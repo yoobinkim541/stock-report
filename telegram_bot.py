@@ -21,6 +21,7 @@ import os
 import sys
 import time
 import json
+import shutil
 import logging
 from datetime import datetime
 
@@ -43,7 +44,16 @@ from barbell_strategy import (
     build_report, build_simulation_report, load_leverage_state, load_phase_state,
     _phase_meter, _bar, _sgov_compare, _dca_rows,
     BULL_PHASES, BEAR_PHASES,
-    TELEGRAM_TOKEN, TELEGRAM_CHAT_ID,
+    TELEGRAM_TOKEN, TELEGRAM_CHAT_ID, PORTFOLIO_PATH,
+)
+from attachment_parser import (
+    extract_text_from_pdf, extract_text_from_image,
+    parse_portfolio_from_text, parse_sells_from_text,
+    detect_content_type,
+    save_pending_snapshot, load_pending_snapshot, clear_pending_snapshot,
+    save_pending_sells, load_pending_sells, clear_pending_sells,
+    build_pending_snapshot_summary, build_pending_sells_summary,
+    ATTACH_DIR, _ensure_dir as _ensure_attach_dir,
 )
 from price_alerts import load_alerts, add_alert, remove_alert, check_alerts
 from portfolio_tracker import (
@@ -144,22 +154,24 @@ def cmd_help() -> str:
     return (
         "🏋️ Intelligence Barbell Bot\n"
         "━━━━━━━━━━━━━━━━━━━━━━━\n"
-        "/status      빠른 현황 (Phase + 핵심 수치)\n"
-        "/phase       Phase 미터 + 행동 지침\n"
-        "/portfolio   포트폴리오 실시간 현황\n"
-        "/dca         오늘 DCA 배분\n"
-        "/order       소수점 매수 주문서 (키움 즉시 입력)\n"
-        "/tax         올해 실현손익 & 양도세 추산  |  sell/history/delete\n"
-        "/sgov        SGOV 실탄 상태\n"
-        "/history     성과 히스토리 (1d/7d/30d/90d)\n"
-        "/rebalance   리밸런싱 계산기\n"
-        "/sim         시뮬레이션 리포트\n"
-        "/dividend    QQQI 배당 기록\n"
-        "/holding     보유 종목 조회/매수·매도/목표비중/DCA 비중\n"
-        "/report      전체 바벨 리포트 (실시간)\n"
-        "/alert       가격 알림 관리\n"
-        "/help        이 메시지\n"
+        "/status           빠른 현황 (Phase + 핵심 수치)\n"
+        "/phase            Phase 미터 + 행동 지침\n"
+        "/portfolio        포트폴리오 실시간 현황\n"
+        "/dca              오늘 DCA 배분\n"
+        "/order            소수점 매수 주문서 (키움 즉시 입력)\n"
+        "/tax              올해 실현손익 & 양도세  |  sell/history/delete/import apply\n"
+        "/sgov             SGOV 실탄 상태\n"
+        "/history          성과 히스토리 (1d/7d/30d/90d)\n"
+        "/rebalance        리밸런싱 계산기\n"
+        "/sim              시뮬레이션 리포트\n"
+        "/dividend         QQQI 배당 기록\n"
+        "/holding          보유 종목 조회/매수·매도/목표비중/DCA 비중\n"
+        "/apply_snapshot   파싱된 포트폴리오 스냅샷 반영\n"
+        "/report           전체 바벨 리포트 (실시간)\n"
+        "/alert            가격 알림 관리\n"
+        "/help             이 메시지\n"
         "━━━━━━━━━━━━━━━━━━━━━━━\n"
+        "📎 이미지·PDF 전송 → 포트폴리오·매도내역 자동 파싱\n"
         f"캐시: {CACHE_TTL // 60}분  ·  /report·/order는 항상 실시간"
     )
 
@@ -516,6 +528,49 @@ def cmd_tax(chat_id: str, args: list):
         EXEMPTION_KRW, TAX_RATE,
     )
 
+    # ── /tax import apply — 파싱된 매도내역 세금 기록 반영 ───────────────────
+    if args and args[0].lower() == "import":
+        if len(args) > 1 and args[1].lower() == "apply":
+            pending = load_pending_sells()
+            if not pending:
+                send(chat_id,
+                     "❌ 적용할 매도내역 없음\n"
+                     "PDF 또는 스크린샷을 전송하면 자동 파싱 후 대기 파일이 생성됩니다.")
+                return
+            sells = pending.get("sells", [])
+            if not sells:
+                send(chat_id, "❌ 파싱된 매도내역이 없습니다.")
+                return
+            fx = fetch_exchange_rate()
+            applied: list[str] = []
+            errors: list[str]  = []
+            for s in sells:
+                try:
+                    rec = add_sell(
+                        s["ticker"], s["qty"],
+                        s["buy_price_usd"], s["sell_price_usd"], fx,
+                    )
+                    gu = rec["gain_usd"]
+                    sg = "▲" if gu >= 0 else "▼"
+                    applied.append(
+                        f"  {s['ticker']} ({s['name']})  {s['qty']}주"
+                        f"  {sg}${abs(gu):,.2f}"
+                    )
+                except Exception as e:
+                    errors.append(f"  {s['ticker']}: {e}")
+            clear_pending_sells()
+            lines = ["✅ 매도내역 세금 기록 반영 완료", "━━━━━━━━━━━━━━━━━━━━━━━"]
+            lines += applied
+            if errors:
+                lines += ["", "❌ 오류:"] + errors
+            lines += ["", f"환율: {fx:,.0f}원/USD  ·  /tax 로 확인"]
+            send(chat_id, "\n".join(lines))
+        else:
+            send(chat_id,
+                 "사용법: /tax import apply\n\n"
+                 "먼저 매도내역 PDF 또는 스크린샷을 채팅창에 전송하세요.")
+        return
+
     # ── /tax delete N ─────────────────────────────────────────────────────
     if args and args[0].lower() == "delete":
         if len(args) < 2:
@@ -666,6 +721,199 @@ def cmd_tax(chat_id: str, args: list):
     except Exception as e:
         send(chat_id, f"❌ 세금 추산 오류: {e}")
         logger.exception("cmd_tax")
+
+
+def download_telegram_file(file_id: str, filename: str) -> str | None:
+    """텔레그램 파일을 로컬(ATTACH_DIR)에 저장하고 경로 반환."""
+    _ensure_attach_dir()
+    res = _api("getFile", file_id=file_id)
+    file_path = res.get("result", {}).get("file_path")
+    if not file_path:
+        return None
+    url = f"https://api.telegram.org/file/bot{TELEGRAM_TOKEN}/{file_path}"
+    try:
+        r = requests.get(url, timeout=60)
+        if not r.ok:
+            return None
+        local_path = str(ATTACH_DIR / filename)
+        with open(local_path, "wb") as f:
+            f.write(r.content)
+        return local_path
+    except Exception as e:
+        logger.error(f"파일 다운로드 실패: {e}")
+        return None
+
+
+def handle_attachment(msg: dict, chat_id: str):
+    """photo 또는 document 메시지를 수신해 파싱·pending 저장·요약 전송."""
+    caption = msg.get("caption", "")
+
+    if "photo" in msg:
+        photo   = msg["photo"][-1]
+        file_id = photo["file_id"]
+        filename = f"photo_{file_id[:12]}.jpg"
+        file_type = "image"
+    else:
+        doc      = msg["document"]
+        file_id  = doc["file_id"]
+        filename = doc.get("file_name", f"doc_{file_id[:12]}.bin")
+        mime     = doc.get("mime_type", "")
+        file_type = "pdf" if "pdf" in mime.lower() else "image"
+
+    send(chat_id, f"⏳ 파일 수신 중... ({file_type.upper()})")
+
+    local_path = download_telegram_file(file_id, filename)
+    if not local_path:
+        send(chat_id, "❌ 파일 다운로드 실패. 다시 시도해주세요.")
+        return
+
+    # 텍스트 추출
+    text: str | None = None
+    if file_type == "pdf":
+        text = extract_text_from_pdf(local_path)
+    else:
+        text = extract_text_from_image(local_path)
+
+    if not text:
+        if caption.strip():
+            text = caption
+        else:
+            send(chat_id,
+                 "⚠️ 텍스트 인식 실패\n\n"
+                 "이미지에서 내용을 읽지 못했습니다.\n"
+                 "아래 명령어로 직접 입력해주세요:\n\n"
+                 "포트폴리오 보유 현황:\n"
+                 "  /holding buy TICKER 수량 평단가\n\n"
+                 "매도내역 기록:\n"
+                 "  /tax sell TICKER 수량 매수단가 매도단가")
+            return
+
+    # 유형 감지
+    content_type = detect_content_type(text, caption)
+
+    if content_type == "sell":
+        sells = parse_sells_from_text(text)
+        if not sells:
+            send(chat_id,
+                 "⚠️ 매도내역 인식 실패\n\n"
+                 "알려진 종목(NVDA, ORCL 등) 매도내역을 인식하지 못했습니다.\n"
+                 "수동 입력:\n"
+                 "/tax sell TICKER 수량 매수단가 매도단가")
+            return
+        save_pending_sells(sells)
+        send(chat_id, build_pending_sells_summary({"parsed_at": datetime.now().isoformat(), "sells": sells}))
+
+    elif content_type == "portfolio":
+        holdings = parse_portfolio_from_text(text)
+        if not holdings:
+            send(chat_id,
+                 "⚠️ 포트폴리오 인식 실패\n\n"
+                 "알려진 종목(NVDA, ORCL 등) 보유 현황을 인식하지 못했습니다.\n"
+                 "수동 입력:\n"
+                 "/holding buy TICKER 수량 평단가")
+            return
+        save_pending_snapshot(holdings)
+        send(chat_id, build_pending_snapshot_summary({"parsed_at": datetime.now().isoformat(), "holdings": holdings}))
+
+    else:
+        # 알 수 없음 — 양쪽 파싱 후 더 많은 쪽 사용
+        holdings = parse_portfolio_from_text(text)
+        sells    = parse_sells_from_text(text)
+        if sells and len(sells) >= len(holdings):
+            save_pending_sells(sells)
+            send(chat_id,
+                 "💡 매도내역으로 인식했습니다.\n\n"
+                 + build_pending_sells_summary({"parsed_at": datetime.now().isoformat(), "sells": sells}))
+        elif holdings:
+            save_pending_snapshot(holdings)
+            send(chat_id,
+                 "💡 포트폴리오 현황으로 인식했습니다.\n\n"
+                 + build_pending_snapshot_summary({"parsed_at": datetime.now().isoformat(), "holdings": holdings}))
+        else:
+            send(chat_id,
+                 "⚠️ 내용 인식 실패\n\n"
+                 "캡션에 '포트폴리오' 또는 '매도내역'을 포함해 다시 전송하거나,\n"
+                 "명령어로 직접 입력해주세요:\n"
+                 "/holding buy TICKER 수량 평단가\n"
+                 "/tax sell TICKER 수량 매수단가 매도단가")
+
+
+def cmd_apply_snapshot(chat_id: str):
+    """pending_snapshot.json 을 portfolio_snapshot.json 에 반영."""
+    pending = load_pending_snapshot()
+    if not pending:
+        send(chat_id,
+             "❌ 적용할 스냅샷 없음\n\n"
+             "계좌현황 스크린샷이나 PDF를 전송하면\n"
+             "파싱 후 대기 파일이 생성됩니다.")
+        return
+
+    holdings = pending.get("holdings", [])
+    if not holdings:
+        send(chat_id, "❌ 파싱된 보유 종목이 없습니다.")
+        return
+
+    try:
+        with open(PORTFOLIO_PATH, encoding="utf-8") as f:
+            snap = json.load(f)
+    except Exception as e:
+        send(chat_id, f"❌ portfolio_snapshot.json 로드 실패: {e}")
+        return
+
+    # 백업
+    backup_path = PORTFOLIO_PATH + ".bak"
+    shutil.copy2(PORTFOLIO_PATH, backup_path)
+
+    existing = {h["ticker"]: h for h in snap.get("overseas_general", {}).get("holdings_usd", [])}
+    changes: list[str] = []
+
+    for h in holdings:
+        ticker = h["ticker"]
+        if ticker in existing:
+            old_sh  = existing[ticker].get("shares", 0)
+            old_avg = existing[ticker].get("avg_price_usd", 0)
+            existing[ticker]["shares"]            = h["shares"]
+            existing[ticker]["avg_price_usd"]     = h["avg_price_usd"]
+            existing[ticker]["current_price_usd"] = h["current_price_usd"]
+            changes.append(
+                f"  {ticker} ({h['name']})\n"
+                f"    수량: {old_sh} → {h['shares']}주\n"
+                f"    평단: ${old_avg:.2f} → ${h['avg_price_usd']:.2f}"
+            )
+        else:
+            # 신규 종목 추가
+            new_entry = {
+                "ticker":            ticker,
+                "name":              h["name"],
+                "shares":            h["shares"],
+                "avg_price_usd":     h["avg_price_usd"],
+                "current_price_usd": h["current_price_usd"],
+                "cost_usd":          round(h["shares"] * h["avg_price_usd"], 4),
+                "value_usd":         round(h["shares"] * h["current_price_usd"], 4),
+                "pnl_usd":           0.0,
+                "return_pct":        0.0,
+            }
+            snap.setdefault("overseas_general", {}).setdefault("holdings_usd", []).append(new_entry)
+            existing[ticker] = new_entry
+            changes.append(f"  {ticker} ({h['name']}) — 신규 추가  {h['shares']}주 @${h['avg_price_usd']:.2f}")
+
+    snap["overseas_general"]["holdings_usd"] = list(existing.values())
+    snap["snapshot_date"] = datetime.now().strftime("%Y-%m-%d")
+
+    with open(PORTFOLIO_PATH, "w", encoding="utf-8") as f:
+        json.dump(snap, f, indent=2, ensure_ascii=False)
+
+    clear_pending_snapshot()
+
+    lines = [
+        "✅ 포트폴리오 스냅샷 반영 완료",
+        "━━━━━━━━━━━━━━━━━━━━━━━",
+    ] + changes + [
+        "",
+        "백업: portfolio_snapshot.json.bak",
+        "/portfolio 로 확인",
+    ]
+    send(chat_id, "\n".join(lines))
 
 
 def cmd_report(chat_id: str):
@@ -867,6 +1115,10 @@ def dispatch(text: str, chat_id: str):
         cmd_tax(chat_id, args)
         return
 
+    if cmd == "/apply_snapshot":
+        cmd_apply_snapshot(chat_id)
+        return
+
     fn = _SIMPLE_CMDS.get(cmd)
     if fn is None:
         send(chat_id, f"❓ 모르는 명령어: {cmd}\n/help 로 목록 확인")
@@ -907,11 +1159,18 @@ def run():
                 chat_id = str(msg.get("chat", {}).get("id", ""))
                 text    = msg.get("text", "")
 
-                if not text.startswith("/"):
+                has_attachment = "photo" in msg or "document" in msg
+                if not has_attachment and not text.startswith("/"):
                     continue
                 if chat_id != ALLOWED_CHAT_ID:
                     logger.warning(f"차단: chat_id {chat_id}")
                     _api("sendMessage", chat_id=chat_id, text="🔒 권한 없음")
+                    continue
+
+                if has_attachment:
+                    kind = "photo" if "photo" in msg else "document"
+                    logger.info(f"첨부 수신: {kind}")
+                    handle_attachment(msg, chat_id)
                     continue
 
                 logger.info(f"수신: {text!r}")
