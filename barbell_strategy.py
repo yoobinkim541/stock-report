@@ -246,6 +246,71 @@ def save_dca_weights(normal: dict, bear: dict):
 # 런타임에 dca_weights.json 로드
 DCA_WEIGHTS, BEAR_DCA_WEIGHTS = load_dca_weights()
 
+# ── 목표 비중 파일 경로 ──────────────────────────────────────────────
+TARGET_WEIGHTS_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "target_weights.json")
+
+# ETF / 실탄 / 레버리지 — 개별 종목 목표비중 분석 제외 티커
+_SKIP_TICKERS = {"SGOV", "QQQI", "QLD", "TQQQ", "BIL", "SHV", "SHY",
+                 "QQQ", "SPY", "VTI", "EFA", "EEM", "TLT", "IEF", "GLD",
+                 "DBC", "DBMF", "UPRO", "TMF"}
+
+_TOTAL_STOCK_BUDGET = 0.44   # 개별주 총 목표 비중 (QQQI·SGOV 제외 포트의 44%)
+
+
+def load_target_weights(portfolio: dict | None = None) -> dict:
+    """
+    target_weights.json 로드.
+    현재 보유 종목 중 설정 없는 종목은 DCA 비중 기반으로 자동 추론.
+    portfolio: fetch_portfolio_value() 반환값 (holdings, prices 포함)
+    """
+    # 1. 파일에서 명시적 목표 로드
+    explicit: dict = {}
+    if os.path.exists(TARGET_WEIGHTS_FILE):
+        try:
+            raw = json.load(open(TARGET_WEIGHTS_FILE, encoding="utf-8"))
+            explicit = {k: float(v) for k, v in raw.items()
+                        if not k.startswith("_") and isinstance(v, (int, float))}
+        except Exception:
+            pass
+
+    if portfolio is None:
+        return explicit
+
+    # 2. 현재 보유 종목 추출
+    holdings = portfolio.get("holdings", {})
+    w_normal, _ = load_dca_weights()
+    dca_total    = sum(w_normal.values()) or 1.0
+
+    result = dict(explicit)
+
+    for ticker in holdings:
+        if ticker in _SKIP_TICKERS or ticker in result:
+            continue
+
+        # DCA 비중 기반 자동 산출
+        if ticker in w_normal:
+            dca_share = w_normal[ticker] / dca_total
+            result[ticker] = round(dca_share * _TOTAL_STOCK_BUDGET, 4)
+        else:
+            # DCA에도 없는 신규 종목 → 소규모 추적 포지션
+            result[ticker] = 0.02
+
+    return result
+
+
+def save_target_weights(updates: dict):
+    """목표 비중 파일 저장 (기존 값 유지 + 업데이트)."""
+    existing: dict = {}
+    if os.path.exists(TARGET_WEIGHTS_FILE):
+        try:
+            raw = json.load(open(TARGET_WEIGHTS_FILE, encoding="utf-8"))
+            existing = {k: v for k, v in raw.items()}  # _comment 등 보존
+        except Exception:
+            pass
+    existing.update(updates)
+    with open(TARGET_WEIGHTS_FILE, "w", encoding="utf-8") as f:
+        json.dump(existing, f, indent=2, ensure_ascii=False)
+
 
 # ══════════════════════════════════════════════════════════════════════
 #  헬퍼
@@ -653,56 +718,71 @@ STOCK_TARGET_WEIGHTS: dict[str, float] = {
 def calculate_position_analysis(portfolio: dict) -> list[dict]:
     """
     종목별 현재 비중 vs 목표 비중 비교.
-    portfolio_snapshot.json 손익 데이터 + 실시간 가격 활용.
+    - target_weights.json 에서 목표 로드 (없으면 DCA 비중으로 자동 추론)
+    - portfolio_snapshot.json 손익 데이터 + 실시간 가격 활용
+    - 보유 중인 모든 종목 자동 포함 (신규 종목도 즉시 분석)
     """
-    total  = portfolio.get("total_usd", 1)
-    prices = portfolio.get("prices", {})
+    total    = portfolio.get("total_usd", 1)
+    prices   = portfolio.get("prices", {})
     holdings = portfolio.get("holdings", {})
 
-    results = []
+    # 동적 목표 비중 로드 (보유 종목 기반 자동 추론 포함)
+    target_map = load_target_weights(portfolio)
 
     # 스냅샷에서 평단가·손익 보조
     pnl_map: dict[str, float] = {}
     avg_map: dict[str, float] = {}
+    note_map: dict[str, str]  = {}
     try:
         snap = json.load(open(PORTFOLIO_PATH, encoding="utf-8"))
         for h in snap.get("overseas_general", {}).get("holdings_usd", []):
             t = h["ticker"]
-            pnl_map[t] = float(h.get("pnl_usd", 0))
-            avg_map[t] = float(h.get("avg_price_usd", 0))
+            pnl_map[t]  = float(h.get("pnl_usd", 0))
+            avg_map[t]  = float(h.get("avg_price_usd", 0))
+            if h.get("note"):
+                note_map[t] = h["note"]
         for h in snap.get("overseas_fractional", {}).get("holdings", []):
             t = h["ticker"]
             pnl_map[t] = pnl_map.get(t, 0) + float(h.get("pnl_usd", 0))
     except Exception:
         pass
 
-    # STOCK_TARGET_WEIGHTS 에 없는 보유 종목도 표시 (CPNG 등)
-    all_tickers = set(STOCK_TARGET_WEIGHTS.keys()) | set(pnl_map.keys()) - {"SGOV", "QQQI"}
+    # 분석 대상: 보유 중 + 목표 설정된 모든 종목
+    all_tickers = (
+        set(target_map.keys())
+        | set(holdings.keys())
+        | set(pnl_map.keys())
+    ) - _SKIP_TICKERS
 
+    results = []
     for ticker in sorted(all_tickers):
-        price  = prices.get(ticker, 0)
-        shares = holdings.get(ticker, 0)
-        val    = shares * price if price > 0 else 0
-
-        target_w = STOCK_TARGET_WEIGHTS.get(ticker, 0.0)
+        price     = prices.get(ticker, 0)
+        shares    = holdings.get(ticker, 0)
+        val       = shares * price if price > 0 else 0
+        target_w  = target_map.get(ticker, 0.0)
         current_w = val / total if total > 0 else 0
         diff_w    = current_w - target_w
         pnl       = pnl_map.get(ticker, 0.0)
         avg_price = avg_map.get(ticker, 0.0)
+        note      = note_map.get(ticker, "")
 
         # 행동 제안
         if target_w == 0 and val > 0:
-            action, direction = "손절/정리 검토", "sell"
-        elif diff_w > 0.03:
+            action, direction = "목표 없음 — 정리 또는 목표 설정 권장", "sell"
+        elif diff_w > 0.04:
             action, direction = f"익절 ${diff_w * total:.0f} 검토", "sell"
-        elif diff_w > 0.015:
-            action, direction = "DCA 중단 or 소폭 익절", "trim"
-        elif diff_w < -0.025:
+        elif diff_w > 0.02:
+            action, direction = "DCA 일시 중단 or 소폭 익절", "trim"
+        elif diff_w < -0.03:
             action, direction = "DCA 우선 배정", "buy"
-        elif diff_w < -0.01:
+        elif diff_w < -0.015:
             action, direction = "DCA 소폭 증가", "add"
         else:
             action, direction = "적정 — 유지", "hold"
+
+        # 신규 종목 태그
+        is_new = ticker not in (load_target_weights() or {})
+        tag    = " 🆕" if is_new and val > 0 else ""
 
         results.append({
             "ticker":      ticker,
@@ -714,6 +794,7 @@ def calculate_position_analysis(portfolio: dict) -> list[dict]:
             "avg_price":   round(avg_price, 2),
             "action":      action,
             "direction":   direction,
+            "note":        note + tag,
         })
 
     return sorted(results, key=lambda x: abs(x["diff_pct"]), reverse=True)

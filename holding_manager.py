@@ -13,6 +13,11 @@ from datetime import datetime
 
 PORTFOLIO_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "portfolio_snapshot.json")
 
+# ── ETF / 레버리지 티커 (목표 비중 분석 제외) ────────────────────────
+_SKIP_TICKERS = {"SGOV", "QQQI", "QLD", "TQQQ", "BIL", "SHV", "SHY",
+                 "QQQ", "SPY", "VTI", "EFA", "TLT", "IEF", "GLD",
+                 "DBC", "DBMF", "UPRO", "TMF"}
+
 
 # ══════════════════════════════════════════════════════════════════════
 #  내부 헬퍼
@@ -172,7 +177,10 @@ def buy_holding(ticker: str, shares: float, price_usd: float,
         )
 
     _save(snap)
-    return msg
+
+    # 매수 후 전체 가격 갱신 (신규 종목 포함)
+    refresh_msg = refresh_portfolio_prices()
+    return msg + f"\n\n{refresh_msg}"
 
 
 def sell_holding(ticker: str, shares: float | None = None) -> str:
@@ -213,7 +221,10 @@ def sell_holding(ticker: str, shares: float | None = None) -> str:
         return f"❌ {ticker} 포지션을 찾을 수 없습니다."
 
     _save(snap)
-    return "✅ 매도 기록\n━━━━━━━━━━━━━━━━━━━━━━━\n" + "\n".join(msgs)
+
+    # 매도 후 전체 가격 갱신
+    refresh_msg = refresh_portfolio_prices()
+    return "✅ 매도 기록\n━━━━━━━━━━━━━━━━━━━━━━━\n" + "\n".join(msgs) + f"\n\n{refresh_msg}"
 
 
 # ══════════════════════════════════════════════════════════════════════
@@ -266,6 +277,144 @@ def set_dca_weights(updates: dict, mode: str = "normal") -> str:
     for ticker, w in sorted(target.items(), key=lambda x: -x[1]):
         amt = int(40_000 * w)
         lines.append(f"  {ticker:<6}  {w*100:.1f}%  ({amt:,}원/일)")
+    return "\n".join(lines)
+
+
+def refresh_portfolio_prices() -> str:
+    """
+    portfolio_snapshot.json 의 모든 보유 종목 현재가를 yfinance로 갱신.
+    매수/매도 후 자동 호출되어 리포트가 항상 최신 상태를 반영.
+    """
+    snap = _load()
+    if not snap:
+        return "❌ 스냅샷 로드 실패"
+
+    # 갱신할 티커 수집
+    all_tickers: set[str] = set()
+    for h in snap.get("overseas_general", {}).get("holdings_usd", []):
+        all_tickers.add(h["ticker"])
+    for h in snap.get("overseas_fractional", {}).get("holdings", []):
+        all_tickers.add(h["ticker"])
+
+    if not all_tickers:
+        return "보유 종목 없음"
+
+    # yfinance 일괄 조회
+    import yfinance as yf
+    import numpy as np
+
+    prices: dict[str, float] = {}
+    tickers = list(all_tickers)
+    try:
+        data = yf.download(tickers, period="2d", auto_adjust=True, progress=False)
+        if not data.empty and "Close" in data.columns:
+            close = data["Close"]
+            if hasattr(close, "columns"):
+                for t in tickers:
+                    if t in close.columns:
+                        s = close[t].dropna()
+                        if not s.empty:
+                            prices[t] = round(float(s.iloc[-1]), 2)
+            else:
+                s = data["Close"].dropna()
+                if not s.empty:
+                    prices[tickers[0]] = round(float(s.iloc[-1]), 2)
+    except Exception:
+        # fallback: 개별 조회
+        for t in tickers:
+            try:
+                h = yf.Ticker(t).history(period="2d")
+                if not h.empty:
+                    prices[t] = round(float(h["Close"].iloc[-1]), 2)
+            except Exception:
+                pass
+
+    if not prices:
+        return "❌ 가격 조회 실패"
+
+    # 스냅샷 업데이트
+    updated = 0
+    for h in snap.get("overseas_general", {}).get("holdings_usd", []):
+        t = h["ticker"]
+        if t not in prices:
+            continue
+        p   = prices[t]
+        sh  = float(h.get("shares", 0))
+        avg = float(h.get("avg_price_usd", p))
+        h["current_price_usd"] = p
+        h["value_usd"]         = round(sh * p, 4)
+        h["cost_usd"]          = round(sh * avg, 4)
+        h["pnl_usd"]           = round(sh * p - sh * avg, 4)
+        h["return_pct"]        = round((p - avg) / avg * 100, 2) if avg > 0 else 0
+        updated += 1
+
+    for h in snap.get("overseas_fractional", {}).get("holdings", []):
+        t = h["ticker"]
+        if t not in prices:
+            continue
+        p  = prices[t]
+        sh = float(h.get("shares", 0))
+        h["value_usd"] = round(sh * p, 4)
+        updated += 1
+
+    _save(snap)
+    return f"✅ {updated}개 종목 가격 갱신  ({datetime.now().strftime('%H:%M')} KST)"
+
+
+def set_target_weight(updates: dict) -> str:
+    """
+    목표 비중 업데이트.
+    updates: {"ORCL": 0.07, "AMD": 0.04}  (소수점) 또는 {"ORCL": 7, "AMD": 4} (%)
+    """
+    from barbell_strategy import save_target_weights, load_target_weights
+
+    # 값 정규화
+    normalized = {}
+    for k, v in updates.items():
+        v = float(v)
+        normalized[k.upper()] = round(v / 100 if v > 1 else v, 4)
+
+    save_target_weights(normalized)
+
+    # 결과 표시
+    all_targets = load_target_weights()
+    lines = ["🎯 목표 비중 업데이트 완료", "━━━━━━━━━━━━━━━━━━━━━━━"]
+    for t, w in sorted(all_targets.items(), key=lambda x: -x[1]):
+        if t.startswith("_"):
+            continue
+        bar = "█" * int(w / 0.10 * 8) + "░" * (8 - int(w / 0.10 * 8))
+        lines.append(f"  {t:<6}  {bar}  {w*100:.1f}%")
+    return "\n".join(lines)
+
+
+def show_target_weights(portfolio: dict | None = None) -> str:
+    """현재 목표 비중 표시 (보유 종목 기준 자동 추론 포함)."""
+    from barbell_strategy import load_target_weights
+    targets = load_target_weights(portfolio)
+    if not targets:
+        return "목표 비중 설정 없음\n/holding target TICKER WEIGHT% 로 설정"
+
+    lines = ["🎯 목표 비중 현황", "━━━━━━━━━━━━━━━━━━━━━━━"]
+
+    # 파일에 명시적 설정된 것
+    from barbell_strategy import TARGET_WEIGHTS_FILE
+    explicit = set()
+    try:
+        raw = json.load(open(TARGET_WEIGHTS_FILE, encoding="utf-8"))
+        explicit = {k for k in raw if not k.startswith("_")}
+    except Exception:
+        pass
+
+    for t, w in sorted(targets.items(), key=lambda x: -x[1]):
+        bar  = "█" * int(w / 0.10 * 8) + "░" * (8 - int(w / 0.10 * 8))
+        tag  = "" if t in explicit else "  (자동 추론)"
+        lines.append(f"  {t:<6}  {bar}  {w*100:.1f}%{tag}")
+
+    lines += [
+        "",
+        "수정: /holding target TICKER 비중% TICKER 비중% ...",
+        "예) /holding target AMD 5 AMZN 4 PLTR 3",
+    ]
     return "\n".join(lines)
 
 

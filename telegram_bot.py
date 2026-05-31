@@ -54,6 +54,7 @@ from portfolio_tracker import (
 from holding_manager import (
     list_holdings, buy_holding, sell_holding,
     show_dca_weights, set_dca_weights,
+    refresh_portfolio_prices, set_target_weight, show_target_weights,
 )
 
 logger = logging.getLogger(__name__)
@@ -150,7 +151,7 @@ def cmd_help() -> str:
         "/history     성과 히스토리 (1d/7d/30d/90d)\n"
         "/rebalance   리밸런싱 계산기\n"
         "/dividend    QQQI 배당 기록\n"
-        "/holding     보유 종목 조회/매수·매도 기록/DCA 비중\n"
+        "/holding     보유 종목 조회/매수·매도/목표비중/DCA 비중\n"
         "/report      전체 바벨 리포트 (실시간)\n"
         "/alert       가격 알림 관리\n"
         "/help        이 메시지\n"
@@ -350,13 +351,16 @@ def cmd_dividend(chat_id: str, args: list):
 
 def cmd_holding(chat_id: str, args: list):
     """
-    /holding                          → 보유 종목 목록
-    /holding buy TICKER 주수 평단가    → 매수 기록 (평단가 재계산)
-    /holding buy TICKER 주수 평단가 frac → 소수점 계좌 매수
-    /holding sell TICKER [주수]        → 매도 기록 (주수 생략 시 전량)
-    /holding dca                      → 현재 DCA 비중 보기
-    /holding dca NOW 18 ORCL 18 CRM 10 → DCA 비중 변경 (%)
-    /holding dca bear NOW 23 ORCL 23  → 하락장 DCA 비중 변경
+    /holding                              → 보유 종목 목록
+    /holding buy TICKER 주수 평단가        → 매수 기록 + 가격 자동 갱신
+    /holding buy TICKER 주수 평단가 frac  → 소수점 계좌 매수
+    /holding sell TICKER [주수]            → 매도 기록 (주수 생략 시 전량)
+    /holding target                       → 목표 비중 현황
+    /holding target TICKER 비중% ...      → 목표 비중 설정/변경
+    /holding dca                          → DCA 비중 현황
+    /holding dca NOW 18 ORCL 18 CRM 10   → DCA 비중 변경
+    /holding dca bear NOW 23 ...          → 하락장 DCA 비중 변경
+    /holding refresh                      → 전 종목 현재가 갱신
     """
     if not args:
         send(chat_id, list_holdings())
@@ -385,6 +389,47 @@ def cmd_holding(chat_id: str, args: list):
             send(chat_id, "❌ 형식 오류: /holding buy TICKER 주수 평단가")
             return
         result = buy_holding(ticker, shares, price, fractional=frac)
+        send(chat_id, result)
+
+    # ── /holding target ──────────────────────────────────────────────
+    elif sub == "target":
+        remaining = args[1:]
+        if not remaining:
+            # 목표 비중 현황 — 현재 포트폴리오 기반 자동 추론 포함
+            try:
+                port = fetch_market()["portfolio"]
+            except Exception:
+                port = None
+            send(chat_id, show_target_weights(port))
+            return
+
+        # /holding target TICKER 비중% TICKER 비중% ...
+        if len(remaining) % 2 != 0:
+            send(chat_id,
+                 "사용법: /holding target TICKER 비중% TICKER 비중% ...\n\n"
+                 "예시:\n"
+                 "/holding target AMD 5 AMZN 4 PLTR 3\n"
+                 "/holding target ORCL 7 UNH 5\n\n"
+                 "• 기존 목표와 병합됩니다 (삭제: 0 입력)")
+            return
+
+        updates = {}
+        try:
+            for i in range(0, len(remaining), 2):
+                t = remaining[i].upper()
+                w = float(remaining[i + 1])
+                updates[t] = w
+        except (ValueError, IndexError):
+            send(chat_id, "❌ 형식 오류: TICKER와 비중%를 번갈아 입력")
+            return
+
+        result = set_target_weight(updates)
+        send(chat_id, result)
+
+    # ── /holding refresh ─────────────────────────────────────────────
+    elif sub == "refresh":
+        send(chat_id, "⏳ 전 종목 현재가 갱신 중...")
+        result = refresh_portfolio_prices()
         send(chat_id, result)
 
     # ── /holding sell ────────────────────────────────────────────────
