@@ -26,6 +26,7 @@ TODAY_STR_SHORT = NOW.strftime("%Y-%m-%d")
 WEEKDAY = NOW.weekday()  # 0=Monday .. 6=Sunday
 
 REPORT_FILE = os.path.expanduser(f"~/reports/daily-report-{TODAY_STR}.md")
+SUMMARY_FILE = os.path.expanduser(f"~/reports/daily-summary-{TODAY_STR}.txt")
 
 USER_AGENT = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
@@ -1036,6 +1037,86 @@ def section_10_economic_calendar() -> str:
 # Main Report Assembler
 # ─────────────────────────────────────────────
 
+def clean_summary_line(line: str) -> str:
+    """Convert markdown-heavy report lines into mobile-friendly text."""
+    line = re.sub(r"\*\*(.*?)\*\*", r"\1", line.strip())
+    line = re.sub(r"\[(.*?)\]\((.*?)\)", r"\1", line)
+    return line
+
+
+def collect_section_bullets(report: str, heading: str, limit: int) -> list[str]:
+    """Collect top-level bullets from a report section."""
+    lines = report.splitlines()
+    start = None
+    for idx, line in enumerate(lines):
+        if line.startswith("## ") and heading in line:
+            start = idx + 1
+            break
+    if start is None:
+        return []
+
+    bullets = []
+    for line in lines[start:]:
+        if line.startswith("## ") or line == "---":
+            break
+        if line.startswith("- ") and not line.startswith("  - "):
+            bullets.append(clean_summary_line(line))
+            if len(bullets) >= limit:
+                break
+    return bullets
+
+
+def build_mobile_summary(report: str) -> str:
+    """Build a short Telegram-first market summary."""
+    market_lines = collect_section_bullets(report, "시장 개요", 4)
+    news_lines = collect_section_bullets(report, "주요 뉴스", 3)
+    signal_lines = collect_section_bullets(report, "매수/매도 타이밍", 3)
+
+    if "전반적으로 상승" in report:
+        conclusion = "상승 우위. 신규 매수는 과열 여부 확인 후 분할 접근."
+    elif "전반적으로 하락" in report:
+        conclusion = "하락 우위. 현금 비중과 리스크 관리 우선."
+    elif "혼조세" in report:
+        conclusion = "혼조세. 보유 유지 + 강한 종목만 선별 관찰."
+    else:
+        conclusion = "핵심 지표 확인 후 보수적으로 대응."
+
+    lines = [
+        f"📈 {TODAY_STR} 시황 요약",
+        "",
+        f"결론: {conclusion}",
+        "",
+        "핵심 지수:",
+    ]
+
+    if market_lines:
+        lines.extend(market_lines)
+    else:
+        lines.append("- 시장 지수 데이터 확인 불가")
+
+    lines.append("")
+    lines.append("핵심 뉴스:")
+    if news_lines:
+        lines.extend(news_lines)
+    else:
+        lines.append("- 주요 뉴스 데이터 확인 불가")
+
+    lines.append("")
+    lines.append("오늘 체크:")
+    if signal_lines:
+        lines.extend(signal_lines)
+    else:
+        lines.extend([
+            "- 금리/달러 움직임",
+            "- 반도체·빅테크 강도",
+            "- 보유종목 개별 뉴스",
+        ])
+
+    lines.append("")
+    lines.append("상세 리포트는 첨부 파일 참고")
+    return "\n".join(lines)
+
+
 def build_report() -> str:
     """Build the full report."""
     lines = []
@@ -1094,7 +1175,12 @@ def main():
     with open(REPORT_FILE, "w", encoding="utf-8") as f:
         f.write(report)
 
+    summary = build_mobile_summary(report)
+    with open(SUMMARY_FILE, "w", encoding="utf-8") as f:
+        f.write(summary)
+
     print(f"\n✅ 리포트 저장 완료: {REPORT_FILE}")
+    print(f"✅ 모바일 요약 저장 완료: {SUMMARY_FILE}")
 
 
 if __name__ == "__main__":

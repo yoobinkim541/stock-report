@@ -20,6 +20,7 @@ def test_generate_report_writes_expected_files_without_network():
         old_reports_dir = ir.REPORTS_DIR
         old_portfolio = ir.PORTFOLIO_TICKERS
         old_nasdaq = ir.NASDAQ_100
+        old_kospi = ir.KOSPI_TOP20
         old_datetime = ir.datetime
         old_score_ticker = ir.score_ticker
         old_detect_signals = ir.detect_signals
@@ -33,6 +34,7 @@ def test_generate_report_writes_expected_files_without_network():
             ir.REPORTS_DIR = tmpdir
             ir.PORTFOLIO_TICKERS = ["MSFT"]
             ir.NASDAQ_100 = ["MSFT"]
+            ir.KOSPI_TOP20 = ["005930.KS"]
             ir.datetime = FixedDateTime
             ir.MANUAL_SCORES = {}
             ir.score_ticker = lambda ticker: {
@@ -50,7 +52,14 @@ def test_generate_report_writes_expected_files_without_network():
                 "price_info": {"1d_change_pct": 4.2, "1mo_change_pct": 8.0, "current_price": 100.0},
                 "volume_info": {"ratio": 1.1},
             }
-            ir._market_summary = lambda: {"spy_price": 500.0, "spy_change": 1.2, "spy_name": "SPY"}
+            ir._market_summary = lambda: {
+                "spy_price": 500.0,
+                "spy_change": 1.2,
+                "spy_name": "SPY",
+                "qqq_price": 600.0,
+                "qqq_change": 0.8,
+                "qqq_name": "QQQ",
+            }
             ir._fetch_korea_indices = lambda: ("2,500.00", "850.00", "1,300.00")
             ir._fetch_arca_posts = lambda: [{"title": "테스트", "url": "https://example.com", "category": "📰뉴스", "when": "09:00", "views": "10", "likes": "2"}]
             ir._company_name = lambda ticker: f"{ticker} Corporation"
@@ -73,10 +82,14 @@ def test_generate_report_writes_expected_files_without_network():
             assert "아카라이브 커뮤니티 동향" in report_text
             assert "MSFT — MSFT Corporation" in report_text
             assert "SPY $500.0 (+1.20%)" in summary_text
+            assert "NASDAQ $600.0 (+0.80%)" in summary_text
+            assert "KOSPI 2,500.00" in summary_text
+            assert "KOSPI 상위" in summary_text
         finally:
             ir.REPORTS_DIR = old_reports_dir
             ir.PORTFOLIO_TICKERS = old_portfolio
             ir.NASDAQ_100 = old_nasdaq
+            ir.KOSPI_TOP20 = old_kospi
             ir.datetime = old_datetime
             ir.score_ticker = old_score_ticker
             ir.detect_signals = old_detect_signals

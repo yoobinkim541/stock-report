@@ -33,6 +33,22 @@ from barbell_strategy import (
 
 MARKET_OPEN_KST = 22   # KST 22:00 = 미국 장 시작
 
+COMPANY_NAMES: dict[str, str] = {
+    "NOW":   "ServiceNow",
+    "ORCL":  "Oracle",
+    "NVDA":  "NVIDIA",
+    "MSFT":  "Microsoft",
+    "GOOGL": "Alphabet",
+    "UNH":   "UnitedHealth",
+    "CRM":   "Salesforce",
+    "SAP":   "SAP SE",
+    "SPMO":  "SP500 Mom",
+    "SGOV":  "T-Bill",
+    "QQQI":  "NBI CC",
+    "CPNG":  "Coupang",
+    "QQQ":   "Nasdaq 100",
+}
+
 
 def _safe(val, default=0.0) -> float:
     try:
@@ -96,32 +112,35 @@ def generate(send: bool = False) -> str:
     emoji  = phase_inf.get("emoji", "")
     label  = phase_inf.get("label", "")
 
+    SEP = "─" * 54
     lines = [
         "📋 소수점 매수 주문서",
         f"📅 {now}",
         f"{emoji} {label}  ({dd:+.1f}%)  /  {dca['total_krw']:,}원",
-        "─" * 46,
-        f"{'종목':<6}  {'금액':>8}  {'수량(소수점)':>12}  {'현재가':>9}",
-        "─" * 46,
+        SEP,
+        f"{'종목':<22}  {'금액':>9}  {'수량':>9}  {'현재가':>8}",
+        SEP,
     ]
 
     total_usd  = 0.0
     order_rows = []
     for ticker, krw_amt in dca["by_ticker"].items():
         price = prices.get(ticker, 0)
+        company = COMPANY_NAMES.get(ticker, "")
+        label_str = f"{ticker} — {company}" if company else ticker
         if price > 0:
             usd_amt    = krw_amt / fx
             qty        = usd_amt / price
             total_usd += usd_amt
             order_rows.append((ticker, krw_amt, qty, price))
             lines.append(
-                f"{ticker:<6}  {krw_amt:>7,}원  {qty:>11.4f}주  @${price:>7.2f}"
+                f"{label_str:<22}  {krw_amt:>8,}원  {qty:>8.4f}주  @${price:>7.2f}"
             )
         else:
-            lines.append(f"{ticker:<6}  {krw_amt:>7,}원  (가격 조회 실패)")
+            lines.append(f"{label_str:<22}  {krw_amt:>8,}원  (가격 조회 실패)")
 
     lines += [
-        "─" * 46,
+        SEP,
         f"합계  {dca['total_krw']:>8,}원  ≈ ${total_usd:.2f}  (@{fx:,.0f}원)",
         "",
         "📱 키움증권  →  해외주식  →  소수점 매수  →  금액 입력",

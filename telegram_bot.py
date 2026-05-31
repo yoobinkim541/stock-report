@@ -51,6 +51,7 @@ from portfolio_tracker import (
     build_performance_report, build_benchmark_report, build_dividend_calendar,
     record_dividend, get_dividend_summary,
 )
+from order_generator import generate as generate_order
 from holding_manager import (
     list_holdings, buy_holding, sell_holding,
     show_dca_weights, set_dca_weights,
@@ -147,6 +148,7 @@ def cmd_help() -> str:
         "/phase       Phase 미터 + 행동 지침\n"
         "/portfolio   포트폴리오 실시간 현황\n"
         "/dca         오늘 DCA 배분\n"
+        "/order       소수점 매수 주문서 (키움 즉시 입력)\n"
         "/sgov        SGOV 실탄 상태\n"
         "/history     성과 히스토리 (1d/7d/30d/90d)\n"
         "/rebalance   리밸런싱 계산기\n"
@@ -157,7 +159,7 @@ def cmd_help() -> str:
         "/alert       가격 알림 관리\n"
         "/help        이 메시지\n"
         "━━━━━━━━━━━━━━━━━━━━━━━\n"
-        f"캐시: {CACHE_TTL // 60}분  ·  /report는 항상 실시간"
+        f"캐시: {CACHE_TTL // 60}분  ·  /report·/order는 항상 실시간"
     )
 
 
@@ -256,8 +258,23 @@ def cmd_dca(d: dict) -> str:
     lines = [
         f"💸 오늘 DCA  {dca['total_krw']:,}원  (${dca['total_usd']:.2f})  [{dca['multiplier']}x]",
         "━━━━━━━━━━━━━━━━━━━━━━━",
-    ] + _dca_rows(dca["by_ticker"], dca["total_krw"], d["exchange_rate"])
+    ] + _dca_rows(dca["by_ticker"], dca["total_krw"], d["exchange_rate"]) + [
+        "",
+        "📋 키움 소수점 매수 주문서: /order",
+    ]
     return "\n".join(lines)
+
+
+def cmd_order(chat_id: str):
+    """소수점 매수 주문서 — 키움증권 해외주식 > 소수점 매수 화면에서 즉시 입력."""
+    send(chat_id, "⏳ 주문서 생성 중...")
+    typing(chat_id)
+    try:
+        report = generate_order()
+        send(chat_id, report)
+    except Exception as e:
+        send(chat_id, f"❌ 주문서 생성 오류: {e}")
+        logger.exception("cmd_order")
 
 
 def cmd_sgov(d: dict) -> str:
@@ -680,6 +697,10 @@ def dispatch(text: str, chat_id: str):
     if cmd == "/holding":
         typing(chat_id)
         cmd_holding(chat_id, args)
+        return
+
+    if cmd == "/order":
+        cmd_order(chat_id)
         return
 
     fn = _SIMPLE_CMDS.get(cmd)

@@ -72,6 +72,14 @@ NASDAQ_100 = [
     "SWKS", "TEAM", "TSCO", "TTWO", "WBA", "WBD", "WDC", "ZM", "ZS"
 ]
 
+# ── KOSPI 시총 상위 20개 (Yahoo Finance .KS 티커) ─────────────────────────
+KOSPI_TOP20 = [
+    "005930.KS", "000660.KS", "373220.KS", "207940.KS", "005380.KS",
+    "068270.KS", "000270.KS", "105560.KS", "055550.KS", "035420.KS",
+    "012330.KS", "028260.KS", "006400.KS", "035720.KS", "329180.KS",
+    "086790.KS", "032830.KS", "015760.KS", "009540.KS", "034020.KS",
+]
+
 REPORTS_DIR = os.path.expanduser("~/reports")
 os.makedirs(REPORTS_DIR, exist_ok=True)
 
@@ -308,23 +316,30 @@ def _judgment(fund_score, signal, grade):
 
 
 def _market_summary():
-    """Get a quick market snapshot using SPY as proxy."""
-    try:
-        spy = yf.Ticker("SPY")
-        info = spy.info
-        hist = spy.history(period="5d")
-        if hist is not None and not hist.empty:
-            closes = hist["Close"]
-            change = (closes.iloc[-1] - closes.iloc[-2]) / closes.iloc[-2] * 100 if len(closes) >= 2 else 0
-            price = closes.iloc[-1]
-            return {
-                "spy_price": round(price, 2),
-                "spy_change": round(change, 2),
-                "spy_name": info.get("shortName", "SPY"),
-            }
-    except Exception as e:
-        logger.warning(f"Market summary error: {e}")
-    return {"spy_price": "N/A", "spy_change": 0, "spy_name": "SPY"}
+    """Get a quick market snapshot using SPY and QQQ as proxies."""
+    summary = {
+        "spy_price": "N/A",
+        "spy_change": 0,
+        "spy_name": "SPY",
+        "qqq_price": "N/A",
+        "qqq_change": 0,
+        "qqq_name": "QQQ",
+    }
+    for ticker, prefix in (("SPY", "spy"), ("QQQ", "qqq")):
+        try:
+            etf = yf.Ticker(ticker)
+            info = etf.info
+            hist = etf.history(period="5d")
+            if hist is not None and not hist.empty:
+                closes = hist["Close"]
+                change = (closes.iloc[-1] - closes.iloc[-2]) / closes.iloc[-2] * 100 if len(closes) >= 2 else 0
+                price = closes.iloc[-1]
+                summary[f"{prefix}_price"] = round(price, 2)
+                summary[f"{prefix}_change"] = round(change, 2)
+                summary[f"{prefix}_name"] = info.get("shortName", ticker)
+        except Exception as e:
+            logger.warning(f"Market summary error ({ticker}): {e}")
+    return summary
 
 
 def _calc_portfolio_pnl(portfolio_results):
@@ -410,7 +425,7 @@ def generate_report():
     print(f"\n📋 NASDAQ 100 스캔 중...")
     ndx_results = []
     scan_count = 0
-    max_scan = 50  # Scan full NASDAQ 100
+    max_scan = len(NASDAQ_100)  # Scan full NASDAQ 100 list
     for ticker in NASDAQ_100:
         if scan_count >= max_scan:
             break
@@ -454,6 +469,37 @@ def generate_report():
         for r in reversed(scored_results):
             if r not in top_watch and len(top_watch) < 5:
                 top_watch.append(r)
+
+    # ── KOSPI top 20 scan ──
+    print(f"\n🇰🇷 KOSPI 상위 20개 스캔 중...")
+    kospi_results = []
+    for i, ticker in enumerate(KOSPI_TOP20):
+        print(f"   [{i+1}/{len(KOSPI_TOP20)}] {ticker}...", end=" ", flush=True)
+        try:
+            fund = MANUAL_SCORES.get(ticker) or score_ticker(ticker)
+            sig = detect_signals(ticker)
+            kospi_results.append({
+                "ticker": ticker,
+                "total_score": fund["total_score"],
+                "grade": fund["grade"],
+                "company_name": _company_name(ticker),
+                "signal": sig["overall_signal"],
+            })
+            print(f"점수:{fund['total_score']} 등급:{fund['grade']} 신호:{sig['overall_signal']}")
+        except Exception as e:
+            print(f"오류 ({e})")
+            kospi_results.append({
+                "ticker": ticker,
+                "total_score": 0,
+                "grade": "N/A",
+                "company_name": _company_name(ticker),
+                "signal": "Warning",
+            })
+
+    kospi_scored = [r for r in kospi_results if r["total_score"] > 0]
+    kospi_scored.sort(key=lambda x: x["total_score"], reverse=True)
+    kospi_top = kospi_scored[:5]
+    kospi_watch = sorted(kospi_results, key=lambda x: x["total_score"])[:5]
 
     # ── Generate report text (Korean) ──
     lines = []
@@ -683,10 +729,30 @@ def generate_report():
         lines.append(f"| {i} | {r['ticker']} — {_company_name(r['ticker'])} | {r['total_score']} | {r['grade']} | {sig_emoji.get(r['signal'], '⚔️')} {r['signal']} |")
     lines.append(f"")
 
-    # Section 4: Arca community
+    # Section 4: KOSPI top 20 scan
+    lines.append(f"## 4. KOSPI 상위 20개 종목 스캔")
+    lines.append(f"")
+    lines.append(f"### Top 5 매수 후보")
+    lines.append(f"")
+    lines.append(f"| 순위 | 종목 | 점수 | 등급 | 신호 |")
+    lines.append(f"|------|------|------|------|------|")
+    for i, r in enumerate(kospi_top[:5], 1):
+        sig_emoji = {"Positive": "🟢", "Neutral": "⚪", "Warning": "🟡", "Critical": "🔴"}
+        lines.append(f"| {i} | {r['ticker']} — {_company_name(r['ticker'])} | {r['total_score']} | {r['grade']} | {sig_emoji.get(r['signal'], '⚔️')} {r['signal']} |")
+    lines.append(f"")
+    lines.append(f"### Top 5 주의 종목")
+    lines.append(f"")
+    lines.append(f"| 순위 | 종목 | 점수 | 등급 | 신호 |")
+    lines.append(f"|------|------|------|------|------|")
+    for i, r in enumerate(kospi_watch[:5], 1):
+        sig_emoji = {"Positive": "🟢", "Neutral": "⚪", "Warning": "🟡", "Critical": "🔴"}
+        lines.append(f"| {i} | {r['ticker']} — {_company_name(r['ticker'])} | {r['total_score']} | {r['grade']} | {sig_emoji.get(r['signal'], '⚔️')} {r['signal']} |")
+    lines.append(f"")
+
+    # Section 5: Arca community
     print(f"\n🗨 아카라이브 주식 채널 수집 중...")
     arca_posts = _fetch_arca_posts()
-    lines.append(f"## 4. 아카라이브 커뮤니티 동향")
+    lines.append(f"## 5. 아카라이브 커뮤니티 동향")
     lines.append(f"")
     if arca_posts:
         lines.append(f"{len(arca_posts)}건의 분석/뉴스/정보/실적 게시글")
@@ -699,8 +765,8 @@ def generate_report():
     lines.append(f"---")
     lines.append(f"")
 
-    # Section 5: Conclusion
-    lines.append(f"## 5. 오늘의 결론")
+    # Section 6: Conclusion
+    lines.append(f"## 6. 오늘의 결론")
     lines.append(f"")
 
     # Generate conclusion
@@ -751,14 +817,15 @@ def generate_report():
         lines.append(f"---")
         lines.append(f"")
 
-    lines.append(f"## 6. 📊 실행 통계")
+    lines.append(f"## 7. 📊 실행 통계")
     lines.append(f"")
     lines.append(f"| 항목 | 값 |")
     lines.append(f"|---|------|")
     elapsed = time.time() - start_time
     lines.append(f"| 실행 시간 | {elapsed:.1f}초 |")
-    lines.append(f"| 포트폴리오 종목 | 12개 |")
-    lines.append(f"| NASDAQ 100 스캔 | 50개 종목 |")
+    lines.append(f"| 포트폴리오 종목 | {len(PORTFOLIO_TICKERS)}개 |")
+    lines.append(f"| NASDAQ 100 스캔 | {len(ndx_results)}개 종목 |")
+    lines.append(f"| KOSPI 상위 20 스캔 | {len(kospi_results)}개 종목 |")
     lines.append(f"| 데이터 소스 | yfinance, SaveTicker API |")
     lines.append(f"| LLM API 토큰 소비 | **0 토큰** (Python 스크립트 내부 LLM 호출 없음) |")
     lines.append(f"| 외부 API 비용 | yfinance 무료 + SaveTicker 무료 |")
@@ -781,8 +848,14 @@ def generate_report():
         "market": market,
         "portfolio": [],
         "nasdaq_100_scan": {
+            "all": ndx_results,
             "top_buy": top_buy_candidates[:5],
             "top_warning": top_watch[:5],
+        },
+        "kospi_top20_scan": {
+            "all": kospi_results,
+            "top_buy": kospi_top[:5],
+            "top_warning": kospi_watch[:5],
         },
     }
     for r in portfolio_results:
@@ -810,7 +883,13 @@ def generate_report():
     # ── Save clean summary ──
     clean_data = {
         "date": today_str,
-        "market_summary": {"spy_change_pct": spy_change, "spy_price": market.get("spy_price")},
+        "market_summary": {
+            "spy_change_pct": spy_change,
+            "spy_price": market.get("spy_price"),
+            "nasdaq_change_pct": market.get("qqq_change"),
+            "nasdaq_price": market.get("qqq_price"),
+            "kospi": kospi_str,
+        },
         "portfolio_summary": [],
     }
     for r in portfolio_results:
@@ -843,6 +922,24 @@ def generate_report():
     clean_data["nasdaq_warnings"] = []
     for r in top_watch[:5]:
         clean_data["nasdaq_warnings"].append({
+            "ticker": r["ticker"],
+            "company": _company_name(r["ticker"]),
+            "score": r["total_score"],
+            "grade": r["grade"],
+            "signal": r["signal"],
+        })
+    clean_data["kospi_top_buy"] = []
+    for r in kospi_top[:5]:
+        clean_data["kospi_top_buy"].append({
+            "ticker": r["ticker"],
+            "company": _company_name(r["ticker"]),
+            "score": r["total_score"],
+            "grade": r["grade"],
+            "signal": r["signal"],
+        })
+    clean_data["kospi_warnings"] = []
+    for r in kospi_watch[:5]:
+        clean_data["kospi_warnings"].append({
             "ticker": r["ticker"],
             "company": _company_name(r["ticker"]),
             "score": r["total_score"],
@@ -884,6 +981,8 @@ def generate_report():
     summary_lines.append(f"📊 {today_str} 투자 리포트 요약")
     summary_lines.append(f"")
     summary_lines.append(f"SPY ${market.get('spy_price', 'N/A')} ({spy_change:+.2f}%)")
+    summary_lines.append(f"NASDAQ ${market.get('qqq_price', 'N/A')} ({market.get('qqq_change', 0):+.2f}%)")
+    summary_lines.append(f"KOSPI {kospi_str}")
     summary_lines.append(f"포트폴리오 평균 점수: {avg_score:.1f}/100")
     sig_counts = f"🟢{pos_count} ⚪{neu_count} 🟡{warn_count} 🔴{crit_count}"
     summary_lines.append(f"신호 분포: {sig_counts}")
@@ -898,6 +997,10 @@ def generate_report():
     summary_lines.append(f"NAS100 상위: {nasdaq_buy_short}")
     nasdaq_warn_short = ', '.join([r['ticker'] for r in top_watch[:3]])
     summary_lines.append(f"NAS100 주의: {nasdaq_warn_short}")
+    kospi_buy_short = ', '.join([r['ticker'] for r in kospi_top[:3]])
+    summary_lines.append(f"KOSPI 상위: {kospi_buy_short}")
+    kospi_warn_short = ', '.join([r['ticker'] for r in kospi_watch[:3]])
+    summary_lines.append(f"KOSPI 주의: {kospi_warn_short}")
     summary_lines.append(f"")
     summary_lines.append(f"소요 시간: {elapsed:.1f}초 | LLM 토큰: 0")
     summary_text = "\n".join(summary_lines)
@@ -915,7 +1018,7 @@ def generate_report():
     print()
     print("## Hermes 봇 브리핑")
     print(f"투자 레포트 생성 완료 | @Stock_botbot 전송 완료")
-    print(f"NAS100 50종목 + 포트폴리오 {len(PORTFOLIO_TICKERS)}종목 분석")
+    print(f"NAS100 {len(ndx_results)}종목 + KOSPI {len(kospi_results)}종목 + 포트폴리오 {len(PORTFOLIO_TICKERS)}종목 분석")
     print(f"LLM 토큰: 0 | 실행 시간: {elapsed:.1f}초")
 
     return report_path, json_path
