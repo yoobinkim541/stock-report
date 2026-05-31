@@ -291,6 +291,66 @@ def build_performance_report(perf: dict, latest: dict) -> str:
     return "\n".join(lines)
 
 
+def build_benchmark_report(perf: dict, benchmarks: dict) -> str:
+    lines = [
+        "📊 벤치마크 비교",
+        "━━━━━━━━━━━━━━━━━━━━━━━",
+        f"  내 포트폴리오",
+        f"    1일   {_ret_str(perf.get('ret_1d'))}",
+        f"    7일   {_ret_str(perf.get('ret_7d'))}",
+        f"    30일  {_ret_str(perf.get('ret_30d'))}",
+        f"    90일  {_ret_str(perf.get('ret_90d'))}",
+        f"    전체  {_ret_str(perf.get('ret_all'))}",
+    ]
+
+    for ticker, data in benchmarks.items():
+        name = data.get("name", ticker)
+        lines += [
+            "",
+            f"  {name}",
+            f"    1일   {_ret_str(data.get('ret_1d'))}",
+            f"    7일   {_ret_str(data.get('ret_7d'))}",
+            f"    30일  {_ret_str(data.get('ret_30d'))}",
+            f"    90일  {_ret_str(data.get('ret_90d'))}",
+            f"    전체  {_ret_str(data.get('ret_all'))}",
+        ]
+
+    return "\n".join(lines)
+
+
+def build_dividend_calendar(dividends: list, shares: float = 1.0) -> str:
+    if not dividends:
+        return (
+            "📅 배당 캘린더\n"
+            "━━━━━━━━━━━━━━━━━━━━━━━\n"
+            "  기록 없음"
+        )
+
+    items = sorted(dividends, key=lambda x: x.get("date", ""))
+    dates = [datetime.strptime(item["date"], "%Y-%m-%d") for item in items if item.get("date")]
+    intervals = [(dates[i] - dates[i - 1]).days for i in range(1, len(dates)) if (dates[i] - dates[i - 1]).days > 0]
+    avg_interval = round(sum(intervals) / len(intervals)) if intervals else 30
+    next_date = dates[-1] + timedelta(days=avg_interval)
+
+    last_amount = items[-1].get("amount_usd", 0)
+    est_payment = last_amount * shares
+
+    lines = [
+        "📅 배당 캘린더",
+        "━━━━━━━━━━━━━━━━━━━━━━━",
+        f"  보유 주수    {shares:g}주",
+        f"  평균 간격    {avg_interval}일",
+        f"  다음 예상    {next_date.strftime('%Y-%m-%d')}",
+        f"  예상 배당    ${est_payment:.2f}",
+        "",
+        "  최근 배당:",
+    ]
+    for item in items[-5:]:
+        lines.append(f"    {item['date']}  ${item.get('amount_usd', 0):.2f}")
+
+    return "\n".join(lines)
+
+
 # ══════════════════════════════════════════════════════════════════════
 #  텔레그램 발송
 # ══════════════════════════════════════════════════════════════════════

@@ -1255,6 +1255,49 @@ def build_report(
     return "\n".join(L)
 
 
+def _simulation_payload(mode: str) -> dict:
+    SIM_DATA = {
+        "bull2": {"qqq": {"current": 530, "high_52w": 520, "low_52w": 400, "drawdown_pct": -0.5,
+                          "position_52w_pct": 95, "mom_1m_pct": 9.0, "mom_3m_pct": 18.0},
+                  "rsi": 76.0, "vix": 13.0},
+        "bull1": {"qqq": {"current": 500, "high_52w": 515, "low_52w": 400, "drawdown_pct": -2.9,
+                          "position_52w_pct": 87, "mom_1m_pct": 5.5, "mom_3m_pct": 12.0},
+                  "rsi": 65.0, "vix": 17.0},
+        "0":    {"qqq": {"current": 480, "high_52w": 485, "low_52w": 380, "drawdown_pct": -1.0,
+                         "position_52w_pct": 96, "mom_1m_pct": 2.0, "mom_3m_pct": 5.0},
+                 "rsi": 55.0, "vix": 20.0},
+        "1":    {"qqq": {"current": 450, "high_52w": 490, "low_52w": 380, "drawdown_pct": -8.2,
+                         "position_52w_pct": 64, "mom_1m_pct": -3.0, "mom_3m_pct": 2.0},
+                 "rsi": 42.0, "vix": 24.0},
+        "2":    {"qqq": {"current": 420, "high_52w": 490, "low_52w": 380, "drawdown_pct": -14.3,
+                         "position_52w_pct": 36, "mom_1m_pct": -8.0, "mom_3m_pct": -5.0},
+                 "rsi": 32.0, "vix": 32.0},
+        "3":    {"qqq": {"current": 400, "high_52w": 490, "low_52w": 360, "drawdown_pct": -18.4,
+                         "position_52w_pct": 31, "mom_1m_pct": -10.0, "mom_3m_pct": -12.0},
+                 "rsi": 27.0, "vix": 38.0},
+        "4":    {"qqq": {"current": 370, "high_52w": 490, "low_52w": 340, "drawdown_pct": -24.5,
+                         "position_52w_pct": 20, "mom_1m_pct": -12.0, "mom_3m_pct": -20.0},
+                 "rsi": 22.0, "vix": 45.0},
+        "5":    {"qqq": {"current": 330, "high_52w": 490, "low_52w": 300, "drawdown_pct": -32.7,
+                         "position_52w_pct": 16, "mom_1m_pct": -18.0, "mom_3m_pct": -28.0},
+                 "rsi": 18.0, "vix": 55.0},
+    }
+    return SIM_DATA.get(mode, SIM_DATA["bull2"])
+
+
+def build_simulation_report(mode: str = "bull2") -> str:
+    d = _simulation_payload(mode)
+    ma_sim = {"above_ma200": d["qqq"]["drawdown_pct"] > -15, "gap_pct": -5.0 if d["qqq"]["drawdown_pct"] < -15 else 8.0}
+    sim_portfolio = {"total_usd": 7940.0, "sgov_usd": 1006.7, "qqqi_usd": 2019.77, "qqqi_shares": 35.2987, "prices": {}, "holdings": {}}
+    sim_div = {"monthly_usd": 20.20, "annual_yield_pct": 12.0, "per_share": 0.5727, "note": "시뮬레이션 추산값"}
+    return (
+        f"\n{'=' * 50}\n"
+        f"[시뮬레이션 모드: {mode}]\n"
+        f"{'=' * 50}\n\n"
+        + build_report(d["qqq"], d["rsi"], d["vix"], ma_sim, sim_portfolio, 1380.0, sim_div)
+    )
+
+
 # ══════════════════════════════════════════════════════════════════════
 #  리밸런싱 계산기
 # ══════════════════════════════════════════════════════════════════════
@@ -1472,40 +1515,7 @@ if __name__ == "__main__":
         update_leverage_position(ticker, float(shares), float(avg_price))
 
     elif args.sim:
-        SIM_DATA = {
-            "bull2": {"qqq": {"current": 530, "high_52w": 520, "low_52w": 400, "drawdown_pct": -0.5,
-                              "position_52w_pct": 95, "mom_1m_pct": 9.0, "mom_3m_pct": 18.0},
-                      "rsi": 76.0, "vix": 13.0},
-            "bull1": {"qqq": {"current": 500, "high_52w": 515, "low_52w": 400, "drawdown_pct": -2.9,
-                              "position_52w_pct": 87, "mom_1m_pct": 5.5, "mom_3m_pct": 12.0},
-                      "rsi": 65.0, "vix": 17.0},
-            "0":    {"qqq": {"current": 480, "high_52w": 485, "low_52w": 380, "drawdown_pct": -1.0,
-                             "position_52w_pct": 96, "mom_1m_pct": 2.0, "mom_3m_pct": 5.0},
-                     "rsi": 55.0, "vix": 20.0},
-            "1":    {"qqq": {"current": 450, "high_52w": 490, "low_52w": 380, "drawdown_pct": -8.2,
-                             "position_52w_pct": 64, "mom_1m_pct": -3.0, "mom_3m_pct": 2.0},
-                     "rsi": 42.0, "vix": 24.0},
-            "2":    {"qqq": {"current": 420, "high_52w": 490, "low_52w": 380, "drawdown_pct": -14.3,
-                             "position_52w_pct": 36, "mom_1m_pct": -8.0, "mom_3m_pct": -5.0},
-                     "rsi": 32.0, "vix": 32.0},
-            "3":    {"qqq": {"current": 400, "high_52w": 490, "low_52w": 360, "drawdown_pct": -18.4,
-                             "position_52w_pct": 31, "mom_1m_pct": -10.0, "mom_3m_pct": -12.0},
-                     "rsi": 27.0, "vix": 38.0},
-            "4":    {"qqq": {"current": 370, "high_52w": 490, "low_52w": 340, "drawdown_pct": -24.5,
-                             "position_52w_pct": 20, "mom_1m_pct": -12.0, "mom_3m_pct": -20.0},
-                     "rsi": 22.0, "vix": 45.0},
-            "5":    {"qqq": {"current": 330, "high_52w": 490, "low_52w": 300, "drawdown_pct": -32.7,
-                             "position_52w_pct": 16, "mom_1m_pct": -18.0, "mom_3m_pct": -28.0},
-                     "rsi": 18.0, "vix": 55.0},
-        }
-        d = SIM_DATA[args.sim]
-        ma_sim = {"above_ma200": d["qqq"]["drawdown_pct"] > -15, "gap_pct": -5.0 if d["qqq"]["drawdown_pct"] < -15 else 8.0}
-        sim_portfolio = {"total_usd": 7940.0, "sgov_usd": 1006.7, "qqqi_usd": 2019.77, "qqqi_shares": 35.2987, "prices": {}, "holdings": {}}
-        sim_div = {"monthly_usd": 20.20, "annual_yield_pct": 12.0, "per_share": 0.5727, "note": "시뮬레이션 추산값"}
-        print(f"\n{'=' * 50}")
-        print(f"[시뮬레이션 모드: {args.sim}]")
-        print(f"{'=' * 50}\n")
-        print(build_report(d["qqq"], d["rsi"], d["vix"], ma_sim, sim_portfolio, 1380.0, sim_div))
+        print(build_simulation_report(args.sim))
 
     else:
         run(send_alert=args.send)

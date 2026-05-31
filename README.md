@@ -36,7 +36,23 @@ deliver_investment_report.sh
 | `daily_signals.py` | 가격/거래량 기반 일일 신호 감지 |
 | `market_report.py` | 시장 뉴스 리포트 (SaveTicker API + Arca Live) |
 | `save_csv.py` | JSON 요약 → CSV 내보내기 |
+| `backtest.py` | 단일 기간 바벨 전략 백테스트 |
+| `backtest_multi.py` | 5/10/20년 및 사용자 지정 시작일 멀티 백테스트 |
 | `deliver_investment_report.sh` | 전체 파이프라인 실행 + 텔레그램 발송 쉘 스크립트 |
+
+---
+
+## 🆕 최근 업그레이드
+
+- `investment_report.py`
+  - Arca Live 수집 실패 시 재시도/타임아웃을 보강해 네트워크 불안정에 더 견고하게 동작하도록 개선했습니다.
+- `backtest_multi.py`
+  - `--start YYYY-MM-DD` 옵션을 추가해 원하는 시작일부터 멀티 백테스트를 실행할 수 있습니다.
+- 테스트 추가
+  - `tests/test_investment_report_network.py`
+  - `tests/test_backtest_multi_cli.py`
+  - `tests/test_investment_report_smoke.py`
+  - 핵심 리포트/CLI/네트워크 회귀 테스트를 함께 검증합니다.
 
 ---
 
@@ -238,6 +254,9 @@ bash deliver_investment_report.sh
 python3 investment_report.py    # 포트폴리오 분석 리포트
 python3 market_report.py        # 시장 뉴스 리포트
 python3 fundamental_score.py    # 종목 펀더멘털 스코어
+python3 backtest.py             # 단일 기간 바벨 전략 백테스트
+python3 backtest_multi.py --period 10   # 10년 멀티 백테스트
+python3 backtest_multi.py --start 2020-01-01  # 사용자 지정 시작일
 ```
 
 ---

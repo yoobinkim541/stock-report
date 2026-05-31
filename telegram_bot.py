@@ -40,7 +40,7 @@ from barbell_strategy import (
     estimate_qqqi_monthly_dividend,
     classify_market, calculate_dca, calculate_sgov_target,
     calculate_rebalancing, build_smart_report,
-    build_report, load_leverage_state, load_phase_state,
+    build_report, build_simulation_report, load_leverage_state, load_phase_state,
     _phase_meter, _bar, _sgov_compare, _dca_rows,
     BULL_PHASES, BEAR_PHASES,
     TELEGRAM_TOKEN, TELEGRAM_CHAT_ID,
@@ -48,7 +48,7 @@ from barbell_strategy import (
 from price_alerts import load_alerts, add_alert, remove_alert, check_alerts
 from portfolio_tracker import (
     record_daily, load_history, calc_performance,
-    build_performance_report,
+    build_performance_report, build_benchmark_report, build_dividend_calendar,
     record_dividend, get_dividend_summary,
 )
 from holding_manager import (
@@ -150,6 +150,7 @@ def cmd_help() -> str:
         "/sgov        SGOV 실탄 상태\n"
         "/history     성과 히스토리 (1d/7d/30d/90d)\n"
         "/rebalance   리밸런싱 계산기\n"
+        "/sim         시뮬레이션 리포트\n"
         "/dividend    QQQI 배당 기록\n"
         "/holding     보유 종목 조회/매수·매도/목표비중/DCA 비중\n"
         "/report      전체 바벨 리포트 (실시간)\n"
@@ -294,6 +295,11 @@ def cmd_rebalance(d: dict) -> str:
     return build_smart_report(
         d["portfolio"], d["market_type"], d["phase_key"], d["exchange_rate"]
     )
+
+
+def cmd_sim(chat_id: str, args: list):
+    mode = args[0] if args else "bull2"
+    send(chat_id, build_simulation_report(mode))
 
 
 def cmd_dividend(chat_id: str, args: list):
@@ -655,7 +661,7 @@ def dispatch(text: str, chat_id: str):
         cmd_report(chat_id)
         return
 
-    # /alert, /dividend : 인자 필요
+    # /alert, /dividend, /sim : 인자 필요
     if cmd == "/alert":
         typing(chat_id)
         cmd_alert(chat_id, args)
@@ -664,6 +670,11 @@ def dispatch(text: str, chat_id: str):
     if cmd == "/dividend":
         typing(chat_id)
         cmd_dividend(chat_id, args)
+        return
+
+    if cmd == "/sim":
+        typing(chat_id)
+        cmd_sim(chat_id, args)
         return
 
     if cmd == "/holding":
