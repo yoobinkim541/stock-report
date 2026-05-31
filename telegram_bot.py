@@ -149,7 +149,7 @@ def cmd_help() -> str:
         "/portfolio   포트폴리오 실시간 현황\n"
         "/dca         오늘 DCA 배분\n"
         "/order       소수점 매수 주문서 (키움 즉시 입력)\n"
-        "/tax         올해 실현손익 & 양도세 추산  |  sell/history 하위명령\n"
+        "/tax         올해 실현손익 & 양도세 추산  |  sell/history/delete\n"
         "/sgov        SGOV 실탄 상태\n"
         "/history     성과 히스토리 (1d/7d/30d/90d)\n"
         "/rebalance   리밸런싱 계산기\n"
@@ -512,9 +512,33 @@ def cmd_holding(chat_id: str, args: list):
 def cmd_tax(chat_id: str, args: list):
     """실현손익 기록/조회 + 양도소득세 추산."""
     from tax_tracker import (
-        add_sell, get_yearly_summary, get_all_records,
+        add_sell, get_yearly_summary, get_all_records, delete_record,
         EXEMPTION_KRW, TAX_RATE,
     )
+
+    # ── /tax delete N ─────────────────────────────────────────────────────
+    if args and args[0].lower() == "delete":
+        if len(args) < 2:
+            send(chat_id, "❌ 형식: /tax delete N  (N = /tax history 의 번호)")
+            return
+        try:
+            n = int(args[1])
+        except ValueError:
+            send(chat_id, "❌ 숫자를 입력하세요.  예) /tax delete 3")
+            return
+        removed = delete_record(n)
+        if removed is None:
+            records = get_all_records()
+            send(chat_id, f"❌ #{n} 번 기록 없음 (전체 {len(records)}건)")
+        else:
+            gu = removed.get("gain_usd", 0)
+            sg = "▲" if gu >= 0 else "▼"
+            send(chat_id,
+                 f"🗑 #{n} 삭제 완료\n"
+                 f"  {removed['date']}  {removed['ticker']}  {removed['qty']}주\n"
+                 f"  @${removed['buy_price_usd']:.2f} → @${removed['sell_price_usd']:.2f}"
+                 f"  {sg}${abs(gu):,.2f}")
+        return
 
     # ── /tax sell TICKER 수량 매수단가 매도단가 ──────────────────────────
     if args and args[0].lower() == "sell":

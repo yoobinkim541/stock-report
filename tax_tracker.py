@@ -81,3 +81,13 @@ def get_yearly_summary(year: int | None = None) -> dict:
 def get_all_records() -> list[dict]:
     """전체 매도 기록 반환."""
     return _load()
+
+
+def delete_record(index: int) -> dict | None:
+    """1-based index로 매도 기록 삭제. 삭제된 레코드 반환, 없으면 None."""
+    records = _load()
+    if index < 1 or index > len(records):
+        return None
+    removed = records.pop(index - 1)
+    _save(records)
+    return removed
