@@ -149,7 +149,7 @@ def cmd_help() -> str:
         "/portfolio   포트폴리오 실시간 현황\n"
         "/dca         오늘 DCA 배분\n"
         "/order       소수점 매수 주문서 (키움 즉시 입력)\n"
-        "/tax         양도소득세 추산 (전량 매도 시 22%)\n"
+        "/tax         올해 실현손익 & 양도세 추산  |  sell/history 하위명령\n"
         "/sgov        SGOV 실탄 상태\n"
         "/history     성과 히스토리 (1d/7d/30d/90d)\n"
         "/rebalance   리밸런싱 계산기\n"
@@ -509,112 +509,135 @@ def cmd_holding(chat_id: str, args: list):
         send(chat_id, list_holdings())
 
 
-def cmd_tax(chat_id: str):
-    """해외주식 양도소득세 추산 — 매도 시 예상 세금 계산."""
-    send(chat_id, "⏳ 세금 추산 중 (실시간 가격 조회)...")
-    typing(chat_id)
-    try:
-        import yfinance as yf
-        snap_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "portfolio_snapshot.json")
-        with open(snap_path, encoding="utf-8") as f:
-            snap = json.load(f)
+def cmd_tax(chat_id: str, args: list):
+    """실현손익 기록/조회 + 양도소득세 추산."""
+    from tax_tracker import (
+        add_sell, get_yearly_summary, get_all_records,
+        EXEMPTION_KRW, TAX_RATE,
+    )
 
-        fx = fetch_exchange_rate()
-
-        # 전체 보유 종목 수집 (해외만 — 국내는 다른 세율 적용)
-        holdings: list[dict] = []
-        for h in snap.get("overseas_general", {}).get("holdings_usd", []):
-            shares = h.get("shares", 0)
-            if shares <= 0:
-                continue
-            # avg 우선순위: avg_price_usd > cost_total_usd/shares > cost_usd/shares
-            avg = h.get("avg_price_usd")
-            if not avg:
-                cost_total = h.get("cost_total_usd")
-                if cost_total:
-                    avg = cost_total / shares
-            if not avg:
-                cost = h.get("cost_usd", 0)
-                if cost:
-                    avg = cost / shares
-            if avg and avg > 0:
-                holdings.append({"ticker": h["ticker"], "avg": avg, "shares": shares, "name": h.get("name", h["ticker"])})
-        for h in snap.get("overseas_fractional", {}).get("holdings", []):
-            cost = h.get("cost_usd", 0)
-            shares = h.get("shares", 0)
-            if shares > 0 and cost > 0:
-                avg = cost / shares
-                holdings.append({"ticker": h["ticker"], "avg": avg, "shares": shares, "name": h.get("name", h["ticker"])})
-
-        if not holdings:
-            send(chat_id, "⚠️ 보유 종목 데이터 없음 (portfolio_snapshot.json 확인)")
+    # ── /tax sell TICKER 수량 매수단가 매도단가 ──────────────────────────
+    if args and args[0].lower() == "sell":
+        if len(args) < 5:
+            send(chat_id,
+                 "❌ 형식: /tax sell TICKER 수량 매수단가 매도단가\n"
+                 "예)  /tax sell NVDA 10 400.00 520.00")
             return
-
-        # 현재 가격 일괄 조회
-        tickers_set = list({h["ticker"] for h in holdings})
         try:
-            raw = yf.download(tickers_set, period="2d", progress=False, auto_adjust=True)
-            if len(tickers_set) == 1:
-                prices = {tickers_set[0]: float(raw["Close"].iloc[-1])}
-            else:
-                prices = {t: float(raw["Close"][t].dropna().iloc[-1]) for t in tickers_set if t in raw["Close"]}
-        except Exception:
-            prices = {}
+            ticker     = args[1].upper()
+            qty        = float(args[2])
+            buy_price  = float(args[3])
+            sell_price = float(args[4])
+        except (ValueError, IndexError):
+            send(chat_id, "❌ 숫자 형식 오류. 예) /tax sell NVDA 10 400.00 520.00")
+            return
+        try:
+            fx  = fetch_exchange_rate()
+            rec = add_sell(ticker, qty, buy_price, sell_price, fx)
+            gu  = rec["gain_usd"]
+            gk  = rec["gain_krw"]
+            sg  = "+" if gu >= 0 else ""
+            send(chat_id, (
+                f"✅ 매도 기록 저장\n"
+                f"━━━━━━━━━━━━━━━━━━━━━━━\n"
+                f"  종목     {ticker}\n"
+                f"  수량     {qty}주\n"
+                f"  매수단가 ${buy_price:.2f}\n"
+                f"  매도단가 ${sell_price:.2f}\n"
+                f"  실현손익 {sg}${gu:,.2f}  ({sg}{gk:,.0f}원)\n"
+                f"  환율     {fx:,.0f}원/USD\n"
+                f"  날짜     {rec['date']}"
+            ))
+        except Exception as e:
+            send(chat_id, f"❌ 매도 기록 오류: {e}")
+        return
 
-        EXEMPTION_KRW = 2_500_000  # 연간 기본공제 250만원
-        TAX_RATE = 0.22            # 22% (소득세 20% + 지방세 2.2%)
-
-        rows = []
-        for h in holdings:
-            t = h["ticker"]
-            cur = prices.get(t)
-            avg = h["avg"]
-            shares = h["shares"]
-            if cur is None:
-                rows.append((t, h["name"], shares, avg, None, None, None))
-                continue
-            gain_usd = (cur - avg) * shares
-            gain_krw = gain_usd * fx
-            rows.append((t, h["name"], shares, avg, cur, gain_usd, gain_krw))
-
-        # 손익 합산
-        valid_rows = [(t, n, s, a, c, gu, gk) for t, n, s, a, c, gu, gk in rows if gu is not None]
-        total_gain_krw = sum(r[6] for r in valid_rows)
-        taxable_krw = max(0.0, total_gain_krw - EXEMPTION_KRW)
-        tax_krw = taxable_krw * TAX_RATE
-        tax_usd = tax_krw / fx if fx > 0 else 0
-
-        SEP = "─" * 52
-        lines = [
-            "💸 해외주식 양도소득세 추산",
-            f"📅 {datetime.now().strftime('%Y-%m-%d')}  (@{fx:,.0f}원)",
-            SEP,
-            f"{'종목':<18} {'수량':>7} {'평단':>8} {'현재':>8} {'손익(USD)':>10}",
-            SEP,
-        ]
-
-        gain_rows = sorted(valid_rows, key=lambda r: r[5], reverse=True)
-        for t, n, s, avg, cur, gu, gk in gain_rows:
-            sign = "▲" if gu > 0 else "▼"
-            short_name = n[:10] if n else t
+    # ── /tax history ─────────────────────────────────────────────────────
+    if args and args[0].lower() == "history":
+        records = get_all_records()
+        if not records:
+            send(chat_id,
+                 "📭 매도 기록 없음\n"
+                 "/tax sell TICKER 수량 매수단가 매도단가  로 기록")
+            return
+        SEP = "─" * 50
+        lines = ["📋 전체 매도 기록", SEP]
+        for r in records:
+            gu  = r.get("gain_usd", 0)
+            gk  = r.get("gain_krw", 0)
+            sg  = "▲" if gu >= 0 else "▼"
             lines.append(
-                f"{t:<6} {short_name:<12} {s:>6.4f}주  @${avg:>6.2f}  @${cur:>6.2f}  {sign}${abs(gu):>7.2f}"
+                f"{r['date']}  {r['ticker']:<6}  {r['qty']}주\n"
+                f"  @${r['buy_price_usd']:.2f} → @${r['sell_price_usd']:.2f}"
+                f"  {sg}${abs(gu):,.2f}  ({sg}{abs(gk):,.0f}원)"
             )
-        for t, n, s, avg, cur, gu, gk in rows:
-            if gu is None:
-                lines.append(f"{t:<6} {'(가격 조회 실패)':<20}")
+        lines += [SEP, f"총 {len(records)}건"]
+        send(chat_id, "\n".join(lines))
+        return
 
-        lines += [
+    # ── /tax (인자 없음) — 올해 실현손익 + 세금 추산 ─────────────────────
+    try:
+        year    = datetime.now().year
+        summary = get_yearly_summary(year)
+        fx      = fetch_exchange_rate()
+
+        total_usd   = summary["total_gain_usd"]
+        total_krw   = summary["total_gain_krw"]
+        taxable_krw = summary["taxable_krw"]
+        tax_krw     = summary["tax_krw"]
+        tax_usd     = tax_krw / fx if fx > 0 else 0
+        count       = summary["count"]
+
+        SEP   = "─" * 52
+        sign  = "+" if total_krw >= 0 else ""
+        lines = [
+            f"💸 {year}년 실현손익 & 양도소득세 추산",
+            f"📅 {datetime.now().strftime('%Y-%m-%d')}  (@{fx:,.0f}원/USD)",
             SEP,
-            f"미실현 순손익     : {'+' if total_gain_krw >= 0 else ''}{total_gain_krw:,.0f}원  (${total_gain_krw/fx:,.2f})",
-            f"기본공제 (250만원): -{min(EXEMPTION_KRW, max(0,total_gain_krw)):,.0f}원",
-            f"과세표준          : {taxable_krw:,.0f}원",
-            f"예상 세금 (22%)   : {tax_krw:,.0f}원  (${tax_usd:,.2f})",
-            "",
-            "※ 전량 매도 시 추산 — 실현 손익 기준 신고",
-            "※ 손실 통산 가능: 손실 종목이 수익을 상쇄",
-            "※ 국내 양도세 신고: 5월 (전년도 실현손익)",
         ]
+
+        if count == 0:
+            lines += [
+                "올해 매도 기록 없음",
+                "",
+                "/tax sell TICKER 수량 매수단가 매도단가  — 매도 기록",
+                "/tax history  — 전체 매도 기록",
+            ]
+        else:
+            # 종목별 소계
+            by_usd: dict[str, float] = {}
+            by_krw: dict[str, float] = {}
+            for r in summary["records"]:
+                t = r["ticker"]
+                by_usd[t] = by_usd.get(t, 0) + r.get("gain_usd", 0)
+                by_krw[t] = by_krw.get(t, 0) + r.get("gain_krw", 0)
+
+            lines += [
+                f"{'종목':<8} {'실현손익(USD)':>14} {'실현손익(KRW)':>14}",
+                SEP,
+            ]
+            for t in sorted(by_usd, key=lambda x: -by_usd[x]):
+                gu = by_usd[t]
+                gk = by_krw[t]
+                sg = "▲" if gu >= 0 else "▼"
+                lines.append(
+                    f"{t:<8} {sg}${abs(gu):>12,.2f}  {sg}{abs(gk):>12,.0f}원"
+                )
+            lines += [
+                SEP,
+                f"실현 총손익    : {sign}{total_krw:,.0f}원  (${total_usd:,.2f})",
+                f"기본공제(250만): -{min(EXEMPTION_KRW, max(0, int(total_krw))):,.0f}원",
+                f"과세표준       : {taxable_krw:,.0f}원",
+                f"예상 세금(22%) : {tax_krw:,.0f}원  (${tax_usd:,.2f})",
+                "",
+                f"※ 매도 기록 {count}건 기준 — 실현손익만 집계",
+                "※ 손실 통산: 손실 종목이 수익 상쇄",
+                "※ 국내 양도세 신고: 매년 5월 (전년도)",
+                "",
+                "/tax sell TICKER 수량 매수단가 매도단가",
+                "/tax history  — 전체 매도 기록",
+            ]
+
         send(chat_id, "\n".join(lines))
     except Exception as e:
         send(chat_id, f"❌ 세금 추산 오류: {e}")
@@ -817,7 +840,7 @@ def dispatch(text: str, chat_id: str):
         return
 
     if cmd == "/tax":
-        cmd_tax(chat_id)
+        cmd_tax(chat_id, args)
         return
 
     fn = _SIMPLE_CMDS.get(cmd)
