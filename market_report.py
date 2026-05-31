@@ -8,6 +8,7 @@ import os
 import sys
 import json
 import math
+import re
 from datetime import datetime, timedelta, timezone
 from typing import Optional, Any
 
@@ -159,6 +160,148 @@ def arrow_for_change(change: Optional[float]) -> str:
     return "➡️"
 
 
+def compact_text(text: Optional[str], limit: int = 110) -> str:
+    """Compress a long text into a single readable snippet."""
+    if not text:
+        return ""
+    cleaned = " ".join(str(text).replace("\n", " ").split())
+    if len(cleaned) <= limit:
+        return cleaned
+    return cleaned[: limit - 1].rstrip() + "…"
+
+
+def format_kst_time(iso_text: Optional[str]) -> str:
+    """Format an ISO timestamp into KST month-day hour:minute."""
+    if not iso_text:
+        return ""
+    try:
+        dt = datetime.fromisoformat(str(iso_text).replace("Z", "+00:00"))
+        return dt.astimezone(KST).strftime("%m-%d %H:%M")
+    except Exception:
+        return ""
+
+
+def fetch_saveticker_json(path: str, params: Optional[dict] = None) -> Optional[dict]:
+    """Fetch JSON from SaveTicker's public API."""
+    base = os.getenv("SAVE_TICKER_API_BASE", "https://saveticker.com/api")
+    url = f"{base.rstrip('/')}/{path.lstrip('/')}"
+    try:
+        resp = requests.get(url, headers=HEADERS, params=params, timeout=12)
+        resp.raise_for_status()
+        return resp.json()
+    except Exception:
+        return None
+
+
+def format_news_item(item: dict, include_snippet: bool = True) -> str:
+    """Format a SaveTicker news item into a markdown bullet."""
+    title = item.get("title") or "[제목 없음]"
+    source = item.get("source") or ""
+    created_at = format_kst_time(item.get("created_at"))
+    tags = [t for t in (item.get("tag_names") or []) if t]
+    parts = []
+    if source:
+        parts.append(source)
+    if created_at:
+        parts.append(created_at)
+    if tags:
+        parts.append(", ".join(tags[:3]))
+    meta = f" ({' · '.join(parts)})" if parts else ""
+    line = f"- **{title}**{meta}"
+    if include_snippet:
+        snippet = compact_text(item.get("content") or item.get("group_summary") or "", 120)
+        if snippet:
+            line += f"\n  - {snippet}"
+    return line
+
+
+ARCA_STOCK_LABELS = ("🧠분석", "📰뉴스", "ℹ️정보", "실적")
+ARCA_STOCK_MAX_PAGES = 5
+ARCA_STOCK_MAX_POSTS = 8
+
+
+def fetch_arca_stock_markdown(page: int = 1) -> Optional[str]:
+    """Fetch Arca stock channel listing from the r.jina.ai text mirror."""
+    url = f"https://r.jina.ai/http://arca.live/b/stock?p={page}"
+    try:
+        resp = requests.get(url, headers=HEADERS, timeout=20)
+        resp.raise_for_status()
+        return resp.text
+    except Exception:
+        return None
+
+
+def parse_arca_stock_posts(markdown: str) -> list[dict]:
+    """Parse Arca stock listing markdown into structured relevant posts."""
+    if not markdown:
+        return []
+
+    posts = []
+    seen_ids = set()
+    link_pat = re.compile(r"\[([^\]]+)\]\(https://arca\.live/b/stock/(\d+)\?p=(\d+)\)")
+
+    for match in link_pat.finditer(markdown):
+        link_text = " ".join(match.group(1).split()).replace("**", "").strip()
+        post_id = match.group(2)
+        if post_id in seen_ids:
+            continue
+        if not any(label in link_text for label in ARCA_STOCK_LABELS):
+            continue
+
+        header = re.match(rf"^(?P<num>\d+)\s*(?P<label>{'|'.join(map(re.escape, ARCA_STOCK_LABELS))})\s+(?P<rest>.+)$", link_text)
+        if not header:
+            continue
+
+        body = header.group("rest").strip()
+        meta = re.match(
+            r"^(?P<title>.*?)(?:\s+\[\d+\])?\s+(?P<author>\S+)\s+(?P<when>(?:\d{2}:\d{2}|\d{4}\.\d{2}\.\d{2}))\s+(?P<views>\d+)\s+(?P<likes>\d+)$",
+            body,
+        )
+        if not meta:
+            continue
+
+        seen_ids.add(post_id)
+        title = compact_text(meta.group("title").strip(), 90)
+        posts.append(
+            {
+                "id": post_id,
+                "url": f"https://arca.live/b/stock/{post_id}",
+                "category": header.group("label"),
+                "title": title,
+                "author": meta.group("author").strip(),
+                "when": meta.group("when").strip(),
+                "views": meta.group("views"),
+                "likes": meta.group("likes"),
+            }
+        )
+
+    return posts
+
+
+def fetch_arca_stock_posts(max_pages: int = ARCA_STOCK_MAX_PAGES, limit: int = ARCA_STOCK_MAX_POSTS) -> list[dict]:
+    """Fetch recent relevant Arca stock posts across a few pages."""
+    posts = []
+    seen = set()
+    for page in range(1, max_pages + 1):
+        markdown = fetch_arca_stock_markdown(page)
+        for post in parse_arca_stock_posts(markdown or ""):
+            if post["id"] in seen:
+                continue
+            seen.add(post["id"])
+            posts.append(post)
+            if len(posts) >= limit:
+                return posts
+    return posts
+
+
+def format_arca_post(post: dict) -> str:
+    """Format a parsed Arca post for the report."""
+    return (
+        f"- [{post['title']}]({post['url']})"
+        f" ({post['category']} · {post['author']} · {post['when']} · 조회 {post['views']} · 추천 {post['likes']})"
+    )
+
+
 # ─────────────────────────────────────────────
 # Section Builders
 # ─────────────────────────────────────────────
@@ -220,26 +363,59 @@ def section_2_top_news() -> str:
     lines.append("## 2. 📰 주요 뉴스 & 이슈 (Top News)")
     lines.append("")
 
+    # 1) SaveTicker top stories: market-wide headlines
+    top_stories = []
+    data = fetch_saveticker_json("news/top-stories")
+    if data and data.get("news_list"):
+        top_stories = data["news_list"][:5]
+
+    # 2) SaveTicker portfolio-related news via ticker filter
+    portfolio_news = []
+    portfolio_filter = ",".join(PORTFOLIO_TICKERS)
+    data = fetch_saveticker_json(
+        "news/list",
+        params={"page": 1, "page_size": 6, "sort": "created_at_desc", "tickers": portfolio_filter},
+    )
+    if data and data.get("news_list"):
+        portfolio_news = data["news_list"][:6]
+
+    # 3) Keep a small fallback path for resilience
     headlines = []
+    seen_titles = set()
 
-    # Try scraping Google News first
-    try:
-        url = "https://news.google.com/search?q=stock+market+today&hl=en-US&gl=US&ceid=US:en"
-        resp = requests.get(url, headers=HEADERS, timeout=10)
-        if resp.status_code == 200:
-            soup = BeautifulSoup(resp.text, "html.parser")
-            articles = soup.select("article") or soup.select("a[href*='article']") or []
-            for article in articles[:8]:
-                title_el = article.select_one("h3, h4, a[aria-label]")
-                if title_el:
-                    title = title_el.get_text(strip=True)
-                    if title and len(title) > 10:
-                        headlines.append(title)
-    except Exception:
-        pass
+    def add_news_batch(batch, prefix):
+        for item in batch:
+            title = item.get("title") or ""
+            if not title or title in seen_titles:
+                continue
+            seen_titles.add(title)
+            headlines.append((prefix, item))
 
-    # Fallback: yfinance ticker news
-    if len(headlines) < 5:
+    add_news_batch(top_stories, "시장")
+    add_news_batch(portfolio_news, "보유종목")
+
+    if len(headlines) < 6:
+        try:
+            # Fallback: Google News RSS (public and more stable than HTML scraping)
+            url = "https://news.google.com/rss/search?q=stock+market+today+OR+fed+OR+earnings&hl=en-US&gl=US&ceid=US:en"
+            resp = requests.get(url, headers=HEADERS, timeout=10)
+            if resp.status_code == 200:
+                soup = BeautifulSoup(resp.text, "xml")
+                for item in soup.select("item")[:8]:
+                    title = item.title.get_text(strip=True) if item.title else ""
+                    if title and title not in seen_titles:
+                        seen_titles.add(title)
+                        headlines.append(("RSS", {
+                            "title": title,
+                            "source": item.source.get_text(strip=True) if item.source else "Google News",
+                            "created_at": item.pubDate.get_text(strip=True) if item.pubDate else None,
+                            "content": item.description.get_text(strip=True) if item.description else "",
+                            "tag_names": [],
+                        }))
+        except Exception:
+            pass
+
+    if len(headlines) < 6:
         try:
             for sym in ["SPY", "QQQ", "AAPL", "NVDA", "TSLA"]:
                 if len(headlines) >= 8:
@@ -247,20 +423,40 @@ def section_2_top_news() -> str:
                 ticker = yf.Ticker(sym)
                 news_items = ticker.news
                 if news_items:
-                    for item in news_items[:3]:
+                    for item in news_items[:2]:
                         title = item.get("title", "")
-                        if title and title not in headlines:
-                            headlines.append(title)
+                        if title and title not in seen_titles:
+                            seen_titles.add(title)
+                            headlines.append(("YF", item))
         except Exception:
             pass
 
     if headlines:
-        for i, h in enumerate(headlines[:8], 1):
-            lines.append(f"{i}. {h}")
+        lines.append("### 시장 헤드라인")
+        lines.append("")
+        for prefix, item in headlines[:5]:
+            lines.append(format_news_item(item))
+        lines.append("")
+
+        if portfolio_news:
+            lines.append("### 포트폴리오 관련 뉴스")
+            lines.append("")
+            for item in portfolio_news[:5]:
+                lines.append(format_news_item(item))
+            lines.append("")
     else:
         lines.append("[데이터 없음] (사유: 뉴스 데이터를 불러올 수 없음)")
+        lines.append("")
 
-    lines.append("")
+    arca_posts = fetch_arca_stock_posts()
+    if arca_posts:
+        lines.append("### 아카라이브 주식 채널 최신 글 (분석/뉴스/정보/실적)")
+        lines.append("")
+        lines.append(f"- 최근 {ARCA_STOCK_MAX_PAGES}페이지에서 {len(arca_posts)}건의 관련 글을 확인했습니다.")
+        for post in arca_posts[:ARCA_STOCK_MAX_POSTS]:
+            lines.append(format_arca_post(post))
+        lines.append("")
+
     return "\n".join(lines)
 
 
@@ -845,7 +1041,7 @@ def build_report() -> str:
     lines = []
     lines.append(f"# 📊 주식시장 일일 리포트")
     lines.append(f"**발행일**: {TODAY_STR} (KST 기준)")
-    lines.append(f"**데이터 출처**: Yahoo Finance, Google News, CNN Money")
+    lines.append(f"**데이터 출처**: Yahoo Finance, SaveTicker API, Google News RSS, CNN Money, Arca Live (r.jina.ai mirror)")
     lines.append("---")
     lines.append("")
 

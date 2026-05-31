@@ -1,0 +1,50 @@
+# ── 보안 ────────────────────────────────
+.env
+.env.*
+*.key
+*.pem
+secrets/
+
+# ── 개인 금융 데이터 (버전 관리 제외) ────
+portfolio_snapshot.json
+leverage_state.json
+price_alerts.json
+
+# ── 봇 런타임 상태 ───────────────────────
+telegram_bot_state.json
+
+# ── Python ──────────────────────────────
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+*.egg-info/
+dist/
+build/
+.venv/
+venv/
+env/
+
+# ── Claude 로컬 설정 ─────────────────────
+.claude/
+
+# ── 임시/작업 파일 ────────────────────────
+claude_continue_result.txt
+codex_night_task.sh
+codex_prompt.txt
+tasks_v2.txt
+/tmp/
+*.tmp
+*.log
+
+# ── 생성된 리포트 (로컬 저장) ─────────────
+reports/
+~/reports/
+
+# ── IDE ─────────────────────────────────
+.vscode/
+.idea/
+*.swp
+*.swo
+.DS_Store

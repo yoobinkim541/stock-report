@@ -1,0 +1,63 @@
+{
+  "snapshot_date": "YYYY-MM-DD",
+  "account": "증권사 계좌명",
+
+  "domestic": {
+    "summary": {
+      "total_cost_krw": 0,
+      "total_value_krw": 0,
+      "total_pnl_krw": 0,
+      "total_return_pct": 0.0
+    },
+    "holdings": []
+  },
+
+  "overseas_general": {
+    "summary": {
+      "total_cost_krw": 0,
+      "total_value_krw": 0,
+      "total_pnl_krw": 0,
+      "total_return_pct": 0.0
+    },
+    "holdings_usd": [
+      {
+        "name": "회사명",
+        "ticker": "TICKER",
+        "shares": 0,
+        "avg_price_usd": 0.0,
+        "current_price_usd": 0.0,
+        "cost_usd": 0.0,
+        "value_usd": 0.0,
+        "pnl_usd": 0.0,
+        "return_pct": 0.0
+      }
+    ]
+  },
+
+  "overseas_fractional": {
+    "summary": {
+      "total_cost_usd": 0.0,
+      "total_value_usd": 0.0,
+      "total_pnl_usd": 0.0,
+      "total_return_pct": 0.0
+    },
+    "holdings": [
+      {
+        "name": "회사명",
+        "ticker": "TICKER",
+        "shares": 0.0,
+        "cost_usd": 0.0,
+        "value_usd": 0.0,
+        "pnl_usd": 0.0,
+        "return_pct": 0.0
+      }
+    ]
+  },
+
+  "portfolio_analysis": {
+    "cash_buffer_usd": 0.0,
+    "income_engine_value_usd": 0.0,
+    "sgov_deployment_ready": false,
+    "barbell_phase": "Phase 0 — 정상 모드"
+  }
+}
