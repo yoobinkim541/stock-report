@@ -23,6 +23,7 @@ barbell_strategy.py — Intelligence Barbell v2.1
 import os
 import json
 import logging
+import time
 from datetime import datetime
 
 import yfinance as yf
@@ -1441,17 +1442,39 @@ def send_telegram(message: str) -> bool:
         return False
 
 
-def send_phase5_emergency(drawdown_pct: float, exchange_rate: float) -> bool:
-    """Phase 5 전용 긴급 에스컬레이션 — 짧고 즉각적인 알림."""
+def send_phase5_emergency(
+    drawdown_pct: float, exchange_rate: float, portfolio: dict | None = None
+) -> bool:
+    """Phase 5 전용 긴급 에스컬레이션 — 포트폴리오 기반 구체적 금액 포함."""
+    portfolio = portfolio or {}
+    sgov_usd   = portfolio.get("sgov_usd", 0.0)
+    qqqi_usd   = portfolio.get("qqqi_usd", 0.0)
+    total_usd  = portfolio.get("total_usd", 0.0)
+
+    sgov_krw       = int(sgov_usd * exchange_rate)
+    qqqi_20pct_usd = round(qqqi_usd * 0.20, 2)
+    qqqi_30pct_usd = round(qqqi_usd * 0.30, 2)
+    qqqi_20pct_krw = int(qqqi_20pct_usd * exchange_rate)
+    qqqi_30pct_krw = int(qqqi_30pct_usd * exchange_rate)
+    dca_krw        = int(DCA_DAILY_BASE_KRW * 5.0)   # 200,000원
+    dca_usd        = round(dca_krw / exchange_rate, 1)
+    total_krw      = int(total_usd * exchange_rate)
+
     msg = (
         "💥💥💥 Phase 5 크래시 에스컬레이션 💥💥💥\n"
         "━━━━━━━━━━━━━━━━━━━━━━━\n"
         f"QQQ 고점 대비 {drawdown_pct:+.1f}% — 시장 붕괴 구간 진입\n"
+        f"포트폴리오 총액: ${total_usd:,.0f}  (₩{total_krw:,})\n"
+        f"환율: {exchange_rate:,.0f}원/USD\n"
         "\n"
-        "⚡ 즉시 실행할 액션:\n"
-        "1. TQQQ 전면 배치 (SGOV 잔여 전액 → TQQQ)\n"
-        "2. QQQI 원금 20~30% → TQQQ 전환 검토\n"
-        "3. 소수점 DCA 5배 (4만 → 20만원) 즉시 실행\n"
+        "⚡ 지금 당장 이렇게 하세요:\n"
+        "━━━━━━━━━━━━━━━━━━━━━━━\n"
+        "1. SGOV 전량 → TQQQ 전환 (승부수)\n"
+        f"   매도 금액: ${sgov_usd:,.0f}  (₩{sgov_krw:,})\n"
+        "2. QQQI 원금 20~30% → TQQQ 전환\n"
+        f"   20% 기준: ${qqqi_20pct_usd:,.0f}  (₩{qqqi_20pct_krw:,})\n"
+        f"   30% 기준: ${qqqi_30pct_usd:,.0f}  (₩{qqqi_30pct_krw:,})\n"
+        f"3. DCA 5배 즉시 실행: {dca_krw:,}원/일  (${dca_usd:.1f})\n"
         "4. NOW, ORCL, NVDA, MSFT 최대 적립\n"
         "5. 예비 현금(적금 포함) 단계적 투입 준비\n"
         "\n"
@@ -1501,10 +1524,13 @@ def run(send_alert: bool = False) -> dict | None:
 
     # 텔레그램: Phase 변화 시 또는 강제 발송 시
     if send_alert or phase_changed:
-        # Phase 5 크래시 진입: 긴급 알림 먼저 발송
+        # Phase 5 크래시 진입: 긴급 알림 3회 반복 발송
         if market_type == "bear" and phase_key == 5 and phase_changed:
-            send_phase5_emergency(qqq.get("drawdown_pct", 0), exchange_rate)
-            logger.warning("Phase 5 긴급 에스컬레이션 발송")
+            for i in range(3):
+                send_phase5_emergency(qqq.get("drawdown_pct", 0), exchange_rate, portfolio)
+                if i < 2:
+                    time.sleep(3)
+            logger.warning("Phase 5 긴급 에스컬레이션 3회 발송 완료")
 
         sent = send_telegram(report)
         if sent:
