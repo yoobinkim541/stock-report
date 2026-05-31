@@ -91,3 +91,33 @@ def delete_record(index: int) -> dict | None:
     removed = records.pop(index - 1)
     _save(records)
     return removed
+
+
+def simulate_sell(ticker: str, qty: float, buy_price_usd: float,
+                  sell_price_usd: float, fx: float,
+                  year: int | None = None) -> dict:
+    """매도 시뮬레이션 — 저장하지 않고 세금 영향만 계산."""
+    if year is None:
+        year = datetime.now().year
+    gain_usd = (sell_price_usd - buy_price_usd) * qty
+    gain_krw = gain_usd * fx
+
+    existing = get_yearly_summary(year)
+    combined_gain_krw = existing["total_gain_krw"] + gain_krw
+    taxable_krw = max(0.0, combined_gain_krw - EXEMPTION_KRW)
+    tax_krw = taxable_krw * TAX_RATE
+
+    return {
+        "ticker":              ticker.upper(),
+        "qty":                 qty,
+        "buy_price_usd":       round(buy_price_usd, 4),
+        "sell_price_usd":      round(sell_price_usd, 4),
+        "gain_usd":            round(gain_usd, 4),
+        "gain_krw":            round(gain_krw, 0),
+        "fx":                  round(fx, 2),
+        "existing_gain_krw":   round(existing["total_gain_krw"], 0),
+        "combined_gain_krw":   round(combined_gain_krw, 0),
+        "taxable_krw":         round(taxable_krw, 0),
+        "tax_krw":             round(tax_krw, 0),
+        "existing_count":      existing["count"],
+    }

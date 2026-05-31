@@ -159,7 +159,7 @@ def cmd_help() -> str:
         "/portfolio        포트폴리오 실시간 현황\n"
         "/dca              오늘 DCA 배분\n"
         "/order            소수점 매수 주문서 (키움 즉시 입력)\n"
-        "/tax              올해 실현손익 & 양도세  |  sell/history/delete/import apply\n"
+        "/tax              올해 실현손익 & 양도세  |  sim/sell/history/delete/import apply\n"
         "/sgov             SGOV 실탄 상태\n"
         "/history          성과 히스토리 (1d/7d/30d/90d)\n"
         "/rebalance        리밸런싱 계산기\n"
@@ -595,6 +595,119 @@ def cmd_tax(chat_id: str, args: list):
                  f"  {sg}${abs(gu):,.2f}")
         return
 
+    # ── /tax sim TICKER [수량] [매수단가] ── 매도 전 세금 시뮬레이션 ────────
+    if args and args[0].lower() == "sim":
+        if len(args) < 2:
+            send(chat_id,
+                 "❌ 형식: /tax sim TICKER [수량] [매수단가]\n"
+                 "예)  /tax sim NVDA\n"
+                 "     /tax sim NVDA 2\n"
+                 "     /tax sim NVDA 2 184.14")
+            return
+        from tax_tracker import simulate_sell, EXEMPTION_KRW
+
+        ticker = args[1].upper()
+
+        # 포트폴리오 스냅샷에서 보유수량·매수단가 조회
+        snap_holdings: list[dict] = []
+        try:
+            snap = json.load(open(PORTFOLIO_PATH, encoding="utf-8"))
+            for section in ("overseas_general", "overseas_fractional"):
+                snap_holdings += snap.get(section, {}).get("holdings_usd", []) + \
+                                  snap.get(section, {}).get("holdings", [])
+        except Exception:
+            pass
+
+        snap_entry = next((h for h in snap_holdings if h.get("ticker") == ticker), None)
+
+        # 수량 파싱 (생략 시 스냅샷)
+        try:
+            qty = float(args[2]) if len(args) >= 3 else None
+        except ValueError:
+            send(chat_id, "❌ 수량은 숫자여야 합니다.  예) /tax sim NVDA 2")
+            return
+        if qty is None:
+            if snap_entry:
+                qty = snap_entry.get("shares", 0)
+            else:
+                send(chat_id,
+                     f"❌ 포트폴리오에 {ticker} 없음\n"
+                     f"수량을 직접 입력하세요: /tax sim {ticker} [수량] [매수단가]")
+                return
+
+        # 매수단가 파싱 (생략 시 스냅샷)
+        try:
+            buy_price = float(args[3]) if len(args) >= 4 else None
+        except ValueError:
+            send(chat_id, "❌ 매수단가는 숫자여야 합니다.")
+            return
+        if buy_price is None:
+            if snap_entry and snap_entry.get("avg_price_usd"):
+                buy_price = snap_entry["avg_price_usd"]
+            elif snap_entry and snap_entry.get("cost_usd") and qty:
+                buy_price = snap_entry["cost_usd"] / qty
+            else:
+                send(chat_id,
+                     f"❌ 매수단가를 찾을 수 없음\n"
+                     f"/tax sim {ticker} {qty} [매수단가]")
+                return
+
+        # 현재가 조회
+        try:
+            import yfinance as yf
+            h = yf.Ticker(ticker).history(period="2d")
+            if h.empty:
+                raise ValueError("데이터 없음")
+            sell_price = float(h["Close"].iloc[-1])
+        except Exception as e:
+            send(chat_id, f"❌ {ticker} 현재가 조회 실패: {e}")
+            return
+
+        try:
+            fx  = fetch_exchange_rate()
+            res = simulate_sell(ticker, qty, buy_price, sell_price, fx)
+        except Exception as e:
+            send(chat_id, f"❌ 시뮬레이션 오류: {e}")
+            return
+
+        gu   = res["gain_usd"]
+        gk   = res["gain_krw"]
+        sg   = "▲" if gu >= 0 else "▼"
+        cg   = res["combined_gain_krw"]
+        csg  = "▲" if cg >= 0 else "▼"
+        tx   = res["tax_krw"]
+        txu  = tx / fx if fx > 0 else 0
+        tk   = res["taxable_krw"]
+        ei   = res["existing_gain_krw"]
+        esg  = "▲" if ei >= 0 else "▼"
+        exem = min(EXEMPTION_KRW, max(0, int(cg))) if cg > 0 else 0
+
+        SEP = "─" * 44
+        company = snap_entry.get("name", ticker) if snap_entry else ticker
+        lines = [
+            f"🔮 매도 시뮬레이션 (실제 반영 안됨)",
+            SEP,
+            f"종목  {ticker} — {company}",
+            f"수량  {qty}주   @${sell_price:.2f} (현재가)",
+            f"매수단가  ${buy_price:.2f}",
+            f"예상 손익  {sg}${abs(gu):,.2f}  ({sg}{abs(gk):,.0f}원)",
+            SEP,
+            f"기존 실현손익  {esg}{abs(ei):,.0f}원",
+            f"합산 총손익    {csg}{abs(cg):,.0f}원",
+            f"기본공제 차감  -{exem:,.0f}원",
+            f"과세표준       {tk:,.0f}원",
+        ]
+        if tk <= 0:
+            lines.append(f"예상 세금      0원  (공제 이내)")
+        else:
+            lines.append(f"예상 세금(22%) {tx:,.0f}원  (${txu:,.2f})")
+        lines += [
+            SEP,
+            f"※ 실제 반영: /tax sell {ticker} {qty} {buy_price:.2f} {sell_price:.2f}",
+        ]
+        send(chat_id, "\n".join(lines))
+        return
+
     # ── /tax sell TICKER 수량 매수단가 매도단가 ──────────────────────────
     if args and args[0].lower() == "sell":
         if len(args) < 5:
@@ -713,6 +826,7 @@ def cmd_tax(chat_id: str, args: list):
                 "※ 손실 통산: 손실 종목이 수익 상쇄",
                 "※ 국내 양도세 신고: 매년 5월 (전년도)",
                 "",
+                "/tax sim TICKER [수량]  — 매도 전 세금 시뮬레이션",
                 "/tax sell TICKER 수량 매수단가 매도단가",
                 "/tax history  — 전체 매도 기록",
             ]
