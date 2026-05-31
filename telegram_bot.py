@@ -23,7 +23,7 @@ import time
 import json
 import shutil
 import logging
-from datetime import datetime
+from datetime import datetime, timedelta
 
 import requests
 
@@ -360,6 +360,35 @@ def cmd_dividend(chat_id: str, args: list):
         lines += ["", "  최근 기록:"]
         for r in summary["records"][-5:]:
             lines.append(f"  {r['date']}  ${r['amount_usd']:.2f} → {r['reinvested_in']}  {r.get('note','')}")
+
+        # 다음 배당 예상일 추가
+        records = summary["records"]
+        if len(records) >= 2:
+            try:
+                rdates = [datetime.strptime(r["date"], "%Y-%m-%d") for r in records if r.get("date")]
+                if len(rdates) >= 2:
+                    intervals = [(rdates[i] - rdates[i-1]).days for i in range(1, len(rdates)) if (rdates[i] - rdates[i-1]).days > 0]
+                    if intervals:
+                        avg_iv = round(sum(intervals) / len(intervals))
+                        next_dt = rdates[-1] + timedelta(days=avg_iv)
+                        try:
+                            with open(PORTFOLIO_PATH, encoding="utf-8") as _pf:
+                                _snap = json.load(_pf)
+                            qqqi_sh = next(
+                                (h.get("shares", 1.0) for h in _snap.get("overseas_fractional", {}).get("holdings", [])
+                                 if h.get("ticker") == "QQQI"),
+                                1.0
+                            )
+                        except Exception:
+                            qqqi_sh = 1.0
+                        est_pay = records[-1].get("amount_usd", 0) * qqqi_sh
+                        lines += [
+                            "",
+                            "  📅 다음 배당 예상:",
+                            f"    {next_dt.strftime('%Y-%m-%d')}  ≈ ${est_pay:.2f}  (간격 {avg_iv}일)",
+                        ]
+            except Exception:
+                pass
 
         send(chat_id, "\n".join(lines))
         return
