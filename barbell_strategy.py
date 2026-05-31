@@ -1422,11 +1422,16 @@ def calculate_rebalancing(
 #  텔레그램
 # ══════════════════════════════════════════════════════════════════════
 
+_TG_MAX_CHARS = 4000  # Telegram 4096자 제한 — 여유 96자
+
+
 def send_telegram(message: str) -> bool:
     if not TELEGRAM_TOKEN:
         logger.warning("TELEGRAM_TOKEN 없음 — 콘솔 출력만 수행")
         return False
     url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
+    if len(message) > _TG_MAX_CHARS:
+        message = message[:_TG_MAX_CHARS] + "\n…(이하 생략)"
     try:
         resp = requests.post(url, json={"chat_id": TELEGRAM_CHAT_ID, "text": message}, timeout=10)
         resp.raise_for_status()
@@ -1434,6 +1439,28 @@ def send_telegram(message: str) -> bool:
     except Exception as e:
         logger.error(f"텔레그램 전송 실패: {e}")
         return False
+
+
+def send_phase5_emergency(drawdown_pct: float, exchange_rate: float) -> bool:
+    """Phase 5 전용 긴급 에스컬레이션 — 짧고 즉각적인 알림."""
+    msg = (
+        "💥💥💥 Phase 5 크래시 에스컬레이션 💥💥💥\n"
+        "━━━━━━━━━━━━━━━━━━━━━━━\n"
+        f"QQQ 고점 대비 {drawdown_pct:+.1f}% — 시장 붕괴 구간 진입\n"
+        "\n"
+        "⚡ 즉시 실행할 액션:\n"
+        "1. TQQQ 전면 배치 (SGOV 잔여 전액 → TQQQ)\n"
+        "2. QQQI 원금 20~30% → TQQQ 전환 검토\n"
+        "3. 소수점 DCA 5배 (4만 → 20만원) 즉시 실행\n"
+        "4. NOW, ORCL, NVDA, MSFT 최대 적립\n"
+        "5. 예비 현금(적금 포함) 단계적 투입 준비\n"
+        "\n"
+        "📱 /order 로 주문서 즉시 생성\n"
+        "📊 /phase 로 전체 Phase 리포트 확인\n"
+        "━━━━━━━━━━━━━━━━━━━━━━━\n"
+        "10년에 한 번 오는 매수 기회. 공포에 팔지 말 것."
+    )
+    return send_telegram(msg)
 
 
 # ══════════════════════════════════════════════════════════════════════
@@ -1474,6 +1501,11 @@ def run(send_alert: bool = False) -> dict | None:
 
     # 텔레그램: Phase 변화 시 또는 강제 발송 시
     if send_alert or phase_changed:
+        # Phase 5 크래시 진입: 긴급 알림 먼저 발송
+        if market_type == "bear" and phase_key == 5 and phase_changed:
+            send_phase5_emergency(qqq.get("drawdown_pct", 0), exchange_rate)
+            logger.warning("Phase 5 긴급 에스컬레이션 발송")
+
         sent = send_telegram(report)
         if sent:
             reason = "강제 발송" if send_alert else f"Phase 변화 ({old_state.get('phase_key', '?')} → {phase_key})"
