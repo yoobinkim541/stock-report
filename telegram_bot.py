@@ -42,6 +42,7 @@ from barbell_strategy import (
     classify_market, calculate_dca, calculate_sgov_target,
     calculate_rebalancing, build_smart_report,
     build_report, build_simulation_report, load_leverage_state, load_phase_state,
+    has_phase_changed, send_phase5_emergency,
     _phase_meter, _bar, _sgov_compare, _dca_rows,
     BULL_PHASES, BEAR_PHASES,
     TELEGRAM_TOKEN, TELEGRAM_CHAT_ID, PORTFOLIO_PATH,
@@ -80,7 +81,9 @@ POLL_TIMEOUT       = 20    # long-polling 대기(초)
 RETRY_DELAY        = 10    # 오류 후 재시도 대기(초)
 CACHE_TTL          = 300   # 시장 데이터 캐시 유지(초, 5분)
 ALERT_CHECK_SECS   = 300   # 가격 알림 체크 주기(초)
+PHASE_CHECK_SECS   = 300   # Phase 변화 체크 주기(초, 5분)
 PID_FILE           = "/tmp/barbell_bot.pid"
+BOT_STATE_FILE     = os.path.join(os.path.dirname(os.path.abspath(__file__)), "telegram_bot_state.json")
 
 # ══════════════════════════════════════════════════════════════════════
 #  시장 데이터 캐시
@@ -1204,6 +1207,65 @@ def notify_triggered_alerts():
 
 
 # ══════════════════════════════════════════════════════════════════════
+#  Phase 변화 모니터링 (봇 자체 발동)
+# ══════════════════════════════════════════════════════════════════════
+
+def _load_bot_phase_state() -> dict:
+    if not os.path.exists(BOT_STATE_FILE):
+        return {}
+    try:
+        with open(BOT_STATE_FILE, encoding="utf-8") as f:
+            data = json.load(f)
+        # market_type 없으면 구버전 파일 → 베이스라인 저장만, 알림 스킵
+        if "market_type" not in data:
+            return {}
+        return data
+    except Exception:
+        return {}
+
+
+def _save_bot_phase_state(market_type: str, phase_key, drawdown: float):
+    state = {
+        "market_type": market_type,
+        "phase_key":   str(phase_key),
+        "drawdown_pct": drawdown,
+        "saved_at":    datetime.now().isoformat(),
+    }
+    with open(BOT_STATE_FILE, "w", encoding="utf-8") as f:
+        json.dump(state, f, indent=2, ensure_ascii=False)
+
+
+def notify_phase_change():
+    """Phase 변화 감지 → Phase 5 진입 시 긴급 에스컬레이션 3회 발송."""
+    try:
+        old = _load_bot_phase_state()
+        d   = fetch_market()
+        mt  = d["market_type"]
+        pk  = d["phase_key"]
+        if not has_phase_changed(old, mt, pk):
+            return
+        dd = d["qqq"].get("drawdown_pct", 0)
+        if mt == "bear" and pk == 5:
+            for i in range(3):
+                send_phase5_emergency(dd, d["exchange_rate"], d["portfolio"])
+                if i < 2:
+                    time.sleep(3)
+            logger.warning("Phase 5 긴급 에스컬레이션 3회 발송 완료 (봇)")
+        else:
+            info = BULL_PHASES[pk] if mt == "bull" else BEAR_PHASES[pk]
+            send(ALLOWED_CHAT_ID,
+                 f"⚠️ Phase 변화 감지!\n"
+                 f"━━━━━━━━━━━━━━━━━━━━━━━\n"
+                 f"{info['emoji']} {info['label']}\n"
+                 f"QQQ {dd:+.2f}%\n"
+                 f"/phase 로 행동 지침 확인")
+            logger.info(f"Phase 변화 알림 발송: {mt}/{pk}")
+        _save_bot_phase_state(mt, pk, dd)
+    except Exception as e:
+        logger.error(f"Phase 변화 체크 오류: {e}")
+
+
+# ══════════════════════════════════════════════════════════════════════
 #  명령어 라우터
 # ══════════════════════════════════════════════════════════════════════
 
@@ -1292,6 +1354,7 @@ def run():
 
     offset: int | None  = None
     last_alert_check    = 0.0
+    last_phase_check    = 0.0
 
     while True:
         try:
@@ -1324,6 +1387,11 @@ def run():
             if now - last_alert_check > ALERT_CHECK_SECS:
                 notify_triggered_alerts()
                 last_alert_check = now
+
+            # Phase 변화 주기 체크 (Phase 5 진입 시 긴급 에스컬레이션 3회)
+            if now - last_phase_check > PHASE_CHECK_SECS:
+                notify_phase_change()
+                last_phase_check = now
 
         except KeyboardInterrupt:
             logger.info("Bot 종료")
