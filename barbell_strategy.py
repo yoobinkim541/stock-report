@@ -26,9 +26,13 @@ import logging
 import time
 from datetime import datetime
 
-import yfinance as yf
 import numpy as np
 import requests
+
+try:
+    import yfinance as yf
+except ImportError:
+    yf = None
 
 try:
     from dotenv import load_dotenv

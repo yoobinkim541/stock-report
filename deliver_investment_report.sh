@@ -2,8 +2,8 @@
 # deliver_investment_report.sh — Generate + deliver to @Stock_botbot
 set -e
 
-SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-cd "$SCRIPT_DIR"
+PROJECT_DIR="${STOCK_REPORT_PROJECT_DIR:-/home/ubuntu/projects/stock-report}"
+cd "$PROJECT_DIR"
 
 # Load bot token
 if [ -f .env ]; then
@@ -12,28 +12,35 @@ if [ -f .env ]; then
     set +a
 fi
 
-DATE=$(python3 -c "from datetime import datetime, timezone, timedelta; print(datetime.now(timezone(timedelta(hours=9))).strftime('%Y-%m-%d'))")
-
 STOCK_BOT_CHAT_ID=5771238245
 START_TIME=$(date +%s)
 
+PYTHON_BIN="${PYTHON_BIN:-python3}"
+
+# Keep the no_agent cron under Hermes' 120s script timeout.
+export INVESTMENT_REPORT_MAX_NASDAQ_SCAN="${INVESTMENT_REPORT_MAX_NASDAQ_SCAN:-20}"
+export INVESTMENT_REPORT_MAX_KOSPI_SCAN="${INVESTMENT_REPORT_MAX_KOSPI_SCAN:-5}"
+export INVESTMENT_REPORT_ARCA_PAGES="${INVESTMENT_REPORT_ARCA_PAGES:-1}"
+
+DATE=$("$PYTHON_BIN" -c "from datetime import datetime, timezone, timedelta; print(datetime.now(timezone(timedelta(hours=9))).strftime('%Y-%m-%d'))")
+
 # Generate report (silent progress → stderr, keep stdout clean)
-python3 investment_report.py > /tmp/invest_report_stdout.txt 2>/tmp/invest_report_stderr.txt
+"$PYTHON_BIN" investment_report.py > /tmp/invest_report_stdout.txt 2>/tmp/invest_report_stderr.txt
 REPORT_EXIT=$?
 
 # Generate CSV from JSON summary
-python3 save_csv.py 2>>/tmp/invest_report_stderr.txt
+"$PYTHON_BIN" save_csv.py 2>>/tmp/invest_report_stderr.txt
 
 # ── Intelligence Barbell v2.1 분석 ────────────────────────────────────
 # Phase 변화 시 자동으로 텔레그램 알림 발송 (중복 발송 없음)
-python3 barbell_strategy.py > /tmp/barbell_report.txt 2>>/tmp/invest_report_stderr.txt
+"$PYTHON_BIN" barbell_strategy.py > /tmp/barbell_report.txt 2>>/tmp/invest_report_stderr.txt
 BARBELL_EXIT=$?
 if [ $BARBELL_EXIT -ne 0 ]; then
     echo "[WARN] 바벨 전략 분석 실패 (exit $BARBELL_EXIT)" >&2
 fi
 
 # ── 포트폴리오 히스토리 기록 ──────────────────────────────────────────
-python3 portfolio_tracker.py > /tmp/tracker_report.txt 2>>/tmp/invest_report_stderr.txt
+"$PYTHON_BIN" portfolio_tracker.py > /tmp/tracker_report.txt 2>>/tmp/invest_report_stderr.txt
 TRACKER_EXIT=$?
 if [ $TRACKER_EXIT -ne 0 ]; then
     echo "[WARN] 포트폴리오 트래커 실패 (exit $TRACKER_EXIT)" >&2
@@ -83,7 +90,7 @@ echo "전송 대상: @Stock_botbot"
 echo ""
 echo "📋 실행 통계"
 echo "  - 포트폴리오: ${PORTFOLIO_COUNT}종목"
-echo "  - NASDAQ 100: 50종목 스캔"
+echo "  - NASDAQ 100: ${INVESTMENT_REPORT_MAX_NASDAQ_SCAN}종목 스캔"
 echo "  - LLM 토큰 소비: 0 (순수 Python 만 사용)"
 echo "  - API 비용: yfinance 무료 + SaveTicker 무료"
 echo ""

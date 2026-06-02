@@ -186,7 +186,17 @@ def _parse_arca_posts(markdown):
     return posts
 
 
-def _fetch_arca_posts(max_pages=3, limit=6):
+def _env_int(name, default, minimum=0):
+    try:
+        value = int(os.getenv(name, str(default)))
+    except ValueError:
+        return default
+    return max(minimum, value)
+
+
+def _fetch_arca_posts(max_pages=None, limit=6):
+    if max_pages is None:
+        max_pages = _env_int("INVESTMENT_REPORT_ARCA_PAGES", 3, 0)
     posts = []
     seen = set()
     for page in range(1, max_pages + 1):
@@ -448,8 +458,8 @@ def generate_report():
     print(f"\n📋 NASDAQ 100 스캔 중...")
     ndx_results = []
     scan_count = 0
-    max_scan = len(NASDAQ_100)  # Scan full NASDAQ 100 list
-    for ticker in NASDAQ_100:
+    max_scan = _env_int("INVESTMENT_REPORT_MAX_NASDAQ_SCAN", len(NASDAQ_100), 0)
+    for ticker in NASDAQ_100[:max_scan]:
         if scan_count >= max_scan:
             break
         scan_count += 1
@@ -494,10 +504,12 @@ def generate_report():
                 top_watch.append(r)
 
     # ── KOSPI top 20 scan ──
-    print(f"\n🇰🇷 KOSPI 상위 20개 스캔 중...")
+    max_kospi_scan = _env_int("INVESTMENT_REPORT_MAX_KOSPI_SCAN", len(KOSPI_TOP20), 0)
+    kospi_scan_list = KOSPI_TOP20[:max_kospi_scan]
+    print(f"\n🇰🇷 KOSPI 상위 {len(kospi_scan_list)}개 스캔 중...")
     kospi_results = []
-    for i, ticker in enumerate(KOSPI_TOP20):
-        print(f"   [{i+1}/{len(KOSPI_TOP20)}] {ticker}...", end=" ", flush=True)
+    for i, ticker in enumerate(kospi_scan_list):
+        print(f"   [{i+1}/{len(kospi_scan_list)}] {ticker}...", end=" ", flush=True)
         try:
             fund = MANUAL_SCORES.get(ticker) or score_ticker(ticker)
             sig = detect_signals(ticker)
