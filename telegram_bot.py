@@ -325,7 +325,7 @@ def cmd_status(d: dict) -> str:
     vix_s = ("💥극공포" if vix > 40 else "🚨공포"   if vix > 30
              else "😴과낙관" if vix < 15 else "✅정상")
 
-    mom_1m = qqq.get("momentum_1m", 0) or 0
+    mom_1m = qqq.get("mom_1m_pct", 0) or 0
     mom_s  = f"{mom_1m:+.1f}%"
     ret_pct  = port.get("return_pct", 0) or 0
     ret_sign = "▲" if ret_pct > 0 else ("▼" if ret_pct < 0 else "─")
