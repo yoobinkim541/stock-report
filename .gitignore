@@ -7,8 +7,11 @@ secrets/
 
 # ── 개인 금융 데이터 (버전 관리 제외) ────
 portfolio_snapshot.json
+portfolio_snapshot.json.bak
 leverage_state.json
 price_alerts.json
+dca_weights.json
+target_weights.json
 
 # ── 봇 런타임 상태 ───────────────────────
 telegram_bot_state.json
@@ -34,6 +37,10 @@ claude_continue_result.txt
 codex_night_task.sh
 codex_prompt.txt
 tasks_v2.txt
+decision_engine_v3_plan.md
+telegram_bot_plan.md
+tasks-telegram-bot.md
+*_plan.md
 /tmp/
 *.tmp
 *.log
