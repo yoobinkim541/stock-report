@@ -51,7 +51,8 @@ def _notify(msg: str):
 def fetch_domestic_balance() -> list[dict]:
     """키움 REST API로 국내주식 보유잔고 조회."""
     try:
-        from kiwoom_rest_api import KiwoomRestAPI
+        import requests as _req
+        from kiwoom_rest_api.auth.token import TokenManager
     except ImportError:
         logger.error("kiwoom-rest-api 미설치: uv pip install kiwoom-rest-api")
         return []
@@ -60,11 +61,19 @@ def fetch_domestic_balance() -> list[dict]:
         logger.error(".env에 KIWOOM_API_KEY / KIWOOM_API_SECRET 없음")
         return []
 
-    api = KiwoomRestAPI()
-    result = api.account.account_evaluation_balance_detail_request_kt00018(
-        query_type="2",              # 2: 개별 종목 리스트
-        domestic_exchange_type="KRX",
+    tok = TokenManager().access_token
+    resp = _req.post(
+        "https://api.kiwoom.com/api/dostk/acnt",
+        headers={
+            "content-type": "application/json;charset=UTF-8",
+            "Authorization": f"Bearer {tok}",
+            "api-id": "kt00018",
+        },
+        json={"qry_tp": "2", "dmst_stex_tp": "KRX"},
+        timeout=15,
     )
+    resp.raise_for_status()
+    result = resp.json()
 
     if result.get("return_code", -1) != 0:
         logger.error("API 오류: %s", result.get("return_msg", "unknown"))
