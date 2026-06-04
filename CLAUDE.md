@@ -42,7 +42,8 @@ portfolio_sync_server.py (상시, port 8765)
 
 ```
 ── 시장 현황 ─────────────────────────────────────
-/status              Phase + 핵심 수치 (5분 캐시)
+/status              Phase + 핵심 수치 + 1M모멘텀 + 수익률 (5분 캐시)
+/summary             한 줄 빠른 현황 — Phase·QQQ·총액·F&G
 /phase               Phase 미터 + 행동 지침
 /report              전체 바벨 리포트 (항상 실시간)
 /sim [bull2|0~5]     시장 상태 시뮬레이션

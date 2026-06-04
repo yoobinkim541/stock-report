@@ -9,6 +9,7 @@ portfolio_snapshot.json과 dca_weights.json을 직접 수정한다.
 
 import json
 import os
+import tempfile
 from datetime import datetime
 
 PORTFOLIO_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "portfolio_snapshot.json")
@@ -32,9 +33,17 @@ def _load() -> dict:
 
 
 def _save(snap: dict):
+    """atomic write: temp → rename, 중간 충돌 시 원본 보호."""
     snap["snapshot_date"] = datetime.now().strftime("%Y-%m-%d")
-    with open(PORTFOLIO_PATH, "w", encoding="utf-8") as f:
-        json.dump(snap, f, indent=2, ensure_ascii=False)
+    dir_ = os.path.dirname(PORTFOLIO_PATH)
+    fd, tmp = tempfile.mkstemp(dir=dir_, suffix=".tmp")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            json.dump(snap, f, indent=2, ensure_ascii=False)
+        os.replace(tmp, PORTFOLIO_PATH)
+    except Exception:
+        os.unlink(tmp)
+        raise
 
 
 def _find_holding(snap: dict, ticker: str) -> tuple[str, int, dict | None]:

@@ -95,6 +95,7 @@ PID_FILE           = "/tmp/barbell_bot.pid"
 BOT_COMMANDS = [
     {"command": "help",           "description": "명령어 목록"},
     {"command": "status",         "description": "Phase + 핵심 수치 (5분 캐시)"},
+    {"command": "summary",        "description": "한 줄 빠른 현황 — Phase·QQQ·총액·F&G"},
     {"command": "phase",          "description": "Phase 미터 + 행동 지침"},
     {"command": "report",         "description": "전체 바벨 리포트 (실시간)"},
     {"command": "sim",            "description": "시장 상태 시뮬레이션"},
@@ -135,6 +136,7 @@ INTERNAL_TEXT_ROUTES = [
 # ══════════════════════════════════════════════════════════════════════
 
 _cache: dict = {}
+_cache_lock = threading.Lock()
 
 
 def fetch_benchmark_returns(tickers=("QQQ", "SPY"), yf_module=None) -> dict:
@@ -178,8 +180,9 @@ def load_advisor_source_digest(hours: int = 24) -> str:
 def fetch_market(force: bool = False) -> dict:
     """모든 시장 데이터 일괄 조회. CACHE_TTL 동안 재사용."""
     now = time.time()
-    if not force and "data" in _cache and now - _cache.get("ts", 0) < CACHE_TTL:
-        return _cache["data"]
+    with _cache_lock:
+        if not force and "data" in _cache and now - _cache.get("ts", 0) < CACHE_TTL:
+            return _cache["data"]
 
     qqq  = fetch_qqq_data()
     rsi  = fetch_rsi("QQQ")
@@ -202,8 +205,9 @@ def fetch_market(force: bool = False) -> dict:
         "market_type": market_type, "phase_key": phase_key,
         "fetched_at": datetime.now().strftime("%m/%d %H:%M"),
     }
-    _cache["data"] = data
-    _cache["ts"]   = now
+    with _cache_lock:
+        _cache["data"] = data
+        _cache["ts"]   = now
     return data
 
 
@@ -240,10 +244,24 @@ def configure_bot_commands():
     logger.info("setMyCommands 완료 (%d개 scope, %d개 명령어)", success, len(BOT_COMMANDS))
 
 
-def send(chat_id: str, text: str):
-    """4000자 초과 시 자동 분할 전송."""
-    for i in range(0, len(text), 4000):
-        _api("sendMessage", chat_id=chat_id, text=text[i:i + 4000])
+def send(chat_id: str, text: str, max_len: int = 4000):
+    """4000자 초과 시 줄바꿈 기준으로 분할 전송 (이모지·단어 깨짐 방지)."""
+    if len(text) <= max_len:
+        _api("sendMessage", chat_id=chat_id, text=text)
+        return
+    chunks, current, current_len = [], [], 0
+    for line in text.split("\n"):
+        line_len = len(line) + 1
+        if current and current_len + line_len > max_len:
+            chunks.append("\n".join(current))
+            current, current_len = [line], line_len
+        else:
+            current.append(line)
+            current_len += line_len
+    if current:
+        chunks.append("\n".join(current))
+    for chunk in chunks:
+        _api("sendMessage", chat_id=chat_id, text=chunk)
 
 
 def typing(chat_id: str):
@@ -307,19 +325,46 @@ def cmd_status(d: dict) -> str:
     vix_s = ("💥극공포" if vix > 40 else "🚨공포"   if vix > 30
              else "😴과낙관" if vix < 15 else "✅정상")
 
+    mom_1m = qqq.get("momentum_1m", 0) or 0
+    mom_s  = f"{mom_1m:+.1f}%"
+    ret_pct  = port.get("return_pct", 0) or 0
+    ret_sign = "▲" if ret_pct > 0 else ("▼" if ret_pct < 0 else "─")
+
     return (
         f"📊 현재 상태  ({d['fetched_at']})\n"
         f"━━━━━━━━━━━━━━━━━━━━━━━\n"
         f"{info['emoji']} {info['label']}\n"
         f"\n"
-        f"QQQ   ${qqq.get('current', 0):>8,.2f}\n"
+        f"QQQ   ${qqq.get('current', 0):>8,.2f}   1M {mom_s}\n"
         f"낙폭  {dd:>+8.2f}%\n"
         f"RSI   {rsi:>8.1f}   {rsi_s}\n"
         f"VIX   {vix:>8.1f}   {vix_s}\n"
         f"F&G   {fg_sc:>8.1f}   {fg_lbl}\n"
         f"\n"
         f"총액  ${port['total_usd']:>8,.0f}  (₩{total_krw:,})\n"
+        f"수익  {ret_sign}{abs(ret_pct):>7.1f}%\n"
         f"SGOV  ${port['sgov_usd']:>8,.0f}  실탄 대기중"
+    )
+
+
+def cmd_summary(d: dict) -> str:
+    """한 줄 빠른 상태 — Phase · QQQ · 총액 · F&G."""
+    qqq  = d["qqq"]
+    mt   = d["market_type"]
+    pk   = d["phase_key"]
+    info = BULL_PHASES[pk] if mt == "bull" else BEAR_PHASES[pk]
+    port = d["portfolio"]
+    fx   = d["exchange_rate"]
+    fg   = (d.get("fear_greed") or {}).get("score", 50)
+    dd   = qqq.get("drawdown_pct", 0)
+    ret  = port.get("return_pct", 0) or 0
+    ret_s = f"{'▲' if ret>=0 else '▼'}{abs(ret):.1f}%"
+    fg_e = ("💀" if fg<=25 else "😨" if fg<=45 else "😐" if fg<=55 else "😄" if fg<=75 else "🤑")
+    return (
+        f"{info['emoji']} {info['label']}  |  "
+        f"QQQ ${qqq.get('current',0):,.0f} ({dd:+.1f}%)  |  "
+        f"₩{int(port['total_usd']*fx):,} {ret_s}  |  "
+        f"F&G {fg:.0f}{fg_e}"
     )
 
 
@@ -385,6 +430,21 @@ def cmd_portfolio(d: dict) -> str:
             lines.append(f"  {ticker}    ${val:>7,.0f}  {sh}주 @${avg:.2f}  {sign}{pnl:.1f}%")
     if not has_lev:
         lines.append("  레버리지  미보유")
+
+    # ── 개별 종목 P&L ───────────────────────────────────────────────────
+    details = port.get("holdings_detail", [])
+    _SKIP = {"SGOV", "QQQI", "QLD", "TQQQ"}
+    stock_details = [h for h in details if h.get("ticker") not in _SKIP and h.get("value_usd", 0) > 0]
+    if stock_details:
+        lines += ["", "━━━ 📈 개별 종목 ━━━"]
+        stock_details.sort(key=lambda h: h.get("value_usd", 0), reverse=True)
+        for h in stock_details:
+            ret  = h.get("return_pct", 0) or 0
+            val  = h.get("value_usd", 0)
+            sign = "▲" if ret > 0 else ("▼" if ret < 0 else "─")
+            lines.append(
+                f"  {h['ticker']:<6}  ${val:>7,.0f}  {sign}{abs(ret):5.1f}%"
+            )
 
     div = d["qqqi_div"]
     lines += [
@@ -507,7 +567,8 @@ def cmd_dividend(chat_id: str, args: list):
                                  if h.get("ticker") == "QQQI"),
                                 1.0
                             )
-                        except Exception:
+                        except Exception as _e:
+                            logger.debug("QQQI 보유수량 조회 실패: %s", _e)
                             qqqi_sh = 1.0
                         est_pay = records[-1].get("amount_usd", 0) * qqqi_sh
                         lines += [
@@ -515,8 +576,8 @@ def cmd_dividend(chat_id: str, args: list):
                             "  📅 다음 배당 예상:",
                             f"    {next_dt.strftime('%Y-%m-%d')}  ≈ ${est_pay:.2f}  (간격 {avg_iv}일)",
                         ]
-            except Exception:
-                pass
+            except Exception as _e:
+                logger.debug("다음 배당 예상일 계산 실패: %s", _e)
 
         send(chat_id, "\n".join(lines))
         return
@@ -783,8 +844,8 @@ def cmd_tax(chat_id: str, args: list):
             for section in ("overseas_general", "overseas_fractional"):
                 snap_holdings += snap.get(section, {}).get("holdings_usd", []) + \
                                   snap.get(section, {}).get("holdings", [])
-        except Exception:
-            pass
+        except Exception as _e:
+            logger.debug("포트폴리오 스냅샷 로드 실패 (평단가 표시 생략): %s", _e)
 
         snap_entry = next((h for h in snap_holdings if h.get("ticker") == ticker), None)
 
@@ -1344,8 +1405,8 @@ def cmd_alert(chat_id: str, args: list):
             h = yf.Ticker(ticker).history(period="2d")
             if not h.empty:
                 current = float(h["Close"].iloc[-1])
-        except Exception:
-            pass
+        except Exception as _e:
+            logger.debug("가격 알림 현재가 조회 실패: %s", _e)
 
         aid = add_alert(ticker, price, atype, note)
         type_str = "현재가 ≤ 목표가 시 발동 (매수/손절)" if atype == "buy" else "현재가 ≥ 목표가 시 발동 (익절)"
@@ -1463,6 +1524,7 @@ def _infer_internal_command(text: str) -> str | None:
 _SIMPLE_CMDS = {
     "/help":      lambda d, _: cmd_help(),
     "/status":    lambda d, _: cmd_status(d),
+    "/summary":   lambda d, _: cmd_summary(d),
     "/phase":     lambda d, _: cmd_phase(d),
     "/portfolio": lambda d, _: cmd_portfolio(d),
     "/dca":       lambda d, _: cmd_dca(d),
