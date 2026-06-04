@@ -228,7 +228,8 @@ def load_dca_weights() -> tuple[dict, dict]:
     """
     if os.path.exists(DCA_WEIGHTS_FILE):
         try:
-            data = json.load(open(DCA_WEIGHTS_FILE, encoding="utf-8"))
+            with open(DCA_WEIGHTS_FILE, encoding="utf-8") as f:
+                data = json.load(f)
             normal = data.get("normal", _DCA_WEIGHTS_DEFAULT)
             bear   = data.get("bear",   _BEAR_DCA_WEIGHTS_DEFAULT)
             # 합계 1.0 정규화
@@ -272,7 +273,8 @@ def load_target_weights(portfolio: dict | None = None) -> dict:
     explicit: dict = {}
     if os.path.exists(TARGET_WEIGHTS_FILE):
         try:
-            raw = json.load(open(TARGET_WEIGHTS_FILE, encoding="utf-8"))
+            with open(TARGET_WEIGHTS_FILE, encoding="utf-8") as f:
+                raw = json.load(f)
             explicit = {k: float(v) for k, v in raw.items()
                         if not k.startswith("_") and isinstance(v, (int, float))}
         except Exception:
@@ -308,7 +310,8 @@ def save_target_weights(updates: dict):
     existing: dict = {}
     if os.path.exists(TARGET_WEIGHTS_FILE):
         try:
-            raw = json.load(open(TARGET_WEIGHTS_FILE, encoding="utf-8"))
+            with open(TARGET_WEIGHTS_FILE, encoding="utf-8") as f:
+                raw = json.load(f)
             existing = {k: v for k, v in raw.items()}  # _comment 등 보존
         except Exception:
             pass
@@ -327,6 +330,33 @@ def _safe_float(val, default=0.0):
         return v if not (np.isnan(v) or np.isinf(v)) else default
     except Exception:
         return default
+
+
+def _holding_details_from_snapshot(snap: dict) -> list[dict]:
+    details = []
+    for section, key in [("overseas_general", "holdings_usd"),
+                          ("overseas_fractional", "holdings")]:
+        for h in snap.get(section, {}).get(key, []):
+            details.append({
+                "ticker": h.get("ticker"),
+                "name": h.get("name"),
+                "shares": h.get("shares"),
+                "value_usd": h.get("value_usd"),
+                "return_pct": h.get("return_pct"),
+            })
+
+    for h in snap.get("domestic", {}).get("holdings", []):
+        value_krw = h.get("value_krw")
+        if value_krw is None and h.get("current_price") is not None:
+            value_krw = _safe_float(h.get("current_price")) * _safe_float(h.get("shares"))
+        details.append({
+            "ticker": h.get("ticker"),
+            "name": h.get("name"),
+            "shares": h.get("shares"),
+            "value_krw": round(value_krw) if value_krw is not None else None,
+            "return_pct": h.get("return_pct"),
+        })
+    return details
 
 
 # ══════════════════════════════════════════════════════════════════════
@@ -430,9 +460,11 @@ def fetch_portfolio_value() -> dict:
     """
     # --- 보유 수량 집계 ---
     holdings: dict[str, float] = {}
+    holdings_detail: list[dict] = []
     try:
         with open(PORTFOLIO_PATH) as f:
             snap = json.load(f)
+        holdings_detail = _holding_details_from_snapshot(snap)
         for h in snap.get("overseas_general", {}).get("holdings_usd", []):
             t = h["ticker"]
             holdings[t] = holdings.get(t, 0.0) + float(h.get("shares", 0))
@@ -450,7 +482,7 @@ def fetch_portfolio_value() -> dict:
             holdings[ticker] = holdings.get(ticker, 0.0) + sh
 
     if not holdings:
-        return {"total_usd": 7940.0, "sgov_usd": 1006.7, "qqqi_usd": 2019.77, "qqqi_shares": 35.2987, "prices": {}, "holdings": {}}
+        return {"total_usd": 7940.0, "sgov_usd": 1006.7, "qqqi_usd": 2019.77, "qqqi_shares": 35.2987, "prices": {}, "holdings": {}, "holdings_detail": holdings_detail}
 
     # --- 실시간 가격 조회 ---
     tickers = list(holdings.keys())
@@ -505,6 +537,7 @@ def fetch_portfolio_value() -> dict:
         "qqqi_shares": round(qqqi_shares, 4),
         "prices": prices,
         "holdings": holdings,
+        "holdings_detail": holdings_detail,
     }
 
 
@@ -552,7 +585,8 @@ def load_leverage_state() -> dict:
     if not os.path.exists(LEVERAGE_FILE):
         return default
     try:
-        data = json.load(open(LEVERAGE_FILE))
+        with open(LEVERAGE_FILE) as f:
+            data = json.load(f)
         for k, v in default.items():
             if k not in data:
                 data[k] = v
@@ -588,7 +622,8 @@ def load_phase_state() -> dict:
     if not os.path.exists(STATE_FILE):
         return {}
     try:
-        return json.load(open(STATE_FILE))
+        with open(STATE_FILE) as f:
+            return json.load(f)
     except Exception:
         return {}
 
@@ -705,21 +740,6 @@ def calculate_dca(market_type: str, phase_key, exchange_rate: float = 1380.0) ->
 #  스마트 리밸런싱 — 안전마진 + 종목별 비중 분석
 # ══════════════════════════════════════════════════════════════════════
 
-# 개별 종목 목표 비중 (포트폴리오 전체 대비 %)
-# QQQI ~22%, SGOV Phase별, QLD/TQQQ Phase별은 별도 관리
-STOCK_TARGET_WEIGHTS: dict[str, float] = {
-    "NOW":   0.07,
-    "ORCL":  0.07,
-    "NVDA":  0.06,
-    "MSFT":  0.06,
-    "GOOGL": 0.05,
-    "UNH":   0.05,
-    "CRM":   0.04,
-    "SAP":   0.02,
-    "SPMO":  0.02,
-}
-
-
 def calculate_position_analysis(portfolio: dict) -> list[dict]:
     """
     종목별 현재 비중 vs 목표 비중 비교.
@@ -739,7 +759,8 @@ def calculate_position_analysis(portfolio: dict) -> list[dict]:
     avg_map: dict[str, float] = {}
     note_map: dict[str, str]  = {}
     try:
-        snap = json.load(open(PORTFOLIO_PATH, encoding="utf-8"))
+        with open(PORTFOLIO_PATH, encoding="utf-8") as f:
+            snap = json.load(f)
         for h in snap.get("overseas_general", {}).get("holdings_usd", []):
             t = h["ticker"]
             pnl_map[t]  = float(h.get("pnl_usd", 0))
@@ -759,6 +780,7 @@ def calculate_position_analysis(portfolio: dict) -> list[dict]:
         | set(pnl_map.keys())
     ) - _SKIP_TICKERS
 
+    explicit_targets = load_target_weights()  # 명시적 목표만 (신규 종목 감지용)
     results = []
     for ticker in sorted(all_tickers):
         price     = prices.get(ticker, 0)
@@ -786,7 +808,7 @@ def calculate_position_analysis(portfolio: dict) -> list[dict]:
             action, direction = "적정 — 유지", "hold"
 
         # 신규 종목 태그
-        is_new = ticker not in (load_target_weights() or {})
+        is_new = ticker not in explicit_targets
         tag    = " 🆕" if is_new and val > 0 else ""
 
         results.append({
@@ -840,32 +862,29 @@ def calculate_safety_margin(portfolio: dict, market_type: str, phase_key) -> dic
             score += min(bonus, 10)
             factors["분산 양호"] = f"+{min(bonus,10):.0f}점  (HHI {hhi:.2f})"
 
-    # ── 2. 손실 포지션 ────────────────────────────────────────────────
+    # ── 2. 손실 포지션 + 3. 미실현 이익 쿠션 ────────────────────────
+    snap = {}
     try:
-        snap = json.load(open(PORTFOLIO_PATH, encoding="utf-8"))
-        for h in snap.get("overseas_general", {}).get("holdings_usd", []):
-            pnl = float(h.get("pnl_usd", 0))
-            if pnl < -40:
-                penalty = min(abs(pnl) / total * 200, 12)
-                score  -= penalty
-                factors[f"손실포지션 {h['ticker']}"] = f"-{penalty:.0f}점 (손실 ${abs(pnl):.0f})"
+        with open(PORTFOLIO_PATH, encoding="utf-8") as f:
+            snap = json.load(f)
     except Exception:
         pass
 
+    overseas = snap.get("overseas_general", {}).get("holdings_usd", [])
+    for h in overseas:
+        pnl = float(h.get("pnl_usd", 0))
+        if pnl < -40:
+            penalty = min(abs(pnl) / total * 200, 12)
+            score  -= penalty
+            factors[f"손실포지션 {h['ticker']}"] = f"-{penalty:.0f}점 (손실 ${abs(pnl):.0f})"
+
     # ── 3. 미실현 이익 쿠션 ─────────────────────────────────────────
-    try:
-        total_gain = sum(
-            float(h.get("pnl_usd", 0))
-            for h in snap.get("overseas_general", {}).get("holdings_usd", [])
-            if float(h.get("pnl_usd", 0)) > 0
-        )
-        gain_ratio = total_gain / total
-        if gain_ratio > 0.05:
-            bonus = min(gain_ratio * 80, 15)
-            score += bonus
-            factors["미실현이익 쿠션"] = f"+{bonus:.0f}점 (+${total_gain:.0f}, {gain_ratio*100:.1f}%)"
-    except Exception:
-        pass
+    total_gain = sum(float(h.get("pnl_usd", 0)) for h in overseas if float(h.get("pnl_usd", 0)) > 0)
+    gain_ratio = total_gain / total if total > 0 else 0
+    if gain_ratio > 0.05:
+        bonus = min(gain_ratio * 80, 15)
+        score += bonus
+        factors["미실현이익 쿠션"] = f"+{bonus:.0f}점 (+${total_gain:.0f}, {gain_ratio*100:.1f}%)"
 
     # ── 4. SGOV 충분도 ────────────────────────────────────────────────
     if market_type == "bull":
@@ -1248,9 +1267,25 @@ def build_report(
     # ── 특수 경고 ─────────────────────────────────────────────────────
     alerts = []
     if market_type == "bull" and phase_key == "bull_2":
-        alerts.append("⚡ 과열: NOW +38% / ORCL +41% — 부분 익절 후 SGOV 비축 최우선")
+        hot = [
+            f"{h['ticker']} {h['return_pct']:+.0f}%"
+            for h in portfolio.get("holdings_detail", [])
+            if h.get("ticker") not in _SKIP_TICKERS
+            and isinstance(h.get("return_pct"), (int, float))
+            and (h.get("return_pct") or 0) >= 30
+        ]
+        if hot:
+            alerts.append(f"⚡ 과열 익절 검토: {', '.join(hot[:3])} — SGOV 비축 최우선")
     if market_type == "bear" and isinstance(phase_key, int) and phase_key >= 3:
-        alerts.append("⚡ CPNG -17% — 즉시 손절, 재원 QLD/TQQQ 재배치")
+        loss = [
+            f"{h['ticker']} {h['return_pct']:+.0f}%"
+            for h in portfolio.get("holdings_detail", [])
+            if h.get("ticker") not in _SKIP_TICKERS
+            and isinstance(h.get("return_pct"), (int, float))
+            and (h.get("return_pct") or 0) <= -10
+        ]
+        if loss:
+            alerts.append(f"⚡ 손절 검토: {', '.join(loss[:3])} — 재원 QLD/TQQQ 재배치")
     if market_type == "bull" and sgov["direction"] == "buy":
         alerts.append("💡 QQQI 배당금 → SGOV 우선 비축 (강세장 실탄 적립)")
     if alerts:
@@ -1306,13 +1341,6 @@ def build_simulation_report(mode: str = "bull2") -> str:
 # ══════════════════════════════════════════════════════════════════════
 #  리밸런싱 계산기
 # ══════════════════════════════════════════════════════════════════════
-
-# Phase별 DCA 목표 비중 (소수점 적립 기준)
-REBAL_DCA_WEIGHTS = {
-    "normal": {"NOW":0.20,"ORCL":0.20,"NVDA":0.15,"MSFT":0.15,"GOOGL":0.10,"UNH":0.10,"SAP":0.05,"SPMO":0.05},
-    "bear":   {"NOW":0.25,"ORCL":0.25,"NVDA":0.20,"MSFT":0.15,"GOOGL":0.10,"UNH":0.05},
-}
-
 
 def calculate_rebalancing(
     market_type: str,
@@ -1374,8 +1402,9 @@ def calculate_rebalancing(
                 lev_lines.append(f"  {ticker}  ${val:.0f}  {sign}{pnl:.1f}%  (보유 유지)")
 
     # DCA 비중 — Phase 2+ 는 BEAR 가중치
+    w_normal_r, w_bear_r = load_dca_weights()
     use_bear = market_type == "bear" and isinstance(phase_key, int) and phase_key >= 2
-    dca_w    = REBAL_DCA_WEIGHTS["bear" if use_bear else "normal"]
+    dca_w    = w_bear_r if use_bear else w_normal_r
     dca_mult = (BULL_PHASES[phase_key]["dca_multiplier"] if market_type == "bull"
                 else BEAR_PHASES[phase_key]["dca_multiplier"] if market_type == "bear"
                 else BEAR_PHASES[0]["dca_multiplier"])
@@ -1409,9 +1438,10 @@ def calculate_rebalancing(
         "",
         f"━━━ DCA 배분  {daily_krw:,}원/일  [{dca_mult}x] ━━━━━━━━",
     ]
+    max_w = max(dca_w.values(), default=1.0)
     for ticker, w in dca_w.items():
         amt = int(daily_krw * w)
-        bar = _bar(w / 0.25, 8)
+        bar = _bar(w / max_w, 8)
         lines.append(f"  {ticker:<5}  {bar}  {amt:,}원  ({int(w*100)}%)")
 
     return {

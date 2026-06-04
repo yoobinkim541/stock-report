@@ -148,11 +148,8 @@ def parse_portfolio_from_text(text: str) -> list[dict]:
         if not ticker or ticker in seen:
             continue
 
-        nums = _parse_nums(line)
-        # 날짜 숫자 제거
-        for dm in _DATE_RE.finditer(line):
-            date_ints = {int(dm.group(i)) for i in range(1, 4)}
-            nums = [x for x in nums if x not in date_ints]
+        clean_line = _DATE_RE.sub("", line)
+        nums = _parse_nums(clean_line)
 
         if not nums:
             continue
@@ -195,14 +192,13 @@ def parse_sells_from_text(text: str) -> list[dict]:
 
         dm = _DATE_RE.search(line)
         if dm:
-            date_str = f"{dm.group(1)}-{int(dm.group(2)):02d}-{int(dm.group(3)):02d}"
+            date_str  = f"{dm.group(1)}-{int(dm.group(2)):02d}-{int(dm.group(3)):02d}"
+            clean_line = _DATE_RE.sub("", line)
         else:
-            date_str = datetime.now().strftime("%Y-%m-%d")
+            date_str  = datetime.now().strftime("%Y-%m-%d")
+            clean_line = line
 
-        nums = _parse_nums(line)
-        if dm:
-            date_ints = {int(dm.group(i)) for i in range(1, 4)}
-            nums = [x for x in nums if x not in date_ints]
+        nums = _parse_nums(clean_line)
 
         if len(nums) < 3:
             continue

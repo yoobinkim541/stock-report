@@ -25,7 +25,8 @@ _SKIP_TICKERS = {"SGOV", "QQQI", "QLD", "TQQQ", "BIL", "SHV", "SHY",
 
 def _load() -> dict:
     try:
-        return json.loads(open(PORTFOLIO_PATH, encoding="utf-8").read())
+        with open(PORTFOLIO_PATH, encoding="utf-8") as f:
+            return json.load(f)
     except Exception:
         return {}
 
@@ -400,7 +401,8 @@ def show_target_weights(portfolio: dict | None = None) -> str:
     from barbell_strategy import TARGET_WEIGHTS_FILE
     explicit = set()
     try:
-        raw = json.load(open(TARGET_WEIGHTS_FILE, encoding="utf-8"))
+        with open(TARGET_WEIGHTS_FILE, encoding="utf-8") as f:
+            raw = json.load(f)
         explicit = {k for k in raw if not k.startswith("_")}
     except Exception:
         pass
@@ -422,13 +424,17 @@ def show_dca_weights() -> str:
     """DCA 비중 현황 출력."""
     w_normal, w_bear = get_dca_weights()
     lines = ["💸 현재 DCA 비중", "━━━━━━━━━━━━━━━━━━━━━━━", "  [정상 Phase 0~1]"]
+    max_n = max(w_normal.values(), default=1.0)
     for t, w in sorted(w_normal.items(), key=lambda x: -x[1]):
         amt = int(40_000 * w)
-        bar = "█" * int(w / 0.25 * 8) + "░" * (8 - int(w / 0.25 * 8))
+        n = round(w / max_n * 8)
+        bar = "█" * n + "░" * (8 - n)
         lines.append(f"  {t:<6}  {bar}  {w*100:.1f}%  {amt:,}원")
     lines += ["", "  [하락 Phase 2+]"]
+    max_b = max(w_bear.values(), default=1.0)
     for t, w in sorted(w_bear.items(), key=lambda x: -x[1]):
         amt = int(40_000 * w)
-        bar = "█" * int(w / 0.25 * 8) + "░" * (8 - int(w / 0.25 * 8))
+        n = round(w / max_b * 8)
+        bar = "█" * n + "░" * (8 - n)
         lines.append(f"  {t:<6}  {bar}  {w*100:.1f}%  {amt:,}원")
     return "\n".join(lines)

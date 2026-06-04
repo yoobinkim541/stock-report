@@ -5,6 +5,7 @@ telegram_bot.py — Intelligence Barbell 양방향 텔레그램 봇
 
 Commands:
   /help      — 명령어 목록
+  /ask       — 포트폴리오 상담
   /status    — Phase + 핵심 수치 (빠른 조회, 캐시 5분)
   /phase     — Phase 미터 + 행동 지침
   /portfolio — 포트폴리오 실시간 현황
@@ -23,6 +24,7 @@ import time
 import json
 import shutil
 import logging
+import threading
 from datetime import datetime, timedelta
 
 import requests
@@ -41,7 +43,7 @@ from barbell_strategy import (
     estimate_qqqi_monthly_dividend,
     classify_market, calculate_dca, calculate_sgov_target,
     calculate_rebalancing, build_smart_report,
-    build_report, build_simulation_report, load_leverage_state, load_phase_state,
+    build_report, build_simulation_report, load_leverage_state, load_phase_state, save_phase_state,
     has_phase_changed, send_phase5_emergency,
     _phase_meter, _bar, _sgov_compare, _dca_rows,
     BULL_PHASES, BEAR_PHASES,
@@ -68,6 +70,7 @@ from holding_manager import (
     show_dca_weights, set_dca_weights,
     refresh_portfolio_prices, set_target_weight, show_target_weights,
 )
+from stock_advisor import ask_portfolio_advisor
 
 logger = logging.getLogger(__name__)
 logging.basicConfig(
@@ -83,7 +86,6 @@ CACHE_TTL          = 300   # 시장 데이터 캐시 유지(초, 5분)
 ALERT_CHECK_SECS   = 300   # 가격 알림 체크 주기(초)
 PHASE_CHECK_SECS   = 300   # Phase 변화 체크 주기(초, 5분)
 PID_FILE           = "/tmp/barbell_bot.pid"
-BOT_STATE_FILE     = os.path.join(os.path.dirname(os.path.abspath(__file__)), "telegram_bot_state.json")
 
 # ══════════════════════════════════════════════════════════════════════
 #  시장 데이터 캐시
@@ -124,8 +126,9 @@ def fetch_market(force: bool = False) -> dict:
 
 def _api(method: str, **kwargs) -> dict:
     url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/{method}"
+    request_timeout = kwargs.pop("_request_timeout", 15)
     try:
-        r = requests.post(url, json=kwargs, timeout=15)
+        r = requests.post(url, json=kwargs, timeout=request_timeout)
         return r.json() if r.ok else {}
     except Exception as e:
         logger.error(f"API {method}: {e}")
@@ -142,11 +145,23 @@ def typing(chat_id: str):
     _api("sendChatAction", chat_id=chat_id, action="typing")
 
 
+def keep_typing(chat_id: str):
+    stop = threading.Event()
+
+    def loop():
+        while not stop.is_set():
+            typing(chat_id)
+            stop.wait(4)
+
+    threading.Thread(target=loop, daemon=True).start()
+    return stop.set
+
+
 def get_updates(offset: int | None = None) -> list:
     params: dict = {"timeout": POLL_TIMEOUT, "allowed_updates": ["message"]}
     if offset is not None:
         params["offset"] = offset
-    return _api("getUpdates", **params).get("result", [])
+    return _api("getUpdates", _request_timeout=POLL_TIMEOUT + 10, **params).get("result", [])
 
 
 # ══════════════════════════════════════════════════════════════════════
@@ -158,6 +173,7 @@ def cmd_help() -> str:
         "🏋️ Intelligence Barbell Bot\n"
         "━━━━━━━━━━━━━━━━━━━━━━━\n"
         "/status           빠른 현황 (Phase + 핵심 수치)\n"
+        "/ask 질문         포트폴리오 상담\n"
         "/phase            Phase 미터 + 행동 지침\n"
         "/portfolio        포트폴리오 실시간 현황\n"
         "/dca              오늘 DCA 배분\n"
@@ -643,7 +659,8 @@ def cmd_tax(chat_id: str, args: list):
         # 포트폴리오 스냅샷에서 보유수량·매수단가 조회
         snap_holdings: list[dict] = []
         try:
-            snap = json.load(open(PORTFOLIO_PATH, encoding="utf-8"))
+            with open(PORTFOLIO_PATH, encoding="utf-8") as _f:
+                snap = json.load(_f)
             for section in ("overseas_general", "overseas_fractional"):
                 snap_holdings += snap.get(section, {}).get("holdings_usd", []) + \
                                   snap.get(section, {}).get("holdings", [])
@@ -1210,35 +1227,11 @@ def notify_triggered_alerts():
 #  Phase 변화 모니터링 (봇 자체 발동)
 # ══════════════════════════════════════════════════════════════════════
 
-def _load_bot_phase_state() -> dict:
-    if not os.path.exists(BOT_STATE_FILE):
-        return {}
-    try:
-        with open(BOT_STATE_FILE, encoding="utf-8") as f:
-            data = json.load(f)
-        # market_type 없으면 구버전 파일 → 베이스라인 저장만, 알림 스킵
-        if "market_type" not in data:
-            return {}
-        return data
-    except Exception:
-        return {}
-
-
-def _save_bot_phase_state(market_type: str, phase_key, drawdown: float):
-    state = {
-        "market_type": market_type,
-        "phase_key":   str(phase_key),
-        "drawdown_pct": drawdown,
-        "saved_at":    datetime.now().isoformat(),
-    }
-    with open(BOT_STATE_FILE, "w", encoding="utf-8") as f:
-        json.dump(state, f, indent=2, ensure_ascii=False)
-
-
 def notify_phase_change():
-    """Phase 변화 감지 → Phase 5 진입 시 긴급 에스컬레이션 3회 발송."""
+    """Phase 변화 감지 → Phase 5 진입 시 긴급 에스컬레이션 3회 발송.
+    barbell_strategy의 STATE_FILE을 공유해 크론과 중복 발송을 방지."""
     try:
-        old = _load_bot_phase_state()
+        old = load_phase_state()
         d   = fetch_market()
         mt  = d["market_type"]
         pk  = d["phase_key"]
@@ -1260,7 +1253,7 @@ def notify_phase_change():
                  f"QQQ {dd:+.2f}%\n"
                  f"/phase 로 행동 지침 확인")
             logger.info(f"Phase 변화 알림 발송: {mt}/{pk}")
-        _save_bot_phase_state(mt, pk, dd)
+        save_phase_state(mt, pk, dd)
     except Exception as e:
         logger.error(f"Phase 변화 체크 오류: {e}")
 
@@ -1318,6 +1311,21 @@ def dispatch(text: str, chat_id: str):
 
     if cmd == "/tax":
         cmd_tax(chat_id, args)
+        return
+
+    if cmd == "/ask":
+        if not args:
+            send(chat_id, "사용법: /ask 질문\n예: /ask 지금 추가매수해도 돼?")
+            return
+        stop_typing = keep_typing(chat_id)
+        try:
+            d = fetch_market()
+            send(chat_id, ask_portfolio_advisor(" ".join(args), d))
+        except Exception as e:
+            send(chat_id, f"❌ 오류: {e}")
+            logger.exception("dispatch /ask")
+        finally:
+            stop_typing()
         return
 
     if cmd == "/apply_snapshot":
