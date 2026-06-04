@@ -183,9 +183,7 @@ def cmd_help() -> str:
         "/history          성과 히스토리 (1d/7d/30d/90d)\n"
         "/rebalance        리밸런싱 계산기\n"
         "/sim              시뮬레이션 리포트\n"
-        "/dividend         QQQI 배당 기록\n"
-        "/holding          보유 종목 조회/매수·매도/목표비중/DCA 비중\n"
-        "/apply_snapshot   파싱된 포트폴리오 스냅샷 반영\n"
+        "/holding          보유 종목 조회/매수·매도/목표비중/DCA 비중/배당/스냅샷 반영\n"
         "/report           전체 바벨 리포트 (실시간)\n"
         "/alert            가격 알림 관리\n"
         "/help             이 메시지\n"
@@ -445,6 +443,8 @@ def cmd_holding(chat_id: str, args: list):
     /holding dca NOW 18 ORCL 18 CRM 10   → DCA 비중 변경
     /holding dca bear NOW 23 ...          → 하락장 DCA 비중 변경
     /holding refresh                      → 전 종목 현재가 갱신
+    /holding dividend [금액 TICKER [메모]] → QQQI 배당 조회/기록
+    /holding apply                        → 파싱된 스냅샷 반영
     """
     if not args:
         send(chat_id, list_holdings())
@@ -563,6 +563,14 @@ def cmd_holding(chat_id: str, args: list):
 
         result = set_dca_weights(updates, mode=mode)
         send(chat_id, result)
+
+    # ── /holding dividend ────────────────────────────────────────────
+    elif sub == "dividend":
+        cmd_dividend(chat_id, args[1:])
+
+    # ── /holding apply ───────────────────────────────────────────────
+    elif sub == "apply":
+        cmd_apply_snapshot(chat_id)
 
     else:
         # args[0]이 sub-command 없이 바로 list
@@ -1290,7 +1298,7 @@ def dispatch(text: str, chat_id: str):
         cmd_alert(chat_id, args)
         return
 
-    if cmd == "/dividend":
+    if cmd == "/dividend":  # 하위 호환 alias → /holding dividend
         typing(chat_id)
         cmd_dividend(chat_id, args)
         return
@@ -1328,7 +1336,7 @@ def dispatch(text: str, chat_id: str):
             stop_typing()
         return
 
-    if cmd == "/apply_snapshot":
+    if cmd == "/apply_snapshot":  # 하위 호환 alias → /holding apply
         cmd_apply_snapshot(chat_id)
         return
 
