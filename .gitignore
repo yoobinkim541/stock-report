@@ -1,6 +1,8 @@
 # ── 보안 ────────────────────────────────
 .env
 .env.*
+kiwoom_sync/.env
+kiwoom_sync/sync.log
 *.key
 *.pem
 secrets/

@@ -1,0 +1,6 @@
+# 반드시 32bit Python (x86)에서 설치
+# pip install -r requirements.txt
+PyQt5==5.15.9
+pywin32
+requests
+python-dotenv
