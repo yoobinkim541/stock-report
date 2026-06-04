@@ -43,8 +43,8 @@ except ImportError:
 logger = logging.getLogger(__name__)
 logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
 
-TELEGRAM_TOKEN = os.getenv("STOCK_BOT_TOKEN")
-TELEGRAM_CHAT_ID = "5771238245"
+TELEGRAM_TOKEN   = os.getenv("STOCK_BOT_TOKEN")
+TELEGRAM_CHAT_ID = os.getenv("STOCK_BOT_CHAT_ID", "5771238245")
 PORTFOLIO_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "portfolio_snapshot.json")
 LEVERAGE_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "leverage_state.json")
 STATE_FILE = os.path.expanduser("~/.cache/barbell_state.json")

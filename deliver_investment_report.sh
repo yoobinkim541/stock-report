@@ -17,9 +17,9 @@ START_TIME=$(date +%s)
 
 PYTHON_BIN="${PYTHON_BIN:-python3}"
 
-# Keep the no_agent cron under Hermes' 120s script timeout.
-export INVESTMENT_REPORT_MAX_NASDAQ_SCAN="${INVESTMENT_REPORT_MAX_NASDAQ_SCAN:-20}"
-export INVESTMENT_REPORT_MAX_KOSPI_SCAN="${INVESTMENT_REPORT_MAX_KOSPI_SCAN:-5}"
+# User-requested full scan sizes. Override env vars can still lower these if needed.
+export INVESTMENT_REPORT_MAX_NASDAQ_SCAN="${INVESTMENT_REPORT_MAX_NASDAQ_SCAN:-100}"
+export INVESTMENT_REPORT_MAX_KOSPI_SCAN="${INVESTMENT_REPORT_MAX_KOSPI_SCAN:-30}"
 export INVESTMENT_REPORT_ARCA_PAGES="${INVESTMENT_REPORT_ARCA_PAGES:-1}"
 
 DATE=$("$PYTHON_BIN" -c "from datetime import datetime, timezone, timedelta; print(datetime.now(timezone(timedelta(hours=9))).strftime('%Y-%m-%d'))")
@@ -48,13 +48,19 @@ fi
 
 REPORT_FILE="$HOME/reports/investment-report-${DATE}.md"
 JSON_FILE="$HOME/reports/investment-data-${DATE}.json"
-SUMMARY_FILE="$HOME/reports/investment-summary-${DATE}.json"
+SUMMARY_FILE="$HOME/reports/investment-summary-${DATE}.txt"
 
 END_TIME=$(date +%s)
 DURATION=$((END_TIME - START_TIME))
 
 if [ ! -f "$REPORT_FILE" ]; then
     echo "[FAIL] Report not generated"
+    cat /tmp/invest_report_stderr.txt
+    exit 1
+fi
+
+if [ ! -f "$SUMMARY_FILE" ]; then
+    echo "[FAIL] Summary not generated"
     cat /tmp/invest_report_stderr.txt
     exit 1
 fi
@@ -66,15 +72,14 @@ if [ -n "$STOCK_BOT_TOKEN" ]; then
         -d "chat_id=${STOCK_BOT_CHAT_ID}" \
         -d "text=${HEADER}" > /dev/null
 
+    curl -s -X POST "https://api.telegram.org/bot${STOCK_BOT_TOKEN}/sendMessage" \
+        -d "chat_id=${STOCK_BOT_CHAT_ID}" \
+        --data-urlencode "text@${SUMMARY_FILE}" > /dev/null
+
     curl -s -X POST "https://api.telegram.org/bot${STOCK_BOT_TOKEN}/sendDocument" \
         -F "chat_id=${STOCK_BOT_CHAT_ID}" \
         -F "document=@${REPORT_FILE}" \
         -F "caption=전체 레포트 (${DATE})" > /dev/null
-
-    curl -s -X POST "https://api.telegram.org/bot${STOCK_BOT_TOKEN}/sendDocument" \
-        -F "chat_id=${STOCK_BOT_CHAT_ID}" \
-        -F "document=@${SUMMARY_FILE}" \
-        -F "caption=분석 요약 JSON (${DATE})" > /dev/null
 fi
 
 # ── stdout: compact delivery report (this goes to Hermes cron output) ──
@@ -91,6 +96,7 @@ echo ""
 echo "📋 실행 통계"
 echo "  - 포트폴리오: ${PORTFOLIO_COUNT}종목"
 echo "  - NASDAQ 100: ${INVESTMENT_REPORT_MAX_NASDAQ_SCAN}종목 스캔"
+echo "  - KOSPI 상위: ${INVESTMENT_REPORT_MAX_KOSPI_SCAN}종목 스캔"
 echo "  - LLM 토큰 소비: 0 (순수 Python 만 사용)"
 echo "  - API 비용: yfinance 무료 + SaveTicker 무료"
 echo ""

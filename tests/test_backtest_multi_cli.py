@@ -9,7 +9,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
 import backtest_multi as bm
 
 
-def test_main_accepts_custom_start_date():
+def run_main_with_args(argv):
     calls = {"download_all": None, "build_report": None, "send_telegram": 0}
 
     old_argv = sys.argv
@@ -20,7 +20,7 @@ def test_main_accepts_custom_start_date():
     old_send_telegram = bm.send_telegram
 
     try:
-        sys.argv = ["backtest_multi.py", "--start", "2024-01-01"]
+        sys.argv = argv
 
         def fake_download_all(start):
             calls["download_all"] = start
@@ -49,10 +49,7 @@ def test_main_accepts_custom_start_date():
         bm.send_telegram = fake_send_telegram
 
         bm.main()
-
-        assert calls["download_all"] == "2024-01-01"
-        assert calls["build_report"] == ["사용자 지정 (2024-01-01~2026)"]
-        assert calls["send_telegram"] == 0
+        return calls
     finally:
         sys.argv = old_argv
         bm.download_all = old_download_all
@@ -60,3 +57,17 @@ def test_main_accepts_custom_start_date():
         bm.run_all = old_run_all
         bm.build_report = old_build_report
         bm.send_telegram = old_send_telegram
+
+
+def test_main_accepts_custom_start_date():
+    calls = run_main_with_args(["backtest_multi.py", "--start", "2024-01-01"])
+
+    assert calls["download_all"] == "2024-01-01"
+    assert calls["build_report"] == ["사용자 지정 (2024-01-01~2026)"]
+    assert calls["send_telegram"] == 0
+
+
+def test_main_period_1_selects_one_year_not_10_or_20():
+    calls = run_main_with_args(["backtest_multi.py", "--period", "1"])
+
+    assert calls["build_report"] == [next(k for k in bm.PERIODS if k.startswith("1년 "))]

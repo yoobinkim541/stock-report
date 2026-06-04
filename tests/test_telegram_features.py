@@ -3,7 +3,7 @@ import sys
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
 
-from barbell_strategy import build_simulation_report
+from barbell_strategy import build_simulation_report, _holding_details_from_snapshot
 from portfolio_tracker import build_benchmark_report, build_dividend_calendar
 
 
@@ -63,3 +63,88 @@ def test_build_dividend_calendar_estimates_next_payment():
     assert "배당 캘린더" in text
     assert "다음 예상" in text
     assert "평균 간격" in text
+
+
+def test_holding_details_from_snapshot_includes_stocks_and_domestic():
+    snap = {
+        "overseas_general": {
+            "holdings_usd": [
+                {
+                    "ticker": "MSFT",
+                    "name": "마이크로소프트",
+                    "shares": 2,
+                    "value_usd": 900.48,
+                    "return_pct": 11.86,
+                }
+            ]
+        },
+        "overseas_fractional": {
+            "holdings": [
+                {
+                    "ticker": "NVDA",
+                    "name": "엔비디아",
+                    "shares": 0.5,
+                    "value_usd": 105.57,
+                    "return_pct": 14.66,
+                }
+            ]
+        },
+        "domestic": {
+            "holdings": [
+                {
+                    "ticker": "SOL AI반도체TOP2",
+                    "name": "SOL AI반도체TOP2플러스",
+                    "shares": 20,
+                    "current_price": 25200,
+                    "return_pct": 6.38,
+                }
+            ]
+        },
+    }
+
+    details = _holding_details_from_snapshot(snap)
+
+    assert details[0]["ticker"] == "MSFT"
+    assert details[0]["name"] == "마이크로소프트"
+    assert details[0]["value_usd"] == 900.48
+    assert details[1]["ticker"] == "NVDA"
+    assert details[2]["value_krw"] == 504000
+
+
+def test_dispatch_ask_fetches_market_and_sends_advice(monkeypatch):
+    import telegram_bot
+
+    calls = {"fetch_market": 0, "ask": None, "send": [], "typing_stop": 0}
+    market = {"market_type": "bull", "phase_key": "bull_1"}
+
+    def fake_fetch_market():
+        calls["fetch_market"] += 1
+        return market
+
+    def fake_ask(question, data):
+        calls["ask"] = (question, data)
+        return "상담 답변"
+
+    def fake_send(chat_id, text):
+        calls["send"].append((chat_id, text))
+
+    def fake_keep_typing(chat_id):
+        calls["typing_chat_id"] = chat_id
+
+        def stop():
+            calls["typing_stop"] += 1
+
+        return stop
+
+    monkeypatch.setattr(telegram_bot, "fetch_market", fake_fetch_market)
+    monkeypatch.setattr(telegram_bot, "ask_portfolio_advisor", fake_ask)
+    monkeypatch.setattr(telegram_bot, "send", fake_send)
+    monkeypatch.setattr(telegram_bot, "keep_typing", fake_keep_typing)
+
+    telegram_bot.dispatch("/ask 지금 추가매수해도 돼?", "chat-1")
+
+    assert calls["fetch_market"] == 1
+    assert calls["ask"] == ("지금 추가매수해도 돼?", market)
+    assert calls["typing_chat_id"] == "chat-1"
+    assert calls["typing_stop"] == 1
+    assert calls["send"] == [("chat-1", "상담 답변")]

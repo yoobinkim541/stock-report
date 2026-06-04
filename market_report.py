@@ -16,6 +16,12 @@ import yfinance as yf
 import requests
 from bs4 import BeautifulSoup
 
+try:
+    from source_collector import build_digest, load_recent_events
+except Exception:
+    build_digest = None
+    load_recent_events = None
+
 # ─────────────────────────────────────────────
 # Configuration
 # ─────────────────────────────────────────────
@@ -192,6 +198,19 @@ def fetch_saveticker_json(path: str, params: Optional[dict] = None) -> Optional[
         return resp.json()
     except Exception:
         return None
+
+
+def load_cached_source_digest() -> str:
+    """Return a recent source-cache digest if the collector cache is available."""
+    if not build_digest or not load_recent_events:
+        return ""
+    try:
+        events = load_recent_events(hours=24)
+    except Exception:
+        return ""
+    if not events:
+        return ""
+    return build_digest(events)
 
 
 def format_news_item(item: dict, include_snippet: bool = True) -> str:
@@ -447,6 +466,11 @@ def section_2_top_news() -> str:
             lines.append("")
     else:
         lines.append("[데이터 없음] (사유: 뉴스 데이터를 불러올 수 없음)")
+        lines.append("")
+
+    cached_digest = load_cached_source_digest()
+    if cached_digest:
+        lines.append(cached_digest.rstrip())
         lines.append("")
 
     arca_posts = fetch_arca_stock_posts()

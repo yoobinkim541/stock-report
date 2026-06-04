@@ -41,7 +41,7 @@ DAILY_DCA_USD  = 29.0       # 일일 DCA ($29 ≈ 40,000원 @1,380원)
 REPORTS_DIR    = os.path.expanduser("~/reports")
 
 TELEGRAM_TOKEN   = os.getenv("STOCK_BOT_TOKEN", "")
-TELEGRAM_CHAT_ID = "5771238245"
+TELEGRAM_CHAT_ID = os.getenv("STOCK_BOT_CHAT_ID", "5771238245")
 
 # Phase별 목표 자산 배분 (QQQ, QLD, TQQQ, SGOV) — 반드시 합계 = 1.0
 ALLOC: dict = {

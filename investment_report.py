@@ -23,6 +23,12 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from fundamental_score import score_ticker
 from daily_signals import detect_signals
 
+try:
+    from source_collector import build_digest, load_recent_events
+except Exception:
+    build_digest = None
+    load_recent_events = None
+
 # Company name cache
 _COMPANY_NAMES = {}
 def _company_name(ticker: str) -> str:
@@ -37,6 +43,19 @@ def _company_name(ticker: str) -> str:
 
 logging.basicConfig(level=logging.WARNING, format="%(levelname)s:%(name)s:%(message)s")
 logger = logging.getLogger("investment_report")
+
+
+def load_cached_source_digest() -> str:
+    """Return a recent source-cache digest if the collector cache is available."""
+    if not build_digest or not load_recent_events:
+        return ""
+    try:
+        events = load_recent_events(hours=24)
+    except Exception:
+        return ""
+    if not events:
+        return ""
+    return build_digest(events)
 
 # ── 포트폴리오 종목 ─────────────────────────────────────────────────────
 PORTFOLIO_TICKERS = ["MSFT", "QQQI", "ORCL", "NOW", "CRM", "SAP", "UNH",
@@ -59,25 +78,29 @@ MANUAL_SCORES = {
 
 # ── NASDAQ 100 종목 (정적 리스트) ───────────────────────────────────────
 NASDAQ_100 = [
-    "AAPL", "MSFT", "AMZN", "NVDA", "GOOGL", "GOOG", "META", "TSLA",
-    "AVGO", "ADBE", "CSCO", "INTC", "QCOM", "TXN", "AMGN", "CMCSA",
-    "NFLX", "PEP", "COST", "TMUS", "AMD", "INTU", "HON", "AMAT", "BKNG",
-    "SBUX", "ADI", "GILD", "ADP", "FISV", "VRTX", "MDLZ", "ISRG", "REGN",
-    "CMG", "PANW", "ABNB", "SNPS", "CDNS", "KLAC", "WDAY", "ASML", "MU",
-    "LRCX", "MRNA", "AEP", "CPRT", "EA", "EXC", "KDP", "BKR", "XEL",
-    "CTAS", "CHTR", "DDOG", "FTNT", "MAR", "MCHP", "PCAR", "PAYX",
-    "ROST", "SIRI", "VRSK", "ANSS", "ALGN", "DLTR", "EBAY", "ENPH",
-    "FAST", "IDXX", "ILMN", "INCY", "KLIC", "LULU", "MELI", "MOH",
-    "MRVL", "MTCH", "NTES", "OKTA", "ORLY", "PTC", "RIVN", "SPLK",
-    "SWKS", "TEAM", "TSCO", "TTWO", "WBA", "WBD", "WDC", "ZM", "ZS"
+    "ADBE", "AMD", "ABNB", "ALNY", "GOOGL", "GOOG", "AMZN", "AEP",
+    "AMGN", "ADI", "AAPL", "AMAT", "APP", "ARM", "ASML", "ADSK",
+    "ADP", "AXON", "BKR", "BKNG", "AVGO", "CDNS", "CHTR", "CTAS",
+    "CSCO", "CCEP", "CTSH", "CMCSA", "CEG", "CPRT", "COST", "CRWD",
+    "CSX", "DDOG", "DXCM", "FANG", "DASH", "EA", "EXC", "FAST",
+    "FER", "FTNT", "GEHC", "GILD", "HON", "IDXX", "INSM", "INTC",
+    "INTU", "ISRG", "KDP", "KLAC", "KHC", "LRCX", "LIN", "LITE",
+    "MAR", "MRVL", "MELI", "META", "MCHP", "MU", "MSFT", "MSTR",
+    "MDLZ", "MPWR", "MNST", "NFLX", "NVDA", "NXPI", "ORLY", "ODFL",
+    "PCAR", "PLTR", "PANW", "PAYX", "PYPL", "PDD", "PEP", "QCOM",
+    "REGN", "ROP", "ROST", "SNDK", "STX", "SHOP", "SBUX", "SNPS",
+    "TMUS", "TTWO", "TSLA", "TXN", "TRI", "VRSK", "VRTX", "WMT",
+    "WBD", "WDC", "WDAY", "XEL",
 ]
 
-# ── KOSPI 시총 상위 20개 (Yahoo Finance .KS 티커) ─────────────────────────
-KOSPI_TOP20 = [
+# ── KOSPI 시총 상위 30개 (Yahoo Finance .KS 티커) ─────────────────────────
+KOSPI_TOP30 = [
     "005930.KS", "000660.KS", "373220.KS", "207940.KS", "005380.KS",
     "068270.KS", "000270.KS", "105560.KS", "055550.KS", "035420.KS",
     "012330.KS", "028260.KS", "006400.KS", "035720.KS", "329180.KS",
     "086790.KS", "032830.KS", "015760.KS", "009540.KS", "034020.KS",
+    "010130.KS", "033780.KS", "096770.KS", "066570.KS", "051910.KS",
+    "003670.KS", "034730.KS", "018260.KS", "003550.KS", "017670.KS",
 ]
 
 _KOSPI_NAMES = {
@@ -101,6 +124,16 @@ _KOSPI_NAMES = {
     "015760.KS": "한국전력",
     "009540.KS": "HD한국조선해양",
     "034020.KS": "두산에너빌리티",
+    "010130.KS": "고려아연",
+    "033780.KS": "KT&G",
+    "096770.KS": "SK이노베이션",
+    "066570.KS": "LG전자",
+    "051910.KS": "LG화학",
+    "003670.KS": "포스코퓨처엠",
+    "034730.KS": "SK",
+    "018260.KS": "삼성에스디에스",
+    "003550.KS": "LG",
+    "017670.KS": "SK텔레콤",
 }
 
 REPORTS_DIR = os.path.expanduser("~/reports")
@@ -241,6 +274,147 @@ def _fmt_price(val):
         return str(val)
 
 
+_ETF_PERIODS = (
+    ("1M", 1 / 12), ("3M", 0.25), ("6M", 0.5), ("1Y", 1), ("2Y", 2),
+    ("3Y", 3), ("5Y", 5), ("10Y", 10), ("20Y", 20),
+)
+_ETF_PEERS = {
+    "SGOV": ("BIL", "SHV", "USFR"),
+    "QQQI": ("JEPQ", "QYLD", "QQQ"),
+    "SPMO": ("MTUM", "QMOM"),
+}
+
+
+def _as_float_list(values):
+    if values is None:
+        return []
+    try:
+        seq = values.tolist()
+    except AttributeError:
+        seq = values
+    result = []
+    for val in seq:
+        try:
+            if val == val:
+                result.append(float(val))
+        except (TypeError, ValueError):
+            pass
+    return result
+
+
+def _etf_expense_pct(info):
+    raw = (info or {}).get("expenseRatio") or (info or {}).get("annualReportExpenseRatio")
+    if raw is None:
+        return 0.0
+    try:
+        val = float(raw)
+    except (TypeError, ValueError):
+        return 0.0
+    return round(val * 100, 3) if val < 1 else round(val, 3)
+
+
+def _etf_peer_group(ticker):
+    peers = list(_ETF_PEERS.get((ticker or "").upper().split(".")[0], ()))
+    for benchmark in ("SPY", "QQQ"):
+        if benchmark not in peers and benchmark != (ticker or "").upper():
+            peers.append(benchmark)
+    return peers
+
+
+def _etf_period_return(hist, years, expense_ratio=0.0):
+    closes = _as_float_list(hist.get("Close") if isinstance(hist, dict) else hist["Close"])
+    dividends = _as_float_list(hist.get("Dividends") if isinstance(hist, dict) else hist.get("Dividends", []))
+    if len(closes) < 2 or closes[0] <= 0:
+        return None
+    total_div = sum(dividends[1:]) if dividends else 0.0
+    gross = ((closes[-1] + total_div) / closes[0] - 1) * 100
+    return round(gross - (float(expense_ratio or 0) * float(years or 0)), 2)
+
+
+def _etf_window(hist, years):
+    if hist is None or len(hist) < 2:
+        return hist, 0.0
+    try:
+        end = hist.index[-1]
+        start = end - timedelta(days=int(365.25 * years))
+        window = hist[hist.index >= start]
+        if len(window) < 2:
+            window = hist
+        actual_years = max((window.index[-1] - window.index[0]).days / 365.25, 1 / 365.25)
+        return window, min(float(years), actual_years)
+    except Exception:
+        return hist, float(years or 0)
+
+
+def _actual_period_label(label, actual_years):
+    target = dict(_ETF_PERIODS).get(label) or actual_years
+    if actual_years >= target * 0.95:
+        return label
+    if actual_years < 1:
+        return f"상장후 {max(1, round(actual_years * 12))}M"
+    return f"상장후 {actual_years:.1f}Y"
+
+
+def _build_etf_comparison(ticker):
+    t = (ticker or "").upper()
+    try:
+        target = yf.Ticker(t)
+        info = target.info or {}
+        expense = _etf_expense_pct(info)
+        target_hist = target.history(period="max", auto_adjust=False)
+        if target_hist is None or len(target_hist) < 2:
+            return None
+        peer_data = {}
+        for peer in _etf_peer_group(t):
+            try:
+                pt = yf.Ticker(peer)
+                ph = pt.history(period="max", auto_adjust=False)
+                if ph is not None and len(ph) >= 2:
+                    peer_data[peer] = {"hist": ph, "expense": _etf_expense_pct(pt.info or {})}
+            except Exception:
+                pass
+        periods = []
+        for label, years in _ETF_PERIODS:
+            target_window, actual_years = _etf_window(target_hist, years)
+            ret = _etf_period_return(target_window, actual_years, expense)
+            if ret is None:
+                continue
+            vs = {}
+            for peer, data in peer_data.items():
+                peer_window, _ = _etf_window(data["hist"], actual_years)
+                peer_ret = _etf_period_return(peer_window, actual_years, data["expense"])
+                if peer_ret is not None:
+                    vs[peer] = {"return_pct": peer_ret, "diff_pct": round(ret - peer_ret, 2)}
+            periods.append({
+                "label": label,
+                "actual_label": _actual_period_label(label, actual_years),
+                "years": round(actual_years, 3),
+                "return_pct": ret,
+                "vs": vs,
+            })
+        return {"ticker": t, "expense_ratio": expense, "peers": _etf_peer_group(t), "periods": periods}
+    except Exception as e:
+        logger.warning(f"ETF comparison failed for {ticker}: {e}")
+        return None
+
+
+def _format_etf_comparison(comparison):
+    if not comparison:
+        return []
+    lines = [f"- **ETF 비교:** 운영수수료 {comparison.get('expense_ratio', 0):.2f}% 반영"]
+    for period in comparison.get("periods", []):
+        parts = [f"{period.get('actual_label')}: {period.get('return_pct'):+.2f}%"]
+        vs = period.get("vs", {}) or {}
+        for benchmark in ("SPY", "QQQ"):
+            if benchmark in vs:
+                parts.append(f"{benchmark} {vs[benchmark]['diff_pct']:+.2f}%p")
+        peer_parts = [f"{p} {v['diff_pct']:+.2f}%p" for p, v in vs.items() if p not in ("SPY", "QQQ")]
+        if peer_parts:
+            parts.append("동종 " + ", ".join(peer_parts[:2]))
+        lines.append("  - " + " | ".join(parts))
+    return lines
+
+
 def _judgment(fund_score, signal, grade):
     """
     Determine final judgment based on fundamental score + daily signal.
@@ -348,6 +522,285 @@ def _judgment(fund_score, signal, grade):
     return ("제외 검토", reasons, risks)
 
 
+def _news_view(signal):
+    news_items = signal.get("news_items", []) or []
+    sentiments = [str(item.get("sentiment", "neutral")).lower() for item in news_items if isinstance(item, dict)]
+    if not sentiments:
+        return {"status": "중립", "reason": "뉴스 특이사항 부족"}
+    positives = sum(1 for s in sentiments if s == "positive")
+    negatives = sum(1 for s in sentiments if s in ("warning", "critical", "negative"))
+    if negatives >= 2 or "critical" in sentiments:
+        return {"status": "부정", "reason": "부정 뉴스가 우세"}
+    if positives > negatives:
+        return {"status": "긍정", "reason": "긍정 뉴스 흐름"}
+    if negatives:
+        return {"status": "주의", "reason": "경계 뉴스 확인"}
+    return {"status": "중립", "reason": "뉴스 영향 제한적"}
+
+
+# ── ETF type detection ──────────────────────────────────────────────────────
+
+_ETF_CASH_BOND = frozenset({"SGOV", "BIL", "SHV", "SHY", "TBIL", "USFR"})
+_ETF_COVERED_CALL = frozenset({"QQQI", "JEPI", "JEPQ", "QYLD", "RYLD", "XYLD"})
+_ETF_MOMENTUM = frozenset({"SPMO", "MTUM", "QMOM", "IMOM"})
+
+
+def _detect_etf_type(ticker, notes):
+    """Returns 'cash_bond', 'covered_call', 'momentum', 'etf_generic', or None."""
+    t = (ticker or "").upper().split(".")[0]
+    if t in _ETF_CASH_BOND:
+        return "cash_bond"
+    if t in _ETF_COVERED_CALL:
+        return "covered_call"
+    if t in _ETF_MOMENTUM:
+        return "momentum"
+    notes_text = " ".join(str(n) for n in (notes or [])).lower()
+    if any(w in notes_text for w in ("현금성", "단기채", "t-bill", "treasury", "단기국채")):
+        return "cash_bond"
+    if any(w in notes_text for w in ("covered call", "covered-call", "인컴", "커버드콜")):
+        return "covered_call"
+    if any(w in notes_text for w in ("momentum", "모멘텀")):
+        return "momentum"
+    if any(w in notes_text for w in ("etf", "etn")):
+        return "etf_generic"
+    return None
+
+
+_EXECUTION_HINTS = {
+    "강한 매수후보": "적극 분할매수 검토",
+    "관심/분할매수": "소량 진입 후 관찰",
+    "관심 유지": "현 보유 유지, 눌림 시 추가",
+    "추격 금지": "급등 이후 → 눌림 대기",
+    "눌림 대기": "조정 후 진입 검토",
+    "보유": "현 비중 유지",
+    "비중축소 검토": "비중 축소 고려",
+    "매도검토": "부분 매도 / 손절 고려",
+    "손절/매도검토": "손절 또는 전량 매도 고려",
+    "데이터부족": "추가 모니터링",
+    "현금성 유지": "안전 현금성 자산 유지",
+    "인컴 유지": "배당/인컴 목적 보유",
+    "모멘텀 유지": "모멘텀 추세 보유",
+    "모멘텀 주의": "모멘텀 둔화 → 비중 점검",
+}
+
+
+def _decision_v2(fund_score, signal, grade=None, ticker=None):
+    """
+    Decision Engine v2: split the view into financial/timing/news/risk buckets.
+
+    Returns a compact dict safe to store in JSON next to the existing judgment keys.
+    """
+    try:
+        score = float(fund_score.get("total_score", 0) or 0)
+    except (TypeError, ValueError):
+        score = 0
+    score_display = int(score) if score == int(score) else round(score, 1)
+    grade = grade if grade is not None else fund_score.get("grade", "N/A")
+    signal_type = signal.get("overall_signal", "Neutral")
+    price_info = signal.get("price_info", {}) or {}
+    warnings = signal.get("warnings", []) or []
+    critical = signal.get("critical", []) or []
+    d1 = price_info.get("1d_change_pct")
+    m1 = price_info.get("1mo_change_pct")
+    has_price = price_info.get("current_price") is not None or d1 is not None or m1 is not None
+
+    # ETF type detection (grade N/A only)
+    _ticker = ticker or fund_score.get("ticker", "") or ""
+    notes = fund_score.get("notes", []) or []
+    etf_type = _detect_etf_type(_ticker, notes) if grade == "N/A" else None
+
+    if grade == "N/A" and score <= 0 and not has_price and not etf_type:
+        financial = {"status": "부족", "reason": "재무/가격 데이터 부족"}
+    elif grade == "N/A":
+        financial = {"status": "해당없음", "reason": "ETF/ETN 또는 재무점수 제외 대상"}
+    elif score >= 75:
+        financial = {"status": "강함", "reason": f"재무 {score_display}점({grade})"}
+    elif score >= 60:
+        financial = {"status": "양호", "reason": f"재무 {score_display}점({grade})"}
+    elif score >= 45:
+        financial = {"status": "보통", "reason": f"재무 {score_display}점({grade})"}
+    else:
+        financial = {"status": "취약", "reason": f"재무 {score_display}점({grade})"}
+
+    if signal_type == "Positive":
+        timing = {"status": "우호", "reason": "일일 신호 긍정"}
+    elif signal_type == "Warning":
+        timing = {"status": "주의", "reason": warnings[0][:50] if warnings else "경고 신호"}
+    elif signal_type == "Critical":
+        timing = {"status": "위험", "reason": critical[0][:50] if critical else "심각 신호"}
+    else:
+        timing = {"status": "중립", "reason": "뚜렷한 타이밍 신호 없음"}
+
+    if d1 is not None:
+        if d1 > 5:
+            timing = {"status": "과열", "reason": f"1일 {d1:+.2f}% 급등"}
+        elif d1 < -5:
+            timing = {"status": "급락", "reason": f"1일 {d1:+.2f}% 급락"}
+    if m1 is not None and m1 < -12 and timing["status"] not in ("위험", "급락"):
+        timing = {"status": "약세", "reason": f"1개월 {m1:+.2f}% 약세"}
+
+    news = _news_view(signal)
+
+    if critical:
+        risk = {"status": "높음", "reason": critical[0][:50]}
+    elif warnings:
+        risk = {"status": "주의", "reason": warnings[0][:50]}
+    elif financial["status"] == "취약":
+        risk = {"status": "주의", "reason": "낮은 재무 점수"}
+    else:
+        risk = {"status": "낮음", "reason": "특이 위험 제한적"}
+
+    # Risk types (additive list)
+    risk_types = []
+    if timing["status"] == "과열":
+        risk_types.append("과열")
+    if timing["status"] == "급락":
+        risk_types.append("급락")
+    if d1 is not None and abs(d1) > 5 and "변동성확대" not in risk_types:
+        risk_types.append("변동성확대")
+    if news["status"] == "부정":
+        risk_types.append("뉴스부정")
+    elif news["status"] == "주의":
+        risk_types.append("뉴스주의")
+    if financial["status"] == "취약":
+        risk_types.append("재무취약")
+    if financial["status"] == "부족":
+        risk_types.append("데이터부족")
+    if critical:
+        risk_types.append("실적둔화")
+    if etf_type == "cash_bond":
+        risk_types.append("현금성")
+    elif etf_type in ("covered_call", "momentum", "etf_generic"):
+        risk_types.append("ETF구조")
+    risk["types"] = risk_types
+
+    # Action determination
+    if financial["status"] == "부족":
+        action = "데이터부족"
+    elif grade == "N/A" and etf_type:
+        # ETF-specific actions
+        if risk["status"] == "높음":
+            action = "매도검토"
+        elif etf_type == "cash_bond":
+            action = "현금성 유지"
+        elif etf_type == "covered_call":
+            action = "추격 금지" if timing["status"] == "과열" else "인컴 유지"
+        elif etf_type == "momentum":
+            action = "모멘텀 주의" if timing["status"] in ("과열", "급락", "약세") else "모멘텀 유지"
+        else:
+            action = "매도검토" if timing["status"] in ("급락", "위험") else "관심 유지"
+    elif risk["status"] == "높음":
+        action = "매도검토"
+    elif timing["status"] == "급락" and score < 60:
+        action = "매도검토"
+    elif financial["status"] == "취약" and risk["status"] == "주의":
+        action = "손절/매도검토"
+    elif risk["status"] == "주의" and score < 55:
+        action = "비중축소 검토"
+    elif timing["status"] == "과열" and score >= 60:
+        # strong/good financial + overheated → 추격 금지
+        action = "추격 금지"
+    elif timing["status"] == "과열":
+        action = "눌림 대기"
+    elif score >= 75 and timing["status"] == "우호" and risk["status"] == "낮음":
+        action = "강한 매수후보"
+    elif score >= 75 and risk["status"] == "낮음":
+        # strong financial, non-overheated, low risk, but timing not great
+        action = "관심 유지"
+    elif score >= 60 and timing["status"] in ("우호", "중립"):
+        action = "관심/분할매수"
+    elif score >= 55 and risk["status"] != "높음":
+        action = "보유"
+    elif timing["status"] in ("약세", "주의") and score >= 60:
+        action = "눌림 대기"
+    else:
+        action = "비중축소 검토"
+
+    # Execution hint (mobile-friendly, additive field)
+    today_action = _EXECUTION_HINTS.get(action, action)
+
+    # Confidence calculation (unchanged from v2)
+    financial_delta = {
+        "강함": 18, "양호": 12, "보통": 4, "취약": -10, "해당없음": -4, "부족": -28
+    }.get(financial["status"], 0)
+    timing_delta = {
+        "우호": 12, "중립": 2, "과열": -6, "약세": -8, "주의": -10, "급락": -16, "위험": -20
+    }.get(timing["status"], 0)
+    news_delta = {
+        "긍정": 6, "중립": 0, "주의": -6, "부정": -12
+    }.get(news["status"], 0)
+    risk_delta = {
+        "낮음": 8, "주의": -8, "높음": -18
+    }.get(risk["status"], 0)
+    confidence = max(0, min(100, 50 + financial_delta + timing_delta + news_delta + risk_delta))
+
+    # Confidence breakdown: each factor's normalized contribution (0-100)
+    confidence_breakdown = {
+        "data_quality": max(0, min(100, 50 + financial_delta)),
+        "signal_alignment": max(0, min(100, 50 + timing_delta)),
+        "risk_clarity": max(0, min(100, 50 + risk_delta)),
+        "news_support": max(0, min(100, 50 + news_delta)),
+    }
+
+    reason_parts = []
+    if financial["status"] in ("강함", "양호", "취약"):
+        reason_parts.append(financial["reason"])
+    reason_parts.append(timing["reason"])
+    if risk["status"] != "낮음":
+        reason_parts.append(risk["reason"])
+    one_line_reason = " · ".join(dict.fromkeys(reason_parts))[:110]
+
+    return {
+        "action": action,
+        "one_line_reason": one_line_reason,
+        "confidence": confidence,
+        "confidence_breakdown": confidence_breakdown,
+        "today_action": today_action,
+        "financial": financial,
+        "timing": timing,
+        "news": news,
+        "risk": risk,
+    }
+
+
+def _decision_summary(item):
+    decision = item.get("decision_v2") or {}
+    action = decision.get("action", "데이터부족")
+    reason = decision.get("one_line_reason", "")
+    return f"{action} - {_compact_text(reason, 32)}" if reason else action
+
+
+def _short_stock_label(item):
+    ticker = item.get("ticker", "")
+    name = _KOSPI_NAMES.get(ticker) or item.get("company_name") or item.get("company") or _company_name(ticker)
+    if name and name != ticker:
+        return f"{ticker}({name})"
+    return ticker
+
+
+def _mobile_pick_items(items, limit=2, exclude_tickers=None):
+    exclude_tickers = set(exclude_tickers or ())
+    picked = []
+    seen = set(exclude_tickers)
+    for item in items:
+        ticker = item.get("ticker")
+        if ticker in seen:
+            continue
+        picked.append(item)
+        if ticker:
+            seen.add(ticker)
+        if len(picked) >= limit:
+            break
+    return picked
+
+
+def _mobile_pick_line(title, items, limit=2, exclude_tickers=None):
+    picks = []
+    for item in _mobile_pick_items(items, limit, exclude_tickers):
+        picks.append(f"{_short_stock_label(item)} {_decision_summary(item)}")
+    return f"{title}: {'; '.join(picks)}" if picks else f"{title}: 없음"
+
+
 def _market_summary():
     """Get a quick market snapshot using SPY and QQQ as proxies."""
     summary = {
@@ -434,11 +887,17 @@ def generate_report():
             fund = MANUAL_SCORES.get(ticker) or score_ticker(ticker)
             sig = detect_signals(ticker)
             judgment, reasons, risks = _judgment(fund, sig, fund.get("grade", "N/A"))
+            decision = _decision_v2(fund, sig, fund.get("grade", "N/A"), ticker=ticker)
+            etf_comparison = None
+            if _detect_etf_type(ticker, fund.get("notes", [])):
+                etf_comparison = _build_etf_comparison(ticker)
             portfolio_results.append({
                 "ticker": ticker,
                 "fundamental": fund,
                 "signal": sig,
                 "judgment": judgment,
+                "decision_v2": decision,
+                "etf_comparison": etf_comparison,
                 "reasons": reasons,
                 "risks": risks,
             })
@@ -450,6 +909,12 @@ def generate_report():
                 "fundamental": {"total_score": 0, "grade": "D", "notes": [str(e)]},
                 "signal": {"overall_signal": "Warning", "warnings": [str(e)]},
                 "judgment": "제외 검토",
+                "decision_v2": _decision_v2(
+                    {"total_score": 0, "grade": "N/A", "notes": [str(e)]},
+                    {"overall_signal": "Warning", "warnings": [str(e)]},
+                    "N/A",
+                    ticker=ticker,
+                ),
                 "reasons": ["데이터 오류"],
                 "risks": [str(e)],
             })
@@ -473,6 +938,7 @@ def generate_report():
                 "grade": fund["grade"],
                 "company_name": _company_name(ticker),
                 "signal": sig["overall_signal"],
+                "decision_v2": _decision_v2(fund, sig, fund.get("grade", "N/A"), ticker=ticker),
             })
             print(f"점수:{fund['total_score']} 등급:{fund['grade']} 신호:{sig['overall_signal']}")
         except Exception as e:
@@ -503,9 +969,9 @@ def generate_report():
             if r not in top_watch and len(top_watch) < 5:
                 top_watch.append(r)
 
-    # ── KOSPI top 20 scan ──
-    max_kospi_scan = _env_int("INVESTMENT_REPORT_MAX_KOSPI_SCAN", len(KOSPI_TOP20), 0)
-    kospi_scan_list = KOSPI_TOP20[:max_kospi_scan]
+    # ── KOSPI top 30 scan ──
+    max_kospi_scan = _env_int("INVESTMENT_REPORT_MAX_KOSPI_SCAN", len(KOSPI_TOP30), 0)
+    kospi_scan_list = KOSPI_TOP30[:max_kospi_scan]
     print(f"\n🇰🇷 KOSPI 상위 {len(kospi_scan_list)}개 스캔 중...")
     kospi_results = []
     for i, ticker in enumerate(kospi_scan_list):
@@ -519,6 +985,7 @@ def generate_report():
                 "grade": fund["grade"],
                 "company_name": _company_name(ticker),
                 "signal": sig["overall_signal"],
+                "decision_v2": _decision_v2(fund, sig, fund.get("grade", "N/A"), ticker=ticker),
             })
             print(f"점수:{fund['total_score']} 등급:{fund['grade']} 신호:{sig['overall_signal']}")
         except Exception as e:
@@ -529,6 +996,12 @@ def generate_report():
                 "grade": "N/A",
                 "company_name": _company_name(ticker),
                 "signal": "Warning",
+                "decision_v2": _decision_v2(
+                    {"total_score": 0, "grade": "N/A", "notes": [str(e)]},
+                    {"overall_signal": "Warning", "warnings": [str(e)]},
+                    "N/A",
+                    ticker=ticker,
+                ),
             })
 
     kospi_scored = [r for r in kospi_results if r["total_score"] > 0]
@@ -614,6 +1087,7 @@ def generate_report():
         fund = r["fundamental"]
         sig = r["signal"]
         judgment = r["judgment"]
+        decision = r.get("decision_v2", {})
         reasons = r["reasons"]
         risks = r["risks"]
 
@@ -673,6 +1147,9 @@ def generate_report():
         lines.append(f"- **재무 건강도:** {score}/100점, 등급 **{grade}**")
         lines.append(f"- **오늘의 신호:** {signal_display}")
         lines.append(f"- **최종 판단:** {judgment}")
+        lines.append(f"- **Decision v2:** {decision.get('action', '데이터부족')} — {decision.get('one_line_reason', '')}")
+        for line in _format_etf_comparison(r.get("etf_comparison")):
+            lines.append(line)
         lines.append(f"- **핵심 이유 3개:**")
         for i, reason in enumerate(reasons, 1):
             lines.append(f"  {i}. {reason}")
@@ -748,40 +1225,40 @@ def generate_report():
     lines.append(f"")
     lines.append(f"### Top 5 매수 후보 (고점수 + 긍정 신호)")
     lines.append(f"")
-    lines.append(f"| 순위 | 종목 | 점수 | 등급 | 신호 |")
-    lines.append(f"|------|------|------|------|------|")
+    lines.append(f"| 순위 | 종목 | 점수 | 등급 | 신호 | 액션 |")
+    lines.append(f"|------|------|------|------|------|------|")
     for i, r in enumerate(top_buy_candidates[:5], 1):
         sig_emoji = {"Positive": "🟢", "Neutral": "⚪", "Warning": "🟡", "Critical": "🔴"}
-        lines.append(f"| {i} | {r['ticker']} — {_company_name(r['ticker'])} | {r['total_score']} | {r['grade']} | {sig_emoji.get(r['signal'], '⚔️')} {r['signal']} |")
+        lines.append(f"| {i} | {r['ticker']} — {_company_name(r['ticker'])} | {r['total_score']} | {r['grade']} | {sig_emoji.get(r['signal'], '⚔️')} {r['signal']} | {r.get('decision_v2', {}).get('action', '데이터부족')} |")
     lines.append(f"")
 
     lines.append(f"### Top 5 주의 종목 (저점수 또는 경고 신호)")
     lines.append(f"")
-    lines.append(f"| 순위 | 종목 | 점수 | 등급 | 신호 |")
-    lines.append(f"|------|------|------|------|------|")
+    lines.append(f"| 순위 | 종목 | 점수 | 등급 | 신호 | 액션 |")
+    lines.append(f"|------|------|------|------|------|------|")
     for i, r in enumerate(top_watch[:5], 1):
         sig_emoji = {"Positive": "🟢", "Neutral": "⚪", "Warning": "🟡", "Critical": "🔴"}
-        lines.append(f"| {i} | {r['ticker']} — {_company_name(r['ticker'])} | {r['total_score']} | {r['grade']} | {sig_emoji.get(r['signal'], '⚔️')} {r['signal']} |")
+        lines.append(f"| {i} | {r['ticker']} — {_company_name(r['ticker'])} | {r['total_score']} | {r['grade']} | {sig_emoji.get(r['signal'], '⚔️')} {r['signal']} | {r.get('decision_v2', {}).get('action', '데이터부족')} |")
     lines.append(f"")
 
-    # Section 4: KOSPI top 20 scan
-    lines.append(f"## 4. KOSPI 상위 20개 종목 스캔")
+    # Section 4: KOSPI top 30 scan
+    lines.append(f"## 4. KOSPI 상위 30개 종목 스캔")
     lines.append(f"")
     lines.append(f"### Top 5 매수 후보")
     lines.append(f"")
-    lines.append(f"| 순위 | 종목 | 점수 | 등급 | 신호 |")
-    lines.append(f"|------|------|------|------|------|")
+    lines.append(f"| 순위 | 종목 | 점수 | 등급 | 신호 | 액션 |")
+    lines.append(f"|------|------|------|------|------|------|")
     for i, r in enumerate(kospi_top[:5], 1):
         sig_emoji = {"Positive": "🟢", "Neutral": "⚪", "Warning": "🟡", "Critical": "🔴"}
-        lines.append(f"| {i} | {r['ticker']} — {_company_name(r['ticker'])} | {r['total_score']} | {r['grade']} | {sig_emoji.get(r['signal'], '⚔️')} {r['signal']} |")
+        lines.append(f"| {i} | {r['ticker']} — {_company_name(r['ticker'])} | {r['total_score']} | {r['grade']} | {sig_emoji.get(r['signal'], '⚔️')} {r['signal']} | {r.get('decision_v2', {}).get('action', '데이터부족')} |")
     lines.append(f"")
     lines.append(f"### Top 5 주의 종목")
     lines.append(f"")
-    lines.append(f"| 순위 | 종목 | 점수 | 등급 | 신호 |")
-    lines.append(f"|------|------|------|------|------|")
+    lines.append(f"| 순위 | 종목 | 점수 | 등급 | 신호 | 액션 |")
+    lines.append(f"|------|------|------|------|------|------|")
     for i, r in enumerate(kospi_watch[:5], 1):
         sig_emoji = {"Positive": "🟢", "Neutral": "⚪", "Warning": "🟡", "Critical": "🔴"}
-        lines.append(f"| {i} | {r['ticker']} — {_company_name(r['ticker'])} | {r['total_score']} | {r['grade']} | {sig_emoji.get(r['signal'], '⚔️')} {r['signal']} |")
+        lines.append(f"| {i} | {r['ticker']} — {_company_name(r['ticker'])} | {r['total_score']} | {r['grade']} | {sig_emoji.get(r['signal'], '⚔️')} {r['signal']} | {r.get('decision_v2', {}).get('action', '데이터부족')} |")
     lines.append(f"")
 
     # Section 5: Arca community
@@ -800,6 +1277,13 @@ def generate_report():
     lines.append(f"---")
     lines.append(f"")
 
+    source_digest = load_cached_source_digest()
+    if source_digest:
+        lines.append(source_digest.strip())
+        lines.append(f"")
+        lines.append(f"---")
+        lines.append(f"")
+
     # Section 6: Conclusion
     lines.append(f"## 6. 오늘의 결론")
     lines.append(f"")
@@ -811,6 +1295,17 @@ def generate_report():
     hold = [f"{r['ticker']} — {_company_name(r['ticker'])}" for r in portfolio_results if r["judgment"] in ("관심 유지", "관망", "가격 조정 대기")]
 
     lines.append(f"**포트폴리오 평균 점수:** {avg_score:.1f}/100점")
+    lines.append(f"")
+
+    lines.append(f"### 위험 대시보드")
+    if watch_risks:
+        for item in watch_risks[:5]:
+            lines.append(f"- 위험 관리: {item}")
+    elif all_warnings:
+        for item in all_warnings[:5]:
+            lines.append(f"- 확인 필요: {item}")
+    else:
+        lines.append(f"- 특이 위험 신호 없음")
     lines.append(f"")
 
     if buy_candidates:
@@ -860,7 +1355,7 @@ def generate_report():
     lines.append(f"| 실행 시간 | {elapsed:.1f}초 |")
     lines.append(f"| 포트폴리오 종목 | {len(PORTFOLIO_TICKERS)}개 |")
     lines.append(f"| NASDAQ 100 스캔 | {len(ndx_results)}개 종목 |")
-    lines.append(f"| KOSPI 상위 20 스캔 | {len(kospi_results)}개 종목 |")
+    lines.append(f"| KOSPI 상위 30 스캔 | {len(kospi_results)}개 종목 |")
     lines.append(f"| 데이터 소스 | yfinance, SaveTicker API |")
     lines.append(f"| LLM API 토큰 소비 | **0 토큰** (Python 스크립트 내부 LLM 호출 없음) |")
     lines.append(f"| 외부 API 비용 | yfinance 무료 + SaveTicker 무료 |")
@@ -887,7 +1382,7 @@ def generate_report():
             "top_buy": top_buy_candidates[:5],
             "top_warning": top_watch[:5],
         },
-        "kospi_top20_scan": {
+        "kospi_top30_scan": {
             "all": kospi_results,
             "top_buy": kospi_top[:5],
             "top_warning": kospi_watch[:5],
@@ -898,6 +1393,8 @@ def generate_report():
             "ticker": r["ticker"],
             "company_name": _company_name(r["ticker"]),
             "judgment": r["judgment"],
+            "decision_v2": r.get("decision_v2", {}),
+            "etf_comparison": r.get("etf_comparison"),
             "fundamental_score": r["fundamental"]["total_score"],
             "fundamental_grade": r["fundamental"]["grade"],
             "overall_signal": r["signal"]["overall_signal"],
@@ -938,6 +1435,7 @@ def generate_report():
             "grade": r["fundamental"]["grade"],
             "signal": r["signal"]["overall_signal"],
             "judgment": r["judgment"],
+            "decision_v2": r.get("decision_v2", {}),
             "price": price_info.get("current_price"),
             "change_1d_pct": price_info.get("1d_change_pct"),
             "change_1mo_pct": price_info.get("1mo_change_pct"),
@@ -953,6 +1451,7 @@ def generate_report():
             "score": r["total_score"],
             "grade": r["grade"],
             "signal": r["signal"],
+            "decision_v2": r.get("decision_v2", {}),
         })
     clean_data["nasdaq_warnings"] = []
     for r in top_watch[:5]:
@@ -962,6 +1461,7 @@ def generate_report():
             "score": r["total_score"],
             "grade": r["grade"],
             "signal": r["signal"],
+            "decision_v2": r.get("decision_v2", {}),
         })
     clean_data["kospi_top_buy"] = []
     for r in kospi_top[:5]:
@@ -971,6 +1471,7 @@ def generate_report():
             "score": r["total_score"],
             "grade": r["grade"],
             "signal": r["signal"],
+            "decision_v2": r.get("decision_v2", {}),
         })
     clean_data["kospi_warnings"] = []
     for r in kospi_watch[:5]:
@@ -980,6 +1481,7 @@ def generate_report():
             "score": r["total_score"],
             "grade": r["grade"],
             "signal": r["signal"],
+            "decision_v2": r.get("decision_v2", {}),
         })
     clean_path = os.path.join(REPORTS_DIR, f"investment-summary-{today_str}.json")
     with open(clean_path, "w", encoding="utf-8") as f:
@@ -1021,21 +1523,25 @@ def generate_report():
     summary_lines.append(f"포트폴리오 평균 점수: {avg_score:.1f}/100")
     sig_counts = f"🟢{pos_count} ⚪{neu_count} 🟡{warn_count} 🔴{crit_count}"
     summary_lines.append(f"신호 분포: {sig_counts}")
-    buy_short = [r['ticker'] for r in portfolio_results if r['judgment'] == '분할매수 후보'][:3]
+    buy_short = [_short_stock_label(r) for r in portfolio_results if r.get("decision_v2", {}).get("action") in ("강한 매수후보", "관심/분할매수", "관심 유지")][:3]
     if buy_short:
-        summary_lines.append(f"분할매수: {', '.join(buy_short)}")
-    watch_short = [r['ticker'] for r in portfolio_results if r['judgment'] in ('위험 증가', '제외 검토')][:3]
+        summary_lines.append(f"매수관심: {', '.join(buy_short)}")
+    watch_short = [_short_stock_label(r) for r in portfolio_results if r.get("decision_v2", {}).get("action") in ("비중축소 검토", "매도검토", "데이터부족", "손절/매도검토")][:3]
     if watch_short:
         summary_lines.append(f"위험: {', '.join(watch_short)}")
     summary_lines.append(f"")
-    nasdaq_buy_short = ', '.join([r['ticker'] for r in top_buy_candidates[:3]])
-    summary_lines.append(f"NAS100 상위: {nasdaq_buy_short}")
-    nasdaq_warn_short = ', '.join([r['ticker'] for r in top_watch[:3]])
-    summary_lines.append(f"NAS100 주의: {nasdaq_warn_short}")
-    kospi_buy_short = ', '.join([r['ticker'] for r in kospi_top[:3]])
-    summary_lines.append(f"KOSPI 상위: {kospi_buy_short}")
-    kospi_warn_short = ', '.join([r['ticker'] for r in kospi_watch[:3]])
-    summary_lines.append(f"KOSPI 주의: {kospi_warn_short}")
+    nasdaq_top_mobile = _mobile_pick_items(top_buy_candidates)
+    kospi_top_mobile = _mobile_pick_items(kospi_top)
+    summary_lines.append(_mobile_pick_line("NAS100 상위", nasdaq_top_mobile))
+    summary_lines.append(_mobile_pick_line("NAS100 주의", top_watch, exclude_tickers={r.get("ticker") for r in nasdaq_top_mobile}))
+    summary_lines.append(_mobile_pick_line("KOSPI 상위", kospi_top_mobile))
+    summary_lines.append(_mobile_pick_line("KOSPI 주의", kospi_watch, exclude_tickers={r.get("ticker") for r in kospi_top_mobile}))
+    if watch_short:
+        summary_lines.append(f"오늘 할 일: 위험 종목 확인 — {', '.join(watch_short)}")
+    elif buy_short:
+        summary_lines.append(f"오늘 할 일: 매수관심 검토 — {', '.join(buy_short)}")
+    else:
+        summary_lines.append(f"오늘 할 일: 포트폴리오 유지")
     summary_lines.append(f"")
     summary_lines.append(f"소요 시간: {elapsed:.1f}초 | LLM 토큰: 0")
     summary_text = "\n".join(summary_lines)

@@ -47,7 +47,7 @@ logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
 INITIAL_CASH   = 10_000.0
 DAILY_DCA_USD  = 29.0
 TELEGRAM_TOKEN   = os.getenv("STOCK_BOT_TOKEN", "")
-TELEGRAM_CHAT_ID = "5771238245"
+TELEGRAM_CHAT_ID = os.getenv("STOCK_BOT_CHAT_ID", "5771238245")
 
 # ── 자산 배분 (합계 = 1.0) ────────────────────────────────────────────
 ALLOC = {

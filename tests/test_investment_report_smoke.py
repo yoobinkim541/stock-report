@@ -20,7 +20,7 @@ def test_generate_report_writes_expected_files_without_network():
         old_reports_dir = ir.REPORTS_DIR
         old_portfolio = ir.PORTFOLIO_TICKERS
         old_nasdaq = ir.NASDAQ_100
-        old_kospi = ir.KOSPI_TOP20
+        old_kospi = ir.KOSPI_TOP30
         old_datetime = ir.datetime
         old_score_ticker = ir.score_ticker
         old_detect_signals = ir.detect_signals
@@ -29,12 +29,13 @@ def test_generate_report_writes_expected_files_without_network():
         old_arca_posts = ir._fetch_arca_posts
         old_company_name = ir._company_name
         old_manual_scores = ir.MANUAL_SCORES
+        old_source_digest = ir.load_cached_source_digest
 
         try:
             ir.REPORTS_DIR = tmpdir
             ir.PORTFOLIO_TICKERS = ["MSFT"]
             ir.NASDAQ_100 = ["MSFT"]
-            ir.KOSPI_TOP20 = ["005930.KS"]
+            ir.KOSPI_TOP30 = ["005930.KS"]
             ir.datetime = FixedDateTime
             ir.MANUAL_SCORES = {}
             ir.score_ticker = lambda ticker: {
@@ -63,6 +64,7 @@ def test_generate_report_writes_expected_files_without_network():
             ir._fetch_korea_indices = lambda: ("2,500.00", "850.00", "1,300.00")
             ir._fetch_arca_posts = lambda: [{"title": "테스트", "url": "https://example.com", "category": "📰뉴스", "when": "09:00", "views": "10", "likes": "2"}]
             ir._company_name = lambda ticker: f"{ticker} Corporation"
+            ir.load_cached_source_digest = lambda: "## 누적 수집 자료\n\n- saveticker 1건\n- [saveticker] AI chip demand · NVDA\n"
 
             report_path, json_path = ir.generate_report()
 
@@ -80,6 +82,10 @@ def test_generate_report_writes_expected_files_without_network():
             summary_text = summary_file.read_text(encoding="utf-8")
             assert "일일 투자 자동화 레포트" in report_text
             assert "아카라이브 커뮤니티 동향" in report_text
+            assert "누적 수집 자료" in report_text
+            assert "AI chip demand" in report_text
+            assert "위험 대시보드" in report_text
+            assert "오늘 할 일" in summary_text
             assert "MSFT — MSFT Corporation" in report_text
             assert "SPY $500.0 (+1.20%)" in summary_text
             assert "NASDAQ $600.0 (+0.80%)" in summary_text
@@ -89,7 +95,7 @@ def test_generate_report_writes_expected_files_without_network():
             ir.REPORTS_DIR = old_reports_dir
             ir.PORTFOLIO_TICKERS = old_portfolio
             ir.NASDAQ_100 = old_nasdaq
-            ir.KOSPI_TOP20 = old_kospi
+            ir.KOSPI_TOP30 = old_kospi
             ir.datetime = old_datetime
             ir.score_ticker = old_score_ticker
             ir.detect_signals = old_detect_signals
@@ -98,3 +104,4 @@ def test_generate_report_writes_expected_files_without_network():
             ir._fetch_arca_posts = old_arca_posts
             ir._company_name = old_company_name
             ir.MANUAL_SCORES = old_manual_scores
+            ir.load_cached_source_digest = old_source_digest
