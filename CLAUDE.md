@@ -8,10 +8,16 @@ deliver_investment_report.sh (크론 23:00 UTC)
   ├── barbell_strategy.py    → Phase 분류·알림 (STATE: ~/.cache/barbell_state.json)
   └── portfolio_tracker.py   → 히스토리 기록 (~/.local/share/stock-report/)
 
+kiwoom_sync_rest.py (크론 23:35 UTC = 08:35 KST, 월~금)
+  └── 키움 REST API kt00018 → portfolio_snapshot.json domestic 섹션 업데이트
+
 telegram_bot.py (상시)
   ├── fetch_market()         → barbell_strategy 전체 조회 (5분 캐시)
   ├── Phase 5min 감시        → barbell_state.json 공유 (크론과 중복 방지)
   └── 가격알림 5min 체크
+
+portfolio_sync_server.py (상시, port 8765)
+  └── 외부 잔고 데이터 수신 → portfolio_snapshot.json 업데이트
 ```
 
 ## 파일 역할 (핵심만)
@@ -28,6 +34,8 @@ telegram_bot.py (상시)
 | `order_generator.py` | Phase 기반 소수점 매수 주문서 생성 | — |
 | `source_collector.py` | 뉴스 JSONL 캐시 수집·다이제스트 | `~/reports/source-cache/*.jsonl` |
 | `stock_advisor.py` | Hermes CLI로 AI 상담 프롬프트 실행 | — |
+| `kiwoom_sync_rest.py` | 키움 REST API 국내주식 잔고 동기화 (크론 08:35 KST) | — |
+| `portfolio_sync_server.py` | 외부 잔고 수신 Flask 서버 (port 8765, Bearer 인증) | — |
 
 ## 텔레그램 봇 명령어
 
@@ -84,6 +92,10 @@ telegram_bot.py (상시)
 |------|------|--------|
 | `STOCK_BOT_TOKEN` | ✅ | — |
 | `STOCK_BOT_CHAT_ID` | — | `5771238245` |
+| `KIWOOM_API_KEY` | — | — (openapi.kiwoom.com 발급) |
+| `KIWOOM_API_SECRET` | — | — |
+| `SYNC_TOKEN` | — | — (portfolio_sync_server 인증) |
+| `SYNC_PORT` | — | `8765` |
 | `SAVE_TICKER_API_BASE` | — | `https://saveticker.com/api` |
 | `INVESTMENT_REPORT_MAX_NASDAQ_SCAN` | — | `100` |
 | `INVESTMENT_REPORT_MAX_KOSPI_SCAN` | — | `30` |
@@ -124,3 +136,4 @@ MSFT, QQQI, ORCL, NOW, CRM, SAP, UNH, SGOV, CPNG, NVDA, GOOGL, SPMO
 - 출력은 한국어 기본
 - 텔레그램 메시지 4000자 초과 시 분할 (4096자 제한)
 - `STOCK_BOT_CHAT_ID` 는 env var — 코드에 하드코딩 금지
+- `KIWOOM_API_KEY` / `KIWOOM_API_SECRET` 절대 커밋 금지
