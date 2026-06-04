@@ -42,8 +42,8 @@ def test_load_recent_events_reads_multiple_days_and_dedupes(tmp_path):
 
 def test_build_digest_groups_by_source_and_limits_items():
     events = [
-        {"source": "saveticker", "title": "AI chip demand", "url": "https://e/1", "tickers": ["NVDA"]},
-        {"source": "arca", "title": "환율 경계", "url": "https://e/2", "category": "📰뉴스"},
+        {"source": "saveticker", "source_url": "https://saveticker.com/api", "title": "AI chip demand", "url": "https://e/1", "tickers": ["NVDA"]},
+        {"source": "arca", "source_url": "https://arca.live/b/stock", "title": "환율 경계", "url": "https://e/2", "category": "📰뉴스"},
     ]
 
     digest = sc.build_digest(events, limit=5)
@@ -51,5 +51,108 @@ def test_build_digest_groups_by_source_and_limits_items():
     assert "누적 수집 자료" in digest
     assert "saveticker 1건" in digest
     assert "arca 1건" in digest
+    assert "신뢰 소스" in digest
+    assert "https://saveticker.com/api" in digest
     assert "AI chip demand" in digest
     assert "NVDA" in digest
+
+
+def test_fetch_market_snapshot_events_includes_common_market_and_portfolio_data():
+    import pandas as pd
+
+    class FakeTicker:
+        def __init__(self, ticker):
+            self.ticker = ticker
+
+        def history(self, period, auto_adjust=True):
+            assert period == "1y"
+            return pd.DataFrame({"Close": list(range(100, 130))})
+
+    class FakeYF:
+        Ticker = FakeTicker
+
+    events = sc.fetch_market_snapshot_events(yf_module=FakeYF)
+    titles = "\n".join(e["title"] for e in events)
+
+    assert len(events) >= 40
+    assert "QQQ Nasdaq 100 ETF" in titles
+    assert "XLK Technology ETF" in titles
+    assert "HYG High-yield bond ETF" in titles
+    assert "MSFT Portfolio holding MSFT" in titles
+    assert all(e["source"] == "yahoo_finance" for e in events)
+
+
+def test_fetch_fred_macro_events_parses_public_csv(monkeypatch):
+    class FakeResponse:
+        text = "observation_date,DGS10\n2026-06-01,4.10\n2026-06-02,.\n2026-06-03,4.15\n"
+
+        def raise_for_status(self):
+            return None
+
+    calls = []
+
+    def fake_get(url, **kwargs):
+        calls.append((url, kwargs))
+        return FakeResponse()
+
+    monkeypatch.setattr(sc.requests, "get", fake_get)
+
+    events = sc.fetch_fred_macro_events({"DGS10": "미국 10년 국채금리"})
+
+    assert len(events) == 1
+    assert calls[0][0] == "https://fred.stlouisfed.org/graph/fredgraph.csv"
+    assert calls[0][1]["params"] == {"id": "DGS10"}
+    assert events[0]["source"] == "fred"
+    assert events[0]["source_url"] == "https://fred.stlouisfed.org"
+    assert "DGS10 미국 10년 국채금리: 2026-06-03 4.15" in events[0]["title"]
+    assert events[0]["metrics"] == {"series_id": "DGS10", "current": 4.15, "delta": 0.05}
+
+
+def test_fred_series_includes_common_treasury_maturities():
+    assert "DGS5" in sc.FRED_SERIES
+    assert "DGS10" in sc.FRED_SERIES
+    assert "DGS20" in sc.FRED_SERIES
+    assert "DGS30" in sc.FRED_SERIES
+
+
+def test_parse_world_gov_bonds_common_maturities():
+    markdown = """
+|  | [5 years](https://www.worldgovernmentbonds.com/bond-historical-data/united-states/5-years/) | 4.163% | +7.8 bp |
+|  | [10 years](https://www.worldgovernmentbonds.com/bond-historical-data/united-states/10-years/) | 4.457% | +1.4 bp |
+|  | [20 years](https://www.worldgovernmentbonds.com/bond-historical-data/united-states/20-years/) | 4.969% | -5.0 bp |
+|  | [30 years](https://www.worldgovernmentbonds.com/bond-historical-data/united-states/30-years/) | 4.966% | -5.3 bp |
+"""
+
+    yields = sc._parse_yields_from_world_gov_bonds(markdown, maturities=(5, 10, 20, 30))
+
+    assert yields == {
+        "5Y": 4.163,
+        "10Y": 4.457,
+        "20Y": 4.969,
+        "30Y": 4.966,
+    }
+
+
+def test_fetch_world_gov_bond_events_emits_common_maturities(monkeypatch):
+    class FakeResponse:
+        text = """
+|  | [5 years](https://www.worldgovernmentbonds.com/bond-historical-data/united-states/5-years/) | 4.163% | +7.8 bp |
+|  | [10 years](https://www.worldgovernmentbonds.com/bond-historical-data/united-states/10-years/) | 4.457% | +1.4 bp |
+|  | [20 years](https://www.worldgovernmentbonds.com/bond-historical-data/united-states/20-years/) | 4.969% | -5.0 bp |
+|  | [30 years](https://www.worldgovernmentbonds.com/bond-historical-data/united-states/30-years/) | 4.966% | -5.3 bp |
+"""
+
+        def raise_for_status(self):
+            return None
+
+    monkeypatch.setattr(sc.requests, "get", lambda *args, **kwargs: FakeResponse())
+
+    events = sc.fetch_world_gov_bond_events({"united-states": "미국 국채금리"})
+
+    assert [event["metrics"]["maturity"] for event in events] == ["5Y", "10Y", "20Y", "30Y"]
+    assert "미국 국채금리 5Y: 4.163%" in events[0]["title"]
+    assert "미국 국채금리 30Y: 4.966%" in events[-1]["title"]
+    # 각 만기가 고유 URL fragment를 가져 append_events 중복 제거에 걸리지 않아야 함
+    urls = [event["url"] for event in events]
+    assert len(set(urls)) == 4
+    assert "#30Y" in urls[-1]

@@ -31,6 +31,14 @@ class TestDetectContentType(unittest.TestCase):
         text = "매도 체결 처분 sell 거래"
         self.assertEqual(ap.detect_content_type(text), "sell")
 
+    def test_mobile_ticker_slash_value_format_is_portfolio(self):
+        text = (
+            "QQQI / 35.4069주 / $2,018.88 / +$126.35 (6.68%)\n"
+            "ORCL / 6.3112주 / $1,438.85 / +$297.59 (26.08%)\n"
+            "UNH / 3.3264주 / $1,323.61 / +$279.9 (26.82%)"
+        )
+        self.assertEqual(ap.detect_content_type(text), "portfolio")
+
 
 class TestParsePortfolioFromText(unittest.TestCase):
     def test_basic_line(self):
@@ -68,6 +76,39 @@ class TestParsePortfolioFromText(unittest.TestCase):
         text = "MSFT 2 400.00 450.00"
         holdings = ap.parse_portfolio_from_text(text)
         self.assertEqual(holdings[0]["name"], ap.KNOWN_TICKERS["MSFT"])
+
+    def test_korean_name_mobile_ocr_window(self):
+        text = (
+            "마이크로소프트             $1,268.25\n"
+            "5.6003주                  +$85.27 (7.21%)\n"
+            "엔비디아                  $594.07\n"
+            "2.7875주                  +$63.63 (11.99%)\n"
+            "SAP(ADR)                  $112.96\n"
+            "0.5944주                  +$7.66 (7.28%)\n"
+        )
+        holdings = ap.parse_portfolio_from_text(text)
+        by_ticker = {h["ticker"]: h for h in holdings}
+        self.assertEqual(by_ticker["MSFT"]["shares"], 5.6003)
+        self.assertEqual(by_ticker["MSFT"]["value_usd"], 1268.25)
+        self.assertEqual(by_ticker["NVDA"]["shares"], 2.7875)
+        self.assertEqual(by_ticker["SAP"]["shares"], 0.5944)
+
+    def test_mobile_ticker_slash_value_format(self):
+        text = (
+            "QQQI / 35.4069주 / $2,018.88 / +$126.35 (6.68%)\n"
+            "ORCL / 6.3112주 / $1,438.85 / +$297.59 (26.08%)\n"
+            "SAP / 0.5944주 / $112.96 / +$7.66 (7.28%)"
+        )
+        holdings = ap.parse_portfolio_from_text(text)
+        by_ticker = {h["ticker"]: h for h in holdings}
+        self.assertEqual(by_ticker["QQQI"]["shares"], 35.4069)
+        self.assertEqual(by_ticker["QQQI"]["value_usd"], 2018.88)
+        self.assertEqual(by_ticker["QQQI"]["pnl_usd"], 126.35)
+        self.assertEqual(by_ticker["QQQI"]["cost_usd"], 1892.53)
+        self.assertAlmostEqual(by_ticker["QQQI"]["avg_price_usd"], 53.45, places=2)
+        self.assertAlmostEqual(by_ticker["QQQI"]["current_price_usd"], 57.0194)
+        self.assertEqual(by_ticker["SAP"]["shares"], 0.5944)
+        self.assertEqual(by_ticker["SAP"]["value_usd"], 112.96)
 
 
 class TestParseSellsFromText(unittest.TestCase):

@@ -71,6 +71,11 @@ from holding_manager import (
     refresh_portfolio_prices, set_target_weight, show_target_weights,
 )
 from stock_advisor import ask_portfolio_advisor
+try:
+    from source_collector import build_digest as build_source_digest, load_recent_events as load_source_events
+except Exception:
+    build_source_digest = None
+    load_source_events = None
 
 logger = logging.getLogger(__name__)
 logging.basicConfig(
@@ -87,11 +92,87 @@ ALERT_CHECK_SECS   = 300   # 가격 알림 체크 주기(초)
 PHASE_CHECK_SECS   = 300   # Phase 변화 체크 주기(초, 5분)
 PID_FILE           = "/tmp/barbell_bot.pid"
 
+BOT_COMMANDS = [
+    {"command": "help",           "description": "명령어 목록"},
+    {"command": "status",         "description": "Phase + 핵심 수치 (5분 캐시)"},
+    {"command": "phase",          "description": "Phase 미터 + 행동 지침"},
+    {"command": "report",         "description": "전체 바벨 리포트 (실시간)"},
+    {"command": "sim",            "description": "시장 상태 시뮬레이션"},
+    {"command": "portfolio",      "description": "포트폴리오 실시간 현황"},
+    {"command": "rebalance",      "description": "리밸런싱 계산기"},
+    {"command": "history",        "description": "성과 히스토리 (1d/7d/30d/90d)"},
+    {"command": "sgov",           "description": "SGOV 실탄 상태"},
+    {"command": "dca",            "description": "오늘 DCA 배분"},
+    {"command": "order",          "description": "소수점 매수 주문서"},
+    {"command": "holding",        "description": "보유 종목 조회/매수·매도/목표비중/DCA/배당"},
+    {"command": "tax",            "description": "실현손익 & 양도세 (sim/sell/history/delete/import)"},
+    {"command": "ask",            "description": "AI 포트폴리오 상담"},
+    {"command": "alert",          "description": "가격 알림 관리 (add/list/remove)"},
+]
+
+BOT_COMMAND_ALIASES = {
+    "/portpolio": "/portfolio",
+    "/protfolio": "/portfolio",
+    "/porfolio": "/portfolio",
+}
+
+
+INTERNAL_TEXT_ROUTES = [
+    ("/portfolio", ("포트폴리오", "portfolio", "보유현황", "보유 현황")),
+    ("/status", ("상태", "현황", "status")),
+    ("/phase", ("phase", "페이즈", "단계")),
+    ("/dca", ("dca", "적립", "배분")),
+    ("/sgov", ("sgov", "실탄")),
+    ("/history", ("history", "히스토리", "성과")),
+    ("/rebalance", ("rebalance", "리밸런싱")),
+    ("/order", ("주문서", "매수 주문")),
+    ("/help", ("명령어", "도움말", "help")),
+]
+
+
 # ══════════════════════════════════════════════════════════════════════
 #  시장 데이터 캐시
 # ══════════════════════════════════════════════════════════════════════
 
 _cache: dict = {}
+
+
+def fetch_benchmark_returns(tickers=("QQQ", "SPY"), yf_module=None) -> dict:
+    """Fetch current/YTD benchmark returns for advisor grounding."""
+    if yf_module is None:
+        import yfinance as yf_module
+
+    returns = {}
+    for ticker in tickers:
+        try:
+            h = yf_module.Ticker(ticker).history(period="ytd", auto_adjust=True)
+            if h.empty:
+                continue
+            close = h["Close"].dropna()
+            if len(close) < 2:
+                continue
+            first = float(close.iloc[0])
+            current = float(close.iloc[-1])
+            returns[ticker] = {
+                "current": round(current, 2),
+                "ytd_pct": round((current - first) / first * 100, 2) if first > 0 else None,
+            }
+        except Exception:
+            continue
+    return returns
+
+
+def load_advisor_source_digest(hours: int = 24) -> str:
+    """Load compact trusted-source cache for /ask grounding."""
+    if not build_source_digest or not load_source_events:
+        return ""
+    try:
+        events = load_source_events(hours=hours)
+    except Exception:
+        return ""
+    if not events:
+        return ""
+    return build_source_digest(events, limit=10)
 
 
 def fetch_market(force: bool = False) -> dict:
@@ -107,12 +188,16 @@ def fetch_market(force: bool = False) -> dict:
     fg   = fetch_fear_greed()
     fx   = fetch_exchange_rate()
     port = fetch_portfolio_value()
+    bench = fetch_benchmark_returns()
+    source_digest = load_advisor_source_digest()
     div  = estimate_qqqi_monthly_dividend(port["qqqi_shares"], port["qqqi_usd"])
     market_type, phase_key = classify_market(qqq, rsi, vix)
 
     data = {
         "qqq": qqq, "rsi": rsi, "vix": vix, "ma": ma,
         "fear_greed": fg,
+        "benchmarks": bench,
+        "source_digest": source_digest,
         "exchange_rate": fx, "portfolio": port, "qqqi_div": div,
         "market_type": market_type, "phase_key": phase_key,
         "fetched_at": datetime.now().strftime("%m/%d %H:%M"),
@@ -135,6 +220,24 @@ def _api(method: str, **kwargs) -> dict:
     except Exception as e:
         logger.error(f"API {method}: {e}")
         return {}
+
+
+def configure_bot_commands():
+    """Telegram 메뉴에 BOT_COMMANDS 등록 (setMyCommands, 전 scope)."""
+    scopes = [
+        None,  # default scope
+        {"type": "all_private_chats"},
+        {"type": "all_chat_administrators"},
+    ]
+    success = 0
+    for scope in scopes:
+        params = {"commands": BOT_COMMANDS}
+        if scope is not None:
+            params["scope"] = scope
+        result = _api("setMyCommands", **params)
+        if result.get("result") is True:
+            success += 1
+    logger.info("setMyCommands 완료 (%d개 scope, %d개 명령어)", success, len(BOT_COMMANDS))
 
 
 def send(chat_id: str, text: str):
@@ -171,28 +274,13 @@ def get_updates(offset: int | None = None) -> list:
 # ══════════════════════════════════════════════════════════════════════
 
 def cmd_help() -> str:
-    return (
-        "🏋️ Intelligence Barbell Bot\n"
-        "━━━━━━━━━━━━━━━━━━━━━━━\n"
-        "/status           빠른 현황 (Phase + 핵심 수치)\n"
-        "/ask 질문         포트폴리오 상담\n"
-        "/phase            Phase 미터 + 행동 지침\n"
-        "/portfolio        포트폴리오 실시간 현황\n"
-        "/dca              오늘 DCA 배분\n"
-        "/order            소수점 매수 주문서 (키움 즉시 입력)\n"
-        "/tax              올해 실현손익 & 양도세  |  sim/sell/history/delete/import apply\n"
-        "/sgov             SGOV 실탄 상태\n"
-        "/history          성과 히스토리 (1d/7d/30d/90d)\n"
-        "/rebalance        리밸런싱 계산기\n"
-        "/sim              시뮬레이션 리포트\n"
-        "/holding          보유 종목 조회/매수·매도/목표비중/DCA 비중/배당/스냅샷 반영\n"
-        "/report           전체 바벨 리포트 (실시간)\n"
-        "/alert            가격 알림 관리\n"
-        "/help             이 메시지\n"
-        "━━━━━━━━━━━━━━━━━━━━━━━\n"
-        "📎 이미지·PDF 전송 → 포트폴리오·매도내역 자동 파싱\n"
-        f"캐시: {CACHE_TTL // 60}분  ·  /report·/order는 항상 실시간"
-    )
+    lines = ["🏋️ Intelligence Barbell Bot", "━━━━━━━━━━━━━━━━━━━━━━━"]
+    for cmd in BOT_COMMANDS:
+        lines.append(f"/{cmd['command']:20s} {cmd['description']}")
+    lines.append("━━━━━━━━━━━━━━━━━━━━━━━")
+    lines.append("📎 이미지·PDF 전송 → 포트폴리오·매도내역 자동 파싱")
+    lines.append(f"캐시: {CACHE_TTL // 60}분  ·  /report·/order는 항상 실시간")
+    return "\n".join(lines)
 
 
 def cmd_status(d: dict) -> str:
@@ -259,11 +347,24 @@ def cmd_portfolio(d: dict) -> str:
     total_krw = int(port["total_usd"] * fx)
     sgov_r = port["sgov_usd"] / port["total_usd"] if port["total_usd"] > 0 else 0
     qqqi_r = port["qqqi_usd"] / port["total_usd"] if port["total_usd"] > 0 else 0
+    pnl_usd = port.get("pnl_usd", 0.0)
+    return_pct = port.get("return_pct", 0.0)
+    pnl_sign = "+" if pnl_usd >= 0 else "-"
+    domestic_cost = port.get("domestic_cost_krw", 0)
+    domestic_value = port.get("domestic_value_krw", 0)
+    domestic_pnl = port.get("domestic_pnl_krw", 0)
+    overall_cost = port.get("cost_usd", 0) * fx + domestic_cost
+    overall_value = port["total_usd"] * fx + domestic_value
+    overall_pnl = pnl_usd * fx + domestic_pnl
+    overall_return = overall_pnl / overall_cost * 100 if overall_cost > 0 else 0.0
+    overall_sign = "+" if overall_pnl >= 0 else "-"
 
     lines = [
         f"💼 포트폴리오  ({d['fetched_at']})",
         "━━━━━━━━━━━━━━━━━━━━━━━",
-        f"  총액  ${port['total_usd']:>8,.2f}  (₩{total_krw:,})",
+        f"  총액  ${port['total_usd']:,.2f}  {pnl_sign}${abs(pnl_usd):,.2f} ({pnl_sign}{abs(return_pct):.1f}%)",
+        f"  원화  ₩{total_krw:,}",
+        f"  전체  ₩{int(overall_value):,}  {overall_sign}₩{abs(int(overall_pnl)):,} ({overall_sign}{abs(overall_return):.1f}%)",
         f"  환율  {fx:,.1f}원/USD",
         f"  SGOV  ${port['sgov_usd']:>7,.2f}  {_bar(sgov_r, 10)}  {sgov_r*100:.1f}%  실탄",
         f"  QQQI  ${port['qqqi_usd']:>7,.2f}  {_bar(min(qqqi_r/0.35, 1), 10)}  {qqqi_r*100:.1f}%  배당엔진",
@@ -993,6 +1094,14 @@ def handle_attachment(msg: dict, chat_id: str):
                  "수동 입력:\n"
                  "/holding buy TICKER 수량 평단가")
             return
+        if len(holdings) < 3:
+            send(chat_id,
+                 "⚠️ 포트폴리오 인식 불완전\n\n"
+                 f"인식된 종목이 {len(holdings)}개뿐이라 스냅샷을 저장하지 않았습니다.\n"
+                 "잘못 적용되면 기존 포트폴리오가 망가질 수 있습니다.\n\n"
+                 "더 선명한 스크린샷/PDF를 보내거나 수동 입력해주세요:\n"
+                 "/holding buy TICKER 수량 평단가")
+            return
         save_pending_snapshot(holdings)
         send(chat_id, build_pending_snapshot_summary({"parsed_at": datetime.now().isoformat(), "holdings": holdings}))
 
@@ -1006,6 +1115,12 @@ def handle_attachment(msg: dict, chat_id: str):
                  "💡 매도내역으로 인식했습니다.\n\n"
                  + build_pending_sells_summary({"parsed_at": datetime.now().isoformat(), "sells": sells}))
         elif holdings:
+            if len(holdings) < 3:
+                send(chat_id,
+                     "⚠️ 포트폴리오 인식 불완전\n\n"
+                     f"인식된 종목이 {len(holdings)}개뿐이라 스냅샷을 저장하지 않았습니다.\n"
+                     "캡션에 '포트폴리오'를 포함해 더 선명한 파일을 다시 보내거나 수동 입력해주세요.")
+                return
             save_pending_snapshot(holdings)
             send(chat_id,
                  "💡 포트폴리오 현황으로 인식했습니다.\n\n"
@@ -1017,6 +1132,42 @@ def handle_attachment(msg: dict, chat_id: str):
                  "명령어로 직접 입력해주세요:\n"
                  "/holding buy TICKER 수량 평단가\n"
                  "/tax sell TICKER 수량 매수단가 매도단가")
+
+
+def handle_plain_text(text: str, chat_id: str) -> bool:
+    """Plain portfolio/sell text pasted into chat -> pending save."""
+    content_type = detect_content_type(text, "")
+
+    if content_type == "sell":
+        sells = parse_sells_from_text(text)
+        if sells:
+            save_pending_sells(sells)
+            send(chat_id, build_pending_sells_summary({"parsed_at": datetime.now().isoformat(), "sells": sells}))
+            return True
+        return False
+
+    if content_type == "portfolio":
+        holdings = parse_portfolio_from_text(text)
+        if not holdings:
+            send(chat_id,
+                 "⚠️ 포트폴리오 인식 실패\n\n"
+                 "알려진 종목(NVDA, ORCL 등) 보유 현황을 인식하지 못했습니다.\n"
+                 "수동 입력:\n"
+                 "/holding buy TICKER 수량 평단가")
+            return True
+        if len(holdings) < 3:
+            send(chat_id,
+                 "⚠️ 포트폴리오 인식 불완전\n\n"
+                 f"인식된 종목이 {len(holdings)}개뿐이라 스냅샷을 저장하지 않았습니다.\n"
+                 "잘못 적용되면 기존 포트폴리오가 망가질 수 있습니다.\n\n"
+                 "더 많은 보유 종목을 포함해 다시 붙여넣거나 수동 입력해주세요:\n"
+                 "/holding buy TICKER 수량 평단가")
+            return True
+        save_pending_snapshot(holdings)
+        send(chat_id, build_pending_snapshot_summary({"parsed_at": datetime.now().isoformat(), "holdings": holdings}))
+        return True
+
+    return False
 
 
 def cmd_apply_snapshot(chat_id: str):
@@ -1050,12 +1201,22 @@ def cmd_apply_snapshot(chat_id: str):
 
     for h in holdings:
         ticker = h["ticker"]
+        cost_usd = round(h["shares"] * h["avg_price_usd"], 4)
+        value_usd = round(h.get("value_usd", h["shares"] * h["current_price_usd"]), 4)
+        pnl_usd = round(value_usd - cost_usd, 4)
+        return_pct = round((pnl_usd / cost_usd) * 100, 2) if cost_usd else 0.0
+
         if ticker in existing:
             old_sh  = existing[ticker].get("shares", 0)
             old_avg = existing[ticker].get("avg_price_usd", 0)
+            existing[ticker]["name"]              = h["name"]
             existing[ticker]["shares"]            = h["shares"]
             existing[ticker]["avg_price_usd"]     = h["avg_price_usd"]
             existing[ticker]["current_price_usd"] = h["current_price_usd"]
+            existing[ticker]["cost_usd"]          = cost_usd
+            existing[ticker]["value_usd"]         = value_usd
+            existing[ticker]["pnl_usd"]           = pnl_usd
+            existing[ticker]["return_pct"]        = return_pct
             changes.append(
                 f"  {ticker} ({h['name']})\n"
                 f"    수량: {old_sh} → {h['shares']}주\n"
@@ -1069,10 +1230,10 @@ def cmd_apply_snapshot(chat_id: str):
                 "shares":            h["shares"],
                 "avg_price_usd":     h["avg_price_usd"],
                 "current_price_usd": h["current_price_usd"],
-                "cost_usd":          round(h["shares"] * h["avg_price_usd"], 4),
-                "value_usd":         round(h["shares"] * h["current_price_usd"], 4),
-                "pnl_usd":           0.0,
-                "return_pct":        0.0,
+                "cost_usd":          cost_usd,
+                "value_usd":         value_usd,
+                "pnl_usd":           pnl_usd,
+                "return_pct":        return_pct,
             }
             snap.setdefault("overseas_general", {}).setdefault("holdings_usd", []).append(new_entry)
             existing[ticker] = new_entry
@@ -1280,6 +1441,24 @@ def notify_phase_change():
 # ══════════════════════════════════════════════════════════════════════
 #  명령어 라우터
 # ══════════════════════════════════════════════════════════════════════
+def _normalize_message_text(text: str) -> str:
+    """Plain text (no leading /) from authorized chat is routed as /ask."""
+    text = text.strip()
+    if text and not text.startswith("/"):
+        return "/ask " + text
+    return text
+
+
+def _infer_internal_command(text: str) -> str | None:
+    """Route natural-language requests for built-in safe commands before LLM advice."""
+    lower = text.strip().lower()
+    if not lower:
+        return None
+    for command, keywords in INTERNAL_TEXT_ROUTES:
+        if any(keyword.lower() in lower for keyword in keywords):
+            return command
+    return None
+
 
 _SIMPLE_CMDS = {
     "/help":      lambda d, _: cmd_help(),
@@ -1297,6 +1476,13 @@ def dispatch(text: str, chat_id: str):
     parts = text.strip().split()
     cmd   = parts[0].lower().split("@")[0]
     args  = parts[1:]
+
+    cmd = BOT_COMMAND_ALIASES.get(cmd, cmd)
+    if cmd == "/ask":
+        inferred = _infer_internal_command(" ".join(args))
+        if inferred:
+            cmd = inferred
+            args = []
 
     # /report : 별도 처리 (내부에서 send 직접 호출)
     if cmd == "/report":
@@ -1338,7 +1524,7 @@ def dispatch(text: str, chat_id: str):
             return
         stop_typing = keep_typing(chat_id)
         try:
-            d = fetch_market()
+            d = fetch_market(force=True)
             send(chat_id, ask_portfolio_advisor(" ".join(args), d))
         except Exception as e:
             send(chat_id, f"❌ 오류: {e}")
@@ -1358,7 +1544,11 @@ def dispatch(text: str, chat_id: str):
 
     typing(chat_id)
     try:
-        d = fetch_market()
+        if cmd == "/portfolio":
+            refresh_portfolio_prices()
+            d = fetch_market(force=True)
+        else:
+            d = fetch_market()
         send(chat_id, fn(d, chat_id))
     except Exception as e:
         send(chat_id, f"❌ 오류: {e}")
@@ -1377,6 +1567,7 @@ def run():
     with open(PID_FILE, "w") as f:
         f.write(str(os.getpid()))
     logger.info(f"🤖 Barbell Bot 시작 (PID {os.getpid()})")
+    configure_bot_commands()
     send(ALLOWED_CHAT_ID, "🤖 Barbell Bot 온라인 ✅\n/help 로 명령어 확인")
 
     offset: int | None  = None
@@ -1393,7 +1584,7 @@ def run():
                 text    = msg.get("text", "")
 
                 has_attachment = "photo" in msg or "document" in msg
-                if not has_attachment and not text.startswith("/"):
+                if not has_attachment and not text.strip():
                     continue
                 if chat_id != ALLOWED_CHAT_ID:
                     logger.warning(f"차단: chat_id {chat_id}")
@@ -1406,6 +1597,11 @@ def run():
                     handle_attachment(msg, chat_id)
                     continue
 
+                if not text.startswith("/") and handle_plain_text(text, chat_id):
+                    logger.info("일반 텍스트를 스냅샷/매도내역으로 처리")
+                    continue
+
+                text = _normalize_message_text(text)
                 logger.info(f"수신: {text!r}")
                 dispatch(text, chat_id)
 

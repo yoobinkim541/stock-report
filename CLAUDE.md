@@ -36,6 +36,7 @@ portfolio_sync_server.py (상시, port 8765)
 | `stock_advisor.py` | Hermes CLI로 AI 상담 프롬프트 실행 | — |
 | `kiwoom_sync_rest.py` | 키움 REST API 국내주식 잔고 동기화 (크론 08:35 KST) | — |
 | `portfolio_sync_server.py` | 외부 잔고 수신 Flask 서버 (port 8765, Bearer 인증) | — |
+| `bot_healthcheck.py` | 봇·서버 상태 자동 점검 (크론 30분, 문제 시만 알림) | `/tmp/healthcheck_last_alert.json` |
 
 ## 텔레그램 봇 명령어
 

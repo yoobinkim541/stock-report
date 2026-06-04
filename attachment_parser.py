@@ -39,6 +39,21 @@ KNOWN_TICKERS: dict[str, str] = {
     "SPMO":  "S&P500 모멘텀 ETF",
 }
 
+KNOWN_ALIASES: dict[str, tuple[str, ...]] = {
+    "MSFT": ("마이크로소프트", "MICROSOFT"),
+    "QQQI": ("QQQI",),
+    "ORCL": ("오라클", "ORACLE"),
+    "NOW": ("서비스나우", "SERVICENOW", "SERVICE NOW"),
+    "CRM": ("세일스포스", "세일스누스", "SALESFORCE"),
+    "SAP": ("SAP", "SAP(ADR)"),
+    "UNH": ("유나이티드헬스", "UNITEDHEALTH"),
+    "SGOV": ("SGOV", "초단기 국채"),
+    "CPNG": ("쿠팡", "COUPANG"),
+    "NVDA": ("엔비디아", "NVIDIA"),
+    "GOOGL": ("알파벳", "GOOGLE", "ALPHABET"),
+    "SPMO": ("SPMO", "모멘텀"),
+}
+
 
 def _ensure_dir():
     DATA_DIR.mkdir(parents=True, exist_ok=True)
@@ -68,26 +83,33 @@ def extract_text_from_pdf(path: str) -> str | None:
 
 def extract_text_from_image(path: str) -> str | None:
     """이미지에서 OCR (tesseract kor+eng, subprocess 직접 호출)."""
-    out_file = None
+    out_files = []
     try:
-        with tempfile.NamedTemporaryFile(suffix=".txt", delete=False) as tf:
-            out_base = tf.name[:-4]
-        out_file = out_base + ".txt"
-        subprocess.run(
-            ["tesseract", path, out_base, "-l", "kor+eng", "--psm", "6"],
-            capture_output=True, text=True, timeout=30,
-        )
-        if os.path.exists(out_file):
-            with open(out_file, encoding="utf-8", errors="ignore") as f:
-                text = f.read()
-            return text if text.strip() else None
+        parts = []
+        for psm in ("6", "11"):
+            with tempfile.NamedTemporaryFile(suffix=".txt", delete=False) as tf:
+                out_base = tf.name[:-4]
+            out_file = out_base + ".txt"
+            out_files.append(out_file)
+            subprocess.run(
+                ["tesseract", path, out_base, "-l", "kor+eng", "--psm", psm],
+                capture_output=True, text=True, timeout=30,
+            )
+            if os.path.exists(out_file):
+                with open(out_file, encoding="utf-8", errors="ignore") as f:
+                    text = f.read()
+                if text.strip():
+                    parts.append(text)
+        text = "\n".join(parts)
+        return text if text.strip() else None
     except FileNotFoundError:
         logger.warning("tesseract 바이너리 없음 — OCR 불가")
     except Exception as e:
         logger.warning(f"OCR 실패: {e}")
     finally:
-        if out_file and os.path.exists(out_file):
-            os.unlink(out_file)
+        for out_file in out_files:
+            if os.path.exists(out_file):
+                os.unlink(out_file)
     return None
 
 
@@ -108,7 +130,26 @@ def _find_ticker(line: str) -> str | None:
     for t in KNOWN_TICKERS:
         if re.search(r'(?<![A-Z])' + t + r'(?![A-Z])', upper):
             return t
+    compact = re.sub(r'\s+', '', upper)
+    for ticker, aliases in KNOWN_ALIASES.items():
+        for alias in aliases:
+            if re.sub(r'\s+', '', alias.upper()) in compact:
+                return ticker
     return None
+
+
+def _parse_money(line: str) -> list[float]:
+    vals: list[float] = []
+    for sign, num in re.findall(r'([+-]?)\s*\$\s*([\d,]+(?:\.\d+)?)', line):
+        value = float(num.replace(',', ''))
+        vals.append(-value if sign == '-' else value)
+    return vals
+
+
+def _normalize_shares(value: float) -> float:
+    if value >= 10000 and float(value).is_integer():
+        return value / 10000
+    return value
 
 
 def detect_content_type(text: str, caption: str = "") -> str:
@@ -118,12 +159,20 @@ def detect_content_type(text: str, caption: str = "") -> str:
     """
     hint = (caption + " " + text[:500]).lower()
     sell_score = sum(1 for k in ["매도", "sell", "거래", "체결", "양도", "처분"] if k in hint)
-    port_score = sum(1 for k in ["보유", "잔고", "현황", "평균", "평단", "portfolio", "계좌"] if k in hint)
+    port_score = sum(1 for k in ["보유", "잔고", "현황", "평균", "평단", "portfolio", "계좌", "포트폴리오"] if k in hint)
 
     if sell_score > port_score:
         return "sell"
     if port_score > sell_score:
         return "portfolio"
+
+    portfolio_lines = 0
+    for line in text.splitlines():
+        if _find_ticker(line) and re.search(r'[\d,]+(?:\.\d+)?\s*주', line) and "$" in line:
+            portfolio_lines += 1
+    if portfolio_lines >= 3:
+        return "portfolio"
+
     return "unknown"
 
 
@@ -139,33 +188,70 @@ def parse_portfolio_from_text(text: str) -> list[dict]:
     """
     results: list[dict] = []
     seen: set[str] = set()
+    lines = [line.strip() for line in text.splitlines()]
 
-    for line in text.splitlines():
-        line = line.strip()
+    for i, line in enumerate(lines):
         if not line:
             continue
         ticker = _find_ticker(line)
         if not ticker or ticker in seen:
             continue
 
+        window = "\n".join(lines[i:i + 4])
         clean_line = _DATE_RE.sub("", line)
         nums = _parse_nums(clean_line)
+        share_match = re.search(r'([\d,]+(?:\.\d+)?)\s*주', window)
+        money = _parse_money(window)
 
-        if not nums:
+        if not nums and not share_match:
             continue
 
-        shares       = nums[0]
-        avg_price    = nums[1] if len(nums) > 1 else 0.0
-        current_price = nums[2] if len(nums) > 2 else avg_price
+        value_usd = money[0] if money else None
+        pnl_usd = money[1] if len(money) > 1 else None
+        if share_match:
+            shares = _normalize_shares(float(share_match.group(1).replace(',', '')))
+            if value_usd is not None and pnl_usd is not None and shares:
+                cost_usd = value_usd - pnl_usd
+                avg_price = cost_usd / shares
+            else:
+                cost_usd = None
+                avg_price = 0.0
+            current_price = round(value_usd / shares, 4) if value_usd and shares else 0.0
+        elif money:
+            next_nums = _parse_nums("\n".join(lines[i + 1:i + 3]))
+            if not next_nums:
+                continue
+            shares = _normalize_shares(next_nums[0])
+            if value_usd is not None and pnl_usd is not None and shares:
+                cost_usd = value_usd - pnl_usd
+                avg_price = cost_usd / shares
+            else:
+                cost_usd = None
+                avg_price = 0.0
+            current_price = round(value_usd / shares, 4) if value_usd and shares else 0.0
+        else:
+            shares        = nums[0]
+            avg_price     = nums[1] if len(nums) > 1 else 0.0
+            current_price = nums[2] if len(nums) > 2 else avg_price
+            value_usd     = round(shares * current_price, 4) if current_price else value_usd
+            pnl_usd       = None
+            cost_usd      = None
 
         seen.add(ticker)
-        results.append({
+        result = {
             "ticker":            ticker,
             "name":              KNOWN_TICKERS[ticker],
             "shares":            round(shares, 4),
             "avg_price_usd":     round(avg_price, 4),
             "current_price_usd": round(current_price, 4),
-        })
+        }
+        if value_usd is not None:
+            result["value_usd"] = round(value_usd, 4)
+        if pnl_usd is not None:
+            result["pnl_usd"] = round(pnl_usd, 4)
+        if cost_usd is not None:
+            result["cost_usd"] = round(cost_usd, 4)
+        results.append(result)
 
     return results
 

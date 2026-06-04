@@ -4,9 +4,11 @@
 from __future__ import annotations
 
 import argparse
+import csv
 import hashlib
 import json
 import os
+import re
 from collections import Counter
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -21,6 +23,75 @@ HEADERS = {
 }
 ARCA_LABELS = ("🧠분석", "📰뉴스", "ℹ️정보", "실적")
 PORTFOLIO_TICKERS = ["MSFT", "QQQI", "ORCL", "NOW", "CRM", "SAP", "UNH", "SGOV", "CPNG", "NVDA", "GOOGL", "SPMO"]
+MARKET_TICKERS = {
+    "QQQ": "Nasdaq 100 ETF",
+    "SPY": "S&P 500 ETF",
+    "DIA": "Dow Jones ETF",
+    "VTI": "US total market ETF",
+    "RSP": "S&P 500 equal-weight ETF",
+    "IWM": "Russell 2000 ETF",
+    "SMH": "Semiconductor ETF",
+    "SOXX": "Semiconductor ETF",
+    "IGV": "Software ETF",
+    "XLK": "Technology ETF",
+    "XLC": "Communication services ETF",
+    "XLY": "Consumer discretionary ETF",
+    "XLP": "Consumer staples ETF",
+    "XLF": "Financials ETF",
+    "XLV": "Health care ETF",
+    "XLI": "Industrials ETF",
+    "XLE": "Energy ETF",
+    "XLU": "Utilities ETF",
+    "XLB": "Materials ETF",
+    "XLRE": "Real estate ETF",
+    "EFA": "Developed ex-US ETF",
+    "EEM": "Emerging markets ETF",
+    "HYG": "High-yield bond ETF",
+    "LQD": "Investment-grade bond ETF",
+    "IEF": "7-10Y Treasury ETF",
+    "TLT": "20Y Treasury ETF",
+    "SHY": "1-3Y Treasury ETF",
+    "GLD": "Gold ETF",
+    "USO": "Oil ETF",
+    "CL=F": "WTI crude oil futures",
+    "BZ=F": "Brent crude oil futures",
+    "UUP": "US Dollar ETF",
+    "GC=F": "Gold futures",
+    "SI=F": "Silver futures",
+    "^VIX": "VIX volatility index",
+    "^TNX": "10Y Treasury yield index",
+    "^TYX": "30Y Treasury yield index",
+    "KRW=X": "USD/KRW FX",
+    **{ticker: f"Portfolio holding {ticker}" for ticker in PORTFOLIO_TICKERS},
+}
+FRED_SERIES = {
+    "DGS5": "미국 5년 국채금리",
+    "DGS10": "미국 10년 국채금리",
+    "DGS20": "미국 20년 국채금리",
+    "DGS30": "미국 30년 국채금리",
+    "DGS2": "미국 2년 국채금리",
+    "T10Y2Y": "미국 10Y-2Y 장단기 금리차",
+    "SOFR": "SOFR 단기금리",
+    "DFF": "Fed Funds 실효금리",
+    "BAMLH0A0HYM2": "미국 하이일드 옵션조정 스프레드",
+    "UNRATE": "미국 실업률",
+    "CPIAUCSL": "미국 CPI 지수",
+    "M2SL": "미국 M2 통화량",
+}
+WORLD_GOV_BOND_COUNTRIES = {
+    "united-states": "미국 국채금리",
+    "japan": "일본 국채금리",
+    "south-korea": "한국 국채금리",
+}
+TELEGRAM_NEWS_CHANNELS = ["yuzukinaok1"]
+NEWS_THEME_KEYWORDS = {
+    "중동/전쟁": ("이스라엘", "이란", "가자", "하마스", "우크라이나", "러시아", "전쟁", "군", "미사일", "핵"),
+    "금리/채권": ("금리", "국채", "채권", "연준", "fed", "treasury", "yield"),
+    "유가/원자재": ("유가", "오일", "원유", "석유", "브렌트", "wti", "금 ", "gold"),
+    "인플레/고용": ("cpi", "물가", "인플레", "고용", "실업", "임금"),
+    "기술/AI": ("ai", "엔비디아", "반도체", "칩", "데이터센터"),
+    "정책/재정": ("재무장관", "세금", "관세", "예산", "부채", "재정"),
+}
 
 
 def event_id(event: dict) -> str:
@@ -97,16 +168,22 @@ def build_digest(events: list[dict], limit: int = 12) -> str:
 
     source_counts = Counter(e.get("source", "unknown") for e in events)
     ticker_counts = Counter(t for e in events for t in (e.get("tickers") or []))
+    tag_counts = Counter(t for e in events for t in (e.get("tags") or []))
+    trusted_sources = sorted({url for e in events for url in [e.get("source_url")] if isinstance(url, str) and url})
     lines = ["## 누적 수집 자료", ""]
     lines.append("- " + ", ".join(f"{src} {cnt}건" for src, cnt in source_counts.most_common()))
     if ticker_counts:
         lines.append("- 반복 등장 종목: " + ", ".join(f"{t} {c}건" for t, c in ticker_counts.most_common(8)))
+    if tag_counts:
+        lines.append("- 반복 테마: " + ", ".join(f"{t} {c}건" for t, c in tag_counts.most_common(8)))
+    if trusted_sources:
+        lines.append("- 신뢰 소스: " + ", ".join(trusted_sources[:6]))
     lines.append("")
 
     for event in sorted(events, key=lambda e: e.get("collected_at", ""), reverse=True)[:limit]:
         title = event.get("title") or "[제목 없음]"
         source = event.get("source", "unknown")
-        url = event.get("url") or ""
+        url = event.get("url") or event.get("source_url") or ""
         tickers = ", ".join(event.get("tickers") or [])
         suffix = f" · {tickers}" if tickers else ""
         lines.append(f"- [{source}] {title}{suffix}" + (f" — {url}" if url else ""))
@@ -116,6 +193,11 @@ def build_digest(events: list[dict], limit: int = 12) -> str:
 def _extract_tickers(text: str, universe: Iterable[str] = PORTFOLIO_TICKERS) -> list[str]:
     upper = f" {text.upper()} "
     return [t for t in universe if f" {t.upper()} " in upper]
+
+
+def _extract_news_tags(text: str) -> list[str]:
+    lower = text.lower()
+    return [theme for theme, words in NEWS_THEME_KEYWORDS.items() if any(word.lower() in lower for word in words)]
 
 
 def fetch_saveticker_events() -> list[dict]:
@@ -139,6 +221,7 @@ def fetch_saveticker_events() -> list[dict]:
             text = " ".join(str(item.get(k) or "") for k in ("title", "content", "group_summary"))
             events.append({
                 "source": "saveticker",
+                "source_url": base,
                 "title": title,
                 "url": item.get("url") or item.get("link") or "",
                 "published_at": item.get("created_at") or item.get("published_at") or "",
@@ -149,8 +232,6 @@ def fetch_saveticker_events() -> list[dict]:
 
 
 def fetch_arca_events(max_pages: int = 2) -> list[dict]:
-    import re
-
     events = []
     link_pat = re.compile(r"\[([^\]]+)\]\(https://arca\.live/b/stock/(\d+)\?p=(\d+)\)")
     for page in range(1, max_pages + 1):
@@ -169,14 +250,192 @@ def fetch_arca_events(max_pages: int = 2) -> list[dict]:
                 "source": "arca",
                 "title": text[:140],
                 "url": f"https://arca.live/b/stock/{post_id}",
+                "source_url": "https://arca.live/b/stock",
                 "category": next((label for label in ARCA_LABELS if label in text), ""),
                 "tickers": _extract_tickers(text),
             })
     return events
 
 
+def fetch_telegram_channel_events(channels: list[str] = TELEGRAM_NEWS_CHANNELS) -> list[dict]:
+    events = []
+    for channel in channels:
+        channel = channel.strip().lstrip("@")
+        if not channel:
+            continue
+        try:
+            resp = requests.get(f"https://r.jina.ai/http://t.me/s/{channel}", headers=HEADERS, timeout=20)
+            resp.raise_for_status()
+            markdown = resp.text
+        except Exception:
+            continue
+
+        titles = [" ".join(m.group(1).split()) for m in re.finditer(r"\*\*([^*]+)\*\*", markdown)]
+        urls = re.findall(rf"https://t\.me/{re.escape(channel)}/\d+", markdown)
+        for idx, title in enumerate(titles):
+            if not title:
+                continue
+            url = urls[idx] if idx < len(urls) else ""
+            events.append({
+                "source": f"telegram:{channel}",
+                "source_url": f"https://t.me/s/{channel}",
+                "title": title[:180],
+                "url": url,
+                "tickers": _extract_tickers(title),
+                "tags": _extract_news_tags(title),
+            })
+    return events
+
+
+def _pct(current: float | None, base: float | None) -> float | None:
+    if current is None or base is None or base <= 0:
+        return None
+    return round((current - base) / base * 100, 2)
+
+
+def _fmt_pct(value: float | None) -> str:
+    return "N/A" if value is None else f"{value:+.2f}%"
+
+
+def fetch_market_snapshot_events(yf_module=None) -> list[dict]:
+    """Collect compact Yahoo Finance market snapshots for low-token advisor grounding."""
+    if yf_module is None:
+        try:
+            import yfinance as yf_module
+        except Exception:
+            return []
+
+    events = []
+    for ticker, label in MARKET_TICKERS.items():
+        try:
+            hist = yf_module.Ticker(ticker).history(period="1y", auto_adjust=True)
+            if hist.empty:
+                continue
+            close = hist["Close"].dropna()
+            if close.empty:
+                continue
+            current = float(close.iloc[-1])
+            day_base = float(close.iloc[-2]) if len(close) >= 2 else None
+            week_base = float(close.iloc[-6]) if len(close) >= 6 else None
+            month_base = float(close.iloc[-22]) if len(close) >= 22 else None
+            year_base = float(close.iloc[0]) if len(close) >= 2 else None
+        except Exception:
+            continue
+
+        title = (
+            f"{ticker} {label}: 현재 {current:.2f}, "
+            f"1D {_fmt_pct(_pct(current, day_base))}, "
+            f"5D {_fmt_pct(_pct(current, week_base))}, "
+            f"1M {_fmt_pct(_pct(current, month_base))}, "
+            f"1Y {_fmt_pct(_pct(current, year_base))}"
+        )
+        events.append({
+            "source": "yahoo_finance",
+            "source_url": "https://finance.yahoo.com",
+            "type": "market_snapshot",
+            "title": title,
+            "url": f"https://finance.yahoo.com/quote/{ticker}",
+            "tickers": [ticker] if ticker.isalpha() else [],
+            "metrics": {
+                "current": round(current, 4),
+                "return_1d_pct": _pct(current, day_base),
+                "return_5d_pct": _pct(current, week_base),
+                "return_1m_pct": _pct(current, month_base),
+                "return_1y_pct": _pct(current, year_base),
+            },
+        })
+    return events
+
+
+def fetch_fred_macro_events(series: dict[str, str] = FRED_SERIES) -> list[dict]:
+    """Collect widely used US macro series from FRED public CSV endpoints."""
+    events = []
+    for series_id, label in series.items():
+        try:
+            resp = requests.get(
+                "https://fred.stlouisfed.org/graph/fredgraph.csv",
+                headers=HEADERS,
+                params={"id": series_id},
+                timeout=12,
+            )
+            resp.raise_for_status()
+            rows = list(csv.DictReader(resp.text.splitlines()))
+        except Exception:
+            continue
+
+        latest = None
+        previous = None
+        for row in rows:
+            value = row.get(series_id)
+            if not value or value == ".":
+                continue
+            previous = latest
+            latest = (row.get("observation_date", ""), value)
+        if not latest:
+            continue
+
+        try:
+            current = float(latest[1])
+            prior = float(previous[1]) if previous else None
+        except (TypeError, ValueError):
+            continue
+
+        delta = None if prior is None else round(current - prior, 4)
+        delta_text = "N/A" if delta is None else f"{delta:+.2f}p"
+        title = f"{series_id} {label}: {latest[0]} {current:.2f}, 직전 대비 {delta_text}"
+        events.append({
+            "source": "fred",
+            "source_url": "https://fred.stlouisfed.org",
+            "type": "macro_snapshot",
+            "title": title,
+            "url": f"https://fred.stlouisfed.org/series/{series_id}",
+            "tickers": [],
+            "metrics": {"series_id": series_id, "current": current, "delta": delta},
+        })
+    return events
+
+
+def _parse_yields_from_world_gov_bonds(markdown: str, maturities: tuple[int, ...] = (5, 10, 20, 30)) -> dict[str, float]:
+    yields = {}
+    for maturity in maturities:
+        match = re.search(rf"\|\s*\[({maturity}) years\]\([^)]*\)\s*\|\s*([0-9.]+)%", markdown)
+        if match:
+            yields[f"{maturity}Y"] = float(match.group(2))
+    return yields
+
+
+def fetch_world_gov_bond_events(countries: dict[str, str] = WORLD_GOV_BOND_COUNTRIES) -> list[dict]:
+    events = []
+    for country, label in countries.items():
+        try:
+            resp = requests.get(f"https://r.jina.ai/http://www.worldgovernmentbonds.com/country/{country}/", headers=HEADERS, timeout=20)
+            resp.raise_for_status()
+            yields = _parse_yields_from_world_gov_bonds(resp.text)
+        except Exception:
+            continue
+        for maturity, value in yields.items():
+            events.append({
+                "source": "worldgovernmentbonds",
+                "source_url": "https://www.worldgovernmentbonds.com",
+                "type": "macro_snapshot",
+                "title": f"{label} {maturity}: {value:.3f}%",
+                "url": f"https://www.worldgovernmentbonds.com/country/{country}/#{maturity}",
+                "tickers": [],
+                "tags": ["금리/채권"],
+                "metrics": {"country": country, "maturity": maturity, "yield_pct": value},
+            })
+    return events
+
+
 def collect_once(cache_dir: Path | str = DEFAULT_CACHE_DIR, now: datetime | None = None) -> tuple[int, int]:
-    events = fetch_saveticker_events() + fetch_arca_events(max_pages=int(os.getenv("STOCK_COLLECTOR_ARCA_PAGES", "2")))
+    events = (
+        fetch_saveticker_events()
+        + fetch_arca_events(max_pages=int(os.getenv("STOCK_COLLECTOR_ARCA_PAGES", "2")))
+        + fetch_telegram_channel_events()
+        + fetch_market_snapshot_events()
+        + fetch_fred_macro_events()
+        + fetch_world_gov_bond_events()
+    )
     return len(events), append_events(events, cache_dir=cache_dir, now=now)
 
 

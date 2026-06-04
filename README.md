@@ -48,6 +48,7 @@ telegram_bot.py (상시)
 | `stock_advisor.py` | AI 포트폴리오 상담 (/ask) |
 | `kiwoom_sync_rest.py` | 키움 REST API → 국내주식 잔고 자동 동기화 (크론 08:35) |
 | `portfolio_sync_server.py` | 외부 → portfolio_snapshot.json 수신 서버 (port 8765) |
+| `bot_healthcheck.py` | 봇·서버 상태 30분 자동 점검, 문제 시만 텔레그램 알림 |
 | `fundamental_score.py` | 종목별 100점 펀더멘털 스코어링 |
 | `daily_signals.py` | 가격/거래량 기반 일일 신호 감지 |
 | `market_report.py` | 시장 뉴스 리포트 (SaveTicker API + Arca Live) |
@@ -248,6 +249,9 @@ cp .env.example .env
 # 키움 국내주식 잔고 동기화 (KST 08:35)
 35 23 * * 1-5 cd /path/to/stock-report && uv run python kiwoom_sync_rest.py >> /tmp/kiwoom_sync.log 2>&1
 
+# 봇·서버 헬스체크 (30분마다, 문제 시만 텔레그램 알림)
+*/30 * * * * cd /path/to/stock-report && uv run python bot_healthcheck.py >> /tmp/healthcheck.log 2>&1
+
 # 봇 watchdog (1분마다)
 * * * * * /path/to/stock-report/bot_watchdog.sh
 
@@ -263,8 +267,9 @@ cp .env.example .env
 stock-report/
 ├── barbell_strategy.py          # 핵심 전략 엔진
 ├── telegram_bot.py              # 양방향 텔레그램 봇
-├── kiwoom_sync_rest.py          # 키움 REST API 국내주식 잔고 동기화 ← NEW
-├── portfolio_sync_server.py     # 외부 잔고 수신 Flask 서버 (port 8765) ← NEW
+├── kiwoom_sync_rest.py          # 키움 REST API 국내주식 잔고 동기화
+├── portfolio_sync_server.py     # 외부 잔고 수신 Flask 서버 (port 8765)
+├── bot_healthcheck.py           # 봇·서버 30분 헬스체크, 문제 시만 알림
 ├── attachment_parser.py         # PDF·이미지 첨부파일 파싱
 ├── holding_manager.py           # 보유 종목 CRUD
 ├── order_generator.py           # 소수점 매수 주문서

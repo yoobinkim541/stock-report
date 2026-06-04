@@ -485,16 +485,29 @@ def fetch_portfolio_value() -> dict:
     # --- 보유 수량 집계 ---
     holdings: dict[str, float] = {}
     holdings_detail: list[dict] = []
+    cost_usd_by_ticker: dict[str, float] = {}
+    domestic_cost_krw = 0.0
+    domestic_value_krw = 0.0
+    domestic_pnl_krw = 0.0
     try:
         with open(PORTFOLIO_PATH) as f:
             snap = json.load(f)
         holdings_detail = _holding_details_from_snapshot(snap)
-        for h in snap.get("overseas_general", {}).get("holdings_usd", []):
-            t = h["ticker"]
-            holdings[t] = holdings.get(t, 0.0) + float(h.get("shares", 0))
-        for h in snap.get("overseas_fractional", {}).get("holdings", []):
-            t = h["ticker"]
-            holdings[t] = holdings.get(t, 0.0) + float(h.get("shares", 0))
+        domestic_summary = snap.get("domestic", {}).get("summary", {})
+        domestic_cost_krw = _safe_float(domestic_summary.get("total_cost_krw"))
+        domestic_value_krw = _safe_float(domestic_summary.get("total_value_krw"))
+        domestic_pnl_krw = _safe_float(domestic_summary.get("total_pnl_krw"), domestic_value_krw - domestic_cost_krw)
+        for section, key in [("overseas_general", "holdings_usd"),
+                             ("overseas_fractional", "holdings")]:
+            for h in snap.get(section, {}).get(key, []):
+                t = h["ticker"]
+                shares = float(h.get("shares", 0))
+                holdings[t] = holdings.get(t, 0.0) + shares
+                cost = _safe_float(h.get("cost_usd"))
+                if cost <= 0 and _safe_float(h.get("avg_price_usd")) > 0:
+                    cost = shares * _safe_float(h.get("avg_price_usd"))
+                if cost > 0:
+                    cost_usd_by_ticker[t] = cost_usd_by_ticker.get(t, 0.0) + cost
     except Exception as e:
         logger.warning(f"portfolio_snapshot.json 로드 실패: {e}")
 
@@ -504,6 +517,9 @@ def fetch_portfolio_value() -> dict:
         sh = float(pos.get("shares", 0))
         if sh > 0:
             holdings[ticker] = holdings.get(ticker, 0.0) + sh
+            avg = _safe_float(pos.get("avg_price_usd"))
+            if avg > 0:
+                cost_usd_by_ticker[ticker] = cost_usd_by_ticker.get(ticker, 0.0) + sh * avg
 
     if not holdings:
         return {"total_usd": 7940.0, "sgov_usd": 1006.7, "qqqi_usd": 2019.77, "qqqi_shares": 35.2987, "prices": {}, "holdings": {}, "holdings_detail": holdings_detail}
@@ -541,14 +557,19 @@ def fetch_portfolio_value() -> dict:
         try:
             with open(PORTFOLIO_PATH) as f:
                 snap = json.load(f)
-            for h in snap.get("overseas_general", {}).get("holdings_usd", []):
-                t = h["ticker"]
-                if t not in prices and "current_price_usd" in h:
-                    prices[t] = float(h["current_price_usd"])
+            for section, key in [("overseas_general", "holdings_usd"),
+                                 ("overseas_fractional", "holdings")]:
+                for h in snap.get(section, {}).get(key, []):
+                    t = h["ticker"]
+                    if t not in prices and "current_price_usd" in h:
+                        prices[t] = float(h["current_price_usd"])
         except Exception:
             pass
 
     total_usd = sum(holdings.get(t, 0) * prices.get(t, 0) for t in tickers)
+    cost_usd = sum(cost_usd_by_ticker.values())
+    pnl_usd = total_usd - cost_usd if cost_usd > 0 else 0.0
+    return_pct = pnl_usd / cost_usd * 100 if cost_usd > 0 else 0.0
     sgov_usd = holdings.get("SGOV", SGOV_SHARES_DEFAULT) * prices.get("SGOV", 100.67)
     qqqi_shares = holdings.get("QQQI", QQQI_SHARES_DEFAULT)
     qqqi_price = prices.get("QQQI", 57.22)
@@ -556,6 +577,12 @@ def fetch_portfolio_value() -> dict:
 
     return {
         "total_usd": round(total_usd, 2),
+        "cost_usd": round(cost_usd, 2),
+        "pnl_usd": round(pnl_usd, 2),
+        "return_pct": round(return_pct, 2),
+        "domestic_cost_krw": round(domestic_cost_krw),
+        "domestic_value_krw": round(domestic_value_krw),
+        "domestic_pnl_krw": round(domestic_pnl_krw),
         "sgov_usd": round(sgov_usd, 2),
         "qqqi_usd": round(qqqi_usd, 2),
         "qqqi_shares": round(qqqi_shares, 4),

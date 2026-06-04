@@ -61,23 +61,36 @@ def fetch_domestic_balance() -> list[dict]:
         logger.error(".env에 KIWOOM_API_KEY / KIWOOM_API_SECRET 없음")
         return []
 
-    tok = TokenManager().access_token
-    resp = _req.post(
-        "https://api.kiwoom.com/api/dostk/acnt",
-        headers={
-            "content-type": "application/json;charset=UTF-8",
-            "Authorization": f"Bearer {tok}",
-            "api-id": "kt00018",
-        },
-        json={"qry_tp": "2", "dmst_stex_tp": "KRX"},
-        timeout=15,
-    )
-    resp.raise_for_status()
-    result = resp.json()
+    try:
+        tok = TokenManager().access_token
+        if not tok:
+            logger.error("키움 토큰 발급 실패 — API Key/Secret 확인 필요")
+            return []
+
+        resp = _req.post(
+            "https://api.kiwoom.com/api/dostk/acnt",
+            headers={
+                "content-type": "application/json;charset=UTF-8",
+                "Authorization": f"Bearer {tok}",
+                "api-id": "kt00018",
+            },
+            json={"qry_tp": "2", "dmst_stex_tp": "KRX"},
+            timeout=15,
+        )
+        resp.raise_for_status()
+        result = resp.json()
+    except Exception as e:
+        logger.error("키움 API 호출 실패: %s", e)
+        return []
 
     if result.get("return_code", -1) != 0:
         logger.error("API 오류: %s", result.get("return_msg", "unknown"))
         return []
+
+    def _num(item: dict, key: str) -> float:
+        """숫자 문자열 → float (쉼표·퍼센트 제거, 빈값=0)."""
+        raw = item.get(key, "") or ""
+        return float(raw.replace(",", "").replace("%", "").strip() or "0")
 
     holdings = []
     for item in result.get("acnt_evlt_remn_indv_tot", []):
@@ -85,19 +98,16 @@ def fetch_domestic_balance() -> list[dict]:
         if not ticker:
             continue
 
-        def _num(key: str) -> float:
-            return float(item.get(key, "0").replace(",", "").replace("%", "") or "0")
-
         holdings.append({
             "ticker":            ticker,
             "name":              item.get("stk_nm", "").strip(),
-            "shares":            _num("rmnd_qty"),
-            "avg_price_krw":     _num("pur_pric"),
-            "current_price_krw": _num("cur_prc"),
-            "cost_krw":          _num("pur_amt"),
-            "value_krw":         _num("evlt_amt"),
-            "pnl_krw":           _num("evltv_prft"),
-            "return_pct":        _num("prft_rt"),
+            "shares":            _num(item, "rmnd_qty"),
+            "avg_price_krw":     _num(item, "pur_pric"),
+            "current_price_krw": _num(item, "cur_prc"),
+            "cost_krw":          _num(item, "pur_amt"),
+            "value_krw":         _num(item, "evlt_amt"),
+            "pnl_krw":           _num(item, "evltv_prft"),
+            "return_pct":        _num(item, "prft_rt"),
         })
 
     logger.info("잔고 조회 완료: %d개 종목", len(holdings))
