@@ -438,6 +438,30 @@ def fetch_vix() -> float:
         return 20.0
 
 
+def fetch_fear_greed() -> dict:
+    """CNN Fear & Greed Index 조회. 실패 시 neutral(50) 반환."""
+    from datetime import timedelta
+    date_str = (datetime.now() - timedelta(days=7)).strftime("%Y-%m-%d")
+    url = f"https://production.dataviz.cnn.io/index/fearandgreed/graphdata/{date_str}"
+    try:
+        resp = requests.get(url, timeout=10, headers={
+            "User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 Chrome/120.0.0.0 Safari/537.36",
+            "Referer": "https://www.cnn.com/",
+            "Accept": "application/json",
+        })
+        resp.raise_for_status()
+        fg = resp.json().get("fear_and_greed", {})
+        return {
+            "score":      round(float(fg.get("score", 50)), 1),
+            "rating":     fg.get("rating", "neutral"),
+            "prev_close": round(float(fg.get("previous_close", 50)), 1),
+            "prev_week":  round(float(fg.get("previous_1_week", 50)), 1),
+            "prev_month": round(float(fg.get("previous_1_month", 50)), 1),
+        }
+    except Exception:
+        return {"score": 50.0, "rating": "neutral", "prev_close": 50.0, "prev_week": 50.0, "prev_month": 50.0}
+
+
 def fetch_ma200(ticker_sym: str) -> dict:
     """현재가 vs 200일 MA."""
     try:
@@ -1094,6 +1118,24 @@ def _vix_visual(vix: float) -> str:
     return f"  VIX  {vix:5.1f}  {bar}  {label}"
 
 
+def _fear_greed_visual(fg: dict) -> str:
+    """CNN Fear & Greed 점수 → 시각화 한 줄."""
+    score  = fg.get("score", 50.0)
+    prev_w = fg.get("prev_week", score)
+    diff   = score - prev_w
+    d_abs  = abs(diff)
+    trend  = f"▲+{d_abs:.0f}" if diff > 0.5 else (f"▼-{d_abs:.0f}" if diff < -0.5 else "─")
+
+    if score <= 25:    emoji, label = "💀", "극단공포"
+    elif score <= 45:  emoji, label = "😨", "공포"
+    elif score <= 55:  emoji, label = "😐", "중립"
+    elif score <= 75:  emoji, label = "😄", "탐욕"
+    else:              emoji, label = "🤑", "극단탐욕"
+
+    bar = _bar(score / 100, 12)
+    return f"  F&G {score:5.1f}  {bar}  {emoji} {label} (1W:{trend})"
+
+
 def _sgov_compare(current: float, target: float) -> list:
     """SGOV 현재/목표 비교 막대 두 줄."""
     scale = max(current, target, 1) * 1.05
@@ -1133,6 +1175,7 @@ def build_report(
     exchange_rate: float = 1380.0,
     qqqi_div: dict = None,
     old_phase_state: dict = None,
+    fear_greed: dict = None,
 ) -> str:
     """시각화 바벨 전략 리포트 생성."""
     if portfolio is None:
@@ -1225,6 +1268,7 @@ def build_report(
         f"  1M {mom_1m:>+6.1f}%  3M {mom_3m:>+6.1f}%",
         _rsi_visual(rsi),
         _vix_visual(vix),
+        _fear_greed_visual(fear_greed or {}),
         f"  200MA   {ma_gap:>+6.1f}%  {ma_icon}",
     ]
 
@@ -1540,6 +1584,7 @@ def run(send_alert: bool = False) -> dict | None:
     rsi = fetch_rsi("QQQ")
     vix = fetch_vix()
     ma = fetch_ma200("QQQ")
+    fg = fetch_fear_greed()
 
     # 신규: 환율 + 포트폴리오 실시간 + 배당 추산
     exchange_rate = fetch_exchange_rate()
@@ -1553,7 +1598,7 @@ def run(send_alert: bool = False) -> dict | None:
     phase_changed = has_phase_changed(old_state, market_type, phase_key)
 
     # 리포트 생성 및 출력
-    report = build_report(qqq, rsi, vix, ma, portfolio, exchange_rate, qqqi_div, old_state)
+    report = build_report(qqq, rsi, vix, ma, portfolio, exchange_rate, qqqi_div, old_state, fg)
     print(report)
 
     # 텔레그램: Phase 변화 시 또는 강제 발송 시

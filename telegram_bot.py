@@ -38,7 +38,7 @@ except ImportError:
     pass
 
 from barbell_strategy import (
-    fetch_qqq_data, fetch_rsi, fetch_vix, fetch_ma200,
+    fetch_qqq_data, fetch_rsi, fetch_vix, fetch_ma200, fetch_fear_greed,
     fetch_exchange_rate, fetch_portfolio_value,
     estimate_qqqi_monthly_dividend,
     classify_market, calculate_dca, calculate_sgov_target,
@@ -104,6 +104,7 @@ def fetch_market(force: bool = False) -> dict:
     rsi  = fetch_rsi("QQQ")
     vix  = fetch_vix()
     ma   = fetch_ma200("QQQ")
+    fg   = fetch_fear_greed()
     fx   = fetch_exchange_rate()
     port = fetch_portfolio_value()
     div  = estimate_qqqi_monthly_dividend(port["qqqi_shares"], port["qqqi_usd"])
@@ -111,6 +112,7 @@ def fetch_market(force: bool = False) -> dict:
 
     data = {
         "qqq": qqq, "rsi": rsi, "vix": vix, "ma": ma,
+        "fear_greed": fg,
         "exchange_rate": fx, "portfolio": port, "qqqi_div": div,
         "market_type": market_type, "phase_key": phase_key,
         "fetched_at": datetime.now().strftime("%m/%d %H:%M"),
@@ -204,6 +206,13 @@ def cmd_status(d: dict) -> str:
     dd   = qqq.get("drawdown_pct", 0)
     total_krw = int(port["total_usd"] * d["exchange_rate"])
 
+    fg    = d.get("fear_greed") or {}
+    fg_sc = fg.get("score", 50.0)
+    fg_rt = fg.get("rating", "neutral")
+    fg_lbl = ("💀극단공포" if fg_sc <= 25 else "😨공포" if fg_sc <= 45
+              else "😐중립" if fg_sc <= 55 else "😄탐욕" if fg_sc <= 75
+              else "🤑극단탐욕")
+
     rsi_s = ("🔥과매도" if rsi < 30 else "⚠️약세"     if rsi < 40
              else "🫧극과매수" if rsi > 75 else "🌡과매수" if rsi > 70
              else "✅중립")
@@ -219,6 +228,7 @@ def cmd_status(d: dict) -> str:
         f"낙폭  {dd:>+8.2f}%\n"
         f"RSI   {rsi:>8.1f}   {rsi_s}\n"
         f"VIX   {vix:>8.1f}   {vix_s}\n"
+        f"F&G   {fg_sc:>8.1f}   {fg_lbl}\n"
         f"\n"
         f"총액  ${port['total_usd']:>8,.0f}  (₩{total_krw:,})\n"
         f"SGOV  ${port['sgov_usd']:>8,.0f}  실탄 대기중"
@@ -1097,6 +1107,7 @@ def cmd_report(chat_id: str):
         report = build_report(
             d["qqq"], d["rsi"], d["vix"], d["ma"],
             d["portfolio"], d["exchange_rate"], d["qqqi_div"], old,
+            d.get("fear_greed"),
         )
         send(chat_id, report)
     except Exception as e:
