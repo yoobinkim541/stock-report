@@ -29,7 +29,7 @@ def save_alerts(alerts: list):
         json.dump(alerts, f, ensure_ascii=False, indent=2)
 
 
-def add_alert(ticker: str, price: float, alert_type: str) -> str:
+def add_alert(ticker: str, price: float, alert_type: str, note: str = "") -> str:
     """
     알림 추가.
     alert_type: "buy" (현재가 <= 목표가 시 발동) | "sell" (현재가 >= 목표가 시 발동)
@@ -37,14 +37,17 @@ def add_alert(ticker: str, price: float, alert_type: str) -> str:
     """
     alerts = load_alerts()
     alert_id = str(uuid.uuid4())[:8]
-    alerts.append({
+    entry: dict = {
         "id": alert_id,
         "ticker": ticker.upper(),
         "price": float(price),
         "type": alert_type.lower(),
         "triggered": False,
         "created_at": datetime.now().isoformat(),
-    })
+    }
+    if note:
+        entry["note"] = note
+    alerts.append(entry)
     save_alerts(alerts)
     return alert_id
 

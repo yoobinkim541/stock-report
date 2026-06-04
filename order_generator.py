@@ -96,8 +96,8 @@ def fetch_prices(tickers: list) -> dict:
 def generate(send: bool = False) -> str:
     """주문서 생성 + 선택적 텔레그램 발송."""
     qqq = fetch_qqq_data()
-    rsi = fetch_rsi("QQQ") if hasattr(fetch_rsi, "__call__") else 50.0
-    vix = fetch_vix()       if hasattr(fetch_vix, "__call__") else 20.0
+    rsi = fetch_rsi("QQQ")
+    vix = fetch_vix()
     fx  = fetch_exchange_rate()
 
     market_type, phase_key = classify_market(qqq, rsi, vix)
@@ -159,6 +159,10 @@ def generate(send: bool = False) -> str:
     return report
 
 
+import logging as _logging
+_logger = _logging.getLogger(__name__)
+
+
 def _send(text: str):
     if not TELEGRAM_TOKEN:
         return
@@ -166,16 +170,8 @@ def _send(text: str):
     for i in range(0, len(text), 4000):
         try:
             requests.post(url, json={"chat_id": TELEGRAM_CHAT_ID, "text": text[i:i + 4000]}, timeout=10)
-        except Exception:
-            pass
-
-
-# fetch_rsi / fetch_vix re-import (order_generator 단독 실행 대비)
-try:
-    from barbell_strategy import fetch_rsi, fetch_vix
-except ImportError:
-    def fetch_rsi(*a, **k): return 50.0
-    def fetch_vix(*a, **k): return 20.0
+        except Exception as e:
+            _logger.error(f"주문서 텔레그램 전송 실패: {e}")
 
 
 if __name__ == "__main__":

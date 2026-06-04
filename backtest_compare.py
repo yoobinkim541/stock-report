@@ -53,7 +53,7 @@ logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
 INITIAL_CASH     = 10_000.0
 DAILY_DCA_USD    = 29.0
 TELEGRAM_TOKEN   = os.getenv("STOCK_BOT_TOKEN", "")
-TELEGRAM_CHAT_ID = "5771238245"
+TELEGRAM_CHAT_ID = os.getenv("STOCK_BOT_CHAT_ID", "5771238245")
 
 # ══════════════════════════════════════════════════════════════════════
 #  전략 정의
@@ -280,7 +280,8 @@ def build_report(all_metrics: dict, logs: dict, start: str) -> str:
     mlist  = list(all_metrics.values())
 
     end    = datetime.now().strftime("%Y-%m-%d")
-    n_yrs  = round(len(logs[names[0]]) / 252, 1) if names and logs.get(names[0]) else "?"
+    first_log = logs.get(names[0], []) if names else []
+    n_yrs  = round(len(first_log) / 252, 1) if first_log else "?"
 
     lines = [
         "🌍 글로벌 바벨/포트폴리오 전략 비교 백테스트",
