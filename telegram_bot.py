@@ -21,11 +21,9 @@ Commands:
 import os
 import sys
 import time
-import json
-import shutil
 import logging
 import threading
-from datetime import datetime, timedelta
+from datetime import datetime
 
 import requests
 
@@ -42,35 +40,32 @@ from barbell_strategy import (
     fetch_exchange_rate, fetch_portfolio_value,
     estimate_qqqi_monthly_dividend,
     classify_market, calculate_dca, calculate_sgov_target,
-    calculate_rebalancing, build_smart_report,
+    build_smart_report,
     build_report, build_simulation_report, load_leverage_state, load_phase_state, save_phase_state,
     has_phase_changed, send_phase5_emergency,
     _phase_meter, _bar, _sgov_compare, _dca_rows,
     BULL_PHASES, BEAR_PHASES,
-    TELEGRAM_TOKEN, TELEGRAM_CHAT_ID, PORTFOLIO_PATH,
+    TELEGRAM_TOKEN, TELEGRAM_CHAT_ID,
 )
 from attachment_parser import (
     extract_text_from_pdf, extract_text_from_image,
     parse_portfolio_from_text, parse_sells_from_text,
     detect_content_type,
-    save_pending_snapshot, load_pending_snapshot, clear_pending_snapshot,
-    save_pending_sells, load_pending_sells, clear_pending_sells,
+    save_pending_snapshot,
+    save_pending_sells,
     build_pending_snapshot_summary, build_pending_sells_summary,
     ATTACH_DIR, _ensure_dir as _ensure_attach_dir,
 )
 from price_alerts import load_alerts, add_alert, remove_alert, check_alerts
 from portfolio_tracker import (
-    record_daily, load_history, calc_performance,
-    build_performance_report, build_benchmark_report, build_dividend_calendar,
-    record_dividend, get_dividend_summary,
+    load_history, calc_performance,
+    build_performance_report,
 )
 from order_generator import generate as generate_order
-from holding_manager import (
-    list_holdings, buy_holding, sell_holding,
-    show_dca_weights, set_dca_weights,
-    refresh_portfolio_prices, set_target_weight, show_target_weights,
-)
+from holding_manager import refresh_portfolio_prices
 from stock_advisor import ask_portfolio_advisor
+from tax_commands import cmd_tax
+from holding_commands import cmd_holding, cmd_dividend, cmd_apply_snapshot
 try:
     from source_collector import build_digest as build_source_digest, load_recent_events as load_source_events
 except Exception:
@@ -520,552 +515,6 @@ def cmd_sim(chat_id: str, args: list):
     send(chat_id, build_simulation_report(mode))
 
 
-def cmd_dividend(chat_id: str, args: list):
-    """QQQI 배당 기록 및 누적 통계."""
-    if not args:
-        # 통계 조회
-        summary = get_dividend_summary()
-        if summary["count"] == 0:
-            send(chat_id,
-                 "💰 QQQI 배당 기록 없음\n"
-                 "━━━━━━━━━━━━━━━━━━━━━━━\n"
-                 "배당 수령 시 기록:\n"
-                 "/dividend 22.15 ORCL 5월배당\n\n"
-                 "형식: /dividend <금액> <재투자종목> [메모]")
-            return
-
-        lines = [
-            "💰 QQQI 배당 기록",
-            "━━━━━━━━━━━━━━━━━━━━━━━",
-            f"  누적 배당  ${summary['total']:,.2f}  ({summary['count']}회)",
-            f"  월 평균    ${summary['avg_monthly']:.2f}",
-            "",
-            "  재투자 대상별:",
-        ]
-        for ticker, amt in summary["by_ticker"].items():
-            lines.append(f"    {ticker:<6}  ${amt:.2f}")
-
-        lines += ["", "  최근 기록:"]
-        for r in summary["records"][-5:]:
-            lines.append(f"  {r['date']}  ${r['amount_usd']:.2f} → {r['reinvested_in']}  {r.get('note','')}")
-
-        # 다음 배당 예상일 추가
-        records = summary["records"]
-        if len(records) >= 2:
-            try:
-                rdates = [datetime.strptime(r["date"], "%Y-%m-%d") for r in records if r.get("date")]
-                if len(rdates) >= 2:
-                    intervals = [(rdates[i] - rdates[i-1]).days for i in range(1, len(rdates)) if (rdates[i] - rdates[i-1]).days > 0]
-                    if intervals:
-                        avg_iv = round(sum(intervals) / len(intervals))
-                        next_dt = rdates[-1] + timedelta(days=avg_iv)
-                        try:
-                            with open(PORTFOLIO_PATH, encoding="utf-8") as _pf:
-                                _snap = json.load(_pf)
-                            qqqi_sh = next(
-                                (h.get("shares", 1.0) for h in _snap.get("overseas_fractional", {}).get("holdings", [])
-                                 if h.get("ticker") == "QQQI"),
-                                1.0
-                            )
-                        except Exception as _e:
-                            logger.debug("QQQI 보유수량 조회 실패: %s", _e)
-                            qqqi_sh = 1.0
-                        est_pay = records[-1].get("amount_usd", 0) * qqqi_sh
-                        lines += [
-                            "",
-                            "  📅 다음 배당 예상:",
-                            f"    {next_dt.strftime('%Y-%m-%d')}  ≈ ${est_pay:.2f}  (간격 {avg_iv}일)",
-                        ]
-            except Exception as _e:
-                logger.debug("다음 배당 예상일 계산 실패: %s", _e)
-
-        send(chat_id, "\n".join(lines))
-        return
-
-    # 기록 모드: /dividend 22.15 ORCL 메모
-    if len(args) < 2:
-        send(chat_id, "사용법: /dividend <금액> <재투자종목> [메모]\n예: /dividend 22.15 ORCL 5월배당")
-        return
-    try:
-        amount = float(args[0])
-    except ValueError:
-        send(chat_id, f"❌ 금액 오류: {args[0]}")
-        return
-    ticker = args[1].upper()
-    note   = " ".join(args[2:]) if len(args) > 2 else ""
-    entry  = record_dividend(amount, ticker, note)
-    send(chat_id,
-         f"✅ 배당 기록 완료\n"
-         f"━━━━━━━━━━━━━━━━━━━━━━━\n"
-         f"  날짜    {entry['date']}\n"
-         f"  금액    ${entry['amount_usd']:.2f}\n"
-         f"  재투자  {entry['reinvested_in']}\n"
-         f"  메모    {entry.get('note','─')}")
-
-
-def cmd_holding(chat_id: str, args: list):
-    """
-    /holding                              → 보유 종목 목록
-    /holding buy TICKER 주수 평단가        → 매수 기록 + 가격 자동 갱신
-    /holding buy TICKER 주수 평단가 frac  → 소수점 계좌 매수
-    /holding sell TICKER [주수]            → 매도 기록 (주수 생략 시 전량)
-    /holding target                       → 목표 비중 현황
-    /holding target TICKER 비중% ...      → 목표 비중 설정/변경
-    /holding dca                          → DCA 비중 현황
-    /holding dca NOW 18 ORCL 18 CRM 10   → DCA 비중 변경
-    /holding dca bear NOW 23 ...          → 하락장 DCA 비중 변경
-    /holding refresh                      → 전 종목 현재가 갱신
-    /holding dividend [금액 TICKER [메모]] → QQQI 배당 조회/기록
-    /holding apply                        → 파싱된 스냅샷 반영
-    """
-    if not args:
-        send(chat_id, list_holdings())
-        return
-
-    sub = args[0].lower()
-
-    # ── /holding buy ────────────────────────────────────────────────
-    if sub == "buy":
-        # /holding buy ORCL 2 200.50 [frac]
-        if len(args) < 4:
-            send(chat_id,
-                 "사용법:\n"
-                 "/holding buy TICKER 주수 평단가\n"
-                 "/holding buy TICKER 주수 평단가 frac  ← 소수점 계좌\n\n"
-                 "예시:\n"
-                 "/holding buy ORCL 2 200.50\n"
-                 "/holding buy NOW 0.5 120.30 frac")
-            return
-        try:
-            ticker  = args[1].upper()
-            shares  = float(args[2])
-            price   = float(args[3])
-            frac    = len(args) > 4 and args[4].lower() == "frac"
-        except (ValueError, IndexError):
-            send(chat_id, "❌ 형식 오류: /holding buy TICKER 주수 평단가")
-            return
-        result = buy_holding(ticker, shares, price, fractional=frac)
-        send(chat_id, result)
-
-    # ── /holding target ──────────────────────────────────────────────
-    elif sub == "target":
-        remaining = args[1:]
-        if not remaining:
-            # 목표 비중 현황 — 현재 포트폴리오 기반 자동 추론 포함
-            try:
-                port = fetch_market()["portfolio"]
-            except Exception:
-                port = None
-            send(chat_id, show_target_weights(port))
-            return
-
-        # /holding target TICKER 비중% TICKER 비중% ...
-        if len(remaining) % 2 != 0:
-            send(chat_id,
-                 "사용법: /holding target TICKER 비중% TICKER 비중% ...\n\n"
-                 "예시:\n"
-                 "/holding target AMD 5 AMZN 4 PLTR 3\n"
-                 "/holding target ORCL 7 UNH 5\n\n"
-                 "• 기존 목표와 병합됩니다 (삭제: 0 입력)")
-            return
-
-        updates = {}
-        try:
-            for i in range(0, len(remaining), 2):
-                t = remaining[i].upper()
-                w = float(remaining[i + 1])
-                updates[t] = w
-        except (ValueError, IndexError):
-            send(chat_id, "❌ 형식 오류: TICKER와 비중%를 번갈아 입력")
-            return
-
-        result = set_target_weight(updates)
-        send(chat_id, result)
-
-    # ── /holding refresh ─────────────────────────────────────────────
-    elif sub == "refresh":
-        send(chat_id, "⏳ 전 종목 현재가 갱신 중...")
-        result = refresh_portfolio_prices()
-        send(chat_id, result)
-
-    # ── /holding sell ────────────────────────────────────────────────
-    elif sub == "sell":
-        # /holding sell CPNG [주수]
-        if len(args) < 2:
-            send(chat_id, "사용법: /holding sell TICKER [주수]\n전량 청산 시 주수 생략")
-            return
-        ticker = args[1].upper()
-        shares = float(args[2]) if len(args) > 2 else None
-        result = sell_holding(ticker, shares)
-        send(chat_id, result)
-
-    # ── /holding dca ────────────────────────────────────────────────
-    elif sub == "dca":
-        remaining = args[1:]
-
-        # 값 없으면 현황 표시
-        if not remaining:
-            send(chat_id, show_dca_weights())
-            return
-
-        # 모드 추출 (bear 키워드)
-        mode = "normal"
-        if remaining and remaining[0].lower() == "bear":
-            mode = "bear"
-            remaining = remaining[1:]
-
-        # 짝수 아니면 오류
-        if len(remaining) % 2 != 0:
-            send(chat_id,
-                 "사용법:\n"
-                 "/holding dca TICKER 비중% TICKER 비중% ...\n"
-                 "/holding dca bear TICKER 비중% ...  ← 하락장 비중\n\n"
-                 "예시:\n"
-                 "/holding dca NOW 18 ORCL 18 CRM 10 NVDA 14 MSFT 14 GOOGL 10 UNH 10 SAP 3 SPMO 3\n"
-                 "(비중 합계가 100%가 아니어도 자동 정규화)")
-            return
-
-        updates = {}
-        try:
-            for i in range(0, len(remaining), 2):
-                updates[remaining[i].upper()] = float(remaining[i + 1])
-        except (ValueError, IndexError):
-            send(chat_id, "❌ 형식 오류: TICKER와 비중(%)을 번갈아 입력")
-            return
-
-        result = set_dca_weights(updates, mode=mode)
-        send(chat_id, result)
-
-    # ── /holding dividend ────────────────────────────────────────────
-    elif sub == "dividend":
-        cmd_dividend(chat_id, args[1:])
-
-    # ── /holding apply ───────────────────────────────────────────────
-    elif sub == "apply":
-        cmd_apply_snapshot(chat_id)
-
-    else:
-        # args[0]이 sub-command 없이 바로 list
-        send(chat_id, list_holdings())
-
-
-def cmd_tax(chat_id: str, args: list):
-    """실현손익 기록/조회 + 양도소득세 추산."""
-    from tax_tracker import (
-        add_sell, get_yearly_summary, get_all_records, delete_record,
-        EXEMPTION_KRW, TAX_RATE,
-    )
-
-    # ── /tax import apply — 파싱된 매도내역 세금 기록 반영 ───────────────────
-    if args and args[0].lower() == "import":
-        if len(args) > 1 and args[1].lower() == "apply":
-            pending = load_pending_sells()
-            if not pending:
-                send(chat_id,
-                     "❌ 적용할 매도내역 없음\n"
-                     "PDF 또는 스크린샷을 전송하면 자동 파싱 후 대기 파일이 생성됩니다.")
-                return
-            sells = pending.get("sells", [])
-            if not sells:
-                send(chat_id, "❌ 파싱된 매도내역이 없습니다.")
-                return
-            fx = fetch_exchange_rate()
-            applied: list[str] = []
-            errors: list[str]  = []
-            for s in sells:
-                try:
-                    rec = add_sell(
-                        s["ticker"], s["qty"],
-                        s["buy_price_usd"], s["sell_price_usd"], fx,
-                    )
-                    gu = rec["gain_usd"]
-                    sg = "▲" if gu >= 0 else "▼"
-                    applied.append(
-                        f"  {s['ticker']} ({s['name']})  {s['qty']}주"
-                        f"  {sg}${abs(gu):,.2f}"
-                    )
-                except Exception as e:
-                    errors.append(f"  {s['ticker']}: {e}")
-            clear_pending_sells()
-            lines = ["✅ 매도내역 세금 기록 반영 완료", "━━━━━━━━━━━━━━━━━━━━━━━"]
-            lines += applied
-            if errors:
-                lines += ["", "❌ 오류:"] + errors
-            lines += ["", f"환율: {fx:,.0f}원/USD  ·  /tax 로 확인"]
-            send(chat_id, "\n".join(lines))
-        else:
-            send(chat_id,
-                 "사용법: /tax import apply\n\n"
-                 "먼저 매도내역 PDF 또는 스크린샷을 채팅창에 전송하세요.")
-        return
-
-    # ── /tax delete N ─────────────────────────────────────────────────────
-    if args and args[0].lower() == "delete":
-        if len(args) < 2:
-            send(chat_id, "❌ 형식: /tax delete N  (N = /tax history 의 번호)")
-            return
-        try:
-            n = int(args[1])
-        except ValueError:
-            send(chat_id, "❌ 숫자를 입력하세요.  예) /tax delete 3")
-            return
-        removed = delete_record(n)
-        if removed is None:
-            records = get_all_records()
-            send(chat_id, f"❌ #{n} 번 기록 없음 (전체 {len(records)}건)")
-        else:
-            gu = removed.get("gain_usd", 0)
-            sg = "▲" if gu >= 0 else "▼"
-            send(chat_id,
-                 f"🗑 #{n} 삭제 완료\n"
-                 f"  {removed['date']}  {removed['ticker']}  {removed['qty']}주\n"
-                 f"  @${removed['buy_price_usd']:.2f} → @${removed['sell_price_usd']:.2f}"
-                 f"  {sg}${abs(gu):,.2f}")
-        return
-
-    # ── /tax sim TICKER [수량] [매수단가] ── 매도 전 세금 시뮬레이션 ────────
-    if args and args[0].lower() == "sim":
-        if len(args) < 2:
-            send(chat_id,
-                 "❌ 형식: /tax sim TICKER [수량] [매수단가]\n"
-                 "예)  /tax sim NVDA\n"
-                 "     /tax sim NVDA 2\n"
-                 "     /tax sim NVDA 2 184.14")
-            return
-        from tax_tracker import simulate_sell, EXEMPTION_KRW
-
-        ticker = args[1].upper()
-
-        # 포트폴리오 스냅샷에서 보유수량·매수단가 조회
-        snap_holdings: list[dict] = []
-        try:
-            with open(PORTFOLIO_PATH, encoding="utf-8") as _f:
-                snap = json.load(_f)
-            for section in ("overseas_general", "overseas_fractional"):
-                snap_holdings += snap.get(section, {}).get("holdings_usd", []) + \
-                                  snap.get(section, {}).get("holdings", [])
-        except Exception as _e:
-            logger.debug("포트폴리오 스냅샷 로드 실패 (평단가 표시 생략): %s", _e)
-
-        snap_entry = next((h for h in snap_holdings if h.get("ticker") == ticker), None)
-
-        # 수량 파싱 (생략 시 스냅샷)
-        try:
-            qty = float(args[2]) if len(args) >= 3 else None
-        except ValueError:
-            send(chat_id, "❌ 수량은 숫자여야 합니다.  예) /tax sim NVDA 2")
-            return
-        if qty is None:
-            if snap_entry:
-                qty = snap_entry.get("shares", 0)
-            else:
-                send(chat_id,
-                     f"❌ 포트폴리오에 {ticker} 없음\n"
-                     f"수량을 직접 입력하세요: /tax sim {ticker} [수량] [매수단가]")
-                return
-
-        # 매수단가 파싱 (생략 시 스냅샷)
-        try:
-            buy_price = float(args[3]) if len(args) >= 4 else None
-        except ValueError:
-            send(chat_id, "❌ 매수단가는 숫자여야 합니다.")
-            return
-        if buy_price is None:
-            if snap_entry and snap_entry.get("avg_price_usd"):
-                buy_price = snap_entry["avg_price_usd"]
-            elif snap_entry and snap_entry.get("cost_usd") and qty:
-                buy_price = snap_entry["cost_usd"] / qty
-            else:
-                send(chat_id,
-                     f"❌ 매수단가를 찾을 수 없음\n"
-                     f"/tax sim {ticker} {qty} [매수단가]")
-                return
-
-        # 현재가 조회
-        try:
-            import yfinance as yf
-            h = yf.Ticker(ticker).history(period="2d")
-            if h.empty:
-                raise ValueError("데이터 없음")
-            sell_price = float(h["Close"].iloc[-1])
-        except Exception as e:
-            send(chat_id, f"❌ {ticker} 현재가 조회 실패: {e}")
-            return
-
-        try:
-            fx  = fetch_exchange_rate()
-            res = simulate_sell(ticker, qty, buy_price, sell_price, fx)
-        except Exception as e:
-            send(chat_id, f"❌ 시뮬레이션 오류: {e}")
-            return
-
-        gu   = res["gain_usd"]
-        gk   = res["gain_krw"]
-        sg   = "▲" if gu >= 0 else "▼"
-        cg   = res["combined_gain_krw"]
-        csg  = "▲" if cg >= 0 else "▼"
-        tx   = res["tax_krw"]
-        txu  = tx / fx if fx > 0 else 0
-        tk   = res["taxable_krw"]
-        ei   = res["existing_gain_krw"]
-        esg  = "▲" if ei >= 0 else "▼"
-        exem = min(EXEMPTION_KRW, max(0, int(cg))) if cg > 0 else 0
-
-        SEP = "─" * 44
-        company = snap_entry.get("name", ticker) if snap_entry else ticker
-        lines = [
-            f"🔮 매도 시뮬레이션 (실제 반영 안됨)",
-            SEP,
-            f"종목  {ticker} — {company}",
-            f"수량  {qty}주   @${sell_price:.2f} (현재가)",
-            f"매수단가  ${buy_price:.2f}",
-            f"예상 손익  {sg}${abs(gu):,.2f}  ({sg}{abs(gk):,.0f}원)",
-            SEP,
-            f"기존 실현손익  {esg}{abs(ei):,.0f}원",
-            f"합산 총손익    {csg}{abs(cg):,.0f}원",
-            f"기본공제 차감  -{exem:,.0f}원",
-            f"과세표준       {tk:,.0f}원",
-        ]
-        if tk <= 0:
-            lines.append(f"예상 세금      0원  (공제 이내)")
-        else:
-            lines.append(f"예상 세금(22%) {tx:,.0f}원  (${txu:,.2f})")
-        lines += [
-            SEP,
-            f"※ 실제 반영: /tax sell {ticker} {qty} {buy_price:.2f} {sell_price:.2f}",
-        ]
-        send(chat_id, "\n".join(lines))
-        return
-
-    # ── /tax sell TICKER 수량 매수단가 매도단가 ──────────────────────────
-    if args and args[0].lower() == "sell":
-        if len(args) < 5:
-            send(chat_id,
-                 "❌ 형식: /tax sell TICKER 수량 매수단가 매도단가\n"
-                 "예)  /tax sell NVDA 10 400.00 520.00")
-            return
-        try:
-            ticker     = args[1].upper()
-            qty        = float(args[2])
-            buy_price  = float(args[3])
-            sell_price = float(args[4])
-        except (ValueError, IndexError):
-            send(chat_id, "❌ 숫자 형식 오류. 예) /tax sell NVDA 10 400.00 520.00")
-            return
-        try:
-            fx  = fetch_exchange_rate()
-            rec = add_sell(ticker, qty, buy_price, sell_price, fx)
-            gu  = rec["gain_usd"]
-            gk  = rec["gain_krw"]
-            sg  = "+" if gu >= 0 else ""
-            send(chat_id, (
-                f"✅ 매도 기록 저장\n"
-                f"━━━━━━━━━━━━━━━━━━━━━━━\n"
-                f"  종목     {ticker}\n"
-                f"  수량     {qty}주\n"
-                f"  매수단가 ${buy_price:.2f}\n"
-                f"  매도단가 ${sell_price:.2f}\n"
-                f"  실현손익 {sg}${gu:,.2f}  ({sg}{gk:,.0f}원)\n"
-                f"  환율     {fx:,.0f}원/USD\n"
-                f"  날짜     {rec['date']}"
-            ))
-        except Exception as e:
-            send(chat_id, f"❌ 매도 기록 오류: {e}")
-        return
-
-    # ── /tax history ─────────────────────────────────────────────────────
-    if args and args[0].lower() == "history":
-        records = get_all_records()
-        if not records:
-            send(chat_id,
-                 "📭 매도 기록 없음\n"
-                 "/tax sell TICKER 수량 매수단가 매도단가  로 기록")
-            return
-        SEP = "─" * 50
-        lines = ["📋 전체 매도 기록", SEP]
-        for r in records:
-            gu  = r.get("gain_usd", 0)
-            gk  = r.get("gain_krw", 0)
-            sg  = "▲" if gu >= 0 else "▼"
-            lines.append(
-                f"{r['date']}  {r['ticker']:<6}  {r['qty']}주\n"
-                f"  @${r['buy_price_usd']:.2f} → @${r['sell_price_usd']:.2f}"
-                f"  {sg}${abs(gu):,.2f}  ({sg}{abs(gk):,.0f}원)"
-            )
-        lines += [SEP, f"총 {len(records)}건"]
-        send(chat_id, "\n".join(lines))
-        return
-
-    # ── /tax (인자 없음) — 올해 실현손익 + 세금 추산 ─────────────────────
-    try:
-        year    = datetime.now().year
-        summary = get_yearly_summary(year)
-        fx      = fetch_exchange_rate()
-
-        total_usd   = summary["total_gain_usd"]
-        total_krw   = summary["total_gain_krw"]
-        taxable_krw = summary["taxable_krw"]
-        tax_krw     = summary["tax_krw"]
-        tax_usd     = tax_krw / fx if fx > 0 else 0
-        count       = summary["count"]
-
-        SEP   = "─" * 52
-        sign  = "+" if total_krw >= 0 else ""
-        lines = [
-            f"💸 {year}년 실현손익 & 양도소득세 추산",
-            f"📅 {datetime.now().strftime('%Y-%m-%d')}  (@{fx:,.0f}원/USD)",
-            SEP,
-        ]
-
-        if count == 0:
-            lines += [
-                "올해 매도 기록 없음",
-                "",
-                "/tax sell TICKER 수량 매수단가 매도단가  — 매도 기록",
-                "/tax history  — 전체 매도 기록",
-            ]
-        else:
-            # 종목별 소계
-            by_usd: dict[str, float] = {}
-            by_krw: dict[str, float] = {}
-            for r in summary["records"]:
-                t = r["ticker"]
-                by_usd[t] = by_usd.get(t, 0) + r.get("gain_usd", 0)
-                by_krw[t] = by_krw.get(t, 0) + r.get("gain_krw", 0)
-
-            lines += [
-                f"{'종목':<8} {'실현손익(USD)':>14} {'실현손익(KRW)':>14}",
-                SEP,
-            ]
-            for t in sorted(by_usd, key=lambda x: -by_usd[x]):
-                gu = by_usd[t]
-                gk = by_krw[t]
-                sg = "▲" if gu >= 0 else "▼"
-                lines.append(
-                    f"{t:<8} {sg}${abs(gu):>12,.2f}  {sg}{abs(gk):>12,.0f}원"
-                )
-            lines += [
-                SEP,
-                f"실현 총손익    : {sign}{total_krw:,.0f}원  (${total_usd:,.2f})",
-                f"기본공제(250만): -{min(EXEMPTION_KRW, max(0, int(total_krw))):,.0f}원",
-                f"과세표준       : {taxable_krw:,.0f}원",
-                f"예상 세금(22%) : {tax_krw:,.0f}원  (${tax_usd:,.2f})",
-                "",
-                f"※ 매도 기록 {count}건 기준 — 실현손익만 집계",
-                "※ 손실 통산: 손실 종목이 수익 상쇄",
-                "※ 국내 양도세 신고: 매년 5월 (전년도)",
-                "",
-                "/tax sim TICKER [수량]  — 매도 전 세금 시뮬레이션",
-                "/tax sell TICKER 수량 매수단가 매도단가",
-                "/tax history  — 전체 매도 기록",
-            ]
-
-        send(chat_id, "\n".join(lines))
-    except Exception as e:
-        send(chat_id, f"❌ 세금 추산 오류: {e}")
-        logger.exception("cmd_tax")
-
-
 def download_telegram_file(file_id: str, filename: str) -> str | None:
     """텔레그램 파일을 로컬(ATTACH_DIR)에 저장하고 경로 반환."""
     _ensure_attach_dir()
@@ -1229,94 +678,6 @@ def handle_plain_text(text: str, chat_id: str) -> bool:
         return True
 
     return False
-
-
-def cmd_apply_snapshot(chat_id: str):
-    """pending_snapshot.json 을 portfolio_snapshot.json 에 반영."""
-    pending = load_pending_snapshot()
-    if not pending:
-        send(chat_id,
-             "❌ 적용할 스냅샷 없음\n\n"
-             "계좌현황 스크린샷이나 PDF를 전송하면\n"
-             "파싱 후 대기 파일이 생성됩니다.")
-        return
-
-    holdings = pending.get("holdings", [])
-    if not holdings:
-        send(chat_id, "❌ 파싱된 보유 종목이 없습니다.")
-        return
-
-    try:
-        with open(PORTFOLIO_PATH, encoding="utf-8") as f:
-            snap = json.load(f)
-    except Exception as e:
-        send(chat_id, f"❌ portfolio_snapshot.json 로드 실패: {e}")
-        return
-
-    # 백업
-    backup_path = PORTFOLIO_PATH + ".bak"
-    shutil.copy2(PORTFOLIO_PATH, backup_path)
-
-    existing = {h["ticker"]: h for h in snap.get("overseas_general", {}).get("holdings_usd", [])}
-    changes: list[str] = []
-
-    for h in holdings:
-        ticker = h["ticker"]
-        cost_usd = round(h["shares"] * h["avg_price_usd"], 4)
-        value_usd = round(h.get("value_usd", h["shares"] * h["current_price_usd"]), 4)
-        pnl_usd = round(value_usd - cost_usd, 4)
-        return_pct = round((pnl_usd / cost_usd) * 100, 2) if cost_usd else 0.0
-
-        if ticker in existing:
-            old_sh  = existing[ticker].get("shares", 0)
-            old_avg = existing[ticker].get("avg_price_usd", 0)
-            existing[ticker]["name"]              = h["name"]
-            existing[ticker]["shares"]            = h["shares"]
-            existing[ticker]["avg_price_usd"]     = h["avg_price_usd"]
-            existing[ticker]["current_price_usd"] = h["current_price_usd"]
-            existing[ticker]["cost_usd"]          = cost_usd
-            existing[ticker]["value_usd"]         = value_usd
-            existing[ticker]["pnl_usd"]           = pnl_usd
-            existing[ticker]["return_pct"]        = return_pct
-            changes.append(
-                f"  {ticker} ({h['name']})\n"
-                f"    수량: {old_sh} → {h['shares']}주\n"
-                f"    평단: ${old_avg:.2f} → ${h['avg_price_usd']:.2f}"
-            )
-        else:
-            # 신규 종목 추가
-            new_entry = {
-                "ticker":            ticker,
-                "name":              h["name"],
-                "shares":            h["shares"],
-                "avg_price_usd":     h["avg_price_usd"],
-                "current_price_usd": h["current_price_usd"],
-                "cost_usd":          cost_usd,
-                "value_usd":         value_usd,
-                "pnl_usd":           pnl_usd,
-                "return_pct":        return_pct,
-            }
-            snap.setdefault("overseas_general", {}).setdefault("holdings_usd", []).append(new_entry)
-            existing[ticker] = new_entry
-            changes.append(f"  {ticker} ({h['name']}) — 신규 추가  {h['shares']}주 @${h['avg_price_usd']:.2f}")
-
-    snap["overseas_general"]["holdings_usd"] = list(existing.values())
-    snap["snapshot_date"] = datetime.now().strftime("%Y-%m-%d")
-
-    with open(PORTFOLIO_PATH, "w", encoding="utf-8") as f:
-        json.dump(snap, f, indent=2, ensure_ascii=False)
-
-    clear_pending_snapshot()
-
-    lines = [
-        "✅ 포트폴리오 스냅샷 반영 완료",
-        "━━━━━━━━━━━━━━━━━━━━━━━",
-    ] + changes + [
-        "",
-        "백업: portfolio_snapshot.json.bak",
-        "/portfolio 로 확인",
-    ]
-    send(chat_id, "\n".join(lines))
 
 
 def cmd_report(chat_id: str):
@@ -1559,7 +920,7 @@ def dispatch(text: str, chat_id: str):
 
     if cmd == "/dividend":  # 하위 호환 alias → /holding dividend
         typing(chat_id)
-        cmd_dividend(chat_id, args)
+        cmd_dividend(chat_id, args, send)
         return
 
     if cmd == "/sim":
@@ -1569,7 +930,7 @@ def dispatch(text: str, chat_id: str):
 
     if cmd == "/holding":
         typing(chat_id)
-        cmd_holding(chat_id, args)
+        cmd_holding(chat_id, args, send)
         return
 
     if cmd == "/order":
@@ -1577,7 +938,7 @@ def dispatch(text: str, chat_id: str):
         return
 
     if cmd == "/tax":
-        cmd_tax(chat_id, args)
+        cmd_tax(chat_id, args, send)
         return
 
     if cmd == "/ask":
@@ -1596,7 +957,7 @@ def dispatch(text: str, chat_id: str):
         return
 
     if cmd == "/apply_snapshot":  # 하위 호환 alias → /holding apply
-        cmd_apply_snapshot(chat_id)
+        cmd_apply_snapshot(chat_id, send)
         return
 
     fn = _SIMPLE_CMDS.get(cmd)
