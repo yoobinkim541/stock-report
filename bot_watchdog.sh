@@ -4,8 +4,14 @@
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 BOT_SCRIPT="$SCRIPT_DIR/telegram_bot.py"
-PID_FILE="/tmp/barbell_bot.pid"
+if [ -n "${XDG_RUNTIME_DIR:-}" ]; then
+    PID_FILE="$XDG_RUNTIME_DIR/barbell_bot.pid"
+else
+    PID_FILE="$HOME/.local/state/stock-report/barbell_bot.pid"
+fi
 LOG_FILE="/tmp/barbell_bot.log"
+
+mkdir -p "$(dirname "$PID_FILE")"
 
 is_running() {
     [ -f "$PID_FILE" ] || return 1

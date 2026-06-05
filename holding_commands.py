@@ -101,6 +101,132 @@ def cmd_dividend(chat_id: str, args: list, send_fn):
             f"  메모    {entry.get('note','─')}")
 
 
+def _holding_buy(chat_id: str, args: list, send_fn):
+    if len(args) < 4:
+        send_fn(chat_id,
+                "사용법:\n"
+                "/holding buy TICKER 주수 평단가\n"
+                "/holding buy TICKER 주수 평단가 frac  ← 소수점 계좌\n\n"
+                "예시:\n"
+                "/holding buy ORCL 2 200.50\n"
+                "/holding buy NOW 0.5 120.30 frac")
+        return
+    try:
+        ticker = args[1].upper()
+        shares = float(args[2])
+        price = float(args[3])
+        frac = len(args) > 4 and args[4].lower() == "frac"
+    except (ValueError, IndexError):
+        send_fn(chat_id, "❌ 형식 오류: /holding buy TICKER 주수 평단가")
+        return
+    result = buy_holding(ticker, shares, price, fractional=frac)
+    send_fn(chat_id, result)
+
+
+def _holding_target(chat_id: str, args: list, send_fn):
+    remaining = args[1:]
+    if not remaining:
+        # 목표 비중 현황 — fetch_portfolio_value() directly (no circular import)
+        try:
+            port = fetch_portfolio_value()
+        except Exception:
+            port = None
+        send_fn(chat_id, show_target_weights(port))
+        return
+
+    # /holding target TICKER 비중% TICKER 비중% ...
+    if len(remaining) % 2 != 0:
+        send_fn(chat_id,
+                "사용법: /holding target TICKER 비중% TICKER 비중% ...\n\n"
+                "예시:\n"
+                "/holding target AMD 5 AMZN 4 PLTR 3\n"
+                "/holding target ORCL 7 UNH 5\n\n"
+                "• 기존 목표와 병합됩니다 (삭제: 0 입력)")
+        return
+
+    updates = {}
+    try:
+        for i in range(0, len(remaining), 2):
+            t = remaining[i].upper()
+            w = float(remaining[i + 1])
+            updates[t] = w
+    except (ValueError, IndexError):
+        send_fn(chat_id, "❌ 형식 오류: TICKER와 비중%를 번갈아 입력")
+        return
+
+    result = set_target_weight(updates)
+    send_fn(chat_id, result)
+
+
+def _holding_refresh(chat_id: str, args: list, send_fn):
+    send_fn(chat_id, "⏳ 전 종목 현재가 갱신 중...")
+    result = refresh_portfolio_prices()
+    send_fn(chat_id, result)
+
+
+def _holding_sell(chat_id: str, args: list, send_fn):
+    if len(args) < 2:
+        send_fn(chat_id, "사용법: /holding sell TICKER [주수]\n전량 청산 시 주수 생략")
+        return
+    ticker = args[1].upper()
+    shares = float(args[2]) if len(args) > 2 else None
+    result = sell_holding(ticker, shares)
+    send_fn(chat_id, result)
+
+
+def _holding_dca(chat_id: str, args: list, send_fn):
+    remaining = args[1:]
+
+    if not remaining:
+        send_fn(chat_id, show_dca_weights())
+        return
+
+    mode = "normal"
+    if remaining and remaining[0].lower() == "bear":
+        mode = "bear"
+        remaining = remaining[1:]
+
+    if len(remaining) % 2 != 0:
+        send_fn(chat_id,
+                "사용법:\n"
+                "/holding dca TICKER 비중% TICKER 비중% ...\n"
+                "/holding dca bear TICKER 비중% ...  ← 하락장 비중\n\n"
+                "예시:\n"
+                "/holding dca NOW 18 ORCL 18 CRM 10 NVDA 14 MSFT 14 GOOGL 10 UNH 10 SAP 3 SPMO 3\n"
+                "(비중 합계가 100%가 아니어도 자동 정규화)")
+        return
+
+    updates = {}
+    try:
+        for i in range(0, len(remaining), 2):
+            updates[remaining[i].upper()] = float(remaining[i + 1])
+    except (ValueError, IndexError):
+        send_fn(chat_id, "❌ 형식 오류: TICKER와 비중(%)을 번갈아 입력")
+        return
+
+    result = set_dca_weights(updates, mode=mode)
+    send_fn(chat_id, result)
+
+
+def _holding_dividend(chat_id: str, args: list, send_fn):
+    cmd_dividend(chat_id, args[1:], send_fn)
+
+
+def _holding_apply(chat_id: str, args: list, send_fn):
+    cmd_apply_snapshot(chat_id, send_fn)
+
+
+_HOLDING_HANDLERS = {
+    "buy": _holding_buy,
+    "target": _holding_target,
+    "refresh": _holding_refresh,
+    "sell": _holding_sell,
+    "dca": _holding_dca,
+    "dividend": _holding_dividend,
+    "apply": _holding_apply,
+}
+
+
 def cmd_holding(chat_id: str, args: list, send_fn):
     """
     /holding                              → 보유 종목 목록
@@ -120,125 +246,11 @@ def cmd_holding(chat_id: str, args: list, send_fn):
         send_fn(chat_id, list_holdings())
         return
 
-    sub = args[0].lower()
-
-    # ── /holding buy ────────────────────────────────────────────────
-    if sub == "buy":
-        if len(args) < 4:
-            send_fn(chat_id,
-                    "사용법:\n"
-                    "/holding buy TICKER 주수 평단가\n"
-                    "/holding buy TICKER 주수 평단가 frac  ← 소수점 계좌\n\n"
-                    "예시:\n"
-                    "/holding buy ORCL 2 200.50\n"
-                    "/holding buy NOW 0.5 120.30 frac")
-            return
-        try:
-            ticker = args[1].upper()
-            shares = float(args[2])
-            price = float(args[3])
-            frac = len(args) > 4 and args[4].lower() == "frac"
-        except (ValueError, IndexError):
-            send_fn(chat_id, "❌ 형식 오류: /holding buy TICKER 주수 평단가")
-            return
-        result = buy_holding(ticker, shares, price, fractional=frac)
-        send_fn(chat_id, result)
-
-    # ── /holding target ──────────────────────────────────────────────
-    elif sub == "target":
-        remaining = args[1:]
-        if not remaining:
-            # 목표 비중 현황 — fetch_portfolio_value() directly (no circular import)
-            try:
-                port = fetch_portfolio_value()
-            except Exception:
-                port = None
-            send_fn(chat_id, show_target_weights(port))
-            return
-
-        # /holding target TICKER 비중% TICKER 비중% ...
-        if len(remaining) % 2 != 0:
-            send_fn(chat_id,
-                    "사용법: /holding target TICKER 비중% TICKER 비중% ...\n\n"
-                    "예시:\n"
-                    "/holding target AMD 5 AMZN 4 PLTR 3\n"
-                    "/holding target ORCL 7 UNH 5\n\n"
-                    "• 기존 목표와 병합됩니다 (삭제: 0 입력)")
-            return
-
-        updates = {}
-        try:
-            for i in range(0, len(remaining), 2):
-                t = remaining[i].upper()
-                w = float(remaining[i + 1])
-                updates[t] = w
-        except (ValueError, IndexError):
-            send_fn(chat_id, "❌ 형식 오류: TICKER와 비중%를 번갈아 입력")
-            return
-
-        result = set_target_weight(updates)
-        send_fn(chat_id, result)
-
-    # ── /holding refresh ─────────────────────────────────────────────
-    elif sub == "refresh":
-        send_fn(chat_id, "⏳ 전 종목 현재가 갱신 중...")
-        result = refresh_portfolio_prices()
-        send_fn(chat_id, result)
-
-    # ── /holding sell ────────────────────────────────────────────────
-    elif sub == "sell":
-        if len(args) < 2:
-            send_fn(chat_id, "사용법: /holding sell TICKER [주수]\n전량 청산 시 주수 생략")
-            return
-        ticker = args[1].upper()
-        shares = float(args[2]) if len(args) > 2 else None
-        result = sell_holding(ticker, shares)
-        send_fn(chat_id, result)
-
-    # ── /holding dca ────────────────────────────────────────────────
-    elif sub == "dca":
-        remaining = args[1:]
-
-        if not remaining:
-            send_fn(chat_id, show_dca_weights())
-            return
-
-        mode = "normal"
-        if remaining and remaining[0].lower() == "bear":
-            mode = "bear"
-            remaining = remaining[1:]
-
-        if len(remaining) % 2 != 0:
-            send_fn(chat_id,
-                    "사용법:\n"
-                    "/holding dca TICKER 비중% TICKER 비중% ...\n"
-                    "/holding dca bear TICKER 비중% ...  ← 하락장 비중\n\n"
-                    "예시:\n"
-                    "/holding dca NOW 18 ORCL 18 CRM 10 NVDA 14 MSFT 14 GOOGL 10 UNH 10 SAP 3 SPMO 3\n"
-                    "(비중 합계가 100%가 아니어도 자동 정규화)")
-            return
-
-        updates = {}
-        try:
-            for i in range(0, len(remaining), 2):
-                updates[remaining[i].upper()] = float(remaining[i + 1])
-        except (ValueError, IndexError):
-            send_fn(chat_id, "❌ 형식 오류: TICKER와 비중(%)을 번갈아 입력")
-            return
-
-        result = set_dca_weights(updates, mode=mode)
-        send_fn(chat_id, result)
-
-    # ── /holding dividend ────────────────────────────────────────────
-    elif sub == "dividend":
-        cmd_dividend(chat_id, args[1:], send_fn)
-
-    # ── /holding apply ───────────────────────────────────────────────
-    elif sub == "apply":
-        cmd_apply_snapshot(chat_id, send_fn)
-
-    else:
+    fn = _HOLDING_HANDLERS.get(args[0].lower())
+    if fn is None:
         send_fn(chat_id, list_holdings())
+        return
+    fn(chat_id, args, send_fn)
 
 
 def cmd_apply_snapshot(chat_id: str, send_fn):

@@ -23,6 +23,7 @@ import sys
 import time
 import logging
 import threading
+from pathlib import Path
 from datetime import datetime
 
 import requests
@@ -73,11 +74,14 @@ except Exception:
     load_source_events = None
 
 logger = logging.getLogger(__name__)
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s %(levelname)s: %(message)s",
-    datefmt="%Y-%m-%d %H:%M:%S",
-)
+
+
+def setup_logging():
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s %(levelname)s: %(message)s",
+        datefmt="%Y-%m-%d %H:%M:%S",
+    )
 
 ALLOWED_CHAT_ID    = TELEGRAM_CHAT_ID
 POLL_TIMEOUT       = 20    # long-polling 대기(초)
@@ -85,7 +89,19 @@ RETRY_DELAY        = 10    # 오류 후 재시도 대기(초)
 CACHE_TTL          = 300   # 시장 데이터 캐시 유지(초, 5분)
 ALERT_CHECK_SECS   = 300   # 가격 알림 체크 주기(초)
 PHASE_CHECK_SECS   = 300   # Phase 변화 체크 주기(초, 5분)
-PID_FILE           = "/tmp/barbell_bot.pid"
+
+
+def _pid_file_path() -> str:
+    runtime_dir = os.getenv("XDG_RUNTIME_DIR")
+    if runtime_dir:
+        path = Path(runtime_dir) / "barbell_bot.pid"
+    else:
+        path = Path.home() / ".local" / "state" / "stock-report" / "barbell_bot.pid"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    return str(path)
+
+
+PID_FILE           = _pid_file_path()
 
 BOT_COMMANDS = [
     {"command": "help",           "description": "명령어 목록"},
@@ -213,12 +229,20 @@ def fetch_market(force: bool = False) -> dict:
 def _api(method: str, **kwargs) -> dict:
     url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/{method}"
     request_timeout = kwargs.pop("_request_timeout", 15)
-    try:
-        r = requests.post(url, json=kwargs, timeout=request_timeout)
-        return r.json() if r.ok else {}
-    except Exception as e:
-        logger.error(f"API {method}: {e}")
-        return {}
+    attempts = kwargs.pop("_attempts", 3)
+    for attempt in range(1, attempts + 1):
+        try:
+            r = requests.post(url, json=kwargs, timeout=request_timeout)
+            if r.ok:
+                return r.json()
+            logger.warning("API %s HTTP %s: %s", method, r.status_code, r.text[:200])
+            if r.status_code < 500 and r.status_code != 429:
+                return {}
+        except Exception as e:
+            logger.error("API %s attempt %d/%d: %s", method, attempt, attempts, e)
+        if attempt < attempts:
+            time.sleep(min(2 ** (attempt - 1), 4))
+    return {}
 
 
 def configure_bot_commands():
@@ -275,11 +299,14 @@ def keep_typing(chat_id: str):
     return stop.set
 
 
-def get_updates(offset: int | None = None) -> list:
+def get_updates(offset: int | None = None) -> list | None:
     params: dict = {"timeout": POLL_TIMEOUT, "allowed_updates": ["message"]}
     if offset is not None:
         params["offset"] = offset
-    return _api("getUpdates", _request_timeout=POLL_TIMEOUT + 10, **params).get("result", [])
+    resp = _api("getUpdates", _request_timeout=POLL_TIMEOUT + 10, **params)
+    if not resp.get("ok"):
+        return None
+    return resp.get("result", [])
 
 
 # ══════════════════════════════════════════════════════════════════════
@@ -840,6 +867,10 @@ def notify_phase_change():
         if not has_phase_changed(old, mt, pk):
             return
         dd = d["qqq"].get("drawdown_pct", 0)
+        qqq = d.get("qqq") or {}
+        if qqq.get("current", 0) <= 0 or qqq.get("high_52w", 0) <= 0 or dd <= -80:
+            logger.warning("Phase 변화 알림 스킵 — QQQ 데이터 비정상: %s", qqq)
+            return
         if mt == "bear" and pk == 5:
             for i in range(3):
                 send_phase5_emergency(dd, d["exchange_rate"], d["portfolio"])
@@ -872,17 +903,26 @@ def _normalize_message_text(text: str) -> str:
 
 
 def _infer_internal_command(text: str) -> str | None:
-    """Route natural-language requests for built-in safe commands before LLM advice."""
+    """Route only explicit command-like /ask text to built-in commands."""
     lower = text.strip().lower()
     if not lower:
         return None
+    if lower.startswith("/"):
+        return lower.split()[0].split("@")[0]
+
+    explicit_suffixes = ("보여줘", "보여 줘", "알려줘", "조회", "확인", "목록", "리스트")
+    advisory_markers = ("해도", "돼", "될까", "어때", "추천", "매수", "팔까", "사도")
+    is_explicit = any(lower.endswith(s) for s in explicit_suffixes)
+    if not is_explicit or any(marker in lower for marker in advisory_markers):
+        return None
+
     for command, keywords in INTERNAL_TEXT_ROUTES:
         if any(keyword.lower() in lower for keyword in keywords):
             return command
     return None
 
 
-_SIMPLE_CMDS = {
+_MARKET_CMDS = {
     "/help":      lambda d, _: cmd_help(),
     "/status":    lambda d, _: cmd_status(d),
     "/summary":   lambda d, _: cmd_summary(d),
@@ -893,6 +933,76 @@ _SIMPLE_CMDS = {
     "/history":   lambda d, _: cmd_history(d),
     "/rebalance": lambda d, _: cmd_rebalance(d),
 }
+
+
+def _dispatch_market(cmd: str, chat_id: str):
+    typing(chat_id)
+    try:
+        if cmd == "/portfolio":
+            refresh_portfolio_prices()
+            d = fetch_market(force=True)
+        else:
+            d = fetch_market()
+        send(chat_id, _MARKET_CMDS[cmd](d, chat_id))
+    except Exception as e:
+        send(chat_id, f"❌ 오류: {e}")
+        logger.exception(f"dispatch {cmd}")
+
+
+def _dispatch_ask(chat_id: str, args: list):
+    if not args:
+        send(chat_id, "사용법: /ask 질문\n예: /ask 지금 추가매수해도 돼?")
+        return
+    stop_typing = keep_typing(chat_id)
+    try:
+        d = fetch_market(force=True)
+        send(chat_id, ask_portfolio_advisor(" ".join(args), d))
+    except Exception as e:
+        send(chat_id, f"❌ 오류: {e}")
+        logger.exception("dispatch /ask")
+    finally:
+        stop_typing()
+
+
+def _dispatch_with_typing(fn, chat_id: str, args: list):
+    typing(chat_id)
+    fn(chat_id, args)
+
+
+def _dispatch_with_send(fn, chat_id: str, args: list):
+    typing(chat_id)
+    fn(chat_id, args, send)
+
+
+def _dispatch_apply_snapshot(chat_id: str, args: list):
+    cmd_apply_snapshot(chat_id, send)
+
+
+def _dispatch_order(chat_id: str, args: list):
+    cmd_order(chat_id)
+
+
+def _dispatch_report(chat_id: str, args: list):
+    cmd_report(chat_id)
+
+
+def _dispatch_tax(chat_id: str, args: list):
+    cmd_tax(chat_id, args, send)
+
+
+_COMMAND_HANDLERS = {
+    "/report": _dispatch_report,
+    "/alert": lambda chat_id, args: _dispatch_with_typing(cmd_alert, chat_id, args),
+    "/dividend": lambda chat_id, args: _dispatch_with_send(cmd_dividend, chat_id, args),
+    "/sim": lambda chat_id, args: _dispatch_with_typing(cmd_sim, chat_id, args),
+    "/holding": lambda chat_id, args: _dispatch_with_send(cmd_holding, chat_id, args),
+    "/order": _dispatch_order,
+    "/tax": _dispatch_tax,
+    "/ask": _dispatch_ask,
+    "/apply_snapshot": _dispatch_apply_snapshot,
+}
+for _cmd in _MARKET_CMDS:
+    _COMMAND_HANDLERS[_cmd] = lambda chat_id, args, cmd=_cmd: _dispatch_market(cmd, chat_id)
 
 
 def dispatch(text: str, chat_id: str):
@@ -907,75 +1017,11 @@ def dispatch(text: str, chat_id: str):
             cmd = inferred
             args = []
 
-    # /report : 별도 처리 (내부에서 send 직접 호출)
-    if cmd == "/report":
-        cmd_report(chat_id)
-        return
-
-    # /alert, /dividend, /sim : 인자 필요
-    if cmd == "/alert":
-        typing(chat_id)
-        cmd_alert(chat_id, args)
-        return
-
-    if cmd == "/dividend":  # 하위 호환 alias → /holding dividend
-        typing(chat_id)
-        cmd_dividend(chat_id, args, send)
-        return
-
-    if cmd == "/sim":
-        typing(chat_id)
-        cmd_sim(chat_id, args)
-        return
-
-    if cmd == "/holding":
-        typing(chat_id)
-        cmd_holding(chat_id, args, send)
-        return
-
-    if cmd == "/order":
-        cmd_order(chat_id)
-        return
-
-    if cmd == "/tax":
-        cmd_tax(chat_id, args, send)
-        return
-
-    if cmd == "/ask":
-        if not args:
-            send(chat_id, "사용법: /ask 질문\n예: /ask 지금 추가매수해도 돼?")
-            return
-        stop_typing = keep_typing(chat_id)
-        try:
-            d = fetch_market(force=True)
-            send(chat_id, ask_portfolio_advisor(" ".join(args), d))
-        except Exception as e:
-            send(chat_id, f"❌ 오류: {e}")
-            logger.exception("dispatch /ask")
-        finally:
-            stop_typing()
-        return
-
-    if cmd == "/apply_snapshot":  # 하위 호환 alias → /holding apply
-        cmd_apply_snapshot(chat_id, send)
-        return
-
-    fn = _SIMPLE_CMDS.get(cmd)
+    fn = _COMMAND_HANDLERS.get(cmd)
     if fn is None:
         send(chat_id, f"❓ 모르는 명령어: {cmd}\n/help 로 목록 확인")
         return
-
-    typing(chat_id)
-    try:
-        if cmd == "/portfolio":
-            refresh_portfolio_prices()
-            d = fetch_market(force=True)
-        else:
-            d = fetch_market()
-        send(chat_id, fn(d, chat_id))
-    except Exception as e:
-        send(chat_id, f"❌ 오류: {e}")
-        logger.exception(f"dispatch {cmd}")
+    fn(chat_id, args)
 
 
 # ══════════════════════════════════════════════════════════════════════
@@ -1000,6 +1046,10 @@ def run():
     while True:
         try:
             updates = get_updates(offset)
+            if updates is None:
+                logger.warning("getUpdates 실패 — %s초 후 재시도", RETRY_DELAY)
+                time.sleep(RETRY_DELAY)
+                continue
             for upd in updates:
                 offset  = upd["update_id"] + 1
                 msg     = upd.get("message", {})
@@ -1055,6 +1105,8 @@ def run():
 # ══════════════════════════════════════════════════════════════════════
 
 if __name__ == "__main__":
+    setup_logging()
+
     import argparse
 
     parser = argparse.ArgumentParser(description="Barbell Telegram Bot")
@@ -1065,7 +1117,7 @@ if __name__ == "__main__":
     if args.test:
         print("=== 로컬 테스트 모드 ===\n")
         d = fetch_market()
-        for name, fn in _SIMPLE_CMDS.items():
+        for name, fn in _MARKET_CMDS.items():
             print(f"\n{'─'*40}")
             print(f"[{name}]")
             print(fn(d, ALLOWED_CHAT_ID))

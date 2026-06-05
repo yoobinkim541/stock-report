@@ -23,7 +23,14 @@ BOT_TOKEN      = os.getenv("STOCK_BOT_TOKEN")
 CHAT_ID        = os.getenv("STOCK_BOT_CHAT_ID", "5771238245")
 PORTFOLIO_PATH = os.path.join(PROJECT_DIR, "portfolio_snapshot.json")
 
-BOT_PID_FILE  = "/tmp/barbell_bot.pid"
+def _pid_file_path() -> str:
+    runtime_dir = os.getenv("XDG_RUNTIME_DIR")
+    if runtime_dir:
+        return os.path.join(runtime_dir, "barbell_bot.pid")
+    return os.path.join(os.path.expanduser("~"), ".local", "state", "stock-report", "barbell_bot.pid")
+
+
+BOT_PID_FILE  = _pid_file_path()
 SYNC_PORT     = int(os.getenv("SYNC_PORT", "8765"))
 
 # 마지막 알림 쿨다운 파일 — 같은 문제를 30분마다 계속 알리는 걸 방지

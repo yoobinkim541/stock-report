@@ -383,17 +383,26 @@ def fetch_qqq_data() -> dict:
         hist = yf.Ticker("QQQ").history(period="1y")
         if hist.empty:
             return {}
-        current = _safe_float(hist["Close"].iloc[-1])
-        high_52w = _safe_float(hist["High"].max())
-        low_52w = _safe_float(hist["Low"].min())
-        drawdown = (current - high_52w) / high_52w * 100 if high_52w > 0 else 0
+        valid = hist.dropna(subset=["High", "Low", "Close"])
+        valid = valid[(valid["High"] > 0) & (valid["Low"] > 0) & (valid["Close"] > 0)]
+        if valid.empty:
+            logger.warning("QQQ 데이터 오류 — 유효한 OHLC 행 없음")
+            return {}
+        closes = valid["Close"].tolist()
+        current = _safe_float(closes[-1])
+        high_52w = _safe_float(valid["High"].max())
+        low_52w = _safe_float(valid["Low"].min())
+        if current <= 0 or high_52w <= 0 or low_52w <= 0 or low_52w > high_52w:
+            logger.warning("QQQ 데이터 비정상 — current=%s high_52w=%s low_52w=%s", current, high_52w, low_52w)
+            return {}
+        drawdown = (current - high_52w) / high_52w * 100
 
         mom_1m = mom_3m = 0.0
-        if len(hist) >= 21:
-            p1m = _safe_float(hist["Close"].iloc[-21])
+        if len(valid) >= 21:
+            p1m = _safe_float(valid["Close"].iloc[-21])
             mom_1m = (current - p1m) / p1m * 100 if p1m > 0 else 0
-        if len(hist) >= 63:
-            p3m = _safe_float(hist["Close"].iloc[-63])
+        if len(valid) >= 63:
+            p3m = _safe_float(valid["Close"].iloc[-63])
             mom_3m = (current - p3m) / p3m * 100 if p3m > 0 else 0
 
         range_52w = high_52w - low_52w
@@ -712,6 +721,9 @@ def classify_market(qqq_data: dict, rsi: float, vix: float) -> tuple:
     """
     drawdown = qqq_data.get("drawdown_pct", 0)
     mom_1m = qqq_data.get("mom_1m_pct", 0)
+    if qqq_data.get("current", 0) <= 0 or qqq_data.get("high_52w", 0) <= 0 or drawdown <= -80:
+        logger.warning("QQQ 데이터 비정상 — 시장 분류를 neutral로 처리: %s", qqq_data)
+        return "neutral", 0
 
     if drawdown <= -30:   return "bear", 5
     elif drawdown <= -20: return "bear", 4

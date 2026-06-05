@@ -311,3 +311,28 @@ WorldGovernmentBonds가 5Y/10Y/20Y/30Y 모두 파싱은 했지만 캐시에는 5
 - 답변 형식 변경: `1. 결론 (낙관/비관/중립 시나리오 포함)`, `2. 근거 (거시 + 미시 각각)`, `3. 실행 시 주의점`
 
 ---
+
+## 2026-06-05 — QQQ NaN OHLC로 Phase 5 -100% 오발송
+
+### 증상
+
+Phase 5 크래시 에스컬레이션이 `QQQ 고점 대비 -100.0%`로 3회 발송됐다. 이후 smoke test도 `fetch_qqq_data: current price > 0`에서 실패했다.
+
+### 원인
+
+`yfinance`가 최신 QQQ 행에 `Volume`만 넣고 `Open/High/Low/Close`는 `NaN`으로 반환했다. 기존 `fetch_qqq_data()`는 마지막 행의 `Close`를 그대로 읽었고, `_safe_float(NaN)`이 `0.0`을 반환하면서 `drawdown_pct = -100%`가 됐다.
+
+### 수정 내용
+
+- `fetch_qqq_data()`는 `High/Low/Close`가 모두 유효하고 0보다 큰 행만 사용한다.
+- 유효 OHLC 행이 없거나 `current/high/low`가 비정상이면 `{}`를 반환한다.
+- `classify_market()`은 `current <= 0`, `high_52w <= 0`, `drawdown <= -80`인 비정상 QQQ 데이터를 `neutral/0`으로 처리한다.
+- `notify_phase_change()`도 같은 가드로 Phase 알림 발송 직전에 한 번 더 차단한다.
+
+### 재발 방지
+
+- 시장 데이터 smoke 실패는 commit/push/restart 전에 반드시 해결한다.
+- `drawdown <= -80` 같은 비현실적 값은 자동 주문/Phase 알림에 사용하지 않는다.
+- yfinance 최신 행은 `Volume`만 있고 OHLC가 `NaN`일 수 있으므로 마지막 행을 맹신하지 않는다.
+
+---
