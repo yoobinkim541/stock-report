@@ -21,6 +21,7 @@ Commands:
 import os
 import sys
 import time
+import fcntl
 import logging
 import threading
 from pathlib import Path
@@ -75,6 +76,12 @@ except Exception:
 
 logger = logging.getLogger(__name__)
 
+_LOCK_FD = None  # kept open for process lifetime to hold fcntl lock
+
+
+class _Telegram409(Exception):
+    """Raised when Telegram returns HTTP 409 Conflict on getUpdates."""
+
 
 def setup_logging():
     logging.basicConfig(
@@ -92,16 +99,40 @@ PHASE_CHECK_SECS   = 300   # Phase 변화 체크 주기(초, 5분)
 
 
 def _pid_file_path() -> str:
-    runtime_dir = os.getenv("XDG_RUNTIME_DIR")
-    if runtime_dir:
-        path = Path(runtime_dir) / "barbell_bot.pid"
-    else:
-        path = Path.home() / ".local" / "state" / "stock-report" / "barbell_bot.pid"
+    path = Path.home() / ".local" / "state" / "stock-report" / "barbell_bot.pid"
     path.parent.mkdir(parents=True, exist_ok=True)
     return str(path)
 
 
 PID_FILE           = _pid_file_path()
+_PHASE_LOCK_FILE   = os.path.expanduser("~/.cache/barbell_state.lock")
+
+
+def _lock_file_path() -> str:
+    return str(Path(PID_FILE).with_suffix(".lock"))
+
+
+def _acquire_instance_lock() -> bool:
+    """Non-blocking exclusive flock. Returns False if another instance holds it."""
+    global _LOCK_FD
+    try:
+        fd = open(_lock_file_path(), "w")
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        _LOCK_FD = fd  # keep fd open to hold lock
+        return True
+    except (IOError, OSError):
+        return False
+
+
+def _cleanup_pid_file():
+    try:
+        with open(PID_FILE) as f:
+            stored = int(f.read().strip())
+        if stored == os.getpid():
+            os.remove(PID_FILE)
+    except Exception:
+        pass
+
 
 BOT_COMMANDS = [
     {"command": "help",           "description": "명령어 목록"},
@@ -226,6 +257,9 @@ def fetch_market(force: bool = False) -> dict:
 #  Telegram API
 # ══════════════════════════════════════════════════════════════════════
 
+_SENTINEL_409: dict = {"__conflict_409__": True}
+
+
 def _api(method: str, **kwargs) -> dict:
     url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/{method}"
     request_timeout = kwargs.pop("_request_timeout", 15)
@@ -235,6 +269,9 @@ def _api(method: str, **kwargs) -> dict:
             r = requests.post(url, json=kwargs, timeout=request_timeout)
             if r.ok:
                 return r.json()
+            if r.status_code == 409:
+                logger.warning("API %s HTTP 409 Conflict", method)
+                return _SENTINEL_409
             logger.warning("API %s HTTP %s: %s", method, r.status_code, r.text[:200])
             if r.status_code < 500 and r.status_code != 429:
                 return {}
@@ -304,6 +341,8 @@ def get_updates(offset: int | None = None) -> list | None:
     if offset is not None:
         params["offset"] = offset
     resp = _api("getUpdates", _request_timeout=POLL_TIMEOUT + 10, **params)
+    if resp.get("__conflict_409__"):
+        raise _Telegram409("Telegram 409 Conflict — 다른 getUpdates 인스턴스 충돌")
     if not resp.get("ok"):
         return None
     return resp.get("result", [])
@@ -860,33 +899,40 @@ def notify_phase_change():
     """Phase 변화 감지 → Phase 5 진입 시 긴급 에스컬레이션 3회 발송.
     barbell_strategy의 STATE_FILE을 공유해 크론과 중복 발송을 방지."""
     try:
-        old = load_phase_state()
-        d   = fetch_market()
-        mt  = d["market_type"]
-        pk  = d["phase_key"]
-        if not has_phase_changed(old, mt, pk):
-            return
-        dd = d["qqq"].get("drawdown_pct", 0)
-        qqq = d.get("qqq") or {}
-        if qqq.get("current", 0) <= 0 or qqq.get("high_52w", 0) <= 0 or dd <= -80:
-            logger.warning("Phase 변화 알림 스킵 — QQQ 데이터 비정상: %s", qqq)
-            return
-        if mt == "bear" and pk == 5:
-            for i in range(3):
-                send_phase5_emergency(dd, d["exchange_rate"], d["portfolio"])
-                if i < 2:
-                    time.sleep(3)
-            logger.warning("Phase 5 긴급 에스컬레이션 3회 발송 완료 (봇)")
-        else:
-            info = BULL_PHASES[pk] if mt == "bull" else BEAR_PHASES[pk]
-            send(ALLOWED_CHAT_ID,
-                 f"⚠️ Phase 변화 감지!\n"
-                 f"━━━━━━━━━━━━━━━━━━━━━━━\n"
-                 f"{info['emoji']} {info['label']}\n"
-                 f"QQQ {dd:+.2f}%\n"
-                 f"/phase 로 행동 지침 확인")
-            logger.info(f"Phase 변화 알림 발송: {mt}/{pk}")
-        save_phase_state(mt, pk, dd)
+        os.makedirs(os.path.dirname(_PHASE_LOCK_FILE) or ".", exist_ok=True)
+        with open(_PHASE_LOCK_FILE, "w") as _lf:
+            try:
+                fcntl.flock(_lf, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except (IOError, OSError):
+                logger.debug("Phase 알림 스킵 — 다른 프로세스 실행 중")
+                return
+            old = load_phase_state()
+            d   = fetch_market()
+            mt  = d["market_type"]
+            pk  = d["phase_key"]
+            if not has_phase_changed(old, mt, pk):
+                return
+            dd = d["qqq"].get("drawdown_pct", 0)
+            qqq = d.get("qqq") or {}
+            if qqq.get("current", 0) <= 0 or qqq.get("high_52w", 0) <= 0 or dd <= -80:
+                logger.warning("Phase 변화 알림 스킵 — QQQ 데이터 비정상: %s", qqq)
+                return
+            if mt == "bear" and pk == 5:
+                for i in range(3):
+                    send_phase5_emergency(dd, d["exchange_rate"], d["portfolio"])
+                    if i < 2:
+                        time.sleep(3)
+                logger.warning("Phase 5 긴급 에스컬레이션 3회 발송 완료 (봇)")
+            else:
+                info = BULL_PHASES[pk] if mt == "bull" else BEAR_PHASES[pk]
+                send(ALLOWED_CHAT_ID,
+                     f"⚠️ Phase 변화 감지!\n"
+                     f"━━━━━━━━━━━━━━━━━━━━━━━\n"
+                     f"{info['emoji']} {info['label']}\n"
+                     f"QQQ {dd:+.2f}%\n"
+                     f"/phase 로 행동 지침 확인")
+                logger.info(f"Phase 변화 알림 발송: {mt}/{pk}")
+            save_phase_state(mt, pk, dd)
     except Exception as e:
         logger.error(f"Phase 변화 체크 오류: {e}")
 
@@ -1033,6 +1079,10 @@ def run():
         logger.error("STOCK_BOT_TOKEN 없음 — .env 파일 확인")
         sys.exit(1)
 
+    if not _acquire_instance_lock():
+        logger.error("다른 봇 인스턴스가 실행 중입니다 (lock 점유) — 종료")
+        sys.exit(0)
+
     with open(PID_FILE, "w") as f:
         f.write(str(os.getpid()))
     logger.info(f"🤖 Barbell Bot 시작 (PID {os.getpid()})")
@@ -1042,14 +1092,28 @@ def run():
     offset: int | None  = None
     last_alert_check    = 0.0
     last_phase_check    = 0.0
+    consecutive_409     = 0
 
     while True:
         try:
-            updates = get_updates(offset)
+            try:
+                updates = get_updates(offset)
+            except _Telegram409:
+                consecutive_409 += 1
+                logger.warning("Telegram 409 Conflict #%d (중복 getUpdates 충돌)", consecutive_409)
+                if consecutive_409 >= 3:
+                    logger.critical("409 Conflict 3회 연속 — 중복 인스턴스 감지, 종료")
+                    _cleanup_pid_file()
+                    sys.exit(2)
+                time.sleep(RETRY_DELAY)
+                continue
+
             if updates is None:
                 logger.warning("getUpdates 실패 — %s초 후 재시도", RETRY_DELAY)
                 time.sleep(RETRY_DELAY)
                 continue
+
+            consecutive_409 = 0
             for upd in updates:
                 offset  = upd["update_id"] + 1
                 msg     = upd.get("message", {})
@@ -1092,8 +1156,7 @@ def run():
         except KeyboardInterrupt:
             logger.info("Bot 종료")
             send(ALLOWED_CHAT_ID, "🤖 Bot 오프라인")
-            if os.path.exists(PID_FILE):
-                os.remove(PID_FILE)
+            _cleanup_pid_file()
             break
         except Exception as e:
             logger.error(f"루프 오류: {e} — {RETRY_DELAY}초 후 재시도")

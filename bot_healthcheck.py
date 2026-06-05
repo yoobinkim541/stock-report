@@ -24,9 +24,6 @@ CHAT_ID        = os.getenv("STOCK_BOT_CHAT_ID", "5771238245")
 PORTFOLIO_PATH = os.path.join(PROJECT_DIR, "portfolio_snapshot.json")
 
 def _pid_file_path() -> str:
-    runtime_dir = os.getenv("XDG_RUNTIME_DIR")
-    if runtime_dir:
-        return os.path.join(runtime_dir, "barbell_bot.pid")
     return os.path.join(os.path.expanduser("~"), ".local", "state", "stock-report", "barbell_bot.pid")
 
 
@@ -59,6 +56,29 @@ def _is_pid_alive(pid_file: str) -> bool:
         return True
     except (FileNotFoundError, ProcessLookupError, ValueError, PermissionError):
         return False
+
+
+def _bot_process_pids() -> list[str]:
+    """Return real telegram_bot.py Python process PIDs, excluding wrappers/checks."""
+    try:
+        result = subprocess.run(
+            ["ps", "-eo", "pid=,args="],
+            capture_output=True, text=True,
+        )
+        pids = []
+        for line in result.stdout.splitlines():
+            if "telegram_bot.py" not in line:
+                continue
+            if "bot_healthcheck.py" in line:
+                continue
+            if "uv run python" in line:
+                continue
+            if "python" not in line:
+                continue
+            pids.append(line.strip().split(None, 1)[0])
+        return pids
+    except Exception:
+        return []
 
 
 def _send_alert(msg: str):
@@ -109,6 +129,71 @@ def check_telegram_bot() -> tuple[str, str] | None:
     if _is_pid_alive(BOT_PID_FILE) or _is_process_running("telegram_bot.py"):
         return None
     return ("bot_down", "❌ <b>telegram_bot.py</b> 프로세스가 없습니다\n  → bot_watchdog.sh 확인 필요")
+
+
+def check_bot_instance_count() -> tuple[str, str] | None:
+    """중복 인스턴스 경고 (>1 프로세스)."""
+    pids = _bot_process_pids()
+    if len(pids) > 1:
+        return ("bot_multi", f"⚠️ telegram_bot.py 인스턴스 {len(pids)}개 실행 중 (PID: {', '.join(pids)})")
+    return None
+
+
+def check_pid_file_match() -> tuple[str, str] | None:
+    """PID 파일과 실제 프로세스 불일치 확인."""
+    pid_exists = os.path.exists(BOT_PID_FILE)
+    pids = _bot_process_pids()
+    proc_running = bool(pids)
+    if not pid_exists and proc_running:
+        return ("pid_missing", "⚠️ telegram_bot.py 실행 중이나 PID 파일 없음 (단일 인스턴스 lock 미적용?)")
+    if not pid_exists:
+        return None
+    try:
+        with open(BOT_PID_FILE) as f:
+            file_pid = int(f.read().strip())
+    except (ValueError, OSError):
+        return ("pid_corrupt", "⚠️ PID 파일 손상")
+    try:
+        os.kill(file_pid, 0)
+    except ProcessLookupError:
+        return ("pid_stale", f"⚠️ PID 파일에 {file_pid} 기록됐으나 프로세스 없음 (스테일 PID)")
+    except PermissionError:
+        pass
+    if pids and str(file_pid) not in pids:
+        return ("pid_mismatch", f"⚠️ PID 파일({file_pid})과 실제 telegram_bot.py PID({', '.join(pids)}) 불일치")
+    return None
+
+
+def check_recent_409() -> tuple[str, str] | None:
+    """최근 로그에서 409 Conflict 발생 확인."""
+    log_files = ["/tmp/barbell_bot.log", "/tmp/bot_watchdog.log", "/tmp/healthcheck.log"]
+    for log_path in log_files:
+        if not os.path.exists(log_path):
+            continue
+        try:
+            result = subprocess.run(["tail", "-n", "100", log_path], capture_output=True, text=True)
+            lines = result.stdout
+            if "409" in lines and ("Conflict" in lines or "conflict" in lines):
+                recent = [l for l in lines.split("\n") if "409" in l][-3:]
+                excerpt = "\n".join(recent[:3])
+                return ("recent_409", f"⚠️ 최근 409 Conflict 발생 ({os.path.basename(log_path)}):\n{excerpt[:300]}")
+        except Exception:
+            pass
+    return None
+
+
+def check_uv_not_found() -> tuple[str, str] | None:
+    """cron 로그에서 'uv: not found' 확인."""
+    for log_path in ["/tmp/healthcheck.log", "/tmp/smoke_test.log"]:
+        if not os.path.exists(log_path):
+            continue
+        try:
+            result = subprocess.run(["tail", "-n", "50", log_path], capture_output=True, text=True)
+            if "uv: not found" in result.stdout:
+                return ("uv_missing", f"⚠️ {os.path.basename(log_path)}: 'uv: not found' — crontab PATH 설정 필요")
+        except Exception:
+            pass
+    return None
 
 
 def check_sync_server() -> tuple[str, str] | None:
@@ -168,6 +253,10 @@ def check_barbell_state_age() -> tuple[str, str] | None:
 def main():
     checks = [
         check_telegram_bot,
+        check_bot_instance_count,
+        check_pid_file_match,
+        check_recent_409,
+        check_uv_not_found,
         check_sync_server,
         check_portfolio_age,
         check_investment_report_cron,
@@ -176,6 +265,7 @@ def main():
 
     state   = _load_alert_state()
     issues  = []
+    suppressed = []
     now     = time.time()
 
     for check in checks:
@@ -187,6 +277,7 @@ def main():
             issues.append(msg)
             state[key] = now
         else:
+            suppressed.append(msg)
             remaining = int((_ALERT_COOLDOWN - (now - state.get(key, 0))) / 60)
             print(f"  [{key}] 쿨다운 중 (재알림까지 {remaining}분)")
 
@@ -196,6 +287,9 @@ def main():
         full_msg = "\n\n".join(issues)
         print(f"[{datetime.now()}] 🚨 {len(issues)}개 문제:\n{full_msg}")
         _send_alert(full_msg)
+        sys.exit(1)
+    if suppressed:
+        print(f"[{datetime.now()}] 🚨 {len(suppressed)}개 문제 감지 (알림 쿨다운 중)")
         sys.exit(1)
     else:
         print(f"[{datetime.now()}] ✅ 모든 체크 정상")

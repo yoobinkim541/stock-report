@@ -1,17 +1,20 @@
 #!/usr/bin/env bash
 # bot_watchdog.sh — telegram_bot.py 가 죽으면 자동 재시작
-# 크론 등록: * * * * * /path/to/bot_watchdog.sh >> /tmp/bot_watchdog.log 2>&1
+# 크론 등록: * * * * * /home/ubuntu/projects/stock-report/bot_watchdog.sh >> /tmp/bot_watchdog.log 2>&1
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 BOT_SCRIPT="$SCRIPT_DIR/telegram_bot.py"
-if [ -n "${XDG_RUNTIME_DIR:-}" ]; then
-    PID_FILE="$XDG_RUNTIME_DIR/barbell_bot.pid"
-else
-    PID_FILE="$HOME/.local/state/stock-report/barbell_bot.pid"
-fi
+PID_FILE="$HOME/.local/state/stock-report/barbell_bot.pid"
 LOG_FILE="/tmp/barbell_bot.log"
+WATCHDOG_LOCK="/tmp/bot_watchdog.lock"
 
 mkdir -p "$(dirname "$PID_FILE")"
+
+# 동시 실행 방지 (cron이 겹치면 skip)
+exec 9>"$WATCHDOG_LOCK"
+if ! flock -n 9; then
+    exit 0
+fi
 
 is_running() {
     [ -f "$PID_FILE" ] || return 1
@@ -33,5 +36,9 @@ if [ -f "$SCRIPT_DIR/.env" ]; then
     set +a
 fi
 
-nohup python3 "$BOT_SCRIPT" >> "$LOG_FILE" 2>&1 &
+UV="/home/ubuntu/.local/bin/uv"
+cd "$SCRIPT_DIR" || exit 1
+flock -u 9
+exec 9>&-
+nohup "$UV" run python "$BOT_SCRIPT" >> "$LOG_FILE" 2>&1 &
 echo "[$(date '+%Y-%m-%d %H:%M:%S')] 재시작 완료 (PID $!)"
