@@ -334,16 +334,26 @@ def _safe_float(val, default=0.0):
 
 def _holding_details_from_snapshot(snap: dict) -> list[dict]:
     details = []
+    # overseas_general + overseas_fractional → dict keyed by ticker
+    merged: dict[str, dict] = {}
     for section, key in [("overseas_general", "holdings_usd"),
                           ("overseas_fractional", "holdings")]:
         for h in snap.get(section, {}).get(key, []):
-            details.append({
-                "ticker": h.get("ticker"),
-                "name": h.get("name"),
-                "shares": h.get("shares"),
-                "value_usd": h.get("value_usd"),
-                "return_pct": h.get("return_pct"),
-            })
+            ticker = h.get("ticker")
+            if ticker in merged:
+                e = merged[ticker]
+                e["shares"] = (e.get("shares") or 0) + (h.get("shares") or 0)
+                e["value_usd"] = (e.get("value_usd") or 0) + (h.get("value_usd") or 0)
+            else:
+                merged[ticker] = {
+                    "ticker": ticker,
+                    "name": h.get("name"),
+                    "shares": h.get("shares"),
+                    "value_usd": h.get("value_usd"),
+                    "return_pct": h.get("return_pct"),
+                }
+    for h in sorted(merged.values(), key=lambda x: x.get("value_usd", 0) or 0, reverse=True):
+        details.append(h)
 
     for h in snap.get("domestic", {}).get("holdings", []):
         value_krw = h.get("value_krw")

@@ -7,6 +7,7 @@ from investment_report import (
     _decision_v2,
     _etf_peer_group,
     _etf_period_return,
+    _fmt_price,
     _format_etf_comparison,
     _mobile_pick_line,
     _mobile_pick_items,
@@ -189,6 +190,25 @@ def test_decision_v2_etf_note_not_data_shortage():
     assert decision["financial"]["status"] != "부족"
 
 
+def test_decision_v2_keeps_sgov_as_cash_even_with_rsi_warning():
+    fund = {
+        "total_score": 0,
+        "grade": "N/A",
+        "ticker": "SGOV",
+        "notes": ["iShares 0-3 Month Treasury Bond ETF", "현금성 단기채"],
+    }
+    signal = {
+        "overall_signal": "Warning",
+        "warnings": ["RSI 과매수 — 매도 검토"],
+        "critical": [],
+        "price_info": {"current_price": 100.5, "1d_change_pct": 0.02, "1mo_change_pct": 0.4},
+    }
+
+    decision = _decision_v2(fund, signal, ticker="SGOV")
+
+    assert decision["action"] == "현금성 유지"
+
+
 def test_decision_v2_risk_types_is_list():
     fund = {"total_score": 82, "grade": "A"}
     signal = {
@@ -275,3 +295,7 @@ def test_format_etf_comparison_reports_relative_underperformance():
     assert any("운영수수료 0.13%" in line for line in lines)
     assert any("1Y" in line and "SPY -2.50%p" in line and "QQQ -4.00%p" in line for line in lines)
     assert any("동종 MTUM +1.00%p" in line for line in lines)
+
+
+def test_fmt_price_supports_krw_for_korea_market_values():
+    assert _fmt_price(3901.234, currency="KRW") == "₩3,901.23"

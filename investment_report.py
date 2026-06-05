@@ -265,11 +265,15 @@ def _fmt_pct(val, force_sign=False):
         return str(val)
 
 
-def _fmt_price(val):
+def _fmt_price(val, currency="USD"):
     if val is None:
         return "N/A"
     try:
-        return f"${float(val):.2f}"
+        v = float(val)
+        if currency == "KRW":
+            # 한국 시장 가격용 — ₩ + 천단위 콤마
+            return f"₩{v:,.2f}"
+        return f"${v:.2f}"
     except (ValueError, TypeError):
         return str(val)
 

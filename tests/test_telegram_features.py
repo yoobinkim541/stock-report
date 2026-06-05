@@ -112,6 +112,27 @@ def test_holding_details_from_snapshot_includes_stocks_and_domestic():
     assert details[2]["value_krw"] == 504000
 
 
+def test_holding_details_combines_duplicate_us_tickers():
+    snap = {
+        "overseas_general": {
+            "holdings_usd": [
+                {"ticker": "MSFT", "name": "마이크로소프트", "shares": 2, "value_usd": 900, "return_pct": 12.5}
+            ]
+        },
+        "overseas_fractional": {
+            "holdings": [
+                {"ticker": "MSFT", "name": "마이크로소프트", "shares": 0.5, "value_usd": 225, "return_pct": 10.0}
+            ]
+        },
+    }
+
+    details = _holding_details_from_snapshot(snap)
+
+    assert len([h for h in details if h["ticker"] == "MSFT"]) == 1
+    assert details[0]["shares"] == 2.5
+    assert details[0]["value_usd"] == 1125
+
+
 def test_dispatch_routes_common_command_typo_to_portfolio(monkeypatch):
     import telegram_bot
 
@@ -416,6 +437,7 @@ def test_bot_commands_include_all_top_level_dispatch_commands():
 
 def test_apply_snapshot_updates_derived_portfolio_values(monkeypatch, tmp_path):
     import telegram_bot
+    import holding_commands
 
     portfolio_path = tmp_path / "portfolio_snapshot.json"
     portfolio_path.write_text(json.dumps({
@@ -446,12 +468,15 @@ def test_apply_snapshot_updates_derived_portfolio_values(monkeypatch, tmp_path):
     }
     sent = []
 
-    monkeypatch.setattr(telegram_bot, "PORTFOLIO_PATH", str(portfolio_path))
-    monkeypatch.setattr(telegram_bot, "load_pending_snapshot", lambda: pending)
-    monkeypatch.setattr(telegram_bot, "clear_pending_snapshot", lambda: None)
+    monkeypatch.setattr(holding_commands, "PORTFOLIO_PATH", str(portfolio_path))
+    monkeypatch.setattr(holding_commands, "load_pending_snapshot", lambda: pending)
+    monkeypatch.setattr(holding_commands, "clear_pending_snapshot", lambda: None)
     monkeypatch.setattr(telegram_bot, "send", lambda chat_id, text: sent.append(text))
 
-    telegram_bot.cmd_apply_snapshot("chat-1")
+    def send_fn(chat_id, text):
+        sent.append(text)
+
+    telegram_bot.cmd_apply_snapshot("chat-1", send_fn)
 
     snap = json.loads(portfolio_path.read_text(encoding="utf-8"))
     holding = snap["overseas_general"]["holdings_usd"][0]

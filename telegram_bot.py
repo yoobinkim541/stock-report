@@ -45,6 +45,7 @@ from barbell_strategy import (
     build_smart_report,
     build_report, build_simulation_report, load_leverage_state, load_phase_state, save_phase_state,
     has_phase_changed, send_phase5_emergency,
+    _holding_details_from_snapshot,
     _phase_meter, _bar, _sgov_compare, _dca_rows,
     BULL_PHASES, BEAR_PHASES,
     TELEGRAM_TOKEN, TELEGRAM_CHAT_ID,
