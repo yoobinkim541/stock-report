@@ -1,4 +1,4 @@
-# 📊 Stock Report — Intelligence Barbell v2.5
+# 📊 Stock Report — Intelligence Barbell v2.6
 
 > 감정 없이, 규칙대로. QQQ Phase 기반 자동화 투자 시스템.
 
@@ -23,10 +23,12 @@ deliver_investment_report.sh        kiwoom_sync_rest.py
                       ├── 매일: 투자 리포트 문서 전송
                       └── Phase 변화 시: 즉시 바벨 전략 알림
 
-telegram_bot.py (상시)
+telegram_bot.py (상시, fcntl 단일 인스턴스 잠금)
   ├── 양방향 명령어 처리
   ├── Phase 5분 감시 (barbell_state.json 공유, 중복 방지)
-  └── 가격 알림 5분 체크
+  ├── 가격 알림 5분 체크
+  ├── tax_commands.py  ← /tax 서브커맨드 분리
+  └── holding_commands.py  ← /holding 서브커맨드 분리
 ```
 
 ---
@@ -36,9 +38,11 @@ telegram_bot.py (상시)
 | 파일 | 역할 |
 |------|------|
 | `barbell_strategy.py` | Intelligence Barbell v2.1 — Phase 분류, SGOV/DCA/레버리지 계산, 시각화 리포트 |
-| `telegram_bot.py` | 양방향 텔레그램 봇 — 명령어 라우터, 첨부파일 처리, Phase 감시 |
+| `telegram_bot.py` | 양방향 텔레그램 봇 — 명령어 라우터, fcntl 단일 인스턴스 잠금, Phase 감시 |
+| `holding_commands.py` | /holding 서브커맨드 핸들러 (buy·sell·target·dca·dividend·apply 등) |
+| `tax_commands.py` | /tax 서브커맨드 핸들러 (sim·sell·history·delete·import) |
 | `investment_report.py` | 포트폴리오 수익률 + 펀더멘털 분석 Markdown 리포트 |
-| `holding_manager.py` | 보유 종목 CRUD + DCA/목표비중 파일 관리 |
+| `holding_manager.py` | 보유 종목 CRUD + DCA/목표비중 파일 관리 (atomic write) |
 | `attachment_parser.py` | PDF·이미지 OCR 파싱 → 포트폴리오·매도내역 자동 감지 |
 | `order_generator.py` | Phase 기반 소수점 매수 주문서 생성 |
 | `portfolio_tracker.py` | 일일 히스토리 기록 + 배당 기록 |
@@ -48,7 +52,8 @@ telegram_bot.py (상시)
 | `stock_advisor.py` | AI 포트폴리오 상담 (/ask) |
 | `kiwoom_sync_rest.py` | 키움 REST API → 국내주식 잔고 자동 동기화 (크론 08:35) |
 | `portfolio_sync_server.py` | 외부 → portfolio_snapshot.json 수신 서버 (port 8765) |
-| `bot_healthcheck.py` | 봇·서버 상태 30분 자동 점검, 문제 시만 텔레그램 알림 |
+| `bot_healthcheck.py` | 봇·서버 상태 30분 자동 점검 — 중복 인스턴스·409 Conflict·PID 불일치·파일 신선도 |
+| `bot_smoke_test.py` | 봇 기능 연기 테스트 — 25개 항목 실데이터 검증, 실패 시만 알림 |
 | `fundamental_score.py` | 종목별 100점 펀더멘털 스코어링 |
 | `daily_signals.py` | 가격/거래량 기반 일일 신호 감지 |
 | `market_report.py` | 시장 뉴스 리포트 (SaveTicker API + Arca Live) |
@@ -60,6 +65,20 @@ telegram_bot.py (상시)
 ---
 
 ## 🆕 최근 업그레이드
+
+### v2.6 — 봇 안정성 강화 & UX 개선 (2026-06-05)
+
+- **단일 인스턴스 잠금** — `fcntl.flock`으로 중복 봇 프로세스 원천 차단  
+  PID 파일 위치: `~/.local/state/stock-report/barbell_bot.pid`
+- **커맨드 모듈 분리** — `holding_commands.py` · `tax_commands.py`로 분리해 유지보수성 향상
+- **QQQ 데이터 가드** — `fetch_qqq_data()` None 반환 시 봇 crash 방지
+- **헬스체크 강화** — 중복 인스턴스 감지, PID 불일치 감지, 409 Conflict 로그 감지, `uv: not found` 크론 오류 감지
+- **봇 smoke test** — `bot_smoke_test.py` 25개 항목 실데이터 검증 크론 (매일 09:00 KST)
+- **UX 개선**
+  - `/portfolio` 개별 종목 P&L 표 추가 (평가금액·수익률 내림차순)
+  - `/status` QQQ 1M 모멘텀 + 포트폴리오 수익률 추가
+  - `/summary` 신규 — 한 줄 빠른 현황 (`Phase · QQQ · 총액 · F&G`)
+- **코드 품질** — `_cache` Lock, `send()` 줄바꿈 분할, atomic file write, silent except → logging
 
 ### v2.5 — 외부 데이터 연동 (2026-06-04)
 
@@ -250,7 +269,10 @@ cp .env.example .env
 # 키움 국내주식 잔고 동기화 (KST 08:35)
 35 23 * * 1-5 cd /path/to/stock-report && uv run python kiwoom_sync_rest.py >> /tmp/kiwoom_sync.log 2>&1
 
-# 봇·서버 헬스체크 (30분마다, 문제 시만 텔레그램 알림)
+# 봇 기능 연기 테스트 (KST 09:00, 실패 시만 알림)
+0 0 * * 1-5 cd /path/to/stock-report && uv run python bot_smoke_test.py >> /tmp/smoke_test.log 2>&1
+
+# 봇·서버 헬스체크 (30분마다, 문제 시만 알림)
 */30 * * * * cd /path/to/stock-report && uv run python bot_healthcheck.py >> /tmp/healthcheck.log 2>&1
 
 # 봇 watchdog (1분마다)
@@ -268,9 +290,12 @@ cp .env.example .env
 stock-report/
 ├── barbell_strategy.py          # 핵심 전략 엔진
 ├── telegram_bot.py              # 양방향 텔레그램 봇
+├── holding_commands.py          # /holding 서브커맨드 핸들러
+├── tax_commands.py              # /tax 서브커맨드 핸들러
 ├── kiwoom_sync_rest.py          # 키움 REST API 국내주식 잔고 동기화
 ├── portfolio_sync_server.py     # 외부 잔고 수신 Flask 서버 (port 8765)
-├── bot_healthcheck.py           # 봇·서버 30분 헬스체크, 문제 시만 알림
+├── bot_healthcheck.py           # 봇·서버 30분 헬스체크 (중복인스턴스·409·PID)
+├── bot_smoke_test.py            # 기능 검증 연기 테스트 25항목 (매일 크론)
 ├── attachment_parser.py         # PDF·이미지 첨부파일 파싱
 ├── holding_manager.py           # 보유 종목 CRUD
 ├── order_generator.py           # 소수점 매수 주문서
@@ -300,7 +325,9 @@ stock-report/
 ├── target_weights.json          # 목표 비중 설정
 └── price_alerts.json            # 🔒 비공개 — 가격 알림
 
+~/.local/state/stock-report/barbell_bot.pid  # 봇 PID (단일 인스턴스 잠금)
 ~/.cache/barbell_state.json      # Phase 상태 (크론·봇 공유)
+~/.cache/barbell_state.lock      # Phase 상태 쓰기 잠금
 ~/.local/share/stock-report/     # 런타임 데이터
   ├── tax_records.json
   ├── pending_snapshot.json      # 파싱 대기 (72시간 TTL)

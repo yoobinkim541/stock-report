@@ -11,13 +11,19 @@ deliver_investment_report.sh (크론 23:00 UTC)
 kiwoom_sync_rest.py (크론 23:35 UTC = 08:35 KST, 월~금)
   └── 키움 REST API kt00018 → portfolio_snapshot.json domestic 섹션 업데이트
 
-telegram_bot.py (상시)
-  ├── fetch_market()         → barbell_strategy 전체 조회 (5분 캐시)
+telegram_bot.py (상시, fcntl 단일 인스턴스 잠금)
+  ├── fetch_market()         → barbell_strategy 전체 조회 (5분 캐시, threading.Lock)
   ├── Phase 5min 감시        → barbell_state.json 공유 (크론과 중복 방지)
-  └── 가격알림 5min 체크
+  ├── 가격알림 5min 체크
+  ├── holding_commands.py    → /holding 서브커맨드 위임
+  └── tax_commands.py        → /tax 서브커맨드 위임
 
 portfolio_sync_server.py (상시, port 8765)
   └── 외부 잔고 데이터 수신 → portfolio_snapshot.json 업데이트
+
+크론 검증:
+  bot_smoke_test.py   — 매일 00:00 UTC (09:00 KST), 25항목 실데이터 테스트
+  bot_healthcheck.py  — 매 30분, 프로세스·서버·파일 상태 점검
 ```
 
 ## 파일 역할 (핵심만)
@@ -25,18 +31,21 @@ portfolio_sync_server.py (상시, port 8765)
 | 파일 | 역할 | 상태파일 |
 |------|------|----------|
 | `barbell_strategy.py` | Phase 분류, DCA·SGOV·레버리지 계산, 리포트 | `~/.cache/barbell_state.json` |
-| `telegram_bot.py` | 봇 메인 루프, 명령어 라우터, 첨부파일 처리 | `telegram_bot_state.json` 제거됨 |
-| `holding_manager.py` | 포트폴리오 CRUD + DCA/목표비중 파일 | `portfolio_snapshot.json`, `dca_weights.json`, `target_weights.json` |
+| `telegram_bot.py` | 봇 메인 루프, 명령어 라우터, fcntl 단일 인스턴스 | `~/.local/state/stock-report/barbell_bot.pid` |
+| `holding_commands.py` | /holding 서브커맨드 (buy·sell·target·dca·dividend·apply) | — |
+| `tax_commands.py` | /tax 서브커맨드 (sim·sell·history·delete·import) | — |
+| `holding_manager.py` | 포트폴리오 CRUD + DCA/목표비중 파일 (atomic write) | `portfolio_snapshot.json`, `dca_weights.json`, `target_weights.json` |
 | `tax_tracker.py` | 실현손익 기록·조회·세금 계산 | `~/.local/share/stock-report/tax_records.json` |
 | `portfolio_tracker.py` | 일일 히스토리 + 배당 기록 | `~/.local/share/stock-report/` |
 | `attachment_parser.py` | PDF/이미지 OCR 파싱, pending 파일 관리 | `pending_snapshot.json`, `pending_sells.json` |
 | `price_alerts.py` | 알림 CRUD + check_alerts() | `price_alerts.json` |
 | `order_generator.py` | Phase 기반 소수점 매수 주문서 생성 | — |
 | `source_collector.py` | 뉴스 JSONL 캐시 수집·다이제스트 | `~/reports/source-cache/*.jsonl` |
-| `stock_advisor.py` | Hermes CLI로 AI 상담 프롬프트 실행 | — |
+| `stock_advisor.py` | AI 상담 프롬프트 실행 | — |
 | `kiwoom_sync_rest.py` | 키움 REST API 국내주식 잔고 동기화 (크론 08:35 KST) | — |
 | `portfolio_sync_server.py` | 외부 잔고 수신 Flask 서버 (port 8765, Bearer 인증) | — |
-| `bot_healthcheck.py` | 봇·서버 상태 자동 점검 (크론 30분, 문제 시만 알림) | `/tmp/healthcheck_last_alert.json` |
+| `bot_healthcheck.py` | 봇·서버 상태 자동 점검 (30분, 중복인스턴스·409·PID·파일 신선도) | `/tmp/healthcheck_last_alert.json` |
+| `bot_smoke_test.py` | 기능 검증 연기 테스트 25항목 (매일 크론, 실패 시만 알림) | — |
 
 ## 텔레그램 봇 명령어
 
@@ -49,7 +58,7 @@ portfolio_sync_server.py (상시, port 8765)
 /sim [bull2|0~5]     시장 상태 시뮬레이션
 
 ── 포트폴리오 ────────────────────────────────────
-/portfolio           보유현황 + 총액
+/portfolio           보유현황 + 개별 종목 P&L + 총액
 /rebalance           안전마진 + 종목 비중 진단 + DCA 조정
 /history             성과 히스토리 (1d/7d/30d/90d)
 /sgov                SGOV 실탄 현재/목표 비교
@@ -126,6 +135,8 @@ portfolio_sync_server.py (상시, port 8765)
 ~/reports/investment-summary-{date}.json — 정제 요약 (save_csv.py 입력)
 ~/reports/investment-summary-{date}.txt  — 모바일 요약 (텔레그램 직접 발송)
 ~/.cache/barbell_state.json             — Phase 상태 (크론·봇 공유)
+~/.cache/barbell_state.lock             — Phase 상태 쓰기 잠금
+~/.local/state/stock-report/barbell_bot.pid  — 봇 PID (단일 인스턴스 잠금)
 ~/.local/share/stock-report/            — 런타임 데이터 (tax, history, dividend, pending)
 ```
 
@@ -136,6 +147,7 @@ MSFT, QQQI, ORCL, NOW, CRM, SAP, UNH, SGOV, CPNG, NVDA, GOOGL, SPMO
 - `.env`, `portfolio_snapshot.json`, `leverage_state.json`, `price_alerts.json` 절대 커밋 금지
 - 티커 표시 시 회사명 병기: `MSFT — Microsoft`
 - 출력은 한국어 기본
-- 텔레그램 메시지 4000자 초과 시 분할 (4096자 제한)
+- 텔레그램 메시지 4000자 초과 시 줄바꿈 기준 분할 (4096자 제한)
 - `STOCK_BOT_CHAT_ID` 는 env var — 코드에 하드코딩 금지
 - `KIWOOM_API_KEY` / `KIWOOM_API_SECRET` 절대 커밋 금지
+- `holding_manager._save()` 는 atomic write (temp→rename) — 직접 `json.dump` 호출 금지
