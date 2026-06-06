@@ -159,6 +159,7 @@ BOT_COMMANDS = [
     {"command": "ask",            "description": "AI 포트폴리오 상담"},
     {"command": "alert",          "description": "가격 알림 관리 (add/list/remove)"},
     {"command": "mlreport",       "description": "ML 전략 성과 리포트 (샘플)"},
+    {"command": "ranking",        "description": "NASDAQ100 종목 랭킹 (LightGBM)"},
 ]
 
 BOT_COMMAND_ALIASES = {
@@ -1065,9 +1066,34 @@ def _dispatch_mlreport(chat_id: str, args: list):
     cmd_mlreport(chat_id)
 
 
+def cmd_ranking(chat_id: str, args: list, send_fn=None):
+    """NASDAQ100 LightGBM 종목 랭킹."""
+    _send = send_fn if send_fn is not None else send
+    _send(chat_id, "⏳ 랭킹 생성 중... (첫 실행 시 약 15초)")
+    try:
+        from ml.ranker import rank_today, load_ranker, format_ranking_report
+        retrain = "retrain" in (args or [])
+        ranking = rank_today(mode="nasdaq100", top_n=15, retrain=retrain)
+        result  = load_ranker()
+        if ranking.empty or result is None:
+            _send(chat_id, "❌ 랭킹 생성 실패 — 데이터 확인 필요")
+            return
+        report = format_ranking_report(ranking, result)
+        _send(chat_id, report)
+    except Exception as e:
+        _send(chat_id, f"❌ 랭킹 오류: {e}")
+        logger.exception("cmd_ranking")
+
+
+def _dispatch_ranking(chat_id: str, args: list):
+    typing(chat_id)
+    cmd_ranking(chat_id, args)
+
+
 _COMMAND_HANDLERS = {
     "/report": _dispatch_report,
     "/mlreport": _dispatch_mlreport,
+    "/ranking":  _dispatch_ranking,
     "/alert": lambda chat_id, args: _dispatch_with_typing(cmd_alert, chat_id, args),
     "/dividend": lambda chat_id, args: _dispatch_with_send(cmd_dividend, chat_id, args),
     "/sim": lambda chat_id, args: _dispatch_with_typing(cmd_sim, chat_id, args),

@@ -72,11 +72,15 @@ def generate_synthetic_market_data(n: int = 756, seed: int = 42) -> dict:
     for t in range(1, n):
         signal[t] = 0.7 * signal[t - 1] + ar_noise[t]
 
-    # Asset returns driven by lagged signal → no lookahead in the DGP
+    # Asset returns driven by lagged signal -> no lookahead in the DGP.
+    # The strategy asset has a stronger learnable component than the passive
+    # benchmarks, so the optimizer can find a genuine sweet spot without
+    # fabricating monotonic positive sample paths.
     signal_lagged = np.concatenate([[0.0], signal[:-1]])
-    asset_rets = 0.003 * np.tanh(signal_lagged) + 0.0002 + rng.normal(0, 0.012, n)
-    spy_rets = rng.normal(0.0003, 0.010, n)
-    qqq_rets = rng.normal(0.0004, 0.012, n)
+    market_noise = rng.normal(0, 0.008, n)
+    asset_rets = 0.0060 * np.tanh(signal_lagged) + 0.0002 + 0.35 * market_noise + rng.normal(0, 0.010, n)
+    spy_rets = 0.00025 + 0.0008 * np.tanh(signal_lagged) + market_noise + rng.normal(0, 0.004, n)
+    qqq_rets = 0.00035 + 0.0012 * np.tanh(signal_lagged) + 1.15 * market_noise + rng.normal(0, 0.005, n)
 
     close = pd.Series(100 * np.cumprod(1 + asset_rets), index=idx, name="asset")
     spy_close = pd.Series(100 * np.cumprod(1 + spy_rets), index=idx, name="SPY")
@@ -184,6 +188,18 @@ def _generate_ml_signal(data: dict, train_fraction: float = 2 / 3) -> pd.Series:
     # OOS predictions only — in-sample period is NaN → strategy stays safe there
     preds = np.full(n, np.nan)
     preds[split:] = model.predict(X[split:])
+
+    # Base-Python fallback: ExcessReturnModel intentionally falls back to a
+    # constant mean when sklearn/lightgbm is unavailable.  A constant signal
+    # cannot create a threshold sweet spot, so use deterministic ridge via
+    # numpy least squares for the smoke optimizer while keeping imports safe.
+    if np.nanstd(preds[split:]) < 1e-12 and split > 5:
+        x_train = np.column_stack([np.ones(split), X[:split]])
+        x_test = np.column_stack([np.ones(n - split), X[split:]])
+        reg = 1e-4 * np.eye(x_train.shape[1])
+        reg[0, 0] = 0.0
+        coef = np.linalg.pinv(x_train.T @ x_train + reg) @ x_train.T @ y[:split]
+        preds[split:] = x_test @ coef
 
     return pd.Series(preds, index=features_df.index, name="ml_signal")
 
@@ -393,9 +409,9 @@ def optimize_sweet_spot(
     ml_data = {**data, "features": data["features"].assign(ml_signal=ml_signal)}
     oos_preds = ml_signal.dropna()
     if len(oos_preds) > 10:
-        ml_thresholds = [
-            float(np.percentile(oos_preds, p)) for p in (5, 25, 50)
-        ]
+        ml_thresholds = sorted({
+            float(np.percentile(oos_preds, p)) for p in (5, 15, 25, 40, 50, 65)
+        })
     else:
         ml_thresholds = [0.0]
 
