@@ -463,3 +463,70 @@ def build_ml_dataset(
             "built_at": datetime.now(timezone.utc).isoformat(),
         },
     }
+
+
+# ── sweet_spot 호환 실데이터 빌더 ──────────────────────────────────────────────
+
+def build_real_sweetspot_data(
+    asset_ticker: str = "QQQ",
+    days: int = 756,
+) -> dict:
+    """실시장 데이터를 sweet_spot.optimize_sweet_spot() 호환 포맷으로 반환.
+
+    generate_synthetic_market_data()와 동일한 키 구조:
+      close      — pd.Series  (asset 종가)
+      spy_close  — pd.Series  (SPY 종가)
+      qqq_close  — pd.Series  (QQQ 종가)
+      features   — pd.DataFrame  (momentum, volatility, sentiment)
+
+    피처:
+      momentum   — 20일 수익률 (실제 모멘텀)
+      volatility — 20일 실현변동성
+      sentiment  — (RSI14 - 50) / 50  ([-1, 1] 정규화, 과매도→음수)
+    """
+    tickers = list({asset_ticker, "SPY", "QQQ"})
+    prices  = fetch_prices(tickers, days=days)
+
+    def _close(t: str) -> pd.Series | None:
+        df = prices.get(t)
+        return df["Close"] if df is not None and "Close" in df.columns else None
+
+    asset = _close(asset_ticker)
+    spy   = _close("SPY")
+    qqq   = _close("QQQ")
+
+    if asset is None:
+        raise ValueError(f"{asset_ticker} 가격 조회 실패")
+
+    # 공통 날짜 인덱스
+    idx = asset.dropna().index
+    if spy is not None:
+        idx = idx.intersection(spy.dropna().index)
+    if qqq is not None:
+        idx = idx.intersection(qqq.dropna().index)
+
+    asset = asset.reindex(idx)
+    spy   = (spy.reindex(idx)   if spy   is not None else asset.copy().rename("SPY"))
+    qqq   = (qqq.reindex(idx)   if qqq   is not None else asset.copy().rename("QQQ"))
+
+    # 피처 계산
+    mom  = asset.pct_change(20).fillna(0)
+    vol  = asset.pct_change().rolling(20, min_periods=1).std().fillna(0)
+    delta = asset.diff()
+    gain  = delta.clip(lower=0).rolling(14, min_periods=1).mean()
+    loss  = (-delta.clip(upper=0)).rolling(14, min_periods=1).mean()
+    rsi   = 100 - 100 / (1 + gain / loss.replace(0, np.nan))
+    sent  = ((rsi - 50) / 50).fillna(0)
+
+    features = pd.DataFrame({
+        "momentum":   mom,
+        "volatility": vol,
+        "sentiment":  sent,
+    }, index=idx)
+
+    return {
+        "close":     asset.rename(asset_ticker),
+        "spy_close": spy.rename("SPY"),
+        "qqq_close": qqq.rename("QQQ"),
+        "features":  features,
+    }

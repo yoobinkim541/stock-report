@@ -4,17 +4,21 @@ Public API
 ----------
 chunk_text(text, limit)                — split long text for Telegram (≤4096 char limit)
 build_ml_strategy_report(...)          — compose performance comparison report text
+build_benchmark_report_section(bench)  — format BenchmarkComparison as a text section
 build_sample_ml_strategy_report()      — demo report using synthetic data (no network)
 """
 
 from __future__ import annotations
 
 from datetime import date, datetime
-from typing import Optional
+from typing import Optional, TYPE_CHECKING
 
 import pandas as pd
 
 from ml.backtest import BacktestResult, buy_and_hold
+
+if TYPE_CHECKING:
+    from ml.benchmarks import BenchmarkComparison
 
 
 # ---------------------------------------------------------------------------
@@ -206,33 +210,103 @@ def build_ml_strategy_report(
 
 
 # ---------------------------------------------------------------------------
+# Benchmark section formatter
+# ---------------------------------------------------------------------------
+
+def build_benchmark_report_section(bench: "BenchmarkComparison") -> str:
+    """Format a BenchmarkComparison as a compact text section for Telegram.
+
+    Lists all benchmark strategies (QQQ, SPY, QLD, TQQQ, 바벨, 올웨더, …) with
+    CAGR / MDD / Sharpe on one line each.  Skips results where CAGR is unavailable
+    (< 365 days).  Portfolio note always included.
+
+    Intentionally compact — designed to be appended after build_ml_strategy_report().
+    """
+    lines: list[str] = [
+        "",
+        "━━━━━━━━━━━━━━━━━━━━━━━",
+        "[ 광범위 벤치마크 비교 (최적화 샘플 / synthetic smoke) ]",
+        "",
+    ]
+    for r in bench.results:
+        cagr_str = f"{r.cagr:.1%}" if r.cagr is not None else "n/a(<1yr)"
+        mdd_str = f"{r.max_drawdown:.1%}"
+        sharpe_str = f"{r.sharpe:.2f}" if r.sharpe is not None else "n/a"
+        lines.append(f"▶ {r.name}")
+        lines.append(f"  CAGR={cagr_str}  MDD={mdd_str}  Sharpe={sharpe_str}  ({r.n_days}d)")
+    lines += [
+        "",
+        f"  ※ {bench.current_portfolio_note}",
+        "  ⚠️ 모든 수치는 합성 데이터 기반 백테스트 (실매매 아님)",
+        "━━━━━━━━━━━━━━━━━━━━━━━",
+    ]
+    return "\n".join(lines)
+
+
+# ---------------------------------------------------------------------------
 # Sample report (no network, synthetic data)
 # ---------------------------------------------------------------------------
 
 _SAMPLE_REPORT_CACHE: dict = {}
+_REAL_REPORT_CACHE:   dict = {}
 
 
 def build_sample_ml_strategy_report() -> str:
     """Build a demo ML strategy report using the sweet-spot optimizer on synthetic data.
 
     Results reflect the actual optimizer output — negative returns are shown as-is,
-    not hidden or adjusted.  Deterministic via seed=42.  Result is cached after first call.
+    not hidden or adjusted.  Includes a full benchmark comparison section.
+    Deterministic via seed=42.  Result is cached after first call.
     """
     if "report" in _SAMPLE_REPORT_CACHE:
         return _SAMPLE_REPORT_CACHE["report"]
 
     from ml.sweet_spot import generate_synthetic_market_data, optimize_sweet_spot
+    from ml.benchmarks import build_benchmark_comparison
 
     data = generate_synthetic_market_data()
     result = optimize_sweet_spot(data)
+    bench = build_benchmark_comparison(data, ml_result=result.ml_result)
 
-    text = build_ml_strategy_report(
+    main_text = build_ml_strategy_report(
         ml_result=result.ml_result,      # actual OOS ExcessReturnModel result (not grid-searched threshold)
         qqq_result=result.qqq_result,
         spy_result=result.spy_result,
         weights=result.weights,
         wf_summary=result.wf_summary,
-        as_of="샘플 (synthetic, 최적화 샘플)",
+        as_of="샘플 (최적화 샘플 / synthetic smoke)",
     )
+    bench_text = build_benchmark_report_section(bench)
+    text = main_text + bench_text
     _SAMPLE_REPORT_CACHE["report"] = text
+    return text
+
+
+def build_real_ml_strategy_report(asset_ticker: str = "QQQ", days: int = 756) -> str:
+    """실시장 데이터(yfinance)로 ML 전략 리포트 생성.
+
+    asset_ticker: 전략 대상 종목 (기본 QQQ)
+    days:         사용 기간 (기본 756 영업일 ≈ 3년)
+    결과는 프로세스 내 캐시 (재호출 시 즉시 반환).
+    """
+    cache_key = f"{asset_ticker}_{days}"
+    if cache_key in _REAL_REPORT_CACHE:
+        return _REAL_REPORT_CACHE[cache_key]
+
+    from ml.data_pipeline import build_real_sweetspot_data
+    from ml.sweet_spot import optimize_sweet_spot
+
+    data   = build_real_sweetspot_data(asset_ticker=asset_ticker, days=days)
+    result = optimize_sweet_spot(data)
+
+    today = date.today().isoformat()
+    text = build_ml_strategy_report(
+        ml_result=result.ml_result,
+        qqq_result=result.qqq_result,
+        spy_result=result.spy_result,
+        weights=result.weights,
+        wf_summary=result.wf_summary,
+        as_of=f"실데이터 {asset_ticker} {days}일 ({today})",
+    )
+    _REAL_REPORT_CACHE[cache_key] = text
     return text

@@ -801,15 +801,30 @@ def cmd_report(chat_id: str):
         logger.exception("cmd_report")
 
 
-def cmd_mlreport(chat_id: str, send_fn=None, send_photo_fn=None):
-    """ML 전략 성과 리포트 (샘플 데이터 기반) + 이퀴티 곡선 이미지."""
+def cmd_mlreport(chat_id: str, args: list = None, send_fn=None, send_photo_fn=None):
+    """ML 전략 성과 리포트.
+
+    /mlreport        — 합성 데이터 샘플 (빠름)
+    /mlreport real   — 실시장 데이터 QQQ 3년 (약 30초)
+    /mlreport real NVDA — 실시장 데이터 NVDA
+    """
     _send       = send_fn       if send_fn       is not None else send
     _send_photo = send_photo_fn if send_photo_fn is not None else send_photo
     if not _ML_REPORTING_AVAILABLE:
         _send(chat_id, "❌ ml.reporting 모듈을 불러올 수 없습니다.")
         return
+
+    args = args or []
+    use_real = "real" in args
+    ticker   = next((a for a in args if a.upper() == a and a.isalpha() and a != "REAL"), "QQQ")
+
     try:
-        report = build_sample_ml_strategy_report()
+        if use_real:
+            _send(chat_id, f"⏳ 실데이터({ticker}) 분석 중... (약 30초)")
+            from ml.reporting import build_real_ml_strategy_report
+            report = build_real_ml_strategy_report(asset_ticker=ticker, days=756)
+        else:
+            report = build_sample_ml_strategy_report()
         for chunk in _ml_chunk_text(report):
             _send(chat_id, chunk)
     except Exception as e:
@@ -1108,7 +1123,7 @@ def _dispatch_tax(chat_id: str, args: list):
 
 def _dispatch_mlreport(chat_id: str, args: list):
     typing(chat_id)
-    cmd_mlreport(chat_id)
+    cmd_mlreport(chat_id, args=args)
 
 
 def cmd_ranking(chat_id: str, args: list, send_fn=None):
