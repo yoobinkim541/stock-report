@@ -150,6 +150,65 @@ def evaluate_threshold_strategy(data: dict, params: dict) -> BacktestResult:
 
 
 # ---------------------------------------------------------------------------
+# Portfolio weights derived from optimizer parameters
+# ---------------------------------------------------------------------------
+
+def _derive_weights_from_params(best_params: dict) -> pd.Series:
+    """Derive portfolio weights from the optimizer's best parameters.
+
+    Maps risk-appetite signals (threshold, max_weight, safe_weight) to
+    a concrete ticker weight vector via build_weights() from ml.portfolio.
+    This ensures the reported portfolio reflects what the optimizer found,
+    rather than hard-coded constants.
+
+    Risk mapping:
+      - low threshold  → signal fires more often → higher equity allocation
+      - high max_weight → more concentrated bet   → higher growth-name scores
+      - high safe_weight → larger cash floor       → higher SGOV allocation
+    """
+    from ml.portfolio import PortfolioConfig, build_weights
+
+    max_w = float(best_params.get("max_weight", 1.0))
+    safe_w = float(best_params.get("safe_weight", 0.0))
+    threshold = float(best_params.get("threshold", 0.0))
+
+    # Map threshold from assumed range [-1, 1]: lower → more bullish
+    thr_norm = (threshold + 1.0) / 2.0          # 0 = most bullish, 1 = most bearish
+    equity_conviction = float(np.clip(min(max_w, 1.0) * (1.0 - thr_norm), 0.0, 1.0))
+
+    # SGOV score: high when bearish or safe_weight is high
+    # Stock scores: high when bullish
+    sgov_score = float(np.clip((1.0 - equity_conviction) * 0.80 + safe_w * 0.20, 0.05, 1.0))
+    scores = pd.Series({
+        "SGOV":  sgov_score,
+        "QQQI":  equity_conviction * 0.80,
+        "NVDA":  equity_conviction * 0.70,
+        "QQQ":   equity_conviction * 0.60,
+        "MSFT":  equity_conviction * 0.50,
+        "GOOGL": equity_conviction * 0.45,
+        "ORCL":  equity_conviction * 0.40,
+    })
+
+    safe_min = float(np.clip(safe_w * 0.5 + 0.05, 0.05, 0.40))
+    # safe_weight_max scales with bearishness so SGOV can absorb more allocation
+    safe_max = float(np.clip(safe_min + 0.90 * (1.0 - equity_conviction), safe_min, 0.95))
+    cfg = PortfolioConfig(
+        safe_weight_min=safe_min,
+        safe_weight_max=safe_max,
+        qqq_weight=0.0,
+        top_n=6,
+        max_single_position=0.25,
+        allow_cash=False,
+    )
+    w = build_weights(scores, cfg)
+    # Normalise to exactly 1.0 (distribute any residual cash proportionally)
+    total = float(w.sum())
+    if total > 1e-9:
+        w = w / total
+    return w
+
+
+# ---------------------------------------------------------------------------
 # Proper walk-forward validation (no leakage)
 # ---------------------------------------------------------------------------
 
@@ -305,15 +364,8 @@ def optimize_sweet_spot(
     # Proper walk-forward: per-fold optimization → true OOS evaluation (no leakage)
     wf_summary = _run_proper_walk_forward(data, param_grid)
 
-    weights = pd.Series({
-        "SGOV": 0.10,
-        "QQQ": 0.15,
-        "NVDA": 0.18,
-        "MSFT": 0.14,
-        "GOOGL": 0.12,
-        "ORCL": 0.10,
-        "QQQI": 0.21,
-    })
+    # Portfolio weights derived from optimizer's best parameters (not hard-coded)
+    weights = _derive_weights_from_params(best_params)
 
     return SweetSpotResult(
         best_params=best_params,
