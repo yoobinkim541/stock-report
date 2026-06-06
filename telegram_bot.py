@@ -329,6 +329,23 @@ def send(chat_id: str, text: str, max_len: int = 4000):
         _api("sendMessage", chat_id=chat_id, text=chunk)
 
 
+def send_photo(chat_id: str, path: str, caption: str = "") -> bool:
+    """로컬 PNG/JPG 파일을 텔레그램으로 전송."""
+    url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendPhoto"
+    try:
+        with open(path, "rb") as f:
+            r = requests.post(
+                url,
+                data={"chat_id": chat_id, "caption": caption[:1024]},
+                files={"photo": f},
+                timeout=30,
+            )
+        return r.ok
+    except Exception as e:
+        logger.warning("send_photo 실패 (%s): %s", path, e)
+        return False
+
+
 def typing(chat_id: str):
     _api("sendChatAction", chat_id=chat_id, action="typing")
 
@@ -774,9 +791,10 @@ def cmd_report(chat_id: str):
         logger.exception("cmd_report")
 
 
-def cmd_mlreport(chat_id: str, send_fn=None):
-    """ML 전략 성과 리포트 (샘플 데이터 기반)."""
-    _send = send_fn if send_fn is not None else send
+def cmd_mlreport(chat_id: str, send_fn=None, send_photo_fn=None):
+    """ML 전략 성과 리포트 (샘플 데이터 기반) + 이퀴티 곡선 이미지."""
+    _send       = send_fn       if send_fn       is not None else send
+    _send_photo = send_photo_fn if send_photo_fn is not None else send_photo
     if not _ML_REPORTING_AVAILABLE:
         _send(chat_id, "❌ ml.reporting 모듈을 불러올 수 없습니다.")
         return
@@ -787,6 +805,23 @@ def cmd_mlreport(chat_id: str, send_fn=None):
     except Exception as e:
         _send(chat_id, f"❌ ML 리포트 생성 오류: {e}")
         logger.exception("cmd_mlreport")
+        return
+
+    # 이퀴티 곡선 + 시험 산점도 이미지 전송 (matplotlib 없으면 건너뜀)
+    try:
+        import tempfile
+        from ml.sweet_spot import generate_synthetic_market_data, optimize_sweet_spot, plot_results
+        data   = generate_synthetic_market_data()
+        result = optimize_sweet_spot(data)
+        with tempfile.TemporaryDirectory() as tmpdir:
+            paths = plot_results(result, outdir=tmpdir)
+            for p in paths:
+                import os
+                fname = os.path.basename(p)
+                caption = "📈 이퀴티 곡선" if "equity" in fname else "🔬 파라미터 탐색"
+                _send_photo(chat_id, p, caption=caption)
+    except Exception as e:
+        logger.info("mlreport 이미지 전송 건너뜀: %s", e)
 
 
 def cmd_alert(chat_id: str, args: list):
