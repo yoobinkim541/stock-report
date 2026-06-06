@@ -241,7 +241,7 @@ def optimize_sweet_spot(
     if param_grid is None:
         param_grid = {
             "threshold": [-1.0, -0.5, 0.0, 0.5, 1.0],
-            "max_weight": [0.8, 1.0, 1.2],
+            "max_weight": [0.8, 1.0],   # 1.2 removed: leverage creates unfair advantage vs. unleveraged QQQ benchmark
             "safe_weight": [0.0, 0.1],
         }
 

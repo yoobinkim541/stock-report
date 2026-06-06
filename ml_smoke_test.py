@@ -241,7 +241,7 @@ def run_tests() -> list[str]:
     failures += _check("optimize_sweet_spot",
         lambda: opt,
         ("best_params 존재",          lambda r: bool(r.best_params)),
-        ("trials 30행",               lambda r: len(r.trials) == 30),
+        ("trials 20행",               lambda r: len(r.trials) == 20),
         ("equity 4개 컬럼",           lambda r: set(r.equity.columns) == {"ML_optimized","baseline","SPY","QQQ"}),
         ("wf mean_sharpe 유한값",      lambda r: r.wf_summary["mean_sharpe"] is not None),
         ("best score >= baseline score", lambda r: _best_beats_baseline(r)),
@@ -333,7 +333,7 @@ def main():
         sys.exit(1)
 
     elapsed = time.time() - t0
-    total_checks = 46  # 위 _check 호출의 총 assertions 수
+    total_checks = 46  # 위 _check 호출의 총 assertions 수 (trials count 체크 포함)
 
     if failures:
         msg = "\n".join(failures)
