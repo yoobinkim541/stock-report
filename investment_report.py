@@ -5,11 +5,13 @@ investment_report.py — 일일 투자 자동화 레포트 메인 스크립트
 fundamental_score.py + daily_signals.py 를 조합하여 종합 리포트 생성
 """
 
+import math
 import os
 import json
 import re
 import sys
 import logging
+import subprocess
 import time
 from datetime import datetime, timedelta
 
@@ -58,8 +60,30 @@ def load_cached_source_digest() -> str:
     return build_digest(events)
 
 # ── 포트폴리오 종목 ─────────────────────────────────────────────────────
-PORTFOLIO_TICKERS = ["MSFT", "QQQI", "ORCL", "NOW", "CRM", "SAP", "UNH",
-                     "SGOV", "CPNG", "NVDA", "GOOGL", "SPMO"]
+DEFAULT_PORTFOLIO_TICKERS = ["MSFT", "QQQI", "ORCL", "NOW", "CRM", "SAP", "UNH",
+                             "SGOV", "CPNG", "NVDA", "GOOGL", "SPMO"]
+PORTFOLIO_SNAPSHOT_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "portfolio_snapshot.json")
+
+
+def load_portfolio_tickers(path=PORTFOLIO_SNAPSHOT_PATH):
+    try:
+        with open(path, encoding="utf-8") as f:
+            snap = json.load(f)
+    except Exception:
+        return list(DEFAULT_PORTFOLIO_TICKERS)
+
+    tickers = []
+    for section in ("overseas_general", "overseas_fractional"):
+        for h in snap.get(section, {}).get("holdings_usd", []):
+            ticker = h.get("ticker")
+            shares = float(h.get("shares") or 0)
+            value = float(h.get("value_usd") or 0)
+            if ticker and (shares > 0 or value > 0) and ticker not in tickers:
+                tickers.append(ticker)
+    return tickers or list(DEFAULT_PORTFOLIO_TICKERS)
+
+
+PORTFOLIO_TICKERS = load_portfolio_tickers()
 
 # ── 수동 점수 오버라이드 (yfinance 데이터 불완전한 종목) ─────────────────────────
 MANUAL_SCORES = {
@@ -139,8 +163,11 @@ _KOSPI_NAMES = {
 REPORTS_DIR = os.path.expanduser("~/reports")
 os.makedirs(REPORTS_DIR, exist_ok=True)
 
+INVESTMENT_REPORT_LLM_MODEL = os.environ.get("INVESTMENT_REPORT_LLM_MODEL", "gpt-5-mini")
+INVESTMENT_REPORT_LLM_PROVIDER = os.environ.get("INVESTMENT_REPORT_LLM_PROVIDER", "openai-codex")
 
 
+# ── helpers
 # ── Arca Live helpers ────────────────────────────────────────────────────
 
 _ARCA_HEADERS = {
@@ -227,6 +254,319 @@ def _env_int(name, default, minimum=0):
     return max(minimum, value)
 
 
+def _llm_overlay_enabled():
+    return os.getenv("INVESTMENT_REPORT_LLM_ENABLED", "1").lower() not in ("0", "false", "no", "off")
+
+
+def _collect_allowed_fact_tokens(data):
+    tokens = set()
+
+    def add_number(value):
+        if isinstance(value, bool):
+            return
+        if isinstance(value, int):
+            tokens.add(str(value))
+            tokens.add(f"{value:,}")
+        elif isinstance(value, float):
+            tokens.add(str(int(value)))
+            tokens.add(f"{int(value):,}")
+            for precision in (0, 1, 2, 3):
+                text = f"{value:.{precision}f}"
+                tokens.add(text)
+                tokens.add(text.rstrip("0").rstrip("."))
+                if "." in text:
+                    integer_part = text.split(".", 1)[0]
+                    tokens.add(integer_part)
+                    try:
+                        tokens.add(f"{int(integer_part):,}")
+                    except ValueError:
+                        pass
+            tokens.add(f"{value:,.2f}")
+
+    def walk(value):
+        if isinstance(value, dict):
+            for item in value.values():
+                walk(item)
+        elif isinstance(value, list):
+            for item in value:
+                walk(item)
+        elif isinstance(value, (int, float)):
+            add_number(value)
+        elif isinstance(value, str):
+            for part in re.findall(r"[-+]?\d+(?:,\d{3})*(?:\.\d+)?", value):
+                tokens.add(part)
+                tokens.add(part.lstrip("+"))
+                tokens.add(part.lstrip("+-"))
+                tokens.add(part.replace(",", ""))
+                if "." in part:
+                    integer_part = part.split(".", 1)[0]
+                    tokens.add(integer_part)
+                    tokens.add(integer_part.lstrip("+"))
+                    tokens.add(integer_part.lstrip("+-"))
+                    tokens.add(integer_part.replace(",", ""))
+                    try:
+                        number = float(part.replace(",", ""))
+                    except ValueError:
+                        continue
+                    for precision in (0, 1, 2, 3):
+                        text = f"{number:.{precision}f}"
+                        tokens.add(text)
+                        tokens.add(text.rstrip("0").rstrip("."))
+
+    walk(data)
+    for key in ("date", "generated_at"):
+        if data.get(key):
+            for part in re.findall(r"\d+", str(data[key])):
+                tokens.add(part)
+    return {t for t in tokens if t}
+
+
+def _collect_allowed_tickers(data):
+    tickers = {"SPY", "QQQ", "KOSPI", "KOSDAQ", "NASDAQ", "NASDAQ100", "NAS100", "USD", "KRW", "ETF", "TR", "PR", "RSI", "MACD", "API", "LLM", "LG", "SK", "KS", "KQ"}
+
+    def walk(value):
+        if isinstance(value, dict):
+            ticker = value.get("ticker")
+            if isinstance(ticker, str):
+                tickers.add(ticker.split(".")[0].upper())
+                tickers.add(ticker.upper())
+            for item in value.values():
+                walk(item)
+        elif isinstance(value, list):
+            for item in value:
+                walk(item)
+
+    walk(data)
+    return tickers
+
+
+def _validate_llm_overlay(text, source_data):
+    if not text.strip():
+        return ["empty output"]
+
+    allowed_numbers = _collect_allowed_fact_tokens(source_data)
+    unknown_numbers = []
+    for raw in re.findall(r"(?<![A-Za-z])[-+]?\d+(?:,\d{3})*(?:\.\d+)?", text):
+        normalized = raw.lstrip("+-").replace(",", "")
+        if raw not in allowed_numbers and raw.lstrip("+") not in allowed_numbers and raw.lstrip("+-") not in allowed_numbers and normalized not in allowed_numbers:
+            unknown_numbers.append(raw)
+
+    allowed_tickers = _collect_allowed_tickers(source_data)
+    unknown_tickers = []
+    for raw in re.findall(r"(?<![A-Z0-9])[A-Z]{2,6}(?:\.[A-Z]{1,3})?(?![A-Z0-9])", text):
+        if raw not in allowed_tickers and raw.split(".")[0] not in allowed_tickers:
+            unknown_tickers.append(raw)
+
+    issues = []
+    if unknown_numbers:
+        issues.append("unknown numeric claims: " + ", ".join(sorted(set(unknown_numbers))[:10]))
+    if unknown_tickers:
+        issues.append("unknown ticker/uppercase claims: " + ", ".join(sorted(set(unknown_tickers))[:10]))
+    return issues
+
+
+def _build_llm_analysis_payload(clean_data, source_digest=""):
+    """Build a comprehensive LLM analysis payload covering all collected data sections.
+
+    Sections:
+      A  market_summary (market/phase/risk)
+      B  portfolio_summary — all tickers, key fields only (no portfolio cap)
+      C  nasdaq/kospi top_buy/warnings — capped by INVESTMENT_REPORT_LLM_LIST_CAP (default 10)
+      D  source_digest — capped by INVESTMENT_REPORT_LLM_SOURCE_DIGEST_CHARS (default 8000)
+      E  performance/history fields if present in clean_data
+
+    Returns payload dict including _meta = {char_count, estimated_tokens, model, provider,
+    section_sizes, list_cap, digest_chars_cap}.
+    Token estimate: ceil(chars / 3.7) — mixed Korean/English heuristic, no tiktoken needed.
+    """
+    list_cap = _env_int("INVESTMENT_REPORT_LLM_LIST_CAP", 10, 1)
+    digest_chars = _env_int("INVESTMENT_REPORT_LLM_SOURCE_DIGEST_CHARS", 8000, 200)
+
+    def _slim_scan_item(item):
+        dv2 = item.get("decision_v2") or {}
+        return {
+            "ticker": item.get("ticker"),
+            "company": item.get("company"),
+            "score": item.get("score"),
+            "grade": item.get("grade"),
+            "signal": item.get("signal"),
+            "action": dv2.get("action"),
+        }
+
+    # A: market_summary
+    section_market = clean_data.get("market_summary", {})
+
+    # B: all portfolio items, slim key fields
+    section_portfolio = []
+    for item in clean_data.get("portfolio_summary", []):
+        dv2 = item.get("decision_v2") or {}
+        section_portfolio.append({
+            "ticker": item.get("ticker"),
+            "company": item.get("company"),
+            "score": item.get("score"),
+            "grade": item.get("grade"),
+            "signal": item.get("signal"),
+            "judgment": item.get("judgment"),
+            "action": dv2.get("action"),
+            "one_line": dv2.get("one_line_reason"),
+            "price": item.get("price"),
+            "1d_pct": item.get("change_1d_pct"),
+            "1mo_pct": item.get("change_1mo_pct"),
+            "reasons": item.get("top_reasons", [])[:2],
+            "risks": item.get("top_risks", [])[:2],
+        })
+
+    # C: nasdaq/kospi lists with list_cap
+    section_nasdaq_buy = [_slim_scan_item(r) for r in clean_data.get("nasdaq_top_buy", [])[:list_cap]]
+    section_nasdaq_warn = [_slim_scan_item(r) for r in clean_data.get("nasdaq_warnings", [])[:list_cap]]
+    section_kospi_buy = [_slim_scan_item(r) for r in clean_data.get("kospi_top_buy", [])[:list_cap]]
+    section_kospi_warn = [_slim_scan_item(r) for r in clean_data.get("kospi_warnings", [])[:list_cap]]
+
+    # D: source_digest capped
+    digest_str = source_digest or ""
+    if len(digest_str) > digest_chars:
+        digest_str = digest_str[:digest_chars - 1] + "…"
+
+    # E: performance/history/previous_judgment if present in clean_data
+    section_perf = {}
+    if "performance" in clean_data and isinstance(clean_data["performance"], dict):
+        section_perf.update(clean_data["performance"])
+    for key in ("barbell_phase", "history", "previous_judgment"):
+        if key in clean_data:
+            section_perf[key] = clean_data[key]
+
+    payload = {
+        "date": clean_data.get("date"),
+        "market_summary": section_market,
+        "portfolio_summary": section_portfolio,
+        "nasdaq_top_buy": section_nasdaq_buy,
+        "nasdaq_warnings": section_nasdaq_warn,
+        "kospi_top_buy": section_kospi_buy,
+        "kospi_warnings": section_kospi_warn,
+        "source_digest": digest_str,
+    }
+    if section_perf:
+        payload["performance"] = section_perf
+
+    # Compute meta based on payload before adding _meta
+    payload_json = json.dumps(payload, ensure_ascii=False, default=str)
+    char_count = len(payload_json)
+    estimated_tokens = math.ceil(char_count / 3.7)
+
+    section_sizes = {
+        "market_summary": len(json.dumps(section_market, ensure_ascii=False, default=str)),
+        "portfolio_summary": len(json.dumps(section_portfolio, ensure_ascii=False, default=str)),
+        "nasdaq_top_buy": len(json.dumps(section_nasdaq_buy, ensure_ascii=False, default=str)),
+        "nasdaq_warnings": len(json.dumps(section_nasdaq_warn, ensure_ascii=False, default=str)),
+        "kospi_top_buy": len(json.dumps(section_kospi_buy, ensure_ascii=False, default=str)),
+        "kospi_warnings": len(json.dumps(section_kospi_warn, ensure_ascii=False, default=str)),
+        "source_digest": len(digest_str),
+    }
+    if section_perf:
+        section_sizes["performance"] = len(json.dumps(section_perf, ensure_ascii=False, default=str))
+
+    payload["_meta"] = {
+        "char_count": char_count,
+        "estimated_tokens": estimated_tokens,
+        "model": INVESTMENT_REPORT_LLM_MODEL,
+        "provider": INVESTMENT_REPORT_LLM_PROVIDER,
+        "section_sizes": section_sizes,
+        "list_cap": list_cap,
+        "digest_chars_cap": digest_chars,
+    }
+
+    return payload
+
+
+def _build_llm_overlay_prompt(clean_data, source_digest=""):
+    payload = _build_llm_analysis_payload(clean_data, source_digest)
+    payload.pop("_meta", None)
+    return (
+        "한국어 투자 리포트 editor. 아래 payload는 수집 정보의 compact 전체 요약.\n"
+        "입력 JSON 사실만 써서 짧은 overlay 작성.\n"
+        "목표: 텔레그램 모바일에서 바로 읽히는 실행형 코멘트 작성.\n"
+        "규칙: 입력에 없는 숫자/티커/뉴스/원인/전망 금지. 새 계산 금지. 모르면 '확인 필요'.\n"
+        "숫자와 티커는 입력 JSON에 있는 표현만 사용하고, 투자 판단은 보유/관심/위험/확인 중 하나로 좁혀 쓴다.\n"
+        "반드시 아래 제목 4개를 그대로 쓰고, 각 섹션은 '-' bullet 1~2개만 작성.\n\n"
+        "## LLM 애널리스트 코멘트\n"
+        "### 오늘의 해석\n"
+        "- 시장/포트폴리오 상태를 입력 수치 기준으로 한 줄 해석\n"
+        "### 오늘 할 일\n"
+        "- 오늘 실제로 확인할 보유/관심 종목 또는 유지 액션을 한 줄로 정리\n"
+        "### 리스크 확인\n"
+        "- 위험 종목/지표/데이터 공백을 한 줄로 점검\n"
+        "### 추가 확인\n"
+        "- 입력만으로 단정할 수 없는 뉴스/원인은 확인 필요로 표시\n\n"
+        "입력 JSON (수집 정보의 compact 전체 요약):\n"
+        f"{json.dumps(payload, ensure_ascii=False, default=str)}"
+    )
+
+
+_LLM_MOBILE_HEADINGS = {
+    "오늘의 해석": "🧠 오늘의 해석",
+    "오늘 할 일": "✅ 오늘 할 일",
+    "리스크 확인": "⚠️ 리스크 확인",
+    "추가 확인": "🔎 추가 확인",
+}
+
+
+def _llm_overlay_mobile_lines(text, max_bullets=6):
+    lines = []
+    current_heading = None
+    for raw in (text or "").splitlines():
+        line = raw.strip()
+        if line in ("### 오늘의 해석", "### 오늘 할 일", "### 리스크 확인", "### 추가 확인"):
+            current_heading = line.replace("### ", "")
+            lines.append(_LLM_MOBILE_HEADINGS.get(current_heading, current_heading))
+            continue
+        if line.startswith("- ") and current_heading:
+            lines.append(line)
+        if sum(1 for item in lines if item.startswith("- ")) >= max_bullets:
+            break
+    if any(item.startswith("- ") for item in lines):
+        return lines
+    return [line.strip() for line in (text or "").splitlines() if line.strip().startswith("- ")][:max_bullets]
+
+
+def _short_status(text, limit=140):
+    return _compact_text(str(text or ""), limit)
+
+
+def _generate_llm_overlay(clean_data, source_digest="", runner=subprocess.run):
+    if not _llm_overlay_enabled():
+        return None, "disabled"
+
+    prompt = _build_llm_overlay_prompt(clean_data, source_digest)
+    cmd = [
+        "hermes",
+        "chat",
+        "-q",
+        prompt,
+        "--provider",
+        INVESTMENT_REPORT_LLM_PROVIDER,
+        "--model",
+        INVESTMENT_REPORT_LLM_MODEL,
+        "-Q",
+    ]
+    timeout = _env_int("INVESTMENT_REPORT_LLM_TIMEOUT", 120, 30)
+    try:
+        result = runner(cmd, capture_output=True, text=True, timeout=timeout, cwd=os.path.dirname(os.path.abspath(__file__)))
+    except Exception as exc:
+        return None, f"call failed: {_short_status(exc)}"
+
+    if getattr(result, "returncode", 1) != 0:
+        stderr = _short_status(getattr(result, "stderr", ""))
+        return None, f"call failed: non-zero exit{': ' + stderr if stderr else ''}"
+
+    text = (getattr(result, "stdout", "") or "").strip()
+    guard_source = dict(clean_data)
+    guard_source["source_digest"] = source_digest
+    issues = _validate_llm_overlay(text, guard_source)
+    if issues:
+        return None, "fact guard rejected output: " + _short_status("; ".join(issues))
+    return text, "ok"
+
+
 def _fetch_arca_posts(max_pages=None, limit=6):
     if max_pages is None:
         max_pages = _env_int("INVESTMENT_REPORT_ARCA_PAGES", 3, 0)
@@ -258,9 +598,23 @@ def _fmt_pct(val, force_sign=False):
         return "N/A"
     try:
         v = float(val)
+        if math.isnan(v):
+            return "N/A"
         if force_sign:
             return f"{v:+.2f}%"
         return f"{v:.2f}%"
+    except (ValueError, TypeError):
+        return str(val)
+
+
+def _fmt_index_value(val):
+    if val is None:
+        return "N/A"
+    try:
+        v = float(val)
+        if math.isnan(v):
+            return "N/A"
+        return f"{v:,.2f}"
     except (ValueError, TypeError):
         return str(val)
 
@@ -270,12 +624,71 @@ def _fmt_price(val, currency="USD"):
         return "N/A"
     try:
         v = float(val)
+        if math.isnan(v):
+            return "N/A"
         if currency == "KRW":
             # 한국 시장 가격용 — ₩ + 천단위 콤마
             return f"₩{v:,.2f}"
         return f"${v:.2f}"
     except (ValueError, TypeError):
         return str(val)
+
+
+def _select_top_buy_candidates(results, limit=5):
+    scored = [r for r in results if r.get("total_score", 0) > 0]
+    scored.sort(key=lambda x: x.get("total_score", 0), reverse=True)
+    picks = []
+    for r in scored:
+        if r.get("signal") == "Positive" and r.get("total_score", 0) >= 60 and len(picks) < limit:
+            picks.append(r)
+    for r in scored:
+        if r not in picks and len(picks) < limit:
+            picks.append(r)
+    return picks
+
+
+def _select_watch_candidates(results, limit=5, exclude_tickers=None):
+    exclude_tickers = set(exclude_tickers or ())
+    risky = [
+        r for r in results
+        if r.get("ticker") not in exclude_tickers
+        and r.get("total_score", 0) > 0
+        and (r.get("signal") in ("Warning", "Critical") or r.get("total_score", 0) < 45)
+    ]
+    risky.sort(key=lambda x: (x.get("total_score", 0), x.get("ticker", "")))
+    return risky[:limit]
+
+
+def _news_title_relevant(ticker, title):
+    text = (title or "").lower()
+    if not text:
+        return False
+    t = (ticker or "").upper()
+    base = t.split(".")[0]
+    names = {base.lower()}
+    company = _KOSPI_NAMES.get(t) or _COMPANY_NAMES.get(t)
+    if company:
+        names.update(part.lower() for part in re.split(r"\s+", str(company)) if len(part) >= 2)
+        names.add(str(company).lower())
+    aliases = {
+        "MSFT": ("microsoft",),
+        "NVDA": ("nvidia",),
+        "GOOGL": ("alphabet", "google"),
+        "GOOG": ("alphabet", "google"),
+        "AMZN": ("amazon",),
+        "TSLA": ("tesla",),
+        "AAPL": ("apple",),
+        "ORCL": ("oracle",),
+        "CRM": ("salesforce",),
+        "NOW": ("servicenow", "service now"),
+        "SAP": ("sap",),
+        "UNH": ("unitedhealth", "united health"),
+        "CPNG": ("coupang", "쿠팡"),
+        "005930": ("삼성전자", "samsung electronics"),
+        "000660": ("sk하이닉스", "하이닉스", "sk hynix"),
+    }
+    names.update(aliases.get(base, ()))
+    return any(name and name in text for name in names)
 
 
 _ETF_PERIODS = (
@@ -326,13 +739,23 @@ def _etf_peer_group(ticker):
 
 
 def _etf_period_return(hist, years, expense_ratio=0.0):
+    result = _etf_period_returns(hist, years, expense_ratio)
+    return None if result is None else result["tr_return_pct"]
+
+
+def _etf_period_returns(hist, years, expense_ratio=0.0):
     closes = _as_float_list(hist.get("Close") if isinstance(hist, dict) else hist["Close"])
     dividends = _as_float_list(hist.get("Dividends") if isinstance(hist, dict) else hist.get("Dividends", []))
     if len(closes) < 2 or closes[0] <= 0:
         return None
     total_div = sum(dividends[1:]) if dividends else 0.0
-    gross = ((closes[-1] + total_div) / closes[0] - 1) * 100
-    return round(gross - (float(expense_ratio or 0) * float(years or 0)), 2)
+    fee_adjustment = float(expense_ratio or 0) * float(years or 0)
+    pr = ((closes[-1] / closes[0]) - 1) * 100
+    tr = ((closes[-1] + total_div) / closes[0] - 1) * 100
+    return {
+        "tr_return_pct": round(tr - fee_adjustment, 2),
+        "pr_return_pct": round(pr - fee_adjustment, 2),
+    }
 
 
 def _etf_window(hist, years):
@@ -380,20 +803,33 @@ def _build_etf_comparison(ticker):
         periods = []
         for label, years in _ETF_PERIODS:
             target_window, actual_years = _etf_window(target_hist, years)
-            ret = _etf_period_return(target_window, actual_years, expense)
-            if ret is None:
+            target_returns = _etf_period_returns(target_window, actual_years, expense)
+            if target_returns is None:
                 continue
+            ret = target_returns["tr_return_pct"]
+            pr_ret = target_returns["pr_return_pct"]
             vs = {}
             for peer, data in peer_data.items():
                 peer_window, _ = _etf_window(data["hist"], actual_years)
-                peer_ret = _etf_period_return(peer_window, actual_years, data["expense"])
-                if peer_ret is not None:
-                    vs[peer] = {"return_pct": peer_ret, "diff_pct": round(ret - peer_ret, 2)}
+                peer_returns = _etf_period_returns(peer_window, actual_years, data["expense"])
+                if peer_returns is not None:
+                    peer_ret = peer_returns["tr_return_pct"]
+                    peer_pr_ret = peer_returns["pr_return_pct"]
+                    vs[peer] = {
+                        "return_pct": peer_ret,
+                        "tr_return_pct": peer_ret,
+                        "pr_return_pct": peer_pr_ret,
+                        "diff_pct": round(ret - peer_ret, 2),
+                        "tr_diff_pct": round(ret - peer_ret, 2),
+                        "pr_diff_pct": round(pr_ret - peer_pr_ret, 2),
+                    }
             periods.append({
                 "label": label,
                 "actual_label": _actual_period_label(label, actual_years),
                 "years": round(actual_years, 3),
                 "return_pct": ret,
+                "tr_return_pct": ret,
+                "pr_return_pct": pr_ret,
                 "vs": vs,
             })
         return {"ticker": t, "expense_ratio": expense, "peers": _etf_peer_group(t), "periods": periods}
@@ -405,17 +841,94 @@ def _build_etf_comparison(ticker):
 def _format_etf_comparison(comparison):
     if not comparison:
         return []
-    lines = [f"- **ETF 비교:** 운영수수료 {comparison.get('expense_ratio', 0):.2f}% 반영"]
-    for period in comparison.get("periods", []):
-        parts = [f"{period.get('actual_label')}: {period.get('return_pct'):+.2f}%"]
+    periods = comparison.get("periods", []) or []
+    if not periods:
+        return []
+
+    peer_diffs = [
+        v.get("tr_diff_pct", v.get("diff_pct"))
+        for period in periods
+        for p, v in (period.get("vs", {}) or {}).items()
+        if p not in ("SPY", "QQQ") and v.get("tr_diff_pct", v.get("diff_pct")) is not None
+    ]
+    peer_names = {
+        p
+        for period in periods
+        for p in (period.get("vs", {}) or {})
+        if p not in ("SPY", "QQQ")
+    }
+    income_peers = bool(peer_names & {"JEPQ", "QYLD"})
+    peer_label = "동종 인컴 ETF" if income_peers else "동종 ETF"
+    if peer_diffs:
+        avg_peer_diff = sum(peer_diffs) / len(peer_diffs)
+        peer_summary = f"{peer_label} 대비 {avg_peer_diff:+.2f}%p"
+        if avg_peer_diff >= 0.1:
+            peer_summary += " 우위"
+        elif avg_peer_diff <= -0.1:
+            peer_summary += " 열위"
+        else:
+            peer_summary += " 비슷"
+    else:
+        peer_summary = "동종 ETF 데이터 부족"
+
+    longest = next((p for p in reversed(periods) if p.get("vs")), None)
+    benchmark_summary = ""
+    if longest:
+        benchmark_parts = [
+            f"{b} TR {longest['vs'][b].get('tr_diff_pct', longest['vs'][b].get('diff_pct')):+.2f}%p"
+            for b in ("SPY", "QQQ")
+            if b in longest.get("vs", {}) and longest["vs"][b].get("tr_diff_pct", longest["vs"][b].get("diff_pct")) is not None
+        ]
+        if benchmark_parts:
+            benchmark_summary = f" · 최장기간 주식형 대비 {', '.join(benchmark_parts)}"
+
+    if income_peers:
+        interpretation = "  - 해석: QQQI는 나스닥 인컴/커버드콜 ETF라 동종 인컴 ETF가 핵심 비교대상이고, QQQ는 상승장 기회비용 참고값입니다."
+    else:
+        interpretation = "  - 해석: 동종 ETF가 핵심 비교대상이고, SPY/QQQ는 주식시장 대비 기회비용 참고값입니다."
+
+    lines = [
+        f"- **ETF 비교 요약:** {peer_summary}{benchmark_summary} · 운영수수료 {comparison.get('expense_ratio', 0):.2f}% 반영",
+        interpretation,
+    ]
+    def _diff_text(name, values):
+        tr_diff = values.get("tr_diff_pct", values.get("diff_pct"))
+        pr_diff = values.get("pr_diff_pct")
+        if tr_diff is None:
+            return None
+        if pr_diff is None:
+            return f"{name} TR {tr_diff:+.2f}%p"
+        return f"{name} TR {tr_diff:+.2f}%p/PR {pr_diff:+.2f}%p"
+
+    seen_labels = set()
+    for period in periods:
+        label = period.get("actual_label")
+        if label in seen_labels:
+            continue
+        seen_labels.add(label)
         vs = period.get("vs", {}) or {}
-        for benchmark in ("SPY", "QQQ"):
-            if benchmark in vs:
-                parts.append(f"{benchmark} {vs[benchmark]['diff_pct']:+.2f}%p")
-        peer_parts = [f"{p} {v['diff_pct']:+.2f}%p" for p, v in vs.items() if p not in ("SPY", "QQQ")]
+        peer_parts = [
+            text
+            for text in (_diff_text(p, v) for p, v in vs.items() if p not in ("SPY", "QQQ"))
+            if text
+        ]
+        stock_parts = [
+            text
+            for text in (_diff_text(b, vs[b]) for b in ("SPY", "QQQ") if b in vs)
+            if text
+        ]
+        tr_return = period.get("tr_return_pct", period.get("return_pct"))
+        pr_return = period.get("pr_return_pct")
+        if pr_return is None:
+            own_return = f"TR {tr_return:+.2f}%"
+        else:
+            own_return = f"TR {tr_return:+.2f}%/PR {pr_return:+.2f}%"
+        parts = [f"{label}: 내 수익률 {own_return}"]
         if peer_parts:
-            parts.append("동종 " + ", ".join(peer_parts[:2]))
-        lines.append("  - " + " | ".join(parts))
+            parts.append("동종 대비 " + ", ".join(peer_parts[:2]))
+        if stock_parts:
+            parts.append("주식형 대비 " + ", ".join(stock_parts))
+        lines.append("  - " + " / ".join(parts))
     return lines
 
 
@@ -859,9 +1372,9 @@ def _fetch_korea_indices():
         )
         close = data["Close"].iloc[-1] if not data.empty else None
         if close is not None:
-            kospi = f"{close.get('^KS11', 'N/A'):,.2f}" if close.get('^KS11') is not None else "N/A"
-            kosdaq = f"{close.get('^KQ11', 'N/A'):,.2f}" if close.get('^KQ11') is not None else "N/A"
-            fx = f"{close.get('KRW=X', 'N/A'):,.2f}" if close.get('KRW=X') is not None else "N/A"
+            kospi = _fmt_index_value(close.get('^KS11'))
+            kosdaq = _fmt_index_value(close.get('^KQ11'))
+            fx = _fmt_index_value(close.get('KRW=X'))
             return kospi, kosdaq, fx
     except Exception:
         logger.warning("Korea indices fetch failed")
@@ -950,28 +1463,11 @@ def generate_report():
             continue
 
     # Sort for top picks and warnings
-    scored_results = [r for r in ndx_results if r["total_score"] > 0]
-    scored_results.sort(key=lambda x: x["total_score"], reverse=True)
-
-    top_buy_candidates = []
-    for r in scored_results:
-        if r["signal"] == "Positive" and r["total_score"] >= 60 and len(top_buy_candidates) < 5:
-            top_buy_candidates.append(r)
-    # Fill remaining with high score
-    if len(top_buy_candidates) < 5:
-        for r in scored_results:
-            if r not in top_buy_candidates and len(top_buy_candidates) < 5:
-                top_buy_candidates.append(r)
-
-    top_watch = []
-    for r in reversed(scored_results):
-        if len(top_watch) < 5:
-            if r["signal"] in ("Warning", "Critical") or r["total_score"] < 45:
-                top_watch.append(r)
-    if len(top_watch) < 5:
-        for r in reversed(scored_results):
-            if r not in top_watch and len(top_watch) < 5:
-                top_watch.append(r)
+    top_buy_candidates = _select_top_buy_candidates(ndx_results)
+    top_watch = _select_watch_candidates(
+        ndx_results,
+        exclude_tickers={r.get("ticker") for r in top_buy_candidates},
+    )
 
     # ── KOSPI top 30 scan ──
     max_kospi_scan = _env_int("INVESTMENT_REPORT_MAX_KOSPI_SCAN", len(KOSPI_TOP30), 0)
@@ -1008,10 +1504,11 @@ def generate_report():
                 ),
             })
 
-    kospi_scored = [r for r in kospi_results if r["total_score"] > 0]
-    kospi_scored.sort(key=lambda x: x["total_score"], reverse=True)
-    kospi_top = kospi_scored[:5]
-    kospi_watch = sorted(kospi_results, key=lambda x: x["total_score"])[:5]
+    kospi_top = _select_top_buy_candidates(kospi_results)
+    kospi_watch = _select_watch_candidates(
+        kospi_results,
+        exclude_tickers={r.get("ticker") for r in kospi_top},
+    )
 
     # ── Generate report text (Korean) ──
     lines = []
@@ -1212,7 +1709,7 @@ def generate_report():
                 if st_news:
                     for item in st_news[:2]:
                         st_title = item.get("title", "")
-                        if st_title and not any(st_title in f for f in findings):
+                        if st_title and _news_title_relevant(ticker, st_title) and not any(st_title in f for f in findings):
                             findings.append(f"📰 SaveTicker: {st_title}")
         except Exception:
             pass
@@ -1361,12 +1858,12 @@ def generate_report():
     lines.append(f"| NASDAQ 100 스캔 | {len(ndx_results)}개 종목 |")
     lines.append(f"| KOSPI 상위 30 스캔 | {len(kospi_results)}개 종목 |")
     lines.append(f"| 데이터 소스 | yfinance, SaveTicker API |")
-    lines.append(f"| LLM API 토큰 소비 | **0 토큰** (Python 스크립트 내부 LLM 호출 없음) |")
+    lines.append(f"| LLM overlay | 선택 실행: {INVESTMENT_REPORT_LLM_MODEL}, fact guard 통과 시만 추가 |")
     lines.append(f"| 외부 API 비용 | yfinance 무료 + SaveTicker 무료 |")
     lines.append(f"| Telegram 전송 | @Stock_botbot (파일 2개 + 헤더) |")
     lines.append(f"")
-    lines.append(f"*이 스크립트는 순수 Python + 공개 API로만 동작하며, LLM 토큰을 소비하지 않습니다.*")
-    lines.append(f"*토큰 비용은 Hermes cron 작업의 시스템 프롬프트에서만 발생합니다.*")
+    lines.append(f"*Python 계산/수치 산출은 공개 API 기반 deterministic 경로로 수행됩니다.*")
+    lines.append(f"*선택적 LLM overlay는 계산값을 바꾸지 않고, fact guard 통과 시에만 별도 코멘트로 추가됩니다.*")
     report_text = "\n".join(lines)
 
     # ── Save report ──
@@ -1492,6 +1989,27 @@ def generate_report():
         json.dump(clean_data, f, ensure_ascii=False, indent=2, default=str)
     print(f"ℹ 분석 요약 저장 완료: {clean_path}")
 
+    # ── LLM payload meta (computed always, even when LLM disabled) ──
+    _llm_payload = _build_llm_analysis_payload(clean_data, source_digest)
+    _llm_meta = _llm_payload.get("_meta", {})
+    llm_token_line = (
+        f"LLM 입력 추정: {_llm_meta.get('char_count', 0):,}자 "
+        f"≈ {_llm_meta.get('estimated_tokens', 0):,} tokens "
+        f"(model {_llm_meta.get('model', INVESTMENT_REPORT_LLM_MODEL)})"
+    )
+    print(f"🔢 {llm_token_line}")
+
+    # ── Optional LLM editor overlay ──
+    llm_overlay, llm_status = _generate_llm_overlay(clean_data, source_digest)
+    if llm_overlay:
+        with open(report_path, "a", encoding="utf-8") as f:
+            f.write("\n---\n\n")
+            f.write(llm_overlay)
+            f.write(f"\n\n*{llm_token_line}*\n")
+        print(f"🧠 LLM overlay 추가 완료: {INVESTMENT_REPORT_LLM_MODEL}")
+    else:
+        print(f"🧠 LLM overlay 건너뜀: {llm_status}")
+
     # ── Judgment change detection ──
     yesterday_str = (datetime.now() - timedelta(days=1)).strftime("%Y-%m-%d")
     yesterday_path = os.path.join(REPORTS_DIR, f"investment-summary-{yesterday_str}.json")
@@ -1547,7 +2065,14 @@ def generate_report():
     else:
         summary_lines.append(f"오늘 할 일: 포트폴리오 유지")
     summary_lines.append(f"")
-    summary_lines.append(f"소요 시간: {elapsed:.1f}초 | LLM 토큰: 0")
+    if llm_overlay:
+        summary_lines.append("")
+        summary_lines.append("🧠 LLM 코멘트")
+        summary_lines.extend(_llm_overlay_mobile_lines(llm_overlay))
+        summary_lines.append(f"소요 시간: {elapsed:.1f}초 | LLM overlay: {INVESTMENT_REPORT_LLM_MODEL}")
+    else:
+        summary_lines.append(f"소요 시간: {elapsed:.1f}초 | LLM overlay: {llm_status}")
+    summary_lines.append(llm_token_line)
     summary_text = "\n".join(summary_lines)
 
     summary_txt_path = os.path.join(REPORTS_DIR, f"investment-summary-{today_str}.txt")
@@ -1564,7 +2089,7 @@ def generate_report():
     print("## Hermes 봇 브리핑")
     print(f"투자 레포트 생성 완료 | @Stock_botbot 전송 완료")
     print(f"NAS100 {len(ndx_results)}종목 + KOSPI {len(kospi_results)}종목 + 포트폴리오 {len(PORTFOLIO_TICKERS)}종목 분석")
-    print(f"LLM 토큰: 0 | 실행 시간: {elapsed:.1f}초")
+    print(f"LLM overlay: {llm_status} | 실행 시간: {elapsed:.1f}초")
 
     return report_path, json_path
 

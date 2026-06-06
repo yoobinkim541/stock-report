@@ -141,7 +141,7 @@ portfolio_sync_server.py (상시, port 8765)
 ```
 
 ## 포트폴리오
-MSFT, QQQI, ORCL, NOW, CRM, SAP, UNH, SGOV, CPNG, NVDA, GOOGL, SPMO
+MSFT, QQQI, ORCL, SAP, UNH, SGOV, NVDA, GOOGL, SPMO
 
 ## 안전 규칙
 - `.env`, `portfolio_snapshot.json`, `leverage_state.json`, `price_alerts.json` 절대 커밋 금지

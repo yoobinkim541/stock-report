@@ -11,7 +11,8 @@ Usage:
   python3 order_generator.py --send   # 텔레그램 발송
 """
 
-import os, sys, argparse
+import html
+import os, sys, argparse, unicodedata
 from datetime import datetime
 
 import yfinance as yf
@@ -48,6 +49,27 @@ COMPANY_NAMES: dict[str, str] = {
     "CPNG":  "Coupang",
     "QQQ":   "Nasdaq 100",
 }
+
+
+def _display_width(s: str) -> int:
+    """문자열의 실제 표시 폭 (CJK=2, 이모지=2, ASCII=1)."""
+    width = 0
+    for ch in s:
+        cp = ord(ch)
+        if cp < 128:
+            width += 1
+        elif cp >= 0x1F000:
+            width += 2  # 이모지 등 상위 평면 문자
+        else:
+            ea = unicodedata.east_asian_width(ch)
+            width += 2 if ea in ('W', 'F') else 1
+    return width
+
+
+def _dw_pad(s: str, target_width: int) -> str:
+    """표시 폭 기준 우측 공백 패딩."""
+    pad = max(0, target_width - _display_width(s))
+    return s + ' ' * pad
 
 
 def _safe(val, default=0.0) -> float:
@@ -112,13 +134,15 @@ def generate(send: bool = False) -> str:
     emoji  = phase_inf.get("emoji", "")
     label  = phase_inf.get("label", "")
 
-    SEP = "─" * 54
+    SEP = "─" * 61
+    COL1 = 22  # 종목 라벨 표시 폭
+
     lines = [
         "📋 소수점 매수 주문서",
         f"📅 {now}",
         f"{emoji} {label}  ({dd:+.1f}%)  /  {dca['total_krw']:,}원",
         SEP,
-        f"{'종목':<22}  {'금액':>9}  {'수량':>9}  {'현재가':>8}",
+        f"{_dw_pad('종목', COL1)}  {'금액':>9}  {'수량':>9}  {'현재가':>8}",
         SEP,
     ]
 
@@ -134,14 +158,14 @@ def generate(send: bool = False) -> str:
             total_usd += usd_amt
             order_rows.append((ticker, krw_amt, qty, price))
             lines.append(
-                f"{label_str:<22}  {krw_amt:>8,}원  {qty:>8.4f}주  @${price:>7.2f}"
+                f"{_dw_pad(label_str, COL1)}  {krw_amt:>8,}원  {qty:>8.4f}주  @${price:>7.2f}"
             )
         else:
-            lines.append(f"{label_str:<22}  {krw_amt:>8,}원  (가격 조회 실패)")
+            lines.append(f"{_dw_pad(label_str, COL1)}  {krw_amt:>8,}원  (가격 조회 실패)")
 
     lines += [
         SEP,
-        f"합계  {dca['total_krw']:>8,}원  ≈ ${total_usd:.2f}  (@{fx:,.0f}원)",
+        f"{_dw_pad('합계', COL1)}  {dca['total_krw']:>8,}원  ≈ ${total_usd:.2f}  (@{fx:,.0f}원)",
         "",
         "📱 키움증권  →  해외주식  →  소수점 매수  →  금액 입력",
     ]
@@ -167,9 +191,11 @@ def _send(text: str):
     if not TELEGRAM_TOKEN:
         return
     url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
-    for i in range(0, len(text), 4000):
+    escaped = html.escape(text)
+    for i in range(0, len(escaped), 4000):
+        chunk = f"<pre>{escaped[i:i + 4000]}</pre>"
         try:
-            requests.post(url, json={"chat_id": TELEGRAM_CHAT_ID, "text": text[i:i + 4000]}, timeout=10)
+            requests.post(url, json={"chat_id": TELEGRAM_CHAT_ID, "text": chunk, "parse_mode": "HTML"}, timeout=10)
         except Exception as e:
             _logger.error(f"주문서 텔레그램 전송 실패: {e}")
 

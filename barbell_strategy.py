@@ -24,6 +24,7 @@ import os
 import json
 import logging
 import time
+import unicodedata
 from datetime import datetime
 
 import numpy as np
@@ -77,7 +78,7 @@ BULL_PHASES = {
         "action_items": [
             "소수점 DCA 0.5배 축소 (4만 → 2만원)",
             "QQQI 배당금 → SGOV 재투자 (실탄 비축)",
-            "NOW, ORCL 목표가 도달 시 5~10% 부분 익절",
+            "ORCL 목표가 도달 시 5~10% 부분 익절",
             "신규 매수 중단 — 기존 포지션만 유지",
             "SGOV 목표 비중: 포트폴리오의 20%",
         ],
@@ -93,8 +94,7 @@ BULL_PHASES = {
             "소수점 DCA 0.8배 (4만 → 3.2만원)",
             "매월 QQQI 배당 50% → SGOV, 50% → DCA",
             "SGOV 목표 비중: 포트폴리오의 12%",
-            "CPNG는 이 구간에서 손절 후 SGOV로 전환 적기",
-            "오버웨이트 종목(ORCL +41%) 일부 리밸런싱 고려",
+            "오버웨이트 종목 일부 리밸런싱 고려",
         ],
     },
 }
@@ -111,8 +111,8 @@ BEAR_PHASES = {
         "dca_multiplier": 1.0,
         "description": "정상 DCA 유지. 변화 없음.",
         "action_items": [
-            "일일 소수점 DCA 4만원 유지 (8종목 분산)",
-            "QQQI 배당금 → ORCL/NOW 소수점 재투자",
+            "일일 소수점 DCA 4만원 유지 (보유 종목 분산)",
+            "QQQI 배당금 → ORCL 중심 소수점 재투자",
             "SGOV 전량 보유 — 실탄 온존",
             "월 1회 포트폴리오 리밸런싱 점검",
         ],
@@ -128,10 +128,10 @@ BEAR_PHASES = {
         "description": "조정 시작. DCA 증액, 고확신 종목 집중.",
         "action_items": [
             "소수점 DCA 1.5배 (4만 → 6만원)",
-            "ORCL, NOW 우선 배정 (비중 +5%씩)",
+            "ORCL, NVDA, MSFT 우선 배정",
             "SGOV 유지 — 추가 하락 대기",
             "RSI < 40 여부, VIX 추이 일일 체크",
-            "CPNG 손절 검토 (손실 고착화 방지)",
+            "예수금·SGOV는 추가 하락 대비 실탄으로 관리",
         ],
     },
     2: {
@@ -205,16 +205,14 @@ BEAR_PHASES = {
 }
 
 # ── DCA 종목 배분 기본값 ─────────────────────────────────────────────────
-# CRM 추가 (2026-05-31: 보유 중, DCA 편입 결정)
-# CPNG는 DCA 제외 (손실 포지션, 현상 유지)
+# NOW/CRM/CPNG는 정리 완료 — DCA 제외
 _DCA_WEIGHTS_DEFAULT = {
-    "NOW": 0.18, "ORCL": 0.18, "NVDA": 0.14,
-    "MSFT": 0.14, "GOOGL": 0.10, "UNH": 0.10,
-    "CRM": 0.10, "SAP": 0.03, "SPMO": 0.03,
+    "ORCL": 0.24, "NVDA": 0.20, "MSFT": 0.18,
+    "GOOGL": 0.14, "UNH": 0.12, "SAP": 0.06, "SPMO": 0.06,
 }
 _BEAR_DCA_WEIGHTS_DEFAULT = {
-    "NOW": 0.23, "ORCL": 0.23, "NVDA": 0.20,
-    "MSFT": 0.14, "GOOGL": 0.10, "CRM": 0.07, "UNH": 0.03,
+    "ORCL": 0.28, "NVDA": 0.24, "MSFT": 0.20,
+    "GOOGL": 0.14, "UNH": 0.08, "SAP": 0.03, "SPMO": 0.03,
 }
 
 DCA_WEIGHTS_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "dca_weights.json")
@@ -1117,6 +1115,27 @@ def build_smart_report(portfolio: dict, market_type: str, phase_key,
 #  시각화 헬퍼
 # ══════════════════════════════════════════════════════════════════════
 
+def _display_width(s: str) -> int:
+    """문자열의 실제 표시 폭 (CJK=2, 이모지=2, ASCII=1)."""
+    width = 0
+    for ch in s:
+        cp = ord(ch)
+        if cp < 128:
+            width += 1
+        elif cp >= 0x1F000:
+            width += 2
+        else:
+            ea = unicodedata.east_asian_width(ch)
+            width += 2 if ea in ('W', 'F') else 1
+    return width
+
+
+def _dw_pad(s: str, target_width: int) -> str:
+    """표시 폭 기준 우측 공백 패딩."""
+    pad = max(0, target_width - _display_width(s))
+    return s + ' ' * pad
+
+
 def _bar(ratio: float, width: int = 10, fill: str = "█", empty: str = "░") -> str:
     """비율(0~1) → 채워진 막대."""
     r = max(0.0, min(1.0, ratio))
@@ -1597,12 +1616,12 @@ def send_phase5_emergency(
         "⚡ 지금 당장 이렇게 하세요:\n"
         "━━━━━━━━━━━━━━━━━━━━━━━\n"
         "1. SGOV 전량 → QLD(2x) 또는 TQQQ(3x) 매수\n"
-        f"   투입 가능 금액: ${sgov_usd:,.0f}  (₩{sgov_krw:,})\n"
+        f"   {_dw_pad('투입 가능 금액:', 15)} ${sgov_usd:,.0f}  (₩{sgov_krw:,})\n"
         "2. QQQI 원금 20~30% → QLD 또는 TQQQ 전환\n"
-        f"   20% 기준: ${qqqi_20pct_usd:,.0f}  (₩{qqqi_20pct_krw:,})\n"
-        f"   30% 기준: ${qqqi_30pct_usd:,.0f}  (₩{qqqi_30pct_krw:,})\n"
+        f"   {_dw_pad('20% 기준:', 15)} ${qqqi_20pct_usd:,.0f}  (₩{qqqi_20pct_krw:,})\n"
+        f"   {_dw_pad('30% 기준:', 15)} ${qqqi_30pct_usd:,.0f}  (₩{qqqi_30pct_krw:,})\n"
         f"3. DCA 5배 즉시 실행: {dca_krw:,}원/일  (${dca_usd:.1f})\n"
-        "4. NOW, ORCL, NVDA, MSFT 최대 적립\n"
+        "4. MSFT/ORCL/NOW 핵심 성장주 비중 유지\n"
         "5. 예비 현금(적금 포함) 단계적 투입 준비\n"
         "\n"
         "📱 /order 로 주문서 즉시 생성\n"

@@ -1,13 +1,11 @@
 {
   "_comment": "개별 종목 목표 비중 (포트폴리오 전체 대비 %). /holding target 으로 수정 가능.",
   "_total_note": "개별주 합계 ~44%, QQQI ~22%, SGOV Phase별, 나머지 여유분",
-  "NOW": 0.07,
-  "ORCL": 0.07,
-  "NVDA": 0.06,
-  "MSFT": 0.06,
-  "GOOGL": 0.05,
+  "ORCL": 0.08,
+  "NVDA": 0.07,
+  "MSFT": 0.07,
+  "GOOGL": 0.06,
   "UNH": 0.05,
-  "CRM": 0.04,
-  "SAP": 0.02,
-  "SPMO": 0.02
+  "SAP": 0.03,
+  "SPMO": 0.03
 }

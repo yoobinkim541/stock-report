@@ -1,6 +1,9 @@
 """Holdings-related Telegram bot commands."""
 import json
+import os
 import shutil
+import subprocess
+import sys
 import logging
 from datetime import datetime, timedelta
 
@@ -16,6 +19,55 @@ from attachment_parser import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+def _portfolio_tickers() -> set[str]:
+    try:
+        with open(PORTFOLIO_PATH, encoding="utf-8") as f:
+            snap = json.load(f)
+    except Exception:
+        return set()
+
+    tickers: set[str] = set()
+    for section, key in [
+        ("overseas_general", "holdings_usd"),
+        ("overseas_fractional", "holdings"),
+        ("domestic", "holdings"),
+    ]:
+        for h in snap.get(section, {}).get(key, []):
+            ticker = str(h.get("ticker", "")).upper().strip()
+            if ticker:
+                tickers.add(ticker)
+    return tickers
+
+
+def _run_backtest_if_constituents_changed(before: set[str], after: set[str], chat_id: str, send_fn):
+    if before == after:
+        return
+
+    project_dir = os.path.dirname(os.path.abspath(__file__))
+    os.makedirs(os.path.expanduser("~/reports"), exist_ok=True)
+    log_path = os.path.expanduser(f"~/reports/backtest-auto-{datetime.now().strftime('%Y%m%d-%H%M%S')}.log")
+    cmd = [sys.executable, os.path.join(project_dir, "backtest_multi.py"), "--send"]
+    try:
+        with open(log_path, "ab") as log:
+            subprocess.Popen(cmd, cwd=project_dir, stdout=log, stderr=subprocess.STDOUT, start_new_session=True)
+    except Exception as e:
+        logger.exception("자동 백테스트 시작 실패")
+        send_fn(chat_id, f"⚠️ 구성종목 변경 감지, 하지만 자동 백테스트 시작 실패: {e}")
+        return
+
+    added = sorted(after - before)
+    removed = sorted(before - after)
+    changes = []
+    if added:
+        changes.append("추가: " + ", ".join(added))
+    if removed:
+        changes.append("제거: " + ", ".join(removed))
+    send_fn(chat_id,
+            "🧪 구성종목 변경 감지 — 백테스트를 백그라운드로 시작했습니다.\n"
+            + (" / ".join(changes) + "\n" if changes else "")
+            + f"완료되면 Telegram으로 결과가 발송됩니다.\n로그: {log_path}")
 
 
 def cmd_dividend(chat_id: str, args: list, send_fn):
@@ -109,7 +161,7 @@ def _holding_buy(chat_id: str, args: list, send_fn):
                 "/holding buy TICKER 주수 평단가 frac  ← 소수점 계좌\n\n"
                 "예시:\n"
                 "/holding buy ORCL 2 200.50\n"
-                "/holding buy NOW 0.5 120.30 frac")
+                "/holding buy NVDA 0.5 210.30 frac")
         return
     try:
         ticker = args[1].upper()
@@ -119,8 +171,10 @@ def _holding_buy(chat_id: str, args: list, send_fn):
     except (ValueError, IndexError):
         send_fn(chat_id, "❌ 형식 오류: /holding buy TICKER 주수 평단가")
         return
+    before = _portfolio_tickers()
     result = buy_holding(ticker, shares, price, fractional=frac)
     send_fn(chat_id, result)
+    _run_backtest_if_constituents_changed(before, _portfolio_tickers(), chat_id, send_fn)
 
 
 def _holding_target(chat_id: str, args: list, send_fn):
@@ -170,8 +224,10 @@ def _holding_sell(chat_id: str, args: list, send_fn):
         return
     ticker = args[1].upper()
     shares = float(args[2]) if len(args) > 2 else None
+    before = _portfolio_tickers()
     result = sell_holding(ticker, shares)
     send_fn(chat_id, result)
+    _run_backtest_if_constituents_changed(before, _portfolio_tickers(), chat_id, send_fn)
 
 
 def _holding_dca(chat_id: str, args: list, send_fn):
@@ -192,7 +248,7 @@ def _holding_dca(chat_id: str, args: list, send_fn):
                 "/holding dca TICKER 비중% TICKER 비중% ...\n"
                 "/holding dca bear TICKER 비중% ...  ← 하락장 비중\n\n"
                 "예시:\n"
-                "/holding dca NOW 18 ORCL 18 CRM 10 NVDA 14 MSFT 14 GOOGL 10 UNH 10 SAP 3 SPMO 3\n"
+                "/holding dca ORCL 24 NVDA 20 MSFT 18 GOOGL 14 UNH 12 SAP 6 SPMO 6\n"
                 "(비중 합계가 100%가 아니어도 자동 정규화)")
         return
 
@@ -279,6 +335,7 @@ def cmd_apply_snapshot(chat_id: str, send_fn):
     backup_path = PORTFOLIO_PATH + ".bak"
     shutil.copy2(PORTFOLIO_PATH, backup_path)
 
+    before = _portfolio_tickers()
     existing = {h["ticker"]: h for h in snap.get("overseas_general", {}).get("holdings_usd", [])}
     changes: list[str] = []
 
@@ -338,3 +395,4 @@ def cmd_apply_snapshot(chat_id: str, send_fn):
         "/portfolio 로 확인",
     ]
     send_fn(chat_id, "\n".join(lines))
+    _run_backtest_if_constituents_changed(before, _portfolio_tickers(), chat_id, send_fn)

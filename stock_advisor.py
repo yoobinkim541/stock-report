@@ -2,11 +2,13 @@
 # -*- coding: utf-8 -*-
 """Portfolio advisor prompt and Codex-backed chat helper."""
 
+import os
 import subprocess
 from pathlib import Path
 
 
 PROJECT_DIR = Path(__file__).resolve().parent
+ADVISOR_MODEL = os.environ.get("STOCK_ADVISOR_MODEL", "gpt-5.5")
 EDITABLE_FILES = [
     "portfolio_snapshot.json",
     "price_alerts.json",
@@ -114,7 +116,7 @@ def _local_fallback(question: str, market: dict) -> str:
     benchmarks = market.get("benchmarks", {})
     portfolio = market.get("portfolio", {})
     return (
-        "Codex 5.5 상담 호출 실패로 로컬 안전 요약을 제공합니다.\n"
+        f"{ADVISOR_MODEL} 상담 호출 실패로 로컬 안전 요약을 제공합니다.\n"
         f"- 질문: {question.strip()}\n"
         f"- 현재 시장/Phase: {market_phase}\n"
         f"- RSI: {_fmt(market.get('rsi'))}, VIX: {_fmt(market.get('vix'))}\n"
@@ -136,7 +138,7 @@ def ask_portfolio_advisor(question: str, market: dict, runner=subprocess.run) ->
         "--provider",
         "openai-codex",
         "--model",
-        "gpt-5.5",
+        ADVISOR_MODEL,
         "--toolsets",
         "file",
         "-Q",

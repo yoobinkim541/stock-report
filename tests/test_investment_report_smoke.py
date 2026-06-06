@@ -1,5 +1,6 @@
 import os
 import sys
+import json
 import tempfile
 from datetime import datetime as real_datetime
 from pathlib import Path
@@ -7,6 +8,19 @@ from pathlib import Path
 sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
 
 import investment_report as ir
+
+
+def test_load_portfolio_tickers_uses_snapshot_holdings(tmp_path):
+    snap_path = tmp_path / "portfolio_snapshot.json"
+    snap_path.write_text(json.dumps({
+        "overseas_general": {"holdings_usd": [
+            {"ticker": "QQQI", "shares": 35, "value_usd": 2000},
+            {"ticker": "SGOV", "shares": 20, "value_usd": 2009},
+        ]},
+        "overseas_fractional": {"holdings_usd": []},
+    }), encoding="utf-8")
+
+    assert ir.load_portfolio_tickers(str(snap_path)) == ["QQQI", "SGOV"]
 
 
 class FixedDateTime:

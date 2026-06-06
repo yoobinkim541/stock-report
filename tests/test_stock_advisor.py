@@ -85,7 +85,7 @@ def test_build_advisor_prompt_includes_individual_stock_holdings():
     assert "14.66%" in prompt
 
 
-def test_ask_portfolio_advisor_uses_codex55_runner():
+def test_ask_portfolio_advisor_uses_configured_codex_model_runner():
     from stock_advisor import PROJECT_DIR, ask_portfolio_advisor
 
     calls = []
@@ -114,6 +114,6 @@ def test_ask_portfolio_advisor_falls_back_when_codex_fails():
 
     answer = ask_portfolio_advisor("지금 추가매수해도 돼?", sample_market(), runner=fake_run)
 
-    assert "Codex 5.5 상담 호출 실패" in answer
+    assert "gpt-5.5 상담 호출 실패" in answer
     assert "로컬 안전 요약" in answer
     assert "bull/bull_1" in answer

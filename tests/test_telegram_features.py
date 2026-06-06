@@ -284,6 +284,27 @@ def test_plain_text_normalized_to_ask_and_dispatched(monkeypatch):
     assert asked == ["추가매수해도 돼?"]
 
 
+def test_plain_text_market_report_with_portfolio_routes_to_ask(monkeypatch):
+    import telegram_bot
+
+    sent = []
+    asked = []
+
+    monkeypatch.setattr(telegram_bot, "refresh_portfolio_prices", lambda: None)
+    monkeypatch.setattr(telegram_bot, "fetch_market", lambda force=False: {"portfolio": {"total_usd": 1}})
+    monkeypatch.setattr(telegram_bot, "ask_portfolio_advisor", lambda q, d: asked.append(q) or "LLM 답변")
+    monkeypatch.setattr(telegram_bot, "send", lambda chat_id, text: sent.append(text))
+    monkeypatch.setattr(telegram_bot, "keep_typing", lambda chat_id: (lambda: None))
+
+    text = "오늘의 주식 현황 보고해줘 내 포트폴리오랑"
+
+    assert telegram_bot.handle_plain_text(text, "chat-1") is False
+    telegram_bot.dispatch(telegram_bot._normalize_message_text(text), "chat-1")
+
+    assert asked == [text]
+    assert sent == ["LLM 답변"]
+
+
 def test_plain_text_portfolio_snapshot_is_saved_as_pending(monkeypatch):
     import telegram_bot
 

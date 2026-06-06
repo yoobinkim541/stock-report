@@ -75,6 +75,12 @@ except Exception:
     build_source_digest = None
     load_source_events = None
 
+try:
+    from ml.reporting import build_sample_ml_strategy_report, chunk_text as _ml_chunk_text
+    _ML_REPORTING_AVAILABLE = True
+except Exception:
+    _ML_REPORTING_AVAILABLE = False
+
 logger = logging.getLogger(__name__)
 
 _LOCK_FD = None  # kept open for process lifetime to hold fcntl lock
@@ -152,6 +158,7 @@ BOT_COMMANDS = [
     {"command": "tax",            "description": "실현손익 & 양도세 (sim/sell/history/delete/import)"},
     {"command": "ask",            "description": "AI 포트폴리오 상담"},
     {"command": "alert",          "description": "가격 알림 관리 (add/list/remove)"},
+    {"command": "mlreport",       "description": "ML 전략 성과 리포트 (샘플)"},
 ]
 
 BOT_COMMAND_ALIASES = {
@@ -533,8 +540,11 @@ def cmd_order(chat_id: str):
     send(chat_id, "⏳ 주문서 생성 중...")
     typing(chat_id)
     try:
+        import html as _html
         report = generate_order()
-        send(chat_id, report)
+        escaped = _html.escape(report)
+        for i in range(0, len(escaped), 4000):
+            _api("sendMessage", chat_id=chat_id, text=f"<pre>{escaped[i:i + 4000]}</pre>", parse_mode="HTML")
     except Exception as e:
         send(chat_id, f"❌ 주문서 생성 오류: {e}")
         logger.exception("cmd_order")
@@ -726,12 +736,7 @@ def handle_plain_text(text: str, chat_id: str) -> bool:
     if content_type == "portfolio":
         holdings = parse_portfolio_from_text(text)
         if not holdings:
-            send(chat_id,
-                 "⚠️ 포트폴리오 인식 실패\n\n"
-                 "알려진 종목(NVDA, ORCL 등) 보유 현황을 인식하지 못했습니다.\n"
-                 "수동 입력:\n"
-                 "/holding buy TICKER 수량 평단가")
-            return True
+            return False
         if len(holdings) < 3:
             send(chat_id,
                  "⚠️ 포트폴리오 인식 불완전\n\n"
@@ -763,6 +768,21 @@ def cmd_report(chat_id: str):
     except Exception as e:
         send(chat_id, f"❌ 리포트 생성 오류: {e}")
         logger.exception("cmd_report")
+
+
+def cmd_mlreport(chat_id: str, send_fn=None):
+    """ML 전략 성과 리포트 (샘플 데이터 기반)."""
+    _send = send_fn if send_fn is not None else send
+    if not _ML_REPORTING_AVAILABLE:
+        _send(chat_id, "❌ ml.reporting 모듈을 불러올 수 없습니다.")
+        return
+    try:
+        report = build_sample_ml_strategy_report()
+        for chunk in _ml_chunk_text(report):
+            _send(chat_id, chunk)
+    except Exception as e:
+        _send(chat_id, f"❌ ML 리포트 생성 오류: {e}")
+        logger.exception("cmd_mlreport")
 
 
 def cmd_alert(chat_id: str, args: list):
@@ -1037,8 +1057,14 @@ def _dispatch_tax(chat_id: str, args: list):
     cmd_tax(chat_id, args, send)
 
 
+def _dispatch_mlreport(chat_id: str, args: list):
+    typing(chat_id)
+    cmd_mlreport(chat_id)
+
+
 _COMMAND_HANDLERS = {
     "/report": _dispatch_report,
+    "/mlreport": _dispatch_mlreport,
     "/alert": lambda chat_id, args: _dispatch_with_typing(cmd_alert, chat_id, args),
     "/dividend": lambda chat_id, args: _dispatch_with_send(cmd_dividend, chat_id, args),
     "/sim": lambda chat_id, args: _dispatch_with_typing(cmd_sim, chat_id, args),

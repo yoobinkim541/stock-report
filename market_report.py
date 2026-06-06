@@ -56,11 +56,33 @@ SECTOR_ETFS = {
 }
 
 # Portfolio tickers
-PORTFOLIO_TICKERS = [
+DEFAULT_PORTFOLIO_TICKERS = [
     "MSFT", "QQQI", "ORCL", "NOW", "CRM",
     "SAP", "UNH", "SGOV", "CPNG", "NVDA",
     "GOOGL", "SPMO",
 ]
+PORTFOLIO_SNAPSHOT_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "portfolio_snapshot.json")
+
+
+def load_portfolio_tickers(path=PORTFOLIO_SNAPSHOT_PATH):
+    try:
+        with open(path, encoding="utf-8") as f:
+            snap = json.load(f)
+    except Exception:
+        return list(DEFAULT_PORTFOLIO_TICKERS)
+
+    tickers = []
+    for section in ("overseas_general", "overseas_fractional"):
+        for h in snap.get(section, {}).get("holdings_usd", []):
+            ticker = h.get("ticker")
+            shares = float(h.get("shares") or 0)
+            value = float(h.get("value_usd") or 0)
+            if ticker and (shares > 0 or value > 0) and ticker not in tickers:
+                tickers.append(ticker)
+    return tickers or list(DEFAULT_PORTFOLIO_TICKERS)
+
+
+PORTFOLIO_TICKERS = load_portfolio_tickers()
 
 # Major indices
 MAJOR_INDICES = {

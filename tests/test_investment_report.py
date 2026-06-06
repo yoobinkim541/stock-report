@@ -1,16 +1,28 @@
+import math
 import os
 import sys
+from types import SimpleNamespace
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
 
 from investment_report import (
+    _build_llm_analysis_payload,
+    _build_llm_overlay_prompt,
     _decision_v2,
     _etf_peer_group,
     _etf_period_return,
+    _etf_period_returns,
+    _fmt_index_value,
     _fmt_price,
     _format_etf_comparison,
+    _generate_llm_overlay,
+    _llm_overlay_mobile_lines,
     _mobile_pick_line,
     _mobile_pick_items,
+    _news_title_relevant,
+    _select_top_buy_candidates,
+    _select_watch_candidates,
+    _validate_llm_overlay,
     _judgment,
 )
 
@@ -264,6 +276,17 @@ def test_etf_period_return_uses_total_return_and_expense_ratio():
     assert result == 11.5
 
 
+def test_etf_period_returns_include_total_return_and_price_return():
+    hist = {
+        "Close": [100.0, 110.0],
+        "Dividends": [0.0, 2.0],
+    }
+
+    result = _etf_period_returns(hist, years=1, expense_ratio=0.50)
+
+    assert result == {"tr_return_pct": 11.5, "pr_return_pct": 9.5}
+
+
 def test_etf_peer_group_includes_peer_and_spy_qqq_benchmarks():
     peers = _etf_peer_group("SPMO")
 
@@ -281,10 +304,12 @@ def test_format_etf_comparison_reports_relative_underperformance():
                 "label": "1Y",
                 "actual_label": "1Y",
                 "return_pct": 8.0,
+                "tr_return_pct": 8.0,
+                "pr_return_pct": 7.5,
                 "vs": {
-                    "SPY": {"return_pct": 10.5, "diff_pct": -2.5},
-                    "QQQ": {"return_pct": 12.0, "diff_pct": -4.0},
-                    "MTUM": {"return_pct": 7.0, "diff_pct": 1.0},
+                    "SPY": {"return_pct": 10.5, "tr_diff_pct": -2.5, "pr_diff_pct": -1.5},
+                    "QQQ": {"return_pct": 12.0, "tr_diff_pct": -4.0, "pr_diff_pct": -3.0},
+                    "MTUM": {"return_pct": 7.0, "tr_diff_pct": 1.0, "pr_diff_pct": 0.5},
                 },
             }
         ],
@@ -292,10 +317,324 @@ def test_format_etf_comparison_reports_relative_underperformance():
 
     lines = _format_etf_comparison(comparison)
 
-    assert any("운영수수료 0.13%" in line for line in lines)
-    assert any("1Y" in line and "SPY -2.50%p" in line and "QQQ -4.00%p" in line for line in lines)
-    assert any("동종 MTUM +1.00%p" in line for line in lines)
+    assert any("ETF 비교 요약" in line and "운영수수료 0.13%" in line for line in lines)
+    assert any("최장기간 주식형 대비 SPY TR -2.50%p, QQQ TR -4.00%p" in line for line in lines)
+    assert any("해석:" in line and "동종 ETF가 핵심 비교대상" in line for line in lines)
+    assert any("1Y" in line and "주식형 대비 SPY TR -2.50%p/PR -1.50%p, QQQ TR -4.00%p/PR -3.00%p" in line for line in lines)
+    assert any("동종 대비 MTUM TR +1.00%p/PR +0.50%p" in line for line in lines)
+
+
+def test_format_etf_comparison_reports_income_etf_context():
+    comparison = {
+        "ticker": "QQQI",
+        "expense_ratio": 0.0,
+        "periods": [
+            {
+                "label": "1Y",
+                "actual_label": "1Y",
+                "return_pct": 27.77,
+                "vs": {
+                    "SPY": {"return_pct": 28.28, "diff_pct": -0.51},
+                    "QQQ": {"return_pct": 40.59, "diff_pct": -12.82},
+                    "JEPQ": {"return_pct": 27.39, "diff_pct": 0.38},
+                    "QYLD": {"return_pct": 22.26, "diff_pct": 5.51},
+                },
+            }
+        ],
+    }
+
+    lines = _format_etf_comparison(comparison)
+
+    assert any("동종 인컴 ETF 대비" in line for line in lines)
+    assert any("QQQI는 나스닥 인컴/커버드콜 ETF" in line for line in lines)
+    assert any("QQQ는 상승장 기회비용" in line for line in lines)
 
 
 def test_fmt_price_supports_krw_for_korea_market_values():
     assert _fmt_price(3901.234, currency="KRW") == "₩3,901.23"
+
+
+def test_fmt_index_value_hides_nan_for_korea_indices():
+    assert _fmt_index_value(float("nan")) == "N/A"
+    assert _fmt_index_value(None) == "N/A"
+    assert _fmt_index_value(3901.234) == "3,901.23"
+
+
+def test_select_watch_candidates_excludes_top_buy_duplicates():
+    results = [
+        {"ticker": "A", "total_score": 90, "signal": "Positive"},
+        {"ticker": "B", "total_score": 80, "signal": "Neutral"},
+        {"ticker": "C", "total_score": 30, "signal": "Warning"},
+    ]
+    top = _select_top_buy_candidates(results, limit=2)
+    watch = _select_watch_candidates(results, limit=2, exclude_tickers={r["ticker"] for r in top})
+
+    assert [r["ticker"] for r in top] == ["A", "B"]
+    assert "A" not in [r["ticker"] for r in watch]
+    assert "B" not in [r["ticker"] for r in watch]
+    assert [r["ticker"] for r in watch] == ["C"]
+
+
+def test_select_watch_candidates_prefers_real_risk_over_low_score_fillers():
+    results = [
+        {"ticker": "SAFE1", "total_score": 88, "signal": "Positive"},
+        {"ticker": "SAFE2", "total_score": 76, "signal": "Neutral"},
+        {"ticker": "RISK", "total_score": 44, "signal": "Neutral"},
+        {"ticker": "WARN", "total_score": 70, "signal": "Warning"},
+    ]
+
+    watch = _select_watch_candidates(results, limit=5)
+
+    assert [r["ticker"] for r in watch] == ["RISK", "WARN"]
+    assert "SAFE1" not in [r["ticker"] for r in watch]
+    assert "SAFE2" not in [r["ticker"] for r in watch]
+
+
+def test_news_title_relevant_rejects_unrelated_global_news():
+    assert _news_title_relevant("MSFT", "Microsoft launches new Copilot features")
+    assert _news_title_relevant("005930.KS", "삼성전자 반도체 실적 개선 기대")
+    assert not _news_title_relevant("MSFT", "Nvidia stock rises as AI demand grows")
+    assert not _news_title_relevant("005930.KS", "현대차 미국 판매 증가")
+
+
+# ── LLM overlay fact-guard 테스트 ─────────────────────────────────────────
+
+def _sample_clean_data():
+    return {
+        "date": "2026-06-05",
+        "market_summary": {"spy_change_pct": 1.23, "spy_price": 650.0, "nasdaq_change_pct": -0.5},
+        "portfolio_summary": [
+            {"ticker": "MSFT", "company": "Microsoft", "score": 82, "judgment": "분할매수 후보"},
+            {"ticker": "QQQI", "company": "NEOS Nasdaq-100 High Income ETF", "score": 0, "judgment": "현금흐름 유지"},
+        ],
+        "nasdaq_top_buy": [{"ticker": "NVDA", "score": 88, "signal": "Positive"}],
+        "nasdaq_warnings": [],
+        "kospi_top_buy": [],
+        "kospi_warnings": [],
+    }
+
+
+def test_llm_overlay_guard_accepts_only_source_numbers_and_tickers():
+    text = "## LLM 애널리스트 코멘트\n### 오늘의 해석\n- MSFT는 82점, SPY 1.23% 수치 기준으로 확인 필요"
+
+    assert _validate_llm_overlay(text, _sample_clean_data()) == []
+
+
+def test_llm_overlay_guard_allows_negative_known_facts_and_korean_company_acronyms():
+    data = _sample_clean_data()
+    data["market_summary"]["spy_change_pct"] = -0.94
+    data["market_summary"]["nasdaq_change_pct"] = -1.92
+    data["kospi_warnings"] = [{"ticker": "373220.KS", "company": "LG에너지솔루션"}, {"ticker": "000660.KS", "company": "SK하이닉스"}]
+    text = "## LLM 애널리스트 코멘트\n- SPY -0.94%, NASDAQ -1.92%, LG에너지솔루션과 SK하이닉스 확인 필요"
+
+    assert _validate_llm_overlay(text, data) == []
+
+
+def test_llm_overlay_guard_allows_compact_display_of_known_string_numbers():
+    data = _sample_clean_data()
+    data["market_summary"]["kospi"] = "8,160.59"
+    data["kospi_top_buy"] = [{"ticker": "000660.KS", "summary": "1일 -9.92% 급락"}]
+    text = "## LLM 애널리스트 코멘트\n- KOSPI 8,160 부근, 000660.KS는 -9.9% 급락 확인 필요"
+
+    assert _validate_llm_overlay(text, data) == []
+
+
+def test_llm_overlay_guard_rejects_new_numeric_claims():
+    text = "## LLM 애널리스트 코멘트\n### 오늘의 해석\n- MSFT는 내일 10% 상승 가능"
+
+    issues = _validate_llm_overlay(text, _sample_clean_data())
+
+    assert issues
+    assert "10" in issues[0]
+
+
+def test_llm_overlay_guard_rejects_unknown_tickers():
+    text = "## LLM 애널리스트 코멘트\n### 오늘의 해석\n- TSLA는 확인 필요"
+
+    issues = _validate_llm_overlay(text, _sample_clean_data())
+
+    assert issues
+    assert "TSLA" in " ".join(issues)
+
+
+def test_generate_llm_overlay_rejects_runner_hallucinations():
+    def runner(cmd, **kwargs):
+        return SimpleNamespace(returncode=0, stdout="## LLM 애널리스트 코멘트\n- TSLA 10% 상승 가능")
+
+    overlay, status = _generate_llm_overlay(_sample_clean_data(), runner=runner)
+
+    assert overlay is None
+    assert "fact guard rejected" in status
+
+
+def test_generate_llm_overlay_accepts_guarded_runner_output():
+    def runner(cmd, **kwargs):
+        return SimpleNamespace(returncode=0, stdout="## LLM 애널리스트 코멘트\n- MSFT는 82점 기준으로 확인 필요")
+
+    overlay, status = _generate_llm_overlay(_sample_clean_data(), runner=runner)
+
+    assert status == "ok"
+    assert "MSFT" in overlay
+
+
+def test_llm_overlay_prompt_includes_all_portfolio_items():
+    data = _sample_clean_data()
+    data["portfolio_summary"] = [
+        {"ticker": f"T{i}", "score": i, "judgment": "관심 유지"} for i in range(20)
+    ]
+    digest = "뉴스 요약 " * 100  # 600 chars — well under 8000 cap
+
+    prompt = _build_llm_overlay_prompt(data, digest)
+
+    assert "### 오늘의 해석" in prompt
+    assert "### 오늘 할 일" in prompt
+    assert "### 리스크 확인" in prompt
+    assert "### 추가 확인" in prompt
+    # All 20 portfolio items must be present (no hard cap on portfolio)
+    assert "T7" in prompt
+    assert "T19" in prompt
+    assert "수집 정보의 compact 전체 요약" in prompt
+
+
+def test_llm_overlay_prompt_caps_source_digest():
+    data = _sample_clean_data()
+    digest = "X" * 10000
+
+    prompt = _build_llm_overlay_prompt(data, digest)
+
+    # Default cap is 8000 chars — the 10000-char digest must be truncated
+    assert "X" * 8001 not in prompt
+    assert "X" * 100 in prompt  # some digest content remains
+
+
+def test_llm_overlay_mobile_lines_preserves_sections():
+    overlay = """## LLM 애널리스트 코멘트
+### 오늘의 해석
+- MSFT는 82점 기준으로 확인 필요
+### 오늘 할 일
+- QQQI 현금흐름 유지 여부 확인
+### 리스크 확인
+- NASDAQ -0.5% 구간에서 위험 종목 확인
+### 추가 확인
+- 뉴스 원인은 확인 필요"""
+
+    lines = _llm_overlay_mobile_lines(overlay)
+
+    assert lines == [
+        "🧠 오늘의 해석",
+        "- MSFT는 82점 기준으로 확인 필요",
+        "✅ 오늘 할 일",
+        "- QQQI 현금흐름 유지 여부 확인",
+        "⚠️ 리스크 확인",
+        "- NASDAQ -0.5% 구간에서 위험 종목 확인",
+        "🔎 추가 확인",
+        "- 뉴스 원인은 확인 필요",
+    ]
+
+
+def test_llm_overlay_mobile_lines_falls_back_to_bullets():
+    overlay = "## LLM 애널리스트 코멘트\n- MSFT는 82점 기준으로 확인 필요"
+
+    assert _llm_overlay_mobile_lines(overlay) == ["- MSFT는 82점 기준으로 확인 필요"]
+
+
+def test_generate_llm_overlay_uses_short_timeout_and_status():
+    calls = []
+
+    def runner(cmd, **kwargs):
+        calls.append(kwargs)
+        return SimpleNamespace(returncode=1, stderr="에러" * 200)
+
+    overlay, status = _generate_llm_overlay(_sample_clean_data(), runner=runner)
+
+    assert overlay is None
+    assert calls[0]["timeout"] == 120
+    assert len(status) < 180
+
+
+# ── _build_llm_analysis_payload 테스트 ───────────────────────────────────────
+
+def test_build_llm_analysis_payload_has_meta_token_estimate():
+    data = _sample_clean_data()
+    payload = _build_llm_analysis_payload(data, "test digest")
+
+    meta = payload["_meta"]
+    assert meta["char_count"] > 0
+    assert meta["estimated_tokens"] > 0
+    assert meta["estimated_tokens"] == math.ceil(meta["char_count"] / 3.7)
+    assert "model" in meta
+    assert "provider" in meta
+    assert "section_sizes" in meta
+    assert "list_cap" in meta
+    assert "digest_chars_cap" in meta
+
+
+def test_build_llm_analysis_payload_includes_all_portfolio():
+    data = _sample_clean_data()
+    data["portfolio_summary"] = [
+        {"ticker": f"T{i}", "score": i * 5, "judgment": "관심 유지", "decision_v2": {}}
+        for i in range(15)
+    ]
+    payload = _build_llm_analysis_payload(data)
+
+    tickers = [item["ticker"] for item in payload["portfolio_summary"]]
+    assert "T0" in tickers
+    assert "T14" in tickers
+    assert len(payload["portfolio_summary"]) == 15
+
+
+def test_build_llm_analysis_payload_caps_digest():
+    data = _sample_clean_data()
+    long_digest = "A" * 10000
+
+    payload = _build_llm_analysis_payload(data, long_digest)
+
+    # Default cap: 8000 chars
+    assert len(payload["source_digest"]) <= 8000
+    assert payload["source_digest"].endswith("…")
+    assert payload["_meta"]["section_sizes"]["source_digest"] <= 8000
+
+
+def test_build_llm_analysis_payload_caps_list_by_env(monkeypatch):
+    monkeypatch.setenv("INVESTMENT_REPORT_LLM_LIST_CAP", "3")
+    data = _sample_clean_data()
+    data["nasdaq_top_buy"] = [
+        {"ticker": f"N{i}", "score": 70, "grade": "B", "signal": "Positive", "decision_v2": {}}
+        for i in range(10)
+    ]
+
+    payload = _build_llm_analysis_payload(data)
+
+    assert len(payload["nasdaq_top_buy"]) == 3
+    assert payload["_meta"]["list_cap"] == 3
+
+
+def test_build_llm_analysis_payload_meta_char_count_matches_payload():
+    data = _sample_clean_data()
+    payload = _build_llm_analysis_payload(data, "짧은 digest")
+
+    meta = payload.pop("_meta")
+    import json as _json
+    actual_chars = len(_json.dumps(payload, ensure_ascii=False, default=str))
+    assert meta["char_count"] == actual_chars
+
+
+def test_build_llm_analysis_payload_includes_perf_section():
+    data = _sample_clean_data()
+    data["performance"] = {"1m_return_pct": 3.5, "ytd_return_pct": 12.0}
+    data["barbell_phase"] = "Phase-2"
+
+    payload = _build_llm_analysis_payload(data)
+
+    assert "performance" in payload
+    assert payload["performance"]["barbell_phase"] == "Phase-2"
+    assert payload["performance"]["1m_return_pct"] == 3.5
+
+
+def test_build_llm_analysis_payload_no_meta_in_llm_prompt():
+    data = _sample_clean_data()
+    prompt = _build_llm_overlay_prompt(data, "digest")
+
+    # _meta should not appear in the prompt sent to LLM
+    assert "_meta" not in prompt
+    assert "char_count" not in prompt
