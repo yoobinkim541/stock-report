@@ -150,6 +150,77 @@ def evaluate_threshold_strategy(data: dict, params: dict) -> BacktestResult:
 
 
 # ---------------------------------------------------------------------------
+# Proper walk-forward validation (no leakage)
+# ---------------------------------------------------------------------------
+
+def _run_proper_walk_forward(
+    data: dict,
+    param_grid: dict,
+    initial_train: int = 378,
+    test_size: int = 189,
+) -> dict:
+    """Walk-forward validation: optimize on expanding train window, evaluate OOS.
+
+    For each fold:
+      1. Find best params by running grid search on the *train* window only.
+      2. Apply those fold-specific best params to the held-out *test* window.
+    This eliminates the leakage that occurs when full-data best_params are reused
+    during WF evaluation.
+
+    With default n=756, initial_train=378, test_size=189 → 2 folds:
+      Fold 0: train=[0:378], test=[378:567]
+      Fold 1: train=[0:567], test=[567:756]
+    """
+    n = len(data["close"])
+    wf_sharpes: list[float] = []
+    wf_cagrs: list[float] = []
+    n_folds = 0
+
+    train_end = initial_train
+    while train_end + test_size <= n:
+        # Slice — preserve index alignment
+        train_data = {
+            k: (v.iloc[:train_end] if isinstance(v, (pd.Series, pd.DataFrame)) else v)
+            for k, v in data.items()
+        }
+        test_data = {
+            k: (v.iloc[train_end:train_end + test_size] if isinstance(v, (pd.Series, pd.DataFrame)) else v)
+            for k, v in data.items()
+        }
+
+        # Optimize on train fold only — default arg binding captures current loop values
+        _qqq_cagr_fold = buy_and_hold(train_data["qqq_close"], name="QQQ").cagr or 0.0
+
+        def _fold_objective(params: dict, _td=train_data, _qc=_qqq_cagr_fold) -> float:
+            r = evaluate_threshold_strategy(_td, params)
+            return composite_score(
+                cagr=r.cagr,
+                max_drawdown=r.max_drawdown,
+                turnover=r.turnover or 0.0,
+                excess_return=(r.cagr or 0.0) - _qc,
+            )
+
+        fold_gs = grid_search_parameters(_fold_objective, param_grid)
+        fold_best_params = fold_gs["best_params"]
+
+        # True OOS evaluation with fold-specific params
+        fr = evaluate_threshold_strategy(test_data, fold_best_params)
+        if fr.sharpe is not None:
+            wf_sharpes.append(fr.sharpe)
+        if fr.cagr is not None:
+            wf_cagrs.append(fr.cagr)
+        n_folds += 1
+        train_end += test_size
+
+    return {
+        "n_folds": n_folds,
+        "mean_sharpe": float(np.mean(wf_sharpes)) if wf_sharpes else None,
+        "std_sharpe": float(np.std(wf_sharpes)) if len(wf_sharpes) > 1 else 0.0,
+        "mean_cagr": float(np.mean(wf_cagrs)) if wf_cagrs else None,
+    }
+
+
+# ---------------------------------------------------------------------------
 # Sweet-spot optimizer
 # ---------------------------------------------------------------------------
 
@@ -231,29 +302,8 @@ def optimize_sweet_spot(
         "QQQ": qqq_eq,
     }).dropna()
 
-    # Walk-forward: 2 folds (~378 days each → CAGR is valid)
-    n = len(data["close"])
-    half = n // 2
-    wf_sharpes: list[float] = []
-    wf_cagrs: list[float] = []
-    for start, end in [(0, half), (half, n)]:
-        fold_data = {
-            **data,
-            "close": data["close"].iloc[start:end],
-            "features": data["features"].iloc[start:end],
-        }
-        fr = evaluate_threshold_strategy(fold_data, best_params)
-        if fr.sharpe is not None:
-            wf_sharpes.append(fr.sharpe)
-        if fr.cagr is not None:
-            wf_cagrs.append(fr.cagr)
-
-    wf_summary = {
-        "n_folds": 2,
-        "mean_sharpe": float(np.mean(wf_sharpes)) if wf_sharpes else None,
-        "std_sharpe": float(np.std(wf_sharpes)) if len(wf_sharpes) > 0 else 0.0,
-        "mean_cagr": float(np.mean(wf_cagrs)) if wf_cagrs else None,
-    }
+    # Proper walk-forward: per-fold optimization → true OOS evaluation (no leakage)
+    wf_summary = _run_proper_walk_forward(data, param_grid)
 
     weights = pd.Series({
         "SGOV": 0.10,
