@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # /// script
-# dependencies = ["anthropic>=0.100", "requests", "python-dotenv"]
+# dependencies = ["requests", "python-dotenv"]
 # ///
 """
 news_spike_detector.py — saveticker 속보 알림
@@ -8,7 +8,7 @@ news_spike_detector.py — saveticker 속보 알림
 동작 흐름:
   1. saveticker 수집 → JSONL 캐시 저장
   2. '속보' 태그 이벤트 중 미발송 건 필터
-  3. Claude Haiku 중요도 판단 (1~10점, 7+ 알림)
+  3. hermes(gemini-2.5-flash)로 중요도 판단 (1~10점, 7+ 알림)
   4. 텔레그램 발송 + 발송 완료 ID 기록 (재발송 방지)
 
 크론 (매 1분):
@@ -17,7 +17,6 @@ news_spike_detector.py — saveticker 속보 알림
 환경변수:
     STOCK_BOT_TOKEN      — 텔레그램 봇 토큰 (필수)
     STOCK_BOT_CHAT_ID    — 텔레그램 채팅 ID (필수)
-    ANTHROPIC_API_KEY    — Claude 중요도 판단용 (없으면 모든 속보 발송)
 """
 from __future__ import annotations
 
@@ -39,18 +38,17 @@ KST        = timezone(timedelta(hours=9))
 CACHE_DIR  = Path(os.path.expanduser("~/reports/source-cache"))
 STATE_FILE = Path(os.path.expanduser("~/.cache/news_spike_state.json"))
 
-BOT_TOKEN     = os.getenv("STOCK_BOT_TOKEN")
-CHAT_ID       = os.getenv("STOCK_BOT_CHAT_ID")
-ANTHROPIC_KEY = os.getenv("ANTHROPIC_API_KEY")
+BOT_TOKEN = os.getenv("STOCK_BOT_TOKEN")
+CHAT_ID   = os.getenv("STOCK_BOT_CHAT_ID")
 
 # 발송 완료 ID를 이 시간 이상 지난 건 state에서 제거 (파일 비대화 방지)
-STATE_TTL_HOURS    = 48
+STATE_TTL_HOURS      = 48
 # 이 시간보다 오래된 속보는 처리 안 함 (재시작 후 과거 속보 폭탄 방지)
-MAX_AGE_HOURS      = 2
-# AI 중요도 임계값 (없으면 모든 속보 발송)
+MAX_AGE_HOURS        = 2
+# 중요도 임계값 (hermes 실패 시 rule-based fallback도 동일 기준)
 IMPORTANCE_THRESHOLD = 7
-AI_MODEL           = "claude-haiku-4-5-20251001"
-MAX_SEND_PER_RUN   = 5
+MAX_SEND_PER_RUN     = 5
+
 
 
 # ── State ─────────────────────────────────────────────────────────────────────
@@ -109,54 +107,84 @@ def fetch_breaking_news(now: datetime) -> list[dict]:
     return sorted(breaking, key=lambda e: e.get("published_at", ""))
 
 
-# ── AI importance judgment ────────────────────────────────────────────────────
+# ── Importance judgment ───────────────────────────────────────────────────────
+
+# 포트폴리오 직접 보유 종목 ($ 없이)
+_PORTFOLIO = {"MSFT", "QQQI", "ORCL", "NVDA", "GOOGL", "SAP", "UNH", "SGOV", "SPMO"}
+
+# 제목에 포함 시 높은 관련성 키워드
+_HIGH_SIGNAL = (
+    "연준", "fomc", "기준금리", "금리 인상", "금리 인하", "금리인상", "금리인하",
+    "관세", "수출 금지", "수출금지", "제재", "반독점",
+    "실적", "어닝", "earnings", "eps", "매출 전망", "매출전망", "가이던스",
+    "파산", "파산보호", "상장폐지", "합병", "인수",
+    "반도체", "ai칩", "hbm", "엔비디아", "nvidia",
+    "전쟁 확전", "핵", "공습", "침공",
+    "s&p500 편입", "나스닥 편입", "편출",
+)
+
+# 제목에 포함 시 낮은 관련성 (노이즈) — 점수 낮춤
+_LOW_SIGNAL = (
+    "교황", "스포츠", "올림픽", "월드컵", "연예", "드라마", "영화",
+    "날씨", "기상", "항공편", "여행",
+)
+
+
+def _rule_score(event: dict) -> tuple[int, str]:
+    """hermes 없을 때 규칙 기반 중요도 점수."""
+    title   = (event.get("title") or "").lower()
+    tickers = {t.lstrip("$").upper() for t in (event.get("tags") or []) if t.startswith("$")}
+
+    # 포트폴리오 종목 직접 언급
+    if tickers & _PORTFOLIO:
+        return 8, f"포트폴리오 종목 직접 관련 ({', '.join(tickers & _PORTFOLIO)})"
+
+    # 고신호 키워드
+    for kw in _HIGH_SIGNAL:
+        if kw in title:
+            return 7, f"핵심 시장 키워드 포함 ({kw})"
+
+    # 저신호 키워드
+    for kw in _LOW_SIGNAL:
+        if kw in title:
+            return 3, f"투자 관련성 낮음 ({kw})"
+
+    # 기타 속보 — 기본 5점 (threshold 미달로 알림 안 보냄)
+    return 5, "일반 속보"
+
 
 def judge_importance(event: dict) -> tuple[int, str]:
-    """Claude Haiku로 단일 속보의 주식 시장 중요도 판단.
+    """hermes(gemini-2.5-flash)로 중요도 판단. 실패 시 규칙 기반 fallback.
 
     Returns:
         (score, reason) — score 1~10
-        ANTHROPIC_API_KEY 없으면 (10, "AI 판단 건너뜀") 반환
     """
-    if not ANTHROPIC_KEY:
-        return 10, "AI 판단 건너뜀"
-
     title   = event.get("title") or ""
-    tags    = [t for t in (event.get("tags") or []) if not t.startswith("$") and t != "속보"]
     tickers = [t.lstrip("$") for t in (event.get("tags") or []) if t.startswith("$")]
+    context = f"관련 종목: {', '.join(tickers)}" if tickers else "종목 없음"
 
-    context = []
-    if tickers:
-        context.append(f"관련 종목: {', '.join(tickers)}")
-    if tags:
-        context.append(f"분류: {', '.join(tags)}")
-    context_str = " | ".join(context) if context else "없음"
-
-    prompt = f"""미국 기술주 중심 포트폴리오(MSFT·NVDA·GOOGL·ORCL·QQQI·SAP·UNH·SGOV·SPMO) 투자자 관점에서, 아래 속보가 즉각적인 대응이 필요한 중요한 이벤트인지 판단해줘.
-
-속보: {title}
-추가 정보: {context_str}
-
-답변 형식 (반드시 이 형식만, 다른 말 없이):
-점수: [1-10]
-이유: [한 줄, 40자 이내]
-
-점수 기준:
-9~10: 시장 충격 (연준 긴급발표·전쟁 확전·반도체 수출금지 등)
-7~8: 즉각 대응 필요 (보유 종목 실적 쇼크·급등락 원인·핵심 규제)
-5~6: 모니터링 (간접 영향 업종)
-1~4: 노이즈 (무관한 뉴스·단순 루머·중요도 낮은 일반 정보)"""
+    prompt = (
+        f"미국 기술주 포트폴리오(MSFT·NVDA·GOOGL·ORCL·QQQI·SAP·UNH·SGOV·SPMO) 투자자 관점에서 "
+        f"아래 속보 중요도를 평가해줘.\n\n"
+        f"속보: {title}\n{context}\n\n"
+        f"반드시 아래 형식만 출력:\n점수: [1-10]\n이유: [한 줄 40자 이내]\n\n"
+        f"9~10: 시장 충격(연준·전쟁확전·반도체수출금지)\n"
+        f"7~8: 즉각대응(보유종목 실적쇼크·핵심규제)\n"
+        f"5~6: 모니터링\n1~4: 노이즈"
+    )
 
     try:
-        import anthropic
-        client = anthropic.Anthropic(api_key=ANTHROPIC_KEY)
-        msg = client.messages.create(
-            model=AI_MODEL,
-            max_tokens=60,
-            messages=[{"role": "user", "content": prompt}],
+        result = __import__("subprocess").run(
+            ["hermes", "chat", "-q", prompt,
+             "--provider", HERMES_PROVIDER,
+             "--model", HERMES_MODEL, "-Q"],
+            capture_output=True, text=True, timeout=20,
         )
-        raw = msg.content[0].text.strip()
-        logger.debug("AI 원문: %s", raw)
+        raw = (result.stdout or "").strip()
+        logger.debug("hermes 원문: %s", raw)
+
+        if result.returncode != 0 or not raw:
+            raise ValueError(f"hermes 실패 (rc={result.returncode})")
 
         score, reason = 5, "파싱 실패"
         for line in raw.splitlines():
@@ -170,8 +198,8 @@ def judge_importance(event: dict) -> tuple[int, str]:
         return score, reason
 
     except Exception as e:
-        logger.warning("AI 판단 실패: %s", e)
-        return 10, f"AI 오류"
+        logger.warning("hermes 판단 실패 (%s) — 규칙 기반 fallback", e)
+        return _rule_score(event)
 
 
 # ── Telegram ──────────────────────────────────────────────────────────────────

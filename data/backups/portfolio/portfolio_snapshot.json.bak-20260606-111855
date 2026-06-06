@@ -1,0 +1,232 @@
+{
+  "snapshot_date": "2026-06-05",
+  "account": "키움증권 6494-3946 (위탁종합) 김유빈",
+  "domestic": {
+    "summary": {
+      "total_cost_krw": 473650,
+      "total_value_krw": 504000,
+      "total_pnl_krw": 30210,
+      "total_return_pct": 6.38
+    },
+    "holdings": [
+      {
+        "name": "SOL AI반도체TOP2플러스",
+        "ticker": "SOL AI반도체TOP2",
+        "avg_price": 23683,
+        "current_price": 25200,
+        "shares": 20,
+        "pnl_krw": 30210,
+        "return_pct": 6.38
+      }
+    ]
+  },
+  "overseas_general": {
+    "holdings_usd": [
+      {
+        "ticker": "QQQI",
+        "name": "나스닥100 고배당 네오스 ETF",
+        "shares": 35.4069,
+        "avg_price_usd": 53.4509,
+        "current_price_usd": 56.34,
+        "cost_usd": 1892.5307,
+        "value_usd": 1994.8247,
+        "pnl_usd": 102.2941,
+        "return_pct": 5.41
+      },
+      {
+        "ticker": "ORCL",
+        "name": "오라클",
+        "shares": 6.3112,
+        "avg_price_usd": 180.8309,
+        "current_price_usd": 221.72,
+        "cost_usd": 1141.26,
+        "value_usd": 1399.3193,
+        "pnl_usd": 258.0593,
+        "return_pct": 22.61
+      },
+      {
+        "ticker": "UNH",
+        "name": "유나이티드헬스그룹",
+        "shares": 3.3264,
+        "avg_price_usd": 313.7656,
+        "current_price_usd": 400.52,
+        "cost_usd": 1043.7099,
+        "value_usd": 1332.2897,
+        "pnl_usd": 288.5798,
+        "return_pct": 27.65
+      },
+      {
+        "ticker": "MSFT",
+        "name": "마이크로소프트",
+        "shares": 2.9344,
+        "avg_price_usd": 403.142,
+        "current_price_usd": 422.79,
+        "cost_usd": 1182.9799,
+        "value_usd": 1240.635,
+        "pnl_usd": 57.6551,
+        "return_pct": 4.87
+      },
+      {
+        "ticker": "SGOV",
+        "name": "미국 초단기 국채 ETF",
+        "shares": 12.0,
+        "avg_price_usd": 100.4408,
+        "current_price_usd": 100.45,
+        "cost_usd": 1205.2896,
+        "value_usd": 1205.4,
+        "pnl_usd": 0.1104,
+        "return_pct": 0.01
+      },
+      {
+        "ticker": "CRM",
+        "name": "세일스포스",
+        "shares": 3.3451,
+        "avg_price_usd": 190.3919,
+        "current_price_usd": 188.14,
+        "cost_usd": 636.8799,
+        "value_usd": 629.3471,
+        "pnl_usd": -7.5328,
+        "return_pct": -1.18
+      },
+      {
+        "ticker": "NOW",
+        "name": "서비스나우",
+        "shares": 4.9354,
+        "avg_price_usd": 103.6147,
+        "current_price_usd": 114.97,
+        "cost_usd": 511.38,
+        "value_usd": 567.4229,
+        "pnl_usd": 56.0429,
+        "return_pct": 10.96
+      },
+      {
+        "ticker": "GOOGL",
+        "name": "알파벳 A",
+        "shares": 1.6642,
+        "avg_price_usd": 329.702,
+        "current_price_usd": 369.61,
+        "cost_usd": 548.6901,
+        "value_usd": 615.105,
+        "pnl_usd": 66.4149,
+        "return_pct": 12.1
+      },
+      {
+        "ticker": "NVDA",
+        "name": "엔비디아",
+        "shares": 2.7875,
+        "avg_price_usd": 190.2924,
+        "current_price_usd": 212.0,
+        "cost_usd": 530.4401,
+        "value_usd": 590.95,
+        "pnl_usd": 60.5099,
+        "return_pct": 11.41
+      },
+      {
+        "ticker": "SPMO",
+        "name": "S&P500 모멘텀 ETF",
+        "shares": 2.014,
+        "avg_price_usd": 141.5839,
+        "current_price_usd": 147.93,
+        "cost_usd": 285.15,
+        "value_usd": 297.931,
+        "pnl_usd": 12.781,
+        "return_pct": 4.48
+      },
+      {
+        "ticker": "SAP",
+        "name": "SAP SE",
+        "shares": 0.5944,
+        "avg_price_usd": 177.1534,
+        "current_price_usd": 187.96,
+        "cost_usd": 105.3,
+        "value_usd": 111.7234,
+        "pnl_usd": 6.4234,
+        "return_pct": 6.1
+      }
+    ]
+  },
+  "overseas_fractional": {
+    "summary": {
+      "total_cost_usd": 1369.0853,
+      "total_value_usd": 1494.4764,
+      "total_pnl_usd": 122.5276,
+      "total_return_pct": 8.94
+    },
+    "holdings": [
+      {
+        "name": "서비스나우",
+        "ticker": "NOW",
+        "shares": 0.6354,
+        "cost_usd": 66.6046,
+        "value_usd": 73.0519,
+        "pnl_usd": 12.2744,
+        "return_pct": 18.42
+      },
+      {
+        "name": "엔비디아",
+        "ticker": "NVDA",
+        "shares": 0.76,
+        "cost_usd": 155.973,
+        "value_usd": 161.12,
+        "pnl_usd": 4.177,
+        "return_pct": 2.67
+      },
+      {
+        "name": "나스닥 100 고배당주 네오스 ETF",
+        "ticker": "QQQI",
+        "shares": 0.2987,
+        "cost_usd": 16.8694,
+        "value_usd": 16.8288,
+        "pnl_usd": 0.1883,
+        "return_pct": 1.11
+      },
+      {
+        "name": "SAP SE (ADR)",
+        "ticker": "SAP",
+        "shares": 0.4988,
+        "cost_usd": 86.8141,
+        "value_usd": 93.7544,
+        "pnl_usd": 3.6853,
+        "return_pct": 4.24
+      },
+      {
+        "name": "S&P 500 모멘텀 인베스코 ETF",
+        "ticker": "SPMO",
+        "shares": 0.9733,
+        "cost_usd": 138.6538,
+        "value_usd": 143.9803,
+        "pnl_usd": 7.6302,
+        "return_pct": 5.5
+      },
+      {
+        "name": "유나이티드헬스그룹",
+        "ticker": "UNH",
+        "shares": 0.3102,
+        "cost_usd": 118.4068,
+        "value_usd": 124.2413,
+        "pnl_usd": -0.6709,
+        "return_pct": -0.56
+      }
+    ]
+  },
+  "portfolio_analysis": {
+    "total_cost_krw_approx": 11437860,
+    "total_value_krw_approx": 12568909,
+    "total_pnl_krw_approx": 1374763,
+    "total_return_pct_approx": 12.02,
+    "strongest_performers": [
+      "ORCL (+41.14%)",
+      "NOW (+38.40%)",
+      "UNH (+23.57%)",
+      "GOOGL (+23.01%)"
+    ],
+    "weakest_performers": [
+      "CPNG (-17.43%)",
+      "SGOV (-0.28%)"
+    ],
+    "cash_buffer_usd": 1006.7,
+    "income_engine_value_usd": 2019.77,
+    "sgov_deployment_ready": true,
+    "barbell_phase": "Phase 0 — 정상 모드 (QQQ 조정 없음)"
+  }
+}
