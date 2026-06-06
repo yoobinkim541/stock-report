@@ -1,14 +1,11 @@
 #!/usr/bin/env python3
-# /// script
-# dependencies = ["requests", "python-dotenv"]
-# ///
 """
 news_spike_detector.py — saveticker 속보 알림
 
 동작 흐름:
   1. saveticker 수집 → JSONL 캐시 저장
   2. '속보' 태그 이벤트 중 미발송 건 필터
-  3. hermes(gemini-2.5-flash)로 중요도 판단 (1~10점, 7+ 알림)
+  3. 규칙 기반 중요도 판단 (포트폴리오 종목/핵심 키워드, 7+ 알림)
   4. 텔레그램 발송 + 발송 완료 ID 기록 (재발송 방지)
 
 크론 (매 1분):
@@ -154,52 +151,7 @@ def _rule_score(event: dict) -> tuple[int, str]:
 
 
 def judge_importance(event: dict) -> tuple[int, str]:
-    """hermes(gemini-2.5-flash)로 중요도 판단. 실패 시 규칙 기반 fallback.
-
-    Returns:
-        (score, reason) — score 1~10
-    """
-    title   = event.get("title") or ""
-    tickers = [t.lstrip("$") for t in (event.get("tags") or []) if t.startswith("$")]
-    context = f"관련 종목: {', '.join(tickers)}" if tickers else "종목 없음"
-
-    prompt = (
-        f"미국 기술주 포트폴리오(MSFT·NVDA·GOOGL·ORCL·QQQI·SAP·UNH·SGOV·SPMO) 투자자 관점에서 "
-        f"아래 속보 중요도를 평가해줘.\n\n"
-        f"속보: {title}\n{context}\n\n"
-        f"반드시 아래 형식만 출력:\n점수: [1-10]\n이유: [한 줄 40자 이내]\n\n"
-        f"9~10: 시장 충격(연준·전쟁확전·반도체수출금지)\n"
-        f"7~8: 즉각대응(보유종목 실적쇼크·핵심규제)\n"
-        f"5~6: 모니터링\n1~4: 노이즈"
-    )
-
-    try:
-        result = __import__("subprocess").run(
-            ["hermes", "chat", "-q", prompt,
-             "--provider", HERMES_PROVIDER,
-             "--model", HERMES_MODEL, "-Q"],
-            capture_output=True, text=True, timeout=20,
-        )
-        raw = (result.stdout or "").strip()
-        logger.debug("hermes 원문: %s", raw)
-
-        if result.returncode != 0 or not raw:
-            raise ValueError(f"hermes 실패 (rc={result.returncode})")
-
-        score, reason = 5, "파싱 실패"
-        for line in raw.splitlines():
-            if line.startswith("점수:"):
-                try:
-                    score = max(1, min(10, int(line.split(":")[1].strip().split()[0])))
-                except Exception:
-                    pass
-            elif line.startswith("이유:"):
-                reason = line.split(":", 1)[1].strip()
-        return score, reason
-
-    except Exception as e:
-        logger.warning("hermes 판단 실패 (%s) — 규칙 기반 fallback", e)
-        return _rule_score(event)
+    return _rule_score(event)
 
 
 # ── Telegram ──────────────────────────────────────────────────────────────────

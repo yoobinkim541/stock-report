@@ -388,9 +388,30 @@ def optimize_sweet_spot(
     )
 
     # Actual ML model: ExcessReturnModel trained on first 2/3, predicts OOS last 1/3
+    # threshold는 OOS 예측값 분포(5/25/50백분위)에서 탐색 — sentiment 스케일과 무관
     ml_signal = _generate_ml_signal(data)
     ml_data = {**data, "features": data["features"].assign(ml_signal=ml_signal)}
-    _ml = evaluate_threshold_strategy(ml_data, {**best_params, "signal_col": "ml_signal"})
+    oos_preds = ml_signal.dropna()
+    if len(oos_preds) > 10:
+        ml_thresholds = [
+            float(np.percentile(oos_preds, p)) for p in (5, 25, 50)
+        ]
+    else:
+        ml_thresholds = [0.0]
+
+    _qqq_cagr = qqq_result.cagr or 0.0
+    best_ml_score = float("-inf")
+    best_ml_params: dict = {"threshold": ml_thresholds[0], "max_weight": best_params.get("max_weight", 1.0), "safe_weight": best_params.get("safe_weight", 0.0), "signal_col": "ml_signal"}
+    for thr in ml_thresholds:
+        _p = {**best_params, "threshold": thr, "signal_col": "ml_signal"}
+        _r = evaluate_threshold_strategy(ml_data, _p)
+        from ml.optimization import composite_score as _cs
+        _s = _cs(cagr=_r.cagr, max_drawdown=_r.max_drawdown, turnover=_r.turnover or 0.0, excess_return=(_r.cagr or 0.0) - _qqq_cagr)
+        if _s > best_ml_score:
+            best_ml_score = _s
+            best_ml_params = _p
+
+    _ml = evaluate_threshold_strategy(ml_data, best_ml_params)
     ml_result = BacktestResult(
         name="ML 전략 (ExcessReturnModel, OOS)",
         cumulative_return=_ml.cumulative_return,
