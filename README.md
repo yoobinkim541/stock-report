@@ -66,6 +66,19 @@ telegram_bot.py (상시, fcntl 단일 인스턴스 잠금)
 
 ## 🆕 최근 업그레이드
 
+### v2.7 — ML Sweet Spot Optimizer (2026-06-06)
+
+- **`ml/sweet_spot.py` 신규** — AR(1) 은닉 신호 기반 합성 시장 데이터 생성기 (`generate_synthetic_market_data`)
+  - DGP는 causal (t일 수익률 = t-1 신호 기반) → lookahead 없음
+  - 임계값 전략 평가기 (`evaluate_threshold_strategy`) — `shift(1)` 포지션 지연 적용
+  - 그리드서치 옵티마이저 (`optimize_sweet_spot`) — threshold / max_weight / safe_weight 탐색
+  - Composite score: CAGR + MDD 패널티 + 회전율 패널티 + QQQ 초과수익
+  - 2-fold walk-forward 요약 + equity curve / trial scatter 선택적 matplotlib 출력
+- **`/mlreport` 샘플 교체** — `build_sample_ml_strategy_report()`가 고정 양수 경로 대신 옵티마이저 실제 결과 출력
+  - 음수 수익률 숨기지 않음 (synthetic seed=42 기준 SPY -48%, ML +9.6%)
+- **테스트 27개 추가** — `tests/test_ml_sweet_spot.py`
+  - 합성 데이터 형태·결정성, shift(1) no-lookahead 검증, 옵티마이저 일관성 검증
+
 ### v2.6 — 봇 안정성 강화 & UX 개선 (2026-06-05)
 
 - **단일 인스턴스 잠금** — `fcntl.flock`으로 중복 봇 프로세스 원천 차단  
