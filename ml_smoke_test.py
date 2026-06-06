@@ -242,8 +242,9 @@ def run_tests() -> list[str]:
         lambda: opt,
         ("best_params 존재",          lambda r: bool(r.best_params)),
         ("trials 20행",               lambda r: len(r.trials) == 20),
-        ("equity 4개 컬럼",           lambda r: set(r.equity.columns) == {"ML_optimized","baseline","SPY","QQQ"}),
+        ("equity 4개 컬럼",           lambda r: set(r.equity.columns) == {"ML_model","threshold","SPY","QQQ"}),
         ("wf mean_sharpe 유한값",      lambda r: r.wf_summary["mean_sharpe"] is not None),
+        ("ml_result 타입",             lambda r: isinstance(r.ml_result, BacktestResult)),
         ("best score >= baseline score", lambda r: _best_beats_baseline(r)),
     )
 
@@ -333,7 +334,7 @@ def main():
         sys.exit(1)
 
     elapsed = time.time() - t0
-    total_checks = 46  # 위 _check 호출의 총 assertions 수 (trials count 체크 포함)
+    total_checks = 47  # 위 _check 호출의 총 assertions 수 (ml_result 타입 체크 추가)
 
     if failures:
         msg = "\n".join(failures)

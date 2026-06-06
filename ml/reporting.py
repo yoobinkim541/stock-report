@@ -227,12 +227,12 @@ def build_sample_ml_strategy_report() -> str:
     result = optimize_sweet_spot(data)
 
     text = build_ml_strategy_report(
-        ml_result=result.best_result,
+        ml_result=result.ml_result,      # actual OOS ExcessReturnModel result (not grid-searched threshold)
         qqq_result=result.qqq_result,
         spy_result=result.spy_result,
         weights=result.weights,
         wf_summary=result.wf_summary,
-        as_of="샘플 (synthetic, optimizer)",
+        as_of="샘플 (synthetic, 최적화 샘플)",
     )
     _SAMPLE_REPORT_CACHE["report"] = text
     return text

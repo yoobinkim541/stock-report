@@ -15,6 +15,7 @@ from ml.sweet_spot import (
     evaluate_threshold_strategy,
     generate_synthetic_market_data,
     optimize_sweet_spot,
+    _generate_ml_signal,
 )
 
 
@@ -171,6 +172,13 @@ class TestOptimizeSweetSpot:
         result = optimize_sweet_spot(data)
         assert isinstance(result.best_result, BacktestResult)
 
+    def test_ml_result_is_backtest_result(self):
+        """ml_result must be an actual OOS ExcessReturnModel result, not a threshold copy."""
+        data = generate_synthetic_market_data(n=756, seed=42)
+        result = optimize_sweet_spot(data)
+        assert isinstance(result.ml_result, BacktestResult)
+        assert "OOS" in result.ml_result.name or "ExcessReturnModel" in result.ml_result.name
+
     def test_best_score_ge_baseline_score(self):
         """Grid search must find params at least as good as baseline (threshold=0)."""
         from ml.optimization import composite_score
@@ -203,7 +211,7 @@ class TestOptimizeSweetSpot:
     def test_equity_df_has_expected_columns(self):
         data = generate_synthetic_market_data(n=756, seed=42)
         result = optimize_sweet_spot(data)
-        for col in ("ML_optimized", "baseline", "SPY", "QQQ"):
+        for col in ("ML_model", "threshold", "SPY", "QQQ"):
             assert col in result.equity.columns
 
     def test_equity_df_not_empty(self):
@@ -234,12 +242,13 @@ class TestOptimizeSweetSpot:
         assert result.best_result.n_days > 0
 
     def test_deterministic(self):
-        """Same seed → same best_params."""
+        """Same seed → same best_params and ml_result."""
         data = generate_synthetic_market_data(seed=42)
         r1 = optimize_sweet_spot(data)
         r2 = optimize_sweet_spot(data)
         assert r1.best_params == r2.best_params
         assert r1.best_result.cumulative_return == pytest.approx(r2.best_result.cumulative_return)
+        assert r1.ml_result.cumulative_return == pytest.approx(r2.ml_result.cumulative_return)
 
 
 # ---------------------------------------------------------------------------

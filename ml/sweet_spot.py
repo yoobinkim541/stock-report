@@ -33,12 +33,13 @@ from ml.optimization import composite_score, grid_search_parameters
 @dataclass
 class SweetSpotResult:
     best_params: dict
-    best_result: BacktestResult
+    best_result: BacktestResult    # best threshold strategy (grid-searched on full data)
+    ml_result: BacktestResult      # actual ML model result (OOS ExcessReturnModel)
     baseline_result: BacktestResult
     qqq_result: BacktestResult
     spy_result: BacktestResult
     trials: pd.DataFrame
-    equity: pd.DataFrame
+    equity: pd.DataFrame           # columns: ML_model, threshold, SPY, QQQ
     weights: pd.Series
     wf_summary: dict
 
@@ -147,6 +148,44 @@ def evaluate_threshold_strategy(data: dict, params: dict) -> BacktestResult:
         n_days=len(df),
         extra={"equity": equity},
     )
+
+
+# ---------------------------------------------------------------------------
+# ML model signal: OOS predictions from ExcessReturnModel
+# ---------------------------------------------------------------------------
+
+def _generate_ml_signal(data: dict, train_fraction: float = 2 / 3) -> pd.Series:
+    """Train ExcessReturnModel on first `train_fraction` of data; predict OOS.
+
+    Returns a Series of model predictions named "ml_signal".  Values are NaN
+    for the in-sample period so the strategy defaults to safe_weight during
+    those rows — making the backtest strictly OOS from the split point.
+
+    Why this is better than a simple threshold on raw sentiment:
+      - The model learns a weighted combination of momentum, volatility and
+        sentiment features rather than thresholding one feature.
+      - Predictions are only used on data the model has never seen.
+    """
+    from ml.models import ExcessReturnModel
+
+    features_df = data["features"]
+    close = data["close"]
+    n = len(features_df)
+    split = int(n * train_fraction)
+
+    # Target: next-day forward return (shift(-1) so training is lookahead-free)
+    fwd_return = close.pct_change().shift(-1).fillna(0)
+    X = features_df.values.astype(float)
+    y = fwd_return.values
+
+    model = ExcessReturnModel()
+    model.fit(X[:split], y[:split])
+
+    # OOS predictions only — in-sample period is NaN → strategy stays safe there
+    preds = np.full(n, np.nan)
+    preds[split:] = model.predict(X[split:])
+
+    return pd.Series(preds, index=features_df.index, name="ml_signal")
 
 
 # ---------------------------------------------------------------------------
@@ -335,9 +374,10 @@ def optimize_sweet_spot(
     gs = grid_search_parameters(_objective, param_grid)
     best_params = gs["best_params"]
 
+    # Best threshold strategy (grid-searched on full data — in-sample benchmark)
     _best = evaluate_threshold_strategy(data, best_params)
     best_result = BacktestResult(
-        name="ML 전략 (최적화 샘플)",
+        name="임계값 전략 (최적화, 전체 기간)",
         cumulative_return=_best.cumulative_return,
         cagr=_best.cagr,
         max_drawdown=_best.max_drawdown,
@@ -347,16 +387,31 @@ def optimize_sweet_spot(
         extra=_best.extra,
     )
 
+    # Actual ML model: ExcessReturnModel trained on first 2/3, predicts OOS last 1/3
+    ml_signal = _generate_ml_signal(data)
+    ml_data = {**data, "features": data["features"].assign(ml_signal=ml_signal)}
+    _ml = evaluate_threshold_strategy(ml_data, {**best_params, "signal_col": "ml_signal"})
+    ml_result = BacktestResult(
+        name="ML 전략 (ExcessReturnModel, OOS)",
+        cumulative_return=_ml.cumulative_return,
+        cagr=_ml.cagr,
+        max_drawdown=_ml.max_drawdown,
+        sharpe=_ml.sharpe,
+        turnover=_ml.turnover,
+        n_days=_ml.n_days,
+        extra=_ml.extra,
+    )
+
     trials = pd.DataFrame(trial_rows)
 
-    # Equity curves for all strategies
-    best_eq = best_result.extra.get("equity", pd.Series(dtype=float))
-    base_eq = baseline_result.extra.get("equity", pd.Series(dtype=float))
+    # Equity curves — "ML_model" uses actual OOS model; "threshold" uses grid-searched threshold
+    ml_eq = ml_result.extra.get("equity", pd.Series(dtype=float))
+    threshold_eq = best_result.extra.get("equity", pd.Series(dtype=float))
     spy_eq = (1 + data["spy_close"].pct_change().fillna(0)).cumprod() * 100
     qqq_eq = (1 + data["qqq_close"].pct_change().fillna(0)).cumprod() * 100
     equity_df = pd.DataFrame({
-        "ML_optimized": best_eq,
-        "baseline": base_eq,
+        "ML_model": ml_eq,
+        "threshold": threshold_eq,
         "SPY": spy_eq,
         "QQQ": qqq_eq,
     }).dropna()
@@ -370,6 +425,7 @@ def optimize_sweet_spot(
     return SweetSpotResult(
         best_params=best_params,
         best_result=best_result,
+        ml_result=ml_result,
         baseline_result=baseline_result,
         qqq_result=qqq_result,
         spy_result=spy_result,
