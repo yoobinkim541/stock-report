@@ -21,6 +21,12 @@ telegram_bot.py (상시, fcntl 단일 인스턴스 잠금)
 portfolio_sync_server.py (상시, port 8765)
   └── 외부 잔고 데이터 수신 → portfolio_snapshot.json 업데이트
 
+news_spike_detector.py (크론 매 1분)
+  ├── fetch_saveticker + fetch_arca(1page) + fetch_telegram → JSONL 캐시 저장
+  ├── 최근 10분 vs 이전 110분 테마/티커 빈도 비교
+  ├── 3배 이상 + 최소 3건 → 텔레그램 스파이크 알림
+  └── 쿨다운: ~/.cache/news_spike_state.json (테마/티커별 1시간)
+
 크론 검증:
   bot_smoke_test.py   — 매일 00:00 UTC (09:00 KST), 25항목 실데이터 테스트
   bot_healthcheck.py  — 매 30분, 프로세스·서버·파일 상태 점검
@@ -41,6 +47,7 @@ portfolio_sync_server.py (상시, port 8765)
 | `price_alerts.py` | 알림 CRUD + check_alerts() | `price_alerts.json` |
 | `order_generator.py` | Phase 기반 소수점 매수 주문서 생성 | — |
 | `source_collector.py` | 뉴스 JSONL 캐시 수집·다이제스트 | `~/reports/source-cache/*.jsonl` |
+| `news_spike_detector.py` | 1분 크론 — 뉴스 수집 + 급증 감지 + 텔레그램 알림 | `~/.cache/news_spike_state.json` |
 | `stock_advisor.py` | AI 상담 프롬프트 실행 | — |
 | `kiwoom_sync_rest.py` | 키움 REST API 국내주식 잔고 동기화 (크론 08:35 KST) | — |
 | `portfolio_sync_server.py` | 외부 잔고 수신 Flask 서버 (port 8765, Bearer 인증) | — |
