@@ -387,6 +387,9 @@ def cmd_status(d: dict) -> str:
     fg_lbl = ("💀극단공포" if fg_sc <= 25 else "😨공포" if fg_sc <= 45
               else "😐중립" if fg_sc <= 55 else "😄탐욕" if fg_sc <= 75
               else "🤑극단탐욕")
+    fg_proxy = fg.get("proxy_score", -1.0)
+    fg_cnn_ok = fg.get("cnn_ok", True)
+    _fg_proxy_str = (f"  proxy {fg_proxy:.0f}" if fg_proxy >= 0 else "")
 
     rsi_s = ("🔥과매도" if rsi < 30 else "⚠️약세"     if rsi < 40
              else "🫧극과매수" if rsi > 75 else "🌡과매수" if rsi > 70
@@ -408,7 +411,7 @@ def cmd_status(d: dict) -> str:
         f"낙폭  {dd:>+8.2f}%\n"
         f"RSI   {rsi:>8.1f}   {rsi_s}\n"
         f"VIX   {vix:>8.1f}   {vix_s}\n"
-        f"F&G   {fg_sc:>8.1f}   {fg_lbl}\n"
+        f"F&G   {fg_sc:>8.1f}   {fg_lbl}{_fg_proxy_str}\n"
         f"\n"
         f"총액  ${port['total_usd']:>8,.0f}  (₩{total_krw:,})\n"
         f"수익  {ret_sign}{abs(ret_pct):>7.1f}%\n"

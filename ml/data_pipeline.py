@@ -12,6 +12,7 @@
   fetch_universe(mode)         → list[str] 티커
   fetch_prices(tickers, days)  → dict[str, pd.DataFrame]  (OHLCV)
   build_fear_greed_proxy(days) → pd.Series  (0=극도공포, 100=극도탐욕)
+  get_fg_proxy_score()         → float  (오늘 proxy 점수, 캐시 1h, 빠름)
   build_stock_features(ticker, prices, market) → pd.DataFrame
   build_ml_dataset(mode, days) → dict  {features, returns, market, universe}
 """
@@ -282,6 +283,32 @@ def build_fear_greed_proxy(days: int = 1260) -> pd.Series:
 
     _save_cache(cache_key, fg.to_frame())
     return fg
+
+
+def get_fg_proxy_score() -> float:
+    """오늘 Fear/Greed proxy 점수 반환 (0=극도공포, 100=극도탐욕).
+
+    1년치 데이터만 사용해 빠르게 계산. 캐시 1시간.
+    네트워크/계산 실패 시 -1 반환.
+    """
+    cache_key = "fg_proxy_today"
+    cached = _load_cache(cache_key, ttl_hours=1.0)
+    if cached is not None and "score" in cached.columns:
+        return float(cached["score"].iloc[0])
+
+    try:
+        fg = build_fear_greed_proxy(days=252)
+        if fg.empty:
+            return -1.0
+        score = float(fg.dropna().iloc[-1])
+        import pickle
+        _cache_path(cache_key).write_bytes(pickle.dumps(
+            pd.DataFrame({"score": [score]})
+        ))
+        return score
+    except Exception as e:
+        logger.warning("get_fg_proxy_score 실패: %s", e)
+        return -1.0
 
 
 # ── 종목별 피처 ───────────────────────────────────────────────────────────────

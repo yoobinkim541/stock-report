@@ -456,8 +456,16 @@ def fetch_vix() -> float:
 
 
 def fetch_fear_greed() -> dict:
-    """CNN Fear & Greed Index 조회. 실패 시 neutral(50) 반환."""
+    """CNN Fear & Greed Index 조회. 실패 시 자체 proxy로 fallback."""
     from datetime import timedelta
+
+    def _proxy_score() -> float:
+        try:
+            from ml.data_pipeline import get_fg_proxy_score
+            return get_fg_proxy_score()
+        except Exception:
+            return -1.0
+
     date_str = (datetime.now() - timedelta(days=7)).strftime("%Y-%m-%d")
     url = f"https://production.dataviz.cnn.io/index/fearandgreed/graphdata/{date_str}"
     try:
@@ -469,14 +477,26 @@ def fetch_fear_greed() -> dict:
         resp.raise_for_status()
         fg = resp.json().get("fear_and_greed", {})
         return {
-            "score":      round(float(fg.get("score", 50)), 1),
-            "rating":     fg.get("rating", "neutral"),
-            "prev_close": round(float(fg.get("previous_close", 50)), 1),
-            "prev_week":  round(float(fg.get("previous_1_week", 50)), 1),
-            "prev_month": round(float(fg.get("previous_1_month", 50)), 1),
+            "score":       round(float(fg.get("score", 50)), 1),
+            "rating":      fg.get("rating", "neutral"),
+            "prev_close":  round(float(fg.get("previous_close", 50)), 1),
+            "prev_week":   round(float(fg.get("previous_1_week", 50)), 1),
+            "prev_month":  round(float(fg.get("previous_1_month", 50)), 1),
+            "proxy_score": round(_proxy_score(), 1),
+            "cnn_ok":      True,
         }
     except Exception:
-        return {"score": 50.0, "rating": "neutral", "prev_close": 50.0, "prev_week": 50.0, "prev_month": 50.0}
+        proxy = _proxy_score()
+        score = proxy if proxy >= 0 else 50.0
+        return {
+            "score":       score,
+            "rating":      "neutral",
+            "prev_close":  score,
+            "prev_week":   score,
+            "prev_month":  score,
+            "proxy_score": round(proxy, 1),
+            "cnn_ok":      False,
+        }
 
 
 def fetch_ma200(ticker_sym: str) -> dict:
