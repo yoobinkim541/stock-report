@@ -177,6 +177,14 @@ class TestBuildSampleMlStrategyReport:
         assert "최적화 샘플" in text
         assert "2025-01-03 (샘플)" not in text
 
+    def test_sample_report_is_cached(self):
+        """Second call must return the identical object (module-level cache)."""
+        import ml.reporting as rep
+        rep._SAMPLE_REPORT_CACHE.clear()
+        r1 = build_sample_ml_strategy_report()
+        r2 = build_sample_ml_strategy_report()
+        assert r1 is r2  # same object → cache hit
+
 
 # ---------------------------------------------------------------------------
 # Telegram bot wiring (no real network)

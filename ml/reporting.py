@@ -209,22 +209,30 @@ def build_ml_strategy_report(
 # Sample report (no network, synthetic data)
 # ---------------------------------------------------------------------------
 
+_SAMPLE_REPORT_CACHE: dict = {}
+
+
 def build_sample_ml_strategy_report() -> str:
     """Build a demo ML strategy report using the sweet-spot optimizer on synthetic data.
 
     Results reflect the actual optimizer output — negative returns are shown as-is,
-    not hidden or adjusted.  Deterministic via seed=42.
+    not hidden or adjusted.  Deterministic via seed=42.  Result is cached after first call.
     """
+    if "report" in _SAMPLE_REPORT_CACHE:
+        return _SAMPLE_REPORT_CACHE["report"]
+
     from ml.sweet_spot import generate_synthetic_market_data, optimize_sweet_spot
 
     data = generate_synthetic_market_data()
     result = optimize_sweet_spot(data)
 
-    return build_ml_strategy_report(
+    text = build_ml_strategy_report(
         ml_result=result.best_result,
         qqq_result=result.qqq_result,
         spy_result=result.spy_result,
         weights=result.weights,
         wf_summary=result.wf_summary,
-        as_of="(최적화 샘플 — synthetic seed=42)",
+        as_of="샘플 (synthetic, optimizer)",
     )
+    _SAMPLE_REPORT_CACHE["report"] = text
+    return text

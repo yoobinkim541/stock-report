@@ -84,6 +84,11 @@ class TestEvaluateThresholdStrategy:
         result = evaluate_threshold_strategy(data, {})
         assert isinstance(result, BacktestResult)
 
+    def test_invalid_signal_col_raises_value_error(self):
+        data = generate_synthetic_market_data(n=50, seed=0)
+        with pytest.raises(ValueError, match="signal_col"):
+            evaluate_threshold_strategy(data, {"signal_col": "nonexistent"})
+
     def test_n_days_equals_input(self):
         # shift(1)[0] = NaN → map() returns safe_weight (not NaN) → no row dropped
         data = generate_synthetic_market_data(n=100, seed=0)

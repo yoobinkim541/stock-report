@@ -123,6 +123,9 @@ def evaluate_threshold_strategy(data: dict, params: dict) -> BacktestResult:
     signal_col = params.get("signal_col", "sentiment")
 
     close = data["close"]
+    if signal_col not in data["features"].columns:
+        available = list(data["features"].columns)
+        raise ValueError(f"signal_col '{signal_col}' not found. Available: {available}")
     signal = data["features"][signal_col]
 
     # shift(1): signal observed at close of t → position from open of t+1
