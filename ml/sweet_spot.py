@@ -22,6 +22,7 @@ from ml.backtest import (
     cagr as _calc_cagr,
     max_drawdown as _calc_mdd,
     sharpe_ratio as _calc_sharpe,
+    get_risk_free_rate as _get_rf,
 )
 from ml.optimization import composite_score, grid_search_parameters
 
@@ -147,7 +148,7 @@ def evaluate_threshold_strategy(data: dict, params: dict) -> BacktestResult:
         cumulative_return=float((1 + strat_ret.fillna(0)).prod() - 1),
         cagr=_calc_cagr(equity),
         max_drawdown=_calc_mdd(equity),
-        sharpe=_calc_sharpe(strat_ret.dropna()),
+        sharpe=_calc_sharpe(strat_ret.dropna(), risk_free=_get_rf()),
         turnover=turnover,
         n_days=len(df),
         extra={"equity": equity},

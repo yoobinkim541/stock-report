@@ -11,12 +11,67 @@ All calculations work on pandas Series/DataFrames; no network required.
 
 from __future__ import annotations
 
+import json
 import math
+import os
 from dataclasses import dataclass, field
+from datetime import datetime, timedelta
+from pathlib import Path
 from typing import Optional
 
 import numpy as np
 import pandas as pd
+
+_RF_CACHE = Path(os.path.expanduser("~/.cache/risk_free_rate.json"))
+_RF_FALLBACK = 0.0425   # ~4.25% — 현재 Fed Funds 수준
+_RF_PROCESS_CACHE: Optional[float] = None   # 프로세스 내 1회만 FRED 조회
+
+
+def get_risk_free_rate() -> float:
+    """FRED DFF(Fed Funds 실효금리) 조회. 실패 시 4.25% fallback.
+
+    캐시: 프로세스 내 1회, 파일 캐시 24시간 (~/.cache/risk_free_rate.json)
+    반환: 연간 소수점 (e.g. 0.0425 → 4.25%)
+    """
+    global _RF_PROCESS_CACHE
+    if _RF_PROCESS_CACHE is not None:
+        return _RF_PROCESS_CACHE
+
+    # 파일 캐시 확인
+    if _RF_CACHE.exists():
+        try:
+            data = json.loads(_RF_CACHE.read_text())
+            age = datetime.now() - datetime.fromisoformat(data["ts"])
+            if age < timedelta(hours=24):
+                _RF_PROCESS_CACHE = float(data["rate"])
+                return _RF_PROCESS_CACHE
+        except Exception:
+            pass
+
+    # FRED API (파일 캐시 미스 시에만 호출)
+    try:
+        import requests
+        r = requests.get(
+            "https://fred.stlouisfed.org/graph/fredgraph.csv",
+            params={"id": "DFF"},
+            headers={"User-Agent": "Mozilla/5.0"},
+            timeout=8,
+        )
+        r.raise_for_status()
+        import csv, io
+        rows = [row for row in csv.DictReader(io.StringIO(r.text))
+                if row.get("DFF") and row["DFF"] != "."]
+        if rows:
+            rate = float(rows[-1]["DFF"]) / 100.0
+            _RF_CACHE.parent.mkdir(parents=True, exist_ok=True)
+            _RF_CACHE.write_text(json.dumps({"rate": rate, "ts": datetime.now().isoformat()}))
+            _RF_PROCESS_CACHE = rate
+            return rate
+    except Exception:
+        pass
+
+    _RF_PROCESS_CACHE = _RF_FALLBACK
+    return _RF_FALLBACK
 
 
 # ---------------------------------------------------------------------------
@@ -109,12 +164,13 @@ def buy_and_hold(close: pd.Series, name: str | None = None) -> BacktestResult:
     label = name or str(close.name or "bah")
     valid = close.dropna()
     rets = valid.pct_change().dropna()
+    rf = get_risk_free_rate()
     return BacktestResult(
         name=label,
         cumulative_return=cumulative_return(valid),
         cagr=cagr(valid),
         max_drawdown=max_drawdown(valid),
-        sharpe=sharpe_ratio(rets),
+        sharpe=sharpe_ratio(rets, risk_free=rf),
         turnover=None,
         n_days=len(valid),
     )
@@ -167,13 +223,14 @@ def rule_baseline(
 
     equity = (1 + strat_ret.fillna(0)).cumprod() * both["close"].iloc[0]
     weights_df = pd.DataFrame({"asset": both["pos"]})
+    rf = get_risk_free_rate()
 
     return BacktestResult(
         name=label,
         cumulative_return=float((1 + strat_ret.fillna(0)).prod() - 1),
         cagr=cagr(equity),
         max_drawdown=max_drawdown(equity),
-        sharpe=sharpe_ratio(strat_ret.dropna()),
+        sharpe=sharpe_ratio(strat_ret.dropna(), risk_free=rf),
         turnover=portfolio_turnover(weights_df),
         n_days=len(both),
         extra={"signal_col": signal_col, "threshold": threshold},
@@ -217,7 +274,7 @@ def portfolio_metrics(
         cumulative_return=float(equity.iloc[-1] - 1) if len(equity) else 0.0,
         cagr=cagr(equity),
         max_drawdown=max_drawdown(equity),
-        sharpe=sharpe_ratio(portfolio_ret.dropna()),
+        sharpe=sharpe_ratio(portfolio_ret.dropna(), risk_free=get_risk_free_rate()),
         turnover=portfolio_turnover(w),
         n_days=len(equity),
     )
