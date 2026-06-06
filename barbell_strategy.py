@@ -800,9 +800,27 @@ def calculate_sgov_target(market_type: str, phase_key, portfolio_total_usd: floa
     }
 
 
+def _fg_dca_adjustment(fg_proxy: float) -> float:
+    """Fear/Greed proxy 극단값 시 DCA 배율 조정 인자.
+
+    극도공포(≤20): 1.2배 — 공포 구간에서 매수 증액
+    극도탐욕(≥80): 0.8배 — 과열 구간에서 매수 축소
+    그 외        : 1.0배 — 조정 없음
+    """
+    if fg_proxy < 0:       # 조회 실패
+        return 1.0
+    if fg_proxy <= 20:
+        return 1.2
+    if fg_proxy >= 80:
+        return 0.8
+    return 1.0
+
+
 def calculate_dca(market_type: str, phase_key, exchange_rate: float = 1380.0) -> dict:
-    """시장 상태별 DCA 금액 및 종목 배분 (원화 + USD 환산)."""
-    # 매번 파일 로드 — 텔레그램 봇으로 변경해도 즉시 반영
+    """시장 상태별 DCA 금액 및 종목 배분 (원화 + USD 환산).
+
+    Fear/Greed proxy 극단값(≤20 극도공포, ≥80 극도탐욕) 시 배율 ±20% 보정.
+    """
     w_normal, w_bear = load_dca_weights()
 
     if market_type == "bull":
@@ -815,14 +833,26 @@ def calculate_dca(market_type: str, phase_key, exchange_rate: float = 1380.0) ->
         mult    = BEAR_PHASES[phase_key]["dca_multiplier"]
         weights = w_bear if phase_key >= 2 else w_normal
 
-    total_krw = int(DCA_DAILY_BASE_KRW * mult)
+    # Fear/Greed proxy 보정
+    try:
+        from ml.data_pipeline import get_fg_proxy_score
+        fg_proxy = get_fg_proxy_score()
+    except Exception:
+        fg_proxy = -1.0
+    fg_adj  = _fg_dca_adjustment(fg_proxy)
+    adj_mult = round(mult * fg_adj, 2)
+
+    total_krw = int(DCA_DAILY_BASE_KRW * adj_mult)
     total_usd = round(total_krw / exchange_rate, 2)
     allocation = {t: int(total_krw * w) for t, w in weights.items()}
     return {
-        "total_krw": total_krw,
-        "total_usd": total_usd,
-        "multiplier": mult,
-        "by_ticker": allocation,
+        "total_krw":   total_krw,
+        "total_usd":   total_usd,
+        "multiplier":  adj_mult,
+        "base_mult":   mult,
+        "fg_proxy":    round(fg_proxy, 1),
+        "fg_adj":      fg_adj,
+        "by_ticker":   allocation,
         "exchange_rate": exchange_rate,
     }
 

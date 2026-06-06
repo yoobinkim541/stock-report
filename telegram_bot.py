@@ -546,8 +546,18 @@ def cmd_portfolio(d: dict) -> str:
 
 def cmd_dca(d: dict) -> str:
     dca = calculate_dca(d["market_type"], d["phase_key"], d["exchange_rate"])
+    fg_proxy = dca.get("fg_proxy", -1.0)
+    fg_adj   = dca.get("fg_adj", 1.0)
+    base_mult = dca.get("base_mult", dca["multiplier"])
+
+    # proxy 조정 표시 (극단값일 때만)
+    adj_note = ""
+    if fg_adj != 1.0 and fg_proxy >= 0:
+        direction = "증액" if fg_adj > 1.0 else "감액"
+        adj_note = f"  (proxy {fg_proxy:.0f} → {direction} {fg_adj}x)"
+
     lines = [
-        f"💸 오늘 DCA  {dca['total_krw']:,}원  (${dca['total_usd']:.2f})  [{dca['multiplier']}x]",
+        f"💸 오늘 DCA  {dca['total_krw']:,}원  (${dca['total_usd']:.2f})  [{dca['multiplier']}x]{adj_note}",
         "━━━━━━━━━━━━━━━━━━━━━━━",
     ] + _dca_rows(dca["by_ticker"], dca["total_krw"], d["exchange_rate"]) + [
         "",
