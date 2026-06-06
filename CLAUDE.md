@@ -46,6 +46,7 @@ portfolio_sync_server.py (상시, port 8765)
 | `portfolio_sync_server.py` | 외부 잔고 수신 Flask 서버 (port 8765, Bearer 인증) | — |
 | `bot_healthcheck.py` | 봇·서버 상태 자동 점검 (30분, 중복인스턴스·409·PID·파일 신선도) | `/tmp/healthcheck_last_alert.json` |
 | `bot_smoke_test.py` | 기능 검증 연기 테스트 25항목 (매일 크론, 실패 시만 알림) | — |
+| `ml_smoke_test.py` | ML 파이프라인 end-to-end 연기 테스트 46항목 — p3~p11 전체, 네트워크 불필요 (매일 크론) | — |
 | `ml/sweet_spot.py` | AR(1) 합성 데이터 생성 + 임계값 전략 그리드서치 (`optimize_sweet_spot`) + 선택적 matplotlib 시각화 | — |
 
 ## 텔레그램 봇 명령어

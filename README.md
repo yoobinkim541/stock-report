@@ -66,6 +66,12 @@ telegram_bot.py (상시, fcntl 단일 인스턴스 잠금)
 
 ## 🆕 최근 업그레이드
 
+### v2.8 — ML Pipeline Smoke Test / p12 (2026-06-06)
+
+- **`ml_smoke_test.py` 신규** — p3~p11 전체 ML 파이프라인 end-to-end 연기 테스트 (46 checks, 0.7초)
+  - 네트워크 없이 합성 데이터만 사용, 실패 시 텔레그램 알림
+  - 크론 등록 권장: `0 0 * * 1-5 uv run python ml_smoke_test.py`
+
 ### v2.7 — ML Sweet Spot Optimizer (2026-06-06)
 
 - **`ml/sweet_spot.py` 신규** — AR(1) 은닉 신호 기반 합성 시장 데이터 생성기 (`generate_synthetic_market_data`)
