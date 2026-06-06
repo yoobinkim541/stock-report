@@ -231,7 +231,7 @@ def rank_today(
         today_feat = feat.dropna().iloc[-1][result.feature_names]
         if today_feat.isna().any():
             continue
-        score = float(result.model.predict([today_feat.values])[0])
+        score = float(result.model.predict(today_feat.to_frame().T)[0])
         rows.append({"ticker": ticker, "score": score, **today_feat.to_dict()})
 
     if not rows:
