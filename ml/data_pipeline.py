@@ -317,14 +317,18 @@ def build_stock_features(
     ticker: str,
     price_df: pd.DataFrame,
     market_features: pd.DataFrame,
+    qqq_close: pd.Series | None = None,
+    sector_id: int = 0,
 ) -> pd.DataFrame:
     """단일 종목 피처 생성.
 
     피처 목록:
-      가격 기반  : mom_20d, mom_60d, mom_125d (벤치마크 초과 모멘텀)
-                   vol_20d (실현변동성), dist_52w_high, dist_52w_low
+      가격 기반  : mom_20d, mom_60d, mom_125d, mom_252d
+                   excess_mom_60d (QQQ 대비 초과 모멘텀)
+                   vol_20d, dist_52w_high, dist_52w_low
                    rsi_14, above_ma50, above_ma200
-      시장 공통  : fg_score, vix (Fear/Greed + VIX)
+      리스크     : beta_60d (QQQ 대비 60일 롤링 베타)
+      시장 공통  : fg_score, vix
     """
     close = price_df["Close"].copy()
     if len(close) < 60:
@@ -332,18 +336,27 @@ def build_stock_features(
 
     feat = pd.DataFrame(index=close.index)
 
-    # 모멘텀 (절대)
+    # 모멘텀 (절대) — 252일은 데이터 손실 25%로 제외
     for w in (20, 60, 125):
         feat[f"mom_{w}d"] = close / close.shift(w) - 1
 
+    # QQQ 대비 초과 모멘텀 (60일)
+    if qqq_close is not None:
+        qqq_aligned = qqq_close.reindex(close.index).ffill()
+        qqq_mom60   = qqq_aligned / qqq_aligned.shift(60) - 1
+        feat["excess_mom_60d"] = feat["mom_60d"] - qqq_mom60
+    else:
+        feat["excess_mom_60d"] = np.nan
+
     # 실현변동성 (20일)
-    feat["vol_20d"] = close.pct_change().rolling(20).std() * np.sqrt(252)
+    rets = close.pct_change()
+    feat["vol_20d"] = rets.rolling(20).std() * np.sqrt(252)
 
     # 52주 고저 대비
     high_52w = close.rolling(252, min_periods=60).max()
     low_52w  = close.rolling(252, min_periods=60).min()
-    feat["dist_52w_high"] = close / high_52w - 1   # ≤ 0
-    feat["dist_52w_low"]  = close / low_52w - 1    # ≥ 0
+    feat["dist_52w_high"] = close / high_52w - 1
+    feat["dist_52w_low"]  = close / low_52w - 1
 
     # RSI(14)
     delta = close.diff()
@@ -355,10 +368,50 @@ def build_stock_features(
     feat["above_ma50"]  = (close > close.rolling(50).mean()).astype(float)
     feat["above_ma200"] = (close > close.rolling(200).mean()).astype(float)
 
+    # QQQ 대비 베타 (60일 롤링)
+    if qqq_close is not None:
+        qqq_r = qqq_close.reindex(close.index).ffill().pct_change()
+        cov   = rets.rolling(60).cov(qqq_r)
+        var   = qqq_r.rolling(60).var().replace(0, np.nan)
+        feat["beta_60d"] = cov / var
+    else:
+        feat["beta_60d"] = np.nan
+
     # 시장 공통 피처 병합
     feat = feat.join(market_features, how="left")
 
     return feat.dropna(how="all")
+
+
+# ── 섹터 매핑 ────────────────────────────────────────────────────────────────
+
+_SECTOR_LABELS = {
+    "Technology": 1, "Communication Services": 2, "Consumer Discretionary": 3,
+    "Health Care": 4, "Financials": 5, "Industrials": 6,
+    "Consumer Staples": 7, "Energy": 8, "Materials": 9,
+    "Real Estate": 10, "Utilities": 11,
+}
+
+
+def _get_sector_map(tickers: list[str]) -> dict[str, int]:
+    """yfinance info로 섹터 조회 → 정수 매핑. 실패 시 0."""
+    cache_key = "sector_map_" + hashlib.md5(",".join(sorted(tickers)).encode()).hexdigest()[:8]
+    cached = _load_cache(cache_key, ttl_hours=168)  # 1주일 캐시
+    if cached is not None and "ticker" in cached.columns:
+        return dict(zip(cached["ticker"], cached["sector_id"]))
+
+    import yfinance as yf
+    result: dict[str, int] = {}
+    for ticker in tickers:
+        try:
+            sector = yf.Ticker(ticker).info.get("sector", "") or ""
+            result[ticker] = _SECTOR_LABELS.get(sector, 0)
+        except Exception:
+            result[ticker] = 0
+
+    df = pd.DataFrame({"ticker": list(result.keys()), "sector_id": list(result.values())})
+    _save_cache(cache_key, df)
+    return result
 
 
 # ── 메인 데이터셋 빌더 ────────────────────────────────────────────────────────
@@ -404,12 +457,17 @@ def build_ml_dataset(
     all_returns:  list[pd.Series]    = []
     all_excess:   list[pd.Series]    = []
 
+    # 섹터 매핑 (GICS 11개 섹터 정수 인코딩)
+    sector_map = _get_sector_map(universe)
+
     for ticker in universe:
         df = prices.get(ticker)
         if df is None or len(df) < 126:
             continue
 
-        feat = build_stock_features(ticker, df, market_feat)
+        sector_id = sector_map.get(ticker, 0)
+        feat = build_stock_features(ticker, df, market_feat,
+                                    qqq_close=qqq_close, sector_id=sector_id)
         if feat.empty:
             continue
 
