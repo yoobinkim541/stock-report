@@ -535,15 +535,20 @@ def build_real_sweetspot_data(
       close      — pd.Series  (asset 종가)
       spy_close  — pd.Series  (SPY 종가)
       qqq_close  — pd.Series  (QQQ 종가)
-      features   — pd.DataFrame  (momentum, volatility, sentiment)
+      features   — pd.DataFrame  (8개 피처)
 
     피처:
-      momentum   — 20일 수익률 (실제 모멘텀)
-      volatility — 20일 실현변동성
-      sentiment  — (RSI14 - 50) / 50  ([-1, 1] 정규화, 과매도→음수)
+      momentum    — 20일 수익률
+      momentum_60 — 60일 수익률 (중기 트렌드)
+      volatility  — 20일 실현변동성
+      sentiment   — (RSI14 - 50) / 50  ([-1, 1])
+      above_ma200 — 200일 MA 위 여부 (0/1)
+      vix_norm    — VIX 백분위 역수 (높을수록 탐욕)
+      credit_sprd — HYG/IEF 비율 정규화 (높을수록 신용 낙관)
+      fg_proxy    — Fear/Greed proxy 백분위 (0~1)
     """
-    tickers = list({asset_ticker, "SPY", "QQQ"})
-    prices  = fetch_prices(tickers, days=days)
+    macro_tickers = list({asset_ticker, "SPY", "QQQ", "^VIX", "HYG", "IEF"})
+    prices  = fetch_prices(macro_tickers, days=days + 60)   # 60일 여유
 
     def _close(t: str) -> pd.Series | None:
         df = prices.get(t)
@@ -552,35 +557,70 @@ def build_real_sweetspot_data(
     asset = _close(asset_ticker)
     spy   = _close("SPY")
     qqq   = _close("QQQ")
+    vix   = _close("^VIX")
+    hyg   = _close("HYG")
+    ief   = _close("IEF")
 
     if asset is None:
         raise ValueError(f"{asset_ticker} 가격 조회 실패")
 
     # 공통 날짜 인덱스
     idx = asset.dropna().index
-    if spy is not None:
-        idx = idx.intersection(spy.dropna().index)
-    if qqq is not None:
-        idx = idx.intersection(qqq.dropna().index)
+    for s in (spy, qqq):
+        if s is not None:
+            idx = idx.intersection(s.dropna().index)
+    idx = idx[-days:]   # 최신 days일만 사용
 
     asset = asset.reindex(idx)
-    spy   = (spy.reindex(idx)   if spy   is not None else asset.copy().rename("SPY"))
-    qqq   = (qqq.reindex(idx)   if qqq   is not None else asset.copy().rename("QQQ"))
+    spy   = spy.reindex(idx)  if spy  is not None else asset.copy().rename("SPY")
+    qqq   = qqq.reindex(idx)  if qqq  is not None else asset.copy().rename("QQQ")
 
-    # 피처 계산
-    mom  = asset.pct_change(20).fillna(0)
-    vol  = asset.pct_change().rolling(20, min_periods=1).std().fillna(0)
+    # 기본 피처
+    mom   = asset.pct_change(20).fillna(0)
+    mom60 = asset.pct_change(60).fillna(0)
+    vol   = asset.pct_change().rolling(20, min_periods=5).std().fillna(0)
+
     delta = asset.diff()
-    gain  = delta.clip(lower=0).rolling(14, min_periods=1).mean()
-    loss  = (-delta.clip(upper=0)).rolling(14, min_periods=1).mean()
+    gain  = delta.clip(lower=0).rolling(14, min_periods=5).mean()
+    loss  = (-delta.clip(upper=0)).rolling(14, min_periods=5).mean()
     rsi   = 100 - 100 / (1 + gain / loss.replace(0, np.nan))
     sent  = ((rsi - 50) / 50).fillna(0)
 
+    ma200       = asset.rolling(200, min_periods=100).mean()
+    above_ma200 = (asset > ma200).astype(float).fillna(0.5)
+
+    # VIX 백분위 역수 (낮은 VIX = 낙관 → 1에 가까움)
+    if vix is not None:
+        vix_r = vix.reindex(idx).ffill()
+        vix_norm = 1 - vix_r.rolling(252, min_periods=60).rank(pct=True).fillna(0.5)
+    else:
+        vix_norm = pd.Series(0.5, index=idx)
+
+    # 신용 스프레드 (HYG/IEF 비율 백분위)
+    if hyg is not None and ief is not None:
+        hyg_r  = hyg.reindex(idx).ffill()
+        ief_r  = ief.reindex(idx).ffill()
+        credit = (hyg_r / ief_r).rolling(252, min_periods=60).rank(pct=True).fillna(0.5)
+    else:
+        credit = pd.Series(0.5, index=idx)
+
+    # Fear/Greed proxy (0~100 → 0~1)
+    try:
+        fg = build_fear_greed_proxy(days=days + 60)
+        fg_aligned = fg.reindex(idx).ffill().fillna(50.0) / 100.0
+    except Exception:
+        fg_aligned = pd.Series(0.5, index=idx)
+
     features = pd.DataFrame({
-        "momentum":   mom,
-        "volatility": vol,
-        "sentiment":  sent,
-    }, index=idx)
+        "momentum":    mom,
+        "momentum_60": mom60,
+        "volatility":  vol,
+        "sentiment":   sent,
+        "above_ma200": above_ma200,
+        "vix_norm":    vix_norm,
+        "credit_sprd": credit,
+        "fg_proxy":    fg_aligned,
+    }, index=idx).fillna(0)
 
     return {
         "close":     asset.rename(asset_ticker),
