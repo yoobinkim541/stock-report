@@ -359,15 +359,20 @@ def rank_today(
         market_feat["vix"] = vix_df["Close"]
     market_feat = market_feat.ffill()
 
+    qqq_close = prices.get("QQQ", pd.DataFrame()).get("Close")
+
     rows = []
     for ticker in tickers:
         df = prices.get(ticker)
         if df is None or len(df) < 60:
             continue
-        feat = build_stock_features(ticker, df, market_feat)
+        feat = build_stock_features(ticker, df, market_feat, qqq_close=qqq_close)
         if feat.empty:
             continue
-        today_feat = feat.dropna().iloc[-1][result.feature_names]
+        feat_clean = feat.dropna()
+        if feat_clean.empty:
+            continue
+        today_feat = feat_clean.iloc[-1].reindex(result.feature_names)
         if today_feat.isna().any():
             continue
         score = float(result.model.predict(today_feat.to_frame().T)[0])

@@ -30,11 +30,9 @@ logger = logging.getLogger(__name__)
 
 NOTION_TOKEN = os.getenv("NOTION_TOKEN")
 
-# 노션 페이지/DB ID (notion_sync.py 설치 시 고정)
-RANKING_DB_ID      = "e91906d9-cced-4049-a62a-cdac348127a9"   # NASDAQ100 랭킹 DB (data source ID)
-PORTFOLIO_PAGE_ID  = "378a13e7-df00-8159-a568-ed25c4351a17"   # 포트폴리오 현황
-ML_PAGE_ID         = "378a13e7-df00-8139-b4d2-f36d265fc966"   # ML 전략 성과
-DASHBOARD_PAGE_ID  = "378a13e7-df00-815a-9fe7-feac02ee5dc6"   # 메인 대시보드
+# 노션 — 모든 동기화는 대시보드 단일 페이지에 섹션으로 작성
+# https://app.notion.com/p/Stock-Report-Dashboard-378a13e7df00815a9fe7feac02ee5dc6
+DASHBOARD_PAGE_ID = "378a13e7-df00-815a-9fe7-feac02ee5dc6"
 
 KST = timezone(timedelta(hours=9))
 
@@ -168,14 +166,13 @@ def sync_ranking() -> bool:
     ok_count = 0
     for _, row in ranking.iterrows():
         props = {
-            "종목":            {"title":  [{"text": {"content": str(row["ticker"])}}]},
-            "날짜":            {"date":   {"start": today}},
-            "순위":            {"number": int(row["rank"])},
-            "점수":            {"number": round(float(row["score"]), 6)},
-            "OOS_IC":          {"number": oos_ic},
-            "OOS_ICIR":        {"number": oos_icir},
+            "종목":   {"title":  [{"text": {"content": str(row["ticker"])}}]},
+            "날짜":   {"date":   {"start": today}},
+            "순위":   {"number": int(row["rank"])},
+            "점수":   {"number": round(float(row["score"]), 6)},
+            "OOS_IC": {"number": oos_ic},
+            "OOS_ICIR": {"number": oos_icir},
         }
-        # 선택 피처 (컬럼이 없으면 건너뜀)
         for notion_key, df_key in [
             ("초과모멘텀_60d", "excess_mom_60d"),
             ("베타_60d",       "beta_60d"),
@@ -184,7 +181,7 @@ def sync_ranking() -> bool:
         ]:
             if df_key in row:
                 v = float(row[df_key])
-                if v == v:   # NaN 제외
+                if v == v:
                     props[notion_key] = {"number": round(v, 6)}
 
         res = _create_page(RANKING_DB_ID, is_db=True, properties=props)
@@ -201,22 +198,23 @@ def sync_portfolio() -> bool:
     """포트폴리오 현황 페이지 업데이트."""
     try:
         from barbell_strategy import (
-            fetch_market_data, classify_market, fetch_fear_greed,
+            fetch_qqq_data, fetch_rsi, fetch_vix,
+            classify_market, fetch_fear_greed,
             calculate_dca, DCA_DAILY_BASE_KRW,
+            fetch_portfolio_value,
         )
-        from holding_manager import load_portfolio_snapshot
-        from telegram_bot import _format_phase_info
     except Exception as e:
         logger.warning("포트폴리오 모듈 로드 실패: %s", e)
         return False
 
     try:
-        md   = fetch_market_data()
-        mt, pk = classify_market(md)
+        qqq  = fetch_qqq_data()
+        rsi  = fetch_rsi("QQQ")
+        vix  = fetch_vix()
+        mt, pk = classify_market(qqq, rsi, vix)
         fg   = fetch_fear_greed()
         dca  = calculate_dca(mt, pk)
-        snap = load_portfolio_snapshot()
-        port = snap.get("overseas_fractional", {})
+        port = fetch_portfolio_value()
         total_usd = port.get("total_usd", 0)
         ret_pct   = port.get("return_pct", 0) or 0
         now_kst   = datetime.now(KST).strftime("%Y-%m-%d %H:%M KST")
@@ -345,11 +343,13 @@ def sync_ml_report() -> bool:
 def sync_dashboard_summary() -> bool:
     """메인 대시보드 빠른 현황 업데이트."""
     try:
-        from barbell_strategy import fetch_market_data, classify_market, fetch_fear_greed, fetch_vix, fetch_rsi, fetch_qqq_data
-        md   = fetch_market_data()
-        mt, pk = classify_market(md)
-        fg   = fetch_fear_greed()
-        qqq  = md.get("qqq") or {}
+        from barbell_strategy import fetch_qqq_data, fetch_rsi, fetch_vix, classify_market, fetch_fear_greed
+        qqq_data = fetch_qqq_data()
+        rsi_val  = fetch_rsi("QQQ")
+        vix_val  = fetch_vix()
+        mt, pk   = classify_market(qqq_data, rsi_val, vix_val)
+        fg       = fetch_fear_greed()
+        qqq      = qqq_data
     except Exception as e:
         logger.warning("대시보드 데이터 수집 실패: %s", e)
         return False
@@ -399,6 +399,125 @@ def sync_dashboard_summary() -> bool:
 
 # ── Entry point ───────────────────────────────────────────────────────────────
 
+def build_full_dashboard() -> str:
+    """대시보드 전체 마크다운 컨텐츠 빌드."""
+    import warnings; warnings.filterwarnings("ignore")
+    now_kst = datetime.now(KST).strftime("%Y-%m-%d %H:%M KST")
+    sections: list[str] = [
+        f"# 📊 Stock Report Dashboard",
+        f"> 최종 업데이트: {now_kst}",
+        "",
+        "---",
+    ]
+
+    # ── 시장 현황 & 포트폴리오 ───────────────────────────────────────────────
+    try:
+        from barbell_strategy import (
+            fetch_qqq_data, fetch_rsi, fetch_vix,
+            classify_market, fetch_fear_greed,
+            calculate_dca, fetch_portfolio_value,
+        )
+        qqq_d  = fetch_qqq_data()
+        rsi_v  = fetch_rsi("QQQ")
+        vix_v  = fetch_vix()
+        mt, pk = classify_market(qqq_d, rsi_v, vix_v)
+        fg     = fetch_fear_greed()
+        dca    = calculate_dca(mt, pk)
+        port   = fetch_portfolio_value()
+
+        fg_sc    = fg.get("score", 50)
+        fg_proxy = fg.get("proxy_score", -1)
+        proxy_s  = f"{fg_proxy:.0f}" if fg_proxy >= 0 else "n/a"
+        total    = port.get("total_usd", 0)
+        ret_pct  = port.get("return_pct", 0) or 0
+        phase_str = f"{mt}-{pk}"
+
+        sections += [
+            "## 📌 시장 & 포트폴리오",
+            "",
+            f"| 항목 | 값 |",
+            f"|------|-----|",
+            f"| Phase | {phase_str} |",
+            f"| QQQ 현재가 | ${qqq_d.get('current',0):,.2f} |",
+            f"| QQQ 1M 모멘텀 | {qqq_d.get('mom_1m_pct',0):+.1f}% |",
+            f"| RSI | {rsi_v:.1f} |",
+            f"| VIX | {vix_v:.1f} |",
+            f"| Fear/Greed CNN | {fg_sc:.1f} |",
+            f"| Fear/Greed Proxy | {proxy_s} |",
+            f"| 포트폴리오 총액 | ${total:,.2f} |",
+            f"| 수익률 | {ret_pct:+.2f}% |",
+            f"| DCA 배율 | {dca['multiplier']}× ({dca['total_krw']:,}원/일) |",
+            "",
+            "---",
+        ]
+        logger.info("시장/포트폴리오 섹션 완료")
+    except Exception as e:
+        logger.warning("시장 데이터 수집 실패: %s", e)
+        sections += ["## 📌 시장 & 포트폴리오", "", "> ⚠️ 데이터 수집 실패", "", "---"]
+
+    # ── NASDAQ100 랭킹 ────────────────────────────────────────────────────────
+    try:
+        from ml.ranker import rank_today, load_ranker
+        ranking = rank_today(mode="nasdaq100", top_n=15)
+        result  = load_ranker()
+
+        if not ranking.empty and result:
+            sections += [
+                "## 📈 NASDAQ100 일일 랭킹 (LightGBM)",
+                "",
+                f"OOS IC: {result.oos_ic:+.3f}  |  ICIR: {result.oos_icir:.2f}  |  학습 기준: {result.train_end_date}",
+                "",
+                "| 순위 | 종목 | 점수 | 초과모멘텀60d | 베타 |",
+                "|------|------|------|--------------|------|",
+            ]
+            for _, row in ranking.iterrows():
+                excess = f"{float(row.get('excess_mom_60d',0))*100:+.1f}%" if 'excess_mom_60d' in row else "—"
+                beta   = f"{float(row.get('beta_60d',0)):.2f}" if 'beta_60d' in row else "—"
+                sections.append(f"| {int(row['rank'])} | {row['ticker']} | {float(row['score'])*100:+.2f}% | {excess} | {beta} |")
+            sections += ["", "⚠️ survivorship bias 있음 (현재 구성종목 기준)", "", "---"]
+            logger.info("랭킹 섹션 완료 (%d종목)", len(ranking))
+        else:
+            sections += ["## 📈 NASDAQ100 일일 랭킹", "", "> ⚠️ 랭킹 데이터 없음", "", "---"]
+    except Exception as e:
+        logger.warning("랭킹 데이터 수집 실패: %s", e)
+        sections += ["## 📈 NASDAQ100 일일 랭킹", "", "> ⚠️ 데이터 수집 실패", "", "---"]
+
+    # ── ML 전략 성과 ──────────────────────────────────────────────────────────
+    try:
+        from ml.data_pipeline import build_real_sweetspot_data
+        from ml.sweet_spot import optimize_sweet_spot
+        from ml.reporting import _ml_adoption_verdict
+
+        data   = build_real_sweetspot_data("QQQ", days=756)
+        result = optimize_sweet_spot(data)
+        ml     = result.ml_result
+        qqq    = result.qqq_result
+        wf     = result.wf_summary
+        verdict, reasons = _ml_adoption_verdict(ml, qqq)
+
+        sections += [
+            "## 🧠 ML 전략 성과 (QQQ 3년 실데이터)",
+            "",
+            f"**채택 판정: {verdict}**",
+            "",
+            "| 전략 | CAGR | Sharpe | MDD |",
+            "|------|------|--------|-----|",
+            f"| ML (nested OOS) | {(ml.cagr or 0):.1%} | {(ml.sharpe or 0):.2f} | {ml.max_drawdown:.1%} |",
+            f"| QQQ 매수보유 | {(qqq.cagr or 0):.1%} | {(qqq.sharpe or 0):.2f} | {qqq.max_drawdown:.1%} |",
+            "",
+            f"Walk-forward: {wf.get('n_folds','?')}폴드 | 평균 CAGR {(wf.get('mean_cagr') or 0):.1%} | 평균 Sharpe {(wf.get('mean_sharpe') or 0):.2f}",
+            "",
+            "---",
+        ]
+        logger.info("ML 성과 섹션 완료")
+    except Exception as e:
+        logger.warning("ML 데이터 수집 실패: %s", e)
+        sections += ["## 🧠 ML 전략 성과", "", "> ⚠️ 데이터 수집 실패", "", "---"]
+
+    sections.append("*이 페이지는 stock-report 프로젝트에서 자동 생성됩니다.*")
+    return "\n".join(sections)
+
+
 def main() -> int:
     logger.info("=== notion_sync 시작 [%s] ===", datetime.now(KST).strftime("%Y-%m-%d %H:%M"))
 
@@ -406,31 +525,24 @@ def main() -> int:
         logger.error("NOTION_TOKEN 환경변수 미설정")
         return 1
 
-    results = {
-        "ranking":   sync_ranking(),
-        "portfolio": sync_portfolio(),
-        "ml_report": sync_ml_report(),
-        "dashboard": sync_dashboard_summary(),
-    }
+    content = build_full_dashboard()
+    ok = _update_page_blocks(DASHBOARD_PAGE_ID, content)
 
-    ok  = sum(results.values())
-    all = len(results)
-    logger.info("동기화 완료: %d/%d 성공 %s", ok, all, results)
-
-    if ok < all:
+    if ok:
+        logger.info("노션 동기화 완료 ✅")
+    else:
+        logger.error("노션 동기화 실패 ❌")
         bot_token = os.getenv("STOCK_BOT_TOKEN")
         chat_id   = os.getenv("STOCK_BOT_CHAT_ID")
         if bot_token and chat_id:
             import requests
-            failed = [k for k, v in results.items() if not v]
             requests.post(
                 f"https://api.telegram.org/bot{bot_token}/sendMessage",
-                json={"chat_id": chat_id,
-                      "text": f"⚠️ Notion 동기화 일부 실패: {', '.join(failed)}"},
+                json={"chat_id": chat_id, "text": "⚠️ Notion 동기화 실패"},
                 timeout=10,
             )
 
-    return 0 if ok == all else 1
+    return 0 if ok else 1
 
 
 if __name__ == "__main__":
