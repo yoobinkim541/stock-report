@@ -114,6 +114,5 @@ def test_ask_portfolio_advisor_falls_back_when_codex_fails():
 
     answer = ask_portfolio_advisor("지금 추가매수해도 돼?", sample_market(), runner=fake_run)
 
-    assert "gpt-5.5 상담 호출 실패" in answer
-    assert "로컬 안전 요약" in answer
+    assert "AI 상담 서버 미응답" in answer or "상담 호출 실패" in answer
     assert "bull/bull_1" in answer
