@@ -67,6 +67,58 @@ def _fmt_f2(value: Optional[float], na: str = "n/a") -> str:
     return f"{value:.2f}" if value is not None else na
 
 
+def _ml_adoption_verdict(
+    ml: BacktestResult,
+    qqq: BacktestResult,
+) -> tuple[str, list[str]]:
+    """ML 전략 채택 여부 판정 (3조건 기준).
+
+    채택 조건:
+      1. ML CAGR > QQQ CAGR  (절대 수익 우위)
+      2. ML Sharpe > QQQ Sharpe  (위험조정 수익 우위)
+      3. ML MDD 개선: |ML MDD| < |QQQ MDD| * 0.9  (낙폭 10%이상 감소)
+
+    3/3 → 채택, 2/3 → 조건부, 1이하 → 비채택
+    """
+    reasons: list[str] = []
+    passed = 0
+
+    ml_cagr  = ml.cagr  or 0.0
+    qqq_cagr = qqq.cagr or 0.0
+    if ml_cagr > qqq_cagr:
+        passed += 1
+        reasons.append(f"CAGR 우위: ML {ml_cagr:.1%} > QQQ {qqq_cagr:.1%}")
+    else:
+        reasons.append(f"CAGR 열위: ML {ml_cagr:.1%} < QQQ {qqq_cagr:.1%}")
+
+    ml_sharpe  = ml.sharpe  or 0.0
+    qqq_sharpe = qqq.sharpe or 0.0
+    if ml_sharpe > qqq_sharpe:
+        passed += 1
+        reasons.append(f"Sharpe 우위: ML {ml_sharpe:.2f} > QQQ {qqq_sharpe:.2f}")
+    else:
+        reasons.append(f"Sharpe 열위: ML {ml_sharpe:.2f} < QQQ {qqq_sharpe:.2f}")
+
+    ml_mdd  = abs(ml.max_drawdown)
+    qqq_mdd = abs(qqq.max_drawdown)
+    if ml_mdd < qqq_mdd * 0.9:
+        passed += 1
+        reasons.append(f"MDD 개선: ML {-ml_mdd:.1%} vs QQQ {-qqq_mdd:.1%}")
+    else:
+        reasons.append(f"MDD 미개선: ML {-ml_mdd:.1%} vs QQQ {-qqq_mdd:.1%}")
+
+    if passed == 3:
+        verdict = "✅ 채택 — 3/3 조건 충족"
+    elif passed == 2:
+        verdict = "⚠️ 조건부 채택 — 2/3 조건 충족"
+    elif passed == 1:
+        verdict = "❌ 비채택 — 1/3 조건 (QQQ 보유 권장)"
+    else:
+        verdict = "❌ 비채택 — 0/3 조건 (QQQ 보유 권장)"
+
+    return verdict, reasons
+
+
 def _fmt_result_block(result: BacktestResult, excess_vs: Optional[float] = None) -> list[str]:
     """Format a single BacktestResult as bullet lines."""
     lines = [
@@ -203,6 +255,14 @@ def build_ml_strategy_report(
         "  ⚠️ 본 수치는 백테스트 결과이며 실제 수익을 보장하지 않습니다.",
         "",
     ]
+
+    # ── 6. ML 채택 판정 ────────────────────────────────────────────────────
+    if qqq_result is not None:
+        verdict, reasons = _ml_adoption_verdict(ml_result, qqq_result)
+        lines += [
+            "[ ML 전략 채택 판정 ]",
+            f"  {verdict}",
+        ] + [f"  • {r}" for r in reasons] + [""]
 
     lines.append("━━━━━━━━━━━━━━━━━━━━━━━")
 
