@@ -3,22 +3,27 @@
 최적화 목표: 진입·청산·비중 파라미터 그리드 탐색 → Calmar ratio 최대화
 방법:
   1. BacktestEngine — 단일 파라미터 세트 백테스트 (shift(1) 룩어헤드 방지)
+     - 기초지수 자동 선택: QLD/TQQQ→QQQ, UPRO→SPY, SOXL→SMH
   2. walk_forward_optimize() — 18개월 학습 / 6개월 OOS 롤링 WF
-  3. optimize_leverage() — Optuna TPE로 파라미터 공간 탐색
+  3. optimize_leverage() — 종목별 독립 Optuna TPE 탐색 후 결과 통합
   4. 결과 저장 / 로드 → leverage_signal.py 자동 연동
 
-파라미터 공간 (18개):
-  instrument    : QLD / TQQQ (기준 레버리지 ETF)
-  min_dd        : 진입 최소 낙폭 (-5% ~ -25%)
-  max_vix_entry : 진입 시 VIX 상한 (20 ~ 50)
+종목별 기초지수:
+  QLD   (QQQ 2×) → QQQ 낙폭·RSI·MA 기준
+  TQQQ  (QQQ 3×) → QQQ 기준
+  UPRO  (SPY 3×) → SPY 기준  ← 기존에 QQQ로 잘못 평가되던 문제 수정
+  SOXL  (SMH 3×) → SMH 기준 (반도체)
+
+파라미터 공간 (instrument 고정 후 나머지 10개):
+  min_dd        : 진입 최소 낙폭 (-3% ~ -25%)
+  max_vix_entry : 진입 시 VIX 상한 (18 ~ 50)
   min_rsi_entry : 진입 시 RSI 하한 (20 ~ 55)
-  max_fg_entry  : 진입 시 FG 상한 (30 ~ 70)
-  lev_weight    : 레버리지 최대 비중 (15% ~ 50%)
-  sgov_floor    : SGOV 최소 비중 (25% ~ 60%)
-  exit_ma       : 청산 MA 기간 (10 ~ 50일)
-  exit_vix      : VIX 급등 청산 (28 ~ 45)
-  trailing_stop : 진입가 대비 트레일링 스탑 (-5% ~ -20%)
-  hold_days_max : 최대 보유 기간 (21 ~ 126일)
+  lev_weight    : 레버리지 최대 비중 (10% ~ 55%)
+  sgov_floor    : SGOV 최소 비중 (20% ~ 65%)
+  exit_ma       : 청산 MA 기간 (5 ~ 60일)
+  exit_vix      : VIX 급등 청산 (25 ~ 48)
+  trailing_stop : 진입가 대비 트레일링 스탑 (-3% ~ -22%)
+  hold_days_max : 최대 보유 기간 (14 ~ 130일)
 """
 from __future__ import annotations
 
@@ -40,10 +45,20 @@ KST = timezone(timedelta(hours=9))
 
 RF_ANNUAL = 0.0425   # 무위험 금리
 
-# ── 파라미터 공간 ─────────────────────────────────────────────────────────────
+# ── 종목별 기초지수 맵핑 ──────────────────────────────────────────────────────
+# 진입·청산 신호는 기초지수 기준으로 계산 (잘못된 QQQ 통일 수정)
+INSTRUMENT_UNDERLYING = {
+    "QLD":  "QQQ",   # NASDAQ-100 2×
+    "TQQQ": "QQQ",   # NASDAQ-100 3×
+    "UPRO": "SPY",   # S&P500 3×
+    "SOXL": "SMH",   # 반도체 3× (SOX 추종)
+}
+# 최적화 대상 종목 (순서: 2× 먼저, 3× 나중)
+OPT_INSTRUMENTS = ["QLD", "TQQQ", "UPRO"]
+
+# ── 파라미터 공간 (instrument 제외) ──────────────────────────────────────────
 
 PARAM_GRID = {
-    "instrument":     ["QLD", "TQQQ"],
     "min_dd":         [-0.05, -0.08, -0.10, -0.12, -0.15, -0.20, -0.25],
     "max_vix_entry":  [25, 30, 35, 40, 50],
     "min_rsi_entry":  [20, 30, 40, 50],
@@ -56,7 +71,6 @@ PARAM_GRID = {
 }
 
 OPTUNA_SPACE = {
-    "instrument":     ("categorical", ["QLD", "TQQQ"]),
     "min_dd":         ("float",  -0.25, -0.03),
     "max_vix_entry":  ("float",   18.0, 50.0),
     "min_rsi_entry":  ("float",   20.0, 55.0),
@@ -102,20 +116,29 @@ class OptimizationResult:
 
 def _load_prices(days: int = 2520) -> dict[str, pd.Series]:
     from ml.data_pipeline import fetch_prices
-    tickers = ["QLD", "TQQQ", "SOXL", "UPRO", "QQQ", "SGOV", "^VIX", "HYG", "IEF", "SHV"]
+    tickers = [
+        "QLD", "TQQQ", "SOXL", "UPRO",
+        "QQQ", "SPY", "SMH",            # 기초지수별 별도 추가 (UPRO→SPY, SOXL→SMH)
+        "SGOV", "^VIX", "HYG", "IEF", "SHV",
+    ]
     p = fetch_prices(tickers, days=days)
     result = {t: df["Close"] for t, df in p.items() if "Close" in df.columns}
 
-    # SGOV 없는 기간(2020 이전) → SHV 또는 무위험금리 프록시로 보완
+    # SGOV 없는 기간(2020 이전) → SHV 스케일 보정으로 연결
     sgov  = result.get("SGOV")
     shv   = result.get("SHV")
     if sgov is not None and shv is not None:
-        # SGOV 시작 전 구간은 SHV로 채우기 (수익률 스케일 보정)
         scale = float(sgov.iloc[0] / shv.reindex(sgov.index).iloc[0]) if len(shv.reindex(sgov.index)) > 0 else 1.0
         pre   = shv.loc[:sgov.index[0]] * scale
         filled = pd.concat([pre, sgov]).sort_index()
         filled = filled[~filled.index.duplicated(keep="last")]
         result["SGOV"] = filled
+
+    # SMH 없으면 QQQ 대용 (반도체 ETF 데이터 기간 짧을 수 있음)
+    if "SMH" not in result and "QQQ" in result:
+        result["SMH"] = result["QQQ"]
+        logger.warning("SMH 데이터 없음 — QQQ로 대체 (SOXL 백테스트 근사치)")
+
     return result
 
 
@@ -136,10 +159,15 @@ class BacktestEngine:
         self.p    = params
         self.inst = params["instrument"]
         self.px   = prices
+        # 기초지수: UPRO→SPY, SOXL→SMH, QLD/TQQQ→QQQ
+        self.underlying = INSTRUMENT_UNDERLYING.get(self.inst, "QQQ")
 
-        # 공통 날짜 인덱스
-        req = [self.inst, "QQQ", "SGOV", "^VIX"]
-        idx = prices["QQQ"].dropna().index
+        # 공통 날짜 인덱스 (기초지수 기준)
+        base = prices.get(self.underlying)
+        if base is None:
+            base = prices.get("QQQ")
+        req  = [self.inst, self.underlying, "SGOV", "^VIX"]
+        idx  = base.dropna().index
         for t in req:
             s = prices.get(t)
             if s is not None:
@@ -147,27 +175,30 @@ class BacktestEngine:
         self.idx = sorted(idx)
 
     def _signals(self) -> pd.DataFrame:
-        """모든 신호 계산 (shift(1) 적용 전)."""
-        qqq = self.px["QQQ"].reindex(self.idx)
+        """모든 신호 계산 — 기초지수(QQQ/SPY/SMH) 기준 낙폭·RSI·MA."""
+        _und = self.px.get(self.underlying)
+        if _und is None:
+            _und = self.px.get("QQQ")
+        und = _und.reindex(self.idx)
         vix = self.px["^VIX"].reindex(self.idx).ffill()
 
-        # 낙폭
-        dd    = (qqq / qqq.cummax() - 1)
-        # RSI
-        delta = qqq.diff()
+        # 낙폭 (기초지수 기준)
+        dd    = (und / und.cummax() - 1)
+        # RSI (기초지수 기준)
+        delta = und.diff()
         gain  = delta.clip(lower=0).rolling(14).mean()
         loss  = (-delta.clip(upper=0)).rolling(14).mean()
         rsi   = 100 - 100 / (1 + gain / loss.replace(0, np.nan))
-        # MA
-        qqq_ma = qqq.rolling(self.p["exit_ma"], min_periods=5).mean()
-        # 진입 신호: 낙폭 충분 + VIX 낮음 + RSI 낮음
+        # 청산 MA (기초지수 기준)
+        und_ma = und.rolling(self.p["exit_ma"], min_periods=5).mean()
+        # 진입: 기초지수 낙폭 충분 + VIX 낮음 + RSI 낮음
         enter = (
             (dd <= self.p["min_dd"]) &
             (vix <= self.p["max_vix_entry"]) &
             (rsi <= self.p["min_rsi_entry"])
         )
-        # 청산 신호: MA 이탈 OR VIX 급등
-        exit_ = (qqq < qqq_ma) | (vix >= self.p["exit_vix"])
+        # 청산: 기초지수 MA 이탈 OR VIX 급등
+        exit_ = (und < und_ma) | (vix >= self.p["exit_vix"])
 
         sig = pd.DataFrame({
             "dd": dd, "vix": vix, "rsi": rsi,
@@ -305,47 +336,50 @@ def composite_score(r: BacktestResult) -> float:
 # ── Walk-Forward 최적화 ────────────────────────────────────────────────────────
 
 def walk_forward_optimize(
-    prices:        dict[str, pd.Series],
-    train_months:  int = 18,
-    test_months:   int = 6,
-    step_months:   int = 3,
-    n_optuna:      int = 80,
+    prices:           dict[str, pd.Series],
+    train_months:     int = 18,
+    test_months:      int = 6,
+    step_months:      int = 3,
+    n_optuna:         int = 80,
+    fixed_instrument: str | None = None,
 ) -> list[BacktestResult]:
-    """롤링 Walk-Forward: 훈련 창에서 Optuna 최적화 → OOS 평가.
-
-    Returns: OOS BacktestResult 목록
-    """
-    qqq = prices.get("QQQ")
-    if qqq is None:
+    """롤링 Walk-Forward: 훈련 창에서 Optuna 최적화 → OOS 평가."""
+    # 기초지수 기준으로 날짜 범위 설정
+    inst       = fixed_instrument or OPT_INSTRUMENTS[0]
+    underlying = INSTRUMENT_UNDERLYING.get(inst, "QQQ")
+    ref        = prices.get(underlying)
+    if ref is None:
+        ref = prices.get("QQQ")
+    if ref is None:
         return []
 
-    idx       = sorted(qqq.dropna().index)
+    idx       = sorted(ref.dropna().index)
     start     = idx[0]
     wf_results: list[BacktestResult] = []
 
     cursor = start + pd.DateOffset(months=train_months)
     while cursor + pd.DateOffset(months=test_months) <= idx[-1] + pd.DateOffset(days=1):
-        train_end   = cursor
-        test_end    = cursor + pd.DateOffset(months=test_months)
+        train_end  = cursor
+        test_end   = cursor + pd.DateOffset(months=test_months)
 
         train_prices = {t: s.loc[:train_end] for t, s in prices.items()}
         test_prices  = {t: s.loc[train_end:test_end] for t, s in prices.items()}
 
-        # 훈련 창에서 최적 파라미터 탐색
-        best_p = _optuna_search(train_prices, n_trials=n_optuna)
+        best_p_raw = _optuna_search(train_prices, n_trials=n_optuna,
+                                    fixed_instrument=fixed_instrument)
+        best_p = {**best_p_raw, "instrument": inst}
 
-        # OOS 평가
         try:
             eng = BacktestEngine(best_p, test_prices)
             res = eng.run()
             res.period = f"{train_end.strftime('%Y-%m')}~{test_end.strftime('%Y-%m')}"
             wf_results.append(res)
             logger.info(
-                "WF fold %s: Calmar=%.2f  CAGR=%.1f%%  MDD=%.1f%%  trades=%d",
-                res.period, res.calmar, res.cagr * 100, res.max_dd * 100, res.n_trades,
+                "WF [%s] %s: Calmar=%.2f  CAGR=%.1f%%  MDD=%.1f%%  trades=%d",
+                inst, res.period, res.calmar, res.cagr*100, res.max_dd*100, res.n_trades,
             )
         except Exception as e:
-            logger.warning("WF fold 실패: %s", e)
+            logger.warning("WF fold 실패 [%s]: %s", inst, e)
 
         cursor += pd.DateOffset(months=step_months)
 
@@ -354,15 +388,23 @@ def walk_forward_optimize(
 
 # ── Optuna 파라미터 탐색 ──────────────────────────────────────────────────────
 
-def _optuna_search(prices: dict[str, pd.Series], n_trials: int = 80) -> dict:
-    """Optuna TPE로 최적 파라미터 탐색."""
+def _optuna_search(
+    prices: dict[str, pd.Series],
+    n_trials: int = 80,
+    fixed_instrument: str | None = None,
+) -> dict:
+    """Optuna TPE로 최적 파라미터 탐색.
+
+    fixed_instrument가 지정되면 해당 종목으로 고정하고 나머지만 탐색.
+    """
     try:
         import optuna
         optuna.logging.set_verbosity(optuna.logging.WARNING)
 
         def objective(trial):
+            inst = fixed_instrument or trial.suggest_categorical("instrument", OPT_INSTRUMENTS)
             params = {
-                "instrument":    trial.suggest_categorical("instrument",   ["QLD", "TQQQ"]),
+                "instrument":    inst,
                 "min_dd":        trial.suggest_float("min_dd",             -0.25, -0.03),
                 "max_vix_entry": trial.suggest_float("max_vix_entry",       18.0, 50.0),
                 "min_rsi_entry": trial.suggest_float("min_rsi_entry",       20.0, 55.0),
@@ -387,14 +429,18 @@ def _optuna_search(prices: dict[str, pd.Series], n_trials: int = 80) -> dict:
         return study.best_params
 
     except ImportError:
-        return _grid_search(prices)
+        return _grid_search(prices, fixed_instrument=fixed_instrument)
 
 
-def _grid_search(prices: dict[str, pd.Series]) -> dict:
+def _grid_search(
+    prices: dict[str, pd.Series],
+    fixed_instrument: str | None = None,
+) -> dict:
     """Optuna 미설치 시 간략 그리드 서치 fallback."""
     import itertools
+    instruments = [fixed_instrument] if fixed_instrument else OPT_INSTRUMENTS
     mini_grid = {
-        "instrument":    ["QLD", "TQQQ"],
+        "instrument":    instruments,
         "min_dd":        [-0.08, -0.12, -0.18],
         "max_vix_entry": [30, 40],
         "min_rsi_entry": [35, 45],
@@ -423,52 +469,42 @@ def _grid_search(prices: dict[str, pd.Series]) -> dict:
 
 # ── 전체 최적화 실행 ──────────────────────────────────────────────────────────
 
-def optimize_leverage(
-    days:          int = 2520,
-    n_optuna:      int = 200,
-    train_months:  int = 18,
-    test_months:   int = 6,
-    step_months:   int = 3,
+def _optimize_one(
+    instrument:    str,
+    prices:        dict[str, pd.Series],
+    n_optuna:      int,
+    train_months:  int,
+    test_months:   int,
+    step_months:   int,
 ) -> OptimizationResult:
-    """전체 최적화 파이프라인.
+    """단일 종목 최적화 파이프라인 (instrument 고정)."""
+    underlying = INSTRUMENT_UNDERLYING.get(instrument, "QQQ")
+    logger.info("[%s] Optuna 탐색 시작 (기초지수: %s)", instrument, underlying)
 
-    1. 전체 기간 Optuna 최적화 (in-sample 기준 파라미터 탐색)
-    2. Walk-forward OOS 검증
-    3. 결과 저장
-    """
-    logger.info("레버리지 스위트스팟 최적화 시작 (n_trials=%d)", n_optuna)
-    prices = _load_prices(days=days)
+    # instrument를 파라미터에 고정한 채 나머지 최적화
+    best_p_raw = _optuna_search(prices, n_trials=n_optuna, fixed_instrument=instrument)
+    best_p     = {**best_p_raw, "instrument": instrument}
 
-    # ── Step 1: 전체 기간 최적 파라미터 ──
-    logger.info("Step 1: 전체 기간 Optuna 탐색...")
-    best_p = _optuna_search(prices, n_trials=n_optuna)
     eng    = BacktestEngine(best_p, prices)
     best_r = eng.run()
     logger.info(
-        "Best params: Calmar=%.2f  CAGR=%.1f%%  MDD=%.1f%%  Sharpe=%.2f  trades=%d",
-        best_r.calmar, best_r.cagr * 100, best_r.max_dd * 100, best_r.sharpe, best_r.n_trades,
+        "[%s] Best: Calmar=%.2f  CAGR=%.1f%%  MDD=%.1f%%  Sharpe=%.2f  trades=%d",
+        instrument, best_r.calmar, best_r.cagr*100, best_r.max_dd*100,
+        best_r.sharpe, best_r.n_trades,
     )
 
-    # ── Step 2: Walk-Forward 검증 ──
-    logger.info("Step 2: Walk-Forward 검증 (%d개월 학습 / %d개월 OOS)...",
-                train_months, test_months)
     wf = walk_forward_optimize(
         prices, train_months=train_months, test_months=test_months,
-        step_months=step_months, n_optuna=max(40, n_optuna // 4),
+        step_months=step_months, n_optuna=max(30, n_optuna // 5),
+        fixed_instrument=instrument,
     )
-
     wf_calmars = [r.calmar for r in wf if np.isfinite(r.calmar)]
-    wf_mean    = float(np.mean(wf_calmars)) if wf_calmars else 0.0
-    wf_std     = float(np.std(wf_calmars))  if len(wf_calmars) > 1 else 0.0
+    wf_mean = float(np.mean(wf_calmars))   if wf_calmars else 0.0
+    wf_std  = float(np.std(wf_calmars))    if len(wf_calmars) > 1 else 0.0
+    logger.info("[%s] WF: %d폴드  mean=%.2f  std=%.2f", instrument, len(wf), wf_mean, wf_std)
 
-    logger.info(
-        "Walk-Forward: %d폴드  mean_Calmar=%.2f  std=%.2f",
-        len(wf), wf_mean, wf_std,
-    )
-
-    # ── Step 3: 결과 저장 ──
     ts = datetime.now(KST).strftime("%Y-%m-%d %H:%M KST")
-    result = OptimizationResult(
+    return OptimizationResult(
         best_params    = best_p,
         best_calmar    = best_r.calmar,
         best_sharpe    = best_r.sharpe,
@@ -480,15 +516,52 @@ def optimize_leverage(
         all_trials     = pd.DataFrame(),
         optimized_at   = ts,
     )
-    save_result(result)
-    return result
+
+
+def optimize_leverage(
+    days:          int = 2520,
+    n_optuna:      int = 200,
+    train_months:  int = 18,
+    test_months:   int = 6,
+    step_months:   int = 3,
+) -> OptimizationResult:
+    """전체 최적화 파이프라인 — 종목별 독립 최적화.
+
+    OPT_INSTRUMENTS (QLD, TQQQ, UPRO) 각각 독립 Optuna 탐색 후
+    전체 기간 Calmar 기준 최우수 종목을 대표 결과로 반환.
+    모든 종목별 결과는 RESULTS_PATH에 함께 저장.
+    """
+    logger.info("레버리지 스위트스팟 최적화 시작 (종목: %s, n_trials=%d)",
+                OPT_INSTRUMENTS, n_optuna)
+    prices = _load_prices(days=days)
+
+    # 종목별 독립 최적화
+    per_instrument: dict[str, OptimizationResult] = {}
+    for inst in OPT_INSTRUMENTS:
+        try:
+            res = _optimize_one(
+                inst, prices, n_optuna, train_months, test_months, step_months,
+            )
+            per_instrument[inst] = res
+        except Exception as e:
+            logger.warning("[%s] 최적화 실패: %s", inst, e)
+
+    if not per_instrument:
+        raise RuntimeError("모든 종목 최적화 실패")
+
+    # Calmar 기준 최우수 종목을 대표 결과로
+    best_inst = max(per_instrument, key=lambda k: per_instrument[k].best_calmar)
+    best      = per_instrument[best_inst]
+
+    save_result(best, per_instrument=per_instrument)
+    logger.info("최적화 완료 — 최우수 종목: %s (Calmar %.2f)", best_inst, best.best_calmar)
+    return best
 
 
 # ── 저장 / 로드 ───────────────────────────────────────────────────────────────
 
-def save_result(r: OptimizationResult) -> None:
-    RESULTS_PATH.parent.mkdir(parents=True, exist_ok=True)
-    data = {
+def _result_to_dict(r: OptimizationResult) -> dict:
+    return {
         "best_params":     r.best_params,
         "best_calmar":     r.best_calmar,
         "best_sharpe":     r.best_sharpe,
@@ -501,6 +574,20 @@ def save_result(r: OptimizationResult) -> None:
         "wf_fold_calmars": [round(f.calmar, 3) for f in r.wf_results],
         "wf_fold_periods": [f.period for f in r.wf_results],
     }
+
+
+def save_result(
+    r: OptimizationResult,
+    per_instrument: dict[str, OptimizationResult] | None = None,
+) -> None:
+    RESULTS_PATH.parent.mkdir(parents=True, exist_ok=True)
+    data = _result_to_dict(r)
+    # 종목별 결과도 함께 저장
+    if per_instrument:
+        data["per_instrument"] = {
+            inst: _result_to_dict(res)
+            for inst, res in per_instrument.items()
+        }
     RESULTS_PATH.write_text(json.dumps(data, indent=2, ensure_ascii=False))
     logger.info("최적화 결과 저장: %s", RESULTS_PATH)
 

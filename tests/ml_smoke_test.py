@@ -359,29 +359,32 @@ def run_tests() -> list[str]:
     _rng     = np.random.default_rng(99)
     _lev_px  = {
         "QQQ":  pd.Series(100 * (1 + _rng.normal(0.0003, 0.01,  252)).cumprod(), index=_lev_idx),
+        "SPY":  pd.Series(100 * (1 + _rng.normal(0.0003, 0.01,  252)).cumprod(), index=_lev_idx),
+        "SMH":  pd.Series(100 * (1 + _rng.normal(0.0004, 0.015, 252)).cumprod(), index=_lev_idx),
         "QLD":  pd.Series(100 * (1 + _rng.normal(0.0006, 0.02,  252)).cumprod(), index=_lev_idx),
+        "TQQQ": pd.Series(100 * (1 + _rng.normal(0.0009, 0.03,  252)).cumprod(), index=_lev_idx),
+        "UPRO": pd.Series(100 * (1 + _rng.normal(0.0009, 0.03,  252)).cumprod(), index=_lev_idx),
+        "SOXL": pd.Series(100 * (1 + _rng.normal(0.0012, 0.045, 252)).cumprod(), index=_lev_idx),
         "SGOV": pd.Series(100 * (1 + _rng.normal(0.0001, 0.001, 252)).cumprod(), index=_lev_idx),
         "^VIX": pd.Series(_rng.uniform(15, 35, 252), index=_lev_idx),
     }
-    _lev_p   = {
-        "instrument":    "QLD",
-        "min_dd":        -0.10,
-        "max_vix_entry": 35.0,
-        "min_rsi_entry": 40.0,
-        "lev_weight":    0.25,
-        "sgov_floor":    0.40,
-        "exit_ma":       20,
-        "exit_vix":      38.0,
-        "trailing_stop": -0.10,
-        "hold_days_max": 63,
-    }
+    _lev_p_qld   = {"instrument": "QLD",  "min_dd": -0.10, "max_vix_entry": 35.0,
+                    "min_rsi_entry": 40.0, "lev_weight": 0.25, "sgov_floor": 0.40,
+                    "exit_ma": 20, "exit_vix": 38.0, "trailing_stop": -0.10, "hold_days_max": 63}
+    _lev_p_upro  = {**_lev_p_qld, "instrument": "UPRO"}   # SPY 기초지수 경로
+    _lev_p       = _lev_p_qld
 
-    failures += _check("LevBacktestEngine.run",
-        lambda: LevEngine(_lev_p, _lev_px).run(),
+    failures += _check("LevBacktestEngine.run (QLD/QQQ 기준)",
+        lambda: LevEngine(_lev_p_qld, _lev_px).run(),
         ("LevBacktestResult 반환", lambda r: isinstance(r, LevBacktestResult)),
         ("CAGR 유한값",            lambda r: np.isfinite(r.cagr)),
         ("Max DD <= 0",            lambda r: r.max_dd <= 0),
         ("Sharpe 유한값",          lambda r: np.isfinite(r.sharpe)),
+    )
+    failures += _check("LevBacktestEngine.run (UPRO/SPY 기준)",
+        lambda: LevEngine(_lev_p_upro, _lev_px).run(),
+        ("LevBacktestResult 반환", lambda r: isinstance(r, LevBacktestResult)),
+        ("UPRO CAGR 유한값",       lambda r: np.isfinite(r.cagr)),
     )
 
     failures += _check("lev_composite_score",
@@ -453,7 +456,7 @@ def main():
         sys.exit(1)
 
     elapsed = time.time() - t0
-    total_checks = 84  # p5 신규지표 17 + macro구조 2 + 기존 58 (p12 LeverageOptimizer 포함) → 77+7=84
+    total_checks = 86  # +2: UPRO/SPY 기초지수 BacktestEngine 테스트
 
     if failures:
         msg = "\n".join(failures)
