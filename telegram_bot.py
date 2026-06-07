@@ -69,6 +69,7 @@ from holding_manager import refresh_portfolio_prices
 from bot.stock_advisor import ask_portfolio_advisor
 from bot.tax_commands import cmd_tax
 from bot.holding_commands import cmd_holding, cmd_dividend, cmd_apply_snapshot
+from bot.entry_commands import cmd_entry
 try:
     from reports.source_collector import build_digest as build_source_digest, load_recent_events as load_source_events
 except Exception:
@@ -103,6 +104,7 @@ RETRY_DELAY        = 10    # 오류 후 재시도 대기(초)
 CACHE_TTL          = 300   # 시장 데이터 캐시 유지(초, 5분)
 ALERT_CHECK_SECS   = 300   # 가격 알림 체크 주기(초)
 PHASE_CHECK_SECS   = 300   # Phase 변화 체크 주기(초, 5분)
+ENTRY_CHECK_SECS   = 1800  # 진입 타점 알림 체크 주기(초, 30분)
 
 
 def _pid_file_path() -> str:
@@ -162,6 +164,7 @@ BOT_COMMANDS = [
     {"command": "ranking",        "description": "NASDAQ100 종목 랭킹 (LightGBM)"},
     {"command": "leverage",       "description": "레버리지 ETF 진입 분석 (QLD/TQQQ/SOXL/UPRO 손익비·타점)"},
     {"command": "meta",           "description": "ML 통합 포트폴리오 배분 (MetaAllocator)"},
+    {"command": "entry",          "description": "진입 타점 분석 — 레버리지+개별주 승률·기대수익 (단일: /entry NVDA)"},
 ]
 
 BOT_COMMAND_ALIASES = {
@@ -998,6 +1001,25 @@ def notify_triggered_alerts():
 
 
 # ══════════════════════════════════════════════════════════════════════
+#  진입 타점 모니터링 (30분 주기 자동 알림)
+# ══════════════════════════════════════════════════════════════════════
+
+def notify_entry_signals() -> None:
+    """레버리지 ETF + 개별주 진입 조건 감지 → 신규 enter 신호 시 푸시 알림."""
+    try:
+        from ml.entry_analyzer import analyze_all_entries, check_alert_signals, format_alert_message
+        scores  = analyze_all_entries(days=756, n_similar=25)
+        alerts  = check_alert_signals(scores)
+        for s in alerts:
+            msg = format_alert_message(s)
+            for chunk in (msg[i:i+4000] for i in range(0, len(msg), 4000)):
+                send(ALLOWED_CHAT_ID, chunk)
+            logger.info("진입 알림 발송: %s (점수=%.2f)", s.ticker, s.score)
+    except Exception as e:
+        logger.warning("진입 타점 모니터링 오류: %s", e)
+
+
+# ══════════════════════════════════════════════════════════════════════
 #  Phase 변화 모니터링 (봇 자체 발동)
 # ══════════════════════════════════════════════════════════════════════
 
@@ -1212,12 +1234,18 @@ def _dispatch_meta(chat_id: str, args: list):
     cmd_meta(chat_id, args)
 
 
+def _dispatch_entry(chat_id: str, args: list):
+    typing(chat_id)
+    cmd_entry(chat_id, args)
+
+
 _COMMAND_HANDLERS = {
     "/report": _dispatch_report,
     "/mlreport": _dispatch_mlreport,
     "/ranking":  _dispatch_ranking,
     "/leverage": _dispatch_leverage,
     "/meta":     _dispatch_meta,
+    "/entry":    _dispatch_entry,
     "/alert": lambda chat_id, args: _dispatch_with_typing(cmd_alert, chat_id, args),
     "/dividend": lambda chat_id, args: _dispatch_with_send(cmd_dividend, chat_id, args),
     "/sim": lambda chat_id, args: _dispatch_with_typing(cmd_sim, chat_id, args),
@@ -1272,6 +1300,7 @@ def run():
     offset: int | None  = None
     last_alert_check    = 0.0
     last_phase_check    = 0.0
+    last_entry_check    = 0.0
     consecutive_409     = 0
 
     while True:
@@ -1332,6 +1361,11 @@ def run():
             if now - last_phase_check > PHASE_CHECK_SECS:
                 notify_phase_change()
                 last_phase_check = now
+
+            # 진입 타점 모니터링 (30분 주기, 새로운 enter 신호 → 푸시)
+            if now - last_entry_check > ENTRY_CHECK_SECS:
+                notify_entry_signals()
+                last_entry_check = now
 
         except KeyboardInterrupt:
             logger.info("Bot 종료")
