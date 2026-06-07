@@ -40,6 +40,40 @@ PRICE_TTL_H = 6   # 가격 캐시 유효시간 (시간)
 # 포트폴리오 보유 종목 (universe 'portfolio' 모드)
 PORTFOLIO_TICKERS = ["MSFT", "QQQI", "ORCL", "NVDA", "GOOGL", "SAP", "UNH", "SGOV", "SPMO"]
 
+# 미국 시가총액 상위 50개 (섹터 다변화, 2025-26 기준)
+US_TOP50 = [
+    # 빅테크 / AI
+    "AAPL", "MSFT", "NVDA", "GOOGL", "AMZN", "META", "TSLA", "AVGO", "ORCL", "CRM",
+    # 반도체
+    "TSM", "QCOM", "AMD", "INTC", "TXN", "AMAT", "KLAC", "MU",
+    # 금융
+    "BRK-B", "JPM", "V", "MA", "BAC", "GS", "MS", "WFC", "SPGI", "BLK",
+    # 헬스케어
+    "LLY", "UNH", "JNJ", "ABBV", "MRK", "TMO", "ABT", "ISRG",
+    # 소비재 / 유통
+    "WMT", "COST", "HD", "MCD", "KO", "PEP", "NKE",
+    # 에너지 / 산업
+    "XOM", "CVX", "GE", "CAT",
+    # 기타 대형주
+    "NFLX", "ADBE", "ACN", "NEE", "LIN",
+]
+
+# 한국 시가총액 상위 10개 (KOSPI, 2025-26 기준)
+# 표시명: {티커: (한글명, 영문명, 섹터)}
+KR_TOP10_META: dict[str, tuple[str, str, str]] = {
+    "005930.KS": ("삼성전자",       "Samsung Electronics", "반도체"),
+    "000660.KS": ("SK하이닉스",     "SK Hynix",            "반도체"),
+    "373220.KS": ("LG에너지솔루션", "LG Energy Solution",  "2차전지"),
+    "207940.KS": ("삼성바이오로직스","Samsung Biologics",   "바이오"),
+    "005380.KS": ("현대차",         "Hyundai Motor",       "자동차"),
+    "005490.KS": ("포스코홀딩스",   "POSCO Holdings",      "철강"),
+    "035420.KS": ("NAVER",          "NAVER",               "IT"),
+    "035720.KS": ("카카오",         "Kakao",               "IT"),
+    "000270.KS": ("기아",           "Kia",                 "자동차"),
+    "006400.KS": ("삼성SDI",        "Samsung SDI",         "2차전지"),
+}
+KR_TOP10 = list(KR_TOP10_META.keys())
+
 # Fear/Greed proxy 재료
 _MACRO_TICKERS = ["^VIX", "^TNX", "QQQ", "SPY", "HYG", "LQD", "IEF", "TLT", "ACWI"]
 
@@ -77,27 +111,35 @@ def _save_cache(key: str, df: pd.DataFrame) -> None:
 # ── 유니버스 ──────────────────────────────────────────────────────────────────
 
 def fetch_universe(
-    mode: Literal["portfolio", "nasdaq100", "sp500", "all"] = "nasdaq100",
+    mode: Literal["portfolio", "nasdaq100", "sp500", "all",
+                  "us_top50", "kr_top10", "watch"] = "nasdaq100",
 ) -> list[str]:
     """종목 유니버스 반환.
 
     mode:
       portfolio  — 현재 보유 포트폴리오 (9종목, 빠름)
+      us_top50   — 미국 시가총액 상위 50개 (하드코딩, 안정적)
+      kr_top10   — 한국 시가총액 상위 10개 KOSPI (.KS 티커)
+      watch      — 포트폴리오 + us_top50 + kr_top10 전체 감시 대상
       nasdaq100  — Wikipedia NASDAQ100 (약 101종목)
       sp500      — Wikipedia S&P500 (약 503종목)
       all        — NASDAQ100 + S&P500 합집합
     """
     if mode == "portfolio":
         return list(PORTFOLIO_TICKERS)
+    if mode == "us_top50":
+        return list(US_TOP50)
+    if mode == "kr_top10":
+        return list(KR_TOP10)
+    if mode == "watch":
+        combined = list(PORTFOLIO_TICKERS) + list(US_TOP50) + list(KR_TOP10)
+        return list(dict.fromkeys(combined))   # 순서 유지 중복 제거
 
     tickers: list[str] = []
-
     if mode in ("nasdaq100", "all"):
         tickers += _fetch_nasdaq100()
     if mode in ("sp500", "all"):
         tickers += _fetch_sp500()
-
-    # 중복 제거, 정렬
     return sorted(set(tickers))
 
 

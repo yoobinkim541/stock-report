@@ -164,7 +164,7 @@ BOT_COMMANDS = [
     {"command": "ranking",        "description": "NASDAQ100 종목 랭킹 (LightGBM)"},
     {"command": "leverage",       "description": "레버리지 ETF 진입 분석 (QLD/TQQQ/SOXL/UPRO 손익비·타점)"},
     {"command": "meta",           "description": "ML 통합 포트폴리오 배분 (MetaAllocator)"},
-    {"command": "entry",          "description": "진입 타점 분석 — 레버리지+개별주 승률·기대수익 (단일: /entry NVDA)"},
+    {"command": "entry",          "description": "진입 타점 분석 — 포트/us50/kr/watch/단일종목 (예: /entry NVDA, /entry kr)"},
 ]
 
 BOT_COMMAND_ALIASES = {
@@ -1005,16 +1005,20 @@ def notify_triggered_alerts():
 # ══════════════════════════════════════════════════════════════════════
 
 def notify_entry_signals() -> None:
-    """레버리지 ETF + 개별주 진입 조건 감지 → 신규 enter 신호 시 푸시 알림."""
+    """전체 감시 대상 진입 조건 감지 → 신규 enter 신호 시 푸시 알림.
+
+    감시 대상: 포트폴리오 + 레버리지 ETF + 미국 시총 50 + 한국 시총 10
+    """
     try:
         from ml.entry_analyzer import analyze_all_entries, check_alert_signals, format_alert_message
-        scores  = analyze_all_entries(days=756, n_similar=25)
+        # watch 유니버스: 포트폴리오 + US50 + KR10 + 레버리지
+        scores  = analyze_all_entries(days=756, n_similar=25, universe="watch")
         alerts  = check_alert_signals(scores)
         for s in alerts:
             msg = format_alert_message(s)
             for chunk in (msg[i:i+4000] for i in range(0, len(msg), 4000)):
                 send(ALLOWED_CHAT_ID, chunk)
-            logger.info("진입 알림 발송: %s (점수=%.2f)", s.ticker, s.score)
+            logger.info("진입 알림 발송: %s (점수=%.2f, %s)", s.ticker, s.score, s.currency)
     except Exception as e:
         logger.warning("진입 타점 모니터링 오류: %s", e)
 

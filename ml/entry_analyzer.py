@@ -34,13 +34,31 @@ KST = timezone(timedelta(hours=9))
 
 # ── 대상 종목 ─────────────────────────────────────────────────────────────────
 
-PORTFOLIO_STOCKS = ["MSFT", "NVDA", "GOOGL", "ORCL", "SAP", "UNH", "SPMO", "QQQI"]
-LEVERAGE_ETFS    = ["QLD", "TQQQ", "UPRO"]
+PORTFOLIO_STOCKS    = ["MSFT", "NVDA", "GOOGL", "ORCL", "SAP", "UNH", "SPMO", "QQQI"]
+LEVERAGE_ETFS       = ["QLD", "TQQQ", "UPRO"]
 LEVERAGE_UNDERLYING = {"QLD": "QQQ", "TQQQ": "QQQ", "UPRO": "SPY"}
 
 ALERT_STATE_PATH = Path(os.path.expanduser("~/.cache/entry_alert_state.json"))
 ALERT_COOLDOWN_H = 6      # 동일 종목 재알림 최소 간격 (시간)
 ALERT_SCORE_MIN  = 0.60   # 알림 발송 최소 점수
+
+# ── 한국 주식 메타데이터 ──────────────────────────────────────────────────────
+# {ticker: (한글명, 영문명, 섹터)}
+KR_META: dict[str, tuple[str, str, str]] = {
+    "005930.KS": ("삼성전자",        "Samsung Electronics",  "반도체"),
+    "000660.KS": ("SK하이닉스",      "SK Hynix",             "반도체"),
+    "373220.KS": ("LG에너지솔루션",  "LG Energy Solution",   "2차전지"),
+    "207940.KS": ("삼성바이오로직스", "Samsung Biologics",    "바이오"),
+    "005380.KS": ("현대차",          "Hyundai Motor",        "자동차"),
+    "005490.KS": ("포스코홀딩스",    "POSCO Holdings",       "철강"),
+    "035420.KS": ("NAVER",           "NAVER",                "IT"),
+    "035720.KS": ("카카오",          "Kakao",                "IT"),
+    "000270.KS": ("기아",            "Kia",                  "자동차"),
+    "006400.KS": ("삼성SDI",         "Samsung SDI",          "2차전지"),
+}
+
+def is_kr_stock(ticker: str) -> bool:
+    return ticker.endswith(".KS") or ticker.endswith(".KQ")
 
 # ── 데이터 컨테이너 ───────────────────────────────────────────────────────────
 
@@ -72,6 +90,10 @@ class EntryScore:
     signal:   str              # "enter" / "wait" / "avoid"
     reasons:  list[str] = field(default_factory=list)
     timestamp: str = ""
+
+    # ── 한국 주식 전용 ──
+    currency:      str = "USD"   # "KRW" for Korean stocks
+    display_name:  str = ""      # 한글명 (한국 주식) 또는 티커
 
 
 # ── 피처 계산 ─────────────────────────────────────────────────────────────────
@@ -250,6 +272,11 @@ def analyze_entry(
         else:
             signal = "avoid"
 
+        # 한국 주식 메타
+        currency     = "KRW" if is_kr_stock(ticker) else "USD"
+        kr_info      = KR_META.get(ticker)
+        display_name = kr_info[0] if kr_info else ticker
+
         return EntryScore(
             ticker           = ticker,
             category         = category,
@@ -271,6 +298,8 @@ def analyze_entry(
             signal           = signal,
             reasons          = reasons,
             timestamp        = datetime.now(KST).strftime("%Y-%m-%d %H:%M KST"),
+            currency         = currency,
+            display_name     = display_name,
         )
 
     except Exception as e:
@@ -281,40 +310,77 @@ def analyze_entry(
 # ── 전체 분석 ─────────────────────────────────────────────────────────────────
 
 def analyze_all_entries(
-    days:      int = 756,
-    n_similar: int = 30,
+    days:        int = 756,
+    n_similar:   int = 30,
+    universe:    str = "portfolio",   # portfolio | us_top50 | kr_top10 | watch | leverage
+    extra_tickers: list[str] | None = None,
 ) -> list[EntryScore]:
-    """포트폴리오 전체 종목 + 레버리지 ETF 진입 분석."""
-    from ml.data_pipeline import fetch_prices
+    """포트폴리오·확장 유니버스 진입 분석.
 
-    all_tickers = list(set(
-        PORTFOLIO_STOCKS + LEVERAGE_ETFS + ["QQQ", "SPY", "^VIX"]
-    ))
-    logger.info("진입 분석 가격 로드: %d종목", len(all_tickers))
+    universe:
+      portfolio  — 보유 종목 + 레버리지 ETF (기본)
+      us_top50   — 미국 시총 상위 50
+      kr_top10   — 한국 시총 상위 10
+      leverage   — 레버리지 ETF만
+      watch      — 전체 감시 (portfolio + us_top50 + kr_top10 + leverage)
+    """
+    from ml.data_pipeline import fetch_prices, US_TOP50, KR_TOP10
+
+    # 대상 티커 결정
+    if universe == "portfolio":
+        stock_tickers = list(PORTFOLIO_STOCKS)
+        lev_tickers   = list(LEVERAGE_ETFS)
+    elif universe == "us_top50":
+        stock_tickers = list(US_TOP50)
+        lev_tickers   = []
+    elif universe == "kr_top10":
+        stock_tickers = list(KR_TOP10)
+        lev_tickers   = []
+    elif universe == "leverage":
+        stock_tickers = []
+        lev_tickers   = list(LEVERAGE_ETFS)
+    elif universe == "watch":
+        stock_tickers = list(dict.fromkeys(
+            list(PORTFOLIO_STOCKS) + list(US_TOP50) + list(KR_TOP10)
+        ))
+        lev_tickers   = list(LEVERAGE_ETFS)
+    else:
+        stock_tickers = list(PORTFOLIO_STOCKS)
+        lev_tickers   = list(LEVERAGE_ETFS)
+
+    if extra_tickers:
+        stock_tickers = list(dict.fromkeys(stock_tickers + extra_tickers))
+
+    all_tickers = list(set(stock_tickers + lev_tickers + ["QQQ", "SPY", "^VIX"]))
+    logger.info("진입 분석 가격 로드: %d종목 (universe=%s)", len(all_tickers), universe)
     prices = fetch_prices(all_tickers, days=days)
 
-    vix_s = prices.get("^VIX", pd.DataFrame()).get("Close", pd.Series(dtype=float))
-    vix_s = vix_s if len(vix_s) > 0 else pd.Series(20.0, index=pd.date_range("2020-01-01", periods=1))
+    vix_df = prices.get("^VIX", pd.DataFrame())
+    vix_s  = vix_df.get("Close") if hasattr(vix_df, "get") else None
+    if vix_s is None or len(vix_s) == 0:
+        vix_s = pd.Series(20.0, index=pd.date_range("2020-01-01", periods=1))
 
-    qqq = prices.get("QQQ", pd.DataFrame()).get("Close")
-    spy = prices.get("SPY", pd.DataFrame()).get("Close")
+    qqq = prices.get("QQQ", pd.DataFrame())
+    qqq = qqq.get("Close") if hasattr(qqq, "get") else None
+    spy = prices.get("SPY", pd.DataFrame())
+    spy = spy.get("Close") if hasattr(spy, "get") else None
 
     scores: list[EntryScore] = []
 
     # 레버리지 ETF
-    for ticker in LEVERAGE_ETFS:
+    for ticker in lev_tickers:
         df = prices.get(ticker)
         if df is None:
             continue
-        und = LEVERAGE_UNDERLYING.get(ticker, "QQQ")
-        und_price = qqq if und == "QQQ" else spy
+        und      = LEVERAGE_UNDERLYING.get(ticker, "QQQ")
+        und_px   = qqq if und == "QQQ" else spy
         s = analyze_entry(ticker, df, vix_s, n_similar=n_similar,
-                          category="leverage", underlying_price=und_price)
+                          category="leverage", underlying_price=und_px)
         if s:
             scores.append(s)
 
-    # 개별주
-    for ticker in PORTFOLIO_STOCKS:
+    # 개별주 (미국 + 한국)
+    for ticker in stock_tickers:
         df = prices.get(ticker)
         if df is None:
             continue
@@ -330,11 +396,20 @@ def analyze_all_entries(
 
 _SIGNAL_EMOJI  = {"enter": "🟢", "wait": "🟡", "avoid": "🔴"}
 _SIGNAL_LABEL  = {"enter": "진입 유리", "wait": "대기", "avoid": "진입 불리"}
-_TICKER_NAME   = {
+_TICKER_NAME: dict[str, str] = {
+    # 포트폴리오
     "MSFT": "Microsoft", "NVDA": "NVIDIA",   "GOOGL": "Alphabet",
     "ORCL": "Oracle",    "SAP":  "SAP",      "UNH":   "UnitedHealth",
     "SPMO": "S&P Momentum", "QQQI": "QQQI",
+    # 레버리지
     "QLD":  "QLD(2×QQQ)",  "TQQQ": "TQQQ(3×QQQ)", "UPRO": "UPRO(3×SPY)",
+    # 미국 주요 종목
+    "AAPL": "Apple",    "AMZN": "Amazon",   "META": "Meta",    "TSLA": "Tesla",
+    "AVGO": "Broadcom", "TSM":  "TSMC",     "QCOM": "Qualcomm","AMD":  "AMD",
+    "LLY":  "Eli Lilly","JPM":  "JPMorgan", "V":    "Visa",    "MA":   "Mastercard",
+    "WMT":  "Walmart",  "COST": "Costco",   "HD":   "Home Depot",
+    "XOM":  "Exxon",    "CVX":  "Chevron",  "NFLX": "Netflix", "ADBE": "Adobe",
+    "BRK-B":"Berkshire","GS":   "Goldman",  "GE":   "GE",      "LIN":  "Linde",
 }
 
 
@@ -342,70 +417,101 @@ def _fmt_pct(v: float) -> str:
     return f"{v*100:+.1f}%"
 
 
-def format_entry_report(scores: list[EntryScore]) -> str:
-    """진입 분석 전체 텔레그램 리포트."""
+def _price_str(s: EntryScore) -> str:
+    """현재가 표시 (KRW는 원화 형식)."""
+    if s.currency == "KRW":
+        return f"₩{s.current_price:,.0f}"
+    return f"${s.current_price:.2f}"
+
+
+def _render_score(s: EntryScore) -> list[str]:
+    """단일 종목 분석 결과 렌더링."""
+    emoji  = _SIGNAL_EMOJI[s.signal]
+    label  = _SIGNAL_LABEL[s.signal]
+    # 표시명: 한국주식은 한글명, 미국은 영문명
+    if s.currency == "KRW":
+        kr_info = KR_META.get(s.ticker)
+        name    = f"{kr_info[0]}({kr_info[1]})" if kr_info else s.ticker
+    else:
+        name = _TICKER_NAME.get(s.ticker, s.ticker)
+
+    rr     = abs(s.expected_ret_20d / s.downside_p25_20d) if s.downside_p25_20d < 0 else 0
+    rr_str = f"{rr:.1f}×" if rr > 0 else "—"
+    price  = _price_str(s)
+
+    out = [
+        f"{emoji} {s.ticker}  {name}  [{label}]  점수:{s.score:.2f}",
+        f"   현재가 {price}  낙폭 {_fmt_pct(s.current_drawdown)}  RSI {s.current_rsi:.0f}",
+        f"   20d {_fmt_pct(s.current_mom_20d)}  VIX {s.current_vix:.1f}",
+        f"   유사기간 {s.n_similar}건 | "
+        f"승률 20d {s.win_prob_20d*100:.0f}% / 60d {s.win_prob_60d*100:.0f}%",
+        f"   기대수익 {_fmt_pct(s.expected_ret_20d)} (20d) / {_fmt_pct(s.expected_ret_60d)} (60d)",
+        f"   하방25% {_fmt_pct(s.downside_p25_20d)}  상방75% {_fmt_pct(s.upside_p75_20d)}  손익비 {rr_str}",
+    ]
+    if s.reasons:
+        out.append(f"   💡 {' · '.join(s.reasons[:2])}")
+    return out
+
+
+def format_entry_report(scores: list[EntryScore], title: str = "📊 진입 타점 분석") -> str:
+    """진입 분석 전체 텔레그램 리포트 (유니버스 혼합 지원)."""
     if not scores:
         return "⚠️ 진입 분석 데이터 없음"
 
-    ts = scores[0].timestamp if scores else ""
+    ts  = scores[0].timestamp if scores else ""
+    lev = [s for s in scores if s.category == "leverage"]
+    kr  = [s for s in scores if s.category == "stock" and s.currency == "KRW"]
+    us  = [s for s in scores if s.category == "stock" and s.currency == "USD"]
+
     lines = [
-        "📊 진입 타점 분석",
+        title,
         "━━━━━━━━━━━━━━━━━━━━━━━",
         f"({ts})",
         "",
-        "[ 레버리지 ETF ]",
     ]
 
-    lev    = [s for s in scores if s.category == "leverage"]
-    stocks = [s for s in scores if s.category == "stock"]
+    if lev:
+        lines.append("[ 📈 레버리지 ETF ]")
+        for s in sorted(lev, key=lambda x: -x.score):
+            lines.extend(_render_score(s))
+            lines.append("")
 
-    def _render(s: EntryScore) -> list[str]:
-        emoji  = _SIGNAL_EMOJI[s.signal]
-        label  = _SIGNAL_LABEL[s.signal]
-        name   = _TICKER_NAME.get(s.ticker, s.ticker)
-        rr     = abs(s.expected_ret_20d / s.downside_p25_20d) if s.downside_p25_20d < 0 else 0
-        rr_str = f"{rr:.1f}×" if rr > 0 else "—"
-        out = [
-            f"{emoji} {s.ticker} ({name})  [{label}]  점수:{s.score:.2f}",
-            f"   낙폭 {_fmt_pct(s.current_drawdown)}  RSI {s.current_rsi:.0f}  "
-            f"20d {_fmt_pct(s.current_mom_20d)}  VIX {s.current_vix:.1f}",
-            f"   유사기간 {s.n_similar}건 | "
-            f"승률 20d {s.win_prob_20d*100:.0f}% / 60d {s.win_prob_60d*100:.0f}%",
-            f"   기대수익 {_fmt_pct(s.expected_ret_20d)} (20d) / {_fmt_pct(s.expected_ret_60d)} (60d)",
-            f"   하방25% {_fmt_pct(s.downside_p25_20d)}  상방75% {_fmt_pct(s.upside_p75_20d)}  "
-            f"손익비 {rr_str}",
-        ]
-        if s.reasons:
-            out.append(f"   💡 {' · '.join(s.reasons[:2])}")
-        return out
+    if us:
+        lines.append("[ 🇺🇸 미국주식 ]")
+        for s in sorted(us, key=lambda x: -x.score):
+            lines.extend(_render_score(s))
+            lines.append("")
 
-    for s in sorted(lev, key=lambda x: -x.score):
-        lines.extend(_render(s))
-        lines.append("")
-
-    lines += ["[ 개별주 ]", ""]
-    for s in sorted(stocks, key=lambda x: -x.score):
-        lines.extend(_render(s))
-        lines.append("")
+    if kr:
+        lines.append("[ 🇰🇷 한국주식 ]")
+        for s in sorted(kr, key=lambda x: -x.score):
+            lines.extend(_render_score(s))
+            lines.append("")
 
     # 요약 추천
     enters = [s for s in scores if s.signal == "enter"]
+    lines.append("━━━━━━━━━━━━━━━━━━━━━━━")
     if enters:
-        names = ", ".join(s.ticker for s in sorted(enters, key=lambda x: -x.score)[:3])
-        lines += ["━━━━━━━━━━━━━━━━━━━━━━━",
-                  f"⚡ 진입 검토 대상: {names}",
-                  "⚠️ 분할 매수 + 손절 설정 필수"]
+        top3 = sorted(enters, key=lambda x: -x.score)[:5]
+        names = ", ".join(s.ticker for s in top3)
+        lines += [
+            f"⚡ 진입 검토 ({len(enters)}건): {names}",
+            "⚠️ 분할 매수 + 손절 설정 필수",
+        ]
     else:
-        lines += ["━━━━━━━━━━━━━━━━━━━━━━━",
-                  "⏳ 현재 진입 유리한 종목 없음 — 추가 조정 대기"]
+        lines.append("⏳ 현재 진입 유리한 종목 없음 — 추가 조정 대기")
 
     return "\n".join(lines)
 
 
 def format_alert_message(s: EntryScore) -> str:
-    """단일 종목 알림 메시지."""
+    """단일 종목 알림 메시지 (한국/미국/레버리지 공통)."""
     emoji = _SIGNAL_EMOJI[s.signal]
-    name  = _TICKER_NAME.get(s.ticker, s.ticker)
+    if s.currency == "KRW":
+        kr_info = KR_META.get(s.ticker)
+        name    = f"{kr_info[0]} ({kr_info[1]})" if kr_info else s.ticker
+    else:
+        name = _TICKER_NAME.get(s.ticker, s.ticker)
     rr    = abs(s.expected_ret_20d / s.downside_p25_20d) if s.downside_p25_20d < 0 else 0
 
     lines = [
