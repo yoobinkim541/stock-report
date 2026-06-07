@@ -88,6 +88,26 @@ def _constant_weight_result(panel: pd.DataFrame, weights: dict[str, float], name
     return result
 
 
+def _ma_trend_following(panel: pd.DataFrame, ma_days: int = 200) -> BacktestResult:
+    """200MA 트렌드 추종: QQQ > 200MA → QQQ 100%, 그 외 → SGOV 100%.
+
+    시그널 shift(1) 적용 — 룩어헤드 없음.
+    """
+    qqq  = panel["QQQ"]
+    ma   = qqq.rolling(ma_days, min_periods=min(ma_days, 60)).mean()
+    long = (qqq > ma).shift(1).fillna(False).astype(bool).values  # numpy bool array
+
+    wts = pd.DataFrame(0.0, index=panel.index, columns=["QQQ", "SGOV"])
+    wts["QQQ"]  = np.where(long, 1.0, 0.0)
+    wts["SGOV"] = np.where(long, 0.0, 1.0)
+
+    result = portfolio_metrics(wts, panel[["QQQ", "SGOV"]], name=f"QQQ {ma_days}MA 트렌드추종")
+    rets     = panel[["QQQ", "SGOV"]].pct_change()
+    port_ret = (wts.shift(1).fillna(0.0) * rets).sum(axis=1)
+    result.extra["equity"] = 100.0 * (1.0 + port_ret.fillna(0.0)).cumprod()
+    return result
+
+
 def _mechanical_bull_bear(panel: pd.DataFrame) -> BacktestResult:
     qqq = panel["QQQ"]
     bull = qqq > qqq.rolling(100, min_periods=20).mean()
@@ -163,6 +183,9 @@ def build_benchmark_comparison(
         _bah_with_equity(panel["SPY"], name="SPY 매수보유"),
         _bah_with_equity(panel["QLD"], name="QLD 매수보유"),
         _bah_with_equity(panel["TQQQ"], name="TQQQ 매수보유"),
+        _constant_weight_result(panel, {"QQQ": 0.80, "SGOV": 0.20}, "QQQ/SGOV 80/20"),
+        _constant_weight_result(panel, {"QQQ": 0.60, "SGOV": 0.40}, "QQQ/SGOV 60/40"),
+        _ma_trend_following(panel, ma_days=200),
         _constant_weight_result(panel, {"QLD": 0.70, "TQQQ": 0.30}, "QLD/TQQQ 바벨"),
         _constant_weight_result(panel, {"QQQ": 0.30, "TLT": 0.40, "IEF": 0.15, "GLD": 0.075, "DBC": 0.075}, "올웨더 포트폴리오"),
         _mechanical_bull_bear(panel),
