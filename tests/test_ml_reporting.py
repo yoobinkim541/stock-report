@@ -206,6 +206,36 @@ class TestBotWiring:
         combined = "\n".join(sent_messages)
         assert "ML 전략 성과 리포트" in combined
 
+    def test_cmd_mlreport_calls_send_photo_fn(self, monkeypatch, tmp_path):
+        """cmd_mlreport must send generated graph paths via injectable send_photo_fn."""
+        import ml.sweet_spot as sweet_spot
+        import telegram_bot as bot
+
+        sent_messages: list[str] = []
+        sent_photos: list[tuple[str, str]] = []
+
+        def fake_plot_results(result, outdir: str):
+            p1 = Path(outdir) / "equity_curves.png"
+            p2 = Path(outdir) / "sweet_spot_trials.png"
+            p1.write_bytes(b"png-1")
+            p2.write_bytes(b"png-2")
+            return [str(p1), str(p2)]
+
+        monkeypatch.setattr(bot, "build_sample_ml_strategy_report", lambda: "ML 전략 성과 리포트")
+        monkeypatch.setattr(sweet_spot, "generate_synthetic_market_data", lambda: {})
+        monkeypatch.setattr(sweet_spot, "optimize_sweet_spot", lambda data: object())
+        monkeypatch.setattr(sweet_spot, "plot_results", fake_plot_results)
+
+        bot.cmd_mlreport(
+            "fake_chat_id",
+            send_fn=lambda chat_id, text: sent_messages.append(text),
+            send_photo_fn=lambda chat_id, path, caption="": sent_photos.append((path, caption)),
+        )
+
+        assert sent_messages == ["ML 전략 성과 리포트"]
+        assert [caption for _, caption in sent_photos] == ["📈 이퀴티 곡선", "🔬 파라미터 탐색"]
+        assert all(path.endswith(".png") for path, _ in sent_photos)
+
     def test_dispatch_routes_mlreport(self):
         """dispatch('/mlreport', ...) must route to _dispatch_mlreport without calling real send."""
         import telegram_bot as bot
