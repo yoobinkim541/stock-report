@@ -18,7 +18,7 @@ STOCK_BOT_CHAT_ID=5771238245
 START_TIME=$(date +%s)
 
 # Generate report (silent progress -> file)
-python3 market_report.py > /tmp/market_report_stdout.txt 2>/tmp/market_report_stderr.txt
+python3 reports/market_report.py > /tmp/market_report_stdout.txt 2>/tmp/market_report_stderr.txt
 REPORT_EXIT=$?
 
 REPORT_FILE="$HOME/reports/daily-report-${DATE}.md"

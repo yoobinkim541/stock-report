@@ -1,17 +1,31 @@
 # Stock Report — Intelligence Barbell
 
+## 폴더 구조
+
+```
+stock-report/
+├── ml/          # ML 모델 (Ranker, LeverageModel, MetaAllocator, Optimizer 등)
+├── bot/         # 텔레그램 서브커맨드 핸들러 (telegram_bot이 import)
+├── reports/     # 리포트·데이터 생성 라이브러리
+├── crons/       # 크론 진입점 스크립트 (daily_*, news_*, notion_*, kiwoom_*)
+├── tests/       # 스모크 테스트·헬스체크
+├── backtest/    # 백테스트 분석 스크립트 (개발용)
+└── scripts/     # 쉘 스크립트 (watchdog, deliver)
+    (root)       # 상시 실행 프로세스: telegram_bot, barbell_strategy, portfolio_sync_server 등
+```
+
 ## 아키텍처 핵심
 
 ```
-deliver_investment_report.sh (크론 23:00 UTC)
-  ├── investment_report.py   → ~/reports/investment-{report,data,summary}
-  ├── barbell_strategy.py    → Phase 분류·알림 (STATE: ~/.cache/barbell_state.json)
-  └── portfolio_tracker.py   → 히스토리 기록 (~/.local/share/stock-report/)
+scripts/deliver_investment_report.sh (크론 23:00 UTC)
+  ├── reports/investment_report.py  → ~/reports/investment-{report,data,summary}
+  ├── barbell_strategy.py           → Phase 분류·알림 (STATE: ~/.cache/barbell_state.json)
+  └── portfolio_tracker.py          → 히스토리 기록 (~/.local/share/stock-report/)
 
-kiwoom_sync_rest.py (크론 23:35 UTC = 08:35 KST, 월~금)
+crons/kiwoom_sync_rest.py (크론 23:35 UTC = 08:35 KST, 월~금)
   └── 키움 REST API kt00018 → portfolio_snapshot.json domestic 섹션 업데이트
 
-daily_leverage_retrain.py (크론 22:15 UTC, 평일)
+crons/daily_leverage_retrain.py (크론 22:15 UTC, 평일)
   ├── LeverageModel 일일 재학습 → 진입 신호 발송
   └── (월요일만) Optuna 파라미터 재최적화 → ~/reports/ml-cache/leverage_best_params.json
 
@@ -19,47 +33,75 @@ telegram_bot.py (상시, fcntl 단일 인스턴스 잠금)
   ├── fetch_market()         → barbell_strategy 전체 조회 (5분 캐시, threading.Lock)
   ├── Phase 5min 감시        → barbell_state.json 공유 (크론과 중복 방지)
   ├── 가격알림 5min 체크
-  ├── holding_commands.py    → /holding 서브커맨드 위임
-  └── tax_commands.py        → /tax 서브커맨드 위임
+  ├── bot/holding_commands.py → /holding 서브커맨드 위임
+  └── bot/tax_commands.py    → /tax 서브커맨드 위임
 
 portfolio_sync_server.py (상시, port 8765)
   └── 외부 잔고 데이터 수신 → portfolio_snapshot.json 업데이트
 
-news_spike_detector.py (크론 매 1분)
-  ├── fetch_saveticker + fetch_arca(1page) + fetch_telegram → JSONL 캐시 저장
-  ├── 최근 10분 vs 이전 110분 테마/티커 빈도 비교
-  ├── 3배 이상 + 최소 3건 → 텔레그램 스파이크 알림
+crons/news_spike_detector.py (크론 매 1분)
+  ├── reports/source_collector → JSONL 캐시 저장
+  ├── 속보 태그 이벤트 필터 + 규칙 기반 중요도 판단
   └── 쿨다운: ~/.cache/news_spike_state.json (테마/티커별 1시간)
 
 크론 검증:
-  bot_smoke_test.py   — 매일 00:00 UTC (09:00 KST), 25항목 실데이터 테스트
-  bot_healthcheck.py  — 매 30분, 프로세스·서버·파일 상태 점검
+  tests/bot_smoke_test.py   — 매일 00:00 UTC (09:00 KST), 25항목 실데이터 테스트
+  tests/bot_healthcheck.py  — 매 30분, 프로세스·서버·파일 상태 점검
 ```
 
 ## 파일 역할 (핵심만)
 
+**루트 (상시 실행 프로세스)**
 | 파일 | 역할 | 상태파일 |
 |------|------|----------|
 | `barbell_strategy.py` | Phase 분류, DCA·SGOV·레버리지 계산, 리포트 | `~/.cache/barbell_state.json` |
 | `telegram_bot.py` | 봇 메인 루프, 명령어 라우터, fcntl 단일 인스턴스 | `~/.local/state/stock-report/barbell_bot.pid` |
-| `holding_commands.py` | /holding 서브커맨드 (buy·sell·target·dca·dividend·apply) | — |
-| `tax_commands.py` | /tax 서브커맨드 (sim·sell·history·delete·import) | — |
 | `holding_manager.py` | 포트폴리오 CRUD + DCA/목표비중 파일 (atomic write) | `portfolio_snapshot.json`, `dca_weights.json`, `target_weights.json` |
 | `tax_tracker.py` | 실현손익 기록·조회·세금 계산 | `~/.local/share/stock-report/tax_records.json` |
 | `portfolio_tracker.py` | 일일 히스토리 + 배당 기록 | `~/.local/share/stock-report/` |
-| `attachment_parser.py` | PDF/이미지 OCR 파싱, pending 파일 관리 | `pending_snapshot.json`, `pending_sells.json` |
-| `price_alerts.py` | 알림 CRUD + check_alerts() | `price_alerts.json` |
-| `order_generator.py` | Phase 기반 소수점 매수 주문서 생성 | — |
-| `source_collector.py` | 뉴스 JSONL 캐시 수집·다이제스트 | `~/reports/source-cache/*.jsonl` |
-| `news_spike_detector.py` | 1분 크론 — 뉴스 수집 + 급증 감지 + 텔레그램 알림 | `~/.cache/news_spike_state.json` |
-| `stock_advisor.py` | AI 상담 프롬프트 실행 | — |
-| `kiwoom_sync_rest.py` | 키움 REST API 국내주식 잔고 동기화 (크론 08:35 KST) | — |
 | `portfolio_sync_server.py` | 외부 잔고 수신 Flask 서버 (port 8765, Bearer 인증) | — |
-| `bot_healthcheck.py` | 봇·서버 상태 자동 점검 (30분, 중복인스턴스·409·PID·파일 신선도) | `/tmp/healthcheck_last_alert.json` |
-| `bot_smoke_test.py` | 기능 검증 연기 테스트 25항목 (매일 크론, 실패 시만 알림) | — |
-| `ml_smoke_test.py` | ML 파이프라인 end-to-end 연기 테스트 58항목 — p3~p12 전체, 네트워크 불필요 (매일 크론) | — |
-| `ml/sweet_spot.py` | AR(1) 합성 데이터 생성 + 임계값 전략 그리드서치 (`optimize_sweet_spot`) + 선택적 matplotlib 시각화 | — |
-| `ml/leverage_optimizer.py` | Optuna TPE 레버리지 파라미터 스위트스팟 탐색 (`optimize_leverage`) + Walk-Forward OOS 검증 + 결과 저장/로드 | `~/reports/ml-cache/leverage_best_params.json` |
+
+**bot/ (텔레그램 서브커맨드)**
+| 파일 | 역할 |
+|------|------|
+| `bot/holding_commands.py` | /holding 서브커맨드 (buy·sell·target·dca·dividend·apply) |
+| `bot/tax_commands.py` | /tax 서브커맨드 (sim·sell·history·delete·import) |
+| `bot/attachment_parser.py` | PDF/이미지 OCR 파싱, pending 파일 관리 |
+| `bot/price_alerts.py` | 알림 CRUD + check_alerts() |
+| `bot/order_generator.py` | Phase 기반 소수점 매수 주문서 생성 |
+| `bot/stock_advisor.py` | AI 상담 프롬프트 실행 |
+
+**reports/ (리포트·데이터 생성)**
+| 파일 | 역할 |
+|------|------|
+| `reports/investment_report.py` | 일일 투자 리포트 생성 |
+| `reports/market_report.py` | 시장 현황 리포트 생성 |
+| `reports/source_collector.py` | 뉴스 JSONL 캐시 수집·다이제스트 |
+| `reports/fundamental_score.py` | 종목 펀더멘털 점수 계산 |
+| `reports/daily_signals.py` | 일일 시장 신호 탐지 |
+| `reports/save_csv.py` | 투자 요약 CSV 저장 |
+
+**crons/ (크론 진입점)**
+| 파일 | 역할 | 주기 |
+|------|------|------|
+| `crons/daily_leverage_retrain.py` | LeverageModel 재학습 + 월요일 Optuna 재최적화 | 평일 22:15 UTC |
+| `crons/daily_ranking.py` | ML 종목 랭킹 발송 | 평일 22:00 UTC |
+| `crons/notion_sync.py` | Notion 대시보드 동기화 | 평일 22:30 UTC |
+| `crons/news_spike_detector.py` | 속보 수집 + 급증 감지 + 텔레그램 알림 | 매 1분 |
+| `crons/kiwoom_sync_rest.py` | 키움 REST API 국내주식 잔고 동기화 | 평일 23:35 UTC |
+
+**tests/ (테스트·헬스체크)**
+| 파일 | 역할 | 주기 |
+|------|------|------|
+| `tests/bot_smoke_test.py` | 기능 검증 연기 테스트 25항목 (실패 시만 알림) | 평일 00:00 UTC |
+| `tests/ml_smoke_test.py` | ML 파이프라인 end-to-end 58항목 (네트워크 불필요) | 평일 크론 |
+| `tests/bot_healthcheck.py` | 봇·서버 상태 점검 (프로세스·PID·파일 신선도) | 매 30분 |
+
+**ml/ (ML 모델)**
+| 파일 | 역할 | 상태파일 |
+|------|------|----------|
+| `ml/sweet_spot.py` | AR(1) 합성 데이터 + 임계값 전략 그리드서치 | — |
+| `ml/leverage_optimizer.py` | Optuna TPE 레버리지 파라미터 탐색 + Walk-Forward OOS | `~/reports/ml-cache/leverage_best_params.json` |
 
 ## 텔레그램 봇 명령어
 

@@ -11,6 +11,7 @@ ml_smoke_test.py — ML 전략 파이프라인 end-to-end 연기 테스트 (p12)
 
 import os
 import sys
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import time
 import logging
 from datetime import datetime

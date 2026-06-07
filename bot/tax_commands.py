@@ -3,7 +3,7 @@ import logging
 from datetime import datetime
 
 from barbell_strategy import fetch_exchange_rate, fetch_portfolio_value
-from attachment_parser import load_pending_sells, clear_pending_sells, build_pending_sells_summary
+from bot.attachment_parser import load_pending_sells, clear_pending_sells, build_pending_sells_summary
 
 logger = logging.getLogger(__name__)
 

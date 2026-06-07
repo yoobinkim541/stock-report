@@ -11,6 +11,7 @@ daily_leverage_retrain.py — 레버리지 ETF 모델 일일 재학습 + 신호 
 import logging
 import os
 import sys
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import warnings
 
 warnings.filterwarnings("ignore")

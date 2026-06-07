@@ -11,6 +11,7 @@ bot_smoke_test.py — 봇 핵심 기능 연기 테스트 (cron 검증용)
 
 import os
 import sys
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import time
 import logging
 from datetime import datetime

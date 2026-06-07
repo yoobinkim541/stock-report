@@ -25,11 +25,11 @@ export INVESTMENT_REPORT_ARCA_PAGES="${INVESTMENT_REPORT_ARCA_PAGES:-1}"
 DATE=$("$PYTHON_BIN" -c "from datetime import datetime, timezone, timedelta; print(datetime.now(timezone(timedelta(hours=9))).strftime('%Y-%m-%d'))")
 
 # Generate report (silent progress → stderr, keep stdout clean)
-"$PYTHON_BIN" investment_report.py > /tmp/invest_report_stdout.txt 2>/tmp/invest_report_stderr.txt
+"$PYTHON_BIN" reports/investment_report.py > /tmp/invest_report_stdout.txt 2>/tmp/invest_report_stderr.txt
 REPORT_EXIT=$?
 
 # Generate CSV from JSON summary
-"$PYTHON_BIN" save_csv.py 2>>/tmp/invest_report_stderr.txt
+"$PYTHON_BIN" reports/save_csv.py 2>>/tmp/invest_report_stderr.txt
 
 # ── Intelligence Barbell v2.1 분석 ────────────────────────────────────
 # Phase 변화 시 자동으로 텔레그램 알림 발송 (중복 발송 없음)

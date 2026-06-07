@@ -50,7 +50,7 @@ from barbell_strategy import (
     BULL_PHASES, BEAR_PHASES,
     TELEGRAM_TOKEN, TELEGRAM_CHAT_ID,
 )
-from attachment_parser import (
+from bot.attachment_parser import (
     extract_text_from_pdf, extract_text_from_image,
     parse_portfolio_from_text, parse_sells_from_text,
     detect_content_type,
@@ -59,18 +59,18 @@ from attachment_parser import (
     build_pending_snapshot_summary, build_pending_sells_summary,
     ATTACH_DIR, _ensure_dir as _ensure_attach_dir,
 )
-from price_alerts import load_alerts, add_alert, remove_alert, check_alerts
+from bot.price_alerts import load_alerts, add_alert, remove_alert, check_alerts
 from portfolio_tracker import (
     load_history, calc_performance,
     build_performance_report,
 )
-from order_generator import generate as generate_order
+from bot.order_generator import generate as generate_order
 from holding_manager import refresh_portfolio_prices
-from stock_advisor import ask_portfolio_advisor
-from tax_commands import cmd_tax
-from holding_commands import cmd_holding, cmd_dividend, cmd_apply_snapshot
+from bot.stock_advisor import ask_portfolio_advisor
+from bot.tax_commands import cmd_tax
+from bot.holding_commands import cmd_holding, cmd_dividend, cmd_apply_snapshot
 try:
-    from source_collector import build_digest as build_source_digest, load_recent_events as load_source_events
+    from reports.source_collector import build_digest as build_source_digest, load_recent_events as load_source_events
 except Exception:
     build_source_digest = None
     load_source_events = None

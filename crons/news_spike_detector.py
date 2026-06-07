@@ -21,7 +21,9 @@ import json
 import logging
 import os
 from datetime import datetime, timedelta, timezone
+import sys
 from pathlib import Path
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import requests
 from dotenv import load_dotenv
@@ -79,7 +81,7 @@ def _prune_state(state: dict, now: datetime) -> None:
 
 def fetch_breaking_news(now: datetime) -> list[dict]:
     """saveticker에서 속보 태그 이벤트만 반환 (최근 MAX_AGE_HOURS 이내)."""
-    from source_collector import fetch_saveticker_events, append_events, event_id
+    from reports.source_collector import fetch_saveticker_events, append_events, event_id
 
     events = fetch_saveticker_events()
     append_events(events, cache_dir=CACHE_DIR)

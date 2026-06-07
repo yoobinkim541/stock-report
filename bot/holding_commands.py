@@ -14,7 +14,7 @@ from holding_manager import (
     refresh_portfolio_prices, set_target_weight, show_target_weights,
 )
 from portfolio_tracker import get_dividend_summary, record_dividend
-from attachment_parser import (
+from bot.attachment_parser import (
     load_pending_snapshot, clear_pending_snapshot, build_pending_snapshot_summary,
 )
 

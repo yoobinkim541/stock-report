@@ -3,7 +3,8 @@
 # 크론 등록: * * * * * /home/ubuntu/projects/stock-report/bot_watchdog.sh >> /tmp/bot_watchdog.log 2>&1
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-BOT_SCRIPT="$SCRIPT_DIR/telegram_bot.py"
+PROJECT_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
+BOT_SCRIPT="$PROJECT_DIR/telegram_bot.py"
 PID_FILE="$HOME/.local/state/stock-report/barbell_bot.pid"
 LOG_FILE="/tmp/barbell_bot.log"
 WATCHDOG_LOCK="/tmp/bot_watchdog.lock"
@@ -30,14 +31,14 @@ fi
 echo "[$(date '+%Y-%m-%d %H:%M:%S')] Bot 미실행 감지 — 재시작"
 
 # .env 로드
-if [ -f "$SCRIPT_DIR/.env" ]; then
+if [ -f "$PROJECT_DIR/.env" ]; then
     set -a
-    source "$SCRIPT_DIR/.env"
+    source "$PROJECT_DIR/.env"
     set +a
 fi
 
 UV="/home/ubuntu/.local/bin/uv"
-cd "$SCRIPT_DIR" || exit 1
+cd "$PROJECT_DIR" || exit 1
 flock -u 9
 exec 9>&-
 nohup "$UV" run python "$BOT_SCRIPT" >> "$LOG_FILE" 2>&1 &
