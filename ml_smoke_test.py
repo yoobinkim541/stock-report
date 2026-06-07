@@ -242,7 +242,7 @@ def run_tests() -> list[str]:
         lambda: opt,
         ("best_params 존재",          lambda r: bool(r.best_params)),
         ("trials 20행",               lambda r: len(r.trials) == 20),
-        ("equity 4개 컬럼",           lambda r: set(r.equity.columns) == {"ML_model","threshold","SPY","QQQ"}),
+        ("equity 필수 컬럼 포함",      lambda r: {"ML_model","threshold","SPY","QQQ"}.issubset(set(r.equity.columns))),
         ("wf mean_sharpe 유한값",      lambda r: r.wf_summary["mean_sharpe"] is not None),
         ("ml_result 타입",             lambda r: isinstance(r.ml_result, BacktestResult)),
         ("best score >= baseline score", lambda r: _best_beats_baseline(r)),

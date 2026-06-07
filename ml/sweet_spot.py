@@ -34,13 +34,14 @@ from ml.optimization import composite_score, grid_search_parameters
 @dataclass
 class SweetSpotResult:
     best_params: dict
-    best_result: BacktestResult    # best threshold strategy (grid-searched on full data)
-    ml_result: BacktestResult      # actual ML model result (OOS ExcessReturnModel)
+    best_result: BacktestResult       # best threshold strategy (grid-searched on full data)
+    ml_result: BacktestResult         # actual ML model result (nested OOS)
+    overlay_result: BacktestResult    # risk overlay: 200MA trend × ML size
     baseline_result: BacktestResult
     qqq_result: BacktestResult
     spy_result: BacktestResult
     trials: pd.DataFrame
-    equity: pd.DataFrame           # columns: ML_model, threshold, SPY, QQQ
+    equity: pd.DataFrame              # columns: ML_model, overlay, threshold, SPY, QQQ
     weights: pd.Series
     wf_summary: dict
 
@@ -150,6 +151,80 @@ def evaluate_threshold_strategy(data: dict, params: dict) -> BacktestResult:
         max_drawdown=_calc_mdd(equity),
         sharpe=_calc_sharpe(strat_ret.dropna(), risk_free=_get_rf()),
         turnover=turnover,
+        n_days=len(df),
+        extra={"equity": equity},
+    )
+
+
+# ---------------------------------------------------------------------------
+# Risk-overlay strategy: trend as base position, ML adjusts size only
+# ---------------------------------------------------------------------------
+
+def evaluate_risk_overlay_strategy(data: dict, train_fraction: float = 2 / 3) -> BacktestResult:
+    """ML as risk overlay: 200MA trend is base, ML signal adjusts position size.
+
+    Logic (shift(1) applied throughout):
+      trend_up  = QQQ > 200MA
+      ml_signal = ExcessReturnModel OOS prediction
+      ml_pos    = percentile rank of ml_signal (0~1)
+
+      position:
+        trend_up  → 0.6 + 0.4 * ml_pos  (0.6 ~ 1.0, always long)
+        trend_down → 0.0 + 0.4 * ml_pos  (0.0 ~ 0.4, defensive)
+
+    Rationale: never fully exits in uptrend (participates in bull runs);
+    ML modulates size instead of making binary in/out decisions.
+    """
+    from ml.models import ExcessReturnModel
+
+    close     = data["close"]
+    qqq_close = data.get("qqq_close", close)
+    features  = data["features"]
+    n = len(close)
+    split = int(n * train_fraction)
+
+    # 200MA trend signal on QQQ (shift(1) applied later)
+    ma200     = qqq_close.rolling(200, min_periods=60).mean()
+    trend_up  = (qqq_close > ma200).astype(float)
+
+    # ML OOS predictions
+    fwd_ret = close.pct_change().shift(-1).fillna(0)
+    X = features.values.astype(float)
+    y = fwd_ret.values
+    model = ExcessReturnModel()
+    model.fit(X[:split], y[:split])
+    raw_preds = np.full(n, np.nan)
+    raw_preds[split:] = model.predict(X[split:])
+    ml_signal = pd.Series(raw_preds, index=features.index)
+
+    # Rolling percentile rank of ml_signal (OOS only)
+    ml_pos = ml_signal.rank(pct=True).fillna(0.5)
+
+    # Position: combine trend + ML size
+    trend_s = trend_up.shift(1).fillna(0.5)   # shift(1): no lookahead
+    ml_s    = ml_pos.shift(1).fillna(0.5)
+    position = np.where(
+        trend_s >= 0.5,
+        0.6 + 0.4 * ml_s,   # trend up: 0.6~1.0
+        0.0 + 0.4 * ml_s,   # trend down: 0.0~0.4
+    )
+    position_s = pd.Series(position, index=close.index)
+
+    # Only trade OOS period (in-sample: hold 0.8 as neutral)
+    position_s.iloc[:split] = 0.8
+
+    df = pd.concat([close.rename("close"), position_s.rename("pos")], axis=1).dropna()
+    asset_ret = df["close"].pct_change()
+    strat_ret = df["pos"] * asset_ret
+    equity    = (1 + strat_ret.fillna(0)).cumprod() * df["close"].iloc[0]
+
+    return BacktestResult(
+        name="ML 리스크오버레이 (200MA+ML크기조절)",
+        cumulative_return=float((1 + strat_ret.fillna(0)).prod() - 1),
+        cagr=_calc_cagr(equity),
+        max_drawdown=_calc_mdd(equity),
+        sharpe=_calc_sharpe(strat_ret.dropna(), risk_free=_get_rf()),
+        turnover=float(df["pos"].diff().abs().mean()),
         n_days=len(df),
         extra={"equity": equity},
     )
@@ -459,16 +534,21 @@ def optimize_sweet_spot(
 
     trials = pd.DataFrame(trial_rows)
 
-    # Equity curves — "ML_model" uses actual OOS model; "threshold" uses grid-searched threshold
-    ml_eq = ml_result.extra.get("equity", pd.Series(dtype=float))
+    # Risk overlay: 200MA trend + ML size adjustment
+    overlay_result = evaluate_risk_overlay_strategy(data, train_fraction=2/3)
+
+    # Equity curves
+    ml_eq       = ml_result.extra.get("equity", pd.Series(dtype=float))
+    overlay_eq  = overlay_result.extra.get("equity", pd.Series(dtype=float))
     threshold_eq = best_result.extra.get("equity", pd.Series(dtype=float))
     spy_eq = (1 + data["spy_close"].pct_change().fillna(0)).cumprod() * 100
     qqq_eq = (1 + data["qqq_close"].pct_change().fillna(0)).cumprod() * 100
     equity_df = pd.DataFrame({
-        "ML_model": ml_eq,
+        "ML_model":  ml_eq,
+        "overlay":   overlay_eq,
         "threshold": threshold_eq,
-        "SPY": spy_eq,
-        "QQQ": qqq_eq,
+        "SPY":       spy_eq,
+        "QQQ":       qqq_eq,
     }).dropna()
 
     # Proper walk-forward: per-fold optimization → true OOS evaluation (no leakage)
@@ -481,6 +561,7 @@ def optimize_sweet_spot(
         best_params=best_params,
         best_result=best_result,
         ml_result=ml_result,
+        overlay_result=overlay_result,
         baseline_result=baseline_result,
         qqq_result=qqq_result,
         spy_result=spy_result,

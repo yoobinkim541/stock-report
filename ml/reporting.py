@@ -143,6 +143,7 @@ def build_ml_strategy_report(
     ml_result: BacktestResult,
     qqq_result: Optional[BacktestResult] = None,
     spy_result: Optional[BacktestResult] = None,
+    overlay_result: Optional[BacktestResult] = None,
     ib_metrics: Optional[dict] = None,
     weights: Optional[pd.Series] = None,
     wf_summary: Optional[dict] = None,
@@ -196,6 +197,13 @@ def build_ml_strategy_report(
         lines += _fmt_result_block(spy_result)
         if spy_excess is not None:
             lines.append(f"  ML 초과(vs SPY): {spy_excess:+.1%}")
+        lines.append("")
+
+    # Risk overlay result
+    if overlay_result:
+        ol_excess = ((overlay_result.cagr or 0) - (qqq_cagr or 0)) if qqq_cagr is not None else None
+        lines.append(f"▶ {overlay_result.name}")
+        lines += _fmt_result_block(overlay_result, excess_vs=ol_excess)
         lines.append("")
 
     # Existing IB/barbell strategy
@@ -329,9 +337,10 @@ def build_sample_ml_strategy_report() -> str:
     bench = build_benchmark_comparison(data, ml_result=result.ml_result)
 
     main_text = build_ml_strategy_report(
-        ml_result=result.ml_result,      # actual OOS ExcessReturnModel result (not grid-searched threshold)
+        ml_result=result.ml_result,
         qqq_result=result.qqq_result,
         spy_result=result.spy_result,
+        overlay_result=result.overlay_result,
         weights=result.weights,
         wf_summary=result.wf_summary,
         as_of="샘플 (최적화 샘플 / synthetic smoke)",
@@ -364,6 +373,7 @@ def build_real_ml_strategy_report(asset_ticker: str = "QQQ", days: int = 756) ->
         ml_result=result.ml_result,
         qqq_result=result.qqq_result,
         spy_result=result.spy_result,
+        overlay_result=result.overlay_result,
         weights=result.weights,
         wf_summary=result.wf_summary,
         as_of=f"실데이터 {asset_ticker} {days}일 ({today})",
