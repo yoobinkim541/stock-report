@@ -816,10 +816,97 @@ def _fg_dca_adjustment(fg_proxy: float) -> float:
     return 1.0
 
 
+def _ml_dca_blend(base_weights: dict) -> tuple[dict, dict, float]:
+    """ML 랭킹 점수로 DCA 비중 조정 (SGOV/QQQI 제외).
+
+    Returns (blended_weights, raw_scores, breadth_score)
+      blended_weights : 정규화된 조정 비중
+      raw_scores      : {ticker: ml_score} 포트폴리오 종목별 예측값
+      breadth_score   : 포트폴리오 평균 ML 점수 (시장 강도 지표)
+    """
+    NON_EQUITY = {"SGOV", "QQQI"}   # 랭킹 대상 제외 (안전자산/배당)
+    try:
+        import numpy as np, pandas as pd
+        from ml.ranker import load_ranker
+        from ml.data_pipeline import fetch_prices, build_stock_features, build_fear_greed_proxy
+
+        result = load_ranker()
+        if result is None:
+            return base_weights, {}, 0.0
+
+        equity = [t for t in base_weights if t not in NON_EQUITY]
+        non_eq = {t: w for t, w in base_weights.items() if t in NON_EQUITY}
+
+        prices = fetch_prices(equity + ["QQQ","^VIX","HYG","LQD","IEF","TLT"], days=300)
+        fg     = build_fear_greed_proxy(days=300)
+        mkt    = fg.to_frame("fg_score")
+        if "^VIX" in prices:
+            mkt["vix"] = prices["^VIX"]["Close"]
+        mkt        = mkt.ffill()
+        qqq_close  = prices.get("QQQ", pd.DataFrame()).get("Close")
+
+        scores: dict[str, float] = {}
+        for ticker in equity:
+            df = prices.get(ticker)
+            if df is None or len(df) < 60:
+                continue
+            feat = build_stock_features(ticker, df, mkt, qqq_close=qqq_close)
+            if feat.empty:
+                continue
+            clean = feat.dropna()
+            if clean.empty:
+                continue
+            row = clean.iloc[-1].reindex(result.feature_names)
+            if row.isna().any():
+                continue
+            scores[ticker] = float(result.model.predict(row.to_frame().T)[0])
+
+        if not scores:
+            return base_weights, {}, 0.0
+
+        breadth = float(np.mean(list(scores.values())))
+
+        # 점수 0~1 백분위 → 비중 ×(0.8~1.2)
+        s_arr = np.array(list(scores.values()))
+        s_min, s_max = s_arr.min(), s_arr.max()
+        if s_max == s_min:
+            return base_weights, scores, breadth
+        percs = {t: (s - s_min) / (s_max - s_min) for t, s in scores.items()}
+
+        blended: dict[str, float] = {}
+        for t in equity:
+            base = base_weights.get(t, 0.0)
+            adj  = 1.0 + 0.4 * percs.get(t, 0.5) - 0.2   # 0.8~1.2
+            blended[t] = base * adj
+        blended.update(non_eq)
+
+        total = sum(blended.values())
+        if total > 0:
+            blended = {k: round(v / total, 4) for k, v in blended.items()}
+
+        return blended, scores, breadth
+
+    except Exception as e:
+        import logging as _log
+        _log.getLogger(__name__).warning("ML DCA 블렌딩 실패: %s", e)
+        return base_weights, {}, 0.0
+
+
+def _ml_breadth_mult(breadth: float) -> tuple[float, str]:
+    """ML 시장 강도 점수 → DCA 배율 보정 인자."""
+    if breadth > 0.005:
+        return 1.1, f"ML 강세 ({breadth*100:+.2f}%)"
+    if breadth < -0.010:
+        return 0.8, f"ML 약세 ({breadth*100:+.2f}%)"
+    if breadth < -0.005:
+        return 0.9, f"ML 약세 ({breadth*100:+.2f}%)"
+    return 1.0, ""
+
+
 def calculate_dca(market_type: str, phase_key, exchange_rate: float = 1380.0) -> dict:
     """시장 상태별 DCA 금액 및 종목 배분 (원화 + USD 환산).
 
-    Fear/Greed proxy 극단값(≤20 극도공포, ≥80 극도탐욕) 시 배율 ±20% 보정.
+    보정 순서: Phase 기본배율 × F&G proxy × ML 시장강도 × (종목별 ML 비중 블렌딩)
     """
     w_normal, w_bear = load_dca_weights()
 
@@ -839,20 +926,46 @@ def calculate_dca(market_type: str, phase_key, exchange_rate: float = 1380.0) ->
         fg_proxy = get_fg_proxy_score()
     except Exception:
         fg_proxy = -1.0
-    fg_adj  = _fg_dca_adjustment(fg_proxy)
-    adj_mult = round(mult * fg_adj, 2)
+    fg_adj = _fg_dca_adjustment(fg_proxy)
 
-    total_krw = int(DCA_DAILY_BASE_KRW * adj_mult)
-    total_usd = round(total_krw / exchange_rate, 2)
-    allocation = {t: int(total_krw * w) for t, w in weights.items()}
+    # ML 비중 블렌딩 + 시장강도 보정
+    ml_weights, ml_scores, breadth = _ml_dca_blend(weights)
+    ml_mult, ml_label = _ml_breadth_mult(breadth)
+
+    # 최종 배율 (Phase × F&G × ML강도)
+    adj_mult = round(mult * fg_adj * ml_mult, 2)
+
+    total_krw  = int(DCA_DAILY_BASE_KRW * adj_mult)
+    total_usd  = round(total_krw / exchange_rate, 2)
+
+    # ML 비중 기반 배분 + 원래 비중 방향 표시
+    allocation     = {t: int(total_krw * w) for t, w in ml_weights.items()}
+    base_alloc     = {t: int(total_krw * w) for t, w in weights.items()}
+    ml_direction   = {}   # ticker → "↑ML" / "↓ML" / ""
+    for t in weights:
+        base_w = weights.get(t, 0)
+        ml_w   = ml_weights.get(t, 0)
+        if ml_w > base_w * 1.05:
+            ml_direction[t] = "↑ML"
+        elif ml_w < base_w * 0.95:
+            ml_direction[t] = "↓ML"
+        else:
+            ml_direction[t] = ""
+
     return {
-        "total_krw":   total_krw,
-        "total_usd":   total_usd,
-        "multiplier":  adj_mult,
-        "base_mult":   mult,
-        "fg_proxy":    round(fg_proxy, 1),
-        "fg_adj":      fg_adj,
-        "by_ticker":   allocation,
+        "total_krw":     total_krw,
+        "total_usd":     total_usd,
+        "multiplier":    adj_mult,
+        "base_mult":     mult,
+        "fg_proxy":      round(fg_proxy, 1),
+        "fg_adj":        fg_adj,
+        "ml_mult":       ml_mult,
+        "ml_label":      ml_label,
+        "ml_scores":     ml_scores,
+        "ml_breadth":    round(breadth * 100, 3),   # % 단위
+        "ml_direction":  ml_direction,
+        "by_ticker":     allocation,
+        "base_by_ticker": base_alloc,
         "exchange_rate": exchange_rate,
     }
 

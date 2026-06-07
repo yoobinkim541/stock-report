@@ -545,22 +545,41 @@ def cmd_portfolio(d: dict) -> str:
 
 
 def cmd_dca(d: dict) -> str:
-    dca = calculate_dca(d["market_type"], d["phase_key"], d["exchange_rate"])
-    fg_proxy = dca.get("fg_proxy", -1.0)
-    fg_adj   = dca.get("fg_adj", 1.0)
+    dca       = calculate_dca(d["market_type"], d["phase_key"], d["exchange_rate"])
     base_mult = dca.get("base_mult", dca["multiplier"])
+    fg_proxy  = dca.get("fg_proxy", -1.0)
+    fg_adj    = dca.get("fg_adj", 1.0)
+    ml_mult   = dca.get("ml_mult", 1.0)
+    ml_label  = dca.get("ml_label", "")
+    ml_bread  = dca.get("ml_breadth", 0.0)
+    ml_dir    = dca.get("ml_direction", {})
 
-    # proxy 조정 표시 (극단값일 때만)
-    adj_note = ""
-    if fg_adj != 1.0 and fg_proxy >= 0:
-        direction = "증액" if fg_adj > 1.0 else "감액"
-        adj_note = f"  (proxy {fg_proxy:.0f} → {direction} {fg_adj}x)"
+    # 배율 분해: Phase × F&G × ML
+    mult_parts = [f"{base_mult}×(Phase)"]
+    if fg_adj != 1.0:
+        mult_parts.append(f"×{fg_adj}(F&G)")
+    if ml_mult != 1.0:
+        mult_parts.append(f"×{ml_mult}(ML)")
+    mult_str = "  ".join(mult_parts)
 
     lines = [
-        f"💸 오늘 DCA  {dca['total_krw']:,}원  (${dca['total_usd']:.2f})  [{dca['multiplier']}x]{adj_note}",
-        "━━━━━━━━━━━━━━━━━━━━━━━",
-    ] + _dca_rows(dca["by_ticker"], dca["total_krw"], d["exchange_rate"]) + [
+        f"💸 오늘 DCA  {dca['total_krw']:,}원  (${dca['total_usd']:.2f})",
+        f"   [{dca['multiplier']}×]  {mult_str}",
+    ]
+    if ml_label:
+        lines.append(f"   🤖 {ml_label}")
+    lines.append("━━━━━━━━━━━━━━━━━━━━━━━")
+
+    # 종목별 배분 + ML 방향 표시
+    for ticker, amt in dca["by_ticker"].items():
+        pct  = amt / dca["total_krw"] * 100 if dca["total_krw"] > 0 else 0
+        tag  = ml_dir.get(ticker, "")
+        usd  = round(amt / d["exchange_rate"], 2)
+        lines.append(f"  {ticker:<6}  {amt:>7,}원  ${usd:.2f}  ({pct:.0f}%)  {tag}")
+
+    lines += [
         "",
+        f"   포트폴리오 ML 강도: {ml_bread:+.2f}%",
         "📋 키움 소수점 매수 주문서: /order",
     ]
     return "\n".join(lines)
