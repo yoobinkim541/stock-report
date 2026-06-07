@@ -41,15 +41,29 @@ class RankerResult:
 
 # ── 학습 ──────────────────────────────────────────────────────────────────────
 
+def _make_ranker_labels(excess: np.ndarray, dates: pd.Index) -> tuple[np.ndarray, np.ndarray]:
+    """LGBMRanker용 rank label(0~3 버킷) + group array 생성."""
+    df = pd.DataFrame({"excess": excess, "date": dates})
+    # 날짜별 4분위 버킷 (0=하위, 3=상위)
+    df["label"] = df.groupby("date")["excess"].transform(
+        lambda x: pd.qcut(x.rank(method="first"), q=4, labels=[0, 1, 2, 3])
+    ).astype(int)
+    df = df.sort_values("date")  # LGBMRanker: group 순서대로 정렬 필요
+    groups = df.groupby("date", sort=True).size().values
+    return df["label"].values, groups
+
+
 def train_ranker(
     dataset: dict,
     train_frac: float = 0.7,
+    use_ranker: bool = True,
 ) -> RankerResult:
-    """시계열 분할로 LGBMRegressor 학습, OOS 성능 평가.
+    """시계열 분할로 LGBMRanker(기본) 또는 LGBMRegressor 학습, OOS 성능 평가.
 
     Args:
-        dataset:    build_ml_dataset() 반환값
-        train_frac: 학습 기간 비율 (나머지는 OOS 평가)
+        dataset:     build_ml_dataset() 반환값
+        train_frac:  학습 기간 비율 (나머지는 OOS 평가)
+        use_ranker:  True=LGBMRanker(lambdarank), False=LGBMRegressor
 
     Returns:
         RankerResult
@@ -81,25 +95,51 @@ def train_ranker(
     test_valid  = np.isfinite(X_test).all(axis=1) & np.isfinite(y_test)
     X_train, y_train = X_train[train_valid], y_train[train_valid]
     X_test,  y_test  = X_test[test_valid],  y_test[test_valid]
+    train_dates = features[train_mask][train_valid].index.get_level_values("date")
 
-    logger.info("학습: %d행 | OOS: %d행 | 분할일: %s", len(X_train), len(X_test), split_date.date())
+    logger.info("학습: %d행 | OOS: %d행 | 분할일: %s | 모델: %s",
+                len(X_train), len(X_test), split_date.date(),
+                "LGBMRanker" if use_ranker else "LGBMRegressor")
 
-    model = lgb.LGBMRegressor(
-        objective="regression",
-        n_estimators=200,
-        num_leaves=31,
-        learning_rate=0.05,
-        min_child_samples=20,
-        subsample=0.8,
-        colsample_bytree=0.8,
-        reg_alpha=0.1,
-        reg_lambda=0.1,
-        random_state=42,
-        verbose=-1,
-        n_jobs=-1,
-    )
     feat_names = list(features.columns)
-    model.fit(X_train, y_train, feature_name=feat_names)
+
+    if use_ranker:
+        labels, groups = _make_ranker_labels(y_train, train_dates)
+        # X_train도 날짜 순서로 재정렬
+        date_order = np.argsort(train_dates, kind="stable")
+        X_train_sorted = X_train[date_order]
+
+        model = lgb.LGBMRanker(
+            objective="lambdarank",
+            n_estimators=200,
+            num_leaves=31,
+            learning_rate=0.05,
+            min_child_samples=5,
+            subsample=0.8,
+            colsample_bytree=0.8,
+            reg_alpha=0.1,
+            reg_lambda=0.1,
+            random_state=42,
+            verbose=-1,
+            n_jobs=-1,
+        )
+        model.fit(X_train_sorted, labels, group=groups, feature_name=feat_names)
+    else:
+        model = lgb.LGBMRegressor(
+            objective="regression",
+            n_estimators=200,
+            num_leaves=31,
+            learning_rate=0.05,
+            min_child_samples=20,
+            subsample=0.8,
+            colsample_bytree=0.8,
+            reg_alpha=0.1,
+            reg_lambda=0.1,
+            random_state=42,
+            verbose=-1,
+            n_jobs=-1,
+        )
+        model.fit(X_train, y_train, feature_name=feat_names)
 
     # OOS 예측
     preds = model.predict(X_test)
