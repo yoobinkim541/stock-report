@@ -127,16 +127,21 @@ def max_drawdown(close: pd.Series) -> float:
     return float(drawdown.min())
 
 
-def cagr(close: pd.Series) -> Optional[float]:
-    """Compound Annual Growth Rate. Returns None if < 1 year of data."""
+def cagr(close: pd.Series, min_days: int = 63) -> Optional[float]:
+    """Compound Annual Growth Rate, annualised regardless of window length.
+
+    Returns None if fewer than min_days of data (default 63 = ~1 quarter).
+    For periods shorter than 1 year the result is still an annualised figure
+    (extrapolated), so interpret with caution.
+    """
     valid = close.dropna()
     if len(valid) < 2:
         return None
     n_days = (valid.index[-1] - valid.index[0]).days
-    if n_days < 365:
+    if n_days < min_days:
         return None
     total = float(valid.iloc[-1] / valid.iloc[0])
-    years = n_days / 365.25
+    years = max(n_days / 365.25, 1 / 252)
     return total ** (1.0 / years) - 1.0
 
 
