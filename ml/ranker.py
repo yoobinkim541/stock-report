@@ -163,6 +163,105 @@ def _monthly_ic(preds: np.ndarray, actuals: np.ndarray, dates: pd.Index) -> pd.S
 
 # ── 저장 / 로드 ───────────────────────────────────────────────────────────────
 
+def walk_forward_backtest(
+    dataset: dict,
+    n_folds: int = 4,
+    min_train_months: int = 12,
+) -> dict:
+    """롤링 Walk-forward 백테스트 — 폴드별 독립 학습 + OOS 평가.
+
+    각 폴드: expanding window 학습 → 다음 기간 OOS 평가
+    (데이터 누수 없음)
+
+    Returns:
+        fold_ics       — 폴드별 월평균 IC
+        fold_top10_rets — 폴드별 상위10분위 평균 수익
+        mean_ic        — 전체 평균 IC
+        std_ic         — IC 표준편차
+        icir           — mean_ic / std_ic
+        n_folds        — 실행된 폴드 수
+    """
+    import lightgbm as lgb
+    from scipy.stats import spearmanr
+
+    features: pd.DataFrame = dataset["features"]
+    excess:   pd.Series    = dataset["excess"]
+
+    dates = features.index.get_level_values("date")
+    unique_dates = sorted(dates.unique())
+    total_months = (unique_dates[-1] - unique_dates[0]).days // 30
+
+    # 최소 훈련 기간 확보 후 폴드 분할
+    min_train_days = min_train_months * 21
+    usable = [d for d in unique_dates if (d - unique_dates[0]).days >= min_train_days]
+    if len(usable) < n_folds * 21:
+        return {"mean_ic": None, "std_ic": None, "icir": None,
+                "n_folds": 0, "fold_ics": [], "fold_top10_rets": []}
+
+    fold_size = len(usable) // n_folds
+    fold_ics: list[float] = []
+    fold_top10: list[float] = []
+
+    for fold in range(n_folds):
+        test_start = usable[fold * fold_size]
+        test_end   = usable[min((fold + 1) * fold_size, len(usable)) - 1]
+
+        train_mask = dates < test_start
+        test_mask  = (dates >= test_start) & (dates <= test_end)
+
+        if train_mask.sum() < 500 or test_mask.sum() < 100:
+            continue
+
+        X_tr = features[train_mask].values.astype(float)
+        y_tr = excess[train_mask].values.astype(float)
+        X_te = features[test_mask].values.astype(float)
+        y_te = excess[test_mask].values.astype(float)
+
+        valid_tr = np.isfinite(X_tr).all(axis=1) & np.isfinite(y_tr)
+        valid_te = np.isfinite(X_te).all(axis=1) & np.isfinite(y_te)
+        X_tr, y_tr = X_tr[valid_tr], y_tr[valid_tr]
+        X_te, y_te = X_te[valid_te], y_te[valid_te]
+
+        model = lgb.LGBMRegressor(
+            n_estimators=200, num_leaves=31, learning_rate=0.05,
+            min_child_samples=20, subsample=0.8, colsample_bytree=0.8,
+            reg_alpha=0.1, reg_lambda=0.1, random_state=42, verbose=-1, n_jobs=-1,
+        )
+        model.fit(X_tr, y_tr, feature_name=list(features.columns))
+        preds = model.predict(features[test_mask][valid_te])
+
+        test_dates_fold = features[test_mask][valid_te].index.get_level_values("date")
+        monthly_ics = _monthly_ic(preds, y_te, test_dates_fold)
+        if len(monthly_ics):
+            fold_ics.append(float(monthly_ics.mean()))
+
+        top_mask = preds >= np.percentile(preds, 90)
+        if top_mask.any():
+            fold_top10.append(float(y_te[top_mask].mean()))
+
+    if not fold_ics:
+        return {"mean_ic": None, "std_ic": None, "icir": None,
+                "n_folds": 0, "fold_ics": [], "fold_top10_rets": []}
+
+    ics   = np.array(fold_ics)
+    mean  = float(ics.mean())
+    std   = float(ics.std()) if len(ics) > 1 else 0.0
+    icir  = mean / std if std > 0 else 0.0
+
+    logger.info(
+        "Walk-forward %d폴드: mean_IC=%.3f  std=%.3f  ICIR=%.2f",
+        len(fold_ics), mean, std, icir,
+    )
+    return {
+        "mean_ic":        mean,
+        "std_ic":         std,
+        "icir":           icir,
+        "n_folds":        len(fold_ics),
+        "fold_ics":       fold_ics,
+        "fold_top10_rets": fold_top10,
+    }
+
+
 def save_ranker(result: RankerResult, path: Path = MODEL_CACHE) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_bytes(pickle.dumps(result))
