@@ -404,33 +404,50 @@ def optimize_sweet_spot(
         extra=_best.extra,
     )
 
-    # Actual ML model: ExcessReturnModel trained on first 2/3, predicts OOS last 1/3
-    # threshold는 OOS 예측값 분포(5/25/50백분위)에서 탐색 — sentiment 스케일과 무관
-    ml_signal = _generate_ml_signal(data)
-    ml_data = {**data, "features": data["features"].assign(ml_signal=ml_signal)}
-    oos_preds = ml_signal.dropna()
-    if len(oos_preds) > 10:
+    # ML model: nested train(0~2/3) / val(2/3~5/6) / test(5/6~end)
+    # threshold는 val 구간에서만 탐색 → test 구간은 1회만 평가 (누수 없음)
+    n = len(data["close"])
+    train_end = int(n * 2 / 3)
+    val_end   = int(n * 5 / 6)
+
+    ml_signal = _generate_ml_signal(data, train_fraction=2/3)
+    ml_data   = {**data, "features": data["features"].assign(ml_signal=ml_signal)}
+
+    # threshold 탐색 — validation 구간 예측값 분포에서만
+    val_preds = ml_signal.iloc[train_end:val_end].dropna()
+    if len(val_preds) > 10:
         ml_thresholds = sorted({
-            float(np.percentile(oos_preds, p)) for p in (5, 15, 25, 40, 50, 65)
+            float(np.percentile(val_preds, p)) for p in (5, 25, 50, 75)
         })
     else:
         ml_thresholds = [0.0]
 
     _qqq_cagr = qqq_result.cagr or 0.0
-    best_ml_score = float("-inf")
-    best_ml_params: dict = {"threshold": ml_thresholds[0], "max_weight": best_params.get("max_weight", 1.0), "safe_weight": best_params.get("safe_weight", 0.0), "signal_col": "ml_signal"}
+    best_ml_score  = float("-inf")
+    best_ml_params = {"threshold": ml_thresholds[0],
+                      "max_weight": best_params.get("max_weight", 1.0),
+                      "safe_weight": best_params.get("safe_weight", 0.0),
+                      "signal_col": "ml_signal"}
+
     for thr in ml_thresholds:
         _p = {**best_params, "threshold": thr, "signal_col": "ml_signal"}
-        _r = evaluate_threshold_strategy(ml_data, _p)
-        from ml.optimization import composite_score as _cs
-        _s = _cs(cagr=_r.cagr, max_drawdown=_r.max_drawdown, turnover=_r.turnover or 0.0, excess_return=(_r.cagr or 0.0) - _qqq_cagr)
+        # val 구간만 슬라이싱해서 평가
+        val_slice = {k: (v.iloc[train_end:val_end] if isinstance(v, (pd.Series, pd.DataFrame)) else v)
+                     for k, v in ml_data.items()}
+        _r = evaluate_threshold_strategy(val_slice, _p)
+        _s = composite_score(cagr=_r.cagr, max_drawdown=_r.max_drawdown,
+                             turnover=_r.turnover or 0.0,
+                             excess_return=(_r.cagr or 0.0) - _qqq_cagr)
         if _s > best_ml_score:
-            best_ml_score = _s
+            best_ml_score  = _s
             best_ml_params = _p
 
-    _ml = evaluate_threshold_strategy(ml_data, best_ml_params)
+    # 최종 test 구간에서 1회만 평가
+    test_slice = {k: (v.iloc[val_end:] if isinstance(v, (pd.Series, pd.DataFrame)) else v)
+                  for k, v in ml_data.items()}
+    _ml = evaluate_threshold_strategy(test_slice, best_ml_params)
     ml_result = BacktestResult(
-        name="ML 전략 (ExcessReturnModel, OOS)",
+        name="ML 전략 (ExcessReturnModel, nested OOS)",
         cumulative_return=_ml.cumulative_return,
         cagr=_ml.cagr,
         max_drawdown=_ml.max_drawdown,
