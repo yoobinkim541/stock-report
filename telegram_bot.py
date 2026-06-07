@@ -160,6 +160,7 @@ BOT_COMMANDS = [
     {"command": "alert",          "description": "가격 알림 관리 (add/list/remove)"},
     {"command": "mlreport",       "description": "ML 전략 성과 리포트 (샘플)"},
     {"command": "ranking",        "description": "NASDAQ100 종목 랭킹 (LightGBM)"},
+    {"command": "leverage",       "description": "레버리지 ETF 진입 분석 (QLD/TQQQ/SOXL/UPRO 손익비·타점)"},
 ]
 
 BOT_COMMAND_ALIASES = {
@@ -1169,10 +1170,32 @@ def _dispatch_ranking(chat_id: str, args: list):
     cmd_ranking(chat_id, args)
 
 
+def cmd_leverage(chat_id: str, args: list, send_fn=None):
+    """레버리지 ETF 진입 분석 — 현재 낙폭 기준 손익비·권장 비중·타점."""
+    _send = send_fn if send_fn is not None else send
+    retrain = "retrain" in (args or [])
+    _send(chat_id, "⏳ 레버리지 분석 중... (첫 실행 시 약 30초)")
+    try:
+        from ml.leverage_signal import get_entry_signal, format_leverage_report
+        sig    = get_entry_signal(retrain=retrain)
+        report = format_leverage_report(sig)
+        for chunk in (report[i:i+4000] for i in range(0, len(report), 4000)):
+            _send(chat_id, chunk)
+    except Exception as e:
+        _send(chat_id, f"❌ 레버리지 분석 오류: {e}")
+        logger.exception("cmd_leverage")
+
+
+def _dispatch_leverage(chat_id: str, args: list):
+    typing(chat_id)
+    cmd_leverage(chat_id, args)
+
+
 _COMMAND_HANDLERS = {
     "/report": _dispatch_report,
     "/mlreport": _dispatch_mlreport,
     "/ranking":  _dispatch_ranking,
+    "/leverage": _dispatch_leverage,
     "/alert": lambda chat_id, args: _dispatch_with_typing(cmd_alert, chat_id, args),
     "/dividend": lambda chat_id, args: _dispatch_with_send(cmd_dividend, chat_id, args),
     "/sim": lambda chat_id, args: _dispatch_with_typing(cmd_sim, chat_id, args),
