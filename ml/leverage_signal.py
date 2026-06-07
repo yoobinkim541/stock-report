@@ -334,6 +334,16 @@ def build_entry_signal(context: dict, model: Optional[LeverageModel] = None) -> 
     )
 
 
+def get_optimized_params() -> dict | None:
+    """leverage_optimizer 최적 파라미터 로드."""
+    try:
+        from ml.leverage_optimizer import load_result
+        r = load_result()
+        return r.get("best_params") if r else None
+    except Exception:
+        return None
+
+
 def get_entry_signal(retrain: bool = False) -> EntrySignal:
     """현재 시황 기반 레버리지 진입 신호 (캐시 활용)."""
     import warnings; warnings.filterwarnings("ignore")
@@ -417,6 +427,36 @@ def format_leverage_report(sig: EntrySignal) -> str:
     lines += [
         "",
         f"🚨 청산 조건: {sig.stop_signal}",
+    ]
+
+    # 최적화 결과 섹션 (저장된 파라미터 있으면 표시)
+    try:
+        from ml.leverage_optimizer import load_result
+        opt = load_result()
+        if opt and opt.get("best_params"):
+            p   = opt["best_params"]
+            lines += [
+                "",
+                "[ 🏆 Optuna 스위트스팟 최적 파라미터 ]",
+                f"  종목: {p.get('instrument')}  "
+                f"진입낙폭: ≤{p.get('min_dd',0)*100:.1f}%  "
+                f"VIX: ≤{p.get('max_vix_entry',0):.0f}  "
+                f"RSI: ≤{p.get('min_rsi_entry',0):.0f}",
+                f"  레버리지 {p.get('lev_weight',0)*100:.0f}%  "
+                f"SGOV최소 {p.get('sgov_floor',0)*100:.0f}%  "
+                f"청산MA {p.get('exit_ma',0)}일  "
+                f"스탑 {p.get('trailing_stop',0)*100:.1f}%",
+                f"  백테스트: CAGR {opt.get('best_cagr',0)*100:+.1f}%  "
+                f"Sharpe {opt.get('best_sharpe',0):.2f}  "
+                f"MDD {opt.get('best_max_dd',0)*100:.1f}%",
+                f"  WF Calmar: {opt.get('wf_mean_calmar',0):.2f} ± {opt.get('wf_std_calmar',0):.2f}  "
+                f"({opt.get('n_wf_folds',0)}폴드)",
+                f"  최적화: {opt.get('optimized_at','')}",
+            ]
+    except Exception:
+        pass
+
+    lines += [
         "",
         f"⚠️ 레버리지는 변동성 붕괴(decay) 위험 있음",
         f"⚠️ 과거 분포 기반 — 미래 수익 보장 없음",

@@ -2,7 +2,10 @@
 """
 daily_leverage_retrain.py — 레버리지 ETF 모델 일일 재학습 + 신호 발송
 
-크론 (미국 장 마감 후, 평일 22:15 UTC = 07:15 KST):
+매일 (22:15 UTC): LeverageModel 재학습 → 진입 신호 발송
+매주 월요일    : Optuna 파라미터 재최적화 (주말 종가 반영)
+
+크론:
     15 22 * * 1-5 cd /home/ubuntu/projects/stock-report && uv run python daily_leverage_retrain.py >> /tmp/daily_leverage.log 2>&1
 """
 import logging
@@ -40,21 +43,58 @@ def _send(text: str) -> bool:
         return False
 
 
+def _should_reoptimize() -> bool:
+    """매주 월요일 OR 최적화 결과 없을 때 재최적화."""
+    from datetime import datetime, timezone, timedelta
+    from ml.leverage_optimizer import load_result, RESULTS_PATH
+    if not RESULTS_PATH.exists():
+        return True
+    # 월요일 (weekday=0) = 재최적화
+    if datetime.now(timezone(timedelta(hours=9))).weekday() == 0:
+        return True
+    return False
+
+
 def main() -> int:
     logger.info("=== daily_leverage_retrain 시작 ===")
 
+    # ── 주간 파라미터 재최적화 (월요일) ──────────────────────────────
+    if _should_reoptimize():
+        logger.info("주간 Optuna 파라미터 재최적화 시작...")
+        try:
+            from ml.leverage_optimizer import optimize_leverage, format_optimization_report
+            from ml.data_pipeline import fetch_prices
+
+            prices    = fetch_prices(["QQQ"], days=2520)
+            qqq       = prices["QQQ"]["Close"]
+            qqq_years = (qqq.index[-1] - qqq.index[0]).days / 365.25
+            qqq_cagr  = float(qqq.iloc[-1] / qqq.iloc[0]) ** (1 / qqq_years) - 1
+
+            opt_result = optimize_leverage(
+                days=2520, n_optuna=200,
+                train_months=18, test_months=6, step_months=3,
+            )
+            opt_report = format_optimization_report(opt_result, bm_qqq=qqq_cagr)
+            _send(opt_report)
+            logger.info(
+                "Optuna 재최적화 완료 — CAGR %.1f%%  MDD %.1f%%  Calmar %.2f",
+                opt_result.best_cagr * 100, opt_result.best_max_dd * 100, opt_result.best_calmar,
+            )
+        except Exception as e:
+            logger.error("파라미터 재최적화 실패: %s", e)
+            _send(f"⚠️ 레버리지 파라미터 재최적화 실패: {e}")
+
+    # ── 일일 모델 재학습 + 신호 발송 ────────────────────────────────
     try:
         from ml.leverage_signal import get_entry_signal, format_leverage_report
 
-        # 강제 재학습 (최신 종가 반영)
         logger.info("LeverageModel 재학습 중...")
         sig    = get_entry_signal(retrain=True)
         report = format_leverage_report(sig)
 
         logger.info(
-            "재학습 완료 — 낙폭 %.1f%% | 진입조언: %s",
-            sig.current_drawdown * 100,
-            sig.entry_advice[:20],
+            "재학습 완료 — 낙폭 %.1f%% | %s",
+            sig.current_drawdown * 100, sig.entry_advice[:25],
         )
 
         if _send(report):

@@ -293,6 +293,74 @@ def run_tests() -> list[str]:
     except ImportError as e:
         failures.append(f"❌ bot wiring: import 실패 — {e}")
 
+    # ── p12: LeverageOptimizer (네트워크 없이 합성 데이터) ────────────────────────
+    logger.info("[p12] LeverageOptimizer BacktestEngine + composite_score")
+    from ml.leverage_optimizer import (
+        BacktestEngine as LevEngine,
+        BacktestResult as LevBacktestResult,
+        composite_score as lev_composite_score,
+        load_result as lev_load_result,
+        format_optimization_report as lev_format_report,
+        OptimizationResult as LevOptResult,
+    )
+
+    _lev_idx = pd.date_range("2022-01-03", periods=252, freq="B")
+    _rng     = np.random.default_rng(99)
+    _lev_px  = {
+        "QQQ":  pd.Series(100 * (1 + _rng.normal(0.0003, 0.01,  252)).cumprod(), index=_lev_idx),
+        "QLD":  pd.Series(100 * (1 + _rng.normal(0.0006, 0.02,  252)).cumprod(), index=_lev_idx),
+        "SGOV": pd.Series(100 * (1 + _rng.normal(0.0001, 0.001, 252)).cumprod(), index=_lev_idx),
+        "^VIX": pd.Series(_rng.uniform(15, 35, 252), index=_lev_idx),
+    }
+    _lev_p   = {
+        "instrument":    "QLD",
+        "min_dd":        -0.10,
+        "max_vix_entry": 35.0,
+        "min_rsi_entry": 40.0,
+        "lev_weight":    0.25,
+        "sgov_floor":    0.40,
+        "exit_ma":       20,
+        "exit_vix":      38.0,
+        "trailing_stop": -0.10,
+        "hold_days_max": 63,
+    }
+
+    failures += _check("LevBacktestEngine.run",
+        lambda: LevEngine(_lev_p, _lev_px).run(),
+        ("LevBacktestResult 반환", lambda r: isinstance(r, LevBacktestResult)),
+        ("CAGR 유한값",            lambda r: np.isfinite(r.cagr)),
+        ("Max DD <= 0",            lambda r: r.max_dd <= 0),
+        ("Sharpe 유한값",          lambda r: np.isfinite(r.sharpe)),
+    )
+
+    failures += _check("lev_composite_score",
+        lambda: lev_composite_score(LevEngine(_lev_p, _lev_px).run()),
+        ("float 반환",       lambda r: isinstance(r, float)),
+        ("유한하거나 -inf",  lambda r: np.isfinite(r) or r == float("-inf")),
+    )
+
+    failures += _check("lev_load_result (결과 없을 때 None 또는 dict)",
+        lambda: lev_load_result(),
+        ("None 또는 dict", lambda r: r is None or isinstance(r, dict)),
+    )
+
+    _lev_res = LevEngine(_lev_p, _lev_px).run()
+    _lev_res.period = "2022-01~2022-06"
+    _lev_opt = LevOptResult(
+        best_params=_lev_p, best_calmar=_lev_res.calmar,
+        best_sharpe=_lev_res.sharpe, best_cagr=_lev_res.cagr,
+        best_max_dd=_lev_res.max_dd, wf_results=[_lev_res],
+        wf_mean_calmar=_lev_res.calmar, wf_std_calmar=0.0,
+        all_trials=pd.DataFrame(), optimized_at="2026-06-07 10:00 KST",
+    )
+    failures += _check("lev_format_report",
+        lambda: lev_format_report(_lev_opt, bm_qqq=0.12),
+        ("비어있지 않음",      lambda r: len(r) > 100),
+        ("최적 파라미터 포함", lambda r: "QLD" in r),
+        ("CAGR 포함",          lambda r: "CAGR" in r),
+        ("경고 포함",          lambda r: "백테스트" in r),
+    )
+
     return failures
 
 
@@ -334,7 +402,7 @@ def main():
         sys.exit(1)
 
     elapsed = time.time() - t0
-    total_checks = 47  # 위 _check 호출의 총 assertions 수 (ml_result 타입 체크 추가)
+    total_checks = 58  # 위 _check 호출의 총 assertions 수 (p12 LeverageOptimizer 11건 추가)
 
     if failures:
         msg = "\n".join(failures)

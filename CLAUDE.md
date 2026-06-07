@@ -11,6 +11,10 @@ deliver_investment_report.sh (크론 23:00 UTC)
 kiwoom_sync_rest.py (크론 23:35 UTC = 08:35 KST, 월~금)
   └── 키움 REST API kt00018 → portfolio_snapshot.json domestic 섹션 업데이트
 
+daily_leverage_retrain.py (크론 22:15 UTC, 평일)
+  ├── LeverageModel 일일 재학습 → 진입 신호 발송
+  └── (월요일만) Optuna 파라미터 재최적화 → ~/reports/ml-cache/leverage_best_params.json
+
 telegram_bot.py (상시, fcntl 단일 인스턴스 잠금)
   ├── fetch_market()         → barbell_strategy 전체 조회 (5분 캐시, threading.Lock)
   ├── Phase 5min 감시        → barbell_state.json 공유 (크론과 중복 방지)
@@ -53,8 +57,9 @@ news_spike_detector.py (크론 매 1분)
 | `portfolio_sync_server.py` | 외부 잔고 수신 Flask 서버 (port 8765, Bearer 인증) | — |
 | `bot_healthcheck.py` | 봇·서버 상태 자동 점검 (30분, 중복인스턴스·409·PID·파일 신선도) | `/tmp/healthcheck_last_alert.json` |
 | `bot_smoke_test.py` | 기능 검증 연기 테스트 25항목 (매일 크론, 실패 시만 알림) | — |
-| `ml_smoke_test.py` | ML 파이프라인 end-to-end 연기 테스트 46항목 — p3~p11 전체, 네트워크 불필요 (매일 크론) | — |
+| `ml_smoke_test.py` | ML 파이프라인 end-to-end 연기 테스트 58항목 — p3~p12 전체, 네트워크 불필요 (매일 크론) | — |
 | `ml/sweet_spot.py` | AR(1) 합성 데이터 생성 + 임계값 전략 그리드서치 (`optimize_sweet_spot`) + 선택적 matplotlib 시각화 | — |
+| `ml/leverage_optimizer.py` | Optuna TPE 레버리지 파라미터 스위트스팟 탐색 (`optimize_leverage`) + Walk-Forward OOS 검증 + 결과 저장/로드 | `~/reports/ml-cache/leverage_best_params.json` |
 
 ## 텔레그램 봇 명령어
 
