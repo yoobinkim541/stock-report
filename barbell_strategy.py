@@ -816,7 +816,24 @@ def _fg_dca_adjustment(fg_proxy: float) -> float:
     return 1.0
 
 
-def _ml_dca_blend(base_weights: dict) -> tuple[dict, dict, float]:
+def _phase_blend_factor(market_type: str, phase_key) -> float:
+    """Phase에 따라 ML 블렌딩 강도를 동적으로 결정.
+
+    고평가(Bull-2)일수록 ML 영향 최소화,
+    급락(Bear 3~5)일수록 ML 방향성 신뢰도 높여 강하게 반영.
+    """
+    if market_type == "bull":
+        return {"bull2": 0.1, "bull1": 0.2}.get(str(phase_key), 0.25)
+    if market_type == "bear":
+        return {0: 0.3, 1: 0.35, 2: 0.45, 3: 0.55, 4: 0.60, 5: 0.60}.get(phase_key, 0.3)
+    return 0.3   # neutral
+
+
+def _ml_dca_blend(
+    base_weights:  dict,
+    market_type:   str = "neutral",
+    phase_key      = 0,
+) -> tuple[dict, dict, float]:
     """ML 랭킹 점수로 DCA 비중 조정 (SGOV/QQQI 제외).
 
     Returns (blended_weights, raw_scores, breadth_score)
@@ -873,10 +890,13 @@ def _ml_dca_blend(base_weights: dict) -> tuple[dict, dict, float]:
             return base_weights, scores, breadth
         percs = {t: (s - s_min) / (s_max - s_min) for t, s in scores.items()}
 
+        blend = _phase_blend_factor(market_type, phase_key)   # Phase별 동적 강도
+
         blended: dict[str, float] = {}
         for t in equity:
             base = base_weights.get(t, 0.0)
-            adj  = 1.0 + 0.4 * percs.get(t, 0.5) - 0.2   # 0.8~1.2
+            # blend=0.1(Bull-2): 미미한 조정 / blend=0.6(Bear-5): 강한 조정
+            adj  = 1.0 + blend * percs.get(t, 0.5) - blend / 2
             blended[t] = base * adj
         blended.update(non_eq)
 
@@ -929,7 +949,7 @@ def calculate_dca(market_type: str, phase_key, exchange_rate: float = 1380.0) ->
     fg_adj = _fg_dca_adjustment(fg_proxy)
 
     # ML 비중 블렌딩 + 시장강도 보정
-    ml_weights, ml_scores, breadth = _ml_dca_blend(weights)
+    ml_weights, ml_scores, breadth = _ml_dca_blend(weights, market_type, phase_key)
     ml_mult, ml_label = _ml_breadth_mult(breadth)
 
     # 최종 배율 (Phase × F&G × ML강도)

@@ -73,6 +73,62 @@ class EntryEvent:
     features: dict           # 기타 ML 피처
 
 
+def _compute_vol_features(qqq: pd.Series, vix: pd.Series, date: pd.Timestamp) -> dict:
+    """vol 체제 피처 계산.
+
+    추가 피처:
+      vix_percentile  : VIX 252일 롤링 백분위 (0=역사적 저점, 1=공황)
+      vix_trend_5d    : VIX 5일 변화율 (상승=공황 확산)
+      drawdown_speed  : 낙폭 발생 속도 (20일 전 대비 낙폭 변화)
+      qqq_below_ma50  : QQQ < MA50 여부 (0/1)
+      vol_regime      : VIX 사분위 기반 체제 (0=낙관~3=공황)
+    """
+    result: dict = {}
+    try:
+        # VIX 백분위
+        vix_tail = vix.loc[:date].tail(253)
+        if len(vix_tail) >= 60:
+            cur = float(vix_tail.iloc[-1])
+            result["vix_percentile"] = float((vix_tail < cur).mean())
+        else:
+            result["vix_percentile"] = 0.5
+
+        # VIX 5일 추세
+        if len(vix_tail) >= 6:
+            result["vix_trend_5d"] = float(vix_tail.iloc[-1] / vix_tail.iloc[-6] - 1)
+        else:
+            result["vix_trend_5d"] = 0.0
+
+        # vol 체제 (0=저변동, 3=공황)
+        v = result.get("vix_percentile", 0.5)
+        result["vol_regime"] = float(min(3, int(v * 4)))
+
+        # 낙폭 속도 (20일간 낙폭 변화)
+        qqq_tail = qqq.loc[:date].tail(22)
+        if len(qqq_tail) >= 21:
+            dd_now  = float(qqq_tail.iloc[-1] / qqq_tail.max() - 1)
+            dd_prev = float(qqq_tail.iloc[-21] / qqq_tail.iloc[:1].max() - 1) if len(qqq_tail) >= 21 else dd_now
+            result["drawdown_speed"] = dd_now - dd_prev
+        else:
+            result["drawdown_speed"] = 0.0
+
+        # MA50 위치
+        ma50 = qqq.loc[:date].rolling(50).mean()
+        if not ma50.empty and not np.isnan(ma50.iloc[-1]):
+            result["qqq_below_ma50"] = float(qqq.loc[date] < ma50.iloc[-1])
+        else:
+            result["qqq_below_ma50"] = 0.0
+
+    except Exception:
+        result.setdefault("vix_percentile", 0.5)
+        result.setdefault("vix_trend_5d",   0.0)
+        result.setdefault("vol_regime",      1.0)
+        result.setdefault("drawdown_speed",  0.0)
+        result.setdefault("qqq_below_ma50",  0.0)
+
+    return result
+
+
 def find_entry_events(
     close_map: dict[str, pd.Series],
     vix:        pd.Series,
@@ -126,23 +182,28 @@ def find_entry_events(
                 except Exception:
                     pass
 
+        # 기본 피처 + vol 체제 피처
+        base_feats = {
+            "drawdown":    d,
+            "vix":         float(vix.get(date, np.nan)),
+            "rsi":         float(rsi.get(date, np.nan)),
+            "fg_proxy":    float(fg.get(date, np.nan)),
+            "ma200_gap":   float(ma200_g.get(date, 0)),
+            "mom_20d":     float((qqq.get(date, np.nan) / qqq.shift(20).get(date, np.nan) - 1)
+                                 if date in qqq.index else np.nan),
+        }
+        vol_feats = _compute_vol_features(qqq, vix, date)
+        feats = {**base_feats, **vol_feats}
+
         events.append(EntryEvent(
-            date        = date,
-            drawdown    = d,
-            vix         = float(vix.get(date, np.nan)),
-            rsi         = float(rsi.get(date, np.nan)),
-            fg_proxy    = float(fg.get(date, np.nan)),
-            ma200_gap   = float(ma200_g.get(date, 0)),
+            date            = date,
+            drawdown        = d,
+            vix             = float(vix.get(date, np.nan)),
+            rsi             = float(rsi.get(date, np.nan)),
+            fg_proxy        = float(fg.get(date, np.nan)),
+            ma200_gap       = float(ma200_g.get(date, 0)),
             forward_returns = fwd,
-            features    = {
-                "drawdown":    d,
-                "vix":         float(vix.get(date, np.nan)),
-                "rsi":         float(rsi.get(date, np.nan)),
-                "fg_proxy":    float(fg.get(date, np.nan)),
-                "ma200_gap":   float(ma200_g.get(date, 0)),
-                "mom_20d":     float((qqq.get(date, np.nan) / qqq.shift(20).get(date, np.nan) - 1)
-                                     if date in qqq.index else np.nan),
-            },
+            features        = feats,
         ))
         last_entry = date
 
@@ -319,6 +380,10 @@ def get_current_entry_context(days: int = 2520) -> dict:
     except Exception:
         fg_v = 50.0
 
+    # vol 체제 피처 (현재 시점)
+    vix_full = _fetch(["^VIX"], days=300).get("^VIX", pd.Series(dtype=float))
+    vol_feats = _compute_vol_features(qqq, vix_full, qqq.index[-1])
+
     current_feats = {
         "drawdown":  cur_dd,
         "vix":       vix_v,
@@ -326,6 +391,7 @@ def get_current_entry_context(days: int = 2520) -> dict:
         "fg_proxy":  fg_v,
         "ma200_gap": ma200_gap,
         "mom_20d":   float(qqq.pct_change(20).iloc[-1]) if len(qqq) > 20 else 0.0,
+        **vol_feats,
     }
 
     # 현재 낙폭 구간 통계

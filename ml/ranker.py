@@ -24,6 +24,29 @@ logger = logging.getLogger(__name__)
 MODEL_CACHE = Path.home() / "reports" / "ml-cache" / "ranker_model.pkl"
 
 
+# ── 생존편향 페널티 ────────────────────────────────────────────────────────────
+
+def _survivorship_penalty(feats: pd.Series) -> float:
+    """52주 고점 근처 + 강한 모멘텀 종목에 페널티 적용.
+
+    근거: NASDAQ100 현재 구성종목 중 최근 편입된 종목은
+         최고점 근처에서 편입되는 경향이 있어 모델이 과낙관할 수 있음.
+
+    조건 (둘 다 충족 시):
+      - dist_52w_high > -0.05 (52주 고점 5% 이내)
+      - mom_125d > 0.30 (125일 수익률 30% 이상)
+
+    Returns:
+      0.85 — 페널티 적용 (15% 점수 감소)
+      1.00 — 정상
+    """
+    dist_high = float(feats.get("dist_52w_high", -0.10))
+    mom_125d  = float(feats.get("mom_125d", 0.0))
+    if dist_high > -0.05 and mom_125d > 0.30:
+        return 0.85
+    return 1.0
+
+
 # ── 결과 컨테이너 ─────────────────────────────────────────────────────────────
 
 @dataclass
@@ -376,7 +399,12 @@ def rank_today(
         if today_feat.isna().any():
             continue
         score = float(result.model.predict(today_feat.to_frame().T)[0])
-        rows.append({"ticker": ticker, "score": score, **today_feat.to_dict()})
+        # 생존편향 페널티: 52주 고점 근처 + 강한 모멘텀 = 편입 이후 고점 가능성
+        penalty = _survivorship_penalty(today_feat)
+        score   = score * penalty
+        rows.append({"ticker": ticker, "score": score,
+                     "surv_penalty": round(penalty, 3),
+                     **today_feat.to_dict()})
 
     if not rows:
         return pd.DataFrame()

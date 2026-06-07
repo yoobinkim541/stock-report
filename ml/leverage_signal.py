@@ -79,16 +79,25 @@ def _kelly_weight(
 # ── ML 모델 ───────────────────────────────────────────────────────────────────
 
 class LeverageModel:
-    """각 레버리지 ETF의 horizon별 수익 예측 LightGBM 모델."""
+    """레버리지 ETF 듀얼 모델 (분류 + 회귀).
+
+    각 (instrument, horizon)마다 두 개의 서브모델:
+      clf: LGBMClassifier — 방향 예측 P(return > 0)  → AUC로 평가
+      reg: LGBMRegressor  — 수익률 크기 예측          → Pearson corr
+
+    Kelly 비중 계산 시 clf의 hit_rate를 사용 → 회귀 IC가 낮아도 안정적 비중 결정.
+    """
 
     def __init__(self):
-        self._models: dict = {}   # {(instrument, horizon): lgb.LGBMRegressor}
+        self._clf: dict = {}   # {(instrument, horizon): LGBMClassifier}
+        self._reg: dict = {}   # {(instrument, horizon): LGBMRegressor}
         self._feat_names: list[str] = []
         self._trained   = False
 
     def train(self, dataset: dict, train_frac: float = 0.7) -> dict:
-        """데이터셋으로 모델 학습. Returns 성능 지표."""
+        """데이터셋으로 분류 + 회귀 모델 동시 학습. Returns 성능 지표."""
         import lightgbm as lgb
+        from sklearn.metrics import roc_auc_score
 
         features: pd.DataFrame = dataset["features"]
         targets                = dataset["targets"]
@@ -107,56 +116,89 @@ class LeverageModel:
         X_te = features[test_mask].values.astype(float)
         perf: dict = {}
 
+        params_shared = dict(
+            n_estimators=150, num_leaves=20, learning_rate=0.05,
+            min_child_samples=8, subsample=0.8, colsample_bytree=0.8,
+            reg_alpha=0.05, reg_lambda=0.05, random_state=42,
+            verbose=-1, n_jobs=-1,
+        )
+
         for name in INSTRUMENTS:
             for h in HORIZONS:
-                key = (name, h)
                 target = targets.get(name, {}).get(h)
                 if target is None or target.empty:
                     continue
 
-                y = target.reindex(features.index)
-                y_tr = y[train_mask].values.astype(float)
-                y_te = y[test_mask].values.astype(float)
+                y_cont = target.reindex(features.index).values.astype(float)
+                y_bin  = (y_cont > 0).astype(int)   # 방향 라벨
 
-                valid_tr = np.isfinite(X_tr).all(axis=1) & np.isfinite(y_tr)
-                valid_te = np.isfinite(X_te).all(axis=1) & np.isfinite(y_te)
+                train_idx = train_mask.values if hasattr(train_mask, "values") else train_mask
+                test_idx  = test_mask.values  if hasattr(test_mask,  "values") else test_mask
+                valid_tr = np.isfinite(X_tr).all(axis=1) & np.isfinite(y_cont[train_idx])
+                valid_te = np.isfinite(X_te).all(axis=1) & np.isfinite(y_cont[test_idx])
                 if valid_tr.sum() < 20:
                     continue
 
-                model = lgb.LGBMRegressor(
-                    n_estimators=100, num_leaves=15, learning_rate=0.05,
-                    min_child_samples=10, subsample=0.8, colsample_bytree=0.8,
-                    random_state=42, verbose=-1, n_jobs=-1,
-                )
-                model.fit(
-                    X_tr[valid_tr], y_tr[valid_tr],
-                    feature_name=self._feat_names,
-                )
-                self._models[key] = model
+                # ── 분류: P(return > 0) ──
+                clf = lgb.LGBMClassifier(objective="binary", **params_shared)
+                clf.fit(X_tr[valid_tr], y_bin[train_idx][valid_tr],
+                        feature_name=self._feat_names)
+                self._clf[(name, h)] = clf
 
+                # ── 회귀: 수익률 크기 ──
+                reg = lgb.LGBMRegressor(objective="regression", **params_shared)
+                reg.fit(X_tr[valid_tr], y_cont[train_idx][valid_tr],
+                        feature_name=self._feat_names)
+                self._reg[(name, h)] = reg
+
+                # 성능 평가
                 if valid_te.sum() > 5:
-                    preds = model.predict(X_te[valid_te])
-                    corr  = float(np.corrcoef(preds, y_te[valid_te])[0, 1])
-                    perf[f"{name}_{h}d"] = round(corr, 3)
+                    y_te_cont = y_cont[test_idx][valid_te]
+                    y_te_bin  = y_bin[test_idx][valid_te]
+                    prob_te   = clf.predict_proba(X_te[valid_te])[:, 1]
+                    pred_te   = reg.predict(X_te[valid_te])
+
+                    try:
+                        auc  = float(roc_auc_score(y_te_bin, prob_te))
+                    except Exception:
+                        auc = 0.5
+                    corr = float(np.corrcoef(pred_te, y_te_cont)[0, 1]) if len(pred_te) > 2 else 0.0
+                    perf[f"{name}_{h}d"] = {"auc": round(auc, 3), "corr": round(corr, 3)}
 
         self._trained = True
-        logger.info("LeverageModel 학습 완료: %d 서브모델", len(self._models))
+        logger.info(
+            "LeverageModel 학습 완료: clf=%d reg=%d 서브모델",
+            len(self._clf), len(self._reg),
+        )
         return perf
 
-    def predict_returns(self, feats: dict) -> dict[str, dict[int, float]]:
-        """현재 피처 → 각 종목의 horizon별 예측 수익률."""
-        if not self._trained or not self._models:
+    def predict_proba(self, feats: dict) -> dict[str, dict[int, float]]:
+        """현재 피처 → 각 종목의 horizon별 P(양수 수익) 예측."""
+        if not self._trained or not self._clf:
             return {}
         x = np.array([[feats.get(f, 0.0) for f in self._feat_names]])
-        preds: dict[str, dict[int, float]] = {}
-        for (name, h), model in self._models.items():
-            if name not in preds:
-                preds[name] = {}
+        out: dict[str, dict[int, float]] = {}
+        for (name, h), clf in self._clf.items():
+            out.setdefault(name, {})
             try:
-                preds[name][h] = float(model.predict(x)[0])
+                out[name][h] = float(clf.predict_proba(x)[0, 1])
+            except Exception:
+                out[name][h] = 0.5
+        return out
+
+    def predict_returns(self, feats: dict) -> dict[str, dict[int, float]]:
+        """현재 피처 → 각 종목의 horizon별 예측 수익률 (회귀 모델)."""
+        if not self._trained or not self._reg:
+            return {}
+        x = np.array([[feats.get(f, 0.0) for f in self._feat_names]])
+        out: dict[str, dict[int, float]] = {}
+        for (name, h), reg in self._reg.items():
+            out.setdefault(name, {})
+            try:
+                out[name][h] = float(reg.predict(x)[0])
             except Exception:
                 pass
-        return preds
+        return out
 
     def save(self, path: Path = MODEL_PATH) -> None:
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -216,7 +258,8 @@ def build_entry_signal(context: dict, model: Optional[LeverageModel] = None) -> 
     rsi_v = cur_feats.get("rsi", np.nan)
     fg_v  = cur_feats.get("fg_proxy", 50.0)
 
-    # ML 예측 수익률
+    # ML 예측: 분류(hit_rate) + 회귀(수익률 크기)
+    ml_proba = model.predict_proba(cur_feats) if model and model._trained else {}
     ml_preds = model.predict_returns(cur_feats) if model and model._trained else {}
 
     instruments_out: dict[str, InstrumentSignal] = {}
@@ -236,6 +279,11 @@ def build_entry_signal(context: dict, model: Optional[LeverageModel] = None) -> 
             er30 = er90 = p25 = hr30 = np.nan
             mdd  = 0.0
             rr   = np.nan
+
+        # 분류 모델 hit_rate로 역사적 hit_rate 보정 (신뢰도 가중 블렌딩)
+        ml_hr30 = ml_proba.get(name, {}).get(21)
+        if ml_hr30 is not None and np.isfinite(hr30):
+            hr30 = 0.5 * hr30 + 0.5 * ml_hr30   # 역사적 + ML 평균
 
         ml_pred = ml_preds.get(name, {}).get(21, np.nan) if ml_preds else np.nan
 

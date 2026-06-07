@@ -161,6 +161,7 @@ BOT_COMMANDS = [
     {"command": "mlreport",       "description": "ML 전략 성과 리포트 (샘플)"},
     {"command": "ranking",        "description": "NASDAQ100 종목 랭킹 (LightGBM)"},
     {"command": "leverage",       "description": "레버리지 ETF 진입 분석 (QLD/TQQQ/SOXL/UPRO 손익비·타점)"},
+    {"command": "meta",           "description": "ML 통합 포트폴리오 배분 (MetaAllocator)"},
 ]
 
 BOT_COMMAND_ALIASES = {
@@ -1191,11 +1192,32 @@ def _dispatch_leverage(chat_id: str, args: list):
     cmd_leverage(chat_id, args)
 
 
+def cmd_meta(chat_id: str, args: list, send_fn=None):
+    """ML 신호 통합 MetaAllocator — 최종 포트폴리오 비중 추천."""
+    _send = send_fn if send_fn is not None else send
+    _send(chat_id, "⏳ ML 신호 통합 중... (약 20초)")
+    try:
+        from ml.meta_allocator import get_meta_allocation, format_meta_report
+        d      = fetch_market()
+        alloc  = get_meta_allocation(d["market_type"], d["phase_key"])
+        report = format_meta_report(alloc)
+        _send(chat_id, report)
+    except Exception as e:
+        _send(chat_id, f"❌ MetaAllocator 오류: {e}")
+        logger.exception("cmd_meta")
+
+
+def _dispatch_meta(chat_id: str, args: list):
+    typing(chat_id)
+    cmd_meta(chat_id, args)
+
+
 _COMMAND_HANDLERS = {
     "/report": _dispatch_report,
     "/mlreport": _dispatch_mlreport,
     "/ranking":  _dispatch_ranking,
     "/leverage": _dispatch_leverage,
+    "/meta":     _dispatch_meta,
     "/alert": lambda chat_id, args: _dispatch_with_typing(cmd_alert, chat_id, args),
     "/dividend": lambda chat_id, args: _dispatch_with_send(cmd_dividend, chat_id, args),
     "/sim": lambda chat_id, args: _dispatch_with_typing(cmd_sim, chat_id, args),
