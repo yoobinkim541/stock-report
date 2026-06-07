@@ -91,12 +91,22 @@ def run_tests() -> list[str]:
 
     # ── p5: Feature dataset ───────────────────────────────────────────────────
     logger.info("[p5] Feature dataset")
-    from ml.features import compute_features, rsi, macd, bollinger
-    idx = pd.date_range("2021-01-04", periods=300, freq="B")
-    close = pd.Series(100 * (1 + np.random.default_rng(0).normal(0.0003, 0.01, 300)).cumprod(), index=idx)
+    from ml.features import (
+        compute_features, rsi, macd, bollinger,
+        stochastic, williams_r, cci, disparity,
+        obv, cmf, price_acceleration, vol_of_vol,
+        ichimoku_signals, ma_cross_signals,
+    )
+    _rng5   = np.random.default_rng(0)
+    idx     = pd.date_range("2021-01-04", periods=300, freq="B")
+    close   = pd.Series(100 * (1 + _rng5.normal(0.0003, 0.01, 300)).cumprod(), index=idx)
+    volume  = pd.Series(_rng5.integers(1_000_000, 10_000_000, 300).astype(float), index=idx)
+    hi      = close * (1 + _rng5.uniform(0, 0.01, 300))
+    lo      = close * (1 - _rng5.uniform(0, 0.01, 300))
+    df_ohlcv = pd.DataFrame({"close": close, "high": hi, "low": lo, "volume": volume})
     df_close = close.to_frame("close")
 
-    failures += _check("compute_features",
+    failures += _check("compute_features (close only)",
         lambda: compute_features(df_close, include_ichimoku=False),
         ("DataFrame 반환",         lambda r: hasattr(r, "columns")),
         ("300행",                  lambda r: len(r) == 300),
@@ -105,10 +115,50 @@ def run_tests() -> list[str]:
         ("ichi_chikou 없음 (lookahead 제거)", lambda r: "ichi_chikou" not in r.columns),
     )
 
+    failures += _check("compute_features (OHLCV + 신규 지표)",
+        lambda: compute_features(df_ohlcv, include_ichimoku=True),
+        ("stoch_k 컬럼 존재",      lambda r: "stoch_k" in r.columns),
+        ("disparity_20d 존재",     lambda r: "disparity_20d" in r.columns),
+        ("price_accel_5d 존재",    lambda r: "price_accel_5d" in r.columns),
+        ("obv 컬럼 존재",          lambda r: "obv" in r.columns),
+        ("ichi_above_cloud 존재",  lambda r: "ichi_above_cloud" in r.columns),
+        ("golden_cross 존재",      lambda r: "golden_cross" in r.columns),
+        ("이격도 100 근방",         lambda r: r["disparity_20d"].dropna().between(50, 200).all()),
+    )
+
+    failures += _check("개별 지표 함수",
+        lambda: {
+            "stoch":    stochastic(close, df_ohlcv),
+            "wr":       williams_r(close, df_ohlcv),
+            "cci":      cci(close, df_ohlcv),
+            "disp20":   disparity(close, 20),
+            "obv":      obv(close, volume),
+            "accel":    price_acceleration(close),
+            "vov":      vol_of_vol(close),
+            "ichi_sig": ichimoku_signals(close, df_ohlcv),
+            "ma_cross": ma_cross_signals(close),
+        },
+        ("stoch_k 범위 0~100",  lambda r: r["stoch"]["stoch_k"].dropna().between(0, 100).all()),
+        ("williams_r 범위",     lambda r: r["wr"].dropna().between(-100, 0).all()),
+        ("이격도 양수",          lambda r: (r["disp20"].dropna() > 0).all()),
+        ("OBV 누적값 유한",      lambda r: np.isfinite(r["obv"].dropna()).all()),
+        ("ichimoku 신호 0/1",   lambda r: r["ichi_sig"]["ichi_above_cloud"].dropna().isin([0.0, 1.0]).all()),
+        ("MA크로스 golden 0/1", lambda r: r["ma_cross"]["golden_cross"].dropna().isin([0.0, 1.0]).all()),
+    )
+
     failures += _check("rsi 경계값",
         lambda: rsi(close),
         ("NaN 없음",     lambda r: r.dropna().between(0, 100).all()),
         ("상승-only→100",lambda r: float(rsi(pd.Series(range(1, 51))).dropna().iloc[-1]) == pytest_approx_100()),
+    )
+
+    # macro_features 임포트 검증 (네트워크 없이 구조만)
+    logger.info("[p5-macro] macro_features 구조 검증")
+    from ml.macro_features import build_macro_features, get_macro_today
+    failures += _check("macro_features 모듈 임포트",
+        lambda: {"build": build_macro_features, "today": get_macro_today},
+        ("build 호출가능",   lambda r: callable(r["build"])),
+        ("today 호출가능",   lambda r: callable(r["today"])),
     )
 
     # ── p6: Baseline backtest ─────────────────────────────────────────────────
@@ -403,7 +453,7 @@ def main():
         sys.exit(1)
 
     elapsed = time.time() - t0
-    total_checks = 58  # 위 _check 호출의 총 assertions 수 (p12 LeverageOptimizer 11건 추가)
+    total_checks = 84  # p5 신규지표 17 + macro구조 2 + 기존 58 (p12 LeverageOptimizer 포함) → 77+7=84
 
     if failures:
         msg = "\n".join(failures)

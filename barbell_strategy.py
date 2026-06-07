@@ -834,14 +834,51 @@ def _ml_dca_blend(
     market_type:   str = "neutral",
     phase_key      = 0,
 ) -> tuple[dict, dict, float]:
-    """ML 랭킹 점수로 DCA 비중 조정 (SGOV/QQQI 제외).
+    """ML 신호 통합 DCA 비중 조정.
+
+    우선순위:
+      1. MetaAllocator (5신호 통합) — weights가 있으면 우선 사용
+      2. Ranker 단독 — MetaAllocator 실패 시 fallback
 
     Returns (blended_weights, raw_scores, breadth_score)
-      blended_weights : 정규화된 조정 비중
-      raw_scores      : {ticker: ml_score} 포트폴리오 종목별 예측값
-      breadth_score   : 포트폴리오 평균 ML 점수 (시장 강도 지표)
     """
-    NON_EQUITY = {"SGOV", "QQQI"}   # 랭킹 대상 제외 (안전자산/배당)
+    import logging as _log
+    _logger = _log.getLogger(__name__)
+    NON_EQUITY = {"SGOV", "QQQI"}
+
+    # ── 1. MetaAllocator 시도 ─────────────────────────────────────────────
+    try:
+        import numpy as np
+        from ml.meta_allocator import get_meta_allocation
+
+        alloc = get_meta_allocation(market_type, phase_key)
+        meta_weights = alloc.weights   # {ticker: float}
+
+        # MetaAllocator 비중이 있으면 blend
+        if meta_weights:
+            blend = _phase_blend_factor(market_type, phase_key)
+            blended: dict[str, float] = {}
+            for t in base_weights:
+                base = base_weights[t]
+                ml_w = meta_weights.get(t, base)
+                blended[t] = base * (1 - blend) + ml_w * blend
+
+            total = sum(blended.values())
+            if total > 0:
+                blended = {k: round(v / total, 4) for k, v in blended.items()}
+
+            # 시장 강도: MetaAllocator confidence 기반
+            breadth = (alloc.confidence - 0.5) * 0.02   # -0.01 ~ +0.01 스케일
+            _logger.info(
+                "MetaAllocator DCA 블렌딩 완료 — 체제: %s (신뢰도 %.0f%%, blend=%.2f)",
+                alloc.regime, alloc.confidence * 100, blend,
+            )
+            return blended, alloc.signal_summary, breadth
+
+    except Exception as e:
+        _logger.warning("MetaAllocator 실패, Ranker fallback: %s", e)
+
+    # ── 2. Ranker fallback ────────────────────────────────────────────────
     try:
         import numpy as np, pandas as pd
         from ml.ranker import load_ranker
@@ -854,13 +891,13 @@ def _ml_dca_blend(
         equity = [t for t in base_weights if t not in NON_EQUITY]
         non_eq = {t: w for t, w in base_weights.items() if t in NON_EQUITY}
 
-        prices = fetch_prices(equity + ["QQQ","^VIX","HYG","LQD","IEF","TLT"], days=300)
-        fg     = build_fear_greed_proxy(days=300)
-        mkt    = fg.to_frame("fg_score")
+        prices    = fetch_prices(equity + ["QQQ","^VIX","HYG","LQD","IEF","TLT"], days=300)
+        fg        = build_fear_greed_proxy(days=300)
+        mkt       = fg.to_frame("fg_score")
         if "^VIX" in prices:
             mkt["vix"] = prices["^VIX"]["Close"]
-        mkt        = mkt.ffill()
-        qqq_close  = prices.get("QQQ", pd.DataFrame()).get("Close")
+        mkt       = mkt.ffill()
+        qqq_close = prices.get("QQQ", pd.DataFrame()).get("Close")
 
         scores: dict[str, float] = {}
         for ticker in equity:
@@ -882,33 +919,28 @@ def _ml_dca_blend(
             return base_weights, {}, 0.0
 
         breadth = float(np.mean(list(scores.values())))
-
-        # 점수 0~1 백분위 → 비중 ×(0.8~1.2)
-        s_arr = np.array(list(scores.values()))
+        s_arr   = np.array(list(scores.values()))
         s_min, s_max = s_arr.min(), s_arr.max()
         if s_max == s_min:
             return base_weights, scores, breadth
         percs = {t: (s - s_min) / (s_max - s_min) for t, s in scores.items()}
 
-        blend = _phase_blend_factor(market_type, phase_key)   # Phase별 동적 강도
-
-        blended: dict[str, float] = {}
+        blend = _phase_blend_factor(market_type, phase_key)
+        blended2: dict[str, float] = {}
         for t in equity:
             base = base_weights.get(t, 0.0)
-            # blend=0.1(Bull-2): 미미한 조정 / blend=0.6(Bear-5): 강한 조정
             adj  = 1.0 + blend * percs.get(t, 0.5) - blend / 2
-            blended[t] = base * adj
-        blended.update(non_eq)
+            blended2[t] = base * adj
+        blended2.update(non_eq)
 
-        total = sum(blended.values())
+        total = sum(blended2.values())
         if total > 0:
-            blended = {k: round(v / total, 4) for k, v in blended.items()}
+            blended2 = {k: round(v / total, 4) for k, v in blended2.items()}
 
-        return blended, scores, breadth
+        return blended2, scores, breadth
 
     except Exception as e:
-        import logging as _log
-        _log.getLogger(__name__).warning("ML DCA 블렌딩 실패: %s", e)
+        _logger.warning("ML DCA 블렌딩 완전 실패: %s", e)
         return base_weights, {}, 0.0
 
 

@@ -345,14 +345,30 @@ def get_optimized_params() -> dict | None:
 
 
 def get_entry_signal(retrain: bool = False) -> EntrySignal:
-    """현재 시황 기반 레버리지 진입 신호 (캐시 활용)."""
+    """현재 시황 기반 레버리지 진입 신호.
+
+    Optimizer best_params가 저장되어 있으면 진입 임계값에 반영.
+    """
     import warnings; warnings.filterwarnings("ignore")
 
-    # 컨텍스트 수집
     from ml.leverage_backtester import get_current_entry_context
     context = get_current_entry_context(days=2520)
 
-    # 모델 로드 또는 학습
+    # Optimizer 최적 파라미터 → context에 진입 임계 주입
+    opt = get_optimized_params()
+    if opt:
+        context["opt_min_dd"]        = opt.get("min_dd",        -0.10)
+        context["opt_max_vix_entry"] = opt.get("max_vix_entry",  35.0)
+        context["opt_min_rsi_entry"] = opt.get("min_rsi_entry",  40.0)
+        context["opt_lev_weight"]    = opt.get("lev_weight",      0.25)
+        context["opt_trailing_stop"] = opt.get("trailing_stop",  -0.10)
+        logger.info(
+            "Optimizer 파라미터 적용 — min_dd=%.1f%%  max_vix=%.0f  lev_w=%.0f%%",
+            opt.get("min_dd", -0.10) * 100,
+            opt.get("max_vix_entry", 35.0),
+            opt.get("lev_weight", 0.25) * 100,
+        )
+
     model = None if retrain else LeverageModel.load()
     if model is None or not model._trained:
         logger.info("LeverageModel 학습 시작...")

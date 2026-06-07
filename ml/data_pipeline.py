@@ -320,66 +320,65 @@ def build_stock_features(
     qqq_close: pd.Series | None = None,
     sector_id: int = 0,
 ) -> pd.DataFrame:
-    """단일 종목 피처 생성.
+    """단일 종목 전체 피처 생성.
 
-    피처 목록:
-      가격 기반  : mom_20d, mom_60d, mom_125d, mom_252d
-                   excess_mom_60d (QQQ 대비 초과 모멘텀)
-                   vol_20d, dist_52w_high, dist_52w_low
-                   rsi_14, above_ma50, above_ma200
-      리스크     : beta_60d (QQQ 대비 60일 롤링 베타)
-      시장 공통  : fg_score, vix
+    피처 그룹 (features.py + 추가):
+      기술적     : 이동평균(SMA/EMA), 오실레이터(RSI/MACD/Stochastic/Williams%R/CCI)
+                   Bollinger, 모멘텀(6개 기간), 이격도(20/60/120), 가격가속도(감마)
+                   실현변동성, ATR, VoV(변동성의변동성)
+      일목균형표 : 원시값 4개 + 신호 6개 (구름위치, TK크로스, 기준선이격)
+      MA크로스   : 골든크로스, EMA단기강세, SMA20/50 위치
+      거래량     : OBV, CMF, 거래량비율, 거래량Z-score
+      52주       : 고저 대비 위치
+      종목고유   : QQQ 초과모멘텀(60d), beta_60d, 섹터ID, 생존편향페널티
+      시장공통   : fg_score, vix (market_features에서 병합)
     """
-    close = price_df["Close"].copy()
-    if len(close) < 60:
+    from ml.features import (
+        compute_features, stochastic, williams_r, cci, disparity,
+        obv, cmf, price_acceleration, vol_of_vol,
+        ichimoku_signals, ma_cross_signals,
+    )
+
+    if len(price_df) < 60:
         return pd.DataFrame()
 
-    feat = pd.DataFrame(index=close.index)
+    close = price_df["Close"].copy()
 
-    # 모멘텀 (절대) — 252일은 데이터 손실 25%로 제외
-    for w in (20, 60, 125):
-        feat[f"mom_{w}d"] = close / close.shift(w) - 1
+    # OHLCV → features.py compute_features 호환 포맷
+    df_feat = price_df.rename(columns={
+        "Open": "open", "High": "high", "Low": "low",
+        "Close": "close", "Volume": "volume",
+    })
+
+    # ── 기술적 피처 전체 세트 ──────────────────────────────────────────────
+    tech = compute_features(df_feat, include_ichimoku=True, include_atr=True)
+
+    # ── 종목 고유 피처 ─────────────────────────────────────────────────────
+    extra = pd.DataFrame(index=close.index)
 
     # QQQ 대비 초과 모멘텀 (60일)
     if qqq_close is not None:
-        qqq_aligned = qqq_close.reindex(close.index).ffill()
-        qqq_mom60   = qqq_aligned / qqq_aligned.shift(60) - 1
-        feat["excess_mom_60d"] = feat["mom_60d"] - qqq_mom60
+        qqq_r = qqq_close.reindex(close.index).ffill()
+        extra["excess_mom_60d"] = (close / close.shift(60) - 1) - (qqq_r / qqq_r.shift(60) - 1)
+        extra["excess_mom_20d"] = (close / close.shift(20) - 1) - (qqq_r / qqq_r.shift(20) - 1)
+        # QQQ 대비 베타 (60일 롤링)
+        rets    = close.pct_change()
+        qqq_ret = qqq_r.pct_change()
+        cov = rets.rolling(60).cov(qqq_ret)
+        var = qqq_ret.rolling(60).var().replace(0, np.nan)
+        extra["beta_60d"]  = cov / var
+        extra["beta_20d"]  = rets.rolling(20).cov(qqq_ret) / qqq_ret.rolling(20).var().replace(0, np.nan)
+        # 감마: 베타의 변화율 (베타 가속도)
+        extra["beta_gamma"] = extra["beta_60d"].diff(20)
     else:
-        feat["excess_mom_60d"] = np.nan
+        for col in ("excess_mom_60d", "excess_mom_20d", "beta_60d", "beta_20d", "beta_gamma"):
+            extra[col] = np.nan
 
-    # 실현변동성 (20일)
-    rets = close.pct_change()
-    feat["vol_20d"] = rets.rolling(20).std() * np.sqrt(252)
+    extra["sector_id"] = float(sector_id)
 
-    # 52주 고저 대비
-    high_52w = close.rolling(252, min_periods=60).max()
-    low_52w  = close.rolling(252, min_periods=60).min()
-    feat["dist_52w_high"] = close / high_52w - 1
-    feat["dist_52w_low"]  = close / low_52w - 1
-
-    # RSI(14)
-    delta = close.diff()
-    gain  = delta.clip(lower=0).rolling(14).mean()
-    loss  = (-delta.clip(upper=0)).rolling(14).mean()
-    feat["rsi_14"] = 100 - 100 / (1 + gain / loss.replace(0, np.nan))
-
-    # MA 위치
-    feat["above_ma50"]  = (close > close.rolling(50).mean()).astype(float)
-    feat["above_ma200"] = (close > close.rolling(200).mean()).astype(float)
-
-    # QQQ 대비 베타 (60일 롤링)
-    if qqq_close is not None:
-        qqq_r = qqq_close.reindex(close.index).ffill().pct_change()
-        cov   = rets.rolling(60).cov(qqq_r)
-        var   = qqq_r.rolling(60).var().replace(0, np.nan)
-        feat["beta_60d"] = cov / var
-    else:
-        feat["beta_60d"] = np.nan
-
-    # 시장 공통 피처 병합
+    # ── 합산 ──────────────────────────────────────────────────────────────
+    feat = pd.concat([tech, extra], axis=1)
     feat = feat.join(market_features, how="left")
-
     return feat.dropna(how="all")
 
 
@@ -443,12 +442,23 @@ def build_ml_dataset(
     # Fear/Greed proxy
     fg = build_fear_greed_proxy(days=days)
 
-    # 시장 공통 피처 (Fear/Greed + VIX)
+    # 시장 공통 피처 (Fear/Greed + VIX + 매크로)
     vix_df = prices.get("^VIX")
     market_feat = fg.to_frame("fg_score")
     if vix_df is not None:
         market_feat["vix"] = vix_df["Close"]
-    market_feat = market_feat.ffill()
+
+    # 매크로 피처 병합 (수익률곡선·크레딧·달러·금·원유 등)
+    try:
+        from ml.macro_features import build_macro_features
+        macro_df = build_macro_features(days=days)
+        if not macro_df.empty:
+            market_feat = market_feat.join(macro_df, how="left")
+            logger.info("매크로 피처 %d개 병합 완료", macro_df.shape[1])
+    except Exception as e:
+        logger.warning("매크로 피처 로드 실패 (스킵): %s", e)
+
+    market_feat = market_feat.ffill(limit=5)
 
     # QQQ 선행 수익률 (초과수익 계산용)
     qqq_close = prices.get("QQQ", pd.DataFrame()).get("Close")

@@ -74,22 +74,58 @@ def _get_ranker_signal() -> dict[str, float]:
 
 
 def _get_excess_signal() -> float:
-    """ExcessReturnModel OOS 방향 (-1=현금 선호, +1=주식 선호)."""
+    """ExcessReturnModel OOS 방향 (-1=현금 선호, +1=주식 선호).
+
+    레이블: QQQ 20일 초과수익률 (다음날 수익률 → 수정).
+    검증:   Expanding Walk-Forward (정적 2/3 분할 → 수정).
+    """
     try:
         import warnings; warnings.filterwarnings("ignore")
-        from ml.data_pipeline import build_real_sweetspot_data
-        from ml.sweet_spot import _generate_ml_signal, generate_synthetic_market_data
+        import numpy as np
+        from ml.data_pipeline import build_real_sweetspot_data, fetch_prices
+        from ml.models import ExcessReturnModel
 
-        data = build_real_sweetspot_data("QQQ", days=252)
-        sig  = _generate_ml_signal(data, train_fraction=2/3)
-        last = sig.dropna()
+        # 실데이터 (SGOV 포함해 QQQ 초과수익 계산 가능하도록)
+        data = build_real_sweetspot_data("QQQ", days=504)  # 약 2년
+        features_df = data["features"]
+        close       = data["close"]
+        qqq_close   = data.get("qqq_close", close)
+
+        n = len(features_df)
+        if n < 100:
+            return 0.0
+
+        # ── 레이블: 20일 QQQ 초과수익률 (shift(-20) = 룩어헤드 방지용 당일 생성) ──
+        fwd_20 = close.pct_change(20).shift(-20)
+        qqq_fwd_20 = qqq_close.pct_change(20).shift(-20)
+        label = (fwd_20 - qqq_fwd_20).reindex(features_df.index).fillna(0)
+
+        X = features_df.values.astype(float)
+        y = label.values
+
+        # ── Expanding Walk-Forward (최소 학습 60일, 예측 20일 단위 슬라이딩) ──
+        min_train = min(60, n // 3)
+        preds = np.full(n, np.nan)
+
+        for end in range(min_train, n - 20, 20):
+            model = ExcessReturnModel()
+            X_tr, y_tr = X[:end], y[:end]
+            valid = np.isfinite(X_tr).all(axis=1) & np.isfinite(y_tr)
+            if valid.sum() < 30:
+                continue
+            model.fit(X_tr[valid], y_tr[valid])
+            end2 = min(end + 20, n)
+            preds[end:end2] = model.predict(X[end:end2])
+
+        last = pd.Series(preds, index=features_df.index).dropna()
         if last.empty:
             return 0.0
-        # 최근 20일 평균 방향
-        recent = float(last.tail(20).mean())
-        # 백분위 기준 정규화 (-1~1)
-        pct = float((last < recent).mean()) * 2 - 1
-        return max(-1.0, min(1.0, pct))
+
+        # 최근 20일 평균 방향 → -1~1 정규화
+        recent   = float(last.tail(20).mean())
+        pct_rank = float((last < recent).mean()) * 2 - 1
+        return max(-1.0, min(1.0, pct_rank))
+
     except Exception as e:
         logger.warning("ExcessReturnModel 신호 실패: %s", e)
         return 0.0
