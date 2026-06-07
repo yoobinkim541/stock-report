@@ -157,7 +157,9 @@ def _compute_macro(prices: dict, days: int) -> pd.DataFrame:
     """가격 데이터에서 매크로 피처 계산."""
 
     # 공통 날짜 인덱스: QQQ or SPY 기준
-    base = _safe_close(prices, "QQQ") or _safe_close(prices, "SPY")
+    base = _safe_close(prices, "QQQ")
+    if base is None:
+        base = _safe_close(prices, "SPY")
     if base is None:
         return pd.DataFrame()
     idx = base.dropna().index[-days:]

@@ -448,17 +448,9 @@ def build_ml_dataset(
     if vix_df is not None:
         market_feat["vix"] = vix_df["Close"]
 
-    # 매크로 피처 병합 (수익률곡선·크레딧·달러·금·원유 등)
-    try:
-        from ml.macro_features import build_macro_features
-        macro_df = build_macro_features(days=days)
-        if not macro_df.empty:
-            market_feat = market_feat.join(macro_df, how="left")
-            logger.info("매크로 피처 %d개 병합 완료", macro_df.shape[1])
-    except Exception as e:
-        logger.warning("매크로 피처 로드 실패 (스킵): %s", e)
-
     market_feat = market_feat.ffill(limit=5)
+    # 참고: 매크로 피처(수익률곡선·크레딧·달러 등)는 종목 간 동일값이므로
+    # 크로스섹셔널 Ranker에 포함하지 않음. LeverageModel/MetaAllocator에서 별도 사용.
 
     # QQQ 선행 수익률 (초과수익 계산용)
     qqq_close = prices.get("QQQ", pd.DataFrame()).get("Close")
