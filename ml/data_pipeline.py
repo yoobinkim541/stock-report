@@ -40,23 +40,37 @@ PRICE_TTL_H = 6   # 가격 캐시 유효시간 (시간)
 # 포트폴리오 보유 종목 (universe 'portfolio' 모드)
 PORTFOLIO_TICKERS = ["MSFT", "QQQI", "ORCL", "NVDA", "GOOGL", "SAP", "UNH", "SGOV", "SPMO"]
 
-# 미국 시가총액 상위 50개 (섹터 다변화, 2025-26 기준)
-US_TOP50 = [
-    # 빅테크 / AI
+# 미국 시가총액 상위 100개 (섹터 다변화, 2025-26 기준)
+US_TOP100 = [
+    # 빅테크 / AI / 클라우드
     "AAPL", "MSFT", "NVDA", "GOOGL", "AMZN", "META", "TSLA", "AVGO", "ORCL", "CRM",
-    # 반도체
-    "TSM", "QCOM", "AMD", "INTC", "TXN", "AMAT", "KLAC", "MU",
-    # 금융
-    "BRK-B", "JPM", "V", "MA", "BAC", "GS", "MS", "WFC", "SPGI", "BLK",
-    # 헬스케어
+    "ADBE", "INTU", "NOW", "SNOW", "PLTR", "UBER", "SHOP",
+    # 반도체 (미국 + 대만)
+    "TSM", "QCOM", "AMD", "INTC", "TXN", "AMAT", "KLAC", "MU", "ASML", "LRCX", "MRVL", "ON",
+    # 금융 (은행·결제·자산운용)
+    "BRK-B", "JPM", "V", "MA", "BAC", "GS", "MS", "WFC",
+    "AXP", "C", "COF", "SCHW", "CME", "BLK", "SPGI", "ICE",
+    # 헬스케어 / 바이오 / 보험
     "LLY", "UNH", "JNJ", "ABBV", "MRK", "TMO", "ABT", "ISRG",
-    # 소비재 / 유통
+    "PFE", "GILD", "REGN", "MDT", "CVS", "CI", "ZTS", "BMY",
+    # 소비재 / 유통 / 미디어
     "WMT", "COST", "HD", "MCD", "KO", "PEP", "NKE",
-    # 에너지 / 산업
-    "XOM", "CVX", "GE", "CAT",
-    # 기타 대형주
-    "NFLX", "ADBE", "ACN", "NEE", "LIN",
+    "SBUX", "TGT", "LOW", "DIS", "CMCSA",
+    # 에너지
+    "XOM", "CVX", "COP", "SLB", "EOG",
+    # 산업재 / 항공방산 / 물류
+    "GE", "CAT", "HON", "RTX", "LMT", "BA", "UPS", "DE", "ETN",
+    # 통신
+    "T", "VZ",
+    # 부동산 / 인프라 / 유틸리티
+    "NEE", "PLD", "AMT",
+    # 소재 / 화학
+    "LIN",
+    # 기타
+    "NFLX", "ACN", "PYPL", "CB", "F", "GM", "AMGN",
 ]
+# 하위 호환: 기존 US_TOP50 참조 코드를 위한 별칭
+US_TOP50 = US_TOP100
 
 # 한국 시가총액 상위 10개 (KOSPI, 2025-26 기준)
 # 표시명: {티커: (한글명, 영문명, 섹터)}
@@ -127,8 +141,8 @@ def fetch_universe(
     """
     if mode == "portfolio":
         return list(PORTFOLIO_TICKERS)
-    if mode == "us_top50":
-        return list(US_TOP50)
+    if mode in ("us_top50", "us_top100"):
+        return list(US_TOP100)
     if mode == "kr_top10":
         return list(KR_TOP10)
     if mode == "watch":

@@ -104,7 +104,8 @@ RETRY_DELAY        = 10    # 오류 후 재시도 대기(초)
 CACHE_TTL          = 300   # 시장 데이터 캐시 유지(초, 5분)
 ALERT_CHECK_SECS   = 300   # 가격 알림 체크 주기(초)
 PHASE_CHECK_SECS   = 300   # Phase 변화 체크 주기(초, 5분)
-ENTRY_CHECK_SECS   = 1800  # 진입 타점 알림 체크 주기(초, 30분)
+ENTRY_CHECK_SECS    = 1800  # 진입 타점 알림 체크 주기(초, 30분)
+INTRADAY_CHECK_SECS = 60    # 단기봉 모니터링 주기(초, 1분, 장중에만 실행)
 
 
 def _pid_file_path() -> str:
@@ -165,6 +166,7 @@ BOT_COMMANDS = [
     {"command": "leverage",       "description": "레버리지 ETF 진입 분석 (QLD/TQQQ/SOXL/UPRO 손익비·타점)"},
     {"command": "meta",           "description": "ML 통합 포트폴리오 배분 (MetaAllocator)"},
     {"command": "entry",          "description": "진입 타점 분석 — 포트/us50/kr/watch/단일종목 (예: /entry NVDA, /entry kr)"},
+    {"command": "intraday",       "description": "단기봉 실시간 신호 — 5m봉 이상감지 (예: /intraday NVDA, /intraday kr)"},
 ]
 
 BOT_COMMAND_ALIASES = {
@@ -1004,6 +1006,65 @@ def notify_triggered_alerts():
 #  진입 타점 모니터링 (30분 주기 자동 알림)
 # ══════════════════════════════════════════════════════════════════════
 
+def notify_intraday_signals() -> None:
+    """1분 주기 단기 이상 신호 감지 (장중에만 실행).
+
+    감시 대상:
+      1) 30분 분석에서 score ≥ 0.5인 종목 (관심 목록)
+      2) 레버리지 ETF (항상 포함)
+    단기 신호(거래량급등·EMA크로스·RSI반등·VWAP돌파) 감지 시 즉시 알림.
+    """
+    try:
+        from ml.intraday_signal import (
+            is_us_market_open, is_kr_market_open,
+            check_intraday_movers, format_intraday_alert,
+        )
+        from ml.entry_analyzer import LEVERAGE_ETFS
+
+        us_open = is_us_market_open()
+        kr_open = is_kr_market_open()
+        if not us_open and not kr_open:
+            return   # 모든 시장 비장중 → 스킵
+
+        # 관심 종목 결정
+        watch_tickers = list(LEVERAGE_ETFS)
+        # 30분 분석 상태에서 score ≥ 0.5인 종목 추가 (캐시 활용)
+        try:
+            from ml.entry_analyzer import analyze_all_entries, ALERT_STATE_PATH
+            import json
+            state_path = ALERT_STATE_PATH
+            if state_path.exists():
+                state = json.loads(state_path.read_text())
+                # 최근 신호가 wait/enter인 종목
+                watch_tickers += [
+                    t for t, v in state.items()
+                    if v.get("last_signal") in ("enter", "wait")
+                    and t not in watch_tickers
+                ]
+        except Exception:
+            pass
+
+        # 장중 시장에 맞는 종목만 체크
+        if not us_open:
+            watch_tickers = [t for t in watch_tickers if t.endswith(".KS")]
+        if not kr_open:
+            watch_tickers = [t for t in watch_tickers if not t.endswith(".KS")]
+
+        if not watch_tickers:
+            return
+
+        movers = check_intraday_movers(watch_tickers, interval="5m", min_score=0.35)
+        for sig in movers:
+            msg = format_intraday_alert(sig)
+            for chunk in (msg[i:i+4000] for i in range(0, len(msg), 4000)):
+                send(ALLOWED_CHAT_ID, chunk)
+            logger.info("단기 신호 알림: %s (score=%.2f, alerts=%s)",
+                        sig.ticker, sig.score, sig.alerts)
+
+    except Exception as e:
+        logger.debug("단기 신호 모니터링 오류: %s", e)
+
+
 def notify_entry_signals() -> None:
     """전체 감시 대상 진입 조건 감지 → 신규 enter 신호 시 푸시 알림.
 
@@ -1243,13 +1304,96 @@ def _dispatch_entry(chat_id: str, args: list):
     cmd_entry(chat_id, args)
 
 
+def cmd_intraday(chat_id: str, args: list, send_fn=None) -> None:
+    """단기봉 실시간 신호 커맨드.
+
+    /intraday           — 관심 종목 5m봉 이상 감지
+    /intraday NVDA      — 단일 종목 상세 단기 분석
+    /intraday kr        — 한국 시총 10개 단기 분석
+    /intraday 1m NVDA   — 1분봉 상세 분석
+    """
+    from telegram_bot import send as _default_send
+    _send = send_fn if send_fn is not None else send
+
+    raw  = [a.strip() for a in (args or [])]
+    args_u = [a.upper() for a in raw]
+
+    # interval 지정: /intraday 1m TICKER
+    interval = "5m"
+    if args_u and args_u[0] in ("1M", "5M", "15M", "1H"):
+        interval = args_u[0].lower()
+        raw  = raw[1:]
+        args_u = args_u[1:]
+
+    try:
+        from ml.intraday_signal import (
+            analyze_intraday, check_intraday_movers,
+            format_intraday_alert, format_intraday_summary,
+            market_status,
+        )
+        from ml.entry_analyzer import LEVERAGE_ETFS, KR_META, PORTFOLIO_STOCKS
+        from ml.data_pipeline import KR_TOP10
+
+        # 장 상태 표시
+        mkt = market_status()
+        status_line = (
+            f"🕐 {mkt['now_kst']} / {mkt['now_et']}  "
+            f"미국장:{'🟢' if mkt['us_open'] else '⭕'}  한국장:{'🟢' if mkt['kr_open'] else '⭕'}"
+        )
+
+        if not args_u:
+            # 기본: 관심 종목 전체 스캔
+            _send(chat_id, f"⏳ 관심 종목 단기 신호 스캔 중... ({interval}봉)\n{status_line}")
+            watch = list(LEVERAGE_ETFS) + list(PORTFOLIO_STOCKS)
+            movers = check_intraday_movers(watch, interval=interval, min_score=0.20)
+            _send(chat_id, format_intraday_summary(movers))
+            return
+
+        if args_u[0] == "KR":
+            _send(chat_id, f"⏳ 한국 시총 10 단기 스캔... ({interval}봉)\n{status_line}")
+            movers = check_intraday_movers(list(KR_TOP10), interval=interval, min_score=0.15)
+            _send(chat_id, format_intraday_summary(movers))
+            return
+
+        if args_u[0] == "US100":
+            from ml.data_pipeline import US_TOP100
+            _send(chat_id, f"⏳ 미국 시총 100 단기 스캔... ({interval}봉, 약 30초)")
+            movers = check_intraday_movers(list(US_TOP100), interval=interval, min_score=0.30)
+            _send(chat_id, format_intraday_summary(movers))
+            return
+
+        # 단일 종목
+        ticker = raw[0]
+        if ticker.replace(".", "").isdigit():
+            ticker = ticker if "." in ticker else ticker + ".KS"
+        else:
+            ticker = ticker.upper()
+
+        _send(chat_id, f"⏳ {ticker} {interval}봉 분석 중...\n{status_line}")
+        sig = analyze_intraday(ticker, interval=interval)
+        if sig is None:
+            _send(chat_id, f"❌ {ticker} 단기 데이터 없음 (장 비개장 또는 티커 오류)")
+            return
+        _send(chat_id, format_intraday_alert(sig))
+
+    except Exception as e:
+        _send(chat_id, f"❌ 단기 분석 오류: {e}")
+        logger.exception("cmd_intraday")
+
+
+def _dispatch_intraday(chat_id: str, args: list):
+    typing(chat_id)
+    cmd_intraday(chat_id, args)
+
+
 _COMMAND_HANDLERS = {
     "/report": _dispatch_report,
     "/mlreport": _dispatch_mlreport,
     "/ranking":  _dispatch_ranking,
     "/leverage": _dispatch_leverage,
     "/meta":     _dispatch_meta,
-    "/entry":    _dispatch_entry,
+    "/entry":     _dispatch_entry,
+    "/intraday":  _dispatch_intraday,
     "/alert": lambda chat_id, args: _dispatch_with_typing(cmd_alert, chat_id, args),
     "/dividend": lambda chat_id, args: _dispatch_with_send(cmd_dividend, chat_id, args),
     "/sim": lambda chat_id, args: _dispatch_with_typing(cmd_sim, chat_id, args),
@@ -1305,6 +1449,7 @@ def run():
     last_alert_check    = 0.0
     last_phase_check    = 0.0
     last_entry_check    = 0.0
+    last_intraday_check = 0.0
     consecutive_409     = 0
 
     while True:
@@ -1370,6 +1515,11 @@ def run():
             if now - last_entry_check > ENTRY_CHECK_SECS:
                 notify_entry_signals()
                 last_entry_check = now
+
+            # 단기봉 이상 감지 (1분 주기, 장중에만)
+            if now - last_intraday_check > INTRADAY_CHECK_SECS:
+                notify_intraday_signals()
+                last_intraday_check = now
 
         except KeyboardInterrupt:
             logger.info("Bot 종료")
