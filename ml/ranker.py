@@ -9,6 +9,7 @@
 """
 from __future__ import annotations
 
+import json
 import logging
 import pickle
 from dataclasses import dataclass, field
@@ -99,13 +100,16 @@ def train_ranker(
     if features.empty:
         raise ValueError("피처 데이터가 비어있습니다")
 
-    # 날짜 기준 시계열 분할
+    # 날짜 기준 시계열 분할 (Purged: 분할 직전 embargo 거래일은 학습에서 제외 —
+    # forward 레이블이 test 구간을 내다보는 데이터 누수 방지)
+    embargo = int(dataset.get("meta", {}).get("forward_days", 20))
     dates = features.index.get_level_values("date")
     unique_dates = sorted(dates.unique())
     split_idx = int(len(unique_dates) * train_frac)
     split_date = unique_dates[split_idx]
+    purge_date = unique_dates[max(split_idx - embargo, 0)]
 
-    train_mask = dates < split_date
+    train_mask = dates < purge_date
     test_mask  = dates >= split_date
 
     X_train = features[train_mask].values.astype(float)
@@ -230,11 +234,13 @@ def walk_forward_backtest(
     dataset: dict,
     n_folds: int = 4,
     min_train_months: int = 12,
+    embargo: int | None = None,
 ) -> dict:
-    """롤링 Walk-forward 백테스트 — 폴드별 독립 학습 + OOS 평가.
+    """롤링 Walk-forward 백테스트 — 폴드별 독립 학습 + OOS 평가 (Purged).
 
-    각 폴드: expanding window 학습 → 다음 기간 OOS 평가
-    (데이터 누수 없음)
+    각 폴드: expanding window 학습 → 다음 기간 OOS 평가.
+    embargo (기본 forward_days): test 시작 직전 N거래일을 학습에서 제외해
+    forward 레이블의 test 구간 누수를 차단.
 
     Returns:
         fold_ics       — 폴드별 월평균 IC
@@ -265,15 +271,19 @@ def walk_forward_backtest(
     fold_ics: list[float] = []
     fold_top10: list[float] = []
 
+    if embargo is None:
+        embargo = int(dataset.get("meta", {}).get("forward_days", 20))
+
     for fold in range(n_folds):
         test_start = usable[fold * fold_size]
         test_end   = usable[min((fold + 1) * fold_size, len(usable)) - 1]
 
-        train_mask = dates < test_start
-        test_mask  = (dates >= test_start) & (dates <= test_end)
+        # Purge: test 시작 전 embargo 거래일은 학습 제외 (레이블 중첩 누수 방지)
+        ts_pos     = unique_dates.index(test_start)
+        purge_date = unique_dates[max(ts_pos - embargo, 0)]
 
-        if train_mask.sum() < 500 or test_mask.sum() < 100:
-            continue
+        train_mask = dates < purge_date
+        test_mask  = (dates >= test_start) & (dates <= test_end)
 
         X_tr = features[train_mask].values.astype(float)
         y_tr = excess[train_mask].values.astype(float)
@@ -284,6 +294,10 @@ def walk_forward_backtest(
         valid_te = np.isfinite(X_te).all(axis=1) & np.isfinite(y_te)
         X_tr, y_tr = X_tr[valid_tr], y_tr[valid_tr]
         X_te, y_te = X_te[valid_te], y_te[valid_te]
+
+        # 피처 웜업(52주 롤링 등) NaN 제거 후 기준으로 표본 확인 — 초기 폴드 빈 학습셋 방지
+        if len(X_tr) < 500 or len(X_te) < 100:
+            continue
 
         model = lgb.LGBMRegressor(
             n_estimators=200, num_leaves=31, learning_rate=0.05,
@@ -402,8 +416,18 @@ def rank_today(
         # 생존편향 페널티: 52주 고점 근처 + 강한 모멘텀 = 편입 이후 고점 가능성
         penalty = _survivorship_penalty(today_feat)
         score   = score * penalty
+        # TradingView식 기술등급 (참고 표시용 — 점수에는 미반영)
+        try:
+            from ml.technical_rating import compute_technical_rating
+            tr = compute_technical_rating(df)
+            tech_rating = tr["summary"]["rating"] if tr else None
+        except Exception:
+            tech_rating = None
+
         rows.append({"ticker": ticker, "score": score,
                      "surv_penalty": round(penalty, 3),
+                     "price": float(df["Close"].dropna().iloc[-1]),
+                     "tech_rating": tech_rating,
                      **today_feat.to_dict()})
 
     if not rows:
@@ -414,14 +438,89 @@ def rank_today(
         .sort_values("score", ascending=False)
         .reset_index(drop=True)
     )
-    ranking.insert(1, "rank", range(1, len(ranking) + 1))
+
+    # 펀더멘털 틸트: 상위 후보(top_n×2)에 한해 재무 점수(0~100)를 예측수익 단위로 가산
+    # — 50점 중립, S급(90)≈+0.4%p, D급(20)≈-0.3%p. 실패 시 모델 점수만 사용.
+    try:
+        cand = ranking.head(top_n * 2).copy()
+        fund = _fundamental_scores(cand["ticker"].tolist())
+        if fund:
+            cand["fund_score"] = cand["ticker"].map(fund)
+            adj = (cand["fund_score"].fillna(50) - 50) / 50 * 0.005
+            cand["score"] = cand["score"] + adj
+            ranking = pd.concat([cand, ranking.iloc[len(cand):]]) \
+                        .sort_values("score", ascending=False).reset_index(drop=True)
+    except Exception as e:
+        logger.warning("펀더멘털 틸트 실패 — 모델 점수만 사용: %s", e)
+
+    ranking["rank"] = range(1, len(ranking) + 1)
     return ranking.head(top_n)
+
+
+FUND_CACHE = Path.home() / "reports" / "ml-cache" / "fundamental_scores.json"
+
+
+def _fundamental_scores(tickers: list[str], max_age_days: int = 7) -> dict[str, float]:
+    """펀더멘털 점수 (0~100) — 7일 파일 캐시, 미보유 종목만 신규 채점."""
+    import time
+    cache: dict = {}
+    try:
+        if FUND_CACHE.exists():
+            raw = json.loads(FUND_CACHE.read_text())
+            if time.time() - raw.get("ts", 0) < max_age_days * 86400:
+                cache = raw.get("scores", {})
+    except Exception:
+        cache = {}
+
+    missing = [t for t in tickers if t not in cache]
+    if missing:
+        from reports.fundamental_score import score_ticker
+        for t in missing:
+            try:
+                r = score_ticker(t)
+                # ETF·조회 실패 등 채점 불가(sections 없음)는 중립 50 처리
+                cache[t] = float(r["total_score"]) if r.get("sections") else 50.0
+            except Exception:
+                cache[t] = 50.0
+        try:
+            FUND_CACHE.parent.mkdir(parents=True, exist_ok=True)
+            FUND_CACHE.write_text(json.dumps({"ts": time.time(), "scores": cache}))
+        except Exception:
+            pass
+    return {t: cache[t] for t in tickers if t in cache}
 
 
 # ── 텔레그램용 포맷 ───────────────────────────────────────────────────────────
 
-def format_ranking_report(ranking: pd.DataFrame, result: RankerResult) -> str:
-    """텔레그램 발송용 랭킹 리포트 포맷."""
+def _ranking_reasons(row: pd.Series) -> str:
+    """랭킹 상위 종목의 추천 이유 — 주요 피처 해석."""
+    reasons = []
+    tech = row.get("tech_rating")
+    if isinstance(tech, str) and tech:
+        reasons.append(f"기술등급 {tech}")
+    ex_mom = row.get("excess_mom_60d")
+    if ex_mom is not None and not pd.isna(ex_mom) and ex_mom > 0:
+        reasons.append(f"QQQ 대비 +{ex_mom*100:.1f}% (60d)")
+    rsi = row.get("rsi_14")
+    if rsi is not None and not pd.isna(rsi):
+        if rsi < 40:
+            reasons.append(f"RSI {rsi:.0f} 과매도권")
+        elif rsi > 70:
+            reasons.append(f"RSI {rsi:.0f} 과열 주의")
+    vs_high = row.get("close_vs_52w_high")
+    if vs_high is not None and not pd.isna(vs_high) and vs_high < 0.90:
+        reasons.append(f"52주 고점 -{(1-vs_high)*100:.0f}%")
+    fund = row.get("fund_score")
+    if fund is not None and not pd.isna(fund) and fund != 50:
+        reasons.append(f"펀더멘털 {fund:.0f}점")
+    return " · ".join(reasons[:3])
+
+
+def format_ranking_report(ranking: pd.DataFrame, result: RankerResult, detail_top: int = 5) -> str:
+    """텔레그램 발송용 랭킹 리포트 포맷.
+
+    상위 detail_top개는 ATR 기반 매매 가이드(권장 매수·목표·손절) 포함.
+    """
     lines = [
         "📈 종목 랭킹 (LightGBM, QQQ 초과수익 기준)",
         "━━━━━━━━━━━━━━",
@@ -434,6 +533,19 @@ def format_ranking_report(ranking: pd.DataFrame, result: RankerResult) -> str:
         score_bar = "█" * min(int(abs(row["score"]) * 500), 8)
         sign = "+" if row["score"] >= 0 else "-"
         lines.append(f"  {row['rank']:>2}. {row['ticker']:<6}  {sign}{abs(row['score'])*100:.2f}%  {score_bar}")
+
+        # 상위 종목 매매 가이드: ATR(14) 배수 — 목표 +2×ATR / 손절 -1.5×ATR / 매수 -0.5×ATR~현재가
+        price = row.get("price")
+        atr   = row.get("atr_14")
+        if (row["rank"] <= detail_top and price is not None and not pd.isna(price)
+                and atr is not None and not pd.isna(atr) and atr > 0):
+            buy_lo = price - 0.5 * atr
+            target = price + 2.0 * atr
+            stop   = price - 1.5 * atr
+            lines.append(f"      현재 ${price:.2f} | 매수 ${buy_lo:.2f}~${price:.2f} | 목표 ${target:.2f} | 손절 ${stop:.2f}")
+            reason = _ranking_reasons(row)
+            if reason:
+                lines.append(f"      💡 {reason}")
 
     lines += [
         "━━━━━━━━━━━━━━",
