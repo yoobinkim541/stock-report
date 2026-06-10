@@ -83,7 +83,7 @@ WORLD_GOV_BOND_COUNTRIES = {
     "japan": "일본 국채금리",
     "south-korea": "한국 국채금리",
 }
-TELEGRAM_NEWS_CHANNELS = ["yuzukinaok1"]
+TELEGRAM_NEWS_CHANNELS = ["yuzukinaok1", "insidertracking"]
 NEWS_THEME_KEYWORDS = {
     "중동/전쟁": ("이스라엘", "이란", "가자", "하마스", "우크라이나", "러시아", "전쟁", "군", "미사일", "핵"),
     "금리/채권": ("금리", "국채", "채권", "연준", "fed", "treasury", "yield"),
@@ -274,6 +274,9 @@ def fetch_telegram_channel_events(channels: list[str] = TELEGRAM_NEWS_CHANNELS) 
         urls = re.findall(rf"https://t\.me/{re.escape(channel)}/\d+", markdown)
         for idx, title in enumerate(titles):
             if not title:
+                continue
+            # 이모지·기호 단독 항목 제외 (실제 글자 4자 미만)
+            if len(re.sub(r"[^\w가-힣]", "", title)) < 4:
                 continue
             url = urls[idx] if idx < len(urls) else ""
             events.append({
