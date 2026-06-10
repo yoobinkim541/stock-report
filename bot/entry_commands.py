@@ -121,6 +121,13 @@ def _entry_single(chat_id: str, ticker: str, _send) -> None:
             return
 
         msg = format_alert_message(score)
+        try:
+            from ml.technical_rating import build_reference_brief
+            ref = build_reference_brief(ticker, df)
+            if ref:
+                msg += "\n" + ref
+        except Exception:
+            logger.debug("참고지표 생략: %s", ticker)
         for chunk in _split(msg):
             _send(chat_id, chunk)
 

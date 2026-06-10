@@ -42,6 +42,31 @@ ALERT_STATE_PATH = Path(os.path.expanduser("~/.cache/entry_alert_state.json"))
 ALERT_COOLDOWN_H = 6      # 동일 종목 재알림 최소 간격 (시간)
 ALERT_SCORE_MIN  = 0.60   # 알림 발송 최소 점수
 
+# ── 진입 점수 파라미터 (backtest/entry_calibration.py가 walk-forward로 재추정) ──
+SCORE_PARAMS_PATH = Path(os.path.expanduser("~/reports/ml-cache/entry_score_params.json"))
+DEFAULT_SCORE_PARAMS = {
+    "w_win": 0.40, "w_rr": 0.30, "w_rsi": 0.15, "w_dd": 0.15,
+    "enter_threshold": 0.62, "wait_threshold": 0.40,
+}
+_score_params_cache: dict | None = None
+
+
+def get_score_params() -> dict:
+    """캘리브레이션된 점수 파라미터 로드 (없으면 기본값)."""
+    global _score_params_cache
+    if _score_params_cache is not None:
+        return _score_params_cache
+    params = dict(DEFAULT_SCORE_PARAMS)
+    try:
+        if SCORE_PARAMS_PATH.exists():
+            loaded = json.loads(SCORE_PARAMS_PATH.read_text())
+            params.update({k: float(v) for k, v in loaded.items() if k in params})
+            logger.info("캘리브레이션 점수 파라미터 적용: %s", params)
+    except Exception as e:
+        logger.warning("점수 파라미터 로드 실패 — 기본값 사용: %s", e)
+    _score_params_cache = params
+    return params
+
 # ── 한국 주식 메타데이터 ──────────────────────────────────────────────────────
 # {ticker: (한글명, 영문명, 섹터)}
 KR_META: dict[str, tuple[str, str, str]] = {
@@ -131,19 +156,39 @@ def _compute_ticker_features(price: pd.Series, vix: pd.Series) -> pd.DataFrame:
     return feat.dropna(how="any")
 
 
+def _vix_regime_bounds(vix_value: float) -> tuple[float, float]:
+    """VIX 레짐 경계: 저(<18) / 중(18~28) / 고(>28)."""
+    if vix_value < 18:
+        return (0.0, 18.0)
+    if vix_value <= 28:
+        return (18.0, 28.0)
+    return (28.0, float("inf"))
+
+
 def _find_similar(
     current: pd.Series,
     history: pd.DataFrame,
     n: int = 30,
     lookback: int = 10,
-) -> pd.Index:
+) -> tuple[pd.Index, np.ndarray]:
     """현재 특징 벡터와 유사한 과거 기간 탐색 (정규화 유클리드 거리).
 
     lookback: 최근 n일은 제외 (최신 데이터 리크 방지).
+    VIX 레짐 조건부: 같은 변동성 레짐 안에서만 탐색 (표본 60건 미만이면 전체로 폴백)
+    — "차트 모양은 비슷하지만 시장 환경이 다른" 기간 혼입 방지.
+
+    Returns:
+        (유사 기간 인덱스, 거리 역수 커널 가중치 — 합 1로 정규화)
     """
     hist = history.iloc[:-lookback] if len(history) > lookback else history
     if hist.empty:
-        return pd.Index([])
+        return pd.Index([]), np.array([])
+
+    if "vix" in hist.columns and np.isfinite(current.get("vix", np.nan)):
+        lo, hi = _vix_regime_bounds(float(current["vix"]))
+        regime = hist[(hist["vix"] >= lo) & (hist["vix"] < hi)]
+        if len(regime) >= 60:
+            hist = regime
 
     # z-score 정규화
     mu  = hist.mean()
@@ -152,7 +197,54 @@ def _find_similar(
     c_n = (current - mu) / std
 
     dists = np.sqrt(((h_n - c_n) ** 2).sum(axis=1))
-    return dists.nsmallest(n).index
+    top   = dists.nsmallest(n)
+    w     = 1.0 / (1.0 + top.to_numpy())
+    w     = w / w.sum() if w.sum() > 0 else np.full(len(w), 1.0 / max(len(w), 1))
+    return top.index, w
+
+
+def _weighted_quantile(values: np.ndarray, weights: np.ndarray, q: float) -> float:
+    """가중 분위수 (선형 보간)."""
+    order = np.argsort(values)
+    v, w  = values[order], weights[order]
+    cw    = np.cumsum(w) - 0.5 * w
+    cw    = cw / w.sum()
+    return float(np.interp(q, cw, v))
+
+
+def compute_entry_score(
+    win_20: float,
+    exp_20: float,
+    p25_20: float,
+    rsi_v:  float,
+    dd_v:   float,
+    category: str = "stock",
+    params: dict | None = None,
+) -> tuple[float, float]:
+    """복합 진입 점수 (0~1)와 손익비 계산 — analyze_entry와 캘리브레이션 공용.
+
+    가중치는 get_score_params()에서 로드 (walk-forward 캘리브레이션 결과 반영).
+    """
+    p = params or get_score_params()
+
+    # 1. 승률
+    win_s = max(0.0, min(1.0, (win_20 - 0.3) / 0.5))
+
+    # 2. 손익비
+    rr   = abs(exp_20 / p25_20) if p25_20 < 0 and np.isfinite(p25_20) else 1.0
+    rr_s = max(0.0, min(1.0, (rr - 0.5) / 2.5))
+
+    # 3. RSI 과매도 보너스
+    rsi_s = max(0.0, min(1.0, (55 - rsi_v) / 35))
+
+    # 4. 낙폭 위치 — 많이 빠질수록 유리 (단, 과도한 낙폭 제외)
+    if category == "leverage":
+        dd_s = max(0.0, min(1.0, (-dd_v - 0.03) / 0.18)) if dd_v < -0.03 else 0.0
+    else:
+        dd_s = max(0.0, min(1.0, (-dd_v - 0.05) / 0.25)) if dd_v < -0.05 else 0.0
+
+    score = win_s * p["w_win"] + rr_s * p["w_rr"] + rsi_s * p["w_rsi"] + dd_s * p["w_dd"]
+    return score, rr
 
 
 # ── 단일 종목 분석 ────────────────────────────────────────────────────────────
@@ -188,10 +280,11 @@ def analyze_entry(
         # 현재 특징
         cur = feat.iloc[-1]
 
-        # 유사 기간 탐색
-        sim_idx = _find_similar(cur, feat, n=n_similar)
+        # 유사 기간 탐색 (거리 커널 가중)
+        sim_idx, sim_w = _find_similar(cur, feat, n=n_similar)
         if len(sim_idx) == 0:
             return None
+        w_all = pd.Series(sim_w, index=sim_idx)
 
         # 선행 수익률 분포 (레버리지 ETF는 실제 ETF 가격 기준)
         fwd_price = price.reindex(feat.index)
@@ -199,18 +292,21 @@ def analyze_entry(
         fwd_20d   = fwd_price.pct_change(20).shift(-20)
         fwd_60d   = fwd_price.pct_change(60).shift(-60)
 
-        rets_20 = fwd_20d.reindex(sim_idx).dropna()
-        rets_60 = fwd_60d.reindex(sim_idx).dropna()
+        r20 = fwd_20d.reindex(sim_idx)
+        r60 = fwd_60d.reindex(sim_idx)
+        rets_20, w20 = r20[r20.notna()], w_all[r20.notna()]
+        rets_60, w60 = r60[r60.notna()], w_all[r60.notna()]
 
         if len(rets_20) < 3:
             return None
 
-        win_20  = float((rets_20 > 0).mean())
-        win_60  = float((rets_60 > 0).mean()) if len(rets_60) >= 3 else win_20
-        exp_20  = float(rets_20.median())
-        exp_60  = float(rets_60.median()) if len(rets_60) >= 3 else exp_20
-        p25_20  = float(rets_20.quantile(0.25))
-        p75_20  = float(rets_20.quantile(0.75))
+        # 거리 가중 통계: 더 유사한 기간일수록 분포 추정에 큰 영향
+        win_20  = float(np.average(rets_20 > 0, weights=w20))
+        win_60  = float(np.average(rets_60 > 0, weights=w60)) if len(rets_60) >= 3 else win_20
+        exp_20  = _weighted_quantile(rets_20.to_numpy(), w20.to_numpy(), 0.5)
+        exp_60  = _weighted_quantile(rets_60.to_numpy(), w60.to_numpy(), 0.5) if len(rets_60) >= 3 else exp_20
+        p25_20  = _weighted_quantile(rets_20.to_numpy(), w20.to_numpy(), 0.25)
+        p75_20  = _weighted_quantile(rets_20.to_numpy(), w20.to_numpy(), 0.75)
 
         # 현재 시장 상태
         high_52w   = price.rolling(252, min_periods=60).max().iloc[-1]
@@ -219,55 +315,33 @@ def analyze_entry(
         und_label  = LEVERAGE_UNDERLYING.get(ticker, ticker)
 
         # ── 진입 점수 계산 ──────────────────────────────────────────────────
-        reasons: list[str] = []
-        score_parts: list[float] = []
+        rsi_v = float(cur["rsi"])
+        dd_v  = float(cur["drawdown"])
+        score, rr = compute_entry_score(win_20, exp_20, p25_20, rsi_v, dd_v, category)
 
-        # 1. 승률 (40%)
-        win_s = max(0.0, min(1.0, (win_20 - 0.3) / 0.5))
-        score_parts.append(win_s * 0.40)
+        reasons: list[str] = []
         if win_20 >= 0.65:
             reasons.append(f"승률 {win_20*100:.0f}% (강세)")
         elif win_20 >= 0.55:
             reasons.append(f"승률 {win_20*100:.0f}% (보통)")
         else:
             reasons.append(f"승률 {win_20*100:.0f}% (약세)")
-
-        # 2. 손익비 (30%)
-        rr = abs(exp_20 / p25_20) if p25_20 < 0 and np.isfinite(p25_20) else 1.0
-        rr_s = max(0.0, min(1.0, (rr - 0.5) / 2.5))
-        score_parts.append(rr_s * 0.30)
         if rr >= 2.0:
             reasons.append(f"손익비 {rr:.1f}× (양호)")
         elif rr >= 1.2:
             reasons.append(f"손익비 {rr:.1f}× (보통)")
         else:
             reasons.append(f"손익비 {rr:.1f}× (불리)")
-
-        # 3. RSI 과매도 보너스 (15%)
-        rsi_v = float(cur["rsi"])
-        rsi_s = max(0.0, min(1.0, (55 - rsi_v) / 35))
-        score_parts.append(rsi_s * 0.15)
         if rsi_v < 35:
             reasons.append(f"RSI {rsi_v:.0f} (과매도)")
         elif rsi_v > 65:
             reasons.append(f"RSI {rsi_v:.0f} (과매수)")
 
-        # 4. 낙폭 위치 (15%) — 많이 빠질수록 유리 (단, 과도한 낙폭 제외)
-        dd_v = float(cur["drawdown"])
-        if category == "leverage":
-            # 레버리지: -5% ~ -20% 구간이 최적
-            dd_s = max(0.0, min(1.0, (-dd_v - 0.03) / 0.18)) if dd_v < -0.03 else 0.0
-        else:
-            # 개별주: -8% ~ -30% 구간이 최적
-            dd_s = max(0.0, min(1.0, (-dd_v - 0.05) / 0.25)) if dd_v < -0.05 else 0.0
-        score_parts.append(dd_s * 0.15)
-
-        score = sum(score_parts)
-
         # 신호 분류
-        if score >= 0.62:
+        sp = get_score_params()
+        if score >= sp["enter_threshold"]:
             signal = "enter"
-        elif score >= 0.40:
+        elif score >= sp["wait_threshold"]:
             signal = "wait"
         else:
             signal = "avoid"
@@ -424,6 +498,34 @@ def _price_str(s: EntryScore) -> str:
     return f"${s.current_price:.2f}"
 
 
+def _fmt_price(value: float, currency: str) -> str:
+    if currency == "KRW":
+        return f"₩{value:,.0f}"
+    return f"${value:.2f}"
+
+
+def trade_level_values(s: EntryScore) -> tuple[float, float, float]:
+    """유사기간 수익 분포 기반 (권장 매수 하단, 목표가, 손절가) 수치 산출.
+
+    목표가  = 현재가 × (1 + 상방 P75), 최소 +2%
+    손절가  = 현재가 × (1 + 하방 P25), 최소 -3% (분포가 양수여도 손절선 확보)
+    권장 매수 = 하방 P25의 절반 되돌림 ~ 현재가 (분할 매수 구간)
+    """
+    p = s.current_price
+    target = p * (1 + max(s.upside_p75_20d, 0.02))
+    stop   = p * (1 + min(s.downside_p25_20d, -0.03))
+    buy_lo = p * (1 + min(s.downside_p25_20d, 0) / 2)
+    return buy_lo, target, stop
+
+
+def _trade_levels(s: EntryScore) -> tuple[str, str, str]:
+    """trade_level_values 표시용 포맷 (통화별)."""
+    buy_lo, target, stop = trade_level_values(s)
+    cur = s.currency
+    buy_str = f"{_fmt_price(buy_lo, cur)} ~ {_fmt_price(s.current_price, cur)}"
+    return buy_str, _fmt_price(target, cur), _fmt_price(stop, cur)
+
+
 def _render_score(s: EntryScore) -> list[str]:
     """단일 종목 분석 결과 렌더링."""
     emoji  = _SIGNAL_EMOJI[s.signal]
@@ -448,6 +550,8 @@ def _render_score(s: EntryScore) -> list[str]:
         f"   기대수익 {_fmt_pct(s.expected_ret_20d)} (20d) / {_fmt_pct(s.expected_ret_60d)} (60d)",
         f"   하방25% {_fmt_pct(s.downside_p25_20d)}  상방75% {_fmt_pct(s.upside_p75_20d)}  손익비 {rr_str}",
     ]
+    buy_str, target_str, stop_str = _trade_levels(s)
+    out.append(f"   매수 {buy_str}  목표 {target_str}  손절 {stop_str}")
     if s.reasons:
         out.append(f"   💡 {' · '.join(s.reasons[:2])}")
     return out
@@ -513,6 +617,7 @@ def format_alert_message(s: EntryScore) -> str:
     else:
         name = _TICKER_NAME.get(s.ticker, s.ticker)
     rr    = abs(s.expected_ret_20d / s.downside_p25_20d) if s.downside_p25_20d < 0 else 0
+    buy_str, target_str, stop_str = _trade_levels(s)
 
     lines = [
         f"🔔 진입 기회 감지 — {s.ticker}",
@@ -527,6 +632,12 @@ def format_alert_message(s: EntryScore) -> str:
         f"  기대수익: {_fmt_pct(s.expected_ret_20d)} (20d) / {_fmt_pct(s.expected_ret_60d)} (60d)",
         f"  하방위험: {_fmt_pct(s.downside_p25_20d)} (P25)",
         f"  손익비:   {rr:.1f}×" if rr > 0 else "  손익비:   —",
+        f"",
+        f"[ 매매 가이드 ]",
+        f"  현재가:     {_price_str(s)}",
+        f"  권장 매수:  {buy_str} (분할)",
+        f"  목표가:     {target_str} (20d 상방 P75)",
+        f"  손절가:     {stop_str} (20d 하방 P25)",
         f"",
         f"진입 점수: {s.score:.2f} / 1.00",
         f"💡 {' · '.join(s.reasons[:3])}",
