@@ -121,7 +121,7 @@ BEAR_PHASES = {
         "label": "Phase 1 — 조정 초입 (-5~-10%)",
         "range": (-5, -10),
         "emoji": "🟡",
-        "sgov_target_ratio": TARGET_SGOV_RATIO,
+        "sgov_target_ratio": 0.12,  # 조정 초입은 실탄 축적 구간 — 기본 8%보다 높게
         "sgov_sell_pct": 0,
         "leverage_target": None,
         "dca_multiplier": 1.5,
@@ -910,8 +910,16 @@ def calculate_sgov_target(market_type: str, phase_key, portfolio_total_usd: floa
         action = f"SGOV 매수 필요: +${diff:.0f} (목표 ${target_usd:.0f})"
         direction = "buy"
     elif diff < -50:
-        action = f"SGOV 매도 필요: ${abs(diff):.0f} → 레버리지/DCA 전환"
-        direction = "sell"
+        # 매도(전환) 신호는 레버리지 전환 단계(bear Phase 2+)에서만 —
+        # Phase 0~1·bull·neutral의 초과분은 깊은 Phase 실탄이므로 보유
+        deploying = (market_type == "bear"
+                     and bool(BEAR_PHASES.get(phase_key, {}).get("leverage_target")))
+        if deploying:
+            action = f"SGOV 매도 필요: ${abs(diff):.0f} → 레버리지/DCA 전환"
+            direction = "sell"
+        else:
+            action = f"SGOV 초과 ${abs(diff):.0f} — 실탄 유지 (Phase 2+ 레버리지 전환 대기)"
+            direction = "hold"
     else:
         action = f"SGOV 적정 수준 유지 (현재 ${sgov_current_usd:.0f})"
         direction = "hold"
