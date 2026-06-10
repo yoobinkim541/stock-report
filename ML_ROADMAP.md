@@ -233,6 +233,6 @@ ML 개선 전후 비교 지표:
 | Ranker OOS IC (purged WF) | 재학습 시 | 0.003 (폴드 +0.04/+0.05/-0.08) | > 0.05 |
 | Ranker ICIR (purged WF) | 재학습 시 | 0.04 | > 0.5 |
 | MetaAllocator vs Rule Sharpe | `paper_track.json` (매주 월 발송) | 적재 시작 (30일 후 첫 비교) | > Rule |
-| Leverage WF median Calmar | `leverage_best_params.json` | 0.57 (QLD, 비용 5bp 반영 — 무비용 1.22는 과대평가였음) | > 1.0 (비용 반영 기준) |
+| Leverage WF median Calmar | `leverage_best_params.json` | 0.85 (TQQQ, 엔진 수정 후 — 유휴현금 이중계상 제거·폴드 웜업 보정, 무거래 폴드는 SGOV 캐리 반영) | > 1.0 (비용 반영 기준) |
 | Phase 래더 vs 플랫 DCA | `backtest/phase_ladder_backtest.py` | XIRR +3.0%p (24.2% vs 21.2%), MDD -6.8%p 불리 | XIRR 우위 유지 |
 | 진입신호 실전 R-multiple | `signal_outcomes.json` | 적재 시작 | 평균 > 0.5R |
