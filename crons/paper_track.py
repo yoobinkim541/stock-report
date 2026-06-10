@@ -102,16 +102,18 @@ def record_today(track: dict) -> None:
 
 
 def _regime_core_weights() -> dict[str, float]:
-    """레짐 코어(J) 오늘 비중: QQQ>200MA & VIX텀 정상 → QLD w=min(1, 0.25/실현vol),
-    잔여 QQQ. 조건 미충족 → 전량 SGOV."""
+    """레짐 코어(L) 오늘 비중 — 앙상블 추세 × vol타깃 × VIX텀.
+
+    위험자산 비중 = MA(50/100/150/200/250) 투표 비율 (점진 진입·청산, 타이밍 럭 완화)
+    그중 QLD 비율 = min(1, 0.25/QLD 실현변동성), 잔여 QQQ
+    VIX 백워데이션(VIX3M/VIX < 0.95) → 전량 SGOV
+    """
     import numpy as np
     from ml.data_pipeline import fetch_prices
 
-    px = fetch_prices(["QQQ", "QLD", "^VIX", "^VIX3M"], days=400)
+    px = fetch_prices(["QQQ", "QLD", "^VIX", "^VIX3M"], days=500)
     qqq = px["QQQ"]["Close"].dropna()
     qld = px["QLD"]["Close"].dropna()
-    ma200 = qqq.rolling(200, min_periods=200).mean()
-    above = bool(qqq.iloc[-1] > ma200.iloc[-1]) if np.isfinite(ma200.iloc[-1]) else False
 
     vix   = px.get("^VIX", {}).get("Close")
     vix3m = px.get("^VIX3M", {}).get("Close")
@@ -120,12 +122,28 @@ def _regime_core_weights() -> dict[str, float]:
         v, v3 = vix.dropna(), vix3m.dropna()
         if not v.empty and not v3.empty and float(v.iloc[-1]) > 0:
             term_ok = float(v3.iloc[-1]) / float(v.iloc[-1]) >= 0.95
-
-    if not (above and term_ok):
+    if not term_ok:
         return {"SGOV": 1.0}
+
+    votes = 0.0
+    for n in (50, 100, 150, 200, 250):
+        ma = qqq.rolling(n, min_periods=n).mean()
+        if np.isfinite(ma.iloc[-1]) and float(qqq.iloc[-1]) > float(ma.iloc[-1]):
+            votes += 1
+    risk = votes / 5.0
+    if risk <= 0:
+        return {"SGOV": 1.0}
+
     vol = float(qld.pct_change().rolling(20).std().iloc[-1]) * (252 ** 0.5)
-    w_l = min(1.0, 0.25 / vol) if np.isfinite(vol) and vol > 1e-6 else 0.0
-    return {"QLD": round(w_l, 4), "QQQ": round(1 - w_l, 4)}
+    lev_frac = min(1.0, 0.25 / vol) if np.isfinite(vol) and vol > 1e-6 else 0.0
+    w_l = round(risk * lev_frac, 4)
+    w_q = round(risk - w_l, 4)
+    out = {}
+    if w_l > 0: out["QLD"] = w_l
+    if w_q > 0: out["QQQ"] = w_q
+    sgov = round(1 - w_l - w_q, 4)
+    if sgov > 0: out["SGOV"] = sgov
+    return out
 
 
 def _weighted_forward_return(weights: dict, closes: dict, start: str, horizon: int) -> float | None:

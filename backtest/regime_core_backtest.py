@@ -132,13 +132,29 @@ def build_strategies(px: dict[str, pd.Series]) -> tuple[dict[str, pd.Series], pd
 
     # J: I + 백워데이션 시 QQQ 잔여분까지 전량 SGOV 대피 (크래시 레짐 속도 보강 —
     # 200MA는 급락에 느리지만 VIX 텀 역전은 며칠 내 반응)
+    def _core(risk_frac: pd.Series, lev_frac: pd.Series) -> pd.Series:
+        """risk_frac: 위험자산(QLD+QQQ) 총 비중 0~1, lev_frac: 그중 QLD 비율 0~1."""
+        w_l = (s(risk_frac) * s(lev_frac)).fillna(0).clip(0, 1)
+        w_q = s(risk_frac).fillna(0).clip(0, 1) - w_l
+        w_c = 1 - w_l - w_q
+        turnover = (w_l.diff().abs() + w_q.diff().abs() + w_c.diff().abs()).fillna(1.0) / 2
+        strat = (w_l * qld_ret + w_q * qqq_ret + w_c * sgov_ret).fillna(0) - turnover * COST
+        return (1 + strat).cumprod()
+
     risk_on = above & term_ok
-    w_l = s((0.25 / vol_qld).where(risk_on, 0.0)).fillna(0).clip(0, 1)
-    w_q = s(risk_on.astype(float)).fillna(0) * (1 - w_l)
-    w_c = 1 - w_l - w_q
-    turnover = (w_l.diff().abs() + w_q.diff().abs() + w_c.diff().abs()).fillna(1.0) / 2
-    strat = (w_l * qld_ret + w_q * qqq_ret + w_c * sgov_ret).fillna(0) - turnover * COST
-    eqs["J. I+텀 전량대피"] = (1 + strat).cumprod()
+    lev_frac_vt = (0.25 / vol_qld).clip(upper=1.0)
+    eqs["J. I+텀 전량대피"] = _core(risk_on.astype(float), lev_frac_vt)
+
+    # K: J + 절대 모멘텀 게이트 (12개월 QQQ 수익 > 현금 수익 — Antonacci dual momentum)
+    # 차입비용 인식: 고금리 환경에서 지수의 초과드리프트가 현금에 못 미치면 레버리지 무의미
+    abs_mom = ((qqq / qqq.shift(252) - 1) > (sgov / sgov.shift(252) - 1)).fillna(False)
+    eqs["K. J+절대모멘텀"] = _core((risk_on & abs_mom).astype(float), lev_frac_vt)
+
+    # L: 단일 200MA 대신 룩백 앙상블 투표 (50/100/150/200/250) — 타이밍 럭 완화.
+    # 위험자산 비중 = 투표 비율 (점진적 진입·청산), 백워데이션 시 전량 대피
+    votes = sum((qqq > qqq.rolling(n, min_periods=n).mean()).astype(float)
+                for n in (50, 100, 150, 200, 250)) / 5.0
+    eqs["L. 앙상블추세 코어"] = _core(votes.where(term_ok, 0.0), lev_frac_vt)
 
     aux = pd.DataFrame({"above": above, "w_F": w_f}, index=idx)
     return eqs, aux
@@ -161,8 +177,8 @@ def report(eqs: dict[str, pd.Series], aux: pd.DataFrame) -> str:
         lines.append(f"{name:<18} 전반 {m1['cagr']*100:+6.1f}%/{m1['mdd']*100:+5.1f}%  "
                      f"후반 {m2['cagr']*100:+6.1f}%/{m2['mdd']*100:+5.1f}%")
 
-    # 연도별 (벤치마크 vs 최종 후보 J)
-    cand = "J. I+텀 전량대피"
+    # 연도별 (벤치마크 vs 최종 후보 L)
+    cand = "L. 앙상블추세 코어"
     lines.append(f"\n[연도별 수익 — QQQ vs {cand}]")
     a, f = eqs["A. QQQ B&H"], eqs[cand]
     for y, g in a.groupby(a.index.year):
@@ -170,7 +186,7 @@ def report(eqs: dict[str, pd.Series], aux: pd.DataFrame) -> str:
         gf = f.loc[g.index]
         rf_ = gf.iloc[-1] / gf.iloc[0] - 1
         win = "✅" if rf_ > ra else "  "
-        lines.append(f"  {y}:  QQQ {ra*100:+6.1f}%   J {rf_*100:+6.1f}%  {win}")
+        lines.append(f"  {y}:  QQQ {ra*100:+6.1f}%   L {rf_*100:+6.1f}%  {win}")
 
     # 최종 후보의 주요 낙폭 에피소드
     dd = f / f.cummax() - 1
@@ -190,6 +206,17 @@ def report(eqs: dict[str, pd.Series], aux: pd.DataFrame) -> str:
     n_sw = int((aux["above"].astype(int).diff().abs() > 0).sum())
     tim = float((aux["w_F"] > 0).mean())
     lines.append(f"\n200MA 신호 전환 {n_sw}회 | F 시장노출 비율 {tim*100:.0f}%")
+
+    # 고금리 시대 부분구간 (2022~) — 레버리지 차입비용이 실가격에 반영된 구간
+    lines.append("\n[고금리 시대 2022-01~ 부분구간 — 차입비용 실반영 구간]")
+    for name in ("A. QQQ B&H", "D. 200MA QLD/SGOV", "J. I+텀 전량대피",
+                 "K. J+절대모멘텀", "L. 앙상블추세 코어"):
+        if name not in eqs:
+            continue
+        sub = eqs[name].loc["2022-01-01":]
+        m = _metrics(sub, name)
+        lines.append(f"{name:<18} CAGR {m['cagr']*100:+6.1f}%  MDD {m['mdd']*100:+6.1f}%  "
+                     f"Sharpe {m['sharpe']:.2f}  Calmar {m['calmar']:.2f}")
     return "\n".join(lines)
 
 
