@@ -157,13 +157,19 @@ def summarize(track: dict) -> str | None:
     def _sharpe(x: np.ndarray) -> float:
         return float(x.mean() / x.std() * np.sqrt(252 / 5)) if x.std() > 0 else 0.0
 
+    # 변동성 조정 비교: meta(현금 비중 높음)와 rule(주식 100%)은 리스크 수준이 달라
+    # 단순 평균 비교는 불공정 — meta 수익을 rule 변동성 수준으로 스케일해 동일 리스크 비교
+    vol_scale = rule.std() / meta.std() if meta.std() > 0 else 1.0
+    meta_voladj = meta.mean() * vol_scale
+
     return "\n".join([
         "🧪 페이퍼 트레이딩 A/B (MetaAllocator vs Phase 규칙)",
         "━━━━━━━━━━━━━━",
         f"표본: {len(rows)}일 (5거래일 수익 기준)",
         f"Meta:  평균 {meta.mean()*100:+.2f}%  Sharpe {_sharpe(meta):.2f}",
         f"Rule:  평균 {rule.mean()*100:+.2f}%  Sharpe {_sharpe(rule):.2f}",
-        f"우세:  {'Meta' if _sharpe(meta) > _sharpe(rule) else 'Rule'}",
+        f"동일 리스크 환산 Meta 평균: {meta_voladj*100:+.2f}% (vol ×{vol_scale:.2f})",
+        f"우세:  {'Meta' if _sharpe(meta) > _sharpe(rule) else 'Rule'} (Sharpe 기준)",
         "→ Meta 우세 지속 시 _ml_dca_blend 반영 비율 상향 검토",
     ])
 

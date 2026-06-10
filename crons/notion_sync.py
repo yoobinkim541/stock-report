@@ -429,6 +429,7 @@ def build_blocks() -> list[dict]:
 
     # ── 차트 & 랭킹 ──────────────────────────────────────────────────────────
     blocks.append(_h2("📈 시황 차트"))
+    ml_data = None   # 차트 섹션 실패 시에도 랭킹/ML 섹션이 재시도할 수 있도록 선초기화
     try:
         ml_data = _collect_ml()
         qqq_close = ml_data["qqq_close"]

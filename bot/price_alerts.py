@@ -76,6 +76,21 @@ def check_alerts() -> list:
     Returns: 이번 호출에서 트리거된 알림 목록.
     """
     alerts = load_alerts()
+
+    # 자동 등록 알림(auto_trade_level)은 30일 후 만료 — 20일 분포 기반 레벨 노화 방지
+    # + 만료로 비워줘야 동일 종목의 새 enter 신호가 다시 등록될 수 있음
+    now = datetime.now()
+    expired_ids = {
+        a["id"] for a in alerts
+        if not a.get("triggered", False)
+        and (a.get("meta") or {}).get("kind") == "auto_trade_level"
+        and a.get("created_at")
+        and (now - datetime.fromisoformat(a["created_at"])).days >= 30
+    }
+    if expired_ids:
+        alerts = [a for a in alerts if a["id"] not in expired_ids]
+        save_alerts(alerts)
+
     active = [a for a in alerts if not a.get("triggered", False)]
     if not active:
         return []

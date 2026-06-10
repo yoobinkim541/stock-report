@@ -358,6 +358,8 @@ def get_current_entry_context(days: int = 2520) -> dict:
     close_map = _fetch(tickers, days=120)
 
     qqq   = close_map.get("QQQ")
+    if qqq is not None:
+        qqq = qqq.dropna()   # yfinance 마지막 행 NaN(장중 미체결 등) → 게이트 fail-open 방지
     if qqq is None or qqq.empty:
         return ds
 
@@ -366,8 +368,10 @@ def get_current_entry_context(days: int = 2520) -> dict:
     ma200_gap = float((qqq / ma200 - 1).iloc[-1]) if len(ma200.dropna()) else 0.0
 
     vix_s = close_map.get("^VIX")
+    vix_s = vix_s.dropna() if vix_s is not None else None
     vix_v = float(vix_s.iloc[-1]) if vix_s is not None and not vix_s.empty else np.nan
     vix3m_s = close_map.get("^VIX3M")
+    vix3m_s = vix3m_s.dropna() if vix3m_s is not None else None
     vix_term_v = (float(vix3m_s.iloc[-1]) / vix_v
                   if vix3m_s is not None and not vix3m_s.empty and np.isfinite(vix_v) and vix_v > 0
                   else float("nan"))

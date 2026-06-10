@@ -49,12 +49,15 @@ DEFAULT_SCORE_PARAMS = {
     "enter_threshold": 0.62, "wait_threshold": 0.40,
 }
 _score_params_cache: dict | None = None
+_score_params_ts: float = 0.0
+_SCORE_PARAMS_TTL = 6 * 3600   # 상시 실행 봇이 월간 재캘리브레이션을 재시작 없이 반영
 
 
 def get_score_params() -> dict:
-    """캘리브레이션된 점수 파라미터 로드 (없으면 기본값)."""
-    global _score_params_cache
-    if _score_params_cache is not None:
+    """캘리브레이션된 점수 파라미터 로드 (없으면 기본값, 6시간 TTL 캐시)."""
+    global _score_params_cache, _score_params_ts
+    import time as _time
+    if _score_params_cache is not None and _time.time() - _score_params_ts < _SCORE_PARAMS_TTL:
         return _score_params_cache
     params = dict(DEFAULT_SCORE_PARAMS)
     try:
@@ -65,6 +68,7 @@ def get_score_params() -> dict:
     except Exception as e:
         logger.warning("점수 파라미터 로드 실패 — 기본값 사용: %s", e)
     _score_params_cache = params
+    _score_params_ts = _time.time()
     return params
 
 # ── 한국 주식 메타데이터 ──────────────────────────────────────────────────────

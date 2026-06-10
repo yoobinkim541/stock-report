@@ -293,13 +293,20 @@ def build_entry_signal(context: dict, model: Optional[LeverageModel] = None) -> 
 
         ml_pred = ml_preds.get(name, {}).get(21, np.nan) if ml_preds else np.nan
 
-        # Kelly 비중: SGOV는 잔여비중 처리
+        # Kelly 비중: 63일 호라이즌 기준 — purged 검증에서 21d AUC≈0.5(무력),
+        # 63d AUC 0.6~0.71로 유효성이 확인된 구간만 사용. SGOV는 잔여비중 처리
         if name == "SGOV":
             kw = 0.0   # 나중에 1 - sum(others) 로 설정
         else:
-            avg_win  = max(er30, 0) if np.isfinite(er30) else 0.01
-            avg_loss = abs(min(p25, 0)) if np.isfinite(p25) and p25 < 0 else 0.05
-            kw = _kelly_weight(hr30 if np.isfinite(hr30) else 0.5, avg_win, avg_loss)
+            hr63  = st.hit_rate.get(63, np.nan) if st else np.nan
+            er63  = st.median_ret.get(63, np.nan) if st else np.nan
+            p25_63 = st.p25_ret.get(63, np.nan) if st else np.nan
+            ml_hr63 = ml_proba.get(name, {}).get(63)
+            if ml_hr63 is not None and np.isfinite(hr63):
+                hr63 = 0.5 * hr63 + 0.5 * ml_hr63
+            avg_win  = max(er63, 0) if np.isfinite(er63) else 0.01
+            avg_loss = abs(min(p25_63, 0)) if np.isfinite(p25_63) and p25_63 < 0 else 0.05
+            kw = _kelly_weight(hr63 if np.isfinite(hr63) else 0.5, avg_win, avg_loss)
 
         weights_raw[name] = kw
 
