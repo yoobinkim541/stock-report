@@ -110,6 +110,7 @@ class OptimizationResult:
     wf_std_calmar:   float
     all_trials:      pd.DataFrame
     optimized_at:    str = ""
+    wf_median_calmar: float = 0.0           # OOS 안정성 대표값 (이상치에 강건)
 
 
 # ── 데이터 로드 ───────────────────────────────────────────────────────────────
@@ -119,7 +120,7 @@ def _load_prices(days: int = 2520) -> dict[str, pd.Series]:
     tickers = [
         "QLD", "TQQQ", "SOXL", "UPRO",
         "QQQ", "SPY", "SMH",            # 기초지수별 별도 추가 (UPRO→SPY, SOXL→SMH)
-        "SGOV", "^VIX", "HYG", "IEF", "SHV",
+        "SGOV", "^VIX", "^VIX3M", "HYG", "IEF", "SHV",
     ]
     p = fetch_prices(tickers, days=days)
     result = {t: df["Close"] for t, df in p.items() if "Close" in df.columns}
@@ -191,17 +192,44 @@ class BacktestEngine:
         rsi   = 100 - 100 / (1 + gain / loss.replace(0, np.nan))
         # 청산 MA (기초지수 기준)
         und_ma = und.rolling(self.p["exit_ma"], min_periods=5).mean()
-        # 진입: 기초지수 낙폭 충분 + VIX 낮음 + RSI 낮음
+        # 실현 변동성 (20일, 연율화) — vol targeting 용
+        real_vol = und.pct_change().rolling(20).std() * np.sqrt(252)
+
+        # VIX 텀스트럭처: VIX3M/VIX (>1 콘탱고=정상, <1 백워데이션=단기 폭풍 가격반영)
+        vix3m = self.px.get("^VIX3M")
+        if vix3m is not None:
+            vix_term = (vix3m.reindex(self.idx).ffill() / vix).fillna(1.0)
+        else:
+            vix_term = pd.Series(1.0, index=self.idx)
+
+        # 진입: 기초지수 낙폭 충분 + VIX 낮음 + RSI 낮음 (+ 텀스트럭처 정상)
         enter = (
             (dd <= self.p["min_dd"]) &
             (vix <= self.p["max_vix_entry"]) &
             (rsi <= self.p["min_rsi_entry"])
         )
-        # 청산: 기초지수 MA 이탈 OR VIX 급등
+        min_term = float(self.p.get("min_vix_term", 0.0) or 0.0)
+        if min_term > 0:
+            enter = enter & (vix_term >= min_term)
+
+        # 추세선 위치 (run()에서 below_trend_scale 비중 조절에 사용; scale=0이면 기존 게이트와 동일)
+        trend_ma = int(self.p.get("trend_ma", 0) or 0)
+        if trend_ma > 0:
+            trend_line  = und.rolling(trend_ma, min_periods=trend_ma // 2).mean()
+            above_trend = (und > trend_line).fillna(True)
+        else:
+            above_trend = pd.Series(True, index=self.idx)
+
+        # 청산: 기초지수 MA 이탈 OR VIX 급등 OR 백워데이션 심화
         exit_ = (und < und_ma) | (vix >= self.p["exit_vix"])
+        if min_term > 0:
+            exit_ = exit_ | (vix_term < min_term - 0.05)
 
         sig = pd.DataFrame({
             "dd": dd, "vix": vix, "rsi": rsi,
+            "real_vol": real_vol,
+            "vix_term": vix_term,
+            "above_trend": above_trend.astype(bool),
             "enter": enter.astype(bool),
             "exit":  exit_.astype(bool),
         }, index=self.idx)
@@ -216,59 +244,81 @@ class BacktestEngine:
         sgov_fl = self.p["sgov_floor"]
         t_stop  = self.p["trailing_stop"]
         max_hd  = self.p["hold_days_max"]
+        cost    = float(self.p.get("cost_bps", 5.0)) / 10000   # 편도 거래비용
+        n_tr    = max(1, int(self.p.get("n_tranches", 1)))
+        tr_step = float(self.p.get("tranche_dd_step", 0.04))
+        below_scale = float(self.p.get("below_trend_scale", 0.0))  # 추세선 아래 비중 (0=게이트)
+        eq_limit    = self.p.get("eq_dd_limit")                    # 자금곡선 스톱 (None=off)
 
         # 포트폴리오 상태
         cash        = 1.0
         lev_shares  = 0.0
         sgov_shares = cash / float(sgov.iloc[0]) if not np.isnan(sgov.iloc[0]) else 0.0
-        entry_price = 0.0
-        entry_date  = None
+        avg_entry   = 0.0       # 가중평균 진입가 (트레일링스탑 기준)
+        entry_date  = None      # 첫 트랜치 진입일
+        filled      = 0         # 채워진 트랜치 수
         n_trades    = 0
         trade_rets  = []
         port_values = []
+        eq_peak     = 1.0
 
         # 진입/청산 신호는 shift(1): 오늘 신호 → 내일 실행
         enter_signal = sig["enter"].shift(1).fillna(False)
         exit_signal  = sig["exit"].shift(1).fillna(False)
+        dd_prev      = sig["dd"].shift(1)
+        above_prev   = sig["above_trend"].shift(1).fillna(True)
 
         for i, date in enumerate(self.idx):
             pv_inst = float(inst.iloc[i]) if not np.isnan(inst.iloc[i]) else (inst.iloc[i-1] if i > 0 else 1.0)
             pv_sgov = float(sgov.iloc[i]) if not np.isnan(sgov.iloc[i]) else (sgov.iloc[i-1] if i > 0 else 1.0)
 
-            in_pos = lev_shares > 0
-
-            # ── 청산 체크 ──
-            if in_pos:
-                cur_val = lev_shares * pv_inst
-                ret_from_entry = (pv_inst / entry_price - 1) if entry_price > 0 else 0
-
+            # ── 청산 체크 (전 트랜치 일괄) ──
+            if lev_shares > 0:
+                ret_from_entry = (pv_inst / avg_entry - 1) if avg_entry > 0 else 0
                 hold_days = (date - entry_date).days if entry_date else 0
-
                 should_exit = (
                     exit_signal.iloc[i] or
                     ret_from_entry <= t_stop or
                     hold_days >= max_hd
                 )
                 if should_exit:
-                    cash += cur_val
+                    cash += lev_shares * pv_inst * (1 - cost)
                     lev_shares = 0.0
                     trade_rets.append(ret_from_entry)
                     n_trades += 1
-                    entry_price = 0.0
-                    entry_date  = None
-                    in_pos      = False
+                    avg_entry, entry_date, filled = 0.0, None, 0
 
-            # ── 진입 체크 ──
-            if not in_pos and enter_signal.iloc[i]:
-                total = cash + lev_shares * pv_inst + sgov_shares * pv_sgov
-                invest = total * lev_w
-                if invest > cash * 0.95:
-                    invest = cash * 0.95
-                if invest > 0:
-                    lev_shares  = invest / pv_inst
-                    cash       -= invest
-                    entry_price = pv_inst
-                    entry_date  = date
+            # ── 자금곡선 스톱: 전략 자체 낙폭이 한도 초과면 신규 진입 차단 ──
+            eq_blocked = False
+            if eq_limit and port_values:
+                eq_blocked = (port_values[-1] / eq_peak - 1) <= -float(eq_limit)
+
+            # ── 진입 체크 (트랜치 k: 낙폭이 min_dd - k×step 도달 시 추가 진입) ──
+            if (not eq_blocked and filled < n_tr and enter_signal.iloc[i]):
+                dd_y = float(dd_prev.iloc[i]) if np.isfinite(dd_prev.iloc[i]) else 0.0
+                if dd_y <= self.p["min_dd"] - filled * tr_step:
+                    total = cash + lev_shares * pv_inst + sgov_shares * pv_sgov
+                    # vol targeting: 실현변동성이 목표를 넘으면 비중 축소
+                    target_vol = self.p.get("target_vol")
+                    vol_scale  = 1.0
+                    if target_vol:
+                        rv = float(sig["real_vol"].iloc[i - 1]) if i > 0 else float("nan")
+                        if np.isfinite(rv) and rv > 1e-6:
+                            vol_scale = min(1.0, target_vol / rv)
+                    # 소프트 추세 스케일: 추세선 아래면 비중 below_scale배 (0이면 진입 안 함)
+                    trend_scale = 1.0 if bool(above_prev.iloc[i]) else below_scale
+                    invest = total * lev_w * vol_scale * trend_scale / n_tr
+                    invest = min(invest, cash * 0.95)
+                    if invest > 1e-9:
+                        buy_shares = invest * (1 - cost) / pv_inst
+                        # 가중평균 진입가 갱신
+                        prev_val   = lev_shares * avg_entry
+                        lev_shares += buy_shares
+                        avg_entry  = (prev_val + buy_shares * pv_inst) / lev_shares
+                        cash      -= invest
+                        if entry_date is None:
+                            entry_date = date
+                        filled += 1
 
             # ── SGOV 리밸런싱 (현금 → SGOV) ──
             sgov_val = sgov_shares * pv_sgov
@@ -279,7 +329,9 @@ class BacktestEngine:
                 sgov_shares += add / pv_sgov
                 cash        -= add
 
-            port_values.append(cash + lev_shares * pv_inst + sgov_shares * pv_sgov)
+            pv = cash + lev_shares * pv_inst + sgov_shares * pv_sgov
+            port_values.append(pv)
+            eq_peak = max(eq_peak, pv)
 
         equity = pd.Series(port_values, index=self.idx)
         rets   = equity.pct_change().dropna()
@@ -294,7 +346,8 @@ class BacktestEngine:
         peak    = equity.cummax()
         dd_s    = (equity / peak - 1)
         max_dd  = float(dd_s.min())
-        calmar  = cagr / abs(max_dd) if max_dd < 0 else 0.0
+        # MDD 분모 floor 5%: 낙폭이 거의 없는 폴드의 Calmar 발산 방지
+        calmar  = cagr / max(abs(max_dd), 0.05)
         win_r   = float(np.mean([r > 0 for r in trade_rets])) if trade_rets else 0.5
 
         return BacktestResult(
@@ -318,7 +371,7 @@ def composite_score(r: BacktestResult) -> float:
       - 거래 3건 미만 → 무효 (SGOV만 보유하는 비활성 전략 방지)
       - CAGR이 무위험금리(4.25%) 이하 → 낮은 점수
       - Calmar 최대 5.0 캡 (MDD≈0 분모 발산 방지)
-      - Sharpe와 CAGR을 함께 고려해 균형 잡힌 전략 선호
+      - Calmar 비중 최대 + MDD 25% 초과분 직접 페널티 — 낙폭 방어 우선
     """
     if r.max_dd < -0.55:
         return float("-inf")   # MDD 55% 초과 = 사용 불가
@@ -330,7 +383,10 @@ def composite_score(r: BacktestResult) -> float:
     calmar  = min(r.calmar, 5.0) if np.isfinite(r.calmar) and r.calmar > 0 else 0.0
     sharpe  = r.sharpe if np.isfinite(r.sharpe) else 0.0
     cagr_sc = min(r.cagr / 0.20, 1.5)   # CAGR 20% 기준으로 정규화 (최대 1.5)
-    return calmar * 0.40 + sharpe * 0.30 + cagr_sc * 0.30
+    score   = calmar * 0.45 + sharpe * 0.25 + cagr_sc * 0.30
+    if r.max_dd < -0.25:
+        score -= (abs(r.max_dd) - 0.25) * 2.0   # MDD 25% 초과분 페널티
+    return score
 
 
 # ── Walk-Forward 최적화 ────────────────────────────────────────────────────────
@@ -414,6 +470,13 @@ def _optuna_search(
                 "exit_vix":      trial.suggest_float("exit_vix",            25.0, 48.0),
                 "trailing_stop": trial.suggest_float("trailing_stop",       -0.22, -0.03),
                 "hold_days_max": trial.suggest_int("hold_days_max",         14,   130),
+                "target_vol":    trial.suggest_float("target_vol",           0.15,  0.45),
+                "trend_ma":      trial.suggest_categorical("trend_ma",      [0, 100, 200]),
+                "below_trend_scale": trial.suggest_float("below_trend_scale", 0.0, 1.0),
+                "min_vix_term":  trial.suggest_float("min_vix_term",         0.80,  1.05),
+                "eq_dd_limit":   trial.suggest_float("eq_dd_limit",          0.10,  0.35),
+                "n_tranches":    trial.suggest_int("n_tranches",             1,     3),
+                "tranche_dd_step": trial.suggest_float("tranche_dd_step",    0.02,  0.06),
             }
             try:
                 res = BacktestEngine(params, prices).run()
@@ -450,6 +513,13 @@ def _grid_search(
         "exit_vix":      [32, 38],
         "trailing_stop": [-0.08, -0.12],
         "hold_days_max": [42, 63],
+        "target_vol":    [0.25, 0.40],
+        "trend_ma":      [0, 200],
+        "below_trend_scale": [0.0, 0.5],
+        "min_vix_term":  [0.0, 0.95],
+        "eq_dd_limit":   [0.15, 0.35],
+        "n_tranches":    [1, 3],
+        "tranche_dd_step": [0.04],
     }
     best_score, best_params = float("-inf"), {}
     keys   = list(mini_grid.keys())
@@ -499,9 +569,11 @@ def _optimize_one(
         fixed_instrument=instrument,
     )
     wf_calmars = [r.calmar for r in wf if np.isfinite(r.calmar)]
-    wf_mean = float(np.mean(wf_calmars))   if wf_calmars else 0.0
-    wf_std  = float(np.std(wf_calmars))    if len(wf_calmars) > 1 else 0.0
-    logger.info("[%s] WF: %d폴드  mean=%.2f  std=%.2f", instrument, len(wf), wf_mean, wf_std)
+    wf_mean   = float(np.mean(wf_calmars))   if wf_calmars else 0.0
+    wf_std    = float(np.std(wf_calmars))    if len(wf_calmars) > 1 else 0.0
+    wf_median = float(np.median(wf_calmars)) if wf_calmars else 0.0
+    logger.info("[%s] WF: %d폴드  median=%.2f  mean=%.2f  std=%.2f",
+                instrument, len(wf), wf_median, wf_mean, wf_std)
 
     ts = datetime.now(KST).strftime("%Y-%m-%d %H:%M KST")
     return OptimizationResult(
@@ -513,6 +585,7 @@ def _optimize_one(
         wf_results     = wf,
         wf_mean_calmar = round(wf_mean, 3),
         wf_std_calmar  = round(wf_std, 3),
+        wf_median_calmar = round(wf_median, 3),
         all_trials     = pd.DataFrame(),
         optimized_at   = ts,
     )
@@ -549,12 +622,17 @@ def optimize_leverage(
     if not per_instrument:
         raise RuntimeError("모든 종목 최적화 실패")
 
-    # Calmar 기준 최우수 종목을 대표 결과로
-    best_inst = max(per_instrument, key=lambda k: per_instrument[k].best_calmar)
+    # OOS 안정성(WF median Calmar) 기준 최우수 종목을 대표 결과로
+    # — 전체기간 best_calmar는 in-sample 과적합에 취약하므로 보조 기준으로만 사용
+    def _select_key(k: str) -> tuple:
+        r = per_instrument[k]
+        return (r.wf_median_calmar if r.wf_results else float("-inf"), r.best_calmar)
+    best_inst = max(per_instrument, key=_select_key)
     best      = per_instrument[best_inst]
 
     save_result(best, per_instrument=per_instrument)
-    logger.info("최적화 완료 — 최우수 종목: %s (Calmar %.2f)", best_inst, best.best_calmar)
+    logger.info("최적화 완료 — 최우수 종목: %s (WF median Calmar %.2f, 전체 Calmar %.2f)",
+                best_inst, best.wf_median_calmar, best.best_calmar)
     return best
 
 
@@ -569,6 +647,7 @@ def _result_to_dict(r: OptimizationResult) -> dict:
         "best_max_dd":     r.best_max_dd,
         "wf_mean_calmar":  r.wf_mean_calmar,
         "wf_std_calmar":   r.wf_std_calmar,
+        "wf_median_calmar": r.wf_median_calmar,
         "n_wf_folds":      len(r.wf_results),
         "optimized_at":    r.optimized_at,
         "wf_fold_calmars": [round(f.calmar, 3) for f in r.wf_results],
@@ -623,6 +702,13 @@ def format_optimization_report(r: OptimizationResult, bm_qqq: float = 0.0) -> st
         f"  청산 VIX:  ≥ {p.get('exit_vix', 0):.1f}",
         f"  트레일링스탑: {p.get('trailing_stop', 0)*100:.1f}%",
         f"  최대보유: {p.get('hold_days_max', 0)}일",
+        f"  목표변동성: {p['target_vol']*100:.0f}% (실현변동성 초과 시 비중 축소)" if p.get("target_vol") else "  목표변동성: 미사용",
+        (f"  추세스케일: {p['trend_ma']}일 MA 아래 비중 ×{p.get('below_trend_scale', 0):.2f}"
+         if p.get("trend_ma") else "  추세게이트: 미사용"),
+        f"  VIX텀 진입: ≥ {p['min_vix_term']:.2f} (백워데이션 회피)" if p.get("min_vix_term") else "  VIX텀: 미사용",
+        f"  자금곡선 스톱: 전략 낙폭 -{p['eq_dd_limit']*100:.0f}% 시 신규진입 차단" if p.get("eq_dd_limit") else "  자금곡선 스톱: 미사용",
+        f"  분할진입: {p.get('n_tranches', 1)}트랜치 (낙폭 {p.get('tranche_dd_step', 0)*100:.1f}%p 간격)",
+        f"  거래비용: {p.get('cost_bps', 5.0):.0f}bp/편도 반영",
         "",
         "[ 전체 기간 성과 ]",
         f"  CAGR:    {r.best_cagr*100:+.1f}%",
@@ -636,7 +722,7 @@ def format_optimization_report(r: OptimizationResult, bm_qqq: float = 0.0) -> st
     lines += [
         "",
         f"[ Walk-Forward OOS ({len(wf)}폴드) ]",
-        f"  평균 Calmar: {r.wf_mean_calmar:.2f} ± {r.wf_std_calmar:.2f}",
+        f"  중앙값 Calmar: {r.wf_median_calmar:.2f}  (평균 {r.wf_mean_calmar:.2f} ± {r.wf_std_calmar:.2f})",
     ]
     if wf:
         lines.append("  폴드별 Calmar:")

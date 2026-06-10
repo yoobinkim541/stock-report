@@ -108,8 +108,14 @@ class LeverageModel:
 
         self._feat_names = list(features.columns)
         dates = features.index
-        split = dates[int(len(dates) * train_frac)]
-        train_mask = dates < split
+        # Purged split: 분할일 직전 max(HORIZONS) 거래일(≈달력일 ×1.45)의 이벤트는
+        # 학습 제외 — 선행 레이블이 test 구간을 내다보는 누수 방지.
+        # (이벤트 기반 희소 인덱스이므로 행 수가 아닌 날짜 기준으로 purge)
+        embargo_cal = int(max(HORIZONS) * 1.45)
+        split_idx = int(len(dates) * train_frac)
+        split     = dates[split_idx]
+        purge_cut = split - pd.Timedelta(days=embargo_cal)
+        train_mask = dates < purge_cut
         test_mask  = dates >= split
 
         X_tr = features[train_mask].values.astype(float)
@@ -317,6 +323,23 @@ def build_entry_signal(context: dict, model: Optional[LeverageModel] = None) -> 
 
     bucket_label = f"{int(bucket[0]*100)}%~{int(bucket[1]*100)}%"
 
+    # 추세 게이트: 기초지수가 게이트 MA 아래면 신규 진입 보류/축소로 강등
+    advice    = _entry_advice(cur_dd, vix_v or 20, rsi_v or 50, fg_v)
+    ma200_gap = cur_feats.get("ma200_gap", 0.0)
+    trend_ma  = context.get("opt_trend_ma", 0)
+    below_scale = context.get("opt_below_trend_scale", 0.0)
+    if trend_ma and ma200_gap < 0 and "보류" not in advice:
+        if below_scale > 0.05:
+            advice = f"⚠️ 추세 약세 — QQQ 200MA {ma200_gap*100:+.1f}% 아래, 비중 ×{below_scale:.1f} 축소 진입 ({advice.split(' — ')[0].strip()})"
+        else:
+            advice = f"🛑 추세 게이트 — QQQ가 200MA {ma200_gap*100:+.1f}% 아래, 신규 진입 보류 ({advice.split(' — ')[0].strip()} 조건이나 게이트 우선)"
+
+    # VIX 백워데이션: 단기 변동성이 중기보다 높음 = 시장이 폭풍을 가격에 반영 중
+    vix_term  = cur_feats.get("vix_term", float("nan"))
+    min_term  = context.get("opt_min_vix_term", 0.0)
+    if min_term and np.isfinite(vix_term) and vix_term < min_term and "보류" not in advice:
+        advice = f"🛑 VIX 백워데이션 (텀 {vix_term:.2f} < {min_term:.2f}) — 신규 진입 보류 ({advice.split(' — ')[0].strip()})"
+
     return EntrySignal(
         current_drawdown   = cur_dd,
         current_vix        = vix_v if np.isfinite(vix_v) else 0.0,
@@ -327,7 +350,7 @@ def build_entry_signal(context: dict, model: Optional[LeverageModel] = None) -> 
         n_similar          = n_similar,
         instruments        = instruments_out,
         total_weight       = sum(weights_raw.values()),
-        entry_advice       = _entry_advice(cur_dd, vix_v or 20, rsi_v or 50, fg_v),
+        entry_advice       = advice,
         next_entry_levels  = _next_entry_levels(cur_dd),
         stop_signal        = "QQQ -5% 추가 하락 or VIX > 40 → 포지션 축소 / QQQ ATH 5% 이내 회복 → 단계적 청산",
         timestamp          = datetime.now(KST).strftime("%Y-%m-%d %H:%M KST"),
@@ -362,11 +385,24 @@ def get_entry_signal(retrain: bool = False) -> EntrySignal:
         context["opt_min_rsi_entry"] = opt.get("min_rsi_entry",  40.0)
         context["opt_lev_weight"]    = opt.get("lev_weight",      0.25)
         context["opt_trailing_stop"] = opt.get("trailing_stop",  -0.10)
+        context["opt_trend_ma"]      = int(opt.get("trend_ma", 0) or 0)
+        context["opt_below_trend_scale"] = float(opt.get("below_trend_scale", 0.0) or 0.0)
+        context["opt_min_vix_term"]  = float(opt.get("min_vix_term", 0.0) or 0.0)
+
+        # vol targeting: 실현변동성이 목표 초과 시 권장 비중 축소
+        target_vol = opt.get("target_vol")
+        real_vol   = context.get("current_feats", {}).get("real_vol_20d", np.nan)
+        if target_vol and np.isfinite(real_vol) and real_vol > 1e-6:
+            vol_scale = min(1.0, target_vol / real_vol)
+            context["opt_lev_weight"] = context["opt_lev_weight"] * vol_scale
+            context["vol_scale"]      = vol_scale
         logger.info(
-            "Optimizer 파라미터 적용 — min_dd=%.1f%%  max_vix=%.0f  lev_w=%.0f%%",
+            "Optimizer 파라미터 적용 — min_dd=%.1f%%  max_vix=%.0f  lev_w=%.0f%%  vol_scale=%.2f  trend_ma=%d",
             opt.get("min_dd", -0.10) * 100,
             opt.get("max_vix_entry", 35.0),
-            opt.get("lev_weight", 0.25) * 100,
+            context["opt_lev_weight"] * 100,
+            context.get("vol_scale", 1.0),
+            context["opt_trend_ma"],
         )
 
     model = None if retrain else LeverageModel.load()

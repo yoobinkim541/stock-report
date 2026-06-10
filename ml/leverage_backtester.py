@@ -354,7 +354,7 @@ def get_current_entry_context(days: int = 2520) -> dict:
 
     # 현재 QQQ 낙폭
     tickers   = list({info["ticker"] for info in INSTRUMENTS.values()} |
-                     {"QQQ", "^VIX", "HYG", "IEF"})
+                     {"QQQ", "^VIX", "^VIX3M", "HYG", "IEF"})
     close_map = _fetch(tickers, days=120)
 
     qqq   = close_map.get("QQQ")
@@ -367,6 +367,10 @@ def get_current_entry_context(days: int = 2520) -> dict:
 
     vix_s = close_map.get("^VIX")
     vix_v = float(vix_s.iloc[-1]) if vix_s is not None and not vix_s.empty else np.nan
+    vix3m_s = close_map.get("^VIX3M")
+    vix_term_v = (float(vix3m_s.iloc[-1]) / vix_v
+                  if vix3m_s is not None and not vix3m_s.empty and np.isfinite(vix_v) and vix_v > 0
+                  else float("nan"))
 
     try:
         from barbell_strategy import fetch_rsi
@@ -384,6 +388,7 @@ def get_current_entry_context(days: int = 2520) -> dict:
     vix_full = _fetch(["^VIX"], days=300).get("^VIX", pd.Series(dtype=float))
     vol_feats = _compute_vol_features(qqq, vix_full, qqq.index[-1])
 
+    real_vol = qqq.pct_change().rolling(20).std() * np.sqrt(252)
     current_feats = {
         "drawdown":  cur_dd,
         "vix":       vix_v,
@@ -391,6 +396,8 @@ def get_current_entry_context(days: int = 2520) -> dict:
         "fg_proxy":  fg_v,
         "ma200_gap": ma200_gap,
         "mom_20d":   float(qqq.pct_change(20).iloc[-1]) if len(qqq) > 20 else 0.0,
+        "real_vol_20d": float(real_vol.iloc[-1]) if len(real_vol.dropna()) else float("nan"),
+        "vix_term":  vix_term_v,
         **vol_feats,
     }
 
