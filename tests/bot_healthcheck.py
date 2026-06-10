@@ -19,7 +19,7 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-PROJECT_DIR    = os.getenv("STOCK_REPORT_PROJECT_DIR", os.path.dirname(os.path.abspath(__file__)))
+PROJECT_DIR    = os.getenv("STOCK_REPORT_PROJECT_DIR", os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 BOT_TOKEN      = os.getenv("STOCK_BOT_TOKEN")
 CHAT_ID        = os.getenv("STOCK_BOT_CHAT_ID", "5771238245")
 PORTFOLIO_PATH = os.path.join(PROJECT_DIR, "portfolio_snapshot.json")
@@ -70,13 +70,20 @@ def _bot_process_pids() -> list[str]:
         for line in result.stdout.splitlines():
             if "telegram_bot.py" not in line:
                 continue
-            if "bot_healthcheck.py" in line:
+            parts = line.split()
+            if len(parts) < 3:
                 continue
-            if "uv run python" in line:
+            # parts[0]=PID, parts[1]=interpreter, parts[2]=script
+            # 실제 봇: python3 /path/telegram_bot.py
+            # 오탐 사례: timeout 14400 claude -p "...telegram_bot.py..." 처럼
+            #   프롬프트 문자열 안에 telegram_bot.py가 포함된 클로드 에이전트 프로세스
+            interpreter = parts[1]
+            script_arg  = parts[2]
+            if "python" not in interpreter:
                 continue
-            if "python" not in line:
+            if not script_arg.endswith("telegram_bot.py"):
                 continue
-            pids.append(line.strip().split(None, 1)[0])
+            pids.append(parts[0])
         return pids
     except Exception:
         return []

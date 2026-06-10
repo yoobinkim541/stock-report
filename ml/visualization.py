@@ -18,6 +18,45 @@ from typing import Optional
 import pandas as pd
 
 
+def _load_pyplot():
+    """Import matplotlib in Agg mode; use a Korean-capable font if installed.
+
+    Returns the pyplot module, or None when matplotlib is not available.
+    """
+    try:
+        import matplotlib
+        matplotlib.use("Agg")
+        import matplotlib.pyplot as plt
+    except ImportError:
+        return None
+
+    try:
+        from matplotlib import font_manager
+        installed = {f.name for f in font_manager.fontManager.ttflist}
+        for name in ("NanumGothic", "Noto Sans CJK KR", "Noto Sans KR", "Malgun Gothic"):
+            if name in installed:
+                matplotlib.rcParams["font.family"] = name
+                matplotlib.rcParams["axes.unicode_minus"] = False
+                break
+    except Exception:
+        pass
+
+    return plt
+
+
+def _savefig_quiet(fig, path: str) -> None:
+    """fig.savefig with missing-glyph warnings silenced.
+
+    Headless servers often lack Korean fonts; the per-glyph UserWarning spam
+    would otherwise drown the smoke-script output.
+    """
+    import warnings
+
+    with warnings.catch_warnings():
+        warnings.filterwarnings("ignore", message=r"Glyph \d+ ")
+        fig.savefig(path, dpi=100, bbox_inches="tight")
+
+
 def plot_equity_curves(
     equity_df: pd.DataFrame,
     outdir: str = "/tmp",
@@ -29,11 +68,8 @@ def plot_equity_curves(
     Returns the absolute file path on success, or None if matplotlib is not
     installed or *equity_df* is empty.
     """
-    try:
-        import matplotlib
-        matplotlib.use("Agg")
-        import matplotlib.pyplot as plt
-    except ImportError:
+    plt = _load_pyplot()
+    if plt is None:
         return None
 
     if equity_df.empty:
@@ -58,7 +94,7 @@ def plot_equity_curves(
     ax.grid(True, alpha=0.3)
 
     path = os.path.join(outdir, filename)
-    fig.savefig(path, dpi=100, bbox_inches="tight")
+    _savefig_quiet(fig, path)
     plt.close(fig)
     return path
 
@@ -75,11 +111,8 @@ def plot_sweet_spot_trials(
     Returns the absolute file path on success, or None if matplotlib is not
     installed or *trials* is missing required columns.
     """
-    try:
-        import matplotlib
-        matplotlib.use("Agg")
-        import matplotlib.pyplot as plt
-    except ImportError:
+    plt = _load_pyplot()
+    if plt is None:
         return None
 
     if trials.empty or "threshold" not in trials.columns or "score" not in trials.columns:
@@ -116,6 +149,6 @@ def plot_sweet_spot_trials(
     ax.grid(True, alpha=0.3)
 
     path = os.path.join(outdir, filename)
-    fig.savefig(path, dpi=100, bbox_inches="tight")
+    _savefig_quiet(fig, path)
     plt.close(fig)
     return path

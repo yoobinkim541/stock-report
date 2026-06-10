@@ -458,7 +458,7 @@ def test_bot_commands_include_all_top_level_dispatch_commands():
 
 def test_apply_snapshot_updates_derived_portfolio_values(monkeypatch, tmp_path):
     import telegram_bot
-    import holding_commands
+    import bot.holding_commands as holding_commands
 
     portfolio_path = tmp_path / "portfolio_snapshot.json"
     portfolio_path.write_text(json.dumps({

@@ -26,7 +26,7 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-PROJECT_DIR    = os.getenv("STOCK_REPORT_PROJECT_DIR", os.path.dirname(os.path.abspath(__file__)))
+PROJECT_DIR    = os.getenv("STOCK_REPORT_PROJECT_DIR", os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 PORTFOLIO_PATH = os.path.join(PROJECT_DIR, "portfolio_snapshot.json")
 
 # 텔레그램 알림
@@ -140,12 +140,30 @@ def update_portfolio(holdings: list[dict]) -> str:
     return "\n".join(lines)
 
 
+def _touch_sync_timestamp():
+    """국내 종목 0개여도 sync 실행 시각 기록 (파일 mtime 갱신)."""
+    if not os.path.exists(PORTFOLIO_PATH):
+        return
+    with open(PORTFOLIO_PATH, encoding="utf-8") as f:
+        snap = json.load(f)
+    snap["last_domestic_sync"] = datetime.now().isoformat()
+    tmp = PORTFOLIO_PATH + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump(snap, f, ensure_ascii=False, indent=2)
+    os.replace(tmp, PORTFOLIO_PATH)
+
+
 def main():
     logger.info("키움 국내주식 동기화 시작")
 
     holdings = fetch_domestic_balance()
     if not holdings:
         logger.warning("조회된 종목 없음 — API 키 또는 계좌 확인 필요")
+        try:
+            _touch_sync_timestamp()
+            logger.info("last_domestic_sync 타임스탬프 갱신 완료")
+        except Exception as e:
+            logger.warning("타임스탬프 갱신 실패: %s", e)
         return
 
     summary = update_portfolio(holdings)
