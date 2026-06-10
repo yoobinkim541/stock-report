@@ -206,7 +206,7 @@ def _tax_sell(chat_id: str, args: list, send_fn):
         rec = add_sell(ticker, qty, buy_price, sell_price, fx)
         gu = rec["gain_usd"]
         gk = rec["gain_krw"]
-        sg = "+" if gu >= 0 else ""
+        sg = "+" if gu >= 0 else "-"
         send_fn(chat_id, (
             f"✅ 매도 기록 저장\n"
             f"━━━━━━━━━━━━━━━━━━━━━━━\n"
@@ -214,7 +214,7 @@ def _tax_sell(chat_id: str, args: list, send_fn):
             f"  수량     {qty}주\n"
             f"  매수단가 ${buy_price:.2f}\n"
             f"  매도단가 ${sell_price:.2f}\n"
-            f"  실현손익 {sg}${gu:,.2f}  ({sg}{gk:,.0f}원)\n"
+            f"  실현손익 {sg}${abs(gu):,.2f}  ({sg}{abs(gk):,.0f}원)\n"
             f"  환율     {fx:,.0f}원/USD\n"
             f"  날짜     {rec['date']}"
         ))

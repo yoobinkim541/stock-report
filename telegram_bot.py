@@ -420,7 +420,6 @@ def cmd_status(d: dict) -> str:
               else "😐중립" if fg_sc <= 55 else "😄탐욕" if fg_sc <= 75
               else "🤑극단탐욕")
     fg_proxy = fg.get("proxy_score", -1.0)
-    fg_cnn_ok = fg.get("cnn_ok", True)
     _fg_proxy_str = (f"  proxy {fg_proxy:.0f}" if fg_proxy >= 0 else "")
 
     rsi_s = ("🔥과매도" if rsi < 30 else "⚠️약세"     if rsi < 40

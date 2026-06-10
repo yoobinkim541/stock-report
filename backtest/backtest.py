@@ -450,8 +450,14 @@ def build_report(metrics: dict, sim: dict) -> str:
     trans = metrics["transitions"]
     if trans:
         lines += ["", "━━━ 주요 Phase 전환 ━━━━━━━━━━━━━━━━━━━━"]
+        # 심각도 순위: bull_2(-2) < bull_1(-1) < 0 < 1 < … < 5
+        _sev = {"bull_2": -2, "bull_1": -1}
         for t in trans[-10:]:
-            arrow  = "↘" if str(t["to"]) > str(t["from"]) else "↗"
+            sev_from = _sev.get(str(t["from"]), None)
+            sev_to   = _sev.get(str(t["to"]), None)
+            sev_from = int(t["from"]) if sev_from is None else sev_from
+            sev_to   = int(t["to"]) if sev_to is None else sev_to
+            arrow  = "↘" if sev_to > sev_from else "↗"
             change = "악화" if arrow == "↘" else "회복"
             lines.append(
                 f"  {t['date']}  "
