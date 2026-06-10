@@ -37,8 +37,13 @@ def _tax_import_apply(chat_id: str, send_fn):
             )
         except Exception as e:
             errors.append(f"  {s['ticker']}: {e}")
-    clear_pending_sells()
-    lines = ["✅ 매도내역 세금 기록 반영 완료", "━━━━━━━━━━━━━━━━━━━━━━━"]
+    # 전부 실패 시 pending 보존 — 원인 해결 후 재시도 가능하도록
+    if applied:
+        clear_pending_sells()
+        lines = ["✅ 매도내역 세금 기록 반영 완료", "━━━━━━━━━━━━━━━━━━━━━━━"]
+    else:
+        lines = ["⚠️ 매도내역 반영 실패 — 대기 파일 보존됨 (수정 후 재시도 가능)",
+                 "━━━━━━━━━━━━━━━━━━━━━━━"]
     lines += applied
     if errors:
         lines += ["", "❌ 오류:"] + errors

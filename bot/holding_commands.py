@@ -45,10 +45,10 @@ def _run_backtest_if_constituents_changed(before: set[str], after: set[str], cha
     if before == after:
         return
 
-    project_dir = os.path.dirname(os.path.abspath(__file__))
+    project_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
     os.makedirs(os.path.expanduser("~/reports"), exist_ok=True)
     log_path = os.path.expanduser(f"~/reports/backtest-auto-{datetime.now().strftime('%Y%m%d-%H%M%S')}.log")
-    cmd = [sys.executable, os.path.join(project_dir, "backtest_multi.py"), "--send"]
+    cmd = [sys.executable, os.path.join(project_dir, "backtest", "backtest_multi.py"), "--send"]
     try:
         with open(log_path, "ab") as log:
             subprocess.Popen(cmd, cwd=project_dir, stdout=log, stderr=subprocess.STDOUT, start_new_session=True)
@@ -381,8 +381,11 @@ def cmd_apply_snapshot(chat_id: str, send_fn):
     snap["overseas_general"]["holdings_usd"] = list(existing.values())
     snap["snapshot_date"] = datetime.now().strftime("%Y-%m-%d")
 
-    with open(PORTFOLIO_PATH, "w", encoding="utf-8") as f:
+    # atomic write — 쓰기 도중 크래시 시 원본 보호 (프로젝트 규칙)
+    tmp_path = PORTFOLIO_PATH + ".tmp"
+    with open(tmp_path, "w", encoding="utf-8") as f:
         json.dump(snap, f, indent=2, ensure_ascii=False)
+    os.replace(tmp_path, PORTFOLIO_PATH)
 
     clear_pending_snapshot()
 

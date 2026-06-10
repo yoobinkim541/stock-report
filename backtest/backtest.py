@@ -245,11 +245,20 @@ def run_simulation(df: pd.DataFrame, start: str) -> dict:
     portfolio_log  = []
     transitions    = []
 
+    last_prices: dict[str, float] = {}
+
     for (date, row), trade_phase in zip(df.iterrows(), trade_phases):
-        prices = {t: float(row.get(t, 0) or 0) for t in ASSETS}
+        # NaN 가격 가드 — NaN은 `<= 0` 비교를 통과해 shares를 영구 오염시킴
+        # (최신 미완성 행 등) → 직전 유효 가격으로 대체
+        prices = {}
         for t in ASSETS:
-            if prices[t] <= 0:
-                prices[t] = 100.0
+            try:
+                v = float(row.get(t, 0) or 0)
+            except (TypeError, ValueError):
+                v = 0.0
+            if not np.isfinite(v) or v <= 0:
+                v = last_prices.get(t, 100.0)
+            prices[t] = last_prices[t] = v
 
         phase = trade_phase
 
@@ -291,8 +300,12 @@ def run_simulation(df: pd.DataFrame, start: str) -> dict:
     bm_invested = INITIAL_CASH
     bm_log      = []
 
+    bm_last_p = float(df.iloc[0]["QQQ"])
     for date, row in df.iterrows():
-        p = float(row.get("QQQ", 0) or 1)
+        p = float(row.get("QQQ", 0) or 0)
+        if not np.isfinite(p) or p <= 0:
+            p = bm_last_p
+        bm_last_p = p
         bm_shares   += DAILY_DCA_USD / p
         bm_invested += DAILY_DCA_USD
         bm_log.append({"date": date.strftime("%Y-%m-%d"), "value": round(bm_shares * p, 2)})

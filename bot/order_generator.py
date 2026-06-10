@@ -18,7 +18,8 @@ from datetime import datetime
 import yfinance as yf
 import requests
 
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+# bot/ → 프로젝트 루트 (barbell_strategy 등 루트 모듈 import용)
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 try:
     from dotenv import load_dotenv; load_dotenv()

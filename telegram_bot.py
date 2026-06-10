@@ -323,6 +323,13 @@ def send(chat_id: str, text: str, max_len: int = 4000):
         return
     chunks, current, current_len = [], [], 0
     for line in text.split("\n"):
+        # 단일 줄이 max_len 초과 시 강제 분할 (4096자 API 제한 방어)
+        while len(line) > max_len:
+            if current:
+                chunks.append("\n".join(current))
+                current, current_len = [], 0
+            chunks.append(line[:max_len])
+            line = line[max_len:]
         line_len = len(line) + 1
         if current and current_len + line_len > max_len:
             chunks.append("\n".join(current))
@@ -682,7 +689,8 @@ def handle_attachment(msg: dict, chat_id: str):
     else:
         doc      = msg["document"]
         file_id  = doc["file_id"]
-        filename = doc.get("file_name", f"doc_{file_id[:12]}.bin")
+        # basename 정제 — 경로 문자가 포함된 파일명으로 ATTACH_DIR 밖에 쓰는 것 방지
+        filename = os.path.basename(doc.get("file_name") or "") or f"doc_{file_id[:12]}.bin"
         mime     = doc.get("mime_type", "")
         file_type = "pdf" if "pdf" in mime.lower() else "image"
 
@@ -1313,7 +1321,6 @@ def cmd_intraday(chat_id: str, args: list, send_fn=None) -> None:
     /intraday kr        — 한국 시총 10개 단기 분석
     /intraday 1m NVDA   — 1분봉 상세 분석
     """
-    from telegram_bot import send as _default_send
     _send = send_fn if send_fn is not None else send
 
     raw  = [a.strip() for a in (args or [])]
@@ -1431,6 +1438,25 @@ def dispatch(text: str, chat_id: str):
 #  메인 폴링 루프
 # ══════════════════════════════════════════════════════════════════════
 
+_BG_LOCKS: dict[str, threading.Lock] = {}
+
+
+def _run_periodic(name: str, fn) -> None:
+    """주기 작업을 백그라운드 스레드로 실행 — 무거운 작업(진입분석 등)이
+    명령어 응답을 막지 않도록. 같은 작업이 아직 실행 중이면 이번 주기는 건너뜀."""
+    lock = _BG_LOCKS.setdefault(name, threading.Lock())
+    if not lock.acquire(blocking=False):
+        return  # 이전 주기 아직 실행 중
+    def _wrap():
+        try:
+            fn()
+        except Exception:
+            logger.exception("주기 작업 오류: %s", name)
+        finally:
+            lock.release()
+    threading.Thread(target=_wrap, daemon=True, name=f"periodic-{name}").start()
+
+
 def run():
     if not TELEGRAM_TOKEN:
         logger.error("STOCK_BOT_TOKEN 없음 — .env 파일 확인")
@@ -1501,25 +1527,25 @@ def run():
                 logger.info(f"수신: {text!r}")
                 dispatch(text, chat_id)
 
-            # 가격 알림 주기 체크
+            # 주기 작업 — 백그라운드 스레드로 실행해 명령어 응답 차단 방지
             now = time.time()
             if now - last_alert_check > ALERT_CHECK_SECS:
-                notify_triggered_alerts()
+                _run_periodic("alerts", notify_triggered_alerts)
                 last_alert_check = now
 
             # Phase 변화 주기 체크 (Phase 5 진입 시 긴급 에스컬레이션 3회)
             if now - last_phase_check > PHASE_CHECK_SECS:
-                notify_phase_change()
+                _run_periodic("phase", notify_phase_change)
                 last_phase_check = now
 
             # 진입 타점 모니터링 (30분 주기, 새로운 enter 신호 → 푸시)
             if now - last_entry_check > ENTRY_CHECK_SECS:
-                notify_entry_signals()
+                _run_periodic("entry", notify_entry_signals)
                 last_entry_check = now
 
             # 단기봉 이상 감지 (1분 주기, 장중에만)
             if now - last_intraday_check > INTRADAY_CHECK_SECS:
-                notify_intraday_signals()
+                _run_periodic("intraday", notify_intraday_signals)
                 last_intraday_check = now
 
         except KeyboardInterrupt:

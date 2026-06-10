@@ -11,7 +11,8 @@ from datetime import datetime
 
 import yfinance as yf
 
-ALERTS_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "price_alerts.json")
+# bot/ → 프로젝트 루트 (실제 price_alerts.json 위치)
+ALERTS_FILE = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "price_alerts.json")
 
 
 def load_alerts() -> list:
@@ -25,8 +26,11 @@ def load_alerts() -> list:
 
 
 def save_alerts(alerts: list):
-    with open(ALERTS_FILE, "w", encoding="utf-8") as f:
+    # atomic write — 쓰기 도중 크래시 시 원본 보호 (프로젝트 규칙)
+    tmp = ALERTS_FILE + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
         json.dump(alerts, f, ensure_ascii=False, indent=2)
+    os.replace(tmp, ALERTS_FILE)
 
 
 def add_alert(ticker: str, price: float, alert_type: str, note: str = "") -> str:

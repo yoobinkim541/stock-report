@@ -9,7 +9,7 @@ from pathlib import Path
 
 logger = logging.getLogger(__name__)
 
-PROJECT_DIR = Path(__file__).resolve().parent
+PROJECT_DIR = Path(__file__).resolve().parent.parent  # bot/ → 프로젝트 루트
 ADVISOR_MODEL = os.environ.get("STOCK_ADVISOR_MODEL", "gpt-5.5")
 EDITABLE_FILES = [
     "portfolio_snapshot.json",
