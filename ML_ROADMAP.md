@@ -13,23 +13,25 @@
 Layer 1  Phase 규칙 (barbell_strategy)
           ↓ Phase별 DCA 배율 + 레버리지 임계
 Layer 2  Ranker ──────────────────────────────→ _ml_dca_blend() → 실제 DCA 비중 ✅
-         LeverageModel ─────────────────────→ /leverage 출력만                  ❌
-         ExcessReturnModel ──────────────────→ MetaAllocator 내부               ❌
-         MetaAllocator (5신호 통합) ──────────→ /meta 출력만                    ❌
-Layer 3  LeverageOptimizer ─────────────────→ best_params.json 저장만           ❌
+         LeverageModel ─────────────────────→ /leverage + opt 임계·vol scale   ✅
+         ExcessReturnModel ──────────────────→ MetaAllocator 내부               ✅
+         MetaAllocator (5신호 통합) ──────────→ DCA 블렌딩 + paper_track A/B    ✅
+Layer 3  LeverageOptimizer ─────────────────→ live 진입 임계·비중 직접 반영     ✅
+         EntryAnalyzer ─────────────────────→ 자동 목표가/손절가 알림 → R-multiple 기록 ✅
 ```
 
-**실제 ML이 의사결정에 영향을 미치는 경로: Ranker → DCA 비중 조정 1개뿐.**
+(2026-06-10 갱신 — 연결 단계는 완료. 남은 축은 신호 품질 검증: paper_track A/B와
+purged WF 기준으로 각 신호의 실제 기여를 측정하는 단계.)
 
 ### 모델별 상세 진단
 
 | 모델 | 피처 | 레이블 | 검증 방식 | 실제 반영 | 핵심 문제 |
 |------|------|--------|-----------|-----------|-----------|
-| **Ranker** | 가격 기반 11개 (모멘텀·RSI·베타·VIX) | 60일 QQQ 초과수익 4분위 | WF (train_frac 0.7) | DCA 비중 (±15%) | 펀더멘털·매크로 피처 없음 |
-| **LeverageModel** | QQQ 낙폭·VIX·RSI·FG·크레딧 스프레드 11개 | 30/60/90일 수익 방향+크기 | 단순 시계열 분할 | /leverage 출력만 | MetaAllocator와 단절 |
-| **ExcessReturnModel** | 모멘텀·변동성·RSI·VIX·크레딧 스프레드 8개 | **다음날 수익률** (정적 2/3 분할) | WF 없음 | MetaAllocator 내부 (출력만) | 레이블 설계 오류·WF 없음 |
-| **MetaAllocator** | 위 3개 + FG proxy + Phase | — | — | /meta 출력만 | DCA·주문과 단절 |
-| **LeverageOptimizer** | Optuna (파라미터 탐색) | Calmar 최대화 | WF OOS | 매주 월 재최적화만 | 최적 파라미터 LeverageModel에 미반영 |
+| **Ranker** | 가격 68개 + 펀더멘털 틸트 (추론 시) | 20일 QQQ 초과수익 | **Purged WF (embargo 20일)** | DCA 비중 (±15%) + 랭킹 매매가이드 | ⚠️ purged IC ≈ 0.003 (최근 폴드 음수) — 단순분할 0.13은 누수 과대평가였음. paper_track으로 DCA 틸트 기여 검증 중 |
+| **LeverageModel** | QQQ 낙폭·VIX·RSI·FG·크레딧 스프레드 11개 | 21/42/63/126일 수익 방향+크기 | **Purged 분할 (embargo 126d)** | /leverage 출력 + opt 파라미터·vol scale 반영 | ⚠️ 21d AUC ≈ 0.5 (무력) / 63~126d AUC 0.6~0.71 — Kelly 블렌딩이 21d 기준인 것은 개선 필요 |
+| **ExcessReturnModel** | 모멘텀·변동성·RSI·VIX·크레딧 스프레드 8개 | 20일 QQQ 초과수익 | WF | MetaAllocator 내부 | — |
+| **MetaAllocator** | 위 3개 + FG proxy + Phase | — | paper_track A/B (2026-06-10~) | DCA 블렌딩 + /meta | 가중치 고정 (Ridge 학습은 3-A) |
+| **LeverageOptimizer** | Optuna 16파라미터 (거래비용 5bp·VIX텀·트랜치·자금곡선스톱·소프트추세 포함) | Calmar 0.45 + Sharpe 0.25 + CAGR 0.30 − MDD 페널티 | WF OOS (median Calmar 선택) | live 신호 임계·비중·vol targeting·백워데이션 게이트 반영 | 비용 반영 후 QLD 저노출 수렴 (CAGR 6.8%/MDD -6.3%) — 잦은 매매 엣지 대부분이 비용으로 소멸함을 확인 (2026-06-10) |
 
 ---
 
@@ -201,11 +203,13 @@ paper_track.json: {
 | 2-A. 매크로 피처 (수익률곡선/VIX텀/크레딧/달러/금/원유 등 40개) | ⭐⭐⭐ | ★★☆ | ✅ 완료 |
 | 2-B. 기술지표 확장 (Stochastic/WR/CCI/이격도/OBV/CMF/감마) | ⭐⭐⭐ | ★★☆ | ✅ 완료 |
 | 2-C. 일목균형표 신호 + MA 크로스오버 신호 | ⭐⭐ | ★☆☆ | ✅ 완료 |
-| 2-D. 펀더멘털 피처 (ROE, EPS 성장) | ⭐⭐ | ★★☆ | ⬜ 미착수 |
-| 2-E. Ranker Purged WF (embargo 20일) | ⭐⭐⭐ | ★★☆ | ⬜ 미착수 |
-| 3-A. MetaAllocator 가중치 Ridge 학습 | ⭐⭐⭐ | ★★★ | ⬜ 미착수 |
-| 3-B. Mean-Variance 포트폴리오 최적화 | ⭐⭐ | ★★★ | ⬜ 미착수 |
-| 3-C. A/B 페이퍼 트레이딩 추적 | ⭐⭐⭐ | ★★☆ | ⬜ 미착수 |
+| 2-D. 펀더멘털 피처 (ROE, EPS 성장) | ⭐⭐ | ★★☆ | 🟡 부분 — 추론 틸트 적용 + 주간 point-in-time 스냅샷 적재 시작 (crons/fundamental_snapshot.py), 학습 피처 투입은 데이터 6개월+ 축적 후 |
+| 2-E. Ranker Purged WF (embargo 20일) | ⭐⭐⭐ | ★★☆ | ✅ 완료 — purged WF mean IC 0.003 (기존 단순분할 0.13은 과대평가였음) |
+| 3-A. MetaAllocator 가중치 Ridge 학습 | ⭐⭐⭐ | ★★★ | ⬜ 보류 — paper_track 30일+ 축적 후 착수 |
+| 3-B. Mean-Variance 포트폴리오 최적화 | ⭐⭐ | ★★★ | ⬜ 보류 — 하려면 inverse-vol 라이트 버전 권장 |
+| 3-C. A/B 페이퍼 트레이딩 추적 | ⭐⭐⭐ | ★★☆ | ✅ 완료 — crons/paper_track.py (월요일 Sharpe 비교 발송) |
+| (신규) 자동 알림 → 신호 성과 기록 (R-multiple) | ⭐⭐⭐ | ★☆☆ | ✅ 완료 — signal_outcomes.json, 캘리브레이션 실전 레이블 |
+| (신규) 진입점수 월간 재캘리브레이션 | ⭐⭐ | ★☆☆ | 🟡 스크립트 완료 (backtest/entry_calibration.py) — 크론 수동 등록 필요 |
 
 ---
 
@@ -224,10 +228,11 @@ paper_track.json: {
 
 ML 개선 전후 비교 지표:
 
-| 지표 | 현재 측정 | 목표 |
-|------|----------|------|
-| Ranker OOS IC | 매일 `/ranking` | > 0.05 (연환산) |
-| Ranker ICIR | 매일 `/ranking` | > 0.5 |
-| MetaAllocator WF Sharpe | `/meta` | > QQQ Sharpe |
-| LeverageModel WF Calmar | `leverage_best_params.json` | > 1.5 |
-| DCA 비중 vs 실현수익 상관 | `paper_track.json` (구현 후) | > 0.15 |
+| 지표 | 현재 측정 | 현재값 (2026-06-10) | 목표 |
+|------|----------|--------------------|------|
+| Ranker OOS IC (purged WF) | 재학습 시 | 0.003 (폴드 +0.04/+0.05/-0.08) | > 0.05 |
+| Ranker ICIR (purged WF) | 재학습 시 | 0.04 | > 0.5 |
+| MetaAllocator vs Rule Sharpe | `paper_track.json` (매주 월 발송) | 적재 시작 (30일 후 첫 비교) | > Rule |
+| Leverage WF median Calmar | `leverage_best_params.json` | 0.57 (QLD, 비용 5bp 반영 — 무비용 1.22는 과대평가였음) | > 1.0 (비용 반영 기준) |
+| Phase 래더 vs 플랫 DCA | `backtest/phase_ladder_backtest.py` | XIRR +3.0%p (24.2% vs 21.2%), MDD -6.8%p 불리 | XIRR 우위 유지 |
+| 진입신호 실전 R-multiple | `signal_outcomes.json` | 적재 시작 | 평균 > 0.5R |

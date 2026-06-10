@@ -89,6 +89,11 @@ crons/news_spike_detector.py (크론 매 1분)
 | `crons/notion_sync.py` | Notion 대시보드 동기화 | 평일 22:30 UTC |
 | `crons/news_spike_detector.py` | 속보 수집 + 급증 감지 + 텔레그램 알림 | 매 1분 |
 | `crons/kiwoom_sync_rest.py` | 키움 REST API 국내주식 잔고 동기화 | 평일 23:35 UTC |
+| `reports/source_collector.py` | 전체 소스 수집 (텔레그램 채널·FRED·국채·시장 스냅샷) → JSONL 캐시 | 매 30분 (:05/:35) |
+| `crons/paper_track.py` | MetaAllocator vs Phase 규칙 A/B 페이퍼 트레이딩 (월요일 Sharpe 비교 발송) | 평일 22:50 UTC |
+| `crons/fundamental_snapshot.py` | 펀더멘털 point-in-time 스냅샷 적재 (look-ahead 없는 학습 피처용) | 토 01:00 UTC |
+| `crons/options_snapshot.py` | 옵션 지표 스냅샷 (ATM IV·풋콜비·스큐·기대변동폭) — 학습 피처 축적 | 평일 21:30 UTC |
+| `backtest/entry_calibration.py` | 진입점수 가중치·임계값 walk-forward 재추정 (OOS 개선 시만 자동 채택) | 매월 1일 14:00 UTC |
 
 **tests/ (테스트·헬스체크)**
 | 파일 | 역할 | 주기 |
@@ -146,6 +151,8 @@ crons/news_spike_detector.py (크론 매 1분)
 /alert add TICKER 가격 buy|sell [메모]  가격 알림 등록
 /alert list                        알림 목록
 /alert remove ID                   알림 삭제
+※ 진입(enter) 신호 발생 시 목표가(sell)·손절가(buy) 알림 자동 등록
+  → 발동 시 signal_outcomes.json에 R-multiple 기록 + 짝 알림 자동 제거
 
 📎 PDF·이미지 전송 → 자동 파싱 → /holding apply 또는 /tax import apply
 ```
@@ -195,6 +202,12 @@ crons/news_spike_detector.py (크론 매 1분)
 ~/.cache/barbell_anchor.json            — 낙폭 고점 앵커 (Phase 드리프트 방지)
 ~/.local/state/stock-report/barbell_bot.pid  — 봇 PID (단일 인스턴스 잠금)
 ~/.local/share/stock-report/            — 런타임 데이터 (tax, history, dividend, pending)
+~/.local/share/stock-report/paper_track.json     — A/B 페이퍼 트레이딩 기록 (meta vs rule)
+~/.local/share/stock-report/signal_outcomes.json — 자동 알림 발동 신호 성과 (R-multiple)
+~/reports/ml-cache/leverage_best_params.json     — Optuna 최적 파라미터 (UPRO·vol targeting)
+~/reports/ml-cache/entry_score_params.json       — 진입점수 가중치 (캘리브레이션 채택 시 생성)
+~/reports/ml-cache/fundamental_scores.json       — 펀더멘털 점수 7일 캐시 (랭커 틸트용)
+~/reports/ml-cache/fundamental_snapshots.jsonl   — 펀더멘털 주간 point-in-time 스냅샷
 ```
 
 ## 포트폴리오
