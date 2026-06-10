@@ -174,10 +174,13 @@ def _find_similar(
     history: pd.DataFrame,
     n: int = 30,
     lookback: int = 10,
+    min_gap: int = 5,
 ) -> tuple[pd.Index, np.ndarray]:
     """현재 특징 벡터와 유사한 과거 기간 탐색 (정규화 유클리드 거리).
 
     lookback: 최근 n일은 제외 (최신 데이터 리크 방지).
+    min_gap:  선택된 이웃 간 최소 간격 (거래일) — 연속일이 묶여 뽑히면 사실상
+              같은 사건의 중첩 표본이라 승률·분포 추정이 과신됨 (군집 중복 방지).
     VIX 레짐 조건부: 같은 변동성 레짐 안에서만 탐색 (표본 60건 미만이면 전체로 폴백)
     — "차트 모양은 비슷하지만 시장 환경이 다른" 기간 혼입 방지.
 
@@ -201,9 +204,28 @@ def _find_similar(
     c_n = (current - mu) / std
 
     dists = np.sqrt(((h_n - c_n) ** 2).sum(axis=1))
-    top   = dists.nsmallest(n)
-    w     = 1.0 / (1.0 + top.to_numpy())
-    w     = w / w.sum() if w.sum() > 0 else np.full(len(w), 1.0 / max(len(w), 1))
+
+    # 거리순 그리디 선택 — 이미 뽑힌 이웃과 min_gap 거래일 이내인 후보는 제외.
+    # 간격은 원본 history의 행 위치(거래일) 기준 (VIX 레짐 필터로 hist가 듬성해져도
+    # 달력상 인접일이 서로 다른 행으로 들어오는 것을 막기 위함).
+    pos_map = {d: p for p, d in enumerate(history.index)}
+    order   = dists.sort_values().index
+    chosen: list = []
+    chosen_pos: list[int] = []
+    for d in order:
+        p = pos_map.get(d)
+        if p is None:
+            continue
+        if any(abs(p - cp) < min_gap for cp in chosen_pos):
+            continue
+        chosen.append(d)
+        chosen_pos.append(p)
+        if len(chosen) >= n:
+            break
+
+    top = dists.loc[chosen]
+    w   = 1.0 / (1.0 + top.to_numpy())
+    w   = w / w.sum() if w.sum() > 0 else np.full(len(w), 1.0 / max(len(w), 1))
     return top.index, w
 
 

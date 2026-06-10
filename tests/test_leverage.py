@@ -195,3 +195,25 @@ def test_ranker_labels_alignment_stable():
     assert list(labels[:8]) == list(labels[8:])
     # 최고 excess 행이 최상위 버킷
     assert labels[0] == 3 and labels[5] == 0
+
+
+def test_find_similar_min_gap():
+    """kNN 이웃이 연속일로 군집되면 같은 사건의 중첩 표본 — 최소 간격 보장."""
+    from ml.entry_analyzer import _find_similar
+    idx = pd.date_range("2022-01-03", periods=400, freq="B")
+    rng = np.random.default_rng(3)
+    hist = pd.DataFrame({
+        "drawdown": rng.normal(-0.1, 0.05, 400),
+        "rsi":      rng.normal(50, 10, 400),
+        "vix":      rng.uniform(18, 28, 400),
+    }, index=idx)
+    # 100~119행을 현재와 거의 동일하게 — 군집 유도
+    cur = pd.Series({"drawdown": -0.25, "rsi": 30.0, "vix": 22.0})
+    hist.iloc[100:120] = [cur["drawdown"], cur["rsi"], cur["vix"]]
+
+    sim_idx, w = _find_similar(cur, hist, n=10, lookback=10, min_gap=5)
+    assert len(sim_idx) > 0
+    pos = sorted(hist.index.get_indexer(sim_idx))
+    gaps = np.diff(pos)
+    assert (gaps >= 5).all(), f"이웃 간격 위반: {gaps}"
+    assert abs(w.sum() - 1.0) < 1e-9
