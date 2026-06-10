@@ -33,10 +33,12 @@ def save_alerts(alerts: list):
     os.replace(tmp, ALERTS_FILE)
 
 
-def add_alert(ticker: str, price: float, alert_type: str, note: str = "") -> str:
+def add_alert(ticker: str, price: float, alert_type: str, note: str = "",
+              meta: dict | None = None) -> str:
     """
     알림 추가.
     alert_type: "buy" (현재가 <= 목표가 시 발동) | "sell" (현재가 >= 목표가 시 발동)
+    meta:       부가 정보 (자동 등록 알림의 진입가·목표·손절·점수 등)
     Returns: alert id
     """
     alerts = load_alerts()
@@ -51,6 +53,8 @@ def add_alert(ticker: str, price: float, alert_type: str, note: str = "") -> str
     }
     if note:
         entry["note"] = note
+    if meta:
+        entry["meta"] = meta
     alerts.append(entry)
     save_alerts(alerts)
     return alert_id

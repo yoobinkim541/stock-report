@@ -18,6 +18,7 @@ Commands:
       5분마다 가격 알림 자동 체크
 """
 
+import json
 import os
 import sys
 import time
@@ -1007,6 +1008,64 @@ def notify_triggered_alerts():
             msg += f"메모    {a['note']}"
         send(ALLOWED_CHAT_ID, msg)
         logger.info(f"알림 발동: {a['ticker']} {a['type']} @ ${tp}")
+        _record_signal_outcome(a)
+
+
+SIGNAL_OUTCOMES_FILE = os.path.expanduser("~/.local/share/stock-report/signal_outcomes.json")
+
+
+def _record_signal_outcome(alert: dict) -> None:
+    """자동 등록 알림 발동 시 신호 성과(R-multiple) 기록 + 짝 알림 제거.
+
+    누적된 실제 신호 성과는 entry_calibration의 백테스트 추정을 보완하는
+    실전 레이블이 된다.
+    """
+    meta = alert.get("meta") or {}
+    if meta.get("kind") != "auto_trade_level":
+        return
+    try:
+        entry  = float(meta["entry_price"])
+        stop   = float(meta["stop"])
+        exit_p = float(alert.get("triggered_price", alert["price"]))
+        risk   = entry - stop
+        r_multiple = (exit_p - entry) / risk if risk > 0 else 0.0
+
+        outcome = {
+            "ticker":       alert["ticker"],
+            "result":       "target" if alert["type"] == "sell" else "stop",
+            "score":        meta.get("score"),
+            "entry_price":  entry,
+            "exit_price":   exit_p,
+            "r_multiple":   round(r_multiple, 3),
+            "registered_at": alert.get("created_at"),
+            "triggered_at":  alert.get("triggered_at"),
+        }
+        os.makedirs(os.path.dirname(SIGNAL_OUTCOMES_FILE), exist_ok=True)
+        records = []
+        if os.path.exists(SIGNAL_OUTCOMES_FILE):
+            try:
+                with open(SIGNAL_OUTCOMES_FILE, encoding="utf-8") as f:
+                    records = json.load(f)
+            except Exception:
+                records = []
+        records.append(outcome)
+        with open(SIGNAL_OUTCOMES_FILE, "w", encoding="utf-8") as f:
+            json.dump(records, f, indent=1, ensure_ascii=False)
+
+        # 짝 알림(목표가↔손절가) 제거 — 청산 완료된 포지션의 잔여 알림 정리
+        for sib in load_alerts():
+            if (sib["ticker"] == alert["ticker"] and sib["id"] != alert["id"]
+                    and not sib.get("triggered")
+                    and (sib.get("meta") or {}).get("kind") == "auto_trade_level"):
+                remove_alert(sib["id"])
+                logger.info("짝 알림 제거: %s %s", sib["ticker"], sib["id"])
+
+        wins = [r for r in records if r["result"] == "target"]
+        logger.info("신호 성과 기록: %s %s R=%.2f (누적 %d건, 목표달성률 %.0f%%)",
+                    alert["ticker"], outcome["result"], r_multiple,
+                    len(records), len(wins) / len(records) * 100)
+    except Exception as e:
+        logger.warning("신호 성과 기록 실패: %s", e)
 
 
 # ══════════════════════════════════════════════════════════════════════
@@ -1084,11 +1143,54 @@ def notify_entry_signals() -> None:
         alerts  = check_alert_signals(scores)
         for s in alerts:
             msg = format_alert_message(s)
+            try:
+                from ml.technical_rating import build_reference_brief
+                ref = build_reference_brief(s.ticker)
+                if ref:
+                    msg += "\n" + ref
+            except Exception:
+                pass
             for chunk in (msg[i:i+4000] for i in range(0, len(msg), 4000)):
                 send(ALLOWED_CHAT_ID, chunk)
             logger.info("진입 알림 발송: %s (점수=%.2f, %s)", s.ticker, s.score, s.currency)
+            _register_trade_level_alerts(s)
     except Exception as e:
         logger.warning("진입 타점 모니터링 오류: %s", e)
+
+
+def _register_trade_level_alerts(s) -> None:
+    """enter 신호의 목표가/손절가를 가격 알림에 자동 등록 (청산 관리 루프).
+
+    동일 종목의 미발동 자동 알림이 이미 있으면 중복 등록하지 않는다.
+    """
+    try:
+        from bot.price_alerts import load_alerts, add_alert
+        from ml.entry_analyzer import trade_level_values
+        if s.signal != "enter":
+            return
+        existing = {
+            a["ticker"] for a in load_alerts()
+            if not a.get("triggered") and str(a.get("note", "")).startswith("자동")
+        }
+        if s.ticker.upper() in existing:
+            return
+        _, target, stop = trade_level_values(s)
+        meta = {
+            "kind":        "auto_trade_level",
+            "entry_price": round(s.current_price, 2),
+            "target":      round(target, 2),
+            "stop":        round(stop, 2),
+            "score":       round(s.score, 3),
+        }
+        add_alert(s.ticker, round(target, 2), "sell",
+                  note=f"자동 목표가 (진입점수 {s.score:.2f})", meta=meta)
+        add_alert(s.ticker, round(stop, 2),   "buy",
+                  note=f"자동 손절가 (진입점수 {s.score:.2f})", meta=meta)
+        send(ALLOWED_CHAT_ID,
+             f"🔖 {s.ticker} 자동 알림 등록 — 목표 {target:.2f} / 손절 {stop:.2f}")
+        logger.info("자동 매매가 알림 등록: %s 목표=%.2f 손절=%.2f", s.ticker, target, stop)
+    except Exception as e:
+        logger.warning("자동 알림 등록 실패 (%s): %s", getattr(s, "ticker", "?"), e)
 
 
 # ══════════════════════════════════════════════════════════════════════
