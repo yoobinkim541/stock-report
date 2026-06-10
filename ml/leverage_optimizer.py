@@ -156,7 +156,11 @@ class BacktestEngine:
       모든 신호는 shift(1): t일 종가 신호 → t+1일 시가 실행.
     """
 
-    def __init__(self, params: dict, prices: dict[str, pd.Series]):
+    def __init__(self, params: dict, prices: dict[str, pd.Series],
+                 eval_start: pd.Timestamp | None = None):
+        """eval_start: 지정 시 신호는 전체 히스토리로 계산하되 포트폴리오 평가는
+        eval_start 이후만 수행 — WF OOS 폴드에서 RSI/MA 웜업 NaN과 폴드-로컬
+        낙폭 앵커(cummax가 폴드 시작점에서 리셋) 왜곡을 방지."""
         self.p    = params
         self.inst = params["instrument"]
         self.px   = prices
@@ -174,6 +178,7 @@ class BacktestEngine:
             if s is not None:
                 idx = idx.intersection(s.dropna().index)
         self.idx = sorted(idx)
+        self.eval_start = pd.Timestamp(eval_start) if eval_start is not None else None
 
     def _signals(self) -> pd.DataFrame:
         """모든 신호 계산 — 기초지수(QQQ/SPY/SMH) 기준 낙폭·RSI·MA."""
@@ -250,10 +255,18 @@ class BacktestEngine:
         below_scale = float(self.p.get("below_trend_scale", 0.0))  # 추세선 아래 비중 (0=게이트)
         eq_limit    = self.p.get("eq_dd_limit")                    # 자금곡선 스톱 (None=off)
 
-        # 포트폴리오 상태
-        cash        = 1.0
+        # 평가 시작 위치 (eval_start 이전은 신호 웜업 구간 — 포트폴리오 평가 제외)
+        start_pos = 0
+        if self.eval_start is not None:
+            start_pos = int(np.searchsorted(pd.DatetimeIndex(self.idx), self.eval_start))
+            start_pos = min(start_pos, max(len(self.idx) - 2, 0))
+
+        # 포트폴리오 상태 — 초기 자본 1.0 전액 SGOV (현금 이중계상 금지:
+        # 기존 cash=1.0 + SGOV 1.0 구조는 자본의 절반이 0% 수익 유휴현금으로 잠김)
+        cash        = 0.0
         lev_shares  = 0.0
-        sgov_shares = cash / float(sgov.iloc[0]) if not np.isnan(sgov.iloc[0]) else 0.0
+        sgov_px0    = float(sgov.iloc[start_pos])
+        sgov_shares = 1.0 / sgov_px0 if np.isfinite(sgov_px0) and sgov_px0 > 0 else 0.0
         avg_entry   = 0.0       # 가중평균 진입가 (트레일링스탑 기준)
         entry_date  = None      # 첫 트랜치 진입일
         filled      = 0         # 채워진 트랜치 수
@@ -268,7 +281,8 @@ class BacktestEngine:
         dd_prev      = sig["dd"].shift(1)
         above_prev   = sig["above_trend"].shift(1).fillna(True)
 
-        for i, date in enumerate(self.idx):
+        eval_idx = self.idx[start_pos:]
+        for i, date in enumerate(self.idx[start_pos:], start=start_pos):
             pv_inst = float(inst.iloc[i]) if not np.isnan(inst.iloc[i]) else (inst.iloc[i-1] if i > 0 else 1.0)
             pv_sgov = float(sgov.iloc[i]) if not np.isnan(sgov.iloc[i]) else (sgov.iloc[i-1] if i > 0 else 1.0)
 
@@ -308,7 +322,15 @@ class BacktestEngine:
                     # 소프트 추세 스케일: 추세선 아래면 비중 below_scale배 (0이면 진입 안 함)
                     trend_scale = 1.0 if bool(above_prev.iloc[i]) else below_scale
                     invest = total * lev_w * vol_scale * trend_scale / n_tr
-                    invest = min(invest, cash * 0.95)
+                    # 자금 조달: 현금 부족분은 SGOV 매도로 충당 (sgov_floor 하한 유지)
+                    shortfall = invest - cash
+                    if shortfall > 0 and sgov_shares > 0:
+                        sellable = max(0.0, sgov_shares * pv_sgov - total * sgov_fl)
+                        sell_amt = min(shortfall, sellable)
+                        if sell_amt > 0:
+                            sgov_shares -= sell_amt / pv_sgov
+                            cash        += sell_amt
+                    invest = min(invest, cash)
                     if invest > 1e-9:
                         buy_shares = invest * (1 - cost) / pv_inst
                         # 가중평균 진입가 갱신
@@ -333,11 +355,11 @@ class BacktestEngine:
             port_values.append(pv)
             eq_peak = max(eq_peak, pv)
 
-        equity = pd.Series(port_values, index=self.idx)
+        equity = pd.Series(port_values, index=eval_idx)
         rets   = equity.pct_change().dropna()
 
         # 성과 지표
-        n_days  = (self.idx[-1] - self.idx[0]).days
+        n_days  = (eval_idx[-1] - eval_idx[0]).days
         years   = max(n_days / 365.25, 0.1)
         cagr    = float(equity.iloc[-1] / equity.iloc[0]) ** (1 / years) - 1
         rf_d    = RF_ANNUAL / 252
@@ -419,14 +441,16 @@ def walk_forward_optimize(
         test_end   = cursor + pd.DateOffset(months=test_months)
 
         train_prices = {t: s.loc[:train_end] for t, s in prices.items()}
-        test_prices  = {t: s.loc[train_end:test_end] for t, s in prices.items()}
+        # OOS 평가: 신호(RSI/MA/낙폭 앵커)는 전체 히스토리로 계산하고
+        # 포트폴리오 평가만 train_end 이후 수행 — 폴드-로컬 cummax/웜업 NaN 왜곡 방지
+        test_prices  = {t: s.loc[:test_end] for t, s in prices.items()}
 
         best_p_raw = _optuna_search(train_prices, n_trials=n_optuna,
                                     fixed_instrument=fixed_instrument)
         best_p = {**best_p_raw, "instrument": inst}
 
         try:
-            eng = BacktestEngine(best_p, test_prices)
+            eng = BacktestEngine(best_p, test_prices, eval_start=train_end)
             res = eng.run()
             res.period = f"{train_end.strftime('%Y-%m')}~{test_end.strftime('%Y-%m')}"
             wf_results.append(res)

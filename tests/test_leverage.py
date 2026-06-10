@@ -120,3 +120,78 @@ def test_leverage_bot_command_wiring():
     assert "/leverage" in _COMMAND_HANDLERS
     cmds = [c["command"] for c in BOT_COMMANDS]
     assert "leverage" in cmds
+
+
+# ── 비판 리뷰 회귀 테스트 (2026-06-10) ────────────────────────────────────────
+
+def _synth_prices(n: int = 504, seed: int = 7) -> dict:
+    idx = pd.date_range("2021-01-04", periods=n, freq="B")
+    rng = np.random.default_rng(seed)
+    return {
+        "QQQ":  pd.Series(100 * (1 + rng.normal(0.0003, 0.012, n)).cumprod(), index=idx),
+        "QLD":  pd.Series(100 * (1 + rng.normal(0.0006, 0.024, n)).cumprod(), index=idx),
+        "SGOV": pd.Series(100 * 1.00018 ** np.arange(n), index=idx),
+        "^VIX": pd.Series(rng.uniform(15, 35, n), index=idx),
+    }
+
+
+_ENGINE_PARAMS = {
+    "instrument": "QLD", "min_dd": -0.05, "max_vix_entry": 40.0,
+    "min_rsi_entry": 50.0, "lev_weight": 0.30, "sgov_floor": 0.40,
+    "exit_ma": 20, "exit_vix": 38.0, "trailing_stop": -0.10, "hold_days_max": 63,
+}
+
+
+def test_backtest_engine_no_idle_cash():
+    """무진입 전략은 SGOV 수익률을 따라가야 함 — 유휴현금(0% 수익) 이중계상 방지."""
+    from ml.leverage_optimizer import BacktestEngine
+    px = _synth_prices()
+    params = {**_ENGINE_PARAMS, "min_dd": -0.99}   # 진입 조건 사실상 불가능
+    r = BacktestEngine(params, px).run()
+    sgov_cagr = 1.00018 ** 252 - 1
+    assert r.n_trades == 0
+    assert abs(r.cagr - sgov_cagr) < 0.01   # 절반이 현금으로 잠기면 ~2.3%로 추락
+
+
+def test_backtest_engine_eval_start():
+    """eval_start 지정 시 신호는 전체 히스토리, 평가는 eval_start 이후만."""
+    from ml.leverage_optimizer import BacktestEngine
+    px  = _synth_prices()
+    idx = px["QQQ"].index
+    r = BacktestEngine(_ENGINE_PARAMS, px, eval_start=idx[252]).run()
+    assert r.equity.index[0] >= idx[252]
+    assert abs(float(r.equity.iloc[0]) - 1.0) < 0.05
+
+
+def test_entry_signal_gate_zeroes_weights():
+    """Optuna 진입 조건 미충족 시 권장 비중도 0이어야 함 (조언-비중 자기모순 방지)."""
+    from ml.leverage_signal import build_entry_signal
+    context = {
+        "current_drawdown": -0.02,                       # 낙폭 미달
+        "current_feats": {"vix": 18.0, "rsi": 60.0, "fg_proxy": 55.0,
+                          "ma200_gap": 0.03},
+        "current_stats": {},
+        "current_bucket": (-0.05, 0.0),
+        "n_similar": 0,
+        "opt_min_dd": -0.10, "opt_max_vix_entry": 35.0, "opt_min_rsi_entry": 40.0,
+        "opt_lev_weight": 0.25,
+    }
+    sig = build_entry_signal(context, model=None)
+    lev_sum = sum(inst.recommended_weight
+                  for name, inst in sig.instruments.items() if name != "SGOV")
+    assert lev_sum == pytest.approx(0.0)
+    assert sig.instruments["SGOV"].recommended_weight == pytest.approx(1.0)
+    assert "보류" in sig.entry_advice or "미충족" in sig.entry_advice
+
+
+def test_ranker_labels_alignment_stable():
+    """동일 날짜 내 라벨 순서가 입력 순서와 일치해야 함 (비안정 정렬 회귀 방지)."""
+    from ml.ranker import _make_ranker_labels
+    dates  = pd.to_datetime(["2024-01-02"] * 8 + ["2024-01-03"] * 8)
+    excess = np.array([0.08, -0.04, 0.02, -0.01, 0.06, -0.06, 0.01, 0.03] * 2)
+    labels, groups = _make_ranker_labels(excess, pd.Index(dates))
+    assert list(groups) == [8, 8]
+    # 날짜가 이미 정렬돼 있으므로 stable 정렬이면 입력 순서 보존 → 두 날짜 라벨 동일
+    assert list(labels[:8]) == list(labels[8:])
+    # 최고 excess 행이 최상위 버킷
+    assert labels[0] == 3 and labels[5] == 0

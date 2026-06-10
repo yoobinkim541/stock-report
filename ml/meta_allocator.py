@@ -97,9 +97,10 @@ def _get_excess_signal() -> float:
             return 0.0
 
         # ── 레이블: 20일 QQQ 초과수익률 (shift(-20) = 룩어헤드 방지용 당일 생성) ──
+        # 미실현 구간(최근 20일)은 NaN 유지 — fillna(0)하면 가짜 0 라벨로 학습됨
         fwd_20 = close.pct_change(20).shift(-20)
         qqq_fwd_20 = qqq_close.pct_change(20).shift(-20)
-        label = (fwd_20 - qqq_fwd_20).reindex(features_df.index).fillna(0)
+        label = (fwd_20 - qqq_fwd_20).reindex(features_df.index)
 
         X = features_df.values.astype(float)
         y = label.values
@@ -227,7 +228,6 @@ def _build_weights(
     if ranker_scores:
         for ticker, norm_score in ranker_scores.items():
             if ticker in base:
-                adj = 1.0 + sw.ranker * norm_score   # -1~+1 × weight → ±weight
                 base[ticker] = max(0.0, base[ticker] * (1.0 + sw.ranker * norm_score))
 
     # LeverageModel 조정: 레버리지 vs SGOV 비율

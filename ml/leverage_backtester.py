@@ -103,12 +103,11 @@ def _compute_vol_features(qqq: pd.Series, vix: pd.Series, date: pd.Timestamp) ->
         v = result.get("vix_percentile", 0.5)
         result["vol_regime"] = float(min(3, int(v * 4)))
 
-        # 낙폭 속도 (20일간 낙폭 변화)
-        qqq_tail = qqq.loc[:date].tail(22)
-        if len(qqq_tail) >= 21:
-            dd_now  = float(qqq_tail.iloc[-1] / qqq_tail.max() - 1)
-            dd_prev = float(qqq_tail.iloc[-21] / qqq_tail.iloc[:1].max() - 1) if len(qqq_tail) >= 21 else dd_now
-            result["drawdown_speed"] = dd_now - dd_prev
+        # 낙폭 속도 (20일간 낙폭 변화) — ATH 앵커 기준 낙폭의 차분
+        qqq_hist = qqq.loc[:date]
+        if len(qqq_hist) >= 21:
+            dd_ser = qqq_hist / qqq_hist.cummax() - 1
+            result["drawdown_speed"] = float(dd_ser.iloc[-1] - dd_ser.iloc[-21])
         else:
             result["drawdown_speed"] = 0.0
 
@@ -352,10 +351,11 @@ def get_current_entry_context(days: int = 2520) -> dict:
     ds = build_leverage_dataset(days=days)
     events = ds["events"]
 
-    # 현재 QQQ 낙폭
+    # 현재 QQQ 낙폭 — 학습 이벤트와 동일한 전체 히스토리 기준
+    # (짧은 윈도우로 계산하면 낙폭 앵커·MA200이 학습 피처와 어긋남 → train/live 괴리)
     tickers   = list({info["ticker"] for info in INSTRUMENTS.values()} |
                      {"QQQ", "^VIX", "^VIX3M", "HYG", "IEF"})
-    close_map = _fetch(tickers, days=120)
+    close_map = _fetch(tickers, days=days)
 
     qqq   = close_map.get("QQQ")
     if qqq is not None:
@@ -376,9 +376,16 @@ def get_current_entry_context(days: int = 2520) -> dict:
                   if vix3m_s is not None and not vix3m_s.empty and np.isfinite(vix_v) and vix_v > 0
                   else float("nan"))
 
+    # RSI: 학습 이벤트(find_entry_events)와 동일한 Cutler(단순이동평균) 방식
+    # — barbell의 Wilder RSI를 쓰면 학습-예측 피처 정의가 달라져 모델 입력이 왜곡됨
     try:
-        from barbell_strategy import fetch_rsi
-        rsi_v = fetch_rsi("QQQ")
+        delta  = qqq.diff()
+        gain   = delta.clip(lower=0).rolling(14).mean()
+        loss   = (-delta.clip(upper=0)).rolling(14).mean()
+        rsi_s2 = 100 - 100 / (1 + gain / loss.replace(0, np.nan))
+        rsi_v  = float(rsi_s2.iloc[-1])
+        if not np.isfinite(rsi_v):
+            rsi_v = np.nan
     except Exception:
         rsi_v = np.nan
 
@@ -388,8 +395,9 @@ def get_current_entry_context(days: int = 2520) -> dict:
     except Exception:
         fg_v = 50.0
 
-    # vol 체제 피처 (현재 시점)
-    vix_full = _fetch(["^VIX"], days=300).get("^VIX", pd.Series(dtype=float))
+    # vol 체제 피처 (현재 시점) — 이미 로드된 전체 히스토리 VIX 재사용
+    vix_full = close_map.get("^VIX")
+    vix_full = vix_full.dropna() if vix_full is not None else pd.Series(dtype=float)
     vol_feats = _compute_vol_features(qqq, vix_full, qqq.index[-1])
 
     real_vol = qqq.pct_change().rolling(20).std() * np.sqrt(252)

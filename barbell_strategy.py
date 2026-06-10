@@ -1060,7 +1060,13 @@ def _ml_dca_blend(
         if not scores:
             return base_weights, {}, 0.0
 
-        breadth = float(np.mean(list(scores.values())))
+        # breadth는 _ml_breadth_mult에서 수익률 단위(±0.5%) 임계와 비교됨 —
+        # LGBMRanker(lambdarank) 점수는 임의 스케일이라 평균이 의미 없음 → 0 처리
+        # (종목 간 상대 틸트는 아래 min-max 정규화로 스케일 무관하게 계속 적용)
+        if type(result.model).__name__ == "LGBMRanker":
+            breadth = 0.0
+        else:
+            breadth = float(np.mean(list(scores.values())))
         s_arr   = np.array(list(scores.values()))
         s_min, s_max = s_arr.min(), s_arr.max()
         if s_max == s_min:

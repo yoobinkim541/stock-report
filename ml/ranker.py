@@ -72,7 +72,9 @@ def _make_ranker_labels(excess: np.ndarray, dates: pd.Index) -> tuple[np.ndarray
     df["label"] = df.groupby("date")["excess"].transform(
         lambda x: pd.qcut(x.rank(method="first"), q=4, labels=[0, 1, 2, 3])
     ).astype(int)
-    df = df.sort_values("date")  # LGBMRanker: group 순서대로 정렬 필요
+    # stable 정렬 필수 — train_ranker의 X_train 재정렬(np.argsort kind="stable")과
+    # 동일 날짜 내 행 순서가 일치해야 라벨-피처 정렬이 깨지지 않음
+    df = df.sort_values("date", kind="stable")
     groups = df.groupby("date", sort=True).size().values
     return df["label"].values, groups
 
@@ -439,14 +441,21 @@ def rank_today(
         .reset_index(drop=True)
     )
 
-    # 펀더멘털 틸트: 상위 후보(top_n×2)에 한해 재무 점수(0~100)를 예측수익 단위로 가산
-    # — 50점 중립, S급(90)≈+0.4%p, D급(20)≈-0.3%p. 실패 시 모델 점수만 사용.
+    # 펀더멘털 틸트: 상위 후보(top_n×2)에 한해 재무 점수(0~100)를 점수에 가산
+    # — 50점 중립. 회귀 모델은 예측수익 단위(S급≈+0.4%p), LGBMRanker는 lambdarank
+    #   점수 스케일이 임의이므로 횡단면 표준편차 기준(±0.15σ)으로 환산.
     try:
         cand = ranking.head(top_n * 2).copy()
         fund = _fundamental_scores(cand["ticker"].tolist())
         if fund:
+            is_rank_model = type(result.model).__name__ == "LGBMRanker"
+            if is_rank_model:
+                s_std = float(cand["score"].std(ddof=0))
+                unit  = 0.15 * s_std if np.isfinite(s_std) and s_std > 0 else 0.0
+            else:
+                unit = 0.005
             cand["fund_score"] = cand["ticker"].map(fund)
-            adj = (cand["fund_score"].fillna(50) - 50) / 50 * 0.005
+            adj = (cand["fund_score"].fillna(50) - 50) / 50 * unit
             cand["score"] = cand["score"] + adj
             ranking = pd.concat([cand, ranking.iloc[len(cand):]]) \
                         .sort_values("score", ascending=False).reset_index(drop=True)
@@ -521,6 +530,10 @@ def format_ranking_report(ranking: pd.DataFrame, result: RankerResult, detail_to
 
     상위 detail_top개는 ATR 기반 매매 가이드(권장 매수·목표·손절) 포함.
     """
+    # LGBMRanker(lambdarank) 점수는 임의 스케일 — %수익률로 표시하면 오해 유발
+    is_rank_model = type(result.model).__name__ == "LGBMRanker"
+    max_abs = float(ranking["score"].abs().max()) if len(ranking) else 1.0
+
     lines = [
         "📈 종목 랭킹 (LightGBM, QQQ 초과수익 기준)",
         "━━━━━━━━━━━━━━",
@@ -530,9 +543,14 @@ def format_ranking_report(ranking: pd.DataFrame, result: RankerResult, detail_to
         "━━━━━━━━━━━━━━",
     ]
     for _, row in ranking.iterrows():
-        score_bar = "█" * min(int(abs(row["score"]) * 500), 8)
-        sign = "+" if row["score"] >= 0 else "-"
-        lines.append(f"  {row['rank']:>2}. {row['ticker']:<6}  {sign}{abs(row['score'])*100:.2f}%  {score_bar}")
+        if is_rank_model:
+            score_bar = "█" * max(1, min(int(abs(row["score"]) / max_abs * 8), 8)) if max_abs > 0 else ""
+            score_str = f"점수 {row['score']:+.3f}"
+        else:
+            score_bar = "█" * min(int(abs(row["score"]) * 500), 8)
+            sign = "+" if row["score"] >= 0 else "-"
+            score_str = f"{sign}{abs(row['score'])*100:.2f}%"
+        lines.append(f"  {row['rank']:>2}. {row['ticker']:<6}  {score_str}  {score_bar}")
 
         # 상위 종목 매매 가이드: ATR(14) 배수 — 목표 +2×ATR / 손절 -1.5×ATR / 매수 -0.5×ATR~현재가
         price = row.get("price")

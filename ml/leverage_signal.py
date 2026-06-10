@@ -322,30 +322,74 @@ def build_entry_signal(context: dict, model: Optional[LeverageModel] = None) -> 
             ml_pred_30d       = ml_pred if np.isfinite(ml_pred) else 0.0,
         )
 
-    # SGOV = 잔여 비중
-    others_sum  = sum(w for n, w in weights_raw.items() if n != "SGOV")
-    sgov_weight = max(0.0, 1.0 - others_sum)
-    instruments_out["SGOV"].recommended_weight = sgov_weight
-    weights_raw["SGOV"] = sgov_weight
-
     bucket_label = f"{int(bucket[0]*100)}%~{int(bucket[1]*100)}%"
 
-    # 추세 게이트: 기초지수가 게이트 MA 아래면 신규 진입 보류/축소로 강등
-    advice    = _entry_advice(cur_dd, vix_v or 20, rsi_v or 50, fg_v)
+    advice = _entry_advice(
+        cur_dd,
+        vix_v if np.isfinite(vix_v) else 20,   # NaN은 truthy — `or` 폴백은 NaN을 못 거름
+        rsi_v if np.isfinite(rsi_v) else 50,
+        fg_v,
+    )
+
+    # ── Optuna 게이트·캡 — 조언 텍스트와 권장 비중을 함께 조정 ──────────────
+    # (게이트가 텍스트만 바꾸고 비중은 그대로면 리포트가 자기모순)
     ma200_gap = cur_feats.get("ma200_gap", 0.0)
     trend_ma  = context.get("opt_trend_ma", 0)
     below_scale = context.get("opt_below_trend_scale", 0.0)
-    if trend_ma and ma200_gap < 0 and "보류" not in advice:
-        if below_scale > 0.05:
-            advice = f"⚠️ 추세 약세 — QQQ 200MA {ma200_gap*100:+.1f}% 아래, 비중 ×{below_scale:.1f} 축소 진입 ({advice.split(' — ')[0].strip()})"
-        else:
-            advice = f"🛑 추세 게이트 — QQQ가 200MA {ma200_gap*100:+.1f}% 아래, 신규 진입 보류 ({advice.split(' — ')[0].strip()} 조건이나 게이트 우선)"
-
-    # VIX 백워데이션: 단기 변동성이 중기보다 높음 = 시장이 폭풍을 가격에 반영 중
     vix_term  = cur_feats.get("vix_term", float("nan"))
     min_term  = context.get("opt_min_vix_term", 0.0)
-    if min_term and np.isfinite(vix_term) and vix_term < min_term and "보류" not in advice:
-        advice = f"🛑 VIX 백워데이션 (텀 {vix_term:.2f} < {min_term:.2f}) — 신규 진입 보류 ({advice.split(' — ')[0].strip()})"
+    opt_min_dd  = context.get("opt_min_dd")
+    opt_max_vix = context.get("opt_max_vix_entry")
+    opt_min_rsi = context.get("opt_min_rsi_entry")
+    lev_cap     = context.get("opt_lev_weight")   # vol targeting 스케일 반영된 상한
+
+    lev_scale = 1.0
+
+    # 진입 조건 게이트: Optuna 최적 진입 임계(낙폭·VIX·RSI) 미충족 시 신규 진입 비중 0
+    if opt_min_dd is not None:
+        gate_ok = cur_dd <= opt_min_dd
+        if gate_ok and opt_max_vix is not None and np.isfinite(vix_v):
+            gate_ok = vix_v <= opt_max_vix
+        if gate_ok and opt_min_rsi is not None and np.isfinite(rsi_v):
+            gate_ok = rsi_v <= opt_min_rsi
+        if not gate_ok:
+            lev_scale = 0.0
+            if "보류" not in advice:
+                advice = (f"🛑 진입 조건 미충족 — 낙폭 {cur_dd*100:+.1f}% > 기준 {opt_min_dd*100:.1f}% "
+                          f"(또는 VIX/RSI 초과), 신규 진입 보류 ({advice.split(' — ')[0].strip()})")
+
+    # 추세 게이트: 기초지수가 게이트 MA 아래면 신규 진입 보류/축소로 강등
+    if lev_scale > 0 and trend_ma and ma200_gap < 0:
+        lev_scale = min(lev_scale, below_scale)
+        if "보류" not in advice:
+            if below_scale > 0.05:
+                advice = f"⚠️ 추세 약세 — QQQ 200MA {ma200_gap*100:+.1f}% 아래, 비중 ×{below_scale:.1f} 축소 진입 ({advice.split(' — ')[0].strip()})"
+            else:
+                advice = f"🛑 추세 게이트 — QQQ가 200MA {ma200_gap*100:+.1f}% 아래, 신규 진입 보류 ({advice.split(' — ')[0].strip()} 조건이나 게이트 우선)"
+
+    # VIX 백워데이션: 단기 변동성이 중기보다 높음 = 시장이 폭풍을 가격에 반영 중
+    if min_term and np.isfinite(vix_term) and vix_term < min_term:
+        lev_scale = 0.0
+        if "보류" not in advice:
+            advice = f"🛑 VIX 백워데이션 (텀 {vix_term:.2f} < {min_term:.2f}) — 신규 진입 보류 ({advice.split(' — ')[0].strip()})"
+
+    # 게이트 스케일 적용 후 합계를 Optuna lev_weight 상한으로 제한
+    for name in weights_raw:
+        if name != "SGOV":
+            weights_raw[name] *= lev_scale
+    others_sum = sum(w for n, w in weights_raw.items() if n != "SGOV")
+    if lev_cap is not None and others_sum > lev_cap > 0:
+        cap_scale = lev_cap / others_sum
+        for name in weights_raw:
+            if name != "SGOV":
+                weights_raw[name] *= cap_scale
+
+    # SGOV = 잔여 비중
+    others_sum  = sum(w for n, w in weights_raw.items() if n != "SGOV")
+    sgov_weight = max(0.0, 1.0 - others_sum)
+    weights_raw["SGOV"] = sgov_weight
+    for name, inst in instruments_out.items():
+        inst.recommended_weight = weights_raw.get(name, 0.0)
 
     return EntrySignal(
         current_drawdown   = cur_dd,
