@@ -371,6 +371,48 @@ def _holding_details_from_snapshot(snap: dict) -> list[dict]:
 #  데이터 수집
 # ══════════════════════════════════════════════════════════════════════
 
+ANCHOR_FILE = os.path.expanduser("~/.cache/barbell_anchor.json")
+ANCHOR_RESET_RECOVERY = 0.95   # 앵커 대비 -5% 이내 회복 시 롤링 고점으로 복귀
+
+
+def _atomic_write_json(path: str, obj: dict):
+    """temp→rename atomic write (부분 쓰기·동시 쓰기 깨짐 방지)."""
+    os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
+    tmp = f"{path}.tmp.{os.getpid()}"
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump(obj, f, indent=2, ensure_ascii=False)
+    os.replace(tmp, path)
+
+
+def _load_drawdown_anchor() -> float:
+    try:
+        with open(ANCHOR_FILE) as f:
+            return _safe_float(json.load(f).get("anchor_high"))
+    except Exception:
+        return 0.0
+
+
+def _update_drawdown_anchor(high_52w: float, current: float) -> float:
+    """낙폭 기준 고점 앵커 관리 (Phase 드리프트 방지).
+
+    롤링 52주 고점만 쓰면 장기 하락장에서 고점 자체가 내려와
+    시장 회복 없이 낙폭이 0%로 수렴 → Phase가 기계적으로 풀린다.
+    → 앵커는 단조 증가시키고, 가격이 앵커 -5% 이내로 실제 회복했을 때만
+      롤링 52주 고점으로 리셋한다.
+    """
+    anchor = max(high_52w, _load_drawdown_anchor())
+    if anchor > 0 and current >= anchor * ANCHOR_RESET_RECOVERY:
+        anchor = high_52w
+    try:
+        _atomic_write_json(ANCHOR_FILE, {
+            "anchor_high": round(anchor, 2),
+            "updated": datetime.now().isoformat(),
+        })
+    except Exception:
+        pass
+    return anchor
+
+
 def fetch_exchange_rate() -> float:
     """USD/KRW 실시간 환율."""
     try:
@@ -396,14 +438,17 @@ def fetch_qqq_data() -> dict:
         if valid.empty:
             logger.warning("QQQ 데이터 오류 — 유효한 OHLC 행 없음")
             return {}
-        closes = valid["Close"].tolist()
-        current = _safe_float(closes[-1])
-        high_52w = _safe_float(valid["High"].max())
-        low_52w = _safe_float(valid["Low"].min())
+        closes_s = valid["Close"]
+        current = _safe_float(closes_s.iloc[-1])
+        # 종가 기준 고저 — 장중 고가(High) 대비 종가 비교는 낙폭을 체계적으로 과대측정
+        high_52w = _safe_float(closes_s.max())
+        low_52w = _safe_float(closes_s.min())
         if current <= 0 or high_52w <= 0 or low_52w <= 0 or low_52w > high_52w:
             logger.warning("QQQ 데이터 비정상 — current=%s high_52w=%s low_52w=%s", current, high_52w, low_52w)
             return {}
-        drawdown = (current - high_52w) / high_52w * 100
+        # 낙폭은 롤링 52주 고점이 아닌 앵커 고점 대비 (장기 베어 Phase 드리프트 방지)
+        anchor = _update_drawdown_anchor(high_52w, current)
+        drawdown = (current - anchor) / anchor * 100 if anchor > 0 else 0.0
 
         mom_1m = mom_3m = 0.0
         if len(valid) >= 21:
@@ -420,6 +465,7 @@ def fetch_qqq_data() -> dict:
             "current": round(current, 2),
             "high_52w": round(high_52w, 2),
             "low_52w": round(low_52w, 2),
+            "anchor_high": round(anchor, 2),
             "drawdown_pct": round(drawdown, 2),
             "position_52w_pct": round(position_52w, 1),
             "mom_1m_pct": round(mom_1m, 2),
@@ -437,8 +483,9 @@ def fetch_rsi(ticker_sym: str, period: int = 14) -> float:
         if len(hist) < period + 1:
             return 50.0
         delta = hist["Close"].diff().dropna()
-        gain = delta.clip(lower=0).rolling(period).mean()
-        loss = (-delta.clip(upper=0)).rolling(period).mean()
+        # Wilder 평활 (ewm alpha=1/N) — 단순이동평균(Cutler) 방식은 70/75 관행 임계값과 어긋남
+        gain = delta.clip(lower=0).ewm(alpha=1 / period, adjust=False).mean()
+        loss = (-delta.clip(upper=0)).ewm(alpha=1 / period, adjust=False).mean()
         rs = gain / loss.replace(0, np.nan)
         rsi = 100 - (100 / (1 + rs))
         return round(_safe_float(rsi.iloc[-1], 50.0), 1)
@@ -717,16 +764,15 @@ def load_phase_state() -> dict:
 
 
 def save_phase_state(market_type: str, phase_key, drawdown: float):
-    """현재 Phase 상태 저장 (다음 실행 비교용)."""
-    os.makedirs(os.path.dirname(STATE_FILE), exist_ok=True)
+    """현재 Phase 상태 저장 (다음 실행 비교용).
+    크론·봇이 동시에 쓸 수 있으므로 atomic write (temp→rename)."""
     state = {
         "last_run": datetime.now().isoformat(),
         "market_type": market_type,
         "phase_key": str(phase_key),
         "drawdown_pct": round(drawdown, 2),
     }
-    with open(STATE_FILE, "w", encoding="utf-8") as f:
-        json.dump(state, f, indent=2, ensure_ascii=False)
+    _atomic_write_json(STATE_FILE, state)
 
 
 def has_phase_changed(old_state: dict, market_type: str, phase_key) -> bool:
@@ -740,32 +786,74 @@ def has_phase_changed(old_state: dict, market_type: str, phase_key) -> bool:
 #  전략 로직
 # ══════════════════════════════════════════════════════════════════════
 
-def classify_market(qqq_data: dict, rsi: float, vix: float) -> tuple:
+# Bear Phase 진입 임계값 (drawdown %, 이하일 때 진입)
+_BEAR_ENTRY_THR = {1: -5, 2: -10, 3: -15, 4: -20, 5: -30}
+# 디에스컬레이션 버퍼: 진입 임계값보다 이만큼 더 회복해야 Phase 하향
+_PHASE_EXIT_BUFFER_PP = 1.5
+
+_PREV_STATE_AUTO = object()   # sentinel — 기본값이면 STATE_FILE에서 자동 로드
+
+
+def _prev_bear_phase(prev_state: dict | None) -> int | None:
+    """이전 상태에서 bear phase 번호 추출 (없으면 None)."""
+    if not prev_state or prev_state.get("market_type") != "bear":
+        return None
+    try:
+        return int(prev_state.get("phase_key"))
+    except (TypeError, ValueError):
+        return None
+
+
+def classify_market(qqq_data: dict, rsi: float, vix: float,
+                    prev_state: dict | None = _PREV_STATE_AUTO) -> tuple:
     """
     시장 상태 분류.
     Returns: (market_type, phase_key)
       market_type: "bull" | "neutral" | "bear"
       phase_key  : "bull_2" | "bull_1" | 0~5
+
+    prev_state: 이전 Phase 상태 (히스테리시스용).
+      - 기본값: STATE_FILE에서 자동 로드
+      - None 명시: 히스테리시스 없이 원시 분류 (시뮬레이션용)
+    Bear Phase 하향은 비가역 액션(SGOV 매도)을 동반하므로,
+    경계값 +1.5%p 이상 회복해야만 하향한다 (whipsaw 방지).
+    VIX가 공포 구간(≥30)이면 깊은 Phase(2+) 하향을 보류한다.
     """
     drawdown = qqq_data.get("drawdown_pct", 0)
     mom_1m = qqq_data.get("mom_1m_pct", 0)
-    if qqq_data.get("current", 0) <= 0 or qqq_data.get("high_52w", 0) <= 0 or drawdown <= -80:
+    # 데이터 오류 판정은 OHLC 정합성으로만 — 낙폭 크기로 오류를 추정하면
+    # 진짜 크래시(-80%대, 2000년 닷컴)를 neutral로 오분류한다
+    if qqq_data.get("current", 0) <= 0 or qqq_data.get("high_52w", 0) <= 0:
         logger.warning("QQQ 데이터 비정상 — 시장 분류를 neutral로 처리: %s", qqq_data)
         return "neutral", 0
 
-    if drawdown <= -30:   return "bear", 5
-    elif drawdown <= -20: return "bear", 4
-    elif drawdown <= -15: return "bear", 3
-    elif drawdown <= -10: return "bear", 2
-    elif drawdown <= -5:  return "bear", 1
-
+    # ── 원시 분류 ─────────────────────────────────────────────────────
+    if drawdown <= -30:   raw = ("bear", 5)
+    elif drawdown <= -20: raw = ("bear", 4)
+    elif drawdown <= -15: raw = ("bear", 3)
+    elif drawdown <= -10: raw = ("bear", 2)
+    elif drawdown <= -5:  raw = ("bear", 1)
     # 고점 대비 -5% 이내: 상승/중립 판별
-    if rsi > RSI_EXTREME_OB and mom_1m > 8 and vix < VIX_LOW:
-        return "bull", "bull_2"
+    elif rsi > RSI_EXTREME_OB and mom_1m > 8 and vix < VIX_LOW:
+        raw = ("bull", "bull_2")
     elif rsi > RSI_OVERBOUGHT or mom_1m > 5:
-        return "bull", "bull_1"
+        raw = ("bull", "bull_1")
     else:
-        return "neutral", 0
+        raw = ("neutral", 0)
+
+    # ── 히스테리시스: bear phase 하향 시에만 적용 (상향·진입은 즉시) ──
+    if prev_state is _PREV_STATE_AUTO:
+        prev_state = load_phase_state()
+    prev_phase = _prev_bear_phase(prev_state)
+    if prev_phase is not None:
+        raw_bear = raw[1] if raw[0] == "bear" else 0
+        if raw_bear < prev_phase:
+            recovered = drawdown > _BEAR_ENTRY_THR[prev_phase] + _PHASE_EXIT_BUFFER_PP
+            vix_panic = prev_phase >= 2 and vix >= VIX_HIGH and drawdown <= -5
+            if not recovered or vix_panic:
+                return "bear", prev_phase
+
+    return raw
 
 
 def calculate_sgov_target(market_type: str, phase_key, portfolio_total_usd: float, sgov_current_usd: float) -> dict:
@@ -833,12 +921,17 @@ def _ml_dca_blend(
     base_weights:  dict,
     market_type:   str = "neutral",
     phase_key      = 0,
+    use_meta:      bool = True,
 ) -> tuple[dict, dict, float]:
     """ML 신호 통합 DCA 비중 조정.
 
     우선순위:
       1. MetaAllocator (5신호 통합) — weights가 있으면 우선 사용
       2. Ranker 단독 — MetaAllocator 실패 시 fallback
+
+    use_meta=False: Ranker 단독만 사용.
+    MetaAllocator 내부(_get_ranker_signal)에서 역호출할 때 필수 —
+    True면 meta→ranker→meta 무한 상호 재귀가 발생한다.
 
     Returns (blended_weights, raw_scores, breadth_score)
     """
@@ -847,36 +940,39 @@ def _ml_dca_blend(
     NON_EQUITY = {"SGOV", "QQQI"}
 
     # ── 1. MetaAllocator 시도 ─────────────────────────────────────────────
-    try:
-        import numpy as np
-        from ml.meta_allocator import get_meta_allocation
+    if use_meta:
+        try:
+            import numpy as np
+            from ml.meta_allocator import get_meta_allocation
 
-        alloc = get_meta_allocation(market_type, phase_key)
-        meta_weights = alloc.weights   # {ticker: float}
+            alloc = get_meta_allocation(market_type, phase_key)
+            meta_weights = alloc.weights   # {ticker: float}
 
-        # MetaAllocator 비중이 있으면 blend
-        if meta_weights:
-            blend = _phase_blend_factor(market_type, phase_key)
-            blended: dict[str, float] = {}
-            for t in base_weights:
-                base = base_weights[t]
-                ml_w = meta_weights.get(t, base)
-                blended[t] = base * (1 - blend) + ml_w * blend
+            # MetaAllocator 비중이 있으면 blend
+            if meta_weights:
+                blend = _phase_blend_factor(market_type, phase_key)
+                blended: dict[str, float] = {}
+                for t in base_weights:
+                    base = base_weights[t]
+                    ml_w = meta_weights.get(t, base)
+                    blended[t] = base * (1 - blend) + ml_w * blend
 
-            total = sum(blended.values())
-            if total > 0:
-                blended = {k: round(v / total, 4) for k, v in blended.items()}
+                total = sum(blended.values())
+                if total > 0:
+                    blended = {k: round(v / total, 4) for k, v in blended.items()}
 
-            # 시장 강도: MetaAllocator confidence 기반
-            breadth = (alloc.confidence - 0.5) * 0.02   # -0.01 ~ +0.01 스케일
-            _logger.info(
-                "MetaAllocator DCA 블렌딩 완료 — 체제: %s (신뢰도 %.0f%%, blend=%.2f)",
-                alloc.regime, alloc.confidence * 100, blend,
-            )
-            return blended, alloc.signal_summary, breadth
+                # 시장 강도: regime 방향 × 신호 일치도
+                # (confidence는 신호 일치도(0~1)일 뿐 방향이 아님 — risk_off 확신 시 음수가 되어야 함)
+                direction = {"risk_on": 1.0, "risk_off": -1.0}.get(alloc.regime, 0.0)
+                breadth = direction * alloc.confidence * 0.01   # -0.01 ~ +0.01 스케일
+                _logger.info(
+                    "MetaAllocator DCA 블렌딩 완료 — 체제: %s (신뢰도 %.0f%%, blend=%.2f)",
+                    alloc.regime, alloc.confidence * 100, blend,
+                )
+                return blended, alloc.signal_summary, breadth
 
-    except Exception as e:
-        _logger.warning("MetaAllocator 실패, Ranker fallback: %s", e)
+        except Exception as e:
+            _logger.warning("MetaAllocator 실패, Ranker fallback: %s", e)
 
     # ── 2. Ranker fallback ────────────────────────────────────────────────
     try:
@@ -978,7 +1074,13 @@ def calculate_dca(market_type: str, phase_key, exchange_rate: float = 1380.0) ->
         fg_proxy = get_fg_proxy_score()
     except Exception:
         fg_proxy = -1.0
-    fg_adj = _fg_dca_adjustment(fg_proxy)
+    # Phase가 이미 극단 공포/탐욕을 반영하는 구간(bear 2+, bull_2)에서는
+    # F&G 보정 생략 — 상관된 두 신호를 곱하면 극단 구간에서 과잉 증폭됨
+    extreme_phase = (
+        (market_type == "bull" and phase_key == "bull_2")
+        or (market_type == "bear" and isinstance(phase_key, int) and phase_key >= 2)
+    )
+    fg_adj = 1.0 if extreme_phase else _fg_dca_adjustment(fg_proxy)
 
     # ML 비중 블렌딩 + 시장강도 보정
     ml_weights, ml_scores, breadth = _ml_dca_blend(weights, market_type, phase_key)
@@ -1207,7 +1309,9 @@ def calculate_safety_margin(portfolio: dict, market_type: str, phase_key) -> dic
         "grade":     grade,
         "emoji":     emoji,
         "factors":   factors,
-        "multiplier": round(max(0.5, score / 100), 2),
+        # 기본점수 70점 = 1.0 (계획 100% 실행). score/100이면 평범한 날에도
+        # 항상 30% 감액되는 구조적 언더슈팅이 발생함. 감액 전용 — 증액은 안 함.
+        "multiplier": round(min(1.0, max(0.5, score / 70)), 2),
     }
 
 
@@ -1467,7 +1571,8 @@ def build_report(
     if qqqi_div is None:
         qqqi_div = {"monthly_usd": 20.0, "annual_yield_pct": 12.0, "per_share": None, "note": "추산값"}
 
-    market_type, phase_key = classify_market(qqq_data, rsi, vix)
+    # old_phase_state 전달 → 히스테리시스 적용 (시뮬레이션은 None → 원시 분류)
+    market_type, phase_key = classify_market(qqq_data, rsi, vix, prev_state=old_phase_state)
     dca    = calculate_dca(market_type, phase_key, exchange_rate)
     sgov   = calculate_sgov_target(market_type, phase_key, portfolio["total_usd"], portfolio["sgov_usd"])
     p_info = BULL_PHASES[phase_key] if market_type == "bull" else BEAR_PHASES[phase_key]
@@ -1624,30 +1729,38 @@ def build_report(
 
 def _simulation_payload(mode: str) -> dict:
     SIM_DATA = {
-        "bull2": {"qqq": {"current": 530, "high_52w": 520, "low_52w": 400, "drawdown_pct": -0.5,
-                          "position_52w_pct": 95, "mom_1m_pct": 9.0, "mom_3m_pct": 18.0},
-                  "rsi": 76.0, "vix": 13.0},
+        "bull2": {"qqq": {"current": 530, "high_52w": 533, "low_52w": 400, "drawdown_pct": -0.5,
+                          "position_52w_pct": 98, "mom_1m_pct": 9.0, "mom_3m_pct": 18.0},
+                  "rsi": 76.0, "vix": 13.0,
+                  "fg": {"score": 82.0, "prev_week": 78.0}},
         "bull1": {"qqq": {"current": 500, "high_52w": 515, "low_52w": 400, "drawdown_pct": -2.9,
                           "position_52w_pct": 87, "mom_1m_pct": 5.5, "mom_3m_pct": 12.0},
-                  "rsi": 65.0, "vix": 17.0},
+                  "rsi": 65.0, "vix": 17.0,
+                  "fg": {"score": 70.0, "prev_week": 65.0}},
         "0":    {"qqq": {"current": 480, "high_52w": 485, "low_52w": 380, "drawdown_pct": -1.0,
                          "position_52w_pct": 96, "mom_1m_pct": 2.0, "mom_3m_pct": 5.0},
-                 "rsi": 55.0, "vix": 20.0},
+                 "rsi": 55.0, "vix": 20.0,
+                 "fg": {"score": 58.0, "prev_week": 55.0}},
         "1":    {"qqq": {"current": 450, "high_52w": 490, "low_52w": 380, "drawdown_pct": -8.2,
                          "position_52w_pct": 64, "mom_1m_pct": -3.0, "mom_3m_pct": 2.0},
-                 "rsi": 42.0, "vix": 24.0},
+                 "rsi": 42.0, "vix": 24.0,
+                 "fg": {"score": 38.0, "prev_week": 45.0}},
         "2":    {"qqq": {"current": 420, "high_52w": 490, "low_52w": 380, "drawdown_pct": -14.3,
                          "position_52w_pct": 36, "mom_1m_pct": -8.0, "mom_3m_pct": -5.0},
-                 "rsi": 32.0, "vix": 32.0},
+                 "rsi": 32.0, "vix": 32.0,
+                 "fg": {"score": 25.0, "prev_week": 30.0}},
         "3":    {"qqq": {"current": 400, "high_52w": 490, "low_52w": 360, "drawdown_pct": -18.4,
                          "position_52w_pct": 31, "mom_1m_pct": -10.0, "mom_3m_pct": -12.0},
-                 "rsi": 27.0, "vix": 38.0},
+                 "rsi": 27.0, "vix": 38.0,
+                 "fg": {"score": 18.0, "prev_week": 22.0}},
         "4":    {"qqq": {"current": 370, "high_52w": 490, "low_52w": 340, "drawdown_pct": -24.5,
                          "position_52w_pct": 20, "mom_1m_pct": -12.0, "mom_3m_pct": -20.0},
-                 "rsi": 22.0, "vix": 45.0},
+                 "rsi": 22.0, "vix": 45.0,
+                 "fg": {"score": 12.0, "prev_week": 15.0}},
         "5":    {"qqq": {"current": 330, "high_52w": 490, "low_52w": 300, "drawdown_pct": -32.7,
                          "position_52w_pct": 16, "mom_1m_pct": -18.0, "mom_3m_pct": -28.0},
-                 "rsi": 18.0, "vix": 55.0},
+                 "rsi": 18.0, "vix": 55.0,
+                 "fg": {"score": 8.0, "prev_week": 11.0}},
     }
     return SIM_DATA.get(mode, SIM_DATA["bull2"])
 
@@ -1661,7 +1774,8 @@ def build_simulation_report(mode: str = "bull2") -> str:
         f"\n{'=' * 50}\n"
         f"[시뮬레이션 모드: {mode}]\n"
         f"{'=' * 50}\n\n"
-        + build_report(d["qqq"], d["rsi"], d["vix"], ma_sim, sim_portfolio, 1380.0, sim_div)
+        + build_report(d["qqq"], d["rsi"], d["vix"], ma_sim, sim_portfolio, 1380.0, sim_div,
+                      fear_greed=d.get("fg"))
     )
 
 
@@ -1787,20 +1901,34 @@ def calculate_rebalancing(
 _TG_MAX_CHARS = 4000  # Telegram 4096자 제한 — 여유 96자
 
 
+def _split_telegram(message: str, limit: int = _TG_MAX_CHARS) -> list[str]:
+    """4096자 제한 대응 — 줄바꿈 경계에서 분할 (절단 금지)."""
+    parts = []
+    while len(message) > limit:
+        cut = message.rfind("\n", 0, limit)
+        if cut <= 0:
+            cut = limit
+        parts.append(message[:cut])
+        message = message[cut:].lstrip("\n")
+    if message:
+        parts.append(message)
+    return parts or [""]
+
+
 def send_telegram(message: str) -> bool:
     if not TELEGRAM_TOKEN:
         logger.warning("TELEGRAM_TOKEN 없음 — 콘솔 출력만 수행")
         return False
     url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
-    if len(message) > _TG_MAX_CHARS:
-        message = message[:_TG_MAX_CHARS] + "\n…(이하 생략)"
-    try:
-        resp = requests.post(url, json={"chat_id": TELEGRAM_CHAT_ID, "text": message}, timeout=10)
-        resp.raise_for_status()
-        return True
-    except Exception as e:
-        logger.error(f"텔레그램 전송 실패: {e}")
-        return False
+    ok = True
+    for part in _split_telegram(message):
+        try:
+            resp = requests.post(url, json={"chat_id": TELEGRAM_CHAT_ID, "text": part}, timeout=10)
+            resp.raise_for_status()
+        except Exception as e:
+            logger.error(f"텔레그램 전송 실패: {e}")
+            ok = False
+    return ok
 
 
 def send_phase5_emergency(
@@ -1874,8 +2002,8 @@ def run(send_alert: bool = False) -> dict | None:
     portfolio = fetch_portfolio_value()
     qqqi_div = estimate_qqqi_monthly_dividend(portfolio["qqqi_shares"], portfolio["qqqi_usd"])
 
-    # Phase 분류
-    market_type, phase_key = classify_market(qqq, rsi, vix)
+    # Phase 분류 (이전 상태 기반 히스테리시스 적용)
+    market_type, phase_key = classify_market(qqq, rsi, vix, prev_state=old_state)
 
     # Phase 변화 감지
     phase_changed = has_phase_changed(old_state, market_type, phase_key)

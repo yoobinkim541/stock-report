@@ -192,6 +192,7 @@ crons/news_spike_detector.py (크론 매 1분)
 ~/reports/investment-summary-{date}.txt  — 모바일 요약 (텔레그램 직접 발송)
 ~/.cache/barbell_state.json             — Phase 상태 (크론·봇 공유)
 ~/.cache/barbell_state.lock             — Phase 상태 쓰기 잠금
+~/.cache/barbell_anchor.json            — 낙폭 고점 앵커 (Phase 드리프트 방지)
 ~/.local/state/stock-report/barbell_bot.pid  — 봇 PID (단일 인스턴스 잠금)
 ~/.local/share/stock-report/            — 런타임 데이터 (tax, history, dividend, pending)
 ```

@@ -1107,7 +1107,8 @@ def notify_phase_change():
                 return
             dd = d["qqq"].get("drawdown_pct", 0)
             qqq = d.get("qqq") or {}
-            if qqq.get("current", 0) <= 0 or qqq.get("high_52w", 0) <= 0 or dd <= -80:
+            # 낙폭 크기로 오류 추정 금지 — 진짜 크래시를 스킵하게 됨 (OHLC 정합성만 체크)
+            if qqq.get("current", 0) <= 0 or qqq.get("high_52w", 0) <= 0:
                 logger.warning("Phase 변화 알림 스킵 — QQQ 데이터 비정상: %s", qqq)
                 return
             if mt == "bear" and pk == 5:

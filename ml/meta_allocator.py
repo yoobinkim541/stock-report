@@ -60,7 +60,8 @@ def _get_ranker_signal() -> dict[str, float]:
     """포트폴리오 종목별 ML 점수 → -1~1 정규화."""
     try:
         from barbell_strategy import _ml_dca_blend, _DCA_WEIGHTS_DEFAULT
-        _, scores, _ = _ml_dca_blend(_DCA_WEIGHTS_DEFAULT)
+        # use_meta=False 필수 — True면 meta→ranker→meta 무한 상호 재귀
+        _, scores, _ = _ml_dca_blend(_DCA_WEIGHTS_DEFAULT, use_meta=False)
         if not scores:
             return {}
         vals = list(scores.values())
@@ -249,7 +250,25 @@ def _build_weights(
 
 # ── 공개 API ──────────────────────────────────────────────────────────────────
 
+_REENTRY_GUARD = False   # meta→ranker→meta 무한 상호 재귀 방지
+
+
 def get_meta_allocation(
+    market_type: str = "neutral",
+    phase_key         = 0,
+) -> MetaAllocation:
+    """현재 시황 기반 통합 포트폴리오 배분 (재진입 시 즉시 예외)."""
+    global _REENTRY_GUARD
+    if _REENTRY_GUARD:
+        raise RuntimeError("get_meta_allocation 재진입 차단 — 신호 함수가 메타를 역호출함")
+    _REENTRY_GUARD = True
+    try:
+        return _get_meta_allocation_impl(market_type, phase_key)
+    finally:
+        _REENTRY_GUARD = False
+
+
+def _get_meta_allocation_impl(
     market_type: str = "neutral",
     phase_key         = 0,
 ) -> MetaAllocation:
