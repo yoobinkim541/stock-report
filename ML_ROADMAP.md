@@ -209,7 +209,7 @@ paper_track.json: {
 | 3-B. Mean-Variance 포트폴리오 최적화 | ⭐⭐ | ★★★ | ⬜ 보류 — 하려면 inverse-vol 라이트 버전 권장 |
 | 3-C. A/B 페이퍼 트레이딩 추적 | ⭐⭐⭐ | ★★☆ | ✅ 완료 — crons/paper_track.py (월요일 Sharpe 비교 발송) |
 | (신규) 자동 알림 → 신호 성과 기록 (R-multiple) | ⭐⭐⭐ | ★☆☆ | ✅ 완료 — signal_outcomes.json, 캘리브레이션 실전 레이블 |
-| (신규) 진입점수 월간 재캘리브레이션 | ⭐⭐ | ★☆☆ | 🟡 스크립트 완료 (backtest/entry_calibration.py) — 크론 수동 등록 필요 |
+| (신규) 진입점수 월간 재캘리브레이션 | ⭐⭐ | ★☆☆ | ✅ 완료 — 크론 등록(매월 1일) + 2026-06-10 첫 채택 (OOS +6.5% vs 기본 +3.1%, 임계 0.74) |
 
 ---
 
@@ -230,8 +230,8 @@ ML 개선 전후 비교 지표:
 
 | 지표 | 현재 측정 | 현재값 (2026-06-10) | 목표 |
 |------|----------|--------------------|------|
-| Ranker OOS IC (purged WF) | 재학습 시 | 0.003 (폴드 +0.04/+0.05/-0.08) | > 0.05 |
-| Ranker ICIR (purged WF) | 재학습 시 | 0.04 | > 0.5 |
+| Ranker OOS IC (purged WF) | 재학습 시 | 0.008 (3폴드, 라벨 정렬 수정 후 — 단일분할 IC -0.03, 알파 여전히 미검증) | > 0.05 |
+| Ranker ICIR (purged WF) | 재학습 시 | 0.15 | > 0.5 |
 | MetaAllocator vs Rule Sharpe | `paper_track.json` (매주 월 발송) | 적재 시작 (30일 후 첫 비교) | > Rule |
 | Leverage WF median Calmar | `leverage_best_params.json` | 0.85 (TQQQ, 엔진 수정 후 — 유휴현금 이중계상 제거·폴드 웜업 보정, 무거래 폴드는 SGOV 캐리 반영) | > 1.0 (비용 반영 기준) |
 | Phase 래더 vs 플랫 DCA | `backtest/phase_ladder_backtest.py` | XIRR +3.0%p (24.2% vs 21.2%), MDD -6.8%p 불리 | XIRR 우위 유지 |
