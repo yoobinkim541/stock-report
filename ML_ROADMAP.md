@@ -210,6 +210,7 @@ paper_track.json: {
 | 3-C. A/B 페이퍼 트레이딩 추적 | ⭐⭐⭐ | ★★☆ | ✅ 완료 — crons/paper_track.py (월요일 Sharpe 비교 발송) |
 | (신규) 자동 알림 → 신호 성과 기록 (R-multiple) | ⭐⭐⭐ | ★☆☆ | ✅ 완료 — signal_outcomes.json, 캘리브레이션 실전 레이블 |
 | (신규) 진입점수 월간 재캘리브레이션 | ⭐⭐ | ★☆☆ | ✅ 완료 — 크론 등록(매월 1일) + 2026-06-10 첫 채택 (OOS +6.5% vs 기본 +3.1%, 임계 0.74) |
+| (신규) 레짐 코어(J): 200MA×vol타깃25%×VIX텀 3-state (QLD↔QQQ↔SGOV) | ⭐⭐⭐⭐ | ★★☆ | 🟡 백테스트 검증 완료 (16y CAGR 21.9% vs QQQ 19.6%, MDD -32.7% vs -35.1%, backtest/regime_core_backtest.py) — paper_track 3번째 암으로 실데이터 검증 중, 60일+ 후 실전 슬리브 전환 판단 |
 
 ---
 

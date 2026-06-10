@@ -79,7 +79,7 @@ def record_today(track: dict) -> None:
     rule_w = w_bear if (mt == "bear" and isinstance(pk, int) and pk >= 2) else w_normal
     rule_w = {t: round(w, 4) for t, w in rule_w.items() if w > 0.001}
 
-    track[today] = {
+    entry = {
         "market_type": mt,
         "phase_key":   str(pk),
         "meta":        meta_w,
@@ -87,8 +87,45 @@ def record_today(track: dict) -> None:
         "regime":      alloc.regime,
         "confidence":  round(alloc.confidence, 3),
     }
-    logger.info("%s 기록 — regime=%s conf=%.2f meta %d종목 / rule %d종목",
-                today, alloc.regime, alloc.confidence, len(meta_w), len(rule_w))
+
+    # 레짐 코어(J) 후보 비중도 병행 기록 — backtest/regime_core_backtest.py 검증 로직
+    # (200MA 추세 × vol타깃 25% × VIX텀 게이트, QLD↔QQQ↔SGOV 3-state)
+    try:
+        entry["regime_core"] = _regime_core_weights()
+    except Exception as e:
+        logger.warning("레짐 코어 비중 계산 실패: %s", e)
+
+    track[today] = entry
+    logger.info("%s 기록 — regime=%s conf=%.2f meta %d / rule %d / core %s",
+                today, alloc.regime, alloc.confidence, len(meta_w), len(rule_w),
+                entry.get("regime_core"))
+
+
+def _regime_core_weights() -> dict[str, float]:
+    """레짐 코어(J) 오늘 비중: QQQ>200MA & VIX텀 정상 → QLD w=min(1, 0.25/실현vol),
+    잔여 QQQ. 조건 미충족 → 전량 SGOV."""
+    import numpy as np
+    from ml.data_pipeline import fetch_prices
+
+    px = fetch_prices(["QQQ", "QLD", "^VIX", "^VIX3M"], days=400)
+    qqq = px["QQQ"]["Close"].dropna()
+    qld = px["QLD"]["Close"].dropna()
+    ma200 = qqq.rolling(200, min_periods=200).mean()
+    above = bool(qqq.iloc[-1] > ma200.iloc[-1]) if np.isfinite(ma200.iloc[-1]) else False
+
+    vix   = px.get("^VIX", {}).get("Close")
+    vix3m = px.get("^VIX3M", {}).get("Close")
+    term_ok = True
+    if vix is not None and vix3m is not None:
+        v, v3 = vix.dropna(), vix3m.dropna()
+        if not v.empty and not v3.empty and float(v.iloc[-1]) > 0:
+            term_ok = float(v3.iloc[-1]) / float(v.iloc[-1]) >= 0.95
+
+    if not (above and term_ok):
+        return {"SGOV": 1.0}
+    vol = float(qld.pct_change().rolling(20).std().iloc[-1]) * (252 ** 0.5)
+    w_l = min(1.0, 0.25 / vol) if np.isfinite(vol) and vol > 1e-6 else 0.0
+    return {"QLD": round(w_l, 4), "QQQ": round(1 - w_l, 4)}
 
 
 def _weighted_forward_return(weights: dict, closes: dict, start: str, horizon: int) -> float | None:
@@ -115,14 +152,15 @@ def fill_realized(track: dict) -> int:
     """과거 기록의 5d/20d 실현 수익률 채우기. 갱신 건수 반환."""
     pending = [
         (d, e) for d, e in track.items()
-        if ("ret_meta_20d" not in e or "ret_meta_5d" not in e)
+        if ("ret_meta_20d" not in e or "ret_meta_5d" not in e
+            or ("regime_core" in e and "ret_regime_core_20d" not in e))
     ]
     if not pending:
         return 0
 
     tickers = set()
     for _, e in pending:
-        tickers |= set(e["meta"]) | set(e["rule"])
+        tickers |= set(e["meta"]) | set(e["rule"]) | set(e.get("regime_core", {}))
 
     from ml.data_pipeline import fetch_prices
     prices = fetch_prices(sorted(tickers), days=120)
@@ -132,7 +170,9 @@ def fill_realized(track: dict) -> int:
     for d, e in pending:
         changed = False
         for horizon, key in ((5, "5d"), (20, "20d")):
-            for side in ("meta", "rule"):
+            for side in ("meta", "rule", "regime_core"):
+                if side not in e:
+                    continue
                 field = f"ret_{side}_{key}"
                 if field in e:
                     continue
@@ -162,7 +202,7 @@ def summarize(track: dict) -> str | None:
     vol_scale = rule.std() / meta.std() if meta.std() > 0 else 1.0
     meta_voladj = meta.mean() * vol_scale
 
-    return "\n".join([
+    lines = [
         "🧪 페이퍼 트레이딩 A/B (MetaAllocator vs Phase 규칙)",
         "━━━━━━━━━━━━━━",
         f"표본: {len(rows)}일 (5거래일 수익 기준)",
@@ -171,7 +211,14 @@ def summarize(track: dict) -> str | None:
         f"동일 리스크 환산 Meta 평균: {meta_voladj*100:+.2f}% (vol ×{vol_scale:.2f})",
         f"우세:  {'Meta' if _sharpe(meta) > _sharpe(rule) else 'Rule'} (Sharpe 기준)",
         "→ Meta 우세 지속 시 _ml_dca_blend 반영 비율 상향 검토",
-    ])
+    ]
+
+    core = np.array([e["ret_regime_core_5d"] for e in track.values()
+                     if "ret_regime_core_5d" in e])
+    if len(core) >= MIN_SUMMARY_ENTRIES:
+        lines.append(f"레짐코어(J): 평균 {core.mean()*100:+.2f}%  Sharpe {_sharpe(core):.2f}"
+                     f" (표본 {len(core)}일)")
+    return "\n".join(lines)
 
 
 def _send(text: str) -> None:
