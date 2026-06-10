@@ -48,7 +48,14 @@ MIN_VIX_TERM = 0.95
 
 def _load(days: int) -> dict[str, pd.Series]:
     from ml.leverage_optimizer import _load_prices   # SGOV←SHV 스플라이스 포함
-    return _load_prices(days=days)
+    px = _load_prices(days=days)
+    # 카나리아(EEM/AGG — Keller DAA)·금(GLD) 추가
+    from ml.data_pipeline import fetch_prices
+    extra = fetch_prices(["EEM", "AGG", "GLD"], days=days)
+    for t, df in extra.items():
+        if df is not None and "Close" in df.columns:
+            px[t] = df["Close"]
+    return px
 
 
 def _metrics(eq: pd.Series, name: str) -> dict:
@@ -154,7 +161,32 @@ def build_strategies(px: dict[str, pd.Series]) -> tuple[dict[str, pd.Series], pd
     # 위험자산 비중 = 투표 비율 (점진적 진입·청산), 백워데이션 시 전량 대피
     votes = sum((qqq > qqq.rolling(n, min_periods=n).mean()).astype(float)
                 for n in (50, 100, 150, 200, 250)) / 5.0
-    eqs["L. 앙상블추세 코어"] = _core(votes.where(term_ok, 0.0), lev_frac_vt)
+    risk_L = votes.where(term_ok, 0.0)
+    eqs["L. 앙상블추세 코어"] = _core(risk_L, lev_frac_vt)
+
+    # M: L + Keller DAA 카나리아 (EEM·AGG 13612W 모멘텀) — 위기 선행 신호.
+    # 카나리아 b개 음수 → 위험비중 ×(1 - b/2) (둘 다 음수면 전량 대피)
+    def _13612w(p: pd.Series) -> pd.Series:
+        return (12 * (p / p.shift(21) - 1) + 4 * (p / p.shift(63) - 1)
+                + 2 * (p / p.shift(126) - 1) + (p / p.shift(252) - 1)) / 19
+    eem, agg = px.get("EEM"), px.get("AGG")
+    if eem is not None and agg is not None:
+        bad = ((_13612w(eem.reindex(idx).ffill()) <= 0).astype(int)
+               + (_13612w(agg.reindex(idx).ffill()) <= 0).astype(int))
+        canary_mult = (1 - bad / 2.0).clip(0, 1)
+        eqs["M. L+카나리아"] = _core(risk_L * canary_mult, lev_frac_vt)
+
+    # N: L의 방어슬리브를 SGOV 50% + GLD 50%로 — 인플레형 약세장(2022) 대응
+    gld = px.get("GLD")
+    if gld is not None:
+        gld_ret = gld.reindex(idx).ffill().pct_change()
+        def_ret = 0.5 * sgov_ret + 0.5 * gld_ret
+        w_l = (s(risk_L) * s(lev_frac_vt)).fillna(0).clip(0, 1)
+        w_q = s(risk_L).fillna(0).clip(0, 1) - w_l
+        w_c = 1 - w_l - w_q
+        turnover = (w_l.diff().abs() + w_q.diff().abs() + w_c.diff().abs()).fillna(1.0) / 2
+        strat = (w_l * qld_ret + w_q * qqq_ret + w_c * def_ret).fillna(0) - turnover * COST
+        eqs["N. L+금방어슬리브"] = (1 + strat).cumprod()
 
     aux = pd.DataFrame({"above": above, "w_F": w_f}, index=idx)
     return eqs, aux
@@ -177,8 +209,8 @@ def report(eqs: dict[str, pd.Series], aux: pd.DataFrame) -> str:
         lines.append(f"{name:<18} 전반 {m1['cagr']*100:+6.1f}%/{m1['mdd']*100:+5.1f}%  "
                      f"후반 {m2['cagr']*100:+6.1f}%/{m2['mdd']*100:+5.1f}%")
 
-    # 연도별 (벤치마크 vs 최종 후보 L)
-    cand = "L. 앙상블추세 코어"
+    # 연도별 (벤치마크 vs 최종 후보 N)
+    cand = "N. L+금방어슬리브"
     lines.append(f"\n[연도별 수익 — QQQ vs {cand}]")
     a, f = eqs["A. QQQ B&H"], eqs[cand]
     for y, g in a.groupby(a.index.year):
@@ -186,7 +218,7 @@ def report(eqs: dict[str, pd.Series], aux: pd.DataFrame) -> str:
         gf = f.loc[g.index]
         rf_ = gf.iloc[-1] / gf.iloc[0] - 1
         win = "✅" if rf_ > ra else "  "
-        lines.append(f"  {y}:  QQQ {ra*100:+6.1f}%   L {rf_*100:+6.1f}%  {win}")
+        lines.append(f"  {y}:  QQQ {ra*100:+6.1f}%   {cand[0]} {rf_*100:+6.1f}%  {win}")
 
     # 최종 후보의 주요 낙폭 에피소드
     dd = f / f.cummax() - 1
@@ -210,7 +242,7 @@ def report(eqs: dict[str, pd.Series], aux: pd.DataFrame) -> str:
     # 고금리 시대 부분구간 (2022~) — 레버리지 차입비용이 실가격에 반영된 구간
     lines.append("\n[고금리 시대 2022-01~ 부분구간 — 차입비용 실반영 구간]")
     for name in ("A. QQQ B&H", "D. 200MA QLD/SGOV", "J. I+텀 전량대피",
-                 "K. J+절대모멘텀", "L. 앙상블추세 코어"):
+                 "K. J+절대모멘텀", "L. 앙상블추세 코어", "M. L+카나리아", "N. L+금방어슬리브"):
         if name not in eqs:
             continue
         sub = eqs[name].loc["2022-01-01":]

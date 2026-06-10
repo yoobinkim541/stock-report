@@ -102,11 +102,12 @@ def record_today(track: dict) -> None:
 
 
 def _regime_core_weights() -> dict[str, float]:
-    """레짐 코어(L) 오늘 비중 — 앙상블 추세 × vol타깃 × VIX텀.
+    """레짐 코어(N) 오늘 비중 — 앙상블 추세 × vol타깃 × VIX텀 × 금 방어슬리브.
 
     위험자산 비중 = MA(50/100/150/200/250) 투표 비율 (점진 진입·청산, 타이밍 럭 완화)
     그중 QLD 비율 = min(1, 0.25/QLD 실현변동성), 잔여 QQQ
-    VIX 백워데이션(VIX3M/VIX < 0.95) → 전량 SGOV
+    방어슬리브(잔여) = SGOV 50% + GLD 50% (인플레형 약세장 대응)
+    VIX 백워데이션(VIX3M/VIX < 0.95) → 전량 방어슬리브
     """
     import numpy as np
     from ml.data_pipeline import fetch_prices
@@ -123,7 +124,7 @@ def _regime_core_weights() -> dict[str, float]:
         if not v.empty and not v3.empty and float(v.iloc[-1]) > 0:
             term_ok = float(v3.iloc[-1]) / float(v.iloc[-1]) >= 0.95
     if not term_ok:
-        return {"SGOV": 1.0}
+        return {"SGOV": 0.5, "GLD": 0.5}
 
     votes = 0.0
     for n in (50, 100, 150, 200, 250):
@@ -132,7 +133,7 @@ def _regime_core_weights() -> dict[str, float]:
             votes += 1
     risk = votes / 5.0
     if risk <= 0:
-        return {"SGOV": 1.0}
+        return {"SGOV": 0.5, "GLD": 0.5}
 
     vol = float(qld.pct_change().rolling(20).std().iloc[-1]) * (252 ** 0.5)
     lev_frac = min(1.0, 0.25 / vol) if np.isfinite(vol) and vol > 1e-6 else 0.0
@@ -141,8 +142,10 @@ def _regime_core_weights() -> dict[str, float]:
     out = {}
     if w_l > 0: out["QLD"] = w_l
     if w_q > 0: out["QQQ"] = w_q
-    sgov = round(1 - w_l - w_q, 4)
-    if sgov > 0: out["SGOV"] = sgov
+    defensive = round(1 - w_l - w_q, 4)
+    if defensive > 0:   # 방어슬리브: SGOV 50% + GLD 50%
+        out["SGOV"] = round(defensive / 2, 4)
+        out["GLD"]  = round(defensive - out["SGOV"], 4)
     return out
 
 
