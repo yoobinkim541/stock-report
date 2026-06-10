@@ -52,7 +52,7 @@ except ImportError:
     pass
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from backtest import _ascii_chart
+from backtest import _ascii_chart, _anchor_drawdown, _wilder_rsi, _classify_with_hysteresis
 
 logger = logging.getLogger(__name__)
 logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
@@ -201,31 +201,12 @@ def download_all(start: str) -> pd.DataFrame:
 
 
 def add_signals(close: pd.DataFrame) -> pd.DataFrame:
-    """RSI, 낙폭, 모멘텀, Phase (IB용)."""
+    """RSI, 낙폭, 모멘텀, Phase (IB용) — backtest.py 라이브 동기 로직 재사용."""
     qqq = close["QQQ"]
-
-    high_52w = qqq.rolling(252, min_periods=21).max().shift(1).fillna(qqq)
-    close["drawdown"] = ((qqq - high_52w) / high_52w * 100).fillna(0)
-
-    delta = qqq.diff()
-    gain  = delta.clip(lower=0).rolling(14).mean()
-    loss  = (-delta.clip(upper=0)).rolling(14).mean()
-    rs    = (gain / loss.replace(0, np.nan)).fillna(1)
-    close["rsi"]   = (100 - 100 / (1 + rs)).fillna(50)
+    close["drawdown"] = _anchor_drawdown(qqq)
+    close["rsi"] = _wilder_rsi(qqq)
     close["mom_1m"] = qqq.pct_change(21, fill_method=None).fillna(0) * 100
-
-    def classify(row):
-        dd, rsi, mom, vix = row["drawdown"], row["rsi"], row["mom_1m"], row["VIX"]
-        if dd <= -30:   return 5
-        if dd <= -20:   return 4
-        if dd <= -15:   return 3
-        if dd <= -10:   return 2
-        if dd <= -5:    return 1
-        if rsi > 75 and mom > 8 and vix < 15: return "bull_2"
-        if rsi > 70 or mom > 5:               return "bull_1"
-        return 0
-
-    close["phase"] = close.apply(classify, axis=1)
+    close["phase"] = _classify_with_hysteresis(close)
     return close
 
 

@@ -374,6 +374,27 @@ def _holding_details_from_snapshot(snap: dict) -> list[dict]:
 ANCHOR_FILE = os.path.expanduser("~/.cache/barbell_anchor.json")
 ANCHOR_RESET_RECOVERY = 0.95   # 앵커 대비 -5% 이내 회복 시 롤링 고점으로 복귀
 
+# yfinance 히스토리 인-프로세스 캐시 — fetch_qqq_data/fetch_rsi/fetch_ma200이
+# 같은 QQQ 1y 데이터를 각자 다운로드하던 중복 제거 (rate-limit 보호)
+_HIST_CACHE: dict[tuple, tuple[float, "object"]] = {}
+_HIST_CACHE_TTL_S = 300
+
+
+def _history_cached(symbol: str, period: str = "1y"):
+    """yf.Ticker(symbol).history(period) 5분 캐시. 실패 시 빈 DataFrame."""
+    import pandas as pd
+    key = (symbol, period)
+    hit = _HIST_CACHE.get(key)
+    if hit and time.time() - hit[0] < _HIST_CACHE_TTL_S:
+        return hit[1]
+    try:
+        hist = yf.Ticker(symbol).history(period=period)
+    except Exception:
+        hist = pd.DataFrame()
+    if hist is not None and not hist.empty:
+        _HIST_CACHE[key] = (time.time(), hist)
+    return hist if hist is not None else pd.DataFrame()
+
 
 def _atomic_write_json(path: str, obj: dict):
     """temp→rename atomic write (부분 쓰기·동시 쓰기 깨짐 방지)."""
@@ -430,7 +451,7 @@ def fetch_exchange_rate() -> float:
 def fetch_qqq_data() -> dict:
     """QQQ 현재가, 52주 고점, 낙폭, 모멘텀 계산."""
     try:
-        hist = yf.Ticker("QQQ").history(period="1y")
+        hist = _history_cached("QQQ", "1y")
         if hist.empty:
             return {}
         valid = hist.dropna(subset=["High", "Low", "Close"])
@@ -477,9 +498,9 @@ def fetch_qqq_data() -> dict:
 
 
 def fetch_rsi(ticker_sym: str, period: int = 14) -> float:
-    """RSI 계산."""
+    """RSI 계산 (1y 공유 캐시 사용 — QQQ는 fetch_qqq_data와 다운로드 공유)."""
     try:
-        hist = yf.Ticker(ticker_sym).history(period="3mo")
+        hist = _history_cached(ticker_sym, "1y")
         if len(hist) < period + 1:
             return 50.0
         delta = hist["Close"].diff().dropna()
@@ -496,7 +517,7 @@ def fetch_rsi(ticker_sym: str, period: int = 14) -> float:
 def fetch_vix() -> float:
     """VIX 현재값."""
     try:
-        hist = yf.Ticker("^VIX").history(period="5d")
+        hist = _history_cached("^VIX", "5d")
         return round(_safe_float(hist["Close"].iloc[-1]), 2) if not hist.empty else 20.0
     except Exception:
         return 20.0
@@ -547,9 +568,9 @@ def fetch_fear_greed() -> dict:
 
 
 def fetch_ma200(ticker_sym: str) -> dict:
-    """현재가 vs 200일 MA."""
+    """현재가 vs 200일 MA (1y 공유 캐시 사용)."""
     try:
-        hist = yf.Ticker(ticker_sym).history(period="1y")
+        hist = _history_cached(ticker_sym, "1y")
         if len(hist) < 50:
             return {"above_ma200": True, "gap_pct": 0.0}
         n = min(200, len(hist))
@@ -606,6 +627,7 @@ def fetch_portfolio_value() -> dict:
                 cost_usd_by_ticker[ticker] = cost_usd_by_ticker.get(ticker, 0.0) + sh * avg
 
     if not holdings:
+        logger.warning("보유 수량 데이터 없음 — 하드코딩 기본 포트폴리오 값 사용 (실제와 다를 수 있음)")
         return {"total_usd": 7940.0, "sgov_usd": 1006.7, "qqqi_usd": 2019.77, "qqqi_shares": 35.2987, "prices": {}, "holdings": {}, "holdings_detail": holdings_detail}
 
     # --- 실시간 가격 조회 ---
@@ -650,12 +672,28 @@ def fetch_portfolio_value() -> dict:
         except Exception:
             pass
 
+    # 그래도 가격 없는 종목 → 평단가 fallback + 경고 ($0 평가로 총액 과소측정 방지)
+    for t in tickers:
+        if prices.get(t, 0) > 0:
+            continue
+        shares = holdings.get(t, 0)
+        avg = cost_usd_by_ticker.get(t, 0.0) / shares if shares > 0 else 0.0
+        if avg > 0:
+            prices[t] = round(avg, 2)
+            logger.warning("%s 가격 조회 실패 — 평단가 $%.2f 로 대체 평가", t, avg)
+        else:
+            logger.warning("%s 가격 조회 실패 + 평단가 없음 — $0 평가 (총액 과소측정 가능)", t)
+
     total_usd = sum(holdings.get(t, 0) * prices.get(t, 0) for t in tickers)
     cost_usd = sum(cost_usd_by_ticker.values())
     pnl_usd = total_usd - cost_usd if cost_usd > 0 else 0.0
     return_pct = pnl_usd / cost_usd * 100 if cost_usd > 0 else 0.0
+    if "SGOV" in holdings and prices.get("SGOV", 0) <= 0:
+        logger.warning("SGOV 가격 조회 실패 — 기본값 $100.67 사용")
     sgov_usd = holdings.get("SGOV", SGOV_SHARES_DEFAULT) * prices.get("SGOV", 100.67)
     qqqi_shares = holdings.get("QQQI", QQQI_SHARES_DEFAULT)
+    if "QQQI" in holdings and prices.get("QQQI", 0) <= 0:
+        logger.warning("QQQI 가격 조회 실패 — 기본값 $57.22 사용")
     qqqi_price = prices.get("QQQI", 57.22)
     qqqi_usd = qqqi_shares * qqqi_price
 
@@ -911,7 +949,7 @@ def _phase_blend_factor(market_type: str, phase_key) -> float:
     급락(Bear 3~5)일수록 ML 방향성 신뢰도 높여 강하게 반영.
     """
     if market_type == "bull":
-        return {"bull2": 0.1, "bull1": 0.2}.get(str(phase_key), 0.25)
+        return {"bull_2": 0.1, "bull_1": 0.2}.get(str(phase_key), 0.25)
     if market_type == "bear":
         return {0: 0.3, 1: 0.35, 2: 0.45, 3: 0.55, 4: 0.60, 5: 0.60}.get(phase_key, 0.3)
     return 0.3   # neutral
@@ -1094,6 +1132,12 @@ def calculate_dca(market_type: str, phase_key, exchange_rate: float = 1380.0) ->
 
     # ML 비중 기반 배분 + 원래 비중 방향 표시
     allocation     = {t: int(total_krw * w) for t, w in ml_weights.items()}
+    # int 절사로 남는 잔여 원화 → 최대 비중 종목에 가산 (합계 = total_krw 보장)
+    if allocation and sum(ml_weights.values()) > 0.999:
+        remainder = total_krw - sum(allocation.values())
+        if remainder > 0:
+            top = max(ml_weights, key=ml_weights.get)
+            allocation[top] += remainder
     base_alloc     = {t: int(total_krw * w) for t, w in weights.items()}
     ml_direction   = {}   # ticker → "↑ML" / "↓ML" / ""
     for t in weights:
@@ -1233,7 +1277,8 @@ def calculate_safety_margin(portfolio: dict, market_type: str, phase_key) -> dic
     # ── 1. 종목 집중도 (HHI) ─────────────────────────────────────────
     stock_ws = []
     for t, sh in holdings.items():
-        if t in ("SGOV", "QQQI", "QLD", "TQQQ", "SPMO", "BIL", "SHV"):
+        # SPMO는 모멘텀 팩터 ETF — 분산 효과가 제한적이므로 집중도 계산에 포함
+        if t in ("SGOV", "QQQI", "QLD", "TQQQ", "BIL", "SHV"):
             continue
         p = prices.get(t, 0)
         if p > 0:

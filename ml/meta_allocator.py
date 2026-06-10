@@ -252,18 +252,68 @@ def _build_weights(
 
 _REENTRY_GUARD = False   # meta→ranker→meta 무한 상호 재귀 방지
 
+# 결과 캐시 — ExcessReturn walk-forward 학습 등 신호 계산이 수십 초 걸리므로
+# /dca·/report·/rebalance·주문서가 연달아 호출해도 1회만 계산
+META_CACHE_TTL_S = 900   # 15분
+_RESULT_CACHE: dict[tuple, tuple[float, "MetaAllocation"]] = {}
+
+
+def _meta_cache_file(market_type: str, phase_key) -> "Path":
+    from pathlib import Path
+    import os
+    d = Path(os.path.expanduser("~/reports/ml-cache"))
+    d.mkdir(parents=True, exist_ok=True)
+    return d / f"meta_alloc_{market_type}_{phase_key}.pkl"
+
+
+def _load_meta_cache(market_type: str, phase_key) -> Optional["MetaAllocation"]:
+    import time, pickle
+    key = (market_type, str(phase_key))
+    hit = _RESULT_CACHE.get(key)
+    if hit and time.time() - hit[0] < META_CACHE_TTL_S:
+        return hit[1]
+    try:   # 파일 캐시 (크론 등 별도 프로세스와 공유)
+        path = _meta_cache_file(market_type, phase_key)
+        if path.exists() and time.time() - path.stat().st_mtime < META_CACHE_TTL_S:
+            alloc = pickle.loads(path.read_bytes())
+            _RESULT_CACHE[key] = (path.stat().st_mtime, alloc)
+            return alloc
+    except Exception:
+        pass
+    return None
+
+
+def _save_meta_cache(market_type: str, phase_key, alloc: "MetaAllocation"):
+    import time, pickle, os
+    _RESULT_CACHE[(market_type, str(phase_key))] = (time.time(), alloc)
+    try:
+        path = _meta_cache_file(market_type, phase_key)
+        tmp = f"{path}.tmp.{os.getpid()}"
+        with open(tmp, "wb") as f:
+            f.write(pickle.dumps(alloc))
+        os.replace(tmp, path)
+    except Exception:
+        pass
+
 
 def get_meta_allocation(
     market_type: str = "neutral",
     phase_key         = 0,
+    force: bool = False,
 ) -> MetaAllocation:
-    """현재 시황 기반 통합 포트폴리오 배분 (재진입 시 즉시 예외)."""
+    """현재 시황 기반 통합 포트폴리오 배분 (15분 캐시, 재진입 시 즉시 예외)."""
     global _REENTRY_GUARD
     if _REENTRY_GUARD:
         raise RuntimeError("get_meta_allocation 재진입 차단 — 신호 함수가 메타를 역호출함")
+    if not force:
+        cached = _load_meta_cache(market_type, phase_key)
+        if cached is not None:
+            return cached
     _REENTRY_GUARD = True
     try:
-        return _get_meta_allocation_impl(market_type, phase_key)
+        alloc = _get_meta_allocation_impl(market_type, phase_key)
+        _save_meta_cache(market_type, phase_key, alloc)
+        return alloc
     finally:
         _REENTRY_GUARD = False
 

@@ -132,39 +132,85 @@ def _execution_phase_series(phases: pd.Series) -> pd.Series:
     return phases.shift(1).fillna(0)
 
 
-def calc_signals(close: pd.DataFrame) -> pd.DataFrame:
-    """RSI, 52주 낙폭, 모멘텀 계산 → phase 열 추가."""
-    qqq = close["QQQ"]
+# ── 라이브(barbell_strategy.py)와 동기화된 신호 로직 ──────────────────
+# backtest_multi.py에서도 import하여 재사용
 
-    # 52주 rolling high (전일 기준 shift(1))
+_BEAR_ENTRY_THR = {1: -5, 2: -10, 3: -15, 4: -20, 5: -30}   # 진입 임계값 (%)
+_PHASE_EXIT_BUFFER_PP = 1.5    # 하향 시 추가 회복 요구 (%p)
+_ANCHOR_RESET_RECOVERY = 0.95  # 앵커 -5% 이내 회복 시 롤링 고점으로 리셋
+
+
+def _anchor_drawdown(qqq: pd.Series) -> pd.Series:
+    """라이브 _update_drawdown_anchor와 동일한 앵커 낙폭(%) 시계열.
+
+    앵커는 단조 증가 고점이며, 가격이 앵커 -5% 이내로 회복했을 때만
+    52주 rolling high로 리셋 (장기 약세장 Phase 드리프트 방지).
+    백테스트는 영속 상태가 없으므로 시계열 내에서 순차 계산한다.
+    """
     high_52w = qqq.rolling(252, min_periods=21).max().shift(1).fillna(qqq)
-    close["drawdown"] = ((qqq - high_52w) / high_52w * 100).fillna(0)
+    px_arr, h52_arr = qqq.to_numpy(float), high_52w.to_numpy(float)
+    dd = np.zeros(len(px_arr))
+    anchor = 0.0
+    for i in range(len(px_arr)):
+        anchor = max(anchor, h52_arr[i])
+        if anchor > 0 and px_arr[i] >= anchor * _ANCHOR_RESET_RECOVERY:
+            anchor = h52_arr[i]
+        dd[i] = (px_arr[i] - anchor) / anchor * 100 if anchor > 0 else 0.0
+    return pd.Series(dd, index=qqq.index)
 
-    # RSI 14
+
+def _wilder_rsi(qqq: pd.Series, period: int = 14) -> pd.Series:
+    """Wilder RSI (ewm alpha=1/N) — 라이브 fetch_rsi와 동일."""
     delta = qqq.diff()
-    gain  = delta.clip(lower=0).rolling(14).mean()
-    loss  = (-delta.clip(upper=0)).rolling(14).mean()
-    rs    = (gain / loss.replace(0, np.nan)).fillna(1)
-    close["rsi"] = (100 - 100 / (1 + rs)).fillna(50)
+    gain = delta.clip(lower=0).ewm(alpha=1 / period, adjust=False).mean()
+    loss = (-delta.clip(upper=0)).ewm(alpha=1 / period, adjust=False).mean()
+    rs = gain / loss.replace(0, np.nan)
+    return (100 - 100 / (1 + rs)).fillna(50)
 
-    # 1개월 모멘텀
+
+def _classify_with_hysteresis(close: pd.DataFrame) -> pd.Series:
+    """라이브 classify_market과 동일한 순차 히스테리시스 분류.
+
+    - bear 진입·상향: 즉시
+    - bear 하향: 진입 임계값 +1.5%p 이상 회복해야 허용
+    - VIX≥30 패닉 시 깊은 Phase(2+) 하향 보류 (dd≤-5 한정)
+    """
+    phases = []
+    prev_bear = None
+    for dd, rsi, mom, vix in zip(close["drawdown"], close["rsi"],
+                                 close["mom_1m"], close["VIX"]):
+        if dd <= -30:   raw = 5
+        elif dd <= -20: raw = 4
+        elif dd <= -15: raw = 3
+        elif dd <= -10: raw = 2
+        elif dd <= -5:  raw = 1
+        elif rsi > 75 and mom > 8 and vix < 15:
+            raw = "bull_2"
+        elif rsi > 70 or mom > 5:
+            raw = "bull_1"
+        else:
+            raw = 0
+
+        phase = raw
+        if prev_bear is not None:
+            raw_bear = raw if isinstance(raw, int) and raw >= 1 else 0
+            if raw_bear < prev_bear:
+                recovered = dd > _BEAR_ENTRY_THR[prev_bear] + _PHASE_EXIT_BUFFER_PP
+                vix_panic = prev_bear >= 2 and vix >= 30 and dd <= -5
+                if not recovered or vix_panic:
+                    phase = prev_bear
+        prev_bear = phase if isinstance(phase, int) and phase >= 1 else None
+        phases.append(phase)
+    return pd.Series(phases, index=close.index, dtype=object)
+
+
+def calc_signals(close: pd.DataFrame) -> pd.DataFrame:
+    """앵커 낙폭, Wilder RSI, 모멘텀 계산 → 히스테리시스 phase 열 추가."""
+    qqq = close["QQQ"]
+    close["drawdown"] = _anchor_drawdown(qqq)
+    close["rsi"] = _wilder_rsi(qqq)
     close["mom_1m"] = qqq.pct_change(21, fill_method=None).fillna(0) * 100
-
-    # Phase 분류
-    def classify(row) -> object:
-        dd, rsi, mom, vix = row["drawdown"], row["rsi"], row["mom_1m"], row["VIX"]
-        if dd <= -30:   return 5
-        if dd <= -20:   return 4
-        if dd <= -15:   return 3
-        if dd <= -10:   return 2
-        if dd <= -5:    return 1
-        if rsi > 75 and mom > 8 and vix < 15:
-            return "bull_2"
-        if rsi > 70 or mom > 5:
-            return "bull_1"
-        return 0
-
-    close["phase"] = close.apply(classify, axis=1)
+    close["phase"] = _classify_with_hysteresis(close)
     return close
 
 
