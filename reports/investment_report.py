@@ -1280,13 +1280,6 @@ def _decision_v2(fund_score, signal, grade=None, ticker=None):
     }
 
 
-def _decision_summary(item):
-    decision = item.get("decision_v2") or {}
-    action = decision.get("action", "데이터부족")
-    reason = decision.get("one_line_reason", "")
-    return f"{action} - {_compact_text(reason, 32)}" if reason else action
-
-
 def _short_stock_label(item):
     ticker = item.get("ticker", "")
     name = _KOSPI_NAMES.get(ticker) or item.get("company_name") or item.get("company") or _company_name(ticker)
@@ -1311,11 +1304,90 @@ def _mobile_pick_items(items, limit=2, exclude_tickers=None):
     return picked
 
 
-def _mobile_pick_line(title, items, limit=2, exclude_tickers=None):
-    picks = []
-    for item in _mobile_pick_items(items, limit, exclude_tickers):
-        picks.append(f"{_short_stock_label(item)} {_decision_summary(item)}")
-    return f"{title}: {'; '.join(picks)}" if picks else f"{title}: 없음"
+def _pct_arrow(change):
+    """등락률 → 방향 인디케이터 (보합 ➖, ±2% 이상은 강조)."""
+    try:
+        c = float(change)
+    except (TypeError, ValueError):
+        return "➖"
+    if c >= 2:
+        return "⏫"
+    if c > 0:
+        return "🔺"
+    if c <= -2:
+        return "⏬"
+    if c < 0:
+        return "🔻"
+    return "➖"
+
+
+def _score_bar(score, width=10):
+    """0~100 점수 → ▰▱ 게이지 바."""
+    try:
+        s = max(0.0, min(100.0, float(score)))
+    except (TypeError, ValueError):
+        return "▱" * width
+    filled = round(s / 100 * width)
+    return "▰" * filled + "▱" * (width - filled)
+
+
+_GRADE_EMOJI = {"A": "🟢", "B": "🔵", "C": "🟡", "D": "🔴", "F": "🔴"}
+
+_ACTION_EMOJI = {
+    "강한 매수후보": "⭐",
+    "관심/분할매수": "✅",
+    "관심 유지": "👀",
+    "비중축소 검토": "⚠️",
+    "매도검토": "🔻",
+    "손절/매도검토": "🚨",
+    "데이터부족": "❔",
+}
+
+
+def _grade_emoji(grade):
+    return _GRADE_EMOJI.get(str(grade or "")[:1].upper(), "⚪")
+
+
+def _mobile_reason_without_finance(item):
+    """one_line_reason에서 재무 점수 중복 세그먼트 제거 (점수는 게이지로 표시)."""
+    reason = (item.get("decision_v2") or {}).get("one_line_reason", "")
+    parts = [p for p in reason.split(" · ") if not p.startswith("재무 ")]
+    return _compact_text(" · ".join(parts), 44)
+
+
+def _mobile_pick_block(title, items, limit=2, exclude_tickers=None):
+    """종목 픽 → 게이지 바 + 액션 인디케이터 멀티라인 블록."""
+    lines = [title]
+    picks = _mobile_pick_items(items, limit, exclude_tickers)
+    if not picks:
+        lines.append("  없음")
+        return lines
+    for item in picks:
+        score = item.get("total_score", item.get("score"))
+        if score is None:
+            score = (item.get("fundamental") or {}).get("total_score")
+        grade = item.get("grade") or (item.get("fundamental") or {}).get("grade")
+        action = (item.get("decision_v2") or {}).get("action", "데이터부족")
+        score_txt = f"{score:.0f}" if isinstance(score, (int, float)) else "?"
+        lines.append(f"{_grade_emoji(grade)} {_short_stock_label(item)} {score_txt}점 {_score_bar(score)}")
+        detail = f"{_ACTION_EMOJI.get(action, '▪️')} {action}"
+        reason = _mobile_reason_without_finance(item)
+        if reason:
+            detail += f" · {reason}"
+        lines.append(f"    {detail}")
+    return lines
+
+
+def _signal_strip(pos, neu, warn, crit, max_dots=20):
+    """포트폴리오 신호 분포 → 이모지 스택 바."""
+    total = pos + neu + warn + crit
+    if total <= 0:
+        return ""
+    if total > max_dots:
+        scale = max_dots / total
+        pos, neu, warn = round(pos * scale), round(neu * scale), round(warn * scale)
+        crit = max(0, max_dots - pos - neu - warn)
+    return "🟢" * pos + "⚪" * neu + "🟡" * warn + "🔴" * crit
 
 
 def _market_summary():
@@ -2035,43 +2107,62 @@ def generate_report():
     else:
         print(f"\n(전일 요약 없음 — 변경 감지 건너뜀)")
 
-    # ── Mobile summary (Telegram-friendly, max 12 lines) ──
+    # ── Mobile summary (Telegram-friendly) ──
+    sep = "━" * 17
+    qqq_change = market.get("qqq_change", 0)
     summary_lines = []
-    summary_lines.append(f"📊 {today_str} 투자 리포트 요약")
-    summary_lines.append(f"")
-    summary_lines.append(f"SPY ${market.get('spy_price', 'N/A')} ({spy_change:+.2f}%)")
-    summary_lines.append(f"NASDAQ ${market.get('qqq_price', 'N/A')} ({market.get('qqq_change', 0):+.2f}%)")
-    summary_lines.append(f"KOSPI {kospi_str}")
-    summary_lines.append(f"포트폴리오 평균 점수: {avg_score:.1f}/100")
-    sig_counts = f"🟢{pos_count} ⚪{neu_count} 🟡{warn_count} 🔴{crit_count}"
-    summary_lines.append(f"신호 분포: {sig_counts}")
-    buy_short = [_short_stock_label(r) for r in portfolio_results if r.get("decision_v2", {}).get("action") in ("강한 매수후보", "관심/분할매수", "관심 유지")][:3]
-    if buy_short:
-        summary_lines.append(f"매수관심: {', '.join(buy_short)}")
-    watch_short = [_short_stock_label(r) for r in portfolio_results if r.get("decision_v2", {}).get("action") in ("비중축소 검토", "매도검토", "데이터부족", "손절/매도검토")][:3]
-    if watch_short:
-        summary_lines.append(f"위험: {', '.join(watch_short)}")
-    summary_lines.append(f"")
+    summary_lines.append(f"📊 {today_str} 투자 리포트")
+    summary_lines.append(sep)
+    summary_lines.append("🌎 시장")
+    summary_lines.append(f"{_pct_arrow(spy_change)} SPY ${market.get('spy_price', 'N/A')} ({spy_change:+.2f}%)")
+    summary_lines.append(f"{_pct_arrow(qqq_change)} NASDAQ ${market.get('qqq_price', 'N/A')} ({qqq_change:+.2f}%)")
+    summary_lines.append(f"▪️ KOSPI {kospi_str}")
+    summary_lines.append("")
+    summary_lines.append(f"💼 포트폴리오 {avg_score:.1f}/100")
+    summary_lines.append(_score_bar(avg_score, 14))
+    summary_lines.append(f"신호: 🟢{pos_count} ⚪{neu_count} 🟡{warn_count} 🔴{crit_count}")
+    signal_strip = _signal_strip(pos_count, neu_count, warn_count, crit_count)
+    if signal_strip:
+        summary_lines.append(signal_strip)
+    buy_items = [r for r in portfolio_results if r.get("decision_v2", {}).get("action") in ("강한 매수후보", "관심/분할매수", "관심 유지")][:3]
+    watch_items = [r for r in portfolio_results if r.get("decision_v2", {}).get("action") in ("비중축소 검토", "매도검토", "데이터부족", "손절/매도검토")][:3]
+    buy_short = [_short_stock_label(r) for r in buy_items]
+    watch_short = [_short_stock_label(r) for r in watch_items]
+    if buy_items:
+        summary_lines.append("")
+        summary_lines.append("🛒 매수관심")
+        for r in buy_items:
+            act = r.get("decision_v2", {}).get("action", "")
+            summary_lines.append(f"  {_ACTION_EMOJI.get(act, '▪️')} {_short_stock_label(r)}")
+    if watch_items:
+        summary_lines.append("")
+        summary_lines.append("⚠️ 위험")
+        for r in watch_items:
+            act = r.get("decision_v2", {}).get("action", "")
+            summary_lines.append(f"  {_ACTION_EMOJI.get(act, '▪️')} {_short_stock_label(r)}")
+    summary_lines.append("")
+    summary_lines.append(sep)
     nasdaq_top_mobile = _mobile_pick_items(top_buy_candidates)
     kospi_top_mobile = _mobile_pick_items(kospi_top)
-    summary_lines.append(_mobile_pick_line("NAS100 상위", nasdaq_top_mobile))
-    summary_lines.append(_mobile_pick_line("NAS100 주의", top_watch, exclude_tickers={r.get("ticker") for r in nasdaq_top_mobile}))
-    summary_lines.append(_mobile_pick_line("KOSPI 상위", kospi_top_mobile))
-    summary_lines.append(_mobile_pick_line("KOSPI 주의", kospi_watch, exclude_tickers={r.get("ticker") for r in kospi_top_mobile}))
+    summary_lines.extend(_mobile_pick_block("🇺🇸 NAS100 상위", nasdaq_top_mobile))
+    summary_lines.extend(_mobile_pick_block("🇺🇸 NAS100 주의", top_watch, exclude_tickers={r.get("ticker") for r in nasdaq_top_mobile}))
+    summary_lines.extend(_mobile_pick_block("🇰🇷 KOSPI 상위", kospi_top_mobile))
+    summary_lines.extend(_mobile_pick_block("🇰🇷 KOSPI 주의", kospi_watch, exclude_tickers={r.get("ticker") for r in kospi_top_mobile}))
+    summary_lines.append("")
+    summary_lines.append(sep)
     if watch_short:
-        summary_lines.append(f"오늘 할 일: 위험 종목 확인 — {', '.join(watch_short)}")
+        summary_lines.append(f"✅ 오늘 할 일: 위험 종목 확인 — {', '.join(watch_short)}")
     elif buy_short:
-        summary_lines.append(f"오늘 할 일: 매수관심 검토 — {', '.join(buy_short)}")
+        summary_lines.append(f"✅ 오늘 할 일: 매수관심 검토 — {', '.join(buy_short)}")
     else:
-        summary_lines.append(f"오늘 할 일: 포트폴리오 유지")
-    summary_lines.append(f"")
+        summary_lines.append("✅ 오늘 할 일: 포트폴리오 유지")
+    summary_lines.append("")
     if llm_overlay:
-        summary_lines.append("")
         summary_lines.append("🧠 LLM 코멘트")
         summary_lines.extend(_llm_overlay_mobile_lines(llm_overlay))
-        summary_lines.append(f"소요 시간: {elapsed:.1f}초 | LLM overlay: {INVESTMENT_REPORT_LLM_MODEL}")
+        summary_lines.append(f"⏱ {elapsed:.1f}초 | LLM overlay: {INVESTMENT_REPORT_LLM_MODEL}")
     else:
-        summary_lines.append(f"소요 시간: {elapsed:.1f}초 | LLM overlay: {llm_status}")
+        summary_lines.append(f"⏱ {elapsed:.1f}초 | LLM overlay: {llm_status}")
     summary_lines.append(llm_token_line)
     summary_text = "\n".join(summary_lines)
 
