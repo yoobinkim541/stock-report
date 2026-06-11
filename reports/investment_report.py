@@ -60,16 +60,20 @@ def load_cached_source_digest() -> str:
     return build_digest(events)
 
 # ── 포트폴리오 종목 ─────────────────────────────────────────────────────
-DEFAULT_PORTFOLIO_TICKERS = ["MSFT", "QQQI", "ORCL", "NOW", "CRM", "SAP", "UNH",
-                             "SGOV", "CPNG", "NVDA", "GOOGL", "SPMO"]
-PORTFOLIO_SNAPSHOT_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "portfolio_snapshot.json")
+DEFAULT_PORTFOLIO_TICKERS = ["MSFT", "QQQI", "ORCL", "SAP", "UNH",
+                             "SGOV", "NVDA", "GOOGL", "SPMO"]
+# portfolio_snapshot.json은 프로젝트 루트에 있다 (이 파일은 reports/ 하위)
+_PROJECT_DIR = os.getenv("STOCK_REPORT_PROJECT_DIR",
+                         os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+PORTFOLIO_SNAPSHOT_PATH = os.path.join(_PROJECT_DIR, "portfolio_snapshot.json")
 
 
 def load_portfolio_tickers(path=PORTFOLIO_SNAPSHOT_PATH):
     try:
         with open(path, encoding="utf-8") as f:
             snap = json.load(f)
-    except Exception:
+    except Exception as exc:
+        print(f"[WARN] {path} 로드 실패 ({exc}) — 기본 종목 목록으로 폴백", file=sys.stderr)
         return list(DEFAULT_PORTFOLIO_TICKERS)
 
     tickers = []
@@ -80,7 +84,10 @@ def load_portfolio_tickers(path=PORTFOLIO_SNAPSHOT_PATH):
             value = float(h.get("value_usd") or 0)
             if ticker and (shares > 0 or value > 0) and ticker not in tickers:
                 tickers.append(ticker)
-    return tickers or list(DEFAULT_PORTFOLIO_TICKERS)
+    if not tickers:
+        print(f"[WARN] {path} 에 보유 종목 없음 — 기본 종목 목록으로 폴백", file=sys.stderr)
+        return list(DEFAULT_PORTFOLIO_TICKERS)
+    return tickers
 
 
 PORTFOLIO_TICKERS = load_portfolio_tickers()

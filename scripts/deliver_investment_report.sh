@@ -105,7 +105,13 @@ fi
 
 # ── stdout: compact delivery report (this goes to Hermes cron output) ──
 REPORT_SIZE=$(wc -c < "$REPORT_FILE")
-PORTFOLIO_COUNT=12
+PORTFOLIO_COUNT=$("$PYTHON_BIN" -c "
+import json
+snap = json.load(open('portfolio_snapshot.json'))
+tickers = {h['ticker'] for s in ('overseas_general', 'overseas_fractional')
+           for h in snap.get(s, {}).get('holdings_usd', []) if h.get('ticker')}
+print(len(tickers))
+" 2>/dev/null || echo "?")
 
 echo "📊 주식 투자 레포트 전송 완료"
 echo "━━━━━━━━━━━━━━━━━━"
