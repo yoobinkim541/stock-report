@@ -532,6 +532,76 @@ def _short_status(text, limit=140):
     return _compact_text(str(text or ""), limit)
 
 
+def _llm_overlay_max_tokens():
+    return _env_int("INVESTMENT_REPORT_LLM_MAX_TOKENS", 4096, 256)
+
+
+def _llm_overlay_retry_max_tokens():
+    return _env_int("INVESTMENT_REPORT_LLM_RETRY_MAX_TOKENS", 1024, 128)
+
+
+def _prepare_overlay_hermes_home(max_tokens):
+    """이 호출에만 model.max_tokens 캡을 적용한 HERMES_HOME 오버레이 생성.
+
+    hermes CLI에는 per-call max_tokens 플래그가 없고, 기본 홈의 config.yaml
+    model.max_tokens 를 바꾸면 사용자의 모든 hermes 세션에 영향을 준다.
+    그래서 config.yaml 만 복사·수정한 별도 홈을 만들고 .env·auth.json 은
+    심볼릭 링크로 공유한다. 실패 시 None 반환 → 기본 홈으로 호출.
+    """
+    base_home = os.environ.get("HERMES_HOME") or os.path.expanduser("~/.hermes")
+    base_config = os.path.join(base_home, "config.yaml")
+    if not os.path.isfile(base_config):
+        return None
+    try:
+        import yaml
+
+        with open(base_config, "r", encoding="utf-8") as fh:
+            cfg = yaml.safe_load(fh) or {}
+        if not isinstance(cfg, dict):
+            return None
+        model_cfg = cfg.get("model")
+        if not isinstance(model_cfg, dict):
+            model_cfg = {}
+        model_cfg["max_tokens"] = int(max_tokens)
+        cfg["model"] = model_cfg
+
+        overlay = os.path.join(
+            os.path.expanduser("~/.cache"),
+            "stock-report",
+            f"hermes-overlay-{int(max_tokens)}",
+        )
+        os.makedirs(overlay, exist_ok=True)
+        tmp_path = os.path.join(overlay, ".config.yaml.tmp")
+        with open(tmp_path, "w", encoding="utf-8") as fh:
+            yaml.safe_dump(cfg, fh, allow_unicode=True, sort_keys=False)
+        os.replace(tmp_path, os.path.join(overlay, "config.yaml"))
+
+        for name in (".env", "auth.json"):
+            src = os.path.join(base_home, name)
+            dst = os.path.join(overlay, name)
+            if os.path.exists(src) and not os.path.lexists(dst):
+                os.symlink(src, dst)
+        return overlay
+    except Exception:
+        return None
+
+
+def _run_overlay_llm(cmd, runner, timeout, max_tokens):
+    env = None
+    overlay_home = _prepare_overlay_hermes_home(max_tokens)
+    if overlay_home:
+        env = dict(os.environ)
+        env["HERMES_HOME"] = overlay_home
+    return runner(
+        cmd,
+        capture_output=True,
+        text=True,
+        timeout=timeout,
+        cwd=os.path.dirname(os.path.abspath(__file__)),
+        env=env,
+    )
+
+
 def _generate_llm_overlay(clean_data, source_digest="", runner=subprocess.run):
     if not _llm_overlay_enabled():
         return None, "disabled"
@@ -549,10 +619,23 @@ def _generate_llm_overlay(clean_data, source_digest="", runner=subprocess.run):
         "-Q",
     ]
     timeout = _env_int("INVESTMENT_REPORT_LLM_TIMEOUT", 120, 30)
+    max_tokens = _llm_overlay_max_tokens()
+    retry_note = ""
     try:
-        result = runner(cmd, capture_output=True, text=True, timeout=timeout, cwd=os.path.dirname(os.path.abspath(__file__)))
+        result = _run_overlay_llm(cmd, runner, timeout, max_tokens)
     except Exception as exc:
         return None, f"call failed: {_short_status(exc)}"
+
+    # 402 = 크레딧 한도 대비 max_tokens 과다 (OpenRouter). 더 낮은 캡으로 1회 재시도.
+    if getattr(result, "returncode", 1) != 0:
+        stderr_text = str(getattr(result, "stderr", "") or "")
+        retry_tokens = _llm_overlay_retry_max_tokens()
+        if "402" in stderr_text and retry_tokens < max_tokens:
+            try:
+                result = _run_overlay_llm(cmd, runner, timeout, retry_tokens)
+                retry_note = f" (402 retry, max_tokens={retry_tokens})"
+            except Exception as exc:
+                return None, f"call failed: {_short_status(exc)}"
 
     if getattr(result, "returncode", 1) != 0:
         stderr = _short_status(getattr(result, "stderr", ""))
@@ -564,7 +647,7 @@ def _generate_llm_overlay(clean_data, source_digest="", runner=subprocess.run):
     issues = _validate_llm_overlay(text, guard_source)
     if issues:
         return None, "fact guard rejected output: " + _short_status("; ".join(issues))
-    return text, "ok"
+    return text, "ok" + retry_note
 
 
 def _fetch_arca_posts(max_pages=None, limit=6):
