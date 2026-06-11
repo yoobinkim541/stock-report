@@ -930,7 +930,7 @@ def cmd_alert(chat_id: str, args: list):
              "/alert remove ID     알림 삭제\n"
              "\n"
              "예시:\n"
-             "/alert add CPNG 14.00 sell  ← 손절\n"
+             "/alert add NVDA 150.00 sell  ← 손절\n"
              "/alert add ORCL 260.00 sell ← 익절\n"
              "/alert add QQQ  430.00 buy  ← 매수 기회")
         return
@@ -963,7 +963,7 @@ def cmd_alert(chat_id: str, args: list):
 
     elif sub == "add":
         if len(args) < 4:
-            send(chat_id, "사용법: /alert add TICKER 가격 buy|sell [메모]\n예: /alert add CPNG 14.00 sell 손절")
+            send(chat_id, "사용법: /alert add TICKER 가격 buy|sell [메모]\n예: /alert add NVDA 150.00 sell 손절")
             return
         ticker = args[1].upper()
         try:

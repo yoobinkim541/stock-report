@@ -203,6 +203,21 @@ def run_tests() -> list[str]:
         ("_cache_lock 존재", lambda r: r is True),
     )
 
+    # ── 포트폴리오 일관성: 은퇴 티커 죽은 텍스트 감사 ─────────────────
+    import portfolio_universe as _pu
+
+    def _dead_ticker_audit():
+        mentions = _pu.find_dead_ticker_mentions()
+        if mentions:
+            raise AssertionError(
+                f"은퇴 티커 잔존 참조 {len(mentions)}건:\n" + "\n".join(mentions[:10]))
+        return True
+
+    failures += _check("은퇴 티커 감사",
+        _dead_ticker_audit,
+        ("소스·설정에 은퇴 티커 언급 없음", lambda r: r is True),
+    )
+
     return failures
 
 

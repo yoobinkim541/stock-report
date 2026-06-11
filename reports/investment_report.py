@@ -59,53 +59,18 @@ def load_cached_source_digest() -> str:
         return ""
     return build_digest(events)
 
-# ── 포트폴리오 종목 ─────────────────────────────────────────────────────
-DEFAULT_PORTFOLIO_TICKERS = ["MSFT", "QQQI", "ORCL", "SAP", "UNH",
-                             "SGOV", "NVDA", "GOOGL", "SPMO"]
-# portfolio_snapshot.json은 프로젝트 루트에 있다 (이 파일은 reports/ 하위)
+# ── 포트폴리오 종목 — 단일 소스: portfolio_universe.py ──────────────────
 _PROJECT_DIR = os.getenv("STOCK_REPORT_PROJECT_DIR",
                          os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-PORTFOLIO_SNAPSHOT_PATH = os.path.join(_PROJECT_DIR, "portfolio_snapshot.json")
-
-
-def load_portfolio_tickers(path=PORTFOLIO_SNAPSHOT_PATH):
-    try:
-        with open(path, encoding="utf-8") as f:
-            snap = json.load(f)
-    except Exception as exc:
-        print(f"[WARN] {path} 로드 실패 ({exc}) — 기본 종목 목록으로 폴백", file=sys.stderr)
-        return list(DEFAULT_PORTFOLIO_TICKERS)
-
-    tickers = []
-    for section in ("overseas_general", "overseas_fractional"):
-        for h in snap.get(section, {}).get("holdings_usd", []):
-            ticker = h.get("ticker")
-            shares = float(h.get("shares") or 0)
-            value = float(h.get("value_usd") or 0)
-            if ticker and (shares > 0 or value > 0) and ticker not in tickers:
-                tickers.append(ticker)
-    if not tickers:
-        print(f"[WARN] {path} 에 보유 종목 없음 — 기본 종목 목록으로 폴백", file=sys.stderr)
-        return list(DEFAULT_PORTFOLIO_TICKERS)
-    return tickers
-
+if _PROJECT_DIR not in sys.path:
+    sys.path.insert(0, _PROJECT_DIR)
+from portfolio_universe import (DEFAULT_PORTFOLIO_TICKERS, PORTFOLIO_SNAPSHOT_PATH,
+                                load_portfolio_tickers)
 
 PORTFOLIO_TICKERS = load_portfolio_tickers()
 
-# ── 수동 점수 오버라이드 (yfinance 데이터 불완전한 종목) ─────────────────────────
-MANUAL_SCORES = {
-    "CPNG": {
-        "ticker": "CPNG",
-        "total_score": 52,
-        "grade": "C",
-        "sections": {},
-        "notes": [
-            "수동 입력 점수 — yfinance 한국 상장사 데이터 불완전",
-            "쿠팡: 한국 이커머스 1위, 2023년 흑자전환 달성",
-            "매출 성장 지속 중, 영업 레버리지 개선 추세",
-        ],
-    },
-}
+# ── 수동 점수 오버라이드 (yfinance 데이터 불완전한 종목용 — 현재 없음) ──────────
+MANUAL_SCORES = {}
 
 # ── NASDAQ 100 종목 (정적 리스트) ───────────────────────────────────────
 NASDAQ_100 = [
@@ -769,11 +734,8 @@ def _news_title_relevant(ticker, title):
         "TSLA": ("tesla",),
         "AAPL": ("apple",),
         "ORCL": ("oracle",),
-        "CRM": ("salesforce",),
-        "NOW": ("servicenow", "service now"),
         "SAP": ("sap",),
         "UNH": ("unitedhealth", "united health"),
-        "CPNG": ("coupang", "쿠팡"),
         "005930": ("삼성전자", "samsung electronics"),
         "000660": ("sk하이닉스", "하이닉스", "sk hynix"),
     }

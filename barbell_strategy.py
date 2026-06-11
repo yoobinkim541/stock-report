@@ -149,7 +149,6 @@ BEAR_PHASES = {
             "SGOV 30% 매도 → QLD 매수",
             "소수점 DCA 2배 (4만 → 8만원)",
             "NVDA, ORCL, MSFT 비중 집중",
-            "CPNG 손절 후 재원을 QLD에 추가",
             "QQQI 배당금 전액 QLD 재투자",
         ],
     },
@@ -200,14 +199,14 @@ BEAR_PHASES = {
             "TQQQ 전면 배치 — 승부수",
             "QQQI 원금 20~30% → TQQQ 전환",
             "소수점 DCA 5배 (4만 → 20만원)",
-            "NOW, ORCL, NVDA, MSFT 최대 적립",
+            "ORCL, NVDA, MSFT 최대 적립",
             "예비 현금(적금 포함) 단계적 투입",
         ],
     },
 }
 
 # ── DCA 종목 배분 기본값 ─────────────────────────────────────────────────
-# NOW/CRM/CPNG는 정리 완료 — DCA 제외
+# 전량 청산 종목은 DCA 제외 (은퇴 티커 목록: portfolio_universe.py)
 _DCA_WEIGHTS_DEFAULT = {
     "ORCL": 0.24, "NVDA": 0.20, "MSFT": 0.18,
     "GOOGL": 0.14, "UNH": 0.12, "SAP": 0.06, "SPMO": 0.06,
@@ -2002,7 +2001,7 @@ def send_phase5_emergency(
         f"   {_dw_pad('20% 기준:', 15)} ${qqqi_20pct_usd:,.0f}  (₩{qqqi_20pct_krw:,})\n"
         f"   {_dw_pad('30% 기준:', 15)} ${qqqi_30pct_usd:,.0f}  (₩{qqqi_30pct_krw:,})\n"
         f"3. DCA 5배 즉시 실행: {dca_krw:,}원/일  (${dca_usd:.1f})\n"
-        "4. MSFT/ORCL/NOW 핵심 성장주 비중 유지\n"
+        "4. MSFT/ORCL/NVDA 핵심 성장주 비중 유지\n"
         "5. 예비 현금(적금 포함) 단계적 투입 준비\n"
         "\n"
         "📱 /order 로 주문서 즉시 생성\n"

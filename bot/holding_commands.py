@@ -292,8 +292,8 @@ def cmd_holding(chat_id: str, args: list, send_fn):
     /holding target                       → 목표 비중 현황
     /holding target TICKER 비중% ...      → 목표 비중 설정/변경
     /holding dca                          → DCA 비중 현황
-    /holding dca NOW 18 ORCL 18 CRM 10   → DCA 비중 변경
-    /holding dca bear NOW 23 ...          → 하락장 DCA 비중 변경
+    /holding dca ORCL 24 NVDA 20 MSFT 18 → DCA 비중 변경
+    /holding dca bear ORCL 28 ...         → 하락장 DCA 비중 변경
     /holding refresh                      → 전 종목 현재가 갱신
     /holding dividend [금액 TICKER [메모]] → QQQI 배당 조회/기록
     /holding apply                        → 파싱된 스냅샷 반영

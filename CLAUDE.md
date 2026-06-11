@@ -57,6 +57,7 @@ crons/news_spike_detector.py (크론 매 1분)
 | `barbell_strategy.py` | Phase 분류, DCA·SGOV·레버리지 계산, 리포트 | `~/.cache/barbell_state.json` |
 | `telegram_bot.py` | 봇 메인 루프, 명령어 라우터, fcntl 단일 인스턴스 | `~/.local/state/stock-report/barbell_bot.pid` |
 | `holding_manager.py` | 포트폴리오 CRUD + DCA/목표비중 파일 (atomic write) | `portfolio_snapshot.json`, `dca_weights.json`, `target_weights.json` |
+| `portfolio_universe.py` | 보유 티커 단일 소스 + 은퇴 티커 기록 + 죽은 텍스트 감사 | `~/.local/share/stock-report/retired_tickers.json` |
 | `tax_tracker.py` | 실현손익 기록·조회·세금 계산 | `~/.local/share/stock-report/tax_records.json` |
 | `portfolio_tracker.py` | 일일 히스토리 + 배당 기록 | `~/.local/share/stock-report/` |
 | `portfolio_sync_server.py` | 외부 잔고 수신 Flask 서버 (port 8765, Bearer 인증) | — |
@@ -242,6 +243,12 @@ crons/news_spike_detector.py (크론 매 1분)
 
 ## 포트폴리오
 MSFT, QQQI, ORCL, SAP, UNH, SGOV, NVDA, GOOGL, SPMO
+
+보유 티커는 `portfolio_universe.load_portfolio_tickers()` 가 `portfolio_snapshot.json` 에서 파생하는 것이 단일 소스다.
+- 리포트·뉴스 수집·ML 파이프라인에 보유 종목 목록을 **하드코딩 금지** — 반드시 위 함수 사용
+- 전량 청산 시 `holding_manager.sell_holding()` 이 은퇴 티커를 자동 기록
+- `tests/bot_smoke_test.py` (매일 09:00 KST)가 소스·런타임 설정에 남은 은퇴 티커 언급을 감사 → 발견 시 텔레그램 경보
+- 의도적 언급(시장 유니버스 등)은 해당 줄에 `ticker-ok` 주석으로 감사 제외
 
 ## 안전 규칙
 - `.env`, `portfolio_snapshot.json`, `leverage_state.json`, `price_alerts.json` 절대 커밋 금지
