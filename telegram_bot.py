@@ -1011,7 +1011,8 @@ def notify_triggered_alerts():
         _record_signal_outcome(a)
 
 
-SIGNAL_OUTCOMES_FILE = os.path.expanduser("~/.local/share/stock-report/signal_outcomes.json")
+SIGNAL_OUTCOMES_FILE = os.path.expanduser("~/.local/share/stock-report/signal_outcomes.json")  # 레거시 (마이그레이션 원본)
+_SIGNAL_OUTCOMES_COLLECTION = "signal_outcomes"
 
 
 def _record_signal_outcome(alert: dict) -> None:
@@ -1040,17 +1041,10 @@ def _record_signal_outcome(alert: dict) -> None:
             "registered_at": alert.get("created_at"),
             "triggered_at":  alert.get("triggered_at"),
         }
-        os.makedirs(os.path.dirname(SIGNAL_OUTCOMES_FILE), exist_ok=True)
-        records = []
-        if os.path.exists(SIGNAL_OUTCOMES_FILE):
-            try:
-                with open(SIGNAL_OUTCOMES_FILE, encoding="utf-8") as f:
-                    records = json.load(f)
-            except Exception:
-                records = []
-        records.append(outcome)
-        with open(SIGNAL_OUTCOMES_FILE, "w", encoding="utf-8") as f:
-            json.dump(records, f, indent=1, ensure_ascii=False)
+        import store
+        store.ensure_migrated(_SIGNAL_OUTCOMES_COLLECTION, SIGNAL_OUTCOMES_FILE)
+        store.append(_SIGNAL_OUTCOMES_COLLECTION, outcome)
+        records = store.all(_SIGNAL_OUTCOMES_COLLECTION)
 
         # 짝 알림(목표가↔손절가) 제거 — 청산 완료된 포지션의 잔여 알림 정리
         for sib in load_alerts():

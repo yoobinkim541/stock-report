@@ -5,11 +5,15 @@
 import logging
 import os
 import subprocess
+import sys
 from pathlib import Path
 
 logger = logging.getLogger(__name__)
 
 PROJECT_DIR = Path(__file__).resolve().parent.parent  # bot/ → 프로젝트 루트
+if str(PROJECT_DIR) not in sys.path:
+    sys.path.insert(0, str(PROJECT_DIR))
+
 ADVISOR_MODEL = os.environ.get("STOCK_ADVISOR_MODEL", "gpt-5.5")
 EDITABLE_FILES = [
     "portfolio_snapshot.json",
@@ -18,6 +22,34 @@ EDITABLE_FILES = [
     "dca_weights.json",
     "leverage_state.json",
 ]
+
+# store 백킹된 편집 대상 파일 → (종류, store 키).
+# advisor(외부 subprocess)는 파일을 직접 편집하므로, 실행 후 store로 재동기화한다.
+# (store.save_*가 파일을 write-through 미러하므로 실행 전 파일은 항상 최신.)
+_STORE_BACKED = {
+    "price_alerts.json":   ("collection", "price_alerts"),
+    "target_weights.json": ("doc",        "target_weights"),
+    "dca_weights.json":    ("doc",        "dca_weights"),
+    "leverage_state.json": ("doc",        "leverage_state"),
+    # portfolio_snapshot.json 은 Phase 2 round 2 — 아직 파일 권위 (재동기화 제외)
+}
+
+
+def _sync_editable_to_store() -> None:
+    """advisor가 파일로 편집한 내용을 store(권위)로 재동기화."""
+    try:
+        import store
+    except Exception:
+        return
+    for fname, (kind, key) in _STORE_BACKED.items():
+        path = PROJECT_DIR / fname
+        try:
+            if kind == "collection":
+                store.reimport_collection(key, path)
+            else:
+                store.reimport_doc(key, path)
+        except Exception as e:
+            logger.warning("advisor store 재동기화 실패 (%s): %s", fname, e)
 
 
 def _fmt(value, default="N/A"):
@@ -249,6 +281,9 @@ def ask_portfolio_advisor(question: str, market: dict, runner=subprocess.run) ->
         result = runner(cmd, capture_output=True, text=True, timeout=120, cwd=PROJECT_DIR)
     except Exception:
         return _local_fallback(question, market)
+    finally:
+        # advisor가 파일 도구로 설정 파일을 편집했을 수 있음 → store 권위로 재동기화
+        _sync_editable_to_store()
 
     if getattr(result, "returncode", 1) != 0:
         return _local_fallback(question, market)

@@ -18,6 +18,13 @@ target_weights.json
 # ── 봇 런타임 상태 ───────────────────────
 telegram_bot_state.json
 
+# ── SQLite 통합 저장소 (개인 데이터 — 커밋 금지) ──
+stock_report.db
+stock_report.db-wal
+stock_report.db-shm
+*.sqlite
+*.sqlite3
+
 # ── Python ──────────────────────────────
 __pycache__/
 *.pyc

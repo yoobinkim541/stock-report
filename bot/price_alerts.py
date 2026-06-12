@@ -4,33 +4,31 @@
 price_alerts.py — 가격 알림 관리 모듈
 """
 
-import json
 import os
+import sys
 import uuid
 from datetime import datetime
 
 import yfinance as yf
 
-# bot/ → 프로젝트 루트 (실제 price_alerts.json 위치)
-ALERTS_FILE = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "price_alerts.json")
+# bot/ → 프로젝트 루트 (store import + 레거시 price_alerts.json 미러 위치)
+_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+if _ROOT not in sys.path:
+    sys.path.insert(0, _ROOT)
+import store
+
+ALERTS_FILE = os.path.join(_ROOT, "price_alerts.json")  # 레거시 미러 (advisor 편집 대상)
+_COLLECTION = "price_alerts"
 
 
 def load_alerts() -> list:
-    if not os.path.exists(ALERTS_FILE):
-        return []
-    try:
-        with open(ALERTS_FILE, encoding="utf-8") as f:
-            return json.load(f)
-    except Exception:
-        return []
+    # store 권위 (레거시 JSON 자동 마이그레이션)
+    return store.load_collection(_COLLECTION, ALERTS_FILE)
 
 
 def save_alerts(alerts: list):
-    # atomic write — 쓰기 도중 크래시 시 원본 보호 (프로젝트 규칙)
-    tmp = ALERTS_FILE + ".tmp"
-    with open(tmp, "w", encoding="utf-8") as f:
-        json.dump(alerts, f, ensure_ascii=False, indent=2)
-    os.replace(tmp, ALERTS_FILE)
+    # store 권위 + 레거시 파일 미러 (advisor 워크플로 유지)
+    store.save_collection(_COLLECTION, alerts, ALERTS_FILE)
 
 
 def add_alert(ticker: str, price: float, alert_type: str, note: str = "",

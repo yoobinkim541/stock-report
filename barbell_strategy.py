@@ -44,6 +44,8 @@ except ImportError:
 logger = logging.getLogger(__name__)
 logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
 
+import store  # SQLite 통합 저장소 (설정 블롭 권위 사본 + 파일 미러)
+
 TELEGRAM_TOKEN   = os.getenv("STOCK_BOT_TOKEN")
 TELEGRAM_CHAT_ID = os.getenv("STOCK_BOT_CHAT_ID", "5771238245")
 PORTFOLIO_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "portfolio_snapshot.json")
@@ -224,10 +226,9 @@ def load_dca_weights() -> tuple[dict, dict]:
     파일 없으면 기본값 반환.
     Returns: (normal_weights, bear_weights)
     """
-    if os.path.exists(DCA_WEIGHTS_FILE):
+    data = store.load_doc("dca_weights", DCA_WEIGHTS_FILE, None)
+    if data:
         try:
-            with open(DCA_WEIGHTS_FILE, encoding="utf-8") as f:
-                data = json.load(f)
             normal = data.get("normal", _DCA_WEIGHTS_DEFAULT)
             bear   = data.get("bear",   _BEAR_DCA_WEIGHTS_DEFAULT)
             # 합계 1.0 정규화
@@ -242,9 +243,8 @@ def load_dca_weights() -> tuple[dict, dict]:
 
 
 def save_dca_weights(normal: dict, bear: dict):
-    """DCA 비중 저장."""
-    with open(DCA_WEIGHTS_FILE, "w", encoding="utf-8") as f:
-        json.dump({"normal": normal, "bear": bear}, f, indent=2, ensure_ascii=False)
+    """DCA 비중 저장 (store 권위 + 파일 미러)."""
+    store.save_doc("dca_weights", {"normal": normal, "bear": bear}, DCA_WEIGHTS_FILE)
 
 
 # 런타임에 dca_weights.json 로드
@@ -267,16 +267,12 @@ def load_target_weights(portfolio: dict | None = None) -> dict:
     현재 보유 종목 중 설정 없는 종목은 DCA 비중 기반으로 자동 추론.
     portfolio: fetch_portfolio_value() 반환값 (holdings, prices 포함)
     """
-    # 1. 파일에서 명시적 목표 로드
+    # 1. store(권위)에서 명시적 목표 로드 (레거시 파일 자동 마이그레이션)
     explicit: dict = {}
-    if os.path.exists(TARGET_WEIGHTS_FILE):
-        try:
-            with open(TARGET_WEIGHTS_FILE, encoding="utf-8") as f:
-                raw = json.load(f)
-            explicit = {k: float(v) for k, v in raw.items()
-                        if not k.startswith("_") and isinstance(v, (int, float))}
-        except Exception:
-            pass
+    raw = store.load_doc("target_weights", TARGET_WEIGHTS_FILE, {})
+    if isinstance(raw, dict):
+        explicit = {k: float(v) for k, v in raw.items()
+                    if not k.startswith("_") and isinstance(v, (int, float))}
 
     if portfolio is None:
         return explicit
@@ -304,18 +300,11 @@ def load_target_weights(portfolio: dict | None = None) -> dict:
 
 
 def save_target_weights(updates: dict):
-    """목표 비중 파일 저장 (기존 값 유지 + 업데이트)."""
-    existing: dict = {}
-    if os.path.exists(TARGET_WEIGHTS_FILE):
-        try:
-            with open(TARGET_WEIGHTS_FILE, encoding="utf-8") as f:
-                raw = json.load(f)
-            existing = {k: v for k, v in raw.items()}  # _comment 등 보존
-        except Exception:
-            pass
+    """목표 비중 저장 (기존 값 유지 + 업데이트, store 권위 + 파일 미러)."""
+    raw = store.load_doc("target_weights", TARGET_WEIGHTS_FILE, {})
+    existing: dict = dict(raw) if isinstance(raw, dict) else {}  # _comment 등 보존
     existing.update(updates)
-    with open(TARGET_WEIGHTS_FILE, "w", encoding="utf-8") as f:
-        json.dump(existing, f, indent=2, ensure_ascii=False)
+    store.save_doc("target_weights", existing, TARGET_WEIGHTS_FILE)
 
 
 # ══════════════════════════════════════════════════════════════════════
@@ -755,23 +744,18 @@ def load_leverage_state() -> dict:
         "QLD": {"shares": 0.0, "avg_price_usd": 0.0, "updated": ""},
         "TQQQ": {"shares": 0.0, "avg_price_usd": 0.0, "updated": ""},
     }
-    if not os.path.exists(LEVERAGE_FILE):
+    data = store.load_doc("leverage_state", LEVERAGE_FILE, None)
+    if not isinstance(data, dict):
         return default
-    try:
-        with open(LEVERAGE_FILE) as f:
-            data = json.load(f)
-        for k, v in default.items():
-            if k not in data:
-                data[k] = v
-        return data
-    except Exception:
-        return default
+    for k, v in default.items():
+        if k not in data:
+            data[k] = v
+    return data
 
 
 def save_leverage_state(state: dict):
-    """QLD/TQQQ 보유 현황 저장."""
-    with open(LEVERAGE_FILE, "w", encoding="utf-8") as f:
-        json.dump(state, f, indent=2, ensure_ascii=False)
+    """QLD/TQQQ 보유 현황 저장 (store 권위 + 파일 미러)."""
+    store.save_doc("leverage_state", state, LEVERAGE_FILE)
 
 
 def update_leverage_position(ticker: str, shares: float, avg_price: float):

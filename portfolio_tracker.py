@@ -36,35 +36,27 @@ from barbell_strategy import (
 logger = logging.getLogger(__name__)
 logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
 
-# ── 파일 경로 ─────────────────────────────────────────────────────────
+# ── 파일 경로 (레거시 — store 마이그레이션 원본) ──────────────────────
 DATA_DIR      = Path.home() / ".local" / "share" / "stock-report"
 HISTORY_FILE  = DATA_DIR / "portfolio_history.json"
 DIVIDEND_FILE = DATA_DIR / "qqqi_dividends.json"
 
+import store
 
-def _ensure_dir():
-    DATA_DIR.mkdir(parents=True, exist_ok=True)
+_HISTORY_COLLECTION  = "portfolio_history"
+_DIVIDEND_COLLECTION = "qqqi_dividends"
 
 
 # ══════════════════════════════════════════════════════════════════════
-#  히스토리 저장/로드
+#  히스토리 저장/로드  (SQLite store 컬렉션)
 # ══════════════════════════════════════════════════════════════════════
 
 def load_history() -> list:
-    _ensure_dir()
-    if not HISTORY_FILE.exists():
-        return []
-    try:
-        return json.loads(HISTORY_FILE.read_text(encoding="utf-8"))
-    except Exception:
-        return []
+    return store.load_collection(_HISTORY_COLLECTION, HISTORY_FILE)
 
 
 def save_history(records: list):
-    _ensure_dir()
-    HISTORY_FILE.write_text(
-        json.dumps(records, indent=2, ensure_ascii=False), encoding="utf-8"
-    )
+    store.replace_all(_HISTORY_COLLECTION, records)
 
 
 def record_daily(dry_run: bool = False) -> dict:
@@ -170,20 +162,11 @@ def calc_performance(records: list) -> dict:
 # ══════════════════════════════════════════════════════════════════════
 
 def load_dividends() -> list:
-    _ensure_dir()
-    if not DIVIDEND_FILE.exists():
-        return []
-    try:
-        return json.loads(DIVIDEND_FILE.read_text(encoding="utf-8"))
-    except Exception:
-        return []
+    return store.load_collection(_DIVIDEND_COLLECTION, DIVIDEND_FILE)
 
 
 def save_dividends(records: list):
-    _ensure_dir()
-    DIVIDEND_FILE.write_text(
-        json.dumps(records, indent=2, ensure_ascii=False), encoding="utf-8"
-    )
+    store.replace_all(_DIVIDEND_COLLECTION, records)
 
 
 def record_dividend(amount_usd: float, reinvested_in: str, note: str = "") -> dict:
