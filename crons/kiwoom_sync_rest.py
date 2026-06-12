@@ -29,6 +29,18 @@ logger = logging.getLogger(__name__)
 PROJECT_DIR    = os.getenv("STOCK_REPORT_PROJECT_DIR", os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 PORTFOLIO_PATH = os.path.join(PROJECT_DIR, "portfolio_snapshot.json")
 
+
+def _shadow_to_store(snap: dict):
+    """portfolio_snapshot 을 store 로 best-effort 그림자 동기화 (라이브 키움 동기화 비차단)."""
+    try:
+        import sys
+        if PROJECT_DIR not in sys.path:
+            sys.path.insert(0, PROJECT_DIR)
+        import store
+        store.shadow_doc("portfolio_snapshot", snap)
+    except Exception as e:
+        logger.warning("store 그림자 동기화 실패: %s", e)
+
 # 텔레그램 알림
 _BOT_TOKEN = os.getenv("STOCK_BOT_TOKEN")
 _CHAT_ID   = os.getenv("STOCK_BOT_CHAT_ID", "5771238245")
@@ -136,6 +148,7 @@ def update_portfolio(holdings: list[dict]) -> str:
     with open(PORTFOLIO_PATH, "w", encoding="utf-8") as f:
         json.dump(snap, f, ensure_ascii=False, indent=2)
 
+    _shadow_to_store(snap)
     lines = [f"  {h['ticker']} {h['name']} {h['shares']}주  {h['return_pct']:+.1f}%" for h in holdings]
     return "\n".join(lines)
 
@@ -151,6 +164,7 @@ def _touch_sync_timestamp():
     with open(tmp, "w", encoding="utf-8") as f:
         json.dump(snap, f, ensure_ascii=False, indent=2)
     os.replace(tmp, PORTFOLIO_PATH)
+    _shadow_to_store(snap)
 
 
 def main():

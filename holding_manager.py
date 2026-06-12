@@ -12,6 +12,8 @@ import os
 import tempfile
 from datetime import datetime
 
+import store  # SQLite 통합 저장소 (portfolio_snapshot 그림자 동기화 — round 3)
+
 PORTFOLIO_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "portfolio_snapshot.json")
 
 # ── ETF / 레버리지 티커 (목표 비중 분석 제외) ────────────────────────
@@ -44,6 +46,8 @@ def _save(snap: dict):
     except Exception:
         os.unlink(tmp)
         raise
+    # store 그림자 사본 (user_id 스코프 — 멀티유저 기반). 파일이 권위.
+    store.shadow_doc("portfolio_snapshot", snap)
 
 
 def _find_holding(snap: dict, ticker: str) -> tuple[str, int, dict | None]:

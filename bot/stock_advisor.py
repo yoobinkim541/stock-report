@@ -27,11 +27,11 @@ EDITABLE_FILES = [
 # advisor(외부 subprocess)는 파일을 직접 편집하므로, 실행 후 store로 재동기화한다.
 # (store.save_*가 파일을 write-through 미러하므로 실행 전 파일은 항상 최신.)
 _STORE_BACKED = {
-    "price_alerts.json":   ("collection", "price_alerts"),
-    "target_weights.json": ("doc",        "target_weights"),
-    "dca_weights.json":    ("doc",        "dca_weights"),
-    "leverage_state.json": ("doc",        "leverage_state"),
-    # portfolio_snapshot.json 은 Phase 2 round 2 — 아직 파일 권위 (재동기화 제외)
+    "price_alerts.json":      ("collection", "price_alerts"),
+    "target_weights.json":    ("doc",        "target_weights"),
+    "dca_weights.json":       ("doc",        "dca_weights"),
+    "leverage_state.json":    ("doc",        "leverage_state"),
+    "portfolio_snapshot.json": ("doc",       "portfolio_snapshot"),  # round 3 (파일 권위 + store 그림자)
 }
 
 
