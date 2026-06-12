@@ -201,9 +201,12 @@ crons/news_spike_detector.py (크론 매 1분)
 ~/.cache/barbell_state.lock             — Phase 상태 쓰기 잠금
 ~/.cache/barbell_anchor.json            — 낙폭 고점 앵커 (Phase 드리프트 방지)
 ~/.local/state/stock-report/barbell_bot.pid  — 봇 PID (단일 인스턴스 잠금)
-~/.local/share/stock-report/            — 런타임 데이터 (tax, history, dividend, pending)
+~/.local/share/stock-report/stock_report.db      — SQLite 통합 저장소 (user_id 스코프, WAL)
+                                                   └ 컬렉션: tax_records · portfolio_history
+                                                     · qqqi_dividends · signal_outcomes
+                                                   (레거시 JSON 자동 마이그레이션 — store.py)
+~/.local/share/stock-report/            — 런타임 데이터 (pending, paper_track + 레거시 JSON 원본)
 ~/.local/share/stock-report/paper_track.json     — A/B 페이퍼 트레이딩 기록 (meta vs rule)
-~/.local/share/stock-report/signal_outcomes.json — 자동 알림 발동 신호 성과 (R-multiple)
 ~/reports/ml-cache/leverage_best_params.json     — Optuna 최적 파라미터 (UPRO·vol targeting)
 ~/reports/ml-cache/entry_score_params.json       — 진입점수 가중치 (캘리브레이션 채택 시 생성)
 ~/reports/ml-cache/fundamental_scores.json       — 펀더멘털 점수 7일 캐시 (랭커 틸트용)
@@ -221,3 +224,5 @@ MSFT, QQQI, ORCL, SAP, UNH, SGOV, NVDA, GOOGL, SPMO
 - `STOCK_BOT_CHAT_ID` 는 env var — 코드에 하드코딩 금지
 - `KIWOOM_API_KEY` / `KIWOOM_API_SECRET` 절대 커밋 금지
 - `holding_manager._save()` 는 atomic write (temp→rename) — 직접 `json.dump` 호출 금지
+- 기록로그(tax/history/dividend/signal_outcomes)는 `store.py` 경유 — 직접 파일 R/W 금지
+  (DB 경로 override: `STOCK_REPORT_DB` env var, 기본 `~/.local/share/stock-report/stock_report.db`)

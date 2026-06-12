@@ -2,37 +2,27 @@
 # -*- coding: utf-8 -*-
 """
 tax_tracker.py — 실현손익 기록 / 조회 / 세금 추산
-데이터: ~/.local/share/stock-report/tax_records.json
+저장소: SQLite store 컬렉션 "tax_records" (레거시 JSON 자동 마이그레이션)
 """
-import json
 import os
 from datetime import datetime
 
+import store
+
 DATA_DIR = os.path.expanduser("~/.local/share/stock-report")
-TAX_FILE = os.path.join(DATA_DIR, "tax_records.json")
+TAX_FILE = os.path.join(DATA_DIR, "tax_records.json")  # 레거시 (마이그레이션 원본)
+_COLLECTION = "tax_records"
 
 EXEMPTION_KRW = 2_500_000  # 연간 기본공제 250만원
 TAX_RATE = 0.22            # 22% (소득세 20% + 지방세 2.2%)
 
 
-def _ensure_dir():
-    os.makedirs(DATA_DIR, exist_ok=True)
-
-
 def _load() -> list[dict]:
-    try:
-        with open(TAX_FILE, encoding="utf-8") as f:
-            return json.load(f)
-    except FileNotFoundError:
-        return []
-    except Exception:
-        return []
+    return store.load_collection(_COLLECTION, TAX_FILE)
 
 
 def _save(records: list[dict]):
-    _ensure_dir()
-    with open(TAX_FILE, "w", encoding="utf-8") as f:
-        json.dump(records, f, indent=2, ensure_ascii=False)
+    store.replace_all(_COLLECTION, records)
 
 
 def add_sell(ticker: str, qty: float, buy_price_usd: float,
