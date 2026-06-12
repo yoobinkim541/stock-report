@@ -52,8 +52,7 @@ _AUDIT_EXCLUDE = (
 )
 
 # 보유 티커에서 파생되는 런타임 설정 파일 (은퇴 티커가 남으면 감사가 보고)
-_RUNTIME_CONFIG_FILES = ("dca_weights.json", "target_weights.json",
-                         "price_alerts.json")
+_RUNTIME_CONFIG_FILES = ("dca_weights.json", "target_weights.json")
 
 
 def load_portfolio_tickers(path=PORTFOLIO_SNAPSHOT_PATH) -> list[str]:
@@ -179,6 +178,24 @@ def find_dead_ticker_mentions(project_dir: str = PROJECT_DIR,
         for t, pat in patterns.items():
             if pat.search(text):
                 findings.append(f"{name} {t} — 런타임 설정에 은퇴 티커 잔존")
+
+    # price_alerts.json: 수동 알림만 검사 — ML 진입신호의 자동 목표가/손절가는
+    # 시장 유니버스 종목 대상이므로 보유 여부와 무관 (오탐 방지)
+    alerts_path = os.path.join(project_dir, "price_alerts.json")
+    try:
+        with open(alerts_path, encoding="utf-8") as f:
+            alerts = json.load(f)
+    except Exception:
+        alerts = []
+    for a in alerts if isinstance(alerts, list) else []:
+        ticker = str(a.get("ticker", "")).upper()
+        if ticker not in retired:
+            continue
+        is_auto = ((a.get("meta") or {}).get("kind") == "auto_trade_level"
+                   or "자동" in (a.get("note") or ""))
+        if not is_auto:
+            findings.append(
+                f"price_alerts.json {ticker} — 수동 알림에 은퇴 티커 잔존 (id={a.get('id')})")
 
     return findings
 

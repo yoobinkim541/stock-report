@@ -64,3 +64,19 @@ def test_audit_detects_planted_mention(tmp_path):
         'ALSO = "CPNG"  # ticker-ok 의도적 언급\n', encoding="utf-8")
     mentions = pu.find_dead_ticker_mentions(str(src_dir), retired={"CPNG"})
     assert len(mentions) == 1 and "foo.py:1" in mentions[0]
+
+
+def test_audit_skips_auto_trade_level_alerts(tmp_path):
+    """ML 진입신호의 자동 알림은 시장 유니버스 대상 — 은퇴 티커여도 오탐 금지."""
+    src_dir = tmp_path / "proj"
+    src_dir.mkdir()
+    alerts = [
+        {"id": "a1", "ticker": "NOW", "price": 114.15, "type": "sell",
+         "note": "자동 목표가 (진입점수 0.81)", "meta": {"kind": "auto_trade_level"}},
+        {"id": "a2", "ticker": "NOW", "price": 90.0, "type": "buy"},  # 수동 잔존
+    ]
+    (src_dir / "price_alerts.json").write_text(
+        json.dumps(alerts), encoding="utf-8")
+    mentions = pu.find_dead_ticker_mentions(str(src_dir), retired={"NOW"})
+    assert len(mentions) == 1
+    assert "수동 알림" in mentions[0] and "id=a2" in mentions[0]
