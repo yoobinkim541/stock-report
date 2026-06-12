@@ -136,11 +136,20 @@ def build_indicators(ticker: str) -> str:
 
 
 def guest_help() -> str:
-    return (
-        "🤖 읽기전용 계정 — 사용 가능 명령어\n"
-        "━━━━━━━━━━━━━━━━━━━\n"
-        "/market             시황 브리핑 (국면·낙폭·RSI·VIX·F&G)\n"
-        "/indicators TICKER  종목 기술적 지표 (RSI·이동평균·모멘텀)\n"
-        "/help               이 도움말"
-        + DISCLAIMER
-    )
+    lines = [
+        "🤖 읽기전용 계정 — 사용 가능 명령어",
+        "━━━━━━━━━━━━━━━━━━━",
+        "[시황·지표]",
+        "/market             시황 브리핑 (국면·낙폭·RSI·VIX·F&G)",
+        "/indicators TICKER  종목 기술적 지표 (RSI·이동평균·모멘텀)",
+        "",
+        "[내 포트폴리오]",
+    ]
+    try:
+        from bot.guest_portfolio import guest_portfolio_help
+        lines.append(guest_portfolio_help())
+    except Exception:
+        pass
+    lines.append("")
+    lines.append("/help               이 도움말")
+    return "\n".join(lines) + DISCLAIMER

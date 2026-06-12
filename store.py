@@ -359,6 +359,29 @@ def reimport_collection(name: str, legacy_path, *, user: str = DEFAULT_USER) -> 
     return True
 
 
+def health() -> dict:
+    """DB 연결·무결성 점검 (운영 헬스체크용).
+
+    Returns: {ok, collections, documents, users, path}. DB 접근 불가 시 예외.
+    """
+    with _connect() as conn:
+        row = conn.execute("PRAGMA quick_check").fetchone()
+        ok = bool(row) and row[0] == "ok"
+        n_coll = conn.execute("SELECT COUNT(*) FROM collections").fetchone()[0]
+        n_docs = conn.execute("SELECT COUNT(*) FROM documents").fetchone()[0]
+        users = conn.execute(
+            "SELECT COUNT(DISTINCT user_id) FROM ("
+            "  SELECT user_id FROM collections UNION SELECT user_id FROM documents)"
+        ).fetchone()[0]
+    return {
+        "ok": ok,
+        "collections": int(n_coll),
+        "documents": int(n_docs),
+        "users": int(users),
+        "path": str(db_path()),
+    }
+
+
 def shadow_doc(key: str, data, *, user: str = DEFAULT_USER) -> bool:
     """파일이 권위인 문서를 store로 best-effort 그림자 동기화 (store 권위 X).
 

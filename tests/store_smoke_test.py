@@ -196,6 +196,33 @@ def main() -> int:
         check("snapshot_date" in shadow, "_save snapshot_date 부여 후 그림자 반영")
         check(Path(hm.PORTFOLIO_PATH).exists(), "portfolio_snapshot 파일(권위) 유지")
 
+    # ── 10. store.health() (운영 헬스체크) ────────────────────────────
+    h = store.health()
+    check(h.get("ok") is True, "store.health ok")
+    check("path" in h and "users" in h, "store.health 필드 (path·users)")
+
+    # ── 11. 게스트 본인 포트폴리오 (user_id 격리) ─────────────────────
+    try:
+        from bot import guest_portfolio as gp
+        importlib.reload(gp)
+    except Exception as e:
+        print(f"⏭️  guest_portfolio skip ({type(e).__name__})")
+    else:
+        gp.add_holding("guestA", "QQQ", 10, 500.0)
+        gp.add_holding("guestA", "QQQ", 10, 520.0)   # 가중평단 → 510
+        ha = gp.list_holdings("guestA")
+        check(ha.get("QQQ", {}).get("shares") == 20 and
+              abs(ha["QQQ"]["avg_price"] - 510.0) < 1e-6,
+              "guest_portfolio 가중평단 누적")
+        gp.add_holding("guestB", "NVDA", 5, 100.0)
+        check("QQQ" not in gp.list_holdings("guestB"),
+              "guest_portfolio user_id 격리 (A↔B)")
+        check(gp.remove_holding("guestA", "QQQ") and gp.list_holdings("guestA") == {},
+              "guest_portfolio remove")
+        empty = gp.build_portfolio_report("guestZ")
+        check("등록된 보유 종목이 없습니다" in empty and "책임은 본인" in empty,
+              "guest_portfolio 빈 리포트 + 면책")
+
     # ── 결과 ──────────────────────────────────────────────────────────
     n_fail = sum(1 for ok, _ in _results if not ok)
     total = len(_results)

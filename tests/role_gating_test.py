@@ -43,9 +43,8 @@ def main() -> int:
     check(blocked_ok, f"게스트는 소유자 전용 {len(owner_only)}개 명령 전부 차단")
 
     # ── 게스트 허용 명령 ─────────────────────────────────────────────
-    check(t._command_allowed("guest", "/market"), "게스트 /market 허용")
-    check(t._command_allowed("guest", "/indicators"), "게스트 /indicators 허용")
-    check(t._command_allowed("guest", "/help"), "게스트 /help 허용")
+    for c in ["/market", "/indicators", "/help", "/myadd", "/myremove", "/myportfolio"]:
+        check(t._command_allowed("guest", c), f"게스트 {c} 허용")
 
     # ── 소유자는 전부 허용 ───────────────────────────────────────────
     check(all(t._command_allowed("owner", c) for c in owner_only + ["/market"]),
