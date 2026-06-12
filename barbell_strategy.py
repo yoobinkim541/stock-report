@@ -396,8 +396,8 @@ def _atomic_write_json(path: str, obj: dict):
 
 def _load_drawdown_anchor() -> float:
     try:
-        with open(ANCHOR_FILE) as f:
-            return _safe_float(json.load(f).get("anchor_high"))
+        data = store.load_doc("barbell_anchor", ANCHOR_FILE, {})
+        return _safe_float((data or {}).get("anchor_high"))
     except Exception:
         return 0.0
 
@@ -414,10 +414,10 @@ def _update_drawdown_anchor(high_52w: float, current: float) -> float:
     if anchor > 0 and current >= anchor * ANCHOR_RESET_RECOVERY:
         anchor = high_52w
     try:
-        _atomic_write_json(ANCHOR_FILE, {
+        store.save_doc("barbell_anchor", {
             "anchor_high": round(anchor, 2),
             "updated": datetime.now().isoformat(),
-        })
+        }, ANCHOR_FILE)
     except Exception:
         pass
     return anchor
@@ -775,26 +775,21 @@ def update_leverage_position(ticker: str, shares: float, avg_price: float):
 # ══════════════════════════════════════════════════════════════════════
 
 def load_phase_state() -> dict:
-    """이전 Phase 상태 로드."""
-    if not os.path.exists(STATE_FILE):
-        return {}
-    try:
-        with open(STATE_FILE) as f:
-            return json.load(f)
-    except Exception:
-        return {}
+    """이전 Phase 상태 로드 (store 권위, 레거시 파일 자동 마이그레이션)."""
+    data = store.load_doc("barbell_state", STATE_FILE, {})
+    return data if isinstance(data, dict) else {}
 
 
 def save_phase_state(market_type: str, phase_key, drawdown: float):
-    """현재 Phase 상태 저장 (다음 실행 비교용).
-    크론·봇이 동시에 쓸 수 있으므로 atomic write (temp→rename)."""
+    """현재 Phase 상태 저장 (store 권위 + 파일 미러 — healthcheck mtime 유지).
+    크론·봇이 동시에 쓸 수 있으므로 store 트랜잭션 + atomic 미러."""
     state = {
         "last_run": datetime.now().isoformat(),
         "market_type": market_type,
         "phase_key": str(phase_key),
         "drawdown_pct": round(drawdown, 2),
     }
-    _atomic_write_json(STATE_FILE, state)
+    store.save_doc("barbell_state", state, STATE_FILE)
 
 
 def has_phase_changed(old_state: dict, market_type: str, phase_key) -> bool:
