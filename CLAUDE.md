@@ -100,7 +100,7 @@ crons/news_spike_detector.py (크론 매 1분)
 |------|------|------|
 | `tests/bot_smoke_test.py` | 기능 검증 연기 테스트 25항목 (실패 시만 알림) | 평일 00:00 UTC |
 | `tests/ml_smoke_test.py` | ML 파이프라인 end-to-end 58항목 (네트워크 불필요) | 평일 크론 |
-| `tests/bot_healthcheck.py` | 봇·서버 상태 점검 (프로세스·PID·파일 신선도) | 매 30분 |
+| `tests/bot_healthcheck.py` | 봇·서버 상태 점검 (프로세스·PID·파일 신선도·store DB 무결성) | 매 30분 |
 
 **ml/ (ML 모델)**
 | 파일 | 역할 | 상태파일 |
@@ -159,8 +159,12 @@ crons/news_spike_detector.py (크론 매 1분)
 ── 읽기전용 게스트 (STOCK_BOT_GUEST_IDS) ─────────
 /market              시황 브리핑 — 국면·낙폭·RSI·VIX·F&G (사실형, 처방 없음)
 /indicators TICKER   종목 기술적 지표 — RSI·이동평균·모멘텀·52주 위치
+/myadd TICKER 주수 평단가   내 보유 종목 추가 (user_id 스코프 store)
+/myremove TICKER     내 보유 종목 삭제
+/myportfolio         내 포트폴리오 평가 — 평가액·손익·수익률 (본인 데이터, 처방 없음)
 /help                게스트 도움말
-※ 게스트는 위 3개만 허용 — 주문·신호·종목관리·세금·AI상담 전면 차단 (법적 안전)
+※ 게스트는 위 6개만 허용 — 주문·신호·종목관리·세금·AI상담 전면 차단 (법적 안전)
+※ 게스트 포트폴리오는 본인 chat_id 네임스페이스에 격리 (소유자 portfolio_snapshot과 분리)
 ```
 
 > `/dividend` → `/holding dividend` 통합, `/apply_snapshot` → `/holding apply` 통합  
@@ -171,11 +175,12 @@ crons/news_spike_detector.py (크론 매 1분)
 | 역할 | chat_id | 권한 |
 |------|---------|------|
 | owner | `STOCK_BOT_CHAT_ID` | 전체 (주문·신호·종목관리·세금·AI상담·첨부) |
-| guest | `STOCK_BOT_GUEST_IDS` (쉼표구분) | 읽기전용 — `/market` `/indicators` `/help` 만 (`_GUEST_COMMANDS`) |
+| guest | `STOCK_BOT_GUEST_IDS` (쉼표구분) | 읽기전용 — `/market` `/indicators` `/myadd` `/myremove` `/myportfolio` `/help` (`_GUEST_COMMANDS`) |
 | 차단 | 그 외 | "권한 없음" |
 
 - 보안 경계: `_command_allowed(role, cmd)` (순수 함수) — 게스트는 처방형/주문 명령 전면 차단.
-- 게스트 출력은 `bot/guest_report.py` — **사실형 데이터·지표만, 처방(매매신호·목표가·DCA·레버리지) 금지.** "서술 OK, 지시 금지" 원칙.
+- 게스트 출력은 `bot/guest_report.py`(시황·지표) + `bot/guest_portfolio.py`(본인 포트폴리오) — **사실형 데이터·지표·본인평가만, 처방(매매신호·목표가·DCA·레버리지) 금지.** "서술 OK, 지시 금지" 원칙.
+- 게스트 포트폴리오는 store 문서 `guest_holdings` 를 게스트 chat_id(user_id)에 저장 — 소유자 데이터와 격리.
 - 첨부·일반텍스트(스냅샷 파싱)는 포트폴리오 수정 → owner 전용.
 
 ## 환경변수

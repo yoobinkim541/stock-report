@@ -256,6 +256,20 @@ def check_barbell_state_age() -> tuple[str, str] | None:
     return None
 
 
+def check_store_db() -> tuple[str, str] | None:
+    """SQLite 통합 저장소(store) 접근·무결성 점검."""
+    try:
+        if PROJECT_DIR not in sys.path:
+            sys.path.insert(0, PROJECT_DIR)
+        import store
+        h = store.health()
+    except Exception as e:
+        return ("store_error", f"🚨 store DB 접근 실패: {e}")
+    if not h.get("ok"):
+        return ("store_corrupt", "🚨 store DB 무결성 점검 실패 (PRAGMA quick_check)")
+    return None
+
+
 # ── 메인 ───────────────────────────────────────────────────────────────
 
 def main():
@@ -269,6 +283,7 @@ def main():
         check_portfolio_age,
         check_investment_report_cron,
         check_barbell_state_age,
+        check_store_db,
     ]
 
     state   = _load_alert_state()
