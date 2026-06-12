@@ -176,6 +176,26 @@ def main() -> int:
         check(abs(a - 500.0) < 1e-6 and abs(bs._load_drawdown_anchor() - 500.0) < 1e-6,
               "barbell_anchor store 왕복")
 
+    # ── 9. portfolio_snapshot 그림자 동기화 (Phase 2 round 3) ─────────
+    check(store.shadow_doc("psnap_x", {"a": 1}) is True, "shadow_doc 반환값")
+    check(store.get_doc("psnap_x") == {"a": 1}, "shadow_doc 저장 확인")
+
+    try:
+        import holding_manager as hm
+        importlib.reload(hm)
+    except Exception as e:
+        print(f"⏭️  holding_manager skip ({type(e).__name__})")
+    else:
+        hm.PORTFOLIO_PATH = str(Path(tmp) / "portfolio_snapshot.json")  # 라이브 파일 보호
+        snap = {"overseas_general": {"holdings_usd": [{"ticker": "NVDA", "shares": 2}]}}
+        hm._save(snap)
+        shadow = store.get_doc("portfolio_snapshot")
+        check(shadow is not None and shadow.get("overseas_general", {})
+              .get("holdings_usd", [{}])[0].get("ticker") == "NVDA",
+              "holding_manager._save → store 그림자")
+        check("snapshot_date" in shadow, "_save snapshot_date 부여 후 그림자 반영")
+        check(Path(hm.PORTFOLIO_PATH).exists(), "portfolio_snapshot 파일(권위) 유지")
+
     # ── 결과 ──────────────────────────────────────────────────────────
     n_fail = sum(1 for ok, _ in _results if not ok)
     total = len(_results)

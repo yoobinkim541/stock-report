@@ -30,6 +30,18 @@ SYNC_PORT      = int(os.getenv("SYNC_PORT", "8765"))
 PROJECT_DIR    = os.getenv("STOCK_REPORT_PROJECT_DIR", os.path.dirname(os.path.abspath(__file__)))
 PORTFOLIO_PATH = os.path.join(PROJECT_DIR, "portfolio_snapshot.json")
 
+
+def _shadow_to_store(snap: dict):
+    """portfolio_snapshot 을 store 로 best-effort 그림자 동기화 (라이브 동기화 비차단)."""
+    try:
+        import sys
+        if PROJECT_DIR not in sys.path:
+            sys.path.insert(0, PROJECT_DIR)
+        import store
+        store.shadow_doc("portfolio_snapshot", snap)
+    except Exception as e:
+        logger.warning("store 그림자 동기화 실패: %s", e)
+
 # 텔레그램 알림 (선택)
 _TELEGRAM_TOKEN   = os.getenv("STOCK_BOT_TOKEN")
 _TELEGRAM_CHAT_ID = os.getenv("STOCK_BOT_CHAT_ID", "5771238245")
@@ -138,6 +150,7 @@ def _update_portfolio(data: dict) -> str:
     with open(PORTFOLIO_PATH, "w", encoding="utf-8") as f:
         json.dump(snap, f, ensure_ascii=False, indent=2)
 
+    _shadow_to_store(snap)
     return f"일반 {general_count}종목 · 소수점 {fractional_count}종목"
 
 

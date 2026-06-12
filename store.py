@@ -357,3 +357,17 @@ def reimport_collection(name: str, legacy_path, *, user: str = DEFAULT_USER) -> 
         return False
     replace_all(name, data, user=user)
     return True
+
+
+def shadow_doc(key: str, data, *, user: str = DEFAULT_USER) -> bool:
+    """파일이 권위인 문서를 store로 best-effort 그림자 동기화 (store 권위 X).
+
+    라이브 브로커 경로(portfolio_snapshot)처럼 파일을 직접 쓰는 writer가
+    store에도 user_id 스코프 사본을 남기기 위한 용도. store 오류가 절대
+    호출자(라이브 동기화)를 깨뜨리지 않도록 예외를 삼킨다. 성공 시 True.
+    """
+    try:
+        put_doc(key, data, user=user)
+        return True
+    except Exception:
+        return False

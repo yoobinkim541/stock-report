@@ -78,22 +78,31 @@ advisor 편집 대상 설정 파일을 **store(권위, user_id 스코프) + writ
 store를 쓰는 core 코드가 pytest에서 실행돼도 **라이브 DB 미오염**. (향후 라운드 안전망.)
 검증: `store_smoke_test.py` 33항목 + `ml_smoke_test.py` 86 checks 회귀 없음.
 
-### ⬜ Phase 2 round 3 (예정) — portfolio_snapshot (라이브 브로커·최고 위험)
+### ✅ Phase 2 round 3 (완료) — portfolio_snapshot (라이브 브로커)
 
-`portfolio_snapshot.json` 은 가장 블래스트 반경이 큼:
-
-- **Writer (3)**: holding_manager(`_save`) · portfolio_sync_server(`_update_portfolio`) · kiwoom_sync_rest(`_update_domestic`)
+`portfolio_snapshot.json` 은 블래스트 반경이 가장 큼:
+- **Writer (3)**: holding_manager(`_save`) · portfolio_sync_server(`_update_portfolio`) · kiwoom_sync_rest(`update_portfolio`/`_touch_sync_timestamp`)
 - **Reader (다수)**: barbell_strategy ×4 · ml/benchmarks · ml/universe · holding_manager(`_load`)
-- **결합**: advisor 편집 대상 · 테스트 다수가 `PORTFOLIO_PATH` monkeypatch · healthcheck mtime 점검
+- **결합**: advisor 편집 · 테스트 다수 `PORTFOLIO_PATH` monkeypatch · healthcheck mtime 점검
 
-**계획 (write-through 미러 활용 → reader 무변경)**:
-1. 3개 writer를 `store.save_doc("portfolio_snapshot", snap, PORTFOLIO_PATH)` 로 전환
-   (store 권위 + 파일 미러). **reader는 미러 파일을 읽으므로 무변경** — 위험 최소화.
-2. advisor reimport 등록(`_STORE_BACKED` 에 `portfolio_snapshot.json` 추가).
-3. 기존 pytest 테스트는 round 2 `conftest.py` 격리로 이미 보호됨 — writer 경유 테스트
-   (test_telegram_features buy/sell)도 tmp DB 사용. PORTFOLIO_PATH monkeypatch는 미러
-   경로로 계속 동작.
-4. 키움/sync 서버는 별도 프로세스 → 각자 `import store` + WAL 동시성으로 안전.
+**채택 패턴 — 파일 권위 + store 그림자 (`shadow_doc`)**:
+다른 설정과 달리 store를 **권위로 승격하지 않고**, 파일을 그대로 권위로 두고 store에
+user_id 스코프 **그림자 사본**만 남긴다. 이유:
+- reader가 9곳(barbell·ml·holding)이고 라이브 키움/sync는 별도 프로세스 → 권위 전환은
+  고위험. **reader·파일 쓰기 메커니즘 전부 무변경**으로 위험을 0에 수렴.
+- `store.shadow_doc()` 는 예외를 삼켜 **store 오류가 라이브 동기화를 절대 깨지 않음**.
+
+| 적용 지점 | 변경 |
+|-----------|------|
+| holding_manager `_save` | 파일 atomic write 후 `store.shadow_doc("portfolio_snapshot", snap)` |
+| portfolio_sync_server / kiwoom_sync_rest | 파일 write 후 `_shadow_to_store(snap)` (best-effort, 비차단) |
+| bot/stock_advisor `_STORE_BACKED` | `portfolio_snapshot.json` → reimport_doc 등록 (advisor 편집 반영) |
+
+테스트 격리(round 2 `conftest.py`)가 writer 경유 pytest(test_telegram_features buy/sell)를
+보호. 검증: `store_smoke_test.py` 38항목 + `ml_smoke_test.py` 86 checks 회귀 없음.
+
+> 향후(멀티유저): store 그림자가 이미 user_id 스코프 사본을 보유 → reader를 store로
+> 플립하면 권위 전환 완료. round 3는 그 직전까지의 기반을 무위험으로 깔았다.
 
 ### ⬜ Phase 3 (예정) — 멀티유저 활성화
 
