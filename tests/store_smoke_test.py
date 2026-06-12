@@ -100,6 +100,70 @@ def main() -> int:
         check(dsum["count"] == 1 and abs(dsum["total"] - 22.15) < 1e-6,
               "portfolio_tracker 배당 기록·집계")
 
+    # ── 6. 문서 + 파일 미러 (Phase 2) ─────────────────────────────────
+    mirror = Path(tmp) / "cfg_mirror.json"
+    store.save_doc("wcfg", {"normal": {"A": 1.0}}, mirror)
+    check(store.load_doc("wcfg", mirror) == {"normal": {"A": 1.0}}, "save_doc/load_doc 왕복")
+    check(mirror.exists() and json.loads(mirror.read_text())["normal"]["A"] == 1.0,
+          "save_doc 파일 미러 기록")
+
+    # 외부(advisor 모사)가 미러 파일을 편집 → reimport로 store 반영
+    mirror.write_text(json.dumps({"normal": {"A": 0.5, "B": 0.5}}), encoding="utf-8")
+    check(store.reimport_doc("wcfg", mirror) is True, "reimport_doc 반환값")
+    check(store.load_doc("wcfg", mirror)["normal"] == {"A": 0.5, "B": 0.5},
+          "reimport_doc 외부 편집 반영")
+
+    # 컬렉션 미러 + reimport
+    cmir = Path(tmp) / "alerts_mirror.json"
+    store.save_collection("alerts_x", [{"id": "1"}], cmir)
+    check(json.loads(cmir.read_text()) == [{"id": "1"}], "save_collection 파일 미러")
+    cmir.write_text(json.dumps([{"id": "1"}, {"id": "2"}]), encoding="utf-8")
+    store.reimport_collection("alerts_x", cmir)
+    check(store.all("alerts_x") == [{"id": "1"}, {"id": "2"}], "reimport_collection 반영")
+
+    # 레거시 문서 자동 마이그레이션
+    legacy_doc = Path(tmp) / "legacy_doc.json"
+    legacy_doc.write_text(json.dumps({"x": 7}), encoding="utf-8")
+    check(store.load_doc("ld", legacy_doc) == {"x": 7}, "load_doc 레거시 자동 마이그레이션")
+
+    # ── 7. 모듈 통합: price_alerts (Phase 2) ──────────────────────────
+    try:
+        import bot.price_alerts as pa
+        importlib.reload(pa)
+    except Exception as e:
+        print(f"⏭️  price_alerts skip (의존성 없음: {type(e).__name__})")
+    else:
+        pa.ALERTS_FILE = str(Path(tmp) / "price_alerts.json")  # 실제 설정 파일 보호
+        aid = pa.add_alert("NVDA", 100.0, "buy", "테스트")
+        loaded = pa.load_alerts()
+        check(len(loaded) == 1 and loaded[0]["ticker"] == "NVDA",
+              "price_alerts add/load (store 경유)")
+        check(Path(pa.ALERTS_FILE).exists(), "price_alerts 파일 미러 생성")
+        check(pa.remove_alert(aid) and pa.load_alerts() == [],
+              "price_alerts remove")
+
+    # ── 8. 모듈 통합: barbell_strategy 가중치 (Phase 2) ───────────────
+    try:
+        import barbell_strategy as bs
+        importlib.reload(bs)
+    except Exception as e:
+        print(f"⏭️  barbell_strategy skip (의존성 없음: {type(e).__name__})")
+    else:
+        # 실제 프로젝트 설정 파일 미러를 tmp로 리다이렉트 (라이브 설정 보호)
+        bs.DCA_WEIGHTS_FILE    = str(Path(tmp) / "dca_weights.json")
+        bs.TARGET_WEIGHTS_FILE = str(Path(tmp) / "target_weights.json")
+        bs.LEVERAGE_FILE       = str(Path(tmp) / "leverage_state.json")
+        bs.save_dca_weights({"AAA": 0.6, "BBB": 0.4}, {"AAA": 1.0})
+        n, b = bs.load_dca_weights()
+        check(abs(n.get("AAA", 0) - 0.6) < 1e-6, "dca_weights store 왕복")
+        check(Path(bs.DCA_WEIGHTS_FILE).exists(), "dca_weights 파일 미러")
+        bs.save_leverage_state({"QLD": {"shares": 3.0, "avg_price_usd": 90.0, "updated": "x"}})
+        lev = bs.load_leverage_state()
+        check(lev["QLD"]["shares"] == 3.0 and "TQQQ" in lev,
+              "leverage_state store 왕복 + 기본키 보강")
+        bs.save_target_weights({"ORCL": 0.07})
+        check(bs.load_target_weights().get("ORCL") == 0.07, "target_weights store 왕복")
+
     # ── 결과 ──────────────────────────────────────────────────────────
     n_fail = sum(1 for ok, _ in _results if not ok)
     total = len(_results)

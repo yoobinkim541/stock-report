@@ -245,3 +245,115 @@ def load_collection(name: str, legacy_path, *, user: str = DEFAULT_USER) -> list
     """레거시 자동 마이그레이션 후 컬렉션 전체 반환 (기록로그 모듈용 헬퍼)."""
     ensure_migrated(name, legacy_path, user=user)
     return all(name, user=user)
+
+
+# ══════════════════════════════════════════════════════════════════════
+#  문서 + 파일 미러 (advisor 편집 대상 설정 파일용 — Phase 2)
+# ──────────────────────────────────────────────────────────────────────
+#  store가 권위 사본(user_id 스코프·트랜잭션) + 레거시 파일은 write-through 미러.
+#  미러 목적: (1) advisor(외부 subprocess)가 파일로 읽고 쓰는 워크플로 유지,
+#            (2) 잔존 직접 파일 reader 호환. advisor 실행 후 reimport_*로 동기화.
+# ══════════════════════════════════════════════════════════════════════
+
+def _atomic_write_text(path, text: str) -> None:
+    """temp→rename atomic write (쓰기 도중 크래시 시 원본 보호)."""
+    import tempfile
+
+    p = Path(path)
+    p.parent.mkdir(parents=True, exist_ok=True)
+    fd, tmp = tempfile.mkstemp(dir=str(p.parent), suffix=".tmp")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            f.write(text)
+        os.replace(tmp, str(p))
+    except Exception:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise
+
+
+def ensure_doc_migrated(key: str, legacy_path, *, user: str = DEFAULT_USER) -> None:
+    """레거시 JSON 문서를 store 문서로 1회 import (멱등, 원본 보존)."""
+    name = f"doc:{key}"
+    with _connect() as conn:
+        if _is_migrated(conn, user, name):
+            return
+        has_doc = conn.execute(
+            "SELECT 1 FROM documents WHERE user_id=? AND key=?", (user, key)
+        ).fetchone() is not None
+        data = None
+        if not has_doc:
+            try:
+                p = Path(legacy_path)
+                if p.exists():
+                    data = json.loads(p.read_text(encoding="utf-8"))
+            except Exception:
+                data = None
+        with conn:
+            if data is not None:
+                conn.execute(
+                    "INSERT INTO documents (user_id, key, data, updated_at) "
+                    "VALUES (?, ?, ?, ?) ON CONFLICT(user_id, key) DO NOTHING",
+                    (user, key, json.dumps(data, ensure_ascii=False), _now()),
+                )
+            _mark_migrated(conn, user, name)
+
+
+def load_doc(key: str, legacy_path, default=None, *, user: str = DEFAULT_USER):
+    """레거시 자동 마이그레이션 후 문서 반환. 없으면 default."""
+    ensure_doc_migrated(key, legacy_path, user=user)
+    return get_doc(key, default, user=user)
+
+
+def save_doc(key: str, data, legacy_path=None, *, mirror: bool = True,
+             user: str = DEFAULT_USER) -> None:
+    """문서 저장 (store 권위) + 레거시 파일 미러 (기본 사용자 한정).
+
+    mirror=True 이고 legacy_path 가 있고 기본 사용자일 때만 파일에 기록한다.
+    (멀티유저 시 다른 사용자는 파일 미러 없이 store만 사용.)
+    """
+    put_doc(key, data, user=user)
+    if mirror and legacy_path and user == DEFAULT_USER:
+        _atomic_write_text(
+            legacy_path, json.dumps(data, indent=2, ensure_ascii=False)
+        )
+
+
+def reimport_doc(key: str, legacy_path, *, user: str = DEFAULT_USER) -> bool:
+    """레거시 파일 → store 문서 재동기화 (advisor 편집 반영). 갱신 시 True."""
+    try:
+        p = Path(legacy_path)
+        if not p.exists():
+            return False
+        data = json.loads(p.read_text(encoding="utf-8"))
+    except Exception:
+        return False
+    put_doc(key, data, user=user)
+    return True
+
+
+def save_collection(name: str, items: list[dict], legacy_path=None, *,
+                    mirror: bool = True, user: str = DEFAULT_USER) -> None:
+    """컬렉션 전체 교체 + 레거시 파일 미러 (기본 사용자 한정)."""
+    replace_all(name, items, user=user)
+    if mirror and legacy_path and user == DEFAULT_USER:
+        _atomic_write_text(
+            legacy_path, json.dumps(items, indent=2, ensure_ascii=False)
+        )
+
+
+def reimport_collection(name: str, legacy_path, *, user: str = DEFAULT_USER) -> bool:
+    """레거시 파일(JSON 리스트) → store 컬렉션 재동기화. 갱신 시 True."""
+    try:
+        p = Path(legacy_path)
+        if not p.exists():
+            return False
+        data = json.loads(p.read_text(encoding="utf-8"))
+        if not isinstance(data, list):
+            return False
+    except Exception:
+        return False
+    replace_all(name, data, user=user)
+    return True

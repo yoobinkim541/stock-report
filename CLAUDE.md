@@ -203,8 +203,9 @@ crons/news_spike_detector.py (크론 매 1분)
 ~/.local/state/stock-report/barbell_bot.pid  — 봇 PID (단일 인스턴스 잠금)
 ~/.local/share/stock-report/stock_report.db      — SQLite 통합 저장소 (user_id 스코프, WAL)
                                                    └ 컬렉션: tax_records · portfolio_history
-                                                     · qqqi_dividends · signal_outcomes
-                                                   (레거시 JSON 자동 마이그레이션 — store.py)
+                                                     · qqqi_dividends · signal_outcomes · price_alerts
+                                                   └ 문서: dca_weights · target_weights · leverage_state
+                                                   (레거시 JSON 자동 마이그레이션 + 파일 미러 — store.py)
 ~/.local/share/stock-report/            — 런타임 데이터 (pending, paper_track + 레거시 JSON 원본)
 ~/.local/share/stock-report/paper_track.json     — A/B 페이퍼 트레이딩 기록 (meta vs rule)
 ~/reports/ml-cache/leverage_best_params.json     — Optuna 최적 파라미터 (UPRO·vol targeting)
@@ -224,5 +225,9 @@ MSFT, QQQI, ORCL, SAP, UNH, SGOV, NVDA, GOOGL, SPMO
 - `STOCK_BOT_CHAT_ID` 는 env var — 코드에 하드코딩 금지
 - `KIWOOM_API_KEY` / `KIWOOM_API_SECRET` 절대 커밋 금지
 - `holding_manager._save()` 는 atomic write (temp→rename) — 직접 `json.dump` 호출 금지
-- 기록로그(tax/history/dividend/signal_outcomes)는 `store.py` 경유 — 직접 파일 R/W 금지
+- 기록로그(tax/history/dividend/signal_outcomes/price_alerts)는 `store.py` 경유 — 직접 파일 R/W 금지
   (DB 경로 override: `STOCK_REPORT_DB` env var, 기본 `~/.local/share/stock-report/stock_report.db`)
+- 설정 블롭(dca/target/leverage)은 store 권위 + 파일 미러(`store.save_doc`) — advisor 편집은
+  `bot/stock_advisor._sync_editable_to_store()` 가 store로 reimport. 직접 `json.dump` 금지
+- store 파일 미러는 `DEFAULT_USER` 만 기록 — 테스트 시 모듈 파일 경로 상수를 tmp로 리다이렉트할 것
+  (라이브 `dca_weights.json` 등 덮어쓰기 방지)
