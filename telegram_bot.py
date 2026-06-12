@@ -100,6 +100,33 @@ def setup_logging():
     )
 
 ALLOWED_CHAT_ID    = TELEGRAM_CHAT_ID
+OWNER_CHAT_ID      = TELEGRAM_CHAT_ID   # 전체 권한 (주문·신호·종목관리·세금·AI상담)
+
+# 읽기전용 게스트 계정 (env STOCK_BOT_GUEST_IDS, 쉼표구분 chat_id).
+# 법적 안전: 게스트는 사실형 시황·기술적 지표만 — 처방형 출력·주문 전면 차단.
+_GUEST_CHAT_IDS    = {x.strip() for x in os.getenv("STOCK_BOT_GUEST_IDS", "").split(",") if x.strip()}
+# 게스트 허용 명령어 (그 외 전부 소유자 전용)
+_GUEST_COMMANDS    = {"/help", "/market", "/indicators"}
+
+
+def _role_for(chat_id: str) -> str | None:
+    """chat_id → 역할. owner=전체, guest=읽기전용, None=차단."""
+    if chat_id == OWNER_CHAT_ID:
+        return "owner"
+    if chat_id in _GUEST_CHAT_IDS:
+        return "guest"
+    return None
+
+
+def _command_allowed(role: str, cmd: str) -> bool:
+    """역할별 명령 허용 여부 (보안 경계 — 순수 함수)."""
+    if role == "owner":
+        return True
+    if role == "guest":
+        return cmd in _GUEST_COMMANDS
+    return False
+
+
 POLL_TIMEOUT       = 20    # long-polling 대기(초)
 RETRY_DELAY        = 10    # 오류 후 재시도 대기(초)
 CACHE_TTL          = 300   # 시장 데이터 캐시 유지(초, 5분)
@@ -168,6 +195,8 @@ BOT_COMMANDS = [
     {"command": "meta",           "description": "ML 통합 포트폴리오 배분 (MetaAllocator)"},
     {"command": "entry",          "description": "진입 타점 분석 — 포트/us50/kr/watch/단일종목 (예: /entry NVDA, /entry kr)"},
     {"command": "intraday",       "description": "단기봉 실시간 신호 — 5m봉 이상감지 (예: /intraday NVDA, /intraday kr)"},
+    {"command": "market",         "description": "시황 브리핑 — 국면·낙폭·RSI·VIX·F&G (읽기전용)"},
+    {"command": "indicators",     "description": "종목 기술적 지표 — RSI·이동평균·모멘텀 (예: /indicators QQQ)"},
 ]
 
 BOT_COMMAND_ALIASES = {
@@ -1292,6 +1321,32 @@ def _dispatch_market(cmd: str, chat_id: str):
         logger.exception(f"dispatch {cmd}")
 
 
+def _dispatch_guest_market(chat_id: str):
+    """게스트 시황 브리핑 (사실형, 처방 없음)."""
+    typing(chat_id)
+    try:
+        from bot.guest_report import build_market_brief
+        d = fetch_market()
+        send(chat_id, build_market_brief(d))
+    except Exception as e:
+        send(chat_id, f"❌ 오류: {e}")
+        logger.exception("dispatch /market")
+
+
+def _dispatch_guest_indicators(chat_id: str, args: list):
+    """게스트 종목 기술적 지표 (서술형, 매매신호 없음)."""
+    if not args:
+        send(chat_id, "사용법: /indicators TICKER\n예: /indicators QQQ")
+        return
+    typing(chat_id)
+    try:
+        from bot.guest_report import build_indicators
+        send(chat_id, build_indicators(args[0]))
+    except Exception as e:
+        send(chat_id, f"❌ 오류: {e}")
+        logger.exception("dispatch /indicators")
+
+
 def _dispatch_ask(chat_id: str, args: list):
     if not args:
         send(chat_id, "사용법: /ask 질문\n예: /ask 지금 추가매수해도 돼?")
@@ -1505,17 +1560,32 @@ _COMMAND_HANDLERS = {
     "/tax": _dispatch_tax,
     "/ask": _dispatch_ask,
     "/apply_snapshot": _dispatch_apply_snapshot,
+    # 읽기전용 게스트 명령 (소유자도 사용 가능)
+    "/market":      lambda chat_id, args: _dispatch_guest_market(chat_id),
+    "/indicators":  lambda chat_id, args: _dispatch_guest_indicators(chat_id, args),
 }
 for _cmd in _MARKET_CMDS:
     _COMMAND_HANDLERS[_cmd] = lambda chat_id, args, cmd=_cmd: _dispatch_market(cmd, chat_id)
 
 
-def dispatch(text: str, chat_id: str):
+def dispatch(text: str, chat_id: str, role: str = "owner"):
     parts = text.strip().split()
     cmd   = parts[0].lower().split("@")[0]
     args  = parts[1:]
 
     cmd = BOT_COMMAND_ALIASES.get(cmd, cmd)
+
+    # 역할 게이팅 (보안 경계) — alias 해석 후, /ask 추론 전에 차단
+    if not _command_allowed(role, cmd):
+        send(chat_id, "🔒 이 명령은 소유자 전용입니다.\n읽기전용 계정 사용법: /help")
+        return
+
+    # 게스트 전용 도움말 (소유자 전체 목록과 분리)
+    if role == "guest" and cmd == "/help":
+        from bot.guest_report import guest_help
+        send(chat_id, guest_help())
+        return
+
     if cmd == "/ask":
         inferred = _infer_internal_command(" ".join(args))
         if inferred:
@@ -1603,24 +1673,30 @@ def run():
                 has_attachment = "photo" in msg or "document" in msg
                 if not has_attachment and not text.strip():
                     continue
-                if chat_id != ALLOWED_CHAT_ID:
+                role = _role_for(chat_id)
+                if role is None:
                     logger.warning(f"차단: chat_id {chat_id}")
                     _api("sendMessage", chat_id=chat_id, text="🔒 권한 없음")
                     continue
 
                 if has_attachment:
+                    # 첨부(스냅샷/매도내역 파싱)는 포트폴리오 수정 → 소유자 전용
+                    if role != "owner":
+                        _api("sendMessage", chat_id=chat_id, text="🔒 첨부 파일은 소유자 전용입니다.")
+                        continue
                     kind = "photo" if "photo" in msg else "document"
                     logger.info(f"첨부 수신: {kind}")
                     handle_attachment(msg, chat_id)
                     continue
 
-                if not text.startswith("/") and handle_plain_text(text, chat_id):
+                # 일반 텍스트(스냅샷/매도내역) 처리는 포트폴리오 수정 → 소유자 전용
+                if role == "owner" and not text.startswith("/") and handle_plain_text(text, chat_id):
                     logger.info("일반 텍스트를 스냅샷/매도내역으로 처리")
                     continue
 
                 text = _normalize_message_text(text)
                 logger.info(f"수신: {text!r}")
-                dispatch(text, chat_id)
+                dispatch(text, chat_id, role)
 
             # 주기 작업 — 백그라운드 스레드로 실행해 명령어 응답 차단 방지
             now = time.time()
