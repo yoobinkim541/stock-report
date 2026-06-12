@@ -155,10 +155,28 @@ crons/news_spike_detector.py (크론 매 1분)
   → 발동 시 signal_outcomes.json에 R-multiple 기록 + 짝 알림 자동 제거
 
 📎 PDF·이미지 전송 → 자동 파싱 → /holding apply 또는 /tax import apply
+
+── 읽기전용 게스트 (STOCK_BOT_GUEST_IDS) ─────────
+/market              시황 브리핑 — 국면·낙폭·RSI·VIX·F&G (사실형, 처방 없음)
+/indicators TICKER   종목 기술적 지표 — RSI·이동평균·모멘텀·52주 위치
+/help                게스트 도움말
+※ 게스트는 위 3개만 허용 — 주문·신호·종목관리·세금·AI상담 전면 차단 (법적 안전)
 ```
 
 > `/dividend` → `/holding dividend` 통합, `/apply_snapshot` → `/holding apply` 통합  
 > 기존 명령어는 하위 호환으로 유지
+
+## 역할 (telegram_bot)
+
+| 역할 | chat_id | 권한 |
+|------|---------|------|
+| owner | `STOCK_BOT_CHAT_ID` | 전체 (주문·신호·종목관리·세금·AI상담·첨부) |
+| guest | `STOCK_BOT_GUEST_IDS` (쉼표구분) | 읽기전용 — `/market` `/indicators` `/help` 만 (`_GUEST_COMMANDS`) |
+| 차단 | 그 외 | "권한 없음" |
+
+- 보안 경계: `_command_allowed(role, cmd)` (순수 함수) — 게스트는 처방형/주문 명령 전면 차단.
+- 게스트 출력은 `bot/guest_report.py` — **사실형 데이터·지표만, 처방(매매신호·목표가·DCA·레버리지) 금지.** "서술 OK, 지시 금지" 원칙.
+- 첨부·일반텍스트(스냅샷 파싱)는 포트폴리오 수정 → owner 전용.
 
 ## 환경변수
 
@@ -166,6 +184,7 @@ crons/news_spike_detector.py (크론 매 1분)
 |------|------|--------|
 | `STOCK_BOT_TOKEN` | ✅ | — |
 | `STOCK_BOT_CHAT_ID` | — | `5771238245` |
+| `STOCK_BOT_GUEST_IDS` | — | — (쉼표구분 읽기전용 게스트 chat_id) |
 | `KIWOOM_API_KEY` | — | — (openapi.kiwoom.com 발급) |
 | `KIWOOM_API_SECRET` | — | — |
 | `SYNC_TOKEN` | — | — (portfolio_sync_server 인증) |
