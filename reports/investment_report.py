@@ -13,11 +13,13 @@ import sys
 import logging
 import subprocess
 import time
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 
 import requests
 import yfinance as yf
 import numpy as np
+
+KST = timezone(timedelta(hours=9))
 
 # Add parent dir to path if needed
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -1509,7 +1511,7 @@ def _fetch_korea_indices():
 
 def generate_report():
     """Generate the full investment report."""
-    today_str = datetime.now().strftime("%Y-%m-%d")
+    today_str = datetime.now(KST).strftime("%Y-%m-%d")
     start_time = time.time()
 
     print(f"📊 일일 투자 리포트 생성 중... ({today_str})")
@@ -1959,7 +1961,7 @@ def generate_report():
     lines.append(f"")
 
     # Friday weekly recap
-    if datetime.now().weekday() == 4:  # Friday
+    if datetime.now(KST).weekday() == 4:  # Friday
         lines.append(f"## 주간 리캡 (5일)")
         lines.append(f"")
         lines.append(f"| 종목 | 등급 | 주간 변동 | 판단 |")
@@ -2135,7 +2137,7 @@ def generate_report():
         print(f"🧠 LLM overlay 건너뜀: {llm_status}")
 
     # ── Judgment change detection ──
-    yesterday_str = (datetime.now() - timedelta(days=1)).strftime("%Y-%m-%d")
+    yesterday_str = (datetime.now(KST) - timedelta(days=1)).strftime("%Y-%m-%d")
     yesterday_path = os.path.join(REPORTS_DIR, f"investment-summary-{yesterday_str}.json")
     if os.path.exists(yesterday_path):
         try:

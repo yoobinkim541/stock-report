@@ -25,8 +25,9 @@ def test_load_portfolio_tickers_uses_snapshot_holdings(tmp_path):
 
 class FixedDateTime:
     @classmethod
-    def now(cls):
-        return real_datetime(2026, 5, 31, 9, 0, 0)
+    def now(cls, tz=None):
+        # tz 인자 수용 (investment_report 는 KST 기준으로 호출)
+        return real_datetime(2026, 5, 31, 9, 0, 0, tzinfo=tz)
 
 
 def test_generate_report_writes_expected_files_without_network():
