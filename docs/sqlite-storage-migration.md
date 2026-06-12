@@ -61,15 +61,39 @@ advisor 편집 대상 설정 파일을 **store(권위, user_id 스코프) + writ
 미러는 **기본 사용자(`DEFAULT_USER`)만** 기록 — 멀티유저 시 타 사용자는 store만 사용.
 검증: `tests/store_smoke_test.py` 30항목 (문서 미러·reimport·모듈 왕복 포함).
 
-### ⬜ Phase 2 round 2 (예정) — 라이브 브로커 경로·핫패스
+### ✅ Phase 2 round 2 (완료) — Phase 핫패스 상태
 
-| 대상 | 현 위치 | 접근 모듈 | 주의 |
-|------|---------|-----------|------|
-| `portfolio_snapshot.json` | 루트 | holding_manager · barbell_strategy · portfolio_sync_server · kiwoom_sync_rest | 멀티라이터 + 라이브 키움 동기화 (최고 위험) |
-| `barbell_state.json` / `barbell_anchor.json` | `~/.cache` | barbell_strategy · telegram_bot | 5분 핫패스 + fcntl 락 — store 트랜잭션으로 락 대체 검토 |
+| store 키 | 종류 | 모듈 | 미러 파일 |
+|----------|------|------|-----------|
+| `barbell_state` | 문서 | barbell_strategy (`load/save_phase_state`) | `~/.cache/barbell_state.json` |
+| `barbell_anchor` | 문서 | barbell_strategy (`_load/_update_drawdown_anchor`) | `~/.cache/barbell_anchor.json` |
 
-> `portfolio_snapshot.json` 은 advisor 편집 대상이면서 라이브 브로커 동기화 경로라
-> round 1 미러 패턴 + 모든 reader/writer 동시 전환이 필요 — 별도 라운드로 분리.
+- 단일 writer · advisor 미편집 → store 권위 + 파일 미러로 안전 전환.
+- 파일 미러 유지 이유: `tests/bot_healthcheck.py` 가 `barbell_state.json` **mtime**으로
+  신선도 점검 → 미러가 mtime 갱신 → 헬스체크 호환.
+- telegram_bot 의 `barbell_state.lock` (fcntl, 봇·크론 Phase5 중복발송 방지)은
+  상위 dedup 로직이므로 **유지** — store 전환은 하위 IO만 교체(시맨틱 불변).
+
+**테스트 격리**: `tests/conftest.py` autouse 픽스처가 `STOCK_REPORT_DB` 를 tmp로 강제 →
+store를 쓰는 core 코드가 pytest에서 실행돼도 **라이브 DB 미오염**. (향후 라운드 안전망.)
+검증: `store_smoke_test.py` 33항목 + `ml_smoke_test.py` 86 checks 회귀 없음.
+
+### ⬜ Phase 2 round 3 (예정) — portfolio_snapshot (라이브 브로커·최고 위험)
+
+`portfolio_snapshot.json` 은 가장 블래스트 반경이 큼:
+
+- **Writer (3)**: holding_manager(`_save`) · portfolio_sync_server(`_update_portfolio`) · kiwoom_sync_rest(`_update_domestic`)
+- **Reader (다수)**: barbell_strategy ×4 · ml/benchmarks · ml/universe · holding_manager(`_load`)
+- **결합**: advisor 편집 대상 · 테스트 다수가 `PORTFOLIO_PATH` monkeypatch · healthcheck mtime 점검
+
+**계획 (write-through 미러 활용 → reader 무변경)**:
+1. 3개 writer를 `store.save_doc("portfolio_snapshot", snap, PORTFOLIO_PATH)` 로 전환
+   (store 권위 + 파일 미러). **reader는 미러 파일을 읽으므로 무변경** — 위험 최소화.
+2. advisor reimport 등록(`_STORE_BACKED` 에 `portfolio_snapshot.json` 추가).
+3. 기존 pytest 테스트는 round 2 `conftest.py` 격리로 이미 보호됨 — writer 경유 테스트
+   (test_telegram_features buy/sell)도 tmp DB 사용. PORTFOLIO_PATH monkeypatch는 미러
+   경로로 계속 동작.
+4. 키움/sync 서버는 별도 프로세스 → 각자 `import store` + WAL 동시성으로 안전.
 
 ### ⬜ Phase 3 (예정) — 멀티유저 활성화
 

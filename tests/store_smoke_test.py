@@ -164,6 +164,18 @@ def main() -> int:
         bs.save_target_weights({"ORCL": 0.07})
         check(bs.load_target_weights().get("ORCL") == 0.07, "target_weights store 왕복")
 
+        # Phase 상태 + 앵커 (round 2) — 미러 경로 tmp 리다이렉트
+        bs.STATE_FILE  = str(Path(tmp) / "barbell_state.json")
+        bs.ANCHOR_FILE = str(Path(tmp) / "barbell_anchor.json")
+        bs.save_phase_state("bear", 3, -16.5)
+        ps = bs.load_phase_state()
+        check(ps.get("market_type") == "bear" and ps.get("phase_key") == "3",
+              "barbell_state store 왕복")
+        check(Path(bs.STATE_FILE).exists(), "barbell_state 파일 미러 (healthcheck mtime)")
+        a = bs._update_drawdown_anchor(high_52w=500.0, current=400.0)
+        check(abs(a - 500.0) < 1e-6 and abs(bs._load_drawdown_anchor() - 500.0) < 1e-6,
+              "barbell_anchor store 왕복")
+
     # ── 결과 ──────────────────────────────────────────────────────────
     n_fail = sum(1 for ok, _ in _results if not ok)
     total = len(_results)

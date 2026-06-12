@@ -205,6 +205,7 @@ crons/news_spike_detector.py (크론 매 1분)
                                                    └ 컬렉션: tax_records · portfolio_history
                                                      · qqqi_dividends · signal_outcomes · price_alerts
                                                    └ 문서: dca_weights · target_weights · leverage_state
+                                                     · barbell_state · barbell_anchor
                                                    (레거시 JSON 자동 마이그레이션 + 파일 미러 — store.py)
 ~/.local/share/stock-report/            — 런타임 데이터 (pending, paper_track + 레거시 JSON 원본)
 ~/.local/share/stock-report/paper_track.json     — A/B 페이퍼 트레이딩 기록 (meta vs rule)
