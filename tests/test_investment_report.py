@@ -17,7 +17,7 @@ from investment_report import (
     _format_etf_comparison,
     _generate_llm_overlay,
     _llm_overlay_mobile_lines,
-    _mobile_pick_line,
+    _mobile_pick_block,
     _mobile_pick_items,
     _news_title_relevant,
     _select_top_buy_candidates,
@@ -123,17 +123,17 @@ def test_decision_v2_includes_deterministic_confidence():
     assert decision["confidence"] == 94
 
 
-def test_mobile_pick_line_excludes_tickers_already_shown_in_top():
+def test_mobile_pick_block_excludes_tickers_already_shown_in_top():
     items = [
         {"ticker": "AAA", "decision_v2": {"action": "보유", "one_line_reason": "재무 70점"}},
         {"ticker": "BBB", "decision_v2": {"action": "보유", "one_line_reason": "재무 65점"}},
     ]
     top_mobile = _mobile_pick_items(items[:1])
 
-    line = _mobile_pick_line("주의", items, exclude_tickers={r["ticker"] for r in top_mobile})
+    block = "\n".join(_mobile_pick_block("주의", items, exclude_tickers={r["ticker"] for r in top_mobile}))
 
-    assert "AAA" not in line
-    assert "BBB" in line
+    assert "AAA" not in block
+    assert "BBB" in block
 
 
 # ── v3 Decision Engine 테스트 ──────────────────────────────────────────────
@@ -252,15 +252,14 @@ def test_decision_v2_today_action_exists_and_short():
     assert len(decision["today_action"]) <= 30
 
 
-def test_mobile_line_length_stays_short():
+def test_mobile_block_lines_stay_short():
     items = [
         {"ticker": "NVDA", "decision_v2": {"action": "관심 유지", "one_line_reason": "재무 76점(A)"}},
         {"ticker": "MSFT", "decision_v2": {"action": "강한 매수후보", "one_line_reason": "재무 82점(A)"}},
     ]
 
-    line = _mobile_pick_line("상위", items)
-
-    assert len(line) < 120, f"Mobile line too long: {len(line)} chars"
+    for line in _mobile_pick_block("상위", items):
+        assert len(line) < 120, f"Mobile line too long: {len(line)} chars"
 
 
 # ── ETF 비교 평가 테스트 ──────────────────────────────────────────────
