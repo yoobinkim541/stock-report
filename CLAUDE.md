@@ -79,6 +79,7 @@ crons/news_spike_detector.py (크론 매 1분)
 | `reports/market_report.py` | 시장 현황 리포트 생성 |
 | `reports/source_collector.py` | 뉴스 JSONL 캐시 수집·다이제스트 |
 | `reports/fundamental_score.py` | 종목 펀더멘털 점수 계산 |
+| `reports/institutional_flow.py` | 기관 매집 추적 — 거래량 방향성(OBV·CMF·A/D) 매집 강도 + 美 13F 지분 변동 교차검증 |
 | `reports/daily_signals.py` | 일일 시장 신호 탐지 |
 | `reports/save_csv.py` | 투자 요약 CSV 저장 |
 
@@ -94,6 +95,7 @@ crons/news_spike_detector.py (크론 매 1분)
 | `crons/paper_track.py` | MetaAllocator vs Phase 규칙 A/B 페이퍼 트레이딩 (월요일 Sharpe 비교 발송) | 평일 22:50 UTC |
 | `crons/fundamental_snapshot.py` | 펀더멘털 point-in-time 스냅샷 적재 (look-ahead 없는 학습 피처용) | 토 01:00 UTC |
 | `crons/options_snapshot.py` | 옵션 지표 스냅샷 (ATM IV·풋콜비·스큐·기대변동폭) — 학습 피처 축적 | 평일 21:30 UTC |
+| `crons/institutional_snapshot.py` | 기관 매집 강도·13F 지분 주간 스냅샷 적재 (델타 추적용) + 상위 5 다이제스트 발송 | 토 01:30 UTC |
 | `backtest/entry_calibration.py` | 진입점수 가중치·임계값 walk-forward 재추정 (OOS 개선 시만 자동 채택) | 매월 1일 14:00 UTC |
 
 **tests/ (테스트·헬스체크)**
@@ -101,6 +103,7 @@ crons/news_spike_detector.py (크론 매 1분)
 |------|------|------|
 | `tests/bot_smoke_test.py` | 기능 검증 연기 테스트 25항목 (실패 시만 알림) | 평일 00:00 UTC |
 | `tests/ml_smoke_test.py` | ML 파이프라인 end-to-end 58항목 (네트워크 불필요) | 평일 크론 |
+| `tests/institutional_flow_smoke_test.py` | 기관 매집 스코어링 무네트워크 단위 테스트 (합성 데이터) | 평일 크론 |
 | `tests/bot_healthcheck.py` | 봇·서버 상태 점검 (프로세스·PID·파일 신선도·store DB 무결성) | 매 30분 |
 
 **ml/ (ML 모델)**
@@ -117,6 +120,7 @@ crons/news_spike_detector.py (크론 매 1분)
 /summary             한 줄 빠른 현황 — Phase·QQQ·총액·F&G
 /phase               Phase 미터 + 행동 지침
 /report              전체 바벨 리포트 (항상 실시간)
+/accum [us|kr|TICKER...]  기관 매집 추적 — OBV·CMF·13F 매집 강도 랭킹 (기본: 보유+美+韓)
 /sim [bull2|0~5]     시장 상태 시뮬레이션
 
 ── 포트폴리오 ────────────────────────────────────
@@ -239,6 +243,7 @@ crons/news_spike_detector.py (크론 매 1분)
 ~/reports/ml-cache/entry_score_params.json       — 진입점수 가중치 (캘리브레이션 채택 시 생성)
 ~/reports/ml-cache/fundamental_scores.json       — 펀더멘털 점수 7일 캐시 (랭커 틸트용)
 ~/reports/ml-cache/fundamental_snapshots.jsonl   — 펀더멘털 주간 point-in-time 스냅샷
+~/reports/ml-cache/institutional_snapshots.jsonl — 기관 매집 강도·13F 지분 주간 스냅샷 (델타 추적)
 ```
 
 ## 포트폴리오

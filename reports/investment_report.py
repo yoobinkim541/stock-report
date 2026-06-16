@@ -28,6 +28,15 @@ from fundamental_score import score_ticker
 from daily_signals import detect_signals
 
 try:
+    from institutional_flow import (rank_accumulation, accumulation_line,
+                                    accumulation_mobile_block,
+                                    clean_entry as _accum_clean_entry)
+    _ACCUM_AVAILABLE = True
+except Exception as _accum_err:   # 매집 모듈 임포트 실패해도 리포트 전체는 살린다
+    _ACCUM_AVAILABLE = False
+    logging.getLogger(__name__).warning("institutional_flow 임포트 실패: %s", _accum_err)
+
+try:
     from source_collector import build_digest, load_recent_events
 except Exception:
     build_digest = None
@@ -1636,6 +1645,27 @@ def generate_report():
         exclude_tickers={r.get("ticker") for r in kospi_top},
     )
 
+    # ── 기관 매집 추적 (institutional accumulation) ──
+    # 포트폴리오 + NASDAQ·KOSPI 스캔 종목 전체에서 매집 강도 상위 종목 추출.
+    # 가격은 fetch_prices 배치 다운로드(6h 캐시), 상위 픽만 13F 교차검증.
+    # (스캔 경로(score_ticker)와 캐시 키가 달라 캐시 미스 시 1회 배치 재다운로드 가능 —
+    #  종목당 다수 호출하는 스캔 대비 무시할 비용. try/except 로 실패해도 리포트는 생존.)
+    print(f"\n🏛️ 기관 매집 강도 분석 중...")
+    accum_picks = []
+    if _ACCUM_AVAILABLE:
+        _accum_universe = (list(PORTFOLIO_TICKERS)
+                           + [r["ticker"] for r in ndx_results]
+                           + [r["ticker"] for r in kospi_results])
+        try:
+            accum_picks = rank_accumulation(_accum_universe, limit=8, min_score=60)
+            print(f"   매집 강도 ≥60 종목: {len(accum_picks)}개")
+        except Exception as e:
+            print(f"   기관 매집 분석 실패: {e}")
+            accum_picks = []
+
+    def _accum_name(t):
+        return _KOSPI_NAMES.get(t) or _company_name(t)
+
     # ── Generate report text (Korean) ──
     lines = []
     lines.append(f"# 일일 투자 자동화 레포트")
@@ -1888,10 +1918,34 @@ def generate_report():
         lines.append(f"| {i} | {r['ticker']} — {_company_name(r['ticker'])} | {r['total_score']} | {r['grade']} | {sig_emoji.get(r['signal'], '⚔️')} {r['signal']} | {r.get('decision_v2', {}).get('action', '데이터부족')} |")
     lines.append(f"")
 
-    # Section 5: Arca community
+    # Section 5: Institutional accumulation (기관 매집 추적)
+    lines.append(f"## 5. 🏛️ 기관 매집 종목 추적")
+    lines.append(f"")
+    lines.append(f"거래량 방향성(OBV·CMF·상승/하락 거래량비·A/D)으로 매집 강도를 0~100 점수화하고, "
+                 f"미국 종목은 분기 13F 기관 지분 변동으로 교차검증합니다. (KOSPI는 13F 미제공 → 기술적 신호만)")
+    lines.append(f"")
+    if accum_picks:
+        lines.append(f"| 종목 | 매집 | 강도 | OBV | CMF | 상승/하락 | 13F 기관 |")
+        lines.append(f"|------|------|------|-----|-----|-----------|----------|")
+        for e in accum_picks:
+            lines.append(accumulation_line(e, name_fn=_accum_name))
+        lines.append(f"")
+        _stealth = [_accum_name(e["ticker"]) for e in accum_picks if e.get("stealth")]
+        if _stealth:
+            lines.append(f"🤫 **조용한 매집** (가격 정체·하락 중 매집 — 기관이 조용히 모으는 패턴): {', '.join(_stealth)}")
+            lines.append(f"")
+    else:
+        lines.append(f"매집 강도 60점 이상 종목 없음 (시장 전반 중립/분산 국면).")
+        lines.append(f"")
+    lines.append(f"> ⚠️ 직접 기관 순매수(원/주) 데이터가 아닌 거래량·13F 기반 *추정*입니다. 참고용.")
+    lines.append(f"")
+    lines.append(f"---")
+    lines.append(f"")
+
+    # Section 6: Arca community
     print(f"\n🗨 아카라이브 주식 채널 수집 중...")
     arca_posts = _fetch_arca_posts()
-    lines.append(f"## 5. 아카라이브 커뮤니티 동향")
+    lines.append(f"## 6. 아카라이브 커뮤니티 동향")
     lines.append(f"")
     if arca_posts:
         lines.append(f"{len(arca_posts)}건의 분석/뉴스/정보/실적 게시글")
@@ -1911,8 +1965,8 @@ def generate_report():
         lines.append(f"---")
         lines.append(f"")
 
-    # Section 6: Conclusion
-    lines.append(f"## 6. 오늘의 결론")
+    # Section 7: Conclusion
+    lines.append(f"## 7. 오늘의 결론")
     lines.append(f"")
 
     # Generate conclusion
@@ -1974,7 +2028,7 @@ def generate_report():
         lines.append(f"---")
         lines.append(f"")
 
-    lines.append(f"## 7. 📊 실행 통계")
+    lines.append(f"## 8. 📊 실행 통계")
     lines.append(f"")
     lines.append(f"| 항목 | 값 |")
     lines.append(f"|---|------|")
@@ -2014,6 +2068,8 @@ def generate_report():
             "top_buy": kospi_top[:5],
             "top_warning": kospi_watch[:5],
         },
+        "institutional_accumulation": [_accum_clean_entry(e, name_fn=_accum_name)
+                                       for e in accum_picks] if _ACCUM_AVAILABLE else [],
     }
     for r in portfolio_results:
         entry = {
@@ -2110,6 +2166,9 @@ def generate_report():
             "signal": r["signal"],
             "decision_v2": r.get("decision_v2", {}),
         })
+    clean_data["institutional_accumulation"] = [
+        _accum_clean_entry(e, name_fn=_accum_name) for e in accum_picks
+    ] if _ACCUM_AVAILABLE else []
     clean_path = os.path.join(REPORTS_DIR, f"investment-summary-{today_str}.json")
     with open(clean_path, "w", encoding="utf-8") as f:
         json.dump(clean_data, f, ensure_ascii=False, indent=2, default=str)
@@ -2202,6 +2261,9 @@ def generate_report():
     summary_lines.extend(_mobile_pick_block("🇺🇸 NAS100 주의", top_watch, exclude_tickers={r.get("ticker") for r in nasdaq_top_mobile}))
     summary_lines.extend(_mobile_pick_block("🇰🇷 KOSPI 상위", kospi_top_mobile))
     summary_lines.extend(_mobile_pick_block("🇰🇷 KOSPI 주의", kospi_watch, exclude_tickers={r.get("ticker") for r in kospi_top_mobile}))
+    if accum_picks:
+        summary_lines.append("")
+        summary_lines.extend(accumulation_mobile_block(accum_picks, "🏛️ 기관 매집", limit=3, name_fn=_accum_name))
     summary_lines.append("")
     summary_lines.append(sep)
     if watch_short:
