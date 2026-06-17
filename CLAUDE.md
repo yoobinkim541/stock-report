@@ -82,6 +82,7 @@ crons/news_spike_detector.py (크론 매 1분)
 | `reports/institutional_flow.py` | 기관 매집 추적 — 거래량 방향성(OBV·CMF·A/D) 매집 강도 + 美 13F 지분 변동 교차검증 |
 | `reports/daily_signals.py` | 일일 시장 신호 탐지 |
 | `reports/save_csv.py` | 투자 요약 CSV 저장 |
+| `reports/report_charts.py` | 일일 리포트 시각화 — 포트폴리오 대시보드 PNG (등락률·벤치마크 추이·RSI·매집강도 4분할, 텔레그램 sendPhoto) |
 
 **crons/ (크론 진입점)**
 | 파일 | 역할 | 주기 |
@@ -226,6 +227,7 @@ crons/news_spike_detector.py (크론 매 1분)
 ~/reports/investment-data-{date}.json    — 원본 데이터
 ~/reports/investment-summary-{date}.json — 정제 요약 (save_csv.py 입력)
 ~/reports/investment-summary-{date}.txt  — 모바일 요약 (텔레그램 직접 발송)
+~/reports/investment-chart-{date}.png    — 포트폴리오 대시보드 (텔레그램 sendPhoto, report_charts.py)
 ~/.cache/barbell_state.json             — Phase 상태 (크론·봇 공유)
 ~/.cache/barbell_state.lock             — Phase 상태 쓰기 잠금
 ~/.cache/barbell_anchor.json            — 낙폭 고점 앵커 (Phase 드리프트 방지)

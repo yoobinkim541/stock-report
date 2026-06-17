@@ -2174,6 +2174,17 @@ def generate_report():
         json.dump(clean_data, f, ensure_ascii=False, indent=2, default=str)
     print(f"ℹ 분석 요약 저장 완료: {clean_path}")
 
+    # ── 시각화 대시보드 PNG (텔레그램 sendPhoto 용) ──
+    # 실패해도 리포트 발송에는 영향 없도록 try/except 로 격리.
+    try:
+        from report_charts import build_portfolio_dashboard
+        chart_path = os.path.join(REPORTS_DIR, f"investment-chart-{today_str}.png")
+        saved = build_portfolio_dashboard(clean_data, market, chart_path, date_str=today_str)
+        if saved:
+            print(f"📊 대시보드 차트 저장 완료: {saved}")
+    except Exception as e:
+        print(f"⚠ 대시보드 차트 생성 실패(무시): {e}")
+
     # ── LLM payload meta (computed always, even when LLM disabled) ──
     _llm_payload = _build_llm_analysis_payload(clean_data, source_digest)
     _llm_meta = _llm_payload.get("_meta", {})

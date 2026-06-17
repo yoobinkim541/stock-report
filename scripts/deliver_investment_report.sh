@@ -49,6 +49,7 @@ fi
 REPORT_FILE="$HOME/reports/investment-report-${DATE}.md"
 JSON_FILE="$HOME/reports/investment-data-${DATE}.json"
 SUMMARY_FILE="$HOME/reports/investment-summary-${DATE}.txt"
+CHART_FILE="$HOME/reports/investment-chart-${DATE}.png"
 
 END_TIME=$(date +%s)
 DURATION=$((END_TIME - START_TIME))
@@ -96,6 +97,14 @@ if [ -n "$STOCK_BOT_TOKEN" ]; then
     send_telegram sendMessage \
         -d "chat_id=${STOCK_BOT_CHAT_ID}" \
         --data-urlencode "text@${SUMMARY_FILE}"
+
+    # 시각화 대시보드 (생성된 경우에만) — 수익률·RSI·매집강도 4분할 그래프
+    if [ -f "$CHART_FILE" ]; then
+        send_telegram sendPhoto \
+            -F "chat_id=${STOCK_BOT_CHAT_ID}" \
+            -F "photo=@${CHART_FILE}" \
+            -F "caption=📊 포트폴리오 대시보드 (${DATE})"
+    fi
 
     send_telegram sendDocument \
         -F "chat_id=${STOCK_BOT_CHAT_ID}" \
