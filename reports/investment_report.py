@@ -1674,6 +1674,11 @@ def generate_report():
     lines.append(f"")
     lines.append(f"---")
     lines.append(f"")
+    # 대시보드 이미지 참조 — 텔레그램 밖(마크다운 뷰어·노션 등 PNG가 같은 폴더에 있는 환경)에서 표시.
+    #  (텔레그램은 .md 를 문서로 보내 렌더하지 않으므로 무시됨 — 부작용 없음. 차트 생성 실패 시엔
+    #   깨진 이미지 아이콘만 보이나 그래프는 sendPhoto 로 별도 전송됨.)
+    lines.append(f"![포트폴리오 대시보드 — {today_str}](investment-chart-{today_str}.png)")
+    lines.append(f"")
 
     # Portfolio P&L
     pnl_1d, pnl_1mo = _calc_portfolio_pnl(portfolio_results)
