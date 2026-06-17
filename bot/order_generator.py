@@ -36,18 +36,15 @@ from barbell_strategy import (
 MARKET_OPEN_KST = 22   # KST 22:00 = 미국 장 시작
 
 COMPANY_NAMES: dict[str, str] = {
-    "NOW":   "ServiceNow",
     "ORCL":  "Oracle",
     "NVDA":  "NVIDIA",
     "MSFT":  "Microsoft",
     "GOOGL": "Alphabet",
     "UNH":   "UnitedHealth",
-    "CRM":   "Salesforce",
     "SAP":   "SAP SE",
     "SPMO":  "SP500 Mom",
     "SGOV":  "T-Bill",
     "QQQI":  "NBI CC",
-    "CPNG":  "Coupang",
     "QQQ":   "Nasdaq 100",
 }
 

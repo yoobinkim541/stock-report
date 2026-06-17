@@ -13,17 +13,28 @@ import sys
 import logging
 import subprocess
 import time
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 
 import requests
 import yfinance as yf
 import numpy as np
+
+KST = timezone(timedelta(hours=9))
 
 # Add parent dir to path if needed
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from fundamental_score import score_ticker
 from daily_signals import detect_signals
+
+try:
+    from institutional_flow import (rank_accumulation, accumulation_line,
+                                    accumulation_mobile_block,
+                                    clean_entry as _accum_clean_entry)
+    _ACCUM_AVAILABLE = True
+except Exception as _accum_err:   # 매집 모듈 임포트 실패해도 리포트 전체는 살린다
+    _ACCUM_AVAILABLE = False
+    logging.getLogger(__name__).warning("institutional_flow 임포트 실패: %s", _accum_err)
 
 try:
     from source_collector import build_digest, load_recent_events
@@ -59,46 +70,18 @@ def load_cached_source_digest() -> str:
         return ""
     return build_digest(events)
 
-# ── 포트폴리오 종목 ─────────────────────────────────────────────────────
-DEFAULT_PORTFOLIO_TICKERS = ["MSFT", "QQQI", "ORCL", "NOW", "CRM", "SAP", "UNH",
-                             "SGOV", "CPNG", "NVDA", "GOOGL", "SPMO"]
-PORTFOLIO_SNAPSHOT_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "portfolio_snapshot.json")
-
-
-def load_portfolio_tickers(path=PORTFOLIO_SNAPSHOT_PATH):
-    try:
-        with open(path, encoding="utf-8") as f:
-            snap = json.load(f)
-    except Exception:
-        return list(DEFAULT_PORTFOLIO_TICKERS)
-
-    tickers = []
-    for section in ("overseas_general", "overseas_fractional"):
-        for h in snap.get(section, {}).get("holdings_usd", []):
-            ticker = h.get("ticker")
-            shares = float(h.get("shares") or 0)
-            value = float(h.get("value_usd") or 0)
-            if ticker and (shares > 0 or value > 0) and ticker not in tickers:
-                tickers.append(ticker)
-    return tickers or list(DEFAULT_PORTFOLIO_TICKERS)
-
+# ── 포트폴리오 종목 — 단일 소스: portfolio_universe.py ──────────────────
+_PROJECT_DIR = os.getenv("STOCK_REPORT_PROJECT_DIR",
+                         os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+if _PROJECT_DIR not in sys.path:
+    sys.path.insert(0, _PROJECT_DIR)
+from portfolio_universe import (DEFAULT_PORTFOLIO_TICKERS, PORTFOLIO_SNAPSHOT_PATH,
+                                load_portfolio_tickers)
 
 PORTFOLIO_TICKERS = load_portfolio_tickers()
 
-# ── 수동 점수 오버라이드 (yfinance 데이터 불완전한 종목) ─────────────────────────
-MANUAL_SCORES = {
-    "CPNG": {
-        "ticker": "CPNG",
-        "total_score": 52,
-        "grade": "C",
-        "sections": {},
-        "notes": [
-            "수동 입력 점수 — yfinance 한국 상장사 데이터 불완전",
-            "쿠팡: 한국 이커머스 1위, 2023년 흑자전환 달성",
-            "매출 성장 지속 중, 영업 레버리지 개선 추세",
-        ],
-    },
-}
+# ── 수동 점수 오버라이드 (yfinance 데이터 불완전한 종목용 — 현재 없음) ──────────
+MANUAL_SCORES = {}
 
 # ── NASDAQ 100 종목 (정적 리스트) ───────────────────────────────────────
 NASDAQ_100 = [
@@ -762,11 +745,8 @@ def _news_title_relevant(ticker, title):
         "TSLA": ("tesla",),
         "AAPL": ("apple",),
         "ORCL": ("oracle",),
-        "CRM": ("salesforce",),
-        "NOW": ("servicenow", "service now"),
         "SAP": ("sap",),
         "UNH": ("unitedhealth", "united health"),
-        "CPNG": ("coupang", "쿠팡"),
         "005930": ("삼성전자", "samsung electronics"),
         "000660": ("sk하이닉스", "하이닉스", "sk hynix"),
     }
@@ -1540,7 +1520,7 @@ def _fetch_korea_indices():
 
 def generate_report():
     """Generate the full investment report."""
-    today_str = datetime.now().strftime("%Y-%m-%d")
+    today_str = datetime.now(KST).strftime("%Y-%m-%d")
     start_time = time.time()
 
     print(f"📊 일일 투자 리포트 생성 중... ({today_str})")
@@ -1664,6 +1644,27 @@ def generate_report():
         kospi_results,
         exclude_tickers={r.get("ticker") for r in kospi_top},
     )
+
+    # ── 기관 매집 추적 (institutional accumulation) ──
+    # 포트폴리오 + NASDAQ·KOSPI 스캔 종목 전체에서 매집 강도 상위 종목 추출.
+    # 가격은 fetch_prices 배치 다운로드(6h 캐시), 상위 픽만 13F 교차검증.
+    # (스캔 경로(score_ticker)와 캐시 키가 달라 캐시 미스 시 1회 배치 재다운로드 가능 —
+    #  종목당 다수 호출하는 스캔 대비 무시할 비용. try/except 로 실패해도 리포트는 생존.)
+    print(f"\n🏛️ 기관 매집 강도 분석 중...")
+    accum_picks = []
+    if _ACCUM_AVAILABLE:
+        _accum_universe = (list(PORTFOLIO_TICKERS)
+                           + [r["ticker"] for r in ndx_results]
+                           + [r["ticker"] for r in kospi_results])
+        try:
+            accum_picks = rank_accumulation(_accum_universe, limit=8, min_score=60)
+            print(f"   매집 강도 ≥60 종목: {len(accum_picks)}개")
+        except Exception as e:
+            print(f"   기관 매집 분석 실패: {e}")
+            accum_picks = []
+
+    def _accum_name(t):
+        return _KOSPI_NAMES.get(t) or _company_name(t)
 
     # ── Generate report text (Korean) ──
     lines = []
@@ -1917,10 +1918,34 @@ def generate_report():
         lines.append(f"| {i} | {r['ticker']} — {_company_name(r['ticker'])} | {r['total_score']} | {r['grade']} | {sig_emoji.get(r['signal'], '⚔️')} {r['signal']} | {r.get('decision_v2', {}).get('action', '데이터부족')} |")
     lines.append(f"")
 
-    # Section 5: Arca community
+    # Section 5: Institutional accumulation (기관 매집 추적)
+    lines.append(f"## 5. 🏛️ 기관 매집 종목 추적")
+    lines.append(f"")
+    lines.append(f"거래량 방향성(OBV·CMF·상승/하락 거래량비·A/D)으로 매집 강도를 0~100 점수화하고, "
+                 f"미국 종목은 분기 13F 기관 지분 변동으로 교차검증합니다. (KOSPI는 13F 미제공 → 기술적 신호만)")
+    lines.append(f"")
+    if accum_picks:
+        lines.append(f"| 종목 | 매집 | 강도 | OBV | CMF | 상승/하락 | 13F 기관 |")
+        lines.append(f"|------|------|------|-----|-----|-----------|----------|")
+        for e in accum_picks:
+            lines.append(accumulation_line(e, name_fn=_accum_name))
+        lines.append(f"")
+        _stealth = [_accum_name(e["ticker"]) for e in accum_picks if e.get("stealth")]
+        if _stealth:
+            lines.append(f"🤫 **조용한 매집** (가격 정체·하락 중 매집 — 기관이 조용히 모으는 패턴): {', '.join(_stealth)}")
+            lines.append(f"")
+    else:
+        lines.append(f"매집 강도 60점 이상 종목 없음 (시장 전반 중립/분산 국면).")
+        lines.append(f"")
+    lines.append(f"> ⚠️ 직접 기관 순매수(원/주) 데이터가 아닌 거래량·13F 기반 *추정*입니다. 참고용.")
+    lines.append(f"")
+    lines.append(f"---")
+    lines.append(f"")
+
+    # Section 6: Arca community
     print(f"\n🗨 아카라이브 주식 채널 수집 중...")
     arca_posts = _fetch_arca_posts()
-    lines.append(f"## 5. 아카라이브 커뮤니티 동향")
+    lines.append(f"## 6. 아카라이브 커뮤니티 동향")
     lines.append(f"")
     if arca_posts:
         lines.append(f"{len(arca_posts)}건의 분석/뉴스/정보/실적 게시글")
@@ -1940,8 +1965,8 @@ def generate_report():
         lines.append(f"---")
         lines.append(f"")
 
-    # Section 6: Conclusion
-    lines.append(f"## 6. 오늘의 결론")
+    # Section 7: Conclusion
+    lines.append(f"## 7. 오늘의 결론")
     lines.append(f"")
 
     # Generate conclusion
@@ -1990,7 +2015,7 @@ def generate_report():
     lines.append(f"")
 
     # Friday weekly recap
-    if datetime.now().weekday() == 4:  # Friday
+    if datetime.now(KST).weekday() == 4:  # Friday
         lines.append(f"## 주간 리캡 (5일)")
         lines.append(f"")
         lines.append(f"| 종목 | 등급 | 주간 변동 | 판단 |")
@@ -2003,7 +2028,7 @@ def generate_report():
         lines.append(f"---")
         lines.append(f"")
 
-    lines.append(f"## 7. 📊 실행 통계")
+    lines.append(f"## 8. 📊 실행 통계")
     lines.append(f"")
     lines.append(f"| 항목 | 값 |")
     lines.append(f"|---|------|")
@@ -2043,6 +2068,8 @@ def generate_report():
             "top_buy": kospi_top[:5],
             "top_warning": kospi_watch[:5],
         },
+        "institutional_accumulation": [_accum_clean_entry(e, name_fn=_accum_name)
+                                       for e in accum_picks] if _ACCUM_AVAILABLE else [],
     }
     for r in portfolio_results:
         entry = {
@@ -2139,6 +2166,9 @@ def generate_report():
             "signal": r["signal"],
             "decision_v2": r.get("decision_v2", {}),
         })
+    clean_data["institutional_accumulation"] = [
+        _accum_clean_entry(e, name_fn=_accum_name) for e in accum_picks
+    ] if _ACCUM_AVAILABLE else []
     clean_path = os.path.join(REPORTS_DIR, f"investment-summary-{today_str}.json")
     with open(clean_path, "w", encoding="utf-8") as f:
         json.dump(clean_data, f, ensure_ascii=False, indent=2, default=str)
@@ -2166,7 +2196,7 @@ def generate_report():
         print(f"🧠 LLM overlay 건너뜀: {llm_status}")
 
     # ── Judgment change detection ──
-    yesterday_str = (datetime.now() - timedelta(days=1)).strftime("%Y-%m-%d")
+    yesterday_str = (datetime.now(KST) - timedelta(days=1)).strftime("%Y-%m-%d")
     yesterday_path = os.path.join(REPORTS_DIR, f"investment-summary-{yesterday_str}.json")
     if os.path.exists(yesterday_path):
         try:
@@ -2231,6 +2261,9 @@ def generate_report():
     summary_lines.extend(_mobile_pick_block("🇺🇸 NAS100 주의", top_watch, exclude_tickers={r.get("ticker") for r in nasdaq_top_mobile}))
     summary_lines.extend(_mobile_pick_block("🇰🇷 KOSPI 상위", kospi_top_mobile))
     summary_lines.extend(_mobile_pick_block("🇰🇷 KOSPI 주의", kospi_watch, exclude_tickers={r.get("ticker") for r in kospi_top_mobile}))
+    if accum_picks:
+        summary_lines.append("")
+        summary_lines.extend(accumulation_mobile_block(accum_picks, "🏛️ 기관 매집", limit=3, name_fn=_accum_name))
     summary_lines.append("")
     summary_lines.append(sep)
     if watch_short:

@@ -65,26 +65,53 @@ if [ ! -f "$SUMMARY_FILE" ]; then
     exit 1
 fi
 
-# Send to Telegram via Bot API
+# Send to Telegram via Bot API (응답 검증: ok=false 면 실패 처리)
+send_telegram() {
+    local method="$1"
+    shift
+    local response
+    response=$(curl -sS -X POST "https://api.telegram.org/bot${STOCK_BOT_TOKEN}/${method}" "$@")
+    "$PYTHON_BIN" - "$response" <<'PY'
+import json
+import sys
+
+try:
+    data = json.loads(sys.argv[1])
+except Exception as exc:
+    print(f"[FAIL] Telegram API response parse failed: {exc}", file=sys.stderr)
+    sys.exit(1)
+
+if not data.get("ok"):
+    print(f"[FAIL] Telegram API returned error: {data}", file=sys.stderr)
+    sys.exit(1)
+PY
+}
+
 if [ -n "$STOCK_BOT_TOKEN" ]; then
     HEADER="📊 주식 투자 자동화 레포트 - ${DATE}"
-    curl -s -X POST "https://api.telegram.org/bot${STOCK_BOT_TOKEN}/sendMessage" \
+    send_telegram sendMessage \
         -d "chat_id=${STOCK_BOT_CHAT_ID}" \
-        -d "text=${HEADER}" > /dev/null
+        -d "text=${HEADER}"
 
-    curl -s -X POST "https://api.telegram.org/bot${STOCK_BOT_TOKEN}/sendMessage" \
+    send_telegram sendMessage \
         -d "chat_id=${STOCK_BOT_CHAT_ID}" \
-        --data-urlencode "text@${SUMMARY_FILE}" > /dev/null
+        --data-urlencode "text@${SUMMARY_FILE}"
 
-    curl -s -X POST "https://api.telegram.org/bot${STOCK_BOT_TOKEN}/sendDocument" \
+    send_telegram sendDocument \
         -F "chat_id=${STOCK_BOT_CHAT_ID}" \
         -F "document=@${REPORT_FILE}" \
-        -F "caption=전체 레포트 (${DATE})" > /dev/null
+        -F "caption=전체 레포트 (${DATE})"
 fi
 
 # ── stdout: compact delivery report (this goes to Hermes cron output) ──
 REPORT_SIZE=$(wc -c < "$REPORT_FILE")
-PORTFOLIO_COUNT=12
+PORTFOLIO_COUNT=$("$PYTHON_BIN" -c "
+import json
+snap = json.load(open('portfolio_snapshot.json'))
+tickers = {h['ticker'] for s in ('overseas_general', 'overseas_fractional')
+           for h in snap.get(s, {}).get('holdings_usd', []) if h.get('ticker')}
+print(len(tickers))
+" 2>/dev/null || echo "?")
 
 echo "📊 주식 투자 레포트 전송 완료"
 echo "━━━━━━━━━━━━━━━━━━"

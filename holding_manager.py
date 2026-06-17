@@ -236,6 +236,16 @@ def sell_holding(ticker: str, shares: float | None = None) -> str:
 
     _save(snap)
 
+    # 전량 청산으로 포지션이 완전히 사라졌으면 은퇴 티커로 기록
+    # → 일일 스모크 감사가 코드·설정에 남은 죽은 참조를 점검한다
+    if _find_holding(snap, ticker)[2] is None:
+        try:
+            from portfolio_universe import record_retired_ticker
+            record_retired_ticker(ticker)
+            msgs.append(f"  🪦 {ticker} 은퇴 티커 등록 — 잔존 참조는 일일 감사가 점검")
+        except Exception:
+            pass
+
     # 매도 후 전체 가격 갱신
     refresh_msg = refresh_portfolio_prices()
     return "✅ 매도 기록\n━━━━━━━━━━━━━━━━━━━━━━━\n" + "\n".join(msgs) + f"\n\n{refresh_msg}"
@@ -254,7 +264,7 @@ def get_dca_weights() -> tuple[dict, dict]:
 def set_dca_weights(updates: dict, mode: str = "normal") -> str:
     """
     DCA 비중 업데이트.
-    updates: {"NOW": 18, "ORCL": 18, "CRM": 10, ...}  (퍼센트 또는 소수점)
+    updates: {"ORCL": 24, "NVDA": 20, "MSFT": 18, ...}  (퍼센트 또는 소수점)
     mode: "normal" | "bear"
     """
     from barbell_strategy import save_dca_weights, load_dca_weights, DCA_WEIGHTS_FILE

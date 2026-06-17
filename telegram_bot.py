@@ -70,6 +70,7 @@ from holding_manager import refresh_portfolio_prices
 from bot.stock_advisor import ask_portfolio_advisor
 from bot.tax_commands import cmd_tax
 from bot.holding_commands import cmd_holding, cmd_dividend, cmd_apply_snapshot
+from bot.accum_commands import cmd_accum
 from bot.entry_commands import cmd_entry
 try:
     from reports.source_collector import build_digest as build_source_digest, load_recent_events as load_source_events
@@ -192,6 +193,7 @@ BOT_COMMANDS = [
     {"command": "alert",          "description": "가격 알림 관리 (add/list/remove)"},
     {"command": "mlreport",       "description": "ML 전략 성과 리포트 (샘플)"},
     {"command": "ranking",        "description": "NASDAQ100 종목 랭킹 (LightGBM)"},
+    {"command": "accum",          "description": "기관 매집 추적 — OBV·CMF·13F 매집 강도 랭킹"},
     {"command": "leverage",       "description": "레버리지 ETF 진입 분석 (QLD/TQQQ/SOXL/UPRO 손익비·타점)"},
     {"command": "meta",           "description": "ML 통합 포트폴리오 배분 (MetaAllocator)"},
     {"command": "entry",          "description": "진입 타점 분석 — 포트/us50/kr/watch/단일종목 (예: /entry NVDA, /entry kr)"},
@@ -930,7 +932,7 @@ def cmd_alert(chat_id: str, args: list):
              "/alert remove ID     알림 삭제\n"
              "\n"
              "예시:\n"
-             "/alert add CPNG 14.00 sell  ← 손절\n"
+             "/alert add NVDA 150.00 sell  ← 손절\n"
              "/alert add ORCL 260.00 sell ← 익절\n"
              "/alert add QQQ  430.00 buy  ← 매수 기회")
         return
@@ -963,7 +965,7 @@ def cmd_alert(chat_id: str, args: list):
 
     elif sub == "add":
         if len(args) < 4:
-            send(chat_id, "사용법: /alert add TICKER 가격 buy|sell [메모]\n예: /alert add CPNG 14.00 sell 손절")
+            send(chat_id, "사용법: /alert add TICKER 가격 buy|sell [메모]\n예: /alert add NVDA 150.00 sell 손절")
             return
         ticker = args[1].upper()
         try:
@@ -1601,6 +1603,7 @@ _COMMAND_HANDLERS = {
     "/dividend": lambda chat_id, args: _dispatch_with_send(cmd_dividend, chat_id, args),
     "/sim": lambda chat_id, args: _dispatch_with_typing(cmd_sim, chat_id, args),
     "/holding": lambda chat_id, args: _dispatch_with_send(cmd_holding, chat_id, args),
+    "/accum": lambda chat_id, args: _dispatch_with_send(cmd_accum, chat_id, args),
     "/order": _dispatch_order,
     "/tax": _dispatch_tax,
     "/ask": _dispatch_ask,

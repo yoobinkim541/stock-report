@@ -26,10 +26,10 @@ except Exception:
 # Configuration
 # ─────────────────────────────────────────────
 KST = timezone(timedelta(hours=9))
-NOW = datetime.now(KST)
-TODAY_STR = NOW.strftime("%Y-%m-%d")
-TODAY_STR_SHORT = NOW.strftime("%Y-%m-%d")
-WEEKDAY = NOW.weekday()  # 0=Monday .. 6=Sunday
+KST_NOW = datetime.now(KST)
+TODAY_STR = KST_NOW.strftime("%Y-%m-%d")
+TODAY_STR_SHORT = KST_NOW.strftime("%Y-%m-%d")
+WEEKDAY = KST_NOW.weekday()  # 0=Monday .. 6=Sunday
 
 REPORT_FILE = os.path.expanduser(f"~/reports/daily-report-{TODAY_STR}.md")
 SUMMARY_FILE = os.path.expanduser(f"~/reports/daily-summary-{TODAY_STR}.txt")
@@ -55,32 +55,13 @@ SECTOR_ETFS = {
     "XLRE": "Real Estate",
 }
 
-# Portfolio tickers
-DEFAULT_PORTFOLIO_TICKERS = [
-    "MSFT", "QQQI", "ORCL", "NOW", "CRM",
-    "SAP", "UNH", "SGOV", "CPNG", "NVDA",
-    "GOOGL", "SPMO",
-]
-PORTFOLIO_SNAPSHOT_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "portfolio_snapshot.json")
-
-
-def load_portfolio_tickers(path=PORTFOLIO_SNAPSHOT_PATH):
-    try:
-        with open(path, encoding="utf-8") as f:
-            snap = json.load(f)
-    except Exception:
-        return list(DEFAULT_PORTFOLIO_TICKERS)
-
-    tickers = []
-    for section in ("overseas_general", "overseas_fractional"):
-        for h in snap.get(section, {}).get("holdings_usd", []):
-            ticker = h.get("ticker")
-            shares = float(h.get("shares") or 0)
-            value = float(h.get("value_usd") or 0)
-            if ticker and (shares > 0 or value > 0) and ticker not in tickers:
-                tickers.append(ticker)
-    return tickers or list(DEFAULT_PORTFOLIO_TICKERS)
-
+# ── 포트폴리오 종목 — 단일 소스: portfolio_universe.py ──────────────────
+_PROJECT_DIR = os.getenv("STOCK_REPORT_PROJECT_DIR",
+                         os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+if _PROJECT_DIR not in sys.path:
+    sys.path.insert(0, _PROJECT_DIR)
+from portfolio_universe import (DEFAULT_PORTFOLIO_TICKERS, PORTFOLIO_SNAPSHOT_PATH,
+                                load_portfolio_tickers)
 
 PORTFOLIO_TICKERS = load_portfolio_tickers()
 

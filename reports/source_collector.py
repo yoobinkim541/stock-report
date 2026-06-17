@@ -8,6 +8,7 @@ import csv
 import hashlib
 import json
 import os
+import sys
 import re
 from collections import Counter
 from datetime import datetime, timedelta, timezone
@@ -22,7 +23,14 @@ HEADERS = {
     "User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 Chrome/120 Safari/537.36"
 }
 ARCA_LABELS = ("🧠분석", "📰뉴스", "ℹ️정보", "실적")
-PORTFOLIO_TICKERS = ["MSFT", "QQQI", "ORCL", "NOW", "CRM", "SAP", "UNH", "SGOV", "CPNG", "NVDA", "GOOGL", "SPMO"]
+# 보유 종목 — 단일 소스: portfolio_universe.py
+_PROJECT_DIR = os.getenv("STOCK_REPORT_PROJECT_DIR",
+                         os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+if _PROJECT_DIR not in sys.path:
+    sys.path.insert(0, _PROJECT_DIR)
+from portfolio_universe import load_portfolio_tickers
+
+PORTFOLIO_TICKERS = load_portfolio_tickers()
 MARKET_TICKERS = {
     "QQQ": "Nasdaq 100 ETF",
     "SPY": "S&P 500 ETF",

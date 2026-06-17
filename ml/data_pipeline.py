@@ -37,14 +37,18 @@ CACHE_DIR   = Path(os.path.expanduser("~/reports/ml-cache"))
 HEADERS     = {"User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36"}
 PRICE_TTL_H = 6   # 가격 캐시 유효시간 (시간)
 
-# 포트폴리오 보유 종목 (universe 'portfolio' 모드)
-PORTFOLIO_TICKERS = ["MSFT", "QQQI", "ORCL", "NVDA", "GOOGL", "SAP", "UNH", "SGOV", "SPMO"]
+# 포트폴리오 보유 종목 (universe 'portfolio' 모드) — 단일 소스에서 파생
+try:
+    from portfolio_universe import load_portfolio_tickers as _load_portfolio_tickers
+    PORTFOLIO_TICKERS = _load_portfolio_tickers()
+except Exception:
+    PORTFOLIO_TICKERS = ["MSFT", "QQQI", "ORCL", "NVDA", "GOOGL", "SAP", "UNH", "SGOV", "SPMO"]
 
 # 미국 시가총액 상위 100개 (섹터 다변화, 2025-26 기준)
 US_TOP100 = [
     # 빅테크 / AI / 클라우드
-    "AAPL", "MSFT", "NVDA", "GOOGL", "AMZN", "META", "TSLA", "AVGO", "ORCL", "CRM",
-    "ADBE", "INTU", "NOW", "SNOW", "PLTR", "UBER", "SHOP",
+    "AAPL", "MSFT", "NVDA", "GOOGL", "AMZN", "META", "TSLA", "AVGO", "ORCL", "CRM",  # ticker-ok 시장 유니버스
+    "ADBE", "INTU", "NOW", "SNOW", "PLTR", "UBER", "SHOP",  # ticker-ok 시장 유니버스
     # 반도체 (미국 + 대만)
     "TSM", "QCOM", "AMD", "INTC", "TXN", "AMAT", "KLAC", "MU", "ASML", "LRCX", "MRVL", "ON",
     # 금융 (은행·결제·자산운용)
