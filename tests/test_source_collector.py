@@ -156,3 +156,59 @@ def test_fetch_world_gov_bond_events_emits_common_maturities(monkeypatch):
     urls = [event["url"] for event in events]
     assert len(set(urls)) == 4
     assert "#30Y" in urls[-1]
+
+
+def test_normalize_tickers_extracts_symbols_from_dicts():
+    # SaveTicker 가 tickers 를 dict 리스트로 줄 때 symbol 만 추출
+    assert sc._normalize_tickers([{"id": 17135, "name": None, "symbol": "SPCX"}]) == ["SPCX"]
+    assert sc._normalize_tickers(["NVDA", {"symbol": "MSFT"}, {"name": "심볼없음"}]) == ["NVDA", "MSFT"]
+    assert sc._normalize_tickers(None) == []
+    assert sc._normalize_tickers([]) == []
+    assert sc._normalize_tickers([" AMD ", ""]) == ["AMD"]
+
+
+def test_build_digest_survives_dict_tickers_in_corrupt_cache():
+    # 손상 캐시(tickers/tags 가 dict 리스트)여도 build_digest 가 크래시하지 않아야 함.
+    # 회귀: 예전엔 Counter / ", ".join 에서 TypeError: unhashable type: 'dict'
+    events = [
+        {"source": "saveticker", "source_url": "https://saveticker.com/api",
+         "title": "스페이스X 급등", "url": "https://e/1",
+         "tickers": [{"id": 17135, "name": None, "symbol": "SPCX"}],
+         "tags": [{"id": 9, "name": "우주"}]},
+        {"source": "saveticker", "source_url": "https://saveticker.com/api",
+         "title": "정상 이벤트", "url": "https://e/2", "tickers": ["NVDA"]},
+    ]
+
+    digest = sc.build_digest(events, limit=5)
+
+    assert "누적 수집 자료" in digest
+    assert "NVDA" in digest            # 정상 str 티커는 집계됨
+    assert "스페이스X 급등" in digest   # dict 티커 이벤트도 크래시 없이 항목으로 표시
+
+
+def test_fetch_saveticker_events_normalizes_dict_tickers(monkeypatch):
+    class FakeResponse:
+        def __init__(self, payload):
+            self._payload = payload
+
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return self._payload
+
+    payload = {"news_list": [{
+        "title": "스페이스X 상장 급등",
+        "url": "https://e/spcx",
+        "created_at": "2026-06-16",
+        "tickers": [{"id": 17135, "name": None, "symbol": "SPCX"}],
+        "tag_names": ["우주"],
+    }]}
+
+    monkeypatch.setattr(sc.requests, "get", lambda *args, **kwargs: FakeResponse(payload))
+
+    events = sc.fetch_saveticker_events()
+
+    assert events, "이벤트가 비어있으면 안 됨"
+    assert events[0]["tickers"] == ["SPCX"]   # dict → symbol 문자열로 정규화
+    assert all(isinstance(t, str) for t in events[0]["tickers"])

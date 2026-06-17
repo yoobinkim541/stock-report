@@ -64,11 +64,11 @@ def load_cached_source_digest() -> str:
         return ""
     try:
         events = load_recent_events(hours=24)
+        if not events:
+            return ""
+        return build_digest(events)   # build_digest 도 try 안에 — 손상 캐시로 죽어도 리포트는 생존
     except Exception:
         return ""
-    if not events:
-        return ""
-    return build_digest(events)
 
 # ── 포트폴리오 종목 — 단일 소스: portfolio_universe.py ──────────────────
 _PROJECT_DIR = os.getenv("STOCK_REPORT_PROJECT_DIR",
