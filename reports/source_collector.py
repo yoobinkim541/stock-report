@@ -175,8 +175,9 @@ def build_digest(events: list[dict], limit: int = 12) -> str:
         return "## 누적 수집 자료\n\n- 최근 24시간 누적 캐시 없음\n"
 
     source_counts = Counter(e.get("source", "unknown") for e in events)
-    ticker_counts = Counter(t for e in events for t in (e.get("tickers") or []))
-    tag_counts = Counter(t for e in events for t in (e.get("tags") or []))
+    # tickers/tags 에 비문자열(dict 등)이 섞여도 죽지 않도록 방어 (손상 캐시 대비)
+    ticker_counts = Counter(t for e in events for t in (e.get("tickers") or []) if isinstance(t, str))
+    tag_counts = Counter(t for e in events for t in (e.get("tags") or []) if isinstance(t, str))
     trusted_sources = sorted({url for e in events for url in [e.get("source_url")] if isinstance(url, str) and url})
     lines = ["## 누적 수집 자료", ""]
     lines.append("- " + ", ".join(f"{src} {cnt}건" for src, cnt in source_counts.most_common()))
@@ -192,7 +193,7 @@ def build_digest(events: list[dict], limit: int = 12) -> str:
         title = event.get("title") or "[제목 없음]"
         source = event.get("source", "unknown")
         url = event.get("url") or event.get("source_url") or ""
-        tickers = ", ".join(event.get("tickers") or [])
+        tickers = ", ".join(t for t in (event.get("tickers") or []) if isinstance(t, str))
         suffix = f" · {tickers}" if tickers else ""
         lines.append(f"- [{source}] {title}{suffix}" + (f" — {url}" if url else ""))
     return "\n".join(lines) + "\n"
@@ -206,6 +207,25 @@ def _extract_tickers(text: str, universe: Iterable[str] = PORTFOLIO_TICKERS) -> 
 def _extract_news_tags(text: str) -> list[str]:
     lower = text.lower()
     return [theme for theme, words in NEWS_THEME_KEYWORDS.items() if any(word.lower() in lower for word in words)]
+
+
+def _normalize_tickers(raw) -> list[str]:
+    """티커 리스트를 문자열로 정규화.
+
+    SaveTicker API 는 tickers 를 [{"id":.., "name":.., "symbol":"NVDA"}] 같은
+    dict 리스트로 줄 때가 있다 → symbol 문자열만 추출한다. 다운스트림(build_digest
+    등)은 list[str] 을 가정하므로 dict 가 새면 Counter·join 에서 크래시한다.
+    """
+    out: list[str] = []
+    for t in raw or []:
+        if isinstance(t, str):
+            if t.strip():
+                out.append(t.strip())
+        elif isinstance(t, dict):
+            sym = t.get("symbol") or t.get("ticker") or t.get("code")
+            if sym:
+                out.append(str(sym).strip())
+    return out
 
 
 def fetch_saveticker_events() -> list[dict]:
@@ -233,7 +253,7 @@ def fetch_saveticker_events() -> list[dict]:
                 "title": title,
                 "url": item.get("url") or item.get("link") or "",
                 "published_at": item.get("created_at") or item.get("published_at") or "",
-                "tickers": item.get("tickers") or _extract_tickers(text),
+                "tickers": _normalize_tickers(item.get("tickers")) or _extract_tickers(text),
                 "tags": item.get("tag_names") or [],
             })
     return events
