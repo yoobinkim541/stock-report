@@ -127,26 +127,33 @@ def fetch_domestic_balance() -> list[dict]:
 
 
 def update_portfolio(holdings: list[dict]) -> str:
-    """portfolio_snapshot.json의 domestic 섹션 업데이트."""
-    shutil.copy2(PORTFOLIO_PATH, PORTFOLIO_PATH + ".bak")
+    """portfolio_snapshot.json의 domestic 섹션 업데이트.
 
-    with open(PORTFOLIO_PATH, encoding="utf-8") as f:
-        snap = json.load(f)
+    교차 프로세스 쓰기 락으로 portfolio_sync_server·holding_manager 와 동시 쓰기 시
+    lost update 를 방지하고, atomic write 로 torn read 를 막는다 (read-modify-write 통째 보호).
+    """
+    import sys
+    if PROJECT_DIR not in sys.path:
+        sys.path.insert(0, PROJECT_DIR)
+    import safe_io
 
-    # 기존 국내주식 딕셔너리 (ticker → entry)
-    existing = {
-        h["ticker"]: h
-        for h in snap.get("domestic", {}).get("holdings", [])
-    }
+    with safe_io.file_write_lock(PORTFOLIO_PATH):
+        shutil.copy2(PORTFOLIO_PATH, PORTFOLIO_PATH + ".bak")
+        with open(PORTFOLIO_PATH, encoding="utf-8") as f:
+            snap = json.load(f)
 
-    for h in holdings:
-        existing[h["ticker"]] = h
+        # 기존 국내주식 딕셔너리 (ticker → entry)
+        existing = {
+            h["ticker"]: h
+            for h in snap.get("domestic", {}).get("holdings", [])
+        }
+        for h in holdings:
+            existing[h["ticker"]] = h
 
-    snap.setdefault("domestic", {})["holdings"] = list(existing.values())
-    snap["last_domestic_sync"] = datetime.now().isoformat()
+        snap.setdefault("domestic", {})["holdings"] = list(existing.values())
+        snap["last_domestic_sync"] = datetime.now().isoformat()
 
-    with open(PORTFOLIO_PATH, "w", encoding="utf-8") as f:
-        json.dump(snap, f, ensure_ascii=False, indent=2)
+        safe_io.atomic_write_json(PORTFOLIO_PATH, snap)
 
     _shadow_to_store(snap)
     lines = [f"  {h['ticker']} {h['name']} {h['shares']}주  {h['return_pct']:+.1f}%" for h in holdings]

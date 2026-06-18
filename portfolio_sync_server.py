@@ -89,11 +89,26 @@ def health():
 
 
 def _update_portfolio(data: dict) -> str:
-    shutil.copy2(PORTFOLIO_PATH, PORTFOLIO_PATH + ".bak")
+    import sys
+    if PROJECT_DIR not in sys.path:
+        sys.path.insert(0, PROJECT_DIR)
+    import safe_io
 
-    with open(PORTFOLIO_PATH, encoding="utf-8") as f:
-        snap = json.load(f)
+    # 교차 프로세스 쓰기 락 + atomic write — kiwoom_sync_rest·holding_manager 와 동시 쓰기 시
+    # lost update / torn read 방지 (read-modify-write 전체를 락 안에서 수행)
+    with safe_io.file_write_lock(PORTFOLIO_PATH):
+        shutil.copy2(PORTFOLIO_PATH, PORTFOLIO_PATH + ".bak")
+        with open(PORTFOLIO_PATH, encoding="utf-8") as f:
+            snap = json.load(f)
+        summary = _apply_portfolio_update(snap, data)
+        safe_io.atomic_write_json(PORTFOLIO_PATH, snap)
 
+    _shadow_to_store(snap)
+    return summary
+
+
+def _apply_portfolio_update(snap: dict, data: dict) -> str:
+    """data 의 overseas_general/fractional 을 snap 에 머지 (락 안에서 호출). 요약 문자열 반환."""
     general_count = fractional_count = 0
 
     # ── 일반계좌 ────────────────────────────────────────────────────────
@@ -146,11 +161,6 @@ def _update_portfolio(data: dict) -> str:
         fractional_count = len(data["overseas_fractional"])
 
     snap["last_kiwoom_sync"] = datetime.now().isoformat()
-
-    with open(PORTFOLIO_PATH, "w", encoding="utf-8") as f:
-        json.dump(snap, f, ensure_ascii=False, indent=2)
-
-    _shadow_to_store(snap)
     return f"일반 {general_count}종목 · 소수점 {fractional_count}종목"
 
 

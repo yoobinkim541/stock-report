@@ -13,6 +13,7 @@ import tempfile
 from datetime import datetime
 
 import store  # SQLite 통합 저장소 (portfolio_snapshot 그림자 동기화 — round 3)
+import safe_io  # 원자적 쓰기 + 교차 프로세스 쓰기 락
 
 PORTFOLIO_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "portfolio_snapshot.json")
 
@@ -35,17 +36,14 @@ def _load() -> dict:
 
 
 def _save(snap: dict):
-    """atomic write: temp → rename, 중간 충돌 시 원본 보호."""
+    """atomic write: temp → rename, 중간 충돌 시 원본 보호.
+
+    교차 프로세스 쓰기 락(safe_io.file_write_lock)으로 kiwoom_sync_rest·
+    portfolio_sync_server 와 동시 쓰기 시 lost update 를 방지한다.
+    """
     snap["snapshot_date"] = datetime.now().strftime("%Y-%m-%d")
-    dir_ = os.path.dirname(PORTFOLIO_PATH)
-    fd, tmp = tempfile.mkstemp(dir=dir_, suffix=".tmp")
-    try:
-        with os.fdopen(fd, "w", encoding="utf-8") as f:
-            json.dump(snap, f, indent=2, ensure_ascii=False)
-        os.replace(tmp, PORTFOLIO_PATH)
-    except Exception:
-        os.unlink(tmp)
-        raise
+    with safe_io.file_write_lock(PORTFOLIO_PATH):
+        safe_io.atomic_write_json(PORTFOLIO_PATH, snap)
     # store 그림자 사본 (user_id 스코프 — 멀티유저 기반). 파일이 권위.
     store.shadow_doc("portfolio_snapshot", snap)
 
