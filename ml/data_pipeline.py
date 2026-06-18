@@ -6,7 +6,12 @@
   - Fear/Greed: 자체 proxy — VIX + QQQ모멘텀 + 신용스프레드 + 안전자산 강세
   - 매크로    : yfinance (^VIX, ^TNX, HYG, LQD, IEF, TLT)
 
-주의: 현재 구성종목 기준 → survivorship bias 있음 (리포트에 명시 필요)
+주의(survivorship bias): 유니버스가 *현재* 구성종목 기준이라 과거 시점에
+  탈락·상장폐지된 종목이 빠져 있다. 학습·백테스트는 '살아남은' 종목만 보므로
+  과거 성과(CAGR·Sharpe)가 상향 편향될 수 있다 — 정성 추정으로 연 +1~3%p
+  CAGR 과대평가 가능(학계 SP500/NASDAQ 연구 통상 범위, 본 유니버스 미측정).
+  실거래·학습은 어차피 생존 종목 대상이라 운용엔 영향이 적으나, 보고되는
+  백테스트 수치는 낙관 쪽으로 읽을 것. (리포트에 명시 필요)
 
 공개 API:
   fetch_universe(mode)         → list[str] 티커
@@ -23,6 +28,7 @@ import io
 import json
 import logging
 import os
+import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Literal
@@ -36,6 +42,11 @@ logger = logging.getLogger(__name__)
 CACHE_DIR   = Path(os.path.expanduser("~/reports/ml-cache"))
 HEADERS     = {"User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36"}
 PRICE_TTL_H = 6   # 가격 캐시 유효시간 (시간)
+
+# yfinance 배치 다운로드 견고성 파라미터
+PRICE_MAX_RETRIES   = 3            # 배치별 최대 재시도 횟수
+PRICE_BACKOFF_BASE  = 2.0          # 지수 백오프 기준 (2s·4s·8s)
+PRICE_SHRINK_STEPS  = (20, 10, 5)  # 반복 실패 시 배치 크기 동적 축소 단계
 
 # 포트폴리오 보유 종목 (universe 'portfolio' 모드) — 단일 소스에서 파생
 try:
@@ -142,6 +153,11 @@ def fetch_universe(
       nasdaq100  — Wikipedia NASDAQ100 (약 101종목)
       sp500      — Wikipedia S&P500 (약 503종목)
       all        — NASDAQ100 + S&P500 합집합
+
+    survivorship bias: 모든 모드가 *현재* 시점 구성종목을 반환한다 (point-in-time
+    재구성 아님). 과거 탈락·상폐 종목이 빠져 백테스트 CAGR 이 상향 편향될 수 있고
+    (정성 추정 연 +1~3%p), 학습 역시 생존 종목만 본다. 운용엔 영향이 작지만
+    보고 수치는 낙관 쪽으로 해석할 것. (모듈 상단 docstring 참조)
     """
     if mode == "portfolio":
         return list(PORTFOLIO_TICKERS)
@@ -211,12 +227,98 @@ def _fetch_sp500() -> list[str]:
 
 # ── 가격 데이터 ───────────────────────────────────────────────────────────────
 
+def _store_batch_result(
+    raw: pd.DataFrame,
+    batch: list[str],
+    days: int,
+    result: dict[str, pd.DataFrame],
+) -> None:
+    """yf.download 응답을 종목별로 분해해 result/캐시에 적재.
+
+    종목 단위 try/except 로 부분 실패를 격리한다 (한 종목 파싱 실패가
+    같은 배치의 다른 종목을 막지 않음).
+    """
+    if raw is None or len(raw) == 0:
+        return
+    if isinstance(raw.columns, pd.MultiIndex):
+        for ticker in batch:
+            try:
+                df = raw.xs(ticker, axis=1, level=1).dropna(how="all").copy()
+                df.index = pd.to_datetime(df.index).tz_localize(None)
+                if len(df) > 10:
+                    result[ticker] = df
+                    _save_cache(f"price_{ticker}_{days}d", df)
+            except Exception:
+                pass
+    else:
+        # 단일 종목 반환 형태
+        ticker = batch[0]
+        try:
+            df = raw.dropna(how="all").copy()
+            df.index = pd.to_datetime(df.index).tz_localize(None)
+            if len(df) > 10:
+                result[ticker] = df
+                _save_cache(f"price_{ticker}_{days}d", df)
+        except Exception:
+            pass
+
+
+def _download_batch_with_retry(
+    yf,
+    batch: list[str],
+    period: str,
+    days: int,
+    result: dict[str, pd.DataFrame],
+    batch_seq: int,
+) -> bool:
+    """단일 배치를 지수 백오프로 재시도하며 다운로드.
+
+    재시도 사이 대기: PRICE_BACKOFF_BASE^attempt 초 (2·4·8s) + 고정 지터.
+    지터는 batch_seq 기반 결정론적 값(0~0.5s) — random 미사용으로 재현 가능.
+
+    Returns:
+        True  — 배치에서 1종목 이상 적재 성공
+        False — 모든 재시도 실패 (적재 0종목)
+    """
+    before = len(result)
+    # 배치 순번 기반 고정 지터 (0.0 ~ 0.45s, 동시 배치 thundering-herd 완화)
+    jitter = (batch_seq % 10) / 20.0
+
+    for attempt in range(PRICE_MAX_RETRIES):
+        try:
+            raw = yf.download(
+                batch, period=period, auto_adjust=True,
+                progress=False, threads=True,
+            )
+            _store_batch_result(raw, batch, days, result)
+            if len(result) > before:
+                return True
+            # 예외 없이 빈 응답 — 재시도로 회복될 여지가 있어 동일 백오프 적용
+            logger.warning("배치 빈 응답 %s (시도 %d/%d)", batch, attempt + 1, PRICE_MAX_RETRIES)
+        except Exception as e:
+            logger.warning("배치 다운로드 실패 %s (시도 %d/%d): %s",
+                           batch, attempt + 1, PRICE_MAX_RETRIES, e)
+
+        # 마지막 시도가 아니면 백오프 후 재시도
+        if attempt < PRICE_MAX_RETRIES - 1:
+            delay = PRICE_BACKOFF_BASE ** (attempt + 1) + jitter
+            time.sleep(delay)
+
+    return len(result) > before
+
+
 def fetch_prices(
     tickers: list[str],
     days: int = 1260,   # 약 5년
     batch_size: int = 20,
 ) -> dict[str, pd.DataFrame]:
     """yfinance로 OHLCV 다운로드. 종목별 캐시 적용.
+
+    견고성:
+      - 배치별 지수 백오프 재시도 (최대 PRICE_MAX_RETRIES회, 2·4·8s + 고정 지터)
+      - 반복 실패 시 배치 크기 동적 축소 (20→10→5) 후 재시도
+      - 종목 단위 부분 실패 격리 (_store_batch_result)
+      - 캐시 우선 사용 (TTL 내 캐시는 네트워크 호출 없이 반환)
 
     Returns:
         {ticker: DataFrame(Date, Open, High, Low, Close, Volume)}
@@ -238,36 +340,36 @@ def fetch_prices(
         logger.info("가격 다운로드: %d종목", len(to_fetch))
         period = f"{days // 252 + 1}y"
 
-        # 배치로 다운로드
+        # 1차 배치 크기는 호출자 지정값, 이후 축소 단계는 PRICE_SHRINK_STEPS 기준
+        batch_seq = 0
         for i in range(0, len(to_fetch), batch_size):
             batch = to_fetch[i : i + batch_size]
-            try:
-                raw = yf.download(
-                    batch, period=period, auto_adjust=True,
-                    progress=False, threads=True,
-                )
-                if isinstance(raw.columns, pd.MultiIndex):
-                    for ticker in batch:
-                        try:
-                            df = raw.xs(ticker, axis=1, level=1).dropna(how="all").copy()
-                            df.index = pd.to_datetime(df.index).tz_localize(None)
-                            if len(df) > 10:
-                                result[ticker] = df
-                                _save_cache(f"price_{ticker}_{days}d", df)
-                        except Exception:
-                            pass
-                else:
-                    # 단일 종목 반환
-                    ticker = batch[0]
-                    df = raw.dropna(how="all").copy()
-                    df.index = pd.to_datetime(df.index).tz_localize(None)
-                    if len(df) > 10:
-                        result[ticker] = df
-                        _save_cache(f"price_{ticker}_{days}d", df)
-            except Exception as e:
-                logger.warning("배치 다운로드 실패 %s: %s", batch, e)
+            ok = _download_batch_with_retry(yf, batch, period, days, result, batch_seq)
+            batch_seq += 1
 
-    logger.info("가격 로드 완료: %d/%d종목", len(result), len(tickers))
+            # 배치 전체 실패 시 더 작은 단위로 쪼개 재시도 (부분 회복 시도).
+            # 각 축소 단계는 '아직 미확보' 종목만 더 작은 서브배치로 재시도하고,
+            # 전부 확보될 때까지 다음(더 작은) 단계로 계속 내려간다.
+            if not ok and len(batch) > PRICE_SHRINK_STEPS[-1]:
+                for sub_size in PRICE_SHRINK_STEPS:
+                    remaining = [t for t in batch if t not in result]
+                    if not remaining:
+                        break  # 전 종목 확보 완료
+                    if sub_size >= len(remaining):
+                        continue  # 현재 미확보 수보다 큰 분할은 의미 없음
+                    logger.warning("배치 축소 재시도: %d종목 → %d씩 분할", len(remaining), sub_size)
+                    for j in range(0, len(remaining), sub_size):
+                        sub = remaining[j : j + sub_size]
+                        _download_batch_with_retry(yf, sub, period, days, result, batch_seq)
+                        batch_seq += 1
+
+    loaded = len(result)
+    requested = len(tickers)
+    failed = requested - loaded
+    if failed > 0:
+        logger.warning("가격 로드 실패 종목 %d/%d개 (캐시·재시도·축소 후에도 미확보)",
+                       failed, requested)
+    logger.info("가격 로드 완료: %d/%d종목", loaded, requested)
     return result
 
 

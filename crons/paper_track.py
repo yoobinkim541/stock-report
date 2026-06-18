@@ -223,6 +223,10 @@ def summarize(track: dict) -> str | None:
     vol_scale = rule.std() / meta.std() if meta.std() > 0 else 1.0
     meta_voladj = meta.mean() * vol_scale
 
+    # 표본 정직성: 일별 기록 × 5거래일 수익 = 윈도 중첩 → 독립 블록은 약 N/5.
+    # 자기상관(overlap) 미보정이라 Sharpe·평균의 통계적 유의성은 약함 → 참고용 지표로만.
+    indep = max(1, len(rows) // 5)
+
     lines = [
         "🧪 페이퍼 트레이딩 A/B (MetaAllocator vs Phase 규칙)",
         "━━━━━━━━━━━━━━",
@@ -230,8 +234,9 @@ def summarize(track: dict) -> str | None:
         f"Meta:  평균 {meta.mean()*100:+.2f}%  Sharpe {_sharpe(meta):.2f}",
         f"Rule:  평균 {rule.mean()*100:+.2f}%  Sharpe {_sharpe(rule):.2f}",
         f"동일 리스크 환산 Meta 평균: {meta_voladj*100:+.2f}% (vol ×{vol_scale:.2f})",
-        f"우세:  {'Meta' if _sharpe(meta) > _sharpe(rule) else 'Rule'} (Sharpe 기준)",
-        "→ Meta 우세 지속 시 _ml_dca_blend 반영 비율 상향 검토",
+        f"우세 경향: {'Meta' if _sharpe(meta) > _sharpe(rule) else 'Rule'} (Sharpe 기준, 단정 아님)",
+        f"⚠️ 표본 N={len(rows)}(독립블록≈{indep}), 자기상관 미보정 — 참고용, 유의성 약함",
+        "→ Meta 우세가 충분한 표본에서 지속되면 _ml_dca_blend 반영 비율 상향 검토",
     ]
 
     core = np.array([e["ret_regime_core_5d"] for e in track.values()
