@@ -61,6 +61,7 @@ crons/news_spike_detector.py (크론 매 1분)
 | `tax_tracker.py` | 실현손익 기록·조회·세금 계산 | `~/.local/share/stock-report/tax_records.json` |
 | `portfolio_tracker.py` | 일일 히스토리 + 배당 기록 | `~/.local/share/stock-report/` |
 | `portfolio_sync_server.py` | 외부 잔고 수신 Flask 서버 (port 8765, Bearer 인증) | — |
+| `safe_io.py` | 멀티프로세스 안전 파일 I/O — atomic write + 교차 프로세스 쓰기 락(portfolio_snapshot writer 공용) | `<path>.lock` |
 
 **bot/ (텔레그램 서브커맨드)**
 | 파일 | 역할 |
@@ -206,6 +207,10 @@ crons/news_spike_detector.py (크론 매 1분)
 | `INVESTMENT_REPORT_ARCA_PAGES` | — | `1` |
 | `STOCK_COLLECTOR_ARCA_PAGES` | — | `2` |
 | `STOCK_REPORT_PROJECT_DIR` | — | `/home/ubuntu/projects/stock-report` |
+| `BARBELL_MAX_DCA_MULT` | — | `5.0` (DCA 배율 절대 상한 — F&G·ML 증폭 폭주 차단) |
+| `BARBELL_DCA_VOL_CAP` | — | `0.40` (QQQ 연변동성 초과 시 DCA 배율 비례 축소) |
+| `BARBELL_LEV_HALT_DD` | — | `-55.0` (낙폭 이하 시 레버리지 증액 정지 — 전소 방어) |
+| `BARBELL_PRICE_STALE_DAYS` | — | `4` (최신 종가 이보다 오래되면 stale → Phase 에스컬레이션 보류) |
 
 ## IB Phase
 
@@ -264,8 +269,12 @@ MSFT, QQQI, ORCL, SAP, UNH, SGOV, NVDA, GOOGL, SPMO
 - 텔레그램 메시지 4000자 초과 시 줄바꿈 기준 분할 (4096자 제한)
 - `STOCK_BOT_CHAT_ID` 는 env var — 코드에 하드코딩 금지
 - `KIWOOM_API_KEY` / `KIWOOM_API_SECRET` 절대 커밋 금지
-- `holding_manager._save()` 는 atomic write (temp→rename) + `store.shadow_doc` (파일 권위, store 그림자) — 직접 `json.dump` 호출 금지
-  portfolio_snapshot writer(sync_server·kiwoom_sync)도 파일 write 후 store 그림자 동기화 (best-effort 비차단)
+- `portfolio_snapshot.json` writer 3종(`holding_manager._save`·`portfolio_sync_server`·`kiwoom_sync_rest`)은
+  모두 `safe_io.atomic_write_json` + `safe_io.file_write_lock` 경유 — 직접 `json.dump`/in-place write 금지.
+  (atomic rename 으로 torn read 방지 + 교차 프로세스 락으로 동시 쓰기 lost update 방지) → 이후 `store.shadow_doc` 비차단 동기화
+- 레버리지/DCA 권고 안전장치: `barbell_strategy.leverage_dca_guard`(변동성 캡·절대 상한·낙폭 정지) +
+  `fetch_qqq_data` stale 플래그(묵은 데이터 시 `run()`이 Phase 에스컬레이션 보류) — 튜닝은 `BARBELL_*` env var
+- 크론 스케줄 단일 진실원: `deploy/crontab.stock-report` (변경 후 `crontab deploy/crontab.stock-report` 적용)
 - 기록로그(tax/history/dividend/signal_outcomes/price_alerts)는 `store.py` 경유 — 직접 파일 R/W 금지
   (DB 경로 override: `STOCK_REPORT_DB` env var, 기본 `~/.local/share/stock-report/stock_report.db`)
 - 설정 블롭(dca/target/leverage)은 store 권위 + 파일 미러(`store.save_doc`) — advisor 편집은
