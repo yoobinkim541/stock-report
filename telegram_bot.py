@@ -1113,7 +1113,7 @@ def notify_intraday_signals() -> None:
         from ml.intraday_signal import (
             is_us_market_open, is_kr_market_open,
             check_intraday_movers, format_intraday_alert,
-            should_emit_intraday_signal,
+            mark_intraday_signal_emitted, should_emit_intraday_signal,
         )
         from ml.entry_analyzer import LEVERAGE_ETFS
 
@@ -1156,6 +1156,7 @@ def notify_intraday_signals() -> None:
             msg = format_intraday_alert(sig)
             for chunk in (msg[i:i+4000] for i in range(0, len(msg), 4000)):
                 send(ALLOWED_CHAT_ID, chunk)
+            mark_intraday_signal_emitted(sig)
             logger.info("단기 신호 알림: %s (score=%.2f, alerts=%s)",
                         sig.ticker, sig.score, sig.alerts)
 

@@ -24,10 +24,10 @@
 """
 from __future__ import annotations
 
+import json
 import logging
 import os
 import pickle
-import json
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -275,21 +275,31 @@ def intraday_signal_key(sig: IntradaySignal) -> str:
     return f"{sig.ticker}|{sig.interval}|{sig.timestamp}|{alerts_key}"
 
 
-def should_emit_intraday_signal(sig: IntradaySignal, state_path: Path = INTRADAY_SENT_STATE_PATH) -> bool:
-    key = intraday_signal_key(sig)
+def _intraday_signal_state_slot(sig: IntradaySignal) -> str:
+    return f"{sig.ticker}|{sig.interval}"
+
+
+def _load_intraday_sent_state(state_path: Path) -> dict:
     try:
         state = json.loads(state_path.read_text()) if state_path.exists() else {}
+        return state if isinstance(state, dict) else {}
     except Exception:
-        state = {}
-    if state.get(sig.ticker) == key:
-        return False
+        return {}
+
+
+def should_emit_intraday_signal(sig: IntradaySignal, state_path: Path = INTRADAY_SENT_STATE_PATH) -> bool:
+    state = _load_intraday_sent_state(state_path)
+    return state.get(_intraday_signal_state_slot(sig)) != intraday_signal_key(sig)
+
+
+def mark_intraday_signal_emitted(sig: IntradaySignal, state_path: Path = INTRADAY_SENT_STATE_PATH) -> None:
+    state = _load_intraday_sent_state(state_path)
+    state[_intraday_signal_state_slot(sig)] = intraday_signal_key(sig)
     try:
         state_path.parent.mkdir(parents=True, exist_ok=True)
-        state[sig.ticker] = key
         state_path.write_text(json.dumps(state, ensure_ascii=False, indent=2))
     except Exception as e:
         logger.debug("단기 신호 중복 상태 저장 실패: %s", e)
-    return True
 
 
 def analyze_intraday(
