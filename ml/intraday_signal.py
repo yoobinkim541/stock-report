@@ -302,6 +302,28 @@ def mark_intraday_signal_emitted(sig: IntradaySignal, state_path: Path = INTRADA
         logger.debug("단기 신호 중복 상태 저장 실패: %s", e)
 
 
+def is_high_confidence_intraday_signal(sig: IntradaySignal, min_score: float = 0.65) -> bool:
+    """알림 발송용 고확신 단기 신호만 통과시킨다."""
+    if sig.score < min_score or len(sig.alerts) < 3:
+        return False
+    if sig.vwap_dev < -0.003 or sig.rsi >= 70:
+        return False
+    if any("급락" in alert or "과매도" in alert for alert in sig.alerts):
+        return False
+
+    bullish_alerts = [
+        alert for alert in sig.alerts
+        if any(token in alert for token in ("거래량", "EMA", "RSI 반등", "VWAP", "BB 상방", "모멘텀"))
+    ]
+    if len(bullish_alerts) < 3:
+        return False
+
+    has_liquidity = sig.vol_ratio >= 3.0 or any("거래량" in alert for alert in sig.alerts)
+    has_price_confirmation = sig.ema_cross_up or sig.vwap_dev >= 0
+    has_positive_move = sig.change_pct > 0 or any("+" in alert and "모멘텀" in alert for alert in sig.alerts)
+    return has_liquidity and has_price_confirmation and has_positive_move
+
+
 def analyze_intraday(
     ticker:   str,
     interval: str = "5m",
@@ -406,15 +428,15 @@ def analyze_intraday(
 def check_intraday_movers(
     tickers:       list[str],
     interval:      str   = "5m",
-    min_score:     float = 0.25,   # 이 이상만 반환
+    min_score:     float = 0.65,   # 이 이상 + 고확신 조건만 반환
     max_results:   int   = 10,
 ) -> list[IntradaySignal]:
-    """여러 종목 단기 이상 감지 (score ≥ min_score 종목만 반환)."""
+    """여러 종목 단기 이상 감지 (고확신 신호만 반환)."""
     results: list[IntradaySignal] = []
     for ticker in tickers:
         try:
             sig = analyze_intraday(ticker, interval=interval)
-            if sig and sig.score >= min_score and sig.alerts:
+            if sig and is_high_confidence_intraday_signal(sig, min_score=min_score):
                 results.append(sig)
         except Exception as e:
             logger.debug("%s 단기 분석 실패: %s", ticker, e)

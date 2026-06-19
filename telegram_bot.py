@@ -1149,7 +1149,7 @@ def notify_intraday_signals() -> None:
         if not watch_tickers:
             return
 
-        movers = check_intraday_movers(watch_tickers, interval="5m", min_score=0.35)
+        movers = check_intraday_movers(watch_tickers, interval="5m", min_score=0.65)
         for sig in movers:
             if not should_emit_intraday_signal(sig):
                 continue

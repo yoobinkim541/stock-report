@@ -7,6 +7,7 @@ from ml.intraday_signal import (
     IntradaySignal,
     _format_bar_timestamp,
     _normalize_intraday_df,
+    is_high_confidence_intraday_signal,
     mark_intraday_signal_emitted,
     should_emit_intraday_signal,
 )
@@ -90,3 +91,52 @@ def test_intraday_signal_dedup_state_is_interval_scoped(tmp_path):
 
     assert should_emit_intraday_signal(base, state_path=state_path) is False
     assert should_emit_intraday_signal(other_interval, state_path=state_path) is False
+
+
+def _intraday_sig(**overrides):
+    data = {
+        "ticker": "000660.KS",
+        "interval": "5m",
+        "currency": "KRW",
+        "price": 2732000,
+        "change_pct": 0.022,
+        "vwap_dev": 0.006,
+        "rsi": 62,
+        "vol_ratio": 3.4,
+        "ema_cross_up": True,
+        "alerts": ["📈 거래량 증가 3×", "⚡ EMA 9/21 상향 돌파", "🚀 5m 모멘텀 +1.8%"],
+        "score": 0.65,
+        "timestamp": "09:20 KST",
+    }
+    data.update(overrides)
+    return IntradaySignal(**data)
+
+
+def test_high_confidence_intraday_signal_requires_multiple_confirmations():
+    assert is_high_confidence_intraday_signal(_intraday_sig()) is True
+
+    assert is_high_confidence_intraday_signal(_intraday_sig(score=0.60)) is False
+    assert is_high_confidence_intraday_signal(_intraday_sig(alerts=["⚡ EMA 9/21 상향 돌파"], score=0.70)) is False
+    assert is_high_confidence_intraday_signal(_intraday_sig(vol_ratio=1.2, alerts=["⚡ EMA 9/21 상향 돌파", "🚀 5m 모멘텀 +1.8%", "🎯 VWAP 상향 돌파 (+0.20%)"])) is False
+    assert is_high_confidence_intraday_signal(_intraday_sig(vwap_dev=-0.01, ema_cross_up=False, alerts=["📈 거래량 증가 3×", "🚀 5m 모멘텀 +1.8%", "💥 BB 상방 돌파 (스퀴즈 해소)"])) is False
+    assert is_high_confidence_intraday_signal(_intraday_sig(rsi=72)) is False
+    assert is_high_confidence_intraday_signal(_intraday_sig(alerts=["📈 거래량 증가 3×", "⚡ EMA 9/21 상향 돌파", "🔻 5m 급락 -1.8%"], score=0.70)) is False
+
+
+def test_lmt_style_bb_volume_alert_is_not_high_confidence():
+    sig = IntradaySignal(
+        ticker="LMT",
+        interval="5m",
+        currency="USD",
+        price=511.00,
+        change_pct=0.009,
+        vwap_dev=-0.0215,
+        rsi=72,
+        vol_ratio=5.5,
+        ema_cross_up=False,
+        alerts=["🔥 거래량 급등 5×", "💥 BB 상방 돌파 (스퀴즈 해소)"],
+        score=0.60,
+        timestamp="22:57 KST",
+    )
+
+    assert is_high_confidence_intraday_signal(sig) is False
