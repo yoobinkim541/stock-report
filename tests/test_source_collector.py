@@ -57,6 +57,25 @@ def test_build_digest_groups_by_source_and_limits_items():
     assert "NVDA" in digest
 
 
+def test_build_digest_normalizes_dict_tickers_and_tags():
+    events = [
+        {
+            "source": "saveticker",
+            "source_url": "https://saveticker.com/api",
+            "title": "Microsoft AI demand",
+            "url": "https://e/msft",
+            "tickers": [{"symbol": "MSFT", "name": "Microsoft Corporation"}],
+            "tags": [{"name": "AI"}],
+        }
+    ]
+
+    digest = sc.build_digest(events, limit=5)
+
+    assert "반복 등장 종목: MSFT 1건" in digest
+    assert "반복 테마: AI 1건" in digest
+    assert "Microsoft AI demand · MSFT" in digest
+
+
 def test_fetch_market_snapshot_events_includes_common_market_and_portfolio_data():
     import pandas as pd
 

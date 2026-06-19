@@ -1113,6 +1113,7 @@ def notify_intraday_signals() -> None:
         from ml.intraday_signal import (
             is_us_market_open, is_kr_market_open,
             check_intraday_movers, format_intraday_alert,
+            should_emit_intraday_signal,
         )
         from ml.entry_analyzer import LEVERAGE_ETFS
 
@@ -1150,6 +1151,8 @@ def notify_intraday_signals() -> None:
 
         movers = check_intraday_movers(watch_tickers, interval="5m", min_score=0.35)
         for sig in movers:
+            if not should_emit_intraday_signal(sig):
+                continue
             msg = format_intraday_alert(sig)
             for chunk in (msg[i:i+4000] for i in range(0, len(msg), 4000)):
                 send(ALLOWED_CHAT_ID, chunk)

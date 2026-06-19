@@ -11,6 +11,7 @@ bot_healthcheck.py — 봇·서버 상태 자동 점검
 import os
 import sys
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+import glob
 import json
 import time
 import subprocess
@@ -230,16 +231,48 @@ def check_portfolio_age() -> tuple[str, str] | None:
     return None
 
 
+def _latest_investment_report_mtime() -> float | None:
+    """Return latest successful investment report evidence mtime."""
+    mtimes = []
+
+    # Hermes no_agent cron writes the real run logs here. This is the active
+    # scheduler source of truth; /tmp/stock_cron.log is only a legacy OS cron log.
+    for log_path in glob.glob(os.path.expanduser("~/.hermes/logs/stock-report/investment-report-*.log")):
+        try:
+            with open(log_path) as f:
+                text = f.read()
+            if "investment report finished" in text and "exit=0" in text:
+                mtimes.append(os.path.getmtime(log_path))
+        except OSError:
+            pass
+
+    for pattern in [
+        os.path.expanduser("~/reports/investment-summary-*.txt"),
+        os.path.expanduser("~/reports/investment-report-*.md"),
+    ]:
+        for report_path in glob.glob(pattern):
+            try:
+                mtimes.append(os.path.getmtime(report_path))
+            except OSError:
+                pass
+
+    log_file = "/tmp/stock_cron.log"
+    if os.path.exists(log_file):
+        mtimes.append(os.path.getmtime(log_file))
+
+    return max(mtimes) if mtimes else None
+
+
 def check_investment_report_cron() -> tuple[str, str] | None:
     """투자 리포트 크론 마지막 실행 확인."""
-    log_file = "/tmp/stock_cron.log"
-    if not os.path.exists(log_file):
-        return None  # 처음 설치 시 로그 없음
-    age_h = (time.time() - os.path.getmtime(log_file)) / 3600
+    last_mtime = _latest_investment_report_mtime()
+    if last_mtime is None:
+        return None  # 처음 설치 시 실행 증거 없음
+    age_h = (time.time() - last_mtime) / 3600
     weekday = datetime.now().weekday()  # 0=월, 6=일
     threshold = 72 if weekday >= 4 else 26  # 금~일은 72h 허용
     if age_h > threshold:
-        return ("cron_stale", f"⚠️ 투자 리포트 크론 마지막 실행 {age_h:.0f}시간 전")
+        return ("cron_stale", f"⚠️ 투자 리포트 마지막 성공 실행 {age_h:.0f}시간 전")
     return None
 
 

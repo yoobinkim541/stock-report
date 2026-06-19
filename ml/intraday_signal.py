@@ -27,6 +27,7 @@ from __future__ import annotations
 import logging
 import os
 import pickle
+import json
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -42,6 +43,7 @@ ET  = timezone(timedelta(hours=-4))   # EDT (4~10월); EST는 -5
 
 CACHE_DIR = Path(os.path.expanduser("~/reports/ml-cache"))
 INTRADAY_TTL_SEC = 60   # 1분 캐시 (API 부하 제한)
+INTRADAY_SENT_STATE_PATH = CACHE_DIR / "intraday_sent_signals.json"
 
 # ── 장 운영 시간 판별 ─────────────────────────────────────────────────────────
 
@@ -105,6 +107,29 @@ def _save_intraday_cache(key: str, df: pd.DataFrame) -> None:
         logger.debug("캐시 저장 실패: %s", e)
 
 
+def _normalize_intraday_df(df: pd.DataFrame) -> pd.DataFrame:
+    """yfinance single-ticker intraday frame shape normalization."""
+    if df.empty:
+        return df
+    if isinstance(df.columns, pd.MultiIndex):
+        # yfinance may return columns like ("Close", "000660.KS") even for one ticker.
+        if df.columns.nlevels >= 2 and len(df.columns.get_level_values(-1).unique()) == 1:
+            df = df.droplevel(-1, axis=1)
+    return df
+
+
+def _format_bar_timestamp(index_value) -> str:
+    try:
+        ts = pd.Timestamp(index_value)
+        if ts.tzinfo is None:
+            ts = ts.tz_localize("UTC")
+        else:
+            ts = ts.tz_convert("UTC")
+        return ts.tz_convert("Asia/Seoul").strftime("%H:%M KST")
+    except Exception:
+        return datetime.now(KST).strftime("%H:%M KST")
+
+
 def fetch_intraday(
     ticker:   str,
     interval: str = "5m",   # "1m" | "5m" | "15m" | "1h"
@@ -121,7 +146,7 @@ def fetch_intraday(
     key    = _intraday_cache_key(ticker, interval)
     cached = _load_intraday_cache(key)
     if cached is not None:
-        return cached
+        return _normalize_intraday_df(cached)
 
     try:
         import yfinance as yf
@@ -137,6 +162,8 @@ def fetch_intraday(
                          progress=False, auto_adjust=True)
         if df.empty:
             return pd.DataFrame()
+
+        df = _normalize_intraday_df(df)
 
         # tz 제거 (단순화)
         if hasattr(df.index, "tz") and df.index.tz is not None:
@@ -243,6 +270,28 @@ class IntradaySignal:
     timestamp:   str = ""
 
 
+def intraday_signal_key(sig: IntradaySignal) -> str:
+    alerts_key = "|".join(sig.alerts)
+    return f"{sig.ticker}|{sig.interval}|{sig.timestamp}|{alerts_key}"
+
+
+def should_emit_intraday_signal(sig: IntradaySignal, state_path: Path = INTRADAY_SENT_STATE_PATH) -> bool:
+    key = intraday_signal_key(sig)
+    try:
+        state = json.loads(state_path.read_text()) if state_path.exists() else {}
+    except Exception:
+        state = {}
+    if state.get(sig.ticker) == key:
+        return False
+    try:
+        state_path.parent.mkdir(parents=True, exist_ok=True)
+        state[sig.ticker] = key
+        state_path.write_text(json.dumps(state, ensure_ascii=False, indent=2))
+    except Exception as e:
+        logger.debug("단기 신호 중복 상태 저장 실패: %s", e)
+    return True
+
+
 def analyze_intraday(
     ticker:   str,
     interval: str = "5m",
@@ -338,7 +387,7 @@ def analyze_intraday(
         ema_cross_up = bool(cur.get("ema_cross_up", 0)),
         alerts       = alerts,
         score        = round(score, 3),
-        timestamp    = datetime.now(KST).strftime("%H:%M KST"),
+        timestamp    = _format_bar_timestamp(df.index[-1]),
     )
 
 

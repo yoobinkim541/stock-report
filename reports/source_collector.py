@@ -170,14 +170,28 @@ def load_recent_events(cache_dir: Path | str = DEFAULT_CACHE_DIR, now: datetime 
     return sorted(events, key=lambda e: e.get("collected_at", ""))
 
 
+def _normalize_symbols(values) -> list[str]:
+    symbols = []
+    for value in values or []:
+        if isinstance(value, str):
+            symbol = value
+        elif isinstance(value, dict):
+            symbol = value.get("symbol") or value.get("name") or ""
+        else:
+            symbol = ""
+        symbol = str(symbol).strip()
+        if symbol:
+            symbols.append(symbol)
+    return symbols
+
+
 def build_digest(events: list[dict], limit: int = 12) -> str:
     if not events:
         return "## 누적 수집 자료\n\n- 최근 24시간 누적 캐시 없음\n"
 
     source_counts = Counter(e.get("source", "unknown") for e in events)
-    # tickers/tags 에 비문자열(dict 등)이 섞여도 죽지 않도록 방어 (손상 캐시 대비)
-    ticker_counts = Counter(t for e in events for t in (e.get("tickers") or []) if isinstance(t, str))
-    tag_counts = Counter(t for e in events for t in (e.get("tags") or []) if isinstance(t, str))
+    ticker_counts = Counter(t for e in events for t in _normalize_symbols(e.get("tickers")))
+    tag_counts = Counter(t for e in events for t in _normalize_symbols(e.get("tags")))
     trusted_sources = sorted({url for e in events for url in [e.get("source_url")] if isinstance(url, str) and url})
     lines = ["## 누적 수집 자료", ""]
     lines.append("- " + ", ".join(f"{src} {cnt}건" for src, cnt in source_counts.most_common()))
@@ -193,7 +207,7 @@ def build_digest(events: list[dict], limit: int = 12) -> str:
         title = event.get("title") or "[제목 없음]"
         source = event.get("source", "unknown")
         url = event.get("url") or event.get("source_url") or ""
-        tickers = ", ".join(t for t in (event.get("tickers") or []) if isinstance(t, str))
+        tickers = ", ".join(_normalize_symbols(event.get("tickers")))
         suffix = f" · {tickers}" if tickers else ""
         lines.append(f"- [{source}] {title}{suffix}" + (f" — {url}" if url else ""))
     return "\n".join(lines) + "\n"
