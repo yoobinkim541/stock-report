@@ -206,10 +206,29 @@ BOT_COMMANDS = [
 ]
 
 BOT_COMMAND_ALIASES = {
+    # 흔한 오타/복수형은 정식 명령어로 통합
     "/portpolio": "/portfolio",
     "/protfolio": "/portfolio",
     "/porfolio": "/portfolio",
+    "/holdings": "/holding",
+    "/alerts": "/alert",
+    "/orders": "/order",
+    "/taxes": "/tax",
+    # 예전 단독 명령어는 하위 호환만 유지하고 /holding 하위 명령으로 합침
+    "/dividend": "/holding dividend",
+    "/apply_snapshot": "/holding apply",
 }
+
+
+HELP_SECTIONS = [
+    ("시장", ["status", "summary", "phase", "report", "sim", "accum"]),
+    ("포트폴리오", ["portfolio", "rebalance", "history", "sgov"]),
+    ("DCA·주문", ["dca", "order"]),
+    ("보유·세금", ["holding", "tax"]),
+    ("AI·알림", ["ask", "alert"]),
+    ("ML·단기신호", ["entry", "intraday", "leverage", "ranking", "meta", "mlreport"]),
+    ("읽기전용 게스트", ["market", "indicators", "myportfolio", "myadd", "myremove"]),
+]
 
 
 INTERNAL_TEXT_ROUTES = [
@@ -429,11 +448,28 @@ def get_updates(offset: int | None = None) -> list | None:
 # ══════════════════════════════════════════════════════════════════════
 
 def cmd_help() -> str:
+    by_name = {cmd["command"]: cmd["description"] for cmd in BOT_COMMANDS}
     lines = ["🏋️ Intelligence Barbell Bot", "━━━━━━━━━━━━━━━━━━━━━━━"]
-    for cmd in BOT_COMMANDS:
-        lines.append(f"/{cmd['command']:20s} {cmd['description']}")
+    shown: set[str] = set()
+    for title, commands in HELP_SECTIONS:
+        section_lines = []
+        for command in commands:
+            desc = by_name.get(command)
+            if not desc:
+                continue
+            section_lines.append(f"/{command:14s} {desc}")
+            shown.add(command)
+        if section_lines:
+            lines.append(f"\n[{title}]")
+            lines.extend(section_lines)
+    leftovers = [cmd for cmd in BOT_COMMANDS if cmd["command"] not in shown]
+    if leftovers:
+        lines.append("\n[기타]")
+        for cmd in leftovers:
+            lines.append(f"/{cmd['command']:14s} {cmd['description']}")
     lines.append("━━━━━━━━━━━━━━━━━━━━━━━")
     lines.append("📎 이미지·PDF 전송 → 포트폴리오·매도내역 자동 파싱")
+    lines.append("통합: /dividend → /holding dividend, /apply_snapshot → /holding apply")
     lines.append(f"캐시: {CACHE_TTL // 60}분  ·  /report·/order는 항상 실시간")
     return "\n".join(lines)
 
@@ -1628,7 +1664,11 @@ def dispatch(text: str, chat_id: str, role: str = "owner"):
     cmd   = parts[0].lower().split("@")[0]
     args  = parts[1:]
 
-    cmd = BOT_COMMAND_ALIASES.get(cmd, cmd)
+    alias = BOT_COMMAND_ALIASES.get(cmd)
+    if alias:
+        alias_parts = alias.split()
+        cmd = alias_parts[0]
+        args = alias_parts[1:] + args
 
     # 역할 게이팅 (보안 경계) — alias 해석 후, /ask 추론 전에 차단
     if not _command_allowed(role, cmd):

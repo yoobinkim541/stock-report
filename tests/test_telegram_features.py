@@ -151,6 +151,62 @@ def test_dispatch_routes_common_command_typo_to_portfolio(monkeypatch):
     assert sent == ["포트폴리오 현황"]
 
 
+def test_dispatch_routes_plural_aliases(monkeypatch):
+    import telegram_bot
+
+    calls = []
+
+    monkeypatch.setattr(telegram_bot, "typing", lambda chat_id: None)
+    monkeypatch.setattr(telegram_bot, "send", lambda *args: None)
+    monkeypatch.setattr(telegram_bot, "cmd_holding", lambda chat_id, args, send_fn: calls.append(("holding", args)))
+    monkeypatch.setattr(telegram_bot, "cmd_alert", lambda chat_id, args: calls.append(("alert", args)))
+    monkeypatch.setattr(telegram_bot, "cmd_order", lambda chat_id: calls.append(("order", [])))
+    monkeypatch.setattr(telegram_bot, "cmd_tax", lambda chat_id, args, send_fn: calls.append(("tax", args)))
+
+    telegram_bot.dispatch("/holdings", "chat-1")
+    telegram_bot.dispatch("/alerts list", "chat-1")
+    telegram_bot.dispatch("/orders", "chat-1")
+    telegram_bot.dispatch("/taxes history", "chat-1")
+
+    assert calls == [
+        ("holding", []),
+        ("alert", ["list"]),
+        ("order", []),
+        ("tax", ["history"]),
+    ]
+
+
+def test_dispatch_routes_legacy_commands_to_holding_subcommands(monkeypatch):
+    import telegram_bot
+
+    calls = []
+
+    monkeypatch.setattr(telegram_bot, "typing", lambda chat_id: None)
+    monkeypatch.setattr(telegram_bot, "send", lambda *args: None)
+    monkeypatch.setattr(telegram_bot, "cmd_holding", lambda chat_id, args, send_fn: calls.append(args))
+
+    telegram_bot.dispatch("/dividend 22.15 ORCL 5월배당", "chat-1")
+    telegram_bot.dispatch("/apply_snapshot", "chat-1")
+
+    assert calls == [
+        ["dividend", "22.15", "ORCL", "5월배당"],
+        ["apply"],
+    ]
+
+
+def test_cmd_help_groups_commands_and_mentions_merged_legacy_commands():
+    import telegram_bot
+
+    help_text = telegram_bot.cmd_help()
+
+    assert "[시장]" in help_text
+    assert "[포트폴리오]" in help_text
+    assert "[보유·세금]" in help_text
+    assert "[ML·단기신호]" in help_text
+    assert "/holding" in help_text
+    assert "통합: /dividend → /holding dividend" in help_text
+
+
 def test_dispatch_routes_plain_internal_feature_request_without_llm(monkeypatch):
     import telegram_bot
 
