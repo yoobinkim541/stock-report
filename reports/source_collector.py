@@ -102,6 +102,43 @@ NEWS_THEME_KEYWORDS = {
 }
 
 
+class _BoundedResponse:
+    """크기 제한 읽기를 마친 응답 래퍼 (.text/.json/.raise_for_status 호환)."""
+    def __init__(self, content: bytes, encoding):
+        self._content = content
+        self._encoding = encoding or "utf-8"
+
+    @property
+    def text(self) -> str:
+        return self._content.decode(self._encoding, errors="replace")
+
+    def json(self):
+        return json.loads(self.text)
+
+    def raise_for_status(self):
+        return None
+
+
+def _bounded_get(url: str, *, timeout: int = 20, max_bytes: int = 5_000_000, **kwargs):
+    """응답 크기 상한이 있는 requests.get — 외부 프록시(r.jina.ai 등)의 과대 응답으로 인한
+    메모리 고갈(DoS)을 방어한다. 본문을 청크로 읽어 max_bytes 초과 시 즉시 중단."""
+    kwargs.setdefault("headers", HEADERS)
+    with requests.get(url, timeout=timeout, stream=True, **kwargs) as r:
+        r.raise_for_status()
+        cl = r.headers.get("Content-Length")
+        if cl and cl.isdigit() and int(cl) > max_bytes:
+            raise ValueError(f"응답 과대(Content-Length={cl} > {max_bytes})")
+        total, chunks = 0, []
+        for chunk in r.iter_content(chunk_size=65536):
+            if not chunk:
+                continue
+            total += len(chunk)
+            if total > max_bytes:
+                raise ValueError(f"응답 과대(>{max_bytes}B) — {url[:60]}")
+            chunks.append(chunk)
+        return _BoundedResponse(b"".join(chunks), r.encoding)
+
+
 def event_id(event: dict) -> str:
     key = event.get("url") or f"{event.get('source', '')}:{event.get('title', '')}"
     return hashlib.sha256(str(key).strip().lower().encode("utf-8")).hexdigest()[:16]
@@ -264,8 +301,7 @@ def fetch_arca_events(max_pages: int = 2) -> list[dict]:
     link_pat = re.compile(r"\[([^\]]+)\]\(https://arca\.live/b/stock/(\d+)\?p=(\d+)\)")
     for page in range(1, max_pages + 1):
         try:
-            resp = requests.get(f"https://r.jina.ai/http://arca.live/b/stock?p={page}", headers=HEADERS, timeout=20)
-            resp.raise_for_status()
+            resp = _bounded_get(f"https://r.jina.ai/http://arca.live/b/stock?p={page}", timeout=20)
             markdown = resp.text
         except Exception:
             continue
@@ -292,8 +328,7 @@ def fetch_telegram_channel_events(channels: list[str] = TELEGRAM_NEWS_CHANNELS) 
         if not channel:
             continue
         try:
-            resp = requests.get(f"https://r.jina.ai/http://t.me/s/{channel}", headers=HEADERS, timeout=20)
-            resp.raise_for_status()
+            resp = _bounded_get(f"https://r.jina.ai/http://t.me/s/{channel}", timeout=20)
             markdown = resp.text
         except Exception:
             continue
@@ -439,8 +474,7 @@ def fetch_world_gov_bond_events(countries: dict[str, str] = WORLD_GOV_BOND_COUNT
     events = []
     for country, label in countries.items():
         try:
-            resp = requests.get(f"https://r.jina.ai/http://www.worldgovernmentbonds.com/country/{country}/", headers=HEADERS, timeout=20)
-            resp.raise_for_status()
+            resp = _bounded_get(f"https://r.jina.ai/http://www.worldgovernmentbonds.com/country/{country}/", timeout=20)
             yields = _parse_yields_from_world_gov_bonds(resp.text)
         except Exception:
             continue

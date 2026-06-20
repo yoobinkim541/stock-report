@@ -55,6 +55,8 @@ STATE_FILE = os.path.expanduser("~/.cache/barbell_state.json")
 # ── 기본값 (실시간 로드 실패 시 fallback) ───────────────────────────────
 SGOV_SHARES_DEFAULT = 10.0
 QQQI_SHARES_DEFAULT = 35.2987
+SGOV_FALLBACK_PRICE = 100.67   # 직전 정상가 캐시도 없을 때의 최후 상수 (drift 있음 — 캐시 우선)
+QQQI_FALLBACK_PRICE = 57.22
 DCA_DAILY_BASE_KRW = 40_000
 TARGET_SGOV_RATIO = 0.08
 MAX_SGOV_RATIO = 0.20
@@ -395,6 +397,29 @@ def _history_cached(symbol: str, period: str = "1y"):
     return hist if hist is not None else pd.DataFrame()
 
 
+_LAST_PRICES_FILE = os.path.expanduser("~/.cache/barbell_last_prices.json")
+
+
+def _load_last_prices() -> dict:
+    """직전 정상 조회가격 캐시 — yfinance 실패 시 하드코딩 대신 최근 실값으로 폴백."""
+    try:
+        with open(_LAST_PRICES_FILE, encoding="utf-8") as f:
+            d = json.load(f)
+        return {k: float(v) for k, v in d.items() if isinstance(v, (int, float)) and v > 0}
+    except Exception:
+        return {}
+
+
+def _save_last_prices(prices: dict) -> None:
+    """이번에 성공 조회한 가격을 직전 정상가 캐시에 병합 저장 (best-effort)."""
+    try:
+        merged = _load_last_prices()
+        merged.update({k: float(v) for k, v in prices.items() if v and v > 0})
+        _atomic_write_json(_LAST_PRICES_FILE, merged)
+    except Exception as e:
+        logger.debug("직전 가격 캐시 저장 실패(무시): %s", e)
+
+
 def _atomic_write_json(path: str, obj: dict):
     """temp→rename atomic write (부분 쓰기·동시 쓰기 깨짐 방지)."""
     os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
@@ -670,8 +695,10 @@ def fetch_portfolio_value() -> dict:
         for section, key in [("overseas_general", "holdings_usd"),
                              ("overseas_fractional", "holdings")]:
             for h in snap.get(section, {}).get(key, []):
+                if not isinstance(h, dict) or "ticker" not in h:
+                    continue   # 손상/수기편집 스냅샷 방어
                 t = h["ticker"]
-                shares = float(h.get("shares", 0))
+                shares = float(h.get("shares", 0) or 0)
                 holdings[t] = holdings.get(t, 0.0) + shares
                 cost = _safe_float(h.get("cost_usd"))
                 if cost <= 0 and _safe_float(h.get("avg_price_usd")) > 0:
@@ -740,11 +767,16 @@ def fetch_portfolio_value() -> dict:
         except Exception:
             pass
 
-    # 그래도 가격 없는 종목 → 평단가 fallback + 경고 ($0 평가로 총액 과소측정 방지)
+    # 그래도 가격 없는 종목 → 직전 정상가 캐시 → 평단가 순 fallback (가짜 하드코딩 대신 최근 실값 우선)
+    last_prices = _load_last_prices()
     for t in tickers:
         if prices.get(t, 0) > 0:
             continue
-        shares = holdings.get(t, 0)
+        if last_prices.get(t, 0) > 0:
+            prices[t] = float(last_prices[t])
+            logger.warning("%s 가격 조회 실패 — 직전 정상가 $%.2f 로 대체", t, prices[t])
+            continue
+        shares = float(holdings.get(t, 0) or 0)
         avg = cost_usd_by_ticker.get(t, 0.0) / shares if shares > 0 else 0.0
         if avg > 0:
             prices[t] = round(avg, 2)
@@ -752,18 +784,24 @@ def fetch_portfolio_value() -> dict:
         else:
             logger.warning("%s 가격 조회 실패 + 평단가 없음 — $0 평가 (총액 과소측정 가능)", t)
 
-    total_usd = sum(holdings.get(t, 0) * prices.get(t, 0) for t in tickers)
+    # 이번에 성공 조회한 가격을 직전 정상가 캐시에 저장 (다음 실패 시 fallback 소스)
+    _save_last_prices({t: prices[t] for t in tickers if prices.get(t, 0) > 0})
+
+    # float 캐스팅 — 손상된 스냅샷(문자열 shares 등)에서도 산술 오류/오평가 방지
+    total_usd = sum(float(holdings.get(t, 0) or 0) * float(prices.get(t, 0) or 0) for t in tickers)
     cost_usd = sum(cost_usd_by_ticker.values())
     pnl_usd = total_usd - cost_usd if cost_usd > 0 else 0.0
     return_pct = pnl_usd / cost_usd * 100 if cost_usd > 0 else 0.0
-    if "SGOV" in holdings and prices.get("SGOV", 0) <= 0:
-        logger.warning("SGOV 가격 조회 실패 — 기본값 $100.67 사용")
-    sgov_usd = holdings.get("SGOV", SGOV_SHARES_DEFAULT) * prices.get("SGOV", 100.67)
-    qqqi_shares = holdings.get("QQQI", QQQI_SHARES_DEFAULT)
-    if "QQQI" in holdings and prices.get("QQQI", 0) <= 0:
-        logger.warning("QQQI 가격 조회 실패 — 기본값 $57.22 사용")
-    qqqi_price = prices.get("QQQI", 57.22)
-    qqqi_usd = qqqi_shares * qqqi_price
+    # SGOV/QQQI 평가 — 조회 실패 시 직전 정상가 → 최후의 하드코딩 상수
+    sgov_px = prices.get("SGOV") or last_prices.get("SGOV") or SGOV_FALLBACK_PRICE
+    if "SGOV" in holdings and not (prices.get("SGOV", 0) > 0):
+        logger.warning("SGOV 가격 조회 실패 — 대체가 $%.2f 사용", sgov_px)
+    sgov_usd = float(holdings.get("SGOV", SGOV_SHARES_DEFAULT) or 0) * float(sgov_px)
+    qqqi_shares = float(holdings.get("QQQI", QQQI_SHARES_DEFAULT) or 0)
+    qqqi_px = prices.get("QQQI") or last_prices.get("QQQI") or QQQI_FALLBACK_PRICE
+    if "QQQI" in holdings and not (prices.get("QQQI", 0) > 0):
+        logger.warning("QQQI 가격 조회 실패 — 대체가 $%.2f 사용", qqqi_px)
+    qqqi_usd = qqqi_shares * float(qqqi_px)
 
     return {
         "total_usd": round(total_usd, 2),
