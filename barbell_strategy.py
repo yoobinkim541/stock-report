@@ -579,6 +579,9 @@ def leverage_dca_guard(base_adj_mult: float, *, drawdown_pct=None, realized_vol=
     if mult > MAX_DCA_MULTIPLIER:
         notes.append(f"절대 상한 적용: ×{round(mult,2)} → ×{MAX_DCA_MULTIPLIER}")
         mult = MAX_DCA_MULTIPLIER
+    # 의도적 불변식: 하한(1.0 floor)을 두지 않는다. 고점 국면의 0.5×(Bull-2)·0.8×(Bull-1)
+    # 처럼 1.0 미만 배율은 '고점에서 DCA 축소'라는 설계다. 여기에 max(1.0, mult) 를 넣으면
+    # 그 의도가 깨지므로 금지 (가드는 '리스크 축소'만, 최소 매수 강제는 하지 않음).
     return round(mult, 2), {
         "vol_scale": vol_scale,
         "realized_vol_pct": round(realized_vol * 100, 1) if realized_vol else 0.0,
