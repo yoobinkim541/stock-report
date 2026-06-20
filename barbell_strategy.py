@@ -45,6 +45,7 @@ logger = logging.getLogger(__name__)
 logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
 
 import store  # SQLite 통합 저장소 (설정 블롭 권위 사본 + 파일 미러)
+import safe_io  # 교차 프로세스 쓰기 락 (상태파일 read-modify-write 직렬화)
 
 TELEGRAM_TOKEN   = os.getenv("STOCK_BOT_TOKEN")
 TELEGRAM_CHAT_ID = os.getenv("STOCK_BOT_CHAT_ID", "5771238245")
@@ -445,16 +446,22 @@ def _update_drawdown_anchor(high_52w: float, current: float) -> float:
     → 앵커는 단조 증가시키고, 가격이 앵커 -5% 이내로 실제 회복했을 때만
       롤링 52주 고점으로 리셋한다.
     """
-    anchor = max(high_52w, _load_drawdown_anchor())
-    if anchor > 0 and current >= anchor * ANCHOR_RESET_RECOVERY:
-        anchor = high_52w
+    # 봇(5분 루프)+크론이 매 run()마다 호출 → load-decide-save 를 교차 프로세스 락으로 직렬화
+    # (lost update 방지). 앵커 리셋(회복 시 롤링 고점 복귀)은 의도된 설계이므로 단조성은 그대로 둔다.
     try:
-        store.save_doc("barbell_anchor", {
-            "anchor_high": round(anchor, 2),
-            "updated": datetime.now().isoformat(),
-        }, ANCHOR_FILE)
+        with safe_io.file_write_lock(ANCHOR_FILE):
+            anchor = max(high_52w, _load_drawdown_anchor())
+            if anchor > 0 and current >= anchor * ANCHOR_RESET_RECOVERY:
+                anchor = high_52w
+            store.save_doc("barbell_anchor", {
+                "anchor_high": round(anchor, 2),
+                "updated": datetime.now().isoformat(),
+            }, ANCHOR_FILE)
     except Exception:
-        pass
+        # 락/저장 실패해도 앵커 계산값은 반환 (Phase 분류 진행)
+        anchor = max(high_52w, _load_drawdown_anchor())
+        if anchor > 0 and current >= anchor * ANCHOR_RESET_RECOVERY:
+            anchor = high_52w
     return anchor
 
 
@@ -879,14 +886,18 @@ def save_leverage_state(state: dict):
 
 
 def update_leverage_position(ticker: str, shares: float, avg_price: float):
-    """CLI --update-leverage 에서 호출: QLD/TQQQ 포지션 업데이트."""
-    state = load_leverage_state()
-    state[ticker.upper()] = {
-        "shares": round(shares, 4),
-        "avg_price_usd": round(avg_price, 2),
-        "updated": datetime.now().strftime("%Y-%m-%d"),
-    }
-    save_leverage_state(state)
+    """CLI --update-leverage 에서 호출: QLD/TQQQ 포지션 업데이트.
+
+    read-modify-write 를 교차 프로세스 락으로 직렬화 — 동시 갱신 시 lost update 방지.
+    """
+    with safe_io.file_write_lock(LEVERAGE_FILE):
+        state = load_leverage_state()
+        state[ticker.upper()] = {
+            "shares": round(shares, 4),
+            "avg_price_usd": round(avg_price, 2),
+            "updated": datetime.now().strftime("%Y-%m-%d"),
+        }
+        save_leverage_state(state)
     print(f"✅ {ticker.upper()} 포지션 업데이트: {shares}주 @ ${avg_price:.2f}")
 
 
