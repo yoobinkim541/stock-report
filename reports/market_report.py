@@ -216,10 +216,19 @@ def load_cached_source_digest() -> str:
     return build_digest(events)
 
 
+def escape_markdown(text: Optional[str]) -> str:
+    """마크다운 특수문자 이스케이프 — 외부 뉴스 제목 등을 마크다운에 임베드할 때
+    인젝션(굵게/링크/코드블록 깨짐) 방지. None/빈값은 빈 문자열로."""
+    if not text:
+        return ""
+    return re.sub(r'([\*\[\]\(\)_`~])', r'\\\1', str(text))
+
+
 def format_news_item(item: dict, include_snippet: bool = True) -> str:
     """Format a SaveTicker news item into a markdown bullet."""
-    title = item.get("title") or "[제목 없음]"
-    source = item.get("source") or ""
+    # 외부 입력(제목·출처)은 마크다운 임베드 전 이스케이프 — 인젝션 방어
+    title = escape_markdown(item.get("title")) or "[제목 없음]"
+    source = escape_markdown(item.get("source"))
     created_at = format_kst_time(item.get("created_at"))
     tags = [t for t in (item.get("tag_names") or []) if t]
     parts = []
@@ -228,11 +237,13 @@ def format_news_item(item: dict, include_snippet: bool = True) -> str:
     if created_at:
         parts.append(created_at)
     if tags:
-        parts.append(", ".join(tags[:3]))
+        # 태그도 외부 입력 — 마크다운 이스케이프
+        parts.append(", ".join(escape_markdown(t) for t in tags[:3]))
     meta = f" ({' · '.join(parts)})" if parts else ""
     line = f"- **{title}**{meta}"
     if include_snippet:
-        snippet = compact_text(item.get("content") or item.get("group_summary") or "", 120)
+        # 스니펫(본문/요약)도 외부 입력 — 마크다운 이스케이프 후 임베드
+        snippet = escape_markdown(compact_text(item.get("content") or item.get("group_summary") or "", 120))
         if snippet:
             line += f"\n  - {snippet}"
     return line
@@ -346,7 +357,11 @@ def section_1_market_overview() -> str:
                     continue
                 prev_close = hist["Close"].iloc[-2]
                 curr_close = hist["Close"].iloc[-1]
-                change = ((curr_close - prev_close) / prev_close) * 100
+                # 0/None 분모 방어 — prev_close 가 0이거나 결측이면 변화율 계산 불가
+                if prev_close and prev_close > 0:
+                    change = ((curr_close - prev_close) / prev_close) * 100
+                else:
+                    change = None
                 arrow = arrow_for_change(change)
                 lines.append(
                     f"- **{name} ({symbol})**: {price_str(curr_close)} "
@@ -503,7 +518,11 @@ def section_3_sector_performance() -> str:
                 continue
             prev = hist["Close"].iloc[-2]
             curr = hist["Close"].iloc[-1]
-            change = ((curr - prev) / prev) * 100
+            # 0/None 분모 방어 — prev 가 0이거나 결측이면 변화율 계산 불가
+            if prev and prev > 0:
+                change = ((curr - prev) / prev) * 100
+            else:
+                change = None
             arrow = arrow_for_change(change)
             lines.append(f"- **{name} ({symbol})**: {price_str(curr)} {arrow} {pct_str(change)}")
         except Exception as e:
@@ -556,10 +575,11 @@ def section_4_technical_analysis() -> str:
         current_price = closes.iloc[-1]
         lines.append(f"- **50일 SMA**: {price_str(sma50) if sma50 is not None else '[데이터 없음]'}")
         lines.append(f"- **200일 SMA**: {price_str(sma200) if sma200 is not None else '[데이터 없음]'}")
-        if sma50 is not None:
+        # 0 분모 방어 — sma 값이 0이면 이격도(%) 계산 불가
+        if sma50 is not None and sma50 > 0:
             pct_above_50 = ((current_price - sma50) / sma50) * 100
             lines.append(f"  - 현재가 vs 50일선: {pct_str(pct_above_50)}")
-        if sma200 is not None:
+        if sma200 is not None and sma200 > 0:
             pct_above_200 = ((current_price - sma200) / sma200) * 100
             lines.append(f"  - 현재가 vs 200일선: {pct_str(pct_above_200)}")
 
@@ -719,11 +739,13 @@ def section_6_portfolio_analysis() -> str:
             target_high = info.get("targetHighPrice")
             target_low = info.get("targetLowPrice")
             if target_mean:
-                upside = ((target_mean - curr_price) / curr_price) * 100
+                # 0/None 분모 방어 — curr_price 가 0/결측이면 상승여력 계산 생략
+                upside = ((target_mean - curr_price) / curr_price) * 100 if (curr_price and curr_price > 0) else None
                 lines.append(f"  - **애널리스트 목표가**: 평균 {price_str(target_mean)} "
                              f"(고가 {price_str(target_high) if target_high else 'N/A'} / "
                              f"저가 {price_str(target_low) if target_low else 'N/A'})")
-                lines.append(f"    - 현재가 대비: {pct_str(upside)}")
+                if upside is not None:
+                    lines.append(f"    - 현재가 대비: {pct_str(upside)}")
 
             # Recent news
             try:
