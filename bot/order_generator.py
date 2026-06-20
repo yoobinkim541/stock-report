@@ -12,8 +12,11 @@ Usage:
 """
 
 import html
+import logging
 import os, sys, argparse, unicodedata
 from datetime import datetime
+
+_logger = logging.getLogger(__name__)
 
 import yfinance as yf
 import requests
@@ -34,6 +37,12 @@ from barbell_strategy import (
 )
 
 MARKET_OPEN_KST = 22   # KST 22:00 = 미국 장 시작
+
+# 소수점 매수 수량 표시·산출 자리수 (키움 소수점 매수 입력 단위와 일치)
+QTY_DECIMALS = 4
+# 역검증 허용오차: 1주문당 절대 100원 또는 상대 1% 중 큰 값까지 허용
+PRECISION_ABS_KRW = 100.0
+PRECISION_REL = 0.01
 
 COMPANY_NAMES: dict[str, str] = {
     "ORCL":  "Oracle",
@@ -146,17 +155,47 @@ def generate(send: bool = False) -> str:
 
     total_usd  = 0.0
     order_rows = []
+    precision_warns: list[dict] = []  # 역검증 실패(정밀도 드리프트) 종목 모음
+    # fx 가 비정상(0·음수·NaN)이면 KRW→USD 환산 자체가 무의미 → 0 으로 방어
+    safe_fx = _safe(fx, default=0.0)
     for ticker, krw_amt in dca["by_ticker"].items():
         price = prices.get(ticker, 0)
         company = COMPANY_NAMES.get(ticker, "")
         label_str = f"{ticker} — {company}" if company else ticker
-        if price > 0:
-            usd_amt    = krw_amt / fx
-            qty        = usd_amt / price
+        if price > 0 and safe_fx > 0:
+            usd_amt    = krw_amt / safe_fx
+            # 표시·실주문 자리수와 동일하게 반올림한 수량을 권위값으로 사용
+            # (이중 나눗셈 후 4자리 절삭으로 발생하는 실투입액 드리프트를 일관화)
+            qty        = round(usd_amt / price, QTY_DECIMALS)
             total_usd += usd_amt
-            order_rows.append((ticker, krw_amt, qty, price))
+
+            # 역검증: 실제로 qty 주를 price·fx 로 매수하면 들어가는 원화
+            actual_krw = qty * price * safe_fx
+            tol = max(PRECISION_ABS_KRW, abs(krw_amt) * PRECISION_REL)
+            warn = abs(actual_krw - krw_amt) > tol
+            if warn:
+                drift = actual_krw - krw_amt
+                precision_warns.append({
+                    "ticker": ticker,
+                    "declared_krw": krw_amt,
+                    "actual_krw": round(actual_krw, 2),
+                    "drift_krw": round(drift, 2),
+                })
+                _logger.warning(
+                    "주문서 정밀도 경고 %s: 선언 %s원 vs 실투입 %.2f원 (드리프트 %+.2f원, 허용 %.2f원)",
+                    ticker, f"{krw_amt:,}", actual_krw, drift, tol,
+                )
+
+            order_rows.append({
+                "ticker": ticker,
+                "krw_amt": krw_amt,
+                "qty": qty,
+                "price": price,
+                "precision_warn": warn,
+            })
+            mark = " ⚠️" if warn else ""
             lines.append(
-                f"{_dw_pad(label_str, COL1)}  {krw_amt:>8,}원  {qty:>8.4f}주  @${price:>7.2f}"
+                f"{_dw_pad(label_str, COL1)}  {krw_amt:>8,}원  {qty:>8.{QTY_DECIMALS}f}주  @${price:>7.2f}{mark}"
             )
         else:
             lines.append(f"{_dw_pad(label_str, COL1)}  {krw_amt:>8,}원  (가격 조회 실패)")
@@ -167,6 +206,17 @@ def generate(send: bool = False) -> str:
         "",
         "📱 키움증권  →  해외주식  →  소수점 매수  →  금액 입력",
     ]
+
+    # 정밀도 경고: 소수점 수량 반올림 때문에 실투입 원화가 선언액과 어긋나는 종목 안내
+    if precision_warns:
+        names = ", ".join(
+            f"{w['ticker']}({w['drift_krw']:+,.0f}원)" for w in precision_warns
+        )
+        lines += [
+            "",
+            f"⚠️  소수점 반올림으로 실투입액 오차: {names}",
+            "    → 금액(원) 기준 입력 시 큰 차이 없음",
+        ]
 
     # Phase별 부가 안내
     if market_type == "bear" and isinstance(phase_key, int) and phase_key >= 2:
@@ -179,10 +229,6 @@ def generate(send: bool = False) -> str:
     if send:
         _send(report)
     return report
-
-
-import logging as _logging
-_logger = _logging.getLogger(__name__)
 
 
 def _send(text: str):

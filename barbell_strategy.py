@@ -387,7 +387,11 @@ def _history_cached(symbol: str, period: str = "1y"):
     except Exception:
         hist = pd.DataFrame()
     if hist is not None and not hist.empty:
-        _HIST_CACHE[key] = (time.time(), hist)
+        now = time.time()
+        # 만료 엔트리 정리 — 인-프로세스 캐시 무한 증가 방지 (상시 봇 프로세스)
+        for k in [k for k, v in _HIST_CACHE.items() if now - v[0] >= _HIST_CACHE_TTL_S]:
+            _HIST_CACHE.pop(k, None)
+        _HIST_CACHE[key] = (now, hist)
     return hist if hist is not None else pd.DataFrame()
 
 
@@ -688,8 +692,11 @@ def fetch_portfolio_value() -> dict:
                 cost_usd_by_ticker[ticker] = cost_usd_by_ticker.get(ticker, 0.0) + sh * avg
 
     if not holdings:
-        logger.warning("보유 수량 데이터 없음 — 하드코딩 기본 포트폴리오 값 사용 (실제와 다를 수 있음)")
-        return {"total_usd": 7940.0, "sgov_usd": 1006.7, "qqqi_usd": 2019.77, "qqqi_shares": 35.2987, "prices": {}, "holdings": {}, "holdings_detail": holdings_detail}
+        # 스냅샷이 비었을 때의 최후 폴백 — 값이 실제 포트폴리오와 다르므로 'data_missing' 으로
+        # 명시 플래그(리포트가 추정치임을 표시·신뢰하지 않도록). 키는 유지해 다운스트림 KeyError 방지.
+        logger.error("보유 수량 데이터 없음 — 폴백 추정치 사용(실제와 불일치). portfolio_snapshot.json 확인 필요")
+        return {"total_usd": 7940.0, "sgov_usd": 1006.7, "qqqi_usd": 2019.77, "qqqi_shares": 35.2987,
+                "prices": {}, "holdings": {}, "holdings_detail": holdings_detail, "data_missing": True}
 
     # --- 실시간 가격 조회 ---
     tickers = list(holdings.keys())
