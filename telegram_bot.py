@@ -368,7 +368,7 @@ def configure_bot_commands():
         result = _api("setMyCommands", **params)
         if result.get("result") is True:
             success += 1
-    logger.info("setMyCommands 완료 (%d개 scope, %d개 명령어)", success, len(BOT_COMMANDS))
+    logger.debug("setMyCommands 완료 (%d개 scope, %d개 명령어)", success, len(BOT_COMMANDS))
 
 
 def send(chat_id: str, text: str, max_len: int = 4000):
