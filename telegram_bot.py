@@ -20,6 +20,7 @@ Commands:
 
 import json
 import os
+import re
 import sys
 import time
 import fcntl
@@ -330,6 +331,20 @@ def fetch_market(force: bool = False) -> dict:
 
 _SENTINEL_409: dict = {"__conflict_409__": True}
 
+# 텔레그램 파일 다운로드 DoS 방어용 상한 (50MB)
+_MAX_DOWNLOAD_BYTES = 50 * 1024 * 1024
+
+
+def _mask_token(text: object) -> str:
+    """로그 출력 전 봇 토큰을 마스킹 — 예외 메시지에 토큰이 섞인 URL이 노출되는 것 방지."""
+    s = str(text)
+    # 직접 토큰 문자열 치환 (URL 등에 그대로 박힌 경우)
+    if TELEGRAM_TOKEN:
+        s = s.replace(TELEGRAM_TOKEN, "***")
+    # /bot<token>/ 패턴 정규식 마스킹 (토큰 형태가 일부 변형돼도 방어)
+    s = re.sub(r"/bot[0-9]+:[A-Za-z0-9_-]+", "/bot***", s)
+    return s
+
 
 def _api(method: str, **kwargs) -> dict:
     url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/{method}"
@@ -347,7 +362,8 @@ def _api(method: str, **kwargs) -> dict:
             if r.status_code < 500 and r.status_code != 429:
                 return {}
         except Exception as e:
-            logger.error("API %s attempt %d/%d: %s", method, attempt, attempts, e)
+            # 예외 메시지에 토큰이 박힌 URL이 섞일 수 있어 마스킹 후 로깅
+            logger.error("API %s attempt %d/%d: %s", method, attempt, attempts, _mask_token(e))
         if attempt < attempts:
             time.sleep(min(2 ** (attempt - 1), 4))
     return {}
@@ -411,7 +427,8 @@ def send_photo(chat_id: str, path: str, caption: str = "") -> bool:
             )
         return r.ok
     except Exception as e:
-        logger.warning("send_photo 실패 (%s): %s", path, e)
+        # 토큰이 박힌 sendPhoto URL이 예외에 섞일 수 있어 마스킹 후 로깅
+        logger.warning("send_photo 실패 (%s): %s", path, _mask_token(e))
         return False
 
 
@@ -736,15 +753,46 @@ def download_telegram_file(file_id: str, filename: str) -> str | None:
         return None
     url = f"https://api.telegram.org/file/bot{TELEGRAM_TOKEN}/{file_path}"
     try:
-        r = requests.get(url, timeout=60)
-        if not r.ok:
-            return None
-        local_path = str(ATTACH_DIR / filename)
-        with open(local_path, "wb") as f:
-            f.write(r.content)
+        # stream=True 로 받아 헤더·본문 크기를 검사 — 대용량 파일 DoS(디스크/메모리 고갈) 방어
+        with requests.get(url, timeout=60, stream=True) as r:
+            if not r.ok:
+                return None
+            # Content-Length 가 임계를 넘으면 본문을 읽기 전에 거부
+            declared = r.headers.get("Content-Length")
+            if declared is not None:
+                try:
+                    if int(declared) > _MAX_DOWNLOAD_BYTES:
+                        logger.warning(
+                            "파일 다운로드 거부 — 크기 초과 (Content-Length=%s > %d)",
+                            declared, _MAX_DOWNLOAD_BYTES,
+                        )
+                        return None
+                except ValueError:
+                    pass  # 헤더가 비정상이면 무시하고 본문 누적 검사로 방어
+            local_path = str(ATTACH_DIR / filename)
+            written = 0
+            with open(local_path, "wb") as f:
+                # 청크로 읽으며 누적 크기가 임계를 넘으면 중단 (헤더 누락/위조 방어)
+                for chunk in r.iter_content(chunk_size=64 * 1024):
+                    if not chunk:
+                        continue
+                    written += len(chunk)
+                    if written > _MAX_DOWNLOAD_BYTES:
+                        logger.warning(
+                            "파일 다운로드 중단 — 본문 크기 초과 (%d > %d)",
+                            written, _MAX_DOWNLOAD_BYTES,
+                        )
+                        f.close()
+                        try:
+                            os.remove(local_path)  # 부분 파일 정리
+                        except OSError:
+                            pass
+                        return None
+                    f.write(chunk)
         return local_path
     except Exception as e:
-        logger.error(f"파일 다운로드 실패: {e}")
+        # 토큰이 박힌 file URL 이 예외에 섞일 수 있어 마스킹 후 로깅
+        logger.error("파일 다운로드 실패: %s", _mask_token(e))
         return None
 
 

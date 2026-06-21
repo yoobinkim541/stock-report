@@ -45,6 +45,7 @@ logger = logging.getLogger(__name__)
 logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
 
 import store  # SQLite 통합 저장소 (설정 블롭 권위 사본 + 파일 미러)
+import safe_io  # 교차 프로세스 쓰기 락 (상태파일 read-modify-write 직렬화)
 
 TELEGRAM_TOKEN   = os.getenv("STOCK_BOT_TOKEN")
 TELEGRAM_CHAT_ID = os.getenv("STOCK_BOT_CHAT_ID", "5771238245")
@@ -55,6 +56,8 @@ STATE_FILE = os.path.expanduser("~/.cache/barbell_state.json")
 # ── 기본값 (실시간 로드 실패 시 fallback) ───────────────────────────────
 SGOV_SHARES_DEFAULT = 10.0
 QQQI_SHARES_DEFAULT = 35.2987
+SGOV_FALLBACK_PRICE = 100.67   # 직전 정상가 캐시도 없을 때의 최후 상수 (drift 있음 — 캐시 우선)
+QQQI_FALLBACK_PRICE = 57.22
 DCA_DAILY_BASE_KRW = 40_000
 TARGET_SGOV_RATIO = 0.08
 MAX_SGOV_RATIO = 0.20
@@ -67,6 +70,13 @@ RSI_EXTREME_OB = 75
 VIX_HIGH = 30
 VIX_EXTREME = 40
 VIX_LOW = 15
+
+# ── 안전장치 (레버리지/DCA 리스크 가드) ──────────────────────────────────
+# 봇은 매매를 실행하지 않고 '권고'만 한다. 아래는 그 권고가 폭주하지 않도록 하는 한도.
+MAX_DCA_MULTIPLIER = float(os.getenv("BARBELL_MAX_DCA_MULT", "5.0"))   # 절대 배율 상한 (F&G·ML 증폭 폭주 차단)
+DCA_VOL_CAP_ANNUAL = float(os.getenv("BARBELL_DCA_VOL_CAP", "0.40"))   # QQQ 연변동성 이 값 초과 시 배율 비례 축소
+LEVERAGE_HALT_DRAWDOWN = float(os.getenv("BARBELL_LEV_HALT_DD", "-55.0"))  # 낙폭 이 값 이하면 레버리지 증액 정지(실탄 소진·전소 방어)
+PRICE_STALE_MAX_DAYS = float(os.getenv("BARBELL_PRICE_STALE_DAYS", "4"))   # 최신 종가가 이보다 오래되면 stale (주말+공휴일 여유)
 
 # ── 상승장 Phase 정의 ─────────────────────────────────────────────────
 BULL_PHASES = {
@@ -380,8 +390,35 @@ def _history_cached(symbol: str, period: str = "1y"):
     except Exception:
         hist = pd.DataFrame()
     if hist is not None and not hist.empty:
-        _HIST_CACHE[key] = (time.time(), hist)
+        now = time.time()
+        # 만료 엔트리 정리 — 인-프로세스 캐시 무한 증가 방지 (상시 봇 프로세스)
+        for k in [k for k, v in _HIST_CACHE.items() if now - v[0] >= _HIST_CACHE_TTL_S]:
+            _HIST_CACHE.pop(k, None)
+        _HIST_CACHE[key] = (now, hist)
     return hist if hist is not None else pd.DataFrame()
+
+
+_LAST_PRICES_FILE = os.path.expanduser("~/.cache/barbell_last_prices.json")
+
+
+def _load_last_prices() -> dict:
+    """직전 정상 조회가격 캐시 — yfinance 실패 시 하드코딩 대신 최근 실값으로 폴백."""
+    try:
+        with open(_LAST_PRICES_FILE, encoding="utf-8") as f:
+            d = json.load(f)
+        return {k: float(v) for k, v in d.items() if isinstance(v, (int, float)) and v > 0}
+    except Exception:
+        return {}
+
+
+def _save_last_prices(prices: dict) -> None:
+    """이번에 성공 조회한 가격을 직전 정상가 캐시에 병합 저장 (best-effort)."""
+    try:
+        merged = _load_last_prices()
+        merged.update({k: float(v) for k, v in prices.items() if v and v > 0})
+        _atomic_write_json(_LAST_PRICES_FILE, merged)
+    except Exception as e:
+        logger.debug("직전 가격 캐시 저장 실패(무시): %s", e)
 
 
 def _atomic_write_json(path: str, obj: dict):
@@ -409,16 +446,22 @@ def _update_drawdown_anchor(high_52w: float, current: float) -> float:
     → 앵커는 단조 증가시키고, 가격이 앵커 -5% 이내로 실제 회복했을 때만
       롤링 52주 고점으로 리셋한다.
     """
-    anchor = max(high_52w, _load_drawdown_anchor())
-    if anchor > 0 and current >= anchor * ANCHOR_RESET_RECOVERY:
-        anchor = high_52w
+    # 봇(5분 루프)+크론이 매 run()마다 호출 → load-decide-save 를 교차 프로세스 락으로 직렬화
+    # (lost update 방지). 앵커 리셋(회복 시 롤링 고점 복귀)은 의도된 설계이므로 단조성은 그대로 둔다.
     try:
-        store.save_doc("barbell_anchor", {
-            "anchor_high": round(anchor, 2),
-            "updated": datetime.now().isoformat(),
-        }, ANCHOR_FILE)
+        with safe_io.file_write_lock(ANCHOR_FILE):
+            anchor = max(high_52w, _load_drawdown_anchor())
+            if anchor > 0 and current >= anchor * ANCHOR_RESET_RECOVERY:
+                anchor = high_52w
+            store.save_doc("barbell_anchor", {
+                "anchor_high": round(anchor, 2),
+                "updated": datetime.now().isoformat(),
+            }, ANCHOR_FILE)
     except Exception:
-        pass
+        # 락/저장 실패해도 앵커 계산값은 반환 (Phase 분류 진행)
+        anchor = max(high_52w, _load_drawdown_anchor())
+        if anchor > 0 and current >= anchor * ANCHOR_RESET_RECOVERY:
+            anchor = high_52w
     return anchor
 
 
@@ -470,6 +513,21 @@ def fetch_qqq_data() -> dict:
         range_52w = high_52w - low_52w
         position_52w = (current - low_52w) / range_52w * 100 if range_52w > 0 else 50
 
+        # 데이터 신선도 — 최신 종가가 너무 오래되면(피드 장애·rate limit) stale 플래그.
+        # 묵은 가격으로 낙폭→Phase 를 잘못 분류(유령 Phase 5 / 진짜 낙폭 누락)하는 것을 막는다.
+        age_days = 0
+        try:
+            last_ts = valid.index[-1]
+            last_date = last_ts.date() if hasattr(last_ts, "date") else None
+            if last_date is not None:
+                age_days = (datetime.now().date() - last_date).days
+        except Exception:
+            age_days = 0
+        stale = age_days > PRICE_STALE_MAX_DAYS
+        if stale:
+            logger.warning("QQQ 가격 stale — 최신 종가 %d일 전 (>%s일). Phase 에스컬레이션 보류 권고",
+                           age_days, PRICE_STALE_MAX_DAYS)
+
         return {
             "current": round(current, 2),
             "high_52w": round(high_52w, 2),
@@ -479,10 +537,64 @@ def fetch_qqq_data() -> dict:
             "position_52w_pct": round(position_52w, 1),
             "mom_1m_pct": round(mom_1m, 2),
             "mom_3m_pct": round(mom_3m, 2),
+            "data_age_days": age_days,
+            "stale": stale,
         }
     except Exception as e:
         logger.warning(f"QQQ 데이터 오류: {e}")
         return {}
+
+
+def _realized_vol_annual(symbol: str = "QQQ", window: int = 20) -> float:
+    """최근 window 거래일 일간수익률의 연환산 변동성. 실패 시 0.0(=캡 미적용)."""
+    try:
+        hist = _history_cached(symbol, "1y")
+        closes = hist["Close"].dropna()
+        if len(closes) < window + 1:
+            return 0.0
+        rets = closes.pct_change().dropna().iloc[-window:]
+        return float(rets.std() * (252 ** 0.5))
+    except Exception:
+        return 0.0
+
+
+def leverage_dca_guard(base_adj_mult: float, *, drawdown_pct=None, realized_vol=None) -> tuple:
+    """DCA 배율에 안전 한도를 적용한다 — (조정배율, 메타 dict).
+
+    봇은 매매를 실행하지 않고 권고만 하므로, 이 가드는 '권고 금액'이 폭주하는 것을 막는다.
+      1) 변동성 캡 : QQQ 연변동성 > DCA_VOL_CAP_ANNUAL 이면 배율을 비례 축소 (벌어진 변동성에
+                     마틴게일式 5배 물타기를 그대로 권고하지 않는다 — 비평 #1의 핵심).
+      2) 절대 상한 : MAX_DCA_MULTIPLIER (F&G×ML 증폭이 6배+로 폭주하는 것 차단).
+      3) 낙폭 정지 : drawdown <= LEVERAGE_HALT_DRAWDOWN 이면 배율 1.0 으로 정지 — 실탄 소진·
+                     레버리지 전소 구간에서 추가 증액 권고를 멈추고 수동 판단을 요구.
+    """
+    notes = []
+    mult = base_adj_mult
+    if realized_vol is None:
+        realized_vol = _realized_vol_annual("QQQ")
+    vol_scale = 1.0
+    if realized_vol and realized_vol > DCA_VOL_CAP_ANNUAL:
+        vol_scale = round(DCA_VOL_CAP_ANNUAL / realized_vol, 3)
+        mult *= vol_scale
+        notes.append(f"변동성 캡: 연변동성 {realized_vol*100:.0f}% > {DCA_VOL_CAP_ANNUAL*100:.0f}% → 배율 ×{vol_scale}")
+    halt = False
+    if drawdown_pct is not None and drawdown_pct <= LEVERAGE_HALT_DRAWDOWN:
+        halt = True
+        if mult > 1.0:
+            mult = 1.0
+        notes.append(f"⛔ 낙폭 {drawdown_pct:.0f}% ≤ {LEVERAGE_HALT_DRAWDOWN:.0f}% — 레버리지 증액 정지(전소 방어). 수동 판단 필요")
+    if mult > MAX_DCA_MULTIPLIER:
+        notes.append(f"절대 상한 적용: ×{round(mult,2)} → ×{MAX_DCA_MULTIPLIER}")
+        mult = MAX_DCA_MULTIPLIER
+    # 의도적 불변식: 하한(1.0 floor)을 두지 않는다. 고점 국면의 0.5×(Bull-2)·0.8×(Bull-1)
+    # 처럼 1.0 미만 배율은 '고점에서 DCA 축소'라는 설계다. 여기에 max(1.0, mult) 를 넣으면
+    # 그 의도가 깨지므로 금지 (가드는 '리스크 축소'만, 최소 매수 강제는 하지 않음).
+    return round(mult, 2), {
+        "vol_scale": vol_scale,
+        "realized_vol_pct": round(realized_vol * 100, 1) if realized_vol else 0.0,
+        "dca_halt": halt,
+        "safety_notes": notes,
+    }
 
 
 def fetch_rsi(ticker_sym: str, period: int = 14) -> float:
@@ -593,8 +705,10 @@ def fetch_portfolio_value() -> dict:
         for section, key in [("overseas_general", "holdings_usd"),
                              ("overseas_fractional", "holdings")]:
             for h in snap.get(section, {}).get(key, []):
+                if not isinstance(h, dict) or "ticker" not in h:
+                    continue   # 손상/수기편집 스냅샷 방어
                 t = h["ticker"]
-                shares = float(h.get("shares", 0))
+                shares = float(h.get("shares", 0) or 0)
                 holdings[t] = holdings.get(t, 0.0) + shares
                 cost = _safe_float(h.get("cost_usd"))
                 if cost <= 0 and _safe_float(h.get("avg_price_usd")) > 0:
@@ -615,8 +729,11 @@ def fetch_portfolio_value() -> dict:
                 cost_usd_by_ticker[ticker] = cost_usd_by_ticker.get(ticker, 0.0) + sh * avg
 
     if not holdings:
-        logger.warning("보유 수량 데이터 없음 — 하드코딩 기본 포트폴리오 값 사용 (실제와 다를 수 있음)")
-        return {"total_usd": 7940.0, "sgov_usd": 1006.7, "qqqi_usd": 2019.77, "qqqi_shares": 35.2987, "prices": {}, "holdings": {}, "holdings_detail": holdings_detail}
+        # 스냅샷이 비었을 때의 최후 폴백 — 값이 실제 포트폴리오와 다르므로 'data_missing' 으로
+        # 명시 플래그(리포트가 추정치임을 표시·신뢰하지 않도록). 키는 유지해 다운스트림 KeyError 방지.
+        logger.error("보유 수량 데이터 없음 — 폴백 추정치 사용(실제와 불일치). portfolio_snapshot.json 확인 필요")
+        return {"total_usd": 7940.0, "sgov_usd": 1006.7, "qqqi_usd": 2019.77, "qqqi_shares": 35.2987,
+                "prices": {}, "holdings": {}, "holdings_detail": holdings_detail, "data_missing": True}
 
     # --- 실시간 가격 조회 ---
     tickers = list(holdings.keys())
@@ -660,11 +777,16 @@ def fetch_portfolio_value() -> dict:
         except Exception:
             pass
 
-    # 그래도 가격 없는 종목 → 평단가 fallback + 경고 ($0 평가로 총액 과소측정 방지)
+    # 그래도 가격 없는 종목 → 직전 정상가 캐시 → 평단가 순 fallback (가짜 하드코딩 대신 최근 실값 우선)
+    last_prices = _load_last_prices()
     for t in tickers:
         if prices.get(t, 0) > 0:
             continue
-        shares = holdings.get(t, 0)
+        if last_prices.get(t, 0) > 0:
+            prices[t] = float(last_prices[t])
+            logger.warning("%s 가격 조회 실패 — 직전 정상가 $%.2f 로 대체", t, prices[t])
+            continue
+        shares = float(holdings.get(t, 0) or 0)
         avg = cost_usd_by_ticker.get(t, 0.0) / shares if shares > 0 else 0.0
         if avg > 0:
             prices[t] = round(avg, 2)
@@ -672,18 +794,24 @@ def fetch_portfolio_value() -> dict:
         else:
             logger.warning("%s 가격 조회 실패 + 평단가 없음 — $0 평가 (총액 과소측정 가능)", t)
 
-    total_usd = sum(holdings.get(t, 0) * prices.get(t, 0) for t in tickers)
+    # 이번에 성공 조회한 가격을 직전 정상가 캐시에 저장 (다음 실패 시 fallback 소스)
+    _save_last_prices({t: prices[t] for t in tickers if prices.get(t, 0) > 0})
+
+    # float 캐스팅 — 손상된 스냅샷(문자열 shares 등)에서도 산술 오류/오평가 방지
+    total_usd = sum(float(holdings.get(t, 0) or 0) * float(prices.get(t, 0) or 0) for t in tickers)
     cost_usd = sum(cost_usd_by_ticker.values())
     pnl_usd = total_usd - cost_usd if cost_usd > 0 else 0.0
     return_pct = pnl_usd / cost_usd * 100 if cost_usd > 0 else 0.0
-    if "SGOV" in holdings and prices.get("SGOV", 0) <= 0:
-        logger.warning("SGOV 가격 조회 실패 — 기본값 $100.67 사용")
-    sgov_usd = holdings.get("SGOV", SGOV_SHARES_DEFAULT) * prices.get("SGOV", 100.67)
-    qqqi_shares = holdings.get("QQQI", QQQI_SHARES_DEFAULT)
-    if "QQQI" in holdings and prices.get("QQQI", 0) <= 0:
-        logger.warning("QQQI 가격 조회 실패 — 기본값 $57.22 사용")
-    qqqi_price = prices.get("QQQI", 57.22)
-    qqqi_usd = qqqi_shares * qqqi_price
+    # SGOV/QQQI 평가 — 조회 실패 시 직전 정상가 → 최후의 하드코딩 상수
+    sgov_px = prices.get("SGOV") or last_prices.get("SGOV") or SGOV_FALLBACK_PRICE
+    if "SGOV" in holdings and not (prices.get("SGOV", 0) > 0):
+        logger.warning("SGOV 가격 조회 실패 — 대체가 $%.2f 사용", sgov_px)
+    sgov_usd = float(holdings.get("SGOV", SGOV_SHARES_DEFAULT) or 0) * float(sgov_px)
+    qqqi_shares = float(holdings.get("QQQI", QQQI_SHARES_DEFAULT) or 0)
+    qqqi_px = prices.get("QQQI") or last_prices.get("QQQI") or QQQI_FALLBACK_PRICE
+    if "QQQI" in holdings and not (prices.get("QQQI", 0) > 0):
+        logger.warning("QQQI 가격 조회 실패 — 대체가 $%.2f 사용", qqqi_px)
+    qqqi_usd = qqqi_shares * float(qqqi_px)
 
     return {
         "total_usd": round(total_usd, 2),
@@ -758,14 +886,18 @@ def save_leverage_state(state: dict):
 
 
 def update_leverage_position(ticker: str, shares: float, avg_price: float):
-    """CLI --update-leverage 에서 호출: QLD/TQQQ 포지션 업데이트."""
-    state = load_leverage_state()
-    state[ticker.upper()] = {
-        "shares": round(shares, 4),
-        "avg_price_usd": round(avg_price, 2),
-        "updated": datetime.now().strftime("%Y-%m-%d"),
-    }
-    save_leverage_state(state)
+    """CLI --update-leverage 에서 호출: QLD/TQQQ 포지션 업데이트.
+
+    read-modify-write 를 교차 프로세스 락으로 직렬화 — 동시 갱신 시 lost update 방지.
+    """
+    with safe_io.file_write_lock(LEVERAGE_FILE):
+        state = load_leverage_state()
+        state[ticker.upper()] = {
+            "shares": round(shares, 4),
+            "avg_price_usd": round(avg_price, 2),
+            "updated": datetime.now().strftime("%Y-%m-%d"),
+        }
+        save_leverage_state(state)
     print(f"✅ {ticker.upper()} 포지션 업데이트: {shares}주 @ ${avg_price:.2f}")
 
 
@@ -1081,10 +1213,13 @@ def _ml_breadth_mult(breadth: float) -> tuple[float, str]:
     return 1.0, ""
 
 
-def calculate_dca(market_type: str, phase_key, exchange_rate: float = 1380.0) -> dict:
+def calculate_dca(market_type: str, phase_key, exchange_rate: float = 1380.0,
+                  drawdown_pct=None) -> dict:
     """시장 상태별 DCA 금액 및 종목 배분 (원화 + USD 환산).
 
     보정 순서: Phase 기본배율 × F&G proxy × ML 시장강도 × (종목별 ML 비중 블렌딩)
+              → 안전 가드(변동성 캡·절대 상한·낙폭 정지, leverage_dca_guard)
+    drawdown_pct 를 주면 낙폭 정지(전소 방어)까지 적용된다.
     """
     w_normal, w_bear = load_dca_weights()
 
@@ -1118,6 +1253,9 @@ def calculate_dca(market_type: str, phase_key, exchange_rate: float = 1380.0) ->
 
     # 최종 배율 (Phase × F&G × ML강도)
     adj_mult = round(mult * fg_adj * ml_mult, 2)
+
+    # 안전 가드: 변동성 캡 · 절대 상한 · 낙폭 정지 (비평 #1 — 레버리지 마틴게일 폭주 차단)
+    adj_mult, _safety = leverage_dca_guard(adj_mult, drawdown_pct=drawdown_pct)
 
     total_krw  = int(DCA_DAILY_BASE_KRW * adj_mult)
     total_usd  = round(total_krw / exchange_rate, 2)
@@ -1157,6 +1295,11 @@ def calculate_dca(market_type: str, phase_key, exchange_rate: float = 1380.0) ->
         "by_ticker":     allocation,
         "base_by_ticker": base_alloc,
         "exchange_rate": exchange_rate,
+        # 안전 가드 메타 (리포트·주문서에 경고 노출용)
+        "vol_scale":     _safety["vol_scale"],
+        "realized_vol_pct": _safety["realized_vol_pct"],
+        "dca_halt":      _safety["dca_halt"],
+        "safety_notes":  _safety["safety_notes"],
     }
 
 
@@ -1610,7 +1753,8 @@ def build_report(
 
     # old_phase_state 전달 → 히스테리시스 적용 (시뮬레이션은 None → 원시 분류)
     market_type, phase_key = classify_market(qqq_data, rsi, vix, prev_state=old_phase_state)
-    dca    = calculate_dca(market_type, phase_key, exchange_rate)
+    dca    = calculate_dca(market_type, phase_key, exchange_rate,
+                           drawdown_pct=qqq_data.get("drawdown_pct"))
     sgov   = calculate_sgov_target(market_type, phase_key, portfolio["total_usd"], portfolio["sgov_usd"])
     p_info = BULL_PHASES[phase_key] if market_type == "bull" else BEAR_PHASES[phase_key]
 
@@ -1732,6 +1876,12 @@ def build_report(
         "",
         f"━━━ 💸 DCA  {dca['total_krw']:,}원  (${dca['total_usd']:.2f} @ {exchange_rate:,.0f}원)  [{dca['multiplier']}x] ━━━",
     ] + _dca_rows(dca["by_ticker"], dca["total_krw"], exchange_rate)
+    # 안전 가드 발동 시 경고 노출 (변동성 캡·낙폭 정지 — 비평 #1)
+    for _note in dca.get("safety_notes", []):
+        L.append(f"  🛡 {_note}")
+    if (market_type == "bear" and isinstance(phase_key, int) and phase_key >= 4):
+        L.append("  ⚠️ 레버리지(QLD/TQQQ) 권고는 *수동 승인 필요* — 자동 매매 아님. "
+                 "3x ETF는 변동성 끌림으로 장기보유 시 손실 누적.")
 
     # ── 특수 경고 ─────────────────────────────────────────────────────
     alerts = []
@@ -2049,17 +2199,33 @@ def run(send_alert: bool = False) -> dict | None:
     report = build_report(qqq, rsi, vix, ma, portfolio, exchange_rate, qqqi_div, old_state, fg)
     print(report)
 
+    # 가격 stale 시 — 묵은 데이터 기반 Phase 에스컬레이션(특히 Phase 5 전면 매수)은 보류.
+    # 잘못된 신호로 레버리지 권고가 나가는 것을 막고, 대신 데이터 경보만 보낸다 (비평 #2).
+    data_stale = bool(qqq.get("stale"))
+
     # 텔레그램: Phase 변화 시 또는 강제 발송 시
     if send_alert or phase_changed:
-        # Phase 5 크래시 진입: 긴급 알림 3회 반복 발송
-        if market_type == "bear" and phase_key == 5 and phase_changed:
+        if data_stale:
+            logger.warning("가격 stale(%d일 전) — Phase 에스컬레이션 알림 보류, 데이터 경보 발송",
+                           qqq.get("data_age_days", 0))
+            send_telegram(
+                f"⚠️ 데이터 신선도 경고\n━━━━━━━━━━━━━━\nQQQ 최신 종가가 "
+                f"{qqq.get('data_age_days', 0)}일 전입니다 (>{PRICE_STALE_MAX_DAYS:.0f}일).\n"
+                f"yfinance 피드 지연·장애 가능 — Phase 분류/레버리지 권고를 신뢰하지 마세요. "
+                f"데이터 복구 후 재확인 권장."
+            )
+        # Phase 5 크래시 진입: 긴급 알림 3회 반복 발송 (단, 데이터가 신선할 때만)
+        elif market_type == "bear" and phase_key == 5 and phase_changed:
             for i in range(3):
                 send_phase5_emergency(qqq.get("drawdown_pct", 0), exchange_rate, portfolio)
                 if i < 2:
                     time.sleep(3)
             logger.warning("Phase 5 긴급 에스컬레이션 3회 발송 완료")
 
-        sent = send_telegram(report)
+        if data_stale:
+            sent = False  # stale 시 본 리포트는 보내지 않음 (경보로 대체)
+        else:
+            sent = send_telegram(report)
         if sent:
             reason = "강제 발송" if send_alert else f"Phase 변화 ({old_state.get('phase_key', '?')} → {phase_key})"
             logger.info(f"텔레그램 알림 발송 완료 [{reason}]")

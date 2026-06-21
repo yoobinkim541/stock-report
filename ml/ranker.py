@@ -343,6 +343,8 @@ def walk_forward_backtest(
 
 def save_ranker(result: RankerResult, path: Path = MODEL_CACHE) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
+    from ml._safe_cache import harden_cache_dir
+    harden_cache_dir(path.parent)  # 0700 best-effort — 타 사용자 모델 주입 방지
     path.write_bytes(pickle.dumps(result))
     logger.info("모델 저장: %s", path)
 
@@ -350,11 +352,9 @@ def save_ranker(result: RankerResult, path: Path = MODEL_CACHE) -> None:
 def load_ranker(path: Path = MODEL_CACHE) -> Optional[RankerResult]:
     if not path.exists():
         return None
-    try:
-        return pickle.loads(path.read_bytes())
-    except Exception as e:
-        logger.warning("모델 로드 실패: %s", e)
-        return None
+    # 안전 로더: 심링크·소유자 검증 후 역직렬화(실패 시 None=모델 미스→재학습)
+    from ml._safe_cache import safe_unpickle
+    return safe_unpickle(path)
 
 
 # ── 오늘의 랭킹 생성 ──────────────────────────────────────────────────────────

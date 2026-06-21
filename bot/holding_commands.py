@@ -171,6 +171,12 @@ def _holding_buy(chat_id: str, args: list, send_fn):
     except (ValueError, IndexError):
         send_fn(chat_id, "❌ 형식 오류: /holding buy TICKER 주수 평단가")
         return
+    # 방어: 음수/0 주수·단가는 평단·비용 계산을 오염시키므로 차단
+    if shares <= 0 or price <= 0:
+        send_fn(chat_id,
+                "❌ 주수와 평단가는 모두 0보다 커야 합니다.\n"
+                "예) /holding buy ORCL 2 200.50")
+        return
     before = _portfolio_tickers()
     result = buy_holding(ticker, shares, price, fractional=frac)
     send_fn(chat_id, result)

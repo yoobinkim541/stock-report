@@ -261,13 +261,15 @@ _RESULT_CACHE: dict[tuple, tuple[float, "MetaAllocation"]] = {}
 def _meta_cache_file(market_type: str, phase_key) -> "Path":
     from pathlib import Path
     import os
+    from ml._safe_cache import harden_cache_dir
     d = Path(os.path.expanduser("~/reports/ml-cache"))
     d.mkdir(parents=True, exist_ok=True)
+    harden_cache_dir(d)  # 0700 best-effort — 타 사용자 파일 주입 방지
     return d / f"meta_alloc_{market_type}_{phase_key}.pkl"
 
 
 def _load_meta_cache(market_type: str, phase_key) -> Optional["MetaAllocation"]:
-    import time, pickle
+    import time
     key = (market_type, str(phase_key))
     hit = _RESULT_CACHE.get(key)
     if hit and time.time() - hit[0] < META_CACHE_TTL_S:
@@ -275,7 +277,11 @@ def _load_meta_cache(market_type: str, phase_key) -> Optional["MetaAllocation"]:
     try:   # 파일 캐시 (크론 등 별도 프로세스와 공유)
         path = _meta_cache_file(market_type, phase_key)
         if path.exists() and time.time() - path.stat().st_mtime < META_CACHE_TTL_S:
-            alloc = pickle.loads(path.read_bytes())
+            # 안전 로더: 심링크·소유자 검증 후 역직렬화(실패 시 None=캐시 미스)
+            from ml._safe_cache import safe_unpickle
+            alloc = safe_unpickle(path)
+            if alloc is None:
+                return None
             _RESULT_CACHE[key] = (path.stat().st_mtime, alloc)
             return alloc
     except Exception:

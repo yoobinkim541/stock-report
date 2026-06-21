@@ -429,12 +429,12 @@ def accumulation_mobile_block(entries, title: str = "🏛️ 기관 매집", lim
 
 def clean_entry(entry: dict, *, name_fn=None) -> dict:
     """clean_data/JSON 페이로드용 슬림 dict."""
-    t = entry["ticker"]
+    t = entry.get("ticker", "UNKNOWN")   # 방어: 손상 입력에도 KeyError 없이 슬림화
     return {
         "ticker": t,
         "company": name_fn(t) if name_fn else t,
-        "accum_score": entry["accum_score"],
-        "verdict": entry["verdict"],
+        "accum_score": entry.get("accum_score", 0.0),
+        "verdict": entry.get("verdict", "중립"),
         "stealth": entry.get("stealth", False),
         "vol_surge": entry.get("vol_surge_flag", False),
         "signals": entry.get("signals", {}),

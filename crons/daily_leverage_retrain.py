@@ -67,7 +67,13 @@ def main() -> int:
             from ml.data_pipeline import fetch_prices
 
             prices    = fetch_prices(["QQQ"], days=2520)
-            qqq       = prices["QQQ"]["Close"]
+            # 방어: QQQ 가격이 결측이면 KeyError 로 크론 크래시 → 우아한 실패 + 알림
+            qqq_df = prices.get("QQQ") if isinstance(prices, dict) else None
+            if qqq_df is None or getattr(qqq_df, "empty", False) or "Close" not in getattr(qqq_df, "columns", []):
+                logger.error("QQQ 가격 데이터 결측 — 재최적화 건너뜀")
+                _send("⚠️ 레버리지 파라미터 재최적화 실패: QQQ 가격 데이터 결측")
+                return 1
+            qqq       = qqq_df["Close"]
             qqq_years = (qqq.index[-1] - qqq.index[0]).days / 365.25
             qqq_cagr  = float(qqq.iloc[-1] / qqq.iloc[0]) ** (1 / qqq_years) - 1
 

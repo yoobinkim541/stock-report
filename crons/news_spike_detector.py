@@ -72,7 +72,17 @@ def _save_state(state: dict) -> None:
 def _prune_state(state: dict, now: datetime) -> None:
     cutoff = now - timedelta(hours=STATE_TTL_HOURS)
     sent = state.setdefault("sent_ids", {})
-    stale = [k for k, v in sent.items() if datetime.fromisoformat(v) < cutoff]
+    stale = []
+    for k, v in sent.items():
+        try:
+            ts = datetime.fromisoformat(v)
+            if ts.tzinfo is None:          # naive 저장값 → KST 가정 (cutoff 는 tz-aware)
+                ts = ts.replace(tzinfo=KST)
+        except Exception:
+            stale.append(k)                # 파싱 불가 → 정리 대상
+            continue
+        if ts < cutoff:
+            stale.append(k)
     for k in stale:
         del sent[k]
 

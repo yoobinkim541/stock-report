@@ -139,7 +139,12 @@ def _compute_ticker_features(price: pd.Series, vix: pd.Series) -> pd.DataFrame:
     delta = price.diff()
     gain  = delta.clip(lower=0).rolling(14).mean()
     loss  = (-delta.clip(upper=0)).rolling(14).mean()
-    feat["rsi"] = (100 - 100 / (1 + gain / loss.replace(0, np.nan))).fillna(50)
+    # 무손실(순상승) 구간: gain/0 → RSI 100(과매수), 무변동: 50. features.rsi 와 정렬
+    # (단순 fillna(50) 은 강한 랠리를 중립으로 잘못 표기 → 역추세 진입 신호 오염)
+    _rsi = 100 - 100 / (1 + gain / loss.replace(0, np.nan))
+    _rsi = _rsi.mask((loss == 0) & (gain > 0), 100.0)
+    _rsi = _rsi.mask((loss == 0) & (gain == 0), 50.0)
+    feat["rsi"] = _rsi.fillna(50)
 
     # 모멘텀
     feat["mom_20d"] = price.pct_change(20).fillna(0)
