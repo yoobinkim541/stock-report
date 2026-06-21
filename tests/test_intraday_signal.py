@@ -1,4 +1,5 @@
 import json
+from datetime import datetime, timedelta
 from pathlib import Path
 
 import pandas as pd
@@ -36,6 +37,17 @@ def test_normalize_intraday_df_flattens_single_ticker_multiindex():
 
 def test_format_bar_timestamp_uses_bar_time_not_current_time():
     assert _format_bar_timestamp(pd.Timestamp("2026-06-19 00:20:00")) == "09:20 KST"
+
+
+def test_et_timezone_follows_dst():
+    """미 동부시간은 서머타임을 반영해야 — 겨울 -5h(EST), 여름 -4h(EDT).
+    고정 오프셋으로 회귀하면 겨울철 장 운영시간 판별이 1시간 어긋난다."""
+    from ml.intraday_signal import ET
+
+    winter = datetime(2026, 1, 15, 12, 0, tzinfo=ET).utcoffset()
+    summer = datetime(2026, 7, 15, 12, 0, tzinfo=ET).utcoffset()
+    assert winter == timedelta(hours=-5)
+    assert summer == timedelta(hours=-4)
 
 
 def test_should_emit_intraday_signal_suppresses_same_bar_same_alerts(tmp_path):

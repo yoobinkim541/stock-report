@@ -39,7 +39,13 @@ import pandas as pd
 logger = logging.getLogger(__name__)
 
 KST = timezone(timedelta(hours=9))
-ET  = timezone(timedelta(hours=-4))   # EDT (4~10월); EST는 -5
+# 미국 동부시간은 서머타임(EDT -4h / EST -5h)을 전환하므로 고정 오프셋이면
+# 겨울철 장 운영시간 판별이 1시간 어긋난다 → DST 자동 반영 ZoneInfo 사용.
+try:
+    from zoneinfo import ZoneInfo
+    ET = ZoneInfo("America/New_York")
+except Exception:                       # tzdata 부재 시 폴백: EDT 고정
+    ET = timezone(timedelta(hours=-4))
 
 CACHE_DIR = Path(os.path.expanduser("~/reports/ml-cache"))
 INTRADAY_TTL_SEC = 60   # 1분 캐시 (API 부하 제한)
