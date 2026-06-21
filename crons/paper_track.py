@@ -52,7 +52,14 @@ def _save_track(track: dict) -> None:
 
 
 def _current_phase() -> tuple[str, object]:
-    state = json.loads(STATE_PATH.read_text())
+    # store(SQLite WAL) 경유 일관 읽기 — 봇의 barbell_state 쓰기와 raw 파일 read 경합(torn read) 회피.
+    try:
+        import store
+        state = store.load_doc("barbell_state", str(STATE_PATH), {}) or {}
+        if not state:                       # 마이그레이션 전 등 빈 경우 파일 폴백
+            state = json.loads(STATE_PATH.read_text())
+    except Exception:
+        state = json.loads(STATE_PATH.read_text())
     mt = state.get("market_type", "neutral")
     pk = state.get("phase_key", 0)
     if isinstance(pk, str) and pk.isdigit():

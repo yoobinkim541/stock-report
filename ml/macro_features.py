@@ -72,7 +72,9 @@ _CACHE_DIR = Path(os.path.expanduser("~/reports/ml-cache"))
 
 def _cache_path(key: str) -> Path:
     import hashlib
+    from ml._safe_cache import harden_cache_dir
     _CACHE_DIR.mkdir(parents=True, exist_ok=True)
+    harden_cache_dir(_CACHE_DIR)  # 0700 best-effort — 타 사용자 파일 주입 방지
     h = hashlib.md5(key.encode()).hexdigest()[:8]
     return _CACHE_DIR / f"macro_{key[:30]}_{h}.pkl"
 
@@ -84,11 +86,9 @@ def _load(key: str, ttl_hours: float) -> pd.DataFrame | None:
     age = datetime.now() - datetime.fromtimestamp(path.stat().st_mtime)
     if age > timedelta(hours=ttl_hours):
         return None
-    try:
-        import pickle
-        return pickle.loads(path.read_bytes())
-    except Exception:
-        return None
+    # 안전 로더: 심링크·소유자 검증 후 역직렬화(실패 시 None=캐시 미스)
+    from ml._safe_cache import safe_unpickle
+    return safe_unpickle(path)
 
 
 def _save(key: str, df: pd.DataFrame) -> None:

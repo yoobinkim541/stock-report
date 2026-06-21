@@ -45,6 +45,7 @@ logger = logging.getLogger(__name__)
 logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
 
 import store  # SQLite 통합 저장소 (설정 블롭 권위 사본 + 파일 미러)
+import safe_io  # 교차 프로세스 쓰기 락 (상태파일 read-modify-write 직렬화)
 
 TELEGRAM_TOKEN   = os.getenv("STOCK_BOT_TOKEN")
 TELEGRAM_CHAT_ID = os.getenv("STOCK_BOT_CHAT_ID", "5771238245")
@@ -55,6 +56,8 @@ STATE_FILE = os.path.expanduser("~/.cache/barbell_state.json")
 # ── 기본값 (실시간 로드 실패 시 fallback) ───────────────────────────────
 SGOV_SHARES_DEFAULT = 10.0
 QQQI_SHARES_DEFAULT = 35.2987
+SGOV_FALLBACK_PRICE = 100.67   # 직전 정상가 캐시도 없을 때의 최후 상수 (drift 있음 — 캐시 우선)
+QQQI_FALLBACK_PRICE = 57.22
 DCA_DAILY_BASE_KRW = 40_000
 TARGET_SGOV_RATIO = 0.08
 MAX_SGOV_RATIO = 0.20
@@ -387,8 +390,35 @@ def _history_cached(symbol: str, period: str = "1y"):
     except Exception:
         hist = pd.DataFrame()
     if hist is not None and not hist.empty:
-        _HIST_CACHE[key] = (time.time(), hist)
+        now = time.time()
+        # 만료 엔트리 정리 — 인-프로세스 캐시 무한 증가 방지 (상시 봇 프로세스)
+        for k in [k for k, v in _HIST_CACHE.items() if now - v[0] >= _HIST_CACHE_TTL_S]:
+            _HIST_CACHE.pop(k, None)
+        _HIST_CACHE[key] = (now, hist)
     return hist if hist is not None else pd.DataFrame()
+
+
+_LAST_PRICES_FILE = os.path.expanduser("~/.cache/barbell_last_prices.json")
+
+
+def _load_last_prices() -> dict:
+    """직전 정상 조회가격 캐시 — yfinance 실패 시 하드코딩 대신 최근 실값으로 폴백."""
+    try:
+        with open(_LAST_PRICES_FILE, encoding="utf-8") as f:
+            d = json.load(f)
+        return {k: float(v) for k, v in d.items() if isinstance(v, (int, float)) and v > 0}
+    except Exception:
+        return {}
+
+
+def _save_last_prices(prices: dict) -> None:
+    """이번에 성공 조회한 가격을 직전 정상가 캐시에 병합 저장 (best-effort)."""
+    try:
+        merged = _load_last_prices()
+        merged.update({k: float(v) for k, v in prices.items() if v and v > 0})
+        _atomic_write_json(_LAST_PRICES_FILE, merged)
+    except Exception as e:
+        logger.debug("직전 가격 캐시 저장 실패(무시): %s", e)
 
 
 def _atomic_write_json(path: str, obj: dict):
@@ -416,16 +446,22 @@ def _update_drawdown_anchor(high_52w: float, current: float) -> float:
     → 앵커는 단조 증가시키고, 가격이 앵커 -5% 이내로 실제 회복했을 때만
       롤링 52주 고점으로 리셋한다.
     """
-    anchor = max(high_52w, _load_drawdown_anchor())
-    if anchor > 0 and current >= anchor * ANCHOR_RESET_RECOVERY:
-        anchor = high_52w
+    # 봇(5분 루프)+크론이 매 run()마다 호출 → load-decide-save 를 교차 프로세스 락으로 직렬화
+    # (lost update 방지). 앵커 리셋(회복 시 롤링 고점 복귀)은 의도된 설계이므로 단조성은 그대로 둔다.
     try:
-        store.save_doc("barbell_anchor", {
-            "anchor_high": round(anchor, 2),
-            "updated": datetime.now().isoformat(),
-        }, ANCHOR_FILE)
+        with safe_io.file_write_lock(ANCHOR_FILE):
+            anchor = max(high_52w, _load_drawdown_anchor())
+            if anchor > 0 and current >= anchor * ANCHOR_RESET_RECOVERY:
+                anchor = high_52w
+            store.save_doc("barbell_anchor", {
+                "anchor_high": round(anchor, 2),
+                "updated": datetime.now().isoformat(),
+            }, ANCHOR_FILE)
     except Exception:
-        pass
+        # 락/저장 실패해도 앵커 계산값은 반환 (Phase 분류 진행)
+        anchor = max(high_52w, _load_drawdown_anchor())
+        if anchor > 0 and current >= anchor * ANCHOR_RESET_RECOVERY:
+            anchor = high_52w
     return anchor
 
 
@@ -550,6 +586,9 @@ def leverage_dca_guard(base_adj_mult: float, *, drawdown_pct=None, realized_vol=
     if mult > MAX_DCA_MULTIPLIER:
         notes.append(f"절대 상한 적용: ×{round(mult,2)} → ×{MAX_DCA_MULTIPLIER}")
         mult = MAX_DCA_MULTIPLIER
+    # 의도적 불변식: 하한(1.0 floor)을 두지 않는다. 고점 국면의 0.5×(Bull-2)·0.8×(Bull-1)
+    # 처럼 1.0 미만 배율은 '고점에서 DCA 축소'라는 설계다. 여기에 max(1.0, mult) 를 넣으면
+    # 그 의도가 깨지므로 금지 (가드는 '리스크 축소'만, 최소 매수 강제는 하지 않음).
     return round(mult, 2), {
         "vol_scale": vol_scale,
         "realized_vol_pct": round(realized_vol * 100, 1) if realized_vol else 0.0,
@@ -666,8 +705,10 @@ def fetch_portfolio_value() -> dict:
         for section, key in [("overseas_general", "holdings_usd"),
                              ("overseas_fractional", "holdings")]:
             for h in snap.get(section, {}).get(key, []):
+                if not isinstance(h, dict) or "ticker" not in h:
+                    continue   # 손상/수기편집 스냅샷 방어
                 t = h["ticker"]
-                shares = float(h.get("shares", 0))
+                shares = float(h.get("shares", 0) or 0)
                 holdings[t] = holdings.get(t, 0.0) + shares
                 cost = _safe_float(h.get("cost_usd"))
                 if cost <= 0 and _safe_float(h.get("avg_price_usd")) > 0:
@@ -688,8 +729,11 @@ def fetch_portfolio_value() -> dict:
                 cost_usd_by_ticker[ticker] = cost_usd_by_ticker.get(ticker, 0.0) + sh * avg
 
     if not holdings:
-        logger.warning("보유 수량 데이터 없음 — 하드코딩 기본 포트폴리오 값 사용 (실제와 다를 수 있음)")
-        return {"total_usd": 7940.0, "sgov_usd": 1006.7, "qqqi_usd": 2019.77, "qqqi_shares": 35.2987, "prices": {}, "holdings": {}, "holdings_detail": holdings_detail}
+        # 스냅샷이 비었을 때의 최후 폴백 — 값이 실제 포트폴리오와 다르므로 'data_missing' 으로
+        # 명시 플래그(리포트가 추정치임을 표시·신뢰하지 않도록). 키는 유지해 다운스트림 KeyError 방지.
+        logger.error("보유 수량 데이터 없음 — 폴백 추정치 사용(실제와 불일치). portfolio_snapshot.json 확인 필요")
+        return {"total_usd": 7940.0, "sgov_usd": 1006.7, "qqqi_usd": 2019.77, "qqqi_shares": 35.2987,
+                "prices": {}, "holdings": {}, "holdings_detail": holdings_detail, "data_missing": True}
 
     # --- 실시간 가격 조회 ---
     tickers = list(holdings.keys())
@@ -733,11 +777,16 @@ def fetch_portfolio_value() -> dict:
         except Exception:
             pass
 
-    # 그래도 가격 없는 종목 → 평단가 fallback + 경고 ($0 평가로 총액 과소측정 방지)
+    # 그래도 가격 없는 종목 → 직전 정상가 캐시 → 평단가 순 fallback (가짜 하드코딩 대신 최근 실값 우선)
+    last_prices = _load_last_prices()
     for t in tickers:
         if prices.get(t, 0) > 0:
             continue
-        shares = holdings.get(t, 0)
+        if last_prices.get(t, 0) > 0:
+            prices[t] = float(last_prices[t])
+            logger.warning("%s 가격 조회 실패 — 직전 정상가 $%.2f 로 대체", t, prices[t])
+            continue
+        shares = float(holdings.get(t, 0) or 0)
         avg = cost_usd_by_ticker.get(t, 0.0) / shares if shares > 0 else 0.0
         if avg > 0:
             prices[t] = round(avg, 2)
@@ -745,18 +794,24 @@ def fetch_portfolio_value() -> dict:
         else:
             logger.warning("%s 가격 조회 실패 + 평단가 없음 — $0 평가 (총액 과소측정 가능)", t)
 
-    total_usd = sum(holdings.get(t, 0) * prices.get(t, 0) for t in tickers)
+    # 이번에 성공 조회한 가격을 직전 정상가 캐시에 저장 (다음 실패 시 fallback 소스)
+    _save_last_prices({t: prices[t] for t in tickers if prices.get(t, 0) > 0})
+
+    # float 캐스팅 — 손상된 스냅샷(문자열 shares 등)에서도 산술 오류/오평가 방지
+    total_usd = sum(float(holdings.get(t, 0) or 0) * float(prices.get(t, 0) or 0) for t in tickers)
     cost_usd = sum(cost_usd_by_ticker.values())
     pnl_usd = total_usd - cost_usd if cost_usd > 0 else 0.0
     return_pct = pnl_usd / cost_usd * 100 if cost_usd > 0 else 0.0
-    if "SGOV" in holdings and prices.get("SGOV", 0) <= 0:
-        logger.warning("SGOV 가격 조회 실패 — 기본값 $100.67 사용")
-    sgov_usd = holdings.get("SGOV", SGOV_SHARES_DEFAULT) * prices.get("SGOV", 100.67)
-    qqqi_shares = holdings.get("QQQI", QQQI_SHARES_DEFAULT)
-    if "QQQI" in holdings and prices.get("QQQI", 0) <= 0:
-        logger.warning("QQQI 가격 조회 실패 — 기본값 $57.22 사용")
-    qqqi_price = prices.get("QQQI", 57.22)
-    qqqi_usd = qqqi_shares * qqqi_price
+    # SGOV/QQQI 평가 — 조회 실패 시 직전 정상가 → 최후의 하드코딩 상수
+    sgov_px = prices.get("SGOV") or last_prices.get("SGOV") or SGOV_FALLBACK_PRICE
+    if "SGOV" in holdings and not (prices.get("SGOV", 0) > 0):
+        logger.warning("SGOV 가격 조회 실패 — 대체가 $%.2f 사용", sgov_px)
+    sgov_usd = float(holdings.get("SGOV", SGOV_SHARES_DEFAULT) or 0) * float(sgov_px)
+    qqqi_shares = float(holdings.get("QQQI", QQQI_SHARES_DEFAULT) or 0)
+    qqqi_px = prices.get("QQQI") or last_prices.get("QQQI") or QQQI_FALLBACK_PRICE
+    if "QQQI" in holdings and not (prices.get("QQQI", 0) > 0):
+        logger.warning("QQQI 가격 조회 실패 — 대체가 $%.2f 사용", qqqi_px)
+    qqqi_usd = qqqi_shares * float(qqqi_px)
 
     return {
         "total_usd": round(total_usd, 2),
@@ -831,14 +886,18 @@ def save_leverage_state(state: dict):
 
 
 def update_leverage_position(ticker: str, shares: float, avg_price: float):
-    """CLI --update-leverage 에서 호출: QLD/TQQQ 포지션 업데이트."""
-    state = load_leverage_state()
-    state[ticker.upper()] = {
-        "shares": round(shares, 4),
-        "avg_price_usd": round(avg_price, 2),
-        "updated": datetime.now().strftime("%Y-%m-%d"),
-    }
-    save_leverage_state(state)
+    """CLI --update-leverage 에서 호출: QLD/TQQQ 포지션 업데이트.
+
+    read-modify-write 를 교차 프로세스 락으로 직렬화 — 동시 갱신 시 lost update 방지.
+    """
+    with safe_io.file_write_lock(LEVERAGE_FILE):
+        state = load_leverage_state()
+        state[ticker.upper()] = {
+            "shares": round(shares, 4),
+            "avg_price_usd": round(avg_price, 2),
+            "updated": datetime.now().strftime("%Y-%m-%d"),
+        }
+        save_leverage_state(state)
     print(f"✅ {ticker.upper()} 포지션 업데이트: {shares}주 @ ${avg_price:.2f}")
 
 

@@ -134,16 +134,29 @@ def test_parse_world_gov_bonds_common_maturities():
 
 
 def test_fetch_world_gov_bond_events_emits_common_maturities(monkeypatch):
-    class FakeResponse:
-        text = """
+    # _bounded_get(stream=True) 인터페이스에 맞춘 스트리밍 컨텍스트매니저 fake
+    _MD = """
 |  | [5 years](https://www.worldgovernmentbonds.com/bond-historical-data/united-states/5-years/) | 4.163% | +7.8 bp |
 |  | [10 years](https://www.worldgovernmentbonds.com/bond-historical-data/united-states/10-years/) | 4.457% | +1.4 bp |
 |  | [20 years](https://www.worldgovernmentbonds.com/bond-historical-data/united-states/20-years/) | 4.969% | -5.0 bp |
 |  | [30 years](https://www.worldgovernmentbonds.com/bond-historical-data/united-states/30-years/) | 4.966% | -5.3 bp |
 """
 
+    class FakeResponse:
+        headers: dict = {}
+        encoding = "utf-8"
+
         def raise_for_status(self):
             return None
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+        def iter_content(self, chunk_size=65536):
+            yield _MD.encode("utf-8")
 
     monkeypatch.setattr(sc.requests, "get", lambda *args, **kwargs: FakeResponse())
 

@@ -110,7 +110,9 @@ _MACRO_TICKERS = ["^VIX", "^TNX", "QQQ", "SPY", "HYG", "LQD", "IEF", "TLT", "ACW
 # ── 캐시 유틸 ─────────────────────────────────────────────────────────────────
 
 def _cache_path(key: str) -> Path:
+    from ml._safe_cache import harden_cache_dir
     CACHE_DIR.mkdir(parents=True, exist_ok=True)
+    harden_cache_dir(CACHE_DIR)  # 0700 best-effort — 타 사용자 파일 주입 방지
     h = hashlib.md5(key.encode()).hexdigest()[:8]
     return CACHE_DIR / f"{key[:40]}_{h}.pkl"
 
@@ -122,11 +124,9 @@ def _load_cache(key: str, ttl_hours: float) -> pd.DataFrame | None:
     mtime = datetime.fromtimestamp(path.stat().st_mtime)
     if datetime.now() - mtime > timedelta(hours=ttl_hours):
         return None
-    try:
-        import pickle
-        return pickle.loads(path.read_bytes())
-    except Exception:
-        return None
+    # 안전 로더: 심링크·소유자 검증 후 역직렬화(실패 시 None=캐시 미스)
+    from ml._safe_cache import safe_unpickle
+    return safe_unpickle(path)
 
 
 def _save_cache(key: str, df: pd.DataFrame) -> None:

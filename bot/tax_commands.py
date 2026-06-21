@@ -106,6 +106,10 @@ def _tax_sim(chat_id: str, args: list, send_fn):
     except ValueError:
         send_fn(chat_id, "❌ 수량은 숫자여야 합니다.  예) /tax sim NVDA 2")
         return
+    # 방어: 음수/0 수량은 손익·세금 계산을 오염시키므로 차단
+    if qty is not None and qty <= 0:
+        send_fn(chat_id, "❌ 수량은 0보다 커야 합니다.  예) /tax sim NVDA 2")
+        return
     if qty is None:
         if snap_entry:
             qty = snap_entry.get("shares", 0)
@@ -119,6 +123,10 @@ def _tax_sim(chat_id: str, args: list, send_fn):
         buy_price = float(args[3]) if len(args) >= 4 else None
     except ValueError:
         send_fn(chat_id, "❌ 매수단가는 숫자여야 합니다.")
+        return
+    # 방어: 음수/0 매수단가는 수익률·세금 계산을 왜곡하므로 차단
+    if buy_price is not None and buy_price <= 0:
+        send_fn(chat_id, "❌ 매수단가는 0보다 커야 합니다.")
         return
     if buy_price is None:
         if snap_entry and snap_entry.get("avg_price_usd"):
@@ -200,6 +208,12 @@ def _tax_sell(chat_id: str, args: list, send_fn):
         sell_price = float(args[4])
     except (ValueError, IndexError):
         send_fn(chat_id, "❌ 숫자 형식 오류. 예) /tax sell NVDA 10 400.00 520.00")
+        return
+    # 방어: 음수/0 입력은 손익·세금 기록을 오염시키므로 차단
+    if qty <= 0 or buy_price <= 0 or sell_price <= 0:
+        send_fn(chat_id,
+                "❌ 수량·매수단가·매도단가는 모두 0보다 커야 합니다.\n"
+                "예) /tax sell NVDA 10 400.00 520.00")
         return
     try:
         fx = fetch_exchange_rate()
