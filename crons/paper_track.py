@@ -258,12 +258,8 @@ def _send(text: str) -> None:
     token, chat = os.getenv("STOCK_BOT_TOKEN"), os.getenv("STOCK_BOT_CHAT_ID")
     if not token or not chat:
         return
-    import requests
-    try:
-        requests.post(f"https://api.telegram.org/bot{token}/sendMessage",
-                      json={"chat_id": chat, "text": text}, timeout=15)
-    except Exception as e:
-        logger.warning("텔레그램 발송 실패: %s", e)
+    import notify
+    notify.send_telegram(text, token=token, chat_id=chat, timeout=15)
 
 
 def main() -> int:

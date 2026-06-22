@@ -53,17 +53,12 @@ _TELEGRAM_CHAT_ID = os.getenv("STOCK_BOT_CHAT_ID", "5771238245")
 
 
 def _notify(msg: str):
-    if not _TELEGRAM_TOKEN:
-        return
-    try:
-        import requests as _req
-        _req.post(
-            f"https://api.telegram.org/bot{_TELEGRAM_TOKEN}/sendMessage",
-            json={"chat_id": _TELEGRAM_CHAT_ID, "text": msg},
-            timeout=10,
-        )
-    except Exception:
-        pass
+    """notify 단일 진실원에 위임."""
+    import sys
+    if PROJECT_DIR not in sys.path:
+        sys.path.insert(0, PROJECT_DIR)
+    import notify
+    notify.send_telegram(msg, token=_TELEGRAM_TOKEN, chat_id=_TELEGRAM_CHAT_ID)
 
 
 @app.route("/sync", methods=["POST"])

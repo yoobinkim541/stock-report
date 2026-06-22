@@ -46,6 +46,7 @@ logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
 
 import store  # SQLite 통합 저장소 (설정 블롭 권위 사본 + 파일 미러)
 import safe_io  # 교차 프로세스 쓰기 락 (상태파일 read-modify-write 직렬화)
+import notify   # 텔레그램 발송 단일 진실원
 
 TELEGRAM_TOKEN   = os.getenv("STOCK_BOT_TOKEN")
 TELEGRAM_CHAT_ID = os.getenv("STOCK_BOT_CHAT_ID", "5771238245")
@@ -416,18 +417,9 @@ def _save_last_prices(prices: dict) -> None:
     try:
         merged = _load_last_prices()
         merged.update({k: float(v) for k, v in prices.items() if v and v > 0})
-        _atomic_write_json(_LAST_PRICES_FILE, merged)
+        safe_io.atomic_write_json(_LAST_PRICES_FILE, merged)
     except Exception as e:
         logger.debug("직전 가격 캐시 저장 실패(무시): %s", e)
-
-
-def _atomic_write_json(path: str, obj: dict):
-    """temp→rename atomic write (부분 쓰기·동시 쓰기 깨짐 방지)."""
-    os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
-    tmp = f"{path}.tmp.{os.getpid()}"
-    with open(tmp, "w", encoding="utf-8") as f:
-        json.dump(obj, f, indent=2, ensure_ascii=False)
-    os.replace(tmp, path)
 
 
 def _load_drawdown_anchor() -> float:
@@ -2085,37 +2077,9 @@ def calculate_rebalancing(
 #  텔레그램
 # ══════════════════════════════════════════════════════════════════════
 
-_TG_MAX_CHARS = 4000  # Telegram 4096자 제한 — 여유 96자
-
-
-def _split_telegram(message: str, limit: int = _TG_MAX_CHARS) -> list[str]:
-    """4096자 제한 대응 — 줄바꿈 경계에서 분할 (절단 금지)."""
-    parts = []
-    while len(message) > limit:
-        cut = message.rfind("\n", 0, limit)
-        if cut <= 0:
-            cut = limit
-        parts.append(message[:cut])
-        message = message[cut:].lstrip("\n")
-    if message:
-        parts.append(message)
-    return parts or [""]
-
-
 def send_telegram(message: str) -> bool:
-    if not TELEGRAM_TOKEN:
-        logger.warning("TELEGRAM_TOKEN 없음 — 콘솔 출력만 수행")
-        return False
-    url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
-    ok = True
-    for part in _split_telegram(message):
-        try:
-            resp = requests.post(url, json={"chat_id": TELEGRAM_CHAT_ID, "text": part}, timeout=10)
-            resp.raise_for_status()
-        except Exception as e:
-            logger.error(f"텔레그램 전송 실패: {e}")
-            ok = False
-    return ok
+    """텔레그램 발송 — notify 단일 진실원에 위임 (4096 분할·토큰 마스킹 공통)."""
+    return notify.send_telegram(message, token=TELEGRAM_TOKEN, chat_id=TELEGRAM_CHAT_ID)
 
 
 def send_phase5_emergency(

@@ -36,6 +36,8 @@ from barbell_strategy import (
     TELEGRAM_TOKEN, TELEGRAM_CHAT_ID,
 )
 
+import notify
+
 MARKET_OPEN_KST = 22   # KST 22:00 = 미국 장 시작
 
 # 소수점 매수 수량 표시·산출 자리수 (키움 소수점 매수 입력 단위와 일치)
@@ -234,14 +236,13 @@ def generate(send: bool = False) -> str:
 def _send(text: str):
     if not TELEGRAM_TOKEN:
         return
-    url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
     escaped = html.escape(text)
     for i in range(0, len(escaped), 4000):
         chunk = f"<pre>{escaped[i:i + 4000]}</pre>"
-        try:
-            requests.post(url, json={"chat_id": TELEGRAM_CHAT_ID, "text": chunk, "parse_mode": "HTML"}, timeout=10)
-        except Exception as e:
-            _logger.error(f"주문서 텔레그램 전송 실패: {e}")
+        notify.send_telegram(
+            chunk, token=TELEGRAM_TOKEN, chat_id=TELEGRAM_CHAT_ID,
+            parse_mode="HTML", split=False,
+        )
 
 
 if __name__ == "__main__":

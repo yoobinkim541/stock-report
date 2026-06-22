@@ -106,18 +106,20 @@ def test_anchor_monotonic_and_reset(tmp_path, monkeypatch):
 
 
 # ══════════════════════════════════════════════════════════════════════
-#  _split_telegram
+#  notify.split_message (구 barbell._split_telegram — notify 단일 진실원으로 이전)
 # ══════════════════════════════════════════════════════════════════════
+import notify
+
 
 def test_split_telegram_short_message():
-    assert bs._split_telegram("짧은 메시지") == ["짧은 메시지"]
+    assert notify.split_message("짧은 메시지") == ["짧은 메시지"]
 
 
 def test_split_telegram_preserves_content():
     msg = "\n".join(f"라인 {i:04d} " + "x" * 50 for i in range(200))
-    parts = bs._split_telegram(msg)
+    parts = notify.split_message(msg)
     assert len(parts) > 1
-    assert all(len(p) <= bs._TG_MAX_CHARS for p in parts)
+    assert all(len(p) <= notify.TG_MAX_CHARS for p in parts)
     assert "\n".join(parts) == msg   # 줄바꿈 경계 분할 → 내용 무손실
 
 

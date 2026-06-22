@@ -81,18 +81,12 @@ def main() -> int:
     BOT_TOKEN = os.getenv("STOCK_BOT_TOKEN")
     CHAT_ID   = os.getenv("STOCK_BOT_CHAT_ID", "5771238245")
     if BOT_TOKEN and ranked:
-        import requests
+        import notify
         block = accumulation_mobile_block(ranked[:5], title="🏛️ 기관 매집 주간 다이제스트",
                                           limit=5, name_fn=_name_fn)
         msg = "\n".join([f"📅 {today}"] + block)
-        try:
-            requests.post(
-                f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage",
-                json={"chat_id": CHAT_ID, "text": msg}, timeout=10,
-            )
+        if notify.send_telegram(msg, token=BOT_TOKEN, chat_id=CHAT_ID):
             logger.info("주간 다이제스트 발송 완료")
-        except Exception as ex:
-            logger.warning("텔레그램 발송 실패: %s", ex)
     else:
         logger.info("STOCK_BOT_TOKEN 없음 또는 결과 없음 — 발송 스킵")
 
