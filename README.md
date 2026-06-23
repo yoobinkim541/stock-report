@@ -64,32 +64,53 @@ flowchart TD
 
 ## ⚙️ 스크립트 목록
 
+**루트 — 상시 프로세스 + 공용 인프라**
+
 | 파일 | 역할 |
 |------|------|
-| `barbell_strategy.py` | Intelligence Barbell v2.1 — Phase 분류, SGOV/DCA/레버리지 계산, 시각화 리포트 |
-| `telegram_bot.py` | 양방향 텔레그램 봇 — 명령어 라우터, fcntl 단일 인스턴스 잠금, Phase 감시 |
-| `holding_commands.py` | /holding 서브커맨드 핸들러 (buy·sell·target·dca·dividend·apply 등) |
-| `tax_commands.py` | /tax 서브커맨드 핸들러 (sim·sell·history·delete·import) |
-| `investment_report.py` | 포트폴리오 수익률 + 펀더멘털 분석 Markdown 리포트 |
-| `holding_manager.py` | 보유 종목 CRUD + DCA/목표비중 파일 관리 (atomic write) |
-| `attachment_parser.py` | PDF·이미지 OCR 파싱 → 포트폴리오·매도내역 자동 감지 |
-| `order_generator.py` | Phase 기반 소수점 매수 주문서 생성 |
-| `portfolio_tracker.py` | 일일 히스토리 기록 + 배당 기록 |
-| `tax_tracker.py` | 실현손익 기록 + 양도소득세 추산 |
-| `price_alerts.py` | 가격 알림 등록·체크 |
-| `source_collector.py` | 뉴스 JSONL 캐시 수집·다이제스트 |
-| `stock_advisor.py` | AI 포트폴리오 상담 (/ask) |
-| `kiwoom_sync_rest.py` | 키움 REST API → 국내주식 잔고 자동 동기화 (크론 08:35) |
-| `portfolio_sync_server.py` | 외부 → portfolio_snapshot.json 수신 서버 (port 8765) |
-| `bot_healthcheck.py` | 봇·서버 상태 30분 자동 점검 — 중복 인스턴스·409 Conflict·PID 불일치·파일 신선도 |
-| `bot_smoke_test.py` | 봇 기능 연기 테스트 — 25개 항목 실데이터 검증, 실패 시만 알림 |
-| `fundamental_score.py` | 종목별 100점 펀더멘털 스코어링 |
-| `daily_signals.py` | 가격/거래량 기반 일일 신호 감지 |
-| `market_report.py` | 시장 뉴스 리포트 (SaveTicker API + Arca Live) |
-| `backtest.py` | 단일 기간 바벨 전략 백테스트 |
-| `backtest_multi.py` | 5/10/20년 및 사용자 지정 시작일 멀티 백테스트 |
-| `save_csv.py` | JSON 요약 → CSV 내보내기 |
-| `deliver_investment_report.sh` | 전체 파이프라인 실행 + 텔레그램 발송 |
+| `barbell_strategy.py` | Intelligence Barbell 전략 — Phase 분류·SGOV/DCA/레버리지 계산·안전 가드·시각화 리포트 |
+| `telegram_bot.py` | 양방향 텔레그램 봇 — 명령어 라우터, fcntl 단일 인스턴스, Phase 감시 |
+| `portfolio_sync_server.py` | 외부 → portfolio_snapshot.json 수신 Flask 서버 (port 8765) |
+| `holding_manager.py` | 보유 종목 CRUD + DCA/목표비중 (atomic write) |
+| `portfolio_tracker.py` · `tax_tracker.py` | 일일 히스토리·배당 / 실현손익·양도세 |
+| `portfolio_universe.py` | 보유 티커 단일 소스 + 은퇴 티커 |
+| `store.py` · `safe_io.py` · `notify.py` | SQLite 통합 저장소 / atomic write+락 / 텔레그램 발송 단일소스 |
+
+**providers/ — 데이터 수집층**
+
+| 파일 | 역할 |
+|------|------|
+| `providers/market_data.py` | yfinance 가격·RSI·VIX·F&G·환율·포트폴리오 평가·캐시·leverage_state |
+
+**bot/ — 텔레그램 서브커맨드**
+
+| 파일 | 역할 |
+|------|------|
+| `bot/holding_commands.py` · `bot/tax_commands.py` | /holding · /tax 서브커맨드 |
+| `bot/accum_commands.py` · `bot/entry_commands.py` | /accum 기관 매집 · /entry 진입 타점 |
+| `bot/price_alerts.py` · `bot/attachment_parser.py` · `bot/stock_advisor.py` · `bot/order_generator.py` | 가격 알림 / PDF·이미지 OCR / AI 상담 / 소수점 주문서 |
+| `bot/guest_report.py` · `bot/guest_portfolio.py` | 읽기전용 게스트 (사실형, 처방 금지) |
+
+**reports/ — 리포트·데이터 생성**
+
+| 파일 | 역할 |
+|------|------|
+| `reports/investment_report.py` | 일일 투자 리포트 (md/json/txt) |
+| `reports/report_charts.py` | 포트폴리오 대시보드 PNG (sendPhoto) |
+| `reports/institutional_flow.py` | 기관 매집 추적 (OBV·CMF·13F) |
+| `reports/market_report.py` · `reports/source_collector.py` | 시장 뉴스 / 뉴스 JSONL 수집 |
+| `reports/fundamental_score.py` · `reports/daily_signals.py` · `reports/save_csv.py` | 펀더멘털 점수 / 일일 신호 / CSV |
+
+**crons/ — 크론 진입점** · **scripts/** · **tests/** · **ml/** · **backtest/**
+
+| 파일 | 역할 |
+|------|------|
+| `crons/kiwoom_sync_rest.py` | 키움 REST → 국내주식 잔고 동기화 (08:35 KST) |
+| `crons/notion_sync.py` | Notion 대시보드 동기화 |
+| `crons/news_spike_detector.py` · `crons/daily_ranking.py` · `crons/*_snapshot.py` · `crons/paper_track.py` | 속보 / ML 랭킹 / 스냅샷 적재 / A/B 페이퍼 |
+| `scripts/deliver_investment_report.sh` | 전체 파이프라인 실행 + 텔레그램 발송 |
+| `tests/bot_healthcheck.py` · `tests/bot_smoke_test.py` · `tests/*` | 헬스체크 / 연기 테스트 / 단위 테스트 (450+) |
+| `ml/` · `backtest/` | ML 모델(ranker·optimizer·meta·entry) / 백테스트 |
 
 ---
 
