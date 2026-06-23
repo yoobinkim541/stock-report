@@ -39,7 +39,7 @@ LEVERAGE_ETFS       = ["QLD", "TQQQ", "UPRO"]
 LEVERAGE_UNDERLYING = {"QLD": "QQQ", "TQQQ": "QQQ", "UPRO": "SPY"}
 
 ALERT_STATE_PATH = Path(os.path.expanduser("~/.cache/entry_alert_state.json"))
-ALERT_COOLDOWN_H = 6      # 동일 종목 재알림 최소 간격 (시간)
+ALERT_COOLDOWN_H = 12     # 동일 종목 재알림 최소 간격 (시간)
 ALERT_SCORE_MIN  = 0.60   # 알림 발송 최소 점수
 
 # ── 진입 점수 파라미터 (backtest/entry_calibration.py가 walk-forward로 재추정) ──
@@ -701,8 +701,8 @@ def check_alert_signals(scores: list[EntryScore]) -> list[EntryScore]:
 
     조건:
       1. signal == "enter" and score >= ALERT_SCORE_MIN
-      2. 이전 신호가 "enter"가 아니었거나 (새로 진입 신호)
-      3. 마지막 알림 이후 ALERT_COOLDOWN_H 이상 경과
+      2. 마지막 알림 이후 ALERT_COOLDOWN_H 이상 경과
+         (장기 진입 기회는 enter가 유지돼도 주기적으로 재알림)
     """
     state   = _load_alert_state()
     now     = datetime.now(KST)
@@ -714,8 +714,6 @@ def check_alert_signals(scores: list[EntryScore]) -> list[EntryScore]:
 
         prev = state.get(s.ticker, {})
         last_alert_str = prev.get("last_alert", "")
-        last_signal    = prev.get("last_signal", "")
-
         # 쿨다운 체크
         if last_alert_str:
             try:
@@ -724,10 +722,6 @@ def check_alert_signals(scores: list[EntryScore]) -> list[EntryScore]:
                     continue   # 아직 쿨다운 중
             except Exception:
                 pass
-
-        # 신호 변화 체크 (wait/avoid → enter 전환 or 처음)
-        if last_signal == "enter":
-            continue   # 이미 enter 신호였으면 스킵
 
         to_alert.append(s)
 

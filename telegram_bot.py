@@ -135,8 +135,8 @@ RETRY_DELAY        = 10    # 오류 후 재시도 대기(초)
 CACHE_TTL          = 300   # 시장 데이터 캐시 유지(초, 5분)
 ALERT_CHECK_SECS   = 300   # 가격 알림 체크 주기(초)
 PHASE_CHECK_SECS   = 300   # Phase 변화 체크 주기(초, 5분)
-ENTRY_CHECK_SECS    = 1800  # 진입 타점 알림 체크 주기(초, 30분)
-INTRADAY_CHECK_SECS = 60    # 단기봉 모니터링 주기(초, 1분, 장중에만 실행)
+ENTRY_CHECK_SECS    = 900   # 진입 타점 알림 체크 주기(초, 15분)
+INTRADAY_CHECK_SECS = 300   # 단기봉 모니터링 주기(초, 5분, 장중에만 실행)
 
 
 def _pid_file_path() -> str:
@@ -1182,14 +1182,14 @@ def _record_signal_outcome(alert: dict) -> None:
 
 
 # ══════════════════════════════════════════════════════════════════════
-#  진입 타점 모니터링 (30분 주기 자동 알림)
+#  진입 타점 모니터링 (15분 주기 자동 알림)
 # ══════════════════════════════════════════════════════════════════════
 
 def notify_intraday_signals() -> None:
-    """1분 주기 단기 이상 신호 감지 (장중에만 실행).
+    """5분 주기 단기 이상 신호 감지 (장중에만 실행).
 
     감시 대상:
-      1) 30분 분석에서 score ≥ 0.5인 종목 (관심 목록)
+      1) 진입 분석에서 score ≥ 0.5인 종목 (관심 목록)
       2) 레버리지 ETF (항상 포함)
     단기 신호(거래량급등·EMA크로스·RSI반등·VWAP돌파) 감지 시 즉시 알림.
     """
@@ -1208,7 +1208,7 @@ def notify_intraday_signals() -> None:
 
         # 관심 종목 결정
         watch_tickers = list(LEVERAGE_ETFS)
-        # 30분 분석 상태에서 score ≥ 0.5인 종목 추가 (캐시 활용)
+        # 진입 분석 상태에서 score ≥ 0.5인 종목 추가 (캐시 활용)
         try:
             from ml.entry_analyzer import analyze_all_entries, ALERT_STATE_PATH
             import json
@@ -1865,12 +1865,12 @@ def run():
                 _run_periodic("phase", notify_phase_change)
                 last_phase_check = now
 
-            # 진입 타점 모니터링 (30분 주기, 새로운 enter 신호 → 푸시)
+            # 진입 타점 모니터링 (15분 주기, enter 지속 시에도 쿨다운 후 푸시)
             if now - last_entry_check > ENTRY_CHECK_SECS:
                 _run_periodic("entry", notify_entry_signals)
                 last_entry_check = now
 
-            # 단기봉 이상 감지 (1분 주기, 장중에만)
+            # 단기봉 이상 감지 (5분 주기, 장중에만)
             if now - last_intraday_check > INTRADAY_CHECK_SECS:
                 _run_periodic("intraday", notify_intraday_signals)
                 last_intraday_check = now
