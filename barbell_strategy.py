@@ -1210,6 +1210,192 @@ def _dca_rows(by_ticker: dict, total_krw: int, exchange_rate: float) -> list:
 
 
 # ══════════════════════════════════════════════════════════════════════
+#  리포트 섹션 빌더 (순수 추출 — build_report 가 L += 로 조립)
+# ══════════════════════════════════════════════════════════════════════
+
+def _section_header(now: str, old_phase_state: dict, market_type: str,
+                    phase_key, drawdown: float) -> list:
+    """헤더 + Phase 변화 경보 (최상단)."""
+    # ── 헤더 ─────────────────────────────────────────────────────────
+    L = [
+        "🏋️ Intelligence Barbell v2.1",
+        f"📅 {now}",
+    ]
+
+    # Phase 변화 경보 (최상단)
+    if old_phase_state and has_phase_changed(old_phase_state, market_type, phase_key):
+        old_t  = old_phase_state.get("market_type", "?")
+        old_k  = old_phase_state.get("phase_key", "?")
+        old_dd = old_phase_state.get("drawdown_pct", 0)
+        L += [
+            "",
+            "╔══════════════════════════════╗",
+            "║  ⚡ PHASE 변화 감지!           ║",
+            f"║  {old_t}/{old_k} ({old_dd:+.1f}%)  →  {market_type}/{phase_key} ({drawdown:+.1f}%)  ║",
+            "╚══════════════════════════════╝",
+        ]
+    return L
+
+
+def _section_phase_meter(p_info: dict, market_type: str, phase_key,
+                         drawdown: float) -> list:
+    """Phase 미터."""
+    # ── Phase 미터 ────────────────────────────────────────────────────
+    return [
+        "",
+        f"📍 Phase  {p_info['emoji']} {p_info['label']}",
+        _phase_meter(market_type, phase_key),
+        f"  QQQ 고점 대비  {drawdown:+.2f}%   {p_info['description']}",
+    ]
+
+
+def _section_portfolio(portfolio: dict, total_krw: int, exchange_rate: float) -> list:
+    """포트폴리오 요약 + 레버리지 포지션."""
+    # ── 포트폴리오 요약 ───────────────────────────────────────────────
+    sgov_ratio = portfolio["sgov_usd"] / portfolio["total_usd"] if portfolio["total_usd"] > 0 else 0
+    qqqi_ratio = portfolio["qqqi_usd"] / portfolio["total_usd"] if portfolio["total_usd"] > 0 else 0
+
+    L = [
+        "",
+        "━━━ 💼 포트폴리오 ━━━",
+        f"  총액  ${portfolio['total_usd']:>8,.2f}   (₩{total_krw:,})",
+        f"  환율  {exchange_rate:,.1f}원/USD",
+        f"  SGOV  ${portfolio['sgov_usd']:>7,.2f}   {_bar(sgov_ratio, 10)}  {sgov_ratio*100:.1f}%  실탄",
+        f"  QQQI  ${portfolio['qqqi_usd']:>7,.2f}   {_bar(min(qqqi_ratio / 0.35, 1), 10)}  {qqqi_ratio*100:.1f}%  배당엔진",
+    ]
+
+    # 레버리지 포지션
+    leverage   = load_leverage_state()
+    lev_prices = portfolio.get("prices", {})
+    has_lev    = False
+    for ticker, pos in leverage.items():
+        sh = pos.get("shares", 0)
+        if sh > 0:
+            has_lev = True
+            avg   = pos.get("avg_price_usd", 0)
+            price = lev_prices.get(ticker, avg)
+            val   = sh * price
+            pnl   = (price - avg) / avg * 100 if avg > 0 else 0
+            sign  = "+" if pnl >= 0 else ""
+            L.append(f"  {ticker}    ${val:>7,.0f}   {sh}주 @${avg:.2f}  {sign}{pnl:.1f}%")
+    if not has_lev:
+        L.append("  레버리지  미보유  (Phase 2+ 진입 시 QLD 매수)")
+    return L
+
+
+def _section_qqq_radar(qqq_data: dict, ma_data: dict, drawdown: float,
+                       rsi: float, vix: float, fear_greed: dict) -> list:
+    """QQQ 레이더."""
+    # ── QQQ 레이더 ────────────────────────────────────────────────────
+    pos_52w = qqq_data.get("position_52w_pct", 50)
+    mom_1m  = qqq_data.get("mom_1m_pct", 0)
+    mom_3m  = qqq_data.get("mom_3m_pct", 0)
+    ma_gap  = ma_data.get("gap_pct", 0)
+    ma_icon = "✅" if ma_data.get("above_ma200", True) else "❌ MA 이탈!"
+
+    return [
+        "",
+        "━━━ 📈 QQQ 레이더 ━━━",
+        f"  현재가  ${qqq_data.get('current', 0):>8,.2f}   52주高 ${qqq_data.get('high_52w', 0):,.2f}  低 ${qqq_data.get('low_52w', 0):,.2f}",
+        f"  낙폭    {drawdown:>+7.2f}%   52주위치 {_bar(pos_52w / 100, 12)} {pos_52w:.0f}%",
+        _drawdown_ruler(drawdown),
+        f"  1M {mom_1m:>+6.1f}%  3M {mom_3m:>+6.1f}%",
+        _rsi_visual(rsi),
+        _vix_visual(vix),
+        _fear_greed_visual(fear_greed or {}),
+        f"  200MA   {ma_gap:>+6.1f}%  {ma_icon}",
+    ]
+
+
+def _section_sgov(sgov: dict) -> list:
+    """SGOV 실탄."""
+    # ── SGOV 실탄 ─────────────────────────────────────────────────────
+    return [
+        "",
+        "━━━ 🛡 SGOV 실탄 ━━━",
+    ] + _sgov_compare(sgov["current_usd"], sgov["target_usd"]) + [
+        f"  목표 {sgov['target_pct']}%  |  차이 ${sgov['diff_usd']:+,.0f}",
+        f"  → {sgov['action']}",
+    ]
+
+
+def _section_qqqi_dividend(qqqi_div: dict, market_type: str, phase_key) -> list:
+    """QQQI 배당 파이프라인."""
+    # ── QQQI 배당 파이프라인 ──────────────────────────────────────────
+    per_s = f"  주당 ${qqqi_div['per_share']:.4f} |" if qqqi_div.get("per_share") else ""
+    if market_type == "bull":
+        div_act = "배당 50% → SGOV 비축,  50% → DCA"
+    elif market_type == "bear" and isinstance(phase_key, int) and phase_key >= 2:
+        div_act = "배당 전액 → QLD/TQQQ 재투자"
+    else:
+        div_act = "배당 전액 → 소수점 DCA 재투자"
+
+    return [
+        "",
+        "━━━ 💰 QQQI 배당 ━━━",
+        f"  월 ${qqqi_div['monthly_usd']:.2f}{per_s}  연 {qqqi_div['annual_yield_pct']:.1f}%  ({qqqi_div['note']})",
+        f"  → {div_act}",
+    ]
+
+
+def _section_action_items(p_info: dict) -> list:
+    """행동 지침."""
+    # ── 행동 지침 ─────────────────────────────────────────────────────
+    L = ["", "━━━ 📋 행동 지침 ━━━"]
+    for i, act in enumerate(p_info["action_items"], 1):
+        L.append(f"  {i}. {act}")
+    return L
+
+
+def _section_dca(dca: dict, exchange_rate: float, market_type: str, phase_key) -> list:
+    """DCA 배분 막대 + 안전 가드 경고."""
+    # ── DCA 배분 막대 ─────────────────────────────────────────────────
+    L = [
+        "",
+        f"━━━ 💸 DCA  {dca['total_krw']:,}원  (${dca['total_usd']:.2f} @ {exchange_rate:,.0f}원)  [{dca['multiplier']}x] ━━━",
+    ] + _dca_rows(dca["by_ticker"], dca["total_krw"], exchange_rate)
+    # 안전 가드 발동 시 경고 노출 (변동성 캡·낙폭 정지 — 비평 #1)
+    for _note in dca.get("safety_notes", []):
+        L.append(f"  🛡 {_note}")
+    if (market_type == "bear" and isinstance(phase_key, int) and phase_key >= 4):
+        L.append("  ⚠️ 레버리지(QLD/TQQQ) 권고는 *수동 승인 필요* — 자동 매매 아님. "
+                 "3x ETF는 변동성 끌림으로 장기보유 시 손실 누적.")
+    return L
+
+
+def _section_special_alerts(market_type: str, phase_key, portfolio: dict,
+                            sgov: dict) -> list:
+    """특수 경고."""
+    # ── 특수 경고 ─────────────────────────────────────────────────────
+    alerts = []
+    if market_type == "bull" and phase_key == "bull_2":
+        hot = [
+            f"{h['ticker']} {h['return_pct']:+.0f}%"
+            for h in portfolio.get("holdings_detail", [])
+            if h.get("ticker") not in _SKIP_TICKERS
+            and isinstance(h.get("return_pct"), (int, float))
+            and (h.get("return_pct") or 0) >= 30
+        ]
+        if hot:
+            alerts.append(f"⚡ 과열 익절 검토: {', '.join(hot[:3])} — SGOV 비축 최우선")
+    if market_type == "bear" and isinstance(phase_key, int) and phase_key >= 3:
+        loss = [
+            f"{h['ticker']} {h['return_pct']:+.0f}%"
+            for h in portfolio.get("holdings_detail", [])
+            if h.get("ticker") not in _SKIP_TICKERS
+            and isinstance(h.get("return_pct"), (int, float))
+            and (h.get("return_pct") or 0) <= -10
+        ]
+        if loss:
+            alerts.append(f"⚡ 손절 검토: {', '.join(loss[:3])} — 재원 QLD/TQQQ 재배치")
+    if market_type == "bull" and sgov["direction"] == "buy":
+        alerts.append("💡 QQQI 배당금 → SGOV 우선 비축 (강세장 실탄 적립)")
+    if alerts:
+        return [""] + alerts
+    return []
+
+
+# ══════════════════════════════════════════════════════════════════════
 #  리포트 생성
 # ══════════════════════════════════════════════════════════════════════
 
@@ -1244,152 +1430,15 @@ def build_report(
 
     L = []
 
-    # ── 헤더 ─────────────────────────────────────────────────────────
-    L += [
-        "🏋️ Intelligence Barbell v2.1",
-        f"📅 {now}",
-    ]
-
-    # Phase 변화 경보 (최상단)
-    if old_phase_state and has_phase_changed(old_phase_state, market_type, phase_key):
-        old_t  = old_phase_state.get("market_type", "?")
-        old_k  = old_phase_state.get("phase_key", "?")
-        old_dd = old_phase_state.get("drawdown_pct", 0)
-        L += [
-            "",
-            "╔══════════════════════════════╗",
-            "║  ⚡ PHASE 변화 감지!           ║",
-            f"║  {old_t}/{old_k} ({old_dd:+.1f}%)  →  {market_type}/{phase_key} ({drawdown:+.1f}%)  ║",
-            "╚══════════════════════════════╝",
-        ]
-
-    # ── Phase 미터 ────────────────────────────────────────────────────
-    L += [
-        "",
-        f"📍 Phase  {p_info['emoji']} {p_info['label']}",
-        _phase_meter(market_type, phase_key),
-        f"  QQQ 고점 대비  {drawdown:+.2f}%   {p_info['description']}",
-    ]
-
-    # ── 포트폴리오 요약 ───────────────────────────────────────────────
-    sgov_ratio = portfolio["sgov_usd"] / portfolio["total_usd"] if portfolio["total_usd"] > 0 else 0
-    qqqi_ratio = portfolio["qqqi_usd"] / portfolio["total_usd"] if portfolio["total_usd"] > 0 else 0
-
-    L += [
-        "",
-        "━━━ 💼 포트폴리오 ━━━",
-        f"  총액  ${portfolio['total_usd']:>8,.2f}   (₩{total_krw:,})",
-        f"  환율  {exchange_rate:,.1f}원/USD",
-        f"  SGOV  ${portfolio['sgov_usd']:>7,.2f}   {_bar(sgov_ratio, 10)}  {sgov_ratio*100:.1f}%  실탄",
-        f"  QQQI  ${portfolio['qqqi_usd']:>7,.2f}   {_bar(min(qqqi_ratio / 0.35, 1), 10)}  {qqqi_ratio*100:.1f}%  배당엔진",
-    ]
-
-    # 레버리지 포지션
-    leverage   = load_leverage_state()
-    lev_prices = portfolio.get("prices", {})
-    has_lev    = False
-    for ticker, pos in leverage.items():
-        sh = pos.get("shares", 0)
-        if sh > 0:
-            has_lev = True
-            avg   = pos.get("avg_price_usd", 0)
-            price = lev_prices.get(ticker, avg)
-            val   = sh * price
-            pnl   = (price - avg) / avg * 100 if avg > 0 else 0
-            sign  = "+" if pnl >= 0 else ""
-            L.append(f"  {ticker}    ${val:>7,.0f}   {sh}주 @${avg:.2f}  {sign}{pnl:.1f}%")
-    if not has_lev:
-        L.append("  레버리지  미보유  (Phase 2+ 진입 시 QLD 매수)")
-
-    # ── QQQ 레이더 ────────────────────────────────────────────────────
-    pos_52w = qqq_data.get("position_52w_pct", 50)
-    mom_1m  = qqq_data.get("mom_1m_pct", 0)
-    mom_3m  = qqq_data.get("mom_3m_pct", 0)
-    ma_gap  = ma_data.get("gap_pct", 0)
-    ma_icon = "✅" if ma_data.get("above_ma200", True) else "❌ MA 이탈!"
-
-    L += [
-        "",
-        "━━━ 📈 QQQ 레이더 ━━━",
-        f"  현재가  ${qqq_data.get('current', 0):>8,.2f}   52주高 ${qqq_data.get('high_52w', 0):,.2f}  低 ${qqq_data.get('low_52w', 0):,.2f}",
-        f"  낙폭    {drawdown:>+7.2f}%   52주위치 {_bar(pos_52w / 100, 12)} {pos_52w:.0f}%",
-        _drawdown_ruler(drawdown),
-        f"  1M {mom_1m:>+6.1f}%  3M {mom_3m:>+6.1f}%",
-        _rsi_visual(rsi),
-        _vix_visual(vix),
-        _fear_greed_visual(fear_greed or {}),
-        f"  200MA   {ma_gap:>+6.1f}%  {ma_icon}",
-    ]
-
-    # ── SGOV 실탄 ─────────────────────────────────────────────────────
-    L += [
-        "",
-        "━━━ 🛡 SGOV 실탄 ━━━",
-    ] + _sgov_compare(sgov["current_usd"], sgov["target_usd"]) + [
-        f"  목표 {sgov['target_pct']}%  |  차이 ${sgov['diff_usd']:+,.0f}",
-        f"  → {sgov['action']}",
-    ]
-
-    # ── QQQI 배당 파이프라인 ──────────────────────────────────────────
-    per_s = f"  주당 ${qqqi_div['per_share']:.4f} |" if qqqi_div.get("per_share") else ""
-    if market_type == "bull":
-        div_act = "배당 50% → SGOV 비축,  50% → DCA"
-    elif market_type == "bear" and isinstance(phase_key, int) and phase_key >= 2:
-        div_act = "배당 전액 → QLD/TQQQ 재투자"
-    else:
-        div_act = "배당 전액 → 소수점 DCA 재투자"
-
-    L += [
-        "",
-        "━━━ 💰 QQQI 배당 ━━━",
-        f"  월 ${qqqi_div['monthly_usd']:.2f}{per_s}  연 {qqqi_div['annual_yield_pct']:.1f}%  ({qqqi_div['note']})",
-        f"  → {div_act}",
-    ]
-
-    # ── 행동 지침 ─────────────────────────────────────────────────────
-    L += ["", "━━━ 📋 행동 지침 ━━━"]
-    for i, act in enumerate(p_info["action_items"], 1):
-        L.append(f"  {i}. {act}")
-
-    # ── DCA 배분 막대 ─────────────────────────────────────────────────
-    L += [
-        "",
-        f"━━━ 💸 DCA  {dca['total_krw']:,}원  (${dca['total_usd']:.2f} @ {exchange_rate:,.0f}원)  [{dca['multiplier']}x] ━━━",
-    ] + _dca_rows(dca["by_ticker"], dca["total_krw"], exchange_rate)
-    # 안전 가드 발동 시 경고 노출 (변동성 캡·낙폭 정지 — 비평 #1)
-    for _note in dca.get("safety_notes", []):
-        L.append(f"  🛡 {_note}")
-    if (market_type == "bear" and isinstance(phase_key, int) and phase_key >= 4):
-        L.append("  ⚠️ 레버리지(QLD/TQQQ) 권고는 *수동 승인 필요* — 자동 매매 아님. "
-                 "3x ETF는 변동성 끌림으로 장기보유 시 손실 누적.")
-
-    # ── 특수 경고 ─────────────────────────────────────────────────────
-    alerts = []
-    if market_type == "bull" and phase_key == "bull_2":
-        hot = [
-            f"{h['ticker']} {h['return_pct']:+.0f}%"
-            for h in portfolio.get("holdings_detail", [])
-            if h.get("ticker") not in _SKIP_TICKERS
-            and isinstance(h.get("return_pct"), (int, float))
-            and (h.get("return_pct") or 0) >= 30
-        ]
-        if hot:
-            alerts.append(f"⚡ 과열 익절 검토: {', '.join(hot[:3])} — SGOV 비축 최우선")
-    if market_type == "bear" and isinstance(phase_key, int) and phase_key >= 3:
-        loss = [
-            f"{h['ticker']} {h['return_pct']:+.0f}%"
-            for h in portfolio.get("holdings_detail", [])
-            if h.get("ticker") not in _SKIP_TICKERS
-            and isinstance(h.get("return_pct"), (int, float))
-            and (h.get("return_pct") or 0) <= -10
-        ]
-        if loss:
-            alerts.append(f"⚡ 손절 검토: {', '.join(loss[:3])} — 재원 QLD/TQQQ 재배치")
-    if market_type == "bull" and sgov["direction"] == "buy":
-        alerts.append("💡 QQQI 배당금 → SGOV 우선 비축 (강세장 실탄 적립)")
-    if alerts:
-        L.append("")
-        L += alerts
+    L += _section_header(now, old_phase_state, market_type, phase_key, drawdown)
+    L += _section_phase_meter(p_info, market_type, phase_key, drawdown)
+    L += _section_portfolio(portfolio, total_krw, exchange_rate)
+    L += _section_qqq_radar(qqq_data, ma_data, drawdown, rsi, vix, fear_greed)
+    L += _section_sgov(sgov)
+    L += _section_qqqi_dividend(qqqi_div, market_type, phase_key)
+    L += _section_action_items(p_info)
+    L += _section_dca(dca, exchange_rate, market_type, phase_key)
+    L += _section_special_alerts(market_type, phase_key, portfolio, sgov)
 
     return "\n".join(L)
 

@@ -1520,6 +1520,303 @@ def _fetch_korea_indices():
     return "N/A", "N/A", "N/A"
 
 
+# ── report assembly helpers (순수 추출: generate_report 의 dict/텍스트 조립부) ──
+
+def _build_json_data(today_str, market, ndx_results, top_buy_candidates,
+                     top_watch, kospi_results, kospi_top, kospi_watch,
+                     accum_picks, name_fn, portfolio_results):
+    """investment-data-{date}.json 원본 데이터 dict 조립 (순수 — 부수효과 없음)."""
+    json_data = {
+        "date": today_str,
+        "generated_at": datetime.now().isoformat(),
+        "market": market,
+        "portfolio": [],
+        "nasdaq_100_scan": {
+            "all": ndx_results,
+            "top_buy": top_buy_candidates[:5],
+            "top_warning": top_watch[:5],
+        },
+        "kospi_top30_scan": {
+            "all": kospi_results,
+            "top_buy": kospi_top[:5],
+            "top_warning": kospi_watch[:5],
+        },
+        "institutional_accumulation": [_accum_clean_entry(e, name_fn=name_fn)
+                                       for e in accum_picks] if _ACCUM_AVAILABLE else [],
+    }
+    for r in portfolio_results:
+        entry = {
+            "ticker": r["ticker"],
+            "company_name": _company_name(r["ticker"]),
+            "judgment": r["judgment"],
+            "decision_v2": r.get("decision_v2", {}),
+            "etf_comparison": r.get("etf_comparison"),
+            "fundamental_score": r["fundamental"]["total_score"],
+            "fundamental_grade": r["fundamental"]["grade"],
+            "overall_signal": r["signal"]["overall_signal"],
+            "fundamental_notes": r["fundamental"].get("notes", []),
+            "signal_warnings": r["signal"].get("warnings", []),
+            "signal_critical": r["signal"].get("critical", []),
+            "price_info": r["signal"].get("price_info", {}),
+            "volume_info": r["signal"].get("volume_info", {}),
+            "reasons": r["reasons"],
+            "risks": r["risks"],
+        }
+        json_data["portfolio"].append(entry)
+    return json_data
+
+
+def _build_clean_data(today_str, spy_change, market, kospi_str,
+                      portfolio_results, top_buy_candidates, top_watch,
+                      kospi_top, kospi_watch, accum_picks, name_fn):
+    """investment-summary-{date}.json 정제 요약 dict 조립 (순수 — 부수효과 없음)."""
+    clean_data = {
+        "date": today_str,
+        "market_summary": {
+            "spy_change_pct": spy_change,
+            "spy_price": market.get("spy_price"),
+            "nasdaq_change_pct": market.get("qqq_change"),
+            "nasdaq_price": market.get("qqq_price"),
+            "kospi": kospi_str,
+        },
+        "portfolio_summary": [],
+    }
+    for r in portfolio_results:
+        t = r["ticker"]
+        sig = r["signal"]
+        price_info = sig.get("price_info", {})
+        clean_data["portfolio_summary"].append({
+            "ticker": t,
+            "company": _company_name(t),
+            "score": r["fundamental"]["total_score"],
+            "grade": r["fundamental"]["grade"],
+            "signal": r["signal"]["overall_signal"],
+            "judgment": r["judgment"],
+            "decision_v2": r.get("decision_v2", {}),
+            "price": price_info.get("current_price"),
+            "change_1d_pct": price_info.get("1d_change_pct"),
+            "change_1mo_pct": price_info.get("1mo_change_pct"),
+            "volume_vs_20d_avg_pct": round((sig.get("volume_info", {}).get("ratio", 1) - 1) * 100, 1) if sig.get("volume_info", {}).get("ratio") else None,
+            "top_reasons": r["reasons"][:2],
+            "top_risks": r["risks"][:2],
+        })
+    clean_data["nasdaq_top_buy"] = []
+    for r in top_buy_candidates[:5]:
+        clean_data["nasdaq_top_buy"].append({
+            "ticker": r["ticker"],
+            "company": _company_name(r["ticker"]),
+            "score": r["total_score"],
+            "grade": r["grade"],
+            "signal": r["signal"],
+            "decision_v2": r.get("decision_v2", {}),
+        })
+    clean_data["nasdaq_warnings"] = []
+    for r in top_watch[:5]:
+        clean_data["nasdaq_warnings"].append({
+            "ticker": r["ticker"],
+            "company": _company_name(r["ticker"]),
+            "score": r["total_score"],
+            "grade": r["grade"],
+            "signal": r["signal"],
+            "decision_v2": r.get("decision_v2", {}),
+        })
+    clean_data["kospi_top_buy"] = []
+    for r in kospi_top[:5]:
+        clean_data["kospi_top_buy"].append({
+            "ticker": r["ticker"],
+            "company": _company_name(r["ticker"]),
+            "score": r["total_score"],
+            "grade": r["grade"],
+            "signal": r["signal"],
+            "decision_v2": r.get("decision_v2", {}),
+        })
+    clean_data["kospi_warnings"] = []
+    for r in kospi_watch[:5]:
+        clean_data["kospi_warnings"].append({
+            "ticker": r["ticker"],
+            "company": _company_name(r["ticker"]),
+            "score": r["total_score"],
+            "grade": r["grade"],
+            "signal": r["signal"],
+            "decision_v2": r.get("decision_v2", {}),
+        })
+    clean_data["institutional_accumulation"] = [
+        _accum_clean_entry(e, name_fn=name_fn) for e in accum_picks
+    ] if _ACCUM_AVAILABLE else []
+    return clean_data
+
+
+def _build_mobile_summary(today_str, spy_change, market, kospi_str, avg_score,
+                          pos_count, neu_count, warn_count, crit_count,
+                          portfolio_results, top_buy_candidates, top_watch,
+                          kospi_top, kospi_watch, accum_picks, name_fn,
+                          llm_overlay, llm_status, elapsed, llm_token_line):
+    """모바일(텔레그램) 요약 텍스트 빌더 (순수 — 부수효과 없음). 원본 로직 그대로."""
+    sep = "━" * 17
+    qqq_change = market.get("qqq_change", 0)
+    summary_lines = []
+    summary_lines.append(f"📊 {today_str} 투자 리포트")
+    summary_lines.append(sep)
+    summary_lines.append("🌎 시장")
+    summary_lines.append(f"{_pct_arrow(spy_change)} SPY ${market.get('spy_price', 'N/A')} ({spy_change:+.2f}%)")
+    summary_lines.append(f"{_pct_arrow(qqq_change)} NASDAQ ${market.get('qqq_price', 'N/A')} ({qqq_change:+.2f}%)")
+    summary_lines.append(f"▪️ KOSPI {kospi_str}")
+    summary_lines.append("")
+    summary_lines.append(f"💼 포트폴리오 {avg_score:.1f}/100")
+    summary_lines.append(_score_bar(avg_score, 14))
+    summary_lines.append(f"신호: 🟢{pos_count} ⚪{neu_count} 🟡{warn_count} 🔴{crit_count}")
+    signal_strip = _signal_strip(pos_count, neu_count, warn_count, crit_count)
+    if signal_strip:
+        summary_lines.append(signal_strip)
+    buy_items = [r for r in portfolio_results if r.get("decision_v2", {}).get("action") in ("강한 매수후보", "관심/분할매수", "관심 유지")][:3]
+    watch_items = [r for r in portfolio_results if r.get("decision_v2", {}).get("action") in ("비중축소 검토", "매도검토", "데이터부족", "손절/매도검토")][:3]
+    buy_short = [_short_stock_label(r) for r in buy_items]
+    watch_short = [_short_stock_label(r) for r in watch_items]
+    if buy_items:
+        summary_lines.append("")
+        summary_lines.append("🛒 매수관심")
+        for r in buy_items:
+            act = r.get("decision_v2", {}).get("action", "")
+            summary_lines.append(f"  {_ACTION_EMOJI.get(act, '▪️')} {_short_stock_label(r)}")
+    if watch_items:
+        summary_lines.append("")
+        summary_lines.append("⚠️ 위험")
+        for r in watch_items:
+            act = r.get("decision_v2", {}).get("action", "")
+            summary_lines.append(f"  {_ACTION_EMOJI.get(act, '▪️')} {_short_stock_label(r)}")
+    summary_lines.append("")
+    summary_lines.append(sep)
+    nasdaq_top_mobile = _mobile_pick_items(top_buy_candidates)
+    kospi_top_mobile = _mobile_pick_items(kospi_top)
+    summary_lines.extend(_mobile_pick_block("🇺🇸 NAS100 상위", nasdaq_top_mobile))
+    summary_lines.extend(_mobile_pick_block("🇺🇸 NAS100 주의", top_watch, exclude_tickers={r.get("ticker") for r in nasdaq_top_mobile}))
+    summary_lines.extend(_mobile_pick_block("🇰🇷 KOSPI 상위", kospi_top_mobile))
+    summary_lines.extend(_mobile_pick_block("🇰🇷 KOSPI 주의", kospi_watch, exclude_tickers={r.get("ticker") for r in kospi_top_mobile}))
+    if accum_picks:
+        summary_lines.append("")
+        summary_lines.extend(accumulation_mobile_block(accum_picks, "🏛️ 기관 매집", limit=3, name_fn=name_fn))
+    summary_lines.append("")
+    summary_lines.append(sep)
+    if watch_short:
+        summary_lines.append(f"✅ 오늘 할 일: 위험 종목 확인 — {', '.join(watch_short)}")
+    elif buy_short:
+        summary_lines.append(f"✅ 오늘 할 일: 매수관심 검토 — {', '.join(buy_short)}")
+    else:
+        summary_lines.append("✅ 오늘 할 일: 포트폴리오 유지")
+    summary_lines.append("")
+    if llm_overlay:
+        summary_lines.append("🧠 LLM 코멘트")
+        summary_lines.extend(_llm_overlay_mobile_lines(llm_overlay))
+        summary_lines.append(f"⏱ {elapsed:.1f}초 | LLM overlay: {INVESTMENT_REPORT_LLM_MODEL}")
+    else:
+        summary_lines.append(f"⏱ {elapsed:.1f}초 | LLM overlay: {llm_status}")
+    summary_lines.append(llm_token_line)
+    return "\n".join(summary_lines)
+
+
+def _technical_indicator_line(ticker):
+    """종목별 기술적 지표 한 줄(`- **기술적 지표:** ...`) 생성. 원본 로직 그대로.
+
+    실패/데이터부족 시 '데이터 없음' 라인을 반환 (원본의 except 경로와 동일).
+    """
+    try:
+        tech_hist = yf.Ticker(ticker).history(period="2mo", interval="1d")
+        if tech_hist is not None and len(tech_hist) > 30:
+            closes = tech_hist["Close"].values
+            # SMA20
+            sma20 = closes[-20:].mean()
+
+            def _ema(values, period):
+                result = np.zeros_like(values)
+                alpha = 2 / (period + 1)
+                result[0] = values[0]
+                for i in range(1, len(values)):
+                    result[i] = alpha * values[i] + (1 - alpha) * result[i-1]
+                return result
+
+            # MACD
+            ema12 = _ema(closes, 12)
+            ema26 = _ema(closes, 26)
+            macd = ema12[-1] - ema26[-1]
+            # RSI (14, Wilder smoothing)
+            deltas = np.diff(closes)
+            gains = np.where(deltas > 0, deltas, 0)
+            losses = np.where(deltas < 0, -deltas, 0)
+            avg_gain = gains[:14].mean()
+            avg_loss = losses[:14].mean()
+            for i in range(14, len(deltas)):
+                avg_gain = (avg_gain * 13 + gains[i]) / 14
+                avg_loss = (avg_loss * 13 + losses[i]) / 14
+            rs = avg_gain / max(avg_loss, 0.001)
+            rsi = 100 - (100 / (1 + rs))
+            return f"- **기술적 지표:** RSI {rsi:.1f} | MACD {macd:.3f} | 20일 MA ${sma20:.2f}"
+    except Exception:
+        return f"- **기술적 지표:** 데이터 없음"
+    return None
+
+
+def _build_ticker_findings(sig, price_info, vol_info, vol_str, fund, ticker):
+    """종목별 '확인할 것' findings 리스트 생성 (순수 추출 — 원본 로직·순서 그대로).
+
+    네트워크(SaveTicker)는 try/except 로 격리되어 있어 실패해도 부분 결과 반환.
+    """
+    findings = []
+
+    # 1. News headlines from yfinance
+    news_items = sig.get("news_items", [])
+    if news_items:
+        for news in news_items[:3]:
+            title = news.get("title", "").strip()
+            if not title or title == "No title":
+                continue
+            senti = news.get("sentiment", "")
+            senti_emoji = {"positive": "🟢", "warning": "🟡", "critical": "🔴", "neutral": "⚪"}
+            se = senti_emoji.get(senti, "⚪")
+            findings.append(f"📰 {se} {title}")
+
+    # 2. Price/volume events
+    d1_change_val = price_info.get("1d_change_pct")
+    if vol_info.get("spike"):
+        findings.append(f"📊 거래량 급증 (20일 평균 대비 {vol_str}, 원인 확인 필요)")
+    if d1_change_val is not None and abs(d1_change_val) > 3:
+        findings.append(f"💹 주가 {d1_change_val:+.2f}% 변동 — 관련 뉴스/공시 확인")
+
+    # 3. Analyst info
+    analyst_info = sig.get("analyst_info", {})
+    target_mean = analyst_info.get("target_mean")
+    if target_mean:
+        upside = analyst_info.get("upside_pct", 0)
+        findings.append(f"🎯 애널리스트 평균 목표가 ${target_mean:.1f} (상승여력 {upside:+.1f}%)")
+
+    # 4. Fundamental concerns
+    breakdown = fund.get("score_breakdown", {})
+    for cat, data_cat in breakdown.items():
+        if isinstance(data_cat, dict) and data_cat.get("score", 0) < data_cat.get("max", 100) * 0.3:
+            cat_name = {"profitability": "수익성", "earnings_quality": "이익의 질", "financial_stability": "재무 안정성", "growth_quality": "성장의 질", "capital_allocation": "자본 배분"}
+            cn = cat_name.get(cat, cat)
+            score_val = data_cat.get("score", 0)
+            max_val = data_cat.get("max", 10)
+            findings.append(f"⚠️ {cn} 점수 낮음 ({score_val}/{max_val}) — 재무제표 확인 필요")
+
+    # 5. SaveTicker news check
+    try:
+        import requests
+        st_url = f"https://saveticker.com/api/news/list?tickers={ticker}&page=1&page_size=2&sort=created_at_desc"
+        st_resp = requests.get(st_url, timeout=5)
+        if st_resp.status_code == 200:
+            st_data = st_resp.json()
+            st_news = st_data.get("news_list", [])
+            if st_news:
+                for item in st_news[:2]:
+                    st_title = item.get("title", "")
+                    if st_title and _news_title_relevant(ticker, st_title) and not any(st_title in f for f in findings):
+                        findings.append(f"📰 SaveTicker: {st_title}")
+    except Exception:
+        pass
+
+    return findings
+
+
 # ── main report generator ───────────────────────────────────────────────
 
 def generate_report():
@@ -1776,39 +2073,9 @@ def generate_report():
         lines.append(f"### {t} — {cname}")
         lines.append(f"- **현재가:** {price_str} | **1일:** {d1_str} | **5일:** {d5_str} | **1개월:** {mo_str}")
         # Technical indicators
-        try:
-            tech_hist = yf.Ticker(t).history(period="2mo", interval="1d")
-            if tech_hist is not None and len(tech_hist) > 30:
-                closes = tech_hist["Close"].values
-                # SMA20
-                sma20 = closes[-20:].mean()
-
-                def _ema(values, period):
-                    result = np.zeros_like(values)
-                    alpha = 2 / (period + 1)
-                    result[0] = values[0]
-                    for i in range(1, len(values)):
-                        result[i] = alpha * values[i] + (1 - alpha) * result[i-1]
-                    return result
-
-                # MACD
-                ema12 = _ema(closes, 12)
-                ema26 = _ema(closes, 26)
-                macd = ema12[-1] - ema26[-1]
-                # RSI (14, Wilder smoothing)
-                deltas = np.diff(closes)
-                gains = np.where(deltas > 0, deltas, 0)
-                losses = np.where(deltas < 0, -deltas, 0)
-                avg_gain = gains[:14].mean()
-                avg_loss = losses[:14].mean()
-                for i in range(14, len(deltas)):
-                    avg_gain = (avg_gain * 13 + gains[i]) / 14
-                    avg_loss = (avg_loss * 13 + losses[i]) / 14
-                rs = avg_gain / max(avg_loss, 0.001)
-                rsi = 100 - (100 / (1 + rs))
-                lines.append(f"- **기술적 지표:** RSI {rsi:.1f} | MACD {macd:.3f} | 20일 MA ${sma20:.2f}")
-        except Exception:
-            lines.append(f"- **기술적 지표:** 데이터 없음")
+        tech_line = _technical_indicator_line(t)
+        if tech_line is not None:
+            lines.append(tech_line)
         lines.append(f"- **거래량 변화:** 20일 평균 대비 {vol_str}")
         lines.append(f"- **재무 건강도:** {score}/100점, 등급 **{grade}**")
         lines.append(f"- **오늘의 신호:** {signal_display}")
@@ -1824,61 +2091,8 @@ def generate_report():
             lines.append(f"  {i}. {risk}")
         lines.append(f"- **확인할 것:**")
         # Build specific findings from available data
-        findings = []
-        
-        # 1. News headlines from yfinance
-        news_items = sig.get("news_items", [])
-        if news_items:
-            for news in news_items[:3]:
-                title = news.get("title", "").strip()
-                if not title or title == "No title":
-                    continue
-                senti = news.get("sentiment", "")
-                senti_emoji = {"positive": "🟢", "warning": "🟡", "critical": "🔴", "neutral": "⚪"}
-                se = senti_emoji.get(senti, "⚪")
-                findings.append(f"📰 {se} {title}")
-        
-        # 2. Price/volume events
-        d1_change_val = price_info.get("1d_change_pct")
-        if vol_info.get("spike"):
-            findings.append(f"📊 거래량 급증 (20일 평균 대비 {vol_str}, 원인 확인 필요)")
-        if d1_change_val is not None and abs(d1_change_val) > 3:
-            findings.append(f"💹 주가 {d1_change_val:+.2f}% 변동 — 관련 뉴스/공시 확인")
-        
-        # 3. Analyst info
-        analyst_info = sig.get("analyst_info", {})
-        target_mean = analyst_info.get("target_mean")
-        if target_mean:
-            upside = analyst_info.get("upside_pct", 0)
-            findings.append(f"🎯 애널리스트 평균 목표가 ${target_mean:.1f} (상승여력 {upside:+.1f}%)")
-        
-        # 4. Fundamental concerns
-        breakdown = fund.get("score_breakdown", {})
-        for cat, data_cat in breakdown.items():
-            if isinstance(data_cat, dict) and data_cat.get("score", 0) < data_cat.get("max", 100) * 0.3:
-                cat_name = {"profitability": "수익성", "earnings_quality": "이익의 질", "financial_stability": "재무 안정성", "growth_quality": "성장의 질", "capital_allocation": "자본 배분"}
-                cn = cat_name.get(cat, cat)
-                score_val = data_cat.get("score", 0)
-                max_val = data_cat.get("max", 10)
-                findings.append(f"⚠️ {cn} 점수 낮음 ({score_val}/{max_val}) — 재무제표 확인 필요")
-        
-        # 5. SaveTicker news check
-        ticker = r["ticker"]
-        try:
-            import requests
-            st_url = f"https://saveticker.com/api/news/list?tickers={ticker}&page=1&page_size=2&sort=created_at_desc"
-            st_resp = requests.get(st_url, timeout=5)
-            if st_resp.status_code == 200:
-                st_data = st_resp.json()
-                st_news = st_data.get("news_list", [])
-                if st_news:
-                    for item in st_news[:2]:
-                        st_title = item.get("title", "")
-                        if st_title and _news_title_relevant(ticker, st_title) and not any(st_title in f for f in findings):
-                            findings.append(f"📰 SaveTicker: {st_title}")
-        except Exception:
-            pass
-        
+        findings = _build_ticker_findings(sig, price_info, vol_info, vol_str, fund, r["ticker"])
+
         if findings:
             for idx, finding in enumerate(findings[:5], 1):
                 lines.append(f"  {idx}. {finding}")
@@ -2062,122 +2276,22 @@ def generate_report():
     print(f"\n📄 리포트 저장 완료: {report_path}")
 
     # ── Save JSON data ──
-    json_data = {
-        "date": today_str,
-        "generated_at": datetime.now().isoformat(),
-        "market": market,
-        "portfolio": [],
-        "nasdaq_100_scan": {
-            "all": ndx_results,
-            "top_buy": top_buy_candidates[:5],
-            "top_warning": top_watch[:5],
-        },
-        "kospi_top30_scan": {
-            "all": kospi_results,
-            "top_buy": kospi_top[:5],
-            "top_warning": kospi_watch[:5],
-        },
-        "institutional_accumulation": [_accum_clean_entry(e, name_fn=_accum_name)
-                                       for e in accum_picks] if _ACCUM_AVAILABLE else [],
-    }
-    for r in portfolio_results:
-        entry = {
-            "ticker": r["ticker"],
-            "company_name": _company_name(r["ticker"]),
-            "judgment": r["judgment"],
-            "decision_v2": r.get("decision_v2", {}),
-            "etf_comparison": r.get("etf_comparison"),
-            "fundamental_score": r["fundamental"]["total_score"],
-            "fundamental_grade": r["fundamental"]["grade"],
-            "overall_signal": r["signal"]["overall_signal"],
-            "fundamental_notes": r["fundamental"].get("notes", []),
-            "signal_warnings": r["signal"].get("warnings", []),
-            "signal_critical": r["signal"].get("critical", []),
-            "price_info": r["signal"].get("price_info", {}),
-            "volume_info": r["signal"].get("volume_info", {}),
-            "reasons": r["reasons"],
-            "risks": r["risks"],
-        }
-        json_data["portfolio"].append(entry)
+    json_data = _build_json_data(
+        today_str, market, ndx_results, top_buy_candidates, top_watch,
+        kospi_results, kospi_top, kospi_watch, accum_picks, _accum_name,
+        portfolio_results,
+    )
 
     json_path = os.path.join(REPORTS_DIR, f"investment-data-{today_str}.json")
     with open(json_path, "w", encoding="utf-8") as f:
         json.dump(json_data, f, ensure_ascii=False, indent=2, default=str)
 
     # ── Save clean summary ──
-    clean_data = {
-        "date": today_str,
-        "market_summary": {
-            "spy_change_pct": spy_change,
-            "spy_price": market.get("spy_price"),
-            "nasdaq_change_pct": market.get("qqq_change"),
-            "nasdaq_price": market.get("qqq_price"),
-            "kospi": kospi_str,
-        },
-        "portfolio_summary": [],
-    }
-    for r in portfolio_results:
-        t = r["ticker"]
-        sig = r["signal"]
-        price_info = sig.get("price_info", {})
-        clean_data["portfolio_summary"].append({
-            "ticker": t,
-            "company": _company_name(t),
-            "score": r["fundamental"]["total_score"],
-            "grade": r["fundamental"]["grade"],
-            "signal": r["signal"]["overall_signal"],
-            "judgment": r["judgment"],
-            "decision_v2": r.get("decision_v2", {}),
-            "price": price_info.get("current_price"),
-            "change_1d_pct": price_info.get("1d_change_pct"),
-            "change_1mo_pct": price_info.get("1mo_change_pct"),
-            "volume_vs_20d_avg_pct": round((sig.get("volume_info", {}).get("ratio", 1) - 1) * 100, 1) if sig.get("volume_info", {}).get("ratio") else None,
-            "top_reasons": r["reasons"][:2],
-            "top_risks": r["risks"][:2],
-        })
-    clean_data["nasdaq_top_buy"] = []
-    for r in top_buy_candidates[:5]:
-        clean_data["nasdaq_top_buy"].append({
-            "ticker": r["ticker"],
-            "company": _company_name(r["ticker"]),
-            "score": r["total_score"],
-            "grade": r["grade"],
-            "signal": r["signal"],
-            "decision_v2": r.get("decision_v2", {}),
-        })
-    clean_data["nasdaq_warnings"] = []
-    for r in top_watch[:5]:
-        clean_data["nasdaq_warnings"].append({
-            "ticker": r["ticker"],
-            "company": _company_name(r["ticker"]),
-            "score": r["total_score"],
-            "grade": r["grade"],
-            "signal": r["signal"],
-            "decision_v2": r.get("decision_v2", {}),
-        })
-    clean_data["kospi_top_buy"] = []
-    for r in kospi_top[:5]:
-        clean_data["kospi_top_buy"].append({
-            "ticker": r["ticker"],
-            "company": _company_name(r["ticker"]),
-            "score": r["total_score"],
-            "grade": r["grade"],
-            "signal": r["signal"],
-            "decision_v2": r.get("decision_v2", {}),
-        })
-    clean_data["kospi_warnings"] = []
-    for r in kospi_watch[:5]:
-        clean_data["kospi_warnings"].append({
-            "ticker": r["ticker"],
-            "company": _company_name(r["ticker"]),
-            "score": r["total_score"],
-            "grade": r["grade"],
-            "signal": r["signal"],
-            "decision_v2": r.get("decision_v2", {}),
-        })
-    clean_data["institutional_accumulation"] = [
-        _accum_clean_entry(e, name_fn=_accum_name) for e in accum_picks
-    ] if _ACCUM_AVAILABLE else []
+    clean_data = _build_clean_data(
+        today_str, spy_change, market, kospi_str, portfolio_results,
+        top_buy_candidates, top_watch, kospi_top, kospi_watch,
+        accum_picks, _accum_name,
+    )
     clean_path = os.path.join(REPORTS_DIR, f"investment-summary-{today_str}.json")
     with open(clean_path, "w", encoding="utf-8") as f:
         json.dump(clean_data, f, ensure_ascii=False, indent=2, default=str)
@@ -2241,66 +2355,13 @@ def generate_report():
         print(f"\n(전일 요약 없음 — 변경 감지 건너뜀)")
 
     # ── Mobile summary (Telegram-friendly) ──
-    sep = "━" * 17
-    qqq_change = market.get("qqq_change", 0)
-    summary_lines = []
-    summary_lines.append(f"📊 {today_str} 투자 리포트")
-    summary_lines.append(sep)
-    summary_lines.append("🌎 시장")
-    summary_lines.append(f"{_pct_arrow(spy_change)} SPY ${market.get('spy_price', 'N/A')} ({spy_change:+.2f}%)")
-    summary_lines.append(f"{_pct_arrow(qqq_change)} NASDAQ ${market.get('qqq_price', 'N/A')} ({qqq_change:+.2f}%)")
-    summary_lines.append(f"▪️ KOSPI {kospi_str}")
-    summary_lines.append("")
-    summary_lines.append(f"💼 포트폴리오 {avg_score:.1f}/100")
-    summary_lines.append(_score_bar(avg_score, 14))
-    summary_lines.append(f"신호: 🟢{pos_count} ⚪{neu_count} 🟡{warn_count} 🔴{crit_count}")
-    signal_strip = _signal_strip(pos_count, neu_count, warn_count, crit_count)
-    if signal_strip:
-        summary_lines.append(signal_strip)
-    buy_items = [r for r in portfolio_results if r.get("decision_v2", {}).get("action") in ("강한 매수후보", "관심/분할매수", "관심 유지")][:3]
-    watch_items = [r for r in portfolio_results if r.get("decision_v2", {}).get("action") in ("비중축소 검토", "매도검토", "데이터부족", "손절/매도검토")][:3]
-    buy_short = [_short_stock_label(r) for r in buy_items]
-    watch_short = [_short_stock_label(r) for r in watch_items]
-    if buy_items:
-        summary_lines.append("")
-        summary_lines.append("🛒 매수관심")
-        for r in buy_items:
-            act = r.get("decision_v2", {}).get("action", "")
-            summary_lines.append(f"  {_ACTION_EMOJI.get(act, '▪️')} {_short_stock_label(r)}")
-    if watch_items:
-        summary_lines.append("")
-        summary_lines.append("⚠️ 위험")
-        for r in watch_items:
-            act = r.get("decision_v2", {}).get("action", "")
-            summary_lines.append(f"  {_ACTION_EMOJI.get(act, '▪️')} {_short_stock_label(r)}")
-    summary_lines.append("")
-    summary_lines.append(sep)
-    nasdaq_top_mobile = _mobile_pick_items(top_buy_candidates)
-    kospi_top_mobile = _mobile_pick_items(kospi_top)
-    summary_lines.extend(_mobile_pick_block("🇺🇸 NAS100 상위", nasdaq_top_mobile))
-    summary_lines.extend(_mobile_pick_block("🇺🇸 NAS100 주의", top_watch, exclude_tickers={r.get("ticker") for r in nasdaq_top_mobile}))
-    summary_lines.extend(_mobile_pick_block("🇰🇷 KOSPI 상위", kospi_top_mobile))
-    summary_lines.extend(_mobile_pick_block("🇰🇷 KOSPI 주의", kospi_watch, exclude_tickers={r.get("ticker") for r in kospi_top_mobile}))
-    if accum_picks:
-        summary_lines.append("")
-        summary_lines.extend(accumulation_mobile_block(accum_picks, "🏛️ 기관 매집", limit=3, name_fn=_accum_name))
-    summary_lines.append("")
-    summary_lines.append(sep)
-    if watch_short:
-        summary_lines.append(f"✅ 오늘 할 일: 위험 종목 확인 — {', '.join(watch_short)}")
-    elif buy_short:
-        summary_lines.append(f"✅ 오늘 할 일: 매수관심 검토 — {', '.join(buy_short)}")
-    else:
-        summary_lines.append("✅ 오늘 할 일: 포트폴리오 유지")
-    summary_lines.append("")
-    if llm_overlay:
-        summary_lines.append("🧠 LLM 코멘트")
-        summary_lines.extend(_llm_overlay_mobile_lines(llm_overlay))
-        summary_lines.append(f"⏱ {elapsed:.1f}초 | LLM overlay: {INVESTMENT_REPORT_LLM_MODEL}")
-    else:
-        summary_lines.append(f"⏱ {elapsed:.1f}초 | LLM overlay: {llm_status}")
-    summary_lines.append(llm_token_line)
-    summary_text = "\n".join(summary_lines)
+    summary_text = _build_mobile_summary(
+        today_str, spy_change, market, kospi_str, avg_score,
+        pos_count, neu_count, warn_count, crit_count,
+        portfolio_results, top_buy_candidates, top_watch,
+        kospi_top, kospi_watch, accum_picks, _accum_name,
+        llm_overlay, llm_status, elapsed, llm_token_line,
+    )
 
     summary_txt_path = os.path.join(REPORTS_DIR, f"investment-summary-{today_str}.txt")
     with open(summary_txt_path, "w", encoding="utf-8") as f:
