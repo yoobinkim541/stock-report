@@ -23,8 +23,8 @@ PATH=/home/ubuntu/.local/bin:/usr/local/bin:/usr/bin:/bin
 0 22 * * 1-5 cd /home/ubuntu/projects/stock-report && uv run python crons/daily_ranking.py >> /tmp/daily_ranking.log 2>&1            # 22:00 UTC = 07:00 KST
 # LeverageModel 일일 재학습 (+ 월요일 Optuna 재최적화)
 15 22 * * 1-5 cd /home/ubuntu/projects/stock-report && uv run python crons/daily_leverage_retrain.py >> /tmp/daily_leverage_retrain.log 2>&1   # 22:15 UTC = 07:15 KST
-# Notion 대시보드 동기화
-30 22 * * 1-5 cd /home/ubuntu/projects/stock-report && uv run python crons/notion_sync.py >> /tmp/notion_sync.log 2>&1               # 22:30 UTC = 07:30 KST
+# Notion 대시보드 동기화 (리포트 23:00 이후 — 당일 요약 반영, kiwoom 23:35 이전)
+30 23 * * 1-5 cd /home/ubuntu/projects/stock-report && uv run python crons/notion_sync.py >> /tmp/notion_sync.log 2>&1               # 23:30 UTC = 08:30 KST
 # MetaAllocator vs Phase 규칙 A/B 페이퍼 트레이딩 (월요일 Sharpe 비교 발송)
 50 22 * * 1-5 cd /home/ubuntu/projects/stock-report && uv run python crons/paper_track.py >> /tmp/paper_track.log 2>&1               # 22:50 UTC = 07:50 KST
 # 키움 REST API 국내주식 잔고 동기화

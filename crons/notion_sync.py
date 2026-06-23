@@ -2,8 +2,8 @@
 """
 notion_sync.py — stock-report → Notion 대시보드 자동 동기화
 
-크론 (평일 22:30 UTC = 07:30 KST):
-    30 22 * * 1-5 cd /home/ubuntu/projects/stock-report && uv run python notion_sync.py >> /tmp/notion_sync.log 2>&1
+크론 (평일 23:30 UTC = 08:30 KST — 리포트 23:00 이후, 당일 요약 반영):
+    30 23 * * 1-5 cd /home/ubuntu/projects/stock-report && uv run python crons/notion_sync.py >> /tmp/notion_sync.log 2>&1
 
 환경변수:
     NOTION_TOKEN         — Notion Integration Token (필수)
@@ -342,19 +342,33 @@ def _collect_ml():
             "fg": fg, "qqq_close": qqq_close}
 
 
-def _load_report_summary() -> str:
-    """오늘 투자 리포트 요약 로드 (없으면 빈 문자열)."""
+def _load_report_summary() -> tuple[str, str]:
+    """투자 리포트 요약 로드 → (본문, 리포트 날짜 'YYYY-MM-DD').
+
+    오늘(KST) 리포트가 없으면 가장 최근 리포트로 폴백한다 — notion 크론이
+    리포트 생성 직전에 돌거나, 주말·생성 실패로 당일 파일이 없어도
+    섹션이 영구히 '미생성'으로 비지 않도록(stale 표시는 호출부에서 처리).
+    파일이 하나도 없으면 ('', '').
+    """
     import glob
+    import re
     from pathlib import Path
+    base  = Path.home() / "reports"
     today = datetime.now(KST).strftime("%Y-%m-%d")
-    pattern = str(Path.home() / f"reports/investment-summary-{today}*.txt")
-    files = sorted(glob.glob(pattern))
-    if files:
-        try:
-            return Path(files[-1]).read_text(encoding="utf-8")[:2000]
-        except Exception:
-            pass
-    return ""
+
+    # 오늘 리포트 우선, 없으면 전체에서 최신 (파일명 날짜 = 사전식 정렬 = 시간순)
+    todays     = sorted(glob.glob(str(base / f"investment-summary-{today}*.txt")))
+    candidates = todays or sorted(glob.glob(str(base / "investment-summary-*.txt")))
+    if not candidates:
+        return "", ""
+
+    path     = candidates[-1]
+    m        = re.search(r"investment-summary-(\d{4}-\d{2}-\d{2})", path)
+    date_str = m.group(1) if m else ""
+    try:
+        return Path(path).read_text(encoding="utf-8")[:2000], date_str
+    except Exception:
+        return "", date_str
 
 
 # ── 블록 빌드 ──────────────────────────────────────────────────────────────────
@@ -366,7 +380,7 @@ def build_blocks() -> list[dict]:
 
     # ── 헤더 ─────────────────────────────────────────────────────────────────
     blocks += [
-        _callout(f"📡 stock-report 자동 동기화  •  {now_kst}  •  매일 07:30 KST",
+        _callout(f"📡 stock-report 자동 동기화  •  {now_kst}  •  평일 08:30 KST",
                  "📊", "blue_background"),
         _divider(),
     ]
@@ -543,16 +557,22 @@ def build_blocks() -> list[dict]:
     # ── 오늘의 투자 리포트 ─────────────────────────────────────────────────────
     blocks.append(_h2("📰 오늘의 투자 리포트"))
     try:
-        summary = _load_report_summary()
+        summary, report_date = _load_report_summary()
+        today_kst = datetime.now(KST).strftime("%Y-%m-%d")
         if summary:
             lines = [l for l in summary.strip().split("\n") if l.strip()]
-            blocks.append(_toggle("📄 전체 요약 (클릭 펼치기)",
-                                  [_para(l) for l in lines[:40]]))
-            logger.info("리포트 요약 추가 완료 (%d줄)", len(lines))
+            label = "📄 전체 요약 (클릭 펼치기)"
+            # 당일 리포트가 아직이면 최근 리포트임을 명시 (오해 방지)
+            if report_date and report_date != today_kst:
+                blocks.append(_callout(
+                    f"당일({today_kst}) 리포트 생성 전 — 최근 {report_date} 리포트 표시",
+                    "🕒", "yellow_background"))
+                label = f"📄 {report_date} 요약 (클릭 펼치기)"
+            blocks.append(_toggle(label, [_para(l) for l in lines[:40]]))
+            logger.info("리포트 요약 추가 완료 (%d줄, %s)", len(lines), report_date or "?")
         else:
-            today_kst = datetime.now(KST).strftime("%Y-%m-%d")
             blocks.append(_callout(
-                f"오늘 리포트 미생성 ({today_kst}) — 크론 23:00 UTC 이후 자동 생성됩니다",
+                f"리포트 없음 ({today_kst}) — 크론 23:00 UTC 이후 자동 생성됩니다",
                 "📭", "gray_background"))
     except Exception as e:
         logger.warning("리포트 로드 실패: %s", e)

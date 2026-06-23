@@ -92,7 +92,7 @@ crons/news_spike_detector.py (크론 매 1분)
 |------|------|------|
 | `crons/daily_leverage_retrain.py` | LeverageModel 재학습 + 월요일 Optuna 재최적화 | 평일 22:15 UTC |
 | `crons/daily_ranking.py` | ML 종목 랭킹 발송 | 평일 22:00 UTC |
-| `crons/notion_sync.py` | Notion 대시보드 동기화 | 평일 22:30 UTC |
+| `crons/notion_sync.py` | Notion 대시보드 동기화 (리포트 23:00 이후) | 평일 23:30 UTC |
 | `crons/news_spike_detector.py` | 속보 수집 + 급증 감지 + 텔레그램 알림 | 매 1분 |
 | `crons/kiwoom_sync_rest.py` | 키움 REST API 국내주식 잔고 동기화 | 평일 23:35 UTC |
 | `reports/source_collector.py` | 전체 소스 수집 (텔레그램 채널·FRED·국채·시장 스냅샷) → JSONL 캐시 | 매 30분 (:05/:35) |
