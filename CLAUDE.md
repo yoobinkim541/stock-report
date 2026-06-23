@@ -92,7 +92,8 @@ crons/news_spike_detector.py (크론 매 1분)
 |------|------|------|
 | `crons/daily_leverage_retrain.py` | LeverageModel 재학습 + 월요일 Optuna 재최적화 | 평일 22:15 UTC |
 | `crons/daily_ranking.py` | ML 종목 랭킹 발송 | 평일 22:00 UTC |
-| `crons/notion_sync.py` | Notion 대시보드 동기화 (리포트 23:00 이후) | 평일 23:30 UTC |
+| `crons/notion_sync.py` | Notion 대시보드 동기화 (리포트 23:00 이후) + 리포트 아카이빙 호출 | 평일 23:30 UTC |
+| `crons/notion_archive.py` | 일일 리포트 → Notion 월(`26/06`)/주(`4주차`) 계층 페이지 누적 아카이빙 (멱등 upsert, 대시보드와 독립) | notion_sync 가 호출 |
 | `crons/news_spike_detector.py` | 속보 수집 + 급증 감지 + 텔레그램 알림 | 매 1분 |
 | `crons/kiwoom_sync_rest.py` | 키움 REST API 국내주식 잔고 동기화 | 평일 23:35 UTC |
 | `reports/source_collector.py` | 전체 소스 수집 (텔레그램 채널·FRED·국채·시장 스냅샷) → JSONL 캐시 | 매 30분 (:05/:35) |
@@ -203,6 +204,9 @@ crons/news_spike_detector.py (크론 매 1분)
 | `KIWOOM_API_SECRET` | — | — |
 | `SYNC_TOKEN` | — | — (portfolio_sync_server 인증) |
 | `SYNC_PORT` | — | `8765` |
+| `NOTION_TOKEN` | — | — (Notion 대시보드 동기화·아카이빙. 없으면 notion_sync 스킵) |
+| `NOTION_ARCHIVE_ROOT_ID` | — | — (아카이브 루트 페이지 강제 지정. 미설정 시 대시보드 부모 아래 자동탐색·생성 후 `~/.cache` 캐시) |
+| `NOTION_ARCHIVE_PARENT_ID` | — | — (루트를 만들 부모. 기본: 대시보드의 부모 페이지) |
 | `SAVE_TICKER_API_BASE` | — | `https://saveticker.com/api` |
 | `INVESTMENT_REPORT_MAX_NASDAQ_SCAN` | — | `100` |
 | `INVESTMENT_REPORT_MAX_KOSPI_SCAN` | — | `30` |
@@ -238,6 +242,7 @@ crons/news_spike_detector.py (크론 매 1분)
 ~/.cache/barbell_state.json             — Phase 상태 (크론·봇 공유)
 ~/.cache/barbell_state.lock             — Phase 상태 쓰기 잠금
 ~/.cache/barbell_anchor.json            — 낙폭 고점 앵커 (Phase 드리프트 방지)
+~/.cache/notion_archive_root.json       — Notion 리포트 아카이브 루트 페이지 id 캐시 (notion_archive.py)
 ~/.local/state/stock-report/barbell_bot.pid  — 봇 PID (단일 인스턴스 잠금)
 ~/.local/share/stock-report/stock_report.db      — SQLite 통합 저장소 (user_id 스코프, WAL)
                                                    └ 컬렉션: tax_records · portfolio_history
