@@ -18,6 +18,7 @@ import pandas as pd
 import pytest
 
 import barbell_strategy as bs
+import providers.market_data as md   # 낙폭 앵커 등 데이터 수집층 정의 모듈 (monkeypatch 대상)
 import ml.meta_allocator as ma
 
 
@@ -92,14 +93,16 @@ def test_hysteresis_full_recovery_exits_bear():
 # ══════════════════════════════════════════════════════════════════════
 
 def test_anchor_monotonic_and_reset(tmp_path, monkeypatch):
-    monkeypatch.setattr(bs, "ANCHOR_FILE", str(tmp_path / "anchor.json"))
+    # ANCHOR_FILE·_update_drawdown_anchor 는 providers/market_data.py 가 실제 정의 모듈.
+    # _update_drawdown_anchor 가 그 모듈 전역 ANCHOR_FILE 을 참조하므로 md 에 패치한다.
+    monkeypatch.setattr(md, "ANCHOR_FILE", str(tmp_path / "anchor.json"))
 
     # 초기: 앵커 = 52주 고점
-    assert bs._update_drawdown_anchor(100.0, 96.0) == 100.0
+    assert md._update_drawdown_anchor(100.0, 96.0) == 100.0
     # 롤링 고점이 90으로 내려와도 (장기 하락장) 앵커는 100 유지
-    assert bs._update_drawdown_anchor(90.0, 60.0) == 100.0
+    assert md._update_drawdown_anchor(90.0, 60.0) == 100.0
     # 가격이 앵커 -5% 이내(95)로 회복 → 롤링 고점 90으로 리셋
-    assert bs._update_drawdown_anchor(90.0, 96.0) == 90.0
+    assert md._update_drawdown_anchor(90.0, 96.0) == 90.0
     # 파일에 영속화 확인
     saved = json.loads((tmp_path / "anchor.json").read_text())
     assert saved["anchor_high"] == 90.0
