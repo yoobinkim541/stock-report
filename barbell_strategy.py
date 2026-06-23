@@ -50,7 +50,8 @@ import notify   # 텔레그램 발송 단일 진실원
 
 TELEGRAM_TOKEN   = os.getenv("STOCK_BOT_TOKEN")
 TELEGRAM_CHAT_ID = os.getenv("STOCK_BOT_CHAT_ID", "5771238245")
-PORTFOLIO_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "portfolio_snapshot.json")
+# portfolio_snapshot 경로 단일 소스 — portfolio_universe(STOCK_REPORT_PROJECT_DIR env 반영). 재export로 호환.
+from portfolio_universe import PORTFOLIO_SNAPSHOT_PATH as PORTFOLIO_PATH
 LEVERAGE_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "leverage_state.json")
 STATE_FILE = os.path.expanduser("~/.cache/barbell_state.json")
 
