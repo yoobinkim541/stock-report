@@ -14,6 +14,8 @@ import sys
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import warnings
 
+import notify
+
 warnings.filterwarnings("ignore")
 
 from dotenv import load_dotenv
@@ -30,18 +32,7 @@ def _send(text: str) -> bool:
     if not BOT_TOKEN or not CHAT_ID:
         logger.warning("STOCK_BOT_TOKEN / STOCK_BOT_CHAT_ID 미설정")
         return False
-    import requests
-    try:
-        for i in range(0, len(text), 4000):
-            requests.post(
-                f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage",
-                json={"chat_id": CHAT_ID, "text": text[i:i+4000]},
-                timeout=15,
-            ).raise_for_status()
-        return True
-    except Exception as e:
-        logger.error("텔레그램 발송 실패: %s", e)
-        return False
+    return notify.send_telegram(text, token=BOT_TOKEN, chat_id=CHAT_ID, timeout=15)
 
 
 def _should_reoptimize() -> bool:

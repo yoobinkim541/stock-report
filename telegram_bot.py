@@ -1707,7 +1707,14 @@ for _cmd in _MARKET_CMDS:
     _COMMAND_HANDLERS[_cmd] = lambda chat_id, args, cmd=_cmd: _dispatch_market(cmd, chat_id)
 
 
-def dispatch(text: str, chat_id: str, role: str = "owner"):
+def _parse_command(text: str) -> tuple[str, list]:
+    """원문 텍스트 → (명령어, 인자) 파싱 + alias 해석 (순수 함수, 부수효과 없음).
+
+    `parts[0]` 을 소문자화하고 `@봇이름` 접미사를 제거해 명령어로,
+    나머지를 인자로 분리한 뒤 `BOT_COMMAND_ALIASES` 로 정식 명령어로 치환한다.
+    alias 가 인자를 포함하면(`/holding dividend` 등) alias 인자가 원본 인자 앞에 온다.
+    역할 게이팅·라우팅 이전 단계 — 동작·순서는 dispatch 인라인 시절과 동일.
+    """
     parts = text.strip().split()
     cmd   = parts[0].lower().split("@")[0]
     args  = parts[1:]
@@ -1717,6 +1724,12 @@ def dispatch(text: str, chat_id: str, role: str = "owner"):
         alias_parts = alias.split()
         cmd = alias_parts[0]
         args = alias_parts[1:] + args
+
+    return cmd, args
+
+
+def dispatch(text: str, chat_id: str, role: str = "owner"):
+    cmd, args = _parse_command(text)
 
     # 역할 게이팅 (보안 경계) — alias 해석 후, /ask 추론 전에 차단
     if not _command_allowed(role, cmd):

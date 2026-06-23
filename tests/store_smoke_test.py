@@ -146,19 +146,23 @@ def main() -> int:
     try:
         import barbell_strategy as bs
         importlib.reload(bs)
+        # 데이터/상태 접근층(leverage·anchor)은 providers/market_data.py 가 실제 정의 모듈.
+        # 해당 함수들은 md 모듈 전역 LEVERAGE_FILE/ANCHOR_FILE 을 참조하므로 md 에 리다이렉트한다.
+        import providers.market_data as md
+        importlib.reload(md)
     except Exception as e:
         print(f"⏭️  barbell_strategy skip (의존성 없음: {type(e).__name__})")
     else:
         # 실제 프로젝트 설정 파일 미러를 tmp로 리다이렉트 (라이브 설정 보호)
         bs.DCA_WEIGHTS_FILE    = str(Path(tmp) / "dca_weights.json")
         bs.TARGET_WEIGHTS_FILE = str(Path(tmp) / "target_weights.json")
-        bs.LEVERAGE_FILE       = str(Path(tmp) / "leverage_state.json")
+        md.LEVERAGE_FILE       = str(Path(tmp) / "leverage_state.json")
         bs.save_dca_weights({"AAA": 0.6, "BBB": 0.4}, {"AAA": 1.0})
         n, b = bs.load_dca_weights()
         check(abs(n.get("AAA", 0) - 0.6) < 1e-6, "dca_weights store 왕복")
         check(Path(bs.DCA_WEIGHTS_FILE).exists(), "dca_weights 파일 미러")
-        bs.save_leverage_state({"QLD": {"shares": 3.0, "avg_price_usd": 90.0, "updated": "x"}})
-        lev = bs.load_leverage_state()
+        md.save_leverage_state({"QLD": {"shares": 3.0, "avg_price_usd": 90.0, "updated": "x"}})
+        lev = md.load_leverage_state()
         check(lev["QLD"]["shares"] == 3.0 and "TQQQ" in lev,
               "leverage_state store 왕복 + 기본키 보강")
         bs.save_target_weights({"ORCL": 0.07})
@@ -166,14 +170,14 @@ def main() -> int:
 
         # Phase 상태 + 앵커 (round 2) — 미러 경로 tmp 리다이렉트
         bs.STATE_FILE  = str(Path(tmp) / "barbell_state.json")
-        bs.ANCHOR_FILE = str(Path(tmp) / "barbell_anchor.json")
+        md.ANCHOR_FILE = str(Path(tmp) / "barbell_anchor.json")
         bs.save_phase_state("bear", 3, -16.5)
         ps = bs.load_phase_state()
         check(ps.get("market_type") == "bear" and ps.get("phase_key") == "3",
               "barbell_state store 왕복")
         check(Path(bs.STATE_FILE).exists(), "barbell_state 파일 미러 (healthcheck mtime)")
-        a = bs._update_drawdown_anchor(high_52w=500.0, current=400.0)
-        check(abs(a - 500.0) < 1e-6 and abs(bs._load_drawdown_anchor() - 500.0) < 1e-6,
+        a = md._update_drawdown_anchor(high_52w=500.0, current=400.0)
+        check(abs(a - 500.0) < 1e-6 and abs(md._load_drawdown_anchor() - 500.0) < 1e-6,
               "barbell_anchor store 왕복")
 
     # ── 9. portfolio_snapshot 그림자 동기화 (Phase 2 round 3) ─────────

@@ -339,14 +339,9 @@ def build_dividend_calendar(dividends: list, shares: float = 1.0) -> str:
 # ══════════════════════════════════════════════════════════════════════
 
 def send_telegram(text: str):
-    if not TELEGRAM_TOKEN:
-        return
-    url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
-    for i in range(0, len(text), 4000):
-        try:
-            requests.post(url, json={"chat_id": TELEGRAM_CHAT_ID, "text": text[i:i+4000]}, timeout=10)
-        except Exception as e:
-            logger.error(f"텔레그램 오류: {e}")
+    """notify 단일 진실원에 위임 (4096 분할·토큰 마스킹 공통)."""
+    import notify
+    notify.send_telegram(text, token=TELEGRAM_TOKEN, chat_id=TELEGRAM_CHAT_ID)
 
 
 # ══════════════════════════════════════════════════════════════════════

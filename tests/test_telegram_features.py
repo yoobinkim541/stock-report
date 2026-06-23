@@ -385,7 +385,9 @@ def test_plain_text_portfolio_snapshot_is_saved_as_pending(monkeypatch):
 
 
 def test_fetch_portfolio_value_returns_total_pnl_and_return(monkeypatch, tmp_path):
-    import barbell_strategy
+    # fetch_portfolio_value·PORTFOLIO_PATH·load_leverage_state·yf 는 providers/market_data.py 로
+    # 이전됨 — fetch_portfolio_value 는 그 모듈 전역을 참조하므로 md 에 패치한다.
+    import providers.market_data as md
 
     portfolio_path = tmp_path / "portfolio_snapshot.json"
     portfolio_path.write_text(json.dumps({
@@ -418,9 +420,9 @@ def test_fetch_portfolio_value_returns_total_pnl_and_return(monkeypatch, tmp_pat
     class FakeDownload:
         empty = True
 
-    monkeypatch.setattr(barbell_strategy, "PORTFOLIO_PATH", str(portfolio_path))
-    monkeypatch.setattr(barbell_strategy, "load_leverage_state", lambda: {})
-    monkeypatch.setattr(barbell_strategy.yf, "download", lambda *args, **kwargs: FakeDownload())
+    monkeypatch.setattr(md, "PORTFOLIO_PATH", str(portfolio_path))
+    monkeypatch.setattr(md, "load_leverage_state", lambda: {})
+    monkeypatch.setattr(md.yf, "download", lambda *args, **kwargs: FakeDownload())
 
     port = fetch_portfolio_value()
 

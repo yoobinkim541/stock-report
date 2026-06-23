@@ -49,9 +49,8 @@ def main() -> int:
 
     token, chat = os.getenv("STOCK_BOT_TOKEN"), os.getenv("STOCK_BOT_CHAT_ID")
     if token and chat:
-        import requests
-        requests.post(f"https://api.telegram.org/bot{token}/sendMessage",
-                      json={"chat_id": chat, "text": msg}, timeout=15)
+        import notify
+        notify.send_telegram(msg, token=token, chat_id=chat, timeout=15)
         logger.info("리마인더 발송 완료 (filled=%d)", filled)
     else:
         logger.warning("봇 토큰 미설정 — 발송 생략:\n%s", msg)

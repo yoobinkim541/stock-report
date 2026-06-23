@@ -17,6 +17,10 @@ import pandas as pd
 
 import safe_io
 import barbell_strategy as b
+# fetch_qqq_data·_history_cached·_update_drawdown_anchor 는 providers/market_data.py 로 이전됨.
+# fetch_qqq_data 는 market_data 의 모듈 전역 _history_cached/_update_drawdown_anchor 를 참조하므로
+# monkeypatch 대상은 providers.market_data (barbell 의 재export 가 아닌 실제 정의 모듈)여야 한다.
+import providers.market_data as md
 
 
 # ── safe_io ───────────────────────────────────────────────────────────────────
@@ -101,16 +105,16 @@ def _fake_hist(days_ago: int, n: int = 300):
 
 
 def test_fetch_qqq_fresh_not_stale(monkeypatch):
-    monkeypatch.setattr(b, "_history_cached", lambda *a, **k: _fake_hist(0))
-    monkeypatch.setattr(b, "_update_drawdown_anchor", lambda high, cur: high)
+    monkeypatch.setattr(md, "_history_cached", lambda *a, **k: _fake_hist(0))
+    monkeypatch.setattr(md, "_update_drawdown_anchor", lambda high, cur: high)
     d = b.fetch_qqq_data()
     assert d and d["stale"] is False
     assert d["data_age_days"] <= 3          # 주말 고려
 
 
 def test_fetch_qqq_old_is_stale(monkeypatch):
-    monkeypatch.setattr(b, "_history_cached", lambda *a, **k: _fake_hist(12))
-    monkeypatch.setattr(b, "_update_drawdown_anchor", lambda high, cur: high)
+    monkeypatch.setattr(md, "_history_cached", lambda *a, **k: _fake_hist(12))
+    monkeypatch.setattr(md, "_update_drawdown_anchor", lambda high, cur: high)
     d = b.fetch_qqq_data()
     assert d and d["stale"] is True
     assert d["data_age_days"] >= 9

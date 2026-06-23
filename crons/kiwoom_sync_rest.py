@@ -49,15 +49,11 @@ _CHAT_ID   = os.getenv("STOCK_BOT_CHAT_ID", "5771238245")
 def _notify(msg: str):
     if not _BOT_TOKEN:
         return
-    try:
-        import requests as _req
-        _req.post(
-            f"https://api.telegram.org/bot{_BOT_TOKEN}/sendMessage",
-            json={"chat_id": _CHAT_ID, "text": msg},
-            timeout=10,
-        )
-    except Exception:
-        pass
+    import sys
+    if PROJECT_DIR not in sys.path:
+        sys.path.insert(0, PROJECT_DIR)
+    import notify
+    notify.send_telegram(msg, token=_BOT_TOKEN, chat_id=_CHAT_ID)
 
 
 def fetch_domestic_balance() -> list[dict]:

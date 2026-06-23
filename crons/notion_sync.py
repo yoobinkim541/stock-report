@@ -579,21 +579,9 @@ def main() -> int:
         logger.info("노션 동기화 완료 ✅ (%d블록)", len(blocks))
     else:
         logger.error("노션 동기화 실패 ❌")
-        bot_token = os.getenv("STOCK_BOT_TOKEN")
-        chat_id   = os.getenv("STOCK_BOT_CHAT_ID")
-        if bot_token and chat_id:
-            import requests
-            # 방어: 알림 발송 응답 확인 — 실패해도 raise 말고 로깅만 (크론 종료코드 보존)
-            try:
-                r = requests.post(
-                    f"https://api.telegram.org/bot{bot_token}/sendMessage",
-                    json={"chat_id": chat_id, "text": "⚠️ Notion 동기화 실패"},
-                    timeout=10,
-                )
-                if not r.ok:
-                    logger.error("실패 알림 발송 실패 %s: %s", r.status_code, r.text[:200])
-            except Exception as e:
-                logger.error("실패 알림 발송 예외: %s", e)
+        # 실패 알림 — notify 단일 진실원 위임 (자체 응답검증·토큰 마스킹·실패 시 로깅만)
+        import notify
+        notify.send_telegram("⚠️ Notion 동기화 실패")
 
     return 0 if ok else 1
 

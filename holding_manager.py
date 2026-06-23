@@ -15,7 +15,8 @@ from datetime import datetime
 import store  # SQLite 통합 저장소 (portfolio_snapshot 그림자 동기화 — round 3)
 import safe_io  # 원자적 쓰기 + 교차 프로세스 쓰기 락
 
-PORTFOLIO_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "portfolio_snapshot.json")
+# portfolio_snapshot 경로 단일 소스 — portfolio_universe(STOCK_REPORT_PROJECT_DIR env 반영)
+from portfolio_universe import PORTFOLIO_SNAPSHOT_PATH as PORTFOLIO_PATH
 
 # ── ETF / 레버리지 티커 (목표 비중 분석 제외) ────────────────────────
 _SKIP_TICKERS = {"SGOV", "QQQI", "QLD", "TQQQ", "BIL", "SHV", "SHY",

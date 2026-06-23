@@ -10,6 +10,8 @@ import os
 import sys
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
+import notify
+
 from dotenv import load_dotenv
 load_dotenv()
 
@@ -24,18 +26,7 @@ def _send(text: str) -> bool:
     if not BOT_TOKEN or not CHAT_ID:
         logger.warning("STOCK_BOT_TOKEN / STOCK_BOT_CHAT_ID 미설정")
         return False
-    import requests
-    try:
-        r = requests.post(
-            f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage",
-            json={"chat_id": CHAT_ID, "text": text},
-            timeout=15,
-        )
-        r.raise_for_status()
-        return True
-    except Exception as e:
-        logger.error("텔레그램 발송 실패: %s", e)
-        return False
+    return notify.send_telegram(text, token=BOT_TOKEN, chat_id=CHAT_ID, timeout=15)
 
 
 def main() -> int:

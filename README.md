@@ -1,4 +1,4 @@
-# 📊 Stock Report — Intelligence Barbell v2.6
+# 📊 Stock Report — Intelligence Barbell v2.9
 
 > 감정 없이, 규칙대로. QQQ Phase 기반 자동화 투자 시스템.
 
@@ -7,29 +7,58 @@
 
 ---
 
-## 🏗 구조 한눈에 보기
+## 🏗 아키텍처 구조
 
-```
-매일 23:00 UTC (KST 08:00)  ── 매일 23:35 UTC (KST 08:35)
-        │                                  │
-        ▼                                  ▼
-deliver_investment_report.sh        kiwoom_sync_rest.py
-        │                            (키움 REST API → 국내주식 잔고)
-        ├─► investment_report.py           │
-        ├─► save_csv.py                    ▼
-        └─► barbell_strategy.py    portfolio_snapshot.json
-                │
-                └─► Telegram @Stock_botbot
-                      ├── 매일: 투자 리포트 문서 전송
-                      └── Phase 변화 시: 즉시 바벨 전략 알림
+위(트리거) → 아래(저장소) **단방향 데이터 흐름**의 6계층 구조입니다. 🆕 = 최근 아키텍처 리팩토링으로 신설·분리된 모듈.
 
-telegram_bot.py (상시, fcntl 단일 인스턴스 잠금)
-  ├── 양방향 명령어 처리
-  ├── Phase 5분 감시 (barbell_state.json 공유, 중복 방지)
-  ├── 가격 알림 5분 체크
-  ├── tax_commands.py  ← /tax 서브커맨드 분리
-  └── holding_commands.py  ← /holding 서브커맨드 분리
+```mermaid
+flowchart TD
+    subgraph T["① 트리거"]
+      U["텔레그램 사용자<br/>명령 · 첨부(PDF/이미지)"]
+      C["크론 스케줄<br/>deploy/crontab · scripts/deliver_*.sh"]
+    end
+    subgraph P["② 상시 프로세스"]
+      BOT["telegram_bot.py<br/>봇 루프 · 라우터 · 5분 감시"]
+      BAR["barbell_strategy.py<br/>Phase · DCA · 레버리지 가드"]
+      SYNC["portfolio_sync_server.py<br/>:8765 외부 잔고 수신"]
+    end
+    subgraph F["③ 기능 계층"]
+      REP["reports/<br/>investment_report · market · 매집 · charts · 뉴스"]
+      BC["bot/<br/>holding · tax · accum · alert · advisor · order"]
+    end
+    subgraph D["④ 데이터 · ML"]
+      MD["providers/market_data.py 🆕<br/>yfinance 수집 · 캐시 · leverage_state"]
+      ML["ml/<br/>ranker · optimizer · meta · entry · pipeline"]
+    end
+    subgraph I["⑤ 공용 인프라"]
+      NT["notify.py 🆕<br/>텔레그램 발송 단일소스"]
+      SIO["safe_io.py<br/>atomic write + 교차프로세스 락"]
+      ST["store.py<br/>SQLite 통합 저장소"]
+      PU["portfolio_universe.py<br/>보유 티커 단일소스"]
+    end
+    subgraph S["⑥ 저장소 / 상태"]
+      DB[("stock_report.db<br/>SQLite WAL")]
+      SNAP["portfolio_snapshot.json<br/>파일권위 + .lock"]
+      CA["~/.cache · ~/reports<br/>상태 · 일일 산출물"]
+    end
+    T --> P --> F --> D --> I --> S
 ```
+
+### 두 가지 핵심 런타임 흐름
+
+**① 일일 리포트 (크론 23:00 UTC = KST 08:00)**
+`scripts/deliver_investment_report.sh` → `reports/investment_report.generate_report()` 가 `providers/market_data`(가격) · `reports/*`(펀더멘털·신호·매집·차트) · `ml/*`(랭킹)을 호출 → `~/reports/` 에 `.md/.json/.txt/.png` 산출 → `notify` 로 `sendDocument` + `sendPhoto` 발송.
+
+**② 전략 판정 (봇 5분 주기 + 크론)**
+`barbell_strategy.run()` → `market_data.fetch_qqq_data()` (**stale 서킷브레이커**) → `classify_market()` (히스테리시스 + 낙폭 앵커) → `calculate_dca()` (+ **leverage_dca_guard**: 변동성 캡·낙폭 정지) → `build_report()` → `notify`.
+
+### 상태 관리 · 동시성
+- **이중 권위**: `portfolio_snapshot.json` = 파일 권위 + `store`(SQLite) 그림자. 그 외 상태(barbell_state·anchor·leverage_state·가중치)는 **store 권위 + 파일 미러**.
+- **동시성**: 봇(상시) + 다수 크론이 같은 파일을 쓰므로 `safe_io.file_write_lock`(교차 프로세스 락) + `atomic_write_json`(temp→rename, torn read 차단). 봇은 `fcntl` 단일 인스턴스 락, store 는 SQLite WAL.
+
+### 안전 경계
+- **매매 미실행**(하드블록) — 봇은 *권고만*, 매수는 사용자 수동.
+- 레버리지 가드(변동성캡·절대상한·낙폭정지) · stale 데이터 시 Phase 에스컬레이션 보류 · 게스트 RBAC(서술 OK·지시 금지) · 로그 토큰 마스킹.
 
 ---
 
@@ -65,6 +94,14 @@ telegram_bot.py (상시, fcntl 단일 인스턴스 잠금)
 ---
 
 ## 🆕 최근 업그레이드
+
+### v2.9 — 기관 매집·시각화·안전장치·아키텍처 리팩토링 (2026-06)
+
+- **기관 매집 추적** (`reports/institutional_flow.py`) — 거래량 방향성(OBV·CMF·A/D) 매집 강도 + 美 13F 교차검증, 일일 리포트 섹션 + `/accum` + 주간 스냅샷.
+- **시각화 대시보드** (`reports/report_charts.py`) — 등락률·벤치마크·RSI·매집강도 4분할 PNG 를 텔레그램 `sendPhoto`.
+- **안전장치** — 레버리지/DCA 가드(변동성 캡·절대 상한·낙폭 정지) + 가격 stale 서킷브레이커 + portfolio_snapshot 교차프로세스 락(`safe_io`) + yfinance 재시도.
+- **보안 하드닝** — Bearer timing-safe 비교·HTTP500 정보노출 차단·pickle `safe_unpickle`·LLM 프롬프트 인젝션 가드·토큰 마스킹.
+- **아키텍처 리팩토링** — 텔레그램 발송 14곳 → `notify.py` 단일 진실원, barbell 데이터층 → `providers/market_data.py` 분리(god-module 2272→1773줄), `generate_report`·`build_report` 거대 함수 분해, `PORTFOLIO_PATH` 단일 소스. (전체 450+ 테스트 통과)
 
 ### v2.8 — ML Pipeline Smoke Test / p12 (2026-06-06)
 
@@ -305,57 +342,51 @@ cp .env.example .env
 
 ## 📁 파일 구조
 
+> 루트의 흩어져 있던 파일들은 `bot/` · `reports/` · `ml/` · `crons/` · `providers/` 폴더로 분류 정리되었습니다.
+
 ```
 stock-report/
-├── barbell_strategy.py          # 핵심 전략 엔진
-├── telegram_bot.py              # 양방향 텔레그램 봇
-├── holding_commands.py          # /holding 서브커맨드 핸들러
-├── tax_commands.py              # /tax 서브커맨드 핸들러
-├── kiwoom_sync_rest.py          # 키움 REST API 국내주식 잔고 동기화
-├── portfolio_sync_server.py     # 외부 잔고 수신 Flask 서버 (port 8765)
-├── bot_healthcheck.py           # 봇·서버 30분 헬스체크 (중복인스턴스·409·PID)
-├── bot_smoke_test.py            # 기능 검증 연기 테스트 25항목 (매일 크론)
-├── attachment_parser.py         # PDF·이미지 첨부파일 파싱
-├── holding_manager.py           # 보유 종목 CRUD
-├── order_generator.py           # 소수점 매수 주문서
-├── portfolio_tracker.py         # 히스토리 기록
-├── tax_tracker.py               # 실현손익·세금
-├── price_alerts.py              # 가격 알림
-├── stock_advisor.py             # AI 상담
-├── investment_report.py         # 포트폴리오 분석
-├── source_collector.py          # 뉴스 수집
-├── fundamental_score.py         # 펀더멘털 스코어
-├── daily_signals.py             # 일일 신호
-├── market_report.py             # 시장 뉴스
-├── backtest.py / backtest_multi.py  # 백테스트
-├── save_csv.py                  # CSV 내보내기
-├── bot_watchdog.sh              # 봇 자동 재시작
-├── sync_server_watchdog.sh      # 동기화 서버 자동 재시작 ← NEW
-├── deliver_investment_report.sh # 크론 실행 스크립트
-├── kiwoom_sync/                 # Windows COM API (미래 확장용)
-│   ├── kiwoom_sync.py
-│   ├── CLAUDE.md
-│   └── .env.example
-├── CLAUDE.md                    # 프로젝트 컨텍스트 (Claude Code용)
-├── .env                         # 🔒 비공개
-├── portfolio_snapshot.json      # 🔒 비공개 — 보유 종목 스냅샷
-├── leverage_state.json          # 🔒 비공개 — QLD/TQQQ 포지션
-├── dca_weights.json             # DCA 비중 설정
-├── target_weights.json          # 목표 비중 설정
-└── price_alerts.json            # 🔒 비공개 — 가격 알림
+├── (루트) 상시 프로세스 + 공용 인프라
+│   ├── telegram_bot.py            # 양방향 봇 — 라우터·5분 감시·fcntl 단일 인스턴스
+│   ├── barbell_strategy.py        # Intelligence Barbell 전략 — Phase·DCA·레버리지 가드
+│   ├── portfolio_sync_server.py   # 외부 잔고 수신 Flask 서버 (:8765)
+│   ├── holding_manager.py         # 보유 종목 CRUD (atomic write)
+│   ├── portfolio_tracker.py       # 일일 히스토리·배당 기록
+│   ├── tax_tracker.py             # 실현손익·양도세
+│   ├── portfolio_universe.py      # 보유 티커 단일 소스 + 은퇴 티커
+│   ├── store.py        🆕 인프라  # SQLite 통합 저장소 (WAL, user_id 스코프)
+│   ├── safe_io.py      🆕 인프라  # atomic write + 교차 프로세스 쓰기 락
+│   └── notify.py       🆕 인프라  # 텔레그램 발송 단일 진실원
+├── providers/          🆕 데이터 수집층
+│   └── market_data.py             # yfinance 수집·캐시·앵커·leverage_state
+├── bot/                # 텔레그램 서브커맨드
+│   ├── holding_commands.py · tax_commands.py · accum_commands.py · entry_commands.py
+│   ├── price_alerts.py · attachment_parser.py · stock_advisor.py · order_generator.py
+│   └── guest_report.py · guest_portfolio.py     # 읽기전용 게스트
+├── reports/            # 리포트·데이터 생성
+│   ├── investment_report.py · market_report.py · source_collector.py
+│   ├── fundamental_score.py · daily_signals.py · institutional_flow.py
+│   └── report_charts.py · save_csv.py
+├── ml/                 # ML 모델·파이프라인
+│   ├── ranker.py · leverage_optimizer.py · leverage_signal.py · meta_allocator.py
+│   ├── entry_analyzer.py · data_pipeline.py · features.py · sweet_spot.py
+│   └── _safe_cache.py(안전 역직렬화) · intraday_signal.py · ...
+├── crons/              # 크론 진입점
+│   ├── daily_ranking.py · daily_leverage_retrain.py · kiwoom_sync_rest.py
+│   ├── news_spike_detector.py · notion_sync.py · paper_track.py
+│   └── *_snapshot.py(fundamental·options·institutional) · reminder·weekly_retrain
+├── tests/              # 스모크·헬스체크·단위 테스트 (450+)
+├── backtest/           # 백테스트 분석 (개발용)
+├── scripts/            # deliver_investment_report.sh · watchdog 등
+├── deploy/crontab.stock-report    # 크론 스케줄 단일 진실원
+├── CLAUDE.md                      # 프로젝트 컨텍스트 (Claude Code용)
+└── 🔒 .env · portfolio_snapshot.json · leverage_state.json · price_alerts.json  (커밋 금지)
 
-~/.local/state/stock-report/barbell_bot.pid  # 봇 PID (단일 인스턴스 잠금)
-~/.cache/barbell_state.json      # Phase 상태 (크론·봇 공유)
-~/.cache/barbell_state.lock      # Phase 상태 쓰기 잠금
-~/.local/share/stock-report/     # 런타임 데이터
-  ├── tax_records.json
-  ├── pending_snapshot.json      # 파싱 대기 (72시간 TTL)
-  ├── pending_sells.json
-  └── attachments/
-~/reports/                       # 생성된 리포트
-/tmp/barbell_bot.log             # 봇 로그
-/tmp/sync_server.log             # 동기화 서버 로그
-/tmp/kiwoom_sync.log             # 키움 동기화 크론 로그
+# 런타임 상태/데이터 (레포 밖)
+~/.local/share/stock-report/stock_report.db   # SQLite 통합 저장소 (store)
+~/.local/state/stock-report/barbell_bot.pid   # 봇 PID (단일 인스턴스 잠금)
+~/.cache/barbell_state·anchor·last_prices.json # Phase·낙폭앵커·직전가 (+ .lock)
+~/reports/                                     # 일일 산출물(md/json/txt/png) + ml-cache
 ```
 
 ---
