@@ -32,6 +32,10 @@ PATH=/home/ubuntu/.local/bin:/usr/local/bin:/usr/bin:/bin
 # 옵션 지표 스냅샷 (ATM IV·풋콜비·스큐·기대변동폭) — 학습 피처 축적
 30 21 * * 1-5 cd /home/ubuntu/projects/stock-report && uv run python crons/options_snapshot.py >> /tmp/options_snapshot.log 2>&1     # 21:30 UTC = 06:30 KST
 
+# 국내주식 모의 페이퍼트레이딩 (KIWOOM_MOCK_ENABLED=true 일 때만 동작 — 장 개장 직후)
+# flock: 재실행·중복 집행 방지 (멱등). KRX 휴장일엔 주문이 거부될 뿐(모의 — 무해, 로그만).
+30 0 * * 1-5 cd /home/ubuntu/projects/stock-report && flock -n /tmp/kiwoom_mock_track.lock uv run python crons/kiwoom_mock_track.py >> /tmp/kiwoom_mock_track.log 2>&1   # 00:30 UTC = 09:30 KST
+
 # ── 고빈도 수집·감지 ─────────────────────────────────────────────────────────
 # 속보 수집 + 급증 감지 + 텔레그램 알림
 * * * * * cd /home/ubuntu/projects/stock-report && uv run python crons/news_spike_detector.py >> /tmp/news_spike_detector.log 2>&1   # 매 1분

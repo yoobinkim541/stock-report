@@ -64,6 +64,7 @@ crons/news_spike_detector.py (크론 매 1분)
 | `safe_io.py` | 멀티프로세스 안전 파일 I/O — atomic write + 교차 프로세스 쓰기 락(portfolio_snapshot writer 공용) | `<path>.lock` |
 | `notify.py` | 텔레그램 발송 단일 진실원 — send_telegram(4096 분할·토큰 마스킹)·send_photo (봇 제외 전 모듈 공용) | — |
 | `providers/market_data.py` | 시장 데이터 수집층 — fetch_qqq_data·rsi·vix·fear_greed·ma200·portfolio_value·환율·캐시·leverage_state (barbell 에서 분리, 재export 호환) | `~/.cache/barbell_anchor·last_prices.json` |
+| `kiwoom_mock.py` | 키움 **모의투자** 어댑터 — 모의 도메인(`mockapi.kiwoom.com`) 하드락 + 토큰·잔고(kt00018)·주문(kt10000/kt10001). 실거래 경로 없음 | — |
 
 **bot/ (텔레그램 서브커맨드)**
 | 파일 | 역할 |
@@ -96,6 +97,7 @@ crons/news_spike_detector.py (크론 매 1분)
 | `crons/notion_archive.py` | 일일 리포트 → Notion 월(`26/06`)/주(`4주차`) 계층 페이지 누적 아카이빙 (멱등 upsert, 대시보드와 독립) | notion_sync 가 호출 |
 | `crons/news_spike_detector.py` | 속보 수집 + 급증 감지 + 텔레그램 알림 | 매 1분 |
 | `crons/kiwoom_sync_rest.py` | 키움 REST API 국내주식 잔고 동기화 | 평일 23:35 UTC |
+| `crons/kiwoom_mock_track.py` | 국내주식 자동 페이퍼트레이딩 (키움 **모의투자** — 신호 기반 리밸런스·모의 도메인 하드락) | 평일 00:30 UTC |
 | `reports/source_collector.py` | 전체 소스 수집 (텔레그램 채널·FRED·국채·시장 스냅샷) → JSONL 캐시 | 매 30분 (:05/:35) |
 | `crons/paper_track.py` | MetaAllocator vs Phase 규칙 A/B 페이퍼 트레이딩 (월요일 Sharpe 비교 발송) | 평일 22:50 UTC |
 | `crons/fundamental_snapshot.py` | 펀더멘털 point-in-time 스냅샷 적재 (look-ahead 없는 학습 피처용) | 토 01:00 UTC |
@@ -202,6 +204,10 @@ crons/news_spike_detector.py (크론 매 1분)
 | `STOCK_BOT_GUEST_IDS` | — | — (쉼표구분 읽기전용 게스트 chat_id) |
 | `KIWOOM_API_KEY` | — | — (openapi.kiwoom.com 발급) |
 | `KIWOOM_API_SECRET` | — | — |
+| `KIWOOM_MOCK_ENABLED` | — | `false` (모의 페이퍼트레이딩 루프 활성화. true 여야 주문 집행) |
+| `KIWOOM_MOCK_API_KEY` / `KIWOOM_MOCK_API_SECRET` | — | — (없으면 `KIWOOM_API_KEY/SECRET` 재사용 — 앱키는 계좌 공용) |
+| `KIWOOM_MOCK_ACCOUNT_NO` | — | — (모의 계좌번호, 표시·로깅용) |
+| `KR_MOCK_UNIVERSE` / `KR_MOCK_MAX_POS` / `KR_MOCK_INVEST` / `KIWOOM_MOCK_SEED` | — | `20` / `5` / `0.9` / `10000000` (모의 전략 파라미터) |
 | `SYNC_TOKEN` | — | — (portfolio_sync_server 인증) |
 | `SYNC_PORT` | — | `8765` |
 | `NOTION_TOKEN` | — | — (Notion 대시보드 동기화·아카이빙. 없으면 notion_sync 스킵) |
@@ -246,7 +252,7 @@ crons/news_spike_detector.py (크론 매 1분)
 ~/.local/state/stock-report/barbell_bot.pid  — 봇 PID (단일 인스턴스 잠금)
 ~/.local/share/stock-report/stock_report.db      — SQLite 통합 저장소 (user_id 스코프, WAL)
                                                    └ 컬렉션: tax_records · portfolio_history
-                                                     · qqqi_dividends · signal_outcomes · price_alerts
+                                                     · qqqi_dividends · signal_outcomes · price_alerts · kr_mock_history
                                                    └ 문서: dca_weights · target_weights · leverage_state
                                                      · barbell_state · barbell_anchor
                                                      · portfolio_snapshot (파일 권위 + store 그림자)
@@ -276,6 +282,9 @@ MSFT, QQQI, ORCL, SAP, UNH, SGOV, NVDA, GOOGL, SPMO
 - 텔레그램 메시지 4000자 초과 시 줄바꿈 기준 분할 (4096자 제한)
 - `STOCK_BOT_CHAT_ID` 는 env var — 코드에 하드코딩 금지
 - `KIWOOM_API_KEY` / `KIWOOM_API_SECRET` 절대 커밋 금지
+- **자동 주문 집행은 모의(paper)에 한함** — `kiwoom_mock.py` 는 `mockapi.kiwoom.com` 도메인을
+  하드락(`_assert_mock_url`)하고 실거래(`api.kiwoom.com`) 경로를 코드에 두지 않는다. 봇의 실계좌
+  자동매매는 여전히 없음(권고만). `crons/kiwoom_mock_track.py` 는 `KIWOOM_MOCK_ENABLED=true` 일 때만 동작
 - `portfolio_snapshot.json` writer 3종(`holding_manager._save`·`portfolio_sync_server`·`kiwoom_sync_rest`)은
   모두 `safe_io.atomic_write_json` + `safe_io.file_write_lock` 경유 — 직접 `json.dump`/in-place write 금지.
   (atomic rename 으로 torn read 방지 + 교차 프로세스 락으로 동시 쓰기 lost update 방지) → 이후 `store.shadow_doc` 비차단 동기화
