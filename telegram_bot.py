@@ -138,6 +138,7 @@ PHASE_CHECK_SECS   = 300   # Phase 변화 체크 주기(초, 5분)
 ENTRY_CHECK_SECS    = 900   # 진입 타점 알림 체크 주기(초, 15분)
 INTRADAY_CHECK_SECS = 300   # 단기봉 모니터링 주기(초, 5분, 장중에만 실행)
 AUTO_INTRADAY_ALERTS = os.getenv("STOCK_BOT_AUTO_INTRADAY", "0") == "1"  # 기본 OFF: /intraday 수동 조회만
+STARTUP_NOTIFY_ENABLED = os.getenv("STOCK_BOT_STARTUP_NOTIFY", "0") == "1"  # 정상 재시작 알림은 기본 무음
 
 
 def _pid_file_path() -> str:
@@ -1792,7 +1793,8 @@ def run():
         f.write(str(os.getpid()))
     logger.info(f"🤖 Barbell Bot 시작 (PID {os.getpid()})")
     configure_bot_commands()
-    send(ALLOWED_CHAT_ID, "🤖 Barbell Bot 온라인 ✅\n/help 로 명령어 확인")
+    if STARTUP_NOTIFY_ENABLED:
+        send(ALLOWED_CHAT_ID, "🤖 Barbell Bot 온라인 ✅\n/help 로 명령어 확인")
 
     offset: int | None  = None
     last_alert_check    = 0.0

@@ -12,6 +12,7 @@ def test_auto_intraday_alerts_default_off():
     import telegram_bot
 
     assert telegram_bot.AUTO_INTRADAY_ALERTS is False
+    assert telegram_bot.STARTUP_NOTIFY_ENABLED is False
 
 
 def test_build_simulation_report_includes_mode_and_phase():
