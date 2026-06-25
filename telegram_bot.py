@@ -137,6 +137,7 @@ ALERT_CHECK_SECS   = 300   # 가격 알림 체크 주기(초)
 PHASE_CHECK_SECS   = 300   # Phase 변화 체크 주기(초, 5분)
 ENTRY_CHECK_SECS    = 900   # 진입 타점 알림 체크 주기(초, 15분)
 INTRADAY_CHECK_SECS = 300   # 단기봉 모니터링 주기(초, 5분, 장중에만 실행)
+AUTO_INTRADAY_ALERTS = os.getenv("STOCK_BOT_AUTO_INTRADAY", "0") == "1"  # 기본 OFF: /intraday 수동 조회만
 
 
 def _pid_file_path() -> str:
@@ -1870,8 +1871,8 @@ def run():
                 _run_periodic("entry", notify_entry_signals)
                 last_entry_check = now
 
-            # 단기봉 이상 감지 (5분 주기, 장중에만)
-            if now - last_intraday_check > INTRADAY_CHECK_SECS:
+            # 단기봉 자동 알림은 기본 OFF — 수동 /intraday 조회만 유지
+            if AUTO_INTRADAY_ALERTS and now - last_intraday_check > INTRADAY_CHECK_SECS:
                 _run_periodic("intraday", notify_intraday_signals)
                 last_intraday_check = now
 

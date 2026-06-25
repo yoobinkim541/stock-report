@@ -8,6 +8,12 @@ from barbell_strategy import build_simulation_report, _holding_details_from_snap
 from portfolio_tracker import build_benchmark_report, build_dividend_calendar
 
 
+def test_auto_intraday_alerts_default_off():
+    import telegram_bot
+
+    assert telegram_bot.AUTO_INTRADAY_ALERTS is False
+
+
 def test_build_simulation_report_includes_mode_and_phase():
     text = build_simulation_report("bull2")
 
