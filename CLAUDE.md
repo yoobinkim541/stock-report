@@ -65,6 +65,7 @@ crons/news_spike_detector.py (크론 매 1분)
 | `notify.py` | 텔레그램 발송 단일 진실원 — send_telegram(4096 분할·토큰 마스킹)·send_photo (봇 제외 전 모듈 공용) | — |
 | `providers/market_data.py` | 시장 데이터 수집층 — fetch_qqq_data·rsi·vix·fear_greed·ma200·portfolio_value·환율·캐시·leverage_state (barbell 에서 분리, 재export 호환) | `~/.cache/barbell_anchor·last_prices.json` |
 | `kiwoom_mock.py` | 키움 **모의투자** 어댑터 — 모의 도메인(`mockapi.kiwoom.com`) 하드락 + 토큰·잔고(kt00018)·주문(kt10000/kt10001). 실거래 경로 없음 | — |
+| `providers/earnings_data.py` | 어닝·컨센서스·밸류에이션 데이터층 — yfinance(US 전체 무료: 서프라이즈·포워드 컨센서스·★리비전 모멘텀·PER/PBR/PSR/ROE/EPS/배당·배당CAGR) / KR(.KS) 열화모드(밸류·배당만). 결측 graceful·12h 캐시 | `~/reports/ml-cache/earnings_*.json` |
 
 **bot/ (텔레그램 서브커맨드)**
 | 파일 | 역할 |
@@ -75,6 +76,7 @@ crons/news_spike_detector.py (크론 매 1분)
 | `bot/price_alerts.py` | 알림 CRUD + check_alerts() |
 | `bot/order_generator.py` | Phase 기반 소수점 매수 주문서 생성 |
 | `bot/stock_advisor.py` | AI 상담 프롬프트 실행 |
+| `bot/earnings_commands.py` | /earnings 서브커맨드 (실적 캘린더·밸류에이션·서프라이즈·컨센서스·PEAD) — owner 전용·정보형 |
 
 **reports/ (리포트·데이터 생성)**
 | 파일 | 역할 |
@@ -87,6 +89,7 @@ crons/news_spike_detector.py (크론 매 1분)
 | `reports/daily_signals.py` | 일일 시장 신호 탐지 |
 | `reports/save_csv.py` | 투자 요약 CSV 저장 |
 | `reports/report_charts.py` | 일일 리포트 시각화 — 포트폴리오 대시보드 PNG (등락률·벤치마크 추이·RSI·매집강도 4분할, 텔레그램 sendPhoto) |
+| `reports/earnings_reaction.py` | 과거 실적후 주가반응(PEAD) — 반응1일·5/20일 드리프트·beat→상승 적중률·드리프트 지속성 (after-close 표준) |
 
 **crons/ (크론 진입점)**
 | 파일 | 역할 | 주기 |
@@ -107,6 +110,7 @@ crons/news_spike_detector.py (크론 매 1분)
 | `crons/paper_track.py` | MetaAllocator vs Phase 규칙 A/B 페이퍼 트레이딩 (월요일 Sharpe 비교 발송) | 평일 22:50 UTC |
 | `crons/fundamental_snapshot.py` | 펀더멘털 point-in-time 스냅샷 적재 (look-ahead 없는 학습 피처용) | 토 01:00 UTC |
 | `crons/options_snapshot.py` | 옵션 지표 스냅샷 (ATM IV·풋콜비·스큐·기대변동폭) — 학습 피처 축적 | 평일 21:30 UTC |
+| `crons/earnings_snapshot.py` | 어닝 컨센서스·★리비전 모멘텀·서프라이즈·밸류에이션 point-in-time 적재 (실적/주가반응 예측 학습데이터 — 무룩어헤드) | 평일 22:10 UTC |
 | `crons/institutional_snapshot.py` | 기관 매집 강도·13F 지분 주간 스냅샷 적재 (델타 추적용) + 상위 5 다이제스트 발송 | 토 01:30 UTC |
 | `backtest/entry_calibration.py` | 진입점수 가중치·임계값 walk-forward 재추정 (OOS 개선 시만 자동 채택) | 매월 1일 14:00 UTC |
 | `crons/entry_adaptive_learn.py` | 진입 임계값 라이브 outcome 적응 학습 (signal_outcomes→★목적함수 OOS 게이트→shadow; `ADAPTIVE_ENTRY_ENABLED` 시만 라이브) | 매월 1일 14:30 UTC |
@@ -137,6 +141,7 @@ crons/news_spike_detector.py (크론 매 1분)
 /phase               Phase 미터 + 행동 지침
 /report              전체 바벨 리포트 (항상 실시간)
 /accum [us|kr|TICKER...]  기관 매집 추적 — OBV·CMF·13F 매집 강도 랭킹 (기본: 보유+美+韓)
+/earnings [TICKER]   실적·밸류에이션 — PER·PBR·PSR·ROE·EPS·배당성장 + 서프라이즈·컨센서스·리비전·PEAD (정보형)
 /sim [bull2|0~5]     시장 상태 시뮬레이션
 
 ── 포트폴리오 ────────────────────────────────────
@@ -280,6 +285,8 @@ crons/news_spike_detector.py (크론 매 1분)
 ~/reports/ml-cache/fundamental_scores.json       — 펀더멘털 점수 7일 캐시 (랭커 틸트용)
 ~/reports/ml-cache/fundamental_snapshots.jsonl   — 펀더멘털 주간 point-in-time 스냅샷
 ~/reports/ml-cache/institutional_snapshots.jsonl — 기관 매집 강도·13F 지분 주간 스냅샷 (델타 추적)
+~/reports/ml-cache/earnings_snapshots.jsonl      — 어닝 컨센서스·리비전·서프라이즈·밸류 일별 point-in-time (실적/주가반응 예측 학습용)
+~/reports/ml-cache/earnings_*.json               — earnings_data 종목별 요약 12h 캐시
 ~/reports/ml-cache/kr_ranker_model.pkl           — KR 전용 랭커 모델 (KOSPI 대비 초과수익, safe_unpickle)
 ~/reports/ml-cache/policy_kr_mock.json           — KR 모의 선택 정책 가중치 (learner 채택 시 갱신, 클램프)
 ~/reports/ml-data/kr_mock_decisions.jsonl        — KR 모의 편입/퇴출 결정+근거 (불변 append-only, 학습/감사 — 절대 삭제 금지)

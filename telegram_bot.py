@@ -199,6 +199,7 @@ BOT_COMMANDS = [
     {"command": "mlreport",       "description": "ML 전략 성과 리포트 (샘플)"},
     {"command": "ranking",        "description": "NASDAQ100 종목 랭킹 (LightGBM)"},
     {"command": "accum",          "description": "기관 매집 추적 — OBV·CMF·13F 매집 강도 랭킹"},
+    {"command": "earnings",       "description": "실적·밸류에이션 — PER/PBR/PSR/ROE/배당·서프라이즈·컨센서스·PEAD (예: /earnings NVDA)"},
     {"command": "leverage",       "description": "레버리지 ETF 진입 분석 (QLD/TQQQ/SOXL/UPRO 손익비·타점)"},
     {"command": "meta",           "description": "ML 통합 포트폴리오 배분 (MetaAllocator)"},
     {"command": "entry",          "description": "진입 타점 분석 — 포트/us50/kr/watch/단일종목 (예: /entry NVDA, /entry kr)"},
@@ -226,7 +227,7 @@ BOT_COMMAND_ALIASES = {
 
 
 HELP_SECTIONS = [
-    ("시장", ["status", "summary", "phase", "report", "sim", "accum"]),
+    ("시장", ["status", "summary", "phase", "report", "sim", "accum", "earnings"]),
     ("포트폴리오", ["portfolio", "rebalance", "history", "sgov"]),
     ("DCA·주문", ["dca", "order"]),
     ("보유·세금", ["holding", "tax"]),

@@ -31,6 +31,8 @@ PATH=/home/ubuntu/.local/bin:/usr/local/bin:/usr/bin:/bin
 35 23 * * 1-5 cd /home/ubuntu/projects/stock-report && uv run python crons/kiwoom_sync_rest.py >> /tmp/kiwoom_sync_rest.log 2>&1      # 23:35 UTC = 08:35 KST
 # 옵션 지표 스냅샷 (ATM IV·풋콜비·스큐·기대변동폭) — 학습 피처 축적
 30 21 * * 1-5 cd /home/ubuntu/projects/stock-report && uv run python crons/options_snapshot.py >> /tmp/options_snapshot.log 2>&1     # 21:30 UTC = 06:30 KST
+# 어닝 컨센서스·리비전·서프라이즈·밸류에이션 point-in-time 스냅샷 — 실적/주가반응 예측 학습데이터 축적
+10 22 * * 1-5 cd /home/ubuntu/projects/stock-report && uv run python crons/earnings_snapshot.py >> /tmp/earnings_snapshot.log 2>&1   # 22:10 UTC = 07:10 KST
 
 # 국내주식 모의 페이퍼트레이딩 (KIWOOM_MOCK_ENABLED=true 일 때만 동작 — 장 개장 직후)
 # flock: 재실행·중복 집행 방지 (멱등). KRX 휴장일엔 주문이 거부될 뿐(모의 — 무해, 로그만).
