@@ -249,6 +249,28 @@ def _next_entry_levels(current_dd: float) -> list[float]:
     return [l for l in levels if l < current_dd - 0.02][:4]
 
 
+def _adaptive_longterm_scale() -> float:
+    """장기 적응 shadow(longterm_policy_shadow.json)의 레버리지 축소 권고 — **옵트인 시에만**.
+
+    `ADAPTIVE_LONGTERM_ENABLED=true` 일 때만 적용. 값은 [0.5, 1.0] 으로 클램프(증액 불가·축소만 —
+    위험 축소 방향). 기본 off/파일 없음/오류 → 1.0(라이브 불변). `longterm_adaptive_eval` 이 기록.
+    (Phase 3 RL 루프를 end-to-end 실작동시키는 배선 — 그 전엔 shadow 가 write-only 죽은 파일이었음.)
+    """
+    import os
+    if os.getenv("ADAPTIVE_LONGTERM_ENABLED", "false").lower() != "true":
+        return 1.0
+    try:
+        import json
+        p = Path(os.path.expanduser("~/reports/ml-cache/longterm_policy_shadow.json"))
+        if not p.exists():
+            return 1.0
+        scale = float(json.loads(p.read_text(encoding="utf-8")).get("lev_scale", 1.0))
+        return max(0.5, min(1.0, scale))      # 축소만(≤1.0), 0.5 하한
+    except Exception as e:
+        logger.warning("적응형 장기 shadow 로드 실패 — 레버리지 스케일 1.0 유지: %s", e)
+        return 1.0
+
+
 def build_entry_signal(context: dict, model: Optional[LeverageModel] = None) -> EntrySignal:
     """context 딕셔너리 → EntrySignal."""
     from datetime import datetime, timezone, timedelta
@@ -372,6 +394,9 @@ def build_entry_signal(context: dict, model: Optional[LeverageModel] = None) -> 
         lev_scale = 0.0
         if "보류" not in advice:
             advice = f"🛑 VIX 백워데이션 (텀 {vix_term:.2f} < {min_term:.2f}) — 신규 진입 보류 ({advice.split(' — ')[0].strip()})"
+
+    # 적응형 장기 shadow(라이브 ★목표 평가) — 옵트인 시 레버리지 축소만(≤1.0). 기본 off → 무영향.
+    lev_scale *= _adaptive_longterm_scale()
 
     # 게이트 스케일 적용 후 합계를 Optuna lev_weight 상한으로 제한
     for name in weights_raw:

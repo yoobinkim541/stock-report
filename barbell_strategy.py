@@ -540,17 +540,42 @@ def _fg_dca_adjustment(fg_proxy: float) -> float:
     return 1.0
 
 
+def _adaptive_advice_blend(base: float) -> float:
+    """advice 적응 shadow(advice_blend_shadow.json) — **옵트인 시** OOS로 입증된 meta 배분으로 blend 상향.
+
+    `ADAPTIVE_ADVICE_ENABLED=true` 일 때만. advice_adaptive_eval 이 meta(챌린저)가 rule(챔피언)을
+    실현수익에서 이기고 하방 ≤ rule 일 때만 권고를 기록 → 그 값으로 blend 를 올리되 **기존 상한 0.6**
+    내로 클램프(기존 _phase_blend_factor 가 bear 에서 내던 최대치를 넘지 않음 = 위험 envelope 불변).
+    기본 off/파일 없음/오류 → base(라이브 불변). Phase 4 RL 을 end-to-end 실작동시키는 배선.
+    """
+    if os.getenv("ADAPTIVE_ADVICE_ENABLED", "false").lower() != "true":
+        return base
+    try:
+        p = os.path.expanduser("~/reports/ml-cache/advice_blend_shadow.json")
+        if not os.path.exists(p):
+            return base
+        with open(p, encoding="utf-8") as f:
+            rec = float(json.load(f).get("blend", base))
+        return max(base, min(0.6, rec))       # 입증된 meta 로 상향, 기존 0.6 상한 내
+    except Exception as e:
+        logger.warning("적응형 advice shadow 로드 실패 — blend 기본 유지: %s", e)
+        return base
+
+
 def _phase_blend_factor(market_type: str, phase_key) -> float:
     """Phase에 따라 ML 블렌딩 강도를 동적으로 결정.
 
     고평가(Bull-2)일수록 ML 영향 최소화,
     급락(Bear 3~5)일수록 ML 방향성 신뢰도 높여 강하게 반영.
+    (옵트인 시 advice 적응 shadow 가 입증된 meta 쪽으로 blend 를 0.6 상한 내에서 상향.)
     """
     if market_type == "bull":
-        return {"bull_2": 0.1, "bull_1": 0.2}.get(str(phase_key), 0.25)
-    if market_type == "bear":
-        return {0: 0.3, 1: 0.35, 2: 0.45, 3: 0.55, 4: 0.60, 5: 0.60}.get(phase_key, 0.3)
-    return 0.3   # neutral
+        base = {"bull_2": 0.1, "bull_1": 0.2}.get(str(phase_key), 0.25)
+    elif market_type == "bear":
+        base = {0: 0.3, 1: 0.35, 2: 0.45, 3: 0.55, 4: 0.60, 5: 0.60}.get(phase_key, 0.3)
+    else:
+        base = 0.3   # neutral
+    return _adaptive_advice_blend(base)
 
 
 def _ml_dca_blend(
