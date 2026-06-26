@@ -121,9 +121,9 @@ def test_get_balance_parses_positions(rec):
     assert "005930" in bal["positions"]
     p = bal["positions"]["005930"]
     assert p["shares"] == 10 and p["cur_price"] == 75000
-    # 현금필드 없음 → cash None, nav 는 추정예탁자산 요약필드(prsm_dpst_aset_amt)
-    assert bal["cash_krw"] is None
+    # kt00018엔 순수 예수금 필드 없음 → nav=추정예탁자산, 현금 = nav - 보유평가액
     assert bal["nav"] == 10_000_000
+    assert bal["cash_krw"] == 10_000_000 - 750_000   # 9,250,000
 
 
 def test_get_balance_failure_sets_ok_false(rec, monkeypatch):
@@ -253,6 +253,20 @@ def test_plan_cash_running_cap():
     orders = kt.plan_rebalance(signals, {}, 1_000_000, 2, cash_krw=300_000, slippage=0.0)
     total = sum(o["qty"] for o in orders if o["side"] == "buy")
     assert total <= 6
+
+
+def test_main_dry_run_places_no_orders(monkeypatch):
+    """--dry-run 은 계획만 출력하고 주문 0 (비활성 상태에서도 미리보기 허용)."""
+    import kiwoom_mock_track as kt
+    monkeypatch.delenv("KIWOOM_MOCK_ENABLED", raising=False)   # 비활성이어도 dry-run 동작
+    monkeypatch.setattr(kiwoom_mock, "get_balance", lambda: {
+        "ok": True, "positions": {}, "pos_value": 0.0, "cash_krw": 10_000_000, "nav": 10_000_000, "raw": {}})
+    monkeypatch.setattr(kt, "compute_kr_signals",
+                        lambda limit=20: [_sig("005930", "강한 매수후보", 80, 50000)])
+    ordered = {"n": 0}
+    monkeypatch.setattr(kiwoom_mock, "place_order", lambda *a, **k: ordered.__setitem__("n", ordered["n"] + 1))
+    assert kt.main(["--dry-run"]) == 0
+    assert ordered["n"] == 0, "dry-run 은 주문 0"
 
 
 def test_main_aborts_on_balance_failure(monkeypatch):

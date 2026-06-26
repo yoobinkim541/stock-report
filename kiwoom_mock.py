@@ -178,15 +178,16 @@ def get_balance() -> dict:
             "return_pct": _num(it, "prft_rt"),
         }
     pos_value = sum(p["value"] for p in positions.values())
-    # 현금(예수금/주문가능): kt00018 요약 후보키 — 라이브 응답으로 정확 키 확정 필요
+    # kt00018 확정 필드(2026-06 모의 검증): prsm_dpst_aset_amt = 추정예탁자산(NAV = 현금+평가),
+    # tot_evlt_amt = 총평가금액(보유). **순수 예수금 필드는 없음** → 현금 = NAV - 보유평가액.
+    nav  = _first_num(res, ["prsm_dpst_aset_amt", "tot_est_amt"])
     cash = _first_num(res, ["entr", "ord_alow_amt", "dnca_tot_amt", "prvs_rcdl_excc_amt"])
-    if cash is not None:
+    if cash is None and nav is not None:
+        cash = max(0.0, nav - pos_value)
+    elif nav is None and cash is not None:
         nav = pos_value + cash
-    else:
-        # 현금 미확인 → 추정예탁자산(현금 포함) 요약필드 시도, 그래도 없으면 None
-        nav = _first_num(res, ["prsm_dpst_aset_amt", "tot_est_amt"])
-        logger.warning("모의 현금필드 미확인 — 응답 최상위 키: %s (라이브 연결 후 키 확정 필요)",
-                       list(res.keys()))
+    if nav is None and cash is None:
+        logger.warning("모의 NAV/현금 필드 미확인 — 응답 키: %s", list(res.keys()))
     return {"ok": True, "positions": positions, "pos_value": pos_value,
             "cash_krw": cash, "nav": nav, "raw": res}
 

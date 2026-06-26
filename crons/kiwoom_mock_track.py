@@ -218,10 +218,14 @@ def _notify(nav: float | None, results: list[dict], signals: list[dict]) -> None
 
 # ── 진입점 ────────────────────────────────────────────────────────────────────
 
-def main() -> int:
-    logger.info("=== kiwoom_mock_track 시작 [%s] ===", datetime.now(KST).strftime("%Y-%m-%d %H:%M"))
+def main(argv: list[str] | None = None) -> int:
+    argv = sys.argv[1:] if argv is None else argv
+    dry = "--dry-run" in argv
+    logger.info("=== kiwoom_mock_track 시작 [%s]%s ===",
+                datetime.now(KST).strftime("%Y-%m-%d %H:%M"), " [DRY-RUN]" if dry else "")
 
-    if not kiwoom_mock.is_enabled():
+    # dry-run 은 미리보기(주문 미집행)라 비활성 상태에서도 허용 — 켜기 전 계획 확인용
+    if not dry and not kiwoom_mock.is_enabled():
         logger.info("KIWOOM_MOCK_ENABLED 아님 — 모의 페이퍼트레이딩 생략 (모의투자 신청 후 활성화)")
         return 0
 
@@ -247,6 +251,14 @@ def main() -> int:
     logger.info("리밸런스 계획 %d건 (예산 ₩%s, 현금 %s, 목표 %d종목)",
                 len(plan), f"{budget:,.0f}",
                 f"₩{cash:,.0f}" if cash is not None else "미확인", MAX_POS)
+
+    if dry:
+        logger.info("[DRY-RUN] 주문 미집행 — 계획만 출력:")
+        for o in plan:
+            logger.info("  [DRY] %s %s %s주 · %s", o["side"], o["code"], o["qty"], o.get("reason"))
+        if not plan:
+            logger.info("  [DRY] 주문 없음 (목표 = 현 보유)")
+        return 0
 
     # 시작 스냅샷 먼저 기록(크래시에도 당일 NAV 시계열 보존)
     _append_history({"kind": "snapshot", "nav": nav, "cash": cash,
