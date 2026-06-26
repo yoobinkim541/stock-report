@@ -39,25 +39,25 @@ def main() -> int:
     logger.info("=== weekly_kr_ranker_retrain 시작 ===")
     try:
         from ml.data_pipeline import build_ml_dataset, KR_BENCHMARK
-        from ml.ranker import train_ranker, walk_forward_backtest
+        from ml.ranker import train_ranker, walk_forward_backtest, adopt_if_better
         from ml.kr_ranker import KR_MODE, KR_MODEL_CACHE
-        from ml.ranker import save_ranker
 
         ds = build_ml_dataset(mode=KR_MODE, days=756, forward_days=20, benchmark_ticker=KR_BENCHMARK)
         if not len(ds.get("features", [])):
             logger.warning("KR 데이터셋 비어있음 — 재학습 생략")
             return 0
         result = train_ranker(ds)
-        save_ranker(result, KR_MODEL_CACHE)
+        adopted, champ_ic = adopt_if_better(result, KR_MODEL_CACHE)   # 챔피언/챌린저
 
         wf = walk_forward_backtest(ds, n_folds=4)
         mean_ic = wf.get("mean_ic")
         fold_str = " / ".join(f"{x:+.3f}" for x in wf.get("fold_ics", []))
 
+        adopt_str = ("채택 ✅" if adopted else f"보류 ⏸️ (챔피언 IC {champ_ic:+.3f} 유지)")
         msg = "\n".join(x for x in [
-            "🇰🇷 KR 랭커 주간 재학습 완료 (Purged WF · vs KOSPI)",
+            "🇰🇷 KR 랭커 주간 재학습 (Purged WF · vs KOSPI · 챔피언/챌린저)",
             "━━━━━━━━━━━━━━",
-            f"분할 OOS IC: {result.oos_ic:+.3f}  ICIR: {result.oos_icir:.2f}",
+            f"분할 OOS IC: {result.oos_ic:+.3f}  ICIR: {result.oos_icir:.2f}  → {adopt_str}",
             (f"WF 평균 IC: {mean_ic:+.4f}" if mean_ic is not None else "WF: 데이터 부족"),
             (f"폴드별 IC: {fold_str}" if fold_str else ""),
             f"상위10% 초과수익(vs KOSPI): {result.oos_top_decile_ret*100:+.1f}%",

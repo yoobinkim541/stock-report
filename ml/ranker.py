@@ -357,6 +357,21 @@ def load_ranker(path: Path = MODEL_CACHE) -> Optional[RankerResult]:
     return safe_unpickle(path)
 
 
+def adopt_if_better(result: RankerResult, path: Path = MODEL_CACHE, *, tol: float = 0.01) -> tuple[bool, float | None]:
+    """챔피언/챌린저 채택 게이트 — 신규 모델 OOS IC 가 현행보다 명백히 나쁘지 않을 때만 저장.
+
+    재학습 모델이 OOS IC 에서 (tol 이상) 퇴보하면 기존(챔피언) 모델을 유지(노이즈성 악화 방지).
+    반환: (채택 여부, 챔피언 OOS IC | None).
+    """
+    champ = load_ranker(path)
+    champ_ic = champ.oos_ic if champ is not None else None
+    if champ_ic is None or result.oos_ic >= champ_ic - tol:
+        save_ranker(result, path)
+        return True, champ_ic
+    logger.info("랭커 재학습 보류 — OOS IC %.3f < 챔피언 %.3f (퇴보) → 기존 유지", result.oos_ic, champ_ic)
+    return False, champ_ic
+
+
 # ── 오늘의 랭킹 생성 ──────────────────────────────────────────────────────────
 
 def rank_today(
@@ -404,6 +419,13 @@ def rank_today(
 
     bench_df = prices.get(benchmark_ticker)
     qqq_close = bench_df.get("Close") if bench_df is not None else None
+    if qqq_close is not None:
+        # 학습과 동일하게 지수 다중TF RSI(일/주/월) 시장공통 피처 주입
+        try:
+            from ml.data_pipeline import index_multitf_rsi
+            market_feat = market_feat.join(index_multitf_rsi(qqq_close), how="left").ffill()
+        except Exception as e:
+            logger.warning("지수 다중TF RSI(추론) 생성 실패: %s", e)
 
     rows = []
     for ticker in tickers:

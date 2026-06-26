@@ -589,6 +589,23 @@ def _get_sector_map(tickers: list[str]) -> dict[str, int]:
 
 # ── 메인 데이터셋 빌더 ────────────────────────────────────────────────────────
 
+def index_multitf_rsi(close: "pd.Series") -> "pd.DataFrame":
+    """지수(벤치마크) 일봉/주봉/월봉 RSI(14) — 일별 인덱스로 정렬.
+
+    룩어헤드 방지: 일봉 RSI 는 당일 종가까지(시점 정합), 주/월봉 RSI 는 **직전 완성 봉**만
+    사용(shift(1)) 후 ffill — 진행 중인 주/월의 미완성 종가를 쓰지 않는다.
+    """
+    from ml.features import rsi
+    out = pd.DataFrame(index=close.index)
+    c = close.dropna()
+    out["idx_rsi_d"] = rsi(c, 14).reindex(close.index)
+    wk = rsi(c.resample("W").last(), 14).shift(1)        # 직전 완성 주봉
+    out["idx_rsi_w"] = wk.reindex(close.index, method="ffill")
+    mo = rsi(c.resample("ME").last(), 14).shift(1)       # 직전 완성 월봉
+    out["idx_rsi_m"] = mo.reindex(close.index, method="ffill")
+    return out
+
+
 def build_ml_dataset(
     mode: Literal["portfolio", "nasdaq100", "sp500", "all", "kr_top10", "kr30"] = "nasdaq100",
     days: int = 1260,
@@ -636,6 +653,12 @@ def build_ml_dataset(
     qqq_close = bench_df.get("Close") if bench_df is not None else None
     if qqq_close is None:
         logger.warning("벤치마크 %s 가격 없음 — 초과수익이 절대수익으로 폴백", benchmark_ticker)
+    else:
+        # 지수 다중 타임프레임 RSI(일/주/월)를 시장공통 피처로 추가(전 종목 broadcast)
+        try:
+            market_feat = market_feat.join(index_multitf_rsi(qqq_close), how="left").ffill(limit=5)
+        except Exception as e:
+            logger.warning("지수 다중TF RSI 생성 실패: %s", e)
 
     all_features: list[pd.DataFrame] = []
     all_returns:  list[pd.Series]    = []
