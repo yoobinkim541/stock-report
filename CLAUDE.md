@@ -102,6 +102,7 @@ crons/news_spike_detector.py (크론 매 1분)
 | `crons/kr_mock_learn.py` | KR 모의 정책 강화 — 보상 백필 + ★목적함수(아웃퍼폼·MDD≤지수) OOS 게이트 재학습 | 토 02:00 UTC |
 | `crons/weekly_kr_ranker_retrain.py` | KR 전용 랭커(KOSPI 대비 초과수익) 주간 재학습 (Purged WF·OOS IC) | 토 03:30 UTC |
 | `crons/longterm_adaptive_eval.py` | 장기 전략 ★목표(vs QQQ 아웃퍼폼·MDD≤지수) 라이브 스코어카드 + 악화 시 보수적 레버리지 축소 shadow 권고 | 토 04:00 UTC |
+| `crons/advice_adaptive_eval.py` | 포트폴리오 advice 적응 평가 (paper_track A/B meta vs rule ★목적함수 → blend 신뢰도 shadow 권고) | 토 04:30 UTC |
 | `reports/source_collector.py` | 전체 소스 수집 (텔레그램 채널·FRED·국채·시장 스냅샷) → JSONL 캐시 | 매 30분 (:05/:35) |
 | `crons/paper_track.py` | MetaAllocator vs Phase 규칙 A/B 페이퍼 트레이딩 (월요일 Sharpe 비교 발송) | 평일 22:50 UTC |
 | `crons/fundamental_snapshot.py` | 펀더멘털 point-in-time 스냅샷 적재 (look-ahead 없는 학습 피처용) | 토 01:00 UTC |
@@ -219,6 +220,7 @@ crons/news_spike_detector.py (크론 매 1분)
 | `KR_MOCK_UNIVERSE` / `KR_MOCK_MAX_POS` / `KR_MOCK_INVEST` / `KIWOOM_MOCK_SEED` | — | `20` / `5` / `0.9` / `10000000` (모의 전략 파라미터) |
 | `ADAPTIVE_ENTRY_ENABLED` | — | `false` (해외 진입 임계값 적응 학습 shadow 를 라이브에 반영. off면 shadow만·라이브 불변) |
 | `ADAPTIVE_LONGTERM_ENABLED` | — | `false` (장기 전략 악화 시 보수적 레버리지 축소 shadow 기록. off면 평가·권고만) |
+| `ADAPTIVE_ADVICE_ENABLED` | — | `false` (MetaAllocator A/B 우위 시 blend 신뢰도 shadow 기록. off면 평가·권고만) |
 | `SYNC_TOKEN` | — | — (portfolio_sync_server 인증) |
 | `SYNC_PORT` | — | `8765` |
 | `NOTION_TOKEN` | — | — (Notion 대시보드 동기화·아카이빙. 없으면 notion_sync 스킵) |
@@ -274,6 +276,7 @@ crons/news_spike_detector.py (크론 매 1분)
 ~/reports/ml-cache/entry_score_params.json       — 진입점수 가중치 (캘리브레이션 채택 시 생성)
 ~/reports/ml-cache/entry_score_params_adaptive.json — 진입 임계값 적응 shadow (ADAPTIVE_ENTRY_ENABLED 시만 라이브 반영)
 ~/reports/ml-cache/longterm_policy_shadow.json   — 장기 보수적 레버리지 축소 shadow (ADAPTIVE_LONGTERM_ENABLED 시만 기록)
+~/reports/ml-cache/advice_blend_shadow.json      — MetaAllocator blend 신뢰도 shadow (ADAPTIVE_ADVICE_ENABLED 시만 기록)
 ~/reports/ml-cache/fundamental_scores.json       — 펀더멘털 점수 7일 캐시 (랭커 틸트용)
 ~/reports/ml-cache/fundamental_snapshots.jsonl   — 펀더멘털 주간 point-in-time 스냅샷
 ~/reports/ml-cache/institutional_snapshots.jsonl — 기관 매집 강도·13F 지분 주간 스냅샷 (델타 추적)
