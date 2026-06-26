@@ -1755,6 +1755,57 @@ def _technical_indicator_line(ticker):
     return None
 
 
+def _earnings_valuation_lines(ticker):
+    """밸류에이션(PER·PBR·PSR·ROE·EPS·배당률/성장) + 다음 실적·컨센서스 요약 라인 (§G1).
+
+    실패/결측 시 빈 리스트 → 리포트 graceful(이 섹션만 생략). US 완전·KR 열화모드(밸류만).
+    """
+    try:
+        from providers import earnings_data as ed
+        s = ed.summary(ticker)
+    except Exception:
+        return []
+    if not s:
+        return []
+    v = s.get("valuation", {}) or {}
+    parts = []
+    if v.get("per") is not None:
+        parts.append(f"PER {v['per']:.1f}x")
+    if v.get("forward_pe") is not None:
+        parts.append(f"fwdPER {v['forward_pe']:.1f}x")
+    if v.get("pbr") is not None:
+        parts.append(f"PBR {v['pbr']:.1f}x")
+    if v.get("psr") is not None:
+        parts.append(f"PSR {v['psr']:.1f}x")
+    if v.get("roe") is not None:
+        parts.append(f"ROE {v['roe'] * 100:.1f}%")
+    if v.get("eps_ttm") is not None:
+        parts.append(f"EPS {v['eps_ttm']:.2f}")
+    if v.get("div_yield") is not None:
+        dg = v.get("div_growth_1y")
+        dgs = f"(성장 {dg * 100:+.0f}%/yr)" if dg is not None else ""
+        parts.append(f"배당 {v['div_yield'] * 100:.1f}%{dgs}")
+    lines = []
+    if parts:
+        lines.append("- **밸류에이션:** " + " · ".join(parts))
+    nxt = s.get("next_earnings", {}) or {}
+    last = s.get("last_surprise") or {}
+    cons = s.get("consensus", {}) or {}
+    e_parts = []
+    if nxt.get("date"):
+        du = nxt.get("days_until")
+        e_parts.append(f"다음 실적 {nxt['date']}" + (f" (D-{du})" if du is not None and du >= 0 else ""))
+    if last.get("surprise_pct") is not None:
+        e_parts.append(f"직전 서프라이즈 {last['surprise_pct']:+.1f}%")
+    if cons.get("revision_momentum") is not None:
+        e_parts.append(f"리비전 모멘텀 {cons['revision_momentum']:+.2f}")
+    if cons.get("target_upside_pct") is not None:
+        e_parts.append(f"목표가 {cons['target_upside_pct']:+.0f}%")
+    if e_parts:
+        lines.append("- **실적/컨센서스:** " + " · ".join(e_parts))
+    return lines
+
+
 def _build_ticker_findings(sig, price_info, vol_info, vol_str, fund, ticker):
     """종목별 '확인할 것' findings 리스트 생성 (순수 추출 — 원본 로직·순서 그대로).
 
@@ -2078,6 +2129,8 @@ def generate_report():
             lines.append(tech_line)
         lines.append(f"- **거래량 변화:** 20일 평균 대비 {vol_str}")
         lines.append(f"- **재무 건강도:** {score}/100점, 등급 **{grade}**")
+        for ev_line in _earnings_valuation_lines(t):     # §G1 밸류에이션·실적/컨센서스
+            lines.append(ev_line)
         lines.append(f"- **오늘의 신호:** {signal_display}")
         lines.append(f"- **최종 판단:** {judgment}")
         lines.append(f"- **Decision v2:** {decision.get('action', '데이터부족')} — {decision.get('one_line_reason', '')}")

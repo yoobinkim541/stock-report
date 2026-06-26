@@ -159,6 +159,99 @@ def test_reaction_summary_empty():
     assert s["n"] == 0 and s["avg_abs_move_1d"] is None
 
 
+# ── G1: 리포트 밸류에이션 렌더 ───────────────────────────────────────────────
+def test_report_valuation_lines(monkeypatch):
+    import providers.earnings_data as ed
+    fake = {"valuation": {"per": 25.3, "forward_pe": 22.0, "pbr": 12.0, "psr": 11.0,
+                          "roe": 0.35, "eps_ttm": 11.8, "div_yield": 0.008, "div_growth_1y": 0.10},
+            "next_earnings": {"date": "2026-04-25", "days_until": 55},
+            "last_surprise": {"surprise_pct": -0.69},
+            "consensus": {"revision_momentum": 0.5, "target_upside_pct": 15.0}}
+    monkeypatch.setattr(ed, "summary", lambda t: fake)
+    from reports import investment_report as ir
+    lines = ir._earnings_valuation_lines("MSFT")
+    assert any("PER 25.3x" in l and "배당 0.8%" in l for l in lines)
+    assert any("다음 실적 2026-04-25 (D-55)" in l for l in lines)
+    assert any("리비전 모멘텀 +0.50" in l and "목표가 +15%" in l for l in lines)
+
+
+def test_report_valuation_lines_graceful_on_error(monkeypatch):
+    import providers.earnings_data as ed
+
+    def _boom(t):
+        raise RuntimeError("network down")
+    monkeypatch.setattr(ed, "summary", _boom)
+    from reports import investment_report as ir
+    assert ir._earnings_valuation_lines("MSFT") == []   # 실패 → 섹션 생략(리포트 무손상)
+
+
+# ── G6: /earnings 커맨드 ─────────────────────────────────────────────────────
+def test_cmd_earnings_overview(monkeypatch):
+    import providers.earnings_data as ed
+    monkeypatch.setattr("portfolio_universe.load_portfolio_tickers", lambda: ["MSFT", "005930.KS"])
+
+    def fake_summary(t):
+        if t == "MSFT":
+            return {"ticker": "MSFT", "valuation": {"per": 25.3, "div_yield": 0.008},
+                    "next_earnings": {"date": "2026-04-25", "days_until": 55},
+                    "last_surprise": {"surprise_pct": -0.69}}
+        return {"ticker": "005930.KS", "valuation": {"per": 9.0}, "next_earnings": {},
+                "last_surprise": None, "degraded": True}
+    monkeypatch.setattr(ed, "summary", fake_summary)
+    from bot import earnings_commands as ec
+    out = []
+    ec.cmd_earnings("123", [], send_fn=lambda cid, txt: out.append(txt))
+    assert len(out) == 1
+    assert "MSFT" in out[0] and "PER 25.3x" in out[0] and "D-55" in out[0]
+    assert "005930.KS" in out[0]
+
+
+def test_cmd_earnings_detail(monkeypatch):
+    import providers.earnings_data as ed
+    from reports import earnings_reaction as er
+    monkeypatch.setattr(ed, "summary", lambda t: {
+        "ticker": "MSFT", "degraded": False,
+        "valuation": {"per": 25.3, "pbr": 12.0, "roe": 0.35, "eps_ttm": 11.8,
+                      "div_yield": 0.008, "div_growth_1y": 0.10},
+        "consensus": {"eps_fwd_avg": 13.2, "n_analysts": 28, "revision_momentum": 0.5,
+                      "target_upside_pct": 15.0},
+        "next_earnings": {"date": "2026-04-25", "days_until": 55}})
+    monkeypatch.setattr(ed, "earnings_history", lambda t, limit=4: [
+        {"date": "2026-01-25", "surprise_pct": -0.69, "eps_actual": 2.88, "eps_est": 2.90}])
+    monkeypatch.setattr(er, "analyze", lambda t: {"summary": {
+        "n": 8, "avg_abs_move_1d": 0.05, "beat_up_rate": 0.75, "drift_persistence": 0.6}})
+    from bot import earnings_commands as ec
+    out = []
+    ec.cmd_earnings("123", ["msft"], send_fn=lambda cid, txt: out.append(txt))
+    assert "PER 25.3x" in out[0] and "리비전 모멘텀 +0.50" in out[0]
+    assert "PEAD" in out[0] and "beat→상승 75%" in out[0]
+
+
+def test_earnings_command_owner_only_registered():
+    import telegram_bot
+    assert "/earnings" not in telegram_bot._GUEST_COMMANDS    # 게스트 차단
+    assert "/earnings" in telegram_bot._COMMAND_HANDLERS       # owner 등록
+
+
+# ── G5: 스냅샷 행 평탄화 ──────────────────────────────────────────────────────
+def test_snapshot_row_flatten(monkeypatch):
+    import providers.earnings_data as ed
+    monkeypatch.setattr(ed, "summary", lambda t, force=False, today=None: {
+        "market_type": "us", "degraded": False,
+        "valuation": {"per": 25.3, "pbr": 12.0, "roe": 0.35, "eps_ttm": 11.8, "div_yield": 0.008,
+                      "div_growth_1y": 0.1, "forward_pe": 22.0, "psr": 11.0},
+        "consensus": {"eps_fwd_avg": 13.2, "n_analysts": 28, "revision_momentum": 0.5,
+                      "eps_rev_up_30d": 6, "eps_rev_down_30d": 2, "target_upside_pct": 15.0, "rev_fwd_avg": 1.0e9},
+        "next_earnings": {"date": "2026-04-25", "days_until": 55},
+        "last_surprise": {"surprise_pct": -0.69}})
+    from crons import earnings_snapshot as es
+    row = es._row("MSFT", "2026-03-01")
+    assert row["ticker"] == "MSFT" and row["date"] == "2026-03-01"
+    assert row["revision_momentum"] == 0.5 and row["per"] == 25.3
+    assert row["last_eps_surprise_pct"] == -0.69 and row["days_until"] == 55
+    assert row["market_type"] == "us" and row["degraded"] is False
+
+
 if __name__ == "__main__":
     import pytest
     sys.exit(pytest.main([__file__, "-v"]))

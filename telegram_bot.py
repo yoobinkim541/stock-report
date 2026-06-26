@@ -73,6 +73,7 @@ from bot.tax_commands import cmd_tax
 from bot.holding_commands import cmd_holding, cmd_dividend, cmd_apply_snapshot
 from bot.accum_commands import cmd_accum
 from bot.entry_commands import cmd_entry
+from bot.earnings_commands import cmd_earnings
 try:
     from reports.source_collector import build_digest as build_source_digest, load_recent_events as load_source_events
 except Exception:
@@ -1706,6 +1707,7 @@ _COMMAND_HANDLERS = {
     "/sim": lambda chat_id, args: _dispatch_with_typing(cmd_sim, chat_id, args),
     "/holding": lambda chat_id, args: _dispatch_with_send(cmd_holding, chat_id, args),
     "/accum": lambda chat_id, args: _dispatch_with_send(cmd_accum, chat_id, args),
+    "/earnings": lambda chat_id, args: _dispatch_with_send(cmd_earnings, chat_id, args),
     "/order": _dispatch_order,
     "/mock": _dispatch_mock,
     "/tax": _dispatch_tax,
