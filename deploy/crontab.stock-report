@@ -35,6 +35,8 @@ PATH=/home/ubuntu/.local/bin:/usr/local/bin:/usr/bin:/bin
 # 국내주식 모의 페이퍼트레이딩 (KIWOOM_MOCK_ENABLED=true 일 때만 동작 — 장 개장 직후)
 # flock: 재실행·중복 집행 방지 (멱등). KRX 휴장일엔 주문이 거부될 뿐(모의 — 무해, 로그만).
 30 0 * * 1-5 cd /home/ubuntu/projects/stock-report && flock -n /tmp/kiwoom_mock_track.lock uv run python crons/kiwoom_mock_track.py >> /tmp/kiwoom_mock_track.log 2>&1   # 00:30 UTC = 09:30 KST
+# 국내 모의 일일 현황 보고 (장 마감 직후 — NAV·손익·편입/퇴출 사유·vs KOSPI·MDD)
+40 6 * * 1-5 cd /home/ubuntu/projects/stock-report && flock -n /tmp/kiwoom_mock_report.lock uv run python crons/kiwoom_mock_report.py >> /tmp/kiwoom_mock_report.log 2>&1   # 06:40 UTC = 15:40 KST
 
 # ── 고빈도 수집·감지 ─────────────────────────────────────────────────────────
 # 속보 수집 + 급증 감지 + 텔레그램 알림
@@ -47,6 +49,10 @@ PATH=/home/ubuntu/.local/bin:/usr/local/bin:/usr/bin:/bin
 0 1 * * 6 cd /home/ubuntu/projects/stock-report && uv run python crons/fundamental_snapshot.py >> /tmp/fundamental_snapshot.log 2>&1   # 토 01:00 UTC = 10:00 KST
 # 기관 매집 강도·13F 지분 주간 스냅샷 적재 (델타 추적) + 상위 5 다이제스트 발송
 30 1 * * 6 cd /home/ubuntu/projects/stock-report && uv run python crons/institutional_snapshot.py >> /tmp/institutional_snapshot.log 2>&1   # 토 01:30 UTC = 10:30 KST
+# KR 모의 정책 강화 (보상 백필 + ★목적함수 OOS 게이트 재학습; KIWOOM_MOCK_ENABLED 시)
+0 2 * * 6 cd /home/ubuntu/projects/stock-report && flock -n /tmp/kr_mock_learn.lock uv run python crons/kr_mock_learn.py >> /tmp/kr_mock_learn.log 2>&1   # 토 02:00 UTC = 11:00 KST
+# KR 전용 랭커 주간 재학습 (코스피 대비 초과수익 예측)
+30 3 * * 6 cd /home/ubuntu/projects/stock-report && uv run python crons/weekly_kr_ranker_retrain.py >> /tmp/weekly_kr_ranker.log 2>&1          # 토 03:30 UTC = 12:30 KST
 
 # ── 월간 재추정 ──────────────────────────────────────────────────────────────
 # 진입점수 가중치·임계값 walk-forward 재추정 (OOS 개선 시만 자동 채택)

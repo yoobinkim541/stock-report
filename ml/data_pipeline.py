@@ -103,6 +103,16 @@ KR_TOP10_META: dict[str, tuple[str, str, str]] = {
 }
 KR_TOP10 = list(KR_TOP10_META.keys())
 
+# 한국 시가총액 상위 30개 (KR 전용 ML 학습 폭 확보 — KR_TOP10 + 20)
+KR_TOP30 = KR_TOP10 + [
+    "105560.KS", "055550.KS", "012330.KS", "028260.KS", "066570.KS",
+    "051910.KS", "096770.KS", "032830.KS", "015760.KS", "017670.KS",
+    "030200.KS", "086790.KS", "000810.KS", "009150.KS", "010130.KS",
+    "011200.KS", "018260.KS", "034730.KS", "011070.KS", "003670.KS",
+]
+# KR 벤치마크 지수 (초과수익·베타 기준) — KOSPI 종합
+KR_BENCHMARK = "^KS11"
+
 # Fear/Greed proxy 재료
 _MACRO_TICKERS = ["^VIX", "^TNX", "QQQ", "SPY", "HYG", "LQD", "IEF", "TLT", "ACWI"]
 
@@ -141,7 +151,7 @@ def _save_cache(key: str, df: pd.DataFrame) -> None:
 
 def fetch_universe(
     mode: Literal["portfolio", "nasdaq100", "sp500", "all",
-                  "us_top50", "kr_top10", "watch"] = "nasdaq100",
+                  "us_top50", "kr_top10", "kr30", "watch"] = "nasdaq100",
 ) -> list[str]:
     """종목 유니버스 반환.
 
@@ -165,6 +175,8 @@ def fetch_universe(
         return list(US_TOP100)
     if mode == "kr_top10":
         return list(KR_TOP10)
+    if mode == "kr30":
+        return list(KR_TOP30)
     if mode == "watch":
         combined = list(PORTFOLIO_TICKERS) + list(US_TOP50) + list(KR_TOP10)
         return list(dict.fromkeys(combined))   # 순서 유지 중복 제거
@@ -578,27 +590,32 @@ def _get_sector_map(tickers: list[str]) -> dict[str, int]:
 # ── 메인 데이터셋 빌더 ────────────────────────────────────────────────────────
 
 def build_ml_dataset(
-    mode: Literal["portfolio", "nasdaq100", "sp500", "all"] = "nasdaq100",
+    mode: Literal["portfolio", "nasdaq100", "sp500", "all", "kr_top10", "kr30"] = "nasdaq100",
     days: int = 1260,
     forward_days: int = 20,
+    benchmark_ticker: str = "QQQ",
 ) -> dict:
     """ML 학습용 데이터셋 구성.
+
+    benchmark_ticker: 초과수익·베타 기준 지수(미국=QQQ, 한국=^KS11 KOSPI).
+                      excess/beta/excess_mom 피처와 라벨이 이 벤치마크 대비로 계산됨.
 
     Returns:
         features  : pd.DataFrame  (date × ticker → flat index, 피처 컬럼)
         returns   : pd.Series     (forward_days 후 수익률, 타겟)
-        excess    : pd.Series     (QQQ 대비 초과수익률, 타겟)
+        excess    : pd.Series     (벤치마크 대비 초과수익률, 타겟)
         universe  : list[str]
         fg_score  : pd.Series     (Fear/Greed proxy)
-        meta      : dict          (mode, days, forward_days, bias_warning)
+        meta      : dict          (mode, days, forward_days, benchmark, bias_warning)
     """
-    logger.info("ML 데이터셋 구성 시작 (mode=%s, days=%d, fwd=%d일)", mode, days, forward_days)
+    logger.info("ML 데이터셋 구성 시작 (mode=%s, days=%d, fwd=%d일, bench=%s)",
+                mode, days, forward_days, benchmark_ticker)
 
     universe = fetch_universe(mode)
     logger.info("유니버스: %d종목", len(universe))
 
     # 가격 다운로드 (벤치마크 포함)
-    all_tickers = list(set(universe + ["QQQ", "SPY", "^VIX", "HYG", "LQD", "IEF", "TLT"]))
+    all_tickers = list(set(universe + [benchmark_ticker, "QQQ", "SPY", "^VIX", "HYG", "LQD", "IEF", "TLT"]))
     prices = fetch_prices(all_tickers, days=days)
 
     # Fear/Greed proxy
@@ -614,8 +631,11 @@ def build_ml_dataset(
     # 참고: 매크로 피처(수익률곡선·크레딧·달러 등)는 종목 간 동일값이므로
     # 크로스섹셔널 Ranker에 포함하지 않음. LeverageModel/MetaAllocator에서 별도 사용.
 
-    # QQQ 선행 수익률 (초과수익 계산용)
-    qqq_close = prices.get("QQQ", pd.DataFrame()).get("Close")
+    # 벤치마크 선행 수익률 (초과수익·베타 계산용 — 미국 QQQ / 한국 KOSPI)
+    bench_df = prices.get(benchmark_ticker)
+    qqq_close = bench_df.get("Close") if bench_df is not None else None
+    if qqq_close is None:
+        logger.warning("벤치마크 %s 가격 없음 — 초과수익이 절대수익으로 폴백", benchmark_ticker)
 
     all_features: list[pd.DataFrame] = []
     all_returns:  list[pd.Series]    = []
@@ -681,6 +701,7 @@ def build_ml_dataset(
             "mode": mode,
             "days": days,
             "forward_days": forward_days,
+            "benchmark": benchmark_ticker,
             "bias_warning": "현재 구성종목 기준 — survivorship bias 있음",
             "built_at": datetime.now(timezone.utc).isoformat(),
         },

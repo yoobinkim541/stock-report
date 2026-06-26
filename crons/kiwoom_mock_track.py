@@ -89,6 +89,8 @@ def compute_kr_signals(limit: int = UNIVERSE) -> list[dict]:
     from reports.fundamental_score import score_ticker
     from reports.daily_signals import detect_signals
 
+    from ml import kr_policy
+
     out = []
     for tk in KOSPI_TOP30[:limit]:
         try:
@@ -105,9 +107,38 @@ def compute_kr_signals(limit: int = UNIVERSE) -> list[dict]:
                 "price":  price,
                 "is_buy":  action in _BUY_ACTIONS,
                 "is_sell": action in _SELL_ACTIONS,
+                # 근거(원장·리포트용) + point-in-time 피처(학습 입력)
+                "rationale": {
+                    "one_line_reason": dec.get("one_line_reason", ""),
+                    "confidence": dec.get("confidence"),
+                    "grade": fund.get("grade", "N/A"),
+                    "financial": (dec.get("financial") or {}).get("status"),
+                    "timing": (dec.get("timing") or {}).get("status"),
+                    "news": (dec.get("news") or {}).get("status"),
+                    "risk": (dec.get("risk") or {}).get("status"),
+                },
+                "features": kr_policy.extract_features(fund, sig, dec),
             })
         except Exception as e:
             logger.warning("KR 신호 실패 %s: %s", tk, e)
+
+    # KR ranker(가치모델) 점수를 횡단면 정규화해 피처에 주입 → policy_score 산출
+    try:
+        from ml import kr_ranker
+        raw = kr_ranker.kr_scores_by_ticker(top_n=max(limit, len(out)))
+        vals = [raw[s["ticker"]] for s in out if s["ticker"] in raw]
+        lo, hi = (min(vals), max(vals)) if vals else (0.0, 1.0)
+        rng = (hi - lo) or 1.0
+        for s in out:
+            rv = raw.get(s["ticker"])
+            if rv is not None:
+                s["features"]["ranker"] = round((rv - lo) / rng, 4)   # [0,1] 정규화
+    except Exception as e:
+        logger.warning("KR ranker 점수 주입 실패(폴백: 규칙 가중만): %s", e)
+
+    params = kr_policy.load_params()
+    for s in out:
+        s["policy_score"] = round(kr_policy.score(s["features"], params), 6)
     return out
 
 
@@ -132,9 +163,10 @@ def plan_rebalance(signals: list[dict], positions: dict, budget_krw: float,
         가용현금 알면 그 한도까지만(over-spend 방지).
     """
     orders: list[dict] = []
+    # 랭킹 = 학습된 정책 점수(policy_score) 우선, 없으면 펀더멘털 score 폴백
     buys = sorted(
         [s for s in signals if s.get("is_buy") and s.get("price", 0) > 0],
-        key=lambda s: -s.get("score", 0),
+        key=lambda s: -(s.get("policy_score") if s.get("policy_score") is not None else s.get("score", 0) / 100.0),
     )[:max_positions]
     target_codes = {s["code"] for s in buys}
 
@@ -178,16 +210,53 @@ def _append_history(rec: dict) -> None:
         logger.warning("모의 기록 실패: %s", e)
 
 
+def _classify_kind(side: str, qty: int, cur_shares: int) -> str:
+    """편입(신규 매수)/증액/퇴출(전량 매도)/감액 분류."""
+    if side == "buy":
+        return "편입" if cur_shares <= 0 else "증액"
+    return "퇴출" if qty >= cur_shares else "감액"
+
+
+def _log_decision(ledger, sig: dict, code: str, kind: str, order_side: str,
+                  qty: int, ok, today: str) -> None:
+    """결정+근거를 불변 원장(kr_decisions.jsonl)에 적재 + 편입/퇴출은 MD 저널에도."""
+    try:
+        ledger.log_decision({
+            "date": today,
+            "ticker": sig.get("ticker", f"{code}.KS"),
+            "code": code,
+            "side": kind,                         # 편입/증액/퇴출/감액
+            "order_side": order_side,             # buy/sell
+            "qty": qty,
+            "price": sig.get("price"),
+            "action": sig.get("action"),
+            "policy_score": sig.get("policy_score"),
+            "score": sig.get("score"),
+            "rationale": sig.get("rationale"),
+            "features": sig.get("features"),      # point-in-time — 학습 입력
+            "ok": ok,
+        })
+        if kind in ("편입", "퇴출"):
+            icon = "📥" if kind == "편입" else "📤"
+            rr = (sig.get("rationale") or {}).get("one_line_reason", "")
+            ledger.append_journal(
+                today, f"- {today} {icon} {kind} {code} {sig.get('action','')} — {rr} (점수 {sig.get('score','')})")
+    except Exception as e:
+        logger.warning("결정 원장 기록 실패 %s: %s", code, e)
+
+
 # ── 텔레그램 요약 ─────────────────────────────────────────────────────────────
 
 def _notify(nav: float | None, results: list[dict], signals: list[dict]) -> None:
-    name_by_code = {}
+    name_by_code, reason_by_code = {}, {}
     try:
         from reports.investment_report import _company_name
         name_by_code = {s["code"]: _company_name(s["ticker"]) for s in signals}
     except Exception:
         pass
+    reason_by_code = {s["code"]: (s.get("rationale") or {}).get("one_line_reason", "") for s in signals}
 
+    _KIND_ICON = {"편입": "📥", "증액": "➕", "퇴출": "📤", "감액": "➖"}
     lines = ["🧪 [모의] 국내 페이퍼트레이딩"]
     lines.append("━━━━━━━━━━━━━━━━━━━━━━━")
     if nav is not None:
@@ -199,8 +268,14 @@ def _notify(nav: float | None, results: list[dict], signals: list[dict]) -> None
     for r in results:
         nm = name_by_code.get(r["code"], "")
         mark = "✅" if r.get("ok") else "❌"
-        side = "매수" if r["side"] == "buy" else "매도"
-        lines.append(f"  {mark} {side} {r['code']} {nm} {r['qty']}주 · {r.get('reason','')}")
+        kind = r.get("kind", "매수" if r["side"] == "buy" else "매도")
+        icon = _KIND_ICON.get(kind, "")
+        lines.append(f"  {mark} {icon}{kind} {r['code']} {nm} {r['qty']}주")
+        # 편입/퇴출은 사유(one_line_reason) 병기
+        if kind in ("편입", "퇴출"):
+            rr = reason_by_code.get(r["code"], "")
+            if rr:
+                lines.append(f"     사유: {rr}")
         if not r.get("ok") and r.get("msg"):
             lines.append(f"     ↳ {r['msg']}")
     lines.append("━━━━━━━━━━━━━━━━━━━━━━━")
@@ -264,15 +339,24 @@ def main(argv: list[str] | None = None) -> int:
     _append_history({"kind": "snapshot", "nav": nav, "cash": cash,
                      "positions": len([p for p in positions.values() if int(p.get("shares", 0) or 0) > 0])})
 
+    from ml.adaptive import Ledger
+    ledger = Ledger("kr_mock")
+    sig_by_code = {s["code"]: s for s in signals}
+    today = datetime.now(KST).strftime("%Y-%m-%d")
+
     results = []
     for o in plan:
+        cur = int(positions.get(o["code"], {}).get("shares", 0) or 0)
+        kind = _classify_kind(o["side"], o["qty"], cur)
         r = kiwoom_mock.place_order(o["code"], o["qty"], o["side"])
-        results.append({**o, **r})
-        logger.info("%s %s %s주 → %s %s",
-                    o["side"], o["code"], o["qty"], "OK" if r.get("ok") else "FAIL", r.get("msg", ""))
-        # 주문별 즉시 기록 — 루프 도중 크래시해도 집행 내역 감사추적 남김(#멱등/감사)
+        results.append({**o, "kind": kind, **r})
+        logger.info("%s(%s) %s %s주 → %s %s",
+                    o["side"], kind, o["code"], o["qty"], "OK" if r.get("ok") else "FAIL", r.get("msg", ""))
+        # 주문별 즉시 기록 — store(현재뷰) + 불변 원장(학습/감사, 절대 삭제 안 함)
         _append_history({"kind": "order", "code": o["code"], "side": o["side"], "qty": o["qty"],
                          "reason": o.get("reason"), "ok": r.get("ok"), "msg": r.get("msg")})
+        _log_decision(ledger, sig_by_code.get(o["code"], {}), o["code"], kind, o["side"],
+                      o["qty"], r.get("ok"), today)
         time.sleep(0.3)   # 레이트리밋 여유
 
     _notify(nav, results, signals)

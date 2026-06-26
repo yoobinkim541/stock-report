@@ -188,6 +188,7 @@ BOT_COMMANDS = [
     {"command": "sgov",           "description": "SGOV 실탄 상태"},
     {"command": "dca",            "description": "오늘 DCA 배분"},
     {"command": "order",          "description": "소수점 매수 주문서"},
+    {"command": "mock",           "description": "국내 모의 페이퍼트레이딩 현황 (NAV·손익·편입/퇴출 사유·vs KOSPI)"},
     {"command": "holding",        "description": "보유 종목 조회/매수·매도/목표비중/DCA/배당"},
     {"command": "tax",            "description": "실현손익 & 양도세 (sim/sell/history/delete/import)"},
     {"command": "ask",            "description": "AI 포트폴리오 상담"},
@@ -1679,6 +1680,17 @@ def _dispatch_intraday(chat_id: str, args: list):
     cmd_intraday(chat_id, args)
 
 
+def _dispatch_mock(chat_id: str, args: list):
+    """국내 모의 페이퍼트레이딩 현황(owner 전용 — _GUEST_COMMANDS 미포함)."""
+    typing(chat_id)
+    try:
+        from crons.kiwoom_mock_report import build_report
+        send(chat_id, build_report())
+    except Exception as e:
+        send(chat_id, f"⚠️ 모의 현황 조회 실패: {e}")
+        logger.exception("cmd_mock")
+
+
 _COMMAND_HANDLERS = {
     "/report": _dispatch_report,
     "/mlreport": _dispatch_mlreport,
@@ -1693,6 +1705,7 @@ _COMMAND_HANDLERS = {
     "/holding": lambda chat_id, args: _dispatch_with_send(cmd_holding, chat_id, args),
     "/accum": lambda chat_id, args: _dispatch_with_send(cmd_accum, chat_id, args),
     "/order": _dispatch_order,
+    "/mock": _dispatch_mock,
     "/tax": _dispatch_tax,
     "/ask": _dispatch_ask,
     "/apply_snapshot": _dispatch_apply_snapshot,

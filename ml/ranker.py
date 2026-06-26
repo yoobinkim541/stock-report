@@ -363,6 +363,8 @@ def rank_today(
     mode: str = "nasdaq100",
     top_n: int = 15,
     retrain: bool = False,
+    benchmark_ticker: str = "QQQ",
+    cache_path: Path = MODEL_CACHE,
 ) -> pd.DataFrame:
     """현재 종목 랭킹 생성.
 
@@ -370,6 +372,8 @@ def rank_today(
         mode:    fetch_universe 모드
         top_n:   상위 N개 반환
         retrain: True면 기존 캐시 무시하고 재학습
+        benchmark_ticker: 초과수익·베타 기준 지수(미국 QQQ / 한국 ^KS11). KR 모델 재사용용.
+        cache_path: 모델 캐시 경로(KR 모델은 별도 경로).
 
     Returns:
         DataFrame (ticker, score, rank, features...)
@@ -377,19 +381,19 @@ def rank_today(
     from ml.data_pipeline import build_ml_dataset, fetch_prices, build_stock_features, build_fear_greed_proxy
 
     # 모델 로드 또는 학습
-    result = None if retrain else load_ranker()
+    result = None if retrain else load_ranker(cache_path)
     if result is None:
-        logger.info("모델 없음 — 신규 학습 시작")
-        ds = build_ml_dataset(mode=mode, days=756, forward_days=20)
+        logger.info("모델 없음 — 신규 학습 시작 (bench=%s)", benchmark_ticker)
+        ds = build_ml_dataset(mode=mode, days=756, forward_days=20, benchmark_ticker=benchmark_ticker)
         result = train_ranker(ds)
-        save_ranker(result)
+        save_ranker(result, cache_path)
 
     # 오늘 데이터로 예측
     universe = result.meta.get("tickers", None)
     from ml.data_pipeline import fetch_universe, PORTFOLIO_TICKERS
     tickers = fetch_universe(mode)
 
-    prices = fetch_prices(tickers + ["QQQ", "SPY", "^VIX", "HYG", "LQD", "IEF", "TLT"], days=300)
+    prices = fetch_prices(tickers + [benchmark_ticker, "QQQ", "SPY", "^VIX", "HYG", "LQD", "IEF", "TLT"], days=300)
     fg = build_fear_greed_proxy(days=300)
     import yfinance as yf
     vix_df = prices.get("^VIX")
@@ -398,7 +402,8 @@ def rank_today(
         market_feat["vix"] = vix_df["Close"]
     market_feat = market_feat.ffill()
 
-    qqq_close = prices.get("QQQ", pd.DataFrame()).get("Close")
+    bench_df = prices.get(benchmark_ticker)
+    qqq_close = bench_df.get("Close") if bench_df is not None else None
 
     rows = []
     for ticker in tickers:
