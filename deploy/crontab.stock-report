@@ -53,6 +53,8 @@ PATH=/home/ubuntu/.local/bin:/usr/local/bin:/usr/bin:/bin
 0 2 * * 6 cd /home/ubuntu/projects/stock-report && flock -n /tmp/kr_mock_learn.lock uv run python crons/kr_mock_learn.py >> /tmp/kr_mock_learn.log 2>&1   # 토 02:00 UTC = 11:00 KST
 # KR 전용 랭커 주간 재학습 (코스피 대비 초과수익 예측)
 30 3 * * 6 cd /home/ubuntu/projects/stock-report && uv run python crons/weekly_kr_ranker_retrain.py >> /tmp/weekly_kr_ranker.log 2>&1          # 토 03:30 UTC = 12:30 KST
+# 장기 전략 ★목표(vs QQQ 아웃퍼폼·MDD≤지수) 라이브 평가 + 보수적 shadow(ADAPTIVE_LONGTERM_ENABLED 시)
+0 4 * * 6 cd /home/ubuntu/projects/stock-report && uv run python crons/longterm_adaptive_eval.py >> /tmp/longterm_adaptive_eval.log 2>&1     # 토 04:00 UTC = 13:00 KST
 
 # ── 월간 재추정 ──────────────────────────────────────────────────────────────
 # 진입점수 가중치·임계값 walk-forward 재추정 (OOS 개선 시만 자동 채택)
