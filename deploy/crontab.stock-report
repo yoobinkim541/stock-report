@@ -57,6 +57,8 @@ PATH=/home/ubuntu/.local/bin:/usr/local/bin:/usr/bin:/bin
 # ── 월간 재추정 ──────────────────────────────────────────────────────────────
 # 진입점수 가중치·임계값 walk-forward 재추정 (OOS 개선 시만 자동 채택)
 0 14 1 * * cd /home/ubuntu/projects/stock-report && uv run python backtest/entry_calibration.py >> /tmp/entry_calibration.log 2>&1     # 매월 1일 14:00 UTC = 23:00 KST
+# 진입 임계값 라이브 outcome 적응 학습 (signal_outcomes → shadow; ADAPTIVE_ENTRY_ENABLED 시만 라이브 반영)
+30 14 1 * * cd /home/ubuntu/projects/stock-report && uv run python crons/entry_adaptive_learn.py >> /tmp/entry_adaptive_learn.log 2>&1   # 매월 1일 14:30 UTC
 
 # ── 테스트·헬스체크 ──────────────────────────────────────────────────────────
 # 기능 검증 연기 테스트 25항목 (실패 시만 알림)

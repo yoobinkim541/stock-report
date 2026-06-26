@@ -107,6 +107,7 @@ crons/news_spike_detector.py (크론 매 1분)
 | `crons/options_snapshot.py` | 옵션 지표 스냅샷 (ATM IV·풋콜비·스큐·기대변동폭) — 학습 피처 축적 | 평일 21:30 UTC |
 | `crons/institutional_snapshot.py` | 기관 매집 강도·13F 지분 주간 스냅샷 적재 (델타 추적용) + 상위 5 다이제스트 발송 | 토 01:30 UTC |
 | `backtest/entry_calibration.py` | 진입점수 가중치·임계값 walk-forward 재추정 (OOS 개선 시만 자동 채택) | 매월 1일 14:00 UTC |
+| `crons/entry_adaptive_learn.py` | 진입 임계값 라이브 outcome 적응 학습 (signal_outcomes→★목적함수 OOS 게이트→shadow; `ADAPTIVE_ENTRY_ENABLED` 시만 라이브) | 매월 1일 14:30 UTC |
 
 **tests/ (테스트·헬스체크)**
 | 파일 | 역할 | 주기 |
@@ -215,6 +216,7 @@ crons/news_spike_detector.py (크론 매 1분)
 | `KIWOOM_MOCK_API_KEY` / `KIWOOM_MOCK_API_SECRET` | — | — (없으면 `KIWOOM_API_KEY/SECRET` 재사용 — 앱키는 계좌 공용) |
 | `KIWOOM_MOCK_ACCOUNT_NO` | — | — (모의 계좌번호, 표시·로깅용) |
 | `KR_MOCK_UNIVERSE` / `KR_MOCK_MAX_POS` / `KR_MOCK_INVEST` / `KIWOOM_MOCK_SEED` | — | `20` / `5` / `0.9` / `10000000` (모의 전략 파라미터) |
+| `ADAPTIVE_ENTRY_ENABLED` | — | `false` (해외 진입 임계값 적응 학습 shadow 를 라이브에 반영. off면 shadow만·라이브 불변) |
 | `SYNC_TOKEN` | — | — (portfolio_sync_server 인증) |
 | `SYNC_PORT` | — | `8765` |
 | `NOTION_TOKEN` | — | — (Notion 대시보드 동기화·아카이빙. 없으면 notion_sync 스킵) |
@@ -268,6 +270,7 @@ crons/news_spike_detector.py (크론 매 1분)
 ~/.local/share/stock-report/paper_track.json     — A/B 페이퍼 트레이딩 기록 (meta vs rule)
 ~/reports/ml-cache/leverage_best_params.json     — Optuna 최적 파라미터 (UPRO·vol targeting)
 ~/reports/ml-cache/entry_score_params.json       — 진입점수 가중치 (캘리브레이션 채택 시 생성)
+~/reports/ml-cache/entry_score_params_adaptive.json — 진입 임계값 적응 shadow (ADAPTIVE_ENTRY_ENABLED 시만 라이브 반영)
 ~/reports/ml-cache/fundamental_scores.json       — 펀더멘털 점수 7일 캐시 (랭커 틸트용)
 ~/reports/ml-cache/fundamental_snapshots.jsonl   — 펀더멘털 주간 point-in-time 스냅샷
 ~/reports/ml-cache/institutional_snapshots.jsonl — 기관 매집 강도·13F 지분 주간 스냅샷 (델타 추적)
