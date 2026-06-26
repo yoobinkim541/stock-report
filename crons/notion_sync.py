@@ -1,12 +1,19 @@
 #!/usr/bin/env python3
 """
-notion_sync.py — stock-report → Notion 대시보드 자동 동기화
+notion_sync.py — stock-report → Notion 대시보드 자동 동기화 + 리포트 아카이빙
 
-크론 (평일 22:30 UTC = 07:30 KST):
-    30 22 * * 1-5 cd /home/ubuntu/projects/stock-report && uv run python notion_sync.py >> /tmp/notion_sync.log 2>&1
+두 가지를 한다:
+  1) 라이브 대시보드(DASHBOARD_PAGE_ID) 매일 덮어쓰기 — 현재 시황·수익률·랭킹 스냅샷.
+  2) 당일 리포트를 월/주 계층 페이지에 누적 아카이빙(crons/notion_archive.py) —
+     📚 리포트 아카이브 → 26/06 → 4주차 → 일별 토글. 멱등 upsert, 대시보드와 독립
+     (아카이브 실패해도 대시보드 동기화는 계속). 대시보드 하단엔 아카이브 링크를 단다.
+
+크론 (평일 23:30 UTC = 08:30 KST — 리포트 23:00 이후, 당일 요약 반영):
+    30 23 * * 1-5 cd /home/ubuntu/projects/stock-report && uv run python crons/notion_sync.py >> /tmp/notion_sync.log 2>&1
 
 환경변수:
     NOTION_TOKEN         — Notion Integration Token (필수)
+    NOTION_ARCHIVE_ROOT_ID / NOTION_ARCHIVE_PARENT_ID — 아카이브 위치 (선택, notion_archive 참고)
     STOCK_BOT_TOKEN      — 텔레그램 봇 (실패 알림용, 선택)
     STOCK_BOT_CHAT_ID    — 텔레그램 채팅 ID
 """
@@ -342,19 +349,66 @@ def _collect_ml():
             "fg": fg, "qqq_close": qqq_close}
 
 
-def _load_report_summary() -> str:
-    """오늘 투자 리포트 요약 로드 (없으면 빈 문자열)."""
+def _load_report_summary() -> tuple[str, str]:
+    """투자 리포트 요약 로드 → (본문, 리포트 날짜 'YYYY-MM-DD').
+
+    오늘(KST) 리포트가 없으면 가장 최근 리포트로 폴백한다 — notion 크론이
+    리포트 생성 직전에 돌거나, 주말·생성 실패로 당일 파일이 없어도
+    섹션이 영구히 '미생성'으로 비지 않도록(stale 표시는 호출부에서 처리).
+    파일이 하나도 없으면 ('', '').
+    """
     import glob
+    import re
     from pathlib import Path
+    base  = Path.home() / "reports"
     today = datetime.now(KST).strftime("%Y-%m-%d")
-    pattern = str(Path.home() / f"reports/investment-summary-{today}*.txt")
-    files = sorted(glob.glob(pattern))
-    if files:
+
+    # 오늘 리포트 우선, 없으면 전체에서 최신 (파일명 날짜 = 사전식 정렬 = 시간순)
+    todays     = sorted(glob.glob(str(base / f"investment-summary-{today}*.txt")))
+    candidates = todays or sorted(glob.glob(str(base / "investment-summary-*.txt")))
+    if not candidates:
+        return "", ""
+
+    path     = candidates[-1]
+    m        = re.search(r"investment-summary-(\d{4}-\d{2}-\d{2})", path)
+    date_str = m.group(1) if m else ""
+    try:
+        return Path(path).read_text(encoding="utf-8")[:2000], date_str
+    except Exception:
+        return "", date_str
+
+
+def _recent_report_summaries(days: int = 5) -> list[tuple[str, str]]:
+    """최근 `days` 일 이내의 실제 리포트 요약 파일들 → [(date, text)] (오래된→최신).
+
+    notion 크론은 평일만 돌지만 리포트는 매일(주말 포함) 생성되므로, 매 실행마다
+    최근 며칠치를 멱등 재아카이빙해 주말·누락 회차 갭을 메운다. **실제 존재하는
+    파일만** 대상 — 폴백/stale 재아카이빙 없음(오래된 리포트를 매일 다시 박지 않음).
+    """
+    import glob
+    import re
+    from pathlib import Path
+    base   = Path.home() / "reports"
+    today  = datetime.now(KST).date()
+    cutoff = today - timedelta(days=days)
+    out: list[tuple[str, str]] = []
+    for path in sorted(glob.glob(str(base / "investment-summary-*.txt"))):
+        m = re.search(r"investment-summary-(\d{4}-\d{2}-\d{2})", path)
+        if not m:
+            continue
         try:
-            return Path(files[-1]).read_text(encoding="utf-8")[:2000]
+            d = datetime.strptime(m.group(1), "%Y-%m-%d").date()
+        except ValueError:
+            continue
+        if d < cutoff or d > today:
+            continue
+        try:
+            text = Path(path).read_text(encoding="utf-8")[:4000]
         except Exception:
-            pass
-    return ""
+            continue
+        if text.strip():
+            out.append((m.group(1), text))
+    return out
 
 
 # ── 블록 빌드 ──────────────────────────────────────────────────────────────────
@@ -366,7 +420,7 @@ def build_blocks() -> list[dict]:
 
     # ── 헤더 ─────────────────────────────────────────────────────────────────
     blocks += [
-        _callout(f"📡 stock-report 자동 동기화  •  {now_kst}  •  매일 07:30 KST",
+        _callout(f"📡 stock-report 자동 동기화  •  {now_kst}  •  평일 08:30 KST",
                  "📊", "blue_background"),
         _divider(),
     ]
@@ -543,16 +597,22 @@ def build_blocks() -> list[dict]:
     # ── 오늘의 투자 리포트 ─────────────────────────────────────────────────────
     blocks.append(_h2("📰 오늘의 투자 리포트"))
     try:
-        summary = _load_report_summary()
+        summary, report_date = _load_report_summary()
+        today_kst = datetime.now(KST).strftime("%Y-%m-%d")
         if summary:
             lines = [l for l in summary.strip().split("\n") if l.strip()]
-            blocks.append(_toggle("📄 전체 요약 (클릭 펼치기)",
-                                  [_para(l) for l in lines[:40]]))
-            logger.info("리포트 요약 추가 완료 (%d줄)", len(lines))
+            label = "📄 전체 요약 (클릭 펼치기)"
+            # 당일 리포트가 아직이면 최근 리포트임을 명시 (오해 방지)
+            if report_date and report_date != today_kst:
+                blocks.append(_callout(
+                    f"당일({today_kst}) 리포트 생성 전 — 최근 {report_date} 리포트 표시",
+                    "🕒", "yellow_background"))
+                label = f"📄 {report_date} 요약 (클릭 펼치기)"
+            blocks.append(_toggle(label, [_para(l) for l in lines[:40]]))
+            logger.info("리포트 요약 추가 완료 (%d줄, %s)", len(lines), report_date or "?")
         else:
-            today_kst = datetime.now(KST).strftime("%Y-%m-%d")
             blocks.append(_callout(
-                f"오늘 리포트 미생성 ({today_kst}) — 크론 23:00 UTC 이후 자동 생성됩니다",
+                f"리포트 없음 ({today_kst}) — 크론 23:00 UTC 이후 자동 생성됩니다",
                 "📭", "gray_background"))
     except Exception as e:
         logger.warning("리포트 로드 실패: %s", e)
@@ -573,6 +633,30 @@ def main() -> int:
         return 1
 
     blocks = build_blocks()
+
+    # ── 일일 리포트 아카이브 (월/주 계층 누적) ──────────────────────────────────
+    # 대시보드와 완전 독립: 여기서 예외가 나도 대시보드 동기화는 계속한다(best-effort).
+    try:
+        import notion_archive
+        recent = _recent_report_summaries(days=5)   # 주말·누락 회차 갭까지 멱등 보강
+        archive_root_id = None
+        for rdate, rtext in recent:
+            archive_root_id = notion_archive.archive_report(rdate, rtext)
+        if archive_root_id is None:
+            # 최근 리포트가 없어도 루트는 보장(대시보드 링크용)
+            archive_root_id = notion_archive.archive_report("", "")
+        if recent:
+            logger.info("아카이브 처리: 최근 %d일치 리포트", len(recent))
+        if archive_root_id:
+            # footer(마지막 divider+회색 para) 바로 위에 아카이브 링크 삽입
+            blocks[-2:-2] = [
+                _divider(),
+                _para("📚 과거 리포트 아카이브 (월/주별)", bold=True),
+                notion_archive.link_to_page(archive_root_id),
+            ]
+    except Exception as e:
+        logger.warning("리포트 아카이브 실패(대시보드는 계속): %s", e)
+
     ok = update_page(DASHBOARD_PAGE_ID, blocks)
 
     if ok:

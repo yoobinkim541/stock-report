@@ -133,6 +133,38 @@ def _history_cached(symbol: str, period: str = "1y"):
     return hist if hist is not None else pd.DataFrame()
 
 
+def fetch_kospi_stats(since_date: str | None = None, symbol: str = "^KS11") -> dict:
+    """KOSPI(기본 ^KS11) 누적수익률(%)·MDD(양수 크기) — since_date~오늘 구간.
+
+    모의 포트폴리오의 '지수 대비 아웃퍼폼 + MDD≤지수' 목표 가시화용.
+    실패/데이터부족 시 {"return_pct": None, "mdd": None}.
+    """
+    import pandas as pd
+    hist = _history_cached(symbol, "1y")
+    if hist is None or getattr(hist, "empty", True) or "Close" not in getattr(hist, "columns", []):
+        return {"return_pct": None, "mdd": None}
+    close = hist["Close"].dropna()
+    if since_date:
+        try:
+            cutoff = pd.Timestamp(since_date).date()
+            close = close[[d.date() >= cutoff for d in close.index]]
+        except Exception:
+            pass
+    if len(close) < 2:
+        return {"return_pct": None, "mdd": None}
+    ret = (float(close.iloc[-1]) / float(close.iloc[0]) - 1.0) * 100.0
+    peak, mdd = -1e18, 0.0
+    for v in close.values:
+        v = float(v)
+        if v > peak:
+            peak = v
+        if peak > 0:
+            dd = (peak - v) / peak
+            if dd > mdd:
+                mdd = dd
+    return {"return_pct": round(ret, 2), "mdd": round(mdd, 4)}
+
+
 _LAST_PRICES_FILE = os.path.expanduser("~/.cache/barbell_last_prices.json")
 
 

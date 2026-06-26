@@ -48,13 +48,29 @@ DEFAULT_SCORE_PARAMS = {
     "w_win": 0.40, "w_rr": 0.30, "w_rsi": 0.15, "w_dd": 0.15,
     "enter_threshold": 0.62, "wait_threshold": 0.40,
 }
+# 안전 범위 — 캘리브레이션/적응 산출물이 손상돼도 극단값이 라이브 진입 점수에 주입되지 않도록 클램프.
+SCORE_PARAM_BOUNDS = {
+    "w_win": (0.0, 1.0), "w_rr": (0.0, 1.0), "w_rsi": (0.0, 0.5), "w_dd": (0.0, 0.5),
+    "enter_threshold": (0.45, 0.85), "wait_threshold": (0.20, 0.60),
+}
 _score_params_cache: dict | None = None
 _score_params_ts: float = 0.0
 _SCORE_PARAMS_TTL = 6 * 3600   # 상시 실행 봇이 월간 재캘리브레이션을 재시작 없이 반영
 
 
+def _clamp_score_params(p: dict) -> dict:
+    out = dict(p)
+    for k, (lo, hi) in SCORE_PARAM_BOUNDS.items():
+        if k in out:
+            try:
+                out[k] = min(hi, max(lo, float(out[k])))
+            except (TypeError, ValueError):
+                out[k] = DEFAULT_SCORE_PARAMS[k]
+    return out
+
+
 def get_score_params() -> dict:
-    """캘리브레이션된 점수 파라미터 로드 (없으면 기본값, 6시간 TTL 캐시)."""
+    """캘리브레이션된 점수 파라미터 로드 (없으면 기본값, 6시간 TTL 캐시, 안전범위 클램프)."""
     global _score_params_cache, _score_params_ts
     import time as _time
     if _score_params_cache is not None and _time.time() - _score_params_ts < _SCORE_PARAMS_TTL:
@@ -67,6 +83,20 @@ def get_score_params() -> dict:
             logger.info("캘리브레이션 점수 파라미터 적용: %s", params)
     except Exception as e:
         logger.warning("점수 파라미터 로드 실패 — 기본값 사용: %s", e)
+    params = _clamp_score_params(params)   # 극단값 차단(안전망 — 정상 grid 값엔 무영향)
+
+    # 적응형 shadow threshold (라이브 outcome 학습) — **옵트인 시에만** 반영(기본 off → 라이브 불변).
+    if os.getenv("ADAPTIVE_ENTRY_ENABLED", "false").lower() == "true":
+        try:
+            shadow = Path(os.path.expanduser("~/reports/ml-cache/entry_score_params_adaptive.json"))
+            if shadow.exists():
+                sj = json.loads(shadow.read_text())
+                if "enter_threshold" in sj:
+                    params = _clamp_score_params({**params, "enter_threshold": float(sj["enter_threshold"])})
+                    logger.info("적응형 enter_threshold 적용(opt-in): %.3f", params["enter_threshold"])
+        except Exception as e:
+            logger.warning("적응형 shadow 로드 실패 — 캘리브레이션 값 유지: %s", e)
+
     _score_params_cache = params
     _score_params_ts = _time.time()
     return params
