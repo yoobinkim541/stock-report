@@ -110,6 +110,7 @@ crons/news_spike_detector.py (크론 매 1분)
 | `crons/weekly_kr_ranker_retrain.py` | KR 전용 랭커(KOSPI 대비 초과수익) 주간 재학습 (Purged WF·OOS IC) | 토 03:30 UTC |
 | `crons/longterm_adaptive_eval.py` | 장기 전략 ★목표(vs QQQ 아웃퍼폼·MDD≤지수) 라이브 스코어카드 + 악화 시 보수적 레버리지 축소 shadow 권고 | 토 04:00 UTC |
 | `crons/leverage_structural_eval.py` | Tier3 구조적 레버리지 ★게이트 재검증 (`backtest/leverage_structural_backtest` SPY+QQQ × 그리드 낙폭예산·DSR·PBO) — GO 시 권고 레버리지 shadow (표시·수동, 자동집행 0) | 토 04:15 UTC |
+| `crons/factor_premium_eval.py` | Tier4 팩터 프리미엄 틸트 ★게이트 재검증 (`backtest/factor_premium_backtest` 롱온리 ETF vs SPY DSR 다중검정·약세슬라이스) — GO 팩터만 shadow. **현재 NO-GO**(밸류·사이즈·퀄리티·최소변동 SPY 미돌파, 모멘텀=SPMO 기보유) | 토 04:45 UTC |
 | `crons/advice_adaptive_eval.py` | 포트폴리오 advice 적응 평가 (paper_track A/B meta vs rule ★목적함수 → blend 신뢰도 shadow 권고) | 토 04:30 UTC |
 | `reports/source_collector.py` | 전체 소스 수집 (텔레그램 채널·FRED·국채·시장 스냅샷) → JSONL 캐시 | 매 30분 (:05/:35) |
 | `crons/paper_track.py` | MetaAllocator vs Phase 규칙 A/B 페이퍼 트레이딩 (월요일 Sharpe 비교 발송) | 평일 22:50 UTC |
@@ -240,6 +241,7 @@ crons/news_spike_detector.py (크론 매 1분)
 | `ADAPTIVE_ENTRY_ENABLED` | — | `false` (해외 진입 임계값 적응 학습 shadow 를 라이브에 반영. off면 shadow만·라이브 불변) |
 | `ADAPTIVE_LONGTERM_ENABLED` | — | `false` (장기 전략 악화 시 보수적 레버리지 축소 shadow 기록. off면 평가·권고만) |
 | `ADAPTIVE_LEVERAGE_ENABLED` | — | `false` (Tier3 구조적 레버리지 GO 권고를 shadow 기록 → `/risk` 표시. off면 게이트 평가·텔레그램만. **자동집행은 항상 없음** — 실계좌 수동) |
+| `ADAPTIVE_FACTOR_TILT_ENABLED` | — | `false` (Tier4 팩터 틸트 GO 시 보상 팩터 shadow 기록 → `/risk` 표시. 현재 게이트 NO-GO라 무기록. 자동집행 항상 없음) |
 | `TIER3_RF_FALLBACK` / `TIER3_LETF_SPREAD` / `TIER3_LETF_EXPENSE` / `TIER3_BUDGET` | — | `0.03` / `0.005` / `0.009` / `0.50` (레버리지 게이트 비용·낙폭예산 가정) |
 | `ADAPTIVE_ADVICE_ENABLED` | — | `false` (MetaAllocator A/B 우위 시 blend 신뢰도 shadow 기록. off면 평가·권고만) |
 | `SYNC_TOKEN` | — | — (portfolio_sync_server 인증) |
@@ -298,6 +300,7 @@ crons/news_spike_detector.py (크론 매 1분)
 ~/reports/ml-cache/entry_score_params_adaptive.json — 진입 임계값 적응 shadow (ADAPTIVE_ENTRY_ENABLED 시만 라이브 반영)
 ~/reports/ml-cache/longterm_policy_shadow.json   — 장기 보수적 레버리지 축소 shadow (ADAPTIVE_LONGTERM_ENABLED 시만 기록)
 ~/reports/ml-cache/structural_leverage_shadow.json — Tier3 구조적 레버리지 GO 권고 (ADAPTIVE_LEVERAGE_ENABLED 시만; /risk 표시·수동집행)
+~/reports/ml-cache/factor_tilt_shadow.json        — Tier4 팩터 틸트 GO 보상 팩터 (ADAPTIVE_FACTOR_TILT_ENABLED 시만; 현재 NO-GO라 미생성)
 ~/reports/ml-cache/advice_blend_shadow.json      — MetaAllocator blend 신뢰도 shadow (ADAPTIVE_ADVICE_ENABLED 시만 기록)
 ~/reports/ml-cache/fundamental_scores.json       — 펀더멘털 점수 7일 캐시 (랭커 틸트용)
 ~/reports/ml-cache/fundamental_snapshots.jsonl   — 펀더멘털 주간 point-in-time 스냅샷

@@ -375,6 +375,22 @@ def _structural_leverage_note() -> str:
         return ""
 
 
+def _factor_tilt_note() -> str:
+    """Tier4 게이트 GO 시 보상 팩터 (shadow·ADAPTIVE_FACTOR_TILT_ENABLED 시 기록). 없으면 "" (NO-GO 시 무표시)."""
+    try:
+        import json
+        import os
+        p = os.path.expanduser("~/reports/ml-cache/factor_tilt_shadow.json")
+        if not os.path.exists(p):
+            return ""
+        with open(p, encoding="utf-8") as f:
+            go = json.load(f).get("go_factors") or []
+        return (f"  · 보상 팩터 틸트 권고: {', '.join(go)} (게이트 GO·SPMO 모멘텀 중복주의·수동)"
+                if go else "")
+    except Exception:
+        return ""
+
+
 def format_risk_report(summary, now: str | None = None) -> str:
     """/risk 전체 리포트. summary None → 안내문."""
     if not summary:
@@ -405,6 +421,9 @@ def format_risk_report(summary, now: str | None = None) -> str:
         _sn = _structural_leverage_note()
         if _sn:
             L.append(_sn)
+        _fn = _factor_tilt_note()
+        if _fn:
+            L.append(_fn)
     if summary.get("factor_caveat"):
         L.append(f"  ({summary['factor_caveat']})")
     L += ["", f"※ {summary.get('caveat','')}"]
