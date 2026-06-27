@@ -53,6 +53,7 @@ from barbell_strategy import (
     BULL_PHASES, BEAR_PHASES,
     TELEGRAM_TOKEN, TELEGRAM_CHAT_ID,
 )
+from ml import risk_model
 from bot.attachment_parser import (
     extract_text_from_pdf, extract_text_from_image,
     parse_portfolio_from_text, parse_sells_from_text,
@@ -188,6 +189,7 @@ BOT_COMMANDS = [
     {"command": "sim",            "description": "시장 상태 시뮬레이션"},
     {"command": "portfolio",      "description": "포트폴리오 실시간 현황"},
     {"command": "rebalance",      "description": "리밸런싱 계산기"},
+    {"command": "risk",           "description": "포트폴리오 위험 분석 — 변동성·위험기여·유효분산·팩터·성장최적 레버리지"},
     {"command": "history",        "description": "성과 히스토리 (1d/7d/30d/90d)"},
     {"command": "sgov",           "description": "SGOV 실탄 상태"},
     {"command": "dca",            "description": "오늘 DCA 배분"},
@@ -229,7 +231,7 @@ BOT_COMMAND_ALIASES = {
 
 HELP_SECTIONS = [
     ("시장", ["status", "summary", "phase", "report", "sim", "accum", "earnings"]),
-    ("포트폴리오", ["portfolio", "rebalance", "history", "sgov"]),
+    ("포트폴리오", ["portfolio", "rebalance", "risk", "history", "sgov"]),
     ("DCA·주문", ["dca", "order"]),
     ("보유·세금", ["holding", "tax"]),
     ("AI·알림", ["ask", "alert"]),
@@ -588,6 +590,28 @@ def cmd_phase(d: dict) -> str:
     return "\n".join(lines)
 
 
+def _risk_weights(d: dict) -> dict:
+    """d["portfolio"] → {ticker: USD 비중} (레버리지 병합된 holdings·prices 기반)."""
+    port = d.get("portfolio") or {}
+    if port.get("data_missing"):
+        return {}
+    holdings = port.get("holdings") or {}
+    prices = port.get("prices") or {}
+    vals = {t: float(holdings[t]) * float(prices.get(t, 0) or 0)
+            for t in holdings if (holdings.get(t) or 0) > 0}
+    total = sum(vals.values())
+    return {t: v / total for t, v in vals.items() if v > 0} if total > 0 else {}
+
+
+def cmd_risk(d: dict) -> str:
+    """포트폴리오 위험 분석 — 변동성·위험기여·유효분산·팩터노출 + 성장최적 레버리지 (owner 전용·표시)."""
+    w = _risk_weights(d)
+    if not w:
+        return "🛡 리스크 분석 — 포트폴리오 데이터 없음"
+    summary = risk_model.portfolio_risk_summary(w)
+    return risk_model.format_risk_report(summary, now=d.get("fetched_at"))
+
+
 def cmd_portfolio(d: dict) -> str:
     port = d["portfolio"]
     fx   = d["exchange_rate"]
@@ -647,6 +671,10 @@ def cmd_portfolio(d: dict) -> str:
             lines.append(
                 f"  {h['ticker']:<6}  ${val:>7,.0f}  {sign}{abs(ret):5.1f}%"
             )
+
+    _ro = risk_model.risk_oneliner(_risk_weights(d))
+    if _ro:
+        lines += ["", _ro]
 
     div = d["qqqi_div"]
     lines += [
@@ -743,10 +771,12 @@ def cmd_history(d: dict) -> str:
 
 
 def cmd_rebalance(d: dict) -> str:
-    """스마트 리밸런싱 — 안전마진 + 종목 비중 + DCA 조정."""
-    return build_smart_report(
+    """스마트 리밸런싱 — 안전마진 + 종목 비중 + DCA 조정 + 달러 vs 리스크 비중."""
+    base = build_smart_report(
         d["portfolio"], d["market_type"], d["phase_key"], d["exchange_rate"]
     )
+    tbl = risk_model.dollar_vs_risk_table(_risk_weights(d))
+    return base + ("\n\n" + tbl if tbl else "")
 
 
 def cmd_sim(chat_id: str, args: list):
@@ -1408,13 +1438,14 @@ _MARKET_CMDS = {
     "/sgov":      lambda d, _: cmd_sgov(d),
     "/history":   lambda d, _: cmd_history(d),
     "/rebalance": lambda d, _: cmd_rebalance(d),
+    "/risk":      lambda d, _: cmd_risk(d),
 }
 
 
 def _dispatch_market(cmd: str, chat_id: str):
     typing(chat_id)
     try:
-        if cmd == "/portfolio":
+        if cmd in ("/portfolio", "/risk"):
             refresh_portfolio_prices()
             d = fetch_market(force=True)
         else:
