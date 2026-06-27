@@ -183,11 +183,9 @@ def _cleanup_pid_file():
 
 BOT_COMMANDS = [
     {"command": "help",           "description": "명령어 목록"},
-    {"command": "status",         "description": "Phase + 핵심 수치 (5분 캐시)"},
-    {"command": "summary",        "description": "한 줄 빠른 현황 — Phase·QQQ·총액·F&G"},
-    {"command": "phase",          "description": "Phase 미터 + 행동 지침"},
+    {"command": "status",         "description": "현황 — Phase·QQQ·총액·F&G + 핵심 수치 (신선도 표기)"},
+    {"command": "phase",          "description": "Phase 미터 + 행동 지침 (/phase sim = 시장 시뮬)"},
     {"command": "report",         "description": "전체 바벨 리포트 (실시간)"},
-    {"command": "sim",            "description": "시장 상태 시뮬레이션"},
     {"command": "portfolio",      "description": "포트폴리오 실시간 현황"},
     {"command": "rebalance",      "description": "리밸런싱 계산기"},
     {"command": "risk",           "description": "포트폴리오 위험 분석 — 변동성·위험기여·유효분산·팩터·성장최적 레버리지"},
@@ -228,6 +226,8 @@ BOT_COMMAND_ALIASES = {
     # 예전 단독 명령어는 하위 호환만 유지하고 /holding 하위 명령으로 합침
     "/dividend": "/holding dividend",
     "/apply_snapshot": "/holding apply",
+    "/summary": "/status",        # /status 가 동일 정보(상세) 포함 — 한줄요약 병합
+    "/sim": "/phase sim",         # 시장 시뮬을 /phase 하위로 병합
 }
 
 
@@ -1434,8 +1434,6 @@ def _infer_internal_command(text: str) -> str | None:
 _MARKET_CMDS = {
     "/help":      lambda d, _: cmd_help(),
     "/status":    lambda d, _: cmd_status(d),
-    "/summary":   lambda d, _: cmd_summary(d),
-    "/phase":     lambda d, _: cmd_phase(d),
     "/portfolio": lambda d, _: cmd_portfolio(d),
     "/dca":       lambda d, _: cmd_dca(d),
     "/sgov":      lambda d, _: cmd_sgov(d),
@@ -1755,6 +1753,20 @@ def _dispatch_usmock(chat_id: str, args: list):
         logger.exception("cmd_usmock")
 
 
+def _dispatch_phase(chat_id: str, args: list):
+    """/phase (실시간 Phase 미터) + /phase sim [모드] (시장 시뮬 — 구 /sim 병합)."""
+    typing(chat_id)
+    try:
+        if args and str(args[0]).lower() == "sim":
+            send(chat_id, build_simulation_report(args[1] if len(args) > 1 else "bull2"))
+            return
+        d = fetch_market()
+        send(chat_id, cmd_phase(d).rstrip() + "\n" + freshness_note(d.get("fetched_ts")))
+    except Exception as e:
+        send(chat_id, f"❌ 오류: {e}")
+        logger.exception("dispatch /phase")
+
+
 _COMMAND_HANDLERS = {
     "/report": _dispatch_report,
     "/mlreport": _dispatch_mlreport,
@@ -1765,7 +1777,6 @@ _COMMAND_HANDLERS = {
     "/intraday":  _dispatch_intraday,
     "/alert": lambda chat_id, args: _dispatch_with_typing(cmd_alert, chat_id, args),
     "/dividend": lambda chat_id, args: _dispatch_with_send(cmd_dividend, chat_id, args),
-    "/sim": lambda chat_id, args: _dispatch_with_typing(cmd_sim, chat_id, args),
     "/holding": lambda chat_id, args: _dispatch_with_send(cmd_holding, chat_id, args),
     "/accum": lambda chat_id, args: _dispatch_with_send(cmd_accum, chat_id, args),
     "/earnings": lambda chat_id, args: _dispatch_with_send(cmd_earnings, chat_id, args),
@@ -1784,6 +1795,7 @@ _COMMAND_HANDLERS = {
 }
 for _cmd in _MARKET_CMDS:
     _COMMAND_HANDLERS[_cmd] = lambda chat_id, args, cmd=_cmd: _dispatch_market(cmd, chat_id)
+_COMMAND_HANDLERS["/phase"] = _dispatch_phase   # 인자 인식(/phase sim) — _MARKET_CMDS 우회
 
 
 def _parse_command(text: str) -> tuple[str, list]:
