@@ -46,6 +46,17 @@ def test_backfill_skips_immature():
     assert L.backfill_outcomes(led, price_fn=lambda t, d, h: None) == 0   # 미성숙
 
 
+def test_backfill_skips_failed_orders():
+    """주문 실패(ok=False) 결정은 forward 보상 산출 제외 — 팬텀 트레이드 오염 방지(S6)."""
+    led = _FakeLedger([
+        {"id": 1, "ticker": "A", "date": "2026-01-01", "side": "편입", "ok": False},
+        {"id": 2, "ticker": "B", "date": "2026-01-01", "side": "편입", "ok": True},
+    ])
+    added = L.backfill_outcomes(led, price_fn=lambda t, d, h: (0.10, 0.04, 0.05, 0.03))
+    assert added == 1                                    # 집행건만
+    assert [o["decision_id"] for o in led.outcomes] == [2]
+
+
 def test_fit_policy_positive_correlation_dominates():
     rows = [{"side": "편입", "features": {"value": v}, "fwd_excess": v * 0.1}
             for v in (0.1, 0.3, 0.5, 0.7, 0.9)]

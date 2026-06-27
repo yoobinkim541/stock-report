@@ -126,6 +126,8 @@ def backfill_outcomes(ledger, *, horizon: int = HORIZON, price_fn=None) -> int:
         side = d.get("side")
         if side not in ("편입", "증액", "퇴출", "감액"):
             continue
+        if d.get("ok") is False:   # ★미집행(주문실패) 결정은 학습 제외 — 팬텀 트레이드 오염 방지(S6)
+            continue
         res = price_fn(d.get("ticker", ""), d.get("date", ""), horizon)
         if res is None:
             continue

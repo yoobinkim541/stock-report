@@ -36,13 +36,15 @@ _TOKEN_URL = "/oauth2/tokenP"
 _HASHKEY_URL = "/uapi/hashkey"
 _ORDER_URL = "/uapi/overseas-stock/v1/trading/order"
 _BALANCE_URL = "/uapi/overseas-stock/v1/trading/inquire-balance"
+_PRESENT_BALANCE_URL = "/uapi/overseas-stock/v1/trading/inquire-present-balance"
 _PRICE_URL = "/uapi/overseas-price/v1/quotations/price"
 
-# 모의 해외 TR_ID (라이브 스모크서 확정 — 미국 기준)
-_TR_BUY = "VTTT1002U"     # 미국 매수(모의)
-_TR_SELL = "VTTT1001U"    # 미국 매도(모의)
-_TR_BALANCE = "VTTS3012R"  # 해외 잔고(모의)
-_TR_PRICE = "HHDFS00000300"  # 해외 현재가(모의/실전 공용)
+# 모의 해외 TR_ID — ★S6 라이브 스모크서 잔고·현재가·present-balance 확정(2026-06-27). 주문은 미확정.
+_TR_BUY = "VTTT1002U"     # 미국 매수(모의) — 라이브 미확정
+_TR_SELL = "VTTT1001U"    # 미국 매도(모의) — 라이브 미확정
+_TR_BALANCE = "VTTS3012R"  # 해외 잔고(모의) — ✅ 라이브 확정 (포지션·P&L)
+_TR_PRESENT = "VTRP6504R"  # 해외 체결기준현재잔고(모의) — ✅ 라이브 확정 (예수금·NAV·환율)
+_TR_PRICE = "HHDFS00000300"  # 해외 현재가(모의/실전 공용) — ✅ 라이브 확정 (레이트리밋 有→재시도)
 
 _TOKEN_FILE = os.path.expanduser("~/.cache/kis_mock_token.json")
 _token_cache: dict = {"token": None, "exp": 0.0}
@@ -190,27 +192,84 @@ def _headers(tr_id: str, extra: dict | None = None) -> dict | None:
     return h
 
 
+def _http_get(url: str, headers: dict, params: dict, *, retries: int = 2) -> dict | None:
+    """모의 GET 단일 통로 — 도메인 하드락 + 간헐 500(레이트리밋) 0.5s 간격 재시도. 실패 시 None.
+
+    ★S6 확정: openapivts(모의) 서버는 price·balance·present-balance 전반에 간헐 500 → 재시도 필수.
+    (주문 POST 는 재시도 금지 — 중복체결 위험. GET 조회만.)
+    """
+    _assert_mock_url(url)
+    last_err = None
+    for attempt in range(retries + 1):
+        try:
+            r = requests.get(url, headers=headers, params=params, timeout=15, allow_redirects=False)
+            r.raise_for_status()
+            return r.json()
+        except Exception as e:
+            last_err = e
+            if attempt < retries:
+                time.sleep(0.5)
+    logger.warning("KIS 모의 GET 실패 [%s] (재시도 %d회): %s", url.rsplit("/", 1)[-1], retries, last_err)
+    return None
+
+
 # ── 현재가 ────────────────────────────────────────────────────────────────────
 
-def get_price(symbol: str, excd: str | None = None) -> float | None:
+def get_price(symbol: str, excd: str | None = None, *, retries: int = 2) -> float | None:
+    """해외 현재가. ★S6 확정: 모의 quote 엔드포인트는 간헐 500(레이트리밋) → _http_get 재시도."""
     excd = excd or _PRICE_EXCD.get(exchange_of(symbol), "NAS")
     h = _headers(_TR_PRICE)
     if not h:
         return None
-    url = _MOCK_BASE + _PRICE_URL
-    _assert_mock_url(url)
-    try:
-        r = requests.get(url, headers=h, params={"AUTH": "", "EXCD": excd, "SYMB": symbol.upper()},
-                         timeout=15, allow_redirects=False)
-        r.raise_for_status()
-        last = (r.json().get("output") or {}).get("last")
-        return float(last) if last not in (None, "", "0") else None
-    except Exception as e:
-        logger.warning("KIS 모의 현재가 실패 [%s]: %s", symbol, e)
+    j = _http_get(_MOCK_BASE + _PRICE_URL, h,
+                  {"AUTH": "", "EXCD": excd, "SYMB": symbol.upper()}, retries=retries)
+    if not j:
         return None
+    last = (j.get("output") or {}).get("last")
+    return float(last) if last not in (None, "", "0") else None
 
 
 # ── 잔고 ──────────────────────────────────────────────────────────────────────
+
+def present_balance() -> dict:
+    """해외 체결기준현재잔고(VTRP6504R) — 외화 주문가능액·NAV·환율. ★S6 라이브 확정 필드.
+
+    반환 {ok, cash_usd, nav_usd, krw_asset, fx, pnl, raw}:
+      cash_usd  외화 주문가능금액(output3.frcr_use_psbl_amt) — 환전/통합증거금-USD 전이면 0
+      krw_asset 총자산(output3.tot_asst_amt) — 모의계좌 KRW 시드
+      nav_usd   tot_asst_amt / fx (USD 환산 총자산) — fx 있을 때만
+      fx        USD 환율(output2 USD행.frst_bltn_exrt)
+    """
+    blank = {"ok": False, "cash_usd": None, "nav_usd": None, "krw_asset": None,
+             "fx": None, "pnl": None, "raw": None}
+    cano, prdt = account()
+    if not cano:
+        logger.error("KOREA_MOCK_ACCOUNT_NO 미설정 — present-balance 차단(fail-closed)")
+        return blank
+    h = _headers(_TR_PRESENT)
+    if not h:
+        return blank
+    params = {"CANO": cano, "ACNT_PRDT_CD": prdt, "WCRC_FRCR_DVSN_CD": "02",
+              "NATN_CD": "000", "TR_MKET_CD": "00", "INQR_DVSN_CD": "00"}
+    res = _http_get(_MOCK_BASE + _PRESENT_BALANCE_URL, h, params)
+    if res is None:
+        return blank
+    o3 = res.get("output3") or {}
+    cash_usd = _f(o3, "frcr_use_psbl_amt")
+    krw_asset = _f(o3, "tot_asst_amt")
+    pnl = _f(o3, "tot_evlu_pfls_amt")
+    fx = None
+    for row in res.get("output2") or []:
+        if (row.get("crcy_cd") or "").upper() == "USD":
+            fx = _f(row, "frst_bltn_exrt") or None
+            if not cash_usd:
+                cash_usd = _f(row, "frcr_dncl_amt_2")   # USD 예수금 폴백
+            break
+    nav_usd = (krw_asset / fx) if (krw_asset and fx) else None
+    return {"ok": str(res.get("rt_cd", "")) == "0", "cash_usd": cash_usd or None,
+            "nav_usd": nav_usd, "krw_asset": krw_asset or None, "fx": fx,
+            "pnl": pnl, "raw": res}
+
 
 def get_balance() -> dict:
     """해외 모의계좌 잔고. 필드명은 라이브 스모크 전 미확정 → graceful(None+키 로깅).
@@ -224,16 +283,10 @@ def get_balance() -> dict:
     h = _headers(_TR_BALANCE)
     if not h:
         return {"ok": False, "positions": {}, "pos_value": 0.0, "cash_usd": None, "nav": None, "raw": None}
-    url = _MOCK_BASE + _BALANCE_URL
-    _assert_mock_url(url)
     params = {"CANO": cano, "ACNT_PRDT_CD": prdt, "OVRS_EXCG_CD": "NASD",
               "TR_CRCY_CD": "USD", "CTX_AREA_FK200": "", "CTX_AREA_NK200": ""}
-    try:
-        r = requests.get(url, headers=h, params=params, timeout=15, allow_redirects=False)
-        r.raise_for_status()
-        res = r.json()
-    except Exception as e:
-        logger.warning("KIS 모의 잔고 실패: %s", e)
+    res = _http_get(_MOCK_BASE + _BALANCE_URL, h, params)
+    if res is None:
         return {"ok": False, "positions": {}, "pos_value": 0.0, "cash_usd": None, "nav": None, "raw": None}
     positions = {}
     for it in res.get("output1", []) or []:
@@ -246,17 +299,17 @@ def get_balance() -> dict:
             "pnl": _f(it, "frcr_evlu_pfls_amt"),
         }
     pos_value = sum(p["value"] for p in positions.values())
-    out2 = res.get("output2") or {}
-    nav = _f(out2, "tot_evlu_pfls_amt") or _f(out2, "frcr_pchs_amt1")
-    cash = _f(out2, "frcr_dncl_amt1") or _f(out2, "frcr_drwg_psbl_amt1")
-    if not nav and not cash:
-        logger.warning("KIS 모의 NAV/현금 필드 미확정 — output2 키: %s", list(out2.keys()))
-    if not cash and nav:
+    # NAV·현금은 present-balance(VTRP6504R)에서 — ★S6 확정. VTTS3012R output2 는 P&L 위주라 부정확.
+    pb = present_balance()
+    cash = pb.get("cash_usd")
+    nav = pb.get("nav_usd")
+    if nav is None:
+        nav = (pos_value + cash) if cash is not None else (pos_value or None)
+    if cash is None and nav is not None:
         cash = max(0.0, nav - pos_value)
-    elif not nav and cash:
-        nav = pos_value + cash
     return {"ok": True, "positions": positions, "pos_value": pos_value,
-            "cash_usd": cash or None, "nav": nav or None, "raw": res}
+            "cash_usd": cash, "nav": nav, "krw_asset": pb.get("krw_asset"),
+            "fx": pb.get("fx"), "raw": res}
 
 
 def _f(d: dict, key: str) -> float:
