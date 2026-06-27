@@ -254,12 +254,7 @@ def summarize(track: dict) -> str | None:
     return "\n".join(lines)
 
 
-def _send(text: str) -> None:
-    token, chat = os.getenv("STOCK_BOT_TOKEN"), os.getenv("STOCK_BOT_CHAT_ID")
-    if not token or not chat:
-        return
-    import notify
-    notify.send_telegram(text, token=token, chat_id=chat, timeout=15)
+from lib.cron_common import send_cron_telegram
 
 
 def main() -> int:
@@ -280,7 +275,7 @@ def main() -> int:
     if datetime.now(KST).weekday() == 0:
         s = summarize(track)
         if s:
-            _send(s)
+            send_cron_telegram(s)
             logger.info("A/B 요약 발송")
     return 0
 

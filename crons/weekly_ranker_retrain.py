@@ -15,7 +15,7 @@ import sys
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-import notify
+from lib.cron_common import send_cron_telegram
 
 from dotenv import load_dotenv
 load_dotenv()
@@ -25,13 +25,6 @@ warnings.filterwarnings("ignore")
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 logger = logging.getLogger(__name__)
-
-
-def _send(text: str) -> None:
-    token, chat = os.getenv("STOCK_BOT_TOKEN"), os.getenv("STOCK_BOT_CHAT_ID")
-    if not token or not chat:
-        return
-    notify.send_telegram(text, token=token, chat_id=chat, timeout=15)
 
 
 def main() -> int:
@@ -59,12 +52,12 @@ def main() -> int:
             f"상위10% 초과수익: {result.oos_top_decile_ret*100:+.1f}%",
             "⚠️ WF IC < 0.02 지속 시 DCA 틸트 비중 축소 검토",
         ])
-        _send(msg)
+        send_cron_telegram(msg)
         logger.info("재학습·보고 완료 (WF mean IC=%s)", mean_ic)
         return 0
     except Exception as e:
         logger.exception("주간 재학습 실패")
-        _send(f"❌ 랭커 주간 재학습 실패: {e}")
+        send_cron_telegram(f"❌ 랭커 주간 재학습 실패: {e}")
         return 1
 
 

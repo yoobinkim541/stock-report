@@ -16,7 +16,7 @@ import sys
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-import notify
+from lib.cron_common import send_cron_telegram
 
 from dotenv import load_dotenv
 load_dotenv()
@@ -28,11 +28,6 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(mess
 logger = logging.getLogger(__name__)
 
 
-def _send(text: str) -> None:
-    token, chat = os.getenv("STOCK_BOT_TOKEN"), os.getenv("STOCK_BOT_CHAT_ID")
-    if not token or not chat:
-        return
-    notify.send_telegram(text, token=token, chat_id=chat, timeout=15)
 
 
 def main() -> int:
@@ -64,11 +59,11 @@ def main() -> int:
             "⚠️ KR 데이터 한계(섹터/옵션/13F 부족) — IC 변동 클 수 있음",
         ] if x)
         logger.info(msg)
-        _send(msg)
+        send_cron_telegram(msg)
         return 0
     except Exception as e:
         logger.exception("KR 랭커 재학습 실패")
-        _send(f"⚠️ KR 랭커 주간 재학습 실패: {e}")
+        send_cron_telegram(f"⚠️ KR 랭커 주간 재학습 실패: {e}")
         return 1
 
 
