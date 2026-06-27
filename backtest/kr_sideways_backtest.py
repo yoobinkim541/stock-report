@@ -107,6 +107,13 @@ def run(start="2010-01-01", symbol="^KS11"):
     fp_cost = float((t_ret[fp_mask] - b_ret[fp_mask]).sum()) * 100
 
     side_days = int(sideways.sum())
+    from ml.validation import validate_strategy
+    _sweep_pp = [sens[k]["sharpe"] / (252 ** 0.5) for k in sens]   # 비용스윕 = 3 trials
+    _validation = validate_strategy(
+        treat_nav.pct_change().dropna(),
+        benchmark_returns=base_nav.pct_change().dropna(),
+        n_trials=3, sr_variance=float(pd.Series(_sweep_pp).var(ddof=1)),
+    )
     return {
         "symbol": symbol,
         "period": f"{close.index[0].date()}~{close.index[-1].date()} ({len(close)}d)",
@@ -115,6 +122,7 @@ def run(start="2010-01-01", symbol="^KS11"):
         "treatment_cash_in_sideways": tm,
         "cost_sensitivity": sens,
         "objective_treat_vs_base": (None if obj is None else round(obj, 4)),
+        "validation": _validation,
         "sideways_subperiod": {"baseline_ret": round(sub_base, 1), "treatment_ret": round(sub_treat, 1)},
         "false_positive": {"days": int(false_pos.sum()), "tilt_cost_pct": round(fp_cost, 2)},
         "verdict": _verdict(bm, tm, sens, sub_base, sub_treat),

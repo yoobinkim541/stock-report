@@ -3,6 +3,7 @@
 import os
 import sys
 
+import numpy as np
 import pandas as pd
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
@@ -39,6 +40,20 @@ def test_cash_in_sideways_cuts_drawdown():
     base_mdd = reward.max_drawdown(list(_simulate(close, base, 0, 0).values))
     treat_mdd = reward.max_drawdown(list(_simulate(close, treat, 0, 0).values))
     assert treat_mdd < base_mdd
+
+
+def test_run_includes_validation(monkeypatch):
+    """run() 산출물에 Tier2 'validation' 필드(psr·dsr·n_trials) 배선 확인 (무네트워크·_fetch 모킹)."""
+    import kr_sideways_backtest as kr
+    idx = pd.bdate_range("2015-01-01", periods=800)
+    rng = np.random.default_rng(3)
+    prices = pd.Series(100 * np.cumprod(1 + rng.normal(0.0003, 0.01, 800)), index=idx)
+    monkeypatch.setattr(kr, "_fetch", lambda *a, **k: prices)
+    res = kr.run()
+    assert res.get("validation") is not None
+    val = res["validation"]
+    assert 0.0 <= val["psr"] <= 1.0
+    assert val["n_trials"] == 3
 
 
 if __name__ == "__main__":

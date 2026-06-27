@@ -81,6 +81,7 @@ def run(start="2014-01-01"):
     import pandas as pd
     from ml.regime_classifier import regime_series, rolling_drawdown
     from ml.adaptive import reward
+    from ml.validation import validate_strategy
 
     px = _fetch(["QQQ", "QLD", "TQQQ", "SHV", "QYLD"], start)
     if "QQQ" not in px or len(px) < 600:
@@ -107,8 +108,8 @@ def run(start="2014-01-01"):
     base_w = pd.DataFrame(base_w, index=px.index)
     treat_w = pd.DataFrame(treat_w, index=px.index)
 
-    base_nav, _ = _simulate(px, base_w)
-    treat_nav, _ = _simulate(px, treat_w)
+    base_nav, base_net = _simulate(px, base_w)
+    treat_nav, treat_net = _simulate(px, treat_w)
     qqq_nav = qqq / qqq.iloc[0]
 
     bm, tm, qm = _metrics(base_nav), _metrics(treat_nav), _metrics(qqq_nav)
@@ -136,6 +137,7 @@ def run(start="2014-01-01"):
         "sideways_days": side_days, "sideways_pct": round(100 * side_days / len(px), 1),
         "baseline": bm, "treatment": tm, "qqq_buyhold": qm,
         "objective_treat_vs_base": (None if obj_vs_base is None else round(obj_vs_base, 4)),
+        "validation": validate_strategy(treat_net, benchmark_returns=base_net, n_trials=1),
         "sideways_subperiod": {"baseline_ret": round(sub_base, 1), "treatment_ret": round(sub_treat, 1)},
         "false_positive": {"days": fp_days, "tilt_cost_pct": round(fp_cost, 2)},
         "verdict": _verdict(bm, tm, qm, obj_vs_base, sub_base, sub_treat),

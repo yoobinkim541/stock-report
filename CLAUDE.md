@@ -139,6 +139,7 @@ crons/news_spike_detector.py (크론 매 1분)
 | `ml/kr_policy.py` | KR 모의 선택 정책 점수 (KR ranker + 규칙 가중, Policy 클램프) | `~/reports/ml-cache/policy_kr_mock.json` |
 | `ml/regime_classifier.py` | 추세 vs 횡보 레짐 감지 (Kaufman ER·무룩어헤드·비대칭 전이, US=QQQ·KR=^KS11) — 리포트/`/status` **표시 전용, 배분 불변**. 백테스트 게이트가 US 횡보 틸트 NO-GO·KR 현금디리스크 조건부(비용반영 시 Sharpe중립) 판정 (`backtest/sideways_backtest.py`·`backtest/kr_sideways_backtest.py`) | — |
 | `ml/risk_model.py` | 포트폴리오 리스크 계측 (Aladdin식, Tier1) — Ledoit-Wolf 공분산·위험기여(Euler)·유효분산(참여비)·QQQ/TLT 팩터베타 + **성장최적 레버리지 계기판**(Kelly밴드·낙폭예산 상한·파산확률). `/risk`·`/portfolio`·`/rebalance` 노출 — **표시 전용, 배분 불변**(실제 레버리지는 Tier3 게이트 후). USD북 한정 | — |
+| `ml/validation.py` | 백테스트 검증 formalism (Tier2, López de Prado) — PSR·**Deflated Sharpe**(다중검정)·**PBO**(CSCV 과적합확률)·Purged/Embargoed CV + `validate_strategy`(벤치마크 초과PSR). `backtest/sideways_backtest`·`kr_sideways_backtest` verdict 에 배선 — **판정·표시 전용**. 공격 엔진(Tier3~6) 라이브 게이트의 통계 관문 | — |
 | `ml/deletion_risk.py` | 부실 퇴출 사전예측 (marcap 파생 피처→P(부실퇴출); 실데이터 OOS AUC 0.743·M&A 제외). 회피 통합·★RL 대상 | — (학습셋 marcap 조립) |
 | `ml/earnings_predictor.py` | 실적 서프라이즈 예측 G3 (P(beat); 서프라이즈 지속성·모멘텀·리비전 모멘텀 훅). 엣지 게이트 캐시 | `~/reports/ml-cache/earnings_predictor.pkl` |
 | `ml/earnings_move_predictor.py` | 실적후 주가반응 예측 G4 (기대 변동폭+방향확률; 방향은 무엣지·정직). 엣지 게이트 캐시 | `~/reports/ml-cache/earnings_move_predictor.pkl` |
