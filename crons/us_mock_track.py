@@ -40,9 +40,9 @@ logger = logging.getLogger(__name__)
 KST = timezone(timedelta(hours=9))
 
 # 기본 US 선택 유니버스 (시장 유니버스 — 보유종목 아님). ticker-ok
-_DEFAULT_UNIVERSE = ["MSFT", "NVDA", "GOOGL", "AAPL", "AMZN", "META", "AVGO", "ORCL",
-                     "AMD", "ADBE", "CRM", "NFLX", "QCOM", "TXN", "INTC", "CSCO",
-                     "PEP", "COST", "AMAT", "MU"]
+_DEFAULT_UNIVERSE = ["MSFT", "NVDA", "GOOGL", "AAPL", "AMZN", "META", "AVGO", "ORCL",   # ticker-ok
+                     "AMD", "ADBE", "CRM", "NFLX", "QCOM", "TXN", "INTC", "CSCO",   # ticker-ok
+                     "PEP", "COST", "AMAT", "MU"]   # ticker-ok (시장 유니버스 — 보유종목 아님)
 
 
 def _int_env(n, d):

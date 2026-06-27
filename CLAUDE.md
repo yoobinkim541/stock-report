@@ -61,6 +61,7 @@ crons/news_spike_detector.py (크론 매 1분)
 | `tax_tracker.py` | 실현손익 기록·조회·세금 계산 | `~/.local/share/stock-report/tax_records.json` |
 | `portfolio_tracker.py` | 일일 히스토리 + 배당 기록 | `~/.local/share/stock-report/` |
 | `portfolio_sync_server.py` | 외부 잔고 수신 Flask 서버 (port 8765, Bearer 인증) | — |
+| `kis_stream.py` | KIS 실시간 시세 **읽기전용** WebSocket 상시 프로세스 — 실전 WS(`ops.koreainvestment.com:21000`) 하드락·체결(가격·거래량)/호가 → 캐시 coalesce flush. `REALTIME_ENABLED` 게이트·주문경로 0(grep 강제)·재접속 백오프·watchdog 재기동 | `~/.cache/kis_realtime_quotes.json` |
 | `safe_io.py` | 멀티프로세스 안전 파일 I/O — atomic write + 교차 프로세스 쓰기 락(portfolio_snapshot writer 공용) | `<path>.lock` |
 | `notify.py` | 텔레그램 발송 단일 진실원 — send_telegram(4096 분할·토큰 마스킹)·send_photo (봇 제외 전 모듈 공용) | — |
 | `providers/market_data.py` | 시장 데이터 수집층 — fetch_qqq_data·rsi·vix·fear_greed·ma200·portfolio_value·환율·캐시·leverage_state (barbell 에서 분리, 재export 호환) | `~/.cache/barbell_anchor·last_prices.json` |
@@ -71,6 +72,8 @@ crons/news_spike_detector.py (크론 매 1분)
 | `providers/index_membership.py` | 교차시장 시점별 멤버십 — 美 S&P500(fja05680, 1996~ 생존편향0)·KR(marcap 위임). members_asof·change_events·membership_intervals(생존편향제거 마스킹) | `~/reports/ml-cache/sp500_history.csv` |
 | `providers/edgar.py` | SEC EDGAR 재무층 — companyfacts(상폐기업 재무 보존·무료) → fundamental_trends(매출YoY·순마진·부채추세, 무룩어헤드). 美 퇴출예측 피처원 | `~/reports/ml-cache/edgar/` |
 | `providers/naver_kr.py` | KR 수급(외인/기관/개인 순매수)+KOSPI200 멤버십(Naver — pykrx 공백 복구, 서버서 동작). investor_flow_features·kospi200_members. **Naver HTML=EUC-KR** | — |
+| `providers/kis_quote.py` | KIS **실계좌 시세 read-only** REST — 실전 도메인(`openapi.koreainvestment.com:9443`) 하드락·현재가·10단계 호가·거래량(KR 무료 실시간·美 신청 시). 주문 경로 0(grep 강제)·`REALTIME_ENABLED` 게이트·실전키 fail-closed | `~/.cache/kis_quote_token.json` |
+| `providers/realtime_quotes.py` | 실시간 캐시 **읽기전용 클라이언트** = 폴백 단일 seam. get_price/orderbook/best/volume, 2단 신선도(heartbeat+심볼 ts). stale·비활성·없음 → None → 소비자 yfinance 폴백. 예외 무발 | `~/.cache/kis_realtime_quotes.json` |
 
 **bot/ (텔레그램 서브커맨드)**
 | 파일 | 역할 |
@@ -103,7 +106,8 @@ crons/news_spike_detector.py (크론 매 1분)
 | `crons/daily_ranking.py` | ML 종목 랭킹 발송 | 평일 22:00 UTC |
 | `crons/notion_sync.py` | Notion 대시보드 동기화 (리포트 23:00 이후) + 리포트 아카이빙 호출 | 평일 23:30 UTC |
 | `crons/notion_archive.py` | 일일 리포트 → Notion 월(`26/06`)/주(`4주차`) 계층 페이지 누적 아카이빙 (멱등 upsert, 대시보드와 독립) | notion_sync 가 호출 |
-| `crons/news_spike_detector.py` | 속보 수집 + 급증 감지 + 텔레그램 알림 | 매 1분 |
+| `crons/news_spike_detector.py` | 속보 수집 + 급증 감지 + 텔레그램 알림 (+ 실시간 시세 동반표시) | 매 1분 |
+| `scripts/kis_stream_watchdog.sh` | 실시간 시세 WS 상시 프로세스(kis_stream) 재기동 — `REALTIME_ENABLED=true` 시만 기동(opt-in·꺼지면 no-op) | 매 1분 |
 | `crons/kiwoom_sync_rest.py` | 키움 REST API 국내주식 잔고 동기화 | 평일 23:35 UTC |
 | `crons/kiwoom_mock_track.py` | 국내주식 자동 페이퍼트레이딩 (키움 **모의투자** — 신호 기반 리밸런스·모의 도메인 하드락·편입/퇴출 근거 원장 적재) | 평일 00:30 UTC |
 | `crons/kiwoom_mock_report.py` | 국내 모의 일일 현황 보고 (NAV·손익·편입/퇴출 사유·누적 vs KOSPI·MDD vs 지수) + `/mock` 공용 | 평일 06:40 UTC |
@@ -249,6 +253,10 @@ crons/news_spike_detector.py (크론 매 1분)
 | `KOREA_MOCK_API_KEY` / `KOREA_MOCK_API_SECRET` | — | — (없으면 `KOREA_API_KEY/SECRET` 재사용 — KIS 앱키) |
 | `KOREA_MOCK_ACCOUNT_NO` | — | — (KIS 모의 계좌 `CANO-ACNT_PRDT_CD` 형식. **필수** — 미설정 시 잔고/주문 fail-closed) |
 | `US_MOCK_UNIVERSE` / `US_MOCK_MAX_POS` / `US_MOCK_INVEST` / `KOREA_MOCK_SEED` | — | Nasdaq기본 / `5` / `0.9` / `100000` (US 모의 전략 파라미터·시드 USD) |
+| `REALTIME_ENABLED` | — | `false` (KIS 실시간 시세 수신·소비 **마스터 게이트**. off면 stream 미기동·전 소비자 yfinance 폴백) |
+| `REALTIME_US_ENABLED` | — | `false` (美 해외 실시간 스트림 — KIS '해외 실시간시세 신청' 확인 후 true. 미설정 시 美 지연/yfinance) |
+| `REALTIME_KR_MAX` / `REALTIME_US_MAX` / `REALTIME_FLUSH_SECS` | — | `10` / `10` / `1.0` (WS 워치리스트 시장별 캡·캐시 flush 주기. 41심볼/세션 제한 대응) |
+| `REALTIME_STALE_S` / `REALTIME_HEARTBEAT_STALE_S` / `REALTIME_QUOTE_STALE_S` | — | `60` / `120` / `10` (소비자 신선도 임계 초 — 초과 시 yfinance/정적 폴백) |
 | `ADAPTIVE_ENTRY_ENABLED` | — | `false` (해외 진입 임계값 적응 학습 shadow 를 라이브에 반영. off면 shadow만·라이브 불변) |
 | `ADAPTIVE_LONGTERM_ENABLED` | — | `false` (장기 전략 악화 시 보수적 레버리지 축소 shadow 기록. off면 평가·권고만) |
 | `ADAPTIVE_LEVERAGE_ENABLED` | — | `false` (Tier3 구조적 레버리지 GO 권고를 shadow 기록 → `/risk` 표시. off면 게이트 평가·텔레그램만. **자동집행은 항상 없음** — 실계좌 수동) |
@@ -336,6 +344,8 @@ crons/news_spike_detector.py (크론 매 1분)
 ~/reports/ml-data/us_mock_journal/YYYY-MM.md     — US 사람용 편입/퇴출 저널 (월별 누적)
 ~/reports/ml-cache/policy_us_mock.json           — US 모의 선택 정책 가중치 (learner OOS 게이트·챔피언-챌린저 채택 시 갱신, 클램프)
 ~/.cache/kis_mock_token.json                     — KIS 해외 모의 OAuth 토큰 디스크 영속 (발급 레이트리밋 회피)
+~/.cache/kis_realtime_quotes.json                — 실시간 시세 캐시 (kis_stream writer·realtime_quotes reader; symbol→{price,bid,ask,bids/asks,volume,ts,delayed}+__heartbeat__. safe_io atomic)
+~/.cache/kis_quote_token.json                    — KIS 실전 시세 OAuth 토큰 디스크 영속 (모의 토큰과 별개·실전 앱키)
 ~/reports/ml-data/kr_mock_outcomes.jsonl         — KR 모의 결정 실현 보상(초과수익) (불변 append-only)
 ~/reports/ml-data/kr_mock_journal/YYYY-MM.md     — 사람용 편입/퇴출 저널 (월별 누적)
 ~/reports/ml-data/kospi200_members.jsonl         — KOSPI200 시점별 멤버십 forward 스냅샷 (Naver, naver_flow_snapshot)
@@ -361,6 +371,10 @@ MSFT, QQQI, ORCL, SAP, UNH, SGOV, NVDA, GOOGL, SPMO
 - **자동 주문 집행은 모의(paper)에 한함** — `kiwoom_mock.py` 는 `mockapi.kiwoom.com` 도메인을
   하드락(`_assert_mock_url`)하고 실거래(`api.kiwoom.com`) 경로를 코드에 두지 않는다. 봇의 실계좌
   자동매매는 여전히 없음(권고만). `crons/kiwoom_mock_track.py` 는 `KIWOOM_MOCK_ENABLED=true` 일 때만 동작
+- **실시간 시세는 실계좌 키 read-only 전용** — `providers/kis_quote.py`·`kis_stream.py` 는 실전 도메인
+  (`openapi…:9443`·`ops…:21000`)을 하드락하되 **주문 URL/TR/함수가 코드에 없다**(테스트가 소스 grep 으로 강제).
+  실시간은 *가격 숫자*만 제공 → 알림·표시·페이퍼 지정가에만 쓰이고 실계좌 집행은 불변(없음). `REALTIME_ENABLED`
+  off(기본)면 전 소비자가 yfinance 로 투명 폴백 — 실시간 장애가 기존 흐름을 깨지 않는다
 - `portfolio_snapshot.json` writer 3종(`holding_manager._save`·`portfolio_sync_server`·`kiwoom_sync_rest`)은
   모두 `safe_io.atomic_write_json` + `safe_io.file_write_lock` 경유 — 직접 `json.dump`/in-place write 금지.
   (atomic rename 으로 torn read 방지 + 교차 프로세스 락으로 동시 쓰기 lost update 방지) → 이후 `store.shadow_doc` 비차단 동기화
