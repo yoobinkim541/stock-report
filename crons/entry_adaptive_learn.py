@@ -142,13 +142,7 @@ def _save_shadow(thr: float, ev: dict) -> None:
     os.replace(tmp, SHADOW_PATH)
 
 
-def _send(text: str) -> None:
-    try:
-        import notify
-        notify.send_telegram(text, token=os.getenv("STOCK_BOT_TOKEN"),
-                             chat_id=os.getenv("STOCK_BOT_CHAT_ID"), timeout=15)
-    except Exception:
-        pass
+from lib.cron_common import send_cron_telegram
 
 
 def main() -> int:
@@ -157,7 +151,7 @@ def main() -> int:
     out = learn(samples)
     logger.info("결과: %s", out["reason"])
     enabled = os.getenv("ADAPTIVE_ENTRY_ENABLED", "false").lower() == "true"
-    _send("\n".join([
+    send_cron_telegram("\n".join([
         "🎯 진입 임계값 적응 학습 (라이브 outcome)",
         out["reason"],
         f"shadow 반영: {'ON(라이브 적용)' if enabled else 'OFF(shadow만 — 라이브 불변)'}",

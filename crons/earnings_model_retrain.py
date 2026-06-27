@@ -26,13 +26,7 @@ logger = logging.getLogger(__name__)
 KST = timezone(timedelta(hours=9))
 
 
-def _send(text: str) -> None:
-    try:
-        import notify
-        notify.send_telegram(text, token=os.getenv("STOCK_BOT_TOKEN"),
-                             chat_id=os.getenv("STOCK_BOT_CHAT_ID"), timeout=15)
-    except Exception:
-        pass
+from lib.cron_common import send_cron_telegram
 
 
 def main() -> int:
@@ -78,7 +72,7 @@ def main() -> int:
     lines.append("⚠️ 어닝 방향예측은 본질적 한계 — 변동폭·서프라이즈 확률만(정보형)")
     msg = "\n".join(lines)
     logger.info(msg)
-    _send(msg)
+    send_cron_telegram(msg)
     return 0
 
 

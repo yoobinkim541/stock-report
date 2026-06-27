@@ -166,13 +166,7 @@ def backfill_outcomes(ledger, *, horizon: int = HORIZON, price_fn=None) -> int:
 
 # ── 진입점 ────────────────────────────────────────────────────────────────────
 
-def _send(text: str) -> None:
-    try:
-        import notify
-        notify.send_telegram(text, token=os.getenv("STOCK_BOT_TOKEN"),
-                             chat_id=os.getenv("STOCK_BOT_CHAT_ID"), timeout=15)
-    except Exception:
-        pass
+from lib.cron_common import send_cron_telegram
 
 
 def main() -> int:
@@ -192,7 +186,7 @@ def main() -> int:
     if len(rows) < MIN_SAMPLES:
         msg = f"🇰🇷 KR 정책 학습 — 표본 {len(rows)}/{MIN_SAMPLES} 미달, 콜드스타트 유지(보류)"
         logger.info(msg)
-        _send(msg)
+        send_cron_telegram(msg)
         return 0
 
     # 지수 MDD 기준 — 결정들의 *보유기간 지수 MDD 평균*(eval 의 종목 MDD 와 동일 단위로 비교).
@@ -209,7 +203,7 @@ def main() -> int:
         lambda oos, params: eval_policy(oos, params, MAX_POS),    # 배치 바스켓과 동일
         index_mdd=index_mdd, min_samples=MIN_SAMPLES, embargo=HORIZON)
     logger.info("재학습 결과: %s", out["reason"])
-    _send(f"🇰🇷 KR 정책 강화 (표본 {len(rows)})\n{out['reason']}\n⚠️ 모의 정책 — 실거래 미반영")
+    send_cron_telegram(f"🇰🇷 KR 정책 강화 (표본 {len(rows)})\n{out['reason']}\n⚠️ 모의 정책 — 실거래 미반영")
     return 0
 
 

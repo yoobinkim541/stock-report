@@ -93,13 +93,7 @@ def _save_shadow(blend: float, ev: dict) -> None:
     os.replace(tmp, SHADOW_PATH)
 
 
-def _send(text: str) -> None:
-    try:
-        import notify
-        notify.send_telegram(text, token=os.getenv("STOCK_BOT_TOKEN"),
-                             chat_id=os.getenv("STOCK_BOT_CHAT_ID"), timeout=15)
-    except Exception:
-        pass
+from lib.cron_common import send_cron_telegram
 
 
 def main() -> int:
@@ -133,7 +127,7 @@ def main() -> int:
                 lines.append(f"  → blend 권고 {blend:.2f} (shadow OFF — 미기록)")
     lines.append("  ⚠️ 평가·권고만 — 라이브 blend 무변경")
     logger.info(" / ".join(lines))
-    _send("\n".join(lines))
+    send_cron_telegram("\n".join(lines))
     return 0
 
 
