@@ -80,8 +80,23 @@ def _all_holdings(snap: dict) -> list[dict]:
 #  공개 API
 # ══════════════════════════════════════════════════════════════════════
 
+def _rt_ret(h: dict):
+    """실시간 신선시 (실시간 return%, True), 아니면 (스냅샷 return%, False). 예외 무발."""
+    snap_ret = h.get("return_pct", 0) or 0
+    try:
+        from providers import realtime_quotes
+        avg = float(h.get("avg_price_usd") or 0)
+        if realtime_quotes.enabled() and avg > 0:
+            cur = realtime_quotes.get_price(str(h.get("ticker", "")).split(".")[0])
+            if cur and cur > 0:
+                return (float(cur) - avg) / avg * 100.0, True
+    except Exception:
+        pass
+    return snap_ret, False
+
+
 def list_holdings() -> str:
-    """현재 보유 종목 텍스트 출력."""
+    """현재 보유 종목 텍스트 출력. 해외는 실시간 시세 신선시 수익률 오버레이(⚡)·아니면 스냅샷."""
     snap = _load()
     if not snap:
         return "⚠️ portfolio_snapshot.json 로드 실패"
@@ -91,18 +106,20 @@ def list_holdings() -> str:
         f"📋 보유 종목 현황  ({today})",
         "━━━━━━━━━━━━━━━━━━━━━━━",
     ]
+    live_count = 0
 
     # 해외 일반
     gen = snap.get("overseas_general", {}).get("holdings_usd", [])
     if gen:
         lines.append("  [해외 일반계좌]")
         for h in gen:
-            ret  = h.get("return_pct", 0)
+            ret, live = _rt_ret(h)
+            live_count += int(live)
             sign = "▲" if ret > 0 else ("▼" if ret < 0 else "─")
             lines.append(
                 f"  {h['ticker']:<6}  {h.get('shares', 0)}주  "
                 f"@${h.get('avg_price_usd', 0):.2f}  "
-                f"{sign}{abs(ret):.1f}%"
+                f"{sign}{abs(ret):.1f}%{'⚡' if live else ''}"
             )
 
     # 소수점
@@ -110,14 +127,15 @@ def list_holdings() -> str:
     if frac:
         lines.append("  [소수점계좌]")
         for h in frac:
-            ret  = h.get("return_pct", 0)
+            ret, live = _rt_ret(h)
+            live_count += int(live)
             sign = "▲" if ret > 0 else ("▼" if ret < 0 else "─")
             lines.append(
                 f"  {h['ticker']:<6}  {h.get('shares', 0):.4f}주  "
-                f"{sign}{abs(ret):.1f}%"
+                f"{sign}{abs(ret):.1f}%{'⚡' if live else ''}"
             )
 
-    # 국내
+    # 국내 (KR 실시간은 별도 스트림 — 현재는 스냅샷 기준)
     dom = snap.get("domestic", {}).get("holdings", [])
     if dom:
         lines.append("  [국내계좌]")
@@ -129,6 +147,11 @@ def list_holdings() -> str:
                 f"{sign}{abs(ret):.1f}%"
             )
 
+    lines.append("━━━━━━━━━━━━━━━━━━━━━━━")
+    if live_count:
+        lines.append(f"  ⚡ {live_count}종목 실시간 · 그 외 스냅샷({today}) · 전체 평가 /portfolio")
+    else:
+        lines.append(f"  📸 스냅샷({today}) 기준 — 실시간 평가는 /portfolio")
     return "\n".join(lines)
 
 
