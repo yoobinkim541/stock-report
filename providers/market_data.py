@@ -401,9 +401,29 @@ def fetch_ma200(ticker_sym: str) -> dict:
         return {"above_ma200": True, "gap_pct": 0.0}
 
 
+def _realtime_spot_overlay(tickers: list) -> dict:
+    """실시간 캐시에서 신선한 스팟가만 추출(REALTIME_ENABLED·신선시). 예외 무발 → {ticker: price}.
+
+    가산 오버레이용 — yfinance/스냅샷 폴백을 대체하지 않고, 신선한 종목만 최신가로 갱신.
+    """
+    out: dict = {}
+    try:
+        from providers import realtime_quotes
+        if not realtime_quotes.enabled():
+            return out
+        stale = int(os.getenv("REALTIME_SPOT_STALE_S", "60"))
+        for t in tickers:
+            p = realtime_quotes.get_price(str(t).split(".")[0], max_age_s=stale)
+            if p and p > 0:
+                out[t] = float(p)
+    except Exception:
+        pass
+    return out
+
+
 def fetch_portfolio_value() -> dict:
     """
-    portfolio_snapshot.json 보유 수량 × yfinance 실시간 가격 → 포트폴리오 총액.
+    portfolio_snapshot.json 보유 수량 × 실시간 가격(실시간 캐시 우선·yfinance 폴백) → 포트폴리오 총액.
     QLD/TQQQ leverage_state.json 포지션도 포함.
     """
     # --- 보유 수량 집계 ---
@@ -512,6 +532,10 @@ def fetch_portfolio_value() -> dict:
             logger.warning("%s 가격 조회 실패 — 평단가 $%.2f 로 대체 평가", t, avg)
         else:
             logger.warning("%s 가격 조회 실패 + 평단가 없음 — $0 평가 (총액 과소측정 가능)", t)
+
+    # 실시간 캐시 오버레이 — 활성·신선시 yfinance/스냅샷보다 최신 스팟으로 갱신(가산·폴백 보존)
+    for t, rt in _realtime_spot_overlay(tickers).items():
+        prices[t] = rt
 
     # 이번에 성공 조회한 가격을 직전 정상가 캐시에 저장 (다음 실패 시 fallback 소스)
     _save_last_prices({t: prices[t] for t in tickers if prices.get(t, 0) > 0})
