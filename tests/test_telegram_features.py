@@ -155,7 +155,7 @@ def test_dispatch_routes_common_command_typo_to_portfolio(monkeypatch):
     telegram_bot.dispatch("/portpolio", "chat-1")
 
     assert calls == ["refresh", ("fetch", True)]
-    assert sent == ["포트폴리오 현황"]
+    assert len(sent) == 1 and sent[0].startswith("포트폴리오 현황")   # 끝에 신선도 한 줄(C1)
 
 
 def test_dispatch_routes_plural_aliases(monkeypatch):
@@ -232,7 +232,7 @@ def test_dispatch_routes_plain_internal_feature_request_without_llm(monkeypatch)
     normalized = telegram_bot._normalize_message_text("포트폴리오 보여줘")
     telegram_bot.dispatch(normalized, "chat-1")
 
-    assert sent == ["포트폴리오 현황"]
+    assert len(sent) == 1 and sent[0].startswith("포트폴리오 현황")   # 끝에 신선도 한 줄(C1)
     assert asked == []
 
 
@@ -507,7 +507,6 @@ def test_bot_commands_include_all_top_level_dispatch_commands():
         "status",
         "phase",
         "report",
-        "sim",
         "portfolio",
         "rebalance",
         "history",
@@ -518,6 +517,8 @@ def test_bot_commands_include_all_top_level_dispatch_commands():
         "tax",
         "ask",
         "alert",
+        "ranking", "leverage", "meta", "entry", "intraday", "mlreport",
+        "mock", "usmock", "accum", "earnings",
     }
 
 

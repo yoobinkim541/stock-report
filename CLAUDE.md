@@ -160,13 +160,11 @@ crons/news_spike_detector.py (크론 매 1분)
 
 ```
 ── 시장 현황 ─────────────────────────────────────
-/status              Phase + 핵심 수치 + 1M모멘텀 + 수익률 (5분 캐시)
-/summary             한 줄 빠른 현황 — Phase·QQQ·총액·F&G
-/phase               Phase 미터 + 행동 지침
+/status              현황 — Phase·QQQ·총액·F&G + 핵심 수치 (신선도 한 줄 표기 · 구 /summary 통합)
+/phase [sim [모드]]  Phase 미터 + 행동 지침 · `/phase sim` = 시장 시뮬(구 /sim 통합)
 /report              전체 바벨 리포트 (항상 실시간)
 /accum [us|kr|TICKER...]  기관 매집 추적 — OBV·CMF·13F 매집 강도 랭킹 (기본: 보유+美+韓)
 /earnings [TICKER]   실적·밸류에이션 — PER·PBR·PSR·ROE·EPS·배당성장 + 서프라이즈·컨센서스·리비전·PEAD (정보형)
-/sim [bull2|0~5]     시장 상태 시뮬레이션
 
 ── 포트폴리오 ────────────────────────────────────
 /portfolio           보유현황 + 개별 종목 P&L + 총액 (+ 리스크 1줄)
@@ -207,7 +205,18 @@ crons/news_spike_detector.py (크론 매 1분)
 ※ 진입(enter) 신호 발생 시 목표가(sell)·손절가(buy) 알림 자동 등록
   → 발동 시 signal_outcomes.json에 R-multiple 기록 + 짝 알림 자동 제거
 
+── ML·신호 (정보·표시용 — 매매신호 아님) ─────────
+/ranking [retrain]   NASDAQ100 LightGBM 종목 랭킹
+/leverage [retrain]  레버리지 ETF 진입 분석 (QLD/TQQQ/SOXL/UPRO)
+/meta                ML 통합 포트폴리오 배분 (MetaAllocator)
+/entry [포트|us50|kr|watch|TICKER]  진입 타점 분석
+/intraday [1m|5m|15m] [kr|us100|TICKER]  단기봉 신호
+/mlreport [real]     ML 전략 성과 리포트
+※ 위 6개는 6티어 검증상 종목선택·장중타이밍 무엣지 → **정보·표시용**(출력 끝 정직 라벨). 검증 통과 공격은 구조적 레버리지(/risk·Tier3)뿐.
+
 📎 PDF·이미지 전송 → 자동 파싱 → /holding apply 또는 /tax import apply
+
+> **신선도 계약**: `/status`·`/phase`·`/portfolio`·`/rebalance`·`/risk`·`/dca`·`/sgov` 는 **실시간**(결정·평가 명령은 5분 캐시 우회 force-fresh) — 출력 끝 `🕒 기준시각·실시간/캐시` 표기. `/history` 는 일별(크론). `REALTIME_ENABLED` 시 QQQ·보유 해외종목은 KIS WS 실시간가 오버레이(`/holding` 은 ⚡ 표시).
 
 ── 읽기전용 게스트 (STOCK_BOT_GUEST_IDS) ─────────
 /market              시황 브리핑 — 국면·낙폭·RSI·VIX·F&G (사실형, 처방 없음)
