@@ -66,6 +66,10 @@ crons/news_spike_detector.py (크론 매 1분)
 | `providers/market_data.py` | 시장 데이터 수집층 — fetch_qqq_data·rsi·vix·fear_greed·ma200·portfolio_value·환율·캐시·leverage_state (barbell 에서 분리, 재export 호환) | `~/.cache/barbell_anchor·last_prices.json` |
 | `kiwoom_mock.py` | 키움 **모의투자** 어댑터 — 모의 도메인(`mockapi.kiwoom.com`) 하드락 + 토큰·잔고(kt00018)·주문(kt10000/kt10001). 실거래 경로 없음 | — |
 | `providers/earnings_data.py` | 어닝·컨센서스·밸류에이션 데이터층 — yfinance(US 전체 무료: 서프라이즈·포워드 컨센서스·★리비전 모멘텀·PER/PBR/PSR/ROE/EPS/배당·배당CAGR) / KR(.KS) 열화모드(밸류·배당만). 결측 graceful·12h 캐시 | `~/reports/ml-cache/earnings_*.json` |
+| `providers/kr_market_data.py` | KR 생존편향제거 데이터층 — **marcap**(연도별 parquet, 1995~ 전종목 시점별 시총·OHLCV·상폐포함) + **FDR KRX-DELISTING**(상폐 라벨·사유). top_n_by_marcap·ohlcv_from_marcap·distress_delistings. **pykrx 는 이 서버서 불가(KRX 403)** | `~/reports/ml-cache/marcap/*.parquet` |
+| `providers/index_membership.py` | 교차시장 시점별 멤버십 — 美 S&P500(fja05680, 1996~ 생존편향0)·KR(marcap 위임). members_asof·change_events·membership_intervals(생존편향제거 마스킹) | `~/reports/ml-cache/sp500_history.csv` |
+| `providers/edgar.py` | SEC EDGAR 재무층 — companyfacts(상폐기업 재무 보존·무료) → fundamental_trends(매출YoY·순마진·부채추세, 무룩어헤드). 美 퇴출예측 피처원 | `~/reports/ml-cache/edgar/` |
+| `providers/naver_kr.py` | KR 수급(외인/기관/개인 순매수)+KOSPI200 멤버십(Naver — pykrx 공백 복구, 서버서 동작). investor_flow_features·kospi200_members. **Naver HTML=EUC-KR** | — |
 
 **bot/ (텔레그램 서브커맨드)**
 | 파일 | 역할 |
@@ -111,6 +115,7 @@ crons/news_spike_detector.py (크론 매 1분)
 | `crons/fundamental_snapshot.py` | 펀더멘털 point-in-time 스냅샷 적재 (look-ahead 없는 학습 피처용) | 토 01:00 UTC |
 | `crons/options_snapshot.py` | 옵션 지표 스냅샷 (ATM IV·풋콜비·스큐·기대변동폭) — 학습 피처 축적 | 평일 21:30 UTC |
 | `crons/earnings_snapshot.py` | 어닝 컨센서스·★리비전 모멘텀·서프라이즈·밸류에이션 point-in-time 적재 (실적/주가반응 예측 학습데이터 — 무룩어헤드) | 평일 22:10 UTC |
+| `crons/naver_flow_snapshot.py` | KR 투자자 수급 + KOSPI200 멤버십 forward 스냅샷 (Naver — pykrx 공백 복구, 시점별 이력 축적) | 평일 07:30 UTC |
 | `crons/institutional_snapshot.py` | 기관 매집 강도·13F 지분 주간 스냅샷 적재 (델타 추적용) + 상위 5 다이제스트 발송 | 토 01:30 UTC |
 | `backtest/entry_calibration.py` | 진입점수 가중치·임계값 walk-forward 재추정 (OOS 개선 시만 자동 채택) | 매월 1일 14:00 UTC |
 | `crons/entry_adaptive_learn.py` | 진입 임계값 라이브 outcome 적응 학습 (signal_outcomes→★목적함수 OOS 게이트→shadow; `ADAPTIVE_ENTRY_ENABLED` 시만 라이브) | 매월 1일 14:30 UTC |

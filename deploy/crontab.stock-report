@@ -39,6 +39,8 @@ PATH=/home/ubuntu/.local/bin:/usr/local/bin:/usr/bin:/bin
 30 0 * * 1-5 cd /home/ubuntu/projects/stock-report && flock -n /tmp/kiwoom_mock_track.lock uv run python crons/kiwoom_mock_track.py >> /tmp/kiwoom_mock_track.log 2>&1   # 00:30 UTC = 09:30 KST
 # 국내 모의 일일 현황 보고 (장 마감 직후 — NAV·손익·편입/퇴출 사유·vs KOSPI·MDD)
 40 6 * * 1-5 cd /home/ubuntu/projects/stock-report && flock -n /tmp/kiwoom_mock_report.lock uv run python crons/kiwoom_mock_report.py >> /tmp/kiwoom_mock_report.log 2>&1   # 06:40 UTC = 15:40 KST
+# KR 투자자 수급 + KOSPI200 멤버십 forward 스냅샷 (Naver — pykrx 공백 복구, 시점별 이력 축적)
+30 7 * * 1-5 cd /home/ubuntu/projects/stock-report && uv run python crons/naver_flow_snapshot.py >> /tmp/naver_flow_snapshot.log 2>&1   # 07:30 UTC = 16:30 KST
 
 # ── 고빈도 수집·감지 ─────────────────────────────────────────────────────────
 # 속보 수집 + 급증 감지 + 텔레그램 알림
