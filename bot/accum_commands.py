@@ -2,6 +2,7 @@
 import logging
 import os
 import sys
+import time
 
 # 직접 실행(__main__) 시 프로젝트 루트를 import 경로에 추가
 if __name__ == "__main__":
@@ -12,6 +13,21 @@ from portfolio_universe import load_portfolio_tickers
 from reports.institutional_flow import rank_accumulation, accumulation_mobile_block
 
 logger = logging.getLogger(__name__)
+
+_ACCUM_CACHE: dict = {}
+_ACCUM_TTL = int(os.getenv("ACCUM_CACHE_TTL", "1800"))   # 30분 — 매집강도(1y 기반)는 장중 변화 느림
+
+
+def _cached_rank(universe, limit, min_score):
+    """rank_accumulation TTL 캐시 — 반복 /accum 시 1년치 yfinance 재조회 방지(봇 인프로세스)."""
+    key = (tuple(sorted(universe)), limit, min_score)
+    now = time.time()
+    hit = _ACCUM_CACHE.get(key)
+    if hit and now - hit[0] < _ACCUM_TTL:
+        return hit[1]
+    picks = rank_accumulation(list(universe), limit=limit, min_score=min_score)
+    _ACCUM_CACHE[key] = (now, picks)
+    return picks
 
 
 def _name_fn(ticker: str) -> str:
@@ -30,14 +46,14 @@ def cmd_accum(chat_id: str, args: list, send_fn):
             universe = sorted(
                 set(load_portfolio_tickers()) | set(US_TOP100) | set(KR_TOP10_META)
             )
-            picks = rank_accumulation(universe, limit=10, min_score=60)
+            picks = _cached_rank(universe, limit=10, min_score=60)
         elif args[0].lower() == "us":
-            picks = rank_accumulation(list(US_TOP100), limit=10, min_score=60)
+            picks = _cached_rank(list(US_TOP100), limit=10, min_score=60)
         elif args[0].lower() == "kr":
-            picks = rank_accumulation(list(KR_TOP10_META), limit=10, min_score=60)
+            picks = _cached_rank(list(KR_TOP10_META), limit=10, min_score=60)
         else:
             tickers = [t.upper() for t in args]
-            picks = rank_accumulation(tickers, limit=len(tickers), min_score=0)
+            picks = _cached_rank(tickers, limit=len(tickers), min_score=0)
 
         if not picks:
             lines = ["🏛️ 기관 매집 추적", "매집 강도 60+ 종목 없음(시장 중립/분산)"]

@@ -12,6 +12,9 @@ AI 투자상담)은 절대 포함하지 않는다 — 이는 소유자 전용.
 
 from __future__ import annotations
 
+import os
+import time
+
 DISCLAIMER = (
     "\n────────────\n"
     "ℹ️ 참고용 시장 데이터·기술적 지표입니다. 매매 권유가 아니며 "
@@ -72,7 +75,24 @@ def build_market_brief(d: dict) -> str:
     return "\n".join(lines) + DISCLAIMER
 
 
+_IND_CACHE: dict = {}
+_IND_TTL = int(os.getenv("INDICATORS_CACHE_TTL", "600"))   # 10분 — 반복 조회 시 1y yfinance 재조회 방지
+
+
 def build_indicators(ticker: str) -> str:
+    """기술 지표 — TTL 캐시 래퍼(반복 /indicators 시 yfinance 재조회 방지). 봇 인프로세스."""
+    key = (ticker or "").upper().strip()
+    now = time.time()
+    hit = _IND_CACHE.get(key)
+    if key and hit and now - hit[0] < _IND_TTL:
+        return hit[1]
+    out = _build_indicators_raw(ticker)
+    if key:
+        _IND_CACHE[key] = (now, out)
+    return out
+
+
+def _build_indicators_raw(ticker: str) -> str:
     """종목 기술적 지표 (RSI·이동평균·모멘텀·52주 위치) — 서술형, 매매신호 없음."""
     ticker = (ticker or "").upper().strip()
     if not ticker or not ticker.replace(".", "").replace("-", "").isalnum():
