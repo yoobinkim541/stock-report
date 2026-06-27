@@ -56,7 +56,7 @@ PATH=/home/ubuntu/.local/bin:/usr/local/bin:/usr/bin:/bin
 # KR 모의 정책 강화 (보상 백필 + ★목적함수 OOS 게이트 재학습; KIWOOM_MOCK_ENABLED 시)
 0 2 * * 6 cd /home/ubuntu/projects/stock-report && flock -n /tmp/kr_mock_learn.lock uv run python crons/kr_mock_learn.py >> /tmp/kr_mock_learn.log 2>&1   # 토 02:00 UTC = 11:00 KST
 # US 해외 모의 페이퍼트레이딩 (KIS 해외 — KOREA_MOCK_ENABLED 시; track→report→주간 learn)
-0 21 * * 1-5 cd /home/ubuntu/projects/stock-report && flock -n /tmp/us_mock_track.lock uv run python crons/us_mock_track.py >> /tmp/us_mock_track.log 2>&1   # 21:00 UTC — US 모의 리밸런스 (미장 개장 전)
+0 15 * * 1-5 cd /home/ubuntu/projects/stock-report && flock -n /tmp/us_mock_track.lock uv run python crons/us_mock_track.py >> /tmp/us_mock_track.log 2>&1   # 15:00 UTC — US 모의 리밸런스 (미 개장 후·연중안전: 여름 11:00 ET·겨울 10:00 ET, 당일 체결)
 30 21 * * 1-5 cd /home/ubuntu/projects/stock-report && flock -n /tmp/us_mock_report.lock uv run python crons/us_mock_report.py >> /tmp/us_mock_report.log 2>&1   # 21:30 UTC — US 모의 현황+스코어카드
 0 3 * * 6 cd /home/ubuntu/projects/stock-report && flock -n /tmp/us_mock_learn.lock uv run python crons/us_mock_learn.py >> /tmp/us_mock_learn.log 2>&1   # 토 03:00 UTC — US 정책 OOS 재학습
 # US 전용 랭커 주간 재학습 (Nasdaq 초과수익 예측 — daily_ranking·us_mock 공급)

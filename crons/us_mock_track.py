@@ -15,8 +15,8 @@
 
 ★정직: 6티어가 US 선택 무엣지 입증 → 이 루프는 *정직 측정 + OOS 안전개선*용. 알파 보장 아님.
 
-크론 (평일 21:00 UTC = 미장 마감 후):
-    0 21 * * 1-5 cd /home/ubuntu/projects/stock-report && uv run python crons/us_mock_track.py
+크론 (평일 15:00 UTC = 미 개장 후·연중안전: 여름 11:00 ET·겨울 10:00 ET → 당일 체결):
+    0 15 * * 1-5 cd /home/ubuntu/projects/stock-report && uv run python crons/us_mock_track.py
 
 env: US_MOCK_UNIVERSE(쉼표 티커, 기본 내장)·US_MOCK_MAX_POS(5)·US_MOCK_INVEST(0.9)·KOREA_MOCK_SEED(100000 USD)
 """
