@@ -30,7 +30,7 @@ PATH=/home/ubuntu/.local/bin:/usr/local/bin:/usr/bin:/bin
 # 키움 REST API 국내주식 잔고 동기화
 35 23 * * 1-5 cd /home/ubuntu/projects/stock-report && uv run python crons/kiwoom_sync_rest.py >> /tmp/kiwoom_sync_rest.log 2>&1      # 23:35 UTC = 08:35 KST
 # 옵션 지표 스냅샷 (ATM IV·풋콜비·스큐·기대변동폭) — 학습 피처 축적
-30 21 * * 1-5 cd /home/ubuntu/projects/stock-report && uv run python crons/options_snapshot.py >> /tmp/options_snapshot.log 2>&1     # 21:30 UTC = 06:30 KST
+20 21 * * 1-5 cd /home/ubuntu/projects/stock-report && uv run python crons/options_snapshot.py >> /tmp/options_snapshot.log 2>&1     # 21:20 UTC = 06:20 KST (us_mock_report 21:30 충돌 회피)
 # 어닝 컨센서스·리비전·서프라이즈·밸류에이션 point-in-time 스냅샷 — 실적/주가반응 예측 학습데이터 축적
 10 22 * * 1-5 cd /home/ubuntu/projects/stock-report && uv run python crons/earnings_snapshot.py >> /tmp/earnings_snapshot.log 2>&1   # 22:10 UTC = 07:10 KST
 
@@ -44,7 +44,7 @@ PATH=/home/ubuntu/.local/bin:/usr/local/bin:/usr/bin:/bin
 
 # ── 고빈도 수집·감지 ─────────────────────────────────────────────────────────
 # 속보 수집 + 급증 감지 + 텔레그램 알림
-* * * * * cd /home/ubuntu/projects/stock-report && uv run python crons/news_spike_detector.py >> /tmp/news_spike_detector.log 2>&1   # 매 1분
+* * * * * cd /home/ubuntu/projects/stock-report && flock -n /tmp/news_spike_detector.lock uv run python crons/news_spike_detector.py >> /tmp/news_spike_detector.log 2>&1   # 매 1분 (flock: 중복실행·상태 RMW 경합 방지)
 # 실시간 시세 WS 상시 프로세스 워치독 (REALTIME_ENABLED=true 일 때만 기동·opt-in)
 * * * * * cd /home/ubuntu/projects/stock-report && bash scripts/kis_stream_watchdog.sh >> /tmp/kis_stream_watchdog.log 2>&1   # 매 1분 (꺼져있으면 no-op)
 # 전체 소스 수집 (텔레그램 채널·FRED·국채·시장 스냅샷) → JSONL 캐시

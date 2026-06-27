@@ -56,24 +56,24 @@ def _notify(msg: str):
     notify.send_telegram(msg, token=_BOT_TOKEN, chat_id=_CHAT_ID)
 
 
-def fetch_domestic_balance() -> list[dict]:
-    """키움 REST API로 국내주식 보유잔고 조회."""
+def fetch_domestic_balance() -> list[dict] | None:
+    """키움 REST API로 국내주식 보유잔고 조회. **실패→None(알림 대상)**, 정상·보유없음→[]."""
     try:
         import requests as _req
         from kiwoom_rest_api.auth.token import TokenManager
     except ImportError:
         logger.error("kiwoom-rest-api 미설치: uv pip install kiwoom-rest-api")
-        return []
+        return None
 
     if not os.getenv("KIWOOM_API_KEY") or not os.getenv("KIWOOM_API_SECRET"):
         logger.error(".env에 KIWOOM_API_KEY / KIWOOM_API_SECRET 없음")
-        return []
+        return None
 
     try:
         tok = TokenManager().access_token
         if not tok:
             logger.error("키움 토큰 발급 실패 — API Key/Secret 확인 필요")
-            return []
+            return None
 
         resp = _req.post(
             "https://api.kiwoom.com/api/dostk/acnt",
@@ -89,11 +89,11 @@ def fetch_domestic_balance() -> list[dict]:
         result = resp.json()
     except Exception as e:
         logger.error("키움 API 호출 실패: %s", e)
-        return []
+        return None
 
     if result.get("return_code", -1) != 0:
         logger.error("API 오류: %s", result.get("return_msg", "unknown"))
-        return []
+        return None
 
     def _num(item: dict, key: str) -> float:
         """숫자 문자열 → float (쉼표·퍼센트 제거, 빈값=0)."""
@@ -174,8 +174,12 @@ def main():
     logger.info("키움 국내주식 동기화 시작")
 
     holdings = fetch_domestic_balance()
-    if not holdings:
-        logger.warning("조회된 종목 없음 — API 키 또는 계좌 확인 필요")
+    if holdings is None:                       # API/키/토큰/연결 실패 — 조용히 묻히지 않게 알림
+        _notify("⚠️ 키움 국내주식 동기화 실패\n  API 키·토큰·연결 확인 필요 (KR 잔고 미갱신)")
+        logger.error("동기화 실패 — 텔레그램 알림 발송")
+        return
+    if not holdings:                            # 정상 조회·국내 보유 없음 (실패 아님 → 알림 X)
+        logger.warning("국내 보유 종목 없음 — 스킵")
         try:
             _touch_sync_timestamp()
             logger.info("last_domestic_sync 타임스탬프 갱신 완료")
