@@ -113,6 +113,43 @@ def test_parse_rejects_encrypted_control_unknown():
     assert ks.parse_realtime_frame("") == []
 
 
+# ── 체결통보 (T7) ─────────────────────────────────────────────────────────────
+
+def test_decrypt_notice_roundtrip():
+    """AES-256-CBC 복호화 — 알려진 key/iv 로 암호화→복호화 왕복."""
+    from Crypto.Cipher import AES
+    from Crypto.Util.Padding import pad
+    from base64 import b64encode
+    key, iv = "0" * 32, "0" * 16
+    plain = "CUST^ACNT^ODER^005930^02^10^71000"
+    ct = AES.new(key.encode(), AES.MODE_CBC, iv.encode()).encrypt(pad(plain.encode(), AES.block_size))
+    assert ks.decrypt_notice(key, iv, b64encode(ct).decode()) == plain
+
+
+def test_parse_notice_kr_fill_only():
+    f = _fields(14, {4: "02", 8: "005930", 9: "10", 10: "71000", 11: "0930", 13: "2"})
+    out = ks.parse_notice("^".join(f), ks.TR_KR_FILL)
+    assert out == [{"symbol": "005930", "side": "buy", "qty": 10.0, "price": 71000.0,
+                    "time": "0930", "tr_id": "H0STCNI0"}]
+    f[13] = "1"                                   # 접수통보 → 제외
+    assert ks.parse_notice("^".join(f), ks.TR_KR_FILL) == []
+
+
+def test_parse_notice_us_fill_indices():
+    """US H0GSCNI0 — symbol[7]·qty[8]·price[9]·cntg_yn[12] (KR 과 다른 인덱스)."""
+    f = _fields(13, {4: "01", 7: "AAPL", 8: "5", 9: "283.78", 10: "2230", 12: "2"})
+    out = ks.parse_notice("^".join(f), ks.TR_US_FILL)
+    assert out == [{"symbol": "AAPL", "side": "sell", "qty": 5.0, "price": 283.78,
+                    "time": "2230", "tr_id": "H0GSCNI0"}]
+
+
+def test_parse_subscribe_ack_extracts_key_iv():
+    ack = json.dumps({"header": {"tr_id": "H0STCNI0"}, "body": {"output": {"iv": "IV16", "key": "KEY32"}}})
+    assert ks.parse_subscribe_ack(ack) == {"tr_id": "H0STCNI0", "key": "KEY32", "iv": "IV16"}
+    assert ks.parse_subscribe_ack(json.dumps({"header": {"tr_id": "H0STASP0"}, "body": {"rt_cd": "0"}})) is None
+    assert ks.parse_subscribe_ack("0|H0STCNT0|001|x") is None    # 데이터프레임 아님
+
+
 # ── 읽기전용 구조 불변 ────────────────────────────────────────────────────────
 
 def test_module_has_no_order_path():

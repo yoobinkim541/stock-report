@@ -21,6 +21,7 @@ import logging
 import os
 import sys
 import time
+from base64 import b64decode
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
@@ -58,6 +59,17 @@ _KR_ASK_BASE = {"ask1": 3, "bid1": 13, "askq1": 23, "bidq1": 33}  # 10단계 연
 _US_TRADE_PRICE_IDX, _US_TRADE_VOL_IDX = 10, 19
 _US_ASK_BID_IDX, _US_ASK_ASK_IDX = 10, 11
 _US_ASK_BIDQ_IDX, _US_ASK_ASKQ_IDX = 12, 13
+
+# ── 체결통보 (T7·실계좌 실시간 체결 알림 — read-only) ──────────────────────────
+# 활성: REALTIME_FILLS_ENABLED=true + REALTIME_HTS_ID(체결통보 tr_key=HTS ID). 실거래 체결만 알림(포트폴리오 미수정).
+TR_KR_FILL = "H0STCNI0"   # 국내 실시간 체결통보(실전)
+TR_US_FILL = "H0GSCNI0"   # 해외 실시간 체결통보(실전 — 실계좌가 美라 주 대상)
+_FILL_TRS = (TR_KR_FILL, TR_US_FILL)
+# 체결통보 필드 인덱스 (open-trading-api 확정 — KR/US 상이!). CNTG_YN: 2=체결·1=접수.
+_FILL_IDX = {
+    TR_KR_FILL: {"side": 4, "symbol": 8, "qty": 9, "price": 10, "time": 11, "cntg_yn": 13},
+    TR_US_FILL: {"side": 4, "symbol": 7, "qty": 8, "price": 9, "time": 10, "cntg_yn": 12},
+}
 
 
 def is_enabled() -> bool:
@@ -102,6 +114,99 @@ def handle_pingpong(raw: str) -> str | None:
     if (j.get("header") or {}).get("tr_id") == "PINGPONG":
         return raw
     return None
+
+
+# ── 체결통보 (순수 + 복호화) ──────────────────────────────────────────────────
+
+def fills_enabled() -> bool:
+    return os.getenv("REALTIME_FILLS_ENABLED", "false").lower() == "true"
+
+
+def _hts_id() -> str:
+    return os.getenv("REALTIME_HTS_ID", "").strip()
+
+
+def decrypt_notice(key: str, iv: str, b64_cipher: str) -> str:
+    """체결통보 AES-256-CBC 복호화 (open-trading-api 레시피). key/iv 는 구독 ACK body.output 에서."""
+    from Crypto.Cipher import AES
+    from Crypto.Util.Padding import unpad
+    cipher = AES.new(key.encode("utf-8"), AES.MODE_CBC, iv.encode("utf-8"))
+    return unpad(cipher.decrypt(b64decode(b64_cipher)), AES.block_size).decode("utf-8")
+
+
+def parse_subscribe_ack(raw: str) -> dict | None:
+    """구독 ACK(JSON) → {tr_id, key, iv} (암호화 TR 복호화 키). 키 없으면 None."""
+    if not raw or not raw.lstrip().startswith("{"):
+        return None
+    try:
+        j = json.loads(raw)
+    except (ValueError, TypeError):
+        return None
+    out = (j.get("body") or {}).get("output") or {}
+    if out.get("iv") and out.get("key"):
+        return {"tr_id": (j.get("header") or {}).get("tr_id"), "key": out["key"], "iv": out["iv"]}
+    return None
+
+
+def parse_notice(plaintext: str, tr_id: str) -> list[dict]:
+    """복호화된 체결통보 → 체결건 list (접수통보 CNTG_YN!=2 제외). KR/US 컬럼 상이."""
+    idx = _FILL_IDX.get(tr_id)
+    if not idx or not plaintext:
+        return []
+    fields = plaintext.split("^")
+    width = max(idx.values()) + 1
+    n = max(1, len(fields) // width) if len(fields) >= width else 1
+    out = []
+    for i in range(n):
+        rec = fields if n == 1 else fields[i * width:(i + 1) * width]
+        if len(rec) <= idx["cntg_yn"]:
+            continue
+        if str(rec[idx["cntg_yn"]]).strip() != "2":          # 2=체결만 (1=접수 제외)
+            continue
+        sym = rec[idx["symbol"]]
+        out.append({
+            "symbol": _norm_us_symbol(sym) if tr_id == TR_US_FILL else sym,
+            "side": "sell" if str(rec[idx["side"]]).strip() in ("01", "1") else "buy",
+            "qty": _ff(rec, idx["qty"]), "price": _ff(rec, idx["price"]),
+            "time": rec[idx["time"]], "tr_id": tr_id,
+        })
+    return out
+
+
+def _record_fill(fill: dict) -> None:
+    """체결건 → ~/.cache/kis_fills.jsonl append + 텔레그램 알림 (read-only·포트폴리오 미수정)."""
+    try:
+        with open(os.path.expanduser("~/.cache/kis_fills.jsonl"), "a", encoding="utf-8") as f:
+            f.write(json.dumps({**fill, "at": time.time()}, ensure_ascii=False) + "\n")
+    except Exception as e:
+        logger.debug("체결 기록 실패(무시): %s", e)
+    try:
+        import notify
+        icon = "🟢" if fill.get("side") == "buy" else "🔴"
+        notify.send_telegram(
+            f"{icon} [실계좌 체결통보] {fill['symbol']} {int(fill['qty'])}주 @ {fill['price']} ({fill['time']})"
+            f"\n⚠️ 실거래 체결 — 포트폴리오 수동 반영 필요",
+            token=os.getenv("STOCK_BOT_TOKEN"), chat_id=os.getenv("STOCK_BOT_CHAT_ID"), timeout=10)
+    except Exception as e:
+        logger.debug("체결 알림 실패(무시): %s", e)
+
+
+def _handle_fill_frame(raw: str, aes_keys: dict) -> None:
+    """암호화 체결통보 프레임 → 복호화 → 체결건 기록·알림. 키 없으면 무시."""
+    parts = raw.split("|", 3)
+    if len(parts) < 4:
+        return
+    tr_id, payload = parts[1], parts[3]
+    kv = aes_keys.get(tr_id)
+    if not kv:
+        return
+    try:
+        plain = decrypt_notice(kv[0], kv[1], payload)
+    except Exception as e:
+        logger.warning("체결통보 복호화 실패: %s", e)
+        return
+    for fill in parse_notice(plain, tr_id):
+        _record_fill(fill)
 
 
 def _extract_kr_trade(f: list) -> dict:
@@ -290,11 +395,14 @@ async def _session(approval_key: str) -> None:
         if us_enabled():
             us_keys = [_us_ws_key(s) for s in sel["US"]]   # 美 tr_key = D+거래소+종목 (DNASAAPL)
             subs += [(TR_US_TRADE, k) for k in us_keys] + [(TR_US_ASK, k) for k in us_keys]
+        if fills_enabled() and _hts_id():                  # 실계좌 체결통보 (tr_key=HTS ID)
+            subs += [(TR_KR_FILL, _hts_id()), (TR_US_FILL, _hts_id())]
         for tr_id, key in subs:
             await ws.send(build_subscribe(approval_key, tr_id, key, register=True))
         logger.info("구독 %d건 (KR %d·US %d, US스트림=%s)", len(subs),
                     len(sel["KR"]), len(sel["US"]), us_enabled())
 
+        aes_keys: dict = {}     # 체결통보 복호화 키 (구독 ACK 에서 수집)
         last_flush = last_refresh = time.time()
         while True:
             try:
@@ -305,7 +413,13 @@ async def _session(approval_key: str) -> None:
                 pong = handle_pingpong(raw)
                 if pong is not None:
                     await ws.send(pong)
-                else:
+                elif raw.lstrip().startswith("{"):          # 구독 ACK — 체결통보 복호화 키 수집
+                    ack = parse_subscribe_ack(raw)
+                    if ack and ack.get("tr_id") in _FILL_TRS:
+                        aes_keys[ack["tr_id"]] = (ack["key"], ack["iv"])
+                elif raw[0] == "1":                          # 암호화 = 체결통보
+                    _handle_fill_frame(raw, aes_keys)
+                else:                                        # 평문 = 시세(체결/호가)
                     for rec in parse_realtime_frame(raw):
                         _apply(latest, rec, delayed=False)   # KR·美 모두 무료 실시간(美 0분지연)
             now = time.time()

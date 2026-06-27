@@ -257,6 +257,7 @@ crons/news_spike_detector.py (크론 매 1분)
 | `REALTIME_US_ENABLED` | — | `false` (美 해외 실시간 스트림. **미국=무료 실시간 0분지연**·별도 신청 불필요(open-trading-api 확정). off면 美 미구독→yfinance) |
 | `REALTIME_KR_MAX` / `REALTIME_US_MAX` / `REALTIME_FLUSH_SECS` | — | `10` / `10` / `1.0` (WS 워치리스트 시장별 캡·캐시 flush 주기. 41심볼/세션 제한 대응) |
 | `REALTIME_STALE_S` / `REALTIME_HEARTBEAT_STALE_S` / `REALTIME_QUOTE_STALE_S` | — | `60` / `120` / `10` (소비자 신선도 임계 초 — 초과 시 yfinance/정적 폴백) |
+| `REALTIME_FILLS_ENABLED` / `REALTIME_HTS_ID` | — | `false` / — (실계좌 체결통보 알림. HTS ID = 체결통보 tr_key. 실거래 체결 시 텔레그램 push — **포트폴리오 미수정**·수동 반영) |
 | `ADAPTIVE_ENTRY_ENABLED` | — | `false` (해외 진입 임계값 적응 학습 shadow 를 라이브에 반영. off면 shadow만·라이브 불변) |
 | `ADAPTIVE_LONGTERM_ENABLED` | — | `false` (장기 전략 악화 시 보수적 레버리지 축소 shadow 기록. off면 평가·권고만) |
 | `ADAPTIVE_LEVERAGE_ENABLED` | — | `false` (Tier3 구조적 레버리지 GO 권고를 shadow 기록 → `/risk` 표시. off면 게이트 평가·텔레그램만. **자동집행은 항상 없음** — 실계좌 수동) |
@@ -346,6 +347,7 @@ crons/news_spike_detector.py (크론 매 1분)
 ~/.cache/kis_mock_token.json                     — KIS 해외 모의 OAuth 토큰 디스크 영속 (발급 레이트리밋 회피)
 ~/.cache/kis_realtime_quotes.json                — 실시간 시세 캐시 (kis_stream writer·realtime_quotes reader; symbol→{price,bid,ask,bids/asks,volume,ts,delayed}+__heartbeat__. safe_io atomic)
 ~/.cache/kis_quote_token.json                    — KIS 실전 시세 OAuth 토큰 디스크 영속 (모의 토큰과 별개·실전 앱키)
+~/.cache/kis_fills.jsonl                          — 실계좌 체결통보 기록 (kis_stream, REALTIME_FILLS_ENABLED 시 — append-only·알림용·AES 복호화)
 ~/reports/ml-data/kr_mock_outcomes.jsonl         — KR 모의 결정 실현 보상(초과수익) (불변 append-only)
 ~/reports/ml-data/kr_mock_journal/YYYY-MM.md     — 사람용 편입/퇴출 저널 (월별 누적)
 ~/reports/ml-data/kospi200_members.jsonl         — KOSPI200 시점별 멤버십 forward 스냅샷 (Naver, naver_flow_snapshot)
