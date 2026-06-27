@@ -14,10 +14,8 @@ yfinance 의 future earnings_dates 반환은 알려진 불안정 → 모두 try/
 """
 from __future__ import annotations
 
-import json
 import logging
 import os
-import time
 from pathlib import Path
 
 logger = logging.getLogger(__name__)
@@ -34,31 +32,14 @@ def _cache_path(key: str) -> Path:
 
 
 def _cache_get(key: str, ttl_h: float = _CACHE_TTL_H):
-    try:
-        p = _cache_path(key)
-        if not p.exists():
-            return None
-        if (time.time() - p.stat().st_mtime) > ttl_h * 3600:
-            return None
-        return json.loads(p.read_text(encoding="utf-8"))
-    except Exception:
-        return None
+    from lib.file_cache import is_fresh, read_json
+    p = _cache_path(key)
+    return read_json(p) if is_fresh(p, ttl_h) else None
 
 
 def _cache_put(key: str, obj) -> None:
-    try:
-        _CACHE_DIR.mkdir(parents=True, exist_ok=True)
-        try:
-            from ml._safe_cache import harden_cache_dir
-            harden_cache_dir(_CACHE_DIR)
-        except Exception:
-            pass
-        p = _cache_path(key)
-        tmp = p.with_suffix(".tmp")
-        tmp.write_text(json.dumps(obj, ensure_ascii=False), encoding="utf-8")
-        os.replace(tmp, p)
-    except Exception as e:
-        logger.debug("earnings 캐시 저장 실패 %s: %s", key, e)
+    from lib.file_cache import write_json_atomic
+    write_json_atomic(_cache_path(key), obj)
 
 
 # ── 유틸 ────────────────────────────────────────────────────────────────────────

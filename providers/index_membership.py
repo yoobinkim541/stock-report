@@ -13,10 +13,8 @@
 """
 from __future__ import annotations
 
-import io
 import logging
 import os
-import time
 import urllib.parse
 from pathlib import Path
 
@@ -33,9 +31,9 @@ def _fetch_sp500_history():
     """fja05680 S&P500 시점별 구성 DataFrame[date, tickers]. 캐시(주간). 실패 시 None."""
     try:
         import pandas as pd
+        from lib.file_cache import is_fresh
         _CACHE_DIR.mkdir(parents=True, exist_ok=True)
-        fresh = _SP500_CACHE.exists() and (time.time() - _SP500_CACHE.stat().st_mtime) < _SP500_TTL_H * 3600
-        if not fresh:
+        if not is_fresh(_SP500_CACHE, _SP500_TTL_H):
             from lib.http_utils import http_get
             raw = http_get(_SP500_URL, timeout=30)
             tmp = _SP500_CACHE.with_suffix(".tmp")

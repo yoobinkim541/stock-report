@@ -13,7 +13,6 @@ from __future__ import annotations
 import json
 import logging
 import os
-import time
 from pathlib import Path
 
 logger = logging.getLogger(__name__)
@@ -37,9 +36,10 @@ def _get(url: str) -> bytes:
 def _cik_map() -> dict:
     """{TICKER: CIK(10자리)} — company_tickers.json 캐시. 실패 시 {}."""
     try:
+        from lib.file_cache import is_fresh
         _CACHE_DIR.mkdir(parents=True, exist_ok=True)
         p = _CACHE_DIR / "cik_map.json"
-        if not (p.exists() and (time.time() - p.stat().st_mtime) < _CIK_TTL_H * 3600):
+        if not is_fresh(p, _CIK_TTL_H):
             raw = _get("https://www.sec.gov/files/company_tickers.json")
             p.write_bytes(raw)
         data = json.loads(p.read_text(encoding="utf-8"))
@@ -55,9 +55,10 @@ def companyfacts(ticker: str, *, cik: str | None = None) -> dict | None:
         cik = cik or _cik_map().get((ticker or "").upper())
         if not cik:
             return None
+        from lib.file_cache import is_fresh
         _CACHE_DIR.mkdir(parents=True, exist_ok=True)
         p = _CACHE_DIR / f"cf_{cik}.json"
-        if not (p.exists() and (time.time() - p.stat().st_mtime) < _FACTS_TTL_H * 3600):
+        if not is_fresh(p, _FACTS_TTL_H):
             raw = _get(f"https://data.sec.gov/api/xbrl/companyfacts/CIK{cik}.json")
             p.write_bytes(raw)
         return json.loads(p.read_text(encoding="utf-8"))
