@@ -359,6 +359,22 @@ def dollar_vs_risk_table(weights: dict) -> str:
         return ""
 
 
+def _structural_leverage_note() -> str:
+    """Tier3 게이트 GO 시 권고 구조적 레버리지 (shadow 파일·ADAPTIVE_LEVERAGE_ENABLED 시 기록). 없으면 ""."""
+    try:
+        import json
+        import os
+        p = os.path.expanduser("~/reports/ml-cache/structural_leverage_shadow.json")
+        if not os.path.exists(p):
+            return ""
+        with open(p, encoding="utf-8") as f:
+            lev = json.load(f).get("reco_lev")
+        return (f"  · 구조적 레버리지 권고 ×{lev:.2f} (게이트 GO·폭락 디리스크 전제·수동집행)"
+                if lev else "")
+    except Exception:
+        return ""
+
+
 def format_risk_report(summary, now: str | None = None) -> str:
     """/risk 전체 리포트. summary None → 안내문."""
     if not summary:
@@ -386,6 +402,9 @@ def format_risk_report(summary, now: str | None = None) -> str:
         if ru:
             L.append(f"  ※ 1.5x → 기대 MDD {ru['implied_mdd']*100:.0f}% "
                      f"({'예산 초과' if ru['breach'] else '예산 이내'})")
+        _sn = _structural_leverage_note()
+        if _sn:
+            L.append(_sn)
     if summary.get("factor_caveat"):
         L.append(f"  ({summary['factor_caveat']})")
     L += ["", f"※ {summary.get('caveat','')}"]

@@ -61,6 +61,8 @@ PATH=/home/ubuntu/.local/bin:/usr/local/bin:/usr/bin:/bin
 50 3 * * 6 cd /home/ubuntu/projects/stock-report && uv run python crons/earnings_model_retrain.py >> /tmp/earnings_model_retrain.log 2>&1      # 토 03:50 UTC = 12:50 KST
 # 장기 전략 ★목표(vs QQQ 아웃퍼폼·MDD≤지수) 라이브 평가 + 보수적 shadow(ADAPTIVE_LONGTERM_ENABLED 시)
 0 4 * * 6 cd /home/ubuntu/projects/stock-report && uv run python crons/longterm_adaptive_eval.py >> /tmp/longterm_adaptive_eval.log 2>&1     # 토 04:00 UTC = 13:00 KST
+# Tier3 구조적 레버리지 ★게이트 재검증 (SPY+QQQ × 그리드 낙폭예산·DSR·PBO; GO 시 권고 shadow는 ADAPTIVE_LEVERAGE_ENABLED 시)
+15 4 * * 6 cd /home/ubuntu/projects/stock-report && uv run python crons/leverage_structural_eval.py >> /tmp/leverage_structural_eval.log 2>&1  # 토 04:15 UTC = 13:15 KST
 # 포트폴리오 advice 적응 평가 (MetaAllocator A/B → blend 신뢰도 ★목적함수; ADAPTIVE_ADVICE_ENABLED 시 shadow)
 30 4 * * 6 cd /home/ubuntu/projects/stock-report && uv run python crons/advice_adaptive_eval.py >> /tmp/advice_adaptive_eval.log 2>&1       # 토 04:30 UTC = 13:30 KST
 
