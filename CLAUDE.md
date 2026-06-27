@@ -137,6 +137,9 @@ crons/news_spike_detector.py (크론 매 1분)
 | `ml/adaptive/` | 적응형 학습 공유 프레임워크 — policy(클램프)·ledger(불변 원장)·reward(★목적함수)·learner(OOS게이트)·regime(최근성)·champion_challenger | `~/reports/ml-cache/policy_*.json` |
 | `ml/kr_ranker.py` | 한국주식 전용 ranker (KOSPI 대비 초과수익 예측, US ranker 재사용·KR캐시) | `~/reports/ml-cache/kr_ranker_model.pkl` |
 | `ml/kr_policy.py` | KR 모의 선택 정책 점수 (KR ranker + 규칙 가중, Policy 클램프) | `~/reports/ml-cache/policy_kr_mock.json` |
+| `ml/deletion_risk.py` | 부실 퇴출 사전예측 (marcap 파생 피처→P(부실퇴출); 실데이터 OOS AUC 0.743·M&A 제외). 회피 통합·★RL 대상 | — (학습셋 marcap 조립) |
+| `ml/earnings_predictor.py` | 실적 서프라이즈 예측 G3 (P(beat); 서프라이즈 지속성·모멘텀·리비전 모멘텀 훅). 엣지 게이트 캐시 | `~/reports/ml-cache/earnings_predictor.pkl` |
+| `ml/earnings_move_predictor.py` | 실적후 주가반응 예측 G4 (기대 변동폭+방향확률; 방향은 무엣지·정직). 엣지 게이트 캐시 | `~/reports/ml-cache/earnings_move_predictor.pkl` |
 
 ## 텔레그램 봇 명령어
 
@@ -293,11 +296,18 @@ crons/news_spike_detector.py (크론 매 1분)
 ~/reports/ml-cache/institutional_snapshots.jsonl — 기관 매집 강도·13F 지분 주간 스냅샷 (델타 추적)
 ~/reports/ml-cache/earnings_snapshots.jsonl      — 어닝 컨센서스·리비전·서프라이즈·밸류 일별 point-in-time (실적/주가반응 예측 학습용)
 ~/reports/ml-cache/earnings_*.json               — earnings_data 종목별 요약 12h 캐시
+~/reports/ml-cache/earnings_predictor.pkl        — 실적 서프라이즈 G3 모델 (엣지 게이트 통과 시만 — earnings_model_retrain)
+~/reports/ml-cache/earnings_move_predictor.pkl   — 실적후 주가반응 G4 모델 (엣지 게이트 통과 시만)
+~/reports/ml-cache/marcap/marcap-YYYY.parquet    — KR 전종목 시점별 시총패널 (1995~, raw GitHub fetch+캐시; kr_market_data)
+~/reports/ml-cache/sp500_history.csv             — 美 S&P500 시점별 구성 이력 (fja05680, index_membership)
+~/reports/ml-cache/edgar/                         — SEC EDGAR companyfacts·CIK맵 캐시 (edgar)
 ~/reports/ml-cache/kr_ranker_model.pkl           — KR 전용 랭커 모델 (KOSPI 대비 초과수익, safe_unpickle)
 ~/reports/ml-cache/policy_kr_mock.json           — KR 모의 선택 정책 가중치 (learner 채택 시 갱신, 클램프)
 ~/reports/ml-data/kr_mock_decisions.jsonl        — KR 모의 편입/퇴출 결정+근거 (불변 append-only, 학습/감사 — 절대 삭제 금지)
 ~/reports/ml-data/kr_mock_outcomes.jsonl         — KR 모의 결정 실현 보상(초과수익) (불변 append-only)
 ~/reports/ml-data/kr_mock_journal/YYYY-MM.md     — 사람용 편입/퇴출 저널 (월별 누적)
+~/reports/ml-data/kospi200_members.jsonl         — KOSPI200 시점별 멤버십 forward 스냅샷 (Naver, naver_flow_snapshot)
+~/reports/ml-data/kr_flow_snapshots.jsonl        — KR 투자자 수급 일별 스냅샷 (외인/기관, Naver)
 ```
 
 ## 포트폴리오
@@ -325,6 +335,9 @@ MSFT, QQQI, ORCL, SAP, UNH, SGOV, NVDA, GOOGL, SPMO
 - 레버리지/DCA 권고 안전장치: `barbell_strategy.leverage_dca_guard`(변동성 캡·절대 상한·낙폭 정지) +
   `fetch_qqq_data` stale 플래그(묵은 데이터 시 `run()`이 Phase 에스컬레이션 보류) — 튜닝은 `BARBELL_*` env var
 - 크론 스케줄 단일 진실원: `deploy/crontab.stock-report` (변경 후 `crontab deploy/crontab.stock-report` 적용)
+- **의존성**: `requirements.txt` 가 작동 .venv 의 정확한 핀(Python 3.11). 재구축 = `uv venv && uv pip install -r requirements.txt`.
+  새 의존성 설치 시 `uv pip freeze > requirements.txt` 로 갱신 필수(미기록 시 재구축에서 소실). pandas 는 <3 고정(pykrx 호환).
+- **`reports/` gitignore 퀴크**: `.gitignore` 가 `reports/` 를 무시 → reports/ 소스 신규 파일은 `git add -f` 필요(기존 추적 파일은 유지). 출력 `~/reports/` 와 소스 `reports/` 가 같은 패턴에 걸리는 레거시 — 신규 reports 모듈 추가 시 주의.
 - 기록로그(tax/history/dividend/signal_outcomes/price_alerts)는 `store.py` 경유 — 직접 파일 R/W 금지
   (DB 경로 override: `STOCK_REPORT_DB` env var, 기본 `~/.local/share/stock-report/stock_report.db`)
 - 설정 블롭(dca/target/leverage)은 store 권위 + 파일 미러(`store.save_doc`) — advisor 편집은

@@ -18,7 +18,6 @@ import logging
 import os
 import time
 import urllib.parse
-import urllib.request
 from pathlib import Path
 
 logger = logging.getLogger(__name__)
@@ -37,8 +36,8 @@ def _fetch_sp500_history():
         _CACHE_DIR.mkdir(parents=True, exist_ok=True)
         fresh = _SP500_CACHE.exists() and (time.time() - _SP500_CACHE.stat().st_mtime) < _SP500_TTL_H * 3600
         if not fresh:
-            req = urllib.request.Request(_SP500_URL, headers={"User-Agent": "Mozilla/5.0"})
-            raw = urllib.request.urlopen(req, timeout=30).read()
+            from lib.http_utils import http_get
+            raw = http_get(_SP500_URL, timeout=30)
             tmp = _SP500_CACHE.with_suffix(".tmp")
             tmp.write_bytes(raw)
             os.replace(tmp, _SP500_CACHE)

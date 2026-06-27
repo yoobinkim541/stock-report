@@ -17,16 +17,9 @@ logger = logging.getLogger(__name__)
 
 
 def _closes(ticker: str, *, days: int = 800):
-    """일별 종가 Series (yfinance). 실패 시 None."""
-    try:
-        import yfinance as yf
-        df = yf.Ticker(ticker).history(period=f"{min(days, 1500)}d", auto_adjust=True)
-        if df is None or len(df) == 0:
-            return None
-        return df["Close"].dropna()
-    except Exception as e:
-        logger.debug("가격 조회 실패 %s: %s", ticker, e)
-        return None
+    """일별 종가 Series — lib.price_utils.fetch_closes 위임(행위 동일; tz 정규화는 post_earnings_reactions 가 멱등 처리)."""
+    from lib.price_utils import fetch_closes
+    return fetch_closes(ticker, period=f"{min(days, 1500)}d")
 
 
 def post_earnings_reactions(ticker: str, *, prices=None, hist=None) -> list[dict]:

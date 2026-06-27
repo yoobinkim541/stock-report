@@ -14,13 +14,11 @@ import json
 import logging
 import os
 import time
-import urllib.request
 from pathlib import Path
 
 logger = logging.getLogger(__name__)
 
 _CACHE_DIR = Path(os.path.expanduser("~/reports/ml-cache/edgar"))
-_UA = {"User-Agent": "stock-report research (yoobinkim2006@gmail.com)"}
 _CIK_TTL_H = 24 * 7
 _FACTS_TTL_H = 24 * 7
 
@@ -32,8 +30,8 @@ _LIAB_CONCEPTS = ["Liabilities"]
 
 
 def _get(url: str) -> bytes:
-    req = urllib.request.Request(url, headers=_UA)
-    return urllib.request.urlopen(req, timeout=30).read()
+    from lib.http_utils import http_get, EDGAR_UA      # SEC 준수 UA(연락처)
+    return http_get(url, timeout=30, ua=EDGAR_UA)
 
 
 def _cik_map() -> dict:

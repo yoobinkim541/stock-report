@@ -44,42 +44,18 @@ def event_features(prior_surprises: list, mom_20d=None, vol_20d=None, revision_m
 
 
 def _price_feats(closes, event_date):
-    """실적일 직전 20거래일 모멘텀·변동성. closes=종가 Series(tz-naive). 실패 시 (None,None)."""
-    try:
-        import pandas as pd
-        d = pd.Timestamp(event_date)
-        pre = closes[closes.index < d]
-        if len(pre) < 21:
-            return None, None
-        window = pre.iloc[-21:]
-        mom = float(window.iloc[-1] / window.iloc[0] - 1.0)
-        rets = window.pct_change().dropna()
-        vol = float(rets.std()) if len(rets) > 1 else None
-        return round(mom, 4), (round(vol, 4) if vol is not None else None)
-    except Exception:
-        return None, None
+    """lib.price_utils.window_feats 위임 (행위 동일 — 실적일 직전 21거래일 모멘텀·변동성)."""
+    from lib.price_utils import window_feats
+    return window_feats(closes, event_date)
 
 
 def build_training_set(tickers: list[str], *, min_prior: int = 3, limit: int = 20):
     """yfinance 과거 서프라이즈 + 가격 → (rows, labels, meta). label=beat(서프라이즈>0). 시간순.
 
-    각 이벤트는 직전 서프라이즈 min_prior 개 이상일 때만 포함(워밍업). 무네트워크 테스트는 _hist_fn/_close_fn 주입.
+    각 이벤트는 직전 서프라이즈 min_prior 개 이상일 때만 포함(워밍업).
     """
-    import pandas as pd
     from providers import earnings_data as ed
-
-    def _closes(tk):
-        try:
-            import yfinance as yf
-            h = yf.Ticker(tk).history(period="6y", auto_adjust=True)
-            if h is None or len(h) == 0:
-                return None
-            c = h["Close"].dropna()
-            if getattr(c.index, "tz", None) is not None:
-                c.index = c.index.tz_localize(None)
-            return c
-        except Exception:
-            return None
+    from lib.price_utils import fetch_closes
 
     rows, labels, meta = [], [], []
     for tk in tickers:
@@ -91,7 +67,7 @@ def build_training_set(tickers: list[str], *, min_prior: int = 3, limit: int = 2
         hist = sorted(hist, key=lambda h: h["date"])           # 시간순
         if len(hist) <= min_prior:
             continue
-        closes = _closes(tk)
+        closes = fetch_closes(tk)
         for i in range(min_prior, len(hist)):
             ev = hist[i]
             prior = [hist[j]["surprise_pct"] for j in range(i)]
@@ -176,14 +152,10 @@ def features_now(ticker: str, *, today: str | None = None) -> dict:
                   key=lambda h: h["date"])
     prior = [h["surprise_pct"] for h in hist]
     mom = vol = rev = None
-    try:
-        import yfinance as yf
-        c = yf.Ticker(ticker).history(period="3mo", auto_adjust=True)["Close"].dropna()
-        if getattr(c.index, "tz", None) is not None:
-            c.index = c.index.tz_localize(None)
-        mom, vol = _price_feats(c, today or _dt.date.today().isoformat())
-    except Exception:
-        pass
+    from lib.price_utils import fetch_closes, window_feats
+    c = fetch_closes(ticker, period="3mo")
+    if c is not None:
+        mom, vol = window_feats(c, today or _dt.date.today().isoformat())
     try:
         rev = ed.consensus(ticker).get("revision_momentum")
     except Exception:

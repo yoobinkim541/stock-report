@@ -16,15 +16,12 @@ from __future__ import annotations
 import json
 import logging
 import re
-import urllib.request
-
 logger = logging.getLogger(__name__)
-
-_H = {"User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36"}
 
 
 def _get(url: str) -> bytes:
-    return urllib.request.urlopen(urllib.request.Request(url, headers=_H), timeout=20).read()
+    from lib.http_utils import http_get
+    return http_get(url, timeout=20)
 
 
 def _num(s):

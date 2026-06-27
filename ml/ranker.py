@@ -404,7 +404,6 @@ def rank_today(
         save_ranker(result, cache_path)
 
     # 오늘 데이터로 예측
-    universe = result.meta.get("tickers", None)
     from ml.data_pipeline import fetch_universe, PORTFOLIO_TICKERS
     tickers = fetch_universe(mode)
 

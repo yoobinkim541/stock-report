@@ -44,44 +44,22 @@ def event_features(prior_abs_moves: list, prior_drift_hits: list, prior_surprise
 
 
 def _price_feats(closes, event_date):
-    try:
-        import pandas as pd
-        d = pd.Timestamp(event_date)
-        pre = closes[closes.index < d]
-        if len(pre) < 21:
-            return None, None
-        w = pre.iloc[-21:]
-        mom = float(w.iloc[-1] / w.iloc[0] - 1.0)
-        rets = w.pct_change().dropna()
-        return round(mom, 4), (round(float(rets.std()), 4) if len(rets) > 1 else None)
-    except Exception:
-        return None, None
+    """lib.price_utils.window_feats 위임 (행위 동일)."""
+    from lib.price_utils import window_feats
+    return window_feats(closes, event_date)
 
 
 def build_training_set(tickers: list[str], *, min_prior: int = 3):
     """earnings_reaction 과거 반응 → (rows, mag_labels, dir_labels, meta). 시간순.
 
-    mag_label=|reaction_1d|, dir_label=1 if reaction_1d>0. 무네트워크 테스트는 모듈 함수 monkeypatch.
+    mag_label=|reaction_1d|, dir_label=1 if reaction_1d>0.
     """
     from reports import earnings_reaction as er
-    from providers import earnings_data as ed
-
-    def _closes(tk):
-        try:
-            import yfinance as yf
-            h = yf.Ticker(tk).history(period="6y", auto_adjust=True)
-            if h is None or len(h) == 0:
-                return None
-            c = h["Close"].dropna()
-            if getattr(c.index, "tz", None) is not None:
-                c.index = c.index.tz_localize(None)
-            return c
-        except Exception:
-            return None
+    from lib.price_utils import fetch_closes
 
     rows, mag, dirn, meta = [], [], [], []
     for tk in tickers:
-        closes = _closes(tk)
+        closes = fetch_closes(tk)
         reactions = er.post_earnings_reactions(tk, prices=closes) if closes is not None else []
         reactions = [r for r in reactions if r.get("reaction_1d") is not None]
         if len(reactions) <= min_prior:
@@ -188,15 +166,8 @@ def features_now(ticker: str, *, today: str | None = None, beat_prob=None) -> di
     """다음 실적 직전 피처 1행 — 과거 반응 통계 + 최근 모멘텀/변동성 + (G3)beat확률."""
     import datetime as _dt
     from reports import earnings_reaction as er
-    closes = None
-    try:
-        import yfinance as yf
-        c = yf.Ticker(ticker).history(period="6y", auto_adjust=True)["Close"].dropna()
-        if getattr(c.index, "tz", None) is not None:
-            c.index = c.index.tz_localize(None)
-        closes = c
-    except Exception:
-        pass
+    from lib.price_utils import fetch_closes, window_feats
+    closes = fetch_closes(ticker)
     reactions = er.post_earnings_reactions(ticker, prices=closes) if closes is not None else []
     reactions = [r for r in reactions if r.get("reaction_1d") is not None]
     abs_moves = [abs(r["reaction_1d"]) for r in reactions]
@@ -206,7 +177,7 @@ def features_now(ticker: str, *, today: str | None = None, beat_prob=None) -> di
                   for r in reactions if r.get("surprise_pct") is not None and r.get("drift_5d") is not None]
     mom = vol = None
     if closes is not None:
-        mom, vol = _price_feats(closes, today or _dt.date.today().isoformat())
+        mom, vol = window_feats(closes, today or _dt.date.today().isoformat())
     return {"features": event_features(abs_moves, drift_hits, surprises, mom, vol, beat_prob=beat_prob)}
 
 
