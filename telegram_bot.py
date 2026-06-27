@@ -54,6 +54,7 @@ from barbell_strategy import (
     TELEGRAM_TOKEN, TELEGRAM_CHAT_ID,
 )
 from ml import risk_model
+from providers.market_data import freshness_note
 from bot.attachment_parser import (
     extract_text_from_pdf, extract_text_from_image,
     parse_portfolio_from_text, parse_sells_from_text,
@@ -327,6 +328,7 @@ def fetch_market(force: bool = False) -> dict:
         "exchange_rate": fx, "portfolio": port, "qqqi_div": div,
         "market_type": market_type, "phase_key": phase_key,
         "fetched_at": datetime.now().strftime("%m/%d %H:%M"),
+        "fetched_ts": now,
     }
     with _cache_lock:
         _cache["data"] = data
@@ -1443,15 +1445,25 @@ _MARKET_CMDS = {
 }
 
 
+# 신선도 한 줄을 붙일 명령 (라이브 시세 대시보드·결정). /help·/history 제외(정적·일별).
+_FRESHNESS_CMDS = {"/status", "/summary", "/phase", "/portfolio",
+                   "/rebalance", "/dca", "/sgov", "/risk"}
+# 실시간 시세 필요한 결정·평가 명령 — 5분 캐시 우회(force).
+_FORCE_FRESH_CMDS = {"/portfolio", "/risk", "/rebalance", "/dca", "/sgov"}
+# 포지션 의존(개별 종목 가격) 명령 — 가격도 갱신.
+_FORCE_REFRESH_PRICES = {"/portfolio", "/risk", "/rebalance"}
+
+
 def _dispatch_market(cmd: str, chat_id: str):
     typing(chat_id)
     try:
-        if cmd in ("/portfolio", "/risk"):
+        if cmd in _FORCE_REFRESH_PRICES:
             refresh_portfolio_prices()
-            d = fetch_market(force=True)
-        else:
-            d = fetch_market()
-        send(chat_id, _MARKET_CMDS[cmd](d, chat_id))
+        d = fetch_market(force=(cmd in _FORCE_FRESH_CMDS))
+        out = _MARKET_CMDS[cmd](d, chat_id)
+        if cmd in _FRESHNESS_CMDS:
+            out = out.rstrip() + "\n" + freshness_note(d.get("fetched_ts"))
+        send(chat_id, out)
     except Exception as e:
         send(chat_id, f"❌ 오류: {e}")
         logger.exception(f"dispatch {cmd}")

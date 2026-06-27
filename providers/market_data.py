@@ -17,7 +17,7 @@ import os
 import json
 import time
 import logging
-from datetime import datetime
+from datetime import datetime, timezone, timedelta
 
 import numpy as np
 import requests
@@ -419,6 +419,33 @@ def _realtime_spot_overlay(tickers: list) -> dict:
     except Exception:
         pass
     return out
+
+
+def freshness_note(fetched_ts, *, now: float | None = None) -> str:
+    """대시보드/결정 명령용 신선도 한 줄. fetched_ts = 시장데이터 조회 epoch.
+
+    실시간 스트림 가동 중이면 'ON(N초)' 표기, 아니면 yfinance. 데이터가 언제 기준인지 일관 노출.
+    """
+    now = time.time() if now is None else now
+    if fetched_ts:
+        try:
+            kst = datetime.fromtimestamp(float(fetched_ts), tz=timezone(timedelta(hours=9)))
+            when = kst.strftime("%H:%M:%S")
+            age = max(0.0, now - float(fetched_ts))
+            age_str = f"{int(age)}초 전" if age < 90 else f"{int(age // 60)}분 전"
+        except (ValueError, TypeError, OSError):
+            when, age_str = "?", "?"
+    else:
+        when, age_str = "?", "?"
+    src = "yfinance"
+    try:
+        import providers.realtime_quotes as _rq
+        if _rq.enabled():
+            hb = _rq.heartbeat_age()
+            src = f"실시간 ON({int(hb)}초)" if (hb is not None and hb <= _rq.HEARTBEAT_STALE_S) else "실시간 대기"
+    except Exception:
+        pass
+    return f"🕒 {when} KST ({age_str}) · 시세 {src}"
 
 
 def fetch_portfolio_value() -> dict:
