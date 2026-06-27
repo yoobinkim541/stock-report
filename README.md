@@ -60,6 +60,77 @@ flowchart TD
 - **매매 미실행**(하드블록) — 봇은 *권고만*, 매수는 사용자 수동.
 - 레버리지 가드(변동성캡·절대상한·낙폭정지) · stale 데이터 시 Phase 에스컬레이션 보류 · 게스트 RBAC(서술 OK·지시 금지) · 로그 토큰 마스킹.
 
+### 🔄 적응 학습 루프 (전략 자동 조절)
+
+**"시장 따라 전략을 유동적으로 바꾸나?"** → 검증된 범위에서 그렇습니다. 베이스 전술배분(라이브)이 시장에 반응하고, 집행 결과가 학습 엔진으로 피드백되어 **★목적함수(아웃퍼폼 + MDD≤지수)** 로 채점·재튜닝됩니다. 단 모든 조정 제안은 **백테스트 OOS 게이트**를 통과해야만 라이브로 반영됩니다 — 미입증은 shadow(기본 OFF)·차단. (재량적 신규 논제 형성은 못 함 — 학습된 전략 공간 내 파라미터 재튜닝.)
+
+```mermaid
+flowchart TD
+    subgraph IN["① 시장 데이터"]
+      D1["가격·RSI·VIX·F&G<br/>모멘텀·낙폭"]
+      D2["Kaufman ER<br/>추세 vs 횡보"]
+    end
+    subgraph DET["② 감지·분류"]
+      C1["classify_market<br/>Phase 0~5"]
+      C2["regime_classifier<br/>추세/횡보"]
+    end
+    DISP["📄 리포트 · /status<br/>표시 전용"]
+    subgraph BASE["③ 베이스 전술배분 — 라이브"]
+      B1["DCA 배율 0.5×~5×"]
+      B2["SGOV 현금버퍼"]
+      B3["레버리지 QLD/TQQQ"]
+      B4["ML DCA blend"]
+    end
+    subgraph EXEC["④ 집행"]
+      X1["실계좌: 권고만(수동)"]
+      X2["KR 모의: 자동(paper)"]
+    end
+    subgraph LEARN["⑤ 적응 학습 엔진 · ml/adaptive"]
+      A1["ledger 불변원장"]
+      A2["reward ★목적함수<br/>아웃퍼폼+MDD≤지수"]
+      A3["learner OOS 게이트"]
+      A4["champion–challenger"]
+    end
+    subgraph EVAL["⑥ 적응 평가 크론 · shadow(기본 OFF)"]
+      E1["longterm 레버리지↓"]
+      E2["advice A/B"]
+      E3["entry 임계값"]
+      E4["leverage Optuna"]
+      E5["kr_mock RL"]
+    end
+    GATE["⑦ 검증 게이트 🚦<br/>백테스트 OOS<br/>비용·룩어헤드 반영"]
+    NOGO["❌ NO-GO<br/>횡보·평균회귀·KR랭커"]
+
+    IN --> DET
+    C1 --> BASE
+    C2 --> DISP
+    BASE --> EXEC
+    EXEC -. 실현 결과 .-> LEARN
+    A1 --> A2 --> A3 --> A4
+    LEARN --> EVAL --> GATE
+    GATE -- "GO" --> BASE
+    GATE -- "NO-GO" --> NOGO
+
+    classDef data fill:#263238,stroke:#80cbc4,color:#fff
+    classDef live fill:#1b5e20,stroke:#a5d6a7,color:#fff
+    classDef engine fill:#4a148c,stroke:#ce93d8,color:#fff
+    classDef shadow fill:#5d4037,stroke:#ffcc80,color:#fff
+    classDef gate fill:#0d47a1,stroke:#90caf9,color:#fff
+    classDef block fill:#7f1d1d,stroke:#fca5a5,color:#fff
+    class IN,DET,D1,D2,C1,C2,DISP data
+    class BASE,B1,B2,B3,B4,EXEC,X1,X2 live
+    class LEARN,A1,A2,A3,A4 engine
+    class EVAL,E1,E2,E3,E4,E5 shadow
+    class GATE gate
+    class NOGO block
+```
+
+- 🟢 **라이브** — 검증된 자동 조절 (Phase 전술배분·DCA·레버리지)
+- 🟣 **학습 엔진** — 결과 기록(ledger) + ★목적함수 채점
+- 🟤 **shadow** — 적응 제안 (기본 OFF, `ADAPTIVE_*` 켜야 라이브 반영)
+- 🔵 **검증 게이트** → 🔴 **NO-GO**: 횡보 디리스크·평균회귀·KR랭커는 엣지 부재로 차단(감지·표시만)
+- `regime_classifier` 는 **옆가지(표시 전용)** — Phase만 배분을 움직이고, 횡보 감지는 인식만.
+
 ---
 
 ## ⚙️ 스크립트 목록
