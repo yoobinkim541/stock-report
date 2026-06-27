@@ -68,9 +68,31 @@ def remove_alert(alert_id: str) -> bool:
     return False
 
 
+_ALERT_STALE_S = int(os.getenv("REALTIME_ALERT_STALE_S", "30"))
+
+
+def _spot_price(ticker: str):
+    """현재가 — 실시간 캐시(활성·신선) 우선, 실패 시 yfinance. 예외 무발(폴백 보장)."""
+    try:
+        from providers import realtime_quotes
+        if realtime_quotes.enabled():
+            rt = realtime_quotes.get_price(ticker.split(".")[0], max_age_s=_ALERT_STALE_S)
+            if rt:
+                return rt
+    except Exception:
+        pass
+    try:
+        hist = yf.Ticker(ticker).history(period="1d")
+        if not hist.empty:
+            return float(hist["Close"].iloc[-1])
+    except Exception:
+        pass
+    return None
+
+
 def check_alerts() -> list:
     """
-    미발동 알림 대상으로 yfinance 실시간 가격 조회 후 조건 충족 시 트리거.
+    미발동 알림 대상으로 가격 조회(실시간 캐시→yfinance 폴백) 후 조건 충족 시 트리거.
     Returns: 이번 호출에서 트리거된 알림 목록.
     """
     alerts = load_alerts()
@@ -93,16 +115,13 @@ def check_alerts() -> list:
     if not active:
         return []
 
-    # 필요한 종목 일괄 조회
+    # 필요한 종목 일괄 조회 (실시간 캐시 우선·yfinance 폴백)
     tickers = list({a["ticker"] for a in active})
     prices: dict[str, float] = {}
     for ticker in tickers:
-        try:
-            hist = yf.Ticker(ticker).history(period="1d")
-            if not hist.empty:
-                prices[ticker] = float(hist["Close"].iloc[-1])
-        except Exception:
-            pass
+        p = _spot_price(ticker)
+        if p is not None:
+            prices[ticker] = p
 
     triggered = []
     for alert in alerts:
