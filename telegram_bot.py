@@ -1575,9 +1575,19 @@ def _dispatch_tax(chat_id: str, args: list):
     cmd_tax(chat_id, args, send)
 
 
+# 6티어 검증상 무엣지(종목선택·장중타이밍)로 판정된 정보형 신호 — 출력 끝 정직 라벨.
+_NOEDGE_LABEL = ("ℹ️ 정보·표시용 — 6티어 검증상 종목선택·장중타이밍은 무엣지 판정"
+                 " (매매신호 아님 · 검증 통과는 구조적 레버리지뿐).")
+
+
+def _noedge(chat_id: str):
+    send(chat_id, _NOEDGE_LABEL)
+
+
 def _dispatch_mlreport(chat_id: str, args: list):
     typing(chat_id)
     cmd_mlreport(chat_id, args=args)
+    _noedge(chat_id)
 
 
 def cmd_ranking(chat_id: str, args: list, send_fn=None):
@@ -1602,6 +1612,7 @@ def cmd_ranking(chat_id: str, args: list, send_fn=None):
 def _dispatch_ranking(chat_id: str, args: list):
     typing(chat_id)
     cmd_ranking(chat_id, args)
+    _noedge(chat_id)
 
 
 def cmd_leverage(chat_id: str, args: list, send_fn=None):
@@ -1623,6 +1634,7 @@ def cmd_leverage(chat_id: str, args: list, send_fn=None):
 def _dispatch_leverage(chat_id: str, args: list):
     typing(chat_id)
     cmd_leverage(chat_id, args)
+    _noedge(chat_id)
 
 
 def cmd_meta(chat_id: str, args: list, send_fn=None):
@@ -1643,11 +1655,13 @@ def cmd_meta(chat_id: str, args: list, send_fn=None):
 def _dispatch_meta(chat_id: str, args: list):
     typing(chat_id)
     cmd_meta(chat_id, args)
+    _noedge(chat_id)
 
 
 def _dispatch_entry(chat_id: str, args: list):
     typing(chat_id)
     cmd_entry(chat_id, args)
+    _noedge(chat_id)
 
 
 def cmd_intraday(chat_id: str, args: list, send_fn=None) -> None:
@@ -1729,6 +1743,7 @@ def cmd_intraday(chat_id: str, args: list, send_fn=None) -> None:
 def _dispatch_intraday(chat_id: str, args: list):
     typing(chat_id)
     cmd_intraday(chat_id, args)
+    _noedge(chat_id)
 
 
 def _dispatch_mock(chat_id: str, args: list):
