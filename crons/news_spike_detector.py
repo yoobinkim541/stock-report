@@ -177,6 +177,22 @@ def _send_telegram(text: str) -> bool:
     return notify.send_telegram(text, token=BOT_TOKEN, chat_id=CHAT_ID)
 
 
+def _realtime_tag(tickers: list) -> str:
+    """태그된 종목의 실시간 시세 동반표시(REALTIME_ENABLED·신선시). 없으면 빈 문자열(부가·차단無)."""
+    try:
+        from providers import realtime_quotes
+        if not realtime_quotes.enabled() or not tickers:
+            return ""
+        bits = []
+        for t in tickers[:5]:
+            p = realtime_quotes.get_price(str(t).split(".")[0])
+            if p:
+                bits.append(f"{t} ${p:,.2f}")
+        return ("  📈 실시간 " + " · ".join(bits)) if bits else ""
+    except Exception:
+        return ""
+
+
 def _format_alert(event: dict, score: int, reason: str) -> str:
     title   = event.get("title") or "[제목 없음]"
     tickers = [t.lstrip("$") for t in (event.get("tags") or []) if t.startswith("$")]
@@ -192,6 +208,9 @@ def _format_alert(event: dict, score: int, reason: str) -> str:
     ]
     if ticker_str:
         lines.append(ticker_str)
+        rt = _realtime_tag(tickers)
+        if rt:
+            lines.append(rt)
     lines.append(f"  {pub} KST · saveticker")
     return "\n".join(lines)
 
