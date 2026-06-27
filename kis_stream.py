@@ -49,6 +49,8 @@ FLUSH_SECS = float(os.getenv("REALTIME_FLUSH_SECS", "1.0"))
 KR_MAX = int(os.getenv("REALTIME_KR_MAX", "10"))
 US_MAX = int(os.getenv("REALTIME_US_MAX", "10"))
 WATCHLIST_REFRESH_SECS = int(os.getenv("REALTIME_WATCHLIST_REFRESH_SECS", "90"))
+# 벤치마크 코어 — 보유 아니어도 상시 스트림(대시보드 /status·/phase 실시간 QQQ). ticker-ok
+_CORE_US = [t.strip().upper() for t in os.getenv("REALTIME_CORE_US", "QQQ").split(",") if t.strip()]
 
 # 필드 인덱스 표 (KR=문서순·확정대상은 라이브 스모크). _ff 로 안전 캐스팅.
 _KR_TRADE_PRICE_IDX, _KR_TRADE_VOL_IDX = 2, 13
@@ -325,8 +327,8 @@ def _classify(ticker: str, kr: list, us: list) -> None:
 
 
 def compute_watchlist() -> tuple[dict, dict]:
-    """보유(국내+해외) ∪ 활성 가격알림 → select_watchlist. 소스는 시스템 단일진실원 재사용."""
-    kr, us = [], []
+    """벤치마크 코어 ∪ 보유(국내+해외) ∪ 활성 가격알림 → select_watchlist. 단일진실원 재사용."""
+    kr, us = [], list(_CORE_US)     # QQQ 등 벤치마크 최우선(대시보드 실시간가)
     try:
         import portfolio_universe
         for t in portfolio_universe.load_portfolio_tickers():

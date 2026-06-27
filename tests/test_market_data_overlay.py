@@ -41,5 +41,20 @@ def test_overlay_never_raises(monkeypatch):
     assert md._realtime_spot_overlay(["MSFT"]) == {}   # 예외 → {} (폴백 보장)
 
 
+def test_fetch_qqq_realtime_overlay(monkeypatch):
+    """fetch_qqq_data: 실시간 신선시 current 를 실시간가로 교체, 아니면 yfinance 종가."""
+    import pandas as pd
+    idx = pd.date_range("2026-01-01", periods=70, freq="D")
+    df = pd.DataFrame({"High": [100.0] * 70, "Low": [90.0] * 70, "Close": [95.0] * 70}, index=idx)
+    monkeypatch.setattr(md, "_history_cached", lambda *a, **k: df)
+    monkeypatch.setattr(md, "_update_drawdown_anchor", lambda h, c: h)   # 파일 I/O 회피
+
+    monkeypatch.setattr(md, "_realtime_current", lambda s: 98.0)         # 실시간 오버레이
+    assert md.fetch_qqq_data()["current"] == 98.0
+
+    monkeypatch.setattr(md, "_realtime_current", lambda s: None)         # 실시간 없음 → 종가
+    assert md.fetch_qqq_data()["current"] == 95.0
+
+
 if __name__ == "__main__":
     sys.exit(pytest.main([__file__, "-v"]))

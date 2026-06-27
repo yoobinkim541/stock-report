@@ -44,5 +44,15 @@ def test_classify_kr_us_strips_suffix():
     assert us == ["AAPL", "MSFT"]
 
 
+def test_core_us_includes_qqq():
+    assert "QQQ" in ks._CORE_US                     # 벤치마크 코어 기본값
+
+
+def test_compute_watchlist_streams_core_qqq():
+    """compute_watchlist 는 보유/알림과 무관하게 QQQ(코어)를 최우선 포함."""
+    sel, _ = ks.compute_watchlist()
+    assert "QQQ" in sel["US"]                        # 코어는 캡 안에서 항상 생존(최우선)
+
+
 if __name__ == "__main__":
     sys.exit(pytest.main([__file__, "-v"]))

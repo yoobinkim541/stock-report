@@ -250,8 +250,11 @@ def fetch_qqq_data() -> dict:
             return {}
         closes_s = valid["Close"]
         current = _safe_float(closes_s.iloc[-1])
+        rt = _realtime_current("QQQ")              # 실시간 스트림 신선시 장중 현재가로 오버레이
+        if rt and rt > 0:
+            current = round(float(rt), 2)
         # 종가 기준 고저 — 장중 고가(High) 대비 종가 비교는 낙폭을 체계적으로 과대측정
-        high_52w = _safe_float(closes_s.max())
+        high_52w = max(_safe_float(closes_s.max()), current)   # 실시간 신고가 반영
         low_52w = _safe_float(closes_s.min())
         if current <= 0 or high_52w <= 0 or low_52w <= 0 or low_52w > high_52w:
             logger.warning("QQQ 데이터 비정상 — current=%s high_52w=%s low_52w=%s", current, high_52w, low_52w)
@@ -419,6 +422,17 @@ def _realtime_spot_overlay(tickers: list) -> dict:
     except Exception:
         pass
     return out
+
+
+def _realtime_current(symbol: str):
+    """실시간 캐시 현재가(스트림 가동·신선시). 비활성/없음/stale → None. 예외 무발."""
+    try:
+        from providers import realtime_quotes
+        if realtime_quotes.enabled():
+            return realtime_quotes.get_price(symbol)
+    except Exception:
+        pass
+    return None
 
 
 def freshness_note(fetched_ts, *, now: float | None = None) -> str:
