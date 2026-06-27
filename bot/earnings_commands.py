@@ -114,8 +114,25 @@ def _detail(send, chat_id: str, ticker: str) -> None:
             parts.append(f"드리프트 지속성 {rsum['drift_persistence'] * 100:.0f}%")
         lines.append(f"실적후 반응(PEAD, {rsum['n']}회): " + " · ".join(parts))
 
+    # 실험적 예측(모델 캐시 있을 때만 — US·정보형). 방향은 예측 불가라 확률·변동폭만.
+    if not s.get("degraded") and n.get("date"):
+        try:
+            from ml import earnings_predictor as _g3
+            from ml import earnings_move_predictor as _g4
+            pb = _g3.predict_for_ticker(ticker)
+            mv = _g4.predict_for_ticker(ticker, beat_prob=pb)
+            pp = []
+            if pb is not None:
+                pp.append(f"beat 확률 {pb * 100:.0f}%")
+            if mv and mv.get("expected_abs_move") is not None:
+                pp.append(f"기대 변동폭 ±{mv['expected_abs_move'] * 100:.1f}%")
+            if pp:
+                lines.append("🔮 예측(실험적): " + " · ".join(pp))
+        except Exception:
+            pass
+
     lines.append("")
-    lines.append("※ 정보 제공 — 예측 아님. 투자 판단은 본인 책임.")
+    lines.append("※ 정보·실험적 예측 — 방향예측은 불가(변동폭·확률만). 투자 판단은 본인 책임.")
     send(chat_id, "\n".join(lines))
 
 

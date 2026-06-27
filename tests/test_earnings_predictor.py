@@ -47,6 +47,27 @@ def test_predict_none_neutral():
     assert ep.predict_beat(None, [{"features": {}}]) == [0.5]    # 모델 없음 → 중립
 
 
+def test_save_load_roundtrip(tmp_path):
+    import numpy as np
+    from ml import earnings_predictor as ep
+    rng = np.random.default_rng(3)
+    rows, labels = [], []
+    for _ in range(220):
+        pbr = float(rng.random())
+        feats = {c: 0.0 for c in ep.FEATURE_COLS}
+        feats["prior_beat_rate"] = pbr
+        rows.append({"features": feats})
+        labels.append(1 if pbr + rng.normal(0, 0.05) > 0.5 else 0)
+    res = ep.train(rows, labels)
+    assert res["model"] is not None
+    p = tmp_path / "m.pkl"
+    ep.save_model(res["model"], p)
+    m2 = ep.load_model(p)
+    assert m2 is not None
+    assert ep.predict_beat(res["model"], rows[:3]) == ep.predict_beat(m2, rows[:3])   # 동일 예측
+    assert ep.load_model(tmp_path / "none.pkl") is None        # 없는 파일 → None
+
+
 if __name__ == "__main__":
     import pytest
     sys.exit(pytest.main([__file__, "-v"]))

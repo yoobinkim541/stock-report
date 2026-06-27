@@ -13,9 +13,14 @@ event_features 순수(테스트). build_training_set 은 earnings_reaction(과�
 from __future__ import annotations
 
 import logging
+import os
+import pickle
 import statistics
+from pathlib import Path
 
 logger = logging.getLogger(__name__)
+
+MODEL_PATH = Path(os.path.expanduser("~/reports/ml-cache/earnings_move_predictor.pkl"))
 
 FEATURE_COLS = ["hist_avg_abs_move", "hist_drift_persist", "prior_surprise_mean",
                 "mom_20d", "vol_20d", "beat_prob", "iv_expected_move"]
@@ -154,3 +159,64 @@ def predict(res: dict, rows: list[dict]) -> list[dict]:
     except Exception as e:
         logger.warning("주가반응 예측 실패: %s", e)
     return out
+
+
+# ── 모델 영속화 + 단일종목 추론(라이브 /earnings 배선) ──────────────────────────
+
+def save_model(res: dict, path: Path = MODEL_PATH) -> None:
+    if not res or res.get("mag_model") is None:
+        return
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with open(path, "wb") as f:
+            pickle.dump({"mag_model": res["mag_model"], "dir_model": res.get("dir_model")}, f)
+    except Exception as e:
+        logger.warning("earnings_move 저장 실패: %s", e)
+
+
+def load_model(path: Path = MODEL_PATH):
+    try:
+        if path.exists():
+            with open(path, "rb") as f:
+                return pickle.load(f)
+    except Exception as e:
+        logger.warning("earnings_move 로드 실패: %s", e)
+    return None
+
+
+def features_now(ticker: str, *, today: str | None = None, beat_prob=None) -> dict:
+    """다음 실적 직전 피처 1행 — 과거 반응 통계 + 최근 모멘텀/변동성 + (G3)beat확률."""
+    import datetime as _dt
+    from reports import earnings_reaction as er
+    closes = None
+    try:
+        import yfinance as yf
+        c = yf.Ticker(ticker).history(period="6y", auto_adjust=True)["Close"].dropna()
+        if getattr(c.index, "tz", None) is not None:
+            c.index = c.index.tz_localize(None)
+        closes = c
+    except Exception:
+        pass
+    reactions = er.post_earnings_reactions(ticker, prices=closes) if closes is not None else []
+    reactions = [r for r in reactions if r.get("reaction_1d") is not None]
+    abs_moves = [abs(r["reaction_1d"]) for r in reactions]
+    surprises = [r.get("surprise_pct") for r in reactions]
+    drift_hits = [1 if (r.get("surprise_pct") is not None and r.get("drift_5d") is not None
+                        and (r["surprise_pct"] > 0) == (r["drift_5d"] > 0)) else 0
+                  for r in reactions if r.get("surprise_pct") is not None and r.get("drift_5d") is not None]
+    mom = vol = None
+    if closes is not None:
+        mom, vol = _price_feats(closes, today or _dt.date.today().isoformat())
+    return {"features": event_features(abs_moves, drift_hits, surprises, mom, vol, beat_prob=beat_prob)}
+
+
+def predict_for_ticker(ticker: str, res=None, *, today: str | None = None, beat_prob=None):
+    """다음 실적 {expected_abs_move, p_up} — 모델 캐시 로드. 없으면 None."""
+    res = res if res is not None else load_model()
+    if not res or res.get("mag_model") is None:
+        return None
+    try:
+        return predict(res, [features_now(ticker, today=today, beat_prob=beat_prob)])[0]
+    except Exception as e:
+        logger.debug("move predict_for_ticker 실패 %s: %s", ticker, e)
+        return None

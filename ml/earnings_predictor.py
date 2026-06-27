@@ -14,9 +14,14 @@ event_features 는 순수(무네트워크 테스트). build_training_set 은 yfi
 from __future__ import annotations
 
 import logging
+import os
+import pickle
 import statistics
+from pathlib import Path
 
 logger = logging.getLogger(__name__)
+
+MODEL_PATH = Path(os.path.expanduser("~/reports/ml-cache/earnings_predictor.pkl"))
 
 FEATURE_COLS = ["prior_n", "prior_surprise_mean", "prior_surprise_std", "prior_beat_rate",
                 "last_surprise", "mom_20d", "vol_20d", "revision_momentum"]
@@ -138,3 +143,61 @@ def predict_beat(model, rows: list[dict]) -> list[float]:
         return [float(p) for p in model.predict_proba(np.array(_matrix(rows), float))[:, 1]]
     except Exception:
         return [0.5] * len(rows)
+
+
+# ── 모델 영속화 + 단일종목 추론(라이브 /earnings 배선) ──────────────────────────
+
+def save_model(model, path: Path = MODEL_PATH) -> None:
+    if model is None:
+        return
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with open(path, "wb") as f:
+            pickle.dump(model, f)
+    except Exception as e:
+        logger.warning("earnings_predictor 저장 실패: %s", e)
+
+
+def load_model(path: Path = MODEL_PATH):
+    try:
+        if path.exists():
+            with open(path, "rb") as f:
+                return pickle.load(f)
+    except Exception as e:
+        logger.warning("earnings_predictor 로드 실패: %s", e)
+    return None
+
+
+def features_now(ticker: str, *, today: str | None = None) -> dict:
+    """다음 실적 직전 시점 피처 1행 — 전체 과거 서프라이즈를 prior, 최근 모멘텀/변동성, 리비전 모멘텀."""
+    import datetime as _dt
+    from providers import earnings_data as ed
+    hist = sorted([h for h in ed.earnings_history(ticker, limit=20) if h.get("surprise_pct") is not None],
+                  key=lambda h: h["date"])
+    prior = [h["surprise_pct"] for h in hist]
+    mom = vol = rev = None
+    try:
+        import yfinance as yf
+        c = yf.Ticker(ticker).history(period="3mo", auto_adjust=True)["Close"].dropna()
+        if getattr(c.index, "tz", None) is not None:
+            c.index = c.index.tz_localize(None)
+        mom, vol = _price_feats(c, today or _dt.date.today().isoformat())
+    except Exception:
+        pass
+    try:
+        rev = ed.consensus(ticker).get("revision_momentum")
+    except Exception:
+        pass
+    return {"features": event_features(prior, mom, vol, revision_momentum=rev)}
+
+
+def predict_for_ticker(ticker: str, model=None, *, today: str | None = None):
+    """다음 실적 P(beat) — 모델 캐시 로드. 모델/데이터 없으면 None."""
+    model = model if model is not None else load_model()
+    if model is None:
+        return None
+    try:
+        return predict_beat(model, [features_now(ticker, today=today)])[0]
+    except Exception as e:
+        logger.debug("predict_for_ticker 실패 %s: %s", ticker, e)
+        return None
