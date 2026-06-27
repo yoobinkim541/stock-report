@@ -391,6 +391,21 @@ def _factor_tilt_note() -> str:
         return ""
 
 
+def _income_engine_note() -> str:
+    """Tier5 인컴 엔진이 GO(희귀: 세후 총수익 우위)일 때만 표시 (shadow). 평시 NO-GO 공개는 일일리포트 QQQI 섹션."""
+    try:
+        import json
+        import os
+        p = os.path.expanduser("~/reports/ml-cache/income_engine_shadow.json")
+        if not os.path.exists(p):
+            return ""
+        with open(p, encoding="utf-8") as f:
+            go = json.load(f).get("verdict") == "GO"
+        return "  · 인컴 엔진: 세후 총수익 대비 우위 (게이트 GO·희귀)" if go else ""
+    except Exception:
+        return ""
+
+
 def format_risk_report(summary, now: str | None = None) -> str:
     """/risk 전체 리포트. summary None → 안내문."""
     if not summary:
@@ -424,6 +439,9 @@ def format_risk_report(summary, now: str | None = None) -> str:
         _fn = _factor_tilt_note()
         if _fn:
             L.append(_fn)
+        _in = _income_engine_note()
+        if _in:
+            L.append(_in)
     if summary.get("factor_caveat"):
         L.append(f"  ({summary['factor_caveat']})")
     L += ["", f"※ {summary.get('caveat','')}"]

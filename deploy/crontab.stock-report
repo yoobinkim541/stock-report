@@ -65,6 +65,8 @@ PATH=/home/ubuntu/.local/bin:/usr/local/bin:/usr/bin:/bin
 15 4 * * 6 cd /home/ubuntu/projects/stock-report && uv run python crons/leverage_structural_eval.py >> /tmp/leverage_structural_eval.log 2>&1  # 토 04:15 UTC = 13:15 KST
 # Tier4 팩터 프리미엄 ★게이트 재검증 (롱온리 ETF vs SPY DSR 다중검정; GO 시 shadow는 ADAPTIVE_FACTOR_TILT_ENABLED 시. 현재 NO-GO)
 45 4 * * 6 cd /home/ubuntu/projects/stock-report && uv run python crons/factor_premium_eval.py >> /tmp/factor_premium_eval.log 2>&1     # 토 04:45 UTC = 13:45 KST
+# Tier5 인컴 복리 ★게이트 재검증 (커버드콜 인컴 vs 총수익·세전세후·재투자vs비축; GO 시 shadow는 ADAPTIVE_INCOME_ENGINE_ENABLED 시. 현재 NO-GO)
+0 5 * * 6 cd /home/ubuntu/projects/stock-report && uv run python crons/income_compounding_eval.py >> /tmp/income_compounding_eval.log 2>&1  # 토 05:00 UTC = 14:00 KST
 # 포트폴리오 advice 적응 평가 (MetaAllocator A/B → blend 신뢰도 ★목적함수; ADAPTIVE_ADVICE_ENABLED 시 shadow)
 30 4 * * 6 cd /home/ubuntu/projects/stock-report && uv run python crons/advice_adaptive_eval.py >> /tmp/advice_adaptive_eval.log 2>&1       # 토 04:30 UTC = 13:30 KST
 

@@ -1362,6 +1362,7 @@ def _section_qqqi_dividend(qqqi_div: dict, market_type: str, phase_key) -> list:
         "━━━ 💰 QQQI 배당 ━━━",
         f"  월 ${qqqi_div['monthly_usd']:.2f}{per_s}  연 {qqqi_div['annual_yield_pct']:.1f}%  ({qqqi_div['note']})",
         f"  → {div_act}",
+        "  ℹ 장기복리엔 총수익(QQQ)>커버드콜 인컴 — 배당 재투자(현금비축 금물)·인컴은 방어",
     ]
 
 
