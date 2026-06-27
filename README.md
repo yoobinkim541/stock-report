@@ -131,6 +131,27 @@ flowchart TD
 - 🔵 **검증 게이트** → 🔴 **NO-GO**: 횡보 디리스크·평균회귀·KR랭커는 엣지 부재로 차단(감지·표시만)
 - `regime_classifier` 는 **옆가지(표시 전용)** — Phase만 배분을 움직이고, 횡보 감지는 인식만.
 
+### 🎯 6-Tier 퀀트 프로그램 (성장최적 복리 · 게이트 검증)
+
+제인스트리트·블랙록식 구조를 6단계로 검증 — 각 티어는 백테스트 게이트(Deflated Sharpe·PBO·낙폭예산)를 통과해야 라이브 권고. **6개 중 구조적 레버리지만 GO**, 나머지는 정직하게 NO-GO. 상세·플래그 가이드·튜닝: **[docs/QUANT_PROGRAM.md](docs/QUANT_PROGRAM.md)**.
+
+```mermaid
+flowchart TB
+    NS["🎯 성장최적 복리 머신 + 기관급 리스크 계측"]:::infra
+    NS --> T1 & T2 & T3 & T4 & T5 & T6
+    T1["① 리스크 계측<br/>/risk"]:::infra
+    T2["② 검증 formalism<br/>DSR·PBO"]:::infra
+    T3["③ 구조 레버리지<br/>✅ GO 1.3x"]:::go
+    T4["④ 팩터 틸트<br/>❌ NO-GO"]:::nogo
+    T5["⑤ 인컴 엔진<br/>❌ NO-GO"]:::nogo
+    T6["⑥ 종목 집중<br/>❌ NO-GO"]:::nogo
+    classDef infra fill:#0d47a1,stroke:#90caf9,color:#fff
+    classDef go fill:#1b5e20,stroke:#a5d6a7,color:#fff
+    classDef nogo fill:#7f1d1d,stroke:#fca5a5,color:#fff
+```
+
+> **결론**: 통과 = 보상받는 위험감수(분산책 1.3x 레버리지 + 폭락 디리스크) 1개. 예측·선택·현재수익(팩터·인컴·집중)은 전부 무엣지/방어. 모든 권고는 표시·shadow 전용·실계좌 수동(자동집행 0).
+
 ---
 
 ## ⚙️ 스크립트 목록
