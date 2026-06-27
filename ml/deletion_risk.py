@@ -95,12 +95,9 @@ def label_distress(code: str, date: str, distress_map: dict, *, horizon_m: int =
 
 
 def _to_matrix(rows: list[dict]):
-    """[{features:{...}}] → (X 리스트[리스트], 결측은 nan). LightGBM 은 nan 처리 가능."""
-    X = []
-    for r in rows:
-        f = r["features"]
-        X.append([f.get(c) if f.get(c) is not None else float("nan") for c in FEATURE_COLS])
-    return X
+    """[{features:{...}}] → X(결측 nan). lib.ml_utils.rows_to_matrix 위임."""
+    from lib.ml_utils import rows_to_matrix
+    return rows_to_matrix(rows, FEATURE_COLS)
 
 
 def train_deletion_model(rows: list[dict], labels: list[int], *, time_split: float = 0.7):

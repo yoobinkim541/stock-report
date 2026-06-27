@@ -83,8 +83,8 @@ def build_training_set(tickers: list[str], *, min_prior: int = 3):
 
 
 def _matrix(rows):
-    return [[r["features"].get(c) if r["features"].get(c) is not None else float("nan")
-             for c in FEATURE_COLS] for r in rows]
+    from lib.ml_utils import rows_to_matrix
+    return rows_to_matrix(rows, FEATURE_COLS)
 
 
 def train(rows: list[dict], mag_labels: list[float], dir_labels: list[int], *, time_split: float = 0.7) -> dict:

@@ -3,4 +3,6 @@
 http_utils  : urllib GET + User-Agent 상수 (providers 공용)
 price_utils : yfinance 종가 fetch + 실적전 모멘텀/변동성 윈도 피처 (ml 공용)
 cron_common : 크론 텔레그램 발송 통일(send_cron_telegram — 11 _send 변종 통합; crons 공용)
+file_cache  : TTL 신선도·JSON get/put·atomic write 프리미티브 (providers 공용)
+ml_utils    : rows→행렬 변환 등 ML 피처 유틸 (ml 모델 공용)
 """
