@@ -406,6 +406,24 @@ def _income_engine_note() -> str:
         return ""
 
 
+def _concentration_note(summary) -> str:
+    """과집중 경고 (Tier6) — 유효분산 낮고 단일종목 위험 높으면. 종목집중=보상없는 위험(게이트 NO-GO)."""
+    try:
+        if not summary:
+            return ""
+        n_eff, n = summary.get("n_eff"), summary.get("n_assets")
+        contribs = summary.get("contributions") or []
+        if not n_eff or not n or not contribs:
+            return ""
+        top_name, _dollar, top_pc = contribs[0]
+        if (n_eff / n) < 0.7 and top_pc > 0.25:
+            return (f"  · 집중 점검: 유효분산 {n_eff:.1f}/{n} (단일 {top_name} {top_pc*100:.0f}%) — "
+                    f"종목집중은 보상없는 위험(검증 NO-GO)·분산 권고; 집중은 구조레버리지로만")
+        return ""
+    except Exception:
+        return ""
+
+
 def format_risk_report(summary, now: str | None = None) -> str:
     """/risk 전체 리포트. summary None → 안내문."""
     if not summary:
@@ -444,5 +462,8 @@ def format_risk_report(summary, now: str | None = None) -> str:
             L.append(_in)
     if summary.get("factor_caveat"):
         L.append(f"  ({summary['factor_caveat']})")
+    _cn = _concentration_note(summary)
+    if _cn:
+        L.append(_cn)
     L += ["", f"※ {summary.get('caveat','')}"]
     return "\n".join(L)

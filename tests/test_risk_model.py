@@ -200,5 +200,20 @@ def test_format_risk_report_none():
     assert "데이터 부족" in rm.format_risk_report(None)
 
 
+def test_concentration_note_warns_low_neff():
+    s = {"n_eff": 4.0, "n_assets": 9, "contributions": [("ORCL", 0.11, 0.30)]}
+    note = rm._concentration_note(s)
+    assert "집중" in note and "ORCL" in note
+
+
+def test_concentration_note_quiet_when_diversified():
+    s = {"n_eff": 8.0, "n_assets": 9, "contributions": [("MSFT", 0.11, 0.12)]}
+    assert rm._concentration_note(s) == ""
+
+
+def test_concentration_note_none_graceful():
+    assert rm._concentration_note(None) == ""
+
+
 if __name__ == "__main__":
     sys.exit(pytest.main([__file__, "-v"]))
