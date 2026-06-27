@@ -45,6 +45,8 @@ PATH=/home/ubuntu/.local/bin:/usr/local/bin:/usr/bin:/bin
 # ── 고빈도 수집·감지 ─────────────────────────────────────────────────────────
 # 속보 수집 + 급증 감지 + 텔레그램 알림
 * * * * * cd /home/ubuntu/projects/stock-report && uv run python crons/news_spike_detector.py >> /tmp/news_spike_detector.log 2>&1   # 매 1분
+# 실시간 시세 WS 상시 프로세스 워치독 (REALTIME_ENABLED=true 일 때만 기동·opt-in)
+* * * * * cd /home/ubuntu/projects/stock-report && bash scripts/kis_stream_watchdog.sh >> /tmp/kis_stream_watchdog.log 2>&1   # 매 1분 (꺼져있으면 no-op)
 # 전체 소스 수집 (텔레그램 채널·FRED·국채·시장 스냅샷) → JSONL 캐시
 5,35 * * * * cd /home/ubuntu/projects/stock-report && uv run python reports/source_collector.py >> /tmp/source_collector.log 2>&1     # 매 30분 (:05/:35)
 

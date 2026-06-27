@@ -1,0 +1,39 @@
+#!/usr/bin/env python3
+"""test_watchlist.py — 실시간 워치리스트 선택 순수함수 (무네트워크)."""
+import os
+import sys
+
+import pytest
+
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
+
+import kis_stream as ks
+
+
+def test_dedup_case_insensitive_and_order():
+    sel, dropped = ks.select_watchlist(["005930", "000660", "005930"],
+                                       ["AAPL", "aapl", "MSFT"], kr_max=10, us_max=10)
+    assert sel["KR"] == ["005930", "000660"]
+    assert sel["US"] == ["AAPL", "MSFT"]          # 대소문자 중복 제거
+    assert dropped["KR"] == [] and dropped["US"] == []
+
+
+def test_cap_truncates_and_reports_dropped():
+    sel, dropped = ks.select_watchlist(["005930", "000660", "035720"],
+                                       ["AAPL", "MSFT", "NVDA", "GOOGL"], kr_max=2, us_max=2)
+    assert sel["KR"] == ["005930", "000660"] and sel["US"] == ["AAPL", "MSFT"]
+    assert dropped["KR"] == ["035720"] and dropped["US"] == ["NVDA", "GOOGL"]   # 우선순위 밖 드롭
+
+
+def test_empty_inputs():
+    sel, dropped = ks.select_watchlist([], [], kr_max=5, us_max=5)
+    assert sel == {"KR": [], "US": []} and dropped == {"KR": [], "US": []}
+
+
+def test_blank_symbols_filtered():
+    sel, _ = ks.select_watchlist(["", "  ", "005930"], [None, "AAPL"], kr_max=10, us_max=10)
+    assert sel["KR"] == ["005930"] and sel["US"] == ["AAPL"]
+
+
+if __name__ == "__main__":
+    sys.exit(pytest.main([__file__, "-v"]))
