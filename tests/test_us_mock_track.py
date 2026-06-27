@@ -46,6 +46,24 @@ def test_classify_kind():
     assert T._classify_kind("sell", 2, 5) == "감액"
 
 
+def test_quote_fn_sizes_at_live_ask():
+    """라이브 호가(ask) 주입 시 실제 체결가로 사이징 — 신호가보다 비싸면 주수↓."""
+    sigs = [{"ticker": "A", "price": 100, "policy_score": 0.9},
+            {"ticker": "B", "price": 100, "policy_score": 0.8}]
+    # A 는 ask $200(신호가의 2배) → per $1000 에 5주. B 는 호가 없음(None) → 신호가 100 → 10주.
+    qfn = lambda sym, side: 200.0 if sym == "A" else None
+    o = _orders(T.plan_rebalance(sigs, {}, budget_usd=2000, max_positions=2, quote_fn=qfn))
+    assert o.get(("A", "buy")) == 5 and o.get(("B", "buy")) == 10
+
+
+def test_quote_fn_none_is_baseline():
+    """quote_fn=None 이면 기존 정적 사이징과 동일(회귀 보장)."""
+    sigs = [{"ticker": "A", "price": 100, "policy_score": 0.9}]
+    base = _orders(T.plan_rebalance(sigs, {}, budget_usd=1000, max_positions=1))
+    none = _orders(T.plan_rebalance(sigs, {}, budget_usd=1000, max_positions=1, quote_fn=None))
+    assert base == none == {("A", "buy"): 10}
+
+
 if __name__ == "__main__":
     import pytest
     sys.exit(pytest.main([__file__, "-v"]))

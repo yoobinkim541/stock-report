@@ -68,6 +68,18 @@ MAX_POS = _int_env("US_MOCK_MAX_POS", 5)
 INVEST = _float_env("US_MOCK_INVEST", 0.9)
 SEED_USD = _float_env("KOREA_MOCK_SEED", 100_000)
 SLIPPAGE = _float_env("US_MOCK_SLIPPAGE", 0.01)
+QUOTE_STALE_S = _int_env("REALTIME_QUOTE_STALE_S", 10)
+
+
+def _rt_best(sym: str, side: str):
+    """실시간 우호가(매수=ask·매도=bid) — 활성·신선시. 없으면 None(정적 슬리피지/신호가 폴백)."""
+    try:
+        from providers import realtime_quotes
+        if realtime_quotes.enabled():
+            return realtime_quotes.best(sym, side, max_age_s=QUOTE_STALE_S)
+    except Exception:
+        pass
+    return None
 
 
 # ── 선택 신호 (런타임·네트워크) ────────────────────────────────────────────────
@@ -142,7 +154,7 @@ def _safe_fund(tk: str) -> dict:
 
 def plan_rebalance(signals: list[dict], positions: dict, budget_usd: float,
                    max_positions: int, cash_usd: float | None = None,
-                   slippage: float = 0.0) -> list[dict]:
+                   slippage: float = 0.0, quote_fn=None) -> list[dict]:
     """목표 바스켓(policy_score 상위 N 균등) vs 보유 → 정수주 지정가 주문계획.
 
     반환: [{symbol, side('buy'|'sell'), qty, reason}]. 매도 먼저(현금확보)·예산0/음수면 매수생략·현금 러닝캡.
@@ -165,6 +177,13 @@ def plan_rebalance(signals: list[dict], positions: dict, budget_usd: float,
             continue
         cur = int(positions.get(sym, {}).get("shares", 0) or 0)
         eff = price * (1.0 + max(0.0, slippage))
+        if quote_fn:                                       # 라이브 호가(ask) 있으면 실제 체결가로 사이징
+            try:
+                q = quote_fn(sym, "buy")
+            except Exception:
+                q = None
+            if q and q > 0:
+                eff = q
         tgt = int(per // eff)                              # 정수주 floor
         if remaining is not None:
             tgt = min(tgt, cur + int(remaining // eff))
@@ -212,7 +231,8 @@ def main(argv: list[str] | None = None) -> int:
         logger.warning("US 신호 0건 — 종료")
         return 0
     budget = nav * INVEST
-    plan = plan_rebalance(signals, positions, budget, MAX_POS, cash_usd=cash, slippage=SLIPPAGE)
+    plan = plan_rebalance(signals, positions, budget, MAX_POS, cash_usd=cash,
+                          slippage=SLIPPAGE, quote_fn=_rt_best)
     logger.info("리밸런스 계획 %d건 (예산 $%.0f·목표 %d종목)", len(plan), budget, MAX_POS)
 
     if dry:
@@ -231,7 +251,7 @@ def main(argv: list[str] | None = None) -> int:
         cur = int(positions.get(o["symbol"], {}).get("shares", 0) or 0)
         kind = _classify_kind(o["side"], o["qty"], cur)
         s = sig_by.get(o["symbol"], {})
-        px = s.get("price") or kis_mock.get_price(o["symbol"]) or 0
+        px = _rt_best(o["symbol"], o["side"]) or s.get("price") or kis_mock.get_price(o["symbol"]) or 0
         r = kis_mock.place_order(o["symbol"], o["qty"], o["side"], price=px)
         results.append({**o, "kind": kind, **r})
         _log_decision(ledger, s, o["symbol"], kind, o["side"], o["qty"], r.get("ok"), today)

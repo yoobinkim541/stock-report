@@ -72,6 +72,18 @@ MAX_POS    = _int_env("KR_MOCK_MAX_POS", 5)
 INVEST     = _float_env("KR_MOCK_INVEST", 0.9)
 SEED_KRW   = _float_env("KIWOOM_MOCK_SEED", 10_000_000)
 SLIPPAGE   = _float_env("KR_MOCK_SLIPPAGE", 0.01)   # 매수 사이징 슬리피지 버퍼(+1%)
+QUOTE_STALE_S = _int_env("REALTIME_QUOTE_STALE_S", 10)
+
+
+def _rt_best(code: str, side: str):
+    """실시간 우호가(매수=ask·매도=bid) — 활성·신선시. 없으면 None(정적 슬리피지 폴백). 시장가 주문이라 사이징만 개선."""
+    try:
+        from providers import realtime_quotes
+        if realtime_quotes.enabled():
+            return realtime_quotes.best(code, side, max_age_s=QUOTE_STALE_S)
+    except Exception:
+        pass
+    return None
 
 _BUY_ACTIONS  = ("강한 매수후보", "관심/분할매수")
 _SELL_ACTIONS = ("매도검토", "손절/매도검토")
@@ -146,7 +158,7 @@ def compute_kr_signals(limit: int = UNIVERSE) -> list[dict]:
 
 def plan_rebalance(signals: list[dict], positions: dict, budget_krw: float,
                    max_positions: int, cash_krw: float | None = None,
-                   slippage: float = 0.0) -> list[dict]:
+                   slippage: float = 0.0, quote_fn=None) -> list[dict]:
     """목표 바스켓 vs 현재 보유 → 시장가 주문계획.
 
     signals:   [{code, action, score, price, is_buy, is_sell}, ...]
@@ -185,6 +197,13 @@ def plan_rebalance(signals: list[dict], positions: dict, budget_krw: float,
             continue
         cur = int(positions.get(code, {}).get("shares", 0) or 0)
         eff_price = price * (1.0 + max(0.0, slippage))   # 슬리피지 버퍼
+        if quote_fn:                                      # 라이브 호가(ask) 있으면 실제 체결가로 사이징
+            try:
+                q = quote_fn(code, "buy")
+            except Exception:
+                q = None
+            if q and q > 0:
+                eff_price = q
         tgt = int(per // eff_price)
         if remaining is not None:                         # 가용현금 러닝 캡
             tgt = min(tgt, cur + int(remaining // eff_price))
@@ -322,7 +341,8 @@ def main(argv: list[str] | None = None) -> int:
         return 0
 
     budget = nav * INVEST
-    plan = plan_rebalance(signals, positions, budget, MAX_POS, cash_krw=cash, slippage=SLIPPAGE)
+    plan = plan_rebalance(signals, positions, budget, MAX_POS, cash_krw=cash,
+                          slippage=SLIPPAGE, quote_fn=_rt_best)
     logger.info("리밸런스 계획 %d건 (예산 ₩%s, 현금 %s, 목표 %d종목)",
                 len(plan), f"{budget:,.0f}",
                 f"₩{cash:,.0f}" if cash is not None else "미확인", MAX_POS)
