@@ -16,6 +16,7 @@ env: REALTIME_ENABLED·REALTIME_US_ENABLED·REALTIME_KR_MAX(10)·REALTIME_US_MAX
 from __future__ import annotations
 
 import asyncio
+import fcntl
 import json
 import logging
 import os
@@ -38,6 +39,8 @@ logger = logging.getLogger(__name__)
 _WS_REAL = "ws://ops.koreainvestment.com:21000"   # ★ 하드락 — 실전 실시간 WS
 _APPROVAL_PATH = "/oauth2/Approval"
 _PID_FILE = os.path.expanduser("~/.local/state/stock-report/kis_stream.pid")
+_LOCK_FILE = os.path.expanduser("~/.local/state/stock-report/kis_stream.lock")
+_lock_fd = None   # 단일 인스턴스 fcntl 락 — 프로세스 수명 동안 유지(중복 스트림·WS 방지)
 
 # 실시간 TR (시세 전용). 美 인덱스는 라이브 스모크 전 확정 금지(FLAG).
 TR_KR_TRADE = "H0STCNT0"   # 국내 체결
@@ -476,6 +479,14 @@ def main() -> int:
         return 0
     if not kis_quote._key():
         logger.error("실전 앱키 없음 — 미기동(fail-closed)")
+        return 0
+    global _lock_fd                                  # 단일 인스턴스 — 중복 WS 스트림 방지
+    os.makedirs(os.path.dirname(_LOCK_FILE), exist_ok=True)
+    _lock_fd = open(_LOCK_FILE, "w")
+    try:
+        fcntl.flock(_lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError:
+        logger.info("다른 kis_stream 인스턴스 실행 중 — 종료(중복 방지)")
         return 0
     os.makedirs(os.path.dirname(_PID_FILE), exist_ok=True)
     with open(_PID_FILE, "w") as f:
