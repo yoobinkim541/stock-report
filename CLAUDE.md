@@ -65,6 +65,7 @@ crons/news_spike_detector.py (크론 매 1분)
 | `notify.py` | 텔레그램 발송 단일 진실원 — send_telegram(4096 분할·토큰 마스킹)·send_photo (봇 제외 전 모듈 공용) | — |
 | `providers/market_data.py` | 시장 데이터 수집층 — fetch_qqq_data·rsi·vix·fear_greed·ma200·portfolio_value·환율·캐시·leverage_state (barbell 에서 분리, 재export 호환) | `~/.cache/barbell_anchor·last_prices.json` |
 | `kiwoom_mock.py` | 키움 **모의투자** 어댑터 — 모의 도메인(`mockapi.kiwoom.com`) 하드락 + 토큰·잔고(kt00018)·주문(kt10000/kt10001). 실거래 경로 없음 | — |
+| `kis_mock.py` | 한국투자증권(KIS) **해외주식 모의투자** 어댑터 — 모의 도메인(`openapivts.koreainvestment.com:29443`) 하드락 + 토큰 디스크영속·해외 잔고/현재가/주문(정수주·지정가·hashkey). CANO+ACNT_PRDT_CD 필수(미설정 fail-closed). 실거래 경로 없음 | `~/.cache/kis_mock_token.json` |
 | `providers/earnings_data.py` | 어닝·컨센서스·밸류에이션 데이터층 — yfinance(US 전체 무료: 서프라이즈·포워드 컨센서스·★리비전 모멘텀·PER/PBR/PSR/ROE/EPS/배당·배당CAGR) / KR(.KS) 열화모드(밸류·배당만). 결측 graceful·12h 캐시 | `~/reports/ml-cache/earnings_*.json` |
 | `providers/kr_market_data.py` | KR 생존편향제거 데이터층 — **marcap**(연도별 parquet, 1995~ 전종목 시점별 시총·OHLCV·상폐포함) + **FDR KRX-DELISTING**(상폐 라벨·사유). top_n_by_marcap·ohlcv_from_marcap·distress_delistings. **pykrx 는 이 서버서 불가(KRX 403)** | `~/reports/ml-cache/marcap/*.parquet` |
 | `providers/index_membership.py` | 교차시장 시점별 멤버십 — 美 S&P500(fja05680, 1996~ 생존편향0)·KR(marcap 위임). members_asof·change_events·membership_intervals(생존편향제거 마스킹) | `~/reports/ml-cache/sp500_history.csv` |
@@ -107,6 +108,9 @@ crons/news_spike_detector.py (크론 매 1분)
 | `crons/kiwoom_mock_track.py` | 국내주식 자동 페이퍼트레이딩 (키움 **모의투자** — 신호 기반 리밸런스·모의 도메인 하드락·편입/퇴출 근거 원장 적재) | 평일 00:30 UTC |
 | `crons/kiwoom_mock_report.py` | 국내 모의 일일 현황 보고 (NAV·손익·편입/퇴출 사유·누적 vs KOSPI·MDD vs 지수) + `/mock` 공용 | 평일 06:40 UTC |
 | `crons/kr_mock_learn.py` | KR 모의 정책 강화 — 보상 백필 + ★목적함수(아웃퍼폼·MDD≤지수) OOS 게이트 재학습 | 토 02:00 UTC |
+| `crons/us_mock_track.py` | 미국주식 자동 페이퍼트레이딩 (KIS 해외 모의 — us_policy 선택 + 바벨 배분·정수주 리밸런스·`Ledger("us_mock")` 결정+근거 적재) | 평일 21:00 UTC |
+| `crons/us_mock_report.py` | 미국 모의 일일 현황 + **로직 평가 스코어카드**(NAV·vs QQQ·MDD·편입/퇴출 적중률·실현 IC) + `/usmock` 공용 | 평일 21:30 UTC |
+| `crons/us_mock_learn.py` | US 모의 정책 강화 — 보상 백필(편입 초과·퇴출 회피) + ★목적함수 OOS 게이트·챔피언-챌린저 재학습 | 토 03:00 UTC |
 | `crons/weekly_kr_ranker_retrain.py` | KR 전용 랭커(KOSPI 대비 초과수익) 주간 재학습 (Purged WF·OOS IC) | 토 03:30 UTC |
 | `crons/longterm_adaptive_eval.py` | 장기 전략 ★목표(vs QQQ 아웃퍼폼·MDD≤지수) 라이브 스코어카드 + 악화 시 보수적 레버리지 축소 shadow 권고 | 토 04:00 UTC |
 | `crons/leverage_structural_eval.py` | Tier3 구조적 레버리지 ★게이트 재검증 (`backtest/leverage_structural_backtest` SPY+QQQ × 그리드 낙폭예산·DSR·PBO) — GO 시 권고 레버리지 shadow (표시·수동, 자동집행 0) | 토 04:15 UTC |
@@ -171,6 +175,7 @@ crons/news_spike_detector.py (크론 매 1분)
 /dca                 오늘 DCA 배분 금액
 /order               소수점 매수 주문서 (키움 즉시 입력)
 /mock                국내 모의 페이퍼트레이딩 현황 (NAV·손익·편입/퇴출 사유·vs KOSPI·MDD) — owner 전용
+/usmock              미국 모의 페이퍼트레이딩 현황 + 로직 평가 스코어카드 (NAV·vs QQQ·MDD·적중률·실현 IC) — owner 전용
 
 ── 종목 관리 ─────────────────────────────────────
 /holding                           보유 종목 목록
@@ -240,6 +245,10 @@ crons/news_spike_detector.py (크론 매 1분)
 | `KIWOOM_MOCK_API_KEY` / `KIWOOM_MOCK_API_SECRET` | — | — (없으면 `KIWOOM_API_KEY/SECRET` 재사용 — 앱키는 계좌 공용) |
 | `KIWOOM_MOCK_ACCOUNT_NO` | — | — (모의 계좌번호, 표시·로깅용) |
 | `KR_MOCK_UNIVERSE` / `KR_MOCK_MAX_POS` / `KR_MOCK_INVEST` / `KIWOOM_MOCK_SEED` | — | `20` / `5` / `0.9` / `10000000` (모의 전략 파라미터) |
+| `KOREA_MOCK_ENABLED` | — | `false` (KIS 해외 모의 페이퍼트레이딩 루프 활성화. true 여야 주문 집행) |
+| `KOREA_MOCK_API_KEY` / `KOREA_MOCK_API_SECRET` | — | — (없으면 `KOREA_API_KEY/SECRET` 재사용 — KIS 앱키) |
+| `KOREA_MOCK_ACCOUNT_NO` | — | — (KIS 모의 계좌 `CANO-ACNT_PRDT_CD` 형식. **필수** — 미설정 시 잔고/주문 fail-closed) |
+| `US_MOCK_UNIVERSE` / `US_MOCK_MAX_POS` / `US_MOCK_INVEST` / `KOREA_MOCK_SEED` | — | Nasdaq기본 / `5` / `0.9` / `100000` (US 모의 전략 파라미터·시드 USD) |
 | `ADAPTIVE_ENTRY_ENABLED` | — | `false` (해외 진입 임계값 적응 학습 shadow 를 라이브에 반영. off면 shadow만·라이브 불변) |
 | `ADAPTIVE_LONGTERM_ENABLED` | — | `false` (장기 전략 악화 시 보수적 레버리지 축소 shadow 기록. off면 평가·권고만) |
 | `ADAPTIVE_LEVERAGE_ENABLED` | — | `false` (Tier3 구조적 레버리지 GO 권고를 shadow 기록 → `/risk` 표시. off면 게이트 평가·텔레그램만. **자동집행은 항상 없음** — 실계좌 수동) |
@@ -322,6 +331,11 @@ crons/news_spike_detector.py (크론 매 1분)
 ~/reports/ml-cache/kr_ranker_model.pkl           — KR 전용 랭커 모델 (KOSPI 대비 초과수익, safe_unpickle)
 ~/reports/ml-cache/policy_kr_mock.json           — KR 모의 선택 정책 가중치 (learner 채택 시 갱신, 클램프)
 ~/reports/ml-data/kr_mock_decisions.jsonl        — KR 모의 편입/퇴출 결정+근거 (불변 append-only, 학습/감사 — 절대 삭제 금지)
+~/reports/ml-data/us_mock_decisions.jsonl        — US 모의 편입/퇴출 결정+근거 (불변 append-only, point-in-time features — 절대 삭제 금지)
+~/reports/ml-data/us_mock_outcomes.jsonl         — US 모의 결정 실현 보상(초과수익 vs QQQ·side-aware 정답) (불변 append-only)
+~/reports/ml-data/us_mock_journal/YYYY-MM.md     — US 사람용 편입/퇴출 저널 (월별 누적)
+~/reports/ml-cache/policy_us_mock.json           — US 모의 선택 정책 가중치 (learner OOS 게이트·챔피언-챌린저 채택 시 갱신, 클램프)
+~/.cache/kis_mock_token.json                     — KIS 해외 모의 OAuth 토큰 디스크 영속 (발급 레이트리밋 회피)
 ~/reports/ml-data/kr_mock_outcomes.jsonl         — KR 모의 결정 실현 보상(초과수익) (불변 append-only)
 ~/reports/ml-data/kr_mock_journal/YYYY-MM.md     — 사람용 편입/퇴출 저널 (월별 누적)
 ~/reports/ml-data/kospi200_members.jsonl         — KOSPI200 시점별 멤버십 forward 스냅샷 (Naver, naver_flow_snapshot)

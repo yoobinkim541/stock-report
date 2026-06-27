@@ -55,6 +55,10 @@ PATH=/home/ubuntu/.local/bin:/usr/local/bin:/usr/bin:/bin
 30 1 * * 6 cd /home/ubuntu/projects/stock-report && uv run python crons/institutional_snapshot.py >> /tmp/institutional_snapshot.log 2>&1   # 토 01:30 UTC = 10:30 KST
 # KR 모의 정책 강화 (보상 백필 + ★목적함수 OOS 게이트 재학습; KIWOOM_MOCK_ENABLED 시)
 0 2 * * 6 cd /home/ubuntu/projects/stock-report && flock -n /tmp/kr_mock_learn.lock uv run python crons/kr_mock_learn.py >> /tmp/kr_mock_learn.log 2>&1   # 토 02:00 UTC = 11:00 KST
+# US 해외 모의 페이퍼트레이딩 (KIS 해외 — KOREA_MOCK_ENABLED 시; track→report→주간 learn)
+0 21 * * 1-5 cd /home/ubuntu/projects/stock-report && flock -n /tmp/us_mock_track.lock uv run python crons/us_mock_track.py >> /tmp/us_mock_track.log 2>&1   # 21:00 UTC — US 모의 리밸런스 (미장 개장 전)
+30 21 * * 1-5 cd /home/ubuntu/projects/stock-report && flock -n /tmp/us_mock_report.lock uv run python crons/us_mock_report.py >> /tmp/us_mock_report.log 2>&1   # 21:30 UTC — US 모의 현황+스코어카드
+0 3 * * 6 cd /home/ubuntu/projects/stock-report && flock -n /tmp/us_mock_learn.lock uv run python crons/us_mock_learn.py >> /tmp/us_mock_learn.log 2>&1   # 토 03:00 UTC — US 정책 OOS 재학습
 # KR 전용 랭커 주간 재학습 (코스피 대비 초과수익 예측)
 30 3 * * 6 cd /home/ubuntu/projects/stock-report && uv run python crons/weekly_kr_ranker_retrain.py >> /tmp/weekly_kr_ranker.log 2>&1          # 토 03:30 UTC = 12:30 KST
 # 어닝 예측(G3 서프라이즈·G4 주가반응) 주간 재학습 + 모델 캐시 (/earnings 라이브 예측 공급)
