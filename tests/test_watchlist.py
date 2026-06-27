@@ -35,5 +35,14 @@ def test_blank_symbols_filtered():
     assert sel["KR"] == ["005930"] and sel["US"] == ["AAPL"]
 
 
+def test_classify_kr_us_strips_suffix():
+    """KR 6자리(.KS/.KQ 포함)→바코드 KR, 그 외→US. 빈/None 무시."""
+    kr, us = [], []
+    for t in ["005930", "035720.KS", "373220.KQ", "AAPL", "MSFT", "", None]:
+        ks._classify(t, kr, us)
+    assert kr == ["005930", "035720", "373220"]   # 접미 제거 후 바코드
+    assert us == ["AAPL", "MSFT"]
+
+
 if __name__ == "__main__":
     sys.exit(pytest.main([__file__, "-v"]))

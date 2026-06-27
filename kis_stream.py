@@ -312,21 +312,32 @@ def select_watchlist(kr_syms: list[str], us_syms: list[str], *,
     return selected, dropped
 
 
+def _classify(ticker: str, kr: list, us: list) -> None:
+    """티커 → KR/US 분류. KR 6자리 코드(.KS/.KQ 접미 포함)는 바코드로 KR, 그 외 US."""
+    t = (ticker or "").strip().upper()
+    if not t:
+        return
+    base = t.split(".")[0]
+    if base.isdigit() and len(base) == 6:    # 국내 6자리 (035720.KS·005930 등) → 바코드 구독
+        kr.append(base)
+    else:
+        us.append(t)
+
+
 def compute_watchlist() -> tuple[dict, dict]:
     """보유(국내+해외) ∪ 활성 가격알림 → select_watchlist. 소스는 시스템 단일진실원 재사용."""
     kr, us = [], []
     try:
         import portfolio_universe
         for t in portfolio_universe.load_portfolio_tickers():
-            (kr if t.isdigit() else us).append(t)
+            _classify(t, kr, us)
     except Exception as e:
         logger.warning("보유 티커 로드 실패: %s", e)
     try:
         from bot import price_alerts
         for a in price_alerts.load_alerts():
             if not a.get("triggered"):
-                t = (a.get("ticker") or "").strip().upper()
-                (kr if t.isdigit() else us).append(t)
+                _classify(a.get("ticker"), kr, us)
     except Exception as e:
         logger.warning("알림 티커 로드 실패: %s", e)
     return select_watchlist(kr, us)
