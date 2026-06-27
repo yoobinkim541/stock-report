@@ -98,6 +98,57 @@ def change_events(market: str) -> list[dict]:
     return events
 
 
+def membership_intervals(market: str = "sp500") -> dict:
+    """{ticker: [(start_date, end_date|None)]} — 지수 재임 구간(생존편향 제거 마스킹용).
+
+    end=None 은 현재까지 재임. 인접 스냅샷 diff 로 편입(start)·편출(end) 추적. market='sp500'.
+    """
+    if (market or "").lower() not in ("sp500", "us", "spx"):
+        return {}
+    snaps = _sp500_snapshots()
+    intervals: dict = {}
+    active: dict = {}
+    prev = frozenset()
+    first = True
+    for d, s in snaps:
+        if first:
+            for t in s:
+                active[t] = d
+            first = False
+        else:
+            for t in s - prev:
+                active.setdefault(t, d)
+            for t in prev - s:
+                intervals.setdefault(t, []).append((active.pop(t, d), d))
+        prev = s
+    for t, st in active.items():
+        intervals.setdefault(t, []).append((st, None))
+    return intervals
+
+
+def members_in_window(market: str, start_date: str) -> list[str]:
+    """start_date 이후(또는 그 시점 재임) 한 번이라도 지수에 있던 종목 합집합 — 생존편향제거 유니버스."""
+    if (market or "").lower() not in ("sp500", "us", "spx"):
+        return []
+    snaps = _sp500_snapshots()
+    u: set = set()
+    prior = [s for d, s in snaps if d <= str(start_date)[:10]]
+    if prior:
+        u |= set(prior[-1])
+    for d, s in snaps:
+        if d >= str(start_date)[:10]:
+            u |= set(s)
+    return sorted(u)
+
+
+def is_member_asof(intervals: dict, ticker: str, date_str: str) -> bool:
+    """ticker 가 date_str 에 지수 멤버였는지(membership_intervals 결과 사용)."""
+    for st, en in intervals.get(ticker, ()):
+        if st <= date_str and (en is None or date_str <= en):
+            return True
+    return False
+
+
 def removals(market: str = "sp500") -> dict:
     """{ticker: 첫 퇴출일} — 지수 편출 라벨(생존편향 제거 학습용). distress/M&A 구분은 별도 필요."""
     out = {}

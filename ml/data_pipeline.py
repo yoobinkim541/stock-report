@@ -611,6 +611,7 @@ def build_ml_dataset(
     days: int = 1260,
     forward_days: int = 20,
     benchmark_ticker: str = "QQQ",
+    survivorship_free: bool = False,
 ) -> dict:
     """ML 학습용 데이터셋 구성.
 
@@ -628,7 +629,21 @@ def build_ml_dataset(
     logger.info("ML 데이터셋 구성 시작 (mode=%s, days=%d, fwd=%d일, bench=%s)",
                 mode, days, forward_days, benchmark_ticker)
 
-    universe = fetch_universe(mode)
+    # 생존편향 제거: 현재 구성종목 대신 시점별 멤버십(편출·상폐분 포함). 美 S&P500 = fja05680.
+    membership_intervals = None
+    if survivorship_free and mode in ("sp500", "all"):
+        try:
+            from providers import index_membership as _im
+            from datetime import date as _date, timedelta as _td
+            _start = (_date.today() - _td(days=int(days * 1.6))).isoformat()
+            universe = _im.members_in_window("sp500", _start)
+            membership_intervals = _im.membership_intervals("sp500")
+            logger.info("생존편향 제거 유니버스(시점별 멤버십): %d종목 (현재구성 아님)", len(universe))
+        except Exception as e:
+            logger.warning("멤버십 유니버스 실패 — 현재구성 폴백: %s", e)
+            universe = fetch_universe(mode)
+    else:
+        universe = fetch_universe(mode)
     logger.info("유니버스: %d종목", len(universe))
 
     # 가격 다운로드 (벤치마크 포함)
@@ -678,6 +693,17 @@ def build_ml_dataset(
         if feat.empty:
             continue
 
+        # 생존편향 제거: 이 종목이 실제 지수 멤버였던 날짜 표본만(편입 전·편출 후 제외 = point-in-time)
+        if membership_intervals is not None:
+            ivs = membership_intervals.get(ticker, [])
+            if not ivs:
+                continue
+            ds = feat.index.strftime("%Y-%m-%d")
+            keep = [any(s <= d and (e is None or d <= e) for s, e in ivs) for d in ds]
+            feat = feat[keep]
+            if feat.empty:
+                continue
+
         close = df["Close"].reindex(feat.index)
         fwd_ret = close.pct_change(forward_days).shift(-forward_days)
 
@@ -725,7 +751,10 @@ def build_ml_dataset(
             "days": days,
             "forward_days": forward_days,
             "benchmark": benchmark_ticker,
-            "bias_warning": "현재 구성종목 기준 — survivorship bias 있음",
+            "survivorship_free": bool(membership_intervals is not None),
+            "bias_warning": ("시점별 멤버십 적용 — survivorship bias 제거(美 상폐주 가격은 무료 공백으로 부분)"
+                             if membership_intervals is not None else
+                             "현재 구성종목 기준 — survivorship bias 있음"),
             "built_at": datetime.now(timezone.utc).isoformat(),
         },
     }

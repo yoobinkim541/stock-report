@@ -36,6 +36,25 @@ def test_members_asof_kr_delegates(monkeypatch):
     assert im.members_asof("kr", "2024-01-01", n=2) == ["005930", "000660"]
 
 
+def test_membership_intervals_and_member_asof(monkeypatch):
+    from providers import index_membership as im
+    monkeypatch.setattr(im, "_sp500_snapshots", _snaps)
+    iv = im.membership_intervals("sp500")
+    assert iv["CCC"] == [("2020-01-01", "2021-01-01")]      # 편입~편출
+    assert iv["AAA"] == [("2020-01-01", None)]              # 현재까지
+    assert iv["DDD"] == [("2021-01-01", None)]
+    assert im.is_member_asof(iv, "CCC", "2020-06-01") is True
+    assert im.is_member_asof(iv, "CCC", "2021-06-01") is False   # 편출 후
+    assert im.is_member_asof(iv, "DDD", "2020-06-01") is False   # 편입 전
+
+
+def test_members_in_window(monkeypatch):
+    from providers import index_membership as im
+    monkeypatch.setattr(im, "_sp500_snapshots", _snaps)
+    # 2020-06 이후: 2020 스냅(prior) + 2021 스냅 합집합 = 편출 CCC 포함(생존편향 제거)
+    assert set(im.members_in_window("sp500", "2020-06-01")) == {"AAA", "BBB", "CCC", "DDD"}
+
+
 # ── edgar ────────────────────────────────────────────────────────────────────
 def _cf():
     def fy(vals):
