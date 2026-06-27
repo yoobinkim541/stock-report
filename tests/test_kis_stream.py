@@ -78,6 +78,34 @@ def test_parse_multi_record_trade():
     assert recs[1]["price"] == 120000.0
 
 
+def test_parse_us_trade_hdfscnt0():
+    """美 체결 HDFSCNT0 — SYMB[0]·LAST[10]·TVOL[19] (open-trading-api 공식 컬럼)."""
+    payload = "^".join(_fields(25, {0: "AAPL", 10: "283.78", 19: "1000000"}))
+    recs = ks.parse_realtime_frame(f"0|HDFSCNT0|001|{payload}")
+    assert recs == [{"symbol": "AAPL", "kind": "trade", "price": 283.78, "volume": 1000000.0}]
+
+
+def test_parse_us_ask_hdfsasp0():
+    """美 호가 HDFSASP0 — PBID1[10]·PASK1[11]·VBID1[12]·VASK1[13] (1호가)."""
+    payload = "^".join(_fields(16, {0: "AAPL", 10: "283.50", 11: "283.80", 12: "100", 13: "200"}))
+    recs = ks.parse_realtime_frame(f"0|HDFSASP0|001|{payload}")
+    r = recs[0]
+    assert r["best_bid"] == 283.50 and r["best_ask"] == 283.80
+    assert r["bids"] == [(283.50, 100.0)] and r["asks"] == [(283.80, 200.0)]
+
+
+def test_us_ws_key_format():
+    assert ks._us_ws_key("AAPL") == "DNASAAPL"     # 나스닥
+    assert ks._us_ws_key("ORCL") == "DNYSORCL"     # 뉴욕
+    assert ks._us_ws_key("SGOV") == "DAMSSGOV"     # 아멕스
+
+
+def test_norm_us_symbol_strips_market_prefix():
+    assert ks._norm_us_symbol("DNASAAPL") == "AAPL"
+    assert ks._norm_us_symbol("RBAQAAPL") == "AAPL"   # 주간거래 접두
+    assert ks._norm_us_symbol("AAPL") == "AAPL"       # 접두 없으면 그대로
+
+
 def test_parse_rejects_encrypted_control_unknown():
     assert ks.parse_realtime_frame("1|H0STCNI0|001|enc...") == []     # 암호화 체결통보 미처리
     assert ks.parse_realtime_frame('{"header":{"tr_id":"PINGPONG"}}') == []  # JSON 제어

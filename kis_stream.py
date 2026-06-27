@@ -41,8 +41,8 @@ _PID_FILE = os.path.expanduser("~/.local/state/stock-report/kis_stream.pid")
 # 실시간 TR (시세 전용). 美 인덱스는 라이브 스모크 전 확정 금지(FLAG).
 TR_KR_TRADE = "H0STCNT0"   # 국내 체결
 TR_KR_ASK = "H0STASP0"     # 국내 호가(10단계)
-TR_US_TRADE = "HDFSCNT0"   # 해외 체결
-TR_US_ASK = "HDFSASP1"     # 해외 호가
+TR_US_TRADE = "HDFSCNT0"   # 美 실시간지연체결가 (★미국=0분지연=무료 실시간; open-trading-api 확정)
+TR_US_ASK = "HDFSASP0"     # 美 실시간호가 (★미국=무료 실시간 1호가; HDFSASP1 은 아시아 지연이라 미사용)
 
 FLUSH_SECS = float(os.getenv("REALTIME_FLUSH_SECS", "1.0"))
 KR_MAX = int(os.getenv("REALTIME_KR_MAX", "10"))
@@ -52,8 +52,12 @@ WATCHLIST_REFRESH_SECS = int(os.getenv("REALTIME_WATCHLIST_REFRESH_SECS", "90"))
 # 필드 인덱스 표 (KR=문서순·확정대상은 라이브 스모크). _ff 로 안전 캐스팅.
 _KR_TRADE_PRICE_IDX, _KR_TRADE_VOL_IDX = 2, 13
 _KR_ASK_BASE = {"ask1": 3, "bid1": 13, "askq1": 23, "bidq1": 33}  # 10단계 연속
-# 美(FLAG — 스모크서 확정): 체결 현재가 idx 11·누적량 idx 19; 호가 best ask/bid idx 11/12(1단)
-_US_TRADE_PRICE_IDX, _US_TRADE_VOL_IDX = 11, 19
+# 美 (공식 컬럼 확정 — koreainvestment/open-trading-api):
+#   HDFSCNT0 체결: SYMB[0]·LAST[10](현재가)·TVOL[19](누적거래량)
+#   HDFSASP0 호가: PBID1[10]·PASK1[11]·VBID1[12]·VASK1[13] (미국 무료 실시간 1호가)
+_US_TRADE_PRICE_IDX, _US_TRADE_VOL_IDX = 10, 19
+_US_ASK_BID_IDX, _US_ASK_ASK_IDX = 10, 11
+_US_ASK_BIDQ_IDX, _US_ASK_ASKQ_IDX = 12, 13
 
 
 def is_enabled() -> bool:
@@ -119,16 +123,38 @@ def _extract_kr_ask(f: list, depth: int = 10) -> dict:
             "best_ask": asks[0][0] if asks else None, "best_bid": bids[0][0] if bids else None}
 
 
+def _norm_us_symbol(raw: str) -> str:
+    """수신 SYMB 정규화 — 'DNASAAPL'/'RBAQAAPL' 류 시장접두 제거(있으면). 기본은 그대로."""
+    s = (raw or "").upper()
+    for pre in ("DNAS", "DNYS", "DAMS", "RBAQ", "RBAY", "RBAA"):
+        if s.startswith(pre) and len(s) > len(pre):
+            return s[len(pre):]
+    return s
+
+
+def _us_ws_key(symbol: str) -> str:
+    """美 실시간 tr_key — 정규장: 'D'+거래소(NAS/NYS/AMS)+종목 (예 DNASAAPL). 주간거래(R+BAQ/BAY/BAA)는 미지원."""
+    return "D" + kis_quote._us_excd(symbol) + symbol.upper()
+
+
 def _extract_us_trade(f: list) -> dict:
-    return {"symbol": f[1] if len(f) > 1 else f[0], "kind": "trade",
+    return {"symbol": _norm_us_symbol(f[0]), "kind": "trade",
             "price": _ff(f, _US_TRADE_PRICE_IDX) or None, "volume": _ff(f, _US_TRADE_VOL_IDX)}
+
+
+def _extract_us_ask(f: list) -> dict:
+    bid, ask = _ff(f, _US_ASK_BID_IDX), _ff(f, _US_ASK_ASK_IDX)
+    bq, aq = _ff(f, _US_ASK_BIDQ_IDX), _ff(f, _US_ASK_ASKQ_IDX)
+    return {"symbol": _norm_us_symbol(f[0]), "kind": "ask",
+            "asks": [(ask, aq)] if ask > 0 else [], "bids": [(bid, bq)] if bid > 0 else [],
+            "best_ask": ask or None, "best_bid": bid or None}
 
 
 _EXTRACTORS = {
     TR_KR_TRADE: _extract_kr_trade, TR_KR_ASK: _extract_kr_ask,
-    TR_US_TRADE: _extract_us_trade,
+    TR_US_TRADE: _extract_us_trade, TR_US_ASK: _extract_us_ask,
 }
-_WIDTHS = {TR_KR_TRADE: 46, TR_KR_ASK: 59, TR_US_TRADE: 26}   # multi-record 분할용(단일프레임은 무관)
+_WIDTHS = {TR_KR_TRADE: 46, TR_KR_ASK: 59, TR_US_TRADE: 25, TR_US_ASK: 16}   # multi-record 분할용(단일프레임은 무관)
 
 
 def parse_realtime_frame(raw: str) -> list[dict]:
@@ -262,7 +288,8 @@ async def _session(approval_key: str) -> None:
         # 등록: KR 체결+호가, (US 활성 시) 해외 체결+호가
         subs = [(TR_KR_TRADE, s) for s in sel["KR"]] + [(TR_KR_ASK, s) for s in sel["KR"]]
         if us_enabled():
-            subs += [(TR_US_TRADE, s) for s in sel["US"]] + [(TR_US_ASK, s) for s in sel["US"]]
+            us_keys = [_us_ws_key(s) for s in sel["US"]]   # 美 tr_key = D+거래소+종목 (DNASAAPL)
+            subs += [(TR_US_TRADE, k) for k in us_keys] + [(TR_US_ASK, k) for k in us_keys]
         for tr_id, key in subs:
             await ws.send(build_subscribe(approval_key, tr_id, key, register=True))
         logger.info("구독 %d건 (KR %d·US %d, US스트림=%s)", len(subs),
@@ -280,8 +307,7 @@ async def _session(approval_key: str) -> None:
                     await ws.send(pong)
                 else:
                     for rec in parse_realtime_frame(raw):
-                        mkt = "US" if rec.get("kind") == "trade" and not rec.get("symbol", "").isdigit() else "KR"
-                        _apply(latest, rec, delayed=(mkt == "US" and not us_enabled()))
+                        _apply(latest, rec, delayed=False)   # KR·美 모두 무료 실시간(美 0분지연)
             now = time.time()
             if now - last_flush >= FLUSH_SECS:
                 _flush(latest, market="KR/US" if us_enabled() else "KR", connected=True)

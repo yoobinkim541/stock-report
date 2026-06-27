@@ -72,7 +72,7 @@ crons/news_spike_detector.py (크론 매 1분)
 | `providers/index_membership.py` | 교차시장 시점별 멤버십 — 美 S&P500(fja05680, 1996~ 생존편향0)·KR(marcap 위임). members_asof·change_events·membership_intervals(생존편향제거 마스킹) | `~/reports/ml-cache/sp500_history.csv` |
 | `providers/edgar.py` | SEC EDGAR 재무층 — companyfacts(상폐기업 재무 보존·무료) → fundamental_trends(매출YoY·순마진·부채추세, 무룩어헤드). 美 퇴출예측 피처원 | `~/reports/ml-cache/edgar/` |
 | `providers/naver_kr.py` | KR 수급(외인/기관/개인 순매수)+KOSPI200 멤버십(Naver — pykrx 공백 복구, 서버서 동작). investor_flow_features·kospi200_members. **Naver HTML=EUC-KR** | — |
-| `providers/kis_quote.py` | KIS **실계좌 시세 read-only** REST — 실전 도메인(`openapi.koreainvestment.com:9443`) 하드락·현재가·10단계 호가·거래량(KR 무료 실시간·美 신청 시). 주문 경로 0(grep 강제)·`REALTIME_ENABLED` 게이트·실전키 fail-closed | `~/.cache/kis_quote_token.json` |
+| `providers/kis_quote.py` | KIS **실계좌 시세 read-only** REST — 실전 도메인(`openapi.koreainvestment.com:9443`) 하드락·현재가·10단계 호가·거래량(**KR·美 모두 무료 실시간**). 주문 경로 0(grep 강제)·`REALTIME_ENABLED` 게이트·실전키 fail-closed | `~/.cache/kis_quote_token.json` |
 | `providers/realtime_quotes.py` | 실시간 캐시 **읽기전용 클라이언트** = 폴백 단일 seam. get_price/orderbook/best/volume, 2단 신선도(heartbeat+심볼 ts). stale·비활성·없음 → None → 소비자 yfinance 폴백. 예외 무발 | `~/.cache/kis_realtime_quotes.json` |
 
 **bot/ (텔레그램 서브커맨드)**
@@ -254,7 +254,7 @@ crons/news_spike_detector.py (크론 매 1분)
 | `KOREA_MOCK_ACCOUNT_NO` | — | — (KIS 모의 계좌 `CANO-ACNT_PRDT_CD` 형식. **필수** — 미설정 시 잔고/주문 fail-closed) |
 | `US_MOCK_UNIVERSE` / `US_MOCK_MAX_POS` / `US_MOCK_INVEST` / `KOREA_MOCK_SEED` | — | Nasdaq기본 / `5` / `0.9` / `100000` (US 모의 전략 파라미터·시드 USD) |
 | `REALTIME_ENABLED` | — | `false` (KIS 실시간 시세 수신·소비 **마스터 게이트**. off면 stream 미기동·전 소비자 yfinance 폴백) |
-| `REALTIME_US_ENABLED` | — | `false` (美 해외 실시간 스트림 — KIS '해외 실시간시세 신청' 확인 후 true. 미설정 시 美 지연/yfinance) |
+| `REALTIME_US_ENABLED` | — | `false` (美 해외 실시간 스트림. **미국=무료 실시간 0분지연**·별도 신청 불필요(open-trading-api 확정). off면 美 미구독→yfinance) |
 | `REALTIME_KR_MAX` / `REALTIME_US_MAX` / `REALTIME_FLUSH_SECS` | — | `10` / `10` / `1.0` (WS 워치리스트 시장별 캡·캐시 flush 주기. 41심볼/세션 제한 대응) |
 | `REALTIME_STALE_S` / `REALTIME_HEARTBEAT_STALE_S` / `REALTIME_QUOTE_STALE_S` | — | `60` / `120` / `10` (소비자 신선도 임계 초 — 초과 시 yfinance/정적 폴백) |
 | `ADAPTIVE_ENTRY_ENABLED` | — | `false` (해외 진입 임계값 적응 학습 shadow 를 라이브에 반영. off면 shadow만·라이브 불변) |
