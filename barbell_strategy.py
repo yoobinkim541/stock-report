@@ -1309,7 +1309,8 @@ def _section_portfolio(portfolio: dict, total_krw: int, exchange_rate: float) ->
 
 
 def _section_qqq_radar(qqq_data: dict, ma_data: dict, drawdown: float,
-                       rsi: float, vix: float, fear_greed: dict) -> list:
+                       rsi: float, vix: float, fear_greed: dict,
+                       regime_ln: str | None = None) -> list:
     """QQQ 레이더."""
     # ── QQQ 레이더 ────────────────────────────────────────────────────
     pos_52w = qqq_data.get("position_52w_pct", 50)
@@ -1321,6 +1322,7 @@ def _section_qqq_radar(qqq_data: dict, ma_data: dict, drawdown: float,
     return [
         "",
         "━━━ 📈 QQQ 레이더 ━━━",
+    ] + ([regime_ln] if regime_ln else []) + [
         f"  현재가  ${qqq_data.get('current', 0):>8,.2f}   52주高 ${qqq_data.get('high_52w', 0):,.2f}  低 ${qqq_data.get('low_52w', 0):,.2f}",
         f"  낙폭    {drawdown:>+7.2f}%   52주위치 {_bar(pos_52w / 100, 12)} {pos_52w:.0f}%",
         _drawdown_ruler(drawdown),
@@ -1424,6 +1426,44 @@ def _section_special_alerts(market_type: str, phase_key, portfolio: dict,
 #  리포트 생성
 # ══════════════════════════════════════════════════════════════════════
 
+def detect_regime(drawdown_pct: float | None = None) -> dict | None:
+    """현재 QQQ 추세/횡보 레짐 진단 (ml.regime_classifier — Kaufman ER 기반).
+
+    캐시된 QQQ 1y 종가(_history_cached)를 재사용 — 핫패스에서 추가 네트워크 없음.
+    종가 부족(<220)·오류 시 None (호출부에서 레짐 줄을 생략 → 기존 동작 보존).
+    drawdown_pct(%) 주입 시 깊은 bear 게이트(횡보 아님)에 사용한다.
+
+    주의: 감지·표시 전용. 라이브 배분(Phase·DCA·레버리지)은 이 결과로 바꾸지 않는다
+    (Phase 1B 백테스트 게이트가 US 횡보 틸트를 NO-GO 판정 — 감지·리포트만).
+    """
+    try:
+        from ml import regime_classifier
+        hist = _history_cached("QQQ", "1y")
+        if hist is None or getattr(hist, "empty", True) or "Close" not in getattr(hist, "columns", []):
+            return None
+        closes = hist["Close"].dropna()
+        dd = (drawdown_pct / 100.0) if isinstance(drawdown_pct, (int, float)) else None
+        r = regime_classifier.classify_latest(closes, drawdown=dd)
+        return r if r.get("er") is not None else None
+    except Exception as e:
+        logger.debug("레짐 감지 실패(무시): %s", e)
+        return None
+
+
+def regime_line(regime: dict | None, indent: str = "  ") -> str | None:
+    """레짐 dict → 한 줄 표시 문자열 (리포트·/status 공용). None → None(줄 생략)."""
+    if not regime:
+        return None
+    if regime.get("sideways"):
+        sub = "저변동·인컴" if regime.get("substate") == "sideways_calm" else "고변동·디리스크"
+        icon, label = "🟰", f"횡보 ({sub})"
+    else:
+        icon, label = "📈", "추세/방향성"
+    er = regime.get("er") or 0.0
+    ret60 = regime.get("ret60") or 0.0
+    return f"{indent}{icon} 레짐   {label}  ·  ER {er:.2f}  ·  3M {ret60 * 100:+.1f}%"
+
+
 def build_report(
     qqq_data: dict,
     rsi: float,
@@ -1434,6 +1474,7 @@ def build_report(
     qqqi_div: dict = None,
     old_phase_state: dict = None,
     fear_greed: dict = None,
+    show_regime: bool = True,
 ) -> str:
     """시각화 바벨 전략 리포트 생성."""
     if portfolio is None:
@@ -1458,7 +1499,8 @@ def build_report(
     L += _section_header(now, old_phase_state, market_type, phase_key, drawdown)
     L += _section_phase_meter(p_info, market_type, phase_key, drawdown)
     L += _section_portfolio(portfolio, total_krw, exchange_rate)
-    L += _section_qqq_radar(qqq_data, ma_data, drawdown, rsi, vix, fear_greed)
+    reg_ln = regime_line(detect_regime(qqq_data.get("drawdown_pct"))) if show_regime else None
+    L += _section_qqq_radar(qqq_data, ma_data, drawdown, rsi, vix, fear_greed, regime_ln=reg_ln)
     L += _section_sgov(sgov)
     L += _section_qqqi_dividend(qqqi_div, market_type, phase_key)
     L += _section_action_items(p_info)
@@ -1516,7 +1558,7 @@ def build_simulation_report(mode: str = "bull2") -> str:
         f"[시뮬레이션 모드: {mode}]\n"
         f"{'=' * 50}\n\n"
         + build_report(d["qqq"], d["rsi"], d["vix"], ma_sim, sim_portfolio, 1380.0, sim_div,
-                      fear_greed=d.get("fg"))
+                      fear_greed=d.get("fg"), show_regime=False)
     )
 
 

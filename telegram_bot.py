@@ -44,6 +44,7 @@ from barbell_strategy import (
     fetch_exchange_rate, fetch_portfolio_value,
     estimate_qqqi_monthly_dividend,
     classify_market, calculate_dca, calculate_sgov_target,
+    detect_regime, regime_line,
     build_smart_report,
     build_report, build_simulation_report, load_leverage_state, load_phase_state, save_phase_state,
     has_phase_changed, send_phase5_emergency,
@@ -527,6 +528,9 @@ def cmd_status(d: dict) -> str:
     ret_pct  = port.get("return_pct", 0) or 0
     ret_sign = "▲" if ret_pct > 0 else ("▼" if ret_pct < 0 else "─")
 
+    reg_ln = regime_line(detect_regime(dd), indent="")
+    reg_block = f"{reg_ln}\n" if reg_ln else ""
+
     return (
         f"📊 현재 상태  ({d['fetched_at']})\n"
         f"━━━━━━━━━━━━━━━━━━━━━━━\n"
@@ -534,6 +538,7 @@ def cmd_status(d: dict) -> str:
         f"\n"
         f"QQQ   ${qqq.get('current', 0):>8,.2f}   1M {mom_s}\n"
         f"낙폭  {dd:>+8.2f}%\n"
+        f"{reg_block}"
         f"RSI   {rsi:>8.1f}   {rsi_s}\n"
         f"VIX   {vix:>8.1f}   {vix_s}\n"
         f"F&G   {fg_sc:>8.1f}   {fg_lbl}{_fg_proxy_str}\n"
