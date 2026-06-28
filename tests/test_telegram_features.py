@@ -150,6 +150,7 @@ def test_dispatch_routes_common_command_typo_to_portfolio(monkeypatch):
     monkeypatch.setattr(telegram_bot, "fetch_market", lambda force=False: calls.append(("fetch", force)) or {"portfolio": {"total_usd": 1}})
     monkeypatch.setattr(telegram_bot, "cmd_portfolio", lambda d: "포트폴리오 현황")
     monkeypatch.setattr(telegram_bot, "send", lambda chat_id, text: sent.append(text))
+    monkeypatch.setattr(telegram_bot, "send_html", lambda chat_id, text, max_len=4000: sent.append(text))
     monkeypatch.setattr(telegram_bot, "typing", lambda chat_id: None)
 
     telegram_bot.dispatch("/portpolio", "chat-1")
@@ -229,6 +230,7 @@ def test_dispatch_routes_plain_internal_feature_request_without_llm(monkeypatch)
     monkeypatch.setattr(telegram_bot, "cmd_portfolio", lambda d: "포트폴리오 현황")
     monkeypatch.setattr(telegram_bot, "ask_portfolio_advisor", lambda q, d: asked.append(q) or "LLM 답변")
     monkeypatch.setattr(telegram_bot, "send", lambda chat_id, text: sent.append(text))
+    monkeypatch.setattr(telegram_bot, "send_html", lambda chat_id, text, max_len=4000: sent.append(text))
     monkeypatch.setattr(telegram_bot, "typing", lambda chat_id: None)
     monkeypatch.setattr(telegram_bot, "keep_typing", lambda chat_id: (lambda: None))
 
@@ -370,6 +372,7 @@ def test_plain_text_market_report_with_portfolio_routes_to_ask(monkeypatch):
     monkeypatch.setattr(telegram_bot, "fetch_market", lambda force=False: {"portfolio": {"total_usd": 1}})
     monkeypatch.setattr(telegram_bot, "ask_portfolio_advisor", lambda q, d: asked.append(q) or "LLM 답변")
     monkeypatch.setattr(telegram_bot, "send", lambda chat_id, text: sent.append(text))
+    monkeypatch.setattr(telegram_bot, "send_html", lambda chat_id, text, max_len=4000: sent.append(text))
     monkeypatch.setattr(telegram_bot, "keep_typing", lambda chat_id: (lambda: None))
 
     text = "오늘의 주식 현황 보고해줘 내 포트폴리오랑"
@@ -476,9 +479,9 @@ def test_cmd_portfolio_includes_total_pnl_and_overall_return():
         "qqqi_div": {"monthly_usd": 2.5, "annual_yield_pct": 12.0},
     })
 
-    # F2 헤드라인 — 전 재산(국내+해외) + 총수익률, 책별 해외/국내 손익 분리
+    # F2 헤드라인 + V-A HTML(<b> 굵게) — 전 재산·해외·국내 손익 (태그 사이 두므로 인접 매칭 회피)
     assert "전 재산" in text
-    assert "해외 $1,000" in text and "+$200" in text and "▲25.0%" in text
+    assert "$1,000" in text and "+$200" in text and "▲25.0%" in text
     assert "국내" in text and "▲20.0%" in text      # 국내 책 손익 별도 표기
 
 
@@ -505,6 +508,7 @@ def test_dispatch_portfolio_refreshes_prices_and_bypasses_cache(monkeypatch):
     monkeypatch.setattr(telegram_bot, "fetch_market", fake_fetch_market)
     monkeypatch.setattr(telegram_bot, "typing", lambda chat_id: None)
     monkeypatch.setattr(telegram_bot, "send", lambda chat_id, text: sent.append(text))
+    monkeypatch.setattr(telegram_bot, "send_html", lambda chat_id, text, max_len=4000: sent.append(text))
 
     telegram_bot.dispatch("/portfolio", "chat-1")
 
@@ -604,6 +608,7 @@ def test_apply_snapshot_updates_derived_portfolio_values(monkeypatch, tmp_path):
     monkeypatch.setattr(holding_commands, "load_pending_snapshot", lambda: pending)
     monkeypatch.setattr(holding_commands, "clear_pending_snapshot", lambda: None)
     monkeypatch.setattr(telegram_bot, "send", lambda chat_id, text: sent.append(text))
+    monkeypatch.setattr(telegram_bot, "send_html", lambda chat_id, text, max_len=4000: sent.append(text))
 
     def send_fn(chat_id, text):
         sent.append(text)
@@ -635,6 +640,7 @@ def test_handle_attachment_rejects_incomplete_portfolio_snapshot(monkeypatch):
     ])
     monkeypatch.setattr(telegram_bot, "save_pending_snapshot", lambda holdings: saved.append(holdings))
     monkeypatch.setattr(telegram_bot, "send", lambda chat_id, text: sent.append(text))
+    monkeypatch.setattr(telegram_bot, "send_html", lambda chat_id, text, max_len=4000: sent.append(text))
 
     telegram_bot.handle_attachment({"photo": [{"file_id": "abc123"}], "caption": "포트폴리오"}, "chat-1")
 

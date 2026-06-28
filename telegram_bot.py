@@ -583,25 +583,24 @@ def cmd_status(d: dict) -> str:
     ret_pct = port.get("return_pct", 0) or 0
     reg_ln  = regime_line(detect_regime(dd), indent="")
 
-    # 헤드라인(핵심 굵게) + 접을 수 있는 상세 — HTML 위계 (V-A)
+    # 헤드라인 핵심 굵게 — 짧은 명령은 전체 표시(접기 없음, V-A 사용자 방침)
     head = fmt.headline(f"{info['emoji']} {fmt.b(info['label'])}",
                         f"내수익 {fmt.b(fmt.spct(ret_pct))}", f"낙폭 {fmt.pct(dd)}")
-    summary = "\n".join([
+    lines = [
         head,
         fmt.sep(),
         fmt.esc(f"QQQ {qqq.get('current', 0):,.2f}  (1M {fmt.pct(mom_1m)})"),
-    ])
-    detail = []
+    ]
     if reg_ln:
-        detail.append(fmt.esc(reg_ln))
-    detail += [
+        lines.append(fmt.esc(reg_ln))
+    lines += [
         fmt.esc(f"RSI {rsi:.0f} {rsi_s}  ·  VIX {vix:.1f} {vix_s}"),
         fmt.esc(f"F&G {fg_sc:.0f} {fg_lbl}"),
         f"총액 {fmt.b(fmt.money(port['total_usd']))} "
         f"({fmt.money(total_krw, '₩', abbrev=True)})  {fmt.spct(ret_pct)}",
         fmt.esc(f"SGOV {fmt.money(port['sgov_usd'])}  실탄"),
     ]
-    return fmt.expand(summary, "\n".join(detail))
+    return "\n".join(lines)
 
 
 def cmd_summary(d: dict) -> str:
@@ -685,17 +684,17 @@ def cmd_portfolio(d: dict) -> str:
     def _sm(v, ccy="$"):                       # 부호 있는 통화 (+$120 / -₩111만)
         return ("+" if v >= 0 else "-") + fmt.money(abs(v), ccy, abbrev=(ccy == "₩"))
 
+    # 헤드라인·핵심 굵게(HTML). 포트폴리오 값은 티커·숫자뿐이라 <>& 없음(esc 불요).
     lines = [
-        # 헤드라인 — 전 재산 + 총수익률 + 총손익 (가장 궁금한 수치 먼저)
-        fmt.headline(f"💼 전 재산 {fmt.money(overall_value, '₩', abbrev=True)}",
+        fmt.headline(f"💼 전 재산 {fmt.b(fmt.money(overall_value, '₩', abbrev=True))}",
                      fmt.spct(overall_return), _sm(overall_pnl, "₩")),
         fmt.sep(),
-        f"해외 {fmt.money(total_usd)} ({fmt.money(total_krw, '₩', abbrev=True)})  "
+        f"해외 {fmt.b(fmt.money(total_usd))} ({fmt.money(total_krw, '₩', abbrev=True)})  "
         f"{fmt.spct(return_pct)} {_sm(pnl_usd)}",
     ]
     if domestic_value > 0:
         dom_ret = domestic_pnl / domestic_cost * 100 if domestic_cost > 0 else 0.0
-        lines.append(f"국내 {fmt.money(domestic_value, '₩', abbrev=True)}  "
+        lines.append(f"국내 {fmt.b(fmt.money(domestic_value, '₩', abbrev=True))}  "
                      f"{fmt.spct(dom_ret)} {_sm(domestic_pnl, '₩')}")
     lines += [
         f"환율 {fx:,.0f}원/USD",
@@ -718,27 +717,29 @@ def cmd_portfolio(d: dict) -> str:
     if not has_lev:
         lines.append("레버리지 미보유")
 
-    # ── 개별 종목 P&L (금액 병기) ───────────────────────────────────────
+    # ── 개별 종목 P&L — 등폭 표(<pre>)로 정렬 ───────────────────────────
     details = port.get("holdings_detail", [])
     _SKIP = {"SGOV", "QQQI", "QLD", "TQQQ"}
     stock_details = [h for h in details if h.get("ticker") not in _SKIP and h.get("value_usd", 0) > 0]
     if stock_details:
-        lines += ["", fmt.sep("📈 개별 종목")]
         stock_details.sort(key=lambda h: h.get("value_usd", 0), reverse=True)
+        rows = []
         for h in stock_details:
             ret = h.get("return_pct", 0) or 0
             val = h.get("value_usd", 0)
             pnl = h.get("pnl_usd")
-            if pnl is None:                    # 없으면 평가액·수익률로 역산
+            if pnl is None:
                 pnl = val - val / (1 + ret / 100) if ret > -100 else 0.0
-            lines.append(f"{h['ticker']} {fmt.money(val)}  {fmt.spct(ret)} ({_sm(pnl)})")
+            rows.append(fmt.wpad(h["ticker"], 6) + fmt.wpad(fmt.money(val), 9, ">")
+                        + "  " + fmt.wpad(fmt.spct(ret), 8) + _sm(pnl))
+        lines += ["", "📈 개별 종목", fmt.pre("\n".join(rows))]
 
     _ro = risk_model.risk_oneliner(_risk_weights(d))
     if _ro:
-        lines += ["", _ro]
+        lines += ["", fmt.esc(_ro)]
 
     div = d["qqqi_div"]
-    lines += ["", f"QQQI 월 배당 {fmt.money(div['monthly_usd'], digits=2)} (연 {div['annual_yield_pct']:.1f}%)"]
+    lines += ["", fmt.esc(f"QQQI 월 배당 {fmt.money(div['monthly_usd'], digits=2)} (연 {div['annual_yield_pct']:.1f}%)")]
     return "\n".join(lines)
 
 
@@ -1508,7 +1509,7 @@ _FORCE_FRESH_CMDS = {"/portfolio", "/risk"}
 # 포지션 의존(개별 종목 가격) 명령 — 가격도 갱신.
 _FORCE_REFRESH_PRICES = {"/portfolio", "/risk"}
 # HTML 리치텍스트(parse_mode=HTML) 출력 명령 — 점진 확산(V-A).
-_HTML_CMDS = {"/status"}
+_HTML_CMDS = {"/status", "/portfolio"}
 
 
 def _dispatch_market(cmd: str, chat_id: str):
