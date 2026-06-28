@@ -1312,7 +1312,7 @@ def notify_intraday_signals() -> None:
         for sig in movers:
             if not should_emit_intraday_signal(sig):
                 continue
-            msg = format_intraday_alert(sig)
+            msg = format_intraday_alert(sig).rstrip() + "\n" + _NOEDGE_LABEL   # 푸시도 정직 라벨
             for chunk in (msg[i:i+4000] for i in range(0, len(msg), 4000)):
                 send(ALLOWED_CHAT_ID, chunk)
             mark_intraday_signal_emitted(sig)
@@ -1342,6 +1342,7 @@ def notify_entry_signals() -> None:
                     msg += "\n" + ref
             except Exception:
                 pass
+            msg = msg.rstrip() + "\n" + _NOEDGE_LABEL   # 푸시도 정직 라벨(무엣지)
             for chunk in (msg[i:i+4000] for i in range(0, len(msg), 4000)):
                 send(ALLOWED_CHAT_ID, chunk)
             logger.info("진입 알림 발송: %s (점수=%.2f, %s)", s.ticker, s.score, s.currency)
@@ -1621,8 +1622,8 @@ def _dispatch_tax(chat_id: str, args: list):
 
 
 # 6티어 검증상 무엣지(종목선택·장중타이밍)로 판정된 정보형 신호 — 출력 끝 정직 라벨.
-_NOEDGE_LABEL = ("ℹ️ 정보·표시용 — 6티어 검증상 종목선택·장중타이밍은 무엣지 판정"
-                 " (매매신호 아님 · 검증 통과는 구조적 레버리지뿐).")
+_NOEDGE_LABEL = ("ℹ️ 참고용 — 종목선택·장중타이밍은 검증상 통계적 우위(엣지) 없음 (매매신호 아님)."
+                 " 검증 통과 공격은 구조적 레버리지뿐.")
 
 
 def _noedge(chat_id: str):
