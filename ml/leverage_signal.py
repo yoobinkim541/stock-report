@@ -601,3 +601,24 @@ def format_leverage_report(sig: EntrySignal) -> str:
         f"({sig.timestamp})",
     ]
     return "\n".join(lines)
+
+
+# ── CLI 진입점 (봇 .venv subprocess 용) ─────────────────────────────────────────
+# 봇은 hermes venv(lightgbm·sklearn 없음)라 /signals lev 를 프로젝트 .venv 의
+# `python -m ml.leverage_signal` subprocess 로 실행 → stdout(리포트)만 회수. (불변)
+if __name__ == "__main__":
+    import argparse
+    import sys
+    import logging
+
+    logging.basicConfig(level=logging.INFO, stream=sys.stderr,
+                        format="%(asctime)s %(levelname)s %(message)s")
+    ap = argparse.ArgumentParser(description="레버리지 진입 신호 리포트 — stdout 으로 출력")
+    ap.add_argument("--retrain", action="store_true")
+    a = ap.parse_args()
+
+    sig = get_entry_signal(retrain=a.retrain)
+    if sig is None:
+        print("__LEV_EMPTY__")
+        sys.exit(2)
+    print(format_leverage_report(sig))

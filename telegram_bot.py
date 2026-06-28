@@ -1782,51 +1782,52 @@ def _dispatch_signals(chat_id: str, args: list):
     _noedge(chat_id)
 
 
-def cmd_ranking(chat_id: str, args: list, send_fn=None):
-    """NASDAQ100 LightGBM 종목 랭킹.
+def _run_signals_subprocess(chat_id: str, _send, module: str, extra: list,
+                            sentinel: str, fail_msg: str, timeout: int = 200):
+    """무엣지 ML 신호를 프로젝트 .venv subprocess 로 실행 → stdout 리포트 전송.
 
-    봇은 hermes venv(lightgbm 없음)라 프로젝트 .venv 의 `python -m ml.ranker`
-    를 subprocess 호출해 리포트(stdout)만 회수한다(불변·안전, /card 와 동일 패턴).
+    봇은 hermes venv(lightgbm·sklearn 없음)라 무거운 ML 신호를 인라인 실행 못 함
+    → `.venv/bin/python3 -m <module>` 우회(불변·안전, /card 와 동일 패턴).
+    실패·타임아웃·빈 결과(sentinel) 시 폴백 메시지.
     """
-    _send = send_fn if send_fn is not None else send
-    retrain = "retrain" in (args or [])
-    _send(chat_id, "⏳ 랭킹 생성 중... (약 15초" + (", 재학습 최대 3분" if retrain else "") + ")")
+    import subprocess
+    proj = os.getenv("STOCK_REPORT_PROJECT_DIR", "/home/ubuntu/projects/stock-report")
+    venv_py = os.path.join(proj, ".venv", "bin", "python3")
     try:
-        import subprocess
-        proj = os.getenv("STOCK_REPORT_PROJECT_DIR", "/home/ubuntu/projects/stock-report")
-        venv_py = os.path.join(proj, ".venv", "bin", "python3")
-        cmd = [venv_py, "-m", "ml.ranker", "--mode", "nasdaq100", "--top", "15"]
-        if retrain:
-            cmd.append("--retrain")
-        r = subprocess.run(cmd, cwd=proj, timeout=200, capture_output=True, text=True)
+        r = subprocess.run([venv_py, "-m", module, *extra],
+                           cwd=proj, timeout=timeout, capture_output=True, text=True)
         out = (r.stdout or "").strip()
-        if r.returncode == 0 and out and "__RANK_EMPTY__" not in out:
+        if r.returncode == 0 and out and sentinel not in out:
             for chunk in (out[i:i+4000] for i in range(0, len(out), 4000)):
                 _send(chat_id, chunk)
         else:
-            _send(chat_id, "❌ 랭킹 생성 실패 — 데이터 확인 필요")
-            logger.warning("cmd_ranking rc=%s err=%s", r.returncode, (r.stderr or "")[-300:])
+            _send(chat_id, fail_msg)
+            logger.warning("%s rc=%s err=%s", module, r.returncode, (r.stderr or "")[-300:])
     except subprocess.TimeoutExpired:
-        _send(chat_id, "❌ 랭킹 시간 초과 — 잠시 후 다시 시도")
+        _send(chat_id, "❌ 시간 초과 — 잠시 후 다시 시도")
     except Exception as e:
-        _send(chat_id, f"❌ 랭킹 오류: {e}")
-        logger.exception("cmd_ranking")
+        _send(chat_id, f"❌ 오류: {e}")
+        logger.exception("subprocess %s", module)
+
+
+def cmd_ranking(chat_id: str, args: list, send_fn=None):
+    """NASDAQ100 LightGBM 종목 랭킹 — .venv subprocess(봇 hermes venv 엔 lightgbm 없음)."""
+    _send = send_fn if send_fn is not None else send
+    retrain = "retrain" in (args or [])
+    _send(chat_id, "⏳ 랭킹 생성 중... (약 15초" + (", 재학습 최대 3분" if retrain else "") + ")")
+    extra = ["--mode", "nasdaq100", "--top", "15"] + (["--retrain"] if retrain else [])
+    _run_signals_subprocess(chat_id, _send, "ml.ranker", extra,
+                            "__RANK_EMPTY__", "❌ 랭킹 생성 실패 — 데이터 확인 필요")
 
 
 def cmd_leverage(chat_id: str, args: list, send_fn=None):
-    """레버리지 ETF 진입 분석 — 현재 낙폭 기준 손익비·권장 비중·타점."""
+    """레버리지 ETF 진입 분석 — .venv subprocess(봇 hermes venv 엔 lightgbm·sklearn 없음)."""
     _send = send_fn if send_fn is not None else send
     retrain = "retrain" in (args or [])
-    _send(chat_id, "⏳ 레버리지 분석 중... (첫 실행 시 약 30초)")
-    try:
-        from ml.leverage_signal import get_entry_signal, format_leverage_report
-        sig    = get_entry_signal(retrain=retrain)
-        report = format_leverage_report(sig)
-        for chunk in (report[i:i+4000] for i in range(0, len(report), 4000)):
-            _send(chat_id, chunk)
-    except Exception as e:
-        _send(chat_id, f"❌ 레버리지 분석 오류: {e}")
-        logger.exception("cmd_leverage")
+    _send(chat_id, "⏳ 레버리지 분석 중... (약 30초" + (", 재학습 시 더" if retrain else "") + ")")
+    extra = ["--retrain"] if retrain else []
+    _run_signals_subprocess(chat_id, _send, "ml.leverage_signal", extra,
+                            "__LEV_EMPTY__", "❌ 레버리지 분석 실패 — 데이터 확인 필요")
 
 
 def cmd_meta(chat_id: str, args: list, send_fn=None):
