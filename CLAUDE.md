@@ -104,7 +104,7 @@ crons/news_spike_detector.py (크론 매 1분)
 |------|------|------|
 | `crons/daily_leverage_retrain.py` | LeverageModel 재학습 + 월요일 Optuna 재최적화 | 평일 22:15 UTC |
 | `crons/daily_ranking.py` | ML 종목 랭킹 발송 | 평일 22:00 UTC |
-| `crons/notion_sync.py` | Notion 대시보드 동기화 (리포트 23:00 이후) + 리포트 아카이빙 호출 | 평일 23:30 UTC |
+| `crons/notion_sync.py` | Notion 대시보드 동기화 (리포트 23:00 이후) + 리포트 아카이빙 호출. **히어로 KPI 밴드**(Phase·QQQ낙폭·내포트·DCA 4열 컬러 콜아웃)·로컬 PNG 네이티브 임베드(파일 업로드 API)·리포트 섹션 구조화(h3/불릿)·**보유종목 DB upsert**·안전 스왑(append-then-delete·child_database 보존) | 평일 23:30 UTC |
 | `crons/notion_archive.py` | 일일 리포트 → Notion 월(`26/06`)/주(`4주차`) 계층 페이지 누적 아카이빙 (멱등 upsert, 대시보드와 독립) | notion_sync 가 호출 |
 | `crons/news_spike_detector.py` | 속보 수집 + 급증 감지 + 텔레그램 알림 (+ 실시간 시세 동반표시) | 매 1분 |
 | `scripts/kis_stream_watchdog.sh` | 실시간 시세 WS 상시 프로세스(kis_stream) 재기동 — `REALTIME_ENABLED=true` 시만 기동(opt-in·꺼지면 no-op) | 매 1분 |
@@ -316,6 +316,7 @@ crons/news_spike_detector.py (크론 매 1분)
 ~/.cache/barbell_state.lock             — Phase 상태 쓰기 잠금
 ~/.cache/barbell_anchor.json            — 낙폭 고점 앵커 (Phase 드리프트 방지)
 ~/.cache/notion_archive_root.json       — Notion 리포트 아카이브 루트 페이지 id 캐시 (notion_archive.py)
+~/.cache/notion_holdings_db.json        — Notion 보유종목 DB id 캐시 (notion_sync._sync_holdings_db — 1회 생성·일일 행 upsert)
 ~/.local/state/stock-report/barbell_bot.pid  — 봇 PID (단일 인스턴스 잠금)
 ~/.local/share/stock-report/stock_report.db      — SQLite 통합 저장소 (user_id 스코프, WAL)
                                                    └ 컬렉션: tax_records · portfolio_history
