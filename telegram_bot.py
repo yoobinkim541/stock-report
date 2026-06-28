@@ -198,6 +198,7 @@ _OWNER_MENU = [
     {"command": "alert",     "description": "가격 알림 관리 (add/list/remove)"},
     {"command": "accum",     "description": "기관 매집 추적 — OBV·CMF·13F 매집 강도"},
     {"command": "earnings",  "description": "실적·밸류에이션 — PER/PBR/ROE·서프라이즈·PEAD (예: /earnings NVDA)"},
+    {"command": "indicators","description": "종목 기술적 지표 — RSI·이동평균·모멘텀·52주 위치 (예: /indicators QQQ)"},
     {"command": "signals",   "description": "ML·단기 신호 (rank|entry|intraday|lev|meta) — 정보·표시용"},
 ]
 
@@ -242,7 +243,7 @@ BOT_COMMAND_ALIASES = {
 
 
 HELP_SECTIONS = [
-    ("시장", ["status", "phase", "report", "accum", "earnings"]),
+    ("시장", ["status", "phase", "report", "accum", "earnings", "indicators"]),
     ("포트폴리오", ["portfolio", "rebalance", "risk", "history"]),
     ("주문·모의", ["order", "paper"]),
     ("보유·세금", ["holding", "tax"]),

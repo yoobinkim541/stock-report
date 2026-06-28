@@ -224,7 +224,7 @@ crons/news_spike_detector.py (크론 매 1분)
 ※ 게스트 포트폴리오는 본인 chat_id 네임스페이스에 격리 (소유자 portfolio_snapshot과 분리)
 ```
 
-> **메뉴 scope 분리** (setMyCommands): **소유자 채팅엔 소유자 메뉴(17), default·all_private_chats 엔 게스트 메뉴(4)** — `BotCommandScopeChat`(소유자)가 우선 적용돼 **소유자 메뉴엔 `/market`·`/indicators`·`/my` 가 안 보임**(권한 아닌 표시만 분리 — 소유자는 입력 시 사용 가능).
+> **메뉴 scope 분리** (setMyCommands): **소유자 채팅엔 소유자 메뉴(18), default·all_private_chats 엔 게스트 메뉴(4)** — `BotCommandScopeChat`(소유자)가 우선 적용돼 **소유자 메뉴엔 `/market`·`/my` 가 안 보임**(권한 아닌 표시만 분리 — 소유자는 입력 시 사용 가능). `/indicators` 는 종목 기술지표가 소유자에도 유용해 **소유자 메뉴에도 노출**(게스트 메뉴엔 그대로).
 >
 > **하위호환 alias** (메뉴 비노출): `/summary`→`/status` · `/sim`→`/phase sim` · `/mock`→`/paper kr` · `/usmock`→`/paper us` · `/dca`→`/rebalance dca` · `/sgov`→`/rebalance sgov` · `/ranking·/entry·/intraday·/leverage·/meta`→`/signals …` · `/myadd·/myremove·/myportfolio`→`/my …` · `/dividend`→`/holding dividend` · `/apply_snapshot`→`/holding apply`
 
