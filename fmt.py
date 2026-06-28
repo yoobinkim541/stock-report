@@ -21,6 +21,7 @@ fmt.py — 텔레그램 출력 공통 포맷 (모바일 안전·일관) — 단�
 
 from __future__ import annotations
 
+import html as _html
 import unicodedata
 
 # ── 구분선 ────────────────────────────────────────────────────────────
@@ -178,3 +179,47 @@ def gloss(*terms) -> str:
     """약어 풀이 1줄. 알 수 없는 용어는 건너뜀."""
     out = [f"{t}={GLOSSARY[t]}" for t in terms if t in GLOSSARY]
     return " · ".join(out)
+
+
+# ── Telegram HTML (parse_mode=HTML) — 리치텍스트 위계 ────────────────────
+# 위계: 핵심 b(굵게) · 표 pre(등폭·정렬유지) · 긴 상세 expand(접기). 모두 입력 이스케이프.
+def esc(s) -> str:
+    """HTML 이스케이프 (parse_mode=HTML 안전 — < > & 만, 본문 따옴표 보존)."""
+    return _html.escape(str(s), quote=False)
+
+
+def b(s) -> str:
+    """굵게 (입력 자동 이스케이프)."""
+    return f"<b>{esc(s)}</b>"
+
+
+def code_inline(s) -> str:
+    """인라인 등폭 (입력 이스케이프)."""
+    return f"<code>{esc(s)}</code>"
+
+
+def pre(s) -> str:
+    """등폭 블록 — 표 정렬 유지·모바일 줄바꿈 방지 (입력 이스케이프)."""
+    return f"<pre>{esc(s)}</pre>"
+
+
+def expand(summary_html: str, detail_html: str) -> str:
+    """접을 수 있는 상세 — summary 는 보이고 detail 은 expandable blockquote.
+
+    summary_html·detail_html 은 **이미 HTML-안전**(b/esc/pre 로 구성)이어야 한다.
+    blockquote 중첩 금지.
+    """
+    return f"{summary_html}\n<blockquote expandable>{detail_html}</blockquote>"
+
+
+_SPARK = "▁▂▃▄▅▆▇█"
+
+
+def spark(series) -> str:
+    """유니코드 스파크라인 (값 시계열 한 줄). 값 2개 미만이면 빈 문자열."""
+    vals = [float(v) for v in series if v is not None]
+    if len(vals) < 2:
+        return ""
+    lo, hi = min(vals), max(vals)
+    rng = (hi - lo) or 1.0
+    return "".join(_SPARK[min(7, max(0, int((v - lo) / rng * 7)))] for v in vals)
