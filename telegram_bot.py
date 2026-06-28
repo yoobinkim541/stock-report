@@ -725,32 +725,35 @@ def cmd_dca(d: dict) -> str:
     ml_bread  = dca.get("ml_breadth", 0.0)
     ml_dir    = dca.get("ml_direction", {})
 
-    # 배율 분해: Phase × F&G × ML
-    mult_parts = [f"{base_mult}×(Phase)"]
+    # 배율 분해: 최종 = Phase × F&G × ML (곱과 최종이 다르면 상한/조정 적용 명시)
+    final = dca["multiplier"]
+    parts = [f"Phase {base_mult}"]
     if fg_adj != 1.0:
-        mult_parts.append(f"×{fg_adj}(F&G)")
+        parts.append(f"F&G {fg_adj}")
     if ml_mult != 1.0:
-        mult_parts.append(f"×{ml_mult}(ML)")
-    mult_str = "  ".join(mult_parts)
+        parts.append(f"ML {ml_mult}")
+    breakdown = " × ".join(parts)
+    product = base_mult * fg_adj * ml_mult
+    clamp = "  (상한·조정 적용)" if abs(product - final) > 0.01 else ""
 
     lines = [
         f"💸 오늘 DCA  {dca['total_krw']:,}원  (${dca['total_usd']:.2f})",
-        f"   [{dca['multiplier']}×]  {mult_str}",
+        f"배율 {final}× = {breakdown}{clamp}",
     ]
     if ml_label:
-        lines.append(f"   🤖 {ml_label}")
-    lines.append("━━━━━━━━━━━━━━━━━━━━━━━")
+        lines.append(f"🤖 {ml_label}")
+    lines.append(fmt.sep())
 
     # 종목별 배분 + ML 방향 표시
     for ticker, amt in dca["by_ticker"].items():
         pct  = amt / dca["total_krw"] * 100 if dca["total_krw"] > 0 else 0
         tag  = ml_dir.get(ticker, "")
         usd  = round(amt / d["exchange_rate"], 2)
-        lines.append(f"  {ticker:<6}  {amt:>7,}원  ${usd:.2f}  ({pct:.0f}%)  {tag}")
+        lines.append(f"{ticker} {amt:,}원  ${usd:.2f} ({pct:.0f}%) {tag}".rstrip())
 
     lines += [
         "",
-        f"   포트폴리오 ML 강도: {ml_bread:+.2f}%",
+        f"포트폴리오 ML 강도: {fmt.signed(ml_bread, 2)}%",
         "📋 키움 소수점 매수 주문서: /order",
     ]
     return "\n".join(lines)
@@ -776,12 +779,13 @@ def cmd_sgov(d: dict) -> str:
     sgov = calculate_sgov_target(
         d["market_type"], d["phase_key"], port["total_usd"], port["sgov_usd"]
     )
+    diff = sgov["diff_usd"]
+    diff_s = ("+" if diff >= 0 else "-") + fmt.money(abs(diff))
     lines = [
-        f"🛡 SGOV 실탄  ({d['fetched_at']})",
-        "━━━━━━━━━━━━━━━━━━━━━━━",
+        f"🛡 SGOV 실탄  (목표 {sgov['target_pct']}%)",
+        fmt.sep(),
     ] + _sgov_compare(sgov["current_usd"], sgov["target_usd"]) + [
-        f"  목표 {sgov['target_pct']}%  ·  차이 ${sgov['diff_usd']:+,.0f}",
-        f"  → {sgov['action']}",
+        f"차이 {diff_s}  →  {sgov['action']}",
     ]
     return "\n".join(lines)
 
