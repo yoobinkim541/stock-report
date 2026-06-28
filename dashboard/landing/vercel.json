@@ -1,0 +1,6 @@
+{
+  "framework": null,
+  "outputDirectory": ".",
+  "buildCommand": "echo static-landing",
+  "installCommand": "echo no-deps"
+}

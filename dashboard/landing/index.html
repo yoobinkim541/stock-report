@@ -1,0 +1,48 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>퀀트 터미널</title>
+<style>
+  :root { color-scheme: dark; }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Noto Sans KR", sans-serif;
+    background: #0b0d12; color: #e6e8ee; min-height: 100vh;
+    display: flex; align-items: center; justify-content: center; padding: 24px;
+  }
+  .card {
+    width: 100%; max-width: 460px; background: #14171f; border: 1px solid #232735;
+    border-radius: 16px; padding: 40px 32px; text-align: center;
+  }
+  .logo { font-size: 44px; line-height: 1; }
+  h1 { font-size: 22px; font-weight: 600; margin: 16px 0 6px; }
+  p.sub { color: #9aa0ad; font-size: 14px; line-height: 1.6; margin-bottom: 28px; }
+  a.btn {
+    display: block; background: #2f6df6; color: #fff; text-decoration: none;
+    font-size: 16px; font-weight: 600; padding: 14px 20px; border-radius: 10px;
+    transition: background .15s;
+  }
+  a.btn:hover { background: #2257d6; }
+  .tags { display: flex; gap: 8px; justify-content: center; flex-wrap: wrap; margin: 22px 0 0; }
+  .tag { font-size: 12px; color: #aab0bd; background: #1b1f29; border: 1px solid #262b3a;
+         border-radius: 999px; padding: 5px 11px; }
+  .note { margin-top: 20px; font-size: 12px; color: #6b7280; line-height: 1.6; }
+</style>
+</head>
+<body>
+  <div class="card">
+    <div class="logo">📊</div>
+    <h1>퀀트 터미널</h1>
+    <p class="sub">가치평가 · 재무 · 리스크 · 기관/내부자 · 공시 · 뉴스 · 캘린더 · 스크리너</p>
+    <a class="btn" id="open" href="https://differences-tracker-fig-decisions.trycloudflare.com">대시보드 열기 →</a>
+    <div class="tags">
+      <span class="tag">🔒 비밀번호 필요</span>
+      <span class="tag">개인 서버 구동</span>
+      <span class="tag">표시 전용 · 주문 0</span>
+    </div>
+    <p class="note">데이터·모델은 개인 서버에서 구동되며 Cloudflare가 HTTPS만 중계합니다.<br>표시·정보용이며 매매 신호가 아닙니다.</p>
+  </div>
+</body>
+</html>
