@@ -92,8 +92,9 @@ def _recent_decisions():
     return [d for d in decs if d.get("date") == last and d.get("side") in ("편입", "퇴출")], last
 
 
-def build_report() -> str:
-    """US 모의 현황 + 스코어카드 (크론·/usmock 공용). read-only."""
+def build_report(html: bool = False) -> str:
+    """US 모의 현황 + 스코어카드 (크론·/paper us 공용). read-only. html=True 면 텔레그램 굵게."""
+    _B = fmt.b if html else (lambda x: x)
     bal = kis_mock.get_balance()
     today = datetime.now(KST)
     hdr = (f"🧪 [모의] 미국 페이퍼트레이딩 현황 (KIS 해외)\n"
@@ -129,8 +130,8 @@ def build_report() -> str:
     # 한눈 스코어카드 1줄 (NAV·누적·vs QQQ) — KR 리포트와 대칭
     excess = (cum_ret - q_ret) if q_ret is not None else None
     lines = [hdr, fmt.headline(
-        f"📊 {fmt.money(nav, abbrev=True)}", f"누적 {fmt.pct(cum_ret)}",
-        (f"QQQ대비 {fmt.pct(excess)}p {'✅' if excess >= 0 else '⚠️'}" if excess is not None else None))]
+        f"📊 {_B(fmt.money(nav, abbrev=True))}", f"누적 {_B(fmt.pct(cum_ret))}",
+        (f"QQQ대비 {_B(fmt.pct(excess) + 'p')} {'✅' if excess >= 0 else '⚠️'}" if excess is not None else None))]
     lines.append(fmt.sep())
     lines.append(f"NAV {fmt.money(nav)}  전일 {fmt.spct(day_ret, 2)}")
     if q_ret is not None:

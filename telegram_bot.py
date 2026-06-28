@@ -478,6 +478,25 @@ def send_html(chat_id: str, html: str, max_len: int = 4000):
         _api("sendMessage", chat_id=chat_id, text=chunk, parse_mode="HTML")
 
 
+def _send_collapsible(chat_id: str, text: str, head_lines: int = 6, tail: str = ""):
+    """긴 평문 리포트 → 앞 head_lines 요약(보임) + 나머지 expandable(접힘). 전체 esc 후 발송.
+
+    너무 길면(>3500자) 접기 대신 평문 분할(send) — blockquote 내부 미절단 한계 회피.
+    """
+    body_text = text.rstrip()
+    full = body_text + (("\n" + tail) if tail else "")
+    if len(full) > 3500:
+        send(chat_id, full)
+        return
+    lines = body_text.split("\n")
+    head = "\n".join(fmt.esc(l) for l in lines[:head_lines])
+    body = "\n".join(fmt.esc(l) for l in lines[head_lines:])
+    msg = fmt.expand(head, body) if body.strip() else head
+    if tail:
+        msg = msg + "\n" + fmt.esc(tail)
+    send_html(chat_id, msg)
+
+
 def send_photo(chat_id: str, path: str, caption: str = "") -> bool:
     """로컬 PNG/JPG 파일을 텔레그램으로 전송."""
     url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendPhoto"
@@ -1052,7 +1071,9 @@ def cmd_report(chat_id: str):
             d["portfolio"], d["exchange_rate"], d["qqqi_div"], old,
             d.get("fear_greed"),
         )
-        send(chat_id, report.rstrip() + "\n" + freshness_note(d.get("fetched_ts")))
+        # 긴 리포트 — 헤드라인(Phase 미터)만 보이고 상세는 접기(expandable)
+        _send_collapsible(chat_id, report, head_lines=6,
+                          tail=freshness_note(d.get("fetched_ts")))
     except Exception as e:
         send(chat_id, f"❌ 리포트 생성 오류: {e}")
         logger.exception("cmd_report")
@@ -1843,15 +1864,15 @@ def _dispatch_paper(chat_id: str, args: list):
     try:
         if sub == "kr":
             from crons.kiwoom_mock_report import build_report
-            send(chat_id, build_report())
+            send_html(chat_id, build_report(html=True))
         elif sub == "us":
             from crons.us_mock_report import build_report
-            send(chat_id, build_report())
+            send_html(chat_id, build_report(html=True))
         else:                                   # 인자 없음 — 국내·미국 둘 다
             from crons.kiwoom_mock_report import build_report as _kr_report
             from crons.us_mock_report import build_report as _us_report
-            send(chat_id, _kr_report())
-            send(chat_id, _us_report())
+            send_html(chat_id, _kr_report(html=True))
+            send_html(chat_id, _us_report(html=True))
     except Exception as e:
         send(chat_id, f"⚠️ 모의 현황 조회 실패: {e}")
         logger.exception("cmd_paper")
@@ -1865,17 +1886,23 @@ def _dispatch_rebalance(chat_id: str, args: list):
     typing(chat_id)
     sub = (str(args[0]).lower() if args else "")
     try:
+        collapse = False
         if sub == "dca":
             d = fetch_market(force=True)
             out = cmd_dca(d)
         elif sub == "sgov":
             d = fetch_market(force=True)
             out = cmd_sgov(d)
-        else:                                   # 기본 리밸런싱 (보유 현재가 갱신)
+        else:                                   # 기본 리밸런싱 (보유 현재가 갱신) — 길어서 접기
             refresh_portfolio_prices()
             d = fetch_market(force=True)
             out = cmd_rebalance(d)
-        send(chat_id, out.rstrip() + "\n" + freshness_note(d.get("fetched_ts")))
+            collapse = True
+        tail = freshness_note(d.get("fetched_ts"))
+        if collapse:
+            _send_collapsible(chat_id, out, head_lines=5, tail=tail)
+        else:
+            send(chat_id, out.rstrip() + "\n" + tail)
     except Exception as e:
         send(chat_id, f"❌ 오류: {e}")
         logger.exception("dispatch /rebalance")

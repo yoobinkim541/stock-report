@@ -56,8 +56,9 @@ def _recent_decisions() -> tuple[list[dict], str | None]:
     return recent, last_date
 
 
-def build_report() -> str:
-    """모의 현황 리포트 문자열(크론·/mock 공용). read-only."""
+def build_report(html: bool = False) -> str:
+    """모의 현황 리포트 문자열(크론·/paper kr 공용). read-only. html=True 면 텔레그램 굵게."""
+    _B = fmt.b if html else (lambda x: x)
     bal = kiwoom_mock.get_balance()
     today = datetime.now(KST)
     hdr = f"🧪 [모의] 국내 페이퍼트레이딩 현황\n📅 {today.strftime('%Y-%m-%d')} ({_WEEKDAY_KR[today.weekday()]}) {today.strftime('%H:%M')} KST"
@@ -98,8 +99,8 @@ def build_report() -> str:
     # 한눈 스코어카드 1줄 (NAV·누적·vs KOSPI)
     excess = (cum_ret - k_ret) if k_ret is not None else None
     lines = [hdr, fmt.headline(
-        f"📊 {fmt.money(nav, '₩', abbrev=True)}", f"누적 {fmt.pct(cum_ret)}",
-        (f"KOSPI대비 {fmt.pct(excess)}p {'✅' if excess >= 0 else '⚠️'}" if excess is not None else None))]
+        f"📊 {_B(fmt.money(nav, '₩', abbrev=True))}", f"누적 {_B(fmt.pct(cum_ret))}",
+        (f"KOSPI대비 {_B(fmt.pct(excess) + 'p')} {'✅' if excess >= 0 else '⚠️'}" if excess is not None else None))]
     lines.append(fmt.sep())
     lines.append(f"NAV {fmt.money(nav, '₩')}  전일 {fmt.spct(day_ret, 2)}")
     if k_ret is not None:
