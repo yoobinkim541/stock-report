@@ -1510,7 +1510,7 @@ _FORCE_FRESH_CMDS = {"/portfolio", "/risk"}
 # 포지션 의존(개별 종목 가격) 명령 — 가격도 갱신.
 _FORCE_REFRESH_PRICES = {"/portfolio", "/risk"}
 # HTML 리치텍스트(parse_mode=HTML) 출력 명령 — 점진 확산(V-A).
-_HTML_CMDS = {"/status", "/portfolio", "/history"}
+_HTML_CMDS = {"/status", "/portfolio", "/history", "/risk"}
 
 
 def _dispatch_market(cmd: str, chat_id: str):
@@ -1653,6 +1653,12 @@ def _dispatch_report(chat_id: str, args: list):
 
 def _dispatch_tax(chat_id: str, args: list):
     cmd_tax(chat_id, args, send)
+
+
+def _dispatch_earnings(chat_id: str, args: list):
+    """/earnings — HTML(굵은 티커·밸류). send_html 로 발송(V-A)."""
+    typing(chat_id)
+    cmd_earnings(chat_id, args, send_html)
 
 
 # 6티어 검증상 무엣지(종목선택·장중타이밍)로 판정된 정보형 신호 — 출력 끝 정직 라벨.
@@ -1896,7 +1902,7 @@ _COMMAND_HANDLERS = {
     "/dividend": lambda chat_id, args: _dispatch_with_send(cmd_dividend, chat_id, args),
     "/holding": lambda chat_id, args: _dispatch_with_send(cmd_holding, chat_id, args),
     "/accum": lambda chat_id, args: _dispatch_with_send(cmd_accum, chat_id, args),
-    "/earnings": lambda chat_id, args: _dispatch_with_send(cmd_earnings, chat_id, args),
+    "/earnings": lambda chat_id, args: _dispatch_earnings(chat_id, args),
     "/order": _dispatch_order,
     "/paper": _dispatch_paper,
     "/tax": _dispatch_tax,

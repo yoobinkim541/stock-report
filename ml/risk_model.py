@@ -430,12 +430,18 @@ def format_risk_report(summary, now: str | None = None) -> str:
     """/risk 전체 리포트. summary None → 안내문."""
     if not summary:
         return "🛡 리스크 분석 — 데이터 부족(이력 <60거래일 또는 보유 1종목 이하)"
-    # 첫 행 2열 공백정렬은 모바일서 줄바꿈 → 2줄로 분리
+    # 핵심 수치 굵게(<b>), 위험기여 표는 등폭(<pre>), 자유텍스트 주석은 esc — 텔레그램 HTML
+    vol_s  = f"{summary['port_vol']*100:.1f}%"
+    neff_s = f"{summary['n_eff']:.1f} / {summary['n_assets']}종목"
     L = ["🛡 리스크 분석", fmt.SEP,
-         f"연변동성  {summary['port_vol']*100:.1f}%",
-         f"유효분산  {summary['n_eff']:.1f} / {summary['n_assets']}종목"]
+         f"연변동성  {fmt.b(vol_s)}",
+         f"유효분산  {fmt.b(neff_s)}"]
+    rows = []
     for tk, dollar, pc in summary["contributions"][:6]:
-        L.append(f"  {tk:5s} {pc*100:4.0f}%  {_bar(max(0.0, pc))}  (달러 {dollar*100:.0f}%)")
+        rows.append(fmt.wpad(tk, 5) + fmt.wpad(f"{pc*100:.0f}%", 5, ">")
+                    + "  " + _bar(max(0.0, pc)) + f"  (달러 {dollar*100:.0f}%)")
+    if rows:
+        L.append(fmt.pre("\n".join(rows)))
     net = summary.get("factor_net") or {}
     if net:
         L.append(f"팩터노출  QQQ β {net.get('mkt',0):.2f} · 금리 β {fmt.signed(net.get('rate',0),2)}")
@@ -444,28 +450,23 @@ def format_risk_report(summary, now: str | None = None) -> str:
         half = (summary.get("growth") or {}).get("half") or {}
         vals = [v for v in half.values()]
         lo, hi = (min(vals), max(vals)) if vals else (0.0, 0.0)
+        rec_s = f"{lev['recommend']:.1f}x"
         L += ["",
               f"⚙ 성장최적 레버리지 (낙폭예산 {lev['budget']*100:.0f}%)",
               f"  낙폭예산 상한  {lev['dd_cap']:.1f}x   (robust·μ불필요)",
               f"  half-Kelly     {lo:.1f}~{hi:.1f}x   (μ가정에 가변)",
-              f"  현재 / 권고    {lev.get('current',1.0):.2f}x → {lev['recommend']:.1f}x"]
+              f"  현재 / 권고    {lev.get('current',1.0):.2f}x → {fmt.b(rec_s)}"]
         ru = ruin_metrics(1.5, summary.get("mdd_est"), budget=lev["budget"])
         if ru:
             L.append(f"  ※ 1.5x → 기대 MDD {ru['implied_mdd']*100:.0f}% "
                      f"({'예산 초과' if ru['breach'] else '예산 이내'})")
-        _sn = _structural_leverage_note()
-        if _sn:
-            L.append(_sn)
-        _fn = _factor_tilt_note()
-        if _fn:
-            L.append(_fn)
-        _in = _income_engine_note()
-        if _in:
-            L.append(_in)
+        for _n in (_structural_leverage_note(), _factor_tilt_note(), _income_engine_note()):
+            if _n:
+                L.append(fmt.esc(_n))
     if summary.get("factor_caveat"):
-        L.append(f"  ({summary['factor_caveat']})")
+        L.append(fmt.esc(f"  ({summary['factor_caveat']})"))
     _cn = _concentration_note(summary)
     if _cn:
-        L.append(_cn)
-    L += ["", f"※ {summary.get('caveat','')}"]
+        L.append(fmt.esc(_cn))
+    L += ["", fmt.esc(f"※ {summary.get('caveat','')}")]
     return "\n".join(L)
