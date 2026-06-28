@@ -10,6 +10,7 @@ stock-report/
 ├── crons/       # 크론 진입점 스크립트 (daily_*, news_*, notion_*, kiwoom_*)
 ├── tests/       # 스모크 테스트·헬스체크
 ├── backtest/    # 백테스트 분석 스크립트 (개발용)
+├── dashboard/   # 퀀트 터미널 Streamlit 웹 대시보드 (프로젝트 .venv 구동)
 └── scripts/     # 쉘 스크립트 (watchdog, deliver)
     (root)       # 상시 실행 프로세스: telegram_bot, barbell_strategy, portfolio_sync_server 등
 ```
@@ -280,7 +281,11 @@ crons/news_spike_detector.py (크론 매 1분)
 | `NOTION_TOKEN` | — | — (Notion 대시보드 동기화·아카이빙. 없으면 notion_sync 스킵) |
 | `NOTION_ARCHIVE_ROOT_ID` | — | — (아카이브 루트 페이지 강제 지정. 미설정 시 대시보드 부모 아래 자동탐색·생성 후 `~/.cache` 캐시) |
 | `NOTION_ARCHIVE_PARENT_ID` | — | — (루트를 만들 부모. 기본: 대시보드의 부모 페이지) |
-| `SAVE_TICKER_API_BASE` | — | `https://saveticker.com/api` |
+| `SAVE_TICKER_API_BASE` | — | `https://saveticker.com/api` (뉴스 + 경제캘린더 `/calendar/events`) |
+| `DART_API_KEY` | — | — (DART OpenAPI 키 — KR 공시. 없으면 대시보드 공시탭 graceful 안내) |
+| `DASHBOARD_ENABLED` | — | `false` (퀀트 터미널 streamlit 워치독 기동 게이트. true 여야 상시구동·opt-in) |
+| `DASHBOARD_PASSWORD` | — | — (대시보드 접근 비번. **미설정 시 fail-closed 전면 차단**) |
+| `DASHBOARD_PORT` | — | `8501` (127.0.0.1 바인드 — 외부는 SSH 터널/reverse proxy) |
 | `INVESTMENT_REPORT_MAX_NASDAQ_SCAN` | — | `100` |
 | `INVESTMENT_REPORT_MAX_KOSPI_SCAN` | — | `30` |
 | `INVESTMENT_REPORT_ARCA_PAGES` | — | `1` |
@@ -303,6 +308,24 @@ crons/news_spike_detector.py (크론 매 1분)
 | 🔴 3 | -15%~-20% | 2.5× | QLD |
 | 🚨 4 | -20%~-30% | 3.0× | QLD 70 + TQQQ 30 |
 | 💥 5 | -30%+ | 5.0× | TQQQ (에스컬레이션 3회) |
+
+## 퀀트 터미널 (웹 대시보드)
+
+`dashboard/` — Streamlit 웹 대시보드. **봇과 달리 프로젝트 `.venv` 로 구동**(풀 ML 스택 보유 → sklearn/lightgbm/matplotlib subprocess 우회 불필요). 기존 `providers/`·`reports/`·`ml/` 함수를 그대로 재사용하는 **표시 레이어**(주문 집행 0·무엣지 라벨 유지).
+
+| 파일 | 역할 |
+|------|------|
+| `dashboard/app.py` | Streamlit 엔트리 — 인증 게이트 → 포트/Phase 헤더 → 종목 선택 → 8탭 |
+| `dashboard/data.py` | 포트폴리오/Phase 상태 + 스케일 명시 포맷터(f_frac_pct vs f_pct·부호버그 차단). streamlit 미import → 테스트가능 |
+| `dashboard/views.py` | 모듈별 provider 래퍼(graceful·provider 내부 import). st.cache_data 로 신선도 |
+| `providers/intrinsic.py` | DDM·RIM 내재가치 닫힌해 + r/g 밴드 (DDM은 고배당주만·payout<40% 플래그) |
+| `providers/econ_calendar.py` | 경제 일정 (saveticker `/calendar/events`·키불요·한글) |
+| `providers/insider.py` | 내부자거래 (SEC Form 4·edgar 재사용·parse_form4 순수) + 최근 SEC 공시 |
+| `providers/dart.py` | KR 공시 (DART OpenAPI·corpCode 매핑·`DART_API_KEY` 없으면 graceful) |
+
+**8탭:** 가치평가(상대+DDM/RIM)·재무제표(EDGAR)·리스크(변동성·레버리지)·기관(13F+내부자)·공시(美 SEC·韓 DART)·뉴스·캘린더(경제+실적)·스크리너(랭킹+ML 백테스트).
+
+**구동:** `bash scripts/run_dashboard.sh` (수동) 또는 `scripts/dashboard_watchdog.sh`(크론 매 1분·`DASHBOARD_ENABLED=true` opt-in·streamlit health 재기동). **활성화 = `.env` 에 `DASHBOARD_PASSWORD`(필수·fail-closed) + `DASHBOARD_ENABLED=true`.** 127.0.0.1 바인드 → 외부는 SSH 터널(`ssh -L 8501:127.0.0.1:8501`) 또는 reverse proxy(caddy TLS+auth). 봇과 별개 프로세스 → 봇 재시작 무관.
 
 ## 출력 파일
 
