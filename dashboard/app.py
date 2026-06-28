@@ -48,6 +48,16 @@ def _risk():
     return views.risk_report_text(data.portfolio_weights())
 
 
+@st.cache_data(ttl=900, show_spinner="불러오는 중…")
+def _iv(t):
+    return views.intrinsic_value(t)
+
+
+@st.cache_data(ttl=1800, show_spinner="불러오는 중…")
+def _econ(days):
+    return views.econ_events(days)
+
+
 # ── 헤더: 포트폴리오 + Phase ────────────────────────────────────────────────
 summ = data.portfolio_summary()
 ph = data.phase_badge()
@@ -88,6 +98,22 @@ with t_val:
             f"애널 {int(c.get('n_analysts') or 0)}명 · "
             f"리비전 모멘텀 {data.f_ratio(c.get('revision_momentum'), 2)} "
             f"(▲{int(c.get('eps_rev_up_30d') or 0)}/▼{int(c.get('eps_rev_down_30d') or 0)})")
+    iv = _iv(ticker)
+    rim, ddm = iv.get("rim"), iv.get("ddm")
+    if rim or ddm:
+        st.markdown("**적정가치 (모델·가정 민감)**")
+        cc = st.columns(3)
+        if rim:
+            cc[0].metric("RIM 적정가", data.f_usd(rim["mid"], 0),
+                         help=f"범위 {data.f_usd(rim['low'], 0)}~{data.f_usd(rim['high'], 0)}")
+        if ddm:
+            cc[1].metric("DDM 적정가" + ("" if iv.get("ddm_reliable") else " ⚠️"),
+                         data.f_usd(ddm["mid"], 0),
+                         help=None if iv.get("ddm_reliable") else "배당성향 낮아 신뢰도 낮음")
+        if iv.get("upside_pct") is not None:
+            cc[2].metric("RIM 상승여력", data.f_pct_s(iv["upside_pct"]))
+        st.caption("RIM=잔여이익(고ROE 반영·범용) · DDM=배당할인(고배당주만 유효) · "
+                   "r 8~11%·g 4% 밴드 · ROE 영속 가정(보수성 주의)")
     h = v.get("history") or []
     if h:
         st.caption("실적 서프라이즈 (최근)")
@@ -135,16 +161,22 @@ with t_inst:
 with t_news:
     st.markdown(_news(ticker) or "_뉴스 없음_")
 
-# ── 캘린더 (실적 이력 — 일정은 QT2) ────────────────────────────────────────
+# ── 캘린더 (경제 일정 + 실적 이력) ─────────────────────────────────────────
 with t_cal:
+    ec = _econ(14)
+    if ec:
+        st.caption("경제 일정 — 향후 2주 (saveticker)")
+        st.dataframe(
+            pd.DataFrame([{"일시": e["date_str"], "중요도": e["marker"], "이벤트": e["title"]}
+                         for e in ec[:40]]),
+            hide_index=True, width="stretch")
     cal = _cal(ticker)
     h = cal.get("history") or []
     if h:
-        st.caption("실적 서프라이즈 이력")
+        st.caption(f"{ticker} 실적 서프라이즈 이력")
         st.dataframe(pd.DataFrame(h), hide_index=True, width="stretch")
-    else:
-        st.warning(f"실적 이력 없음 ({cal.get('error', '')})")
-    st.info("다음 실적·경제지표 발표 일정 캘린더는 QT2에서 추가 예정")
+    elif not ec:
+        st.warning("캘린더 데이터 없음")
 
 # ── 스크리너 (QT3) ──────────────────────────────────────────────────────────
 with t_scr:

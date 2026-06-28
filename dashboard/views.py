@@ -79,9 +79,27 @@ def news_digest(ticker: str, hours: int = 72, limit: int = 10) -> str:
 
 
 def earnings_calendar(ticker: str) -> dict:
-    """실적 서프라이즈 이력 (다음 발표일정 캘린더는 QT2)."""
+    """실적 서프라이즈 이력 (종목별)."""
     from providers import earnings_data
     try:
         return {"history": earnings_data.earnings_history(ticker, limit=6)}
     except Exception as e:
         return {"error": str(e)}
+
+
+def intrinsic_value(ticker: str) -> dict:
+    """DDM·RIM 내재가치 밴드 (QT2)."""
+    from providers import intrinsic
+    try:
+        return intrinsic.intrinsic(ticker)
+    except Exception as e:
+        return {"error": str(e)}
+
+
+def econ_events(days: int = 14) -> list[dict]:
+    """경제 일정 (saveticker /calendar/events, QT2)."""
+    from providers import econ_calendar
+    try:
+        return econ_calendar.upcoming_events(days=days)
+    except Exception:
+        return []
