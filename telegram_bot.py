@@ -234,6 +234,12 @@ BOT_COMMAND_ALIASES = {
     "/myadd": "/my add",          # 게스트 보유추가 → /my add 병합
     "/myremove": "/my del",       # 게스트 보유삭제 → /my del 병합
     "/myportfolio": "/my view",   # 게스트 평가 → /my view 병합
+    # 무엣지 신호 6개를 /signals 우산으로 병합 (/mlreport 는 삭제 — alias 없음)
+    "/ranking": "/signals rank",
+    "/entry": "/signals entry",
+    "/intraday": "/signals intraday",
+    "/leverage": "/signals lev",
+    "/meta": "/signals meta",
 }
 
 
@@ -1603,9 +1609,40 @@ def _noedge(chat_id: str):
     send(chat_id, _NOEDGE_LABEL)
 
 
-def _dispatch_mlreport(chat_id: str, args: list):
+_SIGNALS_USAGE = (
+    "📊 /signals — ML·단기 신호 (정보·표시용)\n"
+    "━━━━━━━━━━━━━━━━━━━\n"
+    "/signals rank [retrain]   NASDAQ100 종목 랭킹 (LightGBM)\n"
+    "/signals entry [포트|us50|kr|watch|TICKER]   진입 타점 분석\n"
+    "/signals intraday [1m|5m|15m] [kr|us100|TICKER]   단기봉 신호\n"
+    "/signals lev [retrain]    레버리지 ETF 진입 분석\n"
+    "/signals meta             ML 통합 배분 (MetaAllocator)\n\n"
+    + _NOEDGE_LABEL
+)
+
+
+def _dispatch_signals(chat_id: str, args: list):
+    """무엣지 신호 우산 — rank|entry|intraday|lev|meta (구 6개 병합, 정직 라벨 1개).
+
+    6티어 검증상 종목선택·장중타이밍은 무엣지 → 정보·표시용. (구 /mlreport 는 삭제.)
+    구 /ranking·/entry·/intraday·/leverage·/meta 는 alias 로 하위호환.
+    """
     typing(chat_id)
-    cmd_mlreport(chat_id, args=args)
+    sub  = (str(args[0]).lower() if args else "")
+    rest = args[1:]
+    if sub in ("rank", "ranking"):
+        cmd_ranking(chat_id, rest)
+    elif sub == "entry":
+        cmd_entry(chat_id, rest)
+    elif sub == "intraday":
+        cmd_intraday(chat_id, rest)
+    elif sub in ("lev", "leverage"):
+        cmd_leverage(chat_id, rest)
+    elif sub == "meta":
+        cmd_meta(chat_id, rest)
+    else:
+        send(chat_id, _SIGNALS_USAGE)
+        return
     _noedge(chat_id)
 
 
@@ -1628,12 +1665,6 @@ def cmd_ranking(chat_id: str, args: list, send_fn=None):
         logger.exception("cmd_ranking")
 
 
-def _dispatch_ranking(chat_id: str, args: list):
-    typing(chat_id)
-    cmd_ranking(chat_id, args)
-    _noedge(chat_id)
-
-
 def cmd_leverage(chat_id: str, args: list, send_fn=None):
     """레버리지 ETF 진입 분석 — 현재 낙폭 기준 손익비·권장 비중·타점."""
     _send = send_fn if send_fn is not None else send
@@ -1650,12 +1681,6 @@ def cmd_leverage(chat_id: str, args: list, send_fn=None):
         logger.exception("cmd_leverage")
 
 
-def _dispatch_leverage(chat_id: str, args: list):
-    typing(chat_id)
-    cmd_leverage(chat_id, args)
-    _noedge(chat_id)
-
-
 def cmd_meta(chat_id: str, args: list, send_fn=None):
     """ML 신호 통합 MetaAllocator — 최종 포트폴리오 비중 추천."""
     _send = send_fn if send_fn is not None else send
@@ -1669,18 +1694,6 @@ def cmd_meta(chat_id: str, args: list, send_fn=None):
     except Exception as e:
         _send(chat_id, f"❌ MetaAllocator 오류: {e}")
         logger.exception("cmd_meta")
-
-
-def _dispatch_meta(chat_id: str, args: list):
-    typing(chat_id)
-    cmd_meta(chat_id, args)
-    _noedge(chat_id)
-
-
-def _dispatch_entry(chat_id: str, args: list):
-    typing(chat_id)
-    cmd_entry(chat_id, args)
-    _noedge(chat_id)
 
 
 def cmd_intraday(chat_id: str, args: list, send_fn=None) -> None:
@@ -1759,12 +1772,6 @@ def cmd_intraday(chat_id: str, args: list, send_fn=None) -> None:
         logger.exception("cmd_intraday")
 
 
-def _dispatch_intraday(chat_id: str, args: list):
-    typing(chat_id)
-    cmd_intraday(chat_id, args)
-    _noedge(chat_id)
-
-
 def _dispatch_paper(chat_id: str, args: list):
     """모의 페이퍼트레이딩 현황 — /paper kr(국내)·/paper us(미국)·/paper(둘 다).
 
@@ -1829,12 +1836,7 @@ def _dispatch_phase(chat_id: str, args: list):
 
 _COMMAND_HANDLERS = {
     "/report": _dispatch_report,
-    "/mlreport": _dispatch_mlreport,
-    "/ranking":  _dispatch_ranking,
-    "/leverage": _dispatch_leverage,
-    "/meta":     _dispatch_meta,
-    "/entry":     _dispatch_entry,
-    "/intraday":  _dispatch_intraday,
+    "/signals": _dispatch_signals,   # 무엣지 신호 우산 (구 ranking·entry·intraday·leverage·meta)
     "/alert": lambda chat_id, args: _dispatch_with_typing(cmd_alert, chat_id, args),
     "/dividend": lambda chat_id, args: _dispatch_with_send(cmd_dividend, chat_id, args),
     "/holding": lambda chat_id, args: _dispatch_with_send(cmd_holding, chat_id, args),
