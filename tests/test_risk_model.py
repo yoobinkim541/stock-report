@@ -35,6 +35,17 @@ def test_cov_ledoitwolf_psd_and_better_conditioned():
     assert np.linalg.cond(lw) < np.linalg.cond(sample)       # 조건수 개선
 
 
+def test_cov_falls_back_when_sklearn_absent(monkeypatch):
+    """봇 hermes venv 엔 sklearn 미설치 → shrink=True 가 표본cov 로 폴백(예외 없이)."""
+    monkeypatch.setitem(sys.modules, "sklearn", None)         # import sklearn → ImportError
+    monkeypatch.setitem(sys.modules, "sklearn.covariance", None)
+    rng = np.random.default_rng(7)
+    R = pd.DataFrame(rng.normal(0, 0.01, size=(300, 5)))
+    fb = rm.shrunk_cov(R, shrink=True)                        # sklearn 없음 → 폴백
+    assert fb.shape == (5, 5)
+    assert np.allclose(fb, rm.shrunk_cov(R, shrink=False))    # 폴백 == 표본cov 경로
+
+
 # ── 리스크 기여 ───────────────────────────────────────────────────────
 def test_rc_two_asset_closed_form():
     cov = [[0.04, 0.01], [0.01, 0.09]]

@@ -111,8 +111,13 @@ def shrunk_cov(returns, shrink: bool = True) -> np.ndarray:
     R = returns.values if hasattr(returns, "values") else np.asarray(returns, dtype=float)
     R = np.atleast_2d(R)
     if shrink:
-        from sklearn.covariance import LedoitWolf
-        cov = LedoitWolf().fit(R).covariance_
+        try:
+            from sklearn.covariance import LedoitWolf
+            cov = LedoitWolf().fit(R).covariance_
+        except ImportError:
+            # 봇(hermes venv)엔 sklearn 미설치 → 표본 공분산 폴백.
+            # 자산수 ≪ 관측수(9종목 vs 수백일)라 LW 수축강도≈0 → 수치상 거의 동일.
+            cov = np.cov(R, rowvar=False)
     else:
         cov = np.cov(R, rowvar=False)
     return np.atleast_2d(np.asarray(cov, dtype=float)) * TRADING_DAYS
