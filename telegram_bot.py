@@ -228,6 +228,8 @@ BOT_COMMAND_ALIASES = {
     "/apply_snapshot": "/holding apply",
     "/summary": "/status",        # /status 가 동일 정보(상세) 포함 — 한줄요약 병합
     "/sim": "/phase sim",         # 시장 시뮬을 /phase 하위로 병합
+    "/mock": "/paper kr",         # 국내 모의 → /paper kr 병합
+    "/usmock": "/paper us",       # 미국 모의 → /paper us 병합
 }
 
 
@@ -1746,26 +1748,28 @@ def _dispatch_intraday(chat_id: str, args: list):
     _noedge(chat_id)
 
 
-def _dispatch_mock(chat_id: str, args: list):
-    """국내 모의 페이퍼트레이딩 현황(owner 전용 — _GUEST_COMMANDS 미포함)."""
+def _dispatch_paper(chat_id: str, args: list):
+    """모의 페이퍼트레이딩 현황 — /paper kr(국내)·/paper us(미국)·/paper(둘 다).
+
+    owner 전용(_GUEST_COMMANDS 미포함). 구 /mock·/usmock 을 병합 (alias 하위호환).
+    """
     typing(chat_id)
+    sub = (str(args[0]).lower() if args else "")
     try:
-        from crons.kiwoom_mock_report import build_report
-        send(chat_id, build_report())
+        if sub == "kr":
+            from crons.kiwoom_mock_report import build_report
+            send(chat_id, build_report())
+        elif sub == "us":
+            from crons.us_mock_report import build_report
+            send(chat_id, build_report())
+        else:                                   # 인자 없음 — 국내·미국 둘 다
+            from crons.kiwoom_mock_report import build_report as _kr_report
+            from crons.us_mock_report import build_report as _us_report
+            send(chat_id, _kr_report())
+            send(chat_id, _us_report())
     except Exception as e:
         send(chat_id, f"⚠️ 모의 현황 조회 실패: {e}")
-        logger.exception("cmd_mock")
-
-
-def _dispatch_usmock(chat_id: str, args: list):
-    """미국 모의 페이퍼트레이딩 현황 + 로직 평가 스코어카드(owner 전용 — _GUEST_COMMANDS 미포함)."""
-    typing(chat_id)
-    try:
-        from crons.us_mock_report import build_report
-        send(chat_id, build_report())
-    except Exception as e:
-        send(chat_id, f"⚠️ US 모의 현황 조회 실패: {e}")
-        logger.exception("cmd_usmock")
+        logger.exception("cmd_paper")
 
 
 def _dispatch_phase(chat_id: str, args: list):
@@ -1796,8 +1800,7 @@ _COMMAND_HANDLERS = {
     "/accum": lambda chat_id, args: _dispatch_with_send(cmd_accum, chat_id, args),
     "/earnings": lambda chat_id, args: _dispatch_with_send(cmd_earnings, chat_id, args),
     "/order": _dispatch_order,
-    "/mock": _dispatch_mock,
-    "/usmock": _dispatch_usmock,
+    "/paper": _dispatch_paper,
     "/tax": _dispatch_tax,
     "/ask": _dispatch_ask,
     "/apply_snapshot": _dispatch_apply_snapshot,
