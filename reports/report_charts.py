@@ -372,10 +372,69 @@ def build_portfolio_dashboard(clean_data, market, out_path, *, price_history=Non
         return None
 
 
-if __name__ == "__main__":   # 수동 점검: 최근 summary JSON 으로 대시보드 생성
+def build_portfolio_card(payload, out_path) -> str | None:
+    """온디맨드 포트폴리오 카드 PNG — 배분 도넛 + 중앙 총액·수익 + 종목별 비중·수익 범례.
+
+    payload: {"holdings":[{ticker,value,ret}], "total_usd", "return_pct"}. 봇이 .venv subprocess 로 호출.
+    """
+    try:
+        holdings = sorted((payload or {}).get("holdings", []), key=lambda h: -float(h.get("value", 0) or 0))
+        holdings = [h for h in holdings if float(h.get("value", 0) or 0) > 0]
+        if not holdings:
+            return None
+        total = float(payload.get("total_usd", 0) or sum(float(h.get("value", 0)) for h in holdings))
+        ret = float(payload.get("return_pct", 0) or 0)
+        _setup_font()
+        labels = [h["ticker"] for h in holdings]
+        vals = [float(h.get("value", 0)) for h in holdings]
+        palette = ["#2b6cb0", "#21a366", "#dd8a2b", "#9b6dd6", "#e5484d",
+                   "#0f9b8e", "#c2410c", "#7c3aed", "#be185d", "#3a9d78", "#8895a7"]
+        colors = [palette[i % len(palette)] for i in range(len(vals))]
+        fig, ax = plt.subplots(figsize=(8.0, 5.0), dpi=110)
+        fig.patch.set_facecolor(_BG)
+        wedges, _ = ax.pie(vals, startangle=90, counterclock=False, colors=colors,
+                           wedgeprops=dict(width=0.42, edgecolor=_BG, linewidth=2))
+        ret_col = _UP if ret >= 0 else _DOWN
+        ax.text(0, 0.12, f"${total:,.0f}", ha="center", va="center",
+                fontsize=21, fontweight="bold", color=_INK)
+        ax.text(0, -0.20, f"{'▲' if ret >= 0 else '▼'}{abs(ret):.1f}%", ha="center", va="center",
+                fontsize=14, fontweight="bold", color=ret_col)
+        ax.set_title(_ko("포트폴리오 배분", "Portfolio Allocation"),
+                     fontsize=14, color=_INK, fontweight="bold", pad=14)
+        tot_v = sum(vals) or 1.0
+        leg = []
+        for h, v in zip(holdings, vals):
+            r = float(h.get("ret", 0) or 0)
+            leg.append(f"{h['ticker']:<6} {v/tot_v*100:4.0f}%  {'▲' if r >= 0 else '▼'}{abs(r):.1f}%")
+        ax.legend(wedges, leg, loc="center left", bbox_to_anchor=(1.0, 0.5),
+                  fontsize=10, frameon=False, prop={"family": "monospace"})
+        fig.text(0.5, 0.02, _ko("실시간/스냅샷 기반 · 참고용", "reference only"),
+                 ha="center", color=_MUTED, fontsize=8)
+        fig.tight_layout(rect=(0, 0.03, 1, 1))
+        os.makedirs(os.path.dirname(out_path), exist_ok=True)
+        fig.savefig(out_path, facecolor=_BG, bbox_inches="tight")
+        plt.close(fig)
+        return out_path
+    except Exception as e:
+        logger.warning("카드 생성 실패: %s", e)
+        try:
+            plt.close("all")
+        except Exception:
+            pass
+        return None
+
+
+if __name__ == "__main__":
     import json
     import glob
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
+    # 온디맨드 카드 모드(봇 subprocess): card <in_json> <out_png>
+    if len(sys.argv) >= 4 and sys.argv[1] == "card":
+        with open(sys.argv[2], encoding="utf-8") as _f:
+            _payload = json.load(_f)
+        _r = build_portfolio_card(_payload, sys.argv[3])
+        sys.exit(0 if _r else 1)
+    # 수동 점검: 최근 summary JSON 으로 대시보드 생성
     files = sorted(glob.glob(os.path.expanduser("~/reports/investment-summary-*.json")))
     if not files:
         print("summary JSON 없음 — 먼저 리포트를 생성하세요")

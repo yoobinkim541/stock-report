@@ -192,6 +192,7 @@ _OWNER_MENU = [
     {"command": "risk",      "description": "위험 분석 — 변동성·위험기여·팩터·성장최적 레버리지"},
     {"command": "history",   "description": "성과 히스토리 (1d/7d/30d/90d)"},
     {"command": "order",     "description": "소수점 매수 주문서"},
+    {"command": "card",      "description": "포트폴리오 카드 이미지 — 배분 도넛·수익"},
     {"command": "paper",     "description": "모의 페이퍼트레이딩 (/paper kr·us)"},
     {"command": "holding",   "description": "보유 종목 조회/매수·매도/목표비중/DCA/배당"},
     {"command": "tax",       "description": "실현손익 & 양도세 (sim/sell/history/delete/import)"},
@@ -819,6 +820,59 @@ def cmd_order(chat_id: str):
     except Exception as e:
         send(chat_id, f"❌ 주문서 생성 오류: {e}")
         logger.exception("cmd_order")
+
+
+def cmd_card(chat_id: str):
+    """온디맨드 포트폴리오 카드 이미지 — .venv subprocess 로 PNG 렌더 → sendPhoto.
+
+    봇은 hermes venv(matplotlib 없음)라 프로젝트 .venv python 을 subprocess 호출(불변·안전).
+    타임아웃·실패 시 텍스트 폴백.
+    """
+    send(chat_id, "⏳ 카드 생성 중...")
+    typing(chat_id)
+    in_path = out_path = None
+    try:
+        import json as _json
+        import tempfile
+        import subprocess
+        refresh_portfolio_prices()
+        d = fetch_market(force=True)
+        port = d["portfolio"]
+        holdings = [{"ticker": h["ticker"], "value": h.get("value_usd", 0), "ret": h.get("return_pct", 0)}
+                    for h in port.get("holdings_detail", []) if h.get("value_usd", 0) > 0]
+        if port.get("sgov_usd", 0) > 0:
+            holdings.append({"ticker": "SGOV", "value": port["sgov_usd"], "ret": 0})
+        if port.get("qqqi_usd", 0) > 0:
+            holdings.append({"ticker": "QQQI", "value": port["qqqi_usd"], "ret": 0})
+        if not holdings:
+            send(chat_id, "보유 데이터 없음 — /portfolio 로 확인")
+            return
+        payload = {"holdings": holdings, "total_usd": port["total_usd"],
+                   "return_pct": port.get("return_pct", 0)}
+        proj = os.getenv("STOCK_REPORT_PROJECT_DIR", "/home/ubuntu/projects/stock-report")
+        venv_py = os.path.join(proj, ".venv", "bin", "python3")
+        with tempfile.NamedTemporaryFile("w", suffix=".json", delete=False, encoding="utf-8") as f:
+            _json.dump(payload, f)
+            in_path = f.name
+        out_path = in_path[:-5] + ".png"
+        r = subprocess.run([venv_py, os.path.join("reports", "report_charts.py"), "card", in_path, out_path],
+                           cwd=proj, timeout=30, capture_output=True)
+        if r.returncode == 0 and os.path.exists(out_path):
+            send_photo(chat_id, out_path, caption="📊 포트폴리오 카드")
+        else:
+            send(chat_id, "카드 생성 실패 — /portfolio 로 확인")
+            logger.warning("cmd_card rc=%s err=%s", r.returncode,
+                           (r.stderr or b"")[-300:])
+    except Exception as e:
+        send(chat_id, f"카드 생성 실패: {e}\n/portfolio 로 확인")
+        logger.exception("cmd_card")
+    finally:
+        for _p in (in_path, out_path):
+            try:
+                if _p:
+                    os.remove(_p)
+            except Exception:
+                pass
 
 
 def cmd_sgov(d: dict) -> str:
@@ -1931,6 +1985,7 @@ _COMMAND_HANDLERS = {
     "/accum": lambda chat_id, args: _dispatch_with_send(cmd_accum, chat_id, args),
     "/earnings": lambda chat_id, args: _dispatch_earnings(chat_id, args),
     "/order": _dispatch_order,
+    "/card": lambda chat_id, args: cmd_card(chat_id),
     "/paper": _dispatch_paper,
     "/tax": _dispatch_tax,
     "/ask": _dispatch_ask,
