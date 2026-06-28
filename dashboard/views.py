@@ -122,3 +122,41 @@ def disclosures(ticker: str) -> dict:
         return {"market": "KR", **d}
     f = insider.recent_filings(ticker)
     return {"market": "US", "list": f.get("filings", []), "error": f.get("error")}
+
+
+def screener(top_n: int = 20) -> dict:
+    """NASDAQ100 LightGBM 랭킹 스크리너 (무엣지·정보용). QT3."""
+    from ml.ranker import load_ranker, rank_today
+    try:
+        df = rank_today(mode="nasdaq100", top_n=top_n)
+        res = load_ranker()
+        rows = df.to_dict("records") if (df is not None and not df.empty) else []
+        meta = {}
+        if res is not None:
+            meta = {"ic": getattr(res, "oos_ic", None), "icir": getattr(res, "oos_icir", None),
+                    "top_decile": getattr(res, "oos_top_decile_ret", None),
+                    "train_end": getattr(res, "train_end_date", None)}
+        return {"rows": rows, "meta": meta}
+    except Exception as e:
+        return {"error": str(e), "rows": [], "meta": {}}
+
+
+def backtest_summary() -> dict:
+    """ML 전략 백테스트 (QQQ 3년 실데이터) + 채택 판정. QT3."""
+    from ml.data_pipeline import build_real_sweetspot_data
+    from ml.reporting import _ml_adoption_verdict
+    from ml.sweet_spot import optimize_sweet_spot
+
+    def _m(x):
+        return {"cagr": getattr(x, "cagr", None), "sharpe": getattr(x, "sharpe", None),
+                "mdd": getattr(x, "max_drawdown", None)}
+
+    try:
+        data = build_real_sweetspot_data("QQQ", days=756)
+        r = optimize_sweet_spot(data)
+        verdict, reasons = _ml_adoption_verdict(r.ml_result, r.qqq_result)
+        return {"ml": _m(r.ml_result), "overlay": _m(r.overlay_result), "qqq": _m(r.qqq_result),
+                "verdict": verdict, "reasons": list(reasons or []),
+                "equity": getattr(r, "equity", None), "wf": getattr(r, "wf_summary", {})}
+    except Exception as e:
+        return {"error": str(e)}

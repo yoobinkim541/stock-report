@@ -106,3 +106,43 @@ def test_views_valuation_error_isolated(monkeypatch):
 def test_views_risk_no_weights():
     from dashboard import views
     assert "보유 데이터 없음" in views.risk_report_text({})
+
+
+def test_views_screener_assembles(monkeypatch):
+    import pandas as pd
+    from dashboard import views
+    from ml import ranker
+
+    class _R:
+        oos_ic, oos_icir, oos_top_decile_ret, train_end_date = 0.01, 0.1, 0.02, "2026-04-14"
+
+    monkeypatch.setattr(ranker, "rank_today",
+                        lambda mode="nasdaq100", top_n=20: pd.DataFrame([{"rank": 1, "ticker": "MDLZ", "score": 2.1}]))
+    monkeypatch.setattr(ranker, "load_ranker", lambda: _R())
+    out = views.screener(20)
+    assert out["rows"][0]["ticker"] == "MDLZ"
+    assert out["meta"]["train_end"] == "2026-04-14"
+
+
+def test_views_screener_graceful(monkeypatch):
+    from dashboard import views
+    from ml import ranker
+
+    def boom(**k):
+        raise RuntimeError("net")
+
+    monkeypatch.setattr(ranker, "rank_today", boom)
+    out = views.screener(20)
+    assert out["rows"] == [] and "error" in out
+
+
+def test_views_backtest_graceful(monkeypatch):
+    from dashboard import views
+    from ml import data_pipeline
+
+    def boom(*a, **k):
+        raise RuntimeError("net")
+
+    monkeypatch.setattr(data_pipeline, "build_real_sweetspot_data", boom)
+    out = views.backtest_summary()
+    assert "error" in out
