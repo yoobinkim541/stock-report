@@ -37,9 +37,16 @@ echo "[$(date '+%F %T')] cloudflared 미실행 — 터널 재시작"
 nohup cloudflared tunnel --url "http://localhost:${PORT}" >> "$LOG" 2>&1 &
 echo $! > "$PID_FILE"
 
-# 새 trycloudflare URL 확보 (tail -f | grep -m1, 최대 30초 — sleep 미사용)
-NEW=$(timeout 30 grep -m1 -oE "https://[a-z0-9-]+\.trycloudflare\.com" <(tail -f "$LOG"))
-if [ -z "$NEW" ]; then echo "  URL 확보 실패"; exit 1; fi
+# 새 trycloudflare URL 확보 — 로그 파일 폴링(최대 60초). cloudflared precheck 가
+# ~15초 걸리고 URL 은 그 뒤 찍히므로 짧은 타임아웃은 놓친다. URL 은 로그에 남으므로
+# 파일을 반복 grep(고정 tail -f 보다 견고).
+NEW=""
+for _ in $(seq 1 30); do
+    NEW=$(grep -oE "https://[a-z0-9-]+\.trycloudflare\.com" "$LOG" 2>/dev/null | tail -1)
+    [ -n "$NEW" ] && break
+    sleep 2
+done
+if [ -z "$NEW" ]; then echo "  URL 확보 실패(60s)"; exit 1; fi
 CUR=$(cat "$URL_FILE" 2>/dev/null)
 echo "$NEW" > "$URL_FILE"
 echo "  새 URL: $NEW (이전: ${CUR:-없음})"
