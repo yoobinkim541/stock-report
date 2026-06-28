@@ -108,8 +108,8 @@ def build_portfolio_report(user: str) -> str:
     data = list_holdings(user)
     if not data:
         return ("📭 등록된 보유 종목이 없습니다.\n"
-                "/myadd TICKER 주수 평단가  로 추가하세요.\n"
-                "예) /myadd QQQ 10 500" + DISCLAIMER)
+                "/my add TICKER 주수 평단가  로 추가하세요.\n"
+                "예) /my add QQQ 10 500" + DISCLAIMER)
 
     prices = _fetch_prices(list(data.keys()))
 
@@ -145,7 +145,7 @@ def build_portfolio_report(user: str) -> str:
 
 def guest_portfolio_help() -> str:
     return (
-        "/myadd TICKER 주수 평단가   보유 종목 추가 (예: /myadd QQQ 10 500)\n"
-        "/myremove TICKER            보유 종목 삭제\n"
-        "/myportfolio                내 포트폴리오 평가 (평가액·손익)"
+        "/my add TICKER 주수 평단가   보유 종목 추가 (예: /my add QQQ 10 500)\n"
+        "/my del TICKER               보유 종목 삭제\n"
+        "/my                          내 포트폴리오 평가 (평가액·손익)"
     )
