@@ -21,6 +21,7 @@ from dotenv import load_dotenv
 load_dotenv()
 
 import kiwoom_mock
+import fmt
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 logger = logging.getLogger(__name__)
@@ -94,55 +95,52 @@ def build_report() -> str:
     k_ret, k_mdd = kospi.get("return_pct"), kospi.get("mdd")
     k_mdd_pct = k_mdd * 100.0 if k_mdd is not None else None
 
-    def _sign(x):
-        return "▲" if x > 0 else ("▼" if x < 0 else "─")
-
-    lines = [hdr, "━━━━━━━━━━━━━━━━━━━"]
-    lines.append(f"  NAV    ₩{nav:,.0f}   전일 {_sign(day_ret)}{abs(day_ret):.2f}%")
+    # 한눈 스코어카드 1줄 (NAV·누적·vs KOSPI)
+    excess = (cum_ret - k_ret) if k_ret is not None else None
+    lines = [hdr, fmt.headline(
+        f"📊 {fmt.money(nav, '₩', abbrev=True)}", f"누적 {fmt.pct(cum_ret)}",
+        (f"KOSPI대비 {fmt.pct(excess)}p {'✅' if excess >= 0 else '⚠️'}" if excess is not None else None))]
+    lines.append(fmt.sep())
+    lines.append(f"NAV {fmt.money(nav, '₩')}  전일 {fmt.spct(day_ret, 2)}")
     if k_ret is not None:
-        excess = cum_ret - k_ret
-        lines.append(f"  누적   {_sign(cum_ret)}{abs(cum_ret):.2f}%  "
-                     f"(KOSPI {_sign(k_ret)}{abs(k_ret):.2f}% · 초과 {excess:+.2f}%p)")
-    else:
-        lines.append(f"  누적   {_sign(cum_ret)}{abs(cum_ret):.2f}%  (KOSPI N/A)")
+        lines.append(f"누적 {fmt.spct(cum_ret, 2)}  (KOSPI {fmt.spct(k_ret, 2)})")
     if k_mdd_pct is not None:
-        ok_mdd = "✅" if strat_mdd <= k_mdd_pct else "⚠️"
-        lines.append(f"  MDD    전략 {strat_mdd:.1f}% vs 지수 {k_mdd_pct:.1f}% {ok_mdd}")
+        ok_mdd = "✅" if strat_mdd <= k_mdd_pct else "⚠️지수보다 깊음"
+        lines.append(f"MDD(최대낙폭) 전략 {strat_mdd:.1f}% / 지수 {k_mdd_pct:.1f}% {ok_mdd}")
     else:
-        lines.append(f"  MDD    전략 {strat_mdd:.1f}%")
+        lines.append(f"MDD(최대낙폭) 전략 {strat_mdd:.1f}%")
     if cash is not None:
-        lines.append(f"  예수금 ₩{cash:,.0f}")
+        lines.append(f"예수금 {fmt.money(cash, '₩')}")
 
-    # 보유 종목 P&L
+    # 보유 종목 P&L — 2줄(종목·등락·평가액 / 수량·단가) 모바일 정렬 안전
     held = {c: p for c, p in positions.items() if int(p.get("shares", 0) or 0) > 0}
-    lines.append("━━━━━━━━━━━━━━━━━━━")
-    lines.append(f"  보유 {len(held)}종목")
+    lines.append(fmt.sep(f"보유 {len(held)}종목"))
     total_pnl = 0.0
     for code, p in sorted(held.items(), key=lambda kv: -(kv[1].get("value", 0) or 0)):
         ret = p.get("return_pct", 0) or 0
         total_pnl += p.get("pnl", 0) or 0
-        lines.append(f"  {code} {p.get('name','')[:8]} {int(p['shares'])}주 "
-                     f"@{p.get('avg_price',0):,.0f}→{p.get('cur_price',0):,.0f} "
-                     f"{_sign(ret)}{abs(ret):.1f}% ₩{p.get('value',0):,.0f}")
+        nm = p.get("name", "") or code
+        lines.append(f"{nm[:8]} {fmt.spct(ret)}  {fmt.money(p.get('value', 0), '₩')}")
+        lines.append(f"  {int(p['shares'])}주 · {p.get('avg_price',0):,.0f}→{p.get('cur_price',0):,.0f}")
     if not held:
-        lines.append("  (보유 없음 — 현금 100%)")
+        lines.append("(보유 없음 — 현금 100%)")
     else:
         cost = pos_value - total_pnl
         pnl_ret = (total_pnl / cost * 100.0) if cost else 0.0
-        lines.append(f"  ─── 평가손익 {_sign(total_pnl)}₩{abs(total_pnl):,.0f} ({pnl_ret:+.1f}%)")
+        sm = ("+" if total_pnl >= 0 else "-") + fmt.money(abs(total_pnl), "₩", abbrev=True)
+        lines.append(f"─ 평가손익 {fmt.spct(pnl_ret)} ({sm})")
 
     # 최근 편입/퇴출 사유
     recent, last_date = _recent_decisions()
     if recent:
-        lines.append("━━━━━━━━━━━━━━━━━━━")
-        lines.append(f"  최근 편입/퇴출 ({last_date})")
+        lines.append(fmt.sep(f"최근 편입/퇴출 ({last_date})"))
         for d in recent:
             icon = "📥" if d.get("side") == "편입" else "📤"
             rr = (d.get("rationale") or {}).get("one_line_reason", "")
-            lines.append(f"  {icon} {d.get('side')} {d.get('code')} {d.get('action','')} — {rr}")
+            lines.append(f"{icon} {d.get('side')} {d.get('code')} — {rr}")
 
-    lines.append("━━━━━━━━━━━━━━━━━━━")
-    lines.append("  ⚠️ 모의투자 — 실거래 아님")
+    lines.append(fmt.sep())
+    lines.append("⚠️ 모의투자 — 실거래 아님")
     return "\n".join(lines)
 
 

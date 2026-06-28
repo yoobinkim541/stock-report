@@ -22,6 +22,7 @@ from dotenv import load_dotenv
 load_dotenv()
 
 import kis_mock
+import fmt
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 logger = logging.getLogger(__name__)
@@ -125,53 +126,69 @@ def build_report() -> str:
     q_ret = bm.get("return_pct")
     q_mdd_pct = bm["mdd"] * 100.0 if bm.get("mdd") is not None else None
 
-    def _s(x):
-        return "▲" if x > 0 else ("▼" if x < 0 else "─")
-
-    lines = [hdr, "━━━━━━━━━━━━━━━"]
-    lines.append(f"  NAV   ${nav:,.0f}   전일 {_s(day_ret)}{abs(day_ret):.2f}%")
+    # 한눈 스코어카드 1줄 (NAV·누적·vs QQQ) — KR 리포트와 대칭
+    excess = (cum_ret - q_ret) if q_ret is not None else None
+    lines = [hdr, fmt.headline(
+        f"📊 {fmt.money(nav, abbrev=True)}", f"누적 {fmt.pct(cum_ret)}",
+        (f"QQQ대비 {fmt.pct(excess)}p {'✅' if excess >= 0 else '⚠️'}" if excess is not None else None))]
+    lines.append(fmt.sep())
+    lines.append(f"NAV {fmt.money(nav)}  전일 {fmt.spct(day_ret, 2)}")
     if q_ret is not None:
-        lines.append(f"  누적  {_s(cum_ret)}{abs(cum_ret):.2f}%  (QQQ {_s(q_ret)}{abs(q_ret):.2f}% · 초과 {cum_ret - q_ret:+.2f}%p)")
-    else:
-        lines.append(f"  누적  {_s(cum_ret)}{abs(cum_ret):.2f}%  (QQQ N/A)")
+        lines.append(f"누적 {fmt.spct(cum_ret, 2)}  (QQQ {fmt.spct(q_ret, 2)})")
     if q_mdd_pct is not None:
-        lines.append(f"  MDD   전략 {strat_mdd:.1f}% vs 지수 {q_mdd_pct:.1f}% {'✅' if strat_mdd <= q_mdd_pct else '⚠️'}")
+        ok = "✅" if strat_mdd <= q_mdd_pct else "⚠️지수보다 깊음"
+        lines.append(f"MDD(최대낙폭) 전략 {strat_mdd:.1f}% / 지수 {q_mdd_pct:.1f}% {ok}")
     if cash is not None:
-        lines.append(f"  현금  ${cash:,.0f}")
+        lines.append(f"현금 {fmt.money(cash)}")
 
+    # 보유 종목 — 2줄(종목·등락·평가액 / 수량·단가), 등락%·평가손익 합계 (KR과 대칭)
     held = {c: p for c, p in positions.items() if int(p.get("shares", 0) or 0) > 0}
-    lines.append("━━━━━━━━━━━━━━━")
-    lines.append(f"  보유 {len(held)}종목")
+    lines.append(fmt.sep(f"보유 {len(held)}종목"))
+    total_pnl = 0.0
     for sym, p in sorted(held.items(), key=lambda kv: -(kv[1].get("value", 0) or 0)):
-        lines.append(f"  {sym} {int(p['shares'])}주 @${p.get('avg_price',0):,.2f}→${p.get('cur_price',0):,.2f} ${p.get('value',0):,.0f}")
+        avg = p.get("avg_price", 0) or 0
+        cur = p.get("cur_price", 0) or 0
+        sh  = int(p["shares"])
+        val = p.get("value", 0) or 0
+        ret = (cur - avg) / avg * 100 if avg > 0 else 0.0
+        total_pnl += (cur - avg) * sh
+        lines.append(f"{sym} {fmt.spct(ret)}  {fmt.money(val)}")
+        lines.append(f"  {sh}주 · {avg:,.2f}→{cur:,.2f}")
     if not held:
-        lines.append("  (보유 없음 — 현금 100%)")
-
-    # ★로직 평가 스코어카드
-    sc = compute_scorecard(_scorecard_rows())
-    lines.append("━━━ 📊 로직 평가 ━━━")
-    if sc["n_buy"] or sc["n_sell"]:
-        if sc["buy_hit"] is not None:
-            lines.append(f"  편입 적중률 {sc['buy_hit']}% (n={sc['n_buy']})")
-        if sc["sell_hit"] is not None:
-            lines.append(f"  퇴출 적중률 {sc['sell_hit']}% (n={sc['n_sell']})")
-        if sc["ic"] is not None:
-            lines.append(f"  실현 IC {sc['ic']:+.2f} (정책점수↔초과수익)")
-        lines.append("  ※ 무엣지면 적중률 ~50%·IC ~0 (정직)")
+        lines.append("(보유 없음 — 현금 100%)")
     else:
-        lines.append("  성숙 결정 없음 — 평가 대기(horizon 경과 후)")
+        cost = pos_value - total_pnl
+        pnl_ret = (total_pnl / cost * 100.0) if cost else 0.0
+        sm = ("+" if total_pnl >= 0 else "-") + fmt.money(abs(total_pnl))
+        lines.append(f"─ 평가손익 {fmt.spct(pnl_ret)} ({sm})")
+
+    # ★로직 평가 스코어카드 — 무엣지 기준선 대비 판정 라벨 인라인
+    sc = compute_scorecard(_scorecard_rows())
+    lines.append(fmt.sep("📊 로직 평가"))
+    if sc["n_buy"] or sc["n_sell"]:
+        def _verdict(hit):
+            return "약한 엣지" if (hit is not None and hit >= 55) else "무엣지 수준"
+        if sc["buy_hit"] is not None:
+            lines.append(f"편입 적중률 {sc['buy_hit']}% (n={sc['n_buy']}) — {_verdict(sc['buy_hit'])}")
+        if sc["sell_hit"] is not None:
+            lines.append(f"퇴출 적중률 {sc['sell_hit']}% (n={sc['n_sell']}) — {_verdict(sc['sell_hit'])}")
+        if sc["ic"] is not None:
+            ic_v = "변별력 있음" if abs(sc["ic"]) >= 0.05 else "≈0(무변별)"
+            lines.append(f"실현 IC {fmt.signed(sc['ic'], 2)} — {ic_v}")
+        lines.append("※ IC=예측↔초과수익 상관 · 무엣지면 적중률 ~50%·IC ~0 (정직)")
+    else:
+        lines.append("성숙 결정 없음 — 평가 대기(horizon 경과 후)")
 
     recent, last = _recent_decisions()
     if recent:
-        lines.append("━━━━━━━━━━━━━━━")
-        lines.append(f"  최근 편입/퇴출 ({last})")
+        lines.append(fmt.sep(f"최근 편입/퇴출 ({last})"))
         for d in recent:
             icon = "📥" if d.get("side") == "편입" else "📤"
             rr = (d.get("rationale") or {}).get("one_line_reason", "")
-            lines.append(f"  {icon} {d.get('side')} {d.get('ticker')} — {rr}")
+            lines.append(f"{icon} {d.get('side')} {d.get('ticker')} — {rr}")
 
-    lines.append("━━━━━━━━━━━━━━━")
-    lines.append("  ⚠️ 모의투자 — 실거래 아님")
+    lines.append(fmt.sep())
+    lines.append("⚠️ 모의투자 — 실거래 아님")
     return "\n".join(lines)
 
 

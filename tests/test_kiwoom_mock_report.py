@@ -39,16 +39,16 @@ def test_build_report_shows_objective_metrics(patched):
     txt = rpt.build_report()
     assert "[모의]" in txt
     assert "NAV" in txt and "11,000,000" in txt
-    assert "누적" in txt and "KOSPI" in txt and "초과" in txt    # 아웃퍼폼 가시화
+    assert "누적" in txt and "KOSPI" in txt and "%p" in txt      # 아웃퍼폼 가시화(F3: KOSPI대비 %p)
     assert "MDD" in txt and "지수" in txt                        # MDD vs 지수
     assert "삼성전자" in txt                                     # 보유 표
     assert "편입" in txt and "기관 매집" in txt                  # 편입 사유
 
 
 def test_build_report_excess_positive(patched):
-    # nav 11M / inception 10M = +10%, KOSPI +6% → 초과 +4%p
+    # nav 11M / inception 10M = +10%, KOSPI +6% → 초과 +4%p (헤드라인 KOSPI대비)
     txt = rpt.build_report()
-    assert "초과 +4.00%p" in txt
+    assert "KOSPI대비 +4.0%p" in txt
 
 
 def test_build_report_mdd_within_index_ok(patched):
