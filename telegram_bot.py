@@ -230,6 +230,8 @@ BOT_COMMAND_ALIASES = {
     "/sim": "/phase sim",         # 시장 시뮬을 /phase 하위로 병합
     "/mock": "/paper kr",         # 국내 모의 → /paper kr 병합
     "/usmock": "/paper us",       # 미국 모의 → /paper us 병합
+    "/dca": "/rebalance dca",     # DCA 배분 → /rebalance dca 병합
+    "/sgov": "/rebalance sgov",   # SGOV 실탄 → /rebalance sgov 병합
 }
 
 
@@ -1437,21 +1439,18 @@ _MARKET_CMDS = {
     "/help":      lambda d, _: cmd_help(),
     "/status":    lambda d, _: cmd_status(d),
     "/portfolio": lambda d, _: cmd_portfolio(d),
-    "/dca":       lambda d, _: cmd_dca(d),
-    "/sgov":      lambda d, _: cmd_sgov(d),
     "/history":   lambda d, _: cmd_history(d),
-    "/rebalance": lambda d, _: cmd_rebalance(d),
     "/risk":      lambda d, _: cmd_risk(d),
 }
+# (/rebalance·/dca·/sgov 는 _dispatch_rebalance 가 인자 인식·force-fresh·freshness 자체 처리)
 
 
 # 신선도 한 줄을 붙일 명령 (라이브 시세 대시보드·결정). /help·/history 제외(정적·일별).
-_FRESHNESS_CMDS = {"/status", "/summary", "/phase", "/portfolio",
-                   "/rebalance", "/dca", "/sgov", "/risk"}
+_FRESHNESS_CMDS = {"/status", "/summary", "/phase", "/portfolio", "/risk"}
 # 실시간 시세 필요한 결정·평가 명령 — 5분 캐시 우회(force).
-_FORCE_FRESH_CMDS = {"/portfolio", "/risk", "/rebalance", "/dca", "/sgov"}
+_FORCE_FRESH_CMDS = {"/portfolio", "/risk"}
 # 포지션 의존(개별 종목 가격) 명령 — 가격도 갱신.
-_FORCE_REFRESH_PRICES = {"/portfolio", "/risk", "/rebalance"}
+_FORCE_REFRESH_PRICES = {"/portfolio", "/risk"}
 
 
 def _dispatch_market(cmd: str, chat_id: str):
@@ -1772,6 +1771,30 @@ def _dispatch_paper(chat_id: str, args: list):
         logger.exception("cmd_paper")
 
 
+def _dispatch_rebalance(chat_id: str, args: list):
+    """/rebalance (리밸런싱) + /rebalance dca·sgov (구 /dca·/sgov 병합).
+
+    결정 명령 — 5분 캐시 우회(force-fresh). 기본 리밸런스는 보유 현재가도 갱신.
+    """
+    typing(chat_id)
+    sub = (str(args[0]).lower() if args else "")
+    try:
+        if sub == "dca":
+            d = fetch_market(force=True)
+            out = cmd_dca(d)
+        elif sub == "sgov":
+            d = fetch_market(force=True)
+            out = cmd_sgov(d)
+        else:                                   # 기본 리밸런싱 (보유 현재가 갱신)
+            refresh_portfolio_prices()
+            d = fetch_market(force=True)
+            out = cmd_rebalance(d)
+        send(chat_id, out.rstrip() + "\n" + freshness_note(d.get("fetched_ts")))
+    except Exception as e:
+        send(chat_id, f"❌ 오류: {e}")
+        logger.exception("dispatch /rebalance")
+
+
 def _dispatch_phase(chat_id: str, args: list):
     """/phase (실시간 Phase 미터) + /phase sim [모드] (시장 시뮬 — 구 /sim 병합)."""
     typing(chat_id)
@@ -1813,7 +1836,8 @@ _COMMAND_HANDLERS = {
 }
 for _cmd in _MARKET_CMDS:
     _COMMAND_HANDLERS[_cmd] = lambda chat_id, args, cmd=_cmd: _dispatch_market(cmd, chat_id)
-_COMMAND_HANDLERS["/phase"] = _dispatch_phase   # 인자 인식(/phase sim) — _MARKET_CMDS 우회
+_COMMAND_HANDLERS["/phase"] = _dispatch_phase            # 인자 인식(/phase sim) — _MARKET_CMDS 우회
+_COMMAND_HANDLERS["/rebalance"] = _dispatch_rebalance    # 인자 인식(/rebalance dca·sgov) — _MARKET_CMDS 우회
 
 
 def _parse_command(text: str) -> tuple[str, list]:
