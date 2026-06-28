@@ -1148,8 +1148,7 @@ def _bar(ratio: float, width: int = 10, fill: str = "█", empty: str = "░") -
 
 
 def _phase_meter(market_type: str, phase_key) -> str:
-    """Phase 위치 표시기 (레이블 + 이모지 두 줄)."""
-    LABELS = ["B2", "B1", "N0", "P1", "P2", "P3", "P4", "P5"]
+    """Phase 위치 표시기 — 한 줄, 현재 위치 [ ] 강조 (모바일 정렬 안전·두 줄 어긋남 제거)."""
     EMOJIS = ["🫧", "🐂", "🟢", "🟡", "🟠", "🔴", "🚨", "💥"]
     if market_type == "neutral":
         idx = 2
@@ -1158,17 +1157,15 @@ def _phase_meter(market_type: str, phase_key) -> str:
     else:
         idx = int(phase_key) + 2
 
-    label_row = "  ".join(f"[{l}]" if i == idx else f" {l} " for i, l in enumerate(LABELS))
-    emoji_row = "   ".join(f"◉{e}" if i == idx else f" {e}" for i, e in enumerate(EMOJIS))
-    return label_row + "\n" + emoji_row
+    return " ".join(f"[{e}]" if i == idx else e for i, e in enumerate(EMOJIS))
 
 
-def _drawdown_ruler(drawdown_pct: float, width: int = 22) -> str:
-    """낙폭 위치를 눈금자로 표시 (-30% ~ 0%)."""
+def _drawdown_ruler(drawdown_pct: float, width: int = 10) -> str:
+    """낙폭 위치 눈금자 (-30%~0%) — 한 줄·양끝 라벨 인라인 (별도 줄 어긋남 제거)."""
     ratio = max(0.0, min(1.0, (drawdown_pct + 30) / 30))
     pos = round(ratio * width)
     ruler = "─" * pos + "●" + "─" * (width - pos)
-    return f"  ◄{ruler}►\n  -30%{'':<{width - 3}}0%"
+    return f"  -30% ◄{ruler}► 0%"
 
 
 def _rsi_visual(rsi: float) -> str:

@@ -545,12 +545,9 @@ def cmd_status(d: dict) -> str:
 
     fg    = d.get("fear_greed") or {}
     fg_sc = fg.get("score", 50.0)
-    fg_rt = fg.get("rating", "neutral")
     fg_lbl = ("💀극단공포" if fg_sc <= 25 else "😨공포" if fg_sc <= 45
               else "😐중립" if fg_sc <= 55 else "😄탐욕" if fg_sc <= 75
               else "🤑극단탐욕")
-    fg_proxy = fg.get("proxy_score", -1.0)
-    _fg_proxy_str = (f"  proxy {fg_proxy:.0f}" if fg_proxy >= 0 else "")
 
     rsi_s = ("🔥과매도" if rsi < 30 else "⚠️약세"     if rsi < 40
              else "🫧극과매수" if rsi > 75 else "🌡과매수" if rsi > 70
@@ -558,30 +555,26 @@ def cmd_status(d: dict) -> str:
     vix_s = ("💥극공포" if vix > 40 else "🚨공포"   if vix > 30
              else "😴과낙관" if vix < 15 else "✅정상")
 
-    mom_1m = qqq.get("mom_1m_pct", 0) or 0
-    mom_s  = f"{mom_1m:+.1f}%"
-    ret_pct  = port.get("return_pct", 0) or 0
-    ret_sign = "▲" if ret_pct > 0 else ("▼" if ret_pct < 0 else "─")
+    mom_1m  = qqq.get("mom_1m_pct", 0) or 0
+    ret_pct = port.get("return_pct", 0) or 0
+    reg_ln  = regime_line(detect_regime(dd), indent="")
 
-    reg_ln = regime_line(detect_regime(dd), indent="")
-    reg_block = f"{reg_ln}\n" if reg_ln else ""
-
-    return (
-        f"📊 현재 상태  ({d['fetched_at']})\n"
-        f"━━━━━━━━━━━━━━━━━━━━━━━\n"
-        f"{info['emoji']} {info['label']}\n"
-        f"\n"
-        f"QQQ   ${qqq.get('current', 0):>8,.2f}   1M {mom_s}\n"
-        f"낙폭  {fmt.pct(dd, 2)}\n"
-        f"{reg_block}"
-        f"RSI   {rsi:>8.1f}   {rsi_s}\n"
-        f"VIX   {vix:>8.1f}   {vix_s}\n"
-        f"F&G   {fg_sc:>8.1f}   {fg_lbl}{_fg_proxy_str}\n"
-        f"\n"
-        f"총액  ${port['total_usd']:>8,.0f}  (₩{total_krw:,})\n"
-        f"수익  {ret_sign}{abs(ret_pct):>7.1f}%\n"
-        f"SGOV  ${port['sgov_usd']:>8,.0f}  실탄 대기중"
-    )
+    lines = [
+        # 헤드라인 — 핵심 3수치 먼저 (Phase·낙폭·내 수익)
+        fmt.headline(f"{info['emoji']} {info['label']}",
+                     f"낙폭 {fmt.pct(dd)}", f"내수익 {fmt.spct(ret_pct)}"),
+        fmt.sep(),
+        f"QQQ  {qqq.get('current', 0):,.2f}  (1M {fmt.pct(mom_1m)})",
+    ]
+    if reg_ln:
+        lines.append(reg_ln)
+    lines += [
+        f"RSI {rsi:.0f} {rsi_s}  ·  VIX {vix:.1f} {vix_s}",
+        f"F&G {fg_sc:.0f} {fg_lbl}",
+        f"총액 {fmt.money(port['total_usd'])} ({fmt.money(total_krw, '₩', abbrev=True)})  {fmt.spct(ret_pct)}",
+        f"SGOV {fmt.money(port['sgov_usd'])}  실탄",
+    ]
+    return "\n".join(lines)
 
 
 def cmd_summary(d: dict) -> str:
@@ -614,7 +607,7 @@ def cmd_phase(d: dict) -> str:
     lines = [
         f"📍 {info['emoji']} {info['label']}",
         _phase_meter(mt, pk),
-        f"  QQQ {dd:+.2f}%  ·  {info['description']}",
+        f"QQQ 낙폭 {fmt.pct(dd, 2)}  ·  {info['description']}",
         "",
         "📋 행동 지침",
     ]
