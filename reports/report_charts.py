@@ -203,10 +203,10 @@ def _panel_rsi(ax, price_history, holdings):
             continue
         val = _rsi(close.dropna())
         if val is not None:
-            rows.append((t, val))
+            rows.append((t, val, h.get("change_1mo_pct")))   # 1개월 등락 동반(패널 정렬 통일용)
     if not rows:
         raise ValueError("RSI 데이터 없음")
-    rows.sort(key=lambda r: r[1])
+    rows.sort(key=lambda r: (r[2] if r[2] is not None else -999.0))   # _panel_returns 와 동일 순서(세로 스캔)
     tickers = [r[0] for r in rows]
     vals = [r[1] for r in rows]
     y = np.arange(len(tickers))
