@@ -174,6 +174,7 @@ crons/news_spike_detector.py (크론 매 1분)
 
 ── 주문 & 모의 ───────────────────────────────────
 /order               소수점 매수 주문서 (키움 즉시 입력)
+/card                포트폴리오 카드 이미지 — 배분 도넛·총액·종목별 비중/수익 (sendPhoto) — owner 전용
 /paper [kr|us]       모의 페이퍼트레이딩 — `kr`=국내(NAV·vs KOSPI)·`us`=미국(NAV·vs QQQ·적중률·IC)·생략=둘 다 (구 /mock·/usmock 통합) — owner 전용
 
 ── 종목 관리 ─────────────────────────────────────
@@ -224,7 +225,9 @@ crons/news_spike_detector.py (크론 매 1분)
 ※ 게스트 포트폴리오는 본인 chat_id 네임스페이스에 격리 (소유자 portfolio_snapshot과 분리)
 ```
 
-> **메뉴 scope 분리** (setMyCommands): **소유자 채팅엔 소유자 메뉴(18), default·all_private_chats 엔 게스트 메뉴(4)** — `BotCommandScopeChat`(소유자)가 우선 적용돼 **소유자 메뉴엔 `/market`·`/my` 가 안 보임**(권한 아닌 표시만 분리 — 소유자는 입력 시 사용 가능). `/indicators` 는 종목 기술지표가 소유자에도 유용해 **소유자 메뉴에도 노출**(게스트 메뉴엔 그대로).
+> **메뉴 scope 분리** (setMyCommands): **소유자 채팅엔 소유자 메뉴(19), default·all_private_chats 엔 게스트 메뉴(4)** — `BotCommandScopeChat`(소유자)가 우선 적용돼 **소유자 메뉴엔 `/market`·`/my` 가 안 보임**(권한 아닌 표시만 분리 — 소유자는 입력 시 사용 가능). `/indicators` 는 종목 기술지표가 소유자에도 유용해 **소유자 메뉴에도 노출**(게스트 메뉴엔 그대로).
+>
+> **출력 포맷** (단일 진실원 `fmt.py`): 전 명령이 공통 레이어 경유 — `pct/money/spct`(0·음수0·부호 버그 차단), 짧은 구분선, **HTML 리치텍스트**(`send_html`·parse_mode=HTML): 핵심 `<b>굵게</b>`, 표는 `<pre>등폭</pre>`, 긴 리포트(/report·/rebalance)는 `<blockquote expandable>접기</blockquote>`(`_send_collapsible`), `/history`는 스파크라인. **모바일 주의**: `━ ─` 는 ambiguous-width 2칸 → 공백 정렬 의존 금지(정렬 필요표는 pre). 크론 공유 빌더(paper·history·barbell report)는 `html=` 파라미터로 텔레그램만 굵게, 크론은 평문. 이미지: 일일 PNG(`report_charts.build_portfolio_dashboard`, 히어로 KPI 밴드) + 온디맨드 `/card`(`build_portfolio_card`, 봇이 `.venv` subprocess 렌더 — hermes venv 불변).
 >
 > **하위호환 alias** (메뉴 비노출): `/summary`→`/status` · `/sim`→`/phase sim` · `/mock`→`/paper kr` · `/usmock`→`/paper us` · `/dca`→`/rebalance dca` · `/sgov`→`/rebalance sgov` · `/ranking·/entry·/intraday·/leverage·/meta`→`/signals …` · `/myadd·/myremove·/myportfolio`→`/my …` · `/dividend`→`/holding dividend` · `/apply_snapshot`→`/holding apply`
 
