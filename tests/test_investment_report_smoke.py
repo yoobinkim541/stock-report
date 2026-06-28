@@ -102,8 +102,9 @@ def test_generate_report_writes_expected_files_without_network():
             assert "위험 대시보드" in report_text
             assert "오늘 할 일" in summary_text
             assert "MSFT — MSFT Corporation" in report_text
-            assert "SPY $500.0 (+1.20%)" in summary_text
-            assert "NASDAQ $600.0 (+0.80%)" in summary_text
+            # M1: 시장 한 줄 — 가격은 PNG 히어로밴드, 텍스트는 fmt.spct 등락만
+            assert "SPY ▲1.2%" in summary_text
+            assert "NASDAQ ▲0.8%" in summary_text
             assert "KOSPI 2,500.00" in summary_text
             assert "KOSPI 상위" in summary_text
         finally:

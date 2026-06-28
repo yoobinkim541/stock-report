@@ -19,6 +19,8 @@ import requests
 import yfinance as yf
 import numpy as np
 
+import fmt   # 출력 포맷 공통 레이어
+
 KST = timezone(timedelta(hours=9))
 
 # Add parent dir to path if needed
@@ -1351,7 +1353,7 @@ def _short_stock_label(item):
     ticker = item.get("ticker", "")
     name = _KOSPI_NAMES.get(ticker) or item.get("company_name") or item.get("company") or _company_name(ticker)
     if name and name != ticker:
-        return f"{ticker}({name})"
+        return fmt.name(ticker, name[:16])   # 'TICKER — Name' (CLAUDE.md 규칙·길면 절단)
     return ticker
 
 
@@ -1646,72 +1648,101 @@ def _build_clean_data(today_str, spy_change, market, kospi_str,
     return clean_data
 
 
+# IB Phase 메타 (phase_key → 이모지·라벨·DCA배율) — barbell IB 표
+_IB_PHASE_META = {
+    "0": ("🟢", "Phase 0 정상", "1.0×"), "1": ("🟡", "Phase 1", "1.5×"),
+    "2": ("🟠", "Phase 2", "2.0×"),     "3": ("🔴", "Phase 3", "2.5×"),
+    "4": ("🚨", "Phase 4", "3.0×"),     "5": ("💥", "Phase 5", "5.0×"),
+    "bull_1": ("🐂", "Bull-1", "0.8×"), "bull_2": ("🫧", "Bull-2", "0.5×"),
+}
+
+
+def _phase_headline_parts():
+    """~/.cache/barbell_state.json → (이모지, 라벨, DCA, 낙폭%) | None (없으면 헤드라인 생략)."""
+    try:
+        with open(os.path.expanduser("~/.cache/barbell_state.json"), encoding="utf-8") as f:
+            st = json.load(f)
+        pk = str(st.get("phase_key", "0"))
+        emoji, label, dca = _IB_PHASE_META.get(pk, ("🟢", f"Phase {pk}", "1.0×"))
+        return emoji, label, dca, st.get("drawdown_pct")
+    except Exception:
+        return None
+
+
 def _build_mobile_summary(today_str, spy_change, market, kospi_str, avg_score,
                           pos_count, neu_count, warn_count, crit_count,
                           portfolio_results, top_buy_candidates, top_watch,
                           kospi_top, kospi_watch, accum_picks, name_fn,
-                          llm_overlay, llm_status, elapsed, llm_token_line):
-    """모바일(텔레그램) 요약 텍스트 빌더 (순수 — 부수효과 없음). 원본 로직 그대로."""
-    sep = "━" * 17
+                          llm_overlay, llm_status, elapsed, llm_token_line,
+                          phase=None):
+    """모바일(텔레그램) 요약 — 헤드라인(Phase·오늘할일) 우선·평문(노션 호환). 진단줄은 md/stdout."""
     qqq_change = market.get("qqq_change", 0)
-    summary_lines = []
-    summary_lines.append(f"📊 {today_str} 투자 리포트")
-    summary_lines.append(sep)
-    summary_lines.append("🌎 시장")
-    summary_lines.append(f"{_pct_arrow(spy_change)} SPY ${market.get('spy_price', 'N/A')} ({spy_change:+.2f}%)")
-    summary_lines.append(f"{_pct_arrow(qqq_change)} NASDAQ ${market.get('qqq_price', 'N/A')} ({qqq_change:+.2f}%)")
-    summary_lines.append(f"▪️ KOSPI {kospi_str}")
-    summary_lines.append("")
-    summary_lines.append(f"💼 포트폴리오 {avg_score:.1f}/100")
-    summary_lines.append(_score_bar(avg_score, 14))
-    summary_lines.append(f"신호: 🟢{pos_count} ⚪{neu_count} 🟡{warn_count} 🔴{crit_count}")
-    signal_strip = _signal_strip(pos_count, neu_count, warn_count, crit_count)
-    if signal_strip:
-        summary_lines.append(signal_strip)
+
     buy_items = [r for r in portfolio_results if r.get("decision_v2", {}).get("action") in ("강한 매수후보", "관심/분할매수", "관심 유지")][:3]
     watch_items = [r for r in portfolio_results if r.get("decision_v2", {}).get("action") in ("비중축소 검토", "매도검토", "데이터부족", "손절/매도검토")][:3]
     buy_short = [_short_stock_label(r) for r in buy_items]
     watch_short = [_short_stock_label(r) for r in watch_items]
+    if watch_short:
+        todo = f"위험 종목 확인 — {', '.join(watch_short)}"
+    elif buy_short:
+        todo = f"매수관심 검토 — {', '.join(buy_short)}"
+    else:
+        todo = "포트폴리오 유지"
+
+    L = []
+    # ── 헤드라인 — Phase·낙폭·DCA + 오늘 할 일 (가장 중요한 결정 먼저) ──
+    if phase:
+        emoji, label, dca, dd = phase
+        bits = [f"{emoji} {label}"]
+        if dd is not None:
+            bits.append(f"QQQ {fmt.pct(dd)}")
+        bits.append(f"DCA {dca}")
+        L.append(fmt.headline(*bits))
+    else:
+        L.append(f"📊 {today_str} 투자 리포트")
+    L.append(f"📌 오늘 할 일: {todo}")
+    L.append(fmt.SEP)
+
+    # ── 내 포트폴리오 (점수·신호·매수관심·위험) ──
+    L.append(f"💼 내 포트 {avg_score:.0f}/100  ·  🟢{pos_count} ⚪{neu_count} 🟡{warn_count} 🔴{crit_count}")
+    L.append(_score_bar(avg_score, 14))
     if buy_items:
-        summary_lines.append("")
-        summary_lines.append("🛒 매수관심")
+        L.append("🛒 매수관심")
         for r in buy_items:
             act = r.get("decision_v2", {}).get("action", "")
-            summary_lines.append(f"  {_ACTION_EMOJI.get(act, '▪️')} {_short_stock_label(r)}")
+            L.append(f"  {_ACTION_EMOJI.get(act, '▪️')} {_short_stock_label(r)}")
     if watch_items:
-        summary_lines.append("")
-        summary_lines.append("⚠️ 위험")
+        L.append("⚠️ 위험")
         for r in watch_items:
             act = r.get("decision_v2", {}).get("action", "")
-            summary_lines.append(f"  {_ACTION_EMOJI.get(act, '▪️')} {_short_stock_label(r)}")
-    summary_lines.append("")
-    summary_lines.append(sep)
+            L.append(f"  {_ACTION_EMOJI.get(act, '▪️')} {_short_stock_label(r)}")
+
+    # ── 시장 (한 줄 — 상세 시각은 PNG 히어로밴드) ──
+    L.append(fmt.SEP)
+    L.append(f"🌎 SPY {fmt.spct(spy_change)} · NASDAQ {fmt.spct(qqq_change)} · KOSPI {kospi_str}")
+
+    # ── 참고 스캔 (종목선택·타이밍 무엣지 — 정보용·강등) ──
     nasdaq_top_mobile = _mobile_pick_items(top_buy_candidates)
     kospi_top_mobile = _mobile_pick_items(kospi_top)
-    summary_lines.extend(_mobile_pick_block("🇺🇸 NAS100 상위", nasdaq_top_mobile))
-    summary_lines.extend(_mobile_pick_block("🇺🇸 NAS100 주의", top_watch, exclude_tickers={r.get("ticker") for r in nasdaq_top_mobile}))
-    summary_lines.extend(_mobile_pick_block("🇰🇷 KOSPI 상위", kospi_top_mobile))
-    summary_lines.extend(_mobile_pick_block("🇰🇷 KOSPI 주의", kospi_watch, exclude_tickers={r.get("ticker") for r in kospi_top_mobile}))
+    scan = []
+    scan.extend(_mobile_pick_block("🇺🇸 NAS100 상위", nasdaq_top_mobile))
+    scan.extend(_mobile_pick_block("🇺🇸 NAS100 주의", top_watch, exclude_tickers={r.get("ticker") for r in nasdaq_top_mobile}))
+    scan.extend(_mobile_pick_block("🇰🇷 KOSPI 상위", kospi_top_mobile))
+    scan.extend(_mobile_pick_block("🇰🇷 KOSPI 주의", kospi_watch, exclude_tickers={r.get("ticker") for r in kospi_top_mobile}))
+    if scan:
+        L.append(fmt.SEP)
+        L.append("🔎 참고 스캔 (종목선택 무엣지·정보용)")
+        L.extend(scan)
     if accum_picks:
-        summary_lines.append("")
-        summary_lines.extend(accumulation_mobile_block(accum_picks, "🏛️ 기관 매집", limit=3, name_fn=name_fn))
-    summary_lines.append("")
-    summary_lines.append(sep)
-    if watch_short:
-        summary_lines.append(f"✅ 오늘 할 일: 위험 종목 확인 — {', '.join(watch_short)}")
-    elif buy_short:
-        summary_lines.append(f"✅ 오늘 할 일: 매수관심 검토 — {', '.join(buy_short)}")
-    else:
-        summary_lines.append("✅ 오늘 할 일: 포트폴리오 유지")
-    summary_lines.append("")
+        L.append("")
+        L.extend(accumulation_mobile_block(accum_picks, "🏛️ 기관 매집", limit=3, name_fn=name_fn))
+
+    # ── LLM 코멘트 (있으면) — 진단줄(런타임·토큰)은 요약서 제외(md §8 에 보존) ──
     if llm_overlay:
-        summary_lines.append("🧠 LLM 코멘트")
-        summary_lines.extend(_llm_overlay_mobile_lines(llm_overlay))
-        summary_lines.append(f"⏱ {elapsed:.1f}초 | LLM overlay: {INVESTMENT_REPORT_LLM_MODEL}")
-    else:
-        summary_lines.append(f"⏱ {elapsed:.1f}초 | LLM overlay: {llm_status}")
-    summary_lines.append(llm_token_line)
-    return "\n".join(summary_lines)
+        L.append(fmt.SEP)
+        L.append("🧠 LLM 코멘트")
+        L.extend(_llm_overlay_mobile_lines(llm_overlay))
+    return "\n".join(L)
 
 
 def _technical_indicator_line(ticker):
@@ -2414,6 +2445,7 @@ def generate_report():
         portfolio_results, top_buy_candidates, top_watch,
         kospi_top, kospi_watch, accum_picks, _accum_name,
         llm_overlay, llm_status, elapsed, llm_token_line,
+        phase=_phase_headline_parts(),
     )
 
     summary_txt_path = os.path.join(REPORTS_DIR, f"investment-summary-{today_str}.txt")
@@ -2422,6 +2454,8 @@ def generate_report():
     print(f"\n📱 모바일 요약 저장 완료: {summary_txt_path}")
     print()
     print(summary_text)
+    # 진단(런타임·토큰)은 사용자 요약서 제외 → 크론 로그(stdout)에만
+    print(f"\n⏱ {elapsed:.1f}초 | LLM: {llm_status} | {llm_token_line}")
 
     # ── Hermes briefing ──
     print()
