@@ -46,29 +46,48 @@ def _h(timeout: int = 15):
 
 
 def update_page(page_id: str, blocks: list[dict]) -> bool:
+    """안전 스왑: 새 블록을 먼저 append 한 뒤 구 블록을 삭제 (N4).
+
+    delete-then-rebuild 는 패치 실패 시 페이지가 빈 채로 남는다. 여기선
+    ① 구 children id 수집(페이지네이션) → ② 새 블록 append(여기서 실패하면
+    구 대시보드가 그대로 보존됨) → ③ 구 블록 삭제. child_database(보유종목
+    DB 등 영속 객체)는 삭제 대상에서 제외.
+    """
     import requests
     headers = _h()
 
-    # 기존 블록 조회
-    r = requests.get(f"https://api.notion.com/v1/blocks/{page_id}/children", headers=headers, timeout=15)
-    if r.status_code != 200:
-        logger.error("블록 조회 실패 %s", r.status_code)
-        return False
+    # ① 기존 children id 수집 (100개 초과 대비 페이지네이션)
+    old: list[tuple[str, str]] = []
+    cursor = None
+    while True:
+        url = f"https://api.notion.com/v1/blocks/{page_id}/children?page_size=100"
+        if cursor:
+            url += f"&start_cursor={cursor}"
+        r = requests.get(url, headers=headers, timeout=15)
+        if r.status_code != 200:
+            logger.error("블록 조회 실패 %s", r.status_code)
+            return False
+        j = r.json()
+        old += [(b["id"], b.get("type", "")) for b in j.get("results", [])]
+        if not j.get("has_more"):
+            break
+        cursor = j.get("next_cursor")
 
-    # 기존 블록 삭제
-    for b in r.json().get("results", []):
-        requests.delete(f"https://api.notion.com/v1/blocks/{b['id']}", headers=headers, timeout=8)
-
-    # 새 블록 추가 (100개씩 배치)
+    # ② 새 블록 먼저 추가 (100개씩 배치) — 실패해도 구 대시보드는 그대로
     for i in range(0, len(blocks), 100):
-        batch = blocks[i:i+100]
         r2 = requests.patch(
             f"https://api.notion.com/v1/blocks/{page_id}/children",
-            headers=headers, json={"children": batch}, timeout=30,
+            headers=headers, json={"children": blocks[i:i+100]}, timeout=30,
         )
         if not r2.ok:
-            logger.error("블록 추가 실패 %s: %s", r2.status_code, r2.text[:200])
+            logger.error("블록 추가 실패 %s: %s — 기존 대시보드 보존", r2.status_code, r2.text[:200])
             return False
+
+    # ③ 구 블록 삭제 (child_database 는 영속 — 제외)
+    for bid, btype in old:
+        if btype == "child_database":
+            continue
+        requests.delete(f"https://api.notion.com/v1/blocks/{bid}", headers=headers, timeout=8)
     return True
 
 
@@ -139,6 +158,137 @@ def _toggle(title: str, children: list[dict]) -> dict:
     return {"object": "block", "type": "toggle",
             "toggle": {"rich_text": [{"type": "text", "text": {"content": title}}],
                        "children": children}}
+
+
+# ── 리치 텍스트 / 히어로 / 컬럼 / 파일 임베드 (N1·N2) ─────────────────────────────
+
+def _rt(content: str, bold: bool = False, color: str = "default") -> dict:
+    """단일 rich_text 런 (굵게·색 지정 가능)."""
+    return {"type": "text", "text": {"content": content},
+            "annotations": {"bold": bold, "color": color}}
+
+
+def _callout_rich(runs: list[dict], emoji: str = "💡", color: str = "gray_background") -> dict:
+    """여러 색·굵기 런으로 구성된 콜아웃."""
+    return {"object": "block", "type": "callout",
+            "callout": {"rich_text": runs, "icon": {"type": "emoji", "emoji": emoji}, "color": color}}
+
+
+def _column(children: list[dict]) -> dict:
+    return {"object": "block", "type": "column", "column": {"children": children}}
+
+
+def _columns(cols: list[list[dict]]) -> dict:
+    """column_list — 각 컬럼은 블록 리스트 (≥2 컬럼·각 ≥1 자식 필수)."""
+    return {"object": "block", "type": "column_list",
+            "column_list": {"children": [_column(c) for c in cols]}}
+
+
+def _phase_label(mt: str, pk) -> str:
+    labels = {"bull": {"bull2": "🫧 Bull-2 (버블)", "bull1": "🐂 Bull-1 (강세)"},
+              "bear": {0: "🟢 0 정상", 1: "🟡 1 조정", 2: "🟠 2 중조정",
+                       3: "🔴 3 심조정", 4: "🚨 4 급락", 5: "💥 5 폭락"}}
+    return labels.get(mt, {}).get(pk, f"{mt}-{pk}")
+
+
+def _hero_band(phase_str: str, mt: str, qqq: dict, dd: float, ret: float,
+               total: float, dca: dict) -> dict:
+    """상단 히어로 KPI 밴드 — Phase·QQQ낙폭·내포트·DCA 4열 컬러 콜아웃."""
+    cur = qqq.get("current", 0) or 0
+    phase_color = {"bull": "green_background", "neutral": "gray_background"}.get(mt, "red_background")
+    dd_color  = "red_background" if dd <= -10 else "orange_background" if dd <= -5 else "green_background"
+    dd_txt    = "red" if dd <= -5 else "default"
+    ret_color = "green_background" if ret >= 0 else "red_background"
+    ret_txt   = "green" if ret >= 0 else "red"
+    phase_co = _callout_rich(
+        [_rt("Phase\n", color="gray"), _rt(phase_str, bold=True)], "🎯", phase_color)
+    qqq_co = _callout_rich(
+        [_rt("QQQ 낙폭\n", color="gray"), _rt(f"{dd:+.1f}%", bold=True, color=dd_txt),
+         _rt(f"  ${cur:,.0f}", color="gray")], "📉" if dd < 0 else "📈", dd_color)
+    port_co = _callout_rich(
+        [_rt("내 포트폴리오\n", color="gray"), _rt(f"{ret:+.1f}%", bold=True, color=ret_txt),
+         _rt(f"  ${total:,.0f}", color="gray")], "💰", ret_color)
+    dca_co = _callout_rich(
+        [_rt("DCA 배율\n", color="gray"), _rt(f"{dca['multiplier']}×", bold=True),
+         _rt(f"  {dca['total_krw']:,}원/일", color="gray")], "🎚️", "blue_background")
+    return _columns([[phase_co], [qqq_co], [port_co], [dca_co]])
+
+
+# 섹션 헤더 프리픽스 — investment_report._build_mobile_summary 의 실제 섹션 마커와 결합.
+# (형식 변경 시 헤더가 평문으로 우아하게 강등될 뿐 깨지지 않음)
+_HDR_PREFIXES = ("📌", "🌎", "💼", "🛒", "🔎", "🇺🇸", "🇰🇷", "🏛️", "📊", "📰", "⚠️ ", "🧠", "🗓️", "🏆", "🎯")
+
+
+def _report_blocks(lines: list[str], limit: int = 45) -> list[dict]:
+    """요약 텍스트 줄 → 구조화 블록 (섹션 헤더·불릿·문단). 40줄 평문 덤프 대체.
+
+    헤더: 섹션 프리픽스로 시작 + `(티커)` 없음 + 24자 이내 → h3.
+    종목 항목(`✅ NVDA(...)`·`🟢 DXCM(...) 79점`)은 `(` 가 있어 문단으로 유지.
+    """
+    out: list[dict] = []
+    for ln in lines[:limit]:
+        s = ln.strip()
+        if not s:
+            continue
+        if set(s) <= set("─━═-=·•▪◦ ▰▱"):          # 구분선·진행바만 → 스킵
+            continue
+        if s[:2] in ("- ", "• ", "· ") or (s and s[0] in "•·▪◦"):
+            out.append(_bullet(s.lstrip("-•·▪◦ ️").strip()))
+            continue
+        if any(s.startswith(p) for p in _HDR_PREFIXES) and "(" not in s and len(s) <= 24:
+            out.append(_h3(s))
+            continue
+        out.append(_para(s))
+    return out or [_para("(요약 없음)")]
+
+
+def _image_upload(file_id: str, caption: str = "") -> dict:
+    block: dict = {"object": "block", "type": "image",
+                   "image": {"type": "file_upload", "file_upload": {"id": file_id}}}
+    if caption:
+        block["image"]["caption"] = [{"type": "text", "text": {"content": caption}}]
+    return block
+
+
+def _upload_file_to_notion(path: str) -> str | None:
+    """로컬 파일 → Notion 파일 업로드 (3단계). 실패 시 None (호출부 QuickChart 폴백)."""
+    import requests
+    if not path or not os.path.exists(path):
+        return None
+    base = {"Authorization": f"Bearer {NOTION_TOKEN}", "Notion-Version": "2022-06-28"}
+    try:
+        r = requests.post("https://api.notion.com/v1/file_uploads",
+                          headers={**base, "Content-Type": "application/json"},
+                          json={}, timeout=20)
+        if not r.ok:
+            logger.warning("file_upload 생성 실패 %s: %s", r.status_code, r.text[:160])
+            return None
+        up = r.json()
+        fid, url = up.get("id"), up.get("upload_url")
+        if not fid or not url:
+            return None
+        with open(path, "rb") as f:
+            r2 = requests.post(url, headers=base,
+                               files={"file": (os.path.basename(path), f, "image/png")}, timeout=60)
+        if not r2.ok:
+            logger.warning("file_upload 전송 실패 %s: %s", r2.status_code, r2.text[:160])
+            return None
+        logger.info("PNG 업로드 완료: %s", os.path.basename(path))
+        return fid
+    except Exception as e:
+        logger.warning("file_upload 예외: %s", e)
+        return None
+
+
+def _latest_chart_png() -> str | None:
+    """오늘(없으면 최근) 포트폴리오 대시보드 PNG 경로."""
+    import glob
+    today = datetime.now(KST).strftime("%Y-%m-%d")
+    p = os.path.expanduser(f"~/reports/investment-chart-{today}.png")
+    if os.path.exists(p):
+        return p
+    cands = sorted(glob.glob(os.path.expanduser("~/reports/investment-chart-*.png")))
+    return cands[-1] if cands else None
 
 
 # ── QuickChart.io URL 생성 ─────────────────────────────────────────────────────
@@ -425,8 +575,7 @@ def build_blocks() -> list[dict]:
         _divider(),
     ]
 
-    # ── 시장 & 포트폴리오 ─────────────────────────────────────────────────────
-    blocks.append(_h2("🌡️ 시장 체온계 & 포트폴리오"))
+    # ── 히어로 KPI 밴드 + 시장 체온계 ──────────────────────────────────────────
     try:
         mkt = _collect_market()
         qqq  = mkt["qqq"]
@@ -439,17 +588,10 @@ def build_blocks() -> list[dict]:
         fg_proxy = fg.get("proxy_score", -1)
         proxy_s  = f"{fg_proxy:.0f}" if fg_proxy >= 0 else "n/a"
         cnn_ok   = fg.get("cnn_ok", True)
-        mom_1m   = qqq.get("mom_1m_pct", 0) or 0
         dd       = qqq.get("drawdown_pct", 0) or 0
         ret      = port.get("return_pct", 0) or 0
         total    = port.get("total_usd", 0)
-
-        phase_labels = {
-            "bull": {"bull2": "🫧 Bull-2 (버블)", "bull1": "🐂 Bull-1 (강세)"},
-            "bear": {0: "🟢 0 정상", 1: "🟡 1 조정", 2: "🟠 2 중조정",
-                     3: "🔴 3 심조정", 4: "🚨 4 급락", 5: "💥 5 폭락"},
-        }
-        phase_str = phase_labels.get(mt, {}).get(pk, f"{mt}-{pk}")
+        phase_str = _phase_label(mt, pk)
 
         fg_emoji = "💀" if fg_sc <= 25 else "😨" if fg_sc <= 45 else "😐" if fg_sc <= 55 else "😄" if fg_sc <= 75 else "🤑"
         fg_label = ("극단공포" if fg_sc <= 25 else "공포" if fg_sc <= 45 else
@@ -457,12 +599,12 @@ def build_blocks() -> list[dict]:
         vix_v = mkt["vix"]
         vix_lbl = "💥극공포" if vix_v > 40 else "🚨공포" if vix_v > 30 else "😴과낙관" if vix_v < 15 else "✅정상"
 
-        # 핵심 지표 callout (Phase에 따라 색상 변경)
-        phase_color = {"bull": "green_background", "neutral": "gray_background"}.get(mt, "red_background")
-        blocks.append(_callout(
-            f"Phase: {phase_str}  |  QQQ ${qqq.get('current',0):,.2f}  |  낙폭 {dd:+.1f}%  |  1M모멘텀 {mom_1m:+.1f}%",
-            "🎯", phase_color))
+        # 히어로 KPI 밴드 (최상단 — 한눈에 들어오는 4대 지표)
+        blocks.append(_hero_band(phase_str, mt, qqq, dd, ret, total, dca))
+        blocks.append(_divider())
 
+        # 시장 체온계 상세 테이블
+        blocks.append(_h2("🌡️ 시장 체온계"))
         blocks.append(_table([
             ["지표", "값", "상태"],
             ["RSI (QQQ)", f"{mkt['rsi']:.1f}", "🔥과매도" if mkt['rsi'] < 30 else "⚠️약세" if mkt['rsi'] < 40 else "🌡과매수" if mkt['rsi'] > 70 else "✅중립"],
@@ -470,8 +612,6 @@ def build_blocks() -> list[dict]:
             [f"Fear/Greed CNN{'(미작동)' if not cnn_ok else ''}", f"{fg_sc:.1f}", f"{fg_emoji} {fg_label}"],
             ["Fear/Greed Proxy", proxy_s, "🟢탐욕" if float(proxy_s) > 55 else "🔴공포" if float(proxy_s) < 45 else "⚪중립" if proxy_s != "n/a" else "—"],
             ["200MA 위치", f"{'위 ▲' if mkt['ma'].get('above_ma200') else '아래 ▽'}  {mkt['ma'].get('gap_pct',0):+.1f}%", ""],
-            ["포트폴리오 총액", f"${total:,.2f}", f"{ret:+.1f}%"],
-            ["DCA 배율", f"{dca['multiplier']}×", f"{dca['total_krw']:,}원/일"],
         ]))
 
         logger.info("시장 섹션 완료")
@@ -489,8 +629,12 @@ def build_blocks() -> list[dict]:
         qqq_close = ml_data["qqq_close"]
         fg_proxy  = ml_data["fg"]
 
-        # QQQ 가격 차트
-        if qqq_close is not None:
+        # 로컬 포트폴리오 대시보드 PNG (report_charts 생성물 — 있으면 우선 임베드)
+        png = _latest_chart_png()
+        fid = _upload_file_to_notion(png) if png else None
+        if fid:
+            blocks.append(_image_upload(fid, "포트폴리오 대시보드 — 등락·벤치마크·RSI·매집강도"))
+        elif qqq_close is not None:   # 폴백: QuickChart QQQ
             url = _qqq_momentum_chart(qqq_close)
             if url:
                 blocks.append(_image(url, "QQQ 최근 60일 가격 + MA60"))
@@ -600,15 +744,14 @@ def build_blocks() -> list[dict]:
         summary, report_date = _load_report_summary()
         today_kst = datetime.now(KST).strftime("%Y-%m-%d")
         if summary:
-            lines = [l for l in summary.strip().split("\n") if l.strip()]
-            label = "📄 전체 요약 (클릭 펼치기)"
+            lines = summary.strip().split("\n")
             # 당일 리포트가 아직이면 최근 리포트임을 명시 (오해 방지)
             if report_date and report_date != today_kst:
                 blocks.append(_callout(
                     f"당일({today_kst}) 리포트 생성 전 — 최근 {report_date} 리포트 표시",
                     "🕒", "yellow_background"))
-                label = f"📄 {report_date} 요약 (클릭 펼치기)"
-            blocks.append(_toggle(label, [_para(l) for l in lines[:40]]))
+            # 평문 40줄 덤프 대신 섹션 헤더·불릿·문단으로 구조화 (인라인 노출)
+            blocks += _report_blocks(lines, limit=45)
             logger.info("리포트 요약 추가 완료 (%d줄, %s)", len(lines), report_date or "?")
         else:
             blocks.append(_callout(
