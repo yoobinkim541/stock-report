@@ -42,6 +42,7 @@ HISTORY_FILE  = DATA_DIR / "portfolio_history.json"
 DIVIDEND_FILE = DATA_DIR / "qqqi_dividends.json"
 
 import store
+import fmt
 
 _HISTORY_COLLECTION  = "portfolio_history"
 _DIVIDEND_COLLECTION = "qqqi_dividends"
@@ -219,10 +220,7 @@ def get_dividend_summary() -> dict:
 # ══════════════════════════════════════════════════════════════════════
 
 def _ret_str(val: float | None) -> str:
-    if val is None:
-        return " N/A  "
-    sign = "▲" if val > 0 else ("▼" if val < 0 else "─")
-    return f"{sign}{abs(val):5.1f}%"
+    return fmt.spct(val)   # ▲1.5% / ▼0.5% / ─ (공통 포맷)
 
 
 def build_performance_report(perf: dict, latest: dict) -> str:
@@ -235,41 +233,36 @@ def build_performance_report(perf: dict, latest: dict) -> str:
     phase_label = p_info["label"] if p_info else f"{mt}/{pk}"
     phase_emoji = p_info["emoji"] if p_info else "❓"
 
-    # 수익률 바 (1d 기준)
-    ret1d = perf.get("ret_1d") or 0
-    bar   = _bar(abs(ret1d) / 3, 8)  # 3% = 풀바
-
     lines = [
-        f"📈 포트폴리오 성과  ({latest['date']})",
-        "━━━━━━━━━━━━━━━━━━━━━━━",
-        f"  현재가치  ${perf['current']:>9,.2f}  (₩{perf['current_krw']:,})",
-        f"  {phase_emoji} {phase_label}",
-        "",
-        "━━━ 수익률 ━━━━━━━━━━━━━━━━━━━━━━━",
-        f"  1일   {_ret_str(perf['ret_1d'])}  {bar}",
-        f"  7일   {_ret_str(perf['ret_7d'])}",
-        f"  30일  {_ret_str(perf['ret_30d'])}",
-        f"  90일  {_ret_str(perf['ret_90d'])}",
-        f"  전체  {_ret_str(perf['ret_all'])}  ({perf['first_date']} 이후)",
-        "",
-        "━━━ 포트폴리오 기록 ━━━━━━━━━━━━━━━━",
-        f"  역대 최고  ${perf['peak']:>9,.2f}  ({perf['peak_date']})",
-        f"  역대 최저  ${perf['trough']:>9,.2f}  ({perf['trough_date']})",
-        f"  고점 대비  {perf['drawdown_from_peak']:>+.2f}%",
-        f"  추적 일수  {perf['n_days']}일",
+        # 헤드라인 — 전체 수익률 + 고점대비(MDD) 먼저 (모바일 첫 화면)
+        fmt.headline(f"📈 성과 {fmt.spct(perf.get('ret_all'))}(전체)",
+                     f"고점 {fmt.pct(perf.get('drawdown_from_peak', 0))}",
+                     f"{phase_emoji} {phase_label}"),
+        fmt.sep(),
+        f"현재가치 {fmt.money(perf['current'], digits=2)} ({fmt.money(perf['current_krw'], '₩', abbrev=True)})",
+        fmt.sep("수익률"),
+        f"1일   {_ret_str(perf['ret_1d'])}",
+        f"7일   {_ret_str(perf['ret_7d'])}",
+        f"30일  {_ret_str(perf['ret_30d'])}",
+        f"90일  {_ret_str(perf['ret_90d'])}",
+        f"전체  {_ret_str(perf['ret_all'])}  ({perf['first_date']} 이후)",
+        fmt.sep("기록"),
+        f"역대 최고 {fmt.money(perf['peak'], digits=2)} ({perf['peak_date']})",
+        f"역대 최저 {fmt.money(perf['trough'], digits=2)} ({perf['trough_date']})",
+        f"고점 대비 {fmt.pct(perf['drawdown_from_peak'], 2)}",
+        f"추적 일수 {perf['n_days']}일",
     ]
 
     # 배당 요약
     div_sum = get_dividend_summary()
     if div_sum["count"] > 0:
         lines += [
-            "",
-            "━━━ QQQI 배당 수령 기록 ━━━━━━━━━━━━",
-            f"  누적 배당  ${div_sum['total']:,.2f}  ({div_sum['count']}회)",
-            f"  월 평균    ${div_sum['avg_monthly']:.2f}",
+            fmt.sep("QQQI 배당 수령"),
+            f"누적 {fmt.money(div_sum['total'], digits=2)} ({div_sum['count']}회)",
+            f"월 평균 {fmt.money(div_sum['avg_monthly'], digits=2)}",
         ]
         for ticker, amt in list(div_sum["by_ticker"].items())[:4]:
-            lines.append(f"  → {ticker:<6}  ${amt:.2f}")
+            lines.append(f"  → {ticker} {fmt.money(amt, digits=2)}")
 
     return "\n".join(lines)
 

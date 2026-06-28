@@ -9,6 +9,8 @@ from __future__ import annotations
 
 import logging
 
+import fmt
+
 logger = logging.getLogger(__name__)
 
 
@@ -31,7 +33,7 @@ def _overview(send, chat_id: str) -> None:
         return d if isinstance(d, (int, float)) and d >= 0 else 10 ** 6
 
     rows.sort(key=_key)
-    lines = ["📅 실적 캘린더 & 밸류에이션 (포트폴리오)", "━━━━━━━━━━━━━━"]
+    lines = ["📅 실적 캘린더 & 밸류에이션 (포트폴리오)", fmt.SEP]
     for s in rows:
         t = s.get("ticker", "?")
         v = s.get("valuation", {}) or {}
@@ -55,17 +57,21 @@ def _detail(send, chat_id: str, ticker: str) -> None:
     v = s.get("valuation", {}) or {}
     c = s.get("consensus", {}) or {}
     n = s.get("next_earnings", {}) or {}
-    lines = [f"📊 {ticker} 실적·밸류에이션", "━━━━━━━━━━━━━━"]
+    lines = [f"📊 {ticker} 실적·밸류에이션", fmt.SEP]
 
-    vparts = []
+    # 밸류 / 수익 2줄 분할 (6약어 한 줄 → 모바일 줄바꿈 방지)
+    val_parts = []
     for label, key in [("PER", "per"), ("fwdPER", "forward_pe"), ("PBR", "pbr"), ("PSR", "psr")]:
         if v.get(key) is not None:
-            vparts.append(f"{label} {v[key]:.1f}x")
+            val_parts.append(f"{label} {v[key]:.1f}x")
+    prof_parts = []
     if v.get("roe") is not None:
-        vparts.append(f"ROE {v['roe'] * 100:.1f}%")
+        prof_parts.append(f"ROE {v['roe'] * 100:.1f}%")
     if v.get("eps_ttm") is not None:
-        vparts.append(f"EPS {v['eps_ttm']:.2f}")
-    lines.append("밸류: " + (" · ".join(vparts) if vparts else "데이터 없음"))
+        prof_parts.append(f"EPS {v['eps_ttm']:.2f}")
+    lines.append("밸류  " + (" · ".join(val_parts) if val_parts else "데이터 없음"))
+    if prof_parts:
+        lines.append("수익  " + " · ".join(prof_parts))
 
     if v.get("div_yield") is not None:
         g = []
@@ -84,7 +90,7 @@ def _detail(send, chat_id: str, ticker: str) -> None:
         if c.get("eps_fwd_avg") is not None:
             cp.append(f"포워드 EPS {c['eps_fwd_avg']:.2f}({int(c['n_analysts']) if c.get('n_analysts') else '?'}명)")
         if c.get("revision_momentum") is not None:
-            cp.append(f"리비전 모멘텀 {c['revision_momentum']:+.2f}")
+            cp.append(f"리비전 모멘텀 {fmt.signed(c['revision_momentum'], 2)}")
         if c.get("target_upside_pct") is not None:
             cp.append(f"목표가 {c['target_upside_pct']:+.0f}%")
         if cp:
