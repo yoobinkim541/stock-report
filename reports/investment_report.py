@@ -2057,6 +2057,24 @@ def generate_report():
     lines.append(f"")
     lines.append(f"---")
     lines.append(f"")
+
+    # ── 0. 오늘 한눈에 (TL;DR) — 스크롤 없이 핵심부터 ──
+    _ph = _phase_headline_parts()
+    _pnl1d, _pnl1mo = _calc_portfolio_pnl(portfolio_results)
+    _sig = [r["signal"]["overall_signal"] for r in portfolio_results]
+    _pos, _neu = _sig.count("Positive"), _sig.count("Neutral")
+    _warn, _crit = _sig.count("Warning"), _sig.count("Critical")
+    lines.append("## 0. 오늘 한눈에")
+    if _ph:
+        _e, _l, _dca, _dd = _ph
+        lines.append(f"- **{_e} {_l}** · QQQ {fmt.pct(_dd) if _dd is not None else '—'} · DCA {_dca}")
+    if _pnl1d is not None:
+        lines.append(f"- **포트폴리오:** 오늘 {fmt.pct(_pnl1d)} · 1개월 "
+                     f"{fmt.pct(_pnl1mo) if _pnl1mo is not None else '—'}")
+    lines.append(f"- **신호 분포:** 🟢{_pos} ⚪{_neu} 🟡{_warn} 🔴{_crit}")
+    lines.append("")
+    lines.append("---")
+    lines.append("")
     # 대시보드 이미지 참조 — 텔레그램 밖(마크다운 뷰어·노션 등 PNG가 같은 폴더에 있는 환경)에서 표시.
     #  (텔레그램은 .md 를 문서로 보내 렌더하지 않으므로 무시됨 — 부작용 없음. 차트 생성 실패 시엔
     #   깨진 이미지 아이콘만 보이나 그래프는 sendPhoto 로 별도 전송됨.)
@@ -2304,20 +2322,9 @@ def generate_report():
         lines.append(f"**관망/유지:** {', '.join(hold)}")
 
     lines.append(f"")
-    if spy_change != 0:
-        if spy_change > 0:
-            lines.append(f"오늘 시장은 상승 분위기입니다. 포트폴리오의 강한 종목을 중심으로")
-            lines.append(f"분할매수 기회를 평가해보세요.")
-        else:
-            lines.append(f"오늘 시장은 하락 분위기입니다. 리스크 관리에 집중하고,")
-            lines.append(f"급락 종목의 원인을 확인한 후 대응하세요.")
-    else:
-        lines.append(f"시장 데이터를 확인하여 오늘의 전략을 수립하세요.")
-    lines.append(f"")
 
     lines.append(f"---")
     lines.append(f"*본 리포트는 자동 생성된 참고 자료입니다. 투자 결정은 본인의 판단에 따라 신중히 내리세요.*")
-    lines.append(f"*생성 시간: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}*")
     lines.append(f"*소요 시간: {time.time() - start_time:.1f}초*")
     lines.append(f"")
 
