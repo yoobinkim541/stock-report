@@ -435,3 +435,32 @@ def format_meta_report(alloc: MetaAllocation) -> str:
         f"({alloc.timestamp})",
     ]
     return "\n".join(lines)
+
+
+# ── CLI 진입점 (봇 .venv subprocess 용) ─────────────────────────────────────────
+# 봇은 hermes venv(lightgbm 없음)라 인라인 실행 시 LeverageModel 신호가 누락된
+# 축소 배분이 된다. .venv 의 `python -m ml.meta_allocator` 로 풀 충실도 실행.
+# (force=True — hermes venv 가 캐시에 남겼을 축소 결과를 무시하고 재계산)
+if __name__ == "__main__":
+    import argparse
+    import sys
+    import logging
+
+    logging.basicConfig(level=logging.INFO, stream=sys.stderr,
+                        format="%(asctime)s %(levelname)s %(message)s")
+    ap = argparse.ArgumentParser(description="MetaAllocator 통합 배분 리포트 — stdout 으로 출력")
+    ap.add_argument("--market-type", default="neutral")
+    ap.add_argument("--phase-key", default="0")
+    a = ap.parse_args()
+
+    pk = a.phase_key
+    try:                       # bear 국면=정수(0~5), bull=문자열("bull1"/"bull2")
+        pk = int(pk)
+    except (ValueError, TypeError):
+        pass
+
+    alloc = get_meta_allocation(a.market_type, pk, force=True)
+    if alloc is None:
+        print("__META_EMPTY__")
+        sys.exit(2)
+    print(format_meta_report(alloc))

@@ -1831,18 +1831,22 @@ def cmd_leverage(chat_id: str, args: list, send_fn=None):
 
 
 def cmd_meta(chat_id: str, args: list, send_fn=None):
-    """ML 신호 통합 MetaAllocator — 최종 포트폴리오 비중 추천."""
+    """ML 신호 통합 MetaAllocator — .venv subprocess(LeverageModel 등 lightgbm 신호 포함 풀 충실도).
+
+    market_type·phase_key 는 봇(hermes venv)서 fetch_market 으로 구해 인자로 전달.
+    """
     _send = send_fn if send_fn is not None else send
     _send(chat_id, "⏳ ML 신호 통합 중... (약 20초)")
     try:
-        from ml.meta_allocator import get_meta_allocation, format_meta_report
-        d      = fetch_market()
-        alloc  = get_meta_allocation(d["market_type"], d["phase_key"])
-        report = format_meta_report(alloc)
-        _send(chat_id, report)
-    except Exception as e:
-        _send(chat_id, f"❌ MetaAllocator 오류: {e}")
-        logger.exception("cmd_meta")
+        d = fetch_market()
+        mt = str(d.get("market_type", "neutral"))
+        pk = str(d.get("phase_key", 0))
+    except Exception:
+        mt, pk = "neutral", "0"
+    _run_signals_subprocess(chat_id, _send, "ml.meta_allocator",
+                            ["--market-type", mt, "--phase-key", pk],
+                            "__META_EMPTY__", "❌ MetaAllocator 실패 — 데이터 확인 필요",
+                            timeout=120)
 
 
 def cmd_intraday(chat_id: str, args: list, send_fn=None) -> None:
