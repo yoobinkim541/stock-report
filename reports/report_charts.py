@@ -260,8 +260,12 @@ def _panel_accum_or_score(ax, accum_picks, holdings):
     ax.set_yticklabels(labels, fontsize=8.5, color=_INK)
     ax.set_title(title, fontsize=12, color=_INK, fontweight="bold", pad=10)
     _style_axes(ax)
-    for yi, v in zip(y, vals):
-        ax.text(v + 1.5, yi, f"{v:.0f}", va="center", ha="left", fontsize=7.5, color=_INK)
+    # 막대 끝 라벨: 점수 + (매집 패널) 판정 텍스트 — 색 단독 의존 제거(색맹·흑백 안전)
+    _VEN = {"강한 매집": "STRONG", "매집": "ACC", "중립": "NEU", "분산": "DIST"}
+    tags = [r[2] for r in rows] if accum_picks else [""] * len(rows)
+    for yi, v, tag in zip(y, vals, tags):
+        td = (tag if _KO_OK else _VEN.get(tag, "")) if tag else ""
+        ax.text(v + 1.5, yi, f"{v:.0f} {td}".rstrip(), va="center", ha="left", fontsize=7.5, color=_INK)
 
 
 def build_portfolio_dashboard(clean_data, market, out_path, *, price_history=None,
