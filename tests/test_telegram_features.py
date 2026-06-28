@@ -209,9 +209,12 @@ def test_cmd_help_groups_commands_and_mentions_merged_legacy_commands():
     assert "[시장]" in help_text
     assert "[포트폴리오]" in help_text
     assert "[보유·세금]" in help_text
-    assert "[ML·단기신호]" in help_text
+    assert "[ML·신호 (참고)]" in help_text
     assert "/holding" in help_text
-    assert "통합: /dividend → /holding dividend" in help_text
+    # Tier B 병합 안내 (footer)
+    assert "통합:" in help_text
+    assert "/paper" in help_text and "/signals" in help_text
+    assert "/dividend" in help_text and "/holding" in help_text
 
 
 def test_dispatch_routes_plain_internal_feature_request_without_llm(monkeypatch):
@@ -297,7 +300,8 @@ def test_dispatch_ask_fetches_market_and_sends_advice(monkeypatch):
     assert calls["send"] == [("chat-1", "상담 답변")]
 
 
-def test_configure_bot_commands_registers_bot_commands(monkeypatch):
+def test_configure_bot_commands_scopes_owner_and_guest_menus(monkeypatch):
+    """B5 — 소유자 채팅엔 owner 메뉴, default·all_private 엔 guest 메뉴 (게스트 숨김)."""
     import telegram_bot
 
     calls = []
@@ -311,13 +315,20 @@ def test_configure_bot_commands_registers_bot_commands(monkeypatch):
     telegram_bot.configure_bot_commands()
 
     assert len(calls) == 3
-    for method, kwargs in calls:
+    for method, _ in calls:
         assert method == "setMyCommands"
-        assert kwargs["commands"] == telegram_bot.BOT_COMMANDS
-    # scope 순서: default → all_private_chats → all_chat_administrators
+    # default + all_private_chats → 게스트 메뉴
     assert calls[0][1].get("scope") is None
-    assert calls[1][1].get("scope") == {"type": "all_private_chats"}
-    assert calls[2][1].get("scope") == {"type": "all_chat_administrators"}
+    assert calls[0][1]["commands"] is telegram_bot._GUEST_MENU
+    assert calls[1][1]["scope"] == {"type": "all_private_chats"}
+    assert calls[1][1]["commands"] is telegram_bot._GUEST_MENU
+    # 소유자 채팅 scope override → 소유자 메뉴
+    assert calls[2][1]["scope"]["type"] == "chat"
+    assert str(calls[2][1]["scope"]["chat_id"]) == str(telegram_bot.OWNER_CHAT_ID)
+    assert calls[2][1]["commands"] is telegram_bot._OWNER_MENU
+    # 게스트 전용 명령은 소유자 메뉴에 노출되지 않음
+    owner = {c["command"] for c in telegram_bot._OWNER_MENU}
+    assert not ({"market", "indicators", "my"} & owner)
 
 
 def test_plain_text_normalized_to_ask_and_dispatched(monkeypatch):
@@ -497,29 +508,59 @@ def test_dispatch_portfolio_refreshes_prices_and_bypasses_cache(monkeypatch):
     assert sent and "포트폴리오" in sent[0]
 
 
-def test_bot_commands_include_all_top_level_dispatch_commands():
+def test_menus_reflect_tier_b_merges_and_have_handlers():
+    """B1~B5 — 병합 후 메뉴 구성 + 모든 메뉴 명령에 핸들러 존재."""
     import telegram_bot
 
-    registered = {item["command"] for item in telegram_bot.BOT_COMMANDS}
+    owner = {c["command"] for c in telegram_bot._OWNER_MENU}
+    guest = {c["command"] for c in telegram_bot._GUEST_MENU}
 
-    assert registered >= {
-        "help",
-        "status",
-        "phase",
-        "report",
-        "portfolio",
-        "rebalance",
-        "history",
-        "sgov",
-        "dca",
-        "order",
-        "holding",
-        "tax",
-        "ask",
-        "alert",
-        "ranking", "leverage", "meta", "entry", "intraday", "mlreport",
-        "mock", "usmock", "accum", "earnings",
+    assert owner >= {
+        "help", "status", "phase", "report", "portfolio", "rebalance",
+        "risk", "history", "order", "paper", "holding", "tax",
+        "ask", "alert", "accum", "earnings", "signals",
     }
+    assert guest >= {"market", "indicators", "my", "help"}
+    # 병합·삭제된 구 명령은 어느 메뉴에도 없음
+    gone = {"summary", "sim", "dca", "sgov", "mock", "usmock",
+            "ranking", "entry", "intraday", "leverage", "meta", "mlreport",
+            "myadd", "myremove", "myportfolio"}
+    assert not (gone & (owner | guest))
+    # 모든 메뉴 명령에 핸들러 존재
+    for c in owner | guest:
+        assert ("/" + c) in telegram_bot._COMMAND_HANDLERS, f"no handler for /{c}"
+
+
+def test_tier_b_aliases_resolve_to_umbrella_commands():
+    """B1~B4 — 구 명령어가 alias 로 우산 명령에 정확히 해석 (하위호환)."""
+    import telegram_bot as t
+
+    assert t._parse_command("/mock")             == ("/paper", ["kr"])
+    assert t._parse_command("/usmock")           == ("/paper", ["us"])
+    assert t._parse_command("/dca")              == ("/rebalance", ["dca"])
+    assert t._parse_command("/sgov")             == ("/rebalance", ["sgov"])
+    assert t._parse_command("/ranking retrain")  == ("/signals", ["rank", "retrain"])
+    assert t._parse_command("/entry kr")         == ("/signals", ["entry", "kr"])
+    assert t._parse_command("/intraday 1m NVDA") == ("/signals", ["intraday", "1m", "NVDA"])
+    assert t._parse_command("/leverage")         == ("/signals", ["lev"])
+    assert t._parse_command("/meta")             == ("/signals", ["meta"])
+    assert t._parse_command("/myadd QQQ 10 500") == ("/my", ["add", "QQQ", "10", "500"])
+    assert t._parse_command("/myremove QQQ")     == ("/my", ["del", "QQQ"])
+    assert t._parse_command("/myportfolio")      == ("/my", ["view"])
+    # /mlreport 는 하드 삭제 — alias 없음, 핸들러 없음
+    assert t._parse_command("/mlreport") == ("/mlreport", [])
+    assert "/mlreport" not in t._COMMAND_HANDLERS
+
+
+def test_guest_permission_boundary_after_my_merge():
+    """B3 — 게스트는 /my·/market·/indicators·/help 만 허용, 처방형·모의 차단."""
+    import telegram_bot as t
+
+    for allowed in ("/my", "/market", "/indicators", "/help"):
+        assert t._command_allowed("guest", allowed) is True
+    for blocked in ("/paper", "/portfolio", "/signals", "/rebalance",
+                    "/tax", "/order", "/ask", "/holding"):
+        assert t._command_allowed("guest", blocked) is False
 
 
 def test_apply_snapshot_updates_derived_portfolio_values(monkeypatch, tmp_path):

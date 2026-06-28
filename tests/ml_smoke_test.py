@@ -331,15 +331,15 @@ def run_tests() -> list[str]:
             ("1개 이상 메시지 발송",     lambda r: len(r) >= 1),
             ("리포트 헤더 포함",         lambda r: "ML 전략 성과 리포트" in "\n".join(r)),
         )
-        if "mlreport" not in [c["command"] for c in BOT_COMMANDS]:
-            failures.append("❌ bot wiring: mlreport가 BOT_COMMANDS에 없음")
+        if "mlreport" in [c["command"] for c in BOT_COMMANDS]:
+            failures.append("❌ bot wiring: mlreport가 메뉴에서 제거되지 않음(B4 하드삭제)")
         else:
-            logger.info("  ✅ bot wiring — mlreport in BOT_COMMANDS")
+            logger.info("  ✅ bot wiring — mlreport 메뉴에서 제거됨 (B4)")
 
-        if "/mlreport" not in _COMMAND_HANDLERS:
-            failures.append("❌ bot wiring: /mlreport가 _COMMAND_HANDLERS에 없음")
+        if "/signals" not in _COMMAND_HANDLERS:
+            failures.append("❌ bot wiring: /signals가 _COMMAND_HANDLERS에 없음")
         else:
-            logger.info("  ✅ bot wiring — /mlreport in _COMMAND_HANDLERS")
+            logger.info("  ✅ bot wiring — /signals in _COMMAND_HANDLERS (무엣지 신호 우산)")
 
     except ImportError as e:
         failures.append(f"❌ bot wiring: import 실패 — {e}")

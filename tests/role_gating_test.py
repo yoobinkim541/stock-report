@@ -36,15 +36,26 @@ def main() -> int:
     check(t._role_for("random999") is None, "미등록 chat_id → 차단(None)")
 
     # ── 보안 경계: 게스트는 처방/주문 명령 전면 차단 ─────────────────
-    owner_only = ["/order", "/holding", "/tax", "/ask", "/dca", "/rebalance",
-                  "/sgov", "/alert", "/report", "/status", "/leverage",
-                  "/entry", "/meta", "/apply_snapshot", "/portfolio", "/sim"]
+    owner_only = ["/order", "/holding", "/tax", "/ask", "/rebalance",
+                  "/alert", "/report", "/status", "/portfolio", "/risk",
+                  "/paper", "/signals", "/accum", "/earnings", "/phase",
+                  "/apply_snapshot"]
     blocked_ok = all(not t._command_allowed("guest", c) for c in owner_only)
     check(blocked_ok, f"게스트는 소유자 전용 {len(owner_only)}개 명령 전부 차단")
 
-    # ── 게스트 허용 명령 ─────────────────────────────────────────────
-    for c in ["/market", "/indicators", "/help", "/myadd", "/myremove", "/myportfolio"]:
+    # ── 구 명령 alias 도 (해석 후에도) 게스트 차단 ───────────────────
+    legacy_aliases = ["/dca", "/sgov", "/mock", "/usmock", "/ranking",
+                      "/entry", "/intraday", "/leverage", "/meta", "/sim", "/summary"]
+    alias_blocked = all(
+        not t._command_allowed("guest", t._parse_command(c)[0]) for c in legacy_aliases)
+    check(alias_blocked, f"구 명령 alias {len(legacy_aliases)}개 해석 후에도 게스트 차단")
+
+    # ── 게스트 허용 명령 (원시 + 구 alias 해석) ──────────────────────
+    for c in ["/market", "/indicators", "/help", "/my"]:
         check(t._command_allowed("guest", c), f"게스트 {c} 허용")
+    for c in ["/myadd", "/myremove", "/myportfolio"]:
+        resolved = t._parse_command(c)[0]
+        check(t._command_allowed("guest", resolved), f"게스트 {c}→{resolved} 허용(alias)")
 
     # ── 소유자는 전부 허용 ───────────────────────────────────────────
     check(all(t._command_allowed("owner", c) for c in owner_only + ["/market"]),

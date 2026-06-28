@@ -236,32 +236,26 @@ class TestBotWiring:
         assert [caption for _, caption in sent_photos] == ["📈 이퀴티 곡선", "🔬 파라미터 탐색"]
         assert all(path.endswith(".png") for path, _ in sent_photos)
 
-    def test_dispatch_routes_mlreport(self):
-        """dispatch('/mlreport', ...) must route to _dispatch_mlreport without calling real send."""
+    def test_dispatch_mlreport_is_removed(self):
+        """B4 — /mlreport 하드 삭제: dispatch 시 '모르는 명령어' (리포트 미생성)."""
         import telegram_bot as bot
 
         sent: list[str] = []
-
-        original_send = bot.send
-        original_typing = bot.typing
-
+        original_send, original_typing = bot.send, bot.typing
         bot.send = lambda chat_id, text: sent.append(text)
         bot.typing = lambda chat_id: None
-
         try:
             bot.dispatch("/mlreport", "fake_chat")
         finally:
-            bot.send = original_send
-            bot.typing = original_typing
+            bot.send, bot.typing = original_send, original_typing
 
         combined = "\n".join(sent)
-        assert "ML 전략 성과 리포트" in combined
+        assert "모르는 명령어" in combined
+        assert "ML 전략 성과 리포트" not in combined
 
-    def test_mlreport_in_bot_commands(self):
-        from telegram_bot import BOT_COMMANDS
-        commands = [c["command"] for c in BOT_COMMANDS]
-        assert "mlreport" in commands
-
-    def test_mlreport_in_command_handlers(self):
-        from telegram_bot import _COMMAND_HANDLERS
-        assert "/mlreport" in _COMMAND_HANDLERS
+    def test_mlreport_command_removed_from_menu_and_handlers(self):
+        """B4 — /mlreport 는 메뉴·핸들러에서 제거 (cmd_mlreport 함수 유닛은 유지)."""
+        from telegram_bot import _OWNER_MENU, _GUEST_MENU, _COMMAND_HANDLERS
+        menu = [c["command"] for c in _OWNER_MENU + _GUEST_MENU]
+        assert "mlreport" not in menu
+        assert "/mlreport" not in _COMMAND_HANDLERS

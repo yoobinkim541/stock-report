@@ -110,10 +110,10 @@ crons/news_spike_detector.py (크론 매 1분)
 | `scripts/kis_stream_watchdog.sh` | 실시간 시세 WS 상시 프로세스(kis_stream) 재기동 — `REALTIME_ENABLED=true` 시만 기동(opt-in·꺼지면 no-op) | 매 1분 |
 | `crons/kiwoom_sync_rest.py` | 키움 REST API 국내주식 잔고 동기화 | 평일 23:35 UTC |
 | `crons/kiwoom_mock_track.py` | 국내주식 자동 페이퍼트레이딩 (키움 **모의투자** — 신호 기반 리밸런스·모의 도메인 하드락·편입/퇴출 근거 원장 적재) | 평일 00:30 UTC |
-| `crons/kiwoom_mock_report.py` | 국내 모의 일일 현황 보고 (NAV·손익·편입/퇴출 사유·누적 vs KOSPI·MDD vs 지수) + `/mock` 공용 | 평일 06:40 UTC |
+| `crons/kiwoom_mock_report.py` | 국내 모의 일일 현황 보고 (NAV·손익·편입/퇴출 사유·누적 vs KOSPI·MDD vs 지수) + `/paper kr` 공용 | 평일 06:40 UTC |
 | `crons/kr_mock_learn.py` | KR 모의 정책 강화 — 보상 백필 + ★목적함수(아웃퍼폼·MDD≤지수) OOS 게이트 재학습 | 토 02:00 UTC |
 | `crons/us_mock_track.py` | 미국주식 자동 페이퍼트레이딩 (KIS 해외 모의 — us_policy 선택 + 바벨 배분·정수주 리밸런스·`Ledger("us_mock")` 결정+근거 적재) | 평일 15:00 UTC (미 개장 후) |
-| `crons/us_mock_report.py` | 미국 모의 일일 현황 + **로직 평가 스코어카드**(NAV·vs QQQ·MDD·편입/퇴출 적중률·실현 IC) + `/usmock` 공용 | 평일 21:30 UTC |
+| `crons/us_mock_report.py` | 미국 모의 일일 현황 + **로직 평가 스코어카드**(NAV·vs QQQ·MDD·편입/퇴출 적중률·실현 IC) + `/paper us` 공용 | 평일 21:30 UTC |
 | `crons/us_mock_learn.py` | US 모의 정책 강화 — 보상 백필(편입 초과·퇴출 회피) + ★목적함수 OOS 게이트·챔피언-챌린저 재학습 | 토 03:00 UTC |
 | `crons/weekly_kr_ranker_retrain.py` | KR 전용 랭커(KOSPI 대비 초과수익) 주간 재학습 (Purged WF·OOS IC) | 토 03:30 UTC |
 | `crons/longterm_adaptive_eval.py` | 장기 전략 ★목표(vs QQQ 아웃퍼폼·MDD≤지수) 라이브 스코어카드 + 악화 시 보수적 레버리지 축소 shadow 권고 | 토 04:00 UTC |
@@ -168,16 +168,13 @@ crons/news_spike_detector.py (크론 매 1분)
 
 ── 포트폴리오 ────────────────────────────────────
 /portfolio           보유현황 + 개별 종목 P&L + 총액 (+ 리스크 1줄)
-/rebalance           안전마진 + 종목 비중 진단 + DCA 조정 (+ 달러 vs 리스크 비중)
+/rebalance [dca|sgov]  안전마진 + 비중 진단 + DCA 조정 · `dca`=오늘 DCA 배분 · `sgov`=SGOV 실탄 비교 (구 /dca·/sgov 통합)
 /risk                포트폴리오 위험 분석 — 변동성·위험기여·유효분산·팩터노출 + 성장최적 레버리지(Kelly·낙폭예산) — owner 전용·표시
 /history             성과 히스토리 (1d/7d/30d/90d)
-/sgov                SGOV 실탄 현재/목표 비교
 
-── DCA & 주문 ────────────────────────────────────
-/dca                 오늘 DCA 배분 금액
+── 주문 & 모의 ───────────────────────────────────
 /order               소수점 매수 주문서 (키움 즉시 입력)
-/mock                국내 모의 페이퍼트레이딩 현황 (NAV·손익·편입/퇴출 사유·vs KOSPI·MDD) — owner 전용
-/usmock              미국 모의 페이퍼트레이딩 현황 + 로직 평가 스코어카드 (NAV·vs QQQ·MDD·적중률·실현 IC) — owner 전용
+/paper [kr|us]       모의 페이퍼트레이딩 — `kr`=국내(NAV·vs KOSPI)·`us`=미국(NAV·vs QQQ·적중률·IC)·생략=둘 다 (구 /mock·/usmock 통합) — owner 전용
 
 ── 종목 관리 ─────────────────────────────────────
 /holding                           보유 종목 목록
@@ -206,38 +203,37 @@ crons/news_spike_detector.py (크론 매 1분)
   → 발동 시 signal_outcomes.json에 R-multiple 기록 + 짝 알림 자동 제거
 
 ── ML·신호 (정보·표시용 — 매매신호 아님) ─────────
-/ranking [retrain]   NASDAQ100 LightGBM 종목 랭킹
-/leverage [retrain]  레버리지 ETF 진입 분석 (QLD/TQQQ/SOXL/UPRO)
-/meta                ML 통합 포트폴리오 배분 (MetaAllocator)
-/entry [포트|us50|kr|watch|TICKER]  진입 타점 분석
-/intraday [1m|5m|15m] [kr|us100|TICKER]  단기봉 신호
-/mlreport [real]     ML 전략 성과 리포트
-※ 위 6개는 6티어 검증상 종목선택·장중타이밍 무엣지 → **정보·표시용**(출력 끝 정직 라벨). 검증 통과 공격은 구조적 레버리지(/risk·Tier3)뿐.
+/signals [rank|entry|intraday|lev|meta]  무엣지 신호 우산 (구 6개 통합)
+   rank [retrain]                      NASDAQ100 LightGBM 종목 랭킹
+   entry [포트|us50|kr|watch|TICKER]    진입 타점 분석
+   intraday [1m|5m|15m] [kr|us100|TICKER]  단기봉 신호
+   lev [retrain]                       레버리지 ETF 진입 분석 (QLD/TQQQ/SOXL/UPRO)
+   meta                                ML 통합 포트폴리오 배분 (MetaAllocator)
+※ 6티어 검증상 종목선택·장중타이밍 무엣지 → **정보·표시용**(출력 끝 정직 라벨). 검증 통과 공격은 구조적 레버리지(/risk·Tier3)뿐. (구 /mlreport 는 삭제 — cmd_mlreport 함수만 유닛 유지)
 
 📎 PDF·이미지 전송 → 자동 파싱 → /holding apply 또는 /tax import apply
 
-> **신선도 계약**: `/status`·`/phase`·`/portfolio`·`/rebalance`·`/risk`·`/dca`·`/sgov` 는 **실시간**(결정·평가 명령은 5분 캐시 우회 force-fresh) — 출력 끝 `🕒 기준시각·실시간/캐시` 표기. `/history` 는 일별(크론). `REALTIME_ENABLED` 시 QQQ·보유 해외종목은 KIS WS 실시간가 오버레이(`/holding` 은 ⚡ 표시).
+> **신선도 계약**: `/status`·`/phase`·`/portfolio`·`/rebalance`(dca·sgov 포함)·`/risk` 는 **실시간**(결정·평가 명령은 5분 캐시 우회 force-fresh) — 출력 끝 `🕒 기준시각·실시간/캐시` 표기. `/history` 는 일별(크론). `REALTIME_ENABLED` 시 QQQ·보유 해외종목은 KIS WS 실시간가 오버레이(`/holding` 은 ⚡ 표시).
 
 ── 읽기전용 게스트 (STOCK_BOT_GUEST_IDS) ─────────
 /market              시황 브리핑 — 국면·낙폭·RSI·VIX·F&G (사실형, 처방 없음)
 /indicators TICKER   종목 기술적 지표 — RSI·이동평균·모멘텀·52주 위치
-/myadd TICKER 주수 평단가   내 보유 종목 추가 (user_id 스코프 store)
-/myremove TICKER     내 보유 종목 삭제
-/myportfolio         내 포트폴리오 평가 — 평가액·손익·수익률 (본인 데이터, 처방 없음)
+/my [add|del]        내 포트폴리오 — 생략=평가(평가액·손익)·`add TICKER 주수 평단가`=추가·`del TICKER`=삭제 (구 /myadd·/myremove·/myportfolio 통합, user_id 스코프 store)
 /help                게스트 도움말
-※ 게스트는 위 6개만 허용 — 주문·신호·종목관리·세금·AI상담 전면 차단 (법적 안전)
+※ 게스트는 위 4개만 허용 — 주문·신호·종목관리·세금·AI상담 전면 차단 (법적 안전)
 ※ 게스트 포트폴리오는 본인 chat_id 네임스페이스에 격리 (소유자 portfolio_snapshot과 분리)
 ```
 
-> `/dividend` → `/holding dividend` 통합, `/apply_snapshot` → `/holding apply` 통합  
-> 기존 명령어는 하위 호환으로 유지
+> **메뉴 scope 분리** (setMyCommands): **소유자 채팅엔 소유자 메뉴(17), default·all_private_chats 엔 게스트 메뉴(4)** — `BotCommandScopeChat`(소유자)가 우선 적용돼 **소유자 메뉴엔 `/market`·`/indicators`·`/my` 가 안 보임**(권한 아닌 표시만 분리 — 소유자는 입력 시 사용 가능).
+>
+> **하위호환 alias** (메뉴 비노출): `/summary`→`/status` · `/sim`→`/phase sim` · `/mock`→`/paper kr` · `/usmock`→`/paper us` · `/dca`→`/rebalance dca` · `/sgov`→`/rebalance sgov` · `/ranking·/entry·/intraday·/leverage·/meta`→`/signals …` · `/myadd·/myremove·/myportfolio`→`/my …` · `/dividend`→`/holding dividend` · `/apply_snapshot`→`/holding apply`
 
 ## 역할 (telegram_bot)
 
 | 역할 | chat_id | 권한 |
 |------|---------|------|
 | owner | `STOCK_BOT_CHAT_ID` | 전체 (주문·신호·종목관리·세금·AI상담·첨부) |
-| guest | `STOCK_BOT_GUEST_IDS` (쉼표구분) | 읽기전용 — `/market` `/indicators` `/myadd` `/myremove` `/myportfolio` `/help` (`_GUEST_COMMANDS`) |
+| guest | `STOCK_BOT_GUEST_IDS` (쉼표구분) | 읽기전용 — `/market` `/indicators` `/my` `/help` (`_GUEST_COMMANDS`) |
 | 차단 | 그 외 | "권한 없음" |
 
 - 보안 경계: `_command_allowed(role, cmd)` (순수 함수) — 게스트는 처방형/주문 명령 전면 차단.

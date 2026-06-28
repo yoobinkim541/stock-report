@@ -116,10 +116,10 @@ def test_format_leverage_report_structure():
 
 
 def test_leverage_bot_command_wiring():
-    from telegram_bot import _COMMAND_HANDLERS, BOT_COMMANDS
-    assert "/leverage" in _COMMAND_HANDLERS
-    cmds = [c["command"] for c in BOT_COMMANDS]
-    assert "leverage" in cmds
+    # B4 — /leverage 는 /signals lev 우산으로 병합 (alias 하위호환)
+    from telegram_bot import _COMMAND_HANDLERS, _parse_command
+    assert _parse_command("/leverage") == ("/signals", ["lev"])
+    assert "/signals" in _COMMAND_HANDLERS
 
 
 # ── 비판 리뷰 회귀 테스트 (2026-06-10) ────────────────────────────────────────
