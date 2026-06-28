@@ -18,6 +18,8 @@ from pathlib import Path
 from typing import Optional
 
 import numpy as np
+
+import fmt
 import pandas as pd
 
 logger = logging.getLogger(__name__)
@@ -524,8 +526,8 @@ def format_leverage_report(sig: EntrySignal) -> str:
         )
         lines.append(
             f"  {'':6}  히트율:{inst.hit_rate_30d*100:.0f}%  "
-            f"MDD:{inst.max_hist_dd*100:+.0f}%  "
-            f"P25:{inst.downside_p25_30d*100:+.1f}%"
+            f"MDD:{fmt.pct(inst.max_hist_dd*100, 0)}  "
+            f"P25:{fmt.pct(inst.downside_p25_30d*100, 1)}"
         )
 
     lines += [

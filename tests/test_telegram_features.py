@@ -326,9 +326,11 @@ def test_configure_bot_commands_scopes_owner_and_guest_menus(monkeypatch):
     assert calls[2][1]["scope"]["type"] == "chat"
     assert str(calls[2][1]["scope"]["chat_id"]) == str(telegram_bot.OWNER_CHAT_ID)
     assert calls[2][1]["commands"] is telegram_bot._OWNER_MENU
-    # 게스트 전용 명령은 소유자 메뉴에 노출되지 않음
+    # 게스트 전용 명령(/market·/my)은 소유자 메뉴에 노출되지 않음
+    # (/indicators 는 종목 기술지표가 소유자에도 유용해 의도적으로 노출)
     owner = {c["command"] for c in telegram_bot._OWNER_MENU}
-    assert not ({"market", "indicators", "my"} & owner)
+    assert not ({"market", "my"} & owner)
+    assert "indicators" in owner
 
 
 def test_plain_text_normalized_to_ask_and_dispatched(monkeypatch):

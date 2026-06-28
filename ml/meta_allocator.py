@@ -21,6 +21,8 @@ from typing import Optional
 import numpy as np
 import pandas as pd
 
+import fmt
+
 logger = logging.getLogger(__name__)
 
 KST = timezone(timedelta(hours=9))
@@ -396,10 +398,10 @@ def format_meta_report(alloc: MetaAllocation) -> str:
         f"{regime_emoji} 체제: {alloc.regime.upper()}  |  신뢰도: {alloc.confidence:.0%}",
         "",
         "[ 신호 요약 ]",
-        f"  Ranker 강도:    {alloc.signal_summary['ranker_breadth']:+.3f}",
-        f"  ExcessReturn:   {alloc.signal_summary['excess_signal']:+.3f}",
+        f"  Ranker 강도:    {fmt.signed(alloc.signal_summary['ranker_breadth'], 3)}",
+        f"  ExcessReturn:   {fmt.signed(alloc.signal_summary['excess_signal'], 3)}",
         f"  F&G Proxy:      {alloc.signal_summary['fg_proxy']:.1f}/100",
-        f"  Phase 신호:     {alloc.signal_summary['phase_signal']:+.2f}",
+        f"  Phase 신호:     {fmt.signed(alloc.signal_summary['phase_signal'], 2)}",
         f"  레버리지 SGOV:  {alloc.signal_summary['lev_sgov']:.0%}",
         "",
         "[ 통합 권장 비중 ]",

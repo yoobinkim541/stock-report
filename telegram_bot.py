@@ -55,6 +55,7 @@ from barbell_strategy import (
 )
 from ml import risk_model
 from providers.market_data import freshness_note
+import fmt
 from bot.attachment_parser import (
     extract_text_from_pdf, extract_text_from_image,
     parse_portfolio_from_text, parse_sells_from_text,
@@ -571,7 +572,7 @@ def cmd_status(d: dict) -> str:
         f"{info['emoji']} {info['label']}\n"
         f"\n"
         f"QQQ   ${qqq.get('current', 0):>8,.2f}   1M {mom_s}\n"
-        f"낙폭  {dd:>+8.2f}%\n"
+        f"낙폭  {fmt.pct(dd, 2)}\n"
         f"{reg_block}"
         f"RSI   {rsi:>8.1f}   {rsi_s}\n"
         f"VIX   {vix:>8.1f}   {vix_s}\n"

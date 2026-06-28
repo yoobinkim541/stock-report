@@ -377,8 +377,12 @@ def _inst_phrase(inst: dict | None) -> str:
         parts.append(f"기관지분 {inst['held_pct'] * 100:.0f}%")
     nc = inst.get("net_change")
     if nc is not None:
-        arrow = "▲" if nc > 0.002 else ("▼" if nc < -0.002 else "—")
-        seg = f"분기 {arrow}{abs(nc) * 100:.1f}%"
+        if nc > 0.002:
+            seg = f"분기 ▲{nc * 100:.1f}%"
+        elif nc < -0.002:
+            seg = f"분기 ▼{abs(nc) * 100:.1f}%"
+        else:
+            seg = "분기 보합"           # 데드존(±0.2%) — '—0.0%' 대신 '보합'
         if inst.get("buyers") is not None:
             seg += f"(매수 {inst['buyers']}·매도 {inst['sellers']}"
             if inst.get("new_entrants"):

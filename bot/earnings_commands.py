@@ -40,7 +40,7 @@ def _overview(send, chat_id: str) -> None:
         nd, du = n.get("date"), n.get("days_until")
         cal = f"{nd} (D-{du})" if nd and isinstance(du, (int, float)) and du >= 0 else (nd or "미정")
         per = f"PER {v['per']:.1f}x" if v.get("per") is not None else "PER —"
-        dy = f"· 배당 {v['div_yield'] * 100:.1f}%" if v.get("div_yield") is not None else ""
+        dy = f"· 배당 {v['div_yield'] * 100:.2f}%" if v.get("div_yield") is not None else ""
         surp = f"· 직전 {last['surprise_pct']:+.1f}%" if last.get("surprise_pct") is not None else ""
         lines.append(f"• {t} — {cal} | {per} {dy} {surp}".rstrip())
     lines.append("")
