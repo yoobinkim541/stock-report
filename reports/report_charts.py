@@ -177,10 +177,17 @@ def _panel_benchmark(ax, price_history, holdings):
         ax.plot(range(len(norm)), norm.values, color=color, linewidth=1.6,
                 label=label, alpha=0.9)
     ax.axhline(0, color=_MUTED, linewidth=1, linestyle="--", alpha=0.6)
+    # x축에 시작·끝 날짜 표기 (인덱스 대신)
+    idx = list(port.index)
+    if len(idx) >= 2:
+        ax.set_xticks([0, len(port) - 1])
+        try:
+            ax.set_xticklabels([str(idx[0])[5:10], str(idx[-1])[5:10]], fontsize=8, color=_MUTED)
+        except Exception:
+            pass
     ax.set_title(_ko("1개월 추이: 포트 vs 벤치마크", "1M Trend: Portfolio vs Benchmark"),
                  fontsize=12, color=_INK, fontweight="bold", pad=10)
     ax.set_ylabel("%", color=_MUTED, fontsize=9)
-    ax.set_xlabel(_ko("최근 거래일", "trading days"), color=_MUTED, fontsize=9)
     ax.legend(loc="upper left", fontsize=8, frameon=False)
     _style_axes(ax)
 
@@ -268,6 +275,29 @@ def _panel_accum_or_score(ax, accum_picks, holdings):
         ax.text(v + 1.5, yi, f"{v:.0f} {td}".rstrip(), va="center", ha="left", fontsize=7.5, color=_INK)
 
 
+def _hero_band(fig, clean_data):
+    """상단 히어로 KPI 스트립 — 시장 한눈 요약(나스닥·SPY·KOSPI·매수신호)."""
+    ms = (clean_data or {}).get("market_summary", {}) or {}
+    holds = (clean_data or {}).get("portfolio_summary", []) or []
+
+    def _chg(v):
+        if v is None:
+            return ("-", _MUTED)
+        col = _UP if v > 0 else (_DOWN if v < 0 else _MUTED)
+        return (f"{v:+.2f}%", col)
+
+    n_buy = sum(1 for h in holds if str(h.get("signal", "")).upper() in ("BUY", "STRONG_BUY"))
+    tiles = [
+        (_ko("나스닥", "NASDAQ"), *_chg(ms.get("nasdaq_change_pct"))),
+        ("SPY", *_chg(ms.get("spy_change_pct"))),
+        ("KOSPI", str(ms.get("kospi") or "-"), _INK),
+        (_ko("매수 신호", "Buy"), f"{n_buy}/{len(holds)}" if holds else "-", _INK),
+    ]
+    for x, (lbl, val, col) in zip((0.155, 0.385, 0.615, 0.845), tiles):
+        fig.text(x, 0.945, lbl, ha="center", va="center", fontsize=9.5, color=_MUTED)
+        fig.text(x, 0.910, val, ha="center", va="center", fontsize=17, color=col, fontweight="bold")
+
+
 def build_portfolio_dashboard(clean_data, market, out_path, *, price_history=None,
                               accum_picks=None, date_str=None) -> str | None:
     """포트폴리오 대시보드 PNG 생성. 성공 시 경로, 실패 시 None."""
@@ -298,6 +328,10 @@ def build_portfolio_dashboard(clean_data, market, out_path, *, price_history=Non
         # matplotlib 폰트는 컬러 이모지 미지원 → 제목에 이모지 넣지 않음(tofu 방지)
         fig.suptitle(f"{title}{suffix}", fontsize=15, color=_INK,
                      fontweight="bold", y=0.985)
+        try:
+            _hero_band(fig, clean_data)        # 상단 KPI 스트립
+        except Exception as e:
+            logger.warning("히어로 밴드 실패: %s", e)
 
         panels = [
             (axes[0][0], _panel_returns, (holdings,)),
@@ -323,7 +357,7 @@ def build_portfolio_dashboard(clean_data, market, out_path, *, price_history=Non
         fig.text(0.5, 0.005,
                  _ko("yfinance 기반 자동 생성 · 참고용", "auto-generated from yfinance · reference only"),
                  ha="center", color=_MUTED, fontsize=8)
-        fig.tight_layout(rect=(0, 0.02, 1, 0.96))
+        fig.tight_layout(rect=(0, 0.02, 1, 0.88))   # 상단에 히어로 밴드 공간 확보
         os.makedirs(os.path.dirname(out_path), exist_ok=True)
         fig.savefig(out_path, facecolor=_BG, bbox_inches="tight")
         plt.close(fig)
