@@ -1783,19 +1783,31 @@ def _dispatch_signals(chat_id: str, args: list):
 
 
 def cmd_ranking(chat_id: str, args: list, send_fn=None):
-    """NASDAQ100 LightGBM 종목 랭킹."""
+    """NASDAQ100 LightGBM 종목 랭킹.
+
+    봇은 hermes venv(lightgbm 없음)라 프로젝트 .venv 의 `python -m ml.ranker`
+    를 subprocess 호출해 리포트(stdout)만 회수한다(불변·안전, /card 와 동일 패턴).
+    """
     _send = send_fn if send_fn is not None else send
-    _send(chat_id, "⏳ 랭킹 생성 중... (첫 실행 시 약 15초)")
+    retrain = "retrain" in (args or [])
+    _send(chat_id, "⏳ 랭킹 생성 중... (약 15초" + (", 재학습 최대 3분" if retrain else "") + ")")
     try:
-        from ml.ranker import rank_today, load_ranker, format_ranking_report
-        retrain = "retrain" in (args or [])
-        ranking = rank_today(mode="nasdaq100", top_n=15, retrain=retrain)
-        result  = load_ranker()
-        if ranking.empty or result is None:
+        import subprocess
+        proj = os.getenv("STOCK_REPORT_PROJECT_DIR", "/home/ubuntu/projects/stock-report")
+        venv_py = os.path.join(proj, ".venv", "bin", "python3")
+        cmd = [venv_py, "-m", "ml.ranker", "--mode", "nasdaq100", "--top", "15"]
+        if retrain:
+            cmd.append("--retrain")
+        r = subprocess.run(cmd, cwd=proj, timeout=200, capture_output=True, text=True)
+        out = (r.stdout or "").strip()
+        if r.returncode == 0 and out and "__RANK_EMPTY__" not in out:
+            for chunk in (out[i:i+4000] for i in range(0, len(out), 4000)):
+                _send(chat_id, chunk)
+        else:
             _send(chat_id, "❌ 랭킹 생성 실패 — 데이터 확인 필요")
-            return
-        report = format_ranking_report(ranking, result)
-        _send(chat_id, report)
+            logger.warning("cmd_ranking rc=%s err=%s", r.returncode, (r.stderr or "")[-300:])
+    except subprocess.TimeoutExpired:
+        _send(chat_id, "❌ 랭킹 시간 초과 — 잠시 후 다시 시도")
     except Exception as e:
         _send(chat_id, f"❌ 랭킹 오류: {e}")
         logger.exception("cmd_ranking")

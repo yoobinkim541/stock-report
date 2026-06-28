@@ -600,3 +600,27 @@ def format_ranking_report(ranking: pd.DataFrame, result: RankerResult, detail_to
         "⚠️ 생존편향 — 현재 살아남은 종목만(상폐 제외) · 참고용",
     ]
     return "\n".join(lines)
+
+
+# ── CLI 진입점 (봇 .venv subprocess 용) ─────────────────────────────────────────
+# 봇은 hermes venv(lightgbm 없음)라 /signals rank 를 프로젝트 .venv 의
+# `python -m ml.ranker` subprocess 로 실행 → stdout(리포트)만 회수. (hermes venv 불변)
+if __name__ == "__main__":
+    import argparse
+    import sys
+    import logging
+
+    logging.basicConfig(level=logging.INFO, stream=sys.stderr,
+                        format="%(asctime)s %(levelname)s %(message)s")
+    ap = argparse.ArgumentParser(description="종목 랭킹 리포트 — stdout 으로 출력")
+    ap.add_argument("--mode", default="nasdaq100")
+    ap.add_argument("--top", type=int, default=15)
+    ap.add_argument("--retrain", action="store_true")
+    a = ap.parse_args()
+
+    ranking = rank_today(mode=a.mode, top_n=a.top, retrain=a.retrain)
+    result = load_ranker()
+    if ranking is None or ranking.empty or result is None:
+        print("__RANK_EMPTY__")
+        sys.exit(2)
+    print(format_ranking_report(ranking, result))
