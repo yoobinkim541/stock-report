@@ -454,6 +454,30 @@ def send(chat_id: str, text: str, max_len: int = 4000):
         _api("sendMessage", chat_id=chat_id, text=chunk)
 
 
+def _html_chunks(html: str, max_len: int):
+    """HTML 을 줄 경계로 분할하되 <pre>/<blockquote> 블록 내부는 자르지 않는다(태그 보존)."""
+    chunks, cur, cur_len, depth = [], [], 0, 0
+    for ln in html.split("\n"):
+        opens  = ln.count("<pre") + ln.count("<blockquote")
+        closes = ln.count("</pre>") + ln.count("</blockquote>")
+        line_len = len(ln) + 1
+        if cur and depth == 0 and cur_len + line_len > max_len:
+            chunks.append("\n".join(cur))
+            cur, cur_len = [], 0
+        cur.append(ln)
+        cur_len += line_len
+        depth = max(0, depth + opens - closes)
+    if cur:
+        chunks.append("\n".join(cur))
+    return chunks
+
+
+def send_html(chat_id: str, html: str, max_len: int = 4000):
+    """parse_mode=HTML 전송 — 태그 안전 분할(블록 내부 미절단)."""
+    for chunk in _html_chunks(html, max_len):
+        _api("sendMessage", chat_id=chat_id, text=chunk, parse_mode="HTML")
+
+
 def send_photo(chat_id: str, path: str, caption: str = "") -> bool:
     """로컬 PNG/JPG 파일을 텔레그램으로 전송."""
     url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendPhoto"
@@ -559,22 +583,25 @@ def cmd_status(d: dict) -> str:
     ret_pct = port.get("return_pct", 0) or 0
     reg_ln  = regime_line(detect_regime(dd), indent="")
 
-    lines = [
-        # 헤드라인 — 핵심 3수치 먼저 (Phase·낙폭·내 수익)
-        fmt.headline(f"{info['emoji']} {info['label']}",
-                     f"낙폭 {fmt.pct(dd)}", f"내수익 {fmt.spct(ret_pct)}"),
+    # 헤드라인(핵심 굵게) + 접을 수 있는 상세 — HTML 위계 (V-A)
+    head = fmt.headline(f"{info['emoji']} {fmt.b(info['label'])}",
+                        f"내수익 {fmt.b(fmt.spct(ret_pct))}", f"낙폭 {fmt.pct(dd)}")
+    summary = "\n".join([
+        head,
         fmt.sep(),
-        f"QQQ  {qqq.get('current', 0):,.2f}  (1M {fmt.pct(mom_1m)})",
-    ]
+        fmt.esc(f"QQQ {qqq.get('current', 0):,.2f}  (1M {fmt.pct(mom_1m)})"),
+    ])
+    detail = []
     if reg_ln:
-        lines.append(reg_ln)
-    lines += [
-        f"RSI {rsi:.0f} {rsi_s}  ·  VIX {vix:.1f} {vix_s}",
-        f"F&G {fg_sc:.0f} {fg_lbl}",
-        f"총액 {fmt.money(port['total_usd'])} ({fmt.money(total_krw, '₩', abbrev=True)})  {fmt.spct(ret_pct)}",
-        f"SGOV {fmt.money(port['sgov_usd'])}  실탄",
+        detail.append(fmt.esc(reg_ln))
+    detail += [
+        fmt.esc(f"RSI {rsi:.0f} {rsi_s}  ·  VIX {vix:.1f} {vix_s}"),
+        fmt.esc(f"F&G {fg_sc:.0f} {fg_lbl}"),
+        f"총액 {fmt.b(fmt.money(port['total_usd']))} "
+        f"({fmt.money(total_krw, '₩', abbrev=True)})  {fmt.spct(ret_pct)}",
+        fmt.esc(f"SGOV {fmt.money(port['sgov_usd'])}  실탄"),
     ]
-    return "\n".join(lines)
+    return fmt.expand(summary, "\n".join(detail))
 
 
 def cmd_summary(d: dict) -> str:
@@ -1480,6 +1507,8 @@ _FRESHNESS_CMDS = {"/status", "/summary", "/phase", "/portfolio", "/risk"}
 _FORCE_FRESH_CMDS = {"/portfolio", "/risk"}
 # 포지션 의존(개별 종목 가격) 명령 — 가격도 갱신.
 _FORCE_REFRESH_PRICES = {"/portfolio", "/risk"}
+# HTML 리치텍스트(parse_mode=HTML) 출력 명령 — 점진 확산(V-A).
+_HTML_CMDS = {"/status"}
 
 
 def _dispatch_market(cmd: str, chat_id: str):
@@ -1491,7 +1520,10 @@ def _dispatch_market(cmd: str, chat_id: str):
         out = _MARKET_CMDS[cmd](d, chat_id)
         if cmd in _FRESHNESS_CMDS:
             out = out.rstrip() + "\n" + freshness_note(d.get("fetched_ts"))
-        send(chat_id, out)
+        if cmd in _HTML_CMDS:
+            send_html(chat_id, out)        # freshness_note 는 <>& 없음 → HTML 안전
+        else:
+            send(chat_id, out)
     except Exception as e:
         send(chat_id, f"❌ 오류: {e}")
         logger.exception(f"dispatch {cmd}")
