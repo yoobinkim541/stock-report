@@ -6,6 +6,13 @@
 """
 from __future__ import annotations
 
+import os
+import sys
+
+# streamlit run 은 sys.path[0]=dashboard/ 로 설정 → 프로젝트 루트를 추가해야
+# `from dashboard import …` 및 providers/reports/ml import 가 동작한다.
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
 import pandas as pd
 import streamlit as st
 
