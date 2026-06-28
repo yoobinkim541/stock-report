@@ -476,8 +476,10 @@ def test_cmd_portfolio_includes_total_pnl_and_overall_return():
         "qqqi_div": {"monthly_usd": 2.5, "annual_yield_pct": 12.0},
     })
 
-    assert "총액  $1,000.00  +$200.00 (+25.0%)" in text
-    assert "전체  ₩1,520,000  +₩300,000 (+24.6%)" in text
+    # F2 헤드라인 — 전 재산(국내+해외) + 총수익률, 책별 해외/국내 손익 분리
+    assert "전 재산" in text
+    assert "해외 $1,000" in text and "+$200" in text and "▲25.0%" in text
+    assert "국내" in text and "▲20.0%" in text      # 국내 책 손익 별도 표기
 
 
 def test_dispatch_portfolio_refreshes_prices_and_bypasses_cache(monkeypatch):
@@ -507,7 +509,7 @@ def test_dispatch_portfolio_refreshes_prices_and_bypasses_cache(monkeypatch):
     telegram_bot.dispatch("/portfolio", "chat-1")
 
     assert calls == [("refresh", None), ("fetch_market", True)]
-    assert sent and "포트폴리오" in sent[0]
+    assert sent and "전 재산" in sent[0]            # F2 헤드라인
 
 
 def test_menus_reflect_tier_b_merges_and_have_handlers():

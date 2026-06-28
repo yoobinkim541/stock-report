@@ -24,6 +24,8 @@ import logging
 import numpy as np
 import pandas as pd
 
+import fmt
+
 logger = logging.getLogger(__name__)
 
 MIN_OBS = 60                 # 최소 거래일 (이보다 적으면 위험 추정 생략)
@@ -428,15 +430,15 @@ def format_risk_report(summary, now: str | None = None) -> str:
     """/risk 전체 리포트. summary None → 안내문."""
     if not summary:
         return "🛡 리스크 분석 — 데이터 부족(이력 <60거래일 또는 보유 1종목 이하)"
-    L = ["🛡 리스크 분석" + (f"  ({now})" if now else ""), "━" * 23,
-         f"연변동성  {summary['port_vol']*100:.1f}%        "
+    # 첫 행 2열 공백정렬은 모바일서 줄바꿈 → 2줄로 분리
+    L = ["🛡 리스크 분석", fmt.SEP,
+         f"연변동성  {summary['port_vol']*100:.1f}%",
          f"유효분산  {summary['n_eff']:.1f} / {summary['n_assets']}종목"]
     for tk, dollar, pc in summary["contributions"][:6]:
         L.append(f"  {tk:5s} {pc*100:4.0f}%  {_bar(max(0.0, pc))}  (달러 {dollar*100:.0f}%)")
     net = summary.get("factor_net") or {}
     if net:
-        idio = ""
-        L.append(f"팩터노출  QQQ β {net.get('mkt',0):.2f} · 금리 β {net.get('rate',0):+.2f}{idio}")
+        L.append(f"팩터노출  QQQ β {net.get('mkt',0):.2f} · 금리 β {fmt.signed(net.get('rate',0),2)}")
     lev = summary.get("leverage") or {}
     if lev.get("dd_cap"):
         half = (summary.get("growth") or {}).get("half") or {}

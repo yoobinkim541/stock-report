@@ -641,30 +641,39 @@ def cmd_risk(d: dict) -> str:
 def cmd_portfolio(d: dict) -> str:
     port = d["portfolio"]
     fx   = d["exchange_rate"]
-    total_krw = int(port["total_usd"] * fx)
-    sgov_r = port["sgov_usd"] / port["total_usd"] if port["total_usd"] > 0 else 0
-    qqqi_r = port["qqqi_usd"] / port["total_usd"] if port["total_usd"] > 0 else 0
-    pnl_usd = port.get("pnl_usd", 0.0)
+    total_usd  = port["total_usd"]
+    total_krw  = int(total_usd * fx)
+    pnl_usd    = port.get("pnl_usd", 0.0)
     return_pct = port.get("return_pct", 0.0)
-    pnl_sign = "+" if pnl_usd >= 0 else "-"
-    domestic_cost = port.get("domestic_cost_krw", 0)
+    domestic_cost  = port.get("domestic_cost_krw", 0)
     domestic_value = port.get("domestic_value_krw", 0)
-    domestic_pnl = port.get("domestic_pnl_krw", 0)
-    overall_cost = port.get("cost_usd", 0) * fx + domestic_cost
-    overall_value = port["total_usd"] * fx + domestic_value
-    overall_pnl = pnl_usd * fx + domestic_pnl
+    domestic_pnl   = port.get("domestic_pnl_krw", 0)
+    overall_cost   = port.get("cost_usd", 0) * fx + domestic_cost
+    overall_value  = total_usd * fx + domestic_value
+    overall_pnl    = pnl_usd * fx + domestic_pnl
     overall_return = overall_pnl / overall_cost * 100 if overall_cost > 0 else 0.0
-    overall_sign = "+" if overall_pnl >= 0 else "-"
+    sgov_r = port["sgov_usd"] / total_usd if total_usd > 0 else 0
+    qqqi_r = port["qqqi_usd"] / total_usd if total_usd > 0 else 0
+
+    def _sm(v, ccy="$"):                       # 부호 있는 통화 (+$120 / -₩111만)
+        return ("+" if v >= 0 else "-") + fmt.money(abs(v), ccy, abbrev=(ccy == "₩"))
 
     lines = [
-        f"💼 포트폴리오  ({d['fetched_at']})",
-        "━━━━━━━━━━━━━━━━━━━━━━━",
-        f"  총액  ${port['total_usd']:,.2f}  {pnl_sign}${abs(pnl_usd):,.2f} ({pnl_sign}{abs(return_pct):.1f}%)",
-        f"  원화  ₩{total_krw:,}",
-        f"  전체  ₩{int(overall_value):,}  {overall_sign}₩{abs(int(overall_pnl)):,} ({overall_sign}{abs(overall_return):.1f}%)",
-        f"  환율  {fx:,.1f}원/USD",
-        f"  SGOV  ${port['sgov_usd']:>7,.2f}  {_bar(sgov_r, 10)}  {sgov_r*100:.1f}%  실탄",
-        f"  QQQI  ${port['qqqi_usd']:>7,.2f}  {_bar(min(qqqi_r/0.35, 1), 10)}  {qqqi_r*100:.1f}%  배당엔진",
+        # 헤드라인 — 전 재산 + 총수익률 + 총손익 (가장 궁금한 수치 먼저)
+        fmt.headline(f"💼 전 재산 {fmt.money(overall_value, '₩', abbrev=True)}",
+                     fmt.spct(overall_return), _sm(overall_pnl, "₩")),
+        fmt.sep(),
+        f"해외 {fmt.money(total_usd)} ({fmt.money(total_krw, '₩', abbrev=True)})  "
+        f"{fmt.spct(return_pct)} {_sm(pnl_usd)}",
+    ]
+    if domestic_value > 0:
+        dom_ret = domestic_pnl / domestic_cost * 100 if domestic_cost > 0 else 0.0
+        lines.append(f"국내 {fmt.money(domestic_value, '₩', abbrev=True)}  "
+                     f"{fmt.spct(dom_ret)} {_sm(domestic_pnl, '₩')}")
+    lines += [
+        f"환율 {fx:,.0f}원/USD",
+        f"SGOV {fmt.money(port['sgov_usd'])}  {_bar(sgov_r, 8)} {sgov_r*100:.1f}% 실탄",
+        f"QQQI {fmt.money(port['qqqi_usd'])}  {_bar(min(qqqi_r/0.35, 1), 8)} {qqqi_r*100:.1f}% 배당(목표35%)",
     ]
 
     leverage   = load_leverage_state()
@@ -678,35 +687,31 @@ def cmd_portfolio(d: dict) -> str:
             price = lev_prices.get(ticker, avg)
             val   = sh * price
             pnl   = (price - avg) / avg * 100 if avg > 0 else 0
-            sign  = "+" if pnl >= 0 else ""
-            lines.append(f"  {ticker}    ${val:>7,.0f}  {sh}주 @${avg:.2f}  {sign}{pnl:.1f}%")
+            lines.append(f"{ticker} {fmt.money(val)}  {sh:g}주 @${avg:.2f}  {fmt.spct(pnl)}")
     if not has_lev:
-        lines.append("  레버리지  미보유")
+        lines.append("레버리지 미보유")
 
-    # ── 개별 종목 P&L ───────────────────────────────────────────────────
+    # ── 개별 종목 P&L (금액 병기) ───────────────────────────────────────
     details = port.get("holdings_detail", [])
     _SKIP = {"SGOV", "QQQI", "QLD", "TQQQ"}
     stock_details = [h for h in details if h.get("ticker") not in _SKIP and h.get("value_usd", 0) > 0]
     if stock_details:
-        lines += ["", "━━━ 📈 개별 종목 ━━━"]
+        lines += ["", fmt.sep("📈 개별 종목")]
         stock_details.sort(key=lambda h: h.get("value_usd", 0), reverse=True)
         for h in stock_details:
-            ret  = h.get("return_pct", 0) or 0
-            val  = h.get("value_usd", 0)
-            sign = "▲" if ret > 0 else ("▼" if ret < 0 else "─")
-            lines.append(
-                f"  {h['ticker']:<6}  ${val:>7,.0f}  {sign}{abs(ret):5.1f}%"
-            )
+            ret = h.get("return_pct", 0) or 0
+            val = h.get("value_usd", 0)
+            pnl = h.get("pnl_usd")
+            if pnl is None:                    # 없으면 평가액·수익률로 역산
+                pnl = val - val / (1 + ret / 100) if ret > -100 else 0.0
+            lines.append(f"{h['ticker']} {fmt.money(val)}  {fmt.spct(ret)} ({_sm(pnl)})")
 
     _ro = risk_model.risk_oneliner(_risk_weights(d))
     if _ro:
         lines += ["", _ro]
 
     div = d["qqqi_div"]
-    lines += [
-        "",
-        f"  QQQI 월 배당  ${div['monthly_usd']:.2f}  (연 {div['annual_yield_pct']:.1f}%)",
-    ]
+    lines += ["", f"QQQI 월 배당 {fmt.money(div['monthly_usd'], digits=2)} (연 {div['annual_yield_pct']:.1f}%)"]
     return "\n".join(lines)
 
 
