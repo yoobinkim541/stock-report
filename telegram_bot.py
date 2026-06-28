@@ -180,38 +180,36 @@ def _cleanup_pid_file():
         pass
 
 
-BOT_COMMANDS = [
-    {"command": "help",           "description": "명령어 목록"},
-    {"command": "status",         "description": "현황 — Phase·QQQ·총액·F&G + 핵심 수치 (신선도 표기)"},
-    {"command": "phase",          "description": "Phase 미터 + 행동 지침 (/phase sim = 시장 시뮬)"},
-    {"command": "report",         "description": "전체 바벨 리포트 (실시간)"},
-    {"command": "portfolio",      "description": "포트폴리오 실시간 현황"},
-    {"command": "rebalance",      "description": "리밸런싱 계산기"},
-    {"command": "risk",           "description": "포트폴리오 위험 분석 — 변동성·위험기여·유효분산·팩터·성장최적 레버리지"},
-    {"command": "history",        "description": "성과 히스토리 (1d/7d/30d/90d)"},
-    {"command": "sgov",           "description": "SGOV 실탄 상태"},
-    {"command": "dca",            "description": "오늘 DCA 배분"},
-    {"command": "order",          "description": "소수점 매수 주문서"},
-    {"command": "mock",           "description": "국내 모의 페이퍼트레이딩 현황 (NAV·손익·편입/퇴출 사유·vs KOSPI)"},
-    {"command": "usmock",         "description": "미국 모의 페이퍼트레이딩 현황 + 로직 평가 (NAV·vs QQQ·편입/퇴출 적중률·IC, KIS 해외)"},
-    {"command": "holding",        "description": "보유 종목 조회/매수·매도/목표비중/DCA/배당"},
-    {"command": "tax",            "description": "실현손익 & 양도세 (sim/sell/history/delete/import)"},
-    {"command": "ask",            "description": "AI 포트폴리오 상담"},
-    {"command": "alert",          "description": "가격 알림 관리 (add/list/remove)"},
-    {"command": "mlreport",       "description": "ML 전략 성과 리포트 (샘플)"},
-    {"command": "ranking",        "description": "NASDAQ100 종목 랭킹 (LightGBM)"},
-    {"command": "accum",          "description": "기관 매집 추적 — OBV·CMF·13F 매집 강도 랭킹"},
-    {"command": "earnings",       "description": "실적·밸류에이션 — PER/PBR/PSR/ROE/배당·서프라이즈·컨센서스·PEAD (예: /earnings NVDA)"},
-    {"command": "leverage",       "description": "레버리지 ETF 진입 분석 (QLD/TQQQ/SOXL/UPRO 손익비·타점)"},
-    {"command": "meta",           "description": "ML 통합 포트폴리오 배분 (MetaAllocator)"},
-    {"command": "entry",          "description": "진입 타점 분석 — 포트/us50/kr/watch/단일종목 (예: /entry NVDA, /entry kr)"},
-    {"command": "intraday",       "description": "단기봉 실시간 신호 — 5m봉 이상감지 (예: /intraday NVDA, /intraday kr)"},
-    {"command": "market",         "description": "시황 브리핑 — 국면·낙폭·RSI·VIX·F&G (읽기전용)"},
-    {"command": "indicators",     "description": "종목 기술적 지표 — RSI·이동평균·모멘텀 (예: /indicators QQQ)"},
-    {"command": "myportfolio",    "description": "내 포트폴리오 평가 — 평가액·손익 (읽기전용)"},
-    {"command": "myadd",          "description": "내 보유 종목 추가 (예: /myadd QQQ 10 500)"},
-    {"command": "myremove",       "description": "내 보유 종목 삭제 (예: /myremove QQQ)"},
+# 소유자 메뉴 (BotCommandScopeChat 으로 소유자 채팅에만 등록 — 게스트 명령은 숨김)
+_OWNER_MENU = [
+    {"command": "help",      "description": "명령어 목록"},
+    {"command": "status",    "description": "현황 — Phase·QQQ·총액·F&G (신선도 표기)"},
+    {"command": "phase",     "description": "Phase 미터 + 행동 지침 (/phase sim = 시장 시뮬)"},
+    {"command": "report",    "description": "전체 바벨 리포트 (실시간)"},
+    {"command": "portfolio", "description": "포트폴리오 실시간 현황 (+리스크)"},
+    {"command": "rebalance", "description": "리밸런싱 + DCA·SGOV (/rebalance dca·sgov)"},
+    {"command": "risk",      "description": "위험 분석 — 변동성·위험기여·팩터·성장최적 레버리지"},
+    {"command": "history",   "description": "성과 히스토리 (1d/7d/30d/90d)"},
+    {"command": "order",     "description": "소수점 매수 주문서"},
+    {"command": "paper",     "description": "모의 페이퍼트레이딩 (/paper kr·us)"},
+    {"command": "holding",   "description": "보유 종목 조회/매수·매도/목표비중/DCA/배당"},
+    {"command": "tax",       "description": "실현손익 & 양도세 (sim/sell/history/delete/import)"},
+    {"command": "ask",       "description": "AI 포트폴리오 상담"},
+    {"command": "alert",     "description": "가격 알림 관리 (add/list/remove)"},
+    {"command": "accum",     "description": "기관 매집 추적 — OBV·CMF·13F 매집 강도"},
+    {"command": "earnings",  "description": "실적·밸류에이션 — PER/PBR/ROE·서프라이즈·PEAD (예: /earnings NVDA)"},
+    {"command": "signals",   "description": "ML·단기 신호 (rank|entry|intraday|lev|meta) — 정보·표시용"},
 ]
+
+# 읽기전용 게스트 메뉴 (default·all_private_chats scope — 소유자 메뉴엔 노출 안 함)
+_GUEST_MENU = [
+    {"command": "market",     "description": "시황 브리핑 — 국면·낙폭·RSI·VIX·F&G (읽기전용)"},
+    {"command": "indicators", "description": "종목 기술적 지표 — RSI·이동평균·모멘텀 (예: /indicators QQQ)"},
+    {"command": "my",         "description": "내 포트폴리오 — /my add·del·(평가)"},
+    {"command": "help",       "description": "도움말"},
+]
+
+BOT_COMMANDS = _OWNER_MENU   # 하위호환: 소유자 기본 메뉴 (cmd_help 등이 참조)
 
 BOT_COMMAND_ALIASES = {
     # 흔한 오타/복수형은 정식 명령어로 통합
@@ -244,13 +242,12 @@ BOT_COMMAND_ALIASES = {
 
 
 HELP_SECTIONS = [
-    ("시장", ["status", "summary", "phase", "report", "sim", "accum", "earnings"]),
-    ("포트폴리오", ["portfolio", "rebalance", "risk", "history", "sgov"]),
-    ("DCA·주문", ["dca", "order"]),
+    ("시장", ["status", "phase", "report", "accum", "earnings"]),
+    ("포트폴리오", ["portfolio", "rebalance", "risk", "history"]),
+    ("주문·모의", ["order", "paper"]),
     ("보유·세금", ["holding", "tax"]),
     ("AI·알림", ["ask", "alert"]),
-    ("ML·단기신호", ["entry", "intraday", "leverage", "ranking", "meta", "mlreport"]),
-    ("읽기전용 게스트", ["market", "indicators", "myportfolio", "myadd", "myremove"]),
+    ("ML·신호 (참고)", ["signals"]),
 ]
 
 
@@ -392,22 +389,40 @@ def _api(method: str, **kwargs) -> dict:
     return {}
 
 
+def _owner_command_scope():
+    """소유자 채팅 scope (BotCommandScopeChat) — 숫자 chat_id 우선, 실패 시 문자열."""
+    if not OWNER_CHAT_ID:
+        return None
+    try:
+        return {"type": "chat", "chat_id": int(OWNER_CHAT_ID)}
+    except (TypeError, ValueError):
+        return {"type": "chat", "chat_id": OWNER_CHAT_ID}
+
+
 def configure_bot_commands():
-    """Telegram 메뉴에 BOT_COMMANDS 등록 (setMyCommands, 전 scope)."""
-    scopes = [
-        None,  # default scope
-        {"type": "all_private_chats"},
-        {"type": "all_chat_administrators"},
+    """Telegram 메뉴 등록 — 소유자 채팅엔 소유자 메뉴, 그 외(게스트·일반)엔 게스트 메뉴.
+
+    BotCommandScopeChat(소유자) 가 default·all_private_chats 보다 우선 적용되므로
+    **소유자에게는 게스트 전용 명령(/market·/indicators·/my)이 메뉴에 보이지 않는다**
+    (소유자는 여전히 입력 시 사용 가능 — 권한이 아니라 표시만 분리).
+    """
+    plans = [
+        (_GUEST_MENU, None),                            # default — 모든 사용자 기본
+        (_GUEST_MENU, {"type": "all_private_chats"}),   # 1:1 채팅 (게스트·미등록)
     ]
+    owner_scope = _owner_command_scope()
+    if owner_scope is not None:
+        plans.append((_OWNER_MENU, owner_scope))        # 소유자 채팅만 override
     success = 0
-    for scope in scopes:
-        params = {"commands": BOT_COMMANDS}
+    for commands, scope in plans:
+        params = {"commands": commands}
         if scope is not None:
             params["scope"] = scope
         result = _api("setMyCommands", **params)
         if result.get("result") is True:
             success += 1
-    logger.debug("setMyCommands 완료 (%d개 scope, %d개 명령어)", success, len(BOT_COMMANDS))
+    logger.debug("setMyCommands 완료 (%d/%d scope · owner %d·guest %d)",
+                 success, len(plans), len(_OWNER_MENU), len(_GUEST_MENU))
 
 
 def send(chat_id: str, text: str, max_len: int = 4000):
@@ -509,7 +524,8 @@ def cmd_help() -> str:
             lines.append(f"/{cmd['command']:14s} {cmd['description']}")
     lines.append("━━━━━━━━━━━━━━━━━━━━━━━")
     lines.append("📎 이미지·PDF 전송 → 포트폴리오·매도내역 자동 파싱")
-    lines.append("통합: /dividend → /holding dividend, /apply_snapshot → /holding apply")
+    lines.append("통합: /paper[kr|us] · /rebalance[dca|sgov] · /signals[rank|entry|intraday|lev|meta]")
+    lines.append("       /dividend·/apply_snapshot → /holding · (구 명령어는 alias 유지)")
     lines.append(f"캐시: {CACHE_TTL // 60}분  ·  /report·/order는 항상 실시간")
     return "\n".join(lines)
 
