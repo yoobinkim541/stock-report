@@ -81,3 +81,60 @@ def test_columns_requires_children():
     assert len(block["column_list"]["children"]) == 2
     for col in block["column_list"]["children"]:
         assert col["column"]["children"]            # 각 컬럼 ≥1 자식
+
+
+# ── N3 보유 종목 DB ──────────────────────────────────────────────────────────
+
+def test_load_holdings_normalizes(tmp_path, monkeypatch):
+    import json
+    snap = {
+        "overseas_general": {"holdings_usd": [
+            {"ticker": "MSFT", "name": "Microsoft", "shares": 2, "avg_price_usd": 100.0,
+             "current_price_usd": 120.0, "cost_usd": 200.0, "value_usd": 240.0, "return_pct": 20.0},
+        ]},
+        "overseas_fractional": {"holdings_usd": [
+            {"ticker": "NVDA", "name": "엔비디아", "shares": 0.5, "cost_usd": 100.0,
+             "value_usd": 60.0, "return_pct": -40.0},   # avg/current 결측 → 파생
+        ]},
+        "domestic": {"holdings": [
+            {"ticker": "069500", "name": "KODEX200", "shares": 10, "avg_price": 30000,
+             "current_price": 33000, "return_pct": 10.0},
+        ]},
+    }
+    (tmp_path / "portfolio_snapshot.json").write_text(json.dumps(snap), encoding="utf-8")
+    monkeypatch.setenv("STOCK_REPORT_PROJECT_DIR", str(tmp_path))
+
+    rows = ns._load_holdings()
+    by = {r["ticker"]: r for r in rows}
+    assert set(by) == {"MSFT", "NVDA", "069500"}
+
+    # USD 비중 합 ≈ 1 (240+60=300)
+    usd = [r for r in rows if r["ccy"] == "USD"]
+    assert abs(sum(r["weight"] for r in usd) - 1.0) < 1e-9
+    assert abs(by["MSFT"]["weight"] - 0.8) < 1e-9
+
+    # 결측 fractional: avg=cost/shares=200, cur=value/shares=120
+    assert abs(by["NVDA"]["avg"] - 200.0) < 1e-9
+    assert abs(by["NVDA"]["cur"] - 120.0) < 1e-9
+
+    # 손익률 = return_pct/100 (Notion percent 분수)
+    assert abs(by["MSFT"]["ret"] - 0.20) < 1e-9
+    assert abs(by["NVDA"]["ret"] + 0.40) < 1e-9
+
+    # KRW 평가액 = current*shares
+    assert abs(by["069500"]["value"] - 330000) < 1e-6
+    assert by["069500"]["ccy"] == "KRW"
+
+
+def test_db_props_shape():
+    row = {"ticker": "MSFT", "name": "Microsoft", "ccy": "USD", "shares": 2,
+           "avg": 100.0, "cur": 120.0, "value": 240.0, "ret": 0.20, "weight": 0.8}
+    props = ns._db_props(row)
+    assert props["Ticker"]["title"][0]["text"]["content"] == "MSFT"
+    assert props["통화"]["select"]["name"] == "USD"
+    assert props["손익률"]["number"] == 0.20      # 분수
+    assert props["비중"]["number"] == 0.8
+    assert set(_HOLDINGS_KEYS) <= set(props)       # 전 속성 존재
+
+
+_HOLDINGS_KEYS = ("Ticker", "종목명", "통화", "수량", "평단가", "현재가", "평가액", "손익률", "비중")

@@ -291,6 +291,171 @@ def _latest_chart_png() -> str | None:
     return cands[-1] if cands else None
 
 
+# ── 보유 종목 데이터베이스 (N3) ─────────────────────────────────────────────────
+# 대시보드 자식 DB(child_database)로 1회 생성 후 매일 행 upsert. N4 의 안전 스왑이
+# child_database 를 보존하므로 일일 재빌드에도 DB·뷰·정렬이 유지된다.
+
+HOLDINGS_DB_CACHE = os.path.expanduser("~/.cache/notion_holdings_db.json")
+
+_HOLDINGS_SCHEMA = {
+    "Ticker":  {"title": {}},
+    "종목명":   {"rich_text": {}},
+    "통화":     {"select": {"options": [{"name": "USD", "color": "blue"},
+                                       {"name": "KRW", "color": "green"}]}},
+    "수량":     {"number": {"format": "number"}},
+    "평단가":   {"number": {"format": "number"}},
+    "현재가":   {"number": {"format": "number"}},
+    "평가액":   {"number": {"format": "number"}},
+    "손익률":   {"number": {"format": "percent"}},
+    "비중":     {"number": {"format": "percent"}},
+}
+
+
+def _load_holdings() -> list[dict]:
+    """portfolio_snapshot.json → 정규화 보유 리스트 (USD 해외 + KRW 국내).
+
+    비중은 통화별 합계 기준. avg/current 결측 시 cost·value/shares 로 파생.
+    """
+    repo = os.getenv("STOCK_REPORT_PROJECT_DIR") or os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    path = os.path.join(repo, "portfolio_snapshot.json")
+    try:
+        with open(path, encoding="utf-8") as f:
+            snap = json.load(f)
+    except Exception as e:
+        logger.warning("snapshot 로드 실패(holdings DB): %s", e)
+        return []
+
+    rows: list[dict] = []
+    usd = []
+    for sec in ("overseas_general", "overseas_fractional"):
+        usd += snap.get(sec, {}).get("holdings_usd", []) or []
+    tot_usd = sum(h.get("value_usd", 0) or 0 for h in usd) or 1
+    for h in usd:
+        shares = h.get("shares", 0) or 0
+        val = h.get("value_usd", 0) or 0
+        avg = h.get("avg_price_usd") or (h.get("cost_usd", 0) / shares if shares else 0)
+        cur = h.get("current_price_usd") or (val / shares if shares else 0)
+        rows.append({"ticker": h.get("ticker", ""), "name": h.get("name", ""), "ccy": "USD",
+                     "shares": shares, "avg": avg, "cur": cur, "value": val,
+                     "ret": (h.get("return_pct", 0) or 0) / 100, "weight": val / tot_usd})
+
+    dom = snap.get("domestic", {}).get("holdings", []) or []
+    tot_krw = sum((d.get("current_price", 0) or 0) * (d.get("shares", 0) or 0) for d in dom) or 1
+    for d in dom:
+        shares = d.get("shares", 0) or 0
+        cur = d.get("current_price", 0) or 0
+        val = cur * shares
+        rows.append({"ticker": d.get("ticker", ""), "name": d.get("name", ""), "ccy": "KRW",
+                     "shares": shares, "avg": d.get("avg_price", 0) or 0, "cur": cur, "value": val,
+                     "ret": (d.get("return_pct", 0) or 0) / 100, "weight": val / tot_krw})
+    return rows
+
+
+def _db_props(row: dict) -> dict:
+    def num(x):
+        return None if x is None else round(float(x), 4)
+    return {
+        "Ticker": {"title": [{"text": {"content": row["ticker"] or "—"}}]},
+        "종목명":  {"rich_text": [{"text": {"content": (row["name"] or "")[:80]}}]},
+        "통화":    {"select": {"name": row["ccy"]}},
+        "수량":    {"number": num(row["shares"])},
+        "평단가":  {"number": num(row["avg"])},
+        "현재가":  {"number": num(row["cur"])},
+        "평가액":  {"number": num(row["value"])},
+        "손익률":  {"number": num(row["ret"])},
+        "비중":    {"number": num(row["weight"])},
+    }
+
+
+def _ensure_holdings_db(parent_page_id: str) -> str | None:
+    """보유 종목 DB id 반환 — 캐시에 있고 살아있으면 재사용, 아니면 생성."""
+    import requests
+    headers = _h()
+    cached = None
+    try:
+        with open(HOLDINGS_DB_CACHE) as f:
+            cached = json.load(f).get("database_id")
+    except Exception:
+        pass
+    if cached:
+        r = requests.get(f"https://api.notion.com/v1/databases/{cached}", headers=headers, timeout=15)
+        if r.ok and not r.json().get("archived"):
+            return cached
+    body = {
+        "parent": {"type": "page_id", "page_id": parent_page_id},
+        "is_inline": False,
+        "icon": {"type": "emoji", "emoji": "📊"},
+        "title": [{"type": "text", "text": {"content": "보유 종목"}}],
+        "properties": _HOLDINGS_SCHEMA,
+    }
+    r = requests.post("https://api.notion.com/v1/databases", headers=headers, json=body, timeout=20)
+    if not r.ok:
+        logger.warning("보유종목 DB 생성 실패 %s: %s", r.status_code, r.text[:200])
+        return None
+    did = r.json()["id"]
+    try:
+        os.makedirs(os.path.dirname(HOLDINGS_DB_CACHE), exist_ok=True)
+        with open(HOLDINGS_DB_CACHE, "w") as f:
+            json.dump({"database_id": did}, f)
+    except Exception:
+        pass
+    logger.info("보유종목 DB 생성: %s", did)
+    return did
+
+
+def _sync_holdings_db(parent_page_id: str) -> None:
+    """보유 종목 행 upsert (티커 매칭 update·신규 create·매도 archive). best-effort."""
+    import requests
+    rows = _load_holdings()
+    if not rows:
+        logger.info("보유종목 DB: 보유 데이터 없음 — 스킵")
+        return
+    did = _ensure_holdings_db(parent_page_id)
+    if not did:
+        return
+    headers = _h()
+
+    existing: dict[str, str] = {}
+    cursor = None
+    while True:
+        body = {"page_size": 100}
+        if cursor:
+            body["start_cursor"] = cursor
+        r = requests.post(f"https://api.notion.com/v1/databases/{did}/query",
+                          headers=headers, json=body, timeout=20)
+        if not r.ok:
+            logger.warning("보유종목 DB 조회 실패 %s", r.status_code)
+            break
+        j = r.json()
+        for pg in j.get("results", []):
+            t = pg["properties"].get("Ticker", {}).get("title", [])
+            key = t[0].get("plain_text") if t else None
+            if key:
+                existing[key] = pg["id"]
+        if not j.get("has_more"):
+            break
+        cursor = j.get("next_cursor")
+
+    seen = set()
+    for row in rows:
+        seen.add(row["ticker"])
+        props = _db_props(row)
+        pid = existing.get(row["ticker"])
+        if pid:
+            requests.patch(f"https://api.notion.com/v1/pages/{pid}",
+                           headers=headers, json={"properties": props}, timeout=15)
+        else:
+            requests.post("https://api.notion.com/v1/pages", headers=headers,
+                          json={"parent": {"database_id": did}, "properties": props}, timeout=15)
+    # 더 이상 보유하지 않는 종목 → 아카이브
+    for tk, pid in existing.items():
+        if tk not in seen:
+            requests.patch(f"https://api.notion.com/v1/pages/{pid}",
+                           headers=headers, json={"archived": True}, timeout=15)
+    logger.info("보유종목 DB 동기화: %d행 (신규/갱신) · %d행 아카이브",
+                len(rows), len(set(existing) - seen))
+
+
 # ── QuickChart.io URL 생성 ─────────────────────────────────────────────────────
 
 def _chart_url(config: dict, w: int = 700, h: int = 320) -> str:
@@ -801,6 +966,13 @@ def main() -> int:
         logger.warning("리포트 아카이브 실패(대시보드는 계속): %s", e)
 
     ok = update_page(DASHBOARD_PAGE_ID, blocks)
+
+    # ── 보유 종목 DB upsert (N3) ───────────────────────────────────────────────
+    # 대시보드와 독립(best-effort): 여기서 예외가 나도 동기화 결과엔 영향 없음.
+    try:
+        _sync_holdings_db(DASHBOARD_PAGE_ID)
+    except Exception as e:
+        logger.warning("보유종목 DB 동기화 실패(대시보드는 계속): %s", e)
 
     if ok:
         logger.info("노션 동기화 완료 ✅ (%d블록)", len(blocks))
