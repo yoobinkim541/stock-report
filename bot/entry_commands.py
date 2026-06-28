@@ -73,7 +73,7 @@ def _entry_universe(chat_id: str, universe: str, title: str, _send) -> None:
     try:
         from ml.entry_analyzer import analyze_all_entries, format_entry_report
         scores = analyze_all_entries(universe=universe)
-        report = format_entry_report(scores, title=f"📊 {title}")
+        report = format_entry_report(scores, title=title)   # title 에 이미 이모지 — 중복(📊 📊) 제거
         for chunk in _split(report):
             _send(chat_id, chunk)
     except Exception as e:

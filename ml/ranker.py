@@ -17,6 +17,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
 
+import fmt
+
 import numpy as np
 import pandas as pd
 
@@ -560,14 +562,16 @@ def format_ranking_report(ranking: pd.DataFrame, result: RankerResult, detail_to
     is_rank_model = type(result.model).__name__ == "LGBMRanker"
     max_abs = float(ranking["score"].abs().max()) if len(ranking) else 1.0
 
+    ic_grade = ("낮음" if abs(result.oos_ic) < 0.03
+                else "보통" if abs(result.oos_ic) < 0.06 else "양호")
     lines = [
-        "📈 종목 랭킹 (LightGBM, QQQ 초과수익 기준)",
-        "━━━━━━━━━━━━━━",
-        f"학습 기간: ~ {result.train_end_date}",
-        f"OOS IC: {result.oos_ic:+.3f}  |  ICIR: {result.oos_icir:.2f}",
-        f"상위10% 초과수익: {result.oos_top_decile_ret*100:+.1f}%",
-        "━━━━━━━━━━━━━━",
+        "📈 종목 랭킹 (LightGBM · QQQ 초과수익 기준)",
+        fmt.SEP,
+        f"모델 신뢰도 {ic_grade} (OOS IC {result.oos_ic:+.3f}) · 학습 ~{result.train_end_date}",
+        fmt.SEP,
     ]
+    if is_rank_model:
+        lines.append("※ 점수 = 상대순위(스케일 임의 · %수익 아님)")
     for _, row in ranking.iterrows():
         if is_rank_model:
             score_bar = "█" * max(1, min(int(abs(row["score"]) / max_abs * 8), 8)) if max_abs > 0 else ""
@@ -583,16 +587,16 @@ def format_ranking_report(ranking: pd.DataFrame, result: RankerResult, detail_to
         atr   = row.get("atr_14")
         if (row["rank"] <= detail_top and price is not None and not pd.isna(price)
                 and atr is not None and not pd.isna(atr) and atr > 0):
-            buy_lo = price - 0.5 * atr
-            target = price + 2.0 * atr
-            stop   = price - 1.5 * atr
-            lines.append(f"      현재 ${price:.2f} | 매수 ${buy_lo:.2f}~${price:.2f} | 목표 ${target:.2f} | 손절 ${stop:.2f}")
+            lo = price - 1.5 * atr
+            hi = price + 2.0 * atr
+            # 무엣지 정보 — 처방(목표/손절) 대신 ATR 통계 참고범위
+            lines.append(f"      ${price:.2f}  ·  ATR 참고범위 ${lo:.2f}~${hi:.2f}")
             reason = _ranking_reasons(row)
             if reason:
                 lines.append(f"      💡 {reason}")
 
     lines += [
-        "━━━━━━━━━━━━━━",
-        f"⚠️ survivorship bias 있음 (현재 구성종목 기준)",
+        fmt.SEP,
+        "⚠️ 생존편향 — 현재 살아남은 종목만(상폐 제외) · 참고용",
     ]
     return "\n".join(lines)
