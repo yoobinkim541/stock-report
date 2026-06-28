@@ -4,6 +4,7 @@ from datetime import datetime
 
 from barbell_strategy import fetch_exchange_rate, fetch_portfolio_value
 from bot.attachment_parser import load_pending_sells, clear_pending_sells, build_pending_sells_summary
+import fmt
 
 logger = logging.getLogger(__name__)
 
@@ -40,10 +41,10 @@ def _tax_import_apply(chat_id: str, send_fn):
     # 전부 실패 시 pending 보존 — 원인 해결 후 재시도 가능하도록
     if applied:
         clear_pending_sells()
-        lines = ["✅ 매도내역 세금 기록 반영 완료", "━━━━━━━━━━━━━━━━━━━━━━━"]
+        lines = ["✅ 매도내역 세금 기록 반영 완료", fmt.SEP]
     else:
         lines = ["⚠️ 매도내역 반영 실패 — 대기 파일 보존됨 (수정 후 재시도 가능)",
-                 "━━━━━━━━━━━━━━━━━━━━━━━"]
+                 fmt.SEP]
     lines += applied
     if errors:
         lines += ["", "❌ 오류:"] + errors
@@ -168,7 +169,7 @@ def _tax_sim(chat_id: str, args: list, send_fn):
     esg = "▲" if ei >= 0 else "▼"
     exem = min(EXEMPTION_KRW, max(0, int(cg))) if cg > 0 else 0
 
-    SEP = "─" * 44
+    SEP = fmt.SEP
     company = snap_entry.get("name", ticker) if snap_entry else ticker
     lines = [
         f"🔮 매도 시뮬레이션 (실제 반영 안됨)",
@@ -223,7 +224,7 @@ def _tax_sell(chat_id: str, args: list, send_fn):
         sg = "+" if gu >= 0 else "-"
         send_fn(chat_id, (
             f"✅ 매도 기록 저장\n"
-            f"━━━━━━━━━━━━━━━━━━━━━━━\n"
+            f"{fmt.SEP}\n"
             f"  종목     {ticker}\n"
             f"  수량     {qty}주\n"
             f"  매수단가 ${buy_price:.2f}\n"
@@ -244,7 +245,7 @@ def _tax_history(chat_id: str, send_fn):
                 "📭 매도 기록 없음\n"
                 "/tax sell TICKER 수량 매수단가 매도단가  로 기록")
         return
-    SEP = "─" * 50
+    SEP = fmt.SEP
     lines = ["📋 전체 매도 기록", SEP]
     for r in records:
         gu = r.get("gain_usd", 0)
@@ -273,7 +274,7 @@ def _tax_summary(chat_id: str, send_fn):
         tax_usd = tax_krw / fx if fx > 0 else 0
         count = summary["count"]
 
-        SEP = "─" * 52
+        SEP = fmt.SEP
         sign = "+" if total_krw >= 0 else ""
         lines = [
             f"💸 {year}년 실현손익 & 양도소득세 추산",
@@ -296,17 +297,16 @@ def _tax_summary(chat_id: str, send_fn):
                 by_usd[t] = by_usd.get(t, 0) + r.get("gain_usd", 0)
                 by_krw[t] = by_krw.get(t, 0) + r.get("gain_krw", 0)
 
-            lines += [
-                f"{'종목':<8} {'실현손익(USD)':>14} {'실현손익(KRW)':>14}",
-                SEP,
-            ]
+            # 종목별 실현손익 — 등폭 표(<pre>)·표시폭 정렬(wpad: CJK 2칸)
+            tbl = [fmt.wpad("종목", 8) + fmt.wpad("USD", 13, ">") + fmt.wpad("KRW", 15, ">")]
             for t in sorted(by_usd, key=lambda x: -by_usd[x]):
                 gu = by_usd[t]
                 gk = by_krw[t]
                 sg = "▲" if gu >= 0 else "▼"
-                lines.append(
-                    f"{t:<8} {sg}${abs(gu):>12,.2f}  {sg}{abs(gk):>12,.0f}원"
-                )
+                tbl.append(fmt.wpad(t, 8)
+                           + fmt.wpad(f"{sg}${abs(gu):,.2f}", 13, ">")
+                           + fmt.wpad(f"{sg}{abs(gk):,.0f}원", 15, ">"))
+            lines.append(fmt.pre("\n".join(tbl)))
             lines += [
                 SEP,
                 f"실현 총손익    : {sign}{total_krw:,.0f}원  (${total_usd:,.2f})",

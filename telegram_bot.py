@@ -1727,7 +1727,7 @@ def _dispatch_report(chat_id: str, args: list):
 
 
 def _dispatch_tax(chat_id: str, args: list):
-    cmd_tax(chat_id, args, send)
+    cmd_tax(chat_id, args, send_html)   # 표는 <pre> 등폭 — HTML 발송
 
 
 def _dispatch_earnings(chat_id: str, args: list):

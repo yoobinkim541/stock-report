@@ -359,7 +359,7 @@ def rank_accumulation(tickers, *, days: int = 160, enrich_top: int = 10,
 _VERDICT_EMOJI = {"강한 매집": "🟢", "매집": "🔵", "중립": "⚪", "분산": "🔴"}
 
 
-def _accum_bar(score, width: int = 10) -> str:
+def _accum_bar(score, width: int = 5) -> str:
     try:
         s = max(0.0, min(100.0, float(score)))
     except (TypeError, ValueError):
