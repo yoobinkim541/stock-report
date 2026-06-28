@@ -1023,7 +1023,7 @@ def cmd_report(chat_id: str):
             d["portfolio"], d["exchange_rate"], d["qqqi_div"], old,
             d.get("fear_greed"),
         )
-        send(chat_id, report)
+        send(chat_id, report.rstrip() + "\n" + freshness_note(d.get("fetched_ts")))
     except Exception as e:
         send(chat_id, f"❌ 리포트 생성 오류: {e}")
         logger.exception("cmd_report")

@@ -41,6 +41,7 @@ logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
 
 import store  # SQLite 통합 저장소 (설정 블롭 권위 사본 + 파일 미러)
 import notify   # 텔레그램 발송 단일 진실원
+import fmt      # 출력 포맷 공통 레이어
 
 # ── 데이터 수집층 재export ───────────────────────────────────────────────
 # 데이터/상태 접근 함수는 providers/market_data.py 로 분리(god-module 분해)되었다.
@@ -1251,10 +1252,8 @@ def _section_header(now: str, old_phase_state: dict, market_type: str,
         old_dd = old_phase_state.get("drawdown_pct", 0)
         L += [
             "",
-            "╔══════════════════════════════╗",
-            "║  ⚡ PHASE 변화 감지!           ║",
-            f"║  {old_t}/{old_k} ({old_dd:+.1f}%)  →  {market_type}/{phase_key} ({drawdown:+.1f}%)  ║",
-            "╚══════════════════════════════╝",
+            "⚡ PHASE 변화 감지!",
+            f"  {old_t}/{old_k} ({fmt.pct(old_dd)})  →  {market_type}/{phase_key} ({fmt.pct(drawdown)})",
         ]
     return L
 
@@ -1346,7 +1345,7 @@ def _section_sgov(sgov: dict) -> list:
 def _section_qqqi_dividend(qqqi_div: dict, market_type: str, phase_key) -> list:
     """QQQI 배당 파이프라인."""
     # ── QQQI 배당 파이프라인 ──────────────────────────────────────────
-    per_s = f"  주당 ${qqqi_div['per_share']:.4f} |" if qqqi_div.get("per_share") else ""
+    per_s = f"  주당 ${qqqi_div['per_share']:.4f}" if qqqi_div.get("per_share") else ""
     if market_type == "bull":
         div_act = "배당 50% → SGOV 비축,  50% → DCA"
     elif market_type == "bear" and isinstance(phase_key, int) and phase_key >= 2:
