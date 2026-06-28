@@ -830,7 +830,8 @@ def cmd_history(d: dict) -> str:
         )
     latest = records[-1]
     perf   = calc_performance(records)
-    return build_performance_report(perf, latest)
+    series = [r.get("total_usd") for r in records[-30:] if r.get("total_usd") is not None]
+    return build_performance_report(perf, latest, value_series=series, html=True)
 
 
 def cmd_rebalance(d: dict) -> str:
@@ -1509,7 +1510,7 @@ _FORCE_FRESH_CMDS = {"/portfolio", "/risk"}
 # 포지션 의존(개별 종목 가격) 명령 — 가격도 갱신.
 _FORCE_REFRESH_PRICES = {"/portfolio", "/risk"}
 # HTML 리치텍스트(parse_mode=HTML) 출력 명령 — 점진 확산(V-A).
-_HTML_CMDS = {"/status", "/portfolio"}
+_HTML_CMDS = {"/status", "/portfolio", "/history"}
 
 
 def _dispatch_market(cmd: str, chat_id: str):

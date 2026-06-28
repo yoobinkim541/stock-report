@@ -223,7 +223,8 @@ def _ret_str(val: float | None) -> str:
     return fmt.spct(val)   # ▲1.5% / ▼0.5% / ─ (공통 포맷)
 
 
-def build_performance_report(perf: dict, latest: dict) -> str:
+def build_performance_report(perf: dict, latest: dict,
+                             value_series: list | None = None, html: bool = False) -> str:
     if not perf:
         return "⚠️ 히스토리 데이터 없음\n`python3 portfolio_tracker.py` 로 첫 기록 생성"
 
@@ -232,14 +233,20 @@ def build_performance_report(perf: dict, latest: dict) -> str:
     p_info = BULL_PHASES.get(pk) if mt == "bull" else BEAR_PHASES.get(int(pk) if str(pk).lstrip("-").isdigit() else 0)
     phase_label = p_info["label"] if p_info else f"{mt}/{pk}"
     phase_emoji = p_info["emoji"] if p_info else "❓"
+    _B = fmt.b if html else (lambda x: x)     # html=True 일 때만 굵게(텔레그램), 크론은 평문
 
     lines = [
         # 헤드라인 — 전체 수익률 + 고점대비(MDD) 먼저 (모바일 첫 화면)
-        fmt.headline(f"📈 성과 {fmt.spct(perf.get('ret_all'))}(전체)",
+        fmt.headline(f"📈 성과 {_B(fmt.spct(perf.get('ret_all')))}(전체)",
                      f"고점 {fmt.pct(perf.get('drawdown_from_peak', 0))}",
                      f"{phase_emoji} {phase_label}"),
+    ]
+    sl = fmt.spark(value_series) if value_series else ""
+    if sl:
+        lines.append(f"추이 {sl}")           # 스파크라인(최근 가치 흐름)
+    lines += [
         fmt.sep(),
-        f"현재가치 {fmt.money(perf['current'], digits=2)} ({fmt.money(perf['current_krw'], '₩', abbrev=True)})",
+        f"현재가치 {_B(fmt.money(perf['current'], digits=2))} ({fmt.money(perf['current_krw'], '₩', abbrev=True)})",
         fmt.sep("수익률"),
         f"1일   {_ret_str(perf['ret_1d'])}",
         f"7일   {_ret_str(perf['ret_7d'])}",
