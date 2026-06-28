@@ -62,8 +62,7 @@ def cmd_accum(chat_id: str, args: list, send_fn):
             lines = accumulation_mobile_block(
                 picks, title="🏛️ 기관 매집 추적 (매집 강도 상위)", limit=10, name_fn=_name_fn)
         lines.append("")
-        lines.append("⚠️ 거래량 방향성(OBV·CMF) 기반 추정 — 실제 기관 순매수가 아님")
-        lines.append("   (13F 지분은 분기 지연 공시 교차검증용) · 참고용")
+        lines.append("⚠️ 거래량(OBV·CMF)·13F 기반 추정 — 실제 순매수 아님 · 참고용")
         send_fn(chat_id, "\n".join(lines))
     except Exception as e:
         logger.exception("/accum 처리 실패")

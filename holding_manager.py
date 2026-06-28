@@ -14,6 +14,7 @@ from datetime import datetime
 
 import store  # SQLite 통합 저장소 (portfolio_snapshot 그림자 동기화 — round 3)
 import safe_io  # 원자적 쓰기 + 교차 프로세스 쓰기 락
+import fmt      # 출력 포맷 공통 레이어
 
 # portfolio_snapshot 경로 단일 소스 — portfolio_universe(STOCK_REPORT_PROJECT_DIR env 반영)
 from portfolio_universe import PORTFOLIO_SNAPSHOT_PATH as PORTFOLIO_PATH
@@ -104,50 +105,45 @@ def list_holdings() -> str:
     today = snap.get("snapshot_date", "?")
     lines = [
         f"📋 보유 종목 현황  ({today})",
-        "━━━━━━━━━━━━━━━━━━━━━━━",
+        fmt.sep(),
     ]
     live_count = 0
 
     # 해외 일반
     gen = snap.get("overseas_general", {}).get("holdings_usd", [])
     if gen:
-        lines.append("  [해외 일반계좌]")
+        lines.append(fmt.sep("해외 일반계좌"))
         for h in gen:
             ret, live = _rt_ret(h)
             live_count += int(live)
-            sign = "▲" if ret > 0 else ("▼" if ret < 0 else "─")
             lines.append(
-                f"  {h['ticker']:<6}  {h.get('shares', 0)}주  "
-                f"@${h.get('avg_price_usd', 0):.2f}  "
-                f"{sign}{abs(ret):.1f}%{'⚡' if live else ''}"
+                f"{h['ticker']} {h.get('shares', 0)}주 @${h.get('avg_price_usd', 0):.2f}  "
+                f"{fmt.spct(ret)}{' ⚡' if live else ''}"
             )
 
     # 소수점
     frac = snap.get("overseas_fractional", {}).get("holdings", [])
     if frac:
-        lines.append("  [소수점계좌]")
+        lines.append(fmt.sep("소수점계좌"))
         for h in frac:
             ret, live = _rt_ret(h)
             live_count += int(live)
-            sign = "▲" if ret > 0 else ("▼" if ret < 0 else "─")
             lines.append(
-                f"  {h['ticker']:<6}  {h.get('shares', 0):.4f}주  "
-                f"{sign}{abs(ret):.1f}%{'⚡' if live else ''}"
+                f"{h['ticker']} {h.get('shares', 0):.4f}주  "
+                f"{fmt.spct(ret)}{' ⚡' if live else ''}"
             )
 
     # 국내 (KR 실시간은 별도 스트림 — 현재는 스냅샷 기준)
     dom = snap.get("domestic", {}).get("holdings", [])
     if dom:
-        lines.append("  [국내계좌]")
+        lines.append(fmt.sep("국내계좌"))
         for h in dom:
-            ret  = h.get("return_pct", 0)
-            sign = "▲" if ret > 0 else ("▼" if ret < 0 else "─")
+            ret = h.get("return_pct", 0)
             lines.append(
-                f"  {h.get('ticker', h.get('name','?')):<12}  {h.get('shares', 0)}주  "
-                f"{sign}{abs(ret):.1f}%"
+                f"{h.get('ticker', h.get('name','?'))} {h.get('shares', 0)}주  {fmt.spct(ret)}"
             )
 
-    lines.append("━━━━━━━━━━━━━━━━━━━━━━━")
+    lines.append(fmt.sep())
     if live_count:
         lines.append(f"  ⚡ {live_count}종목 실시간 · 그 외 스냅샷({today}) · 전체 평가 /portfolio")
     else:
