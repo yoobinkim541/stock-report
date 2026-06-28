@@ -58,6 +58,16 @@ def _econ(days):
     return views.econ_events(days)
 
 
+@st.cache_data(ttl=900, show_spinner="불러오는 중…")
+def _insider(t):
+    return views.insider_trades(t)
+
+
+@st.cache_data(ttl=1800, show_spinner="불러오는 중…")
+def _disc(t):
+    return views.disclosures(t)
+
+
 # ── 헤더: 포트폴리오 + Phase ────────────────────────────────────────────────
 summ = data.portfolio_summary()
 ph = data.phase_badge()
@@ -70,8 +80,8 @@ c4.metric("DCA 배율", f"{ph['dca']}×")
 
 ticker = st.text_input("종목 (예: MSFT, 005930.KS)", value="MSFT").strip().upper()
 
-t_val, t_fin, t_risk, t_inst, t_news, t_cal, t_scr = st.tabs(
-    ["가치평가", "재무제표", "리스크", "기관 보유", "뉴스", "캘린더", "스크리너"])
+t_val, t_fin, t_risk, t_inst, t_disc, t_news, t_cal, t_scr = st.tabs(
+    ["가치평가", "재무제표", "리스크", "기관 보유", "공시", "뉴스", "캘린더", "스크리너"])
 
 # ── 가치평가 (상대 + 컨센서스 + 서프라이즈) ─────────────────────────────────
 with t_val:
@@ -143,7 +153,7 @@ with t_risk:
     st.caption("포트폴리오 전체 (USD 북) · 표시 전용·배분 불변")
     st.code(_risk(), language=None)
 
-# ── 기관 보유 (13F + 매집) ──────────────────────────────────────────────────
+# ── 기관 보유 (13F + 매집 + 내부자거래) ────────────────────────────────────
 with t_inst:
     i = _inst(ticker)
     acc, inst = i.get("accum"), i.get("inst13f")
@@ -155,7 +165,38 @@ with t_inst:
         st.json(inst, expanded=False)
     if not acc and not inst:
         st.warning("기관 데이터 없음")
+
+    ins = _insider(ticker)
+    txs = ins.get("transactions") or []
+    if txs:
+        st.caption(f"내부자거래 (SEC Form 4) · 순매수 {ins.get('net_buy_shares', 0):,.0f}주 "
+                   f"(매수 {ins.get('n_buys', 0)}·매도 {ins.get('n_sells', 0)})")
+        rows = [{"일자": t["date"], "임원": t["owner"], "직책": t["role"],
+                 "구분": {"P": "매수", "S": "매도", "A": "무상", "M": "행사"}.get(t["code"], t["code"]),
+                 "수량": f"{t['shares']:,.0f}", "단가": data.f_usd(t["price"]) if t["price"] else "—"}
+                for t in txs[:25]]
+        st.dataframe(pd.DataFrame(rows), hide_index=True, width="stretch")
+    elif ins.get("error"):
+        st.caption(f"내부자거래: {ins['error']}")
     st.caption("정보·표시용")
+
+# ── 공시 (美 SEC · 韓 DART) ──────────────────────────────────────────────────
+with t_disc:
+    dd = _disc(ticker)
+    lst = dd.get("list") or []
+    if lst:
+        mkt = dd.get("market")
+        st.caption(f"{'DART' if mkt == 'KR' else 'SEC'} 최근 공시")
+        if mkt == "KR":
+            rows = [{"일자": x["date"], "공시": x["title"], "제출인": x.get("filer", ""),
+                     "링크": x["url"]} for x in lst]
+        else:
+            rows = [{"일자": x["date"], "유형": x["form"], "설명": x.get("title", ""),
+                     "링크": x["url"]} for x in lst]
+        st.dataframe(pd.DataFrame(rows), hide_index=True, width="stretch",
+                     column_config={"링크": st.column_config.LinkColumn("원문", display_text="열기")})
+    else:
+        st.warning(f"공시 없음 ({dd.get('error', '')})")
 
 # ── 뉴스 ────────────────────────────────────────────────────────────────────
 with t_news:

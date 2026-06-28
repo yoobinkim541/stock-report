@@ -103,3 +103,22 @@ def econ_events(days: int = 14) -> list[dict]:
         return econ_calendar.upcoming_events(days=days)
     except Exception:
         return []
+
+
+def insider_trades(ticker: str) -> dict:
+    """내부자거래 (SEC Form 4, 美·키불요) — QT2b."""
+    from providers import insider
+    try:
+        return insider.recent_insider(ticker)
+    except Exception as e:
+        return {"error": str(e), "transactions": []}
+
+
+def disclosures(ticker: str) -> dict:
+    """공시 — 美: SEC filings · 韓(.KS): DART. 키 없으면 graceful. QT2b."""
+    from providers import dart, insider
+    if dart.stock_code(ticker):
+        d = dart.recent_disclosures(ticker)
+        return {"market": "KR", **d}
+    f = insider.recent_filings(ticker)
+    return {"market": "US", "list": f.get("filings", []), "error": f.get("error")}
