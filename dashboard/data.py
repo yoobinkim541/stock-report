@@ -84,3 +84,48 @@ def phase_badge(state_path: str | None = None) -> dict:
     emoji, label, dca = _PHASE.get((mt, pk), ("⚪", f"{mt}-{pk}", 1.0))
     return {"emoji": emoji, "label": label, "dca": dca,
             "drawdown": d.get("drawdown_pct", 0) or 0.0}
+
+
+# ── 표시 포맷터 (None 안전·스케일 명시) ─────────────────────────────────────────
+# 제공 데이터 스케일이 필드마다 다름: roe·마진·성장률=분수(×100), div_yield·
+# target_upside_pct=이미 퍼센트. 필드별로 올바른 포맷터를 골라 써야 함.
+def _try_float(x):
+    try:
+        f = float(x)
+        return f if f == f else None   # NaN 거름
+    except (TypeError, ValueError):
+        return None
+
+
+def f_ratio(x, dec: int = 1) -> str:
+    f = _try_float(x)
+    return "—" if f is None else f"{f:.{dec}f}"
+
+
+def f_frac_pct(x, dec: int = 1) -> str:
+    """분수 → 퍼센트 (0.34 → '34.0%')."""
+    f = _try_float(x)
+    return "—" if f is None else f"{f * 100:.{dec}f}%"
+
+
+def f_frac_pct_s(x, dec: int = 1) -> str:
+    """분수 → 부호 퍼센트 (0.10 → '+10.0%')."""
+    f = _try_float(x)
+    return "—" if f is None else f"{f * 100:+.{dec}f}%"
+
+
+def f_pct(x, dec: int = 1) -> str:
+    """이미 퍼센트 (0.98 → '0.98%')."""
+    f = _try_float(x)
+    return "—" if f is None else f"{f:.{dec}f}%"
+
+
+def f_pct_s(x, dec: int = 1) -> str:
+    """이미 퍼센트 → 부호 (50.4 → '+50.4%')."""
+    f = _try_float(x)
+    return "—" if f is None else f"{f:+.{dec}f}%"
+
+
+def f_usd(x, dec: int = 2) -> str:
+    f = _try_float(x)
+    return "—" if f is None else f"${f:,.{dec}f}"
