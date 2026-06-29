@@ -1,21 +1,32 @@
-"""종목 분석 — 종목별 가치평가·재무·기관/내부자·공시·실적. U3 에서 가격차트·서프라이즈 막대 추가."""
+"""종목 분석 — 가격차트 + 가치평가·재무·기관/내부자·공시·실적 (plotly 차트화·U3)."""
 from __future__ import annotations
 
 import pandas as pd
 import streamlit as st
 
-from dashboard import cached, data
+from dashboard import cached, charts, data
+
+_NOBAR = {"displayModeBar": False}
 
 
 def render():
     st.title("🔍 종목 분석")
     ticker = st.session_state.get("ticker", "MSFT")
-    st.caption(f"현재 종목: **{ticker}** — 좌측 사이드바에서 변경")
+    st.caption(f"현재 종목: **{ticker}** — 좌측 사이드바·홈 보유표에서 변경")
+
+    period = st.radio("기간", ["3mo", "6mo", "1y"], index=1, horizontal=True)
+    hist = cached.ohlc(ticker, period=period)
+    price = None
+    if hist is not None and not getattr(hist, "empty", True) and "Close" in getattr(hist, "columns", []):
+        price = float(hist["Close"].iloc[-1])
+        st.plotly_chart(charts.price_line(hist, ticker), width="stretch", config=_NOBAR)
+    else:
+        st.info("가격 데이터 없음 (yfinance)")
 
     t_val, t_fin, t_inst, t_disc, t_earn = st.tabs(
         ["가치평가", "재무제표", "기관·내부자", "공시", "실적"])
     with t_val:
-        _valuation(ticker)
+        _valuation(ticker, price)
     with t_fin:
         _financials(ticker)
     with t_inst:
@@ -26,7 +37,7 @@ def render():
         _earnings(ticker)
 
 
-def _valuation(ticker):
+def _valuation(ticker, price=None):
     v = cached.valuation(ticker)
     m = v.get("metrics") or {}
     if m:
@@ -54,6 +65,8 @@ def _valuation(ticker):
     rim, ddm = iv.get("rim"), iv.get("ddm")
     if rim or ddm:
         st.markdown("**적정가치 (모델·가정 민감)**")
+        if price:
+            st.plotly_chart(charts.value_bullet(price, rim, ddm), width="stretch", config=_NOBAR)
         cc = st.columns(3)
         if rim:
             cc[0].metric("RIM 적정가", data.f_usd(rim["mid"], 0),
@@ -68,9 +81,20 @@ def _valuation(ticker):
                    "r 8~11%·g 4% 밴드 · ROE 영속 가정(보수성 주의)")
     h = v.get("history") or []
     if h:
-        st.caption("실적 서프라이즈 (최근)")
-        st.dataframe(pd.DataFrame(h), hide_index=True, width="stretch")
+        _surprise_chart(h, "실적 서프라이즈 (최근)")
     st.caption("정보·표시용 · 매매신호 아님")
+
+
+def _surprise_chart(history, caption):
+    """서프라이즈 % 부호 막대 (오래된→최근) + 원표."""
+    hh = list(reversed(history))   # 최신순 → 시간순
+    labels = [str(x.get("date", ""))[:10] for x in hh]
+    vals = [x.get("surprise_pct") for x in hh]
+    st.caption(caption)
+    if any(x is not None for x in vals):
+        st.plotly_chart(charts.signed_bars(labels, [float(x or 0) for x in vals]),
+                        width="stretch", config=_NOBAR)
+    st.dataframe(pd.DataFrame(history), hide_index=True, width="stretch")
 
 
 def _financials(ticker):
@@ -93,15 +117,23 @@ def _financials(ticker):
 
 def _institutional(ticker):
     i = cached.institutional(ticker)
-    acc, inst = i.get("accum"), i.get("inst13f")
+    acc = i.get("accum")
     if acc:
-        st.caption("매집 강도")
-        st.json(acc, expanded=False)
-    if inst:
-        st.caption("13F 기관 지분")
-        st.json(inst, expanded=False)
-    if not acc and not inst:
-        st.info("기관 데이터 없음")
+        st.metric("매집 강도 점수", data.f_ratio(acc.get("accum_score"), 1),
+                  help="OBV·CMF·상승하락 거래량비·A/D — 높을수록 매집")
+        sig = acc.get("signals") or {}
+        if sig:
+            g = st.columns(3)
+            g[0].metric("OBV(정규화)", data.f_ratio(sig.get("obv_norm"), 2))
+            g[1].metric("CMF", data.f_ratio(sig.get("cmf"), 2))
+            g[2].metric("상승/하락 거래량", data.f_ratio(sig.get("updown_ratio"), 2))
+        inst = acc.get("institutional")
+        if inst:
+            st.caption("13F 기관 지분 (교차검증)")
+            st.dataframe(pd.DataFrame([inst]) if isinstance(inst, dict) else pd.DataFrame(inst),
+                         hide_index=True, width="stretch")
+    else:
+        st.info(f"기관 매집 데이터 없음 ({i.get('error_accum', '')})")
     ins = cached.insider(ticker)
     txs = ins.get("transactions") or []
     if txs:
@@ -139,7 +171,6 @@ def _earnings(ticker):
     cal = cached.earnings(ticker)
     h = cal.get("history") or []
     if h:
-        st.caption(f"{ticker} 실적 서프라이즈 이력")
-        st.dataframe(pd.DataFrame(h), hide_index=True, width="stretch")
+        _surprise_chart(h, f"{ticker} 실적 서프라이즈 이력")
     else:
         st.warning(f"실적 이력 없음 ({cal.get('error', '')})")

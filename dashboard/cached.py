@@ -59,6 +59,12 @@ def risk():
     return views.risk_report_text(data.portfolio_weights())
 
 
+@st.cache_data(ttl=_TTL, show_spinner="리스크 계산 중…")
+def risk_struct():
+    """구조화 리스크 요약 (위험기여·팩터β·레버리지 — 차트용·U3)."""
+    return views.risk_summary(data.portfolio_weights())
+
+
 @st.cache_data(ttl=_TTL_SLOW, show_spinner="불러오는 중…")
 def econ(days=14):
     return views.econ_events(days)

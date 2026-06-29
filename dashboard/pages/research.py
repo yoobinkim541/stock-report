@@ -4,7 +4,7 @@ from __future__ import annotations
 import pandas as pd
 import streamlit as st
 
-from dashboard import cached, data
+from dashboard import cached, charts, data
 
 
 def render():
@@ -47,7 +47,8 @@ def render():
         eq = bt.get("equity")
         if eq is not None:
             try:
-                st.line_chart(eq)
+                st.plotly_chart(charts.equity_curve(eq), width="stretch",
+                                config={"displayModeBar": False})
             except Exception:
                 pass
     st.caption("⚠️ 검증상 ML 종목선택·장중타이밍 무엣지 — 정보·표시용 (검증 통과 공격은 구조적 레버리지뿐)")

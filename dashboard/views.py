@@ -48,6 +48,17 @@ def risk_report_text(weights: dict) -> str:
         return f"리스크 분석 실패: {e}"
 
 
+def risk_summary(weights: dict) -> dict:
+    """구조화 리스크 요약 (위험기여·팩터β·레버리지 — 차트용). graceful."""
+    from ml import risk_model
+    if not weights:
+        return {"error": "보유 데이터 없음 — portfolio_snapshot 확인 필요"}
+    try:
+        return risk_model.portfolio_risk_summary(weights)
+    except Exception as e:
+        return {"error": str(e)}
+
+
 def institutional(ticker: str) -> dict:
     """선택 종목 13F 지분 + 매집 강도(가능 시)."""
     from reports import institutional_flow
