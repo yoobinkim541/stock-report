@@ -38,8 +38,12 @@ def render():
                 picked = df.iloc[sel[0]]["종목"]
                 if picked and picked != st.session_state.get("ticker"):
                     st.session_state["ticker"] = picked
-                    st.toast(f"종목 분석 대상 → {picked}")
-                    st.rerun()
+                    st.toast(f"종목 분석 → {picked}")
+                    _tp = st.session_state.get("_ticker_page")
+                    if _tp is not None:
+                        st.switch_page(_tp)   # 종목 분석 페이지로 자동 이동
+                    else:
+                        st.rerun()            # 단독 렌더(테스트) 폴백
     else:
         st.warning("보유 데이터 없음 — portfolio_snapshot 확인")
 

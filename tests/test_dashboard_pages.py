@@ -70,6 +70,18 @@ def test_page_renders_without_exception(mod, call):
     assert not at.exception, f"{mod}: {at.exception}"
 
 
+def test_entry_app_runs_through_nav():
+    """app.py 엔트리: 인증 통과 후 sys.path·사이드바·st.navigation·기본 홈 렌더 무예외.
+
+    비루트 cwd 에서 통과해야 함(streamlit `sys.path[0]=스크립트dir` 함정 가드·U1 교훈).
+    views 가 전부 graceful try/except 라 오프라인에서도 예외 없이 빈 데이터로 렌더.
+    """
+    at = AppTest.from_file(os.path.join(ROOT, "dashboard", "app.py"), default_timeout=60)
+    at.session_state["_authed"] = True
+    at.run()
+    assert not at.exception, str(at.exception)
+
+
 def test_portfolio_renders_risk_kpis():
     """포트폴리오: 리스크 KPI 4 + 보유표 (위험기여·팩터 막대는 plotly로 무예외)."""
     at = AppTest.from_string(_script("from dashboard.pages import portfolio", "portfolio.render()"),
