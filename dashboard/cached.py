@@ -1,0 +1,84 @@
+"""dashboard/cached.py — st.cache_data 래퍼 (멀티페이지 공용).
+
+views 의 네트워크 호출을 캐시. 모든 페이지가 동일 캐시를 공유한다.
+(app.py 가 sys.path 에 프로젝트 루트를 넣은 뒤 import 되므로 dashboard import OK.)
+"""
+from __future__ import annotations
+
+import streamlit as st
+
+from dashboard import data, views
+
+_TTL = 900       # 15분
+_TTL_SLOW = 1800  # 30분
+_TTL_HEAVY = 3600  # 1시간 (ML)
+
+
+@st.cache_data(ttl=_TTL, show_spinner="불러오는 중…")
+def valuation(t):
+    return views.valuation(t)
+
+
+@st.cache_data(ttl=_TTL, show_spinner="불러오는 중…")
+def financials(t):
+    return views.financials(t)
+
+
+@st.cache_data(ttl=_TTL, show_spinner="불러오는 중…")
+def institutional(t):
+    return views.institutional(t)
+
+
+@st.cache_data(ttl=_TTL, show_spinner="불러오는 중…")
+def news(t):
+    return views.news_digest(t)
+
+
+@st.cache_data(ttl=_TTL, show_spinner="불러오는 중…")
+def earnings(t):
+    return views.earnings_calendar(t)
+
+
+@st.cache_data(ttl=_TTL, show_spinner="불러오는 중…")
+def intrinsic(t):
+    return views.intrinsic_value(t)
+
+
+@st.cache_data(ttl=_TTL, show_spinner="불러오는 중…")
+def insider(t):
+    return views.insider_trades(t)
+
+
+@st.cache_data(ttl=_TTL_SLOW, show_spinner="불러오는 중…")
+def disclosures(t):
+    return views.disclosures(t)
+
+
+@st.cache_data(ttl=_TTL, show_spinner="불러오는 중…")
+def risk():
+    return views.risk_report_text(data.portfolio_weights())
+
+
+@st.cache_data(ttl=_TTL_SLOW, show_spinner="불러오는 중…")
+def econ(days=14):
+    return views.econ_events(days)
+
+
+@st.cache_data(ttl=_TTL_HEAVY, show_spinner="랭킹 계산 중… (최대 1분)")
+def screener(n):
+    return views.screener(n)
+
+
+@st.cache_data(ttl=_TTL_HEAVY, show_spinner="백테스트 실행 중… (최대 1분)")
+def backtest():
+    return views.backtest_summary()
+
+
+@st.cache_data(ttl=_TTL, show_spinner="가격 불러오는 중…")
+def ohlc(t, period="6mo"):
+    """OHLC 가격 히스토리 (가격차트용·U3). _history_cached 재사용."""
+    try:
+        from providers.market_data import _history_cached
+        return _history_cached(t, period=period)
+    except Exception:
+        return None
