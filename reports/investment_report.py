@@ -19,8 +19,6 @@ import requests
 import yfinance as yf
 import numpy as np
 
-import fmt   # 출력 포맷 공통 레이어
-
 KST = timezone(timedelta(hours=9))
 
 # Add parent dir to path if needed
@@ -77,6 +75,7 @@ _PROJECT_DIR = os.getenv("STOCK_REPORT_PROJECT_DIR",
                          os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 if _PROJECT_DIR not in sys.path:
     sys.path.insert(0, _PROJECT_DIR)
+import fmt   # 출력 포맷 공통 레이어 (루트 모듈 — _PROJECT_DIR 경로 설정 후 import)
 from portfolio_universe import (DEFAULT_PORTFOLIO_TICKERS, PORTFOLIO_SNAPSHOT_PATH,
                                 load_portfolio_tickers)
 
