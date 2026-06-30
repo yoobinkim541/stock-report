@@ -315,9 +315,11 @@ crons/news_spike_detector.py (크론 매 1분)
 
 | 파일 | 역할 |
 |------|------|
-| `dashboard/app.py` | Streamlit 엔트리 — 인증 게이트 → 사이드바(종목 퀵픽·신선도·새로고침) → `st.navigation` 5페이지. 최상단 `sys.path.insert(루트)` 필수(streamlit run `sys.path[0]=스크립트dir` 함정) |
-| `dashboard/pages/` | 멀티페이지(비활성 페이지 미실행=lazy) — `home`(글랜스: 배분도넛+클릭 보유표→종목분석 자동이동+Phase+오늘일정)·`portfolio`(리스크 KPI+위험기여/팩터β 막대+½Kelly밴드+도넛)·`ticker`(가격라인+MA·밸류밴드 불릿·서프라이즈 막대·기관·공시·실적)·`market`(경제캘린더+뉴스)·`research`(스크리너+백테스트 이퀴티) |
-| `dashboard/charts.py` | plotly 차트 빌더(순수 함수·단위테스트) — allocation_donut·price_line·hbar·signed_bars·value_bullet·equity_curve |
+| `dashboard/app.py` | Streamlit 엔트리 — 테마 주입 → 인증 게이트 → 사이드바(종목 퀵픽·신선도·새로고침·**보유 워치리스트**) → `st.navigation` 5페이지. 최상단 `sys.path.insert(루트)` 필수(streamlit run `sys.path[0]=스크립트dir` 함정) |
+| `.streamlit/config.toml` | **Terminal Noir 테마** (TradingView/토스증권) — 다크 블루블랙·일렉트릭블루 액센트·틸그린/코랄레드 시맨틱·Pretendard(한글)+JetBrains Mono(등폭 수치) fontFaces·radius/border/chart 팔레트 |
+| `dashboard/theme.py` | 테마 단일 진실원 — 팔레트 상수 + **순수 HTML/SVG 빌더**(ticker_hero·rating_gauge 반원속도계·sparkline·watchlist, 테스트가능) + `apply_plotly_theme`(차트 다크 템플릿) + `inject_global_css`(streamlit lazy — import 시 미로드해 charts 순수성 유지) |
+| `dashboard/pages/` | 멀티페이지(비활성 페이지 미실행=lazy) — `home`(글랜스: 포트 ticker-hero+배분도넛+클릭 보유표→종목분석 자동이동+Phase+오늘일정)·`portfolio`(리스크 KPI+위험기여/팩터β 막대+½Kelly밴드+도넛)·`ticker`(심볼 히어로+**기술신호 게이지**+가격라인+MA·밸류밴드 불릿·서프라이즈 막대·기관·공시·실적)·`market`(경제캘린더+뉴스)·`research`(스크리너+백테스트 이퀴티) |
+| `dashboard/charts.py` | plotly 차트 빌더(순수 함수·단위테스트·theme 다크 템플릿 적용) — allocation_donut·price_line·hbar·signed_bars·value_bullet·equity_curve |
 | `dashboard/cached.py` | `st.cache_data` 래퍼(멀티페이지 공용·TTL 15~60분) — valuation/financials/.../risk_struct/ohlc |
 | `dashboard/data.py` | 포트폴리오/Phase 상태 + 스케일 명시 포맷터(f_frac_pct vs f_pct·부호버그 차단). streamlit 미import → 테스트가능 |
 | `dashboard/views.py` | 모듈별 provider 래퍼(graceful·provider 내부 import) — risk_summary(구조화)·screener·backtest 등 |
