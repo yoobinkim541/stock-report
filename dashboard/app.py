@@ -15,9 +15,10 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import streamlit as st
 
-from dashboard import auth, data
+from dashboard import auth, data, theme
 
 st.set_page_config(page_title="퀀트 터미널", page_icon="📊", layout="wide")
+theme.inject_global_css()
 
 if not auth.password_gate():
     st.stop()
@@ -39,6 +40,14 @@ with st.sidebar:
         st.rerun()
     st.caption(f"분석 대상: **{st.session_state['ticker']}**")
     st.caption(f"⏱ {datetime.now().strftime('%m/%d %H:%M')} 기준 · 캐시 15~60분")
+
+    # 보유 종목 워치리스트 (터미널 레일 — 무네트워크: 스냅샷 수익률)
+    _wl = sorted(_holdings, key=lambda h: h.get("value", 0) or 0, reverse=True)
+    if _wl:
+        st.markdown("<div style='height:8px'></div>", unsafe_allow_html=True)
+        theme.render(theme.watchlist_html(
+            [{"symbol": h["ticker"], "last": h.get("value"), "chg_pct": h.get("ret")}
+             for h in _wl if h.get("ticker")], title="보유 종목"))
 
 from dashboard.pages import home, market, portfolio, research
 from dashboard.pages import ticker as ticker_pg

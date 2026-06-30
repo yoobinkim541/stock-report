@@ -5,15 +5,23 @@
 """
 from __future__ import annotations
 
-_GREEN = "#16a34a"
-_RED = "#dc2626"
-_BLUE = "#2f6df6"
-_GRID = "#e5e7eb"
+from dashboard import theme
+
+# 팔레트 단일 진실원 = theme (TradingView Terminal Noir). 테스트가 _GREEN/_RED 참조.
+_GREEN = theme.GREEN
+_RED = theme.RED
+_BLUE = theme.BLUE
+_GRID = theme.GRID
 
 
 def _go():
     import plotly.graph_objects as go
     return go
+
+
+def _t(fig):
+    """공통 다크 테마 적용 후 반환."""
+    return theme.apply_plotly_theme(fig)
 
 
 def allocation_donut(holdings: list[dict]):
@@ -26,7 +34,7 @@ def allocation_donut(holdings: list[dict]):
     fig = go.Figure(go.Pie(labels=labels, values=values, hole=0.58,
                            textinfo="label+percent", textposition="outside", sort=False))
     fig.update_layout(margin=dict(t=10, b=10, l=10, r=10), height=300, showlegend=False)
-    return fig
+    return _t(fig)
 
 
 def price_line(hist, ticker: str = ""):
@@ -34,7 +42,7 @@ def price_line(hist, ticker: str = ""):
     go = _go()
     fig = go.Figure()
     if hist is None or getattr(hist, "empty", True) or "Close" not in getattr(hist, "columns", []):
-        return fig
+        return _t(fig)
     close = hist["Close"]
     fig.add_trace(go.Scatter(x=hist.index, y=close, name=ticker or "종가", line=dict(color=_BLUE, width=2)))
     for win, color in ((20, "#f59e0b"), (60, "#9333ea")):
@@ -43,7 +51,7 @@ def price_line(hist, ticker: str = ""):
                                      name=f"MA{win}", line=dict(width=1)))
     fig.update_layout(margin=dict(t=10, b=10, l=10, r=10), height=320,
                       legend=dict(orientation="h", y=1.1), hovermode="x unified")
-    return fig
+    return _t(fig)
 
 
 def hbar(labels: list[str], values: list[float], title: str = "", pct: bool = True):
@@ -56,7 +64,7 @@ def hbar(labels: list[str], values: list[float], title: str = "", pct: bool = Tr
         text=[f"{v*100:.0f}%" if pct else f"{v:.2f}" for _, v in pairs], textposition="auto"))
     fig.update_layout(margin=dict(t=10, b=10, l=10, r=10), height=max(180, 36 * len(pairs)),
                       title=title or None, xaxis_title=None, yaxis_title=None)
-    return fig
+    return _t(fig)
 
 
 def signed_bars(labels: list[str], values: list[float], title: str = ""):
@@ -66,7 +74,7 @@ def signed_bars(labels: list[str], values: list[float], title: str = ""):
     fig = go.Figure(go.Bar(x=labels, y=values, marker_color=colors,
                            text=[f"{v:+.1f}" for v in values], textposition="auto"))
     fig.update_layout(margin=dict(t=10, b=10, l=10, r=10), height=280, title=title or None)
-    return fig
+    return _t(fig)
 
 
 def value_bullet(price: float, rim: dict | None, ddm: dict | None):
@@ -89,7 +97,7 @@ def value_bullet(price: float, rim: dict | None, ddm: dict | None):
         fig.add_vline(x=price, line=dict(color=_RED, dash="dash"),
                       annotation_text=f"현재 ${price:,.0f}")
     fig.update_layout(margin=dict(t=24, b=10, l=10, r=10), height=180, xaxis_title="적정가 ($)")
-    return fig
+    return _t(fig)
 
 
 def equity_curve(equity):
@@ -108,4 +116,4 @@ def equity_curve(equity):
         pass
     fig.update_layout(margin=dict(t=10, b=10, l=10, r=10), height=300,
                       legend=dict(orientation="h", y=1.1))
-    return fig
+    return _t(fig)

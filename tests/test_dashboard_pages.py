@@ -98,6 +98,6 @@ def test_home_has_donut_and_holdings():
                              default_timeout=30)
     at.run()
     assert not at.exception
-    assert len(at.metric) >= 4               # 히어로 KPI 4
+    assert len(at.metric) >= 3               # Phase·낙폭·DCA (총액은 히어로 HTML)
     assert len(at.dataframe) >= 1            # 보유표
     assert any("국면" in str(i.value) for i in at.info)  # Phase 행동 박스

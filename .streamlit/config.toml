@@ -1,0 +1,65 @@
+# 퀀트 터미널 — Terminal Noir 테마 (TradingView/토스증권 영감)
+# 다크 블루블랙 + 일렉트릭 블루 액센트 + 틸그린/코랄레드 시맨틱 + Pretendard/JetBrains Mono.
+# 색·폰트는 여기서(무플래시 네이티브) · 컴포넌트/세부 CSS 는 dashboard/theme.py.
+
+[theme]
+base = "dark"
+primaryColor = "#2962ff"
+backgroundColor = "#0a0e17"
+secondaryBackgroundColor = "#131722"
+textColor = "#d1d4dc"
+linkColor = "#4d8bff"
+
+# 시맨틱 색 (등락·델타·배지) = TradingView 톤
+greenColor = "#26a69a"
+redColor = "#ef5350"
+blueColor = "#2962ff"
+orangeColor = "#f7a600"
+violetColor = "#9b5de5"
+
+# 폰트 (Pretendard=한글+라틴 UI · JetBrains Mono=등폭 수치)
+font = "Pretendard"
+headingFont = "Pretendard"
+codeFont = "JetBrains Mono"
+baseFontSize = 15
+
+# 형태 — 얇은 보더 + 약한 라운드 = 터미널 패널
+baseRadius = "0.4rem"
+buttonRadius = "0.4rem"
+borderColor = "#222631"
+dataframeBorderColor = "#222631"
+dataframeHeaderBackgroundColor = "#161a25"
+showWidgetBorder = true
+showSidebarBorder = true
+
+# 네이티브 차트 팔레트
+chartCategoricalColors = ["#2962ff", "#26a69a", "#ef5350", "#f7a600", "#9b5de5", "#00bcd4", "#ff7043", "#66bb6a"]
+
+[[theme.fontFaces]]
+family = "Pretendard"
+url = "https://cdn.jsdelivr.net/npm/pretendard@1.3.9/dist/web/variable/woff2/PretendardVariable.woff2"
+weight = "100 900"
+style = "normal"
+
+[[theme.fontFaces]]
+family = "JetBrains Mono"
+url = "https://cdn.jsdelivr.net/fontsource/fonts/jetbrains-mono@latest/latin-400-normal.woff2"
+weight = 400
+style = "normal"
+
+[[theme.fontFaces]]
+family = "JetBrains Mono"
+url = "https://cdn.jsdelivr.net/fontsource/fonts/jetbrains-mono@latest/latin-500-normal.woff2"
+weight = 500
+style = "normal"
+
+[[theme.fontFaces]]
+family = "JetBrains Mono"
+url = "https://cdn.jsdelivr.net/fontsource/fonts/jetbrains-mono@latest/latin-700-normal.woff2"
+weight = 700
+style = "normal"
+
+[theme.sidebar]
+backgroundColor = "#0c1019"
+secondaryBackgroundColor = "#131722"
+borderColor = "#222631"

@@ -4,24 +4,38 @@ from __future__ import annotations
 import pandas as pd
 import streamlit as st
 
-from dashboard import cached, charts, data
+from dashboard import cached, charts, data, theme
 
 _NOBAR = {"displayModeBar": False}
 
 
 def render():
-    st.title("🔍 종목 분석")
     ticker = st.session_state.get("ticker", "MSFT")
-    st.caption(f"현재 종목: **{ticker}** — 좌측 사이드바·홈 보유표에서 변경")
-
-    period = st.radio("기간", ["3mo", "6mo", "1y"], index=1, horizontal=True)
+    period = st.radio("기간", ["3mo", "6mo", "1y"], index=1, horizontal=True,
+                      label_visibility="collapsed")
     hist = cached.ohlc(ticker, period=period)
-    price = None
+    price = prev = None
     if hist is not None and not getattr(hist, "empty", True) and "Close" in getattr(hist, "columns", []):
-        price = float(hist["Close"].iloc[-1])
-        st.plotly_chart(charts.price_line(hist, ticker), width="stretch", config=_NOBAR)
-    else:
-        st.info("가격 데이터 없음 (yfinance)")
+        cl = hist["Close"]
+        price = float(cl.iloc[-1])
+        prev = float(cl.iloc[-2]) if len(cl) > 1 else price
+    chg = (price - prev) if (price is not None and prev) else None
+    chg_pct = (chg / prev * 100) if (chg is not None and prev) else None
+    theme.render(theme.ticker_hero_html(ticker, ticker, price, chg, chg_pct,
+                                        f"{period} · yfinance 종가", ""))
+
+    c1, c2 = st.columns([2.3, 1])
+    with c1:
+        if price is not None:
+            st.plotly_chart(charts.price_line(hist, ticker), width="stretch", config=_NOBAR)
+        else:
+            st.info("가격 데이터 없음 (yfinance)")
+    with c2:
+        ts = data.technical_score(hist["Close"]) if price is not None else None
+        if ts:
+            theme.render(theme.rating_gauge_html(ts["score"], sub=ts["sub"]))
+        else:
+            st.caption("기술 신호 N/A")
 
     t_val, t_fin, t_inst, t_disc, t_earn = st.tabs(
         ["가치평가", "재무제표", "기관·내부자", "공시", "실적"])

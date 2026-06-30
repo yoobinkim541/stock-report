@@ -45,6 +45,38 @@ def test_phase_badge_missing_file_graceful():
     assert b["dca"] == 1.0 and b["label"] == "—"
 
 
+def test_portfolio_summary_pnl(tmp_path):
+    snap = tmp_path / "portfolio_snapshot.json"
+    snap.write_text(json.dumps({"overseas_general": {"holdings_usd": [
+        {"ticker": "MSFT", "value_usd": 240, "cost_usd": 200},
+    ]}}), encoding="utf-8")
+    s = data.portfolio_summary(str(snap))
+    assert abs(s["pnl_usd"] - 40) < 1e-9 and abs(s["cost_usd"] - 200) < 1e-9
+
+
+# ── 기술 신호 (게이지용) ─────────────────────────────────────────────────────
+def test_technical_score_uptrend():
+    import pandas as pd
+    r = data.technical_score(pd.Series(range(1, 80)))
+    assert r and r["score"] > 0.5 and r["rsi"] > 60
+
+
+def test_technical_score_downtrend():
+    import pandas as pd
+    r = data.technical_score(pd.Series(range(80, 1, -1)))
+    assert r and r["score"] < -0.3
+
+
+def test_technical_score_short_none():
+    import pandas as pd
+    assert data.technical_score(pd.Series([1, 2, 3])) is None
+
+
+def test_rsi_none_on_short():
+    import pandas as pd
+    assert data.rsi(pd.Series([1, 2, 3])) is None
+
+
 def test_verify_password():
     assert auth.verify_password("abc", "abc") is True
     assert auth.verify_password("abc", "xyz") is False

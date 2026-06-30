@@ -45,7 +45,8 @@ def portfolio_summary(path: str | None = None) -> dict:
     total = sum(h.get("value_usd", 0) or 0 for h in usd)
     cost = sum(h.get("cost_usd", 0) or 0 for h in usd)
     ret = (total / cost - 1) * 100 if cost else 0.0
-    return {"total_usd": total, "return_pct": ret, "n_holdings": len(usd)}
+    return {"total_usd": total, "return_pct": ret, "n_holdings": len(usd),
+            "cost_usd": cost, "pnl_usd": total - cost}
 
 
 def load_holdings(path: str | None = None) -> list[dict]:
@@ -84,6 +85,41 @@ def phase_badge(state_path: str | None = None) -> dict:
     emoji, label, dca = _PHASE.get((mt, pk), ("⚪", f"{mt}-{pk}", 1.0))
     return {"emoji": emoji, "label": label, "dca": dca,
             "drawdown": d.get("drawdown_pct", 0) or 0.0}
+
+
+# ── 기술 신호 (게이지용·순수) ────────────────────────────────────────────────
+def rsi(close, period: int = 14):
+    """RSI(14). close = pandas Series. 데이터 부족 시 None."""
+    try:
+        c = close.dropna()
+        if len(c) < period + 1:
+            return None
+        d = c.diff()
+        up = d.clip(lower=0).rolling(period).mean()
+        dn = (-d.clip(upper=0)).rolling(period).mean()
+        rs = up / dn.replace(0, 1e-9)
+        return float((100 - 100 / (1 + rs)).iloc[-1])
+    except Exception:
+        return None
+
+
+def technical_score(close) -> dict | None:
+    """가격·MA20·MA60·RSI 종합 기술 점수 ∈[-1,1] (강력매도↔강력매수) + 보조 라벨. 순수."""
+    try:
+        c = close.dropna()
+        if len(c) < 25:
+            return None
+        price = float(c.iloc[-1])
+        ma20 = float(c.rolling(20).mean().iloc[-1])
+        ma60 = float(c.rolling(60).mean().iloc[-1]) if len(c) >= 60 else ma20
+        r = rsi(c) or 50.0
+        s = (0.30 if price > ma20 else -0.30) + (0.25 if price > ma60 else -0.25)
+        s += (0.20 if ma20 > ma60 else -0.20)
+        s += max(-0.25, min(0.25, (r - 50) / 50 * 0.25))
+        return {"score": max(-1.0, min(1.0, s)), "rsi": r,
+                "sub": f"RSI {r:.0f} · MA20 {'↑' if price > ma20 else '↓'} · MA60 {'↑' if price > ma60 else '↓'}"}
+    except Exception:
+        return None
 
 
 # ── 표시 포맷터 (None 안전·스케일 명시) ─────────────────────────────────────────

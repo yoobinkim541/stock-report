@@ -4,19 +4,22 @@ from __future__ import annotations
 import pandas as pd
 import streamlit as st
 
-from dashboard import cached, charts, data
+from dashboard import cached, charts, data, theme
 
 
 def render():
     summ = data.portfolio_summary()
     ph = data.phase_badge()
 
-    st.title("🏠 홈")
-    c1, c2, c3, c4 = st.columns(4)
-    c1.metric("내 포트 (USD)", f"${summ['total_usd']:,.0f}", f"{summ['return_pct']:+.1f}%")
-    c2.metric("Phase", f"{ph['emoji']} {ph['label']}")
-    c3.metric("QQQ 낙폭", f"{ph['drawdown']:+.1f}%")
-    c4.metric("DCA 배율", f"{ph['dca']}×")
+    theme.render(theme.ticker_hero_html(
+        symbol="PORT", name="내 포트폴리오", price=summ["total_usd"],
+        change=summ.get("pnl_usd"), change_pct=summ["return_pct"],
+        asof="USD 해외북 · 스냅샷 기준", currency="USD"))
+
+    c1, c2, c3 = st.columns(3)
+    c1.metric("Phase", f"{ph['emoji']} {ph['label']}")
+    c2.metric("QQQ 낙폭", f"{ph['drawdown']:+.1f}%")
+    c3.metric("DCA 배율", f"{ph['dca']}×")
 
     rows = data.load_holdings()
     if rows:
