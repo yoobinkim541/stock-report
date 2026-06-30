@@ -68,6 +68,9 @@ MAX_POS = _int_env("US_MOCK_MAX_POS", 5)
 INVEST = _float_env("US_MOCK_INVEST", 0.9)
 SEED_USD = _float_env("KOREA_MOCK_SEED", 100_000)
 SLIPPAGE = _float_env("US_MOCK_SLIPPAGE", 0.01)
+# 주문가능금액(frcr_use_psbl_amt)의 일부만 매수에 사용 — 수수료(KIS 해외 ~0.25%)·통합증거금
+# USD 환산 haircut·지정가 틱업 여유. 1% 슬리피지만으론 "주문가능금액 부족" 거부가 남아 별도 버퍼.
+CASH_BUFFER = _float_env("US_MOCK_CASH_BUFFER", 0.95)
 QUOTE_STALE_S = _int_env("REALTIME_QUOTE_STALE_S", 10)
 
 
@@ -154,10 +157,12 @@ def _safe_fund(tk: str) -> dict:
 
 def plan_rebalance(signals: list[dict], positions: dict, budget_usd: float,
                    max_positions: int, cash_usd: float | None = None,
-                   slippage: float = 0.0, quote_fn=None) -> list[dict]:
+                   slippage: float = 0.0, quote_fn=None,
+                   cash_buffer: float = 1.0) -> list[dict]:
     """목표 바스켓(policy_score 상위 N 균등) vs 보유 → 정수주 지정가 주문계획.
 
     반환: [{symbol, side('buy'|'sell'), qty, reason}]. 매도 먼저(현금확보)·예산0/음수면 매수생략·현금 러닝캡.
+    cash_buffer<1 이면 주문가능금액의 그 비율만 매수에 사용(수수료·통합증거금 FX·틱업 여유).
     """
     orders: list[dict] = []
     buys = sorted([s for s in signals if s.get("price", 0) > 0],
@@ -170,7 +175,7 @@ def plan_rebalance(signals: list[dict], positions: dict, budget_usd: float,
             orders.append({"symbol": sym, "side": "sell", "qty": sh, "reason": "타깃이탈"})
 
     per = (budget_usd / len(buys)) if (buys and budget_usd > 0) else 0.0
-    remaining = cash_usd if (cash_usd is not None and cash_usd > 0) else None
+    remaining = (cash_usd * cash_buffer) if (cash_usd is not None and cash_usd > 0) else None
     for s in buys:
         sym, price = s["ticker"], s["price"]
         if per <= 0 or price <= 0:
@@ -232,7 +237,7 @@ def main(argv: list[str] | None = None) -> int:
         return 0
     budget = nav * INVEST
     plan = plan_rebalance(signals, positions, budget, MAX_POS, cash_usd=cash,
-                          slippage=SLIPPAGE, quote_fn=_rt_best)
+                          slippage=SLIPPAGE, quote_fn=_rt_best, cash_buffer=CASH_BUFFER)
     logger.info("리밸런스 계획 %d건 (예산 $%.0f·목표 %d종목)", len(plan), budget, MAX_POS)
 
     if dry:

@@ -31,7 +31,16 @@ def test_plan_sells_off_target_first():
 def test_plan_cash_cap():
     sigs = [{"ticker": "A", "price": 100, "policy_score": 0.9}]
     o = _orders(T.plan_rebalance(sigs, {}, budget_usd=10000, max_positions=1, cash_usd=300))
-    assert o.get(("A", "buy")) == 3                                    # 현금 $300 한도
+    assert o.get(("A", "buy")) == 3                                    # 현금 $300 한도 (버퍼 기본 1.0)
+
+
+def test_plan_cash_buffer_leaves_headroom():
+    """cash_buffer<1 이면 주문가능금액의 일부만 사용 — '주문가능금액 부족' 거부 방지."""
+    sigs = [{"ticker": "A", "price": 100, "policy_score": 0.9}]
+    # 현금 $1000, 버퍼 0.9 → $900 사용 → 9주($900), 풀(10주) 아님 → 실집행 여유 확보
+    o = _orders(T.plan_rebalance(sigs, {}, budget_usd=10000, max_positions=1,
+                                 cash_usd=1000, cash_buffer=0.9))
+    assert o.get(("A", "buy")) == 9
 
 
 def test_plan_budget_zero_no_buys():
