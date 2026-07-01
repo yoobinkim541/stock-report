@@ -37,6 +37,18 @@ def test_allocation_donut_empty():
     assert len(fig.data[0].labels) == 0
 
 
+def test_allocation_donut_labels_not_clipped():
+    """바깥 라벨 잘림 방지 — automargin + 넉넉한 높이/여백 (좁은 컬럼서도 안 잘림)."""
+    hold = [{"ticker": t, "value": v} for t, v in
+            [("SGOV", 22.6), ("MSFT", 12.3), ("SAP", 1.04), ("QQQI", 21.7)]]
+    fig = charts.allocation_donut(hold)
+    pie = fig.data[0]
+    assert pie.automargin is True                 # 라벨 공간 자동 확보(plotly.js)
+    assert pie.textposition == "outside"
+    assert fig.layout.height >= 360               # 세로 여유
+    assert fig.layout.margin.l >= 40 and fig.layout.margin.b >= 30
+
+
 def test_allocation_donut_hover_carries_company_names():
     # 웨지 라벨은 티커 유지(공간), 호버 customdata 에 회사명
     hold = [{"ticker": "MU", "value": 100, "name": "Micron Technology"},

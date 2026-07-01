@@ -35,8 +35,11 @@ def allocation_donut(holdings: list[dict]):
     names = [n for _, _, n in items]  # 호버에 회사명(웨지 라벨은 티커 유지 — 공간)
     fig = go.Figure(go.Pie(labels=labels, values=values, hole=0.58, customdata=names,
                            textinfo="label+percent", textposition="outside", sort=False,
+                           automargin=True,   # 바깥 라벨이 잘리지 않게 플롯이 여백 확보
+                           textfont_size=12,
                            hovertemplate="%{customdata} (%{label})<br>%{percent} · %{value:,.0f}<extra></extra>"))
-    fig.update_layout(margin=dict(t=10, b=10, l=10, r=10), height=300, showlegend=False)
+    # 바깥 라벨 공간(좁은 컬럼서도 안 잘리게): 여백 넉넉 + 높이 확대 + automargin
+    fig.update_layout(margin=dict(t=36, b=36, l=48, r=48), height=380, showlegend=False)
     return _t(fig)
 
 
