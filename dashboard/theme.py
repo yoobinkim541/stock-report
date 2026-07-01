@@ -141,9 +141,9 @@ def watchlist_row_html(symbol, last=None, chg_pct=None, spark=None, name="") -> 
     chg = f"{'+' if up else ''}{_num(chg_pct)}%" if chg_pct is not None else "—"
     # 회사명은 title 툴팁으로(좁은 4열 그리드 유지 — 호버 시 노출)
     tip = f' title="{name}"' if name and name != symbol else ""
+    # 사이드바(≈340px)에선 스파크라인 생략 → 3열(종목·값·등락%)로 등락%열 잘림 방지
     return f'''<div class="tn-wl-row">
   <span class="tn-wl-sym"{tip}>{symbol}</span>
-  <span class="tn-wl-spark">{sparkline_svg(spark or [], w=90, h=24)}</span>
   <span class="tn-wl-last">{_num(last)}</span>
   <span class="tn-wl-chg" style="color:{col}">{chg}</span>
 </div>'''
@@ -187,6 +187,12 @@ _CSS = f"""
 /* ── 타이포 ──────────────────────────────────────────────────────────── */
 html, body, [class*="st-"], .stApp, p, span, div, label, input, button {{
   font-family: 'Pretendard', -apple-system, BlinkMacSystemFont, sans-serif;
+}}
+/* Streamlit 머티리얼 아이콘 폰트 복원 — 위 광역 span override 가 아이콘 ligature 를
+   덮어 '_arrow_right_' 처럼 텍스트로 새는 것 방지 (expander 셰브런 등). */
+[data-testid="stIconMaterial"], .material-symbols-rounded, .material-symbols-outlined,
+[class*="material-symbols"], span[translate="no"] {{
+  font-family: 'Material Symbols Rounded', 'Material Symbols Outlined', 'Material Icons' !important;
 }}
 h1, h2, h3 {{ letter-spacing: -0.02em; font-weight: 700; }}
 h1 {{ font-size: 1.7rem !important; }}
@@ -258,13 +264,13 @@ h1 {{ font-size: 1.7rem !important; }}
 .tn-wl {{ background: {PANEL}; border: 1px solid {BORDER}; border-radius: 8px; overflow: hidden; }}
 .tn-wl-head {{ padding: 9px 14px; font-size: .72rem; font-weight: 700; color: {MUTED};
   text-transform: uppercase; letter-spacing: .1em; border-bottom: 1px solid {BORDER}; }}
-.tn-wl-row {{ display: grid; grid-template-columns: 1fr auto auto auto; align-items: center;
+.tn-wl-row {{ display: grid; grid-template-columns: 1fr auto auto; align-items: center;
   gap: 10px; padding: 10px 14px; border-bottom: 1px solid {BORDER}; transition: background .15s; }}
 .tn-wl-row:hover {{ background: {PANEL2}; }}
 .tn-wl-row:last-child {{ border-bottom: none; }}
-.tn-wl-sym {{ font-weight: 700; color: {TEXT}; font-size: .9rem; }}
-.tn-wl-last {{ font-family: {_MONO}; color: {TEXT}; font-size: .85rem; }}
-.tn-wl-chg {{ font-family: {_MONO}; font-size: .85rem; font-weight: 600; min-width: 62px; text-align: right; }}
+.tn-wl-sym {{ font-weight: 700; color: {TEXT}; font-size: .9rem; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }}
+.tn-wl-last {{ font-family: {_MONO}; color: {TEXT}; font-size: .82rem; white-space: nowrap; }}
+.tn-wl-chg {{ font-family: {_MONO}; font-size: .82rem; font-weight: 600; text-align: right; white-space: nowrap; }}
 .tn-spark {{ display: block; }}
 
 /* ── 컴포넌트: 섹션 라벨 ─────────────────────────────────────────────── */

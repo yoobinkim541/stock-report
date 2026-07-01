@@ -124,6 +124,21 @@ def test_ticker_survives_page_context_no_reset():
     assert at.session_state["ticker"] == "MU", f"리셋됨 → {at.session_state['ticker']}"
 
 
+def test_sidebar_select_navigates_and_ticker_sticks():
+    """사이드바 셀렉트박스로 종목 선택 → ticker 반영 + 종목분석 이동(J1).
+
+    switch_page 후 위젯상태 유실 시 셀렉트박스가 첫 옵션으로 리셋되던 취약점 회귀차단
+    (_tsel not in _opts 재동기화). 선택한 종목이 유지되어야 함.
+    """
+    at = AppTest.from_file(os.path.join(ROOT, "dashboard", "app.py"), default_timeout=60)
+    at.session_state["_authed"] = True
+    at.run()
+    at.session_state["_tsel"] = "MU"       # 셀렉트박스 선택 시뮬(위젯 key)
+    at.run()
+    assert not at.exception, str(at.exception)
+    assert at.session_state["ticker"] == "MU", f"선택 유실 → {at.session_state['ticker']}"
+
+
 def test_portfolio_renders_risk_kpis():
     """포트폴리오: 리스크 KPI 4 + 보유표 (위험기여·팩터 막대는 plotly로 무예외)."""
     at = AppTest.from_string(_script("from dashboard.pages import portfolio", "portfolio.render()"),

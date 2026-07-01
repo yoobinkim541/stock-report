@@ -69,7 +69,9 @@ def hbar(labels: list[str], values: list[float], title: str = "", pct: bool = Tr
         y=[l for l, _ in pairs], orientation="h", marker_color=_BLUE,
         text=[f"{v*100:.0f}%" if pct else f"{v:.2f}" for _, v in pairs], textposition="auto"))
     fig.update_layout(margin=dict(t=10, b=10, l=10, r=10), height=max(180, 36 * len(pairs)),
-                      title=title or None, xaxis_title=None, yaxis_title=None)
+                      xaxis_title=None, yaxis_title=None)
+    if title:                       # None 제목은 plotly.js 가 "undefined" 로 렌더 → 비면 미설정
+        fig.update_layout(title=title)
     return _t(fig)
 
 
@@ -79,7 +81,12 @@ def signed_bars(labels: list[str], values: list[float], title: str = ""):
     colors = [_GREEN if (v or 0) >= 0 else _RED for v in values]
     fig = go.Figure(go.Bar(x=labels, y=values, marker_color=colors,
                            text=[f"{v:+.1f}" for v in values], textposition="auto"))
-    fig.update_layout(margin=dict(t=10, b=10, l=10, r=10), height=280, title=title or None)
+    # automargin + 여백 → x축 카테고리 라벨·바닥 값 안 잘림 (도넛 선례)
+    fig.update_layout(margin=dict(t=14, b=44, l=14, r=14), height=300)
+    fig.update_xaxes(automargin=True)
+    fig.update_yaxes(automargin=True)
+    if title:
+        fig.update_layout(title=title)
     return _t(fig)
 
 

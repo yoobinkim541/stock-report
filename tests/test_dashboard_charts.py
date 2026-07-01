@@ -93,6 +93,19 @@ def test_signed_bars_color_by_sign():
     assert colors[0] == charts._GREEN and colors[1] == charts._RED
 
 
+def test_bars_no_undefined_title_when_empty():
+    """제목 미전달 시 title=None 을 넣지 않음 → plotly.js "undefined" 텍스트 방지."""
+    for fig in (charts.hbar(["a"], [0.5]), charts.signed_bars(["시장 β", "금리 β"], [0.6, -0.1])):
+        assert not (fig.layout.title.text or "")   # 빈 제목
+
+
+def test_signed_bars_automargin_no_clip():
+    """automargin + 바닥 여백 → x축 카테고리 라벨 안 잘림."""
+    fig = charts.signed_bars(["시장 β (QQQ)", "금리 β (TLT)"], [0.6, -0.05])
+    assert fig.layout.xaxis.automargin is True
+    assert fig.layout.margin.b >= 30
+
+
 def test_value_bullet_has_price_line():
     fig = charts.value_bullet(100, {"low": 80, "mid": 110, "high": 140}, None)
     assert _is_fig(fig)

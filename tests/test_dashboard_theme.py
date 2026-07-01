@@ -107,3 +107,16 @@ def test_css_has_mobile_and_contrast_polish():
     # MUTED 대비 상향(기존 흐린 #787b86 폐기)
     assert theme.MUTED != "#787b86"
     assert theme.MUTED in css
+
+
+def test_watchlist_3col_no_sparkline():
+    """사이드바 워치리스트 3열(종목·값·등락%) — 스파크 제거로 등락%열 잘림 방지."""
+    row = theme.watchlist_row_html("NVDA", last=6000, chg_pct=1.2, name="NVIDIA")
+    assert "tn-wl-spark" not in row
+    assert "tn-wl-sym" in row and "tn-wl-last" in row and "tn-wl-chg" in row
+
+
+def test_css_restores_material_icon_font():
+    """광역 span override 로부터 Streamlit 머티리얼 아이콘 폰트 복원 (_arrow_right 방지)."""
+    css = theme._CSS
+    assert "stIconMaterial" in css and "Material Symbols" in css

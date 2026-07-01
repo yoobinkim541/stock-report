@@ -36,9 +36,9 @@ with st.sidebar:
     _opts = list(dict.fromkeys(_held + ticker_names.universe()))
     if _cur not in _opts:
         _opts = [_cur] + _opts
-    # 외부(홈 행클릭·초기화)로 ticker 가 바뀌면 위젯에 반영. 위젯 자체 선택은 보존.
-    # (Streamlit 위젯상태 vs 외부 session_state 동기화 관용 패턴)
-    if st.session_state.get("_tsel_sync") != _cur:
+    # 외부(홈 행클릭·초기화·페이지 이동)로 ticker 가 바뀌거나 위젯상태가 유실되면 위젯에 반영.
+    # (Streamlit 위젯상태 vs 외부 session_state 동기화 관용 패턴 · switch_page 후 위젯 초기화 방어)
+    if st.session_state.get("_tsel_sync") != _cur or st.session_state.get("_tsel") not in _opts:
         st.session_state["_tsel"] = _cur
         st.session_state["_tsel_sync"] = _cur
     _sel = st.selectbox("검색 (한글·영문·티커)", _opts,
@@ -46,6 +46,7 @@ with st.sidebar:
     if _sel != _cur:
         st.session_state["ticker"] = _sel
         st.session_state["_tsel_sync"] = _sel
+        st.session_state["_nav_to_ticker"] = True   # 검색·선택 → 종목 분석으로 자동 이동
     if st.button("🔄 새로고침", width="stretch", help="캐시 비우고 다시 불러오기"):
         st.cache_data.clear()
         # 무거운 게이트(스크리너·백테스트)도 초기화 → 캐시 비운 뒤 자동 재계산 방지
@@ -75,4 +76,7 @@ _research_pg = st.Page(research.render, title="리서치", icon="🔬", url_path
 st.session_state["_ticker_page"] = _ticker_pg
 
 nav = st.navigation([_home_pg, _portfolio_pg, _ticker_pg, _market_pg, _research_pg])
+# 사이드바에서 종목을 새로 고르면 종목 분석 페이지로 이동 (홈 행클릭과 동일 UX)
+if st.session_state.pop("_nav_to_ticker", False):
+    st.switch_page(_ticker_pg)
 nav.run()
