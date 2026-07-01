@@ -405,7 +405,9 @@ def main(argv: list[str] | None = None) -> int:
     sig_by_code = {s["code"]: s for s in signals}
     today = datetime.now(KST).strftime("%Y-%m-%d")
 
+    from ml.adaptive import costs
     results = []
+    day_cost = day_notional = 0.0
     for o in plan:
         cur = int(positions.get(o["code"], {}).get("shares", 0) or 0)
         kind = _classify_kind(o["side"], o["qty"], cur)
@@ -413,6 +415,13 @@ def main(argv: list[str] | None = None) -> int:
         results.append({**o, "kind": kind, **r})
         logger.info("%s(%s) %s %s주 → %s %s",
                     o["side"], kind, o["code"], o["qty"], "OK" if r.get("ok") else "FAIL", r.get("msg", ""))
+        # 체결분 거래비용 적립 (수수료+증권거래세 — 회전율 드래그 정직 계기)
+        if r.get("ok"):
+            px = (sig_by_code.get(o["code"], {}).get("price")
+                  or positions.get(o["code"], {}).get("cur_price") or 0)
+            notion = abs(o["qty"]) * float(px or 0)
+            day_notional += notion
+            day_cost += costs.order_cost(notion, o["side"], "KR")
         # 주문별 즉시 기록 — store(현재뷰) + 불변 원장(학습/감사, 절대 삭제 안 함)
         _append_history({"kind": "order", "code": o["code"], "side": o["side"], "qty": o["qty"],
                          "reason": o.get("reason"), "ok": r.get("ok"), "msg": r.get("msg")})
@@ -424,6 +433,8 @@ def main(argv: list[str] | None = None) -> int:
             break
         time.sleep(0.5)   # 레이트리밋 여유 (모의 주문 API 429 완화 · _post 는 429 재시도)
 
+    if day_notional > 0:                       # 당일 거래비용 1건 적재 (리포트 누적·회전율용)
+        _append_history({"kind": "cost", "cost": round(day_cost, 2), "notional": round(day_notional, 2)})
     _notify(nav, results, signals)
     logger.info("=== 완료: 집행 %d건 ===", sum(1 for r in results if r.get("ok")))
     return 0

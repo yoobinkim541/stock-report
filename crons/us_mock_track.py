@@ -262,7 +262,9 @@ def main(argv: list[str] | None = None) -> int:
     ledger = Ledger("us_mock")
     sig_by = {s["ticker"]: s for s in signals}
     today = datetime.now(KST).strftime("%Y-%m-%d")
+    from ml.adaptive import costs
     results = []
+    day_cost = day_notional = 0.0
     for o in plan:
         cur = int(positions.get(o["symbol"], {}).get("shares", 0) or 0)
         kind = _classify_kind(o["side"], o["qty"], cur)
@@ -270,10 +272,19 @@ def main(argv: list[str] | None = None) -> int:
         px = _rt_best(o["symbol"], o["side"]) or s.get("price") or kis_mock.get_price(o["symbol"]) or 0
         r = kis_mock.place_order(o["symbol"], o["qty"], o["side"], price=px)
         results.append({**o, "kind": kind, **r})
+        if r.get("ok"):                          # 체결분 거래비용 적립 (수수료+스프레드 — 정직 계기)
+            notion = abs(o["qty"]) * float(px or 0)
+            day_notional += notion
+            day_cost += costs.order_cost(notion, o["side"], "US")
         _log_decision(ledger, s, o["symbol"], kind, o["side"], o["qty"], r.get("ok"), today)
         logger.info("%s(%s) %s %s주 → %s %s", o["side"], kind, o["symbol"], o["qty"],
                     "OK" if r.get("ok") else "FAIL", r.get("msg", ""))
         time.sleep(0.4)   # KIS 레이트리밋
+    if day_notional > 0:                          # 당일 거래비용 1건 (리포트 누적·회전율용)
+        import store
+        store.append("us_mock_history", {"date": datetime.now(KST).strftime("%Y-%m-%d %H:%M"),
+                                         "kind": "cost", "cost": round(day_cost, 2),
+                                         "notional": round(day_notional, 2)})
     _record_snapshot(nav, cash, positions)
     _notify(nav, results)
     logger.info("=== 완료: 집행 %d건 ===", sum(1 for r in results if r.get("ok")))

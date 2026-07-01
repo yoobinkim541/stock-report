@@ -131,6 +131,22 @@ def build_report(html: bool = False) -> str:
         sm = ("+" if total_pnl >= 0 else "-") + fmt.money(abs(total_pnl), "₩", abbrev=True)
         lines.append(f"─ 평가손익 {fmt.spct(pnl_ret)} ({sm})")
 
+    # 💸 거래비용 정직 계기 (누적 수수료·증권거래세·회전율 → 비용차감 성과)
+    try:
+        import store
+        crows = [r for r in store.all("kr_mock_history") if r.get("kind") == "cost"]
+    except Exception:
+        crows = []
+    tot_cost = sum(float(r.get("cost", 0) or 0) for r in crows)
+    tot_notional = sum(float(r.get("notional", 0) or 0) for r in crows)
+    if tot_cost > 0 and inception_nav:
+        avg_nav = (sum(float(s["nav"]) for s in snaps) / len(snaps)) if snaps else inception_nav
+        drag = tot_cost / inception_nav * 100.0
+        turnover = (tot_notional / avg_nav * 100.0) if avg_nav else 0.0
+        lines.append(fmt.sep("💸 거래비용"))
+        lines.append(f"누적 {fmt.money(tot_cost, '₩', abbrev=True)} · 회전율 {turnover:.0f}%")
+        lines.append(f"비용차감 누적 {fmt.spct(cum_ret - drag)} (표시 {fmt.spct(cum_ret)} − 비용 {drag:.2f}%p)")
+
     # 최근 편입/퇴출 사유
     recent, last_date = _recent_decisions()
     if recent:
