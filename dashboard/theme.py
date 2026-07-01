@@ -17,7 +17,7 @@ PANEL2 = "#1a2030"
 BORDER = "#222631"
 GRID = "#1e222d"
 TEXT = "#d1d4dc"
-MUTED = "#787b86"
+MUTED = "#9198a6"   # 캡션·라벨 가독 상향(기존 #787b86 은 너무 흐림)
 GREEN = "#26a69a"
 RED = "#ef5350"
 BLUE = "#2962ff"
@@ -200,7 +200,7 @@ h1 {{ font-size: 1.7rem !important; }}
   background: {PANEL};
   border: 1px solid {BORDER};
   border-radius: 8px;
-  padding: 12px 14px 10px;
+  padding: 15px 17px 13px;
   transition: border-color .18s ease, transform .18s ease;
 }}
 [data-testid="stMetric"]:hover {{ border-color: #2f3645; transform: translateY(-1px); }}
@@ -215,7 +215,7 @@ h1 {{ font-size: 1.7rem !important; }}
   color: {MUTED}; font-weight: 600; padding: 8px 14px;
   border-radius: 6px 6px 0 0; }}
 .stTabs [aria-selected="true"] {{ color: {TEXT} !important; background: {PANEL}; }}
-.stTabs [data-baseweb="tab-highlight"] {{ background: {BLUE} !important; height: 2px; }}
+.stTabs [data-baseweb="tab-highlight"] {{ background: {BLUE} !important; height: 3px; }}
 
 /* ── 데이터프레임 ────────────────────────────────────────────────────── */
 [data-testid="stDataFrame"] {{ border: 1px solid {BORDER}; border-radius: 8px; }}
@@ -234,7 +234,7 @@ h1 {{ font-size: 1.7rem !important; }}
 ::-webkit-scrollbar-thumb:hover {{ background: #3a4252; }}
 
 /* ── 컴포넌트: 티커 히어로 ───────────────────────────────────────────── */
-.tn-hero {{ display: flex; align-items: center; gap: 18px; margin: 2px 0 14px; }}
+.tn-hero {{ display: flex; align-items: center; gap: 18px; margin: 4px 0 20px; }}
 .tn-badge {{
   width: 62px; height: 62px; border-radius: 50%; border: 1.5px solid;
   display: flex; align-items: center; justify-content: center;
@@ -249,17 +249,17 @@ h1 {{ font-size: 1.7rem !important; }}
 .tn-asof {{ color: {MUTED}; font-size: .72rem; margin-top: 6px; }}
 
 /* ── 컴포넌트: 게이지 ────────────────────────────────────────────────── */
-.tn-gauge {{ background: {PANEL}; border: 1px solid {BORDER}; border-radius: 10px;
-  padding: 14px 14px 16px; text-align: center; }}
+.tn-gauge {{ background: {PANEL}; border: 1px solid {BORDER}; border-radius: 8px;
+  padding: 16px 14px 18px; text-align: center; }}
 .tn-gauge-verdict {{ font-size: 1.25rem; font-weight: 800; margin-top: -6px; }}
 .tn-gauge-sub {{ color: {MUTED}; font-size: .76rem; margin-top: 2px; }}
 
 /* ── 컴포넌트: 워치리스트 ────────────────────────────────────────────── */
-.tn-wl {{ background: {PANEL}; border: 1px solid {BORDER}; border-radius: 10px; overflow: hidden; }}
+.tn-wl {{ background: {PANEL}; border: 1px solid {BORDER}; border-radius: 8px; overflow: hidden; }}
 .tn-wl-head {{ padding: 9px 14px; font-size: .72rem; font-weight: 700; color: {MUTED};
   text-transform: uppercase; letter-spacing: .1em; border-bottom: 1px solid {BORDER}; }}
 .tn-wl-row {{ display: grid; grid-template-columns: 1fr auto auto auto; align-items: center;
-  gap: 10px; padding: 8px 14px; border-bottom: 1px solid #181c27; transition: background .15s; }}
+  gap: 10px; padding: 10px 14px; border-bottom: 1px solid {BORDER}; transition: background .15s; }}
 .tn-wl-row:hover {{ background: {PANEL2}; }}
 .tn-wl-row:last-child {{ border-bottom: none; }}
 .tn-wl-sym {{ font-weight: 700; color: {TEXT}; font-size: .9rem; }}
@@ -271,5 +271,27 @@ h1 {{ font-size: 1.7rem !important; }}
 .tn-sec {{ border-left: 3px solid {BLUE}; padding-left: 10px; margin: 18px 0 10px; }}
 .tn-sec span {{ font-size: .78rem; font-weight: 700; color: {MUTED};
   text-transform: uppercase; letter-spacing: .12em; }}
+
+/* ── segmented_control / pills: 선택 세그먼트 강조 (활성 신호 뚜렷하게) ──── */
+[data-testid="stButtonGroup"] button[aria-pressed="true"],
+[data-testid="stButtonGroup"] button[aria-checked="true"] {{
+  background: {BLUE}26 !important; border-color: {BLUE} !important; color: {TEXT} !important; }}
+
+/* ── 캡션 가독 (흐린 회색 상향) ──────────────────────────────────────── */
+[data-testid="stCaptionContainer"] {{ color: {MUTED} !important; }}
+
+/* ── 모바일 반응형 (≤600px) — 커스텀 컴포넌트 축소·재배치 ─────────────── */
+@media (max-width: 600px) {{
+  .block-container {{ padding-top: 1.4rem; padding-left: .8rem; padding-right: .8rem; }}
+  h1 {{ font-size: 1.4rem !important; }}
+  .tn-hero {{ gap: 12px; margin: 2px 0 14px; }}
+  .tn-badge {{ width: 46px; height: 46px; font-size: .95rem; }}
+  .tn-hero-name {{ font-size: 1.2rem; }}
+  .tn-price {{ font-size: 1.6rem; }}
+  .tn-gauge {{ padding: 12px 10px 14px; }}
+  /* 워치리스트: 스파크라인 숨기고 3열로 (좁은 폭 판독) */
+  .tn-wl-row {{ grid-template-columns: 1fr auto auto; gap: 8px; }}
+  .tn-wl-spark {{ display: none; }}
+}}
 </style>
 """

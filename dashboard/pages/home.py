@@ -29,7 +29,7 @@ def render():
             st.plotly_chart(charts.allocation_donut(rows), width="stretch",
                             config={"displayModeBar": False})
         with right:
-            st.caption("보유 종목 — 행 클릭 시 종목 분석 대상 변경")
+            st.caption("보유 종목 &nbsp;·&nbsp; 🔍 **행을 클릭**하면 해당 종목 상세 분석으로 이동", unsafe_allow_html=True)
             df = pd.DataFrame([{
                 "종목": r["ticker"], "이름": (r["name"] or "")[:18],
                 "평가액($)": round(r["value"]), "손익%": round(r["ret"], 1), "비중%": round(r["weight"], 1),

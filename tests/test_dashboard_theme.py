@@ -97,3 +97,13 @@ def test_theme_import_no_streamlit():
     r = subprocess.run([sys.executable, "-c", code], cwd=ROOT,
                        capture_output=True, text=True)
     assert r.returncode == 0, r.stderr
+
+
+def test_css_has_mobile_and_contrast_polish():
+    """H4: 반응형 미디어쿼리 + 밝아진 MUTED + 컴포넌트 라운드 통일."""
+    css = theme._CSS
+    assert "@media (max-width: 600px)" in css          # 모바일 반응형
+    assert ".tn-wl-spark" in css and "display: none" in css  # 모바일 스파크 숨김
+    # MUTED 대비 상향(기존 흐린 #787b86 폐기)
+    assert theme.MUTED != "#787b86"
+    assert theme.MUTED in css
