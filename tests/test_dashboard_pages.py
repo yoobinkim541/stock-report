@@ -134,10 +134,21 @@ def test_portfolio_renders_risk_kpis():
     assert len(at.dataframe) >= 1
 
 
-def test_research_shows_learning_curve():
-    """리서치: 🧬 정책 학습 곡선 — verdict 라벨 + 채택 이력표 (≥2점이면 곡선 렌더)."""
+def test_research_screener_gated_no_autocompute():
+    """리서치 진입(기본 '종목 랭킹') 시 스크리너 자동실행 안 함 — ▶버튼 + 안내만 (H2 지연제거)."""
     at = AppTest.from_string(_script("from dashboard.pages import research", "research.render()"),
                              default_timeout=30)
+    at.run()
+    assert not at.exception
+    assert any("실행" in str(b.label) for b in at.button), "실행 버튼 없음"
+    assert any("자동 실행하지 않" in str(i.value) for i in at.info), "게이트 안내 없음"
+
+
+def test_research_shows_learning_curve():
+    """리서치 '정책 학습' 섹션 선택 시 곡선·verdict·이력표 (H2 섹션 셀렉터)."""
+    at = AppTest.from_string(_script("from dashboard.pages import research", "research.render()"),
+                             default_timeout=30)
+    at.session_state["research_section"] = "정책 학습"   # 섹션 셀렉터 프리셋
     at.run()
     assert not at.exception
     assert any("정책 학습 곡선" in str(s.value) for s in at.subheader)

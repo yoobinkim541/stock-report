@@ -38,18 +38,28 @@ def render():
         else:
             st.caption("기술 신호 N/A")
 
-    t_val, t_fin, t_inst, t_disc, t_earn = st.tabs(
-        ["가치평가", "재무제표", "기관·내부자", "공시", "실적"])
-    with t_val:
-        _valuation(ticker, price)
-    with t_fin:
+    _detail_sections(ticker, price)
+
+
+# 섹션 셀렉터 + fragment — 활성 섹션만 렌더(그 섹션 네트워크만 호출)·전환은 fragment만 rerun.
+# 기존 st.tabs 는 숨겨도 5개 바디 전부 렌더 → 매 로드마다 네트워크 5회. 그걸 1회로.
+_SECTIONS = ["가치평가", "재무제표", "기관·내부자", "공시", "실적"]
+
+
+@st.fragment
+def _detail_sections(ticker, price):
+    sec = st.segmented_control("상세 분석", _SECTIONS, default="가치평가",
+                               key="ticker_section", label_visibility="collapsed") or "가치평가"
+    if sec == "재무제표":
         _financials(ticker)
-    with t_inst:
+    elif sec == "기관·내부자":
         _institutional(ticker)
-    with t_disc:
+    elif sec == "공시":
         _disclosures(ticker)
-    with t_earn:
+    elif sec == "실적":
         _earnings(ticker)
+    else:
+        _valuation(ticker, price)
 
 
 def _valuation(ticker, price=None):

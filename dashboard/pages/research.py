@@ -1,4 +1,9 @@
-"""리서치 — 종목 랭킹 스크리너 + ML 전략 백테스트 (무거움·이 페이지서만 계산)."""
+"""리서치 — 종목 랭킹 스크리너 + ML 전략 백테스트 + 정책 학습곡선.
+
+무거운 계산(스크리너·백테스트 각 최대 1분)은 **진입 시 자동실행 안 함** — 섹션 셀렉터로
+한 번에 하나만, 그 안에서 ▶실행 버튼을 눌러야 계산. 각 섹션은 @st.fragment 라 슬라이더·
+버튼 조작이 페이지 전체가 아니라 그 섹션만 rerun(자연스러운 부분 갱신).
+"""
 from __future__ import annotations
 
 import pandas as pd
@@ -6,13 +11,32 @@ import streamlit as st
 
 from dashboard import cached, charts, data
 
+_NOBAR = {"displayModeBar": False}
+_SECTIONS = ["종목 랭킹", "전략 백테스트", "정책 학습"]
+
 
 def render():
     st.title("🔬 리서치")
+    sec = st.segmented_control("섹션", _SECTIONS, default="종목 랭킹",
+                               key="research_section", label_visibility="collapsed") or "종목 랭킹"
+    if sec == "전략 백테스트":
+        _backtest_section()
+    elif sec == "정책 학습":
+        _learning_section()
+    else:
+        _screener_section()
 
+
+@st.fragment
+def _screener_section():
     st.subheader("종목 랭킹 스크리너")
     st.caption("NASDAQ100 · LightGBM QQQ 초과수익 예측")
-    topn = st.slider("상위 N", 10, 50, 20, 5)
+    topn = st.slider("상위 N", 10, 50, 20, 5, key="scr_topn")
+    run = st.button("▶ 스크리너 실행 (최대 1분)", key="scr_btn", type="primary")
+    if not (run or st.session_state.get("scr_done")):
+        st.info("버튼을 눌러 스크리너를 실행하세요 — 무거운 ML 계산이라 진입 시 자동 실행하지 않습니다.")
+        return
+    st.session_state["scr_done"] = True
     sc = cached.screener(topn)
     meta = sc.get("meta") or {}
     if meta:
@@ -25,9 +49,16 @@ def render():
         st.warning(f"랭킹 없음 ({sc.get('error', '')})")
     st.caption("⚠️ 생존편향 + 검증상 종목선택 무엣지 — 정보·표시용, 매매신호 아님")
 
-    st.divider()
+
+@st.fragment
+def _backtest_section():
     st.subheader("ML 전략 백테스트")
     st.caption("QQQ 3년 실데이터 (nested OOS)")
+    run = st.button("▶ 백테스트 실행 (최대 1분)", key="bt_btn", type="primary")
+    if not (run or st.session_state.get("bt_done")):
+        st.info("버튼을 눌러 백테스트를 실행하세요 — 무거운 계산이라 진입 시 자동 실행하지 않습니다.")
+        return
+    st.session_state["bt_done"] = True
     bt = cached.backtest()
     if bt.get("error"):
         st.warning(f"백테스트 실패: {bt['error']}")
@@ -47,14 +78,14 @@ def render():
         eq = bt.get("equity")
         if eq is not None:
             try:
-                st.plotly_chart(charts.equity_curve(eq), width="stretch",
-                                config={"displayModeBar": False})
+                st.plotly_chart(charts.equity_curve(eq), width="stretch", config=_NOBAR)
             except Exception:
                 pass
     st.caption("⚠️ 검증상 ML 종목선택·장중타이밍 무엣지 — 정보·표시용 (검증 통과 공격은 구조적 레버리지뿐)")
 
-    # ── 🧬 정책 학습 곡선 (모의 자기개선 진화) ────────────────────────────
-    st.divider()
+
+@st.fragment
+def _learning_section():
     st.subheader("🧬 정책 학습 곡선")
     st.caption("모의 자기개선 — 주별 OOS + 정직 verdict (순비용 기준 · 발전하면 보이고 안 되면 무엣지)")
     mk = st.radio("시장", ["kr_mock", "us_mock"], horizontal=True, key="evo_market",
@@ -71,8 +102,7 @@ def render():
     m[3].metric("누적 엣지", data.f_frac_pct_s(snap.get("cum_net_excess")))
     series = ev.get("series") or []
     if len([s for s in series if s.get("excess") is not None]) >= 2:
-        st.plotly_chart(charts.learning_curve(series), width="stretch",
-                        config={"displayModeBar": False})
+        st.plotly_chart(charts.learning_curve(series), width="stretch", config=_NOBAR)
     else:
         st.info("학습 이력 축적 중 — 주간 재학습(토)마다 누적됩니다 (콜드스타트는 정상)")
     if ev.get("adoptions"):

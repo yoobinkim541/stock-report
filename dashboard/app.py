@@ -46,8 +46,11 @@ with st.sidebar:
     if _sel != _cur:
         st.session_state["ticker"] = _sel
         st.session_state["_tsel_sync"] = _sel
-    if st.button("🔄 새로고침", width="stretch"):
+    if st.button("🔄 새로고침", width="stretch", help="캐시 비우고 다시 불러오기"):
         st.cache_data.clear()
+        # 무거운 게이트(스크리너·백테스트)도 초기화 → 캐시 비운 뒤 자동 재계산 방지
+        for _k in ("scr_done", "bt_done"):
+            st.session_state.pop(_k, None)
         st.rerun()
     st.caption(f"⏱ {datetime.now().strftime('%m/%d %H:%M')} 기준 · 캐시 15~60분")
 
