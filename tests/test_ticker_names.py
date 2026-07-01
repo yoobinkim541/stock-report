@@ -97,6 +97,28 @@ def test_normalize_input_invalid_returns_none():
         assert ticker_names.normalize_input(q) is None
 
 
+# ── L1 S&P500 유니버스 (미국 시총 상위 ~500 검색) ────────────────────────
+def test_universe_covers_sp500():
+    u = set(ticker_names.universe())
+    assert len(u) >= 500                       # 118 → S&P500 병합
+    for t in ("A", "ACGL"):                    # 큐레이트 밖 롱테일도 유니버스에
+        assert t in u, t
+
+
+def test_resolve_sp500_by_name_and_ticker():
+    # 영문 회사명·티커로 S&P500 롱테일 resolve (한글은 큐레이트 인기주만)
+    assert ticker_names.resolve("Agilent") == "A"
+    assert ticker_names.resolve("Arch Capital") == "ACGL"
+    assert ticker_names.resolve("ACGL") == "ACGL"
+    assert ticker_names.normalize_input("Agilent Technologies") == "A"
+
+
+def test_curated_names_take_precedence_over_sp500():
+    # 큐레이트 EN 이 S&P500 시드보다 우선(깔끔한 표시명 유지)
+    assert ticker_names.display_name("AAPL", allow_net=False) == "Apple"
+    assert ticker_names.display_name("BRK-B", allow_net=False) == "Berkshire Hathaway"
+
+
 # ── display_name: US=영문 · KR(.KS)=한글 ────────────────────────────────
 def test_display_name_us_english():
     assert ticker_names.display_name("MSFT", allow_net=False) == "Microsoft"

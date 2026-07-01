@@ -199,6 +199,14 @@ def _norm(s: str) -> str:
     return " ".join((s or "").upper().split())
 
 
+# S&P500(미국 시총 상위 ~500) 티커→영문명 시드 — 검색 유니버스 확장(graceful·없으면 빈).
+# scripts/gen_sp500_seed.py 로 생성. 큐레이트 EN/KO 가 우선(display·index setdefault 순서).
+try:
+    from sp500_seed import SP500 as _SP500
+except Exception:
+    _SP500 = {}
+
+
 def _build_index() -> dict[str, str]:
     idx: dict[str, str] = {}
     for t, nm in EN.items():
@@ -208,11 +216,13 @@ def _build_index() -> dict[str, str]:
             idx.setdefault(_norm(a), t)
     for t, nm in KR.items():
         idx.setdefault(_norm(nm), t)
+    for t, nm in _SP500.items():          # S&P500 영문명 (큐레이트 뒤 — EN/KO/KR 우선)
+        idx.setdefault(_norm(nm), t)
     return idx
 
 
 _INDEX = _build_index()
-_ALL_TICKERS = set(EN) | set(KR) | set(KO)
+_ALL_TICKERS = set(EN) | set(KR) | set(KO) | set(_SP500)
 
 
 # ── yfinance 디스크캐시 (graceful) ────────────────────────────────────
@@ -270,7 +280,7 @@ def display_name(ticker: str, allow_net: bool = True) -> str | None:
     tu = t.upper()
     if t.endswith(".KS") or t.endswith(".KQ"):
         return KR.get(t) or KR.get(tu) or _yf_name(t, allow_net)
-    return EN.get(tu) or _yf_name(tu, allow_net)
+    return EN.get(tu) or _SP500.get(tu) or _yf_name(tu, allow_net)
 
 
 def label(ticker: str, name: str | None = None, maxlen: int | None = None,
