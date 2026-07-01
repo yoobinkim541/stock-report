@@ -67,9 +67,12 @@ def test_backfill_matures_entries_only_and_idempotent(tmp_path):
 
     added = L.backfill_outcomes(lg, price_fn=fake_price)
     assert added == 1                                   # 편입·성숙분만 (퇴출 제외, 미성숙 제외)
+    from ml.adaptive import costs
+    rt = costs.round_trip_frac("KR")
     outs = lg.read_outcomes()
     assert len(outs) == 1 and outs[0]["decision_id"] == "2026-05-01:005930.KS"
-    assert outs[0]["fwd_excess"] == pytest.approx(0.08) and outs[0]["success"] is True
+    assert outs[0]["gross_excess"] == pytest.approx(0.08)                          # 원 초과
+    assert outs[0]["fwd_excess"] == pytest.approx(0.08 - rt) and outs[0]["success"] is True  # net(왕복비용 차감)
     assert outs[0]["fwd_mdd"] == pytest.approx(0.06) and outs[0]["idx_fwd_mdd"] == pytest.approx(0.03)
 
     # 멱등: 재실행해도 중복 outcome 없음
@@ -78,7 +81,7 @@ def test_backfill_matures_entries_only_and_idempotent(tmp_path):
 
     # 학습셋 조인(성숙분만)
     ts = lg.training_set()
-    assert len(ts) == 1 and ts[0]["fwd_excess"] == pytest.approx(0.08)
+    assert len(ts) == 1 and ts[0]["fwd_excess"] == pytest.approx(0.08 - rt)
 
 
 if __name__ == "__main__":

@@ -132,14 +132,18 @@ def backfill_outcomes(ledger, *, horizon: int = HORIZON, price_fn=None) -> int:
         if res is None:
             continue
         stock_ret, idx_ret, stock_mdd, idx_mdd = res
-        excess = stock_ret - idx_ret
+        from ml.adaptive import costs
+        gross = stock_ret - idx_ret
         is_buy = side in _BUY
-        correct = (excess > 0) if is_buy else (excess < 0)   # 퇴출: 미달이면 잘 뺀 것
+        # 매수 결정 보상은 왕복 거래비용 차감(net) — 정책이 비용 넘는 엣지만 학습. 매도는 gross(회피 판단).
+        net = (gross - costs.round_trip_frac("US")) if is_buy else gross
+        correct = (net > 0) if is_buy else (net < 0)   # 퇴출: 미달이면 잘 뺀 것
         ledger.log_outcome({
             "decision_id": d["id"], "side": side, "horizon": horizon,
             "matured_at": datetime.now(KST).strftime("%Y-%m-%d"),
             "stock_ret": round(stock_ret, 5), "index_ret": round(idx_ret, 5),
-            "fwd_excess": round(excess, 5), "fwd_mdd": round(stock_mdd, 5),
+            "fwd_excess": round(net, 5), "gross_excess": round(gross, 5),
+            "fwd_mdd": round(stock_mdd, 5),
             "idx_fwd_mdd": round(idx_mdd, 5), "correct": bool(correct), "success": bool(correct),
         })
         added += 1

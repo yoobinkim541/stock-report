@@ -36,9 +36,26 @@ def test_backfill_side_aware_correct():
     added = L.backfill_outcomes(led, price_fn=lambda t, d, h: px[t])
     assert added == 3
     by = {o["decision_id"]: o for o in led.outcomes}
-    assert by[1]["correct"] is True and by[1]["fwd_excess"] == pytest.approx(0.06)
-    assert by[2]["correct"] is True            # 퇴출 회피 적중
-    assert by[3]["correct"] is False           # 편입 오답
+    from ml.adaptive import costs
+    rt = costs.round_trip_frac("US")
+    assert by[1]["correct"] is True
+    assert by[1]["gross_excess"] == pytest.approx(0.06)          # 원(gross) 초과
+    assert by[1]["fwd_excess"] == pytest.approx(0.06 - rt)       # 매수 net = gross − 왕복비용
+    assert by[2]["correct"] is True                              # 퇴출 회피 적중
+    assert by[2]["fwd_excess"] == pytest.approx(-0.04)           # 매도는 gross(비용 미차감)
+    assert by[3]["correct"] is False                            # 편입 오답
+
+
+def test_backfill_cost_flips_marginal_buy():
+    """왕복 비용보다 작은 초과수익 매수는 net 음수 → 오답(정직): 비용 넘는 엣지만 인정."""
+    from ml.adaptive import costs
+    rt = costs.round_trip_frac("US")
+    led = _FakeLedger([{"id": 1, "ticker": "A", "date": "2026-01-01", "side": "편입"}])
+    # 종목이 지수를 rt/2 만큼만 이김 → gross>0 이지만 net<0
+    L.backfill_outcomes(led, price_fn=lambda t, d, h: (0.04 + rt / 2, 0.04, 0.02, 0.02))
+    o = led.outcomes[0]
+    assert o["gross_excess"] == pytest.approx(rt / 2) and o["gross_excess"] > 0
+    assert o["fwd_excess"] < 0 and o["correct"] is False        # 비용 넘지 못함 → 오답
 
 
 def test_backfill_skips_immature():

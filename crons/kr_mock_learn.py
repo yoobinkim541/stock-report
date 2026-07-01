@@ -151,12 +151,15 @@ def backfill_outcomes(ledger, *, horizon: int = HORIZON, price_fn=None) -> int:
         if res is None:
             continue   # 아직 미성숙 → 다음 회차
         stock_ret, idx_ret, stock_mdd, idx_mdd = res
-        fwd_excess = stock_ret - idx_ret
+        from ml.adaptive import costs
+        gross = stock_ret - idx_ret
+        # 매수(편입/증액) 결정만 평가 → 왕복 거래비용(수수료+증권거래세) 차감한 net 보상
+        fwd_excess = gross - costs.round_trip_frac("KR")
         ledger.log_outcome({
             "decision_id": d["id"], "horizon": horizon,
             "matured_at": datetime.now(KST).strftime("%Y-%m-%d"),
             "stock_ret": round(stock_ret, 5), "index_ret": round(idx_ret, 5),
-            "fwd_excess": round(fwd_excess, 5),
+            "fwd_excess": round(fwd_excess, 5), "gross_excess": round(gross, 5),
             "fwd_mdd": round(stock_mdd, 5), "idx_fwd_mdd": round(idx_mdd, 5),
             "success": bool(fwd_excess > 0),
         })
