@@ -320,10 +320,10 @@ crons/news_spike_detector.py (크론 매 1분)
 
 | 파일 | 역할 |
 |------|------|
-| `dashboard/app.py` | Streamlit 엔트리 — 테마 주입 → 인증 게이트 → 사이드바(종목 퀵픽·**이름/티커 검색**[한글·영문·티커 `ticker_names.resolve`]·신선도·새로고침·**보유 워치리스트**) → `st.navigation` 5페이지. 최상단 `sys.path.insert(루트)` 필수(streamlit run `sys.path[0]=스크립트dir` 함정) |
+| `dashboard/app.py` | Streamlit 엔트리 — 테마 주입 → 인증 게이트 → 사이드바(**단일 검색 셀렉트박스**[보유+전체 유니버스·한/영/티커 타입어헤드·`ticker_names.search_label`]·신선도·새로고침·**보유 워치리스트**) → `st.navigation` 5페이지. 종목선택은 **위젯↔session_state 동기화(`_tsel_sync`)**로 홈 행클릭 등 외부변경 반영·리셋버그 없음. 최상단 `sys.path.insert(루트)` 필수(streamlit run `sys.path[0]=스크립트dir` 함정) |
 | `.streamlit/config.toml` | **Terminal Noir 테마** (TradingView/토스증권) — 다크 블루블랙·일렉트릭블루 액센트·틸그린/코랄레드 시맨틱·Pretendard(한글)+JetBrains Mono(등폭 수치) fontFaces·radius/border/chart 팔레트 |
 | `dashboard/theme.py` | 테마 단일 진실원 — 팔레트 상수 + **순수 HTML/SVG 빌더**(ticker_hero·rating_gauge 반원속도계·sparkline·watchlist, 테스트가능) + `apply_plotly_theme`(차트 다크 템플릿) + `inject_global_css`(streamlit lazy — import 시 미로드해 charts 순수성 유지) |
-| `dashboard/pages/` | 멀티페이지(비활성 페이지 미실행=lazy) — `home`(글랜스: 포트 ticker-hero+배분도넛+클릭 보유표→종목분석 자동이동+Phase+오늘일정)·`portfolio`(리스크 KPI+위험기여/팩터β 막대+½Kelly밴드+도넛)·`ticker`(심볼 히어로+**기술신호 게이지**+가격라인+MA·밸류밴드 불릿·서프라이즈 막대·기관·공시·실적)·`market`(경제캘린더+뉴스)·`research`(스크리너+백테스트 이퀴티+**🧬 정책 학습 곡선**: KR/US 모의 자기개선 verdict·순비용 IC·OOS 곡선·채택 이력) |
+| `dashboard/pages/` | 멀티페이지(비활성 페이지 미실행=lazy) — `home`(글랜스: 포트 ticker-hero+배분도넛+클릭 보유표→종목분석 자동이동+Phase+오늘일정)·`portfolio`(리스크 KPI+위험기여/팩터β 막대+½Kelly밴드+도넛)·`ticker`(히어로+게이지 **상단 밴드**·가격차트 풀폭·상세는 **`st.segmented_control`+`@st.fragment` 섹션**[활성 섹션만 네트워크·부차정보 expander])·`market`(경제캘린더+뉴스)·`research`(**섹션 셀렉터**[랭킹/백테스트/학습]·무거운 스크리너·백테스트는 **▶실행 버튼 게이트+fragment**[진입 시 자동계산 0]·**🧬 정책 학습 곡선**) |
 | `dashboard/charts.py` | plotly 차트 빌더(순수 함수·단위테스트·theme 다크 템플릿 적용) — allocation_donut·price_line·hbar·signed_bars·value_bullet·equity_curve |
 | `dashboard/cached.py` | `st.cache_data` 래퍼(멀티페이지 공용·TTL 15~60분) — valuation/financials/.../risk_struct/ohlc |
 | `dashboard/data.py` | 포트폴리오/Phase 상태 + 스케일 명시 포맷터(f_frac_pct vs f_pct·부호버그 차단). streamlit 미import → 테스트가능 |
@@ -333,7 +333,9 @@ crons/news_spike_detector.py (크론 매 1분)
 | `providers/insider.py` | 내부자거래 (SEC Form 4·edgar 재사용·parse_form4 순수) + 최근 SEC 공시 |
 | `providers/dart.py` | KR 공시 (DART OpenAPI·corpCode 매핑·`DART_API_KEY` 없으면 graceful) |
 
-**5페이지(멀티페이지·plotly 차트화):** 🏠홈(포트 글랜스)·💼포트폴리오(리스크 시각화)·🔍종목 분석(가격차트+밸류/재무/기관/공시/실적 서브탭)·🗓️시장·캘린더(경제+뉴스)·🔬리서치(랭킹 스크리너+ML 백테스트). 검증: `tests/test_dashboard*.py` — data/views 순수로직 + **charts 단위** + **페이지 렌더 AppTest(반드시 비루트 cwd**·streamlit sys.path 함정 가드).
+**5페이지(멀티페이지·plotly 차트화):** 🏠홈(포트 글랜스)·💼포트폴리오(리스크 시각화)·🔍종목 분석(가격차트+밸류/재무/기관/공시/실적 **섹션**)·🗓️시장·캘린더(경제+뉴스)·🔬리서치(랭킹 스크리너+ML 백테스트+정책 학습). 검증: `tests/test_dashboard*.py` — data/views 순수로직 + **charts 단위** + **페이지 렌더 AppTest(반드시 비루트 cwd**·streamlit sys.path 함정 가드).
+
+> **UX 모델(H-series):** 종목선택은 사이드바 **단일 검색 셀렉트박스**(한/영/티커·리셋버그 없음) 하나로 통일. 무거운 계산(종목분석 5섹션·리서치 스크리너/백테스트)은 **`@st.fragment`+`st.segmented_control`/버튼 게이트**로 **활성 것만 실행**(전체 리로드·스피너 연속 제거 — 부분 rerun). 다크 터미널 유지하되 간격·대비·컴포넌트 라운드 다듬고 **≤600px 반응형**(theme.py 미디어쿼리 — 배지·게이지·워치리스트 축소). **시각 검증 한계**: 서버 로컬호스트+게이트라 자동 스크린샷 불가 → AppTest(구조·무예외)+theme 단위로 회귀 차단, 최종 룩은 육안.
 
 **구동:** `bash scripts/run_dashboard.sh` (수동) 또는 `scripts/dashboard_watchdog.sh`(크론 매 1분·`DASHBOARD_ENABLED=true` opt-in·streamlit health 재기동). **활성화 = `.env` 에 `DASHBOARD_PASSWORD`(필수·fail-closed) + `DASHBOARD_ENABLED=true`.** 127.0.0.1 바인드 → 외부는 SSH 터널(`ssh -L 8501:127.0.0.1:8501`) 또는 reverse proxy(caddy TLS+auth). 봇과 별개 프로세스 → 봇 재시작 무관.
 
