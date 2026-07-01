@@ -38,15 +38,27 @@ def _needle_x(svg):
     return float(re.search(r'<line[^>]*x2="([0-9.]+)"', svg).group(1))
 
 
+def _needle_y(svg):
+    return float(re.search(r'<line[^>]*y2="([0-9.]+)"', svg).group(1))
+
+
 def test_rating_gauge_needle_side():
-    """+score → 바늘 우측(매수), −score → 좌측(매도). 중심 cx=110."""
-    assert _needle_x(theme.rating_gauge_html(0.8)) > 110
-    assert _needle_x(theme.rating_gauge_html(-0.8)) < 110
+    """+score → 바늘 우측(매수), −score → 좌측(매도). 중심 cx=100."""
+    assert _needle_x(theme.rating_gauge_html(0.8)) > 100
+    assert _needle_x(theme.rating_gauge_html(-0.8)) < 100
 
 
 def test_rating_gauge_neutral_top():
-    # score 0 → 바늘 ~중앙(110)
-    assert abs(_needle_x(theme.rating_gauge_html(0.0)) - 110) < 1.0
+    # score 0 → 바늘 ~중앙(100)·상단(y<중심)
+    assert abs(_needle_x(theme.rating_gauge_html(0.0)) - 100) < 1.0
+    assert _needle_y(theme.rating_gauge_html(0.0)) < 100
+
+
+def test_rating_gauge_arcs_on_top_half():
+    # L3 재작성: 5존 아크·니들이 상단 반원(y ≤ 중심). 이전 버그=하단 반원(viewBox 밖 잘림) 회귀차단.
+    svg = theme.rating_gauge_html(0.0)
+    ys = [float(y) for y in re.findall(r'A 78 78 0 [01] [01] [0-9.]+ ([0-9.]+)', svg)]
+    assert len(ys) == 5 and all(y <= 101 for y in ys)   # 아크 끝점 전부 상단(중심+ε 이내)
 
 
 def test_rating_gauge_clamps_verdict():

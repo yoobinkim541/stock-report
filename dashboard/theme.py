@@ -85,33 +85,50 @@ _GAUGE_ZONES = [
 ]
 
 
+def _polar(cx, cy, r, deg):
+    """각도(도, 수학표준: 0°=우·90°=위·180°=좌) → SVG 좌표(y 아래로 증가)."""
+    a = math.radians(deg)
+    return cx + r * math.cos(a), cy - r * math.sin(a)
+
+
+def _arc(cx, cy, r, a0, a1):
+    """a0→a1 원호 path (도). 각도 감소(a1<a0)=화면상 시계방향=위 반원 좌→우."""
+    x0, y0 = _polar(cx, cy, r, a0)
+    x1, y1 = _polar(cx, cy, r, a1)
+    large = 1 if abs(a0 - a1) > 180 else 0
+    sweep = 1 if a1 < a0 else 0
+    return f"M {x0:.1f} {y0:.1f} A {r} {r} 0 {large} {sweep} {x1:.1f} {y1:.1f}"
+
+
 def rating_gauge_html(score, verdict="", sub="") -> str:
-    """반원 속도계 게이지 (score∈[-1,1]: -1 강력매도 ↔ +1 강력매수). stroke-dasharray 5존."""
+    """반원 속도계 게이지 (score∈[-1,1]: -1 강력매도 ↔ +1 강력매수).
+
+    5존을 **상단 반원**(좌 약세→우 강세)에 개별 원호로 타일 + 니들(score→각도) + 허브.
+    """
     try:
         score = max(-1.0, min(1.0, float(score)))
     except (TypeError, ValueError):
         score = 0.0
-    cx, cy, R = 110, 112, 90
-    track = f"M {cx - R} {cy} A {R} {R} 0 0 1 {cx + R} {cy}"  # 하단? sweep=1 → 위로 (아래 검증)
-    # 위 반원: sweep=0
-    track = f"M {cx - R} {cy} A {R} {R} 0 0 0 {cx + R} {cy}"
+    cx, cy, R, sw = 100, 100, 78, 15
+    n = len(_GAUGE_ZONES)
+    seg = 180.0 / n                                  # 존당 36°
     arcs = "".join(
-        f'<path d="{track}" pathLength="100" fill="none" stroke="{c}" stroke-width="15" '
-        f'stroke-dasharray="19.4 100" stroke-dashoffset="-{i * 20:.0f}" stroke-linecap="butt"/>'
+        f'<path d="{_arc(cx, cy, R, 180 - i * seg, 180 - (i + 1) * seg)}" fill="none" '
+        f'stroke="{c}" stroke-width="{sw}" stroke-linecap="butt"/>'
         for i, (c, _) in enumerate(_GAUGE_ZONES))
-    th = math.radians(180 - (score + 1) / 2 * 180)
-    nx, ny = cx + (R - 14) * math.cos(th), cy - (R - 14) * math.sin(th)
+    a = 90.0 * (1 - score)                            # score -1→180°, 0→90°, +1→0°
+    nx, ny = _polar(cx, cy, R - 20, a)
     vcol = GREEN if score > 0.15 else RED if score < -0.15 else MUTED
     if not verdict:
-        verdict = next(z[1] for i, z in enumerate(_GAUGE_ZONES)
-                       if i == min(4, int((score + 1) / 2 * 5)))
+        verdict = _GAUGE_ZONES[min(n - 1, int((score + 1) / 2 * n))][1]
+    ly = cy + 16
     return f'''<div class="tn-gauge">
-  <svg viewBox="0 0 220 150" width="100%" height="150">
+  <svg viewBox="0 0 200 126" width="100%" preserveAspectRatio="xMidYMid meet">
     {arcs}
     <line x1="{cx}" y1="{cy}" x2="{nx:.1f}" y2="{ny:.1f}" stroke="{TEXT}" stroke-width="3" stroke-linecap="round"/>
     <circle cx="{cx}" cy="{cy}" r="6" fill="{TEXT}"/>
-    <text x="14" y="146" fill="{MUTED}" font-size="10" font-family="{_MONO}">강력매도</text>
-    <text x="206" y="146" fill="{MUTED}" font-size="10" font-family="{_MONO}" text-anchor="end">강력매수</text>
+    <text x="{cx - R}" y="{ly}" fill="{MUTED}" font-size="10" font-family="{_MONO}" text-anchor="middle">약세</text>
+    <text x="{cx + R}" y="{ly}" fill="{MUTED}" font-size="10" font-family="{_MONO}" text-anchor="middle">강세</text>
   </svg>
   <div class="tn-gauge-verdict" style="color:{vcol}">{verdict}</div>
   {f'<div class="tn-gauge-sub">{sub}</div>' if sub else ''}
