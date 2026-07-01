@@ -15,33 +15,85 @@ def render():
     period = st.radio("기간", ["3mo", "6mo", "1y"], index=1, horizontal=True,
                       label_visibility="collapsed")
     hist = cached.ohlc(ticker, period=period)
-    price = prev = None
+    yf_price = prev = None
     if hist is not None and not getattr(hist, "empty", True) and "Close" in getattr(hist, "columns", []):
         cl = hist["Close"]
-        price = float(cl.iloc[-1])
-        prev = float(cl.iloc[-2]) if len(cl) > 1 else price
+        yf_price = float(cl.iloc[-1])
+        prev = float(cl.iloc[-2]) if len(cl) > 1 else yf_price
+    pos = data.holding_position(ticker)                 # 보유 포지션(평단 등)|None
+
+    # 실시간 밴드(8s 자동갱신) — 히어로 ⚡가격·게이지·내 포지션·호가
+    _live_top(ticker, hist, yf_price, prev, pos)
+
+    # 가격 차트 — 풀폭 (+ 보유 시 평단 수평선)
+    if yf_price is not None:
+        st.plotly_chart(charts.price_line(hist, ticker_names.label(ticker),
+                                          avg_cost=pos.get("avg_price_usd") if pos else None),
+                        width="stretch", config=_NOBAR)
+    else:
+        st.info("가격 데이터 없음 (yfinance)")
+
+    _detail_sections(ticker, yf_price)
+
+
+@st.fragment(run_every=8)
+def _live_top(ticker, hist, yf_price, prev, pos):
+    """히어로 ⚡실시간가 + 게이지 + 내 포지션(평단·손익) + 호가 — 8초 자동갱신."""
+    rq = cached.realtime_quote(ticker)
+    rt = rq.get("price") if rq else None
+    price = rt if (rt and rt > 0) else yf_price
+    src = "⚡ 실시간 KIS" if (rt and rt > 0) else f"yfinance 종가"
     chg = (price - prev) if (price is not None and prev) else None
     chg_pct = (chg / prev * 100) if (chg is not None and prev) else None
-    ts = data.technical_score(hist["Close"]) if price is not None else None
+    ts = data.technical_score(hist["Close"]) if (hist is not None and yf_price is not None) else None
 
-    # 상단 밴드: 심볼 히어로 + 기술 신호 게이지 (게이지에 충분한 폭 — 기존 [2.3,1] 슬리버 폐지)
     hcol, gcol = st.columns([1.6, 1])
     with hcol:
         theme.render(theme.ticker_hero_html(ticker, ticker_names.display_name(ticker) or ticker,
-                                            price, chg, chg_pct, f"{period} · yfinance 종가", ""))
+                                            price, chg, chg_pct, src, ""))
     with gcol:
         if ts:
             theme.render(theme.rating_gauge_html(ts["score"], sub=ts["sub"]))
         else:
             st.caption("기술 신호 N/A")
 
-    # 가격 차트 — 풀폭
-    if price is not None:
-        st.plotly_chart(charts.price_line(hist, ticker_names.label(ticker)), width="stretch", config=_NOBAR)
-    else:
-        st.info("가격 데이터 없음 (yfinance)")
+    # 내 포지션 (보유 시) — 평단·평가손익·주수·평가액
+    if pos:
+        avg = pos.get("avg_price_usd")
+        cur_ret = (price / avg - 1) * 100 if (avg and price) else pos.get("ret", 0)
+        cur_val = pos["shares"] * price if price else pos.get("value", 0)
+        m = st.columns(4)
+        m[0].metric("평단", data.f_usd(avg))
+        m[1].metric("평가손익", data.f_pct_s(cur_ret))
+        m[2].metric("보유주수", f"{pos['shares']:g}주")
+        m[3].metric("평가액", data.f_usd(cur_val, 0))
 
-    _detail_sections(ticker, price)
+    _orderbook(rq)
+
+
+def _orderbook(rq):
+    """실시간 10단계 호가 (KR 완전·US 가격만 안내)."""
+    if not rq:
+        return
+    bids, asks = rq.get("bids") or [], rq.get("asks") or []
+    if not (bids or asks):
+        if rq.get("market") == "US":
+            st.caption("💡 미국 종목은 실시간 가격만 제공 (10단계 호가는 국내만)")
+        return
+    st.markdown("**📊 실시간 호가**")
+    cb, ca = st.columns(2)
+    with cb:
+        st.caption("매수 (BID)")
+        for px, qty in bids[:5]:
+            st.markdown(f"<div style='font-family:monospace;color:{theme.GREEN}'>"
+                        f"{px:,.2f} <span style='color:{theme.MUTED}'>× {qty:,.0f}</span></div>",
+                        unsafe_allow_html=True)
+    with ca:
+        st.caption("매도 (ASK)")
+        for px, qty in asks[:5]:
+            st.markdown(f"<div style='font-family:monospace;color:{theme.RED}'>"
+                        f"{px:,.2f} <span style='color:{theme.MUTED}'>× {qty:,.0f}</span></div>",
+                        unsafe_allow_html=True)
 
 
 # 섹션 셀렉터 + fragment — 활성 섹션만 렌더(그 섹션 네트워크만 호출)·전환은 fragment만 rerun.

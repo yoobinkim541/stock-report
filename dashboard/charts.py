@@ -43,8 +43,8 @@ def allocation_donut(holdings: list[dict]):
     return _t(fig)
 
 
-def price_line(hist, ticker: str = ""):
-    """가격 라인 + 20/60일 이동평균. hist: OHLC DataFrame(Close 필요)."""
+def price_line(hist, ticker: str = "", avg_cost=None):
+    """가격 라인 + 20/60일 이동평균 (+ 보유 시 평단 수평선). hist: OHLC DataFrame(Close 필요)."""
     go = _go()
     fig = go.Figure()
     if hist is None or getattr(hist, "empty", True) or "Close" not in getattr(hist, "columns", []):
@@ -55,6 +55,11 @@ def price_line(hist, ticker: str = ""):
         if len(close) >= win:
             fig.add_trace(go.Scatter(x=hist.index, y=close.rolling(win).mean(),
                                      name=f"MA{win}", line=dict(width=1)))
+    # 평단(avg cost) 수평 점선 — 보유 종목의 매수 평균가를 차트에 오버레이
+    if avg_cost and avg_cost > 0:
+        fig.add_hline(y=avg_cost, line=dict(color=theme.MUTED, dash="dash", width=1.2),
+                      annotation_text=f"평단 ${avg_cost:,.2f}", annotation_position="top left",
+                      annotation_font=dict(color=theme.MUTED, size=11))
     fig.update_layout(margin=dict(t=10, b=10, l=10, r=10), height=320,
                       legend=dict(orientation="h", y=1.1), hovermode="x unified")
     return _t(fig)

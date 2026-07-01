@@ -20,6 +20,18 @@ def test_portfolio_summary(tmp_path):
     assert abs(s["return_pct"] - (340 / 300 - 1) * 100) < 1e-6
 
 
+def test_holding_position(tmp_path):
+    """보유 포지션 조회 — 평단·주수·손익 (J2 · 해외 general)."""
+    snap = tmp_path / "portfolio_snapshot.json"
+    snap.write_text(json.dumps({"overseas_general": {"holdings_usd": [
+        {"ticker": "NVDA", "shares": 2.7875, "avg_price_usd": 190.29, "value_usd": 536.7,
+         "cost_usd": 530.4, "return_pct": 1.18},
+    ]}}), encoding="utf-8")
+    p = data.holding_position("NVDA", str(snap))
+    assert p and abs(p["avg_price_usd"] - 190.29) < 1e-6 and abs(p["shares"] - 2.7875) < 1e-6
+    assert data.holding_position("ZZZZ", str(snap)) is None   # 비보유 → None
+
+
 def test_portfolio_weights_sum_to_one(tmp_path):
     snap = tmp_path / "portfolio_snapshot.json"
     snap.write_text(json.dumps({"overseas_general": {"holdings_usd": [

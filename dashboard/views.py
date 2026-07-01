@@ -184,3 +184,38 @@ def learning_evolution(surface: str = "kr_mock") -> dict:
         return evolution.evolution_summary(surface, rows)
     except Exception as e:
         return {"error": str(e), "snapshot": {}, "verdict": {}, "series": [], "adoptions": [], "n_runs": 0}
+
+
+def realtime_quote(ticker: str) -> dict | None:
+    """실시간 시세+호가 (KIS — 캐시 seam 우선·REST 온디맨드 폴백). read-only·graceful None.
+
+    반환 {price, bids, asks, ts, source, market}. REALTIME_ENABLED off/미보유/장애 시 None →
+    호출부 yfinance 폴백. 주문 경로 없음(kis_quote 는 read-only).
+    """
+    t = (ticker or "").strip()
+    if not t:
+        return None
+    tu = t.upper()
+    if tu.endswith(".KS") or tu.endswith(".KQ"):
+        sym, market = t[:-3], "KR"
+    else:
+        sym, market = tu, "US"
+    price = None
+    try:                                    # 1) 캐시 seam (워치리스트 종목 = 즉시)
+        from providers import market_data
+        price = market_data._realtime_current(t)
+    except Exception:
+        price = None
+    snap = None
+    try:                                    # 2) REST 온디맨드 (임의 티커·호가 포함)
+        from providers import kis_quote
+        snap = kis_quote.get_snapshot(sym, market=market)
+    except Exception:
+        snap = None
+    if snap and snap.get("price"):
+        return {"price": price or snap.get("price"), "bids": snap.get("bids") or [],
+                "asks": snap.get("asks") or [], "ts": snap.get("ts"),
+                "source": snap.get("source", "kis_rest"), "market": market}
+    if price and price > 0:
+        return {"price": price, "bids": [], "asks": [], "ts": None, "source": "kis_ws", "market": market}
+    return None

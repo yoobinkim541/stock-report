@@ -55,25 +55,50 @@ def load_holdings(path: str | None = None) -> list[dict]:
     usd = []
     for sec in ("overseas_general", "overseas_fractional"):
         usd += snap.get(sec, {}).get("holdings_usd", []) or []
-    tot = sum(h.get("value_usd", 0) or 0 for h in usd) or 1
     try:
         import ticker_names
     except Exception:
         ticker_names = None
+    try:
+        from providers import market_data as _md    # 실시간 가격 seam (off/mi스 시 None → 스냅샷)
+    except Exception:
+        _md = None
     rows = []
     for h in usd:
         v = h.get("value_usd", 0) or 0
         tk = h.get("ticker", "")
         nm = h.get("name", "") or ""
+        sh = h.get("shares", 0) or 0
+        cost = h.get("cost_usd", 0) or 0
+        ret = h.get("return_pct", 0) or 0
         # 스냅샷 이름이 없거나 티커와 같으면 resolver 로 회사명 보강(무네트워크)
         if (not nm or nm == tk) and ticker_names:
             nm = ticker_names.display_name(tk, allow_net=False) or nm
-        rows.append({
-            "ticker": tk, "name": nm,
-            "shares": h.get("shares", 0) or 0, "value": v,
-            "ret": h.get("return_pct", 0) or 0, "weight": v / tot * 100,
-        })
+        # 실시간 가격 오버레이 (보유는 스트림 워치리스트에 포함 → 캐시 즉시). value·ret 재계산.
+        rt_on = False
+        rt = _md._realtime_current(tk) if (_md and tk) else None
+        if rt and rt > 0 and sh:
+            v = sh * rt
+            ret = (v - cost) / cost * 100 if cost > 0 else ret
+            rt_on = True
+        rows.append({"ticker": tk, "name": nm, "shares": sh, "value": v,
+                     "ret": ret, "rt": rt_on})
+    tot = sum(r["value"] for r in rows) or 1    # 오버레이 후 총액으로 비중 재계산
+    for r in rows:
+        r["weight"] = r["value"] / tot * 100
     return rows
+
+
+def holding_position(ticker: str, path: str | None = None) -> dict | None:
+    """현재 보유 포지션(해외 general — avg_price_usd 보유): {shares,avg_price_usd,value,ret,cost} or None."""
+    snap = _load_snap(path)
+    tu = (ticker or "").upper()
+    for h in snap.get("overseas_general", {}).get("holdings_usd", []) or []:
+        if (h.get("ticker") or "").upper() == tu and (h.get("shares", 0) or 0) > 0:
+            return {"shares": h.get("shares", 0) or 0, "avg_price_usd": h.get("avg_price_usd"),
+                    "value": h.get("value_usd", 0) or 0, "ret": h.get("return_pct", 0) or 0,
+                    "cost": h.get("cost_usd", 0) or 0}
+    return None
 
 
 def portfolio_weights(path: str | None = None) -> dict:

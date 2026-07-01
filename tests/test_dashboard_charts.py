@@ -81,6 +81,18 @@ def test_price_line_handles_none_and_empty():
     assert _is_fig(charts.price_line(pd.DataFrame()))
 
 
+def test_price_line_avg_cost_hline():
+    """보유 시 평단 수평선(add_hline) 오버레이 (J2)."""
+    idx = pd.date_range("2025-01-01", periods=30, freq="D")
+    hist = pd.DataFrame({"Close": range(100, 130)}, index=idx)
+    fig = charts.price_line(hist, "NVDA", avg_cost=115.0)
+    shapes = fig.layout.shapes or ()
+    assert any(getattr(s, "type", None) == "line" for s in shapes), "평단 hline 없음"
+    # avg_cost 없으면 hline 없음
+    fig2 = charts.price_line(hist, "NVDA")
+    assert not (fig2.layout.shapes or ())
+
+
 def test_hbar_orders_ascending():
     fig = charts.hbar(["x", "y", "z"], [0.3, 0.1, 0.6])
     bar = fig.data[0]
