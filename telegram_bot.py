@@ -194,6 +194,7 @@ _OWNER_MENU = [
     {"command": "order",     "description": "소수점 매수 주문서"},
     {"command": "card",      "description": "포트폴리오 카드 이미지 — 배분 도넛·수익"},
     {"command": "paper",     "description": "모의 페이퍼트레이딩 (/paper kr·us)"},
+    {"command": "evolve",    "description": "모의 자기개선 진화 (KR+US 학습 verdict)"},
     {"command": "holding",   "description": "보유 종목 조회/매수·매도/목표비중/DCA/배당"},
     {"command": "tax",       "description": "실현손익 & 양도세 (sim/sell/history/delete/import)"},
     {"command": "ask",       "description": "AI 포트폴리오 상담"},
@@ -1949,6 +1950,17 @@ def _dispatch_paper(chat_id: str, args: list):
         logger.exception("cmd_paper")
 
 
+def _dispatch_evolve(chat_id: str, args: list):
+    """모의 자기개선 진화 — KR+US 학습 verdict·순비용 IC·채택 이력 (owner 전용·표시형·read-only)."""
+    typing(chat_id)
+    try:
+        from bot.evolve_command import build_evolve_report
+        send_html(chat_id, build_evolve_report(html=True))
+    except Exception as e:
+        send(chat_id, f"⚠️ 진화 리포트 실패: {e}")
+        logger.exception("cmd_evolve")
+
+
 def _dispatch_rebalance(chat_id: str, args: list):
     """/rebalance (리밸런싱) + /rebalance dca·sgov (구 /dca·/sgov 병합).
 
@@ -2004,6 +2016,7 @@ _COMMAND_HANDLERS = {
     "/order": _dispatch_order,
     "/card": lambda chat_id, args: cmd_card(chat_id),
     "/paper": _dispatch_paper,
+    "/evolve": _dispatch_evolve,
     "/tax": _dispatch_tax,
     "/ask": _dispatch_ask,
     "/apply_snapshot": _dispatch_apply_snapshot,
