@@ -24,6 +24,7 @@ import logging
 import os
 import sys
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+import ticker_names  # 종목명 resolver (루트 모듈 — sys.path 세팅 이후)
 import urllib.parse
 from datetime import datetime, timezone, timedelta
 
@@ -356,7 +357,7 @@ def _db_props(row: dict) -> dict:
         return None if x is None else round(float(x), 4)
     return {
         "Ticker": {"title": [{"text": {"content": row["ticker"] or "—"}}]},
-        "종목명":  {"rich_text": [{"text": {"content": (row["name"] or "")[:80]}}]},
+        "종목명":  {"rich_text": [{"text": {"content": (row["name"] or ticker_names.display_name(row["ticker"]) or "")[:80]}}]},
         "통화":    {"select": {"name": row["ccy"]}},
         "수량":    {"number": num(row["shares"])},
         "평단가":  {"number": num(row["avg"])},
@@ -840,7 +841,7 @@ def build_blocks() -> list[dict]:
             for _, row in ranking.iterrows():
                 rows.append([
                     str(int(row["rank"])),
-                    str(row["ticker"]),
+                    ticker_names.label(str(row["ticker"])),
                     f"{float(row['score'])*100:+.2f}%",
                     f"{float(row.get('excess_mom_60d',0))*100:+.1f}%" if 'excess_mom_60d' in row else "—",
                     f"{float(row.get('beta_60d',0)):.2f}" if 'beta_60d' in row else "—",

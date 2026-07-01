@@ -37,6 +37,16 @@ for _p in (_ROOT, _HERE):
     if _p not in sys.path:
         sys.path.insert(0, _p)
 
+import ticker_names  # 종목명 resolver (루트 — sys.path 세팅 이후)
+
+
+def _name_label(ticker, maxlen=12):
+    """PNG y축용 '회사명 (티커)' (tight_layout 이 좌측 여백 자동 확장). 실패·미상 시 티커."""
+    try:
+        return ticker_names.label(ticker, maxlen=maxlen)
+    except Exception:
+        return ticker
+
 # ── 색상 팔레트 ───────────────────────────────────────────────────────────────
 _UP = "#21a366"        # 상승/긍정 (녹)
 _DOWN = "#e5484d"      # 하락/부정 (적)
@@ -136,7 +146,7 @@ def _panel_returns(ax, holdings):
             label=_ko("1일", "1D"), zorder=3)
     ax.axvline(0, color=_MUTED, linewidth=1)
     ax.set_yticks(y)
-    ax.set_yticklabels(tickers, fontsize=9, color=_INK)
+    ax.set_yticklabels([_name_label(t) for t in tickers], fontsize=9, color=_INK)
     ax.set_title(_ko("보유 종목 등락률 (1일·1개월)", "Holdings Return (1D / 1M)"),
                  fontsize=12, color=_INK, fontweight="bold", pad=10)
     ax.set_xlabel("%", color=_MUTED, fontsize=9)
@@ -225,7 +235,7 @@ def _panel_rsi(ax, price_history, holdings):
     ax.axvline(70, color=_DOWN, linewidth=0.9, linestyle="--", alpha=0.6)
     ax.set_xlim(0, 100)
     ax.set_yticks(y)
-    ax.set_yticklabels(tickers, fontsize=9, color=_INK)
+    ax.set_yticklabels([_name_label(t) for t in tickers], fontsize=9, color=_INK)
     ax.set_title(_ko("종목별 RSI(14) — 과매도30·과매수70", "RSI(14) — oversold 30 / overbought 70"),
                  fontsize=12, color=_INK, fontweight="bold", pad=10)
     _style_axes(ax)
@@ -240,8 +250,8 @@ def _panel_accum_or_score(ax, accum_picks, holdings):
         def _accum_label(e):
             t = e.get("ticker", "")
             if t.endswith(".KS"):
-                return (e.get("company") or t)[:14]
-            return t
+                return (e.get("company") or ticker_names.display_name(t) or t)[:14]
+            return _name_label(t)
         rows = [(_accum_label(e), e["accum_score"], e.get("verdict", "중립"))
                 for e in accum_picks][:8]
         rows.sort(key=lambda r: r[1])
@@ -255,7 +265,7 @@ def _panel_accum_or_score(ax, accum_picks, holdings):
         if not rows:
             raise ValueError("점수 데이터 없음")
         rows.sort(key=lambda r: r[1])
-        labels = [r[0] for r in rows]
+        labels = [_name_label(r[0]) for r in rows]
         vals = [r[1] for r in rows]
         colors = [_UP if v >= 70 else (_ACCENT if v >= 50 else _DOWN) for v in vals]
         title = _ko("종목별 펀더멘털 점수", "Fundamental Score")
