@@ -186,7 +186,12 @@ def main() -> int:
     logger.info("보상 백필: %d건 성숙", added)
 
     rows = ledger.training_set()
+    from ml.adaptive import evolution
+    snap = evolution.snapshot(rows)
     if len(rows) < MIN_SAMPLES:
+        evolution.record_learning("kr_mock", {
+            "date": datetime.now(KST).strftime("%Y-%m-%d"), "adopted": False,
+            "reason": "콜드스타트 (표본 미달)", **snap})
         msg = f"🇰🇷 KR 정책 학습 — 표본 {len(rows)}/{MIN_SAMPLES} 미달, 콜드스타트 유지(보류)"
         logger.info(msg)
         send_cron_telegram(msg)
@@ -206,6 +211,14 @@ def main() -> int:
         lambda oos, params: eval_policy(oos, params, MAX_POS),    # 배치 바스켓과 동일
         index_mdd=index_mdd, min_samples=MIN_SAMPLES, embargo=HORIZON)
     logger.info("재학습 결과: %s", out["reason"])
+    evolution.record_learning("kr_mock", {
+        "date": datetime.now(KST).strftime("%Y-%m-%d"), "adopted": bool(out.get("adopted")),
+        "reason": out.get("reason"),
+        "excess_challenger": (out.get("challenger") or {}).get("excess"),
+        "excess_champion": (out.get("champion") or {}).get("excess"),
+        "mdd_challenger": (out.get("challenger") or {}).get("mdd"),
+        "n_oos": (out.get("challenger") or {}).get("n"),
+        "candidate_params": out.get("candidate_params"), **snap})
     send_cron_telegram(f"🇰🇷 KR 정책 강화 (표본 {len(rows)})\n{out['reason']}\n⚠️ 모의 정책 — 실거래 미반영")
     return 0
 
