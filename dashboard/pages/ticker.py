@@ -27,16 +27,25 @@ def render():
     # 실시간 밴드(8s 자동갱신) — 히어로 ⚡가격·게이지·내 포지션·호가
     _live_top(ticker, hist, yf_price, prev, pos)
 
-    # 가격 차트 — 풀폭 (+ 보유 시 평단 수평선)
+    # 가격 차트 — 풀폭 · 라인/캔들 토글 (+ 보유 시 평단 수평선)
     if yf_price is not None:
-        st.plotly_chart(charts.price_line(hist, ticker_names.label(ticker),
-                                          avg_cost=pos.get("avg_price_usd") if pos else None),
-                        width="stretch", config=_NOBAR)
+        _price_chart(ticker, hist, pos.get("avg_price_usd") if pos else None)
     else:
         st.info("가격 데이터 없음 (yfinance)")
 
     _detail_sections(ticker, yf_price)
     _manage_position(ticker, cur, pos)
+
+
+@st.fragment
+def _price_chart(ticker, hist, avg_cost):
+    """가격 차트 — 라인/캔들 토글(차트만 부분 rerun·전체 리로드 방지)."""
+    kind = st.segmented_control("차트 종류", ["📈 라인", "🕯️ 캔들"], default="📈 라인",
+                                label_visibility="collapsed", key="_chart_kind")
+    label = ticker_names.label(ticker)
+    fig = (charts.price_candle(hist, label, avg_cost) if kind == "🕯️ 캔들"
+           else charts.price_line(hist, label, avg_cost))
+    st.plotly_chart(fig, width="stretch", config=_NOBAR)
 
 
 @st.fragment(run_every=8)

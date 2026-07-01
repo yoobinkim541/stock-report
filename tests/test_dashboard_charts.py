@@ -93,6 +93,35 @@ def test_price_line_avg_cost_hline():
     assert not (fig2.layout.shapes or ())
 
 
+# ── L2 캔들 차트 ──────────────────────────────────────────────────────
+def _ohlc(n=70, start=100):
+    idx = pd.date_range("2025-01-01", periods=n, freq="D")
+    return pd.DataFrame({"Open": range(start, start + n), "High": range(start + 1, start + n + 1),
+                         "Low": range(start - 1, start + n - 1), "Close": range(start, start + n)},
+                        index=idx)
+
+
+def test_price_candle_ohlc_and_ma():
+    import plotly.graph_objects as go
+    fig = charts.price_candle(_ohlc(), "TST")
+    assert any(isinstance(tr, go.Candlestick) for tr in fig.data), "Candlestick trace 없음"
+    names = [tr.name for tr in fig.data]
+    assert "MA20" in names and "MA60" in names
+    assert fig.layout.xaxis.rangeslider.visible is False        # 레인지슬라이더 off
+
+
+def test_price_candle_avg_cost_hline():
+    fig = charts.price_candle(_ohlc(30), "NVDA", avg_cost=115.0)
+    assert any(getattr(s, "type", None) == "line" for s in (fig.layout.shapes or ())), "평단 hline 없음"
+
+
+def test_price_candle_handles_missing_ohlc():
+    # OHLC 불완전(Close만)·None·빈 → 빈 Figure(예외 없이)
+    assert _is_fig(charts.price_candle(pd.DataFrame({"Close": [1, 2, 3]})))
+    assert _is_fig(charts.price_candle(None))
+    assert _is_fig(charts.price_candle(pd.DataFrame()))
+
+
 def test_hbar_orders_ascending():
     fig = charts.hbar(["x", "y", "z"], [0.3, 0.1, 0.6])
     bar = fig.data[0]

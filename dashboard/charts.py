@@ -65,6 +65,32 @@ def price_line(hist, ticker: str = "", avg_cost=None):
     return _t(fig)
 
 
+def price_candle(hist, ticker: str = "", avg_cost=None):
+    """가격 캔들(OHLC) + 20/60일 이동평균 (+ 보유 시 평단 수평선). hist: OHLC DataFrame."""
+    go = _go()
+    fig = go.Figure()
+    cols = set(getattr(hist, "columns", []))
+    if hist is None or getattr(hist, "empty", True) or not {"Open", "High", "Low", "Close"} <= cols:
+        return _t(fig)
+    fig.add_trace(go.Candlestick(
+        x=hist.index, open=hist["Open"], high=hist["High"], low=hist["Low"], close=hist["Close"],
+        name=ticker or "OHLC", increasing_line_color=_GREEN, decreasing_line_color=_RED,
+        increasing_fillcolor=_GREEN, decreasing_fillcolor=_RED, line=dict(width=1)))
+    close = hist["Close"]
+    for win in (20, 60):
+        if len(close) >= win:
+            fig.add_trace(go.Scatter(x=hist.index, y=close.rolling(win).mean(),
+                                     name=f"MA{win}", line=dict(width=1)))
+    if avg_cost and avg_cost > 0:
+        fig.add_hline(y=avg_cost, line=dict(color=theme.MUTED, dash="dash", width=1.2),
+                      annotation_text=f"평단 ${avg_cost:,.2f}", annotation_position="top left",
+                      annotation_font=dict(color=theme.MUTED, size=11))
+    fig.update_layout(margin=dict(t=10, b=10, l=10, r=10), height=320,
+                      legend=dict(orientation="h", y=1.1),
+                      xaxis_rangeslider_visible=False)
+    return _t(fig)
+
+
 def hbar(labels: list[str], values: list[float], title: str = "", pct: bool = True):
     """가로 막대 (위험기여·비중 등). 큰 값이 위로."""
     go = _go()
