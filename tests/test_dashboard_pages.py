@@ -88,6 +88,23 @@ def test_entry_app_runs_through_nav():
     assert not at.exception, str(at.exception)
 
 
+def test_sidebar_search_resolves_name_to_ticker():
+    """사이드바 검색: 한글명·영문명·티커 어느 것으로도 종목 resolve (Feature B).
+
+    유빈님 요구 — '마이크론'·'micron'·'MU' 어느 것으로 검색해도 MU 로 세션 반영.
+    """
+    at = AppTest.from_file(os.path.join(ROOT, "dashboard", "app.py"), default_timeout=60)
+    at.session_state["_authed"] = True
+    at.run()
+    assert not at.exception, str(at.exception)
+    search = [ti for ti in at.text_input if "검색" in (ti.label or "")]
+    assert search, "검색 text_input 미발견"
+    for term in ("마이크론", "micron", "MU"):
+        search[0].set_value(term).run()
+        assert not at.exception, str(at.exception)
+        assert at.session_state["ticker"] == "MU", f"{term} → {at.session_state['ticker']}"
+
+
 def test_portfolio_renders_risk_kpis():
     """포트폴리오: 리스크 KPI 4 + 보유표 (위험기여·팩터 막대는 plotly로 무예외)."""
     at = AppTest.from_string(_script("from dashboard.pages import portfolio", "portfolio.render()"),

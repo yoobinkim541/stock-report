@@ -4,6 +4,7 @@ from __future__ import annotations
 import pandas as pd
 import streamlit as st
 
+import ticker_names
 from dashboard import cached
 
 
@@ -21,5 +22,5 @@ def render():
 
     st.divider()
     ticker = st.session_state.get("ticker", "MSFT")
-    st.subheader(f"뉴스 · {ticker}")
+    st.subheader(f"뉴스 · {ticker_names.label(ticker)}")
     st.markdown(cached.news(ticker) or "_뉴스 없음_")

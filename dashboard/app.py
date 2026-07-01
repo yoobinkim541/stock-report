@@ -15,6 +15,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import streamlit as st
 
+import ticker_names  # 종목명 resolver (검색·표시 — 루트 모듈, sys.path 세팅 이후)
 from dashboard import auth, data, theme
 
 st.set_page_config(page_title="퀀트 터미널", page_icon="📊", layout="wide")
@@ -33,12 +34,16 @@ with st.sidebar:
     _cur = st.session_state["ticker"]
     _idx = _tickers.index(_cur) if _cur in _tickers else 0
     _pick = st.selectbox("보유 종목", _tickers, index=_idx)
-    _custom = st.text_input("또는 직접 입력", "", placeholder="예: AAPL · 005930.KS").strip().upper()
-    st.session_state["ticker"] = _custom or _pick
+    _custom = st.text_input("또는 검색 (이름·티커)", "", placeholder="예: 마이크론 · micron · MU").strip()
+    if _custom:
+        # 한글명·영문명·티커 어느 것으로도 resolve. 미해석 시 입력값을 티커로 폴백.
+        st.session_state["ticker"] = ticker_names.resolve(_custom) or _custom.upper()
+    else:
+        st.session_state["ticker"] = _pick
     if st.button("🔄 새로고침", width="stretch"):
         st.cache_data.clear()
         st.rerun()
-    st.caption(f"분석 대상: **{st.session_state['ticker']}**")
+    st.caption(f"분석 대상: **{ticker_names.label(st.session_state['ticker'])}**")
     st.caption(f"⏱ {datetime.now().strftime('%m/%d %H:%M')} 기준 · 캐시 15~60분")
 
     # 보유 종목 워치리스트 (터미널 레일 — 무네트워크: 스냅샷 수익률)
@@ -46,7 +51,7 @@ with st.sidebar:
     if _wl:
         st.markdown("<div style='height:8px'></div>", unsafe_allow_html=True)
         theme.render(theme.watchlist_html(
-            [{"symbol": h["ticker"], "last": h.get("value"), "chg_pct": h.get("ret")}
+            [{"symbol": h["ticker"], "name": h.get("name"), "last": h.get("value"), "chg_pct": h.get("ret")}
              for h in _wl if h.get("ticker")], title="보유 종목"))
 
 from dashboard.pages import home, market, portfolio, research

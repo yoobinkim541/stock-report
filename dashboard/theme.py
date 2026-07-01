@@ -135,12 +135,14 @@ def sparkline_svg(values, w=124, h=30) -> str:
             f'stroke-linejoin="round" stroke-linecap="round"/></svg>')
 
 
-def watchlist_row_html(symbol, last=None, chg_pct=None, spark=None) -> str:
+def watchlist_row_html(symbol, last=None, chg_pct=None, spark=None, name="") -> str:
     up = (chg_pct or 0) >= 0
     col = GREEN if up else RED
     chg = f"{'+' if up else ''}{_num(chg_pct)}%" if chg_pct is not None else "—"
+    # 회사명은 title 툴팁으로(좁은 4열 그리드 유지 — 호버 시 노출)
+    tip = f' title="{name}"' if name and name != symbol else ""
     return f'''<div class="tn-wl-row">
-  <span class="tn-wl-sym">{symbol}</span>
+  <span class="tn-wl-sym"{tip}>{symbol}</span>
   <span class="tn-wl-spark">{sparkline_svg(spark or [], w=90, h=24)}</span>
   <span class="tn-wl-last">{_num(last)}</span>
   <span class="tn-wl-chg" style="color:{col}">{chg}</span>
@@ -149,7 +151,8 @@ def watchlist_row_html(symbol, last=None, chg_pct=None, spark=None) -> str:
 
 def watchlist_html(rows: list[dict], title="워치리스트") -> str:
     body = "".join(watchlist_row_html(r.get("symbol", "?"), r.get("last"),
-                                      r.get("chg_pct"), r.get("spark")) for r in rows)
+                                      r.get("chg_pct"), r.get("spark"), r.get("name", ""))
+                   for r in rows)
     return f'<div class="tn-wl"><div class="tn-wl-head">{title}</div>{body}</div>'
 
 

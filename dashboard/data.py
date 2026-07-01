@@ -56,11 +56,20 @@ def load_holdings(path: str | None = None) -> list[dict]:
     for sec in ("overseas_general", "overseas_fractional"):
         usd += snap.get(sec, {}).get("holdings_usd", []) or []
     tot = sum(h.get("value_usd", 0) or 0 for h in usd) or 1
+    try:
+        import ticker_names
+    except Exception:
+        ticker_names = None
     rows = []
     for h in usd:
         v = h.get("value_usd", 0) or 0
+        tk = h.get("ticker", "")
+        nm = h.get("name", "") or ""
+        # 스냅샷 이름이 없거나 티커와 같으면 resolver 로 회사명 보강(무네트워크)
+        if (not nm or nm == tk) and ticker_names:
+            nm = ticker_names.display_name(tk, allow_net=False) or nm
         rows.append({
-            "ticker": h.get("ticker", ""), "name": h.get("name", ""),
+            "ticker": tk, "name": nm,
             "shares": h.get("shares", 0) or 0, "value": v,
             "ret": h.get("return_pct", 0) or 0, "weight": v / tot * 100,
         })

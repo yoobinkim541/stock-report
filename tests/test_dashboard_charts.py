@@ -37,6 +37,17 @@ def test_allocation_donut_empty():
     assert len(fig.data[0].labels) == 0
 
 
+def test_allocation_donut_hover_carries_company_names():
+    # 웨지 라벨은 티커 유지(공간), 호버 customdata 에 회사명
+    hold = [{"ticker": "MU", "value": 100, "name": "Micron Technology"},
+            {"ticker": "NVDA", "value": 300, "name": "NVIDIA"}]
+    pie = charts.allocation_donut(hold).data[0]
+    assert list(pie.labels) == ["NVDA", "MU"]            # 티커 라벨
+    cd = [str(x) for x in (pie.customdata or [])]
+    assert any("NVIDIA" in x for x in cd) and any("Micron" in x for x in cd)
+    assert "customdata" in (pie.hovertemplate or "")
+
+
 def test_price_line_with_ma():
     idx = pd.date_range("2025-01-01", periods=70, freq="D")
     hist = pd.DataFrame({"Close": range(70)}, index=idx)

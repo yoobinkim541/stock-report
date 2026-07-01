@@ -4,6 +4,7 @@ from __future__ import annotations
 import pandas as pd
 import streamlit as st
 
+import ticker_names
 from dashboard import cached, charts, data, theme
 
 _NOBAR = {"displayModeBar": False}
@@ -21,13 +22,13 @@ def render():
         prev = float(cl.iloc[-2]) if len(cl) > 1 else price
     chg = (price - prev) if (price is not None and prev) else None
     chg_pct = (chg / prev * 100) if (chg is not None and prev) else None
-    theme.render(theme.ticker_hero_html(ticker, ticker, price, chg, chg_pct,
-                                        f"{period} · yfinance 종가", ""))
+    theme.render(theme.ticker_hero_html(ticker, ticker_names.display_name(ticker) or ticker,
+                                        price, chg, chg_pct, f"{period} · yfinance 종가", ""))
 
     c1, c2 = st.columns([2.3, 1])
     with c1:
         if price is not None:
-            st.plotly_chart(charts.price_line(hist, ticker), width="stretch", config=_NOBAR)
+            st.plotly_chart(charts.price_line(hist, ticker_names.label(ticker)), width="stretch", config=_NOBAR)
         else:
             st.info("가격 데이터 없음 (yfinance)")
     with c2:

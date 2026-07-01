@@ -27,12 +27,15 @@ def _t(fig):
 def allocation_donut(holdings: list[dict]):
     """보유 비중 도넛. holdings: [{ticker, value, ...}]."""
     go = _go()
-    items = [(h.get("ticker", "?"), h.get("value", 0) or 0) for h in holdings if (h.get("value", 0) or 0) > 0]
+    items = [(h.get("ticker", "?"), h.get("value", 0) or 0, h.get("name") or h.get("ticker", "?"))
+             for h in holdings if (h.get("value", 0) or 0) > 0]
     items.sort(key=lambda x: x[1], reverse=True)
-    labels = [t for t, _ in items]
-    values = [v for _, v in items]
-    fig = go.Figure(go.Pie(labels=labels, values=values, hole=0.58,
-                           textinfo="label+percent", textposition="outside", sort=False))
+    labels = [t for t, _, _ in items]
+    values = [v for _, v, _ in items]
+    names = [n for _, _, n in items]  # 호버에 회사명(웨지 라벨은 티커 유지 — 공간)
+    fig = go.Figure(go.Pie(labels=labels, values=values, hole=0.58, customdata=names,
+                           textinfo="label+percent", textposition="outside", sort=False,
+                           hovertemplate="%{customdata} (%{label})<br>%{percent} · %{value:,.0f}<extra></extra>"))
     fig.update_layout(margin=dict(t=10, b=10, l=10, r=10), height=300, showlegend=False)
     return _t(fig)
 
