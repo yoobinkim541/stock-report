@@ -88,21 +88,40 @@ def test_entry_app_runs_through_nav():
     assert not at.exception, str(at.exception)
 
 
-def test_sidebar_search_resolves_name_to_ticker():
-    """사이드바 검색: 한글명·영문명·티커 어느 것으로도 종목 resolve (Feature B).
+def test_sidebar_unified_search_selectbox():
+    """사이드바 단일 검색 셀렉트박스: 유니버스에 MU 포함 + 선택 시 세션 반영 (H1).
 
-    유빈님 요구 — '마이크론'·'micron'·'MU' 어느 것으로 검색해도 MU 로 세션 반영.
+    타입어헤드 필터는 클라이언트측(마이크론·micron·MU 모두 라벨 매칭)이라 AppTest 로는
+    옵션 존재 + 선택 반영만 검증. 라벨/resolve 는 test_ticker_names 가 커버.
     """
     at = AppTest.from_file(os.path.join(ROOT, "dashboard", "app.py"), default_timeout=60)
     at.session_state["_authed"] = True
     at.run()
     assert not at.exception, str(at.exception)
-    search = [ti for ti in at.text_input if "검색" in (ti.label or "")]
-    assert search, "검색 text_input 미발견"
-    for term in ("마이크론", "micron", "MU"):
-        search[0].set_value(term).run()
-        assert not at.exception, str(at.exception)
-        assert at.session_state["ticker"] == "MU", f"{term} → {at.session_state['ticker']}"
+    sb = [s for s in at.selectbox if "검색" in (s.label or "")]
+    assert sb, "검색 셀렉트박스 미발견"
+    # options 는 format_func 적용 라벨 — 마이크론(MU) 라벨이 존재해야 타입어헤드로 도달 가능
+    assert any("(MU)" in o and "마이크론" in o for o in sb[0].options), "MU 라벨 없음"
+    # 선택 반영: 위젯 key(_tsel)에 raw 티커 세팅 = 셀렉트박스 선택 시뮬
+    at.session_state["_tsel"] = "MU"
+    at.run()
+    assert not at.exception, str(at.exception)
+    assert at.session_state["ticker"] == "MU"
+
+
+def test_ticker_survives_page_context_no_reset():
+    """비보유 종목을 외부(행클릭 시뮬)로 설정해도 사이드바가 holdings[0]로 되돌리지 않음 (H1 리셋버그 회귀차단).
+
+    기존 버그: 검색/행클릭한 비보유 종목이 rerun 시 셀렉트박스에 의해 보유[0]으로 리셋.
+    """
+    at = AppTest.from_file(os.path.join(ROOT, "dashboard", "app.py"), default_timeout=60)
+    at.session_state["_authed"] = True
+    at.run()
+    # 홈 행클릭이 하는 것과 동일: 논리 ticker 를 외부에서 세팅 후 rerun
+    at.session_state["ticker"] = "MU"      # 비보유(마이크론)
+    at.run()
+    assert not at.exception, str(at.exception)
+    assert at.session_state["ticker"] == "MU", f"리셋됨 → {at.session_state['ticker']}"
 
 
 def test_portfolio_renders_risk_kpis():

@@ -24,26 +24,31 @@ theme.inject_global_css()
 if not auth.password_gate():
     st.stop()
 
-# ── 사이드바: 보유종목 퀵픽 (타이핑 없이 선택) ──────────────────────────────
+# ── 사이드바: 단일 검색 셀렉트박스 (한글·영문·티커 타입어헤드) ────────────────
 _holdings = data.load_holdings()
-_tickers = [h["ticker"] for h in _holdings if h.get("ticker")] or ["MSFT"]
-st.session_state.setdefault("ticker", _tickers[0])
+_held = [h["ticker"] for h in _holdings if h.get("ticker")]
+st.session_state.setdefault("ticker", _held[0] if _held else "MSFT")
 
 with st.sidebar:
-    st.markdown("### 🔎 종목 선택")
+    st.markdown("### 🔎 종목")
     _cur = st.session_state["ticker"]
-    _idx = _tickers.index(_cur) if _cur in _tickers else 0
-    _pick = st.selectbox("보유 종목", _tickers, index=_idx)
-    _custom = st.text_input("또는 검색 (이름·티커)", "", placeholder="예: 마이크론 · micron · MU").strip()
-    if _custom:
-        # 한글명·영문명·티커 어느 것으로도 resolve. 미해석 시 입력값을 티커로 폴백.
-        st.session_state["ticker"] = ticker_names.resolve(_custom) or _custom.upper()
-    else:
-        st.session_state["ticker"] = _pick
+    # 옵션 = 보유 우선 + 전체 유니버스. 현재 종목이 유니버스 밖이면 앞에 보장.
+    _opts = list(dict.fromkeys(_held + ticker_names.universe()))
+    if _cur not in _opts:
+        _opts = [_cur] + _opts
+    # 외부(홈 행클릭·초기화)로 ticker 가 바뀌면 위젯에 반영. 위젯 자체 선택은 보존.
+    # (Streamlit 위젯상태 vs 외부 session_state 동기화 관용 패턴)
+    if st.session_state.get("_tsel_sync") != _cur:
+        st.session_state["_tsel"] = _cur
+        st.session_state["_tsel_sync"] = _cur
+    _sel = st.selectbox("검색 (한글·영문·티커)", _opts,
+                        format_func=ticker_names.search_label, key="_tsel")
+    if _sel != _cur:
+        st.session_state["ticker"] = _sel
+        st.session_state["_tsel_sync"] = _sel
     if st.button("🔄 새로고침", width="stretch"):
         st.cache_data.clear()
         st.rerun()
-    st.caption(f"분석 대상: **{ticker_names.label(st.session_state['ticker'])}**")
     st.caption(f"⏱ {datetime.now().strftime('%m/%d %H:%M')} 기준 · 캐시 15~60분")
 
     # 보유 종목 워치리스트 (터미널 레일 — 무네트워크: 스냅샷 수익률)

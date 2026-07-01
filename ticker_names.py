@@ -244,3 +244,21 @@ def search(query: str, limit: int = 8) -> list[tuple[str, str]]:
         if len(out) >= limit:
             break
     return out
+
+
+def universe() -> list[str]:
+    """검색 가능한 전체 티커(EN∪KR∪KO 큐레이트 키), 티커 정렬. 대시보드 통합 검색용."""
+    return sorted(_ALL_TICKERS)
+
+
+def search_label(ticker: str) -> str:
+    """검색 셀렉트박스용 라벨 `회사명 (티커) · 한글별칭` — 한/영/티커 타입어헤드 지원.
+
+    한글 별칭을 덧붙여 네이티브 selectbox 필터가 한글 입력도 매칭하게 한다.
+    """
+    t = (ticker or "").strip()
+    base = label(t)  # "회사명 (티커)" or 티커
+    ko = KO.get(t.upper())
+    if ko and ko[0] and ko[0] not in base:
+        return f"{base} · {ko[0]}"
+    return base

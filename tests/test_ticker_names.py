@@ -85,6 +85,21 @@ def test_search_candidates():
     assert "MU" in tickers  # 마이크론
 
 
+# ── universe / search_label (대시보드 통합 검색) ────────────────────────
+def test_universe_contains_holdings_and_popular():
+    u = ticker_names.universe()
+    assert "MU" in u and "NVDA" in u and "005930.KS" in u
+    assert u == sorted(u)  # 정렬됨
+
+
+def test_search_label_appends_korean_for_typeahead():
+    # US: 영문 (티커) · 한글 → 한글 타입어헤드 매칭
+    lab = ticker_names.search_label("MU")
+    assert "Micron Technology (MU)" in lab and "마이크론" in lab
+    # KR: 이미 한글명 → 중복 별칭 안 붙음
+    assert ticker_names.search_label("005930.KS") == "삼성전자 (005930.KS)"
+
+
 # ── yfinance 디스크캐시 R/W (tmp 격리·무네트워크) ──────────────────────
 def test_cache_roundtrip(monkeypatch, tmp_path):
     import time
