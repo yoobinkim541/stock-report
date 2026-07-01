@@ -7,6 +7,8 @@ import sys
 import logging
 from datetime import datetime, timedelta
 
+import fmt
+
 from barbell_strategy import fetch_exchange_rate, fetch_portfolio_value, PORTFOLIO_PATH
 from holding_manager import (
     list_holdings, buy_holding, sell_holding,
@@ -93,7 +95,7 @@ def cmd_dividend(chat_id: str, args: list, send_fn):
             "  재투자 대상별:",
         ]
         for ticker, amt in summary["by_ticker"].items():
-            lines.append(f"    {ticker:<6}  ${amt:.2f}")
+            lines.append(f"    {fmt.wpad(fmt.name(ticker, maxlen=12), 18)}  ${amt:.2f}")
 
         lines += ["", "  최근 기록:"]
         for r in summary["records"][-5:]:

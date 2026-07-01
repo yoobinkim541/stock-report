@@ -12,6 +12,8 @@ from __future__ import annotations
 
 import logging
 
+import fmt
+
 logger = logging.getLogger(__name__)
 
 _UNIVERSE_CMDS = {"US50", "KR", "WATCH", "LEVERAGE"}
@@ -87,7 +89,7 @@ def _entry_all(chat_id: str, _send) -> None:
 
 def _entry_single(chat_id: str, ticker: str, _send) -> None:
     """단일 종목 상세 진입 분석 (미국/한국 모두 지원)."""
-    _send(chat_id, f"⏳ {ticker} 진입 분석 중...")
+    _send(chat_id, f"⏳ {fmt.name(ticker)} 진입 분석 중...")
     try:
         import pandas as pd
         from ml.data_pipeline import fetch_prices
@@ -106,7 +108,7 @@ def _entry_single(chat_id: str, ticker: str, _send) -> None:
 
         df = prices.get(ticker)
         if df is None:
-            _send(chat_id, f"❌ {ticker} 가격 데이터 없음 (yfinance 미지원 티커일 수 있음)")
+            _send(chat_id, f"❌ {fmt.name(ticker)} 가격 데이터 없음 (yfinance 미지원 티커일 수 있음)")
             return
 
         category = "leverage" if ticker in LEVERAGE_ETFS else "stock"
@@ -117,7 +119,7 @@ def _entry_single(chat_id: str, ticker: str, _send) -> None:
         score = analyze_entry(ticker, df, vix_s, n_similar=40,
                               category=category, underlying_price=und_px)
         if score is None:
-            _send(chat_id, f"❌ {ticker} 분석 실패 — 데이터 부족 (최소 120일 필요)")
+            _send(chat_id, f"❌ {fmt.name(ticker)} 분석 실패 — 데이터 부족 (최소 120일 필요)")
             return
 
         msg = format_alert_message(score)
@@ -132,7 +134,7 @@ def _entry_single(chat_id: str, ticker: str, _send) -> None:
             _send(chat_id, chunk)
 
     except Exception as e:
-        _send(chat_id, f"❌ {ticker} 분석 오류: {e}")
+        _send(chat_id, f"❌ {fmt.name(ticker)} 분석 오류: {e}")
         logger.exception("cmd_entry single %s", ticker)
 
 

@@ -269,7 +269,7 @@ def build_performance_report(perf: dict, latest: dict,
             f"월 평균 {fmt.money(div_sum['avg_monthly'], digits=2)}",
         ]
         for ticker, amt in list(div_sum["by_ticker"].items())[:4]:
-            lines.append(f"  → {ticker} {fmt.money(amt, digits=2)}")
+            lines.append(f"  → {fmt.name(ticker)} {fmt.money(amt, digits=2)}")
 
     return "\n".join(lines)
 

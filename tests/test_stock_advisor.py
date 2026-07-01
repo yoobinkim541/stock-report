@@ -79,8 +79,9 @@ def test_build_advisor_prompt_includes_individual_stock_holdings():
     prompt = build_advisor_prompt("개별주 점검해줘", market)
 
     assert "[개별 보유 종목]" in prompt
-    assert "NVDA — 엔비디아" in prompt
-    assert "MSFT — 마이크로소프트" in prompt
+    # 새 포맷 `회사명 (티커)` (fmt.name)
+    assert "엔비디아 (NVDA)" in prompt
+    assert "마이크로소프트 (MSFT)" in prompt
     assert "$422.28" in prompt
     assert "14.66%" in prompt
 

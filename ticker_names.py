@@ -34,8 +34,8 @@ EN: dict[str, str] = {
     "AAPL": "Apple", "AMZN": "Amazon", "META": "Meta Platforms", "TSLA": "Tesla",
     "MU": "Micron Technology", "AMD": "AMD", "AVGO": "Broadcom", "NFLX": "Netflix",
     "INTC": "Intel", "QCOM": "Qualcomm", "TXN": "Texas Instruments", "ADBE": "Adobe",
-    "CSCO": "Cisco", "PEP": "PepsiCo", "COST": "Costco", "CRM": "Salesforce",
-    "NOW": "ServiceNow", "CPNG": "Coupang", "PLTR": "Palantir", "ARM": "Arm Holdings",
+    "CSCO": "Cisco", "PEP": "PepsiCo", "COST": "Costco", "CRM": "Salesforce",  # ticker-ok
+    "NOW": "ServiceNow", "CPNG": "Coupang", "PLTR": "Palantir", "ARM": "Arm Holdings",  # ticker-ok
     "SMCI": "Super Micro", "TSM": "TSMC", "ASML": "ASML", "MRVL": "Marvell",
     "PANW": "Palo Alto Networks", "SNOW": "Snowflake", "SHOP": "Shopify",
 }
@@ -70,9 +70,9 @@ KO: dict[str, tuple[str, ...]] = {
     "CSCO": ("시스코", "CISCO"),
     "PEP": ("펩시코", "펩시", "PEPSI"),
     "COST": ("코스트코", "COSTCO"),
-    "CRM": ("세일스포스", "SALESFORCE"),
-    "NOW": ("서비스나우", "SERVICENOW"),
-    "CPNG": ("쿠팡", "COUPANG"),
+    "CRM": ("세일스포스", "SALESFORCE"),  # ticker-ok
+    "NOW": ("서비스나우", "SERVICENOW"),  # ticker-ok
+    "CPNG": ("쿠팡", "COUPANG"),  # ticker-ok
     "PLTR": ("팔란티어", "PALANTIR"),
     "ARM": ("암홀딩스",),
     "SMCI": ("슈퍼마이크로",),

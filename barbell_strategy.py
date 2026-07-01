@@ -1085,7 +1085,7 @@ def build_smart_report(portfolio: dict, market_type: str, phase_key,
         bar_t = _bar(p["target_pct"] / 15, 6)
         pnl_s = f"  P&L ${p['pnl']:+.0f}" if p["pnl"] != 0 else ""
         L.append(
-            f"  {p['ticker']:<6}  현재 {p['current_pct']:>4.1f}% {bar_c}  "
+            f"  {fmt.wpad(fmt.name(p['ticker'], maxlen=12), 18)}  현재 {p['current_pct']:>4.1f}% {bar_c}  "
             f"목표 {p['target_pct']:>4.1f}% {bar_t}  "
             f"{arrow}{abs(diff):.1f}%p{pnl_s}"
         )
@@ -1111,7 +1111,7 @@ def build_smart_report(portfolio: dict, market_type: str, phase_key,
         orig = int(result["base_dca_krw"] * result["adj_weights"].get(ticker, 0))
         diff_amt = amt - orig
         diff_s = f"  ({diff_amt:+,}원)" if abs(diff_amt) > 100 else ""
-        L.append(f"  {ticker:<6}  {bar}  {amt:,}원  ${usd:.1f}{diff_s}")
+        L.append(f"  {fmt.wpad(fmt.name(ticker, maxlen=12), 18)}  {bar}  {amt:,}원  ${usd:.1f}{diff_s}")
 
     return "\n".join(L)
 
@@ -1228,7 +1228,7 @@ def _dca_rows(by_ticker: dict, total_krw: int, exchange_rate: float) -> list:
         bar = _bar(amt / max_amt if max_amt > 0 else 0, 8)
         pct = round(amt / total_krw * 100) if total_krw > 0 else 0
         usd = round(amt / exchange_rate, 1)
-        rows.append(f"  {ticker:<5}  {bar}  {amt:,}원  ${usd:.1f}  ({pct}%)")
+        rows.append(f"  {fmt.wpad(fmt.name(ticker, maxlen=12), 18)}  {bar}  {amt:,}원  ${usd:.1f}  ({pct}%)")
     return rows
 
 
@@ -1394,7 +1394,7 @@ def _section_special_alerts(market_type: str, phase_key, portfolio: dict,
     alerts = []
     if market_type == "bull" and phase_key == "bull_2":
         hot = [
-            f"{h['ticker']} {h['return_pct']:+.0f}%"
+            f"{fmt.name(h['ticker'])} {h['return_pct']:+.0f}%"
             for h in portfolio.get("holdings_detail", [])
             if h.get("ticker") not in _SKIP_TICKERS
             and isinstance(h.get("return_pct"), (int, float))
@@ -1404,7 +1404,7 @@ def _section_special_alerts(market_type: str, phase_key, portfolio: dict,
             alerts.append(f"⚡ 과열 익절 검토: {', '.join(hot[:3])} — SGOV 비축 최우선")
     if market_type == "bear" and isinstance(phase_key, int) and phase_key >= 3:
         loss = [
-            f"{h['ticker']} {h['return_pct']:+.0f}%"
+            f"{fmt.name(h['ticker'])} {h['return_pct']:+.0f}%"
             for h in portfolio.get("holdings_detail", [])
             if h.get("ticker") not in _SKIP_TICKERS
             and isinstance(h.get("return_pct"), (int, float))
@@ -1618,9 +1618,9 @@ def calculate_rebalancing(
             sign  = "+" if pnl >= 0 else ""
             # Bull/중립 복귀 시 레버리지 정리 권고
             if market_type in ("bull", "neutral") and val > 100:
-                lev_lines.append(f"  {ticker}  ${val:.0f}  {sign}{pnl:.1f}%  → ⚠️ 복귀 구간, 일부 익절 고려")
+                lev_lines.append(f"  {fmt.name(ticker)}  ${val:.0f}  {sign}{pnl:.1f}%  → ⚠️ 복귀 구간, 일부 익절 고려")
             else:
-                lev_lines.append(f"  {ticker}  ${val:.0f}  {sign}{pnl:.1f}%  (보유 유지)")
+                lev_lines.append(f"  {fmt.name(ticker)}  ${val:.0f}  {sign}{pnl:.1f}%  (보유 유지)")
 
     # DCA 비중 — Phase 2+ 는 BEAR 가중치
     w_normal_r, w_bear_r = load_dca_weights()
@@ -1663,7 +1663,7 @@ def calculate_rebalancing(
     for ticker, w in dca_w.items():
         amt = int(daily_krw * w)
         bar = _bar(w / max_w, 8)
-        lines.append(f"  {ticker:<5}  {bar}  {amt:,}원  ({int(w*100)}%)")
+        lines.append(f"  {fmt.wpad(fmt.name(ticker, maxlen=12), 18)}  {bar}  {amt:,}원  ({int(w*100)}%)")
 
     return {
         "sgov_diff":    round(sgov_diff, 2),

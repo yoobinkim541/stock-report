@@ -37,6 +37,7 @@ from barbell_strategy import (
 )
 
 import notify
+import fmt
 
 MARKET_OPEN_KST = 22   # KST 22:00 = 미국 장 시작
 
@@ -45,20 +46,6 @@ QTY_DECIMALS = 4
 # 역검증 허용오차: 1주문당 절대 100원 또는 상대 1% 중 큰 값까지 허용
 PRECISION_ABS_KRW = 100.0
 PRECISION_REL = 0.01
-
-COMPANY_NAMES: dict[str, str] = {
-    "ORCL":  "Oracle",
-    "NVDA":  "NVIDIA",
-    "MSFT":  "Microsoft",
-    "GOOGL": "Alphabet",
-    "UNH":   "UnitedHealth",
-    "SAP":   "SAP SE",
-    "SPMO":  "SP500 Mom",
-    "SGOV":  "T-Bill",
-    "QQQI":  "NBI CC",
-    "QQQ":   "Nasdaq 100",
-}
-
 
 def _display_width(s: str) -> int:
     """문자열의 실제 표시 폭 (CJK=2, 이모지=2, ASCII=1)."""
@@ -162,8 +149,7 @@ def generate(send: bool = False) -> str:
     safe_fx = _safe(fx, default=0.0)
     for ticker, krw_amt in dca["by_ticker"].items():
         price = prices.get(ticker, 0)
-        company = COMPANY_NAMES.get(ticker, "")
-        label_str = f"{ticker} — {company}" if company else ticker
+        label_str = fmt.name(ticker)
         if price > 0 and safe_fx > 0:
             usd_amt    = krw_amt / safe_fx
             # 표시·실주문 자리수와 동일하게 반올림한 수량을 권위값으로 사용
@@ -212,7 +198,7 @@ def generate(send: bool = False) -> str:
     # 정밀도 경고: 소수점 수량 반올림 때문에 실투입 원화가 선언액과 어긋나는 종목 안내
     if precision_warns:
         names = ", ".join(
-            f"{w['ticker']}({w['drift_krw']:+,.0f}원)" for w in precision_warns
+            f"{fmt.name(w['ticker'], maxlen=12)}({w['drift_krw']:+,.0f}원)" for w in precision_warns
         )
         lines += [
             "",

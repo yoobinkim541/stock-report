@@ -734,7 +734,7 @@ def cmd_portfolio(d: dict) -> str:
             price = lev_prices.get(ticker, avg)
             val   = sh * price
             pnl   = (price - avg) / avg * 100 if avg > 0 else 0
-            lines.append(f"{ticker} {fmt.money(val)}  {sh:g}주 @${avg:.2f}  {fmt.spct(pnl)}")
+            lines.append(f"{fmt.name(ticker)} {fmt.money(val)}  {sh:g}주 @${avg:.2f}  {fmt.spct(pnl)}")
     if not has_lev:
         lines.append("레버리지 미보유")
 
@@ -751,7 +751,7 @@ def cmd_portfolio(d: dict) -> str:
             pnl = h.get("pnl_usd")
             if pnl is None:
                 pnl = val - val / (1 + ret / 100) if ret > -100 else 0.0
-            rows.append(fmt.wpad(h["ticker"], 6) + fmt.wpad(fmt.money(val), 9, ">")
+            rows.append(fmt.wpad(fmt.name(h["ticker"], maxlen=12), 20) + fmt.wpad(fmt.money(val), 9, ">")
                         + "  " + fmt.wpad(fmt.spct(ret), 8) + _sm(pnl))
         lines += ["", "📈 개별 종목", fmt.pre("\n".join(rows))]
 
@@ -798,7 +798,7 @@ def cmd_dca(d: dict) -> str:
         pct  = amt / dca["total_krw"] * 100 if dca["total_krw"] > 0 else 0
         tag  = ml_dir.get(ticker, "")
         usd  = round(amt / d["exchange_rate"], 2)
-        lines.append(f"{ticker} {amt:,}원  ${usd:.2f} ({pct:.0f}%) {tag}".rstrip())
+        lines.append(f"{fmt.name(ticker)} {amt:,}원  ${usd:.2f} ({pct:.0f}%) {tag}".rstrip())
 
     lines += [
         "",
@@ -1218,13 +1218,13 @@ def cmd_alert(chat_id: str, args: list):
             for a in active:
                 t     = "↓매수" if a["type"] == "buy" else "↑매도"
                 note  = f"  [{a['note']}]" if a.get("note") else ""
-                lines.append(f"  {a['id']}  {a['ticker']}  {t}${a['price']:.2f}{note}")
+                lines.append(f"  {a['id']}  {fmt.name(a['ticker'])}  {t}${a['price']:.2f}{note}")
         if done:
             lines.append("\n✅ 완료")
             for a in done[-5:]:
                 t  = "↓매수" if a["type"] == "buy" else "↑매도"
                 tp = a.get("triggered_price", "?")
-                lines.append(f"  {a['id']}  {a['ticker']}  {t}${a['price']:.2f}  → ${tp}  ({a.get('triggered_at','?')[:10]})")
+                lines.append(f"  {a['id']}  {fmt.name(a['ticker'])}  {t}${a['price']:.2f}  → ${tp}  ({a.get('triggered_at','?')[:10]})")
         send(chat_id, "\n".join(lines))
 
     elif sub == "add":
@@ -1259,7 +1259,7 @@ def cmd_alert(chat_id: str, args: list):
             f"✅ 알림 등록 완료\n"
             f"━━━━━━━━━━━━━━━━━━━━━━━\n"
             f"ID      {aid}\n"
-            f"종목    {ticker}\n"
+            f"종목    {fmt.name(ticker)}\n"
             f"목표가  ${price:.2f}  ({type_str})\n"
         )
         if note:
@@ -1298,7 +1298,7 @@ def notify_triggered_alerts():
         msg = (
             f"🔔 가격 알림 발동!\n"
             f"━━━━━━━━━━━━━━━━━━━━━━━\n"
-            f"종목    {a['ticker']}\n"
+            f"종목    {fmt.name(a['ticker'])}\n"
             f"조건    {t}  @ ${a['price']:.2f}\n"
             f"현재가  ${tp:.2f}\n"
             f"ID      {a['id']}\n"

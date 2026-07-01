@@ -44,7 +44,7 @@ def _overview(send, chat_id: str) -> None:
         per = f"PER {v['per']:.1f}x" if v.get("per") is not None else "PER —"
         dy = f"· 배당 {v['div_yield'] * 100:.2f}%" if v.get("div_yield") is not None else ""
         surp = f"· 직전 {last['surprise_pct']:+.1f}%" if last.get("surprise_pct") is not None else ""
-        lines.append(f"• {fmt.b(t)} — {cal} | {per} {dy} {surp}".rstrip())
+        lines.append(f"• {fmt.b(fmt.name(t))} — {cal} | {per} {dy} {surp}".rstrip())
     lines.append("")
     lines.append("상세: /earnings TICKER")
     send(chat_id, "\n".join(lines))
@@ -57,7 +57,7 @@ def _detail(send, chat_id: str, ticker: str) -> None:
     v = s.get("valuation", {}) or {}
     c = s.get("consensus", {}) or {}
     n = s.get("next_earnings", {}) or {}
-    lines = [f"📊 {fmt.b(ticker)} 실적·밸류에이션", fmt.SEP]
+    lines = [f"📊 {fmt.b(fmt.name(ticker))} 실적·밸류에이션", fmt.SEP]
 
     # 밸류 / 수익 2줄 분할 (6약어 한 줄 → 모바일 줄바꿈 방지)
     val_parts = []

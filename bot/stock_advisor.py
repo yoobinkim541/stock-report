@@ -14,6 +14,8 @@ PROJECT_DIR = Path(__file__).resolve().parent.parent  # bot/ → 프로젝트 �
 if str(PROJECT_DIR) not in sys.path:
     sys.path.insert(0, str(PROJECT_DIR))
 
+import fmt  # 루트 모듈 — sys.path 세팅 이후 import
+
 ADVISOR_MODEL = os.environ.get("STOCK_ADVISOR_MODEL", "gpt-5.5")
 EDITABLE_FILES = [
     "portfolio_snapshot.json",
@@ -68,14 +70,14 @@ def _format_holdings(portfolio: dict) -> str:
             value_text = f"${value}" if value is not None else _fmt(h.get("value_krw"))
             ret = h.get("return_pct")
             ret_text = f", 수익률 {ret}%" if ret is not None else ""
-            lines.append(f"- {ticker} — {name}: {shares}주, 평가 {value_text}{ret_text}")
+            lines.append(f"- {fmt.name(ticker, name)}: {shares}주, 평가 {value_text}{ret_text}")
         return "\n".join(lines) + "\n\n"
 
     holdings = portfolio.get("holdings") or {}
     if holdings:
         lines = ["[개별 보유 종목]"]
         for ticker, shares in holdings.items():
-            lines.append(f"- {ticker}: {shares}주")
+            lines.append(f"- {fmt.name(ticker)}: {shares}주")
         return "\n".join(lines) + "\n\n"
 
     return ""
@@ -94,7 +96,7 @@ def build_ml_context() -> str:
             sorted_scores = sorted(scores.items(), key=lambda x: x[1], reverse=True)
             lines.append("- 포트폴리오 종목 ML 예측 (QQQ 초과수익, 내림차순):")
             for ticker, score in sorted_scores:
-                lines.append(f"    {ticker}: {score*100:+.2f}%")
+                lines.append(f"    {fmt.name(ticker)}: {score*100:+.2f}%")
             ml_mult, ml_label = _ml_breadth_mult(breadth)
             lines.append(f"- 포트폴리오 평균 ML 강도: {breadth*100:+.2f}%  →  DCA {ml_mult}× 보정 ({ml_label or '중립'})")
     except Exception as e:
@@ -108,7 +110,7 @@ def build_ml_context() -> str:
             lines.append(f"- LightGBM 랭커 OOS IC: {result.oos_ic:+.3f}  ICIR: {result.oos_icir:.2f}")
         ranking = rank_today(mode="nasdaq100", top_n=5)
         if not ranking.empty:
-            top5 = "  ".join(f"{r['ticker']}({r['score']*100:+.1f}%)"
+            top5 = "  ".join(f"{fmt.name(r['ticker'])}({r['score']*100:+.1f}%)"
                              for _, r in ranking.head(5).iterrows())
             lines.append(f"- NASDAQ100 상위 5: {top5}")
     except Exception as e:

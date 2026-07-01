@@ -71,7 +71,7 @@ def _tax_delete(chat_id: str, args: list, send_fn):
         sg = "▲" if gu >= 0 else "▼"
         send_fn(chat_id,
                 f"🗑 #{n} 삭제 완료\n"
-                f"  {removed['date']}  {removed['ticker']}  {removed['qty']}주\n"
+                f"  {removed['date']}  {fmt.name(removed['ticker'])}  {removed['qty']}주\n"
                 f"  @${removed['buy_price_usd']:.2f} → @${removed['sell_price_usd']:.2f}"
                 f"  {sg}${abs(gu):,.2f}")
 
@@ -174,7 +174,7 @@ def _tax_sim(chat_id: str, args: list, send_fn):
     lines = [
         f"🔮 매도 시뮬레이션 (실제 반영 안됨)",
         SEP,
-        f"종목  {ticker} — {company}",
+        f"종목  {fmt.name(ticker, company)}",
         f"수량  {qty}주   @${sell_price:.2f} (현재가)",
         f"매수단가  ${buy_price:.2f}",
         f"예상 손익  {sg}${abs(gu):,.2f}  ({sg}{abs(gk):,.0f}원)",
@@ -225,7 +225,7 @@ def _tax_sell(chat_id: str, args: list, send_fn):
         send_fn(chat_id, (
             f"✅ 매도 기록 저장\n"
             f"{fmt.SEP}\n"
-            f"  종목     {ticker}\n"
+            f"  종목     {fmt.name(ticker)}\n"
             f"  수량     {qty}주\n"
             f"  매수단가 ${buy_price:.2f}\n"
             f"  매도단가 ${sell_price:.2f}\n"
@@ -252,7 +252,7 @@ def _tax_history(chat_id: str, send_fn):
         gk = r.get("gain_krw", 0)
         sg = "▲" if gu >= 0 else "▼"
         lines.append(
-            f"{r['date']}  {r['ticker']:<6}  {r['qty']}주\n"
+            f"{r['date']}  {fmt.wpad(fmt.name(r['ticker'], maxlen=12), 18)}  {r['qty']}주\n"
             f"  @${r['buy_price_usd']:.2f} → @${r['sell_price_usd']:.2f}"
             f"  {sg}${abs(gu):,.2f}  ({sg}{abs(gk):,.0f}원)"
         )
@@ -298,12 +298,12 @@ def _tax_summary(chat_id: str, send_fn):
                 by_krw[t] = by_krw.get(t, 0) + r.get("gain_krw", 0)
 
             # 종목별 실현손익 — 등폭 표(<pre>)·표시폭 정렬(wpad: CJK 2칸)
-            tbl = [fmt.wpad("종목", 8) + fmt.wpad("USD", 13, ">") + fmt.wpad("KRW", 15, ">")]
+            tbl = [fmt.wpad("종목", 20) + fmt.wpad("USD", 13, ">") + fmt.wpad("KRW", 15, ">")]
             for t in sorted(by_usd, key=lambda x: -by_usd[x]):
                 gu = by_usd[t]
                 gk = by_krw[t]
                 sg = "▲" if gu >= 0 else "▼"
-                tbl.append(fmt.wpad(t, 8)
+                tbl.append(fmt.wpad(fmt.name(t, maxlen=12), 20)
                            + fmt.wpad(f"{sg}${abs(gu):,.2f}", 13, ">")
                            + fmt.wpad(f"{sg}{abs(gk):,.0f}원", 15, ">"))
             lines.append(fmt.pre("\n".join(tbl)))

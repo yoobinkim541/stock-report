@@ -48,6 +48,7 @@ _AUDIT_EXCLUDE = (
     "backtest/",                 # 과거 데이터 분석 스크립트
     "ml/universe.py",            # 시장 유니버스 (보유와 무관한 종목 스캔)
     "bot/attachment_parser.py",  # 과거 증권사 명세서 파싱용 이름맵
+    "ticker_names.py",           # 종목명 resolver 유니버스 (검색용 — 은퇴 종목명도 포함)
     "portfolio_universe.py",     # 이 파일 (RETIRED_SEED 정의)
 )
 

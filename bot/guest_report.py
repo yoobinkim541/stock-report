@@ -15,6 +15,8 @@ from __future__ import annotations
 import os
 import time
 
+import fmt
+
 DISCLAIMER = (
     "\n────────────\n"
     "ℹ️ 참고용 시장 데이터·기술적 지표입니다. 매매 권유가 아니며 "
@@ -104,9 +106,9 @@ def _build_indicators_raw(ticker: str) -> str:
     try:
         hist = yf.Ticker(ticker).history(period="1y")
     except Exception:
-        return f"❌ {ticker} 데이터 조회 실패"
+        return f"❌ {fmt.name(ticker)} 데이터 조회 실패"
     if hist is None or hist.empty or len(hist) < 30:
-        return f"❌ {ticker} 데이터 부족 (티커 확인)"
+        return f"❌ {fmt.name(ticker)} 데이터 부족 (티커 확인)"
 
     close = hist["Close"].dropna()
     price = float(close.iloc[-1])
@@ -141,7 +143,7 @@ def _build_indicators_raw(ticker: str) -> str:
         rsi_tag = "  (과매수)" if rsi >= 70 else "  (과매도)" if rsi <= 30 else ""
 
     lines = [
-        f"📈 {ticker} 기술적 지표 (읽기전용)",
+        f"📈 {fmt.name(ticker)} 기술적 지표 (읽기전용)",
         "━━━━━━━━━━━━━━━━━━━",
         f"  현재가      ${price:,.2f}",
         f"  RSI(14)     {rsi:.0f}{rsi_tag}" if rsi is not None else "",
