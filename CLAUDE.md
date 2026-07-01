@@ -64,6 +64,7 @@ crons/news_spike_detector.py (크론 매 1분)
 | `portfolio_sync_server.py` | 외부 잔고 수신 Flask 서버 (port 8765, Bearer 인증) | — |
 | `kis_stream.py` | KIS 실시간 시세 **읽기전용** WebSocket 상시 프로세스 — 실전 WS(`ops.koreainvestment.com:21000`) 하드락·체결(가격·거래량)/호가 → 캐시 coalesce flush. `REALTIME_ENABLED` 게이트·주문경로 0(grep 강제)·재접속 백오프·watchdog 재기동 | `~/.cache/kis_realtime_quotes.json` |
 | `safe_io.py` | 멀티프로세스 안전 파일 I/O — atomic write + 교차 프로세스 쓰기 락(portfolio_snapshot writer 공용) | `<path>.lock` |
+| `ticker_names.py` | 종목 티커↔회사명 **단일 진실원**(표시·검색 공용) — 큐레이트 EN/KO/KR 시드 + 역인덱스 + yfinance 디스크캐시(graceful). `display_name`(US 영문·.KS 한글)·`label`(`회사명 (티커)`·maxlen)·`resolve`(한/영/티커→티커)·`search`. `fmt.name`·대시보드 검색·리포트·PNG·노션 공용. 경량(lazy yfinance) | `~/reports/ml-cache/ticker_names.json` |
 | `notify.py` | 텔레그램 발송 단일 진실원 — send_telegram(4096 분할·토큰 마스킹)·send_photo (봇 제외 전 모듈 공용) | — |
 | `providers/market_data.py` | 시장 데이터 수집층 — fetch_qqq_data·rsi·vix·fear_greed·ma200·portfolio_value·환율·캐시·leverage_state (barbell 에서 분리, 재export 호환) | `~/.cache/barbell_anchor·last_prices.json` |
 | `kiwoom_mock.py` | 키움 **모의투자** 어댑터 — 모의 도메인(`mockapi.kiwoom.com`) 하드락 + 토큰·잔고(kt00018)·주문(kt10000/kt10001). 실거래 경로 없음 | — |
@@ -230,7 +231,7 @@ crons/news_spike_detector.py (크론 매 1분)
 
 > **메뉴 scope 분리** (setMyCommands): **소유자 채팅엔 소유자 메뉴(20), default·all_private_chats 엔 게스트 메뉴(4)** — `BotCommandScopeChat`(소유자)가 우선 적용돼 **소유자 메뉴엔 `/market`·`/my` 가 안 보임**(권한 아닌 표시만 분리 — 소유자는 입력 시 사용 가능). `/indicators` 는 종목 기술지표가 소유자에도 유용해 **소유자 메뉴에도 노출**(게스트 메뉴엔 그대로).
 >
-> **출력 포맷** (단일 진실원 `fmt.py`): 전 명령이 공통 레이어 경유 — `pct/money/spct`(0·음수0·부호 버그 차단), 짧은 구분선, **HTML 리치텍스트**(`send_html`·parse_mode=HTML): 핵심 `<b>굵게</b>`, 표는 `<pre>등폭</pre>`, 긴 리포트(/report·/rebalance)는 `<blockquote expandable>접기</blockquote>`(`_send_collapsible`), `/history`는 스파크라인. **모바일 주의**: `━ ─` 는 ambiguous-width 2칸 → 공백 정렬 의존 금지(정렬 필요표는 pre). 크론 공유 빌더(paper·history·barbell report)는 `html=` 파라미터로 텔레그램만 굵게, 크론은 평문. 이미지: 일일 PNG(`report_charts.build_portfolio_dashboard`, 히어로 KPI 밴드) + 온디맨드 `/card`(`build_portfolio_card`, 봇이 `.venv` subprocess 렌더 — hermes venv 불변).
+> **출력 포맷** (단일 진실원 `fmt.py`): 전 명령이 공통 레이어 경유 — `pct/money/spct`(0·음수0·부호 버그 차단), 짧은 구분선, **HTML 리치텍스트**(`send_html`·parse_mode=HTML): 핵심 `<b>굵게</b>`, 표는 `<pre>등폭</pre>`, 긴 리포트(/report·/rebalance)는 `<blockquote expandable>접기</blockquote>`(`_send_collapsible`), `/history`는 스파크라인. **모바일 주의**: `━ ─` 는 ambiguous-width 2칸 → 공백 정렬 의존 금지(정렬 필요표는 pre). 크론 공유 빌더(paper·history·barbell report)는 `html=` 파라미터로 텔레그램만 굵게, 크론은 평문. 이미지: 일일 PNG(`report_charts.build_portfolio_dashboard`, 히어로 KPI 밴드) + 온디맨드 `/card`(`build_portfolio_card`, 봇이 `.venv` subprocess 렌더 — hermes venv 불변). **종목 표시는 전 화면 `회사명 (티커)` 병기** — `fmt.name(ticker[, label, maxlen])` → `ticker_names`(단일 소스). 좁은 등폭칸은 maxlen 절단.
 >
 > **하위호환 alias** (메뉴 비노출): `/summary`→`/status` · `/sim`→`/phase sim` · `/mock`→`/paper kr` · `/usmock`→`/paper us` · `/dca`→`/rebalance dca` · `/sgov`→`/rebalance sgov` · `/ranking·/entry·/intraday·/leverage·/meta`→`/signals …` · `/myadd·/myremove·/myportfolio`→`/my …` · `/dividend`→`/holding dividend` · `/apply_snapshot`→`/holding apply`
 
@@ -319,7 +320,7 @@ crons/news_spike_detector.py (크론 매 1분)
 
 | 파일 | 역할 |
 |------|------|
-| `dashboard/app.py` | Streamlit 엔트리 — 테마 주입 → 인증 게이트 → 사이드바(종목 퀵픽·신선도·새로고침·**보유 워치리스트**) → `st.navigation` 5페이지. 최상단 `sys.path.insert(루트)` 필수(streamlit run `sys.path[0]=스크립트dir` 함정) |
+| `dashboard/app.py` | Streamlit 엔트리 — 테마 주입 → 인증 게이트 → 사이드바(종목 퀵픽·**이름/티커 검색**[한글·영문·티커 `ticker_names.resolve`]·신선도·새로고침·**보유 워치리스트**) → `st.navigation` 5페이지. 최상단 `sys.path.insert(루트)` 필수(streamlit run `sys.path[0]=스크립트dir` 함정) |
 | `.streamlit/config.toml` | **Terminal Noir 테마** (TradingView/토스증권) — 다크 블루블랙·일렉트릭블루 액센트·틸그린/코랄레드 시맨틱·Pretendard(한글)+JetBrains Mono(등폭 수치) fontFaces·radius/border/chart 팔레트 |
 | `dashboard/theme.py` | 테마 단일 진실원 — 팔레트 상수 + **순수 HTML/SVG 빌더**(ticker_hero·rating_gauge 반원속도계·sparkline·watchlist, 테스트가능) + `apply_plotly_theme`(차트 다크 템플릿) + `inject_global_css`(streamlit lazy — import 시 미로드해 charts 순수성 유지) |
 | `dashboard/pages/` | 멀티페이지(비활성 페이지 미실행=lazy) — `home`(글랜스: 포트 ticker-hero+배분도넛+클릭 보유표→종목분석 자동이동+Phase+오늘일정)·`portfolio`(리스크 KPI+위험기여/팩터β 막대+½Kelly밴드+도넛)·`ticker`(심볼 히어로+**기술신호 게이지**+가격라인+MA·밸류밴드 불릿·서프라이즈 막대·기관·공시·실적)·`market`(경제캘린더+뉴스)·`research`(스크리너+백테스트 이퀴티+**🧬 정책 학습 곡선**: KR/US 모의 자기개선 verdict·순비용 IC·OOS 곡선·채택 이력) |
@@ -368,6 +369,7 @@ crons/news_spike_detector.py (크론 매 1분)
 ~/reports/ml-cache/income_engine_shadow.json      — Tier5 인컴 엔진 GO (ADAPTIVE_INCOME_ENGINE_ENABLED 시만; 현재 NO-GO라 미생성)
 ~/reports/ml-cache/concentration_validated_shadow.json — Tier6 집중 GO (ADAPTIVE_CONCENTRATION_DISPLAY_ENABLED 시만; 현재 NO-GO라 미생성)
 ~/reports/ml-cache/advice_blend_shadow.json      — MetaAllocator blend 신뢰도 shadow (ADAPTIVE_ADVICE_ENABLED 시만 기록)
+~/reports/ml-cache/ticker_names.json             — 종목 티커→회사명 yfinance 디스크캐시 (ticker_names, 30일 TTL·큐레이트 시드 미스분만·graceful)
 ~/reports/ml-cache/fundamental_scores.json       — 펀더멘털 점수 7일 캐시 (랭커 틸트용)
 ~/reports/ml-cache/fundamental_snapshots.jsonl   — 펀더멘털 주간 point-in-time 스냅샷
 ~/reports/ml-cache/institutional_snapshots.jsonl — 기관 매집 강도·13F 지분 주간 스냅샷 (델타 추적)
@@ -408,7 +410,7 @@ MSFT, QQQI, ORCL, SAP, UNH, SGOV, NVDA, GOOGL, SPMO
 
 ## 안전 규칙
 - `.env`, `portfolio_snapshot.json`, `leverage_state.json`, `price_alerts.json` 절대 커밋 금지
-- 티커 표시 시 회사명 병기: `MSFT — Microsoft`
+- 티커 표시 시 회사명 병기: `NVIDIA (NVDA)` 형식 (한국 상장주 `.KS`만 한글명 `삼성전자 (005930.KS)`) — 단일 소스 `ticker_names.py`(resolver) + `fmt.name(ticker[, label, maxlen])`. 좁은 등폭칸은 `maxlen` 절단. 대시보드 검색은 한글명·영문명·티커 어느 것으로도 resolve
 - 출력은 한국어 기본
 - 텔레그램 메시지 4000자 초과 시 줄바꿈 기준 분할 (4096자 제한)
 - `STOCK_BOT_CHAT_ID` 는 env var — 코드에 하드코딩 금지
