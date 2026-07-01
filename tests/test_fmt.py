@@ -117,8 +117,15 @@ def test_code_block_wrap():
 
 
 def test_name_rule():
-    assert fmt.name("MSFT", "Microsoft") == "MSFT — Microsoft"
-    assert fmt.name("MSFT") == "MSFT"
+    # 새 포맷 `회사명 (티커)` (CLAUDE.md 규칙 갱신)
+    assert fmt.name("MSFT", "Microsoft") == "Microsoft (MSFT)"
+    # label 생략 시 ticker_names 자동해석 (MSFT 는 큐레이트 시드 → Microsoft)
+    assert fmt.name("MSFT") == "Microsoft (MSFT)"
+    # 이름 == 티커거나 미상이면 티커만
+    assert fmt.name("SAP", "SAP") == "SAP"
+    assert fmt.name("ZZZZ", "") == "ZZZZ"
+    # maxlen 절단
+    assert fmt.name("MU", "Micron Technology", maxlen=8).endswith("… (MU)")
 
 
 def test_headline_skips_empty():

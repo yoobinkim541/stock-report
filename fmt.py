@@ -143,12 +143,25 @@ def code(text: str) -> str:
 
 
 # ── 종목명·헤드라인·약어 ──────────────────────────────────────────────
-def name(ticker: str, label: str | None = None) -> str:
-    """`TICKER — 이름` 통일(CLAUDE.md 규칙). label 없으면 티커만."""
+def name(ticker: str, label: str | None = None, maxlen: int | None = None) -> str:
+    """`회사명 (티커)` 통일(CLAUDE.md 규칙). label 없으면 ticker_names 자동해석·이름 없으면 티커만.
+
+    maxlen: 회사명 최대 길이(좁은칸·등폭표 절단). 렌더 경로라 무네트워크(큐레이트+디스크캐시).
+    """
     t = (ticker or "").strip()
-    if label:
-        return f"{t} — {label}"
-    return t
+    if not t:
+        return ""
+    try:
+        import ticker_names
+        return ticker_names.label(t, name=label, maxlen=maxlen, allow_net=False)
+    except Exception:
+        # ticker_names 미가용 폴백 — 최소 포맷
+        if label and str(label).strip() and str(label).strip() != t:
+            nm = str(label).strip()
+            if maxlen and len(nm) > maxlen:
+                nm = nm[:max(1, maxlen - 1)].rstrip() + "…"
+            return f"{nm} ({t})"
+        return t
 
 
 def headline(*parts) -> str:

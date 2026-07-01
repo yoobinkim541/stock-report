@@ -42,17 +42,13 @@ except Exception:
     build_digest = None
     load_recent_events = None
 
-# Company name cache
-_COMPANY_NAMES = {}
+# 회사명 — ticker_names 단일 진실원에 위임(큐레이트 + yfinance 디스크캐시). 리포트 크론이라 네트워크 허용.
 def _company_name(ticker: str) -> str:
-    if ticker not in _COMPANY_NAMES:
-        try:
-            info = yf.Ticker(ticker).info or {}
-            name = info.get('shortName') or info.get('longName') or ticker
-            _COMPANY_NAMES[ticker] = str(name)
-        except Exception:
-            _COMPANY_NAMES[ticker] = ticker
-    return _COMPANY_NAMES[ticker]
+    try:
+        import ticker_names
+        return ticker_names.display_name(ticker, allow_net=True) or ticker
+    except Exception:
+        return ticker
 
 logging.basicConfig(level=logging.WARNING, format="%(levelname)s:%(name)s:%(message)s")
 logger = logging.getLogger("investment_report")
@@ -737,7 +733,12 @@ def _news_title_relevant(ticker, title):
     t = (ticker or "").upper()
     base = t.split(".")[0]
     names = {base.lower()}
-    company = _KOSPI_NAMES.get(t) or _COMPANY_NAMES.get(t)
+    # 뉴스 관련성 판정은 매 항목 hot path → 무네트워크(큐레이트+캐시)로 회사명 조회
+    try:
+        import ticker_names
+        company = _KOSPI_NAMES.get(t) or ticker_names.display_name(t, allow_net=False)
+    except Exception:
+        company = _KOSPI_NAMES.get(t)
     if company:
         names.update(part.lower() for part in re.split(r"\s+", str(company)) if len(part) >= 2)
         names.add(str(company).lower())
@@ -1352,7 +1353,7 @@ def _short_stock_label(item):
     ticker = item.get("ticker", "")
     name = _KOSPI_NAMES.get(ticker) or item.get("company_name") or item.get("company") or _company_name(ticker)
     if name and name != ticker:
-        return fmt.name(ticker, name[:16])   # 'TICKER — Name' (CLAUDE.md 규칙·길면 절단)
+        return fmt.name(ticker, name[:16])   # '회사명 (티커)' (CLAUDE.md 규칙·길면 절단)
     return ticker
 
 
