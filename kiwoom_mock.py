@@ -130,13 +130,20 @@ def _post(path: str, api_id: str, body: dict) -> dict | None:
         "Authorization": f"Bearer {tok}",
         "api-id": api_id,
     }
-    try:
-        r = requests.post(url, headers=headers, json=body, timeout=15, allow_redirects=False)
-        r.raise_for_status()
-        return r.json()
-    except Exception as e:
-        logger.error("모의 API 실패 [%s]: %s", api_id, e)
-        return None
+    # 429(레이트리밋)만 재시도 — 거부=미체결 확실이라 중복체결 위험 0.
+    # 500 등 다른 오류는 무재시도(주문이 이미 체결됐을 수 있어 중복 위험).
+    for attempt in range(3):
+        try:
+            r = requests.post(url, headers=headers, json=body, timeout=15, allow_redirects=False)
+            if r.status_code == 429 and attempt < 2:
+                time.sleep(0.6 * (attempt + 1))
+                continue
+            r.raise_for_status()
+            return r.json()
+        except Exception as e:
+            logger.error("모의 API 실패 [%s]: %s", api_id, e)
+            return None
+    return None
 
 
 # ── 잔고 ──────────────────────────────────────────────────────────────────────

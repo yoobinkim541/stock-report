@@ -266,6 +266,57 @@ def test_order_blocker_classifies():
     assert kt._order_blocker(None) is None
 
 
+def _fake_post_factory(order_codes):
+    """order_codes: /ordr 호출마다 반환할 status_code 시퀀스."""
+    import requests as _rq
+    state = {"i": 0}
+
+    class R:
+        def __init__(s, code, payload):
+            s.status_code, s._p = code, payload
+
+        def raise_for_status(s):
+            if s.status_code >= 400:
+                raise _rq.HTTPError(str(s.status_code))
+
+        def json(s):
+            return s._p
+
+    def post(url, headers=None, json=None, timeout=None, allow_redirects=None):
+        if url.endswith("/oauth2/token"):
+            return R(200, {"token": "t", "expires_in": 3600})
+        if url.endswith("/api/dostk/ordr"):
+            code = order_codes[min(state["i"], len(order_codes) - 1)]
+            state["i"] += 1
+            return R(code, {"return_code": 0, "ord_no": "ORD1", "return_msg": "정상처리"} if code == 200 else {})
+        return R(200, {})
+
+    return post, state
+
+
+def test_order_429_retries_then_succeeds(monkeypatch):
+    """429(레이트리밋)=미체결 확실 → 재시도 후 체결. 중복체결 위험 0."""
+    monkeypatch.setenv("KIWOOM_API_KEY", "k"); monkeypatch.setenv("KIWOOM_API_SECRET", "s")
+    kiwoom_mock._token_cache.update(token=None, exp=0.0)
+    monkeypatch.setattr(kiwoom_mock.time, "sleep", lambda *_a, **_k: None)
+    post, state = _fake_post_factory([429, 200])       # 1회 429 → 2회차 성공
+    monkeypatch.setattr(kiwoom_mock.requests, "post", post)
+    res = kiwoom_mock.place_order("005930", 1, "buy")
+    assert res["ok"] is True and res["ord_no"] == "ORD1"
+    assert state["i"] == 2                              # 429 + 성공 = 2회 POST
+
+
+def test_order_500_not_retried(monkeypatch):
+    """500 은 무재시도(주문이 이미 체결됐을 수 있어 중복 위험) — 1회 POST 후 실패."""
+    monkeypatch.setenv("KIWOOM_API_KEY", "k"); monkeypatch.setenv("KIWOOM_API_SECRET", "s")
+    kiwoom_mock._token_cache.update(token=None, exp=0.0)
+    post, state = _fake_post_factory([500, 200])       # 500 나와도 재시도 안 함
+    monkeypatch.setattr(kiwoom_mock.requests, "post", post)
+    res = kiwoom_mock.place_order("005930", 1, "buy")
+    assert res["ok"] is False
+    assert state["i"] == 1                              # 단 1회 POST (무재시도)
+
+
 def test_main_dry_run_places_no_orders(monkeypatch):
     """--dry-run 은 계획만 출력하고 주문 0 (비활성 상태에서도 미리보기 허용)."""
     import kiwoom_mock_track as kt

@@ -411,7 +411,7 @@ def main(argv: list[str] | None = None) -> int:
             logger.error("전 주문 공통 차단(%s) 감지 — 남은 주문 중단: %s",
                          _order_blocker(r.get("msg")), r.get("msg"))
             break
-        time.sleep(0.3)   # 레이트리밋 여유
+        time.sleep(0.5)   # 레이트리밋 여유 (모의 주문 API 429 완화 · _post 는 429 재시도)
 
     _notify(nav, results, signals)
     logger.info("=== 완료: 집행 %d건 ===", sum(1 for r in results if r.get("ok")))
