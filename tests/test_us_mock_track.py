@@ -43,6 +43,28 @@ def test_plan_cash_buffer_leaves_headroom():
     assert o.get(("A", "buy")) == 9
 
 
+def test_plan_rebal_band_skips_small_adjust():
+    """무거래 밴드: 목표 대비 band 이내 보유종목은 조정 skip (회전율↓)."""
+    sigs = [{"ticker": "A", "price": 100, "policy_score": 0.9}]
+    pos = {"A": {"shares": 9}}   # 목표 10주(=$1000) 대비 -10%, band 0.25 이내
+    banded = _orders(T.plan_rebalance(sigs, pos, budget_usd=1000, max_positions=1, rebal_band=0.25))
+    assert ("A", "buy") not in banded and ("A", "sell") not in banded   # 무거래
+    nob = _orders(T.plan_rebalance(sigs, pos, budget_usd=1000, max_positions=1, rebal_band=0.0))
+    assert nob.get(("A", "buy")) == 1                                    # 밴드 없으면 9→10
+
+
+def test_plan_exit_buffer_keeps_boundary():
+    """히스테리시스: 보유종목이 top-(N+buffer) 안이면 매도 안 함(경계 flip 방지)."""
+    sigs = [{"ticker": "A", "price": 100, "policy_score": 0.9},
+            {"ticker": "B", "price": 100, "policy_score": 0.8},
+            {"ticker": "C", "price": 100, "policy_score": 0.7}]   # C = rank3
+    pos = {"C": {"shares": 5}}
+    kept = _orders(T.plan_rebalance(sigs, pos, budget_usd=1000, max_positions=2, exit_buffer=2))
+    assert ("C", "sell") not in kept                                    # top-4 안 → 유지
+    nob = _orders(T.plan_rebalance(sigs, pos, budget_usd=1000, max_positions=2, exit_buffer=0))
+    assert nob.get(("C", "sell")) == 5                                  # top-2 밖 → 전량매도
+
+
 def test_plan_budget_zero_no_buys():
     sigs = [{"ticker": "A", "price": 100, "policy_score": 0.9}]
     assert T.plan_rebalance(sigs, {}, budget_usd=0, max_positions=1) == []

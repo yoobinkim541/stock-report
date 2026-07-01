@@ -71,6 +71,8 @@ SLIPPAGE = _float_env("US_MOCK_SLIPPAGE", 0.01)
 # 주문가능금액(frcr_use_psbl_amt)의 일부만 매수에 사용 — 수수료(KIS 해외 ~0.25%)·통합증거금
 # USD 환산 haircut·지정가 틱업 여유. 1% 슬리피지만으론 "주문가능금액 부족" 거부가 남아 별도 버퍼.
 CASH_BUFFER = _float_env("US_MOCK_CASH_BUFFER", 0.95)
+REBAL_BAND = _float_env("US_MOCK_REBAL_BAND", 0.25)   # 무거래 밴드(목표比 ±25% 벗어날 때만 조정·회전율↓)
+EXIT_BUFFER = _int_env("US_MOCK_EXIT_BUFFER", 2)      # 히스테리시스(top-N+2 안이면 보유 유지·경계 flip 방지)
 QUOTE_STALE_S = _int_env("REALTIME_QUOTE_STALE_S", 10)
 
 
@@ -158,20 +160,25 @@ def _safe_fund(tk: str) -> dict:
 def plan_rebalance(signals: list[dict], positions: dict, budget_usd: float,
                    max_positions: int, cash_usd: float | None = None,
                    slippage: float = 0.0, quote_fn=None,
-                   cash_buffer: float = 1.0) -> list[dict]:
+                   cash_buffer: float = 1.0,
+                   rebal_band: float = 0.0, exit_buffer: int = 0) -> list[dict]:
     """목표 바스켓(policy_score 상위 N 균등) vs 보유 → 정수주 지정가 주문계획.
 
     반환: [{symbol, side('buy'|'sell'), qty, reason}]. 매도 먼저(현금확보)·예산0/음수면 매수생략·현금 러닝캡.
     cash_buffer<1 이면 주문가능금액의 그 비율만 매수에 사용(수수료·통합증거금 FX·틱업 여유).
+    rebal_band>0: 보유종목 조정을 |현재가치−목표가치|/목표가치 > band 일 때만(잔챙이 skip·회전율↓).
+    exit_buffer>0: 보유종목이 top-(N+buffer) 안이면 유지(경계 flip-flop 방지·회전율↓).
     """
     orders: list[dict] = []
-    buys = sorted([s for s in signals if s.get("price", 0) > 0],
-                  key=lambda s: -(s.get("policy_score") or 0))[:max_positions]
-    target = {s["ticker"] for s in buys}
+    ranked = sorted([s for s in signals if s.get("price", 0) > 0],
+                    key=lambda s: -(s.get("policy_score") or 0))
+    buys = ranked[:max_positions]
+    # 히스테리시스: 매도는 top-(N+buffer) 밖 종목만 (경계 flip-flop 방지)
+    keep = {s["ticker"] for s in ranked[:max_positions + max(0, exit_buffer)]}
 
     for sym, p in positions.items():
         sh = int(p.get("shares", 0) or 0)
-        if sh > 0 and sym not in target:
+        if sh > 0 and sym not in keep:
             orders.append({"symbol": sym, "side": "sell", "qty": sh, "reason": "타깃이탈"})
 
     per = (budget_usd / len(buys)) if (buys and budget_usd > 0) else 0.0
@@ -189,6 +196,9 @@ def plan_rebalance(signals: list[dict], positions: dict, budget_usd: float,
                 q = None
             if q and q > 0:
                 eff = q
+        # 무거래 밴드: 이미 보유 중이고 목표 대비 band 이내면 조정 skip (신규 진입은 항상 매수)
+        if rebal_band > 0 and cur > 0 and abs(cur * eff - per) <= rebal_band * per:
+            continue
         tgt = int(per // eff)                              # 정수주 floor
         if remaining is not None:
             tgt = min(tgt, cur + int(remaining // eff))
@@ -237,7 +247,8 @@ def main(argv: list[str] | None = None) -> int:
         return 0
     budget = nav * INVEST
     plan = plan_rebalance(signals, positions, budget, MAX_POS, cash_usd=cash,
-                          slippage=SLIPPAGE, quote_fn=_rt_best, cash_buffer=CASH_BUFFER)
+                          slippage=SLIPPAGE, quote_fn=_rt_best, cash_buffer=CASH_BUFFER,
+                          rebal_band=REBAL_BAND, exit_buffer=EXIT_BUFFER)
     logger.info("리밸런스 계획 %d건 (예산 $%.0f·목표 %d종목)", len(plan), budget, MAX_POS)
 
     if dry:

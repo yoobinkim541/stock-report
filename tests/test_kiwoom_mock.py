@@ -255,6 +255,31 @@ def test_plan_cash_running_cap():
     assert total <= 6
 
 
+def test_plan_rebal_band_skips_small_adjust():
+    """무거래 밴드: 목표 대비 band 이내 보유종목은 조정 skip (회전율↓·증권거래세 절감)."""
+    import kiwoom_mock_track as kt
+    sigs = [_sig("005930", "강한 매수후보", 80, 50000)]   # 목표 per=1M → 20주
+    pos = {"005930": {"shares": 19, "cur_price": 50000}}  # 19주(=950k) 목표比 -5%, band 0.25 이내
+    banded = kt.plan_rebalance(sigs, pos, 1_000_000, 1, rebal_band=0.25)
+    assert not any(o["code"] == "005930" for o in banded)          # 무거래
+    nob = kt.plan_rebalance(sigs, pos, 1_000_000, 1, rebal_band=0.0)
+    assert [o for o in nob if o["code"] == "005930"][0] == {
+        "code": "005930", "side": "buy", "qty": 1, "reason": "신규/추가"}
+
+
+def test_plan_exit_buffer_keeps_boundary():
+    """히스테리시스: 보유종목이 top-(N+buffer) 안이면 매도 안 함(경계 flip 방지)."""
+    import kiwoom_mock_track as kt
+    sigs = [_sig("A", "강한 매수후보", 90, 1000),
+            _sig("B", "강한 매수후보", 80, 1000),
+            _sig("C", "강한 매수후보", 70, 1000)]   # C = rank3
+    pos = {"C": {"shares": 5, "cur_price": 1000}}
+    kept = kt.plan_rebalance(sigs, pos, 1_000_000, 2, exit_buffer=2)
+    assert not any(o["code"] == "C" and o["side"] == "sell" for o in kept)   # top-4 안 → 유지
+    nob = kt.plan_rebalance(sigs, pos, 1_000_000, 2, exit_buffer=0)
+    assert {"code": "C", "side": "sell", "qty": 5, "reason": "타깃이탈"} in nob
+
+
 def test_order_blocker_classifies():
     """계좌/시장 레벨 차단 신호 분류 — 개별 주문 문제(부족 등)와 구분해 즉시 중단·명확 알림."""
     import kiwoom_mock_track as kt

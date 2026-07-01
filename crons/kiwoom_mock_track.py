@@ -72,6 +72,8 @@ MAX_POS    = _int_env("KR_MOCK_MAX_POS", 5)
 INVEST     = _float_env("KR_MOCK_INVEST", 0.9)
 SEED_KRW   = _float_env("KIWOOM_MOCK_SEED", 10_000_000)
 SLIPPAGE   = _float_env("KR_MOCK_SLIPPAGE", 0.01)   # 매수 사이징 슬리피지 버퍼(+1%)
+REBAL_BAND = _float_env("KR_MOCK_REBAL_BAND", 0.25)  # 무거래 밴드(목표比 ±25% 벗어날 때만 조정·회전율↓)
+EXIT_BUFFER = _int_env("KR_MOCK_EXIT_BUFFER", 2)     # 히스테리시스(top-N+2 안이면 보유 유지·경계 flip 방지)
 QUOTE_STALE_S = _int_env("REALTIME_QUOTE_STALE_S", 10)
 
 
@@ -158,13 +160,16 @@ def compute_kr_signals(limit: int = UNIVERSE) -> list[dict]:
 
 def plan_rebalance(signals: list[dict], positions: dict, budget_krw: float,
                    max_positions: int, cash_krw: float | None = None,
-                   slippage: float = 0.0, quote_fn=None) -> list[dict]:
+                   slippage: float = 0.0, quote_fn=None,
+                   rebal_band: float = 0.0, exit_buffer: int = 0) -> list[dict]:
     """목표 바스켓 vs 현재 보유 → 시장가 주문계획.
 
     signals:   [{code, action, score, price, is_buy, is_sell}, ...]
     positions: {code: {shares, cur_price, ...}}
     cash_krw:  알려진 가용현금(없으면 None) — 매수 총액을 현금으로 러닝 캡.
     slippage:  매수 사이징 시 가격에 더할 버퍼(예: 0.01 = +1%) — 시가 갭/슬리피지 흡수.
+    rebal_band: >0 이면 보유종목 조정을 |현재가치−목표가치|/목표가치 > band 일 때만(잔챙이 조정 skip·회전율↓).
+    exit_buffer: >0 이면 보유종목이 top-(N+buffer) 안이면 유지(경계 flip-flop 방지·회전율↓).
     반환:      [{code, side('buy'|'sell'), qty, reason}, ...]
 
     규칙:
@@ -176,16 +181,18 @@ def plan_rebalance(signals: list[dict], positions: dict, budget_krw: float,
     """
     orders: list[dict] = []
     # 랭킹 = 학습된 정책 점수(policy_score) 우선, 없으면 펀더멘털 score 폴백
-    buys = sorted(
+    ranked = sorted(
         [s for s in signals if s.get("is_buy") and s.get("price", 0) > 0],
         key=lambda s: -(s.get("policy_score") if s.get("policy_score") is not None else s.get("score", 0) / 100.0),
-    )[:max_positions]
-    target_codes = {s["code"] for s in buys}
+    )
+    buys = ranked[:max_positions]
+    # 히스테리시스: 매도는 top-(N+buffer) 밖 종목만 (경계 flip-flop 방지)
+    keep_codes = {s["code"] for s in ranked[:max_positions + max(0, exit_buffer)]}
 
-    # 1) 매도 먼저: 보유 중 목표 바스켓에 없는 종목 전량 (현금 확보)
+    # 1) 매도 먼저: 보유 중 keep(top-N+buffer) 밖 종목 전량 (현금 확보)
     for code, p in positions.items():
         sh = int(p.get("shares", 0) or 0)
-        if sh > 0 and code not in target_codes:
+        if sh > 0 and code not in keep_codes:
             orders.append({"code": code, "side": "sell", "qty": sh, "reason": "타깃이탈"})
 
     # 2) 매수/조정: 예산 0/음수면 전면 생략 (음수 예산 → 유령매도 방지)
@@ -204,6 +211,9 @@ def plan_rebalance(signals: list[dict], positions: dict, budget_krw: float,
                 q = None
             if q and q > 0:
                 eff_price = q
+        # 무거래 밴드: 이미 보유 중이고 목표 대비 band 이내면 조정 skip (신규 진입은 항상 매수)
+        if rebal_band > 0 and cur > 0 and abs(cur * eff_price - per) <= rebal_band * per:
+            continue
         tgt = int(per // eff_price)
         if remaining is not None:                         # 가용현금 러닝 캡
             tgt = min(tgt, cur + int(remaining // eff_price))
@@ -372,7 +382,8 @@ def main(argv: list[str] | None = None) -> int:
 
     budget = nav * INVEST
     plan = plan_rebalance(signals, positions, budget, MAX_POS, cash_krw=cash,
-                          slippage=SLIPPAGE, quote_fn=_rt_best)
+                          slippage=SLIPPAGE, quote_fn=_rt_best,
+                          rebal_band=REBAL_BAND, exit_buffer=EXIT_BUFFER)
     logger.info("리밸런스 계획 %d건 (예산 ₩%s, 현금 %s, 목표 %d종목)",
                 len(plan), f"{budget:,.0f}",
                 f"₩{cash:,.0f}" if cash is not None else "미확인", MAX_POS)
