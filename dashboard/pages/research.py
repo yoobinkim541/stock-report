@@ -52,3 +52,31 @@ def render():
             except Exception:
                 pass
     st.caption("⚠️ 검증상 ML 종목선택·장중타이밍 무엣지 — 정보·표시용 (검증 통과 공격은 구조적 레버리지뿐)")
+
+    # ── 🧬 정책 학습 곡선 (모의 자기개선 진화) ────────────────────────────
+    st.divider()
+    st.subheader("🧬 정책 학습 곡선")
+    st.caption("모의 자기개선 — 주별 OOS + 정직 verdict (순비용 기준 · 발전하면 보이고 안 되면 무엣지)")
+    mk = st.radio("시장", ["kr_mock", "us_mock"], horizontal=True, key="evo_market",
+                  format_func=lambda s: "국내 (KR)" if s == "kr_mock" else "미국 (US)")
+    ev = cached.learning_evolution(mk)
+    v, snap = ev.get("verdict") or {}, ev.get("snapshot") or {}
+    if v:
+        st.markdown(f"### {v.get('emoji', '')} {v.get('label', '')}")
+        st.caption(v.get("note", ""))
+    m = st.columns(4)
+    m[0].metric("성숙 결정", int(snap.get("n", 0)))
+    m[1].metric("순비용 IC", data.f_ratio(snap.get("realized_ic"), 3))
+    m[2].metric("적중률", data.f_pct(snap.get("buy_hit")))
+    m[3].metric("누적 엣지", data.f_frac_pct_s(snap.get("cum_net_excess")))
+    series = ev.get("series") or []
+    if len([s for s in series if s.get("excess") is not None]) >= 2:
+        st.plotly_chart(charts.learning_curve(series), width="stretch",
+                        config={"displayModeBar": False})
+    else:
+        st.info("학습 이력 축적 중 — 주간 재학습(토)마다 누적됩니다 (콜드스타트는 정상)")
+    if ev.get("adoptions"):
+        st.caption("채택 이력")
+        st.dataframe(pd.DataFrame([{"주": a.get("date"), "OOS 초과": a.get("excess_challenger")}
+                                   for a in ev["adoptions"]]), hide_index=True, width="stretch")
+    st.caption("표시·모의 정책 · 실거래 미반영 · 무엣지면 정직 공개")

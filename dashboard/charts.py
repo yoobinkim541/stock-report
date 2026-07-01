@@ -117,3 +117,30 @@ def equity_curve(equity):
     fig.update_layout(margin=dict(t=10, b=10, l=10, r=10), height=300,
                       legend=dict(orientation="h", y=1.1))
     return _t(fig)
+
+
+def learning_curve(series):
+    """모의 정책 학습 진화 — 주별 OOS 초과수익 + 순비용 IC(우축) + 채택 마커(★).
+
+    series: [{date, excess, ic, adopted}] (evolution_summary 출력).
+    """
+    go = _go()
+    fig = go.Figure()
+    pts = [s for s in (series or []) if s.get("excess") is not None]
+    if not pts:
+        return _t(fig)
+    dates = [s.get("date") for s in pts]
+    fig.add_trace(go.Scatter(x=dates, y=[s["excess"] for s in pts], name="OOS 초과수익",
+                             line=dict(color=_BLUE, width=2)))
+    if any(s.get("ic") is not None for s in pts):
+        fig.add_trace(go.Scatter(x=dates, y=[s.get("ic") for s in pts], name="순비용 IC",
+                                 yaxis="y2", line=dict(color=theme.GREEN, dash="dot")))
+    ax = [s["date"] for s in pts if s.get("adopted")]
+    ay = [s["excess"] for s in pts if s.get("adopted")]
+    if ax:
+        fig.add_trace(go.Scatter(x=ax, y=ay, name="채택", mode="markers",
+                                 marker=dict(color=theme.GREEN, size=12, symbol="star")))
+    fig.update_layout(margin=dict(t=10, b=10, l=10, r=10), height=300,
+                      legend=dict(orientation="h", y=1.12),
+                      yaxis2=dict(overlaying="y", side="right", showgrid=False, zeroline=False))
+    return _t(fig)

@@ -49,6 +49,12 @@ cached.ohlc = lambda t, period="6mo": pd.DataFrame(
     {"Open":range(100,170),"High":range(101,171),"Low":range(99,169),"Close":range(100,170)}, index=_IDX)
 cached.screener = lambda n: {"rows":[],"error":"skip"}
 cached.backtest = lambda: {"error":"skip"}
+cached.learning_evolution = lambda s: {"surface":s,
+    "snapshot":{"n":52,"realized_ic":0.06,"buy_hit":55.0,"cum_net_excess":0.03},
+    "verdict":{"code":"edge","emoji":"\U0001f9ec","label":"약한 엣지 형성","note":"순비용 IC +0.060"},
+    "series":[{"date":"2026-06-01","excess":0.01,"ic":0.02,"adopted":False},
+              {"date":"2026-06-08","excess":0.03,"ic":0.06,"adopted":True}],
+    "adoptions":[{"date":"2026-06-08","excess_challenger":0.03}],"n_runs":2}
 st.session_state["ticker"] = "MSFT"
 ''' % ROOT
 
@@ -90,6 +96,17 @@ def test_portfolio_renders_risk_kpis():
     assert not at.exception
     assert len(at.metric) >= 4
     assert len(at.dataframe) >= 1
+
+
+def test_research_shows_learning_curve():
+    """리서치: 🧬 정책 학습 곡선 — verdict 라벨 + 채택 이력표 (≥2점이면 곡선 렌더)."""
+    at = AppTest.from_string(_script("from dashboard.pages import research", "research.render()"),
+                             default_timeout=30)
+    at.run()
+    assert not at.exception
+    assert any("정책 학습 곡선" in str(s.value) for s in at.subheader)
+    assert any("엣지" in str(m.value) for m in at.markdown)   # verdict 라벨
+    assert len(at.dataframe) >= 1                             # 채택 이력표
 
 
 def test_home_has_donut_and_holdings():

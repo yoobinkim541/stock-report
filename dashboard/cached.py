@@ -80,6 +80,12 @@ def backtest():
     return views.backtest_summary()
 
 
+@st.cache_data(ttl=_TTL_SLOW, show_spinner="학습 이력 불러오는 중…")
+def learning_evolution(surface):
+    """모의 자기개선 진화 (주간 학습 이력 + 라이브 verdict)."""
+    return views.learning_evolution(surface)
+
+
 @st.cache_data(ttl=_TTL, show_spinner="가격 불러오는 중…")
 def ohlc(t, period="6mo"):
     """OHLC 가격 히스토리 (가격차트용·U3). _history_cached 재사용."""

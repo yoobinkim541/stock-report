@@ -171,3 +171,16 @@ def backtest_summary() -> dict:
                 "equity": getattr(r, "equity", None), "wf": getattr(r, "wf_summary", {})}
     except Exception as e:
         return {"error": str(e)}
+
+
+def learning_evolution(surface: str = "kr_mock") -> dict:
+    """모의 자기개선 진화 — 주간 학습 이력 + 라이브 스냅샷 verdict. read-only·graceful."""
+    from ml.adaptive import Ledger, evolution
+    try:
+        rows = Ledger(surface).training_set()
+    except Exception:
+        rows = []
+    try:
+        return evolution.evolution_summary(surface, rows)
+    except Exception as e:
+        return {"error": str(e), "snapshot": {}, "verdict": {}, "series": [], "adoptions": [], "n_runs": 0}

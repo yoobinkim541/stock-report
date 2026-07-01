@@ -90,3 +90,21 @@ def test_equity_curve_dataframe_multi_series():
 def test_equity_curve_series():
     fig = charts.equity_curve([1, 1.1, 1.2])
     assert _is_fig(fig)
+
+
+def test_learning_curve_traces_and_star():
+    series = [{"date": "2026-06-01", "excess": 0.01, "ic": 0.02, "adopted": False},
+              {"date": "2026-06-08", "excess": 0.03, "ic": 0.06, "adopted": True}]
+    fig = charts.learning_curve(series)
+    assert _is_fig(fig)
+    names = [tr.name for tr in fig.data]
+    assert "OOS 초과수익" in names and "순비용 IC" in names and "채택" in names
+    star = next(tr for tr in fig.data if tr.name == "채택")
+    assert list(star.x) == ["2026-06-08"]        # 채택 주만 마커
+    assert star.marker.symbol == "star"
+
+
+def test_learning_curve_empty_and_none_excess():
+    assert _is_fig(charts.learning_curve([]))
+    # excess=None 인 행은 제외 → 데이터 없으면 빈 Figure
+    assert len(charts.learning_curve([{"date": "d", "excess": None}]).data) == 0
