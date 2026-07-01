@@ -38,6 +38,33 @@ EN: dict[str, str] = {
     "NOW": "ServiceNow", "CPNG": "Coupang", "PLTR": "Palantir", "ARM": "Arm Holdings",  # ticker-ok
     "SMCI": "Super Micro", "TSM": "TSMC", "ASML": "ASML", "MRVL": "Marvell",
     "PANW": "Palo Alto Networks", "SNOW": "Snowflake", "SHOP": "Shopify",
+    # ── 대형주 확장: 금융 ──
+    "BRK-B": "Berkshire Hathaway", "JPM": "JPMorgan Chase", "BAC": "Bank of America",
+    "WFC": "Wells Fargo", "GS": "Goldman Sachs", "MS": "Morgan Stanley",
+    "V": "Visa", "MA": "Mastercard", "AXP": "American Express", "C": "Citigroup",
+    # ── 헬스케어 ──
+    "JNJ": "Johnson & Johnson", "LLY": "Eli Lilly", "ABBV": "AbbVie", "MRK": "Merck",
+    "PFE": "Pfizer", "TMO": "Thermo Fisher", "ABT": "Abbott", "DHR": "Danaher",
+    # ── 소비재 ──
+    "WMT": "Walmart", "KO": "Coca-Cola", "PG": "Procter & Gamble", "HD": "Home Depot",
+    "MCD": "McDonald's", "NKE": "Nike", "SBUX": "Starbucks", "DIS": "Disney",
+    "TGT": "Target", "LOW": "Lowe's",
+    # ── 산업·에너지 ──
+    "XOM": "Exxon Mobil", "CVX": "Chevron", "CAT": "Caterpillar", "BA": "Boeing",
+    "GE": "GE Aerospace", "HON": "Honeywell", "UPS": "UPS", "RTX": "RTX",
+    "LMT": "Lockheed Martin",
+    # ── 테크·통신 ──
+    "IBM": "IBM", "UBER": "Uber", "ABNB": "Airbnb", "PYPL": "PayPal",
+    "COIN": "Coinbase", "RIVN": "Rivian", "F": "Ford", "GM": "General Motors",
+    "T": "AT&T", "VZ": "Verizon", "CMCSA": "Comcast",
+    # ── 반도체 확장 ──
+    "AMAT": "Applied Materials", "ADI": "Analog Devices", "KLAC": "KLA",
+    "LRCX": "Lam Research", "NXPI": "NXP Semiconductors",
+    # ── 인기 ETF ──
+    "VOO": "Vanguard S&P 500", "VTI": "Vanguard Total Market", "SCHD": "Schwab US Dividend",
+    "JEPI": "JPMorgan Equity Premium", "JEPQ": "JPMorgan Nasdaq Premium",
+    "DIA": "SPDR Dow Jones", "IWM": "iShares Russell 2000",
+    "GLD": "SPDR Gold", "SLV": "iShares Silver", "ARKK": "ARK Innovation",
 }
 
 # 검색 별칭 (한글 대표명 + 추가 영문 별칭). 첫 항목이 대표 한글명(있으면).
@@ -82,6 +109,76 @@ KO: dict[str, tuple[str, ...]] = {
     "PANW": ("팔로알토",),
     "SNOW": ("스노우플레이크",),
     "SHOP": ("쇼피파이",),
+    # ── 대형주 확장: 금융 ──
+    "BRK-B": ("버크셔", "버크셔해서웨이", "버크셔 해서웨이", "BERKSHIRE"),
+    "JPM": ("제이피모건", "JP모건", "JPMORGAN"),
+    "BAC": ("뱅크오브아메리카", "뱅오아", "BANK OF AMERICA"),
+    "WFC": ("웰스파고", "WELLS FARGO"),
+    "GS": ("골드만삭스", "골드만", "GOLDMAN"),
+    "MS": ("모건스탠리", "MORGAN STANLEY"),
+    "V": ("비자", "VISA"),
+    "MA": ("마스터카드", "MASTERCARD"),
+    "AXP": ("아메리칸익스프레스", "아멕스", "AMEX"),
+    "C": ("씨티그룹", "씨티", "CITI"),
+    # ── 헬스케어 ──
+    "JNJ": ("존슨앤존슨", "존슨", "J&J"),
+    "LLY": ("일라이릴리", "릴리", "ELI LILLY"),
+    "ABBV": ("애브비", "ABBVIE"),
+    "MRK": ("머크", "MERCK"),
+    "PFE": ("화이자", "PFIZER"),
+    "TMO": ("써모피셔", "THERMO FISHER"),
+    "ABT": ("애벗", "ABBOTT"),
+    "DHR": ("다나허", "DANAHER"),
+    # ── 소비재 ──
+    "WMT": ("월마트", "WALMART"),
+    "KO": ("코카콜라", "코크", "COCA COLA"),
+    "PG": ("프록터앤갬블", "P&G", "PROCTER"),
+    "HD": ("홈디포", "HOME DEPOT"),
+    "MCD": ("맥도날드", "맥날", "MCDONALD"),
+    "NKE": ("나이키", "NIKE"),
+    "SBUX": ("스타벅스", "스벅", "STARBUCKS"),
+    "DIS": ("디즈니", "DISNEY"),
+    "TGT": ("타겟", "TARGET"),
+    "LOW": ("로우스", "LOWES"),
+    # ── 산업·에너지 ──
+    "XOM": ("엑슨모빌", "엑슨", "EXXON"),
+    "CVX": ("셰브런", "CHEVRON"),
+    "CAT": ("캐터필러", "CATERPILLAR"),
+    "BA": ("보잉", "BOEING"),
+    "GE": ("제너럴일렉트릭", "GENERAL ELECTRIC"),
+    "HON": ("허니웰", "HONEYWELL"),
+    "UPS": ("유피에스", "UPS"),
+    "RTX": ("레이시온", "RAYTHEON"),
+    "LMT": ("록히드마틴", "록히드", "LOCKHEED"),
+    # ── 테크·통신 ──
+    "IBM": ("아이비엠",),
+    "UBER": ("우버",),
+    "ABNB": ("에어비앤비", "AIRBNB"),
+    "PYPL": ("페이팔", "PAYPAL"),
+    "COIN": ("코인베이스", "COINBASE"),
+    "RIVN": ("리비안", "RIVIAN"),
+    "F": ("포드", "FORD"),
+    "GM": ("제너럴모터스", "지엠", "GENERAL MOTORS"),
+    "T": ("에이티앤티", "AT&T"),
+    "VZ": ("버라이즌", "VERIZON"),
+    "CMCSA": ("컴캐스트", "COMCAST"),
+    # ── 반도체 확장 ──
+    "AMAT": ("어플라이드머티리얼즈", "어플라이드", "APPLIED MATERIALS"),
+    "ADI": ("아나로그디바이스", "ANALOG DEVICES"),
+    "KLAC": ("케이엘에이",),
+    "LRCX": ("램리서치", "LAM RESEARCH"),
+    "NXPI": ("엔엑스피", "NXP"),
+    # ── 인기 ETF ──
+    "VOO": ("뱅가드 S&P500",),
+    "VTI": ("뱅가드 전체시장",),
+    "SCHD": ("슈왑 배당",),
+    "JEPI": ("JP모건 프리미엄인컴",),
+    "JEPQ": ("JP모건 나스닥 프리미엄",),
+    "DIA": ("다우존스", "다우"),
+    "IWM": ("러셀2000",),
+    "GLD": ("금 ETF", "골드"),
+    "SLV": ("은 ETF", "실버"),
+    "ARKK": ("아크 이노베이션", "ARK"),
 }
 
 # 한국 상장주(.KS) 한글 표시명 (KOSPI 시총 상위 — data_pipeline.KR_TOP10_META 와 동일값).

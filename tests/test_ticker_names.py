@@ -39,6 +39,38 @@ def test_resolve_unknown_returns_none():
     assert ticker_names.resolve("   ") is None
 
 
+# ── K1 대형주 확장: 버크셔·월마트·비자 등 (한/영/티커) ────────────────────
+def test_resolve_expanded_largecaps():
+    cases = {
+        "버크셔": "BRK-B", "버크셔 해서웨이": "BRK-B", "berkshire": "BRK-B", "BRK-B": "BRK-B",
+        "월마트": "WMT", "walmart": "WMT", "WMT": "WMT",
+        "비자": "V", "visa": "V",
+        "코카콜라": "KO", "존슨앤존슨": "JNJ", "제이피모건": "JPM", "골드만삭스": "GS",
+        "리비안": "RIVN", "코인베이스": "COIN", "록히드마틴": "LMT", "슈왑 배당": "SCHD",
+    }
+    for q, t in cases.items():
+        assert ticker_names.resolve(q) == t, f"{q} → {ticker_names.resolve(q)} (기대 {t})"
+
+
+def test_single_letter_tickers_exact_not_partial():
+    # 단문자 티커는 정확 티커로 resolve — 부분매칭으로 NVDA 등에 흡수되면 안 됨
+    for t in ("V", "C", "F", "T"):
+        assert ticker_names.resolve(t) == t
+
+
+def test_universe_expanded_covers_largecaps():
+    u = set(ticker_names.universe())
+    for t in ("BRK-B", "WMT", "V", "JNJ", "COIN", "RIVN", "SCHD", "JEPQ"):
+        assert t in u
+    assert len(ticker_names.universe()) >= 110  # 55 → 확장(대형주 시드)
+
+
+def test_label_expanded_names():
+    assert ticker_names.label("BRK-B") == "Berkshire Hathaway (BRK-B)"
+    assert ticker_names.label("V") == "Visa (V)"
+    assert ticker_names.label("WMT") == "Walmart (WMT)"
+
+
 # ── display_name: US=영문 · KR(.KS)=한글 ────────────────────────────────
 def test_display_name_us_english():
     assert ticker_names.display_name("MSFT", allow_net=False) == "Microsoft"
