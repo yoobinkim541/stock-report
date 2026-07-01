@@ -21,6 +21,8 @@ def render():
         yf_price = float(cl.iloc[-1])
         prev = float(cl.iloc[-2]) if len(cl) > 1 else yf_price
     pos = data.holding_position(ticker)                 # 보유 포지션(평단 등)|None
+    _rq0 = cached.realtime_quote(ticker)
+    cur = (_rq0.get("price") if _rq0 else None) or yf_price or 0.0   # 현재가(실시간 우선)
 
     # 실시간 밴드(8s 자동갱신) — 히어로 ⚡가격·게이지·내 포지션·호가
     _live_top(ticker, hist, yf_price, prev, pos)
@@ -34,6 +36,7 @@ def render():
         st.info("가격 데이터 없음 (yfinance)")
 
     _detail_sections(ticker, yf_price)
+    _manage_position(ticker, cur, pos)
 
 
 @st.fragment(run_every=8)
@@ -255,3 +258,61 @@ def _earnings(ticker):
         _surprise_chart(h, f"{ticker} 실적 서프라이즈 이력")
     else:
         st.warning(f"실적 이력 없음 ({cal.get('error', '')})")
+
+
+# ── ⚙️ 내 포지션 관리 — 추가·적립·축소 (실제 추적 포트폴리오 기록 · 실주문 아님) ──────
+# holding_manager 경유(atomic write + 교차프로세스 락) = 봇 /holding 과 동일 경로.
+# 실계좌 브로커 주문 없음(기록 전용·grep 강제). 해외(USD) general 계좌만.
+def _hm():
+    import holding_manager
+    return holding_manager
+
+
+def _apply_action(fn):
+    """holding_manager 액션 실행 → 결과 표시 + 캐시비움 + rerun (포지션 즉시 갱신)."""
+    try:
+        with st.spinner("기록 중… (가격 갱신 포함)"):
+            msg = fn()
+        st.success(str(msg) if msg else "완료")
+        st.cache_data.clear()
+        st.rerun()
+    except Exception as e:
+        st.error(f"실패: {e}")
+
+
+@st.fragment
+def _manage_position(ticker, cur_price, pos):
+    with st.expander("⚙️ 내 포지션 관리 — 추가·적립·축소 (실제 추적 포트폴리오 · 실주문 아님)",
+                     expanded=False):
+        cur = float(cur_price or 0.0)
+        held = pos["shares"] if pos else 0.0
+        st.caption(f"현재가 ${cur:,.2f} · 보유 {held:g}주"
+                   + (f" · 평단 {data.f_usd(pos.get('avg_price_usd'))}" if pos else " · 미보유"))
+        mode = st.segmented_control("작업", ["➕ 추가", "💧 적립(금액)", "➖ 축소"], default="➕ 추가",
+                                    key="mng_mode", label_visibility="collapsed") or "➕ 추가"
+        if mode == "💧 적립(금액)":
+            amt = st.number_input("적립 금액 ($)", min_value=0.0, value=100.0, step=10.0, key="acc_amt")
+            qty = (amt / cur) if cur > 0 else 0.0
+            st.caption(f"→ 현재가 기준 약 **{qty:.4f}주** 소수점 적립 (평단 자동 재계산)")
+            if st.button("💧 적립 기록", key="acc_btn", type="primary",
+                         disabled=(amt <= 0 or cur <= 0), width="stretch"):
+                _apply_action(lambda: _hm().buy_holding(ticker, round(qty, 4), round(cur, 4)))
+        elif mode == "➖ 축소":
+            if not pos:
+                st.info("보유하지 않은 종목입니다.")
+            else:
+                q = st.number_input(f"축소 주수 (0 = 전량, 보유 {held:g})", min_value=0.0,
+                                    max_value=float(held), value=0.0, step=0.0001, format="%.4f", key="red_qty")
+                lab = "전량 정리" if q <= 0 else f"{q:.4f}주 축소"
+                if st.button(f"➖ {lab} 기록", key="red_btn", width="stretch"):
+                    _apply_action(lambda: _hm().sell_holding(ticker, q if q > 0 else None))
+        else:                                                       # 추가(신규·증액)
+            c = st.columns(2)
+            q = c[0].number_input("주수 (소수점 가능)", min_value=0.0, value=1.0, step=0.0001,
+                                  format="%.4f", key="add_qty")
+            px = c[1].number_input("단가 ($)", min_value=0.0, value=round(cur, 2), step=0.01, key="add_px")
+            st.caption(f"→ 약 ${q * px:,.2f} 취득 기록 (평단 자동 재계산)")
+            if st.button("➕ 보유 추가 기록", key="add_btn", type="primary",
+                         disabled=(q <= 0 or px <= 0), width="stretch"):
+                _apply_action(lambda: _hm().buy_holding(ticker, round(q, 4), round(px, 4)))
+        st.caption("holding_manager 안전기록(atomic·교차프로세스 락) · 봇 /holding 과 동일 · 실계좌 주문 없음(기록 전용)")

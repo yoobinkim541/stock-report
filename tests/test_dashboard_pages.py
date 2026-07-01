@@ -171,6 +171,23 @@ def test_research_shows_learning_curve():
     assert len(at.dataframe) >= 1                             # 채택 이력표
 
 
+def test_ticker_position_management_renders():
+    """종목분석 하단 포지션 관리 — 입력·버튼 렌더(J3). 실제 write 없음(클릭 안 함)."""
+    script = _STUBS + (
+        'cached.realtime_quote = lambda t: {"price": 200.0, "bids": [], "asks": [], "market": "US"}\n'
+        'data.holding_position = lambda t, *a, **k: {"shares": 5.0, "avg_price_usd": 180.0,'
+        ' "value": 1000.0, "ret": 11.1, "cost": 900.0}\n'
+        'st.session_state["ticker"] = "NVDA"\n'
+        'from dashboard.pages import ticker\nticker.render()\n')
+    at = AppTest.from_string(script, default_timeout=30)
+    at.run()
+    assert not at.exception, str(at.exception)
+    assert len(at.number_input) >= 1                 # 주수/단가 입력
+    assert any("기록" in str(b.label) for b in at.button)   # 추가/적립/축소 기록 버튼
+    # 안전 라벨(실주문 아님) 노출
+    assert any("실주문 아님" in str(c.value) or "기록 전용" in str(c.value) for c in at.caption)
+
+
 def test_home_has_donut_and_holdings():
     """홈: 도넛(plotly) + 보유표 + KPI 가 렌더되는지(요소 존재)."""
     at = AppTest.from_string(_script("from dashboard.pages import home", "home.render()"),
