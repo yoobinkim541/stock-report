@@ -266,6 +266,24 @@ def _log_decision(ledger, sig: dict, code: str, kind: str, order_side: str,
 
 # ── 텔레그램 요약 ─────────────────────────────────────────────────────────────
 
+# 개별 주문이 아니라 '전 주문이 동일하게 막히는' 계좌/시장 레벨 상황 신호
+_ACCOUNT_SIGNS = ("종료된 계좌", "다시 신청", "개인공매도", "공매도이수", "RC4091", "RC5006", "계좌번호를 확인")
+_MARKET_SIGNS = ("장종료", "장 종료", "RC4058", "장운영시간")
+
+
+def _order_blocker(msg) -> str | None:
+    """주문 실패 사유가 '전 주문 공통 차단'인지 분류 — 개별 주문 문제(부족·틱 등)와 구분.
+
+    'account' = 계좌 종료/유형/미신청 → 재신청 필요 · 'market' = 장 마감 → 장중 재시도 · None = 개별.
+    """
+    m = str(msg or "")
+    if any(s in m for s in _ACCOUNT_SIGNS):
+        return "account"
+    if any(s in m for s in _MARKET_SIGNS):
+        return "market"
+    return None
+
+
 def _notify(nav: float | None, results: list[dict], signals: list[dict]) -> None:
     name_by_code, reason_by_code = {}, {}
     try:
@@ -275,30 +293,42 @@ def _notify(nav: float | None, results: list[dict], signals: list[dict]) -> None
         pass
     reason_by_code = {s["code"]: (s.get("rationale") or {}).get("one_line_reason", "") for s in signals}
 
-    _KIND_ICON = {"편입": "📥", "증액": "➕", "퇴출": "📤", "감액": "➖"}
-    lines = ["🧪 [모의] 국내 페이퍼트레이딩"]
-    lines.append("━━━━━━━━━━━━━━━━━━━━━━━")
+    lines = ["🧪 [모의] 국내 페이퍼트레이딩", "━━━━━━━━━━━━━━━━━━━━━━━"]
     if nav is not None:
         lines.append(f"  추정 NAV  ₩{nav:,.0f}")
-    placed = [r for r in results if r.get("ok")]
-    failed = [r for r in results if not r.get("ok")]
-    if not results:
-        lines.append("  주문 없음 (목표 = 현 보유)")
-    for r in results:
-        nm = name_by_code.get(r["code"], "")
-        mark = "✅" if r.get("ok") else "❌"
-        kind = r.get("kind", "매수" if r["side"] == "buy" else "매도")
-        icon = _KIND_ICON.get(kind, "")
-        lines.append(f"  {mark} {icon}{kind} {r['code']} {nm} {r['qty']}주")
-        # 편입/퇴출은 사유(one_line_reason) 병기
-        if kind in ("편입", "퇴출"):
-            rr = reason_by_code.get(r["code"], "")
-            if rr:
-                lines.append(f"     사유: {rr}")
-        if not r.get("ok") and r.get("msg"):
-            lines.append(f"     ↳ {r['msg']}")
-    lines.append("━━━━━━━━━━━━━━━━━━━━━━━")
-    lines.append(f"  집행 {len(placed)} · 실패 {len(failed)}")
+
+    # 계좌/시장 레벨 차단이면 개별 실패 도배 대신 명확 안내 1건
+    blocker = next((_order_blocker(r.get("msg")) for r in results
+                    if not r.get("ok") and _order_blocker(r.get("msg"))), None)
+    if blocker == "account":
+        emsg = next(r.get("msg") for r in results if _order_blocker(r.get("msg")) == "account")
+        lines += ["  ⚠️ 키움 모의계좌 문제 — 주문 중단", f"     ↳ {emsg}",
+                  "  👉 키움에서 '주식 모의투자(국내)' 재신청·활성화 필요",
+                  "━━━━━━━━━━━━━━━━━━━━━━━"]
+    elif blocker == "market":
+        lines += ["  ⚠️ 장 마감 — 주문 보류 (장중 09:00~15:30 KST 자동 재시도)",
+                  "━━━━━━━━━━━━━━━━━━━━━━━"]
+    else:
+        _KIND_ICON = {"편입": "📥", "증액": "➕", "퇴출": "📤", "감액": "➖"}
+        placed = [r for r in results if r.get("ok")]
+        failed = [r for r in results if not r.get("ok")]
+        if not results:
+            lines.append("  주문 없음 (목표 = 현 보유)")
+        for r in results:
+            nm = name_by_code.get(r["code"], "")
+            mark = "✅" if r.get("ok") else "❌"
+            kind = r.get("kind", "매수" if r["side"] == "buy" else "매도")
+            icon = _KIND_ICON.get(kind, "")
+            lines.append(f"  {mark} {icon}{kind} {r['code']} {nm} {r['qty']}주")
+            # 편입/퇴출은 사유(one_line_reason) 병기
+            if kind in ("편입", "퇴출"):
+                rr = reason_by_code.get(r["code"], "")
+                if rr:
+                    lines.append(f"     사유: {rr}")
+            if not r.get("ok") and r.get("msg"):
+                lines.append(f"     ↳ {r['msg']}")
+        lines.append("━━━━━━━━━━━━━━━━━━━━━━━")
+        lines.append(f"  집행 {len(placed)} · 실패 {len(failed)}")
     lines.append("  ⚠️ 모의투자 — 실거래 아님")
 
     try:
@@ -377,6 +407,10 @@ def main(argv: list[str] | None = None) -> int:
                          "reason": o.get("reason"), "ok": r.get("ok"), "msg": r.get("msg")})
         _log_decision(ledger, sig_by_code.get(o["code"], {}), o["code"], kind, o["side"],
                       o["qty"], r.get("ok"), today)
+        if not r.get("ok") and _order_blocker(r.get("msg")):
+            logger.error("전 주문 공통 차단(%s) 감지 — 남은 주문 중단: %s",
+                         _order_blocker(r.get("msg")), r.get("msg"))
+            break
         time.sleep(0.3)   # 레이트리밋 여유
 
     _notify(nav, results, signals)

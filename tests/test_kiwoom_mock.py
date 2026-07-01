@@ -255,6 +255,17 @@ def test_plan_cash_running_cap():
     assert total <= 6
 
 
+def test_order_blocker_classifies():
+    """계좌/시장 레벨 차단 신호 분류 — 개별 주문 문제(부족 등)와 구분해 즉시 중단·명확 알림."""
+    import kiwoom_mock_track as kt
+    assert kt._order_blocker("[2000](RC4091:모의투자 종료된 계좌입니다. 다시 신청해주시기 바랍니다.)") == "account"
+    assert kt._order_blocker("[2000](RC5006:모의투자 개인공매도이수전용 계좌입니다.)") == "account"
+    assert kt._order_blocker("[2000](RC4058:모의투자 장종료)") == "market"
+    assert kt._order_blocker("모의투자 주문가능금액이 부족합니다.") is None   # 개별 주문 문제 → 중단 안 함
+    assert kt._order_blocker("모의투자 매수주문이 완료 되었습니다.") is None
+    assert kt._order_blocker(None) is None
+
+
 def test_main_dry_run_places_no_orders(monkeypatch):
     """--dry-run 은 계획만 출력하고 주문 0 (비활성 상태에서도 미리보기 허용)."""
     import kiwoom_mock_track as kt
