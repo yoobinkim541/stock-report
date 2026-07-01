@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 
 # ── 큐레이트 시드 ─────────────────────────────────────────────────────
 # US 영문 표시명 (보유 + 인기 US·ETF). 값이 티커와 같으면 병기 생략(label).
@@ -322,6 +323,28 @@ def resolve(query: str, allow_net: bool = False) -> str | None:
             if nq and nq in _norm(ent.get("name", "")):
                 return tk
     return None
+
+
+_US_TICKER_RE = re.compile(r"^[A-Z]{1,5}([.\-][A-Z]{1,2})?$")
+
+
+def normalize_input(query: str) -> str | None:
+    """자유 입력(한글명·영문명·티커) → 정규 티커. 못 찾으면 None.
+
+    대시보드 검색 셀렉트박스 `accept_new_options` 경로용(시드 밖 임의 US 티커 지원).
+    티커 형태 입력(예: RIVN·BRK-B·NET)은 **정확 매칭만** 취하고 실패 시 리터럴 티커로 통과 —
+    부분매칭 오염(예: 'NET'→NFLX) 방지. 비티커형(한글 등)은 기존 resolve(부분매칭 포함).
+    무네트워크·순수.
+    """
+    q = (query or "").strip()
+    if not q:
+        return None
+    qu = q.upper()
+    if _US_TICKER_RE.match(qu):
+        if qu in _ALL_TICKERS:
+            return qu
+        return _INDEX.get(_norm(q)) or qu   # 이름 정확매칭 없으면 리터럴 티커로 통과
+    return resolve(q)
 
 
 def search(query: str, limit: int = 8) -> list[tuple[str, str]]:

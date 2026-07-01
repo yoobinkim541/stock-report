@@ -32,21 +32,37 @@ st.session_state.setdefault("ticker", _held[0] if _held else "MSFT")
 with st.sidebar:
     st.markdown("### 🔎 종목")
     _cur = st.session_state["ticker"]
-    # 옵션 = 보유 우선 + 전체 유니버스. 현재 종목이 유니버스 밖이면 앞에 보장.
+    # 옵션 = 보유 우선 + 전체 유니버스. 현재 종목/정규화 가능한 대기입력이 유니버스 밖이면 앞에 보장.
+    # accept_new_options 로 새로 입력한 티커(예: RIVN)가 아래 reconciliation 의 `_tsel not in _opts`
+    # 절에 걸려 첫 옵션으로 리셋되는 것 방지 — 유효 신규티커만 옵션 편입(garbage 는 미편입→self-heal).
+    _pending = st.session_state.get("_tsel")
+    _pending_ok = bool(_pending) and ticker_names.normalize_input(_pending) is not None
     _opts = list(dict.fromkeys(_held + ticker_names.universe()))
-    if _cur not in _opts:
-        _opts = [_cur] + _opts
+    for _extra in (_cur, _pending if _pending_ok else None):
+        if _extra and _extra not in _opts:
+            _opts = [_extra] + _opts
     # 외부(홈 행클릭·초기화·페이지 이동)로 ticker 가 바뀌거나 위젯상태가 유실되면 위젯에 반영.
     # (Streamlit 위젯상태 vs 외부 session_state 동기화 관용 패턴 · switch_page 후 위젯 초기화 방어)
     if st.session_state.get("_tsel_sync") != _cur or st.session_state.get("_tsel") not in _opts:
         st.session_state["_tsel"] = _cur
         st.session_state["_tsel_sync"] = _cur
     _sel = st.selectbox("검색 (한글·영문·티커)", _opts,
-                        format_func=ticker_names.search_label, key="_tsel")
-    if _sel != _cur:
-        st.session_state["ticker"] = _sel
-        st.session_state["_tsel_sync"] = _sel
-        st.session_state["_nav_to_ticker"] = True   # 검색·선택 → 종목 분석으로 자동 이동
+                        format_func=ticker_names.search_label, key="_tsel",
+                        accept_new_options=True,
+                        help="목록에 없어도 티커를 직접 입력하면 조회합니다 (예: BRK-B · COIN · RIVN)")
+    if _sel and _sel != _cur:
+        _tk = ticker_names.normalize_input(_sel)   # 자유입력 티커/이름 → 정규 티커 (없으면 None)
+        if _tk:
+            st.session_state["ticker"] = _tk
+            st.session_state["_nav_to_ticker"] = True   # 검색·선택 → 종목 분석으로 자동 이동
+            # 위젯 표시를 정규 티커로 맞춤: _tk!=_sel(리터럴·대소문자 차) 이면 _tsel_sync 를 비워
+            # 다음 rerun 의 reconciliation 이 _tsel←_tk 로 자기보정.
+            if _tk != _sel:
+                st.session_state.pop("_tsel_sync", None)
+            else:
+                st.session_state["_tsel_sync"] = _tk
+        else:
+            st.warning("종목을 찾지 못했습니다 — 티커(예: BRK-B)로 입력해 주세요")
     if st.button("🔄 새로고침", width="stretch", help="캐시 비우고 다시 불러오기"):
         st.cache_data.clear()
         # 무거운 게이트(스크리너·백테스트)도 초기화 → 캐시 비운 뒤 자동 재계산 방지

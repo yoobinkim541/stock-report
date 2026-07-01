@@ -139,6 +139,24 @@ def test_sidebar_select_navigates_and_ticker_sticks():
     assert at.session_state["ticker"] == "MU", f"선택 유실 → {at.session_state['ticker']}"
 
 
+def test_sidebar_freeform_ticker_guard_no_reset():
+    """자유입력 신규 티커가 reconciliation 에 리셋되지 않고 ticker 로 반영 (K2 _pending 가드).
+
+    첫 run 에 (ticker=구 MSFT · _tsel=신규 DDOG · sync=MSFT) 를 심어 '방금 입력' 상태 재현.
+    _pending 가드가 정규화 가능한 DDOG 를 _opts 에 편입 → reconciliation 이 첫 옵션으로
+    되돌리지 않음 → normalize_input 정규화·이동. 가드 없으면 DDOG 가 _opts 밖이라 MSFT 로 리셋.
+    (실브라우저 accept_new_options 타이핑 자체는 세션주입으로 시뮬 불가 — 정규화는 unit 커버.)
+    """
+    at = AppTest.from_file(os.path.join(ROOT, "dashboard", "app.py"), default_timeout=60)
+    at.session_state["_authed"] = True
+    at.session_state["ticker"] = "MSFT"        # 현재(구) 종목
+    at.session_state["_tsel"] = "DDOG"         # 방금 입력한 신규 티커(위젯 key)
+    at.session_state["_tsel_sync"] = "MSFT"    # 아직 구 종목과 동기
+    at.run()
+    assert not at.exception, str(at.exception)
+    assert at.session_state["ticker"] == "DDOG", f"자유입력 유실(가드 실패) → {at.session_state.get('ticker')}"
+
+
 def test_portfolio_renders_risk_kpis():
     """포트폴리오: 리스크 KPI 4 + 보유표 (위험기여·팩터 막대는 plotly로 무예외)."""
     at = AppTest.from_string(_script("from dashboard.pages import portfolio", "portfolio.render()"),

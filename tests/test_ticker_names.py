@@ -71,6 +71,32 @@ def test_label_expanded_names():
     assert ticker_names.label("WMT") == "Walmart (WMT)"
 
 
+# ── K2 normalize_input: 자유입력(티커/이름/garbage) → 정규 티커|None ──────
+def test_normalize_input_names_and_tickers():
+    assert ticker_names.normalize_input("버크셔") == "BRK-B"
+    assert ticker_names.normalize_input("berkshire") == "BRK-B"
+    assert ticker_names.normalize_input("월마트") == "WMT"
+    assert ticker_names.normalize_input("visa") == "V"
+    assert ticker_names.normalize_input("삼성전자") == "005930.KS"
+
+
+def test_normalize_input_freeform_literal_ticker():
+    # 시드 밖 티커도 티커 형태면 리터럴 통과(롱테일) · 대소문자 정규화
+    assert ticker_names.normalize_input("DDOG") == "DDOG"       # 시드 밖
+    assert ticker_names.normalize_input("coin") == "COIN"       # 시드 → 대문자
+    assert ticker_names.normalize_input("brk-b") == "BRK-B"
+
+
+def test_normalize_input_no_partial_pollution():
+    # 티커 형태 입력은 부분매칭 오염 없음 ('NET'→NFLX 아님)
+    assert ticker_names.normalize_input("NET") == "NET"
+
+
+def test_normalize_input_invalid_returns_none():
+    for q in ("", "   ", "ㅁㄴㅇㄹ", "123!!", "이건진짜없는종목이름"):
+        assert ticker_names.normalize_input(q) is None
+
+
 # ── display_name: US=영문 · KR(.KS)=한글 ────────────────────────────────
 def test_display_name_us_english():
     assert ticker_names.display_name("MSFT", allow_net=False) == "Microsoft"
