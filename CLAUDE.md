@@ -86,6 +86,7 @@ crons/news_spike_detector.py (크론 매 1분)
 | `bot/order_generator.py` | Phase 기반 소수점 매수 주문서 생성 |
 | `bot/stock_advisor.py` | AI 상담 프롬프트 실행 |
 | `bot/earnings_commands.py` | /earnings 서브커맨드 (실적 캘린더·밸류에이션·서프라이즈·컨센서스·PEAD) — owner 전용·정보형 |
+| `bot/evolve_command.py` | /evolve — 모의 자기개선 진화 렌더 (KR+US `evolution.evolution_summary` → verdict·순비용 IC·스파크 추세·채택 이력) — owner 전용·표시·무엣지면 정직 |
 
 **reports/ (리포트·데이터 생성)**
 | 파일 | 역할 |
@@ -147,7 +148,7 @@ crons/news_spike_detector.py (크론 매 1분)
 |------|------|----------|
 | `ml/sweet_spot.py` | AR(1) 합성 데이터 + 임계값 전략 그리드서치 | — |
 | `ml/leverage_optimizer.py` | Optuna TPE 레버리지 파라미터 탐색 + Walk-Forward OOS | `~/reports/ml-cache/leverage_best_params.json` |
-| `ml/adaptive/` | 적응형 학습 공유 프레임워크 — policy(클램프)·ledger(불변 원장)·reward(★목적함수)·learner(OOS게이트)·regime(최근성)·champion_challenger | `~/reports/ml-cache/policy_*.json` |
+| `ml/adaptive/` | 적응형 학습 공유 프레임워크 — policy(클램프)·ledger(불변 원장)·reward(★목적함수)·learner(OOS게이트)·regime(최근성)·champion_challenger·**evolution(진화 텔레메트리 — 주간 학습 append-only 이력 + 라이브 스냅샷 IC·적중·누적엣지 → 정직 verdict; `/evolve`·대시보드 공용·순수)** | `~/reports/ml-cache/policy_*.json`·`~/reports/ml-data/{kr,us}_mock_learning.jsonl` |
 | `ml/kr_ranker.py` | 한국주식 전용 ranker (KOSPI 대비 초과수익 예측, US ranker 재사용·KR캐시) | `~/reports/ml-cache/kr_ranker_model.pkl` |
 | `ml/kr_policy.py` | KR 모의 선택 정책 점수 (KR ranker + 규칙 가중, Policy 클램프) | `~/reports/ml-cache/policy_kr_mock.json` |
 | `ml/regime_classifier.py` | 추세 vs 횡보 레짐 감지 (Kaufman ER·무룩어헤드·비대칭 전이, US=QQQ·KR=^KS11) — 리포트/`/status` **표시 전용, 배분 불변**. 백테스트 게이트가 US 횡보 틸트 NO-GO·KR 현금디리스크 조건부(비용반영 시 Sharpe중립) 판정 (`backtest/sideways_backtest.py`·`backtest/kr_sideways_backtest.py`) | — |
@@ -177,6 +178,7 @@ crons/news_spike_detector.py (크론 매 1분)
 /order               소수점 매수 주문서 (키움 즉시 입력)
 /card                포트폴리오 카드 이미지 — 배분 도넛·총액·종목별 비중/수익 (sendPhoto) — owner 전용
 /paper [kr|us]       모의 페이퍼트레이딩 — `kr`=국내(NAV·vs KOSPI)·`us`=미국(NAV·vs QQQ·적중률·IC)·생략=둘 다 (구 /mock·/usmock 통합) — owner 전용
+/evolve              모의 자기개선 "진화" — KR+US 정책 학습 verdict(콜드스타트/관찰/약한엣지/무엣지) + 순비용 IC·누적엣지·주별 OOS 추세·채택 이력 — owner 전용·표시(무엣지면 정직 공개)
 
 ── 종목 관리 ─────────────────────────────────────
 /holding                           보유 종목 목록
@@ -226,7 +228,7 @@ crons/news_spike_detector.py (크론 매 1분)
 ※ 게스트 포트폴리오는 본인 chat_id 네임스페이스에 격리 (소유자 portfolio_snapshot과 분리)
 ```
 
-> **메뉴 scope 분리** (setMyCommands): **소유자 채팅엔 소유자 메뉴(19), default·all_private_chats 엔 게스트 메뉴(4)** — `BotCommandScopeChat`(소유자)가 우선 적용돼 **소유자 메뉴엔 `/market`·`/my` 가 안 보임**(권한 아닌 표시만 분리 — 소유자는 입력 시 사용 가능). `/indicators` 는 종목 기술지표가 소유자에도 유용해 **소유자 메뉴에도 노출**(게스트 메뉴엔 그대로).
+> **메뉴 scope 분리** (setMyCommands): **소유자 채팅엔 소유자 메뉴(20), default·all_private_chats 엔 게스트 메뉴(4)** — `BotCommandScopeChat`(소유자)가 우선 적용돼 **소유자 메뉴엔 `/market`·`/my` 가 안 보임**(권한 아닌 표시만 분리 — 소유자는 입력 시 사용 가능). `/indicators` 는 종목 기술지표가 소유자에도 유용해 **소유자 메뉴에도 노출**(게스트 메뉴엔 그대로).
 >
 > **출력 포맷** (단일 진실원 `fmt.py`): 전 명령이 공통 레이어 경유 — `pct/money/spct`(0·음수0·부호 버그 차단), 짧은 구분선, **HTML 리치텍스트**(`send_html`·parse_mode=HTML): 핵심 `<b>굵게</b>`, 표는 `<pre>등폭</pre>`, 긴 리포트(/report·/rebalance)는 `<blockquote expandable>접기</blockquote>`(`_send_collapsible`), `/history`는 스파크라인. **모바일 주의**: `━ ─` 는 ambiguous-width 2칸 → 공백 정렬 의존 금지(정렬 필요표는 pre). 크론 공유 빌더(paper·history·barbell report)는 `html=` 파라미터로 텔레그램만 굵게, 크론은 평문. 이미지: 일일 PNG(`report_charts.build_portfolio_dashboard`, 히어로 KPI 밴드) + 온디맨드 `/card`(`build_portfolio_card`, 봇이 `.venv` subprocess 렌더 — hermes venv 불변).
 >
@@ -320,7 +322,7 @@ crons/news_spike_detector.py (크론 매 1분)
 | `dashboard/app.py` | Streamlit 엔트리 — 테마 주입 → 인증 게이트 → 사이드바(종목 퀵픽·신선도·새로고침·**보유 워치리스트**) → `st.navigation` 5페이지. 최상단 `sys.path.insert(루트)` 필수(streamlit run `sys.path[0]=스크립트dir` 함정) |
 | `.streamlit/config.toml` | **Terminal Noir 테마** (TradingView/토스증권) — 다크 블루블랙·일렉트릭블루 액센트·틸그린/코랄레드 시맨틱·Pretendard(한글)+JetBrains Mono(등폭 수치) fontFaces·radius/border/chart 팔레트 |
 | `dashboard/theme.py` | 테마 단일 진실원 — 팔레트 상수 + **순수 HTML/SVG 빌더**(ticker_hero·rating_gauge 반원속도계·sparkline·watchlist, 테스트가능) + `apply_plotly_theme`(차트 다크 템플릿) + `inject_global_css`(streamlit lazy — import 시 미로드해 charts 순수성 유지) |
-| `dashboard/pages/` | 멀티페이지(비활성 페이지 미실행=lazy) — `home`(글랜스: 포트 ticker-hero+배분도넛+클릭 보유표→종목분석 자동이동+Phase+오늘일정)·`portfolio`(리스크 KPI+위험기여/팩터β 막대+½Kelly밴드+도넛)·`ticker`(심볼 히어로+**기술신호 게이지**+가격라인+MA·밸류밴드 불릿·서프라이즈 막대·기관·공시·실적)·`market`(경제캘린더+뉴스)·`research`(스크리너+백테스트 이퀴티) |
+| `dashboard/pages/` | 멀티페이지(비활성 페이지 미실행=lazy) — `home`(글랜스: 포트 ticker-hero+배분도넛+클릭 보유표→종목분석 자동이동+Phase+오늘일정)·`portfolio`(리스크 KPI+위험기여/팩터β 막대+½Kelly밴드+도넛)·`ticker`(심볼 히어로+**기술신호 게이지**+가격라인+MA·밸류밴드 불릿·서프라이즈 막대·기관·공시·실적)·`market`(경제캘린더+뉴스)·`research`(스크리너+백테스트 이퀴티+**🧬 정책 학습 곡선**: KR/US 모의 자기개선 verdict·순비용 IC·OOS 곡선·채택 이력) |
 | `dashboard/charts.py` | plotly 차트 빌더(순수 함수·단위테스트·theme 다크 템플릿 적용) — allocation_donut·price_line·hbar·signed_bars·value_bullet·equity_curve |
 | `dashboard/cached.py` | `st.cache_data` 래퍼(멀티페이지 공용·TTL 15~60분) — valuation/financials/.../risk_struct/ohlc |
 | `dashboard/data.py` | 포트폴리오/Phase 상태 + 스케일 명시 포맷터(f_frac_pct vs f_pct·부호버그 차단). streamlit 미import → 테스트가능 |
@@ -382,12 +384,14 @@ crons/news_spike_detector.py (크론 매 1분)
 ~/reports/ml-data/us_mock_decisions.jsonl        — US 모의 편입/퇴출 결정+근거 (불변 append-only, point-in-time features — 절대 삭제 금지)
 ~/reports/ml-data/us_mock_outcomes.jsonl         — US 모의 결정 실현 보상(초과수익 vs QQQ·side-aware 정답) (불변 append-only)
 ~/reports/ml-data/us_mock_journal/YYYY-MM.md     — US 사람용 편입/퇴출 저널 (월별 누적)
+~/reports/ml-data/us_mock_learning.jsonl         — US 주간 학습 진화 이력 (채택여부·챔피언/챌린저 OOS·순비용 스냅샷 — evolution.record_learning, 불변 append-only, /evolve·대시보드 학습곡선 원천)
 ~/reports/ml-cache/policy_us_mock.json           — US 모의 선택 정책 가중치 (learner OOS 게이트·챔피언-챌린저 채택 시 갱신, 클램프)
 ~/.cache/kis_mock_token.json                     — KIS 해외 모의 OAuth 토큰 디스크 영속 (발급 레이트리밋 회피)
 ~/.cache/kis_realtime_quotes.json                — 실시간 시세 캐시 (kis_stream writer·realtime_quotes reader; symbol→{price,bid,ask,bids/asks,volume,ts,delayed}+__heartbeat__. safe_io atomic)
 ~/.cache/kis_quote_token.json                    — KIS 실전 시세 OAuth 토큰 디스크 영속 (모의 토큰과 별개·실전 앱키)
 ~/.cache/kis_fills.jsonl                          — 실계좌 체결통보 기록 (kis_stream, REALTIME_FILLS_ENABLED 시 — append-only·알림용·AES 복호화)
 ~/reports/ml-data/kr_mock_outcomes.jsonl         — KR 모의 결정 실현 보상(초과수익) (불변 append-only)
+~/reports/ml-data/kr_mock_learning.jsonl         — KR 주간 학습 진화 이력 (채택여부·챔피언/챌린저 OOS·순비용 스냅샷 — evolution.record_learning, 불변 append-only, /evolve·대시보드 학습곡선 원천)
 ~/reports/ml-data/kr_mock_journal/YYYY-MM.md     — 사람용 편입/퇴출 저널 (월별 누적)
 ~/reports/ml-data/kospi200_members.jsonl         — KOSPI200 시점별 멤버십 forward 스냅샷 (Naver, naver_flow_snapshot)
 ~/reports/ml-data/kr_flow_snapshots.jsonl        — KR 투자자 수급 일별 스냅샷 (외인/기관, Naver)
