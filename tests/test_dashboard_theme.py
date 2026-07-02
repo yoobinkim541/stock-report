@@ -78,21 +78,29 @@ def test_sparkline_up_down_empty():
     assert "polyline" not in theme.sparkline_svg([1])     # 부족 → 빈 svg
 
 
-# ── O2 시장 지표 카드 (F&G·지수 RSI) ──────────────────────────────────
-def test_fng_badge_html():
-    assert "극공포" in theme.fng_badge_html(10)            # <25
-    assert "극탐욕" in theme.fng_badge_html(90)            # 상단
-    assert "중립" in theme.fng_badge_html(50)              # 45~55
-    h = theme.fng_badge_html(31.9, prev_week=26.0)
+# ── O2 시장 지표 게이지 (F&G·지수 RSI 반원 게이지) ─────────────────────
+def test_fng_gauge_html():
+    assert "극공포" in theme.fng_gauge_html(10)            # <25 sub
+    assert "극탐욕" in theme.fng_gauge_html(90)            # 상단
+    assert "중립" in theme.fng_gauge_html(50)              # 45~55
+    h = theme.fng_gauge_html(31.9, prev_week=26.0)
     assert "32" in h and "전주 26" in h                     # 점수·추세
-    assert theme.fng_badge_html(None) == ""                 # 잘못된 입력 graceful
+    assert "<svg" in h and "<path" in h                     # 반원 게이지 SVG
+    assert theme.fng_gauge_html(None) == ""                 # 잘못된 입력 graceful
 
 
-def test_index_rsi_html_zones():
-    h = theme.index_rsi_html("S&P 500", price=6000, chg=1.2, rsi_d=75.0, rsi_w=30.0)
-    assert "S&P 500" in h and "과매수" in h and "과매도" in h   # 75→과매수·30→과매도
+def test_index_rsi_gauges_html():
+    h = theme.index_rsi_gauges_html("S&P 500", price=6000, chg=1.2, rsi_d=75.0, rsi_w=30.0)
+    assert "S&P 500" in h and "과매수" in h and "과매도" in h   # 75→과매수·30→과매도 sub
+    assert h.count("<svg") == 2                              # 일봉·주봉 게이지 2개
     assert theme.RED in h and theme.GREEN in h
-    assert "—" in theme.index_rsi_html("나스닥", rsi_d=None)    # 결측 graceful
+    assert "—" in theme.index_rsi_gauges_html("나스닥", rsi_d=None)   # 결측 graceful
+
+
+def test_gauge_svg_zones_and_needle():
+    g = theme._gauge_svg(50, 0, 100, [(30, theme.GREEN), (70, theme.MUTED), (100, theme.RED)], big="50")
+    assert g.count("<path") == 3 and "<line" in g and "50" in g   # 3존 + 니들
+    assert "<line" not in theme._gauge_svg(None, 0, 100, [(100, theme.MUTED)])   # 값 없으면 니들 없음
 
 
 def test_watchlist_html():

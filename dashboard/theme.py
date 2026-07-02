@@ -147,24 +147,54 @@ def fng_label(score):
     return _FNG_ZONES[-1][1], _FNG_ZONES[-1][2]
 
 
-def fng_badge_html(score, prev_week=None) -> str:
-    """공포·탐욕 지수 카드 — CNN 풍 그라디언트 바 + 마커 + 점수·라벨·전주 추세."""
+def _gauge_svg(value, vmin, vmax, zones, big=None, big_col=None, sub=None) -> str:
+    """반원 게이지 SVG — zones=[(상한, 색)] 오름차순(마지막 상한=vmax). value→니들 각도.
+
+    중앙 big 텍스트(기본 value)·하단 sub. `_arc`/`_polar`(rating_gauge 공용·상단 반원) 재사용.
+    """
+    span = (vmax - vmin) or 1.0
+
+    def ang(v):
+        return 180.0 - (max(vmin, min(vmax, v)) - vmin) / span * 180.0
+
+    cx, cy, r = 100, 100, 78
+    prev = vmin
+    parts = []
+    for hi, col in zones:
+        parts.append(f'<path d="{_arc(cx, cy, r, ang(prev), ang(hi))}" fill="none" '
+                     f'stroke="{col}" stroke-width="13" stroke-linecap="butt"/>')
+        prev = hi
+    ok = isinstance(value, (int, float))
+    if ok:
+        nx, ny = _polar(cx, cy, r - 18, ang(float(value)))
+        parts.append(f'<line x1="{cx}" y1="{cy}" x2="{nx:.1f}" y2="{ny:.1f}" '
+                     f'stroke="{TEXT}" stroke-width="3" stroke-linecap="round"/>')
+        parts.append(f'<circle cx="{cx}" cy="{cy}" r="5" fill="{TEXT}"/>')
+    bigtxt = big if big is not None else (f"{value:.0f}" if ok else "—")
+    parts.append(f'<text x="{cx}" y="80" text-anchor="middle" fill="{big_col or TEXT}" '
+                 f'font-size="27" font-weight="700" font-family="{_MONO}">{bigtxt}</text>')
+    if sub:
+        parts.append(f'<text x="{cx}" y="118" text-anchor="middle" fill="{MUTED}" '
+                     f'font-size="11" font-family="{_MONO}">{sub}</text>')
+    return (f'<svg viewBox="0 0 200 126" width="100%" preserveAspectRatio="xMidYMid meet">'
+            f'{"".join(parts)}</svg>')
+
+
+_FNG_GAUGE = [(25, "#ef5350"), (45, "#ff9800"), (55, MUTED), (75, "#66bb6a"), (100, GREEN)]
+
+
+def fng_gauge_html(score, prev_week=None) -> str:
+    """공포·탐욕 지수 반원 게이지 (CNN 풍) — 점수 니들 + 등급 + 전주 추세."""
     try:
         s = max(0.0, min(100.0, float(score)))
     except (TypeError, ValueError):
         return ""
     col, lab = fng_label(s)
-    trend = ""
-    if isinstance(prev_week, (int, float)):
-        arrow = "▲" if s >= prev_week else "▼"
-        trend = (f'<span style="color:{MUTED};font-size:0.8rem;margin-left:8px">'
-                 f'전주 {prev_week:.0f} {arrow}</span>')
-    return f'''<div style="padding:10px 14px;background:{PANEL};border:1px solid {BORDER};border-radius:10px">
-  <div style="color:{MUTED};font-size:0.85rem;margin-bottom:7px">😱 공포·탐욕 지수 · <b style="color:{col}">{lab}</b></div>
-  <div style="position:relative;height:8px;border-radius:4px;background:linear-gradient(90deg,#ef5350,#ff9800,{MUTED},#66bb6a,{GREEN})">
-    <div style="position:absolute;left:calc({s:.0f}% - 6px);top:-3px;width:12px;height:12px;border-radius:50%;background:{TEXT};border:2px solid {col}"></div></div>
-  <div style="margin-top:9px"><span style="color:{col};font-size:1.6rem;font-weight:700;font-family:{_MONO}">{s:.0f}</span>
-    <span style="color:{MUTED};font-size:0.85rem"> / 100</span>{trend}</div>
+    trend = f' · 전주 {prev_week:.0f} {"▲" if s >= prev_week else "▼"}' if isinstance(prev_week, (int, float)) else ""
+    return f'''<div style="padding:8px 12px;background:{PANEL};border:1px solid {BORDER};border-radius:10px">
+  <div style="color:{MUTED};font-size:0.82rem;text-align:center">😱 공포·탐욕 지수</div>
+  <div style="max-width:210px;margin:0 auto">{_gauge_svg(s, 0, 100, _FNG_GAUGE, big=f"{s:.0f}", big_col=col, sub=lab)}</div>
+  <div style="color:{MUTED};font-size:0.72rem;text-align:center;margin-top:-2px">극공포 0 · 100 극탐욕{trend}</div>
 </div>'''
 
 
@@ -180,24 +210,27 @@ def _rsi_zone(v):
     return "과매수" if v >= 70 else "과매도" if v <= 30 else "중립"
 
 
-def index_rsi_html(name, price=None, chg=None, rsi_d=None, rsi_w=None) -> str:
-    """지수 카드 — 현재가·당일등락 + 일봉/주봉 RSI(과매수 적·과매도 녹·중립 회)."""
+_RSI_GAUGE = [(30, GREEN), (70, MUTED), (100, RED)]   # 과매도 녹·중립 회·과매수 적
+
+
+def index_rsi_gauges_html(name, price=None, chg=None, rsi_d=None, rsi_w=None) -> str:
+    """지수 카드 — 현재가·당일등락 + 일봉/주봉 RSI 반원 게이지 2개(과매수 적·과매도 녹)."""
     ccol = GREEN if (chg or 0) >= 0 else RED
     pxs = f"{price:,.0f}" if isinstance(price, (int, float)) else "—"
     chgs = f"{chg:+.2f}%" if isinstance(chg, (int, float)) else ""
 
-    def cell(lbl, v):
-        c, z = _rsi_color(v), _rsi_zone(v)
-        vs = f"{v:.0f}" if isinstance(v, (int, float)) else "—"
-        return (f'<div style="flex:1"><div style="color:{MUTED};font-size:0.72rem">{lbl}</div>'
-                f'<div style="font-family:{_MONO};font-size:1.15rem;font-weight:700;color:{c}">{vs}'
-                f'<span style="font-size:0.66rem;margin-left:4px;color:{c}">{z}</span></div></div>')
+    def g(lbl, v):
+        c = _rsi_color(v)
+        big = f"{v:.0f}" if isinstance(v, (int, float)) else "—"
+        val = v if isinstance(v, (int, float)) else None
+        return (f'<div style="flex:1;text-align:center"><div style="color:{MUTED};font-size:0.72rem">{lbl}</div>'
+                f'{_gauge_svg(val, 0, 100, _RSI_GAUGE, big=big, big_col=c, sub=_rsi_zone(v))}</div>')
 
-    return f'''<div style="padding:10px 14px;background:{PANEL};border:1px solid {BORDER};border-radius:10px">
+    return f'''<div style="padding:8px 12px;background:{PANEL};border:1px solid {BORDER};border-radius:10px">
   <div style="display:flex;justify-content:space-between;align-items:baseline">
     <b style="color:{TEXT}">{name}</b>
-    <span style="font-family:{_MONO};color:{MUTED};font-size:0.85rem">{pxs} <span style="color:{ccol}">{chgs}</span></span></div>
-  <div style="display:flex;gap:12px;margin-top:8px">{cell("일봉 RSI", rsi_d)}{cell("주봉 RSI", rsi_w)}</div>
+    <span style="font-family:{_MONO};color:{MUTED};font-size:0.82rem">{pxs} <span style="color:{ccol}">{chgs}</span></span></div>
+  <div style="display:flex;gap:6px;margin-top:2px">{g("일봉 RSI", rsi_d)}{g("주봉 RSI", rsi_w)}</div>
 </div>'''
 
 

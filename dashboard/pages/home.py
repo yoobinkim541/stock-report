@@ -79,15 +79,15 @@ def _market_bar():
     cols = st.columns([1.1, 1, 1])
     with cols[0]:
         if fg:
-            theme.render(theme.fng_badge_html(fg.get("score"), fg.get("prev_week")))
+            theme.render(theme.fng_gauge_html(fg.get("score"), fg.get("prev_week")))
         else:
             st.caption("😱 공포·탐욕 지수 N/A")
     for i in range(2):
         with cols[i + 1]:
             if i < len(idx):
                 ix = idx[i]
-                theme.render(theme.index_rsi_html(ix.get("name"), ix.get("price"),
-                                                  ix.get("chg"), ix.get("rsi_d"), ix.get("rsi_w")))
+                theme.render(theme.index_rsi_gauges_html(ix.get("name"), ix.get("price"),
+                                                         ix.get("chg"), ix.get("rsi_d"), ix.get("rsi_w")))
             else:
                 st.caption("지수 데이터 N/A")
 
