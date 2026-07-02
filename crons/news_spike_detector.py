@@ -120,8 +120,15 @@ def fetch_breaking_news(now: datetime) -> list[dict]:
 
 # ── Importance judgment ───────────────────────────────────────────────────────
 
-# 포트폴리오 직접 보유 종목 ($ 없이)
-_PORTFOLIO = {"MSFT", "QQQI", "ORCL", "NVDA", "GOOGL", "SAP", "UNH", "SGOV", "SPMO"}
+# 포트폴리오 직접 보유 종목 — portfolio_snapshot 파생 단일 소스(하드코딩 금지·CLAUDE.md 규칙).
+# 매 1분 크론이 fresh 프로세스로 실행돼 import 시점에 현재 보유를 반영(source_collector 와 동일 패턴).
+# 하드코딩 시 매수/매도로 보유가 바뀌면 관련 속보 누락·은퇴티커 오탐 + 스모크 감사 위반(감사 확정).
+try:
+    from portfolio_universe import load_portfolio_tickers
+    _PORTFOLIO = {t.split(".")[0].upper() for t in load_portfolio_tickers()}
+except Exception as _e:   # 스냅샷 로드 실패해도 속보 탐지는 계속(포트폴리오 관련성 부스트만 생략)
+    logger.warning("보유 종목 로드 실패 — 포트폴리오 관련성 부스트 생략: %s", _e)
+    _PORTFOLIO = set()
 
 # 제목에 포함 시 높은 관련성 키워드
 _HIGH_SIGNAL = (

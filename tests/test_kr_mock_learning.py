@@ -84,5 +84,22 @@ def test_backfill_matures_entries_only_and_idempotent(tmp_path):
     assert len(ts) == 1 and ts[0]["fwd_excess"] == pytest.approx(0.08 - rt)
 
 
+def test_backfill_excludes_unfilled_decisions(tmp_path):
+    """미집행(ok=False) 결정은 보상 평가에서 제외 — 팬텀 트레이드 오염 방지(감사 확정·US S6 미러)."""
+    lg = Ledger("kr_mock", base_dir=tmp_path)
+    lg.log_decision({"date": "2026-05-01", "ticker": "005930.KS", "code": "005930", "side": "편입",
+                     "features": {"ranker": 0.8}, "ok": True})
+    lg.log_decision({"date": "2026-05-01", "ticker": "000660.KS", "code": "000660", "side": "편입",
+                     "features": {"ranker": 0.7}, "ok": False})   # 주문 거부 → 학습 제외돼야
+
+    def fake_price(ticker, date, horizon):
+        return (0.12, 0.04, 0.06, 0.03)
+
+    added = L.backfill_outcomes(lg, price_fn=fake_price)
+    assert added == 1                                            # ok=True 편입만 성숙(ok=False 제외)
+    outs = lg.read_outcomes()
+    assert len(outs) == 1 and outs[0]["decision_id"] == "2026-05-01:005930.KS"
+
+
 if __name__ == "__main__":
     sys.exit(pytest.main([__file__, "-v"]))

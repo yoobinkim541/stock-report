@@ -114,8 +114,8 @@ def main() -> int:
         lines.append(f"  {ev['reason']}")
     else:
         lines += [
-            f"  표본 {ev['n']}  meta {ev['meta_mean']:+.2f}% vs rule {ev['rule_mean']:+.2f}% (우위 {ev['excess']:+.2f}%p)",
-            f"  하방 meta {ev['meta_dd']:.2f}% vs rule {ev['rule_dd']:.2f}%",
+            f"  표본 {ev['n']}  meta {ev['meta_mean']*100:+.2f}% vs rule {ev['rule_mean']*100:+.2f}% (우위 {ev['excess']*100:+.2f}%p)",
+            f"  하방 meta {ev['meta_dd']*100:.2f}% vs rule {ev['rule_dd']*100:.2f}%",
             f"  {ev['reason']}",
         ]
         if ev["adopt"]:

@@ -45,5 +45,12 @@ def test_tag_skips_unpriced(monkeypatch):
     assert "AAPL $100.00" in tag and "ZZZZ" not in tag
 
 
+def test_portfolio_set_derived_from_universe_not_hardcoded():
+    """중요도 판정용 _PORTFOLIO 가 portfolio_universe 파생인지 (하드코딩 금지·CLAUDE.md·감사 확정)."""
+    from portfolio_universe import load_portfolio_tickers
+    expected = {t.split(".")[0].upper() for t in load_portfolio_tickers()}
+    assert N._PORTFOLIO == expected      # 하드코딩 재도입 시 실패
+
+
 if __name__ == "__main__":
     sys.exit(pytest.main([__file__, "-v"]))

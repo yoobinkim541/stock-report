@@ -147,6 +147,8 @@ def backfill_outcomes(ledger, *, horizon: int = HORIZON, price_fn=None) -> int:
         # 편입/증액(매수) 결정만 보상 평가 대상(선택 정책 학습 신호)
         if d.get("side") not in ("편입", "증액"):
             continue
+        if d.get("ok") is False:   # ★미집행(주문실패) 결정 제외 — 팬텀 트레이드 오염 방지(US S6 미러·감사 확정)
+            continue
         res = price_fn(d.get("ticker", ""), d.get("date", ""), horizon)
         if res is None:
             continue   # 아직 미성숙 → 다음 회차
@@ -197,13 +199,17 @@ def main() -> int:
         send_cron_telegram(msg)
         return 0
 
-    # 지수 MDD 기준 — 결정들의 *보유기간 지수 MDD 평균*(eval 의 종목 MDD 와 동일 단위로 비교).
-    idx_mdds = [r["idx_fwd_mdd"] for r in rows if r.get("idx_fwd_mdd") is not None]
+    # 지수 MDD 기준 — 챌린저 MDD 와 **동일 OOS 창**에서 계산(refit_and_adopt 와 같은 분할·embargo).
+    # 전체 population 평균을 쓰면 train 급락장이 baseline 을 부풀려 OOS MDD 제약이 느슨해진다(감사 확정).
+    from ml.adaptive.learner import walk_forward_split
+    _, _oos_mask = walk_forward_split([r.get("date", "") for r in rows], embargo=HORIZON)
+    _oos_rows = [r for r, m in zip(rows, _oos_mask) if m]
+    idx_mdds = [r["idx_fwd_mdd"] for r in _oos_rows if r.get("idx_fwd_mdd") is not None]
     if idx_mdds:
         index_mdd = sum(idx_mdds) / len(idx_mdds)
     else:
         index_mdd = 0.20
-        logger.warning("보유기간 지수 MDD 없음 — 기본 0.20")
+        logger.warning("OOS 보유기간 지수 MDD 없음 — 기본 0.20")
 
     from ml.adaptive import learner
     out = learner.refit_and_adopt(

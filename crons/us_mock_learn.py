@@ -177,7 +177,11 @@ def main() -> int:
         send_cron_telegram(msg)
         return 0
 
-    idx_mdds = [r["idx_fwd_mdd"] for r in buy if r.get("idx_fwd_mdd") is not None]
+    # 지수 MDD 는 챌린저 MDD 와 동일 OOS 창에서 계산(전체 population 평균은 baseline 부풀림 — 감사 확정)
+    from ml.adaptive.learner import walk_forward_split
+    _, _oos_mask = walk_forward_split([r.get("date", "") for r in rows], embargo=HORIZON)
+    _oos_buy = _buy_rows([r for r, m in zip(rows, _oos_mask) if m])
+    idx_mdds = [r["idx_fwd_mdd"] for r in _oos_buy if r.get("idx_fwd_mdd") is not None]
     index_mdd = (sum(idx_mdds) / len(idx_mdds)) if idx_mdds else 0.20
     out = learner.refit_and_adopt(
         rows, us_policy.get_policy(), fit_policy,
