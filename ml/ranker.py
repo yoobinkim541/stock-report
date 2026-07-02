@@ -60,7 +60,7 @@ class RankerResult:
     oos_ic:             float          # information coefficient (rank corr)
     oos_icir:           float          # IC / std(IC)  — 월별 IC의 안정성
     oos_top_decile_ret: float          # 상위 10% 평균 실현 초과수익
-    oos_hit_rate:       float          # 양수 초과수익 비율
+    oos_hit_rate:       float          # 상위 10분위 픽의 양수 초과수익 적중률(모델 성능)
     feature_importance: pd.Series
     meta:               dict = field(default_factory=dict)
 
@@ -185,8 +185,9 @@ def train_ranker(
     top_mask = preds >= np.percentile(preds, 90)
     oos_top_decile_ret = float(y_test[top_mask].mean()) if top_mask.any() else 0.0
 
-    # hit rate
-    oos_hit_rate = float((y_test > 0).mean())
+    # hit rate — 모델이 고른 상위 10분위 픽의 양수 초과수익 적중률(모델 성능).
+    # (기존 (y_test>0).mean() 은 preds 무관한 전체 기저율이라 어떤 모델이든 동일 — 감사 확정)
+    oos_hit_rate = float((y_test[top_mask] > 0).mean()) if top_mask.any() else 0.0
 
     # feature importance
     fi = pd.Series(model.feature_importances_, index=feat_names, name="importance")
@@ -359,18 +360,65 @@ def load_ranker(path: Path = MODEL_CACHE) -> Optional[RankerResult]:
     return safe_unpickle(path)
 
 
-def adopt_if_better(result: RankerResult, path: Path = MODEL_CACHE, *, tol: float = 0.01) -> tuple[bool, float | None]:
+def _oos_ic_for_model(model, feature_names, dataset: dict, train_frac: float = 0.7) -> float | None:
+    """주어진 모델을 dataset 의 동일 시계열 OOS 분할에서 재평가한 OOS IC.
+
+    챔피언/챌린저를 '같은 창'에서 비교하기 위함 — 저장된 스칼라 oos_ic 는 채택 당시의 다른
+    기간이라 직접 비교하면 노화 챔피언 무기한 유지·부당 채택이 생긴다(감사 확정). 챔피언 학습
+    피처가 현재 데이터에 모두 없으면 재평가 불가 → None(호출자가 저장 스칼라로 폴백).
+    """
+    try:
+        features = dataset.get("features")
+        excess = dataset.get("excess")
+        if features is None or excess is None or features.empty:
+            return None
+        if not set(feature_names).issubset(set(features.columns)):
+            return None
+        feats = features[list(feature_names)]           # 챔피언 학습 피처 순서로 정렬
+        dates = feats.index.get_level_values("date")
+        unique_dates = sorted(dates.unique())
+        if len(unique_dates) < 3:
+            return None
+        split_date = unique_dates[int(len(unique_dates) * train_frac)]
+        test_mask = dates >= split_date
+        X_test = feats[test_mask].values.astype(float)
+        y_test = excess[test_mask].values.astype(float)
+        valid = np.isfinite(X_test).all(axis=1) & np.isfinite(y_test)
+        X_test, y_test = X_test[valid], y_test[valid]
+        if len(X_test) == 0:
+            return None
+        test_dates = feats[test_mask][valid].index.get_level_values("date")
+        preds = model.predict(X_test)
+        ic_series = _monthly_ic(preds, y_test, test_dates)
+        return float(ic_series.mean()) if len(ic_series) > 0 else 0.0
+    except Exception as e:
+        logger.warning("챔피언 OOS 동일창 재평가 실패: %s", e)
+        return None
+
+
+def adopt_if_better(result: RankerResult, path: Path = MODEL_CACHE, *, tol: float = 0.01,
+                    dataset: dict | None = None) -> tuple[bool, float | None]:
     """챔피언/챌린저 채택 게이트 — 신규 모델 OOS IC 가 현행보다 명백히 나쁘지 않을 때만 저장.
 
+    dataset 을 주면 챔피언을 **현재 창에서 재평가**해 챌린저와 동일 기간으로 비교한다(저장
+    스칼라 직접 비교는 이질 기간 — 감사 확정). 재평가 불가 시 저장 스칼라로 폴백.
     재학습 모델이 OOS IC 에서 (tol 이상) 퇴보하면 기존(챔피언) 모델을 유지(노이즈성 악화 방지).
-    반환: (채택 여부, 챔피언 OOS IC | None).
+    반환: (채택 여부, 비교에 쓴 챔피언 OOS IC | None).
     """
     champ = load_ranker(path)
-    champ_ic = champ.oos_ic if champ is not None else None
+    if champ is None:
+        save_ranker(result, path)
+        return True, None
+    champ_ic = champ.oos_ic
+    if dataset is not None:
+        re_ic = _oos_ic_for_model(champ.model, champ.feature_names, dataset)
+        if re_ic is not None:
+            champ_ic = re_ic
     if champ_ic is None or result.oos_ic >= champ_ic - tol:
         save_ranker(result, path)
         return True, champ_ic
-    logger.info("랭커 재학습 보류 — OOS IC %.3f < 챔피언 %.3f (퇴보) → 기존 유지", result.oos_ic, champ_ic)
+    logger.info("랭커 재학습 보류 — OOS IC %.3f < 챔피언 %.3f (동일창 재평가·퇴보) → 기존 유지",
+                result.oos_ic, champ_ic)
     return False, champ_ic
 
 
@@ -443,9 +491,10 @@ def rank_today(
         if today_feat.isna().any():
             continue
         score = float(result.model.predict(today_feat.to_frame().T)[0])
-        # 생존편향 페널티: 52주 고점 근처 + 강한 모멘텀 = 편입 이후 고점 가능성
-        penalty = _survivorship_penalty(today_feat)
-        score   = score * penalty
+        # 생존편향 플래그: 52주 고점 근처 + 강한 모멘텀 = 편입 이후 고점 가능성.
+        # 감산은 DataFrame 단계에서 횡단면 스케일로 — 곱셈(×0.85)은 lambdarank 음수 점수에서
+        # 오히려 값을 키워(부스트) 페널티 대상을 위로 올리는 부호버그였다(감사 확정).
+        surv_flag = _survivorship_penalty(today_feat) < 1.0
         # TradingView식 기술등급 (참고 표시용 — 점수에는 미반영)
         try:
             from ml.technical_rating import compute_technical_rating
@@ -455,7 +504,7 @@ def rank_today(
             tech_rating = None
 
         rows.append({"ticker": ticker, "score": score,
-                     "surv_penalty": round(penalty, 3),
+                     "surv_flag": surv_flag,
                      "price": float(df["Close"].dropna().iloc[-1]),
                      "tech_rating": tech_rating,
                      **today_feat.to_dict()})
@@ -468,6 +517,23 @@ def rank_today(
         .sort_values("score", ascending=False)
         .reset_index(drop=True)
     )
+
+    # 생존편향 페널티 — 횡단면 스케일로 감산(점수 부호와 무관하게 항상 하향). 곱셈 부호버그 대체.
+    # LGBMRanker 는 점수 스케일이 임의이므로 ±0.15σ, 회귀는 예측수익 단위(0.005)로 환산(펀더멘털 틸트와 동일).
+    try:
+        s_std = float(ranking["score"].std(ddof=0))
+        is_rank_model = type(result.model).__name__ == "LGBMRanker"
+        surv_unit = (0.15 * s_std if is_rank_model else 0.005) if (np.isfinite(s_std) and s_std > 0) else 0.0
+        flags = ranking.get("surv_flag")
+        if surv_unit > 0 and flags is not None:
+            pen = flags.fillna(False).astype(bool)
+            ranking["surv_penalty"] = pen.map(lambda f: round(-surv_unit, 4) if f else 0.0)
+            ranking.loc[pen, "score"] = ranking.loc[pen, "score"] - surv_unit
+            ranking = ranking.sort_values("score", ascending=False).reset_index(drop=True)
+        else:
+            ranking["surv_penalty"] = 0.0
+    except Exception as e:
+        logger.warning("생존편향 페널티(횡단면) 적용 실패: %s", e)
 
     # 펀더멘털 틸트: 상위 후보(top_n×2)에 한해 재무 점수(0~100)를 점수에 가산
     # — 50점 중립. 회귀 모델은 예측수익 단위(S급≈+0.4%p), LGBMRanker는 lambdarank

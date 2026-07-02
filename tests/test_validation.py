@@ -120,13 +120,24 @@ def test_purged_kfold_no_label_overlap():
     splits = v.purged_kfold_indices(100, n_splits=5, label_horizon=5, embargo=3)
     tests = []
     for train, test in splits:
-        lo, hi = int(test[0]) - 5, int(test[-1]) + 3
-        assert not any(lo <= int(i) <= hi for i in train)   # 라벨창 겹침 0
+        # 라벨 호라이즌은 양쪽 모두 제거: 왼쪽 t0−H, 오른쪽 t1+H+embargo (De Prado purge)
+        lo, hi = int(test[0]) - 5, int(test[-1]) + 5 + 3
+        assert not any(lo <= int(i) <= hi for i in train)   # 라벨창 겹침 0(양쪽)
         tests.append(set(int(i) for i in test))
     assert set().union(*tests) == set(range(100))           # 전부 커버
     for a in range(len(tests)):
         for b in range(a + 1, len(tests)):
             assert tests[a].isdisjoint(tests[b])            # disjoint
+
+
+def test_purged_kfold_purges_right_side_label_horizon():
+    """test 폴드 직후 (t1, t1+H] 의 forward-라벨 표본이 train 에서 제거되는지 (감사 확정 회귀)."""
+    splits = v.purged_kfold_indices(100, n_splits=5, label_horizon=5, embargo=0)
+    for train, test in splits:
+        t1 = int(test[-1])
+        # embargo=0 이어도 오른쪽 라벨 호라이즌(t1+1 .. t1+5)은 train 에 없어야 함
+        right_overlap = [i for i in train if t1 < int(i) <= t1 + 5]
+        assert right_overlap == []
 
 
 # ── validate_strategy ─────────────────────────────────────────────────

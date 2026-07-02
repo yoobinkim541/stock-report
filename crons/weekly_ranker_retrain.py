@@ -35,7 +35,7 @@ def main() -> int:
 
         ds = build_ml_dataset(mode="nasdaq100", days=756, forward_days=20)
         result = train_ranker(ds)
-        adopted, champ_ic = adopt_if_better(result)   # 챔피언/챌린저 — 퇴보 시 기존 모델 유지
+        adopted, champ_ic = adopt_if_better(result, dataset=ds)   # 챔피언/챌린저(동일창 재평가) — 퇴보 시 기존 유지
 
         wf = walk_forward_backtest(ds, n_folds=4)
         mean_ic = wf.get("mean_ic")

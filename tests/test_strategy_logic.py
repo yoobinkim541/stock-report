@@ -298,3 +298,48 @@ def test_backtest_wilder_rsi_range():
     assert _wilder_rsi(up).iloc[-1] > 75
     # 손실이 전무한 시계열은 라이브 fetch_rsi와 동일하게 50 fallback (rs=NaN)
     assert _wilder_rsi(pd.Series(np.linspace(100, 200, 100))).iloc[-1] == 50.0
+
+
+# ── 감사 확정 Batch 3: meta_allocator 신호 회귀 ──────────────────────────────
+def test_fg_signal_sentinel_is_neutral(monkeypatch):
+    """get_fg_proxy_score 실패 센티널(-1.0)/None → 신호 0.0(중립). 도메인 [-1,1] 클램프."""
+    import ml.data_pipeline as dp
+    # 실패 센티널 -1.0 → (-1-50)/50 = -1.02 로 오인 금지 → 중립 0.0
+    monkeypatch.setattr(dp, "get_fg_proxy_score", lambda: -1.0)
+    assert ma._get_fg_signal() == 0.0
+    monkeypatch.setattr(dp, "get_fg_proxy_score", lambda: None)
+    assert ma._get_fg_signal() == 0.0
+    # 정상 값은 스케일·부호 유지 + 클램프
+    monkeypatch.setattr(dp, "get_fg_proxy_score", lambda: 50.0)
+    assert ma._get_fg_signal() == 0.0
+    monkeypatch.setattr(dp, "get_fg_proxy_score", lambda: 100.0)
+    assert ma._get_fg_signal() == 1.0
+    monkeypatch.setattr(dp, "get_fg_proxy_score", lambda: 0.0)
+    assert ma._get_fg_signal() == -1.0
+
+
+def test_excess_signal_degenerate_benchmark_is_neutral(monkeypatch):
+    """벤치마크가 asset 과 동일(라벨 항등 0)이면 신호가 중립 0.0 — 허위 -1 고정 아님(감사 확정).
+
+    수정 전엔 close·qqq_close 가 둘 다 QQQ 라 label 항등 0 → 상수 예측 → pct_rank = -1 로 고정돼
+    regime 을 상시 risk_off 로 밀었다. 이제 상수 라벨 가드가 중립 0.0 을 반환한다.
+    (_get_excess_signal 은 함수 내부에서 ml.data_pipeline 을 import 하므로 dp 모듈을 패치)
+    """
+    import ml.data_pipeline as dp
+    idx = pd.date_range("2024-01-01", periods=260, freq="B")
+    rng = np.random.default_rng(7)
+    close = pd.Series(100 * np.cumprod(1 + rng.normal(0.0008, 0.012, len(idx))), index=idx)
+    feats = pd.DataFrame({"momentum": close.pct_change(20).fillna(0).values,
+                          "vol": close.pct_change().rolling(20, min_periods=5).std().fillna(0).values},
+                         index=idx)
+    # spy_close=None → bench 폴백이 close(QQQ)와 동일 → label 항등 0 → 가드가 중립 0.0
+    monkeypatch.setattr(dp, "build_real_sweetspot_data",
+                        lambda *a, **k: {"features": feats, "close": close, "spy_close": None, "qqq_close": close})
+    assert ma._get_excess_signal() == 0.0
+
+    # 벤치마크(SPY)가 asset 과 구별되면 라벨이 비상수 → 상수 가드 미발동, 유효 신호 [-1,1]
+    spy = pd.Series(100 * np.cumprod(1 + rng.normal(0.0003, 0.010, len(idx))), index=idx)
+    monkeypatch.setattr(dp, "build_real_sweetspot_data",
+                        lambda *a, **k: {"features": feats, "close": close, "spy_close": spy, "qqq_close": close})
+    sig = ma._get_excess_signal()
+    assert isinstance(sig, float) and -1.0 <= sig <= 1.0

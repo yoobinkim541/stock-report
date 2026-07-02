@@ -159,9 +159,12 @@ def pbo_cscv(perf_matrix, n_splits: int = 10):
 
 def purged_kfold_indices(n: int, n_splits: int = 5, label_horizon: int = 0,
                          embargo: int = 0):
-    """시계열 CV — 각 test 폴드의 [t0−H, t1+embargo] 와 겹치는 train 표본을 제거.
+    """시계열 CV — 각 test 폴드의 [t0−H, t1+H+embargo] 와 겹치는 train 표본을 제거.
 
-    반환 list[(train_idx, test_idx)]. (ml/ranker 날짜 퍼지 idiom 의 인덱스 일반화)
+    라벨 호라이즌 H 를 **양쪽 모두** 적용한다(De Prado purge): test 왼쪽은 t0−H,
+    오른쪽은 t1+H 까지 제거해 test 직후 (t1, t1+H] 의 forward 라벨이 test 구간과
+    수익 구간을 공유하는 누수를 막는다. embargo 는 그 위에 추가로 얹는다(감사 확정).
+    반환 list[(train_idx, test_idx)].
     """
     idx = np.arange(n)
     folds = np.array_split(idx, n_splits)
@@ -170,7 +173,7 @@ def purged_kfold_indices(n: int, n_splits: int = 5, label_horizon: int = 0,
         if len(test) == 0:
             continue
         t0, t1 = int(test[0]), int(test[-1])
-        lo, hi = t0 - label_horizon, t1 + embargo
+        lo, hi = t0 - label_horizon, t1 + label_horizon + embargo
         train = np.array([i for i in idx if (i < lo or i > hi) and i not in set(test.tolist())])
         out.append((train, test))
     return out

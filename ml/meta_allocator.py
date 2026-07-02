@@ -88,21 +88,29 @@ def _get_excess_signal() -> float:
         from ml.data_pipeline import build_real_sweetspot_data, fetch_prices
         from ml.models import ExcessReturnModel
 
-        # 실데이터 (SGOV 포함해 QQQ 초과수익 계산 가능하도록)
+        # 실데이터 — asset=QQQ, 벤치마크 레그=SPY (build_real_sweetspot_data 가 spy_close 동반 반환)
         data = build_real_sweetspot_data("QQQ", days=504)  # 약 2년
         features_df = data["features"]
         close       = data["close"]
-        qqq_close   = data.get("qqq_close", close)
+        # 초과수익 벤치마크는 SPY. asset 이 QQQ 라 qqq_close 를 쓰면 close 와 동일 시리즈가 되어
+        # 라벨이 전 구간 항등 0 → 모델이 상수 0 예측 → 신호가 상시 -1(허위 risk_off)로 고정된다(감사 확정).
+        # QQQ vs SPY 상대강도(나스닥 리더십)를 초과수익 신호로: 양수=리스크온.
+        bench_close = data.get("spy_close")
+        if bench_close is None:
+            bench_close = data.get("qqq_close", close)
 
         n = len(features_df)
         if n < 100:
             return 0.0
 
-        # ── 레이블: 20일 QQQ 초과수익률 (shift(-20) = 룩어헤드 방지용 당일 생성) ──
+        # ── 레이블: 20일 QQQ−SPY 초과수익률 (shift(-20) = 룩어헤드 방지용 당일 생성) ──
         # 미실현 구간(최근 20일)은 NaN 유지 — fillna(0)하면 가짜 0 라벨로 학습됨
         fwd_20 = close.pct_change(20).shift(-20)
-        qqq_fwd_20 = qqq_close.pct_change(20).shift(-20)
-        label = (fwd_20 - qqq_fwd_20).reindex(features_df.index)
+        bench_fwd_20 = bench_close.pct_change(20).shift(-20)
+        label = (fwd_20 - bench_fwd_20).reindex(features_df.index)
+        # 벤치마크가 asset 과 동일(예: SPY 조회 실패 폴백)해 라벨이 사실상 상수면 신호 무의미 → 중립
+        if float(label.dropna().abs().mean() or 0.0) < 1e-9:
+            return 0.0
 
         X = features_df.values.astype(float)
         y = label.values
@@ -148,11 +156,15 @@ def _get_leverage_signal() -> dict[str, float]:
 
 
 def _get_fg_signal() -> float:
-    """Fear/Greed Proxy → -1(극도공포) ~ +1(극도탐욕)."""
+    """Fear/Greed Proxy → -1(극도공포) ~ +1(극도탐욕). 실패 센티널·None 은 중립 0.0."""
     try:
         from ml.data_pipeline import get_fg_proxy_score
         fg = get_fg_proxy_score()
-        return (fg - 50) / 50   # 0~100 → -1~+1
+        # get_fg_proxy_score 는 실패 시 -1.0 센티널을 반환(예외 아님) → 유효 점수(0~100)로 오인하면
+        # (-1-50)/50 = -1.02 로 도메인 밖 '극도공포보다 더한 공포'가 regime 을 허위 risk_off 로 민다(감사 확정).
+        if fg is None or fg < 0:
+            return 0.0
+        return max(-1.0, min(1.0, (fg - 50) / 50))   # 0~100 → -1~+1 (도메인 클램프)
     except Exception:
         return 0.0
 

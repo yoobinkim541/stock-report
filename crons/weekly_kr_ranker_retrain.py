@@ -42,7 +42,7 @@ def main() -> int:
             logger.warning("KR 데이터셋 비어있음 — 재학습 생략")
             return 0
         result = train_ranker(ds)
-        adopted, champ_ic = adopt_if_better(result, KR_MODEL_CACHE)   # 챔피언/챌린저
+        adopted, champ_ic = adopt_if_better(result, KR_MODEL_CACHE, dataset=ds)   # 챔피언/챌린저(동일창 재평가)
 
         wf = walk_forward_backtest(ds, n_folds=4)
         mean_ic = wf.get("mean_ic")
