@@ -396,14 +396,25 @@ def cmd_apply_snapshot(chat_id: str, send_fn):
             existing[ticker] = new_entry
             changes.append(f"  {ticker} ({h['name']}) — 신규 추가  {h['shares']}주 @${h['avg_price_usd']:.2f}")
 
-    snap["overseas_general"]["holdings_usd"] = list(existing.values())
-    snap["snapshot_date"] = datetime.now().strftime("%Y-%m-%d")
-
-    # atomic write — 쓰기 도중 크래시 시 원본 보호 (프로젝트 규칙)
-    tmp_path = PORTFOLIO_PATH + ".tmp"
-    with open(tmp_path, "w", encoding="utf-8") as f:
-        json.dump(snap, f, indent=2, ensure_ascii=False)
-    os.replace(tmp_path, PORTFOLIO_PATH)
+    # 최신 스냅샷을 락 안에서 재로드 → overseas_general 만 교체 → atomic write + store 그림자.
+    # (감사 확정: 기존엔 무락 직접 json.dump 라 kiwoom_sync 도메스틱 갱신과 겹치면 lost update.
+    #  overseas_general 은 apply 가 권위 소스, domestic/fractional 은 fresh 재로드로 보존.)
+    import sys as _sys
+    _root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    if _root not in _sys.path:
+        _sys.path.insert(0, _root)
+    import safe_io as _safe_io
+    import store as _store
+    with _safe_io.file_write_lock(PORTFOLIO_PATH):
+        try:
+            with open(PORTFOLIO_PATH, encoding="utf-8") as f:
+                snap = json.load(f)
+        except Exception:
+            pass
+        snap.setdefault("overseas_general", {})["holdings_usd"] = list(existing.values())
+        snap["snapshot_date"] = datetime.now().strftime("%Y-%m-%d")
+        _safe_io.atomic_write_json(PORTFOLIO_PATH, snap)
+    _store.shadow_doc("portfolio_snapshot", snap)
 
     clear_pending_snapshot()
 

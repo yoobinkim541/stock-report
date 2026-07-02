@@ -37,17 +37,27 @@ def _load() -> dict:
         return {}
 
 
-def _save(snap: dict):
-    """atomic write: temp → rename, 중간 충돌 시 원본 보호.
+def _save_locked(snap: dict):
+    """호출자가 이미 file_write_lock 을 보유한 상태의 원자 쓰기 (락 재획득 없음).
 
-    교차 프로세스 쓰기 락(safe_io.file_write_lock)으로 kiwoom_sync_rest·
-    portfolio_sync_server 와 동시 쓰기 시 lost update 를 방지한다.
+    mutator(buy/sell/refresh)가 load→mutate→write 를 하나의 락으로 감싸 lost update 를
+    막을 때 사용한다. flock 은 같은 프로세스라도 재획득 시 데드락이므로 여기선 잡지 않는다.
     """
     snap["snapshot_date"] = datetime.now().strftime("%Y-%m-%d")
-    with safe_io.file_write_lock(PORTFOLIO_PATH):
-        safe_io.atomic_write_json(PORTFOLIO_PATH, snap)
+    safe_io.atomic_write_json(PORTFOLIO_PATH, snap)
     # store 그림자 사본 (user_id 스코프 — 멀티유저 기반). 파일이 권위.
     store.shadow_doc("portfolio_snapshot", snap)
+
+
+def _save(snap: dict):
+    """단독 쓰기용 — file_write_lock 획득 후 원자 쓰기.
+
+    교차 프로세스 쓰기 락(safe_io.file_write_lock)으로 kiwoom_sync_rest·
+    portfolio_sync_server 와 동시 쓰기 시 lost update 를 방지한다. read-modify-write 를
+    통째로 보호하려면 mutator 가 직접 file_write_lock 을 잡고 _save_locked 를 호출한다.
+    """
+    with safe_io.file_write_lock(PORTFOLIO_PATH):
+        _save_locked(snap)
 
 
 def _find_holding(snap: dict, ticker: str) -> tuple[str, int, dict | None]:
@@ -158,59 +168,61 @@ def buy_holding(ticker: str, shares: float, price_usd: float,
     fractional=True 이면 소수점 계좌에 기록.
     """
     ticker = ticker.upper()
-    snap   = _load()
-    if not snap:
-        return "❌ portfolio_snapshot.json 로드 실패"
+    # load→mutate→write 를 하나의 파일락으로 감싸 교차 프로세스(kiwoom_sync·sync_server) lost update 방지
+    with safe_io.file_write_lock(PORTFOLIO_PATH):
+        snap = _load()
+        if not snap:
+            return "❌ portfolio_snapshot.json 로드 실패"
 
-    section = "overseas_fractional" if fractional else "overseas_general"
-    key     = "holdings" if fractional else "holdings_usd"
+        section = "overseas_fractional" if fractional else "overseas_general"
+        key     = "holdings" if fractional else "holdings_usd"
 
-    snap.setdefault(section, {}).setdefault(key, [])
-    holdings = snap[section][key]
+        snap.setdefault(section, {}).setdefault(key, [])
+        holdings = snap[section][key]
 
-    # 기존 포지션 탐색
-    existing = next((h for h in holdings if h.get("ticker", "").upper() == ticker), None)
+        # 기존 포지션 탐색
+        existing = next((h for h in holdings if h.get("ticker", "").upper() == ticker), None)
 
-    if existing:
-        old_shares = float(existing.get("shares", 0))
-        old_avg    = float(existing.get("avg_price_usd", existing.get("cost_usd", 0) / old_shares if old_shares > 0 else price_usd))
-        new_shares = old_shares + shares
-        new_avg    = (old_shares * old_avg + shares * price_usd) / new_shares if new_shares > 0 else price_usd
+        if existing:
+            old_shares = float(existing.get("shares", 0))
+            old_avg    = float(existing.get("avg_price_usd", existing.get("cost_usd", 0) / old_shares if old_shares > 0 else price_usd))
+            new_shares = old_shares + shares
+            new_avg    = (old_shares * old_avg + shares * price_usd) / new_shares if new_shares > 0 else price_usd
 
-        existing["shares"]          = round(new_shares, 4)
-        existing["avg_price_usd"]   = round(new_avg, 4)
-        existing["cost_usd"]        = round(new_shares * new_avg, 4)
-        existing.pop("current_price_usd", None)   # 삭제 → 다음 실행 시 갱신
-        existing.pop("pnl_usd", None)
-        existing.pop("return_pct", None)
-        msg = (
-            f"✅ 매수 기록\n"
-            f"━━━━━━━━━━━━━━━━━━━━━━━\n"
-            f"  종목    {ticker}\n"
-            f"  추가    {shares}주  @${price_usd:.2f}\n"
-            f"  총 보유 {new_shares:.4f}주\n"
-            f"  평단가  ${new_avg:.2f}  (재계산)"
-        )
-    else:
-        new_entry = {
-            "name":          ticker,
-            "ticker":        ticker,
-            "shares":        round(shares, 4),
-            "avg_price_usd": round(price_usd, 4),
-            "cost_usd":      round(shares * price_usd, 4),
-        }
-        holdings.append(new_entry)
-        msg = (
-            f"✅ 신규 포지션 추가\n"
-            f"━━━━━━━━━━━━━━━━━━━━━━━\n"
-            f"  종목    {ticker}\n"
-            f"  수량    {shares}주  @${price_usd:.2f}\n"
-            f"  계좌    {'소수점' if fractional else '일반'}"
-        )
+            existing["shares"]          = round(new_shares, 4)
+            existing["avg_price_usd"]   = round(new_avg, 4)
+            existing["cost_usd"]        = round(new_shares * new_avg, 4)
+            existing.pop("current_price_usd", None)   # 삭제 → 다음 실행 시 갱신
+            existing.pop("pnl_usd", None)
+            existing.pop("return_pct", None)
+            msg = (
+                f"✅ 매수 기록\n"
+                f"━━━━━━━━━━━━━━━━━━━━━━━\n"
+                f"  종목    {ticker}\n"
+                f"  추가    {shares}주  @${price_usd:.2f}\n"
+                f"  총 보유 {new_shares:.4f}주\n"
+                f"  평단가  ${new_avg:.2f}  (재계산)"
+            )
+        else:
+            new_entry = {
+                "name":          ticker,
+                "ticker":        ticker,
+                "shares":        round(shares, 4),
+                "avg_price_usd": round(price_usd, 4),
+                "cost_usd":      round(shares * price_usd, 4),
+            }
+            holdings.append(new_entry)
+            msg = (
+                f"✅ 신규 포지션 추가\n"
+                f"━━━━━━━━━━━━━━━━━━━━━━━\n"
+                f"  종목    {ticker}\n"
+                f"  수량    {shares}주  @${price_usd:.2f}\n"
+                f"  계좌    {'소수점' if fractional else '일반'}"
+            )
 
-    _save(snap)
+        _save_locked(snap)
 
-    # 매수 후 전체 가격 갱신 (신규 종목 포함)
+    # 매수 후 전체 가격 갱신 (신규 종목 포함) — refresh 는 자체 락 획득
     refresh_msg = refresh_portfolio_prices()
     return msg + f"\n\n{refresh_msg}"
 
@@ -222,37 +234,39 @@ def sell_holding(ticker: str, shares: float | None = None) -> str:
     두 계좌(일반 + 소수점) 모두 탐색.
     """
     ticker = ticker.upper()
-    snap   = _load()
-    if not snap:
-        return "❌ portfolio_snapshot.json 로드 실패"
+    # load→mutate→write 를 하나의 파일락으로 감싸 교차 프로세스 lost update 방지
+    with safe_io.file_write_lock(PORTFOLIO_PATH):
+        snap = _load()
+        if not snap:
+            return "❌ portfolio_snapshot.json 로드 실패"
 
-    sold_any = False
-    msgs     = []
+        sold_any = False
+        msgs     = []
 
-    for section, key in [("overseas_general", "holdings_usd"),
-                          ("overseas_fractional", "holdings")]:
-        holdings = snap.get(section, {}).get(key, [])
-        for i, h in enumerate(holdings):
-            if h.get("ticker", "").upper() != ticker:
-                continue
-            existing_shares = float(h.get("shares", 0))
-            sell_qty = existing_shares if shares is None else min(shares, existing_shares)
+        for section, key in [("overseas_general", "holdings_usd"),
+                              ("overseas_fractional", "holdings")]:
+            holdings = snap.get(section, {}).get(key, [])
+            for i, h in enumerate(holdings):
+                if h.get("ticker", "").upper() != ticker:
+                    continue
+                existing_shares = float(h.get("shares", 0))
+                sell_qty = existing_shares if shares is None else min(shares, existing_shares)
 
-            if sell_qty >= existing_shares:
-                # 전량 청산
-                snap[section][key].pop(i)
-                msgs.append(f"  [{section.replace('overseas_', '')}] {ticker} 전량 청산 ({existing_shares:.4f}주)")
-            else:
-                h["shares"] = round(existing_shares - sell_qty, 4)
-                h["cost_usd"] = round(h["shares"] * h.get("avg_price_usd", 0), 4)
-                msgs.append(f"  [{section.replace('overseas_', '')}] {ticker} {sell_qty:.4f}주 매도  →  잔여 {h['shares']:.4f}주")
-            sold_any = True
-            break
+                if sell_qty >= existing_shares:
+                    # 전량 청산
+                    snap[section][key].pop(i)
+                    msgs.append(f"  [{section.replace('overseas_', '')}] {ticker} 전량 청산 ({existing_shares:.4f}주)")
+                else:
+                    h["shares"] = round(existing_shares - sell_qty, 4)
+                    h["cost_usd"] = round(h["shares"] * h.get("avg_price_usd", 0), 4)
+                    msgs.append(f"  [{section.replace('overseas_', '')}] {ticker} {sell_qty:.4f}주 매도  →  잔여 {h['shares']:.4f}주")
+                sold_any = True
+                break
 
-    if not sold_any:
-        return f"❌ {ticker} 포지션을 찾을 수 없습니다."
+        if not sold_any:
+            return f"❌ {ticker} 포지션을 찾을 수 없습니다."
 
-    _save(snap)
+        _save_locked(snap)
 
     # 전량 청산으로 포지션이 완전히 사라졌으면 은퇴 티커로 기록
     # → 일일 스모크 감사가 코드·설정에 남은 죽은 참조를 점검한다
@@ -374,32 +388,35 @@ def refresh_portfolio_prices() -> str:
     if not prices:
         return "❌ 가격 조회 실패"
 
-    # 스냅샷 업데이트
-    updated = 0
-    for h in snap.get("overseas_general", {}).get("holdings_usd", []):
-        t = h["ticker"]
-        if t not in prices:
-            continue
-        p   = prices[t]
-        sh  = float(h.get("shares", 0))
-        avg = float(h.get("avg_price_usd", p))
-        h["current_price_usd"] = p
-        h["value_usd"]         = round(sh * p, 4)
-        h["cost_usd"]          = round(sh * avg, 4)
-        h["pnl_usd"]           = round(sh * p - sh * avg, 4)
-        h["return_pct"]        = round((p - avg) / avg * 100, 2) if avg > 0 else 0
-        updated += 1
+    # yfinance 조회(수 초)는 락 밖에서 끝냈다. 이제 최신 스냅샷을 재로드해 가격만 적용하고
+    # 한 락으로 저장 → 다운로드 중 들어온 도메스틱/외부 잔고 갱신을 보존(lost update 방지).
+    with safe_io.file_write_lock(PORTFOLIO_PATH):
+        snap = _load()
+        updated = 0
+        for h in snap.get("overseas_general", {}).get("holdings_usd", []):
+            t = h["ticker"]
+            if t not in prices:
+                continue
+            p   = prices[t]
+            sh  = float(h.get("shares", 0))
+            avg = float(h.get("avg_price_usd", p))
+            h["current_price_usd"] = p
+            h["value_usd"]         = round(sh * p, 4)
+            h["cost_usd"]          = round(sh * avg, 4)
+            h["pnl_usd"]           = round(sh * p - sh * avg, 4)
+            h["return_pct"]        = round((p - avg) / avg * 100, 2) if avg > 0 else 0
+            updated += 1
 
-    for h in snap.get("overseas_fractional", {}).get("holdings", []):
-        t = h["ticker"]
-        if t not in prices:
-            continue
-        p  = prices[t]
-        sh = float(h.get("shares", 0))
-        h["value_usd"] = round(sh * p, 4)
-        updated += 1
+        for h in snap.get("overseas_fractional", {}).get("holdings", []):
+            t = h["ticker"]
+            if t not in prices:
+                continue
+            p  = prices[t]
+            sh = float(h.get("shares", 0))
+            h["value_usd"] = round(sh * p, 4)
+            updated += 1
 
-    _save(snap)
+        _save_locked(snap)
     return f"✅ {updated}개 종목 가격 갱신  ({datetime.now().strftime('%H:%M')} KST)"
 
 

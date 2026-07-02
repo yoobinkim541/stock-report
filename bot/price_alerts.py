@@ -6,6 +6,7 @@ price_alerts.py — 가격 알림 관리 모듈
 
 import os
 import sys
+import threading
 import uuid
 from datetime import datetime
 
@@ -19,6 +20,10 @@ import store
 
 ALERTS_FILE = os.path.join(_ROOT, "price_alerts.json")  # 레거시 미러 (advisor 편집 대상)
 _COLLECTION = "price_alerts"
+
+# 교차 스레드 lost update 방지 — 주기 check_alerts(백그라운드 스레드)와 add/remove(명령·entry 스레드)가
+# 같은 컬렉션을 load→수정→save 할 때 겹치면 방금 등록/삭제한 알림이 소실된다(감사 확정).
+_ALERTS_LOCK = threading.RLock()
 
 
 def load_alerts() -> list:
@@ -39,32 +44,34 @@ def add_alert(ticker: str, price: float, alert_type: str, note: str = "",
     meta:       부가 정보 (자동 등록 알림의 진입가·목표·손절·점수 등)
     Returns: alert id
     """
-    alerts = load_alerts()
-    alert_id = str(uuid.uuid4())[:8]
-    entry: dict = {
-        "id": alert_id,
-        "ticker": ticker.upper(),
-        "price": float(price),
-        "type": alert_type.lower(),
-        "triggered": False,
-        "created_at": datetime.now().isoformat(),
-    }
-    if note:
-        entry["note"] = note
-    if meta:
-        entry["meta"] = meta
-    alerts.append(entry)
-    save_alerts(alerts)
+    with _ALERTS_LOCK:
+        alerts = load_alerts()
+        alert_id = str(uuid.uuid4())[:8]
+        entry: dict = {
+            "id": alert_id,
+            "ticker": ticker.upper(),
+            "price": float(price),
+            "type": alert_type.lower(),
+            "triggered": False,
+            "created_at": datetime.now().isoformat(),
+        }
+        if note:
+            entry["note"] = note
+        if meta:
+            entry["meta"] = meta
+        alerts.append(entry)
+        save_alerts(alerts)
     return alert_id
 
 
 def remove_alert(alert_id: str) -> bool:
     """알림 삭제. 성공 시 True."""
-    alerts = load_alerts()
-    new_alerts = [a for a in alerts if a["id"] != alert_id]
-    if len(new_alerts) < len(alerts):
-        save_alerts(new_alerts)
-        return True
+    with _ALERTS_LOCK:
+        alerts = load_alerts()
+        new_alerts = [a for a in alerts if a["id"] != alert_id]
+        if len(new_alerts) < len(alerts):
+            save_alerts(new_alerts)
+            return True
     return False
 
 
@@ -95,27 +102,27 @@ def check_alerts() -> list:
     미발동 알림 대상으로 가격 조회(실시간 캐시→yfinance 폴백) 후 조건 충족 시 트리거.
     Returns: 이번 호출에서 트리거된 알림 목록.
     """
-    alerts = load_alerts()
-
-    # 자동 등록 알림(auto_trade_level)은 30일 후 만료 — 20일 분포 기반 레벨 노화 방지
-    # + 만료로 비워줘야 동일 종목의 새 enter 신호가 다시 등록될 수 있음
-    now = datetime.now()
-    expired_ids = {
-        a["id"] for a in alerts
-        if not a.get("triggered", False)
-        and (a.get("meta") or {}).get("kind") == "auto_trade_level"
-        and a.get("created_at")
-        and (now - datetime.fromisoformat(a["created_at"])).days >= 30
-    }
-    if expired_ids:
-        alerts = [a for a in alerts if a["id"] not in expired_ids]
-        save_alerts(alerts)
+    # 만료 퍼지 — 락 안(load→수정→save). auto_trade_level 은 30일 후 만료(레벨 노화 방지 +
+    # 비워줘야 동일 종목의 새 enter 신호가 다시 등록됨).
+    with _ALERTS_LOCK:
+        alerts = load_alerts()
+        now = datetime.now()
+        expired_ids = {
+            a["id"] for a in alerts
+            if not a.get("triggered", False)
+            and (a.get("meta") or {}).get("kind") == "auto_trade_level"
+            and a.get("created_at")
+            and (now - datetime.fromisoformat(a["created_at"])).days >= 30
+        }
+        if expired_ids:
+            alerts = [a for a in alerts if a["id"] not in expired_ids]
+            save_alerts(alerts)
 
     active = [a for a in alerts if not a.get("triggered", False)]
     if not active:
         return []
 
-    # 필요한 종목 일괄 조회 (실시간 캐시 우선·yfinance 폴백)
+    # 필요한 종목 일괄 조회 (실시간 캐시 우선·yfinance 폴백) — 느리므로 락 밖에서 수행
     tickers = list({a["ticker"] for a in active})
     prices: dict[str, float] = {}
     for ticker in tickers:
@@ -123,26 +130,27 @@ def check_alerts() -> list:
         if p is not None:
             prices[ticker] = p
 
+    # 트리거 판정·저장 — 락 안에서 최신 상태 재로드 후 반영(조회 중 들어온 add/remove 보존)
     triggered = []
-    for alert in alerts:
-        if alert.get("triggered", False):
-            continue
-        ticker = alert["ticker"]
-        current = prices.get(ticker)
-        if current is None:
-            continue
-
-        target = alert["price"]
-        atype = alert.get("type", "buy")
-
-        hit = (atype == "buy" and current <= target) or (atype == "sell" and current >= target)
-        if hit:
-            alert["triggered"] = True
-            alert["triggered_at"] = datetime.now().isoformat()
-            alert["triggered_price"] = round(current, 2)
-            triggered.append(alert)
-
-    if triggered:
-        save_alerts(alerts)
+    with _ALERTS_LOCK:
+        alerts = load_alerts()
+        changed = False
+        for alert in alerts:
+            if alert.get("triggered", False):
+                continue
+            current = prices.get(alert["ticker"])
+            if current is None:
+                continue
+            target = alert["price"]
+            atype = alert.get("type", "buy")
+            hit = (atype == "buy" and current <= target) or (atype == "sell" and current >= target)
+            if hit:
+                alert["triggered"] = True
+                alert["triggered_at"] = datetime.now().isoformat()
+                alert["triggered_price"] = round(current, 2)
+                triggered.append(alert)
+                changed = True
+        if changed:
+            save_alerts(alerts)
 
     return triggered

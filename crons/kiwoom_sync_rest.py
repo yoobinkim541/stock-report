@@ -160,13 +160,17 @@ def _touch_sync_timestamp():
     """국내 종목 0개여도 sync 실행 시각 기록 (파일 mtime 갱신)."""
     if not os.path.exists(PORTFOLIO_PATH):
         return
-    with open(PORTFOLIO_PATH, encoding="utf-8") as f:
-        snap = json.load(f)
-    snap["last_domestic_sync"] = datetime.now().isoformat()
-    tmp = PORTFOLIO_PATH + ".tmp"
-    with open(tmp, "w", encoding="utf-8") as f:
-        json.dump(snap, f, ensure_ascii=False, indent=2)
-    os.replace(tmp, PORTFOLIO_PATH)
+    import sys
+    if PROJECT_DIR not in sys.path:
+        sys.path.insert(0, PROJECT_DIR)
+    import safe_io
+    # 교차 프로세스 lost update 방지 — 무락 직접쓰기는 동시 holding_manager/sync_server 갱신을
+    # 되돌릴 수 있어 read-modify-write 를 통째로 file_write_lock + atomic_write 로 보호(감사 확정).
+    with safe_io.file_write_lock(PORTFOLIO_PATH):
+        with open(PORTFOLIO_PATH, encoding="utf-8") as f:
+            snap = json.load(f)
+        snap["last_domestic_sync"] = datetime.now().isoformat()
+        safe_io.atomic_write_json(PORTFOLIO_PATH, snap)
     _shadow_to_store(snap)
 
 
