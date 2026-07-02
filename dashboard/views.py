@@ -219,3 +219,46 @@ def realtime_quote(ticker: str) -> dict | None:
     if price and price > 0:
         return {"price": price, "bids": [], "asks": [], "ts": None, "source": "kis_ws", "market": market}
     return None
+
+
+def sp500_heatmap() -> list[dict]:
+    """S&P500 시장 맵 데이터 — [{ticker,name,sector_kr,market_cap,pct}]. 표시·graceful.
+
+    섹터·시총 = 정적 시드(sp500_seed·sp500_meta), 당일 등락% = 라이브 배치(yf.download 2일 종가).
+    결측(시총·pct 없음) 스킵. 네트워크/모듈 실패 시 빈 리스트 → 홈은 안내 폴백.
+    """
+    try:
+        import sp500_meta
+        import sp500_seed
+    except Exception:
+        return []
+    tickers = list(sp500_seed.SP500)
+    sec_map = getattr(sp500_meta, "SECTOR", {})
+    cap_map = getattr(sp500_meta, "MARKET_CAP", {})
+    kr_map = getattr(sp500_meta, "SECTOR_KR", {})
+    pct: dict[str, float] = {}
+    try:
+        import warnings
+        warnings.filterwarnings("ignore")
+        import yfinance as yf
+        df = yf.download(tickers, period="2d", progress=False, group_by="ticker", threads=True)
+        for t in tickers:
+            try:
+                c = df[t]["Close"].dropna()
+                if len(c) >= 2 and c.iloc[-2]:
+                    pct[t] = round((c.iloc[-1] / c.iloc[-2] - 1) * 100, 2)
+            except Exception:
+                pass
+    except Exception:
+        return []
+    rows: list[dict] = []
+    for t in tickers:
+        cap = cap_map.get(t) or 0
+        p = pct.get(t)
+        if cap <= 0 or p is None:
+            continue
+        rows.append({
+            "ticker": t, "name": sp500_seed.SP500.get(t) or t,
+            "sector_kr": kr_map.get(sec_map.get(t) or "") or "기타",
+            "market_cap": float(cap), "pct": p})
+    return rows

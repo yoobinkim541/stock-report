@@ -122,6 +122,35 @@ def test_price_candle_handles_missing_ohlc():
     assert _is_fig(charts.price_candle(pd.DataFrame()))
 
 
+# ── M2 S&P500 시장 맵 트리맵 ──────────────────────────────────────────
+_HEAT_ROWS = [
+    {"ticker": "AAPL", "name": "Apple", "sector_kr": "기술", "market_cap": 4e12, "pct": 1.96},
+    {"ticker": "MSFT", "name": "Microsoft", "sector_kr": "기술", "market_cap": 2.8e12, "pct": 3.17},
+    {"ticker": "JPM", "name": "JPMorgan", "sector_kr": "금융", "market_cap": 9e11, "pct": -2.18},
+]
+
+
+def test_market_treemap_sector_grouping():
+    import plotly.graph_objects as go
+    fig = charts.market_treemap(_HEAT_ROWS)
+    assert _is_fig(fig)
+    tr = fig.data[0]
+    assert isinstance(tr, go.Treemap)
+    assert {"기술", "금융", "AAPL", "MSFT", "JPM"} <= set(tr.labels)   # 섹터 루트 + 종목
+    idx = list(tr.labels).index("AAPL")
+    assert tr.parents[idx] == "기술"                                    # 종목 parent=섹터
+    assert tr.marker.cmid == 0 and tr.marker.cmax == 3                  # 발산 색 ±3
+
+
+def test_market_treemap_clamps_and_empty():
+    rows = [{"ticker": "X", "name": "X", "sector_kr": "기술", "market_cap": 1e9, "pct": 9.9}]
+    tr = charts.market_treemap(rows).data[0]
+    assert tr.marker.colors[list(tr.labels).index("X")] == 3.0         # +9.9%→+3 클램프
+    assert _is_fig(charts.market_treemap([]))                          # 빈 → 빈 Figure
+    assert len(charts.market_treemap(
+        [{"ticker": "Y", "market_cap": 0, "pct": None, "sector_kr": "기술"}]).data) == 0
+
+
 def test_hbar_orders_ascending():
     fig = charts.hbar(["x", "y", "z"], [0.3, 0.1, 0.6])
     bar = fig.data[0]

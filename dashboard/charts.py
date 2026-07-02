@@ -91,6 +91,44 @@ def price_candle(hist, ticker: str = "", avg_cost=None):
     return _t(fig)
 
 
+def market_treemap(rows: list[dict], height: int = 560):
+    """S&P500 섹터 시장 맵 (Finviz 풍). rows:[{ticker,name,sector_kr,market_cap,pct}].
+
+    섹터→종목 2계층 트리맵. 타일 크기=시총, 색=당일 등락%(적→흑→녹·±3 클램프).
+    """
+    go = _go()
+    rows = [r for r in (rows or []) if (r.get("market_cap") or 0) > 0 and r.get("pct") is not None]
+    if not rows:
+        return _t(go.Figure())
+    from collections import defaultdict
+    sec_sum: dict[str, float] = defaultdict(float)
+    for r in rows:
+        sec_sum[r["sector_kr"]] += float(r["market_cap"])
+    labels, parents, values, colors, texts, custom = [], [], [], [], [], []
+    for s in sorted(sec_sum):                       # 섹터 루트노드 (값=자식 시총합)
+        labels.append(s); parents.append(""); values.append(sec_sum[s])
+        colors.append(0.0); texts.append(f"<b>{s}</b>"); custom.append("")
+    for r in rows:
+        labels.append(r["ticker"]); parents.append(r["sector_kr"])
+        values.append(float(r["market_cap"]))
+        colors.append(max(-3.0, min(3.0, float(r["pct"]))))   # ±3 클램프(대비)
+        texts.append(f'{r["ticker"]}<br>{r["pct"]:+.2f}%')
+        custom.append(r.get("name") or r["ticker"])
+    fig = go.Figure(go.Treemap(
+        labels=labels, parents=parents, values=values, branchvalues="total",
+        text=texts, textinfo="text", textposition="middle center",
+        textfont=dict(size=11, color="white", family=theme._MONO),
+        customdata=custom,
+        marker=dict(colors=colors,
+                    colorscale=[[0.0, _RED], [0.5, "#1a1d26"], [1.0, _GREEN]],
+                    cmid=0, cmin=-3, cmax=3, showscale=False,
+                    line=dict(width=1, color="#0e1117")),
+        tiling=dict(pad=1),
+        hovertemplate="%{customdata} (%{label})<br>시총 %{value:,.0f}<extra></extra>"))
+    fig.update_layout(margin=dict(t=6, b=6, l=6, r=6), height=height)
+    return _t(fig)
+
+
 def hbar(labels: list[str], values: list[float], title: str = "", pct: bool = True):
     """가로 막대 (위험기여·비중 등). 큰 값이 위로."""
     go = _go()

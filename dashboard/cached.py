@@ -100,3 +100,9 @@ def ohlc(t, period="6mo"):
 def realtime_quote(ticker):
     """실시간 시세+호가 (KIS·8s 캐시). off/미보유 시 None → yfinance 폴백."""
     return views.realtime_quote(ticker)
+
+
+@st.cache_data(ttl=_TTL_SLOW, show_spinner="시장 맵 불러오는 중… (최초 ~1분·이후 30분 캐시)")
+def sp500_heatmap():
+    """S&P500 시장 맵 rows (섹터·시총 정적 + 당일 등락 라이브·30분 캐시)."""
+    return views.sp500_heatmap()

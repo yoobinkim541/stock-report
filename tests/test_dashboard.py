@@ -190,3 +190,31 @@ def test_views_backtest_graceful(monkeypatch):
     monkeypatch.setattr(data_pipeline, "build_real_sweetspot_data", boom)
     out = views.backtest_summary()
     assert "error" in out
+
+
+# ── M2 S&P500 시장 맵 데이터 조립 (yf 배치 monkeypatch·무네트워크) ─────────
+def test_views_sp500_heatmap_assembles(monkeypatch):
+    import pandas as pd
+    import yfinance as yf
+    from dashboard import views
+    idx = pd.date_range("2025-01-01", periods=2)
+    cols = pd.MultiIndex.from_product([["AAPL", "MSFT"], ["Open", "High", "Low", "Close", "Volume"]])
+    df = pd.DataFrame(1.0, index=idx, columns=cols)
+    df[("AAPL", "Close")] = [100.0, 102.0]   # +2%
+    df[("MSFT", "Close")] = [200.0, 194.0]   # -3%
+    monkeypatch.setattr(yf, "download", lambda *a, **k: df)
+    got = {r["ticker"]: r for r in views.sp500_heatmap()}
+    assert "AAPL" in got and "MSFT" in got                     # Close 있는 종목만
+    assert abs(got["AAPL"]["pct"] - 2.0) < 0.01
+    assert got["AAPL"]["sector_kr"] == "기술" and got["AAPL"]["market_cap"] > 0   # 실제 메타
+
+
+def test_views_sp500_heatmap_graceful(monkeypatch):
+    import yfinance as yf
+    from dashboard import views
+
+    def boom(*a, **k):
+        raise RuntimeError("net")
+
+    monkeypatch.setattr(yf, "download", boom)
+    assert views.sp500_heatmap() == []
