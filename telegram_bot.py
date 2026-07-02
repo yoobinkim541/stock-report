@@ -765,7 +765,8 @@ def cmd_portfolio(d: dict) -> str:
 
 
 def cmd_dca(d: dict) -> str:
-    dca       = calculate_dca(d["market_type"], d["phase_key"], d["exchange_rate"])
+    dca       = calculate_dca(d["market_type"], d["phase_key"], d["exchange_rate"],
+                              drawdown_pct=d["qqq"].get("drawdown_pct"))
     base_mult = dca.get("base_mult", dca["multiplier"])
     fg_proxy  = dca.get("fg_proxy", -1.0)
     fg_adj    = dca.get("fg_adj", 1.0)
@@ -911,7 +912,8 @@ def cmd_history(d: dict) -> str:
 def cmd_rebalance(d: dict) -> str:
     """스마트 리밸런싱 — 안전마진 + 종목 비중 + DCA 조정 + 달러 vs 리스크 비중."""
     base = build_smart_report(
-        d["portfolio"], d["market_type"], d["phase_key"], d["exchange_rate"]
+        d["portfolio"], d["market_type"], d["phase_key"], d["exchange_rate"],
+        drawdown_pct=d["qqq"].get("drawdown_pct"),
     )
     tbl = risk_model.dollar_vs_risk_table(_risk_weights(d))
     return base + ("\n\n" + tbl if tbl else "")

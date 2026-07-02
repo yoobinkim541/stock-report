@@ -56,5 +56,32 @@ def test_fetch_qqq_realtime_overlay(monkeypatch):
     assert md.fetch_qqq_data()["current"] == 95.0
 
 
+def test_liquidated_sgov_no_ghost(monkeypatch, tmp_path):
+    """SGOV/QQQI 전량청산(holdings 에 없음) 시 유령 기본수량 평가가 0 이어야 함 (감사 확정 회귀).
+
+    수정 전엔 holdings.get('SGOV', SGOV_SHARES_DEFAULT) 로 청산 후에도 10주·35.3주 유령 평가액이
+    생겨 Phase 4/5 청산 국면서 '없는 SGOV 매도' 반복권고가 났다.
+    """
+    import json
+    import pandas as pd
+    snap = {"overseas_general": {"holdings_usd": [
+        {"ticker": "MSFT", "shares": 10, "current_price_usd": 400.0, "cost_usd": 3500.0}]}}
+    p = tmp_path / "snap.json"
+    p.write_text(json.dumps(snap))
+    monkeypatch.setattr(md, "PORTFOLIO_PATH", str(p))
+    monkeypatch.setattr(md, "load_leverage_state", lambda: {})
+    monkeypatch.setattr(md.yf, "download", lambda *a, **k: pd.DataFrame())   # 네트워크 회피 → 스냅샷 폴백
+    monkeypatch.setattr(md, "_realtime_spot_overlay", lambda tickers: {})
+    monkeypatch.setattr(md, "_save_last_prices", lambda prices: None)
+    monkeypatch.setattr(md, "_load_last_prices", lambda: {})
+
+    out = md.fetch_portfolio_value()
+    assert not out.get("data_missing")     # MSFT 보유 → 빈-스냅샷 폴백 아님
+    assert out["sgov_usd"] == 0.0          # 청산된 SGOV → 유령 0
+    assert out["qqqi_usd"] == 0.0
+    assert out["qqqi_shares"] == 0.0
+    assert out["total_usd"] == 4000.0      # MSFT 10주 × $400 (스냅샷 폴백가)
+
+
 if __name__ == "__main__":
     sys.exit(pytest.main([__file__, "-v"]))

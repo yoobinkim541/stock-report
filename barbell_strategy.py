@@ -1006,17 +1006,21 @@ def calculate_smart_rebalancing(
     market_type: str,
     phase_key,
     exchange_rate: float = 1380.0,
+    drawdown_pct=None,
 ) -> dict:
     """
     안전마진 + 비중 분석 기반 스마트 리밸런싱.
     - 포지션 과/부족 진단
     - 안전마진 점수로 DCA 배율 조정
     - 비중 불균형 종목에 DCA 재배분
+
+    drawdown_pct 를 주면 base_dca 산출 시 낙폭 정지(전소 방어)까지 적용된다 — 생략 시
+    안전마진 배율(≤1.0 감액 전용)로는 낙폭 정지를 대체 못 해 극단 낙폭서 가드가 우회된다(감사 확정).
     """
     safety    = calculate_safety_margin(portfolio, market_type, phase_key)
     positions = calculate_position_analysis(portfolio)
     sgov      = calculate_sgov_target(market_type, phase_key, portfolio["total_usd"], portfolio["sgov_usd"])
-    base_dca  = calculate_dca(market_type, phase_key, exchange_rate)
+    base_dca  = calculate_dca(market_type, phase_key, exchange_rate, drawdown_pct=drawdown_pct)
 
     # 안전마진으로 DCA 금액 조정
     adj_mult      = safety["multiplier"]
@@ -1056,9 +1060,10 @@ def calculate_smart_rebalancing(
 
 
 def build_smart_report(portfolio: dict, market_type: str, phase_key,
-                        exchange_rate: float = 1380.0) -> str:
+                        exchange_rate: float = 1380.0, drawdown_pct=None) -> str:
     """스마트 리밸런싱 전용 텔레그램 출력."""
-    result = calculate_smart_rebalancing(portfolio, market_type, phase_key, exchange_rate)
+    result = calculate_smart_rebalancing(portfolio, market_type, phase_key, exchange_rate,
+                                         drawdown_pct=drawdown_pct)
     s  = result["safety"]
     sg = result["sgov"]
     L  = [
@@ -1797,8 +1802,14 @@ def run(send_alert: bool = False) -> dict | None:
     else:
         logger.info(f"Phase 변화 없음 ({market_type}/{phase_key}) — 텔레그램 스킵")
 
-    # 현재 Phase 상태 저장
-    save_phase_state(market_type, phase_key, qqq.get("drawdown_pct", 0))
+    # 현재 Phase 상태 저장 — 단, 데이터 stale 시엔 저장 보류.
+    # stale 분류를 권위 상태로 굳히면, 위에서 보류한 Phase 에스컬레이션 알림이 데이터 복구 후
+    # has_phase_changed() 비교에서 '변화 없음'으로 판정돼 영구 미발송된다. old_state 를 유지해
+    # 다음 신선 실행이 재감지·재발송하도록 한다 (감사 확정: 보류=영구소실 버그).
+    if data_stale:
+        logger.info("데이터 stale — Phase 상태 저장 보류 (복구 후 재감지·알림 재시도)")
+    else:
+        save_phase_state(market_type, phase_key, qqq.get("drawdown_pct", 0))
 
     return {
         "market_type": market_type,

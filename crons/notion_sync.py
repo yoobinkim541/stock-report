@@ -636,7 +636,7 @@ def _collect_market() -> dict:
     ma_d   = fetch_ma200("QQQ")
     mt, pk = classify_market(qqq_d, rsi_v, vix_v)
     fg     = fetch_fear_greed()
-    dca    = calculate_dca(mt, pk)
+    dca    = calculate_dca(mt, pk, drawdown_pct=qqq_d.get("drawdown_pct"))
     port   = fetch_portfolio_value()
     return {"qqq": qqq_d, "rsi": rsi_v, "vix": vix_v, "ma": ma_d,
             "mt": mt, "pk": pk, "fg": fg, "dca": dca, "port": port}

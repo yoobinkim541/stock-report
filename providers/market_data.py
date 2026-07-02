@@ -590,8 +590,11 @@ def fetch_portfolio_value() -> dict:
     sgov_px = prices.get("SGOV") or last_prices.get("SGOV") or SGOV_FALLBACK_PRICE
     if "SGOV" in holdings and not (prices.get("SGOV", 0) > 0):
         logger.warning("SGOV 가격 조회 실패 — 대체가 $%.2f 사용", sgov_px)
-    sgov_usd = float(holdings.get("SGOV", SGOV_SHARES_DEFAULT) or 0) * float(sgov_px)
-    qqqi_shares = float(holdings.get("QQQI", QQQI_SHARES_DEFAULT) or 0)
+    # 티커가 holdings 에 없으면(전량 청산) 0 — 하드코딩 기본수량(SGOV_SHARES_DEFAULT 등)을 쓰면
+    # 청산 후에도 유령 평가액이 생겨 Phase 4/5 청산 국면서 '없는 SGOV 매도' 반복권고가 난다(감사 확정).
+    # 하드코딩 기본은 위 data_missing(빈 스냅샷) 폴백에만 사용.
+    sgov_usd = float(holdings.get("SGOV", 0) or 0) * float(sgov_px)
+    qqqi_shares = float(holdings.get("QQQI", 0) or 0)
     qqqi_px = prices.get("QQQI") or last_prices.get("QQQI") or QQQI_FALLBACK_PRICE
     if "QQQI" in holdings and not (prices.get("QQQI", 0) > 0):
         logger.warning("QQQI 가격 조회 실패 — 대체가 $%.2f 사용", qqqi_px)

@@ -119,7 +119,9 @@ def generate(send: bool = False) -> str:
     fx  = fetch_exchange_rate()
 
     market_type, phase_key = classify_market(qqq, rsi, vix)
-    dca = calculate_dca(market_type, phase_key, fx)
+    # 낙폭 정지(BARBELL_LEV_HALT_DD) 가드가 발동하도록 drawdown_pct 전달 —
+    # 없으면 leverage_dca_guard 가 낙폭 정지를 건너뛰어 극단 낙폭서도 5× 권고가 나감(감사 확정).
+    dca = calculate_dca(market_type, phase_key, fx, drawdown_pct=qqq.get("drawdown_pct"))
 
     tickers   = list(dca["by_ticker"].keys())
     prices    = fetch_prices(tickers)
