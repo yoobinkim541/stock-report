@@ -3,9 +3,26 @@ import json
 import os
 import sys
 
+import pytest
+
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from dashboard import auth, data
+
+
+@pytest.fixture(autouse=True)
+def _no_realtime_overlay(monkeypatch):
+    """데이터 테스트 결정성 보장 — 실시간 오버레이 차단.
+
+    load_holdings 는 providers.market_data._realtime_current 로 실시간가를 덧씌운다. 다른 테스트가
+    load_dotenv 로 REALTIME_ENABLED 를 os.environ 에 흘리면(테스트 순서 의존) 라이브 캐시가 tmp
+    스냅샷 기대값을 덮어 스윕에서만 실패한다. 이 seam 을 None 으로 고정해 결정적으로 만든다.
+    """
+    try:
+        import providers.market_data as _md
+        monkeypatch.setattr(_md, "_realtime_current", lambda *a, **k: None, raising=False)
+    except Exception:
+        pass
 
 
 def test_portfolio_summary(tmp_path):
