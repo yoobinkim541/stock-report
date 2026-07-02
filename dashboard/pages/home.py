@@ -4,6 +4,7 @@ from __future__ import annotations
 import pandas as pd
 import streamlit as st
 
+import ticker_names
 from dashboard import cached, charts, data, theme
 
 
@@ -20,6 +21,10 @@ def render():
     c1.metric("Phase", f"{ph['emoji']} {ph['label']}")
     c2.metric("QQQ 낙폭", f"{ph['drawdown']:+.1f}%")
     c3.metric("DCA 배율", f"{ph['dca']}×")
+
+    st.divider()
+    _market_map()
+    st.divider()
 
     rows = data.load_holdings()
     if rows:
@@ -62,3 +67,34 @@ def render():
             st.write(f"{e['marker']} `{e['date_str']}` {e['title']}")
 
     st.caption("표시·정보용 · 주문 집행 없음 · 과거 기반, 미래 보장 아님")
+
+
+@st.fragment
+def _market_map():
+    """S&P 500 섹터 시장 맵 — 시총 크기·당일 등락 색 + 타일 클릭→종목분석 (Finviz 풍)."""
+    st.markdown("#### 🗺️ S&P 500 시장 맵")
+    st.caption("섹터별 · 타일 크기 = 시가총액 · 색 = 당일 등락(🟩상승 / 🟥하락) · **타일 클릭 → 종목 분석**")
+    rows = cached.sp500_heatmap()
+    if not rows:
+        st.info("시장 맵 데이터를 불러오지 못했습니다 (네트워크/시드 확인).")
+        return
+    ev = st.plotly_chart(charts.market_treemap(rows), width="stretch",
+                         config={"displayModeBar": False}, on_select="rerun", key="_heatmap")
+    # 타일 클릭 → 라벨(티커) 정규화 → 종목 분석 이동 (섹터 헤더 클릭은 normalize None → 무시)
+    picked = None
+    sel = getattr(ev, "selection", None)
+    pts = (sel.get("points") if isinstance(sel, dict) else getattr(sel, "points", None)) or []
+    for p in pts:
+        lab = p.get("label") if isinstance(p, dict) else getattr(p, "label", None)
+        tk = ticker_names.normalize_input(lab or "")
+        if tk:
+            picked = tk
+            break
+    if picked and picked != st.session_state.get("ticker"):
+        st.session_state["ticker"] = picked
+        st.toast(f"종목 분석 → {picked}")
+        _tp = st.session_state.get("_ticker_page")
+        if _tp is not None:
+            st.switch_page(_tp)
+        else:
+            st.rerun()

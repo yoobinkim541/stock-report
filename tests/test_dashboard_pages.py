@@ -49,6 +49,10 @@ cached.ohlc = lambda t, period="6mo": pd.DataFrame(
     {"Open":range(100,170),"High":range(101,171),"Low":range(99,169),"Close":range(100,170)}, index=_IDX)
 cached.screener = lambda n: {"rows":[],"error":"skip"}
 cached.backtest = lambda: {"error":"skip"}
+cached.sp500_heatmap = lambda: [
+    {"ticker":"AAPL","name":"Apple","sector_kr":"기술","market_cap":4e12,"pct":1.96},
+    {"ticker":"MSFT","name":"Microsoft","sector_kr":"기술","market_cap":2.8e12,"pct":3.17},
+    {"ticker":"JPM","name":"JPMorgan","sector_kr":"금융","market_cap":9e11,"pct":-2.18}]
 cached.learning_evolution = lambda s: {"surface":s,
     "snapshot":{"n":52,"realized_ic":0.06,"buy_hit":55.0,"cum_net_excess":0.03},
     "verdict":{"code":"edge","emoji":"\U0001f9ec","label":"약한 엣지 형성","note":"순비용 IC +0.060"},
@@ -215,3 +219,12 @@ def test_home_has_donut_and_holdings():
     assert len(at.metric) >= 3               # Phase·낙폭·DCA (총액은 히어로 HTML)
     assert len(at.dataframe) >= 1            # 보유표
     assert any("국면" in str(i.value) for i in at.info)  # Phase 행동 박스
+
+
+def test_home_shows_market_map():
+    """홈 S&P500 시장 맵 섹션 렌더 (M3·트리맵·무예외·클릭 안 함)."""
+    at = AppTest.from_string(_script("from dashboard.pages import home", "home.render()"),
+                             default_timeout=30)
+    at.run()
+    assert not at.exception, str(at.exception)
+    assert any("S&P 500 시장 맵" in str(m.value) for m in at.markdown)   # 섹션 헤딩
