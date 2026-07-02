@@ -51,6 +51,8 @@ PATH=/home/ubuntu/.local/bin:/usr/local/bin:/usr/bin:/bin
 * * * * * cd /home/ubuntu/projects/stock-report && bash scripts/dashboard_watchdog.sh >> /tmp/dashboard_watchdog.log 2>&1   # 매 1분 (꺼져있으면 no-op)
 # 퀀트 터미널 Cloudflare 터널 워치독 (DASHBOARD_ENABLED=true 시·터널 죽으면 재시작+Vercel 현관 URL 자동갱신)
 * * * * * cd /home/ubuntu/projects/stock-report && bash scripts/cloudflared_watchdog.sh >> /tmp/cloudflared_watchdog.log 2>&1   # 매 1분 (꺼져있으면 no-op)
+# S&P500 시장 맵 스냅샷 (대시보드 홈 트리맵 콜드로드 ~60초 → 즉시 로드용·표시데이터)
+*/20 * * * * cd /home/ubuntu/projects/stock-report && flock -n /tmp/sp500_heatmap_snapshot.lock uv run python crons/sp500_heatmap_snapshot.py >> /tmp/sp500_heatmap_snapshot.log 2>&1   # 매 20분
 # 전체 소스 수집 (텔레그램 채널·FRED·국채·시장 스냅샷) → JSONL 캐시
 5,35 * * * * cd /home/ubuntu/projects/stock-report && uv run python reports/source_collector.py >> /tmp/source_collector.log 2>&1     # 매 30분 (:05/:35)
 

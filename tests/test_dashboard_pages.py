@@ -53,6 +53,9 @@ cached.sp500_heatmap = lambda: [
     {"ticker":"AAPL","name":"Apple","sector_kr":"기술","market_cap":4e12,"pct":1.96},
     {"ticker":"MSFT","name":"Microsoft","sector_kr":"기술","market_cap":2.8e12,"pct":3.17},
     {"ticker":"JPM","name":"JPMorgan","sector_kr":"금융","market_cap":9e11,"pct":-2.18}]
+cached.market_indicators = lambda: {"fear_greed":{"score":32.0,"rating":"fear","prev_week":26.0,"prev_month":56.0},
+    "indices":[{"ticker":"^GSPC","name":"S&P 500","price":6000.0,"chg":1.2,"rsi_d":63.0,"rsi_w":81.0},
+               {"ticker":"^IXIC","name":"나스닥","price":20000.0,"chg":0.8,"rsi_d":58.0,"rsi_w":75.0}]}
 cached.learning_evolution = lambda s: {"surface":s,
     "snapshot":{"n":52,"realized_ic":0.06,"buy_hit":55.0,"cum_net_excess":0.03},
     "verdict":{"code":"edge","emoji":"\U0001f9ec","label":"약한 엣지 형성","note":"순비용 IC +0.060"},
@@ -227,4 +230,5 @@ def test_home_shows_market_map():
                              default_timeout=30)
     at.run()
     assert not at.exception, str(at.exception)
-    assert any("S&P 500 시장 맵" in str(m.value) for m in at.markdown)   # 섹션 헤딩
+    assert any("S&P 500 시장 맵" in str(m.value) for m in at.markdown)   # 시장맵 섹션
+    assert any("시장 지표" in str(m.value) for m in at.markdown)          # F&G·RSI 패널 (O2)

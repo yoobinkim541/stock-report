@@ -5,6 +5,7 @@ app.py 에서 st.cache_data 로 감싼다. provider 는 함수 내부 import(테
 """
 from __future__ import annotations
 
+import os
 import re
 
 
@@ -221,11 +222,39 @@ def realtime_quote(ticker: str) -> dict | None:
     return None
 
 
+_HEATMAP_SNAP = os.path.expanduser("~/reports/ml-cache/sp500_heatmap.json")
+
+
 def sp500_heatmap() -> list[dict]:
-    """S&P500 시장 맵 데이터 — [{ticker,name,sector_kr,market_cap,pct}]. 표시·graceful.
+    """S&P500 시장 맵 rows — 크론 JSON 스냅샷(<90분) 우선(즉시) → 없으면 라이브 후 스냅샷 기록(self-heal).
+
+    콜드로드 ~60초(503 배치)를 스냅샷 파일읽기로 즉시화. crons/sp500_heatmap_snapshot.py 가 20분마다 갱신.
+    """
+    import json
+    import time
+    try:
+        if time.time() - os.stat(_HEATMAP_SNAP).st_mtime < 5400:      # 90분 이내 신선
+            with open(_HEATMAP_SNAP, encoding="utf-8") as f:
+                rows = json.load(f)
+            if rows:
+                return rows
+    except Exception:
+        pass
+    rows = _sp500_heatmap_live()
+    if rows:
+        try:
+            from safe_io import atomic_write_json
+            atomic_write_json(_HEATMAP_SNAP, rows)
+        except Exception:
+            pass
+    return rows
+
+
+def _sp500_heatmap_live() -> list[dict]:
+    """S&P500 시장 맵 라이브 조립 — [{ticker,name,sector_kr,market_cap,pct}]. 표시·graceful.
 
     섹터·시총 = 정적 시드(sp500_seed·sp500_meta), 당일 등락% = 라이브 배치(yf.download 2일 종가).
-    결측(시총·pct 없음) 스킵. 네트워크/모듈 실패 시 빈 리스트 → 홈은 안내 폴백.
+    결측(시총·pct 없음) 스킵. 네트워크/모듈 실패 시 빈 리스트. (크론·스냅샷 미스 시 폴백)
     """
     try:
         import sp500_meta
@@ -262,3 +291,49 @@ def sp500_heatmap() -> list[dict]:
             "sector_kr": kr_map.get(sec_map.get(t) or "") or "기타",
             "market_cap": float(cap), "pct": p})
     return rows
+
+
+def market_indicators() -> dict:
+    """홈 시장 지표 — 공포·탐욕지수 + S&P500·나스닥 일/주봉 RSI. 표시·graceful.
+
+    반환 {fear_greed:{score,rating,prev_week,prev_month}|None,
+          indices:[{ticker,name,price,chg,rsi_d,rsi_w}]}. 네트워크 실패는 None/빈으로 흡수.
+    """
+    from dashboard import data
+    out: dict = {"fear_greed": None, "indices": []}
+    try:
+        from providers import market_data
+        fg = market_data.fetch_fear_greed()
+        if isinstance(fg, dict) and fg.get("score") is not None:
+            out["fear_greed"] = {"score": float(fg["score"]), "rating": fg.get("rating"),
+                                 "prev_week": fg.get("prev_week"), "prev_month": fg.get("prev_month")}
+    except Exception:
+        pass
+    specs = [("^GSPC", "S&P 500"), ("^IXIC", "나스닥")]
+    try:
+        import warnings
+        warnings.filterwarnings("ignore")
+        import yfinance as yf
+        tks = [s[0] for s in specs]
+        hd = yf.download(tks, period="4mo", progress=False, group_by="ticker", threads=True)
+        hw = yf.download(tks, period="2y", interval="1wk", progress=False, group_by="ticker", threads=True)
+    except Exception:
+        return out
+    for tk, name in specs:
+        row = {"ticker": tk, "name": name, "price": None, "chg": None, "rsi_d": None, "rsi_w": None}
+        try:
+            cd = hd[tk]["Close"].dropna()
+            rd = data.rsi(cd)
+            row["rsi_d"] = round(rd, 1) if rd is not None else None
+            if len(cd) >= 2 and cd.iloc[-2]:
+                row["price"] = float(cd.iloc[-1])
+                row["chg"] = round((cd.iloc[-1] / cd.iloc[-2] - 1) * 100, 2)
+        except Exception:
+            pass
+        try:
+            rw = data.rsi(hw[tk]["Close"].dropna())
+            row["rsi_w"] = round(rw, 1) if rw is not None else None
+        except Exception:
+            pass
+        out["indices"].append(row)
+    return out

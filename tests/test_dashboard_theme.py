@@ -78,6 +78,23 @@ def test_sparkline_up_down_empty():
     assert "polyline" not in theme.sparkline_svg([1])     # 부족 → 빈 svg
 
 
+# ── O2 시장 지표 카드 (F&G·지수 RSI) ──────────────────────────────────
+def test_fng_badge_html():
+    assert "극공포" in theme.fng_badge_html(10)            # <25
+    assert "극탐욕" in theme.fng_badge_html(90)            # 상단
+    assert "중립" in theme.fng_badge_html(50)              # 45~55
+    h = theme.fng_badge_html(31.9, prev_week=26.0)
+    assert "32" in h and "전주 26" in h                     # 점수·추세
+    assert theme.fng_badge_html(None) == ""                 # 잘못된 입력 graceful
+
+
+def test_index_rsi_html_zones():
+    h = theme.index_rsi_html("S&P 500", price=6000, chg=1.2, rsi_d=75.0, rsi_w=30.0)
+    assert "S&P 500" in h and "과매수" in h and "과매도" in h   # 75→과매수·30→과매도
+    assert theme.RED in h and theme.GREEN in h
+    assert "—" in theme.index_rsi_html("나스닥", rsi_d=None)    # 결측 graceful
+
+
 def test_watchlist_html():
     w = theme.watchlist_html([{"symbol": "MSFT", "last": 430.1, "chg_pct": 1.2}])
     assert "MSFT" in w and "tn-wl-row" in w and theme.GREEN in w

@@ -135,6 +135,72 @@ def rating_gauge_html(score, verdict="", sub="") -> str:
 </div>'''
 
 
+_FNG_ZONES = [(25, "#ef5350", "극공포"), (45, "#ff9800", "공포"),
+              (55, MUTED, "중립"), (75, "#66bb6a", "탐욕"), (101, GREEN, "극탐욕")]
+
+
+def fng_label(score):
+    """공포·탐욕 점수(0~100) → (색, 한글 라벨)."""
+    for hi, col, lab in _FNG_ZONES:
+        if score < hi:
+            return col, lab
+    return _FNG_ZONES[-1][1], _FNG_ZONES[-1][2]
+
+
+def fng_badge_html(score, prev_week=None) -> str:
+    """공포·탐욕 지수 카드 — CNN 풍 그라디언트 바 + 마커 + 점수·라벨·전주 추세."""
+    try:
+        s = max(0.0, min(100.0, float(score)))
+    except (TypeError, ValueError):
+        return ""
+    col, lab = fng_label(s)
+    trend = ""
+    if isinstance(prev_week, (int, float)):
+        arrow = "▲" if s >= prev_week else "▼"
+        trend = (f'<span style="color:{MUTED};font-size:0.8rem;margin-left:8px">'
+                 f'전주 {prev_week:.0f} {arrow}</span>')
+    return f'''<div style="padding:10px 14px;background:{PANEL};border:1px solid {BORDER};border-radius:10px">
+  <div style="color:{MUTED};font-size:0.85rem;margin-bottom:7px">😱 공포·탐욕 지수 · <b style="color:{col}">{lab}</b></div>
+  <div style="position:relative;height:8px;border-radius:4px;background:linear-gradient(90deg,#ef5350,#ff9800,{MUTED},#66bb6a,{GREEN})">
+    <div style="position:absolute;left:calc({s:.0f}% - 6px);top:-3px;width:12px;height:12px;border-radius:50%;background:{TEXT};border:2px solid {col}"></div></div>
+  <div style="margin-top:9px"><span style="color:{col};font-size:1.6rem;font-weight:700;font-family:{_MONO}">{s:.0f}</span>
+    <span style="color:{MUTED};font-size:0.85rem"> / 100</span>{trend}</div>
+</div>'''
+
+
+def _rsi_color(v):
+    if not isinstance(v, (int, float)):
+        return MUTED
+    return RED if v >= 70 else GREEN if v <= 30 else MUTED
+
+
+def _rsi_zone(v):
+    if not isinstance(v, (int, float)):
+        return "—"
+    return "과매수" if v >= 70 else "과매도" if v <= 30 else "중립"
+
+
+def index_rsi_html(name, price=None, chg=None, rsi_d=None, rsi_w=None) -> str:
+    """지수 카드 — 현재가·당일등락 + 일봉/주봉 RSI(과매수 적·과매도 녹·중립 회)."""
+    ccol = GREEN if (chg or 0) >= 0 else RED
+    pxs = f"{price:,.0f}" if isinstance(price, (int, float)) else "—"
+    chgs = f"{chg:+.2f}%" if isinstance(chg, (int, float)) else ""
+
+    def cell(lbl, v):
+        c, z = _rsi_color(v), _rsi_zone(v)
+        vs = f"{v:.0f}" if isinstance(v, (int, float)) else "—"
+        return (f'<div style="flex:1"><div style="color:{MUTED};font-size:0.72rem">{lbl}</div>'
+                f'<div style="font-family:{_MONO};font-size:1.15rem;font-weight:700;color:{c}">{vs}'
+                f'<span style="font-size:0.66rem;margin-left:4px;color:{c}">{z}</span></div></div>')
+
+    return f'''<div style="padding:10px 14px;background:{PANEL};border:1px solid {BORDER};border-radius:10px">
+  <div style="display:flex;justify-content:space-between;align-items:baseline">
+    <b style="color:{TEXT}">{name}</b>
+    <span style="font-family:{_MONO};color:{MUTED};font-size:0.85rem">{pxs} <span style="color:{ccol}">{chgs}</span></span></div>
+  <div style="display:flex;gap:12px;margin-top:8px">{cell("일봉 RSI", rsi_d)}{cell("주봉 RSI", rsi_w)}</div>
+</div>'''
+
+
 def sparkline_svg(values, w=124, h=30) -> str:
     """미니 스파크라인 (마지막≥처음 → 초록, 아니면 빨강)."""
     vals = [float(v) for v in (values or []) if isinstance(v, (int, float))]

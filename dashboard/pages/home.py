@@ -23,6 +23,7 @@ def render():
     c3.metric("DCA 배율", f"{ph['dca']}×")
 
     st.divider()
+    _market_bar()
     _market_map()
     st.divider()
 
@@ -67,6 +68,28 @@ def render():
             st.write(f"{e['marker']} `{e['date_str']}` {e['title']}")
 
     st.caption("표시·정보용 · 주문 집행 없음 · 과거 기반, 미래 보장 아님")
+
+
+def _market_bar():
+    """시장 지표 — 공포·탐욕지수 + S&P500·나스닥 일/주봉 RSI (경량·15분 캐시)."""
+    st.markdown("#### 📊 시장 지표")
+    mi = cached.market_indicators()
+    fg = mi.get("fear_greed")
+    idx = mi.get("indices") or []
+    cols = st.columns([1.1, 1, 1])
+    with cols[0]:
+        if fg:
+            theme.render(theme.fng_badge_html(fg.get("score"), fg.get("prev_week")))
+        else:
+            st.caption("😱 공포·탐욕 지수 N/A")
+    for i in range(2):
+        with cols[i + 1]:
+            if i < len(idx):
+                ix = idx[i]
+                theme.render(theme.index_rsi_html(ix.get("name"), ix.get("price"),
+                                                  ix.get("chg"), ix.get("rsi_d"), ix.get("rsi_w")))
+            else:
+                st.caption("지수 데이터 N/A")
 
 
 @st.fragment

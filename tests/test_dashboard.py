@@ -203,7 +203,7 @@ def test_views_sp500_heatmap_assembles(monkeypatch):
     df[("AAPL", "Close")] = [100.0, 102.0]   # +2%
     df[("MSFT", "Close")] = [200.0, 194.0]   # -3%
     monkeypatch.setattr(yf, "download", lambda *a, **k: df)
-    got = {r["ticker"]: r for r in views.sp500_heatmap()}
+    got = {r["ticker"]: r for r in views._sp500_heatmap_live()}   # 라이브 조립(스냅샷 우회)
     assert "AAPL" in got and "MSFT" in got                     # Close 있는 종목만
     assert abs(got["AAPL"]["pct"] - 2.0) < 0.01
     assert got["AAPL"]["sector_kr"] == "기술" and got["AAPL"]["market_cap"] > 0   # 실제 메타
@@ -217,4 +217,55 @@ def test_views_sp500_heatmap_graceful(monkeypatch):
         raise RuntimeError("net")
 
     monkeypatch.setattr(yf, "download", boom)
-    assert views.sp500_heatmap() == []
+    assert views._sp500_heatmap_live() == []
+
+
+def test_views_sp500_heatmap_snapshot_first(monkeypatch, tmp_path):
+    """O3: 크론 JSON 스냅샷(<90분) 우선 → 라이브(_sp500_heatmap_live) 미호출·즉시."""
+    import json
+    from dashboard import views
+    snap = tmp_path / "sp500_heatmap.json"
+    rows = [{"ticker": "AAPL", "name": "Apple", "sector_kr": "기술", "market_cap": 4e12, "pct": 1.5}]
+    snap.write_text(json.dumps(rows), encoding="utf-8")
+    monkeypatch.setattr(views, "_HEATMAP_SNAP", str(snap))
+
+    def boom():
+        raise AssertionError("라이브가 호출되면 안 됨(스냅샷 우선)")
+
+    monkeypatch.setattr(views, "_sp500_heatmap_live", boom)
+    assert views.sp500_heatmap() == rows
+
+
+# ── O1 시장 지표 (F&G + 지수 RSI·monkeypatch·무네트워크) ─────────────────
+def test_views_market_indicators(monkeypatch):
+    import pandas as pd
+    import yfinance as yf
+    from dashboard import views
+    from providers import market_data
+    monkeypatch.setattr(market_data, "fetch_fear_greed",
+                        lambda: {"score": 31.9, "rating": "fear", "prev_week": 26.0, "prev_month": 56.5})
+    idx = pd.date_range("2025-01-01", periods=40)
+    cols = pd.MultiIndex.from_product([["^GSPC", "^IXIC"], ["Open", "High", "Low", "Close", "Volume"]])
+    df = pd.DataFrame(1.0, index=idx, columns=cols)
+    df[("^GSPC", "Close")] = range(100, 140)
+    df[("^IXIC", "Close")] = range(200, 240)
+    monkeypatch.setattr(yf, "download", lambda *a, **k: df)
+    mi = views.market_indicators()
+    assert mi["fear_greed"]["score"] == 31.9 and mi["fear_greed"]["rating"] == "fear"
+    names = {i["name"]: i for i in mi["indices"]}
+    assert "S&P 500" in names and "나스닥" in names
+    assert names["S&P 500"]["rsi_d"] is not None and names["S&P 500"]["price"] is not None
+
+
+def test_views_market_indicators_graceful(monkeypatch):
+    import yfinance as yf
+    from dashboard import views
+    from providers import market_data
+
+    def boom(*a, **k):
+        raise RuntimeError("net")
+
+    monkeypatch.setattr(market_data, "fetch_fear_greed", boom)
+    monkeypatch.setattr(yf, "download", boom)
+    mi = views.market_indicators()
+    assert mi["fear_greed"] is None and mi["indices"] == []
