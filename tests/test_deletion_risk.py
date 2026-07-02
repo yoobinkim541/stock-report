@@ -66,6 +66,31 @@ def test_predict_risk_none_safe():
     assert dr.predict_risk(None, rows) == [0.0]   # 모델 없음 → 위험 0(회피 안 함)
 
 
+def test_train_deletion_model_purges_by_horizon():
+    """date 보유 시 split 이전 horizon_m 개월 학습표본이 실제로 제외되는지 (감사 확정 회귀).
+
+    horizon_m 을 전체 기간보다 크게 주면 split 이전 학습표본이 통째로 퍼지돼 학습 보류가 돼야 한다.
+    (라벨 호라이즌 누수 차단 — 기존엔 퍼지 없이 경계 직전 표본의 12M 라벨이 test 로 새어 AUC 낙관편향)
+    """
+    import numpy as np
+    from ml import deletion_risk as dr
+    rng = np.random.default_rng(1)
+    rows, labels = [], []
+    for i in range(400):
+        yr, mo = 2000 + i // 12, i % 12 + 1
+        rank = float(rng.integers(1, 500))
+        risk = rank / 500
+        rows.append({"date": f"{yr}-{mo:02d}-01", "features": {
+            "log_marcap": -rank / 100, "rank": rank, "rank_chg_6m": 0.0, "rank_chg_12m": 0.0,
+            "marcap_chg_6m": -risk, "ret_6m": -risk, "ret_12m": -risk, "amount_chg_6m": -risk,
+            "log_amount": 10 - rank / 100, "near_boundary": min(1.0, rank / 300)}})
+        labels.append(1 if risk + rng.normal(0, 0.04) > 0.4 else 0)
+    base = dr.train_deletion_model(rows, labels, horizon_m=0)      # 퍼지 없음 → 학습
+    assert base["model"] is not None, base.get("reason")
+    purged = dr.train_deletion_model(rows, labels, horizon_m=600)  # 전기간 퍼지 → 표본 소멸 → 보류
+    assert purged["model"] is None
+
+
 if __name__ == "__main__":
     import pytest
     sys.exit(pytest.main([__file__, "-v"]))

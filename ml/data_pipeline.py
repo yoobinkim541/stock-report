@@ -704,12 +704,14 @@ def build_ml_dataset(
             if feat.empty:
                 continue
 
-        close = df["Close"].reindex(feat.index)
-        fwd_ret = close.pct_change(forward_days).shift(-forward_days)
+        # forward 수익은 갭 없는 원 가격 인덱스에서 계산한 뒤 feat.index 로 정렬 —
+        # survivorship_free 로 멤버십 구간을 필터하면 feat.index 에 공백이 생겨 위치기반 pct_change 가
+        # '편출 직전→수년 뒤 재편입' 수익을 라벨로 잡는 왜곡이 난다(감사 확정). 종목·벤치 동일 처리로 대칭.
+        fwd_ret = df["Close"].pct_change(forward_days).shift(-forward_days).reindex(feat.index)
 
         # QQQ 초과수익
         if qqq_close is not None:
-            qqq_fwd = qqq_close.reindex(feat.index).pct_change(forward_days).shift(-forward_days)
+            qqq_fwd = qqq_close.pct_change(forward_days).shift(-forward_days).reindex(feat.index)
             excess = fwd_ret - qqq_fwd
         else:
             excess = fwd_ret.copy()

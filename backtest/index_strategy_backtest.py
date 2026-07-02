@@ -69,9 +69,11 @@ def run_backtest(start_year: int, end_year: int, *, top_n: int = 100, split_year
     split_date = f"{split_year}-01-01"
 
     # 1) 피처·라벨(재사용) → 시작 이전 구간으로만 퇴출모델 학습(OOS)
+    # 12개월 라벨 호라이즌 갭 — split 직전 1년 표본은 라벨이 backtest 구간을 내다봐 누수(감사 확정) → 제외
+    gap_date = f"{split_year - 1}-01-01"
     rows, labels, meta = dr.build_training_set(start_year, end_year, market=market, train_universe_n=2000)
-    tr_rows = [r for r, m in zip(rows, meta) if m["date"] < split_date]
-    tr_lab = [l for l, m in zip(labels, meta) if m["date"] < split_date]
+    tr_rows = [r for r, m in zip(rows, meta) if m["date"] < gap_date]
+    tr_lab = [l for l, m in zip(labels, meta) if m["date"] < gap_date]
     res = dr.train_deletion_model(tr_rows, tr_lab)
     model = res.get("model")
     risk_map = {}

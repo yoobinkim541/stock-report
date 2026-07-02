@@ -137,8 +137,8 @@ def save_model(model, path: Path = MODEL_PATH) -> None:
 def load_model(path: Path = MODEL_PATH):
     try:
         if path.exists():
-            with open(path, "rb") as f:
-                return pickle.load(f)
+            from ml._safe_cache import safe_unpickle   # 심링크·소유자 검증(캐시 스왑 RCE 방어) — 타 ml 로더 공용
+            return safe_unpickle(path)
     except Exception as e:
         logger.warning("earnings_predictor 로드 실패: %s", e)
     return None

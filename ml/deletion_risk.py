@@ -100,7 +100,8 @@ def _to_matrix(rows: list[dict]):
     return rows_to_matrix(rows, FEATURE_COLS)
 
 
-def train_deletion_model(rows: list[dict], labels: list[int], *, time_split: float = 0.7):
+def train_deletion_model(rows: list[dict], labels: list[int], *, time_split: float = 0.7,
+                         horizon_m: int = DEFAULT_HORIZON_M):
     """LightGBM 이진분류 학습 + 시간순 OOS(AUC·precision@상위10%). rows 는 시간순 정렬 가정.
 
     반환 {"model", "oos_auc", "oos_prec_top", "n", "n_pos", "feature_importance"}.
@@ -118,10 +119,21 @@ def train_deletion_model(rows: list[dict], labels: list[int], *, time_split: flo
     except Exception as e:
         return {"model": None, "n": n, "n_pos": n_pos, "reason": f"라이브러리 없음: {e}"}
 
+    import pandas as pd
     X = np.array(_to_matrix(rows), dtype=float)
     y = np.array(labels, dtype=int)
     split = int(n * time_split)
-    Xtr, Xte, ytr, yte = X[:split], X[split:], y[:split], y[split:]
+    # 라벨 호라이즌 퍼지 — split 이전 horizon_m 개월 학습표본 제외: 그 표본의 12M 부실라벨이
+    # test 구간 상폐 이벤트로 결정돼 OOS AUC 를 낙관 편향시킨다(감사 확정). 운영 rows 는 시간순·"date" 보유.
+    dates = pd.to_datetime([r.get("date") for r in rows], errors="coerce")
+    if bool(dates.notna().all()):
+        split_date = dates[split]
+        purge_start = split_date - pd.DateOffset(months=horizon_m)
+        tr_keep = np.asarray(dates[:split] < purge_start)
+    else:
+        tr_keep = np.ones(split, dtype=bool)   # date 없는 합성/단위테스트 경로 → 퍼지 생략
+    Xtr, ytr = X[:split][tr_keep], y[:split][tr_keep]
+    Xte, yte = X[split:], y[split:]
     if ytr.sum() < 10 or yte.sum() < 3 or len(set(yte.tolist())) < 2:
         return {"model": None, "n": n, "n_pos": n_pos,
                 "reason": f"분할 후 양성 부족(train+={int(ytr.sum())}, test+={int(yte.sum())}) — 보류"}

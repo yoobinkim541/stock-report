@@ -68,6 +68,28 @@ def test_save_load_roundtrip(tmp_path):
     assert ep.load_model(tmp_path / "none.pkl") is None        # 없는 파일 → None
 
 
+def test_earnings_loaders_reject_symlink(tmp_path):
+    """earnings 모델 로더가 심링크 캐시를 거부하는지 (safe_unpickle 배선 — 감사 확정 회귀)."""
+    import os
+    import pickle
+    from pathlib import Path
+    import ml.earnings_predictor as ep
+    import ml.earnings_move_predictor as emp
+
+    real = tmp_path / "real.pkl"
+    with open(real, "wb") as f:
+        pickle.dump({"kind": "dummy_model"}, f)
+    link = tmp_path / "link.pkl"
+    os.symlink(real, link)
+
+    # 심링크 → safe_unpickle 거부 → None (raw pickle.load 였으면 로드됐음)
+    assert ep.load_model(Path(link)) is None
+    assert emp.load_model(Path(link)) is None
+    # 소유자 검증 통과하는 정상 파일은 로드
+    assert ep.load_model(Path(real)) == {"kind": "dummy_model"}
+    assert emp.load_model(Path(real)) == {"kind": "dummy_model"}
+
+
 if __name__ == "__main__":
     import pytest
     sys.exit(pytest.main([__file__, "-v"]))

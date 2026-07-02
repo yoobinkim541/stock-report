@@ -197,8 +197,10 @@ def evaluate_risk_overlay_strategy(data: dict, train_fraction: float = 2 / 3) ->
     raw_preds[split:] = model.predict(X[split:])
     ml_signal = pd.Series(raw_preds, index=features.index)
 
-    # Rolling percentile rank of ml_signal (OOS only)
-    ml_pos = ml_signal.rank(pct=True).fillna(0.5)
+    # Expanding percentile rank — 각 시점 t 를 t 까지의 분포로만 순위화.
+    # 전역 rank(pct=True) 는 t 의 순위가 t 이후 미래 예측분포에 의존하는 look-ahead 였다(감사 확정).
+    ml_pos = ml_signal.expanding(min_periods=20).apply(
+        lambda s: s.rank(pct=True).iloc[-1], raw=False).fillna(0.5)
 
     # Position: combine trend + ML size
     trend_s = trend_up.shift(1).fillna(0.5)   # shift(1): no lookahead
