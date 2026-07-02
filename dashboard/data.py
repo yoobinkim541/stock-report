@@ -36,12 +36,37 @@ def _load_snap(path: str | None = None) -> dict:
         return {}
 
 
+def _merged_usd(snap: dict) -> list[dict]:
+    """USD 해외북 두 섹션을 **티커별 합산** — general(holdings_usd) + fractional(holdings).
+
+    같은 티커의 별도 lot(예: NVDA general 2.79주 + fractional 0.76주)을 하나로 합쳐
+    중복 행/과소계상을 막는다. fetch_portfolio_value(providers.market_data)의 집계 방식과 동일.
+    ⚠️ fractional 섹션의 실제 키는 'holdings'(general 은 'holdings_usd') — 혼동 주의.
+    """
+    agg: dict[str, dict] = {}
+    for sec, key in (("overseas_general", "holdings_usd"), ("overseas_fractional", "holdings")):
+        for h in snap.get(sec, {}).get(key, []) or []:
+            t = (h.get("ticker") or "").upper()
+            if not t:
+                continue
+            a = agg.setdefault(t, {"ticker": t, "name": "", "shares": 0.0,
+                                   "value_usd": 0.0, "cost_usd": 0.0})
+            a["shares"] += float(h.get("shares", 0) or 0)
+            a["value_usd"] += float(h.get("value_usd", 0) or 0)
+            a["cost_usd"] += float(h.get("cost_usd", 0) or 0)
+            if not a["name"]:
+                a["name"] = h.get("name", "") or ""
+    for a in agg.values():
+        c = a["cost_usd"]
+        a["avg_price_usd"] = (c / a["shares"]) if a["shares"] else None
+        a["return_pct"] = ((a["value_usd"] / c - 1) * 100) if c > 0 else 0.0
+    return list(agg.values())
+
+
 def portfolio_summary(path: str | None = None) -> dict:
-    """USD 해외북 총액·수익률·종목수 (헤더용)."""
+    """USD 해외북 총액·수익률·종목수 (헤더용) — general+fractional 티커별 합산."""
     snap = _load_snap(path)
-    usd = []
-    for sec in ("overseas_general", "overseas_fractional"):
-        usd += snap.get(sec, {}).get("holdings_usd", []) or []
+    usd = _merged_usd(snap)
     total = sum(h.get("value_usd", 0) or 0 for h in usd)
     cost = sum(h.get("cost_usd", 0) or 0 for h in usd)
     ret = (total / cost - 1) * 100 if cost else 0.0
@@ -50,11 +75,9 @@ def portfolio_summary(path: str | None = None) -> dict:
 
 
 def load_holdings(path: str | None = None) -> list[dict]:
-    """USD 해외북 보유 정규화 (비중 % 포함) — 표·리스크 가중치용."""
+    """USD 해외북 보유 정규화 (비중 % 포함) — 표·리스크 가중치용. general+fractional 티커별 합산."""
     snap = _load_snap(path)
-    usd = []
-    for sec in ("overseas_general", "overseas_fractional"):
-        usd += snap.get(sec, {}).get("holdings_usd", []) or []
+    usd = _merged_usd(snap)
     try:
         import ticker_names
     except Exception:

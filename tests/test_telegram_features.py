@@ -15,6 +15,25 @@ def test_auto_intraday_alerts_default_off():
     assert telegram_bot.STARTUP_NOTIFY_ENABLED is False
 
 
+def test_holding_sell_rejects_invalid_shares(monkeypatch):
+    """Q2: /holding sell 비숫자→안내(크래시 없음)·음수→거부, sell_holding 미호출. 정상만 통과."""
+    from bot import holding_commands as hc
+    calls, msgs = [], []
+    monkeypatch.setattr(hc, "sell_holding", lambda *a, **k: (calls.append(a), "sold")[1])
+    monkeypatch.setattr(hc, "_portfolio_tickers", lambda: set())
+    monkeypatch.setattr(hc, "_run_backtest_if_constituents_changed", lambda *a, **k: None)
+    send = lambda cid, m: msgs.append(m)
+
+    hc._holding_sell("c", ["sell", "ORCL", "abc"], send)     # 비숫자 → 크래시 없이 안내
+    assert calls == [] and any("숫자" in m for m in msgs)
+    msgs.clear()
+    hc._holding_sell("c", ["sell", "ORCL", "-3"], send)      # 음수 → 거부(보유 주수 증가 방지)
+    assert calls == [] and any("0보다 커야" in m for m in msgs)
+    msgs.clear()
+    hc._holding_sell("c", ["sell", "ORCL"], send)            # 전량(주수 생략) → 정상 호출
+    assert len(calls) == 1 and calls[0][1] is None
+
+
 def test_build_simulation_report_includes_mode_and_phase():
     text = build_simulation_report("bull2")
 

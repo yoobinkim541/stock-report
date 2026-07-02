@@ -32,6 +32,25 @@ def test_holding_position(tmp_path):
     assert data.holding_position("ZZZZ", str(snap)) is None   # 비보유 → None
 
 
+def test_portfolio_merges_general_and_fractional(tmp_path):
+    """Q1: general(holdings_usd) + fractional(holdings) 티커별 합산 — 과소계상·중복행 방지."""
+    snap = tmp_path / "portfolio_snapshot.json"
+    snap.write_text(json.dumps({
+        "overseas_general": {"holdings_usd": [
+            {"ticker": "NVDA", "shares": 2.0, "value_usd": 400, "cost_usd": 380, "avg_price_usd": 190},
+            {"ticker": "MSFT", "shares": 1.0, "value_usd": 400, "cost_usd": 400}]},
+        # fractional 은 실제 키가 'holdings' (general 은 'holdings_usd') — 같은 티커 별도 lot
+        "overseas_fractional": {"holdings": [
+            {"ticker": "NVDA", "shares": 0.5, "value_usd": 100, "cost_usd": 95}]},
+    }), encoding="utf-8")
+    s = data.portfolio_summary(str(snap))
+    assert s["n_holdings"] == 2                          # NVDA 중복 아님(합산)
+    assert abs(s["total_usd"] - 900) < 1e-6              # 400 + 400 + 100 (fractional 포함)
+    rows = {r["ticker"]: r for r in data.load_holdings(str(snap))}
+    assert abs(rows["NVDA"]["shares"] - 2.5) < 1e-9      # 2.0 + 0.5 합산
+    assert abs(rows["NVDA"]["value"] - 500) < 1e-6       # 400 + 100
+
+
 def test_portfolio_weights_sum_to_one(tmp_path):
     snap = tmp_path / "portfolio_snapshot.json"
     snap.write_text(json.dumps({"overseas_general": {"holdings_usd": [

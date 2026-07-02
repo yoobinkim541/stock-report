@@ -231,7 +231,17 @@ def _holding_sell(chat_id: str, args: list, send_fn):
         send_fn(chat_id, "사용법: /holding sell TICKER [주수]\n전량 청산 시 주수 생략")
         return
     ticker = args[1].upper()
-    shares = float(args[2]) if len(args) > 2 else None
+    shares = None
+    if len(args) > 2:
+        try:
+            shares = float(args[2])
+        except ValueError:
+            send_fn(chat_id, f"❌ 주수는 숫자여야 합니다: {args[2]}\n전량 청산은 주수 생략")
+            return
+        # 방어: 음수/0 은 sell_holding 에서 보유주수를 오히려 늘리므로 차단
+        if shares <= 0:
+            send_fn(chat_id, "❌ 매도 주수는 0보다 커야 합니다 (전량 청산은 주수 생략).")
+            return
     before = _portfolio_tickers()
     result = sell_holding(ticker, shares)
     send_fn(chat_id, result)
