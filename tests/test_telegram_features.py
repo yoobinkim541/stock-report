@@ -665,3 +665,28 @@ def test_handle_attachment_rejects_incomplete_portfolio_snapshot(monkeypatch):
 
     assert not saved
     assert any("포트폴리오 인식 불완전" in text for text in sent)
+
+
+def test_dispatch_worker_offloads_and_survives_errors(monkeypatch):
+    """Batch P: dispatch 워커가 명령을 순차 처리하고, 핸들러 예외에도 죽지 않고 계속 처리."""
+    import threading
+    import telegram_bot as tb
+    seen = []
+
+    def _fake_dispatch(text, chat_id, role):
+        if text == "/boom":
+            raise RuntimeError("handler crash")
+        seen.append((text, chat_id, role))
+    monkeypatch.setattr(tb, "dispatch", _fake_dispatch)
+    errs = []
+    monkeypatch.setattr(tb, "send", lambda cid, m: errs.append((cid, m)))
+
+    threading.Thread(target=tb._dispatch_worker, daemon=True).start()
+    tb._DISPATCH_Q.put(("/status", "c1", "owner"))
+    tb._DISPATCH_Q.put(("/boom", "c2", "owner"))     # 핸들러 예외 → 워커 생존해야
+    tb._DISPATCH_Q.put(("/help", "c3", "owner"))
+    tb._DISPATCH_Q.join()                            # 3건 모두 처리될 때까지 대기
+
+    assert ("/status", "c1", "owner") in seen
+    assert ("/help", "c3", "owner") in seen          # 예외 후에도 계속 처리(워커 생존)
+    assert any("오류" in m for _, m in errs)          # 예외 시 오류 안내 전송

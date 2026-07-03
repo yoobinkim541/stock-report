@@ -171,20 +171,31 @@ def _headers(tr_id: str) -> dict | None:
             "tr_id": tr_id, "custtype": "P"}
 
 
+# 간이 서킷브레이커 — KIS REST 장애 시 대시보드 8초 프래그먼트가 매 틱 ~수십초 블로킹되는 것 방지.
+# full-실패 시 잠깐 개방(즉시 None → 소비자 yfinance 폴백), 쿨다운 후 자동 재시도(self-heal). 표시경로 한정.
+_CB = {"open_until": 0.0}
+_CB_COOLDOWN = 45.0   # 개방 유지 초
+
+
 def _http_get(url: str, headers: dict, params: dict, *, retries: int = 2) -> dict | None:
-    """시세 GET 단일 통로 — 도메인 하드락 + 간헐 500 0.5s 재시도. 실패 None. (GET 전용 — 주문 POST 없음.)"""
+    """시세 GET 단일 통로 — 도메인 하드락 + 간헐 500 0.5s 재시도 + 서킷브레이커. 실패 None. (GET 전용 — 주문 POST 없음.)"""
     _assert_quote_url(url)
+    if time.time() < _CB["open_until"]:
+        return None   # 서킷 개방 중 — 즉시 폴백(반복 프리즈 회피)
     last_err = None
     for attempt in range(retries + 1):
         try:
-            r = requests.get(url, headers=headers, params=params, timeout=15, allow_redirects=False)
+            r = requests.get(url, headers=headers, params=params, timeout=10, allow_redirects=False)
             r.raise_for_status()
+            _CB["open_until"] = 0.0   # 성공 → 서킷 닫기
             return r.json()
         except Exception as e:
             last_err = e
             if attempt < retries:
                 time.sleep(0.5)
-    logger.warning("KIS 시세 GET 실패 [%s] (재시도 %d): %s", url.rsplit("/", 1)[-1], retries, last_err)
+    _CB["open_until"] = time.time() + _CB_COOLDOWN   # full-실패 → 개방(이후 호출 즉시 폴백·self-heal)
+    logger.warning("KIS 시세 GET 실패 [%s] (재시도 %d) — 서킷 %.0fs 개방: %s",
+                   url.rsplit("/", 1)[-1], retries, _CB_COOLDOWN, last_err)
     return None
 
 

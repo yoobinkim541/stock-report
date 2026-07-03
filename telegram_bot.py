@@ -25,6 +25,7 @@ import sys
 import time
 import fcntl
 import logging
+import queue
 import threading
 from pathlib import Path
 from datetime import datetime
@@ -2104,6 +2105,28 @@ def _run_periodic(name: str, fn) -> None:
     threading.Thread(target=_wrap, daemon=True, name=f"periodic-{name}").start()
 
 
+# 명령 dispatch 단일 워커 — 무거운 명령(/signals 200s·/ask·/portfolio 등)이 메인 폴링 루프
+# (getUpdates 재폴링·주기작업 스케줄 체크)를 막지 않도록 큐로 오프로드. **단일 워커**라 명령은
+# 여전히 1건씩 순차 처리(새 동시성 없음·현행 의미 보존). 주기 데몬과의 동시성은 기존 수준 그대로.
+_DISPATCH_Q: "queue.Queue" = queue.Queue()
+
+
+def _dispatch_worker():
+    while True:
+        item = _DISPATCH_Q.get()
+        try:
+            text, chat_id, role = item
+            dispatch(text, chat_id, role)
+        except Exception:
+            logger.exception("dispatch 워커 오류: %r", item)
+            try:
+                send(item[1], "⚠️ 명령 처리 중 오류가 발생했습니다.")
+            except Exception:
+                pass
+        finally:
+            _DISPATCH_Q.task_done()
+
+
 def run():
     if not TELEGRAM_TOKEN:
         logger.error("STOCK_BOT_TOKEN 없음 — .env 파일 확인")
@@ -2126,6 +2149,9 @@ def run():
     last_entry_check    = 0.0
     last_intraday_check = 0.0
     consecutive_409     = 0
+
+    # dispatch 오프로드 워커 기동 (무거운 명령이 폴링·주기알림을 막지 않게)
+    threading.Thread(target=_dispatch_worker, daemon=True, name="dispatch-worker").start()
 
     while True:
         try:
@@ -2179,7 +2205,7 @@ def run():
 
                 text = _normalize_message_text(text)
                 logger.info(f"수신: {text!r}")
-                dispatch(text, chat_id, role)
+                _DISPATCH_Q.put((text, chat_id, role))   # 워커 스레드로 오프로드(폴링·주기작업 비차단)
 
             # 주기 작업 — 백그라운드 스레드로 실행해 명령어 응답 차단 방지
             now = time.time()

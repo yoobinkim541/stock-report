@@ -61,7 +61,7 @@ def _live_top(ticker, hist, yf_price, prev, pos):
 
     hcol, gcol = st.columns([1.6, 1])
     with hcol:
-        theme.render(theme.ticker_hero_html(ticker, ticker_names.display_name(ticker) or ticker,
+        theme.render(theme.ticker_hero_html(ticker, ticker_names.display_name(ticker, allow_net=False) or ticker,
                                             price, chg, chg_pct, src, ""))
     with gcol:
         if ts:

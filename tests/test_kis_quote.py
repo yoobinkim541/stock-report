@@ -97,5 +97,34 @@ def test_module_has_no_order_path():
     assert "_TOKEN_URL" in src and "/oauth2/tokenP" in src
 
 
+def test_http_get_circuit_breaker_opens_and_self_heals(monkeypatch):
+    """full-실패 시 서킷 개방 → 이후 호출 즉시 None(요청 미발생), 성공 시 리셋 (Batch P 회귀).
+
+    대시보드 8초 프래그먼트가 KIS 장애 시 매 틱 ~수십초 블로킹되던 것을 차단.
+    """
+    kq._CB["open_until"] = 0.0    # 상태 초기화(결정성)
+    calls = {"n": 0}
+
+    def _fail(*a, **k):
+        calls["n"] += 1
+        raise RuntimeError("kis down")
+    monkeypatch.setattr(kq.requests, "get", _fail)
+
+    url = kq._QUOTE_BASE + "/uapi/domestic-stock/v1/quotations/inquire-price"
+    assert kq._http_get(url, {}, {}, retries=2) is None    # full 실패 → 서킷 개방
+    n1 = calls["n"]
+    assert kq._http_get(url, {}, {}, retries=2) is None     # 개방 중 → 즉시 폴백
+    assert calls["n"] == n1                                 # 서킷 개방 중 요청 0
+
+    # 성공 응답 → 서킷 닫힘(self-heal)
+    kq._CB["open_until"] = 0.0
+    class _OK:
+        def raise_for_status(self): pass
+        def json(self): return {"rt_cd": "0"}
+    monkeypatch.setattr(kq.requests, "get", lambda *a, **k: _OK())
+    assert kq._http_get(url, {}, {}, retries=2) == {"rt_cd": "0"}
+    assert kq._CB["open_until"] == 0.0
+
+
 if __name__ == "__main__":
     sys.exit(pytest.main([__file__, "-v"]))
