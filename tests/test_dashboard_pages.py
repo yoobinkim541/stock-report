@@ -56,6 +56,24 @@ cached.sp500_heatmap = lambda: [
 cached.market_indicators = lambda: {"fear_greed":{"score":32.0,"rating":"fear","prev_week":26.0,"prev_month":56.0},
     "indices":[{"ticker":"^GSPC","name":"S&P 500","price":6000.0,"chg":1.2,"rsi_d":63.0,"rsi_w":81.0},
                {"ticker":"^IXIC","name":"나스닥","price":20000.0,"chg":0.8,"rsi_d":58.0,"rsi_w":75.0}]}
+cached.paper = lambda s: {"surface":s,"currency":"₩" if s=="kr_mock" else "$",
+    "bench_name":"KOSPI" if s=="kr_mock" else "QQQ","balance_ok":True,
+    "nav":10500000.0,"cash":1200000.0,
+    "positions":[{"symbol":"005930","name":"삼성전자","shares":10,"avg":70000.0,"cur":75000.0,
+                  "value":750000.0,"ret":7.1}],
+    "nav_series":[{"date":"2026-06-01","nav":10000000.0},{"date":"2026-06-02","nav":10500000.0}],
+    "inception_date":"2026-06-01","cum_ret":5.0,"day_ret":0.5,"strat_mdd":3.2,
+    "bench_ret":2.0,"bench_mdd":5.0,
+    "cost":{"total":15000.0,"turnover":120.0,"drag":0.15},
+    "scorecard":{"buy_hit":55.0,"n_buy":20,"sell_hit":50.0,"n_sell":8},
+    "decisions":[{"date":"2026-06-02","side":"편입","ticker":"005930.KS","name":"삼성전자 (005930.KS)",
+                  "qty":10,"price":70000.0,"policy_score":0.812,
+                  "reason":"score 85·A등급·수급 양호","ok":True,
+                  "fwd_excess":0.021,"correct":True,"matured_at":"2026-06-20"},
+                 {"date":"2026-06-02","side":"퇴출","ticker":"000660.KS","name":"SK하이닉스 (000660.KS)",
+                  "qty":5,"price":180000.0,"policy_score":0.31,
+                  "reason":"타깃이탈","ok":True,
+                  "fwd_excess":None,"correct":None,"matured_at":None}]}
 cached.learning_evolution = lambda s: {"surface":s,
     "snapshot":{"n":52,"realized_ic":0.06,"buy_hit":55.0,"cum_net_excess":0.03},
     "verdict":{"code":"edge","emoji":"\U0001f9ec","label":"약한 엣지 형성","note":"순비용 IC +0.060"},
@@ -75,6 +93,7 @@ def _script(mod, call):
     ("from dashboard.pages import portfolio", "portfolio.render()"),
     ("from dashboard.pages import ticker", "ticker.render()"),
     ("from dashboard.pages import market", "market.render()"),
+    ("from dashboard.pages import paper", "paper.render()"),
     ("from dashboard.pages import research", "research.render()"),
 ])
 def test_page_renders_without_exception(mod, call):
@@ -211,6 +230,32 @@ def test_ticker_position_management_renders():
     assert any("기록" in str(b.label) for b in at.button)   # 추가/적립/축소 기록 버튼
     # 안전 라벨(실주문 아님) 노출
     assert any("실주문 아님" in str(c.value) or "기록 전용" in str(c.value) for c in at.caption)
+
+
+def test_paper_kpis_and_decisions():
+    """모의투자: 계좌 KPI(NAV·누적·vs지수·MDD) + 로직평가 + 판단근거 원장표 + 안전 라벨 (P1)."""
+    at = AppTest.from_string(_script("from dashboard.pages import paper", "paper.render()"),
+                             default_timeout=30)
+    at.run()
+    assert not at.exception, str(at.exception)
+    assert len(at.metric) >= 8                    # 계좌 4 + 예수금 + 로직평가 4
+    assert len(at.dataframe) >= 2                 # 보유표 + 결정 원장표
+    assert any("판단 근거" in str(m.value) for m in at.markdown)
+    assert any("실거래 아님" in str(c.value) for c in at.caption)   # 안전 라벨
+
+
+def test_paper_empty_graceful():
+    """모의투자: 데이터 전무(크론 미실행) 시 안내만 — 무예외 (P1 graceful)."""
+    script = _STUBS + (
+        'cached.paper = lambda s: {"surface":s,"currency":"₩","bench_name":"KOSPI","balance_ok":False,'
+        '"nav":None,"cash":None,"positions":[],"nav_series":[],"inception_date":None,'
+        '"cum_ret":None,"day_ret":None,"strat_mdd":None,"bench_ret":None,"bench_mdd":None,'
+        '"cost":None,"scorecard":{},"decisions":[]}\n'
+        "from dashboard.pages import paper\npaper.render()\n")
+    at = AppTest.from_string(script, default_timeout=30)
+    at.run()
+    assert not at.exception, str(at.exception)
+    assert any("계좌 데이터 없음" in str(i.value) for i in at.info)
 
 
 def test_home_has_donut_and_holdings():

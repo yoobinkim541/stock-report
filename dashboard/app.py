@@ -79,19 +79,20 @@ with st.sidebar:
             [{"symbol": h["ticker"], "name": h.get("name"), "last": h.get("value"), "chg_pct": h.get("ret")}
              for h in _wl if h.get("ticker")], title="보유 종목"))
 
-from dashboard.pages import home, market, portfolio, research
+from dashboard.pages import home, market, paper, portfolio, research
 from dashboard.pages import ticker as ticker_pg
 
 _home_pg = st.Page(home.render, title="홈", icon="🏠", url_path="home", default=True)
 _portfolio_pg = st.Page(portfolio.render, title="포트폴리오", icon="💼", url_path="portfolio")
 _ticker_pg = st.Page(ticker_pg.render, title="종목 분석", icon="🔍", url_path="ticker")
 _market_pg = st.Page(market.render, title="시장·캘린더", icon="🗓️", url_path="market")
+_paper_pg = st.Page(paper.render, title="모의투자", icon="🧪", url_path="paper")
 _research_pg = st.Page(research.render, title="리서치", icon="🔬", url_path="research")
 
 # 홈 보유표 행 클릭 → 종목 분석 자동 이동용 (switch_page 는 StreamlitPage 객체 필요)
 st.session_state["_ticker_page"] = _ticker_pg
 
-nav = st.navigation([_home_pg, _portfolio_pg, _ticker_pg, _market_pg, _research_pg])
+nav = st.navigation([_home_pg, _portfolio_pg, _ticker_pg, _market_pg, _paper_pg, _research_pg])
 # 사이드바에서 종목을 새로 고르면 종목 분석 페이지로 이동 (홈 행클릭과 동일 UX)
 if st.session_state.pop("_nav_to_ticker", False):
     st.switch_page(_ticker_pg)

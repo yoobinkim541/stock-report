@@ -305,3 +305,80 @@ def test_views_market_indicators_graceful(monkeypatch):
     monkeypatch.setattr(yf, "download", boom)
     mi = views.market_indicators()
     assert mi["fear_greed"] is None and mi["indices"] == []
+
+
+# ── P1 자동 모의투자 (원장 조인·스코어카드·요약 조립 — 순수·무네트워크) ─────────
+def test_views_join_decisions_matches_outcomes():
+    from dashboard import views
+    decs = [{"id": "2026-06-02:005930.KS", "date": "2026-06-02", "side": "편입",
+             "ticker": "005930.KS", "code": "005930", "qty": 10, "price": 70000.0,
+             "policy_score": 0.81, "rationale": {"one_line_reason": "A등급·수급 양호"}, "ok": True},
+            {"id": "2026-06-03:AAPL", "date": "2026-06-03", "side": "퇴출",
+             "ticker": "AAPL", "qty": 5, "price": 200.0, "policy_score": 0.2,
+             "rationale": {"one_line_reason": "타깃이탈"}, "ok": True}]
+    outs = [{"decision_id": "2026-06-02:005930.KS", "fwd_excess": 0.021,
+             "success": True, "matured_at": "2026-06-20"}]   # KR 은 success 만 (correct 폴백 검증)
+    rows = views.join_decisions(decs, outs)
+    assert [r["date"] for r in rows] == ["2026-06-03", "2026-06-02"]   # 최신 우선
+    kr = rows[1]
+    assert kr["reason"] == "A등급·수급 양호" and kr["fwd_excess"] == 0.021
+    assert kr["correct"] is True                       # success → correct 폴백
+    assert rows[0]["fwd_excess"] is None and rows[0]["correct"] is None   # 미성숙
+
+
+def test_views_paper_scorecard_hits():
+    from dashboard import views
+    rows = [{"side": "편입", "correct": True}, {"side": "편입", "correct": False},
+            {"side": "증액", "correct": True}, {"side": "퇴출", "correct": True},
+            {"side": "편입", "correct": None}]          # 미성숙은 판정 제외
+    sc = views.paper_scorecard(rows)
+    assert sc["n_buy"] == 3 and abs(sc["buy_hit"] - 66.7) < 0.1
+    assert sc["n_sell"] == 1 and sc["sell_hit"] == 100.0
+
+
+def test_views_paper_summary_assembles(monkeypatch, tmp_path):
+    """store 스냅샷 + 원장 + 벤치를 monkeypatch — NAV 폴백·누적·MDD·비용·결정 조인 검증."""
+    import store
+    from dashboard import views
+    from ml import adaptive
+    from providers import market_data
+
+    hist = [{"kind": "snapshot", "date": "2026-06-01 15:40", "nav": 10_000_000.0, "cash": 1_000_000.0},
+            {"kind": "snapshot", "date": "2026-06-02 15:40", "nav": 10_500_000.0, "cash": 900_000.0},
+            {"kind": "cost", "cost": 15000.0, "notional": 12_000_000.0}]
+    monkeypatch.setattr(store, "all", lambda name, **k: list(hist))
+    import kiwoom_mock
+    monkeypatch.setattr(kiwoom_mock, "get_balance", lambda: {"ok": False})   # 잔고 API 불가 → 폴백
+    monkeypatch.setattr(market_data, "fetch_kospi_stats",
+                        lambda since, symbol="^KS11": {"return_pct": 2.0, "mdd": 0.05})
+
+    led = adaptive.Ledger("kr_mock", base_dir=tmp_path)
+    led.log_decision({"date": "2026-06-02", "ticker": "005930.KS", "side": "편입", "qty": 10,
+                      "price": 70000.0, "policy_score": 0.81,
+                      "rationale": {"one_line_reason": "A등급"}, "ok": True})
+    monkeypatch.setattr(adaptive, "Ledger", lambda s: led)
+
+    d = views.paper_summary("kr_mock")
+    assert d["balance_ok"] is False
+    assert d["nav"] == 10_500_000.0                     # 마지막 스냅샷 폴백
+    assert abs(d["cum_ret"] - 5.0) < 1e-6
+    assert d["inception_date"] == "2026-06-01"
+    assert d["bench_ret"] == 2.0 and abs(d["bench_mdd"] - 5.0) < 1e-9
+    assert d["cost"] and d["cost"]["total"] == 15000.0
+    assert d["decisions"] and d["decisions"][0]["reason"] == "A등급"
+    assert len(d["nav_series"]) == 2
+
+
+def test_views_paper_summary_graceful_empty(monkeypatch):
+    """store·잔고·원장 전부 실패해도 무예외 — 빈 뼈대 반환 (크론 미실행 신규 환경)."""
+    import store
+    from dashboard import views
+
+    def boom(*a, **k):
+        raise RuntimeError("db")
+
+    monkeypatch.setattr(store, "all", boom)
+    import kiwoom_mock
+    monkeypatch.setattr(kiwoom_mock, "get_balance", boom)
+    d = views.paper_summary("kr_mock")
+    assert d["nav"] is None and d["positions"] == [] and d["nav_series"] == []

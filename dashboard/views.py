@@ -174,6 +174,166 @@ def backtest_summary() -> dict:
         return {"error": str(e)}
 
 
+# ── 모의 페이퍼트레이딩 (자동 모의투자 페이지) ─────────────────────────────────
+
+_PAPER = {  # surface → (히스토리 컬렉션, 벤치마크 심볼·이름, 통화, 시드 env·기본)
+    "kr_mock": ("kr_mock_history", "^KS11", "KOSPI", "₩", "KIWOOM_MOCK_SEED", 10_000_000.0),
+    "us_mock": ("us_mock_history", "QQQ", "QQQ", "$", "KOREA_MOCK_SEED", 100_000.0),
+}
+
+
+def join_decisions(decisions: list[dict], outcomes: list[dict]) -> list[dict]:
+    """결정 원장 ⋈ 결과 원장 (decision_id) → 표시행. 최신 날짜 우선. 순수.
+
+    각 행: {date, side, ticker, name?, qty, price, policy_score, reason, ok,
+            fwd_excess?, correct?, matured_at?}. 결과 미성숙 결정도 포함(fwd_excess=None).
+    """
+    by_id = {o.get("decision_id"): o for o in (outcomes or []) if o.get("decision_id")}
+    rows = []
+    for d in (decisions or []):
+        o = by_id.get(d.get("id")) or {}
+        correct = o.get("correct")
+        if correct is None:                     # KR 결과는 success 만 기록 (kr_mock_learn)
+            correct = o.get("success")
+        rows.append({
+            "date": d.get("date", ""), "side": d.get("side", ""),
+            "ticker": d.get("ticker") or d.get("code") or "",
+            "qty": d.get("qty"), "price": d.get("price"),
+            "policy_score": d.get("policy_score"),
+            "reason": (d.get("rationale") or {}).get("one_line_reason", ""),
+            "ok": d.get("ok"),
+            "fwd_excess": o.get("fwd_excess"), "correct": correct,
+            "matured_at": o.get("matured_at"),
+        })
+    rows.sort(key=lambda r: r["date"], reverse=True)
+    return rows
+
+
+def paper_scorecard(rows: list[dict]) -> dict:
+    """조인행 → 편입/퇴출 적중률 (correct/success 판정분만). 순수.
+
+    IC·누적엣지는 evolution.snapshot(learning_evolution)이 단일 소스 — 여기선 퇴출 보완만.
+    """
+    def hit(rs):
+        judged = [r for r in rs if r.get("correct") is not None]
+        return (round(sum(1 for r in judged if r["correct"]) / len(judged) * 100.0, 1),
+                len(judged)) if judged else (None, 0)
+
+    buy_hit, n_buy = hit([r for r in rows if r.get("side") in ("편입", "증액")])
+    sell_hit, n_sell = hit([r for r in rows if r.get("side") in ("퇴출", "감액")])
+    return {"buy_hit": buy_hit, "n_buy": n_buy, "sell_hit": sell_hit, "n_sell": n_sell}
+
+
+def paper_summary(surface: str = "kr_mock") -> dict:
+    """자동 모의투자 계좌 요약 — NAV 시계열·벤치마크·MDD·보유·비용·결정 원장. read-only·graceful.
+
+    잔고 API(모의 도메인) 실패/비활성 시 마지막 EOD 스냅샷 NAV 로 폴백(balance_ok=False).
+    표시 전용 — 주문 경로 0. 크론 리포트(kiwoom_mock_report·us_mock_report)와 동일 데이터원.
+    """
+    hist_name, bench_sym, bench_name, cur, seed_env, seed_def = _PAPER.get(surface, _PAPER["kr_mock"])
+    seed = float(os.getenv(seed_env, str(seed_def)))
+    out: dict = {"surface": surface, "currency": cur, "bench_name": bench_name,
+                 "balance_ok": False, "nav": None, "cash": None, "positions": [],
+                 "nav_series": [], "inception_date": None, "cum_ret": None, "day_ret": None,
+                 "strat_mdd": None, "bench_ret": None, "bench_mdd": None,
+                 "cost": None, "scorecard": {}, "decisions": []}
+
+    # 1) EOD NAV 스냅샷 시계열 (store — 오프라인에서도 가용)
+    snaps: list[dict] = []
+    try:
+        import store
+        hist = store.all(hist_name)
+        snaps = [r for r in hist if r.get("kind") == "snapshot" and r.get("nav") is not None]
+        out["nav_series"] = [{"date": str(r.get("date", ""))[:10], "nav": float(r["nav"])} for r in snaps]
+    except Exception:
+        hist = []
+
+    # 2) 라이브 잔고 (모의 API — 비활성/장애 시 마지막 스냅샷 폴백)
+    nav = None
+    try:
+        mock = __import__("kiwoom_mock" if surface == "kr_mock" else "kis_mock")
+        bal = mock.get_balance()
+        if bal.get("ok"):
+            out["balance_ok"] = True
+            nav = bal.get("nav") or ((bal.get("pos_value") or 0.0)
+                                     + (bal.get("cash_krw" if surface == "kr_mock" else "cash_usd") or 0.0))
+            out["cash"] = bal.get("cash_krw" if surface == "kr_mock" else "cash_usd")
+            for sym, p in (bal.get("positions") or {}).items():
+                sh = int(p.get("shares", 0) or 0)
+                if sh <= 0:
+                    continue
+                avg = p.get("avg_price", 0) or 0
+                curp = p.get("cur_price", 0) or 0
+                ret = p.get("return_pct")
+                if ret is None:
+                    ret = (curp - avg) / avg * 100.0 if avg > 0 else 0.0
+                out["positions"].append({"symbol": sym, "name": p.get("name", "") or sym,
+                                         "shares": sh, "avg": avg, "cur": curp,
+                                         "value": p.get("value", 0) or 0, "ret": ret})
+            out["positions"].sort(key=lambda r: -(r["value"] or 0))
+    except Exception:
+        pass
+    if nav is None and snaps:                    # 폴백: 마지막 EOD 스냅샷
+        nav = float(snaps[-1]["nav"])
+        out["cash"] = snaps[-1].get("cash")
+    out["nav"] = nav
+
+    # 3) 성과 — 누적·전일·전략 MDD (크론 리포트와 동일 산식)
+    if nav is not None:
+        inception_nav = float(snaps[0]["nav"]) if snaps else seed
+        out["inception_date"] = str(snaps[0]["date"])[:10] if snaps else None
+        try:
+            from ml.adaptive import reward as _reward
+            out["strat_mdd"] = _reward.max_drawdown([float(s["nav"]) for s in snaps] + [float(nav)]) * 100.0
+        except Exception:
+            pass
+        out["cum_ret"] = (nav / inception_nav - 1.0) * 100.0 if inception_nav else None
+        if len(snaps) >= 2:
+            prev_nav = float(snaps[-2]["nav"])
+            out["day_ret"] = (nav / prev_nav - 1.0) * 100.0 if prev_nav else None
+
+    # 4) 벤치마크 (인셉션~오늘 — 네트워크·graceful)
+    try:
+        from providers import market_data
+        bm = market_data.fetch_kospi_stats(out["inception_date"], symbol=bench_sym)
+        out["bench_ret"] = bm.get("return_pct")
+        out["bench_mdd"] = bm["mdd"] * 100.0 if bm.get("mdd") is not None else None
+    except Exception:
+        pass
+
+    # 5) 거래비용 계기 (누적 수수료·세금 → 회전율·드래그)
+    try:
+        crows = [r for r in hist if r.get("kind") == "cost"]
+        tot_cost = sum(float(r.get("cost", 0) or 0) for r in crows)
+        tot_notional = sum(float(r.get("notional", 0) or 0) for r in crows)
+        if tot_cost > 0:
+            inception_nav = float(snaps[0]["nav"]) if snaps else seed
+            avg_nav = (sum(float(s["nav"]) for s in snaps) / len(snaps)) if snaps else inception_nav
+            out["cost"] = {"total": tot_cost,
+                           "turnover": (tot_notional / avg_nav * 100.0) if avg_nav else 0.0,
+                           "drag": (tot_cost / inception_nav * 100.0) if inception_nav else 0.0}
+    except Exception:
+        pass
+
+    # 6) 결정 원장 ⋈ 결과 (판단 근거 — append-only ledger read-only)
+    try:
+        from ml.adaptive import Ledger
+        led = Ledger(surface)
+        rows = join_decisions(led.read_decisions(), led.read_outcomes())
+        try:
+            import ticker_names
+            for r in rows:
+                r["name"] = ticker_names.display_name(r["ticker"], allow_net=False) or r["ticker"]
+        except Exception:
+            for r in rows:
+                r["name"] = r["ticker"]
+        out["decisions"] = rows
+        out["scorecard"] = paper_scorecard(rows)
+    except Exception:
+        pass
+    return out
+
+
 def learning_evolution(surface: str = "kr_mock") -> dict:
     """모의 자기개선 진화 — 주간 학습 이력 + 라이브 스냅샷 verdict. read-only·graceful."""
     from ml.adaptive import Ledger, evolution
