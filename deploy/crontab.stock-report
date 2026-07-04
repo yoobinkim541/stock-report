@@ -83,6 +83,10 @@ PATH=/home/ubuntu/.local/bin:/usr/local/bin:/usr/bin:/bin
 0 5 * * 6 cd /home/ubuntu/projects/stock-report && uv run python crons/income_compounding_eval.py >> /tmp/income_compounding_eval.log 2>&1  # 토 05:00 UTC = 14:00 KST
 # Tier6 검증된 집중 ★게이트 재검증 (무스킬 랜덤집중 vs 분산·무생존편향 섹터ETF·DSR 다중검정; GO 시 shadow는 ADAPTIVE_CONCENTRATION_DISPLAY_ENABLED 시. 현재 NO-GO)
 15 5 * * 6 cd /home/ubuntu/projects/stock-report && uv run python crons/concentration_validated_eval.py >> /tmp/concentration_validated_eval.log 2>&1  # 토 05:15 UTC = 14:15 KST
+# KR 선택정책 가격축 ★게이트 재검증 (25년 marcap 무생존편향·순비용 워크포워드 + 트레일링 권고 축; ADAPTIVE_KR_AXES_ENABLED 시 shadow→모의 선택 반영. 현재 OBSERVE)
+30 5 * * 6 cd /home/ubuntu/projects/stock-report && flock -n /tmp/kr_axes_eval.lock uv run python crons/kr_axes_eval.py >> /tmp/kr_axes_eval.log 2>&1  # 토 05:30 UTC = 14:30 KST
+# US 선택정책 가격축 ★게이트 재검증 (S&P500 시점멤버십 마스킹·순비용 워크포워드·커버리지 강등; ADAPTIVE_US_AXES_ENABLED 시 shadow→모의 선택 반영)
+45 5 * * 6 cd /home/ubuntu/projects/stock-report && flock -n /tmp/us_axes_eval.lock uv run python crons/us_axes_eval.py >> /tmp/us_axes_eval.log 2>&1  # 토 05:45 UTC = 14:45 KST
 # 포트폴리오 advice 적응 평가 (MetaAllocator A/B → blend 신뢰도 ★목적함수; ADAPTIVE_ADVICE_ENABLED 시 shadow)
 30 4 * * 6 cd /home/ubuntu/projects/stock-report && uv run python crons/advice_adaptive_eval.py >> /tmp/advice_adaptive_eval.log 2>&1       # 토 04:30 UTC = 13:30 KST
 

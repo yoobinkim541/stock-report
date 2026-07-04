@@ -113,6 +113,16 @@ def compute_kr_signals(limit: int = UNIVERSE) -> list[dict]:
             dec  = _decision_v2(fund, sig, fund.get("grade", "N/A"), ticker=tk)
             price = float((sig.get("price_info") or {}).get("current_price") or 0)
             action = dec.get("action", "")
+            feats = kr_policy.extract_features(fund, sig, dec)
+            # ★가격 축(mom12·hi52·lowvol) — 12M 수정주가 point-in-time (그래이스풀:
+            # 이력 부족/네트워크 실패 시 미기록 → score() 가 사용분만 재정규화)
+            try:
+                from providers.market_data import _history_cached
+                h = _history_cached(tk, period="1y")
+                if h is not None and "Close" in getattr(h, "columns", []):
+                    feats.update(kr_policy.price_axes(h["Close"]))
+            except Exception:
+                pass
             out.append({
                 "ticker": tk,
                 "code":   tk.replace(".KS", "").replace(".KQ", ""),
@@ -131,7 +141,7 @@ def compute_kr_signals(limit: int = UNIVERSE) -> list[dict]:
                     "news": (dec.get("news") or {}).get("status"),
                     "risk": (dec.get("risk") or {}).get("status"),
                 },
-                "features": kr_policy.extract_features(fund, sig, dec),
+                "features": feats,
             })
         except Exception as e:
             logger.warning("KR 신호 실패 %s: %s", tk, e)

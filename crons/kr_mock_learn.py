@@ -33,7 +33,7 @@ KST = timezone(timedelta(hours=9))
 HORIZON = 20             # 거래일(보상 성숙 기준)
 MIN_SAMPLES = 40         # 채택 최소 표본(미만이면 콜드스타트 유지)
 MAX_POS = int(os.getenv("KR_MOCK_MAX_POS", "5"))   # 배치 바스켓 크기(eval 일치용)
-_FEATS = ["ranker", "fund", "signal", "conf", "mom"]
+_FEATS = ["ranker", "fund", "signal", "conf", "mom", "mom12", "hi52", "lowvol"]
 
 
 # ── 통계 ──────────────────────────────────────────────────────────────────────
@@ -54,24 +54,26 @@ def _pearson(xs: list[float], ys: list[float]) -> float:
 def fit_policy(train_rows: list[dict]) -> dict:
     """피처별 (피처값 ↔ 실현 초과수익) 양의 상관에 비례한 가중치 적합.
 
-    전 피처 무상관(양의 상관 합 0)이면 DEFAULT 가중으로 폴백 — 전부-0 가중이 채택돼
-    랭킹이 유니버스 순서로 붕괴하는 것 방지(#12).
+    - **측정 축**(표본 ≥5): weight = max(0, pearson) — 무신호면 0.
+    - **미측정 축**(원장에 아직 없음 — 예: 신규 가격 축): 0 — 데이터 축적 전까지 가중 금지.
+      (미측정 축에 DEFAULT 프라이어를 주면, 측정 축이 전부 무신호일 때 정규화가 미측정
+      축으로 전량 쏠리는 함정 — 신규 축 추가 시 실제로 발생.)
+    - 측정 축 양의 상관 합 0 이면 DEFAULT 가중 전체 폴백 — 전부-0 가중이 채택돼
+      랭킹이 유니버스 순서로 붕괴하는 것 방지(#12).
     """
     from ml import kr_policy
-    weights = {}
+    measured = {}
     for f in _FEATS:
         pairs = [(r["features"].get(f), r.get("fwd_excess"))
                  for r in train_rows
                  if r.get("features") and r["features"].get(f) is not None and r.get("fwd_excess") is not None]
-        if len(pairs) < 5:
-            weights[f] = kr_policy.DEFAULT_POLICY.get(f"w_{f}", 0.1)
-        else:
-            weights[f] = max(0.0, _pearson([a for a, _ in pairs], [b for _, b in pairs]))
-    total = sum(weights.values())
+        if len(pairs) >= 5:
+            measured[f] = max(0.0, _pearson([a for a, _ in pairs], [b for _, b in pairs]))
+    total = sum(measured.values())
     if total <= 1e-9:
-        # 신호 없음 → 합리적 기본 혼합 유지(붕괴 방지)
+        # 신호 없음(또는 전축 미측정) → 합리적 기본 혼합 유지(붕괴 방지)
         return {f"w_{f}": kr_policy.DEFAULT_POLICY[f"w_{f}"] for f in _FEATS}
-    return {f"w_{f}": round(weights[f] / total, 4) for f in _FEATS}
+    return {f"w_{f}": round(measured.get(f, 0.0) / total, 4) for f in _FEATS}
 
 
 def eval_policy(oos_rows: list[dict], params: dict, max_positions: int = 5) -> dict:

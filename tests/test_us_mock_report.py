@@ -39,3 +39,54 @@ def test_scorecard_ic_needs_min_pairs():
 
 if __name__ == "__main__":
     sys.exit(pytest.main([__file__, "-v"]))
+
+
+def test_build_report_shows_sleeve_state(monkeypatch):
+    """/paper us — 슬리브 활성 시 게이트 상태·보유 QLD 를 현황에 표시 (봇 가시화)."""
+    import sys as _sys, os as _os
+    _sys.path.insert(0, _os.path.join(_os.path.dirname(__file__), ".."))
+    import kis_mock
+    from crons import us_mock_report as R
+    from crons import us_mock_track as T
+
+    monkeypatch.setattr(kis_mock, "get_balance", lambda: {
+        "ok": True, "cash_usd": 10_000.0, "pos_value": 90_000.0, "nav": 100_000.0,
+        "positions": {"QLD": {"shares": 300, "avg_price": 90.0, "cur_price": 100.0,
+                              "value": 30_000.0}}})
+    monkeypatch.setattr(R, "_snapshots", lambda: [])
+    monkeypatch.setattr(R, "_scorecard_rows", lambda: [])
+    monkeypatch.setattr(R, "_recent_decisions", lambda: ([], None))
+    monkeypatch.setattr(T, "LEV_SLEEVE_ENABLED", True)
+    monkeypatch.setattr(T, "load_lev_shadow", lambda path=None: 1.3)
+    try:
+        from providers import market_data
+        monkeypatch.setattr(market_data, "fetch_kospi_stats",
+                            lambda *a, **k: {"return_pct": None, "mdd": None})
+    except Exception:
+        pass
+
+    text = R.build_report()
+    assert "구조레버 슬리브" in text
+    assert "×1.30" in text and "목표 30%" in text
+    assert "QLD 300주 (30%)" in text
+
+
+def test_build_report_sleeve_hidden_when_off_and_flat(monkeypatch):
+    """슬리브 off + 보유 0 → 섹션 미표시 (기존 출력 불변)."""
+    import kis_mock
+    from crons import us_mock_report as R
+    from crons import us_mock_track as T
+
+    monkeypatch.setattr(kis_mock, "get_balance", lambda: {
+        "ok": True, "cash_usd": 100_000.0, "pos_value": 0.0, "nav": 100_000.0, "positions": {}})
+    monkeypatch.setattr(R, "_snapshots", lambda: [])
+    monkeypatch.setattr(R, "_scorecard_rows", lambda: [])
+    monkeypatch.setattr(R, "_recent_decisions", lambda: ([], None))
+    monkeypatch.setattr(T, "LEV_SLEEVE_ENABLED", False)
+    try:
+        from providers import market_data
+        monkeypatch.setattr(market_data, "fetch_kospi_stats",
+                            lambda *a, **k: {"return_pct": None, "mdd": None})
+    except Exception:
+        pass
+    assert "구조레버 슬리브" not in R.build_report()
