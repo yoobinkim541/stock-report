@@ -56,6 +56,18 @@ cached.sp500_heatmap = lambda: [
 cached.market_indicators = lambda: {"fear_greed":{"score":32.0,"rating":"fear","prev_week":26.0,"prev_month":56.0},
     "indices":[{"ticker":"^GSPC","name":"S&P 500","price":6000.0,"chg":1.2,"rsi_d":63.0,"rsi_w":81.0},
                {"ticker":"^IXIC","name":"나스닥","price":20000.0,"chg":0.8,"rsi_d":58.0,"rsi_w":75.0}]}
+cached.axes_gate = lambda: {
+    "kr":{"available":True,"env_on":True,"asof":"2026-07-04 10:45","period":"2001~2026",
+          "verdict":{"code":"OBSERVE","label":"\U0001f440 OBSERVE — OOS 순초과>0 이나 통계 관문 미달",
+                     "net_excess_cagr":0.0549,"dsr":0.095,"pbo":0.175,
+                     "oos":{"cagr":0.157,"mdd":0.483},"bench":{"cagr":0.102,"mdd":0.541}},
+          "recommendation":{"chosen":"hi52","policy_weights":{"w_hi52":0.35,"w_lowvol":0.0,
+                            "w_mom12":0.0,"w_mom":0.0},"window":["2021-07-02","2026-07-02"]},
+          "chosen_history":{"hi52":6,"lowvol":3},
+          "shadow":{"asof":"2026-07-04 10:45","chosen":"hi52","fresh":True,"applied":True}},
+    "us":{"available":False,"env_on":False}}
+cached.tier3_gate = lambda: {"available":True,"reco_lev":1.3,"verdict":"GO",
+                             "at":"2026-07-04","fresh":True,"sleeve_env":True}
 cached.paper = lambda s: {"surface":s,"currency":"₩" if s=="kr_mock" else "$",
     "bench_name":"KOSPI" if s=="kr_mock" else "QQQ","balance_ok":True,
     "nav":10500000.0,"cash":1200000.0,
@@ -66,13 +78,16 @@ cached.paper = lambda s: {"surface":s,"currency":"₩" if s=="kr_mock" else "$",
     "bench_ret":2.0,"bench_mdd":5.0,
     "cost":{"total":15000.0,"turnover":120.0,"drag":0.15},
     "scorecard":{"buy_hit":55.0,"n_buy":20,"sell_hit":50.0,"n_sell":8},
+    "sleeve":({"enabled":True,"symbol":"QLD","reco":1.3,"shares":300,"frac":30.0}
+              if s=="us_mock" else None),
     "decisions":[{"date":"2026-06-02","side":"편입","ticker":"005930.KS","name":"삼성전자 (005930.KS)",
                   "qty":10,"price":70000.0,"policy_score":0.812,
                   "reason":"score 85·A등급·수급 양호","ok":True,
+                  "features":{"mom12":0.71,"hi52":0.95,"lowvol":0.6,"pead":0.58},
                   "fwd_excess":0.021,"correct":True,"matured_at":"2026-06-20"},
                  {"date":"2026-06-02","side":"퇴출","ticker":"000660.KS","name":"SK하이닉스 (000660.KS)",
                   "qty":5,"price":180000.0,"policy_score":0.31,
-                  "reason":"타깃이탈","ok":True,
+                  "reason":"타깃이탈","ok":True,"features":{},
                   "fwd_excess":None,"correct":None,"matured_at":None}]}
 cached.learning_evolution = lambda s: {"surface":s,
     "snapshot":{"n":52,"realized_ic":0.06,"buy_hit":55.0,"cum_net_excess":0.03},
@@ -256,6 +271,55 @@ def test_paper_empty_graceful():
     at.run()
     assert not at.exception, str(at.exception)
     assert any("계좌 데이터 없음" in str(i.value) for i in at.info)
+
+
+def test_research_axes_gate_section():
+    """리서치 '축 게이트' — KR verdict 카드·권고·shadow 반영 상태 + US 미생성 안내 (P2)."""
+    at = AppTest.from_string(_script("from dashboard.pages import research", "research.render()"),
+                             default_timeout=30)
+    at.session_state["research_section"] = "축 게이트"
+    at.run()
+    assert not at.exception, str(at.exception)
+    assert any("가격축 ★게이트" in str(s.value) for s in at.subheader)
+    assert any("OBSERVE" in str(m.value) for m in at.markdown)          # KR verdict
+    assert any("hi52" in str(m.value) for m in at.markdown)             # 권고 축
+    assert len(at.metric) >= 4                                          # 순초과·MDD·DSR·PBO
+    assert any("반영 중" in str(c.value) for c in at.caption)           # shadow applied
+    assert any("검증 결과 없음" in str(i.value) for i in at.info)        # US 미생성 안내
+
+
+def test_paper_us_sleeve_badge_and_axes_columns():
+    """모의투자 US — 🏗️ 슬리브 배지 + '축 피처 보기' 토글 시 원장에 축 열 (P2)."""
+    at = AppTest.from_string(_script("from dashboard.pages import paper", "paper.render()"),
+                             default_timeout=30)
+    at.session_state["paper_market"] = "us_mock"
+    at.session_state["paper_axes_us_mock"] = True          # 토글 on 시뮬
+    at.run()
+    assert not at.exception, str(at.exception)
+    assert any("구조레버 슬리브" in str(m.value) and "GO ×1.30" in str(m.value)
+               for m in at.markdown)
+    df = at.dataframe[-1].value                            # 마지막 표 = 결정 원장
+    assert "mom12" in df.columns and "pead" in df.columns
+
+
+def test_home_shows_gate_signal_line():
+    """홈 — 🚦 ML 게이트 신호등 한 줄 (구조레버·KR축·US축) (P2)."""
+    at = AppTest.from_string(_script("from dashboard.pages import home", "home.render()"),
+                             default_timeout=30)
+    at.run()
+    assert not at.exception, str(at.exception)
+    caps = " ".join(str(c.value) for c in at.caption)
+    assert "ML 게이트" in caps and "GO ×1.30" in caps and "OBSERVE·hi52" in caps
+
+
+def test_portfolio_shows_tier3_gate():
+    """포트폴리오 — Tier3 구조레버 게이트 상태 캡션 (P2)."""
+    at = AppTest.from_string(_script("from dashboard.pages import portfolio", "portfolio.render()"),
+                             default_timeout=30)
+    at.run()
+    assert not at.exception, str(at.exception)
+    caps = " ".join(str(c.value) for c in at.caption)
+    assert "Tier3 구조적 레버리지 게이트" in caps and "슬리브 ✅ ON" in caps
 
 
 def test_home_has_donut_and_holdings():

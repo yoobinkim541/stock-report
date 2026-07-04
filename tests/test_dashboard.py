@@ -382,3 +382,65 @@ def test_views_paper_summary_graceful_empty(monkeypatch):
     monkeypatch.setattr(kiwoom_mock, "get_balance", boom)
     d = views.paper_summary("kr_mock")
     assert d["nav"] is None and d["positions"] == [] and d["nav_series"] == []
+
+
+# ── P2 ML 게이트 요약 (파일 read-only·graceful) ───────────────────────────────
+def _write_json(p, obj):
+    import json
+    p.write_text(json.dumps(obj, ensure_ascii=False), encoding="utf-8")
+
+
+def test_views_axes_gate_summary(monkeypatch, tmp_path):
+    from datetime import datetime
+    from dashboard import views
+    bt, sh = tmp_path / "kr_bt.json", tmp_path / "kr_sh.json"
+    _write_json(bt, {"asof": "2026-07-04 10:45", "period": "2001~2026",
+                     "verdict": {"code": "OBSERVE", "net_excess_cagr": 0.0549},
+                     "recommendation": {"chosen": "hi52"},
+                     "chosen_history": {"hi52": 6}})
+    _write_json(sh, {"asof": datetime.now().strftime("%Y-%m-%d %H:%M"), "chosen": "hi52",
+                     "policy_weights": {"w_hi52": 0.35}})
+    monkeypatch.setattr(views, "_GATE_FILES",
+                        {"kr": (str(bt), str(sh), "ADAPTIVE_KR_AXES_ENABLED"),
+                         "us": (str(tmp_path / "none.json"), str(tmp_path / "none2.json"),
+                                "ADAPTIVE_US_AXES_ENABLED")})
+    monkeypatch.setenv("ADAPTIVE_KR_AXES_ENABLED", "true")
+    g = views.axes_gate_summary()
+    kr = g["kr"]
+    assert kr["available"] and kr["verdict"]["code"] == "OBSERVE"
+    assert kr["shadow"]["fresh"] and kr["shadow"]["applied"]      # env on + 신선 → 반영 중
+    assert g["us"] == {"available": False, "env_on": False}       # 파일 없음 graceful
+
+
+def test_views_axes_gate_stale_shadow_not_applied(monkeypatch, tmp_path):
+    from dashboard import views
+    bt, sh = tmp_path / "bt.json", tmp_path / "sh.json"
+    _write_json(bt, {"verdict": {"code": "OBSERVE"}})
+    _write_json(sh, {"asof": "2026-01-01 00:00", "chosen": "hi52"})   # stale
+    monkeypatch.setattr(views, "_GATE_FILES",
+                        {"kr": (str(bt), str(sh), "ADAPTIVE_KR_AXES_ENABLED")})
+    monkeypatch.setenv("ADAPTIVE_KR_AXES_ENABLED", "true")
+    kr = views.axes_gate_summary()["kr"]
+    assert kr["shadow"]["fresh"] is False and kr["shadow"]["applied"] is False
+
+
+def test_views_tier3_gate_status(monkeypatch, tmp_path):
+    from datetime import datetime
+    from dashboard import views
+    p = tmp_path / "t3.json"
+    _write_json(p, {"reco_lev": 1.3, "verdict": "GO",
+                    "_meta": {"at": datetime.now().strftime("%Y-%m-%d %H:%M")}})
+    monkeypatch.setattr(views, "_TIER3_SHADOW", str(p))
+    monkeypatch.setenv("US_MOCK_LEV_SLEEVE", "true")
+    t3 = views.tier3_gate_status()
+    assert t3["available"] and t3["reco_lev"] == 1.3 and t3["fresh"] and t3["sleeve_env"]
+    monkeypatch.setattr(views, "_TIER3_SHADOW", str(tmp_path / "none.json"))
+    assert views.tier3_gate_status()["available"] is False
+
+
+def test_views_join_decisions_carries_features():
+    from dashboard import views
+    decs = [{"id": "d:T", "date": "2026-06-02", "side": "편입", "ticker": "T",
+             "features": {"mom12": 0.7, "pead": 0.6}}]
+    rows = views.join_decisions(decs, [])
+    assert rows[0]["features"] == {"mom12": 0.7, "pead": 0.6}

@@ -80,6 +80,18 @@ def backtest():
     return views.backtest_summary()
 
 
+@st.cache_data(ttl=_TTL_SLOW, show_spinner=False)
+def axes_gate():
+    """KR·US 가격축 ★게이트 검증 + shadow 반영 상태 (로컬 파일 — 30분 캐시)."""
+    return views.axes_gate_summary()
+
+
+@st.cache_data(ttl=_TTL_SLOW, show_spinner=False)
+def tier3_gate():
+    """Tier3 구조레버 게이트 shadow 상태 (로컬 파일 — 30분 캐시)."""
+    return views.tier3_gate_status()
+
+
 @st.cache_data(ttl=_TTL, show_spinner="모의 계좌 불러오는 중…")
 def paper(surface):
     """자동 모의투자 계좌 요약 (NAV·벤치·보유·결정 원장 — 잔고 API graceful 폴백)."""

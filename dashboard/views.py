@@ -202,6 +202,7 @@ def join_decisions(decisions: list[dict], outcomes: list[dict]) -> list[dict]:
             "policy_score": d.get("policy_score"),
             "reason": (d.get("rationale") or {}).get("one_line_reason", ""),
             "ok": d.get("ok"),
+            "features": d.get("features") or {},   # 새 축(mom12·hi52·lowvol·pead) 가시화용
             "fwd_excess": o.get("fwd_excess"), "correct": correct,
             "matured_at": o.get("matured_at"),
         })
@@ -292,6 +293,21 @@ def paper_summary(surface: str = "kr_mock") -> dict:
             prev_nav = float(snaps[-2]["nav"])
             out["day_ret"] = (nav / prev_nav - 1.0) * 100.0 if prev_nav else None
 
+    # 3b) 🏗️ Tier3 구조레버 슬리브 상태 (US 모의 — 게이트·목표 vs 보유 가시화)
+    if surface == "us_mock":
+        try:
+            from crons.us_mock_track import (LEV_SLEEVE_ENABLED, LEV_SLEEVE_SYMBOL,
+                                             load_lev_shadow)
+            lev_pos = next((p for p in out["positions"] if p["symbol"] == LEV_SLEEVE_SYMBOL), None)
+            if LEV_SLEEVE_ENABLED or lev_pos:
+                out["sleeve"] = {
+                    "enabled": LEV_SLEEVE_ENABLED, "symbol": LEV_SLEEVE_SYMBOL,
+                    "reco": load_lev_shadow(),
+                    "shares": (lev_pos or {}).get("shares", 0),
+                    "frac": ((lev_pos or {}).get("value", 0) / nav * 100.0) if nav else 0.0}
+        except Exception:
+            pass
+
     # 4) 벤치마크 (인셉션~오늘 — 네트워크·graceful)
     try:
         from providers import market_data
@@ -331,6 +347,78 @@ def paper_summary(surface: str = "kr_mock") -> dict:
         out["scorecard"] = paper_scorecard(rows)
     except Exception:
         pass
+    return out
+
+
+# ── ML 게이트 현황 (가격축 ★게이트·Tier3 구조레버 — 로컬 파일 read-only·graceful) ──
+
+_GATE_FILES = {
+    "kr": (os.path.expanduser("~/reports/ml-cache/kr_policy_backtest.json"),
+           os.path.expanduser("~/reports/ml-cache/kr_policy_axes_shadow.json"),
+           "ADAPTIVE_KR_AXES_ENABLED"),
+    "us": (os.path.expanduser("~/reports/ml-cache/us_policy_backtest.json"),
+           os.path.expanduser("~/reports/ml-cache/us_policy_axes_shadow.json"),
+           "ADAPTIVE_US_AXES_ENABLED"),
+}
+_TIER3_SHADOW = os.path.expanduser("~/reports/ml-cache/structural_leverage_shadow.json")
+_GATE_FRESH_D = 21     # 주간 크론 2회 이상 누락 시 stale (axes_shadow 정합)
+
+
+def _read_json(path: str):
+    import json
+    try:
+        with open(path, encoding="utf-8") as f:
+            return json.load(f)
+    except Exception:
+        return None
+
+
+def _days_since(date_str: str) -> int | None:
+    from datetime import datetime
+    try:
+        return (datetime.now() - datetime.strptime(str(date_str)[:10], "%Y-%m-%d")).days
+    except Exception:
+        return None
+
+
+def axes_gate_summary() -> dict:
+    """KR·US 가격축 ★게이트 최근 검증 + shadow 반영 상태 — {kr:{...}, us:{...}}.
+
+    kr/us_axes_eval 이 주간 저장하는 JSON 을 그대로 표시(파일 없으면 available=False —
+    크론 미실행 안내). applied = env on ∧ shadow 신선 = load_params 가 실제 반영 중.
+    """
+    out = {}
+    for mk, (bt_path, sh_path, env_key) in _GATE_FILES.items():
+        d = _read_json(bt_path)
+        entry = {"available": bool(d),
+                 "env_on": os.getenv(env_key, "false").lower() == "true"}
+        if d:
+            entry.update({"asof": d.get("asof"), "period": d.get("period"),
+                          "verdict": d.get("verdict") or {},
+                          "recommendation": d.get("recommendation"),
+                          "chosen_history": d.get("chosen_history") or {},
+                          "coverage": d.get("coverage")})
+        sh = _read_json(sh_path)
+        if sh:
+            days = _days_since(sh.get("asof", ""))
+            fresh = days is not None and days <= _GATE_FRESH_D
+            entry["shadow"] = {"asof": sh.get("asof"), "chosen": sh.get("chosen"),
+                               "policy_weights": sh.get("policy_weights"),
+                               "fresh": fresh, "applied": entry["env_on"] and fresh}
+        out[mk] = entry
+    return out
+
+
+def tier3_gate_status() -> dict:
+    """Tier3 구조적 레버리지 게이트 shadow 상태 — 포트폴리오/홈 배지용. graceful."""
+    d = _read_json(_TIER3_SHADOW)
+    out = {"available": bool(d),
+           "sleeve_env": os.getenv("US_MOCK_LEV_SLEEVE", "false").lower() == "true"}
+    if d:
+        at = str((d.get("_meta") or {}).get("at", ""))[:10]
+        days = _days_since(at)
+        out.update({"reco_lev": d.get("reco_lev"), "verdict": d.get("verdict"),
+                    "at": at, "fresh": days is not None and days <= _GATE_FRESH_D})
     return out
 
 
