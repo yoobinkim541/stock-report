@@ -12,7 +12,7 @@ import streamlit as st
 from dashboard import cached, charts, data
 
 _NOBAR = {"displayModeBar": False}
-_SECTIONS = ["종목 랭킹", "전략 백테스트", "정책 학습"]
+_SECTIONS = ["종목 랭킹", "전략 백테스트", "정책 학습", "축 게이트"]
 
 
 def render():
@@ -23,6 +23,8 @@ def render():
         _backtest_section()
     elif sec == "정책 학습":
         _learning_section()
+    elif sec == "축 게이트":
+        _axes_gate_section()
     else:
         _screener_section()
 
@@ -82,6 +84,51 @@ def _backtest_section():
             except Exception:
                 pass
     st.caption("⚠️ 검증상 ML 종목선택·장중타이밍 무엣지 — 정보·표시용 (검증 통과 공격은 구조적 레버리지뿐)")
+
+
+@st.fragment
+def _axes_gate_section():
+    st.subheader("🚦 가격축 ★게이트")
+    st.caption("주간 재검증(토) — 순비용 워크포워드 vs 지수 · KR=25년 marcap 무생존편향 · "
+               "US=S&P500 시점멤버십(상폐 가격 부재 시 커버리지 강등)")
+    g = cached.axes_gate()
+    specs = (("kr", "🇰🇷 국내 — KOSPI 시총 top200 · top5 월리밸 vs 시총가중"),
+             ("us", "🇺🇸 미국 — S&P500 멤버십 · top5 월리밸 vs QQQ"))
+    for mk, title in specs:
+        e = g.get(mk) or {}
+        st.markdown(f"##### {title}")
+        if not e.get("available"):
+            st.info("검증 결과 없음 — 토요일 재검증 크론(kr/us_axes_eval) 실행 후 생성됩니다")
+            continue
+        v = e.get("verdict") or {}
+        st.markdown(f"**{v.get('label', '')}**")
+        oos, b = v.get("oos") or {}, v.get("bench") or {}
+        m = st.columns(4)
+        m[0].metric("OOS 순초과/년", data.f_frac_pct_s(v.get("net_excess_cagr"), 2),
+                    help="워크포워드 OOS 연결 CAGR − 지수 CAGR (비용 차감)")
+        m[1].metric("MDD 전략/지수",
+                    f"{(oos.get('mdd') or 0)*100:.0f}%/{(b.get('mdd') or 0)*100:.0f}%",
+                    help="★목적함수 2순위 제약: 전략 MDD ≤ 지수")
+        m[2].metric("DSR", data.f_ratio(v.get("dsr"), 3), help="관문 ≥0.95 — 다중검정 deflate")
+        m[3].metric("PBO", data.f_ratio(v.get("pbo"), 3), help="관문 <0.5 — 과적합확률(CSCV)")
+        if mk == "us" and e.get("coverage") is not None:
+            st.caption(f"멤버십 가격 커버리지 {e['coverage']*100:.0f}% — 90% 미만이면 GO 자동 강등")
+        rec = e.get("recommendation")
+        if rec:
+            pw = rec.get("policy_weights") or {}
+            w_str = " · ".join(f"{k[2:]} {val:.2f}" for k, val in sorted(pw.items()) if val > 0)
+            st.write(f"📌 현재 권고 축: **{rec.get('chosen')}** → {w_str or '—'}")
+        sh = e.get("shadow")
+        if sh:
+            st.caption(("✅ shadow **반영 중** (모의 선택 전용)" if sh.get("applied")
+                        else "⏸️ shadow 기록됨 — env off/stale 로 미반영") + f" · {sh.get('asof', '')}")
+        else:
+            st.caption("shadow 미기록 (ADAPTIVE_*_AXES_ENABLED off — 평가·표시만)")
+        ch = e.get("chosen_history") or {}
+        if ch:
+            st.caption("워크포워드 폴드 채택 이력: "
+                       + " · ".join(f"{k} ×{cnt}" for k, cnt in list(ch.items())[:6]))
+    st.caption("⚠️ OBSERVE = 엣지 단정 불가(정직) · 반영은 모의 한정 · 실계좌 자동집행 0")
 
 
 @st.fragment

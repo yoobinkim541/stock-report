@@ -56,6 +56,19 @@ def render():
                 f"· 낙폭예산 상한 {data.f_ratio(lev.get('dd_cap'), 2)}× "
                 f"(현재 {data.f_ratio(lev.get('current'), 2)}×)")
 
+        # 🏗️ Tier3 구조적 레버리지 게이트 (검증 통과한 유일한 공격 — 표시 전용)
+        try:
+            t3 = cached.tier3_gate()
+            if t3.get("available"):
+                state = (f"**GO ×{t3.get('reco_lev'):.2f}**" + ("" if t3.get("fresh") else " (stale)")
+                         + f" · {t3.get('at', '')}")
+            else:
+                state = "미기록 — 게이트 NO-GO/평가 대기 또는 `ADAPTIVE_LEVERAGE_ENABLED` off"
+            st.caption(f"🏗️ Tier3 구조적 레버리지 게이트: {state} · "
+                       f"US 모의 슬리브 {'✅ ON' if t3.get('sleeve_env') else 'off'} — 실계좌 자동집행 없음(수동)")
+        except Exception:
+            pass
+
     st.divider()
     rows = data.load_holdings()
     if rows:

@@ -98,6 +98,18 @@ def _account_section(surface: str):
             st.caption(f"💸 누적 거래비용 {_money(c['total'], cur)}\n\n"
                        f"회전율 {c['turnover']:.0f}% · 드래그 −{c['drag']:.2f}%p")
 
+    # ── 🏗️ 구조레버 슬리브 (US — Tier3 게이트 GO 시 모의 라이브 검증) ──────────
+    sl = d.get("sleeve")
+    if sl:
+        if sl.get("reco"):
+            state = f"게이트 **GO ×{sl['reco']:.2f}** → 목표 {(sl['reco'] - 1) * 100:.0f}%"
+        elif sl.get("enabled"):
+            state = "게이트 미통과/stale → 목표 0% (청산 방향)"
+        else:
+            state = "슬리브 off (보유 잔량만)"
+        st.markdown(f"🏗️ **구조레버 슬리브** — {state} · 보유 {sl['symbol']} "
+                    f"{sl['shares']}주 ({sl['frac']:.0f}%)")
+
     # ── 로직 평가 (정직 verdict — evolution 단일 소스) ─────────────────────────
     st.markdown("##### 📊 로직 평가")
     ev = cached.learning_evolution(surface)
@@ -124,24 +136,36 @@ def _decisions_section(surface: str):
     if not rows:
         st.info("결정 이력 없음 — 자동 모의투자 크론 실행 후 누적됩니다")
         return
-    sides = st.multiselect("구분", ["편입", "퇴출", "증액", "감액", "레버슬리브"],
-                           default=["편입", "퇴출"], key=f"paper_sides_{surface}")
-    n = st.slider("표시 건수", 20, 200, 50, 10, key=f"paper_n_{surface}")
+    fc1, fc2, fc3 = st.columns([2, 1, 1])
+    sides = fc1.multiselect("구분", ["편입", "퇴출", "증액", "감액", "레버슬리브"],
+                            default=["편입", "퇴출"], key=f"paper_sides_{surface}")
+    n = fc2.slider("표시 건수", 20, 200, 50, 10, key=f"paper_n_{surface}")
+    show_axes = fc3.toggle("축 피처 보기", key=f"paper_axes_{surface}",
+                           help="★새 수집 축(mom12·hi52·lowvol·pead) — 원장 축적 현황")
     view = [r for r in rows if not sides or r.get("side") in sides][:n]
     if not view:
         st.caption("선택한 구분의 결정 없음")
         return
-    st.dataframe(pd.DataFrame([{
-        "날짜": r["date"],
-        "구분": f"{_SIDE_ICON.get(r.get('side'), '')} {r.get('side', '')}",
-        "종목": r.get("name") or r.get("ticker"),
-        "수량": r.get("qty"),
-        "정책점수": data.f_ratio(r.get("policy_score"), 3),
-        "판단 근거": r.get("reason") or "—",
-        "체결": "✅" if r.get("ok") else ("❌" if r.get("ok") is False else "—"),
-        "실현 순초과": data.f_frac_pct_s(r.get("fwd_excess"), 2),
-        "적중": ("✅" if r["correct"] else "❌") if r.get("correct") is not None else "⏳",
-    } for r in view]), hide_index=True, width="stretch",
-        column_config={"판단 근거": st.column_config.TextColumn(width="large")})
+
+    def _row(r):
+        base = {
+            "날짜": r["date"],
+            "구분": f"{_SIDE_ICON.get(r.get('side'), '')} {r.get('side', '')}",
+            "종목": r.get("name") or r.get("ticker"),
+            "수량": r.get("qty"),
+            "정책점수": data.f_ratio(r.get("policy_score"), 3),
+            "판단 근거": r.get("reason") or "—",
+            "체결": "✅" if r.get("ok") else ("❌" if r.get("ok") is False else "—"),
+            "실현 순초과": data.f_frac_pct_s(r.get("fwd_excess"), 2),
+            "적중": ("✅" if r["correct"] else "❌") if r.get("correct") is not None else "⏳",
+        }
+        if show_axes:
+            f = r.get("features") or {}
+            for ax in ("mom12", "hi52", "lowvol", "pead"):
+                base[ax] = data.f_ratio(f.get(ax), 2)
+        return base
+
+    st.dataframe(pd.DataFrame([_row(r) for r in view]), hide_index=True, width="stretch",
+                 column_config={"판단 근거": st.column_config.TextColumn(width="large")})
     st.caption("실현 순초과 = horizon 경과 후 지수 대비 초과수익(거래비용 차감) · ⏳ = 결과 성숙 대기 · "
                "⚠️ 모의투자 — 실거래 아님")

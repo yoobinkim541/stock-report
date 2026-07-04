@@ -60,6 +60,27 @@ def render():
     st.info(f"**이번 국면 {ph['emoji']} {ph['label']}** · 권장 DCA 배율 **{ph['dca']}×** "
             f"(QQQ 낙폭 {ph['drawdown']:+.1f}%) — 표시·참고용, 자동집행 없음")
 
+    # 🚦 ML 게이트 한눈 (주간 재검증 — 상세: 리서치 → 축 게이트)
+    try:
+        g, t3 = cached.axes_gate(), cached.tier3_gate()
+
+        def _ax(e):
+            if not e.get("available"):
+                return "—"
+            code = (e.get("verdict") or {}).get("code", "?")
+            rec = ((e.get("recommendation") or {}).get("chosen") or "")
+            ap = "·반영중" if (e.get("shadow") or {}).get("applied") else ""
+            return f"{code}{('·' + rec) if rec else ''}{ap}"
+
+        if t3.get("available") and t3.get("fresh"):
+            t3s = f"GO ×{t3.get('reco_lev'):.2f}" + (" (모의 슬리브 ON)" if t3.get("sleeve_env") else "")
+        else:
+            t3s = "미기록" if not t3.get("available") else "stale"
+        st.caption(f"🚦 ML 게이트 — 구조레버 {t3s} · KR축 {_ax(g.get('kr', {}))} · "
+                   f"US축 {_ax(g.get('us', {}))} · 상세: 리서치 → 축 게이트")
+    except Exception:
+        pass
+
     # 오늘/임박 경제 일정 (상위 5)
     ec = cached.econ(7)
     if ec:
