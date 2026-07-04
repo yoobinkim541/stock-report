@@ -214,3 +214,18 @@ def test_learning_curve_empty_and_none_excess():
     assert _is_fig(charts.learning_curve([]))
     # excess=None 인 행은 제외 → 데이터 없으면 빈 Figure
     assert len(charts.learning_curve([{"date": "d", "excess": None}]).data) == 0
+
+
+def test_nav_curve_line_and_baseline():
+    pts = [{"date": "2026-06-01", "nav": 10_000_000.0},
+           {"date": "2026-06-02", "nav": 10_500_000.0}]
+    fig = charts.nav_curve(pts, "₩")
+    assert _is_fig(fig)
+    tr = next(t for t in fig.data if t.name == "NAV")
+    assert list(tr.x) == ["2026-06-01", "2026-06-02"]
+    assert list(tr.y) == [10_000_000.0, 10_500_000.0]
+
+
+def test_nav_curve_empty_graceful():
+    assert _is_fig(charts.nav_curve([]))
+    assert len(charts.nav_curve([{"date": "d", "nav": None}]).data) == 0

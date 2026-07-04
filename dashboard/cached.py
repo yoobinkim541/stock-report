@@ -80,6 +80,12 @@ def backtest():
     return views.backtest_summary()
 
 
+@st.cache_data(ttl=_TTL, show_spinner="모의 계좌 불러오는 중…")
+def paper(surface):
+    """자동 모의투자 계좌 요약 (NAV·벤치·보유·결정 원장 — 잔고 API graceful 폴백)."""
+    return views.paper_summary(surface)
+
+
 @st.cache_data(ttl=_TTL_SLOW, show_spinner="학습 이력 불러오는 중…")
 def learning_evolution(surface):
     """모의 자기개선 진화 (주간 학습 이력 + 라이브 verdict)."""

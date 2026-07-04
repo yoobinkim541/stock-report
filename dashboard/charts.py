@@ -201,6 +201,31 @@ def equity_curve(equity):
     return _t(fig)
 
 
+def nav_curve(points: list[dict], currency: str = "₩"):
+    """모의 계좌 NAV 시계열 (+ 인셉션 기준선). points: [{date, nav}] (paper_summary 출력)."""
+    go = _go()
+    fig = go.Figure()
+    pts = [p for p in (points or []) if p.get("nav") is not None]
+    if not pts:
+        return _t(fig)
+    dates = [p.get("date") for p in pts]
+    navs = [float(p["nav"]) for p in pts]
+    up = navs[-1] >= navs[0]
+    color = _GREEN if up else _RED
+    fig.add_trace(go.Scatter(x=dates, y=navs, name="NAV", mode="lines",
+                             line=dict(color=color, width=2), fill="tozeroy",
+                             fillcolor=("rgba(52,211,153,0.08)" if up else "rgba(248,113,113,0.08)"),
+                             hovertemplate="%{x}<br>NAV " + currency + "%{y:,.0f}<extra></extra>"))
+    fig.add_hline(y=navs[0], line=dict(color=theme.MUTED, dash="dash", width=1),
+                  annotation_text="인셉션", annotation_position="top left",
+                  annotation_font=dict(color=theme.MUTED, size=11))
+    lo, hi = min(navs), max(navs)
+    pad = (hi - lo) * 0.15 or hi * 0.01 or 1.0
+    fig.update_layout(margin=dict(t=10, b=10, l=10, r=10), height=280, showlegend=False,
+                      yaxis=dict(range=[lo - pad, hi + pad]), hovermode="x unified")
+    return _t(fig)
+
+
 def learning_curve(series):
     """모의 정책 학습 진화 — 주별 OOS 초과수익 + 순비용 IC(우축) + 채택 마커(★).
 
