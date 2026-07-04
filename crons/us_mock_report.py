@@ -163,6 +163,24 @@ def build_report(html: bool = False) -> str:
         sm = ("+" if total_pnl >= 0 else "-") + fmt.money(abs(total_pnl))
         lines.append(f"─ 평가손익 {fmt.spct(pnl_ret)} ({sm})")
 
+    # 🏗️ Tier3 구조레버 슬리브 상태 (모의 라이브 검증 — /paper us 에서 게이트·보유 가시화)
+    try:
+        from crons.us_mock_track import LEV_SLEEVE_ENABLED, LEV_SLEEVE_SYMBOL, load_lev_shadow
+        lev_pos = positions.get(LEV_SLEEVE_SYMBOL) or {}
+        lev_sh = int(lev_pos.get("shares", 0) or 0)
+        if LEV_SLEEVE_ENABLED or lev_sh > 0:
+            reco = load_lev_shadow()
+            frac = (float(lev_pos.get("value", 0) or 0) / nav * 100.0) if nav else 0.0
+            lines.append(fmt.sep("🏗️ 구조레버 슬리브"))
+            if reco:
+                lines.append(f"게이트 GO ×{reco:.2f} → 목표 {(reco - 1) * 100:.0f}%"
+                             f" · 보유 {LEV_SLEEVE_SYMBOL} {lev_sh}주 ({frac:.0f}%)")
+            else:
+                state = "게이트 미통과/stale → 목표 0%" if LEV_SLEEVE_ENABLED else "슬리브 off"
+                lines.append(f"{state} · 보유 {LEV_SLEEVE_SYMBOL} {lev_sh}주 ({frac:.0f}%)")
+    except Exception:
+        pass
+
     # 💸 거래비용 정직 계기 (누적 수수료·스프레드·회전율 → 비용차감 성과)
     try:
         import store

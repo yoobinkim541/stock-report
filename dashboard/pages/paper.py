@@ -124,8 +124,8 @@ def _decisions_section(surface: str):
     if not rows:
         st.info("결정 이력 없음 — 자동 모의투자 크론 실행 후 누적됩니다")
         return
-    sides = st.multiselect("구분", ["편입", "퇴출", "증액", "감액"], default=["편입", "퇴출"],
-                           key=f"paper_sides_{surface}")
+    sides = st.multiselect("구분", ["편입", "퇴출", "증액", "감액", "레버슬리브"],
+                           default=["편입", "퇴출"], key=f"paper_sides_{surface}")
     n = st.slider("표시 건수", 20, 200, 50, 10, key=f"paper_n_{surface}")
     view = [r for r in rows if not sides or r.get("side") in sides][:n]
     if not view:

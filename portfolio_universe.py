@@ -49,6 +49,8 @@ _AUDIT_EXCLUDE = (
     "ml/universe.py",            # 시장 유니버스 (보유와 무관한 종목 스캔)
     "bot/attachment_parser.py",  # 과거 증권사 명세서 파싱용 이름맵
     "ticker_names.py",           # 종목명 resolver 유니버스 (검색용 — 은퇴 종목명도 포함)
+    "sp500_seed.py",             # S&P500 전체 시드 (시장 유니버스 — 생성 파일·보유 무관)
+    "sp500_meta.py",             # S&P500 섹터·시총 시드 (시장 유니버스 — 생성 파일)
     "portfolio_universe.py",     # 이 파일 (RETIRED_SEED 정의)
 )
 
