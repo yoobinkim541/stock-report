@@ -46,18 +46,34 @@ def to_yf(code: str) -> str:
 
 # ── marcap 연도별 패널 (네트워크 + 캐시) ────────────────────────────────────────
 
+_CURRENT_YEAR_MAX_AGE_S = 3 * 86400   # 당해연도 파일은 3일 지나면 재수신(주기 재검증 최신성)
+
+
 def _marcap_year(year: int):
-    """연도별 marcap parquet (캐시). 실패 시 None. (테스트는 이 함수를 monkeypatch.)"""
+    """연도별 marcap parquet (캐시). 실패 시 None. (테스트는 이 함수를 monkeypatch.)
+
+    과거 연도 = 불변이라 영구 캐시. **당해연도**는 3일 초과 시 재수신(kr_axes_eval 주간
+    재검증이 갱신 데이터를 보도록) — 재수신 실패 시 기존 캐시 유지(graceful).
+    """
     try:
+        import time
+        from datetime import datetime
         import pandas as pd
         _MARCAP_DIR.mkdir(parents=True, exist_ok=True)
         path = _MARCAP_DIR / f"marcap-{year}.parquet"
-        if not path.exists():
+        stale_current = (path.exists() and year >= datetime.now().year
+                         and time.time() - path.stat().st_mtime > _CURRENT_YEAR_MAX_AGE_S)
+        if not path.exists() or stale_current:
             url = _MARCAP_RAW.format(y=year)
             tmp = path.with_suffix(".tmp")
-            urllib.request.urlretrieve(url, tmp)
-            os.replace(tmp, path)
-            logger.info("marcap %s fetched (%dMB)", year, path.stat().st_size // 1048576)
+            try:
+                urllib.request.urlretrieve(url, tmp)
+                os.replace(tmp, path)
+                logger.info("marcap %s fetched (%dMB)", year, path.stat().st_size // 1048576)
+            except Exception as fe:
+                if not path.exists():
+                    raise
+                logger.warning("marcap %s 재수신 실패 — 기존 캐시 사용: %s", year, fe)
         df = pd.read_parquet(path)
         df["Code"] = df["Code"].map(norm_code)
         return df

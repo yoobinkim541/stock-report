@@ -393,6 +393,62 @@ def chosen_history(folds: list[dict]) -> dict:
 
 
 # ══════════════════════════════════════════════════════════════════════
+#  현재 시점 권고 (라이브 KR 정책 축 매핑 — crons/kr_axes_eval 소비)
+# ══════════════════════════════════════════════════════════════════════
+
+# 백테스트 축 → kr_policy 가중 키 (liq·size 는 라이브 정책에 대응 축 없음 → 매핑 불가)
+AXIS_TO_POLICY = {"mom12": "w_mom12", "hi52": "w_hi52", "vol_inv": "w_lowvol", "rev1": "w_mom"}
+AXES_BUDGET = 0.35   # kr_policy 기본 가격축 합(hi52 .15 + lowvol .10 + mom12 .05 + mom .05) — 권고 총량 상한
+
+
+def mappable_configs(configs: dict | None = None) -> dict:
+    """kr_policy 가중으로 옮길 수 있는 config 만 (전 축 매핑 가능 + 양의 가중 — 음수는 bounds 밖)."""
+    out = {}
+    for name, cfg in (configs or CONFIGS).items():
+        if cfg and all(a in AXIS_TO_POLICY and w > 0 for a, w in cfg.items()):
+            out[name] = cfg
+    return out
+
+
+def current_recommendation(config_daily, bench, *, train_years: int = TRAIN_YEARS,
+                           configs: dict | None = None) -> dict | None:
+    """트레일링 train_years 창 ★목적함수 최적의 **매핑 가능** config → kr_policy 가격축 가중 권고.
+
+    워크포워드 폴드 선택과 동일 로직을 '지금' 시점에 적용한 것 — 라이브 반영은
+    ADAPTIVE_KR_AXES_ENABLED 게이트 + 모의(paper) 한정. 데이터 부족 시 None.
+    """
+    cand = mappable_configs(configs)
+    if not cand or config_daily is None or len(config_daily) == 0:
+        return None
+    end = config_daily.index.max()
+    start = end - pd.DateOffset(years=train_years)
+    best = None
+    for name in cand:
+        if name not in config_daily.columns:
+            continue
+        r = config_daily[name].loc[start:end].dropna()
+        if len(r) < 252 * 3:                              # 워크포워드와 동일 최소 3년
+            continue
+        obj = _objective(r, bench)
+        if obj is not None and (best is None or obj > best[1]):
+            best = (name, obj)
+    if best is None:
+        return None
+    name, obj = best
+    w = cand[name]
+    tot = sum(w.values())
+    pw = {AXIS_TO_POLICY[a]: round(AXES_BUDGET * v / tot, 4) for a, v in w.items()}
+    for k in AXIS_TO_POLICY.values():                     # 미포함 축은 0 명시(교체 의미 명확)
+        pw.setdefault(k, 0.0)
+    tr = config_daily[name].loc[start:end].dropna()
+    return {"chosen": name, "train_obj": round(float(obj), 4),
+            "policy_weights": pw,
+            "train_perf": perf(tr),
+            "bench_perf": perf(bench.reindex(tr.index).fillna(0.0)),
+            "window": [str(start.date()), str(end.date())]}
+
+
+# ══════════════════════════════════════════════════════════════════════
 #  진입점
 # ══════════════════════════════════════════════════════════════════════
 
@@ -412,6 +468,7 @@ def run(start_year: int = 2001, end_year: int | None = None) -> dict:
         "period": f"{start_year}~{end_year}", "universe": f"KOSPI 시총 top{UNIVERSE_N}",
         "top_k": TOP_K, "costs_bps": {"buy": BUY_BPS, "sell": SELL_BPS},
         "verdict": verdict,
+        "recommendation": current_recommendation(wf["config_daily"], wf["bench_returns"]),
         "folds": wf["folds"],
         "chosen_history": chosen_history(wf["folds"]),
         "full_period_by_config": wf["full_period"],

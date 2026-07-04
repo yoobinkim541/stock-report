@@ -141,3 +141,38 @@ def test_verdict_nogo_when_underperform():
     wf = {"oos_returns": oos, "bench_returns": bench, "config_daily": cfg_daily}
     v = bt.build_verdict(wf, n_trials=2)
     assert v["code"] == "NO-GO" and v["net_excess_total"] < 0
+
+
+# ── 현재 권고 (crons/kr_axes_eval — 매핑·게이트) ──────────────────────────────
+
+def test_mappable_configs_excludes_unmappable_and_negative():
+    cfgs = {"ok": {"mom12": 0.6, "hi52": 0.4},
+            "has_liq": {"liq": 1.0},                      # 정책 축 없음
+            "has_neg": {"mom12": 0.7, "rev1": -0.3}}      # 음수 — bounds 밖
+    m = bt.mappable_configs(cfgs)
+    assert set(m) == {"ok"}
+
+
+def test_current_recommendation_picks_best_and_maps_budget():
+    dates = pd.bdate_range("2018-01-02", periods=252 * 6)
+    rng = np.random.default_rng(5)
+    bench = pd.Series(rng.normal(0.0003, 0.01, len(dates)), index=dates)
+    good = bench + 0.001                                   # 지수 지속 아웃퍼폼
+    bad = bench - 0.001
+    cfg_daily = pd.DataFrame({"winner": good, "loser": bad})
+    cfgs = {"winner": {"hi52": 0.6, "vol_inv": 0.4}, "loser": {"rev1": 1.0}}
+    rec = bt.current_recommendation(cfg_daily, bench, train_years=5, configs=cfgs)
+    assert rec and rec["chosen"] == "winner"
+    pw = rec["policy_weights"]
+    assert pw["w_hi52"] == pytest.approx(bt.AXES_BUDGET * 0.6)
+    assert pw["w_lowvol"] == pytest.approx(bt.AXES_BUDGET * 0.4)
+    assert pw["w_mom12"] == 0.0 and pw["w_mom"] == 0.0     # 미포함 축 0 명시
+    assert sum(pw.values()) == pytest.approx(bt.AXES_BUDGET, abs=1e-6)
+
+
+def test_current_recommendation_none_when_short():
+    dates = pd.bdate_range("2024-01-02", periods=100)      # 3년 미만
+    s = pd.Series(0.001, index=dates)
+    rec = bt.current_recommendation(pd.DataFrame({"winner": s}), s,
+                                    configs={"winner": {"hi52": 1.0}})
+    assert rec is None

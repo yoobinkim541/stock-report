@@ -126,6 +126,7 @@ crons/news_spike_detector.py (크론 매 1분)
 | `crons/income_compounding_eval.py` | Tier5 인컴 복리 재투자 ★게이트 재검증 (`backtest/income_compounding_backtest` 커버드콜 QYLD vs 총수익 QQQ 세전/세후·재투자vs비축) — GO 시 shadow. **현재 NO-GO**(인컴 엔진 세후 CAGR −12.9%p 열위·방어기능). 재투자>현금비축(+33%)은 항상참 규율 | 토 05:00 UTC |
 | `crons/concentration_validated_eval.py` | Tier6 검증된 집중 ★게이트 재검증 (`backtest/concentration_validated_backtest` 무스킬 랜덤집중 vs 분산 MC·DSR 다중검정·무생존편향 섹터ETF) — GO 시 shadow. **현재 NO-GO**(무스킬 집중은 보상없는 위험·분산 이길확률 26%; 검증된 집중=구조레버리지뿐) | 토 05:15 UTC |
 | `crons/advice_adaptive_eval.py` | 포트폴리오 advice 적응 평가 (paper_track A/B meta vs rule ★목적함수 → blend 신뢰도 shadow 권고) | 토 04:30 UTC |
+| `crons/kr_axes_eval.py` | KR 선택정책 가격축 ★게이트 주간 재검증 (`backtest/kr_policy_backtest` 25년 marcap 무생존편향·순비용 워크포워드 → DSR/PBO verdict + 트레일링 5년 권고 축 `current_recommendation`) — `ADAPTIVE_KR_AXES_ENABLED` 시 shadow→`kr_policy.load_params` 가 **모의 선택에만** 반영(클램프·가격축 합 ≤50% 상한·21일 stale 무시). **현재 OBSERVE**(OOS +5.5%p/년·MDD≤지수·DSR 미달 — 엣지 단정 불가) | 토 05:30 UTC |
 | `reports/source_collector.py` | 전체 소스 수집 (텔레그램 채널·FRED·국채·시장 스냅샷) → JSONL 캐시 | 매 30분 (:05/:35) |
 | `crons/paper_track.py` | MetaAllocator vs Phase 규칙 A/B 페이퍼 트레이딩 (월요일 Sharpe 비교 발송) | 평일 22:50 UTC |
 | `crons/fundamental_snapshot.py` | 펀더멘털 point-in-time 스냅샷 적재 (look-ahead 없는 학습 피처용) | 토 01:00 UTC |
@@ -282,6 +283,7 @@ crons/news_spike_detector.py (크론 매 1분)
 | `TIER6_SEED` / `TIER6_MC_SAMPLES` | — | `6` / `500` (집중 게이트 몬테카를로 재현 seed·표본수) |
 | `TIER3_RF_FALLBACK` / `TIER3_LETF_SPREAD` / `TIER3_LETF_EXPENSE` / `TIER3_BUDGET` | — | `0.03` / `0.005` / `0.009` / `0.50` (레버리지 게이트 비용·낙폭예산 가정) |
 | `ADAPTIVE_ADVICE_ENABLED` | — | `false` (MetaAllocator A/B 우위 시 blend 신뢰도 shadow 기록. off면 평가·권고만) |
+| `ADAPTIVE_KR_AXES_ENABLED` | — | `false` (KR 가격축 주간 재검증 권고를 shadow 기록 → 모의 선택 정책에 반영. off면 평가·텔레그램만. **모의 한정 — 실계좌 집행 0**) |
 | `SYNC_TOKEN` | — | — (portfolio_sync_server 인증) |
 | `SYNC_PORT` | — | `8765` |
 | `NOTION_TOKEN` | — | — (Notion 대시보드 동기화·아카이빙. 없으면 notion_sync 스킵) |
@@ -395,6 +397,8 @@ crons/news_spike_detector.py (크론 매 1분)
 ~/reports/ml-cache/edgar/                         — SEC EDGAR companyfacts·CIK맵 캐시 (edgar)
 ~/reports/ml-cache/kr_ranker_model.pkl           — KR 전용 랭커 모델 (KOSPI 대비 초과수익, safe_unpickle)
 ~/reports/ml-cache/policy_kr_mock.json           — KR 모의 선택 정책 가중치 (learner 채택 시 갱신, 클램프)
+~/reports/ml-cache/kr_policy_backtest.json       — KR 선택정책 25년 워크포워드 검증 결과 (verdict·권고·폴드 — kr_axes_eval 주간 갱신)
+~/reports/ml-cache/kr_policy_axes_shadow.json    — KR 가격축 권고 shadow (ADAPTIVE_KR_AXES_ENABLED 시 기록 → kr_policy.load_params 모의 반영)
 ~/reports/ml-data/kr_mock_decisions.jsonl        — KR 모의 편입/퇴출 결정+근거 (불변 append-only, 학습/감사 — 절대 삭제 금지)
 ~/reports/ml-data/us_mock_decisions.jsonl        — US 모의 편입/퇴출 결정+근거 (불변 append-only, point-in-time features — 절대 삭제 금지)
 ~/reports/ml-data/us_mock_outcomes.jsonl         — US 모의 결정 실현 보상(초과수익 vs QQQ·side-aware 정답) (불변 append-only)
