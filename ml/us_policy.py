@@ -13,16 +13,23 @@ from __future__ import annotations
 from ml.adaptive import Policy
 
 # 정책 가중치(합 자유 — score 가 사용분 정규화). learner 가 이 안에서 튜닝·클램프.
+# ★가격 축 3종(mom12·hi52·lowvol)은 KR 25년 백테스트(kr_policy_backtest) 근거로 **수집만**
+# 시작 — US 는 이 환경서 백테스트 불가라 기본 가중 0(라이브 무영향), 원장 축적 후 주간
+# 학습 OOS 게이트(us_mock_learn)가 유효하면 가중을 올린다 (정직: 무검증 축은 0).
 DEFAULT_POLICY = {
     "w_ranker":  0.40,   # US LightGBM ranker (기대 초과수익) — 가치모델
     "w_value":   0.20,   # 밸류 (저PER/저PBR)
     "w_quality": 0.20,   # 퀄리티 (ROE)
     "w_mom":     0.10,   # 1개월 모멘텀
     "w_conf":    0.10,   # 의사결정 확신도
+    "w_mom12":   0.0,    # 12-1M 모멘텀 (수집·게이트 채택 대기)
+    "w_hi52":    0.0,    # 52주 고가 근접 (수집·게이트 채택 대기)
+    "w_lowvol":  0.0,    # 저변동성 (수집·게이트 채택 대기)
 }
 BOUNDS = {
     "w_ranker": (0.0, 1.0), "w_value": (0.0, 1.0), "w_quality": (0.0, 1.0),
     "w_mom": (0.0, 1.0), "w_conf": (0.0, 1.0),
+    "w_mom12": (0.0, 1.0), "w_hi52": (0.0, 1.0), "w_lowvol": (0.0, 1.0),
 }
 
 _SIGNAL_MAP = {"Positive": 1.0, "Neutral": 0.5, "Warning": 0.2, "Critical": 0.0}
@@ -65,6 +72,12 @@ def extract_features(fund: dict | None, earnings: dict | None, sig: dict | None)
 
     return {"value": round(value, 4), "quality": round(quality, 4),
             "mom": round(mom, 4), "conf": round(conf, 4)}
+
+
+def price_axes(close) -> dict:
+    """12M 종가 → {mom12, hi52, lowvol} [0,1] — kr_policy.price_axes 재사용 (단일 구현)."""
+    from ml.kr_policy import price_axes as _pa
+    return _pa(close)
 
 
 def score(features: dict, params: dict | None = None) -> float:

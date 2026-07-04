@@ -100,6 +100,14 @@ def compute_us_signals(universe: list[str] | None = None) -> list[dict]:
             sig = _safe_signals(tk)
             fund = _safe_fund(tk)
             feats = us_policy.extract_features(fund, earnings, sig)
+            # ★가격 축(mom12·hi52·lowvol) — 기본 가중 0(수집 전용) → 원장 축적 후 학습 게이트 채택
+            try:
+                from providers.market_data import _history_cached
+                h = _history_cached(tk, period="1y")
+                if h is not None and "Close" in getattr(h, "columns", []):
+                    feats.update(us_policy.price_axes(h["Close"]))
+            except Exception:
+                pass
             price = float((sig.get("price_info") or {}).get("current_price") or 0) or (kis_mock.get_price(tk) or 0)
             out.append({
                 "ticker": tk, "price": price, "features": feats,

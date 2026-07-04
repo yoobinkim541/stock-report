@@ -83,8 +83,18 @@ def test_fit_policy_positive_correlation_dominates():
 
 def test_fit_policy_empty_fallback_normalized():
     w = L.fit_policy([])
-    assert set(w) == {"w_ranker", "w_value", "w_quality", "w_mom", "w_conf"}
-    assert sum(w.values()) == pytest.approx(1.0, abs=1e-3)   # DEFAULT 정규화 폴백
+    assert set(w) == {"w_ranker", "w_value", "w_quality", "w_mom", "w_conf",
+                      "w_mom12", "w_hi52", "w_lowvol"}     # ★가격 축 3종 포함
+    assert sum(w.values()) == pytest.approx(1.0, abs=1e-3)   # DEFAULT 정규화 폴백(신규 축 0)
+
+
+def test_fit_policy_unmeasured_axis_gets_zero_not_default():
+    """측정 축에 신호가 있으면 미측정 축(원장에 없는 신규 축)은 0 — DEFAULT 쏠림 함정 방지."""
+    rows = [{"side": "편입", "features": {"value": v}, "fwd_excess": v * 0.1}
+            for v in (0.1, 0.3, 0.5, 0.7, 0.9)]
+    w = L.fit_policy(rows)
+    assert w["w_value"] == pytest.approx(1.0)              # 유일한 측정·유신호 축
+    assert w["w_mom12"] == 0.0 and w["w_hi52"] == 0.0 and w["w_lowvol"] == 0.0
 
 
 def test_eval_policy_basket_excess():

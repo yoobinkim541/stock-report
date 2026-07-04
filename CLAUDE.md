@@ -113,7 +113,7 @@ crons/news_spike_detector.py (크론 매 1분)
 | `scripts/kis_stream_watchdog.sh` | 실시간 시세 WS 상시 프로세스(kis_stream) 재기동 — `REALTIME_ENABLED=true` 시만 기동(opt-in·꺼지면 no-op) | 매 1분 |
 | `crons/kiwoom_sync_rest.py` | 키움 REST API 국내주식 잔고 동기화 | 평일 23:35 UTC |
 | `crons/sp500_heatmap_snapshot.py` | 대시보드 홈 S&P500 시장맵 스냅샷 적재(`_sp500_heatmap_live`→JSON) — 콜드로드 즉시화. 표시데이터 | 매 20분 |
-| `crons/kiwoom_mock_track.py` | 국내주식 자동 페이퍼트레이딩 (키움 **모의투자** — 신호 기반 리밸런스·모의 도메인 하드락·편입/퇴출 근거 원장 적재). **회전율 억제**(무거래밴드+랭크 히스테리시스)·**거래비용 적립**(수수료+증권거래세→리포트 계기) | 평일 00:30 UTC |
+| `crons/kiwoom_mock_track.py` | 국내주식 자동 페이퍼트레이딩 (키움 **모의투자** — 신호 기반 리밸런스·모의 도메인 하드락·편입/퇴출 근거 원장 적재). **회전율 억제**(무거래밴드+랭크 히스테리시스)·**거래비용 적립**(수수료+증권거래세→리포트 계기)·★가격 축 3종(mom12·hi52·lowvol) point-in-time 원장 수집 | 평일 00:30 UTC |
 | `crons/kiwoom_mock_report.py` | 국내 모의 일일 현황 보고 (NAV·손익·편입/퇴출 사유·누적 vs KOSPI·MDD vs 지수) + `/paper kr` 공용 | 평일 06:40 UTC |
 | `crons/kr_mock_learn.py` | KR 모의 정책 강화 — 보상 백필 + ★목적함수(아웃퍼폼·MDD≤지수) OOS 게이트 재학습 | 토 02:00 UTC |
 | `crons/us_mock_track.py` | 미국주식 자동 페이퍼트레이딩 (KIS 해외 모의 — us_policy 선택 + 바벨 배분·정수주 리밸런스·`Ledger("us_mock")` 결정+근거 적재) | 평일 15:00 UTC (미 개장 후) |
@@ -152,7 +152,7 @@ crons/news_spike_detector.py (크론 매 1분)
 | `ml/leverage_optimizer.py` | Optuna TPE 레버리지 파라미터 탐색 + Walk-Forward OOS | `~/reports/ml-cache/leverage_best_params.json` |
 | `ml/adaptive/` | 적응형 학습 공유 프레임워크 — policy(클램프)·ledger(불변 원장)·reward(★목적함수)·learner(OOS게이트)·regime(최근성)·champion_challenger·**evolution(진화 텔레메트리 — 주간 학습 append-only 이력 + 라이브 스냅샷 IC·적중·누적엣지 → 정직 verdict; `/evolve`·대시보드 공용·순수)** | `~/reports/ml-cache/policy_*.json`·`~/reports/ml-data/{kr,us}_mock_learning.jsonl` |
 | `ml/kr_ranker.py` | 한국주식 전용 ranker (KOSPI 대비 초과수익 예측, US ranker 재사용·KR캐시) | `~/reports/ml-cache/kr_ranker_model.pkl` |
-| `ml/kr_policy.py` | KR 모의 선택 정책 점수 (KR ranker + 규칙 가중, Policy 클램프) | `~/reports/ml-cache/policy_kr_mock.json` |
+| `ml/kr_policy.py` | KR 모의 선택 정책 점수 (KR ranker + 규칙 가중 + ★가격 축 3종 `price_axes`[mom12·hi52·lowvol — US 정책과 공유], Policy 클램프). **기본 가중 = `backtest/kr_policy_backtest` 25년 실증 반영**(2001~2026 marcap 무생존편향·순비용·워크포워드: OOS 연결 +5.5%p/년·MDD≤지수 — DSR 미달 OBSERVE 라 보수 배분·rev1(+1M) 축 열위 실증→축소. US 는 신규 축 가중 0=수집만·주간 학습 OOS 게이트 채택 대기) | `~/reports/ml-cache/policy_kr_mock.json`·`kr_policy_backtest.json` |
 | `ml/regime_classifier.py` | 추세 vs 횡보 레짐 감지 (Kaufman ER·무룩어헤드·비대칭 전이, US=QQQ·KR=^KS11) — 리포트/`/status` **표시 전용, 배분 불변**. 백테스트 게이트가 US 횡보 틸트 NO-GO·KR 현금디리스크 조건부(비용반영 시 Sharpe중립) 판정 (`backtest/sideways_backtest.py`·`backtest/kr_sideways_backtest.py`) | — |
 | `ml/risk_model.py` | 포트폴리오 리스크 계측 (Aladdin식, Tier1) — Ledoit-Wolf 공분산·위험기여(Euler)·유효분산(참여비)·QQQ/TLT 팩터베타 + **성장최적 레버리지 계기판**(Kelly밴드·낙폭예산 상한·파산확률). `/risk`·`/portfolio`·`/rebalance` 노출 — **표시 전용, 배분 불변**(실제 레버리지는 Tier3 게이트 후). USD북 한정 | — |
 | `ml/validation.py` | 백테스트 검증 formalism (Tier2, López de Prado) — PSR·**Deflated Sharpe**(다중검정)·**PBO**(CSCV 과적합확률)·Purged/Embargoed CV + `validate_strategy`(벤치마크 초과PSR). `backtest/sideways_backtest`·`kr_sideways_backtest` verdict 에 배선 — **판정·표시 전용**. 공격 엔진(Tier3~6) 라이브 게이트의 통계 관문 | — |

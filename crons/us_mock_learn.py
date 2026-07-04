@@ -33,7 +33,7 @@ HORIZON = 20
 MIN_SAMPLES = 40
 MAX_POS = int(os.getenv("US_MOCK_MAX_POS", "5"))
 BENCHMARK = "QQQ"
-_FEATS = ["ranker", "value", "quality", "mom", "conf"]
+_FEATS = ["ranker", "value", "quality", "mom", "conf", "mom12", "hi52", "lowvol"]
 _BUY = ("편입", "증액")
 
 
@@ -53,21 +53,23 @@ def _buy_rows(rows):
 
 
 def fit_policy(train_rows: list[dict]) -> dict:
-    """편입측 (피처값 ↔ 실현 초과수익) 양의 상관 비례 가중치. 무신호면 DEFAULT 폴백(붕괴 방지)."""
+    """편입측 (피처값 ↔ 실현 초과수익) 양의 상관 비례 가중치. 무신호면 DEFAULT 폴백(붕괴 방지).
+
+    미측정 축(원장 표본 <5 — 예: 신규 가격 축)은 0 — DEFAULT 프라이어를 주면 측정 축이
+    전부 무신호일 때 미측정 축으로 가중이 전량 쏠리는 함정(kr_mock_learn 과 동일 수정).
+    """
     from ml import us_policy
     rows = _buy_rows(train_rows)
-    weights = {}
+    measured = {}
     for f in _FEATS:
         pairs = [(r["features"].get(f), r.get("fwd_excess")) for r in rows
                  if r.get("features") and r["features"].get(f) is not None and r.get("fwd_excess") is not None]
-        if len(pairs) < 5:
-            weights[f] = us_policy.DEFAULT_POLICY.get(f"w_{f}", 0.1)
-        else:
-            weights[f] = max(0.0, _pearson([a for a, _ in pairs], [b for _, b in pairs]))
-    total = sum(weights.values())
+        if len(pairs) >= 5:
+            measured[f] = max(0.0, _pearson([a for a, _ in pairs], [b for _, b in pairs]))
+    total = sum(measured.values())
     if total <= 1e-9:
         return {f"w_{f}": us_policy.DEFAULT_POLICY[f"w_{f}"] for f in _FEATS}
-    return {f"w_{f}": round(weights[f] / total, 4) for f in _FEATS}
+    return {f"w_{f}": round(measured.get(f, 0.0) / total, 4) for f in _FEATS}
 
 
 def eval_policy(oos_rows: list[dict], params: dict, max_positions: int = 5) -> dict:
