@@ -444,3 +444,34 @@ def test_views_join_decisions_carries_features():
              "features": {"mom12": 0.7, "pead": 0.6}}]
     rows = views.join_decisions(decs, [])
     assert rows[0]["features"] == {"mom12": 0.7, "pead": 0.6}
+
+
+# ── P3 사이드바 모의 레일 (초경량 글랜스 — store 스냅샷만) ────────────────────
+def test_views_paper_glance_from_snapshots(monkeypatch):
+    import store
+    from dashboard import views
+    hists = {"kr_mock_history": [
+                 {"kind": "snapshot", "nav": 10_000_000.0},
+                 {"kind": "cost", "cost": 1.0},                    # 스냅샷 아님 — 무시
+                 {"kind": "snapshot", "nav": 10_500_000.0}],
+             "us_mock_history": [{"kind": "snapshot", "nav": 100_000.0}]}
+    monkeypatch.setattr(store, "all", lambda name, **k: list(hists.get(name, [])))
+    g = views.paper_glance()
+    assert [r["surface"] for r in g] == ["kr_mock", "us_mock"]
+    kr = g[0]
+    assert kr["nav"] == 10_500_000.0 and abs(kr["cum_ret"] - 5.0) < 1e-9
+    assert abs(kr["day_ret"] - 5.0) < 1e-9 and kr["n_days"] == 2
+    us = g[1]
+    assert us["cum_ret"] == 0.0 and us["day_ret"] == 0.0           # 단일 스냅샷
+
+
+def test_views_paper_glance_empty_and_error(monkeypatch):
+    import store
+    from dashboard import views
+    monkeypatch.setattr(store, "all", lambda name, **k: [])
+    assert views.paper_glance() == []                              # 크론 미실행 → 레일 숨김
+
+    def boom(*a, **k):
+        raise RuntimeError("db")
+    monkeypatch.setattr(store, "all", boom)
+    assert views.paper_glance() == []

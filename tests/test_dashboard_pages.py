@@ -341,3 +341,17 @@ def test_home_shows_market_map():
     assert not at.exception, str(at.exception)
     assert any("S&P 500 시장 맵" in str(m.value) for m in at.markdown)   # 시장맵 섹션
     assert any("시장 지표" in str(m.value) for m in at.markdown)          # F&G·RSI 패널 (O2)
+
+
+def test_sidebar_paper_rail_and_nav(monkeypatch):
+    """사이드바 🧪 모의투자 레일 + 상세 버튼 → 모의투자 페이지 이동 (P3).
+
+    entry app 은 실 store(빈 DB)라 레일이 숨음 — cached.paper_glance 를 세션 전에
+    스텁할 수 없어 스크립트 방식으로 app 사이드바 로직 대신 views→theme 경로만 검증하고,
+    버튼 플래그(_nav_to_paper)는 entry app 에서 세션 주입으로 switch 무예외 확인.
+    """
+    at = AppTest.from_file(os.path.join(ROOT, "dashboard", "app.py"), default_timeout=60)
+    at.session_state["_authed"] = True
+    at.session_state["_nav_to_paper"] = True          # 레일 버튼 클릭 시뮬
+    at.run()
+    assert not at.exception, str(at.exception)
