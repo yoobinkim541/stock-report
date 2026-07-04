@@ -58,37 +58,14 @@ def _apply_axes_shadow(params: dict, *, path: str | None = None) -> dict:
     """ADAPTIVE_KR_AXES_ENABLED=true + shadow 신선 시 가격축 가중을 권고로 교체. 실패 시 원본.
 
     shadow = kr_axes_eval 이 트레일링 5년 ★목적함수 최적 축을 kr_policy 가중으로 매핑한 것.
-    안전: env 게이트(기본 off)·클램프·AXES_MAX_SHARE 상한·stale 무시 — **모의 선택에만** 영향
-    (kiwoom_mock_track 소비, 실계좌 주문 경로 0).
+    안전장치(env 게이트·클램프·상한·stale)는 ml.adaptive.axes_shadow 단일 구현 — US 와 공용.
+    **모의 선택에만** 영향(kiwoom_mock_track 소비, 실계좌 주문 경로 0).
     """
-    if os.getenv("ADAPTIVE_KR_AXES_ENABLED", "false").lower() != "true":
-        return params
-    try:
-        import json
-        from datetime import datetime
-        with open(path or AXES_SHADOW_PATH, encoding="utf-8") as f:
-            shadow = json.load(f)
-        asof = str(shadow.get("asof", ""))[:10]
-        if (datetime.now() - datetime.strptime(asof, "%Y-%m-%d")).days > AXES_SHADOW_MAX_AGE_D:
-            return params
-        pw = shadow.get("policy_weights") or {}
-        if not any(k in pw for k in _AXES_KEYS):
-            return params
-        out = dict(params)
-        for k in _AXES_KEYS:
-            out[k] = float(pw.get(k, 0.0))
-        # 가격축 독식 방지: 축소 후 비중이 상한이 되도록 cap = rest·S/(1−S)
-        # (전체합 기준으로 cap 을 계산하면 축소 후에도 비율이 상한을 초과 — 폐구간 해)
-        axes_sum = sum(out.get(k, 0.0) for k in _AXES_KEYS)
-        rest_sum = sum(v for k, v in out.items() if k.startswith("w_") and k not in _AXES_KEYS)
-        cap = rest_sum * AXES_MAX_SHARE / max(1e-9, 1.0 - AXES_MAX_SHARE)
-        if rest_sum > 0 and axes_sum > cap:
-            scale = cap / axes_sum
-            for k in _AXES_KEYS:
-                out[k] = round(out[k] * scale, 4)
-        return get_policy().clamp(out)
-    except Exception:
-        return params
+    from ml.adaptive.axes_shadow import apply_axes_shadow
+    return apply_axes_shadow(params, env_key="ADAPTIVE_KR_AXES_ENABLED",
+                             path=path or AXES_SHADOW_PATH, axes_keys=_AXES_KEYS,
+                             clamp=get_policy().clamp, max_share=AXES_MAX_SHARE,
+                             max_age_d=AXES_SHADOW_MAX_AGE_D)
 
 
 def load_params() -> dict:

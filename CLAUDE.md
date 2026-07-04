@@ -116,7 +116,7 @@ crons/news_spike_detector.py (크론 매 1분)
 | `crons/kiwoom_mock_track.py` | 국내주식 자동 페이퍼트레이딩 (키움 **모의투자** — 신호 기반 리밸런스·모의 도메인 하드락·편입/퇴출 근거 원장 적재). **회전율 억제**(무거래밴드+랭크 히스테리시스)·**거래비용 적립**(수수료+증권거래세→리포트 계기)·★가격 축 3종(mom12·hi52·lowvol) point-in-time 원장 수집 | 평일 00:30 UTC |
 | `crons/kiwoom_mock_report.py` | 국내 모의 일일 현황 보고 (NAV·손익·편입/퇴출 사유·누적 vs KOSPI·MDD vs 지수) + `/paper kr` 공용 | 평일 06:40 UTC |
 | `crons/kr_mock_learn.py` | KR 모의 정책 강화 — 보상 백필 + ★목적함수(아웃퍼폼·MDD≤지수) OOS 게이트 재학습 | 토 02:00 UTC |
-| `crons/us_mock_track.py` | 미국주식 자동 페이퍼트레이딩 (KIS 해외 모의 — us_policy 선택 + 바벨 배분·정수주 리밸런스·`Ledger("us_mock")` 결정+근거 적재) | 평일 15:00 UTC (미 개장 후) |
+| `crons/us_mock_track.py` | 미국주식 자동 페이퍼트레이딩 (KIS 해외 모의 — us_policy 선택 + 바벨 배분·정수주 리밸런스·`Ledger("us_mock")` 결정+근거 적재). ★가격 축 3종+PEAD 축 point-in-time 수집 + **Tier3 구조레버 QLD 슬리브**(`US_MOCK_LEV_SLEEVE` 시 게이트 GO shadow 신선하면 NAV×(reco−1) 2x ETF — 모의 한정 라이브 검증·원장 side '레버슬리브'·게이트 소멸 시 청산 방향) | 평일 15:00 UTC (미 개장 후) |
 | `crons/us_mock_report.py` | 미국 모의 일일 현황 + **로직 평가 스코어카드**(NAV·vs QQQ·MDD·편입/퇴출 적중률·실현 IC) + `/paper us` 공용 | 평일 21:30 UTC |
 | `crons/us_mock_learn.py` | US 모의 정책 강화 — 보상 백필(편입 초과·퇴출 회피) + ★목적함수 OOS 게이트·챔피언-챌린저 재학습 | 토 03:00 UTC |
 | `crons/weekly_kr_ranker_retrain.py` | KR 전용 랭커(KOSPI 대비 초과수익) 주간 재학습 (Purged WF·OOS IC) | 토 03:30 UTC |
@@ -126,6 +126,7 @@ crons/news_spike_detector.py (크론 매 1분)
 | `crons/income_compounding_eval.py` | Tier5 인컴 복리 재투자 ★게이트 재검증 (`backtest/income_compounding_backtest` 커버드콜 QYLD vs 총수익 QQQ 세전/세후·재투자vs비축) — GO 시 shadow. **현재 NO-GO**(인컴 엔진 세후 CAGR −12.9%p 열위·방어기능). 재투자>현금비축(+33%)은 항상참 규율 | 토 05:00 UTC |
 | `crons/concentration_validated_eval.py` | Tier6 검증된 집중 ★게이트 재검증 (`backtest/concentration_validated_backtest` 무스킬 랜덤집중 vs 분산 MC·DSR 다중검정·무생존편향 섹터ETF) — GO 시 shadow. **현재 NO-GO**(무스킬 집중은 보상없는 위험·분산 이길확률 26%; 검증된 집중=구조레버리지뿐) | 토 05:15 UTC |
 | `crons/advice_adaptive_eval.py` | 포트폴리오 advice 적응 평가 (paper_track A/B meta vs rule ★목적함수 → blend 신뢰도 shadow 권고) | 토 04:30 UTC |
+| `crons/us_axes_eval.py` | US 선택정책 가격축 ★게이트 주간 재검증 (`backtest/us_policy_backtest` — S&P500 **시점 멤버십 마스킹**(fja05680) + yfinance 순비용 워크포워드 vs QQQ·**커버리지 강등**[상폐 가격 부재 시 GO→OBSERVE]) — `ADAPTIVE_US_AXES_ENABLED` 시 shadow→`us_policy.load_params` 모의 반영(공용 `ml/adaptive/axes_shadow`) | 토 05:45 UTC |
 | `crons/kr_axes_eval.py` | KR 선택정책 가격축 ★게이트 주간 재검증 (`backtest/kr_policy_backtest` 25년 marcap 무생존편향·순비용 워크포워드 → DSR/PBO verdict + 트레일링 5년 권고 축 `current_recommendation`) — `ADAPTIVE_KR_AXES_ENABLED` 시 shadow→`kr_policy.load_params` 가 **모의 선택에만** 반영(클램프·가격축 합 ≤50% 상한·21일 stale 무시). **현재 OBSERVE**(OOS +5.5%p/년·MDD≤지수·DSR 미달 — 엣지 단정 불가) | 토 05:30 UTC |
 | `reports/source_collector.py` | 전체 소스 수집 (텔레그램 채널·FRED·국채·시장 스냅샷) → JSONL 캐시 | 매 30분 (:05/:35) |
 | `crons/paper_track.py` | MetaAllocator vs Phase 규칙 A/B 페이퍼 트레이딩 (월요일 Sharpe 비교 발송) | 평일 22:50 UTC |
@@ -284,6 +285,8 @@ crons/news_spike_detector.py (크론 매 1분)
 | `TIER3_RF_FALLBACK` / `TIER3_LETF_SPREAD` / `TIER3_LETF_EXPENSE` / `TIER3_BUDGET` | — | `0.03` / `0.005` / `0.009` / `0.50` (레버리지 게이트 비용·낙폭예산 가정) |
 | `ADAPTIVE_ADVICE_ENABLED` | — | `false` (MetaAllocator A/B 우위 시 blend 신뢰도 shadow 기록. off면 평가·권고만) |
 | `ADAPTIVE_KR_AXES_ENABLED` | — | `false` (KR 가격축 주간 재검증 권고를 shadow 기록 → 모의 선택 정책에 반영. off면 평가·텔레그램만. **모의 한정 — 실계좌 집행 0**) |
+| `ADAPTIVE_US_AXES_ENABLED` | — | `false` (US 가격축 주간 재검증 권고 shadow → 모의 선택 반영. KR 보다 약한 검증[상폐 가격 부재·커버리지 강등] — 동일 안전장치) |
+| `US_MOCK_LEV_SLEEVE` / `US_MOCK_LEV_SYMBOL` | — | `false` / `QLD` (Tier3 게이트 GO shadow 신선 시 US 모의 NAV×(reco−1) 을 2x ETF 슬리브로 — **모의 한정 라이브 검증**. 게이트 NO-GO/stale 시 청산 방향) |
 | `SYNC_TOKEN` | — | — (portfolio_sync_server 인증) |
 | `SYNC_PORT` | — | `8765` |
 | `NOTION_TOKEN` | — | — (Notion 대시보드 동기화·아카이빙. 없으면 notion_sync 스킵) |
@@ -399,6 +402,8 @@ crons/news_spike_detector.py (크론 매 1분)
 ~/reports/ml-cache/policy_kr_mock.json           — KR 모의 선택 정책 가중치 (learner 채택 시 갱신, 클램프)
 ~/reports/ml-cache/kr_policy_backtest.json       — KR 선택정책 25년 워크포워드 검증 결과 (verdict·권고·폴드 — kr_axes_eval 주간 갱신)
 ~/reports/ml-cache/kr_policy_axes_shadow.json    — KR 가격축 권고 shadow (ADAPTIVE_KR_AXES_ENABLED 시 기록 → kr_policy.load_params 모의 반영)
+~/reports/ml-cache/us_policy_backtest.json       — US 선택정책 멤버십 마스킹 워크포워드 검증 (커버리지 포함 — us_axes_eval 주간 갱신·서버 전용)
+~/reports/ml-cache/us_policy_axes_shadow.json    — US 가격축 권고 shadow (ADAPTIVE_US_AXES_ENABLED 시 기록 → us_policy.load_params 모의 반영)
 ~/reports/ml-data/kr_mock_decisions.jsonl        — KR 모의 편입/퇴출 결정+근거 (불변 append-only, 학습/감사 — 절대 삭제 금지)
 ~/reports/ml-data/us_mock_decisions.jsonl        — US 모의 편입/퇴출 결정+근거 (불변 append-only, point-in-time features — 절대 삭제 금지)
 ~/reports/ml-data/us_mock_outcomes.jsonl         — US 모의 결정 실현 보상(초과수익 vs QQQ·side-aware 정답) (불변 append-only)

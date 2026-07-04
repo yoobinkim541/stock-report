@@ -33,7 +33,7 @@ HORIZON = 20
 MIN_SAMPLES = 40
 MAX_POS = int(os.getenv("US_MOCK_MAX_POS", "5"))
 BENCHMARK = "QQQ"
-_FEATS = ["ranker", "value", "quality", "mom", "conf", "mom12", "hi52", "lowvol"]
+_FEATS = ["ranker", "value", "quality", "mom", "conf", "mom12", "hi52", "lowvol", "pead"]
 _BUY = ("편입", "증액")
 
 

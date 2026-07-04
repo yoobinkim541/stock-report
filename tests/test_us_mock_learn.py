@@ -84,7 +84,7 @@ def test_fit_policy_positive_correlation_dominates():
 def test_fit_policy_empty_fallback_normalized():
     w = L.fit_policy([])
     assert set(w) == {"w_ranker", "w_value", "w_quality", "w_mom", "w_conf",
-                      "w_mom12", "w_hi52", "w_lowvol"}     # ★가격 축 3종 포함
+                      "w_mom12", "w_hi52", "w_lowvol", "w_pead"}   # ★가격 축 3종 + PEAD
     assert sum(w.values()) == pytest.approx(1.0, abs=1e-3)   # DEFAULT 정규화 폴백(신규 축 0)
 
 

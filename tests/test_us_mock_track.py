@@ -98,3 +98,54 @@ def test_quote_fn_none_is_baseline():
 if __name__ == "__main__":
     import pytest
     sys.exit(pytest.main([__file__, "-v"]))
+
+
+# ── ★Tier3 구조레버 QLD 슬리브 (게이트·사이징 — 모의 한정) ────────────────────
+
+def test_load_lev_shadow_go_fresh(tmp_path):
+    import json
+    from datetime import datetime
+    p = tmp_path / "s.json"
+    p.write_text(json.dumps({"reco_lev": 1.3, "verdict": "GO",
+                             "_meta": {"at": datetime.now().strftime("%Y-%m-%d %H:%M")}}))
+    assert T.load_lev_shadow(str(p)) == 1.3
+
+
+def test_load_lev_shadow_rejects_nogo_stale_missing(tmp_path):
+    import json
+    p = tmp_path / "s.json"
+    p.write_text(json.dumps({"reco_lev": 1.3, "verdict": "NO-GO",
+                             "_meta": {"at": "2026-01-01 00:00"}}))
+    assert T.load_lev_shadow(str(p)) is None                       # NO-GO
+    p.write_text(json.dumps({"reco_lev": 1.3, "verdict": "GO",
+                             "_meta": {"at": "2020-01-01 00:00"}}))
+    assert T.load_lev_shadow(str(p)) is None                       # stale(>21일)
+    assert T.load_lev_shadow(str(tmp_path / "none.json")) is None  # 파일 없음
+
+
+def test_sleeve_plan_sizes_l_minus_one():
+    frac, orders = T.sleeve_plan(1.3, 100_000, {}, 50.0, symbol="QLD")
+    assert frac == 0.3
+    assert orders == [{"symbol": "QLD", "side": "buy", "qty": 600,
+                       "reason": "Tier3 구조레버 슬리브 ×1.30", "sleeve": True}]
+
+
+def test_sleeve_plan_liquidates_when_gate_off():
+    frac, orders = T.sleeve_plan(None, 100_000, {"QLD": {"shares": 100}}, 50.0, symbol="QLD")
+    assert frac == 0.0
+    assert orders[0]["side"] == "sell" and orders[0]["qty"] == 100
+
+
+def test_sleeve_plan_band_and_price_guard():
+    # 밴드 내(목표 $30k vs 보유 580주×$50=$29k) → 무거래
+    frac, orders = T.sleeve_plan(1.3, 100_000, {"QLD": {"shares": 580}}, 50.0,
+                                 band=0.25, symbol="QLD")
+    assert frac == 0.3 and orders == []
+    # 가격 불명 → 주문 보류하되 비중은 유지(예산 과투자 방지)
+    frac, orders = T.sleeve_plan(1.3, 100_000, {}, None, symbol="QLD")
+    assert frac == 0.3 and orders == []
+
+
+def test_sleeve_plan_max_frac_clamp():
+    frac, _ = T.sleeve_plan(2.5, 100_000, {}, 50.0, symbol="QLD")   # 폭주 reco
+    assert frac == T.LEV_SLEEVE_MAX_FRAC
