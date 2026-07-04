@@ -350,6 +350,35 @@ def paper_summary(surface: str = "kr_mock") -> dict:
     return out
 
 
+def paper_glance() -> list[dict]:
+    """사이드바용 모의 계좌 초경량 요약 — store EOD 스냅샷만 읽음 (잔고 API·벤치·원장 X).
+
+    전 페이지 사이드바에서 매 rerun 호출되므로 네트워크 0·로컬 DB 만. 스냅샷 없는
+    surface 는 제외(크론 미실행 환경 → 빈 리스트 = 레일 숨김). graceful.
+    [{surface, label, currency, nav, cum_ret, day_ret, n_days}]
+    """
+    specs = (("kr_mock", "🇰🇷 국내", "₩", "kr_mock_history"),
+             ("us_mock", "🇺🇸 미국", "$", "us_mock_history"))
+    out = []
+    for surface, label, cur, hist_name in specs:
+        try:
+            import store
+            snaps = [r for r in store.all(hist_name)
+                     if r.get("kind") == "snapshot" and r.get("nav") is not None]
+            if not snaps:
+                continue
+            nav = float(snaps[-1]["nav"])
+            first = float(snaps[0]["nav"])
+            prev = float(snaps[-2]["nav"]) if len(snaps) >= 2 else first
+            out.append({"surface": surface, "label": label, "currency": cur, "nav": nav,
+                        "cum_ret": (nav / first - 1.0) * 100.0 if first else 0.0,
+                        "day_ret": (nav / prev - 1.0) * 100.0 if prev else 0.0,
+                        "n_days": len(snaps)})
+        except Exception:
+            continue
+    return out
+
+
 # ── ML 게이트 현황 (가격축 ★게이트·Tier3 구조레버 — 로컬 파일 read-only·graceful) ──
 
 _GATE_FILES = {

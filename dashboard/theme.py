@@ -272,6 +272,42 @@ def watchlist_html(rows: list[dict], title="워치리스트") -> str:
     return f'<div class="tn-wl"><div class="tn-wl-head">{title}</div>{body}</div>'
 
 
+def _money_compact(v, cur: str) -> str:
+    """모의 레일용 압축 금액 — ₩는 억/만, $는 천단위 콤마. None → —."""
+    if v is None:
+        return "—"
+    try:
+        v = float(v)
+    except (TypeError, ValueError):
+        return "—"
+    if cur == "₩":
+        return f"₩{v / 1e8:.2f}억" if abs(v) >= 1e8 else f"₩{v / 1e4:,.0f}만"
+    return f"${v:,.0f}"
+
+
+def paper_rail_html(rows: list[dict], title="🧪 모의투자") -> str:
+    """사이드바 모의 계좌 레일 (워치리스트와 동일 tn-wl 스타일 — 순수 빌더).
+
+    rows: views.paper_glance 출력 [{label, currency, nav, cum_ret, day_ret, n_days}].
+    3열: 계좌 · NAV(압축) · 누적%(색). 전일·기록일수는 title 툴팁.
+    """
+    body = []
+    for r in rows or []:
+        cum = r.get("cum_ret")
+        up = (cum or 0) >= 0
+        col = GREEN if up else RED
+        chg = f"{'+' if up else ''}{_num(cum)}%" if cum is not None else "—"
+        day = r.get("day_ret")
+        tip = (f' title="전일 {day:+.2f}% · 기록 {r.get("n_days", 0)}일"'
+               if day is not None else "")
+        body.append(f'''<div class="tn-wl-row">
+  <span class="tn-wl-sym"{tip}>{r.get("label", "?")}</span>
+  <span class="tn-wl-last">{_money_compact(r.get("nav"), r.get("currency", ""))}</span>
+  <span class="tn-wl-chg" style="color:{col}">{chg}</span>
+</div>''')
+    return f'<div class="tn-wl"><div class="tn-wl-head">{title}</div>{"".join(body)}</div>'
+
+
 def section_label_html(text, accent=BLUE) -> str:
     return f'<div class="tn-sec" style="border-color:{accent}"><span>{text}</span></div>'
 

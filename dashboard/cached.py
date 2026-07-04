@@ -92,6 +92,12 @@ def tier3_gate():
     return views.tier3_gate_status()
 
 
+@st.cache_data(ttl=_TTL, show_spinner=False)
+def paper_glance():
+    """사이드바 모의 레일 초경량 요약 (store 스냅샷만 — 무네트워크·15분)."""
+    return views.paper_glance()
+
+
 @st.cache_data(ttl=_TTL, show_spinner="모의 계좌 불러오는 중…")
 def paper(surface):
     """자동 모의투자 계좌 요약 (NAV·벤치·보유·결정 원장 — 잔고 API graceful 폴백)."""

@@ -157,3 +157,25 @@ def test_css_restores_material_icon_font():
     """광역 span override 로부터 Streamlit 머티리얼 아이콘 폰트 복원 (_arrow_right 방지)."""
     css = theme._CSS
     assert "stIconMaterial" in css and "Material Symbols" in css
+
+
+# ── P3 모의 레일 빌더 (순수) ──────────────────────────────────────────────────
+def test_paper_rail_html_rows_and_compact_money():
+    rows = [{"label": "🇰🇷 국내", "currency": "₩", "nav": 10_500_000.0,
+             "cum_ret": 5.0, "day_ret": 0.5, "n_days": 12},
+            {"label": "🇺🇸 미국", "currency": "$", "nav": 100_000.0,
+             "cum_ret": -1.2, "day_ret": -0.1, "n_days": 3}]
+    html = theme.paper_rail_html(rows)
+    assert "모의투자" in html and "🇰🇷 국내" in html
+    assert "₩1,050만" in html and "$100,000" in html               # 압축 금액
+    assert "+5.00%" in html and "-1.20%" in html
+    assert theme.GREEN in html and theme.RED in html               # 부호 색
+    assert "전일 +0.50%" in html and "기록 12일" in html            # 툴팁
+
+
+def test_paper_rail_html_eok_and_empty():
+    html = theme.paper_rail_html([{"label": "kr", "currency": "₩", "nav": 2.5e8,
+                                   "cum_ret": 0.0}])
+    assert "₩2.50억" in html
+    empty = theme.paper_rail_html([])
+    assert empty.startswith('<div class="tn-wl">')                 # 무행도 유효 마크업

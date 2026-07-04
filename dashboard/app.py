@@ -16,7 +16,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import streamlit as st
 
 import ticker_names  # 종목명 resolver (검색·표시 — 루트 모듈, sys.path 세팅 이후)
-from dashboard import auth, data, theme
+from dashboard import auth, cached, data, theme
 
 st.set_page_config(page_title="퀀트 터미널", page_icon="📊", layout="wide")
 theme.inject_global_css()
@@ -79,6 +79,15 @@ with st.sidebar:
             [{"symbol": h["ticker"], "name": h.get("name"), "last": h.get("value"), "chg_pct": h.get("ret")}
              for h in _wl if h.get("ticker")], title="보유 종목"))
 
+    # 🧪 모의투자 레일 (KR·US 자동 페이퍼트레이딩 — EOD 스냅샷 초경량·무네트워크)
+    _pg = cached.paper_glance()
+    if _pg:
+        st.markdown("<div style='height:8px'></div>", unsafe_allow_html=True)
+        theme.render(theme.paper_rail_html(_pg))
+        if st.button("🧪 모의투자 상세", width="stretch", key="_paper_btn",
+                     help="계좌 현황·NAV 곡선·판단근거 원장"):
+            st.session_state["_nav_to_paper"] = True   # 페이지 객체 생성 후 switch (아래)
+
 from dashboard.pages import home, market, paper, portfolio, research
 from dashboard.pages import ticker as ticker_pg
 
@@ -96,4 +105,7 @@ nav = st.navigation([_home_pg, _portfolio_pg, _ticker_pg, _market_pg, _paper_pg,
 # 사이드바에서 종목을 새로 고르면 종목 분석 페이지로 이동 (홈 행클릭과 동일 UX)
 if st.session_state.pop("_nav_to_ticker", False):
     st.switch_page(_ticker_pg)
+# 사이드바 모의 레일 버튼 → 모의투자 페이지 (위 _nav_to_ticker 와 동일 패턴)
+if st.session_state.pop("_nav_to_paper", False):
+    st.switch_page(_paper_pg)
 nav.run()
