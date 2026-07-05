@@ -64,7 +64,18 @@ cached.axes_gate = lambda: {
           "recommendation":{"chosen":"hi52","policy_weights":{"w_hi52":0.35,"w_lowvol":0.0,
                             "w_mom12":0.0,"w_mom":0.0},"window":["2021-07-02","2026-07-02"]},
           "chosen_history":{"hi52":6,"lowvol":3},
-          "shadow":{"asof":"2026-07-04 10:45","chosen":"hi52","fresh":True,"applied":True}},
+          "shadow":{"asof":"2026-07-04 10:45","chosen":"hi52","fresh":True,"applied":True},
+          "regime_overlay":{"code":"OBSERVE","label":"\U0001f440 OBSERVE(방어)",
+              "overlay":{"cagr":0.139,"mdd":0.422},"offense_alone":{"cagr":0.131,"mdd":0.60},
+              "bench":{"cagr":0.104,"mdd":0.541},"mdd_vs_offense_pp":-17.8,
+              "dsr":0.03,"ir":0.168,"bear_defend_years":"6/7","mdd_win_years":"10/25"},
+          "cost_sensitivity":{"axis":["hi52"],"drag_saved_pp":2.0,
+              "current":{"scheme":"월간·버퍼2","drag_pp":2.44,"net_cagr":0.125},
+              "best":{"scheme":"반기·버퍼2","net_cagr":0.147},
+              "rows":[{"scheme":"월간·버퍼2","net_cagr":0.125,"drag_pp":2.44,"turnover":0.79,
+                       "net_excess_pp":2.09,"mdd":0.60},
+                      {"scheme":"반기·버퍼2","net_cagr":0.147,"drag_pp":0.47,"turnover":0.91,
+                       "net_excess_pp":4.29,"mdd":0.63}]}},
     "us":{"available":False,"env_on":False}}
 cached.tier3_gate = lambda: {"available":True,"reco_lev":1.3,"verdict":"GO",
                              "at":"2026-07-04","fresh":True,"sleeve_env":True}
@@ -286,6 +297,9 @@ def test_research_axes_gate_section():
     assert len(at.metric) >= 4                                          # 순초과·MDD·DSR·PBO
     assert any("반영 중" in str(c.value) for c in at.caption)           # shadow applied
     assert any("검증 결과 없음" in str(i.value) for i in at.info)        # US 미생성 안내
+    # 🛡️ 레짐 방어 오버레이 + 💸 비용 최적화 expander (P4)
+    exp = " ".join(str(e.label) for e in at.expander)
+    assert "레짐 방어 오버레이" in exp and "비용·회전율 최적화" in exp
 
 
 def test_paper_us_sleeve_badge_and_axes_columns():

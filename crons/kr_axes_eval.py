@@ -69,6 +69,24 @@ def build_message(res: dict, *, enabled: bool, shadow_written: bool) -> str:
         lines.append("shadow 반영: " + ("✅ 기록(모의 선택 전용)" if shadow_written else "⚠️ 기록 실패/권고 없음"))
     else:
         lines.append("shadow off (ADAPTIVE_KR_AXES_ENABLED=false) — 평가·표시만")
+
+    # 🛡️ 레짐 방어 오버레이 (표시·추적 전용 — 방어 verdict)
+    ro = res.get("regime_overlay") or {}
+    if ro and not ro.get("error"):
+        lines.append("━━━━━━━━━━━━━━")
+        lines.append(f"🛡️ 레짐 방어 오버레이: {ro.get('code')}")
+        lines.append(f"MDD {ro['overlay']['mdd']*100:.0f}% (순공격比 {ro['mdd_vs_offense_pp']:+.0f}%p) ·"
+                     f" 약세해방어 {ro.get('bear_defend_years')} · DSR {ro.get('dsr')}")
+        lines.append("→ 수익 엔진 아님·낙폭 방어용 · 초과수익 통계 미달(위기집중·whipsaw)")
+
+    # 💸 비용·회전율 (확실한 실행 권고)
+    cs = res.get("cost_sensitivity") or {}
+    if cs and not cs.get("error"):
+        cur, best = cs.get("current") or {}, cs.get("best") or {}
+        lines.append("━━━━━━━━━━━━━━")
+        lines.append(f"💸 회전율 비용: 현재(월간) 드래그 {cur.get('drag_pp')}%p/년")
+        lines.append(f"→ 리밸 주기↓ 시 ~{cs.get('drag_saved_pp')}%p 확실 회수 (gross 비단조 — OOS 재검 후)")
+
     lines.append("⚠️ 검증상 OBSERVE = 엣지 단정 불가 · 모의 한정 · 실계좌 자동집행 0")
     return "\n".join(lines)
 

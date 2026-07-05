@@ -426,7 +426,9 @@ def axes_gate_summary() -> dict:
                           "verdict": d.get("verdict") or {},
                           "recommendation": d.get("recommendation"),
                           "chosen_history": d.get("chosen_history") or {},
-                          "coverage": d.get("coverage")})
+                          "coverage": d.get("coverage"),
+                          "regime_overlay": d.get("regime_overlay"),        # 방어 오버레이(KR)
+                          "cost_sensitivity": d.get("cost_sensitivity")})   # 비용 스윕(KR)
         sh = _read_json(sh_path)
         if sh:
             days = _days_since(sh.get("asof", ""))
