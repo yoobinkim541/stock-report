@@ -419,3 +419,23 @@ def test_min_hold_default_active_60(monkeypatch):
     # 0 으로 명시 오버라이드 시 현행 무제한 회전 복귀
     monkeypatch.setenv("KR_MOCK_MIN_HOLD_DAYS", "0")
     assert kt._int_env("KR_MOCK_MIN_HOLD_DAYS", 60) == 0
+
+
+def test_tranches_default_active_3(monkeypatch):
+    """KR_MOCK_TRANCHES 기본 3 = 분할 활성 · 1 오버라이드 시 일괄 복귀."""
+    import kiwoom_mock_track as kt
+    monkeypatch.delenv("KR_MOCK_TRANCHES", raising=False)
+    assert kt._int_env("KR_MOCK_TRANCHES", 3) == 3
+    monkeypatch.setenv("KR_MOCK_TRANCHES", "1")
+    assert kt._int_env("KR_MOCK_TRANCHES", 3) == 1
+
+
+def test_plan_then_tranche_caps_full_entry():
+    """plan_rebalance 목표 → 분할 상한 통합 (60주 신규 → 3분할 20주)."""
+    import kiwoom_mock_track as kt
+    from lib.tranche import plan_tranches
+    sig = [{"code": "A", "is_buy": True, "price": 50_000, "policy_score": 0.9}]
+    plan = kt.plan_rebalance(sig, {}, 3_000_000, 1)
+    assert plan == [{"code": "A", "side": "buy", "qty": 60, "reason": "신규/추가"}]
+    out = plan_tranches(plan, 3_000_000 / 1, lambda c: {"A": 50_000}.get(c), 3, id_key="code")
+    assert out[0]["qty"] == 20 and "3분할" in out[0]["reason"]

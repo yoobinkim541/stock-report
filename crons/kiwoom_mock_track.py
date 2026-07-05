@@ -79,6 +79,9 @@ EXIT_BUFFER = _int_env("KR_MOCK_EXIT_BUFFER", 2)     # 히스테리시스(top-N+
 # 기본 60(OOS 권고값 반영·모의로 라이브 검증). KR_MOCK_MIN_HOLD_DAYS=0 으로 되돌리면 현행 무제한 회전.
 # 모의 한정 — 실계좌 자동 경로 없음. 꼬리위험(2023 등) 있어 실계좌는 모의 검증 후 수동 판단.
 MIN_HOLD_DAYS = _int_env("KR_MOCK_MIN_HOLD_DAYS", 60)
+# ★분할매수·분할매도 — 회당 목표의 1/N 만 거래(N회에 평균진입/청산). 분산 축소(알파 아님)·
+# 모의 bps 비용 불변. 기본 3(분할 활성)·1=현행 일괄. min_hold(청산 지연)와 독립 합성.
+TRANCHES = _int_env("KR_MOCK_TRANCHES", 3)
 QUOTE_STALE_S = _int_env("REALTIME_QUOTE_STALE_S", 10)
 
 
@@ -452,9 +455,17 @@ def main(argv: list[str] | None = None) -> int:
                           slippage=SLIPPAGE, quote_fn=_rt_best,
                           rebal_band=REBAL_BAND, exit_buffer=EXIT_BUFFER,
                           min_hold_days=MIN_HOLD_DAYS, held_days=held_days)
-    logger.info("리밸런스 계획 %d건 (예산 ₩%s, 현금 %s, 목표 %d종목)",
+    # ★분할매수/매도: 각 주문을 회당 목표의 1/N 로 상한 (N회에 평균 진입·청산)
+    if TRANCHES > 1 and plan:
+        from lib.tranche import plan_tranches
+        _px = {s["code"]: s.get("price") for s in signals if s.get("code")}
+        for c, p in positions.items():
+            _px.setdefault(c, p.get("cur_price"))
+        plan = plan_tranches(plan, budget / max(MAX_POS, 1), lambda c: _px.get(c), TRANCHES,
+                             id_key="code")
+    logger.info("리밸런스 계획 %d건 (예산 ₩%s, 현금 %s, 목표 %d종목, %d분할)",
                 len(plan), f"{budget:,.0f}",
-                f"₩{cash:,.0f}" if cash is not None else "미확인", MAX_POS)
+                f"₩{cash:,.0f}" if cash is not None else "미확인", MAX_POS, TRANCHES)
 
     if dry:
         logger.info("[DRY-RUN] 주문 미집행 — 계획만 출력:")
