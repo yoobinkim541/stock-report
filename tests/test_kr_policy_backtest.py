@@ -226,3 +226,17 @@ def test_cost_sensitivity_drag_and_best(monkeypatch):
     assert all(r["drag_pp"] >= -1e-9 for r in cs["rows"])          # 무비용이 유비용보다 나쁠 수 없음
     assert cs["best"]["net_cagr"] == max(r["net_cagr"] for r in cs["rows"])
     assert cs["current"]["scheme"] == "월간·버퍼2"
+
+
+def test_cost_sensitivity_has_oos_verdict():
+    """비용 스윕 OOS 블록 — 견고성 verdict + 라이브 권고 (최소보유일) 산출."""
+    p = _panels(n_days=1600)
+    feats = {t: f for t in bt.month_ends(p["ret"].index) if (f := bt.features_asof(p, t)) is not None}
+    rebal = sorted(feats.keys())
+    bench = bt.cap_benchmark(p, rebal)
+    cs = bt.cost_sensitivity(p, feats, rebal, bench)
+    o = cs["oos"]
+    assert o["verdict"] in ("ROBUST", "MIXED", "IN-SAMPLE")
+    assert 0.0 <= o["year_win_rate"] <= 1.0 and o["n_years"] >= 1
+    assert isinstance(o["gross_preserved"], bool) and isinstance(o["cross_axis_confirmed"], bool)
+    assert "min_hold_days" in o["live_reco"] and "caveat" in o["live_reco"]

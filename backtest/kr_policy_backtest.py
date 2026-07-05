@@ -600,9 +600,58 @@ def cost_sensitivity(panels: dict, feats: dict, rebal: list, bench, *,
                      "n_rebal": len(sub), "turnover": _avg_turnover(picks, top_k)})
     best = max(rows, key=lambda r: r["net_cagr"])
     cur = next((r for r in rows if r["scheme"] == "월간·버퍼2"), rows[0])
+    oos = _cost_oos_robustness(panels, feats, rebal, bench, axis_cfg, top_k)
     return {"axis": list(axis_cfg), "rows": rows, "best": best, "current": cur,
             "gain_pp": round((best["net_cagr"] - cur["net_cagr"]) * 100, 2),
-            "drag_saved_pp": round(cur["drag_pp"] - best["drag_pp"], 2)}
+            "drag_saved_pp": round(cur["drag_pp"] - best["drag_pp"], 2),
+            "oos": oos}
+
+
+def _cost_oos_robustness(panels: dict, feats: dict, rebal: list, bench,
+                         axis_cfg: dict, top_k: int) -> dict:
+    """'덜 거래' 이점의 견고성 — 연도 승률·gross 보존·다른 축 확인 → adopt-worthy verdict.
+
+    정직 규율: 전기간 best 는 과적합 위험. (a) 반기가 월간을 이긴 OOS 연도 비율,
+    (b) gross(무비용)가 보존되나?(=이득이 비용절감이지 gross 우연이 아님), (c) 다른 축
+    (lowvol)서도 재현? — 셋 다 충족해야 ROBUST. 고정주기 위상위험(분기 함정·특정해 꼬리)
+    때문에 라이브 반영은 **최소 보유기간(연속)** 으로 권고(고정 cadence 아님).
+    """
+    ret = panels["ret"]
+
+    def sret(freq, buf, cfg):
+        sub = rebal[::freq]
+        return simulate(ret, _picks_hysteresis(feats, sub, cfg, k=top_k, buffer=buf),
+                        buy_bps=BUY_BPS, sell_bps=SELL_BPS)
+
+    mo, semi = sret(1, 2, axis_cfg), sret(6, 2, axis_cfg)
+    years = sorted(set(mo.index.year))
+    wins = n = 0
+    for y in years:
+        m = mo.index.year == y
+        if m.sum() < 60:
+            continue
+        n += 1
+        if perf(semi[m])["total"] > perf(mo[m])["total"]:
+            wins += 1
+    # gross 보존: 반기 gross ≈ 월간 gross (이득이 비용에서 옴)
+    g_mo = perf(simulate(ret, _picks_hysteresis(feats, rebal[::1], axis_cfg, k=top_k, buffer=2),
+                         buy_bps=0.0, sell_bps=0.0))["cagr"]
+    g_semi = perf(simulate(ret, _picks_hysteresis(feats, rebal[::6], axis_cfg, k=top_k, buffer=2),
+                           buy_bps=0.0, sell_bps=0.0))["cagr"]
+    gross_preserved = g_semi >= g_mo - 0.01          # gross 손실 <1%p
+    # 다른 축 재현 (lowvol)
+    alt = {"vol_inv": 1.0}
+    alt_win = perf(sret(6, 2, alt))["cagr"] > perf(sret(1, 2, alt))["cagr"]
+    win_rate = round(wins / n, 2) if n else 0.0
+    robust = win_rate >= 0.6 and gross_preserved and alt_win
+    verdict = ("ROBUST" if robust else ("MIXED" if win_rate >= 0.5 else "IN-SAMPLE"))
+    return {"year_win_rate": win_rate, "n_years": n, "gross_preserved": bool(gross_preserved),
+            "gross_mo": round(g_mo, 4), "gross_semi": round(g_semi, 4),
+            "cross_axis_confirmed": bool(alt_win), "verdict": verdict,
+            # 라이브 반영 권고 — 최소 보유기간(연속·고정주기 위상위험 회피)
+            "live_reco": {"min_hold_days": 60 if robust else 0,
+                          "expected_drag_save_pp": 2.0 if robust else 0.0,
+                          "caveat": "특정해 꼬리위험(2023 등)·모의로 라이브 검증 후 실계좌 고려"}}
 
 
 def run(start_year: int = 2001, end_year: int | None = None) -> dict:

@@ -79,13 +79,20 @@ def build_message(res: dict, *, enabled: bool, shadow_written: bool) -> str:
                      f" 약세해방어 {ro.get('bear_defend_years')} · DSR {ro.get('dsr')}")
         lines.append("→ 수익 엔진 아님·낙폭 방어용 · 초과수익 통계 미달(위기집중·whipsaw)")
 
-    # 💸 비용·회전율 (확실한 실행 권고)
+    # 💸 비용·회전율 (OOS 검증된 실행 권고)
     cs = res.get("cost_sensitivity") or {}
     if cs and not cs.get("error"):
-        cur, best = cs.get("current") or {}, cs.get("best") or {}
+        cur = cs.get("current") or {}
+        oos = cs.get("oos") or {}
+        reco = oos.get("live_reco") or {}
         lines.append("━━━━━━━━━━━━━━")
-        lines.append(f"💸 회전율 비용: 현재(월간) 드래그 {cur.get('drag_pp')}%p/년")
-        lines.append(f"→ 리밸 주기↓ 시 ~{cs.get('drag_saved_pp')}%p 확실 회수 (gross 비단조 — OOS 재검 후)")
+        lines.append(f"💸 회전율 비용: 현재(월간) 드래그 {cur.get('drag_pp')}%p/년 · OOS {oos.get('verdict')}")
+        lines.append(f"   반기>월간 {int((oos.get('year_win_rate') or 0)*100)}%·gross보존 {oos.get('gross_preserved')}·타축확인 {oos.get('cross_axis_confirmed')}")
+        if reco.get("min_hold_days"):
+            live = "✅ 적용 중" if os.getenv("KR_MOCK_MIN_HOLD_DAYS", "0") != "0" else "off(KR_MOCK_MIN_HOLD_DAYS)"
+            lines.append(f"→ 권고 최소보유 {reco['min_hold_days']}일 (~{reco['expected_drag_save_pp']}%p 절감·모의 한정) · {live}")
+        else:
+            lines.append("→ 견고 미확인 — 현행 유지(과적합 회피)")
 
     lines.append("⚠️ 검증상 OBSERVE = 엣지 단정 불가 · 모의 한정 · 실계좌 자동집행 0")
     return "\n".join(lines)

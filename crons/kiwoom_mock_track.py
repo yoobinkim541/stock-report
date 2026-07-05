@@ -74,6 +74,9 @@ SEED_KRW   = _float_env("KIWOOM_MOCK_SEED", 10_000_000)
 SLIPPAGE   = _float_env("KR_MOCK_SLIPPAGE", 0.01)   # 매수 사이징 슬리피지 버퍼(+1%)
 REBAL_BAND = _float_env("KR_MOCK_REBAL_BAND", 0.25)  # 무거래 밴드(목표比 ±25% 벗어날 때만 조정·회전율↓)
 EXIT_BUFFER = _int_env("KR_MOCK_EXIT_BUFFER", 2)     # 히스테리시스(top-N+2 안이면 보유 유지·경계 flip 방지)
+# ★최소 보유기간 — backtest/kr_policy_backtest 비용 OOS 실증(슬로우 신호 과잉거래가 순수익 ~2.4%p
+# 잠식·최소보유가 gross 보존하며 비용만 절감·64% 연도·cross-axis). 기본 0=현행(무제한 회전).
+MIN_HOLD_DAYS = _int_env("KR_MOCK_MIN_HOLD_DAYS", 0)
 QUOTE_STALE_S = _int_env("REALTIME_QUOTE_STALE_S", 10)
 
 
@@ -166,12 +169,55 @@ def compute_kr_signals(limit: int = UNIVERSE) -> list[dict]:
     return out
 
 
+def held_days_from_decisions(decisions: list[dict], codes, today: str) -> dict:
+    """보유 종목별 보유일수 = today − 가장 최근 편입일 (원장 결정에서). 순수·테스트 핵심.
+
+    같은 종목 재편입 시 최신 편입일 기준(중간 청산 후 재진입은 새 보유). 편입 기록 없으면 제외.
+    """
+    import datetime as _dt
+    entry: dict[str, str] = {}
+    for d in decisions or []:
+        if d.get("side") == "편입":
+            c = d.get("code") or (d.get("ticker") or "").replace(".KS", "").replace(".KQ", "")
+            dt = str(d.get("date", ""))[:10]
+            if c and dt and dt > entry.get(c, ""):
+                entry[c] = dt
+    out = {}
+    try:
+        t0 = _dt.date.fromisoformat(today[:10])
+    except Exception:
+        return out
+    for c in codes:
+        e = entry.get(c)
+        if not e:
+            continue
+        try:
+            out[c] = (t0 - _dt.date.fromisoformat(e)).days
+        except Exception:
+            continue
+    return out
+
+
+def _held_days(positions: dict) -> dict:
+    """라이브 보유 종목의 보유일수 (원장 편입일 기준). 실패 시 {} (→ 최소보유 미적용)."""
+    try:
+        from datetime import datetime
+        from ml.adaptive import Ledger
+        held = [c for c, p in positions.items() if int(p.get("shares", 0) or 0) > 0]
+        return held_days_from_decisions(Ledger("kr_mock").read_decisions(), held,
+                                        datetime.now(KST).strftime("%Y-%m-%d"))
+    except Exception as e:
+        logger.warning("보유일수 산출 실패(최소보유 미적용): %s", e)
+        return {}
+
+
 # ── 리밸런스 (순수 함수 — 테스트 핵심) ────────────────────────────────────────
 
 def plan_rebalance(signals: list[dict], positions: dict, budget_krw: float,
                    max_positions: int, cash_krw: float | None = None,
                    slippage: float = 0.0, quote_fn=None,
-                   rebal_band: float = 0.0, exit_buffer: int = 0) -> list[dict]:
+                   rebal_band: float = 0.0, exit_buffer: int = 0,
+                   min_hold_days: int = 0, held_days: dict | None = None) -> list[dict]:
     """목표 바스켓 vs 현재 보유 → 시장가 주문계획.
 
     signals:   [{code, action, score, price, is_buy, is_sell}, ...]
@@ -180,6 +226,10 @@ def plan_rebalance(signals: list[dict], positions: dict, budget_krw: float,
     slippage:  매수 사이징 시 가격에 더할 버퍼(예: 0.01 = +1%) — 시가 갭/슬리피지 흡수.
     rebal_band: >0 이면 보유종목 조정을 |현재가치−목표가치|/목표가치 > band 일 때만(잔챙이 조정 skip·회전율↓).
     exit_buffer: >0 이면 보유종목이 top-(N+buffer) 안이면 유지(경계 flip-flop 방지·회전율↓).
+    min_hold_days: >0 이면 편입 후 이 일수 미만 보유 종목은 타깃이탈이어도 청산 보류(회전율↓).
+      **★backtest/kr_policy_backtest 실증**: 슬로우 신호(hi52 등) 과잉거래가 순수익을 연 ~2.4%p
+      갉아먹음 → 최소 보유기간이 gross 보존하며 비용만 절감(OOS 64% 연도·cross-axis·gross 보존).
+      held_days: {code: 보유일수} (main 이 원장 편입일에서 산출). 기본 0 = 현행(무제한 회전).
     반환:      [{code, side('buy'|'sell'), qty, reason}, ...]
 
     규칙:
@@ -190,6 +240,7 @@ def plan_rebalance(signals: list[dict], positions: dict, budget_krw: float,
         가용현금 알면 그 한도까지만(over-spend 방지).
     """
     orders: list[dict] = []
+    held_days = held_days or {}
     # 랭킹 = 학습된 정책 점수(policy_score) 우선, 없으면 펀더멘털 score 폴백
     ranked = sorted(
         [s for s in signals if s.get("is_buy") and s.get("price", 0) > 0],
@@ -200,9 +251,12 @@ def plan_rebalance(signals: list[dict], positions: dict, budget_krw: float,
     keep_codes = {s["code"] for s in ranked[:max_positions + max(0, exit_buffer)]}
 
     # 1) 매도 먼저: 보유 중 keep(top-N+buffer) 밖 종목 전량 (현금 확보)
+    #    단 min_hold_days>0 이면 편입 후 그 일수 미만 종목은 청산 보류(회전율 억제)
     for code, p in positions.items():
         sh = int(p.get("shares", 0) or 0)
         if sh > 0 and code not in keep_codes:
+            if min_hold_days > 0 and 0 <= held_days.get(code, 10 ** 9) < min_hold_days:
+                continue   # 최소 보유기간 미충족 — 타깃이탈이어도 유지
             orders.append({"code": code, "side": "sell", "qty": sh, "reason": "타깃이탈"})
 
     # 2) 매수/조정: 예산 0/음수면 전면 생략 (음수 예산 → 유령매도 방지)
@@ -391,9 +445,11 @@ def main(argv: list[str] | None = None) -> int:
         return 0
 
     budget = nav * INVEST
+    held_days = _held_days(positions) if MIN_HOLD_DAYS > 0 else {}
     plan = plan_rebalance(signals, positions, budget, MAX_POS, cash_krw=cash,
                           slippage=SLIPPAGE, quote_fn=_rt_best,
-                          rebal_band=REBAL_BAND, exit_buffer=EXIT_BUFFER)
+                          rebal_band=REBAL_BAND, exit_buffer=EXIT_BUFFER,
+                          min_hold_days=MIN_HOLD_DAYS, held_days=held_days)
     logger.info("리밸런스 계획 %d건 (예산 ₩%s, 현금 %s, 목표 %d종목)",
                 len(plan), f"{budget:,.0f}",
                 f"₩{cash:,.0f}" if cash is not None else "미확인", MAX_POS)

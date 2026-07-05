@@ -158,8 +158,20 @@ def _axes_gate_section():
                     "드래그%p": r["drag_pp"], "회전율": r["turnover"],
                     "순초과%p": r["net_excess_pp"], "MDD": data.f_frac_pct(r["mdd"]),
                 } for r in cs.get("rows", [])], ), hide_index=True, width="stretch")
-                st.caption(f"→ 현재(월간) 드래그 중 **~{cs.get('drag_saved_pp')}%p 는 리밸 주기↓로 확실 회수** · "
-                           f"단 gross 상호작용 비단조(분기 최악)라 '{best.get('scheme')}' 채택은 OOS 재검 필요")
+                oos = cs.get("oos") or {}
+                if oos:
+                    reco = oos.get("live_reco") or {}
+                    vc = {"ROBUST": "✅", "MIXED": "🟡", "IN-SAMPLE": "⚠️"}.get(oos.get("verdict"), "")
+                    st.caption(f"**OOS 검증 {vc} {oos.get('verdict')}** — 반기가 월간 이긴 연도 "
+                               f"{int((oos.get('year_win_rate') or 0)*100)}% · gross 보존 {oos.get('gross_preserved')}"
+                               f"(월간 {(oos.get('gross_mo') or 0)*100:.1f}%/반기 {(oos.get('gross_semi') or 0)*100:.1f}%) · "
+                               f"다른 축 확인 {oos.get('cross_axis_confirmed')}")
+                    if reco.get("min_hold_days"):
+                        st.caption(f"→ 라이브 권고: **최소 보유 {reco['min_hold_days']}일** "
+                                   f"(고정 주기 위상위험 회피·연속) · ~{reco['expected_drag_save_pp']}%p 절감 · "
+                                   f"{reco.get('caveat', '')} · env `KR_MOCK_MIN_HOLD_DAYS`")
+                    else:
+                        st.caption("→ 견고 미확인 — 현행 유지(과적합 회피)")
     st.caption("⚠️ OBSERVE = 엣지 단정 불가(정직) · 반영은 모의 한정 · 실계좌 자동집행 0")
 
 

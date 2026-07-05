@@ -72,6 +72,9 @@ cached.axes_gate = lambda: {
           "cost_sensitivity":{"axis":["hi52"],"drag_saved_pp":2.0,
               "current":{"scheme":"월간·버퍼2","drag_pp":2.44,"net_cagr":0.125},
               "best":{"scheme":"반기·버퍼2","net_cagr":0.147},
+              "oos":{"verdict":"ROBUST","year_win_rate":0.64,"n_years":22,"gross_preserved":True,
+                     "gross_mo":0.150,"gross_semi":0.152,"cross_axis_confirmed":True,
+                     "live_reco":{"min_hold_days":60,"expected_drag_save_pp":2.0,"caveat":"꼬리위험·모의 검증"}},
               "rows":[{"scheme":"월간·버퍼2","net_cagr":0.125,"drag_pp":2.44,"turnover":0.79,
                        "net_excess_pp":2.09,"mdd":0.60},
                       {"scheme":"반기·버퍼2","net_cagr":0.147,"drag_pp":0.47,"turnover":0.91,
@@ -300,6 +303,8 @@ def test_research_axes_gate_section():
     # 🛡️ 레짐 방어 오버레이 + 💸 비용 최적화 expander (P4)
     exp = " ".join(str(e.label) for e in at.expander)
     assert "레짐 방어 오버레이" in exp and "비용·회전율 최적화" in exp
+    caps = " ".join(str(c.value) for c in at.caption)
+    assert "OOS 검증" in caps and "최소 보유 60일" in caps          # 비용 OOS verdict + 라이브 권고
 
 
 def test_paper_us_sleeve_badge_and_axes_columns():
