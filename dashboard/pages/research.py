@@ -128,6 +128,50 @@ def _axes_gate_section():
         if ch:
             st.caption("워크포워드 폴드 채택 이력: "
                        + " · ".join(f"{k} ×{cnt}" for k, cnt in list(ch.items())[:6]))
+
+        # 🛡️ 레짐 방어 오버레이 (KR — 수익 아님·낙폭 방어 추적)
+        ro = e.get("regime_overlay") or {}
+        if ro and not ro.get("error"):
+            with st.expander(f"🛡️ 레짐 방어 오버레이 — {ro.get('code', '')}"):
+                st.caption("강세(지수>200MA)=고가모멘텀 · 약세=저변동 전환. **수익 엔진 아님 — 낙폭 방어용.**")
+                ov, bn, of = ro.get("overlay") or {}, ro.get("bench") or {}, ro.get("offense_alone") or {}
+                k = st.columns(4)
+                k[0].metric("오버레이 MDD", data.f_frac_pct(ov.get("mdd")),
+                            help="순공격(hi52 단독) 대비 낙폭")
+                k[1].metric("순공격比 MDD", f"{ro.get('mdd_vs_offense_pp', 0):+.0f}%p",
+                            help="음수 = 낙폭 개선")
+                k[2].metric("약세해 방어", ro.get("bear_defend_years", "—"),
+                            help="지수 하락 연도 중 방어 성공")
+                k[3].metric("초과 DSR", data.f_ratio(ro.get("dsr"), 3),
+                            help="관문 ≥0.95 — 미달이면 초과수익은 통계 무의미(위기집중·whipsaw)")
+                st.caption("👀 방어 기전은 확인(약세해 다수 방어)이나 초과수익 통계 미달 — "
+                           "V자 반등서 whipsaw 위험 · 추적 전용·자동집행 0")
+
+        # 💸 비용·회전율 (확실한 실행 권고)
+        cs = e.get("cost_sensitivity") or {}
+        if cs and not cs.get("error"):
+            with st.expander("💸 비용·회전율 최적화 — 확실한 실행 권고"):
+                cur, best = cs.get("current") or {}, cs.get("best") or {}
+                st.caption(f"축 {cs.get('axis')} · 월간 리밸 회전율 비용이 순수익을 **연 {cur.get('drag_pp')}%p** 갉아먹음")
+                st.dataframe(pd.DataFrame([{
+                    "스킴": r["scheme"], "순CAGR": data.f_frac_pct_s(r["net_cagr"]),
+                    "드래그%p": r["drag_pp"], "회전율": r["turnover"],
+                    "순초과%p": r["net_excess_pp"], "MDD": data.f_frac_pct(r["mdd"]),
+                } for r in cs.get("rows", [])], ), hide_index=True, width="stretch")
+                oos = cs.get("oos") or {}
+                if oos:
+                    reco = oos.get("live_reco") or {}
+                    vc = {"ROBUST": "✅", "MIXED": "🟡", "IN-SAMPLE": "⚠️"}.get(oos.get("verdict"), "")
+                    st.caption(f"**OOS 검증 {vc} {oos.get('verdict')}** — 반기가 월간 이긴 연도 "
+                               f"{int((oos.get('year_win_rate') or 0)*100)}% · gross 보존 {oos.get('gross_preserved')}"
+                               f"(월간 {(oos.get('gross_mo') or 0)*100:.1f}%/반기 {(oos.get('gross_semi') or 0)*100:.1f}%) · "
+                               f"다른 축 확인 {oos.get('cross_axis_confirmed')}")
+                    if reco.get("min_hold_days"):
+                        st.caption(f"→ 라이브 권고: **최소 보유 {reco['min_hold_days']}일** "
+                                   f"(고정 주기 위상위험 회피·연속) · ~{reco['expected_drag_save_pp']}%p 절감 · "
+                                   f"{reco.get('caveat', '')} · env `KR_MOCK_MIN_HOLD_DAYS`")
+                    else:
+                        st.caption("→ 견고 미확인 — 현행 유지(과적합 회피)")
     st.caption("⚠️ OBSERVE = 엣지 단정 불가(정직) · 반영은 모의 한정 · 실계좌 자동집행 0")
 
 

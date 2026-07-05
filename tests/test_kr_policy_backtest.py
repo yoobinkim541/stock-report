@@ -176,3 +176,67 @@ def test_current_recommendation_none_when_short():
     rec = bt.current_recommendation(pd.DataFrame({"winner": s}), s,
                                     configs={"winner": {"hi52": 1.0}})
     assert rec is None
+
+
+# ── 레짐 방어 오버레이 + 비용 스윕 (P4) ───────────────────────────────────────
+
+def test_picks_hysteresis_keeps_holdings_in_buffer():
+    """직전 보유가 top-(k+buffer) 안이면 유지 (회전율 억제)."""
+    idx = pd.bdate_range("2020-01-02", periods=3, freq="ME")
+    # 3개 리밸 시점 · 6종목, hi52 순위를 시점마다 살짝 뒤섞어 경계 유지 검증
+    feats = {}
+    for i, t in enumerate(idx):
+        codes = [f"{j:05d}0" for j in range(1, 7)]
+        vals = [6, 5, 4, 3, 2, 1] if i == 0 else [5, 6, 4, 3, 1, 2]  # 1·2위 스왑
+        feats[t] = pd.DataFrame({"hi52": vals}, index=codes).apply(bt._z)
+    rebal = list(idx)
+    # buffer0: top2 매 시점 그대로 = 시점1에 000010↔000020 스왑 발생
+    p0 = bt._picks_hysteresis(feats, rebal, {"hi52": 1.0}, k=2, buffer=0)
+    # buffer2: top(2+2)=top4 안이면 유지 → 보유 000010·000020 이 top4 안이라 무교체
+    p2 = bt._picks_hysteresis(feats, rebal, {"hi52": 1.0}, k=2, buffer=2)
+    assert bt._avg_turnover(p2, 2) <= bt._avg_turnover(p0, 2)
+
+
+def test_avg_turnover_bounds():
+    picks = {"a": ["1", "2", "3"], "b": ["1", "2", "3"], "c": ["1", "4", "5"]}
+    # b: 무교체(0), c: 2/3 교체 → 평균 (0 + 0.667)/2 = 0.333 (표시용 3자리 반올림)
+    assert bt._avg_turnover(picks, 3) == 0.333
+
+
+def test_regime_overlay_defense_verdict(monkeypatch):
+    """레짐 오버레이 — 방어 verdict 3분기·MDD 지표·DSR 산출 (합성 무예외)."""
+    p = _panels(n_days=1600)
+    feats = {t: f for t in bt.month_ends(p["ret"].index) if (f := bt.features_asof(p, t)) is not None}
+    rebal = sorted(feats.keys())
+    bench = bt.cap_benchmark(p, rebal)
+    out = bt.regime_overlay_eval(p, feats, rebal, bench, ma=100)
+    assert out["code"] in ("GO", "OBSERVE", "NO-GO")
+    assert "overlay" in out and "offense_alone" in out and "bench" in out
+    assert "/" in out["bear_defend_years"] and out["dsr"] is None or isinstance(out["dsr"], float)
+
+
+def test_cost_sensitivity_drag_and_best(monkeypatch):
+    """비용 스윕 — 각 스킴 drag≥0·best 는 순CAGR 최대·현재 대비 gain 산출."""
+    p = _panels(n_days=1600)
+    feats = {t: f for t in bt.month_ends(p["ret"].index) if (f := bt.features_asof(p, t)) is not None}
+    rebal = sorted(feats.keys())
+    bench = bt.cap_benchmark(p, rebal)
+    cs = bt.cost_sensitivity(p, feats, rebal, bench)
+    assert len(cs["rows"]) == 5
+    assert all(r["drag_pp"] >= -1e-9 for r in cs["rows"])          # 무비용이 유비용보다 나쁠 수 없음
+    assert cs["best"]["net_cagr"] == max(r["net_cagr"] for r in cs["rows"])
+    assert cs["current"]["scheme"] == "월간·버퍼2"
+
+
+def test_cost_sensitivity_has_oos_verdict():
+    """비용 스윕 OOS 블록 — 견고성 verdict + 라이브 권고 (최소보유일) 산출."""
+    p = _panels(n_days=1600)
+    feats = {t: f for t in bt.month_ends(p["ret"].index) if (f := bt.features_asof(p, t)) is not None}
+    rebal = sorted(feats.keys())
+    bench = bt.cap_benchmark(p, rebal)
+    cs = bt.cost_sensitivity(p, feats, rebal, bench)
+    o = cs["oos"]
+    assert o["verdict"] in ("ROBUST", "MIXED", "IN-SAMPLE")
+    assert 0.0 <= o["year_win_rate"] <= 1.0 and o["n_years"] >= 1
+    assert isinstance(o["gross_preserved"], bool) and isinstance(o["cross_axis_confirmed"], bool)
+    assert "min_hold_days" in o["live_reco"] and "caveat" in o["live_reco"]

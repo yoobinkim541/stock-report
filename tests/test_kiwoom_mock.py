@@ -371,3 +371,51 @@ def test_main_aborts_on_balance_failure(monkeypatch):
 
 if __name__ == "__main__":
     sys.exit(pytest.main([__file__, "-v"]))
+
+
+# ── 최소 보유기간 게이트 (KR_MOCK_MIN_HOLD_DAYS · 비용 OOS 실증 반영) ──────────
+
+def test_held_days_from_decisions_latest_entry():
+    import kiwoom_mock_track as kt
+    decs = [{"date": "2026-05-01", "side": "편입", "code": "005930"},
+            {"date": "2026-05-10", "side": "퇴출", "code": "005930"},
+            {"date": "2026-06-01", "side": "편입", "code": "005930"},   # 재편입 → 최신 기준
+            {"date": "2026-06-15", "side": "편입", "ticker": "000660.KS"}]
+    hd = kt.held_days_from_decisions(decs, ["005930", "000660", "099999"], "2026-06-21")
+    assert hd["005930"] == 20        # 06-01 기준 (재편입)
+    assert hd["000660"] == 6         # ticker→code 파생
+    assert "099999" not in hd        # 편입 기록 없음 → 제외
+
+
+def test_plan_min_hold_keeps_recent_entry():
+    import kiwoom_mock_track as kt
+    # A 는 타깃(top1), B 는 타깃이탈이나 보유 3일(<60) → 청산 보류
+    signals = [{"code": "A", "is_buy": True, "price": 100, "policy_score": 0.9},
+               {"code": "B", "is_buy": False, "price": 100, "policy_score": 0.1}]
+    positions = {"B": {"shares": 10, "cur_price": 100}}
+    hold = kt.plan_rebalance(signals, positions, 1_000_000, 1, min_hold_days=60,
+                             held_days={"B": 3})
+    assert not any(o["code"] == "B" and o["side"] == "sell" for o in hold)   # 보류
+    # 보유 90일(≥60)이면 정상 청산
+    sold = kt.plan_rebalance(signals, positions, 1_000_000, 1, min_hold_days=60,
+                             held_days={"B": 90})
+    assert any(o["code"] == "B" and o["side"] == "sell" for o in sold)
+
+
+def test_plan_min_hold_zero_is_current_behavior():
+    import kiwoom_mock_track as kt
+    signals = [{"code": "A", "is_buy": True, "price": 100, "policy_score": 0.9}]
+    positions = {"B": {"shares": 10, "cur_price": 100}}
+    # min_hold_days=0 (기본) → 타깃이탈 즉시 청산 (현행 불변)
+    orders = kt.plan_rebalance(signals, positions, 1_000_000, 1, min_hold_days=0)
+    assert any(o["code"] == "B" and o["side"] == "sell" for o in orders)
+
+
+def test_min_hold_default_active_60(monkeypatch):
+    """KR_MOCK_MIN_HOLD_DAYS 기본값 60 = 모의 활성 (미설정 시 비용 OOS 권고값)."""
+    import kiwoom_mock_track as kt
+    monkeypatch.delenv("KR_MOCK_MIN_HOLD_DAYS", raising=False)
+    assert kt._int_env("KR_MOCK_MIN_HOLD_DAYS", 60) == 60
+    # 0 으로 명시 오버라이드 시 현행 무제한 회전 복귀
+    monkeypatch.setenv("KR_MOCK_MIN_HOLD_DAYS", "0")
+    assert kt._int_env("KR_MOCK_MIN_HOLD_DAYS", 60) == 0

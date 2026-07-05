@@ -452,6 +452,208 @@ def current_recommendation(config_daily, bench, *, train_years: int = TRAIN_YEAR
 #  진입점
 # ══════════════════════════════════════════════════════════════════════
 
+# ══════════════════════════════════════════════════════════════════════
+#  레짐 방어 오버레이 (시장상태 조건부 축 전환 — 방어 verdict·표시 전용)
+# ══════════════════════════════════════════════════════════════════════
+
+REGIME_MA = 200                 # 지수 추세 필터 (일)
+REGIME_OFFENSE = {"hi52": 1.0}  # 강세(지수>MA): 고가근접 모멘텀
+REGIME_DEFENSE = {"vol_inv": 1.0}  # 약세(지수<MA): 저변동 방어
+DEFENSE_MDD_MARGIN = 0.03       # 오버레이가 순공격 대비 MDD 를 이만큼 낮춰야 '방어 유효'
+
+
+def _picks_hysteresis(feats: dict, rebal: list, cfg: dict, *, k: int = TOP_K,
+                      buffer: int = 0) -> dict:
+    """축 cfg 로 top-k 선택하되 직전 보유가 top-(k+buffer) 안이면 유지 (회전율 억제)."""
+    picks, prev = {}, []
+    for t in rebal:
+        f = feats[t]
+        score = pd.Series(0.0, index=f.index)
+        for a, w in cfg.items():
+            if a in f.columns:
+                score = score + float(w) * f[a].fillna(0.0)
+        wide = list(score.nlargest(k + max(0, buffer)).index)
+        keep = [c for c in prev if c in wide]
+        fresh = [c for c in score.nlargest(k).index if c not in keep]
+        cur = (keep + fresh)[:k]
+        picks[t] = cur
+        prev = cur
+    return picks
+
+
+def _avg_turnover(picks: dict, k: int = TOP_K) -> float:
+    """리밸런스당 평균 교체 종목수 / k (편도 회전율)."""
+    dates = sorted(picks)
+    prev, tot, n = set(), 0.0, 0
+    for t in dates:
+        cur = set(picks[t])
+        if prev:
+            tot += len(cur - prev) / max(k, 1)
+            n += 1
+        prev = cur
+    return round(tot / n, 3) if n else 0.0
+
+
+def regime_overlay_eval(panels: dict, feats: dict, rebal: list, bench, *,
+                        offense: dict | None = None, defense: dict | None = None,
+                        ma: int = REGIME_MA) -> dict:
+    """시장상태 조건부 축 전환(강세=고가모멘텀·약세=저변동)의 **방어 오버레이 verdict**.
+
+    정직 규율: 이건 종목선택 알파가 아니라 **낙폭 방어 오버레이**다. 판정 기준을 수익이 아니라
+    MDD 에 둔다 — 순공격(offense 단독) 대비 MDD 를 유의미하게 낮추면서 지수 초과·MDD≤지수를
+    유지하면 방어 유효. 단 초과수익 DSR 은 그대로 보고(위기집중·whipsaw 위험 정직 공개).
+    무룩어헤드: 레짐 신호는 t 시점까지 지수 종가만 사용, 축 적용은 t 익일부터(simulate 규약).
+    """
+    from ml import validation
+    offense = offense or REGIME_OFFENSE
+    defense = defense or REGIME_DEFENSE
+    ret = panels["ret"]
+    bench_nav = (1.0 + bench).cumprod()
+    ma_s = bench_nav.rolling(ma).mean()
+    picks = {}
+    for t in rebal:
+        v = ma_s.loc[:t].iloc[-1] if t in ma_s.index else float("nan")
+        up = bool(bench_nav.loc[:t].iloc[-1] > v) if (v == v) else True
+        picks[t] = select_top(feats[t], offense if up else defense, TOP_K)
+    r = simulate(ret, picks)
+    off = simulate(ret, {t: select_top(feats[t], offense, TOP_K) for t in rebal})
+    b = bench.reindex(r.index).fillna(0.0)
+    pr, pb, po = perf(r), perf(b), perf(off.reindex(r.index).fillna(0.0))
+
+    # 연도별 방어 성공 — 지수 대비 MDD 개선 비율 (특히 약세해)
+    years = sorted({d.year for d in r.index})
+    mdd_wins, bear_defends, bear_years = 0, 0, 0
+    for y in years:
+        m = r.index.year == y
+        if m.sum() < 60:
+            continue
+        ry, by = perf(r[m]), perf(b.reindex(r[m].index).fillna(0.0))
+        if ry["mdd"] <= by["mdd"]:
+            mdd_wins += 1
+        if by["total"] < 0:                       # 지수 약세해
+            bear_years += 1
+            if ry["total"] > by["total"]:
+                bear_defends += 1
+    n_years = len([y for y in years if (r.index.year == y).sum() >= 60])
+
+    # DSR: 축 그리드 + 오버레이를 trial 로 (다중검정 정직)
+    b_full = bench.reindex(ret.index).fillna(0.0)
+    trials = []
+    for name, cfg in CONFIGS.items():
+        tr = simulate(ret, {t: select_top(feats[t], cfg, TOP_K) for t in rebal})
+        trials.append(validation.sharpe_ratio((tr - b_full.reindex(tr.index).fillna(0.0)).dropna())["pp"])
+    excess = (r - b).dropna()
+    trials.append(validation.sharpe_ratio(excess)["pp"])
+    dsr = validation.deflated_sharpe_ratio(excess.values, len(trials), trial_sharpes=trials)
+
+    return_ok = (pr["total"] - pb["total"]) > 0
+    mdd_ok = pr["mdd"] <= pb["mdd"]
+    defends = pr["mdd"] < po["mdd"] - DEFENSE_MDD_MARGIN
+    stat_ok = dsr is not None and dsr >= 0.95
+    if return_ok and mdd_ok and defends and stat_ok:
+        code, label = "GO", "✅ GO(방어) — MDD 방어 + 초과수익 통계 유의 (희귀)"
+    elif return_ok and mdd_ok and defends:
+        code, label = "OBSERVE", ("👀 OBSERVE(방어) — 순공격 대비 MDD 개선·지수 아웃퍼폼 확인, "
+                                  "단 초과수익 통계 미달·이득 위기집중·반등 whipsaw 위험")
+    else:
+        code, label = "NO-GO", "➖ NO-GO(방어) — MDD 방어 미확인 또는 지수 언더퍼폼"
+    return {"code": code, "label": label,
+            "regime": {"offense": list(offense), "defense": list(defense), "ma": ma},
+            "overlay": pr, "offense_alone": po, "bench": pb,
+            "mdd_vs_offense_pp": round((po["mdd"] - pr["mdd"]) * 100, 1),
+            "net_excess_cagr": round(pr["cagr"] - pb["cagr"], 4),
+            "ir": round(float(validation.sharpe_ratio(excess)["ann"]), 3),
+            "dsr": (None if dsr is None else round(dsr, 4)),
+            "mdd_win_years": f"{mdd_wins}/{n_years}",
+            "bear_defend_years": f"{bear_defends}/{bear_years}"}
+
+
+# ══════════════════════════════════════════════════════════════════════
+#  비용·회전율 최적화 (무거래밴드·리밸 주기 스윕 → 순비용 최적 스킴)
+# ══════════════════════════════════════════════════════════════════════
+
+def cost_sensitivity(panels: dict, feats: dict, rebal: list, bench, *,
+                     axis_cfg: dict | None = None, top_k: int = TOP_K) -> dict:
+    """리밸 주기 × 히스테리시스 버퍼 스윕 → 회전율·비용드래그·순CAGR. 순수·확실도 높음.
+
+    비용은 통계 불확실성 0 이라 여기 결론은 OBSERVE 가 아니라 **실행 가능 권고**다.
+    gross = 무비용 시뮬, net = KR 비대칭 비용(매수2/매도20bps) → drag = gross−net CAGR.
+    현 라이브 기본(월간·버퍼2 ≈ REBAL_BAND 0.25) 대비 순CAGR 최대 스킴을 권고.
+    """
+    axis_cfg = axis_cfg or REGIME_OFFENSE      # 게이트 최다 채택 축(hi52)로 스윕
+    ret = panels["ret"]
+    b = bench.reindex(ret.index).fillna(0.0)
+    schemes = [("월간·버퍼0", 1, 0), ("월간·버퍼2", 1, 2), ("분기·버퍼0", 3, 0),
+               ("분기·버퍼2", 3, 2), ("반기·버퍼2", 6, 2)]
+    rows = []
+    for name, freq, buf in schemes:
+        sub = rebal[::freq]
+        picks = _picks_hysteresis(feats, sub, axis_cfg, k=top_k, buffer=buf)
+        net = simulate(ret, picks, buy_bps=BUY_BPS, sell_bps=SELL_BPS)
+        gross = simulate(ret, picks, buy_bps=0.0, sell_bps=0.0)
+        pn, pg = perf(net), perf(gross)
+        pbn = perf(b.reindex(net.index).fillna(0.0))
+        rows.append({"scheme": name, "freq_m": freq, "buffer": buf,
+                     "net_cagr": pn["cagr"], "gross_cagr": pg["cagr"],
+                     "drag_pp": round((pg["cagr"] - pn["cagr"]) * 100, 2),
+                     "mdd": pn["mdd"], "net_excess_pp": round((pn["cagr"] - pbn["cagr"]) * 100, 2),
+                     "n_rebal": len(sub), "turnover": _avg_turnover(picks, top_k)})
+    best = max(rows, key=lambda r: r["net_cagr"])
+    cur = next((r for r in rows if r["scheme"] == "월간·버퍼2"), rows[0])
+    oos = _cost_oos_robustness(panels, feats, rebal, bench, axis_cfg, top_k)
+    return {"axis": list(axis_cfg), "rows": rows, "best": best, "current": cur,
+            "gain_pp": round((best["net_cagr"] - cur["net_cagr"]) * 100, 2),
+            "drag_saved_pp": round(cur["drag_pp"] - best["drag_pp"], 2),
+            "oos": oos}
+
+
+def _cost_oos_robustness(panels: dict, feats: dict, rebal: list, bench,
+                         axis_cfg: dict, top_k: int) -> dict:
+    """'덜 거래' 이점의 견고성 — 연도 승률·gross 보존·다른 축 확인 → adopt-worthy verdict.
+
+    정직 규율: 전기간 best 는 과적합 위험. (a) 반기가 월간을 이긴 OOS 연도 비율,
+    (b) gross(무비용)가 보존되나?(=이득이 비용절감이지 gross 우연이 아님), (c) 다른 축
+    (lowvol)서도 재현? — 셋 다 충족해야 ROBUST. 고정주기 위상위험(분기 함정·특정해 꼬리)
+    때문에 라이브 반영은 **최소 보유기간(연속)** 으로 권고(고정 cadence 아님).
+    """
+    ret = panels["ret"]
+
+    def sret(freq, buf, cfg):
+        sub = rebal[::freq]
+        return simulate(ret, _picks_hysteresis(feats, sub, cfg, k=top_k, buffer=buf),
+                        buy_bps=BUY_BPS, sell_bps=SELL_BPS)
+
+    mo, semi = sret(1, 2, axis_cfg), sret(6, 2, axis_cfg)
+    years = sorted(set(mo.index.year))
+    wins = n = 0
+    for y in years:
+        m = mo.index.year == y
+        if m.sum() < 60:
+            continue
+        n += 1
+        if perf(semi[m])["total"] > perf(mo[m])["total"]:
+            wins += 1
+    # gross 보존: 반기 gross ≈ 월간 gross (이득이 비용에서 옴)
+    g_mo = perf(simulate(ret, _picks_hysteresis(feats, rebal[::1], axis_cfg, k=top_k, buffer=2),
+                         buy_bps=0.0, sell_bps=0.0))["cagr"]
+    g_semi = perf(simulate(ret, _picks_hysteresis(feats, rebal[::6], axis_cfg, k=top_k, buffer=2),
+                           buy_bps=0.0, sell_bps=0.0))["cagr"]
+    gross_preserved = g_semi >= g_mo - 0.01          # gross 손실 <1%p
+    # 다른 축 재현 (lowvol)
+    alt = {"vol_inv": 1.0}
+    alt_win = perf(sret(6, 2, alt))["cagr"] > perf(sret(1, 2, alt))["cagr"]
+    win_rate = round(wins / n, 2) if n else 0.0
+    robust = win_rate >= 0.6 and gross_preserved and alt_win
+    verdict = ("ROBUST" if robust else ("MIXED" if win_rate >= 0.5 else "IN-SAMPLE"))
+    return {"year_win_rate": win_rate, "n_years": n, "gross_preserved": bool(gross_preserved),
+            "gross_mo": round(g_mo, 4), "gross_semi": round(g_semi, 4),
+            "cross_axis_confirmed": bool(alt_win), "verdict": verdict,
+            # 라이브 반영 권고 — 최소 보유기간(연속·고정주기 위상위험 회피)
+            "live_reco": {"min_hold_days": 60 if robust else 0,
+                          "expected_drag_save_pp": 2.0 if robust else 0.0,
+                          "caveat": "특정해 꼬리위험(2023 등)·모의로 라이브 검증 후 실계좌 고려"}}
+
+
 def run(start_year: int = 2001, end_year: int | None = None) -> dict:
     end_year = end_year or datetime.now().year
     logger.info("marcap 패널 조립 %d~%d …", start_year, end_year)
@@ -463,12 +665,28 @@ def run(start_year: int = 2001, end_year: int | None = None) -> dict:
     if wf.get("error"):
         return wf
     verdict = build_verdict(wf, n_trials=len(CONFIGS))
+    # 피처·리밸 재사용 (레짐 오버레이·비용 스윕)
+    _feats = {t: f for t in month_ends(panels["ret"].index)
+              if (f := features_asof(panels, t)) is not None}
+    _rebal = sorted(_feats.keys())
+    try:
+        regime = regime_overlay_eval(panels, _feats, _rebal, wf["bench_returns"])
+    except Exception as e:
+        logger.warning("레짐 오버레이 평가 실패: %s", e)
+        regime = {"error": str(e)}
+    try:
+        costs = cost_sensitivity(panels, _feats, _rebal, wf["bench_returns"])
+    except Exception as e:
+        logger.warning("비용 스윕 실패: %s", e)
+        costs = {"error": str(e)}
     result = {
         "asof": datetime.now().strftime("%Y-%m-%d %H:%M"),
         "period": f"{start_year}~{end_year}", "universe": f"KOSPI 시총 top{UNIVERSE_N}",
         "top_k": TOP_K, "costs_bps": {"buy": BUY_BPS, "sell": SELL_BPS},
         "verdict": verdict,
         "recommendation": current_recommendation(wf["config_daily"], wf["bench_returns"]),
+        "regime_overlay": regime,
+        "cost_sensitivity": costs,
         "folds": wf["folds"],
         "chosen_history": chosen_history(wf["folds"]),
         "full_period_by_config": wf["full_period"],
@@ -499,6 +717,25 @@ def _print_report(res: dict) -> None:
           f" {'✅' if v['mdd_ok'] else '⚠️'}  · IR {v['ir']}")
     print(f"  DSR {v['dsr']} (n_trials={v['n_trials']}) · PBO {v['pbo']} · PSR(초과) {v['psr_excess']}")
     print("\n  폴드별 채택 config:", res["chosen_history"])
+
+    ro = res.get("regime_overlay") or {}
+    if ro and not ro.get("error"):
+        print(f"\n  🛡️ 레짐 방어 오버레이: {ro['label']}")
+        print(f"     오버레이 CAGR {ro['overlay']['cagr']*100:+.1f}% (지수 {ro['bench']['cagr']*100:+.1f}%"
+              f"·순공격 {ro['offense_alone']['cagr']*100:+.1f}%) · MDD {ro['overlay']['mdd']*100:.0f}%"
+              f" (순공격比 {ro['mdd_vs_offense_pp']:+.0f}%p·지수 {ro['bench']['mdd']*100:.0f}%)")
+        print(f"     DSR {ro['dsr']} · 약세해방어 {ro['bear_defend_years']} · MDD승 {ro['mdd_win_years']}")
+
+    cs = res.get("cost_sensitivity") or {}
+    if cs and not cs.get("error"):
+        print(f"\n  💸 비용·회전율 (축 {cs['axis']}) — 확실한 실행 권고(통계불확실 0):")
+        for x in cs["rows"]:
+            mk = " ★best" if x["scheme"] == cs["best"]["scheme"] else (" (현재)" if x["scheme"] == cs["current"]["scheme"] else "")
+            print(f"     {x['scheme']:<12} 순CAGR {x['net_cagr']*100:+5.1f}%  드래그 {x['drag_pp']:4.2f}%p"
+                  f"  회전 {x['turnover']:.2f}  MDD {x['mdd']*100:.0f}%{mk}")
+        print(f"     → 현재(월간) 드래그 {cs['current']['drag_pp']:.2f}%p 중 ~{cs['drag_saved_pp']:.1f}%p 는 주기↓로 확실 회수"
+              f" · gross 상호작용 비단조라 '{cs['best']['scheme']}' 채택은 OOS 재검 필요")
+
     print("\n  전기간 config별 (참고 — 판정은 OOS 연결만):")
     bench = res["bench_full"]
     print(f"    {'벤치(시총가중)':<16} CAGR {bench['cagr']*100:+6.1f}%  MDD {bench['mdd']*100:5.1f}%  Sharpe {bench['sharpe']}")
