@@ -89,7 +89,11 @@ def build_message(res: dict, *, enabled: bool, shadow_written: bool) -> str:
         lines.append(f"💸 회전율 비용: 현재(월간) 드래그 {cur.get('drag_pp')}%p/년 · OOS {oos.get('verdict')}")
         lines.append(f"   반기>월간 {int((oos.get('year_win_rate') or 0)*100)}%·gross보존 {oos.get('gross_preserved')}·타축확인 {oos.get('cross_axis_confirmed')}")
         if reco.get("min_hold_days"):
-            live = "✅ 적용 중" if os.getenv("KR_MOCK_MIN_HOLD_DAYS", "0") != "0" else "off(KR_MOCK_MIN_HOLD_DAYS)"
+            try:
+                eff = int(os.getenv("KR_MOCK_MIN_HOLD_DAYS", "60"))
+            except ValueError:
+                eff = 60
+            live = f"✅ 적용 중 {eff}일" if eff > 0 else "off(KR_MOCK_MIN_HOLD_DAYS=0)"
             lines.append(f"→ 권고 최소보유 {reco['min_hold_days']}일 (~{reco['expected_drag_save_pp']}%p 절감·모의 한정) · {live}")
         else:
             lines.append("→ 견고 미확인 — 현행 유지(과적합 회피)")

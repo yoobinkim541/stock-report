@@ -409,3 +409,13 @@ def test_plan_min_hold_zero_is_current_behavior():
     # min_hold_days=0 (기본) → 타깃이탈 즉시 청산 (현행 불변)
     orders = kt.plan_rebalance(signals, positions, 1_000_000, 1, min_hold_days=0)
     assert any(o["code"] == "B" and o["side"] == "sell" for o in orders)
+
+
+def test_min_hold_default_active_60(monkeypatch):
+    """KR_MOCK_MIN_HOLD_DAYS 기본값 60 = 모의 활성 (미설정 시 비용 OOS 권고값)."""
+    import kiwoom_mock_track as kt
+    monkeypatch.delenv("KR_MOCK_MIN_HOLD_DAYS", raising=False)
+    assert kt._int_env("KR_MOCK_MIN_HOLD_DAYS", 60) == 60
+    # 0 으로 명시 오버라이드 시 현행 무제한 회전 복귀
+    monkeypatch.setenv("KR_MOCK_MIN_HOLD_DAYS", "0")
+    assert kt._int_env("KR_MOCK_MIN_HOLD_DAYS", 60) == 0

@@ -75,8 +75,10 @@ SLIPPAGE   = _float_env("KR_MOCK_SLIPPAGE", 0.01)   # 매수 사이징 슬리피
 REBAL_BAND = _float_env("KR_MOCK_REBAL_BAND", 0.25)  # 무거래 밴드(목표比 ±25% 벗어날 때만 조정·회전율↓)
 EXIT_BUFFER = _int_env("KR_MOCK_EXIT_BUFFER", 2)     # 히스테리시스(top-N+2 안이면 보유 유지·경계 flip 방지)
 # ★최소 보유기간 — backtest/kr_policy_backtest 비용 OOS 실증(슬로우 신호 과잉거래가 순수익 ~2.4%p
-# 잠식·최소보유가 gross 보존하며 비용만 절감·64% 연도·cross-axis). 기본 0=현행(무제한 회전).
-MIN_HOLD_DAYS = _int_env("KR_MOCK_MIN_HOLD_DAYS", 0)
+# 잠식·최소보유가 gross 보존하며 비용만 절감·반기>월간 64% 연도·cross-axis=ROBUST). **모의 활성**:
+# 기본 60(OOS 권고값 반영·모의로 라이브 검증). KR_MOCK_MIN_HOLD_DAYS=0 으로 되돌리면 현행 무제한 회전.
+# 모의 한정 — 실계좌 자동 경로 없음. 꼬리위험(2023 등) 있어 실계좌는 모의 검증 후 수동 판단.
+MIN_HOLD_DAYS = _int_env("KR_MOCK_MIN_HOLD_DAYS", 60)
 QUOTE_STALE_S = _int_env("REALTIME_QUOTE_STALE_S", 10)
 
 
