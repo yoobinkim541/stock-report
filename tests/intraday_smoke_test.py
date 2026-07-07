@@ -128,6 +128,17 @@ def run_tests() -> list[str]:
     failures += _check("bar_anom", _anom,
         ("역행 → v=0·v_anom", lambda r: r[0]["v"] == 0.0 and r[0]["v_anom"] is True))
 
+    def _allowed():
+        a = ib.BarAggregator()
+        a.set_allowed({"QQQ"})
+        a.on_tick("QQQ", 500.0, 100, t0, "US")
+        a.on_tick("621947", 10.0, 50, t0, "KR")     # 파싱 글리치 위장 심볼 (6자리 숫자)
+        a.on_tick("111.29", 5.0, 10, t0, "US")      # 가격이 심볼 자리에 온 케이스
+        return a.roll(t0 + 61)
+
+    failures += _check("bar_allowed", _allowed,
+        ("화이트리스트 밖 틱 무시", lambda r: [b["symbol"] for b in r] == ["QQQ"]))
+
     # ── i3: reader 왕복·5m 리샘플·프로파일 ────────────────────────────────────
     logger.info("[i3] bar store 왕복")
 

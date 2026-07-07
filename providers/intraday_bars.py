@@ -70,10 +70,19 @@ class BarAggregator:
         self._cur: dict[str, dict] = {}     # sym → 진행 중 bar
         self._prev_cum: dict[str, float] = {}   # sym → 직전 관측 누적거래량
         self._done: list[dict] = []
+        self._allowed: set[str] | None = None   # 구독 심볼 화이트리스트 (None=전부 허용)
+
+    def set_allowed(self, symbols) -> None:
+        """구독 중인 심볼만 집계 — 멀티레코드 프레임 폭 어긋남으로 rec[0]에 가격/거래량이
+        오는 파싱 글리치가 bar store(학습 데이터)를 오염시키는 것을 원천 차단.
+        (6자리 숫자 거래량은 KR 심볼 패턴으로 위장하므로 패턴 검증으론 부족 — 라이브 실증.)"""
+        self._allowed = set(symbols) if symbols is not None else None
 
     def on_tick(self, symbol: str, price: float, cum_volume, ts_epoch: float,
                 market: str = "KR") -> None:
         if not symbol or not price or price <= 0:
+            return
+        if self._allowed is not None and symbol not in self._allowed:
             return
         minute = int(ts_epoch // 60)
         cur = self._cur.get(symbol)

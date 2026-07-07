@@ -343,6 +343,12 @@ def compute_watchlist() -> tuple[dict, dict]:
             _classify(t, kr, us)
     except Exception as e:
         logger.warning("보유 티커 로드 실패: %s", e)
+    try:                                     # 단기 유니버스 — 알림보다 앞 (bar 는 스트림 필수,
+        from providers import intraday_universe   # 가격알림은 스트림 없어도 5분 크론이 폴백 체크)
+        for t in intraday_universe.watchlist_symbols():
+            _classify(t, kr, us)
+    except Exception as e:
+        logger.warning("단기 유니버스 로드 실패: %s", e)
     try:
         from bot import price_alerts
         for a in price_alerts.load_alerts():
@@ -350,12 +356,6 @@ def compute_watchlist() -> tuple[dict, dict]:
                 _classify(a.get("ticker"), kr, us)
     except Exception as e:
         logger.warning("알림 티커 로드 실패: %s", e)
-    try:                                     # 단기 유니버스 (최후미 우선순위 — 캡 초과분 드롭)
-        from providers import intraday_universe
-        for t in intraday_universe.watchlist_symbols():
-            _classify(t, kr, us)
-    except Exception as e:
-        logger.warning("단기 유니버스 로드 실패: %s", e)
     return select_watchlist(kr, us)
 
 
@@ -433,6 +433,8 @@ async def _session(approval_key: str) -> None:
     sel, dropped = compute_watchlist()
     if dropped["KR"] or dropped["US"]:
         logger.warning("워치리스트 캡 초과 드롭: %s", dropped)
+    if _BAR_AGG is not None:
+        _BAR_AGG.set_allowed(set(sel["KR"]) | set(sel["US"]))   # 구독 심볼만 bar 집계 (오염 차단)
     latest: dict = {}
     async with websockets.connect(_WS_REAL, ping_interval=None, max_size=None) as ws:
         # 등록: KR 체결+호가, (US 활성 시) 해외 체결+호가
