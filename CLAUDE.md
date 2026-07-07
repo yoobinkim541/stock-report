@@ -130,7 +130,7 @@ crons/news_spike_detector.py (크론 매 1분)
 | `crons/advice_adaptive_eval.py` | 포트폴리오 advice 적응 평가 (paper_track A/B meta vs rule ★목적함수 → blend 신뢰도 shadow 권고) | 토 04:30 UTC |
 | `crons/us_axes_eval.py` | US 선택정책 가격축 ★게이트 주간 재검증 (`backtest/us_policy_backtest` — S&P500 **시점 멤버십 마스킹**(fja05680) + yfinance 순비용 워크포워드 vs QQQ·**커버리지 강등**[상폐 가격 부재 시 GO→OBSERVE]) — `ADAPTIVE_US_AXES_ENABLED` 시 shadow→`us_policy.load_params` 모의 반영(공용 `ml/adaptive/axes_shadow`) | 토 05:45 UTC |
 | `crons/kr_axes_eval.py` | KR 선택정책 가격축 ★게이트 주간 재검증 (`backtest/kr_policy_backtest` 25년 marcap 무생존편향·순비용 워크포워드 → DSR/PBO verdict + 트레일링 5년 권고 축 `current_recommendation` + **🛡️레짐 방어 오버레이**[강세=고가모멘텀·약세=저변동 전환 → MDD 방어 verdict·**수익 아님**·약세해 6/7 방어이나 초과 DSR 미달] + **💸비용·회전율 스윕**[월간 리밸 드래그 ~2.4%p/년·주기↓로 확실 회수·gross 비단조라 OOS 재검]) — `ADAPTIVE_KR_AXES_ENABLED` 시 shadow→`kr_policy.load_params` 가 **모의 선택에만** 반영(클램프·가격축 합 ≤50% 상한·21일 stale 무시). **현재 OBSERVE**(OOS +5.5%p/년·MDD≤지수·DSR 미달 — 엣지 단정 불가) | 토 05:30 UTC |
-| `reports/source_collector.py` | 전체 소스 수집 (텔레그램 채널·FRED·국채·시장 스냅샷) → JSONL 캐시. **소스별 헬스 기록**(`source_health.json` — 소스 크래시 격리·수집 0건 공백 감지)·텔레그램 **본문(body ≤3000자) 수집**(직접 HTML — 레딧분석 등 장문 구조화·티커/테마는 본문 우선)·**포스트 유형 태그**(레딧분석/속보/프리마켓)·다이제스트에 레딧/WSB 심리 한 줄·텔레그램 **t.me/s 직접 HTML 폴백**(jina 장애/무 bold 채널)·FRED 재시도 | 매 30분 (:05/:35) |
+| `reports/source_collector.py` | 전체 소스 수집 (텔레그램 채널·FRED·국채·시장 스냅샷) → JSONL 캐시. **소스별 헬스 기록**(`source_health.json` — 소스 크래시 격리·수집 0건 공백 감지)·텔레그램 **본문(body ≤3000자) 수집**(직접 HTML — 레딧분석 등 장문 구조화·티커/테마는 본문 우선)·**포스트 유형 태그**(레딧분석/속보/프리마켓)·다이제스트에 레딧/WSB 심리 한 줄·텔레그램 **t.me/s 직접 HTML 폴백**(jina 장애/무 bold 채널)·**arca/WGB 직접 HTML 폴백**·FRED 재시도+**공식 API 폴백**(`FRED_API_KEY`)·오류 원인 헬스 기록(경보에 표시)·무성공 grace 6h(배포 직후 오탐 방지) | 매 30분 (:05/:35) |
 | `crons/paper_track.py` | MetaAllocator vs Phase 규칙 A/B 페이퍼 트레이딩 (월요일 Sharpe 비교 발송) | 평일 22:50 UTC |
 | `crons/fundamental_snapshot.py` | 펀더멘털 point-in-time 스냅샷 적재 (look-ahead 없는 학습 피처용) | 토 01:00 UTC |
 | `crons/options_snapshot.py` | 옵션 지표 스냅샷 (ATM IV·풋콜비·스큐·기대변동폭) — 학습 피처 축적 | 평일 21:30 UTC |
@@ -315,6 +315,8 @@ crons/news_spike_detector.py (크론 매 1분)
 | `INVESTMENT_REPORT_ARCA_PAGES` | — | `1` |
 | `STOCK_COLLECTOR_ARCA_PAGES` | — | `2` |
 | `STOCK_COLLECTOR_TG_CHANNELS` | — | `yuzukinaok1,insidertracking` (뉴스 텔레그램 채널 — 죽은 채널 무배포 교체) |
+| `FRED_API_KEY` | — | — (FRED 공식 API 폴백 키 — fredgraph.csv 차단 시 복구 경로. 무료 발급: fred.stlouisfed.org/docs/api/api_key.html) |
+| `JINA_API_KEY` | — | — (r.jina.ai 인증 — 익명 레이트리밋 완화. arca/WGB 프록시 수집 안정화) |
 | `STOCK_REPORT_PROJECT_DIR` | — | `/home/ubuntu/projects/stock-report` |
 | `BARBELL_MAX_DCA_MULT` | — | `5.0` (DCA 배율 절대 상한 — F&G·ML 증폭 폭주 차단) |
 | `BARBELL_DCA_VOL_CAP` | — | `0.40` (QQQ 연변동성 초과 시 DCA 배율 비례 축소) |

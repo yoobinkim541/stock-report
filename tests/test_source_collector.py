@@ -344,3 +344,94 @@ def test_collect_once_isolates_source_crash(tmp_path, monkeypatch):
     h = sc.load_source_health(tmp_path / "cache")
     assert h["saveticker"]["last_count"] == 0                     # 크래시 소스 = 0건 기록
     assert h["telegram:yuzukinaok1"]["last_count"] == 1
+
+
+# ── 죽은 출처 복구 — 직접 폴백·FRED API·오류 원인 기록 ───────────────────────
+
+def test_parse_arca_html():
+    html = '''
+    <a class="title" href="/b/stock/172799906?p=1"><span>🧠분석</span> 로마 시대의 지중해 무역</a>
+    <a class="title" href="/b/stock/172799907?p=1">잡담 글은 라벨 없음</a>
+    <a class="title" href="/b/stock/172799906?p=1">중복 id</a>
+    '''
+    rows = sc._parse_arca_html(html)
+    assert rows[0][0] == "172799906" and "지중해 무역" in rows[0][1]
+    assert len(rows) == 2                                     # 중복 id 제거
+
+
+def test_fetch_arca_falls_back_to_direct(monkeypatch):
+    def fake_get(url, timeout=0):
+        if url.startswith("https://r.jina.ai/"):
+            raise RuntimeError("429 rate limited")
+        class R:
+            text = '<a href="/b/stock/111?p=1">📰뉴스 반도체 수출 규제</a>'
+        return R()
+    monkeypatch.setattr(sc, "_bounded_get", fake_get)
+    events = sc.fetch_arca_events(max_pages=1)
+    assert len(events) == 1 and events[0]["url"].endswith("/111")
+    assert events[0]["category"] == "📰뉴스"
+
+
+def test_parse_wgb_html():
+    html = '''
+    <tr><td><a href="/x">5 years</a></td><td>3.456%</td></tr>
+    <tr><td><a href="/y">10 years</a></td><td class="w3">4.395 %</td></tr>
+    <tr><td>비관련 99.9%</td></tr>
+    '''
+    y = sc._parse_yields_from_wgb_html(html)
+    assert y == {"5Y": 3.456, "10Y": 4.395}
+
+
+def test_fetch_wgb_falls_back_to_direct(monkeypatch):
+    def fake_get(url, timeout=0):
+        if url.startswith("https://r.jina.ai/"):
+            raise RuntimeError("boom")
+        class R:
+            text = '<tr><td><a>10 years</a></td><td>4.100%</td></tr>'
+        return R()
+    monkeypatch.setattr(sc, "_bounded_get", fake_get)
+    events = sc.fetch_world_gov_bond_events({"united-states": "미국 국채금리"})
+    assert len(events) == 1 and events[0]["metrics"]["yield_pct"] == 4.1
+
+
+def test_fred_api_fallback(monkeypatch):
+    monkeypatch.setenv("FRED_API_KEY", "testkey")
+    class R:
+        def raise_for_status(self): pass
+        def json(self):
+            return {"observations": [
+                {"date": "2026-07-04", "value": "4.35"},
+                {"date": "2026-07-03", "value": "."},
+                {"date": "2026-07-02", "value": "4.30"}]}
+    monkeypatch.setattr(sc.requests, "get", lambda *a, **k: R())
+    latest, prev = sc._fred_api_latest("DGS10")
+    assert latest == ("2026-07-04", "4.35")
+    assert prev == ("2026-07-02", "4.30")                     # '.' 결측 건너뜀
+
+
+def test_fred_api_fallback_no_key(monkeypatch):
+    monkeypatch.delenv("FRED_API_KEY", raising=False)
+    assert sc._fred_api_latest("DGS10") == (None, None)
+
+
+def test_health_records_error_and_grace(tmp_path):
+    cache = tmp_path / "cache"
+    t0 = datetime(2026, 7, 7, 10, 0, tzinfo=KST)
+    sc._LAST_ERRORS.clear()
+    sc._note_error("fred", "fredgraph.csv: 403 Forbidden")
+    h = sc.update_source_health([], cache_dir=cache, now=t0)
+    assert h["fred"]["last_error"].startswith("fredgraph.csv")
+    assert h["fred"]["first_run"].startswith("2026-07-07")
+
+    # grace: 첫 기록 2h 후 — 무성공이어도 아직 경보 아님 (fred grace = min(72,6)=6h)
+    bad_2h = {s["source"]: s for s in sc.stale_sources(h, now=t0 + timedelta(hours=2))}
+    assert "fred" not in bad_2h
+    # 7h 후 — grace 초과 → 경보 + 원인 포함
+    bad_7h = {s["source"]: s for s in sc.stale_sources(h, now=t0 + timedelta(hours=7))}
+    assert "fred" in bad_7h and bad_7h["fred"]["error"].startswith("fredgraph.csv")
+
+    # 성공하면 오류 제거
+    sc._LAST_ERRORS.pop("fred", None)
+    h2 = sc.update_source_health([{"source": "fred", "title": "x"}], cache_dir=cache,
+                                 now=t0 + timedelta(hours=8))
+    assert "last_error" not in h2["fred"] and h2["fred"]["first_run"] == h["fred"]["first_run"]
