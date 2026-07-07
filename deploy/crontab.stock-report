@@ -105,5 +105,7 @@ PATH=/home/ubuntu/.local/bin:/usr/local/bin:/usr/bin:/bin
 # ── 테스트·헬스체크 ──────────────────────────────────────────────────────────
 # 기능 검증 연기 테스트 25항목 (실패 시만 알림)
 0 0 * * * cd /home/ubuntu/projects/stock-report && uv run python tests/bot_smoke_test.py >> /tmp/bot_smoke_test.log 2>&1               # 00:00 UTC = 09:00 KST
+# 단기(1m/5m) 모의 파이프라인 연기 테스트 (무네트워크·합성 — 실패 시만 알림)
+10 0 * * 1-5 cd /home/ubuntu/projects/stock-report && uv run python tests/intraday_smoke_test.py >> /tmp/intraday_smoke_test.log 2>&1   # 00:10 UTC = 09:10 KST
 # 봇·서버 상태 점검 (프로세스·PID·파일 신선도·store DB 무결성)
 */30 * * * * cd /home/ubuntu/projects/stock-report && uv run python tests/bot_healthcheck.py >> /tmp/bot_healthcheck.log 2>&1         # 매 30분

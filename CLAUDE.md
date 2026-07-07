@@ -62,7 +62,7 @@ crons/news_spike_detector.py (크론 매 1분)
 | `tax_tracker.py` | 실현손익 기록·조회·세금 계산 | `~/.local/share/stock-report/tax_records.json` |
 | `portfolio_tracker.py` | 일일 히스토리 + 배당 기록 | `~/.local/share/stock-report/` |
 | `portfolio_sync_server.py` | 외부 잔고 수신 Flask 서버 (port 8765, Bearer 인증) | — |
-| `kis_stream.py` | KIS 실시간 시세 **읽기전용** WebSocket 상시 프로세스 — 실전 WS(`ops.koreainvestment.com:21000`) 하드락·체결(가격·거래량)/호가 → 캐시 coalesce flush. `REALTIME_ENABLED` 게이트·주문경로 0(grep 강제)·재접속 백오프·watchdog 재기동 | `~/.cache/kis_realtime_quotes.json` |
+| `kis_stream.py` | KIS 실시간 시세 **읽기전용** WebSocket 상시 프로세스 — 실전 WS(`ops.koreainvestment.com:21000`) 하드락·체결(가격·거래량)/호가 → 캐시 coalesce flush. `REALTIME_ENABLED` 게이트·주문경로 0(grep 강제)·재접속 백오프·watchdog 재기동 + **틱→1분봉 sink**(`INTRADAY_BARS_ENABLED` 시 `providers/intraday_bars.BarAggregator` — 단기 모의 데이터층) | `~/.cache/kis_realtime_quotes.json` |
 | `safe_io.py` | 멀티프로세스 안전 파일 I/O — atomic write + 교차 프로세스 쓰기 락(portfolio_snapshot writer 공용) | `<path>.lock` |
 | `ticker_names.py` | 종목 티커↔회사명 **단일 진실원**(표시·검색 공용) — 큐레이트 EN/KO/KR 시드(**US 대형주 ~70 확장: 버크셔·JPM·월마트·비자·J&J·코카콜라·인기 ETF 등 한글별칭 포함** → universe 118; **L: S&P500 전체(`sp500_seed` ~503) 병합 → universe ~543**) + 역인덱스 + yfinance 디스크캐시(graceful). `display_name`(US 영문·.KS 한글)·`label`(`회사명 (티커)`·maxlen)·`resolve`(한/영/티커→티커)·`normalize_input`(자유입력→정규 티커\|None·티커형은 정확매칭만→부분매칭 오염 차단·시드밖 리터럴 통과)·`search`. `fmt.name`·대시보드 검색(accept_new_options)·리포트·PNG·노션 공용. 경량(lazy yfinance) | `~/reports/ml-cache/ticker_names.json` |
 | `notify.py` | 텔레그램 발송 단일 진실원 — send_telegram(4096 분할·토큰 마스킹)·send_photo (봇 제외 전 모듈 공용) | — |
@@ -77,6 +77,8 @@ crons/news_spike_detector.py (크론 매 1분)
 | `providers/news_labels.py` | **LLM 뉴스 구조화 라벨층** — 수집 뉴스 → {티커,유형,방향,강도} point-in-time JSONL(published/labeled 시각 보존·무룩어헤드) + `news_axis`(방향×강도 감쇠합 [0,1]). 환각 방어(입력 태그 밖 티커 폐기·enum 검증). LLM=**피처 생성기 한정**(선택/타이밍 위임 금지 — 재현불가 출력은 백테스트 불성립) | `~/reports/ml-data/news_llm_labels.jsonl` |
 | `providers/kis_quote.py` | KIS **실계좌 시세 read-only** REST — 실전 도메인(`openapi.koreainvestment.com:9443`) 하드락·현재가·10단계 호가·거래량(**KR·美 모두 무료 실시간**). 주문 경로 0(grep 강제)·`REALTIME_ENABLED` 게이트·실전키 fail-closed | `~/.cache/kis_quote_token.json` |
 | `providers/realtime_quotes.py` | 실시간 캐시 **읽기전용 클라이언트** = 폴백 단일 seam. get_price/orderbook/best/volume, 2단 신선도(heartbeat+심볼 ts). stale·비활성·없음 → None → 소비자 yfinance 폴백. 예외 무발 | `~/.cache/kis_realtime_quotes.json` |
+| `providers/intraday_bars.py` | 단기 1분봉 데이터층 — kis_stream 틱→OHLCV 집계(누적 볼륨 차분·v_anom/v_partial)·JSONL bar store reader(5m 리샘플·yfinance 폴백)·분대별 거래량 프로파일·심볼 변환 단일 진실원(base_symbol/to_yf/market_of) | `~/reports/ml-data/intraday_bars/*.jsonl` |
+| `providers/intraday_universe.py` | 단기 동적 유니버스 스캐너 ("stocks in play") — KR KIS 거래대금 순위(+필터: 거래대금·가격·보통주만·ETF/스팩 제외)·US 히트맵 스냅샷 재사용 → \|등락\| 상위 top-K. 히스테리시스(보유 유지)·실패 시 정적 `INTRADAY_UNIVERSE_*` 폴백 | `~/.cache/intraday_universe.json` |
 
 **bot/ (텔레그램 서브커맨드)**
 | 파일 | 역할 |
@@ -116,6 +118,8 @@ crons/news_spike_detector.py (크론 매 1분)
 | `crons/kiwoom_sync_rest.py` | 키움 REST API 국내주식 잔고 동기화 | 평일 23:35 UTC |
 | `crons/sp500_heatmap_snapshot.py` | 대시보드 홈 S&P500 시장맵 스냅샷 적재(`_sp500_heatmap_live`→JSON) — 콜드로드 즉시화. 표시데이터 | 매 20분 |
 | `crons/kiwoom_mock_track.py` | 국내주식 자동 페이퍼트레이딩 (키움 **모의투자** — 신호 기반 리밸런스·모의 도메인 하드락·편입/퇴출 근거 원장 적재). **회전율 억제**(무거래밴드+랭크 히스테리시스)·**거래비용 적립**(수수료+증권거래세→리포트 계기)·★가격 축 3종(mom12·hi52·lowvol) point-in-time 원장 수집·**분할매수/매도**(`KR_MOCK_TRANCHES` 회당 목표 1/N·`lib/tranche`)·**최소보유**(`KR_MOCK_MIN_HOLD_DAYS`) | 평일 00:30 UTC |
+| `crons/intraday_mock_track.py` | **단기(1분봉) 모의 트레이딩 엔진** — 유니버스 갱신→orphan 수리→bar/호가 적재→일손실 halt→청산(우선: stop→target→timestop→collapse→EOD flat)→진입(축 5+3 점수+가드 8종). **shadow 기본**(`INTRADAY_SHADOW_ONLY` — 가상체결만 원장)·청산 즉시 net-of-cost R 보상·trade_events→차트 ▲▼ 마커. `INTRADAY_MOCK_ENABLED` off 면 no-op | 매 1분 |
+| `crons/intraday_mock_learn.py` | 단기 정책 주간 학습 + ★게이트 (축 상관 재적합·walk-forward OOS 채택 + 트레이드≥100·순R>0·PSR≥0.95·PBO<0.5 → GO/OBSERVE/NO-GO 정직 verdict — **집행 전환은 항상 수동**) | 토 02:30 UTC |
 | `crons/kiwoom_mock_report.py` | 국내 모의 일일 현황 보고 (NAV·손익·편입/퇴출 사유·누적 vs KOSPI·MDD vs 지수) + `/paper kr` 공용 | 평일 06:40 UTC |
 | `crons/kr_mock_learn.py` | KR 모의 정책 강화 — 보상 백필 + ★목적함수(아웃퍼폼·MDD≤지수) OOS 게이트 재학습 | 토 02:00 UTC |
 | `crons/us_mock_track.py` | 미국주식 자동 페이퍼트레이딩 (KIS 해외 모의 — us_policy 선택 + 바벨 배분·정수주 리밸런스·`Ledger("us_mock")` 결정+근거 적재). ★가격 축 3종+PEAD 축 point-in-time 수집 + **Tier3 구조레버 QLD 슬리브**(`US_MOCK_LEV_SLEEVE` 시 게이트 GO shadow 신선하면 NAV×(reco−1) 2x ETF — 모의 한정 라이브 검증·원장 side '레버슬리브'·게이트 소멸 시 청산 방향) + **분할매수/매도**(`US_MOCK_TRANCHES`·`lib/tranche`) | 평일 15:00 UTC (미 개장 후) |
@@ -148,6 +152,7 @@ crons/news_spike_detector.py (크론 매 1분)
 | `tests/bot_smoke_test.py` | 기능 검증 연기 테스트 25항목 (실패 시만 알림) | 평일 00:00 UTC |
 | `tests/ml_smoke_test.py` | ML 파이프라인 end-to-end 58항목 (네트워크 불필요) | 평일 크론 |
 | `tests/institutional_flow_smoke_test.py` | 기관 매집 스코어링 무네트워크 단위 테스트 (합성 데이터) | 평일 크론 |
+| `tests/intraday_smoke_test.py` | 단기 모의 파이프라인 연기 테스트 — bar 집계·축·가드·청산·사이징·엔진 사이클·학습 게이트·안전 grep (무네트워크 합성) | 평일 00:10 UTC |
 | `tests/bot_healthcheck.py` | 봇·서버 상태 점검 (프로세스·PID·파일 신선도·store DB 무결성·**수집 소스 공백 경보**) | 매 30분 |
 
 **ml/ (ML 모델)**
@@ -164,6 +169,8 @@ crons/news_spike_detector.py (크론 매 1분)
 | `ml/deletion_risk.py` | 부실 퇴출 사전예측 (marcap 파생 피처→P(부실퇴출); 실데이터 OOS AUC 0.743·M&A 제외). 회피 통합·★RL 대상 | — (학습셋 marcap 조립) |
 | `ml/earnings_predictor.py` | 실적 서프라이즈 예측 G3 (P(beat); 서프라이즈 지속성·모멘텀·리비전 모멘텀 훅). 엣지 게이트 캐시 | `~/reports/ml-cache/earnings_predictor.pkl` |
 | `ml/earnings_move_predictor.py` | 실적후 주가반응 예측 G4 (기대 변동폭+방향확률; 방향은 무엣지·정직). 엣지 게이트 캐시 | `~/reports/ml-cache/earnings_move_predictor.pkl` |
+| `ml/intraday_axes.py` | 단기 판단 축·가드·청산·사이징·가상체결 (전부 순수) — ORB 돌파(과확장 페널티)·VWAP 반전·시간대 정규화 volspike·OFI(10단계 호가)·뉴스 이벤트 창(롱 전용)·레짐 승수(Kaufman ER) + 리스크 사이징(1/3 캡)·best 호가 가상체결(+스프레드/2+1틱 페널티)·KRX 호가단위 표 | — |
+| `ml/intraday_policy.py` | 단기 정책 (Policy kr_intraday/us_intraday) — 축 가중 클램프·결측 재정규화 score·θ_entry/exit·stop/target/timestop 파라미터 | `~/reports/ml-cache/policy_{kr,us}_intraday.json` |
 
 ## 텔레그램 봇 명령어
 
@@ -320,6 +327,17 @@ crons/news_spike_detector.py (크론 매 1분)
 | `BARBELL_DCA_VOL_CAP` | — | `0.40` (QQQ 연변동성 초과 시 DCA 배율 비례 축소) |
 | `BARBELL_LEV_HALT_DD` | — | `-55.0` (낙폭 이하 시 레버리지 증액 정지 — 전소 방어) |
 | `BARBELL_PRICE_STALE_DAYS` | — | `4` (최신 종가 이보다 오래되면 stale → Phase 에스컬레이션 보류) |
+| `INTRADAY_BARS_ENABLED` | — | `false` (kis_stream 틱→1분봉 집계 sink — 단기 데이터 수집. **가장 먼저 켤 것** — volspike 프로파일 20세션 축적이 크리티컬 패스) |
+| `INTRADAY_MOCK_ENABLED` | — | `false` (매 1분 단기 모의 엔진. off 면 크론 no-op) |
+| `INTRADAY_SHADOW_ONLY` | — | `true` (가상체결만 원장 기록·모의 주문 0. **★게이트 GO 후에만 수동 false**) |
+| `INTRADAY_MARKETS` | — | `kr,us` |
+| `INTRADAY_SCAN_ENABLED` / `INTRADAY_SCAN_TOP_KR` / `INTRADAY_SCAN_TOP_US` | — | `true` / `5` / `4` (동적 유니버스 — 거래대금·등락 상위. 실패 시 `INTRADAY_UNIVERSE_*` 정적 폴백) |
+| `INTRADAY_MIN_TURNOVER_KRW` | — | `30000000000` (KR 후보 거래대금 하한 300억 — 유동성·스프레드 방어) |
+| `INTRADAY_UNIVERSE_KR` / `INTRADAY_UNIVERSE_US` | — | `005930,000660,373220,005380,035420` / `QQQ` (정적 폴백 유니버스) |
+| `INTRADAY_SLEEVE_FRAC` / `INTRADAY_RISK_PER_TRADE` | — | `0.10` / `0.005` (모의 NAV 중 슬리브 비율·트레이드당 리스크 사이징) |
+| `INTRADAY_MAX_TRADES_DAY` / `INTRADAY_COOLDOWN_MIN` / `INTRADAY_DAILY_LOSS_HALT` | — | `6` / `30` / `0.015` (일 왕복 상한·심볼 쿨다운·일손실 −1.5% 정지) |
+| `INTRADAY_MAX_SPREAD_BPS_KR` / `INTRADAY_MAX_SPREAD_BPS_US` | — | `25` / `5` (진입 스프레드 상한 — KR 은 max(2틱, 상한): 호가단위상 1틱이 ~16bps) |
+| `INTRADAY_FLAT_BUFFER_MIN` / `INTRADAY_ENTRY_CUTOFF_MIN` / `INTRADAY_STALE_FLAT_MIN` | — | `15` / `30` / `10` (마감 前 강제청산 버퍼·진입 컷오프·bar 정체 시 전량청산) |
 
 ## IB Phase
 
@@ -429,6 +447,13 @@ crons/news_spike_detector.py (크론 매 1분)
 ~/.cache/kis_mock_token.json                     — KIS 해외 모의 OAuth 토큰 디스크 영속 (발급 레이트리밋 회피)
 ~/reports/ml-cache/sp500_heatmap.json            — 대시보드 홈 S&P500 시장맵 스냅샷 (sp500_heatmap_snapshot 크론 20분·rows[티커·섹터·시총·등락%]; views.sp500_heatmap <90분 우선읽기 → 콜드로드 즉시화)
 ~/.cache/kis_realtime_quotes.json                — 실시간 시세 캐시 (kis_stream writer·realtime_quotes reader; symbol→{price,bid,ask,bids/asks,volume,ts,delayed}+__heartbeat__. safe_io atomic)
+~/reports/ml-data/intraday_bars/YYYY-MM-DD.jsonl — 단기 1분봉 store (kis_stream 단일 writer·틱 집계 OHLCV — 백테스트 데이터 축적·불변 append-only)
+~/.cache/intraday_universe.json                  — 단기 동적 유니버스 (스캐너 결과·히스테리시스 — kis_stream 워치리스트 편입)
+~/.cache/intraday_mock_state.json                — 단기 엔진 상태 (오픈 포지션 유일 권위·카운터·halt·쿨다운 — 손상 시 orphan 수리로 원장 정합 복구)
+~/reports/ml-data/{kr,us}_intraday_decisions.jsonl — 단기 결정 원장 (id=date:ticker:HHMMSS·축 피처 point-in-time — 절대 삭제 금지)
+~/reports/ml-data/{kr,us}_intraday_outcomes.jsonl  — 단기 실현 보상 (청산 즉시 net-of-cost R=fwd_excess — 절대 삭제 금지)
+~/reports/ml-data/{kr,us}_intraday_learning.jsonl  — 단기 주간 학습·게이트 이력 (evolution — /evolve·대시보드)
+~/reports/ml-cache/policy_{kr,us}_intraday.json    — 단기 정책 가중 (learner OOS 채택 시 갱신·클램프)
 ~/.cache/kis_quote_token.json                    — KIS 실전 시세 OAuth 토큰 디스크 영속 (모의 토큰과 별개·실전 앱키)
 ~/.cache/kis_fills.jsonl                          — 실계좌 체결통보 기록 (kis_stream, REALTIME_FILLS_ENABLED 시 — append-only·알림용·AES 복호화)
 ~/reports/ml-data/kr_mock_outcomes.jsonl         — KR 모의 결정 실현 보상(초과수익) (불변 append-only)

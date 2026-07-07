@@ -314,6 +314,31 @@ def check_source_collection() -> tuple[str, str] | None:
     return ("source_stale", "⚠️ 뉴스/매크로 수집 공백 출처 감지\n" + "\n".join(lines))
 
 
+def check_intraday_bars() -> tuple[str, str] | None:
+    """단기 1분봉 sink 고장 감지 — INTRADAY_BARS_ENABLED 인데 장중 당일 bar 미갱신.
+
+    게이트 off(기본)·장외엔 침묵. 스트림은 살아있는데 sink 만 죽는 케이스 가시화.
+    """
+    if os.getenv("INTRADAY_BARS_ENABLED", "false").lower() != "true":
+        return None
+    try:
+        if PROJECT_DIR not in sys.path:
+            sys.path.insert(0, PROJECT_DIR)
+        from ml.intraday_signal import is_kr_market_open, is_us_market_open
+        from providers import intraday_bars
+        if not (is_kr_market_open() or is_us_market_open()):
+            return None
+        path = intraday_bars.bar_path(intraday_bars.today_utc())
+        age = (time.time() - path.stat().st_mtime) if path.exists() else None
+    except Exception as e:
+        return ("intraday_bars_error", f"⚠️ 단기 bar 점검 실패: {e}")
+    if age is None or age > 20 * 60:      # 개장 초 유예 포함 20분
+        gap = "파일 없음" if age is None else f"{age / 60:.0f}분 미갱신"
+        return ("intraday_bars_stale",
+                f"⚠️ 단기 1분봉 sink 정체 — 장중인데 당일 bar {gap} (kis_stream 재시작 필요 가능)")
+    return None
+
+
 def check_store_db() -> tuple[str, str] | None:
     """SQLite 통합 저장소(store) 접근·무결성 점검."""
     try:
@@ -343,6 +368,7 @@ def main():
         check_barbell_state_age,
         check_store_db,
         check_source_collection,
+        check_intraday_bars,
     ]
 
     state   = _load_alert_state()

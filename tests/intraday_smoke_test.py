@@ -376,6 +376,20 @@ def run_tests() -> list[str]:
         ("무예외 렌더", lambda t: len(t) > 100),
     )
 
+    # ── i13: 안전 grep — 엔진 주문은 모의 어댑터 경유만 (실계좌 경로 0 강제) ──
+    logger.info("[i13] 안전 grep")
+    import crons.intraday_mock_track as _eng_mod
+
+    def _src():
+        return open(_eng_mod.__file__, encoding="utf-8").read()
+
+    failures += _check("order_path_grep", _src,
+        ("실전 키움 도메인 미참조", lambda s: "api.kiwoom.com" not in s.replace("mockapi.kiwoom.com", "")),
+        ("실전 주문 TR 미참조", lambda s: "TTTC" not in s and "TTTT" not in s),
+        ("직접 HTTP 주문 없음", lambda s: "requests.post" not in s),
+        ("주문은 모의 어댑터 경유", lambda s: "kiwoom_mock" in s and "kis_mock" in s),
+    )
+
     return failures
 
 
