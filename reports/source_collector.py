@@ -6,16 +6,21 @@ from __future__ import annotations
 import argparse
 import csv
 import hashlib
+import html as html_mod
 import json
+import logging
 import os
 import sys
 import re
+import time as time_mod
 from collections import Counter
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Iterable
 
 import requests
+
+logger = logging.getLogger(__name__)
 
 KST = timezone(timedelta(hours=9))
 DEFAULT_CACHE_DIR = Path(os.path.expanduser("~/reports/source-cache"))
@@ -91,7 +96,9 @@ WORLD_GOV_BOND_COUNTRIES = {
     "japan": "일본 국채금리",
     "south-korea": "한국 국채금리",
 }
-TELEGRAM_NEWS_CHANNELS = ["yuzukinaok1", "insidertracking"]
+# 뉴스 텔레그램 채널 — env 로 교체 가능(죽은 채널 무배포 교체): STOCK_COLLECTOR_TG_CHANNELS=a,b
+TELEGRAM_NEWS_CHANNELS = [c.strip().lstrip("@") for c in os.getenv(
+    "STOCK_COLLECTOR_TG_CHANNELS", "yuzukinaok1,insidertracking").split(",") if c.strip()]
 NEWS_THEME_KEYWORDS = {
     "중동/전쟁": ("이스라엘", "이란", "가자", "하마스", "우크라이나", "러시아", "전쟁", "군", "미사일", "핵"),
     "금리/채권": ("금리", "국채", "채권", "연준", "fed", "treasury", "yield"),
@@ -335,20 +342,50 @@ def fetch_arca_events(max_pages: int = 2) -> list[dict]:
     return events
 
 
+def _telegram_titles_from_html(html_text: str, channel: str) -> tuple[list[str], list[str]]:
+    """t.me/s/<channel> 공개 HTML 에서 메시지 텍스트·링크 추출 (순수 — 테스트 가능).
+
+    jina 마크다운의 **bold** 파싱은 굵은 제목이 없는 채널에서 0건이 되는 함정
+    (insidertracking 수집 공백의 유력 원인) → 위젯 메시지 div 직접 파싱 폴백.
+    """
+    titles = []
+    for m in re.finditer(r'class="tgme_widget_message_text[^"]*"[^>]*>(.*?)</div>',
+                         html_text, re.S):
+        raw = re.sub(r"<br\s*/?>", " ", m.group(1))
+        txt = html_mod.unescape(re.sub(r"<[^>]+>", "", raw))
+        txt = " ".join(txt.split())
+        if txt:
+            titles.append(txt)
+    urls = re.findall(rf'href="(https://t\.me/{re.escape(channel)}/\d+)"', html_text)
+    return titles, urls
+
+
 def fetch_telegram_channel_events(channels: list[str] = TELEGRAM_NEWS_CHANNELS) -> list[dict]:
     events = []
     for channel in channels:
         channel = channel.strip().lstrip("@")
         if not channel:
             continue
+        titles: list[str] = []
+        urls: list[str] = []
         try:
             resp = _bounded_get(f"https://r.jina.ai/http://t.me/s/{channel}", timeout=20)
             markdown = resp.text
-        except Exception:
-            continue
+            titles = [" ".join(m.group(1).split()) for m in re.finditer(r"\*\*([^*]+)\*\*", markdown)]
+            urls = re.findall(rf"https://t\.me/{re.escape(channel)}/\d+", markdown)
+        except Exception as e:
+            logger.warning("telegram:%s jina 수집 실패 — 직접 HTML 폴백 시도: %s", channel, e)
 
-        titles = [" ".join(m.group(1).split()) for m in re.finditer(r"\*\*([^*]+)\*\*", markdown)]
-        urls = re.findall(rf"https://t\.me/{re.escape(channel)}/\d+", markdown)
+        if not titles:
+            # 폴백: t.me/s 공개 프리뷰 직접 파싱 (jina 장애/레이트리밋·bold 없는 채널 대응)
+            try:
+                resp = _bounded_get(f"https://t.me/s/{channel}", timeout=15)
+                titles, urls = _telegram_titles_from_html(resp.text, channel)
+            except Exception as e:
+                logger.warning("telegram:%s 직접 HTML 폴백도 실패: %s", channel, e)
+
+        if not titles:
+            logger.warning("telegram:%s 수집 0건 (jina·직접 모두) — 채널명/차단 확인 필요", channel)
         for idx, title in enumerate(titles):
             if not title:
                 continue
@@ -430,17 +467,27 @@ def fetch_market_snapshot_events(yf_module=None) -> list[dict]:
 def fetch_fred_macro_events(series: dict[str, str] = FRED_SERIES) -> list[dict]:
     """Collect widely used US macro series from FRED public CSV endpoints."""
     events = []
+    fail = 0
     for series_id, label in series.items():
-        try:
-            resp = requests.get(
-                "https://fred.stlouisfed.org/graph/fredgraph.csv",
-                headers=HEADERS,
-                params={"id": series_id},
-                timeout=12,
-            )
-            resp.raise_for_status()
-            rows = list(csv.DictReader(resp.text.splitlines()))
-        except Exception:
+        rows = None
+        for attempt in (1, 2):                     # 일시 장애 1회 재시도 (백오프 2s)
+            try:
+                resp = requests.get(
+                    "https://fred.stlouisfed.org/graph/fredgraph.csv",
+                    headers=HEADERS,
+                    params={"id": series_id},
+                    timeout=12,
+                )
+                resp.raise_for_status()
+                rows = list(csv.DictReader(resp.text.splitlines()))
+                break
+            except Exception as e:
+                if attempt == 2:
+                    fail += 1
+                    logger.warning("FRED %s 수집 실패(재시도 포함): %s", series_id, e)
+                else:
+                    time_mod.sleep(2)
+        if rows is None:
             continue
 
         latest = None
@@ -506,15 +553,123 @@ def fetch_world_gov_bond_events(countries: dict[str, str] = WORLD_GOV_BOND_COUNT
     return events
 
 
+# ── 소스별 수집 헬스 (수집 공백 가시화 — 조용한 실패 차단) ────────────────────
+
+HEALTH_FILE = "source_health.json"
+
+# 소스별 "이만큼 수집 0이면 비정상" 임계(시간) — 크론 30분 주기 기준·주말 여유
+SOURCE_STALE_HOURS = {
+    "saveticker": 3,
+    "arca": 24,
+    "telegram:*": 12,
+    "yahoo_finance": 24,
+    "fred": 72,
+    "worldgovernmentbonds": 72,
+}
+
+
+def expected_sources() -> list[str]:
+    """수집기가 시도해야 하는 소스 전체 (텔레그램은 채널별 분리 — 채널 단위 공백 감지)."""
+    return (["saveticker", "arca"]
+            + [f"telegram:{c}" for c in TELEGRAM_NEWS_CHANNELS]
+            + ["yahoo_finance", "fred", "worldgovernmentbonds"])
+
+
+def update_source_health(events: list[dict], cache_dir: Path | str = DEFAULT_CACHE_DIR,
+                         now: datetime | None = None) -> dict:
+    """이번 수집 결과를 소스별 헬스 파일에 반영 — {source: {last_run, last_count, last_success, ...}}.
+
+    count>0 이면 last_success 갱신. 0 이면 last_success 는 보존(공백 기간 측정의 기준점).
+    """
+    now = (now or datetime.now(KST)).astimezone(KST)
+    cache_dir = Path(cache_dir)
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    path = cache_dir / HEALTH_FILE
+    health: dict = {}
+    if path.exists():
+        try:
+            health = json.loads(path.read_text(encoding="utf-8"))
+        except Exception:
+            health = {}
+    counts = Counter(str(e.get("source") or "") for e in events)
+    for src in expected_sources():
+        rec = health.get(src) or {}
+        n = int(counts.get(src, 0))
+        rec["last_run"] = now.isoformat()
+        rec["last_count"] = n
+        if n > 0:
+            rec["last_success"] = now.isoformat()
+            rec["last_success_count"] = n
+        health[src] = rec
+    tmp = path.with_suffix(".tmp")
+    tmp.write_text(json.dumps(health, ensure_ascii=False, indent=2), encoding="utf-8")
+    os.replace(tmp, path)
+    return health
+
+
+def load_source_health(cache_dir: Path | str = DEFAULT_CACHE_DIR) -> dict:
+    path = Path(cache_dir) / HEALTH_FILE
+    if not path.exists():
+        return {}
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except Exception:
+        return {}
+
+
+def stale_sources(health: dict | None = None, now: datetime | None = None,
+                  thresholds: dict | None = None,
+                  cache_dir: Path | str = DEFAULT_CACHE_DIR) -> list[dict]:
+    """수집 공백 소스 목록 (순수 — health dict 주입 시 무 I/O·테스트 가능).
+
+    반환: [{source, hours(공백 시간·성공 이력 없으면 None), threshold}] — 임계 초과만.
+    """
+    health = load_source_health(cache_dir) if health is None else health
+    if not health:
+        return []
+    now = (now or datetime.now(KST)).astimezone(KST)
+    th = thresholds or SOURCE_STALE_HOURS
+    out = []
+    for src, rec in sorted(health.items()):
+        limit = th.get(src) or th.get(f"{src.split(':')[0]}:*") or th.get(src.split(":")[0]) or 24
+        last_ok = rec.get("last_success")
+        if last_ok:
+            try:
+                ts = datetime.fromisoformat(last_ok)
+                if ts.tzinfo is None:
+                    ts = ts.replace(tzinfo=KST)
+                hours = (now - ts).total_seconds() / 3600
+            except Exception:
+                hours = None
+        else:
+            hours = None                            # 성공 이력 자체가 없음 = 최우선 점검 대상
+        if hours is None or hours > limit:
+            out.append({"source": src, "hours": None if hours is None else round(hours, 1),
+                        "threshold": limit})
+    return out
+
+
 def collect_once(cache_dir: Path | str = DEFAULT_CACHE_DIR, now: datetime | None = None) -> tuple[int, int]:
-    events = (
-        fetch_saveticker_events()
-        + fetch_arca_events(max_pages=int(os.getenv("STOCK_COLLECTOR_ARCA_PAGES", "2")))
-        + fetch_telegram_channel_events()
-        + fetch_market_snapshot_events()
-        + fetch_fred_macro_events()
-        + fetch_world_gov_bond_events()
-    )
+    fetchers = [
+        ("saveticker", fetch_saveticker_events),
+        ("arca", lambda: fetch_arca_events(max_pages=int(os.getenv("STOCK_COLLECTOR_ARCA_PAGES", "2")))),
+        ("telegram", fetch_telegram_channel_events),
+        ("yahoo_finance", fetch_market_snapshot_events),
+        ("fred", fetch_fred_macro_events),
+        ("worldgovernmentbonds", fetch_world_gov_bond_events),
+    ]
+    events: list[dict] = []
+    for name, fn in fetchers:
+        try:
+            got = fn()
+            events.extend(got)
+            logger.info("수집 %s: %d건", name, len(got))
+        except Exception as e:                      # 한 소스 크래시가 전체 수집을 죽이지 않게
+            logger.warning("수집 %s 실패(격리): %s", name, e)
+    try:
+        update_source_health(events, cache_dir=cache_dir, now=now)
+    except Exception as e:
+        logger.warning("소스 헬스 기록 실패(무시): %s", e)
     return len(events), append_events(events, cache_dir=cache_dir, now=now)
 
 
@@ -547,9 +702,14 @@ def main() -> int:
         print(build_digest(load_recent_events(args.cache_dir, hours=args.hours)))
         return 0
 
+    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
     fetched, written = collect_once(args.cache_dir)
     removed = prune_old(args.cache_dir)
     print(f"stock source collector: fetched={fetched} new={written} pruned={removed} cache={args.cache_dir}")
+    # 소스별 공백 요약 — 크론 로그에서 "어느 출처가 죽었는지" 즉시 확인
+    for s in stale_sources(cache_dir=args.cache_dir):
+        gap = "성공 이력 없음" if s["hours"] is None else f"{s['hours']:.0f}시간 공백"
+        print(f"⚠️ 수집 공백: {s['source']} — {gap} (임계 {s['threshold']}h)")
     return 0
 
 

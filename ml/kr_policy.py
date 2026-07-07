@@ -33,11 +33,13 @@ DEFAULT_POLICY = {
     "w_hi52":   0.15,    # ★52주 고가 근접 — 워크포워드 최다 채택 축
     "w_lowvol": 0.10,    # ★저변동성 — MDD≤지수 제약에 기여
     "w_mom12":  0.05,    # ★12-1M 모멘텀 (문헌 표준·단기반전 오염 제거)
+    "w_news":   0.0,     # ★LLM 뉴스 구조화 축 (providers/news_labels) — 수집·게이트 채택 대기
 }
 BOUNDS = {
     "w_ranker": (0.0, 1.0), "w_fund": (0.0, 1.0), "w_signal": (0.0, 1.0),
     "w_conf": (0.0, 1.0), "w_mom": (0.0, 1.0),
     "w_hi52": (0.0, 1.0), "w_lowvol": (0.0, 1.0), "w_mom12": (0.0, 1.0),
+    "w_news": (0.0, 1.0),
 }
 
 _SIGNAL_MAP = {"Positive": 1.0, "Neutral": 0.5, "Warning": 0.2, "Critical": 0.0}

@@ -33,7 +33,7 @@ HORIZON = 20
 MIN_SAMPLES = 40
 MAX_POS = int(os.getenv("US_MOCK_MAX_POS", "5"))
 BENCHMARK = "QQQ"
-_FEATS = ["ranker", "value", "quality", "mom", "conf", "mom12", "hi52", "lowvol", "pead"]
+_FEATS = ["ranker", "value", "quality", "mom", "conf", "mom12", "hi52", "lowvol", "pead", "news"]
 _BUY = ("편입", "증액")
 
 
@@ -59,13 +59,17 @@ def fit_policy(train_rows: list[dict]) -> dict:
     전부 무신호일 때 미측정 축으로 가중이 전량 쏠리는 함정(kr_mock_learn 과 동일 수정).
     """
     from ml import us_policy
+    from ml.adaptive.learner import NEW_AXIS_MIN_PAIRS, robust_axis_weight
+    _NEW_AXES = {"mom12", "hi52", "lowvol", "pead", "news"}   # 원장 축적 초기 축 — 강화 게이트(E)
     rows = _buy_rows(train_rows)
     measured = {}
     for f in _FEATS:
         pairs = [(r["features"].get(f), r.get("fwd_excess")) for r in rows
                  if r.get("features") and r["features"].get(f) is not None and r.get("fwd_excess") is not None]
-        if len(pairs) >= 5:
-            measured[f] = max(0.0, _pearson([a for a, _ in pairs], [b for _, b in pairs]))
+        new = f in _NEW_AXES
+        w = robust_axis_weight(pairs, min_pairs=NEW_AXIS_MIN_PAIRS if new else 5, stability=new)
+        if w is not None:
+            measured[f] = w
     total = sum(measured.values())
     if total <= 1e-9:
         return {f"w_{f}": us_policy.DEFAULT_POLICY[f"w_{f}"] for f in _FEATS}

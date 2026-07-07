@@ -73,6 +73,8 @@ SLIPPAGE = _float_env("US_MOCK_SLIPPAGE", 0.01)
 CASH_BUFFER = _float_env("US_MOCK_CASH_BUFFER", 0.95)
 REBAL_BAND = _float_env("US_MOCK_REBAL_BAND", 0.25)   # 무거래 밴드(목표比 ±25% 벗어날 때만 조정·회전율↓)
 EXIT_BUFFER = _int_env("US_MOCK_EXIT_BUFFER", 2)      # 히스테리시스(top-N+2 안이면 보유 유지·경계 flip 방지)
+# ★분할매수·분할매도 — 회당 목표 1/N (N회 평균 진입/청산·분산 축소·bps 비용 불변). 기본 3·1=일괄.
+TRANCHES = _int_env("US_MOCK_TRANCHES", 3)
 QUOTE_STALE_S = _int_env("REALTIME_QUOTE_STALE_S", 10)
 
 # ★Tier3 구조적 레버리지 슬리브 (모의 한정 라이브 검증) — 게이트 GO shadow 가 신선할 때만
@@ -172,6 +174,14 @@ def compute_us_signals(universe: list[str] | None = None) -> list[dict]:
                 pa = us_policy.pead_axis(earnings_data.earnings_history(tk, limit=4), closes)
                 if pa is not None:
                     feats["pead"] = pa
+            except Exception:
+                pass
+            # ★LLM 뉴스 구조화 축 — news_llm_snapshot 라벨 집계 (없으면 미기록 → 재정규화)
+            try:
+                from providers import news_labels
+                na = news_labels.news_axis(tk)
+                if na is not None:
+                    feats["news"] = na
             except Exception:
                 pass
             price = float((sig.get("price_info") or {}).get("current_price") or 0) or (kis_mock.get_price(tk) or 0)
@@ -335,11 +345,19 @@ def main(argv: list[str] | None = None) -> int:
     plan = plan_rebalance(signals, positions_stock, budget, MAX_POS, cash_usd=cash,
                           slippage=SLIPPAGE, quote_fn=_rt_best, cash_buffer=CASH_BUFFER,
                           rebal_band=REBAL_BAND, exit_buffer=EXIT_BUFFER)
+    # ★분할매수/매도: 종목 주문을 회당 목표의 1/N 로 상한 (슬리브는 별도 — 제외)
+    if TRANCHES > 1 and plan:
+        from lib.tranche import plan_tranches
+        _px = {s["ticker"]: s.get("price") for s in signals if s.get("ticker")}
+        for sym, p in positions_stock.items():
+            _px.setdefault(sym, p.get("cur_price"))
+        plan = plan_tranches(plan, budget / max(MAX_POS, 1), lambda s: _px.get(s), TRANCHES,
+                             id_key="symbol")
     # 실행 순서: 매도(현금 확보) → 슬리브 → 매수
     plan = ([o for o in plan if o["side"] == "sell"] + sleeve_orders
             + [o for o in plan if o["side"] == "buy"])
-    logger.info("리밸런스 계획 %d건 (예산 $%.0f·목표 %d종목·슬리브 %.0f%%)",
-                len(plan), budget, MAX_POS, sleeve_frac * 100)
+    logger.info("리밸런스 계획 %d건 (예산 $%.0f·목표 %d종목·슬리브 %.0f%%·%d분할)",
+                len(plan), budget, MAX_POS, sleeve_frac * 100, TRANCHES)
 
     if dry:
         for o in plan:

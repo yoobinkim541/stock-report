@@ -34,6 +34,16 @@ def news(t):
     return views.news_digest(t)
 
 
+@st.cache_data(ttl=600, show_spinner="수집 뉴스 불러오는 중…")
+def collected_news(hours=48):
+    return views.collected_news(hours)
+
+
+@st.cache_data(ttl=600, show_spinner=False)
+def source_health():
+    return views.source_health_summary()
+
+
 @st.cache_data(ttl=_TTL, show_spinner="불러오는 중…")
 def earnings(t):
     return views.earnings_calendar(t)

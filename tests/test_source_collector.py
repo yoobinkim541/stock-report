@@ -244,3 +244,103 @@ def test_fetch_saveticker_events_normalizes_dict_tickers(monkeypatch):
     assert events, "이벤트가 비어있으면 안 됨"
     assert events[0]["tickers"] == ["SPCX"]   # dict → symbol 문자열로 정규화
     assert all(isinstance(t, str) for t in events[0]["tickers"])
+
+
+# ── 소스별 수집 헬스 (수집 공백 가시화) ──────────────────────────────────────
+
+def test_update_and_load_source_health_roundtrip(tmp_path):
+    cache = tmp_path / "cache"
+    now = datetime(2026, 7, 7, 10, 0, tzinfo=KST)
+    events = [{"source": "saveticker", "title": "a"},
+              {"source": "saveticker", "title": "b"},
+              {"source": "telegram:yuzukinaok1", "title": "c"}]
+    h = sc.update_source_health(events, cache_dir=cache, now=now)
+    assert h["saveticker"]["last_count"] == 2
+    assert h["saveticker"]["last_success"].startswith("2026-07-07")
+    # 수집 0건 소스: last_run 은 찍히고 last_success 는 없음 (공백 측정 기준점)
+    assert h["telegram:insidertracking"]["last_count"] == 0
+    assert "last_success" not in h["telegram:insidertracking"]
+    assert sc.load_source_health(cache) == h
+
+
+def test_source_health_preserves_last_success_across_gap(tmp_path):
+    cache = tmp_path / "cache"
+    t1 = datetime(2026, 7, 6, 10, 0, tzinfo=KST)
+    t2 = datetime(2026, 7, 7, 10, 0, tzinfo=KST)
+    sc.update_source_health([{"source": "fred", "title": "x"}], cache_dir=cache, now=t1)
+    h = sc.update_source_health([], cache_dir=cache, now=t2)     # 다음 수집은 전부 0건
+    assert h["fred"]["last_count"] == 0
+    assert h["fred"]["last_success"].startswith("2026-07-06")    # 성공 시각 보존
+
+
+def test_stale_sources_flags_gap_and_never_succeeded():
+    now = datetime(2026, 7, 7, 12, 0, tzinfo=KST)
+    health = {
+        "saveticker": {"last_success": "2026-07-07T11:40:00+09:00"},        # 20분 전 — 정상
+        "fred": {"last_success": "2026-07-03T10:00:00+09:00"},              # 98h — 임계 72h 초과
+        "telegram:insidertracking": {"last_run": "2026-07-07T11:40:00+09:00"},  # 성공 이력 없음
+        "telegram:yuzukinaok1": {"last_success": "2026-07-07T05:00:00+09:00"},  # 7h — 임계 12h 이내
+    }
+    bad = {s["source"]: s for s in sc.stale_sources(health, now=now)}
+    assert "saveticker" not in bad and "telegram:yuzukinaok1" not in bad
+    assert bad["fred"]["hours"] > 72
+    assert bad["telegram:insidertracking"]["hours"] is None      # 이력 없음 = 최우선 점검
+
+
+def test_stale_sources_empty_health_silent():
+    assert sc.stale_sources({}, now=datetime.now(KST)) == []
+
+
+def test_telegram_titles_from_html_parses_widget_text():
+    html = '''
+    <div class="tgme_widget_message_text js-message_text" dir="auto">
+      삼성전자, <b>HBM4</b> 공급 계약 체결&amp;확대<br/>관련 종목 주목
+    </div>
+    <a class="tgme_widget_message_date" href="https://t.me/insidertracking/123"><time></time></a>
+    <div class="tgme_widget_message_text js-message_text" dir="auto">두번째 메시지</div>
+    <a class="tgme_widget_message_date" href="https://t.me/insidertracking/124"><time></time></a>
+    '''
+    titles, urls = sc._telegram_titles_from_html(html, "insidertracking")
+    assert titles[0] == "삼성전자, HBM4 공급 계약 체결&확대 관련 종목 주목"   # 태그 제거·unescape·공백 정리
+    assert titles[1] == "두번째 메시지"
+    assert urls == ["https://t.me/insidertracking/123", "https://t.me/insidertracking/124"]
+
+
+def test_fetch_telegram_falls_back_to_direct_html(monkeypatch):
+    """jina 가 bold 없는 마크다운(제목 0건)을 줘도 직접 HTML 폴백으로 수집."""
+    calls = []
+
+    class _Resp:
+        def __init__(self, text):
+            self.text = text
+
+    def fake_get(url, timeout=0):
+        calls.append(url)
+        if url.startswith("https://r.jina.ai/"):
+            return _Resp("plain markdown without bold titles")
+        return _Resp('<div class="tgme_widget_message_text">연준 금리 동결 시사</div>'
+                     '<a href="https://t.me/chanx/9"></a>')
+
+    monkeypatch.setattr(sc, "_bounded_get", fake_get)
+    events = sc.fetch_telegram_channel_events(["chanx"])
+    assert len(events) == 1
+    assert events[0]["title"] == "연준 금리 동결 시사"
+    assert events[0]["url"] == "https://t.me/chanx/9"
+    assert any(u.startswith("https://t.me/s/chanx") for u in calls)   # 폴백 경로 사용됨
+
+
+def test_collect_once_isolates_source_crash(tmp_path, monkeypatch):
+    """한 소스 fetcher 가 크래시해도 나머지 수집 + 헬스 기록은 계속."""
+    monkeypatch.setattr(sc, "fetch_saveticker_events",
+                        lambda: (_ for _ in ()).throw(RuntimeError("boom")))
+    monkeypatch.setattr(sc, "fetch_arca_events", lambda max_pages=2: [])
+    monkeypatch.setattr(sc, "fetch_telegram_channel_events",
+                        lambda: [{"source": "telegram:yuzukinaok1", "title": "t", "url": "https://t.me/y/1"}])
+    monkeypatch.setattr(sc, "fetch_market_snapshot_events", lambda: [])
+    monkeypatch.setattr(sc, "fetch_fred_macro_events", lambda: [])
+    monkeypatch.setattr(sc, "fetch_world_gov_bond_events", lambda: [])
+    fetched, written = sc.collect_once(cache_dir=tmp_path / "cache")
+    assert fetched == 1 and written == 1
+    h = sc.load_source_health(tmp_path / "cache")
+    assert h["saveticker"]["last_count"] == 0                     # 크래시 소스 = 0건 기록
+    assert h["telegram:yuzukinaok1"]["last_count"] == 1

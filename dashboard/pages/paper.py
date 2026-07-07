@@ -141,7 +141,7 @@ def _decisions_section(surface: str):
                             default=["편입", "퇴출"], key=f"paper_sides_{surface}")
     n = fc2.slider("표시 건수", 20, 200, 50, 10, key=f"paper_n_{surface}")
     show_axes = fc3.toggle("축 피처 보기", key=f"paper_axes_{surface}",
-                           help="★새 수집 축(mom12·hi52·lowvol·pead) — 원장 축적 현황")
+                           help="★새 수집 축(mom12·hi52·lowvol·pead·news) — 원장 축적 현황")
     view = [r for r in rows if not sides or r.get("side") in sides][:n]
     if not view:
         st.caption("선택한 구분의 결정 없음")
@@ -161,7 +161,7 @@ def _decisions_section(surface: str):
         }
         if show_axes:
             f = r.get("features") or {}
-            for ax in ("mom12", "hi52", "lowvol", "pead"):
+            for ax in ("mom12", "hi52", "lowvol", "pead", "news"):
                 base[ax] = data.f_ratio(f.get(ax), 2)
         return base
 

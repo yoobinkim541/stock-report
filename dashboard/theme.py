@@ -312,6 +312,86 @@ def section_label_html(text, accent=BLUE) -> str:
     return f'<div class="tn-sec" style="border-color:{accent}"><span>{text}</span></div>'
 
 
+# ── 경제 일정 달력 (월간 그리드) ─────────────────────────────────────────────
+
+_ECAL_IMP_ORDER = {"high": 0, "medium": 1, "low": 2, "info": 3}
+_ECAL_MAX_CHIPS = 4     # 셀당 표시 이벤트 수 (초과분 +N)
+_ECAL_WEEKDAYS = ("월", "화", "수", "목", "금", "토", "일")
+
+
+def econ_calendar_html(events: list, start=None, weeks: int = 3) -> str:
+    """경제 일정 → 달력 그리드 HTML (순수 빌더 — 테스트 가능).
+
+    events: econ_calendar.upcoming_events 형식 [{when: datetime|None, title, marker, importance}].
+    start 가 속한 주 월요일부터 weeks 주. 오늘 = 액센트 테두리·주말 흐림·지난날 반투명.
+    when 없는 이벤트는 달력에 못 놓으므로 제외(목록 expander 가 보완).
+    """
+    import html as _h
+    from datetime import date as _date, timedelta as _td
+
+    today = start or _date.today()
+    if hasattr(today, "date"):
+        today = today.date()
+    monday = today - _td(days=today.weekday())
+
+    by_day: dict = {}
+    for ev in events or []:
+        w = ev.get("when")
+        if w is None:
+            continue
+        d = w.date() if hasattr(w, "date") else w
+        by_day.setdefault(d, []).append(ev)
+
+    cells = []
+    for i in range(max(1, weeks) * 7):
+        d = monday + _td(days=i)
+        evs = sorted(by_day.get(d, []),
+                     key=lambda e: (_ECAL_IMP_ORDER.get(e.get("importance"), 9),
+                                    str(e.get("when") or "")))
+        chips = []
+        for ev in evs[:_ECAL_MAX_CHIPS]:
+            t = _h.escape(str(ev.get("title") or ""))
+            hhmm = ""
+            try:
+                hhmm = ev["when"].strftime("%H:%M") + " "
+            except Exception:
+                pass
+            chips.append(f'<div class="ec-ev" title="{hhmm}{t}">'
+                         f'{ev.get("marker", "⚪")} {t}</div>')
+        if len(evs) > _ECAL_MAX_CHIPS:
+            chips.append(f'<div class="ec-more">+{len(evs) - _ECAL_MAX_CHIPS}건 더</div>')
+        klass = "ec-cell"
+        if d == today:
+            klass += " ec-today"
+        if d.weekday() >= 5:
+            klass += " ec-dim"
+        if d < today:
+            klass += " ec-past"
+        badge = f'<span class="ec-mon">{d.month}/</span>' if (d.day == 1 or i == 0) else ""
+        cells.append(f'<div class="{klass}"><div class="ec-date">{badge}{d.day}</div>'
+                     f'{"".join(chips)}</div>')
+
+    heads = "".join(f'<div class="ec-head">{h}</div>' for h in _ECAL_WEEKDAYS)
+    style = (
+        "<style>"
+        ".ec-cal{display:grid;grid-template-columns:repeat(7,1fr);gap:4px;margin:4px 0 8px}"
+        f".ec-head{{color:{MUTED};font-size:.72rem;text-align:center;padding:2px 0}}"
+        f".ec-cell{{background:{PANEL};border:1px solid {BORDER};border-radius:8px;"
+        "min-height:78px;padding:4px 6px;overflow:hidden}"
+        f".ec-today{{border-color:{BLUE};box-shadow:inset 0 0 0 1px {BLUE}}}"
+        f".ec-dim .ec-date{{color:{MUTED}}}"
+        ".ec-past{opacity:.55}"
+        f".ec-date{{font-family:{_MONO};font-size:.72rem;color:{TEXT};margin-bottom:2px}}"
+        f".ec-mon{{color:{AMBER};font-weight:700}}"
+        f".ec-ev{{font-size:.68rem;color:{TEXT};white-space:nowrap;overflow:hidden;"
+        "text-overflow:ellipsis;line-height:1.55;cursor:default}"
+        f".ec-more{{font-size:.62rem;color:{MUTED}}}"
+        "@media (max-width:600px){.ec-cell{min-height:56px;padding:3px 4px}"
+        ".ec-ev{font-size:.6rem}}"
+        "</style>")
+    return style + f'<div class="ec-cal">{heads}{"".join(cells)}</div>'
+
+
 # ── 전역 CSS 주입 (streamlit lazy) ───────────────────────────────────────────
 def inject_global_css():
     import streamlit as st

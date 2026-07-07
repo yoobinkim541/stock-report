@@ -33,7 +33,7 @@ KST = timezone(timedelta(hours=9))
 HORIZON = 20             # 거래일(보상 성숙 기준)
 MIN_SAMPLES = 40         # 채택 최소 표본(미만이면 콜드스타트 유지)
 MAX_POS = int(os.getenv("KR_MOCK_MAX_POS", "5"))   # 배치 바스켓 크기(eval 일치용)
-_FEATS = ["ranker", "fund", "signal", "conf", "mom", "mom12", "hi52", "lowvol"]
+_FEATS = ["ranker", "fund", "signal", "conf", "mom", "mom12", "hi52", "lowvol", "news"]
 
 
 # ── 통계 ──────────────────────────────────────────────────────────────────────
@@ -62,13 +62,17 @@ def fit_policy(train_rows: list[dict]) -> dict:
       랭킹이 유니버스 순서로 붕괴하는 것 방지(#12).
     """
     from ml import kr_policy
+    from ml.adaptive.learner import NEW_AXIS_MIN_PAIRS, robust_axis_weight
+    _NEW_AXES = {"mom12", "hi52", "lowvol", "news"}  # 원장 축적 초기 축 — 강화 게이트(E)
     measured = {}
     for f in _FEATS:
         pairs = [(r["features"].get(f), r.get("fwd_excess"))
                  for r in train_rows
                  if r.get("features") and r["features"].get(f) is not None and r.get("fwd_excess") is not None]
-        if len(pairs) >= 5:
-            measured[f] = max(0.0, _pearson([a for a, _ in pairs], [b for _, b in pairs]))
+        new = f in _NEW_AXES
+        w = robust_axis_weight(pairs, min_pairs=NEW_AXIS_MIN_PAIRS if new else 5, stability=new)
+        if w is not None:
+            measured[f] = w
     total = sum(measured.values())
     if total <= 1e-9:
         # 신호 없음(또는 전축 미측정) → 합리적 기본 혼합 유지(붕괴 방지)

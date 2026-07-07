@@ -637,3 +637,24 @@ def test_build_llm_analysis_payload_no_meta_in_llm_prompt():
     # _meta should not appear in the prompt sent to LLM
     assert "_meta" not in prompt
     assert "char_count" not in prompt
+
+
+# ── LLM overlay 관측 계기 (LLM-3) ────────────────────────────────────────────
+
+def test_llm_overlay_log_and_stats():
+    """overlay 결과 store 축적 → 최근 30일 성공/거부 집계 (conftest 가 tmp DB 격리)."""
+    from investment_report import _log_llm_overlay, llm_overlay_stats
+
+    _log_llm_overlay("ok", {"estimated_tokens": 1234})
+    _log_llm_overlay("fact guard rejected output: unknown numeric claims: 42", {})
+    _log_llm_overlay("call failed: non-zero exit", {})
+    _log_llm_overlay("disabled", {})
+
+    stats = llm_overlay_stats(days=30)
+    assert stats is not None
+    assert stats["n"] >= 4
+    assert stats["ok"] >= 1
+    assert stats["guard_rejected"] >= 1
+    assert stats["call_failed"] >= 1
+    assert stats["disabled"] >= 1
+    assert 0.0 <= stats["ok_rate"] <= 1.0

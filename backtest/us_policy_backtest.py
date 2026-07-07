@@ -179,18 +179,24 @@ def features_asof(panels: dict, t: pd.Timestamp,
 def walk_forward(panels: dict, configs: dict, bench: pd.Series, *,
                  train_years: int = TRAIN_YEARS, top_k: int = TOP_K) -> dict:
     ret = panels["ret"]
-    feats, covs = {}, []
+    feats, covs = {}, {}
     for t in month_ends(ret.index):
         f, cov = features_asof(panels, t, top_k)
         if f is not None:
             feats[t] = f
-            covs.append(cov)
+            covs[t] = cov
     if not feats:
         return {"error": "피처 산출 불가(데이터 부족)"}
     rebal = sorted(feats.keys())
-    coverage = round(float(np.mean(covs)), 4) if covs else 0.0
-    logger.info("리밸런스 %d개 (%s~%s) · 평균 멤버십 커버리지 %.0f%%",
-                len(rebal), rebal[0].date(), rebal[-1].date(), coverage * 100)
+    coverage = round(float(np.mean(list(covs.values()))), 4) if covs else 0.0
+    # 연도별 커버리지 (D — 과거로 갈수록 상폐 가격 부재 심화: 어느 폴드가 신뢰 약한지 정직 공개)
+    cov_by_year: dict = {}
+    for t, c in covs.items():
+        cov_by_year.setdefault(t.year, []).append(c)
+    coverage_by_year = {str(y): round(float(np.mean(v)), 3) for y, v in sorted(cov_by_year.items())}
+    logger.info("리밸런스 %d개 (%s~%s) · 평균 멤버십 커버리지 %.0f%% · 최저연도 %s",
+                len(rebal), rebal[0].date(), rebal[-1].date(), coverage * 100,
+                min(coverage_by_year.items(), key=lambda kv: kv[1]) if coverage_by_year else "—")
 
     ret_by_cfg = {}
     for name, cfg in configs.items():
@@ -226,7 +232,8 @@ def walk_forward(panels: dict, configs: dict, bench: pd.Series, *,
     return {"oos_returns": oos, "bench_returns": bench, "folds": folds,
             "config_daily": pd.DataFrame(ret_by_cfg).dropna(how="all"),
             "full_period": {n: perf(r) for n, r in ret_by_cfg.items()},
-            "bench_perf_full": perf(bench.loc[rebal[0]:]), "coverage": coverage}
+            "bench_perf_full": perf(bench.loc[rebal[0]:]), "coverage": coverage,
+            "coverage_by_year": coverage_by_year}
 
 
 def degrade_for_coverage(verdict: dict, coverage: float,
@@ -266,6 +273,7 @@ def run(start_year: int = 2005, end_year: int | None = None) -> dict:
         "universe": "S&P500 시점 멤버십(상폐목록 포함·가격은 yfinance 가용분)",
         "top_k": TOP_K, "costs_bps": {"buy": BUY_BPS, "sell": SELL_BPS}, "bench": BENCH,
         "coverage": wf["coverage"],
+        "coverage_by_year": wf.get("coverage_by_year", {}),
         "verdict": verdict,
         "recommendation": current_recommendation(wf["config_daily"], wf["bench_returns"],
                                                  configs=CONFIGS),

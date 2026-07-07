@@ -79,6 +79,12 @@ EXIT_BUFFER = _int_env("KR_MOCK_EXIT_BUFFER", 2)     # 히스테리시스(top-N+
 # 기본 60(OOS 권고값 반영·모의로 라이브 검증). KR_MOCK_MIN_HOLD_DAYS=0 으로 되돌리면 현행 무제한 회전.
 # 모의 한정 — 실계좌 자동 경로 없음. 꼬리위험(2023 등) 있어 실계좌는 모의 검증 후 수동 판단.
 MIN_HOLD_DAYS = _int_env("KR_MOCK_MIN_HOLD_DAYS", 60)
+# ★분할매수·분할매도 — 회당 목표의 1/N 만 거래(N회에 평균진입/청산). 분산 축소(알파 아님)·
+# 모의 bps 비용 불변. 기본 3(분할 활성)·1=현행 일괄. min_hold(청산 지연)와 독립 합성.
+TRANCHES = _int_env("KR_MOCK_TRANCHES", 3)
+# 부분체결 스텁 예외(B) — 트란치 빌드 중 신호 이탈로 목표의 이 비율 미만인 반쪽 포지션은
+# min_hold 보호에서 제외(청산 허용). 없으면 저비중 잔재가 최대 60일 자본 잠식.
+STUB_EXEMPT_FRAC = _float_env("KR_MOCK_STUB_FRAC", 0.5)
 QUOTE_STALE_S = _int_env("REALTIME_QUOTE_STALE_S", 10)
 
 
@@ -126,6 +132,14 @@ def compute_kr_signals(limit: int = UNIVERSE) -> list[dict]:
                 h = _history_cached(tk, period="1y")
                 if h is not None and "Close" in getattr(h, "columns", []):
                     feats.update(kr_policy.price_axes(h["Close"]))
+            except Exception:
+                pass
+            # ★LLM 뉴스 구조화 축 — news_llm_snapshot 라벨 집계 (없으면 미기록 → 재정규화)
+            try:
+                from providers import news_labels
+                na = news_labels.news_axis(tk)
+                if na is not None:
+                    feats["news"] = na
             except Exception:
                 pass
             out.append({
@@ -219,7 +233,8 @@ def plan_rebalance(signals: list[dict], positions: dict, budget_krw: float,
                    max_positions: int, cash_krw: float | None = None,
                    slippage: float = 0.0, quote_fn=None,
                    rebal_band: float = 0.0, exit_buffer: int = 0,
-                   min_hold_days: int = 0, held_days: dict | None = None) -> list[dict]:
+                   min_hold_days: int = 0, held_days: dict | None = None,
+                   stub_frac: float = 0.0) -> list[dict]:
     """목표 바스켓 vs 현재 보유 → 시장가 주문계획.
 
     signals:   [{code, action, score, price, is_buy, is_sell}, ...]
@@ -232,6 +247,8 @@ def plan_rebalance(signals: list[dict], positions: dict, budget_krw: float,
       **★backtest/kr_policy_backtest 실증**: 슬로우 신호(hi52 등) 과잉거래가 순수익을 연 ~2.4%p
       갉아먹음 → 최소 보유기간이 gross 보존하며 비용만 절감(OOS 64% 연도·cross-axis·gross 보존).
       held_days: {code: 보유일수} (main 이 원장 편입일에서 산출). 기본 0 = 현행(무제한 회전).
+    stub_frac: >0 이면 포지션 가치 < (budget/max_positions)×비율 인 스텁(트란치 빌드 중
+      이탈한 반쪽 포지션)은 min_hold 보호 제외 → 청산 허용(저비중 잔재 자본잠식 방지·B).
     반환:      [{code, side('buy'|'sell'), qty, reason}, ...]
 
     규칙:
@@ -254,11 +271,16 @@ def plan_rebalance(signals: list[dict], positions: dict, budget_krw: float,
 
     # 1) 매도 먼저: 보유 중 keep(top-N+buffer) 밖 종목 전량 (현금 확보)
     #    단 min_hold_days>0 이면 편입 후 그 일수 미만 종목은 청산 보류(회전율 억제)
+    #    — 스텁(목표의 stub_frac 미만 반쪽 포지션)은 보호 제외(트란치 빌드 중 이탈분 정리·B)
+    per_target = (budget_krw / max(max_positions, 1)) if budget_krw > 0 else 0.0
     for code, p in positions.items():
         sh = int(p.get("shares", 0) or 0)
         if sh > 0 and code not in keep_codes:
             if min_hold_days > 0 and 0 <= held_days.get(code, 10 ** 9) < min_hold_days:
-                continue   # 최소 보유기간 미충족 — 타깃이탈이어도 유지
+                val = sh * float(p.get("cur_price", 0) or 0)
+                is_stub = stub_frac > 0 and per_target > 0 and val < stub_frac * per_target
+                if not is_stub:
+                    continue   # 최소 보유기간 미충족(제대로 빌드된 포지션) — 유지
             orders.append({"code": code, "side": "sell", "qty": sh, "reason": "타깃이탈"})
 
     # 2) 매수/조정: 예산 0/음수면 전면 생략 (음수 예산 → 유령매도 방지)
@@ -451,10 +473,19 @@ def main(argv: list[str] | None = None) -> int:
     plan = plan_rebalance(signals, positions, budget, MAX_POS, cash_krw=cash,
                           slippage=SLIPPAGE, quote_fn=_rt_best,
                           rebal_band=REBAL_BAND, exit_buffer=EXIT_BUFFER,
-                          min_hold_days=MIN_HOLD_DAYS, held_days=held_days)
-    logger.info("리밸런스 계획 %d건 (예산 ₩%s, 현금 %s, 목표 %d종목)",
+                          min_hold_days=MIN_HOLD_DAYS, held_days=held_days,
+                          stub_frac=STUB_EXEMPT_FRAC)
+    # ★분할매수/매도: 각 주문을 회당 목표의 1/N 로 상한 (N회에 평균 진입·청산)
+    if TRANCHES > 1 and plan:
+        from lib.tranche import plan_tranches
+        _px = {s["code"]: s.get("price") for s in signals if s.get("code")}
+        for c, p in positions.items():
+            _px.setdefault(c, p.get("cur_price"))
+        plan = plan_tranches(plan, budget / max(MAX_POS, 1), lambda c: _px.get(c), TRANCHES,
+                             id_key="code")
+    logger.info("리밸런스 계획 %d건 (예산 ₩%s, 현금 %s, 목표 %d종목, %d분할)",
                 len(plan), f"{budget:,.0f}",
-                f"₩{cash:,.0f}" if cash is not None else "미확인", MAX_POS)
+                f"₩{cash:,.0f}" if cash is not None else "미확인", MAX_POS, TRANCHES)
 
     if dry:
         logger.info("[DRY-RUN] 주문 미집행 — 계획만 출력:")

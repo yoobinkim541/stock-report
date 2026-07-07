@@ -475,3 +475,78 @@ def test_views_paper_glance_empty_and_error(monkeypatch):
         raise RuntimeError("db")
     monkeypatch.setattr(store, "all", boom)
     assert views.paper_glance() == []
+
+
+# ── 수집 뉴스 그룹핑 (시장·캘린더) ────────────────────────────────────────────
+
+def test_views_group_news_sorts_by_importance_then_recency():
+    from dashboard import views
+    events = [
+        {"id": "a", "source": "saveticker", "title": "일반 뉴스 옛것",
+         "published_at": "2026-07-05T10:00:00+09:00", "tags": []},
+        {"id": "b", "source": "saveticker", "title": "포트 종목 뉴스",
+         "published_at": "2026-07-05T09:00:00+09:00", "tags": ["$NVDA"]},
+        {"id": "c", "source": "saveticker", "title": "일반 뉴스 최신",
+         "published_at": "2026-07-06T10:00:00+09:00", "tags": []},
+        {"id": "d", "source": "telegram:chan1", "title": "채널 뉴스",
+         "published_at": "2026-07-06T11:00:00+09:00", "tags": []},
+    ]
+    score = lambda e: (8, "포트") if "$NVDA" in (e.get("tags") or []) else (5, "")
+    g = views.group_news(events, score_fn=score)
+    assert set(g) == {"saveticker", "telegram"}                  # 채널 접미사 제거 그룹
+    sv = g["saveticker"]
+    assert [x["title"] for x in sv] == ["포트 종목 뉴스", "일반 뉴스 최신", "일반 뉴스 옛것"]
+    assert sv[0]["score"] == 8 and sv[0]["tickers"] == ["NVDA"]
+
+
+def test_views_group_news_llm_label_boost_and_dedupe():
+    from dashboard import views
+    events = [
+        {"id": "x", "source": "saveticker", "title": "실적 뉴스",
+         "published_at": "2026-07-06T10:00:00+09:00", "tags": ["$MSFT"]},
+        {"id": "x", "source": "saveticker", "title": "실적 뉴스",       # 중복 id → 1건
+         "published_at": "2026-07-06T10:00:00+09:00", "tags": ["$MSFT"]},
+    ]
+    labels = {"x": {"direction": 1, "strength": 5, "event_type": "실적"}}
+    g = views.group_news(events, label_by_id=labels, score_fn=lambda e: (5, ""))
+    assert len(g["saveticker"]) == 1
+    it = g["saveticker"][0]
+    assert it["llm"] == {"direction": 1, "strength": 5, "event_type": "실적"}
+    assert it["score"] == 8                                       # max(5, 3+5)
+
+
+def test_views_group_news_empty_and_graceful():
+    from dashboard import views
+    assert views.group_news([]) == {}
+    g = views.group_news([{"source": None, "title": "  ", "tags": []},
+                          {"source": "arca", "title": "글", "published_at": ""}])
+    assert list(g) == ["arca"]                                    # 빈 제목 스킵
+
+
+def test_theme_econ_calendar_html():
+    from datetime import date, datetime
+    from dashboard import theme
+    today = date(2026, 7, 7)                                      # 화요일
+    events = [
+        {"when": datetime(2026, 7, 8, 21, 30), "title": "CPI 발표", "marker": "🔴", "importance": "high"},
+        {"when": datetime(2026, 7, 8, 10, 0), "title": "저중요 <이벤트>", "marker": "🟢", "importance": "low"},
+        {"when": None, "title": "날짜 미정", "marker": "⚪", "importance": "info"},
+    ]
+    html = theme.econ_calendar_html(events, start=today, weeks=2)
+    assert html.count('class="ec-head"') == 7 and "월" in html   # 요일 헤더(CSS 셀렉터 제외)
+    assert html.count('class="ec-cell') == 14                     # 2주 그리드
+    assert "ec-today" in html and "CPI 발표" in html
+    assert "&lt;이벤트&gt;" in html                                # HTML escape
+    assert "날짜 미정" not in html                                 # when 없는 건 제외
+    # 같은 날 중요도순: 🔴 CPI 가 🟢 보다 먼저
+    assert html.index("CPI 발표") < html.index("저중요")
+
+
+def test_theme_econ_calendar_overflow_chip():
+    from datetime import date, datetime
+    from dashboard import theme
+    d = date(2026, 7, 7)
+    events = [{"when": datetime(2026, 7, 7, 9 + i), "title": f"이벤트{i}", "marker": "🟡",
+               "importance": "medium"} for i in range(6)]
+    html = theme.econ_calendar_html(events, start=d, weeks=1)
+    assert "+2건 더" in html                                       # 셀당 4개 + 초과 표시

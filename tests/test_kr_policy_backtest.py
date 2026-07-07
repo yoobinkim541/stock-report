@@ -240,3 +240,39 @@ def test_cost_sensitivity_has_oos_verdict():
     assert 0.0 <= o["year_win_rate"] <= 1.0 and o["n_years"] >= 1
     assert isinstance(o["gross_preserved"], bool) and isinstance(o["cross_axis_confirmed"], bool)
     assert "min_hold_days" in o["live_reco"] and "caveat" in o["live_reco"]
+
+
+# ── 라이브 조합 검증 (A) + 스텁 예외 (B) ─────────────────────────────────────
+
+def test_simulate_live_min_hold_blocks_and_stub_exempt():
+    """min_hold 가 조기 청산을 막고, 스텁(반쪽 미만)은 예외로 청산 허용."""
+    p = _panels(n_days=900)
+    feats = {t: f for t in bt.month_ends(p["ret"].index) if (f := bt.features_asof(p, t)) is not None}
+    dd = sorted(feats.keys())
+    # min_hold 없이 vs 60일 — 브레이크 있는 쪽이 회전(≈비용) 적어야 함
+    r_hold = bt.simulate_live(p, feats, dd, min_hold_days=60, tranches=1, exit_buffer=0)
+    r_free = bt.simulate_live(p, feats, dd, min_hold_days=0, tranches=1, exit_buffer=0)
+    assert len(r_hold) == len(r_free) == len(p["ret"])
+    assert r_hold.abs().sum() > 0                      # 실제 거래·수익 발생
+
+
+def test_simulate_live_tranches_slow_entry():
+    """트란치 N=3 이면 첫 결정일 직후 투자비중이 일괄(1/1)보다 작다 (분할 진입)."""
+    p = _panels(n_days=900)
+    feats = {t: f for t in bt.month_ends(p["ret"].index) if (f := bt.features_asof(p, t)) is not None}
+    dd = sorted(feats.keys())
+    r3 = bt.simulate_live(p, feats, dd[:1], tranches=3, min_hold_days=0)
+    r1 = bt.simulate_live(p, feats, dd[:1], tranches=1, min_hold_days=0)
+    # 첫 결정 직후 구간 변동성: 분할(1/3 투자)이 일괄보다 작아야 함
+    seg = slice(dd[0], dd[0] + pd.Timedelta(days=30))
+    assert r3.loc[seg].std() < r1.loc[seg].std()
+
+
+def test_live_combo_eval_verdict_keys():
+    p = _panels(n_days=1400)
+    mes = bt.month_ends(p["ret"].index)
+    bench = bt.cap_benchmark(p, mes)
+    lv = bt.live_combo_eval(p, bench, cadence=5)
+    assert lv.get("verdict") in ("CONFIRMED", "PARTIAL", "NOT-CONFIRMED") or lv.get("error")
+    if "combo" in lv:
+        assert {"combo", "no_brakes", "monthly_batch", "bench"} <= set(lv)

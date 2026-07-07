@@ -28,12 +28,13 @@ DEFAULT_POLICY = {
     "w_hi52":    0.0,    # 52주 고가 근접 (수집·게이트 채택 대기)
     "w_lowvol":  0.0,    # 저변동성 (수집·게이트 채택 대기)
     "w_pead":    0.0,    # ★어닝 드리프트(PEAD) — 서프라이즈×반응×감쇠 (수집·게이트 채택 대기)
+    "w_news":    0.0,    # ★LLM 뉴스 구조화 축 (providers/news_labels) — 수집·게이트 채택 대기
 }
 BOUNDS = {
     "w_ranker": (0.0, 1.0), "w_value": (0.0, 1.0), "w_quality": (0.0, 1.0),
     "w_mom": (0.0, 1.0), "w_conf": (0.0, 1.0),
     "w_mom12": (0.0, 1.0), "w_hi52": (0.0, 1.0), "w_lowvol": (0.0, 1.0),
-    "w_pead": (0.0, 1.0),
+    "w_pead": (0.0, 1.0), "w_news": (0.0, 1.0),
 }
 
 _SIGNAL_MAP = {"Positive": 1.0, "Neutral": 0.5, "Warning": 0.2, "Critical": 0.0}

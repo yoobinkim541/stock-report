@@ -634,6 +634,52 @@ def _generate_llm_overlay(clean_data, source_digest="", runner=subprocess.run):
     return text, "ok" + retry_note
 
 
+def _log_llm_overlay(status, meta):
+    """overlay 결과를 store 컬렉션에 축적 — LLM 에도 ML(IC·적중률)과 동일한 관측 계기.
+
+    집계는 llm_overlay_stats(). store 실패는 리포트 발송에 영향 없음(graceful).
+    """
+    try:
+        import store
+        store.append("llm_overlay_log", {
+            "date": datetime.now(KST).strftime("%Y-%m-%d"),
+            "ok": bool(str(status or "").startswith("ok")),
+            "status": _short_status(status, 200),
+            "model": INVESTMENT_REPORT_LLM_MODEL,
+            "provider": INVESTMENT_REPORT_LLM_PROVIDER,
+            "est_tokens": int((meta or {}).get("estimated_tokens", 0) or 0),
+        })
+    except Exception as e:
+        logger.warning(f"LLM overlay 로그 실패(무시): {e}")
+
+
+def llm_overlay_stats(days=30):
+    """최근 N일 overlay 성공/거부 집계 — 기록 없으면 None.
+
+    반환: {n, ok, guard_rejected, call_failed, disabled, ok_rate}
+    fact guard 거부율이 높으면 guard 완화가 아니라 프롬프트/payload 개선이 먼저(정직 규율).
+    """
+    try:
+        import store
+        rows = store.all("llm_overlay_log")
+    except Exception:
+        return None
+    cutoff = (datetime.now(KST) - timedelta(days=days)).strftime("%Y-%m-%d")
+    recent = [r for r in rows if str(r.get("date", "")) >= cutoff]
+    if not recent:
+        return None
+    ok = sum(1 for r in recent if r.get("ok"))
+    status_of = lambda r: str(r.get("status", ""))
+    return {
+        "n": len(recent),
+        "ok": ok,
+        "guard_rejected": sum(1 for r in recent if "fact guard" in status_of(r)),
+        "call_failed": sum(1 for r in recent if status_of(r).startswith("call failed")),
+        "disabled": sum(1 for r in recent if status_of(r) == "disabled"),
+        "ok_rate": round(ok / len(recent), 3),
+    }
+
+
 def _fetch_arca_posts(max_pages=None, limit=6):
     if max_pages is None:
         max_pages = _env_int("INVESTMENT_REPORT_ARCA_PAGES", 3, 0)
@@ -2353,6 +2399,11 @@ def generate_report():
     lines.append(f"| KOSPI 상위 30 스캔 | {len(kospi_results)}개 종목 |")
     lines.append(f"| 데이터 소스 | yfinance, SaveTicker API |")
     lines.append(f"| LLM overlay | 선택 실행: {INVESTMENT_REPORT_LLM_MODEL}, fact guard 통과 시만 추가 |")
+    _ostats = llm_overlay_stats()
+    if _ostats:
+        lines.append(f"| LLM overlay 최근 30일 | {_ostats['n']}회 · 성공 {_ostats['ok']} "
+                     f"({_ostats['ok_rate']*100:.0f}%) · guard 거부 {_ostats['guard_rejected']} "
+                     f"· 호출 실패 {_ostats['call_failed']} |")
     lines.append(f"| 외부 API 비용 | yfinance 무료 + SaveTicker 무료 |")
     lines.append(f"| Telegram 전송 | @Stock_botbot (파일 2개 + 헤더) |")
     lines.append(f"")
@@ -2411,6 +2462,7 @@ def generate_report():
 
     # ── Optional LLM editor overlay ──
     llm_overlay, llm_status = _generate_llm_overlay(clean_data, source_digest)
+    _log_llm_overlay(llm_status, _llm_meta)   # 관측 계기 — 성공/거부율 store 축적
     if llm_overlay:
         with open(report_path, "a", encoding="utf-8") as f:
             f.write("\n---\n\n")
