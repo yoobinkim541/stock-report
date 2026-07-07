@@ -74,6 +74,7 @@ crons/news_spike_detector.py (크론 매 1분)
 | `providers/index_membership.py` | 교차시장 시점별 멤버십 — 美 S&P500(fja05680, 1996~ 생존편향0)·KR(marcap 위임). members_asof·change_events·membership_intervals(생존편향제거 마스킹) | `~/reports/ml-cache/sp500_history.csv` |
 | `providers/edgar.py` | SEC EDGAR 재무층 — companyfacts(상폐기업 재무 보존·무료) → fundamental_trends(매출YoY·순마진·부채추세, 무룩어헤드). 美 퇴출예측 피처원 | `~/reports/ml-cache/edgar/` |
 | `providers/naver_kr.py` | KR 수급(외인/기관/개인 순매수)+KOSPI200 멤버십(Naver — pykrx 공백 복구, 서버서 동작). investor_flow_features·kospi200_members. **Naver HTML=EUC-KR** | — |
+| `providers/news_labels.py` | **LLM 뉴스 구조화 라벨층** — 수집 뉴스 → {티커,유형,방향,강도} point-in-time JSONL(published/labeled 시각 보존·무룩어헤드) + `news_axis`(방향×강도 감쇠합 [0,1]). 환각 방어(입력 태그 밖 티커 폐기·enum 검증). LLM=**피처 생성기 한정**(선택/타이밍 위임 금지 — 재현불가 출력은 백테스트 불성립) | `~/reports/ml-data/news_llm_labels.jsonl` |
 | `providers/kis_quote.py` | KIS **실계좌 시세 read-only** REST — 실전 도메인(`openapi.koreainvestment.com:9443`) 하드락·현재가·10단계 호가·거래량(**KR·美 모두 무료 실시간**). 주문 경로 0(grep 강제)·`REALTIME_ENABLED` 게이트·실전키 fail-closed | `~/.cache/kis_quote_token.json` |
 | `providers/realtime_quotes.py` | 실시간 캐시 **읽기전용 클라이언트** = 폴백 단일 seam. get_price/orderbook/best/volume, 2단 신선도(heartbeat+심볼 ts). stale·비활성·없음 → None → 소비자 yfinance 폴백. 예외 무발 | `~/.cache/kis_realtime_quotes.json` |
 
@@ -85,7 +86,7 @@ crons/news_spike_detector.py (크론 매 1분)
 | `bot/attachment_parser.py` | PDF/이미지 OCR 파싱, pending 파일 관리 |
 | `bot/price_alerts.py` | 알림 CRUD + check_alerts() |
 | `bot/order_generator.py` | Phase 기반 소수점 매수 주문서 생성 |
-| `bot/stock_advisor.py` | AI 상담 프롬프트 실행 |
+| `bot/stock_advisor.py` | AI 상담 프롬프트 실행 — source_digest DATA블록 인젝션 방어 + **편집 사후 가드**(범위/구조 검증 위반 시 실행 전 스냅샷 롤백·경고 병기) |
 | `bot/earnings_commands.py` | /earnings 서브커맨드 (실적 캘린더·밸류에이션·서프라이즈·컨센서스·PEAD) — owner 전용·정보형 |
 | `bot/evolve_command.py` | /evolve — 모의 자기개선 진화 렌더 (KR+US `evolution.evolution_summary` → verdict·순비용 IC·스파크 추세·채택 이력) — owner 전용·표시·무엣지면 정직 |
 
@@ -109,7 +110,7 @@ crons/news_spike_detector.py (크론 매 1분)
 | `crons/daily_ranking.py` | ML 종목 랭킹 발송 | 평일 22:00 UTC |
 | `crons/notion_sync.py` | Notion 대시보드 동기화 (리포트 23:00 이후) + 리포트 아카이빙 호출. **히어로 KPI 밴드**(Phase·QQQ낙폭·내포트·DCA 4열 컬러 콜아웃)·로컬 PNG 네이티브 임베드(파일 업로드 API)·리포트 섹션 구조화(h3/불릿)·**보유종목 DB upsert**·안전 스왑(append-then-delete·child_database 보존) | 평일 23:30 UTC |
 | `crons/notion_archive.py` | 일일 리포트 → Notion 월(`26/06`)/주(`4주차`) 계층 페이지 누적 아카이빙 (멱등 upsert, 대시보드와 독립) | notion_sync 가 호출 |
-| `crons/news_spike_detector.py` | 속보 수집 + 급증 감지 + 텔레그램 알림 (+ 실시간 시세 동반표시) | 매 1분 |
+| `crons/news_spike_detector.py` | 속보 수집 + 급증 감지 + 텔레그램 알림 (+ 실시간 시세 동반표시). **경계선(규칙 5~6점)만 LLM 2차 판정**(`NEWS_SPIKE_LLM_ENABLED` opt-in·회당 상한·실패 시 규칙 점수 유지) | 매 1분 |
 | `scripts/kis_stream_watchdog.sh` | 실시간 시세 WS 상시 프로세스(kis_stream) 재기동 — `REALTIME_ENABLED=true` 시만 기동(opt-in·꺼지면 no-op) | 매 1분 |
 | `crons/kiwoom_sync_rest.py` | 키움 REST API 국내주식 잔고 동기화 | 평일 23:35 UTC |
 | `crons/sp500_heatmap_snapshot.py` | 대시보드 홈 S&P500 시장맵 스냅샷 적재(`_sp500_heatmap_live`→JSON) — 콜드로드 즉시화. 표시데이터 | 매 20분 |
@@ -133,6 +134,7 @@ crons/news_spike_detector.py (크론 매 1분)
 | `crons/fundamental_snapshot.py` | 펀더멘털 point-in-time 스냅샷 적재 (look-ahead 없는 학습 피처용) | 토 01:00 UTC |
 | `crons/options_snapshot.py` | 옵션 지표 스냅샷 (ATM IV·풋콜비·스큐·기대변동폭) — 학습 피처 축적 | 평일 21:30 UTC |
 | `crons/earnings_snapshot.py` | 어닝 컨센서스·★리비전 모멘텀·서프라이즈·밸류에이션 point-in-time 적재 (실적/주가반응 예측 학습데이터 — 무룩어헤드) | 평일 22:10 UTC |
+| `crons/news_llm_snapshot.py` | **LLM 뉴스 구조화 라벨 적재** (`NEWS_LLM_LABELS_ENABLED` opt-in) — 티커태그·미라벨 이벤트만 배치 라벨(회당 30건 캡) → news 축 피처 원천. KR 00:30·US 15:00 모의 결정 직전 신선화 | 평일 00:05·14:05 UTC |
 | `crons/naver_flow_snapshot.py` | KR 투자자 수급 + KOSPI200 멤버십 forward 스냅샷 (Naver — pykrx 공백 복구, 시점별 이력 축적) | 평일 07:30 UTC |
 | `crons/earnings_model_retrain.py` | 어닝 예측(G3 서프라이즈·G4 주가반응) 주간 재학습 + 모델 캐시 (엣지 게이트: AUC>0.52·skill>0.02 시만 저장 → /earnings 라이브 예측 공급) | 토 03:50 UTC |
 | `crons/institutional_snapshot.py` | 기관 매집 강도·13F 지분 주간 스냅샷 적재 (델타 추적용) + 상위 5 다이제스트 발송 | 토 01:30 UTC |
@@ -295,6 +297,13 @@ crons/news_spike_detector.py (크론 매 1분)
 | `NOTION_TOKEN` | — | — (Notion 대시보드 동기화·아카이빙. 없으면 notion_sync 스킵) |
 | `NOTION_ARCHIVE_ROOT_ID` | — | — (아카이브 루트 페이지 강제 지정. 미설정 시 대시보드 부모 아래 자동탐색·생성 후 `~/.cache` 캐시) |
 | `NOTION_ARCHIVE_PARENT_ID` | — | — (루트를 만들 부모. 기본: 대시보드의 부모 페이지) |
+| `NEWS_SPIKE_LLM_ENABLED` | — | `false` (속보 경계선[규칙 5~6점]만 LLM 2차 판정. off면 규칙 점수만 — 기존 동작 불변) |
+| `NEWS_SPIKE_LLM_MODEL` / `NEWS_SPIKE_LLM_PROVIDER` | — | `gpt-5-mini` / `openai-codex` |
+| `NEWS_SPIKE_LLM_MAX_PER_RUN` / `NEWS_SPIKE_LLM_TIMEOUT` | — | `3` / `20` (회당 LLM 판정 상한·초 — 매 1분 크론 비용 통제) |
+| `NEWS_LLM_LABELS_ENABLED` | — | `false` (LLM 뉴스 구조화 라벨 크론 opt-in. off면 라벨 미적재 → news 축 미기록·score 재정규화) |
+| `NEWS_LLM_LABELS_MODEL` / `NEWS_LLM_LABELS_PROVIDER` / `NEWS_LLM_LABELS_TIMEOUT` | — | `gpt-5-mini` / `openai-codex` / `90` |
+| `NEWS_LLM_LABELS_MAX` | — | `30` (회당 라벨 배치 상한 — 일 2회 실행 비용 캡) |
+| `INVESTMENT_REPORT_LLM_ENABLED` | — | `1` (일일 리포트 LLM overlay — fact guard 통과 시만 코멘트 추가·결과는 store `llm_overlay_log` 축적) |
 | `SAVE_TICKER_API_BASE` | — | `https://saveticker.com/api` (뉴스 + 경제캘린더 `/calendar/events`) |
 | `DART_API_KEY` | — | — (DART OpenAPI 키 — KR 공시. 없으면 대시보드 공시탭 graceful 안내) |
 | `DASHBOARD_ENABLED` | — | `false` (퀀트 터미널 streamlit 워치독 기동 게이트. true 여야 상시구동·opt-in) |
@@ -395,6 +404,7 @@ crons/news_spike_detector.py (크론 매 1분)
 ~/reports/ml-cache/fundamental_snapshots.jsonl   — 펀더멘털 주간 point-in-time 스냅샷
 ~/reports/ml-cache/institutional_snapshots.jsonl — 기관 매집 강도·13F 지분 주간 스냅샷 (델타 추적)
 ~/reports/ml-cache/earnings_snapshots.jsonl      — 어닝 컨센서스·리비전·서프라이즈·밸류 일별 point-in-time (실적/주가반응 예측 학습용)
+~/reports/ml-data/news_llm_labels.jsonl          — LLM 뉴스 구조화 라벨 point-in-time (published/labeled 시각 보존 — news 축 원천, 불변 append-only)
 ~/reports/ml-cache/earnings_*.json               — earnings_data 종목별 요약 12h 캐시
 ~/reports/ml-cache/earnings_predictor.pkl        — 실적 서프라이즈 G3 모델 (엣지 게이트 통과 시만 — earnings_model_retrain)
 ~/reports/ml-cache/earnings_move_predictor.pkl   — 실적후 주가반응 G4 모델 (엣지 게이트 통과 시만)

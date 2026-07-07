@@ -176,6 +176,14 @@ def compute_us_signals(universe: list[str] | None = None) -> list[dict]:
                     feats["pead"] = pa
             except Exception:
                 pass
+            # ★LLM 뉴스 구조화 축 — news_llm_snapshot 라벨 집계 (없으면 미기록 → 재정규화)
+            try:
+                from providers import news_labels
+                na = news_labels.news_axis(tk)
+                if na is not None:
+                    feats["news"] = na
+            except Exception:
+                pass
             price = float((sig.get("price_info") or {}).get("current_price") or 0) or (kis_mock.get_price(tk) or 0)
             out.append({
                 "ticker": tk, "price": price, "features": feats,

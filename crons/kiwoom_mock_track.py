@@ -134,6 +134,14 @@ def compute_kr_signals(limit: int = UNIVERSE) -> list[dict]:
                     feats.update(kr_policy.price_axes(h["Close"]))
             except Exception:
                 pass
+            # ★LLM 뉴스 구조화 축 — news_llm_snapshot 라벨 집계 (없으면 미기록 → 재정규화)
+            try:
+                from providers import news_labels
+                na = news_labels.news_axis(tk)
+                if na is not None:
+                    feats["news"] = na
+            except Exception:
+                pass
             out.append({
                 "ticker": tk,
                 "code":   tk.replace(".KS", "").replace(".KQ", ""),

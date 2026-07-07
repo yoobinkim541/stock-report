@@ -33,7 +33,7 @@ HORIZON = 20
 MIN_SAMPLES = 40
 MAX_POS = int(os.getenv("US_MOCK_MAX_POS", "5"))
 BENCHMARK = "QQQ"
-_FEATS = ["ranker", "value", "quality", "mom", "conf", "mom12", "hi52", "lowvol", "pead"]
+_FEATS = ["ranker", "value", "quality", "mom", "conf", "mom12", "hi52", "lowvol", "pead", "news"]
 _BUY = ("편입", "증액")
 
 
@@ -60,7 +60,7 @@ def fit_policy(train_rows: list[dict]) -> dict:
     """
     from ml import us_policy
     from ml.adaptive.learner import NEW_AXIS_MIN_PAIRS, robust_axis_weight
-    _NEW_AXES = {"mom12", "hi52", "lowvol", "pead"}   # 원장 축적 초기 축 — 강화 게이트(E)
+    _NEW_AXES = {"mom12", "hi52", "lowvol", "pead", "news"}   # 원장 축적 초기 축 — 강화 게이트(E)
     rows = _buy_rows(train_rows)
     measured = {}
     for f in _FEATS:

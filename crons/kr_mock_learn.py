@@ -33,7 +33,7 @@ KST = timezone(timedelta(hours=9))
 HORIZON = 20             # 거래일(보상 성숙 기준)
 MIN_SAMPLES = 40         # 채택 최소 표본(미만이면 콜드스타트 유지)
 MAX_POS = int(os.getenv("KR_MOCK_MAX_POS", "5"))   # 배치 바스켓 크기(eval 일치용)
-_FEATS = ["ranker", "fund", "signal", "conf", "mom", "mom12", "hi52", "lowvol"]
+_FEATS = ["ranker", "fund", "signal", "conf", "mom", "mom12", "hi52", "lowvol", "news"]
 
 
 # ── 통계 ──────────────────────────────────────────────────────────────────────
@@ -63,7 +63,7 @@ def fit_policy(train_rows: list[dict]) -> dict:
     """
     from ml import kr_policy
     from ml.adaptive.learner import NEW_AXIS_MIN_PAIRS, robust_axis_weight
-    _NEW_AXES = {"mom12", "hi52", "lowvol"}          # 원장 축적 초기 축 — 강화 게이트(E)
+    _NEW_AXES = {"mom12", "hi52", "lowvol", "news"}  # 원장 축적 초기 축 — 강화 게이트(E)
     measured = {}
     for f in _FEATS:
         pairs = [(r["features"].get(f), r.get("fwd_excess"))

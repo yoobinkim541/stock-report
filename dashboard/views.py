@@ -202,7 +202,7 @@ def join_decisions(decisions: list[dict], outcomes: list[dict]) -> list[dict]:
             "policy_score": d.get("policy_score"),
             "reason": (d.get("rationale") or {}).get("one_line_reason", ""),
             "ok": d.get("ok"),
-            "features": d.get("features") or {},   # 새 축(mom12·hi52·lowvol·pead) 가시화용
+            "features": d.get("features") or {},   # 새 축(mom12·hi52·lowvol·pead·news) 가시화용
             "fwd_excess": o.get("fwd_excess"), "correct": correct,
             "matured_at": o.get("matured_at"),
         })
