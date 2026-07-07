@@ -26,7 +26,16 @@ BOT_TOKEN = os.getenv("STOCK_BOT_TOKEN")
 CHAT_ID = os.getenv("STOCK_BOT_CHAT_ID", "5771238245")
 
 
+# 개발 워크트리 실행 가드 — load_dotenv 가 상위 프로덕션 .env 를 찾아 올라가서
+# 개발 중 빨간 실행이 실제 텔레그램 알림을 쏘는 사고 방지(2026-07-07 2회 발생).
+# 크론은 메인 트리에서 돌므로 프로덕션 실패 알림은 불변.
+_DEV_RUN = "/.claude/worktrees/" in os.path.abspath(__file__)
+
+
 def _alert(msg: str):
+    if _DEV_RUN:
+        logger.info("개발 워크트리 실행 — 텔레그램 알림 생략")
+        return
     if not BOT_TOKEN:
         return
     try:
