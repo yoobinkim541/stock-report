@@ -61,8 +61,11 @@ def build_label_prompt(events: list[dict]) -> str:
     lines = []
     for e in events:
         title = str(e.get("title") or "").replace("<<<", "").replace(">>>", "")[:200]
-        lines.append(json.dumps({"id": e.get("id"), "title": title,
-                                 "tickers": sorted(_event_tickers(e))}, ensure_ascii=False))
+        row = {"id": e.get("id"), "title": title, "tickers": sorted(_event_tickers(e))}
+        body = str(e.get("body") or "").replace("<<<", "").replace(">>>", "")
+        if body and body != title:
+            row["body"] = body[:300]       # 장문 포스트(레딧 분석 등) 문맥 — 라벨 정밀도 보강
+        lines.append(json.dumps(row, ensure_ascii=False))
     return (
         "너는 투자 뉴스 구조화기다. 아래 DATA 블록의 각 뉴스에 대해 JSON 한 줄씩 출력하라.\n"
         "형식: {\"id\": 입력 id 그대로, \"tickers\": [입력 tickers 중 실제 관련된 것만], "

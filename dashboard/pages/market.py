@@ -61,9 +61,36 @@ def _health_banner():
                + " — 서버 수집 크론 로그(/tmp/…collector) 확인", icon="⚠️")
 
 
+def _wsb_card():
+    """🗣️ 레딧/WSB 심리 — insidertracking 분석 포스트 구조화 (표시·컨텍스트 전용)."""
+    ss = cached.social_sentiment()
+    s = (ss or {}).get("summary")
+    if not s:
+        return
+    with st.expander(f"🗣️ 레딧/WSB 심리 — {str(s.get('published_at'))[:10]} "
+                     f"(주인공: {' · '.join(s.get('top_tickers', [])[:4]) or '—'})", expanded=True):
+        if s.get("mood_bullets"):
+            st.markdown("**🔥 전체 시장 심리**")
+            for b in s["mood_bullets"][:4]:
+                st.markdown(f"- {b}")
+        cols = st.columns(2)
+        secs = [x for x in s.get("sections", []) if "심리" not in x["heading"]][:8]
+        for i, sec in enumerate(secs):
+            with cols[i % 2]:
+                tks = " ".join(f"`{t}`" for t in sec.get("tickers", [])[:4])
+                st.markdown(f"**{sec['emoji']} {sec['heading']}** {tks}")
+                for b in sec.get("bullets", [])[:3]:
+                    st.markdown(f"<span style='color:{theme.MUTED};font-size:.85rem'>· {b}</span>",
+                                unsafe_allow_html=True)
+        src = f" · [원문]({s['url']})" if s.get("url") else ""
+        st.caption(f"출처: 텔레그램 insidertracking{src} · 소셜 심리는 컨텍스트 — 매매신호 아님 "
+                   "(판단 반영은 LLM 라벨→news 축 게이트 경유만)")
+
+
 def _news_section():
     st.subheader("🗞️ 수집 뉴스 — 출처별 · 중요도순")
     _health_banner()
+    _wsb_card()
     hours = st.radio("수집 범위", [24, 48, 72], index=1, horizontal=True,
                      format_func=lambda h: f"최근 {h}시간", key="news_hours",
                      label_visibility="collapsed")

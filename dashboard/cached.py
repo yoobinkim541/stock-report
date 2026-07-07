@@ -49,6 +49,11 @@ def source_health():
     return views.source_health_summary()
 
 
+@st.cache_data(ttl=900, show_spinner=False)
+def social_sentiment():
+    return views.social_sentiment()
+
+
 @st.cache_data(ttl=_TTL, show_spinner="불러오는 중…")
 def earnings(t):
     return views.earnings_calendar(t)

@@ -30,6 +30,14 @@ data.portfolio_weights = lambda *a, **k: {"MSFT":0.4,"NVDA":0.6}
 cached.econ = lambda *a, **k: [{"marker":"\U0001f534","date_str":"06/29 21:30","title":"CPI"}]
 cached.news = lambda t: "뉴스 본문"
 cached.etf = lambda t: {"ticker": t, "is_etf": False}
+cached.social_sentiment = lambda: {"summary": {"title": "미국 레딧 게시물 분석",
+    "published_at": "2026-07-05T10:00:00+09:00", "url": "https://t.me/insidertracking/1",
+    "top_tickers": ["MU", "SNDK", "NVDA"],
+    "mood_bullets": ["메모리가 압도적인 주인공", "YOLO 콜옵션 심리 강함"],
+    "sections": [{"emoji": "\U0001f4be", "heading": "MU / SNDK - AI 메모리",
+                  "tickers": ["MU", "SNDK"], "bullets": ["갭업 기대", "ATH 반복 언급"]},
+                 {"emoji": "\U0001f525", "heading": "현재 WSB 전체 시장 심리",
+                  "tickers": [], "bullets": ["Risk-On"]}]}}
 cached.source_health = lambda: {"health": {"saveticker": {"last_count": 12}},
     "stale": [{"source": "telegram:insidertracking", "hours": None, "threshold": 12}]}
 cached.collected_news = lambda hours=48: {"hours": hours, "groups": {

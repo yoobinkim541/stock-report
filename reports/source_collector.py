@@ -245,6 +245,14 @@ def build_digest(events: list[dict], limit: int = 12) -> str:
         lines.append("- 반복 테마: " + ", ".join(f"{t} {c}건" for t, c in tag_counts.most_common(8)))
     if trusted_sources:
         lines.append("- 신뢰 소스: " + ", ".join(trusted_sources[:6]))
+    # 레딧/WSB 심리 한 줄 (insidertracking 분석 포스트 구조화 — 있으면)
+    try:
+        from reports.social_sentiment import digest_line, sentiment_summary
+        line = digest_line(sentiment_summary(events))
+        if line:
+            lines.append(f"- {line}")
+    except Exception:
+        pass
     lines.append("")
 
     for event in sorted(events, key=lambda e: e.get("collected_at", ""), reverse=True)[:limit]:
@@ -360,6 +368,19 @@ def _telegram_titles_from_html(html_text: str, channel: str) -> tuple[list[str],
     return titles, urls
 
 
+TELEGRAM_BODY_MAX = 3000    # 이벤트 body 상한 (레딧 분석 등 장문 구조화 파싱용)
+
+
+def _telegram_message_texts(channel: str) -> tuple[list[str], list[str]]:
+    """t.me/s 직접 HTML — (전체 메시지 텍스트 목록, 링크 목록). 실패 시 ([], [])."""
+    try:
+        resp = _bounded_get(f"https://t.me/s/{channel}", timeout=15)
+        return _telegram_titles_from_html(resp.text, channel)
+    except Exception as e:
+        logger.info("telegram:%s 직접 HTML 실패: %s", channel, e)
+        return [], []
+
+
 def fetch_telegram_channel_events(channels: list[str] = TELEGRAM_NEWS_CHANNELS) -> list[dict]:
     events = []
     for channel in channels:
@@ -368,6 +389,7 @@ def fetch_telegram_channel_events(channels: list[str] = TELEGRAM_NEWS_CHANNELS) 
             continue
         titles: list[str] = []
         urls: list[str] = []
+        bodies_by_url: dict[str, str] = {}
         try:
             resp = _bounded_get(f"https://r.jina.ai/http://t.me/s/{channel}", timeout=20)
             markdown = resp.text
@@ -376,13 +398,15 @@ def fetch_telegram_channel_events(channels: list[str] = TELEGRAM_NEWS_CHANNELS) 
         except Exception as e:
             logger.warning("telegram:%s jina 수집 실패 — 직접 HTML 폴백 시도: %s", channel, e)
 
-        if not titles:
+        if titles:
+            # jina 성공 = 제목만 확보 → 장문 본문(레딧 분석·프리마켓 등)은 직접 HTML 로 보강
+            texts, t_urls = _telegram_message_texts(channel)
+            bodies_by_url = {u: t[:TELEGRAM_BODY_MAX] for u, t in zip(t_urls, texts)}
+        else:
             # 폴백: t.me/s 공개 프리뷰 직접 파싱 (jina 장애/레이트리밋·bold 없는 채널 대응)
-            try:
-                resp = _bounded_get(f"https://t.me/s/{channel}", timeout=15)
-                titles, urls = _telegram_titles_from_html(resp.text, channel)
-            except Exception as e:
-                logger.warning("telegram:%s 직접 HTML 폴백도 실패: %s", channel, e)
+            texts, urls = _telegram_message_texts(channel)
+            titles = texts
+            bodies_by_url = {u: t[:TELEGRAM_BODY_MAX] for u, t in zip(urls, texts)}
 
         if not titles:
             logger.warning("telegram:%s 수집 0건 (jina·직접 모두) — 채널명/차단 확인 필요", channel)
@@ -393,13 +417,25 @@ def fetch_telegram_channel_events(channels: list[str] = TELEGRAM_NEWS_CHANNELS) 
             if len(re.sub(r"[^\w가-힣]", "", title)) < 4:
                 continue
             url = urls[idx] if idx < len(urls) else ""
+            body = bodies_by_url.get(url, "")
+            scan_text = body or title           # 티커/테마 추출은 본문 우선(장문 포스트 대응)
+            tags = _extract_news_tags(scan_text)
+            try:                                # 포스트 유형 태그 (레딧분석·속보·프리마켓 — 표시/필터용)
+                from reports.social_sentiment import classify_post
+                kind = {"reddit_analysis": "레딧분석", "breaking": "속보",
+                        "premarket": "프리마켓"}.get(classify_post(scan_text))
+                if kind and kind not in tags:
+                    tags = tags + [kind]
+            except Exception:
+                pass
             events.append({
                 "source": f"telegram:{channel}",
                 "source_url": f"https://t.me/s/{channel}",
                 "title": title[:180],
                 "url": url,
-                "tickers": _extract_tickers(title),
-                "tags": _extract_news_tags(title),
+                "body": body,
+                "tickers": _extract_tickers(scan_text),
+                "tags": tags,
             })
     return events
 
