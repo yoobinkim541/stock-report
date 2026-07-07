@@ -19,6 +19,11 @@ def valuation(t):
     return views.valuation(t)
 
 
+@st.cache_data(ttl=_TTL_HEAVY, show_spinner="ETF 정보 불러오는 중…")
+def etf(t):
+    return views.etf_overview(t)
+
+
 @st.cache_data(ttl=_TTL, show_spinner="불러오는 중…")
 def financials(t):
     return views.financials(t)

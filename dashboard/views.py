@@ -727,3 +727,17 @@ def source_health_summary() -> dict:
         return {"health": health, "stale": stale_sources(health) if health else []}
     except Exception as e:
         return {"health": {}, "stale": [], "error": str(e)}
+
+
+def etf_overview(ticker: str) -> dict:
+    """ETF 전용 요약 (providers.etf_data) — 비ETF {"is_etf": False}. graceful."""
+    try:
+        from providers import etf_data
+        return etf_data.etf_summary(ticker)
+    except Exception as e:
+        # 판정 실패 시에도 알려진 ETF 는 ETF 레이아웃 유지(주식 뷰 오표시 방지)
+        try:
+            from providers.etf_data import is_etf
+            return {"ticker": ticker, "is_etf": is_etf(ticker), "error": str(e)}
+        except Exception:
+            return {"ticker": ticker, "is_etf": False, "error": str(e)}

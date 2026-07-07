@@ -33,7 +33,12 @@ def render():
     else:
         st.info("가격 데이터 없음 (yfinance)")
 
-    _detail_sections(ticker, yf_price)
+    # ETF 는 개별주 섹션(PER·재무·기관·실적) 대신 ETF 전용 뷰(프로필·Top10·보수·괴리율·배당)
+    etf = cached.etf(ticker)
+    if (etf or {}).get("is_etf"):
+        _etf_sections(ticker, etf, cur)
+    else:
+        _detail_sections(ticker, yf_price)
     _manage_position(ticker, cur, pos)
 
 
@@ -106,6 +111,99 @@ def _orderbook(rq):
             st.markdown(f"<div style='font-family:monospace;color:{theme.RED}'>"
                         f"{px:,.2f} <span style='color:{theme.MUTED}'>× {qty:,.0f}</span></div>",
                         unsafe_allow_html=True)
+
+
+# ── ETF 전용 뷰 — 프로필·보유 Top10·투자지표 (개별주 섹션 대체·토스증권 풍) ──────
+
+def _f_bil(v):
+    """총자산/시총 압축 표기 — $12.9B → $129.1억 대신 $12.9B(글로벌 표준) + 억달러 병기."""
+    try:
+        v = float(v)
+    except (TypeError, ValueError):
+        return "—"
+    if v >= 1e9:
+        return f"${v/1e9:,.1f}B (${v/1e8:,.0f}억)"
+    if v >= 1e6:
+        return f"${v/1e6:,.1f}M"
+    return f"${v:,.0f}"
+
+
+def _etf_sections(ticker, etf, price):
+    desc = (etf.get("description") or "").strip()
+    if desc:
+        st.info(desc[:280] + ("…" if len(desc) > 280 else ""), icon="🧺")
+
+    # ── 프로필 (시가총액/운용자산·운용사·NAV·상장일·발행주식수) ──
+    st.subheader("ETF 프로필")
+    rows = [
+        ("운용자산(AUM)", _f_bil(etf.get("total_assets"))),
+        ("운용사", etf.get("family") or "—"),
+        ("NAV", data.f_usd(etf.get("nav")) if etf.get("nav") else "—"),
+        ("상장일", etf.get("inception") or "—"),
+        ("발행주식수", f"{etf['shares_outstanding']:,.0f}주" if etf.get("shares_outstanding") else "—"),
+        ("카테고리", etf.get("category") or "—"),
+    ]
+    c1, c2 = st.columns(2)
+    for i, (k, v) in enumerate(rows):
+        (c1 if i % 2 == 0 else c2).markdown(
+            f"<div style='display:flex;justify-content:space-between;"
+            f"border-bottom:1px solid {theme.BORDER};padding:6px 2px'>"
+            f"<span style='color:{theme.MUTED}'>{k}</span><b>{v}</b></div>",
+            unsafe_allow_html=True)
+
+    # ── 보유 비중 Top 10 (도넛 + 리스트) ──
+    top = etf.get("top_holdings") or []
+    if top:
+        st.subheader("보유 비중 Top 10")
+        dcol, lcol = st.columns([1, 1.4])
+        with dcol:
+            st.plotly_chart(charts.allocation_donut(
+                [{"ticker": h["symbol"], "value": h.get("pct") or 0,
+                  "name": ticker_names.display_name(h["symbol"], allow_net=False) or h.get("name")}
+                 for h in top]), width="stretch", config=_NOBAR)
+        with lcol:
+            half = (len(top) + 1) // 2
+            l1, l2 = st.columns(2)
+            for col, chunk in ((l1, top[:half]), (l2, top[half:])):
+                with col:
+                    for h in chunk:
+                        nm = ticker_names.display_name(h["symbol"], allow_net=False) or h.get("name") or h["symbol"]
+                        pct = f"{h['pct']:.2f}%" if h.get("pct") is not None else "—"
+                        st.markdown(f"**{nm}** <span style='color:{theme.MUTED}'>{pct}</span>",
+                                    unsafe_allow_html=True)
+        st.caption("출처: 운용사 공시 (yfinance funds_data) · 비중은 공시 시점 기준")
+    else:
+        st.caption("보유 종목 데이터 없음 (yfinance funds_data)")
+
+    # ── 투자 지표: 운용보수·괴리율 | 배당 ──
+    st.subheader("투자 지표")
+    ic1, ic2 = st.columns(2)
+    with ic1:
+        st.markdown("**ETF 정보**")
+        er = etf.get("expense_ratio")
+        st.metric("운용보수", data.f_frac_pct(er) if er is not None else "—",
+                  help="연간 총보수 (Expense Ratio)")
+        pm = etf.get("premium_pct")
+        st.metric("괴리율", f"{pm:+.2f}%" if pm is not None else "—",
+                  help="(시장가 − NAV) / NAV — 음수 = NAV 대비 할인 거래")
+    with ic2:
+        dv = etf.get("dividends") or {}
+        st.markdown(f"**배당** <span style='color:{theme.MUTED};font-size:.8rem'>최근 12개월</span>",
+                    unsafe_allow_html=True)
+        d1, d2, d3 = st.columns(3)
+        d1.metric("횟수", f"{dv.get('count_12m', 0)}번",
+                  dv.get("freq_label") if dv.get("freq_label", "—") != "—" else None)
+        d2.metric("주당 배당금", f"연 ${dv.get('per_share_12m', 0):,.2f}" if dv.get("per_share_12m") else "—")
+        d3.metric("수익률", f"연 {dv['yield_pct']:.2f}%" if dv.get("yield_pct") else "—",
+                  help="최근 12개월 배당합 ÷ 현재가")
+
+    sw = etf.get("sector_weights") or {}
+    if sw:
+        with st.expander("🏭 섹터 비중", expanded=False):
+            items = sorted(sw.items(), key=lambda x: -x[1])[:11]
+            st.plotly_chart(charts.hbar([k for k, _ in items], [v for _, v in items], "섹터 %", pct=False),
+                            width="stretch", config=_NOBAR)
+    st.caption("정보·표시용 · 매매신호 아님 · 결측 필드는 — 표기")
 
 
 # 섹션 셀렉터 + fragment — 활성 섹션만 렌더(그 섹션 네트워크만 호출)·전환은 fragment만 rerun.
