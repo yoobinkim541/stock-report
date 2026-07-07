@@ -19,6 +19,13 @@ def _surface_block(surface: str, flag: str, name: str, html: bool) -> list[str]:
     snap, v = ev["snapshot"], ev["verdict"]
 
     lines = [f"{flag} {_B(name)} — {v['emoji']} {_B(v['label'])}", f"  {v['note']}"]
+    if surface.endswith("_intraday"):
+        lines[-1] += "  (단기 — 수치는 R 단위·트레이드당)"
+        gate = next((h.get("gate") for h in reversed(evolution.read_learning(surface))
+                     if h.get("gate")), None)
+        if gate:
+            lines.append(f"  🚦게이트 {gate.get('verdict')} — n {gate.get('n')}"
+                         f"·순R {gate.get('mean_net_r')}·PSR {gate.get('psr')}·PBO {gate.get('pbo')}")
 
     bits = [f"성숙 {snap.get('n', 0)}건"]
     if snap.get("realized_ic") is not None:
@@ -48,6 +55,10 @@ def build_evolve_report(html: bool = False) -> str:
     lines += _surface_block("kr_mock", "🇰🇷", "국내(KR)", html)
     lines.append(fmt.sep())
     lines += _surface_block("us_mock", "🇺🇸", "미국(US)", html)
+    lines.append(fmt.sep())
+    lines += _surface_block("kr_intraday", "🕐", "단기 KR", html)
+    lines.append(fmt.sep())
+    lines += _surface_block("us_intraday", "🕐", "단기 US", html)
     lines.append(fmt.sep())
     lines.append("결정→순비용 보상→주간 OOS 재학습→챔피언·챌린저 (자기개선 루프)")
     lines.append("⚠️ 표시·모의 정책 · 실거래 미반영 · 무엣지면 정직 공개")

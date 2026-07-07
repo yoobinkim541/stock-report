@@ -12,7 +12,7 @@ import math
 import os
 
 _DIR = os.path.expanduser("~/reports/ml-data")
-_BUY = ("편입", "증액")
+_BUY = ("편입", "증액", "단기진입")   # 단기진입 = intraday 표면(kr/us_intraday) — fwd_excess 는 R 단위
 
 MIN_SAMPLES = int(os.getenv("EVOLVE_MIN_SAMPLES", "40"))   # 이 이상 성숙해야 판정 (validation 정직 규율)
 IC_EDGE = float(os.getenv("EVOLVE_IC_EDGE", "0.05"))       # 이 이상 순비용 IC 지속 = 약한 엣지

@@ -317,6 +317,65 @@ def run_tests() -> list[str]:
     logger.info("[i10] 엔진 사이클")
     failures += _engine_tests(tmp)
 
+    # ── i11: 주간 학습 — fit/eval/게이트 verdict 분기 (합성 원장) ─────────────
+    logger.info("[i11] 주간 학습·게이트")
+    from crons import intraday_mock_learn as learn
+    import random
+    rng = random.Random(0)
+
+    def _rows(n, mean_r):
+        rows = []
+        for i in range(n):
+            win = rng.random() < (0.7 if mean_r > 0 else 0.3)
+            lvl = 0.9 if win else 0.1
+            r = abs(rng.gauss(1.0, 0.3))
+            rows.append({"id": f"2026-06-{i % 20 + 1:02d}:T{i}:1000{i % 60:02d}",
+                         "date": f"2026-06-{i % 20 + 1:02d}", "side": "단기진입",
+                         "policy_score": lvl,
+                         "features": {"orb": lvl, "vwap": lvl, "volspike": lvl,
+                                      "ofi": lvl, "news": None, "ema": 0.5, "rsi": 0.3, "bb": 0.3},
+                         "fwd_excess": round(r if win else -r, 4)})
+        return rows
+
+    good, bad = _rows(120, 0.4), _rows(120, -0.4)
+
+    failures += _check("learn_fit", lambda: learn.make_fit("kr")(good),
+        ("가중 합 1", lambda w: abs(sum(w.values()) - 1.0) < 0.01),
+        ("측정축 가중 > 0", lambda w: w["w_orb"] > 0),
+        ("무신호 폴백=DEFAULT", lambda w: abs(sum(learn.make_fit("kr")(
+            [{"features": {}, "fwd_excess": 0.1}] * 10).values())
+            - sum(v for k, v in __import__("ml.intraday_policy", fromlist=["x"]).DEFAULTS["kr"].items()
+                  if k.startswith("w_"))) < 0.01),
+    )
+    failures += _check("learn_eval", lambda: learn.eval_policy(good, learn.make_fit("kr")(good), "kr"),
+        ("선택 발생", lambda e: e["n"] > 0),
+        ("양의 기대", lambda e: e["excess"] > 0),
+        ("MDD [0,1]", lambda e: 0.0 <= e["mdd"] <= 1.0),
+        ("전결측 → n 0", lambda e: learn.eval_policy([], {}, "kr")["n"] == 0),
+    )
+    failures += _check("gate", lambda: (learn.gate_eval(good, "kr"),
+                                        learn.gate_eval(bad, "kr"),
+                                        learn.gate_eval(good[:30], "kr")),
+        ("양 분포 → GO/OBSERVE", lambda g: g[0]["verdict"] in ("GO", "OBSERVE")),
+        ("음 분포 → NO-GO", lambda g: g[1]["verdict"] == "NO-GO"),
+        ("표본 미달 → 콜드스타트", lambda g: g[2]["verdict"] == "콜드스타트"),
+        ("PSR 산출", lambda g: g[0]["psr"] is not None and g[0]["psr"] > 0.9),
+        ("news 표본 0 명시", lambda g: g[0]["news_axis_n"] == 0),
+    )
+
+    # ── i12: evolution 단기 표면 집계 + /evolve 렌더 ─────────────────────────
+    logger.info("[i12] evolution·evolve 렌더")
+    from ml.adaptive import evolution
+    failures += _check("evolution_intraday", lambda: evolution.snapshot(good),
+        ("단기진입 side 집계", lambda s: s["n"] == len([r for r in good if r["fwd_excess"] is not None])),
+        ("IC 산출", lambda s: s["realized_ic"] is not None),
+    )
+    from bot.evolve_command import build_evolve_report
+    failures += _check("evolve_render", lambda: build_evolve_report(html=False),
+        ("단기 표면 포함", lambda t: "단기 KR" in t and "단기 US" in t),
+        ("무예외 렌더", lambda t: len(t) > 100),
+    )
+
     return failures
 
 
