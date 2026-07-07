@@ -250,6 +250,13 @@ def build_report(html: bool = False) -> str:
     else:
         lines.append("성숙 결정 없음 — 평가 대기(horizon 경과 후)")
 
+    # 🕐 단기 슬리브 (INTRADAY_MOCK — 데이터 없으면 섹션 숨음)
+    try:
+        from lib.intraday_status import intraday_section
+        lines += intraday_section("US", html=html)
+    except Exception as e:
+        logger.warning("단기 섹션 실패(무시): %s", e)
+
     recent, last = _recent_decisions()
     if recent:
         lines.append(fmt.sep(f"최근 편입/퇴출 ({last})"))

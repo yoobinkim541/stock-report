@@ -325,3 +325,40 @@ def learning_curve(series):
                       legend=dict(orientation="h", y=1.12),
                       yaxis2=dict(overlaying="y", side="right", showgrid=False, zeroline=False))
     return _t(fig)
+
+
+def intraday_candle(hist, ticker: str = "", trades=None, vwap=None,
+                    or_range=None, levels=None):
+    """단기(1m/5m) 캔들 + ▲▼ 트레이드 마커 + VWAP·시가범위(OR) 박스·스톱/목표선.
+
+    hist: 분봉 OHLCV DataFrame · trades: trade_events 레코드(마커 클릭용 customdata 포함)
+    vwap: hist.index 정렬 시계열 | None · or_range: (hi, lo, end_ts) | None ·
+    levels: [{"y", "label", "color"}] (스톱·목표 수평 점선).
+    """
+    go = _go()
+    fig = go.Figure()
+    cols = set(getattr(hist, "columns", []))
+    if hist is None or getattr(hist, "empty", True) or not {"Open", "High", "Low", "Close"} <= cols:
+        return _t(fig)
+    fig.add_trace(go.Candlestick(
+        x=hist.index, open=hist["Open"], high=hist["High"], low=hist["Low"], close=hist["Close"],
+        name=ticker or "OHLC", increasing_line_color=_GREEN, decreasing_line_color=_RED,
+        increasing_fillcolor=_GREEN, decreasing_fillcolor=_RED, line=dict(width=1)))
+    if vwap is not None and len(vwap) == len(hist):
+        fig.add_trace(go.Scatter(x=hist.index, y=list(vwap), name="VWAP",
+                                 line=dict(color="#f59e0b", width=1.4, dash="dot")))
+    if or_range:
+        hi, lo, end = or_range
+        fig.add_shape(type="rect", x0=hist.index[0], x1=end, y0=lo, y1=hi,
+                      fillcolor="rgba(59,130,246,0.10)", line=dict(color="#3b82f6", width=1))
+    for lv in (levels or []):
+        if lv.get("y"):
+            fig.add_hline(y=lv["y"], line=dict(color=lv.get("color", theme.MUTED),
+                                               dash="dash", width=1.1),
+                          annotation_text=lv.get("label", ""), annotation_position="right",
+                          annotation_font=dict(size=10, color=lv.get("color", theme.MUTED)))
+    _add_trade_markers(fig, hist, trades or [])
+    fig.update_layout(margin=dict(t=10, b=10, l=10, r=10), height=360,
+                      legend=dict(orientation="h", y=1.1), hovermode="x unified",
+                      xaxis_rangeslider_visible=False)
+    return _t(fig)

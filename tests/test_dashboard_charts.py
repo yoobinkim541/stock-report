@@ -260,3 +260,31 @@ def test_nav_curve_line_and_baseline():
 def test_nav_curve_empty_graceful():
     assert _is_fig(charts.nav_curve([]))
     assert len(charts.nav_curve([{"date": "d", "nav": None}]).data) == 0
+
+
+def test_intraday_candle_full_overlay():
+    import pandas as pd
+    idx = pd.date_range("2026-07-08 09:00", periods=20, freq="min", tz="Asia/Seoul")
+    hist = pd.DataFrame({"Open": [100.0] * 20, "High": [101.0] * 20,
+                         "Low": [99.0] * 20, "Close": [100.5] * 20,
+                         "Volume": [10.0] * 20}, index=idx)
+    trades = [{"event_id": "intr-x-in", "side": "buy", "qty": 5, "price": 100.5,
+               "avg_price": 100.5, "account": "shadow", "source": "intraday_mock",
+               "timestamp": idx[10].isoformat(), "currency": "KRW"}]
+    fig = charts.intraday_candle(hist, "005930", trades=trades, vwap=[100.2] * 20,
+                                 or_range=(101.0, 99.0, idx[14]),
+                                 levels=[{"y": 99.5, "label": "스톱", "color": "#ef4444"}])
+    assert _is_fig(fig)
+    names = [tr.name for tr in fig.data]
+    assert "VWAP" in names and "Buy" in names            # 오버레이 + ▲ 마커
+    buy = next(tr for tr in fig.data if tr.name == "Buy")
+    assert buy.customdata[0][0] == "intr-x-in"           # 클릭 → event_id 계약
+    # OR 박스(rect) 1 + 스톱 hline(line) 1
+    assert sum(1 for s in fig.layout.shapes if s.type == "rect") == 1
+    assert sum(1 for s in fig.layout.shapes if s.type == "line") == 1
+
+
+def test_intraday_candle_empty_graceful():
+    import pandas as pd
+    assert _is_fig(charts.intraday_candle(pd.DataFrame()))
+    assert len(charts.intraday_candle(pd.DataFrame()).data) == 0

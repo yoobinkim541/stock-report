@@ -759,3 +759,73 @@ def social_sentiment(hours: int = 72) -> dict:
         return {"summary": sentiment_summary(events)}
     except Exception as e:
         return {"summary": None, "error": str(e)}
+
+
+# ── 단기(1분봉) 모의 트레이딩 (표시 전용·read-only) ──────────────────────────
+
+def intraday_overview(market: str) -> dict:
+    """단기 슬리브 개요 — 요약 KPI(state+원장) + bar 날짜 목록. 미사용 시 데이터 없음."""
+    out: dict = {"market": market}
+    try:
+        from lib.intraday_status import intraday_summary
+        out["summary"] = intraday_summary(market)
+    except Exception as e:
+        out["summary"], out["summary_error"] = None, str(e)
+    try:
+        from providers import intraday_bars
+        out["dates"] = intraday_bars.available_dates()[-30:]
+    except Exception as e:
+        out["dates"], out["dates_error"] = [], str(e)
+    return out
+
+
+def intraday_day(market: str, date: str) -> dict:
+    """그날 단기 트레이드 원장(결정⋈결과) + 심볼 목록 (트레이드 심볼 우선)."""
+    mk = market.upper()
+    out: dict = {"rows": [], "symbols": []}
+    try:
+        from ml.adaptive import Ledger
+        led = Ledger(f"{mk.lower()}_intraday")
+        outs = {o["decision_id"]: o for o in led.read_outcomes() if o.get("decision_id")}
+        out["rows"] = [{**d, **(outs.get(d["id"]) or {})}
+                       for d in led.read_decisions() if d.get("date") == date]
+        out["symbols"] = list(dict.fromkeys(r.get("ticker") for r in out["rows"] if r.get("ticker")))
+    except Exception as e:
+        out["error"] = str(e)
+    if not out["symbols"]:
+        try:
+            from providers import intraday_bars
+            out["symbols"] = intraday_bars.list_symbols(date, market=mk)[:10]
+        except Exception:
+            pass
+    return out
+
+
+def intraday_chart(symbol: str, market: str, date: str, interval: str = "1m") -> dict:
+    """분봉(자체 bar store 우선·yfinance 폴백) + VWAP·OR 박스 + 그날 트레이드 마커."""
+    mk = market.upper()
+    out: dict = {"symbol": symbol, "src": "none"}
+    try:
+        from providers import intraday_bars
+        df, src = intraday_bars.load_bars_with_fallback(symbol, mk, date, interval=interval)
+        out["bars"], out["src"] = df, src
+        if df is not None and not df.empty:
+            typ = (df["High"] + df["Low"] + df["Close"]) / 3
+            cv = df["Volume"].cumsum().replace(0, float("nan"))
+            out["vwap"] = list((typ * df["Volume"]).cumsum() / cv)
+            open_min = 9 * 60 if mk == "KR" else 9 * 60 + 30    # OR 은 세션 개장분만
+            fmin = df.index[0].hour * 60 + df.index[0].minute
+            if fmin <= open_min + 1 and len(df) >= 15:
+                head = df.iloc[:15]
+                out["or_range"] = (float(head["High"].max()), float(head["Low"].min()),
+                                   df.index[min(14, len(df) - 1)])
+    except Exception as e:
+        out["bars_error"] = str(e)
+    try:
+        from lib import trade_events
+        out["trades"] = [t for t in trade_events.trades_for_ticker(symbol)
+                         if t.get("source") == "intraday_mock"
+                         and str(t.get("timestamp", ""))[:10] == date]
+    except Exception as e:
+        out["trades"], out["trades_error"] = [], str(e)
+    return out

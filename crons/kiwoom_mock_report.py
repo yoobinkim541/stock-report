@@ -180,6 +180,13 @@ def build_report(html: bool = False) -> str:
         lines.append(f"누적 {fmt.money(tot_cost, '₩', abbrev=True)} · 회전율 {turnover:.0f}%")
         lines.append(f"비용차감 누적 {fmt.spct(cum_ret - drag)} (표시 {fmt.spct(cum_ret)} − 비용 {drag:.2f}%p)")
 
+    # 🕐 단기 슬리브 (INTRADAY_MOCK — 데이터 없으면 섹션 숨음)
+    try:
+        from lib.intraday_status import intraday_section
+        lines += intraday_section("KR", html=html)
+    except Exception as e:
+        logger.warning("단기 섹션 실패(무시): %s", e)
+
     # 최근 편입/퇴출 사유
     recent, last_date = _recent_decisions()
     if recent:
