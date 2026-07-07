@@ -96,6 +96,15 @@ def valuation_metrics(ticker: str, *, _t=None) -> dict:
 
     US/KR 공통(yfinance .info + dividends). KR 은 forward 계열이 대체로 None(열화모드).
     """
+    if is_kr(ticker) and _t is None:
+        try:
+            from providers import kr_fundamentals
+            kr = kr_fundamentals.recent_annual_metrics(ticker)
+            if kr and kr.get("confidence") != "missing" and not kr.get("error"):
+                return kr
+        except Exception as e:
+            logger.debug("KR DART 밸류에이션 실패 %s: %s", ticker, e)
+
     out = {k: None for k in ("per", "forward_pe", "pbr", "psr", "roe", "eps_ttm", "eps_fwd",
                              "div_yield", "div_yield_5y_avg", "payout", "div_growth_1y", "div_growth_3y")}
     out["market_type"] = "kr" if is_kr(ticker) else "us"
@@ -263,11 +272,18 @@ def summary(ticker: str, *, force: bool = False, today: str | None = None) -> di
         if c is not None:
             return c
     t = None
-    try:
-        t = _ticker(ticker)
-    except Exception:
-        t = None
-    val = valuation_metrics(ticker, _t=t)
+    if is_kr(ticker):
+        val = valuation_metrics(ticker)
+        try:
+            t = _ticker(ticker)
+        except Exception:
+            t = None
+    else:
+        try:
+            t = _ticker(ticker)
+        except Exception:
+            t = None
+        val = valuation_metrics(ticker, _t=t)
     hist = earnings_history(ticker, limit=8, _t=t)
     cons = consensus(ticker, _t=t)
     nxt = next_earnings(ticker, _t=t, today=today)

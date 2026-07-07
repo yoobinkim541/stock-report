@@ -92,7 +92,11 @@ def test_next_earnings_with_injected_today():
 
 def test_kr_degraded_mode(monkeypatch):
     from providers import earnings_data as ed
+    from providers import kr_fundamentals as kf
     kr = FakeTicker({"trailingPE": 9.0, "priceToBook": 1.1, "returnOnEquity": 0.12})  # 컨센서스 없음
+    monkeypatch.setattr(kf, "recent_annual_metrics", lambda t: {
+        "market_type": "kr", "confidence": "missing", "error": "DART_API_KEY 미설정"
+    })
     monkeypatch.setattr(ed, "_ticker", lambda s: kr)
     monkeypatch.setattr(ed, "_cache_get", lambda *a, **k: None)
     monkeypatch.setattr(ed, "_cache_put", lambda *a, **k: None)
