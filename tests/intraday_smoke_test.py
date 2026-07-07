@@ -313,6 +313,167 @@ def run_tests() -> list[str]:
         ("KR 기본가중 합 1", lambda r: abs(sum(v for k, v in ip.DEFAULTS["kr"].items() if k.startswith("w_")) - 1.0) < 1e-9),
     )
 
+    # ── i10: 엔진 — 진입→멱등→손절→쿨다운→orphan 수리 (전부 모킹·쓰기 tmp 격리) ──
+    logger.info("[i10] 엔진 사이클")
+    failures += _engine_tests(tmp)
+
+    return failures
+
+
+def _engine_tests(tmp: str) -> list[str]:
+    """run_market 전체 사이클 — 시장·시세·유니버스·이벤트 기록 전부 모킹."""
+    import pandas as pd
+    from crons import intraday_mock_track as eng
+    from providers import intraday_bars as ib
+    from providers import intraday_universe as iu
+    from providers import realtime_quotes as rq
+
+    failures = []
+    ledger_dir = os.path.join(tmp, "ledger")
+    os.makedirs(ledger_dir, exist_ok=True)
+    events: list[dict] = []
+
+    # 모킹 — 원본 보관 후 복원
+    saved = {
+        "_market_open": eng._market_open, "_news_events": eng._news_events,
+        "_record_event": eng._record_event, "_rest_price": eng._rest_price,
+        "LEDGER": eng._LEDGER_BASE,
+        "iu_refresh": iu.refresh, "iu_current": iu.current_universe,
+        "ib_load": ib.load_bars, "ib_dates": ib.available_dates,
+        "rq_enabled": rq.enabled, "rq_hb": rq.heartbeat_age,
+        "rq_fresh": rq.is_fresh, "rq_ob": rq.get_orderbook,
+    }
+
+    # 세션: 확정 30봉 — 25봉째부터 OR 돌파+거래량 급증. 지금 KST 분에 끝나게 정렬.
+    from datetime import timedelta
+    from zoneinfo import ZoneInfo
+    now_kst = datetime.now(ZoneInfo("Asia/Seoul"))
+    n_bars = 35                                 # 레짐 ER(31봉)까지 계산되게
+    start = now_kst.replace(second=0, microsecond=0) - timedelta(minutes=n_bars)
+    idx = pd.date_range(start, periods=n_bars, freq="min")   # start 가 tz-aware(KST)
+    o, h, l, c, v = [], [], [], [], []
+    px = 61000.0
+    for i in range(n_bars):
+        # 개장 15분 넓은 범위(±150) → 마지막 3봉 완만한 돌파(+150/봉·과확장 페널티 미발동)
+        drift = 150.0 if i >= 32 else (150.0 if i % 4 == 1 else (-150.0 if i % 4 == 3 else 0.0))
+        px2 = px + drift
+        o.append(px); c.append(px2)
+        h.append(max(px, px2) + 40); l.append(min(px, px2) - 40)
+        v.append(1000.0 * (20.0 if i >= 32 else 1.0))
+        px = px2
+    df_bo = pd.DataFrame({"Open": o, "High": h, "Low": l, "Close": c, "Volume": v}, index=idx)
+    bars_now = {"005930": df_bo}
+
+    last_c = float(df_bo["Close"].iloc[-1])
+    ob = {"bids": [(last_c, 2000)], "asks": [(last_c + 100, 200)],   # 1틱 스프레드·매수 우세(OFI)
+          "best_bid": last_c, "best_ask": last_c + 100, "ts": 0}
+
+    try:
+        eng._LEDGER_BASE = ledger_dir
+        eng._market_open = lambda mk: mk == "KR"
+        eng._news_events = lambda now_epoch: []
+        eng._record_event = lambda *a, **k: events.append({"sym": a[0], "side": a[2], **k})
+        eng._rest_price = lambda sym, mk: float(bars_now[sym]["Close"].iloc[-1]) if sym in bars_now else None
+        iu.refresh = lambda mk, keep=None, **k: ["005930"]
+        iu.current_universe = lambda mk: ["005930"]
+        ib.load_bars = lambda sym, date=None, **k: bars_now.get(ib.base_symbol(sym), pd.DataFrame())
+        ib.available_dates = lambda base_dir=None: []
+        rq.enabled = lambda: True
+        rq.heartbeat_age = lambda cache=None: 1.0
+        rq.is_fresh = lambda sym, **k: True
+        rq.get_orderbook = lambda sym, **k: dict(ob)
+
+        cfg = {**eng.load_cfg(), "shadow": True, "markets": ["KR"],
+               "flat_buffer_min": 15, "entry_cutoff_min": 30}
+        # ORB 세션 시작 검증을 통과시키려면 첫 봉이 개장분이어야 함 → 개장분으로 간주되게 OPEN_MIN 조정
+        saved_open = dict(eng._OPEN_MIN)
+        eng._OPEN_MIN["KR"] = idx[0].hour * 60 + idx[0].minute
+        saved_close = dict(eng._CLOSE_MIN)
+        eng._CLOSE_MIN["KR"] = (now_kst.hour * 60 + now_kst.minute) + 120   # 마감 여유
+
+        from ml.adaptive import Ledger
+        state = eng._blank_state()
+
+        notes1 = eng.run_market("KR", state, cfg)
+        led = Ledger("kr_intraday", base_dir=ledger_dir)
+        decs = led.read_decisions()
+        pos_key = "KR:005930"
+
+        failures_local = []
+        def chk(desc, cond):
+            if not cond:
+                failures_local.append(f"❌ engine: {desc}")
+            else:
+                logger.info("  ✅ engine — %s", desc)
+
+        chk("진입 발생", pos_key in state["positions"])
+        chk("결정 1건 기록", len(decs) == 1)
+        chk("id = date:ticker:HHMMSS", len(decs) == 1 and decs[0]["id"].count(":") == 2)
+        chk("shadow 플래그", len(decs) == 1 and decs[0].get("shadow") is True)
+        chk("체결 이벤트(buy)", any(e["side"] == "buy" for e in events))
+        chk("카운터 증가", state["counters"]["KR"]["trades"] == 1)
+
+        # 같은 분 재실행 → 새 bar 없음 → 중복 결정 0
+        eng.run_market("KR", state, cfg)
+        chk("멱등(같은 분 재실행)", len(led.read_decisions()) == 1)
+
+        # 손절 봉 — low 가 stop 아래
+        if pos_key in state["positions"]:
+            stop = state["positions"][pos_key]["stop"]
+            last_ts = idx[-1] + timedelta(minutes=1)
+            df_stop = pd.concat([df_bo, pd.DataFrame(
+                {"Open": [stop + 50], "High": [stop + 80], "Low": [stop - 200],
+                 "Close": [stop - 100], "Volume": [3000.0]},
+                index=pd.DatetimeIndex([last_ts]))])
+            bars_now["005930"] = df_stop
+            eng.run_market("KR", state, cfg)
+            outs = led.read_outcomes()
+            chk("손절 청산 outcome", len(outs) == 1 and outs[0]["exit_reason"] == "stop")
+            chk("net R 음수", len(outs) == 1 and outs[0]["realized_r"] < 0)
+            chk("fwd_excess=realized_r", len(outs) == 1 and outs[0]["fwd_excess"] == outs[0]["realized_r"])
+            chk("포지션 제거", pos_key not in state["positions"])
+            chk("쿨다운 설정", state["cooldown_until"].get(pos_key, 0) > 0)
+            chk("체결 이벤트(sell)", any(e["side"] == "sell" for e in events))
+            chk("day_pnl 반영", state["counters"]["KR"]["day_pnl"] != 0.0)
+
+        # orphan 수리 — 원장에만 있는 당일 결정
+        led.log_decision({"id": f"{now_kst.strftime('%Y-%m-%d')}:000660:120000",
+                          "date": now_kst.strftime("%Y-%m-%d"), "ticker": "000660",
+                          "side": "단기진입", "qty": 3, "price": 200000.0,
+                          "stop": 198000.0, "shadow": True, "ok": True})
+        bars_now["000660"] = df_bo * 3
+        n_rep = eng._repair_orphans(state, "KR", led)
+        chk("orphan 수리 1건", n_rep == 1)
+        chk("orphan outcome 기록", any(o["exit_reason"] == "orphan_repair" for o in led.read_outcomes()))
+
+        # state 왕복
+        saved_sp = eng.STATE_PATH
+        eng.STATE_PATH = os.path.join(tmp, "state.json")
+        eng.save_state(state)
+        st2 = eng.load_state()
+        chk("state 왕복", st2["counters"]["KR"]["trades"] == state["counters"]["KR"]["trades"])
+        eng.STATE_PATH = saved_sp
+
+        failures.extend(failures_local)
+        eng._OPEN_MIN.update(saved_open)
+        eng._CLOSE_MIN.update(saved_close)
+    except Exception as e:
+        import traceback
+        failures.append(f"❌ engine: 예외 — {e}\n{traceback.format_exc()[-500:]}")
+    finally:
+        eng._market_open = saved["_market_open"]
+        eng._news_events = saved["_news_events"]
+        eng._record_event = saved["_record_event"]
+        eng._rest_price = saved["_rest_price"]
+        eng._LEDGER_BASE = saved["LEDGER"]
+        iu.refresh = saved["iu_refresh"]
+        iu.current_universe = saved["iu_current"]
+        ib.load_bars = saved["ib_load"]
+        ib.available_dates = saved["ib_dates"]
+        rq.enabled = saved["rq_enabled"]
+        rq.heartbeat_age = saved["rq_hb"]
+        rq.is_fresh = saved["rq_fresh"]
+        rq.get_orderbook = saved["rq_ob"]
     return failures
 
 
