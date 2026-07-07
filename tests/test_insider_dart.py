@@ -73,3 +73,70 @@ def test_dart_graceful_non_kr(monkeypatch):
     monkeypatch.setenv("DART_API_KEY", "dummy")
     out = dart.recent_disclosures("AAPL")
     assert out["list"] == [] and "KR" in out["error"]
+
+
+def test_dart_amount_parser():
+    assert dart._amount("1,234") == 1234.0
+    assert dart._amount("(1,234)") == -1234.0
+    assert dart._amount("-") is None
+
+
+def test_dart_extract_major_accounts_prefers_consolidated():
+    raw = [
+        {"account_nm": "자본총계", "fs_div": "OFS", "fs_nm": "재무제표", "sj_div": "BS", "thstrm_amount": "90"},
+        {"account_nm": "자본총계", "fs_div": "CFS", "fs_nm": "연결재무제표", "sj_div": "BS", "thstrm_amount": "100"},
+        {"account_nm": "지배기업의 소유주에게 귀속되는 자본", "fs_div": "CFS", "fs_nm": "연결재무제표", "sj_div": "BS", "thstrm_amount": "80"},
+        {"account_nm": "매출액", "fs_div": "CFS", "fs_nm": "연결재무제표", "sj_div": "IS", "thstrm_amount": "1,000"},
+        {"account_nm": "영업이익", "fs_div": "CFS", "fs_nm": "연결재무제표", "sj_div": "IS", "thstrm_amount": "120"},
+        {"account_nm": "지배기업의 소유주에게 귀속되는 당기순이익", "fs_div": "CFS", "fs_nm": "연결재무제표", "sj_div": "IS", "thstrm_amount": "75"},
+        {"account_nm": "기본주당이익", "fs_div": "CFS", "fs_nm": "연결재무제표", "sj_div": "IS", "thstrm_amount": "5,432"},
+    ]
+    rows = [dart._normalize_account_row(r) for r in raw]
+
+    fin = dart._extract_major_accounts(rows)
+
+    assert fin["fs_div"] == "CFS"
+    assert fin["revenue"] == 1000.0
+    assert fin["operating_income"] == 120.0
+    assert fin["net_income"] == 75.0
+    assert fin["equity"] == 80.0
+    assert fin["eps"] == 5432.0
+
+
+def test_dart_financial_accounts_graceful_without_key(monkeypatch):
+    monkeypatch.delenv("DART_API_KEY", raising=False)
+    out = dart.financial_accounts("005930.KS", year=2025)
+    assert out["list"] == [] and "미설정" in out["error"]
+
+
+def test_dart_financial_accounts_request(monkeypatch):
+    monkeypatch.setenv("DART_API_KEY", "dummy")
+    monkeypatch.setattr(dart, "corp_code_map", lambda refresh=False: {"005930": "00126380"})
+    calls = []
+
+    class FakeResp:
+        def json(self):
+            return {
+                "status": "000",
+                "list": [
+                    {"account_nm": "매출액", "fs_div": "CFS", "fs_nm": "연결재무제표",
+                     "sj_div": "IS", "thstrm_amount": "1,000", "currency": "KRW"},
+                ],
+            }
+
+    class FakeRequests:
+        @staticmethod
+        def get(url, timeout, params):
+            calls.append((url, timeout, params))
+            return FakeResp()
+
+    monkeypatch.setitem(sys.modules, "requests", FakeRequests)
+
+    out = dart.financial_accounts("005930.KS", year=2025)
+
+    assert out["stock_code"] == "005930"
+    assert out["corp_code"] == "00126380"
+    assert out["list"][0]["account_nm"] == "매출액"
+    assert out["list"][0]["thstrm_amount"] == 1000.0
+    assert calls[0][2]["bsns_year"] == "2025"
+    assert calls[0][2]["reprt_code"] == dart.ANNUAL_REPORT
