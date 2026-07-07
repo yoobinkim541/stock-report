@@ -56,7 +56,8 @@ def _health_banner():
     bits = []
     for s in stale[:6]:
         gap = "이력 없음" if s.get("hours") is None else f"{s['hours']:.0f}h 공백"
-        bits.append(f"`{s['source']}` ({gap})")
+        err = f" — {str(s['error'])[:60]}" if s.get("error") else ""
+        bits.append(f"`{s['source']}` ({gap}{err})")
     st.warning("⛔ 수집이 멈춘 출처: " + " · ".join(bits)
                + " — 서버 수집 크론 로그(/tmp/…collector) 확인", icon="⚠️")
 

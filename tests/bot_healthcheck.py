@@ -310,7 +310,8 @@ def check_source_collection() -> tuple[str, str] | None:
     lines = []
     for s in bad[:6]:
         gap = "성공 이력 없음" if s["hours"] is None else f"{s['hours']:.0f}h 공백"
-        lines.append(f"  · {s['source']} — {gap} (임계 {s['threshold']}h)")
+        err = f"\n    └ {s['error']}" if s.get("error") else ""
+        lines.append(f"  · {s['source']} — {gap} (임계 {s['threshold']}h){err}")
     return ("source_stale", "⚠️ 뉴스/매크로 수집 공백 출처 감지\n" + "\n".join(lines))
 
 
