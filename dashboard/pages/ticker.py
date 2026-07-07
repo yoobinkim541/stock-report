@@ -38,6 +38,7 @@ def render():
     if (etf or {}).get("is_etf"):
         _etf_sections(ticker, etf, cur)
     else:
+        _analysis_snapshot(ticker)
         _detail_sections(ticker, yf_price)
     _manage_position(ticker, cur, pos)
 
@@ -281,6 +282,25 @@ def _detail_sections(ticker, price):
         _earnings(ticker)
     else:
         _valuation(ticker, price)
+
+
+def _analysis_snapshot(ticker):
+    """개별주 첫 화면용 압축 판단. 상세 섹션의 원자료를 먼저 읽기 쉽게 요약한다."""
+    v = cached.valuation(ticker)
+    f = cached.financials(ticker)
+    iv = cached.intrinsic(ticker)
+    summary = data.company_analysis_summary(v.get("metrics") or {}, (f.get("trends") or {}), iv)
+
+    st.subheader("기업 판단 요약")
+    verdict, good, risk = st.columns([0.8, 1.4, 1.4])
+    verdict.metric("판단", summary["verdict"])
+    with good:
+        st.markdown("**강점**")
+        st.markdown("\n".join(f"- {x}" for x in summary["positives"]))
+    with risk:
+        st.markdown("**주의점**")
+        st.markdown("\n".join(f"- {x}" for x in summary["risks"]))
+    st.caption("다음 확인: " + " · ".join(summary["checks"]))
 
 
 def _valuation(ticker, price=None):

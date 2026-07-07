@@ -135,6 +135,32 @@ def test_technical_score_short_none():
     assert data.technical_score(pd.Series([1, 2, 3])) is None
 
 
+def test_company_analysis_summary_positive_case():
+    s = data.company_analysis_summary(
+        {"roe": 0.22, "per": 18.0, "pbr": 2.5, "eps_ttm": 3200, "market_type": "kr"},
+        {"rev_yoy": 0.12, "net_margin": 0.18, "debt_to_assets": 0.28},
+        {"upside_pct": 18.0},
+    )
+    assert s["verdict"] == "양호"
+    assert any("ROE" in x for x in s["positives"])
+    assert any("매출 성장" in x for x in s["positives"])
+    assert "특이 위험 제한적" in s["risks"]
+    assert any("DART" in x for x in s["checks"])
+
+
+def test_company_analysis_summary_risk_case():
+    s = data.company_analysis_summary(
+        {"roe": 0.04, "per": 55.0, "pbr": 6.2, "eps_ttm": -120, "per_status": "loss"},
+        {"rev_yoy": -0.08, "net_margin": 0.02, "net_margin_chg": -0.05, "debt_to_assets": 0.82},
+        {"upside_pct": -24.0},
+    )
+    assert s["verdict"] == "주의 우선"
+    assert any("적자" in x for x in s["risks"])
+    assert any("PER" in x for x in s["risks"])
+    assert any("매출 역성장" in x for x in s["risks"])
+    assert any("부채/자산" in x for x in s["risks"])
+
+
 def test_rsi_none_on_short():
     import pandas as pd
     assert data.rsi(pd.Series([1, 2, 3])) is None
