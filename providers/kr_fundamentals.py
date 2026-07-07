@@ -181,3 +181,111 @@ def recent_annual_metrics(ticker: str, *, asof: str | None = None, lookback_year
         if not last.get("error") and last.get("confidence") != "missing":
             return last
     return last or _empty(ticker)
+
+
+def _trend_empty(ticker: str) -> dict:
+    return {
+        "ticker": ticker,
+        "stock_code": dart.stock_code(ticker),
+        "market_type": "kr",
+        "source": "DART",
+        "trends": {
+            "rev_yoy": None,
+            "net_margin": None,
+            "net_margin_chg": None,
+            "debt_to_assets": None,
+            "debt_to_assets_chg": None,
+            "is_loss": None,
+            "n_years": 0,
+        },
+        "rows": [],
+        "confidence": "missing",
+        "error": None,
+    }
+
+
+def _financial_row(year: int | None, financials: dict) -> dict:
+    return {
+        "year": year,
+        "revenue": financials.get("revenue"),
+        "operating_income": financials.get("operating_income"),
+        "net_income": financials.get("net_income"),
+        "equity": financials.get("equity"),
+        "assets": financials.get("assets"),
+        "liabilities": financials.get("liabilities"),
+        "fs_div": financials.get("fs_div"),
+        "fs_nm": financials.get("fs_nm"),
+    }
+
+
+def _margin(row: dict) -> float | None:
+    return _safe_div(row.get("net_income"), row.get("revenue"))
+
+
+def _debt_to_assets(row: dict) -> float | None:
+    return _safe_div(row.get("liabilities"), row.get("assets"))
+
+
+def financial_trends(
+    ticker: str,
+    *,
+    years: int = 4,
+    base_year: int | None = None,
+    financial_rows: list[dict] | None = None,
+) -> dict:
+    """국내 종목 DART 연간 재무 추세. dashboard.views.financials와 같은 trends shape."""
+    out = _trend_empty(ticker)
+    code = dart.stock_code(ticker)
+    if not code:
+        out["error"] = "KR 종목 아님"
+        return out
+
+    rows: list[dict] = []
+    errors: list[str] = []
+    if financial_rows is not None:
+        rows = [dict(r) for r in financial_rows if r]
+    else:
+        base = base_year or _infer_recent_report_year()
+        for y in range(base - max(1, years) + 1, base + 1):
+            src = dart.major_financials(ticker, year=y)
+            if src.get("error"):
+                errors.append(f"{y}: {src.get('error')}")
+                continue
+            fin = src.get("financials") or {}
+            if not any(fin.get(k) is not None for k in ("revenue", "net_income", "assets", "liabilities")):
+                continue
+            rows.append(_financial_row(src.get("year", y), fin))
+
+    rows = sorted(rows, key=lambda r: int(r.get("year") or 0))
+    out["rows"] = rows
+    tr = out["trends"]
+    tr["n_years"] = len(rows)
+    if not rows:
+        out["error"] = "; ".join(errors[-2:]) if errors else "DART 재무 데이터 없음"
+        return out
+
+    rev_rows = [r for r in rows if r.get("revenue")]
+    if len(rev_rows) >= 2:
+        tr["rev_yoy"] = round(rev_rows[-1]["revenue"] / rev_rows[-2]["revenue"] - 1.0, 4)
+
+    margin_rows = [r for r in rows if _margin(r) is not None]
+    if margin_rows:
+        tr["net_margin"] = round(_margin(margin_rows[-1]), 4)
+        tr["is_loss"] = bool((margin_rows[-1].get("net_income") or 0) < 0)
+        if len(margin_rows) >= 2:
+            tr["net_margin_chg"] = round(_margin(margin_rows[-1]) - _margin(margin_rows[-2]), 4)
+
+    debt_rows = [r for r in rows if _debt_to_assets(r) is not None]
+    if debt_rows:
+        tr["debt_to_assets"] = round(_debt_to_assets(debt_rows[-1]), 4)
+        if len(debt_rows) >= 2:
+            tr["debt_to_assets_chg"] = round(_debt_to_assets(debt_rows[-1]) - _debt_to_assets(debt_rows[-2]), 4)
+
+    latest = rows[-1]
+    out["fiscal_year"] = latest.get("year")
+    out["fs_div"] = latest.get("fs_div")
+    out["fs_nm"] = latest.get("fs_nm")
+    out["confidence"] = "high" if len(rows) >= 2 else "partial"
+    if errors:
+        out["warnings"] = errors[-2:]
+    return out

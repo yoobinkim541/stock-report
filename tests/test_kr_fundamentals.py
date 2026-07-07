@@ -97,3 +97,26 @@ def test_earnings_data_kr_falls_back_to_yfinance(monkeypatch):
     assert v["per"] == 9.0
     assert v["pbr"] == 1.1
     assert v["roe"] == 0.12
+
+
+def test_kr_financial_trends_calculates_dashboard_metrics():
+    from providers import kr_fundamentals as kf
+
+    out = kf.financial_trends("005930.KS", financial_rows=[
+        {"year": 2023, "revenue": 1000.0, "net_income": 100.0, "assets": 2000.0, "liabilities": 900.0},
+        {"year": 2024, "revenue": 1200.0, "net_income": 180.0, "assets": 2400.0, "liabilities": 1200.0},
+        {"year": 2025, "revenue": 1500.0, "net_income": 225.0, "assets": 3000.0, "liabilities": 1350.0,
+         "fs_div": "CFS", "fs_nm": "연결재무제표"},
+    ])
+
+    tr = out["trends"]
+    assert out["market_type"] == "kr"
+    assert out["source"] == "DART"
+    assert tr["n_years"] == 3
+    assert tr["rev_yoy"] == 0.25
+    assert tr["net_margin"] == 0.15
+    assert tr["net_margin_chg"] == 0.0
+    assert tr["debt_to_assets"] == 0.45
+    assert tr["debt_to_assets_chg"] == -0.05
+    assert tr["is_loss"] is False
+    assert out["confidence"] == "high"

@@ -417,6 +417,7 @@ def _surprise_chart(history, caption):
 def _financials(ticker):
     f = cached.financials(ticker)
     tr = f.get("trends") or {}
+    is_kr = f.get("market_type") == "kr"
     if tr:
         a = st.columns(4)
         a[0].metric("매출 YoY", data.f_frac_pct(tr.get("rev_yoy")))
@@ -427,9 +428,30 @@ def _financials(ticker):
         a[3].metric("연속 보고연수", f"{int(tr.get('n_years') or 0)}년")
         if tr.get("is_loss"):
             st.warning("최근 적자 구간")
-        st.caption("출처: SEC EDGAR companyfacts (美) · 무룩어헤드")
+        rows = f.get("rows") or []
+        if is_kr and rows:
+            table = [{
+                "연도": r.get("year"),
+                "매출": _f_krw_large(r.get("revenue")),
+                "영업이익": _f_krw_large(r.get("operating_income")),
+                "순이익": _f_krw_large(r.get("net_income")),
+                "자산": _f_krw_large(r.get("assets")),
+                "부채": _f_krw_large(r.get("liabilities")),
+            } for r in reversed(rows[-4:])]
+            st.dataframe(pd.DataFrame(table), hide_index=True, width="stretch")
+        if is_kr:
+            bits = ["출처: DART 단일회사 주요계정"]
+            if f.get("fiscal_year"):
+                bits.append(f"{f['fiscal_year']} 사업보고서")
+            if f.get("fs_nm"):
+                bits.append(str(f["fs_nm"]))
+            bits.append("매출·마진·부채 추세")
+            st.caption(" · ".join(bits))
+        else:
+            st.caption("출처: SEC EDGAR companyfacts (美) · 무룩어헤드")
     else:
-        st.warning(f"재무 데이터 없음 — 美 종목만 지원 ({f.get('error', '')})")
+        source = "DART" if is_kr else "SEC EDGAR"
+        st.warning(f"재무 데이터 없음 — {source} 확인 필요 ({f.get('error', '')})")
 
 
 def _institutional(ticker):

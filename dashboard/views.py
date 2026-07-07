@@ -29,9 +29,12 @@ def valuation(ticker: str) -> dict:
 
 
 def financials(ticker: str) -> dict:
-    """SEC EDGAR 펀더멘털 추세 (매출YoY·순마진·부채)."""
-    from providers import edgar
+    """펀더멘털 추세 (美 SEC EDGAR / 韓 DART)."""
     try:
+        if str(ticker or "").upper().endswith((".KS", ".KQ")):
+            from providers import kr_fundamentals
+            return kr_fundamentals.financial_trends(ticker)
+        from providers import edgar
         return {"trends": edgar.fundamental_trends(ticker)}
     except Exception as e:
         return {"error": str(e)}

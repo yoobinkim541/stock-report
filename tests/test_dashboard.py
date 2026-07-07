@@ -224,6 +224,33 @@ def test_views_valuation_error_isolated(monkeypatch):
     assert v["consensus"]["n_analysts"] == 5
 
 
+def test_views_financials_routes_kr_to_dart(monkeypatch):
+    from dashboard import views
+    from providers import edgar, kr_fundamentals
+
+    monkeypatch.setattr(kr_fundamentals, "financial_trends",
+                        lambda t: {"market_type": "kr", "source": "DART", "trends": {"n_years": 3}})
+    monkeypatch.setattr(edgar, "fundamental_trends",
+                        lambda t: (_ for _ in ()).throw(AssertionError("EDGAR should not be called")))
+
+    f = views.financials("005930.KS")
+
+    assert f["market_type"] == "kr"
+    assert f["source"] == "DART"
+    assert f["trends"]["n_years"] == 3
+
+
+def test_views_financials_routes_us_to_edgar(monkeypatch):
+    from dashboard import views
+    from providers import edgar
+
+    monkeypatch.setattr(edgar, "fundamental_trends", lambda t: {"rev_yoy": 0.2, "n_years": 4})
+
+    f = views.financials("MSFT")
+
+    assert f["trends"]["rev_yoy"] == 0.2
+
+
 def test_views_risk_no_weights():
     from dashboard import views
     assert "보유 데이터 없음" in views.risk_report_text({})
