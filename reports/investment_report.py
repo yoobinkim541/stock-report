@@ -26,6 +26,13 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from fundamental_score import score_ticker
 from daily_signals import detect_signals
+from llm_decision import (
+    build_context_decision,
+    load_holding_context,
+    merge_llm_decision,
+    run_llm_portfolio_decisions,
+    slim_earnings_context,
+)
 
 try:
     from institutional_flow import (rank_accumulation, accumulation_line,
@@ -388,6 +395,12 @@ def _build_llm_analysis_payload(clean_data, source_digest=""):
             "signal": item.get("signal"),
             "judgment": item.get("judgment"),
             "action": dv2.get("action"),
+            "context_action": (item.get("decision_context") or {}).get("portfolio_action"),
+            "context_plan": (item.get("decision_context") or {}).get("execution_plan"),
+            "context_risk": (item.get("decision_context") or {}).get("risk_level"),
+            "weight_pct": (item.get("holding_context") or {}).get("weight_pct"),
+            "holding_return_pct": (item.get("holding_context") or {}).get("return_pct"),
+            "days_until_earnings": (item.get("earnings_context") or {}).get("days_until"),
             "one_line": dv2.get("one_line_reason"),
             "price": item.get("price"),
             "1d_pct": item.get("change_1d_pct"),
@@ -1598,6 +1611,11 @@ def _build_json_data(today_str, market, ndx_results, top_buy_candidates,
             "company_name": _company_name(r["ticker"]),
             "judgment": r["judgment"],
             "decision_v2": r.get("decision_v2", {}),
+            "decision_context": r.get("decision_context", {}),
+            "llm_decision": r.get("llm_decision"),
+            "llm_decision_status": r.get("llm_decision_status"),
+            "holding_context": r.get("holding_context", {}),
+            "earnings_context": r.get("earnings_context", {}),
             "etf_comparison": r.get("etf_comparison"),
             "fundamental_score": r["fundamental"]["total_score"],
             "fundamental_grade": r["fundamental"]["grade"],
@@ -1641,6 +1659,11 @@ def _build_clean_data(today_str, spy_change, market, kospi_str,
             "signal": r["signal"]["overall_signal"],
             "judgment": r["judgment"],
             "decision_v2": r.get("decision_v2", {}),
+            "decision_context": r.get("decision_context", {}),
+            "llm_decision": r.get("llm_decision"),
+            "llm_decision_status": r.get("llm_decision_status"),
+            "holding_context": r.get("holding_context", {}),
+            "earnings_context": r.get("earnings_context", {}),
             "price": price_info.get("current_price"),
             "change_1d_pct": price_info.get("1d_change_pct"),
             "change_1mo_pct": price_info.get("1mo_change_pct"),
@@ -1694,6 +1717,54 @@ def _build_clean_data(today_str, spy_change, market, kospi_str,
     return clean_data
 
 
+def _earnings_context_for_ticker(ticker):
+    try:
+        from providers import earnings_data as ed
+        return slim_earnings_context(ed.summary(ticker))
+    except Exception:
+        return {}
+
+
+def _attach_context_decisions(portfolio_results, market, runner=subprocess.run):
+    """Attach deterministic v3 context decisions and optional LLM shadow review."""
+    try:
+        holding_book = load_holding_context(PORTFOLIO_SNAPSHOT_PATH)
+        positions = holding_book.get("positions", {})
+    except Exception:
+        positions = {}
+
+    llm_items = []
+    for r in portfolio_results:
+        ticker = r.get("ticker", "")
+        holding = positions.get(ticker.upper(), {})
+        earnings = _earnings_context_for_ticker(ticker)
+        context_decision = build_context_decision(r, holding=holding, earnings=earnings, market=market)
+        r["holding_context"] = holding
+        r["earnings_context"] = earnings
+        r["decision_context"] = context_decision
+        sig = r.get("signal", {}) or {}
+        llm_items.append({
+            "ticker": ticker,
+            "company": _company_name(ticker),
+            "rule_decision": r.get("decision_v2", {}),
+            "context_decision": context_decision,
+            "holding": holding,
+            "earnings": earnings,
+            "price": sig.get("price_info", {}),
+            "top_reasons": r.get("reasons", [])[:3],
+            "top_risks": r.get("risks", [])[:3],
+        })
+
+    llm_decisions, llm_status = run_llm_portfolio_decisions(llm_items, market=market, runner=runner)
+    for r in portfolio_results:
+        ticker = str(r.get("ticker", "")).upper()
+        llm_decision = llm_decisions.get(ticker)
+        r["llm_decision"] = llm_decision
+        r["llm_decision_status"] = llm_status
+        r["decision_context"] = merge_llm_decision(r.get("decision_context", {}), llm_decision)
+    return llm_status
+
+
 # IB Phase 메타 (phase_key → 이모지·라벨·DCA배율) — barbell IB 표
 _IB_PHASE_META = {
     "0": ("🟢", "Phase 0 정상", "1.0×"), "1": ("🟡", "Phase 1", "1.5×"),
@@ -1715,6 +1786,15 @@ def _phase_headline_parts():
         return None
 
 
+def _context_mobile_line(item):
+    ctx = item.get("decision_context", {}) or {}
+    plan = _compact_text(ctx.get("execution_plan", ""), 38)
+    suffix = f" — {plan}" if plan else ""
+    action = ctx.get("portfolio_action")
+    emoji = "🟠" if action == "일부축소" else "🟡"
+    return f"  {emoji} {_short_stock_label(item)}{suffix}"
+
+
 def _build_mobile_summary(today_str, spy_change, market, kospi_str, avg_score,
                           pos_count, neu_count, warn_count, crit_count,
                           portfolio_results, top_buy_candidates, top_watch,
@@ -1724,12 +1804,32 @@ def _build_mobile_summary(today_str, spy_change, market, kospi_str, avg_score,
     """모바일(텔레그램) 요약 — 헤드라인(Phase·오늘할일) 우선·평문(노션 호환). 진단줄은 md/stdout."""
     qqq_change = market.get("qqq_change", 0)
 
-    buy_items = [r for r in portfolio_results if r.get("decision_v2", {}).get("action") in ("강한 매수후보", "관심/분할매수", "관심 유지")][:3]
-    watch_items = [r for r in portfolio_results if r.get("decision_v2", {}).get("action") in ("비중축소 검토", "매도검토", "데이터부족", "손절/매도검토")][:3]
+    true_risk_actions = ("매도검토", "데이터부족", "손절/매도검토")
+    review_actions = ("비중점검", "일부축소", "추가매수 금지")
+    risk_items = [
+        r for r in portfolio_results
+        if r.get("decision_v2", {}).get("action") in true_risk_actions
+        or (r.get("decision_context", {}) or {}).get("risk_level") == "높음"
+    ][:3]
+    risk_tickers = {r.get("ticker") for r in risk_items}
+    review_items = [
+        r for r in portfolio_results
+        if r.get("ticker") not in risk_tickers
+        and (r.get("decision_context", {}) or {}).get("portfolio_action") in review_actions
+    ][:3]
+    review_tickers = {r.get("ticker") for r in review_items}
+    buy_items = [
+        r for r in portfolio_results
+        if r.get("ticker") not in (risk_tickers | review_tickers)
+        and r.get("decision_v2", {}).get("action") in ("강한 매수후보", "관심/분할매수", "관심 유지")
+    ][:3]
     buy_short = [_short_stock_label(r) for r in buy_items]
-    watch_short = [_short_stock_label(r) for r in watch_items]
-    if watch_short:
-        todo = f"위험 종목 확인 — {', '.join(watch_short)}"
+    risk_short = [_short_stock_label(r) for r in risk_items]
+    review_short = [_short_stock_label(r) for r in review_items]
+    if risk_short:
+        todo = f"위험 종목 확인 — {', '.join(risk_short)}"
+    elif review_short:
+        todo = f"비중점검 — {', '.join(review_short)}"
     elif buy_short:
         todo = f"매수관심 검토 — {', '.join(buy_short)}"
     else:
@@ -1757,9 +1857,13 @@ def _build_mobile_summary(today_str, spy_change, market, kospi_str, avg_score,
         for r in buy_items:
             act = r.get("decision_v2", {}).get("action", "")
             L.append(f"  {_ACTION_EMOJI.get(act, '▪️')} {_short_stock_label(r)}")
-    if watch_items:
+    if review_items:
+        L.append("🟡 비중점검")
+        for r in review_items:
+            L.append(_context_mobile_line(r))
+    if risk_items:
         L.append("⚠️ 위험")
-        for r in watch_items:
+        for r in risk_items:
             act = r.get("decision_v2", {}).get("action", "")
             L.append(f"  {_ACTION_EMOJI.get(act, '▪️')} {_short_stock_label(r)}")
 
@@ -2000,6 +2104,10 @@ def generate_report():
                 "risks": [str(e)],
             })
 
+    print("🧭 포트폴리오 맥락 판단 보정 중...")
+    llm_decision_status = _attach_context_decisions(portfolio_results, market)
+    print(f"   LLM decision: {llm_decision_status}")
+
     # ── NASDAQ 100 scan ──
     print(f"\n📋 NASDAQ 100 스캔 중...")
     ndx_results = []
@@ -2229,6 +2337,21 @@ def generate_report():
         lines.append(f"- **오늘의 신호:** {signal_display}")
         lines.append(f"- **최종 판단:** {judgment}")
         lines.append(f"- **Decision v2:** {decision.get('action', '데이터부족')} — {decision.get('one_line_reason', '')}")
+        context_decision = r.get("decision_context", {}) or {}
+        if context_decision:
+            ctx_reason = " · ".join(context_decision.get("reasoning_summary", [])[:3])
+            lines.append(
+                f"- **Context decision:** {context_decision.get('portfolio_action', '비중점검')} "
+                f"({context_decision.get('risk_level', '주의')}) — "
+                f"{context_decision.get('execution_plan', '')}"
+                f"{' · ' + ctx_reason if ctx_reason else ''}"
+            )
+            if context_decision.get("llm_shadow"):
+                shadow = context_decision["llm_shadow"]
+                lines.append(
+                    f"- **LLM shadow:** {shadow.get('portfolio_action')} "
+                    f"({shadow.get('risk_level')}) — {shadow.get('execution_plan')}"
+                )
         for line in _format_etf_comparison(r.get("etf_comparison")):
             lines.append(line)
         lines.append(f"- **핵심 이유 3개:**")
@@ -2398,6 +2521,7 @@ def generate_report():
     lines.append(f"| NASDAQ 100 스캔 | {len(ndx_results)}개 종목 |")
     lines.append(f"| KOSPI 상위 30 스캔 | {len(kospi_results)}개 종목 |")
     lines.append(f"| 데이터 소스 | yfinance, SaveTicker API |")
+    lines.append(f"| LLM decision | 포트폴리오 맥락 판단: {llm_decision_status} |")
     lines.append(f"| LLM overlay | 선택 실행: {INVESTMENT_REPORT_LLM_MODEL}, fact guard 통과 시만 추가 |")
     _ostats = llm_overlay_stats()
     if _ostats:

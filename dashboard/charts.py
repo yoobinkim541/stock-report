@@ -24,6 +24,77 @@ def _t(fig):
     return theme.apply_plotly_theme(fig)
 
 
+def _trade_price(hist, trade: dict):
+    price = trade.get("price")
+    try:
+        if price is not None and float(price) > 0:
+            return float(price)
+    except (TypeError, ValueError):
+        pass
+    try:
+        close = hist["Close"].dropna()
+        if close.empty:
+            return None
+        import pandas as pd
+        ts = pd.Timestamp(trade.get("timestamp") or trade.get("date"))
+        loc = close.index.get_indexer([ts], method="nearest")[0]
+        if loc >= 0:
+            return float(close.iloc[loc])
+    except Exception:
+        return None
+    return None
+
+
+def _add_trade_markers(fig, hist, trades):
+    if not trades:
+        return
+    go = _go()
+    for side, color, symbol, name in (
+        ("buy", _GREEN, "triangle-up", "Buy"),
+        ("sell", _RED, "triangle-down", "Sell"),
+    ):
+        rows = [t for t in trades if str(t.get("side", "")).lower() == side]
+        if not rows:
+            continue
+        xs, ys, custom = [], [], []
+        for t in rows:
+            px = _trade_price(hist, t)
+            if px is None:
+                continue
+            xs.append(t.get("timestamp") or t.get("date"))
+            ys.append(px)
+            custom.append([
+                t.get("event_id"),
+                "매수" if side == "buy" else "매도",
+                t.get("qty"),
+                px,
+                t.get("avg_price"),
+                t.get("account"),
+                t.get("source"),
+                t.get("timestamp") or t.get("date"),
+                t.get("note"),
+                t.get("currency") or "USD",
+            ])
+        if not xs:
+            continue
+        fig.add_trace(go.Scatter(
+            x=xs,
+            y=ys,
+            mode="markers",
+            name=name,
+            customdata=custom,
+            marker=dict(symbol=symbol, size=13, color=color,
+                        line=dict(color="#ffffff", width=0.8)),
+            hovertemplate=(
+                "<b>%{customdata[1]}</b> %{customdata[7]}<br>"
+                "수량 %{customdata[2]:,.4g}주 · 체결 %{customdata[9]} %{customdata[3]:,.2f}<br>"
+                "평단 %{customdata[9]} %{customdata[4]:,.2f}<br>"
+                "%{customdata[5]} · %{customdata[6]}<br>"
+                "%{customdata[8]}<extra></extra>"
+            ),
+        ))
+
+
 def allocation_donut(holdings: list[dict]):
     """보유 비중 도넛. holdings: [{ticker, value, ...}]."""
     go = _go()
@@ -43,7 +114,7 @@ def allocation_donut(holdings: list[dict]):
     return _t(fig)
 
 
-def price_line(hist, ticker: str = "", avg_cost=None):
+def price_line(hist, ticker: str = "", avg_cost=None, trades=None):
     """가격 라인 + 20/60일 이동평균 (+ 보유 시 평단 수평선). hist: OHLC DataFrame(Close 필요)."""
     go = _go()
     fig = go.Figure()
@@ -60,12 +131,13 @@ def price_line(hist, ticker: str = "", avg_cost=None):
         fig.add_hline(y=avg_cost, line=dict(color=theme.MUTED, dash="dash", width=1.2),
                       annotation_text=f"평단 ${avg_cost:,.2f}", annotation_position="top left",
                       annotation_font=dict(color=theme.MUTED, size=11))
+    _add_trade_markers(fig, hist, trades or [])
     fig.update_layout(margin=dict(t=10, b=10, l=10, r=10), height=320,
                       legend=dict(orientation="h", y=1.1), hovermode="x unified")
     return _t(fig)
 
 
-def price_candle(hist, ticker: str = "", avg_cost=None):
+def price_candle(hist, ticker: str = "", avg_cost=None, trades=None):
     """가격 캔들(OHLC) + 20/60일 이동평균 (+ 보유 시 평단 수평선). hist: OHLC DataFrame."""
     go = _go()
     fig = go.Figure()
@@ -85,8 +157,10 @@ def price_candle(hist, ticker: str = "", avg_cost=None):
         fig.add_hline(y=avg_cost, line=dict(color=theme.MUTED, dash="dash", width=1.2),
                       annotation_text=f"평단 ${avg_cost:,.2f}", annotation_position="top left",
                       annotation_font=dict(color=theme.MUTED, size=11))
+    _add_trade_markers(fig, hist, trades or [])
     fig.update_layout(margin=dict(t=10, b=10, l=10, r=10), height=320,
                       legend=dict(orientation="h", y=1.1),
+                      hovermode="x unified",
                       xaxis_rangeslider_visible=False)
     return _t(fig)
 

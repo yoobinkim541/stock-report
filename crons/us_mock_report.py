@@ -23,6 +23,8 @@ load_dotenv()
 
 import kis_mock
 import fmt
+from lib import mock_llm_execution as llm_exec
+from lib import mock_llm_rationale as llm_rationale
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 logger = logging.getLogger(__name__)
@@ -30,6 +32,40 @@ logger = logging.getLogger(__name__)
 KST = timezone(timedelta(hours=9))
 SEED_USD = float(os.getenv("KOREA_MOCK_SEED", "100000"))
 _WD = ["월", "화", "수", "목", "금", "토", "일"]
+
+
+def _position_payload(sym, p, total_value):
+    value = p.get("value", 0) or 0
+    avg = p.get("avg_price", 0) or 0
+    cur = p.get("cur_price", 0) or 0
+    ret = (cur - avg) / avg * 100 if avg > 0 else 0.0
+    return {
+        "ticker": sym,
+        "weight_pct": round(value / total_value * 100.0, 1) if total_value else 0.0,
+        "return_pct": ret,
+        "value": value,
+    }
+
+
+def _decision_payload(d):
+    return {
+        "side": d.get("side"),
+        "ticker": d.get("ticker"),
+        "reason": (d.get("rationale") or {}).get("one_line_reason", ""),
+        "policy_score": d.get("policy_score"),
+    }
+
+
+def _llm_shadow_summary():
+    try:
+        from ml.adaptive import Ledger
+        ledger = Ledger("us_mock_llm_shadow")
+        rows = llm_exec.shadow_training_set(ledger)
+        summary = llm_exec.summarize_shadow(rows, horizon=llm_exec.report_horizon())
+        return summary, llm_exec.pending_shadow_count(ledger, horizons_=llm_exec.horizons())
+    except Exception as e:
+        logger.info("US LLM shadow summary skipped: %s", e)
+        return {"n": 0, "hit_rate": None, "avg_delta": None, "by_action": {}}, 0
 
 
 def _pearson(xs, ys) -> float:
@@ -221,6 +257,38 @@ def build_report(html: bool = False) -> str:
             icon = "📥" if d.get("side") == "편입" else "📤"
             rr = (d.get("rationale") or {}).get("one_line_reason", "")
             lines.append(f"{icon} {d.get('side')} {d.get('ticker')} — {rr}")
+
+    shadow, pending_shadow = _llm_shadow_summary()
+    lines.append(fmt.sep("🧠 LLM Shadow 평가"))
+    lines.append(llm_exec.summary_line(shadow))
+    if pending_shadow:
+        lines.append(f"미성숙 후보 {pending_shadow}건 — horizon 경과 후 평가")
+
+    llm_payload = llm_rationale.build_payload(
+        market="US",
+        nav=nav,
+        day_ret=day_ret,
+        cum_ret=cum_ret,
+        benchmark_ret=q_ret,
+        excess=excess,
+        strat_mdd=strat_mdd,
+        benchmark_mdd=q_mdd_pct,
+        cash=cash,
+        positions=[
+            _position_payload(sym, p, pos_value)
+            for sym, p in sorted(held.items(), key=lambda kv: -(kv[1].get("value", 0) or 0))
+        ],
+        recent_decisions=[_decision_payload(d) for d in recent],
+        scorecard=sc,
+        trading_cost=tot_cost,
+        turnover=turnover if tot_cost > 0 and inception_nav else None,
+    )
+    llm_result, llm_status = llm_rationale.run(llm_payload)
+    if llm_result:
+        lines.append(fmt.sep("🧠 LLM 판단근거"))
+        lines.extend(llm_rationale.format_section(llm_result)[1:])
+    else:
+        logger.info("US mock LLM rationale skipped: %s", llm_status)
 
     lines.append(fmt.sep())
     lines.append("⚠️ 모의투자 — 실거래 아님")

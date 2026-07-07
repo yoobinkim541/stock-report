@@ -29,7 +29,7 @@ def render():
 
     # 가격 차트 — 풀폭 · 라인/캔들 토글 (+ 보유 시 평단 수평선)
     if yf_price is not None:
-        _price_chart(ticker, hist, pos.get("avg_price_usd") if pos else None)
+        _price_chart(ticker, hist, pos.get("avg_price_usd") if pos else None, data.trade_events(ticker))
     else:
         st.info("가격 데이터 없음 (yfinance)")
 
@@ -43,14 +43,70 @@ def render():
 
 
 @st.fragment
-def _price_chart(ticker, hist, avg_cost):
+def _selected_trade(event, trades):
+    try:
+        points = event.selection.points
+    except Exception:
+        try:
+            points = event.get("selection", {}).get("points", [])
+        except Exception:
+            points = []
+    if not points:
+        return None
+    point = points[0]
+    custom = point.get("customdata") if isinstance(point, dict) else getattr(point, "customdata", None)
+    event_id = custom[0] if custom else None
+    if not event_id:
+        return None
+    return next((t for t in trades if t.get("event_id") == event_id), None)
+
+
+def _trade_detail(t):
+    if not t:
+        return
+    side = "매수" if t.get("side") == "buy" else "매도"
+    cur = t.get("currency") or "USD"
+    cols = st.columns(4)
+    cols[0].metric("구분", side)
+    cols[1].metric("수량", f"{float(t.get('qty') or 0):g}주")
+    cols[2].metric("체결가", f"{cur} {float(t.get('price') or 0):,.2f}" if t.get("price") else "—")
+    cols[3].metric("평단", f"{cur} {float(t.get('avg_price') or 0):,.2f}" if t.get("avg_price") else "—")
+    st.caption(f"{t.get('timestamp') or t.get('date')} · {t.get('account') or 'account'} · {t.get('source') or 'source'}"
+               + (f" · {t.get('note')}" if t.get("note") else ""))
+
+
+def _price_chart(ticker, hist, avg_cost, trades):
     """가격 차트 — 라인/캔들 토글(차트만 부분 rerun·전체 리로드 방지)."""
     kind = st.segmented_control("차트 종류", ["📈 라인", "🕯️ 캔들"], default="📈 라인",
                                 label_visibility="collapsed", key="_chart_kind")
     label = ticker_names.label(ticker)
-    fig = (charts.price_candle(hist, label, avg_cost) if kind == "🕯️ 캔들"
-           else charts.price_line(hist, label, avg_cost))
-    st.plotly_chart(fig, width="stretch", config=_NOBAR)
+    fig = (charts.price_candle(hist, label, avg_cost, trades=trades) if kind == "🕯️ 캔들"
+           else charts.price_line(hist, label, avg_cost, trades=trades))
+    event = None
+    try:
+        event = st.plotly_chart(
+            fig, width="stretch", config=_NOBAR, key=f"price_chart_{ticker}_{kind}",
+            on_select="rerun", selection_mode="points")
+    except TypeError:
+        st.plotly_chart(fig, width="stretch", config=_NOBAR)
+    selected = _selected_trade(event, trades or [])
+    if selected:
+        _trade_detail(selected)
+    elif trades:
+        st.caption("차트의 ▲/▼ 거래 마커를 클릭하면 수량·평단·체결가를 볼 수 있습니다.")
+    if trades:
+        with st.expander(f"거래 마커 {len(trades)}건", expanded=False):
+            rows = [{
+                "일자": t.get("date"),
+                "구분": "매수" if t.get("side") == "buy" else "매도",
+                "수량": t.get("qty"),
+                "체결가": t.get("price"),
+                "평단": t.get("avg_price"),
+                "계좌": t.get("account"),
+                "출처": t.get("source"),
+                "메모": t.get("note"),
+            } for t in trades]
+            st.dataframe(pd.DataFrame(rows), hide_index=True, width="stretch")
 
 
 @st.fragment(run_every=8)
@@ -412,7 +468,7 @@ def _manage_position(ticker, cur_price, pos):
                                     max_value=float(held), value=0.0, step=0.0001, format="%.4f", key="red_qty")
                 lab = "전량 정리" if q <= 0 else f"{q:.4f}주 축소"
                 if st.button(f"➖ {lab} 기록", key="red_btn", width="stretch"):
-                    _apply_action(lambda: _hm().sell_holding(ticker, q if q > 0 else None))
+                    _apply_action(lambda: _hm().sell_holding(ticker, q if q > 0 else None, price_usd=round(cur, 4)))
         else:                                                       # 추가(신규·증액)
             c = st.columns(2)
             q = c[0].number_input("주수 (소수점 가능)", min_value=0.0, value=1.0, step=0.0001,

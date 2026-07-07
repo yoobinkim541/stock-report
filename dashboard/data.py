@@ -124,6 +124,15 @@ def holding_position(ticker: str, path: str | None = None) -> dict | None:
     return None
 
 
+def trade_events(ticker: str, *, include_mock: bool = True) -> list[dict]:
+    """Chart overlay trade markers for a ticker."""
+    try:
+        from lib import trade_events as _te
+        return _te.trades_for_ticker(ticker, include_mock=include_mock)
+    except Exception:
+        return []
+
+
 def portfolio_weights(path: str | None = None) -> dict:
     """{ticker: weight(0~1)} — risk_model.portfolio_risk_summary 입력용."""
     rows = load_holdings(path)

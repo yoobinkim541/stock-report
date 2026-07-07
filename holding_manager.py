@@ -15,6 +15,7 @@ from datetime import datetime
 import store  # SQLite 통합 저장소 (portfolio_snapshot 그림자 동기화 — round 3)
 import safe_io  # 원자적 쓰기 + 교차 프로세스 쓰기 락
 import fmt      # 출력 포맷 공통 레이어
+from lib import trade_events
 
 # portfolio_snapshot 경로 단일 소스 — portfolio_universe(STOCK_REPORT_PROJECT_DIR env 반영)
 from portfolio_universe import PORTFOLIO_SNAPSHOT_PATH as PORTFOLIO_PATH
@@ -168,6 +169,7 @@ def buy_holding(ticker: str, shares: float, price_usd: float,
     fractional=True 이면 소수점 계좌에 기록.
     """
     ticker = ticker.upper()
+    trade_rec = None
     # load→mutate→write 를 하나의 파일락으로 감싸 교차 프로세스(kiwoom_sync·sync_server) lost update 방지
     with safe_io.file_write_lock(PORTFOLIO_PATH):
         snap = _load()
@@ -195,6 +197,12 @@ def buy_holding(ticker: str, shares: float, price_usd: float,
             existing.pop("current_price_usd", None)   # 삭제 → 다음 실행 시 갱신
             existing.pop("pnl_usd", None)
             existing.pop("return_pct", None)
+            trade_rec = {
+                "ticker": ticker, "side": "buy", "qty": shares, "price": price_usd,
+                "avg_price": new_avg, "account": "overseas_fractional" if fractional else "overseas_general",
+                "source": "manual_holding", "market": "US", "currency": "USD",
+                "note": "holding buy",
+            }
             msg = (
                 f"✅ 매수 기록\n"
                 f"━━━━━━━━━━━━━━━━━━━━━━━\n"
@@ -212,6 +220,12 @@ def buy_holding(ticker: str, shares: float, price_usd: float,
                 "cost_usd":      round(shares * price_usd, 4),
             }
             holdings.append(new_entry)
+            trade_rec = {
+                "ticker": ticker, "side": "buy", "qty": shares, "price": price_usd,
+                "avg_price": price_usd, "account": "overseas_fractional" if fractional else "overseas_general",
+                "source": "manual_holding", "market": "US", "currency": "USD",
+                "note": "holding buy new",
+            }
             msg = (
                 f"✅ 신규 포지션 추가\n"
                 f"━━━━━━━━━━━━━━━━━━━━━━━\n"
@@ -222,18 +236,22 @@ def buy_holding(ticker: str, shares: float, price_usd: float,
 
         _save_locked(snap)
 
+    if trade_rec:
+        trade_events.record_trade(**trade_rec)
+
     # 매수 후 전체 가격 갱신 (신규 종목 포함) — refresh 는 자체 락 획득
     refresh_msg = refresh_portfolio_prices()
     return msg + f"\n\n{refresh_msg}"
 
 
-def sell_holding(ticker: str, shares: float | None = None) -> str:
+def sell_holding(ticker: str, shares: float | None = None, price_usd: float | None = None) -> str:
     """
     매도 기록.
     shares=None 이면 전량 청산.
     두 계좌(일반 + 소수점) 모두 탐색.
     """
     ticker = ticker.upper()
+    trade_recs = []
     # load→mutate→write 를 하나의 파일락으로 감싸 교차 프로세스 lost update 방지
     with safe_io.file_write_lock(PORTFOLIO_PATH):
         snap = _load()
@@ -251,6 +269,8 @@ def sell_holding(ticker: str, shares: float | None = None) -> str:
                     continue
                 existing_shares = float(h.get("shares", 0))
                 sell_qty = existing_shares if shares is None else min(shares, existing_shares)
+                avg = float(h.get("avg_price_usd") or 0) or None
+                px = price_usd or h.get("current_price_usd") or avg
 
                 if sell_qty >= existing_shares:
                     # 전량 청산
@@ -261,12 +281,27 @@ def sell_holding(ticker: str, shares: float | None = None) -> str:
                     h["cost_usd"] = round(h["shares"] * h.get("avg_price_usd", 0), 4)
                     msgs.append(f"  [{section.replace('overseas_', '')}] {ticker} {sell_qty:.4f}주 매도  →  잔여 {h['shares']:.4f}주")
                 sold_any = True
+                trade_recs.append({
+                    "ticker": ticker,
+                    "side": "sell",
+                    "qty": sell_qty,
+                    "price": px,
+                    "avg_price": avg,
+                    "account": section,
+                    "source": "manual_holding",
+                    "market": "US",
+                    "currency": "USD",
+                    "note": "holding sell",
+                })
                 break
 
         if not sold_any:
             return f"❌ {ticker} 포지션을 찾을 수 없습니다."
 
         _save_locked(snap)
+
+    for rec in trade_recs:
+        trade_events.record_trade(**rec)
 
     # 전량 청산으로 포지션이 완전히 사라졌으면 은퇴 티커로 기록
     # → 일일 스모크 감사가 코드·설정에 남은 죽은 참조를 점검한다

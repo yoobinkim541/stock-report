@@ -49,6 +49,21 @@ def test_holding_position(tmp_path):
     assert data.holding_position("ZZZZ", str(snap)) is None   # 비보유 → None
 
 
+def test_trade_events_reads_ledger(tmp_path, monkeypatch):
+    monkeypatch.setenv("STOCK_REPORT_DB", str(tmp_path / "stock_report.db"))
+    import store
+    store._initialized.clear()
+    from lib import trade_events
+
+    trade_events.record_trade(
+        ticker="MSFT", side="buy", qty=1, price=420,
+        account="manual", source="manual_holding", timestamp="2026-07-07T10:00:00",
+        event_id="dash-1")
+    rows = data.trade_events("MSFT")
+    assert len(rows) == 1
+    assert rows[0]["event_id"] == "dash-1"
+
+
 def test_portfolio_merges_general_and_fractional(tmp_path):
     """Q1: general(holdings_usd) + fractional(holdings) 티커별 합산 — 과소계상·중복행 방지."""
     snap = tmp_path / "portfolio_snapshot.json"

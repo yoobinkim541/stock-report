@@ -132,7 +132,9 @@ def update_portfolio(holdings: list[dict]) -> str:
     if PROJECT_DIR not in sys.path:
         sys.path.insert(0, PROJECT_DIR)
     import safe_io
+    from lib import trade_events
 
+    trade_recs = []
     with safe_io.file_write_lock(PORTFOLIO_PATH):
         shutil.copy2(PORTFOLIO_PATH, PORTFOLIO_PATH + ".bak")
         with open(PORTFOLIO_PATH, encoding="utf-8") as f:
@@ -143,7 +145,27 @@ def update_portfolio(holdings: list[dict]) -> str:
             h["ticker"]: h
             for h in snap.get("domestic", {}).get("holdings", [])
         }
+        had_prior_sync = bool(snap.get("last_domestic_sync"))
         for h in holdings:
+            old = existing.get(h["ticker"]) or {}
+            old_shares = float(old.get("shares", 0) or 0)
+            new_shares = float(h.get("shares", 0) or 0)
+            delta = round(new_shares - old_shares, 6)
+            if had_prior_sync and abs(delta) > 1e-8:
+                side = "buy" if delta > 0 else "sell"
+                trade_recs.append({
+                    "ticker": h["ticker"],
+                    "side": side,
+                    "qty": abs(delta),
+                    "price": h.get("avg_price_krw") if side == "buy" else h.get("current_price_krw"),
+                    "avg_price": h.get("avg_price_krw"),
+                    "account": os.getenv("KIWOOM_ACCOUNT_NO", "domestic"),
+                    "source": "kiwoom_sync",
+                    "market": "KR",
+                    "currency": "KRW",
+                    "confirmed": True,
+                    "note": "키움 잔고 동기화 수량 변화",
+                })
             existing[h["ticker"]] = h
 
         snap.setdefault("domestic", {})["holdings"] = list(existing.values())
@@ -152,6 +174,8 @@ def update_portfolio(holdings: list[dict]) -> str:
         safe_io.atomic_write_json(PORTFOLIO_PATH, snap)
 
     _shadow_to_store(snap)
+    for rec in trade_recs:
+        trade_events.record_trade(**rec)
     lines = [f"  {h['ticker']} {h['name']} {h['shares']}주  {h['return_pct']:+.1f}%" for h in holdings]
     return "\n".join(lines)
 

@@ -93,6 +93,27 @@ def test_price_line_avg_cost_hline():
     assert not (fig2.layout.shapes or ())
 
 
+def test_price_line_trade_markers_have_click_data():
+    idx = pd.date_range("2025-01-01", periods=30, freq="D")
+    hist = pd.DataFrame({"Close": range(100, 130)}, index=idx)
+    trades = [
+        {"event_id": "e1", "date": "2025-01-05", "timestamp": "2025-01-05T09:30:00",
+         "ticker": "NVDA", "side": "buy", "qty": 2, "price": 104, "avg_price": 104,
+         "account": "manual", "source": "manual_holding", "currency": "USD", "note": "first"},
+        {"event_id": "e2", "date": "2025-01-10", "timestamp": "2025-01-10T09:30:00",
+         "ticker": "NVDA", "side": "sell", "qty": 1, "price": 109, "avg_price": 104,
+         "account": "manual", "source": "manual_holding", "currency": "USD", "note": "trim"},
+    ]
+    fig = charts.price_line(hist, "NVDA", trades=trades)
+    names = [tr.name for tr in fig.data]
+    assert "Buy" in names and "Sell" in names
+    buy = next(tr for tr in fig.data if tr.name == "Buy")
+    assert buy.marker.symbol == "triangle-up"
+    assert buy.customdata[0][0] == "e1"
+    assert buy.customdata[0][2] == 2
+    assert "customdata" in buy.hovertemplate
+
+
 # ── L2 캔들 차트 ──────────────────────────────────────────────────────
 def _ohlc(n=70, start=100):
     idx = pd.date_range("2025-01-01", periods=n, freq="D")
@@ -113,6 +134,16 @@ def test_price_candle_ohlc_and_ma():
 def test_price_candle_avg_cost_hline():
     fig = charts.price_candle(_ohlc(30), "NVDA", avg_cost=115.0)
     assert any(getattr(s, "type", None) == "line" for s in (fig.layout.shapes or ())), "평단 hline 없음"
+
+
+def test_price_candle_trade_marker_falls_back_to_close():
+    hist = _ohlc(30)
+    fig = charts.price_candle(hist, "NVDA", trades=[
+        {"event_id": "e3", "date": "2025-01-05", "ticker": "NVDA", "side": "buy",
+         "qty": 1, "price": None, "avg_price": 104}
+    ])
+    buy = next(tr for tr in fig.data if tr.name == "Buy")
+    assert list(buy.y)[0] == 104  # close on 2025-01-05 from _ohlc start=100
 
 
 def test_price_candle_handles_missing_ohlc():

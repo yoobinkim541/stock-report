@@ -8,6 +8,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
 from investment_report import (
     _build_llm_analysis_payload,
     _build_llm_overlay_prompt,
+    _build_mobile_summary,
     _decision_v2,
     _etf_peer_group,
     _etf_period_return,
@@ -24,6 +25,11 @@ from investment_report import (
     _select_watch_candidates,
     _validate_llm_overlay,
     _judgment,
+)
+from llm_decision import (
+    build_context_decision,
+    merge_llm_decision,
+    validate_llm_decisions,
 )
 
 
@@ -250,6 +256,109 @@ def test_decision_v2_today_action_exists_and_short():
     assert "today_action" in decision
     assert isinstance(decision["today_action"], str)
     assert len(decision["today_action"]) <= 30
+
+
+def test_context_decision_treats_unh_like_case_as_partial_trim_not_true_risk():
+    result = {
+        "ticker": "UNH",
+        "fundamental": {"total_score": 49, "grade": "C", "notes": []},
+        "signal": {
+            "overall_signal": "Positive",
+            "price_info": {"current_price": 425.36, "1d_change_pct": -0.28, "1mo_change_pct": 13.47},
+        },
+        "decision_v2": {
+            "action": "비중축소 검토",
+            "confidence": 74,
+            "risk": {"status": "낮음", "reason": "특이 위험 제한적"},
+        },
+        "risks": ["ROIC 시계열 데이터 부족"],
+    }
+    holding = {"weight_pct": 16.5, "return_pct": 36.4}
+    earnings = {"days_until": 11, "revision_momentum": -0.2, "target_upside_pct": -3.2}
+
+    decision = build_context_decision(result, holding=holding, earnings=earnings)
+
+    assert decision["portfolio_action"] == "일부축소"
+    assert decision["risk_level"] == "주의"
+    assert "20~30%" in decision["execution_plan"]
+    assert "전량매도" in decision["do_not_do"]
+
+
+def test_mobile_summary_separates_position_review_from_risk_bucket():
+    unh = {
+        "ticker": "UNH",
+        "company_name": "UnitedHealth",
+        "decision_v2": {"action": "비중축소 검토"},
+        "decision_context": {
+            "risk_level": "주의",
+            "portfolio_action": "일부축소",
+            "execution_plan": "실적 전 20~30% 일부축소, 나머지 보유",
+        },
+        "signal": {"overall_signal": "Positive"},
+    }
+
+    text = _build_mobile_summary(
+        "2026-07-07",
+        -0.1,
+        {"qqq_change": -1.7},
+        "N/A",
+        43,
+        1,
+        0,
+        0,
+        0,
+        [unh],
+        [],
+        [],
+        [],
+        [],
+        [],
+        lambda t: t,
+        None,
+        "disabled",
+        1.0,
+        "",
+        phase=None,
+    )
+
+    assert "📌 오늘 할 일: 비중점검" in text
+    assert "🟡 비중점검" in text
+    assert "UnitedHealth (UNH)" in text
+    assert "⚠️ 위험" not in text
+
+
+def test_llm_decision_schema_shadow_and_apply_merge():
+    raw = {
+        "decisions": [
+            {
+                "ticker": "UNH",
+                "risk_level": "주의",
+                "portfolio_action": "비중점검",
+                "execution_plan": "실적 확인 전 추가매수 금지",
+                "reasoning_summary": ["실적 D-11"],
+                "do_not_do": ["실적 전 추가매수"],
+                "recheck_triggers": ["가이던스 유지 여부"],
+                "confidence": 71,
+            }
+        ]
+    }
+
+    llm = validate_llm_decisions(raw, {"UNH"})["UNH"]
+    context = {
+        "ticker": "UNH",
+        "risk_level": "주의",
+        "portfolio_action": "일부축소",
+        "execution_plan": "실적 전 20~30% 일부축소, 나머지 보유",
+        "confidence": 79,
+    }
+
+    shadow = merge_llm_decision(context, llm, mode="shadow")
+    applied = merge_llm_decision(context, llm, mode="apply")
+
+    assert shadow["portfolio_action"] == "일부축소"
+    assert shadow["llm_shadow"]["portfolio_action"] == "비중점검"
+    assert applied["portfolio_action"] == "비중점검"
+    assert applied["source"] == "llm_apply"
 
 
 def test_mobile_block_lines_stay_short():
