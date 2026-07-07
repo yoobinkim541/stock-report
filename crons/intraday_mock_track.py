@@ -234,9 +234,15 @@ def _symbol_axes(sym: str, mk: str, df, feats, *, profile: dict, obi_samples: li
         return None
     row = feats.iloc[-1]
     close = float(df["Close"].iloc[-1])
-    # ORB — 첫 봉이 세션 개장분인 경우만 (장중 신규 편입 심볼은 결측)
-    first_min = df.index[0].hour * 60 + df.index[0].minute
-    orr = ax.opening_range(df, orb_minutes) if first_min <= _OPEN_MIN[mk] + 1 else None
+    # ORB — 프리마켓 봉 제외(US 스트림은 개장 전 틱도 옴 — 라이브 실증) 후,
+    # 세션 첫 봉이 개장분일 때만 (장중 신규 편입 심볼은 결측)
+    mins = df.index.hour * 60 + df.index.minute
+    sess = df[mins >= _OPEN_MIN[mk]]
+    orr = None
+    if len(sess) >= orb_minutes:
+        sess_first = sess.index[0].hour * 60 + sess.index[0].minute
+        if sess_first <= _OPEN_MIN[mk] + 1:
+            orr = ax.opening_range(sess, orb_minutes)
     hhmm = df.index[-1].strftime("%H:%M")
     vol = float(df["Volume"].iloc[-1])
     vz = ax.tod_vol_z(vol, hhmm, profile)
