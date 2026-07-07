@@ -29,6 +29,8 @@ data.portfolio_summary = lambda *a, **k: {"total_usd":10000.0,"return_pct":15.0,
 data.portfolio_weights = lambda *a, **k: {"MSFT":0.4,"NVDA":0.6}
 cached.econ = lambda *a, **k: [{"marker":"\U0001f534","date_str":"06/29 21:30","title":"CPI"}]
 cached.news = lambda t: "뉴스 본문"
+cached.source_health = lambda: {"health": {"saveticker": {"last_count": 12}},
+    "stale": [{"source": "telegram:insidertracking", "hours": None, "threshold": 12}]}
 cached.collected_news = lambda hours=48: {"hours": hours, "groups": {
     "saveticker": [{"title": "엔비디아 [실적] 서프라이즈", "url": "https://example.com/1",
                     "score": 8, "reason": "포트폴리오 종목", "published_at": "2026-07-06T10:00:00+09:00",

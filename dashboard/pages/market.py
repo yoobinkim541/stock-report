@@ -47,8 +47,23 @@ def _calendar_section():
             hide_index=True, width="stretch")
 
 
+def _health_banner():
+    """수집 공백 출처 경고 (source_health.json — 없으면 침묵)."""
+    sh = cached.source_health()
+    stale = (sh or {}).get("stale") or []
+    if not stale:
+        return
+    bits = []
+    for s in stale[:6]:
+        gap = "이력 없음" if s.get("hours") is None else f"{s['hours']:.0f}h 공백"
+        bits.append(f"`{s['source']}` ({gap})")
+    st.warning("⛔ 수집이 멈춘 출처: " + " · ".join(bits)
+               + " — 서버 수집 크론 로그(/tmp/…collector) 확인", icon="⚠️")
+
+
 def _news_section():
     st.subheader("🗞️ 수집 뉴스 — 출처별 · 중요도순")
+    _health_banner()
     hours = st.radio("수집 범위", [24, 48, 72], index=1, horizontal=True,
                      format_func=lambda h: f"최근 {h}시간", key="news_hours",
                      label_visibility="collapsed")

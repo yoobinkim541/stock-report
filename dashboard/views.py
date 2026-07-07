@@ -717,3 +717,13 @@ def collected_news(hours: int = 48) -> dict:
     except Exception:
         pass
     return {"groups": group_news(events, label_by_id, _news_rule_scorer()), "hours": hours}
+
+
+def source_health_summary() -> dict:
+    """수집 소스 헬스 (source_collector 헬스 파일 read-only) — 대시보드 배너용. graceful."""
+    try:
+        from reports.source_collector import load_source_health, stale_sources
+        health = load_source_health()
+        return {"health": health, "stale": stale_sources(health) if health else []}
+    except Exception as e:
+        return {"health": {}, "stale": [], "error": str(e)}

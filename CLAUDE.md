@@ -129,7 +129,7 @@ crons/news_spike_detector.py (크론 매 1분)
 | `crons/advice_adaptive_eval.py` | 포트폴리오 advice 적응 평가 (paper_track A/B meta vs rule ★목적함수 → blend 신뢰도 shadow 권고) | 토 04:30 UTC |
 | `crons/us_axes_eval.py` | US 선택정책 가격축 ★게이트 주간 재검증 (`backtest/us_policy_backtest` — S&P500 **시점 멤버십 마스킹**(fja05680) + yfinance 순비용 워크포워드 vs QQQ·**커버리지 강등**[상폐 가격 부재 시 GO→OBSERVE]) — `ADAPTIVE_US_AXES_ENABLED` 시 shadow→`us_policy.load_params` 모의 반영(공용 `ml/adaptive/axes_shadow`) | 토 05:45 UTC |
 | `crons/kr_axes_eval.py` | KR 선택정책 가격축 ★게이트 주간 재검증 (`backtest/kr_policy_backtest` 25년 marcap 무생존편향·순비용 워크포워드 → DSR/PBO verdict + 트레일링 5년 권고 축 `current_recommendation` + **🛡️레짐 방어 오버레이**[강세=고가모멘텀·약세=저변동 전환 → MDD 방어 verdict·**수익 아님**·약세해 6/7 방어이나 초과 DSR 미달] + **💸비용·회전율 스윕**[월간 리밸 드래그 ~2.4%p/년·주기↓로 확실 회수·gross 비단조라 OOS 재검]) — `ADAPTIVE_KR_AXES_ENABLED` 시 shadow→`kr_policy.load_params` 가 **모의 선택에만** 반영(클램프·가격축 합 ≤50% 상한·21일 stale 무시). **현재 OBSERVE**(OOS +5.5%p/년·MDD≤지수·DSR 미달 — 엣지 단정 불가) | 토 05:30 UTC |
-| `reports/source_collector.py` | 전체 소스 수집 (텔레그램 채널·FRED·국채·시장 스냅샷) → JSONL 캐시 | 매 30분 (:05/:35) |
+| `reports/source_collector.py` | 전체 소스 수집 (텔레그램 채널·FRED·국채·시장 스냅샷) → JSONL 캐시. **소스별 헬스 기록**(`source_health.json` — 소스 크래시 격리·수집 0건 공백 감지)·텔레그램 **t.me/s 직접 HTML 폴백**(jina 장애/무 bold 채널)·FRED 재시도 | 매 30분 (:05/:35) |
 | `crons/paper_track.py` | MetaAllocator vs Phase 규칙 A/B 페이퍼 트레이딩 (월요일 Sharpe 비교 발송) | 평일 22:50 UTC |
 | `crons/fundamental_snapshot.py` | 펀더멘털 point-in-time 스냅샷 적재 (look-ahead 없는 학습 피처용) | 토 01:00 UTC |
 | `crons/options_snapshot.py` | 옵션 지표 스냅샷 (ATM IV·풋콜비·스큐·기대변동폭) — 학습 피처 축적 | 평일 21:30 UTC |
@@ -147,7 +147,7 @@ crons/news_spike_detector.py (크론 매 1분)
 | `tests/bot_smoke_test.py` | 기능 검증 연기 테스트 25항목 (실패 시만 알림) | 평일 00:00 UTC |
 | `tests/ml_smoke_test.py` | ML 파이프라인 end-to-end 58항목 (네트워크 불필요) | 평일 크론 |
 | `tests/institutional_flow_smoke_test.py` | 기관 매집 스코어링 무네트워크 단위 테스트 (합성 데이터) | 평일 크론 |
-| `tests/bot_healthcheck.py` | 봇·서버 상태 점검 (프로세스·PID·파일 신선도·store DB 무결성) | 매 30분 |
+| `tests/bot_healthcheck.py` | 봇·서버 상태 점검 (프로세스·PID·파일 신선도·store DB 무결성·**수집 소스 공백 경보**) | 매 30분 |
 
 **ml/ (ML 모델)**
 | 파일 | 역할 | 상태파일 |
@@ -405,6 +405,7 @@ crons/news_spike_detector.py (크론 매 1분)
 ~/reports/ml-cache/institutional_snapshots.jsonl — 기관 매집 강도·13F 지분 주간 스냅샷 (델타 추적)
 ~/reports/ml-cache/earnings_snapshots.jsonl      — 어닝 컨센서스·리비전·서프라이즈·밸류 일별 point-in-time (실적/주가반응 예측 학습용)
 ~/reports/ml-data/news_llm_labels.jsonl          — LLM 뉴스 구조화 라벨 point-in-time (published/labeled 시각 보존 — news 축 원천, 불변 append-only)
+~/reports/source-cache/source_health.json        — 수집 소스별 헬스 (last_run/last_count/last_success — 공백 감지·healthcheck 경보·대시보드 배너)
 ~/reports/ml-cache/earnings_*.json               — earnings_data 종목별 요약 12h 캐시
 ~/reports/ml-cache/earnings_predictor.pkl        — 실적 서프라이즈 G3 모델 (엣지 게이트 통과 시만 — earnings_model_retrain)
 ~/reports/ml-cache/earnings_move_predictor.pkl   — 실적후 주가반응 G4 모델 (엣지 게이트 통과 시만)

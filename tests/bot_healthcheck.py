@@ -289,6 +289,31 @@ def check_barbell_state_age() -> tuple[str, str] | None:
     return None
 
 
+def check_source_collection() -> tuple[str, str] | None:
+    """뉴스/매크로 수집 소스별 공백 감지 — source_health.json (source_collector 가 매 수집마다 기록).
+
+    특정 출처만 조용히 죽는 문제(수집기 except 삼킴) 가시화. 헬스 파일이 아직 없으면
+    (수집기 미갱신 배포 직후) 침묵 — 파일이 생기는 다음 수집부터 유효.
+    """
+    try:
+        if PROJECT_DIR not in sys.path:
+            sys.path.insert(0, PROJECT_DIR)
+        from reports.source_collector import load_source_health, stale_sources
+        health = load_source_health()
+        if not health:
+            return None
+        bad = stale_sources(health)
+    except Exception as e:
+        return ("source_health_error", f"⚠️ 수집 헬스 점검 실패: {e}")
+    if not bad:
+        return None
+    lines = []
+    for s in bad[:6]:
+        gap = "성공 이력 없음" if s["hours"] is None else f"{s['hours']:.0f}h 공백"
+        lines.append(f"  · {s['source']} — {gap} (임계 {s['threshold']}h)")
+    return ("source_stale", "⚠️ 뉴스/매크로 수집 공백 출처 감지\n" + "\n".join(lines))
+
+
 def check_store_db() -> tuple[str, str] | None:
     """SQLite 통합 저장소(store) 접근·무결성 점검."""
     try:
@@ -317,6 +342,7 @@ def main():
         check_investment_report_cron,
         check_barbell_state_age,
         check_store_db,
+        check_source_collection,
     ]
 
     state   = _load_alert_state()
