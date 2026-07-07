@@ -27,9 +27,9 @@ DEFAULT_CACHE_DIR = Path(os.path.expanduser("~/reports/source-cache"))
 HEADERS = {
     "User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 Chrome/120 Safari/537.36"
 }
-# 정직 UA — FRED·r.jina.ai 는 브라우저 위장 UA 를 봇으로 판정(타르핏/403), 평범한 UA 는 통과
-# (2026-07-07 라이브 실증: FRED 위장 UA=12s 타임아웃·기본 UA=0.3s 200, jina 위장 UA=403).
-# 텔레그램 t.me/s 는 브라우저 UA 로 정상 동작 중 — 소스별로 구분 사용.
+# 정직 UA — FRED fredgraph·r.jina.ai 는 브라우저 위장 UA 를 봇 판정(타르핏/403), 평범한 UA 는 통과
+# (2026-07-07 라이브 실증: FRED 위장 UA=12s 타임아웃·정직 UA=0.3s 200, jina 위장 UA=403·정직 UA=200).
+# 1차 경로가 살아나면 매 실행 12시리즈×2회×12s 타임아웃 낭비 없이 즉시 수집 — API 키 폴백은 유지.
 PLAIN_HEADERS = {"User-Agent": "stock-report/1.0 (+yoobinkim2006@gmail.com)"}
 ARCA_LABELS = ("🧠분석", "📰뉴스", "ℹ️정보", "실적")
 # 보유 종목 — 단일 소스: portfolio_universe.py
@@ -130,10 +130,24 @@ class _BoundedResponse:
         return None
 
 
+# 소스별 마지막 오류 (update_source_health 가 헬스 파일에 기록 → 경보에 원인 표시)
+_LAST_ERRORS: dict[str, str] = {}
+
+
+def _note_error(source: str, err) -> None:
+    _LAST_ERRORS[source] = str(err)[:200]
+
+
 def _bounded_get(url: str, *, timeout: int = 20, max_bytes: int = 5_000_000, **kwargs):
     """응답 크기 상한이 있는 requests.get — 외부 프록시(r.jina.ai 등)의 과대 응답으로 인한
     메모리 고갈(DoS)을 방어한다. 본문을 청크로 읽어 max_bytes 초과 시 즉시 중단."""
     kwargs.setdefault("headers", HEADERS)
+    if url.startswith("https://r.jina.ai/"):
+        # jina 는 브라우저 위장 UA 에 403 (라이브 실증) — 정직 UA 로 교체
+        kwargs["headers"] = {**kwargs["headers"], **PLAIN_HEADERS}
+        # 익명 레이트리밋이 빡빡 — JINA_API_KEY 있으면 인증(쿼터 상향·429 완화)
+        if os.getenv("JINA_API_KEY"):
+            kwargs["headers"]["Authorization"] = f"Bearer {os.getenv('JINA_API_KEY')}"
     with requests.get(url, timeout=timeout, stream=True, **kwargs) as r:
         r.raise_for_status()
         cl = r.headers.get("Content-Length")
@@ -329,29 +343,60 @@ def fetch_saveticker_events() -> list[dict]:
     return events
 
 
+def _parse_arca_html(html_text: str) -> list[tuple[str, str]]:
+    """arca.live 게시판 HTML → [(post_id, 제목텍스트)] (순수 — jina 장애 시 직접 폴백용)."""
+    out = []
+    seen = set()
+    for m in re.finditer(r'href="/b/stock/(\d+)[^"]*"[^>]*>(.*?)</a>', html_text, re.S):
+        post_id = m.group(1)
+        if post_id in seen:
+            continue
+        text = html_mod.unescape(re.sub(r"<[^>]+>", " ", m.group(2)))
+        text = " ".join(text.split())
+        if not text:
+            continue
+        seen.add(post_id)
+        out.append((post_id, text))
+    return out
+
+
 def fetch_arca_events(max_pages: int = 2) -> list[dict]:
     events = []
     link_pat = re.compile(r"\[([^\]]+)\]\(https://arca\.live/b/stock/(\d+)\?p=(\d+)\)")
+
+    def _add(post_id: str, text: str) -> None:
+        if not any(label in text for label in ARCA_LABELS):
+            return
+        events.append({
+            "source": "arca",
+            "title": text[:140],
+            "url": f"https://arca.live/b/stock/{post_id}",
+            "source_url": "https://arca.live/b/stock",
+            "category": next((label for label in ARCA_LABELS if label in text), ""),
+            "tickers": _extract_tickers(text),
+        })
+
     for page in range(1, max_pages + 1):
         try:
-            resp = _bounded_get(f"https://r.jina.ai/http://arca.live/b/stock?p={page}",
-                                timeout=20, headers=PLAIN_HEADERS)
-            markdown = resp.text
-        except Exception:
-            continue
-        for match in link_pat.finditer(markdown):
-            text = " ".join(match.group(1).split()).replace("**", "").strip()
-            if not any(label in text for label in ARCA_LABELS):
-                continue
-            post_id = match.group(2)
-            events.append({
-                "source": "arca",
-                "title": text[:140],
-                "url": f"https://arca.live/b/stock/{post_id}",
-                "source_url": "https://arca.live/b/stock",
-                "category": next((label for label in ARCA_LABELS if label in text), ""),
-                "tickers": _extract_tickers(text),
-            })
+            resp = _bounded_get(f"https://r.jina.ai/http://arca.live/b/stock?p={page}", timeout=20)
+            for match in link_pat.finditer(resp.text):
+                _add(match.group(2), " ".join(match.group(1).split()).replace("**", "").strip())
+        except Exception as e:
+            logger.warning("arca p%d jina 실패: %s", page, e)
+            _note_error("arca", f"jina: {e}")
+
+    if not events:
+        # 폴백: arca.live 직접 (jina 장애/레이트리밋 대응 — CF 차단이면 이것도 실패·헬스에 기록)
+        for page in range(1, max_pages + 1):
+            try:
+                resp = _bounded_get(f"https://arca.live/b/stock?p={page}", timeout=15)
+                for post_id, text in _parse_arca_html(resp.text):
+                    _add(post_id, text)
+            except Exception as e:
+                logger.warning("arca p%d 직접 폴백도 실패: %s", page, e)
+                _note_error("arca", f"직접: {e}")
+    if events:
+        _LAST_ERRORS.pop("arca", None)
     return events
 
 
@@ -415,6 +460,9 @@ def fetch_telegram_channel_events(channels: list[str] = TELEGRAM_NEWS_CHANNELS) 
 
         if not titles:
             logger.warning("telegram:%s 수집 0건 (jina·직접 모두) — 채널명/차단 확인 필요", channel)
+            _note_error(f"telegram:{channel}", "jina·직접 HTML 모두 0건 — 채널명/차단 확인")
+        else:
+            _LAST_ERRORS.pop(f"telegram:{channel}", None)
         for idx, title in enumerate(titles):
             if not title:
                 continue
@@ -505,6 +553,36 @@ def fetch_market_snapshot_events(yf_module=None) -> list[dict]:
     return events
 
 
+def _fred_api_latest(series_id: str):
+    """FRED 공식 API 최근 2관측 — (latest, previous) 각 (date, value)|None. 키 없으면 (None, None).
+
+    fredgraph.csv 가 클라우드 IP/봇 UA 를 차단할 때의 폴백. 키는 무료:
+    https://fred.stlouisfed.org/docs/api/api_key.html → .env FRED_API_KEY
+    """
+    key = os.getenv("FRED_API_KEY")
+    if not key:
+        return None, None
+    try:
+        resp = requests.get(
+            "https://api.stlouisfed.org/fred/series/observations",
+            params={"series_id": series_id, "api_key": key, "file_type": "json",
+                    "sort_order": "desc", "limit": 5},
+            headers=HEADERS, timeout=12)
+        resp.raise_for_status()
+        obs = [(o.get("date", ""), o.get("value"))
+               for o in resp.json().get("observations", [])
+               if o.get("value") not in (None, ".", "")]
+        if not obs:
+            return None, None
+        latest = obs[0]
+        previous = obs[1] if len(obs) > 1 else None
+        return latest, previous
+    except Exception as e:
+        logger.warning("FRED API 폴백 실패 %s: %s", series_id, e)
+        _note_error("fred", f"api: {e}")
+        return None, None
+
+
 def fetch_fred_macro_events(series: dict[str, str] = FRED_SERIES) -> list[dict]:
     """Collect widely used US macro series from FRED public CSV endpoints."""
     events = []
@@ -515,7 +593,7 @@ def fetch_fred_macro_events(series: dict[str, str] = FRED_SERIES) -> list[dict]:
             try:
                 resp = requests.get(
                     "https://fred.stlouisfed.org/graph/fredgraph.csv",
-                    headers=PLAIN_HEADERS,   # 위장 UA 는 FRED 봇감지에 타르핏 — 정직 UA 만 통과
+                    headers=PLAIN_HEADERS,   # 위장 UA 는 봇감지 타르핏 — 정직 UA 만 통과(실증)
                     params={"id": series_id},
                     timeout=12,
                 )
@@ -525,20 +603,24 @@ def fetch_fred_macro_events(series: dict[str, str] = FRED_SERIES) -> list[dict]:
             except Exception as e:
                 if attempt == 2:
                     fail += 1
-                    logger.warning("FRED %s 수집 실패(재시도 포함): %s", series_id, e)
+                    logger.warning("FRED %s csv 실패(재시도 포함): %s", series_id, e)
+                    _note_error("fred", f"fredgraph.csv: {e}")
                 else:
                     time_mod.sleep(2)
-        if rows is None:
-            continue
 
         latest = None
         previous = None
-        for row in rows:
-            value = row.get(series_id)
-            if not value or value == ".":
-                continue
-            previous = latest
-            latest = (row.get("observation_date", ""), value)
+        if rows is not None:
+            for row in rows:
+                value = row.get(series_id)
+                if not value or value == ".":
+                    continue
+                previous = latest
+                latest = (row.get("observation_date", ""), value)
+
+        if latest is None:
+            # 폴백: FRED 공식 API (무료 키 — .env FRED_API_KEY. csv 가 봇/클라우드 IP 차단 시 경로)
+            latest, previous = _fred_api_latest(series_id)
         if not latest:
             continue
 
@@ -560,6 +642,8 @@ def fetch_fred_macro_events(series: dict[str, str] = FRED_SERIES) -> list[dict]:
             "tickers": [],
             "metrics": {"series_id": series_id, "current": current, "delta": delta},
         })
+    if events:
+        _LAST_ERRORS.pop("fred", None)
     return events
 
 
@@ -572,15 +656,38 @@ def _parse_yields_from_world_gov_bonds(markdown: str, maturities: tuple[int, ...
     return yields
 
 
+def _parse_yields_from_wgb_html(html_text: str, maturities: tuple[int, ...] = (5, 10, 20, 30)) -> dict[str, float]:
+    """worldgovernmentbonds.com 직접 HTML → {'10Y': 4.395, ...} (순수 — jina 폴백용).
+
+    행 단위로 'N years' 링크 근처(≤300자)의 첫 백분율만 취해 오매칭을 줄인다.
+    """
+    yields = {}
+    for maturity in maturities:
+        m = re.search(rf">\s*{maturity}\s*years?\s*<.{{0,300}}?([0-9]+\.[0-9]+)\s*%",
+                      html_text, re.S | re.I)
+        if m:
+            yields[f"{maturity}Y"] = float(m.group(1))
+    return yields
+
+
 def fetch_world_gov_bond_events(countries: dict[str, str] = WORLD_GOV_BOND_COUNTRIES) -> list[dict]:
     events = []
     for country, label in countries.items():
+        yields = {}
         try:
-            resp = _bounded_get(f"https://r.jina.ai/http://www.worldgovernmentbonds.com/country/{country}/",
-                                timeout=20, headers=PLAIN_HEADERS)
+            resp = _bounded_get(f"https://r.jina.ai/http://www.worldgovernmentbonds.com/country/{country}/", timeout=20)
             yields = _parse_yields_from_world_gov_bonds(resp.text)
-        except Exception:
-            continue
+        except Exception as e:
+            logger.warning("WGB %s jina 실패: %s", country, e)
+            _note_error("worldgovernmentbonds", f"jina: {e}")
+        if not yields:
+            # 폴백: 직접 HTML (jina 장애/레이트리밋 대응)
+            try:
+                resp = _bounded_get(f"https://www.worldgovernmentbonds.com/country/{country}/", timeout=15)
+                yields = _parse_yields_from_wgb_html(resp.text)
+            except Exception as e:
+                logger.warning("WGB %s 직접 폴백도 실패: %s", country, e)
+                _note_error("worldgovernmentbonds", f"직접: {e}")
         for maturity, value in yields.items():
             events.append({
                 "source": "worldgovernmentbonds",
@@ -592,6 +699,8 @@ def fetch_world_gov_bond_events(countries: dict[str, str] = WORLD_GOV_BOND_COUNT
                 "tags": ["금리/채권"],
                 "metrics": {"country": country, "maturity": maturity, "yield_pct": value},
             })
+    if events:
+        _LAST_ERRORS.pop("worldgovernmentbonds", None)
     return events
 
 
@@ -637,11 +746,17 @@ def update_source_health(events: list[dict], cache_dir: Path | str = DEFAULT_CAC
     for src in expected_sources():
         rec = health.get(src) or {}
         n = int(counts.get(src, 0))
+        rec.setdefault("first_run", now.isoformat())   # 무성공 grace 기준점
         rec["last_run"] = now.isoformat()
         rec["last_count"] = n
         if n > 0:
             rec["last_success"] = now.isoformat()
             rec["last_success_count"] = n
+            rec.pop("last_error", None)
+        else:
+            err = _LAST_ERRORS.get(src) or _LAST_ERRORS.get(src.split(":")[0])
+            if err:
+                rec["last_error"] = err
         health[src] = rec
     tmp = path.with_suffix(".tmp")
     tmp.write_text(json.dumps(health, ensure_ascii=False, indent=2), encoding="utf-8")
@@ -671,23 +786,31 @@ def stale_sources(health: dict | None = None, now: datetime | None = None,
         return []
     now = (now or datetime.now(KST)).astimezone(KST)
     th = thresholds or SOURCE_STALE_HOURS
+
+    def _hours_since(iso: str):
+        try:
+            ts = datetime.fromisoformat(iso)
+            if ts.tzinfo is None:
+                ts = ts.replace(tzinfo=KST)
+            return (now - ts).total_seconds() / 3600
+        except Exception:
+            return None
+
     out = []
     for src, rec in sorted(health.items()):
         limit = th.get(src) or th.get(f"{src.split(':')[0]}:*") or th.get(src.split(":")[0]) or 24
         last_ok = rec.get("last_success")
-        if last_ok:
-            try:
-                ts = datetime.fromisoformat(last_ok)
-                if ts.tzinfo is None:
-                    ts = ts.replace(tzinfo=KST)
-                hours = (now - ts).total_seconds() / 3600
-            except Exception:
-                hours = None
-        else:
-            hours = None                            # 성공 이력 자체가 없음 = 최우선 점검 대상
+        hours = _hours_since(last_ok) if last_ok else None
+        if hours is None:
+            # 성공 이력 없음 — 단, 관측 시작 직후(배포/신규 소스)엔 grace (오탐 방지):
+            # 첫 기록 후 min(임계, 6h) 는 조용히 관찰, 그 뒤에도 무성공이면 경보.
+            grace = min(limit, 6)
+            since_first = _hours_since(rec.get("first_run") or "") if rec.get("first_run") else None
+            if since_first is not None and since_first <= grace:
+                continue
         if hours is None or hours > limit:
             out.append({"source": src, "hours": None if hours is None else round(hours, 1),
-                        "threshold": limit})
+                        "threshold": limit, "error": rec.get("last_error")})
     return out
 
 
