@@ -313,6 +313,7 @@ crons/news_spike_detector.py (크론 매 1분)
 | `INVESTMENT_REPORT_MAX_KOSPI_SCAN` | — | `30` |
 | `INVESTMENT_REPORT_ARCA_PAGES` | — | `1` |
 | `STOCK_COLLECTOR_ARCA_PAGES` | — | `2` |
+| `STOCK_COLLECTOR_TG_CHANNELS` | — | `yuzukinaok1,insidertracking` (뉴스 텔레그램 채널 — 죽은 채널 무배포 교체) |
 | `STOCK_REPORT_PROJECT_DIR` | — | `/home/ubuntu/projects/stock-report` |
 | `BARBELL_MAX_DCA_MULT` | — | `5.0` (DCA 배율 절대 상한 — F&G·ML 증폭 폭주 차단) |
 | `BARBELL_DCA_VOL_CAP` | — | `0.40` (QQQ 연변동성 초과 시 DCA 배율 비례 축소) |
