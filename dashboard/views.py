@@ -616,3 +616,104 @@ def market_indicators() -> dict:
             pass
         out["indices"].append(row)
     return out
+
+
+# ── 수집 뉴스 (시장·캘린더 — 출처별·중요도순) ─────────────────────────────────
+
+# 출처 표시 순서·라벨 (뉴스성 소스 우선, 수치성 스냅샷 후순위)
+NEWS_SOURCE_ORDER = ["saveticker", "telegram", "arca", "fred", "worldgovernmentbonds", "yahoo_finance"]
+NEWS_SOURCE_LABEL = {
+    "saveticker": "📰 SaveTicker",
+    "telegram": "✈️ 텔레그램",
+    "arca": "💬 아카라이브",
+    "fred": "🏛️ FRED 매크로",
+    "worldgovernmentbonds": "🏦 국채금리",
+    "yahoo_finance": "📈 시장 스냅샷",
+}
+
+
+def news_source_key(source) -> str:
+    """'telegram:yuzukinaok1' → 'telegram' (채널별이 아닌 소스별 그룹)."""
+    return (str(source or "기타")).split(":")[0]
+
+
+def _news_rule_scorer():
+    """속보 크론의 규칙 중요도(_rule_score) 재사용 — 단일 진실원. 실패 시 균등 5점."""
+    try:
+        import sys
+        crons = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "crons")
+        if crons not in sys.path:
+            sys.path.insert(0, crons)
+        from news_spike_detector import _rule_score
+        return _rule_score
+    except Exception:
+        return lambda e: (5, "")
+
+
+def group_news(events: list, label_by_id: dict | None = None, score_fn=None) -> dict:
+    """수집 이벤트 → 출처별 그룹 + 중요도순 정렬 (순수 — 테스트 가능).
+
+    중요도 = 속보 규칙 점수(포트폴리오 종목 8·핵심 키워드 7·노이즈 3·기본 5).
+    LLM 구조화 라벨(news_labels)이 있으면 방향/강도를 병기하고 강도로 하한 보정
+    (score ≥ 3+strength — LLM 도 표시·정렬 보조일 뿐 사실 생성 없음).
+    반환: {source_key: [{title,url,score,reason,time_str,tickers,llm}...]} — 점수↓·최신↑.
+    """
+    score_fn = score_fn or (lambda e: (5, ""))
+    label_by_id = label_by_id or {}
+    groups: dict[str, list[dict]] = {}
+    seen = set()
+    for e in events or []:
+        title = (e.get("title") or "").strip()
+        if not title:
+            continue
+        eid = str(e.get("id") or f"{e.get('source')}|{title}|{e.get('published_at')}")
+        if eid in seen:
+            continue
+        seen.add(eid)
+        try:
+            score, reason = score_fn(e)[:2]
+        except Exception:
+            score, reason = 5, ""
+        llm = None
+        lb = label_by_id.get(eid) or label_by_id.get(str(e.get("id")))
+        if lb:
+            try:
+                d, s = int(lb.get("direction", 0)), int(lb.get("strength", 0))
+                llm = {"direction": d, "strength": s, "event_type": lb.get("event_type")}
+                score = max(int(score), 3 + s)
+            except (TypeError, ValueError):
+                pass
+        tickers = [str(t).lstrip("$") for t in (e.get("tags") or []) if str(t).startswith("$")]
+        pub = str(e.get("published_at") or "")
+        groups.setdefault(news_source_key(e.get("source")), []).append({
+            "title": title, "url": e.get("url"), "score": int(score), "reason": reason,
+            "published_at": pub,
+            "time_str": pub[5:16].replace("T", " ") if len(pub) >= 16 else pub,
+            "tickers": tickers[:4], "llm": llm,
+        })
+    for lst in groups.values():
+        lst.sort(key=lambda x: x["published_at"], reverse=True)   # 동점 내 최신 우선
+        lst.sort(key=lambda x: -x["score"])                       # 1차: 중요도
+    return groups
+
+
+def collected_news(hours: int = 48) -> dict:
+    """source-cache 수집 뉴스 → 출처별·중요도순 (+LLM 라벨 방향 병기). graceful."""
+    try:
+        from reports.source_collector import load_recent_events, event_id
+        events = load_recent_events(hours=hours)
+        for e in events:
+            if not e.get("id"):
+                try:
+                    e["id"] = event_id(e)
+                except Exception:
+                    pass
+    except Exception as e:
+        return {"error": str(e), "groups": {}}
+    label_by_id: dict = {}
+    try:
+        from providers import news_labels
+        label_by_id = {str(r.get("id")): r for r in news_labels.load_labels() if r.get("id")}
+    except Exception:
+        pass
+    return {"groups": group_news(events, label_by_id, _news_rule_scorer()), "hours": hours}

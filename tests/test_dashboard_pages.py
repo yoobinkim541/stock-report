@@ -29,6 +29,14 @@ data.portfolio_summary = lambda *a, **k: {"total_usd":10000.0,"return_pct":15.0,
 data.portfolio_weights = lambda *a, **k: {"MSFT":0.4,"NVDA":0.6}
 cached.econ = lambda *a, **k: [{"marker":"\U0001f534","date_str":"06/29 21:30","title":"CPI"}]
 cached.news = lambda t: "뉴스 본문"
+cached.collected_news = lambda hours=48: {"hours": hours, "groups": {
+    "saveticker": [{"title": "엔비디아 [실적] 서프라이즈", "url": "https://example.com/1",
+                    "score": 8, "reason": "포트폴리오 종목", "published_at": "2026-07-06T10:00:00+09:00",
+                    "time_str": "07-06 10:00", "tickers": ["NVDA"],
+                    "llm": {"direction": 1, "strength": 4, "event_type": "실적"}}],
+    "telegram": [{"title": "일반 채널 뉴스", "url": None, "score": 5, "reason": "",
+                  "published_at": "2026-07-06T09:00:00+09:00", "time_str": "07-06 09:00",
+                  "tickers": [], "llm": None}]}}
 cached.valuation = lambda t: {"metrics":{"per":30.0,"roe":0.4},"consensus":{"n_analysts":5},
     "history":[{"date":"2026-04-30","eps_est":2.1,"eps_actual":2.3,"surprise_pct":9.5},
                {"date":"2026-01-30","eps_est":2.0,"eps_actual":1.9,"surprise_pct":-5.0}]}
