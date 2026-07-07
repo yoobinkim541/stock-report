@@ -22,6 +22,7 @@ from investment_report import (
     _mobile_pick_block,
     _mobile_pick_items,
     _news_title_relevant,
+    _portfolio_action_plan,
     _select_top_buy_candidates,
     _select_watch_candidates,
     _validate_llm_overlay,
@@ -323,9 +324,42 @@ def test_mobile_summary_separates_position_review_from_risk_bucket():
     )
 
     assert "📌 오늘 할 일: 비중점검" in text
-    assert "🟡 비중점검" in text
+    assert "✅ 실행 우선순위" in text
+    assert "비중점검 · UnitedHealth (UNH)" in text
     assert "UnitedHealth (UNH)" in text
-    assert "⚠️ 위험" not in text
+    assert "위험관리 · UnitedHealth (UNH)" not in text
+
+
+def test_portfolio_action_plan_prioritizes_actions_with_context():
+    buy = {
+        "ticker": "MSFT",
+        "company_name": "Microsoft",
+        "decision_v2": {"action": "강한 매수후보", "today_action": "분할매수 후보"},
+        "signal": {"price_info": {"1d_change_pct": 1.2}},
+    }
+    review = {
+        "ticker": "UNH",
+        "company_name": "UnitedHealth",
+        "decision_v2": {"action": "비중축소 검토"},
+        "decision_context": {"portfolio_action": "일부축소", "execution_plan": "실적 전 20~30% 일부축소"},
+        "holding_context": {"weight_pct": 16.5},
+        "earnings_context": {"days_until": 11},
+        "signal": {"price_info": {"1d_change_pct": -0.3}},
+    }
+    risk = {
+        "ticker": "RISK",
+        "company_name": "Risk Co",
+        "decision_v2": {"action": "매도검토", "today_action": "급락 원인 확인"},
+        "decision_context": {"risk_level": "높음"},
+    }
+
+    plan = _portfolio_action_plan([buy, review, risk])
+
+    assert [row["bucket"] for row in plan] == ["위험관리", "비중점검", "매수관심"]
+    assert plan[1]["label"] == "UnitedHealth (UNH)"
+    assert "실적 전" in plan[1]["detail"]
+    assert "비중 16.5%" in plan[1]["extras"]
+    assert "실적 D-11" in plan[1]["extras"]
 
 
 def test_fx_timing_mobile_line_is_compact_and_honest():

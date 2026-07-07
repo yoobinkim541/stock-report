@@ -1472,6 +1472,10 @@ _ACTION_EMOJI = {
     "데이터부족": "❔",
 }
 
+_RISK_ACTIONS = ("매도검토", "데이터부족", "손절/매도검토")
+_REVIEW_ACTIONS = ("비중점검", "일부축소", "추가매수 금지", "비중축소 검토", "추격 금지")
+_BUY_ACTIONS = ("강한 매수후보", "관심/분할매수", "관심 유지")
+
 
 def _grade_emoji(grade):
     return _GRADE_EMOJI.get(str(grade or "")[:1].upper(), "⚪")
@@ -1827,6 +1831,93 @@ def _context_mobile_line(item):
     return f"  {emoji} {_short_stock_label(item)}{suffix}"
 
 
+def _safe_float(value):
+    try:
+        f = float(value)
+        return f if f == f else None
+    except (TypeError, ValueError):
+        return None
+
+
+def _action_plan_kind(item):
+    dv2 = item.get("decision_v2", {}) or {}
+    ctx = item.get("decision_context", {}) or {}
+    action = dv2.get("action")
+    ctx_action = ctx.get("portfolio_action")
+    if action in _RISK_ACTIONS or ctx.get("risk_level") == "높음":
+        return 0, "위험관리", "⚠️"
+    if ctx_action in _REVIEW_ACTIONS or action in _REVIEW_ACTIONS:
+        emoji = "🟠" if ctx_action == "일부축소" else "🟡"
+        return 1, "비중점검", emoji
+    if action in _BUY_ACTIONS:
+        return 2, "매수관심", _ACTION_EMOJI.get(action, "🛒")
+    return None
+
+
+def _portfolio_action_plan(portfolio_results, limit=5):
+    """모바일·Markdown 공용 실행 우선순위. 위험관리 → 비중점검 → 매수관심 순."""
+    rows = []
+    for item in portfolio_results or []:
+        kind = _action_plan_kind(item)
+        if not kind:
+            continue
+        priority, bucket, emoji = kind
+        dv2 = item.get("decision_v2", {}) or {}
+        ctx = item.get("decision_context", {}) or {}
+        detail = (
+            ctx.get("execution_plan")
+            or dv2.get("today_action")
+            or _mobile_reason_without_finance(item)
+            or item.get("judgment")
+            or dv2.get("one_line_reason")
+            or ""
+        )
+        holding = item.get("holding_context", {}) or {}
+        earnings = item.get("earnings_context", {}) or {}
+        price_info = (item.get("signal", {}) or {}).get("price_info", {}) or {}
+        extras = []
+        weight = _safe_float(holding.get("weight_pct"))
+        if weight is not None:
+            extras.append(f"비중 {weight:.1f}%")
+        days = _safe_float(earnings.get("days_until"))
+        if days is not None:
+            extras.append(f"실적 D-{int(days)}")
+        d1 = _safe_float(price_info.get("1d_change_pct", item.get("change_1d_pct")))
+        if d1 is not None:
+            extras.append(f"1일 {d1:+.1f}%")
+        rows.append({
+            "priority": priority,
+            "bucket": bucket,
+            "emoji": emoji,
+            "ticker": item.get("ticker", ""),
+            "label": _short_stock_label(item),
+            "action": ctx.get("portfolio_action") or dv2.get("action") or bucket,
+            "detail": _compact_text(detail, 64),
+            "extras": extras[:2],
+        })
+    rows.sort(key=lambda r: (r["priority"], r["ticker"]))
+    return rows[:limit]
+
+
+def _action_plan_headline(rows):
+    if not rows:
+        return "포트폴리오 유지"
+    first = rows[0]
+    suffix = f" 외 {len(rows) - 1}건" if len(rows) > 1 else ""
+    return f"{first['bucket']} — {first['label']}{suffix}"
+
+
+def _action_plan_mobile_lines(rows):
+    if not rows:
+        return ["  포트폴리오 유지"]
+    lines = []
+    for row in rows:
+        extras = f" ({' · '.join(row['extras'])})" if row.get("extras") else ""
+        detail = f" — {row['detail']}" if row.get("detail") else ""
+        lines.append(f"  {row['emoji']} {row['bucket']} · {row['label']}{detail}{extras}")
+    return lines
+
+
 def _build_mobile_summary(today_str, spy_change, market, kospi_str, avg_score,
                           pos_count, neu_count, warn_count, crit_count,
                           portfolio_results, top_buy_candidates, top_watch,
@@ -1836,36 +1927,8 @@ def _build_mobile_summary(today_str, spy_change, market, kospi_str, avg_score,
     """모바일(텔레그램) 요약 — 헤드라인(Phase·오늘할일) 우선·평문(노션 호환). 진단줄은 md/stdout."""
     qqq_change = market.get("qqq_change", 0)
 
-    true_risk_actions = ("매도검토", "데이터부족", "손절/매도검토")
-    review_actions = ("비중점검", "일부축소", "추가매수 금지")
-    risk_items = [
-        r for r in portfolio_results
-        if r.get("decision_v2", {}).get("action") in true_risk_actions
-        or (r.get("decision_context", {}) or {}).get("risk_level") == "높음"
-    ][:3]
-    risk_tickers = {r.get("ticker") for r in risk_items}
-    review_items = [
-        r for r in portfolio_results
-        if r.get("ticker") not in risk_tickers
-        and (r.get("decision_context", {}) or {}).get("portfolio_action") in review_actions
-    ][:3]
-    review_tickers = {r.get("ticker") for r in review_items}
-    buy_items = [
-        r for r in portfolio_results
-        if r.get("ticker") not in (risk_tickers | review_tickers)
-        and r.get("decision_v2", {}).get("action") in ("강한 매수후보", "관심/분할매수", "관심 유지")
-    ][:3]
-    buy_short = [_short_stock_label(r) for r in buy_items]
-    risk_short = [_short_stock_label(r) for r in risk_items]
-    review_short = [_short_stock_label(r) for r in review_items]
-    if risk_short:
-        todo = f"위험 종목 확인 — {', '.join(risk_short)}"
-    elif review_short:
-        todo = f"비중점검 — {', '.join(review_short)}"
-    elif buy_short:
-        todo = f"매수관심 검토 — {', '.join(buy_short)}"
-    else:
-        todo = "포트폴리오 유지"
+    action_plan = _portfolio_action_plan(portfolio_results, limit=4)
+    todo = _action_plan_headline(action_plan)
 
     L = []
     # ── 헤드라인 — Phase·낙폭·DCA + 오늘 할 일 (가장 중요한 결정 먼저) ──
@@ -1884,20 +1947,8 @@ def _build_mobile_summary(today_str, spy_change, market, kospi_str, avg_score,
     # ── 내 포트폴리오 (점수·신호·매수관심·위험) ──
     L.append(f"💼 내 포트 {avg_score:.0f}/100  ·  🟢{pos_count} ⚪{neu_count} 🟡{warn_count} 🔴{crit_count}")
     L.append(_score_bar(avg_score, 14))
-    if buy_items:
-        L.append("🛒 매수관심")
-        for r in buy_items:
-            act = r.get("decision_v2", {}).get("action", "")
-            L.append(f"  {_ACTION_EMOJI.get(act, '▪️')} {_short_stock_label(r)}")
-    if review_items:
-        L.append("🟡 비중점검")
-        for r in review_items:
-            L.append(_context_mobile_line(r))
-    if risk_items:
-        L.append("⚠️ 위험")
-        for r in risk_items:
-            act = r.get("decision_v2", {}).get("action", "")
-            L.append(f"  {_ACTION_EMOJI.get(act, '▪️')} {_short_stock_label(r)}")
+    L.append("✅ 실행 우선순위")
+    L.extend(_action_plan_mobile_lines(action_plan))
 
     # ── 시장 (한 줄 — 상세 시각은 PNG 히어로밴드) ──
     L.append(fmt.SEP)
@@ -2279,6 +2330,7 @@ def generate_report():
     _sig = [r["signal"]["overall_signal"] for r in portfolio_results]
     _pos, _neu = _sig.count("Positive"), _sig.count("Neutral")
     _warn, _crit = _sig.count("Warning"), _sig.count("Critical")
+    _action_plan = _portfolio_action_plan(portfolio_results, limit=5)
     lines.append("## 0. 오늘 한눈에")
     if _ph:
         _e, _l, _dca, _dd = _ph
@@ -2287,9 +2339,21 @@ def generate_report():
         lines.append(f"- **포트폴리오:** 오늘 {fmt.pct(_pnl1d)} · 1개월 "
                      f"{fmt.pct(_pnl1mo) if _pnl1mo is not None else '—'}")
     lines.append(f"- **신호 분포:** 🟢{_pos} ⚪{_neu} 🟡{_warn} 🔴{_crit}")
+    lines.append(f"- **오늘 할 일:** {_action_plan_headline(_action_plan)}")
     _fx_line = _fx_timing_mobile_line(fx_timing)
     if _fx_line:
         lines.append(f"- **{_fx_line}**")
+    if _action_plan:
+        lines.append("")
+        lines.append("**실행 우선순위**")
+        lines.append("")
+        lines.append("| 우선 | 종목 | 액션 | 확인 포인트 |")
+        lines.append("|---|---|---|---|")
+        for row in _action_plan:
+            extras = f" ({' · '.join(row['extras'])})" if row.get("extras") else ""
+            lines.append(f"| {row['emoji']} {row['bucket']} | {row['label']} | {row['action']} | {row['detail']}{extras} |")
+    else:
+        lines.append("- **실행 우선순위:** 포트폴리오 유지")
     lines.append("")
     lines.append("---")
     lines.append("")
