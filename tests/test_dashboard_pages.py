@@ -441,7 +441,9 @@ cached.etf = lambda t: {"ticker": "069500.KS", "stock_code": "069500", "is_etf":
                              default_timeout=30)
     at.run()
     assert not at.exception, at.exception
-    body = " ".join(str(x) for x in at.markdown) + " ".join(m.label for m in at.metric)
+    # HTML markdown 요소는 str() 이 repr("Markdown(allow_html=True)")라 본문이 안 잡힘 — .value 로
+    body = (" ".join(str(getattr(x, "value", x)) for x in at.markdown)
+            + " ".join(m.label for m in at.metric))
     assert "추종지수" in body and "KOSPI 200" in body
     assert "종목코드" in body and "069500" in body
     assert "추적오차" in body
