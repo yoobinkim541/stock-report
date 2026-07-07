@@ -187,6 +187,7 @@ KR: dict[str, str] = {
     "005930.KS": "삼성전자", "000660.KS": "SK하이닉스", "373220.KS": "LG에너지솔루션",
     "207940.KS": "삼성바이오로직스", "005380.KS": "현대차", "005490.KS": "포스코홀딩스",
     "035420.KS": "NAVER", "035720.KS": "카카오", "000270.KS": "기아", "006400.KS": "삼성SDI",
+    "069500.KS": "KODEX 200",
 }
 
 _CACHE_PATH = os.path.expanduser("~/reports/ml-cache/ticker_names.json")
@@ -336,6 +337,7 @@ def resolve(query: str, allow_net: bool = False) -> str | None:
 
 
 _US_TICKER_RE = re.compile(r"^[A-Z]{1,5}([.\-][A-Z]{1,2})?$")
+_KR_CODE_RE = re.compile(r"^(?:A)?(\d{6})(?:\.(KS|KQ))?$", re.IGNORECASE)
 
 
 def normalize_input(query: str) -> str | None:
@@ -350,6 +352,10 @@ def normalize_input(query: str) -> str | None:
     if not q:
         return None
     qu = q.upper()
+    km = _KR_CODE_RE.match(qu)
+    if km:
+        suffix = km.group(2) or "KS"
+        return f"{km.group(1)}.{suffix.upper()}"
     if _US_TICKER_RE.match(qu):
         if qu in _ALL_TICKERS:
             return qu

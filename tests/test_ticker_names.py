@@ -78,6 +78,9 @@ def test_normalize_input_names_and_tickers():
     assert ticker_names.normalize_input("월마트") == "WMT"
     assert ticker_names.normalize_input("visa") == "V"
     assert ticker_names.normalize_input("삼성전자") == "005930.KS"
+    assert ticker_names.normalize_input("A069500") == "069500.KS"
+    assert ticker_names.normalize_input("069500") == "069500.KS"
+    assert ticker_names.normalize_input("KODEX 200") == "069500.KS"
 
 
 def test_normalize_input_freeform_literal_ticker():

@@ -54,9 +54,66 @@ def test_parse_top_holdings():
     assert E.parse_top_holdings(pd.DataFrame()) == []
 
 
+def test_parse_kr_top_holdings():
+    df = pd.DataFrame({
+        "종목명": ["삼성전자", "SK하이닉스"],
+        "비중": ["30.5", "12.25"],
+        "수량": [1000, 200],
+        "평가금액": [70_000_000, 36_000_000],
+    }, index=["005930", "000660"])
+
+    out = E.parse_kr_top_holdings(df)
+
+    assert out[0]["symbol"] == "005930"
+    assert out[0]["name"] == "삼성전자"
+    assert out[0]["pct"] == 30.5
+    assert out[0]["shares"] == 1000
+    assert out[0]["amount"] == 70_000_000
+
+
 def test_is_etf_known_list_and_quote_type():
     assert E.is_etf("QQQI") is True                  # 보유 ETF — 오프라인 폴백
     assert E.is_etf("SGOV") is True
+    assert E.is_etf("A069500") is True
+    assert E.is_etf("069500.KS") is True
+    assert E.is_etf("005930.KS") is False
     assert E.is_etf("MSFT") is False
     assert E.is_etf("MSFT", quote_type="ETF") is True
     assert E.is_etf("QQQI", quote_type="EQUITY") is False   # 실판정 우선
+
+
+def test_kr_etf_summary_fallback_shape(monkeypatch):
+    monkeypatch.setattr(E, "_latest_kr_market_row", lambda code: {
+        "Code": "069500", "Close": 38900.0, "Marcap": 7_800_000_000_000.0,
+        "Stocks": 200_000_000.0, "Date": "2026-07-07",
+    })
+    monkeypatch.setattr(E, "_kr_yfinance_overlay", lambda out: None)
+    monkeypatch.setattr(E, "_kr_pykrx_overlay", lambda out: None)
+
+    out = E.kr_etf_summary("A069500")
+
+    assert out["ticker"] == "069500.KS"
+    assert out["market_type"] == "kr"
+    assert out["currency"] == "KRW"
+    assert out["name"] == "KODEX 200"
+    assert out["benchmark"] == "KOSPI 200"
+    assert out["price"] == 38900.0
+
+
+def test_apply_kr_etf_metric_table_merges_nav_deviation_and_tracking_error():
+    out = {"ticker": "069500.KS", "stock_code": "069500"}
+    df = pd.DataFrame({
+        "NAV": [38950.0],
+        "종가": [38900.0],
+        "괴리율": [-0.13],
+        "추적오차율": [0.08],
+        "순자산총액": [7_800_000_000_000],
+    }, index=["069500"])
+
+    E.apply_kr_etf_metric_table(out, df)
+
+    assert out["nav"] == 38950.0
+    assert out["price"] == 38900.0
+    assert out["premium_pct"] == -0.13
+    assert out["tracking_error_pct"] == 0.08
+    assert out["total_assets"] == 7_800_000_000_000

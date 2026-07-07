@@ -420,3 +420,31 @@ cached.etf = lambda t: {"ticker": "QQQI", "is_etf": True,
     body = " ".join(str(x) for x in at.markdown) + " ".join(m.label for m in at.metric)
     assert "운용보수" in body and "괴리율" in body            # ETF 지표 렌더
     assert not any("PER" == m.label for m in at.metric)      # 주식 밸류 섹션 미렌더
+
+
+def test_ticker_page_kr_etf_view():
+    """국내 ETF는 원화·추종지수·구성종목 중심의 ETF 분석 화면을 렌더한다."""
+    etf_stub = '''
+st.session_state["ticker"] = "069500.KS"
+cached.etf = lambda t: {"ticker": "069500.KS", "stock_code": "069500", "is_etf": True,
+    "market_type": "kr", "currency": "KRW", "name": "KODEX 200",
+    "description": "KOSPI 200 지수를 추종하는 국내 대표 시장 ETF",
+    "family": "삼성자산운용", "category": "국내 주식형", "benchmark": "KOSPI 200",
+    "total_assets": 7800000000000, "nav": 38950.0, "price": 38900.0, "premium_pct": -0.13,
+    "tracking_error_pct": 0.08, "expense_ratio": 0.0015, "inception": "2002-10-14",
+    "top_holdings": [
+        {"symbol": "005930", "name": "삼성전자", "pct": 28.5, "shares": 1000, "amount": 70000000},
+        {"symbol": "000660", "name": "SK하이닉스", "pct": 9.2, "shares": 200, "amount": 36000000}],
+    "dividends": {"count_12m": 4, "per_share_12m": 820.0, "yield_pct": 2.1, "freq_label": "분기"}}
+'''
+    at = AppTest.from_string(_STUBS + etf_stub + "\nfrom dashboard.pages import ticker\nticker.render()\n",
+                             default_timeout=30)
+    at.run()
+    assert not at.exception, at.exception
+    body = " ".join(str(x) for x in at.markdown) + " ".join(m.label for m in at.metric)
+    assert "추종지수" in body and "KOSPI 200" in body
+    assert "종목코드" in body and "069500" in body
+    assert "추적오차" in body
+    assert any("구성종목" in str(s.value) for s in at.subheader)
+    assert len(at.dataframe) >= 1
+    assert not any("PER" == m.label for m in at.metric)
