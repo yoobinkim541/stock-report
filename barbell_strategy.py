@@ -69,6 +69,7 @@ from providers.market_data import (
     # 레버리지 상태
     load_leverage_state, save_leverage_state, update_leverage_position,
 )
+from providers.fx_timing import fetch_fx_timing, render_fx_timing
 
 TELEGRAM_TOKEN   = os.getenv("STOCK_BOT_TOKEN")
 TELEGRAM_CHAT_ID = os.getenv("STOCK_BOT_CHAT_ID", "5771238245")
@@ -1392,6 +1393,17 @@ def _section_dca(dca: dict, exchange_rate: float, market_type: str, phase_key) -
     return L
 
 
+def _section_fx_timing(timing: dict | None = None) -> list:
+    """USD/KRW 환전 타이밍 표시 블록. 전략 배율에는 영향 없는 정보용."""
+    try:
+        timing = fetch_fx_timing() if timing is None else timing
+        text = render_fx_timing(timing, html=False)
+    except Exception as e:
+        logger.debug("환전 타이밍 표시 실패(무시): %s", e)
+        return []
+    return [""] + text.splitlines() if text else []
+
+
 def _section_special_alerts(market_type: str, phase_key, portfolio: dict,
                             sgov: dict) -> list:
     """특수 경고."""
@@ -1477,6 +1489,8 @@ def build_report(
     old_phase_state: dict = None,
     fear_greed: dict = None,
     show_regime: bool = True,
+    show_fx_timing: bool = True,
+    fx_timing: dict | None = None,
 ) -> str:
     """시각화 바벨 전략 리포트 생성."""
     if portfolio is None:
@@ -1507,6 +1521,8 @@ def build_report(
     L += _section_qqqi_dividend(qqqi_div, market_type, phase_key)
     L += _section_action_items(p_info)
     L += _section_dca(dca, exchange_rate, market_type, phase_key)
+    if show_fx_timing:
+        L += _section_fx_timing(fx_timing)
     L += _section_special_alerts(market_type, phase_key, portfolio, sgov)
 
     return "\n".join(L)
@@ -1560,7 +1576,7 @@ def build_simulation_report(mode: str = "bull2") -> str:
         f"[시뮬레이션 모드: {mode}]\n"
         f"{'=' * 50}\n\n"
         + build_report(d["qqq"], d["rsi"], d["vix"], ma_sim, sim_portfolio, 1380.0, sim_div,
-                      fear_greed=d.get("fg"), show_regime=False)
+                      fear_greed=d.get("fg"), show_regime=False, show_fx_timing=False)
     )
 
 

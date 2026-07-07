@@ -79,6 +79,7 @@ _PROJECT_DIR = os.getenv("STOCK_REPORT_PROJECT_DIR",
 if _PROJECT_DIR not in sys.path:
     sys.path.insert(0, _PROJECT_DIR)
 import fmt   # 출력 포맷 공통 레이어 (루트 모듈 — _PROJECT_DIR 경로 설정 후 import)
+from providers.fx_timing import fetch_fx_timing, render_fx_timing
 from portfolio_universe import (DEFAULT_PORTFOLIO_TICKERS, PORTFOLIO_SNAPSHOT_PATH,
                                 load_portfolio_tickers)
 
@@ -1581,6 +1582,37 @@ def _fetch_korea_indices():
     return "N/A", "N/A", "N/A"
 
 
+def _safe_fetch_fx_timing():
+    """USD/KRW 환전 타이밍. 실패해도 리포트 생성은 계속한다."""
+    try:
+        return fetch_fx_timing()
+    except Exception as e:
+        logger.warning("FX timing fetch failed: %s", e)
+        return None
+
+
+def _fx_timing_mobile_line(timing):
+    """모바일 요약용 1줄 환전 타이밍."""
+    if not timing:
+        return ""
+    if not timing.get("ok"):
+        verdict = timing.get("verdict") or "데이터 부족"
+        return f"💱 환전 {verdict} · 정액 분할"
+    try:
+        rate = f"{float(timing.get('rate')):,.0f}원"
+    except (TypeError, ValueError):
+        rate = "N/A"
+    pct = timing.get("pct_display")
+    pct_s = f"{pct}%ile" if pct is not None else "위치 N/A"
+    try:
+        mult = f"{float(timing.get('multiplier', 1.0)):g}×"
+    except (TypeError, ValueError):
+        mult = "1×"
+    emoji = timing.get("emoji", "💱")
+    verdict = timing.get("verdict", "분할")
+    return f"💱 환전 {emoji} {verdict} · {rate} · {pct_s} · {mult} (예측 아님)"
+
+
 # ── report assembly helpers (순수 추출: generate_report 의 dict/텍스트 조립부) ──
 
 def _build_json_data(today_str, market, ndx_results, top_buy_candidates,
@@ -1800,7 +1832,7 @@ def _build_mobile_summary(today_str, spy_change, market, kospi_str, avg_score,
                           portfolio_results, top_buy_candidates, top_watch,
                           kospi_top, kospi_watch, accum_picks, name_fn,
                           llm_overlay, llm_status, elapsed, llm_token_line,
-                          phase=None):
+                          phase=None, fx_timing=None):
     """모바일(텔레그램) 요약 — 헤드라인(Phase·오늘할일) 우선·평문(노션 호환). 진단줄은 md/stdout."""
     qqq_change = market.get("qqq_change", 0)
 
@@ -1870,6 +1902,9 @@ def _build_mobile_summary(today_str, spy_change, market, kospi_str, avg_score,
     # ── 시장 (한 줄 — 상세 시각은 PNG 히어로밴드) ──
     L.append(fmt.SEP)
     L.append(f"🌎 SPY {fmt.spct(spy_change)} · NASDAQ {fmt.spct(qqq_change)} · KOSPI {kospi_str}")
+    fx_line = _fx_timing_mobile_line(fx_timing)
+    if fx_line:
+        L.append(fx_line)
 
     # ── 참고 스캔 (종목선택·타이밍 무엣지 — 정보용·강등) ──
     nasdaq_top_mobile = _mobile_pick_items(top_buy_candidates)
@@ -2203,6 +2238,8 @@ def generate_report():
     def _accum_name(t):
         return _KOSPI_NAMES.get(t) or _company_name(t)
 
+    fx_timing = _safe_fetch_fx_timing()
+
     # ── Generate report text (Korean) ──
     lines = []
     lines.append(f"# 일일 투자 자동화 레포트")
@@ -2226,6 +2263,9 @@ def generate_report():
         lines.append(f"- **포트폴리오:** 오늘 {fmt.pct(_pnl1d)} · 1개월 "
                      f"{fmt.pct(_pnl1mo) if _pnl1mo is not None else '—'}")
     lines.append(f"- **신호 분포:** 🟢{_pos} ⚪{_neu} 🟡{_warn} 🔴{_crit}")
+    _fx_line = _fx_timing_mobile_line(fx_timing)
+    if _fx_line:
+        lines.append(f"- **{_fx_line}**")
     lines.append("")
     lines.append("---")
     lines.append("")
@@ -2244,6 +2284,10 @@ def generate_report():
     # Korea indices
     kospi_str, kosdaq_str, fx_str = _fetch_korea_indices()
     lines.append(f"- **KOSPI:** {kospi_str} | **KOSDAQ:** {kosdaq_str} | **USD/KRW:** {fx_str}")
+    fx_block = render_fx_timing(fx_timing, html=False) if fx_timing else ""
+    if fx_block:
+        lines.append("")
+        lines.extend(fx_block.splitlines())
     lines.append(f"")
 
     # Section 1: Summary
@@ -2629,6 +2673,7 @@ def generate_report():
         kospi_top, kospi_watch, accum_picks, _accum_name,
         llm_overlay, llm_status, elapsed, llm_token_line,
         phase=_phase_headline_parts(),
+        fx_timing=fx_timing,
     )
 
     summary_txt_path = os.path.join(REPORTS_DIR, f"investment-summary-{today_str}.txt")

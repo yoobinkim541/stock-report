@@ -13,6 +13,7 @@ from investment_report import (
     _etf_peer_group,
     _etf_period_return,
     _etf_period_returns,
+    _fx_timing_mobile_line,
     _fmt_index_value,
     _fmt_price,
     _format_etf_comparison,
@@ -325,6 +326,22 @@ def test_mobile_summary_separates_position_review_from_risk_bucket():
     assert "🟡 비중점검" in text
     assert "UnitedHealth (UNH)" in text
     assert "⚠️ 위험" not in text
+
+
+def test_fx_timing_mobile_line_is_compact_and_honest():
+    line = _fx_timing_mobile_line({
+        "ok": True,
+        "rate": 1325.4,
+        "pct_display": 18,
+        "multiplier": 1.5,
+        "emoji": "🟢",
+        "verdict": "환전 유리",
+    })
+
+    assert "환전 유리" in line
+    assert "1.5×" in line
+    assert "예측 아님" in line
+    assert len(line) < 100
 
 
 def test_llm_decision_schema_shadow_and_apply_merge():

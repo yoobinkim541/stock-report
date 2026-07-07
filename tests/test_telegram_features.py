@@ -465,6 +465,7 @@ def test_fetch_portfolio_value_returns_total_pnl_and_return(monkeypatch, tmp_pat
     monkeypatch.setattr(md, "PORTFOLIO_PATH", str(portfolio_path))
     monkeypatch.setattr(md, "load_leverage_state", lambda: {})
     monkeypatch.setattr(md.yf, "download", lambda *args, **kwargs: FakeDownload())
+    monkeypatch.setattr(md, "_realtime_spot_overlay", lambda tickers: {})
 
     port = fetch_portfolio_value()
 
@@ -577,6 +578,40 @@ def test_tier_b_aliases_resolve_to_umbrella_commands():
     # /mlreport 는 하드 삭제 — alias 없음, 핸들러 없음
     assert t._parse_command("/mlreport") == ("/mlreport", [])
     assert "/mlreport" not in t._COMMAND_HANDLERS
+
+
+def test_cmd_dca_appends_fx_timing(monkeypatch):
+    import telegram_bot
+
+    monkeypatch.setattr(telegram_bot, "calculate_dca", lambda *a, **k: {
+        "total_krw": 40_000,
+        "total_usd": 28.57,
+        "multiplier": 1.0,
+        "base_mult": 1.0,
+        "fg_adj": 1.0,
+        "ml_mult": 1.0,
+        "ml_label": "",
+        "ml_breadth": 0.0,
+        "ml_direction": {},
+        "by_ticker": {"MSFT": 40_000},
+    })
+    monkeypatch.setattr(telegram_bot, "fetch_fx_timing", lambda: {"ok": True})
+    monkeypatch.setattr(
+        telegram_bot,
+        "render_fx_timing",
+        lambda timing, html=False: "💱 환전 타이밍\n- 분할 환전 배율 1×",
+    )
+
+    text = telegram_bot.cmd_dca({
+        "market_type": "neutral",
+        "phase_key": 0,
+        "exchange_rate": 1400.0,
+        "qqq": {"drawdown_pct": -1.0},
+    })
+
+    assert "오늘 DCA" in text
+    assert "환전 타이밍" in text
+    assert "분할 환전 배율" in text
 
 
 def test_guest_permission_boundary_after_my_merge():

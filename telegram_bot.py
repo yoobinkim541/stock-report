@@ -56,6 +56,7 @@ from barbell_strategy import (
 )
 from ml import risk_model
 from providers.market_data import freshness_note
+from providers.fx_timing import fetch_fx_timing, render_fx_timing
 import fmt
 from bot.attachment_parser import (
     extract_text_from_pdf, extract_text_from_image,
@@ -807,6 +808,13 @@ def cmd_dca(d: dict) -> str:
         f"포트폴리오 ML 강도: {fmt.signed(ml_bread, 2)}%",
         "📋 키움 소수점 매수 주문서: /order",
     ]
+    try:
+        fx_block = render_fx_timing(fetch_fx_timing(), html=False)
+    except Exception as e:
+        logger.debug("환전 타이밍 표시 실패(무시): %s", e)
+        fx_block = ""
+    if fx_block:
+        lines += ["", fx_block]
     return "\n".join(lines)
 
 
