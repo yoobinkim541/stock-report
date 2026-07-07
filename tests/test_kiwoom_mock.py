@@ -439,3 +439,19 @@ def test_plan_then_tranche_caps_full_entry():
     assert plan == [{"code": "A", "side": "buy", "qty": 60, "reason": "신규/추가"}]
     out = plan_tranches(plan, 3_000_000 / 1, lambda c: {"A": 50_000}.get(c), 3, id_key="code")
     assert out[0]["qty"] == 20 and "3분할" in out[0]["reason"]
+
+
+def test_plan_min_hold_stub_exempt():
+    """스텁(목표의 절반 미만 반쪽 포지션)은 min_hold 보호 제외 → 청산 허용 (B)."""
+    import kiwoom_mock_track as kt
+    signals = [{"code": "A", "is_buy": True, "price": 100, "policy_score": 0.9}]
+    # per_target = 1_000_000/1 = 1M. B 보유가치 40만(<50%) = 스텁 → 3일 보유여도 청산
+    stub = {"B": {"shares": 4, "cur_price": 100_000}}
+    out = kt.plan_rebalance(signals, stub, 1_000_000, 1, min_hold_days=60,
+                            held_days={"B": 3}, stub_frac=0.5)
+    assert any(o["code"] == "B" and o["side"] == "sell" for o in out)
+    # 보유가치 60만(≥50%) = 제대로 빌드 → 보호 유지
+    built = {"B": {"shares": 6, "cur_price": 100_000}}
+    out2 = kt.plan_rebalance(signals, built, 1_000_000, 1, min_hold_days=60,
+                             held_days={"B": 3}, stub_frac=0.5)
+    assert not any(o["code"] == "B" and o["side"] == "sell" for o in out2)

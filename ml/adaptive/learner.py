@@ -16,6 +16,39 @@ from ml.adaptive import reward as _reward
 logger = logging.getLogger(__name__)
 
 
+NEW_AXIS_MIN_PAIRS = 20   # 신규 축(원장 축적 초기)은 일반 축(5)보다 높은 최소표본 요구 (E)
+
+
+def _pearson(xs: list, ys: list) -> float:
+    n = len(xs)
+    if n < 3:
+        return 0.0
+    mx, my = sum(xs) / n, sum(ys) / n
+    num = sum((x - mx) * (y - my) for x, y in zip(xs, ys))
+    dx = (sum((x - mx) ** 2 for x in xs)) ** 0.5
+    dy = (sum((y - my) ** 2 for y in ys)) ** 0.5
+    return num / (dx * dy) if dx > 0 and dy > 0 else 0.0
+
+
+def robust_axis_weight(pairs: list, *, min_pairs: int = 5, stability: bool = False):
+    """(피처값, 실현보상) 쌍 → 축 가중 후보 max(0, pearson). 표본<min_pairs → None(미측정).
+
+    stability=True (신규 축): 표본을 전/후반으로 갈라 **두 반쪽의 상관 부호가 모두 양(+)**
+    일 때만 인정 — 소표본 노이즈로 신규 축이 가중 승격되는 것 방지(E). 불일치 → 0.0
+    (측정됐으나 무신호로 취급 — DEFAULT 프라이어 쏠림 함정과 별개).
+    """
+    if len(pairs) < min_pairs:
+        return None
+    xs, ys = [a for a, _ in pairs], [b for _, b in pairs]
+    full = max(0.0, _pearson(xs, ys))
+    if not stability or full <= 0.0:
+        return full
+    h = len(pairs) // 2
+    first = _pearson(xs[:h], ys[:h])
+    second = _pearson(xs[h:], ys[h:])
+    return full if (first > 0 and second > 0) else 0.0
+
+
 def walk_forward_split(dates: list, *, train_frac: float = 0.6, embargo: int = 0):
     """날짜순 train/OOS 마스크. **embargo 는 고유 거래일(날짜) 단위** purge.
 

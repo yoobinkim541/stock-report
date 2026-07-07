@@ -270,6 +270,7 @@ crons/news_spike_detector.py (크론 매 1분)
 | `US_MOCK_UNIVERSE` / `US_MOCK_MAX_POS` / `US_MOCK_INVEST` / `KOREA_MOCK_SEED` | — | Nasdaq기본 / `5` / `0.9` / `100000` (US 모의 전략 파라미터·시드 USD) |
 | `{KR,US}_MOCK_REBAL_BAND` / `{KR,US}_MOCK_EXIT_BUFFER` | — | `0.25` / `2` (회전율 억제 — 무거래 밴드[목표比 ±25% 벗어날 때만 조정]·랭크 히스테리시스[보유종목 top-N+2 안이면 유지]. 크론 주기 불변·잔챙이 churn 제거) |
 | `{KR,US}_MOCK_TRANCHES` | — | `3` (분할매수·분할매도 — 회당 목표의 1/N 만 거래·N회에 평균 진입/청산[`lib/tranche.py`·상태없음: 포지션 크기가 진행도 인코딩·매 실행 남은 갭을 상한만큼 줄여 N회 수렴]. **분산 축소지 알파 아님**·모의 bps 비용 불변[총 거래대금 동일]. 기본 3=분할 활성·`1`=현행 일괄. min_hold[청산 지연]·rebal_band 와 독립 합성. **모의 한정**) |
+| `KR_MOCK_STUB_FRAC` | — | `0.5` (min_hold 보호 예외 — 포지션 가치가 목표(budget/N)의 이 비율 **미만**인 스텁[트란치 빌드 중 이탈한 반쪽]은 청산 허용. 저비중 잔재 60일 자본잠식 방지) |
 | `KR_MOCK_MIN_HOLD_DAYS` | — | `60` (편입 후 최소 보유일 — 미만이면 타깃이탈이어도 청산 보류. **`backtest/kr_policy_backtest` 비용 OOS 실증**: 슬로우 신호 과잉거래가 순수익 ~2.4%p 잠식·최소보유가 gross 보존하며 비용만 절감[반기>월간 64% 연도·cross-axis·gross 보존=ROBUST]. **기본 60=모의 활성**(OOS 권고값 반영·모의로 라이브 검증)·`0` 으로 되돌리면 현행 무제한 회전. **모의 한정**·꼬리위험(2023 등) 있어 실계좌는 모의 검증 후 수동) |
 | `{KR,US}_MOCK_BUY_BPS` / `{KR,US}_MOCK_SELL_BPS` | — | KR `2`/`20` · US `15`/`15` (거래비용 bps — 수수료+KR 증권거래세. `ml/adaptive/costs.py`. 리포트 누적비용·회전율 계기 + 보상 fwd_excess net-of-cost 차감) |
 | `REALTIME_ENABLED` | — | `false` (KIS 실시간 시세 수신·소비 **마스터 게이트**. off면 stream 미기동·전 소비자 yfinance 폴백) |
@@ -355,7 +356,7 @@ crons/news_spike_detector.py (크론 매 1분)
 >
 > **시장지표+성능(O-series):** 홈에 **공포·탐욕지수 + S&P500·나스닥 일/주봉 RSI** + 시장맵 즉시화. (O1) `views.market_indicators`(`market_data.fetch_fear_greed` + ^GSPC/^IXIC 일봉·주봉 `yf.download`→`data.rsi`)·`cached` 15분. (O2/O5) **반원 게이지**: `theme._gauge_svg`(범용·`_arc`/`_polar` 재사용·zones·니들·중앙값) → `fng_gauge_html`(CNN 풍 공포탐욕 게이지·전주 추세)·`index_rsi_gauges_html`(일봉/주봉 RSI 게이지 2개·과매수>70 적·과매도<30 녹) + `home._market_bar`(시장맵 위·경량 즉시렌더). (O3) **성능**: `sp500_heatmap` 스냅샷-우선(`~/reports/ml-cache/sp500_heatmap.json` <90분 → 파일읽기 즉시·미스 시 라이브 후 self-heal write) + `crons/sp500_heatmap_snapshot.py`(매 20분·`_sp500_heatmap_live` 추출) → 콜드 ~60초 → 즉시. 표시·주문 0.
 
-**구동:** `bash scripts/run_dashboard.sh` (수동) 또는 `scripts/dashboard_watchdog.sh`(크론 매 1분·`DASHBOARD_ENABLED=true` opt-in·streamlit health 재기동). **활성화 = `.env` 에 `DASHBOARD_PASSWORD`(필수·fail-closed) + `DASHBOARD_ENABLED=true`.** 127.0.0.1 바인드 → 외부는 SSH 터널(`ssh -L 8501:127.0.0.1:8501`) 또는 reverse proxy(caddy TLS+auth). 봇과 별개 프로세스 → 봇 재시작 무관.
+**구동:** 게이트 JSON 콜드스타트는 `bash scripts/bootstrap_gates.sh`(배포 직후 1회 — KR marcap 첫 다운로드 수 분). 대시보드는 `bash scripts/run_dashboard.sh` (수동) 또는 `scripts/dashboard_watchdog.sh`(크론 매 1분·`DASHBOARD_ENABLED=true` opt-in·streamlit health 재기동). **활성화 = `.env` 에 `DASHBOARD_PASSWORD`(필수·fail-closed) + `DASHBOARD_ENABLED=true`.** 127.0.0.1 바인드 → 외부는 SSH 터널(`ssh -L 8501:127.0.0.1:8501`) 또는 reverse proxy(caddy TLS+auth). 봇과 별개 프로세스 → 봇 재시작 무관.
 
 ## 출력 파일
 

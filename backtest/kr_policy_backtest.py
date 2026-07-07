@@ -44,6 +44,7 @@ from __future__ import annotations
 import argparse
 import json
 import logging
+import math
 import os
 import sys
 from datetime import datetime
@@ -337,7 +338,8 @@ def walk_forward(panels: dict, configs: dict, *, train_years: int = TRAIN_YEARS,
     return {"oos_returns": oos, "bench_returns": bench, "folds": folds,
             "config_daily": pd.DataFrame(ret_by_cfg).dropna(how="all"),
             "full_period": {n: perf(r) for n, r in ret_by_cfg.items()},
-            "bench_perf_full": perf(bench)}
+            "bench_perf_full": perf(bench),
+            "feats": feats, "rebal": rebal}   # 후속 평가(레짐·비용·라이브조합) 재사용 — 재계산 방지
 
 
 # ══════════════════════════════════════════════════════════════════════
@@ -496,7 +498,7 @@ def _avg_turnover(picks: dict, k: int = TOP_K) -> float:
 
 def regime_overlay_eval(panels: dict, feats: dict, rebal: list, bench, *,
                         offense: dict | None = None, defense: dict | None = None,
-                        ma: int = REGIME_MA) -> dict:
+                        ma: int = REGIME_MA, config_daily=None) -> dict:
     """시장상태 조건부 축 전환(강세=고가모멘텀·약세=저변동)의 **방어 오버레이 verdict**.
 
     정직 규율: 이건 종목선택 알파가 아니라 **낙폭 방어 오버레이**다. 판정 기준을 수익이 아니라
@@ -516,7 +518,11 @@ def regime_overlay_eval(panels: dict, feats: dict, rebal: list, bench, *,
         up = bool(bench_nav.loc[:t].iloc[-1] > v) if (v == v) else True
         picks[t] = select_top(feats[t], offense if up else defense, TOP_K)
     r = simulate(ret, picks)
-    off = simulate(ret, {t: select_top(feats[t], offense, TOP_K) for t in rebal})
+    # 순공격 = hi52 단독 — walk_forward 의 config_daily 있으면 재사용(중복 시뮬 방지·C)
+    if config_daily is not None and offense == REGIME_OFFENSE and "hi52" in getattr(config_daily, "columns", []):
+        off = config_daily["hi52"].dropna()
+    else:
+        off = simulate(ret, {t: select_top(feats[t], offense, TOP_K) for t in rebal})
     b = bench.reindex(r.index).fillna(0.0)
     pr, pb, po = perf(r), perf(b), perf(off.reindex(r.index).fillna(0.0))
 
@@ -536,12 +542,17 @@ def regime_overlay_eval(panels: dict, feats: dict, rebal: list, bench, *,
                 bear_defends += 1
     n_years = len([y for y in years if (r.index.year == y).sum() >= 60])
 
-    # DSR: 축 그리드 + 오버레이를 trial 로 (다중검정 정직)
+    # DSR: 축 그리드 + 오버레이를 trial 로 (다중검정 정직) — config_daily 재사용(중복 시뮬 방지·C)
     b_full = bench.reindex(ret.index).fillna(0.0)
     trials = []
-    for name, cfg in CONFIGS.items():
-        tr = simulate(ret, {t: select_top(feats[t], cfg, TOP_K) for t in rebal})
-        trials.append(validation.sharpe_ratio((tr - b_full.reindex(tr.index).fillna(0.0)).dropna())["pp"])
+    if config_daily is not None and len(getattr(config_daily, "columns", [])) >= 2:
+        for c in config_daily.columns:
+            e = (config_daily[c] - b_full.reindex(config_daily.index).fillna(0.0)).dropna()
+            trials.append(validation.sharpe_ratio(e)["pp"])
+    else:
+        for name, cfg in CONFIGS.items():
+            tr = simulate(ret, {t: select_top(feats[t], cfg, TOP_K) for t in rebal})
+            trials.append(validation.sharpe_ratio((tr - b_full.reindex(tr.index).fillna(0.0)).dropna())["pp"])
     excess = (r - b).dropna()
     trials.append(validation.sharpe_ratio(excess)["pp"])
     dsr = validation.deflated_sharpe_ratio(excess.values, len(trials), trial_sharpes=trials)
@@ -654,6 +665,142 @@ def _cost_oos_robustness(panels: dict, feats: dict, rebal: list, bench,
                           "caveat": "특정해 꼬리위험(2023 등)·모의로 라이브 검증 후 실계좌 고려"}}
 
 
+# ══════════════════════════════════════════════════════════════════════
+#  라이브 조합 검증 (A) — 실제 모의 구성(고빈도 결정+히스테리시스+min_hold+트란치) 그대로
+# ══════════════════════════════════════════════════════════════════════
+
+LIVE_MIN_HOLD_D = 60      # KR_MOCK_MIN_HOLD_DAYS 기본 정합 (거래일 아닌 달력일 근사 → 거래일 ~41)
+LIVE_TRANCHES = 3         # KR_MOCK_TRANCHES 기본 정합
+LIVE_EXIT_BUFFER = 2      # KR_MOCK_EXIT_BUFFER 정합
+LIVE_STUB_FRAC = 0.5      # 부분체결 스텁(목표의 절반 미만) — min_hold 보호 예외 (B)
+
+
+def simulate_live(panels: dict, feats: dict, decision_dates: list, *, top_k: int = TOP_K,
+                  exit_buffer: int = LIVE_EXIT_BUFFER, min_hold_days: int = LIVE_MIN_HOLD_D,
+                  tranches: int = LIVE_TRANCHES, stub_frac: float = LIVE_STUB_FRAC,
+                  buy_bps: float = BUY_BPS, sell_bps: float = SELL_BPS,
+                  axis_cfg: dict | None = None) -> pd.Series:
+    """상태보존 NAV 시뮬 — 라이브 모의의 실제 브레이크 조합을 그대로 모델링. 순수.
+
+    월간 배치 simulate() 와 달리 결정일마다: 히스테리시스 keep → min_hold(스텁 예외) 청산 게이트
+    → 트란치 상한 매수/매도. 가격 = 합성 수정주가(adj). 체결 = 결정일 종가(피처는 ≤t 데이터만
+    → 무룩어헤드). min_hold 는 **거래일 환산**(달력일×5/7) — 라이브는 달력일 기준이라 보수 근사.
+    반환: 일별 수익률 Series (전 기간·현금 수익 0).
+    """
+    axis_cfg = axis_cfg or REGIME_OFFENSE                    # hi52 (게이트 최다 채택 축)
+    ret, adj = panels["ret"], panels["adj"]
+    dates = ret.index
+    dset = set(decision_dates)
+    min_hold_td = int(min_hold_days * 5 / 7)                 # 달력일 → 거래일 근사
+
+    cash = 1.0
+    shares: dict[str, float] = {}                            # code → 주수 (합성가 기준)
+    entry_di: dict[str, int] = {}                            # code → 편입 거래일 인덱스
+    navs = []
+    prev_px = None
+    for di, d in enumerate(dates):
+        px = adj.loc[d]
+        # 보유 평가 (결측일 = 직전가 유지: adj 는 ffill 성질[ret NaN→0 누적곱]이라 자연 유지)
+        pos_val = sum(sh * float(px.get(c) or (prev_px.get(c) if prev_px is not None else 0) or 0)
+                      for c, sh in shares.items())
+        nav = cash + pos_val
+        navs.append(nav)
+        prev_px = px
+
+        if d not in dset or d not in feats:
+            continue
+        f = feats[d]
+        score = pd.Series(0.0, index=f.index)
+        for a, w in axis_cfg.items():
+            if a in f.columns:
+                score = score + float(w) * f[a].fillna(0.0)
+        ranked = list(score.nlargest(top_k + max(0, exit_buffer)).index)
+        target = set(score.nlargest(top_k).index)
+        keep = set(ranked)
+        per = nav * 0.9 / max(top_k, 1)                      # INVEST 0.9 정합
+
+        # 1) 청산 게이트: keep 밖 + (min_hold 충족 또는 스텁) → 트란치 상한 매도
+        for c in list(shares.keys()):
+            if c in keep:
+                continue
+            p = float(px.get(c) or 0)
+            if p <= 0:
+                continue
+            val = shares[c] * p
+            held = di - entry_di.get(c, -10 ** 9)
+            protected = (min_hold_days > 0 and held < min_hold_td
+                         and val >= stub_frac * per)         # 스텁(반쪽 미만)은 보호 예외 (B)
+            if protected:
+                continue
+            # 트란치 상한 — 값 기반 연속(합성가 소수주 체계: 정수 ceil 은 캡 무력화 함정)
+            cap = ((per / tranches) / p) if tranches > 1 else shares[c]
+            q = min(shares[c], cap)
+            cash += q * p * (1.0 - sell_bps / 1e4)
+            shares[c] -= q
+            if shares[c] <= 1e-9:
+                shares.pop(c), entry_di.pop(c, None)
+
+        # 2) 매수: 목표 top-k 중 미달분 → 트란치 상한
+        for c in target:
+            p = float(px.get(c) or 0)
+            if p <= 0:
+                continue
+            cur_val = shares.get(c, 0.0) * p
+            gap = per - cur_val
+            if gap <= per * 0.25:                            # 무거래 밴드(REBAL_BAND 정합)
+                continue
+            cap_sh = ((per / tranches) / p) if tranches > 1 else (gap / p)
+            q = min(gap / p, cap_sh, cash / (p * (1.0 + buy_bps / 1e4)) if p > 0 else 0)
+            if q <= 0:
+                continue
+            cash -= q * p * (1.0 + buy_bps / 1e4)
+            if c not in shares:
+                entry_di[c] = di
+            shares[c] = shares.get(c, 0.0) + q
+
+    nav_s = pd.Series(navs, index=dates)
+    return nav_s.pct_change().fillna(0.0)
+
+
+def live_combo_eval(panels: dict, bench, *, cadence: int = 5) -> dict:
+    """A: 라이브 브레이크 조합(주간 결정+히스테리시스+min_hold60+3분할+스텁예외)의 순효과 검증.
+
+    비교 3종: ①라이브 조합 ②동일 주간 결정·브레이크 없음(일괄) ③월간 배치(기존 백테스트 가정).
+    → "min_hold+트란치 조합이 실제 라이브 구성에서도 비용을 회수하나" 를 직접 판정.
+    cadence=5 거래일(주간) — 일간 크론의 무거래일 다수를 근사(브레이크가 거래를 걸러 등가).
+    """
+    ret = panels["ret"]
+    week_dates = list(ret.index[::cadence])
+    feats_w = {}
+    for t in week_dates:
+        f = features_asof(panels, t)
+        if f is not None:
+            feats_w[t] = f
+    if len(feats_w) < 60:
+        return {"error": "피처 부족(기간 짧음)"}
+    decision_dates = sorted(feats_w.keys())
+
+    combo = simulate_live(panels, feats_w, decision_dates)
+    naked = simulate_live(panels, feats_w, decision_dates,
+                          min_hold_days=0, tranches=1, exit_buffer=0)
+    # 월간 배치(기존 가정) — 월말만 결정
+    monthly_dates = [t for t in month_ends(ret.index) if t in feats_w]
+    monthly = simulate_live(panels, feats_w, monthly_dates,
+                            min_hold_days=0, tranches=1, exit_buffer=LIVE_EXIT_BUFFER)
+
+    b = bench.reindex(combo.index).fillna(0.0)
+    pc, pn, pm, pb = perf(combo), perf(naked), perf(monthly), perf(b)
+    brakes_help = pc["cagr"] > pn["cagr"]
+    verdict = ("CONFIRMED" if brakes_help and pc["cagr"] >= pm["cagr"] - 0.01 else
+               ("PARTIAL" if brakes_help else "NOT-CONFIRMED"))
+    return {"verdict": verdict,
+            "combo": pc, "no_brakes": pn, "monthly_batch": pm, "bench": pb,
+            "brake_gain_pp": round((pc["cagr"] - pn["cagr"]) * 100, 2),
+            "vs_monthly_pp": round((pc["cagr"] - pm["cagr"]) * 100, 2),
+            "note": ("주간 결정 근사(일간 크론의 무거래일 다수) · min_hold 달력60일≈거래41일 · "
+                     "CONFIRMED=브레이크가 무브레이크 대비 순이득 & 월간 가정 대비 동등 이상")}
+
+
 def run(start_year: int = 2001, end_year: int | None = None) -> dict:
     end_year = end_year or datetime.now().year
     logger.info("marcap 패널 조립 %d~%d …", start_year, end_year)
@@ -665,12 +812,11 @@ def run(start_year: int = 2001, end_year: int | None = None) -> dict:
     if wf.get("error"):
         return wf
     verdict = build_verdict(wf, n_trials=len(CONFIGS))
-    # 피처·리밸 재사용 (레짐 오버레이·비용 스윕)
-    _feats = {t: f for t in month_ends(panels["ret"].index)
-              if (f := features_asof(panels, t)) is not None}
-    _rebal = sorted(_feats.keys())
+    # walk_forward 산출물 재사용 (피처·리밸·config_daily — 중복 재계산 방지·크론 런타임 ↓)
+    _feats, _rebal = wf["feats"], wf["rebal"]
     try:
-        regime = regime_overlay_eval(panels, _feats, _rebal, wf["bench_returns"])
+        regime = regime_overlay_eval(panels, _feats, _rebal, wf["bench_returns"],
+                                     config_daily=wf["config_daily"])
     except Exception as e:
         logger.warning("레짐 오버레이 평가 실패: %s", e)
         regime = {"error": str(e)}
@@ -679,6 +825,11 @@ def run(start_year: int = 2001, end_year: int | None = None) -> dict:
     except Exception as e:
         logger.warning("비용 스윕 실패: %s", e)
         costs = {"error": str(e)}
+    try:
+        live = live_combo_eval(panels, wf["bench_returns"])
+    except Exception as e:
+        logger.warning("라이브 조합 검증 실패: %s", e)
+        live = {"error": str(e)}
     result = {
         "asof": datetime.now().strftime("%Y-%m-%d %H:%M"),
         "period": f"{start_year}~{end_year}", "universe": f"KOSPI 시총 top{UNIVERSE_N}",
@@ -687,6 +838,7 @@ def run(start_year: int = 2001, end_year: int | None = None) -> dict:
         "recommendation": current_recommendation(wf["config_daily"], wf["bench_returns"]),
         "regime_overlay": regime,
         "cost_sensitivity": costs,
+        "live_combo": live,
         "folds": wf["folds"],
         "chosen_history": chosen_history(wf["folds"]),
         "full_period_by_config": wf["full_period"],
@@ -735,6 +887,15 @@ def _print_report(res: dict) -> None:
                   f"  회전 {x['turnover']:.2f}  MDD {x['mdd']*100:.0f}%{mk}")
         print(f"     → 현재(월간) 드래그 {cs['current']['drag_pp']:.2f}%p 중 ~{cs['drag_saved_pp']:.1f}%p 는 주기↓로 확실 회수"
               f" · gross 상호작용 비단조라 '{cs['best']['scheme']}' 채택은 OOS 재검 필요")
+
+    lv = res.get("live_combo") or {}
+    if lv and not lv.get("error"):
+        print(f"\n  🔩 라이브 조합 검증(A): {lv['verdict']} — 브레이크 이득 {lv['brake_gain_pp']:+.1f}%p/년"
+              f" · vs 월간가정 {lv['vs_monthly_pp']:+.1f}%p")
+        for k, lab in (("combo", "라이브(주간+브레이크)"), ("no_brakes", "무브레이크"),
+                       ("monthly_batch", "월간 배치가정")):
+            p = lv[k]
+            print(f"     {lab:<16} CAGR {p['cagr']*100:+6.1f}%  MDD {p['mdd']*100:5.1f}%")
 
     print("\n  전기간 config별 (참고 — 판정은 OOS 연결만):")
     bench = res["bench_full"]

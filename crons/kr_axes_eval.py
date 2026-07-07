@@ -98,6 +98,15 @@ def build_message(res: dict, *, enabled: bool, shadow_written: bool) -> str:
         else:
             lines.append("→ 견고 미확인 — 현행 유지(과적합 회피)")
 
+    # 🔩 라이브 조합 검증 (A — 켜둔 기본값[min_hold·트란치]의 실구성 순효과 정직 추적)
+    lv = res.get("live_combo") or {}
+    if lv and not lv.get("error"):
+        lines.append("━━━━━━━━━━━━━━")
+        lines.append(f"🔩 라이브 조합(주간+min_hold+분할): {lv.get('verdict')}")
+        lines.append(f"   브레이크 이득 {lv.get('brake_gain_pp'):+.1f}%p/년 · vs 월간가정 {lv.get('vs_monthly_pp'):+.1f}%p")
+        if lv.get("verdict") != "CONFIRMED":
+            lines.append("   → 월간가정 대비 슬리피지 존재 — 결정 주기/밴드 관찰 대상(정직)")
+
     lines.append("⚠️ 검증상 OBSERVE = 엣지 단정 불가 · 모의 한정 · 실계좌 자동집행 0")
     return "\n".join(lines)
 

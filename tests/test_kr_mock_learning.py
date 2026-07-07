@@ -103,3 +103,15 @@ def test_backfill_excludes_unfilled_decisions(tmp_path):
 
 if __name__ == "__main__":
     sys.exit(pytest.main([__file__, "-v"]))
+
+
+def test_new_axis_stability_gate():
+    """신규 축(E): 표본<20 미측정 · 전/후반 부호 불일치 → 0 · 일관 양상관 → 가중 (learner 공용)."""
+    from ml.adaptive.learner import robust_axis_weight
+    up = [(i / 30, i / 300) for i in range(30)]              # 일관 양상관 30쌍
+    assert robust_axis_weight(up, min_pairs=20, stability=True) > 0.9
+    assert robust_axis_weight(up[:10], min_pairs=20, stability=True) is None   # 소표본 미측정
+    flip = [(i / 15, i / 150) for i in range(15)] + [(i / 15, -i / 150) for i in range(15)]
+    assert robust_axis_weight(flip, min_pairs=20, stability=True) == 0.0       # 부호 불일치 → 0
+    # 기존 축은 완화 게이트(5쌍·안정성 미요구) 유지
+    assert robust_axis_weight(up[:6], min_pairs=5, stability=False) > 0.9
