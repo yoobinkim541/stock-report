@@ -34,6 +34,8 @@ from dotenv import load_dotenv
 load_dotenv()
 
 import kis_mock
+from lib import mock_llm_execution as llm_exec
+from lib import trade_events
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 logger = logging.getLogger(__name__)
@@ -368,8 +370,24 @@ def main(argv: list[str] | None = None) -> int:
 
     from ml.adaptive import Ledger
     ledger = Ledger("us_mock")
+    llm_shadow_ledger = Ledger("us_mock_llm_shadow")
     sig_by = {s["ticker"]: s for s in signals}
     today = datetime.now(KST).strftime("%Y-%m-%d")
+
+    llm_payload = llm_exec.build_order_review_payload(
+        market="US", nav=nav, cash=cash, budget=budget, max_positions=MAX_POS,
+        orders=plan, positions=positions, signals=signals)
+    llm_reviews, llm_status = llm_exec.run_order_review(llm_payload)
+    logged = llm_exec.log_shadow_reviews(
+        llm_shadow_ledger, market="US", date=today, plan=plan, reviews=llm_reviews,
+        signals_by=sig_by, applied_mode=llm_exec.mode())
+    plan, llm_applied = llm_exec.apply_reviews(plan, llm_reviews)
+    logger.info("LLM order review: %s · shadow %d건 · applied %d건",
+                llm_status, logged, len(llm_applied))
+    for item in llm_applied:
+        logger.warning("LLM guarded_apply %s %s %s주 → %s",
+                       item.get("side"), item.get("symbol"), item.get("qty"), item.get("llm_applied"))
+
     from ml.adaptive import costs
     results = []
     day_cost = day_notional = 0.0
@@ -385,6 +403,20 @@ def main(argv: list[str] | None = None) -> int:
             notion = abs(o["qty"]) * float(px or 0)
             day_notional += notion
             day_cost += costs.order_cost(notion, o["side"], "US")
+            trade_events.record_trade(
+                ticker=o["symbol"],
+                side=o["side"],
+                qty=o["qty"],
+                price=px,
+                avg_price=positions.get(o["symbol"], {}).get("avg_price"),
+                account="us_mock",
+                source="kis_mock",
+                market="US",
+                currency="USD",
+                broker_order_id=r.get("ord_no"),
+                confirmed=True,
+                note=o.get("reason", ""),
+            )
         _log_decision(ledger, s, o["symbol"], kind, o["side"], o["qty"], r.get("ok"), today)
         logger.info("%s(%s) %s %s주 → %s %s", o["side"], kind, o["symbol"], o["qty"],
                     "OK" if r.get("ok") else "FAIL", r.get("msg", ""))

@@ -124,6 +124,15 @@ def holding_position(ticker: str, path: str | None = None) -> dict | None:
     return None
 
 
+def trade_events(ticker: str, *, include_mock: bool = True) -> list[dict]:
+    """Chart overlay trade markers for a ticker."""
+    try:
+        from lib import trade_events as _te
+        return _te.trades_for_ticker(ticker, include_mock=include_mock)
+    except Exception:
+        return []
+
+
 def portfolio_weights(path: str | None = None) -> dict:
     """{ticker: weight(0~1)} — risk_model.portfolio_risk_summary 입력용."""
     rows = load_holdings(path)
@@ -177,6 +186,74 @@ def technical_score(close) -> dict | None:
                 "sub": f"RSI {r:.0f} · MA20 {'↑' if price > ma20 else '↓'} · MA60 {'↑' if price > ma60 else '↓'}"}
     except Exception:
         return None
+
+
+def company_analysis_summary(metrics: dict | None, trends: dict | None = None,
+                             intrinsic: dict | None = None) -> dict:
+    """기업 분석 첫 화면용 요약. 입력 dict만 쓰는 순수 판단 레이어."""
+    m, tr, iv = metrics or {}, trends or {}, intrinsic or {}
+    positives, risks, checks = [], [], []
+
+    roe = _try_float(m.get("roe"))
+    per = _try_float(m.get("per"))
+    pbr = _try_float(m.get("pbr"))
+    eps = _try_float(m.get("eps_ttm"))
+    rev_yoy = _try_float(tr.get("rev_yoy"))
+    margin = _try_float(tr.get("net_margin"))
+    margin_chg = _try_float(tr.get("net_margin_chg"))
+    debt = _try_float(tr.get("debt_to_assets"))
+    upside = _try_float(iv.get("upside_pct"))
+
+    if roe is not None and roe >= 0.15:
+        positives.append(f"ROE {roe * 100:.1f}%")
+    if rev_yoy is not None and rev_yoy > 0:
+        positives.append(f"매출 성장 {rev_yoy * 100:+.1f}%")
+    if margin is not None and margin > 0.15:
+        positives.append(f"순마진 {margin * 100:.1f}%")
+    if eps is not None and eps > 0:
+        positives.append("EPS 흑자")
+    if upside is not None and upside >= 10:
+        positives.append(f"RIM 상승여력 {upside:+.0f}%")
+
+    if m.get("per_status") == "loss" or (eps is not None and eps <= 0):
+        risks.append("적자 또는 EPS 비양수")
+    if per is not None and per >= 40:
+        risks.append(f"PER {per:.1f}x 부담")
+    if rev_yoy is not None and rev_yoy < 0:
+        risks.append(f"매출 역성장 {rev_yoy * 100:+.1f}%")
+    if debt is not None and debt >= 0.75:
+        risks.append(f"부채/자산 {debt * 100:.0f}%")
+    if pbr is not None and pbr >= 5 and (roe is None or roe < 0.15):
+        risks.append(f"PBR {pbr:.1f}x 대비 ROE 낮음")
+    if margin_chg is not None and margin_chg < -0.03:
+        risks.append(f"순마진 악화 {margin_chg * 100:+.1f}%p")
+    if upside is not None and upside <= -10:
+        risks.append(f"RIM 하방 {upside:+.0f}%")
+
+    if m.get("market_type") == "kr":
+        checks.append("DART 기준연도·마캡 기준일 확인")
+    if not m:
+        checks.append("밸류에이션 데이터 소스 확인")
+    if not tr:
+        checks.append("재무 추세 데이터 확인")
+    checks.append("다음 실적·가이던스 확인")
+    checks.append("최근 공시·뉴스 확인")
+
+    if risks and len(risks) >= 2:
+        verdict = "주의 우선"
+    elif positives and risks:
+        verdict = "선별 관찰"
+    elif positives:
+        verdict = "양호"
+    else:
+        verdict = "데이터 확인 필요"
+
+    return {
+        "verdict": verdict,
+        "positives": positives[:3] or ["뚜렷한 강점 데이터 부족"],
+        "risks": risks[:4] or ["특이 위험 제한적"],
+        "checks": list(dict.fromkeys(checks))[:3],
+    }
 
 
 # ── 표시 포맷터 (None 안전·스케일 명시) ─────────────────────────────────────────

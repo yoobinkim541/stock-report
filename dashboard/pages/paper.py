@@ -32,6 +32,7 @@ def render():
                               format_func=lambda s: _SURF_LABEL.get(s, s),
                               label_visibility="collapsed") or "kr_mock"
     _account_section(mk)
+    _intraday_section(mk)
     _decisions_section(mk)
 
 
@@ -125,6 +126,117 @@ def _account_section(surface: str):
     k[3].metric("누적 엣지", data.f_frac_pct_s(snap.get("cum_net_excess")),
                 help="매수 결정 평균 순초과수익")
     st.caption("※ 무엣지면 적중률 ~50%·IC ≈0 으로 그대로 표시(정직) · 상세 학습곡선은 리서치 → 정책 학습")
+
+
+def _selected_intraday_trade(event, trades):
+    """plotly 마커 클릭 → customdata[0]=event_id → 트레이드 레코드 (ticker.py 패턴)."""
+    try:
+        points = event.selection.points
+    except Exception:
+        try:
+            points = (event or {}).get("selection", {}).get("points", [])
+        except Exception:
+            points = []
+    if not points:
+        return None
+    point = points[0]
+    custom = point.get("customdata") if isinstance(point, dict) else getattr(point, "customdata", None)
+    event_id = custom[0] if custom else None
+    return next((t for t in trades if t.get("event_id") == event_id), None)
+
+
+@st.fragment
+def _intraday_section(surface: str):
+    """🕐 단기(1분봉) 트레이딩 — 분봉 캔들 + ▲▼ 체결 마커 + 판단근거. 미사용 시 숨김."""
+    mkt = "KR" if surface == "kr_mock" else "US"
+    ov = cached.intraday_overview(mkt)
+    s, dates = ov.get("summary"), ov.get("dates") or []
+    if not s and not dates:
+        return                                  # 단기 서브시스템 미가동 — 섹션 자체 숨김
+    st.markdown("##### 🕐 단기 트레이딩 (1분봉)")
+    if s:
+        cur = s["currency"]
+        badge = "🌑 shadow(가상체결)" if s["shadow"] else "🧪 모의 집행"
+        k = st.columns(4)
+        k[0].metric("오늘 트레이드", f"{s['today_n']}건",
+                    delta=(f"승 {s['wins']}" if s["today_n"] else None), delta_color="off")
+        k[1].metric("오늘 실현", _money(s["net_today"], cur))
+        k[2].metric("누적 (슬리브)", _money(s["cum"], cur))
+        k[3].metric("상태", "🛑 일손실 정지" if s["halt"] else badge)
+    day_default = dates[-1] if dates else None
+    c1, c2, c3 = st.columns([2, 1, 1])
+    date = c1.selectbox("날짜", list(reversed(dates)) or [day_default],
+                        key=f"intr_date_{surface}") if dates else day_default
+    if not date:
+        st.caption("분봉 데이터 없음 — `INTRADAY_BARS_ENABLED=true` + kis_stream 재시작 후 축적됩니다")
+        return
+    day = cached.intraday_day(mkt, date)
+    syms = day.get("symbols") or []
+    if not syms:
+        st.caption("그날 트레이드·분봉 심볼 없음")
+        return
+    sym = c2.selectbox("종목", syms, key=f"intr_sym_{surface}",
+                       format_func=lambda t: data.name_label(t) if hasattr(data, "name_label") else t)
+    interval = c3.segmented_control("봉", ["1m", "5m"], default="1m",
+                                    key=f"intr_iv_{surface}") or "1m"
+
+    ch = cached.intraday_chart(sym, mkt, date, interval)
+    bars = ch.get("bars")
+    if bars is None or getattr(bars, "empty", True):
+        st.caption("분봉 없음 (bar store 미축적·yfinance 폴백 실패)")
+        return
+    # 그날 그 심볼 결정의 스톱/목표선 (최근 결정 기준)
+    rows_sym = [r for r in (day.get("rows") or []) if r.get("ticker") == sym]
+    levels = []
+    if rows_sym:
+        last = rows_sym[-1]
+        levels = [{"y": last.get("stop"), "label": "스톱", "color": "#ef4444"},
+                  {"y": last.get("target"), "label": "목표", "color": "#22c55e"}]
+    fig = charts.intraday_candle(bars, sym, trades=ch.get("trades"),
+                                 vwap=ch.get("vwap"), or_range=ch.get("or_range"),
+                                 levels=levels)
+    event = None
+    try:
+        event = st.plotly_chart(fig, width="stretch", config=_NOBAR,
+                                key=f"intr_chart_{surface}_{sym}_{date}_{interval}",
+                                on_select="rerun", selection_mode="points")
+    except TypeError:
+        st.plotly_chart(fig, width="stretch", config=_NOBAR)
+    src_note = {"store": "자체 1분봉(실시간 수집)", "yfinance": "yfinance 폴백(지연)"}.get(ch.get("src"), "")
+    st.caption(f"▲매수 ▼매도 마커 클릭 → 판단근거 · VWAP 점선 · 파란 박스=시가범위(OR 15분) · {src_note}")
+
+    sel = _selected_intraday_trade(event, ch.get("trades") or [])
+    if sel:
+        eid = str(sel.get("event_id") or "")
+        did = eid[5:-3] if eid.startswith("intr-") else None    # intr-{decision_id}-in|out
+        rec = next((r for r in rows_sym if r.get("id") == did), None)
+        side_lbl = "매수(진입)" if sel.get("side") == "buy" else "매도(청산)"
+        cc = st.columns(4)
+        cc[0].metric("구분", side_lbl)
+        cc[1].metric("수량·가격", f"{sel.get('qty')}주 @ {float(sel.get('price') or 0):,.2f}")
+        cc[2].metric("점수", data.f_ratio((rec or {}).get("score"), 2))
+        cc[3].metric("결과", (f"{rec.get('exit_reason')} R{rec.get('realized_r'):+.2f}"
+                              if rec and rec.get("realized_r") is not None else "⏳/—"))
+        if rec and rec.get("features"):
+            axes = {k: v for k, v in rec["features"].items()
+                    if k in ("orb", "vwap", "volspike", "ofi", "news", "ema", "rsi", "bb")}
+            st.caption("판단 축 점수: " + " · ".join(
+                f"{k} {data.f_ratio(v, 2)}" for k, v in axes.items() if v is not None))
+
+    # 그날 트레이드 원장표 (결정⋈결과)
+    rows = day.get("rows") or []
+    if rows:
+        st.dataframe(pd.DataFrame([{
+            "시각": str(r.get("id", ""))[-6:], "종목": r.get("ticker"),
+            "수량": r.get("qty"), "진입": r.get("price"),
+            "점수": data.f_ratio(r.get("score"), 2),
+            "청산": r.get("exit_reason") or "⏳오픈",
+            "net R": (f"{r['realized_r']:+.2f}" if r.get("realized_r") is not None else "—"),
+            "손익": (f"{r['net_pnl']:+,.0f}" if r.get("net_pnl") is not None else "—"),
+            "모드": "shadow" if r.get("shadow") else "모의",
+        } for r in rows]), hide_index=True, width="stretch")
+    st.caption("⚠️ 단기 슬리브 — shadow 기본(가상체결)·게이트(트레이드≥100·순R>0·PSR·PBO) 통과 후에만 "
+               "모의 집행 승격 · 실거래 아님")
 
 
 @st.fragment

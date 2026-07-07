@@ -47,6 +47,8 @@ PATH=/home/ubuntu/.local/bin:/usr/local/bin:/usr/bin:/bin
 # ── 고빈도 수집·감지 ─────────────────────────────────────────────────────────
 # 속보 수집 + 급증 감지 + 텔레그램 알림
 * * * * * cd /home/ubuntu/projects/stock-report && flock -n /tmp/news_spike_detector.lock uv run python crons/news_spike_detector.py >> /tmp/news_spike_detector.log 2>&1   # 매 1분 (flock: 중복실행·상태 RMW 경합 방지)
+# 단기(1분봉) 모의 트레이딩 엔진 (INTRADAY_MOCK_ENABLED=true 일 때만 — 꺼져있으면 즉시 no-op·shadow 기본)
+* * * * * cd /home/ubuntu/projects/stock-report && flock -n /tmp/intraday_mock_track.lock uv run python crons/intraday_mock_track.py >> /tmp/intraday_mock_track.log 2>&1   # 매 1분 (열린 시장만 내부 처리)
 # 실시간 시세 WS 상시 프로세스 워치독 (REALTIME_ENABLED=true 일 때만 기동·opt-in)
 * * * * * cd /home/ubuntu/projects/stock-report && bash scripts/kis_stream_watchdog.sh >> /tmp/kis_stream_watchdog.log 2>&1   # 매 1분 (꺼져있으면 no-op)
 # 퀀트 터미널 streamlit 대시보드 워치독 (DASHBOARD_ENABLED=true 일 때만 기동·opt-in)
@@ -65,6 +67,8 @@ PATH=/home/ubuntu/.local/bin:/usr/local/bin:/usr/bin:/bin
 30 1 * * 6 cd /home/ubuntu/projects/stock-report && uv run python crons/institutional_snapshot.py >> /tmp/institutional_snapshot.log 2>&1   # 토 01:30 UTC = 10:30 KST
 # KR 모의 정책 강화 (보상 백필 + ★목적함수 OOS 게이트 재학습; KIWOOM_MOCK_ENABLED 시)
 0 2 * * 6 cd /home/ubuntu/projects/stock-report && flock -n /tmp/kr_mock_learn.lock uv run python crons/kr_mock_learn.py >> /tmp/kr_mock_learn.log 2>&1   # 토 02:00 UTC = 11:00 KST
+# 단기 모의 정책 주간 학습 + ★게이트 평가 (INTRADAY_MOCK_ENABLED 시 — GO 여도 집행 전환은 수동)
+30 2 * * 6 cd /home/ubuntu/projects/stock-report && flock -n /tmp/intraday_mock_learn.lock uv run python crons/intraday_mock_learn.py >> /tmp/intraday_mock_learn.log 2>&1   # 토 02:30 UTC = 11:30 KST
 # US 해외 모의 페이퍼트레이딩 (KIS 해외 — KOREA_MOCK_ENABLED 시; track→report→주간 learn)
 0 15 * * 1-5 cd /home/ubuntu/projects/stock-report && flock -n /tmp/us_mock_track.lock uv run python crons/us_mock_track.py >> /tmp/us_mock_track.log 2>&1   # 15:00 UTC — US 모의 리밸런스 (미 개장 후·연중안전: 여름 11:00 ET·겨울 10:00 ET, 당일 체결)
 30 21 * * 1-5 cd /home/ubuntu/projects/stock-report && flock -n /tmp/us_mock_report.lock uv run python crons/us_mock_report.py >> /tmp/us_mock_report.log 2>&1   # 21:30 UTC — US 모의 현황+스코어카드
@@ -101,5 +105,7 @@ PATH=/home/ubuntu/.local/bin:/usr/local/bin:/usr/bin:/bin
 # ── 테스트·헬스체크 ──────────────────────────────────────────────────────────
 # 기능 검증 연기 테스트 25항목 (실패 시만 알림)
 0 0 * * * cd /home/ubuntu/projects/stock-report && uv run python tests/bot_smoke_test.py >> /tmp/bot_smoke_test.log 2>&1               # 00:00 UTC = 09:00 KST
+# 단기(1m/5m) 모의 파이프라인 연기 테스트 (무네트워크·합성 — 실패 시만 알림)
+10 0 * * 1-5 cd /home/ubuntu/projects/stock-report && uv run python tests/intraday_smoke_test.py >> /tmp/intraday_smoke_test.log 2>&1   # 00:10 UTC = 09:10 KST
 # 봇·서버 상태 점검 (프로세스·PID·파일 신선도·store DB 무결성)
 */30 * * * * cd /home/ubuntu/projects/stock-report && uv run python tests/bot_healthcheck.py >> /tmp/bot_healthcheck.log 2>&1         # 매 30분

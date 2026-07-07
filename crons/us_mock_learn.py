@@ -24,6 +24,7 @@ from dotenv import load_dotenv
 load_dotenv()
 
 import kis_mock
+from lib import mock_llm_execution as llm_exec
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 logger = logging.getLogger(__name__)
@@ -170,6 +171,12 @@ def main() -> int:
 
     added = backfill_outcomes(ledger)
     logger.info("보상 백필: %d건 성숙", added)
+    llm_ledger = Ledger("us_mock_llm_shadow")
+    llm_added = llm_exec.backfill_shadow_outcomes(
+        llm_ledger, market="US", horizons_=llm_exec.horizons(), price_fn=_default_price_fn)
+    llm_summary = llm_exec.summarize_shadow(
+        llm_exec.shadow_training_set(llm_ledger), horizon=llm_exec.report_horizon())
+    logger.info("LLM shadow 백필: %d건 성숙 · %s", llm_added, llm_exec.summary_line(llm_summary))
     rows = ledger.training_set()
     buy = _buy_rows(rows)
     from ml.adaptive import evolution
@@ -177,8 +184,16 @@ def main() -> int:
     if len(buy) < MIN_SAMPLES:
         evolution.record_learning("us_mock", {
             "date": datetime.now(KST).strftime("%Y-%m-%d"), "adopted": False,
-            "reason": "콜드스타트 (표본 미달)", **snap})
-        msg = f"🇺🇸 US 정책 학습 — 편입표본 {len(buy)}/{MIN_SAMPLES} 미달, 콜드스타트 유지(보류)"
+            "reason": "콜드스타트 (표본 미달)",
+            "llm_shadow_added": llm_added,
+            "llm_shadow_n": llm_summary.get("n"),
+            "llm_shadow_hit_rate": llm_summary.get("hit_rate"),
+            "llm_shadow_avg_delta": llm_summary.get("avg_delta"),
+            **snap})
+        msg = (
+            f"🇺🇸 US 정책 학습 — 편입표본 {len(buy)}/{MIN_SAMPLES} 미달, 콜드스타트 유지(보류)\n"
+            f"🧠 LLM shadow: {llm_exec.summary_line(llm_summary)}"
+        )
         logger.info(msg)
         send_cron_telegram(msg)
         return 0
@@ -201,8 +216,16 @@ def main() -> int:
         "excess_champion": (out.get("champion") or {}).get("excess"),
         "mdd_challenger": (out.get("challenger") or {}).get("mdd"),
         "n_oos": (out.get("challenger") or {}).get("n"),
-        "candidate_params": out.get("candidate_params"), **snap})
-    send_cron_telegram(f"🇺🇸 US 정책 강화 (편입표본 {len(buy)})\n{out['reason']}\n⚠️ 모의 정책 — 실거래 미반영")
+        "candidate_params": out.get("candidate_params"),
+        "llm_shadow_added": llm_added,
+        "llm_shadow_n": llm_summary.get("n"),
+        "llm_shadow_hit_rate": llm_summary.get("hit_rate"),
+        "llm_shadow_avg_delta": llm_summary.get("avg_delta"),
+        **snap})
+    send_cron_telegram(
+        f"🇺🇸 US 정책 강화 (편입표본 {len(buy)})\n{out['reason']}\n"
+        f"🧠 LLM shadow: {llm_exec.summary_line(llm_summary)}\n"
+        "⚠️ 모의 정책 — 실거래 미반영")
     return 0
 
 

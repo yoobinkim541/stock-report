@@ -93,6 +93,27 @@ def test_price_line_avg_cost_hline():
     assert not (fig2.layout.shapes or ())
 
 
+def test_price_line_trade_markers_have_click_data():
+    idx = pd.date_range("2025-01-01", periods=30, freq="D")
+    hist = pd.DataFrame({"Close": range(100, 130)}, index=idx)
+    trades = [
+        {"event_id": "e1", "date": "2025-01-05", "timestamp": "2025-01-05T09:30:00",
+         "ticker": "NVDA", "side": "buy", "qty": 2, "price": 104, "avg_price": 104,
+         "account": "manual", "source": "manual_holding", "currency": "USD", "note": "first"},
+        {"event_id": "e2", "date": "2025-01-10", "timestamp": "2025-01-10T09:30:00",
+         "ticker": "NVDA", "side": "sell", "qty": 1, "price": 109, "avg_price": 104,
+         "account": "manual", "source": "manual_holding", "currency": "USD", "note": "trim"},
+    ]
+    fig = charts.price_line(hist, "NVDA", trades=trades)
+    names = [tr.name for tr in fig.data]
+    assert "Buy" in names and "Sell" in names
+    buy = next(tr for tr in fig.data if tr.name == "Buy")
+    assert buy.marker.symbol == "triangle-up"
+    assert buy.customdata[0][0] == "e1"
+    assert buy.customdata[0][2] == 2
+    assert "customdata" in buy.hovertemplate
+
+
 # ── L2 캔들 차트 ──────────────────────────────────────────────────────
 def _ohlc(n=70, start=100):
     idx = pd.date_range("2025-01-01", periods=n, freq="D")
@@ -113,6 +134,16 @@ def test_price_candle_ohlc_and_ma():
 def test_price_candle_avg_cost_hline():
     fig = charts.price_candle(_ohlc(30), "NVDA", avg_cost=115.0)
     assert any(getattr(s, "type", None) == "line" for s in (fig.layout.shapes or ())), "평단 hline 없음"
+
+
+def test_price_candle_trade_marker_falls_back_to_close():
+    hist = _ohlc(30)
+    fig = charts.price_candle(hist, "NVDA", trades=[
+        {"event_id": "e3", "date": "2025-01-05", "ticker": "NVDA", "side": "buy",
+         "qty": 1, "price": None, "avg_price": 104}
+    ])
+    buy = next(tr for tr in fig.data if tr.name == "Buy")
+    assert list(buy.y)[0] == 104  # close on 2025-01-05 from _ohlc start=100
 
 
 def test_price_candle_handles_missing_ohlc():
@@ -229,3 +260,31 @@ def test_nav_curve_line_and_baseline():
 def test_nav_curve_empty_graceful():
     assert _is_fig(charts.nav_curve([]))
     assert len(charts.nav_curve([{"date": "d", "nav": None}]).data) == 0
+
+
+def test_intraday_candle_full_overlay():
+    import pandas as pd
+    idx = pd.date_range("2026-07-08 09:00", periods=20, freq="min", tz="Asia/Seoul")
+    hist = pd.DataFrame({"Open": [100.0] * 20, "High": [101.0] * 20,
+                         "Low": [99.0] * 20, "Close": [100.5] * 20,
+                         "Volume": [10.0] * 20}, index=idx)
+    trades = [{"event_id": "intr-x-in", "side": "buy", "qty": 5, "price": 100.5,
+               "avg_price": 100.5, "account": "shadow", "source": "intraday_mock",
+               "timestamp": idx[10].isoformat(), "currency": "KRW"}]
+    fig = charts.intraday_candle(hist, "005930", trades=trades, vwap=[100.2] * 20,
+                                 or_range=(101.0, 99.0, idx[14]),
+                                 levels=[{"y": 99.5, "label": "스톱", "color": "#ef4444"}])
+    assert _is_fig(fig)
+    names = [tr.name for tr in fig.data]
+    assert "VWAP" in names and "Buy" in names            # 오버레이 + ▲ 마커
+    buy = next(tr for tr in fig.data if tr.name == "Buy")
+    assert buy.customdata[0][0] == "intr-x-in"           # 클릭 → event_id 계약
+    # OR 박스(rect) 1 + 스톱 hline(line) 1
+    assert sum(1 for s in fig.layout.shapes if s.type == "rect") == 1
+    assert sum(1 for s in fig.layout.shapes if s.type == "line") == 1
+
+
+def test_intraday_candle_empty_graceful():
+    import pandas as pd
+    assert _is_fig(charts.intraday_candle(pd.DataFrame()))
+    assert len(charts.intraday_candle(pd.DataFrame()).data) == 0

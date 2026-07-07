@@ -29,7 +29,7 @@ def render():
 
     # 가격 차트 — 풀폭 · 라인/캔들 토글 (+ 보유 시 평단 수평선)
     if yf_price is not None:
-        _price_chart(ticker, hist, pos.get("avg_price_usd") if pos else None)
+        _price_chart(ticker, hist, pos.get("avg_price_usd") if pos else None, data.trade_events(ticker))
     else:
         st.info("가격 데이터 없음 (yfinance)")
 
@@ -38,19 +38,76 @@ def render():
     if (etf or {}).get("is_etf"):
         _etf_sections(ticker, etf, cur)
     else:
+        _analysis_snapshot(ticker)
         _detail_sections(ticker, yf_price)
     _manage_position(ticker, cur, pos)
 
 
 @st.fragment
-def _price_chart(ticker, hist, avg_cost):
+def _selected_trade(event, trades):
+    try:
+        points = event.selection.points
+    except Exception:
+        try:
+            points = event.get("selection", {}).get("points", [])
+        except Exception:
+            points = []
+    if not points:
+        return None
+    point = points[0]
+    custom = point.get("customdata") if isinstance(point, dict) else getattr(point, "customdata", None)
+    event_id = custom[0] if custom else None
+    if not event_id:
+        return None
+    return next((t for t in trades if t.get("event_id") == event_id), None)
+
+
+def _trade_detail(t):
+    if not t:
+        return
+    side = "매수" if t.get("side") == "buy" else "매도"
+    cur = t.get("currency") or "USD"
+    cols = st.columns(4)
+    cols[0].metric("구분", side)
+    cols[1].metric("수량", f"{float(t.get('qty') or 0):g}주")
+    cols[2].metric("체결가", f"{cur} {float(t.get('price') or 0):,.2f}" if t.get("price") else "—")
+    cols[3].metric("평단", f"{cur} {float(t.get('avg_price') or 0):,.2f}" if t.get("avg_price") else "—")
+    st.caption(f"{t.get('timestamp') or t.get('date')} · {t.get('account') or 'account'} · {t.get('source') or 'source'}"
+               + (f" · {t.get('note')}" if t.get("note") else ""))
+
+
+def _price_chart(ticker, hist, avg_cost, trades):
     """가격 차트 — 라인/캔들 토글(차트만 부분 rerun·전체 리로드 방지)."""
     kind = st.segmented_control("차트 종류", ["📈 라인", "🕯️ 캔들"], default="📈 라인",
                                 label_visibility="collapsed", key="_chart_kind")
     label = ticker_names.label(ticker)
-    fig = (charts.price_candle(hist, label, avg_cost) if kind == "🕯️ 캔들"
-           else charts.price_line(hist, label, avg_cost))
-    st.plotly_chart(fig, width="stretch", config=_NOBAR)
+    fig = (charts.price_candle(hist, label, avg_cost, trades=trades) if kind == "🕯️ 캔들"
+           else charts.price_line(hist, label, avg_cost, trades=trades))
+    event = None
+    try:
+        event = st.plotly_chart(
+            fig, width="stretch", config=_NOBAR, key=f"price_chart_{ticker}_{kind}",
+            on_select="rerun", selection_mode="points")
+    except TypeError:
+        st.plotly_chart(fig, width="stretch", config=_NOBAR)
+    selected = _selected_trade(event, trades or [])
+    if selected:
+        _trade_detail(selected)
+    elif trades:
+        st.caption("차트의 ▲/▼ 거래 마커를 클릭하면 수량·평단·체결가를 볼 수 있습니다.")
+    if trades:
+        with st.expander(f"거래 마커 {len(trades)}건", expanded=False):
+            rows = [{
+                "일자": t.get("date"),
+                "구분": "매수" if t.get("side") == "buy" else "매도",
+                "수량": t.get("qty"),
+                "체결가": t.get("price"),
+                "평단": t.get("avg_price"),
+                "계좌": t.get("account"),
+                "출처": t.get("source"),
+                "메모": t.get("note"),
+            } for t in trades]
+            st.dataframe(pd.DataFrame(rows), hide_index=True, width="stretch")
 
 
 @st.fragment(run_every=8)
@@ -128,19 +185,53 @@ def _f_bil(v):
     return f"${v:,.0f}"
 
 
+def _is_kr_etf(etf):
+    return (etf or {}).get("market_type") == "kr" or (etf or {}).get("currency") == "KRW"
+
+
+def _etf_money(etf, value, dec=2):
+    return _f_krw(value, dec=dec) if _is_kr_etf(etf) else data.f_usd(value, dec)
+
+
+def _etf_asset(etf, value):
+    return _f_krw_large(value) if _is_kr_etf(etf) else _f_bil(value)
+
+
+def _etf_div_amount(etf, value):
+    if not value:
+        return "—"
+    return f"연 {_f_krw(value)}" if _is_kr_etf(etf) else f"연 ${float(value):,.2f}"
+
+
 def _etf_sections(ticker, etf, price):
+    is_kr = _is_kr_etf(etf)
     desc = (etf.get("description") or "").strip()
     if desc:
-        st.info(desc[:280] + ("…" if len(desc) > 280 else ""), icon="🧺")
+        st.info(desc[:280] + ("…" if len(desc) > 280 else ""), icon="📊")
+
+    st.subheader("ETF 한눈에")
+    dv = etf.get("dividends") or {}
+    k = st.columns(5)
+    k[0].metric("현재가", _etf_money(etf, etf.get("price") or price, 0 if is_kr else 2))
+    k[1].metric("NAV", _etf_money(etf, etf.get("nav"), 0 if is_kr else 2))
+    pm = etf.get("premium_pct")
+    k[2].metric("괴리율", f"{pm:+.2f}%" if pm is not None else "—",
+                help="시장가격과 기준가(NAV)의 차이")
+    er = etf.get("expense_ratio")
+    k[3].metric("총보수", data.f_frac_pct(er) if er is not None else "—",
+                help="연간 총보수/운용보수")
+    k[4].metric("분배금 수익률", f"연 {dv['yield_pct']:.2f}%" if dv.get("yield_pct") else "—",
+                help="최근 12개월 분배금 합계 ÷ 현재가")
 
     # ── 프로필 (시가총액/운용자산·운용사·NAV·상장일·발행주식수) ──
     st.subheader("ETF 프로필")
+    asset_value = etf.get("total_assets") or etf.get("market_cap")
     rows = [
-        ("운용자산(AUM)", _f_bil(etf.get("total_assets"))),
+        ("순자산/AUM", _etf_asset(etf, asset_value)),
         ("운용사", etf.get("family") or "—"),
-        ("NAV", data.f_usd(etf.get("nav")) if etf.get("nav") else "—"),
+        ("추종지수", etf.get("benchmark") or "—"),
         ("상장일", etf.get("inception") or "—"),
-        ("발행주식수", f"{etf['shares_outstanding']:,.0f}주" if etf.get("shares_outstanding") else "—"),
+        ("종목코드", etf.get("stock_code") or ticker),
         ("카테고리", etf.get("category") or "—"),
     ]
     c1, c2 = st.columns(2)
@@ -154,48 +245,60 @@ def _etf_sections(ticker, etf, price):
     # ── 보유 비중 Top 10 (도넛 + 리스트) ──
     top = etf.get("top_holdings") or []
     if top:
-        st.subheader("보유 비중 Top 10")
+        st.subheader("구성종목 Top 10" if is_kr else "보유 비중 Top 10")
         dcol, lcol = st.columns([1, 1.4])
         with dcol:
             st.plotly_chart(charts.allocation_donut(
-                [{"ticker": h["symbol"], "value": h.get("pct") or 0,
-                  "name": ticker_names.display_name(h["symbol"], allow_net=False) or h.get("name")}
+                [{"ticker": h.get("symbol") or h.get("name"), "value": h.get("pct") or 0,
+                  "name": (h.get("name") if is_kr else
+                           ticker_names.display_name(h["symbol"], allow_net=False) or h.get("name"))}
                  for h in top]), width="stretch", config=_NOBAR)
         with lcol:
-            half = (len(top) + 1) // 2
-            l1, l2 = st.columns(2)
-            for col, chunk in ((l1, top[:half]), (l2, top[half:])):
-                with col:
-                    for h in chunk:
-                        nm = ticker_names.display_name(h["symbol"], allow_net=False) or h.get("name") or h["symbol"]
-                        pct = f"{h['pct']:.2f}%" if h.get("pct") is not None else "—"
-                        st.markdown(f"**{nm}** <span style='color:{theme.MUTED}'>{pct}</span>",
-                                    unsafe_allow_html=True)
-        st.caption("출처: 운용사 공시 (yfinance funds_data) · 비중은 공시 시점 기준")
+            if is_kr:
+                rows = [{
+                    "구성종목": h.get("name") or h.get("symbol"),
+                    "비중": f"{h['pct']:.2f}%" if h.get("pct") is not None else "—",
+                    "수량": f"{h['shares']:,.0f}" if h.get("shares") is not None else "—",
+                    "평가금액": _f_krw_large(h.get("amount")) if h.get("amount") is not None else "—",
+                } for h in top]
+                st.dataframe(pd.DataFrame(rows), hide_index=True, width="stretch")
+            else:
+                half = (len(top) + 1) // 2
+                l1, l2 = st.columns(2)
+                for col, chunk in ((l1, top[:half]), (l2, top[half:])):
+                    with col:
+                        for h in chunk:
+                            nm = ticker_names.display_name(h["symbol"], allow_net=False) or h.get("name") or h["symbol"]
+                            pct = f"{h['pct']:.2f}%" if h.get("pct") is not None else "—"
+                            st.markdown(f"**{nm}** <span style='color:{theme.MUTED}'>{pct}</span>",
+                                        unsafe_allow_html=True)
+        src = etf.get("top_holdings_source") or ("pykrx PDF" if is_kr else "yfinance funds_data")
+        st.caption(f"출처: {src} · 비중은 공시/조회 시점 기준")
     else:
-        st.caption("보유 종목 데이터 없음 (yfinance funds_data)")
+        st.caption("구성종목 데이터 없음" if is_kr else "보유 종목 데이터 없음 (yfinance funds_data)")
 
     # ── 투자 지표: 운용보수·괴리율 | 배당 ──
     st.subheader("투자 지표")
     ic1, ic2 = st.columns(2)
     with ic1:
         st.markdown("**ETF 정보**")
-        er = etf.get("expense_ratio")
         st.metric("운용보수", data.f_frac_pct(er) if er is not None else "—",
                   help="연간 총보수 (Expense Ratio)")
-        pm = etf.get("premium_pct")
         st.metric("괴리율", f"{pm:+.2f}%" if pm is not None else "—",
                   help="(시장가 − NAV) / NAV — 음수 = NAV 대비 할인 거래")
+        if is_kr:
+            te = etf.get("tracking_error_pct")
+            st.metric("추적오차", f"{te:.2f}%" if te is not None else "—",
+                      help="ETF 수익률과 추종지수 수익률의 차이")
     with ic2:
-        dv = etf.get("dividends") or {}
-        st.markdown(f"**배당** <span style='color:{theme.MUTED};font-size:.8rem'>최근 12개월</span>",
+        st.markdown(f"**분배금** <span style='color:{theme.MUTED};font-size:.8rem'>최근 12개월</span>",
                     unsafe_allow_html=True)
         d1, d2, d3 = st.columns(3)
         d1.metric("횟수", f"{dv.get('count_12m', 0)}번",
                   dv.get("freq_label") if dv.get("freq_label", "—") != "—" else None)
-        d2.metric("주당 배당금", f"연 ${dv.get('per_share_12m', 0):,.2f}" if dv.get("per_share_12m") else "—")
+        d2.metric("주당 분배금", _etf_div_amount(etf, dv.get("per_share_12m")))
         d3.metric("수익률", f"연 {dv['yield_pct']:.2f}%" if dv.get("yield_pct") else "—",
-                  help="최근 12개월 배당합 ÷ 현재가")
+                  help="최근 12개월 분배금 합 ÷ 현재가")
 
     sw = etf.get("sector_weights") or {}
     if sw:
@@ -203,7 +306,8 @@ def _etf_sections(ticker, etf, price):
             items = sorted(sw.items(), key=lambda x: -x[1])[:11]
             st.plotly_chart(charts.hbar([k for k, _ in items], [v for _, v in items], "섹터 %", pct=False),
                             width="stretch", config=_NOBAR)
-    st.caption("정보·표시용 · 매매신호 아님 · 결측 필드는 — 표기")
+    src = etf.get("source") or ("KR ETF" if is_kr else "yfinance")
+    st.caption(f"정보·표시용 · 매매신호 아님 · 결측 필드는 — 표기 · 데이터: {src}")
 
 
 # 섹션 셀렉터 + fragment — 활성 섹션만 렌더(그 섹션 네트워크만 호출)·전환은 fragment만 rerun.
@@ -227,9 +331,29 @@ def _detail_sections(ticker, price):
         _valuation(ticker, price)
 
 
+def _analysis_snapshot(ticker):
+    """개별주 첫 화면용 압축 판단. 상세 섹션의 원자료를 먼저 읽기 쉽게 요약한다."""
+    v = cached.valuation(ticker)
+    f = cached.financials(ticker)
+    iv = cached.intrinsic(ticker)
+    summary = data.company_analysis_summary(v.get("metrics") or {}, (f.get("trends") or {}), iv)
+
+    st.subheader("기업 판단 요약")
+    verdict, good, risk = st.columns([0.8, 1.4, 1.4])
+    verdict.metric("판단", summary["verdict"])
+    with good:
+        st.markdown("**강점**")
+        st.markdown("\n".join(f"- {x}" for x in summary["positives"]))
+    with risk:
+        st.markdown("**주의점**")
+        st.markdown("\n".join(f"- {x}" for x in summary["risks"]))
+    st.caption("다음 확인: " + " · ".join(summary["checks"]))
+
+
 def _valuation(ticker, price=None):
     v = cached.valuation(ticker)
     m = v.get("metrics") or {}
+    is_kr = m.get("market_type") == "kr"
     if m:
         a = st.columns(4)
         a[0].metric("PER", data.f_ratio(m.get("per")))
@@ -240,7 +364,14 @@ def _valuation(ticker, price=None):
         b[0].metric("ROE", data.f_frac_pct(m.get("roe")))
         b[1].metric("배당수익률", data.f_pct(m.get("div_yield"), 2))
         b[2].metric("배당성장 3Y", data.f_frac_pct_s(m.get("div_growth_3y")))
-        b[3].metric("EPS(TTM)", data.f_usd(m.get("eps_ttm")))
+        b[3].metric("EPS(TTM)", _f_krw(m.get("eps_ttm")) if is_kr else data.f_usd(m.get("eps_ttm")))
+        if is_kr:
+            c = st.columns(4)
+            c[0].metric("시가총액", _f_krw_large(m.get("market_cap")))
+            c[1].metric("순이익", _f_krw_large(m.get("net_income")))
+            c[2].metric("자본", _f_krw_large(m.get("equity")))
+            c[3].metric("BPS", _f_krw(m.get("bps")))
+            st.caption(_kr_valuation_caption(m))
     else:
         st.warning(f"밸류에이션 데이터 없음 ({v.get('metrics_error', '')})")
     c = v.get("consensus") or {}
@@ -276,6 +407,48 @@ def _valuation(ticker, price=None):
     st.caption("정보·표시용 · 매매신호 아님")
 
 
+def _f_krw(v, dec=0):
+    try:
+        f = float(v)
+        if f != f:
+            return "—"
+        return f"₩{f:,.{dec}f}"
+    except (TypeError, ValueError):
+        return "—"
+
+
+def _f_krw_large(v):
+    try:
+        f = float(v)
+        if f != f:
+            return "—"
+    except (TypeError, ValueError):
+        return "—"
+    a = abs(f)
+    if a >= 1e12:
+        return f"₩{f / 1e12:,.1f}조"
+    if a >= 1e8:
+        return f"₩{f / 1e8:,.0f}억"
+    return f"₩{f:,.0f}"
+
+
+def _kr_valuation_caption(m):
+    bits = [str(m.get("source") or "DART+marcap")]
+    if m.get("fiscal_year"):
+        bits.append(f"{m['fiscal_year']} 사업보고서")
+    if m.get("fs_nm"):
+        bits.append(str(m["fs_nm"]))
+    elif m.get("fs_div"):
+        bits.append("연결 기준" if m.get("fs_div") == "CFS" else "별도 기준")
+    if m.get("asof"):
+        bits.append(f"마캡 {m['asof']}")
+    if m.get("confidence"):
+        bits.append(f"신뢰도 {m['confidence']}")
+    if m.get("per_status") == "loss":
+        bits.append("PER 적자")
+    return " · ".join(bits)
+
+
 def _surprise_chart(history, caption):
     """서프라이즈 % 부호 막대 (오래된→최근) + 원표."""
     hh = list(reversed(history))   # 최신순 → 시간순
@@ -291,6 +464,7 @@ def _surprise_chart(history, caption):
 def _financials(ticker):
     f = cached.financials(ticker)
     tr = f.get("trends") or {}
+    is_kr = f.get("market_type") == "kr"
     if tr:
         a = st.columns(4)
         a[0].metric("매출 YoY", data.f_frac_pct(tr.get("rev_yoy")))
@@ -301,9 +475,30 @@ def _financials(ticker):
         a[3].metric("연속 보고연수", f"{int(tr.get('n_years') or 0)}년")
         if tr.get("is_loss"):
             st.warning("최근 적자 구간")
-        st.caption("출처: SEC EDGAR companyfacts (美) · 무룩어헤드")
+        rows = f.get("rows") or []
+        if is_kr and rows:
+            table = [{
+                "연도": r.get("year"),
+                "매출": _f_krw_large(r.get("revenue")),
+                "영업이익": _f_krw_large(r.get("operating_income")),
+                "순이익": _f_krw_large(r.get("net_income")),
+                "자산": _f_krw_large(r.get("assets")),
+                "부채": _f_krw_large(r.get("liabilities")),
+            } for r in reversed(rows[-4:])]
+            st.dataframe(pd.DataFrame(table), hide_index=True, width="stretch")
+        if is_kr:
+            bits = ["출처: DART 단일회사 주요계정"]
+            if f.get("fiscal_year"):
+                bits.append(f"{f['fiscal_year']} 사업보고서")
+            if f.get("fs_nm"):
+                bits.append(str(f["fs_nm"]))
+            bits.append("매출·마진·부채 추세")
+            st.caption(" · ".join(bits))
+        else:
+            st.caption("출처: SEC EDGAR companyfacts (美) · 무룩어헤드")
     else:
-        st.warning(f"재무 데이터 없음 — 美 종목만 지원 ({f.get('error', '')})")
+        source = "DART" if is_kr else "SEC EDGAR"
+        st.warning(f"재무 데이터 없음 — {source} 확인 필요 ({f.get('error', '')})")
 
 
 def _institutional(ticker):
@@ -412,7 +607,7 @@ def _manage_position(ticker, cur_price, pos):
                                     max_value=float(held), value=0.0, step=0.0001, format="%.4f", key="red_qty")
                 lab = "전량 정리" if q <= 0 else f"{q:.4f}주 축소"
                 if st.button(f"➖ {lab} 기록", key="red_btn", width="stretch"):
-                    _apply_action(lambda: _hm().sell_holding(ticker, q if q > 0 else None))
+                    _apply_action(lambda: _hm().sell_holding(ticker, q if q > 0 else None, price_usd=round(cur, 4)))
         else:                                                       # 추가(신규·증액)
             c = st.columns(2)
             q = c[0].number_input("주수 (소수점 가능)", min_value=0.0, value=1.0, step=0.0001,

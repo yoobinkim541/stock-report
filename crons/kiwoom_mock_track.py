@@ -46,6 +46,8 @@ from dotenv import load_dotenv
 load_dotenv()
 
 import kiwoom_mock
+from lib import mock_llm_execution as llm_exec
+from lib import trade_events
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 logger = logging.getLogger(__name__)
@@ -501,8 +503,23 @@ def main(argv: list[str] | None = None) -> int:
 
     from ml.adaptive import Ledger
     ledger = Ledger("kr_mock")
+    llm_shadow_ledger = Ledger("kr_mock_llm_shadow")
     sig_by_code = {s["code"]: s for s in signals}
     today = datetime.now(KST).strftime("%Y-%m-%d")
+
+    llm_payload = llm_exec.build_order_review_payload(
+        market="KR", nav=nav, cash=cash, budget=budget, max_positions=MAX_POS,
+        orders=plan, positions=positions, signals=signals)
+    llm_reviews, llm_status = llm_exec.run_order_review(llm_payload)
+    logged = llm_exec.log_shadow_reviews(
+        llm_shadow_ledger, market="KR", date=today, plan=plan, reviews=llm_reviews,
+        signals_by=sig_by_code, applied_mode=llm_exec.mode())
+    plan, llm_applied = llm_exec.apply_reviews(plan, llm_reviews)
+    logger.info("LLM order review: %s · shadow %d건 · applied %d건",
+                llm_status, logged, len(llm_applied))
+    for item in llm_applied:
+        logger.warning("LLM guarded_apply %s %s %s주 → %s",
+                       item.get("side"), item.get("symbol"), item.get("qty"), item.get("llm_applied"))
 
     from ml.adaptive import costs
     results = []
@@ -521,6 +538,21 @@ def main(argv: list[str] | None = None) -> int:
             notion = abs(o["qty"]) * float(px or 0)
             day_notional += notion
             day_cost += costs.order_cost(notion, o["side"], "KR")
+            sig = sig_by_code.get(o["code"], {})
+            trade_events.record_trade(
+                ticker=sig.get("ticker") or f"{o['code']}.KS",
+                side=o["side"],
+                qty=o["qty"],
+                price=px,
+                avg_price=positions.get(o["code"], {}).get("avg_price"),
+                account="kr_mock",
+                source="kiwoom_mock",
+                market="KR",
+                currency="KRW",
+                broker_order_id=r.get("ord_no"),
+                confirmed=True,
+                note=o.get("reason", ""),
+            )
         # 주문별 즉시 기록 — store(현재뷰) + 불변 원장(학습/감사, 절대 삭제 안 함)
         _append_history({"kind": "order", "code": o["code"], "side": o["side"], "qty": o["qty"],
                          "reason": o.get("reason"), "ok": r.get("ok"), "msg": r.get("msg")})

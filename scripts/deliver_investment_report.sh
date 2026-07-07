@@ -21,6 +21,9 @@ PYTHON_BIN="${PYTHON_BIN:-python3}"
 export INVESTMENT_REPORT_MAX_NASDAQ_SCAN="${INVESTMENT_REPORT_MAX_NASDAQ_SCAN:-100}"
 export INVESTMENT_REPORT_MAX_KOSPI_SCAN="${INVESTMENT_REPORT_MAX_KOSPI_SCAN:-30}"
 export INVESTMENT_REPORT_ARCA_PAGES="${INVESTMENT_REPORT_ARCA_PAGES:-1}"
+export INVESTMENT_REPORT_LLM_ENABLED="${INVESTMENT_REPORT_LLM_ENABLED:-1}"
+export INVESTMENT_REPORT_LLM_DECISION_ENABLED="${INVESTMENT_REPORT_LLM_DECISION_ENABLED:-1}"
+export INVESTMENT_REPORT_LLM_DECISION_MODE="${INVESTMENT_REPORT_LLM_DECISION_MODE:-shadow}"
 
 DATE=$("$PYTHON_BIN" -c "from datetime import datetime, timezone, timedelta; print(datetime.now(timezone(timedelta(hours=9))).strftime('%Y-%m-%d'))")
 
@@ -134,6 +137,7 @@ echo "  - 포트폴리오: ${PORTFOLIO_COUNT}종목"
 echo "  - NASDAQ 100: ${INVESTMENT_REPORT_MAX_NASDAQ_SCAN}종목 스캔"
 echo "  - KOSPI 상위: ${INVESTMENT_REPORT_MAX_KOSPI_SCAN}종목 스캔"
 echo "  - LLM overlay: ${INVESTMENT_REPORT_LLM_MODEL:-gpt-5-mini} (fact guard 통과 시만 리포트에 추가)"
+echo "  - LLM decision: ${INVESTMENT_REPORT_LLM_DECISION_MODEL:-${INVESTMENT_REPORT_LLM_MODEL:-gpt-5-mini}} (${INVESTMENT_REPORT_LLM_DECISION_MODE}, schema guard)"
 echo "  - API 비용: yfinance 무료 + SaveTicker 무료"
 echo ""
 echo "✅ @Stock_botbot 으로 전송 완료"

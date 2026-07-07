@@ -156,3 +156,18 @@ def sp500_heatmap():
 def market_indicators():
     """공포·탐욕지수 + S&P500·나스닥 일/주봉 RSI (15분 캐시)."""
     return views.market_indicators()
+
+
+@st.cache_data(ttl=60, show_spinner=False)
+def intraday_overview(market):
+    return views.intraday_overview(market)
+
+
+@st.cache_data(ttl=60, show_spinner=False)
+def intraday_day(market, date):
+    return views.intraday_day(market, date)
+
+
+@st.cache_data(ttl=60, show_spinner="분봉 불러오는 중…")
+def intraday_chart(symbol, market, date, interval):
+    return views.intraday_chart(symbol, market, date, interval)

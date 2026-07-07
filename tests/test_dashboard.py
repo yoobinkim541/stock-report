@@ -49,6 +49,21 @@ def test_holding_position(tmp_path):
     assert data.holding_position("ZZZZ", str(snap)) is None   # 비보유 → None
 
 
+def test_trade_events_reads_ledger(tmp_path, monkeypatch):
+    monkeypatch.setenv("STOCK_REPORT_DB", str(tmp_path / "stock_report.db"))
+    import store
+    store._initialized.clear()
+    from lib import trade_events
+
+    trade_events.record_trade(
+        ticker="MSFT", side="buy", qty=1, price=420,
+        account="manual", source="manual_holding", timestamp="2026-07-07T10:00:00",
+        event_id="dash-1")
+    rows = data.trade_events("MSFT")
+    assert len(rows) == 1
+    assert rows[0]["event_id"] == "dash-1"
+
+
 def test_portfolio_merges_general_and_fractional(tmp_path):
     """Q1: general(holdings_usd) + fractional(holdings) 티커별 합산 — 과소계상·중복행 방지."""
     snap = tmp_path / "portfolio_snapshot.json"
@@ -120,6 +135,32 @@ def test_technical_score_short_none():
     assert data.technical_score(pd.Series([1, 2, 3])) is None
 
 
+def test_company_analysis_summary_positive_case():
+    s = data.company_analysis_summary(
+        {"roe": 0.22, "per": 18.0, "pbr": 2.5, "eps_ttm": 3200, "market_type": "kr"},
+        {"rev_yoy": 0.12, "net_margin": 0.18, "debt_to_assets": 0.28},
+        {"upside_pct": 18.0},
+    )
+    assert s["verdict"] == "양호"
+    assert any("ROE" in x for x in s["positives"])
+    assert any("매출 성장" in x for x in s["positives"])
+    assert "특이 위험 제한적" in s["risks"]
+    assert any("DART" in x for x in s["checks"])
+
+
+def test_company_analysis_summary_risk_case():
+    s = data.company_analysis_summary(
+        {"roe": 0.04, "per": 55.0, "pbr": 6.2, "eps_ttm": -120, "per_status": "loss"},
+        {"rev_yoy": -0.08, "net_margin": 0.02, "net_margin_chg": -0.05, "debt_to_assets": 0.82},
+        {"upside_pct": -24.0},
+    )
+    assert s["verdict"] == "주의 우선"
+    assert any("적자" in x for x in s["risks"])
+    assert any("PER" in x for x in s["risks"])
+    assert any("매출 역성장" in x for x in s["risks"])
+    assert any("부채/자산" in x for x in s["risks"])
+
+
 def test_rsi_none_on_short():
     import pandas as pd
     assert data.rsi(pd.Series([1, 2, 3])) is None
@@ -181,6 +222,33 @@ def test_views_valuation_error_isolated(monkeypatch):
     v = views.valuation("MSFT")
     assert "metrics_error" in v
     assert v["consensus"]["n_analysts"] == 5
+
+
+def test_views_financials_routes_kr_to_dart(monkeypatch):
+    from dashboard import views
+    from providers import edgar, kr_fundamentals
+
+    monkeypatch.setattr(kr_fundamentals, "financial_trends",
+                        lambda t: {"market_type": "kr", "source": "DART", "trends": {"n_years": 3}})
+    monkeypatch.setattr(edgar, "fundamental_trends",
+                        lambda t: (_ for _ in ()).throw(AssertionError("EDGAR should not be called")))
+
+    f = views.financials("005930.KS")
+
+    assert f["market_type"] == "kr"
+    assert f["source"] == "DART"
+    assert f["trends"]["n_years"] == 3
+
+
+def test_views_financials_routes_us_to_edgar(monkeypatch):
+    from dashboard import views
+    from providers import edgar
+
+    monkeypatch.setattr(edgar, "fundamental_trends", lambda t: {"rev_yoy": 0.2, "n_years": 4})
+
+    f = views.financials("MSFT")
+
+    assert f["trends"]["rev_yoy"] == 0.2
 
 
 def test_views_risk_no_weights():

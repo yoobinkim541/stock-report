@@ -30,9 +30,44 @@ _KNOWN_ETFS = {
     "XLI", "XLY", "XLP", "XLU", "XLB", "XLC", "XLRE", "EFA", "EEM", "ARKK", "MOAT",
 }
 
+_KR_ETF_META = {
+    "069500": {
+        "name": "KODEX 200",
+        "family": "삼성자산운용",
+        "category": "국내 주식형",
+        "benchmark": "KOSPI 200",
+        "listing_date": "2002-10-14",
+        "description": "KOSPI 200 지수를 추종하는 국내 대표 시장 ETF",
+    },
+    "102110": {"name": "TIGER 200", "family": "미래에셋자산운용", "category": "국내 주식형", "benchmark": "KOSPI 200"},
+    "278530": {"name": "KODEX 200TR", "family": "삼성자산운용", "category": "국내 주식형", "benchmark": "KOSPI 200 TR"},
+    "122630": {"name": "KODEX 레버리지", "family": "삼성자산운용", "category": "국내 레버리지", "benchmark": "KOSPI 200"},
+    "252670": {"name": "KODEX 200선물인버스2X", "family": "삼성자산운용", "category": "국내 인버스", "benchmark": "KOSPI 200 선물"},
+    "233740": {"name": "KODEX 코스닥150레버리지", "family": "삼성자산운용", "category": "국내 레버리지", "benchmark": "KOSDAQ 150"},
+    "229200": {"name": "KODEX 코스닥150", "family": "삼성자산운용", "category": "국내 주식형", "benchmark": "KOSDAQ 150"},
+    "305720": {"name": "KODEX 2차전지산업", "family": "삼성자산운용", "category": "국내 테마형", "benchmark": "FnGuide 2차전지산업"},
+    "360750": {"name": "TIGER 미국S&P500", "family": "미래에셋자산운용", "category": "해외 주식형", "benchmark": "S&P 500"},
+    "133690": {"name": "TIGER 미국나스닥100", "family": "미래에셋자산운용", "category": "해외 주식형", "benchmark": "NASDAQ 100"},
+    "379800": {"name": "KODEX 미국S&P500TR", "family": "삼성자산운용", "category": "해외 주식형", "benchmark": "S&P 500 TR"},
+}
+
 
 def _cache_path(ticker: str) -> Path:
     return CACHE_DIR / f"etf_{ticker.upper().replace('.', '_')}.json"
+
+
+def kr_code(ticker: str) -> str | None:
+    """A069500·069500·069500.KS → 069500. 아니면 None."""
+    s = str(ticker or "").strip().upper()
+    if s.startswith("A") and len(s) == 7 and s[1:].isdigit():
+        return s[1:]
+    base = s.split(".")[0]
+    return base if len(base) == 6 and base.isdigit() else None
+
+
+def normalize_ticker(ticker: str) -> str:
+    code = kr_code(ticker)
+    return f"{code}.KS" if code else str(ticker or "").upper()
 
 
 def _load_cache(ticker: str):
@@ -116,6 +151,89 @@ def parse_top_holdings(df, limit: int = 10) -> list[dict]:
     return out
 
 
+def _col(row, *names):
+    for name in names:
+        if name in row and row.get(name) is not None:
+            return row.get(name)
+    return None
+
+
+def _num(v):
+    try:
+        if isinstance(v, str):
+            v = v.replace(",", "").replace("%", "").strip()
+        f = float(v)
+        return f if f == f else None
+    except (TypeError, ValueError):
+        return None
+
+
+def parse_kr_top_holdings(df, limit: int = 10) -> list[dict]:
+    """pykrx PDF DataFrame → [{symbol, name, pct, shares, amount}] graceful parser."""
+    out = []
+    try:
+        if df is None or getattr(df, "empty", True):
+            return []
+        rows = df.reset_index().to_dict("records")
+        total_amount = sum(_num(_col(r, "평가금액", "금액", "amount")) or 0 for r in rows)
+        for r in rows[:limit]:
+            raw_symbol = _col(r, "티커", "종목코드", "코드", "index", "Ticker", "Symbol")
+            symbol = str(raw_symbol).zfill(6) if raw_symbol is not None and str(raw_symbol).isdigit() else str(raw_symbol or "")
+            name = str(_col(r, "종목명", "종목", "Name", "name") or symbol or "현금")
+            pct = _num(_col(r, "비중", "비율", "편입비중", "weight", "Weight"))
+            if pct is not None and 0 < pct <= 1:
+                pct = pct * 100
+            amount = _num(_col(r, "평가금액", "금액", "amount"))
+            if pct is None and amount and total_amount:
+                pct = amount / total_amount * 100
+            shares = _num(_col(r, "수량", "계약수", "shares"))
+            out.append({
+                "symbol": symbol,
+                "name": name,
+                "pct": round(pct, 2) if pct is not None else None,
+                "shares": shares,
+                "amount": amount,
+            })
+    except Exception:
+        return out
+    return out
+
+
+def apply_kr_etf_metric_table(out: dict, df) -> dict:
+    """pykrx ETF 괴리율/추적오차류 테이블을 out에 병합. 테스트 가능한 순수 helper."""
+    code = str(out.get("stock_code") or kr_code(out.get("ticker")) or "")
+    try:
+        if df is None or getattr(df, "empty", True) or not code:
+            return out
+        for r in df.reset_index().to_dict("records"):
+            raw_symbol = _col(r, "티커", "종목코드", "코드", "index", "Ticker", "Symbol")
+            symbol = str(raw_symbol).zfill(6) if raw_symbol is not None and str(raw_symbol).isdigit() else str(raw_symbol or "")
+            if symbol != code:
+                continue
+            nav = _num(_col(r, "NAV", "순자산가치", "기준가"))
+            price = _num(_col(r, "종가", "현재가", "Close", "price"))
+            premium = _num(_col(r, "괴리율", "괴리율(%)", "deviation", "premium_pct"))
+            tracking = _num(_col(r, "추적오차", "추적오차율", "추적오차율(%)", "tracking_error", "tracking_error_pct"))
+            aum = _num(_col(r, "순자산", "순자산총액", "AUM", "total_assets"))
+            if nav is not None:
+                out["nav"] = nav
+            if price is not None:
+                out["price"] = price
+            if premium is not None:
+                out["premium_pct"] = round(premium, 2)
+            elif out.get("price") and out.get("nav"):
+                out["premium_pct"] = premium_pct(out.get("price"), out.get("nav"))
+            if tracking is not None:
+                out["tracking_error_pct"] = round(tracking, 2)
+            if aum is not None:
+                out["total_assets"] = aum
+            out["metrics_source"] = "pykrx ETF"
+            return out
+    except Exception:
+        return out
+    return out
+
+
 def is_etf(ticker: str, quote_type: str | None = None) -> bool:
     """ETF 여부 — quote_type 인자(감지 재사용) > 알려진 ETF 목록 > False.
 
@@ -123,7 +241,142 @@ def is_etf(ticker: str, quote_type: str | None = None) -> bool:
     """
     if quote_type:
         return str(quote_type).upper() in ("ETF", "MUTUALFUND")
+    code = kr_code(ticker)
+    if code:
+        return code in _KR_ETF_META
     return str(ticker).upper().split(".")[0] in _KNOWN_ETFS
+
+
+def _kr_etf_base(ticker: str) -> dict:
+    code = kr_code(ticker) or ""
+    meta = _KR_ETF_META.get(code, {})
+    return {
+        "ticker": f"{code}.KS" if code else str(ticker or "").upper(),
+        "stock_code": code,
+        "is_etf": bool(code and code in _KR_ETF_META),
+        "market_type": "kr",
+        "currency": "KRW",
+        "source": "KR ETF fallback",
+        "name": meta.get("name"),
+        "family": meta.get("family"),
+        "category": meta.get("category"),
+        "benchmark": meta.get("benchmark"),
+        "inception": meta.get("listing_date"),
+        "description": meta.get("description"),
+        "total_assets": None,
+        "nav": None,
+        "price": None,
+        "premium_pct": None,
+        "tracking_error_pct": None,
+        "expense_ratio": None,
+        "top_holdings": [],
+        "dividends": dividend_stats([], None),
+    }
+
+
+def _latest_kr_market_row(code: str) -> dict:
+    try:
+        from providers import kr_market_data as km
+        snap = km.marcap_asof(datetime.now().strftime("%Y-%m-%d"), market="")
+        if snap is None or len(snap) == 0:
+            return {}
+        sub = snap[snap["Code"].map(km.norm_code) == km.norm_code(code)]
+        if len(sub):
+            return sub.iloc[0].to_dict()
+    except Exception:
+        return {}
+    return {}
+
+
+def _kr_yfinance_overlay(out: dict) -> None:
+    try:
+        import yfinance as yf
+        t = yf.Ticker(out["ticker"])
+        info = {}
+        try:
+            info = t.get_info() or {}
+        except Exception:
+            info = {}
+        price = info.get("regularMarketPrice") or info.get("previousClose")
+        nav = info.get("navPrice")
+        out["price"] = price or out.get("price")
+        out["nav"] = nav or out.get("nav")
+        pm = premium_pct(out.get("price"), out.get("nav"))
+        if pm is not None:
+            out["premium_pct"] = pm
+        out["name"] = out.get("name") or info.get("longName") or info.get("shortName")
+        out["family"] = out.get("family") or info.get("fundFamily")
+        out["category"] = out.get("category") or info.get("category")
+        out["total_assets"] = out.get("total_assets") or info.get("totalAssets")
+        if out.get("expense_ratio") is None:
+            out["expense_ratio"] = info.get("annualReportExpenseRatio") or info.get("netExpenseRatio")
+        try:
+            div = t.dividends
+            pairs = [(str(idx), float(v)) for idx, v in div.items()] if div is not None else []
+            out["dividends"] = dividend_stats(pairs, out.get("price"))
+        except Exception:
+            pass
+    except Exception:
+        pass
+
+
+def _kr_pykrx_overlay(out: dict) -> None:
+    code = out.get("stock_code")
+    if not code:
+        return
+    try:
+        from pykrx import stock
+    except Exception:
+        return
+    today = datetime.now().strftime("%Y%m%d")
+    try:
+        out["name"] = out.get("name") or stock.get_etf_ticker_name(code)
+    except Exception:
+        pass
+    try:
+        pdf = None
+        for args in ((code, today), (code,), (today, code)):
+            try:
+                pdf = stock.get_etf_portfolio_deposit_file(*args)
+                if pdf is not None:
+                    break
+            except Exception:
+                continue
+        parsed = parse_kr_top_holdings(pdf)
+        if parsed:
+            out["top_holdings"] = parsed
+            out["top_holdings_source"] = "pykrx PDF"
+    except Exception:
+        pass
+    for fn_name in ("get_etf_price_deviation", "get_etf_tracking_error"):
+        try:
+            fn = getattr(stock, fn_name)
+        except Exception:
+            continue
+        for args in ((today,), (today, code), (code, today)):
+            try:
+                df = fn(*args)
+                before = dict(out)
+                apply_kr_etf_metric_table(out, df)
+                if out != before:
+                    break
+            except Exception:
+                continue
+
+
+def kr_etf_summary(ticker: str) -> dict:
+    out = _kr_etf_base(ticker)
+    if not out["is_etf"]:
+        return out
+    row = _latest_kr_market_row(out["stock_code"])
+    if row:
+        out["price"] = row.get("Close") or out.get("price")
+        out["market_cap"] = row.get("Marcap")
+        out["shares_outstanding"] = row.get("Stocks")
+        out["asof"] = str(row.get("Date"))[:10] if row.get("Date") is not None else None
+    _kr_yfinance_overlay(out)
+    _kr_pykrx_overlay(out)
+    return out
 
 
 def etf_summary(ticker: str) -> dict:
@@ -131,12 +384,16 @@ def etf_summary(ticker: str) -> dict:
 
     12h 디스크 캐시(대시보드 st.cache_data 와 이중 — 재시작/봇 재사용 대비).
     """
-    tk = str(ticker).upper()
+    tk = normalize_ticker(ticker)
     cached = _load_cache(tk)
     if cached is not None:
         return cached
 
     out: dict = {"ticker": tk, "is_etf": is_etf(tk)}
+    if kr_code(tk):
+        out = kr_etf_summary(tk)
+        _save_cache(tk, out)
+        return out
     try:
         import yfinance as yf
         t = yf.Ticker(tk)

@@ -92,7 +92,11 @@ def test_next_earnings_with_injected_today():
 
 def test_kr_degraded_mode(monkeypatch):
     from providers import earnings_data as ed
+    from providers import kr_fundamentals as kf
     kr = FakeTicker({"trailingPE": 9.0, "priceToBook": 1.1, "returnOnEquity": 0.12})  # 컨센서스 없음
+    monkeypatch.setattr(kf, "recent_annual_metrics", lambda t: {
+        "market_type": "kr", "confidence": "missing", "error": "DART_API_KEY 미설정"
+    })
     monkeypatch.setattr(ed, "_ticker", lambda s: kr)
     monkeypatch.setattr(ed, "_cache_get", lambda *a, **k: None)
     monkeypatch.setattr(ed, "_cache_put", lambda *a, **k: None)
@@ -173,6 +177,35 @@ def test_report_valuation_lines(monkeypatch):
     assert any("PER 25.3x" in l and "배당 0.8%" in l for l in lines)
     assert any("다음 실적 2026-04-25 (D-55)" in l for l in lines)
     assert any("리비전 모멘텀 +0.50" in l and "목표가 +15%" in l for l in lines)
+
+
+def test_report_valuation_lines_kr_context(monkeypatch):
+    import providers.earnings_data as ed
+    fake = {
+        "valuation": {
+            "market_type": "kr",
+            "source": "DART+marcap",
+            "fiscal_year": 2025,
+            "fs_nm": "연결재무제표",
+            "asof": "2026-07-06",
+            "confidence": "high",
+            "per": 14.0,
+            "pbr": 1.75,
+            "roe": 0.125,
+            "eps_ttm": 5000.0,
+        },
+        "next_earnings": {},
+        "last_surprise": None,
+        "consensus": {},
+    }
+    monkeypatch.setattr(ed, "summary", lambda t: fake)
+    from reports import investment_report as ir
+
+    lines = ir._earnings_valuation_lines("005930.KS")
+
+    assert any("PER 14.0x" in l and "ROE 12.5%" in l for l in lines)
+    assert any("KR 기준" in l and "DART+marcap" in l and "2025 사업보고서" in l for l in lines)
+    assert any("마캡 2026-07-06" in l and "신뢰도 high" in l for l in lines)
 
 
 def test_report_valuation_lines_graceful_on_error(monkeypatch):

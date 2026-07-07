@@ -27,6 +27,10 @@ DEFAULT_CACHE_DIR = Path(os.path.expanduser("~/reports/source-cache"))
 HEADERS = {
     "User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 Chrome/120 Safari/537.36"
 }
+# 정직 UA — FRED fredgraph·r.jina.ai 는 브라우저 위장 UA 를 봇 판정(타르핏/403), 평범한 UA 는 통과
+# (2026-07-07 라이브 실증: FRED 위장 UA=12s 타임아웃·정직 UA=0.3s 200, jina 위장 UA=403·정직 UA=200).
+# 1차 경로가 살아나면 매 실행 12시리즈×2회×12s 타임아웃 낭비 없이 즉시 수집 — API 키 폴백은 유지.
+PLAIN_HEADERS = {"User-Agent": "stock-report/1.0 (+yoobinkim2006@gmail.com)"}
 ARCA_LABELS = ("🧠분석", "📰뉴스", "ℹ️정보", "실적")
 # 보유 종목 — 단일 소스: portfolio_universe.py
 _PROJECT_DIR = os.getenv("STOCK_REPORT_PROJECT_DIR",
@@ -138,10 +142,12 @@ def _bounded_get(url: str, *, timeout: int = 20, max_bytes: int = 5_000_000, **k
     """응답 크기 상한이 있는 requests.get — 외부 프록시(r.jina.ai 등)의 과대 응답으로 인한
     메모리 고갈(DoS)을 방어한다. 본문을 청크로 읽어 max_bytes 초과 시 즉시 중단."""
     kwargs.setdefault("headers", HEADERS)
-    # r.jina.ai 는 익명 레이트리밋이 빡빡 — JINA_API_KEY 있으면 인증(쿼터 상향·429 완화)
-    if url.startswith("https://r.jina.ai/") and os.getenv("JINA_API_KEY"):
-        kwargs["headers"] = {**kwargs["headers"],
-                             "Authorization": f"Bearer {os.getenv('JINA_API_KEY')}"}
+    if url.startswith("https://r.jina.ai/"):
+        # jina 는 브라우저 위장 UA 에 403 (라이브 실증) — 정직 UA 로 교체
+        kwargs["headers"] = {**kwargs["headers"], **PLAIN_HEADERS}
+        # 익명 레이트리밋이 빡빡 — JINA_API_KEY 있으면 인증(쿼터 상향·429 완화)
+        if os.getenv("JINA_API_KEY"):
+            kwargs["headers"]["Authorization"] = f"Bearer {os.getenv('JINA_API_KEY')}"
     with requests.get(url, timeout=timeout, stream=True, **kwargs) as r:
         r.raise_for_status()
         cl = r.headers.get("Content-Length")
@@ -587,7 +593,7 @@ def fetch_fred_macro_events(series: dict[str, str] = FRED_SERIES) -> list[dict]:
             try:
                 resp = requests.get(
                     "https://fred.stlouisfed.org/graph/fredgraph.csv",
-                    headers=HEADERS,
+                    headers=PLAIN_HEADERS,   # 위장 UA 는 봇감지 타르핏 — 정직 UA 만 통과(실증)
                     params={"id": series_id},
                     timeout=12,
                 )

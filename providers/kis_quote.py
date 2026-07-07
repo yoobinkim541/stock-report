@@ -32,11 +32,13 @@ _TOKEN_URL = "/oauth2/tokenP"
 _KR_PRICE_URL = "/uapi/domestic-stock/v1/quotations/inquire-price"
 _KR_ASKING_URL = "/uapi/domestic-stock/v1/quotations/inquire-asking-price-exp-ccn"
 _OVRS_PRICE_URL = "/uapi/overseas-price/v1/quotations/price"
+_KR_VOLRANK_URL = "/uapi/domestic-stock/v1/quotations/volume-rank"
 
 # 시세 조회 TR (읽기전용). 응답 필드명은 라이브 스모크 전 확정 금지.
 _TR_KR_PRICE = "FHKST01010100"    # 국내 현재가
 _TR_KR_ASKING = "FHKST01010200"   # 국내 호가+예상체결 (10단계)
 _TR_OVRS_PRICE = "HHDFS00000300"  # 해외 현재가 (S6서 동작 확인된 TR)
+_TR_KR_VOLRANK = "FHPST01710000"  # 국내 거래량/거래대금 순위 (단기 스캐너용 — 조회 전용)
 
 _TOKEN_FILE = os.path.expanduser("~/.cache/kis_quote_token.json")
 _token_cache: dict = {"token": None, "exp": 0.0}
@@ -107,6 +109,23 @@ def parse_overseas_price(output: dict) -> dict:
     last = output.get("last")
     price = _f(output, "last") if last not in (None, "", "0") else None
     return {"price": price, "volume": _f(output, "tvol")}
+
+
+def parse_volume_rank(rows: list[dict]) -> list[dict]:
+    """거래량 순위 output → [{code, name, price, chg_pct, volume, turnover}].
+
+    mksc_shrn_iscd=단축코드·hts_kor_isnm=종목명·stck_prpr=현재가·prdy_ctrt=등락률%·
+    acml_vol=누적거래량·acml_tr_pbmn=누적거래대금(원).
+    """
+    out = []
+    for r in rows or []:
+        code = str(r.get("mksc_shrn_iscd") or "").strip()
+        if not code:
+            continue
+        out.append({"code": code, "name": str(r.get("hts_kor_isnm") or "").strip(),
+                    "price": _f(r, "stck_prpr"), "chg_pct": _f(r, "prdy_ctrt"),
+                    "volume": _f(r, "acml_vol"), "turnover": _f(r, "acml_tr_pbmn")})
+    return out
 
 
 # ── 토큰 (디스크 영속) ────────────────────────────────────────────────────────
@@ -265,3 +284,27 @@ def get_snapshot(symbol: str, *, market: str = "KR") -> dict | None:
     ob = get_orderbook(symbol, market=market) or {}
     return {**q, "bids": ob.get("bids"), "asks": ob.get("asks"),
             "best_bid": ob.get("best_bid"), "best_ask": ob.get("best_ask")}
+
+
+def volume_rank_kr() -> list[dict] | None:
+    """국내 거래대금 순위 상위 (단기 스캐너용·조회 전용 GET). 실패/비활성 None.
+
+    FID_BLNG_CLS_CODE=3 → 거래금액순 정렬. 응답 필드 단위(acml_tr_pbmn=원)는
+    라이브 스모크로 확정 — 실패 시 스캐너가 정적 유니버스로 폴백하므로 graceful.
+    """
+    if not is_enabled():
+        return None
+    h = _headers(_TR_KR_VOLRANK)
+    if not h:
+        return None
+    j = _http_get(_QUOTE_BASE + _KR_VOLRANK_URL, h, {
+        "FID_COND_MRKT_DIV_CODE": "J", "FID_COND_SCR_DIV_CODE": "20171",
+        "FID_INPUT_ISCD": "0000", "FID_DIV_CLS_CODE": "0",
+        "FID_BLNG_CLS_CODE": "3", "FID_TRGT_CLS_CODE": "111111111",
+        "FID_TRGT_EXLS_CLS_CODE": "0000000000",
+        "FID_INPUT_PRICE_1": "", "FID_INPUT_PRICE_2": "",
+        "FID_VOL_CNT": "", "FID_INPUT_DATE_1": ""})
+    if not j:
+        return None
+    rows = parse_volume_rank(j.get("output") or [])
+    return rows or None

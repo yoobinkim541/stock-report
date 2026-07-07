@@ -1,6 +1,7 @@
 # ── 보안 ────────────────────────────────
 .env
 .env.*
+!/.env.example
 kiwoom_sync/.env
 kiwoom_sync/sync.log
 *.key
@@ -10,6 +11,7 @@ secrets/
 # ── 개인 금융 데이터 (버전 관리 제외) ────
 portfolio_snapshot.json
 portfolio_snapshot.json.bak
+portfolio_snapshot.json.lock
 leverage_state.json
 price_alerts.json
 dca_weights.json
@@ -55,7 +57,8 @@ tasks-telegram-bot.md
 *.log
 
 # ── 생성된 리포트 (로컬 저장) ─────────────
-reports/
+reports/*
+!reports/llm_decision.py
 ~/reports/
 
 # ── IDE ─────────────────────────────────

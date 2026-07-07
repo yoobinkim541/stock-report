@@ -187,6 +187,14 @@ flowchart TB
 
 ## 🆕 최근 업그레이드
 
+### v3.0 — LLM 판단근거 보강 (2026-07)
+
+- **일일 투자 리포트 LLM 활성화** — `scripts/deliver_investment_report.sh` 기본값으로 LLM overlay와 보유종목 컨텍스트 판단근거를 켬. `INVESTMENT_REPORT_LLM_DECISION_MODE=shadow`라서 매수/매도 판정은 설명으로만 붙고 자동집행은 없음.
+- **방어주/위험주 구분 개선** — 숫자 신호만으로 `위험` 처리하던 보유종목에 컨텍스트 메타데이터와 LLM schema guard를 붙여 `비중점검`과 `위험`을 분리.
+- **국내/해외 모의투자 리포트 LLM 판단근거** — KR/US 페이퍼트레이딩 현황 리포트에 `🧠 LLM 판단근거` 섹션을 추가. 입력 JSON 안의 수익률, 벤치마크, MDD, 보유비중, 최근 편입/퇴출, 스코어카드만 설명하며 모의 주문 로직에는 영향 없음.
+- **주문 리밸런싱 LLM shadow 계측** — KR/US 모의 주문계획을 LLM이 `allow/block/reduce_half`로 리뷰하고, 기본 `MOCK_ORDER_LLM_MODE=shadow`에서는 주문을 바꾸지 않은 채 별도 원장(`*_llm_shadow`)에 기록. 주간 학습 루프가 5/20/60D 성숙 후 rule-only 대비 평균 개선폭과 적중률을 백필한다. `guarded_apply`는 명시 설정 시 매수 block/reduce_half만 제한 적용.
+- **설정 스위치** — `.env`에서 `INVESTMENT_REPORT_LLM_ENABLED`, `INVESTMENT_REPORT_LLM_DECISION_ENABLED`, `MOCK_REPORT_LLM_ENABLED`, `MOCK_ORDER_LLM_ENABLED`로 끄고 켤 수 있고, 모델은 `*_LLM_MODEL`, provider는 `*_LLM_PROVIDER`로 변경.
+
 ### v2.9 — 기관 매집·시각화·안전장치·아키텍처 리팩토링 (2026-06)
 
 - **기관 매집 추적** (`reports/institutional_flow.py`) — 거래량 방향성(OBV·CMF·A/D) 매집 강도 + 美 13F 교차검증, 일일 리포트 섹션 + `/accum` + 주간 스냅샷.
