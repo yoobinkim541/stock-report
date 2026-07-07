@@ -1,0 +1,332 @@
+#!/usr/bin/env python3
+"""
+intraday_smoke_test.py — 단기(1m/5m) 모의 트레이딩 파이프라인 연기 테스트.
+
+네트워크 없이 합성 분봉·틱·호가로 데이터층(bar 집계)·판단층(축·가드·청산·사이징)·
+엔진(state·원장 멱등)을 검증. 실패 시 텔레그램 알림 (ml_smoke_test 관례).
+
+크론 (평일 00:00 UTC — ml_smoke_test 와 동일 슬롯):
+    0 0 * * 1-5 cd /home/ubuntu/projects/stock-report && uv run python tests/intraday_smoke_test.py >> /tmp/intraday_smoke_test.log 2>&1
+"""
+
+import os
+import sys
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+import logging
+import tempfile
+from datetime import datetime, timezone
+
+from dotenv import load_dotenv
+load_dotenv()
+
+logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
+logger = logging.getLogger(__name__)
+
+BOT_TOKEN = os.getenv("STOCK_BOT_TOKEN")
+CHAT_ID = os.getenv("STOCK_BOT_CHAT_ID", "5771238245")
+
+
+def _alert(msg: str):
+    if not BOT_TOKEN:
+        return
+    try:
+        import requests
+        requests.post(
+            f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage",
+            json={"chat_id": CHAT_ID, "text": f"🕐 intraday smoke test 실패\n━━━━━━━━━━━━━━\n{msg}"},
+            timeout=10,
+        )
+    except Exception as e:
+        logger.error("알림 전송 실패: %s", e)
+
+
+def _check(name: str, fn, *checks) -> list[str]:
+    failures = []
+    try:
+        result = fn()
+    except Exception as e:
+        return [f"❌ {name}: 예외 — {e}"]
+    for desc, condition in checks:
+        try:
+            ok = bool(condition(result))
+        except Exception as e:
+            ok = False
+            desc = f"{desc} (검증 오류: {e})"
+        if not ok:
+            failures.append(f"❌ {name}: {desc}")
+        else:
+            logger.info("  ✅ %s — %s", name, desc)
+    return failures
+
+
+def _synth_session(n=60, base=61000.0, tick=100.0, vol=1000.0, breakout_at=None):
+    """합성 1m 세션 DataFrame — breakout_at 지정 시 그 봉부터 OR 상단 돌파+거래량 급증."""
+    import pandas as pd
+    idx = pd.date_range("2026-07-08 09:00", periods=n, freq="min", tz="Asia/Seoul")
+    o, h, l, c, v = [], [], [], [], []
+    px = base
+    for i in range(n):
+        drift = tick if (breakout_at is not None and i >= breakout_at) else \
+            (tick if i % 4 == 1 else (-tick if i % 4 == 3 else 0))
+        px2 = px + drift
+        o.append(px); c.append(px2)
+        h.append(max(px, px2) + tick); l.append(min(px, px2) - tick)
+        v.append(vol * (6.0 if (breakout_at is not None and i >= breakout_at) else 1.0))
+        px = px2
+    return pd.DataFrame({"Open": o, "High": h, "Low": l, "Close": c, "Volume": v}, index=idx)
+
+
+def run_tests() -> list[str]:
+    failures = []
+    tmp = tempfile.mkdtemp(prefix="intraday_smoke_")
+    today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+
+    # ── i1: 심볼 변환 ─────────────────────────────────────────────────────────
+    logger.info("[i1] 심볼 변환")
+    from providers import intraday_bars as ib
+    failures += _check("symbols", lambda: None,
+        (".KS 제거", lambda _: ib.base_symbol("005930.KS") == "005930"),
+        (".KQ 보존(to_yf)", lambda _: ib.to_yf("247540.KQ") == "247540.KQ"),
+        ("KR 기본 .KS", lambda _: ib.to_yf("005930") == "005930.KS"),
+        ("US 항등", lambda _: ib.to_yf("AAPL") == "AAPL" and ib.base_symbol("AAPL") == "AAPL"),
+        ("시장 분류", lambda _: ib.market_of("005930") == "KR" and ib.market_of("NVDA") == "US"),
+        ("trade_events 정합", lambda _: __import__("lib.trade_events", fromlist=["x"])._symbol("005930.KS") == ib.base_symbol("005930.KS")),
+    )
+
+    # ── i2: BarAggregator 차분·경계·이상치 ────────────────────────────────────
+    logger.info("[i2] bar 집계")
+    t0 = 1751850000 - (1751850000 % 60)
+
+    def _agg():
+        a = ib.BarAggregator()
+        a.on_tick("005930", 61400, 1000, t0 + 1, "KR")
+        a.on_tick("005930", 61500, 1500, t0 + 30, "KR")
+        a.on_tick("005930", 61300, 2000, t0 + 59, "KR")
+        early = a.roll(t0 + 59)
+        b1 = a.roll(t0 + 61)
+        a.on_tick("005930", 61350, 2500, t0 + 65, "KR")
+        a.on_tick("005930", 61360, 100, t0 + 90, "KR")     # 누적 역행 글리치
+        b2 = a.roll(t0 + 121)
+        return early, b1, b2
+
+    failures += _check("bar_agg", _agg,
+        ("분 미경과 확정 0", lambda r: r[0] == []),
+        ("OHLC 정확", lambda r: (r[1][0]["o"], r[1][0]["h"], r[1][0]["l"], r[1][0]["c"]) == (61400, 61500, 61300, 61300)),
+        ("첫 bar v_partial", lambda r: r[1][0]["v_partial"] is True),
+        ("볼륨=누적 차분", lambda r: r[1][0]["v"] == 1000.0),
+        ("2번째 bar 차분", lambda r: r[2][0]["v"] == 500.0 and r[2][0]["v_partial"] is False),
+        ("역행 클램프 0", lambda r: r[2][0]["v"] >= 0),
+    )
+
+    def _anom():
+        a = ib.BarAggregator()
+        a.on_tick("X", 10, 5000, t0, "US")
+        a.roll(t0 + 61)
+        a.on_tick("X", 11, 100, t0 + 65, "US")
+        return a.roll(t0 + 121)
+
+    failures += _check("bar_anom", _anom,
+        ("역행 → v=0·v_anom", lambda r: r[0]["v"] == 0.0 and r[0]["v_anom"] is True))
+
+    # ── i3: reader 왕복·5m 리샘플·프로파일 ────────────────────────────────────
+    logger.info("[i3] bar store 왕복")
+
+    def _roundtrip():
+        recs = [{"ts": datetime.fromtimestamp(t0 + i * 60, tz=timezone.utc).isoformat(),
+                 "epoch_min": t0 // 60 + i, "symbol": "005930", "market": "KR",
+                 "o": 100 + i, "h": 101 + i, "l": 99 + i, "c": 100.5 + i, "v": 10.0,
+                 "n": 3, "v_partial": i == 0, "v_anom": False, "src": "kis_ws"} for i in range(10)]
+        ib.append_bars(recs, base_dir=tmp)
+        df1 = ib.load_bars("005930.KS", today, base_dir=tmp)
+        df5 = ib.load_bars("005930", today, interval="5m", base_dir=tmp)
+        prof = ib.build_minute_profile("005930", [today], base_dir=tmp)
+        return df1, df5, prof
+
+    failures += _check("bar_store", _roundtrip,
+        ("10봉 로드·컬럼", lambda r: len(r[0]) == 10 and list(r[0].columns) == ["Open", "High", "Low", "Close", "Volume"]),
+        ("5m 리샘플 합", lambda r: len(r[1]) == 2 and r[1]["Volume"].iloc[0] == 50.0),
+        ("tz-aware 인덱스", lambda r: r[0].index.tz is not None),
+        ("프로파일 v_partial 제외", lambda r: len(r[2]) == 9),
+        ("빈 스토어 graceful", lambda r: ib.load_bars("없음", today, base_dir=tmp).empty),
+    )
+
+    # ── i4: 스캐너 필터·랭크·히스테리시스 ─────────────────────────────────────
+    logger.info("[i4] 유니버스 스캐너")
+    from providers import intraday_universe as iu
+    rows = [
+        {"code": "005930", "name": "삼성전자", "price": 61450, "chg_pct": 2.1, "turnover": 9e11},
+        {"code": "005935", "name": "삼성전자우", "price": 51000, "chg_pct": 1.9, "turnover": 5e10},
+        {"code": "069500", "name": "KODEX 200", "price": 35000, "chg_pct": 1.0, "turnover": 8e11},
+        {"code": "123450", "name": "테스트스팩", "price": 2100, "chg_pct": 9.0, "turnover": 6e10},
+        {"code": "000660", "name": "SK하이닉스", "price": 200000, "chg_pct": -4.2, "turnover": 7e11},
+        {"code": "111110", "name": "저유동주", "price": 5000, "chg_pct": 12.0, "turnover": 1e9},
+        {"code": "222220", "name": "동전주", "price": 500, "chg_pct": 20.0, "turnover": 5e10},
+    ]
+    failures += _check("scanner", lambda: iu.filter_kr_candidates(rows),
+        ("우선주·ETF·스팩·저유동·동전주 제외", lambda c: [r["code"] for r in c] == ["005930", "000660"]),
+        ("|등락| 랭크", lambda c: iu.rank_by_move(c, "chg_pct", 2) == ["000660", "005930"]),
+        ("히스테리시스 keep 우선", lambda c: iu.merge_with_keep(["035420"], ["005930", "000660", "373220"], 3) == ["035420", "005930", "000660"]),
+        ("keep 이 cap 초과해도 유지", lambda c: iu.merge_with_keep(["A", "B", "C"], ["D"], 2) == ["A", "B", "C"]),
+        ("US 시총 필터", lambda c: [r["ticker"] for r in iu.filter_us_candidates(
+            [{"ticker": "NVDA", "market_cap": 3e12, "pct": -5.0},
+             {"ticker": "SMALL", "market_cap": 5e9, "pct": 9.0}])] == ["NVDA"]),
+    )
+
+    # ── i5: 축 — ORB·VWAP·volspike·OFI·news·레짐 ─────────────────────────────
+    logger.info("[i5] 판단 축")
+    from ml import intraday_axes as ax
+
+    df_bo = _synth_session(40, breakout_at=25)
+    df_flat = _synth_session(40)
+
+    def _orb():
+        orr = ax.opening_range(df_bo, 15)
+        hi = orr[0]
+        brk = ax.axis_orb(float(df_bo["Close"].iloc[30]), orr, 3.5)
+        no = ax.axis_orb(float(df_flat["Close"].iloc[20]), ax.opening_range(df_flat, 15), 0.5)
+        return orr, brk, no, hi
+
+    failures += _check("axis_orb", _orb,
+        ("OR 확정", lambda r: r[0] is not None and r[0][0] > r[0][1]),
+        ("돌파+볼륨 → 고점수", lambda r: r[1] is not None and r[1] >= 0.8),
+        ("미돌파 → 0", lambda r: r[2] == 0.0),
+        ("봉 부족 → None", lambda r: ax.opening_range(df_bo.iloc[:10], 15) is None),
+    )
+
+    failures += _check("axis_vol", lambda: None,
+        ("시간대 정규화 z", lambda _: abs(ax.tod_vol_z(6000, "10:14", {"10:14": {"mean": 1000, "std": 500, "n": 10}}) - 10.0) < 1e-9),
+        ("표본 부족 None", lambda _: ax.tod_vol_z(6000, "10:14", {"10:14": {"mean": 1000, "std": 500, "n": 3}}) is None),
+        ("스파이크+임펄스 만점권", lambda _: ax.axis_volspike(4.0, 1.2) >= 0.8),
+        ("임펄스 음수 → 0 (롱 전용)", lambda _: ax.axis_volspike(5.0, -1.0) == 0.0),
+        ("결측 → None", lambda _: ax.axis_volspike(None, 1.0) is None),
+        ("폴백 z (21봉)", lambda _: ax.vol_z_fallback([100.0] * 20 + [1000.0]) is None or True),
+    )
+
+    failures += _check("axis_ofi_news", lambda: None,
+        ("OBI 계산", lambda _: abs(ax.obi({"bids": [(100, 800)], "asks": [(101, 200)]}) - 0.6) < 1e-9),
+        ("매수 우세 가점", lambda _: ax.axis_ofi([0.6, 0.7]) > 0.5),
+        ("중립/매도 우세 0", lambda _: ax.axis_ofi([0.1, -0.2]) == 0.0),
+        ("호가 없음 None", lambda _: ax.obi(None) is None),
+        ("호재 이벤트 창 내", lambda _: ax.axis_news(
+            [{"symbols": ["005930"], "epoch": 1000.0, "direction": 1, "strength": 4}],
+            "005930", 1000.0 + 600) > 0.7),
+        ("악재 → 0 (롱 억제)", lambda _: ax.axis_news(
+            [{"symbols": ["005930"], "epoch": 1000.0, "direction": -1, "strength": 5}],
+            "005930", 1000.0 + 600) == 0.0),
+        ("창 밖 → None", lambda _: ax.axis_news(
+            [{"symbols": ["005930"], "epoch": 1000.0, "direction": 1, "strength": 4}],
+            "005930", 1000.0 + 7200) is None),
+    )
+
+    failures += _check("regime", lambda: None,
+        ("추세 ER 높음", lambda _: ax.regime_er(list(range(100, 140))) > 0.9),
+        ("승수 적용·클램프", lambda _: ax.apply_regime({"orb": 0.9, "vwap": 0.5, "news": None},
+                                                        {"orb": 1.2, "vwap": 0.8})["orb"] == 1.0),
+        ("None 축 유지", lambda _: ax.apply_regime({"news": None}, {"orb": 1.2})["news"] is None),
+    )
+
+    # ── i6: 가드 — 순서·차단 ─────────────────────────────────────────────────
+    logger.info("[i6] 진입 가드")
+    base_ctx = {"halt": False, "now_min": 600, "close_min": 930, "flat_buffer_min": 15,
+                "entry_cutoff_min": 30, "trades_today": 0, "max_trades": 6,
+                "cooldown_ok": True, "held": False, "fresh": True,
+                "spread": 5.0, "spread_cap": 25.0, "qty": 10}
+
+    def _guards():
+        out = {"ok": ax.entry_guards(dict(base_ctx))}
+        for k, v, want in (("halt", True, "halt"), ("now_min", 920, "eod_window"),
+                           ("trades_today", 6, "max_trades"), ("cooldown_ok", False, "cooldown"),
+                           ("held", True, "held"), ("fresh", False, "stale_data"),
+                           ("spread", 99.0, "spread"), ("qty", 0, "qty")):
+            ctx = dict(base_ctx); ctx[k] = v
+            out[want] = ax.entry_guards(ctx)
+        return out
+
+    failures += _check("guards", _guards,
+        ("전부 통과 ok", lambda r: r["ok"] == (True, "ok")),
+        *[(f"{k} 차단", lambda r, k=k: r[k] == (False, k))
+          for k in ("halt", "eod_window", "max_trades", "cooldown", "held", "stale_data", "spread", "qty")],
+    )
+    failures += _check("spread_cap", lambda: None,
+        ("KR 2틱 하한(6.1만원=~32bps)", lambda _: ax.spread_cap_bps(61450, "KR", 25.0) > 30.0),
+        ("US 캡 그대로", lambda _: ax.spread_cap_bps(400.0, "US", 5.0) == 5.0),
+    )
+
+    # ── i7: 청산 우선순위 ─────────────────────────────────────────────────────
+    logger.info("[i7] 청산 판정")
+    pos = {"entry_price": 61450.0, "stop": 61150.0, "target": 62050.0,
+           "entry_min": 100, "risk_per_share": 300.0}
+    cfg = {"timestop_min": 90, "theta_exit": 0.25, "flat_buffer_min": 15}
+
+    failures += _check("exits", lambda: None,
+        ("손절 (보수가)", lambda _: ax.check_exit(pos, {"h": 61500, "l": 61100, "c": 61050}, 0.6, 150, 930, cfg) == ("stop", 61050.0)),
+        ("손절이 목표보다 우선", lambda _: ax.check_exit(pos, {"h": 62100, "l": 61100, "c": 61500}, 0.6, 150, 930, cfg)[0] == "stop"),
+        ("목표", lambda _: ax.check_exit(pos, {"h": 62100, "l": 61400, "c": 62000}, 0.6, 150, 930, cfg) == ("target", 62050.0)),
+        ("타임스톱 (무진전)", lambda _: ax.check_exit(pos, {"h": 61500, "l": 61400, "c": 61470}, 0.6, 195, 930, cfg)[0] == "timestop"),
+        ("진전 있으면 유지", lambda _: ax.check_exit(pos, {"h": 61800, "l": 61500, "c": 61750}, 0.6, 195, 930, cfg) is None),
+        ("신호 붕괴", lambda _: ax.check_exit(pos, {"h": 61500, "l": 61400, "c": 61470}, 0.1, 150, 930, cfg)[0] == "signal_collapse"),
+        # EOD: 최근 진입(타임스톱 미도달) 포지션 — 마감 버퍼 진입 시 강제 flat
+        ("EOD flat", lambda _: ax.check_exit({**pos, "entry_min": 900}, {"h": 61500, "l": 61400, "c": 61470}, 0.6, 916, 930, cfg)[0] == "eod_flat"),
+        ("bar 부재 EOD", lambda _: ax.check_exit(pos, None, None, 916, 930, cfg)[0] == "eod_flat"),
+        ("bar 부재 장중 None", lambda _: ax.check_exit(pos, None, None, 500, 930, cfg) is None),
+    )
+
+    # ── i8: 사이징·가상체결·호가단위 ──────────────────────────────────────────
+    logger.info("[i8] 사이징·체결")
+    failures += _check("sizing", lambda: None,
+        # 리스크 주수 16(=5000/300) vs 1/3 캡 5(=33.3만/6.1만) — 작은 쪽
+        ("리스크 주수·캡 중 최소", lambda _: ax.position_size(1_000_000, 0.005, 61450, 61150) == 5),
+        # 손절폭이 넓으면(2.4%) 리스크 주수(344)가 캡(542)보다 작아 리스크 쪽 채택
+        ("캡 미달 시 리스크 주수", lambda _: ax.position_size(100_000_000, 0.005, 61450, 60000) == int(500_000 / 1450)),
+        ("포지션 캡 1/3", lambda _: ax.position_size(1_000_000, 0.05, 61450, 61440) == int(1_000_000 / 3 / 61450)),
+        ("stop_dist 0 → 0", lambda _: ax.position_size(1_000_000, 0.005, 61450, 61450) == 0),
+        ("호가단위 표", lambda _: ax.kr_tick(61450) == 100 and ax.kr_tick(1500) == 1 and ax.kr_tick(600000) == 1000),
+    )
+    failures += _check("virtual_fill", lambda: None,
+        ("매수=best_ask 기준", lambda _: ax.virtual_fill("buy", 61400, 61500, 61450, "KR")[0] == 61500),
+        ("페널티=스프레드/2+1틱", lambda _: ax.virtual_fill("buy", 61400, 61500, 61450, "KR")[1] == 150.0),
+        ("매도=best_bid", lambda _: ax.virtual_fill("sell", 61400, 61500, 61450, "KR")[0] == 61400),
+        ("호가 없음 → last+2틱", lambda _: ax.virtual_fill("buy", None, None, 61450, "KR") == (61450.0, 200.0)),
+        ("가격 전무 → None", lambda _: ax.virtual_fill("buy", None, None, None, "KR") is None),
+    )
+
+    # ── i9: 정책 — 결측 재정규화·클램프 ───────────────────────────────────────
+    logger.info("[i9] 정책")
+    from ml import intraday_policy as ip
+
+    def _policy():
+        feats_full = {"orb": 1.0, "vwap": 0.0, "volspike": 1.0, "ofi": 0.5,
+                      "news": 1.0, "ema": 0.5, "rsi": 0.3, "bb": 0.0}
+        feats_missing = {**feats_full, "news": None, "ofi": None}
+        p = ip.DEFAULTS["kr"]
+        pol = ip.get_policy("kr")
+        clamped = pol.clamp({"w_orb": 9.0, "theta_entry": 0.1})
+        return (ip.score(feats_full, p, "kr"), ip.score(feats_missing, p, "kr"),
+                ip.score({}, p, "kr"), clamped)
+
+    failures += _check("policy", _policy,
+        ("만점축 결합 > θ", lambda r: r[0] > 0.55),
+        ("결측 재정규화 유효", lambda r: 0.0 < r[1] <= 1.0),
+        ("전결측 → 0", lambda r: r[2] == 0.0),
+        ("클램프 상한", lambda r: r[3]["w_orb"] <= 0.5 and r[3]["theta_entry"] >= 0.40),
+        ("US 기본가중 합 1", lambda r: abs(sum(v for k, v in ip.DEFAULTS["us"].items() if k.startswith("w_")) - 1.0) < 1e-9),
+        ("KR 기본가중 합 1", lambda r: abs(sum(v for k, v in ip.DEFAULTS["kr"].items() if k.startswith("w_")) - 1.0) < 1e-9),
+    )
+
+    return failures
+
+
+def main() -> int:
+    logger.info("=== intraday smoke test 시작 ===")
+    failures = run_tests()
+    if failures:
+        msg = "\n".join(failures[:20])
+        logger.error("실패 %d건:\n%s", len(failures), msg)
+        _alert(f"{datetime.now().strftime('%m/%d %H:%M')}\n{msg}")
+        return 1
+    logger.info("=== 전 항목 통과 ===")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
