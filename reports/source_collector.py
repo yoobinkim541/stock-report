@@ -27,6 +27,10 @@ DEFAULT_CACHE_DIR = Path(os.path.expanduser("~/reports/source-cache"))
 HEADERS = {
     "User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 Chrome/120 Safari/537.36"
 }
+# 정직 UA — FRED·r.jina.ai 는 브라우저 위장 UA 를 봇으로 판정(타르핏/403), 평범한 UA 는 통과
+# (2026-07-07 라이브 실증: FRED 위장 UA=12s 타임아웃·기본 UA=0.3s 200, jina 위장 UA=403).
+# 텔레그램 t.me/s 는 브라우저 UA 로 정상 동작 중 — 소스별로 구분 사용.
+PLAIN_HEADERS = {"User-Agent": "stock-report/1.0 (+yoobinkim2006@gmail.com)"}
 ARCA_LABELS = ("🧠분석", "📰뉴스", "ℹ️정보", "실적")
 # 보유 종목 — 단일 소스: portfolio_universe.py
 _PROJECT_DIR = os.getenv("STOCK_REPORT_PROJECT_DIR",
@@ -330,7 +334,8 @@ def fetch_arca_events(max_pages: int = 2) -> list[dict]:
     link_pat = re.compile(r"\[([^\]]+)\]\(https://arca\.live/b/stock/(\d+)\?p=(\d+)\)")
     for page in range(1, max_pages + 1):
         try:
-            resp = _bounded_get(f"https://r.jina.ai/http://arca.live/b/stock?p={page}", timeout=20)
+            resp = _bounded_get(f"https://r.jina.ai/http://arca.live/b/stock?p={page}",
+                                timeout=20, headers=PLAIN_HEADERS)
             markdown = resp.text
         except Exception:
             continue
@@ -510,7 +515,7 @@ def fetch_fred_macro_events(series: dict[str, str] = FRED_SERIES) -> list[dict]:
             try:
                 resp = requests.get(
                     "https://fred.stlouisfed.org/graph/fredgraph.csv",
-                    headers=HEADERS,
+                    headers=PLAIN_HEADERS,   # 위장 UA 는 FRED 봇감지에 타르핏 — 정직 UA 만 통과
                     params={"id": series_id},
                     timeout=12,
                 )
@@ -571,7 +576,8 @@ def fetch_world_gov_bond_events(countries: dict[str, str] = WORLD_GOV_BOND_COUNT
     events = []
     for country, label in countries.items():
         try:
-            resp = _bounded_get(f"https://r.jina.ai/http://www.worldgovernmentbonds.com/country/{country}/", timeout=20)
+            resp = _bounded_get(f"https://r.jina.ai/http://www.worldgovernmentbonds.com/country/{country}/",
+                                timeout=20, headers=PLAIN_HEADERS)
             yields = _parse_yields_from_world_gov_bonds(resp.text)
         except Exception:
             continue
