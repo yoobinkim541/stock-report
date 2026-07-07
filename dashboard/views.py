@@ -727,3 +727,32 @@ def source_health_summary() -> dict:
         return {"health": health, "stale": stale_sources(health) if health else []}
     except Exception as e:
         return {"health": {}, "stale": [], "error": str(e)}
+
+
+def etf_overview(ticker: str) -> dict:
+    """ETF 전용 요약 (providers.etf_data) — 비ETF {"is_etf": False}. graceful."""
+    try:
+        from providers import etf_data
+        return etf_data.etf_summary(ticker)
+    except Exception as e:
+        # 판정 실패 시에도 알려진 ETF 는 ETF 레이아웃 유지(주식 뷰 오표시 방지)
+        try:
+            from providers.etf_data import is_etf
+            return {"ticker": ticker, "is_etf": is_etf(ticker), "error": str(e)}
+        except Exception:
+            return {"ticker": ticker, "is_etf": False, "error": str(e)}
+
+
+def social_sentiment(hours: int = 72) -> dict:
+    """레딧/WSB 심리 카드 — insidertracking 분석 포스트 구조화 (표시·컨텍스트 전용).
+
+    판단 반영은 news_labels → news 축(게이트) 단일 경로 — 이 카드는 신호 아님.
+    """
+    try:
+        from reports.source_collector import load_recent_events
+        from reports.social_sentiment import sentiment_summary
+        events = [e for e in load_recent_events(hours=hours)
+                  if str(e.get("source", "")).startswith("telegram:")]
+        return {"summary": sentiment_summary(events)}
+    except Exception as e:
+        return {"summary": None, "error": str(e)}

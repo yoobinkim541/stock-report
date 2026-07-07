@@ -29,6 +29,15 @@ data.portfolio_summary = lambda *a, **k: {"total_usd":10000.0,"return_pct":15.0,
 data.portfolio_weights = lambda *a, **k: {"MSFT":0.4,"NVDA":0.6}
 cached.econ = lambda *a, **k: [{"marker":"\U0001f534","date_str":"06/29 21:30","title":"CPI"}]
 cached.news = lambda t: "뉴스 본문"
+cached.etf = lambda t: {"ticker": t, "is_etf": False}
+cached.social_sentiment = lambda: {"summary": {"title": "미국 레딧 게시물 분석",
+    "published_at": "2026-07-05T10:00:00+09:00", "url": "https://t.me/insidertracking/1",
+    "top_tickers": ["MU", "SNDK", "NVDA"],
+    "mood_bullets": ["메모리가 압도적인 주인공", "YOLO 콜옵션 심리 강함"],
+    "sections": [{"emoji": "\U0001f4be", "heading": "MU / SNDK - AI 메모리",
+                  "tickers": ["MU", "SNDK"], "bullets": ["갭업 기대", "ATH 반복 언급"]},
+                 {"emoji": "\U0001f525", "heading": "현재 WSB 전체 시장 심리",
+                  "tickers": [], "bullets": ["Risk-On"]}]}}
 cached.source_health = lambda: {"health": {"saveticker": {"last_count": 12}},
     "stale": [{"source": "telegram:insidertracking", "hours": None, "threshold": 12}]}
 cached.collected_news = lambda hours=48: {"hours": hours, "groups": {
@@ -384,3 +393,29 @@ def test_sidebar_paper_rail_and_nav(monkeypatch):
     at.session_state["_nav_to_paper"] = True          # 레일 버튼 클릭 시뮬
     at.run()
     assert not at.exception, str(at.exception)
+
+
+def test_ticker_page_etf_view():
+    """ETF 티커는 개별주 섹션 대신 ETF 전용 뷰(프로필·Top10·보수·괴리율·배당) — 무예외."""
+    etf_stub = '''
+st.session_state["ticker"] = "QQQI"
+cached.etf = lambda t: {"ticker": "QQQI", "is_etf": True,
+    "name": "NEOS Nasdaq 100 High Income ETF",
+    "description": "나스닥 100에 커버드콜 전략으로 투자하는 ETF",
+    "family": "NEOS Investment Management LLC", "category": "Derivative Income",
+    "total_assets": 1.291e10, "nav": 56.1, "price": 55.82, "premium_pct": -0.5,
+    "expense_ratio": 0.0068, "shares_outstanding": 230230000, "inception": "2024-01-30",
+    "top_holdings": [
+        {"symbol": "NVDA", "name": "NVIDIA", "pct": 7.65},
+        {"symbol": "AAPL", "name": "Apple", "pct": 6.63},
+        {"symbol": "MSFT", "name": "Microsoft", "pct": 4.38}],
+    "sector_weights": {"technology": 51.2, "communication_services": 15.3},
+    "dividends": {"count_12m": 12, "per_share_12m": 7.62, "yield_pct": 13.69, "freq_label": "매월"}}
+'''
+    at = AppTest.from_string(_STUBS + etf_stub + "\nfrom dashboard.pages import ticker\nticker.render()\n",
+                             default_timeout=30)
+    at.run()
+    assert not at.exception, at.exception
+    body = " ".join(str(x) for x in at.markdown) + " ".join(m.label for m in at.metric)
+    assert "운용보수" in body and "괴리율" in body            # ETF 지표 렌더
+    assert not any("PER" == m.label for m in at.metric)      # 주식 밸류 섹션 미렌더
