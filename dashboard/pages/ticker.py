@@ -286,6 +286,7 @@ def _detail_sections(ticker, price):
 def _valuation(ticker, price=None):
     v = cached.valuation(ticker)
     m = v.get("metrics") or {}
+    is_kr = m.get("market_type") == "kr"
     if m:
         a = st.columns(4)
         a[0].metric("PER", data.f_ratio(m.get("per")))
@@ -296,7 +297,14 @@ def _valuation(ticker, price=None):
         b[0].metric("ROE", data.f_frac_pct(m.get("roe")))
         b[1].metric("배당수익률", data.f_pct(m.get("div_yield"), 2))
         b[2].metric("배당성장 3Y", data.f_frac_pct_s(m.get("div_growth_3y")))
-        b[3].metric("EPS(TTM)", data.f_usd(m.get("eps_ttm")))
+        b[3].metric("EPS(TTM)", _f_krw(m.get("eps_ttm")) if is_kr else data.f_usd(m.get("eps_ttm")))
+        if is_kr:
+            c = st.columns(4)
+            c[0].metric("시가총액", _f_krw_large(m.get("market_cap")))
+            c[1].metric("순이익", _f_krw_large(m.get("net_income")))
+            c[2].metric("자본", _f_krw_large(m.get("equity")))
+            c[3].metric("BPS", _f_krw(m.get("bps")))
+            st.caption(_kr_valuation_caption(m))
     else:
         st.warning(f"밸류에이션 데이터 없음 ({v.get('metrics_error', '')})")
     c = v.get("consensus") or {}
@@ -330,6 +338,48 @@ def _valuation(ticker, price=None):
         with st.expander("📈 실적 서프라이즈 이력", expanded=False):
             _surprise_chart(h, "실적 서프라이즈 (최근)")
     st.caption("정보·표시용 · 매매신호 아님")
+
+
+def _f_krw(v, dec=0):
+    try:
+        f = float(v)
+        if f != f:
+            return "—"
+        return f"₩{f:,.{dec}f}"
+    except (TypeError, ValueError):
+        return "—"
+
+
+def _f_krw_large(v):
+    try:
+        f = float(v)
+        if f != f:
+            return "—"
+    except (TypeError, ValueError):
+        return "—"
+    a = abs(f)
+    if a >= 1e12:
+        return f"₩{f / 1e12:,.1f}조"
+    if a >= 1e8:
+        return f"₩{f / 1e8:,.0f}억"
+    return f"₩{f:,.0f}"
+
+
+def _kr_valuation_caption(m):
+    bits = [str(m.get("source") or "DART+marcap")]
+    if m.get("fiscal_year"):
+        bits.append(f"{m['fiscal_year']} 사업보고서")
+    if m.get("fs_nm"):
+        bits.append(str(m["fs_nm"]))
+    elif m.get("fs_div"):
+        bits.append("연결 기준" if m.get("fs_div") == "CFS" else "별도 기준")
+    if m.get("asof"):
+        bits.append(f"마캡 {m['asof']}")
+    if m.get("confidence"):
+        bits.append(f"신뢰도 {m['confidence']}")
+    if m.get("per_status") == "loss":
+        bits.append("PER 적자")
+    return " · ".join(bits)
 
 
 def _surprise_chart(history, caption):

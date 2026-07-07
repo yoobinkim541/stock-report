@@ -2019,7 +2019,31 @@ def _earnings_valuation_lines(ticker):
         e_parts.append(f"목표가 {cons['target_upside_pct']:+.0f}%")
     if e_parts:
         lines.append("- **실적/컨센서스:** " + " · ".join(e_parts))
+    kr_ctx = _kr_valuation_context_line(v)
+    if kr_ctx:
+        lines.append(kr_ctx)
     return lines
+
+
+def _kr_valuation_context_line(v: dict) -> str:
+    """KR DART+marcap 밸류에이션 기준 출처 라인."""
+    if (v or {}).get("market_type") != "kr":
+        return ""
+    source = v.get("source")
+    if not source:
+        return ""
+    bits = [source]
+    if v.get("fiscal_year"):
+        bits.append(f"{v['fiscal_year']} 사업보고서")
+    if v.get("fs_nm"):
+        bits.append(str(v["fs_nm"]))
+    elif v.get("fs_div"):
+        bits.append("연결" if v.get("fs_div") == "CFS" else "별도")
+    if v.get("asof"):
+        bits.append(f"마캡 {v['asof']}")
+    if v.get("confidence"):
+        bits.append(f"신뢰도 {v['confidence']}")
+    return "- **KR 기준:** " + " · ".join(bits)
 
 
 def _build_ticker_findings(sig, price_info, vol_info, vol_str, fund, ticker):
