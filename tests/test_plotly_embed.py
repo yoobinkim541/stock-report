@@ -86,3 +86,17 @@ def test_pannable_bounds_override():
     html = plotly_embed.pannable_chart_html(fig, hist, bounds_json="[[1,2.5,2.5,0]]")
     assert "[[1, 2.5, 2.5, 0]]" in html or "[[1,2.5,2.5,0]]" in html
     assert '"99.0"' not in html
+
+
+def test_embed_drag_ux_contract():
+    """드래그 UX — 실시간 y-follow·lerp·y 고정·이진탐색·hover 중지 계약."""
+    hist = _hist(60)
+    fig = charts.price_chart(hist, "T", show_rsi=True, show_volume=True)
+    html = plotly_embed.pannable_chart_html(fig, hist, view_days=30, vol_axis="yaxis2")
+    for token in ("plotly_relayouting",          # 드래그 중 이벤트 — 종료 스냅 제거
+                  "requestAnimationFrame",       # rAF lerp 루프
+                  "fixedrange = true",           # y축 사용자 팬 고정 (y 싸움 제거)
+                  "function lowerBound",         # bounds 이진 탐색
+                  "hovermode: false",            # 드래그 중 hover 중지
+                  "function animStep"):
+        assert token in html, f"누락: {token}"

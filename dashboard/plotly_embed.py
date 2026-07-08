@@ -109,21 +109,71 @@ def pannable_chart_html(fig, hist, *, height: int = 460, view_days=None,
   const bounds = {bounds};                       // [[ms, low, high], ...] 시간 오름차순
   const gd = document.getElementById("chart");
   fig.layout.height = {height};
-  let guard = false, timer = null;
+  // y축은 전부 프로그램 제어(자동 맞춤) — 사용자 팬이 y를 끌지 않게 고정해
+  // '드래그 중 y 싸움 → 종료 시 스냅' 흔들림의 근원을 제거 (TradingView 방식)
+  for (const k of Object.keys(fig.layout)) {{
+    if (k.startsWith("yaxis")) fig.layout[k].fixedrange = true;
+  }}
+  const hoverMode = fig.layout.hovermode || "x unified";
+  let guard = false, dragging = false, hoverOff = false;
 
   const volAxis = {vol_axis_js};                 // 거래량 패널 축 id (없으면 null)
+
+  function lowerBound(t0) {{                     // 시간 정렬 bounds 이진 탐색
+    let lo = 0, hi = bounds.length;
+    while (lo < hi) {{ const m = (lo + hi) >> 1; if (bounds[m][0] < t0) lo = m + 1; else hi = m; }}
+    return lo;
+  }}
 
   function yFit(x0, x1) {{                       // 보이는 구간 고저·거래량 최대 + 패딩
     if (!bounds.length) return null;
     let lo = Infinity, hi = -Infinity, vmax = 0;
-    for (const [t, l, h, v] of bounds) {{
-      if (t >= x0 && t <= x1) {{
-        if (l < lo) lo = l; if (h > hi) hi = h; if (v > vmax) vmax = v;
-      }}
+    for (let i = lowerBound(x0); i < bounds.length && bounds[i][0] <= x1; i++) {{
+      const b = bounds[i];
+      if (b[1] < lo) lo = b[1]; if (b[2] > hi) hi = b[2]; if (b[3] > vmax) vmax = b[3];
     }}
     if (!isFinite(lo)) return null;
-    const pad = Math.max((hi - lo) * 0.06, hi * 0.002);
+    const pad = Math.max((hi - lo) * 0.06, Math.abs(hi) * 0.002);
     return {{price: [lo - pad, hi + pad], vol: [0, vmax * 1.1 || 1]}};
+  }}
+
+  // ── 부드러운 y 전환 — rAF lerp 루프 (즉시 점프 대신 ~100ms ease-out) ──
+  let target = null, curY = null, raf = null, busy = false;
+
+  function animStep() {{
+    raf = null;
+    if (!target) return;
+    if (!curY) curY = {{price: target.price.slice(), vol: target.vol.slice()}};
+    const a = 0.38;
+    curY.price[0] += (target.price[0] - curY.price[0]) * a;
+    curY.price[1] += (target.price[1] - curY.price[1]) * a;
+    curY.vol[1]   += (target.vol[1] - curY.vol[1]) * a;
+    const span = Math.abs(target.price[1] - target.price[0]) || 1;
+    const done = Math.abs(curY.price[0] - target.price[0]) + Math.abs(curY.price[1] - target.price[1])
+                 < span * 0.002;
+    if (done) curY = {{price: target.price.slice(), vol: target.vol.slice()}};
+    if (!busy) {{
+      busy = true; guard = true;
+      const upd = {{"yaxis.range": curY.price.slice()}};
+      if (volAxis) upd[volAxis + ".range"] = [0, curY.vol[1]];
+      Plotly.relayout(gd, upd).then(() => {{ busy = false; guard = false; }});
+    }}
+    if (!done || dragging) raf = requestAnimationFrame(animStep);
+  }}
+
+  function setTarget(x0, x1) {{
+    const r = yFit(x0, x1);
+    if (!r) return;
+    target = r;
+    if (!raf) raf = requestAnimationFrame(animStep);
+  }}
+
+  function evXRange(e) {{                        // relayout(ing) 페이로드 → [ms, ms]
+    if (!e) return null;
+    let r0 = e["xaxis.range[0]"], r1 = e["xaxis.range[1]"];
+    if (e["xaxis.range"]) {{ r0 = e["xaxis.range"][0]; r1 = e["xaxis.range"][1]; }}
+    if (r0 == null || r1 == null) return null;
+    return [Date.parse(r0) || +r0, Date.parse(r1) || +r1];
   }}
 
   const lastClose = {last_close};
@@ -154,17 +204,18 @@ def pannable_chart_html(fig, hist, *, height: int = 460, view_days=None,
     }}
   }}
 
-  function rescale() {{
+  function rescale() {{                          // 드래그 종료/휠/슬라이더 — 콜아웃 포함 최종 맞춤
     const xr = gd.layout.xaxis.range;
     if (!xr) return;
     const x0 = Date.parse(xr[0]), x1 = Date.parse(xr[1]);
-    const r = yFit(x0, x1);
-    if (!r) return;
-    const upd = {{"yaxis.range": r.price}};
-    if (volAxis) upd[volAxis + ".range"] = r.vol;
-    callouts(x0, x1, upd);                       // 최고/최저가 팬 따라 이동
-    guard = true;
-    Plotly.relayout(gd, upd).then(() => {{ guard = false; }});
+    setTarget(x0, x1);                           // y 는 lerp 루프가 수렴
+    const upd = {{}};
+    callouts(x0, x1, upd);                       // 무거운 주석 갱신은 종료 시 1회만
+    if (hoverOff) {{ upd["hovermode"] = hoverMode; hoverOff = false; }}
+    if (Object.keys(upd).length) {{
+      guard = true;
+      Plotly.relayout(gd, upd).then(() => {{ guard = false; }});
+    }}
   }}
 
   Plotly.newPlot(gd, fig.data, fig.layout, {config}).then(() => {{
@@ -179,12 +230,23 @@ def pannable_chart_html(fig, hist, *, height: int = 460, view_days=None,
           .then(() => {{ guard = false; rescale(); }});
       }}
     }}
-    gd.on("plotly_relayout", (e) => {{           // 팬/줌/슬라이더 → 부드러운 y 자동맞춤
+    gd.on("plotly_relayouting", (e) => {{        // 드래그 **중** — y 가 실시간 따라옴 (스냅 제거)
       if (guard) return;
+      const xr = evXRange(e);
+      if (!xr) return;
+      if (!dragging) {{                          // 드래그 시작: hover 연산 중지 (비용 절감)
+        dragging = true;
+        if (!hoverOff) {{ hoverOff = true; guard = true;
+          Plotly.relayout(gd, {{hovermode: false}}).then(() => {{ guard = false; }}); }}
+      }}
+      setTarget(xr[0], xr[1]);
+    }});
+    gd.on("plotly_relayout", (e) => {{           // 팬 종료/휠 줌/슬라이더 → 최종 맞춤+콜아웃
+      if (guard) return;
+      dragging = false;
       const keys = Object.keys(e || {{}});
       if (keys.some(k => k.startsWith("xaxis.range")) || e["xaxis.autorange"]) {{
-        clearTimeout(timer);
-        timer = setTimeout(rescale, 50);
+        requestAnimationFrame(rescale);
       }}
     }});
     gd.on("plotly_click", (ev) => {{             // ▲▼ 마커 클릭 → 인차트 상세

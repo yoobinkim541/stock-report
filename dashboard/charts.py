@@ -663,17 +663,19 @@ def price_chart(hist, ticker: str = "", *, kind: str = "line", avg_cost=None,
         fig = go.Figure()
 
     # ── 메인: 가격 ──
+    # 대용량(≥1500봉) 라인은 WebGL(Scattergl) — 캔들/소용량은 SVG 유지(스타일 동일)
+    _SC = go.Scattergl if len(close.dropna()) >= 1500 else go.Scatter
     if cmp_mode:                       # 비교 — % 상대수익 라인 (메인 + 비교 각자 인덱스)
         n_main = normalize_pct(close, view_days)
-        fig.add_trace(go.Scatter(x=n_main.index, y=n_main, name=ticker or "메인",
-                                 hovertemplate="%{y:+.2f}%<extra>" + (ticker or "메인") + "</extra>",
-                                 line=dict(color=_BLUE, width=2)))
+        fig.add_trace(_SC(x=n_main.index, y=n_main, name=ticker or "메인",
+                          hovertemplate="%{y:+.2f}%<extra>" + (ticker or "메인") + "</extra>",
+                          line=dict(color=_BLUE, width=2)))
         for i, (lab, s) in enumerate(compare.items()):
             ns = normalize_pct(s, view_days)
-            fig.add_trace(go.Scatter(x=ns.index, y=ns, name=lab,
-                                     hovertemplate="%{y:+.2f}%<extra>" + lab + "</extra>",
-                                     line=dict(color=_CMP_COLORS[i % len(_CMP_COLORS)],
-                                               width=1.6)))
+            fig.add_trace(_SC(x=ns.index, y=ns, name=lab,
+                              hovertemplate="%{y:+.2f}%<extra>" + lab + "</extra>",
+                              line=dict(color=_CMP_COLORS[i % len(_CMP_COLORS)],
+                                        width=1.6)))
         fig.add_hline(y=0, line=dict(color=theme.MUTED, dash="dot", width=0.8),
                       row=1 if panes > 1 else None, col=1 if panes > 1 else None)
     elif kind == "candle" and has_ohlc:
@@ -683,8 +685,8 @@ def price_chart(hist, ticker: str = "", *, kind: str = "line", avg_cost=None,
             increasing_line_color=_GREEN, decreasing_line_color=_RED,
             increasing_fillcolor=_GREEN, decreasing_fillcolor=_RED, line=dict(width=1)))
     else:
-        fig.add_trace(go.Scatter(x=hist.index, y=close, name=ticker or "종가",
-                                 line=dict(color=_BLUE, width=2)))
+        fig.add_trace(_SC(x=hist.index, y=close, name=ticker or "종가",
+                          line=dict(color=_BLUE, width=2)))
 
     # ── 일목균형표 (구름은 MA 아래 깔리게 먼저) ──
     if ichimoku and has_ohlc and len(close) >= 52:

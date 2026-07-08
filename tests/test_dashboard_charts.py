@@ -651,3 +651,15 @@ def test_bullet_bands_generic():
     assert len(fig.data) == 2                          # 밴드 라인 + mid 마커
     assert fig.data[0].x == (99.0, 134.0)
     assert any("현재 $142" in (s.text or "") for s in fig.layout.annotations)
+
+
+def test_price_chart_scattergl_for_large_series():
+    """대용량(≥1500봉) 라인 = WebGL(Scattergl)·소용량 = SVG Scatter (스타일 동일)."""
+    import plotly.graph_objects as go
+    idx = pd.date_range("2020-01-01", periods=1600, freq="D")
+    close = pd.Series(range(100, 1700), index=idx, dtype=float)
+    big = pd.DataFrame({"Close": close}, index=idx)
+    fig = charts.price_chart(big, "T")
+    assert isinstance(fig.data[0], go.Scattergl)
+    small = charts.price_chart(big.iloc[:100], "T")
+    assert isinstance(small.data[0], go.Scatter) and not isinstance(small.data[0], go.Scattergl)
