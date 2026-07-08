@@ -51,10 +51,89 @@ def _screener_section():
                    f"상위10% 초과 {data.f_frac_pct_s(meta.get('top_decile'))} · 학습 {meta.get('train_end', '')}")
     rows = sc.get("rows") or []
     if rows:
-        st.dataframe(pd.DataFrame(rows), hide_index=True, width="stretch")
+        table = [{
+            "순위": r.get("rank"),
+            "종목": (f"{r['name']} ({r['ticker']})" if r.get("name") else r.get("ticker", ""))
+                    + (" ⚠️" if r.get("surv_flag") else ""),
+            "점수": r.get("score"),
+            "가격": r.get("price"),
+            "기술등급": r.get("tech_rating") or "—",
+            "RSI": r.get("rsi_14"),
+            "52주고점比": (r["close_vs_52w_high"] * 100
+                           if r.get("close_vs_52w_high") is not None else None),
+            "6M 모멘텀%": (r["mom_126d"] * 100 if r.get("mom_126d") is not None else None),
+            "QQQ대비%p": (r["excess_mom_60d"] * 100
+                          if r.get("excess_mom_60d") is not None else None),
+            "재무점수": r.get("fund_score"),
+            "판단근거": r.get("reason") or "—",
+        } for r in rows]
+        event = st.dataframe(
+            pd.DataFrame(table), hide_index=True, width="stretch",
+            on_select="rerun", selection_mode="single-row", key="_scr_tbl",
+            column_config={
+                "점수": st.column_config.NumberColumn(format="%.3f",
+                                                      help="LGBM 상대순위 점수 (임의 스케일)"),
+                "가격": st.column_config.NumberColumn(format="$%.2f"),
+                "RSI": st.column_config.NumberColumn(format="%.0f"),
+                "52주고점比": st.column_config.NumberColumn(format="%.0f%%"),
+                "6M 모멘텀%": st.column_config.NumberColumn(format="%.1f"),
+                "QQQ대비%p": st.column_config.NumberColumn(format="%.1f"),
+                "재무점수": st.column_config.NumberColumn(format="%.0f"),
+                "판단근거": st.column_config.TextColumn(width="large",
+                                                        help="두드러진 특징 상위 3 (모델 기여도 아님)"),
+            })
+        _screener_detail(event, rows, sc.get("feats") or {},
+                         (sc.get("meta") or {}).get("importance") or {})
     else:
         st.warning(f"랭킹 없음 ({sc.get('error', '')})")
-    st.caption("⚠️ 생존편향 + 검증상 종목선택 무엣지 — 정보·표시용, 매매신호 아님")
+    st.caption("⚠️ 생존편향(⚠️) + 검증상 종목선택 무엣지 — 정보·표시용, 매매신호 아님 · "
+               "행 클릭 = 상세")
+
+
+def _screener_detail(event, rows, feats, importance):
+    """선택 행 상세 카드 — 선택 티커만 네트워크(밸류·매집) + 전체 피처 표 (중요도 순)."""
+    try:
+        sel = event.selection.rows
+    except Exception:
+        sel = []
+    if not sel or sel[0] >= len(rows):
+        return
+    r = rows[sel[0]]
+    t = r.get("ticker", "")
+    st.markdown(f"##### 🔎 {r.get('name') or t} ({t}) — 상세")
+    c1, c2, c3 = st.columns([1, 1, 0.6])
+    with c1:
+        v = cached.valuation(t) or {}
+        m = v.get("metrics") or {}
+        st.markdown("**밸류에이션**")
+        vv = st.columns(3)
+        vv[0].metric("PER", data.f_ratio(m.get("per")))
+        vv[1].metric("PEG", data.f_ratio(m.get("peg")))
+        vv[2].metric("ROE", data.f_frac_pct(m.get("roe")) if m.get("roe") is not None else "—")
+    with c2:
+        inst = cached.institutional(t) or {}
+        ac = inst.get("accum") or {}
+        st.markdown("**기관 매집**")
+        ii = st.columns(2)
+        ii[0].metric("매집 강도", data.f_ratio(ac.get("accum_score"), 1) if ac else "—",
+                     help="OBV·CMF·상승/하락 거래량 종합")
+        sig = ac.get("signals") or {}
+        ii[1].metric("CMF", data.f_ratio(sig.get("cmf"), 2) if sig else "—")
+    with c3:
+        st.markdown("**바로가기**")
+        if st.button("🔍 종목 분석 열기", key=f"_scr_open_{t}"):
+            st.session_state["ticker"] = t
+            pg = st.session_state.get("_ticker_page")
+            if pg:
+                st.switch_page(pg)
+            else:
+                st.rerun()
+    f = feats.get(t) or {}
+    if f:
+        ordered = sorted(f.items(), key=lambda x: -float(importance.get(x[0], 0) or 0))
+        st.markdown("**전체 피처** — 모델 중요도 순")
+        st.dataframe(pd.DataFrame([{"피처": k, "값": v} for k, v in ordered]),
+                     hide_index=True, width="stretch", height=240)
 
 
 @st.fragment

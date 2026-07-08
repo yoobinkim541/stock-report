@@ -69,7 +69,13 @@ cached.risk_struct = lambda: {"port_vol":0.2,"n_eff":3.5,"n_assets":5,"mdd_est":
                 "kelly_half":{"conservative":0.5,"moderate":0.9,"trailing":1.1}}}
 cached.ohlc = lambda t, period="6mo": pd.DataFrame(
     {"Open":range(100,170),"High":range(101,171),"Low":range(99,169),"Close":range(100,170)}, index=_IDX)
-cached.screener = lambda n: {"rows":[],"error":"skip"}
+cached.screener = lambda n: {"rows": [{"rank": 1, "ticker": "NVDA", "name": "NVIDIA",
+    "score": 2.54, "price": 196.9, "tech_rating": "매수", "surv_flag": False,
+    "reason": "52주 고점 근접 · 6M 모멘텀 +42%%", "rsi_14": 62.0,
+    "close_vs_52w_high": 0.97, "mom_126d": 0.42, "excess_mom_60d": 0.08, "fund_score": 72.0}],
+    "feats": {"NVDA": {"rsi_14": 62.0, "mom_126d": 0.42}},
+    "meta": {"ic": 0.05, "icir": 0.8, "top_decile": 0.02, "train_end": "2026-06-01",
+             "importance": {"mom_126d": 100, "rsi_14": 50}}}
 cached.backtest = lambda: {"error":"skip"}
 cached.sp500_heatmap = lambda: [
     {"ticker":"AAPL","name":"Apple","sector_kr":"기술","market_cap":4e12,"pct":1.96},
@@ -495,3 +501,21 @@ cached.etf_peers = lambda t: {"group": {"key": "ndx_covered_call",
     assert "ETF 점수" in html_body                               # 점수 게이지 (HTML 마크다운)
     assert "매매신호 아님" in " ".join(str(c.value) for c in at.caption)
     assert len(at.dataframe) >= 1                                # 피어 지표표
+
+
+def test_research_screener_enriched():
+    """스크리너 — 기업명·판단근거 컬럼 + 무엣지 캡션 (합성 주입)."""
+    script = _STUBS + '''
+st.session_state["scr_done"] = True
+from dashboard.pages import research
+research._screener_section()
+'''
+    at = AppTest.from_string(script, default_timeout=30)
+    at.run()
+    assert not at.exception, at.exception
+    assert len(at.dataframe) >= 1
+    df0 = at.dataframe[0].value
+    assert "판단근거" in df0.columns and "종목" in df0.columns
+    assert "NVIDIA (NVDA)" in str(df0["종목"].iloc[0])            # 기업명 병기
+    caps = " ".join(str(c.value) for c in at.caption)
+    assert "매매신호 아님" in caps

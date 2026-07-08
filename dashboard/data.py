@@ -368,3 +368,47 @@ def valuation_score(price, metrics, consensus=None, intrinsic=None) -> dict | No
     score = sum(w * s for w, s, _ in comps) / wsum
     return {"score": clamp(score), "sub": " · ".join(lab for _, _, lab in comps[:3]),
             "n": len(comps)}
+
+
+# 스크리너 판단근거 화이트리스트 — (피처, 값→한글 라벨|None). 설명 가능한 것만.
+_DRIVER_RULES = [
+    ("close_vs_52w_high", lambda v: "52주 고점 근접" if v >= 0.95 else
+        (f"고점 -{(1 - v) * 100:.0f}%" if v <= 0.75 else None)),
+    ("mom_126d", lambda v: f"6M 모멘텀 {v * 100:+.0f}%" if abs(v) >= 0.15 else None),
+    ("excess_mom_60d", lambda v: f"QQQ대비 {v * 100:+.1f}%p(60d)" if abs(v) >= 0.03 else None),
+    ("rsi_14", lambda v: f"RSI {v:.0f} 과매도" if v <= 35 else
+        (f"RSI {v:.0f} 과열" if v >= 70 else None)),
+    ("cmf_21", lambda v: "자금 유입(CMF+)" if v >= 0.08 else
+        ("자금 유출(CMF−)" if v <= -0.08 else None)),
+    ("vol_ratio_20", lambda v: f"거래량 급증 ×{v:.1f}" if v >= 1.5 else None),
+    ("golden_cross", lambda v: "골든크로스" if v >= 1 else None),
+    ("ichi_above_cloud", lambda v: "일목 구름 위" if v >= 1 else None),
+    ("mom_21d", lambda v: f"1M {v * 100:+.0f}%" if abs(v) >= 0.08 else None),
+    ("fund_score", lambda v: f"재무 {v:.0f}점 우수" if v >= 70 else
+        (f"재무 {v:.0f}점 취약" if v <= 35 else None)),
+]
+
+
+def screener_drivers(feats: dict, importance: dict | None = None, top: int = 3) -> str:
+    """스크리너 판단근거 — 전역 피처 중요도 순으로 개별 값 해석 → 상위 top 한글 드라이버.
+
+    화이트리스트 규칙만 사용(설명 가능성) · SHAP 아님 — 모델 기여도가 아니라
+    '이 종목의 두드러진 특징' 서술. 결측/해당 없음 → '—'. 순수.
+    """
+    feats = feats or {}
+    imp = importance or {}
+    rules = sorted(_DRIVER_RULES, key=lambda r: -float(imp.get(r[0], 0) or 0))
+    out = []
+    for feat, fn in rules:
+        v = _try_float(feats.get(feat))
+        if v is None:
+            continue
+        try:
+            lab = fn(v)
+        except Exception:
+            lab = None
+        if lab:
+            out.append(lab)
+        if len(out) >= top:
+            break
+    return " · ".join(out) if out else "—"

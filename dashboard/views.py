@@ -143,17 +143,42 @@ def screener(top_n: int = 20) -> dict:
     """NASDAQ100 LightGBM 랭킹 스크리너 (무엣지·정보용). QT3."""
     from ml.ranker import load_ranker, rank_today
     try:
+        import ticker_names
+        from dashboard.data import screener_drivers
         df = rank_today(mode="nasdaq100", top_n=top_n)
         res = load_ranker()
-        rows = df.to_dict("records") if (df is not None and not df.empty) else []
+        raw = df.to_dict("records") if (df is not None and not df.empty) else []
+        imp = {}
+        if res is not None and getattr(res, "feature_importance", None) is not None:
+            try:
+                imp = res.feature_importance.to_dict()
+            except Exception:
+                imp = {}
+        core = ("rank", "ticker", "score", "price", "tech_rating", "surv_flag")
+        rows, feats = [], {}
+        for r in raw:
+            t = r.get("ticker", "")
+            f = {k: v for k, v in r.items() if k not in core}
+            feats[t] = f
+            rows.append({
+                "rank": r.get("rank"), "ticker": t,
+                "name": ticker_names.display_name(t, allow_net=False) or "",
+                "score": r.get("score"), "price": r.get("price"),
+                "tech_rating": r.get("tech_rating"), "surv_flag": r.get("surv_flag"),
+                "reason": screener_drivers(f, imp),
+                "rsi_14": f.get("rsi_14"), "close_vs_52w_high": f.get("close_vs_52w_high"),
+                "mom_126d": f.get("mom_126d"), "excess_mom_60d": f.get("excess_mom_60d"),
+                "fund_score": f.get("fund_score"),
+            })
         meta = {}
         if res is not None:
             meta = {"ic": getattr(res, "oos_ic", None), "icir": getattr(res, "oos_icir", None),
                     "top_decile": getattr(res, "oos_top_decile_ret", None),
-                    "train_end": getattr(res, "train_end_date", None)}
-        return {"rows": rows, "meta": meta}
+                    "train_end": getattr(res, "train_end_date", None),
+                    "importance": dict(sorted(imp.items(), key=lambda x: -x[1])[:15])}
+        return {"rows": rows, "feats": feats, "meta": meta}
     except Exception as e:
-        return {"error": str(e), "rows": [], "meta": {}}
+        return {"error": str(e), "rows": [], "feats": {}, "meta": {}}
 
 
 def backtest_summary() -> dict:

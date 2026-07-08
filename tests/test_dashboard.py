@@ -689,3 +689,17 @@ def test_valuation_score_overvalued_and_insufficient():
     assert data.valuation_score(100.0, {"peg": 1.0}) is None      # 재료 1개 → 생략
     assert data.valuation_score(None, m) is None
     assert data.valuation_score(100.0, {}) is None
+
+
+def test_screener_drivers():
+    """판단근거 화이트리스트 — 중요도 정렬·상위 3·결측 '—' (순수)."""
+    feats = {"close_vs_52w_high": 0.97, "mom_126d": 0.42, "rsi_14": 75.0,
+             "excess_mom_60d": 0.081, "cmf_21": 0.01}
+    s = data.screener_drivers(feats, {"mom_126d": 100, "rsi_14": 90,
+                                      "close_vs_52w_high": 10}, top=3)
+    parts = s.split(" · ")
+    assert len(parts) == 3
+    assert parts[0].startswith("6M 모멘텀 +42%")        # 중요도 1위 규칙 먼저
+    assert "RSI 75 과열" in s
+    assert data.screener_drivers({}, {}) == "—"
+    assert data.screener_drivers({"cmf_21": 0.0}, None) == "—"   # 규칙 미발동
