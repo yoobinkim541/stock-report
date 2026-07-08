@@ -820,3 +820,23 @@ def twr_series(records: list, flows_by_date: dict) -> dict:
         prev = v
     return {"dates": dates, "twr": twr, "simple": simple,
             "flows_total": flows_total, "n_days": len(rec)}
+
+
+def load_kr_holdings(path: str | None = None) -> dict:
+    """국내(KR)북 보유 — 키움 동기화 스냅샷 domestic 섹션 (원화). graceful {}."""
+    snap = _load_snap(path)
+    dom = snap.get("domestic") or {}
+    rows = []
+    for h in dom.get("holdings") or []:
+        sh = _try_float(h.get("shares")) or 0
+        cur = _try_float(h.get("current_price")) or 0
+        rows.append({"name": h.get("name") or h.get("ticker") or "?",
+                     "shares": sh, "avg": _try_float(h.get("avg_price")),
+                     "cur": cur, "value": sh * cur,
+                     "ret": _try_float(h.get("return_pct")),
+                     "pnl": _try_float(h.get("pnl_krw"))})
+    if not rows:
+        return {}
+    total = sum(r["value"] for r in rows)
+    return {"rows": rows, "total": total,
+            "last_sync": snap.get("last_domestic_sync")}

@@ -892,3 +892,20 @@ def test_twr_series_deposit_not_gain():
     assert tw["simple"][2] == pytest.approx(65.0)          # 단순 총액은 65% (왜곡)
     assert tw["flows_total"] == 500.0
     assert data.twr_series(rec[:1], flows) == {}
+
+
+def test_load_kr_holdings(tmp_path):
+    """국내북 로더 — domestic 섹션 정규화 (원화 평가·동기화 시각)."""
+    import json
+    p = tmp_path / "snap.json"
+    p.write_text(json.dumps({"domestic": {"holdings": [
+        {"name": "SOL AI반도체TOP2플러스", "ticker": "SOL", "avg_price": 23683,
+         "current_price": 25200, "shares": 20, "pnl_krw": 30210, "return_pct": 6.38}]},
+        "last_domestic_sync": "2026-07-08 08:35"}))
+    kr = data.load_kr_holdings(str(p))
+    assert kr["total"] == 25200 * 20
+    assert kr["rows"][0]["ret"] == 6.38
+    assert kr["last_sync"].startswith("2026-07-08")
+    empty = tmp_path / "e.json"
+    empty.write_text("{}")
+    assert data.load_kr_holdings(str(empty)) == {}

@@ -29,6 +29,7 @@ def render():
     _exposure_section(rows)
     _holdings_table(rows)
     _income_section(rows)
+    _kr_section()
 
     with st.expander("리스크 전체 리포트 (텍스트)"):
         st.code(cached.risk(), language=None)
@@ -256,6 +257,31 @@ def _holdings_table(rows):
         pg = st.session_state.get("_ticker_page")
         if pg:
             st.switch_page(pg)
+
+
+def _kr_section():
+    """🇰🇷 국내(KR)북 — 키움 잔고 동기화 표시 (리스크 모델은 USD북 한정 — 분리 명시)."""
+    kr = data.load_kr_holdings()
+    if not kr:
+        return
+    st.markdown("##### 🇰🇷 국내 보유 — 키움 동기화")
+    k1, k2 = st.columns([1, 2.2], vertical_alignment="center")
+    k1.metric("국내 평가액", f"₩{kr['total']:,.0f}",
+              help=f"마지막 동기화 {kr.get('last_sync') or '—'} (평일 08:35 KST 크론)")
+    with k2:
+        st.dataframe(pd.DataFrame([{
+            "종목": r["name"], "주수": r["shares"], "평단": r["avg"],
+            "현재가": r["cur"], "평가액": r["value"], "손익%": r["ret"],
+        } for r in kr["rows"]]), hide_index=True, width="stretch",
+            height=min(250, 44 + 35 * len(kr["rows"])),
+            column_config={
+                "평단": st.column_config.NumberColumn(format="localized"),
+                "현재가": st.column_config.NumberColumn(format="localized"),
+                "평가액": st.column_config.NumberColumn(format="localized"),
+                "손익%": st.column_config.NumberColumn(format="%+.1f%%"),
+            })
+    st.caption("위 리스크·성장·리밸런스 분석은 **USD 해외북 한정** — 국내북은 잔고 표시만"
+               "(키움 kt00018 동기화·기록 전용)")
 
 
 def _income_section(rows):

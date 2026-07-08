@@ -579,6 +579,12 @@ h1 {{ font-size: 1.7rem !important; }}
 
 /* ── 모바일 반응형 (≤600px) — 커스텀 컴포넌트 축소·재배치 ─────────────── */
 @media (max-width: 600px) {{
+  /* 신규 카드·스트립 — 모바일 축소 (인라인 스타일은 !important 로 우선) */
+  div[style*="min-height:340px"] {{ min-height: 240px !important; }}
+  div[style*="min-width:150px"] {{ min-width: 46% !important; }}
+  div[style*="min-width:104px"] {{ min-width: 44% !important; }}
+  .tn-tape {{ font-size: 0.7rem; }}
+
   .block-container {{ padding-top: 1.4rem; padding-left: .8rem; padding-right: .8rem; }}
   h1 {{ font-size: 1.4rem !important; }}
   .tn-hero {{ gap: 12px; margin: 2px 0 14px; }}
