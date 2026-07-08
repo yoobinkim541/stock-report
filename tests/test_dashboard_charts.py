@@ -454,3 +454,26 @@ def test_price_chart_trend_lines_overlay():
     # 빈 입력 무변화
     fig2 = charts.price_chart(hist, "T", trend_lines=[])
     assert len(fig2.data) < len(fig.data)
+
+
+def test_price_chart_three_pane_layout():
+    """가격/거래량/RSI 3패널 — 축 배치·거래량 방향색·RSI 시그널·최고최저 콜아웃·현재가 칩."""
+    import pandas as pd
+    idx = pd.date_range("2024-01-01", periods=120, freq="D")
+    close = [100.0 + (i % 7) for i in range(120)]
+    hist = pd.DataFrame({"Open": [c - 0.5 for c in close],
+                         "High": [c + 1 for c in close], "Low": [c - 1 for c in close],
+                         "Close": close, "Volume": [10.0 + i for i in range(120)]}, index=idx)
+    fig = charts.price_chart(hist, "T", kind="candle", show_rsi=True, show_volume=True)
+    by_name = {tr.name: tr for tr in fig.data}
+    assert by_name["거래량"].yaxis == "y2" and by_name["거래량 MA20"].yaxis == "y2"
+    assert by_name["RSI(14)"].yaxis == "y3" and by_name["RSI 시그널(14)"].yaxis == "y3"
+    assert fig.layout.yaxis3.range == (0, 100)
+    anns = " ".join(a.text for a in fig.layout.annotations)
+    assert "+" in anns and "-" in anns and "<b>" in anns       # 최고/최저 % + 현재가 칩
+    # 거래량만 (RSI off) → 거래량 y2
+    fig2 = charts.price_chart(hist, "T", show_volume=True)
+    assert {tr.name: tr for tr in fig2.data}["거래량"].yaxis == "y2"
+    # Volume 컬럼 없으면 침묵 스킵
+    fig3 = charts.price_chart(hist.drop(columns=["Volume"]), "T", show_volume=True)
+    assert "거래량" not in [tr.name for tr in fig3.data]

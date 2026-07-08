@@ -23,21 +23,23 @@ def _plotlyjs_cdn() -> str:
 
 
 def price_bounds_json(hist) -> str:
-    """[[epoch_ms, low, high], ...] — y 자동맞춤용 경량 배열 (JS 이진탐색 소비)."""
+    """[[epoch_ms, low, high, volume], ...] — y 자동맞춤용 경량 배열 (JS 소비)."""
     if hist is None or getattr(hist, "empty", True):
         return "[]"
     cols = set(hist.columns)
     lo = hist["Low"] if "Low" in cols else hist["Close"]
     hi = hist["High"] if "High" in cols else hist["Close"]
+    vol = hist["Volume"] if "Volume" in cols else None
     out = []
-    for ts, l, h in zip(hist.index, lo.values, hi.values):
+    for i, (ts, l, h) in enumerate(zip(hist.index, lo.values, hi.values)):
         if l == l and h == h:                                   # NaN 스킵
-            out.append([int(ts.timestamp() * 1000), float(l), float(h)])
+            v = float(vol.iloc[i]) if vol is not None and vol.iloc[i] == vol.iloc[i] else 0.0
+            out.append([int(ts.timestamp() * 1000), float(l), float(h), v])
     return json.dumps(out)
 
 
 def pannable_chart_html(fig, hist, *, height: int = 460, view_days=None,
-                        rsi_pane: bool = False) -> str:
+                        vol_axis: str | None = None) -> str:
     """fig(charts.price_chart 산출) → 자동 y 리스케일·드로잉·인차트 마커 상세 임베드 HTML."""
     fig_json = fig.to_json()
     bounds = price_bounds_json(hist)
@@ -47,6 +49,7 @@ def pannable_chart_html(fig, hist, *, height: int = 460, view_days=None,
         "modeBarButtonsToAdd": ["drawline", "drawopenpath", "drawrect", "eraseshape"],
     })
     view_ms = int(view_days) * 86400000 if view_days else 0
+    vol_axis_js = json.dumps(vol_axis)
     return f"""
 <div id="chart" style="width:100%"></div>
 <div id="detail" style="display:none;margin-top:6px;padding:8px 12px;border:1px solid #1e222d;
@@ -66,15 +69,19 @@ def pannable_chart_html(fig, hist, *, height: int = 460, view_days=None,
   fig.layout.height = {height};
   let guard = false, timer = null;
 
-  function yFit(x0, x1) {{                       // 보이는 구간 고저 + 6% 패딩
+  const volAxis = {vol_axis_js};                 // 거래량 패널 축 id (없으면 null)
+
+  function yFit(x0, x1) {{                       // 보이는 구간 고저·거래량 최대 + 패딩
     if (!bounds.length) return null;
-    let lo = Infinity, hi = -Infinity;
-    for (const [t, l, h] of bounds) {{
-      if (t >= x0 && t <= x1) {{ if (l < lo) lo = l; if (h > hi) hi = h; }}
+    let lo = Infinity, hi = -Infinity, vmax = 0;
+    for (const [t, l, h, v] of bounds) {{
+      if (t >= x0 && t <= x1) {{
+        if (l < lo) lo = l; if (h > hi) hi = h; if (v > vmax) vmax = v;
+      }}
     }}
     if (!isFinite(lo)) return null;
     const pad = Math.max((hi - lo) * 0.06, hi * 0.002);
-    return [lo - pad, hi + pad];
+    return {{price: [lo - pad, hi + pad], vol: [0, vmax * 1.1 || 1]}};
   }}
 
   function rescale() {{
@@ -82,8 +89,10 @@ def pannable_chart_html(fig, hist, *, height: int = 460, view_days=None,
     if (!xr) return;
     const r = yFit(Date.parse(xr[0]), Date.parse(xr[1]));
     if (!r) return;
+    const upd = {{"yaxis.range": r.price}};
+    if (volAxis) upd[volAxis + ".range"] = r.vol;
     guard = true;
-    Plotly.relayout(gd, {{"yaxis.range": r}}).then(() => {{ guard = false; }});
+    Plotly.relayout(gd, upd).then(() => {{ guard = false; }});
   }}
 
   Plotly.newPlot(gd, fig.data, fig.layout, {config}).then(() => {{

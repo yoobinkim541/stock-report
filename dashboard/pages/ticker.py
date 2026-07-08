@@ -99,6 +99,7 @@ def _price_chart(ticker, hist, avg_cost, trades, view_days=None):
         mas = st.multiselect("이동평균", _MA_OPTS,
                              default=_MA_DEFAULT.get(tf, [60, 120, 200]), key=f"_ma_{tf}")
         inds = st.multiselect("보조지표", _IND_OPTS, default=["RSI(14)"], key=f"_ind_{tf}")
+        show_vol = st.checkbox("거래량 패널", value=True, key=f"_vol_{tf}")
         st.markdown("**추세 분석** (자동 감지 — 표시·참고용)")
         want_lines = st.checkbox("자동 지지/저항선", key=f"_tl_lines_{tf}")
         want_short = st.checkbox("단기 채널 (60봉)", key=f"_tl_short_{tf}")
@@ -120,11 +121,12 @@ def _price_chart(ticker, hist, avg_cost, trades, view_days=None):
     if want_lines or want_short or want_long:
         ch_key = tuple(k for k, w in (("short", want_short), ("long", want_long)) if w)
         tls = cached.trendlines_for(ticker, tf, want_lines, ch_key)
+    show_vol = show_vol and "Volume" in getattr(df, "columns", [])
     fig = charts.price_chart(
         df, label, kind=("candle" if kind == "🕯️ 캔들" else "line"),
         avg_cost=avg_cost, trades=trades, view_days=view_days, mas=mas,
         show_rsi=show_rsi, bollinger="볼린저밴드(20,2σ)" in inds,
-        ichimoku="일목균형표" in inds, trend_lines=tls)
+        ichimoku="일목균형표" in inds, trend_lines=tls, show_volume=show_vol)
     event = None
     if legacy:
         try:
@@ -134,11 +136,13 @@ def _price_chart(ticker, hist, avg_cost, trades, view_days=None):
         except TypeError:
             st.plotly_chart(fig, width="stretch", config=charts.PAN_DRAW_CFG)
     else:
-        # 커스텀 임베드 — 팬 시 보이는 구간에 y축 부드러운 자동 맞춤(클라이언트 JS)
+        # 커스텀 임베드 — 팬 시 보이는 구간에 y축(가격·거래량) 부드러운 자동 맞춤
         from dashboard import plotly_embed
         h = int(fig.layout.height or 420)
         st.components.v1.html(
-            plotly_embed.pannable_chart_html(fig, df, height=h, view_days=view_days),
+            plotly_embed.pannable_chart_html(
+                fig, df, height=h, view_days=view_days,
+                vol_axis="yaxis2" if show_vol else None),
             height=h + 80)
     st.caption("🖱️ 드래그=이동(y축 자동 맞춤) · 휠=확대/축소 · 더블클릭=원위치 · "
                "✏️ 우상단 모드바 직접 그리기(선·자유곡선·박스)·지우개 — 설정 변경 시 드로잉 초기화")

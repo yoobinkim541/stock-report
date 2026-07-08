@@ -536,11 +536,12 @@ def _add_trend_lines(fig, items: list[dict]) -> None:
 def price_chart(hist, ticker: str = "", *, kind: str = "line", avg_cost=None,
                 trades=None, view_days=None, mas=(60, 120, 200),
                 show_rsi: bool = False, bollinger: bool = False, ichimoku: bool = False,
-                trend_lines=None):
-    """가격 차트 + 기술적 분석 도구 — MA 세트·볼린저밴드·일목균형표·RSI 하단 패널.
+                trend_lines=None, show_volume: bool = False):
+    """가격 차트 + 기술적 분석 도구 (TradingView 풍 멀티패널).
 
-    show_rsi=True 면 2행 서브플롯(가격 75%·RSI 25%, x 공유 — 레인지슬라이더는 비활성:
-    plotly 서브플롯 제약, 팬/줌은 유지). 지표는 범례 클릭으로 개별 토글 가능.
+    패널: 가격(+MA·BB·일목·추세선·평단·기간 최고/최저·현재가 라벨) / 거래량(방향색 바+MA20)
+    / RSI(14)+시그널(14MA)+30~70 밴드. 서브패널 있으면 레인지슬라이더 비활성(plotly 제약 —
+    팬/줌 유지). 지표는 범례 클릭으로 개별 토글 가능.
     """
     go = _go()
     cols = set(getattr(hist, "columns", []))
@@ -548,11 +549,16 @@ def price_chart(hist, ticker: str = "", *, kind: str = "line", avg_cost=None,
         return _t(go.Figure())
     close = hist["Close"]
     has_ohlc = {"Open", "High", "Low"} <= cols
+    show_volume = show_volume and "Volume" in cols
 
-    if show_rsi:
+    panes = 1 + (1 if show_volume else 0) + (1 if show_rsi else 0)
+    vol_row = 2 if show_volume else None
+    rsi_row = panes if show_rsi else None
+    if panes > 1:
         from plotly.subplots import make_subplots
-        fig = make_subplots(rows=2, cols=1, shared_xaxes=True,
-                            row_heights=[0.76, 0.24], vertical_spacing=0.04)
+        heights = {1: [1.0], 2: [0.74, 0.26], 3: [0.60, 0.18, 0.22]}[panes]
+        fig = make_subplots(rows=panes, cols=1, shared_xaxes=True,
+                            row_heights=heights, vertical_spacing=0.03)
     else:
         fig = go.Figure()
 
@@ -607,29 +613,85 @@ def price_chart(hist, ticker: str = "", *, kind: str = "line", avg_cost=None,
         fig.add_hline(y=avg_cost, line=dict(color=theme.MUTED, dash="dash", width=1.2),
                       annotation_text=f"평단 {avg_cost:,.2f}", annotation_position="top left",
                       annotation_font=dict(color=theme.MUTED, size=11),
-                      row=1 if show_rsi else None, col=1 if show_rsi else None)
+                      row=1 if panes > 1 else None, col=1 if panes > 1 else None)
     _add_trend_lines(fig, trend_lines or [])
     _add_trade_markers(fig, hist, trades or [])
 
-    # ── RSI 하단 패널 ──
+    # ── 기간 최고/최저 콜아웃 + 현재가 점선·우측 라벨 (TradingView 풍) ──
+    _add_extremes_and_last(fig, hist, view_days, panes)
+
+    # ── 거래량 패널 (방향색 바 + 거래량 MA20) ──
+    if show_volume:
+        vol = hist["Volume"]
+        if has_ohlc:
+            up = (close >= hist["Open"]).values
+        else:
+            up = (close.diff().fillna(0) >= 0).values
+        vcolors = [_GREEN if u else _RED for u in up]
+        fig.add_trace(go.Bar(x=hist.index, y=vol, name="거래량",
+                             marker=dict(color=vcolors), opacity=0.55),
+                      row=vol_row, col=1)
+        if len(vol) >= 20:
+            fig.add_trace(go.Scatter(x=hist.index, y=vol.rolling(20).mean(),
+                                     name="거래량 MA20", line=dict(color=_GREEN, width=1)),
+                          row=vol_row, col=1)
+        fig.update_yaxes(row=vol_row, col=1, nticks=3)
+
+    # ── RSI 패널 (RSI + 시그널(14MA) + 30~70 밴드) ──
     if show_rsi:
         rsi = _rsi_series(close)
+        fig.add_hrect(y0=30, y1=70, fillcolor="rgba(120,130,180,0.08)", line_width=0,
+                      row=rsi_row, col=1)
         fig.add_trace(go.Scatter(x=hist.index, y=rsi, name="RSI(14)",
-                                 line=dict(color="#f59e0b", width=1.3)), row=2, col=1)
+                                 line=dict(color="#9333ea", width=1.2)), row=rsi_row, col=1)
+        fig.add_trace(go.Scatter(x=hist.index, y=rsi.rolling(14).mean(), name="RSI 시그널(14)",
+                                 line=dict(color="#3b82f6", width=1.2)), row=rsi_row, col=1)
         for lv, c in ((70, _RED), (30, _GREEN)):
-            fig.add_hline(y=lv, line=dict(color=c, dash="dot", width=0.8), row=2, col=1)
-        fig.update_yaxes(range=[0, 100], row=2, col=1, tickvals=[30, 50, 70])
+            fig.add_hline(y=lv, line=dict(color=c, dash="dot", width=0.7), row=rsi_row, col=1)
+        fig.update_yaxes(range=[0, 100], row=rsi_row, col=1, tickvals=[30, 50, 70])
 
     fig.update_layout(margin=dict(t=10, b=10, l=10, r=10), dragmode="pan",
                       legend=dict(orientation="h", y=1.08, font=dict(size=10)),
-                      hovermode="x unified", height=470 if show_rsi else 380,
-                      newshape=dict(line=dict(color="#f59e0b", width=2)))
+                      hovermode="x unified", height={1: 380, 2: 470, 3: 560}[panes],
+                      bargap=0.1, newshape=dict(line=dict(color="#f59e0b", width=2)))
     _t(fig)
-    if show_rsi:
+    if panes > 1:
         fig.update_xaxes(rangeslider_visible=False)   # 서브플롯 제약 — 팬/줌으로 탐색
-    else:
-        fig.update_layout(xaxis=dict(rangeslider=dict(visible=True, thickness=0.08)))
-    return _initial_view(fig, hist, view_days) if not show_rsi else _initial_view_sub(fig, hist, view_days)
+        return _initial_view_sub(fig, hist, view_days)
+    fig.update_layout(xaxis=dict(rangeslider=dict(visible=True, thickness=0.08)))
+    return _initial_view(fig, hist, view_days)
+
+
+def _add_extremes_and_last(fig, hist, view_days, panes) -> None:
+    """표시창 최고/최저 콜아웃(현재가 대비 %·날짜) + 현재가 점선·우측 라벨."""
+    import pandas as pd
+    cols = set(hist.columns)
+    win = hist
+    if view_days:
+        start = hist.index[-1] - pd.Timedelta(days=view_days)
+        w = hist[hist.index >= start]
+        if len(w) >= 2:
+            win = w
+    last = float(hist["Close"].iloc[-1])
+    hi_s = win["High"] if "High" in cols else win["Close"]
+    lo_s = win["Low"] if "Low" in cols else win["Close"]
+    hi_i, lo_i = hi_s.idxmax(), lo_s.idxmin()
+    hi_v, lo_v = float(hi_s.max()), float(lo_s.min())
+    kw = dict(row=1, col=1) if panes > 1 else {}
+    if hi_v > 0:
+        fig.add_annotation(x=hi_i, y=hi_v, text=f"{hi_v:,.0f} ({last / hi_v - 1:+.1%})",
+                           showarrow=True, arrowhead=2, ax=0, ay=-24,
+                           font=dict(size=10, color=_RED), arrowcolor=_RED, **kw)
+    if lo_v > 0:
+        fig.add_annotation(x=lo_i, y=lo_v, text=f"{lo_v:,.0f} ({last / lo_v - 1:+.1%})",
+                           showarrow=True, arrowhead=2, ax=0, ay=24,
+                           font=dict(size=10, color=_BLUE), arrowcolor=_BLUE, **kw)
+    prev = float(hist["Close"].iloc[-2]) if len(hist) > 1 else last
+    chip = _GREEN if last >= prev else _RED
+    fig.add_hline(y=last, line=dict(color=chip, dash="dot", width=0.8), **kw)
+    fig.add_annotation(xref="x domain", x=1.0, y=last, xanchor="left", showarrow=False,
+                       text=f"<b>{last:,.0f}</b>", font=dict(size=11, color="#ffffff"),
+                       bgcolor=chip, borderpad=2, **({"row": 1, "col": 1} if panes > 1 else {}))
 
 
 def _initial_view_sub(fig, hist, view_days):
