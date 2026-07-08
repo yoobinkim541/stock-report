@@ -220,19 +220,26 @@ def pannable_chart_html(fig, hist, *, height: int = 460, view_days=None,
     }}
   }}
 
-  function rescale() {{                          // 드래그 종료/휠/슬라이더 — 콜아웃 포함 최종 맞춤
+  function muteHover() {{                        // 제스처 중 hover 연산 중지 (1회)
+    if (hoverOff) return;
+    hoverOff = true; guard = true;
+    Plotly.relayout(gd, {{hovermode: false}}).then(() => {{ guard = false; }});
+  }}
+
+  function finishGesture() {{                    // 제스처 끝 1회 — 콜아웃·hover 복원
     const xr = gd.layout.xaxis.range;
     if (!xr) return;
     const x0 = Date.parse(xr[0]), x1 = Date.parse(xr[1]);
     setTarget(x0, x1);                           // y 는 lerp 루프가 수렴
     const upd = {{}};
-    callouts(x0, x1, upd);                       // 무거운 주석 갱신은 종료 시 1회만
+    callouts(x0, x1, upd);                       // 무거운 주석 갱신은 여기서만
     if (hoverOff) {{ upd["hovermode"] = hoverMode; hoverOff = false; }}
     if (Object.keys(upd).length) {{
       guard = true;
       Plotly.relayout(gd, upd).then(() => {{ guard = false; }});
     }}
   }}
+  const rescale = finishGesture;                 // 초기 표시창 경로 하위호환
 
   Plotly.newPlot(gd, fig.data, fig.layout, {config}).then(() => {{
     const last = bounds.length ? bounds[bounds.length - 1][0] : null;
@@ -246,23 +253,27 @@ def pannable_chart_html(fig, hist, *, height: int = 460, view_days=None,
           .then(() => {{ guard = false; rescale(); }});
       }}
     }}
+    let gestureTimer = null;
     gd.on("plotly_relayouting", (e) => {{        // 드래그 **중** — y 가 실시간 따라옴 (스냅 제거)
       if (guard) return;
       const xr = evXRange(e);
       if (!xr) return;
-      if (!dragging) {{                          // 드래그 시작: hover 연산 중지 (비용 절감)
-        dragging = true;
-        if (!hoverOff) {{ hoverOff = true; guard = true;
-          Plotly.relayout(gd, {{hovermode: false}}).then(() => {{ guard = false; }}); }}
-      }}
+      dragging = true;
+      muteHover();
       setTarget(xr[0], xr[1]);
     }});
-    gd.on("plotly_relayout", (e) => {{           // 팬 종료/휠 줌/슬라이더 → 최종 맞춤+콜아웃
+    // 휠 줌은 틱마다 relayout 이 발생(연속 제스처) — 틱 중엔 y 목표 갱신만(저비용),
+    // 콜아웃·hover 복원 등 무거운 마무리는 마지막 틱 후 160ms 에 1회 (줌 랙 제거)
+    gd.on("plotly_relayout", (e) => {{
       if (guard) return;
       dragging = false;
       const keys = Object.keys(e || {{}});
       if (keys.some(k => k.startsWith("xaxis.range")) || e["xaxis.autorange"]) {{
-        requestAnimationFrame(rescale);
+        muteHover();
+        const xr = evXRange(e);
+        if (xr) setTarget(xr[0], xr[1]);
+        clearTimeout(gestureTimer);
+        gestureTimer = setTimeout(finishGesture, 160);
       }}
     }});
     gd.on("plotly_click", (ev) => {{             // ▲▼ 마커 클릭 → 인차트 상세
