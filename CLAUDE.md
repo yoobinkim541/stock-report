@@ -369,6 +369,7 @@ crons/news_spike_detector.py (크론 매 1분)
 | `dashboard/data.py` | 포트폴리오/Phase 상태 + 스케일 명시 포맷터(f_frac_pct vs f_pct·부호버그 차단). streamlit 미import → 테스트가능 |
 | `dashboard/views.py` | 모듈별 provider 래퍼(graceful·provider 내부 import) — risk_summary(구조화)·screener·backtest 등 |
 | `providers/intrinsic.py` | DDM·RIM 내재가치 닫힌해 + r/g 밴드 (DDM은 고배당주만·payout<40% 플래그) |
+| `providers/etf_compare.py` | ETF 비교·점수층 — **TR(Adj Close)/PR(Close) 분리**(`auto_adjust=False`; 현 차트 조정종가=TR 근사·QYLD 3y TR+46.9% vs PR+1.9%)·피어 지표(수익률 창[커버리지<60% None]·MDD·추적차=**대표 ETF TR 프록시**[^XNDX 불안정])·**점수 1~100**(전략별[index/커버드콜/배당] 가중 백분위·결측 재정규화·소그룹 shrink·데이터부족 None 정직). 피어 그룹=루트 `etf_meta.py` 큐레이트 시드(11그룹·레버리지 제외·KR 5종 검증). 그룹 12h 디스크 캐시(`etf_peer_*.json`)·점수는 읽기 시 순수 재계산. 종목분석 ETF 뷰(📈 TR vs PR·🏆 동종 비교표·게이지) + ⇄ 비교 팝오버(피어 원클릭·PR 토글[일봉·비교 모드 전용]) 소비 |
 | `providers/econ_calendar.py` | 경제 일정 (saveticker `/calendar/events`·키불요·한글) |
 | `providers/insider.py` | 내부자거래 (SEC Form 4·edgar 재사용·parse_form4 순수) + 최근 SEC 공시 |
 | `providers/dart.py` | KR 공시 (DART OpenAPI·corpCode 매핑·`DART_API_KEY` 없으면 graceful) |

@@ -116,6 +116,27 @@ def _price_chart(ticker, hist, avg_cost, trades, view_days=None):
                 cmp_tickers.append(_tk)
             elif not _tk:
                 st.warning(f"'{_r}' 종목을 찾지 못했습니다")
+        # 같은 지수 추종 ETF 원클릭 추가 (etf_meta 정적 시드 — 무네트워크).
+        # 기존 multiselect 의 session_state 는 불변 — 별도 pills 를 merge (위젯 상태 함정 회피)
+        import etf_meta
+        _peers = etf_meta.peers_of(ticker)
+        if _peers:
+            _pks = st.pills("같은 지수 추종 — 원클릭 추가", _peers, selection_mode="multi",
+                            key="_cmp_peers", format_func=ticker_names.search_label) or []
+            for _pk in _pks:
+                if _pk in cmp_tickers:
+                    continue
+                if len(cmp_tickers) >= 3:
+                    st.caption("⚠️ 비교는 최대 3종목 — 초과 선택은 제외")
+                    break
+                cmp_tickers.append(_pk)
+        pr_mode = False
+        if cmp_tickers:
+            pr_mode = st.toggle("PR(가격) 기준 — 분배금 제외", key="_cmp_pr",
+                                help="기본=TR(배당재투자·조정종가). 커버드콜 ETF 비교 시 "
+                                     "가격만의 성과 확인용 — 비교 모드·일봉 전용")
+            if pr_mode and tf != "1d":
+                st.caption("ℹ️ PR 기준은 일봉 전용 — 현재 봉 단위에선 TR(조정종가)로 표시")
     with c3.popover("📐 지표"):
         st.markdown("**상단 지표** — 가격 차트 오버레이")
         top = st.pills("상단 지표", _TOP_INDS, selection_mode="multi",
@@ -160,17 +181,36 @@ def _price_chart(ticker, hist, avg_cost, trades, view_days=None):
         ch_key = tuple(k for k, w in (("short", want_short), ("long", want_long)) if w)
         tls = cached.trendlines_for(ticker, tf, want_lines, ch_key)
     show_vol = "거래량" in bottom and "Volume" in getattr(df, "columns", [])
-    # 비교 종목 데이터 — 메인과 동일 봉 단위 파이프라인 (결측은 정직 스킵)
+    # 비교 종목 데이터 — 메인과 동일 봉 단위 파이프라인 (결측은 정직 스킵).
+    # PR 토글(일봉·비교 모드): 시리즈를 raw Close(분배 제외)로 치환 — 실패 시 TR 유지.
+    _use_pr = pr_mode and tf == "1d"
     compare = {}
     for _ct in cmp_tickers:
-        _cdf = cached.ohlc(_ct, "max") if tf == "1d" else cached.ohlc_tf(_ct, tf)
-        if _cdf is not None and not getattr(_cdf, "empty", True) and "Close" in _cdf.columns:
-            compare[ticker_names.label(_ct, maxlen=22)] = _cdf["Close"]
+        series = None
+        if _use_pr:
+            _d = cached.tr_pr(_ct)
+            series = _d["pr"] if _d else None
+        if series is None:
+            _cdf = cached.ohlc(_ct, "max") if tf == "1d" else cached.ohlc_tf(_ct, tf)
+            if _cdf is not None and not getattr(_cdf, "empty", True) and "Close" in _cdf.columns:
+                series = _cdf["Close"]
+        if series is not None:
+            _sfx = " PR" if _use_pr else ""
+            compare[ticker_names.label(_ct, maxlen=22) + _sfx] = series
         else:
             st.caption(f"⚠️ {_ct} {tf_label}봉 데이터 없음 — 비교에서 제외")
+    if compare and _use_pr:
+        _dm = cached.tr_pr(ticker)
+        if _dm:
+            df = pd.DataFrame({"Close": _dm["pr"]})   # 메인도 PR — 거래량 패널 자연 생략
+        else:
+            st.caption("⚠️ 메인 PR 데이터 없음 — 메인은 TR(조정종가) 유지")
     if compare:
-        st.caption("⇄ 비교 모드 — % 상대수익 겹침 · 가격 지표(캔들·평단·MA·매물대 등) 비활성 "
-                   "· 거래량/RSI 는 메인 종목 기준")
+        st.caption("⇄ 비교 모드 — % 상대수익 겹침 · "
+                   + ("**PR(가격) 기준 — 분배금 제외**" if _use_pr
+                      else "TR(배당재투자·조정종가) 기준")
+                   + " · 가격 지표(캔들·평단·MA·매물대 등) 비활성")
+        show_vol = show_vol and "Volume" in getattr(df, "columns", [])   # PR 스왑 후 재판정
     fig = charts.price_chart(
         df, label, kind=("candle" if kind == "🕯️ 캔들" else "line"),
         avg_cost=avg_cost, trades=trades, view_days=view_days, mas=mas,
