@@ -376,13 +376,34 @@ def _valuation(ticker, price=None):
     else:
         st.warning(f"밸류에이션 데이터 없음 ({v.get('metrics_error', '')})")
     c = v.get("consensus") or {}
-    if c:
+    cur_sym = "₩" if is_kr else "$"
+    _fmt_t = (lambda x: f"₩{x:,.0f}") if is_kr else (lambda x: f"${x:,.2f}")
+    # 🎯 애널리스트 의견 분포 (토스 풍 — 최다 카테고리 강조)
+    rec = {k: c.get(f"rec_{k}") for k in ("strong_sell", "sell", "hold", "buy", "strong_buy")}
+    rec_counts = {k: int(x) for k, x in rec.items() if x is not None}
+    total_rec = sum(rec_counts.values())
+    if total_rec > 0:
+        buyers = rec_counts.get("buy", 0) + rec_counts.get("strong_buy", 0)
+        st.markdown("##### 🎯 애널리스트 의견")
+        st.markdown(f"애널리스트 **{total_rec}명 중 {buyers}명**이 매수 의견을 냈어요.")
+        st.plotly_chart(charts.analyst_ratings(rec), width="stretch", config=_NOBAR)
+    # 🎯 예상 목표주가 팬 차트 (과거 1y + 1년 후 최고/평균/최저 투영)
+    if c.get("target_mean") and price:
+        up = c.get("target_upside_pct")
+        st.markdown("##### 🎯 예상 목표주가 (1년)")
+        st.markdown(f"평균 목표가 **{_fmt_t(c['target_mean'])}**"
+                    + (f" — 지금보다 **{up:+.1f}%**" if up is not None else ""))
+        st.plotly_chart(
+            charts.target_price_fan(cached.ohlc(ticker, period="1y"), price,
+                                    c.get("target_high"), c.get("target_mean"),
+                                    c.get("target_low"), cur_sym),
+            width="stretch", config=_NOBAR)
+        st.caption("점선 = 애널리스트 목표가 범위(최고/평균/최저) · 목표가는 컨센서스 — 리비전에 따라 변동")
+    if c and (c.get("revision_momentum") is not None or c.get("n_analysts")):
         st.markdown(
-            f"**컨센서스** · 목표가 {data.f_usd(c.get('target_mean'), 0)} "
-            f"(상승여력 {data.f_pct_s(c.get('target_upside_pct'))}) · "
-            f"애널 {int(c.get('n_analysts') or 0)}명 · "
             f"리비전 모멘텀 {data.f_ratio(c.get('revision_momentum'), 2)} "
-            f"(▲{int(c.get('eps_rev_up_30d') or 0)}/▼{int(c.get('eps_rev_down_30d') or 0)})")
+            f"(▲{int(c.get('eps_rev_up_30d') or 0)}/▼{int(c.get('eps_rev_down_30d') or 0)}) · "
+            f"애널 {int(c.get('n_analysts') or 0)}명")
     # 💰 멀티플 적정가 — 포워드 EPS × 현재 PER (= 현재가 × PER/fPER). 사용자 채택 방식(1순위).
     fv = data.fair_value_multiple(price, m.get("per"), m.get("forward_pe"))
     if fv:

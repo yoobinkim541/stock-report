@@ -374,3 +374,74 @@ def intraday_candle(hist, ticker: str = "", trades=None, vwap=None,
     fig.update_layout(margin=dict(t=10, b=10, l=10, r=10),
                       legend=dict(orientation="h", y=1.1), hovermode="x unified")
     return _pannable(_t(fig), height=400)
+
+
+def analyst_ratings(dist: dict):
+    """애널리스트 의견 분포 바 (토스 풍) — dist: {strong_sell,sell,hold,buy,strong_buy} 명수.
+
+    최다 카테고리만 시맨틱 색(매수측 초록·매도측 빨강·중립 회색), 나머지는 딤 처리.
+    """
+    go = _go()
+    order = [("strong_sell", "적극 매도"), ("sell", "매도"), ("hold", "중립"),
+             ("buy", "매수"), ("strong_buy", "적극 매수")]
+    counts = [max(0.0, float(dist.get(k) or 0)) for k, _ in order]
+    if not any(counts):
+        return _t(go.Figure())
+    top = counts.index(max(counts))
+    sem = {0: _RED, 1: _RED, 2: theme.MUTED, 3: _GREEN, 4: _GREEN}
+    colors = [sem[i] if i == top else "#2a2e39" for i in range(5)]
+    fig = go.Figure(go.Bar(
+        x=[lb for _, lb in order], y=counts,
+        text=[f"{int(c)}명" for c in counts], textposition="outside",
+        marker=dict(color=colors, cornerradius=6),
+        hovertemplate="%{x}: %{y:.0f}명<extra></extra>"))
+    fig.update_layout(margin=dict(t=28, b=10, l=10, r=10), height=230, showlegend=False,
+                      yaxis=dict(visible=False, range=[0, max(counts) * 1.25]),
+                      xaxis=dict(showgrid=False))
+    return _t(fig)
+
+
+def target_price_fan(hist, price, high, mean, low, currency: str = "$"):
+    """예상 목표주가 팬 차트 (토스 풍) — 과거 1y 종가 + 1년 후 최고/평균/최저 점선 투영.
+
+    hist: Close 포함 DataFrame | None(가격 이력 없이 투영만). price: 현재가(필수).
+    mean 없으면 빈 Figure. 라벨에 목표가·상승률 병기, 현재가 수평 점선 기준.
+    """
+    go = _go()
+    fig = go.Figure()
+    p = float(price or 0)
+    if not p or not mean:
+        return _t(fig)
+    import pandas as pd
+    if hist is not None and not getattr(hist, "empty", True) and "Close" in hist.columns:
+        close = hist["Close"].dropna()
+        if not close.empty:
+            last_x = close.index[-1]
+            fig.add_trace(go.Scatter(x=close.index, y=close, name="주가",
+                                     line=dict(color="#8b93a7", width=1.8),
+                                     hovertemplate="%{x|%y.%m.%d} %{y:,.0f}<extra></extra>"))
+        else:
+            last_x = pd.Timestamp.now()
+    else:
+        last_x = pd.Timestamp.now()
+    future = last_x + pd.Timedelta(days=365)
+    fmt = (lambda v: f"{currency}{v:,.0f}") if currency == "₩" else (lambda v: f"{currency}{v:,.2f}")
+    targets = [("최고", high, _GREEN), ("평균", mean, "#f59e0b"), ("최저", low, _RED)]
+    for name, tv, color in targets:
+        if not tv:
+            continue
+        tv = float(tv)
+        fig.add_trace(go.Scatter(
+            x=[last_x, future], y=[p, tv], mode="lines+markers", name=name,
+            line=dict(color=color, dash="dot", width=1.6),
+            marker=dict(size=[0, 8], color=color),
+            hovertemplate=f"{name} {fmt(tv)} ({(tv / p - 1) * 100:+.1f}%)<extra></extra>"))
+        fig.add_annotation(x=future, y=tv, xanchor="left", showarrow=False,
+                           text=f" {name} {fmt(tv)} ({(tv / p - 1) * 100:+.1f}%)",
+                           font=dict(size=11, color=color))
+    fig.add_hline(y=p, line=dict(color=theme.MUTED, dash="dash", width=1),
+                  annotation_text=f"현재 {fmt(p)}", annotation_position="bottom left",
+                  annotation_font=dict(size=10, color=theme.MUTED))
+    fig.update_layout(margin=dict(t=10, b=10, l=10, r=150), height=340, showlegend=False,
+                      hovermode="closest")
+    return _t(fig)

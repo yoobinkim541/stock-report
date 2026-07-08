@@ -303,3 +303,62 @@ def test_price_charts_pannable_navigation():
         assert fig.layout.xaxis.rangeslider.visible is True
     assert charts.PAN_CFG["scrollZoom"] is True           # 휠 확대/축소
     assert "select2d" in charts.PAN_CFG["modeBarButtonsToRemove"]  # 마커 클릭과 간섭 제거
+
+
+def test_analyst_ratings_highlights_dominant_bucket():
+    fig = charts.analyst_ratings({"strong_sell": 1, "sell": 2, "hold": 4, "buy": 12, "strong_buy": 8})
+    assert _is_fig(fig)
+    bar = fig.data[0]
+    assert list(bar.x) == ["적극 매도", "매도", "중립", "매수", "적극 매수"]
+    assert list(bar.y) == [1, 2, 4, 12, 8]
+    assert list(bar.marker.color)[3] == charts._GREEN
+
+
+def test_analyst_ratings_empty_graceful():
+    assert _is_fig(charts.analyst_ratings({}))
+    assert len(charts.analyst_ratings({}).data) == 0
+
+
+def test_target_price_fan_projects_targets_and_handles_empty_close():
+    import pandas as pd
+    idx = pd.date_range("2026-01-01", periods=3, freq="D")
+    hist = pd.DataFrame({"Close": [100.0, 101.0, 102.0]}, index=idx)
+    fig = charts.target_price_fan(hist, 100.0, 130.0, 120.0, 90.0)
+    assert _is_fig(fig)
+    assert [tr.name for tr in fig.data] == ["주가", "최고", "평균", "최저"]
+    assert len(fig.layout.annotations) == 4       # 목표가 3개 + 현재가 hline
+
+    empty_close = pd.DataFrame({"Close": [None, None]}, index=idx[:2])
+    assert _is_fig(charts.target_price_fan(empty_close, 100.0, 120.0, 110.0, 90.0))
+
+
+def test_target_price_fan_requires_mean_and_price():
+    assert len(charts.target_price_fan(None, 100.0, 120.0, None, 90.0).data) == 0
+    assert len(charts.target_price_fan(None, None, 120.0, 110.0, 90.0).data) == 0
+
+
+def test_analyst_ratings_distribution():
+    fig = charts.analyst_ratings({"strong_sell": 0, "sell": 0, "hold": 1, "buy": 23, "strong_buy": 1})
+    assert _is_fig(fig)
+    bar = fig.data[0]
+    assert list(bar.y) == [0, 0, 1, 23, 1]
+    assert list(bar.text) == ["0명", "0명", "1명", "23명", "1명"]
+    assert bar.marker.color[3] == charts._GREEN          # 최다 카테고리 강조
+    assert bar.marker.color[2] != charts._GREEN          # 나머지 딤
+    assert len(charts.analyst_ratings({}).data) == 0     # 빈 분포 graceful
+
+
+def test_target_price_fan_projection():
+    import pandas as pd
+    idx = pd.date_range("2025-07-08", periods=250, freq="D")
+    hist = pd.DataFrame({"Close": [2_000_000.0 + i * 1000 for i in range(250)]}, index=idx)
+    fig = charts.target_price_fan(hist, 2_259_000, 4_300_000, 3_547_916, 1_750_000, "₩")
+    assert _is_fig(fig)
+    assert len(fig.data) == 4                             # 주가 + 최고/평균/최저 점선
+    anns = " ".join(a.text for a in fig.layout.annotations)
+    assert "최고" in anns and "평균" in anns and "최저" in anns
+    assert "+57.1%" in anns and "+90.3%" in anns and "-22.5%" in anns
+    assert "₩3,547,916" in anns                           # KR 통화 포맷
+    # 평균 없으면 빈 Figure · 이력 없이도 투영만으로 렌더
+    assert len(charts.target_price_fan(hist, 100.0, None, None, None).data) == 0
+    assert len(charts.target_price_fan(None, 100.0, 120.0, 110.0, 90.0).data) == 3
