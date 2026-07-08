@@ -208,7 +208,9 @@ def _holdings_table(rows):
         cost = r.get("cost") or 0
         _ed = None
         try:
-            _ed = cached.next_earnings(r["ticker"])
+            from providers.etf_data import is_etf as _is_etf
+            if not _is_etf(r["ticker"]):        # ETF 는 실적일 없음 — 404 방지
+                _ed = cached.next_earnings(r["ticker"])
         except Exception:
             pass
         _dd = (f"D-{(_ed - _date.today()).days}"

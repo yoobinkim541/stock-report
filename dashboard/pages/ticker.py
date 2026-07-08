@@ -314,9 +314,16 @@ def _live_top(ticker, hist, yf_price, prev, pos):
         else:
             st.caption("기술 신호 N/A")
     with vcol:
-        val = cached.valuation(ticker) or {}
-        vs = data.valuation_score(price, val.get("metrics"), val.get("consensus"),
-                                  cached.intrinsic(ticker))
+        vs = None
+        try:                                    # ETF 는 fundamentals 없음 — 404 스팸 방지
+            from providers.etf_data import is_etf as _is_etf
+            _skip_val = _is_etf(ticker)
+        except Exception:
+            _skip_val = False
+        if not _skip_val:
+            val = cached.valuation(ticker) or {}
+            vs = data.valuation_score(price, val.get("metrics"), val.get("consensus"),
+                                      cached.intrinsic(ticker))
         if vs:
             theme.render(theme.valuation_gauge_html(vs["score"], sub=vs["sub"]))
         else:
