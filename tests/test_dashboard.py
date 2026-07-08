@@ -715,3 +715,20 @@ def test_peg_textbook_and_eps_growth():
     assert data.peg_textbook({"per": 30.0, "eps_ttm": 5.0, "eps_fwd": 4.0}) is None  # 역성장
     assert data.peg_textbook({}) is None
     assert data.eps_growth_fwd({"eps_ttm": 0.0, "eps_fwd": 1.0}) is None
+
+
+def test_format_screener_features():
+    """피처 표시 — 한글 라벨·카테고리·스마트 포맷·중요도 정렬·미등록 폴백 (순수)."""
+    feats = {"obv": -79_488_400, "mom_126d": 0.42, "golden_cross": 1.0,
+             "sma_200": 57.7986, "vol_63d": 0.2401, "beta_60d": -0.4929,
+             "unknown_feat": 1.2345}
+    rows = data.format_screener_features(feats, {"mom_126d": 100, "obv": 90})
+    by = {r["지표"]: r for r in rows}
+    assert rows[0]["지표"] == "6개월 모멘텀" and rows[0]["값"] == "+42.0%"   # 중요도 1위
+    assert by["OBV 누적 흐름"]["값"] == "-79.5M" and by["OBV 누적 흐름"]["구분"] == "거래량"
+    assert by["골든크로스"]["값"] == "✓"
+    assert by["200일 이평"]["값"] == "$57.80"
+    assert by["변동성 3개월"]["값"] == "+24.0%"
+    assert by["베타 60일"]["값"] == "-0.49"
+    assert by["unknown_feat"]["구분"] == "기타"                              # 폴백
+    assert data.format_screener_features({}, {}) == []

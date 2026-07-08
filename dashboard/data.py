@@ -438,3 +438,108 @@ def peg_textbook(metrics) -> dict | None:
         return None
     return {"peg": per / g, "growth_pct": g, "per": per,
             "yahoo": _try_float(m.get("peg"))}
+
+
+# 스크리너 피처 표시 메타 — (한글 라벨, 카테고리, 포맷 kind)
+# kind: price($)·pct(분수→%)·ratio(배율→%)·osc(1dp)·num·vol(축약)·flag(✓/—)·beta(2dp)
+_FEAT_META = {
+    "sma_5": ("5일 이평", "가격·이평", "price"), "sma_10": ("10일 이평", "가격·이평", "price"),
+    "sma_20": ("20일 이평", "가격·이평", "price"), "sma_50": ("50일 이평", "가격·이평", "price"),
+    "sma_200": ("200일 이평", "가격·이평", "price"),
+    "ema_12": ("EMA 12", "가격·이평", "price"), "ema_26": ("EMA 26", "가격·이평", "price"),
+    "ema_50": ("EMA 50", "가격·이평", "price"),
+    "bb_mid_20": ("볼린저 중심", "가격·이평", "price"),
+    "bb_upper_20": ("볼린저 상단", "가격·이평", "price"),
+    "bb_lower_20": ("볼린저 하단", "가격·이평", "price"),
+    "bb_pct_b_20": ("볼린저 %B", "가격·이평", "num"),
+    "bb_bw_20": ("볼린저 밴드폭", "변동성", "num"),
+    "ichi_tenkan": ("일목 전환선", "가격·이평", "price"),
+    "ichi_kijun": ("일목 기준선", "가격·이평", "price"),
+    "ichi_senkou_a": ("일목 선행A", "가격·이평", "price"),
+    "ichi_senkou_b": ("일목 선행B", "가격·이평", "price"),
+    "mom_1d": ("1일 수익률", "모멘텀", "pct"), "mom_5d": ("5일 모멘텀", "모멘텀", "pct"),
+    "mom_10d": ("10일 모멘텀", "모멘텀", "pct"), "mom_21d": ("1개월 모멘텀", "모멘텀", "pct"),
+    "mom_63d": ("3개월 모멘텀", "모멘텀", "pct"), "mom_126d": ("6개월 모멘텀", "모멘텀", "pct"),
+    "excess_mom_20d": ("QQQ대비 20일", "모멘텀", "pct"),
+    "excess_mom_60d": ("QQQ대비 60일", "모멘텀", "pct"),
+    "close_vs_52w_high": ("52주 고점 대비", "모멘텀", "ratio"),
+    "close_vs_52w_low": ("52주 저점 대비", "모멘텀", "ratio"),
+    "close_vs_sma20": ("20일선 대비", "모멘텀", "ratio"),
+    "close_vs_sma50": ("50일선 대비", "모멘텀", "ratio"),
+    "disparity_20d": ("이격도 20일", "모멘텀", "num"),
+    "disparity_60d": ("이격도 60일", "모멘텀", "num"),
+    "disparity_120d": ("이격도 120일", "모멘텀", "num"),
+    "price_accel_5d": ("가속도 5일", "모멘텀", "num"),
+    "price_accel_20d": ("가속도 20일", "모멘텀", "num"),
+    "rsi_14": ("RSI 14", "오실레이터", "osc"), "rsi_7": ("RSI 7", "오실레이터", "osc"),
+    "macd": ("MACD", "오실레이터", "num"), "macd_signal": ("MACD 시그널", "오실레이터", "num"),
+    "macd_hist": ("MACD 히스토그램", "오실레이터", "num"),
+    "stoch_k": ("스토캐스틱 %K", "오실레이터", "osc"),
+    "stoch_d": ("스토캐스틱 %D", "오실레이터", "osc"),
+    "williams_r_14": ("윌리엄스 %R", "오실레이터", "osc"),
+    "cci_20": ("CCI 20", "오실레이터", "osc"),
+    "vol_10d": ("변동성 10일", "변동성", "pct"), "vol_21d": ("변동성 1개월", "변동성", "pct"),
+    "vol_63d": ("변동성 3개월", "변동성", "pct"), "atr_14": ("ATR 14", "변동성", "num"),
+    "vov_10_30": ("변동성의 변동성", "변동성", "num"),
+    "vol_sma_20": ("거래량 20일 평균", "거래량", "vol"),
+    "vol_ratio_20": ("거래량 배율(20일)", "거래량", "num"),
+    "vol_zscore_20": ("거래량 z-score", "거래량", "num"),
+    "obv": ("OBV 누적 흐름", "거래량", "vol"), "cmf_21": ("CMF 자금흐름", "거래량", "num"),
+    "golden_cross": ("골든크로스", "신호", "flag"),
+    "ema_bull_short": ("단기 EMA 정배열", "신호", "flag"),
+    "ma5_above_ma20": ("5일>20일선", "신호", "flag"),
+    "ichi_above_cloud": ("일목 구름 위", "신호", "flag"),
+    "ichi_below_cloud": ("일목 구름 아래", "신호", "flag"),
+    "ichi_cloud_bull": ("일목 구름 상승형", "신호", "flag"),
+    "ichi_tk_cross_up": ("일목 전환>기준 크로스", "신호", "flag"),
+    "ichi_tk_bull": ("일목 전환>기준", "신호", "flag"),
+    "ichi_price_vs_kijun": ("가격/기준선 비", "신호", "num"),
+    "beta_60d": ("베타 60일", "시장", "beta"), "beta_20d": ("베타 20일", "시장", "beta"),
+    "beta_gamma": ("베타 감마", "시장", "beta"),
+    "fg_score": ("공포·탐욕", "시장", "osc"), "vix": ("VIX", "시장", "osc"),
+    "idx_rsi_d": ("지수 RSI 일봉", "시장", "osc"), "idx_rsi_w": ("지수 RSI 주봉", "시장", "osc"),
+    "idx_rsi_m": ("지수 RSI 월봉", "시장", "osc"),
+    "fund_score": ("재무 점수", "펀더멘털", "osc"),
+    "surv_penalty": ("생존편향 감산", "기타", "num"), "sector_id": ("섹터 ID", "기타", "num"),
+}
+
+
+def _fmt_feat(v, kind: str) -> str:
+    x = _try_float(v)
+    if x is None:
+        return "—"
+    if kind == "flag":
+        return "✓" if x >= 1 else "—"
+    if kind == "pct":
+        return f"{x * 100:+.1f}%"
+    if kind == "ratio":
+        return f"{x * 100:.0f}%"
+    if kind == "price":
+        return f"${x:,.2f}"
+    if kind == "vol":
+        a = abs(x)
+        s = "-" if x < 0 else ""
+        if a >= 1e9:
+            return f"{s}{a / 1e9:,.1f}B"
+        if a >= 1e6:
+            return f"{s}{a / 1e6:,.1f}M"
+        return f"{s}{a:,.0f}"
+    if kind == "osc":
+        return f"{x:.1f}"
+    if kind == "beta":
+        return f"{x:.2f}"
+    return f"{x:.4g}"
+
+
+def format_screener_features(feats: dict, importance: dict | None = None) -> list[dict]:
+    """스크리너 전체 피처 → 표시행 [{지표, 값, 구분}] — 한글 라벨·스마트 포맷·중요도 순. 순수."""
+    imp = importance or {}
+    rows = []
+    for k, v in (feats or {}).items():
+        label, cat, kind = _FEAT_META.get(k, (k, "기타", "num"))
+        rows.append({"_imp": float(imp.get(k, 0) or 0),
+                     "지표": label, "값": _fmt_feat(v, kind), "구분": cat})
+    rows.sort(key=lambda r: -r["_imp"])
+    for r in rows:
+        r.pop("_imp")
+    return rows

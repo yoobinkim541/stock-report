@@ -90,8 +90,15 @@ def _screener_section():
                "행 클릭 = 상세")
 
 
+def _chip(text, color):
+    return (f'<span style="display:inline-block;margin:2px 6px 2px 0;padding:3px 11px;'
+            f'border:1px solid {color}44;border-radius:999px;color:{color};'
+            f'font-size:0.78rem;background:{color}14">{text}</span>')
+
+
 def _screener_detail(event, rows, feats, importance):
-    """선택 행 상세 카드 — 선택 티커만 네트워크(밸류·매집) + 전체 피처 표 (중요도 순)."""
+    """선택 행 상세 카드 — 선정 근거 칩·지표 밴드 2열·전체 피처(한글·카테고리) 표."""
+    from dashboard import theme
     try:
         sel = event.selection.rows
     except Exception:
@@ -100,40 +107,81 @@ def _screener_detail(event, rows, feats, importance):
         return
     r = rows[sel[0]]
     t = r.get("ticker", "")
-    st.markdown(f"##### 🔎 {r.get('name') or t} ({t}) — 상세")
-    c1, c2, c3 = st.columns([1, 1, 0.6])
-    with c1:
-        v = cached.valuation(t) or {}
-        m = v.get("metrics") or {}
-        st.markdown("**밸류에이션**")
-        vv = st.columns(3)
-        vv[0].metric("PER", data.f_ratio(m.get("per")))
-        vv[1].metric("PEG", data.f_ratio(m.get("peg")))
-        vv[2].metric("ROE", data.f_frac_pct(m.get("roe")) if m.get("roe") is not None else "—")
-    with c2:
-        inst = cached.institutional(t) or {}
-        ac = inst.get("accum") or {}
-        st.markdown("**기관 매집**")
-        ii = st.columns(2)
-        ii[0].metric("매집 강도", data.f_ratio(ac.get("accum_score"), 1) if ac else "—",
-                     help="OBV·CMF·상승/하락 거래량 종합")
-        sig = ac.get("signals") or {}
-        ii[1].metric("CMF", data.f_ratio(sig.get("cmf"), 2) if sig else "—")
-    with c3:
-        st.markdown("**바로가기**")
-        if st.button("🔍 종목 분석 열기", key=f"_scr_open_{t}"):
+    f = feats.get(t) or {}
+
+    # ── 헤더 카드: 순위·점수·기술등급 + 선정 근거 칩 ──
+    reason_chips = "".join(_chip(x.strip(), theme.BLUE)
+                           for x in (r.get("reason") or "").split("·") if x.strip() and x.strip() != "—")
+    rating = r.get("tech_rating") or "—"
+    r_col = theme.GREEN if "매수" in rating else theme.RED if "매도" in rating else theme.MUTED
+    st.markdown(
+        f'<div style="background:{theme.PANEL};border:1px solid {theme.BORDER};'
+        f'border-left:4px solid {theme.BLUE};border-radius:12px;padding:12px 16px">'
+        f'<div style="display:flex;gap:14px;align-items:baseline;flex-wrap:wrap">'
+        f'<b style="font-size:1.15rem">🔎 {r.get("name") or t} ({t})</b>'
+        f'<span style="color:{theme.MUTED};font-size:0.82rem">랭킹 {r.get("rank")}위 · '
+        f'점수 {r.get("score"):.3f}</span>'
+        f'{_chip(rating, r_col)}</div>'
+        f'<div style="margin-top:6px"><span style="color:{theme.MUTED};font-size:0.74rem;'
+        f'margin-right:6px">선정 근거</span>{reason_chips or "—"}</div>'
+        f'<div style="color:{theme.MUTED};font-size:0.7rem;margin-top:4px">'
+        f'근거 = 두드러진 특징 서술(모델 기여도 아님) · 표시·참고용 · 매매신호 아님</div></div>',
+        unsafe_allow_html=True)
+
+    # ── 지표 밴드 — 1행: 스크리너 피처(무네트워크) · 2행: 밸류·매집(선택 티커만 조회) ──
+    m1 = st.columns(5)
+    m1[0].metric("RSI(14)", data.f_ratio(f.get("rsi_14"), 1) if f.get("rsi_14") is not None else "—")
+    m1[1].metric("52주 고점比", f"{r['close_vs_52w_high'] * 100:.0f}%"
+                 if r.get("close_vs_52w_high") is not None else "—")
+    m1[2].metric("6M 모멘텀", f"{r['mom_126d'] * 100:+.1f}%"
+                 if r.get("mom_126d") is not None else "—")
+    m1[3].metric("QQQ 대비(60d)", f"{r['excess_mom_60d'] * 100:+.1f}%p"
+                 if r.get("excess_mom_60d") is not None else "—")
+    m1[4].metric("재무 점수", f"{r['fund_score']:.0f}" if r.get("fund_score") is not None else "—",
+                 help="수익성·이익의 질·안정성·성장·자본배분 종합 (0~100)")
+    v = cached.valuation(t) or {}
+    m = v.get("metrics") or {}
+    _pt = data.peg_textbook(m)
+    _g = data.eps_growth_fwd(m)
+    inst = cached.institutional(t) or {}
+    ac = inst.get("accum") or {}
+    sig = ac.get("signals") or {}
+    cmf_val = sig.get("cmf", f.get("cmf_21"))            # 매집 조회 실패 시 피처 폴백
+    m2 = st.columns(5)
+    m2[0].metric("PER", data.f_ratio(m.get("per")))
+    m2[1].metric("PEG (계산)", data.f_ratio((_pt or {}).get("peg")),
+                 help="PER ÷ 예상 EPS 증가율 (Fwd/TTM 1년)")
+    m2[2].metric("EPS 성장률", f"{_g:+.1f}%" if _g is not None else "—")
+    m2[3].metric("매집 강도", data.f_ratio(ac.get("accum_score"), 1) if ac else "—",
+                 help="OBV·CMF·상승/하락 거래량 종합 — 조회 실패 시 —")
+    m2[4].metric("CMF 자금흐름", data.f_ratio(cmf_val, 2) if cmf_val is not None else "—",
+                 help="+ 유입 / − 유출 (매집 조회 실패 시 스크리너 피처값)")
+
+    # ── 전체 피처 — 한글 라벨·카테고리·스마트 포맷 (중요도 순) ──
+    fr = data.format_screener_features(f, importance)
+    tcol, bcol = st.columns([2.1, 0.9], vertical_alignment="bottom")
+    with tcol:
+        st.markdown("**전체 피처** — 모델 중요도 순 · 한글 라벨")
+    with bcol:
+        if st.button("🔍 종목 분석 열기", key=f"_scr_open_{t}", width="stretch"):
             st.session_state["ticker"] = t
             pg = st.session_state.get("_ticker_page")
             if pg:
                 st.switch_page(pg)
             else:
                 st.rerun()
-    f = feats.get(t) or {}
-    if f:
-        ordered = sorted(f.items(), key=lambda x: -float(importance.get(x[0], 0) or 0))
-        st.markdown("**전체 피처** — 모델 중요도 순")
-        st.dataframe(pd.DataFrame([{"피처": k, "값": v} for k, v in ordered]),
-                     hide_index=True, width="stretch", height=240)
+    if fr:
+        cats = ["전체"] + sorted({x["구분"] for x in fr})
+        pick = st.pills("구분", cats, default="전체", selection_mode="single",
+                        key=f"_scr_cat_{t}", label_visibility="collapsed") or "전체"
+        show = fr if pick == "전체" else [x for x in fr if x["구분"] == pick]
+        st.dataframe(pd.DataFrame(show), hide_index=True, width="stretch",
+                     height=min(330, 44 + 35 * len(show)),
+                     column_config={
+                         "지표": st.column_config.TextColumn(width="medium"),
+                         "값": st.column_config.TextColumn(width="small"),
+                         "구분": st.column_config.TextColumn(width="small"),
+                     })
 
 
 @st.fragment
