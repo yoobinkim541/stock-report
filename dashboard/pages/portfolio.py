@@ -83,10 +83,11 @@ def _risk_section():
                 help="낙폭예산 상한(robust·μ가정 무관) · 표시 전용")
 
     col1, col2 = st.columns(2)
+    contribs = s.get("contributions") or []
+    _h = max(300, 36 * len(contribs)) if contribs else 300   # 좌우 차트 높이 동기화
     with col1:
-        contribs = s.get("contributions") or []
         if contribs:
-            st.caption("위험 기여도 (참여비)")
+            st.caption("위험 기여도 (참여비) — 포트 **안**에서 누가 위험을 만드나")
             st.plotly_chart(
                 charts.hbar([t for t, _w, _pc in contribs],
                             [pc for _t, _w, pc in contribs], pct=True),
@@ -94,13 +95,19 @@ def _risk_section():
     with col2:
         fn = s.get("factor_net") or {}
         if fn:
-            st.caption("팩터 순베타")
-            st.plotly_chart(
-                charts.signed_bars([_FAC_LABEL.get(k, k) for k in fn.keys()],
-                                   [round(float(v), 2) for v in fn.values()]),
-                width="stretch", config=_NOBAR)
-            if s.get("factor_caveat"):
-                st.caption(s["factor_caveat"])
+            st.caption("팩터 순베타 — 포트가 **바깥** 무엇에 노출됐나")
+            _fig = charts.signed_bars([_FAC_LABEL.get(k, k) for k in fn.keys()],
+                                      [round(float(v), 2) for v in fn.values()])
+            _fig.update_layout(height=_h)                    # 좌측 기여도와 같은 높이
+            st.plotly_chart(_fig, width="stretch", config=_NOBAR)
+            _mkt = fn.get("mkt")
+            st.caption(
+                f"β = 지난 1년 일수익률 회귀. **시장β {_mkt:+.2f}** = QQQ 가 1% 움직일 때 "
+                f"포트가 평균 {abs(_mkt):.1f}% 동행 — 개별 9종목이어도 시장 관점 실효 노출은 "
+                f"이 한 숫자로 요약 (1보다 낮음 = SGOV·QQQI 완충이 작동 중). "
+                f"**금리β {fn.get('rate', 0):+.2f}** ≈ 금리 변화에 사실상 중립. "
+                + (s.get("factor_caveat") or "과거 실현 기반 — 미래 보장 아님")
+                if _mkt is not None else (s.get("factor_caveat") or ""))
 
     kh = lev.get("kelly_half") or {}
     if kh:
