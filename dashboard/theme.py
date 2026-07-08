@@ -225,10 +225,12 @@ def fng_gauge_html(score, prev_week=None) -> str:
         return ""
     col, lab = fng_label(s)
     trend = f' · 전주 {prev_week:.0f} {"▲" if s >= prev_week else "▼"}' if isinstance(prev_week, (int, float)) else ""
-    return f'''<div style="padding:8px 12px;background:{PANEL};border:1px solid {BORDER};border-radius:10px;min-height:318px;display:flex;flex-direction:column;justify-content:center;">
+    return f'''<div style="padding:10px 12px;background:{PANEL};border:1px solid {BORDER};border-radius:10px;min-height:340px;display:flex;flex-direction:column;">
   <div style="color:{MUTED};font-size:0.82rem;text-align:center">😱 공포·탐욕 지수</div>
-  <div style="max-width:210px;margin:0 auto">{_gauge_svg(s, 0, 100, _FNG_GAUGE, big=f"{s:.0f}", big_col=col, sub=lab)}</div>
-  <div style="color:{MUTED};font-size:0.72rem;text-align:center;margin-top:-2px">극공포 0 · 100 극탐욕{trend}</div>
+  <div style="flex:1;display:flex;flex-direction:column;justify-content:center">
+    <div style="max-width:230px;margin:0 auto;width:100%">{_gauge_svg(s, 0, 100, _FNG_GAUGE, big=f"{s:.0f}", big_col=col, sub=lab)}</div>
+  </div>
+  <div style="color:{MUTED};font-size:0.72rem;text-align:center">극공포 0 · 100 극탐욕{trend}</div>
 </div>'''
 
 
@@ -260,11 +262,13 @@ def index_rsi_gauges_html(name, price=None, chg=None, rsi_d=None, rsi_w=None) ->
         return (f'<div style="flex:1;text-align:center"><div style="color:{MUTED};font-size:0.72rem">{lbl}</div>'
                 f'{_gauge_svg(val, 0, 100, _RSI_GAUGE, big=big, big_col=c, sub=_rsi_zone(v))}</div>')
 
-    return f'''<div style="padding:8px 12px;background:{PANEL};border:1px solid {BORDER};border-radius:10px;min-height:318px;display:flex;flex-direction:column;justify-content:center;">
+    return f'''<div style="padding:10px 12px;background:{PANEL};border:1px solid {BORDER};border-radius:10px;min-height:340px;display:flex;flex-direction:column;">
   <div style="display:flex;justify-content:space-between;align-items:baseline">
     <b style="color:{TEXT}">{name}</b>
     <span style="font-family:{_MONO};color:{MUTED};font-size:0.82rem">{pxs} <span style="color:{ccol}">{chgs}</span></span></div>
-  <div style="display:flex;gap:6px;margin-top:2px">{g("일봉 RSI", rsi_d)}{g("주봉 RSI", rsi_w)}</div>
+  <div style="flex:1;display:flex;align-items:center">
+    <div style="display:flex;gap:6px;width:100%">{g("일봉 RSI", rsi_d)}{g("주봉 RSI", rsi_w)}</div>
+  </div>
 </div>'''
 
 
@@ -807,8 +811,10 @@ def market_temp_html(score, sub: str = "", phase_line: str = "") -> str:
                               boxed=False)                      # 카드가 박스 — 이중 박스 방지
     tail = (f'<div style="color:{MUTED};font-size:0.7rem;text-align:center;'
             f'margin-top:4px">{phase_line}</div>' if phase_line else "")
-    return (f'<div style="padding:8px 12px;background:{PANEL};border:1px solid {BORDER};'
-            f'border-radius:10px;min-height:318px;display:flex;flex-direction:column;justify-content:center;">{inner}{tail}</div>')
+    return (f'<div style="padding:10px 12px;background:{PANEL};border:1px solid {BORDER};'
+            f'border-radius:10px;min-height:340px;display:flex;flex-direction:column;">'
+            f'<div style="flex:1;display:flex;flex-direction:column;'
+            f'justify-content:center">{inner}</div>{tail}</div>')
 
 
 def valuation_strip_html(v: dict) -> str:
