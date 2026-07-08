@@ -73,8 +73,11 @@ def _screener_section():
     rows = sc.get("rows") or []
     if rows:
         from dashboard import theme
+        prev_ranks = sc.get("prev_ranks") or {}
         table = [{
-            "순위": r.get("rank"),
+            "순위": data.rank_badge(r.get("rank")),
+            "변동": (data.rank_move(r.get("rank"), prev_ranks.get(r.get("ticker")))
+                     if prev_ranks else "—"),
             "종목": (f"{r['name']} ({r['ticker']})" if r.get("name") else r.get("ticker", ""))
                     + (" ⚠️" if r.get("surv_flag") else ""),
             "점수": r.get("score"),
@@ -98,8 +101,17 @@ def _screener_section():
             except TypeError:
                 return ""
 
+        def _movecolor(v):
+            sv = str(v)
+            if sv.startswith("▲") or sv == "NEW":
+                return f"color: {theme.GREEN}"
+            if sv.startswith("▼"):
+                return f"color: {theme.RED}"
+            return f"color: {theme.MUTED}"
+
         sty = (df.style
                .map(_updown, subset=["6M 모멘텀%", "QQQ대비%p"])
+               .map(_movecolor, subset=["변동"])
                .map(lambda v: (f"color: {theme.RED}" if isinstance(v, (int, float)) and v >= 70
                                else f"color: {theme.GREEN}"
                                if isinstance(v, (int, float)) and v <= 30 else ""),
@@ -110,7 +122,9 @@ def _screener_section():
             height=min(670, 44 + 35 * len(df)),
             on_select="rerun", selection_mode="single-row", key="_scr_tbl",
             column_config={
-                "순위": st.column_config.NumberColumn(width="small", format="%d"),
+                "순위": st.column_config.TextColumn(width="small"),
+                "변동": st.column_config.TextColumn(
+                    width="small", help="직전 실행 대비 순위 변동 — NEW = 신규 진입"),
                 "종목": st.column_config.TextColumn(width="medium", pinned=True),
                 "점수": st.column_config.ProgressColumn(
                     format="%.3f", min_value=_smin, max_value=_smax,
@@ -132,8 +146,9 @@ def _screener_section():
                          (sc.get("meta") or {}).get("importance") or {})
     else:
         st.warning(f"랭킹 없음 ({sc.get('error', '')})")
+    _pa = sc.get("prev_asof")
     st.caption("⚠️ 생존편향(⚠️) + 검증상 종목선택 무엣지 — 정보·표시용, 매매신호 아님 · "
-               "행 클릭 = 상세")
+               "행 클릭 = 상세" + (f" · 변동 기준 = 직전 실행 {_pa}" if _pa else ""))
 
 
 def _chip(text, color):

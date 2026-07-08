@@ -181,6 +181,13 @@ def screener(top_n: int = 20) -> dict:
             try:
                 import json
                 from datetime import datetime
+                try:                                  # 직전 실행 순위 → 변동(▲▼NEW) 표시용
+                    prev = json.loads(_screener_last_path().read_text())
+                    out["prev_ranks"] = {r0.get("ticker"): r0.get("rank")
+                                         for r0 in (prev.get("rows") or [])}
+                    out["prev_asof"] = prev.get("asof")
+                except Exception:
+                    pass
                 out2 = dict(out)
                 out2["asof"] = datetime.now().strftime("%Y-%m-%d %H:%M KST")
                 out2["topn"] = top_n

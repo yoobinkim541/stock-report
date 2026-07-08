@@ -841,3 +841,13 @@ def test_top_feature_bars():
     assert tb["values"] == [100.0, 90.0]
     assert data.top_feature_bars(feats, {}) == {}
     assert data.top_feature_bars({}, {"x": 1}) == {}
+
+
+def test_rank_badge_and_move():
+    """순위 배지(메달)·직전 대비 변동(▲▼〓NEW) — 순수."""
+    assert data.rank_badge(1) == "🥇 1" and data.rank_badge(3) == "🥉 3"
+    assert data.rank_badge(7) == "7" and data.rank_badge(None) == "—"
+    assert data.rank_move(2, 5) == "▲3"                # 5위 → 2위 상승
+    assert data.rank_move(6, 4) == "▼2"
+    assert data.rank_move(3, 3) == "〓"
+    assert data.rank_move(1, None) == "NEW"

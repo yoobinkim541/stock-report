@@ -719,3 +719,24 @@ def top_feature_bars(feats: dict, importance: dict | None = None, top: int = 8) 
         if len(labels) >= top:
             break
     return {"labels": labels, "values": values} if labels else {}
+
+
+def rank_badge(rank) -> str:
+    """순위 배지 — 1~3위 메달·이하 숫자 (순수)."""
+    r = _try_float(rank)
+    if r is None:
+        return "—"
+    r = int(r)
+    return {1: "🥇 1", 2: "🥈 2", 3: "🥉 3"}.get(r, str(r))
+
+
+def rank_move(rank, prev_rank) -> str:
+    """직전 실행 대비 순위 변동 — ▲n 상승·▼n 하락·〓 유지·NEW 신규 (순수)."""
+    r = _try_float(rank)
+    if r is None:
+        return "—"
+    p = _try_float(prev_rank)
+    if p is None:
+        return "NEW"
+    d = int(p) - int(r)
+    return f"▲{d}" if d > 0 else (f"▼{-d}" if d < 0 else "〓")
