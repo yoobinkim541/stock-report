@@ -836,3 +836,25 @@ def intraday_chart(symbol: str, market: str, date: str, interval: str = "1m") ->
     except Exception as e:
         out["trades"], out["trades_error"] = [], str(e)
     return out
+
+
+def ohlc_tf(ticker: str, tf: str = "1d"):
+    """타임프레임별 OHLCV — 1d/1wk/1mo 는 전체(주·월봉은 일봉 리샘플·무추가호출),
+    5m 은 최근 60일·1h 는 최근 2년 (yfinance 인트라데이 보존 한계). 실패 None."""
+    try:
+        from providers.market_data import _history_cached
+        if tf in ("1d", "1wk", "1mo"):
+            d = _history_cached(ticker, period="max")
+            if d is None or getattr(d, "empty", True) or tf == "1d":
+                return d
+            rule = "W" if tf == "1wk" else "ME"
+            agg = {"Open": "first", "High": "max", "Low": "min", "Close": "last"}
+            if "Volume" in d.columns:
+                agg["Volume"] = "sum"
+            return d.resample(rule).agg(agg).dropna(subset=["Open"])
+        import yfinance as yf
+        period = "60d" if tf == "5m" else "730d"
+        df = yf.Ticker(ticker).history(period=period, interval=tf)
+        return df if df is not None and not df.empty else None
+    except Exception:
+        return None

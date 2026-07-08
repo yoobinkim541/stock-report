@@ -190,6 +190,23 @@ def test_formatters_none_nan_safe():
         assert f("n/a") == "—"
 
 
+def test_fair_value_multiple_uses_current_multiple_on_forward_eps():
+    fv = data.fair_value_multiple(100, 25, 20)
+    assert fv["fair"] == pytest.approx(125.0)
+    assert fv["upside_pct"] == pytest.approx(25.0)
+    assert fv["eps_fwd"] == pytest.approx(5.0)
+    assert fv["per"] == 25
+    assert fv["fper"] == 20
+
+
+def test_fair_value_multiple_rejects_invalid_inputs():
+    assert data.fair_value_multiple(None, 25, 20) is None
+    assert data.fair_value_multiple(100, 0, 20) is None
+    assert data.fair_value_multiple(100, 25, -1) is None
+    assert data.fair_value_multiple(100, 250, 20) is None   # extreme ratio: likely bad data
+    assert data.fair_value_multiple(100, 1, 20) is None
+
+
 # ── views 배선 (provider monkeypatch — 무네트워크) ───────────────────────────
 def test_views_strip_html():
     from dashboard import views
@@ -618,3 +635,23 @@ def test_theme_econ_calendar_overflow_chip():
                "importance": "medium"} for i in range(6)]
     html = theme.econ_calendar_html(events, start=d, weeks=1)
     assert "+2건 더" in html                                       # 셀당 4개 + 초과 표시
+
+
+def test_ohlc_tf_resamples_weekly_monthly(monkeypatch):
+    """주·월봉 = 일봉 max 리샘플 (추가 네트워크 0) — OHLC 집계 정합."""
+    import pandas as pd
+    from dashboard import views
+    idx = pd.date_range("2026-01-05", periods=10, freq="B")   # 2주 (월~금 ×2)
+    daily = pd.DataFrame({"Open": range(10, 20), "High": range(20, 30),
+                          "Low": range(1, 11), "Close": range(15, 25),
+                          "Volume": [100.0] * 10}, index=idx)
+    import providers.market_data as md
+    monkeypatch.setattr(md, "_history_cached", lambda t, period="max": daily)
+    wk = views.ohlc_tf("TST", "1wk")
+    assert len(wk) == 2
+    assert wk["Open"].iloc[0] == 10 and wk["Close"].iloc[0] == 19   # 첫 주 first/last
+    assert wk["High"].iloc[0] == 24 and wk["Low"].iloc[0] == 1      # 주 내 max/min
+    assert wk["Volume"].iloc[0] == 500.0
+    mo = views.ohlc_tf("TST", "1mo")
+    assert len(mo) == 1 and mo["Volume"].iloc[0] == 1000.0
+    assert views.ohlc_tf("TST", "1d") is daily                      # 일봉 = 원본 passthrough

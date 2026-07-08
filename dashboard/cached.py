@@ -171,3 +171,8 @@ def intraday_day(market, date):
 @st.cache_data(ttl=60, show_spinner="분봉 불러오는 중…")
 def intraday_chart(symbol, market, date, interval):
     return views.intraday_chart(symbol, market, date, interval)
+
+
+@st.cache_data(ttl=_TTL, show_spinner="봉 데이터 불러오는 중…")
+def ohlc_tf(t, tf):
+    return views.ohlc_tf(t, tf)

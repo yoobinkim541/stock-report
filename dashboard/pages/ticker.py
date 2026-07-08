@@ -79,14 +79,30 @@ def _trade_detail(t):
                + (f" · {t.get('note')}" if t.get("note") else ""))
 
 
+_TF = {"5분": "5m", "1시간": "1h", "1일": "1d", "주": "1wk", "월": "1mo"}
+_TF_SPAN = {"5m": "최근 60일", "1h": "최근 2년"}   # yfinance 인트라데이 보존 한계 (정직 표기)
+
+
 def _price_chart(ticker, hist, avg_cost, trades, view_days=None):
-    """가격 차트 — 라인/캔들 토글(차트만 부분 rerun·전체 리로드 방지)."""
-    kind = st.segmented_control("차트 종류", ["📈 라인", "🕯️ 캔들"], default="📈 라인",
+    """가격 차트 — 봉 단위(5분~월) + 라인/캔들 토글(차트만 부분 rerun·전체 리로드 방지)."""
+    c1, c2 = st.columns([1.3, 1])
+    tf_label = c1.segmented_control("봉", list(_TF), default="1일",
+                                    label_visibility="collapsed", key="_chart_tf") or "1일"
+    kind = c2.segmented_control("차트 종류", ["📈 라인", "🕯️ 캔들"], default="📈 라인",
                                 label_visibility="collapsed", key="_chart_kind")
+    tf = _TF[tf_label]
+    df = hist
+    if tf != "1d":
+        df = cached.ohlc_tf(ticker, tf)
+        if df is None or getattr(df, "empty", True):
+            st.caption(f"⚠️ {tf_label}봉 데이터 없음 — 일봉으로 표시")
+            df, tf = hist, "1d"
+        elif tf in _TF_SPAN:
+            st.caption(f"ℹ️ {tf_label}봉은 {_TF_SPAN[tf]}까지 제공 (yfinance 보존 한계) · 주/월/일봉은 전체 이력")
     label = ticker_names.label(ticker)
-    fig = (charts.price_candle(hist, label, avg_cost, trades=trades, view_days=view_days)
+    fig = (charts.price_candle(df, label, avg_cost, trades=trades, view_days=view_days)
            if kind == "🕯️ 캔들"
-           else charts.price_line(hist, label, avg_cost, trades=trades, view_days=view_days))
+           else charts.price_line(df, label, avg_cost, trades=trades, view_days=view_days))
     event = None
     try:
         event = st.plotly_chart(
