@@ -1064,23 +1064,38 @@ def _entry_levels_section(ticker, hist, price):
         return
     st.markdown("##### 🎯 진입 레벨 가이드 — 밸류 × 기술")
     mm = st.columns(4)
-    ents = lv.get("entries") or []
+    zones = lv.get("zones") or []
     for i in range(3):
-        if i < len(ents):
-            lab, val, pct = ents[i]
-            mm[i].metric(f"{i + 1}차 지지 후보 — {lab}", f"{val:,.2f}",
-                         delta=f"{pct:+.1f}%", delta_color="off",
-                         help="현재가 아래 근접 순 기술적 레벨 — 분할 접근 참고용")
+        if i < len(zones):
+            z = zones[i]
+            strong = f" ×{z['n']}" if z.get("n", 1) > 1 else ""
+            val_txt = (f"{z['lo']:,.2f}~{z['hi']:,.2f}" if z["hi"] > z["lo"] * 1.0005
+                       else f"{z['mid']:,.2f}")
+            mm[i].metric(f"{i + 1}차 지지 존{strong}", val_txt,
+                         delta=f"{z['pct']:+.1f}%", delta_color="off",
+                         help=f"재료: {' + '.join(z['labels'])} — 겹칠수록(×n) 신뢰↑ · "
+                              "분할 접근 참고용")
+            if mm[i].button("🔔 도달 알림", key=f"_lvl_alert_{ticker}_{i}",
+                            help="이 존 상단 도달 시 텔레그램 알림 (봇 /alert 공용)"):
+                try:
+                    from bot import price_alerts
+                    price_alerts.add_alert(ticker, round(z["hi"], 2), "buy",
+                                           note=f"진입 존{i + 1} ({'+'.join(z['labels'][:2])})")
+                    st.toast(f"🔔 {ticker} {z['hi']:,.2f} 하락 도달 알림 등록")
+                except Exception as e:
+                    st.toast(f"알림 등록 실패: {e}")
         else:
-            mm[i].metric(f"{i + 1}차 지지 후보", "—")
+            mm[i].metric(f"{i + 1}차 지지 존", "—")
     gap = lv.get("fair_gap_pct")
     mm[3].metric("밸류 기준가 평균 대비", f"{gap:+.1f}%" if gap is not None else "—",
                  help="멀티플 기준가·RIM·목표가 평균이 현재가보다 위(+)면 밸류 여유")
+    ents = lv.get("entries") or []
     levels = ([("기술 지지", val, "support") for _, val, _ in ents]
               + [("기술 저항", val, "resist") for _, val, _ in (lv.get("resists") or [])]
               + [("밸류 기준", val, "fair") for _, val, _ in (lv.get("fairs") or [])])
+    zone_bands = [("기술 지지", z["lo"], z["hi"]) for z in zones if z["hi"] > z["lo"]]
     if levels:
-        st.plotly_chart(charts.price_levels(lv["price"], levels),
+        st.plotly_chart(charts.price_levels(lv["price"], levels, zones=zone_bands),
                         width="stretch", config=_NOBAR)
     detail = " · ".join(f"{lab} {val:,.0f}({pct:+.1f}%)"
                         for lab, val, pct in (lv.get("fairs") or []))

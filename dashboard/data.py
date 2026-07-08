@@ -757,9 +757,24 @@ def entry_levels(price, supports: list, resistances: list, fairs: list) -> dict:
     def _pct(v):
         return (v / p - 1) * 100
 
-    ent = sorted(((lab, float(v)) for lab, v in supports
-                  if _try_float(v) and 0 < float(v) < p),
-                 key=lambda x: -x[1])[:3]
+    # 지지 클러스터링 — 1.5% 이내 재료를 존으로 묶음 (겹침 = 강도·신뢰)
+    raw = sorted(((lab, float(v)) for lab, v in supports
+                  if _try_float(v) and 0 < float(v) < p), key=lambda x: -x[1])
+    zones = []
+    for lab, v in raw:
+        if zones and (zones[-1]["lo"] / v - 1) < 0.015:
+            z = zones[-1]
+            z["lo"] = min(z["lo"], v)
+            z["hi"] = max(z["hi"], v)
+            z["labels"].append(lab)
+        else:
+            zones.append({"lo": v, "hi": v, "labels": [lab]})
+    ent = []
+    for z in zones[:3]:
+        mid = (z["lo"] + z["hi"]) / 2
+        ent.append((" + ".join(z["labels"][:3]), mid))
+        z["mid"] = mid
+        z["n"] = len(z["labels"])
     res = sorted(((lab, float(v)) for lab, v in resistances
                   if _try_float(v) and float(v) > p),
                  key=lambda x: x[1])[:2]
@@ -772,6 +787,7 @@ def entry_levels(price, supports: list, resistances: list, fairs: list) -> dict:
         gap = _pct(avg)
     return {"price": p,
             "entries": [(lab, v, _pct(v)) for lab, v in ent],
+            "zones": [{**z, "pct": _pct(z["mid"])} for z in zones[:3]],
             "resists": [(lab, v, _pct(v)) for lab, v in res],
             "fairs": [(lab, v, _pct(v)) for lab, v in fv],
             "fair_gap_pct": gap}

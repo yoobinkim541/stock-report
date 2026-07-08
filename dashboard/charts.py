@@ -1132,13 +1132,19 @@ _LEVEL_STYLE = {"support": (_GREEN, "triangle-up"), "resist": (_RED, "triangle-d
                 "fair": (_BLUE, "diamond")}
 
 
-def price_levels(price: float, levels: list):
-    """가격 레벨 사다리 — levels=[(행라벨, 가격, kind)] · 현재가 수직선 (순수).
+def price_levels(price: float, levels: list, zones: list | None = None):
+    """가격 레벨 사다리 — levels=[(행라벨, 가격, kind)] · zones=[(행라벨, lo, hi)] 존 밴드.
 
-    kind: support(녹 ▲)·resist(적 ▼)·fair(청 ◆). 진입 레벨 가이드 시각화.
+    kind: support(녹 ▲)·resist(적 ▼)·fair(청 ◆). 존 = 재료 합류 구간(두꺼운 녹 밴드).
     """
     go = _go()
     fig = go.Figure()
+    for row_label, lo, hi in (zones or []):
+        if hi > lo:
+            fig.add_trace(go.Scatter(
+                x=[lo, hi], y=[row_label, row_label], mode="lines",
+                line=dict(color=_GREEN, width=12), opacity=0.35, showlegend=False,
+                hovertemplate=f"합류 존 {lo:,.2f}~{hi:,.2f}<extra></extra>"))
     seen_kind = set()
     for row_label, v, kind in levels:
         col, sym = _LEVEL_STYLE.get(kind, (_GRID, "circle"))

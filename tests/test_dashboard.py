@@ -861,12 +861,23 @@ def test_entry_levels():
                   ("52주 저점", 70.0), ("MA120", 101.0)],       # 101 은 위 → 제외
         resistances=[("52주 고점", 120.0), ("추세 저항선", 108.0)],
         fairs=[("멀티플 기준가", 117.0), ("목표가 중앙값", 123.0)])
-    assert [x[0] for x in lv["entries"]] == ["MA60", "볼린저 하단", "MA200"]
+    labs = [x[0] for x in lv["entries"]]
+    assert labs[0] == "MA60" and "MA200" in labs           # 근접순 유지 (클러스터 라벨)
     assert lv["entries"][0][2] == pytest.approx(-4.0)
+    assert lv["zones"][0]["n"] == 1                        # 1.5% 밖 — 미병합
     assert [x[0] for x in lv["resists"]] == ["추세 저항선", "52주 고점"]
     assert lv["fair_gap_pct"] == pytest.approx(20.0)            # (117+123)/2 = 120
     assert data.entry_levels(0, [], [], []) == {}
     assert data.entry_levels(100.0, [], [], []) == {}           # 재료 전무 — 생략
+    # 합류 존 — 1.5% 이내 재료 병합·강도 ×n
+    lv2 = data.entry_levels(100.0,
+                            supports=[("MA200", 95.0), ("매물대(HVN)", 95.8),
+                                      ("추세 지지선", 95.4), ("52주 저점", 80.0)],
+                            resistances=[], fairs=[("기준가", 110.0), ("목표가", 112.0)])
+    z0 = lv2["zones"][0]
+    assert z0["n"] == 3 and z0["lo"] == 95.0 and z0["hi"] == 95.8
+    assert "MA200" in z0["labels"] and "매물대(HVN)" in z0["labels"]
+    assert lv2["zones"][1]["n"] == 1                       # 52주 저점은 별도 존
 
 
 def test_twr_series_deposit_not_gain():
