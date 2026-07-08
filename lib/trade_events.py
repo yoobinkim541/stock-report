@@ -158,3 +158,27 @@ def import_mock_history(collection: str, *, market: str) -> int:
         except Exception:
             continue
     return added
+
+
+def remove_event(event_id: str) -> bool:
+    """event_id 이벤트 1건 제거 (undo 전용) — store.replace_all 원자 교체. 성공 True.
+
+    기록로그는 store 경유 원칙 준수. 대상 부재/스토어 실패 시 False.
+    """
+    try:
+        import store
+        rows = store.all(COLLECTION)
+        keep = [r for r in rows if r.get("event_id") != event_id]
+        if len(keep) == len(rows):
+            return False
+        store.replace_all(COLLECTION, keep)
+        return True
+    except Exception:
+        return False
+
+
+def latest_manual_event(ticker: str) -> dict | None:
+    """해당 티커의 최신 manual_holding 이벤트 (undo 대상) — 없으면 None."""
+    rows = [r for r in trades_for_ticker(ticker, include_mock=False)
+            if str(r.get("source") or "") == "manual_holding"]
+    return rows[-1] if rows else None
