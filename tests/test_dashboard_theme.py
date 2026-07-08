@@ -243,3 +243,17 @@ def test_position_band_html():
                                   ("평가손익", "+3.4%", theme.GREEN)])
     assert "평단" in h and "$190.52" in h and theme.GREEN in h
     assert theme.position_band_html([]) == ""
+
+
+def test_analysis_card_html():
+    """기업 판단 요약 카드 — verdict 색 액센트·강점/주의 칩·다음확인 풋터·빈 목록 graceful."""
+    h = theme.analysis_card_html("주의 우선", ["ROE 32.9%"], ["순마진 악화 -7.8%p"],
+                                 ["다음 실적·가이던스 확인"])
+    assert theme.RED in h and "주의 우선" in h              # verdict 색 액센트
+    assert "ROE 32.9%" in h and "✔" in h
+    assert "순마진 악화" in h and "⚠" in h
+    assert "다음 확인" in h and "가이던스" in h
+    assert "매매신호 아님" in h
+    good = theme.analysis_card_html("양호", [], [], None)
+    assert theme.GREEN in good and "특이 강점 없음" in good   # 빈 목록·풋터 생략
+    assert "다음 확인" not in good

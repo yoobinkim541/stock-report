@@ -640,15 +640,8 @@ def _analysis_snapshot(ticker):
     summary = data.company_analysis_summary(v.get("metrics") or {}, (f.get("trends") or {}), iv)
 
     st.subheader("기업 판단 요약")
-    verdict, good, risk = st.columns([0.8, 1.4, 1.4])
-    verdict.metric("판단", summary["verdict"])
-    with good:
-        st.markdown("**강점**")
-        st.markdown("\n".join(f"- {x}" for x in summary["positives"]))
-    with risk:
-        st.markdown("**주의점**")
-        st.markdown("\n".join(f"- {x}" for x in summary["risks"]))
-    st.caption("다음 확인: " + " · ".join(summary["checks"]))
+    theme.render(theme.analysis_card_html(summary["verdict"], summary["positives"],
+                                          summary["risks"], summary["checks"]))
 
 
 def _valuation(ticker, price=None):

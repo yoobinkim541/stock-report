@@ -713,3 +713,54 @@ def etf_score_html(score, group_name: str = "", low_confidence: bool = False) ->
   <div style="max-width:210px;margin:0 auto">{_gauge_svg(s, 0, 100, _ETF_SCORE_ZONES, big=f"{s:.0f}", sub=lab)}</div>
   <div style="color:{MUTED};font-size:0.72rem;text-align:center;margin-top:-2px">동종그룹 백분위 가중합 1~100 · 표시·참고용{conf}</div>
 </div>'''
+
+
+# ── 기업 판단 요약 카드 (순수) ─────────────────────────────────────────────────
+_VERDICT_STYLE = {"양호": (GREEN, "🟢"), "선별 관찰": (AMBER, "🟡"),
+                  "주의 우선": (RED, "🔴"), "데이터 확인 필요": (MUTED, "⚪")}
+
+
+def analysis_card_html(verdict: str, positives: list, risks: list,
+                       checks: list | None = None) -> str:
+    """기업 판단 요약 카드 — verdict 색 액센트 + 강점 ✓/주의 ⚠ 칩 리스트 + 다음 확인 풋터.
+
+    표시·참고용(매매신호 아님). 순수 HTML — 반응형(flex-wrap·컬럼 min-width).
+    """
+    col, icon = _VERDICT_STYLE.get(verdict, (MUTED, "⚪"))
+
+    def _items(items, mark, mcol, empty):
+        if not items:
+            return f'<div style="color:{MUTED};font-size:0.82rem;padding:2px 0">{empty}</div>'
+        return "".join(
+            f'<div style="display:flex;gap:8px;align-items:baseline;padding:3px 0">'
+            f'<span style="color:{mcol};font-size:0.8rem">{mark}</span>'
+            f'<span style="font-size:0.9rem;color:{TEXT}">{x}</span></div>'
+            for x in items)
+
+    chips = "".join(
+        f'<span style="display:inline-block;margin:2px 6px 2px 0;padding:3px 10px;'
+        f'border:1px solid {BORDER};border-radius:999px;color:{MUTED};'
+        f'font-size:0.74rem;background:{PANEL2}">☑ {c}</span>'
+        for c in (checks or []))
+    footer = (f'<div style="margin-top:10px;padding-top:9px;border-top:1px solid {BORDER}">'
+              f'<span style="color:{MUTED};font-size:0.72rem;margin-right:6px">다음 확인</span>'
+              f'{chips}</div>' if chips else "")
+    return f'''<div style="background:{PANEL};border:1px solid {BORDER};border-left:4px solid {col};
+  border-radius:12px;padding:14px 16px">
+  <div style="display:flex;gap:22px;flex-wrap:wrap">
+    <div style="flex:0 0 170px;min-width:150px;display:flex;flex-direction:column;justify-content:center">
+      <div style="color:{MUTED};font-size:0.72rem;letter-spacing:0.06em">종합 판단</div>
+      <div style="font-size:1.35rem;font-weight:700;color:{col};margin-top:2px">{icon} {verdict}</div>
+      <div style="color:{MUTED};font-size:0.7rem;margin-top:4px">표시·참고용 · 매매신호 아님</div>
+    </div>
+    <div style="flex:1;min-width:220px">
+      <div style="color:{GREEN};font-size:0.78rem;font-weight:600;margin-bottom:4px">강점</div>
+      {_items(positives, "✔", GREEN, "특이 강점 없음")}
+    </div>
+    <div style="flex:1;min-width:220px">
+      <div style="color:{RED};font-size:0.78rem;font-weight:600;margin-bottom:4px">주의점</div>
+      {_items(risks, "⚠", RED, "특이 리스크 없음")}
+    </div>
+  </div>
+  {footer}
+</div>'''
