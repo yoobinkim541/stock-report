@@ -50,6 +50,10 @@ def pannable_chart_html(fig, hist, *, height: int = 460, view_days=None,
     })
     view_ms = int(view_days) * 86400000 if view_days else 0
     vol_axis_js = json.dumps(vol_axis)
+    try:
+        last_close = float(hist["Close"].iloc[-1])
+    except Exception:
+        last_close = 0.0
     return f"""
 <div id="chart" style="width:100%"></div>
 <div id="detail" style="display:none;margin-top:6px;padding:8px 12px;border:1px solid #1e222d;
@@ -84,13 +88,43 @@ def pannable_chart_html(fig, hist, *, height: int = 460, view_days=None,
     return {{price: [lo - pad, hi + pad], vol: [0, vmax * 1.1 || 1]}};
   }}
 
+  const lastClose = {last_close};
+
+  function callouts(x0, x1, upd) {{             // 보이는 구간 최고/최저 콜아웃 팬 추종
+    let hi = -Infinity, hiT = 0, lo = Infinity, loT = 0;
+    for (const [t, l, h] of bounds) {{
+      if (t >= x0 && t <= x1) {{
+        if (h > hi) {{ hi = h; hiT = t; }}
+        if (l < lo) {{ lo = l; loT = t; }}
+      }}
+    }}
+    if (!isFinite(lo) || !lastClose) return;
+    const anns = gd.layout.annotations || [];
+    const fmt = (v) => Math.round(v).toLocaleString();
+    const pct = (v) => ((lastClose / v - 1) * 100).toFixed(1);
+    for (let i = 0; i < anns.length; i++) {{
+      if (anns[i].name === "tn-hi") {{
+        upd[`annotations[${{i}}].x`] = new Date(hiT).toISOString();
+        upd[`annotations[${{i}}].y`] = hi;
+        upd[`annotations[${{i}}].text`] = `${{fmt(hi)}} (${{pct(hi) > 0 ? "+" : ""}}${{pct(hi)}}%)`;
+      }}
+      if (anns[i].name === "tn-lo") {{
+        upd[`annotations[${{i}}].x`] = new Date(loT).toISOString();
+        upd[`annotations[${{i}}].y`] = lo;
+        upd[`annotations[${{i}}].text`] = `${{fmt(lo)}} (+${{pct(lo)}}%)`.replace("(+-", "(-");
+      }}
+    }}
+  }}
+
   function rescale() {{
     const xr = gd.layout.xaxis.range;
     if (!xr) return;
-    const r = yFit(Date.parse(xr[0]), Date.parse(xr[1]));
+    const x0 = Date.parse(xr[0]), x1 = Date.parse(xr[1]);
+    const r = yFit(x0, x1);
     if (!r) return;
     const upd = {{"yaxis.range": r.price}};
     if (volAxis) upd[volAxis + ".range"] = r.vol;
+    callouts(x0, x1, upd);                       // 최고/최저가 팬 따라 이동
     guard = true;
     Plotly.relayout(gd, upd).then(() => {{ guard = false; }});
   }}

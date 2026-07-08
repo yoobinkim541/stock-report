@@ -45,3 +45,14 @@ def test_embed_cdn_failure_notice():
     fig = charts.price_chart(_hist(), "T")
     html = plotly_embed.pannable_chart_html(fig, _hist())
     assert "CDN 로드 실패" in html                              # 폴백 안내 문구 포함
+
+
+def test_embed_callouts_follow_pan():
+    """최고/최저 콜아웃 팬 추종 계약 — name 태그·JS 핸들러·현재가 상수."""
+    hist = _hist()
+    fig = charts.price_chart(hist, "T", kind="candle", view_days=60)
+    names = [a.name for a in fig.layout.annotations if a.name]
+    assert "tn-hi" in names and "tn-lo" in names        # 서버측 태그
+    html = plotly_embed.pannable_chart_html(fig, hist, view_days=60)
+    for token in ("function callouts", 'anns[i].name === "tn-hi"', "const lastClose ="):
+        assert token in html, f"누락: {token}"

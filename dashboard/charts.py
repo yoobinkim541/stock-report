@@ -679,11 +679,13 @@ def _add_extremes_and_last(fig, hist, view_days, panes) -> None:
     hi_v, lo_v = float(hi_s.max()), float(lo_s.min())
     kw = dict(row=1, col=1) if panes > 1 else {}
     if hi_v > 0:
-        fig.add_annotation(x=hi_i, y=hi_v, text=f"{hi_v:,.0f} ({last / hi_v - 1:+.1%})",
+        fig.add_annotation(name="tn-hi", x=hi_i, y=hi_v,
+                           text=f"{hi_v:,.0f} ({last / hi_v - 1:+.1%})",
                            showarrow=True, arrowhead=2, ax=0, ay=-24,
                            font=dict(size=10, color=_RED), arrowcolor=_RED, **kw)
     if lo_v > 0:
-        fig.add_annotation(x=lo_i, y=lo_v, text=f"{lo_v:,.0f} ({last / lo_v - 1:+.1%})",
+        fig.add_annotation(name="tn-lo", x=lo_i, y=lo_v,
+                           text=f"{lo_v:,.0f} ({last / lo_v - 1:+.1%})",
                            showarrow=True, arrowhead=2, ax=0, ay=24,
                            font=dict(size=10, color=_BLUE), arrowcolor=_BLUE, **kw)
     prev = float(hist["Close"].iloc[-2]) if len(hist) > 1 else last
