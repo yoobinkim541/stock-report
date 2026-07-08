@@ -18,15 +18,21 @@ from lib import trade_events as te  # noqa: E402
 
 @pytest.fixture
 def iso(tmp_path, monkeypatch):
-    """격리 환경 — tmp 스냅샷 + trade_events 컬렉션 비우기 + refresh 무력화."""
+    """격리 환경 — tmp 스냅샷 + trade_events 비우기 + refresh/shadow_doc 무력화.
+
+    shadow_doc 차단: _save_locked 가 공유 테스트 DB 의 portfolio_snapshot 문서를
+    덮어써 다른 테스트(포트폴리오 합계 등)를 오염시키는 것 방지.
+    """
+    import store
     p = tmp_path / "portfolio_snapshot.json"
     p.write_text(json.dumps({"overseas_general": {"holdings_usd": []},
                              "overseas_fractional": {"holdings": []}}))
     monkeypatch.setattr(hm, "PORTFOLIO_PATH", str(p))
     monkeypatch.setattr(hm, "refresh_portfolio_prices", lambda: "(가격 갱신 생략)")
-    import store
+    monkeypatch.setattr(store, "shadow_doc", lambda *a, **k: None)
     store.replace_all(te.COLLECTION, [])
-    return p
+    yield p
+    store.replace_all(te.COLLECTION, [])               # 뒷정리 — 원장 잔재 제거
 
 
 def _holding(p, section="overseas_general", key="holdings_usd", ticker="NVDA"):

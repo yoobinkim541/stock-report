@@ -254,20 +254,7 @@ def _price_chart(ticker, hist, avg_cost, trades):
     if selected:
         _trade_detail(selected)
     elif trades:
-        st.caption("차트의 ▲/▼ 거래 마커를 클릭하면 수량·평단·체결가가 차트 아래 박스에 표시됩니다.")
-    if trades:
-        with st.expander(f"거래 마커 {len(trades)}건", expanded=False):
-            rows = [{
-                "일자": t.get("date"),
-                "구분": "매수" if t.get("side") == "buy" else "매도",
-                "수량": t.get("qty"),
-                "체결가": t.get("price"),
-                "평단": t.get("avg_price"),
-                "계좌": t.get("account"),
-                "출처": t.get("source"),
-                "메모": t.get("note"),
-            } for t in trades]
-            st.dataframe(pd.DataFrame(rows), hide_index=True, width="stretch")
+        st.caption("차트의 ▲/▼ 거래 마커 클릭 = 상세 · 전체 이력·되돌리기는 하단 ⚙️ 내 포지션 관리")
 
 
 @st.fragment(run_every=8)
@@ -931,7 +918,7 @@ def _apply_action(fn):
             msg = fn()
         st.success(str(msg) if msg else "완료")
         st.cache_data.clear()
-        st.rerun()
+        st.rerun(scope="app")   # fragment 밖(차트 마커·거래 이력)까지 갱신
     except Exception as e:
         st.error(f"실패: {e}")
 
@@ -946,6 +933,45 @@ def _money_krw(x) -> str:
         return "—"
 
 
+def _trade_history(ticker):
+    """🧾 거래 이력 — 원장 최신순 + ↩️ 최근 수동 기록 되돌리기 (기록 전용)."""
+    from lib import trade_events as te
+    st.markdown("##### 🧾 거래 이력")
+    trades = data.trade_events(ticker)
+    if trades:
+        rows = [{
+            "일자": t.get("date"),
+            "구분": "🟢 매수" if t.get("side") == "buy" else "🔴 매도",
+            "수량": t.get("qty"),
+            "체결가": t.get("price"),
+            "평단": t.get("avg_price"),
+            "출처": "수동" if t.get("source") == "manual_holding" else (t.get("source") or "—"),
+            "메모": t.get("note") or "",
+        } for t in reversed(trades)]
+        st.dataframe(pd.DataFrame(rows), hide_index=True, width="stretch",
+                     height=min(302, 44 + 35 * len(rows)),
+                     column_config={
+                         "수량": st.column_config.NumberColumn(format="%.4f"),
+                         "체결가": st.column_config.NumberColumn(format="%.2f"),
+                         "평단": st.column_config.NumberColumn(format="%.2f"),
+                         "메모": st.column_config.TextColumn(width="medium"),
+                     })
+    else:
+        st.caption("기록 없음 — 좌측 적립/추가/축소 기록이 여기와 차트 ▲▼ 마커에 반영됩니다.")
+    ev = te.latest_manual_event(ticker)
+    if ev:
+        side_kr = "매수" if ev.get("side") == "buy" else "매도"
+        ok = st.checkbox("확인 — 포트폴리오 스냅샷 즉시 수정", key=f"_undo_ok_{ticker}")
+        if st.button(f"↩️ 최근 기록 되돌리기 — {ev.get('date')} {side_kr} "
+                     f"{float(ev.get('qty') or 0):g}주",
+                     key=f"_undo_{ticker}", disabled=not ok, width="stretch"):
+            _apply_action(lambda: _hm().undo_trade(ev["event_id"]))
+    elif trades:
+        st.caption("되돌릴 수동 기록 없음 (동기화·모의 기록은 되돌리기 불가)")
+    st.caption("되돌리기 = 최신 수동 기록 1건 역산 복원(반복 가능·평단 검증이 이중 실행 차단) · "
+               "실계좌 주문 없음")
+
+
 @st.fragment
 def _manage_position(ticker, cur_price, pos):
     cur = float(cur_price or 0.0)
@@ -958,60 +984,64 @@ def _manage_position(ticker, cur_price, pos):
     top[2].metric("평단", data.f_usd(pos.get("avg_price_usd")) if pos else "—")
     top[3].metric("평가액", data.f_usd(pos.get("value"), 0) if pos else "—")
 
-    mode = st.segmented_control("작업", ["💧 적립", "➕ 추가", "➖ 축소"], default="💧 적립",
-                                key="mng_mode_v2", label_visibility="collapsed") or "💧 적립"
-    if mode == "💧 적립":
-        c1, c2, c3 = st.columns([1, 1, 1])
-        currency = c1.segmented_control("입력 통화", ["₩ 원화", "$ 달러"], default="₩ 원화",
-                                        key="acc_currency")
-        freq = c2.segmented_control("주기", ["매일", "매주", "매월"], default="매주",
-                                    key="acc_freq")
-        fx = 1380.0
-        if currency == "₩ 원화":
-            amt = c3.number_input("적립 금액 (₩)", min_value=0.0, value=100_000.0,
-                                  step=10_000.0, format="%.0f", key="acc_amt_krw")
-            fx = st.number_input("적용 환율 (₩/$)", min_value=500.0, max_value=2500.0,
-                                 value=1380.0, step=1.0, format="%.1f", key="acc_fx",
-                                 help="원화 예산을 USD 매수금액으로 환산할 때 쓰는 환율")
-            amount_usd = amt / fx if fx > 0 else 0.0
-            amount_label = _money_krw(amt)
-        else:
-            amt = c3.number_input("적립 금액 ($)", min_value=0.0, value=100.0,
-                                  step=10.0, key="acc_amt_usd")
-            amount_usd = amt
-            amount_label = data.f_usd(amt)
-        qty = (amount_usd / cur) if cur > 0 else 0.0
-        monthly_usd = amount_usd * _ACC_MONTHLY_MULT.get(freq, 1.0)
-        p = st.columns(4)
-        p[0].metric(f"{freq} 금액", amount_label)
-        p[1].metric("환산 USD", data.f_usd(amount_usd))
-        p[2].metric("예상 수량", f"{qty:.4f}주")
-        p[3].metric("월 환산", data.f_usd(monthly_usd, 0))
-        st.caption(f"현재가 기준 1회 적립 수량 · {freq} 주기 메모 · 평단 자동 재계산")
-        note = f"DCA {freq} {amount_label} ({amount_usd:.2f} USD"
-        if currency == "₩ 원화":
-            note += f", fx {fx:.1f}"
-        note += ")"
-        if st.button(f"💧 {freq} 적립 1회 기록", key="acc_btn", type="primary",
-                     disabled=(amount_usd <= 0 or qty <= 0 or cur <= 0), width="stretch"):
-            _apply_action(lambda: _hm().buy_holding(
-                ticker, round(qty, 4), round(cur, 4), note=note))
-    elif mode == "➖ 축소":
-        if not pos:
-            st.info("보유하지 않은 종목입니다.")
-        else:
-            q = st.number_input(f"축소 주수 (0 = 전량, 보유 {held:g})", min_value=0.0,
-                                max_value=float(held), value=0.0, step=0.0001, format="%.4f", key="red_qty")
-            lab = "전량 정리" if q <= 0 else f"{q:.4f}주 축소"
-            if st.button(f"➖ {lab} 기록", key="red_btn", width="stretch"):
-                _apply_action(lambda: _hm().sell_holding(ticker, q if q > 0 else None, price_usd=round(cur, 4)))
-    else:                                                       # 추가(신규·증액)
-        c = st.columns(2)
-        q = c[0].number_input("주수 (소수점 가능)", min_value=0.0, value=1.0, step=0.0001,
-                              format="%.4f", key="add_qty")
-        px = c[1].number_input("단가 ($)", min_value=0.0, value=round(cur, 2), step=0.01, key="add_px")
-        st.caption(f"→ 약 ${q * px:,.2f} 취득 기록 (평단 자동 재계산)")
-        if st.button("➕ 보유 추가 기록", key="add_btn", type="primary",
-                     disabled=(q <= 0 or px <= 0), width="stretch"):
-            _apply_action(lambda: _hm().buy_holding(ticker, round(q, 4), round(px, 4)))
-    st.caption("holding_manager 안전기록(atomic·교차프로세스 락) · 봇 /holding 과 동일 · 실계좌 주문 없음(기록 전용)")
+    left, right = st.columns([1.25, 1], gap="large")
+    with left:
+        mode = st.segmented_control("작업", ["💧 적립", "➕ 추가", "➖ 축소"], default="💧 적립",
+                                    key="mng_mode_v2", label_visibility="collapsed") or "💧 적립"
+        if mode == "💧 적립":
+            c1, c2, c3 = st.columns([1, 1, 1])
+            currency = c1.segmented_control("입력 통화", ["₩ 원화", "$ 달러"], default="₩ 원화",
+                                            key="acc_currency")
+            freq = c2.segmented_control("주기", ["매일", "매주", "매월"], default="매주",
+                                        key="acc_freq")
+            fx = 1380.0
+            if currency == "₩ 원화":
+                amt = c3.number_input("적립 금액 (₩)", min_value=0.0, value=100_000.0,
+                                      step=10_000.0, format="%.0f", key="acc_amt_krw")
+                fx = st.number_input("적용 환율 (₩/$)", min_value=500.0, max_value=2500.0,
+                                     value=1380.0, step=1.0, format="%.1f", key="acc_fx",
+                                     help="원화 예산을 USD 매수금액으로 환산할 때 쓰는 환율")
+                amount_usd = amt / fx if fx > 0 else 0.0
+                amount_label = _money_krw(amt)
+            else:
+                amt = c3.number_input("적립 금액 ($)", min_value=0.0, value=100.0,
+                                      step=10.0, key="acc_amt_usd")
+                amount_usd = amt
+                amount_label = data.f_usd(amt)
+            qty = (amount_usd / cur) if cur > 0 else 0.0
+            monthly_usd = amount_usd * _ACC_MONTHLY_MULT.get(freq, 1.0)
+            p = st.columns(4)
+            p[0].metric(f"{freq} 금액", amount_label)
+            p[1].metric("환산 USD", data.f_usd(amount_usd))
+            p[2].metric("예상 수량", f"{qty:.4f}주")
+            p[3].metric("월 환산", data.f_usd(monthly_usd, 0))
+            st.caption(f"현재가 기준 1회 적립 수량 · {freq} 주기 메모 · 평단 자동 재계산")
+            note = f"DCA {freq} {amount_label} ({amount_usd:.2f} USD"
+            if currency == "₩ 원화":
+                note += f", fx {fx:.1f}"
+            note += ")"
+            if st.button(f"💧 {freq} 적립 1회 기록", key="acc_btn", type="primary",
+                         disabled=(amount_usd <= 0 or qty <= 0 or cur <= 0), width="stretch"):
+                _apply_action(lambda: _hm().buy_holding(
+                    ticker, round(qty, 4), round(cur, 4), note=note))
+        elif mode == "➖ 축소":
+            if not pos:
+                st.info("보유하지 않은 종목입니다.")
+            else:
+                q = st.number_input(f"축소 주수 (0 = 전량, 보유 {held:g})", min_value=0.0,
+                                    max_value=float(held), value=0.0, step=0.0001, format="%.4f", key="red_qty")
+                lab = "전량 정리" if q <= 0 else f"{q:.4f}주 축소"
+                if st.button(f"➖ {lab} 기록", key="red_btn", width="stretch"):
+                    _apply_action(lambda: _hm().sell_holding(ticker, q if q > 0 else None, price_usd=round(cur, 4)))
+        else:                                                       # 추가(신규·증액)
+            c = st.columns(2)
+            q = c[0].number_input("주수 (소수점 가능)", min_value=0.0, value=1.0, step=0.0001,
+                                  format="%.4f", key="add_qty")
+            px = c[1].number_input("단가 ($)", min_value=0.0, value=round(cur, 2), step=0.01, key="add_px")
+            st.caption(f"→ 약 ${q * px:,.2f} 취득 기록 (평단 자동 재계산)")
+            if st.button("➕ 보유 추가 기록", key="add_btn", type="primary",
+                         disabled=(q <= 0 or px <= 0), width="stretch"):
+                _apply_action(lambda: _hm().buy_holding(ticker, round(q, 4), round(px, 4)))
+        st.caption("holding_manager 안전기록(atomic·교차프로세스 락) · 봇 /holding 과 동일 · 실계좌 주문 없음(기록 전용)")
+    with right:
+        _trade_history(ticker)
