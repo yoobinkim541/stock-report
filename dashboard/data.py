@@ -614,13 +614,16 @@ def rebalance_gaps(holdings: list, targets: dict) -> dict:
 
 
 _CLASS_CASH = {"SGOV", "BIL", "SHV"}
+_CLASS_LEV = {"QLD", "TQQQ", "SOXL", "UPRO", "SQQQ"}    # 레버리지 — Tier3 슬리브 (별도 분류)
 
 
 def asset_class_of(ticker: str) -> str:
-    """자산군 분류 (표시용) — 현금성/인컴(커버드콜)/지수·팩터 ETF/개별주."""
+    """자산군 분류 (표시용) — 현금성/인컴(커버드콜)/레버리지/지수·팩터 ETF/개별주."""
     t = str(ticker).upper().split(".")[0]
     if t in _CLASS_CASH:
         return "현금성 (초단기 국채)"
+    if t in _CLASS_LEV:
+        return "레버리지 ETF (Tier3)"
     try:
         import etf_meta
         g = etf_meta.group_of(t)

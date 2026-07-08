@@ -778,6 +778,8 @@ def test_exposures_and_asset_class():
     assert data.asset_class_of("SGOV") == "현금성 (초단기 국채)"
     assert data.asset_class_of("QQQI") == "인컴 (커버드콜)"
     assert data.asset_class_of("QQQ") == "지수·팩터 ETF"
+    assert data.asset_class_of("SPMO") == "지수·팩터 ETF"       # S&P500 모멘텀 지수
+    assert data.asset_class_of("QLD") == "레버리지 ETF (Tier3)"  # 2x — 별도 분류
     assert data.asset_class_of("MSFT") == "개별주"
     ex = data.exposures([{"ticker": "MSFT", "value": 500.0},
                          {"ticker": "SGOV", "value": 500.0}])

@@ -152,11 +152,15 @@ def _rebalance_section(rows):
                     format="$%.0f", help="+ = 매수 필요 · − = 축소 필요 (표시 전용)"),
             })
     unt = (rb or {}).get("untargeted") or []
+    _ROLE = {"현금성 (초단기 국채)": "실탄", "인컴 (커버드콜)": "배당재투자",
+             "레버리지 ETF (Tier3)": "Tier3 레버 — Phase 규칙",
+             "지수·팩터 ETF": "지수 추종", "개별주": "개별주"}
+    unt_desc = " · ".join(f"{t}({_ROLE.get(data.asset_class_of(t), '기타')})" for t in unt)
     st.caption(f"+갭 = 목표 초과(축소 방향)·−갭 = 목표 미달(증액 방향) · 근거 = 봇 "
-               f"`/holding target` 에 직접 설정한 목표(성장주 슬리브 합 "
+               f"`/holding target` 에 직접 설정한 목표(합 "
                f"{(rb or {}).get('target_sum_pct', 0):.0f}%) 대비 이탈 — 모델 추천 아님 · "
-               f"목표 미설정 {'·'.join(unt) if unt else '없음'} 은 바벨 안전/인컴 축 "
-               f"(SGOV 실탄·QQQI 배당재투자 — 별도 규칙, 갭 제외) · 표시 전용 — 실행은 수동")
+               f"목표 미설정(갭 제외·각자 규칙): {unt_desc or '없음'} · "
+               f"표시 전용 — 실행은 수동")
 
 
 def _exposure_section(rows):
