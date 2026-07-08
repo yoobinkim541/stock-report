@@ -95,6 +95,33 @@ def _manage_dialog():
             st.caption("오늘은 이미 기록했습니다 (중복 방지 — 내일 다시 활성)")
         st.caption("⚠️ **기록 전용** — 실제 매수는 키움 앱 → 해외주식 → 소수점 매수")
 
+    # ── 🔁 자동 기록 플랜 (매 세션 미 종가·확정 종가 환율로 자동 기록 — 크론) ──
+    from lib import accumulation
+    aps = accumulation.load_plans()
+    st.markdown("##### 🔁 자동 기록 플랜")
+    if aps:
+        for p_ in aps:
+            t_ = p_.get("ticker", "")
+            amt_ = (f"₩{p_.get('amount', 0):,.0f}" if p_.get("currency") == "KRW"
+                    else f"${p_.get('amount', 0):,.2f}")
+            r1, r2, r3, r4 = st.columns([2.4, 1.2, 0.8, 0.7],
+                                        vertical_alignment="center")
+            r1.markdown(f"**{ticker_names.label(t_, maxlen=22)}** — "
+                        f"{p_.get('freq')} {amt_}")
+            r2.caption(f"마지막 {p_.get('last_run') or '아직 없음'}")
+            on = r3.toggle("ON", value=p_.get("enabled", True), key=f"_ap_on_{t_}")
+            if on != p_.get("enabled", True):
+                accumulation.set_enabled(t_, on)
+            if r4.button("삭제", key=f"_ap_del_{t_}"):
+                accumulation.remove_plan(t_)
+                st.rerun()
+        st.caption("매 미국 세션 마감(06:10 KST) 후 그날 종가·확정 종가 환율로 소수점 계좌에 "
+                   "자동 **기록** — 실계좌 주문 아님(키움 주식모으기 결과의 거울) · "
+                   "매주=주 첫 거래일·매월=월 첫 거래일 · 등록은 종목분석 ⚙️ 적립 폼")
+    else:
+        st.caption("등록된 플랜 없음 — 종목분석 → ⚙️ 내 포지션 관리 → 💧 적립에서 "
+                   "'🔁 자동 기록 등록'을 누르면 매 세션 종가로 자동 기록됩니다.")
+
     # ── 비중 편집 (봇 /holding dca 와 동일 소스·합계 자동 정규화) ──
     with st.expander("⚖️ 모으기 비중 편집", expanded=False):
         try:

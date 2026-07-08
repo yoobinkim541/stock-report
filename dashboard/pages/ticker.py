@@ -1053,10 +1053,32 @@ def _manage_position(ticker, cur_price, pos):
             if currency == "₩ 원화":
                 note += f", fx {fx:.1f}"
             note += ")"
-            if st.button(f"💧 {freq} 적립 1회 기록", key="acc_btn", type="primary",
+            b1, b2 = st.columns(2)
+            if b1.button(f"💧 {freq} 적립 1회 기록", key="acc_btn", type="primary",
                          disabled=(amount_usd <= 0 or qty <= 0 or cur <= 0), width="stretch"):
                 _apply_action(lambda: _hm().buy_holding(
                     ticker, round(qty, 4), round(cur, 4), note=note))
+            # 🔁 자동 모으기 — 등록해두면 크론이 매 세션 미 종가·확정 종가 환율로 자동 기록
+            from lib import accumulation
+            _plan = accumulation.plan_for(ticker)
+            _amt_raw = amt
+            _cur_code = "KRW" if currency == "₩ 원화" else "USD"
+            if b2.button(f"🔁 자동 기록 등록 — {freq} 종가", key="acc_auto_btn",
+                         disabled=(_amt_raw <= 0), width="stretch",
+                         help="등록하면 매 미국 세션 마감 후 그날 종가·확정 종가 환율로 "
+                              "자동 기록 (실주문 아님 — 키움 주식모으기 결과를 거울처럼 반영)"):
+                st.success(accumulation.upsert_plan(ticker, _amt_raw, _cur_code, freq))
+                st.rerun(scope="app")
+            if _plan:
+                _pa = (f"₩{_plan['amount']:,.0f}" if _plan.get("currency") == "KRW"
+                       else f"${_plan['amount']:,.2f}")
+                pc1, pc2 = st.columns([2.2, 1])
+                pc1.caption(f"🔁 자동 모으기 활성: {_plan.get('freq')} {_pa} · "
+                            f"마지막 기록 {_plan.get('last_run') or '아직 없음'} · "
+                            f"{'ON' if _plan.get('enabled', True) else 'OFF'}")
+                if pc2.button("해제", key="acc_auto_del", width="stretch"):
+                    accumulation.remove_plan(ticker)
+                    st.rerun(scope="app")
         elif mode == "➖ 축소":
             if not pos:
                 st.info("보유하지 않은 종목입니다.")
