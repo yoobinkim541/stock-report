@@ -586,6 +586,12 @@ def run_market(mk: str, state: dict, cfg: dict, *, dry: bool = False) -> list[st
         ob = obs.get(sym)
         meta = axes["_meta"]
         sp = ax.spread_bps((ob or {}).get("best_bid"), (ob or {}).get("best_ask"))
+        if sp is None and mk == "US":
+            # US 무버는 KIS 등록한도(41)상 호가(ask) 미구독이 정상 — 호가 부재를 hard-block
+            # 하면 무버 진입이 영구 불가(라이브 실증: TSLA 0.61 차단). 스캐너 시총 하한($10B)
+            # + 가상체결 보수 페널티(호가 없으면 2틱)가 방어하므로 통과. KR 은 10단계 호가
+            # 구독이 보장되니 fail-closed 유지.
+            sp = 0.0
         atr = meta.get("atr")
         stop = meta["close"] - float(params.get("stop_atr_mult", 1.2)) * atr if atr else None
         qty = ax.position_size(sleeve, cfg["risk_per_trade"], meta["close"], stop) if stop else 0
