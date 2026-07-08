@@ -87,7 +87,8 @@ _TF_SPAN = {"5m": "최근 60일", "1h": "최근 2년"}   # yfinance 인트라데
 _MA_OPTS = [5, 10, 20, 60, 120, 200]
 _MA_DEFAULT = {"1d": [60, 120, 200], "1wk": [60, 120, 200],   # 요청 기본값
                "1mo": [5, 10, 20, 60, 120, 200], "5m": [20, 60], "1h": [20, 60]}
-_IND_OPTS = ["RSI(14)", "볼린저밴드(20,2σ)", "일목균형표"]
+_TOP_INDS = ["이동평균선", "볼린저 밴드", "일목균형표", "슈퍼트렌드", "엔벨로프",
+             "매물대", "프랙탈", "자동 추세선"]
 
 
 def _price_chart(ticker, hist, avg_cost, trades, view_days=None):
@@ -99,14 +100,24 @@ def _price_chart(ticker, hist, avg_cost, trades, view_days=None):
                                 label_visibility="collapsed", key="_chart_kind")
     tf = _TF[tf_label]
     with c3.popover("📐 지표"):
-        mas = st.multiselect("이동평균", _MA_OPTS,
-                             default=_MA_DEFAULT.get(tf, [60, 120, 200]), key=f"_ma_{tf}")
-        inds = st.multiselect("보조지표", _IND_OPTS, default=["RSI(14)"], key=f"_ind_{tf}")
-        show_vol = st.checkbox("거래량 패널", value=True, key=f"_vol_{tf}")
-        st.markdown("**추세 분석** (자동 감지 — 표시·참고용)")
-        want_lines = st.checkbox("자동 지지/저항선", key=f"_tl_lines_{tf}")
-        want_short = st.checkbox("단기 채널 (60봉)", key=f"_tl_short_{tf}")
-        want_long = st.checkbox("장기 채널 (250봉)", key=f"_tl_long_{tf}")
+        st.markdown("**상단 지표** — 가격 차트 오버레이")
+        top = st.pills("상단 지표", _TOP_INDS, selection_mode="multi",
+                       default=["이동평균선"], key=f"_top_{tf}",
+                       label_visibility="collapsed") or []
+        mas = []
+        if "이동평균선" in top:
+            mas = st.multiselect("이동평균 기간", _MA_OPTS,
+                                 default=_MA_DEFAULT.get(tf, [60, 120, 200]), key=f"_ma_{tf}")
+        want_lines = want_short = want_long = False
+        if "자동 추세선" in top:
+            want_lines = True
+            cch1, cch2 = st.columns(2)
+            want_short = cch1.checkbox("단기 채널(60봉)", key=f"_tl_short_{tf}")
+            want_long = cch2.checkbox("장기 채널(250봉)", key=f"_tl_long_{tf}")
+        st.markdown("**하단 지표** — 서브 패널")
+        bottom = st.pills("하단 지표", ["거래량", "RSI"], selection_mode="multi",
+                          default=["거래량", "RSI"], key=f"_bot_{tf}",
+                          label_visibility="collapsed") or []
         legacy = st.toggle("구형 렌더러", key="_legacy_chart",
                            help="plotly.js CDN 불가 환경 폴백 — 팬 시 y 자동맞춤·인차트 상세 없음")
         st.caption("봉 단위별로 설정이 기억됩니다 · 범례 클릭으로도 개별 토글")
@@ -119,17 +130,19 @@ def _price_chart(ticker, hist, avg_cost, trades, view_days=None):
         elif tf in _TF_SPAN:
             st.caption(f"ℹ️ {tf_label}봉은 {_TF_SPAN[tf]}까지 제공 (yfinance 보존 한계) · 주/월/일봉은 전체 이력")
     label = ticker_names.label(ticker)
-    show_rsi = "RSI(14)" in inds
+    show_rsi = "RSI" in bottom
     tls = []
     if want_lines or want_short or want_long:
         ch_key = tuple(k for k, w in (("short", want_short), ("long", want_long)) if w)
         tls = cached.trendlines_for(ticker, tf, want_lines, ch_key)
-    show_vol = show_vol and "Volume" in getattr(df, "columns", [])
+    show_vol = "거래량" in bottom and "Volume" in getattr(df, "columns", [])
     fig = charts.price_chart(
         df, label, kind=("candle" if kind == "🕯️ 캔들" else "line"),
         avg_cost=avg_cost, trades=trades, view_days=view_days, mas=mas,
-        show_rsi=show_rsi, bollinger="볼린저밴드(20,2σ)" in inds,
-        ichimoku="일목균형표" in inds, trend_lines=tls, show_volume=show_vol)
+        show_rsi=show_rsi, bollinger="볼린저 밴드" in top,
+        ichimoku="일목균형표" in top, trend_lines=tls, show_volume=show_vol,
+        supertrend="슈퍼트렌드" in top, envelope="엔벨로프" in top,
+        fractals="프랙탈" in top, vol_profile="매물대" in top)
     event = None
     if legacy:
         try:

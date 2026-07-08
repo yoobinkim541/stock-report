@@ -536,7 +536,8 @@ def _add_trend_lines(fig, items: list[dict]) -> None:
 def price_chart(hist, ticker: str = "", *, kind: str = "line", avg_cost=None,
                 trades=None, view_days=None, mas=(60, 120, 200),
                 show_rsi: bool = False, bollinger: bool = False, ichimoku: bool = False,
-                trend_lines=None, show_volume: bool = False):
+                trend_lines=None, show_volume: bool = False, supertrend: bool = False,
+                envelope: bool = False, fractals: bool = False, vol_profile: bool = False):
     """가격 차트 + 기술적 분석 도구 (TradingView 풍 멀티패널).
 
     패널: 가격(+MA·BB·일목·추세선·평단·기간 최고/최저·현재가 라벨) / 거래량(방향색 바+MA20)
@@ -615,6 +616,8 @@ def price_chart(hist, ticker: str = "", *, kind: str = "line", avg_cost=None,
                       annotation_font=dict(color=theme.MUTED, size=11),
                       row=1 if panes > 1 else None, col=1 if panes > 1 else None)
     _add_trend_lines(fig, trend_lines or [])
+    _add_top_indicators(fig, hist, supertrend=supertrend, envelope=envelope,
+                        fractals=fractals, vol_profile=vol_profile, panes=panes)
     _add_trade_markers(fig, hist, trades or [])
 
     # ── 기간 최고/최저 콜아웃 + 현재가 점선·우측 라벨 (TradingView 풍) ──
@@ -715,3 +718,118 @@ def _initial_view_sub(fig, hist, view_days):
     fig.update_xaxes(range=[start, end + (end - start) * 0.02])
     fig.update_yaxes(range=[lo - pad, hi + pad], row=1, col=1)
     return fig
+
+
+# ── 신규 상단 지표 — 슈퍼트렌드·엔벨로프·윌리엄스 프랙탈·매물대분석 ────────────
+
+def _atr_series(hist, n: int = 10):
+    import pandas as pd
+    h, l, c = hist["High"], hist["Low"], hist["Close"]
+    prev = c.shift(1)
+    tr = pd.concat([h - l, (h - prev).abs(), (l - prev).abs()], axis=1).max(axis=1)
+    return tr.ewm(alpha=1 / n, adjust=False).mean()
+
+
+def supertrend_series(hist, period: int = 10, mult: float = 3.0):
+    """슈퍼트렌드 — (line, trend[±1]) 시리즈. 표준 반복식(밴드 래칫)."""
+    import numpy as np
+    atr = _atr_series(hist, period).values
+    hl2 = ((hist["High"] + hist["Low"]) / 2).values
+    close = hist["Close"].values
+    n = len(close)
+    ub, lb = hl2 + mult * atr, hl2 - mult * atr
+    fub, flb = ub.copy(), lb.copy()
+    trend = np.ones(n, dtype=int)
+    line = np.full(n, np.nan)
+    for i in range(1, n):
+        fub[i] = ub[i] if (ub[i] < fub[i - 1] or close[i - 1] > fub[i - 1]) else fub[i - 1]
+        flb[i] = lb[i] if (lb[i] > flb[i - 1] or close[i - 1] < flb[i - 1]) else flb[i - 1]
+        if trend[i - 1] == 1:
+            trend[i] = -1 if close[i] < flb[i] else 1
+        else:
+            trend[i] = 1 if close[i] > fub[i] else -1
+        line[i] = flb[i] if trend[i] == 1 else fub[i]
+    return line, trend
+
+
+def fractal_points(hist, k: int = 2):
+    """윌리엄스 프랙탈 — (고점 프랙탈 idx, 저점 프랙탈 idx). 5봉(±k) 패턴·확정분만."""
+    import numpy as np
+    h, l = hist["High"].values, hist["Low"].values
+    n = len(h)
+    tops, bots = [], []
+    for i in range(k, n - k):
+        if h[i] == max(h[i - k:i + k + 1]):
+            tops.append(i)
+        if l[i] == min(l[i - k:i + k + 1]):
+            bots.append(i)
+    return np.array(tops, dtype=int), np.array(bots, dtype=int)
+
+
+def volume_profile_bins(hist, bins: int = 40):
+    """매물대분석 — 가격대별 거래량 히스토그램 (전 구간·typical price 가중).
+
+    반환 (bin_centers, volumes) | None(Volume 없음).
+    """
+    import numpy as np
+    if "Volume" not in hist.columns:
+        return None
+    typ = ((hist["High"] + hist["Low"] + hist["Close"]) / 3).values
+    vol = hist["Volume"].fillna(0).values
+    lo, hi = float(np.nanmin(hist["Low"])), float(np.nanmax(hist["High"]))
+    if hi <= lo:
+        return None
+    edges = np.linspace(lo, hi, bins + 1)
+    idx = np.clip(np.digitize(typ, edges) - 1, 0, bins - 1)
+    out = np.zeros(bins)
+    np.add.at(out, idx, vol)
+    centers = (edges[:-1] + edges[1:]) / 2
+    return centers, out
+
+
+def _add_top_indicators(fig, hist, *, supertrend=False, envelope=False,
+                        fractals=False, vol_profile=False, panes=1):
+    """상단(가격 패널) 신규 지표 오버레이 — price_chart 내부 전용."""
+    go = _go()
+    kw = dict(row=1, col=1) if panes > 1 else {}
+    if supertrend and len(hist) >= 12:
+        line, trend = supertrend_series(hist)
+        up = [v if t == 1 else None for v, t in zip(line, trend)]
+        dn = [v if t == -1 else None for v, t in zip(line, trend)]
+        fig.add_trace(go.Scatter(x=hist.index, y=up, name="슈퍼트렌드",
+                                 line=dict(color=_GREEN, width=1.4)), **kw)
+        fig.add_trace(go.Scatter(x=hist.index, y=dn, showlegend=False,
+                                 legendgroup="슈퍼트렌드",
+                                 line=dict(color=_RED, width=1.4)), **kw)
+    if envelope and len(hist) >= 20:
+        ma = hist["Close"].rolling(20).mean()
+        for off, nm, show in ((0.06, "엔벨로프 +6%", True), (-0.06, "엔벨로프 -6%", False)):
+            fig.add_trace(go.Scatter(x=hist.index, y=ma * (1 + off),
+                                     name="엔벨로프(20,6%)", showlegend=show,
+                                     legendgroup="엔벨로프",
+                                     line=dict(color="#22d3ee", width=0.9, dash="dot")), **kw)
+    if fractals and len(hist) >= 5:
+        tops, bots = fractal_points(hist)
+        shown = False
+        if len(tops):
+            fig.add_trace(go.Scatter(
+                x=hist.index[tops], y=hist["High"].values[tops] * 1.002, name="프랙탈",
+                legendgroup="프랙탈", showlegend=True,
+                mode="markers", marker=dict(symbol="triangle-down", size=7, color=_RED)), **kw)
+            shown = True
+        if len(bots):
+            fig.add_trace(go.Scatter(
+                x=hist.index[bots], y=hist["Low"].values[bots] * 0.998, name="프랙탈",
+                legendgroup="프랙탈", showlegend=not shown,
+                mode="markers", marker=dict(symbol="triangle-up", size=7, color=_GREEN)), **kw)
+    if vol_profile:
+        vp = volume_profile_bins(hist)
+        if vp is not None:
+            centers, vols = vp
+            vmax = float(vols.max()) or 1.0
+            fig.add_trace(go.Bar(
+                x=vols, y=centers, orientation="h", name="매물대",
+                marker=dict(color="rgba(139,147,167,0.30)"), width=(centers[1] - centers[0]),
+                xaxis="x9", hovertemplate="%{y:,.0f} 매물 %{x:,.0f}<extra>매물대</extra>"))
+            fig.update_layout(xaxis9=dict(overlaying="x", side="top", visible=False,
+                                          range=[0, vmax * 4], fixedrange=True))

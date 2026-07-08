@@ -477,3 +477,32 @@ def test_price_chart_three_pane_layout():
     # Volume 컬럼 없으면 침묵 스킵
     fig3 = charts.price_chart(hist.drop(columns=["Volume"]), "T", show_volume=True)
     assert "거래량" not in [tr.name for tr in fig3.data]
+
+
+def test_price_chart_new_top_indicators():
+    """슈퍼트렌드·엔벨로프·프랙탈·매물대 — 트레이스 존재·토글 off 시 부재·V자 전환."""
+    import numpy as np
+    import pandas as pd
+    idx = pd.date_range("2024-01-01", periods=160, freq="D")
+    close = np.concatenate([np.linspace(100, 70, 80), np.linspace(70, 105, 80)])  # V자
+    hist = pd.DataFrame({"Open": close, "High": close + 1.5, "Low": close - 1.5,
+                         "Close": close, "Volume": np.full(160, 100.0)}, index=idx)
+    fig = charts.price_chart(hist, "T", kind="candle", mas=[],
+                             supertrend=True, envelope=True, fractals=True, vol_profile=True)
+    names = [tr.name for tr in fig.data]
+    assert "슈퍼트렌드" in names and "엔벨로프(20,6%)" in names
+    assert "프랙탈" in names and "매물대" in names
+    vp = next(tr for tr in fig.data if tr.name == "매물대")
+    assert vp.xaxis == "x9" and vp.orientation == "h"          # 오버레이 히스토그램
+    assert fig.layout.xaxis9.visible is False
+    # 엔벨로프 ±6% 정합
+    env = [tr for tr in fig.data if tr.legendgroup == "엔벨로프"]
+    ma20 = hist["Close"].rolling(20).mean().iloc[-1]
+    ys = sorted(t.y[-1] for t in env)
+    assert ys[0] == pytest.approx(ma20 * 0.94) and ys[1] == pytest.approx(ma20 * 1.06)
+    # V자 → 슈퍼트렌드 추세 전환 존재
+    line, trend = charts.supertrend_series(hist)
+    assert (np.diff(trend) != 0).any()
+    # 전부 off → 신규 지표 트레이스 없음
+    fig2 = charts.price_chart(hist, "T", mas=[])
+    assert not ({"슈퍼트렌드", "매물대", "프랙탈"} & set(tr.name for tr in fig2.data))
