@@ -320,9 +320,10 @@ def signed_bars(labels: list[str], values: list[float], title: str = ""):
     go = _go()
     colors = [_GREEN if (v or 0) >= 0 else _RED for v in values]
     fig = go.Figure(go.Bar(x=labels, y=values, marker_color=colors,
-                           text=[f"{v:+.1f}" for v in values], textposition="auto"))
+                           text=[f"{v:+.1f}" for v in values], textposition="auto",
+                           cliponaxis=False))   # 음수 바 바깥 라벨(-0.1 등) 축 클리핑 방지
     # automargin + 여백 → x축 카테고리 라벨·바닥 값 안 잘림 (도넛 선례)
-    fig.update_layout(margin=dict(t=14, b=44, l=14, r=14), height=300)
+    fig.update_layout(margin=dict(t=14, b=52, l=14, r=14), height=300)
     fig.update_xaxes(automargin=True)
     fig.update_yaxes(automargin=True)
     if title:
