@@ -139,6 +139,12 @@ def pannable_chart_html(fig, hist, *, height: int = 460, view_days=None,
   let guard = false, dragging = false, hoverOff = false;
 
   const volAxis = {vol_axis_js};                 // 거래량 패널 축 id (없으면 null)
+  // 전역 거래량 상위 2% 분위 캡 — 스파이크가 창에 들어와도 평상 막대가 읽히게
+  const volCap = (() => {{
+    const vs = bounds.map(b => b[3]).filter(v => v > 0).sort((a, b) => a - b);
+    if (!vs.length) return Infinity;
+    return vs[Math.floor(vs.length * 0.98)] * 1.6;
+  }})();
 
   function lowerBound(t0) {{                     // 시간 정렬 bounds 이진 탐색
     let lo = 0, hi = bounds.length;
@@ -155,7 +161,8 @@ def pannable_chart_html(fig, hist, *, height: int = 460, view_days=None,
     }}
     if (!isFinite(lo)) return null;
     const pad = Math.max((hi - lo) * 0.06, Math.abs(hi) * 0.002);
-    return {{price: [lo - pad, hi + pad], vol: [0, vmax * 1.1 || 1]}};
+    return {{price: [lo - pad, hi + pad],
+             vol: [0, Math.min(vmax, volCap) * 1.1 || 1]}};
   }}
 
   // ── 부드러운 y 전환 — 시간 기반 lerp + **비용 적응형 스로틀** ──

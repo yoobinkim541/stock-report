@@ -690,3 +690,17 @@ def test_price_levels_chart():
     syms = {tr.marker.symbol for tr in fig.data}
     assert {"triangle-up", "triangle-down", "diamond"} <= syms
     assert any("현재 100" in (a.text or "") for a in fig.layout.annotations)
+
+
+def test_volume_axis_spike_cap():
+    """거래량 축 q98 캡 — 역사적 스파이크가 축을 지배하지 않게 (최근 60봉은 보장)."""
+    idx = pd.date_range("2024-01-01", periods=400, freq="D")
+    close = pd.Series([100.0] * 400, index=idx)
+    vol = pd.Series([10_000_000.0] * 400, index=idx)
+    vol.iloc[50] = 1_000_000_000.0                    # 1B 스파이크
+    hist = pd.DataFrame({"Open": close, "High": close * 1.01, "Low": close * 0.99,
+                         "Close": close, "Volume": vol}, index=idx)
+    fig = charts.price_chart(hist, "T", show_volume=True)
+    vr = fig.layout.yaxis2.range
+    assert vr is not None and vr[1] < 100_000_000     # 1B 스파이크에 미지배
+    assert vr[1] >= 10_000_000 * 1.1                  # 평상 막대는 안 잘림

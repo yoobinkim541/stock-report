@@ -101,6 +101,7 @@ def test_embed_drag_ux_contract():
                   "costMs",                      # 리드로우 비용 EMA — 적응형 스로틀
                   "visDelta",                    # 데드밴드 — 무의미한 relayout 생략
                   "performance.now",
+                  "const volCap",                # 거래량 q98 캡 — 스파이크 축 지배 방지
                   "function finishGesture",      # 제스처 끝 1회 마무리 (휠 줌 랙 제거)
                   "gestureTimer = setTimeout(finishGesture, 160)",
                   "function animStep"):

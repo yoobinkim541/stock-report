@@ -765,7 +765,15 @@ def price_chart(hist, ticker: str = "", *, kind: str = "line", avg_cost=None,
             fig.add_trace(go.Scatter(x=hist.index, y=vol.rolling(20).mean(),
                                      name="거래량 MA20", showlegend=False, line=dict(color=_GREEN, width=1)),
                           row=vol_row, col=1)
-        fig.update_yaxes(row=vol_row, col=1, nticks=3)
+        # 거래량 축 = 상위 2% 분위 캡 — 역사적 스파이크가 축을 지배해 평상 막대가
+        # 바닥에 깔리는 것 방지(스파이크는 잘림 — 표준 처방). 최근 60봉 최대는 보장.
+        _v = vol.dropna()
+        if len(_v) > 20:
+            _cap = max(float(_v.quantile(0.98)) * 1.6,
+                       float(_v.tail(60).max() or 1) * 1.15)
+            fig.update_yaxes(range=[0, _cap], row=vol_row, col=1, nticks=3)
+        else:
+            fig.update_yaxes(row=vol_row, col=1, nticks=3)
 
     # ── RSI 패널 (RSI + 시그널(14MA) + 30~70 밴드) ──
     if show_rsi:
