@@ -470,7 +470,7 @@ def _etf_peer_section(ticker, peers):
     mine = next((r for r in rows if r["ticker"] == me), None)
     if mine and mine.get("score_detail"):
         sd = mine["score_detail"]
-        g1, g2 = st.columns([1, 1.5])
+        g1, g2 = st.columns([1, 1.5], vertical_alignment="center")
         with g1:
             theme.render(theme.etf_score_html(mine.get("score"), grp["name"],
                                               sd.get("low_confidence", False)))
@@ -478,7 +478,8 @@ def _etf_peer_section(ticker, peers):
             comp = {k: v for k, v in (sd.get("components") or {}).items() if v is not None}
             if comp:
                 st.plotly_chart(charts.hbar(list(comp.keys()), list(comp.values()),
-                                            "구성 점수 (백분위)", pct=False),
+                                            "구성 점수 (백분위)", pct=False,
+                                            x_range=(0, 105)),
                                 width="stretch", config=_NOBAR)
             missing = [k for k, v in (sd.get("components") or {}).items() if v is None]
             if missing:

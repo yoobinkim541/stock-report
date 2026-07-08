@@ -292,18 +292,26 @@ def market_treemap(rows: list[dict], height: int = 560):
     return _t(fig)
 
 
-def hbar(labels: list[str], values: list[float], title: str = "", pct: bool = True):
-    """가로 막대 (위험기여·비중 등). 큰 값이 위로."""
+def hbar(labels: list[str], values: list[float], title: str = "", pct: bool = True,
+         x_range=None):
+    """가로 막대 (위험기여·비중 등). 큰 값이 위로. x_range=(lo, hi) — 고정축(백분위 등)."""
     go = _go()
     pairs = sorted(zip(labels, values), key=lambda x: x[1])
     fig = go.Figure(go.Bar(
         x=[v * 100 if pct else v for _, v in pairs],
         y=[l for l, _ in pairs], orientation="h", marker_color=_BLUE,
         text=[f"{v*100:.0f}%" if pct else f"{v:.2f}" for _, v in pairs], textposition="auto"))
-    fig.update_layout(margin=dict(t=10, b=10, l=10, r=10), height=max(180, 36 * len(pairs)),
+    # t=10 이 제목을 잘라먹던 원인 — 제목 있을 때만 상단 여백 확보 + 좌측 앵커
+    fig.update_layout(margin=dict(t=44 if title else 10, b=10, l=10, r=24),
+                      height=max(180, 36 * len(pairs)),
                       xaxis_title=None, yaxis_title=None)
+    fig.update_xaxes(automargin=True)
+    fig.update_yaxes(automargin=True)
+    if x_range:
+        fig.update_xaxes(range=list(x_range))
     if title:                       # None 제목은 plotly.js 가 "undefined" 로 렌더 → 비면 미설정
-        fig.update_layout(title=title)
+        fig.update_layout(title=dict(text=title, x=0.01, xanchor="left",
+                                     font=dict(size=13)))
     return _t(fig)
 
 

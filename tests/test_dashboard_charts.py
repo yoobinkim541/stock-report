@@ -633,3 +633,13 @@ def test_price_chart_compare_initial_view_pct():
     assert r2 is not None and r2[1] < 45
     main = next(tr for tr in fig1.data if tr.name == "T")
     assert "%{y:+.2f}%" in main.hovertemplate         # hover 포맷
+
+
+def test_hbar_title_margin_and_range():
+    """hbar 제목 잘림 회귀 — 제목 시 t>=40·좌측 앵커·x_range 고정축."""
+    fig = charts.hbar(["비용", "성과"], [12.0, 62.0], "구성 점수 (백분위)",
+                      pct=False, x_range=(0, 105))
+    assert fig.layout.margin.t >= 40
+    assert fig.layout.title.xanchor == "left"
+    assert list(fig.layout.xaxis.range) == [0, 105]
+    assert charts.hbar(["a"], [1.0]).layout.margin.t == 10   # 무제목은 기존 여백
