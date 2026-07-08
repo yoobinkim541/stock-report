@@ -38,6 +38,31 @@ def _pannable(fig, *, rangeslider: bool = True, height: int = 360):
     return fig
 
 
+def _initial_view(fig, hist, view_days, *, lo_col="Low", hi_col="High"):
+    """전체 히스토리 로드 상태에서 초기 화면만 최근 view_days 로 — 과거는 드래그/미니차트 탐색.
+
+    x·y 초기 범위를 창에 맞춤(plotly 는 x창 추종 y 자동스케일이 없어 창 기준으로 시작 —
+    팬/줌으로 조절·더블클릭=전체 복귀). 데이터가 창보다 짧으면 전체 표시.
+    """
+    if not view_days or hist is None or getattr(hist, "empty", True):
+        return fig
+    import pandas as pd
+    end = hist.index[-1]
+    start = end - pd.Timedelta(days=view_days)
+    if start <= hist.index[0]:
+        return fig                                   # 창보다 짧은 이력 — 전체 그대로
+    win = hist[hist.index >= start]
+    if len(win) < 2:
+        return fig
+    cols = set(getattr(hist, "columns", []))
+    lo = float(win[lo_col].min()) if lo_col in cols else float(win["Close"].min())
+    hi = float(win[hi_col].max()) if hi_col in cols else float(win["Close"].max())
+    pad = max((hi - lo) * 0.06, hi * 0.002)
+    fig.update_layout(xaxis_range=[start, end + (end - start) * 0.02],
+                      yaxis_range=[lo - pad, hi + pad])
+    return fig
+
+
 def _trade_price(hist, trade: dict):
     price = trade.get("price")
     try:
@@ -128,7 +153,7 @@ def allocation_donut(holdings: list[dict]):
     return _t(fig)
 
 
-def price_line(hist, ticker: str = "", avg_cost=None, trades=None):
+def price_line(hist, ticker: str = "", avg_cost=None, trades=None, view_days=None):
     """가격 라인 + 20/60일 이동평균 (+ 보유 시 평단 수평선). hist: OHLC DataFrame(Close 필요)."""
     go = _go()
     fig = go.Figure()
@@ -148,10 +173,10 @@ def price_line(hist, ticker: str = "", avg_cost=None, trades=None):
     _add_trade_markers(fig, hist, trades or [])
     fig.update_layout(margin=dict(t=10, b=10, l=10, r=10),
                       legend=dict(orientation="h", y=1.1), hovermode="x unified")
-    return _pannable(_t(fig))
+    return _initial_view(_pannable(_t(fig)), hist, view_days, lo_col="Close", hi_col="Close")
 
 
-def price_candle(hist, ticker: str = "", avg_cost=None, trades=None):
+def price_candle(hist, ticker: str = "", avg_cost=None, trades=None, view_days=None):
     """가격 캔들(OHLC) + 20/60일 이동평균 (+ 보유 시 평단 수평선). hist: OHLC DataFrame."""
     go = _go()
     fig = go.Figure()
@@ -175,7 +200,7 @@ def price_candle(hist, ticker: str = "", avg_cost=None, trades=None):
     fig.update_layout(margin=dict(t=10, b=10, l=10, r=10),
                       legend=dict(orientation="h", y=1.1),
                       hovermode="x unified")
-    return _pannable(_t(fig))
+    return _initial_view(_pannable(_t(fig)), hist, view_days)
 
 
 def market_treemap(rows: list[dict], height: int = 560):

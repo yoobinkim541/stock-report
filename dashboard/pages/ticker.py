@@ -12,9 +12,11 @@ _NOBAR = {"displayModeBar": False}
 
 def render():
     ticker = st.session_state.get("ticker", "MSFT")
-    period = st.radio("기간", ["3mo", "6mo", "1y"], index=1, horizontal=True,
+    # 기간 = 초기 표시 창만 — 데이터는 항상 전체(max) 로드라 과거로 무한 드래그 가능
+    period = st.radio("기간", ["3mo", "6mo", "1y", "5y", "전체"], index=1, horizontal=True,
                       label_visibility="collapsed")
-    hist = cached.ohlc(ticker, period=period)
+    view_days = {"3mo": 90, "6mo": 180, "1y": 365, "5y": 1825, "전체": None}[period]
+    hist = cached.ohlc(ticker, period="max")
     yf_price = prev = None
     if hist is not None and not getattr(hist, "empty", True) and "Close" in getattr(hist, "columns", []):
         cl = hist["Close"]
@@ -29,7 +31,8 @@ def render():
 
     # 가격 차트 — 풀폭 · 라인/캔들 토글 (+ 보유 시 평단 수평선)
     if yf_price is not None:
-        _price_chart(ticker, hist, pos.get("avg_price_usd") if pos else None, data.trade_events(ticker))
+        _price_chart(ticker, hist, pos.get("avg_price_usd") if pos else None,
+                     data.trade_events(ticker), view_days)
     else:
         st.info("가격 데이터 없음 (yfinance)")
 
@@ -76,13 +79,14 @@ def _trade_detail(t):
                + (f" · {t.get('note')}" if t.get("note") else ""))
 
 
-def _price_chart(ticker, hist, avg_cost, trades):
+def _price_chart(ticker, hist, avg_cost, trades, view_days=None):
     """가격 차트 — 라인/캔들 토글(차트만 부분 rerun·전체 리로드 방지)."""
     kind = st.segmented_control("차트 종류", ["📈 라인", "🕯️ 캔들"], default="📈 라인",
                                 label_visibility="collapsed", key="_chart_kind")
     label = ticker_names.label(ticker)
-    fig = (charts.price_candle(hist, label, avg_cost, trades=trades) if kind == "🕯️ 캔들"
-           else charts.price_line(hist, label, avg_cost, trades=trades))
+    fig = (charts.price_candle(hist, label, avg_cost, trades=trades, view_days=view_days)
+           if kind == "🕯️ 캔들"
+           else charts.price_line(hist, label, avg_cost, trades=trades, view_days=view_days))
     event = None
     try:
         event = st.plotly_chart(

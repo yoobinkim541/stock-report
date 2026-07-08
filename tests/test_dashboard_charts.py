@@ -337,6 +337,24 @@ def test_target_price_fan_requires_mean_and_price():
     assert len(charts.target_price_fan(None, None, 120.0, 110.0, 90.0).data) == 0
 
 
+def test_initial_view_window_full_history():
+    """전체 히스토리 로드 + 초기 표시창(view_days) — 과거 드래그용 데이터는 전부 유지."""
+    import pandas as pd
+    idx = pd.date_range("2016-01-01", periods=2500, freq="D")   # ~7년
+    hist = pd.DataFrame({"Open": [100.0] * 2500, "High": [200.0] * 2300 + [110.0] * 200,
+                         "Low": [90.0] * 2500, "Close": [100.0] * 2500,
+                         "Volume": [1.0] * 2500}, index=idx)
+    fig = charts.price_candle(hist, "T", view_days=180)
+    assert len(fig.data[0].x) == 2500                            # 데이터는 전체 보존
+    x0, x1 = fig.layout.xaxis.range
+    assert pd.Timestamp(x0) >= idx[0] and pd.Timestamp(x1) >= idx[-1]
+    assert (pd.Timestamp(x1) - pd.Timestamp(x0)).days <= 200     # 초기 창 ≈ 6개월
+    assert fig.layout.yaxis.range[1] < 150                       # y 는 창 데이터(110) 기준 — 과거 고점(200) 아님
+    # view_days 없으면 전체 표시(범위 미설정) · 창보다 짧은 이력도 전체
+    assert charts.price_line(hist, "T").layout.xaxis.range is None
+    assert charts.price_line(hist.iloc[:100], "T", view_days=365).layout.xaxis.range is None
+
+
 def test_analyst_ratings_distribution():
     fig = charts.analyst_ratings({"strong_sell": 0, "sell": 0, "hold": 1, "buy": 23, "strong_buy": 1})
     assert _is_fig(fig)
