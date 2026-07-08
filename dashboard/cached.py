@@ -221,3 +221,18 @@ def fx_now():
 @st.cache_data(ttl=1800, show_spinner=False)
 def fx_timing():
     return views.fx_timing()
+
+
+@st.cache_data(ttl=900, show_spinner=False)
+def port_history():
+    return views.portfolio_history()
+
+
+@st.cache_data(ttl=900, show_spinner=False)
+def target_weights_map():
+    return views.target_weights_map()
+
+
+@st.cache_data(ttl=3600, show_spinner=False)
+def income_summary(qqqi_shares=0.0, qqqi_usd=0.0):
+    return views.income_summary(qqqi_shares, qqqi_usd)

@@ -1113,3 +1113,42 @@ def fx_timing() -> dict:
         return fetch_fx_timing() or {}
     except Exception:
         return {}
+
+
+def portfolio_history() -> list:
+    """일별 포트 히스토리 (portfolio_tracker — store 경유). graceful []."""
+    try:
+        import portfolio_tracker
+        return portfolio_tracker.load_history() or []
+    except Exception:
+        return []
+
+
+def target_weights_map() -> dict:
+    """목표 비중 {ticker: 분수} (봇 /rebalance 와 동일 소스). graceful {}."""
+    try:
+        from barbell_strategy import load_target_weights
+        return load_target_weights() or {}
+    except Exception:
+        return {}
+
+
+def income_summary(qqqi_shares: float = 0.0, qqqi_usd: float = 0.0) -> dict:
+    """인컴 트래커 — 분배금 기록 누적 + QQQI 월 예상(추정·네트워크 graceful)."""
+    out = {"records": [], "total": 0.0, "est_monthly": None}
+    try:
+        import store
+        recs = store.all("qqqi_dividends") or []
+        out["records"] = recs
+        out["total"] = sum(float(r.get("amount") or r.get("amount_usd") or 0) for r in recs)
+    except Exception:
+        pass
+    try:
+        if qqqi_shares > 0:
+            from providers.market_data import estimate_qqqi_monthly_dividend
+            est = estimate_qqqi_monthly_dividend(qqqi_shares, qqqi_usd) or {}
+            out["est_monthly"] = est.get("monthly_usd") or est.get("estimated_monthly_usd")
+            out["est_detail"] = est
+    except Exception:
+        pass
+    return out

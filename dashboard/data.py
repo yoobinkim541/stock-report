@@ -105,7 +105,7 @@ def load_holdings(path: str | None = None) -> list[dict]:
             ret = (v - cost) / cost * 100 if cost > 0 else ret
             rt_on = True
         rows.append({"ticker": tk, "name": nm, "shares": sh, "value": v,
-                     "ret": ret, "rt": rt_on})
+                     "ret": ret, "rt": rt_on, "cost": cost})
     tot = sum(r["value"] for r in rows) or 1    # 오버레이 후 총액으로 비중 재계산
     for r in rows:
         r["weight"] = r["value"] / tot * 100
@@ -543,3 +543,117 @@ def format_screener_features(feats: dict, importance: dict | None = None) -> lis
     for r in rows:
         r.pop("_imp")
     return rows
+
+
+# ── 포트폴리오 페이지 보강 (P1) — 순수 계산층 ────────────────────────────────
+
+def growth_series(records: list) -> dict:
+    """일별 히스토리 → 포트 vs QQQ 정규화(%) 시리즈 (첫 기록=0%). 순수.
+
+    반환 {dates, port, qqq, n_days} — 레코드 <2 면 빈 dict (정직 생략).
+    """
+    rec = [r for r in (records or [])
+           if _try_float(r.get("total_usd")) and _try_float(r.get("qqq_price"))]
+    if len(rec) < 2:
+        return {}
+    p0 = float(rec[0]["total_usd"])
+    q0 = float(rec[0]["qqq_price"])
+    if p0 <= 0 or q0 <= 0:
+        return {}
+    return {"dates": [r.get("date") for r in rec],
+            "port": [(float(r["total_usd"]) / p0 - 1) * 100 for r in rec],
+            "qqq": [(float(r["qqq_price"]) / q0 - 1) * 100 for r in rec],
+            "n_days": len(rec)}
+
+
+def fx_attribution(records: list, days: int = 30) -> dict:
+    """기간 수익 분해 — $수익률·₩수익률·환율 기여(%p). 순수.
+
+    환율 기여 = (1+₩수익)/(1+$수익) − 1 (원화 투자자 관점의 환차 몫).
+    """
+    rec = [r for r in (records or [])
+           if _try_float(r.get("total_usd")) and _try_float(r.get("total_krw"))]
+    if len(rec) < 2:
+        return {}
+    win = rec[-min(len(rec), max(2, days)):]
+    u0, u1 = float(win[0]["total_usd"]), float(win[-1]["total_usd"])
+    k0, k1 = float(win[0]["total_krw"]), float(win[-1]["total_krw"])
+    if u0 <= 0 or k0 <= 0:
+        return {}
+    usd_ret = u1 / u0 - 1
+    krw_ret = k1 / k0 - 1
+    return {"usd_ret": usd_ret * 100, "krw_ret": krw_ret * 100,
+            "fx_ret": ((1 + krw_ret) / (1 + usd_ret) - 1) * 100,
+            "window_days": len(win), "from": win[0].get("date"), "to": win[-1].get("date")}
+
+
+def rebalance_gaps(holdings: list, targets: dict) -> list[dict]:
+    """현재 vs 목표 비중 갭 — [{ticker, name, cur, tgt, gap_pp, usd_delta}] |갭| 내림차순. 순수.
+
+    targets: {ticker: 분수}. 목표 없는 종목은 목표 0%로(초과 보유), 미보유 목표는 매수 필요.
+    표시 전용 — 실행은 수동 (실계좌 주문 0 원칙).
+    """
+    total = sum((h.get("value") or 0) for h in (holdings or []))
+    if total <= 0 or not targets:
+        return []
+    cur = {h["ticker"]: (h.get("value") or 0) / total * 100 for h in holdings}
+    names = {h["ticker"]: h.get("name") or "" for h in holdings}
+    out = []
+    for t in sorted(set(cur) | set(targets)):
+        c = cur.get(t, 0.0)
+        g = float(targets.get(t, 0.0)) * 100
+        gap = c - g
+        if abs(gap) < 0.05 and t not in cur:
+            continue
+        out.append({"ticker": t, "name": names.get(t, ""), "cur": c, "tgt": g,
+                    "gap_pp": gap, "usd_delta": -gap / 100 * total})
+    out.sort(key=lambda r: -abs(r["gap_pp"]))
+    return out
+
+
+_CLASS_CASH = {"SGOV", "BIL", "SHV"}
+
+
+def asset_class_of(ticker: str) -> str:
+    """자산군 분류 (표시용) — 현금성/인컴(커버드콜)/지수·팩터 ETF/개별주."""
+    t = str(ticker).upper().split(".")[0]
+    if t in _CLASS_CASH:
+        return "현금성 (초단기 국채)"
+    try:
+        import etf_meta
+        g = etf_meta.group_of(t)
+        if g and "covered_call" in g:
+            return "인컴 (커버드콜)"
+        if g:
+            return "지수·팩터 ETF"
+    except Exception:
+        pass
+    try:
+        from providers.etf_data import is_etf
+        if is_etf(t):
+            return "지수·팩터 ETF"
+    except Exception:
+        pass
+    return "개별주"
+
+
+def exposures(holdings: list) -> dict:
+    """보유 → 섹터 노출(개별주)·자산군 분해 (%). 순수(정적 시드만)."""
+    total = sum((h.get("value") or 0) for h in (holdings or []))
+    if total <= 0:
+        return {}
+    try:
+        from sp500_meta import SECTOR_KR
+    except Exception:
+        SECTOR_KR = {}
+    sec: dict = {}
+    cls: dict = {}
+    for h in holdings:
+        t = h.get("ticker", "")
+        w = (h.get("value") or 0) / total * 100
+        c = asset_class_of(t)
+        cls[c] = cls.get(c, 0) + w
+        label = (SECTOR_KR.get(t) or "기타·해외") if c == "개별주" else c
+        sec[label] = sec.get(label, 0) + w
+    return {"sector": dict(sorted(sec.items(), key=lambda x: -x[1])),
+            "class": dict(sorted(cls.items(), key=lambda x: -x[1]))}

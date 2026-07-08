@@ -33,6 +33,14 @@ cached.news = lambda t: "뉴스 본문"
 cached.etf = lambda t: {"ticker": t, "is_etf": False}
 cached.tr_pr = lambda t, years=5: None
 cached.fx_now = lambda: 1400.0
+cached.port_history = lambda: [
+    {"date": "2026-07-06", "total_usd": 9300.0, "total_krw": 14000000, "exchange_rate": 1505.0,
+     "qqq_price": 700.0},
+    {"date": "2026-07-07", "total_usd": 9411.0, "total_krw": 14239554, "exchange_rate": 1513.0,
+     "qqq_price": 704.9}]
+cached.target_weights_map = lambda: {"MSFT": 0.5, "NVDA": 0.4, "SGOV": 0.1}
+cached.income_summary = lambda *a, **k: {"records": [{"amount": 12.5}], "total": 12.5,
+    "est_monthly": 20.0, "est_detail": {"note": "최근 3개월 평균 배당 기준"}}
 cached.fx_timing = lambda: {"ok": True, "rate": 1509.8, "pct_display": 96.1,
     "emoji": "\U0001f534", "verdict": "원화 약세 구간", "multiplier": 0.3,
     "action": "환전 최소화 - 필요분만"}

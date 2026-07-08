@@ -732,3 +732,55 @@ def test_format_screener_features():
     assert by["베타 60일"]["값"] == "-0.49"
     assert by["unknown_feat"]["구분"] == "기타"                              # 폴백
     assert data.format_screener_features({}, {}) == []
+
+
+# ── 포트폴리오 페이지 보강 (P1 · 순수) ────────────────────────────────────────
+def _hist_rec():
+    return [{"date": "2026-06-30", "total_usd": 9000.0, "total_krw": 13_500_000,
+             "exchange_rate": 1500.0, "qqq_price": 690.0},
+            {"date": "2026-07-07", "total_usd": 9411.0, "total_krw": 14_239_554,
+             "exchange_rate": 1513.0, "qqq_price": 704.9}]
+
+
+def test_growth_series_normalized():
+    g = data.growth_series(_hist_rec())
+    assert g["port"][0] == 0.0 and g["qqq"][0] == 0.0            # 첫 기록 = 0%
+    assert g["port"][-1] == pytest.approx((9411 / 9000 - 1) * 100)
+    assert g["qqq"][-1] == pytest.approx((704.9 / 690 - 1) * 100)
+    assert data.growth_series([]) == {} and data.growth_series(_hist_rec()[:1]) == {}
+
+
+def test_fx_attribution():
+    fx = data.fx_attribution(_hist_rec(), days=30)
+    assert fx["usd_ret"] == pytest.approx(4.567, abs=0.01)
+    assert fx["krw_ret"] == pytest.approx(5.478, abs=0.01)
+    # 환율 기여 = (1+₩)/(1+$)−1 ≈ +0.87%p (원화 약세 → 원화 평가 이득)
+    assert fx["fx_ret"] == pytest.approx(0.871, abs=0.02)
+    assert data.fx_attribution([]) == {}
+
+
+def test_rebalance_gaps():
+    holdings = [{"ticker": "MSFT", "name": "Microsoft", "value": 6000.0},
+                {"ticker": "NVDA", "name": "NVIDIA", "value": 4000.0}]
+    gaps = data.rebalance_gaps(holdings, {"MSFT": 0.5, "SGOV": 0.1})
+    by = {g["ticker"]: g for g in gaps}
+    assert by["MSFT"]["gap_pp"] == pytest.approx(10.0)           # 60 − 50 → 축소 방향
+    assert by["MSFT"]["usd_delta"] == pytest.approx(-1000.0)
+    assert by["SGOV"]["gap_pp"] == pytest.approx(-10.0)          # 미보유 목표 → 증액 방향
+    assert by["SGOV"]["usd_delta"] == pytest.approx(1000.0)
+    assert by["NVDA"]["gap_pp"] == pytest.approx(40.0)           # 목표 없음 = 0% 취급
+    assert gaps[0]["ticker"] == "NVDA"                           # |갭| 내림차순
+    assert data.rebalance_gaps(holdings, {}) == []
+
+
+def test_exposures_and_asset_class():
+    assert data.asset_class_of("SGOV") == "현금성 (초단기 국채)"
+    assert data.asset_class_of("QQQI") == "인컴 (커버드콜)"
+    assert data.asset_class_of("QQQ") == "지수·팩터 ETF"
+    assert data.asset_class_of("MSFT") == "개별주"
+    ex = data.exposures([{"ticker": "MSFT", "value": 500.0},
+                         {"ticker": "SGOV", "value": 500.0}])
+    assert ex["class"]["개별주"] == pytest.approx(50.0)
+    assert ex["class"]["현금성 (초단기 국채)"] == pytest.approx(50.0)
+    assert any("기술" in k or k == "기타·해외" for k in ex["sector"])   # MSFT 섹터 시드
+    assert data.exposures([]) == {}

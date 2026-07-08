@@ -1098,3 +1098,22 @@ def _add_top_indicators2(fig, hist, *, emas=(), psar=False, donchian_on=False,
         if av is not None:
             fig.add_trace(go.Scatter(x=av.index, y=av, name="앵커드 VWAP",
                                      line=dict(color="#e879f9", width=1.3, dash="dashdot")), **kw)
+
+
+def growth_compare(dates, port_pct, qqq_pct):
+    """포트 vs QQQ 성장 곡선 (% 정규화 — 첫 기록=0%). 순수."""
+    go = _go()
+    fig = go.Figure()
+    fig.add_trace(go.Scatter(x=dates, y=port_pct, name="내 포트폴리오",
+                             hovertemplate="%{y:+.2f}%<extra>내 포트</extra>",
+                             line=dict(color=_BLUE, width=2.2)))
+    fig.add_trace(go.Scatter(x=dates, y=qqq_pct, name="QQQ",
+                             hovertemplate="%{y:+.2f}%<extra>QQQ</extra>",
+                             line=dict(color="#f59e0b", width=1.4, dash="dot")))
+    fig.add_hline(y=0, line=dict(color=theme.MUTED, dash="dot", width=0.7))
+    fig.update_layout(margin=dict(t=8, b=10, l=10, r=12), height=280,
+                      hovermode="x unified",
+                      legend=dict(orientation="h", x=0.0, y=1.0, yanchor="bottom",
+                                  font=dict(size=10), bgcolor="rgba(0,0,0,0)"))
+    fig.update_yaxes(ticksuffix="%", tickformat=".1f")
+    return _t(fig)
