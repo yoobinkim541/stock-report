@@ -344,7 +344,8 @@ def valuation_score(price, metrics, consensus=None, intrinsic=None) -> dict | No
         return max(-1.0, min(1.0, x))
 
     comps = []                                       # (weight, score, label)
-    peg = _try_float(m.get("peg"))
+    _pt = peg_textbook(m)
+    peg = (_pt or {}).get("peg") or _try_float(m.get("peg"))   # 교과서식 우선·야후 폴백
     if peg and peg > 0:
         comps.append((1.0, clamp((1.75 - peg) / 1.25), f"PEG {peg:.1f}"))
     e0, e1 = _try_float(m.get("eps_ttm")), _try_float(m.get("eps_fwd"))
@@ -412,3 +413,28 @@ def screener_drivers(feats: dict, importance: dict | None = None, top: int = 3) 
         if len(out) >= top:
             break
     return " · ".join(out) if out else "—"
+
+
+def eps_growth_fwd(metrics) -> float | None:
+    """예상 EPS 증가율(%) = (Fwd EPS ÷ TTM EPS − 1)×100. 결측/비양수 TTM → None. 순수."""
+    m = metrics or {}
+    e0, e1 = _try_float(m.get("eps_ttm")), _try_float(m.get("eps_fwd"))
+    if not e0 or e0 <= 0 or e1 is None:
+        return None
+    return (e1 / e0 - 1.0) * 100.0
+
+
+def peg_textbook(metrics) -> dict | None:
+    """교과서식 PEG = PER ÷ 예상 EPS 증가율(%) (Fwd/TTM 1년). 순수.
+
+    yfinance trailingPegRatio(야후 자체 5년 기대성장 기반)와 다를 수 있어
+    정의가 투명한 직접 계산을 표시 기본값으로 쓴다. 성장률 ≤0 → None(정직).
+    반환 {"peg", "growth_pct", "per", "yahoo"} | None.
+    """
+    m = metrics or {}
+    per = _try_float(m.get("per"))
+    g = eps_growth_fwd(m)
+    if not per or per <= 0 or not g or g <= 0:
+        return None
+    return {"peg": per / g, "growth_pct": g, "per": per,
+            "yahoo": _try_float(m.get("peg"))}

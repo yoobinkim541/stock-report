@@ -330,6 +330,25 @@ def signed_bars(labels: list[str], values: list[float], title: str = ""):
     return _t(fig)
 
 
+def bullet_bands(price: float, rows: list, x_title: str = "적정가 ($)", height: int = 160):
+    """현재가 vs 적정가 밴드(범용 수평 불릿) — rows=[(라벨, lo, mid, hi)]."""
+    go = _go()
+    fig = go.Figure()
+    for name, lo, mid, hi in rows:
+        if lo is None or hi is None:
+            continue
+        fig.add_trace(go.Scatter(x=[lo, hi], y=[name, name], mode="lines",
+                                 line=dict(color=_GRID, width=10), showlegend=False))
+        fig.add_trace(go.Scatter(x=[mid], y=[name], mode="markers",
+                                 marker=dict(color=_BLUE, size=12), showlegend=False))
+    if price:
+        fig.add_vline(x=price, line=dict(color=_RED, dash="dash"),
+                      annotation_text=f"현재 ${price:,.0f}")
+    fig.update_layout(margin=dict(t=24, b=10, l=10, r=10), height=height,
+                      xaxis_title=x_title)
+    return _t(fig)
+
+
 def value_bullet(price: float, rim: dict | None, ddm: dict | None):
     """현재가 vs RIM/DDM 적정가 밴드 (수평 범위 막대)."""
     go = _go()

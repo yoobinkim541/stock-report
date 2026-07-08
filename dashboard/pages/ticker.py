@@ -652,8 +652,12 @@ def _valuation(ticker, price=None):
         a = st.columns(5)
         a[0].metric("PER", data.f_ratio(m.get("per")))
         a[1].metric("Fwd PE", data.f_ratio(m.get("forward_pe")))
-        a[2].metric("PEG", data.f_ratio(m.get("peg")),
-                    help="PER ÷ 예상 이익성장률. 1 전후는 성장 대비 밸류 부담이 낮다는 해석에 자주 쓰지만, 성장률 추정이 불안정하면 결측/왜곡될 수 있음.")
+        _pt = data.peg_textbook(m)
+        a[2].metric("PEG", data.f_ratio((_pt or {}).get("peg")),
+                    help=("PER ÷ 예상 EPS 증가율(Fwd/TTM 1년) — 교과서 정의 직접 계산. "
+                          + (f"성장률 {_pt['growth_pct']:+.0f}% 기준 · 야후 PEG(5y 성장 추정) "
+                             f"{data.f_ratio(_pt.get('yahoo'))} 와 다를 수 있음"
+                             if _pt else "성장률 ≤0 이거나 EPS 결측이면 — 표시")))
         a[3].metric("PBR", data.f_ratio(m.get("pbr")))
         a[4].metric("PSR", data.f_ratio(m.get("psr")))
         b = st.columns(4)
@@ -716,24 +720,43 @@ def _valuation(ticker, price=None):
                      help="PER > fPER = 이익 성장 예상 (그 폭이 곧 상방)")
         st.caption("⚠️ Forward EPS·fPER 는 애널리스트 컨센서스 — 리비전에 따라 흔들림 · 멀티플 유지는 가정")
 
+    # 🎯 적정가 인디케이터 — 멀티플 기반 (Fwd EPS × PER + 성장 지표). RIM·DDM 은 보조 참고
+    if fv and price:
+        st.markdown("##### 🎯 적정가 인디케이터 — 멀티플 기반")
+        fair = fv["fair"]
+        st.plotly_chart(charts.bullet_bands(
+            price, [("Fwd EPS×PER (±15%)", fair * 0.85, fair, fair * 1.15)]),
+            width="stretch", config=_NOBAR)
+        g = data.eps_growth_fwd(m)
+        _pt2 = data.peg_textbook(m)
+        mm = st.columns(4)
+        mm[0].metric("멀티플 기준가", _fmt_px(fair), delta=f"{fv['upside_pct']:+.1f}%",
+                     help="Forward EPS × 현재 PER — 컨센서스 이익에 현 멀티플 유지 가정")
+        mm[1].metric("EPS 성장률", f"{g:+.1f}%" if g is not None else "—",
+                     help="Fwd EPS ÷ TTM EPS − 1 (1년 예상)")
+        mm[2].metric("PEG (계산)", data.f_ratio((_pt2 or {}).get("peg")),
+                     help="PER ÷ EPS 증가율 — <1 성장 대비 저평가 해석 관례")
+        mm[3].metric("ROE", data.f_frac_pct(m.get("roe")) if m.get("roe") is not None else "—",
+                     help="자기자본이익률 — 이익의 질·멀티플 정당화 근거")
+        st.caption("밴드 = 멀티플 ±15% 가정 · Fwd EPS 는 컨센서스(리비전 민감) · 표시·참고용")
+
     iv = cached.intrinsic(ticker)
     rim, ddm = iv.get("rim"), iv.get("ddm")
-    if rim or ddm:
-        st.markdown("##### 💰 적정가치 — RIM·DDM 모델 · 가정 민감")
-        if price:
-            st.plotly_chart(charts.value_bullet(price, rim, ddm), width="stretch", config=_NOBAR)
+    ddm_ok = bool(ddm and (ddm.get("mid") or 0) > 0)
+    if rim or ddm_ok:
+        st.markdown("###### 참고 — RIM·DDM 모델 (가정 민감·보수적)")
         cc = st.columns(3)
         if rim:
             cc[0].metric("RIM 적정가", data.f_usd(rim["mid"], 0),
                          help=f"범위 {data.f_usd(rim['low'], 0)}~{data.f_usd(rim['high'], 0)}")
-        if ddm:
+        if ddm_ok:
             cc[1].metric("DDM 적정가" + ("" if iv.get("ddm_reliable") else " ⚠️"),
                          data.f_usd(ddm["mid"], 0),
                          help=None if iv.get("ddm_reliable") else "배당성향 낮아 신뢰도 낮음")
         if iv.get("upside_pct") is not None:
             cc[2].metric("RIM 상승여력", data.f_pct_s(iv["upside_pct"]))
-        st.caption("RIM=잔여이익(고ROE 반영·범용) · DDM=배당할인(고배당주만 유효) · "
-                   "r 8~11%·g 4% 밴드 · ROE 영속 가정(보수성 주의)")
+        st.caption("RIM=잔여이익·DDM=배당할인(고배당주만) · r 8~11%·g 4% · ROE 영속 가정 — "
+                   "성장주에는 보수적이라 멀티플 기준가와 병행 해석")
     h = v.get("history") or []
     if h:
         st.markdown("##### 📈 실적 서프라이즈 이력")

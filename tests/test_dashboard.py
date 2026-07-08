@@ -678,7 +678,7 @@ def test_valuation_score_undervalued():
     iv = {"rim": {"mid": 125.0}, "upside_pct": 25.0}
     vs = data.valuation_score(100.0, m, c, iv)
     assert vs and vs["score"] > 0.3                    # 저평가 방향
-    assert "PEG 0.8" in vs["sub"] and vs["n"] == 5
+    assert "PEG 0.7" in vs["sub"] and vs["n"] == 5     # 교과서식 20÷30% (야후 0.8 아님)
 
 
 def test_valuation_score_overvalued_and_insufficient():
@@ -703,3 +703,15 @@ def test_screener_drivers():
     assert "RSI 75 과열" in s
     assert data.screener_drivers({}, {}) == "—"
     assert data.screener_drivers({"cmf_21": 0.0}, None) == "—"   # 규칙 미발동
+
+
+def test_peg_textbook_and_eps_growth():
+    """교과서식 PEG = PER ÷ EPS 증가율(fwd/ttm) — 야후 PEG 와 구분·성장 ≤0 정직 None."""
+    m = {"per": 30.0, "eps_ttm": 5.0, "eps_fwd": 9.7, "peg": 0.6}
+    assert data.eps_growth_fwd(m) == pytest.approx(94.0)
+    pt = data.peg_textbook(m)
+    assert pt["peg"] == pytest.approx(30.0 / 94.0, abs=0.001)   # 0.319 (야후 0.6 과 다름)
+    assert pt["yahoo"] == 0.6
+    assert data.peg_textbook({"per": 30.0, "eps_ttm": 5.0, "eps_fwd": 4.0}) is None  # 역성장
+    assert data.peg_textbook({}) is None
+    assert data.eps_growth_fwd({"eps_ttm": 0.0, "eps_fwd": 1.0}) is None

@@ -643,3 +643,11 @@ def test_hbar_title_margin_and_range():
     assert fig.layout.title.xanchor == "left"
     assert list(fig.layout.xaxis.range) == [0, 105]
     assert charts.hbar(["a"], [1.0]).layout.margin.t == 10   # 무제목은 기존 여백
+
+
+def test_bullet_bands_generic():
+    """범용 적정가 불릿 — 밴드·중앙 마커·현재가 vline (멀티플 기준가 인디케이터)."""
+    fig = charts.bullet_bands(142.0, [("Fwd EPS×PER (±15%)", 99.0, 117.0, 134.0)])
+    assert len(fig.data) == 2                          # 밴드 라인 + mid 마커
+    assert fig.data[0].x == (99.0, 134.0)
+    assert any("현재 $142" in (s.text or "") for s in fig.layout.annotations)
