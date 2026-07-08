@@ -17,10 +17,6 @@ _NOBAR = {"displayModeBar": False}
 
 def render():
     ticker = st.session_state.get("ticker", "MSFT")
-    # 기간 = 초기 표시 창만 — 데이터는 항상 전체(max) 로드라 과거로 무한 드래그 가능
-    period = st.radio("기간", ["3mo", "6mo", "1y", "5y", "전체"], index=1, horizontal=True,
-                      label_visibility="collapsed")
-    view_days = {"3mo": 90, "6mo": 180, "1y": 365, "5y": 1825, "전체": None}[period]
     hist = cached.ohlc(ticker, period="max")
     yf_price = prev = None
     if hist is not None and not getattr(hist, "empty", True) and "Close" in getattr(hist, "columns", []):
@@ -34,10 +30,10 @@ def render():
     # 실시간 밴드(8s 자동갱신) — 히어로 ⚡가격·게이지·내 포지션 (호가는 차트 아래 접이식)
     _live_top(ticker, hist, yf_price, prev, pos)
 
-    # 가격 차트 — 풀폭 · 봉/차트종류/지표 컨트롤 (+ 보유 시 평단 수평선)
+    # 가격 차트 — 풀폭 · 봉/기간/차트종류/지표 컨트롤 (+ 보유 시 평단 수평선)
     if yf_price is not None:
         _price_chart(ticker, hist, pos.get("avg_price_usd") if pos else None,
-                     data.trade_events(ticker), view_days)
+                     data.trade_events(ticker))
     else:
         st.info("가격 데이터 없음 (yfinance)")
 
@@ -97,11 +93,16 @@ _TOP_INDS = ["이동평균선", "지수이평(EMA)", "볼린저 밴드", "일목
              "VWAP(세션)", "앵커드 VWAP", "자동 추세선"]
 
 
-def _price_chart(ticker, hist, avg_cost, trades, view_days=None):
-    """가격 차트 — 봉 단위(5분~월)·라인/캔들·기술적 분석 도구(MA 세트·RSI·BB·일목)."""
-    tf_label = st.segmented_control("봉", list(_TF), default="1일",
-                                    label_visibility="collapsed", key="_chart_tf") or "1일"
-    c2, c3, c4, _sp = st.columns([1.1, 0.5, 0.5, 0.9])
+def _price_chart(ticker, hist, avg_cost, trades):
+    """가격 차트 — 봉 단위(5분~월)·기간·라인/캔들·기술적 분석 도구(MA 세트·RSI·BB·일목)."""
+    tcol, pcol = st.columns([1.9, 1.9])
+    tf_label = tcol.segmented_control("봉", list(_TF), default="1일",
+                                      label_visibility="collapsed", key="_chart_tf") or "1일"
+    # 기간 = 초기 표시 창만 — 데이터는 항상 전체(max) 로드라 과거로 무한 드래그 가능
+    period = pcol.radio("기간", ["3mo", "6mo", "1y", "5y", "전체"], index=1, horizontal=True,
+                        label_visibility="collapsed", key="_chart_period")
+    view_days = {"3mo": 90, "6mo": 180, "1y": 365, "5y": 1825, "전체": None}[period]
+    c2, c3, c4, _sp = st.columns([0.95, 0.42, 0.42, 2.2])
     kind = c2.segmented_control("차트 종류", ["📈 라인", "🕯️ 캔들"], default="📈 라인",
                                 label_visibility="collapsed", key="_chart_kind")
     tf = _TF[tf_label]
@@ -278,26 +279,40 @@ def _live_top(ticker, hist, yf_price, prev, pos):
     chg_pct = (chg / prev * 100) if (chg is not None and prev) else None
     ts = data.technical_score(hist["Close"]) if (hist is not None and yf_price is not None) else None
 
-    hcol, gcol = st.columns([1.6, 1])
+    # 3열 — 히어로 | 📐 기술적 분석 | ⚖️ 가치평가 (게이지 나란히 — 빈 공간 제거)
+    hcol, gcol, vcol = st.columns([1.5, 1, 1])
     with hcol:
         theme.render(theme.ticker_hero_html(ticker, ticker_names.display_name(ticker, allow_net=False) or ticker,
                                             price, chg, chg_pct, src, ""))
+        # 내 포지션 (보유 시) — 히어로 아래 컴팩트 밴드 (게이지와 높이 균형)
+        if pos:
+            avg = pos.get("avg_price_usd")
+            cur_ret = (price / avg - 1) * 100 if (avg and price) else pos.get("ret", 0)
+            cur_val = pos["shares"] * price if price else pos.get("value", 0)
+            theme.render(theme.position_band_html([
+                ("평단", data.f_usd(avg), None),
+                ("평가손익", data.f_pct_s(cur_ret),
+                 theme.GREEN if (cur_ret or 0) >= 0 else theme.RED),
+                ("보유주수", f"{pos['shares']:g}주", None),
+                ("평가액", data.f_usd(cur_val, 0), None),
+            ]))
     with gcol:
         if ts:
-            theme.render(theme.rating_gauge_html(ts["score"], sub=ts["sub"]))
+            theme.render(theme.rating_gauge_html(ts["score"], sub=ts["sub"],
+                                                 title="📐 기술적 분석"))
         else:
             st.caption("기술 신호 N/A")
-
-    # 내 포지션 (보유 시) — 평단·평가손익·주수·평가액
-    if pos:
-        avg = pos.get("avg_price_usd")
-        cur_ret = (price / avg - 1) * 100 if (avg and price) else pos.get("ret", 0)
-        cur_val = pos["shares"] * price if price else pos.get("value", 0)
-        m = st.columns(4)
-        m[0].metric("평단", data.f_usd(avg))
-        m[1].metric("평가손익", data.f_pct_s(cur_ret))
-        m[2].metric("보유주수", f"{pos['shares']:g}주")
-        m[3].metric("평가액", data.f_usd(cur_val, 0))
+    with vcol:
+        val = cached.valuation(ticker) or {}
+        vs = data.valuation_score(price, val.get("metrics"), val.get("consensus"),
+                                  cached.intrinsic(ticker))
+        if vs:
+            theme.render(theme.valuation_gauge_html(vs["score"], sub=vs["sub"]))
+        else:
+            st.markdown(f"<div style='color:{theme.MUTED};font-size:.78rem;"
+                        f"text-align:center;padding-top:26px'>⚖️ 가치평가<br>"
+                        f"<span style='font-size:.72rem'>재료 부족 — 생략 (ETF 등)</span></div>",
+                        unsafe_allow_html=True)
 
 
 

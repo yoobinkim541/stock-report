@@ -222,3 +222,24 @@ def test_etf_score_html_gauge():
     none_h = theme.etf_score_html(None)
     assert "데이터 부족" in none_h and "<svg" not in none_h
     assert "그룹 최상위" in theme.etf_score_html(90) and "그룹 최하위" in theme.etf_score_html(5)
+
+
+def test_valuation_gauge_html():
+    """가치평가 게이지 — 라벨 체계(고평가/저평가)·타이틀·verdict 존."""
+    h = theme.valuation_gauge_html(0.7, sub="PEG 0.9 · 목표가 +25%")
+    assert "저평가" in h and "고평가" in h                  # 끝 라벨
+    assert "⚖️ 가치평가" in h and "PEG 0.9" in h
+    assert "크게 저평가" in h                               # +0.7 → 최상위 존 verdict
+    assert "크게 고평가" in theme.valuation_gauge_html(-0.9)
+    assert "적정 수준" in theme.valuation_gauge_html(0.0)
+    # 기본 rating 게이지 동작 불변 (기술적 분석)
+    base = theme.rating_gauge_html(0.8)
+    assert "강세" in base and "강력매수" in base
+
+
+def test_position_band_html():
+    """내 포지션 컴팩트 밴드 — 라벨·값·색·빈 입력 graceful."""
+    h = theme.position_band_html([("평단", "$190.52", None),
+                                  ("평가손익", "+3.4%", theme.GREEN)])
+    assert "평단" in h and "$190.52" in h and theme.GREEN in h
+    assert theme.position_band_html([]) == ""

@@ -669,3 +669,23 @@ def test_ohlc_tf_resamples_weekly_monthly(monkeypatch):
     mo = views.ohlc_tf("TST", "1mo")
     assert len(mo) == 1 and mo["Volume"].iloc[0] == 1000.0
     assert views.ohlc_tf("TST", "1d") is daily                      # 일봉 = 원본 passthrough
+
+
+# ── 가치평가 종합 점수 (게이지용 · 순수) ──────────────────────────────────────
+def test_valuation_score_undervalued():
+    m = {"peg": 0.8, "per": 20.0, "forward_pe": 16.0, "eps_ttm": 5.0, "eps_fwd": 6.5}
+    c = {"target_median": 130.0}
+    iv = {"rim": {"mid": 125.0}, "upside_pct": 25.0}
+    vs = data.valuation_score(100.0, m, c, iv)
+    assert vs and vs["score"] > 0.3                    # 저평가 방향
+    assert "PEG 0.8" in vs["sub"] and vs["n"] == 5
+
+
+def test_valuation_score_overvalued_and_insufficient():
+    # 자기일관 입력: price=120=eps_ttm×per — 기준가 upside ≈ +2.5%(중립), PEG·목표가가 압도
+    m = {"peg": 3.5, "per": 60.0, "forward_pe": 55.0, "eps_ttm": 2.0, "eps_fwd": 2.05}
+    vs = data.valuation_score(120.0, m, {"target_median": 96.0}, None)
+    assert vs and vs["score"] < -0.3                   # 고평가 방향
+    assert data.valuation_score(100.0, {"peg": 1.0}) is None      # 재료 1개 → 생략
+    assert data.valuation_score(None, m) is None
+    assert data.valuation_score(100.0, {}) is None

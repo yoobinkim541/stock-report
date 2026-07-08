@@ -326,3 +326,45 @@ def fair_value_multiple(price, per, fper=None, eps_fwd=None) -> dict | None:
         return None
     return {"fair": fair, "upside_pct": (ratio - 1.0) * 100.0,
             "eps_fwd": eps, "per": t, "fper": f, "source": source}
+
+
+def valuation_score(price, metrics, consensus=None, intrinsic=None) -> dict | None:
+    """가치평가 종합 점수 ∈[-1,1] (−1 크게 고평가 ↔ +1 크게 저평가) + 근거 라벨. 순수.
+
+    컴포넌트(가용한 것만·가중 평균): PEG(1.0)·fwd EPS 성장률(0.5)·멀티플 기준가
+    업사이드(1.0)·애널리스트 목표가 업사이드(1.0)·RIM 업사이드(0.5).
+    재료 <2 개면 None(정직 생략). 표시·참고용 — 매매신호 아님.
+    """
+    m, c, iv = metrics or {}, consensus or {}, intrinsic or {}
+    p = _try_float(price)
+    if not p or p <= 0:
+        return None
+
+    def clamp(x):
+        return max(-1.0, min(1.0, x))
+
+    comps = []                                       # (weight, score, label)
+    peg = _try_float(m.get("peg"))
+    if peg and peg > 0:
+        comps.append((1.0, clamp((1.75 - peg) / 1.25), f"PEG {peg:.1f}"))
+    e0, e1 = _try_float(m.get("eps_ttm")), _try_float(m.get("eps_fwd"))
+    if e0 and e1 and e0 > 0:
+        g = (e1 / e0 - 1) * 100
+        comps.append((0.5, clamp((g - 5.0) / 20.0), f"EPS성장 {g:+.0f}%"))
+    fv = fair_value_multiple(p, m.get("per"), m.get("forward_pe"), m.get("eps_fwd"))
+    if fv and fv.get("fair"):
+        up = fv["fair"] / p - 1
+        comps.append((1.0, clamp(up / 0.30), f"기준가 {up * 100:+.0f}%"))
+    tgt = _try_float(c.get("target_median") or c.get("target_mean"))
+    if tgt and tgt > 0:
+        up = tgt / p - 1
+        comps.append((1.0, clamp(up / 0.30), f"목표가 {up * 100:+.0f}%"))
+    rim_up = _try_float(iv.get("upside_pct"))
+    if rim_up is not None and (iv.get("rim") or {}).get("mid"):
+        comps.append((0.5, clamp(rim_up / 100.0 / 0.35), f"RIM {rim_up:+.0f}%"))
+    if len(comps) < 2:
+        return None
+    wsum = sum(w for w, _, _ in comps)
+    score = sum(w * s for w, s, _ in comps) / wsum
+    return {"score": clamp(score), "sub": " · ".join(lab for _, _, lab in comps[:3]),
+            "n": len(comps)}

@@ -100,39 +100,71 @@ def _arc(cx, cy, r, a0, a1):
     return f"M {x0:.1f} {y0:.1f} A {r} {r} 0 {large} {sweep} {x1:.1f} {y1:.1f}"
 
 
-def rating_gauge_html(score, verdict="", sub="") -> str:
+def rating_gauge_html(score, verdict="", sub="", *, title="",
+                      end_labels=("약세", "강세"), zones=None) -> str:
     """반원 속도계 게이지 (score∈[-1,1]: -1 강력매도 ↔ +1 강력매수).
 
     5존을 **상단 반원**(좌 약세→우 강세)에 개별 원호로 타일 + 니들(score→각도) + 허브.
+    zones/end_labels 로 라벨 체계 교체 가능(가치평가 게이지 공용) — 기본 동작 불변.
     """
+    zones = zones or _GAUGE_ZONES
     try:
         score = max(-1.0, min(1.0, float(score)))
     except (TypeError, ValueError):
         score = 0.0
     cx, cy, R, sw = 100, 100, 78, 15
-    n = len(_GAUGE_ZONES)
+    n = len(zones)
     seg = 180.0 / n                                  # 존당 36°
     arcs = "".join(
         f'<path d="{_arc(cx, cy, R, 180 - i * seg, 180 - (i + 1) * seg)}" fill="none" '
         f'stroke="{c}" stroke-width="{sw}" stroke-linecap="butt"/>'
-        for i, (c, _) in enumerate(_GAUGE_ZONES))
+        for i, (c, _) in enumerate(zones))
     a = 90.0 * (1 - score)                            # score -1→180°, 0→90°, +1→0°
     nx, ny = _polar(cx, cy, R - 20, a)
     vcol = GREEN if score > 0.15 else RED if score < -0.15 else MUTED
     if not verdict:
-        verdict = _GAUGE_ZONES[min(n - 1, int((score + 1) / 2 * n))][1]
+        verdict = zones[min(n - 1, int((score + 1) / 2 * n))][1]
     ly = cy + 16
-    return f'''<div class="tn-gauge" style="max-width:260px;margin:0 auto">
+    head = (f'<div style="color:{MUTED};font-size:0.78rem;text-align:center;'
+            f'margin-bottom:-4px">{title}</div>' if title else '')
+    return f'''<div class="tn-gauge" style="max-width:220px;margin:0 auto">
+  {head}
   <svg viewBox="0 0 200 126" width="100%" preserveAspectRatio="xMidYMid meet">
     {arcs}
     <line x1="{cx}" y1="{cy}" x2="{nx:.1f}" y2="{ny:.1f}" stroke="{TEXT}" stroke-width="3" stroke-linecap="round"/>
     <circle cx="{cx}" cy="{cy}" r="6" fill="{TEXT}"/>
-    <text x="{cx - R}" y="{ly}" fill="{MUTED}" font-size="10" font-family="{_MONO}" text-anchor="middle">약세</text>
-    <text x="{cx + R}" y="{ly}" fill="{MUTED}" font-size="10" font-family="{_MONO}" text-anchor="middle">강세</text>
+    <text x="{cx - R}" y="{ly}" fill="{MUTED}" font-size="10" font-family="{_MONO}" text-anchor="middle">{end_labels[0]}</text>
+    <text x="{cx + R}" y="{ly}" fill="{MUTED}" font-size="10" font-family="{_MONO}" text-anchor="middle">{end_labels[1]}</text>
   </svg>
   <div class="tn-gauge-verdict" style="color:{vcol}">{verdict}</div>
   {f'<div class="tn-gauge-sub">{sub}</div>' if sub else ''}
 </div>'''
+
+
+_VAL_ZONES = [
+    ("#ef5350", "크게 고평가"), ("#ef9a9a", "고평가"), ("#5d6673", "적정 수준"),
+    ("#80cbc4", "저평가"), ("#26a69a", "크게 저평가"),
+]
+
+
+def valuation_gauge_html(score, sub="") -> str:
+    """가치평가 게이지 (score∈[-1,1]: -1 크게 고평가 ↔ +1 크게 저평가) — 표시·참고용."""
+    return rating_gauge_html(score, sub=sub, title="⚖️ 가치평가",
+                             end_labels=("고평가", "저평가"), zones=_VAL_ZONES)
+
+
+def position_band_html(cells) -> str:
+    """내 포지션 컴팩트 밴드 — [(label, value, color|None)] 한 줄 스트립 (st.metric 대체)."""
+    if not cells:
+        return ""
+    items = "".join(
+        f'<div style="flex:1;min-width:104px;text-align:center;padding:2px 6px">'
+        f'<span style="color:{MUTED};font-size:0.72rem">{lab}</span><br>'
+        f'<b style="font-size:1.02rem;color:{col or TEXT};font-family:{_MONO}">{val}</b></div>'
+        for lab, val, col in cells)
+    return (f'<div style="display:flex;gap:6px;flex-wrap:wrap;align-items:center;'
+            f'padding:7px 10px;background:{PANEL};border:1px solid {BORDER};'
+            f'border-radius:10px">{items}</div>')
 
 
 _FNG_ZONES = [(25, "#ef5350", "극공포"), (45, "#ff9800", "공포"),
