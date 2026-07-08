@@ -988,12 +988,49 @@ def _entry_levels_section(ticker, hist, price):
     if len(yr) > 20:
         supports.append(("52주 저점", float(yr.min())))
         resists.append(("52주 고점", float(yr.max())))
-    try:                                            # 자동 감지 추세 지지/저항선 (3터치)
-        for tl in cached.trendlines_for(ticker, "1d", True, ()) or []:
+    try:                                            # 자동 감지 추세 지지/저항선·채널 상하단
+        for tl in cached.trendlines_for(ticker, "1d", True, ("long",)) or []:
             if tl.get("kind") == "support":
                 supports.append(("추세 지지선", float(tl.get("y1"))))
             elif tl.get("kind") == "resistance":
                 resists.append(("추세 저항선", float(tl.get("y1"))))
+            elif tl.get("kind") == "channel":
+                path = tl.get("path") or {}
+                up = (path.get("upper") or [None])[-1] if path else (tl.get("upper") or [None])[-1]
+                lo_ = (path.get("lower") or [None])[-1] if path else (tl.get("lower") or [None])[-1]
+                if lo_:
+                    supports.append(("채널 하단", float(lo_)))
+                if up:
+                    resists.append(("채널 상단", float(up)))
+    except Exception:
+        pass
+    try:                                            # 매물대 — 거래량 상위 노드(HVN) = 강한 지지/저항
+        vp = charts.volume_profile_bins(hist[hist.index >= hist.index[-1]
+                                             - pd.Timedelta(days=730)])
+        if vp:
+            centers, vols = vp
+            top = sorted(zip(centers, vols), key=lambda x: -x[1])[:4]
+            for c, _vol in top:
+                (supports if c < price else resists).append(("매물대(HVN)", float(c)))
+    except Exception:
+        pass
+    try:                                            # 앵커드 VWAP (최근 1년) — 평균 보유단가 근사
+        av = charts.anchored_vwap(hist, anchor=hist.index[-1] - pd.Timedelta(days=365))
+        if av is not None and len(av):
+            v_ = float(av.iloc[-1])
+            (supports if v_ < price else resists).append(("앵커드 VWAP(1y)", v_))
+    except Exception:
+        pass
+    try:                                            # 일목 구름 상/하단 (선행스팬 — 현재 시점)
+        if {"High", "Low"} <= set(hist.columns) and len(close) >= 78:
+            h9 = (hist["High"].rolling(9).max() + hist["Low"].rolling(9).min()) / 2
+            h26 = (hist["High"].rolling(26).max() + hist["Low"].rolling(26).min()) / 2
+            spa = float(((h9 + h26) / 2).shift(26).iloc[-1])
+            spb = float(((hist["High"].rolling(52).max()
+                          + hist["Low"].rolling(52).min()) / 2).shift(26).iloc[-1])
+            c_lo, c_hi = min(spa, spb), max(spa, spb)
+            (supports if c_lo < price else resists).append(("일목 구름 하단", c_lo))
+            (supports if c_hi < price else resists).append(("일목 구름 상단", c_hi))
     except Exception:
         pass
     fairs = []
