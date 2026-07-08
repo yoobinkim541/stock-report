@@ -30,6 +30,13 @@ _KNOWN_ETFS = {
     "XLI", "XLY", "XLP", "XLU", "XLB", "XLC", "XLRE", "EFA", "EEM", "ARKK", "MOAT",
 }
 
+# 피어 그룹 시드(etf_meta)의 US 티커도 오프라인 감지에 포함 (순환 import 방지 — 지연)
+try:
+    from etf_meta import US_TICKERS as _META_US
+    _KNOWN_ETFS |= set(_META_US)
+except Exception:
+    pass
+
 _KR_ETF_META = {
     "069500": {
         "name": "KODEX 200",
