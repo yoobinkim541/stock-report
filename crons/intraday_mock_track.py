@@ -578,6 +578,16 @@ def run_market(mk: str, state: dict, cfg: dict, *, dry: bool = False) -> list[st
         if axes is None or score is None:
             continue
         cands.append((score, sym, axes))
+    # 세션 최고점 진단 — 결정 0건이 휴면(점수 미달)인지 고장인지 로그만으로 구분.
+    # 신고점 갱신 시에만 한 줄 기록(단조증가라 일 수 회) — 매분 스팸 없음.
+    if cands:
+        top_score, top_sym, _ = max(cands)
+        _today = state.get("session_date", {}).get(mk)
+        _d = state.setdefault("diag", {}).get(mk) or {}
+        if _d.get("date") != _today or top_score > float(_d.get("best") or -9):
+            state["diag"][mk] = {"date": _today, "best": round(top_score, 4), "sym": top_sym}
+            logger.info("[%s] 세션 최고점 %s score %.2f (θ_entry %.2f)",
+                        mk, top_sym, top_score, float(params.get("theta_entry", 0.55)))
     for score, sym, axes in sorted(cands, reverse=True):
         if n_pos >= _MAX_CONCURRENT:
             break

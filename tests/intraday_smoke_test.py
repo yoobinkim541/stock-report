@@ -88,6 +88,9 @@ def _synth_session(n=60, base=61000.0, tick=100.0, vol=1000.0, breakout_at=None)
 def run_tests() -> list[str]:
     failures = []
     tmp = tempfile.mkdtemp(prefix="intraday_smoke_")
+    import atexit
+    import shutil
+    atexit.register(shutil.rmtree, tmp, ignore_errors=True)   # 전 종료경로 정리 — /tmp 누수 방지
     today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
 
     # ── i1: 심볼 변환 ─────────────────────────────────────────────────────────
