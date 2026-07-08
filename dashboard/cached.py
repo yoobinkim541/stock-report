@@ -191,3 +191,8 @@ def russell2000_heatmap():
 @st.cache_data(ttl=_TTL, show_spinner="추세선 감지 중…")
 def trendlines_for(t, tf, lines, ch_key):
     return views.trendlines_for(t, tf, lines=lines, channels=tuple(ch_key))
+
+
+@st.cache_data(ttl=300, show_spinner=False)
+def market_tape():
+    return views.market_tape()

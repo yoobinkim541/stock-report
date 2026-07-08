@@ -109,3 +109,13 @@ if st.session_state.pop("_nav_to_ticker", False):
 if st.session_state.pop("_nav_to_paper", False):
     st.switch_page(_paper_pg)
 nav.run()
+
+# 하단 시장 마퀴 띠 — 전 페이지 공통 (VIX·달러·코스피/닥·나스닥·선물 — 5분 캐시·graceful)
+try:
+    from dashboard import cached as _cached
+    from dashboard import theme as _theme
+    _tape = _theme.market_tape_html(_cached.market_tape())
+    if _tape:
+        st.markdown(_tape, unsafe_allow_html=True)
+except Exception:
+    pass

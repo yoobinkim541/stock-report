@@ -1013,3 +1013,33 @@ def trendlines_for(ticker: str, tf: str = "1d", *, lines: bool = True,
         return tl.detect_trendlines(df, channels=channels, lines=lines)
     except Exception:
         return []
+
+
+_TAPE_SYMS = [("^VIX", "VIX", 2), ("DX-Y.NYB", "달러 인덱스", 2), ("KRW=X", "달러 환율", 2),
+              ("^KS11", "코스피", 2), ("^KQ11", "코스닥", 2), ("^IXIC", "나스닥", 2),
+              ("^GSPC", "S&P500", 2), ("NQ=F", "나스닥100 선물", 1), ("ES=F", "S&P 선물", 1)]
+
+
+def market_tape() -> list[dict]:
+    """하단 마퀴 띠 데이터 — [{label, value, chg, pct}]. yf 2d 배치·graceful []."""
+    try:
+        import warnings
+        warnings.filterwarnings("ignore")
+        import yfinance as yf
+        df = yf.download([s for s, _, _ in _TAPE_SYMS], period="2d", progress=False,
+                         group_by="ticker", threads=True)
+    except Exception:
+        return []
+    out = []
+    for sym, label, dec in _TAPE_SYMS:
+        try:
+            c = df[sym]["Close"].dropna()
+            if len(c) < 2 or not c.iloc[-2]:
+                continue
+            last, prev = float(c.iloc[-1]), float(c.iloc[-2])
+            out.append({"label": label, "value": round(last, dec),
+                        "chg": round(last - prev, dec),
+                        "pct": round((last / prev - 1) * 100, 2)})
+        except Exception:
+            continue
+    return out

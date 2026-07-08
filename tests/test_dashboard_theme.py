@@ -196,3 +196,16 @@ def test_orderbook_ladder_html():
     assert "172,650,238" in h                          # 거래량
     assert h.count("#3182f6") >= 3 and h.count("#f04452") >= 3   # 파랑=ask 잔량·빨강=bid 잔량
     assert "호가 없음" in theme.orderbook_ladder_html([], [])    # graceful
+
+
+def test_market_tape_html_marquee():
+    """하단 마퀴 띠 — 무한 스크롤 keyframes·내용 2벌 복제·고정 위치·색 시맨틱."""
+    items = [{"label": "코스피", "value": 7293.43, "chg": -362.88, "pct": -4.73},
+             {"label": "VIX", "value": 16.13, "chg": 0.56, "pct": 3.59}]
+    h = theme.market_tape_html(items)
+    assert "tn-tape-scroll" in h and "infinite" in h
+    assert h.count("코스피") == 2 and h.count("VIX") == 2       # 이음새 없는 루프용 복제
+    assert "position: fixed" in h and "bottom: 0" in h
+    assert "▼" in h and "▲" in h
+    assert "animation-play-state: paused" in h                  # hover 정지
+    assert theme.market_tape_html([]) == ""                     # graceful

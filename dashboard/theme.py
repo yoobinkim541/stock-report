@@ -612,3 +612,39 @@ def orderbook_ladder_html(bids, asks, *, prev_close=None, price=None,
             f"<div style='flex:1'><div style='max-height:340px;overflow-y:auto'>"
             f"<table style='width:100%;border-collapse:collapse'>"
             + "".join(rows) + "</table></div>" + totals + "</div>" + stats + "</div>")
+
+
+def market_tape_html(items: list[dict]) -> str:
+    """하단 고정 시장 마퀴 띠 — CSS 무한 스크롤(내용 2벌·hover 정지). 항목 없으면 ''.
+
+    items: [{label, value, chg, pct}] — 상승 초록/하락 빨강(프로젝트 시맨틱).
+    본문 가림 방지 padding-bottom 주입 포함. 순수 HTML(theme.render 로 출력).
+    """
+    if not items:
+        return ""
+    spans = []
+    for it in items:
+        pct = it.get("pct")
+        chg = it.get("chg")
+        color = GREEN if (pct or 0) >= 0 else RED
+        arrow = "▲" if (pct or 0) >= 0 else "▼"
+        spans.append(
+            f"<span style='margin:0 18px;white-space:nowrap'>"
+            f"<b style='color:#d1d4dc'>{it['label']}</b> "
+            f"<span style='font-family:{_MONO}'>{it['value']:,}</span> "
+            f"<span style='color:{color};font-family:{_MONO};font-size:11px'>"
+            f"{arrow}{abs(chg):,} ({pct:+.2f}%)</span></span>")
+    seq = "".join(spans)
+    return f"""
+<style>
+@keyframes tn-tape-scroll {{ 0% {{ transform: translateX(0); }} 100% {{ transform: translateX(-50%); }} }}
+.tn-tape {{ position: fixed; left: 0; right: 0; bottom: 0; z-index: 999;
+  background: {PANEL}; border-top: 1px solid {GRID}; height: 30px;
+  overflow: hidden; display: flex; align-items: center; font-size: 12.5px; }}
+.tn-tape-inner {{ display: inline-flex; white-space: nowrap;
+  animation: tn-tape-scroll 60s linear infinite; }}
+.tn-tape:hover .tn-tape-inner {{ animation-play-state: paused; }}
+.stMainBlockContainer {{ padding-bottom: 56px !important; }}
+</style>
+<div class="tn-tape"><div class="tn-tape-inner">{seq}{seq}</div></div>
+"""
