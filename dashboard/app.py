@@ -21,6 +21,9 @@ from dashboard import auth, cached, data, theme
 st.set_page_config(page_title="퀀트 터미널", page_icon="📊", layout="wide")
 theme.inject_global_css()
 
+# 서버 재기동 감지 워치독 — 배포/재시작 후 좀비 탭이 자동 새로고침 → 로그인 게이트
+st.components.v1.html(auth.reconnect_watchdog_html(), height=0)
+
 if not auth.password_gate():
     st.stop()
 

@@ -523,3 +523,12 @@ research._screener_section()
     assert "NVIDIA (NVDA)" in str(df0["종목"].iloc[0])            # 기업명 병기
     caps = " ".join(str(c.value) for c in at.caption)
     assert "매매신호 아님" in caps
+
+
+def test_reconnect_watchdog_html_contract():
+    """서버 재기동 워치독 — health 폴링·down→up 전이 시 parent reload 계약."""
+    from dashboard import auth
+    h = auth.reconnect_watchdog_html(2500)
+    assert "/_stcore/health" in h and "2500" in h
+    assert "window.parent.location.reload" in h
+    assert "down = true" in h                       # 실패 → 회복 전이만 리로드
