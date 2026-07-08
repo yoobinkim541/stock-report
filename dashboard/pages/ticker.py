@@ -267,7 +267,8 @@ def _price_chart(ticker, hist, avg_cost, trades, fullscreen: bool = False):
         st.components.v1.html(
             plotly_embed.pannable_chart_html(
                 fig, df, height=h, view_days=view_days,
-                vol_axis="yaxis2" if show_vol else None, bounds_json=_bj),
+                vol_axis="yaxis2" if show_vol else None, bounds_json=_bj,
+                fit_viewport=fullscreen),
             height=h + 128)
     st.caption("🖱️ 드래그=이동(y축 자동 맞춤) · 휠=확대/축소 · 더블클릭=원위치 · "
                "✏️ 우상단 모드바 직접 그리기(선·자유곡선·박스)·지우개 — 설정 변경 시 드로잉 초기화")

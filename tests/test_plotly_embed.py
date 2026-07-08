@@ -51,7 +51,7 @@ def test_embed_reserves_chart_height():
     fig = charts.price_chart(_hist(), "T", show_rsi=True, show_volume=True)
     html = plotly_embed.pannable_chart_html(fig, _hist(), height=612)
     assert "min-height:612px" in html
-    assert "fig.layout.height = 612" in html
+    assert "fig.layout.height = fitVH ? vhFit() : 612" in html   # 풀뷰 실측 분기
 
 
 def test_embed_callouts_follow_pan():
@@ -105,3 +105,15 @@ def test_embed_drag_ux_contract():
                   "gestureTimer = setTimeout(finishGesture, 160)",
                   "function animStep"):
         assert token in html, f"누락: {token}"
+
+
+def test_embed_fit_viewport_contract():
+    """풀뷰 — 부모 창 높이 실측 리사이즈(frameElement)·리사이즈 추종 계약."""
+    hist = _hist(40)
+    fig = charts.price_chart(hist, "T")
+    full = plotly_embed.pannable_chart_html(fig, hist, fit_viewport=True)
+    for token in ("const fitVH = true", "window.frameElement",
+                  "parent.innerHeight", 'addEventListener("resize"'):
+        assert token in full, f"누락: {token}"
+    norm = plotly_embed.pannable_chart_html(fig, hist)
+    assert "const fitVH = false" in norm

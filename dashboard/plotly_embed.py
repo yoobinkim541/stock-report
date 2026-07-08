@@ -74,7 +74,8 @@ def compare_bounds_json(main_hist, compare: dict, view_days=None) -> str:
 
 def pannable_chart_html(fig, hist, *, height: int = 460, view_days=None,
                         vol_axis: str | None = None,
-                        bounds_json: str | None = None) -> str:
+                        bounds_json: str | None = None,
+                        fit_viewport: bool = False) -> str:
     """fig(charts.price_chart 산출) → 자동 y 리스케일·드로잉·인차트 마커 상세 임베드 HTML.
 
     bounds_json — y 맞춤 프레임 오버라이드 (비교 모드: compare_bounds_json 의 % 프레임).
@@ -88,6 +89,7 @@ def pannable_chart_html(fig, hist, *, height: int = 460, view_days=None,
     })
     view_ms = int(view_days) * 86400000 if view_days else 0
     vol_axis_js = json.dumps(vol_axis)
+    fit_vh_js = json.dumps(bool(fit_viewport))
     try:
         last_close = float(hist["Close"].iloc[-1])
     except Exception:
@@ -108,7 +110,26 @@ def pannable_chart_html(fig, hist, *, height: int = 460, view_days=None,
   const fig = {fig_json};
   const bounds = {bounds};                       // [[ms, low, high], ...] 시간 오름차순
   const gd = document.getElementById("chart");
-  fig.layout.height = {height};
+  const fitVH = {fit_vh_js};                     // 풀뷰 — 부모 창 높이에 맞춰 리사이즈
+  function vhFit() {{                            // same-origin iframe — frameElement 직접 리사이즈
+    try {{
+      const fe = window.frameElement;
+      const top = fe.getBoundingClientRect().top;
+      const h = Math.max(480, window.parent.innerHeight - top - 24);
+      fe.style.height = (h + 8) + "px";
+      return h;
+    }} catch (e) {{ return {height}; }}
+  }}
+  fig.layout.height = fitVH ? vhFit() : {height};
+  if (fitVH) {{
+    try {{
+      window.parent.addEventListener("resize", () => {{
+        const h = vhFit();
+        guard = true;
+        Plotly.relayout(gd, {{height: h}}).then(() => {{ guard = false; }});
+      }});
+    }} catch (e) {{}}
+  }}
   // y축은 전부 프로그램 제어(자동 맞춤) — 사용자 팬이 y를 끌지 않게 고정해
   // '드래그 중 y 싸움 → 종료 시 스냅' 흔들림의 근원을 제거 (TradingView 방식)
   for (const k of Object.keys(fig.layout)) {{

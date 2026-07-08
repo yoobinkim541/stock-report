@@ -18,9 +18,12 @@ from dashboard.pages import ticker as ticker_pg
 
 
 def render():
-    # 상단 패딩 슬림 — 차트가 화면 최대 점유
-    st.markdown("<style>.stMainBlockContainer{padding-top:1.2rem !important}</style>",
-                unsafe_allow_html=True)
+    # 진짜 전체화면 — 사이드바·하단 마퀴 숨김 + 상하좌우 여백 최소화
+    st.markdown("""<style>
+      [data-testid="stSidebar"], [data-testid="stSidebarCollapsedControl"] { display: none !important; }
+      .stMainBlockContainer { padding: 0.6rem 1rem 0 !important; max-width: 100% !important; }
+      .tn-tape { display: none !important; }
+    </style>""", unsafe_allow_html=True)
     t = st.session_state.get("ticker", "MSFT")
     hist = cached.ohlc(t, period="max")
     if hist is None or getattr(hist, "empty", True):
