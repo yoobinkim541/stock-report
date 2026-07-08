@@ -663,3 +663,19 @@ def test_price_chart_scattergl_for_large_series():
     assert isinstance(fig.data[0], go.Scattergl)
     small = charts.price_chart(big.iloc[:100], "T")
     assert isinstance(small.data[0], go.Scatter) and not isinstance(small.data[0], go.Scattergl)
+
+
+def test_ichimoku_webgl_and_cloud_nan_free():
+    """일목·MA·BB 대용량 WebGL 전환 + 구름 fill 쌍은 NaN 없는 유효 구간만 (gl 아티팩트 방지)."""
+    import numpy as np
+    import plotly.graph_objects as go
+    idx = pd.date_range("2020-01-01", periods=1600, freq="D")
+    base = pd.Series(range(100, 1700), index=idx, dtype=float)
+    hist = pd.DataFrame({"Open": base, "High": base * 1.01, "Low": base * 0.99,
+                         "Close": base, "Volume": [1e6] * 1600}, index=idx)
+    fig = charts.price_chart(hist, "T", ichimoku=True, bollinger=True, mas=(200,))
+    by = {tr.name: tr for tr in fig.data if tr.name}
+    for nm in ("선행A", "선행B(구름)", "MA200", "BB상단", "BB하단"):
+        assert isinstance(by[nm], go.Scattergl), nm
+    assert not np.isnan(np.asarray(by["선행B(구름)"].y, dtype=float)).any()   # 구름 NaN 0
+    assert not np.isnan(np.asarray(by["BB하단"].y, dtype=float)).any()

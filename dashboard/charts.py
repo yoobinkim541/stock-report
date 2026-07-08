@@ -688,29 +688,32 @@ def price_chart(hist, ticker: str = "", *, kind: str = "line", avg_cost=None,
         fig.add_trace(_SC(x=hist.index, y=close, name=ticker or "종가",
                           line=dict(color=_BLUE, width=2)))
 
-    # ── 일목균형표 (구름은 MA 아래 깔리게 먼저) ──
+    # ── 일목균형표 (구름은 MA 아래 깔리게 먼저) — 대용량은 WebGL(_SC) ──
     if ichimoku and has_ohlc and len(close) >= 52:
         h9 = (hist["High"].rolling(9).max() + hist["Low"].rolling(9).min()) / 2      # 전환선
         h26 = (hist["High"].rolling(26).max() + hist["Low"].rolling(26).min()) / 2   # 기준선
         spa = ((h9 + h26) / 2).shift(26)                                             # 선행스팬A
         spb = ((hist["High"].rolling(52).max()
                 + hist["Low"].rolling(52).min()) / 2).shift(26)                      # 선행스팬B
-        fig.add_trace(go.Scatter(x=hist.index, y=spa, name="선행A",
-                                 line=dict(color="#26a69a", width=0.8), opacity=0.6))
-        fig.add_trace(go.Scatter(x=hist.index, y=spb, name="선행B(구름)",
-                                 line=dict(color="#ef5350", width=0.8), opacity=0.6,
-                                 fill="tonexty", fillcolor="rgba(120,140,180,0.12)"))
-        fig.add_trace(go.Scatter(x=hist.index, y=h9, name="전환선(9)",
-                                 line=dict(color="#22d3ee", width=1)))
-        fig.add_trace(go.Scatter(x=hist.index, y=h26, name="기준선(26)",
-                                 line=dict(color="#f59e0b", width=1)))
-        fig.add_trace(go.Scatter(x=hist.index, y=close.shift(-26), name="후행스팬",
-                                 line=dict(color="#e879f9", width=0.8, dash="dot")))
+        # 구름 fill 은 양쪽 다 유효한 구간만 (선두 NaN 제거 — WebGL fill 아티팩트 방지)
+        cloud = spa.notna() & spb.notna()
+        ci = hist.index[cloud]
+        fig.add_trace(_SC(x=ci, y=spa[cloud], name="선행A",
+                          line=dict(color="#26a69a", width=0.8), opacity=0.6))
+        fig.add_trace(_SC(x=ci, y=spb[cloud], name="선행B(구름)",
+                          line=dict(color="#ef5350", width=0.8), opacity=0.6,
+                          fill="tonexty", fillcolor="rgba(120,140,180,0.12)"))
+        fig.add_trace(_SC(x=hist.index, y=h9, name="전환선(9)",
+                          line=dict(color="#22d3ee", width=1)))
+        fig.add_trace(_SC(x=hist.index, y=h26, name="기준선(26)",
+                          line=dict(color="#f59e0b", width=1)))
+        fig.add_trace(_SC(x=hist.index, y=close.shift(-26), name="후행스팬",
+                          line=dict(color="#e879f9", width=0.8, dash="dot")))
 
     # ── 이동평균 세트 ──
     for win in sorted(set(int(w) for w in (mas or []))):
         if len(close) >= win:
-            fig.add_trace(go.Scatter(
+            fig.add_trace(_SC(
                 x=hist.index, y=close.rolling(win).mean(), name=f"MA{win}",
                 line=dict(width=1.1, color=_MA_COLORS.get(win))))
 
@@ -718,11 +721,13 @@ def price_chart(hist, ticker: str = "", *, kind: str = "line", avg_cost=None,
     if bollinger and len(close) >= 20:
         ma20 = close.rolling(20).mean()
         sd = close.rolling(20).std()
-        fig.add_trace(go.Scatter(x=hist.index, y=ma20 + 2 * sd, name="BB상단",
-                                 line=dict(color="#8b93a7", width=0.8, dash="dot")))
-        fig.add_trace(go.Scatter(x=hist.index, y=ma20 - 2 * sd, name="BB하단",
-                                 line=dict(color="#8b93a7", width=0.8, dash="dot"),
-                                 fill="tonexty", fillcolor="rgba(139,147,167,0.08)"))
+        bb_ok = ma20.notna() & sd.notna()
+        bi = hist.index[bb_ok]
+        fig.add_trace(_SC(x=bi, y=(ma20 + 2 * sd)[bb_ok], name="BB상단",
+                          line=dict(color="#8b93a7", width=0.8, dash="dot")))
+        fig.add_trace(_SC(x=bi, y=(ma20 - 2 * sd)[bb_ok], name="BB하단",
+                          line=dict(color="#8b93a7", width=0.8, dash="dot"),
+                          fill="tonexty", fillcolor="rgba(139,147,167,0.08)"))
 
     if avg_cost and avg_cost > 0:
         fig.add_hline(y=avg_cost, line=dict(color=theme.MUTED, dash="dash", width=1.2),
