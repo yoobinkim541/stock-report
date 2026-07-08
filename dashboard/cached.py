@@ -251,3 +251,13 @@ def screener_last():
 @st.cache_data(ttl=900, show_spinner=False)
 def portfolio_flows():
     return views.portfolio_flows()
+
+
+@st.cache_data(ttl=900, show_spinner=False)
+def market_temp_history():
+    return views.market_temp_history()
+
+
+@st.cache_data(ttl=12 * 3600, show_spinner=False)
+def next_earnings(t):
+    return views.next_earnings(t)

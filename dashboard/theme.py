@@ -800,8 +800,9 @@ _TEMP_ZONES = [
 ]
 
 
-def market_temp_html(score, sub: str = "", phase_line: str = "") -> str:
-    """시장 온도계 카드 — 역발상 종합(−1 과열 ↔ +1 기회). 표시·참고용."""
+def market_temp_html(score, sub: str = "", phase_line: str = "",
+                     spark: list | None = None) -> str:
+    """시장 온도계 카드 — 역발상 종합(−1 과열 ↔ +1 기회) + 이력 스파크. 표시·참고용."""
     if score is None:
         return (f'<div style="padding:10px 12px;background:{PANEL};border:1px solid '
                 f'{BORDER};border-radius:10px;text-align:center;color:{MUTED}">'
@@ -809,8 +810,14 @@ def market_temp_html(score, sub: str = "", phase_line: str = "") -> str:
     inner = rating_gauge_html(score, sub=sub, title="🌡️ 시장 온도계 (역발상)",
                               end_labels=("과열", "기회"), zones=_TEMP_ZONES,
                               boxed=False)                      # 카드가 박스 — 이중 박스 방지
-    tail = (f'<div style="color:{MUTED};font-size:0.7rem;text-align:center;'
-            f'margin-top:4px">{phase_line}</div>' if phase_line else "")
+    sp = ""
+    if spark and len(spark) >= 2:
+        arrow = "↑ 데워지는 중" if spark[-1] >= spark[0] else "↓ 식는 중"
+        sp = (f'<div style="text-align:center;margin-top:2px">{sparkline_svg(spark)}'
+              f'<span style="color:{MUTED};font-size:0.68rem;margin-left:6px">'
+              f'{len(spark)}일 · {arrow}</span></div>')
+    tail = sp + (f'<div style="color:{MUTED};font-size:0.7rem;text-align:center;'
+                 f'margin-top:4px">{phase_line}</div>' if phase_line else "")
     return (f'<div style="padding:10px 12px;background:{PANEL};border:1px solid {BORDER};'
             f'border-radius:10px;min-height:340px;display:flex;flex-direction:column;">'
             f'<div style="flex:1;display:flex;flex-direction:column;'

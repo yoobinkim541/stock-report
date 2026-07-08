@@ -200,12 +200,21 @@ def _holdings_table(rows):
     if not rows:
         return
     st.markdown("##### 📋 보유 상세 — 행 클릭 = 종목 분석")
+    from datetime import date as _date
     table = []
     for r in rows:
         sh = r.get("shares") or 0
         cost = r.get("cost") or 0
+        _ed = None
+        try:
+            _ed = cached.next_earnings(r["ticker"])
+        except Exception:
+            pass
+        _dd = (f"D-{(_ed - _date.today()).days}"
+               if _ed and (_ed - _date.today()).days >= 0 else "—")
         table.append({
             "종목": f"{r.get('name') or ''} ({r['ticker']})".strip(),
+            "실적": _dd,
             "주수": sh,
             "평단": (cost / sh) if sh > 0 and cost > 0 else None,
             "현재가": (r.get("value") or 0) / sh if sh > 0 else None,
@@ -228,6 +237,8 @@ def _holdings_table(rows):
         height=min(460, 44 + 35 * len(df)),
         column_config={
             "종목": st.column_config.TextColumn(width="medium", pinned=True),
+            "실적": st.column_config.TextColumn(width="small",
+                                                help="다음 실적 발표까지 D-일 (yfinance)"),
             "주수": st.column_config.NumberColumn(format="%.4f"),
             "평단": st.column_config.NumberColumn(format="$%.2f"),
             "현재가": st.column_config.NumberColumn(format="$%.2f"),

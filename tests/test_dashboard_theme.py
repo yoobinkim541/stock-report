@@ -279,3 +279,12 @@ def test_market_temp_and_valuation_strip():
     assert "32.3" in strip and "98%ile" in strip and "20.7" in strip
     assert "+43.3%" in strip and "0.68" in strip
     assert theme.valuation_strip_html({}) == ""
+
+
+def test_market_temp_spark():
+    """온도계 이력 스파크 — 방향 라벨(데워지는/식는 중)·2점 미만 생략."""
+    h = theme.market_temp_html(0.2, spark=[-0.1, 0.0, 0.2])
+    assert "svg" in h and "데워지는 중" in h and "3일" in h
+    h2 = theme.market_temp_html(0.2, spark=[0.5, 0.1])
+    assert "식는 중" in h2
+    assert "일 ·" not in theme.market_temp_html(0.2, spark=None)

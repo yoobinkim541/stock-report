@@ -1225,3 +1225,26 @@ def portfolio_flows() -> dict:
         return out
     except Exception:
         return {}
+
+
+def market_temp_history(limit: int = 30) -> list:
+    """시장 온도계 일별 이력 (store — 크론 적재). graceful []."""
+    try:
+        import store
+        rows = store.all("market_temp_history") or []
+        return rows[-limit:]
+    except Exception:
+        return []
+
+
+def next_earnings(ticker: str):
+    """다음 실적 발표일 (yfinance calendar) — date | None. graceful."""
+    try:
+        import yfinance as yf
+        cal = yf.Ticker(ticker).calendar or {}
+        ed = cal.get("Earnings Date")
+        if isinstance(ed, (list, tuple)) and ed:
+            return ed[0]
+        return ed or None
+    except Exception:
+        return None

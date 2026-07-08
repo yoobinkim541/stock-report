@@ -129,8 +129,11 @@ def _market_bar():
         phase_line = (f"실행 규칙 = Phase: {plan.get('emoji', '')} "
                       f"{plan.get('label', '')} · DCA {plan.get('mult', 1):g}×"
                       if plan.get("label") else "실행 규칙은 Phase(DCA 배율)가 담당")
+        _th = [r.get("score") for r in cached.market_temp_history()
+               if r.get("score") is not None]
         theme.render(theme.market_temp_html((temp or {}).get("score"),
-                                            (temp or {}).get("sub", ""), phase_line))
+                                            (temp or {}).get("sub", ""), phase_line,
+                                            spark=_th if len(_th) >= 2 else None))
 
     # 🧮 S&P500 밸류 스트립 — PER(multpl 보고이익+역사 백분위)·fPER·성장·PEG
     if v:

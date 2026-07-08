@@ -47,6 +47,10 @@ cached.fx_timing = lambda: {"ok": True, "rate": 1509.8, "pct_display": 96.1,
 cached.etf_peers = lambda t: {}
 cached.screener_last = lambda: None
 cached.trendlines_for = lambda *a, **k: []
+cached.market_temp_history = lambda: [{"date": "2026-07-07", "score": 0.1},
+                                      {"date": "2026-07-08", "score": 0.2}]
+cached.next_earnings = lambda t: None
+cached.portfolio_flows = lambda: {}
 cached.social_sentiment = lambda: {"summary": {"title": "미국 레딧 게시물 분석",
     "published_at": "2026-07-05T10:00:00+09:00", "url": "https://t.me/insidertracking/1",
     "top_tickers": ["MU", "SNDK", "NVDA"],

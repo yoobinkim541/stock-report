@@ -39,7 +39,39 @@ def _get_close(ticker: str):
     return float(hist["Close"].iloc[-1]), last_ts.date()
 
 
+def _record_market_temp() -> None:
+    """🌡️ 시장 온도계 일별 스냅샷 — 홈 스파크라인 이력 (graceful·모으기와 독립)."""
+    try:
+        from datetime import date
+
+        import store
+        from dashboard.data import market_temperature
+        from providers.market_data import fetch_fear_greed, fetch_qqq_data
+        from providers.market_valuation import sp500_valuation
+        import yfinance as yf
+
+        today = date.today().isoformat()
+        if any(r.get("date") == today for r in store.all("market_temp_history")):
+            return                                     # 멱등 — 하루 1회
+        fg = (fetch_fear_greed() or {}).get("score")
+        v = sp500_valuation() or {}
+        w = yf.Ticker("^GSPC").history(period="2y", interval="1wk")["Close"]
+        from dashboard.data import rsi as _rsi
+        rsi_w = _rsi(w) if len(w) > 20 else None
+        dd = (fetch_qqq_data() or {}).get("drawdown_pct")
+        t = market_temperature(fear_greed=fg, rsi_w=rsi_w,
+                               per_pctile_20y=v.get("per_pctile_20y"),
+                               peg=v.get("peg"), drawdown_pct=dd)
+        if t:
+            store.append("market_temp_history",
+                         {"date": today, "score": round(t["score"], 3), "sub": t["sub"]})
+            print(f"온도계 스냅샷 {today}: {t['score']:+.2f}")
+    except Exception as e:
+        print("온도계 스냅샷 실패:", e)
+
+
 def main() -> None:
+    _record_market_temp()
     plans = [p for p in accumulation.load_plans() if p.get("enabled", True)]
     if not plans:
         print("자동 모으기 플랜 없음 — no-op")

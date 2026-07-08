@@ -662,8 +662,18 @@ def _analysis_snapshot(ticker):
     summary = data.company_analysis_summary(v.get("metrics") or {}, (f.get("trends") or {}), iv)
 
     st.subheader("기업 판단 요약")
+    checks = list(summary["checks"])
+    try:                                            # 다음 실적일 D-day (12h 캐시)
+        ed = cached.next_earnings(ticker)
+        if ed:
+            from datetime import date as _date
+            dday = (ed - _date.today()).days
+            if dday >= 0:
+                checks.insert(0, f"다음 실적 {ed.strftime('%m/%d')} (D-{dday})")
+    except Exception:
+        pass
     theme.render(theme.analysis_card_html(summary["verdict"], summary["positives"],
-                                          summary["risks"], summary["checks"]))
+                                          summary["risks"], checks))
 
 
 def _valuation(ticker, price=None):
