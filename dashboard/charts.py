@@ -537,7 +537,9 @@ def price_chart(hist, ticker: str = "", *, kind: str = "line", avg_cost=None,
                 trades=None, view_days=None, mas=(60, 120, 200),
                 show_rsi: bool = False, bollinger: bool = False, ichimoku: bool = False,
                 trend_lines=None, show_volume: bool = False, supertrend: bool = False,
-                envelope: bool = False, fractals: bool = False, vol_profile: bool = False):
+                envelope: bool = False, fractals: bool = False, vol_profile: bool = False,
+                emas=(), psar: bool = False, donchian_on: bool = False,
+                vwap: bool = False, avwap: bool = False):
     """가격 차트 + 기술적 분석 도구 (TradingView 풍 멀티패널).
 
     패널: 가격(+MA·BB·일목·추세선·평단·기간 최고/최저·현재가 라벨) / 거래량(방향색 바+MA20)
@@ -618,6 +620,8 @@ def price_chart(hist, ticker: str = "", *, kind: str = "line", avg_cost=None,
     _add_trend_lines(fig, trend_lines or [])
     _add_top_indicators(fig, hist, supertrend=supertrend, envelope=envelope,
                         fractals=fractals, vol_profile=vol_profile, panes=panes)
+    _add_top_indicators2(fig, hist, emas=emas, psar=psar, donchian_on=donchian_on,
+                         vwap=vwap, avwap=avwap, view_days=view_days, panes=panes)
     _add_trade_markers(fig, hist, trades or [])
 
     # ── 기간 최고/최저 콜아웃 + 현재가 점선·우측 라벨 (TradingView 풍) ──
@@ -833,3 +837,125 @@ def _add_top_indicators(fig, hist, *, supertrend=False, envelope=False,
                 xaxis="x9", hovertemplate="%{y:,.0f} 매물 %{x:,.0f}<extra>매물대</extra>"))
             fig.update_layout(xaxis9=dict(overlaying="x", side="top", visible=False,
                                           range=[0, vmax * 4], fixedrange=True))
+
+
+# ── 신규 상단 지표 2차 — EMA·파라볼릭 SAR·프라이스 채널(돈치안)·VWAP·앵커드 VWAP ──
+
+def parabolic_sar_series(hist, af: float = 0.02, af_step: float = 0.02, af_max: float = 0.2):
+    """파라볼릭 SAR — (sar, trend[±1]). 표준 반복식 (Wilder)."""
+    import numpy as np
+    h, l = hist["High"].values, hist["Low"].values
+    n = len(h)
+    sar = np.full(n, np.nan)
+    trend = np.ones(n, dtype=int)
+    if n < 3:
+        return sar, trend
+    up = h[1] > h[0]
+    trend[1] = 1 if up else -1
+    sar[1] = l[0] if up else h[0]
+    ep = h[1] if up else l[1]
+    a = af
+    for i in range(2, n):
+        sar[i] = sar[i - 1] + a * (ep - sar[i - 1])
+        if trend[i - 1] == 1:
+            sar[i] = min(sar[i], l[i - 1], l[i - 2])
+            if l[i] < sar[i]:                       # 추세 전환 ↓
+                trend[i] = -1
+                sar[i] = ep
+                ep, a = l[i], af
+            else:
+                trend[i] = 1
+                if h[i] > ep:
+                    ep, a = h[i], min(a + af_step, af_max)
+        else:
+            sar[i] = max(sar[i], h[i - 1], h[i - 2])
+            if h[i] > sar[i]:                       # 추세 전환 ↑
+                trend[i] = 1
+                sar[i] = ep
+                ep, a = h[i], af
+            else:
+                trend[i] = -1
+                if l[i] < ep:
+                    ep, a = l[i], min(a + af_step, af_max)
+    return sar, trend
+
+
+def donchian(hist, n: int = 20):
+    """프라이스 채널(돈치안) — (upper, lower, mid)."""
+    up = hist["High"].rolling(n).max()
+    lo = hist["Low"].rolling(n).min()
+    return up, lo, (up + lo) / 2
+
+
+def session_vwap(hist):
+    """세션(일자별 리셋) VWAP — 인트라데이 전용. Volume 없으면 None."""
+    if "Volume" not in hist.columns:
+        return None
+    tp = (hist["High"] + hist["Low"] + hist["Close"]) / 3
+    v = hist["Volume"].fillna(0)
+    day = hist.index.date
+    cum_tv = (tp * v).groupby(day).cumsum()
+    cum_v = v.groupby(day).cumsum().replace(0, float("nan"))
+    return cum_tv / cum_v
+
+
+def anchored_vwap(hist, anchor=None):
+    """앵커드 VWAP — anchor(Timestamp) 이후 누적. Volume 없으면 None."""
+    if "Volume" not in hist.columns:
+        return None
+    df = hist if anchor is None else hist[hist.index >= anchor]
+    if df.empty:
+        return None
+    tp = (df["High"] + df["Low"] + df["Close"]) / 3
+    v = df["Volume"].fillna(0)
+    cum_v = v.cumsum().replace(0, float("nan"))
+    return (tp * v).cumsum() / cum_v
+
+
+def _add_top_indicators2(fig, hist, *, emas=(), psar=False, donchian_on=False,
+                         vwap=False, avwap=False, view_days=None, panes=1):
+    """상단 지표 2차 오버레이 — price_chart 내부 전용."""
+    go = _go()
+    kw = dict(row=1, col=1) if panes > 1 else {}
+    close = hist["Close"]
+    _EMA_COLORS = {5: "#f0abfc", 10: "#67e8f9", 20: "#fbbf24", 60: "#a78bfa",
+                   120: "#6ee7b7", 200: "#fb7185"}
+    for win in sorted(set(int(w) for w in (emas or []))):
+        if len(close) >= win:
+            fig.add_trace(go.Scatter(x=hist.index, y=close.ewm(span=win, adjust=False).mean(),
+                                     name=f"EMA{win}",
+                                     line=dict(width=1.1, dash="dash",
+                                               color=_EMA_COLORS.get(win))), **kw)
+    if psar and len(hist) >= 3:
+        sar, trend = parabolic_sar_series(hist)
+        up = [s if t == 1 else None for s, t in zip(sar, trend)]
+        dn = [s if t == -1 else None for s, t in zip(sar, trend)]
+        fig.add_trace(go.Scatter(x=hist.index, y=up, name="파라볼릭 SAR", mode="markers",
+                                 marker=dict(size=3, color=_GREEN)), **kw)
+        fig.add_trace(go.Scatter(x=hist.index, y=dn, showlegend=False, legendgroup="파라볼릭 SAR",
+                                 mode="markers", marker=dict(size=3, color=_RED)), **kw)
+    if donchian_on and len(hist) >= 20:
+        up, lo, mid = donchian(hist)
+        fig.add_trace(go.Scatter(x=hist.index, y=up, name="프라이스 채널(20)",
+                                 line=dict(color="#8b93a7", width=0.9)), **kw)
+        fig.add_trace(go.Scatter(x=hist.index, y=lo, showlegend=False,
+                                 legendgroup="프라이스 채널(20)",
+                                 line=dict(color="#8b93a7", width=0.9),
+                                 fill="tonexty", fillcolor="rgba(139,147,167,0.06)"), **kw)
+        fig.add_trace(go.Scatter(x=hist.index, y=mid, showlegend=False,
+                                 legendgroup="프라이스 채널(20)",
+                                 line=dict(color="#8b93a7", width=0.7, dash="dot")), **kw)
+    if vwap:
+        sv = session_vwap(hist)
+        if sv is not None:
+            fig.add_trace(go.Scatter(x=hist.index, y=sv, name="VWAP(세션)",
+                                     line=dict(color="#f59e0b", width=1.3)), **kw)
+    if avwap:
+        anchor = None
+        if view_days:
+            import pandas as pd
+            anchor = hist.index[-1] - pd.Timedelta(days=view_days)
+        av = anchored_vwap(hist, anchor)
+        if av is not None:
+            fig.add_trace(go.Scatter(x=av.index, y=av, name="앵커드 VWAP",
+                                     line=dict(color="#e879f9", width=1.3, dash="dashdot")), **kw)

@@ -87,8 +87,9 @@ _TF_SPAN = {"5m": "최근 60일", "1h": "최근 2년"}   # yfinance 인트라데
 _MA_OPTS = [5, 10, 20, 60, 120, 200]
 _MA_DEFAULT = {"1d": [60, 120, 200], "1wk": [60, 120, 200],   # 요청 기본값
                "1mo": [5, 10, 20, 60, 120, 200], "5m": [20, 60], "1h": [20, 60]}
-_TOP_INDS = ["이동평균선", "볼린저 밴드", "일목균형표", "슈퍼트렌드", "엔벨로프",
-             "매물대", "프랙탈", "자동 추세선"]
+_TOP_INDS = ["이동평균선", "지수이평(EMA)", "볼린저 밴드", "일목균형표", "슈퍼트렌드",
+             "엔벨로프", "파라볼릭 SAR", "프라이스 채널", "매물대", "프랙탈",
+             "VWAP(세션)", "앵커드 VWAP", "자동 추세선"]
 
 
 def _price_chart(ticker, hist, avg_cost, trades, view_days=None):
@@ -108,6 +109,13 @@ def _price_chart(ticker, hist, avg_cost, trades, view_days=None):
         if "이동평균선" in top:
             mas = st.multiselect("이동평균 기간", _MA_OPTS,
                                  default=_MA_DEFAULT.get(tf, [60, 120, 200]), key=f"_ma_{tf}")
+        emas = []
+        if "지수이평(EMA)" in top:
+            emas = st.multiselect("EMA 기간", _MA_OPTS, default=[20, 60], key=f"_ema_{tf}")
+        if "VWAP(세션)" in top and tf not in ("5m", "1h"):
+            st.caption("ℹ️ VWAP(세션)은 인트라데이(5분·1시간) 전용 — 일봉+ 는 앵커드 VWAP 사용")
+        if "앵커드 VWAP" in top:
+            st.caption("ℹ️ 앵커드 VWAP 앵커 = 기간(라디오) 시작 · 팬 시 고정")
         want_lines = want_short = want_long = False
         if "자동 추세선" in top:
             want_lines = True
@@ -142,7 +150,9 @@ def _price_chart(ticker, hist, avg_cost, trades, view_days=None):
         show_rsi=show_rsi, bollinger="볼린저 밴드" in top,
         ichimoku="일목균형표" in top, trend_lines=tls, show_volume=show_vol,
         supertrend="슈퍼트렌드" in top, envelope="엔벨로프" in top,
-        fractals="프랙탈" in top, vol_profile="매물대" in top)
+        fractals="프랙탈" in top, vol_profile="매물대" in top,
+        emas=emas, psar="파라볼릭 SAR" in top, donchian_on="프라이스 채널" in top,
+        vwap=("VWAP(세션)" in top and tf in ("5m", "1h")), avwap="앵커드 VWAP" in top)
     event = None
     if legacy:
         try:

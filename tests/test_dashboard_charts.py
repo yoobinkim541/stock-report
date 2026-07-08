@@ -506,3 +506,36 @@ def test_price_chart_new_top_indicators():
     # 전부 off → 신규 지표 트레이스 없음
     fig2 = charts.price_chart(hist, "T", mas=[])
     assert not ({"슈퍼트렌드", "매물대", "프랙탈"} & set(tr.name for tr in fig2.data))
+
+
+def test_price_chart_second_wave_indicators():
+    """EMA·파라볼릭 SAR·프라이스 채널·세션 VWAP·앵커드 VWAP — 수식·트레이스 계약."""
+    import numpy as np
+    import pandas as pd
+    idx = pd.date_range("2026-07-06 09:00", periods=120, freq="5min", tz="Asia/Seoul")
+    close = 100 + np.cumsum(np.random.default_rng(3).normal(0, 0.4, 120))
+    hist = pd.DataFrame({"Open": close, "High": close + 0.6, "Low": close - 0.6,
+                         "Close": close, "Volume": np.full(120, 50.0)}, index=idx)
+    fig = charts.price_chart(hist, "T", mas=[20], emas=[20], psar=True,
+                             donchian_on=True, vwap=True, avwap=True, view_days=1)
+    names = [tr.name for tr in fig.data]
+    for n in ("EMA20", "파라볼릭 SAR", "프라이스 채널(20)", "VWAP(세션)", "앵커드 VWAP"):
+        assert n in names, f"{n} 없음"
+    # EMA ≠ SMA (다른 수식)
+    ema = next(tr for tr in fig.data if tr.name == "EMA20")
+    sma = next(tr for tr in fig.data if tr.name == "MA20")
+    assert ema.y[-1] != sma.y[-1]
+    # SAR 추세 전환 존재 + 돈치안 상단≥하단
+    sar, trend = charts.parabolic_sar_series(hist)
+    assert (np.diff(trend[2:]) != 0).any()
+    up, lo, _ = charts.donchian(hist)
+    assert (up.dropna() >= lo.dropna()).all()
+    # 세션 VWAP 일자 리셋 — 두 세션 경계에서 누적 초기화
+    two_day = pd.date_range("2026-07-06 09:00", periods=80, freq="5min", tz="Asia/Seoul")
+    two_day = two_day[:40].append(pd.date_range("2026-07-07 09:00", periods=40,
+                                                freq="5min", tz="Asia/Seoul"))
+    h2 = hist.iloc[:80].set_axis(two_day)
+    sv = charts.session_vwap(h2)
+    d2_first = sv.iloc[40]
+    tp_first = float((h2["High"].iloc[40] + h2["Low"].iloc[40] + h2["Close"].iloc[40]) / 3)
+    assert d2_first == pytest.approx(tp_first)          # 새 세션 첫 봉 = 그 봉 tp (리셋)
