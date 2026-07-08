@@ -740,3 +740,38 @@ def rank_move(rank, prev_rank) -> str:
         return "NEW"
     d = int(p) - int(r)
     return f"▲{d}" if d > 0 else (f"▼{-d}" if d < 0 else "〓")
+
+
+def entry_levels(price, supports: list, resistances: list, fairs: list) -> dict:
+    """진입 레벨 가이드 조립 (순수) — 기술적 지지/저항 + 밸류 기준가 합성.
+
+    supports/resistances/fairs: [(라벨, 가격)]. 반환:
+    {entries: [(라벨, 가격, 현재가比%)] 현재가 아래 근접순 최대 3 — 분할 진입 후보 레벨,
+     resists: 위쪽 최대 2, fairs: 유효 밸류 기준가+갭, fair_gap_pct: 평균 기준가 대비}
+    **레벨 후보 서술이지 예측/매매신호 아님** — 캡션 정직 병기 전제.
+    """
+    p = _try_float(price)
+    if not p or p <= 0:
+        return {}
+
+    def _pct(v):
+        return (v / p - 1) * 100
+
+    ent = sorted(((lab, float(v)) for lab, v in supports
+                  if _try_float(v) and 0 < float(v) < p),
+                 key=lambda x: -x[1])[:3]
+    res = sorted(((lab, float(v)) for lab, v in resistances
+                  if _try_float(v) and float(v) > p),
+                 key=lambda x: x[1])[:2]
+    fv = [(lab, float(v)) for lab, v in fairs if _try_float(v) and float(v) > 0]
+    if not ent and not fv:
+        return {}
+    gap = None
+    if fv:
+        avg = sum(v for _, v in fv) / len(fv)
+        gap = _pct(avg)
+    return {"price": p,
+            "entries": [(lab, v, _pct(v)) for lab, v in ent],
+            "resists": [(lab, v, _pct(v)) for lab, v in res],
+            "fairs": [(lab, v, _pct(v)) for lab, v in fv],
+            "fair_gap_pct": gap}

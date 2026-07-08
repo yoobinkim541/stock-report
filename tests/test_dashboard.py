@@ -851,3 +851,19 @@ def test_rank_badge_and_move():
     assert data.rank_move(6, 4) == "▼2"
     assert data.rank_move(3, 3) == "〓"
     assert data.rank_move(1, None) == "NEW"
+
+
+def test_entry_levels():
+    """진입 레벨 조립 — 아래 지지 근접순 3·위 저항 2·밸류 갭 (순수)."""
+    lv = data.entry_levels(
+        100.0,
+        supports=[("MA60", 96.0), ("MA200", 88.0), ("볼린저 하단", 93.0),
+                  ("52주 저점", 70.0), ("MA120", 101.0)],       # 101 은 위 → 제외
+        resistances=[("52주 고점", 120.0), ("추세 저항선", 108.0)],
+        fairs=[("멀티플 기준가", 117.0), ("목표가 중앙값", 123.0)])
+    assert [x[0] for x in lv["entries"]] == ["MA60", "볼린저 하단", "MA200"]
+    assert lv["entries"][0][2] == pytest.approx(-4.0)
+    assert [x[0] for x in lv["resists"]] == ["추세 저항선", "52주 고점"]
+    assert lv["fair_gap_pct"] == pytest.approx(20.0)            # (117+123)/2 = 120
+    assert data.entry_levels(0, [], [], []) == {}
+    assert data.entry_levels(100.0, [], [], []) == {}           # 재료 전무 — 생략

@@ -679,3 +679,14 @@ def test_ichimoku_webgl_and_cloud_nan_free():
         assert isinstance(by[nm], go.Scattergl), nm
     assert not np.isnan(np.asarray(by["선행B(구름)"].y, dtype=float)).any()   # 구름 NaN 0
     assert not np.isnan(np.asarray(by["BB하단"].y, dtype=float)).any()
+
+
+def test_price_levels_chart():
+    """가격 레벨 사다리 — kind 별 마커·현재가 vline (순수)."""
+    fig = charts.price_levels(100.0, [("기술 지지", 96.0, "support"),
+                                      ("기술 저항", 108.0, "resist"),
+                                      ("밸류 기준", 117.0, "fair")])
+    assert len(fig.data) == 3
+    syms = {tr.marker.symbol for tr in fig.data}
+    assert {"triangle-up", "triangle-down", "diamond"} <= syms
+    assert any("현재 100" in (a.text or "") for a in fig.layout.annotations)

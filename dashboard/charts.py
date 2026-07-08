@@ -1118,3 +1118,35 @@ def growth_compare(dates, port_pct, qqq_pct):
                                   font=dict(size=10), bgcolor="rgba(0,0,0,0)"))
     fig.update_yaxes(ticksuffix="%", tickformat=".1f")
     return _t(fig)
+
+
+_LEVEL_STYLE = {"support": (_GREEN, "triangle-up"), "resist": (_RED, "triangle-down"),
+                "fair": (_BLUE, "diamond")}
+
+
+def price_levels(price: float, levels: list):
+    """가격 레벨 사다리 — levels=[(행라벨, 가격, kind)] · 현재가 수직선 (순수).
+
+    kind: support(녹 ▲)·resist(적 ▼)·fair(청 ◆). 진입 레벨 가이드 시각화.
+    """
+    go = _go()
+    fig = go.Figure()
+    seen_kind = set()
+    for row_label, v, kind in levels:
+        col, sym = _LEVEL_STYLE.get(kind, (_GRID, "circle"))
+        fig.add_trace(go.Scatter(
+            x=[v], y=[row_label], mode="markers+text",
+            text=[f"{v:,.0f}"], textposition="middle right",
+            textfont=dict(size=10, color=col),
+            marker=dict(color=col, size=11, symbol=sym),
+            showlegend=False, hovertemplate=f"{row_label}: %{{x:,.2f}}<extra></extra>"))
+        seen_kind.add(kind)
+    if price:
+        fig.add_vline(x=price, line=dict(color=theme.TEXT, dash="dash", width=1.2),
+                      annotation_text=f"현재 {price:,.0f}", annotation_position="top")
+    fig.update_layout(margin=dict(t=26, b=10, l=10, r=30),
+                      height=max(180, 34 * len({r for r, _, _ in levels}) + 60),
+                      xaxis_title=None)
+    fig.update_yaxes(automargin=True)
+    fig.update_xaxes(automargin=True)
+    return _t(fig)

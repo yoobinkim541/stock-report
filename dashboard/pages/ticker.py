@@ -40,6 +40,10 @@ def render():
     # 실시간 호가 — 접이식(기본 접힘)·8초 자동갱신 (차트 우선 레이아웃)
     _orderbook_section(ticker, hist, prev)
 
+    # 🎯 진입 레벨 가이드 — 기술 지지/저항 × 밸류 기준가 (표시·참고용)
+    if yf_price is not None:
+        _entry_levels_section(ticker, hist, cur or yf_price)
+
     # ETF 는 개별주 섹션(PER·재무·기관·실적) 대신 ETF 전용 뷰(프로필·Top10·보수·괴리율·배당)
     etf = cached.etf(ticker)
     if (etf or {}).get("is_etf"):
@@ -957,6 +961,83 @@ def _money_krw(x) -> str:
         return f"₩{float(x):,.0f}"
     except (TypeError, ValueError):
         return "—"
+
+
+@st.fragment
+def _entry_levels_section(ticker, hist, price):
+    """🎯 진입 레벨 가이드 — 추세 지지/저항·MA·볼린저·52주(기술) × 기준가·RIM·목표가(밸류).
+
+    레벨 **후보 서술** — 예측·매매신호 아님 (실행 규칙은 Phase DCA·수동).
+    """
+    if hist is None or getattr(hist, "empty", True):
+        return
+    close = hist["Close"].dropna()
+    if len(close) < 60 or not price:
+        return
+    supports, resists = [], []
+    for win in (60, 120, 200):                      # 주요 이동평균 (아래=지지·위=저항)
+        if len(close) >= win:
+            v = float(close.rolling(win).mean().iloc[-1])
+            (supports if v < price else resists).append((f"MA{win}", v))
+    if len(close) >= 20:                            # 볼린저 ±2σ
+        ma20 = close.rolling(20).mean().iloc[-1]
+        sd = close.rolling(20).std().iloc[-1]
+        supports.append(("볼린저 하단", float(ma20 - 2 * sd)))
+        resists.append(("볼린저 상단", float(ma20 + 2 * sd)))
+    yr = close[close.index >= close.index[-1] - pd.Timedelta(days=365)]
+    if len(yr) > 20:
+        supports.append(("52주 저점", float(yr.min())))
+        resists.append(("52주 고점", float(yr.max())))
+    try:                                            # 자동 감지 추세 지지/저항선 (3터치)
+        for tl in cached.trendlines_for(ticker, "1d", True, ()) or []:
+            if tl.get("kind") == "support":
+                supports.append(("추세 지지선", float(tl.get("y1"))))
+            elif tl.get("kind") == "resistance":
+                resists.append(("추세 저항선", float(tl.get("y1"))))
+    except Exception:
+        pass
+    fairs = []
+    v = cached.valuation(ticker) or {}
+    m = v.get("metrics") or {}
+    fv = data.fair_value_multiple(price, m.get("per"), m.get("forward_pe"),
+                                  m.get("eps_fwd"))
+    if fv and fv.get("fair"):
+        fairs.append(("멀티플 기준가", fv["fair"]))
+    iv = cached.intrinsic(ticker) or {}
+    if (iv.get("rim") or {}).get("mid"):
+        fairs.append(("RIM 적정가", iv["rim"]["mid"]))
+    tgt = (v.get("consensus") or {}).get("target_median")
+    if tgt:
+        fairs.append(("목표가 중앙값", tgt))
+
+    lv = data.entry_levels(price, supports, resists, fairs)
+    if not lv:
+        return
+    st.markdown("##### 🎯 진입 레벨 가이드 — 밸류 × 기술")
+    mm = st.columns(4)
+    ents = lv.get("entries") or []
+    for i in range(3):
+        if i < len(ents):
+            lab, val, pct = ents[i]
+            mm[i].metric(f"{i + 1}차 지지 후보 — {lab}", f"{val:,.2f}",
+                         delta=f"{pct:+.1f}%", delta_color="off",
+                         help="현재가 아래 근접 순 기술적 레벨 — 분할 접근 참고용")
+        else:
+            mm[i].metric(f"{i + 1}차 지지 후보", "—")
+    gap = lv.get("fair_gap_pct")
+    mm[3].metric("밸류 기준가 평균 대비", f"{gap:+.1f}%" if gap is not None else "—",
+                 help="멀티플 기준가·RIM·목표가 평균이 현재가보다 위(+)면 밸류 여유")
+    levels = ([("기술 지지", val, "support") for _, val, _ in ents]
+              + [("기술 저항", val, "resist") for _, val, _ in (lv.get("resists") or [])]
+              + [("밸류 기준", val, "fair") for _, val, _ in (lv.get("fairs") or [])])
+    if levels:
+        st.plotly_chart(charts.price_levels(lv["price"], levels),
+                        width="stretch", config=_NOBAR)
+    detail = " · ".join(f"{lab} {val:,.0f}({pct:+.1f}%)"
+                        for lab, val, pct in (lv.get("fairs") or []))
+    st.caption(("밸류 기준: " + detail + " · " if detail else "")
+               + "레벨은 **후보 서술** — 예측·매매신호 아님 · 지지 이탈 가능 · "
+                 "실행 규칙은 Phase DCA(자동 아님·수동)")
 
 
 def _trade_history(ticker):
