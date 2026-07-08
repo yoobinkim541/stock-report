@@ -217,9 +217,11 @@ def backtest_summary() -> dict:
         data = build_real_sweetspot_data("QQQ", days=756)
         r = optimize_sweet_spot(data)
         verdict, reasons = _ml_adoption_verdict(r.ml_result, r.qqq_result)
-        return {"ml": _m(r.ml_result), "overlay": _m(r.overlay_result), "qqq": _m(r.qqq_result),
-                "verdict": verdict, "reasons": list(reasons or []),
-                "equity": getattr(r, "equity", None), "wf": getattr(r, "wf_summary", {})}
+        out = {"ml": _m(r.ml_result), "overlay": _m(r.overlay_result), "qqq": _m(r.qqq_result),
+               "verdict": verdict, "reasons": list(reasons or []),
+               "equity": getattr(r, "equity", None), "wf": getattr(r, "wf_summary", {})}
+        _backtest_persist(out)                       # 마지막 실행 디스크 영속 (재방문 즉시 표시)
+        return out
     except Exception as e:
         return {"error": str(e)}
 
@@ -1199,6 +1201,62 @@ def screener_last() -> dict | None:
         import json
         p = _screener_last_path()
         return json.loads(p.read_text()) if p.exists() else None
+    except Exception:
+        return None
+
+
+def _backtest_last_path():
+    from pathlib import Path
+    return Path.home() / "reports" / "ml-cache" / "backtest_last.json"
+
+
+def _backtest_persist(out: dict) -> None:
+    """백테스트 결과 JSON 영속 (equity 는 컬럼별 값 배열 — graceful·실패 무시)."""
+    try:
+        import json
+        from datetime import datetime
+
+        import pandas as pd
+        eq, eq_j = out.get("equity"), None
+        if eq is not None:
+            try:
+                df = eq if isinstance(eq, pd.DataFrame) else pd.DataFrame({"equity": pd.Series(eq)})
+                eq_j = {str(c): [None if pd.isna(x) else float(x) for x in df[c].tolist()]
+                        for c in df.columns}
+            except Exception:
+                eq_j = None
+
+        def _mm(d):
+            try:
+                return {k: (None if v is None else float(v)) for k, v in (d or {}).items()}
+            except Exception:
+                return {}
+
+        payload = {"ml": _mm(out.get("ml")), "overlay": _mm(out.get("overlay")),
+                   "qqq": _mm(out.get("qqq")), "verdict": str(out.get("verdict") or ""),
+                   "reasons": [str(x) for x in out.get("reasons") or []], "equity": eq_j,
+                   "asof": datetime.now().strftime("%Y-%m-%d %H:%M")}
+        p = _backtest_last_path()
+        p.parent.mkdir(parents=True, exist_ok=True)
+        tmp = p.with_suffix(".tmp")
+        tmp.write_text(json.dumps(payload, ensure_ascii=False))
+        tmp.replace(p)
+    except Exception:
+        pass
+
+
+def backtest_last() -> dict | None:
+    """마지막 백테스트 결과 (디스크 영속 — 나이 무관 표시·asof 병기). 없으면 None."""
+    try:
+        import json
+        p = _backtest_last_path()
+        if not p.exists():
+            return None
+        d = json.loads(p.read_text())
+        if d.get("equity"):
+            import pandas as pd
+            d["equity"] = pd.DataFrame(d["equity"])
+        return d
     except Exception:
         return None
 

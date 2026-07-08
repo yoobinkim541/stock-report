@@ -113,6 +113,10 @@ cached.screener = lambda n: {"rows": [{"rank": 1, "ticker": "NVDA", "name": "NVI
     "meta": {"ic": 0.05, "icir": 0.8, "top_decile": 0.02, "train_end": "2026-06-01",
              "importance": {"mom_126d": 100, "rsi_14": 50}}}
 cached.backtest = lambda: {"error":"skip"}
+cached.backtest_last = lambda: {"ml": {"cagr": 0.21, "sharpe": 1.1, "mdd": -0.18},
+    "qqq": {"cagr": 0.18, "sharpe": 0.9, "mdd": -0.22}, "overlay": {},
+    "verdict": "비채택", "reasons": ["OOS 개선 미달"], "equity": None,
+    "asof": "2026-07-08 12:00"}
 cached.sp500_heatmap = lambda: [
     {"ticker":"AAPL","name":"Apple","sector_kr":"기술","market_cap":4e12,"pct":1.96},
     {"ticker":"MSFT","name":"Microsoft","sector_kr":"기술","market_cap":2.8e12,"pct":3.17},

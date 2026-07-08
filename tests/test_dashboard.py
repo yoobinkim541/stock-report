@@ -909,3 +909,19 @@ def test_load_kr_holdings(tmp_path):
     empty = tmp_path / "e.json"
     empty.write_text("{}")
     assert data.load_kr_holdings(str(empty)) == {}
+
+
+def test_backtest_persist_roundtrip(tmp_path, monkeypatch):
+    """백테스트 결과 디스크 영속 — equity DataFrame 직렬화 왕복."""
+    import pandas as pd
+
+    from dashboard import views
+    monkeypatch.setattr(views, "_backtest_last_path", lambda: tmp_path / "bt.json")
+    assert views.backtest_last() is None              # 파일 없음 → None
+    eq = pd.DataFrame({"ml": [1.0, 1.1], "qqq": [1.0, 0.9]})
+    views._backtest_persist({"ml": {"cagr": 0.2, "sharpe": 1.1}, "qqq": {"cagr": 0.1},
+                             "overlay": {}, "verdict": "채택", "reasons": ["r1"],
+                             "equity": eq, "wf": {"ignored": object()}})
+    d = views.backtest_last()
+    assert d["verdict"] == "채택" and d["asof"] and d["ml"]["cagr"] == 0.2
+    assert list(d["equity"].columns) == ["ml", "qqq"] and len(d["equity"]) == 2

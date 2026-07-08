@@ -267,12 +267,24 @@ def _screener_detail(event, rows, feats, importance):
 def _backtest_section():
     st.subheader("ML 전략 백테스트")
     st.caption("QQQ 3년 실데이터 (nested OOS)")
-    run = st.button("▶ 백테스트 실행 (최대 1분)", key="bt_btn", type="primary")
-    if not (run or st.session_state.get("bt_done")):
-        st.info("버튼을 눌러 백테스트를 실행하세요 — 무거운 계산이라 진입 시 자동 실행하지 않습니다.")
+    last = cached.backtest_last()
+    c_run, c_info = st.columns([1, 2.2], vertical_alignment="center")
+    run = c_run.button("🔄 다시 실행 (최대 1분)" if last else "▶ 백테스트 실행 (최대 1분)",
+                       key="bt_btn", type="primary", width="stretch")
+    if run:
+        cached.backtest.clear()                       # 인메모리 캐시 무시 — 진짜 재계산
+        bt = cached.backtest()
+        cached.backtest_last.clear()
+        st.session_state["bt_done"] = True
+    elif st.session_state.get("bt_done"):
+        bt = cached.backtest()
+    elif last:
+        bt = last                                     # 💾 마지막 실행 결과 즉시 표시
+        c_info.caption(f"💾 마지막 실행 {last.get('asof', '—')} — 최신화는 다시 실행")
+    else:
+        st.info("버튼을 눌러 백테스트를 실행하세요 — 무거운 계산이라 진입 시 자동 실행하지 않습니다. "
+                "한 번 실행하면 결과가 저장돼 다음부터 즉시 표시됩니다.")
         return
-    st.session_state["bt_done"] = True
-    bt = cached.backtest()
     if bt.get("error"):
         st.warning(f"백테스트 실패: {bt['error']}")
     else:
