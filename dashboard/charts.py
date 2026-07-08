@@ -125,6 +125,7 @@ def _add_trade_markers(fig, hist, trades):
             y=ys,
             mode="markers",
             name=name,
+            showlegend=False,
             customdata=custom,
             marker=dict(symbol=symbol, size=13, color=color,
                         line=dict(color="#ffffff", width=0.8)),
@@ -684,12 +685,12 @@ def price_chart(hist, ticker: str = "", *, kind: str = "line", avg_cost=None,
         else:
             up = (close.diff().fillna(0) >= 0).values
         vcolors = [_GREEN if u else _RED for u in up]
-        fig.add_trace(go.Bar(x=hist.index, y=vol, name="거래량",
+        fig.add_trace(go.Bar(x=hist.index, y=vol, name="거래량", showlegend=False,
                              marker=dict(color=vcolors), opacity=0.55),
                       row=vol_row, col=1)
         if len(vol) >= 20:
             fig.add_trace(go.Scatter(x=hist.index, y=vol.rolling(20).mean(),
-                                     name="거래량 MA20", line=dict(color=_GREEN, width=1)),
+                                     name="거래량 MA20", showlegend=False, line=dict(color=_GREEN, width=1)),
                           row=vol_row, col=1)
         fig.update_yaxes(row=vol_row, col=1, nticks=3)
 
@@ -698,17 +699,19 @@ def price_chart(hist, ticker: str = "", *, kind: str = "line", avg_cost=None,
         rsi = _rsi_series(close)
         fig.add_hrect(y0=30, y1=70, fillcolor="rgba(120,130,180,0.08)", line_width=0,
                       row=rsi_row, col=1)
-        fig.add_trace(go.Scatter(x=hist.index, y=rsi, name="RSI(14)",
+        fig.add_trace(go.Scatter(x=hist.index, y=rsi, name="RSI(14)", showlegend=False,
                                  line=dict(color="#9333ea", width=1.2)), row=rsi_row, col=1)
-        fig.add_trace(go.Scatter(x=hist.index, y=rsi.rolling(14).mean(), name="RSI 시그널(14)",
+        fig.add_trace(go.Scatter(x=hist.index, y=rsi.rolling(14).mean(), name="RSI 시그널(14)", showlegend=False,
                                  line=dict(color="#3b82f6", width=1.2)), row=rsi_row, col=1)
         for lv, c in ((70, _RED), (30, _GREEN)):
             fig.add_hline(y=lv, line=dict(color=c, dash="dot", width=0.7), row=rsi_row, col=1)
         fig.update_yaxes(range=[0, 100], row=rsi_row, col=1, tickvals=[30, 50, 70])
 
     chart_height = {1: 380, 2: 540, 3: 680}[panes]
-    fig.update_layout(margin=dict(t=14, b=64, l=14, r=18), dragmode="pan",
-                      legend=dict(orientation="h", y=1.08, font=dict(size=10)),
+    fig.update_layout(margin=dict(t=14, b=64, l=14, r=46), dragmode="pan",
+                      legend=dict(orientation="h", x=0.0, xanchor="left",
+                                  y=1.0, yanchor="bottom", font=dict(size=10),
+                                  bgcolor="rgba(0,0,0,0)", itemsizing="constant"),
                       hovermode="x unified", height=chart_height,
                       bargap=0.1, newshape=dict(line=dict(color="#f59e0b", width=2)))
     fig.update_xaxes(automargin=True)

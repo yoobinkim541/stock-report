@@ -588,3 +588,17 @@ def test_price_chart_compare_empty_series_ignored():
     fig = charts.price_chart(hist, "M", kind="candle",
                              compare={"a": None, "b": short})
     assert any(isinstance(tr, go.Candlestick) for tr in fig.data)   # 캔들 유지 = 일반 모드
+
+
+def test_price_chart_legend_decluttered():
+    """범례 정리 — 거래량·RSI·Buy/Sell 은 범례 제외, 종가·MA 만 노출 (UI 소음 제거)."""
+    hist = _ohlc(80)
+    hist["Volume"] = 1000.0
+    trades = [{"event_id": "e1", "side": "buy", "qty": 1, "price": 110.0,
+               "date": str(hist.index[10].date())}]
+    fig = charts.price_chart(hist, "T", mas=(20,), show_rsi=True, show_volume=True,
+                             trades=trades)
+    shown = {tr.name for tr in fig.data if tr.showlegend is not False}
+    assert shown == {"T", "MA20"}                       # 나머지 전부 범례 숨김
+    assert fig.layout.legend.xanchor == "left"          # 좌상단 밀착
+    assert fig.layout.margin.r >= 40                    # 현재가 칩 잘림 방지 여백

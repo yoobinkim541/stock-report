@@ -53,7 +53,8 @@ def _manage_dialog():
         return
     st.caption(f"{plan.get('emoji', '')} {plan.get('label', '')} · QQQ 낙폭 "
                f"{plan.get('dd', 0):+.1f}% · 배율 {plan.get('mult', 1):g}× · "
-               f"환율 {plan.get('fx', 0):,.0f}원 · {plan.get('now', '')}")
+               f"환율 {plan.get('fx', 0):,.0f}원 **(확정 종가 자동 — 하루 고정)** · "
+               f"{plan.get('now', '')}")
 
     # ── 오늘 배분 계획표 ──
     rows = plan["rows"]

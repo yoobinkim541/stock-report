@@ -95,16 +95,17 @@ _TOP_INDS = ["이동평균선", "지수이평(EMA)", "볼린저 밴드", "일목
 
 def _price_chart(ticker, hist, avg_cost, trades):
     """가격 차트 — 봉 단위(5분~월)·기간·라인/캔들·기술적 분석 도구(MA 세트·RSI·BB·일목)."""
-    tcol, pcol = st.columns([1.9, 1.9])
-    tf_label = tcol.segmented_control("봉", list(_TF), default="1일",
-                                      label_visibility="collapsed", key="_chart_tf") or "1일"
+    # 컨트롤 한 줄 — 봉 | 라인/캔들 | 지표 | 비교 | 기간 (좁은 화면은 자동 줄바꿈)
+    ctf, ckind, c3, c4, cper = st.columns([1.5, 0.75, 0.36, 0.36, 1.5],
+                                          vertical_alignment="center")
+    tf_label = ctf.segmented_control("봉", list(_TF), default="1일",
+                                     label_visibility="collapsed", key="_chart_tf") or "1일"
+    kind = ckind.segmented_control("차트 종류", ["📈 라인", "🕯️ 캔들"], default="📈 라인",
+                                   label_visibility="collapsed", key="_chart_kind")
     # 기간 = 초기 표시 창만 — 데이터는 항상 전체(max) 로드라 과거로 무한 드래그 가능
-    period = pcol.radio("기간", ["3mo", "6mo", "1y", "5y", "전체"], index=1, horizontal=True,
+    period = cper.radio("기간", ["3mo", "6mo", "1y", "5y", "전체"], index=1, horizontal=True,
                         label_visibility="collapsed", key="_chart_period")
     view_days = {"3mo": 90, "6mo": 180, "1y": 365, "5y": 1825, "전체": None}[period]
-    c2, c3, c4, _sp = st.columns([0.95, 0.42, 0.42, 2.2])
-    kind = c2.segmented_control("차트 종류", ["📈 라인", "🕯️ 캔들"], default="📈 라인",
-                                label_visibility="collapsed", key="_chart_kind")
     tf = _TF[tf_label]
     # ── ⇄ 비교 — 최대 3종목 % 상대수익 오버레이 (사이드바 검색과 동일 정규화) ──
     with c4.popover("⇄ 비교"):
@@ -163,8 +164,9 @@ def _price_chart(ticker, hist, avg_cost, trades):
         if "자동 추세선" in top:
             want_lines = True
             cch1, cch2 = st.columns(2)
-            want_short = cch1.checkbox("단기 채널(60봉)", key=f"_tl_short_{tf}")
-            want_long = cch2.checkbox("장기 채널(250봉)", key=f"_tl_long_{tf}")
+            # 채널 기본 ON — pill 선택 즉시 지지/저항선 + 상승/하락 채널까지 그려짐
+            want_short = cch1.checkbox("단기 채널(60봉)", value=True, key=f"_tl_short_{tf}")
+            want_long = cch2.checkbox("장기 채널(250봉)", value=True, key=f"_tl_long_{tf}")
         st.markdown("**하단 지표** — 서브 패널")
         bottom = st.pills("하단 지표", ["거래량", "RSI"], selection_mode="multi",
                           default=["거래량", "RSI"], key=f"_bot_{tf}",

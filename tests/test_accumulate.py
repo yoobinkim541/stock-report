@@ -15,7 +15,7 @@ def _patched_og(monkeypatch):
     monkeypatch.setattr(og, "fetch_qqq_data", lambda: {"drawdown_pct": -3.2})
     monkeypatch.setattr(og, "fetch_rsi", lambda t: 55.0)
     monkeypatch.setattr(og, "fetch_vix", lambda: 18.0)
-    monkeypatch.setattr(og, "fetch_exchange_rate", lambda: 1400.0)
+    monkeypatch.setattr(og, "fetch_exchange_rate_close", lambda: 1400.0)
     monkeypatch.setattr(og, "classify_market", lambda q, r, v: ("neutral", 0))
     monkeypatch.setattr(og, "calculate_dca", lambda mt, pk, fx, drawdown_pct=None: {
         "total_krw": 42_000, "multiplier": 1.0,
@@ -78,3 +78,17 @@ accumulate.sidebar_rail()
     at = AppTest.from_string(script, default_timeout=15)
     at.run()
     assert not at.exception and not at.button                 # 조용히 생략
+
+
+def test_fx_last_completed_close():
+    """확정 종가 선택 — 오늘(진행 중) 봉 제외·주말엔 마지막 봉 그대로 (순수)."""
+    import pandas as pd
+    from datetime import date
+    from providers.market_data import _last_completed_close
+    h = pd.DataFrame({"Close": [1400.0, 1410.0]},
+                     index=pd.to_datetime(["2026-07-07", "2026-07-08"]))
+    assert _last_completed_close(h, date(2026, 7, 8)) == 1400.0   # 오늘 봉 형성 중 → 직전
+    assert _last_completed_close(h, date(2026, 7, 10)) == 1410.0  # 휴장일 → 마지막 확정
+    assert _last_completed_close(None, date(2026, 7, 8)) is None
+    one = h.iloc[:1]
+    assert _last_completed_close(one, date(2026, 7, 7)) == 1400.0  # 단일 봉 폴백

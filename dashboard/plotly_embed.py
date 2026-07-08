@@ -82,7 +82,7 @@ def pannable_chart_html(fig, hist, *, height: int = 460, view_days=None,
     fig_json = fig.to_json()
     bounds = bounds_json if bounds_json is not None else price_bounds_json(hist)
     config = json.dumps({
-        "scrollZoom": True, "displaylogo": False, "displayModeBar": True,
+        "scrollZoom": True, "displaylogo": False,   # 모드바 = hover 시만 (기본) — 상시 노출 제거
         "modeBarButtonsToRemove": ["select2d", "lasso2d"],
         "modeBarButtonsToAdd": ["drawline", "drawopenpath", "drawrect", "eraseshape"],
     })

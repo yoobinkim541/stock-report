@@ -31,6 +31,7 @@ except ImportError:
 
 from barbell_strategy import (
     fetch_qqq_data, fetch_rsi, fetch_vix, fetch_exchange_rate,
+    fetch_exchange_rate_close,
     classify_market, calculate_dca,
     BULL_PHASES, BEAR_PHASES,
     TELEGRAM_TOKEN, TELEGRAM_CHAT_ID,
@@ -121,7 +122,7 @@ def build() -> dict:
     qqq = fetch_qqq_data()
     rsi = fetch_rsi("QQQ")
     vix = fetch_vix()
-    fx  = fetch_exchange_rate()
+    fx  = fetch_exchange_rate_close()   # 확정 종가 기준 — 하루 동안 고정(장중 변동 배제)
 
     market_type, phase_key = classify_market(qqq, rsi, vix)
     # 낙폭 정지(BARBELL_LEV_HALT_DD) 가드가 발동하도록 drawdown_pct 전달 —
