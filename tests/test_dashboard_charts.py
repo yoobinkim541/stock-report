@@ -602,3 +602,34 @@ def test_price_chart_legend_decluttered():
     assert shown == {"T", "MA20"}                       # 나머지 전부 범례 숨김
     assert fig.layout.legend.xanchor == "left"          # 좌상단 밀착
     assert fig.layout.margin.r >= 40                    # 현재가 칩 잘림 방지 여백
+
+
+def test_cmp_initial_yrange_pct_frame():
+    """비교(%) 모드 초기 y = 정규화 % 프레임 — 달러 가격대(45~55)가 아니어야 (1y 버그 회귀)."""
+    idx = pd.date_range("2024-06-01", periods=500, freq="D")
+    tr = pd.Series([50.0 * 1.0006 ** i for i in range(500)], index=idx)     # $50대
+    pr = pd.Series([50.0 * 1.0001 ** i for i in range(500)], index=idx)
+    r = charts.cmp_initial_yrange(tr, {"PR": pr}, 365)
+    assert r is not None
+    lo, hi = r
+    assert lo < 5 and hi < 40                        # % 스케일 (달러 50대 아님)
+    assert hi > 10                                    # TR 1y ≈ +24% 포함
+    assert charts.cmp_initial_yrange(tr.iloc[:1], {}, 365) is None   # 재료 부족
+
+
+def test_price_chart_compare_initial_view_pct():
+    """compare 차트의 서버측 초기 y-range 가 % 프레임 (panes 1·2 양 경로)."""
+    idx = pd.date_range("2024-06-01", periods=500, freq="D")
+    close = pd.Series([50.0 * 1.0006 ** i for i in range(500)], index=idx)
+    hist = pd.DataFrame({"Open": close, "High": close * 1.01, "Low": close * 0.99,
+                         "Close": close, "Volume": [1e6] * 500}, index=idx)
+    cmp_s = pd.Series([100.0 * 1.0003 ** i for i in range(500)], index=idx)
+    fig1 = charts.price_chart(hist, "T", compare={"C": cmp_s}, view_days=365)   # panes==1
+    r1 = fig1.layout.yaxis.range
+    assert r1 is not None and r1[1] < 45              # % 프레임 (가격 50~67 아님)
+    fig2 = charts.price_chart(hist, "T", compare={"C": cmp_s}, view_days=365,
+                              show_rsi=True, show_volume=True)                  # panes>1
+    r2 = fig2.layout.yaxis.range
+    assert r2 is not None and r2[1] < 45
+    main = next(tr for tr in fig1.data if tr.name == "T")
+    assert "%{y:+.2f}%" in main.hovertemplate         # hover 포맷

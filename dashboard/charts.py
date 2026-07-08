@@ -42,11 +42,12 @@ def _pannable(fig, *, rangeslider: bool = True, height: int = 360):
     return fig
 
 
-def _initial_view(fig, hist, view_days, *, lo_col="Low", hi_col="High"):
+def _initial_view(fig, hist, view_days, *, lo_col="Low", hi_col="High", y_override=None):
     """전체 히스토리 로드 상태에서 초기 화면만 최근 view_days 로 — 과거는 드래그/미니차트 탐색.
 
     x·y 초기 범위를 창에 맞춤(plotly 는 x창 추종 y 자동스케일이 없어 창 기준으로 시작 —
     팬/줌으로 조절·더블클릭=전체 복귀). 데이터가 창보다 짧으면 전체 표시.
+    y_override=(lo, hi) — 비교(%) 모드처럼 트레이스 단위가 가격이 아닐 때 y 만 주입.
     """
     if not view_days or hist is None or getattr(hist, "empty", True):
         return fig
@@ -54,9 +55,16 @@ def _initial_view(fig, hist, view_days, *, lo_col="Low", hi_col="High"):
     end = hist.index[-1]
     start = end - pd.Timedelta(days=view_days)
     if start <= hist.index[0]:
+        if y_override:                               # 짧은 이력도 % y 프레임은 반영
+            fig.update_layout(yaxis_range=list(y_override))
         return fig                                   # 창보다 짧은 이력 — 전체 그대로
     win = hist[hist.index >= start]
     if len(win) < 2:
+        return fig
+    if y_override:
+        lo, hi = y_override
+        fig.update_layout(xaxis_range=[start, end + (end - start) * 0.02],
+                          yaxis_range=[lo, hi])
         return fig
     cols = set(getattr(hist, "columns", []))
     lo = float(win[lo_col].min()) if lo_col in cols else float(win["Close"].min())
@@ -65,6 +73,33 @@ def _initial_view(fig, hist, view_days, *, lo_col="Low", hi_col="High"):
     fig.update_layout(xaxis_range=[start, end + (end - start) * 0.02],
                       yaxis_range=[lo - pad, hi + pad])
     return fig
+
+
+def cmp_initial_yrange(close, compare, view_days):
+    """비교(%) 모드 초기 y 범위 — 전 시리즈 normalize_pct 후 표시창 min/max (순수).
+
+    반환 (lo, hi) 또는 None(재료 부족 — 오토레인지 위임). 달러 가격으로 y 를 잡던
+    _initial_view 가 % 축에 가격대(예: 45~55)를 넣어 선이 화면 밖으로 나가던 버그의 해법.
+    """
+    import pandas as pd
+    lo = hi = None
+    for s in [close] + list((compare or {}).values()):
+        if s is None or len(getattr(s, "dropna", lambda: [])()) < 2:
+            continue
+        ns = normalize_pct(s, view_days)
+        win = ns
+        if view_days:
+            start = ns.index[-1] - pd.Timedelta(days=int(view_days))
+            w = ns[ns.index >= start]
+            if len(w) >= 2:
+                win = w
+        wlo, whi = float(win.min()), float(win.max())
+        lo = wlo if lo is None else min(lo, wlo)
+        hi = whi if hi is None else max(hi, whi)
+    if lo is None or hi is None or lo == hi:
+        return None
+    pad = max((hi - lo) * 0.06, 0.5)                 # % 축 최소 0.5%p 패딩
+    return lo - pad, hi + pad
 
 
 def _trade_price(hist, trade: dict):
@@ -604,10 +639,12 @@ def price_chart(hist, ticker: str = "", *, kind: str = "line", avg_cost=None,
     if cmp_mode:                       # 비교 — % 상대수익 라인 (메인 + 비교 각자 인덱스)
         n_main = normalize_pct(close, view_days)
         fig.add_trace(go.Scatter(x=n_main.index, y=n_main, name=ticker or "메인",
+                                 hovertemplate="%{y:+.2f}%<extra>" + (ticker or "메인") + "</extra>",
                                  line=dict(color=_BLUE, width=2)))
         for i, (lab, s) in enumerate(compare.items()):
             ns = normalize_pct(s, view_days)
             fig.add_trace(go.Scatter(x=ns.index, y=ns, name=lab,
+                                     hovertemplate="%{y:+.2f}%<extra>" + lab + "</extra>",
                                      line=dict(color=_CMP_COLORS[i % len(_CMP_COLORS)],
                                                width=1.6)))
         fig.add_hline(y=0, line=dict(color=theme.MUTED, dash="dot", width=0.8),
@@ -672,7 +709,8 @@ def price_chart(hist, ticker: str = "", *, kind: str = "line", avg_cost=None,
 
     # ── 기간 최고/최저 콜아웃 + 현재가 점선·우측 라벨 (TradingView 풍) ──
     if cmp_mode:                       # % 축 — 가격 콜아웃 대신 % 포맷만
-        fig.update_yaxes(ticksuffix="%", row=1 if panes > 1 else None,
+        fig.update_yaxes(ticksuffix="%", tickformat=".1f",
+                         row=1 if panes > 1 else None,
                          col=1 if panes > 1 else None)
     else:
         _add_extremes_and_last(fig, hist, view_days, panes)
@@ -719,9 +757,13 @@ def price_chart(hist, ticker: str = "", *, kind: str = "line", avg_cost=None,
     _t(fig)
     if panes > 1:
         fig.update_xaxes(rangeslider_visible=False)   # 서브플롯 제약 — 팬/줌으로 탐색
-        return _initial_view_sub(fig, hist, view_days)
+        return _initial_view_sub(fig, hist, view_days,
+                                  y_override=(cmp_initial_yrange(close, compare, view_days)
+                                              if cmp_mode else None))
     fig.update_layout(xaxis=dict(rangeslider=dict(visible=True, thickness=0.08)))
-    return _initial_view(fig, hist, view_days)
+    return _initial_view(fig, hist, view_days,
+                         y_override=(cmp_initial_yrange(close, compare, view_days)
+                                     if cmp_mode else None))
 
 
 def _add_extremes_and_last(fig, hist, view_days, panes) -> None:
@@ -758,23 +800,31 @@ def _add_extremes_and_last(fig, hist, view_days, panes) -> None:
                        bgcolor=chip, borderpad=2, **({"row": 1, "col": 1} if panes > 1 else {}))
 
 
-def _initial_view_sub(fig, hist, view_days):
-    """RSI 서브플롯용 초기 표시창 — x 공유축 범위만 (y 는 가격 창 기준)."""
+def _initial_view_sub(fig, hist, view_days, y_override=None):
+    """RSI 서브플롯용 초기 표시창 — x 공유축 범위만 (y 는 가격 창 기준).
+
+    y_override=(lo, hi) — 비교(%) 모드에서 가격 창 대신 % 프레임 주입.
+    """
     if not view_days or hist is None or getattr(hist, "empty", True):
         return fig
     import pandas as pd
     end = hist.index[-1]
     start = end - pd.Timedelta(days=view_days)
     if start <= hist.index[0]:
+        if y_override:
+            fig.update_yaxes(range=list(y_override), row=1, col=1)
         return fig
     win = hist[hist.index >= start]
     if len(win) < 2:
+        return fig
+    fig.update_xaxes(range=[start, end + (end - start) * 0.02])
+    if y_override:
+        fig.update_yaxes(range=list(y_override), row=1, col=1)
         return fig
     cols = set(hist.columns)
     lo = float(win["Low"].min()) if "Low" in cols else float(win["Close"].min())
     hi = float(win["High"].max()) if "High" in cols else float(win["Close"].max())
     pad = max((hi - lo) * 0.06, hi * 0.002)
-    fig.update_xaxes(range=[start, end + (end - start) * 0.02])
     fig.update_yaxes(range=[lo - pad, hi + pad], row=1, col=1)
     return fig
 
