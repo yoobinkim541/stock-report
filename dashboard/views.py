@@ -993,3 +993,14 @@ def _russell2000_live() -> list[dict]:
              "sector_kr": _NASDAQ_SECTOR_KR.get(sec, "기타"),
              "market_cap": cap, "pct": p}
             for cap, sym, name, sec, p in stocks[1000:3000]]
+
+
+def trendlines_for(ticker: str, tf: str = "1d", *, lines: bool = True,
+                   channels: tuple[str, ...] = ()) -> list[dict]:
+    """자동 추세선·채널 감지 (dashboard.trendlines) — 표시·참고용. graceful []."""
+    try:
+        from dashboard import trendlines as tl
+        df = ohlc_tf(ticker, tf)
+        return tl.detect_trendlines(df, channels=channels, lines=lines)
+    except Exception:
+        return []

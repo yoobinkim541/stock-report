@@ -426,3 +426,31 @@ def test_price_chart_indicators_composite():
     # 이력 부족 MA 는 침묵 스킵
     fig3 = charts.price_chart(hist.iloc[:50], "T", mas=[200])
     assert "MA200" not in [tr.name for tr in fig3.data]
+
+
+def test_price_chart_trend_lines_overlay():
+    """추세선·채널 오버레이 — 지지/저항 대시 선분·채널 상하단 fill·annotation·드로잉 스타일."""
+    import pandas as pd
+    idx = pd.date_range("2024-01-01", periods=100, freq="D")
+    hist = pd.DataFrame({"Open": [100.0] * 100, "High": [101.0] * 100,
+                         "Low": [99.0] * 100, "Close": [100.0] * 100}, index=idx)
+    tls = [
+        {"kind": "support", "label": "지지선 (3터치)", "x0": idx[10], "x1": idx[-1],
+         "y0": 98.0, "y1": 100.0, "upper": None, "lower": None, "path": None,
+         "touches": 3, "meta": {"trend": None}},
+        {"kind": "channel", "label": "단기 상승채널(60)", "x0": idx[40], "x1": idx[-1],
+         "y0": 99.0, "y1": 101.0, "upper": (100.0, 102.0), "lower": (98.0, 100.0),
+         "path": None, "touches": 0, "meta": {"trend": "up"}},
+    ]
+    fig = charts.price_chart(hist, "T", trend_lines=tls)
+    names = [tr.name for tr in fig.data]
+    assert "지지선 (3터치)" in names and "단기 상승채널(60)" in names
+    ch_lower = [tr for tr in fig.data if tr.legendgroup == "단기 상승채널(60)" and tr.fill == "tonexty"]
+    assert ch_lower, "채널 fill 없음"
+    anns = " ".join(a.text for a in fig.layout.annotations)
+    assert "지지선" in anns and "상승채널" in anns
+    assert fig.layout.newshape.line.color == "#f59e0b"      # 수동 드로잉 기본 스타일
+    assert "drawline" in charts.PAN_DRAW_CFG["modeBarButtonsToAdd"]
+    # 빈 입력 무변화
+    fig2 = charts.price_chart(hist, "T", trend_lines=[])
+    assert len(fig2.data) < len(fig.data)

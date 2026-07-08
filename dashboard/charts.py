@@ -29,6 +29,10 @@ def _t(fig):
 PAN_CFG = {"scrollZoom": True, "displayModeBar": True, "displaylogo": False,
            "modeBarButtonsToRemove": ["select2d", "lasso2d"]}
 PAN_HINT = "🖱️ 드래그=이동 · 휠=확대/축소 · 더블클릭=원위치 · 하단 미니차트 드래그=과거 구간"
+# 수동 드로잉 도구 포함 config — 선/자유곡선/박스/지우개. 드로잉은 클라이언트 상태
+# (Streamlit rerun 시 소실 — streamlit 이 shape 이벤트를 서버에 미노출·정직 한계)
+PAN_DRAW_CFG = {**PAN_CFG,
+                "modeBarButtonsToAdd": ["drawline", "drawopenpath", "drawrect", "eraseshape"]}
 
 
 def _pannable(fig, *, rangeslider: bool = True, height: int = 360):
@@ -497,9 +501,42 @@ _MA_COLORS = {5: "#e879f9", 10: "#22d3ee", 20: "#f59e0b", 60: "#9333ea",
               120: "#34d399", 200: "#f43f5e"}
 
 
+def _add_trend_lines(fig, items: list[dict]) -> None:
+    """자동 감지 추세선·채널 오버레이 (dashboard.trendlines 출력 스키마 소비).
+
+    지지=초록 대시·저항=빨강 대시·채널=중심 점선+상하단(반투명 fill·path 폴백). 표시·참고용.
+    """
+    go = _go()
+    for it in items or []:
+        kind = it.get("kind")
+        if kind == "channel":
+            color = {"up": _GREEN, "down": _RED}.get((it.get("meta") or {}).get("trend"), "#8b93a7")
+            path = it.get("path")
+            if path:
+                xs, up, lo = path["x"], path["upper"], path["lower"]
+            else:
+                xs = [it["x0"], it["x1"]]
+                up, lo = list(it["upper"]), list(it["lower"])
+            fig.add_trace(go.Scatter(x=xs, y=up, name=it["label"], legendgroup=it["label"],
+                                     line=dict(color=color, width=1.1)))
+            fig.add_trace(go.Scatter(x=xs, y=lo, showlegend=False, legendgroup=it["label"],
+                                     line=dict(color=color, width=1.1),
+                                     fill="tonexty", fillcolor="rgba(139,147,167,0.07)"))
+            fig.add_trace(go.Scatter(x=[it["x0"], it["x1"]], y=[it["y0"], it["y1"]],
+                                     showlegend=False, legendgroup=it["label"],
+                                     line=dict(color=color, width=0.8, dash="dot")))
+        else:
+            color = _GREEN if kind == "support" else _RED
+            fig.add_trace(go.Scatter(x=[it["x0"], it["x1"]], y=[it["y0"], it["y1"]],
+                                     name=it["label"], line=dict(color=color, width=1.4, dash="dash")))
+        fig.add_annotation(x=it["x1"], y=it["y1"], xanchor="left", showarrow=False,
+                           text=it["label"], font=dict(size=10, color=theme.MUTED))
+
+
 def price_chart(hist, ticker: str = "", *, kind: str = "line", avg_cost=None,
                 trades=None, view_days=None, mas=(60, 120, 200),
-                show_rsi: bool = False, bollinger: bool = False, ichimoku: bool = False):
+                show_rsi: bool = False, bollinger: bool = False, ichimoku: bool = False,
+                trend_lines=None):
     """가격 차트 + 기술적 분석 도구 — MA 세트·볼린저밴드·일목균형표·RSI 하단 패널.
 
     show_rsi=True 면 2행 서브플롯(가격 75%·RSI 25%, x 공유 — 레인지슬라이더는 비활성:
@@ -571,6 +608,7 @@ def price_chart(hist, ticker: str = "", *, kind: str = "line", avg_cost=None,
                       annotation_text=f"평단 {avg_cost:,.2f}", annotation_position="top left",
                       annotation_font=dict(color=theme.MUTED, size=11),
                       row=1 if show_rsi else None, col=1 if show_rsi else None)
+    _add_trend_lines(fig, trend_lines or [])
     _add_trade_markers(fig, hist, trades or [])
 
     # ── RSI 하단 패널 ──
@@ -584,7 +622,8 @@ def price_chart(hist, ticker: str = "", *, kind: str = "line", avg_cost=None,
 
     fig.update_layout(margin=dict(t=10, b=10, l=10, r=10), dragmode="pan",
                       legend=dict(orientation="h", y=1.08, font=dict(size=10)),
-                      hovermode="x unified", height=470 if show_rsi else 380)
+                      hovermode="x unified", height=470 if show_rsi else 380,
+                      newshape=dict(line=dict(color="#f59e0b", width=2)))
     _t(fig)
     if show_rsi:
         fig.update_xaxes(rangeslider_visible=False)   # 서브플롯 제약 — 팬/줌으로 탐색

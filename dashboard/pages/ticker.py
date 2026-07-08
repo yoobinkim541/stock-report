@@ -99,6 +99,12 @@ def _price_chart(ticker, hist, avg_cost, trades, view_days=None):
         mas = st.multiselect("이동평균", _MA_OPTS,
                              default=_MA_DEFAULT.get(tf, [60, 120, 200]), key=f"_ma_{tf}")
         inds = st.multiselect("보조지표", _IND_OPTS, default=["RSI(14)"], key=f"_ind_{tf}")
+        st.markdown("**추세 분석** (자동 감지 — 표시·참고용)")
+        want_lines = st.checkbox("자동 지지/저항선", key=f"_tl_lines_{tf}")
+        want_short = st.checkbox("단기 채널 (60봉)", key=f"_tl_short_{tf}")
+        want_long = st.checkbox("장기 채널 (250봉)", key=f"_tl_long_{tf}")
+        legacy = st.toggle("구형 렌더러", key="_legacy_chart",
+                           help="plotly.js CDN 불가 환경 폴백 — 팬 시 y 자동맞춤·인차트 상세 없음")
         st.caption("봉 단위별로 설정이 기억됩니다 · 범례 클릭으로도 개별 토글")
     df = hist
     if tf != "1d":
@@ -110,25 +116,37 @@ def _price_chart(ticker, hist, avg_cost, trades, view_days=None):
             st.caption(f"ℹ️ {tf_label}봉은 {_TF_SPAN[tf]}까지 제공 (yfinance 보존 한계) · 주/월/일봉은 전체 이력")
     label = ticker_names.label(ticker)
     show_rsi = "RSI(14)" in inds
+    tls = []
+    if want_lines or want_short or want_long:
+        ch_key = tuple(k for k, w in (("short", want_short), ("long", want_long)) if w)
+        tls = cached.trendlines_for(ticker, tf, want_lines, ch_key)
     fig = charts.price_chart(
         df, label, kind=("candle" if kind == "🕯️ 캔들" else "line"),
         avg_cost=avg_cost, trades=trades, view_days=view_days, mas=mas,
         show_rsi=show_rsi, bollinger="볼린저밴드(20,2σ)" in inds,
-        ichimoku="일목균형표" in inds)
+        ichimoku="일목균형표" in inds, trend_lines=tls)
     event = None
-    try:
-        event = st.plotly_chart(
-            fig, width="stretch", config=charts.PAN_CFG, key=f"price_chart_{ticker}_{kind}",
-            on_select="rerun", selection_mode="points")
-    except TypeError:
-        st.plotly_chart(fig, width="stretch", config=charts.PAN_CFG)
-    st.caption("🖱️ 드래그=이동 · 휠=확대/축소 · 더블클릭=원위치"
-               + ("" if show_rsi else " · 하단 미니차트 드래그=과거 구간"))
-    selected = _selected_trade(event, trades or [])
+    if legacy:
+        try:
+            event = st.plotly_chart(
+                fig, width="stretch", config=charts.PAN_DRAW_CFG,
+                key=f"price_chart_{ticker}_{kind}", on_select="rerun", selection_mode="points")
+        except TypeError:
+            st.plotly_chart(fig, width="stretch", config=charts.PAN_DRAW_CFG)
+    else:
+        # 커스텀 임베드 — 팬 시 보이는 구간에 y축 부드러운 자동 맞춤(클라이언트 JS)
+        from dashboard import plotly_embed
+        h = int(fig.layout.height or 420)
+        st.components.v1.html(
+            plotly_embed.pannable_chart_html(fig, df, height=h, view_days=view_days),
+            height=h + 80)
+    st.caption("🖱️ 드래그=이동(y축 자동 맞춤) · 휠=확대/축소 · 더블클릭=원위치 · "
+               "✏️ 우상단 모드바 직접 그리기(선·자유곡선·박스)·지우개 — 설정 변경 시 드로잉 초기화")
+    selected = _selected_trade(event, trades or []) if legacy else None
     if selected:
         _trade_detail(selected)
     elif trades:
-        st.caption("차트의 ▲/▼ 거래 마커를 클릭하면 수량·평단·체결가를 볼 수 있습니다.")
+        st.caption("차트의 ▲/▼ 거래 마커를 클릭하면 수량·평단·체결가가 차트 아래 박스에 표시됩니다.")
     if trades:
         with st.expander(f"거래 마커 {len(trades)}건", expanded=False):
             rows = [{

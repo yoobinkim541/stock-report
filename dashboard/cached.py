@@ -186,3 +186,8 @@ def kr200_heatmap():
 @st.cache_data(ttl=300, show_spinner="러셀2000 맵 불러오는 중…")
 def russell2000_heatmap():
     return views.russell2000_heatmap()
+
+
+@st.cache_data(ttl=_TTL, show_spinner="추세선 감지 중…")
+def trendlines_for(t, tf, lines, ch_key):
+    return views.trendlines_for(t, tf, lines=lines, channels=tuple(ch_key))
