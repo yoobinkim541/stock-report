@@ -42,6 +42,8 @@ def upsert_plan(ticker: str, amount: float, currency: str, freq: str,
     if freq not in ("매일", "매주", "매월"):
         return "❌ 주기는 매일/매주/매월 중 하나여야 합니다."
     cur = "KRW" if str(currency).upper().startswith(("K", "₩", "W")) else "USD"
+    if cur == "KRW":                                    # 키움 최소/단위 1,000원
+        amount = max(1000.0, round(float(amount) / 1000.0) * 1000.0)
     plans = [p for p in load_plans() if p.get("ticker") != t]
     plans.append({"ticker": t, "amount": float(amount), "currency": cur,
                   "freq": freq, "enabled": True, "last_run": None,
@@ -164,6 +166,8 @@ def update_plan(ticker: str, *, amount: float | None = None, freq: str | None = 
         if p.get("ticker") != t:
             continue
         if amount is not None and amount > 0:
+            if (currency or p.get("currency")) == "KRW":   # 천원 단위·최소 1,000원
+                amount = max(1000.0, round(float(amount) / 1000.0) * 1000.0)
             p["amount"] = float(amount)
         if freq in ("매일", "매주", "매월"):
             p["freq"] = freq

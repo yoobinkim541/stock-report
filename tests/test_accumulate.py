@@ -92,3 +92,17 @@ def test_fx_last_completed_close():
     assert _last_completed_close(None, date(2026, 7, 8)) is None
     one = h.iloc[:1]
     assert _last_completed_close(one, date(2026, 7, 7)) == 1400.0  # 단일 봉 폴백
+
+
+def test_round_alloc_1000():
+    """모으기 배분 천원 단위 재배분 — 합계 보존·최소 1,000원·0 배분 제외 (최대잔여법)."""
+    from bot.order_generator import round_alloc_1000
+    alloc = {"ORCL": 13_482, "NVDA": 12_048, "MSFT": 10_842, "GOOGL": 8_676,
+             "UNH": 7_230, "SAP": 3_618, "SPMO": 4_104}                 # 합 60,000
+    r = round_alloc_1000(alloc)
+    assert sum(r.values()) == 60_000                     # 합계 정확 보존
+    assert all(v % 1000 == 0 and v >= 1000 for v in r.values())
+    assert r["ORCL"] >= r["SPMO"]                        # 비중 순서 유지(대략)
+    tiny = round_alloc_1000({"A": 700, "B": 400})        # 합 1,100 → 1,000 한 묶음
+    assert sum(tiny.values()) == 1000 and set(tiny) == {"A"}
+    assert round_alloc_1000({}) == {}

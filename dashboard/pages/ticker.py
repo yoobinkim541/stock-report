@@ -1034,8 +1034,9 @@ def _manage_position(ticker, cur_price, pos):
             _fx_live = cached.fx_now() or 1380.0        # 실시간 환율 자동 (2분 캐시)
             fx = _fx_live
             if currency == "₩ 원화":
-                amt = c3.number_input("적립 금액 (₩)", min_value=0.0, value=100_000.0,
-                                      step=10_000.0, format="%.0f", key="acc_amt_krw")
+                amt = c3.number_input("적립 금액 (₩)", min_value=1000.0, value=100_000.0,
+                                      step=1000.0, format="%.0f", key="acc_amt_krw",
+                                      help="키움 주식모으기 최소/단위 금액 = 1,000원")
                 fx = st.number_input("적용 환율 (₩/$) — 실시간 자동", min_value=500.0,
                                      max_value=2500.0, value=round(float(_fx_live), 1),
                                      step=1.0, format="%.1f", key="acc_fx",

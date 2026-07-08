@@ -112,6 +112,25 @@ def fetch_prices(tickers: list) -> dict:
     return prices
 
 
+def round_alloc_1000(by_ticker: dict) -> dict:
+    """배분을 **천원 단위**로 재배분 (순수 — 키움 주식모으기 최소/단위 금액 1,000원).
+
+    최대잔여법: 각 종목 floor(금액/1000) 배정 후 남은 천원 묶음을 잔여(소수부)가
+    큰 순서로 +1,000. 합계 = round(원합계/1000)×1000 정확 보존 · 0원 배분은 제외.
+    """
+    total = sum(by_ticker.values())
+    if total <= 0:
+        return dict(by_ticker)
+    units = int(round(total / 1000.0))                 # 배정할 천원 묶음 수
+    quo = {t: v / 1000.0 for t, v in by_ticker.items()}
+    base = {t: int(q) for t, q in quo.items()}
+    left = units - sum(base.values())
+    order = sorted(quo, key=lambda t: -(quo[t] - base[t]))
+    for t in order[:max(0, left)]:
+        base[t] += 1
+    return {t: n * 1000 for t, n in base.items() if n > 0}
+
+
 def build() -> dict:
     """주식 모으기(소수점 DCA) 계획 — 구조화 산출 (봇 주문서·대시보드 사이드바 공용).
 
@@ -129,6 +148,9 @@ def build() -> dict:
     # 없으면 leverage_dca_guard 가 낙폭 정지를 건너뛰어 극단 낙폭서도 5× 권고가 나감(감사 확정).
     dca = calculate_dca(market_type, phase_key, fx, drawdown_pct=qqq.get("drawdown_pct"))
 
+    # 키움 주식모으기 입력 단위(최소 1,000원·천원 단위)에 맞춰 재배분 — 합계 보존
+    dca["by_ticker"] = round_alloc_1000(dca["by_ticker"])
+    dca["total_krw"] = sum(dca["by_ticker"].values())
     tickers   = list(dca["by_ticker"].keys())
     prices    = fetch_prices(tickers)
     phase_inf = BULL_PHASES[phase_key] if market_type == "bull" else BEAR_PHASES.get(phase_key, BEAR_PHASES[0])

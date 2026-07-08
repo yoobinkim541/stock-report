@@ -148,10 +148,12 @@ def _manage_dialog():
                         f"마지막 {p_.get('last_run') or '아직 없음'}</span>",
                         unsafe_allow_html=True)
             new_amt = r2.number_input(
-                f"금액 ({'₩' if is_krw else '$'})", min_value=0.0,
+                f"금액 ({'₩' if is_krw else '$'})",
+                min_value=(1000.0 if is_krw else 0.0),
                 value=float(p_.get("amount", 0)),
                 step=(1000.0 if is_krw else 1.0),
-                format=("%.0f" if is_krw else "%.2f"), key=f"_ap_amt_{t_}")
+                format=("%.0f" if is_krw else "%.2f"), key=f"_ap_amt_{t_}",
+                help="₩는 키움 최소/단위 1,000원" if is_krw else None)
             cur_freq = p_.get("freq", "매일")
             new_freq = r3.selectbox("주기", _FREQS,
                                     index=_FREQS.index(cur_freq) if cur_freq in _FREQS else 0,

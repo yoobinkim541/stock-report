@@ -257,3 +257,11 @@ def test_analysis_card_html():
     good = theme.analysis_card_html("양호", [], [], None)
     assert theme.GREEN in good and "특이 강점 없음" in good   # 빈 목록·풋터 생략
     assert "다음 확인" not in good
+
+
+def test_css_render_progress_animations():
+    """렌더링 진행감 — 스켈레톤 shimmer·stale 숨쉬기 keyframes 계약."""
+    css = theme._CSS
+    assert "stSkeleton" in css and "tn-shimmer" in css
+    assert 'data-stale="true"' in css and "tn-breathe" in css
+    assert css.count("@keyframes tn-shimmer") == 1 and css.count("@keyframes tn-breathe") == 1

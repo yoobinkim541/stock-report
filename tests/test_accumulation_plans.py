@@ -119,3 +119,15 @@ accumulate.sidebar_rail()
     body = " ".join(str(getattr(m, "value", "")) for m in at.markdown)
     assert "자동 모으기" in body and "NVDA" in body and "₩14,000" in body
     assert "매주 $10.00" in body
+
+
+def test_krw_plan_thousand_units():
+    """KRW 플랜 — 최소 1,000원·천원 단위 라운딩 (등록·편집 공통)."""
+    ac.upsert_plan("NVDA", 14_400, "KRW", "매일")
+    assert ac.plan_for("NVDA")["amount"] == 14_000
+    ac.upsert_plan("MSFT", 300, "KRW", "매일")            # 최소 1,000원 클램프
+    assert ac.plan_for("MSFT")["amount"] == 1000
+    ac.update_plan("NVDA", amount=15_700)
+    assert ac.plan_for("NVDA")["amount"] == 16_000
+    ac.upsert_plan("UNH", 10.55, "USD", "매일")           # USD 는 라운딩 없음
+    assert ac.plan_for("UNH")["amount"] == 10.55

@@ -458,6 +458,27 @@ html, body, [class*="st-"], .stApp, p, span, div, label, input, button {{
 [class*="material-symbols"], span[translate="no"] {{
   font-family: 'Material Symbols Rounded', 'Material Symbols Outlined', 'Material Icons' !important;
 }}
+
+/* ── 렌더링 진행감 — 스켈레톤 shimmer + stale 요소 숨쉬기 (멈춘 화면 느낌 제거) ── */
+[data-testid="stSkeleton"] {{
+  background: linear-gradient(90deg, #131722 25%, #1e2536 38%, #131722 55%) !important;
+  background-size: 400% 100% !important;
+  animation: tn-shimmer 1.3s ease-in-out infinite;
+  border-radius: 10px;
+}}
+@keyframes tn-shimmer {{
+  0% {{ background-position: 100% 50%; }}
+  100% {{ background-position: 0% 50%; }}
+}}
+/* rerun 중 이전 화면(stale) — 부드러운 숨쉬기 펄스로 '처리 중' 신호 */
+[data-stale="true"] {{
+  animation: tn-breathe 1.5s ease-in-out infinite !important;
+}}
+@keyframes tn-breathe {{
+  0%, 100% {{ opacity: 0.45; }}
+  50% {{ opacity: 0.8; }}
+}}
+.stSpinner > div {{ border-top-color: #2962ff !important; }}
 h1, h2, h3 {{ letter-spacing: -0.02em; font-weight: 700; }}
 h1 {{ font-size: 1.7rem !important; }}
 /* 숫자는 등폭 (터미널 정렬감) */
