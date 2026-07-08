@@ -138,6 +138,7 @@ crons/news_spike_detector.py (크론 매 1분)
 | `crons/paper_track.py` | MetaAllocator vs Phase 규칙 A/B 페이퍼 트레이딩 (월요일 Sharpe 비교 발송) | 평일 22:50 UTC |
 | `crons/fundamental_snapshot.py` | 펀더멘털 point-in-time 스냅샷 적재 (look-ahead 없는 학습 피처용) | 토 01:00 UTC |
 | `crons/options_snapshot.py` | 옵션 지표 스냅샷 (ATM IV·풋콜비·스큐·기대변동폭) — 학습 피처 축적 | 평일 21:30 UTC |
+| `crons/accumulate_daily.py` | **주식 모으기 자동 기록** — 등록 플랜(`lib/accumulation` store 문서: 종목·금액 ₩/\$·매일/매주/매월)을 미 마감 직후 그날 종가×확정 종가 환율로 소수점 계좌에 매수 **기록**(멱등 last_run·휴장 스킵·천원 단위·텔레그램 요약). **실계좌 주문 0** — 키움 주식모으기 실매수의 거울. 플랜 없으면 no-op | 평일 21:10 UTC |
 | `crons/earnings_snapshot.py` | 어닝 컨센서스·★리비전 모멘텀·서프라이즈·밸류에이션 point-in-time 적재 (실적/주가반응 예측 학습데이터 — 무룩어헤드) | 평일 22:10 UTC |
 | `crons/news_llm_snapshot.py` | **LLM 뉴스 구조화 라벨 적재** (`NEWS_LLM_LABELS_ENABLED` opt-in) — 티커태그·미라벨 이벤트만 배치 라벨(회당 30건 캡) → news 축 피처 원천. KR 00:30·US 15:00 모의 결정 직전 신선화 | 평일 00:05·14:05 UTC |
 | `crons/naver_flow_snapshot.py` | KR 투자자 수급 + KOSPI200 멤버십 forward 스냅샷 (Naver — pykrx 공백 복구, 시점별 이력 축적) | 평일 07:30 UTC |
@@ -368,6 +369,7 @@ crons/news_spike_detector.py (크론 매 1분)
 | `dashboard/cached.py` | `st.cache_data` 래퍼(멀티페이지 공용·TTL 15~60분) — valuation/financials/.../risk_struct/ohlc |
 | `dashboard/data.py` | 포트폴리오/Phase 상태 + 스케일 명시 포맷터(f_frac_pct vs f_pct·부호버그 차단). streamlit 미import → 테스트가능 |
 | `dashboard/views.py` | 모듈별 provider 래퍼(graceful·provider 내부 import) — risk_summary(구조화)·screener·backtest 등 |
+| `dashboard/accumulate.py` | 사이드바 💰 주식 모으기 — 레일(오늘 배분+🔁 자동 플랜 목록) + 다이얼로그(계획표=`bot/order_generator.build()` 공용 산식·천원 단위 재배분 `round_alloc_1000`·오늘 기록·💱 환전 타이밍 스트립·자동 플랜 금액/주기 **즉시 편집**[`lib/accumulation.update_plan` — last_run 보존]·신규 등록·비중 편집) |
 | `providers/intrinsic.py` | DDM·RIM 내재가치 닫힌해 + r/g 밴드 (DDM은 고배당주만·payout<40% 플래그) |
 | `providers/etf_compare.py` | ETF 비교·점수층 — **TR(Adj Close)/PR(Close) 분리**(`auto_adjust=False`; 현 차트 조정종가=TR 근사·QYLD 3y TR+46.9% vs PR+1.9%)·피어 지표(수익률 창[커버리지<60% None]·MDD·추적차=**대표 ETF TR 프록시**[^XNDX 불안정])·**점수 1~100**(전략별[index/커버드콜/배당] 가중 백분위·결측 재정규화·소그룹 shrink·데이터부족 None 정직). 피어 그룹=루트 `etf_meta.py` 큐레이트 시드(11그룹·레버리지 제외·KR 5종 검증). 그룹 12h 디스크 캐시(`etf_peer_*.json`)·점수는 읽기 시 순수 재계산. 종목분석 ETF 뷰(📈 TR vs PR·🏆 동종 비교표·게이지) + ⇄ 비교 팝오버(피어 원클릭·PR 토글[일봉·비교 모드 전용]) 소비 |
 | `providers/econ_calendar.py` | 경제 일정 (saveticker `/calendar/events`·키불요·한글) |
@@ -408,6 +410,7 @@ crons/news_spike_detector.py (크론 매 1분)
                                                    └ 컬렉션: tax_records · portfolio_history
                                                      · qqqi_dividends · signal_outcomes · price_alerts · kr_mock_history
                                                    └ 문서: dca_weights · target_weights · leverage_state
+                                                     · accumulation_plans (자동 모으기 플랜)
                                                      · barbell_state · barbell_anchor
                                                      · portfolio_snapshot (파일 권위 + store 그림자)
                                                    (레거시 JSON 자동 마이그레이션 + 파일 미러 — store.py)
