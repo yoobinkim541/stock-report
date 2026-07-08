@@ -146,7 +146,7 @@ def realtime_quote(ticker):
     return views.realtime_quote(ticker)
 
 
-@st.cache_data(ttl=_TTL_SLOW, show_spinner="시장 맵 불러오는 중… (최초 ~1분·이후 30분 캐시)")
+@st.cache_data(ttl=300, show_spinner="시장 맵 불러오는 중…")
 def sp500_heatmap():
     """S&P500 시장 맵 rows (섹터·시총 정적 + 당일 등락 라이브·30분 캐시·크론 스냅샷 우선)."""
     return views.sp500_heatmap()
@@ -178,11 +178,11 @@ def ohlc_tf(t, tf):
     return views.ohlc_tf(t, tf)
 
 
-@st.cache_data(ttl=_TTL_SLOW, show_spinner="코스피200 맵 불러오는 중…")
+@st.cache_data(ttl=300, show_spinner="코스피200 맵 불러오는 중…")
 def kr200_heatmap():
     return views.kr200_heatmap()
 
 
-@st.cache_data(ttl=_TTL_SLOW, show_spinner="러셀2000 맵 불러오는 중…")
+@st.cache_data(ttl=300, show_spinner="러셀2000 맵 불러오는 중…")
 def russell2000_heatmap():
     return views.russell2000_heatmap()
