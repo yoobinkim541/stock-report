@@ -137,26 +137,42 @@ def pannable_chart_html(fig, hist, *, height: int = 460, view_days=None,
     return {{price: [lo - pad, hi + pad], vol: [0, vmax * 1.1 || 1]}};
   }}
 
-  // ── 부드러운 y 전환 — rAF lerp 루프 (즉시 점프 대신 ~100ms ease-out) ──
+  // ── 부드러운 y 전환 — 시간 기반 lerp + **비용 적응형 스로틀** ──
+  // 일목 구름·채널처럼 fill 폴리곤이 많으면 relayout 1회가 비싸다 → 실제 리드로우
+  // 비용(EMA)을 재서 갱신 간격을 자동으로 벌리고(무거우면 ~10fps·가벼우면 60fps),
+  // 목표와 차이가 시각적으로 무의미하면(데드밴드) relayout 자체를 생략한다.
   let target = null, curY = null, raf = null, busy = false;
+  let costMs = 8, lastApply = 0, lastStep = 0;
 
   function animStep() {{
     raf = null;
     if (!target) return;
+    const now = performance.now();
+    const dt = Math.min(100, now - (lastStep || now));
+    lastStep = now;
     if (!curY) curY = {{price: target.price.slice(), vol: target.vol.slice()}};
-    const a = 0.38;
+    const a = 1 - Math.exp(-dt / 90);            // 프레임률 무관 ~90ms 수렴 ease-out
     curY.price[0] += (target.price[0] - curY.price[0]) * a;
     curY.price[1] += (target.price[1] - curY.price[1]) * a;
     curY.vol[1]   += (target.vol[1] - curY.vol[1]) * a;
     const span = Math.abs(target.price[1] - target.price[0]) || 1;
-    const done = Math.abs(curY.price[0] - target.price[0]) + Math.abs(curY.price[1] - target.price[1])
-                 < span * 0.002;
+    const dist = Math.abs(curY.price[0] - target.price[0])
+               + Math.abs(curY.price[1] - target.price[1]);
+    const done = dist < span * 0.002;
     if (done) curY = {{price: target.price.slice(), vol: target.vol.slice()}};
-    if (!busy) {{
-      busy = true; guard = true;
+    const minGap = Math.max(16, costMs * 1.2);   // 리드로우 비용만큼 간격 자동 확대
+    const applied = gd.layout.yaxis.range || [];
+    const visDelta = Math.abs((applied[0] ?? 1e18) - curY.price[0])
+                   + Math.abs((applied[1] ?? 1e18) - curY.price[1]);
+    if (!busy && now - lastApply >= minGap && visDelta > span * 0.004) {{
+      busy = true; guard = true; lastApply = now;
+      const t0 = performance.now();
       const upd = {{"yaxis.range": curY.price.slice()}};
-      if (volAxis) upd[volAxis + ".range"] = [0, curY.vol[1]];
-      Plotly.relayout(gd, upd).then(() => {{ busy = false; guard = false; }});
+      if (volAxis && !dragging) upd[volAxis + ".range"] = [0, curY.vol[1]];
+      Plotly.relayout(gd, upd).then(() => {{
+        costMs = costMs * 0.7 + (performance.now() - t0) * 0.3;   // 비용 EMA
+        busy = false; guard = false;
+      }});
     }}
     if (!done || dragging) raf = requestAnimationFrame(animStep);
   }}

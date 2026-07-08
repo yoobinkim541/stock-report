@@ -98,5 +98,8 @@ def test_embed_drag_ux_contract():
                   "fixedrange = true",           # y축 사용자 팬 고정 (y 싸움 제거)
                   "function lowerBound",         # bounds 이진 탐색
                   "hovermode: false",            # 드래그 중 hover 중지
+                  "costMs",                      # 리드로우 비용 EMA — 적응형 스로틀
+                  "visDelta",                    # 데드밴드 — 무의미한 relayout 생략
+                  "performance.now",
                   "function animStep"):
         assert token in html, f"누락: {token}"
