@@ -191,12 +191,26 @@ def test_formatters_none_nan_safe():
 
 
 def test_fair_value_multiple_uses_current_multiple_on_forward_eps():
-    fv = data.fair_value_multiple(100, 25, 20)
+    fv = data.fair_value_multiple(100, 25, 20, eps_fwd=5)
     assert fv["fair"] == pytest.approx(125.0)
     assert fv["upside_pct"] == pytest.approx(25.0)
     assert fv["eps_fwd"] == pytest.approx(5.0)
     assert fv["per"] == 25
     assert fv["fper"] == 20
+    assert fv["source"] == "eps_fwd"
+
+
+def test_fair_value_multiple_falls_back_to_implied_forward_eps():
+    fv = data.fair_value_multiple(100, 25, 20)
+    assert fv["fair"] == pytest.approx(125.0)
+    assert fv["eps_fwd"] == pytest.approx(5.0)
+    assert fv["source"] == "implied_fper"
+
+
+def test_fair_value_multiple_can_use_forward_eps_without_fper():
+    fv = data.fair_value_multiple(100, 25, None, eps_fwd=5)
+    assert fv["fair"] == pytest.approx(125.0)
+    assert fv["fper"] is None
 
 
 def test_fair_value_multiple_rejects_invalid_inputs():

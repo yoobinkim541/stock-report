@@ -96,10 +96,26 @@ def _price_chart(ticker, hist, avg_cost, trades, view_days=None):
     """가격 차트 — 봉 단위(5분~월)·라인/캔들·기술적 분석 도구(MA 세트·RSI·BB·일목)."""
     tf_label = st.segmented_control("봉", list(_TF), default="1일",
                                     label_visibility="collapsed", key="_chart_tf") or "1일"
-    c2, c3, _sp = st.columns([1.1, 0.5, 1.4])
+    c2, c3, c4, _sp = st.columns([1.1, 0.5, 0.5, 0.9])
     kind = c2.segmented_control("차트 종류", ["📈 라인", "🕯️ 캔들"], default="📈 라인",
                                 label_visibility="collapsed", key="_chart_kind")
     tf = _TF[tf_label]
+    # ── ⇄ 비교 — 최대 3종목 % 상대수익 오버레이 (사이드바 검색과 동일 정규화) ──
+    with c4.popover("⇄ 비교"):
+        st.caption("최대 3종목 — 기간 시작=0% 상대수익으로 겹쳐 비교")
+        _raw = st.multiselect(
+            "비교 종목 (한글·영문·티커)",
+            [t for t in ticker_names.universe() if t != ticker],
+            max_selections=3, format_func=ticker_names.search_label,
+            accept_new_options=True, key="_cmp_sel",
+            help="목록에 없어도 티커 직접 입력 가능 (예: AMD · BRK-B)")
+        cmp_tickers = []
+        for _r in _raw or []:
+            _tk = ticker_names.normalize_input(_r)
+            if _tk and _tk != ticker and _tk not in cmp_tickers:
+                cmp_tickers.append(_tk)
+            elif not _tk:
+                st.warning(f"'{_r}' 종목을 찾지 못했습니다")
     with c3.popover("📐 지표"):
         st.markdown("**상단 지표** — 가격 차트 오버레이")
         top = st.pills("상단 지표", _TOP_INDS, selection_mode="multi",
@@ -144,6 +160,17 @@ def _price_chart(ticker, hist, avg_cost, trades, view_days=None):
         ch_key = tuple(k for k, w in (("short", want_short), ("long", want_long)) if w)
         tls = cached.trendlines_for(ticker, tf, want_lines, ch_key)
     show_vol = "거래량" in bottom and "Volume" in getattr(df, "columns", [])
+    # 비교 종목 데이터 — 메인과 동일 봉 단위 파이프라인 (결측은 정직 스킵)
+    compare = {}
+    for _ct in cmp_tickers:
+        _cdf = cached.ohlc(_ct, "max") if tf == "1d" else cached.ohlc_tf(_ct, tf)
+        if _cdf is not None and not getattr(_cdf, "empty", True) and "Close" in _cdf.columns:
+            compare[ticker_names.label(_ct, maxlen=22)] = _cdf["Close"]
+        else:
+            st.caption(f"⚠️ {_ct} {tf_label}봉 데이터 없음 — 비교에서 제외")
+    if compare:
+        st.caption("⇄ 비교 모드 — % 상대수익 겹침 · 가격 지표(캔들·평단·MA·매물대 등) 비활성 "
+                   "· 거래량/RSI 는 메인 종목 기준")
     fig = charts.price_chart(
         df, label, kind=("candle" if kind == "🕯️ 캔들" else "line"),
         avg_cost=avg_cost, trades=trades, view_days=view_days, mas=mas,
@@ -152,7 +179,8 @@ def _price_chart(ticker, hist, avg_cost, trades, view_days=None):
         supertrend="슈퍼트렌드" in top, envelope="엔벨로프" in top,
         fractals="프랙탈" in top, vol_profile="매물대" in top,
         emas=emas, psar="파라볼릭 SAR" in top, donchian_on="프라이스 채널" in top,
-        vwap=("VWAP(세션)" in top and tf in ("5m", "1h")), avwap="앵커드 VWAP" in top)
+        vwap=("VWAP(세션)" in top and tf in ("5m", "1h")), avwap="앵커드 VWAP" in top,
+        compare=compare)
     event = None
     if legacy:
         try:
@@ -165,11 +193,13 @@ def _price_chart(ticker, hist, avg_cost, trades, view_days=None):
         # 커스텀 임베드 — 팬 시 보이는 구간에 y축(가격·거래량) 부드러운 자동 맞춤
         from dashboard import plotly_embed
         h = int(fig.layout.height or 420)
+        _bj = (plotly_embed.compare_bounds_json(df, compare, view_days)
+               if compare else None)                   # 비교 모드 — % 프레임으로 y 맞춤
         st.components.v1.html(
             plotly_embed.pannable_chart_html(
                 fig, df, height=h, view_days=view_days,
-                vol_axis="yaxis2" if show_vol else None),
-            height=h + 80)
+                vol_axis="yaxis2" if show_vol else None, bounds_json=_bj),
+            height=h + 128)
     st.caption("🖱️ 드래그=이동(y축 자동 맞춤) · 휠=확대/축소 · 더블클릭=원위치 · "
                "✏️ 우상단 모드바 직접 그리기(선·자유곡선·박스)·지우개 — 설정 변경 시 드로잉 초기화")
     selected = _selected_trade(event, trades or []) if legacy else None
@@ -466,13 +496,16 @@ def _valuation(ticker, price=None):
     m = v.get("metrics") or {}
     is_kr = m.get("market_type") == "kr"
     if m:
-        a = st.columns(4)
+        a = st.columns(5)
         a[0].metric("PER", data.f_ratio(m.get("per")))
         a[1].metric("Fwd PE", data.f_ratio(m.get("forward_pe")))
-        a[2].metric("PBR", data.f_ratio(m.get("pbr")))
-        a[3].metric("PSR", data.f_ratio(m.get("psr")))
+        a[2].metric("PEG", data.f_ratio(m.get("peg")),
+                    help="PER ÷ 예상 이익성장률. 1 전후는 성장 대비 밸류 부담이 낮다는 해석에 자주 쓰지만, 성장률 추정이 불안정하면 결측/왜곡될 수 있음.")
+        a[3].metric("PBR", data.f_ratio(m.get("pbr")))
+        a[4].metric("PSR", data.f_ratio(m.get("psr")))
         b = st.columns(4)
-        b[0].metric("ROE", data.f_frac_pct(m.get("roe")))
+        b[0].metric("ROE", data.f_frac_pct(m.get("roe")),
+                    help="자기자본이익률. 주주자본 대비 이익 창출력이며, PBR 해석과 함께 보는 품질 지표.")
         b[1].metric("배당수익률", data.f_pct(m.get("div_yield"), 2))
         b[2].metric("배당성장 3Y", data.f_frac_pct_s(m.get("div_growth_3y")))
         b[3].metric("EPS(TTM)", _f_krw(m.get("eps_ttm")) if is_kr else data.f_usd(m.get("eps_ttm")))
@@ -514,21 +547,21 @@ def _valuation(ticker, price=None):
             f"리비전 모멘텀 {data.f_ratio(c.get('revision_momentum'), 2)} "
             f"(▲{int(c.get('eps_rev_up_30d') or 0)}/▼{int(c.get('eps_rev_down_30d') or 0)}) · "
             f"애널 {int(c.get('n_analysts') or 0)}명")
-    # 💰 멀티플 적정가 — 포워드 EPS × 현재 PER (= 현재가 × PER/fPER). 사용자 채택 방식(1순위).
-    fv = data.fair_value_multiple(price, m.get("per"), m.get("forward_pe"))
+    # 💰 멀티플 유지 기준가 — Forward EPS × 현재 PER.
+    fv = data.fair_value_multiple(price, m.get("per"), m.get("forward_pe"), m.get("eps_fwd"))
     if fv:
         _fmt_px = _f_krw if is_kr else (lambda x: data.f_usd(x, 2))
         fc = st.columns(3)
-        fc[0].metric("💰 적정가 (EPS×PER)", _fmt_px(fv["fair"]),
+        fc[0].metric("💰 기준가 (Fwd EPS×PER)", _fmt_px(fv["fair"]),
                      delta=f"{fv['upside_pct']:+.1f}% vs 현재가",
-                     help="포워드 EPS × 현재 PER = 현재가 × (PER/fPER). "
-                          "이익이 컨센서스대로 성장하고 멀티플이 유지될 때의 가격 — "
-                          "re-rating 은 가정하지 않는 보수형.")
-        fc[1].metric("포워드 EPS (내재)", _fmt_px(fv["eps_fwd"]),
-                     help="현재가 ÷ fPER — 컨센서스 이익 기준")
-        fc[2].metric("PER → fPER", f"{fv['per']:.1f} → {fv['fper']:.1f}",
+                     help="Forward EPS × 현재 PER. EPS(TTM)×PER은 대체로 현재가를 재계산하므로, "
+                          "미래 이익 컨센서스를 현재 멀티플에 대입한 보수적 기준가로 표시합니다.")
+        fc[1].metric("Forward EPS", _fmt_px(fv["eps_fwd"]),
+                     help="컨센서스 Forward EPS. 없으면 현재가 ÷ fPER 로 내재 EPS를 역산합니다.")
+        _fper = fv.get("fper")
+        fc[2].metric("PER / fPER", f"{fv['per']:.1f} / {(_fper and f'{_fper:.1f}') or '—'}",
                      help="PER > fPER = 이익 성장 예상 (그 폭이 곧 상방)")
-        st.caption("⚠️ fPER 는 애널리스트 컨센서스 — 리비전에 따라 흔들림 · 멀티플 유지는 가정")
+        st.caption("⚠️ Forward EPS·fPER 는 애널리스트 컨센서스 — 리비전에 따라 흔들림 · 멀티플 유지는 가정")
 
     iv = cached.intrinsic(ticker)
     rim, ddm = iv.get("rim"), iv.get("ddm")
@@ -730,39 +763,82 @@ def _apply_action(fn):
         st.error(f"실패: {e}")
 
 
+_ACC_MONTHLY_MULT = {"매일": 21.0, "매주": 4.33, "매월": 1.0}
+
+
+def _money_krw(x) -> str:
+    try:
+        return f"₩{float(x):,.0f}"
+    except (TypeError, ValueError):
+        return "—"
+
+
 @st.fragment
 def _manage_position(ticker, cur_price, pos):
-    with st.expander("⚙️ 내 포지션 관리 — 추가·적립·축소 (실제 추적 포트폴리오 · 실주문 아님)",
-                     expanded=False):
-        cur = float(cur_price or 0.0)
-        held = pos["shares"] if pos else 0.0
-        st.caption(f"현재가 ${cur:,.2f} · 보유 {held:g}주"
-                   + (f" · 평단 {data.f_usd(pos.get('avg_price_usd'))}" if pos else " · 미보유"))
-        mode = st.segmented_control("작업", ["➕ 추가", "💧 적립(금액)", "➖ 축소"], default="➕ 추가",
-                                    key="mng_mode", label_visibility="collapsed") or "➕ 추가"
-        if mode == "💧 적립(금액)":
-            amt = st.number_input("적립 금액 ($)", min_value=0.0, value=100.0, step=10.0, key="acc_amt")
-            qty = (amt / cur) if cur > 0 else 0.0
-            st.caption(f"→ 현재가 기준 약 **{qty:.4f}주** 소수점 적립 (평단 자동 재계산)")
-            if st.button("💧 적립 기록", key="acc_btn", type="primary",
-                         disabled=(amt <= 0 or cur <= 0), width="stretch"):
-                _apply_action(lambda: _hm().buy_holding(ticker, round(qty, 4), round(cur, 4)))
-        elif mode == "➖ 축소":
-            if not pos:
-                st.info("보유하지 않은 종목입니다.")
-            else:
-                q = st.number_input(f"축소 주수 (0 = 전량, 보유 {held:g})", min_value=0.0,
-                                    max_value=float(held), value=0.0, step=0.0001, format="%.4f", key="red_qty")
-                lab = "전량 정리" if q <= 0 else f"{q:.4f}주 축소"
-                if st.button(f"➖ {lab} 기록", key="red_btn", width="stretch"):
-                    _apply_action(lambda: _hm().sell_holding(ticker, q if q > 0 else None, price_usd=round(cur, 4)))
-        else:                                                       # 추가(신규·증액)
-            c = st.columns(2)
-            q = c[0].number_input("주수 (소수점 가능)", min_value=0.0, value=1.0, step=0.0001,
-                                  format="%.4f", key="add_qty")
-            px = c[1].number_input("단가 ($)", min_value=0.0, value=round(cur, 2), step=0.01, key="add_px")
-            st.caption(f"→ 약 ${q * px:,.2f} 취득 기록 (평단 자동 재계산)")
-            if st.button("➕ 보유 추가 기록", key="add_btn", type="primary",
-                         disabled=(q <= 0 or px <= 0), width="stretch"):
-                _apply_action(lambda: _hm().buy_holding(ticker, round(q, 4), round(px, 4)))
-        st.caption("holding_manager 안전기록(atomic·교차프로세스 락) · 봇 /holding 과 동일 · 실계좌 주문 없음(기록 전용)")
+    cur = float(cur_price or 0.0)
+    held = pos["shares"] if pos else 0.0
+    st.divider()
+    st.markdown("##### ⚙️ 내 포지션 관리")
+    top = st.columns([1.15, 1, 1, 1])
+    top[0].metric("현재가", data.f_usd(cur))
+    top[1].metric("보유주수", f"{held:g}주" if held else "미보유")
+    top[2].metric("평단", data.f_usd(pos.get("avg_price_usd")) if pos else "—")
+    top[3].metric("평가액", data.f_usd(pos.get("value"), 0) if pos else "—")
+
+    mode = st.segmented_control("작업", ["💧 적립", "➕ 추가", "➖ 축소"], default="💧 적립",
+                                key="mng_mode_v2", label_visibility="collapsed") or "💧 적립"
+    if mode == "💧 적립":
+        c1, c2, c3 = st.columns([1, 1, 1])
+        currency = c1.segmented_control("입력 통화", ["₩ 원화", "$ 달러"], default="₩ 원화",
+                                        key="acc_currency")
+        freq = c2.segmented_control("주기", ["매일", "매주", "매월"], default="매주",
+                                    key="acc_freq")
+        fx = 1380.0
+        if currency == "₩ 원화":
+            amt = c3.number_input("적립 금액 (₩)", min_value=0.0, value=100_000.0,
+                                  step=10_000.0, format="%.0f", key="acc_amt_krw")
+            fx = st.number_input("적용 환율 (₩/$)", min_value=500.0, max_value=2500.0,
+                                 value=1380.0, step=1.0, format="%.1f", key="acc_fx",
+                                 help="원화 예산을 USD 매수금액으로 환산할 때 쓰는 환율")
+            amount_usd = amt / fx if fx > 0 else 0.0
+            amount_label = _money_krw(amt)
+        else:
+            amt = c3.number_input("적립 금액 ($)", min_value=0.0, value=100.0,
+                                  step=10.0, key="acc_amt_usd")
+            amount_usd = amt
+            amount_label = data.f_usd(amt)
+        qty = (amount_usd / cur) if cur > 0 else 0.0
+        monthly_usd = amount_usd * _ACC_MONTHLY_MULT.get(freq, 1.0)
+        p = st.columns(4)
+        p[0].metric(f"{freq} 금액", amount_label)
+        p[1].metric("환산 USD", data.f_usd(amount_usd))
+        p[2].metric("예상 수량", f"{qty:.4f}주")
+        p[3].metric("월 환산", data.f_usd(monthly_usd, 0))
+        st.caption(f"현재가 기준 1회 적립 수량 · {freq} 주기 메모 · 평단 자동 재계산")
+        note = f"DCA {freq} {amount_label} ({amount_usd:.2f} USD"
+        if currency == "₩ 원화":
+            note += f", fx {fx:.1f}"
+        note += ")"
+        if st.button(f"💧 {freq} 적립 1회 기록", key="acc_btn", type="primary",
+                     disabled=(amount_usd <= 0 or qty <= 0 or cur <= 0), width="stretch"):
+            _apply_action(lambda: _hm().buy_holding(
+                ticker, round(qty, 4), round(cur, 4), note=note))
+    elif mode == "➖ 축소":
+        if not pos:
+            st.info("보유하지 않은 종목입니다.")
+        else:
+            q = st.number_input(f"축소 주수 (0 = 전량, 보유 {held:g})", min_value=0.0,
+                                max_value=float(held), value=0.0, step=0.0001, format="%.4f", key="red_qty")
+            lab = "전량 정리" if q <= 0 else f"{q:.4f}주 축소"
+            if st.button(f"➖ {lab} 기록", key="red_btn", width="stretch"):
+                _apply_action(lambda: _hm().sell_holding(ticker, q if q > 0 else None, price_usd=round(cur, 4)))
+    else:                                                       # 추가(신규·증액)
+        c = st.columns(2)
+        q = c[0].number_input("주수 (소수점 가능)", min_value=0.0, value=1.0, step=0.0001,
+                              format="%.4f", key="add_qty")
+        px = c[1].number_input("단가 ($)", min_value=0.0, value=round(cur, 2), step=0.01, key="add_px")
+        st.caption(f"→ 약 ${q * px:,.2f} 취득 기록 (평단 자동 재계산)")
+        if st.button("➕ 보유 추가 기록", key="add_btn", type="primary",
+                     disabled=(q <= 0 or px <= 0), width="stretch"):
+            _apply_action(lambda: _hm().buy_holding(ticker, round(q, 4), round(px, 4)))
+    st.caption("holding_manager 안전기록(atomic·교차프로세스 락) · 봇 /holding 과 동일 · 실계좌 주문 없음(기록 전용)")

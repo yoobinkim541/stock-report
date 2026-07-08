@@ -38,7 +38,8 @@ def _us_ticker():
     info = {"trailingPE": 25.3, "forwardPE": 22.0, "priceToBook": 12.0,
             "priceToSalesTrailing12Months": 11.0, "returnOnEquity": 0.35,
             "trailingEps": 11.8, "forwardEps": 13.2, "dividendYield": 0.008,
-            "fiveYearAvgDividendYield": 0.9, "payoutRatio": 0.25}
+            "fiveYearAvgDividendYield": 0.9, "payoutRatio": 0.25,
+            "trailingPegRatio": 1.42}
     idx = pd.date_range("2022-03-01", periods=16, freq="QS")     # 4년 분기배당
     divs = pd.Series([0.5 * (1.1 ** (i // 4)) for i in range(16)], index=idx)  # 연 +10%
     edates = pd.DataFrame(
@@ -61,6 +62,7 @@ def test_valuation_metrics_us():
     from providers import earnings_data as ed
     v = ed.valuation_metrics("MSFT", _t=_us_ticker())
     assert v["per"] == 25.3 and v["pbr"] == 12.0 and v["psr"] == 11.0
+    assert v["forward_pe"] == 22.0 and v["peg"] == 1.42
     assert v["roe"] == 0.35 and v["eps_ttm"] == 11.8 and v["eps_fwd"] == 13.2
     assert v["div_yield"] == 0.008 and v["payout"] == 0.25
     assert abs(v["div_growth_1y"] - 0.10) < 1e-6     # 결정적 10%

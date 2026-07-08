@@ -47,6 +47,13 @@ def test_embed_cdn_failure_notice():
     assert "CDN 로드 실패" in html                              # 폴백 안내 문구 포함
 
 
+def test_embed_reserves_chart_height():
+    fig = charts.price_chart(_hist(), "T", show_rsi=True, show_volume=True)
+    html = plotly_embed.pannable_chart_html(fig, _hist(), height=612)
+    assert "min-height:612px" in html
+    assert "fig.layout.height = 612" in html
+
+
 def test_embed_callouts_follow_pan():
     """최고/최저 콜아웃 팬 추종 계약 — name 태그·JS 핸들러·현재가 상수."""
     hist = _hist()
@@ -56,3 +63,26 @@ def test_embed_callouts_follow_pan():
     html = plotly_embed.pannable_chart_html(fig, hist, view_days=60)
     for token in ("function callouts", 'anns[i].name === "tn-hi"', "const lastClose ="):
         assert token in html, f"누락: {token}"
+
+
+def test_compare_bounds_json_pct_scale():
+    """비교 프레임 — % 스케일·시간 정렬·메인 행만 거래량 탑재."""
+    hist = _hist(40)                                   # Close=100 평평 → 메인 pct=0
+    idx = hist.index
+    cmp_s = pd.Series([50.0 + i for i in range(40)], index=idx)   # +78% 까지 상승
+    b = json.loads(plotly_embed.compare_bounds_json(hist, {"C": cmp_s}, None))
+    assert len(b) == 80                                 # 메인 40 + 비교 40
+    assert all(b[i][0] <= b[i + 1][0] for i in range(len(b) - 1))   # ms 오름차순
+    assert max(r[2] for r in b) < 90                    # % 스케일 (가격 100·50 아님)
+    assert any(abs(r[2] - 78.0) < 1e-6 for r in b)      # 비교 마지막 = (89/50-1)=+78%
+    vols = [r[3] for r in b if r[3] > 0]
+    assert len(vols) == 40                              # 거래량은 메인 행에만
+
+
+def test_pannable_bounds_override():
+    """bounds_json 오버라이드가 임베드 JS 프레임을 대체 (비교 모드 % y-fit)."""
+    hist = _hist(30)
+    fig = charts.price_chart(hist, "T")
+    html = plotly_embed.pannable_chart_html(fig, hist, bounds_json="[[1,2.5,2.5,0]]")
+    assert "[[1, 2.5, 2.5, 0]]" in html or "[[1,2.5,2.5,0]]" in html
+    assert '"99.0"' not in html

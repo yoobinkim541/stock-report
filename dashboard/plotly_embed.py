@@ -38,11 +38,49 @@ def price_bounds_json(hist) -> str:
     return json.dumps(out)
 
 
+def compare_bounds_json(main_hist, compare: dict, view_days=None) -> str:
+    """비교 모드 y 자동맞춤 프레임 — 전 시리즈를 %로 정규화해 병합 (JS yFit 소비).
+
+    행 = [epoch_ms, pct, pct, volume]. 메인 행만 거래량 탑재(거래량 패널=메인 기준).
+    yFit 은 구간 내 행들의 min/max 스캔이라 시리즈별 행이 섞여 있어도 동작.
+    """
+    from dashboard.charts import normalize_pct
+    rows = []
+
+    def _rows(series, vol=None):
+        ns = normalize_pct(series, view_days)
+        if ns is None:
+            return
+        for i, (ts, p) in enumerate(zip(ns.index, ns.values)):
+            if p == p:                                       # NaN 스킵
+                v = 0.0
+                if vol is not None:
+                    try:
+                        vv = float(vol.loc[ts])
+                        v = vv if vv == vv else 0.0
+                    except Exception:
+                        v = 0.0
+                rows.append([int(ts.timestamp() * 1000), float(p), float(p), v])
+
+    if main_hist is not None and not getattr(main_hist, "empty", True):
+        cols = set(main_hist.columns)
+        _rows(main_hist["Close"], main_hist["Volume"] if "Volume" in cols else None)
+    for s in (compare or {}).values():
+        if s is not None and len(s):
+            _rows(s)
+    rows.sort(key=lambda r: r[0])
+    return json.dumps(rows)
+
+
 def pannable_chart_html(fig, hist, *, height: int = 460, view_days=None,
-                        vol_axis: str | None = None) -> str:
-    """fig(charts.price_chart 산출) → 자동 y 리스케일·드로잉·인차트 마커 상세 임베드 HTML."""
+                        vol_axis: str | None = None,
+                        bounds_json: str | None = None) -> str:
+    """fig(charts.price_chart 산출) → 자동 y 리스케일·드로잉·인차트 마커 상세 임베드 HTML.
+
+    bounds_json — y 맞춤 프레임 오버라이드 (비교 모드: compare_bounds_json 의 % 프레임).
+    """
     fig_json = fig.to_json()
-    bounds = price_bounds_json(hist)
+    bounds = bounds_json if bounds_json is not None else price_bounds_json(hist)
     config = json.dumps({
         "scrollZoom": True, "displaylogo": False, "displayModeBar": True,
         "modeBarButtonsToRemove": ["select2d", "lasso2d"],
@@ -55,7 +93,7 @@ def pannable_chart_html(fig, hist, *, height: int = 460, view_days=None,
     except Exception:
         last_close = 0.0
     return f"""
-<div id="chart" style="width:100%"></div>
+<div id="chart" style="width:100%;min-height:{height}px"></div>
 <div id="detail" style="display:none;margin-top:6px;padding:8px 12px;border:1px solid #1e222d;
   border-radius:8px;background:#131722;color:#d1d4dc;
   font:12px 'JetBrains Mono', ui-monospace, monospace"></div>

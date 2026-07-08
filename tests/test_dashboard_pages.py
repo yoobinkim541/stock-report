@@ -277,6 +277,11 @@ def test_ticker_position_management_renders():
     assert not at.exception, str(at.exception)
     assert len(at.number_input) >= 1                 # 주수/단가 입력
     assert any("기록" in str(b.label) for b in at.button)   # 추가/적립/축소 기록 버튼
+    assert any("적립 금액 (₩)" in str(getattr(n, "label", "")) for n in at.number_input)
+    assert any("적용 환율" in str(getattr(n, "label", "")) for n in at.number_input)
+    seg = " ".join(str(s) for s in at.segmented_control)
+    assert "매일" in seg and "매주" in seg and "매월" in seg
+    assert any("적립 1회 기록" in str(b.label) for b in at.button)
     # 안전 라벨(실주문 아님) 노출
     assert any("실주문 아님" in str(c.value) or "기록 전용" in str(c.value) for c in at.caption)
 

@@ -163,7 +163,7 @@ def list_holdings() -> str:
 
 
 def buy_holding(ticker: str, shares: float, price_usd: float,
-                fractional: bool = False) -> str:
+                fractional: bool = False, note: str | None = None) -> str:
     """
     매수 기록: 기존 포지션 있으면 평단가 재계산, 없으면 신규 추가.
     fractional=True 이면 소수점 계좌에 기록.
@@ -201,7 +201,7 @@ def buy_holding(ticker: str, shares: float, price_usd: float,
                 "ticker": ticker, "side": "buy", "qty": shares, "price": price_usd,
                 "avg_price": new_avg, "account": "overseas_fractional" if fractional else "overseas_general",
                 "source": "manual_holding", "market": "US", "currency": "USD",
-                "note": "holding buy",
+                "note": note or "holding buy",
             }
             msg = (
                 f"✅ 매수 기록\n"
@@ -224,7 +224,7 @@ def buy_holding(ticker: str, shares: float, price_usd: float,
                 "ticker": ticker, "side": "buy", "qty": shares, "price": price_usd,
                 "avg_price": price_usd, "account": "overseas_fractional" if fractional else "overseas_general",
                 "source": "manual_holding", "market": "US", "currency": "USD",
-                "note": "holding buy new",
+                "note": note or "holding buy new",
             }
             msg = (
                 f"✅ 신규 포지션 추가\n"

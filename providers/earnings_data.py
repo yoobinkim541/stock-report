@@ -92,7 +92,7 @@ def _dividend_cagr(divs, years: int):
 
 
 def valuation_metrics(ticker: str, *, _t=None) -> dict:
-    """PER·forwardPE·PBR·PSR·ROE·EPS(ttm/fwd)·배당률·payout·배당성장(1y/3y). 결측 None.
+    """PER·forwardPE·PEG·PBR·PSR·ROE·EPS(ttm/fwd)·배당률·payout·배당성장(1y/3y). 결측 None.
 
     US/KR 공통(yfinance .info + dividends). KR 은 forward 계열이 대체로 None(열화모드).
     """
@@ -105,7 +105,7 @@ def valuation_metrics(ticker: str, *, _t=None) -> dict:
         except Exception as e:
             logger.debug("KR DART 밸류에이션 실패 %s: %s", ticker, e)
 
-    out = {k: None for k in ("per", "forward_pe", "pbr", "psr", "roe", "eps_ttm", "eps_fwd",
+    out = {k: None for k in ("per", "forward_pe", "peg", "pbr", "psr", "roe", "eps_ttm", "eps_fwd",
                              "div_yield", "div_yield_5y_avg", "payout", "div_growth_1y", "div_growth_3y")}
     out["market_type"] = "kr" if is_kr(ticker) else "us"
     try:
@@ -118,6 +118,7 @@ def valuation_metrics(ticker: str, *, _t=None) -> dict:
             info = {}
         out["per"] = _f(info.get("trailingPE"))
         out["forward_pe"] = _f(info.get("forwardPE"))
+        out["peg"] = _f(info.get("trailingPegRatio") or info.get("pegRatio"))
         out["pbr"] = _f(info.get("priceToBook"))
         out["psr"] = _f(info.get("priceToSalesTrailing12Months"))
         out["roe"] = _f(info.get("returnOnEquity"))

@@ -419,6 +419,8 @@ def test_price_chart_indicators_composite():
     rsi_tr = next(tr for tr in fig.data if tr.name == "RSI(14)")
     assert rsi_tr.yaxis == "y2"                                # 하단 서브패널
     assert fig.layout.yaxis2.range == (0, 100)
+    assert fig.layout.height >= 540 and fig.layout.margin.b >= 64
+    assert fig.layout.yaxis2.domain[1] - fig.layout.yaxis2.domain[0] >= 0.27
     # 전부 끄면 가격 트레이스만
     fig2 = charts.price_chart(hist, "T", kind="line", mas=[], show_rsi=False)
     assert [tr.name for tr in fig2.data] == ["T"]
@@ -469,6 +471,9 @@ def test_price_chart_three_pane_layout():
     assert by_name["거래량"].yaxis == "y2" and by_name["거래량 MA20"].yaxis == "y2"
     assert by_name["RSI(14)"].yaxis == "y3" and by_name["RSI 시그널(14)"].yaxis == "y3"
     assert fig.layout.yaxis3.range == (0, 100)
+    assert fig.layout.height >= 680 and fig.layout.margin.b >= 64
+    assert fig.layout.xaxis.automargin is True and fig.layout.yaxis3.automargin is True
+    assert fig.layout.yaxis3.domain[1] - fig.layout.yaxis3.domain[0] >= 0.20
     anns = " ".join(a.text for a in fig.layout.annotations)
     assert "+" in anns and "-" in anns and "<b>" in anns       # 최고/최저 % + 현재가 칩
     # 거래량만 (RSI off) → 거래량 y2
@@ -539,3 +544,47 @@ def test_price_chart_second_wave_indicators():
     d2_first = sv.iloc[40]
     tp_first = float((h2["High"].iloc[40] + h2["Low"].iloc[40] + h2["Close"].iloc[40]) / 3)
     assert d2_first == pytest.approx(tp_first)          # 새 세션 첫 봉 = 그 봉 tp (리셋)
+
+
+# ── I3 종목 비교 오버레이 (% 상대수익) ────────────────────────────────
+def test_normalize_pct_anchor_zero():
+    """정규화 시작점 = 표시창 시작 봉 0% (앵커 이전 구간도 같은 앵커로 연속)."""
+    idx = pd.date_range("2025-01-01", periods=100, freq="D")
+    s = pd.Series(range(100, 200), index=idx, dtype=float)
+    n = charts.normalize_pct(s, view_days=30)
+    anchor_ts = idx[-1] - pd.Timedelta(days=30)
+    first_in_win = n[n.index >= anchor_ts].iloc[0]
+    assert abs(first_in_win) < 1e-9                    # 창 시작 = 0%
+    assert n.iloc[0] < 0                                # 앵커 이전(더 쌈) → 음수 %
+    n_all = charts.normalize_pct(s)                     # view_days 없음 → 첫 봉 앵커
+    assert abs(n_all.iloc[0]) < 1e-9
+    assert abs(n_all.iloc[-1] - 99.0) < 1e-9            # 100→199 = +99%
+
+
+def test_price_chart_compare_mode():
+    """비교 모드 — 정규화 라인 2+, 가격절대 오버레이(캔들·평단·MA) 자동 숨김·% 축."""
+    import plotly.graph_objects as go
+    hist = _ohlc(80)
+    cmp_s = pd.Series([50.0 + i * 2 for i in range(80)], index=hist.index)
+    fig = charts.price_chart(hist, "MAIN", kind="candle", avg_cost=115.0,
+                             mas=(20,), compare={"CMP (X)": cmp_s})
+    assert not any(isinstance(tr, go.Candlestick) for tr in fig.data)   # 캔들 강제 해제
+    names = [tr.name for tr in fig.data]
+    assert "MAIN" in names and "CMP (X)" in names       # 두 시리즈 존재
+    assert not any(n and n.startswith("MA") and n != "MAIN" for n in names)  # MA 숨김
+    hlines = [s for s in fig.layout.shapes if s.type == "line" and s.y0 == s.y1]
+    assert all(s.y0 == 0 for s in hlines)               # 평단 hline 없음·0% 기준선만
+    assert fig.layout.yaxis.ticksuffix == "%"
+    main_tr = next(tr for tr in fig.data if tr.name == "MAIN")
+    assert abs(main_tr.y[0]) < 1e-9                     # 시작 0%
+    assert not [a for a in fig.layout.annotations or [] if a.name in ("tn-hi", "tn-lo")]
+
+
+def test_price_chart_compare_empty_series_ignored():
+    """비교 시리즈가 전부 무효(None·짧음)면 일반 모드 유지."""
+    import plotly.graph_objects as go
+    hist = _ohlc(60)
+    short = pd.Series([1.0], index=hist.index[:1])
+    fig = charts.price_chart(hist, "M", kind="candle",
+                             compare={"a": None, "b": short})
+    assert any(isinstance(tr, go.Candlestick) for tr in fig.data)   # 캔들 유지 = 일반 모드

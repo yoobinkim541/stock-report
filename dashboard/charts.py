@@ -499,6 +499,28 @@ def _rsi_series(close, n: int = 14):
 
 _MA_COLORS = {5: "#e879f9", 10: "#22d3ee", 20: "#f59e0b", 60: "#9333ea",
               120: "#34d399", 200: "#f43f5e"}
+_CMP_COLORS = ["#f59e0b", "#e879f9", "#22d3ee"]   # 비교 종목 팔레트 (메인=BLUE)
+
+
+def normalize_pct(series, view_days=None):
+    """종가 시리즈 → 표시창 시작=0% 기준 상대수익률(%) — 비교 오버레이용 (순수).
+
+    앵커 = 마지막 봉 − view_days 이후 첫 봉의 값(없으면 첫 봉). 앵커 이전 구간도
+    같은 앵커로 환산해 팬 백 시 연속 표시(리베이스 앵커는 표시창 시작 고정 — v2 JS 재기준).
+    """
+    import pandas as pd
+    s = series.dropna()
+    if s is None or len(s) == 0:
+        return s
+    anchor_val = float(s.iloc[0])
+    if view_days:
+        start = s.index[-1] - pd.Timedelta(days=int(view_days))
+        after = s[s.index >= start]
+        if len(after):
+            anchor_val = float(after.iloc[0])
+    if anchor_val == 0:
+        return s * float("nan")
+    return (s / anchor_val - 1.0) * 100.0
 
 
 def _add_trend_lines(fig, items: list[dict]) -> None:
@@ -539,17 +561,29 @@ def price_chart(hist, ticker: str = "", *, kind: str = "line", avg_cost=None,
                 trend_lines=None, show_volume: bool = False, supertrend: bool = False,
                 envelope: bool = False, fractals: bool = False, vol_profile: bool = False,
                 emas=(), psar: bool = False, donchian_on: bool = False,
-                vwap: bool = False, avwap: bool = False):
+                vwap: bool = False, avwap: bool = False, compare=None):
     """가격 차트 + 기술적 분석 도구 (TradingView 풍 멀티패널).
 
     패널: 가격(+MA·BB·일목·추세선·평단·기간 최고/최저·현재가 라벨) / 거래량(방향색 바+MA20)
     / RSI(14)+시그널(14MA)+30~70 밴드. 서브패널 있으면 레인지슬라이더 비활성(plotly 제약 —
     팬/줌 유지). 지표는 범례 클릭으로 개별 토글 가능.
+
+    compare = {라벨: 종가 시리즈} — 비교 모드: 전 시리즈를 표시창 시작=0% 상대수익률로
+    정규화해 겹침(y축 %). 가격절대 오버레이(캔들·평단·MA·BB·일목·추세선·상단지표·거래마커·
+    최고/최저 콜아웃)는 자동 비활성 — RSI·거래량 서브패널은 메인 종목 기준 유지.
     """
     go = _go()
     cols = set(getattr(hist, "columns", []))
     if hist is None or getattr(hist, "empty", True) or "Close" not in cols:
         return _t(go.Figure())
+    compare = {k: v for k, v in (compare or {}).items()
+               if v is not None and len(getattr(v, "dropna", lambda: [])()) >= 2}
+    cmp_mode = bool(compare)
+    if cmp_mode:                       # 가격절대 오버레이 전부 비활성 (% 축과 공존 불가)
+        kind, avg_cost, trades, trend_lines = "line", None, None, None
+        mas, emas = (), ()
+        bollinger = ichimoku = supertrend = envelope = fractals = vol_profile = False
+        psar = donchian_on = vwap = avwap = False
     close = hist["Close"]
     has_ohlc = {"Open", "High", "Low"} <= cols
     show_volume = show_volume and "Volume" in cols
@@ -559,14 +593,25 @@ def price_chart(hist, ticker: str = "", *, kind: str = "line", avg_cost=None,
     rsi_row = panes if show_rsi else None
     if panes > 1:
         from plotly.subplots import make_subplots
-        heights = {1: [1.0], 2: [0.74, 0.26], 3: [0.60, 0.18, 0.22]}[panes]
+        heights = {1: [1.0], 2: [0.70, 0.30], 3: [0.58, 0.19, 0.23]}[panes]
         fig = make_subplots(rows=panes, cols=1, shared_xaxes=True,
-                            row_heights=heights, vertical_spacing=0.03)
+                            row_heights=heights, vertical_spacing=0.05)
     else:
         fig = go.Figure()
 
     # ── 메인: 가격 ──
-    if kind == "candle" and has_ohlc:
+    if cmp_mode:                       # 비교 — % 상대수익 라인 (메인 + 비교 각자 인덱스)
+        n_main = normalize_pct(close, view_days)
+        fig.add_trace(go.Scatter(x=n_main.index, y=n_main, name=ticker or "메인",
+                                 line=dict(color=_BLUE, width=2)))
+        for i, (lab, s) in enumerate(compare.items()):
+            ns = normalize_pct(s, view_days)
+            fig.add_trace(go.Scatter(x=ns.index, y=ns, name=lab,
+                                     line=dict(color=_CMP_COLORS[i % len(_CMP_COLORS)],
+                                               width=1.6)))
+        fig.add_hline(y=0, line=dict(color=theme.MUTED, dash="dot", width=0.8),
+                      row=1 if panes > 1 else None, col=1 if panes > 1 else None)
+    elif kind == "candle" and has_ohlc:
         fig.add_trace(go.Candlestick(
             x=hist.index, open=hist["Open"], high=hist["High"], low=hist["Low"],
             close=close, name=ticker or "OHLC",
@@ -625,7 +670,11 @@ def price_chart(hist, ticker: str = "", *, kind: str = "line", avg_cost=None,
     _add_trade_markers(fig, hist, trades or [])
 
     # ── 기간 최고/최저 콜아웃 + 현재가 점선·우측 라벨 (TradingView 풍) ──
-    _add_extremes_and_last(fig, hist, view_days, panes)
+    if cmp_mode:                       # % 축 — 가격 콜아웃 대신 % 포맷만
+        fig.update_yaxes(ticksuffix="%", row=1 if panes > 1 else None,
+                         col=1 if panes > 1 else None)
+    else:
+        _add_extremes_and_last(fig, hist, view_days, panes)
 
     # ── 거래량 패널 (방향색 바 + 거래량 MA20) ──
     if show_volume:
@@ -657,10 +706,13 @@ def price_chart(hist, ticker: str = "", *, kind: str = "line", avg_cost=None,
             fig.add_hline(y=lv, line=dict(color=c, dash="dot", width=0.7), row=rsi_row, col=1)
         fig.update_yaxes(range=[0, 100], row=rsi_row, col=1, tickvals=[30, 50, 70])
 
-    fig.update_layout(margin=dict(t=10, b=10, l=10, r=10), dragmode="pan",
+    chart_height = {1: 380, 2: 540, 3: 680}[panes]
+    fig.update_layout(margin=dict(t=14, b=64, l=14, r=18), dragmode="pan",
                       legend=dict(orientation="h", y=1.08, font=dict(size=10)),
-                      hovermode="x unified", height={1: 380, 2: 470, 3: 560}[panes],
+                      hovermode="x unified", height=chart_height,
                       bargap=0.1, newshape=dict(line=dict(color="#f59e0b", width=2)))
+    fig.update_xaxes(automargin=True)
+    fig.update_yaxes(automargin=True)
     _t(fig)
     if panes > 1:
         fig.update_xaxes(rangeslider_visible=False)   # 서브플롯 제약 — 팬/줌으로 탐색
