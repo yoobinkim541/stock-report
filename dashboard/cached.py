@@ -196,3 +196,13 @@ def trendlines_for(t, tf, lines, ch_key):
 @st.cache_data(ttl=300, show_spinner=False)
 def market_tape():
     return views.market_tape()
+
+
+@st.cache_data(ttl=_TTL_HEAVY, show_spinner="TR·PR 계산 중…")
+def tr_pr(t, years=5):
+    return views.etf_tr_pr(t, years)
+
+
+@st.cache_data(ttl=_TTL_HEAVY, show_spinner="동종 ETF 비교 중…")
+def etf_peers(t):
+    return views.etf_peer_compare(t)

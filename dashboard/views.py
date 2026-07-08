@@ -1043,3 +1043,21 @@ def market_tape() -> list[dict]:
         except Exception:
             continue
     return out
+
+
+def etf_tr_pr(ticker: str, years: int = 5):
+    """ETF TR(배당재투자)/PR(가격) 시리즈 — {"tr","pr","asof"} | None. graceful."""
+    try:
+        from providers import etf_compare
+        return etf_compare.tr_pr_series(ticker, years)
+    except Exception:
+        return None
+
+
+def etf_peer_compare(ticker: str) -> dict:
+    """동종그룹 지표+점수 — {"group","rows","asof"} | {} (그룹 없음/실패). graceful."""
+    try:
+        from providers import etf_compare
+        return etf_compare.peer_report(ticker)
+    except Exception:
+        return {}
