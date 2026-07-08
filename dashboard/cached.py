@@ -140,7 +140,7 @@ def ohlc(t, period="6mo"):
         return None
 
 
-@st.cache_data(ttl=8, show_spinner=False)
+@st.cache_data(ttl=3, show_spinner=False)
 def realtime_quote(ticker):
     """실시간 시세+호가 (KIS·8s 캐시). off/미보유 시 None → yfinance 폴백."""
     return views.realtime_quote(ticker)

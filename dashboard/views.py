@@ -496,8 +496,17 @@ def realtime_quote(ticker: str) -> dict | None:
         price = market_data._realtime_current(t)
     except Exception:
         price = None
+    try:                                    # 2) WS 실시간 캐시 호가 (워치리스트 = 1초 갱신·진짜 실시간)
+        from providers import realtime_quotes
+        ob = realtime_quotes.get_orderbook(sym, max_age_s=15)
+        if ob and (ob.get("bids") or ob.get("asks")):
+            return {"price": price or realtime_quotes.get_price(sym),
+                    "bids": ob.get("bids") or [], "asks": ob.get("asks") or [],
+                    "ts": ob.get("ts"), "source": "kis_ws", "market": market}
+    except Exception:
+        pass
     snap = None
-    try:                                    # 2) REST 온디맨드 (임의 티커·호가 포함)
+    try:                                    # 3) REST 온디맨드 (임의 티커·호가 포함 — 폴백)
         from providers import kis_quote
         snap = kis_quote.get_snapshot(sym, market=market)
     except Exception:

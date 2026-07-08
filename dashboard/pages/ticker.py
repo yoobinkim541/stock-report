@@ -203,9 +203,12 @@ def _live_top(ticker, hist, yf_price, prev, pos):
 
 
 
-@st.fragment(run_every=8)
+@st.fragment(run_every=4)
 def _orderbook_section(ticker, hist, prev):
-    """실시간 호가 — 차트 아래 접이식(기본 접힘·화면 점유 최소화), 8초 자동갱신."""
+    """실시간 호가 — 차트 아래 접이식(기본 접힘·화면 점유 최소화), 4초 자동갱신.
+
+    호가 원천: WS 실시간 캐시(워치리스트 = 1초 스트림) 우선 → REST 폴백 (views.realtime_quote).
+    """
     rq = cached.realtime_quote(ticker)
     if not rq or not (rq.get("bids") or rq.get("asks")):
         return                                     # 호가 없음(US/장외) — 섹션 자체 생략

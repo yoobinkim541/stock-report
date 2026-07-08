@@ -122,7 +122,7 @@ def rating_gauge_html(score, verdict="", sub="") -> str:
     if not verdict:
         verdict = _GAUGE_ZONES[min(n - 1, int((score + 1) / 2 * n))][1]
     ly = cy + 16
-    return f'''<div class="tn-gauge">
+    return f'''<div class="tn-gauge" style="max-width:260px;margin:0 auto">
   <svg viewBox="0 0 200 126" width="100%" preserveAspectRatio="xMidYMid meet">
     {arcs}
     <line x1="{cx}" y1="{cy}" x2="{nx:.1f}" y2="{ny:.1f}" stroke="{TEXT}" stroke-width="3" stroke-linecap="round"/>
@@ -562,14 +562,18 @@ def orderbook_ladder_html(bids, asks, *, prev_close=None, price=None,
         qty = f"{q:,.0f}"
         px_cell = (f"<td style='width:38%;text-align:center;padding:1px 4px;"
                    f"font-family:{_MONO};font-size:12px'>{px:,.0f}{_pct(px)}</td>")
-        bar = (f"<div style='background:{bar_color}26;border-left:2px solid {bar_color};"
-               f"width:{w}%;padding:0 4px;font-size:10.5px;font-family:{_MONO};"
-               f"color:{bar_color};white-space:nowrap'>{qty}</div>")
-        if side == "ask":   # 잔량 좌측 (우측정렬 바)
-            return (f"<tr><td style='width:31%'><div style='display:flex;justify-content:flex-end'>"
-                    f"{bar}</div></td>{px_cell}<td style='width:31%'></td></tr>")
-        return (f"<tr><td style='width:31%'></td>{px_cell}"
-                f"<td style='width:31%'><div style='display:flex'>{bar}</div></td></tr>")
+        # 바 = 배경 absolute 레이어, 텍스트 = 전폭 오버레이 → 바가 좁아도 숫자는 절대 안 꺾임
+        anchor = "right" if side == "ask" else "left"
+        border = "left" if side == "ask" else "right"
+        cell = (f"<td style='width:31%'><div style='position:relative;min-height:16px'>"
+                f"<div style='position:absolute;top:1px;bottom:1px;{anchor}:0;width:{w}%;"
+                f"background:{bar_color}26;border-{border}:2px solid {bar_color}'></div>"
+                f"<div style='position:relative;text-align:{anchor};padding:1px 6px;"
+                f"font-family:{_MONO};font-size:10.5px;color:{bar_color};"
+                f"white-space:nowrap'>{qty}</div></div></td>")
+        if side == "ask":
+            return f"<tr>{cell}{px_cell}<td style='width:31%'></td></tr>"
+        return f"<tr><td style='width:31%'></td>{px_cell}{cell}</tr>"
 
     rows = [_row(p, q, "ask") for p, q in sorted(asks, key=lambda x: -x[0])]
     if price:
