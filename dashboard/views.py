@@ -1095,3 +1095,12 @@ def accumulation_plan() -> dict:
         return order_generator.build() or {}
     except Exception:
         return {}
+
+
+def fx_now() -> float | None:
+    """USD/KRW 실시간 환율 (graceful None) — 적립 폼 적용 환율 자동 채움."""
+    try:
+        from providers.market_data import fetch_exchange_rate
+        return fetch_exchange_rate()
+    except Exception:
+        return None

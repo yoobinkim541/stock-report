@@ -211,3 +211,8 @@ def etf_peers(t):
 @st.cache_data(ttl=300, show_spinner="모으기 계획 계산 중…")
 def accumulation():
     return views.accumulation_plan()
+
+
+@st.cache_data(ttl=120, show_spinner=False)
+def fx_now():
+    return views.fx_now()

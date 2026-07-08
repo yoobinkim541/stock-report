@@ -1031,13 +1031,16 @@ def _manage_position(ticker, cur_price, pos):
                                             key="acc_currency")
             freq = c2.segmented_control("주기", ["매일", "매주", "매월"], default="매주",
                                         key="acc_freq")
-            fx = 1380.0
+            _fx_live = cached.fx_now() or 1380.0        # 실시간 환율 자동 (2분 캐시)
+            fx = _fx_live
             if currency == "₩ 원화":
                 amt = c3.number_input("적립 금액 (₩)", min_value=0.0, value=100_000.0,
                                       step=10_000.0, format="%.0f", key="acc_amt_krw")
-                fx = st.number_input("적용 환율 (₩/$)", min_value=500.0, max_value=2500.0,
-                                     value=1380.0, step=1.0, format="%.1f", key="acc_fx",
-                                     help="원화 예산을 USD 매수금액으로 환산할 때 쓰는 환율")
+                fx = st.number_input("적용 환율 (₩/$) — 실시간 자동", min_value=500.0,
+                                     max_value=2500.0, value=round(float(_fx_live), 1),
+                                     step=1.0, format="%.1f", key="acc_fx",
+                                     help="실시간 USD/KRW 자동 채움 (2분 캐시·직접 수정 가능) — "
+                                          "원화 예산을 USD 매수금액으로 환산")
                 amount_usd = amt / fx if fx > 0 else 0.0
                 amount_label = _money_krw(amt)
             else:

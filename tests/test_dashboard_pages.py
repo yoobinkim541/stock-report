@@ -32,6 +32,7 @@ cached.econ = lambda *a, **k: [{"marker":"\U0001f534","date_str":"06/29 21:30","
 cached.news = lambda t: "뉴스 본문"
 cached.etf = lambda t: {"ticker": t, "is_etf": False}
 cached.tr_pr = lambda t, years=5: None
+cached.fx_now = lambda: 1400.0
 cached.etf_peers = lambda t: {}
 cached.social_sentiment = lambda: {"summary": {"title": "미국 레딧 게시물 분석",
     "published_at": "2026-07-05T10:00:00+09:00", "url": "https://t.me/insidertracking/1",
