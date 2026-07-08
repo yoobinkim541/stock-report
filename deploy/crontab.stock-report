@@ -31,6 +31,9 @@ PATH=/home/ubuntu/.local/bin:/usr/local/bin:/usr/bin:/bin
 35 23 * * 1-5 cd /home/ubuntu/projects/stock-report && uv run python crons/kiwoom_sync_rest.py >> /tmp/kiwoom_sync_rest.log 2>&1      # 23:35 UTC = 08:35 KST
 # 옵션 지표 스냅샷 (ATM IV·풋콜비·스큐·기대변동폭) — 학습 피처 축적
 20 21 * * 1-5 cd /home/ubuntu/projects/stock-report && uv run python crons/options_snapshot.py >> /tmp/options_snapshot.log 2>&1     # 21:20 UTC = 06:20 KST (us_mock_report 21:30 충돌 회피)
+
+# 주식 모으기 자동 기록 — 미 정규장 마감 직후 종가·확정 종가 환율로 소수점 계좌 기록 (플랜 없으면 no-op·기록 전용)
+10 21 * * 1-5 cd /home/ubuntu/projects/stock-report && uv run python crons/accumulate_daily.py >> /tmp/accumulate_daily.log 2>&1   # 21:10 UTC = 06:10 KST
 # 어닝 컨센서스·리비전·서프라이즈·밸류에이션 point-in-time 스냅샷 — 실적/주가반응 예측 학습데이터 축적
 10 22 * * 1-5 cd /home/ubuntu/projects/stock-report && uv run python crons/earnings_snapshot.py >> /tmp/earnings_snapshot.log 2>&1   # 22:10 UTC = 07:10 KST
 # LLM 뉴스 구조화 라벨 point-in-time 적재 (NEWS_LLM_LABELS_ENABLED=true 일 때만 — KR 00:30·US 15:00 모의 결정 직전 신선화)

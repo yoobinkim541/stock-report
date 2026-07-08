@@ -21,6 +21,9 @@ from dashboard import auth, cached, data, theme
 st.set_page_config(page_title="퀀트 터미널", page_icon="📊", layout="wide")
 theme.inject_global_css()
 
+# 서버 재기동 감지 워치독 — 배포/재시작 후 좀비 탭이 자동 새로고침 → 로그인 게이트
+st.components.v1.html(auth.reconnect_watchdog_html(), height=0)
+
 if not auth.password_gate():
     st.stop()
 
@@ -88,7 +91,12 @@ with st.sidebar:
                      help="계좌 현황·NAV 곡선·판단근거 원장"):
             st.session_state["_nav_to_paper"] = True   # 페이지 객체 생성 후 switch (아래)
 
-from dashboard.pages import home, market, paper, portfolio, research
+    # 💰 주식 모으기 레일 (소수점 DCA 통합 관리 — 계획·기록·비중 편집 다이얼로그)
+    from dashboard import accumulate as _accum
+    st.markdown("<div style='height:8px'></div>", unsafe_allow_html=True)
+    _accum.sidebar_rail()
+
+from dashboard.pages import chart_full, home, market, paper, portfolio, research
 from dashboard.pages import ticker as ticker_pg
 
 _home_pg = st.Page(home.render, title="홈", icon="🏠", url_path="home", default=True)
@@ -97,11 +105,14 @@ _ticker_pg = st.Page(ticker_pg.render, title="종목 분석", icon="🔍", url_p
 _market_pg = st.Page(market.render, title="시장·캘린더", icon="🗓️", url_path="market")
 _paper_pg = st.Page(paper.render, title="모의투자", icon="🧪", url_path="paper")
 _research_pg = st.Page(research.render, title="리서치", icon="🔬", url_path="research")
+_chart_pg = st.Page(chart_full.render, title="차트 풀뷰", icon="🖥️", url_path="chart")
 
 # 홈 보유표 행 클릭 → 종목 분석 자동 이동용 (switch_page 는 StreamlitPage 객체 필요)
 st.session_state["_ticker_page"] = _ticker_pg
+st.session_state["_chart_page"] = _chart_pg          # ⛶ 전체화면 풀차트 왕복용
 
-nav = st.navigation([_home_pg, _portfolio_pg, _ticker_pg, _market_pg, _paper_pg, _research_pg])
+nav = st.navigation([_home_pg, _portfolio_pg, _ticker_pg, _chart_pg, _market_pg,
+                     _paper_pg, _research_pg])
 # 사이드바에서 종목을 새로 고르면 종목 분석 페이지로 이동 (홈 행클릭과 동일 UX)
 if st.session_state.pop("_nav_to_ticker", False):
     st.switch_page(_ticker_pg)
@@ -109,3 +120,13 @@ if st.session_state.pop("_nav_to_ticker", False):
 if st.session_state.pop("_nav_to_paper", False):
     st.switch_page(_paper_pg)
 nav.run()
+
+# 하단 시장 마퀴 띠 — 전 페이지 공통 (VIX·달러·코스피/닥·나스닥·선물 — 5분 캐시·graceful)
+try:
+    from dashboard import cached as _cached
+    from dashboard import theme as _theme
+    _tape = _theme.market_tape_html(_cached.market_tape())
+    if _tape:
+        st.markdown(_tape, unsafe_allow_html=True)
+except Exception:
+    pass

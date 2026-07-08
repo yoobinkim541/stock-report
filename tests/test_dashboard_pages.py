@@ -45,9 +45,30 @@ data.load_holdings = lambda *a, **k: [
 data.portfolio_summary = lambda *a, **k: {"total_usd":10000.0,"return_pct":15.0,"n_holdings":2}
 data.portfolio_weights = lambda *a, **k: {"MSFT":0.4,"NVDA":0.6}
 data.trade_events = lambda *a, **k: []
+data.load_kr_holdings = lambda *a, **k: {}
 cached.econ = lambda *a, **k: [{"marker":"\U0001f534","date_str":"06/29 21:30","title":"CPI"}]
 cached.news = lambda t: "뉴스 본문"
 cached.etf = lambda t: {"ticker": t, "is_etf": False}
+cached.tr_pr = lambda t, years=5: None
+cached.fx_now = lambda: 1400.0
+cached.port_history = lambda: [
+    {"date": "2026-07-06", "total_usd": 9300.0, "total_krw": 14000000, "exchange_rate": 1505.0,
+     "qqq_price": 700.0},
+    {"date": "2026-07-07", "total_usd": 9411.0, "total_krw": 14239554, "exchange_rate": 1513.0,
+     "qqq_price": 704.9}]
+cached.target_weights_map = lambda: {"MSFT": 0.5, "NVDA": 0.4, "SGOV": 0.1}
+cached.income_summary = lambda *a, **k: {"records": [{"amount": 12.5}], "total": 12.5,
+    "est_monthly": 20.0, "est_detail": {"note": "최근 3개월 평균 배당 기준"}}
+cached.fx_timing = lambda: {"ok": True, "rate": 1509.8, "pct_display": 96.1,
+    "emoji": "\U0001f534", "verdict": "원화 약세 구간", "multiplier": 0.3,
+    "action": "환전 최소화 - 필요분만"}
+cached.etf_peers = lambda t: {}
+cached.screener_last = lambda: None
+cached.trendlines_for = lambda *a, **k: []
+cached.market_temp_history = lambda: [{"date": "2026-07-07", "score": 0.1},
+                                      {"date": "2026-07-08", "score": 0.2}]
+cached.next_earnings = lambda t: None
+cached.portfolio_flows = lambda: {}
 cached.social_sentiment = lambda: {"summary": {"title": "미국 레딧 게시물 분석",
     "published_at": "2026-07-05T10:00:00+09:00", "url": "https://t.me/insidertracking/1",
     "top_tickers": ["MU", "SNDK", "NVDA"],
@@ -84,12 +105,22 @@ cached.risk_struct = lambda: {"port_vol":0.2,"n_eff":3.5,"n_assets":5,"mdd_est":
                 "kelly_half":{"conservative":0.5,"moderate":0.9,"trailing":1.1}}}
 cached.ohlc = lambda t, period="6mo": pd.DataFrame(
     {"Open":range(100,170),"High":range(101,171),"Low":range(99,169),"Close":range(100,170)}, index=_IDX)
-cached.screener = lambda n: {"rows":[],"error":"skip"}
+cached.screener = lambda n: {"rows": [{"rank": 1, "ticker": "NVDA", "name": "NVIDIA",
+    "score": 2.54, "price": 196.9, "tech_rating": "매수", "surv_flag": False,
+    "reason": "52주 고점 근접 · 6M 모멘텀 +42%%", "rsi_14": 62.0,
+    "close_vs_52w_high": 0.97, "mom_126d": 0.42, "excess_mom_60d": 0.08, "fund_score": 72.0}],
+    "feats": {"NVDA": {"rsi_14": 62.0, "mom_126d": 0.42}},
+    "meta": {"ic": 0.05, "icir": 0.8, "top_decile": 0.02, "train_end": "2026-06-01",
+             "importance": {"mom_126d": 100, "rsi_14": 50}}}
 cached.backtest = lambda: {"error":"skip"}
 cached.sp500_heatmap = lambda: [
     {"ticker":"AAPL","name":"Apple","sector_kr":"기술","market_cap":4e12,"pct":1.96},
     {"ticker":"MSFT","name":"Microsoft","sector_kr":"기술","market_cap":2.8e12,"pct":3.17},
     {"ticker":"JPM","name":"JPMorgan","sector_kr":"금융","market_cap":9e11,"pct":-2.18}]
+cached.sp500_valuation = lambda: {"per": 27.3, "fper": 21.9, "eps_growth_pct": 24.7,
+    "peg": 1.11, "n": 100, "cov_trailing_pct": 68.0, "cov_forward_pct": 66.0,
+    "per_reported": 32.28, "per_pctile_all": 97.8, "per_pctile_20y": 91.7,
+    "hist_n": 1867, "asof": "2026-07-08"}
 cached.market_indicators = lambda: {"fear_greed":{"score":32.0,"rating":"fear","prev_week":26.0,"prev_month":56.0},
     "indices":[{"ticker":"^GSPC","name":"S&P 500","price":6000.0,"chg":1.2,"rsi_d":63.0,"rsi_w":81.0},
                {"ticker":"^IXIC","name":"나스닥","price":20000.0,"chg":0.8,"rsi_d":58.0,"rsi_w":75.0}]}
@@ -294,6 +325,11 @@ def test_ticker_position_management_renders():
     assert not at.exception, str(at.exception)
     assert len(at.number_input) >= 1                 # 주수/단가 입력
     assert any("기록" in str(b.label) for b in at.button)   # 추가/적립/축소 기록 버튼
+    assert any("적립 금액 (₩)" in str(getattr(n, "label", "")) for n in at.number_input)
+    assert any("적용 환율" in str(getattr(n, "label", "")) for n in at.number_input)
+    seg = " ".join(str(s) for s in at.segmented_control)
+    assert "매일" in seg and "매주" in seg and "매월" in seg
+    assert any("적립 1회 기록" in str(b.label) for b in at.button)
     # 안전 라벨(실주문 아님) 노출
     assert any("실주문 아님" in str(c.value) or "기록 전용" in str(c.value) for c in at.caption)
 
@@ -395,7 +431,7 @@ def test_home_shows_market_map():
                              default_timeout=30)
     at.run()
     assert not at.exception, str(at.exception)
-    assert any("S&P 500 시장 맵" in str(m.value) for m in at.markdown)   # 시장맵 섹션
+    assert any("시장 맵" in str(m.value) for m in at.markdown)   # 시장맵 섹션 (3맵 탭 통합)
     assert any("시장 지표" in str(m.value) for m in at.markdown)          # F&G·RSI 패널 (O2)
 
 
@@ -467,3 +503,85 @@ cached.etf = lambda t: {"ticker": "069500.KS", "stock_code": "069500", "is_etf":
     assert any("구성종목" in str(s.value) for s in at.subheader)
     assert len(at.dataframe) >= 1
     assert not any("PER" == m.label for m in at.metric)
+
+
+def test_ticker_page_etf_tr_pr_and_peer_score():
+    """ETF 뷰 신규 섹션 — TR vs PR 지표·차트 + 동종그룹 비교표·점수 게이지 (합성 주입)."""
+    etf_stub = '''
+st.session_state["ticker"] = "QQQI"
+cached.etf = lambda t: {"ticker": "QQQI", "is_etf": True, "name": "NEOS NDX High Income",
+    "expense_ratio": 0.0068, "price": 55.8, "nav": 56.1, "premium_pct": -0.5,
+    "dividends": {"count_12m": 12, "per_share_12m": 7.6, "yield_pct": 13.7, "freq_label": "매월"}}
+_TIDX = pd.date_range("2023-01-01", periods=900, freq="D")
+_TR = pd.Series([100.0 * 1.0006 ** i for i in range(900)], index=_TIDX)
+_PR = pd.Series([100.0 * 1.0001 ** i for i in range(900)], index=_TIDX)
+cached.tr_pr = lambda t, years=5: {"tr": _TR, "pr": _PR, "asof": "2026-07-08"}
+_ROW = {"ticker": "QQQI", "expense_ratio": 0.0068, "aum": 1.3e10, "div_yield_pct": 13.7,
+        "div_count_12m": 12, "tr_1y": 22.2, "tr_3y_ann": 18.0, "pr_1y": 6.1, "pr_3y_ann": 2.0,
+        "mdd": 20.0, "mdd_window_y": 3.0, "history_years": 2.4, "avg_dollar_vol": 5e7,
+        "tracking_diff": -9.3, "score": 60,
+        "score_detail": {"score": 60, "components": {"비용": 38, "성과": 62, "인컴": 88,
+                         "리스크": 50, "유동성": 75}, "n_peers": 4, "low_confidence": False,
+                         "basis": "1y", "strategy": "covered_call"}}
+_ROW2 = dict(_ROW, ticker="QYLD", score=47, tr_1y=21.7)
+cached.etf_peers = lambda t: {"group": {"key": "ndx_covered_call",
+    "name": "나스닥100 커버드콜", "strategy": "covered_call", "bench": "QQQ"},
+    "rows": [_ROW, _ROW2], "asof": "2026-07-08 07:00 UTC"}
+'''
+    at = AppTest.from_string(_STUBS + etf_stub + "\nfrom dashboard.pages import ticker\nticker.render()\n",
+                             default_timeout=30)
+    at.run()
+    assert not at.exception, at.exception
+    body = (" ".join(str(x) for x in at.markdown)
+            + " ".join(m.label for m in at.metric)
+            + " ".join(str(x.value) for x in at.subheader))
+    assert "TR vs PR" in body and "분배 기여" in body            # TR/PR 섹션
+    assert "동종 ETF 비교" in body and "나스닥100 커버드콜" in body   # 피어 섹션
+    html_body = " ".join(str(getattr(x, "value", "")) for x in at.markdown)
+    assert "ETF 점수" in html_body                               # 점수 게이지 (HTML 마크다운)
+    assert "매매신호 아님" in " ".join(str(c.value) for c in at.caption)
+    assert len(at.dataframe) >= 1                                # 피어 지표표
+
+
+def test_research_screener_enriched():
+    """스크리너 — 기업명·판단근거 컬럼 + 무엣지 캡션 (합성 주입)."""
+    script = _STUBS + '''
+st.session_state["scr_done"] = True
+from dashboard.pages import research
+research._screener_section()
+'''
+    at = AppTest.from_string(script, default_timeout=30)
+    at.run()
+    assert not at.exception, at.exception
+    assert len(at.dataframe) >= 1
+    df0 = at.dataframe[0].value
+    assert "판단근거" in df0.columns and "종목" in df0.columns
+    assert "NVIDIA (NVDA)" in str(df0["종목"].iloc[0])            # 기업명 병기
+    caps = " ".join(str(c.value) for c in at.caption)
+    assert "매매신호 아님" in caps
+
+
+def test_reconnect_watchdog_html_contract():
+    """서버 재기동 워치독 — health 폴링·down→up 전이 시 parent reload 계약."""
+    from dashboard import auth
+    h = auth.reconnect_watchdog_html(2500)
+    assert "/_stcore/health" in h and "2500" in h
+    assert "window.parent.location.reload" in h
+    assert "down = true" in h                       # 실패 → 회복 전이만 리로드
+
+
+def test_chart_full_page():
+    """차트 풀뷰 — 동일 컨트롤(_price_chart 공용)·840 높이·복귀 버튼 (무예외)."""
+    script = _STUBS + '''
+st.session_state["ticker"] = "MSFT"
+cached.realtime_quote = lambda t: None
+from dashboard.pages import chart_full
+chart_full.render()
+'''
+    at = AppTest.from_string(script, default_timeout=30)
+    at.run()
+    assert not at.exception, at.exception
+    labels = " ".join(str(b.label) for b in at.button)
+    assert "↙" in labels                              # 복귀 버튼
+    body = " ".join(str(getattr(m, "value", "")) for m in at.markdown)
+    assert "Microsoft" in body or "MSFT" in body      # 히어로 라벨

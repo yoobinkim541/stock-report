@@ -100,39 +100,73 @@ def _arc(cx, cy, r, a0, a1):
     return f"M {x0:.1f} {y0:.1f} A {r} {r} 0 {large} {sweep} {x1:.1f} {y1:.1f}"
 
 
-def rating_gauge_html(score, verdict="", sub="") -> str:
+def rating_gauge_html(score, verdict="", sub="", *, title="",
+                      end_labels=("약세", "강세"), zones=None,
+                      boxed: bool = True) -> str:
     """반원 속도계 게이지 (score∈[-1,1]: -1 강력매도 ↔ +1 강력매수).
 
     5존을 **상단 반원**(좌 약세→우 강세)에 개별 원호로 타일 + 니들(score→각도) + 허브.
+    zones/end_labels 로 라벨 체계 교체 가능(가치평가 게이지 공용) — 기본 동작 불변.
     """
+    zones = zones or _GAUGE_ZONES
     try:
         score = max(-1.0, min(1.0, float(score)))
     except (TypeError, ValueError):
         score = 0.0
     cx, cy, R, sw = 100, 100, 78, 15
-    n = len(_GAUGE_ZONES)
+    n = len(zones)
     seg = 180.0 / n                                  # 존당 36°
     arcs = "".join(
         f'<path d="{_arc(cx, cy, R, 180 - i * seg, 180 - (i + 1) * seg)}" fill="none" '
         f'stroke="{c}" stroke-width="{sw}" stroke-linecap="butt"/>'
-        for i, (c, _) in enumerate(_GAUGE_ZONES))
+        for i, (c, _) in enumerate(zones))
     a = 90.0 * (1 - score)                            # score -1→180°, 0→90°, +1→0°
     nx, ny = _polar(cx, cy, R - 20, a)
     vcol = GREEN if score > 0.15 else RED if score < -0.15 else MUTED
     if not verdict:
-        verdict = _GAUGE_ZONES[min(n - 1, int((score + 1) / 2 * n))][1]
+        verdict = zones[min(n - 1, int((score + 1) / 2 * n))][1]
     ly = cy + 16
-    return f'''<div class="tn-gauge">
+    head = (f'<div style="color:{MUTED};font-size:0.78rem;text-align:center;'
+            f'margin-bottom:-4px">{title}</div>' if title else '')
+    box = ("tn-gauge" if boxed else "")
+    return f'''<div class="{box}" style="max-width:220px;margin:0 auto;text-align:center">
+  {head}
   <svg viewBox="0 0 200 126" width="100%" preserveAspectRatio="xMidYMid meet">
     {arcs}
     <line x1="{cx}" y1="{cy}" x2="{nx:.1f}" y2="{ny:.1f}" stroke="{TEXT}" stroke-width="3" stroke-linecap="round"/>
     <circle cx="{cx}" cy="{cy}" r="6" fill="{TEXT}"/>
-    <text x="{cx - R}" y="{ly}" fill="{MUTED}" font-size="10" font-family="{_MONO}" text-anchor="middle">약세</text>
-    <text x="{cx + R}" y="{ly}" fill="{MUTED}" font-size="10" font-family="{_MONO}" text-anchor="middle">강세</text>
+    <text x="{cx - R}" y="{ly}" fill="{MUTED}" font-size="10" font-family="{_MONO}" text-anchor="middle">{end_labels[0]}</text>
+    <text x="{cx + R}" y="{ly}" fill="{MUTED}" font-size="10" font-family="{_MONO}" text-anchor="middle">{end_labels[1]}</text>
   </svg>
   <div class="tn-gauge-verdict" style="color:{vcol}">{verdict}</div>
   {f'<div class="tn-gauge-sub">{sub}</div>' if sub else ''}
 </div>'''
+
+
+_VAL_ZONES = [
+    ("#ef5350", "크게 고평가"), ("#ef9a9a", "고평가"), ("#5d6673", "적정 수준"),
+    ("#80cbc4", "저평가"), ("#26a69a", "크게 저평가"),
+]
+
+
+def valuation_gauge_html(score, sub="") -> str:
+    """가치평가 게이지 (score∈[-1,1]: -1 크게 고평가 ↔ +1 크게 저평가) — 표시·참고용."""
+    return rating_gauge_html(score, sub=sub, title="⚖️ 가치평가",
+                             end_labels=("고평가", "저평가"), zones=_VAL_ZONES)
+
+
+def position_band_html(cells) -> str:
+    """내 포지션 컴팩트 밴드 — [(label, value, color|None)] 한 줄 스트립 (st.metric 대체)."""
+    if not cells:
+        return ""
+    items = "".join(
+        f'<div style="flex:1;min-width:104px;text-align:center;padding:2px 6px">'
+        f'<span style="color:{MUTED};font-size:0.72rem">{lab}</span><br>'
+        f'<b style="font-size:1.02rem;color:{col or TEXT};font-family:{_MONO}">{val}</b></div>'
+        for lab, val, col in cells)
+    return (f'<div style="display:flex;gap:6px;flex-wrap:wrap;align-items:center;'
+            f'padding:7px 10px;background:{PANEL};border:1px solid {BORDER};'
+            f'border-radius:10px">{items}</div>')
 
 
 _FNG_ZONES = [(25, "#ef5350", "극공포"), (45, "#ff9800", "공포"),
@@ -191,10 +225,12 @@ def fng_gauge_html(score, prev_week=None) -> str:
         return ""
     col, lab = fng_label(s)
     trend = f' · 전주 {prev_week:.0f} {"▲" if s >= prev_week else "▼"}' if isinstance(prev_week, (int, float)) else ""
-    return f'''<div style="padding:8px 12px;background:{PANEL};border:1px solid {BORDER};border-radius:10px">
+    return f'''<div style="padding:10px 12px;background:{PANEL};border:1px solid {BORDER};border-radius:10px;min-height:340px;display:flex;flex-direction:column;">
   <div style="color:{MUTED};font-size:0.82rem;text-align:center">😱 공포·탐욕 지수</div>
-  <div style="max-width:210px;margin:0 auto">{_gauge_svg(s, 0, 100, _FNG_GAUGE, big=f"{s:.0f}", big_col=col, sub=lab)}</div>
-  <div style="color:{MUTED};font-size:0.72rem;text-align:center;margin-top:-2px">극공포 0 · 100 극탐욕{trend}</div>
+  <div style="flex:1;display:flex;flex-direction:column;justify-content:center">
+    <div style="max-width:230px;margin:0 auto;width:100%">{_gauge_svg(s, 0, 100, _FNG_GAUGE, big=f"{s:.0f}", big_col=col, sub=lab)}</div>
+  </div>
+  <div style="color:{MUTED};font-size:0.72rem;text-align:center">극공포 0 · 100 극탐욕{trend}</div>
 </div>'''
 
 
@@ -226,11 +262,13 @@ def index_rsi_gauges_html(name, price=None, chg=None, rsi_d=None, rsi_w=None) ->
         return (f'<div style="flex:1;text-align:center"><div style="color:{MUTED};font-size:0.72rem">{lbl}</div>'
                 f'{_gauge_svg(val, 0, 100, _RSI_GAUGE, big=big, big_col=c, sub=_rsi_zone(v))}</div>')
 
-    return f'''<div style="padding:8px 12px;background:{PANEL};border:1px solid {BORDER};border-radius:10px">
+    return f'''<div style="padding:10px 12px;background:{PANEL};border:1px solid {BORDER};border-radius:10px;min-height:340px;display:flex;flex-direction:column;">
   <div style="display:flex;justify-content:space-between;align-items:baseline">
     <b style="color:{TEXT}">{name}</b>
     <span style="font-family:{_MONO};color:{MUTED};font-size:0.82rem">{pxs} <span style="color:{ccol}">{chgs}</span></span></div>
-  <div style="display:flex;gap:6px;margin-top:2px">{g("일봉 RSI", rsi_d)}{g("주봉 RSI", rsi_w)}</div>
+  <div style="flex:1;display:flex;align-items:center">
+    <div style="display:flex;gap:6px;width:100%">{g("일봉 RSI", rsi_d)}{g("주봉 RSI", rsi_w)}</div>
+  </div>
 </div>'''
 
 
@@ -426,6 +464,27 @@ html, body, [class*="st-"], .stApp, p, span, div, label, input, button {{
 [class*="material-symbols"], span[translate="no"] {{
   font-family: 'Material Symbols Rounded', 'Material Symbols Outlined', 'Material Icons' !important;
 }}
+
+/* ── 렌더링 진행감 — 스켈레톤 shimmer + stale 요소 숨쉬기 (멈춘 화면 느낌 제거) ── */
+[data-testid="stSkeleton"] {{
+  background: linear-gradient(90deg, #131722 25%, #1e2536 38%, #131722 55%) !important;
+  background-size: 400% 100% !important;
+  animation: tn-shimmer 1.3s ease-in-out infinite;
+  border-radius: 10px;
+}}
+@keyframes tn-shimmer {{
+  0% {{ background-position: 100% 50%; }}
+  100% {{ background-position: 0% 50%; }}
+}}
+/* rerun 중 이전 화면(stale) — 부드러운 숨쉬기 펄스로 '처리 중' 신호 */
+[data-stale="true"] {{
+  animation: tn-breathe 1.5s ease-in-out infinite !important;
+}}
+@keyframes tn-breathe {{
+  0%, 100% {{ opacity: 0.45; }}
+  50% {{ opacity: 0.8; }}
+}}
+.stSpinner > div {{ border-top-color: #2962ff !important; }}
 h1, h2, h3 {{ letter-spacing: -0.02em; font-weight: 700; }}
 h1 {{ font-size: 1.7rem !important; }}
 /* 숫자는 등폭 (터미널 정렬감) */
@@ -520,6 +579,12 @@ h1 {{ font-size: 1.7rem !important; }}
 
 /* ── 모바일 반응형 (≤600px) — 커스텀 컴포넌트 축소·재배치 ─────────────── */
 @media (max-width: 600px) {{
+  /* 신규 카드·스트립 — 모바일 축소 (인라인 스타일은 !important 로 우선) */
+  div[style*="min-height:340px"] {{ min-height: 240px !important; }}
+  div[style*="min-width:150px"] {{ min-width: 46% !important; }}
+  div[style*="min-width:104px"] {{ min-width: 44% !important; }}
+  .tn-tape {{ font-size: 0.7rem; }}
+
   .block-container {{ padding-top: 1.4rem; padding-left: .8rem; padding-right: .8rem; }}
   h1 {{ font-size: 1.4rem !important; }}
   .tn-hero {{ gap: 12px; margin: 2px 0 14px; }}
@@ -533,3 +598,266 @@ h1 {{ font-size: 1.7rem !important; }}
 }}
 </style>
 """
+
+
+def orderbook_ladder_html(bids, asks, *, prev_close=None, price=None,
+                          day=None, week52=None, depth: int = 10) -> str:
+    """실시간 호가 사다리 (KR HTS 풍·순수 HTML) — theme.render 로 출력.
+
+    상단 = 매도호가(최우선이 아래·잔량 바 좌측 파랑), 하단 = 매수호가(잔량 바 우측 빨강).
+    등락% = 전일 종가 기준 (KR 관례: 상승 빨강·하락 파랑). 우측 패널 = 당일 시작/최고/최저·
+    거래량·52주 고저. 하단 = 매도/매수 총잔량 비율 바. bids/asks: [[price, qty], ...] 최우선 우선.
+    """
+    bids = [(float(p), float(q)) for p, q in (bids or [])[:depth] if p]
+    asks = [(float(p), float(q)) for p, q in (asks or [])[:depth] if p]
+    if not bids and not asks:
+        return "<div style='color:#9198a6'>호가 없음</div>"
+    max_q = max([q for _, q in bids + asks] or [1.0]) or 1.0
+
+    def _pct(px):
+        if not prev_close:
+            return ""
+        v = (px / prev_close - 1) * 100
+        color = "#f04452" if v > 0 else ("#3182f6" if v < 0 else MUTED)
+        return f"<span style='color:{color};font-size:11px'> {v:+.2f}%</span>"
+
+    def _row(px, q, side):
+        w = max(2, int(q / max_q * 100))
+        bar_color = "#3182f6" if side == "ask" else "#f04452"
+        qty = f"{q:,.0f}"
+        px_cell = (f"<td style='width:38%;text-align:center;padding:1px 4px;"
+                   f"font-family:{_MONO};font-size:12px'>{px:,.0f}{_pct(px)}</td>")
+        # 바 = 배경 absolute 레이어, 텍스트 = 전폭 오버레이 → 바가 좁아도 숫자는 절대 안 꺾임
+        anchor = "right" if side == "ask" else "left"
+        border = "left" if side == "ask" else "right"
+        cell = (f"<td style='width:31%'><div style='position:relative;min-height:16px'>"
+                f"<div style='position:absolute;top:1px;bottom:1px;{anchor}:0;width:{w}%;"
+                f"background:{bar_color}26;border-{border}:2px solid {bar_color}'></div>"
+                f"<div style='position:relative;text-align:{anchor};padding:1px 6px;"
+                f"font-family:{_MONO};font-size:10.5px;color:{bar_color};"
+                f"white-space:nowrap'>{qty}</div></div></td>")
+        if side == "ask":
+            return f"<tr>{cell}{px_cell}<td style='width:31%'></td></tr>"
+        return f"<tr><td style='width:31%'></td>{px_cell}{cell}</tr>"
+
+    rows = [_row(p, q, "ask") for p, q in sorted(asks, key=lambda x: -x[0])]
+    if price:
+        rows.append(f"<tr><td></td><td style='text-align:center;border:1px solid #e5e8ee55;"
+                    f"border-radius:6px;padding:2px;font-family:{_MONO};font-weight:700;"
+                    f"font-size:13px'>{float(price):,.0f}{_pct(float(price))}</td><td></td></tr>")
+    rows += [_row(p, q, "bid") for p, q in bids]
+
+    stat_rows = []
+    def _stat(k, v, color=None):
+        vv = f"{v:,.0f}" if isinstance(v, (int, float)) else (v or "—")
+        c = f"color:{color}" if color else ""
+        stat_rows.append(f"<div style='display:flex;justify-content:space-between;"
+                         f"font-size:12px;padding:2px 0'><span style='color:{MUTED}'>{k}</span>"
+                         f"<span style='font-family:{_MONO};{c}'>{vv}</span></div>")
+    if week52:
+        _stat("52주 최고", week52.get("high")); _stat("52주 최저", week52.get("low"))
+    if day:
+        _stat("시작", day.get("open"))
+        _stat("최고", day.get("high"), "#f04452"); _stat("최저", day.get("low"), "#3182f6")
+        if day.get("volume"):
+            _stat("거래량", day["volume"])
+    stats = (f"<div style='min-width:170px;border-left:1px solid {GRID};padding-left:12px'>"
+             + "".join(stat_rows) + "</div>") if stat_rows else ""
+
+    tb, ta = sum(q for _, q in bids), sum(q for _, q in asks)
+    tot = (tb + ta) or 1.0
+    totals = (f"<div style='display:flex;align-items:center;gap:8px;margin-top:6px;font-size:12px'>"
+              f"<span style='color:#3182f6'>판매대기 {ta:,.0f}</span>"
+              f"<div style='flex:1;height:6px;border-radius:3px;overflow:hidden;display:flex'>"
+              f"<div style='width:{ta / tot * 100:.1f}%;background:#3182f6'></div>"
+              f"<div style='width:{tb / tot * 100:.1f}%;background:#f04452'></div></div>"
+              f"<span style='color:#f04452'>{tb:,.0f} 구매대기</span></div>")
+
+    return (f"<div style='display:flex;gap:14px'>"
+            f"<div style='flex:1'><div style='max-height:340px;overflow-y:auto'>"
+            f"<table style='width:100%;border-collapse:collapse'>"
+            + "".join(rows) + "</table></div>" + totals + "</div>" + stats + "</div>")
+
+
+def market_tape_html(items: list[dict]) -> str:
+    """하단 고정 시장 마퀴 띠 — CSS 무한 스크롤(내용 2벌·hover 정지). 항목 없으면 ''.
+
+    items: [{label, value, chg, pct}] — 상승 초록/하락 빨강(프로젝트 시맨틱).
+    본문 가림 방지 padding-bottom 주입 포함. 순수 HTML(theme.render 로 출력).
+    """
+    if not items:
+        return ""
+    spans = []
+    for it in items:
+        pct = it.get("pct")
+        chg = it.get("chg")
+        color = GREEN if (pct or 0) >= 0 else RED
+        arrow = "▲" if (pct or 0) >= 0 else "▼"
+        spans.append(
+            f"<span style='margin:0 18px;white-space:nowrap'>"
+            f"<b style='color:#d1d4dc'>{it['label']}</b> "
+            f"<span style='font-family:{_MONO}'>{it['value']:,}</span> "
+            f"<span style='color:{color};font-family:{_MONO};font-size:11px'>"
+            f"{arrow}{abs(chg):,} ({pct:+.2f}%)</span></span>")
+    seq = "".join(spans)
+    return f"""
+<style>
+@keyframes tn-tape-scroll {{ 0% {{ transform: translateX(0); }} 100% {{ transform: translateX(-50%); }} }}
+.tn-tape {{ position: fixed; left: 0; right: 0; bottom: 0; z-index: 999;
+  background: {PANEL}; border-top: 1px solid {GRID}; height: 30px;
+  overflow: hidden; display: flex; align-items: center; font-size: 12.5px; }}
+.tn-tape-inner {{ display: inline-flex; white-space: nowrap;
+  animation: tn-tape-scroll 60s linear infinite; }}
+.tn-tape:hover .tn-tape-inner {{ animation-play-state: paused; }}
+.stMainBlockContainer {{ padding-bottom: 56px !important; }}
+</style>
+<div class="tn-tape"><div class="tn-tape-inner">{seq}{seq}</div></div>
+"""
+
+
+# ── ETF 점수 게이지 (동종그룹 1~100 — 표시·참고용) ─────────────────────────────
+_ETF_SCORE_ZONES = [(20, RED), (40, "#f97316"), (60, MUTED), (80, "#86c26a"), (100, GREEN)]
+
+
+def etf_score_label(s):
+    if s >= 80:
+        return "그룹 최상위"
+    if s >= 60:
+        return "그룹 상위"
+    if s >= 40:
+        return "그룹 중위"
+    if s >= 20:
+        return "그룹 하위"
+    return "그룹 최하위"
+
+
+def etf_score_html(score, group_name: str = "", low_confidence: bool = False) -> str:
+    """ETF 동종그룹 점수(1~100) 반원 게이지 — score None → 데이터 부족 안내."""
+    if score is None:
+        return (f'<div style="padding:10px 12px;background:{PANEL};border:1px solid {BORDER};'
+                f'border-radius:10px;text-align:center;color:{MUTED}">'
+                f'점수 — <b>데이터 부족</b><br><span style="font-size:0.75rem">'
+                f'이력·지표가 모자라 산출 생략 (정직 표시)</span></div>')
+    s = max(1.0, min(100.0, float(score)))
+    lab = etf_score_label(s)
+    conf = (f' · <span style="color:{RED}">표본 부족</span>' if low_confidence else "")
+    return f'''<div style="padding:8px 12px;background:{PANEL};border:1px solid {BORDER};border-radius:10px">
+  <div style="color:{MUTED};font-size:0.82rem;text-align:center">🏆 ETF 점수 — {group_name or "동종그룹"}</div>
+  <div style="max-width:210px;margin:0 auto">{_gauge_svg(s, 0, 100, _ETF_SCORE_ZONES, big=f"{s:.0f}", sub=lab)}</div>
+  <div style="color:{MUTED};font-size:0.72rem;text-align:center;margin-top:-2px">동종그룹 백분위 가중합 1~100 · 표시·참고용{conf}</div>
+</div>'''
+
+
+# ── 기업 판단 요약 카드 (순수) ─────────────────────────────────────────────────
+_VERDICT_STYLE = {"양호": (GREEN, "🟢"), "선별 관찰": (AMBER, "🟡"),
+                  "주의 우선": (RED, "🔴"), "데이터 확인 필요": (MUTED, "⚪")}
+
+
+def analysis_card_html(verdict: str, positives: list, risks: list,
+                       checks: list | None = None) -> str:
+    """기업 판단 요약 카드 — verdict 색 액센트 + 강점 ✓/주의 ⚠ 칩 리스트 + 다음 확인 풋터.
+
+    표시·참고용(매매신호 아님). 순수 HTML — 반응형(flex-wrap·컬럼 min-width).
+    """
+    col, icon = _VERDICT_STYLE.get(verdict, (MUTED, "⚪"))
+
+    def _items(items, mark, mcol, empty):
+        if not items:
+            return f'<div style="color:{MUTED};font-size:0.82rem;padding:2px 0">{empty}</div>'
+        return "".join(
+            f'<div style="display:flex;gap:8px;align-items:baseline;padding:3px 0">'
+            f'<span style="color:{mcol};font-size:0.8rem">{mark}</span>'
+            f'<span style="font-size:0.9rem;color:{TEXT}">{x}</span></div>'
+            for x in items)
+
+    chips = "".join(
+        f'<span style="display:inline-block;margin:2px 6px 2px 0;padding:3px 10px;'
+        f'border:1px solid {BORDER};border-radius:999px;color:{MUTED};'
+        f'font-size:0.74rem;background:{PANEL2}">☑ {c}</span>'
+        for c in (checks or []))
+    footer = (f'<div style="margin-top:10px;padding-top:9px;border-top:1px solid {BORDER}">'
+              f'<span style="color:{MUTED};font-size:0.72rem;margin-right:6px">다음 확인</span>'
+              f'{chips}</div>' if chips else "")
+    return f'''<div style="background:{PANEL};border:1px solid {BORDER};border-left:4px solid {col};
+  border-radius:12px;padding:14px 16px">
+  <div style="display:flex;gap:22px;flex-wrap:wrap">
+    <div style="flex:0 0 170px;min-width:150px;display:flex;flex-direction:column;justify-content:center">
+      <div style="color:{MUTED};font-size:0.72rem;letter-spacing:0.06em">종합 판단</div>
+      <div style="font-size:1.35rem;font-weight:700;color:{col};margin-top:2px">{icon} {verdict}</div>
+      <div style="color:{MUTED};font-size:0.7rem;margin-top:4px">표시·참고용 · 매매신호 아님</div>
+    </div>
+    <div style="flex:1;min-width:220px">
+      <div style="color:{GREEN};font-size:0.78rem;font-weight:600;margin-bottom:4px">강점</div>
+      {_items(positives, "✔", GREEN, "특이 강점 없음")}
+    </div>
+    <div style="flex:1;min-width:220px">
+      <div style="color:{RED};font-size:0.78rem;font-weight:600;margin-bottom:4px">주의점</div>
+      {_items(risks, "⚠", RED, "특이 리스크 없음")}
+    </div>
+  </div>
+  {footer}
+</div>'''
+
+
+# ── 🌡️ 시장 온도계 게이지 + 밸류 스트립 (홈 시장 지표 — 순수) ──────────────────
+_TEMP_ZONES = [
+    (RED, "과열 — 신중"), ("#ff9800", "다소 과열"), (MUTED, "중립"),
+    ("#80cbc4", "분할매수 우호"), (GREEN, "공포·기회 구간"),
+]
+
+
+def market_temp_html(score, sub: str = "", phase_line: str = "",
+                     spark: list | None = None) -> str:
+    """시장 온도계 카드 — 역발상 종합(−1 과열 ↔ +1 기회) + 이력 스파크. 표시·참고용."""
+    if score is None:
+        return (f'<div style="padding:10px 12px;background:{PANEL};border:1px solid '
+                f'{BORDER};border-radius:10px;text-align:center;color:{MUTED}">'
+                f'🌡️ 시장 온도계 — 재료 부족</div>')
+    inner = rating_gauge_html(score, sub=sub, title="🌡️ 시장 온도계 (역발상)",
+                              end_labels=("과열", "기회"), zones=_TEMP_ZONES,
+                              boxed=False)                      # 카드가 박스 — 이중 박스 방지
+    sp = ""
+    if spark and len(spark) >= 2:
+        arrow = "↑ 데워지는 중" if spark[-1] >= spark[0] else "↓ 식는 중"
+        sp = (f'<div style="text-align:center;margin-top:2px">{sparkline_svg(spark)}'
+              f'<span style="color:{MUTED};font-size:0.68rem;margin-left:6px">'
+              f'{len(spark)}일 · {arrow}</span></div>')
+    tail = sp + (f'<div style="color:{MUTED};font-size:0.7rem;text-align:center;'
+                 f'margin-top:4px">{phase_line}</div>' if phase_line else "")
+    return (f'<div style="padding:10px 12px;background:{PANEL};border:1px solid {BORDER};'
+            f'border-radius:10px;min-height:340px;display:flex;flex-direction:column;">'
+            f'<div style="flex:1;display:flex;flex-direction:column;'
+            f'justify-content:center">{inner}</div>{tail}</div>')
+
+
+def valuation_strip_html(v: dict) -> str:
+    """S&P500 밸류 스트립 — PER(역사 백분위 칩)·fPER·EPS 성장·PEG 단일 패널 (순수)."""
+    if not v:
+        return ""
+    per = v.get("per_reported") or v.get("per")
+    pct, pct20 = v.get("per_pctile_all"), v.get("per_pctile_20y")
+    g = v.get("eps_growth_pct")
+    peg = v.get("peg")
+
+    def cell(label, val, extra="", col=TEXT):
+        return (f'<div style="flex:1;min-width:150px;padding:4px 10px">'
+                f'<div style="color:{MUTED};font-size:0.72rem">{label}</div>'
+                f'<div style="font-size:1.35rem;font-weight:700;color:{col};'
+                f'font-family:{_MONO}">{val}</div>{extra}</div>')
+
+    chip = ""
+    if pct is not None:
+        c = RED if pct >= 90 else AMBER if pct >= 70 else MUTED
+        chip = (f'<span style="display:inline-block;margin-top:3px;padding:2px 9px;'
+                f'border:1px solid {c}44;border-radius:999px;color:{c};font-size:0.7rem;'
+                f'background:{c}14">1871~ {pct:.0f}%ile · 20y {pct20:.0f}%ile</span>')
+    g_col = GREEN if (g or 0) >= 0 else RED
+    peg_col = GREEN if (peg or 9) < 1 else (AMBER if (peg or 9) < 2 else RED)
+    return (f'<div style="display:flex;flex-wrap:wrap;gap:6px;align-items:flex-start;'
+            f'background:{PANEL};border:1px solid {BORDER};border-radius:10px;'
+            f'padding:9px 8px">'
+            + cell("S&P500 PER (보고이익)", f"{per:.1f}" if per else "—", chip)
+            + cell("fPER (컨센서스)", f"{v.get('fper'):.1f}" if v.get("fper") else "—")
+            + cell("EPS 성장률 (1y 예상)", f"{g:+.1f}%" if g is not None else "—", "", g_col)
+            + cell("PEG (교과서식)", f"{peg:.2f}" if peg else "—", "", peg_col)
+            + '</div>')

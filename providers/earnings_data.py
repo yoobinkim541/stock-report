@@ -92,7 +92,7 @@ def _dividend_cagr(divs, years: int):
 
 
 def valuation_metrics(ticker: str, *, _t=None) -> dict:
-    """PER·forwardPE·PBR·PSR·ROE·EPS(ttm/fwd)·배당률·payout·배당성장(1y/3y). 결측 None.
+    """PER·forwardPE·PEG·PBR·PSR·ROE·EPS(ttm/fwd)·배당률·payout·배당성장(1y/3y). 결측 None.
 
     US/KR 공통(yfinance .info + dividends). KR 은 forward 계열이 대체로 None(열화모드).
     """
@@ -105,7 +105,7 @@ def valuation_metrics(ticker: str, *, _t=None) -> dict:
         except Exception as e:
             logger.debug("KR DART 밸류에이션 실패 %s: %s", ticker, e)
 
-    out = {k: None for k in ("per", "forward_pe", "pbr", "psr", "roe", "eps_ttm", "eps_fwd",
+    out = {k: None for k in ("per", "forward_pe", "peg", "pbr", "psr", "roe", "eps_ttm", "eps_fwd",
                              "div_yield", "div_yield_5y_avg", "payout", "div_growth_1y", "div_growth_3y")}
     out["market_type"] = "kr" if is_kr(ticker) else "us"
     try:
@@ -118,6 +118,7 @@ def valuation_metrics(ticker: str, *, _t=None) -> dict:
             info = {}
         out["per"] = _f(info.get("trailingPE"))
         out["forward_pe"] = _f(info.get("forwardPE"))
+        out["peg"] = _f(info.get("trailingPegRatio") or info.get("pegRatio"))
         out["pbr"] = _f(info.get("priceToBook"))
         out["psr"] = _f(info.get("priceToSalesTrailing12Months"))
         out["roe"] = _f(info.get("returnOnEquity"))
@@ -175,7 +176,9 @@ def earnings_history(ticker: str, *, limit: int = 12, _t=None) -> list[dict]:
 def consensus(ticker: str, *, _t=None) -> dict:
     """포워드 컨센서스 + ★리비전 모멘텀 + 목표가. KR 은 대체로 None(열화모드)."""
     out = {k: None for k in ("eps_fwd_avg", "n_analysts", "rev_fwd_avg", "eps_rev_up_30d",
-                             "eps_rev_down_30d", "revision_momentum", "target_mean", "target_upside_pct")}
+                             "eps_rev_down_30d", "revision_momentum", "target_mean", "target_upside_pct",
+                             "target_high", "target_low", "target_median",
+                             "rec_strong_buy", "rec_buy", "rec_hold", "rec_sell", "rec_strong_sell")}
     try:
         t = _t or _ticker(ticker)
         # 포워드 EPS 컨센서스(다음 분기 '+1q')
@@ -204,15 +207,31 @@ def consensus(ticker: str, *, _t=None) -> dict:
                 out["revision_momentum"] = round((up - dn) / tot, 3) if tot > 0 else None
         except Exception:
             pass
-        # 목표가
+        # 목표가 (최고/평균/중앙/최저 — 팬 차트용)
         try:
             apt = t.analyst_price_targets
             if isinstance(apt, dict):
                 mean = _f(apt.get("mean"))
                 cur = _f(apt.get("current"))
                 out["target_mean"] = mean
+                out["target_high"] = _f(apt.get("high"))
+                out["target_low"] = _f(apt.get("low"))
+                out["target_median"] = _f(apt.get("median"))
                 if mean and cur and cur > 0:
                     out["target_upside_pct"] = round((mean / cur - 1.0) * 100.0, 1)
+        except Exception:
+            pass
+        # 의견 분포 (적극매도~적극매수 — 최근월 '0m' 행)
+        try:
+            rs = t.recommendations_summary
+            if rs is not None and len(rs):
+                row = rs.iloc[0]
+                if "period" in rs.columns and (rs["period"] == "0m").any():
+                    row = rs[rs["period"] == "0m"].iloc[0]
+                for src, dst in (("strongBuy", "rec_strong_buy"), ("buy", "rec_buy"),
+                                 ("hold", "rec_hold"), ("sell", "rec_sell"),
+                                 ("strongSell", "rec_strong_sell")):
+                    out[dst] = _f(row.get(src))
         except Exception:
             pass
     except Exception as e:

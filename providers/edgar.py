@@ -24,6 +24,8 @@ _FACTS_TTL_H = 24 * 7
 _REVENUE_CONCEPTS = ["Revenues", "RevenueFromContractWithCustomerExcludingAssessedTax",
                      "RevenueFromContractWithCustomerIncludingAssessedTax", "SalesRevenueNet"]
 _NI_CONCEPTS = ["NetIncomeLoss", "ProfitLoss"]
+_EQUITY_CONCEPTS = ["StockholdersEquity",
+                    "StockholdersEquityIncludingPortionAttributableToNoncontrollingInterest"]
 _ASSET_CONCEPTS = ["Assets"]
 _LIAB_CONCEPTS = ["Liabilities"]
 
@@ -123,7 +125,8 @@ def fundamental_trends(ticker: str, *, asof: str | None = None, cf: dict | None 
     cf 주입 시 무네트워크(테스트). 결측은 None(graceful).
     """
     out = {"rev_yoy": None, "net_margin": None, "net_margin_chg": None,
-           "debt_to_assets": None, "debt_to_assets_chg": None, "is_loss": None, "n_years": 0}
+           "debt_to_assets": None, "debt_to_assets_chg": None, "is_loss": None, "n_years": 0,
+           "roe": None, "roe_chg_3y": None}
     cf = cf if cf is not None else companyfacts(ticker)
     if not cf:
         return out
@@ -144,6 +147,20 @@ def fundamental_trends(ticker: str, *, asof: str | None = None, cf: dict | None 
             rev_prev = _val_at(rev, ni[-2][0])
             if rev_prev:
                 out["net_margin_chg"] = round(out["net_margin"] - ni[-2][1] / rev_prev, 4)
+    # ROE 추세 — 연간 순이익 ÷ 자기자본 (같은 결산 end 매칭·최대 3년 변화 pp)
+    eq = _annual_series(cf, _EQUITY_CONCEPTS, asof)
+    if ni and eq:
+        e_by = dict(eq)
+        roes = []
+        for end, v in ni:
+            ev = _val_at(eq, end) or e_by.get(end)
+            if ev:
+                roes.append((end, v / ev))
+        if roes:
+            out["roe"] = round(roes[-1][1], 4)
+            if len(roes) >= 2:
+                base = roes[max(0, len(roes) - 4)][1]     # ~3년 전 (연간 4개=3y 간격)
+                out["roe_chg_3y"] = round(roes[-1][1] - base, 4)
     a_by, l_by = dict(assets), dict(liab)
     common = sorted(set(a_by) & set(l_by))
     if common:

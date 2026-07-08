@@ -70,12 +70,13 @@ def test_holding_manager_buy_sell_records_chart_events(isolated_db, tmp_path, mo
     monkeypatch.setattr(H, "PORTFOLIO_PATH", str(snap))
     monkeypatch.setattr(H, "refresh_portfolio_prices", lambda: "가격 갱신 생략")
 
-    H.buy_holding("MSFT", 2, 400.0)
+    H.buy_holding("MSFT", 2, 400.0, note="DCA 매주 ₩100,000")
     H.sell_holding("MSFT", 1, price_usd=420.0)
 
     rows = T.trades_for_ticker("MSFT", include_mock=False)
     assert [r["side"] for r in rows] == ["buy", "sell"]
     assert rows[0]["avg_price"] == 400.0
+    assert rows[0]["note"] == "DCA 매주 ₩100,000"
     assert rows[1]["price"] == 420.0
 
 

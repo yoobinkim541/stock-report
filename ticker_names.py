@@ -207,6 +207,12 @@ try:
 except Exception:
     _SP500 = {}
 
+# 국내 ETF(.KS) 티커→한글명 시드 — scripts/gen_kr_etf_seed.py (Naver etfItemList·~1,100).
+try:
+    from kr_etf_seed import KR_ETF as _KR_ETF
+except Exception:
+    _KR_ETF = {}
+
 
 def _build_index() -> dict[str, str]:
     idx: dict[str, str] = {}
@@ -219,11 +225,13 @@ def _build_index() -> dict[str, str]:
         idx.setdefault(_norm(nm), t)
     for t, nm in _SP500.items():          # S&P500 영문명 (큐레이트 뒤 — EN/KO/KR 우선)
         idx.setdefault(_norm(nm), t)
+    for t, nm in _KR_ETF.items():         # 국내 ETF 한글명 (KODEX 200 등)
+        idx.setdefault(_norm(nm), t)
     return idx
 
 
 _INDEX = _build_index()
-_ALL_TICKERS = set(EN) | set(KR) | set(KO) | set(_SP500)
+_ALL_TICKERS = set(EN) | set(KR) | set(KO) | set(_SP500) | set(_KR_ETF)
 
 
 # ── yfinance 디스크캐시 (graceful) ────────────────────────────────────
@@ -280,7 +288,7 @@ def display_name(ticker: str, allow_net: bool = True) -> str | None:
         return None
     tu = t.upper()
     if t.endswith(".KS") or t.endswith(".KQ"):
-        return KR.get(t) or KR.get(tu) or _yf_name(t, allow_net)
+        return KR.get(t) or KR.get(tu) or _KR_ETF.get(tu) or _yf_name(t, allow_net)
     return EN.get(tu) or _SP500.get(tu) or _yf_name(tu, allow_net)
 
 

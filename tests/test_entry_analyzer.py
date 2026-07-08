@@ -1,7 +1,7 @@
 import json
 from datetime import datetime, timedelta
 
-from ml.entry_analyzer import EntryScore, KST, check_alert_signals
+from ml.entry_analyzer import EntryScore, KST, check_alert_signals, format_alert_message
 
 
 def _entry_score(**overrides):
@@ -66,3 +66,38 @@ def test_check_alert_signals_suppresses_enter_before_cooldown(tmp_path, monkeypa
     }))
 
     assert check_alert_signals([_entry_score()]) == []
+
+
+def test_format_alert_message_is_explanatory_not_prescriptive():
+    msg = format_alert_message(_entry_score(
+        ticker="000270.KS",
+        underlying="000270.KS",
+        current_drawdown=-0.221,
+        current_rsi=41.0,
+        current_vix=16.1,
+        current_mom_20d=-0.065,
+        current_mom_60d=-0.02,
+        current_price=153_700.0,
+        n_similar=24,
+        win_prob_20d=0.72,
+        win_prob_60d=0.57,
+        expected_ret_20d=0.03,
+        expected_ret_60d=0.014,
+        downside_p25_20d=-0.009,
+        upside_p75_20d=0.082,
+        score=0.75,
+        reasons=["승률 72% (강세)", "손익비 3.1× (양호)"],
+        currency="KRW",
+        display_name="기아",
+    ))
+
+    assert "진입 후보 감지(정보형) — 000270.KS · 기아" in msg
+    assert "🟢 기아 (Kia) · 점수 0.75/1.00" in msg
+    assert "[ 한줄 판단 ]" in msg
+    assert "[ 왜 떴나 ]" in msg
+    assert "[ 참고 레벨 ]" in msg
+    assert "[ 매매 가이드 ]" not in msg
+    assert "표본:     24건 (보통)" in msg
+    assert "무효화선:" in msg
+    assert "하방 P25 -0.9%, 최소 -3.0% 적용" in msg
+    assert "정보형 알림 — 자동 주문 아님" in msg

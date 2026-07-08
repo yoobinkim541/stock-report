@@ -1,8 +1,13 @@
 """홈 — 글랜스 랜딩 (포트폴리오 중심). 히어로 KPI + 배분 도넛 + 클릭 보유표 + Phase + 오늘 일정."""
 from __future__ import annotations
 
+import os
+import sys
+
 import pandas as pd
 import streamlit as st
+
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 
 import ticker_names
 from dashboard import cached, charts, data, theme
@@ -92,12 +97,13 @@ def render():
 
 
 def _market_bar():
-    """시장 지표 — 공포·탐욕지수 + S&P500·나스닥 일/주봉 RSI (경량·15분 캐시)."""
+    """시장 지표 — 공포·탐욕지수 + 지수 RSI + S&P500 밸류에이션 (경량 캐시)."""
     st.markdown("#### 📊 시장 지표")
     mi = cached.market_indicators()
     fg = mi.get("fear_greed")
     idx = mi.get("indices") or []
-    cols = st.columns([1.1, 1, 1])
+    v = cached.sp500_valuation()
+    cols = st.columns([1, 1, 1, 1])
     with cols[0]:
         if fg:
             theme.render(theme.fng_gauge_html(fg.get("score"), fg.get("prev_week")))
@@ -111,28 +117,68 @@ def _market_bar():
                                                          ix.get("chg"), ix.get("rsi_d"), ix.get("rsi_w")))
             else:
                 st.caption("지수 데이터 N/A")
+    with cols[3]:
+        # 🌡️ 시장 온도계 — 역발상 종합 (표시·참고 — 실행 규칙은 Phase DCA 배율)
+        plan = cached.accumulation() or {}
+        spx = next((x for x in idx if "S&P" in str(x.get("name", ""))),
+                   idx[0] if idx else {})
+        temp = data.market_temperature(
+            fear_greed=(fg or {}).get("score"), rsi_w=spx.get("rsi_w"),
+            per_pctile_20y=v.get("per_pctile_20y"), peg=v.get("peg"),
+            drawdown_pct=plan.get("dd"))
+        phase_line = (f"실행 규칙 = Phase: {plan.get('emoji', '')} "
+                      f"{plan.get('label', '')} · DCA {plan.get('mult', 1):g}×"
+                      if plan.get("label") else "실행 규칙은 Phase(DCA 배율)가 담당")
+        _th = [r.get("score") for r in cached.market_temp_history()
+               if r.get("score") is not None]
+        theme.render(theme.market_temp_html((temp or {}).get("score"),
+                                            (temp or {}).get("sub", ""), phase_line,
+                                            spark=_th if len(_th) >= 2 else None))
+
+    # 🧮 S&P500 밸류 스트립 — PER(multpl 보고이익+역사 백분위)·fPER·성장·PEG
+    if v:
+        theme.render(theme.valuation_strip_html(v))
+        st.caption(f"PER = multpl.com 보고이익(1871~ {v.get('hist_n', 0)}개월 백분위) · "
+                   f"자체 집계(상위 {v.get('n', 0)}종목 시총가중) PER "
+                   f"{data.f_ratio(v.get('per'), 1)} 병행 · fPER/성장/PEG = 자체 집계 · "
+                   f"{v.get('asof', '')} · 12h 캐시 · 표시·참고용")
+
+
+_MAPS = {   # 라벨 → (cached 로더명, 부가 캡션)
+    "S&P 500": ("sp500_heatmap",
+                "기술 섹터는 세부 카테고리(반도체·소프트웨어/클라우드·IT서비스·하드웨어)로 분해"),
+    "코스피 200": ("kr200_heatmap", "업종별(Naver) · 시총 = marcap 스냅샷"),
+    "러셀 2000": ("russell2000_heatmap",
+                 "미국 소형주 **근사** — 보통주 시총 1001~3000위 (러셀 공식 구성 아님·정직 표기)"),
+}
 
 
 @st.fragment
 def _market_map():
-    """S&P 500 섹터 시장 맵 — 시총 크기·당일 등락 색 + 타일 클릭→종목분석 (Finviz 풍)."""
-    st.markdown("#### 🗺️ S&P 500 시장 맵")
-    st.caption("섹터별 · 타일 크기 = 시가총액 · 색 = 당일 등락(🟩상승 / 🟥하락) · **타일 클릭 → 종목 분석**")
-    rows = cached.sp500_heatmap()
+    """시장 맵 3종(S&P500·코스피200·러셀2000) — 시총 크기·등락 색 + 타일 클릭→종목분석."""
+    st.markdown("#### 🗺️ 시장 맵")
+    which = st.segmented_control("시장", list(_MAPS), default="S&P 500",
+                                 label_visibility="collapsed", key="_map_kind") or "S&P 500"
+    loader, note = _MAPS[which]
+    st.caption("타일 크기 = 시가총액 · 색 = 당일 등락(🟩상승 / 🟥하락) · "
+               f"**타일 클릭 → 종목 분석** · {note}")
+    rows = getattr(cached, loader)()
     if not rows:
-        st.info("시장 맵 데이터를 불러오지 못했습니다 (네트워크/시드 확인).")
+        st.info("시장 맵 데이터를 불러오지 못했습니다 (첫 로드는 크론 스냅샷 대기 — 최대 20분).")
         return
     ev = st.plotly_chart(charts.market_treemap(rows), width="stretch",
-                         config={"displayModeBar": False}, on_select="rerun", key="_heatmap")
-    # 타일 클릭 → 라벨(티커) 정규화 → 종목 분석 이동 (섹터 헤더 클릭은 normalize None → 무시)
+                         config={"displayModeBar": False}, on_select="rerun",
+                         key=f"_heatmap_{loader}")
+    # 타일 클릭 → 종목 분석 이동. 리프 라벨 = 정확한 티커 → rows 멤버십으로 판정
+    # (normalize_input 부분매칭 함정: 세부 헤더 "반도체"→TSM 오이동 — 헤더/섹터 클릭은 무시)
+    valid = {r.get("ticker") for r in rows}
     picked = None
     sel = getattr(ev, "selection", None)
     pts = (sel.get("points") if isinstance(sel, dict) else getattr(sel, "points", None)) or []
     for p in pts:
         lab = p.get("label") if isinstance(p, dict) else getattr(p, "label", None)
-        tk = ticker_names.normalize_input(lab or "")
-        if tk:
-            picked = tk
+        if lab in valid:
+            picked = lab
             break
     if picked and picked != st.session_state.get("ticker"):
         st.session_state["ticker"] = picked

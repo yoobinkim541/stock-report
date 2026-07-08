@@ -143,17 +143,64 @@ def screener(top_n: int = 20) -> dict:
     """NASDAQ100 LightGBM 랭킹 스크리너 (무엣지·정보용). QT3."""
     from ml.ranker import load_ranker, rank_today
     try:
+        import ticker_names
+        from dashboard.data import screener_drivers
         df = rank_today(mode="nasdaq100", top_n=top_n)
         res = load_ranker()
-        rows = df.to_dict("records") if (df is not None and not df.empty) else []
+        raw = df.to_dict("records") if (df is not None and not df.empty) else []
+        imp = {}
+        if res is not None and getattr(res, "feature_importance", None) is not None:
+            try:
+                imp = res.feature_importance.to_dict()
+            except Exception:
+                imp = {}
+        core = ("rank", "ticker", "score", "price", "tech_rating", "surv_flag")
+        rows, feats = [], {}
+        for r in raw:
+            t = r.get("ticker", "")
+            f = {k: v for k, v in r.items() if k not in core}
+            feats[t] = f
+            rows.append({
+                "rank": r.get("rank"), "ticker": t,
+                "name": ticker_names.display_name(t, allow_net=False) or "",
+                "score": r.get("score"), "price": r.get("price"),
+                "tech_rating": r.get("tech_rating"), "surv_flag": r.get("surv_flag"),
+                "reason": screener_drivers(f, imp),
+                "rsi_14": f.get("rsi_14"), "close_vs_52w_high": f.get("close_vs_52w_high"),
+                "mom_126d": f.get("mom_126d"), "excess_mom_60d": f.get("excess_mom_60d"),
+                "fund_score": f.get("fund_score"),
+            })
         meta = {}
         if res is not None:
             meta = {"ic": getattr(res, "oos_ic", None), "icir": getattr(res, "oos_icir", None),
                     "top_decile": getattr(res, "oos_top_decile_ret", None),
-                    "train_end": getattr(res, "train_end_date", None)}
-        return {"rows": rows, "meta": meta}
+                    "train_end": getattr(res, "train_end_date", None),
+                    "importance": dict(sorted(imp.items(), key=lambda x: -x[1])[:15])}
+        out = {"rows": rows, "feats": feats, "meta": meta}
+        if rows:                                      # 마지막 실행 디스크 영속 (재방문 즉시 표시)
+            try:
+                import json
+                from datetime import datetime
+                try:                                  # 직전 실행 순위 → 변동(▲▼NEW) 표시용
+                    prev = json.loads(_screener_last_path().read_text())
+                    out["prev_ranks"] = {r0.get("ticker"): r0.get("rank")
+                                         for r0 in (prev.get("rows") or [])}
+                    out["prev_asof"] = prev.get("asof")
+                except Exception:
+                    pass
+                out2 = dict(out)
+                out2["asof"] = datetime.now().strftime("%Y-%m-%d %H:%M KST")
+                out2["topn"] = top_n
+                pth = _screener_last_path()
+                pth.parent.mkdir(parents=True, exist_ok=True)
+                tmp = pth.with_suffix(".tmp")
+                tmp.write_text(json.dumps(out2, ensure_ascii=False))
+                tmp.replace(pth)
+            except Exception:
+                pass
+        return out
     except Exception as e:
-        return {"error": str(e), "rows": [], "meta": {}}
+        return {"error": str(e), "rows": [], "feats": {}, "meta": {}}
 
 
 def backtest_summary() -> dict:
@@ -262,6 +309,13 @@ def paper_summary(surface: str = "kr_mock") -> dict:
             nav = bal.get("nav") or ((bal.get("pos_value") or 0.0)
                                      + (bal.get("cash_krw" if surface == "kr_mock" else "cash_usd") or 0.0))
             out["cash"] = bal.get("cash_krw" if surface == "kr_mock" else "cash_usd")
+            if surface == "us_mock":
+                # 통화 구성 분해 — KIS 모의는 통합증거금(USD 예수금 0·원화가 증거금)이라
+                # NAV=원화총자산 환산·'현금'=파생값. 표시 레이어가 정직하게 라벨링(달러/원화 혼동 방지).
+                out["fx"] = bal.get("fx")
+                out["krw_asset"] = bal.get("krw_asset")
+                out["usd_deposit"] = bal.get("usd_deposit")
+                out["cash_derived"] = bool(bal.get("cash_derived"))
             for sym, p in (bal.get("positions") or {}).items():
                 sh = int(p.get("shares", 0) or 0)
                 if sh <= 0:
@@ -489,8 +543,17 @@ def realtime_quote(ticker: str) -> dict | None:
         price = market_data._realtime_current(t)
     except Exception:
         price = None
+    try:                                    # 2) WS 실시간 캐시 호가 (워치리스트 = 1초 갱신·진짜 실시간)
+        from providers import realtime_quotes
+        ob = realtime_quotes.get_orderbook(sym, max_age_s=15)
+        if ob and (ob.get("bids") or ob.get("asks")):
+            return {"price": price or realtime_quotes.get_price(sym),
+                    "bids": ob.get("bids") or [], "asks": ob.get("asks") or [],
+                    "ts": ob.get("ts"), "source": "kis_ws", "market": market}
+    except Exception:
+        pass
     snap = None
-    try:                                    # 2) REST 온디맨드 (임의 티커·호가 포함)
+    try:                                    # 3) REST 온디맨드 (임의 티커·호가 포함 — 폴백)
         from providers import kis_quote
         snap = kis_quote.get_snapshot(sym, market=market)
     except Exception:
@@ -571,8 +634,27 @@ def _sp500_heatmap_live() -> list[dict]:
         rows.append({
             "ticker": t, "name": sp500_seed.SP500.get(t) or t,
             "sector_kr": kr_map.get(sec_map.get(t) or "") or "기타",
+            "sub": tech_subsector(sec_map.get(t), getattr(sp500_meta, "INDUSTRY", {}).get(t)),
             "market_cap": float(cap), "pct": p})
     return rows
+
+
+# 기술 섹터 세부 카테고리 — yfinance industry → 한글 버킷 (트리맵 3계층)
+_TECH_SUB = {
+    "Semiconductors": "반도체", "Semiconductor Equipment & Materials": "반도체",
+    "Software - Application": "소프트웨어·클라우드", "Software - Infrastructure": "소프트웨어·클라우드",
+    "Information Technology Services": "IT서비스",
+    "Computer Hardware": "하드웨어·장비", "Communication Equipment": "하드웨어·장비",
+    "Scientific & Technical Instruments": "하드웨어·장비", "Electronic Components": "하드웨어·장비",
+    "Consumer Electronics": "하드웨어·장비", "Solar": "하드웨어·장비",
+}
+
+
+def tech_subsector(sector, industry) -> str | None:
+    """기술 섹터만 세부 카테고리 반환 (그 외 None — 2계층 유지). 순수."""
+    if sector != "Technology" or not industry:
+        return None
+    return _TECH_SUB.get(industry, "기타 기술")
 
 
 def market_indicators() -> dict:
@@ -829,3 +911,340 @@ def intraday_chart(symbol: str, market: str, date: str, interval: str = "1m") ->
     except Exception as e:
         out["trades"], out["trades_error"] = [], str(e)
     return out
+
+
+def ohlc_tf(ticker: str, tf: str = "1d"):
+    """타임프레임별 OHLCV — 1d/1wk/1mo 는 전체(주·월봉은 일봉 리샘플·무추가호출),
+    5m 은 최근 60일·1h 는 최근 2년 (yfinance 인트라데이 보존 한계). 실패 None."""
+    try:
+        from providers.market_data import _history_cached
+        if tf in ("1d", "1wk", "1mo"):
+            d = _history_cached(ticker, period="max")
+            if d is None or getattr(d, "empty", True) or tf == "1d":
+                return d
+            rule = "W" if tf == "1wk" else "ME"
+            agg = {"Open": "first", "High": "max", "Low": "min", "Close": "last"}
+            if "Volume" in d.columns:
+                agg["Volume"] = "sum"
+            return d.resample(rule).agg(agg).dropna(subset=["Open"])
+        import yfinance as yf
+        period = "60d" if tf == "5m" else "730d"
+        df = yf.Ticker(ticker).history(period=period, interval=tf)
+        return df if df is not None and not df.empty else None
+    except Exception:
+        return None
+
+
+# ── 코스피200·러셀2000 시장 맵 (sp500_heatmap 패턴 — 스냅샷 우선·라이브 self-heal) ──
+
+_KR200_SNAP = os.path.expanduser("~/reports/ml-cache/kr200_heatmap.json")
+_RUSSELL_SNAP = os.path.expanduser("~/reports/ml-cache/russell2000_heatmap.json")
+
+_NASDAQ_SECTOR_KR = {
+    "Technology": "기술", "Telecommunications": "커뮤니케이션", "Health Care": "헬스케어",
+    "Finance": "금융", "Real Estate": "부동산", "Consumer Discretionary": "경기소비재",
+    "Consumer Staples": "필수소비재", "Industrials": "산업재", "Basic Materials": "소재",
+    "Energy": "에너지", "Utilities": "유틸리티",
+}
+_NON_COMMON = ("Warrant", "Right", "Unit", "Preferred", "Depositary", "Notes")
+
+
+def _snap_or(build, snap_path: str, max_age_s: int = 5400) -> list[dict]:
+    """스냅샷(<max_age) 우선 → 없으면 build() 후 self-heal 기록 (sp500 패턴 공용)."""
+    import json
+    import time
+    try:
+        if time.time() - os.stat(snap_path).st_mtime < max_age_s:
+            with open(snap_path, encoding="utf-8") as f:
+                rows = json.load(f)
+            if rows:
+                return rows
+    except Exception:
+        pass
+    rows = build()
+    if rows:
+        try:
+            from safe_io import atomic_write_json
+            atomic_write_json(snap_path, rows)
+        except Exception:
+            pass
+    return rows
+
+
+def kr200_heatmap() -> list[dict]:
+    """코스피200 시장 맵 rows — 크론 스냅샷 우선(즉시) → 라이브(199종목 배치 ~30초)."""
+    return _snap_or(_kr200_heatmap_live, _KR200_SNAP)
+
+
+def _kr200_heatmap_live() -> list[dict]:
+    """kr200_meta(업종·시총·이름) + yf 배치 당일 등락%. 타일=한글명·라벨=티커(클릭 계약)."""
+    try:
+        import kr200_meta
+    except Exception:
+        return []
+    codes = sorted(kr200_meta.MARKET_CAP)
+    tickers = [f"{c}.KS" for c in codes]
+    pct: dict[str, float] = {}
+    try:
+        import warnings
+        warnings.filterwarnings("ignore")
+        import yfinance as yf
+        df = yf.download(tickers, period="2d", progress=False, group_by="ticker", threads=True)
+        for t in tickers:
+            try:
+                c = df[t]["Close"].dropna()
+                if len(c) >= 2 and c.iloc[-2]:
+                    pct[t] = round((c.iloc[-1] / c.iloc[-2] - 1) * 100, 2)
+            except Exception:
+                pass
+    except Exception:
+        return []
+    rows = []
+    for c in codes:
+        t = f"{c}.KS"
+        p = pct.get(t)
+        cap = kr200_meta.MARKET_CAP.get(c) or 0
+        if p is None or cap <= 0:
+            continue
+        nm = kr200_meta.NAME.get(c) or c
+        rows.append({"ticker": t, "name": nm, "tile": nm[:7],
+                     "sector_kr": kr200_meta.SECTOR.get(c) or "기타",
+                     "market_cap": float(cap), "pct": p})
+    return rows
+
+
+def russell2000_heatmap() -> list[dict]:
+    """러셀2000 근사 시장 맵 — 美 보통주 시총 1001~3000위 (NASDAQ 스크리너 1콜·정직 라벨)."""
+    return _snap_or(_russell2000_live, _RUSSELL_SNAP)
+
+
+def _russell2000_live() -> list[dict]:
+    """NASDAQ 스크리너(전 종목 시총·섹터·당일%) → 시총 1001~3000위. graceful []."""
+    try:
+        import requests
+        r = requests.get("https://api.nasdaq.com/api/screener/stocks",
+                         params={"tableonly": "true", "limit": "0", "download": "true"},
+                         headers={"User-Agent": "Mozilla/5.0 (X11; Linux x86_64)",
+                                  "Accept": "application/json"}, timeout=45)
+        r.raise_for_status()
+        raw = (r.json().get("data") or {}).get("rows") or []
+    except Exception:
+        return []
+    stocks = []
+    for it in raw:
+        sym = (it.get("symbol") or "").strip()
+        name = (it.get("name") or "").strip()
+        if not sym or "^" in sym or "/" in sym or any(x in name for x in _NON_COMMON):
+            continue
+        try:
+            cap = float(it.get("marketCap") or 0)
+            p = float(str(it.get("pctchange") or "").replace("%", "") or "nan")
+        except ValueError:
+            continue
+        if cap <= 0 or p != p:
+            continue
+        stocks.append((cap, sym, name, (it.get("sector") or "").strip(), p))
+    stocks.sort(reverse=True)
+    return [{"ticker": sym, "name": name[:40],
+             "sector_kr": _NASDAQ_SECTOR_KR.get(sec, "기타"),
+             "market_cap": cap, "pct": p}
+            for cap, sym, name, sec, p in stocks[1000:3000]]
+
+
+def trendlines_for(ticker: str, tf: str = "1d", *, lines: bool = True,
+                   channels: tuple[str, ...] = ()) -> list[dict]:
+    """자동 추세선·채널 감지 (dashboard.trendlines) — 표시·참고용. graceful []."""
+    try:
+        from dashboard import trendlines as tl
+        df = ohlc_tf(ticker, tf)
+        return tl.detect_trendlines(df, channels=channels, lines=lines)
+    except Exception:
+        return []
+
+
+_TAPE_SYMS = [("^VIX", "VIX", 2), ("DX-Y.NYB", "달러 인덱스", 2), ("KRW=X", "달러 환율", 2),
+              ("^KS11", "코스피", 2), ("^KQ11", "코스닥", 2), ("^IXIC", "나스닥", 2),
+              ("^GSPC", "S&P500", 2), ("NQ=F", "나스닥100 선물", 1), ("ES=F", "S&P 선물", 1)]
+
+
+def market_tape() -> list[dict]:
+    """하단 마퀴 띠 데이터 — [{label, value, chg, pct}]. yf 2d 배치·graceful []."""
+    try:
+        import warnings
+        warnings.filterwarnings("ignore")
+        import yfinance as yf
+        df = yf.download([s for s, _, _ in _TAPE_SYMS], period="2d", progress=False,
+                         group_by="ticker", threads=True)
+    except Exception:
+        return []
+    out = []
+    for sym, label, dec in _TAPE_SYMS:
+        try:
+            c = df[sym]["Close"].dropna()
+            if len(c) < 2 or not c.iloc[-2]:
+                continue
+            last, prev = float(c.iloc[-1]), float(c.iloc[-2])
+            out.append({"label": label, "value": round(last, dec),
+                        "chg": round(last - prev, dec),
+                        "pct": round((last / prev - 1) * 100, 2)})
+        except Exception:
+            continue
+    return out
+
+
+def etf_tr_pr(ticker: str, years: int = 5):
+    """ETF TR(배당재투자)/PR(가격) 시리즈 — {"tr","pr","asof"} | None. graceful."""
+    try:
+        from providers import etf_compare
+        return etf_compare.tr_pr_series(ticker, years)
+    except Exception:
+        return None
+
+
+def etf_peer_compare(ticker: str) -> dict:
+    """동종그룹 지표+점수 — {"group","rows","asof"} | {} (그룹 없음/실패). graceful."""
+    try:
+        from providers import etf_compare
+        return etf_compare.peer_report(ticker)
+    except Exception:
+        return {}
+
+
+def accumulation_plan() -> dict:
+    """주식 모으기(소수점 DCA) 계획 — bot.order_generator.build() (graceful {})."""
+    try:
+        from bot import order_generator
+        return order_generator.build() or {}
+    except Exception:
+        return {}
+
+
+def fx_now() -> float | None:
+    """USD/KRW 실시간 환율 (graceful None) — 적립 폼 적용 환율 자동 채움."""
+    try:
+        from providers.market_data import fetch_exchange_rate
+        return fetch_exchange_rate()
+    except Exception:
+        return None
+
+
+def fx_timing() -> dict:
+    """환전 타이밍 판정 (providers.fx_timing — 아침 리포트와 동일 산식). graceful {}."""
+    try:
+        from providers.fx_timing import fetch_fx_timing
+        return fetch_fx_timing() or {}
+    except Exception:
+        return {}
+
+
+def portfolio_history() -> list:
+    """일별 포트 히스토리 (portfolio_tracker — store 경유). graceful []."""
+    try:
+        import portfolio_tracker
+        return portfolio_tracker.load_history() or []
+    except Exception:
+        return []
+
+
+def target_weights_map() -> dict:
+    """목표 비중 {ticker: 분수} (봇 /rebalance 와 동일 소스). graceful {}."""
+    try:
+        from barbell_strategy import load_target_weights
+        return load_target_weights() or {}
+    except Exception:
+        return {}
+
+
+def income_summary(qqqi_shares: float = 0.0, qqqi_usd: float = 0.0) -> dict:
+    """인컴 트래커 — 분배금 기록 누적 + QQQI 월 예상(추정·네트워크 graceful)."""
+    out = {"records": [], "total": 0.0, "est_monthly": None}
+    try:
+        import store
+        recs = store.all("qqqi_dividends") or []
+        out["records"] = recs
+        out["total"] = sum(float(r.get("amount") or r.get("amount_usd") or 0) for r in recs)
+    except Exception:
+        pass
+    try:
+        if qqqi_shares > 0:
+            from providers.market_data import estimate_qqqi_monthly_dividend
+            est = estimate_qqqi_monthly_dividend(qqqi_shares, qqqi_usd) or {}
+            out["est_monthly"] = est.get("monthly_usd") or est.get("estimated_monthly_usd")
+            out["est_detail"] = est
+    except Exception:
+        pass
+    return out
+
+
+def sp500_valuation() -> dict:
+    """S&P500 지수 밸류 (상위 100 시총가중 집계 — market_valuation). graceful {}."""
+    try:
+        from providers.market_valuation import sp500_valuation as _v
+        return _v() or {}
+    except Exception:
+        return {}
+
+
+_SCREENER_LAST = None                       # 경로 상수 (홈 기준 — 워크트리 무관)
+
+
+def _screener_last_path():
+    from pathlib import Path
+    return Path.home() / "reports" / "ml-cache" / "screener_last.json"
+
+
+def screener_last() -> dict | None:
+    """마지막 스크리너 실행 결과 (디스크 영속 — 나이 무관 표시·asof 병기). 없으면 None."""
+    try:
+        import json
+        p = _screener_last_path()
+        return json.loads(p.read_text()) if p.exists() else None
+    except Exception:
+        return None
+
+
+def portfolio_flows() -> dict:
+    """일자별 외부 현금흐름(USD) — 거래 원장 합산 (적립/추가 +·축소 −). graceful {}."""
+    try:
+        from lib import trade_events as te
+        out: dict = {}
+        for r in te.all_trades():
+            if str(r.get("currency") or "USD") != "USD":
+                continue
+            src = str(r.get("source") or "")
+            if "mock" in src or "mock" in str(r.get("account") or ""):
+                continue
+            qty, px = r.get("qty"), r.get("price")
+            if not qty or not px:
+                continue
+            amt = float(qty) * float(px)
+            d = str(r.get("date") or "")[:10]
+            if not d:
+                continue
+            out[d] = out.get(d, 0.0) + (amt if r.get("side") == "buy" else -amt)
+        return out
+    except Exception:
+        return {}
+
+
+def market_temp_history(limit: int = 30) -> list:
+    """시장 온도계 일별 이력 (store — 크론 적재). graceful []."""
+    try:
+        import store
+        rows = store.all("market_temp_history") or []
+        return rows[-limit:]
+    except Exception:
+        return []
+
+
+def next_earnings(ticker: str):
+    """다음 실적 발표일 (yfinance calendar) — date | None. graceful."""
+    try:
+        import yfinance as yf
+        cal = yf.Ticker(ticker).calendar or {}
+        ed = cal.get("Earnings Date")
+        if isinstance(ed, (list, tuple)) and ed:
+            return ed[0]
+        return ed or None
+    except Exception:
+        return None

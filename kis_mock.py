@@ -259,16 +259,18 @@ def present_balance() -> dict:
     krw_asset = _f(o3, "tot_asst_amt")
     pnl = _f(o3, "tot_evlu_pfls_amt")
     fx = None
+    usd_deposit = None
     for row in res.get("output2") or []:
         if (row.get("crcy_cd") or "").upper() == "USD":
             fx = _f(row, "frst_bltn_exrt") or None
+            usd_deposit = _f(row, "frcr_dncl_amt_2")    # USD 실예수금 (통합증거금 계좌면 0 — 라이브 실증)
             if not cash_usd:
-                cash_usd = _f(row, "frcr_dncl_amt_2")   # USD 예수금 폴백
+                cash_usd = usd_deposit                  # 주문가능액 폴백
             break
     nav_usd = (krw_asset / fx) if (krw_asset and fx) else None
     return {"ok": str(res.get("rt_cd", "")) == "0", "cash_usd": cash_usd or None,
             "nav_usd": nav_usd, "krw_asset": krw_asset or None, "fx": fx,
-            "pnl": pnl, "raw": res}
+            "usd_deposit": usd_deposit, "pnl": pnl, "raw": res}
 
 
 def get_balance() -> dict:
@@ -305,11 +307,14 @@ def get_balance() -> dict:
     nav = pb.get("nav_usd")
     if nav is None:
         nav = (pos_value + cash) if cash is not None else (pos_value or None)
+    cash_derived = False
     if cash is None and nav is not None:
         cash = max(0.0, nav - pos_value)
+        cash_derived = True     # 파생값 — USD 실예수금 아님(원화 여유증거금의 달러 환산)
     return {"ok": True, "positions": positions, "pos_value": pos_value,
-            "cash_usd": cash, "nav": nav, "krw_asset": pb.get("krw_asset"),
-            "fx": pb.get("fx"), "raw": res}
+            "cash_usd": cash, "cash_derived": cash_derived, "nav": nav,
+            "krw_asset": pb.get("krw_asset"), "fx": pb.get("fx"),
+            "usd_deposit": pb.get("usd_deposit"), "raw": res}
 
 
 def _f(d: dict, key: str) -> float:

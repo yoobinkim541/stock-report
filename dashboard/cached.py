@@ -140,13 +140,13 @@ def ohlc(t, period="6mo"):
         return None
 
 
-@st.cache_data(ttl=8, show_spinner=False)
+@st.cache_data(ttl=3, show_spinner=False)
 def realtime_quote(ticker):
     """실시간 시세+호가 (KIS·8s 캐시). off/미보유 시 None → yfinance 폴백."""
     return views.realtime_quote(ticker)
 
 
-@st.cache_data(ttl=_TTL_SLOW, show_spinner="시장 맵 불러오는 중… (최초 ~1분·이후 30분 캐시)")
+@st.cache_data(ttl=300, show_spinner="시장 맵 불러오는 중…")
 def sp500_heatmap():
     """S&P500 시장 맵 rows (섹터·시총 정적 + 당일 등락 라이브·30분 캐시·크론 스냅샷 우선)."""
     return views.sp500_heatmap()
@@ -171,3 +171,93 @@ def intraday_day(market, date):
 @st.cache_data(ttl=60, show_spinner="분봉 불러오는 중…")
 def intraday_chart(symbol, market, date, interval):
     return views.intraday_chart(symbol, market, date, interval)
+
+
+@st.cache_data(ttl=_TTL, show_spinner="봉 데이터 불러오는 중…")
+def ohlc_tf(t, tf):
+    return views.ohlc_tf(t, tf)
+
+
+@st.cache_data(ttl=300, show_spinner="코스피200 맵 불러오는 중…")
+def kr200_heatmap():
+    return views.kr200_heatmap()
+
+
+@st.cache_data(ttl=300, show_spinner="러셀2000 맵 불러오는 중…")
+def russell2000_heatmap():
+    return views.russell2000_heatmap()
+
+
+@st.cache_data(ttl=_TTL, show_spinner="추세선 감지 중…")
+def trendlines_for(t, tf, lines, ch_key):
+    return views.trendlines_for(t, tf, lines=lines, channels=tuple(ch_key))
+
+
+@st.cache_data(ttl=300, show_spinner=False)
+def market_tape():
+    return views.market_tape()
+
+
+@st.cache_data(ttl=_TTL_HEAVY, show_spinner="TR·PR 계산 중…")
+def tr_pr(t, years=5):
+    return views.etf_tr_pr(t, years)
+
+
+@st.cache_data(ttl=_TTL_HEAVY, show_spinner="동종 ETF 비교 중…")
+def etf_peers(t):
+    return views.etf_peer_compare(t)
+
+
+@st.cache_data(ttl=300, show_spinner="모으기 계획 계산 중…")
+def accumulation():
+    return views.accumulation_plan()
+
+
+@st.cache_data(ttl=120, show_spinner=False)
+def fx_now():
+    return views.fx_now()
+
+
+@st.cache_data(ttl=1800, show_spinner=False)
+def fx_timing():
+    return views.fx_timing()
+
+
+@st.cache_data(ttl=900, show_spinner=False)
+def port_history():
+    return views.portfolio_history()
+
+
+@st.cache_data(ttl=900, show_spinner=False)
+def target_weights_map():
+    return views.target_weights_map()
+
+
+@st.cache_data(ttl=3600, show_spinner=False)
+def income_summary(qqqi_shares=0.0, qqqi_usd=0.0):
+    return views.income_summary(qqqi_shares, qqqi_usd)
+
+
+@st.cache_data(ttl=3600, show_spinner="S&P500 밸류 집계 중… (12h 캐시)")
+def sp500_valuation():
+    return views.sp500_valuation()
+
+
+@st.cache_data(ttl=60, show_spinner=False)
+def screener_last():
+    return views.screener_last()
+
+
+@st.cache_data(ttl=900, show_spinner=False)
+def portfolio_flows():
+    return views.portfolio_flows()
+
+
+@st.cache_data(ttl=900, show_spinner=False)
+def market_temp_history():
+    return views.market_temp_history()
+
+
+@st.cache_data(ttl=12 * 3600, show_spinner=False)
+def next_earnings(t):
+    return views.next_earnings(t)

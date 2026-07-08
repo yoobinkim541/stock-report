@@ -52,6 +52,40 @@ def _decision_payload(d):
     }
 
 
+def _kr_label(code: str | None, name: str | None = None, ticker: str | None = None) -> str:
+    """국내 종목 표시명: 회사명 (티커). 네트워크 없이 큐레이트/캐시만 사용."""
+    c = str(code or ticker or "").replace(".KS", "").replace(".KQ", "").strip().zfill(6)
+    nm = (name or "").strip()
+    if not nm or nm in (c, ticker, f"{c}.KS", f"{c}.KQ"):
+        try:
+            import kr200_meta
+            nm = kr200_meta.NAME.get(c) or nm
+        except Exception:
+            pass
+    if not nm or nm in (c, ticker, f"{c}.KS", f"{c}.KQ"):
+        try:
+            import ticker_names
+            nm = ticker_names.display_name(ticker or f"{c}.KS", allow_net=False) or nm
+        except Exception:
+            pass
+    if nm and nm not in (c, ticker, f"{c}.KS", f"{c}.KQ"):
+        return f"{nm} ({c})"
+    return c
+
+
+def _decision_interpretation(d: dict) -> str:
+    """최근 결정 한 줄 해석. 원장 근거만 기반으로 보수적으로 요약."""
+    side = d.get("side")
+    reason = str((d.get("rationale") or {}).get("one_line_reason") or "")
+    if side == "편입":
+        if "일일 신호 긍정" in reason:
+            return "재무 품질과 단기 신호가 편입 조건을 충족"
+        return "현재 정책 조건에서 신규 편입 우선순위에 포함"
+    if side == "퇴출":
+        return "정책 조건에서 보유 우선순위가 낮아져 제외"
+    return "정책 조건 변화에 따른 포지션 조정"
+
+
 def _llm_shadow_summary():
     try:
         from ml.adaptive import Ledger
@@ -94,7 +128,8 @@ def build_report(html: bool = False) -> str:
     _B = fmt.b if html else (lambda x: x)
     bal = kiwoom_mock.get_balance()
     today = datetime.now(KST)
-    hdr = f"🧪 [모의] 국내 페이퍼트레이딩 현황\n📅 {today.strftime('%Y-%m-%d')} ({_WEEKDAY_KR[today.weekday()]}) {today.strftime('%H:%M')} KST"
+    hdr = (f"🧪 [모의] 국내 모의투자 · "
+           f"{today.strftime('%Y-%m-%d')} ({_WEEKDAY_KR[today.weekday()]}) {today.strftime('%H:%M')} KST")
     if not bal.get("ok"):
         return hdr + "\n━━━━━━━━━━━━━━━━━━━\n  ⚠️ 잔고 조회 실패 — 모의 연결/모의투자 신청 확인 필요"
 
@@ -129,22 +164,23 @@ def build_report(html: bool = False) -> str:
     k_ret, k_mdd = kospi.get("return_pct"), kospi.get("mdd")
     k_mdd_pct = k_mdd * 100.0 if k_mdd is not None else None
 
-    # 한눈 스코어카드 1줄 (NAV·누적·vs KOSPI)
+    # 상단 KPI — 숫자 우선, 판단 라벨은 오른쪽에 짧게.
     excess = (cum_ret - k_ret) if k_ret is not None else None
-    lines = [hdr, fmt.headline(
-        f"📊 {_B(fmt.money(nav, '₩', abbrev=True))}", f"누적 {_B(fmt.pct(cum_ret))}",
-        (f"KOSPI대비 {_B(fmt.pct(excess) + 'p')} {'✅' if excess >= 0 else '⚠️'}" if excess is not None else None))]
-    lines.append(fmt.sep())
-    lines.append(f"NAV {fmt.money(nav, '₩')}  전일 {fmt.spct(day_ret, 2)}")
-    if k_ret is not None:
-        lines.append(f"누적 {fmt.spct(cum_ret, 2)}  (KOSPI {fmt.spct(k_ret, 2)})")
-    if k_mdd_pct is not None:
-        ok_mdd = "✅" if strat_mdd <= k_mdd_pct else "⚠️지수보다 깊음"
-        lines.append(f"MDD(최대낙폭) 전략 {strat_mdd:.1f}% / 지수 {k_mdd_pct:.1f}% {ok_mdd}")
+    lines = [hdr, fmt.sep()]
+    lines.append(f"NAV  {_B(fmt.money(nav, '₩'))}   {fmt.spct(day_ret, 2)} D/D")
+    if excess is not None:
+        lines.append(f"누적 {fmt.spct(cum_ret, 2)}       KOSPI 대비 {fmt.pct(excess)}p {'✅' if excess >= 0 else '⚠️'}")
     else:
-        lines.append(f"MDD(최대낙폭) 전략 {strat_mdd:.1f}%")
+        lines.append(f"누적 {fmt.spct(cum_ret, 2)}")
+    if k_mdd_pct is not None:
+        ok_mdd = "대비 방어 ✅" if strat_mdd <= k_mdd_pct else "보다 깊음 ⚠️"
+        lines.append(f"MDD  {strat_mdd:.1f}%         KOSPI {k_mdd_pct:.1f}% {ok_mdd}")
+    else:
+        lines.append(f"MDD  {strat_mdd:.1f}%")
     if cash is not None:
-        lines.append(f"예수금 {fmt.money(cash, '₩')}")
+        cash_w = cash / nav * 100.0 if nav else 0.0
+        lines.append(f"현금 {fmt.money(cash, '₩')}   현금비중 {cash_w:.1f}%")
+    lines.append(fmt.sep())
 
     # 보유 종목 P&L — 2줄(종목·등락·평가액 / 수량·단가) 모바일 정렬 안전
     held = {c: p for c, p in positions.items() if int(p.get("shares", 0) or 0) > 0}
@@ -154,15 +190,17 @@ def build_report(html: bool = False) -> str:
         ret = p.get("return_pct", 0) or 0
         total_pnl += p.get("pnl", 0) or 0
         nm = p.get("name", "") or code
-        lines.append(f"{nm[:8]} {fmt.spct(ret)}  {fmt.money(p.get('value', 0), '₩')}")
-        lines.append(f"  {int(p['shares'])}주 · {p.get('avg_price',0):,.0f}→{p.get('cur_price',0):,.0f}")
+        mark = "▲" if ret > 0 else ("▼" if ret < 0 else "·")
+        lines.append(f"{mark} {nm[:10]}  {fmt.pct(ret)}  {fmt.money(p.get('value', 0), '₩')}")
+        lines.append(f"  {int(p['shares'])}주 · {p.get('avg_price',0):,.0f} → {p.get('cur_price',0):,.0f}")
     if not held:
         lines.append("(보유 없음 — 현금 100%)")
     else:
         cost = pos_value - total_pnl
         pnl_ret = (total_pnl / cost * 100.0) if cost else 0.0
         sm = ("+" if total_pnl >= 0 else "-") + fmt.money(abs(total_pnl), "₩", abbrev=True)
-        lines.append(f"─ 평가손익 {fmt.spct(pnl_ret)} ({sm})")
+        lines.append("")
+        lines.append(f"평가손익  {fmt.spct(pnl_ret)}  {sm}")
 
     # 💸 거래비용 정직 계기 (누적 수수료·증권거래세·회전율 → 비용차감 성과)
     try:
@@ -176,9 +214,10 @@ def build_report(html: bool = False) -> str:
         avg_nav = (sum(float(s["nav"]) for s in snaps) / len(snaps)) if snaps else inception_nav
         drag = tot_cost / inception_nav * 100.0
         turnover = (tot_notional / avg_nav * 100.0) if avg_nav else 0.0
-        lines.append(fmt.sep("💸 거래비용"))
+        lines.append(fmt.sep("비용 체크"))
         lines.append(f"누적 {fmt.money(tot_cost, '₩', abbrev=True)} · 회전율 {turnover:.0f}%")
-        lines.append(f"비용차감 누적 {fmt.spct(cum_ret - drag)} (표시 {fmt.spct(cum_ret)} − 비용 {drag:.2f}%p)")
+        lines.append(f"비용 차감 후 누적 {fmt.spct(cum_ret - drag)}")
+        lines.append(f"성과 차감: -{drag:.2f}%p")
 
     # 🕐 단기 슬리브 (INTRADAY_MOCK — 데이터 없으면 섹션 숨음)
     try:
@@ -190,14 +229,19 @@ def build_report(html: bool = False) -> str:
     # 최근 편입/퇴출 사유
     recent, last_date = _recent_decisions()
     if recent:
-        lines.append(fmt.sep(f"최근 편입/퇴출 ({last_date})"))
+        lines.append(fmt.sep("최근 결정"))
         for d in recent:
             icon = "📥" if d.get("side") == "편입" else "📤"
             rr = (d.get("rationale") or {}).get("one_line_reason", "")
-            lines.append(f"{icon} {d.get('side')} {d.get('code')} — {rr}")
+            code = d.get("code") or str(d.get("ticker", "")).replace(".KS", "").replace(".KQ", "")
+            qty = d.get("qty")
+            qty_s = f" · {int(qty)}주" if isinstance(qty, (int, float)) and qty else ""
+            lines.append(f"{icon} {d.get('side')}  {_kr_label(code, d.get('name'), d.get('ticker'))}{qty_s}")
+            lines.append(f"근거: {rr or d.get('action') or '—'}")
+            lines.append(f"해석: {_decision_interpretation(d)}")
 
     shadow, pending_shadow = _llm_shadow_summary()
-    lines.append(fmt.sep("🧠 LLM Shadow 평가"))
+    lines.append(fmt.sep("LLM Shadow"))
     lines.append(llm_exec.summary_line(shadow))
     if pending_shadow:
         lines.append(f"미성숙 후보 {pending_shadow}건 — horizon 경과 후 평가")

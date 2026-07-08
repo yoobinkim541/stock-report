@@ -31,9 +31,10 @@ def _fetch(t: str):
     try:
         import yfinance as yf
         info = yf.Ticker(t).info or {}
-        return t, (info.get("sector") or ""), float(info.get("marketCap") or 0.0)
+        return (t, (info.get("sector") or ""), float(info.get("marketCap") or 0.0),
+                (info.get("industry") or ""))
     except Exception:
-        return t, "", 0.0
+        return t, "", 0.0, ""
 
 
 def main() -> None:
@@ -41,12 +42,15 @@ def main() -> None:
     print(f"S&P500 {len(tickers)} — yfinance sector/marketCap fetch…", flush=True)
     sector: dict[str, str] = {}
     cap: dict[str, float] = {}
+    industry: dict[str, str] = {}
     with cf.ThreadPoolExecutor(max_workers=8) as ex:
-        for i, (t, sec, mc) in enumerate(ex.map(_fetch, tickers), 1):
+        for i, (t, sec, mc, ind) in enumerate(ex.map(_fetch, tickers), 1):
             if sec:
                 sector[t] = sec
             if mc > 0:
                 cap[t] = mc
+            if ind:
+                industry[t] = ind
             if i % 50 == 0:
                 print(f"  {i}/{len(tickers)}", flush=True)
     today = datetime.date.today().isoformat()
@@ -71,8 +75,13 @@ def main() -> None:
         f.write("MARKET_CAP: dict[str, float] = {\n")
         for t in sorted(cap):
             f.write(f'    "{t}": {cap[t]:.0f},\n')
+        f.write("}\n\n")
+        f.write("# yfinance industry — 기술 섹터 세부 카테고리(반도체·소프트웨어 등) 그룹핑용\n")
+        f.write("INDUSTRY: dict[str, str] = {\n")
+        for t in sorted(industry):
+            f.write(f'    "{t}": "{industry[t]}",\n')
         f.write("}\n")
-    print(f"wrote {out}: sector {len(sector)}, cap {len(cap)}", flush=True)
+    print(f"wrote {out}: sector {len(sector)}, cap {len(cap)}, industry {len(industry)}", flush=True)
 
 
 if __name__ == "__main__":

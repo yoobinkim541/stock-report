@@ -63,7 +63,7 @@ from providers.market_data import (
     _load_last_prices, _save_last_prices,
     _load_drawdown_anchor, _update_drawdown_anchor, _realized_vol_annual,
     # 외부 피드 조회
-    fetch_exchange_rate, fetch_qqq_data, fetch_rsi, fetch_vix,
+    fetch_exchange_rate, fetch_exchange_rate_close, fetch_qqq_data, fetch_rsi, fetch_vix,
     fetch_fear_greed, fetch_ma200, fetch_portfolio_value,
     estimate_qqqi_monthly_dividend,
     # 레버리지 상태

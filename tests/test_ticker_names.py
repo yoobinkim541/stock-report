@@ -204,3 +204,14 @@ def test_cache_expired_offline_returns_stale(monkeypatch, tmp_path):
     ticker_names._save_cache({"ZZZZ": {"name": "Old", "ts": 0}})  # 만료(ts=0)
     monkeypatch.setattr(ticker_names, "_yf_cache", None)
     assert ticker_names.display_name("ZZZZ", allow_net=False) == "Old"
+
+
+def test_kr_etf_seed_search_and_display():
+    """국내 ETF 시드 병합 — 한글명 검색·resolve·display (KODEX/TIGER 등 ~1,100)."""
+    import ticker_names as tn
+    assert tn.resolve("KODEX 200") == "069500.KS"
+    assert tn.resolve("TIGER 미국S&P500") == "360750.KS"
+    assert tn.display_name("069500.KS", allow_net=False) == "KODEX 200"
+    assert tn.normalize_input("069500.KS") == "069500.KS"
+    hits = dict(tn.search("KODEX", limit=8))
+    assert "069500.KS" in hits

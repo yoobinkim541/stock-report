@@ -179,3 +179,112 @@ def test_paper_rail_html_eok_and_empty():
     assert "₩2.50억" in html
     empty = theme.paper_rail_html([])
     assert empty.startswith('<div class="tn-wl">')                 # 무행도 유효 마크업
+
+
+def test_orderbook_ladder_html():
+    """호가 사다리 — 잔량 바·전일比 등락%·현재가 강조·총잔량·당일/52주 패널."""
+    bids = [[23125, 518], [23110, 827]]
+    asks = [[23130, 1379], [23135, 6125]]
+    h = theme.orderbook_ladder_html(
+        bids, asks, prev_close=22130, price=23125,
+        day={"open": 20590, "high": 24900, "low": 19900, "volume": 172650238},
+        week52={"high": 44385, "low": 18665})
+    assert "23,125" in h and "23,135" in h
+    assert "+4.50%" in h and "+4.54%" in h            # 전일比 등락 (반올림)
+    assert "판매대기" in h and "구매대기" in h          # 총잔량 비율 바
+    assert "52주 최고" in h and "44,385" in h
+    assert "172,650,238" in h                          # 거래량
+    assert h.count("#3182f6") >= 3 and h.count("#f04452") >= 3   # 파랑=ask 잔량·빨강=bid 잔량
+    assert "호가 없음" in theme.orderbook_ladder_html([], [])    # graceful
+
+
+def test_market_tape_html_marquee():
+    """하단 마퀴 띠 — 무한 스크롤 keyframes·내용 2벌 복제·고정 위치·색 시맨틱."""
+    items = [{"label": "코스피", "value": 7293.43, "chg": -362.88, "pct": -4.73},
+             {"label": "VIX", "value": 16.13, "chg": 0.56, "pct": 3.59}]
+    h = theme.market_tape_html(items)
+    assert "tn-tape-scroll" in h and "infinite" in h
+    assert h.count("코스피") == 2 and h.count("VIX") == 2       # 이음새 없는 루프용 복제
+    assert "position: fixed" in h and "bottom: 0" in h
+    assert "▼" in h and "▲" in h
+    assert "animation-play-state: paused" in h                  # hover 정지
+    assert theme.market_tape_html([]) == ""                     # graceful
+
+
+def test_etf_score_html_gauge():
+    """ETF 점수 게이지 — 니들·5존·라벨·표본부족·None=데이터 부족 안내."""
+    h = theme.etf_score_html(72, "나스닥 100")
+    assert "<svg" in h and "<line" in h and h.count("<path") == 5   # 니들 + 5존
+    assert "72" in h and "그룹 상위" in h and "나스닥 100" in h
+    assert "표시·참고용" in h
+    low = theme.etf_score_html(55, "금", low_confidence=True)
+    assert "표본 부족" in low
+    none_h = theme.etf_score_html(None)
+    assert "데이터 부족" in none_h and "<svg" not in none_h
+    assert "그룹 최상위" in theme.etf_score_html(90) and "그룹 최하위" in theme.etf_score_html(5)
+
+
+def test_valuation_gauge_html():
+    """가치평가 게이지 — 라벨 체계(고평가/저평가)·타이틀·verdict 존."""
+    h = theme.valuation_gauge_html(0.7, sub="PEG 0.9 · 목표가 +25%")
+    assert "저평가" in h and "고평가" in h                  # 끝 라벨
+    assert "⚖️ 가치평가" in h and "PEG 0.9" in h
+    assert "크게 저평가" in h                               # +0.7 → 최상위 존 verdict
+    assert "크게 고평가" in theme.valuation_gauge_html(-0.9)
+    assert "적정 수준" in theme.valuation_gauge_html(0.0)
+    # 기본 rating 게이지 동작 불변 (기술적 분석)
+    base = theme.rating_gauge_html(0.8)
+    assert "강세" in base and "강력매수" in base
+
+
+def test_position_band_html():
+    """내 포지션 컴팩트 밴드 — 라벨·값·색·빈 입력 graceful."""
+    h = theme.position_band_html([("평단", "$190.52", None),
+                                  ("평가손익", "+3.4%", theme.GREEN)])
+    assert "평단" in h and "$190.52" in h and theme.GREEN in h
+    assert theme.position_band_html([]) == ""
+
+
+def test_analysis_card_html():
+    """기업 판단 요약 카드 — verdict 색 액센트·강점/주의 칩·다음확인 풋터·빈 목록 graceful."""
+    h = theme.analysis_card_html("주의 우선", ["ROE 32.9%"], ["순마진 악화 -7.8%p"],
+                                 ["다음 실적·가이던스 확인"])
+    assert theme.RED in h and "주의 우선" in h              # verdict 색 액센트
+    assert "ROE 32.9%" in h and "✔" in h
+    assert "순마진 악화" in h and "⚠" in h
+    assert "다음 확인" in h and "가이던스" in h
+    assert "매매신호 아님" in h
+    good = theme.analysis_card_html("양호", [], [], None)
+    assert theme.GREEN in good and "특이 강점 없음" in good   # 빈 목록·풋터 생략
+    assert "다음 확인" not in good
+
+
+def test_css_render_progress_animations():
+    """렌더링 진행감 — 스켈레톤 shimmer·stale 숨쉬기 keyframes 계약."""
+    css = theme._CSS
+    assert "stSkeleton" in css and "tn-shimmer" in css
+    assert 'data-stale="true"' in css and "tn-breathe" in css
+    assert css.count("@keyframes tn-shimmer") == 1 and css.count("@keyframes tn-breathe") == 1
+
+
+def test_market_temp_and_valuation_strip():
+    """온도계 카드(끝 라벨 과열/기회·Phase 라인) + 밸류 스트립(백분위 칩·색)."""
+    h = theme.market_temp_html(0.4, sub="공포탐욕 44", phase_line="Phase 1 · DCA 1.5×")
+    assert "시장 온도계" in h and "과열" in h and "기회" in h
+    assert "Phase 1" in h and "분할매수 우호" in h
+    assert "재료 부족" in theme.market_temp_html(None)
+    v = {"per_reported": 32.28, "per": 29.6, "per_pctile_all": 97.8,
+         "per_pctile_20y": 91.7, "fper": 20.7, "eps_growth_pct": 43.3, "peg": 0.68}
+    strip = theme.valuation_strip_html(v)
+    assert "32.3" in strip and "98%ile" in strip and "20.7" in strip
+    assert "+43.3%" in strip and "0.68" in strip
+    assert theme.valuation_strip_html({}) == ""
+
+
+def test_market_temp_spark():
+    """온도계 이력 스파크 — 방향 라벨(데워지는/식는 중)·2점 미만 생략."""
+    h = theme.market_temp_html(0.2, spark=[-0.1, 0.0, 0.2])
+    assert "svg" in h and "데워지는 중" in h and "3일" in h
+    h2 = theme.market_temp_html(0.2, spark=[0.5, 0.1])
+    assert "식는 중" in h2
+    assert "일 ·" not in theme.market_temp_html(0.2, spark=None)

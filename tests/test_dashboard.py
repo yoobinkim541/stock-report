@@ -190,6 +190,37 @@ def test_formatters_none_nan_safe():
         assert f("n/a") == "—"
 
 
+def test_fair_value_multiple_uses_current_multiple_on_forward_eps():
+    fv = data.fair_value_multiple(100, 25, 20, eps_fwd=5)
+    assert fv["fair"] == pytest.approx(125.0)
+    assert fv["upside_pct"] == pytest.approx(25.0)
+    assert fv["eps_fwd"] == pytest.approx(5.0)
+    assert fv["per"] == 25
+    assert fv["fper"] == 20
+    assert fv["source"] == "eps_fwd"
+
+
+def test_fair_value_multiple_falls_back_to_implied_forward_eps():
+    fv = data.fair_value_multiple(100, 25, 20)
+    assert fv["fair"] == pytest.approx(125.0)
+    assert fv["eps_fwd"] == pytest.approx(5.0)
+    assert fv["source"] == "implied_fper"
+
+
+def test_fair_value_multiple_can_use_forward_eps_without_fper():
+    fv = data.fair_value_multiple(100, 25, None, eps_fwd=5)
+    assert fv["fair"] == pytest.approx(125.0)
+    assert fv["fper"] is None
+
+
+def test_fair_value_multiple_rejects_invalid_inputs():
+    assert data.fair_value_multiple(None, 25, 20) is None
+    assert data.fair_value_multiple(100, 0, 20) is None
+    assert data.fair_value_multiple(100, 25, -1) is None
+    assert data.fair_value_multiple(100, 250, 20) is None   # extreme ratio: likely bad data
+    assert data.fair_value_multiple(100, 1, 20) is None
+
+
 # ── views 배선 (provider monkeypatch — 무네트워크) ───────────────────────────
 def test_views_strip_html():
     from dashboard import views
@@ -618,3 +649,263 @@ def test_theme_econ_calendar_overflow_chip():
                "importance": "medium"} for i in range(6)]
     html = theme.econ_calendar_html(events, start=d, weeks=1)
     assert "+2건 더" in html                                       # 셀당 4개 + 초과 표시
+
+
+def test_ohlc_tf_resamples_weekly_monthly(monkeypatch):
+    """주·월봉 = 일봉 max 리샘플 (추가 네트워크 0) — OHLC 집계 정합."""
+    import pandas as pd
+    from dashboard import views
+    idx = pd.date_range("2026-01-05", periods=10, freq="B")   # 2주 (월~금 ×2)
+    daily = pd.DataFrame({"Open": range(10, 20), "High": range(20, 30),
+                          "Low": range(1, 11), "Close": range(15, 25),
+                          "Volume": [100.0] * 10}, index=idx)
+    import providers.market_data as md
+    monkeypatch.setattr(md, "_history_cached", lambda t, period="max": daily)
+    wk = views.ohlc_tf("TST", "1wk")
+    assert len(wk) == 2
+    assert wk["Open"].iloc[0] == 10 and wk["Close"].iloc[0] == 19   # 첫 주 first/last
+    assert wk["High"].iloc[0] == 24 and wk["Low"].iloc[0] == 1      # 주 내 max/min
+    assert wk["Volume"].iloc[0] == 500.0
+    mo = views.ohlc_tf("TST", "1mo")
+    assert len(mo) == 1 and mo["Volume"].iloc[0] == 1000.0
+    assert views.ohlc_tf("TST", "1d") is daily                      # 일봉 = 원본 passthrough
+
+
+# ── 가치평가 종합 점수 (게이지용 · 순수) ──────────────────────────────────────
+def test_valuation_score_undervalued():
+    m = {"peg": 0.8, "per": 20.0, "forward_pe": 16.0, "eps_ttm": 5.0, "eps_fwd": 6.5}
+    c = {"target_median": 130.0}
+    iv = {"rim": {"mid": 125.0}, "upside_pct": 25.0}
+    vs = data.valuation_score(100.0, m, c, iv)
+    assert vs and vs["score"] > 0.3                    # 저평가 방향
+    assert "PEG 0.7" in vs["sub"] and vs["n"] == 5     # 교과서식 20÷30% (야후 0.8 아님)
+
+
+def test_valuation_score_overvalued_and_insufficient():
+    # 자기일관 입력: price=120=eps_ttm×per — 기준가 upside ≈ +2.5%(중립), PEG·목표가가 압도
+    m = {"peg": 3.5, "per": 60.0, "forward_pe": 55.0, "eps_ttm": 2.0, "eps_fwd": 2.05}
+    vs = data.valuation_score(120.0, m, {"target_median": 96.0}, None)
+    assert vs and vs["score"] < -0.3                   # 고평가 방향
+    assert data.valuation_score(100.0, {"peg": 1.0}) is None      # 재료 1개 → 생략
+    assert data.valuation_score(None, m) is None
+    assert data.valuation_score(100.0, {}) is None
+
+
+def test_screener_drivers():
+    """판단근거 화이트리스트 — 중요도 정렬·상위 3·결측 '—' (순수)."""
+    feats = {"close_vs_52w_high": 0.97, "mom_126d": 0.42, "rsi_14": 75.0,
+             "excess_mom_60d": 0.081, "cmf_21": 0.01}
+    s = data.screener_drivers(feats, {"mom_126d": 100, "rsi_14": 90,
+                                      "close_vs_52w_high": 10}, top=3)
+    parts = s.split(" · ")
+    assert len(parts) == 3
+    assert parts[0].startswith("6M 모멘텀 +42%")        # 중요도 1위 규칙 먼저
+    assert "RSI 75 과열" in s
+    assert data.screener_drivers({}, {}) == "—"
+    assert data.screener_drivers({"cmf_21": 0.0}, None) == "—"   # 규칙 미발동
+
+
+def test_peg_textbook_and_eps_growth():
+    """교과서식 PEG = PER ÷ EPS 증가율(fwd/ttm) — 야후 PEG 와 구분·성장 ≤0 정직 None."""
+    m = {"per": 30.0, "eps_ttm": 5.0, "eps_fwd": 9.7, "peg": 0.6}
+    assert data.eps_growth_fwd(m) == pytest.approx(94.0)
+    pt = data.peg_textbook(m)
+    assert pt["peg"] == pytest.approx(30.0 / 94.0, abs=0.001)   # 0.319 (야후 0.6 과 다름)
+    assert pt["yahoo"] == 0.6
+    assert data.peg_textbook({"per": 30.0, "eps_ttm": 5.0, "eps_fwd": 4.0}) is None  # 역성장
+    assert data.peg_textbook({}) is None
+    assert data.eps_growth_fwd({"eps_ttm": 0.0, "eps_fwd": 1.0}) is None
+
+
+def test_format_screener_features():
+    """피처 표시 — 한글 라벨·카테고리·스마트 포맷·중요도 정렬·미등록 폴백 (순수)."""
+    feats = {"obv": -79_488_400, "mom_126d": 0.42, "golden_cross": 1.0,
+             "sma_200": 57.7986, "vol_63d": 0.2401, "beta_60d": -0.4929,
+             "unknown_feat": 1.2345}
+    rows = data.format_screener_features(feats, {"mom_126d": 100, "obv": 90})
+    by = {r["지표"]: r for r in rows}
+    assert rows[0]["지표"] == "6개월 모멘텀" and rows[0]["값"] == "+42.0%"   # 중요도 1위
+    assert by["OBV 누적 흐름"]["값"] == "-79.5M" and by["OBV 누적 흐름"]["구분"] == "거래량"
+    assert by["골든크로스"]["값"] == "✓"
+    assert by["200일 이평"]["값"] == "$57.80"
+    assert by["변동성 3개월"]["값"] == "+24.0%"
+    assert by["베타 60일"]["값"] == "-0.49"
+    assert by["unknown_feat"]["구분"] == "기타"                              # 폴백
+    assert data.format_screener_features({}, {}) == []
+
+
+# ── 포트폴리오 페이지 보강 (P1 · 순수) ────────────────────────────────────────
+def _hist_rec():
+    return [{"date": "2026-06-30", "total_usd": 9000.0, "total_krw": 13_500_000,
+             "exchange_rate": 1500.0, "qqq_price": 690.0},
+            {"date": "2026-07-07", "total_usd": 9411.0, "total_krw": 14_239_554,
+             "exchange_rate": 1513.0, "qqq_price": 704.9}]
+
+
+def test_growth_series_normalized():
+    g = data.growth_series(_hist_rec())
+    assert g["port"][0] == 0.0 and g["qqq"][0] == 0.0            # 첫 기록 = 0%
+    assert g["port"][-1] == pytest.approx((9411 / 9000 - 1) * 100)
+    assert g["qqq"][-1] == pytest.approx((704.9 / 690 - 1) * 100)
+    assert data.growth_series([]) == {} and data.growth_series(_hist_rec()[:1]) == {}
+
+
+def test_fx_attribution():
+    fx = data.fx_attribution(_hist_rec(), days=30)
+    assert fx["usd_ret"] == pytest.approx(4.567, abs=0.01)
+    assert fx["krw_ret"] == pytest.approx(5.478, abs=0.01)
+    # 환율 기여 = (1+₩)/(1+$)−1 ≈ +0.87%p (원화 약세 → 원화 평가 이득)
+    assert fx["fx_ret"] == pytest.approx(0.871, abs=0.02)
+    assert data.fx_attribution([]) == {}
+
+
+def test_rebalance_gaps():
+    holdings = [{"ticker": "MSFT", "name": "Microsoft", "value": 6000.0},
+                {"ticker": "QQQI", "name": "NEOS", "value": 4000.0}]
+    rb = data.rebalance_gaps(holdings, {"MSFT": 0.5, "SGOV": 0.1})
+    by = {g["ticker"]: g for g in rb["gaps"]}
+    assert by["MSFT"]["gap_pp"] == pytest.approx(10.0)           # 60 − 50 → 축소 방향
+    assert by["MSFT"]["usd_delta"] == pytest.approx(-1000.0)
+    assert by["SGOV"]["gap_pp"] == pytest.approx(-10.0)          # 미보유 목표 → 증액 방향
+    assert by["SGOV"]["usd_delta"] == pytest.approx(1000.0)
+    assert "QQQI" not in by                                      # 목표 미설정 → 갭 제외
+    assert rb["untargeted"] == ["QQQI"]                          # 별도 반환 (안전/인컴 축)
+    assert rb["target_sum_pct"] == pytest.approx(60.0)
+    assert data.rebalance_gaps(holdings, {}) == {}
+
+
+def test_exposures_and_asset_class():
+    assert data.asset_class_of("SGOV") == "현금성 (초단기 국채)"
+    assert data.asset_class_of("QQQI") == "인컴 (커버드콜)"
+    assert data.asset_class_of("QQQ") == "지수·팩터 ETF"
+    assert data.asset_class_of("SPMO") == "지수·팩터 ETF"       # S&P500 모멘텀 지수
+    assert data.asset_class_of("QLD") == "레버리지 ETF (Tier3)"  # 2x — 별도 분류
+    assert data.asset_class_of("MSFT") == "개별주"
+    ex = data.exposures([{"ticker": "MSFT", "value": 500.0},
+                         {"ticker": "SGOV", "value": 500.0}])
+    assert ex["class"]["개별주"] == pytest.approx(50.0)
+    assert ex["class"]["현금성 (초단기 국채)"] == pytest.approx(50.0)
+    assert any("기술" in k or k == "기타·해외" for k in ex["sector"])   # MSFT 섹터 시드
+    assert data.exposures([]) == {}
+
+
+def test_aggregate_index_valuation():
+    """지수 밸류 상향 집계 — 시총가중 조화평균·성장·PEG·결측 제외 (순수)."""
+    from providers.market_valuation import aggregate_index_valuation
+    rows = [{"cap": 3000, "per": 30.0, "fper": 24.0},
+            {"cap": 1000, "per": 20.0, "fper": 16.0},
+            {"cap": 500, "per": None, "fper": None}]      # 결측 — 커버리지에서 제외
+    v = aggregate_index_valuation(rows)
+    # 조화평균: Σcap/Σ(cap/PE) = 4000/(100+50) ≈ 26.67
+    assert v["per"] == pytest.approx(26.7, abs=0.05)
+    assert v["fper"] == pytest.approx(21.3, abs=0.05)     # 4000/(125+62.5)
+    assert v["eps_growth_pct"] == pytest.approx(25.0, abs=0.1)   # 이익합 187.5/150
+    assert v["peg"] == pytest.approx(26.67 / 25.0, abs=0.01)
+    assert v["cov_trailing_pct"] == pytest.approx(4000 / 4500 * 100, abs=0.1)
+    assert aggregate_index_valuation([]) == {}
+
+
+def test_multpl_parsers():
+    """multpl 파서 — 현재값·월별 테이블(abbr/&#x2002; 스킵)·역사 백분위 (순수)."""
+    from providers.market_valuation import (hist_percentile, parse_multpl_current,
+                                            parse_multpl_table)
+    cur_html = '<div id="current"><b>Current<span>S&P 500 PE</span>:</b>\n32.28\n</div>'
+    assert parse_multpl_current(cur_html) == 32.28
+    assert parse_multpl_current("<html></html>") is None
+    tbl = ('<tr><td>Jun 1, 2026</td>\n<td>\n<abbr title="Estimate">†</abbr>\n31.93\n</td>'
+           '<tr><td>Dec 1, 2024</td>\n<td>\n&#x2002;\n28.60\n</td>'
+           '<tr><td>Mar 1, 1871</td>\n<td>\n&#x2002;\n11.52\n</td>')
+    rows = parse_multpl_table(tbl)
+    assert [v for _, v in rows] == [31.93, 28.60, 11.52]
+    assert hist_percentile([10, 20, 30, 40], 32.28) == 75.0
+    assert hist_percentile([], 30) is None
+
+
+def test_market_temperature():
+    """시장 온도계 — 역발상 부호·가중 평균·재료 부족 None (순수)."""
+    hot = data.market_temperature(fear_greed=85, rsi_w=80, per_pctile_20y=95,
+                                  peg=2.5, drawdown_pct=0.0)
+    assert hot["score"] < -0.5                        # 과열 → 신중
+    cold = data.market_temperature(fear_greed=15, rsi_w=30, per_pctile_20y=30,
+                                   peg=0.7, drawdown_pct=-12.0)
+    assert cold["score"] > 0.5                        # 공포·저평가 → 기회
+    assert "공포탐욕 15" in cold["sub"]
+    assert data.market_temperature(fear_greed=50) is None       # 재료 1개
+
+
+def test_top_feature_bars():
+    """핵심 피처 바 — 중요도 순 라벨(한글 · 포맷값)·top 제한 (순수)."""
+    feats = {"mom_126d": 0.42, "rsi_14": 62.0, "obv": -38_800_000}
+    tb = data.top_feature_bars(feats, {"obv": 100, "mom_126d": 90, "rsi_14": 10}, top=2)
+    assert tb["labels"] == ["OBV 누적 흐름 · -38.8M", "6개월 모멘텀 · +42.0%"]
+    assert tb["values"] == [100.0, 90.0]
+    assert data.top_feature_bars(feats, {}) == {}
+    assert data.top_feature_bars({}, {"x": 1}) == {}
+
+
+def test_rank_badge_and_move():
+    """순위 배지(메달)·직전 대비 변동(▲▼〓NEW) — 순수."""
+    assert data.rank_badge(1) == "🥇 1" and data.rank_badge(3) == "🥉 3"
+    assert data.rank_badge(7) == "7" and data.rank_badge(None) == "—"
+    assert data.rank_move(2, 5) == "▲3"                # 5위 → 2위 상승
+    assert data.rank_move(6, 4) == "▼2"
+    assert data.rank_move(3, 3) == "〓"
+    assert data.rank_move(1, None) == "NEW"
+
+
+def test_entry_levels():
+    """진입 레벨 조립 — 아래 지지 근접순 3·위 저항 2·밸류 갭 (순수)."""
+    lv = data.entry_levels(
+        100.0,
+        supports=[("MA60", 96.0), ("MA200", 88.0), ("볼린저 하단", 93.0),
+                  ("52주 저점", 70.0), ("MA120", 101.0)],       # 101 은 위 → 제외
+        resistances=[("52주 고점", 120.0), ("추세 저항선", 108.0)],
+        fairs=[("멀티플 기준가", 117.0), ("목표가 중앙값", 123.0)])
+    labs = [x[0] for x in lv["entries"]]
+    assert labs[0] == "MA60" and "MA200" in labs           # 근접순 유지 (클러스터 라벨)
+    assert lv["entries"][0][2] == pytest.approx(-4.0)
+    assert lv["zones"][0]["n"] == 1                        # 1.5% 밖 — 미병합
+    assert [x[0] for x in lv["resists"]] == ["추세 저항선", "52주 고점"]
+    assert lv["fair_gap_pct"] == pytest.approx(20.0)            # (117+123)/2 = 120
+    assert data.entry_levels(0, [], [], []) == {}
+    assert data.entry_levels(100.0, [], [], []) == {}           # 재료 전무 — 생략
+    # 합류 존 — 1.5% 이내 재료 병합·강도 ×n
+    lv2 = data.entry_levels(100.0,
+                            supports=[("MA200", 95.0), ("매물대(HVN)", 95.8),
+                                      ("추세 지지선", 95.4), ("52주 저점", 80.0)],
+                            resistances=[], fairs=[("기준가", 110.0), ("목표가", 112.0)])
+    z0 = lv2["zones"][0]
+    assert z0["n"] == 3 and z0["lo"] == 95.0 and z0["hi"] == 95.8
+    assert "MA200" in z0["labels"] and "매물대(HVN)" in z0["labels"]
+    assert lv2["zones"][1]["n"] == 1                       # 52주 저점은 별도 존
+
+
+def test_twr_series_deposit_not_gain():
+    """TWR — 적립(현금 유입)이 수익으로 잡히지 않음 (단순 총액과 대비)."""
+    rec = [{"date": "2026-07-01", "total_usd": 1000.0},
+           {"date": "2026-07-02", "total_usd": 1500.0},    # +500 적립 (가격 불변)
+           {"date": "2026-07-03", "total_usd": 1650.0}]    # +10% 상승
+    flows = {"2026-07-02": 500.0}
+    tw = data.twr_series(rec, flows)
+    assert tw["twr"][1] == pytest.approx(0.0)              # 적립일 수익 0
+    assert tw["twr"][2] == pytest.approx(10.0)             # 진짜 수익만
+    assert tw["simple"][2] == pytest.approx(65.0)          # 단순 총액은 65% (왜곡)
+    assert tw["flows_total"] == 500.0
+    assert data.twr_series(rec[:1], flows) == {}
+
+
+def test_load_kr_holdings(tmp_path):
+    """국내북 로더 — domestic 섹션 정규화 (원화 평가·동기화 시각)."""
+    import json
+    p = tmp_path / "snap.json"
+    p.write_text(json.dumps({"domestic": {"holdings": [
+        {"name": "SOL AI반도체TOP2플러스", "ticker": "SOL", "avg_price": 23683,
+         "current_price": 25200, "shares": 20, "pnl_krw": 30210, "return_pct": 6.38}]},
+        "last_domestic_sync": "2026-07-08 08:35"}))
+    kr = data.load_kr_holdings(str(p))
+    assert kr["total"] == 25200 * 20
+    assert kr["rows"][0]["ret"] == 6.38
+    assert kr["last_sync"].startswith("2026-07-08")
+    empty = tmp_path / "e.json"
+    empty.write_text("{}")
+    assert data.load_kr_holdings(str(empty)) == {}

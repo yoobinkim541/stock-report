@@ -128,7 +128,7 @@ def test_price_candle_ohlc_and_ma():
     assert any(isinstance(tr, go.Candlestick) for tr in fig.data), "Candlestick trace 없음"
     names = [tr.name for tr in fig.data]
     assert "MA20" in names and "MA60" in names
-    assert fig.layout.xaxis.rangeslider.visible is False        # 레인지슬라이더 off
+    assert fig.layout.xaxis.rangeslider.visible is True         # 과거 탐색 레인지슬라이더 (내비 개편)
 
 
 def test_price_candle_avg_cost_hline():
@@ -169,8 +169,28 @@ def test_market_treemap_sector_grouping():
     assert isinstance(tr, go.Treemap)
     assert {"기술", "금융", "AAPL", "MSFT", "JPM"} <= set(tr.labels)   # 섹터 루트 + 종목
     idx = list(tr.labels).index("AAPL")
-    assert tr.parents[idx] == "기술"                                    # 종목 parent=섹터
+    assert tr.parents[idx] == "sec:기술"                                # 종목 parent=섹터 id
+    assert tr.ids[idx] == "t:AAPL"                                      # 종목 label=티커(클릭 계약)
     assert tr.marker.cmid == 0 and tr.marker.cmax == 3                  # 발산 색 ±3
+
+
+def test_market_treemap_tech_subcategories():
+    """기술 섹터 3계층 — sub(반도체 등) 중간 노드, 종목 parent=sub id."""
+    rows = [
+        {"ticker": "NVDA", "name": "NVIDIA", "sector_kr": "기술", "sub": "반도체",
+         "market_cap": 3e12, "pct": 2.0},
+        {"ticker": "MSFT", "name": "Microsoft", "sector_kr": "기술", "sub": "소프트웨어·클라우드",
+         "market_cap": 2.8e12, "pct": 1.0},
+        {"ticker": "JPM", "name": "JPMorgan", "sector_kr": "금융", "market_cap": 9e11, "pct": -1.0},
+    ]
+    tr = charts.market_treemap(rows).data[0]
+    ids = list(tr.ids)
+    assert "sub:기술/반도체" in ids and "sub:기술/소프트웨어·클라우드" in ids
+    assert tr.parents[ids.index("sub:기술/반도체")] == "sec:기술"       # sub → 섹터
+    assert tr.parents[ids.index("t:NVDA")] == "sub:기술/반도체"         # 종목 → sub
+    assert tr.parents[ids.index("t:JPM")] == "sec:금융"                 # sub 없는 섹터는 2계층 유지
+    # branchvalues=total 정합: sub 값 = 자식 시총합
+    assert tr.values[ids.index("sub:기술/반도체")] == 3e12
 
 
 def test_market_treemap_clamps_and_empty():
@@ -288,3 +308,399 @@ def test_intraday_candle_empty_graceful():
     import pandas as pd
     assert _is_fig(charts.intraday_candle(pd.DataFrame()))
     assert len(charts.intraday_candle(pd.DataFrame()).data) == 0
+
+
+def test_price_charts_pannable_navigation():
+    """가격 차트 3종 — pan 드래그 + 레인지슬라이더(과거 탐색) 계약."""
+    import pandas as pd
+    idx = pd.date_range("2026-01-01", periods=30, freq="D")
+    hist = pd.DataFrame({"Open": [100.0] * 30, "High": [101.0] * 30,
+                         "Low": [99.0] * 30, "Close": [100.5] * 30,
+                         "Volume": [10.0] * 30}, index=idx)
+    for fig in (charts.price_line(hist, "T"), charts.price_candle(hist, "T"),
+                charts.intraday_candle(hist, "T")):
+        assert fig.layout.dragmode == "pan"
+        assert fig.layout.xaxis.rangeslider.visible is True
+    assert charts.PAN_CFG["scrollZoom"] is True           # 휠 확대/축소
+    assert "select2d" in charts.PAN_CFG["modeBarButtonsToRemove"]  # 마커 클릭과 간섭 제거
+
+
+def test_analyst_ratings_highlights_dominant_bucket():
+    fig = charts.analyst_ratings({"strong_sell": 1, "sell": 2, "hold": 4, "buy": 12, "strong_buy": 8})
+    assert _is_fig(fig)
+    bar = fig.data[0]
+    assert list(bar.x) == ["적극 매도", "매도", "중립", "매수", "적극 매수"]
+    assert list(bar.y) == [1, 2, 4, 12, 8]
+    assert list(bar.marker.color)[3] == charts._GREEN
+
+
+def test_analyst_ratings_empty_graceful():
+    assert _is_fig(charts.analyst_ratings({}))
+    assert len(charts.analyst_ratings({}).data) == 0
+
+
+def test_target_price_fan_projects_targets_and_handles_empty_close():
+    import pandas as pd
+    idx = pd.date_range("2026-01-01", periods=3, freq="D")
+    hist = pd.DataFrame({"Close": [100.0, 101.0, 102.0]}, index=idx)
+    fig = charts.target_price_fan(hist, 100.0, 130.0, 120.0, 90.0)
+    assert _is_fig(fig)
+    assert [tr.name for tr in fig.data] == ["주가", "최고", "평균", "최저"]
+    assert len(fig.layout.annotations) == 4       # 목표가 3개 + 현재가 hline
+
+    empty_close = pd.DataFrame({"Close": [None, None]}, index=idx[:2])
+    assert _is_fig(charts.target_price_fan(empty_close, 100.0, 120.0, 110.0, 90.0))
+
+
+def test_target_price_fan_requires_mean_and_price():
+    assert len(charts.target_price_fan(None, 100.0, 120.0, None, 90.0).data) == 0
+    assert len(charts.target_price_fan(None, None, 120.0, 110.0, 90.0).data) == 0
+
+
+def test_initial_view_window_full_history():
+    """전체 히스토리 로드 + 초기 표시창(view_days) — 과거 드래그용 데이터는 전부 유지."""
+    import pandas as pd
+    idx = pd.date_range("2016-01-01", periods=2500, freq="D")   # ~7년
+    hist = pd.DataFrame({"Open": [100.0] * 2500, "High": [200.0] * 2300 + [110.0] * 200,
+                         "Low": [90.0] * 2500, "Close": [100.0] * 2500,
+                         "Volume": [1.0] * 2500}, index=idx)
+    fig = charts.price_candle(hist, "T", view_days=180)
+    assert len(fig.data[0].x) == 2500                            # 데이터는 전체 보존
+    x0, x1 = fig.layout.xaxis.range
+    assert pd.Timestamp(x0) >= idx[0] and pd.Timestamp(x1) >= idx[-1]
+    assert (pd.Timestamp(x1) - pd.Timestamp(x0)).days <= 200     # 초기 창 ≈ 6개월
+    assert fig.layout.yaxis.range[1] < 150                       # y 는 창 데이터(110) 기준 — 과거 고점(200) 아님
+    # view_days 없으면 전체 표시(범위 미설정) · 창보다 짧은 이력도 전체
+    assert charts.price_line(hist, "T").layout.xaxis.range is None
+    assert charts.price_line(hist.iloc[:100], "T", view_days=365).layout.xaxis.range is None
+
+
+def test_analyst_ratings_distribution():
+    fig = charts.analyst_ratings({"strong_sell": 0, "sell": 0, "hold": 1, "buy": 23, "strong_buy": 1})
+    assert _is_fig(fig)
+    bar = fig.data[0]
+    assert list(bar.y) == [0, 0, 1, 23, 1]
+    assert list(bar.text) == ["0명", "0명", "1명", "23명", "1명"]
+    assert bar.marker.color[3] == charts._GREEN          # 최다 카테고리 강조
+    assert bar.marker.color[2] != charts._GREEN          # 나머지 딤
+    assert len(charts.analyst_ratings({}).data) == 0     # 빈 분포 graceful
+
+
+def test_target_price_fan_projection():
+    import pandas as pd
+    idx = pd.date_range("2025-07-08", periods=250, freq="D")
+    hist = pd.DataFrame({"Close": [2_000_000.0 + i * 1000 for i in range(250)]}, index=idx)
+    fig = charts.target_price_fan(hist, 2_259_000, 4_300_000, 3_547_916, 1_750_000, "₩")
+    assert _is_fig(fig)
+    assert len(fig.data) == 4                             # 주가 + 최고/평균/최저 점선
+    anns = " ".join(a.text for a in fig.layout.annotations)
+    assert "최고" in anns and "평균" in anns and "최저" in anns
+    assert "+57.1%" in anns and "+90.3%" in anns and "-22.5%" in anns
+    assert "₩3,547,916" in anns                           # KR 통화 포맷
+    # 평균 없으면 빈 Figure · 이력 없이도 투영만으로 렌더
+    assert len(charts.target_price_fan(hist, 100.0, None, None, None).data) == 0
+    assert len(charts.target_price_fan(None, 100.0, 120.0, 110.0, 90.0).data) == 3
+
+
+def test_price_chart_indicators_composite():
+    """기술적 분석 합성 — MA 세트·RSI 하단 패널·볼린저·일목균형표 토글."""
+    import pandas as pd
+    idx = pd.date_range("2024-01-01", periods=300, freq="D")
+    hist = pd.DataFrame({"Open": [100.0 + i * 0.1 for i in range(300)],
+                         "High": [101.0 + i * 0.1 for i in range(300)],
+                         "Low": [99.0 + i * 0.1 for i in range(300)],
+                         "Close": [100.5 + i * 0.1 for i in range(300)],
+                         "Volume": [10.0] * 300}, index=idx)
+    fig = charts.price_chart(hist, "T", kind="candle", mas=[60, 120, 200],
+                             show_rsi=True, bollinger=True, ichimoku=True)
+    names = [tr.name for tr in fig.data]
+    assert {"MA60", "MA120", "MA200"} <= set(names)
+    assert "RSI(14)" in names and "BB상단" in names and "전환선(9)" in names
+    rsi_tr = next(tr for tr in fig.data if tr.name == "RSI(14)")
+    assert rsi_tr.yaxis == "y2"                                # 하단 서브패널
+    assert fig.layout.yaxis2.range == (0, 100)
+    assert fig.layout.height >= 540 and fig.layout.margin.b >= 64
+    assert fig.layout.yaxis2.domain[1] - fig.layout.yaxis2.domain[0] >= 0.27
+    # 전부 끄면 가격 트레이스만
+    fig2 = charts.price_chart(hist, "T", kind="line", mas=[], show_rsi=False)
+    assert [tr.name for tr in fig2.data] == ["T"]
+    assert fig2.layout.xaxis.rangeslider.visible is True       # RSI 없으면 슬라이더 유지
+    # 이력 부족 MA 는 침묵 스킵
+    fig3 = charts.price_chart(hist.iloc[:50], "T", mas=[200])
+    assert "MA200" not in [tr.name for tr in fig3.data]
+
+
+def test_price_chart_trend_lines_overlay():
+    """추세선·채널 오버레이 — 지지/저항 대시 선분·채널 상하단 fill·annotation·드로잉 스타일."""
+    import pandas as pd
+    idx = pd.date_range("2024-01-01", periods=100, freq="D")
+    hist = pd.DataFrame({"Open": [100.0] * 100, "High": [101.0] * 100,
+                         "Low": [99.0] * 100, "Close": [100.0] * 100}, index=idx)
+    tls = [
+        {"kind": "support", "label": "지지선 (3터치)", "x0": idx[10], "x1": idx[-1],
+         "y0": 98.0, "y1": 100.0, "upper": None, "lower": None, "path": None,
+         "touches": 3, "meta": {"trend": None}},
+        {"kind": "channel", "label": "단기 상승채널(60)", "x0": idx[40], "x1": idx[-1],
+         "y0": 99.0, "y1": 101.0, "upper": (100.0, 102.0), "lower": (98.0, 100.0),
+         "path": None, "touches": 0, "meta": {"trend": "up"}},
+    ]
+    fig = charts.price_chart(hist, "T", trend_lines=tls)
+    names = [tr.name for tr in fig.data]
+    assert "지지선 (3터치)" in names and "단기 상승채널(60)" in names
+    ch_lower = [tr for tr in fig.data if tr.legendgroup == "단기 상승채널(60)" and tr.fill == "tonexty"]
+    assert ch_lower, "채널 fill 없음"
+    anns = " ".join(a.text for a in fig.layout.annotations)
+    assert "지지선" in anns and "상승채널" in anns
+    assert fig.layout.newshape.line.color == "#f59e0b"      # 수동 드로잉 기본 스타일
+    assert "drawline" in charts.PAN_DRAW_CFG["modeBarButtonsToAdd"]
+    # 빈 입력 무변화
+    fig2 = charts.price_chart(hist, "T", trend_lines=[])
+    assert len(fig2.data) < len(fig.data)
+
+
+def test_price_chart_three_pane_layout():
+    """가격/거래량/RSI 3패널 — 축 배치·거래량 방향색·RSI 시그널·최고최저 콜아웃·현재가 칩."""
+    import pandas as pd
+    idx = pd.date_range("2024-01-01", periods=120, freq="D")
+    close = [100.0 + (i % 7) for i in range(120)]
+    hist = pd.DataFrame({"Open": [c - 0.5 for c in close],
+                         "High": [c + 1 for c in close], "Low": [c - 1 for c in close],
+                         "Close": close, "Volume": [10.0 + i for i in range(120)]}, index=idx)
+    fig = charts.price_chart(hist, "T", kind="candle", show_rsi=True, show_volume=True)
+    by_name = {tr.name: tr for tr in fig.data}
+    assert by_name["거래량"].yaxis == "y2" and by_name["거래량 MA20"].yaxis == "y2"
+    assert by_name["RSI(14)"].yaxis == "y3" and by_name["RSI 시그널(14)"].yaxis == "y3"
+    assert fig.layout.yaxis3.range == (0, 100)
+    assert fig.layout.height >= 680 and fig.layout.margin.b >= 64
+    assert fig.layout.xaxis.automargin is True and fig.layout.yaxis3.automargin is True
+    assert fig.layout.yaxis3.domain[1] - fig.layout.yaxis3.domain[0] >= 0.20
+    anns = " ".join(a.text for a in fig.layout.annotations)
+    assert "+" in anns and "-" in anns and "<b>" in anns       # 최고/최저 % + 현재가 칩
+    # 거래량만 (RSI off) → 거래량 y2
+    fig2 = charts.price_chart(hist, "T", show_volume=True)
+    assert {tr.name: tr for tr in fig2.data}["거래량"].yaxis == "y2"
+    # Volume 컬럼 없으면 침묵 스킵
+    fig3 = charts.price_chart(hist.drop(columns=["Volume"]), "T", show_volume=True)
+    assert "거래량" not in [tr.name for tr in fig3.data]
+
+
+def test_price_chart_new_top_indicators():
+    """슈퍼트렌드·엔벨로프·프랙탈·매물대 — 트레이스 존재·토글 off 시 부재·V자 전환."""
+    import numpy as np
+    import pandas as pd
+    idx = pd.date_range("2024-01-01", periods=160, freq="D")
+    close = np.concatenate([np.linspace(100, 70, 80), np.linspace(70, 105, 80)])  # V자
+    hist = pd.DataFrame({"Open": close, "High": close + 1.5, "Low": close - 1.5,
+                         "Close": close, "Volume": np.full(160, 100.0)}, index=idx)
+    fig = charts.price_chart(hist, "T", kind="candle", mas=[],
+                             supertrend=True, envelope=True, fractals=True, vol_profile=True)
+    names = [tr.name for tr in fig.data]
+    assert "슈퍼트렌드" in names and "엔벨로프(20,6%)" in names
+    assert "프랙탈" in names and "매물대" in names
+    vp = next(tr for tr in fig.data if tr.name == "매물대")
+    assert vp.xaxis == "x9" and vp.orientation == "h"          # 오버레이 히스토그램
+    assert fig.layout.xaxis9.visible is False
+    # 엔벨로프 ±6% 정합
+    env = [tr for tr in fig.data if tr.legendgroup == "엔벨로프"]
+    ma20 = hist["Close"].rolling(20).mean().iloc[-1]
+    ys = sorted(t.y[-1] for t in env)
+    assert ys[0] == pytest.approx(ma20 * 0.94) and ys[1] == pytest.approx(ma20 * 1.06)
+    # V자 → 슈퍼트렌드 추세 전환 존재
+    line, trend = charts.supertrend_series(hist)
+    assert (np.diff(trend) != 0).any()
+    # 전부 off → 신규 지표 트레이스 없음
+    fig2 = charts.price_chart(hist, "T", mas=[])
+    assert not ({"슈퍼트렌드", "매물대", "프랙탈"} & set(tr.name for tr in fig2.data))
+
+
+def test_price_chart_second_wave_indicators():
+    """EMA·파라볼릭 SAR·프라이스 채널·세션 VWAP·앵커드 VWAP — 수식·트레이스 계약."""
+    import numpy as np
+    import pandas as pd
+    idx = pd.date_range("2026-07-06 09:00", periods=120, freq="5min", tz="Asia/Seoul")
+    close = 100 + np.cumsum(np.random.default_rng(3).normal(0, 0.4, 120))
+    hist = pd.DataFrame({"Open": close, "High": close + 0.6, "Low": close - 0.6,
+                         "Close": close, "Volume": np.full(120, 50.0)}, index=idx)
+    fig = charts.price_chart(hist, "T", mas=[20], emas=[20], psar=True,
+                             donchian_on=True, vwap=True, avwap=True, view_days=1)
+    names = [tr.name for tr in fig.data]
+    for n in ("EMA20", "파라볼릭 SAR", "프라이스 채널(20)", "VWAP(세션)", "앵커드 VWAP"):
+        assert n in names, f"{n} 없음"
+    # EMA ≠ SMA (다른 수식)
+    ema = next(tr for tr in fig.data if tr.name == "EMA20")
+    sma = next(tr for tr in fig.data if tr.name == "MA20")
+    assert ema.y[-1] != sma.y[-1]
+    # SAR 추세 전환 존재 + 돈치안 상단≥하단
+    sar, trend = charts.parabolic_sar_series(hist)
+    assert (np.diff(trend[2:]) != 0).any()
+    up, lo, _ = charts.donchian(hist)
+    assert (up.dropna() >= lo.dropna()).all()
+    # 세션 VWAP 일자 리셋 — 두 세션 경계에서 누적 초기화
+    two_day = pd.date_range("2026-07-06 09:00", periods=80, freq="5min", tz="Asia/Seoul")
+    two_day = two_day[:40].append(pd.date_range("2026-07-07 09:00", periods=40,
+                                                freq="5min", tz="Asia/Seoul"))
+    h2 = hist.iloc[:80].set_axis(two_day)
+    sv = charts.session_vwap(h2)
+    d2_first = sv.iloc[40]
+    tp_first = float((h2["High"].iloc[40] + h2["Low"].iloc[40] + h2["Close"].iloc[40]) / 3)
+    assert d2_first == pytest.approx(tp_first)          # 새 세션 첫 봉 = 그 봉 tp (리셋)
+
+
+# ── I3 종목 비교 오버레이 (% 상대수익) ────────────────────────────────
+def test_normalize_pct_anchor_zero():
+    """정규화 시작점 = 표시창 시작 봉 0% (앵커 이전 구간도 같은 앵커로 연속)."""
+    idx = pd.date_range("2025-01-01", periods=100, freq="D")
+    s = pd.Series(range(100, 200), index=idx, dtype=float)
+    n = charts.normalize_pct(s, view_days=30)
+    anchor_ts = idx[-1] - pd.Timedelta(days=30)
+    first_in_win = n[n.index >= anchor_ts].iloc[0]
+    assert abs(first_in_win) < 1e-9                    # 창 시작 = 0%
+    assert n.iloc[0] < 0                                # 앵커 이전(더 쌈) → 음수 %
+    n_all = charts.normalize_pct(s)                     # view_days 없음 → 첫 봉 앵커
+    assert abs(n_all.iloc[0]) < 1e-9
+    assert abs(n_all.iloc[-1] - 99.0) < 1e-9            # 100→199 = +99%
+
+
+def test_price_chart_compare_mode():
+    """비교 모드 — 정규화 라인 2+, 가격절대 오버레이(캔들·평단·MA) 자동 숨김·% 축."""
+    import plotly.graph_objects as go
+    hist = _ohlc(80)
+    cmp_s = pd.Series([50.0 + i * 2 for i in range(80)], index=hist.index)
+    fig = charts.price_chart(hist, "MAIN", kind="candle", avg_cost=115.0,
+                             mas=(20,), compare={"CMP (X)": cmp_s})
+    assert not any(isinstance(tr, go.Candlestick) for tr in fig.data)   # 캔들 강제 해제
+    names = [tr.name for tr in fig.data]
+    assert "MAIN" in names and "CMP (X)" in names       # 두 시리즈 존재
+    assert not any(n and n.startswith("MA") and n != "MAIN" for n in names)  # MA 숨김
+    hlines = [s for s in fig.layout.shapes if s.type == "line" and s.y0 == s.y1]
+    assert all(s.y0 == 0 for s in hlines)               # 평단 hline 없음·0% 기준선만
+    assert fig.layout.yaxis.ticksuffix == "%"
+    main_tr = next(tr for tr in fig.data if tr.name == "MAIN")
+    assert abs(main_tr.y[0]) < 1e-9                     # 시작 0%
+    assert not [a for a in fig.layout.annotations or [] if a.name in ("tn-hi", "tn-lo")]
+
+
+def test_price_chart_compare_empty_series_ignored():
+    """비교 시리즈가 전부 무효(None·짧음)면 일반 모드 유지."""
+    import plotly.graph_objects as go
+    hist = _ohlc(60)
+    short = pd.Series([1.0], index=hist.index[:1])
+    fig = charts.price_chart(hist, "M", kind="candle",
+                             compare={"a": None, "b": short})
+    assert any(isinstance(tr, go.Candlestick) for tr in fig.data)   # 캔들 유지 = 일반 모드
+
+
+def test_price_chart_legend_decluttered():
+    """범례 정리 — 거래량·RSI·Buy/Sell 은 범례 제외, 종가·MA 만 노출 (UI 소음 제거)."""
+    hist = _ohlc(80)
+    hist["Volume"] = 1000.0
+    trades = [{"event_id": "e1", "side": "buy", "qty": 1, "price": 110.0,
+               "date": str(hist.index[10].date())}]
+    fig = charts.price_chart(hist, "T", mas=(20,), show_rsi=True, show_volume=True,
+                             trades=trades)
+    shown = {tr.name for tr in fig.data if tr.showlegend is not False}
+    assert shown == {"T", "MA20"}                       # 나머지 전부 범례 숨김
+    assert fig.layout.legend.xanchor == "left"          # 좌상단 밀착
+    assert fig.layout.margin.r >= 40                    # 현재가 칩 잘림 방지 여백
+
+
+def test_cmp_initial_yrange_pct_frame():
+    """비교(%) 모드 초기 y = 정규화 % 프레임 — 달러 가격대(45~55)가 아니어야 (1y 버그 회귀)."""
+    idx = pd.date_range("2024-06-01", periods=500, freq="D")
+    tr = pd.Series([50.0 * 1.0006 ** i for i in range(500)], index=idx)     # $50대
+    pr = pd.Series([50.0 * 1.0001 ** i for i in range(500)], index=idx)
+    r = charts.cmp_initial_yrange(tr, {"PR": pr}, 365)
+    assert r is not None
+    lo, hi = r
+    assert lo < 5 and hi < 40                        # % 스케일 (달러 50대 아님)
+    assert hi > 10                                    # TR 1y ≈ +24% 포함
+    assert charts.cmp_initial_yrange(tr.iloc[:1], {}, 365) is None   # 재료 부족
+
+
+def test_price_chart_compare_initial_view_pct():
+    """compare 차트의 서버측 초기 y-range 가 % 프레임 (panes 1·2 양 경로)."""
+    idx = pd.date_range("2024-06-01", periods=500, freq="D")
+    close = pd.Series([50.0 * 1.0006 ** i for i in range(500)], index=idx)
+    hist = pd.DataFrame({"Open": close, "High": close * 1.01, "Low": close * 0.99,
+                         "Close": close, "Volume": [1e6] * 500}, index=idx)
+    cmp_s = pd.Series([100.0 * 1.0003 ** i for i in range(500)], index=idx)
+    fig1 = charts.price_chart(hist, "T", compare={"C": cmp_s}, view_days=365)   # panes==1
+    r1 = fig1.layout.yaxis.range
+    assert r1 is not None and r1[1] < 45              # % 프레임 (가격 50~67 아님)
+    fig2 = charts.price_chart(hist, "T", compare={"C": cmp_s}, view_days=365,
+                              show_rsi=True, show_volume=True)                  # panes>1
+    r2 = fig2.layout.yaxis.range
+    assert r2 is not None and r2[1] < 45
+    main = next(tr for tr in fig1.data if tr.name == "T")
+    assert "%{y:+.2f}%" in main.hovertemplate         # hover 포맷
+
+
+def test_hbar_title_margin_and_range():
+    """hbar 제목 잘림 회귀 — 제목 시 t>=40·좌측 앵커·x_range 고정축."""
+    fig = charts.hbar(["비용", "성과"], [12.0, 62.0], "구성 점수 (백분위)",
+                      pct=False, x_range=(0, 105))
+    assert fig.layout.margin.t >= 40
+    assert fig.layout.title.xanchor == "left"
+    assert list(fig.layout.xaxis.range) == [0, 105]
+    assert charts.hbar(["a"], [1.0]).layout.margin.t == 10   # 무제목은 기존 여백
+
+
+def test_bullet_bands_generic():
+    """범용 적정가 불릿 — 밴드·중앙 마커·현재가 vline (멀티플 기준가 인디케이터)."""
+    fig = charts.bullet_bands(142.0, [("Fwd EPS×PER (±15%)", 99.0, 117.0, 134.0)])
+    assert len(fig.data) == 2                          # 밴드 라인 + mid 마커
+    assert fig.data[0].x == (99.0, 134.0)
+    assert any("현재 $142" in (s.text or "") for s in fig.layout.annotations)
+
+
+def test_price_chart_scattergl_for_large_series():
+    """대용량(≥1500봉) 라인 = WebGL(Scattergl)·소용량 = SVG Scatter (스타일 동일)."""
+    import plotly.graph_objects as go
+    idx = pd.date_range("2020-01-01", periods=1600, freq="D")
+    close = pd.Series(range(100, 1700), index=idx, dtype=float)
+    big = pd.DataFrame({"Close": close}, index=idx)
+    fig = charts.price_chart(big, "T")
+    assert isinstance(fig.data[0], go.Scattergl)
+    small = charts.price_chart(big.iloc[:100], "T")
+    assert isinstance(small.data[0], go.Scatter) and not isinstance(small.data[0], go.Scattergl)
+
+
+def test_ichimoku_webgl_and_cloud_nan_free():
+    """일목·MA·BB 대용량 WebGL 전환 + 구름 fill 쌍은 NaN 없는 유효 구간만 (gl 아티팩트 방지)."""
+    import numpy as np
+    import plotly.graph_objects as go
+    idx = pd.date_range("2020-01-01", periods=1600, freq="D")
+    base = pd.Series(range(100, 1700), index=idx, dtype=float)
+    hist = pd.DataFrame({"Open": base, "High": base * 1.01, "Low": base * 0.99,
+                         "Close": base, "Volume": [1e6] * 1600}, index=idx)
+    fig = charts.price_chart(hist, "T", ichimoku=True, bollinger=True, mas=(200,))
+    by = {tr.name: tr for tr in fig.data if tr.name}
+    for nm in ("선행A", "선행B(구름)", "MA200", "BB상단", "BB하단"):
+        assert isinstance(by[nm], go.Scattergl), nm
+    assert not np.isnan(np.asarray(by["선행B(구름)"].y, dtype=float)).any()   # 구름 NaN 0
+    assert not np.isnan(np.asarray(by["BB하단"].y, dtype=float)).any()
+
+
+def test_price_levels_chart():
+    """가격 레벨 사다리 — kind 별 마커·현재가 vline (순수)."""
+    fig = charts.price_levels(100.0, [("기술 지지", 96.0, "support"),
+                                      ("기술 저항", 108.0, "resist"),
+                                      ("밸류 기준", 117.0, "fair")])
+    assert len(fig.data) == 3
+    syms = {tr.marker.symbol for tr in fig.data}
+    assert {"triangle-up", "triangle-down", "diamond"} <= syms
+    assert any("현재 100" in (a.text or "") for a in fig.layout.annotations)
+
+
+def test_volume_axis_spike_cap():
+    """거래량 축 q98 캡 — 역사적 스파이크가 축을 지배하지 않게 (최근 60봉은 보장)."""
+    idx = pd.date_range("2024-01-01", periods=400, freq="D")
+    close = pd.Series([100.0] * 400, index=idx)
+    vol = pd.Series([10_000_000.0] * 400, index=idx)
+    vol.iloc[50] = 1_000_000_000.0                    # 1B 스파이크
+    hist = pd.DataFrame({"Open": close, "High": close * 1.01, "Low": close * 0.99,
+                         "Close": close, "Volume": vol}, index=idx)
+    fig = charts.price_chart(hist, "T", show_volume=True)
+    vr = fig.layout.yaxis2.range
+    assert vr is not None and vr[1] < 100_000_000     # 1B 스파이크에 미지배
+    assert vr[1] >= 10_000_000 * 1.1                  # 평상 막대는 안 잘림

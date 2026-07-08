@@ -32,6 +32,7 @@ def patched(monkeypatch):
     ])
     monkeypatch.setattr(rpt, "_recent_decisions", lambda: (
         [{"date": "2026-06-26", "side": "편입", "code": "005930", "action": "강한 매수후보",
+          "qty": 3, "name": "삼성전자",
           "rationale": {"one_line_reason": "기관 매집 + 일일신호 긍정"}}], "2026-06-26"))
     from providers import market_data
     monkeypatch.setattr(market_data, "fetch_kospi_stats",
@@ -42,16 +43,19 @@ def test_build_report_shows_objective_metrics(patched):
     txt = rpt.build_report()
     assert "[모의]" in txt
     assert "NAV" in txt and "11,000,000" in txt
-    assert "누적" in txt and "KOSPI" in txt and "%p" in txt      # 아웃퍼폼 가시화(F3: KOSPI대비 %p)
-    assert "MDD" in txt and "지수" in txt                        # MDD vs 지수
-    assert "삼성전자" in txt                                     # 보유 표
-    assert "편입" in txt and "기관 매집" in txt                  # 편입 사유
+    assert "현금비중" in txt
+    assert "누적" in txt and "KOSPI 대비" in txt and "%p" in txt  # 아웃퍼폼 가시화(F3: KOSPI 대비 %p)
+    assert "MDD" in txt and "대비 방어" in txt                    # MDD vs KOSPI
+    assert "보유 1종목" in txt and "삼성전자" in txt              # 보유 표
+    assert "최근 결정" in txt
+    assert "편입" in txt and "삼성전자 (005930)" in txt and "3주" in txt
+    assert "근거: 기관 매집" in txt and "해석:" in txt            # 편입 사유/해석
 
 
 def test_build_report_excess_positive(patched):
     # nav 11M / inception 10M = +10%, KOSPI +6% → 초과 +4%p (헤드라인 KOSPI대비)
     txt = rpt.build_report()
-    assert "KOSPI대비 +4.0%p" in txt
+    assert "KOSPI 대비 +4.0%p" in txt
 
 
 def test_build_report_mdd_within_index_ok(patched):

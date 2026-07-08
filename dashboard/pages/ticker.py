@@ -1,8 +1,13 @@
 """종목 분석 — 가격차트 + 가치평가·재무·기관/내부자·공시·실적 (plotly 차트화·U3)."""
 from __future__ import annotations
 
+import os
+import sys
+
 import pandas as pd
 import streamlit as st
+
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 
 import ticker_names
 from dashboard import cached, charts, data, theme
@@ -12,9 +17,7 @@ _NOBAR = {"displayModeBar": False}
 
 def render():
     ticker = st.session_state.get("ticker", "MSFT")
-    period = st.radio("기간", ["3mo", "6mo", "1y"], index=1, horizontal=True,
-                      label_visibility="collapsed")
-    hist = cached.ohlc(ticker, period=period)
+    hist = cached.ohlc(ticker, period="max")
     yf_price = prev = None
     if hist is not None and not getattr(hist, "empty", True) and "Close" in getattr(hist, "columns", []):
         cl = hist["Close"]
@@ -24,14 +27,22 @@ def render():
     _rq0 = cached.realtime_quote(ticker)
     cur = (_rq0.get("price") if _rq0 else None) or yf_price or 0.0   # 현재가(실시간 우선)
 
-    # 실시간 밴드(8s 자동갱신) — 히어로 ⚡가격·게이지·내 포지션·호가
+    # 실시간 밴드(8s 자동갱신) — 히어로 ⚡가격·게이지·내 포지션 (호가는 차트 아래 접이식)
     _live_top(ticker, hist, yf_price, prev, pos)
 
-    # 가격 차트 — 풀폭 · 라인/캔들 토글 (+ 보유 시 평단 수평선)
+    # 가격 차트 — 풀폭 · 봉/기간/차트종류/지표 컨트롤 (+ 보유 시 평단 수평선)
     if yf_price is not None:
-        _price_chart(ticker, hist, pos.get("avg_price_usd") if pos else None, data.trade_events(ticker))
+        _price_chart(ticker, hist, pos.get("avg_price_usd") if pos else None,
+                     data.trade_events(ticker))
     else:
         st.info("가격 데이터 없음 (yfinance)")
+
+    # 실시간 호가 — 접이식(기본 접힘)·8초 자동갱신 (차트 우선 레이아웃)
+    _orderbook_section(ticker, hist, prev)
+
+    # 🎯 진입 레벨 가이드 — 기술 지지/저항 × 밸류 기준가 (표시·참고용)
+    if yf_price is not None:
+        _entry_levels_section(ticker, hist, cur or yf_price)
 
     # ETF 는 개별주 섹션(PER·재무·기관·실적) 대신 ETF 전용 뷰(프로필·Top10·보수·괴리율·배당)
     etf = cached.etf(ticker)
@@ -76,38 +87,196 @@ def _trade_detail(t):
                + (f" · {t.get('note')}" if t.get("note") else ""))
 
 
-def _price_chart(ticker, hist, avg_cost, trades):
-    """가격 차트 — 라인/캔들 토글(차트만 부분 rerun·전체 리로드 방지)."""
-    kind = st.segmented_control("차트 종류", ["📈 라인", "🕯️ 캔들"], default="📈 라인",
-                                label_visibility="collapsed", key="_chart_kind")
+_TF = {"5분": "5m", "1시간": "1h", "1일": "1d", "주": "1wk", "월": "1mo"}
+_TF_SPAN = {"5m": "최근 60일", "1h": "최근 2년"}   # yfinance 인트라데이 보존 한계 (정직 표기)
+_MA_OPTS = [5, 10, 20, 60, 120, 200]
+_MA_DEFAULT = {"1d": [60, 120, 200], "1wk": [60, 120, 200],   # 요청 기본값
+               "1mo": [5, 10, 20, 60, 120, 200], "5m": [20, 60], "1h": [20, 60]}
+_TOP_INDS = ["이동평균선", "자동 추세선·채널", "지수이평(EMA)", "볼린저 밴드", "일목균형표",
+             "슈퍼트렌드", "엔벨로프", "파라볼릭 SAR", "프라이스 채널", "매물대", "프랙탈",
+             "VWAP(세션)", "앵커드 VWAP"]
+
+
+def _price_chart(ticker, hist, avg_cost, trades, fullscreen: bool = False):
+    """가격 차트 — 봉·기간·라인/캔들·지표·비교 컨트롤 (풀뷰 페이지와 공용 컴포넌트).
+
+    fullscreen=True 면 차트 풀뷰 페이지 모드 — 높이 확대·⛶ 는 복귀 버튼.
+    """
+    # 컨트롤 한 줄 — 봉 | 라인/캔들 | 지표 | 비교 | 기간 | ⛶ (좁은 화면은 자동 줄바꿈)
+    ctf, ckind, c3, c4, cper, cfull = st.columns([1.45, 0.72, 0.34, 0.34, 1.4, 0.35],
+                                                 vertical_alignment="center")
+    if fullscreen:
+        if cfull.button("↙", key="_chart_back", help="종목 분석으로 복귀"):
+            pg = st.session_state.get("_ticker_page")
+            if pg:
+                st.switch_page(pg)
+    else:
+        if cfull.button("⛶", key="_chart_fullbtn", help="전체화면 풀차트 — 모든 컨트롤 그대로"):
+            pg = st.session_state.get("_chart_page")
+            if pg:
+                st.switch_page(pg)
+    tf_label = ctf.segmented_control("봉", list(_TF), default="1일",
+                                     label_visibility="collapsed", key="_chart_tf") or "1일"
+    kind = ckind.segmented_control("차트 종류", ["📈 라인", "🕯️ 캔들"], default="📈 라인",
+                                   label_visibility="collapsed", key="_chart_kind")
+    # 기간 = 초기 표시 창만 — 데이터는 항상 전체(max) 로드라 과거로 무한 드래그 가능
+    period = cper.radio("기간", ["3mo", "6mo", "1y", "5y", "전체"], index=1, horizontal=True,
+                        label_visibility="collapsed", key="_chart_period")
+    view_days = {"3mo": 90, "6mo": 180, "1y": 365, "5y": 1825, "전체": None}[period]
+    tf = _TF[tf_label]
+    # ── ⇄ 비교 — 최대 3종목 % 상대수익 오버레이 (사이드바 검색과 동일 정규화) ──
+    with c4.popover("⇄ 비교"):
+        st.caption("최대 3종목 — 기간 시작=0% 상대수익으로 겹쳐 비교")
+        _raw = st.multiselect(
+            "비교 종목 (한글·영문·티커)",
+            [t for t in ticker_names.universe() if t != ticker],
+            max_selections=3, format_func=ticker_names.search_label,
+            accept_new_options=True, key="_cmp_sel",
+            help="목록에 없어도 티커 직접 입력 가능 (예: AMD · BRK-B)")
+        cmp_tickers = []
+        for _r in _raw or []:
+            _tk = ticker_names.normalize_input(_r)
+            if _tk and _tk != ticker and _tk not in cmp_tickers:
+                cmp_tickers.append(_tk)
+            elif not _tk:
+                st.warning(f"'{_r}' 종목을 찾지 못했습니다")
+        # 같은 지수 추종 ETF 원클릭 추가 (etf_meta 정적 시드 — 무네트워크).
+        # 기존 multiselect 의 session_state 는 불변 — 별도 pills 를 merge (위젯 상태 함정 회피)
+        import etf_meta
+        _peers = etf_meta.peers_of(ticker)
+        if _peers:
+            _pks = st.pills("같은 지수 추종 — 원클릭 추가", _peers, selection_mode="multi",
+                            key="_cmp_peers", format_func=ticker_names.search_label) or []
+            for _pk in _pks:
+                if _pk in cmp_tickers:
+                    continue
+                if len(cmp_tickers) >= 3:
+                    st.caption("⚠️ 비교는 최대 3종목 — 초과 선택은 제외")
+                    break
+                cmp_tickers.append(_pk)
+        pr_mode = False
+        if cmp_tickers:
+            pr_mode = st.toggle("PR(가격) 기준 — 분배금 제외", key="_cmp_pr",
+                                help="기본=TR(배당재투자·조정종가). 커버드콜 ETF 비교 시 "
+                                     "가격만의 성과 확인용 — 비교 모드·일봉 전용")
+            if pr_mode and tf != "1d":
+                st.caption("ℹ️ PR 기준은 일봉 전용 — 현재 봉 단위에선 TR(조정종가)로 표시")
+    with c3.popover("📐 지표"):
+        st.markdown("**상단 지표** — 가격 차트 오버레이")
+        top = st.pills("상단 지표", _TOP_INDS, selection_mode="multi",
+                       default=["이동평균선"], key=f"_top_{tf}",
+                       label_visibility="collapsed") or []
+        mas = []
+        if "이동평균선" in top:
+            mas = st.multiselect("이동평균 기간", _MA_OPTS,
+                                 default=_MA_DEFAULT.get(tf, [60, 120, 200]), key=f"_ma_{tf}")
+        emas = []
+        if "지수이평(EMA)" in top:
+            emas = st.multiselect("EMA 기간", _MA_OPTS, default=[20, 60], key=f"_ema_{tf}")
+        if "VWAP(세션)" in top and tf not in ("5m", "1h"):
+            st.caption("ℹ️ VWAP(세션)은 인트라데이(5분·1시간) 전용 — 일봉+ 는 앵커드 VWAP 사용")
+        if "앵커드 VWAP" in top:
+            st.caption("ℹ️ 앵커드 VWAP 앵커 = 기간(라디오) 시작 · 팬 시 고정")
+        want_lines = want_short = want_long = False
+        if "자동 추세선·채널" in top:
+            want_lines = True
+            cch1, cch2 = st.columns(2)
+            # 채널 기본 ON — pill 선택 즉시 지지/저항선 + 상승/하락 채널까지 그려짐
+            want_short = cch1.checkbox("단기 채널(60봉)", value=True, key=f"_tl_short_{tf}")
+            want_long = cch2.checkbox("장기 채널(250봉)", value=True, key=f"_tl_long_{tf}")
+            st.caption("채널 = 회귀 ±2σ 자동 감지 — 상승(초록)/하락(빨강)/횡보(회색)·"
+                       "라벨에 방향 표기 · 지지/저항선 동시 표시")
+        st.markdown("**하단 지표** — 서브 패널")
+        bottom = st.pills("하단 지표", ["거래량", "RSI"], selection_mode="multi",
+                          default=["거래량", "RSI"], key=f"_bot_{tf}",
+                          label_visibility="collapsed") or []
+        legacy = st.toggle("구형 렌더러", key="_legacy_chart",
+                           help="plotly.js CDN 불가 환경 폴백 — 팬 시 y 자동맞춤·인차트 상세 없음")
+        st.caption("봉 단위별로 설정이 기억됩니다 · 범례 클릭으로도 개별 토글")
+    df = hist
+    if tf != "1d":
+        df = cached.ohlc_tf(ticker, tf)
+        if df is None or getattr(df, "empty", True):
+            st.caption(f"⚠️ {tf_label}봉 데이터 없음 — 일봉으로 표시")
+            df, tf = hist, "1d"
+        elif tf in _TF_SPAN:
+            st.caption(f"ℹ️ {tf_label}봉은 {_TF_SPAN[tf]}까지 제공 (yfinance 보존 한계) · 주/월/일봉은 전체 이력")
     label = ticker_names.label(ticker)
-    fig = (charts.price_candle(hist, label, avg_cost, trades=trades) if kind == "🕯️ 캔들"
-           else charts.price_line(hist, label, avg_cost, trades=trades))
+    show_rsi = "RSI" in bottom
+    tls = []
+    if want_lines or want_short or want_long:
+        ch_key = tuple(k for k, w in (("short", want_short), ("long", want_long)) if w)
+        tls = cached.trendlines_for(ticker, tf, want_lines, ch_key)
+    show_vol = "거래량" in bottom and "Volume" in getattr(df, "columns", [])
+    # 비교 종목 데이터 — 메인과 동일 봉 단위 파이프라인 (결측은 정직 스킵).
+    # PR 토글(일봉·비교 모드): 시리즈를 raw Close(분배 제외)로 치환 — 실패 시 TR 유지.
+    _use_pr = pr_mode and tf == "1d"
+    compare = {}
+    for _ct in cmp_tickers:
+        series = None
+        if _use_pr:
+            _d = cached.tr_pr(_ct)
+            series = _d["pr"] if _d else None
+        if series is None:
+            _cdf = cached.ohlc(_ct, "max") if tf == "1d" else cached.ohlc_tf(_ct, tf)
+            if _cdf is not None and not getattr(_cdf, "empty", True) and "Close" in _cdf.columns:
+                series = _cdf["Close"]
+        if series is not None:
+            _sfx = " PR" if _use_pr else ""
+            compare[ticker_names.label(_ct, maxlen=22) + _sfx] = series
+        else:
+            st.caption(f"⚠️ {_ct} {tf_label}봉 데이터 없음 — 비교에서 제외")
+    if compare and _use_pr:
+        _dm = cached.tr_pr(ticker)
+        if _dm:
+            df = pd.DataFrame({"Close": _dm["pr"]})   # 메인도 PR — 거래량 패널 자연 생략
+        else:
+            st.caption("⚠️ 메인 PR 데이터 없음 — 메인은 TR(조정종가) 유지")
+    if compare:
+        st.caption("⇄ 비교 모드 — % 상대수익 겹침 · "
+                   + ("**PR(가격) 기준 — 분배금 제외**" if _use_pr
+                      else "TR(배당재투자·조정종가) 기준")
+                   + " · 가격 지표(캔들·평단·MA·매물대 등) 비활성")
+        show_vol = show_vol and "Volume" in getattr(df, "columns", [])   # PR 스왑 후 재판정
+    fig = charts.price_chart(
+        df, label, kind=("candle" if kind == "🕯️ 캔들" else "line"),
+        avg_cost=avg_cost, trades=trades, view_days=view_days, mas=mas,
+        show_rsi=show_rsi, bollinger="볼린저 밴드" in top,
+        ichimoku="일목균형표" in top, trend_lines=tls, show_volume=show_vol,
+        supertrend="슈퍼트렌드" in top, envelope="엔벨로프" in top,
+        fractals="프랙탈" in top, vol_profile="매물대" in top,
+        emas=emas, psar="파라볼릭 SAR" in top, donchian_on="프라이스 채널" in top,
+        vwap=("VWAP(세션)" in top and tf in ("5m", "1h")), avwap="앵커드 VWAP" in top,
+        compare=compare)
+    if fullscreen:                                  # ⛶ 풀뷰 — 뷰포트 거의 채우는 높이
+        fig.update_layout(height=840)
     event = None
-    try:
-        event = st.plotly_chart(
-            fig, width="stretch", config=_NOBAR, key=f"price_chart_{ticker}_{kind}",
-            on_select="rerun", selection_mode="points")
-    except TypeError:
-        st.plotly_chart(fig, width="stretch", config=_NOBAR)
-    selected = _selected_trade(event, trades or [])
+    if legacy:
+        try:
+            event = st.plotly_chart(
+                fig, width="stretch", config=charts.PAN_DRAW_CFG,
+                key=f"price_chart_{ticker}_{kind}", on_select="rerun", selection_mode="points")
+        except TypeError:
+            st.plotly_chart(fig, width="stretch", config=charts.PAN_DRAW_CFG)
+    else:
+        # 커스텀 임베드 — 팬 시 보이는 구간에 y축(가격·거래량) 부드러운 자동 맞춤
+        from dashboard import plotly_embed
+        h = int(fig.layout.height or 420)
+        _bj = (plotly_embed.compare_bounds_json(df, compare, view_days)
+               if compare else None)                   # 비교 모드 — % 프레임으로 y 맞춤
+        st.components.v1.html(
+            plotly_embed.pannable_chart_html(
+                fig, df, height=h, view_days=view_days,
+                vol_axis="yaxis2" if show_vol else None, bounds_json=_bj,
+                fit_viewport=fullscreen),
+            height=h + 128)
+    st.caption("🖱️ 드래그=이동(y축 자동 맞춤) · 휠=확대/축소 · 더블클릭=원위치 · "
+               "✏️ 우상단 모드바 직접 그리기(선·자유곡선·박스)·지우개 — 설정 변경 시 드로잉 초기화")
+    selected = _selected_trade(event, trades or []) if legacy else None
     if selected:
         _trade_detail(selected)
     elif trades:
-        st.caption("차트의 ▲/▼ 거래 마커를 클릭하면 수량·평단·체결가를 볼 수 있습니다.")
-    if trades:
-        with st.expander(f"거래 마커 {len(trades)}건", expanded=False):
-            rows = [{
-                "일자": t.get("date"),
-                "구분": "매수" if t.get("side") == "buy" else "매도",
-                "수량": t.get("qty"),
-                "체결가": t.get("price"),
-                "평단": t.get("avg_price"),
-                "계좌": t.get("account"),
-                "출처": t.get("source"),
-                "메모": t.get("note"),
-            } for t in trades]
-            st.dataframe(pd.DataFrame(rows), hide_index=True, width="stretch")
+        st.caption("차트의 ▲/▼ 거래 마커 클릭 = 상세 · 전체 이력·되돌리기는 하단 ⚙️ 내 포지션 관리")
 
 
 @st.fragment(run_every=8)
@@ -121,32 +290,75 @@ def _live_top(ticker, hist, yf_price, prev, pos):
     chg_pct = (chg / prev * 100) if (chg is not None and prev) else None
     ts = data.technical_score(hist["Close"]) if (hist is not None and yf_price is not None) else None
 
-    hcol, gcol = st.columns([1.6, 1])
+    # 3열 — 히어로 | 📐 기술적 분석 | ⚖️ 가치평가 (게이지 나란히 — 빈 공간 제거)
+    hcol, gcol, vcol = st.columns([1.5, 1, 1])
     with hcol:
         theme.render(theme.ticker_hero_html(ticker, ticker_names.display_name(ticker, allow_net=False) or ticker,
                                             price, chg, chg_pct, src, ""))
+        # 내 포지션 (보유 시) — 히어로 아래 컴팩트 밴드 (게이지와 높이 균형)
+        if pos:
+            avg = pos.get("avg_price_usd")
+            cur_ret = (price / avg - 1) * 100 if (avg and price) else pos.get("ret", 0)
+            cur_val = pos["shares"] * price if price else pos.get("value", 0)
+            theme.render(theme.position_band_html([
+                ("평단", data.f_usd(avg), None),
+                ("평가손익", data.f_pct_s(cur_ret),
+                 theme.GREEN if (cur_ret or 0) >= 0 else theme.RED),
+                ("보유주수", f"{pos['shares']:g}주", None),
+                ("평가액", data.f_usd(cur_val, 0), None),
+            ]))
     with gcol:
         if ts:
-            theme.render(theme.rating_gauge_html(ts["score"], sub=ts["sub"]))
+            theme.render(theme.rating_gauge_html(ts["score"], sub=ts["sub"],
+                                                 title="📐 기술적 분석"))
         else:
             st.caption("기술 신호 N/A")
-
-    # 내 포지션 (보유 시) — 평단·평가손익·주수·평가액
-    if pos:
-        avg = pos.get("avg_price_usd")
-        cur_ret = (price / avg - 1) * 100 if (avg and price) else pos.get("ret", 0)
-        cur_val = pos["shares"] * price if price else pos.get("value", 0)
-        m = st.columns(4)
-        m[0].metric("평단", data.f_usd(avg))
-        m[1].metric("평가손익", data.f_pct_s(cur_ret))
-        m[2].metric("보유주수", f"{pos['shares']:g}주")
-        m[3].metric("평가액", data.f_usd(cur_val, 0))
-
-    _orderbook(rq)
+    with vcol:
+        val = cached.valuation(ticker) or {}
+        vs = data.valuation_score(price, val.get("metrics"), val.get("consensus"),
+                                  cached.intrinsic(ticker))
+        if vs:
+            theme.render(theme.valuation_gauge_html(vs["score"], sub=vs["sub"]))
+        else:
+            st.markdown(f"<div style='color:{theme.MUTED};font-size:.78rem;"
+                        f"text-align:center;padding-top:26px'>⚖️ 가치평가<br>"
+                        f"<span style='font-size:.72rem'>재료 부족 — 생략 (ETF 등)</span></div>",
+                        unsafe_allow_html=True)
 
 
-def _orderbook(rq):
-    """실시간 10단계 호가 (KR 완전·US 가격만 안내)."""
+
+@st.fragment(run_every=1.5)
+def _orderbook_section(ticker, hist, prev):
+    """실시간 호가 — 차트 아래 접이식, 1.5초 자동갱신.
+
+    WS 실시간 캐시(1초 스트림) **직독**(st.cache 우회 — 로컬 파일 읽기라 저렴) → REST 폴백.
+    조회 종목은 viewer_interest 기록 → kis_stream 이 ~1.5분 내 스트림에 자동 편입(잔여 슬롯).
+    """
+    from lib import viewer_interest
+    from providers.intraday_bars import base_symbol
+    sym = base_symbol(ticker)
+    viewer_interest.record(sym)                    # 보는 종목 → 실시간 구독 승격
+    rq = None
+    try:
+        from providers import realtime_quotes
+        ob = realtime_quotes.get_orderbook(sym, max_age_s=15)
+        if ob and (ob.get("bids") or ob.get("asks")):
+            rq = {"price": realtime_quotes.get_price(sym),
+                  "bids": ob.get("bids") or [], "asks": ob.get("asks") or [],
+                  "source": "kis_ws"}
+    except Exception:
+        rq = None
+    if rq is None:
+        rq = cached.realtime_quote(ticker)         # REST 폴백 (비구독 종목 — 수 초 지연)
+    if not rq or not (rq.get("bids") or rq.get("asks")):
+        return                                     # 호가 없음(US/장외) — 섹션 자체 생략
+    live = "⚡스트림" if rq.get("source") == "kis_ws" else "REST 지연 — 스트림 편입 중(~1.5분)"
+    st.markdown(f"##### 📊 실시간 호가 — 10단계 · {live} · 상승 🔴/하락 🔵")
+    _orderbook(rq, hist, prev, rq.get("price"))
+
+
+def _orderbook(rq, hist=None, prev_close=None, price=None):
+    """실시간 10단계 호가 사다리 (KR HTS 풍 — 잔량 바·등락%·당일/52주 패널·총잔량)."""
     if not rq:
         return
     bids, asks = rq.get("bids") or [], rq.get("asks") or []
@@ -154,20 +366,19 @@ def _orderbook(rq):
         if rq.get("market") == "US":
             st.caption("💡 미국 종목은 실시간 가격만 제공 (10단계 호가는 국내만)")
         return
-    st.markdown("**📊 실시간 호가**")
-    cb, ca = st.columns(2)
-    with cb:
-        st.caption("매수 (BID)")
-        for px, qty in bids[:5]:
-            st.markdown(f"<div style='font-family:monospace;color:{theme.GREEN}'>"
-                        f"{px:,.2f} <span style='color:{theme.MUTED}'>× {qty:,.0f}</span></div>",
-                        unsafe_allow_html=True)
-    with ca:
-        st.caption("매도 (ASK)")
-        for px, qty in asks[:5]:
-            st.markdown(f"<div style='font-family:monospace;color:{theme.RED}'>"
-                        f"{px:,.2f} <span style='color:{theme.MUTED}'>× {qty:,.0f}</span></div>",
-                        unsafe_allow_html=True)
+    day = week52 = None
+    if hist is not None and not getattr(hist, "empty", True):
+        try:
+            last = hist.iloc[-1]
+            day = {"open": float(last["Open"]), "high": float(last["High"]),
+                   "low": float(last["Low"]),
+                   "volume": float(last["Volume"]) if "Volume" in hist.columns else None}
+            w = hist.tail(252)
+            week52 = {"high": float(w["High"].max()), "low": float(w["Low"].min())}
+        except Exception:
+            pass
+    theme.render(theme.orderbook_ladder_html(
+        bids, asks, prev_close=prev_close, price=price, day=day, week52=week52))
 
 
 # ── ETF 전용 뷰 — 프로필·보유 Top10·투자지표 (개별주 섹션 대체·토스증권 풍) ──────
@@ -203,6 +414,110 @@ def _etf_div_amount(etf, value):
     return f"연 {_f_krw(value)}" if _is_kr_etf(etf) else f"연 ${float(value):,.2f}"
 
 
+_TRPR_WIN = {"1y": 365, "3y": 365 * 3, "5y": 365 * 5}
+
+
+@st.fragment
+def _etf_tr_pr_section(ticker, peers):
+    """📈 수익률·리스크 — TR(배당재투자) vs PR(가격) + 벤치 TR 오버레이 (커버드콜 핵심 뷰)."""
+    st.subheader("📈 수익률·리스크 (TR vs PR)")
+    d = cached.tr_pr(ticker)
+    if not d:
+        st.caption("TR·PR 데이터 없음 (yfinance)")
+        return
+    from providers.etf_compare import mdd_pct, window_return
+    win_label = st.segmented_control("구간", list(_TRPR_WIN), default="3y",
+                                     label_visibility="collapsed", key="_trpr_win") or "3y"
+    days = _TRPR_WIN[win_label]
+    tr, pr = d["tr"], d["pr"]
+    tr_r, pr_r = window_return(tr, days), window_return(pr, days)
+    mdd, mdd_y = mdd_pct(tr, days)
+    grp = (peers or {}).get("group") or {}
+    bench = grp.get("bench")
+    bench_d = cached.tr_pr(bench) if bench and bench != ticker else None
+    vs = None
+    if bench_d:
+        b_r = window_return(bench_d["tr"], days)
+        if b_r is not None and tr_r is not None:
+            vs = tr_r - b_r
+    m = st.columns(5)
+    m[0].metric(f"TR {win_label}", f"{tr_r:+.1f}%" if tr_r is not None else "—",
+                help="총수익 — 분배금 재투자 가정(조정종가)")
+    m[1].metric(f"PR {win_label}", f"{pr_r:+.1f}%" if pr_r is not None else "—",
+                help="가격 수익 — 분배금 제외")
+    m[2].metric("분배 기여", f"{tr_r - pr_r:+.1f}%p" if None not in (tr_r, pr_r) else "—",
+                help="TR − PR — 분배금(재투자)이 만든 수익 몫")
+    m[3].metric(f"MDD({mdd_y or '—'}y)", f"-{mdd:.1f}%" if mdd is not None else "—",
+                help="TR 기준 최대 낙폭")
+    m[4].metric(f"vs {bench or '지수'}", f"{vs:+.1f}%p" if vs is not None else "—",
+                help="같은 구간 TR 차이 — 벤치=그룹 대표 ETF TR 프록시")
+    compare = {"PR(가격)": pr}
+    if bench_d:
+        compare[f"{bench} TR"] = bench_d["tr"]
+    fig = charts.price_chart(pd.DataFrame({"Close": tr}), "TR(배당재투자)",
+                             compare=compare, view_days=days, show_rsi=False)
+    st.plotly_chart(fig, width="stretch", config=_NOBAR)
+    st.caption("TR=분배금 재투자(조정종가) · PR=가격만 · 벤치=대표 ETF TR 프록시"
+               "(TR 지수 원천 불안정) · 세전 · 표시·참고용")
+
+
+def _fmt_aum(v):
+    if not v:
+        return "—"
+    return f"{v / 1e9:,.1f}B" if v >= 1e9 else f"{v / 1e6:,.0f}M"
+
+
+def _etf_peer_section(ticker, peers):
+    """🏆 동종 ETF 비교·점수 — 게이지 + 컴포넌트 막대 + 피어 지표표 (표시·참고용)."""
+    rows = (peers or {}).get("rows") or []
+    if not rows:
+        return                                     # 그룹 미등록 — 섹션 자연 생략 (정직)
+    grp = peers["group"]
+    st.subheader(f"🏆 동종 ETF 비교 — {grp['name']}")
+    from providers.etf_data import normalize_ticker
+    me = normalize_ticker(ticker)
+    mine = next((r for r in rows if r["ticker"] == me), None)
+    if mine and mine.get("score_detail"):
+        sd = mine["score_detail"]
+        g1, g2 = st.columns([1, 1.5], vertical_alignment="center")
+        with g1:
+            theme.render(theme.etf_score_html(mine.get("score"), grp["name"],
+                                              sd.get("low_confidence", False)))
+        with g2:
+            comp = {k: v for k, v in (sd.get("components") or {}).items() if v is not None}
+            if comp:
+                st.plotly_chart(charts.hbar(list(comp.keys()), list(comp.values()),
+                                            "구성 점수 (백분위)", pct=False,
+                                            x_range=(0, 105)),
+                                width="stretch", config=_NOBAR)
+            missing = [k for k, v in (sd.get("components") or {}).items() if v is None]
+            if missing:
+                st.caption(f"결측 컴포넌트: {'·'.join(missing)} — 가중치 재정규화")
+    is_cc = grp.get("strategy") != "index"
+    td_col = "전략 갭(기초 대비)" if is_cc else "추적차(3y·%p)"
+    table = []
+    for r in sorted(rows, key=lambda x: -(x.get("score") or 0)):
+        er = r.get("expense_ratio")
+        table.append({
+            "ETF": ("▶ " if r["ticker"] == me else "") + r["ticker"],
+            "보수": f"{er * 100:.2f}%" if er is not None else "—",
+            "AUM": _fmt_aum(r.get("aum")),
+            "1y TR": f"{r['tr_1y']:+.1f}%" if r.get("tr_1y") is not None else "—",
+            "3y TR(연)": f"{r['tr_3y_ann']:+.1f}%" if r.get("tr_3y_ann") is not None else "—",
+            "MDD": f"-{r['mdd']:.1f}%" if r.get("mdd") is not None else "—",
+            td_col: f"{r['tracking_diff']:+.1f}" if r.get("tracking_diff") is not None else "—",
+            "분배율": f"{r['div_yield_pct']:.1f}%" if r.get("div_yield_pct") else "—",
+            "점수": r.get("score") if r.get("score") is not None else "—",
+        })
+    st.dataframe(pd.DataFrame(table), hide_index=True, width="stretch")
+    tail = ("커버드콜 '전략 갭'은 기초지수 프록시 대비 TR 차 — 전략 특성이지 추적오차 아님 · "
+            if is_cc else "")
+    st.caption(f"점수 1~100 = 동종그룹 내 백분위 가중합(비용·성과·"
+               f"{'인컴' if is_cc else '추적'}·리스크·유동성) · {tail}"
+               f"벤치={grp['bench']} TR 프록시 · 기준 {peers.get('asof') or '—'} · "
+               f"표시·참고용 · 매매신호 아님")
+
+
 def _etf_sections(ticker, etf, price):
     is_kr = _is_kr_etf(etf)
     desc = (etf.get("description") or "").strip()
@@ -223,13 +538,21 @@ def _etf_sections(ticker, etf, price):
     k[4].metric("분배금 수익률", f"연 {dv['yield_pct']:.2f}%" if dv.get("yield_pct") else "—",
                 help="최근 12개월 분배금 합계 ÷ 현재가")
 
+    # ── 수익률·리스크 (TR vs PR) + 동종 ETF 비교·점수 ──
+    peers = cached.etf_peers(ticker)
+    _etf_tr_pr_section(ticker, peers)
+    _etf_peer_section(ticker, peers)
+
     # ── 프로필 (시가총액/운용자산·운용사·NAV·상장일·발행주식수) ──
     st.subheader("ETF 프로필")
     asset_value = etf.get("total_assets") or etf.get("market_cap")
+    _grp = (peers or {}).get("group") or {}
+    bench_label = etf.get("benchmark") or (
+        f"{_grp['name']} (그룹 — 벤치 {_grp['bench']} 프록시)" if _grp else "—")
     rows = [
         ("순자산/AUM", _etf_asset(etf, asset_value)),
         ("운용사", etf.get("family") or "—"),
-        ("추종지수", etf.get("benchmark") or "—"),
+        ("추종지수", bench_label),
         ("상장일", etf.get("inception") or "—"),
         ("종목코드", etf.get("stock_code") or ticker),
         ("카테고리", etf.get("category") or "—"),
@@ -302,10 +625,10 @@ def _etf_sections(ticker, etf, price):
 
     sw = etf.get("sector_weights") or {}
     if sw:
-        with st.expander("🏭 섹터 비중", expanded=False):
-            items = sorted(sw.items(), key=lambda x: -x[1])[:11]
-            st.plotly_chart(charts.hbar([k for k, _ in items], [v for _, v in items], "섹터 %", pct=False),
-                            width="stretch", config=_NOBAR)
+        st.markdown("##### 🏭 섹터 비중")
+        items = sorted(sw.items(), key=lambda x: -x[1])[:11]
+        st.plotly_chart(charts.hbar([k for k, _ in items], [v for _, v in items], "섹터 %", pct=False),
+                        width="stretch", config=_NOBAR)
     src = etf.get("source") or ("KR ETF" if is_kr else "yfinance")
     st.caption(f"정보·표시용 · 매매신호 아님 · 결측 필드는 — 표기 · 데이터: {src}")
 
@@ -339,15 +662,18 @@ def _analysis_snapshot(ticker):
     summary = data.company_analysis_summary(v.get("metrics") or {}, (f.get("trends") or {}), iv)
 
     st.subheader("기업 판단 요약")
-    verdict, good, risk = st.columns([0.8, 1.4, 1.4])
-    verdict.metric("판단", summary["verdict"])
-    with good:
-        st.markdown("**강점**")
-        st.markdown("\n".join(f"- {x}" for x in summary["positives"]))
-    with risk:
-        st.markdown("**주의점**")
-        st.markdown("\n".join(f"- {x}" for x in summary["risks"]))
-    st.caption("다음 확인: " + " · ".join(summary["checks"]))
+    checks = list(summary["checks"])
+    try:                                            # 다음 실적일 D-day (12h 캐시)
+        ed = cached.next_earnings(ticker)
+        if ed:
+            from datetime import date as _date
+            dday = (ed - _date.today()).days
+            if dday >= 0:
+                checks.insert(0, f"다음 실적 {ed.strftime('%m/%d')} (D-{dday})")
+    except Exception:
+        pass
+    theme.render(theme.analysis_card_html(summary["verdict"], summary["positives"],
+                                          summary["risks"], checks))
 
 
 def _valuation(ticker, price=None):
@@ -355,13 +681,20 @@ def _valuation(ticker, price=None):
     m = v.get("metrics") or {}
     is_kr = m.get("market_type") == "kr"
     if m:
-        a = st.columns(4)
+        a = st.columns(5)
         a[0].metric("PER", data.f_ratio(m.get("per")))
         a[1].metric("Fwd PE", data.f_ratio(m.get("forward_pe")))
-        a[2].metric("PBR", data.f_ratio(m.get("pbr")))
-        a[3].metric("PSR", data.f_ratio(m.get("psr")))
+        _pt = data.peg_textbook(m)
+        a[2].metric("PEG", data.f_ratio((_pt or {}).get("peg")),
+                    help=("PER ÷ 예상 EPS 증가율(Fwd/TTM 1년) — 교과서 정의 직접 계산. "
+                          + (f"성장률 {_pt['growth_pct']:+.0f}% 기준 · 야후 PEG(5y 성장 추정) "
+                             f"{data.f_ratio(_pt.get('yahoo'))} 와 다를 수 있음"
+                             if _pt else "성장률 ≤0 이거나 EPS 결측이면 — 표시")))
+        a[3].metric("PBR", data.f_ratio(m.get("pbr")))
+        a[4].metric("PSR", data.f_ratio(m.get("psr")))
         b = st.columns(4)
-        b[0].metric("ROE", data.f_frac_pct(m.get("roe")))
+        b[0].metric("ROE", data.f_frac_pct(m.get("roe")),
+                    help="자기자본이익률. 주주자본 대비 이익 창출력이며, PBR 해석과 함께 보는 품질 지표.")
         b[1].metric("배당수익률", data.f_pct(m.get("div_yield"), 2))
         b[2].metric("배당성장 3Y", data.f_frac_pct_s(m.get("div_growth_3y")))
         b[3].metric("EPS(TTM)", _f_krw(m.get("eps_ttm")) if is_kr else data.f_usd(m.get("eps_ttm")))
@@ -375,35 +708,95 @@ def _valuation(ticker, price=None):
     else:
         st.warning(f"밸류에이션 데이터 없음 ({v.get('metrics_error', '')})")
     c = v.get("consensus") or {}
-    if c:
+    cur_sym = "₩" if is_kr else "$"
+    _fmt_t = (lambda x: f"₩{x:,.0f}") if is_kr else (lambda x: f"${x:,.2f}")
+    # 🎯 애널리스트 의견 분포 (토스 풍 — 최다 카테고리 강조)
+    rec = {k: c.get(f"rec_{k}") for k in ("strong_sell", "sell", "hold", "buy", "strong_buy")}
+    rec_counts = {k: int(x) for k, x in rec.items() if x is not None}
+    total_rec = sum(rec_counts.values())
+    if total_rec > 0:
+        buyers = rec_counts.get("buy", 0) + rec_counts.get("strong_buy", 0)
+        st.markdown("##### 🎯 애널리스트 의견")
+        st.markdown(f"애널리스트 **{total_rec}명 중 {buyers}명**이 매수 의견을 냈어요.")
+        st.plotly_chart(charts.analyst_ratings(rec), width="stretch", config=_NOBAR)
+    # 🎯 예상 목표주가 팬 차트 (과거 1y + 1년 후 최고/평균/최저 투영)
+    if c.get("target_mean") and price:
+        up = c.get("target_upside_pct")
+        st.markdown("##### 🎯 예상 목표주가 (1년)")
+        st.markdown(f"평균 목표가 **{_fmt_t(c['target_mean'])}**"
+                    + (f" — 지금보다 **{up:+.1f}%**" if up is not None else ""))
+        st.plotly_chart(
+            charts.target_price_fan(cached.ohlc(ticker, period="1y"), price,
+                                    c.get("target_high"), c.get("target_mean"),
+                                    c.get("target_low"), cur_sym),
+            width="stretch", config=_NOBAR)
+        st.caption("점선 = 애널리스트 목표가 범위(최고/평균/최저) · 목표가는 컨센서스 — 리비전에 따라 변동")
+    if c and (c.get("revision_momentum") is not None or c.get("n_analysts")):
         st.markdown(
-            f"**컨센서스** · 목표가 {data.f_usd(c.get('target_mean'), 0)} "
-            f"(상승여력 {data.f_pct_s(c.get('target_upside_pct'))}) · "
-            f"애널 {int(c.get('n_analysts') or 0)}명 · "
             f"리비전 모멘텀 {data.f_ratio(c.get('revision_momentum'), 2)} "
-            f"(▲{int(c.get('eps_rev_up_30d') or 0)}/▼{int(c.get('eps_rev_down_30d') or 0)})")
+            f"(▲{int(c.get('eps_rev_up_30d') or 0)}/▼{int(c.get('eps_rev_down_30d') or 0)}) · "
+            f"애널 {int(c.get('n_analysts') or 0)}명")
+    # 💰 멀티플 유지 기준가 — Forward EPS × 현재 PER.
+    fv = data.fair_value_multiple(price, m.get("per"), m.get("forward_pe"), m.get("eps_fwd"))
+    if fv:
+        _fmt_px = _f_krw if is_kr else (lambda x: data.f_usd(x, 2))
+        fc = st.columns(3)
+        fc[0].metric("💰 기준가 (Fwd EPS×PER)", _fmt_px(fv["fair"]),
+                     delta=f"{fv['upside_pct']:+.1f}% vs 현재가",
+                     help="Forward EPS × 현재 PER. EPS(TTM)×PER은 대체로 현재가를 재계산하므로, "
+                          "미래 이익 컨센서스를 현재 멀티플에 대입한 보수적 기준가로 표시합니다.")
+        fc[1].metric("Forward EPS", _fmt_px(fv["eps_fwd"]),
+                     help="컨센서스 Forward EPS. 없으면 현재가 ÷ fPER 로 내재 EPS를 역산합니다.")
+        _fper = fv.get("fper")
+        fc[2].metric("PER / fPER", f"{fv['per']:.1f} / {(_fper and f'{_fper:.1f}') or '—'}",
+                     help="PER > fPER = 이익 성장 예상 (그 폭이 곧 상방)")
+        st.caption("⚠️ Forward EPS·fPER 는 애널리스트 컨센서스 — 리비전에 따라 흔들림 · 멀티플 유지는 가정")
+
+    # 🎯 적정가 인디케이터 — 멀티플 기반 (Fwd EPS × PER + 성장 지표). RIM·DDM 은 보조 참고
+    if fv and price:
+        st.markdown("##### 🎯 적정가 인디케이터 — 멀티플 기반")
+        fair = fv["fair"]
+        st.plotly_chart(charts.bullet_bands(
+            price, [("Fwd EPS×PER (±15%)", fair * 0.85, fair, fair * 1.15)]),
+            width="stretch", config=_NOBAR)
+        g = data.eps_growth_fwd(m)
+        _pt2 = data.peg_textbook(m)
+        mm = st.columns(4)
+        mm[0].metric("멀티플 기준가", _fmt_px(fair), delta=f"{fv['upside_pct']:+.1f}%",
+                     help="Forward EPS × 현재 PER — 컨센서스 이익에 현 멀티플 유지 가정")
+        mm[1].metric("EPS 성장률", f"{g:+.1f}%" if g is not None else "—",
+                     help="Fwd EPS ÷ TTM EPS − 1 (1년 예상)")
+        mm[2].metric("PEG (계산)", data.f_ratio((_pt2 or {}).get("peg")),
+                     help="PER ÷ EPS 증가율 — <1 성장 대비 저평가 해석 관례")
+        _tr = (cached.financials(ticker) or {}).get("trends") or {}
+        _rchg = _tr.get("roe_chg_3y")
+        mm[3].metric("ROE", data.f_frac_pct(m.get("roe")) if m.get("roe") is not None else "—",
+                     delta=(f"{_rchg * 100:+.1f}%p (3y)" if _rchg is not None else None),
+                     help="자기자본이익률 — 이익의 질·멀티플 정당화 근거. "
+                          "증감은 EDGAR 연간 재무 기준 최근 ~3년 변화")
+        st.caption("밴드 = 멀티플 ±15% 가정 · Fwd EPS 는 컨센서스(리비전 민감) · 표시·참고용")
+
     iv = cached.intrinsic(ticker)
     rim, ddm = iv.get("rim"), iv.get("ddm")
-    if rim or ddm:
-        with st.expander("💰 적정가치 (RIM·DDM 모델 · 가정 민감)", expanded=False):
-            if price:
-                st.plotly_chart(charts.value_bullet(price, rim, ddm), width="stretch", config=_NOBAR)
-            cc = st.columns(3)
-            if rim:
-                cc[0].metric("RIM 적정가", data.f_usd(rim["mid"], 0),
-                             help=f"범위 {data.f_usd(rim['low'], 0)}~{data.f_usd(rim['high'], 0)}")
-            if ddm:
-                cc[1].metric("DDM 적정가" + ("" if iv.get("ddm_reliable") else " ⚠️"),
-                             data.f_usd(ddm["mid"], 0),
-                             help=None if iv.get("ddm_reliable") else "배당성향 낮아 신뢰도 낮음")
-            if iv.get("upside_pct") is not None:
-                cc[2].metric("RIM 상승여력", data.f_pct_s(iv["upside_pct"]))
-            st.caption("RIM=잔여이익(고ROE 반영·범용) · DDM=배당할인(고배당주만 유효) · "
-                       "r 8~11%·g 4% 밴드 · ROE 영속 가정(보수성 주의)")
+    ddm_ok = bool(ddm and (ddm.get("mid") or 0) > 0)
+    if rim or ddm_ok:
+        st.markdown("###### 참고 — RIM·DDM 모델 (가정 민감·보수적)")
+        cc = st.columns(3)
+        if rim:
+            cc[0].metric("RIM 적정가", data.f_usd(rim["mid"], 0),
+                         help=f"범위 {data.f_usd(rim['low'], 0)}~{data.f_usd(rim['high'], 0)}")
+        if ddm_ok:
+            cc[1].metric("DDM 적정가" + ("" if iv.get("ddm_reliable") else " ⚠️"),
+                         data.f_usd(ddm["mid"], 0),
+                         help=None if iv.get("ddm_reliable") else "배당성향 낮아 신뢰도 낮음")
+        if iv.get("upside_pct") is not None:
+            cc[2].metric("RIM 상승여력", data.f_pct_s(iv["upside_pct"]))
+        st.caption("RIM=잔여이익·DDM=배당할인(고배당주만) · r 8~11%·g 4% · ROE 영속 가정 — "
+                   "성장주에는 보수적이라 멀티플 기준가와 병행 해석")
     h = v.get("history") or []
     if h:
-        with st.expander("📈 실적 서프라이즈 이력", expanded=False):
-            _surprise_chart(h, "실적 서프라이즈 (최근)")
+        st.markdown("##### 📈 실적 서프라이즈 이력")
+        _surprise_chart(h, "실적 서프라이즈 (최근)")
     st.caption("정보·표시용 · 매매신호 아님")
 
 
@@ -523,13 +916,13 @@ def _institutional(ticker):
     ins = cached.insider(ticker)
     txs = ins.get("transactions") or []
     if txs:
-        with st.expander(f"내부자거래 (SEC Form 4) · 순매수 {ins.get('net_buy_shares', 0):,.0f}주 "
-                         f"(매수 {ins.get('n_buys', 0)}·매도 {ins.get('n_sells', 0)})", expanded=False):
-            rows = [{"일자": t["date"], "임원": t["owner"], "직책": t["role"],
-                     "구분": {"P": "매수", "S": "매도", "A": "무상", "M": "행사"}.get(t["code"], t["code"]),
-                     "수량": f"{t['shares']:,.0f}", "단가": data.f_usd(t["price"]) if t["price"] else "—"}
-                    for t in txs[:25]]
-            st.dataframe(pd.DataFrame(rows), hide_index=True, width="stretch")
+        st.markdown(f"##### 🧾 내부자거래 (SEC Form 4) — 순매수 {ins.get('net_buy_shares', 0):,.0f}주 "
+                    f"(매수 {ins.get('n_buys', 0)}·매도 {ins.get('n_sells', 0)})")
+        rows = [{"일자": t["date"], "임원": t["owner"], "직책": t["role"],
+                 "구분": {"P": "매수", "S": "매도", "A": "무상", "M": "행사"}.get(t["code"], t["code"]),
+                 "수량": f"{t['shares']:,.0f}", "단가": data.f_usd(t["price"]) if t["price"] else "—"}
+                for t in txs[:25]]
+        st.dataframe(pd.DataFrame(rows), hide_index=True, width="stretch", height=280)
     elif ins.get("error"):
         st.caption(f"내부자거래: {ins['error']}")
     st.caption("정보·표시용")
@@ -577,28 +970,289 @@ def _apply_action(fn):
             msg = fn()
         st.success(str(msg) if msg else "완료")
         st.cache_data.clear()
-        st.rerun()
+        st.rerun(scope="app")   # fragment 밖(차트 마커·거래 이력)까지 갱신
     except Exception as e:
         st.error(f"실패: {e}")
 
 
+_ACC_MONTHLY_MULT = {"매일": 21.0, "매주": 4.33, "매월": 1.0}
+
+
+def _money_krw(x) -> str:
+    try:
+        return f"₩{float(x):,.0f}"
+    except (TypeError, ValueError):
+        return "—"
+
+
+@st.fragment
+def _entry_levels_section(ticker, hist, price):
+    """🎯 진입 레벨 가이드 — 추세 지지/저항·MA·볼린저·52주(기술) × 기준가·RIM·목표가(밸류).
+
+    레벨 **후보 서술** — 예측·매매신호 아님 (실행 규칙은 Phase DCA·수동).
+    """
+    if hist is None or getattr(hist, "empty", True):
+        return
+    close = hist["Close"].dropna()
+    if len(close) < 60 or not price:
+        return
+    supports, resists = [], []
+    for win in (60, 120, 200):                      # 주요 이동평균 (아래=지지·위=저항)
+        if len(close) >= win:
+            v = float(close.rolling(win).mean().iloc[-1])
+            (supports if v < price else resists).append((f"MA{win}", v))
+    if len(close) >= 20:                            # 볼린저 ±2σ
+        ma20 = close.rolling(20).mean().iloc[-1]
+        sd = close.rolling(20).std().iloc[-1]
+        supports.append(("볼린저 하단", float(ma20 - 2 * sd)))
+        resists.append(("볼린저 상단", float(ma20 + 2 * sd)))
+    yr = close[close.index >= close.index[-1] - pd.Timedelta(days=365)]
+    if len(yr) > 20:
+        supports.append(("52주 저점", float(yr.min())))
+        resists.append(("52주 고점", float(yr.max())))
+    try:                                            # 자동 감지 추세 지지/저항선·채널 상하단
+        for tl in cached.trendlines_for(ticker, "1d", True, ("long",)) or []:
+            if tl.get("kind") == "support":
+                supports.append(("추세 지지선", float(tl.get("y1"))))
+            elif tl.get("kind") == "resistance":
+                resists.append(("추세 저항선", float(tl.get("y1"))))
+            elif tl.get("kind") == "channel":
+                path = tl.get("path") or {}
+                up = (path.get("upper") or [None])[-1] if path else (tl.get("upper") or [None])[-1]
+                lo_ = (path.get("lower") or [None])[-1] if path else (tl.get("lower") or [None])[-1]
+                if lo_:
+                    supports.append(("채널 하단", float(lo_)))
+                if up:
+                    resists.append(("채널 상단", float(up)))
+    except Exception:
+        pass
+    try:                                            # 매물대 — 거래량 상위 노드(HVN) = 강한 지지/저항
+        vp = charts.volume_profile_bins(hist[hist.index >= hist.index[-1]
+                                             - pd.Timedelta(days=730)])
+        if vp:
+            centers, vols = vp
+            top = sorted(zip(centers, vols), key=lambda x: -x[1])[:4]
+            for c, _vol in top:
+                (supports if c < price else resists).append(("매물대(HVN)", float(c)))
+    except Exception:
+        pass
+    try:                                            # 앵커드 VWAP (최근 1년) — 평균 보유단가 근사
+        av = charts.anchored_vwap(hist, anchor=hist.index[-1] - pd.Timedelta(days=365))
+        if av is not None and len(av):
+            v_ = float(av.iloc[-1])
+            (supports if v_ < price else resists).append(("앵커드 VWAP(1y)", v_))
+    except Exception:
+        pass
+    try:                                            # 일목 구름 상/하단 (선행스팬 — 현재 시점)
+        if {"High", "Low"} <= set(hist.columns) and len(close) >= 78:
+            h9 = (hist["High"].rolling(9).max() + hist["Low"].rolling(9).min()) / 2
+            h26 = (hist["High"].rolling(26).max() + hist["Low"].rolling(26).min()) / 2
+            spa = float(((h9 + h26) / 2).shift(26).iloc[-1])
+            spb = float(((hist["High"].rolling(52).max()
+                          + hist["Low"].rolling(52).min()) / 2).shift(26).iloc[-1])
+            c_lo, c_hi = min(spa, spb), max(spa, spb)
+            (supports if c_lo < price else resists).append(("일목 구름 하단", c_lo))
+            (supports if c_hi < price else resists).append(("일목 구름 상단", c_hi))
+    except Exception:
+        pass
+    fairs = []
+    v = cached.valuation(ticker) or {}
+    m = v.get("metrics") or {}
+    fv = data.fair_value_multiple(price, m.get("per"), m.get("forward_pe"),
+                                  m.get("eps_fwd"))
+    if fv and fv.get("fair"):
+        fairs.append(("멀티플 기준가", fv["fair"]))
+    iv = cached.intrinsic(ticker) or {}
+    if (iv.get("rim") or {}).get("mid"):
+        fairs.append(("RIM 적정가", iv["rim"]["mid"]))
+    tgt = (v.get("consensus") or {}).get("target_median")
+    if tgt:
+        fairs.append(("목표가 중앙값", tgt))
+
+    lv = data.entry_levels(price, supports, resists, fairs)
+    if not lv:
+        return
+    st.markdown("##### 🎯 진입 레벨 가이드 — 밸류 × 기술")
+    mm = st.columns(4)
+    zones = lv.get("zones") or []
+    for i in range(3):
+        if i < len(zones):
+            z = zones[i]
+            strong = f" ×{z['n']}" if z.get("n", 1) > 1 else ""
+            val_txt = (f"{z['lo']:,.2f}~{z['hi']:,.2f}" if z["hi"] > z["lo"] * 1.0005
+                       else f"{z['mid']:,.2f}")
+            mm[i].metric(f"{i + 1}차 지지 존{strong}", val_txt,
+                         delta=f"{z['pct']:+.1f}%", delta_color="off",
+                         help=f"재료: {' + '.join(z['labels'])} — 겹칠수록(×n) 신뢰↑ · "
+                              "분할 접근 참고용")
+            if mm[i].button("🔔 도달 알림", key=f"_lvl_alert_{ticker}_{i}",
+                            help="이 존 상단 도달 시 텔레그램 알림 (봇 /alert 공용)"):
+                try:
+                    from bot import price_alerts
+                    price_alerts.add_alert(ticker, round(z["hi"], 2), "buy",
+                                           note=f"진입 존{i + 1} ({'+'.join(z['labels'][:2])})")
+                    st.toast(f"🔔 {ticker} {z['hi']:,.2f} 하락 도달 알림 등록")
+                except Exception as e:
+                    st.toast(f"알림 등록 실패: {e}")
+        else:
+            mm[i].metric(f"{i + 1}차 지지 존", "—")
+    gap = lv.get("fair_gap_pct")
+    mm[3].metric("밸류 기준가 평균 대비", f"{gap:+.1f}%" if gap is not None else "—",
+                 help="멀티플 기준가·RIM·목표가 평균이 현재가보다 위(+)면 밸류 여유")
+    ents = lv.get("entries") or []
+    levels = ([("기술 지지", val, "support") for _, val, _ in ents]
+              + [("기술 저항", val, "resist") for _, val, _ in (lv.get("resists") or [])]
+              + [("밸류 기준", val, "fair") for _, val, _ in (lv.get("fairs") or [])])
+    zone_bands = [("기술 지지", z["lo"], z["hi"]) for z in zones if z["hi"] > z["lo"]]
+    if levels:
+        st.plotly_chart(charts.price_levels(lv["price"], levels, zones=zone_bands),
+                        width="stretch", config=_NOBAR)
+    detail = " · ".join(f"{lab} {val:,.0f}({pct:+.1f}%)"
+                        for lab, val, pct in (lv.get("fairs") or []))
+    st.caption(("밸류 기준: " + detail + " · " if detail else "")
+               + "레벨은 **후보 서술** — 예측·매매신호 아님 · 지지 이탈 가능 · "
+                 "실행 규칙은 Phase DCA(자동 아님·수동)")
+
+
+def _trade_history(ticker):
+    """🧾 거래 이력 — 원장 최신순 · 행 선택 = 그 기록만 취소 (임의 시점·기록 전용)."""
+    from lib import trade_events as te
+    st.markdown("##### 🧾 거래 이력")
+    trades = data.trade_events(ticker)
+    ordered = list(reversed(trades))                   # 표시 순서(최신 위) = 선택 인덱스
+    sel_ev = None
+    if trades:
+        rows = [{
+            "일자": t.get("date"),
+            "구분": "🟢 매수" if t.get("side") == "buy" else "🔴 매도",
+            "수량": t.get("qty"),
+            "체결가": t.get("price"),
+            "평단": t.get("avg_price"),
+            "출처": "수동" if t.get("source") == "manual_holding" else (t.get("source") or "—"),
+            "메모": t.get("note") or "",
+        } for t in ordered]
+        event = st.dataframe(pd.DataFrame(rows), hide_index=True, width="stretch",
+                             height=min(302, 44 + 35 * len(rows)),
+                             on_select="rerun", selection_mode="single-row",
+                             key=f"_th_{ticker}",
+                             column_config={
+                                 "수량": st.column_config.NumberColumn(format="%.4f"),
+                                 "체결가": st.column_config.NumberColumn(format="%.2f"),
+                                 "평단": st.column_config.NumberColumn(format="%.2f"),
+                                 "메모": st.column_config.TextColumn(width="medium"),
+                             })
+        try:
+            sel = event.selection.rows
+        except Exception:
+            sel = []
+        if sel and sel[0] < len(ordered):
+            sel_ev = ordered[sel[0]]
+    else:
+        st.caption("기록 없음 — 좌측 적립/추가/축소 기록이 여기와 차트 ▲▼ 마커에 반영됩니다.")
+
+    # 취소 대상: 선택 행 우선 · 미선택 시 최근 수동 기록 (임의 시점 취소는 rollback+replay)
+    target = sel_ev if sel_ev is not None else te.latest_manual_event(ticker)
+    if sel_ev is not None and (str(sel_ev.get("source") or "") != "manual_holding"
+                               or str(sel_ev.get("account") or "") not in
+                               ("overseas_general", "overseas_fractional")):
+        st.caption("⚠️ 선택한 기록은 동기화/모의 기록 — 취소 불가 (수동 기록만 가능)")
+    elif target:
+        side_kr = "매수" if target.get("side") == "buy" else "매도"
+        which = "선택 기록" if sel_ev is not None else "최근 기록"
+        ok = st.checkbox("확인 — 포트폴리오 스냅샷 즉시 수정", key=f"_undo_ok_{ticker}")
+        if st.button(f"↩️ {which} 취소 — {target.get('date')} {side_kr} "
+                     f"{float(target.get('qty') or 0):g}주",
+                     key=f"_undo_{ticker}", disabled=not ok, width="stretch"):
+            _apply_action(lambda: _hm().undo_trade(target["event_id"]))
+    elif trades:
+        st.caption("취소할 수동 기록 없음 (동기화·모의 기록은 취소 불가)")
+    st.caption("행 선택 = 그 기록만 취소(중간 기록도 가능 — 이후 기록은 자동 재계산·"
+               "모순이면 정직 거부) · 평단 검증이 이중 실행 차단 · 실계좌 주문 없음")
+
+
 @st.fragment
 def _manage_position(ticker, cur_price, pos):
-    with st.expander("⚙️ 내 포지션 관리 — 추가·적립·축소 (실제 추적 포트폴리오 · 실주문 아님)",
-                     expanded=False):
-        cur = float(cur_price or 0.0)
-        held = pos["shares"] if pos else 0.0
-        st.caption(f"현재가 ${cur:,.2f} · 보유 {held:g}주"
-                   + (f" · 평단 {data.f_usd(pos.get('avg_price_usd'))}" if pos else " · 미보유"))
-        mode = st.segmented_control("작업", ["➕ 추가", "💧 적립(금액)", "➖ 축소"], default="➕ 추가",
-                                    key="mng_mode", label_visibility="collapsed") or "➕ 추가"
-        if mode == "💧 적립(금액)":
-            amt = st.number_input("적립 금액 ($)", min_value=0.0, value=100.0, step=10.0, key="acc_amt")
-            qty = (amt / cur) if cur > 0 else 0.0
-            st.caption(f"→ 현재가 기준 약 **{qty:.4f}주** 소수점 적립 (평단 자동 재계산)")
-            if st.button("💧 적립 기록", key="acc_btn", type="primary",
-                         disabled=(amt <= 0 or cur <= 0), width="stretch"):
-                _apply_action(lambda: _hm().buy_holding(ticker, round(qty, 4), round(cur, 4)))
+    cur = float(cur_price or 0.0)
+    held = pos["shares"] if pos else 0.0
+    st.divider()
+    st.markdown("##### ⚙️ 내 포지션 관리")
+    top = st.columns([1.15, 1, 1, 1])
+    top[0].metric("현재가", data.f_usd(cur))
+    top[1].metric("보유주수", f"{held:g}주" if held else "미보유")
+    top[2].metric("평단", data.f_usd(pos.get("avg_price_usd")) if pos else "—")
+    top[3].metric("평가액", data.f_usd(pos.get("value"), 0) if pos else "—")
+
+    left, right = st.columns([1.25, 1], gap="large")
+    with left:
+        mode = st.segmented_control("작업", ["💧 적립", "➕ 추가", "➖ 축소"], default="💧 적립",
+                                    key="mng_mode_v2", label_visibility="collapsed") or "💧 적립"
+        if mode == "💧 적립":
+            c1, c2, c3 = st.columns([1, 1, 1])
+            currency = c1.segmented_control("입력 통화", ["₩ 원화", "$ 달러"], default="₩ 원화",
+                                            key="acc_currency")
+            freq = c2.segmented_control("주기", ["매일", "매주", "매월"], default="매주",
+                                        key="acc_freq")
+            _fx_live = cached.fx_now() or 1380.0        # 실시간 환율 자동 (2분 캐시)
+            fx = _fx_live
+            if currency == "₩ 원화":
+                amt = c3.number_input("적립 금액 (₩)", min_value=1000.0, value=100_000.0,
+                                      step=1000.0, format="%.0f", key="acc_amt_krw",
+                                      help="키움 주식모으기 최소/단위 금액 = 1,000원")
+                fx = st.number_input("적용 환율 (₩/$) — 실시간 자동", min_value=500.0,
+                                     max_value=2500.0, value=round(float(_fx_live), 1),
+                                     step=1.0, format="%.1f", key="acc_fx",
+                                     help="실시간 USD/KRW 자동 채움 (2분 캐시·직접 수정 가능) — "
+                                          "원화 예산을 USD 매수금액으로 환산")
+                _ft = cached.fx_timing()
+                if _ft.get("ok"):
+                    st.caption(f"💱 환전 타이밍: {_ft.get('emoji', '')} {_ft.get('verdict', '')} · "
+                               f"5y 위치 {_ft.get('pct_display', '—')}%ile · "
+                               f"분할 환전 배율 {_ft.get('multiplier', 1):g}× — {_ft.get('action', '')}")
+                amount_usd = amt / fx if fx > 0 else 0.0
+                amount_label = _money_krw(amt)
+            else:
+                amt = c3.number_input("적립 금액 ($)", min_value=0.0, value=100.0,
+                                      step=10.0, key="acc_amt_usd")
+                amount_usd = amt
+                amount_label = data.f_usd(amt)
+            qty = (amount_usd / cur) if cur > 0 else 0.0
+            monthly_usd = amount_usd * _ACC_MONTHLY_MULT.get(freq, 1.0)
+            p = st.columns(4)
+            p[0].metric(f"{freq} 금액", amount_label)
+            p[1].metric("환산 USD", data.f_usd(amount_usd))
+            p[2].metric("예상 수량", f"{qty:.4f}주")
+            p[3].metric("월 환산", data.f_usd(monthly_usd, 0))
+            st.caption(f"현재가 기준 1회 적립 수량 · {freq} 주기 메모 · 평단 자동 재계산")
+            note = f"DCA {freq} {amount_label} ({amount_usd:.2f} USD"
+            if currency == "₩ 원화":
+                note += f", fx {fx:.1f}"
+            note += ")"
+            b1, b2 = st.columns(2)
+            if b1.button(f"💧 {freq} 적립 1회 기록", key="acc_btn", type="primary",
+                         disabled=(amount_usd <= 0 or qty <= 0 or cur <= 0), width="stretch"):
+                _apply_action(lambda: _hm().buy_holding(
+                    ticker, round(qty, 4), round(cur, 4), note=note))
+            # 🔁 자동 모으기 — 등록해두면 크론이 매 세션 미 종가·확정 종가 환율로 자동 기록
+            from lib import accumulation
+            _plan = accumulation.plan_for(ticker)
+            _amt_raw = amt
+            _cur_code = "KRW" if currency == "₩ 원화" else "USD"
+            if b2.button(f"🔁 자동 기록 등록 — {freq} 종가", key="acc_auto_btn",
+                         disabled=(_amt_raw <= 0), width="stretch",
+                         help="등록하면 매 미국 세션 마감 후 그날 종가·확정 종가 환율로 "
+                              "자동 기록 (실주문 아님 — 키움 주식모으기 결과를 거울처럼 반영)"):
+                st.success(accumulation.upsert_plan(ticker, _amt_raw, _cur_code, freq))
+                st.rerun(scope="app")
+            if _plan:
+                _pa = (f"₩{_plan['amount']:,.0f}" if _plan.get("currency") == "KRW"
+                       else f"${_plan['amount']:,.2f}")
+                pc1, pc2 = st.columns([2.2, 1])
+                pc1.caption(f"🔁 자동 모으기 활성: {_plan.get('freq')} {_pa} · "
+                            f"마지막 기록 {_plan.get('last_run') or '아직 없음'} · "
+                            f"{'ON' if _plan.get('enabled', True) else 'OFF'}")
+                if pc2.button("해제", key="acc_auto_del", width="stretch"):
+                    accumulation.remove_plan(ticker)
+                    st.rerun(scope="app")
         elif mode == "➖ 축소":
             if not pos:
                 st.info("보유하지 않은 종목입니다.")
@@ -618,3 +1272,5 @@ def _manage_position(ticker, cur_price, pos):
                          disabled=(q <= 0 or px <= 0), width="stretch"):
                 _apply_action(lambda: _hm().buy_holding(ticker, round(q, 4), round(px, 4)))
         st.caption("holding_manager 안전기록(atomic·교차프로세스 락) · 봇 /holding 과 동일 · 실계좌 주문 없음(기록 전용)")
+    with right:
+        _trade_history(ticker)

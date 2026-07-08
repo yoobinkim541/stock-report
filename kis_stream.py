@@ -356,6 +356,12 @@ def compute_watchlist() -> tuple[dict, dict]:
                 _classify(a.get("ticker"), kr, us)
     except Exception as e:
         logger.warning("알림 티커 로드 실패: %s", e)
+    try:                                     # 대시보드 '지금 보는 종목' (최후미 — 잔여 슬롯만)
+        from lib import viewer_interest
+        for t in viewer_interest.recent():
+            _classify(t, kr, us)
+    except Exception as e:
+        logger.debug("viewer interest 로드 실패(무시): %s", e)
     return select_watchlist(kr, us)
 
 

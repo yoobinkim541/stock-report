@@ -1,8 +1,13 @@
 """시장·캘린더 — 경제 일정(달력) + 수집 뉴스(출처별·중요도순)."""
 from __future__ import annotations
 
+import os
+import sys
+
 import pandas as pd
 import streamlit as st
+
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 
 import ticker_names
 from dashboard import cached, theme, views

@@ -158,3 +158,55 @@ def import_mock_history(collection: str, *, market: str) -> int:
         except Exception:
             continue
     return added
+
+
+def remove_event(event_id: str) -> bool:
+    """event_id 이벤트 1건 제거 (undo 전용) — store.replace_all 원자 교체. 성공 True.
+
+    기록로그는 store 경유 원칙 준수. 대상 부재/스토어 실패 시 False.
+    """
+    try:
+        import store
+        rows = store.all(COLLECTION)
+        keep = [r for r in rows if r.get("event_id") != event_id]
+        if len(keep) == len(rows):
+            return False
+        store.replace_all(COLLECTION, keep)
+        return True
+    except Exception:
+        return False
+
+
+def latest_manual_event(ticker: str) -> dict | None:
+    """해당 티커의 최신 manual_holding 이벤트 (undo 대상) — 없으면 None."""
+    rows = [r for r in trades_for_ticker(ticker, include_mock=False)
+            if str(r.get("source") or "") == "manual_holding"]
+    return rows[-1] if rows else None
+
+
+def rewrite_events(remove_id: str, avg_updates: dict | None = None) -> bool:
+    """이벤트 1건 제거 + 후속 이벤트 avg_price 일괄 갱신 (임의 기록 취소 replay 전용).
+
+    store.replace_all 원자 교체 — 취소된 기록 이후 이벤트들의 '기록 시점 평단'을
+    재계산 값으로 바꿔 이후 undo 의 평단 정합 검증이 계속 성립하게 한다.
+    """
+    try:
+        import store
+        rows = store.all(COLLECTION)
+        out, changed = [], False
+        for r in rows:
+            if r.get("event_id") == remove_id:
+                changed = True
+                continue
+            upd = (avg_updates or {}).get(r.get("event_id"))
+            if upd is not None:
+                r = dict(r)
+                r["avg_price"] = upd
+                changed = True
+            out.append(r)
+        if not changed:
+            return False
+        store.replace_all(COLLECTION, out)
+        return True
+    except Exception:
+        return False

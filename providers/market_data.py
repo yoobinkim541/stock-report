@@ -237,6 +237,39 @@ def fetch_exchange_rate() -> float:
     return 1380.0
 
 
+def _last_completed_close(hist, now_utc_date):
+    """일봉 프레임에서 **확정 종가** 선택 (순수) — 마지막 봉이 오늘(UTC·진행 중)이면 직전 봉.
+
+    주말/휴장엔 마지막 봉 자체가 확정 종가라 그대로 쓴다.
+    """
+    if hist is None or getattr(hist, "empty", True) or "Close" not in hist.columns:
+        return None
+    c = hist["Close"].dropna()
+    if len(c) == 0:
+        return None
+    last_date = c.index[-1].date()
+    if last_date >= now_utc_date and len(c) >= 2:      # 오늘 봉 = 아직 형성 중 → 직전 확정
+        return float(c.iloc[-2])
+    return float(c.iloc[-1])
+
+
+def fetch_exchange_rate_close() -> float:
+    """USD/KRW **최근 확정 종가** 환율 — 주식 모으기·소수점 주문서 기준 (장중 변동 배제).
+
+    실시간(진행 중) 봉을 제외한 직전 영업일 종가라 하루 동안 값이 고정된다.
+    실패 시 실시간 환율로 폴백.
+    """
+    try:
+        from datetime import datetime as _dt, timezone as _tz
+        hist = yf.Ticker("USDKRW=X").history(period="7d")
+        rate = _last_completed_close(hist, _dt.now(_tz.utc).date())
+        if rate and 900 < rate < 2500:
+            return round(rate, 1)
+    except Exception:
+        pass
+    return fetch_exchange_rate()
+
+
 def fetch_qqq_data() -> dict:
     """QQQ 현재가, 52주 고점, 낙폭, 모멘텀 계산."""
     try:
