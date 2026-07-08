@@ -560,10 +560,10 @@ def orderbook_ladder_html(bids, asks, *, prev_close=None, price=None,
         w = max(2, int(q / max_q * 100))
         bar_color = "#3182f6" if side == "ask" else "#f04452"
         qty = f"{q:,.0f}"
-        px_cell = (f"<td style='width:38%;text-align:center;padding:2px 6px;"
-                   f"font-family:{_MONO};font-size:13px'>{px:,.0f}{_pct(px)}</td>")
+        px_cell = (f"<td style='width:38%;text-align:center;padding:1px 4px;"
+                   f"font-family:{_MONO};font-size:12px'>{px:,.0f}{_pct(px)}</td>")
         bar = (f"<div style='background:{bar_color}26;border-left:2px solid {bar_color};"
-               f"width:{w}%;padding:1px 4px;font-size:11px;font-family:{_MONO};"
+               f"width:{w}%;padding:0 4px;font-size:10.5px;font-family:{_MONO};"
                f"color:{bar_color};white-space:nowrap'>{qty}</div>")
         if side == "ask":   # 잔량 좌측 (우측정렬 바)
             return (f"<tr><td style='width:31%'><div style='display:flex;justify-content:flex-end'>"
@@ -574,8 +574,8 @@ def orderbook_ladder_html(bids, asks, *, prev_close=None, price=None,
     rows = [_row(p, q, "ask") for p, q in sorted(asks, key=lambda x: -x[0])]
     if price:
         rows.append(f"<tr><td></td><td style='text-align:center;border:1px solid #e5e8ee55;"
-                    f"border-radius:6px;padding:3px;font-family:{_MONO};font-weight:700;"
-                    f"font-size:14px'>{float(price):,.0f}{_pct(float(price))}</td><td></td></tr>")
+                    f"border-radius:6px;padding:2px;font-family:{_MONO};font-weight:700;"
+                    f"font-size:13px'>{float(price):,.0f}{_pct(float(price))}</td><td></td></tr>")
     rows += [_row(p, q, "bid") for p, q in bids]
 
     stat_rows = []
@@ -605,5 +605,6 @@ def orderbook_ladder_html(bids, asks, *, prev_close=None, price=None,
               f"<span style='color:#f04452'>{tb:,.0f} 구매대기</span></div>")
 
     return (f"<div style='display:flex;gap:14px'>"
-            f"<div style='flex:1'><table style='width:100%;border-collapse:collapse'>"
-            + "".join(rows) + "</table>" + totals + "</div>" + stats + "</div>")
+            f"<div style='flex:1'><div style='max-height:340px;overflow-y:auto'>"
+            f"<table style='width:100%;border-collapse:collapse'>"
+            + "".join(rows) + "</table></div>" + totals + "</div>" + stats + "</div>")

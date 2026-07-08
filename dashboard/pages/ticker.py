@@ -26,15 +26,18 @@ def render():
     _rq0 = cached.realtime_quote(ticker)
     cur = (_rq0.get("price") if _rq0 else None) or yf_price or 0.0   # 현재가(실시간 우선)
 
-    # 실시간 밴드(8s 자동갱신) — 히어로 ⚡가격·게이지·내 포지션·호가
+    # 실시간 밴드(8s 자동갱신) — 히어로 ⚡가격·게이지·내 포지션 (호가는 차트 아래 접이식)
     _live_top(ticker, hist, yf_price, prev, pos)
 
-    # 가격 차트 — 풀폭 · 라인/캔들 토글 (+ 보유 시 평단 수평선)
+    # 가격 차트 — 풀폭 · 봉/차트종류/지표 컨트롤 (+ 보유 시 평단 수평선)
     if yf_price is not None:
         _price_chart(ticker, hist, pos.get("avg_price_usd") if pos else None,
                      data.trade_events(ticker), view_days)
     else:
         st.info("가격 데이터 없음 (yfinance)")
+
+    # 실시간 호가 — 접이식(기본 접힘)·8초 자동갱신 (차트 우선 레이아웃)
+    _orderbook_section(ticker, hist, prev)
 
     # ETF 는 개별주 섹션(PER·재무·기관·실적) 대신 ETF 전용 뷰(프로필·Top10·보수·괴리율·배당)
     etf = cached.etf(ticker)
@@ -89,9 +92,9 @@ _IND_OPTS = ["RSI(14)", "볼린저밴드(20,2σ)", "일목균형표"]
 
 def _price_chart(ticker, hist, avg_cost, trades, view_days=None):
     """가격 차트 — 봉 단위(5분~월)·라인/캔들·기술적 분석 도구(MA 세트·RSI·BB·일목)."""
-    c1, c2, c3 = st.columns([1.2, 0.95, 0.45])
-    tf_label = c1.segmented_control("봉", list(_TF), default="1일",
+    tf_label = st.segmented_control("봉", list(_TF), default="1일",
                                     label_visibility="collapsed", key="_chart_tf") or "1일"
+    c2, c3, _sp = st.columns([1.1, 0.5, 1.4])
     kind = c2.segmented_control("차트 종류", ["📈 라인", "🕯️ 캔들"], default="📈 라인",
                                 label_visibility="collapsed", key="_chart_kind")
     tf = _TF[tf_label]
@@ -198,7 +201,17 @@ def _live_top(ticker, hist, yf_price, prev, pos):
         m[2].metric("보유주수", f"{pos['shares']:g}주")
         m[3].metric("평가액", data.f_usd(cur_val, 0))
 
-    _orderbook(rq, hist, prev, price)
+
+
+@st.fragment(run_every=8)
+def _orderbook_section(ticker, hist, prev):
+    """실시간 호가 — 차트 아래 접이식(기본 접힘·화면 점유 최소화), 8초 자동갱신."""
+    rq = cached.realtime_quote(ticker)
+    if not rq or not (rq.get("bids") or rq.get("asks")):
+        return                                     # 호가 없음(US/장외) — 섹션 자체 생략
+    with st.expander("📊 실시간 호가 (10단계) — 등락% = 전일 종가 기준·상승 🔴/하락 🔵",
+                     expanded=False):
+        _orderbook(rq, hist, prev, rq.get("price"))
 
 
 def _orderbook(rq, hist=None, prev_close=None, price=None):
@@ -221,9 +234,6 @@ def _orderbook(rq, hist=None, prev_close=None, price=None):
             week52 = {"high": float(w["High"].max()), "low": float(w["Low"].min())}
         except Exception:
             pass
-    st.markdown("**📊 실시간 호가** &nbsp;<span style='color:#9198a6;font-size:12px'>"
-                "등락% = 전일 종가 기준 (상승 🔴 / 하락 🔵 — KR 관례)</span>",
-                unsafe_allow_html=True)
     theme.render(theme.orderbook_ladder_html(
         bids, asks, prev_close=prev_close, price=price, day=day, week52=week52))
 
