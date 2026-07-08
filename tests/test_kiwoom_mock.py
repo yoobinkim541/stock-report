@@ -12,6 +12,7 @@ test_kiwoom_mock.py — 키움 모의 페이퍼트레이딩 테스트 (무네트
 """
 import os
 import sys
+from types import SimpleNamespace
 
 import pytest
 
@@ -289,6 +290,77 @@ def test_order_blocker_classifies():
     assert kt._order_blocker("모의투자 주문가능금액이 부족합니다.") is None   # 개별 주문 문제 → 중단 안 함
     assert kt._order_blocker("모의투자 매수주문이 완료 되었습니다.") is None
     assert kt._order_blocker(None) is None
+
+
+def test_notify_includes_company_name_and_expanded_reason(monkeypatch):
+    import kiwoom_mock_track as kt
+    import notify
+
+    sent = {}
+    monkeypatch.setenv("KR_MOCK_NOTIFY_LLM_ENABLED", "0")
+    monkeypatch.setitem(sys.modules, "kr200_meta", SimpleNamespace(NAME={"009540": "HD한국조선해양"}))
+    monkeypatch.setattr(notify, "send_telegram",
+                        lambda text, **_kw: sent.__setitem__("text", text))
+    signals = [{
+        "code": "009540", "ticker": "009540.KS", "action": "강한 매수후보",
+        "score": 68, "price": 483000, "policy_score": 0.734,
+        "rationale": {"one_line_reason": "재무 68점(B) · 일일 신호 긍정",
+                      "grade": "B", "financial": "B", "timing": "긍정",
+                      "news": "중립", "risk": "보통"},
+    }]
+    results = [{"code": "009540", "side": "buy", "qty": 2, "kind": "편입",
+                "ok": True, "reason": "신규/추가"}]
+
+    kt._notify(9_664_093, results, signals)
+
+    text = sent["text"]
+    assert "추정 NAV  ₩9,664,093" in text
+    assert "편입 009540 HD한국조선해양 2주" in text
+    assert "사유: 재무 68점(B) · 일일 신호 긍정" in text
+    assert "근거: 판단 강한 매수후보 · 재무 68점(B) · 정책점수 0.73" in text
+    assert "세부: 재무 B · 타이밍 긍정 · 뉴스 중립 · 리스크 보통" in text
+
+
+def test_notify_uses_llm_decision_notes(monkeypatch):
+    import kiwoom_mock_track as kt
+    import notify
+    from lib import mock_llm_rationale
+
+    sent, seen = {}, {}
+    monkeypatch.setenv("KR_MOCK_NOTIFY_LLM_ENABLED", "1")
+    monkeypatch.setitem(sys.modules, "kr200_meta", SimpleNamespace(NAME={"009540": "HD한국조선해양"}))
+    monkeypatch.setattr(notify, "send_telegram",
+                        lambda text, **_kw: sent.__setitem__("text", text))
+
+    def fake_run(payload):
+        seen.update(payload)
+        return ({
+            "summary": "재무 B와 정책점수가 함께 기준을 통과했습니다.",
+            "decision_notes": ["편입은 일일 신호와 가격 축이 뒷받침합니다."],
+            "risk_checks": ["모의 결과로 추적합니다."],
+            "confidence": 71,
+        }, "ok")
+
+    monkeypatch.setattr(mock_llm_rationale, "run", fake_run)
+    signals = [{
+        "code": "009540", "ticker": "009540.KS", "action": "강한 매수후보",
+        "score": 68, "price": 483000, "policy_score": 0.734,
+        "rationale": {"one_line_reason": "재무 68점(B) · 일일 신호 긍정", "grade": "B"},
+        "features": {"ranker": 0.8, "mom12": 0.6},
+    }]
+    results = [{"code": "009540", "side": "buy", "qty": 2, "kind": "편입",
+                "ok": True, "reason": "신규/추가"}]
+
+    kt._notify(9_664_093, results, signals)
+
+    text = sent["text"]
+    assert "편입 009540 HD한국조선해양 2주" in text
+    assert "🧠 판단근거:" in text
+    assert "재무 B와 정책점수" in text
+    assert "일일 신호와 가격 축" in text
+    assert seen["recent_decisions"][0]["name"] == "HD한국조선해양"
+    assert seen["recent_decisions"][0]["policy_score"] == 0.734
+    assert "근거: 판단 강한 매수후보" not in text       # LLM 성공 시 정량 폴백 중복 생략
 
 
 def _fake_post_factory(order_codes):

@@ -384,14 +384,156 @@ def _order_blocker(msg) -> str | None:
     return None
 
 
-def _notify(nav: float | None, results: list[dict], signals: list[dict]) -> None:
-    name_by_code, reason_by_code = {}, {}
+def _company_name_for_code(code: str, ticker: str | None = None) -> str:
+    """KR 알림 표시명. KOSPI200 메타 우선 → ticker_names → 기존 리포트 resolver."""
+    c = str(code or "").replace(".KS", "").replace(".KQ", "").zfill(6)
     try:
-        from reports.investment_report import _company_name
-        name_by_code = {s["code"]: _company_name(s["ticker"]) for s in signals}
+        import kr200_meta
+        name = kr200_meta.NAME.get(c)
+        if name:
+            return name
     except Exception:
         pass
-    reason_by_code = {s["code"]: (s.get("rationale") or {}).get("one_line_reason", "") for s in signals}
+    tk = ticker or (f"{c}.KS" if c and c.isdigit() else c)
+    try:
+        import ticker_names
+        name = ticker_names.display_name(tk, allow_net=False)
+        if name and name not in (tk, c):
+            return name
+    except Exception:
+        pass
+    try:
+        from reports import investment_report as ir
+        name = getattr(ir, "_KOSPI_NAMES", {}).get(tk)
+        if name:
+            return name
+    except Exception:
+        pass
+    try:
+        from reports.investment_report import _company_name
+        name = _company_name(tk)
+        if name and name not in (tk, c):
+            return name
+    except Exception:
+        pass
+    return ""
+
+
+def _fmt_policy_score(value) -> str | None:
+    try:
+        v = float(value)
+        if v != v:
+            return None
+        return f"{v:.2f}"
+    except (TypeError, ValueError):
+        return None
+
+
+def _decision_detail_lines(sig: dict | None, order: dict | None = None) -> list[str]:
+    """LLM 비활성/실패 시 쓰는 결정적 근거 상세. 입력 신호 밖의 내용은 만들지 않는다."""
+    sig = sig or {}
+    order = order or {}
+    r = sig.get("rationale") or {}
+    parts = []
+    action = sig.get("action")
+    score = sig.get("score")
+    grade = r.get("grade")
+    if action:
+        parts.append(f"판단 {action}")
+    if score is not None:
+        parts.append(f"재무 {score}점" + (f"({grade})" if grade else ""))
+    ps = _fmt_policy_score(sig.get("policy_score"))
+    if ps is not None:
+        parts.append(f"정책점수 {ps}")
+
+    lines = []
+    if parts:
+        lines.append("     근거: " + " · ".join(parts))
+
+    statuses = [(label, r.get(key)) for label, key in (
+        ("재무", "financial"), ("타이밍", "timing"), ("뉴스", "news"), ("리스크", "risk")) if r.get(key)]
+    if statuses:
+        lines.append("     세부: " + " · ".join(f"{label} {value}" for label, value in statuses))
+
+    price = sig.get("price")
+    if price:
+        try:
+            px = f"₩{float(price):,.0f}"
+        except (TypeError, ValueError):
+            px = str(price)
+        reason = order.get("reason")
+        lines.append("     기준: " + px + (f" · 주문 {reason}" if reason else ""))
+    return lines[:3]
+
+
+def _notify_llm_enabled() -> bool:
+    default = os.getenv("MOCK_REPORT_LLM_ENABLED", "1")
+    return os.getenv("KR_MOCK_NOTIFY_LLM_ENABLED", default).lower() not in ("0", "false", "no", "off")
+
+
+def _notify_llm_lines(nav: float | None, results: list[dict], signals_by_code: dict[str, dict],
+                      name_by_code: dict[str, str]) -> list[str]:
+    """알림 1건당 LLM 1회. 실패 시 빈 리스트 반환하고 호출부가 정량 폴백을 사용한다."""
+    if not _notify_llm_enabled() or not results:
+        return []
+    decisions = []
+    for r in results:
+        sig = signals_by_code.get(r.get("code"), {})
+        decisions.append({
+            "code": r.get("code"),
+            "name": name_by_code.get(r.get("code")) or "",
+            "side": r.get("side"),
+            "kind": r.get("kind"),
+            "qty": r.get("qty"),
+            "ok": bool(r.get("ok")),
+            "order_reason": r.get("reason"),
+            "order_msg": r.get("msg"),
+            "action": sig.get("action"),
+            "price": sig.get("price"),
+            "financial_score": sig.get("score"),
+            "policy_score": sig.get("policy_score"),
+            "rationale": sig.get("rationale") or {},
+            "features": sig.get("features") or {},
+        })
+    payload = {
+        "market": "KR",
+        "nav": nav,
+        "recent_decisions": decisions[:5],
+        "instruction": "최근 모의 편입/퇴출의 판단근거만 2~3줄로 설명. 입력에 없는 전망·뉴스·숫자는 금지.",
+    }
+    try:
+        from lib import mock_llm_rationale
+        result, status = mock_llm_rationale.run(payload)
+        if status != "ok" or not result:
+            logger.info("KR 모의 알림 LLM 근거 생략: %s", status)
+            return []
+        notes = []
+        if result.get("summary"):
+            notes.append(result["summary"])
+        notes.extend(result.get("decision_notes") or [])
+        notes.extend(result.get("risk_checks") or [])
+        notes = [n for n in notes if n][:3]
+        if not notes:
+            return []
+        return ["     🧠 판단근거:"] + [f"     - {n}" for n in notes]
+    except Exception as e:
+        logger.info("KR 모의 알림 LLM 근거 실패: %s", e)
+        return []
+
+
+def _notify(nav: float | None, results: list[dict], signals: list[dict]) -> None:
+    signals_by_code = {s.get("code"): s for s in signals if s.get("code")}
+    name_by_code = {}
+    for s in signals:
+        code = s.get("code")
+        if code:
+            name_by_code[code] = _company_name_for_code(code, s.get("ticker"))
+    for r in results:
+        code = r.get("code")
+        if code and code not in name_by_code:
+            name_by_code[code] = _company_name_for_code(code)
+    reason_by_code = {s["code"]: (s.get("rationale") or {}).get("one_line_reason", "")
+                      for s in signals if s.get("code")}
 
     lines = ["🧪 [모의] 국내 페이퍼트레이딩", "━━━━━━━━━━━━━━━━━━━━━━━"]
     if nav is not None:
@@ -414,19 +556,25 @@ def _notify(nav: float | None, results: list[dict], signals: list[dict]) -> None
         failed = [r for r in results if not r.get("ok")]
         if not results:
             lines.append("  주문 없음 (목표 = 현 보유)")
+        llm_lines = _notify_llm_lines(nav, results, signals_by_code, name_by_code)
         for r in results:
             nm = name_by_code.get(r["code"], "")
+            label = f"{r['code']} {nm}".strip()
             mark = "✅" if r.get("ok") else "❌"
             kind = r.get("kind", "매수" if r["side"] == "buy" else "매도")
             icon = _KIND_ICON.get(kind, "")
-            lines.append(f"  {mark} {icon}{kind} {r['code']} {nm} {r['qty']}주")
+            lines.append(f"  {mark} {icon}{kind} {label} {r['qty']}주")
             # 편입/퇴출은 사유(one_line_reason) 병기
             if kind in ("편입", "퇴출"):
                 rr = reason_by_code.get(r["code"], "")
                 if rr:
                     lines.append(f"     사유: {rr}")
+                if not llm_lines:
+                    lines.extend(_decision_detail_lines(signals_by_code.get(r["code"]), r))
             if not r.get("ok") and r.get("msg"):
                 lines.append(f"     ↳ {r['msg']}")
+        if llm_lines:
+            lines.extend(llm_lines)
         lines.append("━━━━━━━━━━━━━━━━━━━━━━━")
         lines.append(f"  집행 {len(placed)} · 실패 {len(failed)}")
     lines.append("  ⚠️ 모의투자 — 실거래 아님")
