@@ -88,9 +88,9 @@ _TF_SPAN = {"5m": "최근 60일", "1h": "최근 2년"}   # yfinance 인트라데
 _MA_OPTS = [5, 10, 20, 60, 120, 200]
 _MA_DEFAULT = {"1d": [60, 120, 200], "1wk": [60, 120, 200],   # 요청 기본값
                "1mo": [5, 10, 20, 60, 120, 200], "5m": [20, 60], "1h": [20, 60]}
-_TOP_INDS = ["이동평균선", "지수이평(EMA)", "볼린저 밴드", "일목균형표", "슈퍼트렌드",
-             "엔벨로프", "파라볼릭 SAR", "프라이스 채널", "매물대", "프랙탈",
-             "VWAP(세션)", "앵커드 VWAP", "자동 추세선"]
+_TOP_INDS = ["이동평균선", "자동 추세선·채널", "지수이평(EMA)", "볼린저 밴드", "일목균형표",
+             "슈퍼트렌드", "엔벨로프", "파라볼릭 SAR", "프라이스 채널", "매물대", "프랙탈",
+             "VWAP(세션)", "앵커드 VWAP"]
 
 
 def _price_chart(ticker, hist, avg_cost, trades):
@@ -161,12 +161,14 @@ def _price_chart(ticker, hist, avg_cost, trades):
         if "앵커드 VWAP" in top:
             st.caption("ℹ️ 앵커드 VWAP 앵커 = 기간(라디오) 시작 · 팬 시 고정")
         want_lines = want_short = want_long = False
-        if "자동 추세선" in top:
+        if "자동 추세선·채널" in top:
             want_lines = True
             cch1, cch2 = st.columns(2)
             # 채널 기본 ON — pill 선택 즉시 지지/저항선 + 상승/하락 채널까지 그려짐
             want_short = cch1.checkbox("단기 채널(60봉)", value=True, key=f"_tl_short_{tf}")
             want_long = cch2.checkbox("장기 채널(250봉)", value=True, key=f"_tl_long_{tf}")
+            st.caption("채널 = 회귀 ±2σ 자동 감지 — 상승(초록)/하락(빨강)/횡보(회색)·"
+                       "라벨에 방향 표기 · 지지/저항선 동시 표시")
         st.markdown("**하단 지표** — 서브 패널")
         bottom = st.pills("하단 지표", ["거래량", "RSI"], selection_mode="multi",
                           default=["거래량", "RSI"], key=f"_bot_{tf}",
