@@ -299,3 +299,21 @@ def f_pct_s(x, dec: int = 1) -> str:
 def f_usd(x, dec: int = 2) -> str:
     f = _try_float(x)
     return "—" if f is None else f"${f:,.{dec}f}"
+
+
+def fair_value_multiple(price, per, fper) -> dict | None:
+    """멀티플 유지 적정가 — 포워드 EPS × 현재 PER (= 현재가 × PER/fPER).
+
+    "이익이 컨센서스대로 성장하고 시장이 현재 멀티플을 유지하면"의 가격.
+    PER > fPER(이익 성장)만큼 상방 — 멀티플 re-rating 은 가정하지 않는 보수형.
+    PER·fPER 유효(>0)일 때만, 극단 배율(10x 초과)은 데이터 오류로 보고 제외.
+    """
+    p, t, f = _try_float(price), _try_float(per), _try_float(fper)
+    if not p or not t or not f or p <= 0 or t <= 0 or f <= 0:
+        return None
+    ratio = t / f
+    if ratio > 10 or ratio < 0.1:
+        return None
+    fair = p * ratio
+    return {"fair": fair, "upside_pct": (ratio - 1.0) * 100.0,
+            "eps_fwd": p / f, "per": t, "fper": f}

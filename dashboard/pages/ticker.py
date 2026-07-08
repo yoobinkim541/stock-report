@@ -86,10 +86,11 @@ def _price_chart(ticker, hist, avg_cost, trades):
     event = None
     try:
         event = st.plotly_chart(
-            fig, width="stretch", config=_NOBAR, key=f"price_chart_{ticker}_{kind}",
+            fig, width="stretch", config=charts.PAN_CFG, key=f"price_chart_{ticker}_{kind}",
             on_select="rerun", selection_mode="points")
     except TypeError:
-        st.plotly_chart(fig, width="stretch", config=_NOBAR)
+        st.plotly_chart(fig, width="stretch", config=charts.PAN_CFG)
+    st.caption(charts.PAN_HINT)
     selected = _selected_trade(event, trades or [])
     if selected:
         _trade_detail(selected)
@@ -382,6 +383,22 @@ def _valuation(ticker, price=None):
             f"애널 {int(c.get('n_analysts') or 0)}명 · "
             f"리비전 모멘텀 {data.f_ratio(c.get('revision_momentum'), 2)} "
             f"(▲{int(c.get('eps_rev_up_30d') or 0)}/▼{int(c.get('eps_rev_down_30d') or 0)})")
+    # 💰 멀티플 적정가 — 포워드 EPS × 현재 PER (= 현재가 × PER/fPER). 사용자 채택 방식(1순위).
+    fv = data.fair_value_multiple(price, m.get("per"), m.get("forward_pe"))
+    if fv:
+        _fmt_px = _f_krw if is_kr else (lambda x: data.f_usd(x, 2))
+        fc = st.columns(3)
+        fc[0].metric("💰 적정가 (EPS×PER)", _fmt_px(fv["fair"]),
+                     delta=f"{fv['upside_pct']:+.1f}% vs 현재가",
+                     help="포워드 EPS × 현재 PER = 현재가 × (PER/fPER). "
+                          "이익이 컨센서스대로 성장하고 멀티플이 유지될 때의 가격 — "
+                          "re-rating 은 가정하지 않는 보수형.")
+        fc[1].metric("포워드 EPS (내재)", _fmt_px(fv["eps_fwd"]),
+                     help="현재가 ÷ fPER — 컨센서스 이익 기준")
+        fc[2].metric("PER → fPER", f"{fv['per']:.1f} → {fv['fper']:.1f}",
+                     help="PER > fPER = 이익 성장 예상 (그 폭이 곧 상방)")
+        st.caption("⚠️ fPER 는 애널리스트 컨센서스 — 리비전에 따라 흔들림 · 멀티플 유지는 가정")
+
     iv = cached.intrinsic(ticker)
     rim, ddm = iv.get("rim"), iv.get("ddm")
     if rim or ddm:

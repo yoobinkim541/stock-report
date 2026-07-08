@@ -24,6 +24,20 @@ def _t(fig):
     return theme.apply_plotly_theme(fig)
 
 
+# 가격 차트 인터랙션 config — 드래그=이동(pan)·휠=확대/축소·더블클릭=원위치.
+# select/lasso 는 마커 클릭(on_select) 과 간섭하므로 제거. 페이지들이 공용(단일 진실원).
+PAN_CFG = {"scrollZoom": True, "displayModeBar": True, "displaylogo": False,
+           "modeBarButtonsToRemove": ["select2d", "lasso2d"]}
+PAN_HINT = "🖱️ 드래그=이동 · 휠=확대/축소 · 더블클릭=원위치 · 하단 미니차트 드래그=과거 구간"
+
+
+def _pannable(fig, *, rangeslider: bool = True, height: int = 360):
+    """가격 차트 공통 내비게이션 — pan 드래그 + 하단 레인지슬라이더(과거 탐색)."""
+    fig.update_layout(dragmode="pan", height=height,
+                      xaxis=dict(rangeslider=dict(visible=rangeslider, thickness=0.08)))
+    return fig
+
+
 def _trade_price(hist, trade: dict):
     price = trade.get("price")
     try:
@@ -132,9 +146,9 @@ def price_line(hist, ticker: str = "", avg_cost=None, trades=None):
                       annotation_text=f"평단 ${avg_cost:,.2f}", annotation_position="top left",
                       annotation_font=dict(color=theme.MUTED, size=11))
     _add_trade_markers(fig, hist, trades or [])
-    fig.update_layout(margin=dict(t=10, b=10, l=10, r=10), height=320,
+    fig.update_layout(margin=dict(t=10, b=10, l=10, r=10),
                       legend=dict(orientation="h", y=1.1), hovermode="x unified")
-    return _t(fig)
+    return _pannable(_t(fig))
 
 
 def price_candle(hist, ticker: str = "", avg_cost=None, trades=None):
@@ -158,11 +172,10 @@ def price_candle(hist, ticker: str = "", avg_cost=None, trades=None):
                       annotation_text=f"평단 ${avg_cost:,.2f}", annotation_position="top left",
                       annotation_font=dict(color=theme.MUTED, size=11))
     _add_trade_markers(fig, hist, trades or [])
-    fig.update_layout(margin=dict(t=10, b=10, l=10, r=10), height=320,
+    fig.update_layout(margin=dict(t=10, b=10, l=10, r=10),
                       legend=dict(orientation="h", y=1.1),
-                      hovermode="x unified",
-                      xaxis_rangeslider_visible=False)
-    return _t(fig)
+                      hovermode="x unified")
+    return _pannable(_t(fig))
 
 
 def market_treemap(rows: list[dict], height: int = 560):
@@ -358,7 +371,6 @@ def intraday_candle(hist, ticker: str = "", trades=None, vwap=None,
                           annotation_text=lv.get("label", ""), annotation_position="right",
                           annotation_font=dict(size=10, color=lv.get("color", theme.MUTED)))
     _add_trade_markers(fig, hist, trades or [])
-    fig.update_layout(margin=dict(t=10, b=10, l=10, r=10), height=360,
-                      legend=dict(orientation="h", y=1.1), hovermode="x unified",
-                      xaxis_rangeslider_visible=False)
-    return _t(fig)
+    fig.update_layout(margin=dict(t=10, b=10, l=10, r=10),
+                      legend=dict(orientation="h", y=1.1), hovermode="x unified")
+    return _pannable(_t(fig), height=400)

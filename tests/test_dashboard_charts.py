@@ -128,7 +128,7 @@ def test_price_candle_ohlc_and_ma():
     assert any(isinstance(tr, go.Candlestick) for tr in fig.data), "Candlestick trace 없음"
     names = [tr.name for tr in fig.data]
     assert "MA20" in names and "MA60" in names
-    assert fig.layout.xaxis.rangeslider.visible is False        # 레인지슬라이더 off
+    assert fig.layout.xaxis.rangeslider.visible is True         # 과거 탐색 레인지슬라이더 (내비 개편)
 
 
 def test_price_candle_avg_cost_hline():
@@ -288,3 +288,18 @@ def test_intraday_candle_empty_graceful():
     import pandas as pd
     assert _is_fig(charts.intraday_candle(pd.DataFrame()))
     assert len(charts.intraday_candle(pd.DataFrame()).data) == 0
+
+
+def test_price_charts_pannable_navigation():
+    """가격 차트 3종 — pan 드래그 + 레인지슬라이더(과거 탐색) 계약."""
+    import pandas as pd
+    idx = pd.date_range("2026-01-01", periods=30, freq="D")
+    hist = pd.DataFrame({"Open": [100.0] * 30, "High": [101.0] * 30,
+                         "Low": [99.0] * 30, "Close": [100.5] * 30,
+                         "Volume": [10.0] * 30}, index=idx)
+    for fig in (charts.price_line(hist, "T"), charts.price_candle(hist, "T"),
+                charts.intraday_candle(hist, "T")):
+        assert fig.layout.dragmode == "pan"
+        assert fig.layout.xaxis.rangeslider.visible is True
+    assert charts.PAN_CFG["scrollZoom"] is True           # 휠 확대/축소
+    assert "select2d" in charts.PAN_CFG["modeBarButtonsToRemove"]  # 마커 클릭과 간섭 제거
