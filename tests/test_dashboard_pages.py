@@ -546,3 +546,20 @@ def test_reconnect_watchdog_html_contract():
     assert "/_stcore/health" in h and "2500" in h
     assert "window.parent.location.reload" in h
     assert "down = true" in h                       # 실패 → 회복 전이만 리로드
+
+
+def test_chart_full_page():
+    """차트 풀뷰 — 동일 컨트롤(_price_chart 공용)·840 높이·복귀 버튼 (무예외)."""
+    script = _STUBS + '''
+st.session_state["ticker"] = "MSFT"
+cached.realtime_quote = lambda t: None
+from dashboard.pages import chart_full
+chart_full.render()
+'''
+    at = AppTest.from_string(script, default_timeout=30)
+    at.run()
+    assert not at.exception, at.exception
+    labels = " ".join(str(b.label) for b in at.button)
+    assert "↙" in labels                              # 복귀 버튼
+    body = " ".join(str(getattr(m, "value", "")) for m in at.markdown)
+    assert "Microsoft" in body or "MSFT" in body      # 히어로 라벨

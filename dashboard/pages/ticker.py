@@ -97,13 +97,24 @@ _TOP_INDS = ["이동평균선", "자동 추세선·채널", "지수이평(EMA)",
              "VWAP(세션)", "앵커드 VWAP"]
 
 
-def _price_chart(ticker, hist, avg_cost, trades):
-    """가격 차트 — 봉 단위(5분~월)·기간·라인/캔들·기술적 분석 도구(MA 세트·RSI·BB·일목)."""
+def _price_chart(ticker, hist, avg_cost, trades, fullscreen: bool = False):
+    """가격 차트 — 봉·기간·라인/캔들·지표·비교 컨트롤 (풀뷰 페이지와 공용 컴포넌트).
+
+    fullscreen=True 면 차트 풀뷰 페이지 모드 — 높이 확대·⛶ 는 복귀 버튼.
+    """
     # 컨트롤 한 줄 — 봉 | 라인/캔들 | 지표 | 비교 | 기간 | ⛶ (좁은 화면은 자동 줄바꿈)
     ctf, ckind, c3, c4, cper, cfull = st.columns([1.45, 0.72, 0.34, 0.34, 1.4, 0.35],
                                                  vertical_alignment="center")
-    full = cfull.toggle("⛶", key="_chart_full",
-                        help="풀사이즈 차트 — 세로 크게 보기 (다시 끄면 기본 크기)")
+    if fullscreen:
+        if cfull.button("↙", key="_chart_back", help="종목 분석으로 복귀"):
+            pg = st.session_state.get("_ticker_page")
+            if pg:
+                st.switch_page(pg)
+    else:
+        if cfull.button("⛶", key="_chart_fullbtn", help="전체화면 풀차트 — 모든 컨트롤 그대로"):
+            pg = st.session_state.get("_chart_page")
+            if pg:
+                st.switch_page(pg)
     tf_label = ctf.segmented_control("봉", list(_TF), default="1일",
                                      label_visibility="collapsed", key="_chart_tf") or "1일"
     kind = ckind.segmented_control("차트 종류", ["📈 라인", "🕯️ 캔들"], default="📈 라인",
@@ -237,8 +248,8 @@ def _price_chart(ticker, hist, avg_cost, trades):
         emas=emas, psar="파라볼릭 SAR" in top, donchian_on="프라이스 채널" in top,
         vwap=("VWAP(세션)" in top and tf in ("5m", "1h")), avwap="앵커드 VWAP" in top,
         compare=compare)
-    if full:                                        # ⛶ 풀사이즈 — 뷰포트 거의 채우는 높이
-        fig.update_layout(height=820)
+    if fullscreen:                                  # ⛶ 풀뷰 — 뷰포트 거의 채우는 높이
+        fig.update_layout(height=840)
     event = None
     if legacy:
         try:
