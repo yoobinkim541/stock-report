@@ -206,3 +206,8 @@ def tr_pr(t, years=5):
 @st.cache_data(ttl=_TTL_HEAVY, show_spinner="동종 ETF 비교 중…")
 def etf_peers(t):
     return views.etf_peer_compare(t)
+
+
+@st.cache_data(ttl=300, show_spinner="모으기 계획 계산 중…")
+def accumulation():
+    return views.accumulation_plan()

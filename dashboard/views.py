@@ -1061,3 +1061,12 @@ def etf_peer_compare(ticker: str) -> dict:
         return etf_compare.peer_report(ticker)
     except Exception:
         return {}
+
+
+def accumulation_plan() -> dict:
+    """주식 모으기(소수점 DCA) 계획 — bot.order_generator.build() (graceful {})."""
+    try:
+        from bot import order_generator
+        return order_generator.build() or {}
+    except Exception:
+        return {}

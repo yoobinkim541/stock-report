@@ -88,6 +88,11 @@ with st.sidebar:
                      help="계좌 현황·NAV 곡선·판단근거 원장"):
             st.session_state["_nav_to_paper"] = True   # 페이지 객체 생성 후 switch (아래)
 
+    # 💰 주식 모으기 레일 (소수점 DCA 통합 관리 — 계획·기록·비중 편집 다이얼로그)
+    from dashboard import accumulate as _accum
+    st.markdown("<div style='height:8px'></div>", unsafe_allow_html=True)
+    _accum.sidebar_rail()
+
 from dashboard.pages import home, market, paper, portfolio, research
 from dashboard.pages import ticker as ticker_pg
 
