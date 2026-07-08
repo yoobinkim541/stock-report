@@ -203,16 +203,33 @@ def _live_top(ticker, hist, yf_price, prev, pos):
 
 
 
-@st.fragment(run_every=4)
+@st.fragment(run_every=1.5)
 def _orderbook_section(ticker, hist, prev):
-    """실시간 호가 — 차트 아래 접이식(기본 접힘·화면 점유 최소화), 4초 자동갱신.
+    """실시간 호가 — 차트 아래 접이식, 1.5초 자동갱신.
 
-    호가 원천: WS 실시간 캐시(워치리스트 = 1초 스트림) 우선 → REST 폴백 (views.realtime_quote).
+    WS 실시간 캐시(1초 스트림) **직독**(st.cache 우회 — 로컬 파일 읽기라 저렴) → REST 폴백.
+    조회 종목은 viewer_interest 기록 → kis_stream 이 ~1.5분 내 스트림에 자동 편입(잔여 슬롯).
     """
-    rq = cached.realtime_quote(ticker)
+    from lib import viewer_interest
+    from providers.intraday_bars import base_symbol
+    sym = base_symbol(ticker)
+    viewer_interest.record(sym)                    # 보는 종목 → 실시간 구독 승격
+    rq = None
+    try:
+        from providers import realtime_quotes
+        ob = realtime_quotes.get_orderbook(sym, max_age_s=15)
+        if ob and (ob.get("bids") or ob.get("asks")):
+            rq = {"price": realtime_quotes.get_price(sym),
+                  "bids": ob.get("bids") or [], "asks": ob.get("asks") or [],
+                  "source": "kis_ws"}
+    except Exception:
+        rq = None
+    if rq is None:
+        rq = cached.realtime_quote(ticker)         # REST 폴백 (비구독 종목 — 수 초 지연)
     if not rq or not (rq.get("bids") or rq.get("asks")):
         return                                     # 호가 없음(US/장외) — 섹션 자체 생략
-    with st.expander("📊 실시간 호가 (10단계) — 등락% = 전일 종가 기준·상승 🔴/하락 🔵",
+    live = "⚡스트림" if rq.get("source") == "kis_ws" else "REST 지연 — 스트림 편입 중(~1.5분)"
+    with st.expander(f"📊 실시간 호가 (10단계 · {live}) — 상승 🔴/하락 🔵",
                      expanded=False):
         _orderbook(rq, hist, prev, rq.get("price"))
 
