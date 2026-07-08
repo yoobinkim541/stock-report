@@ -152,3 +152,24 @@ def run_once(*, now_et=None, get_close=None, get_fx=None, record=None) -> dict:
         except Exception as e:
             out["errors"].append(f"{t}: {e}")
     return out
+
+
+def update_plan(ticker: str, *, amount: float | None = None, freq: str | None = None,
+                currency: str | None = None) -> bool:
+    """기존 플랜 필드만 수정 — last_run·enabled **보존** (upsert 와 달리 재트리거 없음)."""
+    t = str(ticker).upper()
+    plans = load_plans()
+    hit = False
+    for p in plans:
+        if p.get("ticker") != t:
+            continue
+        if amount is not None and amount > 0:
+            p["amount"] = float(amount)
+        if freq in ("매일", "매주", "매월"):
+            p["freq"] = freq
+        if currency in ("KRW", "USD"):
+            p["currency"] = currency
+        hit = True
+    if hit:
+        save_plans(plans)
+    return hit

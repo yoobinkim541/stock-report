@@ -82,3 +82,40 @@ def test_run_once_holiday_skip():
                       get_fx=lambda: 1400.0, record=lambda *a: "ok")
     assert not res["recorded"] and any("휴장" in s for s in res["skipped"])
     assert ac.plan_for("NVDA")["last_run"] is None                    # 미마킹
+
+
+def test_update_plan_preserves_state():
+    """편집(update_plan) — 금액·주기만 바뀌고 last_run·enabled 보존 (재트리거 없음)."""
+    ac.upsert_plan("NVDA", 5000, "KRW", "매일")
+    ac.mark_run("NVDA", date(2026, 7, 8))
+    ac.set_enabled("NVDA", False)
+    assert ac.update_plan("NVDA", amount=14_000, freq="매주")
+    p = ac.plan_for("NVDA")
+    assert p["amount"] == 14_000 and p["freq"] == "매주"
+    assert p["last_run"] == "2026-07-08" and p["enabled"] is False   # 보존
+    assert not ac.update_plan("NOPE", amount=1)
+    ac.update_plan("NVDA", amount=0, freq="격주")                     # 무효값 무시
+    p2 = ac.plan_for("NVDA")
+    assert p2["amount"] == 14_000 and p2["freq"] == "매주"
+
+
+def test_sidebar_rail_shows_plans():
+    """사이드바 레일 — 자동 플랜 목록(종목·주기·금액) 노출 (AppTest·store 격리)."""
+    import pytest as _pytest
+    _pytest.importorskip("streamlit")
+    from streamlit.testing.v1 import AppTest
+    ac.upsert_plan("NVDA", 14_000, "KRW", "매일")
+    ac.upsert_plan("MSFT", 10.0, "USD", "매주")
+    script = f'''
+import sys
+sys.path.insert(0, {ROOT!r})
+from dashboard import cached, accumulate
+cached.accumulation = lambda: {{}}
+accumulate.sidebar_rail()
+'''
+    at = AppTest.from_string(script, default_timeout=15)
+    at.run()
+    assert not at.exception, at.exception
+    body = " ".join(str(getattr(m, "value", "")) for m in at.markdown)
+    assert "자동 모으기" in body and "NVDA" in body and "₩14,000" in body
+    assert "매주 $10.00" in body
