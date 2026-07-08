@@ -803,3 +803,19 @@ def test_aggregate_index_valuation():
     assert v["peg"] == pytest.approx(26.67 / 25.0, abs=0.01)
     assert v["cov_trailing_pct"] == pytest.approx(4000 / 4500 * 100, abs=0.1)
     assert aggregate_index_valuation([]) == {}
+
+
+def test_multpl_parsers():
+    """multpl 파서 — 현재값·월별 테이블(abbr/&#x2002; 스킵)·역사 백분위 (순수)."""
+    from providers.market_valuation import (hist_percentile, parse_multpl_current,
+                                            parse_multpl_table)
+    cur_html = '<div id="current"><b>Current<span>S&P 500 PE</span>:</b>\n32.28\n</div>'
+    assert parse_multpl_current(cur_html) == 32.28
+    assert parse_multpl_current("<html></html>") is None
+    tbl = ('<tr><td>Jun 1, 2026</td>\n<td>\n<abbr title="Estimate">†</abbr>\n31.93\n</td>'
+           '<tr><td>Dec 1, 2024</td>\n<td>\n&#x2002;\n28.60\n</td>'
+           '<tr><td>Mar 1, 1871</td>\n<td>\n&#x2002;\n11.52\n</td>')
+    rows = parse_multpl_table(tbl)
+    assert [v for _, v in rows] == [31.93, 28.60, 11.52]
+    assert hist_percentile([10, 20, 30, 40], 32.28) == 75.0
+    assert hist_percentile([], 30) is None

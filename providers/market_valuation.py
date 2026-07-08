@@ -1,4 +1,8 @@
-"""providers/market_valuation.py — S&P500 지수 레벨 밸류에이션 (상향 집계).
+"""providers/market_valuation.py — S&P500 지수 레벨 밸류에이션 (하이브리드).
+
+PER 헤드라인 = **multpl.com** (S&P 보고이익 GAAP 기준·1871~ 월별 → 역사 백분위 맥락)
++ fPER·EPS 성장·PEG = 상위 100 시총가중 상향 집계 (multpl 에 forward 계열이 없음).
+두 PER 은 이익 정의가 달라(보고 vs yfinance trailing) 수치가 다름 — 출처 병기.
 
 지수 자체(^GSPC)와 SPY 는 forward PE 를 안 주므로, 시총 상위 구성종목의
 trailing/forward PE 를 **시총가중 조화평균**으로 집계한다:
@@ -57,6 +61,65 @@ def aggregate_index_valuation(rows: list[dict]) -> dict:
     }
 
 
+
+
+# ── multpl.com — 보고이익 기준 PER + 역사 백분위 (순수 파서 + graceful fetch) ──
+import re as _re
+
+_MULTPL_URL = "https://www.multpl.com/s-p-500-pe-ratio"
+
+
+def parse_multpl_current(html: str):
+    """div#current 블록의 현재 PER (순수). 실패 None."""
+    m = _re.search(r'id="current".*?</b>\s*([\d.]+)', html, _re.S)
+    try:
+        return float(m.group(1)) if m else None
+    except (TypeError, ValueError):
+        return None
+
+
+def parse_multpl_table(html: str) -> list:
+    """월별 테이블 → [(date_str, value)] 최신순 (순수)."""
+    out = []
+    # 값 셀 앞에 <abbr>†</abbr>(추정치)·&#x2002;(공백 엔티티) 등이 끼어듦 — 모두 건너뜀
+    for m in _re.finditer(r"<td>([A-Z][a-z]{2} \d+, \d{4})</td>\s*<td>\s*"
+                          r"(?:(?:<[^>]+>[^<]*</[^>]+>|&#x[0-9a-fA-F]+;)\s*)*([\d.]+)",
+                          html):
+        try:
+            out.append((m.group(1), float(m.group(2))))
+        except ValueError:
+            continue
+    return out
+
+
+def hist_percentile(values: list, current: float):
+    """현재값의 역사 백분위 (0~100 · 값 이하 비율). 순수."""
+    vals = [v for v in values if isinstance(v, (int, float))]
+    if not vals or current is None:
+        return None
+    return round(sum(1 for v in vals if v <= current) / len(vals) * 100, 1)
+
+
+def fetch_multpl_pe() -> dict:
+    """multpl 현재 PER + 역사 백분위(전체·최근 20년). 실패 {} (graceful)."""
+    try:
+        import requests
+        ua = {"User-Agent": "Mozilla/5.0"}
+        cur = parse_multpl_current(
+            requests.get(_MULTPL_URL, headers=ua, timeout=15).text)
+        if cur is None:
+            return {}
+        rows = parse_multpl_table(
+            requests.get(_MULTPL_URL + "/table/by-month", headers=ua, timeout=15).text)
+        vals = [v for _, v in rows]
+        return {"per_reported": cur,
+                "per_pctile_all": hist_percentile(vals, cur),
+                "per_pctile_20y": hist_percentile(vals[:240], cur),
+                "hist_n": len(vals)}
+    except Exception:
+        return {}
+
+
 def _fetch_rows(top_n: int = TOP_N) -> list[dict]:
     import yfinance as yf
     from sp500_meta import MARKET_CAP
@@ -78,11 +141,17 @@ def sp500_valuation(top_n: int = TOP_N) -> dict:
     """지수 밸류 집계 — 12h 디스크 캐시. 실패/재료 부족 {} (graceful)."""
     try:
         if CACHE.exists() and time.time() - CACHE.stat().st_mtime < CACHE_TTL_S:
-            return json.loads(CACHE.read_text())
+            cached = json.loads(CACHE.read_text())
+            if "per_reported" not in cached:            # 구 캐시 self-heal — multpl 만 보강
+                cached.update(fetch_multpl_pe())
+                if "per_reported" in cached:
+                    CACHE.write_text(json.dumps(cached, ensure_ascii=False))
+            return cached
     except Exception:
         pass
     try:
         out = aggregate_index_valuation(_fetch_rows(top_n))
+        out.update(fetch_multpl_pe())
         if out:
             out["asof"] = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
             CACHE.parent.mkdir(parents=True, exist_ok=True)

@@ -121,9 +121,15 @@ def _market_bar():
     v = cached.sp500_valuation()
     if v:
         b = st.columns(4)
-        b[0].metric("S&P500 PER", data.f_ratio(v.get("per"), 1),
-                    help=f"시총가중 조화평균 — 상위 {v.get('n', 0)}종목"
-                         f"(지수 시총 {v.get('cov_trailing_pct', 0):.0f}%) 집계")
+        _pe_head = v.get("per_reported") or v.get("per")
+        _pct = v.get("per_pctile_all")
+        _pct20 = v.get("per_pctile_20y")
+        b[0].metric("S&P500 PER", data.f_ratio(_pe_head, 1),
+                    delta=(f"1871~ {_pct:.0f}%ile · 20y {_pct20:.0f}%ile"
+                           if _pct is not None else None), delta_color="off",
+                    help=f"multpl.com 보고이익(GAAP) 기준 — 월별 {v.get('hist_n', 0)}개월 "
+                         f"역사 대비 백분위 · 자체 집계(상위 {v.get('n', 0)}종목 시총가중) "
+                         f"PER {data.f_ratio(v.get('per'), 1)} 병행")
         b[1].metric("fPER", data.f_ratio(v.get("fper"), 1),
                     help="Forward EPS 컨센서스 기준 — 리비전 민감")
         b[2].metric("EPS 성장률", f"{v['eps_growth_pct']:+.1f}%"
