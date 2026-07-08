@@ -101,7 +101,8 @@ def _arc(cx, cy, r, a0, a1):
 
 
 def rating_gauge_html(score, verdict="", sub="", *, title="",
-                      end_labels=("약세", "강세"), zones=None) -> str:
+                      end_labels=("약세", "강세"), zones=None,
+                      boxed: bool = True) -> str:
     """반원 속도계 게이지 (score∈[-1,1]: -1 강력매도 ↔ +1 강력매수).
 
     5존을 **상단 반원**(좌 약세→우 강세)에 개별 원호로 타일 + 니들(score→각도) + 허브.
@@ -127,7 +128,8 @@ def rating_gauge_html(score, verdict="", sub="", *, title="",
     ly = cy + 16
     head = (f'<div style="color:{MUTED};font-size:0.78rem;text-align:center;'
             f'margin-bottom:-4px">{title}</div>' if title else '')
-    return f'''<div class="tn-gauge" style="max-width:220px;margin:0 auto">
+    box = ("tn-gauge" if boxed else "")
+    return f'''<div class="{box}" style="max-width:220px;margin:0 auto;text-align:center">
   {head}
   <svg viewBox="0 0 200 126" width="100%" preserveAspectRatio="xMidYMid meet">
     {arcs}
@@ -223,7 +225,7 @@ def fng_gauge_html(score, prev_week=None) -> str:
         return ""
     col, lab = fng_label(s)
     trend = f' · 전주 {prev_week:.0f} {"▲" if s >= prev_week else "▼"}' if isinstance(prev_week, (int, float)) else ""
-    return f'''<div style="padding:8px 12px;background:{PANEL};border:1px solid {BORDER};border-radius:10px">
+    return f'''<div style="padding:8px 12px;background:{PANEL};border:1px solid {BORDER};border-radius:10px;min-height:318px;display:flex;flex-direction:column;justify-content:center;">
   <div style="color:{MUTED};font-size:0.82rem;text-align:center">😱 공포·탐욕 지수</div>
   <div style="max-width:210px;margin:0 auto">{_gauge_svg(s, 0, 100, _FNG_GAUGE, big=f"{s:.0f}", big_col=col, sub=lab)}</div>
   <div style="color:{MUTED};font-size:0.72rem;text-align:center;margin-top:-2px">극공포 0 · 100 극탐욕{trend}</div>
@@ -258,7 +260,7 @@ def index_rsi_gauges_html(name, price=None, chg=None, rsi_d=None, rsi_w=None) ->
         return (f'<div style="flex:1;text-align:center"><div style="color:{MUTED};font-size:0.72rem">{lbl}</div>'
                 f'{_gauge_svg(val, 0, 100, _RSI_GAUGE, big=big, big_col=c, sub=_rsi_zone(v))}</div>')
 
-    return f'''<div style="padding:8px 12px;background:{PANEL};border:1px solid {BORDER};border-radius:10px">
+    return f'''<div style="padding:8px 12px;background:{PANEL};border:1px solid {BORDER};border-radius:10px;min-height:318px;display:flex;flex-direction:column;justify-content:center;">
   <div style="display:flex;justify-content:space-between;align-items:baseline">
     <b style="color:{TEXT}">{name}</b>
     <span style="font-family:{_MONO};color:{MUTED};font-size:0.82rem">{pxs} <span style="color:{ccol}">{chgs}</span></span></div>
@@ -801,11 +803,12 @@ def market_temp_html(score, sub: str = "", phase_line: str = "") -> str:
                 f'{BORDER};border-radius:10px;text-align:center;color:{MUTED}">'
                 f'🌡️ 시장 온도계 — 재료 부족</div>')
     inner = rating_gauge_html(score, sub=sub, title="🌡️ 시장 온도계 (역발상)",
-                              end_labels=("과열", "기회"), zones=_TEMP_ZONES)
+                              end_labels=("과열", "기회"), zones=_TEMP_ZONES,
+                              boxed=False)                      # 카드가 박스 — 이중 박스 방지
     tail = (f'<div style="color:{MUTED};font-size:0.7rem;text-align:center;'
-            f'margin-top:-2px">{phase_line}</div>' if phase_line else "")
+            f'margin-top:4px">{phase_line}</div>' if phase_line else "")
     return (f'<div style="padding:8px 12px;background:{PANEL};border:1px solid {BORDER};'
-            f'border-radius:10px">{inner}{tail}</div>')
+            f'border-radius:10px;min-height:318px;display:flex;flex-direction:column;justify-content:center;">{inner}{tail}</div>')
 
 
 def valuation_strip_html(v: dict) -> str:
