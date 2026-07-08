@@ -867,3 +867,17 @@ def test_entry_levels():
     assert lv["fair_gap_pct"] == pytest.approx(20.0)            # (117+123)/2 = 120
     assert data.entry_levels(0, [], [], []) == {}
     assert data.entry_levels(100.0, [], [], []) == {}           # 재료 전무 — 생략
+
+
+def test_twr_series_deposit_not_gain():
+    """TWR — 적립(현금 유입)이 수익으로 잡히지 않음 (단순 총액과 대비)."""
+    rec = [{"date": "2026-07-01", "total_usd": 1000.0},
+           {"date": "2026-07-02", "total_usd": 1500.0},    # +500 적립 (가격 불변)
+           {"date": "2026-07-03", "total_usd": 1650.0}]    # +10% 상승
+    flows = {"2026-07-02": 500.0}
+    tw = data.twr_series(rec, flows)
+    assert tw["twr"][1] == pytest.approx(0.0)              # 적립일 수익 0
+    assert tw["twr"][2] == pytest.approx(10.0)             # 진짜 수익만
+    assert tw["simple"][2] == pytest.approx(65.0)          # 단순 총액은 65% (왜곡)
+    assert tw["flows_total"] == 500.0
+    assert data.twr_series(rec[:1], flows) == {}

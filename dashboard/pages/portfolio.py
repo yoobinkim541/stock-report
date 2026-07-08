@@ -55,16 +55,20 @@ def _headline(hist, rows):
 
 
 def _growth_section(hist):
-    """📈 자산 성장 곡선 — 내 포트 vs QQQ (% 정규화)."""
+    """📈 자산 성장 곡선 — TWR(입출금 조정) vs QQQ."""
     g = data.growth_series(hist)
-    st.markdown("##### 📈 자산 성장 — 내 포트 vs QQQ")
+    st.markdown("##### 📈 자산 성장 — 내 포트(TWR) vs QQQ")
     if not g:
         st.caption("일별 기록 2일 이상 쌓이면 표시됩니다 (매일 23:00 UTC 크론이 적재)")
         return
-    st.plotly_chart(charts.growth_compare(g["dates"], g["port"], g["qqq"]),
+    tw = data.twr_series(hist, cached.portfolio_flows())
+    port = tw.get("twr") if tw else g["port"]
+    st.plotly_chart(charts.growth_compare(g["dates"], port, g["qqq"]),
                     width="stretch", config=_NOBAR)
-    st.caption(f"기록 {g['n_days']}일 (매일 자동 누적) · 첫 기록=0% 정규화 · "
-               "입출금 미조정(단순 총액 기준) — 참고용")
+    _ft = (tw or {}).get("flows_total") or 0.0
+    st.caption(f"기록 {g['n_days']}일 (매일 자동 누적) · **TWR = 입출금 조정 시간가중 수익률**"
+               f"(거래 기록 기반 — 적립이 수익으로 안 잡힘 · 기간 순유입 "
+               f"{data.f_usd(_ft, 0)}) · 첫 기록=0% · 참고용")
 
 
 def _risk_section():

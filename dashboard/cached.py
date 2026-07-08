@@ -246,3 +246,8 @@ def sp500_valuation():
 @st.cache_data(ttl=60, show_spinner=False)
 def screener_last():
     return views.screener_last()
+
+
+@st.cache_data(ttl=900, show_spinner=False)
+def portfolio_flows():
+    return views.portfolio_flows()

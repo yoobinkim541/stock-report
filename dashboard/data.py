@@ -775,3 +775,32 @@ def entry_levels(price, supports: list, resistances: list, fairs: list) -> dict:
             "resists": [(lab, v, _pct(v)) for lab, v in res],
             "fairs": [(lab, v, _pct(v)) for lab, v in fv],
             "fair_gap_pct": gap}
+
+
+def twr_series(records: list, flows_by_date: dict) -> dict:
+    """시간가중 수익률(TWR) — 일별 총액 + 외부 현금흐름(거래 원장) 보정 (순수).
+
+    r_t = (V_t − F_t) / V_{t−1} − 1  (F_t = 당일 순유입 — 적립 매수 +, 매도 −).
+    적립이 수익처럼 보이는 단순 총액 왜곡을 제거. 반환 {dates, twr[%], simple[%],
+    flows_total} — 레코드 <2 → {}.
+    """
+    rec = [r for r in (records or []) if _try_float(r.get("total_usd"))]
+    if len(rec) < 2:
+        return {}
+    base = float(rec[0]["total_usd"])
+    if base <= 0:
+        return {}
+    dates, twr, simple = [rec[0].get("date")], [0.0], [0.0]
+    idx, prev, flows_total = 1.0, base, 0.0
+    for r in rec[1:]:
+        v = float(r["total_usd"])
+        f = float((flows_by_date or {}).get(r.get("date"), 0.0))
+        flows_total += f
+        if prev > 0:
+            idx *= max(0.0, (v - f) / prev)
+        dates.append(r.get("date"))
+        twr.append((idx - 1) * 100)
+        simple.append((v / base - 1) * 100)
+        prev = v
+    return {"dates": dates, "twr": twr, "simple": simple,
+            "flows_total": flows_total, "n_days": len(rec)}

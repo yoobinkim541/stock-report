@@ -1201,3 +1201,27 @@ def screener_last() -> dict | None:
         return json.loads(p.read_text()) if p.exists() else None
     except Exception:
         return None
+
+
+def portfolio_flows() -> dict:
+    """일자별 외부 현금흐름(USD) — 거래 원장 합산 (적립/추가 +·축소 −). graceful {}."""
+    try:
+        from lib import trade_events as te
+        out: dict = {}
+        for r in te.all_trades():
+            if str(r.get("currency") or "USD") != "USD":
+                continue
+            src = str(r.get("source") or "")
+            if "mock" in src or "mock" in str(r.get("account") or ""):
+                continue
+            qty, px = r.get("qty"), r.get("price")
+            if not qty or not px:
+                continue
+            amt = float(qty) * float(px)
+            d = str(r.get("date") or "")[:10]
+            if not d:
+                continue
+            out[d] = out.get(d, 0.0) + (amt if r.get("side") == "buy" else -amt)
+        return out
+    except Exception:
+        return {}
