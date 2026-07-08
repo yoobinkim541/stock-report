@@ -1,8 +1,13 @@
 """홈 — 글랜스 랜딩 (포트폴리오 중심). 히어로 KPI + 배분 도넛 + 클릭 보유표 + Phase + 오늘 일정."""
 from __future__ import annotations
 
+import os
+import sys
+
 import pandas as pd
 import streamlit as st
+
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 
 import ticker_names
 from dashboard import cached, charts, data, theme

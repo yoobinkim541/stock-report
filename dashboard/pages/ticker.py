@@ -1,8 +1,13 @@
 """종목 분석 — 가격차트 + 가치평가·재무·기관/내부자·공시·실적 (plotly 차트화·U3)."""
 from __future__ import annotations
 
+import os
+import sys
+
 import pandas as pd
 import streamlit as st
+
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 
 import ticker_names
 from dashboard import cached, charts, data, theme

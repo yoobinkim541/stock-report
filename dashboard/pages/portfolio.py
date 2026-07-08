@@ -1,8 +1,13 @@
 """포트폴리오 — 리스크 시각화 + 배분 (표시 전용·배분 불변)."""
 from __future__ import annotations
 
+import os
+import sys
+
 import pandas as pd
 import streamlit as st
+
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 
 from dashboard import cached, charts, data
 
