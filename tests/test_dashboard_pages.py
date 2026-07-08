@@ -15,6 +15,23 @@ pytest.importorskip("streamlit")
 pytest.importorskip("plotly")
 from streamlit.testing.v1 import AppTest  # noqa: E402
 
+
+@pytest.fixture(scope="module", autouse=True)
+def _restore_dashboard_modules():
+    """_STUBS 가 AppTest 인프로세스로 dashboard.data/cached 모듈 속성을 직접 덮어씀 —
+    같은 pytest 세션의 후속 테스트(test_dashboard.py 등)가 가짜 보유종목을 보지 않도록
+    원본 속성을 스냅샷하고 모듈 종료 시 복원."""
+    from dashboard import cached, data
+    saved = [(mod, dict(vars(mod))) for mod in (data, cached)]
+    yield
+    for mod, snap in saved:
+        for key in list(vars(mod)):
+            if key not in snap:
+                delattr(mod, key)
+        for key, val in snap.items():
+            setattr(mod, key, val)
+
+
 _STUBS = '''
 import os, sys
 sys.path.insert(0, %r)
