@@ -56,6 +56,19 @@ def _manage_dialog():
                f"환율 {plan.get('fx', 0):,.0f}원 **(확정 종가 자동 — 하루 고정)** · "
                f"{plan.get('now', '')}")
 
+    # 💱 환전 타이밍 (아침 리포트와 동일 산식 — 원화→달러 분할 환전 가이드)
+    ft = cached.fx_timing()
+    if ft.get("ok"):
+        _c = {"🟢": theme.GREEN, "🟡": theme.AMBER, "🔴": theme.RED}.get(ft.get("emoji"), theme.MUTED)
+        st.markdown(
+            f'<div style="border-left:3px solid {_c};background:{theme.PANEL};'
+            f'border:1px solid {theme.BORDER};border-radius:8px;padding:7px 12px;'
+            f'font-size:0.84rem">💱 <b>환전 타이밍</b> {ft.get("emoji", "")} '
+            f'<b style="color:{_c}">{ft.get("verdict", "")}</b> — {ft.get("action", "")} · '
+            f'현재 {ft.get("rate", 0):,.1f}원 · 5y 위치 {ft.get("pct_display", "—")}%ile · '
+            f'분할 환전 배율 <b>{ft.get("multiplier", 1):g}×</b></div>',
+            unsafe_allow_html=True)
+
     # ── 오늘 배분 계획표 ──
     rows = plan["rows"]
     import pandas as pd

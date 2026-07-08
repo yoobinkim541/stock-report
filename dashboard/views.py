@@ -1104,3 +1104,12 @@ def fx_now() -> float | None:
         return fetch_exchange_rate()
     except Exception:
         return None
+
+
+def fx_timing() -> dict:
+    """환전 타이밍 판정 (providers.fx_timing — 아침 리포트와 동일 산식). graceful {}."""
+    try:
+        from providers.fx_timing import fetch_fx_timing
+        return fetch_fx_timing() or {}
+    except Exception:
+        return {}

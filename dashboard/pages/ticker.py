@@ -1041,6 +1041,11 @@ def _manage_position(ticker, cur_price, pos):
                                      step=1.0, format="%.1f", key="acc_fx",
                                      help="실시간 USD/KRW 자동 채움 (2분 캐시·직접 수정 가능) — "
                                           "원화 예산을 USD 매수금액으로 환산")
+                _ft = cached.fx_timing()
+                if _ft.get("ok"):
+                    st.caption(f"💱 환전 타이밍: {_ft.get('emoji', '')} {_ft.get('verdict', '')} · "
+                               f"5y 위치 {_ft.get('pct_display', '—')}%ile · "
+                               f"분할 환전 배율 {_ft.get('multiplier', 1):g}× — {_ft.get('action', '')}")
                 amount_usd = amt / fx if fx > 0 else 0.0
                 amount_label = _money_krw(amt)
             else:

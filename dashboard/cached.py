@@ -216,3 +216,8 @@ def accumulation():
 @st.cache_data(ttl=120, show_spinner=False)
 def fx_now():
     return views.fx_now()
+
+
+@st.cache_data(ttl=1800, show_spinner=False)
+def fx_timing():
+    return views.fx_timing()
