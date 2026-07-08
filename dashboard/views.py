@@ -176,7 +176,22 @@ def screener(top_n: int = 20) -> dict:
                     "top_decile": getattr(res, "oos_top_decile_ret", None),
                     "train_end": getattr(res, "train_end_date", None),
                     "importance": dict(sorted(imp.items(), key=lambda x: -x[1])[:15])}
-        return {"rows": rows, "feats": feats, "meta": meta}
+        out = {"rows": rows, "feats": feats, "meta": meta}
+        if rows:                                      # 마지막 실행 디스크 영속 (재방문 즉시 표시)
+            try:
+                import json
+                from datetime import datetime
+                out2 = dict(out)
+                out2["asof"] = datetime.now().strftime("%Y-%m-%d %H:%M KST")
+                out2["topn"] = top_n
+                pth = _screener_last_path()
+                pth.parent.mkdir(parents=True, exist_ok=True)
+                tmp = pth.with_suffix(".tmp")
+                tmp.write_text(json.dumps(out2, ensure_ascii=False))
+                tmp.replace(pth)
+            except Exception:
+                pass
+        return out
     except Exception as e:
         return {"error": str(e), "rows": [], "feats": {}, "meta": {}}
 
@@ -1161,3 +1176,21 @@ def sp500_valuation() -> dict:
         return _v() or {}
     except Exception:
         return {}
+
+
+_SCREENER_LAST = None                       # 경로 상수 (홈 기준 — 워크트리 무관)
+
+
+def _screener_last_path():
+    from pathlib import Path
+    return Path.home() / "reports" / "ml-cache" / "screener_last.json"
+
+
+def screener_last() -> dict | None:
+    """마지막 스크리너 실행 결과 (디스크 영속 — 나이 무관 표시·asof 병기). 없으면 None."""
+    try:
+        import json
+        p = _screener_last_path()
+        return json.loads(p.read_text()) if p.exists() else None
+    except Exception:
+        return None

@@ -698,3 +698,24 @@ def market_temperature(*, fear_greed=None, rsi_w=None, per_pctile_20y=None,
     return {"score": score,
             "sub": " · ".join(lab for _, _, lab in comps[:4]),
             "n": len(comps)}
+
+
+def top_feature_bars(feats: dict, importance: dict | None = None, top: int = 8) -> dict:
+    """모델 중요도 상위 피처 → 바 차트 재료 (순수).
+
+    반환 {labels: ['6개월 모멘텀 · +11.2%', ...], values: [중요도...]} — '모델이 이
+    종목에서 무엇을 보는가'를 값과 함께 시각화. 중요도 없으면 빈 dict.
+    """
+    imp = {k: float(v) for k, v in (importance or {}).items() if v}
+    if not imp or not feats:
+        return {}
+    labels, values = [], []
+    for k, w in sorted(imp.items(), key=lambda x: -x[1]):
+        if k not in feats:
+            continue
+        meta = _FEAT_META.get(k, (k, "기타", "num"))
+        labels.append(f"{meta[0]} · {_fmt_feat(feats[k], meta[2])}")
+        values.append(w)
+        if len(labels) >= top:
+            break
+    return {"labels": labels, "values": values} if labels else {}

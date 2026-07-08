@@ -45,6 +45,7 @@ cached.fx_timing = lambda: {"ok": True, "rate": 1509.8, "pct_display": 96.1,
     "emoji": "\U0001f534", "verdict": "원화 약세 구간", "multiplier": 0.3,
     "action": "환전 최소화 - 필요분만"}
 cached.etf_peers = lambda t: {}
+cached.screener_last = lambda: None
 cached.social_sentiment = lambda: {"summary": {"title": "미국 레딧 게시물 분석",
     "published_at": "2026-07-05T10:00:00+09:00", "url": "https://t.me/insidertracking/1",
     "top_tickers": ["MU", "SNDK", "NVDA"],

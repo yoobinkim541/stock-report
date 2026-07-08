@@ -39,12 +39,25 @@ def _screener_section():
     st.subheader("종목 랭킹 스크리너")
     st.caption("NASDAQ100 · LightGBM QQQ 초과수익 예측")
     topn = st.slider("상위 N", 10, 50, 20, 5, key="scr_topn")
-    run = st.button("▶ 스크리너 실행 (최대 1분)", key="scr_btn", type="primary")
-    if not (run or st.session_state.get("scr_done")):
-        st.info("버튼을 눌러 스크리너를 실행하세요 — 무거운 ML 계산이라 진입 시 자동 실행하지 않습니다.")
+    last = cached.screener_last()
+    c_run, c_info = st.columns([1, 2.2], vertical_alignment="center")
+    run = c_run.button("🔄 다시 실행 (최대 1분)" if last else "▶ 스크리너 실행 (최대 1분)",
+                       key="scr_btn", type="primary", width="stretch")
+    if run:
+        cached.screener.clear()                       # 인메모리 캐시 무시 — 진짜 재계산
+        sc = cached.screener(topn)
+        cached.screener_last.clear()
+        st.session_state["scr_done"] = True
+    elif st.session_state.get("scr_done"):
+        sc = cached.screener(topn)
+    elif last:
+        sc = last                                     # 💾 마지막 실행 결과 즉시 표시
+        c_info.caption(f"💾 마지막 실행 {last.get('asof', '—')} · 상위 "
+                       f"{last.get('topn', '?')} — 최신화는 다시 실행")
+    else:
+        st.info("버튼을 눌러 스크리너를 실행하세요 — 무거운 ML 계산이라 진입 시 자동 실행하지 않습니다. "
+                "한 번 실행하면 결과가 저장돼 다음부터 즉시 표시됩니다.")
         return
-    st.session_state["scr_done"] = True
-    sc = cached.screener(topn)
     meta = sc.get("meta") or {}
     if meta:
         from dashboard import theme
@@ -190,6 +203,13 @@ def _screener_detail(event, rows, feats, importance):
     m2[4].metric("CMF 자금흐름", data.f_ratio(cmf_val, 2) if cmf_val is not None else "—",
                  help="+ 유입 / − 유출 (매집 조회 실패 시 스크리너 피처값)")
 
+    # ── 🧠 모델이 보는 핵심 피처 — 중요도 상위 (값 병기) ──
+    tb = data.top_feature_bars(f, importance, top=8)
+    if tb:
+        st.plotly_chart(charts.hbar(tb["labels"], tb["values"],
+                                    "🧠 모델 중요도 상위 — 이 종목의 값", pct=False),
+                        width="stretch", config=_NOBAR)
+
     # ── 전체 피처 — 한글 라벨·카테고리·스마트 포맷 (중요도 순) ──
     fr = data.format_screener_features(f, importance)
     tcol, bcol = st.columns([2.1, 0.9], vertical_alignment="bottom")
@@ -208,7 +228,18 @@ def _screener_detail(event, rows, feats, importance):
         pick = st.pills("구분", cats, default="전체", selection_mode="single",
                         key=f"_scr_cat_{t}", label_visibility="collapsed") or "전체"
         show = fr if pick == "전체" else [x for x in fr if x["구분"] == pick]
-        st.dataframe(pd.DataFrame(show), hide_index=True, width="stretch",
+        from dashboard import theme as _th
+
+        def _valcolor(v):                            # 부호·플래그 시맨틱 색
+            sv = str(v)
+            if sv.startswith("+") or sv == "✓":
+                return f"color: {_th.GREEN}"
+            if sv.startswith("-"):
+                return f"color: {_th.RED}"
+            return ""
+
+        sdf = pd.DataFrame(show).style.map(_valcolor, subset=["값"])
+        st.dataframe(sdf, hide_index=True, width="stretch",
                      height=min(330, 44 + 35 * len(show)),
                      column_config={
                          "지표": st.column_config.TextColumn(width="medium"),

@@ -831,3 +831,13 @@ def test_market_temperature():
     assert cold["score"] > 0.5                        # 공포·저평가 → 기회
     assert "공포탐욕 15" in cold["sub"]
     assert data.market_temperature(fear_greed=50) is None       # 재료 1개
+
+
+def test_top_feature_bars():
+    """핵심 피처 바 — 중요도 순 라벨(한글 · 포맷값)·top 제한 (순수)."""
+    feats = {"mom_126d": 0.42, "rsi_14": 62.0, "obv": -38_800_000}
+    tb = data.top_feature_bars(feats, {"obv": 100, "mom_126d": 90, "rsi_14": 10}, top=2)
+    assert tb["labels"] == ["OBV 누적 흐름 · -38.8M", "6개월 모멘텀 · +42.0%"]
+    assert tb["values"] == [100.0, 90.0]
+    assert data.top_feature_bars(feats, {}) == {}
+    assert data.top_feature_bars({}, {"x": 1}) == {}
