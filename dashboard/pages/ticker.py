@@ -736,8 +736,12 @@ def _valuation(ticker, price=None):
                      help="Fwd EPS ÷ TTM EPS − 1 (1년 예상)")
         mm[2].metric("PEG (계산)", data.f_ratio((_pt2 or {}).get("peg")),
                      help="PER ÷ EPS 증가율 — <1 성장 대비 저평가 해석 관례")
+        _tr = (cached.financials(ticker) or {}).get("trends") or {}
+        _rchg = _tr.get("roe_chg_3y")
         mm[3].metric("ROE", data.f_frac_pct(m.get("roe")) if m.get("roe") is not None else "—",
-                     help="자기자본이익률 — 이익의 질·멀티플 정당화 근거")
+                     delta=(f"{_rchg * 100:+.1f}%p (3y)" if _rchg is not None else None),
+                     help="자기자본이익률 — 이익의 질·멀티플 정당화 근거. "
+                          "증감은 EDGAR 연간 재무 기준 최근 ~3년 변화")
         st.caption("밴드 = 멀티플 ±15% 가정 · Fwd EPS 는 컨센서스(리비전 민감) · 표시·참고용")
 
     iv = cached.intrinsic(ticker)
