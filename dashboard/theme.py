@@ -785,3 +785,57 @@ def analysis_card_html(verdict: str, positives: list, risks: list,
   </div>
   {footer}
 </div>'''
+
+
+# ── 🌡️ 시장 온도계 게이지 + 밸류 스트립 (홈 시장 지표 — 순수) ──────────────────
+_TEMP_ZONES = [
+    (RED, "과열 — 신중"), ("#ff9800", "다소 과열"), (MUTED, "중립"),
+    ("#80cbc4", "분할매수 우호"), (GREEN, "공포·기회 구간"),
+]
+
+
+def market_temp_html(score, sub: str = "", phase_line: str = "") -> str:
+    """시장 온도계 카드 — 역발상 종합(−1 과열 ↔ +1 기회). 표시·참고용."""
+    if score is None:
+        return (f'<div style="padding:10px 12px;background:{PANEL};border:1px solid '
+                f'{BORDER};border-radius:10px;text-align:center;color:{MUTED}">'
+                f'🌡️ 시장 온도계 — 재료 부족</div>')
+    inner = rating_gauge_html(score, sub=sub, title="🌡️ 시장 온도계 (역발상)",
+                              end_labels=("과열", "기회"), zones=_TEMP_ZONES)
+    tail = (f'<div style="color:{MUTED};font-size:0.7rem;text-align:center;'
+            f'margin-top:-2px">{phase_line}</div>' if phase_line else "")
+    return (f'<div style="padding:8px 12px;background:{PANEL};border:1px solid {BORDER};'
+            f'border-radius:10px">{inner}{tail}</div>')
+
+
+def valuation_strip_html(v: dict) -> str:
+    """S&P500 밸류 스트립 — PER(역사 백분위 칩)·fPER·EPS 성장·PEG 단일 패널 (순수)."""
+    if not v:
+        return ""
+    per = v.get("per_reported") or v.get("per")
+    pct, pct20 = v.get("per_pctile_all"), v.get("per_pctile_20y")
+    g = v.get("eps_growth_pct")
+    peg = v.get("peg")
+
+    def cell(label, val, extra="", col=TEXT):
+        return (f'<div style="flex:1;min-width:150px;padding:4px 10px">'
+                f'<div style="color:{MUTED};font-size:0.72rem">{label}</div>'
+                f'<div style="font-size:1.35rem;font-weight:700;color:{col};'
+                f'font-family:{_MONO}">{val}</div>{extra}</div>')
+
+    chip = ""
+    if pct is not None:
+        c = RED if pct >= 90 else AMBER if pct >= 70 else MUTED
+        chip = (f'<span style="display:inline-block;margin-top:3px;padding:2px 9px;'
+                f'border:1px solid {c}44;border-radius:999px;color:{c};font-size:0.7rem;'
+                f'background:{c}14">1871~ {pct:.0f}%ile · 20y {pct20:.0f}%ile</span>')
+    g_col = GREEN if (g or 0) >= 0 else RED
+    peg_col = GREEN if (peg or 9) < 1 else (AMBER if (peg or 9) < 2 else RED)
+    return (f'<div style="display:flex;flex-wrap:wrap;gap:6px;align-items:flex-start;'
+            f'background:{PANEL};border:1px solid {BORDER};border-radius:10px;'
+            f'padding:9px 8px">'
+            + cell("S&P500 PER (보고이익)", f"{per:.1f}" if per else "—", chip)
+            + cell("fPER (컨센서스)", f"{v.get('fper'):.1f}" if v.get("fper") else "—")
+            + cell("EPS 성장률 (1y 예상)", f"{g:+.1f}%" if g is not None else "—", "", g_col)
+            + cell("PEG (교과서식)", f"{peg:.2f}" if peg else "—", "", peg_col)
+            + '</div>')

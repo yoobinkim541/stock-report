@@ -265,3 +265,17 @@ def test_css_render_progress_animations():
     assert "stSkeleton" in css and "tn-shimmer" in css
     assert 'data-stale="true"' in css and "tn-breathe" in css
     assert css.count("@keyframes tn-shimmer") == 1 and css.count("@keyframes tn-breathe") == 1
+
+
+def test_market_temp_and_valuation_strip():
+    """온도계 카드(끝 라벨 과열/기회·Phase 라인) + 밸류 스트립(백분위 칩·색)."""
+    h = theme.market_temp_html(0.4, sub="공포탐욕 44", phase_line="Phase 1 · DCA 1.5×")
+    assert "시장 온도계" in h and "과열" in h and "기회" in h
+    assert "Phase 1" in h and "분할매수 우호" in h
+    assert "재료 부족" in theme.market_temp_html(None)
+    v = {"per_reported": 32.28, "per": 29.6, "per_pctile_all": 97.8,
+         "per_pctile_20y": 91.7, "fper": 20.7, "eps_growth_pct": 43.3, "peg": 0.68}
+    strip = theme.valuation_strip_html(v)
+    assert "32.3" in strip and "98%ile" in strip and "20.7" in strip
+    assert "+43.3%" in strip and "0.68" in strip
+    assert theme.valuation_strip_html({}) == ""

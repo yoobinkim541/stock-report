@@ -662,3 +662,39 @@ def exposures(holdings: list) -> dict:
         sec[label] = sec.get(label, 0) + w
     return {"sector": dict(sorted(sec.items(), key=lambda x: -x[1])),
             "class": dict(sorted(cls.items(), key=lambda x: -x[1]))}
+
+
+def market_temperature(*, fear_greed=None, rsi_w=None, per_pctile_20y=None,
+                       peg=None, drawdown_pct=None) -> dict | None:
+    """🌡️ 시장 온도계 ∈[-1,1] — −1 과열(신중) ↔ +1 공포·저평가(분할매수 우호). 순수.
+
+    DCA(적립) 투자자 관점의 **역발상** 종합: 공포탐욕 낮을수록 +·주봉 RSI 과열 −·
+    PER 역사 백분위 높을수록 −·PEG 낮을수록 +·QQQ 낙폭 깊을수록 +(바벨 철학).
+    표시·참고용 — 매매신호 아님. 실행 규칙은 Phase(DCA 배율)가 담당. 재료 <2 → None.
+    """
+    def clamp(x):
+        return max(-1.0, min(1.0, x))
+
+    comps = []                                       # (weight, score, label)
+    fg = _try_float(fear_greed)
+    if fg is not None:
+        comps.append((1.0, clamp((50.0 - fg) / 40.0), f"공포탐욕 {fg:.0f}"))
+    rw = _try_float(rsi_w)
+    if rw is not None:
+        comps.append((1.0, clamp((55.0 - rw) / 30.0), f"주봉 RSI {rw:.0f}"))
+    pct = _try_float(per_pctile_20y)
+    if pct is not None:
+        comps.append((1.0, clamp((60.0 - pct) / 40.0), f"PER 20y {pct:.0f}%ile"))
+    pg = _try_float(peg)
+    if pg is not None and pg > 0:
+        comps.append((0.7, clamp((1.4 - pg) / 0.9), f"PEG {pg:.2f}"))
+    dd = _try_float(drawdown_pct)
+    if dd is not None:
+        comps.append((0.8, clamp(-dd / 15.0), f"QQQ 낙폭 {dd:+.1f}%"))
+    if len(comps) < 2:
+        return None
+    wsum = sum(w for w, _, _ in comps)
+    score = clamp(sum(w * s for w, s, _ in comps) / wsum)
+    return {"score": score,
+            "sub": " · ".join(lab for _, _, lab in comps[:4]),
+            "n": len(comps)}

@@ -819,3 +819,15 @@ def test_multpl_parsers():
     assert [v for _, v in rows] == [31.93, 28.60, 11.52]
     assert hist_percentile([10, 20, 30, 40], 32.28) == 75.0
     assert hist_percentile([], 30) is None
+
+
+def test_market_temperature():
+    """시장 온도계 — 역발상 부호·가중 평균·재료 부족 None (순수)."""
+    hot = data.market_temperature(fear_greed=85, rsi_w=80, per_pctile_20y=95,
+                                  peg=2.5, drawdown_pct=0.0)
+    assert hot["score"] < -0.5                        # 과열 → 신중
+    cold = data.market_temperature(fear_greed=15, rsi_w=30, per_pctile_20y=30,
+                                   peg=0.7, drawdown_pct=-12.0)
+    assert cold["score"] > 0.5                        # 공포·저평가 → 기회
+    assert "공포탐욕 15" in cold["sub"]
+    assert data.market_temperature(fear_greed=50) is None       # 재료 1개

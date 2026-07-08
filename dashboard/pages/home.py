@@ -102,7 +102,8 @@ def _market_bar():
     mi = cached.market_indicators()
     fg = mi.get("fear_greed")
     idx = mi.get("indices") or []
-    cols = st.columns([1.1, 1, 1])
+    v = cached.sp500_valuation()
+    cols = st.columns([1, 1, 1, 1])
     with cols[0]:
         if fg:
             theme.render(theme.fng_gauge_html(fg.get("score"), fg.get("prev_week")))
@@ -116,28 +117,28 @@ def _market_bar():
                                                          ix.get("chg"), ix.get("rsi_d"), ix.get("rsi_w")))
             else:
                 st.caption("지수 데이터 N/A")
+    with cols[3]:
+        # 🌡️ 시장 온도계 — 역발상 종합 (표시·참고 — 실행 규칙은 Phase DCA 배율)
+        plan = cached.accumulation() or {}
+        spx = next((x for x in idx if "S&P" in str(x.get("name", ""))),
+                   idx[0] if idx else {})
+        temp = data.market_temperature(
+            fear_greed=(fg or {}).get("score"), rsi_w=spx.get("rsi_w"),
+            per_pctile_20y=v.get("per_pctile_20y"), peg=v.get("peg"),
+            drawdown_pct=plan.get("dd"))
+        phase_line = (f"실행 규칙 = Phase: {plan.get('emoji', '')} "
+                      f"{plan.get('label', '')} · DCA {plan.get('mult', 1):g}×"
+                      if plan.get("label") else "실행 규칙은 Phase(DCA 배율)가 담당")
+        theme.render(theme.market_temp_html((temp or {}).get("score"),
+                                            (temp or {}).get("sub", ""), phase_line))
 
-    # 🧮 S&P500 밸류에이션 — 상위 100 시총가중 상향 집계 (PER·fPER·EPS성장·PEG)
-    v = cached.sp500_valuation()
+    # 🧮 S&P500 밸류 스트립 — PER(multpl 보고이익+역사 백분위)·fPER·성장·PEG
     if v:
-        b = st.columns(4)
-        _pe_head = v.get("per_reported") or v.get("per")
-        _pct = v.get("per_pctile_all")
-        _pct20 = v.get("per_pctile_20y")
-        b[0].metric("S&P500 PER", data.f_ratio(_pe_head, 1),
-                    delta=(f"1871~ {_pct:.0f}%ile · 20y {_pct20:.0f}%ile"
-                           if _pct is not None else None), delta_color="off",
-                    help=f"multpl.com 보고이익(GAAP) 기준 — 월별 {v.get('hist_n', 0)}개월 "
-                         f"역사 대비 백분위 · 자체 집계(상위 {v.get('n', 0)}종목 시총가중) "
-                         f"PER {data.f_ratio(v.get('per'), 1)} 병행")
-        b[1].metric("fPER", data.f_ratio(v.get("fper"), 1),
-                    help="Forward EPS 컨센서스 기준 — 리비전 민감")
-        b[2].metric("EPS 성장률", f"{v['eps_growth_pct']:+.1f}%"
-                    if v.get("eps_growth_pct") is not None else "—",
-                    help="지수 이익합 기준 Fwd/TTM — 1년 예상")
-        b[3].metric("PEG (계산)", data.f_ratio(v.get("peg")),
-                    help="PER ÷ EPS 증가율 — 교과서식 · <1 성장 대비 저평가 해석 관례")
-        st.caption(f"밸류 집계 {v.get('asof', '')} · 12h 캐시 · 표시·참고용")
+        theme.render(theme.valuation_strip_html(v))
+        st.caption(f"PER = multpl.com 보고이익(1871~ {v.get('hist_n', 0)}개월 백분위) · "
+                   f"자체 집계(상위 {v.get('n', 0)}종목 시총가중) PER "
+                   f"{data.f_ratio(v.get('per'), 1)} 병행 · fPER/성장/PEG = 자체 집계 · "
+                   f"{v.get('asof', '')} · 12h 캐시 · 표시·참고용")
 
 
 _MAPS = {   # 라벨 → (cached 로더명, 부가 캡션)
