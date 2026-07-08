@@ -236,3 +236,8 @@ def target_weights_map():
 @st.cache_data(ttl=3600, show_spinner=False)
 def income_summary(qqqi_shares=0.0, qqqi_usd=0.0):
     return views.income_summary(qqqi_shares, qqqi_usd)
+
+
+@st.cache_data(ttl=3600, show_spinner="S&P500 밸류 집계 중… (12h 캐시)")
+def sp500_valuation():
+    return views.sp500_valuation()

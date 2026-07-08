@@ -787,3 +787,19 @@ def test_exposures_and_asset_class():
     assert ex["class"]["현금성 (초단기 국채)"] == pytest.approx(50.0)
     assert any("기술" in k or k == "기타·해외" for k in ex["sector"])   # MSFT 섹터 시드
     assert data.exposures([]) == {}
+
+
+def test_aggregate_index_valuation():
+    """지수 밸류 상향 집계 — 시총가중 조화평균·성장·PEG·결측 제외 (순수)."""
+    from providers.market_valuation import aggregate_index_valuation
+    rows = [{"cap": 3000, "per": 30.0, "fper": 24.0},
+            {"cap": 1000, "per": 20.0, "fper": 16.0},
+            {"cap": 500, "per": None, "fper": None}]      # 결측 — 커버리지에서 제외
+    v = aggregate_index_valuation(rows)
+    # 조화평균: Σcap/Σ(cap/PE) = 4000/(100+50) ≈ 26.67
+    assert v["per"] == pytest.approx(26.7, abs=0.05)
+    assert v["fper"] == pytest.approx(21.3, abs=0.05)     # 4000/(125+62.5)
+    assert v["eps_growth_pct"] == pytest.approx(25.0, abs=0.1)   # 이익합 187.5/150
+    assert v["peg"] == pytest.approx(26.67 / 25.0, abs=0.01)
+    assert v["cov_trailing_pct"] == pytest.approx(4000 / 4500 * 100, abs=0.1)
+    assert aggregate_index_valuation([]) == {}

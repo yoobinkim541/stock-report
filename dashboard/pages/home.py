@@ -97,7 +97,7 @@ def render():
 
 
 def _market_bar():
-    """시장 지표 — 공포·탐욕지수 + S&P500·나스닥 일/주봉 RSI (경량·15분 캐시)."""
+    """시장 지표 — 공포·탐욕지수 + 지수 RSI + S&P500 밸류에이션 (경량 캐시)."""
     st.markdown("#### 📊 시장 지표")
     mi = cached.market_indicators()
     fg = mi.get("fear_greed")
@@ -116,6 +116,22 @@ def _market_bar():
                                                          ix.get("chg"), ix.get("rsi_d"), ix.get("rsi_w")))
             else:
                 st.caption("지수 데이터 N/A")
+
+    # 🧮 S&P500 밸류에이션 — 상위 100 시총가중 상향 집계 (PER·fPER·EPS성장·PEG)
+    v = cached.sp500_valuation()
+    if v:
+        b = st.columns(4)
+        b[0].metric("S&P500 PER", data.f_ratio(v.get("per"), 1),
+                    help=f"시총가중 조화평균 — 상위 {v.get('n', 0)}종목"
+                         f"(지수 시총 {v.get('cov_trailing_pct', 0):.0f}%) 집계")
+        b[1].metric("fPER", data.f_ratio(v.get("fper"), 1),
+                    help="Forward EPS 컨센서스 기준 — 리비전 민감")
+        b[2].metric("EPS 성장률", f"{v['eps_growth_pct']:+.1f}%"
+                    if v.get("eps_growth_pct") is not None else "—",
+                    help="지수 이익합 기준 Fwd/TTM — 1년 예상")
+        b[3].metric("PEG (계산)", data.f_ratio(v.get("peg")),
+                    help="PER ÷ EPS 증가율 — 교과서식 · <1 성장 대비 저평가 해석 관례")
+        st.caption(f"밸류 집계 {v.get('asof', '')} · 12h 캐시 · 표시·참고용")
 
 
 _MAPS = {   # 라벨 → (cached 로더명, 부가 캡션)

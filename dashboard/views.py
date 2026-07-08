@@ -1152,3 +1152,12 @@ def income_summary(qqqi_shares: float = 0.0, qqqi_usd: float = 0.0) -> dict:
     except Exception:
         pass
     return out
+
+
+def sp500_valuation() -> dict:
+    """S&P500 지수 밸류 (상위 100 시총가중 집계 — market_valuation). graceful {}."""
+    try:
+        from providers.market_valuation import sp500_valuation as _v
+        return _v() or {}
+    except Exception:
+        return {}
