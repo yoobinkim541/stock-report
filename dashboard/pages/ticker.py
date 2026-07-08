@@ -163,11 +163,11 @@ def _live_top(ticker, hist, yf_price, prev, pos):
         m[2].metric("보유주수", f"{pos['shares']:g}주")
         m[3].metric("평가액", data.f_usd(cur_val, 0))
 
-    _orderbook(rq)
+    _orderbook(rq, hist, prev, price)
 
 
-def _orderbook(rq):
-    """실시간 10단계 호가 (KR 완전·US 가격만 안내)."""
+def _orderbook(rq, hist=None, prev_close=None, price=None):
+    """실시간 10단계 호가 사다리 (KR HTS 풍 — 잔량 바·등락%·당일/52주 패널·총잔량)."""
     if not rq:
         return
     bids, asks = rq.get("bids") or [], rq.get("asks") or []
@@ -175,20 +175,22 @@ def _orderbook(rq):
         if rq.get("market") == "US":
             st.caption("💡 미국 종목은 실시간 가격만 제공 (10단계 호가는 국내만)")
         return
-    st.markdown("**📊 실시간 호가**")
-    cb, ca = st.columns(2)
-    with cb:
-        st.caption("매수 (BID)")
-        for px, qty in bids[:5]:
-            st.markdown(f"<div style='font-family:monospace;color:{theme.GREEN}'>"
-                        f"{px:,.2f} <span style='color:{theme.MUTED}'>× {qty:,.0f}</span></div>",
-                        unsafe_allow_html=True)
-    with ca:
-        st.caption("매도 (ASK)")
-        for px, qty in asks[:5]:
-            st.markdown(f"<div style='font-family:monospace;color:{theme.RED}'>"
-                        f"{px:,.2f} <span style='color:{theme.MUTED}'>× {qty:,.0f}</span></div>",
-                        unsafe_allow_html=True)
+    day = week52 = None
+    if hist is not None and not getattr(hist, "empty", True):
+        try:
+            last = hist.iloc[-1]
+            day = {"open": float(last["Open"]), "high": float(last["High"]),
+                   "low": float(last["Low"]),
+                   "volume": float(last["Volume"]) if "Volume" in hist.columns else None}
+            w = hist.tail(252)
+            week52 = {"high": float(w["High"].max()), "low": float(w["Low"].min())}
+        except Exception:
+            pass
+    st.markdown("**📊 실시간 호가** &nbsp;<span style='color:#9198a6;font-size:12px'>"
+                "등락% = 전일 종가 기준 (상승 🔴 / 하락 🔵 — KR 관례)</span>",
+                unsafe_allow_html=True)
+    theme.render(theme.orderbook_ladder_html(
+        bids, asks, prev_close=prev_close, price=price, day=day, week52=week52))
 
 
 # ── ETF 전용 뷰 — 프로필·보유 Top10·투자지표 (개별주 섹션 대체·토스증권 풍) ──────

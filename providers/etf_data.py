@@ -92,6 +92,21 @@ def _save_cache(ticker: str, data: dict) -> None:
 
 # ── 순수 헬퍼 (테스트 가능) ──────────────────────────────────────────────────
 
+def norm_expense_ratio(v, *, percent_units: bool = False):
+    """총보수(TER) → 분수 정규화. yfinance netExpenseRatio 는 **퍼센트 단위**(0.68=0.68% —
+    2026-07 라이브 실증·QQQI 가 68%로 표시되던 버그 원인). 실TER 상한 ~5% 를 방어선으로
+    퍼센트 단위 유입을 교정. 무효(<=0) None."""
+    try:
+        v = float(v)
+    except (TypeError, ValueError):
+        return None
+    if v <= 0:
+        return None
+    if percent_units or v > 0.05:
+        return v / 100.0
+    return v
+
+
 def premium_pct(price, nav):
     """괴리율 % = (시장가 − NAV) / NAV. 결측/0 → None."""
     try:
@@ -309,7 +324,9 @@ def _kr_yfinance_overlay(out: dict) -> None:
         out["category"] = out.get("category") or info.get("category")
         out["total_assets"] = out.get("total_assets") or info.get("totalAssets")
         if out.get("expense_ratio") is None:
-            out["expense_ratio"] = info.get("annualReportExpenseRatio") or info.get("netExpenseRatio")
+            out["expense_ratio"] = (norm_expense_ratio(info.get("annualReportExpenseRatio"))
+                                    or norm_expense_ratio(info.get("netExpenseRatio"),
+                                                          percent_units=True))
         try:
             div = t.dividends
             pairs = [(str(idx), float(v)) for idx, v in div.items()] if div is not None else []
@@ -387,6 +404,9 @@ def etf_summary(ticker: str) -> dict:
     tk = normalize_ticker(ticker)
     cached = _load_cache(tk)
     if cached is not None:
+        # 구 캐시의 퍼센트 단위 TER(QQQI 68% 표시 버그) self-heal — 정규화는 멱등
+        if cached.get("expense_ratio") is not None:
+            cached["expense_ratio"] = norm_expense_ratio(cached["expense_ratio"])
         return cached
 
     out: dict = {"ticker": tk, "is_etf": is_etf(tk)}
@@ -419,8 +439,9 @@ def etf_summary(ticker: str) -> dict:
             "nav": nav,
             "price": price,
             "premium_pct": premium_pct(price, nav),
-            "expense_ratio": (info.get("annualReportExpenseRatio")
-                              or info.get("netExpenseRatio")),
+            "expense_ratio": (norm_expense_ratio(info.get("annualReportExpenseRatio"))
+                              or norm_expense_ratio(info.get("netExpenseRatio"),
+                                                    percent_units=True)),
             "shares_outstanding": info.get("sharesOutstanding"),
             "inception": None,
         })
@@ -454,7 +475,7 @@ def etf_summary(ticker: str) -> dict:
                     if fo is not None and not getattr(fo, "empty", True):
                         row = [i for i in fo.index if "Expense Ratio" in str(i)]
                         if row:
-                            out["expense_ratio"] = float(fo.loc[row[0]].iloc[0])
+                            out["expense_ratio"] = norm_expense_ratio(fo.loc[row[0]].iloc[0])
                 except Exception:
                     pass
             try:

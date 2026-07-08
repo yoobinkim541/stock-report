@@ -179,3 +179,20 @@ def test_paper_rail_html_eok_and_empty():
     assert "₩2.50억" in html
     empty = theme.paper_rail_html([])
     assert empty.startswith('<div class="tn-wl">')                 # 무행도 유효 마크업
+
+
+def test_orderbook_ladder_html():
+    """호가 사다리 — 잔량 바·전일比 등락%·현재가 강조·총잔량·당일/52주 패널."""
+    bids = [[23125, 518], [23110, 827]]
+    asks = [[23130, 1379], [23135, 6125]]
+    h = theme.orderbook_ladder_html(
+        bids, asks, prev_close=22130, price=23125,
+        day={"open": 20590, "high": 24900, "low": 19900, "volume": 172650238},
+        week52={"high": 44385, "low": 18665})
+    assert "23,125" in h and "23,135" in h
+    assert "+4.50%" in h and "+4.54%" in h            # 전일比 등락 (반올림)
+    assert "판매대기" in h and "구매대기" in h          # 총잔량 비율 바
+    assert "52주 최고" in h and "44,385" in h
+    assert "172,650,238" in h                          # 거래량
+    assert h.count("#3182f6") >= 3 and h.count("#f04452") >= 3   # 파랑=ask 잔량·빨강=bid 잔량
+    assert "호가 없음" in theme.orderbook_ladder_html([], [])    # graceful

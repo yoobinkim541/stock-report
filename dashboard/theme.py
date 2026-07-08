@@ -533,3 +533,77 @@ h1 {{ font-size: 1.7rem !important; }}
 }}
 </style>
 """
+
+
+def orderbook_ladder_html(bids, asks, *, prev_close=None, price=None,
+                          day=None, week52=None, depth: int = 10) -> str:
+    """실시간 호가 사다리 (KR HTS 풍·순수 HTML) — theme.render 로 출력.
+
+    상단 = 매도호가(최우선이 아래·잔량 바 좌측 파랑), 하단 = 매수호가(잔량 바 우측 빨강).
+    등락% = 전일 종가 기준 (KR 관례: 상승 빨강·하락 파랑). 우측 패널 = 당일 시작/최고/최저·
+    거래량·52주 고저. 하단 = 매도/매수 총잔량 비율 바. bids/asks: [[price, qty], ...] 최우선 우선.
+    """
+    bids = [(float(p), float(q)) for p, q in (bids or [])[:depth] if p]
+    asks = [(float(p), float(q)) for p, q in (asks or [])[:depth] if p]
+    if not bids and not asks:
+        return "<div style='color:#9198a6'>호가 없음</div>"
+    max_q = max([q for _, q in bids + asks] or [1.0]) or 1.0
+
+    def _pct(px):
+        if not prev_close:
+            return ""
+        v = (px / prev_close - 1) * 100
+        color = "#f04452" if v > 0 else ("#3182f6" if v < 0 else MUTED)
+        return f"<span style='color:{color};font-size:11px'> {v:+.2f}%</span>"
+
+    def _row(px, q, side):
+        w = max(2, int(q / max_q * 100))
+        bar_color = "#3182f6" if side == "ask" else "#f04452"
+        qty = f"{q:,.0f}"
+        px_cell = (f"<td style='width:38%;text-align:center;padding:2px 6px;"
+                   f"font-family:{_MONO};font-size:13px'>{px:,.0f}{_pct(px)}</td>")
+        bar = (f"<div style='background:{bar_color}26;border-left:2px solid {bar_color};"
+               f"width:{w}%;padding:1px 4px;font-size:11px;font-family:{_MONO};"
+               f"color:{bar_color};white-space:nowrap'>{qty}</div>")
+        if side == "ask":   # 잔량 좌측 (우측정렬 바)
+            return (f"<tr><td style='width:31%'><div style='display:flex;justify-content:flex-end'>"
+                    f"{bar}</div></td>{px_cell}<td style='width:31%'></td></tr>")
+        return (f"<tr><td style='width:31%'></td>{px_cell}"
+                f"<td style='width:31%'><div style='display:flex'>{bar}</div></td></tr>")
+
+    rows = [_row(p, q, "ask") for p, q in sorted(asks, key=lambda x: -x[0])]
+    if price:
+        rows.append(f"<tr><td></td><td style='text-align:center;border:1px solid #e5e8ee55;"
+                    f"border-radius:6px;padding:3px;font-family:{_MONO};font-weight:700;"
+                    f"font-size:14px'>{float(price):,.0f}{_pct(float(price))}</td><td></td></tr>")
+    rows += [_row(p, q, "bid") for p, q in bids]
+
+    stat_rows = []
+    def _stat(k, v, color=None):
+        vv = f"{v:,.0f}" if isinstance(v, (int, float)) else (v or "—")
+        c = f"color:{color}" if color else ""
+        stat_rows.append(f"<div style='display:flex;justify-content:space-between;"
+                         f"font-size:12px;padding:2px 0'><span style='color:{MUTED}'>{k}</span>"
+                         f"<span style='font-family:{_MONO};{c}'>{vv}</span></div>")
+    if week52:
+        _stat("52주 최고", week52.get("high")); _stat("52주 최저", week52.get("low"))
+    if day:
+        _stat("시작", day.get("open"))
+        _stat("최고", day.get("high"), "#f04452"); _stat("최저", day.get("low"), "#3182f6")
+        if day.get("volume"):
+            _stat("거래량", day["volume"])
+    stats = (f"<div style='min-width:170px;border-left:1px solid {GRID};padding-left:12px'>"
+             + "".join(stat_rows) + "</div>") if stat_rows else ""
+
+    tb, ta = sum(q for _, q in bids), sum(q for _, q in asks)
+    tot = (tb + ta) or 1.0
+    totals = (f"<div style='display:flex;align-items:center;gap:8px;margin-top:6px;font-size:12px'>"
+              f"<span style='color:#3182f6'>판매대기 {ta:,.0f}</span>"
+              f"<div style='flex:1;height:6px;border-radius:3px;overflow:hidden;display:flex'>"
+              f"<div style='width:{ta / tot * 100:.1f}%;background:#3182f6'></div>"
+              f"<div style='width:{tb / tot * 100:.1f}%;background:#f04452'></div></div>"
+              f"<span style='color:#f04452'>{tb:,.0f} 구매대기</span></div>")
+
+    return (f"<div style='display:flex;gap:14px'>"
+            f"<div style='flex:1'><table style='width:100%;border-collapse:collapse'>"
+            + "".join(rows) + "</table>" + totals + "</div>" + stats + "</div>")
