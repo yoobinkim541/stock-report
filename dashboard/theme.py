@@ -648,3 +648,36 @@ def market_tape_html(items: list[dict]) -> str:
 </style>
 <div class="tn-tape"><div class="tn-tape-inner">{seq}{seq}</div></div>
 """
+
+
+# ── ETF 점수 게이지 (동종그룹 1~100 — 표시·참고용) ─────────────────────────────
+_ETF_SCORE_ZONES = [(20, RED), (40, "#f97316"), (60, MUTED), (80, "#86c26a"), (100, GREEN)]
+
+
+def etf_score_label(s):
+    if s >= 80:
+        return "그룹 최상위"
+    if s >= 60:
+        return "그룹 상위"
+    if s >= 40:
+        return "그룹 중위"
+    if s >= 20:
+        return "그룹 하위"
+    return "그룹 최하위"
+
+
+def etf_score_html(score, group_name: str = "", low_confidence: bool = False) -> str:
+    """ETF 동종그룹 점수(1~100) 반원 게이지 — score None → 데이터 부족 안내."""
+    if score is None:
+        return (f'<div style="padding:10px 12px;background:{PANEL};border:1px solid {BORDER};'
+                f'border-radius:10px;text-align:center;color:{MUTED}">'
+                f'점수 — <b>데이터 부족</b><br><span style="font-size:0.75rem">'
+                f'이력·지표가 모자라 산출 생략 (정직 표시)</span></div>')
+    s = max(1.0, min(100.0, float(score)))
+    lab = etf_score_label(s)
+    conf = (f' · <span style="color:{RED}">표본 부족</span>' if low_confidence else "")
+    return f'''<div style="padding:8px 12px;background:{PANEL};border:1px solid {BORDER};border-radius:10px">
+  <div style="color:{MUTED};font-size:0.82rem;text-align:center">🏆 ETF 점수 — {group_name or "동종그룹"}</div>
+  <div style="max-width:210px;margin:0 auto">{_gauge_svg(s, 0, 100, _ETF_SCORE_ZONES, big=f"{s:.0f}", sub=lab)}</div>
+  <div style="color:{MUTED};font-size:0.72rem;text-align:center;margin-top:-2px">동종그룹 백분위 가중합 1~100 · 표시·참고용{conf}</div>
+</div>'''

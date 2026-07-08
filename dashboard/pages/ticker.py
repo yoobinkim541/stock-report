@@ -344,6 +344,109 @@ def _etf_div_amount(etf, value):
     return f"연 {_f_krw(value)}" if _is_kr_etf(etf) else f"연 ${float(value):,.2f}"
 
 
+_TRPR_WIN = {"1y": 365, "3y": 365 * 3, "5y": 365 * 5}
+
+
+@st.fragment
+def _etf_tr_pr_section(ticker, peers):
+    """📈 수익률·리스크 — TR(배당재투자) vs PR(가격) + 벤치 TR 오버레이 (커버드콜 핵심 뷰)."""
+    st.subheader("📈 수익률·리스크 (TR vs PR)")
+    d = cached.tr_pr(ticker)
+    if not d:
+        st.caption("TR·PR 데이터 없음 (yfinance)")
+        return
+    from providers.etf_compare import mdd_pct, window_return
+    win_label = st.segmented_control("구간", list(_TRPR_WIN), default="3y",
+                                     label_visibility="collapsed", key="_trpr_win") or "3y"
+    days = _TRPR_WIN[win_label]
+    tr, pr = d["tr"], d["pr"]
+    tr_r, pr_r = window_return(tr, days), window_return(pr, days)
+    mdd, mdd_y = mdd_pct(tr, days)
+    grp = (peers or {}).get("group") or {}
+    bench = grp.get("bench")
+    bench_d = cached.tr_pr(bench) if bench and bench != ticker else None
+    vs = None
+    if bench_d:
+        b_r = window_return(bench_d["tr"], days)
+        if b_r is not None and tr_r is not None:
+            vs = tr_r - b_r
+    m = st.columns(5)
+    m[0].metric(f"TR {win_label}", f"{tr_r:+.1f}%" if tr_r is not None else "—",
+                help="총수익 — 분배금 재투자 가정(조정종가)")
+    m[1].metric(f"PR {win_label}", f"{pr_r:+.1f}%" if pr_r is not None else "—",
+                help="가격 수익 — 분배금 제외")
+    m[2].metric("분배 기여", f"{tr_r - pr_r:+.1f}%p" if None not in (tr_r, pr_r) else "—",
+                help="TR − PR — 분배금(재투자)이 만든 수익 몫")
+    m[3].metric(f"MDD({mdd_y or '—'}y)", f"-{mdd:.1f}%" if mdd is not None else "—",
+                help="TR 기준 최대 낙폭")
+    m[4].metric(f"vs {bench or '지수'}", f"{vs:+.1f}%p" if vs is not None else "—",
+                help="같은 구간 TR 차이 — 벤치=그룹 대표 ETF TR 프록시")
+    compare = {"PR(가격)": pr}
+    if bench_d:
+        compare[f"{bench} TR"] = bench_d["tr"]
+    fig = charts.price_chart(pd.DataFrame({"Close": tr}), "TR(배당재투자)",
+                             compare=compare, view_days=days, show_rsi=False)
+    st.plotly_chart(fig, width="stretch", config=_NOBAR)
+    st.caption("TR=분배금 재투자(조정종가) · PR=가격만 · 벤치=대표 ETF TR 프록시"
+               "(TR 지수 원천 불안정) · 세전 · 표시·참고용")
+
+
+def _fmt_aum(v):
+    if not v:
+        return "—"
+    return f"{v / 1e9:,.1f}B" if v >= 1e9 else f"{v / 1e6:,.0f}M"
+
+
+def _etf_peer_section(ticker, peers):
+    """🏆 동종 ETF 비교·점수 — 게이지 + 컴포넌트 막대 + 피어 지표표 (표시·참고용)."""
+    rows = (peers or {}).get("rows") or []
+    if not rows:
+        return                                     # 그룹 미등록 — 섹션 자연 생략 (정직)
+    grp = peers["group"]
+    st.subheader(f"🏆 동종 ETF 비교 — {grp['name']}")
+    from providers.etf_data import normalize_ticker
+    me = normalize_ticker(ticker)
+    mine = next((r for r in rows if r["ticker"] == me), None)
+    if mine and mine.get("score_detail"):
+        sd = mine["score_detail"]
+        g1, g2 = st.columns([1, 1.5])
+        with g1:
+            theme.render(theme.etf_score_html(mine.get("score"), grp["name"],
+                                              sd.get("low_confidence", False)))
+        with g2:
+            comp = {k: v for k, v in (sd.get("components") or {}).items() if v is not None}
+            if comp:
+                st.plotly_chart(charts.hbar(list(comp.keys()), list(comp.values()),
+                                            "구성 점수 (백분위)", pct=False),
+                                width="stretch", config=_NOBAR)
+            missing = [k for k, v in (sd.get("components") or {}).items() if v is None]
+            if missing:
+                st.caption(f"결측 컴포넌트: {'·'.join(missing)} — 가중치 재정규화")
+    is_cc = grp.get("strategy") != "index"
+    td_col = "전략 갭(기초 대비)" if is_cc else "추적차(3y·%p)"
+    table = []
+    for r in sorted(rows, key=lambda x: -(x.get("score") or 0)):
+        er = r.get("expense_ratio")
+        table.append({
+            "ETF": ("▶ " if r["ticker"] == me else "") + r["ticker"],
+            "보수": f"{er * 100:.2f}%" if er is not None else "—",
+            "AUM": _fmt_aum(r.get("aum")),
+            "1y TR": f"{r['tr_1y']:+.1f}%" if r.get("tr_1y") is not None else "—",
+            "3y TR(연)": f"{r['tr_3y_ann']:+.1f}%" if r.get("tr_3y_ann") is not None else "—",
+            "MDD": f"-{r['mdd']:.1f}%" if r.get("mdd") is not None else "—",
+            td_col: f"{r['tracking_diff']:+.1f}" if r.get("tracking_diff") is not None else "—",
+            "분배율": f"{r['div_yield_pct']:.1f}%" if r.get("div_yield_pct") else "—",
+            "점수": r.get("score") if r.get("score") is not None else "—",
+        })
+    st.dataframe(pd.DataFrame(table), hide_index=True, width="stretch")
+    tail = ("커버드콜 '전략 갭'은 기초지수 프록시 대비 TR 차 — 전략 특성이지 추적오차 아님 · "
+            if is_cc else "")
+    st.caption(f"점수 1~100 = 동종그룹 내 백분위 가중합(비용·성과·"
+               f"{'인컴' if is_cc else '추적'}·리스크·유동성) · {tail}"
+               f"벤치={grp['bench']} TR 프록시 · 기준 {peers.get('asof') or '—'} · "
+               f"표시·참고용 · 매매신호 아님")
+
+
 def _etf_sections(ticker, etf, price):
     is_kr = _is_kr_etf(etf)
     desc = (etf.get("description") or "").strip()
@@ -364,13 +467,21 @@ def _etf_sections(ticker, etf, price):
     k[4].metric("분배금 수익률", f"연 {dv['yield_pct']:.2f}%" if dv.get("yield_pct") else "—",
                 help="최근 12개월 분배금 합계 ÷ 현재가")
 
+    # ── 수익률·리스크 (TR vs PR) + 동종 ETF 비교·점수 ──
+    peers = cached.etf_peers(ticker)
+    _etf_tr_pr_section(ticker, peers)
+    _etf_peer_section(ticker, peers)
+
     # ── 프로필 (시가총액/운용자산·운용사·NAV·상장일·발행주식수) ──
     st.subheader("ETF 프로필")
     asset_value = etf.get("total_assets") or etf.get("market_cap")
+    _grp = (peers or {}).get("group") or {}
+    bench_label = etf.get("benchmark") or (
+        f"{_grp['name']} (그룹 — 벤치 {_grp['bench']} 프록시)" if _grp else "—")
     rows = [
         ("순자산/AUM", _etf_asset(etf, asset_value)),
         ("운용사", etf.get("family") or "—"),
-        ("추종지수", etf.get("benchmark") or "—"),
+        ("추종지수", bench_label),
         ("상장일", etf.get("inception") or "—"),
         ("종목코드", etf.get("stock_code") or ticker),
         ("카테고리", etf.get("category") or "—"),

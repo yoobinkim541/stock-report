@@ -209,3 +209,16 @@ def test_market_tape_html_marquee():
     assert "▼" in h and "▲" in h
     assert "animation-play-state: paused" in h                  # hover 정지
     assert theme.market_tape_html([]) == ""                     # graceful
+
+
+def test_etf_score_html_gauge():
+    """ETF 점수 게이지 — 니들·5존·라벨·표본부족·None=데이터 부족 안내."""
+    h = theme.etf_score_html(72, "나스닥 100")
+    assert "<svg" in h and "<line" in h and h.count("<path") == 5   # 니들 + 5존
+    assert "72" in h and "그룹 상위" in h and "나스닥 100" in h
+    assert "표시·참고용" in h
+    low = theme.etf_score_html(55, "금", low_confidence=True)
+    assert "표본 부족" in low
+    none_h = theme.etf_score_html(None)
+    assert "데이터 부족" in none_h and "<svg" not in none_h
+    assert "그룹 최상위" in theme.etf_score_html(90) and "그룹 최하위" in theme.etf_score_html(5)

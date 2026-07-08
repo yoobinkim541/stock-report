@@ -457,3 +457,41 @@ cached.etf = lambda t: {"ticker": "069500.KS", "stock_code": "069500", "is_etf":
     assert any("구성종목" in str(s.value) for s in at.subheader)
     assert len(at.dataframe) >= 1
     assert not any("PER" == m.label for m in at.metric)
+
+
+def test_ticker_page_etf_tr_pr_and_peer_score():
+    """ETF 뷰 신규 섹션 — TR vs PR 지표·차트 + 동종그룹 비교표·점수 게이지 (합성 주입)."""
+    etf_stub = '''
+st.session_state["ticker"] = "QQQI"
+cached.etf = lambda t: {"ticker": "QQQI", "is_etf": True, "name": "NEOS NDX High Income",
+    "expense_ratio": 0.0068, "price": 55.8, "nav": 56.1, "premium_pct": -0.5,
+    "dividends": {"count_12m": 12, "per_share_12m": 7.6, "yield_pct": 13.7, "freq_label": "매월"}}
+_TIDX = pd.date_range("2023-01-01", periods=900, freq="D")
+_TR = pd.Series([100.0 * 1.0006 ** i for i in range(900)], index=_TIDX)
+_PR = pd.Series([100.0 * 1.0001 ** i for i in range(900)], index=_TIDX)
+cached.tr_pr = lambda t, years=5: {"tr": _TR, "pr": _PR, "asof": "2026-07-08"}
+_ROW = {"ticker": "QQQI", "expense_ratio": 0.0068, "aum": 1.3e10, "div_yield_pct": 13.7,
+        "div_count_12m": 12, "tr_1y": 22.2, "tr_3y_ann": 18.0, "pr_1y": 6.1, "pr_3y_ann": 2.0,
+        "mdd": 20.0, "mdd_window_y": 3.0, "history_years": 2.4, "avg_dollar_vol": 5e7,
+        "tracking_diff": -9.3, "score": 60,
+        "score_detail": {"score": 60, "components": {"비용": 38, "성과": 62, "인컴": 88,
+                         "리스크": 50, "유동성": 75}, "n_peers": 4, "low_confidence": False,
+                         "basis": "1y", "strategy": "covered_call"}}
+_ROW2 = dict(_ROW, ticker="QYLD", score=47, tr_1y=21.7)
+cached.etf_peers = lambda t: {"group": {"key": "ndx_covered_call",
+    "name": "나스닥100 커버드콜", "strategy": "covered_call", "bench": "QQQ"},
+    "rows": [_ROW, _ROW2], "asof": "2026-07-08 07:00 UTC"}
+'''
+    at = AppTest.from_string(_STUBS + etf_stub + "\nfrom dashboard.pages import ticker\nticker.render()\n",
+                             default_timeout=30)
+    at.run()
+    assert not at.exception, at.exception
+    body = (" ".join(str(x) for x in at.markdown)
+            + " ".join(m.label for m in at.metric)
+            + " ".join(str(x.value) for x in at.subheader))
+    assert "TR vs PR" in body and "분배 기여" in body            # TR/PR 섹션
+    assert "동종 ETF 비교" in body and "나스닥100 커버드콜" in body   # 피어 섹션
+    html_body = " ".join(str(getattr(x, "value", "")) for x in at.markdown)
+    assert "ETF 점수" in html_body                               # 점수 게이지 (HTML 마크다운)
+    assert "매매신호 아님" in " ".join(str(c.value) for c in at.caption)
+    assert len(at.dataframe) >= 1                                # 피어 지표표

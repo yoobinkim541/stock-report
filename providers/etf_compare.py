@@ -92,7 +92,7 @@ def ann_return(total_ret_pct: float, years: float):
     return (base ** (1.0 / years) - 1.0) * 100.0
 
 
-def _mdd_pct(tr, days: int = 365 * 3):
+def mdd_pct(tr, days: int = 365 * 3):
     """TR 시리즈 최근 days 창의 MDD(%) + 실제 창 길이(년). 데이터 부족 시 가용 전체."""
     import pandas as pd
     tr = tr.dropna()
@@ -131,7 +131,7 @@ def compute_metrics(prices: dict, group: dict, extras: dict) -> list[dict]:
             tr3, pr3 = window_return(tr, 365 * 3), window_return(pr, 365 * 3)
             row["tr_3y_ann"] = ann_return(tr3, 3.0) if tr3 is not None else None
             row["pr_3y_ann"] = ann_return(pr3, 3.0) if pr3 is not None else None
-            row["mdd"], row["mdd_window_y"] = _mdd_pct(tr)
+            row["mdd"], row["mdd_window_y"] = mdd_pct(tr)
             row["history_years"] = round((tr.index[-1] - tr.index[0]).days / 365.25, 1)
             df = prices.get(t)
             try:                                                 # 60일 평균 거래대금 (달러/원)
