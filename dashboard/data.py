@@ -587,28 +587,30 @@ def fx_attribution(records: list, days: int = 30) -> dict:
             "window_days": len(win), "from": win[0].get("date"), "to": win[-1].get("date")}
 
 
-def rebalance_gaps(holdings: list, targets: dict) -> list[dict]:
-    """현재 vs 목표 비중 갭 — [{ticker, name, cur, tgt, gap_pp, usd_delta}] |갭| 내림차순. 순수.
+def rebalance_gaps(holdings: list, targets: dict) -> dict:
+    """현재 vs 목표 비중 갭 — **목표가 설정된 종목만** 비교 (순수).
 
-    targets: {ticker: 분수}. 목표 없는 종목은 목표 0%로(초과 보유), 미보유 목표는 매수 필요.
-    표시 전용 — 실행은 수동 (실계좌 주문 0 원칙).
+    targets: {ticker: 분수} = 봇 `/holding target` 설정(성장주 슬리브). 목표 미설정
+    종목(QQQI·SGOV 등 바벨 안전/인컴 축 — 별도 규칙 관리)은 갭 계산에서 제외하고
+    `untargeted` 로 따로 반환 — '목표 0% = 전량 축소' 오해 방지. 표시 전용.
+    반환 {"gaps": [...|갭| 내림차순], "untargeted": [ticker...], "target_sum_pct"}.
     """
     total = sum((h.get("value") or 0) for h in (holdings or []))
     if total <= 0 or not targets:
-        return []
+        return {}
     cur = {h["ticker"]: (h.get("value") or 0) / total * 100 for h in holdings}
     names = {h["ticker"]: h.get("name") or "" for h in holdings}
-    out = []
-    for t in sorted(set(cur) | set(targets)):
+    gaps = []
+    for t in sorted(targets):
         c = cur.get(t, 0.0)
-        g = float(targets.get(t, 0.0)) * 100
+        g = float(targets[t]) * 100
         gap = c - g
-        if abs(gap) < 0.05 and t not in cur:
-            continue
-        out.append({"ticker": t, "name": names.get(t, ""), "cur": c, "tgt": g,
-                    "gap_pp": gap, "usd_delta": -gap / 100 * total})
-    out.sort(key=lambda r: -abs(r["gap_pp"]))
-    return out
+        gaps.append({"ticker": t, "name": names.get(t, ""), "cur": c, "tgt": g,
+                     "gap_pp": gap, "usd_delta": -gap / 100 * total})
+    gaps.sort(key=lambda r: -abs(r["gap_pp"]))
+    return {"gaps": gaps,
+            "untargeted": [t for t in cur if t not in targets],
+            "target_sum_pct": sum(float(v) for v in targets.values()) * 100}
 
 
 _CLASS_CASH = {"SGOV", "BIL", "SHV"}

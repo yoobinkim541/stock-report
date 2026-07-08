@@ -761,16 +761,17 @@ def test_fx_attribution():
 
 def test_rebalance_gaps():
     holdings = [{"ticker": "MSFT", "name": "Microsoft", "value": 6000.0},
-                {"ticker": "NVDA", "name": "NVIDIA", "value": 4000.0}]
-    gaps = data.rebalance_gaps(holdings, {"MSFT": 0.5, "SGOV": 0.1})
-    by = {g["ticker"]: g for g in gaps}
+                {"ticker": "QQQI", "name": "NEOS", "value": 4000.0}]
+    rb = data.rebalance_gaps(holdings, {"MSFT": 0.5, "SGOV": 0.1})
+    by = {g["ticker"]: g for g in rb["gaps"]}
     assert by["MSFT"]["gap_pp"] == pytest.approx(10.0)           # 60 − 50 → 축소 방향
     assert by["MSFT"]["usd_delta"] == pytest.approx(-1000.0)
     assert by["SGOV"]["gap_pp"] == pytest.approx(-10.0)          # 미보유 목표 → 증액 방향
     assert by["SGOV"]["usd_delta"] == pytest.approx(1000.0)
-    assert by["NVDA"]["gap_pp"] == pytest.approx(40.0)           # 목표 없음 = 0% 취급
-    assert gaps[0]["ticker"] == "NVDA"                           # |갭| 내림차순
-    assert data.rebalance_gaps(holdings, {}) == []
+    assert "QQQI" not in by                                      # 목표 미설정 → 갭 제외
+    assert rb["untargeted"] == ["QQQI"]                          # 별도 반환 (안전/인컴 축)
+    assert rb["target_sum_pct"] == pytest.approx(60.0)
+    assert data.rebalance_gaps(holdings, {}) == {}
 
 
 def test_exposures_and_asset_class():

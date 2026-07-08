@@ -127,10 +127,11 @@ def _risk_section():
 def _rebalance_section(rows):
     """🎯 목표 vs 현재 비중 갭 (봇 /rebalance 와 동일 소스 — 표시 전용)."""
     targets = cached.target_weights_map()
-    gaps = data.rebalance_gaps(rows, targets)
+    rb = data.rebalance_gaps(rows, targets)
+    gaps = (rb or {}).get("gaps") or []
     if not gaps:
         return
-    st.markdown("##### 🎯 리밸런스 갭 — 목표 vs 현재")
+    st.markdown("##### 🎯 리밸런스 갭 — 목표 vs 현재 (목표 설정 종목만)")
     g1, g2 = st.columns([1.2, 1], vertical_alignment="center")
     with g1:
         st.plotly_chart(
@@ -150,8 +151,12 @@ def _rebalance_section(rows):
                 "조정 필요": st.column_config.NumberColumn(
                     format="$%.0f", help="+ = 매수 필요 · − = 축소 필요 (표시 전용)"),
             })
-    st.caption("+갭 = 목표 초과(축소 방향)·−갭 = 목표 미달(매수 방향) · 목표 비중은 "
-               "봇 `/holding target` 과 동일 소스 · 표시 전용 — 실행은 수동")
+    unt = (rb or {}).get("untargeted") or []
+    st.caption(f"+갭 = 목표 초과(축소 방향)·−갭 = 목표 미달(증액 방향) · 근거 = 봇 "
+               f"`/holding target` 에 직접 설정한 목표(성장주 슬리브 합 "
+               f"{(rb or {}).get('target_sum_pct', 0):.0f}%) 대비 이탈 — 모델 추천 아님 · "
+               f"목표 미설정 {'·'.join(unt) if unt else '없음'} 은 바벨 안전/인컴 축 "
+               f"(SGOV 실탄·QQQI 배당재투자 — 별도 규칙, 갭 제외) · 표시 전용 — 실행은 수동")
 
 
 def _exposure_section(rows):
