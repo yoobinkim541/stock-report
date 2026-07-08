@@ -47,10 +47,19 @@ def _screener_section():
     sc = cached.screener(topn)
     meta = sc.get("meta") or {}
     if meta:
-        st.caption(f"OOS IC {data.f_ratio(meta.get('ic'), 3)} · ICIR {data.f_ratio(meta.get('icir'), 2)} · "
-                   f"상위10% 초과 {data.f_frac_pct_s(meta.get('top_decile'))} · 학습 {meta.get('train_end', '')}")
+        from dashboard import theme
+        _ic = meta.get("ic")
+        _ic_col = theme.GREEN if (_ic or 0) > 0 else theme.RED
+        st.markdown(
+            _chip(f"OOS IC {data.f_ratio(_ic, 3)}", _ic_col)
+            + _chip(f"ICIR {data.f_ratio(meta.get('icir'), 2)}", theme.MUTED)
+            + _chip(f"상위10% 초과 {data.f_frac_pct_s(meta.get('top_decile'))}",
+                    theme.GREEN if (meta.get("top_decile") or 0) > 0 else theme.RED)
+            + _chip(f"학습 {meta.get('train_end', '—')}", theme.MUTED),
+            unsafe_allow_html=True)
     rows = sc.get("rows") or []
     if rows:
+        from dashboard import theme
         table = [{
             "순위": r.get("rank"),
             "종목": (f"{r['name']} ({r['ticker']})" if r.get("name") else r.get("ticker", ""))
@@ -67,18 +76,42 @@ def _screener_section():
             "재무점수": r.get("fund_score"),
             "판단근거": r.get("reason") or "—",
         } for r in rows]
+        df = pd.DataFrame(table)
+
+        def _updown(v):                                  # 등락 색 (± 셀 텍스트)
+            try:
+                return (f"color: {theme.GREEN}" if v > 0
+                        else f"color: {theme.RED}" if v < 0 else "")
+            except TypeError:
+                return ""
+
+        sty = (df.style
+               .map(_updown, subset=["6M 모멘텀%", "QQQ대비%p"])
+               .map(lambda v: (f"color: {theme.RED}" if isinstance(v, (int, float)) and v >= 70
+                               else f"color: {theme.GREEN}"
+                               if isinstance(v, (int, float)) and v <= 30 else ""),
+                    subset=["RSI"]))
+        _smin, _smax = float(df["점수"].min()), float(df["점수"].max())
         event = st.dataframe(
-            pd.DataFrame(table), hide_index=True, width="stretch",
+            sty, hide_index=True, width="stretch",
+            height=min(670, 44 + 35 * len(df)),
             on_select="rerun", selection_mode="single-row", key="_scr_tbl",
             column_config={
-                "점수": st.column_config.NumberColumn(format="%.3f",
-                                                      help="LGBM 상대순위 점수 (임의 스케일)"),
+                "순위": st.column_config.NumberColumn(width="small", format="%d"),
+                "종목": st.column_config.TextColumn(width="medium", pinned=True),
+                "점수": st.column_config.ProgressColumn(
+                    format="%.3f", min_value=_smin, max_value=_smax,
+                    help="LGBM 상대순위 점수 (임의 스케일 — 바는 그룹 내 상대 위치)"),
                 "가격": st.column_config.NumberColumn(format="$%.2f"),
-                "RSI": st.column_config.NumberColumn(format="%.0f"),
-                "52주고점比": st.column_config.NumberColumn(format="%.0f%%"),
-                "6M 모멘텀%": st.column_config.NumberColumn(format="%.1f"),
-                "QQQ대비%p": st.column_config.NumberColumn(format="%.1f"),
-                "재무점수": st.column_config.NumberColumn(format="%.0f"),
+                "RSI": st.column_config.NumberColumn(format="%.0f",
+                                                     help="70↑ 과열(적)·30↓ 과매도(녹)"),
+                "52주고점比": st.column_config.ProgressColumn(
+                    format="%.0f%%", min_value=0, max_value=100,
+                    help="52주 고점 대비 현재가 위치"),
+                "6M 모멘텀%": st.column_config.NumberColumn(format="%+.1f"),
+                "QQQ대비%p": st.column_config.NumberColumn(format="%+.1f"),
+                "재무점수": st.column_config.ProgressColumn(
+                    format="%.0f", min_value=0, max_value=100),
                 "판단근거": st.column_config.TextColumn(width="large",
                                                         help="두드러진 특징 상위 3 (모델 기여도 아님)"),
             })
