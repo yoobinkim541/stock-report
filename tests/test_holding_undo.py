@@ -78,12 +78,40 @@ def test_sell_undo_partial_and_full(iso):
     assert h2 and h2["shares"] == 4.0 and h2["avg_price_usd"] == pytest.approx(200.0)
 
 
+def test_undo_middle_buy_replays_later(iso):
+    """중간 매수 취소 — 이후 기록 롤백→재적용으로 평단 정합 + 원장 avg 재기록."""
+    hm.buy_holding("NVDA", 2.0, 100.0)                 # A
+    hm.buy_holding("NVDA", 1.0, 190.0)                 # B (취소 대상) → 평단 130
+    hm.buy_holding("NVDA", 1.0, 130.0)                 # C → 평단 130 × 4주
+    events = [r for r in te.trades_for_ticker("NVDA") if r["source"] == "manual_holding"]
+    b = events[1]
+    msg = hm.undo_trade(b["event_id"])
+    assert msg.startswith("↩️") and "이후 1건 평단 재계산" in msg
+    h = _holding(iso)
+    # B 없이 재적용: (2×100 + 1×130) / 3 = 110
+    assert h["shares"] == 3.0 and h["avg_price_usd"] == pytest.approx(110.0, abs=0.01)
+    # C 이벤트의 기록 평단도 110 으로 갱신 → C 재취소가 정합 통과
+    c = te.latest_manual_event("NVDA")
+    assert c["avg_price"] == pytest.approx(110.0, abs=0.01)
+    assert hm.undo_trade(c["event_id"]).startswith("↩️")
+    h2 = _holding(iso)
+    assert h2["shares"] == 2.0 and h2["avg_price_usd"] == pytest.approx(100.0, abs=0.01)
+
+
+def test_undo_middle_buy_contradiction_refused(iso):
+    """유일 매수 취소 시 이후 매도가 보유 초과 — 모순 정직 거부."""
+    hm.buy_holding("AMD", 3.0, 150.0)
+    hm.sell_holding("AMD", 1.0, 170.0)
+    first = [r for r in te.trades_for_ticker("AMD")
+             if r["source"] == "manual_holding"][0]
+    msg = hm.undo_trade(first["event_id"])              # 매수 취소 → 매도가 모순
+    assert msg.startswith("❌ 취소 불가")
+    h = _holding(iso, ticker="AMD")
+    assert h["shares"] == 2.0                           # 원상 불변
+
+
 def test_undo_guards(iso):
     hm.buy_holding("NVDA", 2.0, 100.0)
-    first = te.latest_manual_event("NVDA")
-    hm.buy_holding("NVDA", 1.0, 190.0)
-    # 비최신 거부
-    assert hm.undo_trade(first["event_id"]).startswith("❌ 최신")
     # 미존재 거부
     assert hm.undo_trade("nope").startswith("❌ 기록")
     # 모의/동기화 source 거부
@@ -105,4 +133,4 @@ def test_undo_double_click_blocked(iso):
     te.record_trade(ticker="NVDA", side="buy", qty=1, price=190.0, avg_price=130.0,
                     account="overseas_general", source="manual_holding")
     ev2 = te.latest_manual_event("NVDA")
-    assert hm.undo_trade(ev2["event_id"]).startswith("❌ 현재 평단")   # avg 불일치 차단
+    assert "평단" in hm.undo_trade(ev2["event_id"])        # avg 불일치 차단

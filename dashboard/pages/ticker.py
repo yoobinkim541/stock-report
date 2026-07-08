@@ -927,10 +927,12 @@ def _money_krw(x) -> str:
 
 
 def _trade_history(ticker):
-    """🧾 거래 이력 — 원장 최신순 + ↩️ 최근 수동 기록 되돌리기 (기록 전용)."""
+    """🧾 거래 이력 — 원장 최신순 · 행 선택 = 그 기록만 취소 (임의 시점·기록 전용)."""
     from lib import trade_events as te
     st.markdown("##### 🧾 거래 이력")
     trades = data.trade_events(ticker)
+    ordered = list(reversed(trades))                   # 표시 순서(최신 위) = 선택 인덱스
+    sel_ev = None
     if trades:
         rows = [{
             "일자": t.get("date"),
@@ -940,29 +942,44 @@ def _trade_history(ticker):
             "평단": t.get("avg_price"),
             "출처": "수동" if t.get("source") == "manual_holding" else (t.get("source") or "—"),
             "메모": t.get("note") or "",
-        } for t in reversed(trades)]
-        st.dataframe(pd.DataFrame(rows), hide_index=True, width="stretch",
-                     height=min(302, 44 + 35 * len(rows)),
-                     column_config={
-                         "수량": st.column_config.NumberColumn(format="%.4f"),
-                         "체결가": st.column_config.NumberColumn(format="%.2f"),
-                         "평단": st.column_config.NumberColumn(format="%.2f"),
-                         "메모": st.column_config.TextColumn(width="medium"),
-                     })
+        } for t in ordered]
+        event = st.dataframe(pd.DataFrame(rows), hide_index=True, width="stretch",
+                             height=min(302, 44 + 35 * len(rows)),
+                             on_select="rerun", selection_mode="single-row",
+                             key=f"_th_{ticker}",
+                             column_config={
+                                 "수량": st.column_config.NumberColumn(format="%.4f"),
+                                 "체결가": st.column_config.NumberColumn(format="%.2f"),
+                                 "평단": st.column_config.NumberColumn(format="%.2f"),
+                                 "메모": st.column_config.TextColumn(width="medium"),
+                             })
+        try:
+            sel = event.selection.rows
+        except Exception:
+            sel = []
+        if sel and sel[0] < len(ordered):
+            sel_ev = ordered[sel[0]]
     else:
         st.caption("기록 없음 — 좌측 적립/추가/축소 기록이 여기와 차트 ▲▼ 마커에 반영됩니다.")
-    ev = te.latest_manual_event(ticker)
-    if ev:
-        side_kr = "매수" if ev.get("side") == "buy" else "매도"
+
+    # 취소 대상: 선택 행 우선 · 미선택 시 최근 수동 기록 (임의 시점 취소는 rollback+replay)
+    target = sel_ev if sel_ev is not None else te.latest_manual_event(ticker)
+    if sel_ev is not None and (str(sel_ev.get("source") or "") != "manual_holding"
+                               or str(sel_ev.get("account") or "") not in
+                               ("overseas_general", "overseas_fractional")):
+        st.caption("⚠️ 선택한 기록은 동기화/모의 기록 — 취소 불가 (수동 기록만 가능)")
+    elif target:
+        side_kr = "매수" if target.get("side") == "buy" else "매도"
+        which = "선택 기록" if sel_ev is not None else "최근 기록"
         ok = st.checkbox("확인 — 포트폴리오 스냅샷 즉시 수정", key=f"_undo_ok_{ticker}")
-        if st.button(f"↩️ 최근 기록 되돌리기 — {ev.get('date')} {side_kr} "
-                     f"{float(ev.get('qty') or 0):g}주",
+        if st.button(f"↩️ {which} 취소 — {target.get('date')} {side_kr} "
+                     f"{float(target.get('qty') or 0):g}주",
                      key=f"_undo_{ticker}", disabled=not ok, width="stretch"):
-            _apply_action(lambda: _hm().undo_trade(ev["event_id"]))
+            _apply_action(lambda: _hm().undo_trade(target["event_id"]))
     elif trades:
-        st.caption("되돌릴 수동 기록 없음 (동기화·모의 기록은 되돌리기 불가)")
-    st.caption("되돌리기 = 최신 수동 기록 1건 역산 복원(반복 가능·평단 검증이 이중 실행 차단) · "
-               "실계좌 주문 없음")
+        st.caption("취소할 수동 기록 없음 (동기화·모의 기록은 취소 불가)")
+    st.caption("행 선택 = 그 기록만 취소(중간 기록도 가능 — 이후 기록은 자동 재계산·"
+               "모순이면 정직 거부) · 평단 검증이 이중 실행 차단 · 실계좌 주문 없음")
 
 
 @st.fragment

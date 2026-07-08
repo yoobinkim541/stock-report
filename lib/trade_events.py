@@ -182,3 +182,31 @@ def latest_manual_event(ticker: str) -> dict | None:
     rows = [r for r in trades_for_ticker(ticker, include_mock=False)
             if str(r.get("source") or "") == "manual_holding"]
     return rows[-1] if rows else None
+
+
+def rewrite_events(remove_id: str, avg_updates: dict | None = None) -> bool:
+    """이벤트 1건 제거 + 후속 이벤트 avg_price 일괄 갱신 (임의 기록 취소 replay 전용).
+
+    store.replace_all 원자 교체 — 취소된 기록 이후 이벤트들의 '기록 시점 평단'을
+    재계산 값으로 바꿔 이후 undo 의 평단 정합 검증이 계속 성립하게 한다.
+    """
+    try:
+        import store
+        rows = store.all(COLLECTION)
+        out, changed = [], False
+        for r in rows:
+            if r.get("event_id") == remove_id:
+                changed = True
+                continue
+            upd = (avg_updates or {}).get(r.get("event_id"))
+            if upd is not None:
+                r = dict(r)
+                r["avg_price"] = upd
+                changed = True
+            out.append(r)
+        if not changed:
+            return False
+        store.replace_all(COLLECTION, out)
+        return True
+    except Exception:
+        return False

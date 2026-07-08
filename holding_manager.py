@@ -318,35 +318,102 @@ def sell_holding(ticker: str, shares: float | None = None, price_usd: float | No
     return "✅ 매도 기록\n━━━━━━━━━━━━━━━━━━━━━━━\n" + "\n".join(msgs) + f"\n\n{refresh_msg}"
 
 
-def undo_trade(event_id: str) -> str:
-    """최신 수동 기록 1건 역산 복원 (대시보드 되돌리기 — 기록 전용·실주문 아님).
+def _ev_qty_price(ev):
+    try:
+        qty = float(ev.get("qty") or 0)
+    except (TypeError, ValueError):
+        qty = 0.0
+    price = ev.get("price")
+    return qty, (float(price) if price is not None else None)
 
-    안전 가드: ① manual_holding 만(동기화·모의 거부) ② 해외 수동 계좌만(국내는
-    kiwoom_sync 가 권위) ③ 해당 티커 **최신** 수동 이벤트만(이후 평단 재계산 보호)
-    ④ 평단 일치 검증(이중 undo·외부 변경 방어 — 절대 완화 금지). 반복 클릭 시
-    ④가 자연 차단(멱등). 성공 시 원장 이벤트 제거 + 가격 갱신.
+
+def _inverse_event(state, ev):
+    """이벤트 1건 역산 — state=(shares, avg)|None (이벤트 직후) → 직전 state.
+
+    평단 일치 검증(±0.01) 포함 — 실패 시 ValueError(정직 메시지).
+    """
+    qty, price = _ev_qty_price(ev)
+    if qty <= 0:
+        raise ValueError("수량 정보가 없어 되돌릴 수 없습니다.")
+    ev_avg = ev.get("avg_price")
+    if str(ev.get("side")) == "buy":
+        if state is None:
+            raise ValueError("매수 직후 보유가 비어 있어 스냅샷과 이력이 불일치합니다.")
+        shares, avg = state
+        if ev_avg is None or abs(avg - float(ev_avg)) > 0.01:
+            raise ValueError("현재/기록 평단이 달라 취소할 수 없습니다 (외부 변경 또는 이미 취소).")
+        if shares + 1e-6 < qty:
+            raise ValueError("보유 수량이 기록 수량보다 적습니다.")
+        old_shares = round(shares - qty, 4)
+        if old_shares <= 1e-4:
+            return None
+        if price is None:
+            raise ValueError("체결가 정보가 없어 평단을 복원할 수 없습니다.")
+        old_avg = (avg * shares - qty * price) / old_shares
+        if old_avg <= 0:
+            raise ValueError("평단 역산 결과가 비정상입니다.")
+        return old_shares, round(old_avg, 4)
+    # 매도 역산
+    if state is None:                                   # 전량 매도의 역 — 재추가
+        base = ev_avg if ev_avg is not None else price
+        if base is None:
+            raise ValueError("평단 정보가 없어 전량 매도 기록을 복원할 수 없습니다.")
+        return round(qty, 4), round(float(base), 4)
+    shares, avg = state
+    if ev_avg is not None and abs(avg - float(ev_avg)) > 0.01:
+        raise ValueError("현재/기록 평단이 달라 취소할 수 없습니다 (외부 변경 또는 이미 취소).")
+    return round(shares + qty, 4), avg
+
+
+def _apply_event(state, ev):
+    """이벤트 1건 순방향 적용 (replay) — (새 state, 이 이벤트의 재계산 avg_price)."""
+    qty, price = _ev_qty_price(ev)
+    if qty <= 0:
+        raise ValueError("수량 정보가 없는 기록이 있어 재적용할 수 없습니다.")
+    if str(ev.get("side")) == "buy":
+        if price is None:
+            raise ValueError("체결가 없는 매수 기록이 있어 재적용할 수 없습니다.")
+        if state is None:
+            return (round(qty, 4), round(price, 4)), round(price, 4)
+        shares, avg = state
+        new_shares = round(shares + qty, 4)
+        new_avg = round((shares * avg + qty * price) / new_shares, 4)
+        return (new_shares, new_avg), new_avg
+    if state is None:
+        raise ValueError("보유 없는 상태의 매도 기록 — 이 기록을 취소하면 이력이 모순됩니다.")
+    shares, avg = state
+    if qty > shares + 1e-6:
+        raise ValueError("보유보다 큰 매도 기록 — 이 기록을 취소하면 이력이 모순됩니다.")
+    new_shares = round(shares - qty, 4)
+    return ((None if new_shares <= 1e-4 else (new_shares, avg)), avg)
+
+
+def undo_trade(event_id: str) -> str:
+    """수동 기록 1건 취소 — **임의 시점** 기록도 취소 가능 (기록 전용·실주문 아님).
+
+    방식: 대상 이후의 수동 기록을 최신→과거로 **롤백**(각 단계 평단 일치 검증)해
+    대상 직전 상태를 복원 → 대상을 제외하고 **재적용(replay)** → 이후 이벤트들의
+    기록 평단(avg_price)도 재계산 값으로 원장에 갱신(이후 undo 정합 유지).
+    가드: manual_holding 만·해외 수동 계좌만·모순 발생 시(예: 매수 취소로 이후
+    매도가 보유 초과) 정직 거부. 최신 기록은 replay 없는 특수 사례로 자연 처리.
     """
     ev = next((r for r in trade_events.all_trades()
                if r.get("event_id") == event_id), None)
     if not ev:
         return "❌ 기록을 찾을 수 없습니다."
     if str(ev.get("source") or "") != "manual_holding":
-        return "❌ 수동 기록만 되돌릴 수 있습니다 (동기화·모의 기록 불가)."
+        return "❌ 수동 기록만 취소할 수 있습니다 (동기화·모의 기록 불가)."
     account = str(ev.get("account") or "")
     if account not in ("overseas_general", "overseas_fractional"):
-        return "❌ 해외 수동 계좌 기록만 되돌릴 수 있습니다 (국내는 증권사 동기화가 권위)."
+        return "❌ 해외 수동 계좌 기록만 취소할 수 있습니다 (국내는 증권사 동기화가 권위)."
     ticker = str(ev.get("ticker") or "").upper()
-    latest = trade_events.latest_manual_event(ticker)
-    if not latest or latest.get("event_id") != event_id:
-        return "❌ 최신 기록만 되돌릴 수 있습니다 (이후 기록의 평단 정합 보호)."
-    try:
-        qty = float(ev.get("qty") or 0)
-    except (TypeError, ValueError):
-        qty = 0.0
-    price = ev.get("price")
-    side = str(ev.get("side") or "")
-    if qty <= 0:
-        return "❌ 수량 정보가 없어 되돌릴 수 없습니다."
+    seq = [r for r in trade_events.trades_for_ticker(ticker, include_mock=False)
+           if str(r.get("source") or "") == "manual_holding"
+           and str(r.get("account") or "") == account]
+    idx = next((i for i, r in enumerate(seq) if r.get("event_id") == event_id), None)
+    if idx is None:
+        return "❌ 기록을 찾을 수 없습니다."
+    tail = seq[idx:]                                    # 대상 + 이후 기록 (시간순)
 
     section = "overseas_fractional" if account == "overseas_fractional" else "overseas_general"
     key = "holdings" if section == "overseas_fractional" else "holdings_usd"
@@ -358,58 +425,44 @@ def undo_trade(event_id: str) -> str:
         holdings = snap.setdefault(section, {}).setdefault(key, [])
         existing = next((h for h in holdings
                          if str(h.get("ticker", "")).upper() == ticker), None)
-        if side == "buy":
+        state = ((float(existing.get("shares", 0)),
+                  float(existing.get("avg_price_usd", 0) or 0))
+                 if existing is not None else None)
+        try:
+            for r in reversed(tail):                    # 롤백 — 대상 직전 상태로
+                state = _inverse_event(state, r)
+            avg_updates = {}
+            for r in tail[1:]:                          # 대상 제외 재적용
+                state, new_avg = _apply_event(state, r)
+                avg_updates[r.get("event_id")] = new_avg
+        except ValueError as e:
+            return f"❌ 취소 불가 — {e}"
+        # 스냅샷 반영
+        if state is None:
+            if existing is not None:
+                holdings.remove(existing)
+        else:
+            shares, avg = state
             if existing is None:
-                return "❌ 보유 내역이 없어 매수 기록을 되돌릴 수 없습니다."
-            cur_shares = float(existing.get("shares", 0))
-            cur_avg = float(existing.get("avg_price_usd", 0) or 0)
-            ev_avg = ev.get("avg_price")
-            if ev_avg is None or abs(cur_avg - float(ev_avg)) > 0.01:
-                return ("❌ 현재 평단이 기록 시점과 달라 되돌릴 수 없습니다 "
-                        "(이미 되돌렸거나 외부 변경 — 안전상 중단).")
-            if cur_shares + 1e-6 < qty:
-                return "❌ 보유 수량이 기록 수량보다 적어 되돌릴 수 없습니다."
-            old_shares = round(cur_shares - qty, 4)
-            if old_shares <= 1e-4:
-                holdings.remove(existing)               # 신규 매수 취소 → 포지션 제거
-            else:
-                if price is None:
-                    return "❌ 체결가 정보가 없어 평단을 복원할 수 없습니다."
-                old_avg = (cur_avg * cur_shares - qty * float(price)) / old_shares
-                if old_avg <= 0:
-                    return "❌ 평단 역산 결과가 비정상 — 안전상 중단."
-                existing["shares"] = old_shares
-                existing["avg_price_usd"] = round(old_avg, 4)
-                existing["cost_usd"] = round(old_shares * round(old_avg, 4), 4)
-                for k in ("current_price_usd", "pnl_usd", "return_pct"):
-                    existing.pop(k, None)
-        else:                                           # 매도 되돌리기
-            ev_avg = ev.get("avg_price") if ev.get("avg_price") is not None else price
-            if existing is None:                        # 전량 매도 복원
-                if ev_avg is None:
-                    return "❌ 평단 정보가 없어 전량 매도 기록을 복원할 수 없습니다."
-                holdings.append({"ticker": ticker, "shares": round(qty, 4),
-                                 "avg_price_usd": round(float(ev_avg), 4),
-                                 "cost_usd": round(qty * float(ev_avg), 4)})
-            else:                                       # 부분 매도 복원 (평단 불변)
-                cur_avg = float(existing.get("avg_price_usd", 0) or 0)
-                if (ev.get("avg_price") is not None
-                        and abs(cur_avg - float(ev["avg_price"])) > 0.01):
-                    return ("❌ 현재 평단이 기록 시점과 달라 되돌릴 수 없습니다 "
-                            "(이미 되돌렸거나 외부 변경 — 안전상 중단).")
-                new_shares = round(float(existing.get("shares", 0)) + qty, 4)
-                existing["shares"] = new_shares
-                existing["cost_usd"] = round(new_shares * cur_avg, 4)
-                for k in ("current_price_usd", "pnl_usd", "return_pct"):
-                    existing.pop(k, None)
+                existing = {"ticker": ticker}
+                holdings.append(existing)
+            existing["shares"] = round(shares, 4)
+            existing["avg_price_usd"] = round(avg, 4)
+            existing["cost_usd"] = round(round(shares, 4) * round(avg, 4), 4)
+            for k in ("current_price_usd", "pnl_usd", "return_pct"):
+                existing.pop(k, None)
         _save_locked(snap)
 
-    removed = trade_events.remove_event(event_id)
+    removed = trade_events.rewrite_events(event_id, avg_updates)
     refresh_msg = refresh_portfolio_prices()
+    qty, _ = _ev_qty_price(ev)
+    n_replay = len(tail) - 1
+    replay_note = f" · 이후 {n_replay}건 평단 재계산" if n_replay else ""
     warn = ("" if removed else
-            "\n⚠️ 원장 이벤트 제거 실패 — 차트 마커가 남을 수 있음(평단 검증이 중복 복원은 차단)")
-    return (f"↩️ 되돌리기 완료 — {ticker} {'매수' if side == 'buy' else '매도'} "
-            f"{qty:g}주 기록 취소{warn}\n\n{refresh_msg}")
+            "\n⚠️ 원장 갱신 실패 — 차트 마커가 남을 수 있음(평단 검증이 중복 취소는 차단)")
+    return (f"↩️ 취소 완료 — {ev.get('date')} {ticker} "
+            f"{'매수' if str(ev.get('side')) == 'buy' else '매도'} {qty:g}주"
+            f"{replay_note}{warn}\n\n{refresh_msg}")
 
 
 # ══════════════════════════════════════════════════════════════════════
