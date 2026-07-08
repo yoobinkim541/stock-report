@@ -176,7 +176,12 @@ def build_report(html: bool = False) -> str:
         ok = "✅" if strat_mdd <= q_mdd_pct else "⚠️지수보다 깊음"
         lines.append(f"MDD(최대낙폭) 전략 {strat_mdd:.1f}% / 지수 {q_mdd_pct:.1f}% {ok}")
     if cash is not None:
-        lines.append(f"현금 {fmt.money(cash)}")
+        # 통합증거금 — USD 실예수금 0·'현금'은 원화 여유증거금의 달러 환산(파생값). 혼동 방지 병기.
+        if bal.get("cash_derived") and bal.get("fx"):
+            lines.append(f"여유 증거금 {fmt.money(cash)} (원화 환산·USD 예수금 "
+                         f"{fmt.money(bal.get('usd_deposit') or 0.0)}·환율 ₩{bal['fx']:,.0f})")
+        else:
+            lines.append(f"현금 {fmt.money(cash)}")
 
     # 보유 종목 — 2줄(종목·등락·평가액 / 수량·단가), 등락%·평가손익 합계 (KR과 대칭)
     held = {c: p for c, p in positions.items() if int(p.get("shares", 0) or 0) > 0}

@@ -262,6 +262,13 @@ def paper_summary(surface: str = "kr_mock") -> dict:
             nav = bal.get("nav") or ((bal.get("pos_value") or 0.0)
                                      + (bal.get("cash_krw" if surface == "kr_mock" else "cash_usd") or 0.0))
             out["cash"] = bal.get("cash_krw" if surface == "kr_mock" else "cash_usd")
+            if surface == "us_mock":
+                # 통화 구성 분해 — KIS 모의는 통합증거금(USD 예수금 0·원화가 증거금)이라
+                # NAV=원화총자산 환산·'현금'=파생값. 표시 레이어가 정직하게 라벨링(달러/원화 혼동 방지).
+                out["fx"] = bal.get("fx")
+                out["krw_asset"] = bal.get("krw_asset")
+                out["usd_deposit"] = bal.get("usd_deposit")
+                out["cash_derived"] = bool(bal.get("cash_derived"))
             for sym, p in (bal.get("positions") or {}).items():
                 sh = int(p.get("shares", 0) or 0)
                 if sh <= 0:
