@@ -378,7 +378,7 @@ def test_home_shows_market_map():
                              default_timeout=30)
     at.run()
     assert not at.exception, str(at.exception)
-    assert any("S&P 500 시장 맵" in str(m.value) for m in at.markdown)   # 시장맵 섹션
+    assert any("시장 맵" in str(m.value) for m in at.markdown)   # 시장맵 섹션 (3맵 탭 통합)
     assert any("시장 지표" in str(m.value) for m in at.markdown)          # F&G·RSI 패널 (O2)
 
 

@@ -578,8 +578,27 @@ def _sp500_heatmap_live() -> list[dict]:
         rows.append({
             "ticker": t, "name": sp500_seed.SP500.get(t) or t,
             "sector_kr": kr_map.get(sec_map.get(t) or "") or "기타",
+            "sub": tech_subsector(sec_map.get(t), getattr(sp500_meta, "INDUSTRY", {}).get(t)),
             "market_cap": float(cap), "pct": p})
     return rows
+
+
+# 기술 섹터 세부 카테고리 — yfinance industry → 한글 버킷 (트리맵 3계층)
+_TECH_SUB = {
+    "Semiconductors": "반도체", "Semiconductor Equipment & Materials": "반도체",
+    "Software - Application": "소프트웨어·클라우드", "Software - Infrastructure": "소프트웨어·클라우드",
+    "Information Technology Services": "IT서비스",
+    "Computer Hardware": "하드웨어·장비", "Communication Equipment": "하드웨어·장비",
+    "Scientific & Technical Instruments": "하드웨어·장비", "Electronic Components": "하드웨어·장비",
+    "Consumer Electronics": "하드웨어·장비", "Solar": "하드웨어·장비",
+}
+
+
+def tech_subsector(sector, industry) -> str | None:
+    """기술 섹터만 세부 카테고리 반환 (그 외 None — 2계층 유지). 순수."""
+    if sector != "Technology" or not industry:
+        return None
+    return _TECH_SUB.get(industry, "기타 기술")
 
 
 def market_indicators() -> dict:
@@ -858,3 +877,119 @@ def ohlc_tf(ticker: str, tf: str = "1d"):
         return df if df is not None and not df.empty else None
     except Exception:
         return None
+
+
+# ── 코스피200·러셀2000 시장 맵 (sp500_heatmap 패턴 — 스냅샷 우선·라이브 self-heal) ──
+
+_KR200_SNAP = os.path.expanduser("~/reports/ml-cache/kr200_heatmap.json")
+_RUSSELL_SNAP = os.path.expanduser("~/reports/ml-cache/russell2000_heatmap.json")
+
+_NASDAQ_SECTOR_KR = {
+    "Technology": "기술", "Telecommunications": "커뮤니케이션", "Health Care": "헬스케어",
+    "Finance": "금융", "Real Estate": "부동산", "Consumer Discretionary": "경기소비재",
+    "Consumer Staples": "필수소비재", "Industrials": "산업재", "Basic Materials": "소재",
+    "Energy": "에너지", "Utilities": "유틸리티",
+}
+_NON_COMMON = ("Warrant", "Right", "Unit", "Preferred", "Depositary", "Notes")
+
+
+def _snap_or(build, snap_path: str, max_age_s: int = 5400) -> list[dict]:
+    """스냅샷(<max_age) 우선 → 없으면 build() 후 self-heal 기록 (sp500 패턴 공용)."""
+    import json
+    import time
+    try:
+        if time.time() - os.stat(snap_path).st_mtime < max_age_s:
+            with open(snap_path, encoding="utf-8") as f:
+                rows = json.load(f)
+            if rows:
+                return rows
+    except Exception:
+        pass
+    rows = build()
+    if rows:
+        try:
+            from safe_io import atomic_write_json
+            atomic_write_json(snap_path, rows)
+        except Exception:
+            pass
+    return rows
+
+
+def kr200_heatmap() -> list[dict]:
+    """코스피200 시장 맵 rows — 크론 스냅샷 우선(즉시) → 라이브(199종목 배치 ~30초)."""
+    return _snap_or(_kr200_heatmap_live, _KR200_SNAP)
+
+
+def _kr200_heatmap_live() -> list[dict]:
+    """kr200_meta(업종·시총·이름) + yf 배치 당일 등락%. 타일=한글명·라벨=티커(클릭 계약)."""
+    try:
+        import kr200_meta
+    except Exception:
+        return []
+    codes = sorted(kr200_meta.MARKET_CAP)
+    tickers = [f"{c}.KS" for c in codes]
+    pct: dict[str, float] = {}
+    try:
+        import warnings
+        warnings.filterwarnings("ignore")
+        import yfinance as yf
+        df = yf.download(tickers, period="2d", progress=False, group_by="ticker", threads=True)
+        for t in tickers:
+            try:
+                c = df[t]["Close"].dropna()
+                if len(c) >= 2 and c.iloc[-2]:
+                    pct[t] = round((c.iloc[-1] / c.iloc[-2] - 1) * 100, 2)
+            except Exception:
+                pass
+    except Exception:
+        return []
+    rows = []
+    for c in codes:
+        t = f"{c}.KS"
+        p = pct.get(t)
+        cap = kr200_meta.MARKET_CAP.get(c) or 0
+        if p is None or cap <= 0:
+            continue
+        nm = kr200_meta.NAME.get(c) or c
+        rows.append({"ticker": t, "name": nm, "tile": nm[:7],
+                     "sector_kr": kr200_meta.SECTOR.get(c) or "기타",
+                     "market_cap": float(cap), "pct": p})
+    return rows
+
+
+def russell2000_heatmap() -> list[dict]:
+    """러셀2000 근사 시장 맵 — 美 보통주 시총 1001~3000위 (NASDAQ 스크리너 1콜·정직 라벨)."""
+    return _snap_or(_russell2000_live, _RUSSELL_SNAP)
+
+
+def _russell2000_live() -> list[dict]:
+    """NASDAQ 스크리너(전 종목 시총·섹터·당일%) → 시총 1001~3000위. graceful []."""
+    try:
+        import requests
+        r = requests.get("https://api.nasdaq.com/api/screener/stocks",
+                         params={"tableonly": "true", "limit": "0", "download": "true"},
+                         headers={"User-Agent": "Mozilla/5.0 (X11; Linux x86_64)",
+                                  "Accept": "application/json"}, timeout=45)
+        r.raise_for_status()
+        raw = (r.json().get("data") or {}).get("rows") or []
+    except Exception:
+        return []
+    stocks = []
+    for it in raw:
+        sym = (it.get("symbol") or "").strip()
+        name = (it.get("name") or "").strip()
+        if not sym or "^" in sym or "/" in sym or any(x in name for x in _NON_COMMON):
+            continue
+        try:
+            cap = float(it.get("marketCap") or 0)
+            p = float(str(it.get("pctchange") or "").replace("%", "") or "nan")
+        except ValueError:
+            continue
+        if cap <= 0 or p != p:
+            continue
+        stocks.append((cap, sym, name, (it.get("sector") or "").strip(), p))
+    stocks.sort(reverse=True)
+    return [{"ticker": sym, "name": name[:40],
+             "sector_kr": _NASDAQ_SECTOR_KR.get(sec, "기타"),
+             "market_cap": cap, "pct": p}
+            for cap, sym, name, sec, p in stocks[1000:3000]]

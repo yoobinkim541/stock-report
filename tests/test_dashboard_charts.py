@@ -169,8 +169,28 @@ def test_market_treemap_sector_grouping():
     assert isinstance(tr, go.Treemap)
     assert {"기술", "금융", "AAPL", "MSFT", "JPM"} <= set(tr.labels)   # 섹터 루트 + 종목
     idx = list(tr.labels).index("AAPL")
-    assert tr.parents[idx] == "기술"                                    # 종목 parent=섹터
+    assert tr.parents[idx] == "sec:기술"                                # 종목 parent=섹터 id
+    assert tr.ids[idx] == "t:AAPL"                                      # 종목 label=티커(클릭 계약)
     assert tr.marker.cmid == 0 and tr.marker.cmax == 3                  # 발산 색 ±3
+
+
+def test_market_treemap_tech_subcategories():
+    """기술 섹터 3계층 — sub(반도체 등) 중간 노드, 종목 parent=sub id."""
+    rows = [
+        {"ticker": "NVDA", "name": "NVIDIA", "sector_kr": "기술", "sub": "반도체",
+         "market_cap": 3e12, "pct": 2.0},
+        {"ticker": "MSFT", "name": "Microsoft", "sector_kr": "기술", "sub": "소프트웨어·클라우드",
+         "market_cap": 2.8e12, "pct": 1.0},
+        {"ticker": "JPM", "name": "JPMorgan", "sector_kr": "금융", "market_cap": 9e11, "pct": -1.0},
+    ]
+    tr = charts.market_treemap(rows).data[0]
+    ids = list(tr.ids)
+    assert "sub:기술/반도체" in ids and "sub:기술/소프트웨어·클라우드" in ids
+    assert tr.parents[ids.index("sub:기술/반도체")] == "sec:기술"       # sub → 섹터
+    assert tr.parents[ids.index("t:NVDA")] == "sub:기술/반도체"         # 종목 → sub
+    assert tr.parents[ids.index("t:JPM")] == "sec:금융"                 # sub 없는 섹터는 2계층 유지
+    # branchvalues=total 정합: sub 값 = 자식 시총합
+    assert tr.values[ids.index("sub:기술/반도체")] == 3e12
 
 
 def test_market_treemap_clamps_and_empty():

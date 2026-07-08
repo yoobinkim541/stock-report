@@ -113,26 +113,41 @@ def _market_bar():
                 st.caption("지수 데이터 N/A")
 
 
+_MAPS = {   # 라벨 → (cached 로더명, 부가 캡션)
+    "S&P 500": ("sp500_heatmap",
+                "기술 섹터는 세부 카테고리(반도체·소프트웨어/클라우드·IT서비스·하드웨어)로 분해"),
+    "코스피 200": ("kr200_heatmap", "업종별(Naver) · 시총 = marcap 스냅샷"),
+    "러셀 2000": ("russell2000_heatmap",
+                 "미국 소형주 **근사** — 보통주 시총 1001~3000위 (러셀 공식 구성 아님·정직 표기)"),
+}
+
+
 @st.fragment
 def _market_map():
-    """S&P 500 섹터 시장 맵 — 시총 크기·당일 등락 색 + 타일 클릭→종목분석 (Finviz 풍)."""
-    st.markdown("#### 🗺️ S&P 500 시장 맵")
-    st.caption("섹터별 · 타일 크기 = 시가총액 · 색 = 당일 등락(🟩상승 / 🟥하락) · **타일 클릭 → 종목 분석**")
-    rows = cached.sp500_heatmap()
+    """시장 맵 3종(S&P500·코스피200·러셀2000) — 시총 크기·등락 색 + 타일 클릭→종목분석."""
+    st.markdown("#### 🗺️ 시장 맵")
+    which = st.segmented_control("시장", list(_MAPS), default="S&P 500",
+                                 label_visibility="collapsed", key="_map_kind") or "S&P 500"
+    loader, note = _MAPS[which]
+    st.caption("타일 크기 = 시가총액 · 색 = 당일 등락(🟩상승 / 🟥하락) · "
+               f"**타일 클릭 → 종목 분석** · {note}")
+    rows = getattr(cached, loader)()
     if not rows:
-        st.info("시장 맵 데이터를 불러오지 못했습니다 (네트워크/시드 확인).")
+        st.info("시장 맵 데이터를 불러오지 못했습니다 (첫 로드는 크론 스냅샷 대기 — 최대 20분).")
         return
     ev = st.plotly_chart(charts.market_treemap(rows), width="stretch",
-                         config={"displayModeBar": False}, on_select="rerun", key="_heatmap")
-    # 타일 클릭 → 라벨(티커) 정규화 → 종목 분석 이동 (섹터 헤더 클릭은 normalize None → 무시)
+                         config={"displayModeBar": False}, on_select="rerun",
+                         key=f"_heatmap_{loader}")
+    # 타일 클릭 → 종목 분석 이동. 리프 라벨 = 정확한 티커 → rows 멤버십으로 판정
+    # (normalize_input 부분매칭 함정: 세부 헤더 "반도체"→TSM 오이동 — 헤더/섹터 클릭은 무시)
+    valid = {r.get("ticker") for r in rows}
     picked = None
     sel = getattr(ev, "selection", None)
     pts = (sel.get("points") if isinstance(sel, dict) else getattr(sel, "points", None)) or []
     for p in pts:
         lab = p.get("label") if isinstance(p, dict) else getattr(p, "label", None)
-        tk = ticker_names.normalize_input(lab or "")
-        if tk:
-            picked = tk
+        if lab in valid:
+            picked = lab
             break
     if picked and picked != st.session_state.get("ticker"):
         st.session_state["ticker"] = picked

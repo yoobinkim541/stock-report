@@ -176,3 +176,13 @@ def intraday_chart(symbol, market, date, interval):
 @st.cache_data(ttl=_TTL, show_spinner="봉 데이터 불러오는 중…")
 def ohlc_tf(t, tf):
     return views.ohlc_tf(t, tf)
+
+
+@st.cache_data(ttl=_TTL_SLOW, show_spinner="코스피200 맵 불러오는 중…")
+def kr200_heatmap():
+    return views.kr200_heatmap()
+
+
+@st.cache_data(ttl=_TTL_SLOW, show_spinner="러셀2000 맵 불러오는 중…")
+def russell2000_heatmap():
+    return views.russell2000_heatmap()
