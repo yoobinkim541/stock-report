@@ -344,9 +344,8 @@ def _orderbook_section(ticker, hist, prev):
     if not rq or not (rq.get("bids") or rq.get("asks")):
         return                                     # 호가 없음(US/장외) — 섹션 자체 생략
     live = "⚡스트림" if rq.get("source") == "kis_ws" else "REST 지연 — 스트림 편입 중(~1.5분)"
-    with st.expander(f"📊 실시간 호가 (10단계 · {live}) — 상승 🔴/하락 🔵",
-                     expanded=False):
-        _orderbook(rq, hist, prev, rq.get("price"))
+    st.markdown(f"##### 📊 실시간 호가 — 10단계 · {live} · 상승 🔴/하락 🔵")
+    _orderbook(rq, hist, prev, rq.get("price"))
 
 
 def _orderbook(rq, hist=None, prev_close=None, price=None):
@@ -616,10 +615,10 @@ def _etf_sections(ticker, etf, price):
 
     sw = etf.get("sector_weights") or {}
     if sw:
-        with st.expander("🏭 섹터 비중", expanded=False):
-            items = sorted(sw.items(), key=lambda x: -x[1])[:11]
-            st.plotly_chart(charts.hbar([k for k, _ in items], [v for _, v in items], "섹터 %", pct=False),
-                            width="stretch", config=_NOBAR)
+        st.markdown("##### 🏭 섹터 비중")
+        items = sorted(sw.items(), key=lambda x: -x[1])[:11]
+        st.plotly_chart(charts.hbar([k for k, _ in items], [v for _, v in items], "섹터 %", pct=False),
+                        width="stretch", config=_NOBAR)
     src = etf.get("source") or ("KR ETF" if is_kr else "yfinance")
     st.caption(f"정보·표시용 · 매매신호 아님 · 결측 필드는 — 표기 · 데이터: {src}")
 
@@ -739,25 +738,25 @@ def _valuation(ticker, price=None):
     iv = cached.intrinsic(ticker)
     rim, ddm = iv.get("rim"), iv.get("ddm")
     if rim or ddm:
-        with st.expander("💰 적정가치 (RIM·DDM 모델 · 가정 민감)", expanded=False):
-            if price:
-                st.plotly_chart(charts.value_bullet(price, rim, ddm), width="stretch", config=_NOBAR)
-            cc = st.columns(3)
-            if rim:
-                cc[0].metric("RIM 적정가", data.f_usd(rim["mid"], 0),
-                             help=f"범위 {data.f_usd(rim['low'], 0)}~{data.f_usd(rim['high'], 0)}")
-            if ddm:
-                cc[1].metric("DDM 적정가" + ("" if iv.get("ddm_reliable") else " ⚠️"),
-                             data.f_usd(ddm["mid"], 0),
-                             help=None if iv.get("ddm_reliable") else "배당성향 낮아 신뢰도 낮음")
-            if iv.get("upside_pct") is not None:
-                cc[2].metric("RIM 상승여력", data.f_pct_s(iv["upside_pct"]))
-            st.caption("RIM=잔여이익(고ROE 반영·범용) · DDM=배당할인(고배당주만 유효) · "
-                       "r 8~11%·g 4% 밴드 · ROE 영속 가정(보수성 주의)")
+        st.markdown("##### 💰 적정가치 — RIM·DDM 모델 · 가정 민감")
+        if price:
+            st.plotly_chart(charts.value_bullet(price, rim, ddm), width="stretch", config=_NOBAR)
+        cc = st.columns(3)
+        if rim:
+            cc[0].metric("RIM 적정가", data.f_usd(rim["mid"], 0),
+                         help=f"범위 {data.f_usd(rim['low'], 0)}~{data.f_usd(rim['high'], 0)}")
+        if ddm:
+            cc[1].metric("DDM 적정가" + ("" if iv.get("ddm_reliable") else " ⚠️"),
+                         data.f_usd(ddm["mid"], 0),
+                         help=None if iv.get("ddm_reliable") else "배당성향 낮아 신뢰도 낮음")
+        if iv.get("upside_pct") is not None:
+            cc[2].metric("RIM 상승여력", data.f_pct_s(iv["upside_pct"]))
+        st.caption("RIM=잔여이익(고ROE 반영·범용) · DDM=배당할인(고배당주만 유효) · "
+                   "r 8~11%·g 4% 밴드 · ROE 영속 가정(보수성 주의)")
     h = v.get("history") or []
     if h:
-        with st.expander("📈 실적 서프라이즈 이력", expanded=False):
-            _surprise_chart(h, "실적 서프라이즈 (최근)")
+        st.markdown("##### 📈 실적 서프라이즈 이력")
+        _surprise_chart(h, "실적 서프라이즈 (최근)")
     st.caption("정보·표시용 · 매매신호 아님")
 
 
@@ -877,13 +876,13 @@ def _institutional(ticker):
     ins = cached.insider(ticker)
     txs = ins.get("transactions") or []
     if txs:
-        with st.expander(f"내부자거래 (SEC Form 4) · 순매수 {ins.get('net_buy_shares', 0):,.0f}주 "
-                         f"(매수 {ins.get('n_buys', 0)}·매도 {ins.get('n_sells', 0)})", expanded=False):
-            rows = [{"일자": t["date"], "임원": t["owner"], "직책": t["role"],
-                     "구분": {"P": "매수", "S": "매도", "A": "무상", "M": "행사"}.get(t["code"], t["code"]),
-                     "수량": f"{t['shares']:,.0f}", "단가": data.f_usd(t["price"]) if t["price"] else "—"}
-                    for t in txs[:25]]
-            st.dataframe(pd.DataFrame(rows), hide_index=True, width="stretch")
+        st.markdown(f"##### 🧾 내부자거래 (SEC Form 4) — 순매수 {ins.get('net_buy_shares', 0):,.0f}주 "
+                    f"(매수 {ins.get('n_buys', 0)}·매도 {ins.get('n_sells', 0)})")
+        rows = [{"일자": t["date"], "임원": t["owner"], "직책": t["role"],
+                 "구분": {"P": "매수", "S": "매도", "A": "무상", "M": "행사"}.get(t["code"], t["code"]),
+                 "수량": f"{t['shares']:,.0f}", "단가": data.f_usd(t["price"]) if t["price"] else "—"}
+                for t in txs[:25]]
+        st.dataframe(pd.DataFrame(rows), hide_index=True, width="stretch", height=280)
     elif ins.get("error"):
         st.caption(f"내부자거래: {ins['error']}")
     st.caption("정보·표시용")
