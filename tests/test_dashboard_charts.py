@@ -400,3 +400,29 @@ def test_target_price_fan_projection():
     # 평균 없으면 빈 Figure · 이력 없이도 투영만으로 렌더
     assert len(charts.target_price_fan(hist, 100.0, None, None, None).data) == 0
     assert len(charts.target_price_fan(None, 100.0, 120.0, 110.0, 90.0).data) == 3
+
+
+def test_price_chart_indicators_composite():
+    """기술적 분석 합성 — MA 세트·RSI 하단 패널·볼린저·일목균형표 토글."""
+    import pandas as pd
+    idx = pd.date_range("2024-01-01", periods=300, freq="D")
+    hist = pd.DataFrame({"Open": [100.0 + i * 0.1 for i in range(300)],
+                         "High": [101.0 + i * 0.1 for i in range(300)],
+                         "Low": [99.0 + i * 0.1 for i in range(300)],
+                         "Close": [100.5 + i * 0.1 for i in range(300)],
+                         "Volume": [10.0] * 300}, index=idx)
+    fig = charts.price_chart(hist, "T", kind="candle", mas=[60, 120, 200],
+                             show_rsi=True, bollinger=True, ichimoku=True)
+    names = [tr.name for tr in fig.data]
+    assert {"MA60", "MA120", "MA200"} <= set(names)
+    assert "RSI(14)" in names and "BB상단" in names and "전환선(9)" in names
+    rsi_tr = next(tr for tr in fig.data if tr.name == "RSI(14)")
+    assert rsi_tr.yaxis == "y2"                                # 하단 서브패널
+    assert fig.layout.yaxis2.range == (0, 100)
+    # 전부 끄면 가격 트레이스만
+    fig2 = charts.price_chart(hist, "T", kind="line", mas=[], show_rsi=False)
+    assert [tr.name for tr in fig2.data] == ["T"]
+    assert fig2.layout.xaxis.rangeslider.visible is True       # RSI 없으면 슬라이더 유지
+    # 이력 부족 MA 는 침묵 스킵
+    fig3 = charts.price_chart(hist.iloc[:50], "T", mas=[200])
+    assert "MA200" not in [tr.name for tr in fig3.data]

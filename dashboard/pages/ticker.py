@@ -81,16 +81,25 @@ def _trade_detail(t):
 
 _TF = {"5분": "5m", "1시간": "1h", "1일": "1d", "주": "1wk", "월": "1mo"}
 _TF_SPAN = {"5m": "최근 60일", "1h": "최근 2년"}   # yfinance 인트라데이 보존 한계 (정직 표기)
+_MA_OPTS = [5, 10, 20, 60, 120, 200]
+_MA_DEFAULT = {"1d": [60, 120, 200], "1wk": [60, 120, 200],   # 요청 기본값
+               "1mo": [5, 10, 20, 60, 120, 200], "5m": [20, 60], "1h": [20, 60]}
+_IND_OPTS = ["RSI(14)", "볼린저밴드(20,2σ)", "일목균형표"]
 
 
 def _price_chart(ticker, hist, avg_cost, trades, view_days=None):
-    """가격 차트 — 봉 단위(5분~월) + 라인/캔들 토글(차트만 부분 rerun·전체 리로드 방지)."""
-    c1, c2 = st.columns([1.3, 1])
+    """가격 차트 — 봉 단위(5분~월)·라인/캔들·기술적 분석 도구(MA 세트·RSI·BB·일목)."""
+    c1, c2, c3 = st.columns([1.2, 0.95, 0.45])
     tf_label = c1.segmented_control("봉", list(_TF), default="1일",
                                     label_visibility="collapsed", key="_chart_tf") or "1일"
     kind = c2.segmented_control("차트 종류", ["📈 라인", "🕯️ 캔들"], default="📈 라인",
                                 label_visibility="collapsed", key="_chart_kind")
     tf = _TF[tf_label]
+    with c3.popover("📐 지표"):
+        mas = st.multiselect("이동평균", _MA_OPTS,
+                             default=_MA_DEFAULT.get(tf, [60, 120, 200]), key=f"_ma_{tf}")
+        inds = st.multiselect("보조지표", _IND_OPTS, default=["RSI(14)"], key=f"_ind_{tf}")
+        st.caption("봉 단위별로 설정이 기억됩니다 · 범례 클릭으로도 개별 토글")
     df = hist
     if tf != "1d":
         df = cached.ohlc_tf(ticker, tf)
@@ -100,9 +109,12 @@ def _price_chart(ticker, hist, avg_cost, trades, view_days=None):
         elif tf in _TF_SPAN:
             st.caption(f"ℹ️ {tf_label}봉은 {_TF_SPAN[tf]}까지 제공 (yfinance 보존 한계) · 주/월/일봉은 전체 이력")
     label = ticker_names.label(ticker)
-    fig = (charts.price_candle(df, label, avg_cost, trades=trades, view_days=view_days)
-           if kind == "🕯️ 캔들"
-           else charts.price_line(df, label, avg_cost, trades=trades, view_days=view_days))
+    show_rsi = "RSI(14)" in inds
+    fig = charts.price_chart(
+        df, label, kind=("candle" if kind == "🕯️ 캔들" else "line"),
+        avg_cost=avg_cost, trades=trades, view_days=view_days, mas=mas,
+        show_rsi=show_rsi, bollinger="볼린저밴드(20,2σ)" in inds,
+        ichimoku="일목균형표" in inds)
     event = None
     try:
         event = st.plotly_chart(
@@ -110,7 +122,8 @@ def _price_chart(ticker, hist, avg_cost, trades, view_days=None):
             on_select="rerun", selection_mode="points")
     except TypeError:
         st.plotly_chart(fig, width="stretch", config=charts.PAN_CFG)
-    st.caption(charts.PAN_HINT)
+    st.caption("🖱️ 드래그=이동 · 휠=확대/축소 · 더블클릭=원위치"
+               + ("" if show_rsi else " · 하단 미니차트 드래그=과거 구간"))
     selected = _selected_trade(event, trades or [])
     if selected:
         _trade_detail(selected)

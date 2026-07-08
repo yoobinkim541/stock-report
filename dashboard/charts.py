@@ -481,3 +481,134 @@ def target_price_fan(hist, price, high, mean, low, currency: str = "$"):
     fig.update_layout(margin=dict(t=10, b=10, l=10, r=150), height=340, showlegend=False,
                       hovermode="closest")
     return _t(fig)
+
+
+# ── 기술적 분석 지표 (순수 계산 + 합성 차트) ──────────────────────────────────
+
+def _rsi_series(close, n: int = 14):
+    delta = close.diff()
+    gain = delta.clip(lower=0).rolling(n).mean()
+    loss = (-delta.clip(upper=0)).rolling(n).mean()
+    rs = gain / loss.replace(0, float("nan"))
+    return 100 - 100 / (1 + rs)
+
+
+_MA_COLORS = {5: "#e879f9", 10: "#22d3ee", 20: "#f59e0b", 60: "#9333ea",
+              120: "#34d399", 200: "#f43f5e"}
+
+
+def price_chart(hist, ticker: str = "", *, kind: str = "line", avg_cost=None,
+                trades=None, view_days=None, mas=(60, 120, 200),
+                show_rsi: bool = False, bollinger: bool = False, ichimoku: bool = False):
+    """가격 차트 + 기술적 분석 도구 — MA 세트·볼린저밴드·일목균형표·RSI 하단 패널.
+
+    show_rsi=True 면 2행 서브플롯(가격 75%·RSI 25%, x 공유 — 레인지슬라이더는 비활성:
+    plotly 서브플롯 제약, 팬/줌은 유지). 지표는 범례 클릭으로 개별 토글 가능.
+    """
+    go = _go()
+    cols = set(getattr(hist, "columns", []))
+    if hist is None or getattr(hist, "empty", True) or "Close" not in cols:
+        return _t(go.Figure())
+    close = hist["Close"]
+    has_ohlc = {"Open", "High", "Low"} <= cols
+
+    if show_rsi:
+        from plotly.subplots import make_subplots
+        fig = make_subplots(rows=2, cols=1, shared_xaxes=True,
+                            row_heights=[0.76, 0.24], vertical_spacing=0.04)
+    else:
+        fig = go.Figure()
+
+    # ── 메인: 가격 ──
+    if kind == "candle" and has_ohlc:
+        fig.add_trace(go.Candlestick(
+            x=hist.index, open=hist["Open"], high=hist["High"], low=hist["Low"],
+            close=close, name=ticker or "OHLC",
+            increasing_line_color=_GREEN, decreasing_line_color=_RED,
+            increasing_fillcolor=_GREEN, decreasing_fillcolor=_RED, line=dict(width=1)))
+    else:
+        fig.add_trace(go.Scatter(x=hist.index, y=close, name=ticker or "종가",
+                                 line=dict(color=_BLUE, width=2)))
+
+    # ── 일목균형표 (구름은 MA 아래 깔리게 먼저) ──
+    if ichimoku and has_ohlc and len(close) >= 52:
+        h9 = (hist["High"].rolling(9).max() + hist["Low"].rolling(9).min()) / 2      # 전환선
+        h26 = (hist["High"].rolling(26).max() + hist["Low"].rolling(26).min()) / 2   # 기준선
+        spa = ((h9 + h26) / 2).shift(26)                                             # 선행스팬A
+        spb = ((hist["High"].rolling(52).max()
+                + hist["Low"].rolling(52).min()) / 2).shift(26)                      # 선행스팬B
+        fig.add_trace(go.Scatter(x=hist.index, y=spa, name="선행A",
+                                 line=dict(color="#26a69a", width=0.8), opacity=0.6))
+        fig.add_trace(go.Scatter(x=hist.index, y=spb, name="선행B(구름)",
+                                 line=dict(color="#ef5350", width=0.8), opacity=0.6,
+                                 fill="tonexty", fillcolor="rgba(120,140,180,0.12)"))
+        fig.add_trace(go.Scatter(x=hist.index, y=h9, name="전환선(9)",
+                                 line=dict(color="#22d3ee", width=1)))
+        fig.add_trace(go.Scatter(x=hist.index, y=h26, name="기준선(26)",
+                                 line=dict(color="#f59e0b", width=1)))
+        fig.add_trace(go.Scatter(x=hist.index, y=close.shift(-26), name="후행스팬",
+                                 line=dict(color="#e879f9", width=0.8, dash="dot")))
+
+    # ── 이동평균 세트 ──
+    for win in sorted(set(int(w) for w in (mas or []))):
+        if len(close) >= win:
+            fig.add_trace(go.Scatter(
+                x=hist.index, y=close.rolling(win).mean(), name=f"MA{win}",
+                line=dict(width=1.1, color=_MA_COLORS.get(win))))
+
+    # ── 볼린저밴드 (20, ±2σ) ──
+    if bollinger and len(close) >= 20:
+        ma20 = close.rolling(20).mean()
+        sd = close.rolling(20).std()
+        fig.add_trace(go.Scatter(x=hist.index, y=ma20 + 2 * sd, name="BB상단",
+                                 line=dict(color="#8b93a7", width=0.8, dash="dot")))
+        fig.add_trace(go.Scatter(x=hist.index, y=ma20 - 2 * sd, name="BB하단",
+                                 line=dict(color="#8b93a7", width=0.8, dash="dot"),
+                                 fill="tonexty", fillcolor="rgba(139,147,167,0.08)"))
+
+    if avg_cost and avg_cost > 0:
+        fig.add_hline(y=avg_cost, line=dict(color=theme.MUTED, dash="dash", width=1.2),
+                      annotation_text=f"평단 {avg_cost:,.2f}", annotation_position="top left",
+                      annotation_font=dict(color=theme.MUTED, size=11),
+                      row=1 if show_rsi else None, col=1 if show_rsi else None)
+    _add_trade_markers(fig, hist, trades or [])
+
+    # ── RSI 하단 패널 ──
+    if show_rsi:
+        rsi = _rsi_series(close)
+        fig.add_trace(go.Scatter(x=hist.index, y=rsi, name="RSI(14)",
+                                 line=dict(color="#f59e0b", width=1.3)), row=2, col=1)
+        for lv, c in ((70, _RED), (30, _GREEN)):
+            fig.add_hline(y=lv, line=dict(color=c, dash="dot", width=0.8), row=2, col=1)
+        fig.update_yaxes(range=[0, 100], row=2, col=1, tickvals=[30, 50, 70])
+
+    fig.update_layout(margin=dict(t=10, b=10, l=10, r=10), dragmode="pan",
+                      legend=dict(orientation="h", y=1.08, font=dict(size=10)),
+                      hovermode="x unified", height=470 if show_rsi else 380)
+    _t(fig)
+    if show_rsi:
+        fig.update_xaxes(rangeslider_visible=False)   # 서브플롯 제약 — 팬/줌으로 탐색
+    else:
+        fig.update_layout(xaxis=dict(rangeslider=dict(visible=True, thickness=0.08)))
+    return _initial_view(fig, hist, view_days) if not show_rsi else _initial_view_sub(fig, hist, view_days)
+
+
+def _initial_view_sub(fig, hist, view_days):
+    """RSI 서브플롯용 초기 표시창 — x 공유축 범위만 (y 는 가격 창 기준)."""
+    if not view_days or hist is None or getattr(hist, "empty", True):
+        return fig
+    import pandas as pd
+    end = hist.index[-1]
+    start = end - pd.Timedelta(days=view_days)
+    if start <= hist.index[0]:
+        return fig
+    win = hist[hist.index >= start]
+    if len(win) < 2:
+        return fig
+    cols = set(hist.columns)
+    lo = float(win["Low"].min()) if "Low" in cols else float(win["Close"].min())
+    hi = float(win["High"].max()) if "High" in cols else float(win["Close"].max())
+    pad = max((hi - lo) * 0.06, hi * 0.002)
+    fig.update_xaxes(range=[start, end + (end - start) * 0.02])
+    fig.update_yaxes(range=[lo - pad, hi + pad], row=1, col=1)
+    return fig
