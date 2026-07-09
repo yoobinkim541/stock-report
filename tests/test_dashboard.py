@@ -941,9 +941,15 @@ def test_valuation_score_kr_no_dart_suppressed():
     assert got is not None and -1.0 <= got["score"] <= 1.0
 
 
-def test_valuation_metrics_kr_suppresses_yf_multiples():
-    """KR yfinance 폴백 — 신뢰불가 멀티플(forward_pe·peg·psr) 폐기 + 폴백 마커."""
-    from providers import earnings_data
+def test_valuation_metrics_kr_suppresses_yf_multiples(monkeypatch):
+    """KR yfinance 폴백 — 신뢰불가 멀티플(forward_pe·peg·psr) 폐기 + 폴백 마커.
+
+    밀폐: 다른 테스트가 .env(DART 키)를 로드하면 DART 경로가 성공해 순서 의존 실패
+    → DART 를 명시적으로 미가용 처리해 yf 폴백 분기를 고정 검증.
+    """
+    from providers import earnings_data, kr_fundamentals
+    monkeypatch.setattr(kr_fundamentals, "recent_annual_metrics",
+                        lambda t, **k: {"confidence": "missing"})
     m = earnings_data.valuation_metrics("005930.KS")
     assert m.get("market_type") == "kr"
     assert m.get("forward_pe") is None and m.get("peg") is None and m.get("psr") is None
