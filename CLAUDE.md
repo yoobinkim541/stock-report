@@ -339,7 +339,9 @@ crons/news_spike_detector.py (크론 매 1분)
 | `INTRADAY_MIN_TURNOVER_KRW` | — | `30000000000` (KR 후보 거래대금 하한 300억 — 유동성·스프레드 방어) |
 | `INTRADAY_UNIVERSE_KR` / `INTRADAY_UNIVERSE_US` | — | `005930,000660,373220,005380,035420` / `QQQ` (정적 폴백 유니버스) |
 | `INTRADAY_SLEEVE_FRAC` / `INTRADAY_RISK_PER_TRADE` | — | `0.10` / `0.005` (모의 NAV 중 슬리브 비율·트레이드당 리스크 사이징) |
-| `INTRADAY_MAX_TRADES_DAY` / `INTRADAY_COOLDOWN_MIN` / `INTRADAY_DAILY_LOSS_HALT` | — | `6` / `30` / `0.015` (일 왕복 상한·심볼 쿨다운·일손실 −1.5% 정지) |
+| `INTRADAY_MAX_TRADES_DAY` / `INTRADAY_COOLDOWN_MIN` / `INTRADAY_DAILY_LOSS_HALT` | — | `6` / `30` / `0.015` (일 왕복 상한·심볼 쿨다운[**손실 청산 후만** — 익절 후 즉시 재진입 허용·0=전체 비활성]·일손실 −1.5% 정지) |
+| `INTRADAY_STOP_FRICTION_MULT` | — | `3.0` (스탑폭 하한 = 왕복마찰/주 × 배수 — 첫 실트레이드서 마찰(수수료+슬리피지 1,887원)>스탑리스크(1,683원)로 -1R 스탑이 -2.1R 증폭된 문제 방어. 사이징·R 분모도 마찰 포함 → 스탑 도달 = 정확히 -1R) |
+| `INTRADAY_MIN_NOTIONAL_KRW` / `INTRADAY_MIN_NOTIONAL_USD` | — | `100000` / `150` (진입 최소 명목금액 — 학습 신호 품질용. 슬리브 1/3 캡보다 훨씬 낮게 유지할 것) |
 | `INTRADAY_MAX_SPREAD_BPS_KR` / `INTRADAY_MAX_SPREAD_BPS_US` | — | `25` / `5` (진입 스프레드 상한 — KR 은 max(2틱, 상한): 호가단위상 1틱이 ~16bps) |
 | `INTRADAY_FLAT_BUFFER_MIN` / `INTRADAY_ENTRY_CUTOFF_MIN` / `INTRADAY_STALE_FLAT_MIN` | — | `15` / `30` / `10` (마감 前 강제청산 버퍼·진입 컷오프·bar 정체 시 전량청산) |
 

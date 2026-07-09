@@ -304,6 +304,20 @@ def run_tests() -> list[str]:
         ("포지션 캡 1/3", lambda _: ax.position_size(1_000_000, 0.05, 61450, 61440) == int(1_000_000 / 3 / 61450)),
         ("stop_dist 0 → 0", lambda _: ax.position_size(1_000_000, 0.005, 61450, 61450) == 0),
         ("호가단위 표", lambda _: ax.kr_tick(61450) == 100 and ax.kr_tick(1500) == 1 and ax.kr_tick(600000) == 1000),
+        # 마찰 포함 사이징 — 분모에 friction 가산 → 스탑 도달 총손실 ≈ 예산 (R=-1 정합)
+        ("마찰 포함 주수 축소", lambda _: ax.position_size(1_000_000, 0.005, 61450, 61150, friction=300.0)
+            == int(5000 / (300 + 300))),
+        ("최소 명목 미달 → 0", lambda _: ax.position_size(1_000_000, 0.005, 61450, 61150,
+                                                          min_notional=1_000_000) == 0),
+    )
+    failures += _check("friction_stop", lambda: None,
+        # 61450: 1틱=100 → 페널티 왕복 (스프레드/2+틱)×2=300 + 수수료·거래세 22bps ≈ 135 → ~435
+        ("마찰/주 구성", lambda _: 400 < ax.friction_per_share(61450, "KR", spread=100.0) < 480),
+        ("호가 미상 = 1틱 가정", lambda _: ax.friction_per_share(61450, "KR")
+            == ax.friction_per_share(61450, "KR", spread=100.0)),
+        ("스탑 하한 = 마찰×배수", lambda _: abs((61450 - ax.stop_with_floor(61450, 100.0, 1.2,
+            435.0, floor_mult=3.0)) - 1305.0) < 1e-6),
+        ("ATR 넓으면 ATR 채택", lambda _: 61450 - ax.stop_with_floor(61450, 2000.0, 1.2, 435.0) == 2400.0),
     )
     failures += _check("virtual_fill", lambda: None,
         ("매수=best_ask 기준", lambda _: ax.virtual_fill("buy", 61400, 61500, 61450, "KR")[0] == 61500),

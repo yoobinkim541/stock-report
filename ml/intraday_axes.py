@@ -302,15 +302,53 @@ def check_exit(pos: dict, bar: dict | None, score: float | None,
 
 # ── 사이징·가상체결 ───────────────────────────────────────────────────────────
 
+def friction_per_share(price: float, market: str, spread: float | None = None) -> float:
+    """왕복 마찰/주 — 거래비용(매수+매도 bps) + 가상체결 페널티(진입+청산 각 스프레드/2+1틱).
+
+    실전 첫 트레이드(042660)서 마찰(1,887원)이 스탑 리스크(1,683원)를 초과해 -1R 스탑이
+    -2.1R 로 증폭된 문제의 분모 — 스탑폭 하한·사이징·R 분모가 이 값을 공유한다.
+    호가 미상 시 스프레드=1틱 가정(virtual_fill 보수 가산과 정합). 순수.
+    """
+    if not price or price <= 0:
+        return 0.0
+    tick = tick_size(price, market)
+    spr = spread if (spread and spread > 0) else tick
+    penalty_rt = (spr / 2.0 + tick) * 2.0
+    from ml.adaptive import costs
+    fee_rt = costs.order_cost(price, "buy", market) + costs.order_cost(price, "sell", market)
+    return float(penalty_rt + fee_rt)
+
+
+def stop_with_floor(price: float, atr: float, atr_mult: float, friction: float,
+                    floor_mult: float = 3.0) -> float:
+    """스탑가 = price − max(atr_mult×ATR, floor_mult×마찰/주).
+
+    1분봉 ATR 스탑이 마찰보다 좁으면(0.5%대) 노이즈 스탑아웃 + 마찰 지배로 구조적
+    음수 — 마찰의 floor_mult 배를 하한으로 강제해 스탑 리스크 중 마찰 비중을
+    ≤ 1/floor_mult 로 묶는다. 순수.
+    """
+    dist = max(float(atr_mult) * float(atr), float(floor_mult) * float(friction))
+    return price - dist
+
+
 def position_size(sleeve_nav: float, risk_frac: float, price: float, stop: float,
-                  max_pos_frac: float = 1.0 / 3.0) -> int:
-    """리스크 기반 주수 — 손절 도달 시 슬리브 손실 = risk_frac. per-position 가치 캡."""
+                  max_pos_frac: float = 1.0 / 3.0, friction: float = 0.0,
+                  min_notional: float = 0.0) -> int:
+    """리스크 기반 주수 — 손절 도달 시 슬리브 손실 = risk_frac. per-position 가치 캡.
+
+    friction — 왕복 마찰/주 포함 사이징: 스탑 도달 총손실(스탑거리+마찰)이 예산과
+    일치하도록 분모에 가산 → 실현 R ≈ −1 정합. min_notional — 학습 신호 품질용
+    최소 명목금액(미만이면 0 = 진입 생략).
+    """
     stop_dist = price - stop
     if sleeve_nav <= 0 or price <= 0 or stop_dist <= 0:
         return 0
-    qty = int(sleeve_nav * risk_frac / stop_dist)
+    qty = int(sleeve_nav * risk_frac / (stop_dist + max(0.0, friction)))
     cap = int(sleeve_nav * max_pos_frac / price)
-    return max(0, min(qty, cap))
+    qty = max(0, min(qty, cap))
+    if min_notional > 0 and qty * price < min_notional:
+        return 0
+    return qty
 
 
 def virtual_fill(side: str, best_bid, best_ask, last_price, market: str) -> tuple[float, float] | None:

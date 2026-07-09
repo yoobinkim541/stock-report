@@ -60,6 +60,9 @@ def load_cfg() -> dict:
         "risk_per_trade": _env_f("INTRADAY_RISK_PER_TRADE", 0.005),
         "max_trades": int(_env_f("INTRADAY_MAX_TRADES_DAY", 6)),
         "cooldown_min": int(_env_f("INTRADAY_COOLDOWN_MIN", 30)),
+        "stop_friction_mult": _env_f("INTRADAY_STOP_FRICTION_MULT", 3.0),
+        "min_notional": {"KR": _env_f("INTRADAY_MIN_NOTIONAL_KRW", 100000),
+                         "US": _env_f("INTRADAY_MIN_NOTIONAL_USD", 150)},
         "daily_loss_halt": _env_f("INTRADAY_DAILY_LOSS_HALT", 0.015),
         "spread_cap": {"KR": _env_f("INTRADAY_MAX_SPREAD_BPS_KR", 25.0),
                        "US": _env_f("INTRADAY_MAX_SPREAD_BPS_US", 5.0)},
@@ -311,7 +314,9 @@ def _do_exit(state: dict, key: str, pos: dict, reason: str, ref_px: float, mk: s
     c = state["counters"].setdefault(mk, {"trades": 0, "day_pnl": 0.0, "sleeve_pnl_cum": 0.0})
     c["day_pnl"] = c.get("day_pnl", 0.0) + net
     c["sleeve_pnl_cum"] = c.get("sleeve_pnl_cum", 0.0) + net
-    state["cooldown_until"][key] = time.time() + cfg["cooldown_min"] * 60
+    if net < 0:                                     # 손실 청산만 쿨다운 — 윕소 연타 방어.
+        # 익절/본전 청산 후엔 즉시 재진입 허용(모멘텀 지속 포착). COOLDOWN_MIN=0 이면 전체 비활성.
+        state["cooldown_until"][key] = time.time() + cfg["cooldown_min"] * 60
     state["positions"].pop(key, None)
     (notes if notes is not None else []).append(
         f"{'🟢' if net > 0 else '🔴'} {sym} 청산[{reason}] {qty}주 @ {exit_px:,.2f} "
@@ -326,9 +331,16 @@ def _do_entry(state: dict, sym: str, mk: str, axes: dict, score: float, params: 
     price, atr = meta["close"], meta.get("atr")
     if not price or not atr or atr <= 0:
         return False
-    stop = price - float(params.get("stop_atr_mult", 1.2)) * atr
+    ob_spread = None
+    if orderbook and orderbook.get("best_bid") and orderbook.get("best_ask"):
+        ob_spread = float(orderbook["best_ask"]) - float(orderbook["best_bid"])
+    friction = ax.friction_per_share(price, mk, spread=ob_spread)
+    # 스탑폭 하한 = 마찰×배수 — 1분 ATR 타이트 스탑(첫 트레이드 1분 스탑아웃)·마찰 지배 방어
+    stop = ax.stop_with_floor(price, atr, float(params.get("stop_atr_mult", 1.2)),
+                              friction, floor_mult=cfg["stop_friction_mult"])
     target = price + float(params.get("target_r", 2.0)) * (price - stop)
-    qty = ax.position_size(sleeve, cfg["risk_per_trade"], price, stop)
+    qty = ax.position_size(sleeve, cfg["risk_per_trade"], price, stop,
+                           friction=friction, min_notional=cfg["min_notional"][mk])
     if qty < 1:
         return False
     shadow = cfg["shadow"]
@@ -364,7 +376,7 @@ def _do_entry(state: dict, sym: str, mk: str, axes: dict, score: float, params: 
         "decision_id": did, "ticker": sym, "market": mk, "qty": qty,
         "entry_price": fill["price"], "entry_epoch": time.time(),
         "entry_min": now.hour * 60 + now.minute, "stop": stop, "target": target,
-        "risk_per_share": price - stop, "shadow": shadow,
+        "risk_per_share": (price - stop) + friction, "shadow": shadow,
         "penalty_entry": fill["penalty"], "last_score": score}
     c = state["counters"].setdefault(mk, {"trades": 0, "day_pnl": 0.0, "sleeve_pnl_cum": 0.0})
     c["trades"] = c.get("trades", 0) + 1
@@ -603,8 +615,14 @@ def run_market(mk: str, state: dict, cfg: dict, *, dry: bool = False) -> list[st
             # 구독이 보장되니 fail-closed 유지.
             sp = 0.0
         atr = meta.get("atr")
-        stop = meta["close"] - float(params.get("stop_atr_mult", 1.2)) * atr if atr else None
-        qty = ax.position_size(sleeve, cfg["risk_per_trade"], meta["close"], stop) if stop else 0
+        _fr = ax.friction_per_share(meta["close"], mk,
+                                    spread=((ob or {}).get("best_ask") or 0)
+                                    - ((ob or {}).get("best_bid") or 0) or None)
+        stop = (ax.stop_with_floor(meta["close"], atr, float(params.get("stop_atr_mult", 1.2)),
+                                   _fr, floor_mult=cfg["stop_friction_mult"]) if atr else None)
+        qty = (ax.position_size(sleeve, cfg["risk_per_trade"], meta["close"], stop,
+                                friction=_fr, min_notional=cfg["min_notional"][mk])
+               if stop else 0)                      # _do_entry 와 동일 산식 — 가드 일관성
         ok, why = ax.entry_guards({
             "halt": state["halt"].get(mk, False), "now_min": now_min, "close_min": close_min,
             "flat_buffer_min": cfg["flat_buffer_min"], "entry_cutoff_min": cfg["entry_cutoff_min"],
