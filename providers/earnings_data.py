@@ -139,6 +139,13 @@ def valuation_metrics(ticker: str, *, _t=None) -> dict:
             logger.debug("배당 이력 실패 %s: %s", ticker, e)
     except Exception as e:
         logger.warning("밸류에이션 조회 실패 %s: %s", ticker, e)
+    if is_kr(ticker):
+        # KR .KS/.KQ 는 yfinance 밸류에이션 멀티플이 실제와 크게 어긋남(삼성 forwardPE 4.4·
+        # PEG 0.2·PSR 4.8 = 명백한 오류) → 오해 소지 큰 멀티플은 폐기(가치평가 게이지 오염 차단).
+        # 정밀 PER/PBR/ROE 는 DART 경로(recent_annual_metrics)가 담당 — DART_API_KEY 필요.
+        for _k in ("forward_pe", "peg", "psr"):
+            out[_k] = None
+        out["kr_yf_fallback"] = True                # UI: "DART 키 설정 시 정밀 계산" 안내용
     return out
 
 

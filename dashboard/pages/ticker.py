@@ -17,6 +17,11 @@ _NOBAR = {"displayModeBar": False}
 
 def render():
     ticker = st.session_state.get("ticker", "MSFT")
+    # 접미사 없는 6자리 KR 코드(예: "005930")는 yfinance 가 빈 데이터를 줘 차트·밸류가
+    # 통째로 안 뜸 → .KS 보정(방어). US 티커는 6자리 숫자가 아니라 무영향. 위젯 상태는
+    # 건드리지 않음(_tsel 리셋 함정 회피) — 로컬 정규화만.
+    if ticker and ticker.isdigit() and len(ticker) == 6:
+        ticker = ticker + ".KS"
     hist = cached.ohlc(ticker, period="max")
     yf_price = prev = None
     if hist is not None and not getattr(hist, "empty", True) and "Close" in getattr(hist, "columns", []):
@@ -327,9 +332,11 @@ def _live_top(ticker, hist, yf_price, prev, pos):
         if vs:
             theme.render(theme.valuation_gauge_html(vs["score"], sub=vs["sub"]))
         else:
+            _kr_nodart = (val.get("metrics") or {}).get("kr_yf_fallback") if not _skip_val else False
+            _msg = ("국내주식 — DART 키 설정 시 활성" if _kr_nodart else "재료 부족 — 생략 (ETF 등)")
             st.markdown(f"<div style='color:{theme.MUTED};font-size:.78rem;"
                         f"text-align:center;padding-top:26px'>⚖️ 가치평가<br>"
-                        f"<span style='font-size:.72rem'>재료 부족 — 생략 (ETF 등)</span></div>",
+                        f"<span style='font-size:.72rem'>{_msg}</span></div>",
                         unsafe_allow_html=True)
 
 
@@ -705,13 +712,17 @@ def _valuation(ticker, price=None):
         b[1].metric("배당수익률", data.f_pct(m.get("div_yield"), 2))
         b[2].metric("배당성장 3Y", data.f_frac_pct_s(m.get("div_growth_3y")))
         b[3].metric("EPS(TTM)", _f_krw(m.get("eps_ttm")) if is_kr else data.f_usd(m.get("eps_ttm")))
-        if is_kr:
+        if is_kr and not m.get("kr_yf_fallback"):
             c = st.columns(4)
             c[0].metric("시가총액", _f_krw_large(m.get("market_cap")))
             c[1].metric("순이익", _f_krw_large(m.get("net_income")))
             c[2].metric("자본", _f_krw_large(m.get("equity")))
             c[3].metric("BPS", _f_krw(m.get("bps")))
             st.caption(_kr_valuation_caption(m))
+        elif m.get("kr_yf_fallback"):
+            st.info("🇰🇷 국내주식 정밀 밸류에이션(PER·PBR·ROE·EPS)엔 **DART_API_KEY** 가 필요합니다 "
+                    "— 무료 발급(opendart.fss.or.kr) 후 `.env` 에 추가하면 DART 재무제표 기반으로 계산됩니다. "
+                    "현재는 yfinance 제한 데이터라 신뢰 불가한 멀티플(Fwd PE·PEG·PSR)은 숨김 처리했습니다.")
     else:
         st.warning(f"밸류에이션 데이터 없음 ({v.get('metrics_error', '')})")
     c = v.get("consensus") or {}
@@ -803,7 +814,7 @@ def _valuation(ticker, price=None):
     h = v.get("history") or []
     if h:
         st.markdown("##### 📈 실적 서프라이즈 이력")
-        _surprise_chart(h, "실적 서프라이즈 (최근)")
+        _surprise_chart(h, "실적 서프라이즈 (최근)", key=f"{ticker}_val")
     st.caption("정보·표시용 · 매매신호 아님")
 
 
@@ -849,16 +860,22 @@ def _kr_valuation_caption(m):
     return " · ".join(bits)
 
 
-def _surprise_chart(history, caption):
-    """서프라이즈 % 부호 막대 (오래된→최근) + 원표."""
+def _surprise_chart(history, caption, key=None):
+    """서프라이즈 % 부호 막대 (오래된→최근) + 원표.
+
+    key — 같은 페이지에서 두 번 렌더(스냅샷·상세)되므로 plotly_chart 고유 키 필수
+    (없으면 StreamlitDuplicateElementId 크래시 — 라이브 실증).
+    """
     hh = list(reversed(history))   # 최신순 → 시간순
     labels = [str(x.get("date", ""))[:10] for x in hh]
     vals = [x.get("surprise_pct") for x in hh]
     st.caption(caption)
     if any(x is not None for x in vals):
         st.plotly_chart(charts.signed_bars(labels, [float(x or 0) for x in vals]),
-                        width="stretch", config=_NOBAR)
-    st.dataframe(pd.DataFrame(history), hide_index=True, width="stretch")
+                        width="stretch", config=_NOBAR,
+                        key=f"surprise_{key}" if key else None)
+    st.dataframe(pd.DataFrame(history), hide_index=True, width="stretch",
+                 key=f"surprise_tbl_{key}" if key else None)
 
 
 def _financials(ticker):
@@ -957,7 +974,7 @@ def _earnings(ticker):
     cal = cached.earnings(ticker)
     h = cal.get("history") or []
     if h:
-        _surprise_chart(h, f"{ticker} 실적 서프라이즈 이력")
+        _surprise_chart(h, f"{ticker} 실적 서프라이즈 이력", key=f"{ticker}_earn")
     else:
         st.warning(f"실적 이력 없음 ({cal.get('error', '')})")
 

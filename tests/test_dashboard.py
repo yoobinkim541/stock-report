@@ -925,3 +925,26 @@ def test_backtest_persist_roundtrip(tmp_path, monkeypatch):
     d = views.backtest_last()
     assert d["verdict"] == "채택" and d["asof"] and d["ml"]["cagr"] == 0.2
     assert list(d["equity"].columns) == ["ml", "qqq"] and len(d["equity"]) == 2
+
+
+def test_valuation_score_kr_no_dart_suppressed():
+    """KR 열화모드(DART 미가용·per None) — yfinance garbage 로 게이지 오도 방지 → None."""
+    from dashboard import data
+    kr_yf = {"market_type": "kr", "per": None, "forward_pe": None, "peg": None,
+             "psr": None, "roe": 0.19, "kr_yf_fallback": True}
+    # 목표가만 있어도 KR 열화모드면 억제 (야후 KR 목표가도 불신)
+    assert data.valuation_score(286250, kr_yf, {"target_mean": 480000}, {}) is None
+    # DART 가용(per 존재)이면 정상 채점
+    kr_dart = {"market_type": "kr", "per": 12.0, "pbr": 1.1, "roe": 0.12,
+               "eps_ttm": 5000, "eps_fwd": 5800}
+    got = data.valuation_score(60000, kr_dart, {"target_mean": 72000}, {})
+    assert got is not None and -1.0 <= got["score"] <= 1.0
+
+
+def test_valuation_metrics_kr_suppresses_yf_multiples():
+    """KR yfinance 폴백 — 신뢰불가 멀티플(forward_pe·peg·psr) 폐기 + 폴백 마커."""
+    from providers import earnings_data
+    m = earnings_data.valuation_metrics("005930.KS")
+    assert m.get("market_type") == "kr"
+    assert m.get("forward_pe") is None and m.get("peg") is None and m.get("psr") is None
+    assert m.get("kr_yf_fallback") is True

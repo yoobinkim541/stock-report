@@ -343,10 +343,15 @@ def valuation_score(price, metrics, consensus=None, intrinsic=None) -> dict | No
     def clamp(x):
         return max(-1.0, min(1.0, x))
 
+    # KR 열화모드(DART 미가용) — yfinance .KS 밸류에이션·컨센서스 목표가가 실제와 크게
+    # 어긋나 게이지가 상시 "극저평가"로 오도됨. DART per 이 있으면(신뢰) 정상 채점,
+    # 없으면 야후 파생 컴포넌트를 전부 배제 → 재료 부족(None)으로 게이지 정직 생략.
+    kr_unreliable = (m.get("market_type") == "kr" and not _try_float(m.get("per")))
+
     comps = []                                       # (weight, score, label)
     _pt = peg_textbook(m)
     peg = (_pt or {}).get("peg") or _try_float(m.get("peg"))   # 교과서식 우선·야후 폴백
-    if peg and peg > 0:
+    if peg and peg > 0 and not kr_unreliable:
         comps.append((1.0, clamp((1.75 - peg) / 1.25), f"PEG {peg:.1f}"))
     e0, e1 = _try_float(m.get("eps_ttm")), _try_float(m.get("eps_fwd"))
     if e0 and e1 and e0 > 0:
@@ -357,7 +362,7 @@ def valuation_score(price, metrics, consensus=None, intrinsic=None) -> dict | No
         up = fv["fair"] / p - 1
         comps.append((1.0, clamp(up / 0.30), f"기준가 {up * 100:+.0f}%"))
     tgt = _try_float(c.get("target_median") or c.get("target_mean"))
-    if tgt and tgt > 0:
+    if tgt and tgt > 0 and not kr_unreliable:
         up = tgt / p - 1
         comps.append((1.0, clamp(up / 0.30), f"목표가 {up * 100:+.0f}%"))
     rim_up = _try_float(iv.get("upside_pct"))
