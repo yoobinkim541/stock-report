@@ -343,27 +343,29 @@ def valuation_score(price, metrics, consensus=None, intrinsic=None) -> dict | No
     def clamp(x):
         return max(-1.0, min(1.0, x))
 
-    # KR 은 yfinance forward EPS·PEG·컨센서스 목표가가 실제와 크게 어긋나 신뢰불가
-    # (DART 도 forward 는 제공 안 함). → forward 계열 컴포넌트 전부 배제하고, DART 트레일링
-    # PER·PBR·ROE 로 별도 채점. 기존 게이지 컴포넌트가 전부 forward/PEG/target 이라 KR 은
-    # DART 가 있어도 게이지가 상시 공백이던 문제 해소. US 는 기존 로직 그대로.
+    # KR 은 yfinance forward EPS·PEG·컨센서스 목표가가 실제와 크게 어긋나 신뢰불가.
+    # 단 **Naver 증권사 컨센서스**(kr_consensus_source='naver' — 차기연도 EPS 추정·목표가)가
+    # 병합돼 있으면 진짜 포워드 축이므로 정상 채점 — 고ROE 성장주가 트레일링 잔여이익
+    # 모델의 '고평가' 편향으로 오도되던 한계 해소. Naver 없으면 야후 파생은 여전히 배제.
     is_kr = (m.get("market_type") == "kr")
+    kr_fwd_ok = is_kr and m.get("kr_consensus_source") == "naver"
+    kr_tgt_ok = is_kr and (c.get("source") == "naver")
 
     comps = []                                       # (weight, score, label)
     _pt = peg_textbook(m)
     peg = (_pt or {}).get("peg") or _try_float(m.get("peg"))   # 교과서식 우선·야후 폴백
-    if peg and peg > 0 and not is_kr:
+    if peg and peg > 0 and (not is_kr or kr_fwd_ok):
         comps.append((1.0, clamp((1.75 - peg) / 1.25), f"PEG {peg:.1f}"))
     e0, e1 = _try_float(m.get("eps_ttm")), _try_float(m.get("eps_fwd"))
-    if e0 and e1 and e0 > 0:                         # KR 은 eps_fwd 결측이라 자연 제외
+    if e0 and e1 and e0 > 0:                         # KR eps_fwd 는 Naver 병합 시만 존재
         g = (e1 / e0 - 1) * 100
         comps.append((0.5, clamp((g - 5.0) / 20.0), f"EPS성장 {g:+.0f}%"))
     fv = fair_value_multiple(p, m.get("per"), m.get("forward_pe"), m.get("eps_fwd"))
-    if fv and fv.get("fair") and not is_kr:
+    if fv and fv.get("fair") and (not is_kr or kr_fwd_ok):
         up = fv["fair"] / p - 1
         comps.append((1.0, clamp(up / 0.30), f"기준가 {up * 100:+.0f}%"))
     tgt = _try_float(c.get("target_median") or c.get("target_mean"))
-    if tgt and tgt > 0 and not is_kr:               # yfinance KR 목표가 신뢰불가 → 제외
+    if tgt and tgt > 0 and (not is_kr or kr_tgt_ok):  # KR 목표가는 Naver 산일 때만
         up = tgt / p - 1
         comps.append((1.0, clamp(up / 0.30), f"목표가 {up * 100:+.0f}%"))
     rim_up = _try_float(iv.get("upside_pct"))

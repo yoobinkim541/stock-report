@@ -858,6 +858,9 @@ def _kr_valuation_caption(m):
         bits.append(f"신뢰도 {m['confidence']}")
     if m.get("per_status") == "loss":
         bits.append("PER 적자")
+    if m.get("kr_consensus_source") == "naver":
+        bits.append(f"포워드(Fwd PE·PEG·목표가) = {m.get('kr_consensus_year') or '차기연도'}E "
+                    "네이버 증권사 컨센서스")
     return " · ".join(bits)
 
 
