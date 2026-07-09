@@ -948,3 +948,22 @@ def test_valuation_metrics_kr_suppresses_yf_multiples():
     assert m.get("market_type") == "kr"
     assert m.get("forward_pe") is None and m.get("peg") is None and m.get("psr") is None
     assert m.get("kr_yf_fallback") is True
+
+
+def test_ohlc_disk_fallback_prevents_blank(tmp_path, monkeypatch):
+    """yfinance 실패(빈값) 시 디스크 폴백 → 차트 blank 방지 (마감 후 재방문 케이스)."""
+    import pandas as pd
+
+    from dashboard import cached
+    monkeypatch.setattr(cached, "_ohlc_disk_path",
+                        lambda t, period: tmp_path / f"{t}__{period}.parquet")
+    good = pd.DataFrame({"Open": [1.0, 2.0], "High": [1.0, 2.0], "Low": [1.0, 2.0],
+                         "Close": [1.0, 2.0], "Volume": [10, 20]},
+                        index=pd.to_datetime(["2026-07-07", "2026-07-08"]))
+    import providers.market_data as md
+    monkeypatch.setattr(md, "_history_cached", lambda t, period="1y": good)
+    assert len(cached.ohlc.__wrapped__("005930.KS", "max")) == 2   # 정상 → 디스크 백업
+    # 이제 yfinance 실패(빈 DataFrame) → 디스크 폴백이 마지막 정상 데이터 반환
+    monkeypatch.setattr(md, "_history_cached", lambda t, period="1y": pd.DataFrame())
+    out = cached.ohlc.__wrapped__("005930.KS", "max")
+    assert out is not None and not out.empty and len(out) == 2       # blank 아님

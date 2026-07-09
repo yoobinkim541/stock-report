@@ -130,14 +130,43 @@ def learning_evolution(surface):
     return views.learning_evolution(surface)
 
 
+def _ohlc_disk_path(t, period):
+    from pathlib import Path
+    safe = "".join(c if (c.isalnum() or c in ".-_") else "_" for c in str(t))
+    return Path.home() / "reports" / "ml-cache" / "ohlc_cache" / f"{safe}__{period}.parquet"
+
+
 @st.cache_data(ttl=_TTL, show_spinner="가격 불러오는 중…")
 def ohlc(t, period="6mo"):
-    """OHLC 가격 히스토리 (가격차트용·U3). _history_cached 재사용."""
+    """OHLC 가격 히스토리 (가격차트용·U3). _history_cached 재사용.
+
+    yfinance 가 빈 값(레이트리밋·일시장애)을 주면 차트가 통째로 안 뜨는데(가격 데이터
+    없음), @st.cache_data 가 그 빈 값을 15분 캐싱해 blank 가 지속됨 — 특히 KR 은
+    DART 부재로 페이지당 yfinance 호출이 많아 취약. → 성공 시 디스크 백업, 실패 시
+    **마지막 정상 데이터로 폴백**해 blank 차트를 방지(약간 stale 해도 표시 우선).
+    """
+    df = None
     try:
         from providers.market_data import _history_cached
-        return _history_cached(t, period=period)
+        df = _history_cached(t, period=period)
     except Exception:
-        return None
+        df = None
+    if df is not None and not getattr(df, "empty", True):
+        try:                                       # 성공 — 마지막 정상 데이터 디스크 백업
+            p = _ohlc_disk_path(t, period)
+            p.parent.mkdir(parents=True, exist_ok=True)
+            df.to_parquet(p)
+        except Exception:
+            pass
+        return df
+    try:                                           # 실패/빈값 — 디스크 폴백(blank 방지)
+        p = _ohlc_disk_path(t, period)
+        if p.exists():
+            import pandas as pd
+            return pd.read_parquet(p)
+    except Exception:
+        pass
+    return df
 
 
 @st.cache_data(ttl=3, show_spinner=False)

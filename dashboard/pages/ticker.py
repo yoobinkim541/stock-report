@@ -25,9 +25,10 @@ def render():
     hist = cached.ohlc(ticker, period="max")
     yf_price = prev = None
     if hist is not None and not getattr(hist, "empty", True) and "Close" in getattr(hist, "columns", []):
-        cl = hist["Close"]
-        yf_price = float(cl.iloc[-1])
-        prev = float(cl.iloc[-2]) if len(cl) > 1 else yf_price
+        cl = hist["Close"].dropna()               # 마감 직후 미확정 봉(NaN 종가) 제외 —
+        if len(cl):                               # 안 하면 yf_price=NaN 이 hero·진입레벨 오염
+            yf_price = float(cl.iloc[-1])
+            prev = float(cl.iloc[-2]) if len(cl) > 1 else yf_price
     pos = data.holding_position(ticker)                 # 보유 포지션(평단 등)|None
     _rq0 = cached.realtime_quote(ticker)
     cur = (_rq0.get("price") if _rq0 else None) or yf_price or 0.0   # 현재가(실시간 우선)
