@@ -967,3 +967,18 @@ def test_ohlc_disk_fallback_prevents_blank(tmp_path, monkeypatch):
     monkeypatch.setattr(md, "_history_cached", lambda t, period="1y": pd.DataFrame())
     out = cached.ohlc.__wrapped__("005930.KS", "max")
     assert out is not None and not out.empty and len(out) == 2       # blank 아님
+
+
+def test_valuation_score_kr_trailing_gauge():
+    """KR DART 트레일링(PER·PBR·ROE) 게이지 — forward/PEG 없어도 채점(기존엔 상시 공백)."""
+    from dashboard import data
+    kr = {"market_type": "kr", "per": 12.0, "pbr": 1.0, "roe": 0.15,
+          "forward_pe": None, "peg": None, "eps_ttm": 5000, "eps_fwd": None}
+    got = data.valuation_score(60000, kr, {}, {})
+    assert got is not None and got["n"] >= 2            # PER + P/B·ROE → 게이지 표시
+    assert "PER" in got["sub"] and "P/B" in got["sub"]
+    # 저평가 방향: PER 12(이익수익률 8.3%)·PBR 1.0 vs 정당 P/B(ROE15%→2.0) → 저평가(+)
+    assert got["score"] > 0
+    # KR yfinance 목표가(신뢰불가)는 게이지에 반영 안 됨 — target 만으론 채점 불가
+    kr_only_tgt = {"market_type": "kr", "per": None, "pbr": None, "roe": None}
+    assert data.valuation_score(60000, kr_only_tgt, {"target_mean": 99999}, {}) is None
