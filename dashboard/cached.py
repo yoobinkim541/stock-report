@@ -227,9 +227,12 @@ def market_tape():
     return views.market_tape()
 
 
-@st.cache_data(ttl=300, show_spinner="매크로 자산 불러오는 중…")
+@st.cache_data(ttl=900, show_spinner="매크로 자산 불러오는 중…")
 def macro_assets():
-    """환율·금·비트코인 등 매크로 자산 시세 + 30일 스파크라인 (5분 캐시)."""
+    """환율·금·비트코인 등 매크로 자산 시세 + 30일 스파크라인 (15분 캐시).
+
+    5분 TTL 은 홈 재방문마다 yf 배치(8심볼) 블로킹을 유발 — 표시용이라 15분이면 충분.
+    """
     return views.macro_assets()
 
 

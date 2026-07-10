@@ -287,6 +287,52 @@ _TEMPLATE = r"""
   }
   const rescale = finishGesture;                 // 초기 표시창 경로 하위호환
 
+  // ── 커스텀 크로스헤어 — plotly 스파이크 대신 순수 DOM 오버레이 ──
+  // 스파이크는 마우스무브마다 plotly 재그리기 유발(다중 트레이스 스터터·성능 회귀 확정).
+  // DOM translate 는 리플로우/재그리기 0 — rAF 스로틀 + 가격 버블(y축 매핑·log 대응).
+  const xhV = document.createElement("div");
+  const xhH = document.createElement("div");
+  const xhY = document.createElement("div");
+  xhV.style.cssText = "position:absolute;top:0;left:0;width:0;border-left:1px dashed #6b7385;" +
+    "pointer-events:none;display:none;z-index:3";
+  xhH.style.cssText = "position:absolute;top:0;left:0;height:0;border-top:1px dashed #6b7385;" +
+    "pointer-events:none;display:none;z-index:3";
+  xhY.style.cssText = "position:absolute;top:0;left:0;pointer-events:none;display:none;z-index:4;" +
+    "background:#2a2e39;color:#d1d4dc;font:10px 'JetBrains Mono',monospace;" +
+    "padding:1px 4px;border-radius:3px;transform-origin:left center";
+  let xhRaf = null, xhEvt = null;                      // 부착은 newPlot 후 (newPlot 이 div 를 비움)
+  function xhHide() { xhV.style.display = xhH.style.display = xhY.style.display = "none"; }
+  function xhApply() {
+    xhRaf = null;
+    const e = xhEvt;
+    if (!e) return;
+    const drag = gd.querySelector(".nsewdrag");        // 메인(가격) 플롯 영역
+    if (!drag) return;
+    const pr = drag.getBoundingClientRect(), gr = gd.getBoundingClientRect();
+    if (e.clientX < pr.left || e.clientX > pr.right
+        || e.clientY < pr.top || e.clientY > pr.bottom) { xhHide(); return; }
+    const x = e.clientX - gr.left, y = e.clientY - gr.top;
+    xhV.style.display = xhH.style.display = "block";
+    xhV.style.transform = "translateX(" + x + "px)";
+    xhV.style.top = (pr.top - gr.top) + "px";
+    xhV.style.height = pr.height + "px";
+    xhH.style.transform = "translateY(" + y + "px)";
+    xhH.style.left = (pr.left - gr.left) + "px";
+    xhH.style.width = pr.width + "px";
+    const yr = gd.layout.yaxis && gd.layout.yaxis.range;
+    if (yr) {                                          // y 가격 버블 (축좌표 → fmtVal 이 환산)
+      const frac = (e.clientY - pr.top) / pr.height;
+      xhY.textContent = fmtVal(yr[1] + (yr[0] - yr[1]) * frac);
+      xhY.style.display = "block";
+      xhY.style.transform = "translate(" + (pr.right - gr.left + 2) + "px, " + (y - 8) + "px)";
+    }
+  }
+  gd.addEventListener("mousemove", (e) => {
+    xhEvt = e;
+    if (!xhRaf) xhRaf = requestAnimationFrame(xhApply);
+  });
+  gd.addEventListener("mouseleave", xhHide);
+
   // ── OHLC 데이터창 — 호버 봉의 시·고·저·종·거래량·등락% 리드아웃 (bounds 재사용) ──
   const ohlcEl = document.getElementById("ohlcbar");
   function ohlcReadout(ms) {
@@ -567,6 +613,8 @@ _TEMPLATE = r"""
   };
 
   Plotly.newPlot(gd, fig.data, fig.layout, @@CONFIG@@).then(() => {
+    gd.style.position = "relative";                    // 크로스헤어 오버레이 부착 (newPlot 후)
+    gd.appendChild(xhV); gd.appendChild(xhH); gd.appendChild(xhY);
     // 저장된 드로잉 복원 — 서버 도형 뒤에 append (지우기·보호 가드와 정합).
     // 하단 지표 구성이 바뀌어 사라진 서브패널 축(y3 등)을 참조하는 도형은 제외(고아 방지)
     const saved = loadDrawings();

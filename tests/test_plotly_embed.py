@@ -82,7 +82,9 @@ def test_embed_persistence_and_readout_contract():
     html = plotly_embed.pannable_chart_html(fig, hist, store_key="NVDA:1d:lin")
     for token in ('"NVDA:1d:lin"', "function saveDrawings", "function loadDrawings",
                   "function scheduleSave", '"tndraw:" + storeKey',
-                  'id="ohlcbar"', "function ohlcReadout", "plotly_hover", "plotly_unhover"):
+                  'id="ohlcbar"', "function ohlcReadout", "plotly_hover", "plotly_unhover",
+                  # DOM 크로스헤어 — plotly 스파이크 대신 (재그리기 0·rAF 스로틀)
+                  "function xhApply", "requestAnimationFrame(xhApply)", "mouseleave"):
         assert token in html, f"누락: {token}"
     # store_key 미지정 = null → 비영속 (구형 호출 하위호환)
     norm = plotly_embed.pannable_chart_html(fig, hist)

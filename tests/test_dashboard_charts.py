@@ -822,14 +822,14 @@ def test_heikin_ashi_transform():
     assert charts.heikin_ashi(None) is None
 
 
-def test_price_chart_crosshair_spikes():
-    """십자선 — x 전 패널·y 가격 패널 스파이크 (TradingView 크로스헤어)."""
+def test_price_chart_no_plotly_spikes():
+    """십자선은 embed JS DOM 오버레이 — plotly 스파이크 금지 (마우스무브 재그리기
+    스터터 성능 회귀 확정 → 제거. 재도입 방지 회귀)."""
     fig = charts.price_chart(_ohlcv(), "T", show_volume=True, show_rsi=True)
-    assert fig.layout.xaxis.showspikes is True and fig.layout.xaxis.spikemode == "across"
-    assert fig.layout.yaxis.showspikes is True            # 가격 패널
-    assert fig.layout.yaxis3.showspikes is not True       # 서브패널은 y 스파이크 없음
-    fig1 = charts.price_chart(_ohlcv(), "T")              # 단일 패널
-    assert fig1.layout.yaxis.showspikes is True
+    assert fig.layout.xaxis.showspikes is not True
+    assert fig.layout.yaxis.showspikes is not True
+    fig1 = charts.price_chart(_ohlcv(), "T")
+    assert fig1.layout.yaxis.showspikes is not True
 
 
 def test_price_chart_log_scale_yref_none_annotations():

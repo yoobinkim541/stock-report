@@ -31,12 +31,14 @@ function el(id) {
   if (!els[id]) els[id] = { id, style: {}, innerHTML: "", _h: {}, _s: new Set(id === "bt-mag" ? ["on"] : []),
     classList: { toggle(c, on) { on ? this._s.add(c) : this._s.delete(c); }, get _set() { return null; } },
     on(e, f) { this._h[e] = f; }, emit(e, p) { if (this._h[e]) this._h[e](p); },
+    appendChild() {}, addEventListener() {}, querySelector() { return null; },
     getBoundingClientRect() { return { top: 0 }; } };
   els[id].classList._s = els[id]._s;
   if (id === "chart") gd = els[id];
   return els[id];
 }
-global.document = { getElementById: el };
+global.document = { getElementById: el,
+                    createElement: () => ({ style: {}, textContent: "" }) };
 global.window = { frameElement: null, parent: { innerHeight: 900, addEventListener() {} } };
 global.performance = { now: () => 1 };
 global.requestAnimationFrame = () => null;
