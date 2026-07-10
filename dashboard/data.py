@@ -840,3 +840,37 @@ def load_kr_holdings(path: str | None = None) -> dict:
     total = sum(r["value"] for r in rows)
     return {"rows": rows, "total": total,
             "last_sync": snap.get("last_domestic_sync")}
+
+
+# ── 가격 알림 (bot/price_alerts store 재사용 — 차트→알림 연동) ─────────────────
+
+def ticker_alerts(ticker: str) -> list[dict]:
+    """해당 종목의 미발동 가격 알림 목록 — [{id,price,type,note,created_at}]. graceful []."""
+    try:
+        from bot import price_alerts
+        t = (ticker or "").upper()
+        return [a for a in price_alerts.load_alerts()
+                if a.get("ticker") == t and not a.get("triggered")]
+    except Exception:
+        return []
+
+
+def add_ticker_alert(ticker: str, price: float, alert_type: str, note: str = "") -> str | None:
+    """가격 알림 등록 — 발동 시 봇(5분 체크)이 텔레그램 발송. 실패 None. 주문 아님."""
+    try:
+        from bot import price_alerts
+        if not price or float(price) <= 0:
+            return None
+        return price_alerts.add_alert(ticker, float(price), alert_type, note=note,
+                                      meta={"source": "dashboard_chart"})
+    except Exception:
+        return None
+
+
+def remove_ticker_alert(alert_id: str) -> bool:
+    """가격 알림 삭제. graceful False."""
+    try:
+        from bot import price_alerts
+        return bool(price_alerts.remove_alert(alert_id))
+    except Exception:
+        return False

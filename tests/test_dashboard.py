@@ -406,6 +406,160 @@ def test_views_market_indicators_graceful(monkeypatch):
     assert mi["fear_greed"] is None and mi["indices"] == []
 
 
+def test_views_macro_assets(monkeypatch):
+    """매크로 자산 — yf 배치 → 최신가·전일대비·스파크. 부분 실패 스킵·전체 실패 []."""
+    import pandas as pd
+    import yfinance as yf
+    from dashboard import views
+    syms = [s[0] for s in views._MACRO_SPECS]
+    idx = pd.date_range("2025-06-01", periods=30)
+    cols = pd.MultiIndex.from_product([syms, ["Open", "High", "Low", "Close", "Volume"]])
+    df = pd.DataFrame(1.0, index=idx, columns=cols)
+    df[("KRW=X", "Close")] = [1400.0 + i for i in range(30)]     # 상승
+    df[("GC=F", "Close")] = [4100.0 - i for i in range(30)]      # 하락
+    df[("BTC-USD", "Close")] = float("nan")                       # 결측 → 스킵
+    monkeypatch.setattr(yf, "download", lambda *a, **k: df)
+    out = views.macro_assets()
+    by = {x["symbol"]: x for x in out}
+    assert "KRW=X" in by and by["KRW=X"]["pct"] > 0 and by["KRW=X"]["ticker"] == "KRW=X"
+    assert "GC=F" in by and by["GC=F"]["pct"] < 0
+    assert "BTC-USD" not in by                                    # 전량 NaN → 스킵
+    assert by["KRW=X"]["spark"] and len(by["KRW=X"]["spark"]) <= 30
+    assert by["KRW=X"]["unit"] == "₩" and by["GC=F"]["emoji"]
+
+    def boom(*a, **k):
+        raise RuntimeError("net")
+
+    monkeypatch.setattr(yf, "download", boom)
+    assert views.macro_assets() == []                            # 전체 실패 graceful
+
+
+def test_ticker_alerts_crud(tmp_path, monkeypatch):
+    """차트→가격 알림 래퍼 — 등록/종목 필터/삭제.
+
+    store DB 는 conftest 가 tmp 격리하지만 **레거시 미러(ALERTS_FILE)는 모듈 상수** —
+    리다이렉트 없이는 라이브 price_alerts.json 을 덮어쓴다(CLAUDE.md 테스트 규칙).
+    """
+    import bot.price_alerts as pa
+    from dashboard import data as ddata
+    monkeypatch.setattr(pa, "ALERTS_FILE", str(tmp_path / "price_alerts.json"))
+    aid = ddata.add_ticker_alert("TSLA", 250.5, "buy", note="지지선")
+    assert aid
+    ddata.add_ticker_alert("NVDA", 999.0, "sell")
+    mine = ddata.ticker_alerts("TSLA")
+    assert any(a["id"] == aid and a["price"] == 250.5 and a["type"] == "buy" for a in mine)
+    assert all(a["ticker"] == "TSLA" for a in mine)         # 타 종목 미포함
+    assert ddata.remove_ticker_alert(aid) is True
+    assert not any(a["id"] == aid for a in ddata.ticker_alerts("TSLA"))
+    # 불량 입력 graceful
+    assert ddata.add_ticker_alert("TSLA", 0, "buy") is None
+    assert ddata.remove_ticker_alert("nonexist") is False
+
+
+def test_price_alerts_cross_process_serialized(tmp_path):
+    """봇↔대시보드 **교차 프로세스** 동시 등록 — flock 직렬화로 lost update 0.
+
+    save_collection 은 컬렉션 통째 교체 — 락 없이는 두 프로세스의 load→append→save 가
+    겹쳐 알림이 소실된다(대시보드가 신규 writer 가 되며 현실화된 위험). 각 15건×2프로세스
+    동시 등록 후 30건 전부 존재해야 통과.
+    """
+    import subprocess
+    root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    env = dict(os.environ, STOCK_REPORT_DB=str(tmp_path / "t.db"))
+    prog = (
+        "import sys, time; sys.path.insert(0, {root!r})\n"
+        "import bot.price_alerts as pa\n"
+        "pa.ALERTS_FILE = {mirror!r}\n"
+        "time.sleep(0.05)\n"                     # 두 프로세스 기동 후 동시 시작
+        "for i in range(15):\n"
+        "    pa.add_alert('P{tag}N%d' % i, 100.0 + i, 'buy')\n"
+    )
+    procs = [subprocess.Popen(
+        [sys.executable, "-c",
+         prog.format(root=root, mirror=str(tmp_path / "mirror.json"), tag=t)],
+        env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE) for t in ("A", "B")]
+    for p in procs:
+        _, err = p.communicate(timeout=120)
+        assert p.returncode == 0, err.decode()[-800:]
+    # 검증도 동일 env 서브프로세스로 — 부모 store 는 conftest DB 에 바인딩돼 있음
+    chk = subprocess.run(
+        [sys.executable, "-c",
+         f"import sys; sys.path.insert(0, {root!r})\n"
+         "import bot.price_alerts as pa\n"
+         f"pa.ALERTS_FILE = {str(tmp_path / 'mirror.json')!r}\n"
+         "print(len(pa.load_alerts()))"],
+        env=env, capture_output=True, text=True, timeout=60)
+    assert chk.returncode == 0, chk.stderr[-800:]
+    n = int(chk.stdout.strip().splitlines()[-1])
+    assert n == 30, f"lost update! {n}/30"
+
+
+def test_views_chart_news_events(tmp_path, monkeypatch):
+    """차트 뉴스 마커 로더 — base 심볼 매칭(.KS 무접미)·필드 추출·파일없음 graceful []."""
+    import json as _json
+    from dashboard import views
+    from providers import news_labels
+    rows = [
+        {"id": "1", "published_at": "2026-07-01T09:00:00+09:00", "tickers": ["NVDA"],
+         "event_type": "실적", "direction": 1, "strength": 4, "title_head": "beat"},
+        {"id": "2", "published_at": "2026-07-02T09:00:00+09:00", "tickers": ["005930"],
+         "event_type": "규제", "direction": -1, "strength": 3, "title_head": "krx"},
+        {"id": "3", "published_at": "", "tickers": ["NVDA"],
+         "event_type": "기타", "direction": 0, "strength": 1, "title_head": "no-date"},
+    ]
+    p = tmp_path / "labels.jsonl"
+    p.write_text("\n".join(_json.dumps(r) for r in rows), encoding="utf-8")
+    monkeypatch.setattr(news_labels, "LABELS_PATH", p)
+    out = views.chart_news_events("NVDA")
+    assert len(out) == 1 and out[0]["date"] == "2026-07-01" and out[0]["direction"] == 1
+    kr = views.chart_news_events("005930.KS")            # .KS → base 매칭
+    assert len(kr) == 1 and kr[0]["event_type"] == "규제"
+    monkeypatch.setattr(news_labels, "LABELS_PATH", tmp_path / "none.jsonl")
+    assert views.chart_news_events("NVDA") == []          # 파일 없음 graceful
+
+
+def test_views_ohlc_tf_2h_4h_resample(monkeypatch):
+    """2h/4h 커스텀 봉 — yfinance 1h 조회 후 로컬 리샘플 (interval 인자 검증)."""
+    import pandas as pd
+    import yfinance as yf
+    from dashboard import views
+    idx = pd.date_range("2026-07-06 08:00", periods=8, freq="h")   # 2h 버킷 경계 정렬
+    hourly = pd.DataFrame({"Open": range(100, 108), "High": range(101, 109),
+                           "Low": range(99, 107), "Close": range(100, 108),
+                           "Volume": [10.0] * 8}, index=idx)
+    seen = {}
+
+    class _T:
+        def __init__(self, t):
+            pass
+
+        def history(self, period=None, interval=None):
+            seen["interval"] = interval
+            return hourly
+
+    monkeypatch.setattr(yf, "Ticker", _T)
+    d2 = views.ohlc_tf("NVDA", "2h")
+    assert seen["interval"] == "1h"                       # 2h 는 yf 미지원 → 1h 조회
+    assert len(d2) == 4 and float(d2["High"].iloc[0]) == 102.0   # (101,102) max
+    assert float(d2["Volume"].iloc[0]) == 20.0            # 합산
+    d4 = views.ohlc_tf("NVDA", "4h")
+    assert len(d4) == 2 and float(d4["Close"].iloc[0]) == 103.0  # last of 09~12
+    d1 = views.ohlc_tf("NVDA", "1h")
+    assert seen["interval"] == "1h" and len(d1) == 8      # 1h 는 그대로
+
+
+def test_macro_symbols_resolve_and_search():
+    """매크로 심볼 — 한/영/티커 resolve + 검색 유니버스 포함 + 표시명 (검색 발견성)."""
+    import ticker_names as tn
+    assert tn.resolve("금") == "GC=F"
+    assert tn.resolve("비트코인") == "BTC-USD"
+    assert tn.resolve("환율") == "KRW=X"
+    assert tn.normalize_input("이더리움") == "ETH-USD"
+    for t in ("GC=F", "BTC-USD", "KRW=X", "^TNX", "ETH-USD", "SI=F", "CL=F", "DX-Y.NYB"):
+        assert t in tn.universe(), f"{t} not in search universe"
+        assert tn.display_name(t, allow_net=False)               # 깔끔한 표시명
+
+
 # ── P1 자동 모의투자 (원장 조인·스코어카드·요약 조립 — 순수·무네트워크) ─────────
 def test_views_join_decisions_matches_outcomes():
     from dashboard import views

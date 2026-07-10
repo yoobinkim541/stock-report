@@ -46,6 +46,11 @@ data.portfolio_summary = lambda *a, **k: {"total_usd":10000.0,"return_pct":15.0,
 data.portfolio_weights = lambda *a, **k: {"MSFT":0.4,"NVDA":0.6}
 data.trade_events = lambda *a, **k: []
 data.load_kr_holdings = lambda *a, **k: {}
+data.ticker_alerts = lambda t: [{"id": "ab12cd34", "ticker": "MSFT", "price": 380.0,
+                                 "type": "buy", "note": "지지선", "triggered": False,
+                                 "created_at": "2026-07-09T10:00:00"}]
+data.add_ticker_alert = lambda *a, **k: "ab12cd34"
+data.remove_ticker_alert = lambda i: True
 cached.econ = lambda *a, **k: [{"marker":"\U0001f534","date_str":"06/29 21:30","title":"CPI"}]
 cached.news = lambda t: "뉴스 본문"
 cached.etf = lambda t: {"ticker": t, "is_etf": False}
@@ -68,6 +73,15 @@ cached.trendlines_for = lambda *a, **k: []
 cached.market_temp_history = lambda: [{"date": "2026-07-07", "score": 0.1},
                                       {"date": "2026-07-08", "score": 0.2}]
 cached.next_earnings = lambda t: None
+cached.chart_news = lambda t: [{"date": "2026-07-01", "direction": 1, "strength": 4,
+                                "event_type": "실적", "title": "beat"}]
+cached.macro_assets = lambda: [
+    {"symbol": "KRW=X", "label": "달러/원 환율", "emoji": "\U0001f4b1", "unit": "₩",
+     "ticker": "KRW=X", "price": 1505.05, "chg": -3.2, "pct": -0.21, "spark": [1500, 1503, 1505]},
+    {"symbol": "GC=F", "label": "금", "emoji": "\U0001f947", "unit": "$/oz", "ticker": "GC=F",
+     "price": 4105.3, "chg": 12.1, "pct": 0.30, "spark": [4090, 4100, 4105]},
+    {"symbol": "BTC-USD", "label": "비트코인", "emoji": "₿", "unit": "$", "ticker": "BTC-USD",
+     "price": 64162, "chg": 980, "pct": 1.55, "spark": [63000, 63800, 64162]}]
 cached.portfolio_flows = lambda: {}
 cached.social_sentiment = lambda: {"summary": {"title": "미국 레딧 게시물 분석",
     "published_at": "2026-07-05T10:00:00+09:00", "url": "https://t.me/insidertracking/1",

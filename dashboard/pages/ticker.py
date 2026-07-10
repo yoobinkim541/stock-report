@@ -32,8 +32,12 @@ def render():
 
     # 가격 차트 — 풀폭 · 봉/기간/차트종류/지표 컨트롤 (+ 보유 시 평단 수평선)
     if yf_price is not None:
-        _price_chart(ticker, hist, pos.get("avg_price_usd") if pos else None,
-                     data.trade_events(ticker))
+        # ⚡자동 갱신 토글은 fragment **밖** — 켜고 끄기가 래퍼(주기 재실행)를 전환해야 함
+        live = st.toggle("⚡ 자동 갱신 (8초)", key="_chart_live",
+                         help="실시간가로 마지막 봉·현재가 갱신 — 보던 위치·드로잉 유지")
+        _chart = _price_chart_live if live else _price_chart
+        _chart(ticker, hist, pos.get("avg_price_usd") if pos else None,
+               data.trade_events(ticker))
     else:
         st.info("가격 데이터 없음 (yfinance)")
 
@@ -87,14 +91,71 @@ def _trade_detail(t):
                + (f" · {t.get('note')}" if t.get("note") else ""))
 
 
-_TF = {"5분": "5m", "1시간": "1h", "1일": "1d", "주": "1wk", "월": "1mo"}
-_TF_SPAN = {"5m": "최근 60일", "1h": "최근 2년"}   # yfinance 인트라데이 보존 한계 (정직 표기)
+_TF = {"5분": "5m", "1시간": "1h", "2시간": "2h", "4시간": "4h",
+       "1일": "1d", "주": "1wk", "월": "1mo"}
+# yfinance 인트라데이 보존 한계 (정직 표기) — 2h/4h 는 1h 리샘플이라 같은 한계
+_TF_SPAN = {"5m": "최근 60일", "1h": "최근 2년", "2h": "최근 2년", "4h": "최근 2년"}
 _MA_OPTS = [5, 10, 20, 60, 120, 200]
 _MA_DEFAULT = {"1d": [60, 120, 200], "1wk": [60, 120, 200],   # 요청 기본값
                "1mo": [5, 10, 20, 60, 120, 200], "5m": [20, 60], "1h": [20, 60]}
 _TOP_INDS = ["이동평균선", "자동 추세선·채널", "지수이평(EMA)", "볼린저 밴드", "일목균형표",
              "슈퍼트렌드", "엔벨로프", "파라볼릭 SAR", "프라이스 채널", "매물대", "프랙탈",
              "VWAP(세션)", "앵커드 VWAP"]
+
+
+def _chart_events(ticker, df, ev_sel) -> tuple[list, list]:
+    """이벤트 마커 조립 — 실적(E·beat 초록/miss 빨강)·배당(D)·뉴스(N·방향색). graceful.
+
+    실적=valuation history(서프라이즈%) · 배당=일봉 Dividends 열(리샘플 봉은 열 없음→스킵)
+    · 뉴스=LLM 구조화 라벨(point-in-time·표시 전용). 반환 (events, zones=[]).
+    """
+    events: list[dict] = []
+    if "실적 E" in ev_sel:
+        try:
+            for h in (cached.valuation(ticker) or {}).get("history") or []:
+                sp = h.get("surprise_pct")
+                if not h.get("date"):
+                    continue
+                if sp is None:
+                    hover, color = f"실적 {h['date']}", theme.MUTED
+                else:
+                    beat = sp >= 0
+                    color = theme.GREEN if beat else theme.RED
+                    hover = (f"실적 {h['date']} · EPS {h.get('eps_actual')} vs "
+                             f"예상 {h.get('eps_est')} ({sp:+.1f}% {'beat' if beat else 'miss'})")
+                events.append({"date": h["date"], "marker": "E", "color": color,
+                               "hover": hover})
+        except Exception:
+            pass
+    if "배당 D" in ev_sel and "Dividends" in getattr(df, "columns", []):
+        try:
+            dv = df["Dividends"]
+            for ts_, amt in dv[dv > 0].tail(40).items():
+                events.append({"date": ts_, "marker": "D", "color": "#22d3ee",
+                               "hover": f"배당락 {str(ts_)[:10]} · {float(amt):,.4f}"})
+        except Exception:
+            pass
+    if "뉴스 N" in ev_sel:
+        try:
+            for n in cached.chart_news(ticker) or []:
+                d_ = n.get("direction")
+                color = theme.GREEN if (d_ or 0) > 0 else (theme.RED if (d_ or 0) < 0
+                                                           else theme.MUTED)
+                events.append({"date": n.get("date"), "marker": "N", "color": color,
+                               "hover": f"📰 {n.get('event_type')} · {n.get('title')} "
+                                        f"(강도 {n.get('strength')})"})
+        except Exception:
+            pass
+    return events, []
+
+
+@st.fragment(run_every=8)
+def _price_chart_live(ticker, hist, avg_cost, trades, fullscreen: bool = False):
+    """⚡ 자동 갱신 차트 — 8초 fragment 재실행 (실시간 마지막 봉 패치 + 뷰·드로잉 유지).
+
+    드로잉=localStorage 복원 · 뷰 위치=60초 신선 규칙 복원이라 재실행이 화면을 안 깨뜨림.
+    """
+    _price_chart(ticker, hist, avg_cost, trades, fullscreen)
 
 
 def _price_chart(ticker, hist, avg_cost, trades, fullscreen: bool = False):
@@ -117,8 +178,9 @@ def _price_chart(ticker, hist, avg_cost, trades, fullscreen: bool = False):
                 st.switch_page(pg)
     tf_label = ctf.segmented_control("봉", list(_TF), default="1일",
                                      label_visibility="collapsed", key="_chart_tf") or "1일"
-    kind = ckind.segmented_control("차트 종류", ["📈 라인", "🕯️ 캔들"], default="📈 라인",
-                                   label_visibility="collapsed", key="_chart_kind")
+    kind = ckind.segmented_control("차트 종류", ["📈 라인", "🕯️ 캔들", "🟩 HA"], default="📈 라인",
+                                   label_visibility="collapsed", key="_chart_kind",
+                                   help="HA = 하이킨아시(평활 캔들·표시용 — 실체결가와 다름)")
     # 기간 = 초기 표시 창만 — 데이터는 항상 전체(max) 로드라 과거로 무한 드래그 가능
     period = cper.radio("기간", ["3mo", "6mo", "1y", "5y", "전체"], index=1, horizontal=True,
                         label_visibility="collapsed", key="_chart_period")
@@ -186,10 +248,17 @@ def _price_chart(ticker, hist, avg_cost, trades, fullscreen: bool = False):
             want_long = cch2.checkbox("장기 채널(250봉)", value=True, key=f"_tl_long_{tf}")
             st.caption("채널 = 회귀 ±2σ 자동 감지 — 상승(초록)/하락(빨강)/횡보(회색)·"
                        "라벨에 방향 표기 · 지지/저항선 동시 표시")
+        st.markdown("**이벤트 마커** — 실적·배당·뉴스·진입존 오버레이 (이 프로젝트 데이터)")
+        ev_sel = st.pills("이벤트", ["실적 E", "배당 D", "뉴스 N", "진입존 🎯"],
+                          selection_mode="multi", default=["실적 E", "배당 D"],
+                          key=f"_ev_{tf}", label_visibility="collapsed") or []
         st.markdown("**하단 지표** — 서브 패널")
-        bottom = st.pills("하단 지표", ["거래량", "RSI"], selection_mode="multi",
+        bottom = st.pills("하단 지표", ["거래량", "RSI", "MACD", "스토캐스틱"], selection_mode="multi",
                           default=["거래량", "RSI"], key=f"_bot_{tf}",
                           label_visibility="collapsed") or []
+        log_scale = st.toggle("로그 스케일", key=f"_logscale_{tf}",
+                              help="가격축을 로그로 — 장기·급등 종목의 % 변화 비교에 유리 "
+                                   "(비교 모드·서브패널 제외)")
         legacy = st.toggle("구형 렌더러", key="_legacy_chart",
                            help="plotly.js CDN 불가 환경 폴백 — 팬 시 y 자동맞춤·인차트 상세 없음")
         st.caption("봉 단위별로 설정이 기억됩니다 · 범례 클릭으로도 개별 토글")
@@ -203,6 +272,8 @@ def _price_chart(ticker, hist, avg_cost, trades, fullscreen: bool = False):
             st.caption(f"ℹ️ {tf_label}봉은 {_TF_SPAN[tf]}까지 제공 (yfinance 보존 한계) · 주/월/일봉은 전체 이력")
     label = ticker_names.label(ticker)
     show_rsi = "RSI" in bottom
+    show_macd = "MACD" in bottom
+    show_stoch = "스토캐스틱" in bottom
     tls = []
     if want_lines or want_short or want_long:
         ch_key = tuple(k for k, w in (("short", want_short), ("long", want_long)) if w)
@@ -238,8 +309,43 @@ def _price_chart(ticker, hist, avg_cost, trades, fullscreen: bool = False):
                       else "TR(배당재투자·조정종가) 기준")
                    + " · 가격 지표(캔들·평단·MA·매물대 등) 비활성")
         show_vol = show_vol and "Volume" in getattr(df, "columns", [])   # PR 스왑 후 재판정
+    # ⚡ 실시간 — 마지막 봉을 KIS 실시간가로 패치 (fresh 시·비교 모드 제외).
+    # 캐시된 df 원본 오염 금지 → copy 후 수정. HA 변환 앞이라 HA 도 최신가 반영.
+    if not compare and df is not None and not getattr(df, "empty", True):
+        _rt = (cached.realtime_quote(ticker) or {}).get("price")
+        if _rt and _rt > 0:
+            df = df.copy()
+            for _c in ("Close", "High", "Low"):     # int 열에 float 대입 = pandas 3 에러
+                if _c in df.columns and getattr(df[_c].dtype, "kind", "") != "f":
+                    df[_c] = df[_c].astype("float64")
+            _il = df.index[-1]
+            df.loc[_il, "Close"] = float(_rt)
+            if "High" in df.columns:
+                df.loc[_il, "High"] = max(float(df.loc[_il, "High"]), float(_rt))
+            if "Low" in df.columns:
+                df.loc[_il, "Low"] = min(float(df.loc[_il, "Low"]), float(_rt))
+    # 로그 스케일은 비교(%) 모드와 공존 불가 — 비교 시 자동 비활성
+    use_log = bool(log_scale) and not compare
+    _df_events = df   # 이벤트 조립용 원본 참조 — HA 변환은 Dividends 열을 보존 안 함
+    # 하이킨아시 — 표시용 평활 변형(OHLC 재계산·거래량 보존). OHLC 없으면 라인 폴백.
+    use_ha = kind == "🟩 HA" and not compare
+    if use_ha:
+        _ha = charts.heikin_ashi(df)
+        if _ha is not df:
+            df = _ha
+            st.caption("🟩 하이킨아시 — 평활 캔들(표시용) · 시고저종은 HA 재계산값 — "
+                       "실제 체결가·평단 비교는 근사")
+        else:
+            use_ha = False
+            st.caption("⚠️ 하이킨아시는 OHLC 필요 — 라인으로 표시")
+    events, zones = _chart_events(ticker, _df_events, ev_sel) if not compare else ([], [])
+    if "진입존 🎯" in ev_sel and not compare:
+        try:
+            zones = _chart_entry_zones(ticker, hist, float(hist["Close"].iloc[-1]))
+        except Exception:
+            zones = []
     fig = charts.price_chart(
-        df, label, kind=("candle" if kind == "🕯️ 캔들" else "line"),
+        df, label, kind=("candle" if (kind == "🕯️ 캔들" or use_ha) else "line"),
         avg_cost=avg_cost, trades=trades, view_days=view_days, mas=mas,
         show_rsi=show_rsi, bollinger="볼린저 밴드" in top,
         ichimoku="일목균형표" in top, trend_lines=tls, show_volume=show_vol,
@@ -247,7 +353,8 @@ def _price_chart(ticker, hist, avg_cost, trades, fullscreen: bool = False):
         fractals="프랙탈" in top, vol_profile="매물대" in top,
         emas=emas, psar="파라볼릭 SAR" in top, donchian_on="프라이스 채널" in top,
         vwap=("VWAP(세션)" in top and tf in ("5m", "1h")), avwap="앵커드 VWAP" in top,
-        compare=compare)
+        compare=compare, show_macd=show_macd, show_stoch=show_stoch, log_scale=use_log,
+        events=events, zones=zones)
     if fullscreen:                                  # ⛶ 풀뷰 — 뷰포트 거의 채우는 높이
         fig.update_layout(height=840)
     event = None
@@ -264,19 +371,76 @@ def _price_chart(ticker, hist, avg_cost, trades, fullscreen: bool = False):
         h = int(fig.layout.height or 420)
         _bj = (plotly_embed.compare_bounds_json(df, compare, view_days)
                if compare else None)                   # 비교 모드 — % 프레임으로 y 맞춤
+        # 드로잉 영속화 키 — 좌표계가 다른 조합(스케일·HA)은 분리 버킷
+        _scale = "pct" if compare else ("log" if use_log else "lin")
+        _sk = f"{ticker}:{tf}:{_scale}" + (":ha" if use_ha else "")
         st.components.v1.html(
             plotly_embed.pannable_chart_html(
                 fig, df, height=h, view_days=view_days,
                 vol_axis="yaxis2" if show_vol else None, bounds_json=_bj,
-                fit_viewport=fullscreen),
-            height=h + 128)
+                fit_viewport=fullscreen, pct_mode=bool(compare), y_log=use_log,
+                store_key=_sk),
+            height=h + 164)
     st.caption("🖱️ 드래그=이동(y축 자동 맞춤) · 휠=확대/축소 · 더블클릭=원위치 · "
-               "✏️ 우상단 모드바 직접 그리기(선·자유곡선·박스)·지우개 — 설정 변경 시 드로잉 초기화")
+               "✏️ 모드바 직접 그리기(선·자유곡선·박스)·지우개 + 차트 위 도구바: "
+               "🧲 자석(봉 OHLC 스냅)·─ 수평선·🔱 피보나치·📏 측정·🗑 지우기 · "
+               "드로잉은 이 브라우저에 종목·봉·스케일별 자동 저장")
     selected = _selected_trade(event, trades or []) if legacy else None
     if selected:
         _trade_detail(selected)
     elif trades:
         st.caption("차트의 ▲/▼ 거래 마커 클릭 = 상세 · 전체 이력·되돌리기는 하단 ⚙️ 내 포지션 관리")
+    _alert_section(ticker, hist)
+
+
+@st.fragment
+def _alert_section(ticker, hist):
+    """🔔 가격 알림 — 차트에서 본 레벨을 봇 알림으로 (bot/price_alerts store 공용).
+
+    발동 체크·텔레그램 발송은 봇의 5분 루프가 담당 — 여기는 등록/목록/삭제만.
+    표시·알림용, 주문 아님. (iframe 드로잉은 서버로 못 돌아오므로 가격 입력 프리필 방식)
+    fragment — 등록/삭제가 expander 만 부분 rerun (차트 재렌더·드로잉 세션 무영향).
+    """
+    alerts = data.ticker_alerts(ticker)
+    # 라벨은 고정 — 개수를 넣으면 등록 직후 라벨 변경으로 expander 가 접힘(위젯 상태=라벨 키)
+    with st.expander("🔔 가격 알림"):
+        if alerts:
+            st.caption(f"활성 알림 {len(alerts)}건")
+        try:
+            _last = float(hist["Close"].iloc[-1]) if hist is not None else 0.0
+        except Exception:
+            _last = 0.0
+        c1, c2, c3, c4 = st.columns([1.2, 1, 1.4, 0.8], vertical_alignment="bottom")
+        px = c1.number_input("목표가", min_value=0.0, value=round(_last, 2),
+                             format="%.2f", key=f"_al_px_{ticker}")
+        # 클릭 해제 시 None 반환 → 방향 반전 오등록 방지 (_chart_tf 와 동일 가드)
+        du = c2.segmented_control("방향", ["📉 이하", "📈 이상"], default="📉 이하",
+                                  key=f"_al_dir_{ticker}",
+                                  help="이하=현재가가 목표가 아래로(매수 관심) · 이상=위로(목표/청산)"
+                                  ) or "📉 이하"
+        memo = c3.text_input("메모(선택)", key=f"_al_note_{ticker}",
+                             placeholder="예: 지지선 이탈 감시")
+        if c4.button("등록", key=f"_al_add_{ticker}", width="stretch"):
+            aid = data.add_ticker_alert(ticker, px, "buy" if du == "📉 이하" else "sell",
+                                        note=memo or "")
+            if aid:
+                st.toast(f"🔔 {ticker} {px:,.2f} 알림 등록 — 발동 시 텔레그램 발송")
+                st.rerun(scope="fragment")
+            else:
+                st.warning("알림 등록 실패 — 가격을 확인하세요")
+        if alerts:
+            st.caption("등록된 알림 — 봇이 5분마다 체크(⚡실시간가 우선)·발동 시 텔레그램")
+            for a in alerts:
+                r1, r2 = st.columns([5, 0.8], vertical_alignment="center")
+                arrow = "📉 이하" if a.get("type") == "buy" else "📈 이상"
+                note = f" · {a['note']}" if a.get("note") else ""
+                r1.write(f"{arrow} **{a.get('price'):,.2f}**{note} "
+                         f"<span style='color:#9198a6;font-size:.75rem'>"
+                         f"{str(a.get('created_at', ''))[:16]}</span>",
+                         unsafe_allow_html=True)
+                if r2.button("삭제", key=f"_al_rm_{a.get('id')}"):
+                    data.remove_ticker_alert(a.get("id"))
+                    st.rerun(scope="fragment")
 
 
 @st.fragment(run_every=8)
@@ -985,17 +1149,18 @@ def _money_krw(x) -> str:
         return "—"
 
 
-@st.fragment
-def _entry_levels_section(ticker, hist, price):
-    """🎯 진입 레벨 가이드 — 추세 지지/저항·MA·볼린저·52주(기술) × 기준가·RIM·목표가(밸류).
+def _entry_level_inputs(ticker, hist, price):
+    """진입 레벨 입력 조립 — (supports, resists, fairs) 각 [(라벨, 가격)]. **순수 헬퍼**.
 
-    레벨 **후보 서술** — 예측·매매신호 아님 (실행 규칙은 Phase DCA·수동).
+    🎯 섹션과 차트 진입존 오버레이가 공유 (같은 재료·같은 합류존). 재료 부족 시 None.
+    (리팩터 시 구 섹션의 @st.fragment 가 여기 붙어있던 것을 제거 — 데이터 함수에
+    fragment 가 붙으면 예외가 그레이스풀 계약을 깨고 빈 컨테이너를 삽입한다.)
     """
     if hist is None or getattr(hist, "empty", True):
-        return
+        return None
     close = hist["Close"].dropna()
     if len(close) < 60 or not price:
-        return
+        return None
     supports, resists = [], []
     for win in (60, 120, 200):                      # 주요 이동평균 (아래=지지·위=저항)
         if len(close) >= win:
@@ -1068,6 +1233,37 @@ def _entry_levels_section(ticker, hist, price):
     tgt = (v.get("consensus") or {}).get("target_median")
     if tgt:
         fairs.append(("목표가 중앙값", tgt))
+    return supports, resists, fairs
+
+
+def _chart_entry_zones(ticker, hist, price) -> list[dict]:
+    """차트 진입존 오버레이 데이터 — 🎯 섹션과 동일 합류존 상위 3개. graceful []."""
+    try:
+        inp = _entry_level_inputs(ticker, hist, price)
+        if not inp:
+            return []
+        lv = data.entry_levels(price, *inp) or {}
+        out = []
+        for i, z in enumerate((lv.get("zones") or [])[:3]):
+            n = z.get("n", 1)
+            out.append({"lo": z.get("lo"), "hi": z.get("hi"),
+                        "label": f"🎯 {i + 1}차 존" + (f" ×{n}" if n > 1 else "")})
+        return out
+    except Exception:
+        return []
+
+
+@st.fragment
+def _entry_levels_section(ticker, hist, price):
+    """🎯 진입 레벨 가이드 — 추세 지지/저항·MA·볼린저·52주(기술) × 기준가·RIM·목표가(밸류).
+
+    레벨 **후보 서술** — 예측·매매신호 아님 (실행 규칙은 Phase DCA·수동).
+    fragment — 🔔 도달 알림 버튼 클릭이 페이지 전체가 아닌 섹션만 rerun.
+    """
+    inp = _entry_level_inputs(ticker, hist, price)
+    if not inp:
+        return
+    supports, resists, fairs = inp
 
     lv = data.entry_levels(price, supports, resists, fairs)
     if not lv:

@@ -198,6 +198,18 @@ def market_tape():
     return views.market_tape()
 
 
+@st.cache_data(ttl=300, show_spinner="매크로 자산 불러오는 중…")
+def macro_assets():
+    """환율·금·비트코인 등 매크로 자산 시세 + 30일 스파크라인 (5분 캐시)."""
+    return views.macro_assets()
+
+
+@st.cache_data(ttl=1800, show_spinner=False)
+def chart_news(t):
+    """차트 뉴스 이벤트 마커 — LLM 라벨 로컬 JSONL (30분 캐시·무네트워크)."""
+    return views.chart_news_events(t)
+
+
 @st.cache_data(ttl=_TTL_HEAVY, show_spinner="TR·PR 계산 중…")
 def tr_pr(t, years=5):
     return views.etf_tr_pr(t, years)
