@@ -68,6 +68,13 @@ cached.trendlines_for = lambda *a, **k: []
 cached.market_temp_history = lambda: [{"date": "2026-07-07", "score": 0.1},
                                       {"date": "2026-07-08", "score": 0.2}]
 cached.next_earnings = lambda t: None
+cached.macro_assets = lambda: [
+    {"symbol": "KRW=X", "label": "달러/원 환율", "emoji": "\U0001f4b1", "unit": "₩",
+     "ticker": "KRW=X", "price": 1505.05, "chg": -3.2, "pct": -0.21, "spark": [1500, 1503, 1505]},
+    {"symbol": "GC=F", "label": "금", "emoji": "\U0001f947", "unit": "$/oz", "ticker": "GC=F",
+     "price": 4105.3, "chg": 12.1, "pct": 0.30, "spark": [4090, 4100, 4105]},
+    {"symbol": "BTC-USD", "label": "비트코인", "emoji": "₿", "unit": "$", "ticker": "BTC-USD",
+     "price": 64162, "chg": 980, "pct": 1.55, "spark": [63000, 63800, 64162]}]
 cached.portfolio_flows = lambda: {}
 cached.social_sentiment = lambda: {"summary": {"title": "미국 레딧 게시물 분석",
     "published_at": "2026-07-05T10:00:00+09:00", "url": "https://t.me/insidertracking/1",

@@ -406,6 +406,46 @@ def test_views_market_indicators_graceful(monkeypatch):
     assert mi["fear_greed"] is None and mi["indices"] == []
 
 
+def test_views_macro_assets(monkeypatch):
+    """매크로 자산 — yf 배치 → 최신가·전일대비·스파크. 부분 실패 스킵·전체 실패 []."""
+    import pandas as pd
+    import yfinance as yf
+    from dashboard import views
+    syms = [s[0] for s in views._MACRO_SPECS]
+    idx = pd.date_range("2025-06-01", periods=30)
+    cols = pd.MultiIndex.from_product([syms, ["Open", "High", "Low", "Close", "Volume"]])
+    df = pd.DataFrame(1.0, index=idx, columns=cols)
+    df[("KRW=X", "Close")] = [1400.0 + i for i in range(30)]     # 상승
+    df[("GC=F", "Close")] = [4100.0 - i for i in range(30)]      # 하락
+    df[("BTC-USD", "Close")] = float("nan")                       # 결측 → 스킵
+    monkeypatch.setattr(yf, "download", lambda *a, **k: df)
+    out = views.macro_assets()
+    by = {x["symbol"]: x for x in out}
+    assert "KRW=X" in by and by["KRW=X"]["pct"] > 0 and by["KRW=X"]["ticker"] == "KRW=X"
+    assert "GC=F" in by and by["GC=F"]["pct"] < 0
+    assert "BTC-USD" not in by                                    # 전량 NaN → 스킵
+    assert by["KRW=X"]["spark"] and len(by["KRW=X"]["spark"]) <= 30
+    assert by["KRW=X"]["unit"] == "₩" and by["GC=F"]["emoji"]
+
+    def boom(*a, **k):
+        raise RuntimeError("net")
+
+    monkeypatch.setattr(yf, "download", boom)
+    assert views.macro_assets() == []                            # 전체 실패 graceful
+
+
+def test_macro_symbols_resolve_and_search():
+    """매크로 심볼 — 한/영/티커 resolve + 검색 유니버스 포함 + 표시명 (검색 발견성)."""
+    import ticker_names as tn
+    assert tn.resolve("금") == "GC=F"
+    assert tn.resolve("비트코인") == "BTC-USD"
+    assert tn.resolve("환율") == "KRW=X"
+    assert tn.normalize_input("이더리움") == "ETH-USD"
+    for t in ("GC=F", "BTC-USD", "KRW=X", "^TNX", "ETH-USD", "SI=F", "CL=F", "DX-Y.NYB"):
+        assert t in tn.universe(), f"{t} not in search universe"
+        assert tn.display_name(t, allow_net=False)               # 깔끔한 표시명
+
+
 # ── P1 자동 모의투자 (원장 조인·스코어카드·요약 조립 — 순수·무네트워크) ─────────
 def test_views_join_decisions_matches_outcomes():
     from dashboard import views

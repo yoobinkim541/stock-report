@@ -703,6 +703,55 @@ def market_indicators() -> dict:
     return out
 
 
+# ── 매크로 자산 (환율·금·원자재·암호화폐·금리) ────────────────────────────────
+
+# (yf 심볼, 라벨, 이모지, 소수자리, 단위, 분석 이동 티커|None)
+# 분석 이동 티커: yfinance 로 OHLC 조회가 되는 심볼만 (선물·^TNX 는 종목분석 파이프라인
+# 이 지원 — 환율 KRW=X 도 동일). None 이면 카드 클릭 비활성.
+_MACRO_SPECS = [
+    ("KRW=X", "달러/원 환율", "💱", 2, "₩", "KRW=X"),
+    ("GC=F", "금", "🥇", 1, "$/oz", "GC=F"),
+    ("BTC-USD", "비트코인", "₿", 0, "$", "BTC-USD"),
+    ("ETH-USD", "이더리움", "Ξ", 0, "$", "ETH-USD"),
+    ("SI=F", "은", "🥈", 2, "$/oz", "SI=F"),
+    ("CL=F", "WTI 유가", "🛢️", 2, "$/bbl", "CL=F"),
+    ("^TNX", "미 10년물 금리", "🏦", 2, "%", "^TNX"),
+    ("DX-Y.NYB", "달러 인덱스", "💵", 2, "", "DX-Y.NYB"),
+]
+
+
+def macro_assets() -> list[dict]:
+    """홈 매크로 자산 카드 — [{symbol,label,emoji,price,chg,pct,unit,spark,ticker}].
+
+    yfinance 1개월 일봉 배치 1회 → 최신가·전일대비·30일 스파크라인. 개별 심볼 실패는
+    조용히 스킵(부분 성공 허용), 전체 실패는 []. 표시·참고용(주문 경로 없음).
+    """
+    try:
+        import warnings
+        warnings.filterwarnings("ignore")
+        import yfinance as yf
+        df = yf.download([s[0] for s in _MACRO_SPECS], period="1mo", progress=False,
+                         group_by="ticker", threads=True)
+    except Exception:
+        return []
+    out = []
+    for sym, label, emoji, dec, unit, tk in _MACRO_SPECS:
+        try:
+            c = df[sym]["Close"].dropna()
+            if len(c) < 2 or not float(c.iloc[-2]):
+                continue
+            last, prev = float(c.iloc[-1]), float(c.iloc[-2])
+            out.append({
+                "symbol": sym, "label": label, "emoji": emoji, "unit": unit, "ticker": tk,
+                "price": round(last, dec), "chg": round(last - prev, dec),
+                "pct": round((last / prev - 1) * 100, 2),
+                "spark": [float(v) for v in c.tail(30).tolist()],
+            })
+        except Exception:
+            continue
+    return out
+
+
 # ── 수집 뉴스 (시장·캘린더 — 출처별·중요도순) ─────────────────────────────────
 
 # 출처 표시 순서·라벨 (뉴스성 소스 우선, 수치성 스냅샷 후순위)
@@ -1064,7 +1113,8 @@ def trendlines_for(ticker: str, tf: str = "1d", *, lines: bool = True,
 
 _TAPE_SYMS = [("^VIX", "VIX", 2), ("DX-Y.NYB", "달러 인덱스", 2), ("KRW=X", "달러 환율", 2),
               ("^KS11", "코스피", 2), ("^KQ11", "코스닥", 2), ("^IXIC", "나스닥", 2),
-              ("^GSPC", "S&P500", 2), ("NQ=F", "나스닥100 선물", 1), ("ES=F", "S&P 선물", 1)]
+              ("^GSPC", "S&P500", 2), ("NQ=F", "나스닥100 선물", 1), ("ES=F", "S&P 선물", 1),
+              ("GC=F", "금", 1), ("BTC-USD", "비트코인", 0), ("^TNX", "미10년물", 2)]
 
 
 def market_tape() -> list[dict]:

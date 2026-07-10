@@ -33,12 +33,54 @@ def test_embed_html_contract():
 
 def test_price_bounds_json():
     b = json.loads(plotly_embed.price_bounds_json(_hist(50)))
-    assert len(b) == 50 and b[0][1] == 99.0 and b[0][2] == 101.0
+    # [ms, low, high, vol, open, close] — 6열 (🧲 자석 스냅에 OHLC 필요)
+    assert len(b) == 50 and len(b[0]) == 6
+    assert b[0][1] == 99.0 and b[0][2] == 101.0                 # low·high
+    assert b[0][4] == 100.0 and b[0][5] == 100.0               # open·close
     assert b[1][0] - b[0][0] == 86400000                       # epoch ms 간격
     assert plotly_embed.price_bounds_json(None) == "[]"
     h = _hist(5)
     h.iloc[2, h.columns.get_loc("Low")] = float("nan")
     assert len(json.loads(plotly_embed.price_bounds_json(h))) == 4   # NaN 스킵
+
+
+def test_embed_drawing_tools_contract():
+    """드로잉 도구 — 자석·수평선·피보나치·측정·지우기 툴바 + 스냅/도형 로직 계약."""
+    hist = _hist()
+    fig = charts.price_chart(hist, "T", kind="candle")
+    html = plotly_embed.pannable_chart_html(fig, hist)
+    # 툴바 버튼
+    for bid in ('id="bt-mag"', 'id="bt-hline"', 'id="bt-fib"', 'id="bt-meas"', 'id="bt-clear"'):
+        assert bid in html, f"툴바 버튼 누락: {bid}"
+    # 핵심 로직
+    for token in ("function snapPoint", "function makeFib", "function makeMeasure",
+                  "function makeHline", "function handleShapes", "FIB_LEVELS",
+                  "reconcileHlineAnns", "const baseShapes",
+                  "idx < baseShapeCount"):       # 서버 도형 보호 가드
+        assert token in html, f"드로잉 로직 누락: {token}"
+
+
+def test_embed_log_and_pct_flags():
+    """로그·비교(%) 모드 플래그 임베드 + toY/fromY 변환 계약."""
+    hist = _hist()
+    fig = charts.price_chart(hist, "T", log_scale=True)
+    html = plotly_embed.pannable_chart_html(fig, hist, y_log=True)
+    assert "const yLog = true" in html
+    assert "Math.log10" in html and "Math.pow(10" in html      # toY/fromY
+    # 기본(off)
+    norm = plotly_embed.pannable_chart_html(charts.price_chart(hist, "T"), hist)
+    assert "const yLog = false" in norm and "const pctMode = false" in norm
+    # 비교(%) 모드 플래그
+    pct = plotly_embed.pannable_chart_html(fig, hist, pct_mode=True)
+    assert "const pctMode = true" in pct
+
+
+def test_embed_no_unreplaced_tokens():
+    """@@TOKEN@@ 치환 누락 없음 — 템플릿 전량 치환 (fig JSON 이 토큰 오염 안 함)."""
+    hist = _hist()
+    fig = charts.price_chart(hist, "T", kind="candle", show_volume=True, show_rsi=True)
+    html = plotly_embed.pannable_chart_html(fig, hist, view_days=90, vol_axis="yaxis2")
+    assert "@@" not in html
 
 
 def test_embed_cdn_failure_notice():

@@ -187,9 +187,12 @@ def _price_chart(ticker, hist, avg_cost, trades, fullscreen: bool = False):
             st.caption("채널 = 회귀 ±2σ 자동 감지 — 상승(초록)/하락(빨강)/횡보(회색)·"
                        "라벨에 방향 표기 · 지지/저항선 동시 표시")
         st.markdown("**하단 지표** — 서브 패널")
-        bottom = st.pills("하단 지표", ["거래량", "RSI"], selection_mode="multi",
+        bottom = st.pills("하단 지표", ["거래량", "RSI", "MACD", "스토캐스틱"], selection_mode="multi",
                           default=["거래량", "RSI"], key=f"_bot_{tf}",
                           label_visibility="collapsed") or []
+        log_scale = st.toggle("로그 스케일", key=f"_logscale_{tf}",
+                              help="가격축을 로그로 — 장기·급등 종목의 % 변화 비교에 유리 "
+                                   "(비교 모드·서브패널 제외)")
         legacy = st.toggle("구형 렌더러", key="_legacy_chart",
                            help="plotly.js CDN 불가 환경 폴백 — 팬 시 y 자동맞춤·인차트 상세 없음")
         st.caption("봉 단위별로 설정이 기억됩니다 · 범례 클릭으로도 개별 토글")
@@ -203,6 +206,8 @@ def _price_chart(ticker, hist, avg_cost, trades, fullscreen: bool = False):
             st.caption(f"ℹ️ {tf_label}봉은 {_TF_SPAN[tf]}까지 제공 (yfinance 보존 한계) · 주/월/일봉은 전체 이력")
     label = ticker_names.label(ticker)
     show_rsi = "RSI" in bottom
+    show_macd = "MACD" in bottom
+    show_stoch = "스토캐스틱" in bottom
     tls = []
     if want_lines or want_short or want_long:
         ch_key = tuple(k for k, w in (("short", want_short), ("long", want_long)) if w)
@@ -238,6 +243,8 @@ def _price_chart(ticker, hist, avg_cost, trades, fullscreen: bool = False):
                       else "TR(배당재투자·조정종가) 기준")
                    + " · 가격 지표(캔들·평단·MA·매물대 등) 비활성")
         show_vol = show_vol and "Volume" in getattr(df, "columns", [])   # PR 스왑 후 재판정
+    # 로그 스케일은 비교(%) 모드와 공존 불가 — 비교 시 자동 비활성
+    use_log = bool(log_scale) and not compare
     fig = charts.price_chart(
         df, label, kind=("candle" if kind == "🕯️ 캔들" else "line"),
         avg_cost=avg_cost, trades=trades, view_days=view_days, mas=mas,
@@ -247,7 +254,7 @@ def _price_chart(ticker, hist, avg_cost, trades, fullscreen: bool = False):
         fractals="프랙탈" in top, vol_profile="매물대" in top,
         emas=emas, psar="파라볼릭 SAR" in top, donchian_on="프라이스 채널" in top,
         vwap=("VWAP(세션)" in top and tf in ("5m", "1h")), avwap="앵커드 VWAP" in top,
-        compare=compare)
+        compare=compare, show_macd=show_macd, show_stoch=show_stoch, log_scale=use_log)
     if fullscreen:                                  # ⛶ 풀뷰 — 뷰포트 거의 채우는 높이
         fig.update_layout(height=840)
     event = None
@@ -268,10 +275,11 @@ def _price_chart(ticker, hist, avg_cost, trades, fullscreen: bool = False):
             plotly_embed.pannable_chart_html(
                 fig, df, height=h, view_days=view_days,
                 vol_axis="yaxis2" if show_vol else None, bounds_json=_bj,
-                fit_viewport=fullscreen),
-            height=h + 128)
+                fit_viewport=fullscreen, pct_mode=bool(compare), y_log=use_log),
+            height=h + 164)
     st.caption("🖱️ 드래그=이동(y축 자동 맞춤) · 휠=확대/축소 · 더블클릭=원위치 · "
-               "✏️ 우상단 모드바 직접 그리기(선·자유곡선·박스)·지우개 — 설정 변경 시 드로잉 초기화")
+               "✏️ 모드바 직접 그리기(선·자유곡선·박스)·지우개 + 차트 위 도구바: "
+               "🧲 자석(봉 OHLC 스냅)·─ 수평선·🔱 피보나치·📏 측정·🗑 지우기 — 설정 변경 시 드로잉 초기화")
     selected = _selected_trade(event, trades or []) if legacy else None
     if selected:
         _trade_detail(selected)

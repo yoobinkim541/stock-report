@@ -692,6 +692,119 @@ def test_price_levels_chart():
     assert any("현재 100" in (a.text or "") for a in fig.layout.annotations)
 
 
+def _ohlcv(n=200):
+    import numpy as np
+    import pandas as pd
+    idx = pd.date_range("2024-01-01", periods=n, freq="D")
+    base = np.linspace(100, 200, n) + np.sin(np.arange(n) / 9) * 4
+    return pd.DataFrame({"Open": base, "High": base + 2, "Low": base - 2,
+                         "Close": base + 1, "Volume": [1e6 + i for i in range(n)]}, index=idx)
+
+
+def test_price_chart_macd_stoch_panels():
+    """MACD·스토캐스틱 하단 패널 — 5패널 축 배치·트레이스·서브패널 선형 유지."""
+    hist = _ohlcv()
+    fig = charts.price_chart(hist, "T", kind="candle", show_volume=True, show_rsi=True,
+                             show_macd=True, show_stoch=True)
+    names = [tr.name for tr in fig.data]
+    assert any("MACD(12" in (n or "") for n in names)
+    assert any(n == "%K(14)" for n in names) and any(n == "%D(3)" for n in names)
+    # 패널 5개 → yaxis..yaxis5. 순서: 가격1·거래량2·RSI3·MACD4·스토5
+    yaxes = [k for k in vars(fig.layout) if str(k).startswith("yaxis")]
+    assert len([k for k in fig.layout if str(k).startswith("yaxis")]) == 5
+    by = {tr.name: tr for tr in fig.data}
+    assert by["거래량"].yaxis == "y2"
+    assert by["RSI(14)"].yaxis == "y3"
+    assert by["MACD(12·26)"].yaxis == "y4"
+    assert by["%K(14)"].yaxis == "y5"
+    assert fig.layout.yaxis5.range == (0, 100)          # 스토 0~100 밴드
+    assert fig.layout.height >= 900
+
+
+def test_price_chart_macd_only():
+    """MACD 단독(거래량·RSI 없이) → 2패널·행 배정 정확 (동적 일반화)."""
+    fig = charts.price_chart(_ohlcv(), "T", show_macd=True)
+    by = {tr.name: tr for tr in fig.data}
+    assert by["MACD(12·26)"].yaxis == "y2"              # 가격 다음 첫 서브패널
+    n_yaxes = len([k for k in fig.layout if str(k).startswith("yaxis")])
+    assert n_yaxes == 2
+
+
+def test_price_chart_stoch_requires_ohlc():
+    """스토캐스틱은 High/Low 필요 — Close만 있으면 침묵 스킵 (패널 미생성)."""
+    hist = _ohlc()[["Close"]]
+    fig = charts.price_chart(hist, "T", show_stoch=True)
+    assert not any((tr.name or "").startswith("%K") for tr in fig.data)
+
+
+def test_price_chart_log_scale():
+    """로그 스케일 — 가격축 type=log·y범위 log10·도형/주석 y log10·서브패널 선형 유지."""
+    import math
+    hist = _ohlcv()
+    fig = charts.price_chart(hist, "T", kind="line", avg_cost=150.0, view_days=90,
+                             log_scale=True, show_rsi=True)
+    assert fig.layout.yaxis.type == "log"
+    assert fig.layout.yaxis2.type in (None, "-", "linear")    # RSI 서브패널 선형
+    # 초기 y범위 log10 밴드 (가격 100~200 → log10 2.0~2.3)
+    yr = fig.layout.yaxis.range
+    assert yr and 1.9 < yr[0] < 2.4 and 1.9 < yr[1] < 2.4
+    # 평단선 shape y = log10(150)
+    price_shapes = [s.y0 for s in fig.layout.shapes if s.yref == "y" and s.y0 is not None]
+    assert any(abs(v - math.log10(150.0)) < 1e-6 for v in price_shapes)
+    # 가격축 주석은 log10 위치이되 텍스트는 raw 값 유지
+    price_anns = [a for a in fig.layout.annotations if a.yref == "y"]
+    assert price_anns and all(1.9 < a.y < 2.4 for a in price_anns)
+    assert any("150" in (a.text or "") for a in price_anns)   # raw 텍스트
+
+
+def test_price_chart_log_scale_yref_none_annotations():
+    """로그축 yref=None 주석 변환 — 적대 리뷰 확정 버그(B1) 회귀 방어.
+
+    `add_annotation(row/col 없이)` 는 yref=None 으로 남지만 plotly.js 가 첫 y축(가격)으로
+    coerce → log10 변환에서 누락되면 raw 가격이 10^가격 위치로 날아간다. 트리거 2종:
+    (1) 추세선/채널 라벨 — 모든 패널 구성, (2) panes==1 의 tn-hi/lo·현재가 라벨.
+    """
+    import math
+    hist = _ohlcv()
+    tls = [{"kind": "support", "x0": hist.index[0], "x1": hist.index[-1],
+            "y0": 100.0, "y1": 150.0, "label": "지지선"}]
+    # (2) 하단 지표 전부 off → panes==1 (+ 추세선 라벨 = 트리거 1도 동시 검증)
+    fig = charts.price_chart(hist, "T", log_scale=True, trend_lines=tls, view_days=90)
+    assert fig.layout.yaxis.type == "log"
+    for an in fig.layout.annotations:
+        if getattr(an, "yref", None) in (None, "y") and isinstance(an.y, (int, float)):
+            assert an.y < 3.0, f"raw 가격 잔존(log10 미변환): {an.text!r} y={an.y}"
+    # 지지선 라벨(y1=150)이 log10(150)≈2.176 로 변환됐는지 명시 확인
+    tl_ann = [a for a in fig.layout.annotations if (a.text or "") == "지지선"]
+    assert tl_ann and abs(tl_ann[0].y - math.log10(150.0)) < 1e-6
+    # (1) 멀티패널에서도 추세선 라벨(yref=None 유지) 변환
+    fig2 = charts.price_chart(hist, "T", log_scale=True, trend_lines=tls,
+                              show_volume=True, show_rsi=True)
+    tl2 = [a for a in fig2.layout.annotations if (a.text or "") == "지지선"]
+    assert tl2 and abs(tl2[0].y - math.log10(150.0)) < 1e-6
+    # 서브패널(y3=RSI) 밴드·라인은 raw 유지 (오변환 없음)
+    sub_shapes = [s for s in fig2.layout.shapes if getattr(s, "yref", "") == "y3"]
+    assert sub_shapes and all(s.y0 is None or s.y0 >= 0 for s in sub_shapes)
+    assert any((s.y0 == 30 or s.y0 == 70) for s in sub_shapes if s.y0 is not None)
+
+
+def test_price_chart_log_scale_off_is_raw():
+    """로그 off(기본) — 축 선형·도형 y 는 raw 값 (회귀 방어)."""
+    fig = charts.price_chart(_ohlcv(), "T", avg_cost=150.0)
+    assert fig.layout.yaxis.type in (None, "-", "linear")
+    price_shapes = [s.y0 for s in fig.layout.shapes if s.yref == "y" and s.y0 is not None]
+    assert any(abs(v - 150.0) < 1e-6 for v in price_shapes)
+
+
+def test_price_chart_log_compare_disabled():
+    """비교(%) 모드에선 로그 자동 비활성 (log_scale=True 무시)."""
+    import pandas as pd
+    hist = _ohlcv()
+    cmp_s = pd.Series([50.0 + i * 0.1 for i in range(len(hist))], index=hist.index)
+    fig = charts.price_chart(hist, "T", compare={"C": cmp_s}, log_scale=True)
+    assert fig.layout.yaxis.type in (None, "-", "linear")
+
+
 def test_volume_axis_spike_cap():
     """거래량 축 q98 캡 — 역사적 스파이크가 축을 지배하지 않게 (최근 60봉은 보장)."""
     idx = pd.date_range("2024-01-01", periods=400, freq="D")

@@ -42,12 +42,54 @@ def _pannable(fig, *, rangeslider: bool = True, height: int = 360):
     return fig
 
 
-def _initial_view(fig, hist, view_days, *, lo_col="Low", hi_col="High", y_override=None):
+def _logr(lo, hi):
+    """선형 y범위 → 로그축(plotly type='log' 는 range 를 log10 으로 해석)."""
+    import math
+    lo = max(lo, hi * 1e-4 if hi > 0 else 1e-6)      # 0·음수 방어
+    return [math.log10(lo), math.log10(hi)] if hi > 0 else [lo, hi]
+
+
+def _log_fixup_price_shapes(fig) -> None:
+    """로그축 보정 — 가격 패널 도형·주석의 y 를 log10 으로 변환 (in-place).
+
+    plotly 규약: 로그축의 shape/annotation y 는 log10(값)로 줘야 정위치(주석 docstring
+    "you must take the log of your desired range"). 트레이스는 raw 값이라 무관 —
+    이 함수는 avg_cost·최고저 콜아웃·현재가선·추세선 라벨 등 어느 헬퍼가 넣었든
+    가격축 도형/주석만 골라 일괄 변환한다. 서브패널(y2·y3…)·paper 참조는 건드리지 않음.
+
+    **yref 판별 함정**: `add_annotation(row/col 없이)` 는 yref 가 None 으로 남고
+    plotly.js 가 렌더 시 첫 y축(=가격 패널)으로 coerce 한다 — 추세선/채널 라벨(전 구성)과
+    panes==1 의 tn-hi/lo·현재가 라벨이 이 경로. 따라서 None 도 가격축으로 취급해 변환한다
+    (서브패널 주석은 항상 명시적 y2·y3 를 가져 오변환 없음 — 적대 리뷰로 확정된 버그 픽스).
+    """
+    import math
+
+    def _lg(v):
+        try:
+            v = float(v)
+        except (TypeError, ValueError):
+            return v
+        return math.log10(v) if v > 0 else v
+
+    for sh in (fig.layout.shapes or []):
+        if getattr(sh, "yref", None) in (None, "y"):
+            if sh.y0 is not None:
+                sh.y0 = _lg(sh.y0)
+            if sh.y1 is not None:
+                sh.y1 = _lg(sh.y1)
+    for an in (fig.layout.annotations or []):
+        if getattr(an, "yref", None) in (None, "y") and an.y is not None:
+            an.y = _lg(an.y)
+
+
+def _initial_view(fig, hist, view_days, *, lo_col="Low", hi_col="High", y_override=None,
+                  log_scale: bool = False):
     """전체 히스토리 로드 상태에서 초기 화면만 최근 view_days 로 — 과거는 드래그/미니차트 탐색.
 
     x·y 초기 범위를 창에 맞춤(plotly 는 x창 추종 y 자동스케일이 없어 창 기준으로 시작 —
     팬/줌으로 조절·더블클릭=전체 복귀). 데이터가 창보다 짧으면 전체 표시.
     y_override=(lo, hi) — 비교(%) 모드처럼 트레이스 단위가 가격이 아닐 때 y 만 주입.
+    log_scale — 로그축이면 계산한 y범위를 log10 으로 변환(y_override=% 모드는 로그 없음).
     """
     if not view_days or hist is None or getattr(hist, "empty", True):
         return fig
@@ -70,8 +112,8 @@ def _initial_view(fig, hist, view_days, *, lo_col="Low", hi_col="High", y_overri
     lo = float(win[lo_col].min()) if lo_col in cols else float(win["Close"].min())
     hi = float(win[hi_col].max()) if hi_col in cols else float(win["Close"].max())
     pad = max((hi - lo) * 0.06, hi * 0.002)
-    fig.update_layout(xaxis_range=[start, end + (end - start) * 0.02],
-                      yaxis_range=[lo - pad, hi + pad])
+    yr = _logr(lo - pad, hi + pad) if log_scale else [lo - pad, hi + pad]
+    fig.update_layout(xaxis_range=[start, end + (end - start) * 0.02], yaxis_range=yr)
     return fig
 
 
@@ -625,7 +667,8 @@ def price_chart(hist, ticker: str = "", *, kind: str = "line", avg_cost=None,
                 trend_lines=None, show_volume: bool = False, supertrend: bool = False,
                 envelope: bool = False, fractals: bool = False, vol_profile: bool = False,
                 emas=(), psar: bool = False, donchian_on: bool = False,
-                vwap: bool = False, avwap: bool = False, compare=None):
+                vwap: bool = False, avwap: bool = False, compare=None,
+                show_macd: bool = False, show_stoch: bool = False, log_scale: bool = False):
     """가격 차트 + 기술적 분석 도구 (TradingView 풍 멀티패널).
 
     패널: 가격(+MA·BB·일목·추세선·평단·기간 최고/최저·현재가 라벨) / 거래량(방향색 바+MA20)
@@ -648,16 +691,27 @@ def price_chart(hist, ticker: str = "", *, kind: str = "line", avg_cost=None,
         mas, emas = (), ()
         bollinger = ichimoku = supertrend = envelope = fractals = vol_profile = False
         psar = donchian_on = vwap = avwap = False
+        log_scale = False              # % 축엔 로그 무의미
     close = hist["Close"]
     has_ohlc = {"Open", "High", "Low"} <= cols
     show_volume = show_volume and "Volume" in cols
+    show_stoch = show_stoch and has_ohlc                # 스토캐스틱은 High/Low 필요
 
-    panes = 1 + (1 if show_volume else 0) + (1 if show_rsi else 0)
-    vol_row = 2 if show_volume else None
-    rsi_row = panes if show_rsi else None
+    # 하단 서브패널 — 순서 고정(거래량 → RSI → MACD → 스토캐스틱). 행 번호 동적 배정.
+    sub = [("vol", show_volume), ("rsi", show_rsi), ("macd", show_macd), ("stoch", show_stoch)]
+    active = [name for name, on in sub if on]
+    panes = 1 + len(active)
+    row_of = {name: i + 2 for i, name in enumerate(active)}   # 가격=1, 서브=2..
+    vol_row = row_of.get("vol")
+    rsi_row = row_of.get("rsi")
+    macd_row = row_of.get("macd")
+    stoch_row = row_of.get("stoch")
     if panes > 1:
         from plotly.subplots import make_subplots
-        heights = {1: [1.0], 2: [0.70, 0.30], 3: [0.58, 0.19, 0.23]}[panes]
+        # 2·3패널은 기존 튜닝 비율 유지(회귀 방어), 4·5패널만 일반 분배 규칙
+        _HEIGHTS = {2: [0.70, 0.30], 3: [0.58, 0.19, 0.23],
+                    4: [0.52, 0.16, 0.16, 0.16], 5: [0.46, 0.135, 0.135, 0.135, 0.135]}
+        heights = _HEIGHTS[panes]
         fig = make_subplots(rows=panes, cols=1, shared_xaxes=True,
                             row_heights=heights, vertical_spacing=0.05)
     else:
@@ -788,7 +842,42 @@ def price_chart(hist, ticker: str = "", *, kind: str = "line", avg_cost=None,
             fig.add_hline(y=lv, line=dict(color=c, dash="dot", width=0.7), row=rsi_row, col=1)
         fig.update_yaxes(range=[0, 100], row=rsi_row, col=1, tickvals=[30, 50, 70])
 
-    chart_height = {1: 380, 2: 540, 3: 680}[panes]
+    # ── MACD 패널 (12·26·9) — 히스토그램(방향색) + MACD·시그널 라인 ──
+    if macd_row:
+        ema12 = close.ewm(span=12, adjust=False).mean()
+        ema26 = close.ewm(span=26, adjust=False).mean()
+        macd = ema12 - ema26
+        signal = macd.ewm(span=9, adjust=False).mean()
+        histo = macd - signal
+        hcolors = [_GREEN if v >= 0 else _RED for v in histo.fillna(0)]
+        fig.add_trace(go.Bar(x=hist.index, y=histo, name="MACD 히스토", showlegend=False,
+                             marker=dict(color=hcolors), opacity=0.5), row=macd_row, col=1)
+        fig.add_trace(go.Scatter(x=hist.index, y=macd, name="MACD(12·26)", showlegend=False,
+                                 line=dict(color="#3b82f6", width=1.2)), row=macd_row, col=1)
+        fig.add_trace(go.Scatter(x=hist.index, y=signal, name="시그널(9)", showlegend=False,
+                                 line=dict(color="#f59e0b", width=1.2)), row=macd_row, col=1)
+        fig.add_hline(y=0, line=dict(color=theme.MUTED, dash="dot", width=0.7),
+                      row=macd_row, col=1)
+        fig.update_yaxes(row=macd_row, col=1, nticks=3)
+
+    # ── 스토캐스틱 패널 (%K 14·%D 3) — 20/80 밴드 ──
+    if stoch_row:
+        low14 = hist["Low"].rolling(14).min()
+        high14 = hist["High"].rolling(14).max()
+        rng = (high14 - low14).replace(0, float("nan"))
+        pctk = ((close - low14) / rng * 100).rolling(3).mean()   # 슬로우 %K
+        pctd = pctk.rolling(3).mean()                            # %D
+        fig.add_hrect(y0=20, y1=80, fillcolor="rgba(120,130,180,0.08)", line_width=0,
+                      row=stoch_row, col=1)
+        fig.add_trace(go.Scatter(x=hist.index, y=pctk, name="%K(14)", showlegend=False,
+                                 line=dict(color="#22d3ee", width=1.2)), row=stoch_row, col=1)
+        fig.add_trace(go.Scatter(x=hist.index, y=pctd, name="%D(3)", showlegend=False,
+                                 line=dict(color="#e879f9", width=1.1)), row=stoch_row, col=1)
+        for lv, c in ((80, _RED), (20, _GREEN)):
+            fig.add_hline(y=lv, line=dict(color=c, dash="dot", width=0.7), row=stoch_row, col=1)
+        fig.update_yaxes(range=[0, 100], row=stoch_row, col=1, tickvals=[20, 50, 80])
+
+    chart_height = {1: 380, 2: 540, 3: 680, 4: 800, 5: 900}[panes]
     fig.update_layout(margin=dict(t=14, b=64, l=14, r=46), dragmode="pan",
                       legend=dict(orientation="h", x=0.0, xanchor="left",
                                   y=1.0, yanchor="bottom", font=dict(size=10),
@@ -797,16 +886,20 @@ def price_chart(hist, ticker: str = "", *, kind: str = "line", avg_cost=None,
                       bargap=0.1, newshape=dict(line=dict(color="#f59e0b", width=2)))
     fig.update_xaxes(automargin=True)
     fig.update_yaxes(automargin=True)
+    if log_scale:                          # 가격 패널만 로그 — 서브패널(RSI·MACD 등)은 선형 유지
+        fig.update_yaxes(type="log", row=1 if panes > 1 else None,
+                         col=1 if panes > 1 else None)
+        _log_fixup_price_shapes(fig)       # 가격축 도형·주석 y → log10 (plotly 규약)
     _t(fig)
     if panes > 1:
         fig.update_xaxes(rangeslider_visible=False)   # 서브플롯 제약 — 팬/줌으로 탐색
         return _initial_view_sub(fig, hist, view_days,
                                   y_override=(cmp_initial_yrange(close, compare, view_days)
-                                              if cmp_mode else None))
+                                              if cmp_mode else None), log_scale=log_scale)
     fig.update_layout(xaxis=dict(rangeslider=dict(visible=True, thickness=0.08)))
     return _initial_view(fig, hist, view_days,
                          y_override=(cmp_initial_yrange(close, compare, view_days)
-                                     if cmp_mode else None))
+                                     if cmp_mode else None), log_scale=log_scale)
 
 
 def _add_extremes_and_last(fig, hist, view_days, panes) -> None:
@@ -843,10 +936,11 @@ def _add_extremes_and_last(fig, hist, view_days, panes) -> None:
                        bgcolor=chip, borderpad=2, **({"row": 1, "col": 1} if panes > 1 else {}))
 
 
-def _initial_view_sub(fig, hist, view_days, y_override=None):
+def _initial_view_sub(fig, hist, view_days, y_override=None, log_scale: bool = False):
     """RSI 서브플롯용 초기 표시창 — x 공유축 범위만 (y 는 가격 창 기준).
 
     y_override=(lo, hi) — 비교(%) 모드에서 가격 창 대신 % 프레임 주입.
+    log_scale — 로그축이면 가격 y범위를 log10 으로 변환.
     """
     if not view_days or hist is None or getattr(hist, "empty", True):
         return fig
@@ -868,7 +962,8 @@ def _initial_view_sub(fig, hist, view_days, y_override=None):
     lo = float(win["Low"].min()) if "Low" in cols else float(win["Close"].min())
     hi = float(win["High"].max()) if "High" in cols else float(win["Close"].max())
     pad = max((hi - lo) * 0.06, hi * 0.002)
-    fig.update_yaxes(range=[lo - pad, hi + pad], row=1, col=1)
+    yr = _logr(lo - pad, hi + pad) if log_scale else [lo - pad, hi + pad]
+    fig.update_yaxes(range=yr, row=1, col=1)
     return fig
 
 
