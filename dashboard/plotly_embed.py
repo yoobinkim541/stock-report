@@ -276,6 +276,7 @@ _TEMPLATE = r"""
     if (!xr) return;
     const x0 = Date.parse(xr[0]), x1 = Date.parse(xr[1]);
     setTarget(x0, x1);                           // y 는 lerp 루프가 수렴
+    saveView(xr);                                // 뷰 위치 유지(60s 규칙) — 원문 저장
     const upd = {};
     callouts(x0, x1, upd);                       // 무거운 주석 갱신은 여기서만
     if (hoverOff) { upd["hovermode"] = hoverMode; hoverOff = false; }
@@ -337,6 +338,29 @@ _TEMPLATE = r"""
       if (!d || d.v !== 1 || !Array.isArray(d.shapes) || !Array.isArray(d.anns)) return null;
       return d;
     } catch (e) { return null; }
+  }
+
+  // ── 뷰(x 표시창) 유지 — 60초 신선 규칙: ⚡자동갱신·설정 변경 리런에선 보던 위치
+  // 그대로, 새로 연 세션(>60s)은 기간 라디오 기본창 (TradingView 이어보기 절충) ──
+  // ⚠️ 저장은 plotly 가 쓴 range **문자열 그대로**(무파싱) — plotly 는 naive 문자열을
+  // UTC 로 합성하는데 Date.parse 는 로컬로 해석해, 파싱-재직렬화 왕복이 KST 에서
+  // 9시간씩 뷰를 밀리게 한다(자동갱신마다 누적 — 적대 리뷰 확정). 원문 왕복은 무손실.
+  function saveView(range) {
+    if (!storeKey || !range) return;
+    try {
+      localStorage.setItem("tnview:" + storeKey,           // vm = 기간 라디오 식별 —
+                           JSON.stringify({view: [range[0], range[1]],  // 라디오 변경 시 무시
+                                           ts: Date.now(), vm: @@VIEW_MS@@}));
+    } catch (e) {}
+  }
+  function loadFreshView() {
+    if (!storeKey) return null;
+    try {
+      const v = JSON.parse(localStorage.getItem("tnview:" + storeKey) || "null");
+      if (v && Array.isArray(v.view) && Date.now() - (v.ts || 0) < 60000
+          && v.vm === @@VIEW_MS@@) return v.view;
+    } catch (e) {}
+    return null;
   }
   // 서버 오버레이(평단선·현재가선·RSI 밴드)는 사용자 도형과 구분 불가(둘 다 무명 shape) →
   // 개수가 아닌 **깊은 복사본**을 보존 기준으로 삼는다(지우개로 인덱스가 밀려도 안전).
@@ -558,7 +582,12 @@ _TEMPLATE = r"""
       }).then(() => { guard = false; });
     }
     const last = bounds.length ? bounds[bounds.length - 1][0] : null;
-    if (last && @@VIEW_MS@@) {                   // 초기 표시창 (기간 라디오)
+    const freshView = loadFreshView();           // ⚡자동갱신·설정변경 직후 = 보던 위치 복원
+    if (freshView) {
+      guard = true;                              // 저장된 원문 그대로 — 재직렬화 왕복 금지
+      Plotly.relayout(gd, {"xaxis.range": [freshView[0], freshView[1]]})
+        .then(() => { guard = false; rescale(); });
+    } else if (last && @@VIEW_MS@@) {            // 초기 표시창 (기간 라디오)
       const x0 = last - @@VIEW_MS@@;
       const first = bounds[0][0];
       if (x0 > first) {

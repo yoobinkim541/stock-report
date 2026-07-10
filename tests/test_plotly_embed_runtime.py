@@ -109,10 +109,18 @@ const savedKeys = Object.keys(_ls);
 if (savedKeys.length !== 1 || !savedKeys[0].startsWith("tndraw:")) fail("persist_save " + savedKeys);
 const savedDoc = JSON.parse(_ls[savedKeys[0]]);
 if (savedDoc.v !== 1 || savedDoc.shapes.length !== 1) fail("persist_doc");
+// 뷰 위치 복원 — plotly 원문(naive 문자열) 그대로 왕복해야 함 (Date 재직렬화 = KST −9h 밀림)
+const NAIVE = ["2025-02-01 12:00:00", "2025-03-01 12:00:00"];
+_ls["tnview:TEST:1d:lin"] = JSON.stringify({view: NAIVE, ts: Date.now(), vm: 90 * 864e5});
+relayoutCalls.length = 0;
 for (const k of Object.keys(els)) delete els[k];   // 새 세션 모사 — DOM 리셋·storage 유지
 gd = null;
 __SCRIPT__
 if (!gd || !gd.layout) fail("reload_gd");
+const vr = relayoutCalls.find((u) => u["xaxis.range"]);
+if (!vr) fail("view_restore_missing");
+if (vr["xaxis.range"][0] !== NAIVE[0] || vr["xaxis.range"][1] !== NAIVE[1])
+  fail("view_restore_reserialized " + JSON.stringify(vr["xaxis.range"]));
 const nRestored = (gd.layout.shapes || []).length - BASE.length;
 if (nRestored !== 1) fail("persist_restore n=" + nRestored);
 const rs = gd.layout.shapes[gd.layout.shapes.length - 1];

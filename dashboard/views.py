@@ -752,6 +752,31 @@ def macro_assets() -> list[dict]:
     return out
 
 
+def chart_news_events(ticker: str, limit: int = 120) -> list[dict]:
+    """차트 뉴스 이벤트 마커 — LLM 구조화 라벨(point-in-time JSONL)에서 해당 종목 추출.
+
+    라벨 tickers 는 base 심볼(무 .KS 접미) — 입력 티커도 base 로 매칭. 파일 없음(라벨
+    크론 미가동)·실패는 [] (graceful). [{date, direction, strength, event_type, title}].
+    """
+    try:
+        from providers import news_labels
+        base = (ticker or "").upper().split(".")[0]
+        out = []
+        for r in news_labels.load_labels():
+            if base not in (r.get("tickers") or []):
+                continue
+            d = str(r.get("published_at") or "")[:10]
+            if not d:
+                continue
+            out.append({"date": d, "direction": r.get("direction"),
+                        "strength": r.get("strength"),
+                        "event_type": r.get("event_type") or "",
+                        "title": r.get("title_head") or ""})
+        return out[-limit:]
+    except Exception:
+        return []
+
+
 # ── 수집 뉴스 (시장·캘린더 — 출처별·중요도순) ─────────────────────────────────
 
 # 출처 표시 순서·라벨 (뉴스성 소스 우선, 수치성 스냅샷 후순위)
@@ -964,22 +989,31 @@ def intraday_chart(symbol: str, market: str, date: str, interval: str = "1m") ->
 
 def ohlc_tf(ticker: str, tf: str = "1d"):
     """타임프레임별 OHLCV — 1d/1wk/1mo 는 전체(주·월봉은 일봉 리샘플·무추가호출),
-    5m 은 최근 60일·1h 는 최근 2년 (yfinance 인트라데이 보존 한계). 실패 None."""
+    5m 은 최근 60일·1h 는 최근 2년 (yfinance 인트라데이 보존 한계).
+    2h/4h 는 yfinance 미지원 → 1h 를 리샘플(같은 2년 한계). 실패 None."""
     try:
         from providers.market_data import _history_cached
+        agg = {"Open": "first", "High": "max", "Low": "min", "Close": "last"}
         if tf in ("1d", "1wk", "1mo"):
             d = _history_cached(ticker, period="max")
             if d is None or getattr(d, "empty", True) or tf == "1d":
                 return d
             rule = "W" if tf == "1wk" else "ME"
-            agg = {"Open": "first", "High": "max", "Low": "min", "Close": "last"}
             if "Volume" in d.columns:
                 agg["Volume"] = "sum"
             return d.resample(rule).agg(agg).dropna(subset=["Open"])
         import yfinance as yf
+        resample_rule = {"2h": "2h", "4h": "4h"}.get(tf)
+        interval = "1h" if resample_rule else tf
         period = "60d" if tf == "5m" else "730d"
-        df = yf.Ticker(ticker).history(period=period, interval=tf)
-        return df if df is not None and not df.empty else None
+        df = yf.Ticker(ticker).history(period=period, interval=interval)
+        if df is None or df.empty:
+            return None
+        if resample_rule:
+            if "Volume" in df.columns:
+                agg["Volume"] = "sum"
+            df = df.resample(resample_rule).agg(agg).dropna(subset=["Open"])
+        return df if not df.empty else None
     except Exception:
         return None
 

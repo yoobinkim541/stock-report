@@ -494,6 +494,60 @@ def test_price_alerts_cross_process_serialized(tmp_path):
     assert n == 30, f"lost update! {n}/30"
 
 
+def test_views_chart_news_events(tmp_path, monkeypatch):
+    """차트 뉴스 마커 로더 — base 심볼 매칭(.KS 무접미)·필드 추출·파일없음 graceful []."""
+    import json as _json
+    from dashboard import views
+    from providers import news_labels
+    rows = [
+        {"id": "1", "published_at": "2026-07-01T09:00:00+09:00", "tickers": ["NVDA"],
+         "event_type": "실적", "direction": 1, "strength": 4, "title_head": "beat"},
+        {"id": "2", "published_at": "2026-07-02T09:00:00+09:00", "tickers": ["005930"],
+         "event_type": "규제", "direction": -1, "strength": 3, "title_head": "krx"},
+        {"id": "3", "published_at": "", "tickers": ["NVDA"],
+         "event_type": "기타", "direction": 0, "strength": 1, "title_head": "no-date"},
+    ]
+    p = tmp_path / "labels.jsonl"
+    p.write_text("\n".join(_json.dumps(r) for r in rows), encoding="utf-8")
+    monkeypatch.setattr(news_labels, "LABELS_PATH", p)
+    out = views.chart_news_events("NVDA")
+    assert len(out) == 1 and out[0]["date"] == "2026-07-01" and out[0]["direction"] == 1
+    kr = views.chart_news_events("005930.KS")            # .KS → base 매칭
+    assert len(kr) == 1 and kr[0]["event_type"] == "규제"
+    monkeypatch.setattr(news_labels, "LABELS_PATH", tmp_path / "none.jsonl")
+    assert views.chart_news_events("NVDA") == []          # 파일 없음 graceful
+
+
+def test_views_ohlc_tf_2h_4h_resample(monkeypatch):
+    """2h/4h 커스텀 봉 — yfinance 1h 조회 후 로컬 리샘플 (interval 인자 검증)."""
+    import pandas as pd
+    import yfinance as yf
+    from dashboard import views
+    idx = pd.date_range("2026-07-06 08:00", periods=8, freq="h")   # 2h 버킷 경계 정렬
+    hourly = pd.DataFrame({"Open": range(100, 108), "High": range(101, 109),
+                           "Low": range(99, 107), "Close": range(100, 108),
+                           "Volume": [10.0] * 8}, index=idx)
+    seen = {}
+
+    class _T:
+        def __init__(self, t):
+            pass
+
+        def history(self, period=None, interval=None):
+            seen["interval"] = interval
+            return hourly
+
+    monkeypatch.setattr(yf, "Ticker", _T)
+    d2 = views.ohlc_tf("NVDA", "2h")
+    assert seen["interval"] == "1h"                       # 2h 는 yf 미지원 → 1h 조회
+    assert len(d2) == 4 and float(d2["High"].iloc[0]) == 102.0   # (101,102) max
+    assert float(d2["Volume"].iloc[0]) == 20.0            # 합산
+    d4 = views.ohlc_tf("NVDA", "4h")
+    assert len(d4) == 2 and float(d4["Close"].iloc[0]) == 103.0  # last of 09~12
+    d1 = views.ohlc_tf("NVDA", "1h")
+    assert seen["interval"] == "1h" and len(d1) == 8      # 1h 는 그대로
+
+
 def test_macro_symbols_resolve_and_search():
     """매크로 심볼 — 한/영/티커 resolve + 검색 유니버스 포함 + 표시명 (검색 발견성)."""
     import ticker_names as tn

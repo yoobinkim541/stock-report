@@ -204,6 +204,12 @@ def macro_assets():
     return views.macro_assets()
 
 
+@st.cache_data(ttl=1800, show_spinner=False)
+def chart_news(t):
+    """차트 뉴스 이벤트 마커 — LLM 라벨 로컬 JSONL (30분 캐시·무네트워크)."""
+    return views.chart_news_events(t)
+
+
 @st.cache_data(ttl=_TTL_HEAVY, show_spinner="TR·PR 계산 중…")
 def tr_pr(t, years=5):
     return views.etf_tr_pr(t, years)

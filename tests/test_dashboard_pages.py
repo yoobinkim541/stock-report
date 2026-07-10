@@ -73,6 +73,8 @@ cached.trendlines_for = lambda *a, **k: []
 cached.market_temp_history = lambda: [{"date": "2026-07-07", "score": 0.1},
                                       {"date": "2026-07-08", "score": 0.2}]
 cached.next_earnings = lambda t: None
+cached.chart_news = lambda t: [{"date": "2026-07-01", "direction": 1, "strength": 4,
+                                "event_type": "실적", "title": "beat"}]
 cached.macro_assets = lambda: [
     {"symbol": "KRW=X", "label": "달러/원 환율", "emoji": "\U0001f4b1", "unit": "₩",
      "ticker": "KRW=X", "price": 1505.05, "chg": -3.2, "pct": -0.21, "spark": [1500, 1503, 1505]},

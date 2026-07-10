@@ -47,5 +47,8 @@ def render():
         f'{"⚡ 실시간 KIS" if rq and rq.get("price") else "yfinance 종가"}</span></div>',
         unsafe_allow_html=True)
     pos = data.holding_position(t)
-    ticker_pg._price_chart(t, hist, pos.get("avg_price_usd") if pos else None,
-                           data.trade_events(t), fullscreen=True)
+    live = st.toggle("⚡ 자동 갱신 (8초)", key="_chart_live",
+                     help="실시간가로 마지막 봉·현재가 갱신 — 보던 위치·드로잉 유지")
+    _chart = ticker_pg._price_chart_live if live else ticker_pg._price_chart
+    _chart(t, hist, pos.get("avg_price_usd") if pos else None,
+           data.trade_events(t), fullscreen=True)

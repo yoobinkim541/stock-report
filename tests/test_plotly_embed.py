@@ -89,6 +89,20 @@ def test_embed_persistence_and_readout_contract():
     assert "const storeKey = null" in norm
 
 
+def test_embed_view_position_contract():
+    """뷰 위치 유지 — 60초 신선 + 기간 라디오(vm) 일치 시만 복원 (⚡자동갱신 무점프)."""
+    hist = _hist()
+    fig = charts.price_chart(hist, "T")
+    html = plotly_embed.pannable_chart_html(fig, hist, view_days=90, store_key="NVDA:1d:lin")
+    for token in ("function saveView", "function loadFreshView", '"tnview:" + storeKey',
+                  "< 60000", "v.vm ===", "const freshView = loadFreshView()"):
+        assert token in html, f"누락: {token}"
+    # saveView 는 제스처 마무리(finishGesture)에서 **range 원문**으로 호출 —
+    # Date 파싱-재직렬화 왕복은 KST 에서 −9h 밀림 (적대 리뷰 확정 버그의 회귀 방어)
+    assert html.index("function finishGesture") < html.index("saveView(xr)")
+    assert "new Date(freshView[0])" not in html          # 복원도 원문 그대로
+
+
 def test_embed_no_unreplaced_tokens():
     """@@TOKEN@@ 치환 누락 없음 — 템플릿 전량 치환 (fig JSON 이 토큰 오염 안 함)."""
     hist = _hist()

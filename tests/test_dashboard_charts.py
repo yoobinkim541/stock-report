@@ -757,6 +757,52 @@ def test_price_chart_log_scale():
     assert any("150" in (a.text or "") for a in price_anns)   # raw 텍스트
 
 
+def test_price_chart_event_markers_and_zones():
+    """이벤트 마커(실적·배당·뉴스) + 진입존 밴드 — 배지 트레이스·범위밖 스킵·존 밴드/라벨."""
+    hist = _ohlcv()
+    events = [
+        {"date": "2024-03-15", "marker": "E", "color": "#26a69a", "hover": "실적 beat +9.5%"},
+        {"date": "2024-05-01", "marker": "D", "color": "#22d3ee", "hover": "배당 0.25"},
+        {"date": "2020-01-01", "marker": "E", "color": "#26a69a", "hover": "범위 밖"},
+    ]
+    zones = [{"lo": 120.0, "hi": 124.0, "label": "🎯 1차 존 ×3"},
+             {"lo": 110.0, "hi": 110.0, "label": "🎯 2차 존"}]     # 점 존 → 얇은 밴드
+    fig = charts.price_chart(hist, "T", kind="candle", events=events, zones=zones)
+    ev = [tr for tr in fig.data if (tr.name or "").startswith("이벤트")]
+    assert ev and sum(len(tr.x) for tr in ev) == 2               # 범위 밖 1건 스킵
+    assert all(tr.customdata is not None and "customdata" in tr.hovertemplate for tr in ev)
+    # 마커 y = 봉 저가 아래 (1.5% 오프셋)
+    for tr in ev:
+        for x_, y_ in zip(tr.x, tr.y):
+            low = float(hist["Low"].asof(x_))
+            assert abs(y_ - low * 0.985) < 1e-9
+    rects = [s for s in fig.layout.shapes if s.type == "rect"
+             and (s.fillcolor or "").startswith("rgba(41,98,255")]
+    assert len(rects) == 2
+    thin = min(rects, key=lambda s: s.y1 - s.y0)
+    assert thin.y1 > thin.y0                                     # 점 존도 밴드화
+    labels = [a.text for a in fig.layout.annotations if "존" in (a.text or "")]
+    assert len(labels) == 2
+    # 이벤트 없음 → 트레이스 없음
+    fig0 = charts.price_chart(hist, "T")
+    assert not [tr for tr in fig0.data if (tr.name or "").startswith("이벤트")]
+
+
+def test_price_chart_events_log_scale_zones_converted():
+    """로그축 — 존 밴드(도형)는 log10 변환·이벤트 마커(트레이스)는 raw 유지."""
+    import math
+    hist = _ohlcv()
+    fig = charts.price_chart(hist, "T", log_scale=True,
+                             events=[{"date": "2024-03-15", "marker": "E",
+                                      "color": "#26a69a", "hover": "h"}],
+                             zones=[{"lo": 120.0, "hi": 124.0, "label": "🎯 존"}])
+    zr = [s for s in fig.layout.shapes if s.type == "rect"
+          and (s.fillcolor or "").startswith("rgba(41,98,255")]
+    assert zr and abs(zr[0].y0 - math.log10(120.0)) < 1e-9
+    ev = [tr for tr in fig.data if (tr.name or "").startswith("이벤트")][0]
+    assert 90 < float(ev.y[0]) < 210                             # 트레이스 raw
+
+
 def test_heikin_ashi_transform():
     """하이킨아시 — 정의 검증(HA종가·재귀 시가·고저 포섭)·Volume 보존·graceful."""
     hist = _ohlcv(50)

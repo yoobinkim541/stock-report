@@ -629,6 +629,71 @@ def normalize_pct(series, view_days=None):
     return (s / anchor_val - 1.0) * 100.0
 
 
+def _add_event_markers(fig, hist, events, panes) -> None:
+    """이벤트 마커 — 실적(E)·배당(D)·뉴스(N) 등을 봉 아래 원형 배지로 (표시·참고용).
+
+    events: [{date, marker(1글자), color, hover}]. y = 해당 시점 봉 저가의 1.5% 아래
+    (스케일 무관 비율 오프셋 — 로그축에서도 일정한 시각 간격). 봉 범위 밖 날짜는 스킵.
+    """
+    if not events:
+        return
+    import pandas as pd
+    go = _go()
+    cols = set(getattr(hist, "columns", []))
+    low = (hist["Low"] if "Low" in cols else hist["Close"]).dropna()
+    if low.empty:
+        return
+    kw = dict(row=1, col=1) if panes > 1 else {}
+    groups: dict = {}
+    for ev in events:
+        try:
+            ts = pd.Timestamp(ev.get("date"))
+        except Exception:
+            continue
+        # tz 정합 — yfinance 인덱스는 tz-aware(미국장), 이벤트 날짜는 보통 naive
+        idx_tz = getattr(low.index, "tz", None)
+        if ts.tzinfo is None and idx_tz is not None:
+            ts = ts.tz_localize(idx_tz)
+        elif ts.tzinfo is not None and idx_tz is None:
+            ts = ts.tz_localize(None)
+        try:
+            base = low.asof(ts)                     # 해당 시점(이전 최근접) 봉 저가
+        except Exception:
+            continue
+        if base != base or ts < low.index[0]:       # NaN·범위 밖 스킵
+            continue
+        g = groups.setdefault((str(ev.get("marker", "•"))[:1],
+                               ev.get("color") or theme.MUTED),
+                              {"x": [], "y": [], "hover": []})
+        g["x"].append(ts)
+        g["y"].append(float(base) * 0.985)
+        g["hover"].append(str(ev.get("hover") or ""))
+    for (letter, color), g in groups.items():
+        fig.add_trace(go.Scatter(
+            x=g["x"], y=g["y"], mode="markers+text", name=f"이벤트 {letter}",
+            showlegend=False, text=[letter] * len(g["x"]), customdata=g["hover"],
+            textfont=dict(size=8, color="#ffffff"),
+            marker=dict(symbol="circle", size=11, color=color, opacity=0.9),
+            hovertemplate="%{customdata}<extra></extra>"), **kw)
+
+
+def _add_entry_zones(fig, zones, panes) -> None:
+    """진입 합류 존 밴드 — 지지 클러스터(재료 겹침)를 반투명 파랑 밴드로 (표시·참고용)."""
+    kw = dict(row=1, col=1) if panes > 1 else {}
+    for z in zones or []:
+        lo, hi = z.get("lo"), z.get("hi")
+        if not lo or not hi:
+            continue
+        if hi <= lo * 1.0005:                       # 점 존 → 얇은 밴드로 시각화
+            lo, hi = lo * 0.9985, hi * 1.0015
+        fig.add_hrect(y0=lo, y1=hi, fillcolor="rgba(41,98,255,0.10)", line_width=0, **kw)
+        fig.add_annotation(xref="x domain", x=0.004, y=(lo + hi) / 2, yref="y",
+                           xanchor="left", showarrow=False,
+                           text=z.get("label", ""), font=dict(size=9, color="#7ea6ff"),
+                           bgcolor="rgba(10,14,23,.55)",
+                           **({"row": 1, "col": 1} if panes > 1 else {}))
+
+
 def heikin_ashi(hist):
     """하이킨아시 변환 — 표시용 평활 캔들 (OHLC 재계산·Volume 보존·순수).
 
@@ -695,7 +760,8 @@ def price_chart(hist, ticker: str = "", *, kind: str = "line", avg_cost=None,
                 envelope: bool = False, fractals: bool = False, vol_profile: bool = False,
                 emas=(), psar: bool = False, donchian_on: bool = False,
                 vwap: bool = False, avwap: bool = False, compare=None,
-                show_macd: bool = False, show_stoch: bool = False, log_scale: bool = False):
+                show_macd: bool = False, show_stoch: bool = False, log_scale: bool = False,
+                events=None, zones=None):
     """가격 차트 + 기술적 분석 도구 (TradingView 풍 멀티패널).
 
     패널: 가격(+MA·BB·일목·추세선·평단·기간 최고/최저·현재가 라벨) / 거래량(방향색 바+MA20)
@@ -719,6 +785,7 @@ def price_chart(hist, ticker: str = "", *, kind: str = "line", avg_cost=None,
         bollinger = ichimoku = supertrend = envelope = fractals = vol_profile = False
         psar = donchian_on = vwap = avwap = False
         log_scale = False              # % 축엔 로그 무의미
+        events, zones = None, None     # 절대가격 오버레이 — % 축과 공존 불가
     close = hist["Close"]
     has_ohlc = {"Open", "High", "Low"} <= cols
     show_volume = show_volume and "Volume" in cols
@@ -822,6 +889,8 @@ def price_chart(hist, ticker: str = "", *, kind: str = "line", avg_cost=None,
     _add_top_indicators2(fig, hist, emas=emas, psar=psar, donchian_on=donchian_on,
                          vwap=vwap, avwap=avwap, view_days=view_days, panes=panes)
     _add_trade_markers(fig, hist, trades or [])
+    _add_event_markers(fig, hist, events, panes)
+    _add_entry_zones(fig, zones, panes)
 
     # ── 기간 최고/최저 콜아웃 + 현재가 점선·우측 라벨 (TradingView 풍) ──
     if cmp_mode:                       # % 축 — 가격 콜아웃 대신 % 포맷만
