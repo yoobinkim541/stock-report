@@ -494,6 +494,94 @@ def test_price_alerts_cross_process_serialized(tmp_path):
     assert n == 30, f"lost update! {n}/30"
 
 
+def test_is_macro_classification_and_units():
+    """매크로 판별 + 단위 단일 소스 (환율에 'USD', 금리에 'USD' 붙는 오표기 방지)."""
+    import ticker_names as tn
+    for t in ("KRW=X", "GC=F", "BTC-USD", "^TNX", "DX-Y.NYB", "^VIX", "krw=x"):
+        assert tn.is_macro(t), t
+    for t in ("NVDA", "QQQ", "005930.KS", "", None):
+        assert not tn.is_macro(t), t
+    assert tn.macro_unit("KRW=X") == "₩" and tn.macro_unit("gc=f") == "$/oz"
+    assert tn.macro_unit("^TNX") == "%" and tn.macro_unit("BTC-USD") == "$"
+    assert tn.macro_unit("NVDA") == ""                     # 주식 → 빈 문자열
+    assert set(tn.MACRO) == set(tn.MACRO_UNITS)            # 멤버십·단위 동기
+
+
+def test_query_param_ticker_is_whitelisted():
+    """`?tk=` 는 앵커 카드가 쓰는 **비신뢰 입력** — 마크업·경로·SQL 류는 전부 None.
+
+    app.py 가 normalize_input 결과만 session_state["ticker"] 에 넣고, 그 값은
+    unsafe_allow_html 히어로/사이드바 라벨로 흘러가므로 여기서 차단되어야 한다.
+    """
+    import ticker_names as tn
+    for bad in ('<script>alert(1)</script>', '"><img src=x onerror=alert(1)>', "A<B",
+                "javascript:alert(1)", "../../etc/passwd", "GC=F<script>", "<b>x</b>"):
+        assert tn.normalize_input(bad) is None, bad
+    # 정상 매크로 심볼은 통과 (시드 화이트리스트 경유)
+    assert tn.normalize_input("GC=F") == "GC=F"
+    assert tn.normalize_input("krw=x") == "KRW=X"
+    assert tn.normalize_input("^TNX") == "^TNX"
+
+
+def test_series_profile_and_percentile():
+    """성과 프로필(수익률·52주 위치·변동성·200일 이격) + 역사 백분위 — 순수·graceful."""
+    import numpy as np
+    import pandas as pd
+    from dashboard import data as ddata
+    idx = pd.date_range("2024-01-01", periods=400, freq="D")
+    up = pd.DataFrame({"Close": np.linspace(100.0, 150.0, 400)}, index=idx)
+    p = ddata.series_profile(up)
+    assert p["r1y"] > 0 and p["ytd"] > 0 and p["last"] == 150.0
+    assert p["hi52"] == 150.0 and p["pos52"] == pytest.approx(1.0)
+    assert p["vol_ann"] is not None and p["ma200_gap"] > 0     # 상승 → 200일선 위
+    assert ddata.history_percentile(up) > 95                   # 최근값이 최고 → 상위 백분위
+    dn = pd.DataFrame({"Close": np.linspace(150.0, 100.0, 400)}, index=idx)
+    assert ddata.series_profile(dn)["ma200_gap"] < 0
+    assert ddata.history_percentile(dn) < 5
+    # 짧은 이력·결측 graceful
+    assert ddata.series_profile(pd.DataFrame({"Close": [1.0, 2.0]})) is None
+    assert ddata.series_profile(None) is None
+    assert ddata.history_percentile(pd.DataFrame({"Close": [1.0, 2.0]})) is None
+    short = pd.DataFrame({"Close": np.linspace(10.0, 11.0, 20)},
+                         index=pd.date_range("2026-06-20", periods=20, freq="D"))
+    sp = ddata.series_profile(short)
+    # 창을 못 덮는 구간은 None — 20일치로 "1년/3개월/YTD" 라벨을 만들면 허위
+    assert sp is not None and sp["r1y"] is None and sp["r3m"] is None
+    assert sp["ytd"] is None and sp["ma200_gap"] is None
+    assert sp["r1w"] is not None                                # 1주는 덮음
+    # tz-aware 인덱스에서도 YTD 계산 (yfinance 미국장 인덱스)
+    tzs = pd.DataFrame({"Close": np.linspace(100.0, 110.0, 400)},
+                       index=pd.date_range("2025-06-01", periods=400, freq="D",
+                                           tz="America/New_York"))
+    assert ddata.series_profile(tzs)["ytd"] is not None
+
+
+def test_macro_correlations(monkeypatch):
+    """연관 자산 상관 — 90일 피어슨·30일 등락·미지원 티커 []·yf 실패 graceful []."""
+    import numpy as np
+    import pandas as pd
+    import yfinance as yf
+    from dashboard import views
+    idx = pd.date_range("2026-01-01", periods=180, freq="D")
+    base = pd.Series(np.linspace(100.0, 120.0, 180), index=idx)
+    frames = {"GC=F": base, "^TNX": pd.Series(np.linspace(5.0, 4.0, 180), index=idx),  # 역방향
+              "DX-Y.NYB": base * 1.01, "SI=F": base * 0.5}
+    df = pd.concat({k: pd.DataFrame({"Close": v}) for k, v in frames.items()}, axis=1)
+    monkeypatch.setattr(yf, "download", lambda *a, **k: df)
+    out = views.macro_correlations("GC=F")
+    assert len(out) == 3 and {r["symbol"] for r in out} == {"^TNX", "DX-Y.NYB", "SI=F"}
+    tnx = next(r for r in out if r["symbol"] == "^TNX")
+    assert tnx["corr90"] is not None and tnx["chg90" if False else "chg30"] is not None
+    assert all(r.get("note") for r in out)                       # 관계 설명 필수
+    assert views.macro_correlations("NVDA") == []                # 미지원 → 빈 목록
+
+    def _boom(*a, **k):
+        raise RuntimeError("net down")
+
+    monkeypatch.setattr(yf, "download", _boom)
+    assert views.macro_correlations("GC=F") == []                # graceful
+
+
 def test_views_chart_news_events(tmp_path, monkeypatch):
     """차트 뉴스 마커 로더 — base 심볼 매칭(.KS 무접미)·필드 추출·파일없음 graceful []."""
     import json as _json

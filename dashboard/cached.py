@@ -242,6 +242,12 @@ def chart_news(t):
     return views.chart_news_events(t)
 
 
+@st.cache_data(ttl=1800, show_spinner="연관 자산 분석 중…")
+def macro_corr(t):
+    """매크로 자산 연관 카드 — 90일 상관·30일 등락 (30분 캐시)."""
+    return views.macro_correlations(t)
+
+
 @st.cache_data(ttl=_TTL_HEAVY, show_spinner="TR·PR 계산 중…")
 def tr_pr(t, years=5):
     return views.etf_tr_pr(t, years)
