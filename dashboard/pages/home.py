@@ -29,6 +29,7 @@ def render():
 
     st.divider()
     _market_bar()
+    _macro_row()
     _market_map()
     st.divider()
 
@@ -142,6 +143,35 @@ def _market_bar():
                    f"자체 집계(상위 {v.get('n', 0)}종목 시총가중) PER "
                    f"{data.f_ratio(v.get('per'), 1)} 병행 · fPER/성장/PEG = 자체 집계 · "
                    f"{v.get('asof', '')} · 12h 캐시 · 표시·참고용")
+
+
+@st.fragment
+def _macro_row():
+    """매크로 자산 — 환율·금·비트코인·유가·금리 카드 + 클릭 시 종목 분석 이동."""
+    st.markdown("#### 🌐 매크로 자산")
+    items = cached.macro_assets()
+    if not items:
+        st.caption("매크로 자산 데이터를 불러오지 못했습니다 (네트워크 일시 오류 — 새로고침).")
+        return
+    theme.render(theme.macro_cards_html(items, cols=4))
+    # 카드는 순수 HTML(클릭 이벤트 불가) → 아래 컴팩트 버튼 행으로 종목 분석 이동 제공
+    st.caption("아래 버튼 = 해당 자산 상세 차트(캔들·지표·드로잉)로 이동")
+    labels = [it for it in items if it.get("ticker")]
+    ncol = 4
+    for i in range(0, len(labels), ncol):
+        cols = st.columns(ncol)
+        for j, it in enumerate(labels[i:i + ncol]):
+            if cols[j].button(f"{it['emoji']} {it['label']}", key=f"_macro_{it['ticker']}",
+                              width="stretch"):
+                tk = it["ticker"]
+                if tk != st.session_state.get("ticker"):
+                    st.session_state["ticker"] = tk
+                    st.toast(f"종목 분석 → {tk}")
+                    _tp = st.session_state.get("_ticker_page")
+                    if _tp is not None:
+                        st.switch_page(_tp)
+                    else:
+                        st.rerun()
 
 
 _MAPS = {   # 라벨 → (cached 로더명, 부가 캡션)

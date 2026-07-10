@@ -211,6 +211,28 @@ def test_market_tape_html_marquee():
     assert theme.market_tape_html([]) == ""                     # graceful
 
 
+def test_macro_cards_html():
+    """매크로 자산 카드 — 이모지·라벨·가격·등락 색·스파크·반응형 그리드·단위 접두/접미."""
+    up = {"symbol": "GC=F", "label": "금", "emoji": "🥇", "unit": "$/oz", "ticker": "GC=F",
+          "price": 4105.3, "chg": 12.1, "pct": 0.30, "spark": [4090, 4100, 4105]}
+    dn = {"symbol": "KRW=X", "label": "달러/원 환율", "emoji": "💱", "unit": "₩", "ticker": "KRW=X",
+          "price": 1505.05, "chg": -3.2, "pct": -0.21, "spark": [1500, 1503, 1505]}
+    grid = theme.macro_cards_html([up, dn], cols=4)
+    assert "tn-macro" in grid and "repeat(4," in grid
+    assert "max-width: 600px" in grid and "repeat(2," in grid   # 반응형 2열
+    assert "금" in grid and "달러/원 환율" in grid
+    # 상승=초록·하락=빨강
+    assert theme.GREEN in theme.macro_card_html(up)
+    assert theme.RED in theme.macro_card_html(dn)
+    # 통화기호 접두(₩) vs 단위 접미($/oz)
+    assert "₩1,505.05" in theme.macro_card_html(dn)
+    assert "$/oz" in theme.macro_card_html(up)
+    # 빈 목록·None 값 graceful
+    assert theme.macro_cards_html([]) == ""
+    theme.macro_card_html({"label": "x", "emoji": "", "price": None, "chg": None,
+                           "pct": None, "unit": "", "spark": []})
+
+
 def test_etf_score_html_gauge():
     """ETF 점수 게이지 — 니들·5존·라벨·표본부족·None=데이터 부족 안내."""
     h = theme.etf_score_html(72, "나스닥 100")

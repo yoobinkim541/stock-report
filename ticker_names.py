@@ -66,6 +66,11 @@ EN: dict[str, str] = {
     "JEPI": "JPMorgan Equity Premium", "JEPQ": "JPMorgan Nasdaq Premium",
     "DIA": "SPDR Dow Jones", "IWM": "iShares Russell 2000",
     "GLD": "SPDR Gold", "SLV": "iShares Silver", "ARKK": "ARK Innovation",
+    # ── 매크로 자산 (환율·원자재·암호화폐·금리·지수 — 홈 매크로 카드·검색·차트) ──
+    "KRW=X": "USD/KRW", "GC=F": "Gold Futures", "SI=F": "Silver Futures",
+    "CL=F": "WTI Crude Oil", "BTC-USD": "Bitcoin", "ETH-USD": "Ethereum",
+    "^TNX": "US 10Y Treasury Yield", "DX-Y.NYB": "US Dollar Index",
+    "^VIX": "CBOE Volatility Index", "^GSPC": "S&P 500 Index", "^IXIC": "NASDAQ Composite",
 }
 
 # 검색 별칭 (한글 대표명 + 추가 영문 별칭). 첫 항목이 대표 한글명(있으면).
@@ -180,6 +185,18 @@ KO: dict[str, tuple[str, ...]] = {
     "GLD": ("금 ETF", "골드"),
     "SLV": ("은 ETF", "실버"),
     "ARKK": ("아크 이노베이션", "ARK"),
+    # ── 매크로 자산 (한글 검색 별칭 — 홈 카드 클릭·통합 검색) ──
+    "KRW=X": ("달러 환율", "원달러", "달러원", "환율"),
+    "GC=F": ("금", "금 선물", "골드"),
+    "SI=F": ("은", "은 선물"),
+    "CL=F": ("유가", "wti", "원유", "국제유가"),
+    "BTC-USD": ("비트코인", "비트", "btc"),
+    "ETH-USD": ("이더리움", "이더", "eth"),
+    "^TNX": ("미국 10년물 금리", "미국채금리", "국채금리", "10년물"),
+    "DX-Y.NYB": ("달러 인덱스", "달러지수", "dxy"),
+    "^VIX": ("변동성지수", "공포지수", "빅스"),
+    "^GSPC": ("에스앤피500", "s&p500", "스앤피"),
+    "^IXIC": ("나스닥", "나스닥종합"),
 }
 
 # 한국 상장주(.KS) 한글 표시명 (KOSPI 시총 상위 — data_pipeline.KR_TOP10_META 와 동일값).
