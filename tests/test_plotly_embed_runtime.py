@@ -147,3 +147,129 @@ def test_drawing_tools_runtime(tmp_path):
     r = subprocess.run([_NODE, str(runner)], capture_output=True, text=True, timeout=30)
     assert r.returncode == 0, f"runtime fail: {r.stdout}\n{r.stderr}"
     assert "OK" in r.stdout
+
+
+# ── 무한 relayout 루프 회귀 (실브라우저 프리즈 재현) ──────────────────────────
+# plotly 는 {shapes:[...]} relayout 의 자기 이벤트를 **비동기**(promise .then 이후)로 emit —
+# 이 하니스는 그 비동기 메아리를 충실히 모델링한다. 수정 전 코드면 applyDraw→메아리→magnet
+# 재스냅→applyDraw 무한 루프로 relayout 이 CAP 를 넘겨 탭이 얼어붙는다(실측 확정).
+_ASYNC_HARNESS = r"""
+let gd = null;
+const els = {};
+function el(id) {
+  if (!els[id]) els[id] = { id, style: {}, innerHTML: "", textContent: "", _h: {},
+    _s: new Set(id === "bt-mag" ? ["on"] : []),
+    classList: { toggle(c, on) { on ? this._s.add(c) : this._s.delete(c); } },
+    on(e, f) { this._h[e] = f; }, emit(e, p) { if (this._h[e]) this._h[e](p); },
+    appendChild() {}, addEventListener() {}, querySelector() { return null; },
+    getBoundingClientRect() { return { top: 0, left: 0, right: 100, bottom: 100, width: 100, height: 100 }; } };
+  els[id].classList._s = els[id]._s;
+  if (id === "chart") gd = els[id];
+  return els[id];
+}
+global.document = { getElementById: el, createElement: () => ({ style: {}, textContent: "" }) };
+global.window = { frameElement: null, parent: { innerHeight: 900, addEventListener() {} } };
+global.performance = { now: () => 1 };
+global.requestAnimationFrame = () => null;
+const _ls = {};
+global.localStorage = { getItem: (k) => (k in _ls ? _ls[k] : null),
+                        setItem: (k, v) => { _ls[k] = String(v); }, removeItem: (k) => { delete _ls[k]; } };
+global.setTimeout = (fn) => { fn(); return 0; };
+global.clearTimeout = () => {};
+
+// ── 이벤트 루프 + plotly 비동기 자기 메아리 모델 ──
+const micro = [];               // promise .then 큐
+const echoes = [];              // plotly 가 뒤늦게 쏘는 plotly_relayout 큐 (.then 이후)
+let RELAYOUTS = 0;
+const CAP = 500;                // 이 이상이면 무한 루프로 간주
+global.Plotly = {
+  newPlot(g, d, l) { g.data = d; g.layout = l; return { then(cb) { cb(); return this; } }; },
+  relayout(g, u) {
+    RELAYOUTS++;
+    if (RELAYOUTS > CAP) throw new Error("RELAYOUT_LOOP");   // 무한 루프 → 여기서 폭발
+    for (const k of Object.keys(u)) if (!k.includes(".") && !k.includes("[")) g.layout[k] = u[k];
+    if (u["xaxis.range"]) g.layout.xaxis = Object.assign(g.layout.xaxis || {}, {range: u["xaxis.range"]});
+    let cb = null;
+    // 1) 프로미스 resolve (guard=false 등) 를 먼저 큐잉
+    micro.push(() => { if (cb) cb(); });
+    // 2) shapes/annotations 변경이면 plotly 가 **그 뒤** plotly_relayout(자기 메아리) emit
+    if ("shapes" in u || "annotations" in u || "dragmode" in u) {
+      const payload = ("shapes" in u) ? { shapes: g.layout.shapes }
+                    : ("dragmode" in u) ? { dragmode: u.dragmode }
+                    : { annotations: g.layout.annotations };
+      echoes.push(() => { if (gd._h["plotly_relayout"]) gd._h["plotly_relayout"](payload); });
+    }
+    return { then(f) { cb = f; return this; } };
+  },
+};
+function pump() {                // .then 먼저 전부, 그 다음 메아리 하나씩 (각 메아리가 또 relayout 유발)
+  let steps = 0;
+  while (micro.length || echoes.length) {
+    if (++steps > 5000) throw new Error("PUMP_RUNAWAY");
+    if (micro.length) { micro.shift()(); continue; }
+    echoes.shift()();
+  }
+}
+__SCRIPT__
+const iso = (d) => new Date(d).toISOString();
+const D0 = Date.parse("2025-02-01"), D1 = Date.parse("2025-03-01");
+const BASE = JSON.parse(JSON.stringify(gd.layout.shapes || []));
+function fail(m) { console.error("FAIL " + m); process.exit(1); }
+
+// 초기 newPlot .then(복원·초기뷰) 메아리 소진
+try { pump(); } catch (e) { fail("init_pump " + e.message); }
+
+// ── 수평선 그리기: plotly 가 dragmode='drawline' 로 raw line 을 append 하고 relayout emit ──
+el("bt-hline").onclick();
+try { pump(); } catch (e) { fail("hline_select " + e.message); }
+RELAYOUTS = 0;
+gd.layout.shapes = BASE.concat([{ type: "line", xref: "x", yref: "y",
+  x0: iso(D0), y0: 140.3, x1: iso(D0 + 864e5), y1: 141 }]);
+gd._h["plotly_relayout"]({ shapes: gd.layout.shapes });   // 사용자 그리기 이벤트
+try { pump(); } catch (e) { fail("HLINE_DRAW_LOOP (" + e.message + ") relayouts=" + RELAYOUTS); }
+if (RELAYOUTS > 20) fail("hline relayout 폭주 " + RELAYOUTS);
+if (gd.layout.shapes.filter(s => s.name === "tool-hline").length !== 1) fail("hline 미생성");
+
+// ── 자석: 사용자가 raw 선을 그리면 스냅 후 안정(메아리로 재스냅 루프 없어야) ──
+RELAYOUTS = 0;
+gd.layout.shapes = BASE.concat([{ type: "line", xref: "x", yref: "y",
+  x0: iso(D0 + 3e5), y0: 131.4, x1: iso(D1 + 3e5), y1: 158.2 }]);
+gd._h["plotly_relayout"]({ shapes: gd.layout.shapes });
+try { pump(); } catch (e) { fail("MAGNET_LOOP (" + e.message + ") relayouts=" + RELAYOUTS); }
+if (RELAYOUTS > 20) fail("magnet relayout 폭주 " + RELAYOUTS);
+const ln = gd.layout.shapes[gd.layout.shapes.length - 1];
+if (ln.y0 !== Math.round(ln.y0)) fail("magnet 스냅 안됨 " + ln.y0);
+
+// ── 측정 박스도 루프 없어야 ──
+el("bt-meas").onclick();
+try { pump(); } catch (e) { fail("meas_select " + e.message); }
+RELAYOUTS = 0;
+gd.layout.shapes = gd.layout.shapes.concat([{ type: "rect", xref: "x", yref: "y",
+  x0: iso(D0), y0: 120, x1: iso(D1), y1: 150 }]);
+gd._h["plotly_relayout"]({ shapes: gd.layout.shapes });
+try { pump(); } catch (e) { fail("MEASURE_LOOP (" + e.message + ") relayouts=" + RELAYOUTS); }
+if (RELAYOUTS > 20) fail("measure relayout 폭주 " + RELAYOUTS);
+console.log("OK bounded");
+"""
+
+
+@pytest.mark.skipif(_NODE is None, reason="node 미설치 — 런타임 JS 검증 스킵")
+def test_drawing_no_infinite_relayout_loop(tmp_path):
+    """드로잉 시 자기 메아리 무한 relayout 루프(=탭 프리즈) 회귀 방어.
+
+    plotly 의 비동기 shapes 메아리를 충실히 모델 → 수정 전이면 relayout 이 CAP(500) 초과.
+    """
+    idx = pd.date_range("2025-01-01", periods=70, freq="D")
+    df = pd.DataFrame({"Open": range(100, 170), "High": range(101, 171),
+                       "Low": range(99, 169), "Close": range(100, 170),
+                       "Volume": [1e6] * 70}, index=idx)
+    fig = charts.price_chart(df, "TEST", kind="candle", show_volume=True,
+                             show_rsi=True, avg_cost=140.0)
+    html = plotly_embed.pannable_chart_html(fig, df, height=460, view_days=90,
+                                            vol_axis="yaxis2", store_key="TEST:1d:lin")
+    js = re.findall(r"<script>(.*?)</script>", html, re.S)[-1]
+    runner = tmp_path / "loop.js"
+    runner.write_text(_ASYNC_HARNESS.replace("__SCRIPT__", js), encoding="utf-8")
+    r = subprocess.run([_NODE, str(runner)], capture_output=True, text=True, timeout=30)
+    assert r.returncode == 0, f"loop guard fail: {r.stdout}\n{r.stderr}"
+    assert "OK bounded" in r.stdout

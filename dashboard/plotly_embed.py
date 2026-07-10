@@ -151,6 +151,13 @@ _TEMPLATE = r"""
   }
   const hoverMode = fig.layout.hovermode || "x unified";
   let guard = false, dragging = false, hoverOff = false;
+  // ⚠️ plotly 는 {shapes:[...]} relayout 의 자기 이벤트를 **비동기**로(promise .then 이
+  // guard=false 로 되돌린 뒤) emit 한다 → boolean guard 만으론 자기 메아리를 못 막아,
+  // applyDraw→메아리→magnet 재스냅→applyDraw 무한 루프로 탭이 얼어붙었다(실측 확정).
+  // 방어는 **내용 기반**(카운터는 sync/async/수동 emit 에 드리프트): (1) 새 draw 이벤트의
+  // 마지막 도형이 이미 우리가 만든 tool-*/서버 도형이면 = 자기 메아리 → 무시,
+  // (2) 자석 snapShape 는 좌표가 실제로 바뀔 때만 applyDraw(멱등 — 이미 스냅된 메아리는
+  //     재적용 안 해 루프가 끊김). 두 가드가 named/unnamed 도형을 각각 커버.
 
   const volAxis = @@VOL_AXIS@@;                  // 거래량 패널 축 id (없으면 null)
   // 전역 거래량 상위 2% 분위 캡 — 스파이크가 창에 들어와도 평상 막대가 읽히게
@@ -537,15 +544,27 @@ _TEMPLATE = r"""
     setTool(null);
   }
 
-  function snapShape(sh, shapes) {               // 🧲 — 선/박스 끝점을 봉·OHLC 로
+  const _same = (a, b) => a === b || (typeof a === "number" && typeof b === "number"
+                                      && Math.abs(a - b) < 1e-9);
+
+  function snapShape(sh, shapes) {               // 🧲 — 선/박스 끝점을 봉·OHLC 로 (멱등)
+    // ⚠️ 좌표가 실제로 바뀔 때만 applyDraw — 이미 스냅된 도형의 자기 메아리는 변화 0 이라
+    // 재적용하지 않아 무한 루프가 끊긴다(실측 확정 프리즈의 핵심 방어).
     if (sh.type === "line" && sh.xref !== "paper") {
       const p0 = snapPoint(toMs(sh.x0), sh.y0), p1 = snapPoint(toMs(sh.x1), sh.y1);
-      sh.x0 = toISO(p0[0]); sh.y0 = p0[1]; sh.x1 = toISO(p1[0]); sh.y1 = p1[1];
+      const x0 = toISO(p0[0]), x1 = toISO(p1[0]);
+      if (_same(sh.x0, x0) && _same(sh.y0, p0[1]) && _same(sh.x1, x1) && _same(sh.y1, p1[1]))
+        return true;                             // 변화 없음 → 자기 메아리 → 무시
+      sh.x0 = x0; sh.y0 = p0[1]; sh.x1 = x1; sh.y1 = p1[1];
     } else if (sh.type === "rect") {
       const p0 = snapPoint(toMs(sh.x0), sh.y0), p1 = snapPoint(toMs(sh.x1), sh.y1);
-      sh.x0 = toISO(p0[0]); sh.y0 = p0[1]; sh.x1 = toISO(p1[0]); sh.y1 = p1[1];
+      const x0 = toISO(p0[0]), x1 = toISO(p1[0]);
+      if (_same(sh.x0, x0) && _same(sh.y0, p0[1]) && _same(sh.x1, x1) && _same(sh.y1, p1[1]))
+        return true;
+      sh.x0 = x0; sh.y0 = p0[1]; sh.x1 = x1; sh.y1 = p1[1];
     } else if (sh.type === "line" && sh.xref === "paper" && (sh.name || "") === "tool-hline") {
       const y = snapPoint(bounds.length ? bounds[bounds.length - 1][0] : 0, sh.y0)[1];
+      if (_same(sh.y0, y) && _same(sh.y1, y)) return true;   // 변화 없음 → 무시
       sh.y0 = sh.y1 = y;                         // 수평선 편집 — 가격만 스냅
       const nth = shapes.filter(s => (s.name || "") === "tool-hline").indexOf(sh);
       const anns = curAnns();
@@ -585,6 +604,9 @@ _TEMPLATE = r"""
     const shapes = (gd.layout.shapes || []).slice();
     const sh = shapes[idx];
     if (!sh || sh.type === "path") return true;  // 자유곡선 — 스냅 제외
+    // 새 draw 이벤트인데 마지막 도형이 이미 우리가 만든 tool-* 도형이면 = applyDraw 자기 메아리
+    // (진짜 새 draw 는 항상 무명 raw 도형을 append) → 재처리 금지(무한 루프 차단·drift 방지)
+    if (isNew && String(sh.name || "").startsWith("tool-")) return true;
     if (sh.yref && sh.yref !== "y") return true; // 가격 패널 외(거래량·RSI) — 제외
     // 서버 도형(평단선·현재가선)은 사용자 편집/자석 대상 아님 — 스냅이 평단을 움직이면 안 됨
     if (idx < baseShapeCount && !String(sh.name || "").startsWith("tool-")) return true;
