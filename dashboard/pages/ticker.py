@@ -35,7 +35,7 @@ def render():
         # ⚡자동 갱신 토글은 fragment **밖** — 켜고 끄기가 래퍼(주기 재실행)를 전환해야 함
         live = st.toggle("⚡ 자동 갱신 (8초)", key="_chart_live",
                          help="실시간가로 마지막 봉·현재가 갱신 — 보던 위치·드로잉 유지")
-        _chart = _price_chart_live if live else _price_chart
+        _chart = _price_chart_live if live else _price_chart_frag
         _chart(ticker, hist, pos.get("avg_price_usd") if pos else None,
                data.trade_events(ticker))
     else:
@@ -154,6 +154,16 @@ def _price_chart_live(ticker, hist, avg_cost, trades, fullscreen: bool = False):
     """⚡ 자동 갱신 차트 — 8초 fragment 재실행 (실시간 마지막 봉 패치 + 뷰·드로잉 유지).
 
     드로잉=localStorage 복원 · 뷰 위치=60초 신선 규칙 복원이라 재실행이 화면을 안 깨뜨림.
+    """
+    _price_chart(ticker, hist, avg_cost, trades, fullscreen)
+
+
+@st.fragment
+def _price_chart_frag(ticker, hist, avg_cost, trades, fullscreen: bool = False):
+    """기본 차트 fragment — 봉/기간/지표 컨트롤 변경이 **차트만** 부분 rerun.
+
+    비프래그먼트로 render 에 인라인이면 컨트롤 하나 바꿀 때마다 페이지 전체(히어로·호가·
+    진입레벨·분석 섹션)가 재실행돼 체감 버벅임의 주원인이 된다 (H-series UX 모델 복원).
     """
     _price_chart(ticker, hist, avg_cost, trades, fullscreen)
 

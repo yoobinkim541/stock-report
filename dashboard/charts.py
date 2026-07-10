@@ -982,12 +982,8 @@ def price_chart(hist, ticker: str = "", *, kind: str = "line", avg_cost=None,
                       bargap=0.1, newshape=dict(line=dict(color="#f59e0b", width=2)))
     fig.update_xaxes(automargin=True)
     fig.update_yaxes(automargin=True)
-    # 십자선(크로스헤어) — TradingView 풍. x 는 전 패널 관통, y 는 가격 패널만.
-    # 제스처 중엔 hovermode=false 뮤트(embed JS)라 스파이크도 함께 숨어 팬 성능 무영향.
-    _spike = dict(showspikes=True, spikemode="across", spikesnap="cursor",
-                  spikethickness=0.6, spikedash="dot", spikecolor=theme.MUTED)
-    fig.update_xaxes(**_spike)
-    fig.update_yaxes(row=1 if panes > 1 else None, col=1 if panes > 1 else None, **_spike)
+    # 십자선은 plotly 스파이크 대신 **embed JS DOM 오버레이** (plotly_embed) —
+    # 스파이크는 마우스무브마다 전체 재그리기를 유발해 다중 트레이스에서 스터터(성능 회귀 확정)
     if log_scale:                          # 가격 패널만 로그 — 서브패널(RSI·MACD 등)은 선형 유지
         fig.update_yaxes(type="log", row=1 if panes > 1 else None,
                          col=1 if panes > 1 else None)
