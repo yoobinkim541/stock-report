@@ -757,6 +757,35 @@ def test_price_chart_log_scale():
     assert any("150" in (a.text or "") for a in price_anns)   # raw 텍스트
 
 
+def test_heikin_ashi_transform():
+    """하이킨아시 — 정의 검증(HA종가·재귀 시가·고저 포섭)·Volume 보존·graceful."""
+    hist = _ohlcv(50)
+    ha = charts.heikin_ashi(hist)
+    r0 = hist.iloc[0]
+    assert abs(ha["Close"].iloc[0] - (r0.Open + r0.High + r0.Low + r0.Close) / 4) < 1e-9
+    assert abs(ha["Open"].iloc[0] - (r0.Open + r0.Close) / 2) < 1e-9
+    # 재귀: HA시가[i] = (HA시가[i-1]+HA종가[i-1])/2
+    assert abs(ha["Open"].iloc[5] - (ha["Open"].iloc[4] + ha["Close"].iloc[4]) / 2) < 1e-9
+    assert (ha["High"] >= ha[["Open", "Close"]].max(axis=1) - 1e-12).all()
+    assert (ha["Low"] <= ha[["Open", "Close"]].min(axis=1) + 1e-12).all()
+    assert "Volume" in ha.columns and (ha["Volume"].values == hist["Volume"].values).all()
+    assert len(ha) == len(hist)
+    # OHLC 없으면 원본 그대로 (graceful)
+    close_only = hist[["Close"]]
+    assert charts.heikin_ashi(close_only) is close_only
+    assert charts.heikin_ashi(None) is None
+
+
+def test_price_chart_crosshair_spikes():
+    """십자선 — x 전 패널·y 가격 패널 스파이크 (TradingView 크로스헤어)."""
+    fig = charts.price_chart(_ohlcv(), "T", show_volume=True, show_rsi=True)
+    assert fig.layout.xaxis.showspikes is True and fig.layout.xaxis.spikemode == "across"
+    assert fig.layout.yaxis.showspikes is True            # 가격 패널
+    assert fig.layout.yaxis3.showspikes is not True       # 서브패널은 y 스파이크 없음
+    fig1 = charts.price_chart(_ohlcv(), "T")              # 단일 패널
+    assert fig1.layout.yaxis.showspikes is True
+
+
 def test_price_chart_log_scale_yref_none_annotations():
     """로그축 yref=None 주석 변환 — 적대 리뷰 확정 버그(B1) 회귀 방어.
 

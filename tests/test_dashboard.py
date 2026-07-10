@@ -434,6 +434,66 @@ def test_views_macro_assets(monkeypatch):
     assert views.macro_assets() == []                            # 전체 실패 graceful
 
 
+def test_ticker_alerts_crud(tmp_path, monkeypatch):
+    """차트→가격 알림 래퍼 — 등록/종목 필터/삭제.
+
+    store DB 는 conftest 가 tmp 격리하지만 **레거시 미러(ALERTS_FILE)는 모듈 상수** —
+    리다이렉트 없이는 라이브 price_alerts.json 을 덮어쓴다(CLAUDE.md 테스트 규칙).
+    """
+    import bot.price_alerts as pa
+    from dashboard import data as ddata
+    monkeypatch.setattr(pa, "ALERTS_FILE", str(tmp_path / "price_alerts.json"))
+    aid = ddata.add_ticker_alert("TSLA", 250.5, "buy", note="지지선")
+    assert aid
+    ddata.add_ticker_alert("NVDA", 999.0, "sell")
+    mine = ddata.ticker_alerts("TSLA")
+    assert any(a["id"] == aid and a["price"] == 250.5 and a["type"] == "buy" for a in mine)
+    assert all(a["ticker"] == "TSLA" for a in mine)         # 타 종목 미포함
+    assert ddata.remove_ticker_alert(aid) is True
+    assert not any(a["id"] == aid for a in ddata.ticker_alerts("TSLA"))
+    # 불량 입력 graceful
+    assert ddata.add_ticker_alert("TSLA", 0, "buy") is None
+    assert ddata.remove_ticker_alert("nonexist") is False
+
+
+def test_price_alerts_cross_process_serialized(tmp_path):
+    """봇↔대시보드 **교차 프로세스** 동시 등록 — flock 직렬화로 lost update 0.
+
+    save_collection 은 컬렉션 통째 교체 — 락 없이는 두 프로세스의 load→append→save 가
+    겹쳐 알림이 소실된다(대시보드가 신규 writer 가 되며 현실화된 위험). 각 15건×2프로세스
+    동시 등록 후 30건 전부 존재해야 통과.
+    """
+    import subprocess
+    root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    env = dict(os.environ, STOCK_REPORT_DB=str(tmp_path / "t.db"))
+    prog = (
+        "import sys, time; sys.path.insert(0, {root!r})\n"
+        "import bot.price_alerts as pa\n"
+        "pa.ALERTS_FILE = {mirror!r}\n"
+        "time.sleep(0.05)\n"                     # 두 프로세스 기동 후 동시 시작
+        "for i in range(15):\n"
+        "    pa.add_alert('P{tag}N%d' % i, 100.0 + i, 'buy')\n"
+    )
+    procs = [subprocess.Popen(
+        [sys.executable, "-c",
+         prog.format(root=root, mirror=str(tmp_path / "mirror.json"), tag=t)],
+        env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE) for t in ("A", "B")]
+    for p in procs:
+        _, err = p.communicate(timeout=120)
+        assert p.returncode == 0, err.decode()[-800:]
+    # 검증도 동일 env 서브프로세스로 — 부모 store 는 conftest DB 에 바인딩돼 있음
+    chk = subprocess.run(
+        [sys.executable, "-c",
+         f"import sys; sys.path.insert(0, {root!r})\n"
+         "import bot.price_alerts as pa\n"
+         f"pa.ALERTS_FILE = {str(tmp_path / 'mirror.json')!r}\n"
+         "print(len(pa.load_alerts()))"],
+        env=env, capture_output=True, text=True, timeout=60)
+    assert chk.returncode == 0, chk.stderr[-800:]
+    n = int(chk.stdout.strip().splitlines()[-1])
+    assert n == 30, f"lost update! {n}/30"
+
+
 def test_macro_symbols_resolve_and_search():
     """매크로 심볼 — 한/영/티커 resolve + 검색 유니버스 포함 + 표시명 (검색 발견성)."""
     import ticker_names as tn

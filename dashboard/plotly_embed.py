@@ -104,6 +104,8 @@ _TEMPLATE = r"""
   <button id="bt-meas" class="tbtn" title="박스 드래그 = Δ가격·Δ%·봉수·기간">📏 측정</button>
   <button id="bt-clear" class="tbtn" title="직접 그린 도형 전체 제거">🗑 지우기</button>
   <span id="tool-hint"></span>
+  <span id="ohlcbar" style="margin-left:auto;font:11px 'JetBrains Mono', ui-monospace, monospace;
+        color:#9198a6;white-space:nowrap"></span>
 </div>
 <div id="chart" style="width:100%;min-height:@@HEIGHT@@px"></div>
 <div id="detail" style="display:none;margin-top:6px;padding:8px 12px;border:1px solid #1e222d;
@@ -284,8 +286,58 @@ _TEMPLATE = r"""
   }
   const rescale = finishGesture;                 // 초기 표시창 경로 하위호환
 
+  // ── OHLC 데이터창 — 호버 봉의 시·고·저·종·거래량·등락% 리드아웃 (bounds 재사용) ──
+  const ohlcEl = document.getElementById("ohlcbar");
+  function ohlcReadout(ms) {
+    if (!ohlcEl || !bounds.length) return;
+    const i = Math.min(Math.max(lowerBound(ms), 0), bounds.length - 1);
+    const idx = (i > 0 && Math.abs(bounds[i - 1][0] - ms) < Math.abs(bounds[i][0] - ms)) ? i - 1 : i;
+    const b = bounds[idx];
+    const f = (v) => (Math.abs(v) >= 1000 ? Math.round(v).toLocaleString() : (+v).toFixed(2));
+    if (b.length < 6) {                          // 비교(%) 프레임 — 값만
+      ohlcEl.textContent = (b[1] >= 0 ? "+" : "") + (+b[1]).toFixed(2) + "%";
+      return;
+    }
+    const prevC = idx > 0 ? bounds[idx - 1][5] : b[4];
+    const chg = prevC ? ((b[5] / prevC - 1) * 100) : 0;
+    const col = b[5] >= b[4] ? "#26a69a" : "#ef5350";
+    const vol = b[3] >= 1e6 ? (b[3] / 1e6).toFixed(1) + "M" : Math.round(b[3]).toLocaleString();
+    ohlcEl.innerHTML = `시 ${f(b[4])} 고 ${f(b[2])} 저 ${f(b[1])} ` +
+      `종 <b style="color:${col}">${f(b[5])}</b> ` +
+      `<span style="color:${col}">${chg >= 0 ? "+" : ""}${chg.toFixed(2)}%</span> · ${vol}`;
+  }
+  if (bounds.length) ohlcReadout(bounds[bounds.length - 1][0]);   // 기본 = 마지막 봉
+
   // ══ 드로잉 도구 — 🧲 자석 스냅 · 수평선 · 피보나치 · 측정 · 지우기 ══════════
   let magnet = true, tool = null;                // tool: null | 'hline' | 'fib' | 'meas'
+
+  // ── 드로잉 영속화 — localStorage (키=티커:봉:스케일 · 서버 도형 이후만 저장) ──
+  const storeKey = @@STORE_KEY@@;                // null 이면 영속화 없음 (구형/테스트)
+  let saveTimer = null;
+  function saveDrawings() {
+    if (!storeKey) return;
+    try {
+      const shapes = (gd.layout.shapes || []).slice(baseShapeCount);
+      const anns = (gd.layout.annotations || []).filter(
+        (a) => String(a.name || "").startsWith("tool-"));
+      const k = "tndraw:" + storeKey;
+      if (!shapes.length && !anns.length) { localStorage.removeItem(k); return; }
+      localStorage.setItem(k, JSON.stringify({v: 1, shapes: shapes, anns: anns}));
+    } catch (e) {}                               // 사파리 프라이빗 등 — 조용히 비영속
+  }
+  function scheduleSave() {
+    if (!storeKey) return;
+    clearTimeout(saveTimer);
+    saveTimer = setTimeout(saveDrawings, 250);
+  }
+  function loadDrawings() {
+    if (!storeKey) return null;
+    try {
+      const d = JSON.parse(localStorage.getItem("tndraw:" + storeKey) || "null");
+      if (!d || d.v !== 1 || !Array.isArray(d.shapes) || !Array.isArray(d.anns)) return null;
+      return d;
+    } catch (e) { return null; }
+  }
   // 서버 오버레이(평단선·현재가선·RSI 밴드)는 사용자 도형과 구분 불가(둘 다 무명 shape) →
   // 개수가 아닌 **깊은 복사본**을 보존 기준으로 삼는다(지우개로 인덱스가 밀려도 안전).
   const baseShapes = JSON.parse(JSON.stringify(fig.layout.shapes || []));
@@ -338,7 +390,10 @@ _TEMPLATE = r"""
 
   function applyDraw(shapes, anns) {             // 도형/주석 일괄 반영 (자기이벤트 가드)
     guard = true;
-    Plotly.relayout(gd, {shapes: shapes, annotations: anns}).then(() => { guard = false; });
+    Plotly.relayout(gd, {shapes: shapes, annotations: anns}).then(() => {
+      guard = false;
+      scheduleSave();                            // 도구 산출물 영속화
+    });
   }
 
   function curAnns() { return (gd.layout.annotations || []).slice(); }
@@ -483,10 +538,25 @@ _TEMPLATE = r"""
     // 주석 = 이름 필터 (tn-hi/tn-lo 콜아웃은 팬 중 갱신되므로 복사본 복원 금지)
     const anns = curAnns().filter((a) => !String(a.name || "").startsWith("tool-"));
     applyDraw(JSON.parse(JSON.stringify(baseShapes)), anns);
+    try { if (storeKey) localStorage.removeItem("tndraw:" + storeKey); } catch (e) {}
     document.getElementById("detail").style.display = "none";
   };
 
   Plotly.newPlot(gd, fig.data, fig.layout, @@CONFIG@@).then(() => {
+    // 저장된 드로잉 복원 — 서버 도형 뒤에 append (지우기·보호 가드와 정합).
+    // 하단 지표 구성이 바뀌어 사라진 서브패널 축(y3 등)을 참조하는 도형은 제외(고아 방지)
+    const saved = loadDrawings();
+    if (saved && (saved.shapes.length || saved.anns.length)) {
+      const axes = new Set(Object.keys(fig.layout).filter((k) => k.startsWith("yaxis"))
+        .map((k) => "y" + k.slice(5)));
+      const okRef = (r) => !r || r === "paper" || axes.has(r);
+      guard = true;
+      Plotly.relayout(gd, {
+        shapes: (gd.layout.shapes || []).concat(saved.shapes.filter((s) => okRef(s.yref))),
+        annotations: (gd.layout.annotations || []).concat(
+          saved.anns.filter((a) => okRef(a.yref))),
+      }).then(() => { guard = false; });
+    }
     const last = bounds.length ? bounds[bounds.length - 1][0] : null;
     if (last && @@VIEW_MS@@) {                   // 초기 표시창 (기간 라디오)
       const x0 = last - @@VIEW_MS@@;
@@ -512,7 +582,7 @@ _TEMPLATE = r"""
     gd.on("plotly_relayout", (e) => {
       if (guard) return;
       dragging = false;
-      if (handleShapes(e)) return;               // 드로잉 도구·🧲 자석 경로
+      if (handleShapes(e)) { scheduleSave(); return; }   // 드로잉 도구·🧲 자석 경로 + 영속화
       const keys = Object.keys(e || {});
       if (keys.some(k => k.startsWith("xaxis.range")) || e["xaxis.autorange"]) {
         muteHover();
@@ -521,6 +591,15 @@ _TEMPLATE = r"""
         clearTimeout(gestureTimer);
         gestureTimer = setTimeout(finishGesture, 160);
       }
+    });
+    gd.on("plotly_hover", (ev) => {              // 데이터창 — 호버 봉 OHLC 리드아웃
+      const p = (ev.points || [])[0];
+      if (!p || p.x == null) return;
+      const ms = typeof p.x === "number" ? p.x : Date.parse(p.x);
+      if (ms === ms) ohlcReadout(ms);            // NaN 가드
+    });
+    gd.on("plotly_unhover", () => {              // 이탈 시 마지막 봉으로 복귀
+      if (bounds.length) ohlcReadout(bounds[bounds.length - 1][0]);
     });
     gd.on("plotly_click", (ev) => {              // ▲▼ 마커 클릭 → 인차트 상세
       const p = (ev.points || [])[0];
@@ -544,12 +623,15 @@ def pannable_chart_html(fig, hist, *, height: int = 460, view_days=None,
                         bounds_json: str | None = None,
                         fit_viewport: bool = False,
                         pct_mode: bool = False,
-                        y_log: bool = False) -> str:
+                        y_log: bool = False,
+                        store_key: str | None = None) -> str:
     """fig(charts.price_chart 산출) → 자동 y 리스케일·드로잉 도구·인차트 마커 상세 임베드 HTML.
 
     bounds_json — y 맞춤 프레임 오버라이드 (비교 모드: compare_bounds_json 의 % 프레임).
     pct_mode — 비교(%) 모드: 도구 라벨을 가격 대신 % 로 포맷.
     y_log — 로그 스케일: 도형/축 y 좌표가 log10 공간 (스냅·측정이 실가격으로 환산).
+    store_key — 드로잉 영속화 localStorage 키(예: "NVDA:1d:lin"). None=비영속.
+                스케일(lin/log/pct)을 키에 포함해야 좌표계 혼선이 없다(호출부 책임).
     """
     bounds = bounds_json if bounds_json is not None else price_bounds_json(hist)
     config = json.dumps({
@@ -570,6 +652,7 @@ def pannable_chart_html(fig, hist, *, height: int = 460, view_days=None,
             .replace("@@PCT_MODE@@", json.dumps(bool(pct_mode)))
             .replace("@@Y_LOG@@", json.dumps(bool(y_log)))
             .replace("@@LAST_CLOSE@@", json.dumps(last_close))
+            .replace("@@STORE_KEY@@", json.dumps(store_key))
             .replace("@@CONFIG@@", config)
             .replace("@@BOUNDS@@", bounds)
             .replace("@@FIG@@", fig.to_json()))       # fig JSON 은 마지막 (토큰 오염 차단)

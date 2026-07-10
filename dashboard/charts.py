@@ -629,6 +629,33 @@ def normalize_pct(series, view_days=None):
     return (s / anchor_val - 1.0) * 100.0
 
 
+def heikin_ashi(hist):
+    """하이킨아시 변환 — 표시용 평활 캔들 (OHLC 재계산·Volume 보존·순수).
+
+    HA종가=(O+H+L+C)/4 · HA시가=직전(HA시가+HA종가)/2 (재귀) · 고저는 원시고저 포함 최대/최소.
+    **표시용 변형** — 실제 체결가와 다르므로 콜아웃·평단선 비교는 근사임을 호출부가 표기.
+    OHLC 없으면 원본 그대로 반환(graceful).
+    """
+    import numpy as np
+    import pandas as pd
+    cols = set(getattr(hist, "columns", []))
+    if hist is None or getattr(hist, "empty", True) or not {"Open", "High", "Low", "Close"} <= cols:
+        return hist
+    o_, h_, l_, c_ = (hist[k].to_numpy(dtype=float) for k in ("Open", "High", "Low", "Close"))
+    ha_c = (o_ + h_ + l_ + c_) / 4.0
+    ha_o = np.empty_like(ha_c)
+    ha_o[0] = (o_[0] + c_[0]) / 2.0
+    for i in range(1, len(ha_c)):                     # 재귀 정의 — 벡터화 불가
+        ha_o[i] = (ha_o[i - 1] + ha_c[i - 1]) / 2.0
+    ha_h = np.maximum.reduce([h_, ha_o, ha_c])
+    ha_l = np.minimum.reduce([l_, ha_o, ha_c])
+    out = pd.DataFrame({"Open": ha_o, "High": ha_h, "Low": ha_l, "Close": ha_c},
+                       index=hist.index)
+    if "Volume" in cols:
+        out["Volume"] = hist["Volume"].to_numpy()
+    return out
+
+
 def _add_trend_lines(fig, items: list[dict]) -> None:
     """자동 감지 추세선·채널 오버레이 (dashboard.trendlines 출력 스키마 소비).
 
@@ -886,6 +913,12 @@ def price_chart(hist, ticker: str = "", *, kind: str = "line", avg_cost=None,
                       bargap=0.1, newshape=dict(line=dict(color="#f59e0b", width=2)))
     fig.update_xaxes(automargin=True)
     fig.update_yaxes(automargin=True)
+    # 십자선(크로스헤어) — TradingView 풍. x 는 전 패널 관통, y 는 가격 패널만.
+    # 제스처 중엔 hovermode=false 뮤트(embed JS)라 스파이크도 함께 숨어 팬 성능 무영향.
+    _spike = dict(showspikes=True, spikemode="across", spikesnap="cursor",
+                  spikethickness=0.6, spikedash="dot", spikecolor=theme.MUTED)
+    fig.update_xaxes(**_spike)
+    fig.update_yaxes(row=1 if panes > 1 else None, col=1 if panes > 1 else None, **_spike)
     if log_scale:                          # 가격 패널만 로그 — 서브패널(RSI·MACD 등)은 선형 유지
         fig.update_yaxes(type="log", row=1 if panes > 1 else None,
                          col=1 if panes > 1 else None)

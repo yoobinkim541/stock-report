@@ -75,6 +75,20 @@ def test_embed_log_and_pct_flags():
     assert "const pctMode = true" in pct
 
 
+def test_embed_persistence_and_readout_contract():
+    """드로잉 영속화(localStorage)·OHLC 데이터창 계약 — store_key 주입·저장/복원/키 규약."""
+    hist = _hist()
+    fig = charts.price_chart(hist, "T", kind="candle")
+    html = plotly_embed.pannable_chart_html(fig, hist, store_key="NVDA:1d:lin")
+    for token in ('"NVDA:1d:lin"', "function saveDrawings", "function loadDrawings",
+                  "function scheduleSave", '"tndraw:" + storeKey',
+                  'id="ohlcbar"', "function ohlcReadout", "plotly_hover", "plotly_unhover"):
+        assert token in html, f"누락: {token}"
+    # store_key 미지정 = null → 비영속 (구형 호출 하위호환)
+    norm = plotly_embed.pannable_chart_html(fig, hist)
+    assert "const storeKey = null" in norm
+
+
 def test_embed_no_unreplaced_tokens():
     """@@TOKEN@@ 치환 누락 없음 — 템플릿 전량 치환 (fig JSON 이 토큰 오염 안 함)."""
     hist = _hist()

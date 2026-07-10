@@ -46,6 +46,13 @@ global.Plotly = {
     for (const k of Object.keys(u)) if (!k.includes(".") && !k.includes("[")) g.layout[k] = u[k];
     return { then(cb) { cb(); return this; } }; },
 };
+// localStorage 스텁 + setTimeout 동기화(디바운스 저장 즉시 flush) — 영속화 검증용
+const _ls = {};
+global.localStorage = { getItem: (k) => (k in _ls ? _ls[k] : null),
+                        setItem: (k, v) => { _ls[k] = String(v); },
+                        removeItem: (k) => { delete _ls[k]; } };
+global.setTimeout = (fn) => { fn(); return 0; };
+global.clearTimeout = () => {};
 __SCRIPT__
 const iso = (d) => new Date(d).toISOString();
 const D0 = Date.parse("2025-02-01"), D1 = Date.parse("2025-03-01");
@@ -90,10 +97,26 @@ gd.emit("plotly_relayout", { shapes: gd.layout.shapes });
 const mAnn = (gd.layout.annotations || []).filter(a => a.name === "tool-meas");
 if (gd.layout.shapes.filter(s => s.name === "tool-meas").length !== 1 || !mAnn.length
     || mAnn[0].text.indexOf("봉") < 0) fail("measure");
-// 5) 지우기 — 서버 도형만 정확 복원
+// 5) 지우기 — 서버 도형만 정확 복원 + 저장소도 클리어
 el("bt-clear").onclick();
 if (JSON.stringify(gd.layout.shapes) !== JSON.stringify(BASE)) fail("clear_restore");
 if ((gd.layout.annotations || []).some(a => String(a.name || "").startsWith("tool-"))) fail("clear_ann");
+if (Object.keys(_ls).length) fail("clear_storage " + JSON.stringify(_ls));
+// 6) 영속화 — 새 선(자석 스냅) → localStorage 저장 → 재로드(스크립트 재실행) 시 복원
+append([{ type: "line", xref: "x", yref: "y", x0: iso(D0), y0: 130, x1: iso(D1), y1: 150 }]);
+gd.emit("plotly_relayout", { shapes: gd.layout.shapes });
+const savedKeys = Object.keys(_ls);
+if (savedKeys.length !== 1 || !savedKeys[0].startsWith("tndraw:")) fail("persist_save " + savedKeys);
+const savedDoc = JSON.parse(_ls[savedKeys[0]]);
+if (savedDoc.v !== 1 || savedDoc.shapes.length !== 1) fail("persist_doc");
+for (const k of Object.keys(els)) delete els[k];   // 새 세션 모사 — DOM 리셋·storage 유지
+gd = null;
+__SCRIPT__
+if (!gd || !gd.layout) fail("reload_gd");
+const nRestored = (gd.layout.shapes || []).length - BASE.length;
+if (nRestored !== 1) fail("persist_restore n=" + nRestored);
+const rs = gd.layout.shapes[gd.layout.shapes.length - 1];
+if (rs.y0 !== Math.round(rs.y0)) fail("persist_snapped_coords");   // 저장 전 스냅값 유지
 console.log("OK");
 """
 
@@ -107,7 +130,7 @@ def test_drawing_tools_runtime(tmp_path):
     fig = charts.price_chart(df, "TEST", kind="candle", show_volume=True,
                              show_rsi=True, avg_cost=140.0)
     html = plotly_embed.pannable_chart_html(fig, df, height=460, view_days=90,
-                                            vol_axis="yaxis2")
+                                            vol_axis="yaxis2", store_key="TEST:1d:lin")
     js = re.findall(r"<script>(.*?)</script>", html, re.S)[-1]
     runner = tmp_path / "run.js"
     runner.write_text(_HARNESS.replace("__SCRIPT__", js), encoding="utf-8")
