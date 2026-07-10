@@ -25,7 +25,8 @@ CACHE_TTL_S = 12 * 3600
 # 네트워크 불가/info 실패 시 ETF 감지 폴백 (보유·주요 ETF — 감지 실패로 주식 뷰가 뜨는 것 방지)
 _KNOWN_ETFS = {
     "QQQI", "SGOV", "SPMO", "QQQ", "SPY", "VOO", "IVV", "DIA", "IWM", "VTI", "RSP",
-    "QLD", "TQQQ", "SOXL", "UPRO", "SQQQ", "SMH", "SOXX", "IGV", "SCHD", "JEPI", "JEPQ",
+    "QLD", "TQQQ", "SQQQ", "SOXL", "SOXS", "SSO", "UPRO", "SMH", "SOXX", "IGV", "SCHD", "JEPI", "JEPQ",
+    "NVDL", "NVD", "TSLL", "AAPU", "AMZU", "GGLL", "MSFU", "METU", "CONL", "PLTU", "MSTU",
     "QYLD", "GLD", "TLT", "IEF", "SHY", "HYG", "LQD", "BIL", "XLK", "XLF", "XLV", "XLE",
     "XLI", "XLY", "XLP", "XLU", "XLB", "XLC", "XLRE", "EFA", "EEM", "ARKK", "MOAT",
 }

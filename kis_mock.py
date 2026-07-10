@@ -50,7 +50,16 @@ _TOKEN_FILE = os.path.expanduser("~/.cache/kis_mock_token.json")
 _token_cache: dict = {"token": None, "exp": 0.0}
 
 # 종목 → 해외거래소코드(주문 OVRS_EXCG_CD). 미상은 NASD 기본. (스모크서 보강)
-_TICKER_EXCH = {"ORCL": "NYSE", "UNH": "NYSE", "SAP": "NYSE", "SGOV": "AMEX", "SPMO": "AMEX"}
+_TICKER_EXCH = {
+    "ORCL": "NYSE", "UNH": "NYSE", "SAP": "NYSE",
+    "SGOV": "AMEX", "SPMO": "AMEX",
+    # Leveraged ETFs. NASDAQ listed funds use NASD; NYSE Arca funds use KIS AMEX code.
+    "QLD": "AMEX", "TQQQ": "NASD", "SQQQ": "NASD",
+    "SOXL": "AMEX", "SSO": "AMEX", "SOXS": "AMEX",
+    "NVDL": "NASD", "NVD": "NASD", "TSLL": "NASD", "AAPU": "NASD",
+    "AMZU": "NASD", "GGLL": "NASD", "MSFU": "NASD", "METU": "NASD",
+    "CONL": "NASD", "PLTU": "NASD", "MSTU": "NASD",
+}
 _PRICE_EXCD = {"NASD": "NAS", "NYSE": "NYS", "AMEX": "AMS"}   # 주문코드 → 현재가 EXCD
 
 

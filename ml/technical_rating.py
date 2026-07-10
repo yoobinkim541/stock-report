@@ -156,6 +156,54 @@ def pivot_points(df: pd.DataFrame, method: str = "classic") -> dict | None:
         return None
 
 
+def _fmt_level(ticker: str, value: float) -> str:
+    if ticker.endswith((".KS", ".KQ")):
+        return f"₩{value:,.0f}"
+    return f"${value:,.2f}"
+
+
+def _latest_close(df: pd.DataFrame | None) -> float | None:
+    if df is None or "Close" not in df:
+        return None
+    close = df["Close"].dropna()
+    if close.empty:
+        return None
+    try:
+        return float(close.iloc[-1])
+    except Exception:
+        return None
+
+
+def _reference_interpretation(
+    ticker: str,
+    rating: dict | None,
+    piv: dict | None,
+    current_price: float | None,
+) -> str:
+    notes: list[str] = []
+    if rating:
+        label = str(rating["summary"].get("rating", ""))
+        if "매도" in label:
+            notes.append("기술 추세는 아직 약세라 통계 신호와 충돌")
+        elif "매수" in label:
+            notes.append("기술 추세는 통계 신호와 같은 방향")
+        else:
+            notes.append("기술 추세는 중립이라 가격 확인 필요")
+
+    if piv and current_price is not None:
+        p, s1, r1 = float(piv["P"]), float(piv["S1"]), float(piv["R1"])
+        if current_price < s1:
+            notes.append(f"S1({_fmt_level(ticker, s1)}) 아래라 변동성 확대 구간")
+        elif current_price < p:
+            notes.append(f"월 피벗({_fmt_level(ticker, p)}) 회복 전까지 반등 신뢰도 낮음")
+        elif current_price > r1:
+            notes.append(f"R1({_fmt_level(ticker, r1)}) 위라 단기 과열 여부 확인")
+        else:
+            notes.append("월 피벗 위, R1 아래의 중립 가격대")
+
+    return " · ".join(notes[:2])
+
+
 def build_reference_brief(ticker: str, df: pd.DataFrame | None = None,
                           include_options: bool = True) -> str:
     """텔레그램용 참고지표 블록 — 기술등급 + 월간 피벗 + 옵션 지표."""
@@ -170,10 +218,20 @@ def build_reference_brief(ticker: str, df: pd.DataFrame | None = None,
     rating = compute_technical_rating(df) if df is not None else None
     if rating:
         s, m, o = rating["summary"], rating["ma"], rating["osc"]
-        lines.append(f"  기술등급: {s['rating']}  (MA {m['buy']}↑/{m['sell']}↓ · OSC {o['buy']}↑/{o['sell']}↓)")
+        lines.append(
+            f"  기술등급: {s['rating']} "
+            f"(이평 {m['buy']}↑/{m['sell']}↓ · 오실 {o['buy']}↑/{o['sell']}↓)"
+        )
     piv = pivot_points(df) if df is not None else None
     if piv:
-        lines.append(f"  월 피벗:  P {piv['P']:.2f} | S1 {piv['S1']:.2f} / R1 {piv['R1']:.2f}")
+        lines.append(
+            f"  월 피벗:  P {_fmt_level(ticker, piv['P'])} | "
+            f"S1 {_fmt_level(ticker, piv['S1'])} / R1 {_fmt_level(ticker, piv['R1'])}"
+        )
+
+    interp = _reference_interpretation(ticker, rating, piv, _latest_close(df))
+    if interp:
+        lines.append(f"  해석: {interp}")
 
     if include_options and not ticker.endswith((".KS", ".KQ")):
         try:

@@ -95,6 +95,67 @@ def test_quote_fn_none_is_baseline():
     assert base == none == {("A", "buy"): 10}
 
 
+def test_universe_includes_leveraged_etfs_by_default(monkeypatch):
+    monkeypatch.delenv("US_MOCK_UNIVERSE", raising=False)
+    monkeypatch.delenv("US_MOCK_INCLUDE_LEVERAGE", raising=False)
+    monkeypatch.delenv("US_MOCK_INCLUDE_SINGLE_LEVERAGE", raising=False)
+    u = T._universe()
+    for sym in ("QLD", "TQQQ", "SQQQ", "SOXL", "SSO", "SOXS", "NVDL", "TSLL", "MSFU"):
+        assert sym in u
+        assert T.is_leverage_etf(sym) is True
+
+
+def test_universe_can_disable_leveraged_etfs(monkeypatch):
+    monkeypatch.delenv("US_MOCK_UNIVERSE", raising=False)
+    monkeypatch.setenv("US_MOCK_INCLUDE_LEVERAGE", "false")
+    u = T._universe()
+    assert "TQQQ" not in u and "SOXS" not in u and "NVDL" not in u
+
+
+def test_leverage_universe_can_disable_single_stock_leverage(monkeypatch):
+    monkeypatch.delenv("US_MOCK_LEVERAGE_UNIVERSE", raising=False)
+    monkeypatch.delenv("US_MOCK_SINGLE_LEVERAGE_UNIVERSE", raising=False)
+    monkeypatch.setenv("US_MOCK_INCLUDE_SINGLE_LEVERAGE", "false")
+    u = T.leverage_universe()
+    assert "TQQQ" in u and "SOXS" in u
+    assert "NVDL" not in u and "TSLL" not in u
+
+
+def test_leverage_universe_accepts_custom_single_stock_list(monkeypatch):
+    monkeypatch.setenv("US_MOCK_LEVERAGE_UNIVERSE", "QLD")
+    monkeypatch.setenv("US_MOCK_INCLUDE_SINGLE_LEVERAGE", "true")
+    monkeypatch.setenv("US_MOCK_SINGLE_LEVERAGE_UNIVERSE", "NVDL,TSLL,NVDL")
+    assert T.leverage_universe() == ["QLD", "NVDL", "TSLL"]
+
+
+def test_custom_active_leverage_symbol_gets_generic_meta():
+    assert T._active_leverage_meta("ZZZL", {"ZZZL"})["label"] == "레버리지 ETF"
+    assert T._active_leverage_meta("ZZZL", set()) is None
+
+
+def test_plan_caps_leveraged_positions_and_budget():
+    sigs = [
+        {"ticker": "NVDL", "price": 100, "policy_score": 0.99},
+        {"ticker": "TQQQ", "price": 100, "policy_score": 0.98},
+        {"ticker": "TSLL", "price": 100, "policy_score": 0.97},
+        {"ticker": "A", "price": 100, "policy_score": 0.80},
+        {"ticker": "B", "price": 100, "policy_score": 0.70},
+        {"ticker": "C", "price": 100, "policy_score": 0.60},
+    ]
+    o = _orders(T.plan_rebalance(
+        sigs, {}, budget_usd=100_000, max_positions=5,
+        leverage_symbols={"NVDL", "TQQQ", "TSLL"},
+        leverage_max_positions=2,
+        leverage_budget_frac=0.30,
+    ))
+    assert o.get(("NVDL", "buy")) == 150
+    assert o.get(("TQQQ", "buy")) == 150
+    assert ("TSLL", "buy") not in o
+    assert o.get(("A", "buy")) == 233
+    assert o.get(("B", "buy")) == 233
+    assert o.get(("C", "buy")) == 233
+
+
 if __name__ == "__main__":
     import pytest
     sys.exit(pytest.main([__file__, "-v"]))

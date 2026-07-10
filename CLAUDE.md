@@ -78,7 +78,7 @@ crons/news_spike_detector.py (크론 매 1분)
 | `providers/kis_quote.py` | KIS **실계좌 시세 read-only** REST — 실전 도메인(`openapi.koreainvestment.com:9443`) 하드락·현재가·10단계 호가·거래량(**KR·美 모두 무료 실시간**). 주문 경로 0(grep 강제)·`REALTIME_ENABLED` 게이트·실전키 fail-closed | `~/.cache/kis_quote_token.json` |
 | `providers/realtime_quotes.py` | 실시간 캐시 **읽기전용 클라이언트** = 폴백 단일 seam. get_price/orderbook/best/volume, 2단 신선도(heartbeat+심볼 ts). stale·비활성·없음 → None → 소비자 yfinance 폴백. 예외 무발 | `~/.cache/kis_realtime_quotes.json` |
 | `providers/intraday_bars.py` | 단기 1분봉 데이터층 — kis_stream 틱→OHLCV 집계(누적 볼륨 차분·v_anom/v_partial)·JSONL bar store reader(5m 리샘플·yfinance 폴백)·분대별 거래량 프로파일·심볼 변환 단일 진실원(base_symbol/to_yf/market_of) | `~/reports/ml-data/intraday_bars/*.jsonl` |
-| `providers/intraday_universe.py` | 단기 동적 유니버스 스캐너 ("stocks in play") — KR KIS 거래대금 순위(+필터: 거래대금·가격·보통주만·ETF/스팩 제외)·US 히트맵 스냅샷 재사용 → \|등락\| 상위 top-K. 히스테리시스(보유 유지)·실패 시 정적 `INTRADAY_UNIVERSE_*` 폴백 | `~/.cache/intraday_universe.json` |
+| `providers/intraday_universe.py` | 단기 동적 유니버스 스캐너 ("stocks in play") — KR KIS 거래대금 순위(+필터: 거래대금·가격·보통주만·ETF/스팩 제외)·US 히트맵 스냅샷 재사용 → \|등락\| 상위 top-K. 히스테리시스(보유 유지)·실패 시 정적 `INTRADAY_UNIVERSE_*` 폴백. US 단기 레버리지 on 시 기초자산과 체결 ETF를 함께 watchlist 편입 | `~/.cache/intraday_universe.json` |
 
 **bot/ (텔레그램 서브커맨드)**
 | 파일 | 역할 |
@@ -118,11 +118,11 @@ crons/news_spike_detector.py (크론 매 1분)
 | `crons/kiwoom_sync_rest.py` | 키움 REST API 국내주식 잔고 동기화 | 평일 23:35 UTC |
 | `crons/sp500_heatmap_snapshot.py` | 대시보드 홈 S&P500 시장맵 스냅샷 적재(`_sp500_heatmap_live`→JSON) — 콜드로드 즉시화. 표시데이터 | 매 20분 |
 | `crons/kiwoom_mock_track.py` | 국내주식 자동 페이퍼트레이딩 (키움 **모의투자** — 신호 기반 리밸런스·모의 도메인 하드락·편입/퇴출 근거 원장 적재). **회전율 억제**(무거래밴드+랭크 히스테리시스)·**거래비용 적립**(수수료+증권거래세→리포트 계기)·★가격 축 3종(mom12·hi52·lowvol) point-in-time 원장 수집·**분할매수/매도**(`KR_MOCK_TRANCHES` 회당 목표 1/N·`lib/tranche`)·**최소보유**(`KR_MOCK_MIN_HOLD_DAYS`) | 평일 00:30 UTC |
-| `crons/intraday_mock_track.py` | **단기(1분봉) 모의 트레이딩 엔진** — 유니버스 갱신→orphan 수리→bar/호가 적재→일손실 halt→청산(우선: stop→target→timestop→collapse→EOD flat)→진입(축 5+3 점수+가드 8종). **shadow 기본**(`INTRADAY_SHADOW_ONLY` — 가상체결만 원장)·청산 즉시 net-of-cost R 보상·trade_events→차트 ▲▼ 마커. `INTRADAY_MOCK_ENABLED` off 면 no-op | 매 1분 |
+| `crons/intraday_mock_track.py` | **단기(1분봉) 모의 트레이딩 엔진** — 유니버스 갱신→orphan 수리→bar/호가 적재→일손실 halt→청산(우선: stop→target→timestop→collapse→EOD flat)→진입(축 5+3 점수+가드 8종). US 레버리지는 기초자산 신호(`QQQ/NVDA` 등)로 레버리지 ETF(`TQQQ/NVDL` 등)를 체결하고, 신규 위험은 남은 일손실 예산 안으로 자동 축소. 정규 진입선 아래는 `INTRADAY_EXPLORE_*`로 작은 리스크 탐색 진입을 허용(KR 기본 0.40·35%, US 0.48·50%)하고, 거래횟수·동시포지션·재진입 쿨다운 기본 제한은 0이라 손실예산이 실제 제한자. 같은 종목도 청산 후 다음 새 봉에서 즉시 재진입 가능. US 5bp 스프레드는 소프트 기준으로만 남겨 극단 호가만 하드 차단. **shadow 기본**(`INTRADAY_SHADOW_ONLY` — 가상체결만 원장)·청산 즉시 net-of-cost R 보상·trade_events→차트 ▲▼ 마커. `INTRADAY_MOCK_ENABLED` off 면 no-op | 매 1분 |
 | `crons/intraday_mock_learn.py` | 단기 정책 주간 학습 + ★게이트 (축 상관 재적합·walk-forward OOS 채택 + 트레이드≥100·순R>0·PSR≥0.95·PBO<0.5 → GO/OBSERVE/NO-GO 정직 verdict — **집행 전환은 항상 수동**) | 토 02:30 UTC |
 | `crons/kiwoom_mock_report.py` | 국내 모의 일일 현황 보고 (NAV·손익·편입/퇴출 사유·누적 vs KOSPI·MDD vs 지수) + `/paper kr` 공용 | 평일 06:40 UTC |
 | `crons/kr_mock_learn.py` | KR 모의 정책 강화 — 보상 백필 + ★목적함수(아웃퍼폼·MDD≤지수) OOS 게이트 재학습 | 토 02:00 UTC |
-| `crons/us_mock_track.py` | 미국주식 자동 페이퍼트레이딩 (KIS 해외 모의 — us_policy 선택 + 바벨 배분·정수주 리밸런스·`Ledger("us_mock")` 결정+근거 적재). ★가격 축 3종+PEAD 축 point-in-time 수집 + **Tier3 구조레버 QLD 슬리브**(`US_MOCK_LEV_SLEEVE` 시 게이트 GO shadow 신선하면 NAV×(reco−1) 2x ETF — 모의 한정 라이브 검증·원장 side '레버슬리브'·게이트 소멸 시 청산 방향) + **분할매수/매도**(`US_MOCK_TRANCHES`·`lib/tranche`) | 평일 15:00 UTC (미 개장 후) |
+| `crons/us_mock_track.py` | 미국주식 자동 페이퍼트레이딩 (KIS 해외 모의 — us_policy 선택 + 바벨 배분·정수주 리밸런스·`Ledger("us_mock")` 결정+근거 적재). ★가격 축 3종+PEAD 축 point-in-time 수집 + **레버리지 ETF 후보군**(지수/섹터 기본 `QLD,TQQQ,SQQQ,SOXL,SSO,SOXS` + 단일종목 기본 `NVDL,NVD,TSLL,AAPU,AMZU,GGLL,MSFU,METU,CONL,PLTU,MSTU`, 최대 2개·예산 35% 캡) + **Tier3 구조레버 QLD 슬리브**(`US_MOCK_LEV_SLEEVE` 시 게이트 GO shadow 신선하면 NAV×(reco−1) 2x ETF — 모의 한정 라이브 검증·원장 side '레버슬리브'·게이트 소멸 시 청산 방향) + **분할매수/매도**(`US_MOCK_TRANCHES`·`lib/tranche`) | 평일 15:00 UTC (미 개장 후) |
 | `crons/us_mock_report.py` | 미국 모의 일일 현황 + **로직 평가 스코어카드**(NAV·vs QQQ·MDD·편입/퇴출 적중률·실현 IC) + `/paper us` 공용 | 평일 21:30 UTC |
 | `crons/us_mock_learn.py` | US 모의 정책 강화 — 보상 백필(편입 초과·퇴출 회피) + ★목적함수 OOS 게이트·챔피언-챌린저 재학습 | 토 03:00 UTC |
 | `crons/weekly_kr_ranker_retrain.py` | KR 전용 랭커(KOSPI 대비 초과수익) 주간 재학습 (Purged WF·OOS IC) | 토 03:30 UTC |
@@ -170,7 +170,7 @@ crons/news_spike_detector.py (크론 매 1분)
 | `ml/deletion_risk.py` | 부실 퇴출 사전예측 (marcap 파생 피처→P(부실퇴출); 실데이터 OOS AUC 0.743·M&A 제외). 회피 통합·★RL 대상 | — (학습셋 marcap 조립) |
 | `ml/earnings_predictor.py` | 실적 서프라이즈 예측 G3 (P(beat); 서프라이즈 지속성·모멘텀·리비전 모멘텀 훅). 엣지 게이트 캐시 | `~/reports/ml-cache/earnings_predictor.pkl` |
 | `ml/earnings_move_predictor.py` | 실적후 주가반응 예측 G4 (기대 변동폭+방향확률; 방향은 무엣지·정직). 엣지 게이트 캐시 | `~/reports/ml-cache/earnings_move_predictor.pkl` |
-| `ml/intraday_axes.py` | 단기 판단 축·가드·청산·사이징·가상체결 (전부 순수) — ORB 돌파(과확장 페널티)·VWAP 반전·시간대 정규화 volspike·OFI(10단계 호가)·뉴스 이벤트 창(롱 전용)·레짐 승수(Kaufman ER) + 리스크 사이징(1/3 캡)·best 호가 가상체결(+스프레드/2+1틱 페널티)·KRX 호가단위 표 | — |
+| `ml/intraday_axes.py` | 단기 판단 축·가드·청산·사이징·가상체결 (전부 순수) — ORB 돌파(과확장 페널티)·VWAP 반전·시간대 정규화 volspike·OFI(10단계 호가)·뉴스 이벤트 창(롱 전용)·레짐 승수(Kaufman ER) + 리스크 사이징(남은 일손실 예산 우선·1/3 가치캡)·best 호가 가상체결(+스프레드/2+1틱 페널티)·KRX 호가단위 표 | — |
 | `ml/intraday_policy.py` | 단기 정책 (Policy kr_intraday/us_intraday) — 축 가중 클램프·결측 재정규화 score·θ_entry/exit·stop/target/timestop 파라미터 | `~/reports/ml-cache/policy_{kr,us}_intraday.json` |
 
 ## 텔레그램 봇 명령어
@@ -279,6 +279,7 @@ crons/news_spike_detector.py (크론 매 1분)
 | `KOREA_MOCK_API_KEY` / `KOREA_MOCK_API_SECRET` | — | — (없으면 `KOREA_API_KEY/SECRET` 재사용 — KIS 앱키) |
 | `KOREA_MOCK_ACCOUNT_NO` | — | — (KIS 모의 계좌 `CANO-ACNT_PRDT_CD` 형식. **필수** — 미설정 시 잔고/주문 fail-closed) |
 | `US_MOCK_UNIVERSE` / `US_MOCK_MAX_POS` / `US_MOCK_INVEST` / `KOREA_MOCK_SEED` | — | Nasdaq기본 / `5` / `0.9` / `100000` (US 모의 전략 파라미터·시드 USD) |
+| `US_MOCK_INCLUDE_LEVERAGE` / `US_MOCK_LEVERAGE_UNIVERSE` / `US_MOCK_INCLUDE_SINGLE_LEVERAGE` / `US_MOCK_SINGLE_LEVERAGE_UNIVERSE` / `US_MOCK_LEVERAGE_MAX_POS` / `US_MOCK_LEVERAGE_MAX_WEIGHT` | — | `true` / `QLD,TQQQ,SQQQ,SOXL,SSO,SOXS` / `true` / `NVDL,NVD,TSLL,AAPU,AMZU,GGLL,MSFU,METU,CONL,PLTU,MSTU` / `2` / `0.35` (US 모의 일반 선택 바스켓에 지수·섹터·개별주 레버리지/인버스 ETF 허용. 종목 수와 총 예산 캡으로 쏠림 제한. **모의 한정**) |
 | `{KR,US}_MOCK_REBAL_BAND` / `{KR,US}_MOCK_EXIT_BUFFER` | — | `0.25` / `2` (회전율 억제 — 무거래 밴드[목표比 ±25% 벗어날 때만 조정]·랭크 히스테리시스[보유종목 top-N+2 안이면 유지]. 크론 주기 불변·잔챙이 churn 제거) |
 | `{KR,US}_MOCK_TRANCHES` | — | `3` (분할매수·분할매도 — 회당 목표의 1/N 만 거래·N회에 평균 진입/청산[`lib/tranche.py`·상태없음: 포지션 크기가 진행도 인코딩·매 실행 남은 갭을 상한만큼 줄여 N회 수렴]. **분산 축소지 알파 아님**·모의 bps 비용 불변[총 거래대금 동일]. 기본 3=분할 활성·`1`=현행 일괄. min_hold[청산 지연]·rebal_band 와 독립 합성. **모의 한정**) |
 | `KR_MOCK_STUB_FRAC` | — | `0.5` (min_hold 보호 예외 — 포지션 가치가 목표(budget/N)의 이 비율 **미만**인 스텁[트란치 빌드 중 이탈한 반쪽]은 청산 허용. 저비중 잔재 60일 자본잠식 방지) |
@@ -339,10 +340,13 @@ crons/news_spike_detector.py (크론 매 1분)
 | `INTRADAY_MIN_TURNOVER_KRW` | — | `30000000000` (KR 후보 거래대금 하한 300억 — 유동성·스프레드 방어) |
 | `INTRADAY_UNIVERSE_KR` / `INTRADAY_UNIVERSE_US` | — | `005930,000660,373220,005380,035420` / `QQQ` (정적 폴백 유니버스) |
 | `INTRADAY_SLEEVE_FRAC` / `INTRADAY_RISK_PER_TRADE` | — | `0.10` / `0.005` (모의 NAV 중 슬리브 비율·트레이드당 리스크 사이징) |
-| `INTRADAY_MAX_TRADES_DAY` / `INTRADAY_COOLDOWN_MIN` / `INTRADAY_DAILY_LOSS_HALT` | — | `6` / `30` / `0.015` (일 왕복 상한·심볼 쿨다운[**손실 청산 후만** — 익절 후 즉시 재진입 허용·0=전체 비활성]·일손실 −1.5% 정지) |
+| `INTRADAY_EXPLORE_ENABLED` / `INTRADAY_EXPLORE_ENTRY_KR` / `INTRADAY_EXPLORE_RISK_MULT_KR` / `INTRADAY_EXPLORE_ENTRY_US` / `INTRADAY_EXPLORE_RISK_MULT_US` | — | `true` / `0.40` / `0.35` / `0.48` / `0.50` (정규 `theta_entry` 아래 탐색 진입. KR은 하루 1건 콜드스타트 방지를 위해 더 낮은 문턱·작은 리스크로 표본을 늘림. 글로벌 `INTRADAY_EXPLORE_ENTRY` / `INTRADAY_EXPLORE_RISK_MULT`로 일괄 override 가능) |
+| `INTRADAY_LEVERAGE_ENABLED` / `INTRADAY_LEVERAGE_MAP` | — | `true` / `QQQ:TQQQ,NVDA:NVDL,TSLA:TSLL,AAPL:AAPU,AMZN:AMZU,GOOGL:GGLL,MSFT:MSFU,META:METU,COIN:CONL,PLTR:PLTU,MSTR:MSTU` (US 단기에서 기초자산 신호를 레버리지 ETF 가상체결로 매핑. 기초자산+ETF 모두 실시간 watchlist 편입) |
+| `INTRADAY_MAX_TRADES_DAY` / `INTRADAY_MAX_CONCURRENT_POS` / `INTRADAY_COOLDOWN_MIN` / `INTRADAY_DAILY_LOSS_HALT` | — | `0` / `0` / `0` / `0.015` (`0`=일 거래횟수·동시 포지션·같은 종목 재진입 쿨다운 제한 없음. 실제 제한자는 남은 일손실 예산: 신규 진입 수량을 `일손실한도 + 당일손익 - 열린포지션 최악손실` 안으로 축소. 동시포지션은 `_KR`/`_US` override 가능) |
 | `INTRADAY_STOP_FRICTION_MULT` | — | `3.0` (스탑폭 하한 = 왕복마찰/주 × 배수 — 첫 실트레이드서 마찰(수수료+슬리피지 1,887원)>스탑리스크(1,683원)로 -1R 스탑이 -2.1R 증폭된 문제 방어. 사이징·R 분모도 마찰 포함 → 스탑 도달 = 정확히 -1R) |
 | `INTRADAY_MIN_NOTIONAL_KRW` / `INTRADAY_MIN_NOTIONAL_USD` | — | `100000` / `150` (진입 최소 명목금액 — 학습 신호 품질용. 슬리브 1/3 캡보다 훨씬 낮게 유지할 것) |
-| `INTRADAY_MAX_SPREAD_BPS_KR` / `INTRADAY_MAX_SPREAD_BPS_US` | — | `25` / `5` (진입 스프레드 상한 — KR 은 max(2틱, 상한): 호가단위상 1틱이 ~16bps) |
+| `INTRADAY_MAX_SPREAD_BPS_KR` / `INTRADAY_MAX_SPREAD_BPS_US` | — | `25` / `5` (소프트 스프레드 기준 — 실제 스프레드는 마찰·수량 산식에 반영) |
+| `INTRADAY_HARD_SPREAD_BPS_KR` / `INTRADAY_HARD_SPREAD_BPS_US` | — | `25` / `50` (진입 하드 차단선. US 는 5bp 초과만으로 막지 않고 극단 호가만 차단) |
 | `INTRADAY_FLAT_BUFFER_MIN` / `INTRADAY_ENTRY_CUTOFF_MIN` / `INTRADAY_STALE_FLAT_MIN` | — | `15` / `30` / `10` (마감 前 강제청산 버퍼·진입 컷오프·bar 정체 시 전량청산) |
 
 ## IB Phase

@@ -37,6 +37,10 @@ _HEATMAP_MAX_AGE_S = 90 * 60          # views.sp500_heatmap 와 동일 신선도
 # 정적 폴백 기본값 — 스캐너 불능 시에도 KR 유동성 최상위로 동작
 _DEFAULT_KR = "005930,000660,373220,005380,035420"
 _DEFAULT_US = "QQQ"
+_DEFAULT_LEVERAGE_MAP = (
+    "QQQ:TQQQ,NVDA:NVDL,TSLA:TSLL,AAPL:AAPU,AMZN:AMZU,GOOGL:GGLL,"
+    "MSFT:MSFU,META:METU,COIN:CONL,PLTR:PLTU,MSTR:MSTU"
+)
 
 # KR 비보통주·상품 제외 (이름 기반 — 완전하지 않아도 graceful, 보통주 코드 끝자리 0 필터가 1차)
 _KR_NAME_EXCLUDE = ("스팩", "ETN", "레버리지", "인버스", "선물", "채권")
@@ -56,6 +60,32 @@ def _feature_on() -> bool:
 
 def _env_list(name: str, default: str) -> list[str]:
     return [base_symbol(t) for t in (os.getenv(name, default) or "").split(",") if t.strip()]
+
+
+def leverage_enabled() -> bool:
+    return os.getenv("INTRADAY_LEVERAGE_ENABLED", "true").lower() in ("1", "true", "yes", "on")
+
+
+def leverage_map() -> dict[str, str]:
+    """기초자산 단기 신호 → 체결할 레버리지 ETF. env 로 완전 교체 가능."""
+    raw = os.getenv("INTRADAY_LEVERAGE_MAP", _DEFAULT_LEVERAGE_MAP)
+    out: dict[str, str] = {}
+    for part in (raw or "").split(","):
+        if ":" not in part:
+            continue
+        src, dst = [base_symbol(x) for x in part.split(":", 1)]
+        if src and dst and src != dst:
+            out[src] = dst
+    return out
+
+
+def expand_with_leverage(symbols: list[str]) -> list[str]:
+    """스트림/분봉 수집용 확장 — 기초자산과 체결 ETF를 함께 유지."""
+    out = [base_symbol(s) for s in symbols if s]
+    if leverage_enabled():
+        mp = leverage_map()
+        out.extend(mp[s] for s in list(out) if s in mp)
+    return list(dict.fromkeys(out))
 
 
 def static_universe(market: str) -> list[str]:
@@ -231,4 +261,4 @@ def watchlist_symbols() -> list[str]:
     """kis_stream 워치리스트 편입용 KR+US 합본 — 단기 서브시스템 비활성 시 빈 리스트."""
     if not _feature_on():
         return []
-    return current_universe("KR") + current_universe("US")
+    return current_universe("KR") + expand_with_leverage(current_universe("US"))

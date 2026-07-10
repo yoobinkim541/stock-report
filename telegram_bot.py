@@ -1943,19 +1943,21 @@ def _dispatch_paper(chat_id: str, args: list):
     owner 전용(_GUEST_COMMANDS 미포함). 구 /mock·/usmock 을 병합 (alias 하위호환).
     """
     typing(chat_id)
-    sub = (str(args[0]).lower() if args else "")
+    norm_args = [str(a).lower() for a in (args or [])]
+    detail = any(a in ("full", "detail", "detailed", "상세") for a in norm_args)
+    sub = next((a for a in norm_args if a in ("kr", "us")), "")
     try:
         if sub == "kr":
             from crons.kiwoom_mock_report import build_report
-            send_html(chat_id, build_report(html=True))
+            send_html(chat_id, build_report(html=True, detail=detail))
         elif sub == "us":
             from crons.us_mock_report import build_report
-            send_html(chat_id, build_report(html=True))
+            send_html(chat_id, build_report(html=True, detail=detail))
         else:                                   # 인자 없음 — 국내·미국 둘 다
             from crons.kiwoom_mock_report import build_report as _kr_report
             from crons.us_mock_report import build_report as _us_report
-            send_html(chat_id, _kr_report(html=True))
-            send_html(chat_id, _us_report(html=True))
+            send_html(chat_id, _kr_report(html=True, detail=detail))
+            send_html(chat_id, _us_report(html=True, detail=detail))
     except Exception as e:
         send(chat_id, f"⚠️ 모의 현황 조회 실패: {e}")
         logger.exception("cmd_paper")

@@ -50,6 +50,11 @@ def test_build_order_body_whole_share_limit():
 def test_exchange_of():
     assert kis_mock.exchange_of("ORCL") == "NYSE"
     assert kis_mock.exchange_of("SGOV") == "AMEX"
+    assert kis_mock.exchange_of("TQQQ") == "NASD"
+    assert kis_mock.exchange_of("SOXL") == "AMEX"
+    assert kis_mock.exchange_of("SSO") == "AMEX"
+    assert kis_mock.exchange_of("NVDL") == "NASD"
+    assert kis_mock.exchange_of("TSLL") == "NASD"
     assert kis_mock.exchange_of("MSFT") == "NASD"               # 기본
 
 

@@ -19,6 +19,9 @@
     0 15 * * 1-5 cd /home/ubuntu/projects/stock-report && uv run python crons/us_mock_track.py
 
 env: US_MOCK_UNIVERSE(쉼표 티커, 기본 내장)·US_MOCK_MAX_POS(5)·US_MOCK_INVEST(0.9)·KOREA_MOCK_SEED(100000 USD)
+     US_MOCK_INCLUDE_LEVERAGE(true)·US_MOCK_LEVERAGE_UNIVERSE(QLD,TQQQ,SQQQ,SOXL,SSO,SOXS)
+     US_MOCK_INCLUDE_SINGLE_LEVERAGE(true)·US_MOCK_SINGLE_LEVERAGE_UNIVERSE(NVDL,TSLL,AAPU,...)
+     US_MOCK_LEVERAGE_MAX_POS(2)·US_MOCK_LEVERAGE_MAX_WEIGHT(0.35)
 """
 from __future__ import annotations
 
@@ -46,6 +49,31 @@ _DEFAULT_UNIVERSE = ["MSFT", "NVDA", "GOOGL", "AAPL", "AMZN", "META", "AVGO", "O
                      "AMD", "ADBE", "CRM", "NFLX", "QCOM", "TXN", "INTC", "CSCO",   # ticker-ok
                      "PEP", "COST", "AMAT", "MU"]   # ticker-ok (시장 유니버스 — 보유종목 아님)
 
+LEVERAGE_ETF_META = {
+    "QLD":  {"leverage": 2.0, "underlying": "QQQ",  "inverse": False, "label": "2x 나스닥100"},
+    "TQQQ": {"leverage": 3.0, "underlying": "QQQ",  "inverse": False, "label": "3x 나스닥100"},
+    "SQQQ": {"leverage": 3.0, "underlying": "QQQ",  "inverse": True,  "label": "3x 인버스 나스닥100"},
+    "SOXL": {"leverage": 3.0, "underlying": "SOXX", "inverse": False, "label": "3x 반도체"},
+    "SSO":  {"leverage": 2.0, "underlying": "SPY",  "inverse": False, "label": "2x S&P500"},
+    "SOXS": {"leverage": 3.0, "underlying": "SOXX", "inverse": True,  "label": "3x 인버스 반도체"},
+    # Single-stock leveraged ETFs. Availability/listing venues can change; override via env if needed.
+    "NVDL": {"leverage": 2.0, "underlying": "NVDA",  "inverse": False, "label": "2x 엔비디아"},
+    "NVD":  {"leverage": 2.0, "underlying": "NVDA",  "inverse": True,  "label": "2x 인버스 엔비디아"},
+    "TSLL": {"leverage": 2.0, "underlying": "TSLA",  "inverse": False, "label": "2x 테슬라"},
+    "AAPU": {"leverage": 2.0, "underlying": "AAPL",  "inverse": False, "label": "2x 애플"},
+    "AMZU": {"leverage": 2.0, "underlying": "AMZN",  "inverse": False, "label": "2x 아마존"},
+    "GGLL": {"leverage": 2.0, "underlying": "GOOGL", "inverse": False, "label": "2x 알파벳"},
+    "MSFU": {"leverage": 2.0, "underlying": "MSFT",  "inverse": False, "label": "2x 마이크로소프트"},
+    "METU": {"leverage": 2.0, "underlying": "META",  "inverse": False, "label": "2x 메타"},
+    "CONL": {"leverage": 2.0, "underlying": "COIN",  "inverse": False, "label": "2x 코인베이스"},
+    "PLTU": {"leverage": 2.0, "underlying": "PLTR",  "inverse": False, "label": "2x 팔란티어"},
+    "MSTU": {"leverage": 2.0, "underlying": "MSTR",  "inverse": False, "label": "2x 마이크로스트래티지"},
+}
+_DEFAULT_LEVERAGE_UNIVERSE = ["QLD", "TQQQ", "SQQQ", "SOXL", "SSO", "SOXS"]
+_DEFAULT_SINGLE_LEVERAGE_UNIVERSE = [
+    "NVDL", "NVD", "TSLL", "AAPU", "AMZU", "GGLL", "MSFU", "METU", "CONL", "PLTU", "MSTU",
+]
+
 
 def _int_env(n, d):
     try:
@@ -61,9 +89,50 @@ def _float_env(n, d):
         return d
 
 
+def _bool_env(n: str, d: bool = False) -> bool:
+    raw = os.getenv(n)
+    if raw is None:
+        return d
+    return str(raw).lower() in ("1", "true", "yes", "on")
+
+
+def _csv_tickers(raw: str) -> list[str]:
+    return [t.strip().upper() for t in raw.split(",") if t.strip()]
+
+
+def _dedupe(seq: list[str]) -> list[str]:
+    return list(dict.fromkeys(seq))
+
+
+def leverage_universe() -> list[str]:
+    raw = os.getenv("US_MOCK_LEVERAGE_UNIVERSE", "")
+    out = _csv_tickers(raw) or list(_DEFAULT_LEVERAGE_UNIVERSE)
+    if _bool_env("US_MOCK_INCLUDE_SINGLE_LEVERAGE", True):
+        single_raw = os.getenv("US_MOCK_SINGLE_LEVERAGE_UNIVERSE", "")
+        out += _csv_tickers(single_raw) or list(_DEFAULT_SINGLE_LEVERAGE_UNIVERSE)
+    return _dedupe(out)
+
+
+def is_leverage_etf(ticker: str) -> bool:
+    return str(ticker or "").upper() in LEVERAGE_ETF_META
+
+
+def _active_leverage_meta(ticker: str, active_symbols: set[str] | None = None) -> dict | None:
+    tk = str(ticker or "").upper()
+    meta = LEVERAGE_ETF_META.get(tk)
+    if meta:
+        return meta
+    if active_symbols and tk in active_symbols:
+        return {"leverage": None, "underlying": tk, "inverse": False, "label": "레버리지 ETF"}
+    return None
+
+
 def _universe() -> list[str]:
     raw = os.getenv("US_MOCK_UNIVERSE", "")
-    return [t.strip().upper() for t in raw.split(",") if t.strip()] or _DEFAULT_UNIVERSE
+    base = _csv_tickers(raw) or list(_DEFAULT_UNIVERSE)
+    if _bool_env("US_MOCK_INCLUDE_LEVERAGE", True):
+        base += leverage_universe()
+    return _dedupe(base)
 
 
 MAX_POS = _int_env("US_MOCK_MAX_POS", 5)
@@ -78,6 +147,8 @@ EXIT_BUFFER = _int_env("US_MOCK_EXIT_BUFFER", 2)      # 히스테리시스(top-N
 # ★분할매수·분할매도 — 회당 목표 1/N (N회 평균 진입/청산·분산 축소·bps 비용 불변). 기본 3·1=일괄.
 TRANCHES = _int_env("US_MOCK_TRANCHES", 3)
 QUOTE_STALE_S = _int_env("REALTIME_QUOTE_STALE_S", 10)
+LEV_ETF_MAX_POS = _int_env("US_MOCK_LEVERAGE_MAX_POS", 2)
+LEV_ETF_MAX_WEIGHT = _float_env("US_MOCK_LEVERAGE_MAX_WEIGHT", 0.35)
 
 # ★Tier3 구조적 레버리지 슬리브 (모의 한정 라이브 검증) — 게이트 GO shadow 가 신선할 때만
 # NAV 의 (reco_lev − 1) 비율을 2x ETF 로 보유 → 유효 레버리지 ≈ reco_lev. 기본 off(opt-in).
@@ -157,12 +228,14 @@ def compute_us_signals(universe: list[str] | None = None) -> list[dict]:
     """유니버스별 us_policy 점수 + 현재가 + 판단근거. ranker 는 best-effort(있으면 횡단정규화 주입)."""
     from ml import us_policy
     universe = universe or _universe()
+    active_leverage_symbols = set(leverage_universe())
     out = []
     for tk in universe:
         try:
-            earnings = _safe_earnings(tk)
+            lev_meta = _active_leverage_meta(tk, active_leverage_symbols)
+            earnings = {} if lev_meta else _safe_earnings(tk)
             sig = _safe_signals(tk)
-            fund = _safe_fund(tk)
+            fund = {} if lev_meta else _safe_fund(tk)
             feats = us_policy.extract_features(fund, earnings, sig)
             # ★가격 축(mom12·hi52·lowvol) + PEAD 축 — 기본 가중 0(수집 전용) → 원장 축적 후
             # 학습 게이트(us_mock_learn) 채택. 실패 시 미기록 → score() 재정규화 (graceful)
@@ -187,12 +260,26 @@ def compute_us_signals(universe: list[str] | None = None) -> list[dict]:
             except Exception:
                 pass
             price = float((sig.get("price_info") or {}).get("current_price") or 0) or (kis_mock.get_price(tk) or 0)
+            reason = f"value {feats['value']:.2f}·quality {feats['quality']:.2f}·mom {feats['mom']:.2f}"
+            if lev_meta:
+                axes = []
+                if feats.get("mom12") is not None:
+                    axes.append(f"mom12 {feats['mom12']:.2f}")
+                if feats.get("hi52") is not None:
+                    axes.append(f"hi52 {feats['hi52']:.2f}")
+                axes_s = "·" + "·".join(axes) if axes else ""
+                inv = "인버스 " if lev_meta.get("inverse") else ""
+                reason = (f"{lev_meta['label']}({inv}{lev_meta['underlying']}) · "
+                          f"mom {feats['mom']:.2f}{axes_s}")
             out.append({
                 "ticker": tk, "price": price, "features": feats,
                 "rationale": {
-                    "one_line_reason": f"value {feats['value']:.2f}·quality {feats['quality']:.2f}·mom {feats['mom']:.2f}",
+                    "one_line_reason": reason,
                     "per": earnings.get("per"), "pbr": earnings.get("pbr"), "roe": earnings.get("roe"),
                 },
+                "asset_class": "leveraged_etf" if lev_meta else "stock",
+                "leverage": (lev_meta or {}).get("leverage"),
+                "inverse": bool((lev_meta or {}).get("inverse")),
             })
         except Exception as e:
             logger.warning("US 신호 실패 %s: %s", tk, e)
@@ -243,11 +330,62 @@ def _safe_fund(tk: str) -> dict:
 
 # ── 리밸런스 (순수 함수 — 테스트 핵심) ────────────────────────────────────────
 
+def _select_targets(ranked: list[dict], max_positions: int,
+                    leverage_symbols: set[str] | None = None,
+                    leverage_max_positions: int | None = None) -> list[dict]:
+    """상위 랭크에서 목표 바스켓 선택. 레버리지 ETF 수 캡은 모의 계좌 쏠림 방지용."""
+    if not leverage_symbols or leverage_max_positions is None:
+        return ranked[:max_positions]
+    targets: list[dict] = []
+    lev_n = 0
+    lev_cap = max(0, int(leverage_max_positions))
+    for s in ranked:
+        if len(targets) >= max_positions:
+            break
+        sym = str(s.get("ticker") or "").upper()
+        is_lev = sym in leverage_symbols
+        if is_lev and lev_n >= lev_cap:
+            continue
+        targets.append(s)
+        if is_lev:
+            lev_n += 1
+    return targets
+
+
+def _target_values(buys: list[dict], budget_usd: float,
+                   leverage_symbols: set[str] | None = None,
+                   leverage_budget_frac: float | None = None) -> dict[str, float]:
+    if not buys or budget_usd <= 0:
+        return {}
+    base = budget_usd / len(buys)
+    out = {s["ticker"]: base for s in buys}
+    if not leverage_symbols or leverage_budget_frac is None:
+        return out
+    lev = [s["ticker"] for s in buys if s["ticker"] in leverage_symbols]
+    stock = [s["ticker"] for s in buys if s["ticker"] not in leverage_symbols]
+    if not lev:
+        return out
+    lev_cap = max(0.0, min(1.0, float(leverage_budget_frac))) * budget_usd
+    desired = base * len(lev)
+    if desired <= lev_cap:
+        return out
+    lev_per = lev_cap / len(lev) if lev else 0.0
+    stock_per = (budget_usd - lev_per * len(lev)) / len(stock) if stock else 0.0
+    for sym in lev:
+        out[sym] = lev_per
+    for sym in stock:
+        out[sym] = stock_per
+    return out
+
+
 def plan_rebalance(signals: list[dict], positions: dict, budget_usd: float,
                    max_positions: int, cash_usd: float | None = None,
                    slippage: float = 0.0, quote_fn=None,
                    cash_buffer: float = 1.0,
-                   rebal_band: float = 0.0, exit_buffer: int = 0) -> list[dict]:
+                   rebal_band: float = 0.0, exit_buffer: int = 0,
+                   leverage_symbols: set[str] | None = None,
+                   leverage_max_positions: int | None = None,
+                   leverage_budget_frac: float | None = None) -> list[dict]:
     """목표 바스켓(policy_score 상위 N 균등) vs 보유 → 정수주 지정가 주문계획.
 
     반환: [{symbol, side('buy'|'sell'), qty, reason}]. 매도 먼저(현금확보)·예산0/음수면 매수생략·현금 러닝캡.
@@ -258,19 +396,26 @@ def plan_rebalance(signals: list[dict], positions: dict, budget_usd: float,
     orders: list[dict] = []
     ranked = sorted([s for s in signals if s.get("price", 0) > 0],
                     key=lambda s: -(s.get("policy_score") or 0))
-    buys = ranked[:max_positions]
+    buys = _select_targets(ranked, max_positions, leverage_symbols, leverage_max_positions)
     # 히스테리시스: 매도는 top-(N+buffer) 밖 종목만 (경계 flip-flop 방지)
-    keep = {s["ticker"] for s in ranked[:max_positions + max(0, exit_buffer)]}
+    keep_targets = _select_targets(
+        ranked,
+        max_positions + max(0, exit_buffer),
+        leverage_symbols,
+        leverage_max_positions,
+    )
+    keep = {s["ticker"] for s in keep_targets}
 
     for sym, p in positions.items():
         sh = int(p.get("shares", 0) or 0)
         if sh > 0 and sym not in keep:
             orders.append({"symbol": sym, "side": "sell", "qty": sh, "reason": "타깃이탈"})
 
-    per = (budget_usd / len(buys)) if (buys and budget_usd > 0) else 0.0
+    target_values = _target_values(buys, budget_usd, leverage_symbols, leverage_budget_frac)
     remaining = (cash_usd * cash_buffer) if (cash_usd is not None and cash_usd > 0) else None
     for s in buys:
         sym, price = s["ticker"], s["price"]
+        per = target_values.get(sym, 0.0)
         if per <= 0 or price <= 0:
             continue
         cur = int(positions.get(sym, {}).get("shares", 0) or 0)
@@ -331,6 +476,7 @@ def main(argv: list[str] | None = None) -> int:
     if not signals:
         logger.warning("US 신호 0건 — 종료")
         return 0
+    leverage_symbols = set(leverage_universe())
 
     # ★Tier3 구조레버 슬리브 (모의 한정) — 게이트 GO·신선 시 NAV×(reco−1) 을 2x ETF 로.
     # 슬리브 종목은 선택 로직 대상에서 제외(positions 분리 — '타깃이탈' 오청산 방지).
@@ -344,9 +490,16 @@ def main(argv: list[str] | None = None) -> int:
         logger.info("슬리브: reco=%s → 비중 %.0f%% · 주문 %d건", reco, sleeve_frac * 100, len(sleeve_orders))
 
     budget = nav * INVEST * (1.0 - sleeve_frac)
-    plan = plan_rebalance(signals, positions_stock, budget, MAX_POS, cash_usd=cash,
+    trade_signals = [
+        s for s in signals
+        if not (LEV_SLEEVE_ENABLED and s.get("ticker") == LEV_SLEEVE_SYMBOL)
+    ]
+    plan = plan_rebalance(trade_signals, positions_stock, budget, MAX_POS, cash_usd=cash,
                           slippage=SLIPPAGE, quote_fn=_rt_best, cash_buffer=CASH_BUFFER,
-                          rebal_band=REBAL_BAND, exit_buffer=EXIT_BUFFER)
+                          rebal_band=REBAL_BAND, exit_buffer=EXIT_BUFFER,
+                          leverage_symbols=leverage_symbols,
+                          leverage_max_positions=LEV_ETF_MAX_POS,
+                          leverage_budget_frac=LEV_ETF_MAX_WEIGHT)
     # ★분할매수/매도: 종목 주문을 회당 목표의 1/N 로 상한 (슬리브는 별도 — 제외)
     if TRANCHES > 1 and plan:
         from lib.tranche import plan_tranches
@@ -358,8 +511,9 @@ def main(argv: list[str] | None = None) -> int:
     # 실행 순서: 매도(현금 확보) → 슬리브 → 매수
     plan = ([o for o in plan if o["side"] == "sell"] + sleeve_orders
             + [o for o in plan if o["side"] == "buy"])
-    logger.info("리밸런스 계획 %d건 (예산 $%.0f·목표 %d종목·슬리브 %.0f%%·%d분할)",
-                len(plan), budget, MAX_POS, sleeve_frac * 100, TRANCHES)
+    logger.info("리밸런스 계획 %d건 (예산 $%.0f·목표 %d종목·레버ETF 최대 %d개/%.0f%%·슬리브 %.0f%%·%d분할)",
+                len(plan), budget, MAX_POS, LEV_ETF_MAX_POS, LEV_ETF_MAX_WEIGHT * 100,
+                sleeve_frac * 100, TRANCHES)
 
     if dry:
         for o in plan:

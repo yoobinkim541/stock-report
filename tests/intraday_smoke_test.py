@@ -270,6 +270,10 @@ def run_tests() -> list[str]:
         *[(f"{k} 차단", lambda r, k=k: r[k] == (False, k))
           for k in ("halt", "eod_window", "max_trades", "cooldown", "held", "stale_data", "spread", "qty")],
     )
+    failures += _check("guards_loss_budget", lambda: None,
+        ("max_trades=0 은 무제한", lambda _: ax.entry_guards({**base_ctx, "trades_today": 99, "max_trades": 0}) == (True, "ok")),
+        ("손실예산 0 차단", lambda _: ax.entry_guards({**base_ctx, "loss_budget": 0.0}) == (False, "loss_budget")),
+    )
     failures += _check("spread_cap", lambda: None,
         ("KR 2틱 하한(6.1만원=~32bps)", lambda _: ax.spread_cap_bps(61450, "KR", 25.0) > 30.0),
         ("US 캡 그대로", lambda _: ax.spread_cap_bps(400.0, "US", 5.0) == 5.0),
@@ -308,6 +312,9 @@ def run_tests() -> list[str]:
         # 수치는 1/3 가치캡(542주)이 안 걸리는 리스크측 채택 구간으로 선정
         ("마찰 포함 주수 축소", lambda _: ax.position_size(100_000_000, 0.005, 61450, 60000, friction=300.0)
             == int(500_000 / (1450 + 300))),
+        ("남은 손실예산으로 주수 축소", lambda _: ax.position_size(100_000_000, 0.005, 61450, 60000,
+                                                               friction=300.0, loss_budget=17_500)
+            == int(17_500 / (1450 + 300))),
         ("최소 명목 미달 → 0", lambda _: ax.position_size(1_000_000, 0.005, 61450, 61150,
                                                           min_notional=1_000_000) == 0),
     )
@@ -351,7 +358,7 @@ def run_tests() -> list[str]:
         ("KR 기본가중 합 1", lambda r: abs(sum(v for k, v in ip.DEFAULTS["kr"].items() if k.startswith("w_")) - 1.0) < 1e-9),
     )
 
-    # ── i10: 엔진 — 진입→멱등→손절→쿨다운→orphan 수리 (전부 모킹·쓰기 tmp 격리) ──
+    # ── i10: 엔진 — 진입→멱등→손절→즉시 재진입 가능→orphan 수리 (전부 모킹·쓰기 tmp 격리) ──
     logger.info("[i10] 엔진 사이클")
     failures += _engine_tests(tmp)
 
@@ -543,7 +550,7 @@ def _engine_tests(tmp: str) -> list[str]:
             chk("net R 음수", len(outs) == 1 and outs[0]["realized_r"] < 0)
             chk("fwd_excess=realized_r", len(outs) == 1 and outs[0]["fwd_excess"] == outs[0]["realized_r"])
             chk("포지션 제거", pos_key not in state["positions"])
-            chk("쿨다운 설정", state["cooldown_until"].get(pos_key, 0) > 0)
+            chk("기본 쿨다운 없음", state["cooldown_until"].get(pos_key, 0) <= 0)
             chk("체결 이벤트(sell)", any(e["side"] == "sell" for e in events))
             chk("day_pnl 반영", state["counters"]["KR"]["day_pnl"] != 0.0)
 

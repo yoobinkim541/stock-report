@@ -74,6 +74,8 @@ def test_parse_kr_top_holdings():
 def test_is_etf_known_list_and_quote_type():
     assert E.is_etf("QQQI") is True                  # 보유 ETF — 오프라인 폴백
     assert E.is_etf("SGOV") is True
+    assert E.is_etf("NVDL") is True
+    assert E.is_etf("TSLL") is True
     assert E.is_etf("A069500") is True
     assert E.is_etf("069500.KS") is True
     assert E.is_etf("005930.KS") is False

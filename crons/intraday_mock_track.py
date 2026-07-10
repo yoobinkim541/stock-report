@@ -13,6 +13,8 @@
 
 크론: * * * * * flock -n /tmp/intraday_mock_track.lock uv run python crons/intraday_mock_track.py
      INTRADAY_MOCK_ENABLED=false(기본) 면 즉시 no-op.
+     US 레버리지 단기: 기초자산 신호(QQQ/NVDA 등) → 레버리지 ETF(TQQQ/NVDL 등) 가상체결.
+     수량은 일손실 한도에서 남은 예산 안으로 자동 축소한다.
 수동 검증: --dry-run (쓰기 0·판단 stdout — 크론과 동시 실행 안전).
 """
 from __future__ import annotations
@@ -41,7 +43,7 @@ _TZ = {"KR": ZoneInfo("Asia/Seoul"), "US": ZoneInfo("America/New_York")}
 _OPEN_MIN = {"KR": 9 * 60, "US": 9 * 60 + 30}
 _CLOSE_MIN = {"KR": 15 * 60 + 30, "US": 16 * 60}
 _SEED_ENV = {"KR": ("KIWOOM_MOCK_SEED", 10_000_000.0), "US": ("KOREA_MOCK_SEED", 100_000.0)}
-_MAX_CONCURRENT = 3          # per-position ≤ 슬리브 1/3 캡과 정합
+_DEFAULT_MAX_CONCURRENT = 0  # 0 = 제한 없음. 남은 일손실 예산이 실제 제한자.
 
 
 def _env_f(name: str, default: float) -> float:
@@ -51,25 +53,60 @@ def _env_f(name: str, default: float) -> float:
         return default
 
 
+def _cfg_market_value(cfg: dict, key: str, mk: str | None, default):
+    val = cfg.get(key, default)
+    if isinstance(val, dict):
+        market = (mk or "").upper()
+        return val.get(market, val.get(market.lower(), default))
+    return val
+
+
 def load_cfg() -> dict:
+    try:
+        from providers import intraday_universe
+        lev_enabled = intraday_universe.leverage_enabled()
+        lev_map = intraday_universe.leverage_map()
+    except Exception:
+        lev_enabled, lev_map = False, {}
+    spread_soft_kr = _env_f("INTRADAY_MAX_SPREAD_BPS_KR", 25.0)
+    spread_soft_us = _env_f("INTRADAY_MAX_SPREAD_BPS_US", 5.0)
+    spread_hard_kr = _env_f("INTRADAY_HARD_SPREAD_BPS_KR", spread_soft_kr)
+    spread_hard_us = _env_f("INTRADAY_HARD_SPREAD_BPS_US", 50.0)
+    max_concurrent_default = int(_env_f("INTRADAY_MAX_CONCURRENT_POS", _DEFAULT_MAX_CONCURRENT))
     return {
         "enabled": os.getenv("INTRADAY_MOCK_ENABLED", "false").lower() == "true",
         "shadow": os.getenv("INTRADAY_SHADOW_ONLY", "true").lower() == "true",
         "markets": [m.strip().upper() for m in os.getenv("INTRADAY_MARKETS", "kr,us").split(",") if m.strip()],
         "sleeve_frac": _env_f("INTRADAY_SLEEVE_FRAC", 0.10),
         "risk_per_trade": _env_f("INTRADAY_RISK_PER_TRADE", 0.005),
-        "max_trades": int(_env_f("INTRADAY_MAX_TRADES_DAY", 6)),
-        "cooldown_min": int(_env_f("INTRADAY_COOLDOWN_MIN", 30)),
+        "max_trades": int(_env_f("INTRADAY_MAX_TRADES_DAY", 0)),
+        "cooldown_min": int(_env_f("INTRADAY_COOLDOWN_MIN", 0)),
         "stop_friction_mult": _env_f("INTRADAY_STOP_FRICTION_MULT", 3.0),
         "min_notional": {"KR": _env_f("INTRADAY_MIN_NOTIONAL_KRW", 100000),
                          "US": _env_f("INTRADAY_MIN_NOTIONAL_USD", 150)},
         "daily_loss_halt": _env_f("INTRADAY_DAILY_LOSS_HALT", 0.015),
-        "spread_cap": {"KR": _env_f("INTRADAY_MAX_SPREAD_BPS_KR", 25.0),
-                       "US": _env_f("INTRADAY_MAX_SPREAD_BPS_US", 5.0)},
+        "spread_cap": {"KR": spread_soft_kr, "US": spread_soft_us},
+        "spread_hard_cap": {"KR": max(spread_soft_kr, spread_hard_kr),
+                            "US": max(spread_soft_us, spread_hard_us)},
         "flat_buffer_min": int(_env_f("INTRADAY_FLAT_BUFFER_MIN", 15)),
         "entry_cutoff_min": int(_env_f("INTRADAY_ENTRY_CUTOFF_MIN", 30)),
         "stale_flat_min": int(_env_f("INTRADAY_STALE_FLAT_MIN", 10)),
         "orb_minutes": int(_env_f("INTRADAY_ORB_MINUTES", 15)),
+        "explore_enabled": os.getenv("INTRADAY_EXPLORE_ENABLED", "true").lower() == "true",
+        "explore_entry": {
+            "KR": _env_f("INTRADAY_EXPLORE_ENTRY_KR", _env_f("INTRADAY_EXPLORE_ENTRY", 0.40)),
+            "US": _env_f("INTRADAY_EXPLORE_ENTRY_US", _env_f("INTRADAY_EXPLORE_ENTRY", 0.48)),
+        },
+        "explore_risk_mult": {
+            "KR": _env_f("INTRADAY_EXPLORE_RISK_MULT_KR", _env_f("INTRADAY_EXPLORE_RISK_MULT", 0.35)),
+            "US": _env_f("INTRADAY_EXPLORE_RISK_MULT_US", _env_f("INTRADAY_EXPLORE_RISK_MULT", 0.50)),
+        },
+        "max_concurrent": {
+            "KR": int(_env_f("INTRADAY_MAX_CONCURRENT_POS_KR", max_concurrent_default)),
+            "US": int(_env_f("INTRADAY_MAX_CONCURRENT_POS_US", max_concurrent_default)),
+        },
+        "leverage_enabled": lev_enabled,
+        "leverage_map": lev_map,
     }
 
 
@@ -267,8 +304,87 @@ def _symbol_axes(sym: str, mk: str, df, feats, *, profile: dict, obi_samples: li
     axes = ax.apply_regime(axes, ax.regime_multipliers(er))
     axes["_meta"] = {"vol_z_tod": vz, "regime_er": er, "close": close,
                      "atr": float(row.get("atr")) if row.get("atr") == row.get("atr") else None,
-                     "bar_ts": df.index[-1].isoformat(), "epoch_min": int(df.index[-1].timestamp() // 60)}
+                     "bar_ts": df.index[-1].isoformat(), "epoch_min": int(df.index[-1].timestamp() // 60),
+                     "symbol": sym}
     return axes
+
+
+def _trade_symbol(signal_sym: str, mk: str, cfg: dict) -> str:
+    if mk != "US" or not cfg.get("leverage_enabled"):
+        return signal_sym
+    return (cfg.get("leverage_map") or {}).get(signal_sym, signal_sym)
+
+
+def _execution_axes(signal_axes: dict, trade_sym: str, trade_df, trade_feats) -> dict | None:
+    """기초자산 점수축 + 체결 ETF 가격축. stop/size 는 체결 ETF ATR 기준."""
+    sig_meta = signal_axes.get("_meta") or {}
+    if trade_sym == sig_meta.get("symbol"):
+        return signal_axes
+    if trade_df is None or getattr(trade_df, "empty", True) or trade_feats is None or getattr(trade_feats, "empty", True):
+        return None
+    try:
+        row = trade_feats.iloc[-1]
+        close = float(trade_df["Close"].iloc[-1])
+        atr = float(row.get("atr")) if row.get("atr") == row.get("atr") else None
+        if not close or not atr or atr <= 0:
+            return None
+        out = {k: v for k, v in signal_axes.items() if k != "_meta"}
+        out["_meta"] = {
+            **sig_meta,
+            "close": close,
+            "atr": atr,
+            "bar_ts": trade_df.index[-1].isoformat(),
+            "epoch_min": int(trade_df.index[-1].timestamp() // 60),
+            "signal_ticker": sig_meta.get("symbol"),
+            "execution_ticker": trade_sym,
+        }
+        return out
+    except Exception:
+        return None
+
+
+def _open_risk(state: dict, mk: str) -> float:
+    total = 0.0
+    for key, pos in (state.get("positions") or {}).items():
+        if not str(key).startswith(f"{mk}:"):
+            continue
+        try:
+            total += float(pos.get("risk_per_share") or 0) * int(pos.get("qty") or 0)
+        except (TypeError, ValueError):
+            continue
+    return max(0.0, total)
+
+
+def _remaining_loss_budget(state: dict, mk: str, sleeve: float, cfg: dict) -> float:
+    """오늘 순손익이 -daily_loss_halt*sleeve 밑으로 내려가지 않도록 신규 위험을 제한."""
+    c = state["counters"].setdefault(mk, {"trades": 0, "day_pnl": 0.0, "sleeve_pnl_cum": 0.0})
+    limit = max(0.0, float(cfg.get("daily_loss_halt", 0.0)) * max(sleeve, 0.0))
+    return max(0.0, limit + float(c.get("day_pnl") or 0.0) - _open_risk(state, mk))
+
+
+def _entry_risk_mult(score: float, params: dict, cfg: dict, mk: str | None = None) -> tuple[float, str]:
+    """정규 진입선 아래 탐색 구간은 작은 리스크로 표본을 쌓는다."""
+    theta_entry = float(params.get("theta_entry", 0.55))
+    if score >= theta_entry:
+        return 1.0, "normal"
+    if not cfg.get("explore_enabled", True):
+        return 0.0, "skip"
+    theta_explore = min(theta_entry, float(_cfg_market_value(cfg, "explore_entry", mk, 0.48)))
+    if score < theta_explore:
+        return 0.0, "skip"
+    mult = max(0.0, min(1.0, float(_cfg_market_value(cfg, "explore_risk_mult", mk, 0.50))))
+    return (mult, "explore") if mult > 0 else (0.0, "skip")
+
+
+def _max_concurrent(mk: str, cfg: dict) -> int:
+    return max(0, int(_cfg_market_value(cfg, "max_concurrent", mk, _DEFAULT_MAX_CONCURRENT)))
+
+
+def _entry_spread_cap(price: float, mk: str, cfg: dict) -> float:
+    """진입 차단에는 하드캡을 쓰고, 실제 스프레드는 마찰/수량 산식에 반영한다."""
+    from ml import intraday_axes as ax
+    caps = cfg.get("spread_hard_cap") or cfg.get("spread_cap") or {}
+    return ax.spread_cap_bps(price, mk, float(caps.get(mk, 0.0)))
 
 
 # ── 청산·진입 실행 ────────────────────────────────────────────────────────────
@@ -314,9 +430,11 @@ def _do_exit(state: dict, key: str, pos: dict, reason: str, ref_px: float, mk: s
     c = state["counters"].setdefault(mk, {"trades": 0, "day_pnl": 0.0, "sleeve_pnl_cum": 0.0})
     c["day_pnl"] = c.get("day_pnl", 0.0) + net
     c["sleeve_pnl_cum"] = c.get("sleeve_pnl_cum", 0.0) + net
-    if net < 0:                                     # 손실 청산만 쿨다운 — 윕소 연타 방어.
-        # 익절/본전 청산 후엔 즉시 재진입 허용(모멘텀 지속 포착). COOLDOWN_MIN=0 이면 전체 비활성.
-        state["cooldown_until"][key] = time.time() + cfg["cooldown_min"] * 60
+    cooldown_min = int(cfg.get("cooldown_min") or 0)
+    if net < 0 and cooldown_min > 0:                # 선택 옵션. 기본은 즉시 재진입 허용.
+        state["cooldown_until"][key] = time.time() + cooldown_min * 60
+    else:
+        state["cooldown_until"].pop(key, None)
     state["positions"].pop(key, None)
     (notes if notes is not None else []).append(
         f"{'🟢' if net > 0 else '🔴'} {sym} 청산[{reason}] {qty}주 @ {exit_px:,.2f} "
@@ -325,7 +443,8 @@ def _do_exit(state: dict, key: str, pos: dict, reason: str, ref_px: float, mk: s
 
 
 def _do_entry(state: dict, sym: str, mk: str, axes: dict, score: float, params: dict,
-              cfg: dict, sleeve: float, ledger, *, orderbook=None, dry=False, notes=None) -> bool:
+              cfg: dict, sleeve: float, ledger, *, orderbook=None, loss_budget=None,
+              risk_mult=1.0, entry_mode="normal", dry=False, notes=None) -> bool:
     from ml import intraday_axes as ax
     meta = axes["_meta"]
     price, atr = meta["close"], meta.get("atr")
@@ -339,8 +458,10 @@ def _do_entry(state: dict, sym: str, mk: str, axes: dict, score: float, params: 
     stop = ax.stop_with_floor(price, atr, float(params.get("stop_atr_mult", 1.2)),
                               friction, floor_mult=cfg["stop_friction_mult"])
     target = price + float(params.get("target_r", 2.0)) * (price - stop)
-    qty = ax.position_size(sleeve, cfg["risk_per_trade"], price, stop,
-                           friction=friction, min_notional=cfg["min_notional"][mk])
+    risk_frac = cfg["risk_per_trade"] * max(0.0, float(risk_mult))
+    qty = ax.position_size(sleeve, risk_frac, price, stop,
+                           friction=friction, min_notional=cfg["min_notional"][mk],
+                           loss_budget=loss_budget)
     if qty < 1:
         return False
     shadow = cfg["shadow"]
@@ -364,25 +485,33 @@ def _do_entry(state: dict, sym: str, mk: str, axes: dict, score: float, params: 
                 "price": round(fill["price"], 4), "bar_ts": meta["bar_ts"],
                 "score": round(score, 4), "features": feats_rec,
                 "stop": round(stop, 4), "target": round(target, 4),
+                "signal_ticker": meta.get("signal_ticker"),
+                "execution_ticker": meta.get("execution_ticker") or sym,
+                "loss_budget": round(float(loss_budget), 2) if loss_budget is not None else None,
+                "entry_mode": entry_mode, "risk_mult": round(float(risk_mult), 4),
+                "risk_frac": round(float(risk_frac), 6),
                 "shadow": shadow, "ok": True})
         except Exception as e:
             logger.error("decision 기록 실패 %s: %s", sym, e)
             return False
     _record_event(sym, mk, "buy", qty, fill["price"], decision_id=did, direction="in",
                   avg_price=fill["price"], shadow=shadow,
-                  note=f"단기 진입 score={score:.2f} stop={stop:,.0f}"
+                  note=f"단기 {'탐색 ' if entry_mode == 'explore' else ''}진입 score={score:.2f} stop={stop:,.0f}"
                        + (" (shadow)" if shadow else ""), dry=dry)
     state["positions"][f"{mk}:{sym}"] = {
         "decision_id": did, "ticker": sym, "market": mk, "qty": qty,
         "entry_price": fill["price"], "entry_epoch": time.time(),
         "entry_min": now.hour * 60 + now.minute, "stop": stop, "target": target,
         "risk_per_share": (price - stop) + friction, "shadow": shadow,
-        "penalty_entry": fill["penalty"], "last_score": score}
+        "penalty_entry": fill["penalty"], "last_score": score,
+        "signal_ticker": meta.get("signal_ticker"), "loss_budget_entry": loss_budget,
+        "entry_mode": entry_mode, "risk_mult": risk_mult, "risk_frac": risk_frac}
     c = state["counters"].setdefault(mk, {"trades": 0, "day_pnl": 0.0, "sleeve_pnl_cum": 0.0})
     c["trades"] = c.get("trades", 0) + 1
     (notes if notes is not None else []).append(
-        f"▶️ {sym} 진입 {qty}주 @ {fill['price']:,.2f} score {score:.2f}"
-        f" (stop {stop:,.0f}·tgt {target:,.0f}){' [shadow]' if shadow else ''}")
+        f"▶️ {sym} {'탐색 ' if entry_mode == 'explore' else ''}진입 {qty}주 @ {fill['price']:,.2f} score {score:.2f}"
+        + (f" ({meta.get('signal_ticker')} 신호)" if meta.get("signal_ticker") and meta.get("signal_ticker") != sym else "")
+        + f" (stop {stop:,.0f}·tgt {target:,.0f}){' [shadow]' if shadow else ''}")
     return True
 
 
@@ -468,7 +597,9 @@ def run_market(mk: str, state: dict, cfg: dict, *, dry: bool = False) -> list[st
     # ② 데이터 적재 — bar·호가·신선도·프로파일
     from providers import intraday_bars, realtime_quotes
     from ml.intraday_signal import compute_intraday_features
-    watch = list(dict.fromkeys(universe + held))
+    lev_map = cfg.get("leverage_map") or {}
+    mapped = [lev_map[s] for s in universe if mk == "US" and cfg.get("leverage_enabled") and s in lev_map]
+    watch = list(dict.fromkeys(universe + mapped + held))
     bars, feats, obs, fresh = {}, {}, {}, {}
     hb_ok = False
     try:
@@ -576,8 +707,10 @@ def run_market(mk: str, state: dict, cfg: dict, *, dry: bool = False) -> list[st
     n_pos = sum(1 for k in state["positions"] if k.startswith(f"{mk}:"))
     cands = []
     for sym in universe:
+        trade_sym = _trade_symbol(sym, mk, cfg)
         key = f"{mk}:{sym}"
-        if key in state["positions"]:
+        trade_key = f"{mk}:{trade_sym}"
+        if trade_key in state["positions"]:
             continue
         df = bars.get(sym)
         if df is None or df.empty:
@@ -589,21 +722,29 @@ def run_market(mk: str, state: dict, cfg: dict, *, dry: bool = False) -> list[st
         state["last_processed_bar"][key] = ep
         if axes is None or score is None:
             continue
-        cands.append((score, sym, axes))
+        trade_axes = _execution_axes(axes, trade_sym, bars.get(trade_sym), feats.get(trade_sym))
+        if trade_axes is None:
+            continue
+        cands.append((score, sym, trade_sym, trade_axes))
     # 세션 최고점 진단 — 결정 0건이 휴면(점수 미달)인지 고장인지 로그만으로 구분.
     # 신고점 갱신 시에만 한 줄 기록(단조증가라 일 수 회) — 매분 스팸 없음.
     if cands:
-        top_score, top_sym, _ = max(cands)
+        top_score, top_sym, top_trade, _ = max(cands)
         _today = state.get("session_date", {}).get(mk)
         _d = state.setdefault("diag", {}).get(mk) or {}
         if _d.get("date") != _today or top_score > float(_d.get("best") or -9):
-            state["diag"][mk] = {"date": _today, "best": round(top_score, 4), "sym": top_sym}
-            logger.info("[%s] 세션 최고점 %s score %.2f (θ_entry %.2f)",
-                        mk, top_sym, top_score, float(params.get("theta_entry", 0.55)))
-    for score, sym, axes in sorted(cands, reverse=True):
-        if n_pos >= _MAX_CONCURRENT:
+            state["diag"][mk] = {"date": _today, "best": round(top_score, 4), "sym": top_sym,
+                                 "trade_sym": top_trade}
+            suffix = f"→{top_trade}" if top_trade != top_sym else ""
+            logger.info("[%s] 세션 최고점 %s%s score %.2f (θ_entry %.2f / θ_explore %.2f)",
+                        mk, top_sym, suffix, top_score, float(params.get("theta_entry", 0.55)),
+                        float(_cfg_market_value(cfg, "explore_entry", mk, 0.48)))
+    max_concurrent = _max_concurrent(mk, cfg)
+    for score, signal_sym, sym, axes in sorted(cands, reverse=True):
+        if max_concurrent > 0 and n_pos >= max_concurrent:
             break
-        if score < float(params.get("theta_entry", 0.55)):
+        risk_mult, entry_mode = _entry_risk_mult(score, params, cfg, mk)
+        if risk_mult <= 0:
             continue
         ob = obs.get(sym)
         meta = axes["_meta"]
@@ -620,22 +761,27 @@ def run_market(mk: str, state: dict, cfg: dict, *, dry: bool = False) -> list[st
                                     - ((ob or {}).get("best_bid") or 0) or None)
         stop = (ax.stop_with_floor(meta["close"], atr, float(params.get("stop_atr_mult", 1.2)),
                                    _fr, floor_mult=cfg["stop_friction_mult"]) if atr else None)
-        qty = (ax.position_size(sleeve, cfg["risk_per_trade"], meta["close"], stop,
-                                friction=_fr, min_notional=cfg["min_notional"][mk])
+        loss_budget = _remaining_loss_budget(state, mk, sleeve, cfg)
+        qty = (ax.position_size(sleeve, cfg["risk_per_trade"] * risk_mult, meta["close"], stop,
+                                friction=_fr, min_notional=cfg["min_notional"][mk],
+                                loss_budget=loss_budget)
                if stop else 0)                      # _do_entry 와 동일 산식 — 가드 일관성
         ok, why = ax.entry_guards({
             "halt": state["halt"].get(mk, False), "now_min": now_min, "close_min": close_min,
             "flat_buffer_min": cfg["flat_buffer_min"], "entry_cutoff_min": cfg["entry_cutoff_min"],
             "trades_today": c.get("trades", 0), "max_trades": cfg["max_trades"],
-            "cooldown_ok": time.time() >= float(state["cooldown_until"].get(f"{mk}:{sym}") or 0),
+            "cooldown_ok": int(cfg.get("cooldown_min") or 0) <= 0
+                           or time.time() >= float(state["cooldown_until"].get(f"{mk}:{sym}") or 0),
             "held": False, "fresh": fresh.get(sym, False),
-            "spread": sp, "spread_cap": ax.spread_cap_bps(meta["close"], mk, cfg["spread_cap"][mk]),
-            "qty": qty})
+            "spread": sp, "spread_cap": _entry_spread_cap(meta["close"], mk, cfg),
+            "loss_budget": loss_budget, "qty": qty})
         if not ok:
-            logger.info("[%s] %s score %.2f — 가드 차단(%s)", mk, sym, score, why)
+            suffix = f"({signal_sym} 신호)" if signal_sym != sym else ""
+            logger.info("[%s] %s%s score %.2f %s — 가드 차단(%s)", mk, sym, suffix, score, entry_mode, why)
             continue
         if _do_entry(state, sym, mk, axes, score, params, cfg, sleeve, ledger,
-                     orderbook=ob, dry=dry, notes=notes):
+                     orderbook=ob, loss_budget=loss_budget, risk_mult=risk_mult,
+                     entry_mode=entry_mode, dry=dry, notes=notes):
             n_pos += 1
     return notes
 
