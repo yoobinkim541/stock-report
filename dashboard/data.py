@@ -874,3 +874,65 @@ def remove_ticker_alert(alert_id: str) -> bool:
         return bool(price_alerts.remove_alert(alert_id))
     except Exception:
         return False
+
+
+def series_profile(hist) -> dict | None:
+    """가격 시리즈 프로필 (순수) — 매크로 자산 성과 밴드용.
+
+    반환 {r1w, r1m, r3m, r1y, ytd(%), hi52, lo52, pos52(0~1), vol_ann(%), ma200_gap(%)}.
+    이력이 창을 못 덮는 구간은 None (짧은 이력 graceful). 주식/매크로 공용 가능.
+    """
+    try:
+        import pandas as pd
+        close = hist["Close"].dropna()
+        if len(close) < 10:
+            return None
+        last = float(close.iloc[-1])
+        end = close.index[-1]
+        first = close.index[0]
+
+        def _ret(days):
+            # 이력이 창을 덮지 못하면 None — 20일치 데이터로 "1년 수익률"을 만들면 허위 라벨
+            start = end - pd.Timedelta(days=days)
+            if first > start:
+                return None
+            win = close[close.index >= start]
+            base = float(win.iloc[0]) if len(win) >= 2 else None
+            return (last / base - 1) * 100 if base else None
+
+        jan1 = pd.Timestamp(end.year, 1, 1)
+        tz = getattr(close.index, "tz", None)
+        if tz is not None:
+            jan1 = jan1.tz_localize(tz)
+        ytd_win = close[close.index >= jan1]
+        # 연초 이전 데이터가 없으면 YTD 라벨은 허위 → None (이력이 올해 시작 후면 미표시)
+        ytd = ((last / float(ytd_win.iloc[0]) - 1) * 100
+               if (len(ytd_win) >= 2 and first <= jan1) else None)
+        yr = close[close.index >= end - pd.Timedelta(days=365)]
+        hi52 = float(yr.max()) if len(yr) else None
+        lo52 = float(yr.min()) if len(yr) else None
+        pos52 = ((last - lo52) / (hi52 - lo52)) if (hi52 and lo52 and hi52 > lo52) else None
+        rets = close.pct_change().dropna().tail(252)
+        vol_ann = float(rets.std() * (252 ** 0.5) * 100) if len(rets) >= 30 else None
+        ma200 = float(close.rolling(200).mean().iloc[-1]) if len(close) >= 200 else None
+        return {"r1w": _ret(7), "r1m": _ret(30), "r3m": _ret(91), "r1y": _ret(365),
+                "ytd": ytd, "hi52": hi52, "lo52": lo52, "pos52": pos52,
+                "vol_ann": vol_ann,
+                "ma200_gap": ((last / ma200 - 1) * 100) if ma200 else None,
+                "last": last}
+    except Exception:
+        return None
+
+
+def history_percentile(hist, years: int = 10) -> float | None:
+    """현재값의 역사 백분위 (순수) — 금리 레벨 맥락용. 0~100 | None."""
+    try:
+        import pandas as pd
+        close = hist["Close"].dropna()
+        win = close[close.index >= close.index[-1] - pd.Timedelta(days=365 * years)]
+        if len(win) < 60:
+            return None
+        last = float(win.iloc[-1])
+        return float((win <= last).mean() * 100)
+    except Exception:
+        return None

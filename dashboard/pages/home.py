@@ -132,9 +132,11 @@ def _market_bar():
                       if plan.get("label") else "실행 규칙은 Phase(DCA 배율)가 담당")
         _th = [r.get("score") for r in cached.market_temp_history()
                if r.get("score") is not None]
+        # 점 2~4개짜리 스파크는 추세 정보가 없는데 직선 하나로 눈에 띄어 오해를 부른다
+        # (일별 크론이 하루 1점 적재 — 5일 이상 쌓인 뒤 표시). 추세 캡션은 그대로.
         theme.render(theme.market_temp_html((temp or {}).get("score"),
                                             (temp or {}).get("sub", ""), phase_line,
-                                            spark=_th if len(_th) >= 2 else None))
+                                            spark=_th if len(_th) >= 5 else None))
 
     # 🧮 S&P500 밸류 스트립 — PER(multpl 보고이익+역사 백분위)·fPER·성장·PEG
     if v:
@@ -147,31 +149,18 @@ def _market_bar():
 
 @st.fragment
 def _macro_row():
-    """매크로 자산 — 환율·금·비트코인·유가·금리 카드 + 클릭 시 종목 분석 이동."""
+    """매크로 자산 — 환율·금·비트코인·유가·금리. **카드 클릭 → 매크로 전용 분석**.
+
+    카드는 순수 HTML(콜백 없음) → `?tk=<티커>` 앵커로 이동(app.py 가 쿼리파라미터 소비).
+    별도 버튼 행 불필요.
+    """
     st.markdown("#### 🌐 매크로 자산")
     items = cached.macro_assets()
     if not items:
         st.caption("매크로 자산 데이터를 불러오지 못했습니다 (네트워크 일시 오류 — 새로고침).")
         return
+    st.caption("🔍 **카드를 클릭**하면 해당 자산 상세 차트·매크로 분석으로 이동")
     theme.render(theme.macro_cards_html(items, cols=4))
-    # 카드는 순수 HTML(클릭 이벤트 불가) → 아래 컴팩트 버튼 행으로 종목 분석 이동 제공
-    st.caption("아래 버튼 = 해당 자산 상세 차트(캔들·지표·드로잉)로 이동")
-    labels = [it for it in items if it.get("ticker")]
-    ncol = 4
-    for i in range(0, len(labels), ncol):
-        cols = st.columns(ncol)
-        for j, it in enumerate(labels[i:i + ncol]):
-            if cols[j].button(f"{it['emoji']} {it['label']}", key=f"_macro_{it['ticker']}",
-                              width="stretch"):
-                tk = it["ticker"]
-                if tk != st.session_state.get("ticker"):
-                    st.session_state["ticker"] = tk
-                    st.toast(f"종목 분석 → {tk}")
-                    _tp = st.session_state.get("_ticker_page")
-                    if _tp is not None:
-                        st.switch_page(_tp)
-                    else:
-                        st.rerun()
 
 
 _MAPS = {   # 라벨 → (cached 로더명, 부가 캡션)

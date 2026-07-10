@@ -75,6 +75,8 @@ cached.market_temp_history = lambda: [{"date": "2026-07-07", "score": 0.1},
 cached.next_earnings = lambda t: None
 cached.chart_news = lambda t: [{"date": "2026-07-01", "direction": 1, "strength": 4,
                                 "event_type": "실적", "title": "beat"}]
+cached.macro_corr = lambda t: [{"symbol": "^TNX", "label": "미 10년물", "note": "역상관 경향",
+                                "corr90": -0.62, "chg30": 1.4}]
 cached.macro_assets = lambda: [
     {"symbol": "KRW=X", "label": "달러/원 환율", "emoji": "\U0001f4b1", "unit": "₩",
      "ticker": "KRW=X", "price": 1505.05, "chg": -3.2, "pct": -0.21, "spark": [1500, 1503, 1505]},
@@ -461,6 +463,38 @@ def test_sidebar_paper_rail_and_nav(monkeypatch):
     at.session_state["_nav_to_paper"] = True          # 레일 버튼 클릭 시뮬
     at.run()
     assert not at.exception, str(at.exception)
+
+
+def test_ticker_page_macro_view():
+    """매크로 자산(금)은 주식 섹션(호가·진입레벨·밸류·재무·포지션관리) 대신 전용 뷰.
+
+    성과 프로필·연관 자산 상관이 뜨고, 주식 전용 섹션은 렌더되지 않아야 한다.
+    """
+    macro_stub = '''
+st.session_state["ticker"] = "GC=F"
+'''
+    at = AppTest.from_string(_STUBS + macro_stub
+                             + "\nfrom dashboard.pages import ticker\nticker.render()\n",
+                             default_timeout=30)
+    at.run()
+    assert not at.exception, str(at.exception)
+    body = " ".join(str(m.value) for m in at.markdown) + " ".join(str(c.value) for c in at.caption)
+    assert "성과 프로필" in body and "연관 자산" in body
+    # 주식 전용 섹션 부재 (매크로엔 무의미)
+    for stock_only in ("진입 레벨 가이드", "포지션 관리", "실시간 호가"):
+        assert stock_only not in body, f"매크로 뷰에 주식 섹션 노출: {stock_only}"
+
+
+def test_ticker_page_macro_krw_fx_timing():
+    """환율(KRW=X)은 환전 타이밍 + 포트 민감도 특화 섹션."""
+    at = AppTest.from_string(_STUBS + '\nst.session_state["ticker"] = "KRW=X"\n'
+                             + "\nfrom dashboard.pages import ticker\nticker.render()\n",
+                             default_timeout=30)
+    at.run()
+    assert not at.exception, str(at.exception)
+    body = " ".join(str(m.value) for m in at.markdown) + \
+        " ".join(str(c.value) for c in at.caption) + " ".join(str(i.value) for i in at.info)
+    assert "환전 타이밍" in body and "민감도" in body
 
 
 def test_ticker_page_etf_view():

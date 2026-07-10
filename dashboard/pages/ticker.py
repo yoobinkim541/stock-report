@@ -41,6 +41,11 @@ def render():
     else:
         st.info("가격 데이터 없음 (yfinance)")
 
+    # 매크로·지수 자산 — 주식 섹션(호가·진입레벨·밸류·재무·포지션관리) 대신 전용 뷰
+    if ticker_names.is_macro(ticker):
+        _macro_sections(ticker, hist)
+        return
+
     # 실시간 호가 — 접이식(기본 접힘)·8초 자동갱신 (차트 우선 레이아웃)
     _orderbook_section(ticker, hist, prev)
 
@@ -168,6 +173,91 @@ def _price_chart_frag(ticker, hist, avg_cost, trades, fullscreen: bool = False):
     _price_chart(ticker, hist, avg_cost, trades, fullscreen)
 
 
+def _macro_sections(ticker, hist):
+    """매크로·지수 전용 분석 — 성과 밴드 + 자산 특화 + 연관 자산 상관 (표시·참고용).
+
+    주식 섹션(밸류·재무·기관·공시·호가·진입레벨·포지션관리)은 매크로에 무의미 → 대체.
+    환율=환전 타이밍·포트 민감도 / 금리=역사 백분위 / 금=금은비 / 암호·지수=상관 맥락.
+    """
+    prof = data.series_profile(hist)
+    if prof:
+        st.markdown("##### 📊 성과 프로필")
+
+        def _c(v):
+            # 값 없음(None)은 중립색 — `(None or 0) >= 0` 이 초록을 칠하던 것 방지
+            if not isinstance(v, (int, float)):
+                return None
+            return theme.GREEN if v >= 0 else theme.RED
+
+        theme.render(theme.position_band_html([
+            ("1주", data.f_pct_s(prof["r1w"]), _c(prof["r1w"])),
+            ("1개월", data.f_pct_s(prof["r1m"]), _c(prof["r1m"])),
+            ("3개월", data.f_pct_s(prof["r3m"]), _c(prof["r3m"])),
+            ("1년", data.f_pct_s(prof["r1y"]), _c(prof["r1y"])),
+            ("YTD", data.f_pct_s(prof["ytd"]), _c(prof["ytd"])),
+        ]))
+        pos52 = prof.get("pos52")
+        theme.render(theme.position_band_html([
+            ("52주 위치", f"{pos52 * 100:.0f}%" if pos52 is not None else "—",
+             None),
+            ("52주 고점", f"{prof['hi52']:,.2f}" if prof.get("hi52") else "—", None),
+            ("52주 저점", f"{prof['lo52']:,.2f}" if prof.get("lo52") else "—", None),
+            ("연변동성", f"{prof['vol_ann']:.1f}%" if prof.get("vol_ann") is not None else "—",
+             None),
+            ("200일선 이격", data.f_pct_s(prof.get("ma200_gap")),
+             _c(prof.get("ma200_gap"))),
+        ]))
+
+    # ── 자산 특화 ──
+    if ticker == "KRW=X":
+        fx = cached.fx_timing() or {}
+        if fx.get("ok"):
+            st.markdown("##### 💱 환전 타이밍 (3년 백분위)")
+            st.info(f"{fx.get('emoji', '')} **{fx.get('verdict', '')}** — 현재 "
+                    f"{fx.get('rate', 0):,.1f}원 · 3년 분포 상위 {fx.get('pct_display', 0):.0f}% "
+                    f"구간 · 권장: {fx.get('action', '')} (환전 배율 {fx.get('multiplier', 1):g}×)")
+        summ = data.portfolio_summary() or {}
+        tot = summ.get("total_usd")
+        if tot:
+            st.caption(f"💼 내 포트 민감도 — 해외북 ${tot:,.0f} 기준 환율 **10원 변동 ≈ "
+                       f"₩{tot * 10:,.0f}** 원화 평가액 변동 (자연 환헤지 없음 가정)")
+    elif ticker == "^TNX":
+        pct = data.history_percentile(hist, years=10)
+        if pct is not None:
+            st.markdown("##### 🏦 금리 레벨 맥락")
+            st.info(f"현재 미 10년물 금리는 **최근 10년 분포의 상위 {100 - pct:.0f}%** 수준 — "
+                    f"금리 ↑ = 성장주 할인율·금 보유비용 압박, ↓ = 위험자산 우호 "
+                    f"(백분위 {pct:.0f})")
+    elif ticker == "GC=F":
+        try:
+            si = cached.ohlc("SI=F", "6mo")
+            ratio = float(hist["Close"].dropna().iloc[-1]) / float(si["Close"].dropna().iloc[-1])
+            st.markdown("##### 🥇 금은비 (Gold/Silver Ratio)")
+            st.info(f"금은비 **{ratio:.1f}** — 역사 평균대 60~70. 80↑ = 은 상대 저평가, "
+                    f"50↓ = 금 상대 저평가 신호로 해석되곤 함 (참고용)")
+        except Exception:
+            pass
+
+    # ── 🔗 연관 자산 — 90일 상관·30일 등락 ──
+    rel = cached.macro_corr(ticker) or []
+    if rel:
+        st.markdown("##### 🔗 연관 자산 — 90일 상관")
+        cols = st.columns(min(len(rel), 3))
+        for i, r in enumerate(rel[:3]):
+            with cols[i]:
+                corr = r.get("corr90")
+                cs = f"{corr:+.2f}" if corr is not None else "—"
+                strong = corr is not None and abs(corr) >= 0.5
+                st.metric(f"{r['label']}", cs,
+                          delta=(f"{r['chg30']:+.2f}% (30일)" if r.get("chg30") is not None
+                                 else None), delta_color="off",
+                          help=r.get("note", ""))
+                if strong:
+                    st.caption("⚡ 상관 뚜렷" + (" (역방향)" if corr < 0 else ""))
+                st.caption(r.get("note", ""))
+    st.caption("표시·참고용 — 상관은 국면에 따라 변하며 인과가 아님 · 주문 집행 없음")
+
+
 def _price_chart(ticker, hist, avg_cost, trades, fullscreen: bool = False):
     """가격 차트 — 봉·기간·라인/캔들·지표·비교 컨트롤 (풀뷰 페이지와 공용 컴포넌트).
 
@@ -258,10 +348,15 @@ def _price_chart(ticker, hist, avg_cost, trades, fullscreen: bool = False):
             want_long = cch2.checkbox("장기 채널(250봉)", value=True, key=f"_tl_long_{tf}")
             st.caption("채널 = 회귀 ±2σ 자동 감지 — 상승(초록)/하락(빨강)/횡보(회색)·"
                        "라벨에 방향 표기 · 지지/저항선 동시 표시")
-        st.markdown("**이벤트 마커** — 실적·배당·뉴스·진입존 오버레이 (이 프로젝트 데이터)")
-        ev_sel = st.pills("이벤트", ["실적 E", "배당 D", "뉴스 N", "진입존 🎯"],
-                          selection_mode="multi", default=["실적 E", "배당 D"],
-                          key=f"_ev_{tf}", label_visibility="collapsed") or []
+        # 매크로(환율·금·금리 등)는 실적·배당·진입존이 무의미 — 뉴스만 노출
+        _ev_opts = (["뉴스 N"] if ticker_names.is_macro(ticker)
+                    else ["실적 E", "배당 D", "뉴스 N", "진입존 🎯"])
+        _ev_def = [] if ticker_names.is_macro(ticker) else ["실적 E", "배당 D"]
+        st.markdown("**이벤트 마커** — " + ("뉴스 오버레이" if ticker_names.is_macro(ticker)
+                                          else "실적·배당·뉴스·진입존 오버레이 (이 프로젝트 데이터)"))
+        ev_sel = st.pills("이벤트", _ev_opts, selection_mode="multi", default=_ev_def,
+                          key=f"_ev_{tf}_{'macro' if ticker_names.is_macro(ticker) else 'eq'}",
+                          label_visibility="collapsed") or []
         st.markdown("**하단 지표** — 서브 패널")
         bottom = st.pills("하단 지표", ["거래량", "RSI", "MACD", "스토캐스틱"], selection_mode="multi",
                           default=["거래량", "RSI"], key=f"_bot_{tf}",
@@ -464,11 +559,19 @@ def _live_top(ticker, hist, yf_price, prev, pos):
     chg_pct = (chg / prev * 100) if (chg is not None and prev) else None
     ts = data.technical_score(hist["Close"]) if (hist is not None and yf_price is not None) else None
 
-    # 3열 — 히어로 | 📐 기술적 분석 | ⚖️ 가치평가 (게이지 나란히 — 빈 공간 제거)
-    hcol, gcol, vcol = st.columns([1.5, 1, 1])
+    # 3열 — 히어로 | 📐 기술적 분석 | ⚖️ 가치평가 (게이지 나란히 — 빈 공간 제거).
+    # 매크로 자산은 밸류에이션(PER·RIM·목표가) 개념이 없어 2열(히어로+기술)만.
+    _macro = ticker_names.is_macro(ticker)
+    if _macro:
+        hcol, gcol = st.columns([2.5, 1])
+        vcol = None
+    else:
+        hcol, gcol, vcol = st.columns([1.5, 1, 1])
     with hcol:
+        # 통화·단위 — 매크로는 자산별(₩·$/oz·%), 그 외 해외주는 USD (오표기 방지)
+        _cur = ticker_names.macro_unit(ticker) if _macro else "USD"
         theme.render(theme.ticker_hero_html(ticker, ticker_names.display_name(ticker, allow_net=False) or ticker,
-                                            price, chg, chg_pct, src, ""))
+                                            price, chg, chg_pct, src, _cur))
         # 내 포지션 (보유 시) — 히어로 아래 컴팩트 밴드 (게이지와 높이 균형)
         if pos:
             avg = pos.get("avg_price_usd")
@@ -487,17 +590,18 @@ def _live_top(ticker, hist, yf_price, prev, pos):
                                                  title="📐 기술적 분석"))
         else:
             st.caption("기술 신호 N/A")
-    with vcol:
-        val = cached.valuation(ticker) or {}
-        vs = data.valuation_score(price, val.get("metrics"), val.get("consensus"),
-                                  cached.intrinsic(ticker))
-        if vs:
-            theme.render(theme.valuation_gauge_html(vs["score"], sub=vs["sub"]))
-        else:
-            st.markdown(f"<div style='color:{theme.MUTED};font-size:.78rem;"
-                        f"text-align:center;padding-top:26px'>⚖️ 가치평가<br>"
-                        f"<span style='font-size:.72rem'>재료 부족 — 생략 (ETF 등)</span></div>",
-                        unsafe_allow_html=True)
+    if vcol is not None:
+        with vcol:
+            val = cached.valuation(ticker) or {}
+            vs = data.valuation_score(price, val.get("metrics"), val.get("consensus"),
+                                      cached.intrinsic(ticker))
+            if vs:
+                theme.render(theme.valuation_gauge_html(vs["score"], sub=vs["sub"]))
+            else:
+                st.markdown(f"<div style='color:{theme.MUTED};font-size:.78rem;"
+                            f"text-align:center;padding-top:26px'>⚖️ 가치평가<br>"
+                            f"<span style='font-size:.72rem'>재료 부족 — 생략 (ETF 등)</span></div>",
+                            unsafe_allow_html=True)
 
 
 

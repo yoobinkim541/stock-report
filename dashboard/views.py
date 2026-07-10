@@ -705,18 +705,17 @@ def market_indicators() -> dict:
 
 # ── 매크로 자산 (환율·금·원자재·암호화폐·금리) ────────────────────────────────
 
-# (yf 심볼, 라벨, 이모지, 소수자리, 단위, 분석 이동 티커|None)
-# 분석 이동 티커: yfinance 로 OHLC 조회가 되는 심볼만 (선물·^TNX 는 종목분석 파이프라인
-# 이 지원 — 환율 KRW=X 도 동일). None 이면 카드 클릭 비활성.
+# (yf 심볼, 라벨, 이모지, 소수자리) — 단위는 `ticker_names.macro_unit` 단일 소스.
+# 카드 클릭은 `?tk=<심볼>` 앵커 → 종목분석(매크로 전용 뷰). 전부 yfinance OHLC 조회 가능.
 _MACRO_SPECS = [
-    ("KRW=X", "달러/원 환율", "💱", 2, "₩", "KRW=X"),
-    ("GC=F", "금", "🥇", 1, "$/oz", "GC=F"),
-    ("BTC-USD", "비트코인", "₿", 0, "$", "BTC-USD"),
-    ("ETH-USD", "이더리움", "Ξ", 0, "$", "ETH-USD"),
-    ("SI=F", "은", "🥈", 2, "$/oz", "SI=F"),
-    ("CL=F", "WTI 유가", "🛢️", 2, "$/bbl", "CL=F"),
-    ("^TNX", "미 10년물 금리", "🏦", 2, "%", "^TNX"),
-    ("DX-Y.NYB", "달러 인덱스", "💵", 2, "", "DX-Y.NYB"),
+    ("KRW=X", "달러/원 환율", "💱", 2),
+    ("GC=F", "금", "🥇", 1),
+    ("BTC-USD", "비트코인", "₿", 0),
+    ("ETH-USD", "이더리움", "Ξ", 0),
+    ("SI=F", "은", "🥈", 2),
+    ("CL=F", "WTI 유가", "🛢️", 2),
+    ("^TNX", "미 10년물 금리", "🏦", 2),
+    ("DX-Y.NYB", "달러 인덱스", "💵", 2),
 ]
 
 
@@ -734,19 +733,83 @@ def macro_assets() -> list[dict]:
                          group_by="ticker", threads=True)
     except Exception:
         return []
+    import ticker_names
     out = []
-    for sym, label, emoji, dec, unit, tk in _MACRO_SPECS:
+    for sym, label, emoji, dec in _MACRO_SPECS:
         try:
             c = df[sym]["Close"].dropna()
             if len(c) < 2 or not float(c.iloc[-2]):
                 continue
             last, prev = float(c.iloc[-1]), float(c.iloc[-2])
             out.append({
-                "symbol": sym, "label": label, "emoji": emoji, "unit": unit, "ticker": tk,
+                "symbol": sym, "label": label, "emoji": emoji,
+                "unit": ticker_names.macro_unit(sym), "ticker": sym,
                 "price": round(last, dec), "chg": round(last - prev, dec),
                 "pct": round((last / prev - 1) * 100, 2),
                 "spark": [float(v) for v in c.tail(30).tolist()],
             })
+        except Exception:
+            continue
+    return out
+
+
+# 매크로 자산별 연관 세트 — (심볼, 라벨, 관계 설명)
+_MACRO_REL = {
+    "KRW=X": [("DX-Y.NYB", "달러 인덱스", "달러 강세 ↔ 원화 약세"),
+              ("^KS11", "코스피", "원화 약세 시 외인 수급 압박"),
+              ("^TNX", "미 10년물", "금리차 → 환율 압력")],
+    "DX-Y.NYB": [("KRW=X", "달러/원", "달러 강세 ↔ 원화 약세"),
+                 ("GC=F", "금", "달러 강세 시 금 압박(역상관 경향)"),
+                 ("^TNX", "미 10년물", "미 금리 ↑ → 달러 강세 경향")],
+    "GC=F": [("^TNX", "미 10년물", "실질금리 ↑ = 무이자 자산 금 압박(역상관 경향)"),
+             ("DX-Y.NYB", "달러 인덱스", "달러 표시 자산 — 역상관 경향"),
+             ("SI=F", "은", "귀금속 동행 (금은비 확인)")],
+    "SI=F": [("GC=F", "금", "귀금속 동행"), ("DX-Y.NYB", "달러 인덱스", "역상관 경향")],
+    "BTC-USD": [("^IXIC", "나스닥", "리스크온 자산 동행 경향"),
+                ("GC=F", "금", "'디지털 금' 서사 — 국면 따라 상이"),
+                ("DX-Y.NYB", "달러 인덱스", "유동성 국면 역상관 경향")],
+    "ETH-USD": [("BTC-USD", "비트코인", "암호화폐 동행(베타 높음)"),
+                ("^IXIC", "나스닥", "리스크온 동행 경향")],
+    "CL=F": [("DX-Y.NYB", "달러 인덱스", "달러 표시 원자재 — 역상관 경향"),
+             ("^GSPC", "S&P500", "경기 수요 프록시")],
+    "^TNX": [("^IXIC", "나스닥", "금리 ↑ = 성장주 할인율 압박"),
+             ("GC=F", "금", "실질금리 프록시 — 역상관 경향"),
+             ("DX-Y.NYB", "달러 인덱스", "금리차 → 달러")],
+    "^VIX": [("^GSPC", "S&P500", "공포지수 — 강한 역상관")],
+    "^GSPC": [("^IXIC", "나스닥", "미 대형주 동행"), ("^KS11", "코스피", "글로벌 동조")],
+    "^IXIC": [("^GSPC", "S&P500", "미 대형주 동행"), ("^TNX", "미 10년물", "금리 민감(성장주)")],
+}
+
+
+def macro_correlations(ticker: str) -> list[dict]:
+    """매크로 자산 연관 카드 — 관련 자산들과의 90일 상관 + 30일 등락. graceful [].
+
+    [{symbol, label, note, corr90, chg30}]. yf 6mo 배치 1회. 상관은 일수익률 피어슨.
+    """
+    rel = _MACRO_REL.get((ticker or "").upper())
+    if not rel:
+        return []
+    try:
+        import warnings
+        warnings.filterwarnings("ignore")
+        import yfinance as yf
+        syms = [ticker] + [s for s, _, _ in rel]
+        df = yf.download(syms, period="6mo", progress=False, group_by="ticker", threads=True)
+        base = df[ticker]["Close"].dropna().pct_change().dropna()
+    except Exception:
+        return []
+    out = []
+    for sym, label, note in rel:
+        try:
+            c = df[sym]["Close"].dropna()
+            r = c.pct_change().dropna()
+            joined = base.tail(90).align(r.tail(90), join="inner")
+            corr = float(joined[0].corr(joined[1])) if len(joined[0]) >= 30 else None
+            m30 = c[c.index >= c.index[-1] - __import__("pandas").Timedelta(days=30)]
+            chg30 = ((float(c.iloc[-1]) / float(m30.iloc[0]) - 1) * 100) if len(m30) >= 2 else None
+            out.append({"symbol": sym, "label": label, "note": note,
+                        "corr90": round(corr, 2) if corr == corr and corr is not None else None,
+                        "chg30": round(chg30, 2) if chg30 is not None else None})
         except Exception:
             continue
     return out

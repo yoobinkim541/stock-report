@@ -361,6 +361,26 @@ def resolve(query: str, allow_net: bool = False) -> str | None:
     return None
 
 
+# 매크로/지수 자산 → 표시 단위. 주식 분석(밸류·재무·기관·공시) 대신 매크로 전용 뷰 대상.
+# 단위 단일 소스 — 히어로·홈 카드가 공유(환율에 "USD", 금리에 "USD" 붙는 오표기 방지).
+MACRO_UNITS: dict[str, str] = {
+    "KRW=X": "₩", "GC=F": "$/oz", "SI=F": "$/oz", "CL=F": "$/bbl",
+    "BTC-USD": "$", "ETH-USD": "$", "^TNX": "%", "DX-Y.NYB": "",
+    "^VIX": "", "^GSPC": "pt", "^IXIC": "pt",
+}
+MACRO: set[str] = set(MACRO_UNITS)
+
+
+def is_macro(ticker: str) -> bool:
+    """매크로·지수 자산 여부 (환율·원자재·암호화폐·금리·지수 — 대시보드 뷰 분기)."""
+    return (ticker or "").strip().upper() in MACRO
+
+
+def macro_unit(ticker: str) -> str:
+    """매크로 자산 표시 단위 (₩·$/oz·% 등). 매크로가 아니면 ''."""
+    return MACRO_UNITS.get((ticker or "").strip().upper(), "")
+
+
 _US_TICKER_RE = re.compile(r"^[A-Z]{1,5}([.\-][A-Z]{1,2})?$")
 _KR_CODE_RE = re.compile(r"^(?:A)?(\d{6})(?:\.(KS|KQ))?$", re.IGNORECASE)
 

@@ -9,6 +9,7 @@
 from __future__ import annotations
 
 import math
+from urllib.parse import quote as _urlquote
 
 # ── 팔레트 (config.toml 과 동일) ─────────────────────────────────────────────
 BG = "#0a0e17"
@@ -272,10 +273,12 @@ def index_rsi_gauges_html(name, price=None, chg=None, rsi_d=None, rsi_w=None) ->
 </div>'''
 
 
-def macro_card_html(item: dict) -> str:
+def macro_card_html(item: dict, link: bool = True) -> str:
     """매크로 자산 카드 1개 — 이모지·라벨 / 가격·단위 / 등락 / 30일 스파크라인 (순수).
 
-    item: {emoji,label,price,chg,pct,unit,spark}. 상승 초록·하락 빨강(프로젝트 시맨틱).
+    item: {emoji,label,price,chg,pct,unit,spark,ticker}. 상승 초록·하락 빨강(프로젝트 시맨틱).
+    link=True 면 카드 전체가 `?tk=<티커>` 앵커 — app.py 가 쿼리파라미터를 소비해 종목분석
+    으로 이동(순수 HTML 은 콜백이 없어 앵커가 유일한 클릭 경로 · 별도 버튼 행 불필요).
     """
     pct = item.get("pct")
     chg = item.get("chg")
@@ -292,9 +295,7 @@ def macro_card_html(item: dict) -> str:
         suffix = f' <span style="color:{MUTED};font-size:.68rem">{unit}</span>' if unit else ""
     chg_s = f"{'+' if up else ''}{chg:,}" if isinstance(chg, (int, float)) else "—"
     pct_s = f"{pct:+.2f}%" if isinstance(pct, (int, float)) else ""
-    return (
-        f'<div style="padding:9px 11px;background:{PANEL};border:1px solid {BORDER};'
-        f'border-radius:10px;display:flex;flex-direction:column;gap:2px">'
+    body = (
         f'<div style="color:{MUTED};font-size:.74rem;white-space:nowrap;overflow:hidden;'
         f'text-overflow:ellipsis">{item.get("emoji", "")} {item.get("label", "")}</div>'
         f'<div style="font-family:{_MONO};color:{TEXT};font-size:1.02rem;font-weight:600">'
@@ -302,17 +303,28 @@ def macro_card_html(item: dict) -> str:
         f'<div style="display:flex;justify-content:space-between;align-items:center;gap:4px">'
         f'<span style="font-family:{_MONO};color:{col};font-size:.72rem;white-space:nowrap">'
         f'{"▲" if up else "▼"}{chg_s} ({pct_s})</span>'
-        f'{sparkline_svg(item.get("spark"), w=58, h=20)}</div></div>')
+        f'{sparkline_svg(item.get("spark"), w=58, h=20)}</div>')
+    tk = item.get("ticker")
+    if link and tk:
+        # target=_self — 새 탭 대신 현재 탭 네비게이션(앱 rerun). 티커는 URL 인코딩(`^`·`=`).
+        href = "?tk=" + _urlquote(str(tk), safe="")
+        return (f'<a class="tn-macro-card" href="{href}" target="_self" '
+                f'title="{item.get("label", "")} 상세 차트·분석으로 이동">{body}</a>')
+    return f'<div class="tn-macro-card">{body}</div>'
 
 
-def macro_cards_html(items: list[dict], cols: int = 4) -> str:
-    """매크로 자산 카드 그리드 — 반응형(≤600px 2열). 항목 없으면 ''."""
+def macro_cards_html(items: list[dict], cols: int = 4, link: bool = True) -> str:
+    """매크로 자산 카드 그리드 — 반응형(≤600px 2열)·카드 클릭 시 종목분석. 항목 없으면 ''."""
     if not items:
         return ""
-    cards = "".join(macro_card_html(it) for it in items)
+    cards = "".join(macro_card_html(it, link=link) for it in items)
     return f'''<style>
 .tn-macro {{ display:grid; grid-template-columns:repeat({cols}, minmax(0, 1fr)); gap:8px; }}
 @media (max-width: 600px) {{ .tn-macro {{ grid-template-columns:repeat(2, minmax(0, 1fr)); }} }}
+.tn-macro .tn-macro-card {{ padding:9px 11px; background:{PANEL}; border:1px solid {BORDER};
+  border-radius:10px; display:flex; flex-direction:column; gap:2px;
+  text-decoration:none !important; color:inherit; transition:border-color .12s, transform .12s; }}
+a.tn-macro-card:hover {{ border-color:{BLUE}; transform:translateY(-1px); }}
 </style><div class="tn-macro">{cards}</div>'''
 
 

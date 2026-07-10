@@ -211,6 +211,22 @@ def test_market_tape_html_marquee():
     assert theme.market_tape_html([]) == ""                     # graceful
 
 
+def test_macro_card_is_clickable_anchor():
+    """카드 = `?tk=` 앵커 (별도 버튼 행 제거) — 티커 URL 인코딩·현재탭 이동·비링크 폴백."""
+    it = {"emoji": "🥇", "label": "금", "price": 4109.9, "chg": -20.7, "pct": -0.5,
+          "unit": "$/oz", "spark": [1, 2, 3], "ticker": "GC=F"}
+    html = theme.macro_card_html(it)
+    assert 'href="?tk=GC%3DF"' in html          # `=` 인코딩 — 쿼리 파싱 오염 차단
+    assert 'target="_self"' in html and "<a " in html
+    assert 'href="?tk=%5ETNX"' in theme.macro_card_html({**it, "ticker": "^TNX"})
+    assert 'href="?tk=KRW%3DX"' in theme.macro_card_html({**it, "ticker": "KRW=X"})
+    # 링크 비활성 / 티커 없음 → div 폴백 (앵커 없음)
+    assert "<a " not in theme.macro_card_html(it, link=False)
+    assert "<a " not in theme.macro_card_html({k: v for k, v in it.items() if k != "ticker"})
+    grid = theme.macro_cards_html([it])
+    assert "tn-macro-card" in grid and "a.tn-macro-card:hover" in grid
+
+
 def test_macro_cards_html():
     """매크로 자산 카드 — 이모지·라벨·가격·등락 색·스파크·반응형 그리드·단위 접두/접미."""
     up = {"symbol": "GC=F", "label": "금", "emoji": "🥇", "unit": "$/oz", "ticker": "GC=F",
