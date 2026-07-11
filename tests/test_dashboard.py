@@ -1,6 +1,7 @@
 """tests/test_dashboard.py — 퀀트 터미널 데이터·인증 순수로직 (무네트워크·무 streamlit)."""
 import json
 import os
+import re
 import sys
 
 import pytest
@@ -171,6 +172,33 @@ def test_verify_password():
     assert auth.verify_password("abc", "xyz") is False
     assert auth.verify_password("abc", None) is False     # fail-closed (미설정)
     assert auth.verify_password("", "") is False
+
+
+def test_auth_cookie_token_roundtrip():
+    """쿠키 세션 토큰 — 발급/검증/만료/키회전 (카드 앵커·F5 비번 재요구 제거의 핵심)."""
+    now = 1_800_000_000.0
+    tok = auth.issue_token("pw", "salt", now=now, ttl_s=3600)
+    assert auth.verify_token(tok, "pw", "salt", now=now) is True
+    assert auth.verify_token(tok, "pw", "salt", now=now + 3599) is True
+    assert auth.verify_token(tok, "pw", "salt", now=now + 3601) is False    # 만료
+    assert auth.verify_token(tok, "other", "salt", now=now) is False        # 비번 변경 → 무효
+    assert auth.verify_token(tok, "pw", "salt2", now=now) is False          # salt 회전 → 무효
+    assert auth.verify_token(tok, None, "salt", now=now) is False           # fail-closed
+    # 변조·형식 불량
+    exp, _, sig = tok.partition(".")
+    assert auth.verify_token(f"{int(exp) + 9999}.{sig}", "pw", "salt", now=now) is False
+    for bad in ("", "garbage", "123", "abc.def", None):
+        assert auth.verify_token(bad, "pw", "salt", now=now) is False
+    # 토큰에 비밀번호 평문 미포함 + 쿠키 안전 문자만
+    assert "pw" not in tok and re.fullmatch(r"\d+\.[0-9a-f]{64}", tok)
+
+
+def test_auth_cookie_html_injection_safe():
+    """쿠키 주입 HTML — 토큰은 검증된 hex 형식이라 스크립트 이탈 불가 + 만료 설정."""
+    tok = auth.issue_token("pw", "salt", now=1_800_000_000.0)
+    html = auth._set_cookie_html(tok)
+    assert auth.COOKIE_NAME + "=" + tok in html and "max-age=" in html
+    assert "SameSite=Lax" in html
 
 
 # ── 포맷터 (스케일 명시 — 부호/스케일 버그 차단) ─────────────────────────────
