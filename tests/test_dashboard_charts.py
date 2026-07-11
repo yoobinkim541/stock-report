@@ -451,6 +451,10 @@ def test_price_chart_trend_lines_overlay():
     assert ch_lower, "채널 fill 없음"
     anns = " ".join(a.text for a in fig.layout.annotations)
     assert "지지선" in anns and "상승채널" in anns
+    tl_anns = [a for a in fig.layout.annotations if a.text in ("지지선 (3터치)", "단기 상승채널(60)")]
+    assert tl_anns and all(a.bgcolor for a in tl_anns)      # 선과 글씨가 겹치지 않도록 칩 배경
+    assert all(a.borderpad >= 4 and a.xshift >= 10 for a in tl_anns)
+    assert all(a.yshift > 0 for a in tl_anns)
     assert fig.layout.newshape.line.color == "#f59e0b"      # 수동 드로잉 기본 스타일
     assert "drawline" in charts.PAN_DRAW_CFG["modeBarButtonsToAdd"]
     # 빈 입력 무변화
@@ -803,6 +807,35 @@ def test_price_chart_events_log_scale_zones_converted():
     assert 90 < float(ev.y[0]) < 210                             # 트레이스 raw
 
 
+def test_price_chart_fund_eps_panel():
+    """분기 EPS 서브패널 — beat 초록/miss 빨강 바 + 예상 마커·빈 데이터 무패널·비교 차단."""
+    hist = _ohlcv()
+    eps = [{"date": "2024-03-15", "eps_est": 2.0, "eps_actual": 2.3, "surprise_pct": 15.0},
+           {"date": "2024-06-14", "eps_est": 2.1, "eps_actual": 1.9, "surprise_pct": -9.5},
+           {"date": "2024-09-13", "eps_est": None, "eps_actual": 2.5, "surprise_pct": None},
+           {"date": None, "eps_est": 1.0, "eps_actual": 1.0, "surprise_pct": 0.0},   # 무발표일 스킵
+           {"date": "2024-12-13", "eps_est": 2.2, "eps_actual": None, "surprise_pct": None}]  # 무실적 스킵
+    fig = charts.price_chart(hist, "T", show_volume=True, fund_eps=eps)
+    bars = [tr for tr in fig.data if getattr(tr, "name", "") == "분기 EPS"]
+    assert len(bars) == 1 and len(bars[0].x) == 3                 # 유효 3행만
+    cols = list(bars[0].marker.color)
+    assert cols[0] == charts._GREEN and cols[1] == charts._RED    # beat/miss 색
+    assert cols[2] == charts._GREEN                               # 서프라이즈 None → 중립(≥0) 초록
+    est = [tr for tr in fig.data if getattr(tr, "name", "") == "예상 EPS"]
+    assert len(est) == 1 and len(est[0].x) == 2                   # est 있는 행만
+    assert any("+15.0%" in h for h in bars[0].customdata)
+    # 패널 행이 실제로 늘었는지 (가격+거래량+EPS = yaxis3 존재)
+    assert fig.layout.yaxis3 is not None
+    # 빈/무효 데이터 → 패널 없음
+    fig0 = charts.price_chart(hist, "T", show_volume=True, fund_eps=[])
+    assert not [tr for tr in fig0.data if getattr(tr, "name", "") == "분기 EPS"]
+    # 비교 모드 → 자동 차단
+    import pandas as pd
+    cmp_s = pd.Series(hist["Close"].values * 1.1, index=hist.index)
+    figc = charts.price_chart(hist, "T", compare={"C": cmp_s}, fund_eps=eps)
+    assert not [tr for tr in figc.data if getattr(tr, "name", "") == "분기 EPS"]
+
+
 def test_heikin_ashi_transform():
     """하이킨아시 — 정의 검증(HA종가·재귀 시가·고저 포섭)·Volume 보존·graceful."""
     hist = _ohlcv(50)
@@ -1029,3 +1062,15 @@ def test_price_chart_fundamentals_panel():
     # 빈/무효 rows → 패널 없음
     fig2 = charts.price_chart(hist, "T", fundamentals=[{"date": "2024-01-01"}])
     assert getattr(fig2.layout, "yaxis2", None) is None
+
+
+def test_price_chart_fundamentals_unsorted_rows():
+    """비정렬 rows 방어 — 바 폭(min 간격)이 음수가 되던 실측 버그 회귀."""
+    hist = _ohlcv_v(200)
+    rows = [{"date": "2024-12-31", "revenue": 6.6e10, "net_income": 1.9e10, "margin": 0.29},
+            {"date": "2024-03-31", "revenue": 5.0e10, "net_income": 1.2e10, "margin": 0.24},
+            {"date": "2024-09-30", "revenue": 6.1e10, "net_income": 1.7e10, "margin": 0.28},
+            {"date": "2024-06-30", "revenue": 5.5e10, "net_income": 1.5e10, "margin": 0.27}]
+    fig = charts.price_chart(hist, "T", fundamentals=rows)      # 예외 없이 빌드
+    bar = next(t for t in fig.data if (t.name or "") == "매출")
+    assert bar.width and float(bar.width) > 0

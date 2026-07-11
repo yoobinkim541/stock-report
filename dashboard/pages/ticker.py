@@ -184,6 +184,141 @@ def _price_chart_frag(ticker, hist, avg_cost, trades, fullscreen: bool = False):
     _price_chart(ticker, hist, avg_cost, trades, fullscreen)
 
 
+def _rerun_chart_fragment():
+    try:
+        st.rerun(scope="fragment")
+    except Exception:
+        st.rerun()
+
+
+def _compare_state(ticker: str) -> list[str]:
+    """차트 비교 종목 상태 — 검색 위젯과 분리해 추가/삭제가 예측 가능하게."""
+    raw = st.session_state.get("_cmp_active", [])
+    if isinstance(raw, str):
+        raw = [raw]
+    active: list[str] = []
+    for item in raw or []:
+        tk = ticker_names.normalize_input(str(item))
+        if tk and tk != ticker and tk not in active:
+            active.append(tk)
+        if len(active) >= 3:
+            break
+    st.session_state["_cmp_active"] = active
+    return active
+
+
+def _add_compare_ticker(raw, ticker: str) -> bool:
+    tk = ticker_names.normalize_input(str(raw or ""))
+    if not tk or tk == ticker:
+        return False
+    active = _compare_state(ticker)
+    if tk in active or len(active) >= 3:
+        return False
+    st.session_state["_cmp_active"] = active + [tk]
+    st.session_state["_cmp_panel_open"] = True
+    return True
+
+
+def _compare_suggestions(ticker: str, active: list[str]) -> list[str]:
+    """빠른 비교 후보 — ETF 피어 + 대표 벤치마크 + 내 보유 종목."""
+    import etf_meta
+    out: list[str] = []
+
+    def add(tk):
+        norm = ticker_names.normalize_input(str(tk or ""))
+        if norm and norm != ticker and norm not in active and norm not in out:
+            out.append(norm)
+
+    for p in etf_meta.peers_of(ticker):
+        add(p)
+    for p in ("QQQ", "SPY"):
+        add(p)
+    try:
+        for h in data.load_holdings() or []:
+            add(h.get("ticker"))
+    except Exception:
+        pass
+    return out[:6]
+
+
+def _compare_controls(ticker: str, tf: str, tf_label: str) -> tuple[list[str], bool]:
+    """풀폭 비교 트레이 — 추가/삭제/추천/PR 기준을 한 곳에서 조작."""
+    active = _compare_state(ticker)
+    with st.container(border=True):
+        h1, h2, h3 = st.columns([1.2, 2.6, 0.75], vertical_alignment="bottom")
+        h1.markdown("**⇄ 종목 비교**")
+        h1.caption("기간 시작=0% 상대수익")
+
+        opts = [t for t in ticker_names.universe() if t != ticker and t not in active]
+        pending = st.session_state.get("_cmp_add")
+        pending_ok = bool(pending) and ticker_names.normalize_input(str(pending)) in opts
+        if not pending_ok and st.session_state.get("_cmp_add") is not None:
+            st.session_state["_cmp_add"] = None
+        pick = h2.selectbox(
+            "비교 추가",
+            opts,
+            index=None,
+            placeholder="티커·회사명 검색해서 추가",
+            format_func=ticker_names.search_label,
+            accept_new_options=True,
+            key="_cmp_add",
+            disabled=len(active) >= 3,
+            label_visibility="collapsed",
+            help="목록에 없어도 티커 직접 입력 가능 (예: AMD · BRK-B)",
+        )
+        if pick:
+            if _add_compare_ticker(pick, ticker):
+                _rerun_chart_fragment()
+            else:
+                st.caption("⚠️ 이미 비교 중이거나 추가할 수 없는 종목입니다")
+
+        if h3.button("초기화", key="_cmp_clear", width="stretch", disabled=not active):
+            st.session_state["_cmp_active"] = []
+            st.session_state["_cmp_peers"] = []
+            _rerun_chart_fragment()
+
+        suggestions = _compare_suggestions(ticker, active)
+        if suggestions:
+            st.caption("빠른 추가")
+            cols = st.columns(min(4, len(suggestions)))
+            for i, peer in enumerate(suggestions[:4]):
+                if cols[i % len(cols)].button(
+                    f"+ {ticker_names.label(peer, maxlen=18)}",
+                    key=f"_cmp_quick_{ticker}_{peer}",
+                    width="stretch",
+                    disabled=len(active) >= 3,
+                    help=ticker_names.search_label(peer),
+                ):
+                    if _add_compare_ticker(peer, ticker):
+                        _rerun_chart_fragment()
+
+        active = _compare_state(ticker)
+        if active:
+            st.caption("비교 중")
+            cols = st.columns(3)
+            for i, tk in enumerate(active):
+                if cols[i].button(
+                    f"× {ticker_names.label(tk, maxlen=20)}",
+                    key=f"_cmp_remove_{tk}",
+                    width="stretch",
+                    help="비교에서 제거",
+                ):
+                    st.session_state["_cmp_active"] = [x for x in active if x != tk]
+                    _rerun_chart_fragment()
+        else:
+            st.caption("비교할 종목을 추가하면 차트가 % 상대수익 모드로 전환됩니다")
+
+        pr_mode = False
+        if active:
+            pr_mode = st.toggle("PR(가격) 기준 — 분배금 제외", key="_cmp_pr",
+                                disabled=tf != "1d",
+                                help="기본=TR(배당재투자·조정종가). 커버드콜 ETF 비교 시 "
+                                     "가격만의 성과 확인용 — 비교 모드·일봉 전용")
+            if tf != "1d":
+                st.caption("ℹ️ PR 기준은 일봉 전용 — 현재 봉 단위에선 TR(조정종가)로 표시")
+        return active, bool(pr_mode and tf == "1d")
+
+
 @st.fragment
 def _llm_related_section(ticker):
     """🤖 AI 연관 종목 — LLM 아이디어 (버튼 게이트·표시 전용·환각은 provider 가 폐기).
@@ -323,7 +458,7 @@ def _price_chart(ticker, hist, avg_cost, trades, fullscreen: bool = False,
     패치 (html 바이트 안정 = 8초 재실행이 iframe 을 재마운트하지 않음).
     """
     # 컨트롤 한 줄 — 봉 | 라인/캔들 | 지표 | 비교 | 기간 | ⛶ (좁은 화면은 자동 줄바꿈)
-    ctf, ckind, c3, c4, cper, cfull = st.columns([1.45, 0.72, 0.34, 0.34, 1.4, 0.35],
+    ctf, ckind, c3, c4, cper, cfull = st.columns([1.45, 0.72, 0.34, 0.64, 1.25, 0.35],
                                                  vertical_alignment="center")
     if fullscreen:
         if cfull.button("↙", key="_chart_back", help="종목 분석으로 복귀"):
@@ -345,43 +480,17 @@ def _price_chart(ticker, hist, avg_cost, trades, fullscreen: bool = False,
                         label_visibility="collapsed", key="_chart_period")
     view_days = {"3mo": 90, "6mo": 180, "1y": 365, "5y": 1825, "전체": None}[period]
     tf = _TF[tf_label]
-    # ── ⇄ 비교 — 최대 3종목 % 상대수익 오버레이 (사이드바 검색과 동일 정규화) ──
-    with c4.popover("⇄ 비교"):
-        st.caption("최대 3종목 — 기간 시작=0% 상대수익으로 겹쳐 비교")
-        _raw = st.multiselect(
-            "비교 종목 (한글·영문·티커)",
-            [t for t in ticker_names.universe() if t != ticker],
-            max_selections=3, format_func=ticker_names.search_label,
-            accept_new_options=True, key="_cmp_sel",
-            help="목록에 없어도 티커 직접 입력 가능 (예: AMD · BRK-B)")
-        cmp_tickers = []
-        for _r in _raw or []:
-            _tk = ticker_names.normalize_input(_r)
-            if _tk and _tk != ticker and _tk not in cmp_tickers:
-                cmp_tickers.append(_tk)
-            elif not _tk:
-                st.warning(f"'{_r}' 종목을 찾지 못했습니다")
-        # 같은 지수 추종 ETF 원클릭 추가 (etf_meta 정적 시드 — 무네트워크).
-        # 기존 multiselect 의 session_state 는 불변 — 별도 pills 를 merge (위젯 상태 함정 회피)
-        import etf_meta
-        _peers = etf_meta.peers_of(ticker)
-        if _peers:
-            _pks = st.pills("같은 지수 추종 — 원클릭 추가", _peers, selection_mode="multi",
-                            key="_cmp_peers", format_func=ticker_names.search_label) or []
-            for _pk in _pks:
-                if _pk in cmp_tickers:
-                    continue
-                if len(cmp_tickers) >= 3:
-                    st.caption("⚠️ 비교는 최대 3종목 — 초과 선택은 제외")
-                    break
-                cmp_tickers.append(_pk)
-        pr_mode = False
-        if cmp_tickers:
-            pr_mode = st.toggle("PR(가격) 기준 — 분배금 제외", key="_cmp_pr",
-                                help="기본=TR(배당재투자·조정종가). 커버드콜 ETF 비교 시 "
-                                     "가격만의 성과 확인용 — 비교 모드·일봉 전용")
-            if pr_mode and tf != "1d":
-                st.caption("ℹ️ PR 기준은 일봉 전용 — 현재 봉 단위에선 TR(조정종가)로 표시")
+    cmp_active = _compare_state(ticker)
+    cmp_label = f"⇄ 비교 {len(cmp_active)}" if cmp_active else "⇄ 비교"
+    if c4.button(cmp_label, key="_cmp_toggle", width="stretch",
+                 help="비교 종목 검색·삭제·빠른 추가"):
+        st.session_state["_cmp_panel_open"] = not st.session_state.get("_cmp_panel_open", False)
+    if cmp_active:
+        st.session_state["_cmp_panel_open"] = True
+    if st.session_state.get("_cmp_panel_open", False):
+        cmp_tickers, pr_mode = _compare_controls(ticker, tf, tf_label)
+    else:
+        cmp_tickers, pr_mode = cmp_active, False
     with c3.popover("📐 지표"):
         st.markdown("**상단 지표** — 가격 차트 오버레이")
         top = st.pills("상단 지표", _TOP_INDS, selection_mode="multi",
@@ -418,7 +527,8 @@ def _price_chart(ticker, hist, avg_cost, trades, fullscreen: bool = False,
                           label_visibility="collapsed") or []
         st.markdown("**하단 지표** — 서브 패널")
         bottom = st.pills("하단 지표", ["거래량", "RSI", "MACD", "스토캐스틱",
-                                     "Aroon", "%b", "PVT", "펀더멘털"], selection_mode="multi",
+                                     "Aroon", "%b", "PVT", "분기 EPS", "펀더멘털"],
+                          selection_mode="multi",
                           default=["거래량", "RSI"], key=f"_bot_{tf}",
                           label_visibility="collapsed") or []
         log_scale = st.toggle("로그 스케일", key=f"_logscale_{tf}",
@@ -551,6 +661,9 @@ def _price_chart(ticker, hist, avg_cost, trades, fullscreen: bool = False,
         keltner="켈트너 채널" in top, kama="KAMA" in top,
         chandelier="샹들리에 엑시트" in top,
         show_aroon=show_aroon, show_bbpct=show_bbpct, show_pvt=show_pvt,
+        fund_eps=(((cached.valuation(ticker) or {}).get("history") or [])
+                  if "분기 EPS" in bottom and not compare
+                  and not ticker_names.is_macro(ticker) else None),
         fundamentals=fund_rows,
         events=events, zones=zones)
     if fullscreen:                                  # ⛶ 풀뷰 — 뷰포트 거의 채우는 높이

@@ -752,6 +752,16 @@ def _add_trend_lines(fig, items: list[dict]) -> None:
     지지=초록 대시·저항=빨강 대시·채널=중심 점선+상하단(반투명 fill·path 폴백). 표시·참고용.
     """
     go = _go()
+
+    def _label_yshift(item: dict) -> int:
+        kind = item.get("kind")
+        trend = (item.get("meta") or {}).get("trend")
+        if kind == "resistance" or trend == "down":
+            return -16
+        if kind == "support" or trend == "up":
+            return 16
+        return 14
+
     for it in items or []:
         kind = it.get("kind")
         if kind == "channel":
@@ -774,8 +784,17 @@ def _add_trend_lines(fig, items: list[dict]) -> None:
             color = _GREEN if kind == "support" else _RED
             fig.add_trace(go.Scatter(x=[it["x0"], it["x1"]], y=[it["y0"], it["y1"]],
                                      name=it["label"], line=dict(color=color, width=1.4, dash="dash")))
-        fig.add_annotation(x=it["x1"], y=it["y1"], xanchor="left", showarrow=False,
-                           text=it["label"], font=dict(size=10, color=theme.MUTED))
+        fig.add_annotation(
+            x=it["x1"], y=it["y1"], xanchor="left", yanchor="middle",
+            xshift=10, yshift=_label_yshift(it), showarrow=False,
+            text=it["label"],
+            font=dict(size=11, color="#d1d4dc"),
+            bgcolor="rgba(13, 17, 23, 0.82)",
+            bordercolor=color,
+            borderwidth=1,
+            borderpad=4,
+            opacity=0.96,
+        )
 
 
 def price_chart(hist, ticker: str = "", *, kind: str = "line", avg_cost=None,
@@ -788,7 +807,7 @@ def price_chart(hist, ticker: str = "", *, kind: str = "line", avg_cost=None,
                 show_macd: bool = False, show_stoch: bool = False, log_scale: bool = False,
                 keltner: bool = False, kama: bool = False, chandelier: bool = False,
                 show_aroon: bool = False, show_bbpct: bool = False, show_pvt: bool = False,
-                fundamentals=None, events=None, zones=None):
+                fundamentals=None, events=None, zones=None, fund_eps=None):
     """가격 차트 + 기술적 분석 도구 (TradingView 풍 멀티패널).
 
     패널: 가격(+MA·BB·일목·추세선·평단·기간 최고/최저·현재가 라벨) / 거래량(방향색 바+MA20)
@@ -814,6 +833,7 @@ def price_chart(hist, ticker: str = "", *, kind: str = "line", avg_cost=None,
         keltner = kama = chandelier = False
         log_scale = False              # % 축엔 로그 무의미
         events, zones = None, None     # 절대가격 오버레이 — % 축과 공존 불가
+        fund_eps = None                # 분기 EPS 패널도 메인 종목 전용 — 비교 시 제외
     close = hist["Close"]
     has_ohlc = {"Open", "High", "Low"} <= cols
     show_volume = show_volume and "Volume" in cols
@@ -821,15 +841,19 @@ def price_chart(hist, ticker: str = "", *, kind: str = "line", avg_cost=None,
     show_aroon = show_aroon and has_ohlc                # Aroon 은 High/Low 필요
     show_pvt = show_pvt and "Volume" in cols            # PVT 는 거래량 필요
 
-    # 유효 펀더멘털 행만 (매출 or 순이익 하나는 있어야) — ETF·매크로는 빈 rows → 패널 생략
-    fund_rows = [r for r in (fundamentals or [])
-                 if r.get("date") and (r.get("revenue") is not None
-                                       or r.get("net_income") is not None)]
-
-    # 하단 서브패널 — 순서 고정(거래량→RSI→MACD→스토→Aroon→%b→PVT→펀더멘털). 행 동적 배정.
+    # 하단 서브패널 — 순서 고정(거래량→RSI→MACD→스토→Aroon→%b→PVT→EPS→펀더멘털).
+    # 분기 EPS — 유효 행(발표일+실제 EPS)만. 비교(%) 모드는 아래 cmp_mode 절이 차단.
+    fund_eps = [r for r in (fund_eps or [])
+                if r.get("date") and r.get("eps_actual") is not None]
+    # 유효 펀더멘털 행만 (매출 or 순이익 하나는 있어야) — ETF·매크로는 빈 rows → 패널 생략.
+    # 날짜 오름차순 방어 정렬 — 비정렬 입력이면 바 폭(min 간격)이 음수가 됨 (실측 버그)
+    fund_rows = sorted((r for r in (fundamentals or [])
+                        if r.get("date") and (r.get("revenue") is not None
+                                              or r.get("net_income") is not None)),
+                       key=lambda r: str(r.get("date")))
     sub = [("vol", show_volume), ("rsi", show_rsi), ("macd", show_macd), ("stoch", show_stoch),
            ("aroon", show_aroon), ("bbpct", show_bbpct), ("pvt", show_pvt),
-           ("fund", bool(fund_rows))]
+           ("eps", bool(fund_eps)), ("fund", bool(fund_rows))]
     active = [name for name, on in sub if on]
     panes = 1 + len(active)
     row_of = {name: i + 2 for i, name in enumerate(active)}   # 가격=1, 서브=2..
@@ -840,6 +864,7 @@ def price_chart(hist, ticker: str = "", *, kind: str = "line", avg_cost=None,
     aroon_row = row_of.get("aroon")
     bbpct_row = row_of.get("bbpct")
     pvt_row = row_of.get("pvt")
+    eps_row = row_of.get("eps")
     fund_row = row_of.get("fund")
     if panes > 1:
         from plotly.subplots import make_subplots
@@ -1086,6 +1111,40 @@ def price_chart(hist, ticker: str = "", *, kind: str = "line", avg_cost=None,
                                      line=dict(color="#3b82f6", width=1)), row=pvt_row, col=1)
         fig.update_yaxes(row=pvt_row, col=1, nticks=3)
 
+    # ── 분기 EPS 패널 — 실제(beat 초록/miss 빨강 바) vs 예상(회색 마커) · 서프라이즈 hover ──
+    # TradingView 유료 '펀더멘털 오버레이' 대응 — 데이터는 valuation history(24분기·기캐시).
+    if eps_row and fund_eps:
+        import pandas as pd
+        rows = sorted(fund_eps, key=lambda r: r["date"])
+        xs = [pd.Timestamp(r["date"]) for r in rows]
+        idx_tz = getattr(hist.index, "tz", None)
+        if idx_tz is not None:
+            xs = [x.tz_localize(idx_tz) if x.tzinfo is None else x for x in xs]
+        act = [float(r["eps_actual"]) for r in rows]
+        est = [r.get("eps_est") for r in rows]
+        colors = [(_GREEN if (r.get("surprise_pct") or 0) >= 0 else _RED) for r in rows]
+        hover = [f"발표 {r['date']} · EPS {r['eps_actual']} vs 예상 "
+                 f"{r.get('eps_est', '—')}"
+                 + (f" ({r['surprise_pct']:+.1f}%)" if r.get("surprise_pct") is not None else "")
+                 for r in rows]
+        fig.add_trace(go.Bar(x=xs, y=act, name="분기 EPS", showlegend=False,
+                             marker=dict(color=colors), opacity=0.85,
+                             width=40 * 86400000, customdata=hover,
+                             hovertemplate="%{customdata}<extra></extra>"),
+                      row=eps_row, col=1)
+        est_x = [x for x, e in zip(xs, est) if e is not None]
+        est_y = [float(e) for e in est if e is not None]
+        if est_y:
+            fig.add_trace(go.Scatter(x=est_x, y=est_y, name="예상 EPS", showlegend=False,
+                                     mode="markers",
+                                     marker=dict(symbol="line-ew-open", size=14,
+                                                 color=theme.MUTED,
+                                                 line=dict(width=2, color=theme.MUTED)),
+                                     hoverinfo="skip"),
+                          row=eps_row, col=1)
+        fig.update_yaxes(row=eps_row, col=1, nticks=3, title_text="EPS",
+                         title_font=dict(size=9, color=theme.MUTED))
+
     # ── 펀더멘털 패널 — 분기(연간) 매출 바 + 순이익 라인 (TV img08 갭 · 전유 데이터) ──
     if fund_row:
         import pandas as pd
@@ -1101,10 +1160,11 @@ def price_chart(hist, ticker: str = "", *, kind: str = "line", avg_cost=None,
         if any(v is not None for v in f_rev):
             # 바 폭 명시(간격의 45%·ms) — 자동 폭은 분기 간격 전체를 채워 뭉툭 (실측)
             if len(f_xs) >= 2:
-                _bw = min((f_xs[i + 1] - f_xs[i]).total_seconds() * 1000
+                _bw = min(abs((f_xs[i + 1] - f_xs[i]).total_seconds()) * 1000
                           for i in range(len(f_xs) - 1)) * 0.45
             else:
                 _bw = 40 * 86400000.0
+            _bw = max(float(_bw), 1.0)             # 중복 날짜 등 0 방어
             fig.add_trace(go.Bar(x=f_xs, y=f_rev, name="매출", showlegend=False,
                                  width=_bw,
                                  marker=dict(color="rgba(47,129,247,0.55)"),
@@ -1125,7 +1185,7 @@ def price_chart(hist, ticker: str = "", *, kind: str = "line", avg_cost=None,
 
     chart_height = ({1: 380, 2: 540, 3: 680, 4: 800, 5: 900}.get(panes)
                     or 900 + 85 * (panes - 5))
-    fig.update_layout(margin=dict(t=14, b=64, l=14, r=46), dragmode="pan",
+    fig.update_layout(margin=dict(t=14, b=64, l=14, r=72), dragmode="pan",
                       legend=dict(orientation="h", x=0.0, xanchor="left",
                                   y=1.0, yanchor="bottom", font=dict(size=10),
                                   bgcolor="rgba(0,0,0,0)", itemsizing="constant"),
