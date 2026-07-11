@@ -622,6 +622,52 @@ def test_reconnect_watchdog_html_contract():
     assert "/_stcore/health" in h and "2500" in h
     assert "window.parent.location.reload" in h
     assert "down = true" in h                       # 실패 → 회복 전이만 리로드
+    assert "AbortController" in h                   # fetch hang 방어 타임아웃
+    assert ">= 3" in h                              # 연속 3회 실패부터 다운 판정
+
+
+_WATCHDOG_HARNESS = r"""
+let tick = null;
+global.setInterval = (fn, ms) => { tick = fn; return 0; };
+let reloads = 0;
+global.window = { parent: { location: { reload() { reloads++; } } } };
+const outcomes = [];                       // 틱마다 소비 — 'ok' | 'fail'
+global.fetch = () => (outcomes.shift() === "ok"
+  ? Promise.resolve({ ok: true }) : Promise.reject(new Error("ECONNRESET")));
+__SCRIPT__
+(async () => {
+  function fail(m) { console.error("FAIL " + m); process.exit(1); }
+  if (!tick) fail("no_interval");
+  // 1) 일시적 reset 1회 → 즉시 회복: reload 금지 (hair-trigger 튕김 방지)
+  outcomes.push("fail", "ok"); await tick(); await tick();
+  if (reloads !== 0) fail("single_blip_reloaded");
+  // 2) 2연속 실패 → 회복: 아직 임계(3) 미달 — reload 금지
+  outcomes.push("fail", "fail", "ok"); await tick(); await tick(); await tick();
+  if (reloads !== 0) fail("two_blips_reloaded");
+  // 3) 연속 3회 실패(진짜 다운) → 회복: reload 정확히 1회
+  outcomes.push("fail", "fail", "fail", "ok");
+  await tick(); await tick(); await tick(); await tick();
+  if (reloads !== 1) fail("no_reload_after_downtime reloads=" + reloads);
+  console.log("OK watchdog");
+})();
+"""
+
+
+@pytest.mark.skipif(__import__("shutil").which("node") is None,
+                    reason="node 미설치 — 런타임 JS 검증 스킵")
+def test_reconnect_watchdog_runtime(tmp_path):
+    """워치독 런타임 — 단일/2연속 실패는 무시, 3연속 실패 후 회복 시만 reload 1회."""
+    import re
+    import subprocess
+
+    from dashboard import auth
+    h = auth.reconnect_watchdog_html(1000)
+    js = re.findall(r"<script>(.*?)</script>", h, re.S)[0]
+    runner = tmp_path / "watchdog.js"
+    runner.write_text(_WATCHDOG_HARNESS.replace("__SCRIPT__", js), encoding="utf-8")
+    r = subprocess.run(["node", str(runner)], capture_output=True, text=True, timeout=30)
+    assert r.returncode == 0, f"watchdog runtime fail: {r.stdout}\n{r.stderr}"
+    assert "OK watchdog" in r.stdout
 
 
 def test_chart_full_page():
