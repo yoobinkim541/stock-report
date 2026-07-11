@@ -40,9 +40,9 @@ def patched(monkeypatch):
 
 
 def test_build_report_shows_objective_metrics(patched):
-    txt = rpt.build_report()
+    txt = rpt.build_report(detail=True)
     assert "[모의]" in txt
-    assert "NAV" in txt and "11,000,000" in txt
+    assert "NAV" in txt and "1,100만" in txt
     assert "현금비중" in txt
     assert "누적" in txt and "KOSPI 대비" in txt and "%p" in txt  # 아웃퍼폼 가시화(F3: KOSPI 대비 %p)
     assert "MDD" in txt and "대비 방어" in txt                    # MDD vs KOSPI
@@ -54,13 +54,13 @@ def test_build_report_shows_objective_metrics(patched):
 
 def test_build_report_excess_positive(patched):
     # nav 11M / inception 10M = +10%, KOSPI +6% → 초과 +4%p (헤드라인 KOSPI대비)
-    txt = rpt.build_report()
+    txt = rpt.build_report(detail=True)
     assert "KOSPI 대비 +4.0%p" in txt
 
 
 def test_build_report_mdd_within_index_ok(patched):
     # NAV 시계열 10M→10.8M→11M 단조증가 → 전략 MDD 0% ≤ 지수 20% → ✅
-    txt = rpt.build_report()
+    txt = rpt.build_report(detail=True)
     assert "✅" in txt
 
 
@@ -78,7 +78,7 @@ def test_build_report_includes_llm_rationale_when_available(patched, monkeypatch
         }, "ok")
 
     monkeypatch.setattr(rpt.llm_rationale, "run", fake_run)
-    txt = rpt.build_report()
+    txt = rpt.build_report(detail=True)
     assert seen["market"] == "KR"
     assert seen["positions"][0]["code"] == "005930"
     assert "🧠 LLM 판단근거" in txt
@@ -92,6 +92,20 @@ def test_build_report_balance_failure(monkeypatch):
                         "pos_value": 0, "cash_krw": None, "nav": None})
     txt = rpt.build_report()
     assert "잔고 조회 실패" in txt
+
+
+def test_build_report_defaults_to_compact(patched, monkeypatch):
+    monkeypatch.setattr(rpt.llm_rationale, "run", lambda payload: pytest.fail("compact report should not call LLM rationale"))
+    txt = rpt.build_report()
+    assert "국내 모의투자" in txt
+    assert "KOSPI 대비 +4.0%p" in txt
+    assert "보유 요약" in txt
+    assert "보유 1종목" in txt
+    assert "삼성전자" in txt
+    assert "체크" in txt
+    assert "상세: /paper kr full" in txt
+    assert "🧠 LLM 판단근거" not in txt
+    assert "70,000 → 75,000" not in txt
 
 
 def test_main_skips_when_disabled(monkeypatch):

@@ -343,26 +343,44 @@ def valuation_score(price, metrics, consensus=None, intrinsic=None) -> dict | No
     def clamp(x):
         return max(-1.0, min(1.0, x))
 
+    # KR 은 yfinance forward EPS·PEG·컨센서스 목표가가 실제와 크게 어긋나 신뢰불가.
+    # 단 **Naver 증권사 컨센서스**(kr_consensus_source='naver' — 차기연도 EPS 추정·목표가)가
+    # 병합돼 있으면 진짜 포워드 축이므로 정상 채점 — 고ROE 성장주가 트레일링 잔여이익
+    # 모델의 '고평가' 편향으로 오도되던 한계 해소. Naver 없으면 야후 파생은 여전히 배제.
+    is_kr = (m.get("market_type") == "kr")
+    kr_fwd_ok = is_kr and m.get("kr_consensus_source") == "naver"
+    kr_tgt_ok = is_kr and (c.get("source") == "naver")
+
     comps = []                                       # (weight, score, label)
     _pt = peg_textbook(m)
     peg = (_pt or {}).get("peg") or _try_float(m.get("peg"))   # 교과서식 우선·야후 폴백
-    if peg and peg > 0:
+    if peg and peg > 0 and (not is_kr or kr_fwd_ok):
         comps.append((1.0, clamp((1.75 - peg) / 1.25), f"PEG {peg:.1f}"))
     e0, e1 = _try_float(m.get("eps_ttm")), _try_float(m.get("eps_fwd"))
-    if e0 and e1 and e0 > 0:
+    if e0 and e1 and e0 > 0:                         # KR eps_fwd 는 Naver 병합 시만 존재
         g = (e1 / e0 - 1) * 100
         comps.append((0.5, clamp((g - 5.0) / 20.0), f"EPS성장 {g:+.0f}%"))
     fv = fair_value_multiple(p, m.get("per"), m.get("forward_pe"), m.get("eps_fwd"))
-    if fv and fv.get("fair"):
+    if fv and fv.get("fair") and (not is_kr or kr_fwd_ok):
         up = fv["fair"] / p - 1
         comps.append((1.0, clamp(up / 0.30), f"기준가 {up * 100:+.0f}%"))
     tgt = _try_float(c.get("target_median") or c.get("target_mean"))
-    if tgt and tgt > 0:
+    if tgt and tgt > 0 and (not is_kr or kr_tgt_ok):  # KR 목표가는 Naver 산일 때만
         up = tgt / p - 1
         comps.append((1.0, clamp(up / 0.30), f"목표가 {up * 100:+.0f}%"))
     rim_up = _try_float(iv.get("upside_pct"))
     if rim_up is not None and (iv.get("rim") or {}).get("mid"):
         comps.append((0.5, clamp(rim_up / 100.0 / 0.35), f"RIM {rim_up:+.0f}%"))
+    if is_kr:                                        # DART 트레일링 품질·가치 게이지
+        per_k, pbr_k, roe_k = (_try_float(m.get("per")), _try_float(m.get("pbr")),
+                               _try_float(m.get("roe")))
+        if per_k and per_k > 0:                      # 이익수익률 — 5% 중립·9%↑ 저평가
+            comps.append((0.6, clamp((1.0 / per_k - 0.05) / 0.04), f"PER {per_k:.0f}"))
+        if pbr_k and pbr_k > 0 and roe_k is not None:
+            jpb = (roe_k - 0.03) / (0.09 - 0.03)     # 정당 P/B (잔여이익 닫힌해·r9%·g3%)
+            if jpb > 0:                              # 실제 < 정당 → 저평가
+                comps.append((0.6, clamp((jpb / pbr_k - 1) / 0.5),
+                              f"P/B {pbr_k:.1f}·ROE {roe_k * 100:.0f}%"))
     if len(comps) < 2:
         return None
     wsum = sum(w for w, _, _ in comps)
@@ -874,3 +892,65 @@ def remove_ticker_alert(alert_id: str) -> bool:
         return bool(price_alerts.remove_alert(alert_id))
     except Exception:
         return False
+
+
+def series_profile(hist) -> dict | None:
+    """가격 시리즈 프로필 (순수) — 매크로 자산 성과 밴드용.
+
+    반환 {r1w, r1m, r3m, r1y, ytd(%), hi52, lo52, pos52(0~1), vol_ann(%), ma200_gap(%)}.
+    이력이 창을 못 덮는 구간은 None (짧은 이력 graceful). 주식/매크로 공용 가능.
+    """
+    try:
+        import pandas as pd
+        close = hist["Close"].dropna()
+        if len(close) < 10:
+            return None
+        last = float(close.iloc[-1])
+        end = close.index[-1]
+        first = close.index[0]
+
+        def _ret(days):
+            # 이력이 창을 덮지 못하면 None — 20일치 데이터로 "1년 수익률"을 만들면 허위 라벨
+            start = end - pd.Timedelta(days=days)
+            if first > start:
+                return None
+            win = close[close.index >= start]
+            base = float(win.iloc[0]) if len(win) >= 2 else None
+            return (last / base - 1) * 100 if base else None
+
+        jan1 = pd.Timestamp(end.year, 1, 1)
+        tz = getattr(close.index, "tz", None)
+        if tz is not None:
+            jan1 = jan1.tz_localize(tz)
+        ytd_win = close[close.index >= jan1]
+        # 연초 이전 데이터가 없으면 YTD 라벨은 허위 → None (이력이 올해 시작 후면 미표시)
+        ytd = ((last / float(ytd_win.iloc[0]) - 1) * 100
+               if (len(ytd_win) >= 2 and first <= jan1) else None)
+        yr = close[close.index >= end - pd.Timedelta(days=365)]
+        hi52 = float(yr.max()) if len(yr) else None
+        lo52 = float(yr.min()) if len(yr) else None
+        pos52 = ((last - lo52) / (hi52 - lo52)) if (hi52 and lo52 and hi52 > lo52) else None
+        rets = close.pct_change().dropna().tail(252)
+        vol_ann = float(rets.std() * (252 ** 0.5) * 100) if len(rets) >= 30 else None
+        ma200 = float(close.rolling(200).mean().iloc[-1]) if len(close) >= 200 else None
+        return {"r1w": _ret(7), "r1m": _ret(30), "r3m": _ret(91), "r1y": _ret(365),
+                "ytd": ytd, "hi52": hi52, "lo52": lo52, "pos52": pos52,
+                "vol_ann": vol_ann,
+                "ma200_gap": ((last / ma200 - 1) * 100) if ma200 else None,
+                "last": last}
+    except Exception:
+        return None
+
+
+def history_percentile(hist, years: int = 10) -> float | None:
+    """현재값의 역사 백분위 (순수) — 금리 레벨 맥락용. 0~100 | None."""
+    try:
+        import pandas as pd
+        close = hist["Close"].dropna()
+        win = close[close.index >= close.index[-1] - pd.Timedelta(days=365 * years)]
+        if len(win) < 60:
+            return None
+        last = float(win.iloc[-1])
+        return float((win <= last).mean() * 100)
+    except Exception:
+        return None

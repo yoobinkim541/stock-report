@@ -32,6 +32,17 @@ _holdings = data.load_holdings()
 _held = [h["ticker"] for h in _holdings if h.get("ticker")]
 st.session_state.setdefault("ticker", _held[0] if _held else "MSFT")
 
+# 순수 HTML 카드(매크로 자산 등)의 클릭 = `?tk=<티커>` 링크 — 여기서 소비 후 파라미터 제거.
+# 링크 클릭은 브라우저 네비게이션(세션 재생성)이라 **사이드바 위젯보다 먼저** 반영해야
+# 이번 런부터 ticker 가 맞는다. 정규화 실패는 조용히 무시(주소창 임의값 방어).
+_qtk = st.query_params.get("tk")
+if _qtk:
+    _qnorm = ticker_names.normalize_input(_qtk)
+    st.query_params.clear()                        # 재클릭·새로고침 루프 방지
+    if _qnorm:
+        st.session_state["ticker"] = _qnorm
+        st.session_state["_nav_to_ticker"] = True  # st.navigation 이후 switch_page (기존 경로)
+
 with st.sidebar:
     st.markdown("### 🔎 종목")
     _cur = st.session_state["ticker"]

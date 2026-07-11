@@ -629,6 +629,31 @@ def normalize_pct(series, view_days=None):
     return (s / anchor_val - 1.0) * 100.0
 
 
+def view_window(hist, view_days, pan_mult: int = 5, warmup_bars: int = 250,
+                floor_bars: int = 800):
+    """차트 직렬화용 데이터 윈도잉 — 뷰(기간)의 pan_mult배 팬버퍼 + 지표 워밍업 tail (순수).
+
+    기간 라디오는 초기 표시창만 좁히고 데이터는 항상 전체(max·장기주 ~11k봉)를
+    fig+bounds 로 직렬화하던 것이 지표/기간 토글마다 수 MB websocket push + 수초
+    ScriptRunner 점유의 주원인("채널 쓰면 다운" 체감). 뷰의 pan_mult배 팬버퍼면
+    과거 드래그 체감은 유지되고, warmup_bars 는 MA200·일목(52+26) 등 롤링 지표가
+    팬버퍼 구간에서 깨지지 않을 여유분. view_days=None(전체)·짧은 데이터는 그대로
+    반환. DataFrame/Series 모두 지원(tail 뷰 반환).
+    """
+    if view_days is None or hist is None or getattr(hist, "empty", True):
+        return hist
+    import pandas as pd
+    try:
+        cutoff = hist.index[-1] - pd.Timedelta(days=int(view_days))
+        view_bars = int((hist.index >= cutoff).sum())
+    except Exception:
+        return hist                                 # 비시계열 인덱스 등 — 무윈도잉
+    keep = max(view_bars * int(pan_mult) + int(warmup_bars), int(floor_bars))
+    if keep >= len(hist):
+        return hist
+    return hist.iloc[-keep:]
+
+
 def _add_event_markers(fig, hist, events, panes) -> None:
     """이벤트 마커 — 실적(E)·배당(D)·뉴스(N) 등을 봉 아래 원형 배지로 (표시·참고용).
 
@@ -982,12 +1007,8 @@ def price_chart(hist, ticker: str = "", *, kind: str = "line", avg_cost=None,
                       bargap=0.1, newshape=dict(line=dict(color="#f59e0b", width=2)))
     fig.update_xaxes(automargin=True)
     fig.update_yaxes(automargin=True)
-    # 십자선(크로스헤어) — TradingView 풍. x 는 전 패널 관통, y 는 가격 패널만.
-    # 제스처 중엔 hovermode=false 뮤트(embed JS)라 스파이크도 함께 숨어 팬 성능 무영향.
-    _spike = dict(showspikes=True, spikemode="across", spikesnap="cursor",
-                  spikethickness=0.6, spikedash="dot", spikecolor=theme.MUTED)
-    fig.update_xaxes(**_spike)
-    fig.update_yaxes(row=1 if panes > 1 else None, col=1 if panes > 1 else None, **_spike)
+    # 십자선은 plotly 스파이크 대신 **embed JS DOM 오버레이** (plotly_embed) —
+    # 스파이크는 마우스무브마다 전체 재그리기를 유발해 다중 트레이스에서 스터터(성능 회귀 확정)
     if log_scale:                          # 가격 패널만 로그 — 서브패널(RSI·MACD 등)은 선형 유지
         fig.update_yaxes(type="log", row=1 if panes > 1 else None,
                          col=1 if panes > 1 else None)
@@ -1032,8 +1053,12 @@ def _add_extremes_and_last(fig, hist, view_days, panes) -> None:
                            font=dict(size=10, color=_BLUE), arrowcolor=_BLUE, **kw)
     prev = float(hist["Close"].iloc[-2]) if len(hist) > 1 else last
     chip = _GREEN if last >= prev else _RED
-    fig.add_hline(y=last, line=dict(color=chip, dash="dot", width=0.8), **kw)
-    fig.add_annotation(xref="x domain", x=1.0, y=last, xanchor="left", showarrow=False,
+    # name=tn-last — ⚡live 클라이언트 패치(plotly_embed patchLast)가 이름으로 찾아
+    # 현재가선·라벨을 in-place 이동 (tool-* 아님 → 드로잉 보호·지우기 로직과 무간섭)
+    fig.add_hline(y=last, name="tn-last",
+                  line=dict(color=chip, dash="dot", width=0.8), **kw)
+    fig.add_annotation(name="tn-last", xref="x domain", x=1.0, y=last, xanchor="left",
+                       showarrow=False,
                        text=f"<b>{last:,.0f}</b>", font=dict(size=11, color="#ffffff"),
                        bgcolor=chip, borderpad=2, **({"row": 1, "col": 1} if panes > 1 else {}))
 

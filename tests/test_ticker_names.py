@@ -172,7 +172,15 @@ def test_search_candidates():
 def test_universe_contains_holdings_and_popular():
     u = ticker_names.universe()
     assert "MU" in u and "NVDA" in u and "005930.KS" in u
+    assert "NVDL" in u and "TSLL" in u
     assert u == sorted(u)  # 정렬됨
+
+
+def test_single_stock_leverage_names_and_aliases():
+    assert ticker_names.resolve("엔비디아 2배") == "NVDL"
+    assert ticker_names.resolve("테슬라 레버리지") == "TSLL"
+    assert ticker_names.resolve("MSTR 2배") == "MSTU"
+    assert ticker_names.label("NVDL") == "GraniteShares 2x Long NVDA (NVDL)"
 
 
 def test_search_label_appends_korean_for_typeahead():

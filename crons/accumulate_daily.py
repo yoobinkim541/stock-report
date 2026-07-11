@@ -27,14 +27,20 @@ from lib import accumulation
 
 
 def _get_close(ticker: str):
-    """오늘 미 세션 종가 — 마지막 일봉 날짜가 오늘(ET)이 아니면 휴장 취급 None."""
+    """오늘 미 세션 **확정 종가** — 마지막 일봉이 오늘(ET)이고 세션이 끝났을 때만.
+
+    장중(16:00 ET 이전) 실행 시 진행 중인 봉을 종가로 오인해 장중가를 기록하던
+    버그 방어 — 세션 미종료면 None(스킵·크론 21:10 UTC 재실행이 처리).
+    """
+    now_et = datetime.now(ZoneInfo("America/New_York"))
+    if (now_et.hour, now_et.minute) < (16, 5):
+        return None                                  # 세션 미종료 — 장중가 기록 금지
     import yfinance as yf
     hist = yf.Ticker(ticker).history(period="5d")
     if hist is None or hist.empty:
         return None
     last_ts = hist.index[-1]
-    today_et = datetime.now(ZoneInfo("America/New_York")).date()
-    if last_ts.date() != today_et:
+    if last_ts.date() != now_et.date():
         return None
     return float(hist["Close"].iloc[-1]), last_ts.date()
 

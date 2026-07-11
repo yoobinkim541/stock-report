@@ -44,7 +44,15 @@ _TOKEN_FILE = os.path.expanduser("~/.cache/kis_quote_token.json")
 _token_cache: dict = {"token": None, "exp": 0.0}
 
 # 美 종목 → 해외 현재가 EXCD (kis_mock 와 동일 규칙)
-_US_EXCH = {"ORCL": "NYS", "UNH": "NYS", "SAP": "NYS", "SGOV": "AMS", "SPMO": "AMS"}
+_US_EXCH = {
+    "ORCL": "NYS", "UNH": "NYS", "SAP": "NYS",
+    "SGOV": "AMS", "SPMO": "AMS",
+    "QLD": "AMS", "TQQQ": "NAS", "SQQQ": "NAS",
+    "SOXL": "AMS", "SSO": "AMS", "SOXS": "AMS",
+    "NVDL": "NAS", "NVD": "NAS", "TSLL": "NAS", "AAPU": "NAS",
+    "AMZU": "NAS", "GGLL": "NAS", "MSFU": "NAS", "METU": "NAS",
+    "CONL": "NAS", "PLTU": "NAS", "MSTU": "NAS",
+}
 
 
 # ── 설정 ──────────────────────────────────────────────────────────────────────

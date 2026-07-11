@@ -131,3 +131,18 @@ def test_krw_plan_thousand_units():
     assert ac.plan_for("NVDA")["amount"] == 16_000
     ac.upsert_plan("UNH", 10.55, "USD", "매일")           # USD 는 라운딩 없음
     assert ac.plan_for("UNH")["amount"] == 10.55
+
+
+def test_cron_get_close_intraday_guard(monkeypatch):
+    """장중(16:00 ET 이전) 실행 — 진행 중 봉을 종가로 오인하지 않음 (None 스킵)."""
+    import importlib
+    from datetime import datetime
+    from zoneinfo import ZoneInfo
+    mod = importlib.import_module("crons.accumulate_daily")
+
+    class _FakeDT:
+        @staticmethod
+        def now(tz=None):
+            return datetime(2026, 7, 8, 11, 0, tzinfo=ZoneInfo("America/New_York"))
+    monkeypatch.setattr(mod, "datetime", _FakeDT)
+    assert mod._get_close("NVDA") is None            # 장중 → 즉시 None (yf 호출 전)

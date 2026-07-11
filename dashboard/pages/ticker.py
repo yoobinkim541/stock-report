@@ -17,12 +17,18 @@ _NOBAR = {"displayModeBar": False}
 
 def render():
     ticker = st.session_state.get("ticker", "MSFT")
+    # 접미사 없는 6자리 KR 코드(예: "005930")는 yfinance 가 빈 데이터를 줘 차트·밸류가
+    # 통째로 안 뜸 → .KS 보정(방어). US 티커는 6자리 숫자가 아니라 무영향. 위젯 상태는
+    # 건드리지 않음(_tsel 리셋 함정 회피) — 로컬 정규화만.
+    if ticker and ticker.isdigit() and len(ticker) == 6:
+        ticker = ticker + ".KS"
     hist = cached.ohlc(ticker, period="max")
     yf_price = prev = None
     if hist is not None and not getattr(hist, "empty", True) and "Close" in getattr(hist, "columns", []):
-        cl = hist["Close"]
-        yf_price = float(cl.iloc[-1])
-        prev = float(cl.iloc[-2]) if len(cl) > 1 else yf_price
+        cl = hist["Close"].dropna()               # 마감 직후 미확정 봉(NaN 종가) 제외 —
+        if len(cl):                               # 안 하면 yf_price=NaN 이 hero·진입레벨 오염
+            yf_price = float(cl.iloc[-1])
+            prev = float(cl.iloc[-2]) if len(cl) > 1 else yf_price
     pos = data.holding_position(ticker)                 # 보유 포지션(평단 등)|None
     _rq0 = cached.realtime_quote(ticker)
     cur = (_rq0.get("price") if _rq0 else None) or yf_price or 0.0   # 현재가(실시간 우선)
@@ -35,11 +41,17 @@ def render():
         # ⚡자동 갱신 토글은 fragment **밖** — 켜고 끄기가 래퍼(주기 재실행)를 전환해야 함
         live = st.toggle("⚡ 자동 갱신 (8초)", key="_chart_live",
                          help="실시간가로 마지막 봉·현재가 갱신 — 보던 위치·드로잉 유지")
-        _chart = _price_chart_live if live else _price_chart
+        _chart = _price_chart_live if live else _price_chart_frag
         _chart(ticker, hist, pos.get("avg_price_usd") if pos else None,
                data.trade_events(ticker))
     else:
         st.info("가격 데이터 없음 (yfinance)")
+
+    # 매크로·지수 자산 — 주식 섹션(호가·진입레벨·밸류·재무·포지션관리) 대신 전용 뷰
+    if ticker_names.is_macro(ticker):
+        _macro_sections(ticker, hist)
+        _llm_related_section(ticker)
+        return
 
     # 실시간 호가 — 접이식(기본 접힘)·8초 자동갱신 (차트 우선 레이아웃)
     _orderbook_section(ticker, hist, prev)
@@ -55,6 +67,7 @@ def render():
     else:
         _analysis_snapshot(ticker)
         _detail_sections(ticker, yf_price)
+    _llm_related_section(ticker)
     _manage_position(ticker, cur, pos)
 
 
@@ -151,17 +164,163 @@ def _chart_events(ticker, df, ev_sel) -> tuple[list, list]:
 
 @st.fragment(run_every=8)
 def _price_chart_live(ticker, hist, avg_cost, trades, fullscreen: bool = False):
-    """⚡ 자동 갱신 차트 — 8초 fragment 재실행 (실시간 마지막 봉 패치 + 뷰·드로잉 유지).
+    """⚡ 자동 갱신 차트 — 8초 fragment 재실행 (실시간가는 피더가 클라이언트 패치).
 
-    드로잉=localStorage 복원 · 뷰 위치=60초 신선 규칙 복원이라 재실행이 화면을 안 깨뜨림.
+    live 모드의 메인 차트 html 은 **바이트 안정** — 실시간가를 서버에서 bake 하면
+    8초마다 srcdoc 이 바뀌어 iframe 재마운트(그리던 드로잉 리셋 + 수 MB 재전송)가
+    일어난다. 대신 초소형 피더 컴포넌트가 localStorage 로 가격을 push 하고 차트
+    iframe 이 마지막 봉·현재가선만 in-place 패치 (plotly_embed live 경로).
+    """
+    _price_chart(ticker, hist, avg_cost, trades, fullscreen, live=True)
+
+
+@st.fragment
+def _price_chart_frag(ticker, hist, avg_cost, trades, fullscreen: bool = False):
+    """기본 차트 fragment — 봉/기간/지표 컨트롤 변경이 **차트만** 부분 rerun.
+
+    비프래그먼트로 render 에 인라인이면 컨트롤 하나 바꿀 때마다 페이지 전체(히어로·호가·
+    진입레벨·분석 섹션)가 재실행돼 체감 버벅임의 주원인이 된다 (H-series UX 모델 복원).
     """
     _price_chart(ticker, hist, avg_cost, trades, fullscreen)
 
 
-def _price_chart(ticker, hist, avg_cost, trades, fullscreen: bool = False):
+@st.fragment
+def _llm_related_section(ticker):
+    """🤖 AI 연관 종목 — LLM 아이디어 (버튼 게이트·표시 전용·환각은 provider 가 폐기).
+
+    fragment — 추천/이동 버튼이 페이지 전체 rerun 을 유발하지 않음. 정직 라벨 필수.
+    """
+    with st.expander("🤖 AI 연관 종목 추천"):
+        st.caption("LLM 아이디어 — **검증 안 된 참고용·매매신호 아님** · 응답 티커는 "
+                   "화이트리스트 검증(환각 폐기) · 24시간 캐시")
+        res_key = f"_llmrel_res_{ticker}"
+        if res_key not in st.session_state:
+            if st.button("🤖 추천 받기", key=f"_llmrel_btn_{ticker}",
+                         help="LLM 1회 호출 (최대 60초·이후 24h 캐시)"):
+                with st.spinner("LLM 연관 종목 생성 중… (최대 60초)"):
+                    st.session_state[res_key] = cached.llm_related(ticker)
+                st.rerun(scope="fragment")
+            return
+        # 결과는 세션에 고정 — 캐시 만료 후 리런이 버튼 없이 LLM 을 재호출하는 누수 방지
+        items, status = st.session_state[res_key]
+        if not items:
+            msg = {"disabled": "DASH_LLM_RELATED_ENABLED=0 — 비활성화됨",
+                   "empty": "LLM 이 검증 통과 종목을 내지 못했습니다 — 잠시 후 다시 시도"}
+            st.info(msg.get(status, f"추천 실패 — {status}"))
+            if st.button("다시 시도", key=f"_llmrel_retry_{ticker}"):
+                cached.llm_related.clear()
+                st.session_state.pop(res_key, None)
+                st.rerun(scope="fragment")
+            return
+        for it in items:
+            c1, c2, c3 = st.columns([2.2, 3, 0.9], vertical_alignment="center")
+            c1.write(f"**{ticker_names.label(it['ticker'], maxlen=24)}** "
+                     f"<span style='color:{theme.MUTED};font-size:.72rem'>"
+                     f"{it.get('relation', '')}</span>", unsafe_allow_html=True)
+            c2.caption(it.get("reason", ""))
+            if c3.button("분석 →", key=f"_llmrel_nav_{ticker}_{it['ticker']}"):
+                st.session_state["ticker"] = it["ticker"]
+                _tp = st.session_state.get("_ticker_page")
+                if _tp is not None:
+                    st.switch_page(_tp)
+                else:
+                    st.rerun()
+        st.caption(f"상태: {'디스크 캐시' if status == 'cached' else 'LLM 신규 생성'} · "
+                   "표시·아이디어용 — 투자 판단·자동 반영 없음")
+
+
+def _macro_sections(ticker, hist):
+    """매크로·지수 전용 분석 — 성과 밴드 + 자산 특화 + 연관 자산 상관 (표시·참고용).
+
+    주식 섹션(밸류·재무·기관·공시·호가·진입레벨·포지션관리)은 매크로에 무의미 → 대체.
+    환율=환전 타이밍·포트 민감도 / 금리=역사 백분위 / 금=금은비 / 암호·지수=상관 맥락.
+    """
+    prof = data.series_profile(hist)
+    if prof:
+        st.markdown("##### 📊 성과 프로필")
+
+        def _c(v):
+            # 값 없음(None)은 중립색 — `(None or 0) >= 0` 이 초록을 칠하던 것 방지
+            if not isinstance(v, (int, float)):
+                return None
+            return theme.GREEN if v >= 0 else theme.RED
+
+        theme.render(theme.position_band_html([
+            ("1주", data.f_pct_s(prof["r1w"]), _c(prof["r1w"])),
+            ("1개월", data.f_pct_s(prof["r1m"]), _c(prof["r1m"])),
+            ("3개월", data.f_pct_s(prof["r3m"]), _c(prof["r3m"])),
+            ("1년", data.f_pct_s(prof["r1y"]), _c(prof["r1y"])),
+            ("YTD", data.f_pct_s(prof["ytd"]), _c(prof["ytd"])),
+        ]))
+        pos52 = prof.get("pos52")
+        theme.render(theme.position_band_html([
+            ("52주 위치", f"{pos52 * 100:.0f}%" if pos52 is not None else "—",
+             None),
+            ("52주 고점", f"{prof['hi52']:,.2f}" if prof.get("hi52") else "—", None),
+            ("52주 저점", f"{prof['lo52']:,.2f}" if prof.get("lo52") else "—", None),
+            ("연변동성", f"{prof['vol_ann']:.1f}%" if prof.get("vol_ann") is not None else "—",
+             None),
+            ("200일선 이격", data.f_pct_s(prof.get("ma200_gap")),
+             _c(prof.get("ma200_gap"))),
+        ]))
+
+    # ── 자산 특화 ──
+    if ticker == "KRW=X":
+        fx = cached.fx_timing() or {}
+        if fx.get("ok"):
+            st.markdown("##### 💱 환전 타이밍 (3년 백분위)")
+            st.info(f"{fx.get('emoji', '')} **{fx.get('verdict', '')}** — 현재 "
+                    f"{fx.get('rate', 0):,.1f}원 · 3년 분포 상위 {fx.get('pct_display', 0):.0f}% "
+                    f"구간 · 권장: {fx.get('action', '')} (환전 배율 {fx.get('multiplier', 1):g}×)")
+        summ = data.portfolio_summary() or {}
+        tot = summ.get("total_usd")
+        if tot:
+            st.caption(f"💼 내 포트 민감도 — 해외북 ${tot:,.0f} 기준 환율 **10원 변동 ≈ "
+                       f"₩{tot * 10:,.0f}** 원화 평가액 변동 (자연 환헤지 없음 가정)")
+    elif ticker == "^TNX":
+        pct = data.history_percentile(hist, years=10)
+        if pct is not None:
+            st.markdown("##### 🏦 금리 레벨 맥락")
+            st.info(f"현재 미 10년물 금리는 **최근 10년 분포의 상위 {100 - pct:.0f}%** 수준 — "
+                    f"금리 ↑ = 성장주 할인율·금 보유비용 압박, ↓ = 위험자산 우호 "
+                    f"(백분위 {pct:.0f})")
+    elif ticker == "GC=F":
+        try:
+            si = cached.ohlc("SI=F", "6mo")
+            ratio = float(hist["Close"].dropna().iloc[-1]) / float(si["Close"].dropna().iloc[-1])
+            st.markdown("##### 🥇 금은비 (Gold/Silver Ratio)")
+            st.info(f"금은비 **{ratio:.1f}** — 역사 평균대 60~70. 80↑ = 은 상대 저평가, "
+                    f"50↓ = 금 상대 저평가 신호로 해석되곤 함 (참고용)")
+        except Exception:
+            pass
+
+    # ── 🔗 연관 자산 — 90일 상관·30일 등락 ──
+    rel = cached.macro_corr(ticker) or []
+    if rel:
+        st.markdown("##### 🔗 연관 자산 — 90일 상관")
+        cols = st.columns(min(len(rel), 3))
+        for i, r in enumerate(rel[:3]):
+            with cols[i]:
+                corr = r.get("corr90")
+                cs = f"{corr:+.2f}" if corr is not None else "—"
+                strong = corr is not None and abs(corr) >= 0.5
+                st.metric(f"{r['label']}", cs,
+                          delta=(f"{r['chg30']:+.2f}% (30일)" if r.get("chg30") is not None
+                                 else None), delta_color="off",
+                          help=r.get("note", ""))
+                if strong:
+                    st.caption("⚡ 상관 뚜렷" + (" (역방향)" if corr < 0 else ""))
+                st.caption(r.get("note", ""))
+    st.caption("표시·참고용 — 상관은 국면에 따라 변하며 인과가 아님 · 주문 집행 없음")
+
+
+def _price_chart(ticker, hist, avg_cost, trades, fullscreen: bool = False,
+                 live: bool = False):
     """가격 차트 — 봉·기간·라인/캔들·지표·비교 컨트롤 (풀뷰 페이지와 공용 컴포넌트).
 
     fullscreen=True 면 차트 풀뷰 페이지 모드 — 높이 확대·⛶ 는 복귀 버튼.
+    live=True(⚡자동갱신 래퍼) — 실시간가 서버 bake 생략 + 피더 컴포넌트로 클라이언트
+    패치 (html 바이트 안정 = 8초 재실행이 iframe 을 재마운트하지 않음).
     """
     # 컨트롤 한 줄 — 봉 | 라인/캔들 | 지표 | 비교 | 기간 | ⛶ (좁은 화면은 자동 줄바꿈)
     ctf, ckind, c3, c4, cper, cfull = st.columns([1.45, 0.72, 0.34, 0.34, 1.4, 0.35],
@@ -181,7 +340,7 @@ def _price_chart(ticker, hist, avg_cost, trades, fullscreen: bool = False):
     kind = ckind.segmented_control("차트 종류", ["📈 라인", "🕯️ 캔들", "🟩 HA"], default="📈 라인",
                                    label_visibility="collapsed", key="_chart_kind",
                                    help="HA = 하이킨아시(평활 캔들·표시용 — 실체결가와 다름)")
-    # 기간 = 초기 표시 창만 — 데이터는 항상 전체(max) 로드라 과거로 무한 드래그 가능
+    # 기간 = 초기 표시 창 — 데이터는 뷰의 5배 팬버퍼로 윈도잉(charts.view_window·"전체"=전량)
     period = cper.radio("기간", ["3mo", "6mo", "1y", "5y", "전체"], index=1, horizontal=True,
                         label_visibility="collapsed", key="_chart_period")
     view_days = {"3mo": 90, "6mo": 180, "1y": 365, "5y": 1825, "전체": None}[period]
@@ -248,10 +407,15 @@ def _price_chart(ticker, hist, avg_cost, trades, fullscreen: bool = False):
             want_long = cch2.checkbox("장기 채널(250봉)", value=True, key=f"_tl_long_{tf}")
             st.caption("채널 = 회귀 ±2σ 자동 감지 — 상승(초록)/하락(빨강)/횡보(회색)·"
                        "라벨에 방향 표기 · 지지/저항선 동시 표시")
-        st.markdown("**이벤트 마커** — 실적·배당·뉴스·진입존 오버레이 (이 프로젝트 데이터)")
-        ev_sel = st.pills("이벤트", ["실적 E", "배당 D", "뉴스 N", "진입존 🎯"],
-                          selection_mode="multi", default=["실적 E", "배당 D"],
-                          key=f"_ev_{tf}", label_visibility="collapsed") or []
+        # 매크로(환율·금·금리 등)는 실적·배당·진입존이 무의미 — 뉴스만 노출
+        _ev_opts = (["뉴스 N"] if ticker_names.is_macro(ticker)
+                    else ["실적 E", "배당 D", "뉴스 N", "진입존 🎯"])
+        _ev_def = [] if ticker_names.is_macro(ticker) else ["실적 E", "배당 D"]
+        st.markdown("**이벤트 마커** — " + ("뉴스 오버레이" if ticker_names.is_macro(ticker)
+                                          else "실적·배당·뉴스·진입존 오버레이 (이 프로젝트 데이터)"))
+        ev_sel = st.pills("이벤트", _ev_opts, selection_mode="multi", default=_ev_def,
+                          key=f"_ev_{tf}_{'macro' if ticker_names.is_macro(ticker) else 'eq'}",
+                          label_visibility="collapsed") or []
         st.markdown("**하단 지표** — 서브 패널")
         bottom = st.pills("하단 지표", ["거래량", "RSI", "MACD", "스토캐스틱"], selection_mode="multi",
                           default=["거래량", "RSI"], key=f"_bot_{tf}",
@@ -309,9 +473,21 @@ def _price_chart(ticker, hist, avg_cost, trades, fullscreen: bool = False):
                       else "TR(배당재투자·조정종가) 기준")
                    + " · 가격 지표(캔들·평단·MA·매물대 등) 비활성")
         show_vol = show_vol and "Volume" in getattr(df, "columns", [])   # PR 스왑 후 재판정
+    # 직렬화 윈도잉 — max 전량(장기주 ~11k봉) fig+bounds 직렬화가 지표/기간 토글마다
+    # 수 MB push + 수초 ScriptRunner 점유의 주원인. 뷰의 5배 팬버퍼+지표 워밍업만
+    # 남긴다("전체"=무윈도잉). 이하 실시간 패치·이벤트마커·HA·bounds 전부 같은 윈도우.
+    df = charts.view_window(df, view_days)
+    if compare:
+        compare = {k: charts.view_window(s, view_days) for k, s in compare.items()}
+    # ⚡ live(자동갱신) — 실시간가는 **클라이언트 패치**(피더 iframe → localStorage →
+    # plotly_embed patchLast). 서버 bake 를 하면 8초마다 srcdoc 이 바뀌어 iframe
+    # 재마운트(그리던 드로잉 리셋 + 대형 재전송)가 일어나므로 live 땐 생략해 html 을
+    # 바이트 안정으로 유지. HA·비교·구형 렌더러는 클라 패치 미지원 → 종전 bake 유지.
+    _client_rt = (bool(live) and not compare and not legacy and kind != "🟩 HA"
+                  and df is not None and not getattr(df, "empty", True))
     # ⚡ 실시간 — 마지막 봉을 KIS 실시간가로 패치 (fresh 시·비교 모드 제외).
     # 캐시된 df 원본 오염 금지 → copy 후 수정. HA 변환 앞이라 HA 도 최신가 반영.
-    if not compare and df is not None and not getattr(df, "empty", True):
+    if not compare and not _client_rt and df is not None and not getattr(df, "empty", True):
         _rt = (cached.realtime_quote(ticker) or {}).get("price")
         if _rt and _rt > 0:
             df = df.copy()
@@ -379,8 +555,13 @@ def _price_chart(ticker, hist, avg_cost, trades, fullscreen: bool = False):
                 fig, df, height=h, view_days=view_days,
                 vol_axis="yaxis2" if show_vol else None, bounds_json=_bj,
                 fit_viewport=fullscreen, pct_mode=bool(compare), y_log=use_log,
-                store_key=_sk),
+                store_key=_sk, dock=fullscreen, live=_client_rt),
             height=h + 164)
+        if _client_rt:
+            # ⚡ 피더 — <1KB 컴포넌트만 8초 재실행마다 재마운트(가격+신선도 push).
+            # 메인 차트 html 은 위에서 바이트 안정 → 드로잉·뷰·플롯 상태 유지.
+            _rtp = (cached.realtime_quote(ticker) or {}).get("price")
+            st.components.v1.html(plotly_embed.realtime_feed_html(_sk, _rtp), height=0)
     st.caption("🖱️ 드래그=이동(y축 자동 맞춤) · 휠=확대/축소 · 더블클릭=원위치 · "
                "✏️ 모드바 직접 그리기(선·자유곡선·박스)·지우개 + 차트 위 도구바: "
                "🧲 자석(봉 OHLC 스냅)·─ 수평선·🔱 피보나치·📏 측정·🗑 지우기 · "
@@ -454,11 +635,19 @@ def _live_top(ticker, hist, yf_price, prev, pos):
     chg_pct = (chg / prev * 100) if (chg is not None and prev) else None
     ts = data.technical_score(hist["Close"]) if (hist is not None and yf_price is not None) else None
 
-    # 3열 — 히어로 | 📐 기술적 분석 | ⚖️ 가치평가 (게이지 나란히 — 빈 공간 제거)
-    hcol, gcol, vcol = st.columns([1.5, 1, 1])
+    # 3열 — 히어로 | 📐 기술적 분석 | ⚖️ 가치평가 (게이지 나란히 — 빈 공간 제거).
+    # 매크로 자산은 밸류에이션(PER·RIM·목표가) 개념이 없어 2열(히어로+기술)만.
+    _macro = ticker_names.is_macro(ticker)
+    if _macro:
+        hcol, gcol = st.columns([2.5, 1])
+        vcol = None
+    else:
+        hcol, gcol, vcol = st.columns([1.5, 1, 1])
     with hcol:
+        # 통화·단위 — 매크로는 자산별(₩·$/oz·%), 그 외 해외주는 USD (오표기 방지)
+        _cur = ticker_names.macro_unit(ticker) if _macro else "USD"
         theme.render(theme.ticker_hero_html(ticker, ticker_names.display_name(ticker, allow_net=False) or ticker,
-                                            price, chg, chg_pct, src, ""))
+                                            price, chg, chg_pct, src, _cur))
         # 내 포지션 (보유 시) — 히어로 아래 컴팩트 밴드 (게이지와 높이 균형)
         if pos:
             avg = pos.get("avg_price_usd")
@@ -477,17 +666,28 @@ def _live_top(ticker, hist, yf_price, prev, pos):
                                                  title="📐 기술적 분석"))
         else:
             st.caption("기술 신호 N/A")
-    with vcol:
-        val = cached.valuation(ticker) or {}
-        vs = data.valuation_score(price, val.get("metrics"), val.get("consensus"),
-                                  cached.intrinsic(ticker))
-        if vs:
-            theme.render(theme.valuation_gauge_html(vs["score"], sub=vs["sub"]))
-        else:
-            st.markdown(f"<div style='color:{theme.MUTED};font-size:.78rem;"
-                        f"text-align:center;padding-top:26px'>⚖️ 가치평가<br>"
-                        f"<span style='font-size:.72rem'>재료 부족 — 생략 (ETF 등)</span></div>",
-                        unsafe_allow_html=True)
+    # 매크로 자산은 밸류에이션(PER·RIM·목표가) 개념이 없어 가치평가 게이지 자체를 생략
+    if vcol is not None:
+        with vcol:
+            vs = None
+            try:                                # ETF 는 fundamentals 없음 — 404 스팸 방지
+                from providers.etf_data import is_etf as _is_etf
+                _skip_val = _is_etf(ticker)
+            except Exception:
+                _skip_val = False
+            if not _skip_val:
+                val = cached.valuation(ticker) or {}
+                vs = data.valuation_score(price, val.get("metrics"), val.get("consensus"),
+                                          cached.intrinsic(ticker))
+            if vs:
+                theme.render(theme.valuation_gauge_html(vs["score"], sub=vs["sub"]))
+            else:
+                _kr_nodart = (val.get("metrics") or {}).get("kr_yf_fallback") if not _skip_val else False
+                _msg = ("국내주식 — DART 키 설정 시 활성" if _kr_nodart else "재료 부족 — 생략 (ETF 등)")
+                st.markdown(f"<div style='color:{theme.MUTED};font-size:.78rem;"
+                            f"text-align:center;padding-top:26px'>⚖️ 가치평가<br>"
+                            f"<span style='font-size:.72rem'>{_msg}</span></div>",
+                            unsafe_allow_html=True)
 
 
 
@@ -862,13 +1062,17 @@ def _valuation(ticker, price=None):
         b[1].metric("배당수익률", data.f_pct(m.get("div_yield"), 2))
         b[2].metric("배당성장 3Y", data.f_frac_pct_s(m.get("div_growth_3y")))
         b[3].metric("EPS(TTM)", _f_krw(m.get("eps_ttm")) if is_kr else data.f_usd(m.get("eps_ttm")))
-        if is_kr:
+        if is_kr and not m.get("kr_yf_fallback"):
             c = st.columns(4)
             c[0].metric("시가총액", _f_krw_large(m.get("market_cap")))
             c[1].metric("순이익", _f_krw_large(m.get("net_income")))
             c[2].metric("자본", _f_krw_large(m.get("equity")))
             c[3].metric("BPS", _f_krw(m.get("bps")))
             st.caption(_kr_valuation_caption(m))
+        elif m.get("kr_yf_fallback"):
+            st.info("🇰🇷 국내주식 정밀 밸류에이션(PER·PBR·ROE·EPS)엔 **DART_API_KEY** 가 필요합니다 "
+                    "— 무료 발급(opendart.fss.or.kr) 후 `.env` 에 추가하면 DART 재무제표 기반으로 계산됩니다. "
+                    "현재는 yfinance 제한 데이터라 신뢰 불가한 멀티플(Fwd PE·PEG·PSR)은 숨김 처리했습니다.")
     else:
         st.warning(f"밸류에이션 데이터 없음 ({v.get('metrics_error', '')})")
     c = v.get("consensus") or {}
@@ -960,7 +1164,7 @@ def _valuation(ticker, price=None):
     h = v.get("history") or []
     if h:
         st.markdown("##### 📈 실적 서프라이즈 이력")
-        _surprise_chart(h, "실적 서프라이즈 (최근)")
+        _surprise_chart(h, "실적 서프라이즈 (최근)", key=f"{ticker}_val")
     st.caption("정보·표시용 · 매매신호 아님")
 
 
@@ -1003,19 +1207,28 @@ def _kr_valuation_caption(m):
         bits.append(f"신뢰도 {m['confidence']}")
     if m.get("per_status") == "loss":
         bits.append("PER 적자")
+    if m.get("kr_consensus_source") == "naver":
+        bits.append(f"포워드(Fwd PE·PEG·목표가) = {m.get('kr_consensus_year') or '차기연도'}E "
+                    "네이버 증권사 컨센서스")
     return " · ".join(bits)
 
 
-def _surprise_chart(history, caption):
-    """서프라이즈 % 부호 막대 (오래된→최근) + 원표."""
+def _surprise_chart(history, caption, key=None):
+    """서프라이즈 % 부호 막대 (오래된→최근) + 원표.
+
+    key — 같은 페이지에서 두 번 렌더(스냅샷·상세)되므로 plotly_chart 고유 키 필수
+    (없으면 StreamlitDuplicateElementId 크래시 — 라이브 실증).
+    """
     hh = list(reversed(history))   # 최신순 → 시간순
     labels = [str(x.get("date", ""))[:10] for x in hh]
     vals = [x.get("surprise_pct") for x in hh]
     st.caption(caption)
     if any(x is not None for x in vals):
         st.plotly_chart(charts.signed_bars(labels, [float(x or 0) for x in vals]),
-                        width="stretch", config=_NOBAR)
-    st.dataframe(pd.DataFrame(history), hide_index=True, width="stretch")
+                        width="stretch", config=_NOBAR,
+                        key=f"surprise_{key}" if key else None)
+    st.dataframe(pd.DataFrame(history), hide_index=True, width="stretch",
+                 key=f"surprise_tbl_{key}" if key else None)
 
 
 def _financials(ticker):
@@ -1114,7 +1327,7 @@ def _earnings(ticker):
     cal = cached.earnings(ticker)
     h = cal.get("history") or []
     if h:
-        _surprise_chart(h, f"{ticker} 실적 서프라이즈 이력")
+        _surprise_chart(h, f"{ticker} 실적 서프라이즈 이력", key=f"{ticker}_earn")
     else:
         st.warning(f"실적 이력 없음 ({cal.get('error', '')})")
 

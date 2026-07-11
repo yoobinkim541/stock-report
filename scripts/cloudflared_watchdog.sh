@@ -51,13 +51,25 @@ CUR=$(cat "$URL_FILE" 2>/dev/null)
 echo "$NEW" > "$URL_FILE"
 echo "  새 URL: $NEW (이전: ${CUR:-없음})"
 
-# URL 변경 시 Vercel 현관(landing) 링크 갱신 → git push → Vercel 자동배포
-if [ "$NEW" != "$CUR" ] && [ -f "$LANDING" ]; then
+# URL 변경 시 Vercel 현관(landing) 링크 갱신 → master push → Vercel 자동배포.
+# 메인 트리가 feature 브랜치일 수 있으므로(라이브 실증: feat/llm-decision-layer 체크아웃
+# 중이면 커밋이 엉뚱한 브랜치에 감) master 고정 전용 워크트리에서 커밋한다.
+WT="$HOME/.cache/landing_master_wt"
+if [ "$NEW" != "$CUR" ]; then
     cd "$PROJECT_DIR" || exit 1
-    sed -i -E "s#https://[a-z0-9-]+\.trycloudflare\.com#${NEW}#g" "$LANDING"
-    if ! git diff --quiet -- "$LANDING" 2>/dev/null; then
-        git add "$LANDING"
-        git commit -q -m "chore(dashboard): 터널 URL 자동 갱신 (${NEW})" && \
-        git push -q origin master && echo "  Vercel 현관 갱신 push 완료"
+    if [ ! -e "$WT/.git" ]; then
+        git worktree add "$WT" master 2>>"$LOG" || { echo "  워크트리 생성 실패"; exit 1; }
     fi
+    cd "$WT" || exit 1
+    git fetch -q origin master && git reset -q --hard origin/master
+    sed -i -E "s#https://[a-z0-9-]+\.trycloudflare\.com#${NEW}#g" dashboard/landing/index.html
+    if ! git diff --quiet -- dashboard/landing/index.html 2>/dev/null; then
+        git add dashboard/landing/index.html
+        git commit -q -m "chore(dashboard): 터널 URL 자동 갱신 (${NEW})" && \
+        git push -q origin HEAD:master && echo "  Vercel 현관 갱신 push 완료"
+    fi
+    # 텔레그램 통지 (Vercel 현관은 고정이라 안내용 — 실패해도 무해)
+    cd "$PROJECT_DIR" && uv run python -c "
+import notify
+notify.send_telegram('🌐 대시보드 터널 재기동 — Vercel 현관 주소는 그대로, 새 터널 URL 자동 반영됨\n(직통: ${NEW})')" >> "$LOG" 2>&1 || true
 fi

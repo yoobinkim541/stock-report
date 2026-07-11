@@ -30,6 +30,7 @@ from __future__ import annotations
 
 import logging
 import os
+import re
 import sys
 
 import numpy as np
@@ -374,22 +375,42 @@ def _inst_phrase(inst: dict | None) -> str:
         return ""
     parts = []
     if inst.get("held_pct") is not None:
-        parts.append(f"기관지분 {inst['held_pct'] * 100:.0f}%")
+        parts.append(f"기관 {inst['held_pct'] * 100:.0f}%")
     nc = inst.get("net_change")
     if nc is not None:
         if nc > 0.002:
-            seg = f"분기 ▲{nc * 100:.1f}%"
+            seg = f"분기 +{nc * 100:.1f}%"
         elif nc < -0.002:
-            seg = f"분기 ▼{abs(nc) * 100:.1f}%"
+            seg = f"분기 -{abs(nc) * 100:.1f}%"
         else:
             seg = "분기 보합"           # 데드존(±0.2%) — '—0.0%' 대신 '보합'
         if inst.get("buyers") is not None:
-            seg += f"(매수 {inst['buyers']}·매도 {inst['sellers']}"
+            seg += f" · 매수 {inst['buyers']}/매도 {inst['sellers']}"
             if inst.get("new_entrants"):
-                seg += f"·신규 {inst['new_entrants']}"
-            seg += ")"
+                seg += f"/신규 {inst['new_entrants']}"
         parts.append(seg)
     return " · ".join(parts)
+
+
+def _mobile_label(ticker: str, name: str | None) -> str:
+    if not name or name == ticker:
+        return ticker
+    text = " ".join(str(name).replace(",", " ").split())
+    for pat in (r"\bIncorporated\b", r"\bInc\.?\b", r"\bCorporation\b", r"\bCorp\.?\b",
+                r"\bCompany\b", r"\bCo\.?\b", r"\bLtd\.?\b", r"\bLimited\b"):
+        text = re.sub(pat, "", text, flags=re.IGNORECASE)
+    text = re.sub(r"\s+[.,]+$", "", text)
+    text = re.sub(r"\s+\.", "", text)
+    text = " ".join(text.split())
+    if len(text) > 24:
+        words, out = text.split(), []
+        for word in words:
+            cand = " ".join(out + [word])
+            if len(cand) > 24:
+                break
+            out.append(word)
+        text = " ".join(out) if out else text[:23].rstrip() + "…"
+    return f"{text} ({ticker})"
 
 
 def accumulation_line(entry: dict, *, name_fn=None) -> str:
@@ -416,10 +437,10 @@ def accumulation_mobile_block(entries, title: str = "🏛️ 기관 매집", lim
     for e in entries[:limit]:
         t = e["ticker"]
         name = name_fn(t) if name_fn else None
-        label = f"{t}({name})" if name and name != t else t
+        label = _mobile_label(t, name)
         emoji = _VERDICT_EMOJI.get(e["verdict"], "⚪")
-        lines.append(f"{emoji} {label} {e['accum_score']:.0f}점 {_accum_bar(e['accum_score'])}")
-        bits = [e["verdict"]]
+        lines.append(f"{emoji} {label} {e['accum_score']:.0f}점 · {e['verdict']}")
+        bits = []
         if e.get("stealth"):
             bits.append("🤫조용한매집")
         if e.get("vol_surge_flag"):
@@ -427,7 +448,11 @@ def accumulation_mobile_block(entries, title: str = "🏛️ 기관 매집", lim
         inst = _inst_phrase(e.get("institutional"))
         if inst:
             bits.append(inst)
-        lines.append("    " + " · ".join(bits))
+        if not bits:
+            sig = e.get("signals", {}) or {}
+            if sig.get("price_chg_20d") is not None:
+                bits.append(f"20일 가격 {sig.get('price_chg_20d'):+.1f}%")
+        lines.append("    근거: " + " · ".join(bits))
     return lines
 
 

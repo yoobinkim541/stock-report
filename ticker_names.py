@@ -29,7 +29,15 @@ EN: dict[str, str] = {
     # 지수·ETF·레버리지
     "QQQ": "Invesco QQQ", "SPY": "SPDR S&P 500", "TLT": "iShares 20+ Treasury",
     "QLD": "ProShares Ultra QQQ", "TQQQ": "ProShares UltraPro QQQ",
-    "SOXL": "Direxion Semi Bull 3x", "UPRO": "ProShares UltraPro S&P500",
+    "SQQQ": "ProShares UltraPro Short QQQ",
+    "SOXL": "Direxion Semi Bull 3x", "SOXS": "Direxion Semi Bear 3x",
+    "SSO": "ProShares Ultra S&P500", "UPRO": "ProShares UltraPro S&P500",
+    "NVDL": "GraniteShares 2x Long NVDA", "NVD": "GraniteShares 2x Short NVDA",
+    "TSLL": "Direxion TSLA Bull 2x", "AAPU": "Direxion AAPL Bull 2x",
+    "AMZU": "Direxion AMZN Bull 2x", "GGLL": "Direxion GOOGL Bull 2x",
+    "MSFU": "Direxion MSFT Bull 2x", "METU": "Direxion META Bull 2x",
+    "CONL": "GraniteShares 2x Long COIN", "PLTU": "GraniteShares 2x Long PLTR",
+    "MSTU": "T-Rex 2x Long MSTR",
     "QYLD": "Global X Nasdaq Covered Call",
     # 인기 US (검색·표시)
     "AAPL": "Apple", "AMZN": "Amazon", "META": "Meta Platforms", "TSLA": "Tesla",
@@ -88,6 +96,23 @@ KO: dict[str, tuple[str, ...]] = {
     "QQQ": ("나스닥100", "나스닥"),
     "SPY": ("S&P500", "에스앤피"),
     "TLT": ("미국 장기국채",),
+    "QLD": ("나스닥 2배", "QLD"),
+    "TQQQ": ("나스닥 3배", "티큐", "TQQQ"),
+    "SQQQ": ("나스닥 인버스 3배", "에스큐", "SQQQ"),
+    "SOXL": ("반도체 3배", "속슬", "SOXL"),
+    "SOXS": ("반도체 인버스 3배", "속스", "SOXS"),
+    "SSO": ("S&P500 2배", "SSO"),
+    "NVDL": ("엔비디아 2배", "NVDA 2배", "엔비디아 레버리지", "NVDL"),
+    "NVD": ("엔비디아 인버스 2배", "NVDA 인버스", "NVD"),
+    "TSLL": ("테슬라 2배", "TSLA 2배", "테슬라 레버리지", "TSLL"),
+    "AAPU": ("애플 2배", "AAPL 2배", "애플 레버리지", "AAPU"),
+    "AMZU": ("아마존 2배", "AMZN 2배", "아마존 레버리지", "AMZU"),
+    "GGLL": ("구글 2배", "알파벳 2배", "GOOGL 2배", "GGLL"),
+    "MSFU": ("마이크로소프트 2배", "MSFT 2배", "MSFU"),
+    "METU": ("메타 2배", "META 2배", "METU"),
+    "CONL": ("코인베이스 2배", "COIN 2배", "CONL"),
+    "PLTU": ("팔란티어 2배", "PLTR 2배", "PLTU"),
+    "MSTU": ("마이크로스트래티지 2배", "MSTR 2배", "MSTU"),
     "AAPL": ("애플", "APPLE"),
     "AMZN": ("아마존", "AMAZON"),
     "META": ("메타", "페이스북", "FACEBOOK"),
@@ -359,6 +384,26 @@ def resolve(query: str, allow_net: bool = False) -> str | None:
             if nq and nq in _norm(ent.get("name", "")):
                 return tk
     return None
+
+
+# 매크로/지수 자산 → 표시 단위. 주식 분석(밸류·재무·기관·공시) 대신 매크로 전용 뷰 대상.
+# 단위 단일 소스 — 히어로·홈 카드가 공유(환율에 "USD", 금리에 "USD" 붙는 오표기 방지).
+MACRO_UNITS: dict[str, str] = {
+    "KRW=X": "₩", "GC=F": "$/oz", "SI=F": "$/oz", "CL=F": "$/bbl",
+    "BTC-USD": "$", "ETH-USD": "$", "^TNX": "%", "DX-Y.NYB": "",
+    "^VIX": "", "^GSPC": "pt", "^IXIC": "pt",
+}
+MACRO: set[str] = set(MACRO_UNITS)
+
+
+def is_macro(ticker: str) -> bool:
+    """매크로·지수 자산 여부 (환율·원자재·암호화폐·금리·지수 — 대시보드 뷰 분기)."""
+    return (ticker or "").strip().upper() in MACRO
+
+
+def macro_unit(ticker: str) -> str:
+    """매크로 자산 표시 단위 (₩·$/oz·% 등). 매크로가 아니면 ''."""
+    return MACRO_UNITS.get((ticker or "").strip().upper(), "")
 
 
 _US_TICKER_RE = re.compile(r"^[A-Z]{1,5}([.\-][A-Z]{1,2})?$")

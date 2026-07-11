@@ -1,6 +1,7 @@
 """tests/test_dashboard.py — 퀀트 터미널 데이터·인증 순수로직 (무네트워크·무 streamlit)."""
 import json
 import os
+import re
 import sys
 
 import pytest
@@ -171,6 +172,37 @@ def test_verify_password():
     assert auth.verify_password("abc", "xyz") is False
     assert auth.verify_password("abc", None) is False     # fail-closed (미설정)
     assert auth.verify_password("", "") is False
+
+
+def test_auth_cookie_token_roundtrip():
+    """쿠키 세션 토큰 — 발급/검증/만료/키회전 (카드 앵커·F5 비번 재요구 제거의 핵심)."""
+    now = 1_800_000_000.0
+    tok = auth.issue_token("pw", "salt", now=now, ttl_s=3600)
+    assert auth.verify_token(tok, "pw", "salt", now=now) is True
+    assert auth.verify_token(tok, "pw", "salt", now=now + 3599) is True
+    assert auth.verify_token(tok, "pw", "salt", now=now + 3601) is False    # 만료
+    assert auth.verify_token(tok, "other", "salt", now=now) is False        # 비번 변경 → 무효
+    assert auth.verify_token(tok, "pw", "salt2", now=now) is False          # salt 회전 → 무효
+    assert auth.verify_token(tok, None, "salt", now=now) is False           # fail-closed
+    # 변조·형식 불량
+    exp, _, sig = tok.partition(".")
+    assert auth.verify_token(f"{int(exp) + 9999}.{sig}", "pw", "salt", now=now) is False
+    for bad in ("", "garbage", "123", "abc.def", None):
+        assert auth.verify_token(bad, "pw", "salt", now=now) is False
+    # 토큰에 비밀번호 평문 미포함 + 쿠키 안전 문자만
+    assert "pw" not in tok and re.fullmatch(r"\d+\.[0-9a-f]{64}", tok)
+    # 비ASCII/임의 쿠키값이 로그인 게이트를 크래시시키면 안 됨 (compare_digest TypeError DoS)
+    for weird in ("9999999999.ábc", "9999999999." + "가" * 64, "9999999999." + "A" * 64,
+                  "9999999999." + "0" * 63):
+        assert auth.verify_token(weird, "pw", "salt", now=now) is False   # no raise
+
+
+def test_auth_cookie_html_injection_safe():
+    """쿠키 주입 HTML — 토큰은 검증된 hex 형식이라 스크립트 이탈 불가 + 만료 설정."""
+    tok = auth.issue_token("pw", "salt", now=1_800_000_000.0)
+    html = auth._set_cookie_html(tok)
+    assert auth.COOKIE_NAME + "=" + tok in html and "max-age=" in html
+    assert "SameSite=Lax" in html
 
 
 # ── 포맷터 (스케일 명시 — 부호/스케일 버그 차단) ─────────────────────────────
@@ -492,6 +524,153 @@ def test_price_alerts_cross_process_serialized(tmp_path):
     assert chk.returncode == 0, chk.stderr[-800:]
     n = int(chk.stdout.strip().splitlines()[-1])
     assert n == 30, f"lost update! {n}/30"
+
+
+def test_llm_related_parse_hallucination_defense():
+    """🤖 연관 종목 파서 — 환각 티커 폐기·자기 제외·enum 강등·중복 제거·펜스 허용."""
+    from providers import llm_related
+    raw = """다음과 같이 추천합니다:
+```json
+[
+ {"ticker": "AMD", "relation": "경쟁사", "reason": "GPU 직접 경쟁"},
+ {"ticker": "FAKE123XYZ", "relation": "경쟁사", "reason": "환각"},
+ {"ticker": "<script>", "relation": "경쟁사", "reason": "주입"},
+ {"ticker": "NVDA", "relation": "경쟁사", "reason": "자기 자신"},
+ {"ticker": "amd", "relation": "경쟁사", "reason": "중복(소문자)"},
+ {"ticker": "005930.KS", "relation": "이상한관계", "reason": "국내 — enum 밖 관계"},
+ {"ticker": "TSM", "relation": "공급망", "reason": "파운드리"}
+]
+```"""
+    out = llm_related.parse_related(raw, "NVDA")
+    tks = [o["ticker"] for o in out]
+    assert "AMD" in tks and "TSM" in tks and "005930.KS" in tks
+    assert "NVDA" not in tks and not any("FAKE" in t or "<" in t for t in tks)
+    assert tks.count("AMD") == 1                              # 중복 제거
+    kr = next(o for o in out if o["ticker"] == "005930.KS")
+    assert kr["relation"] == "연관"                            # enum 밖 → 강등
+    # 잡문·비배열 graceful
+    assert llm_related.parse_related("추천 없음", "NVDA") == []
+    assert llm_related.parse_related('{"ticker": "AMD"}', "NVDA") == []
+    assert llm_related.parse_related("", "NVDA") == []
+
+
+def test_llm_related_runner_and_cache(tmp_path, monkeypatch):
+    """🤖 연관 종목 러너 — 정상 호출→캐시 적재→2회차 cached, 실패·비활성 graceful."""
+    from providers import llm_related
+    monkeypatch.setattr(llm_related, "CACHE_DIR", tmp_path)
+    payload = '[{"ticker": "AMD", "relation": "경쟁사", "reason": "GPU"}]'
+
+    class _R:
+        returncode = 0
+        stdout = payload
+        stderr = ""
+
+    calls = []
+
+    def runner(cmd, **kw):
+        calls.append(cmd)
+        assert "hermes" == cmd[0] and "-Q" in cmd
+        return _R()
+
+    items, status = llm_related.related_tickers("NVDA", name="NVIDIA", runner=runner)
+    assert status == "ok" and items[0]["ticker"] == "AMD" and len(calls) == 1
+    items2, status2 = llm_related.related_tickers("NVDA", runner=runner)
+    assert status2 == "cached" and items2 == items and len(calls) == 1   # 디스크 캐시 히트
+
+    def boom(cmd, **kw):
+        raise RuntimeError("no hermes")
+
+    assert llm_related.related_tickers("MSFT", runner=boom)[1].startswith("call failed")
+    monkeypatch.setenv("DASH_LLM_RELATED_ENABLED", "0")
+    assert llm_related.related_tickers("MSFT", runner=runner)[1] == "disabled"
+
+
+def test_is_macro_classification_and_units():
+    """매크로 판별 + 단위 단일 소스 (환율에 'USD', 금리에 'USD' 붙는 오표기 방지)."""
+    import ticker_names as tn
+    for t in ("KRW=X", "GC=F", "BTC-USD", "^TNX", "DX-Y.NYB", "^VIX", "krw=x"):
+        assert tn.is_macro(t), t
+    for t in ("NVDA", "QQQ", "005930.KS", "", None):
+        assert not tn.is_macro(t), t
+    assert tn.macro_unit("KRW=X") == "₩" and tn.macro_unit("gc=f") == "$/oz"
+    assert tn.macro_unit("^TNX") == "%" and tn.macro_unit("BTC-USD") == "$"
+    assert tn.macro_unit("NVDA") == ""                     # 주식 → 빈 문자열
+    assert set(tn.MACRO) == set(tn.MACRO_UNITS)            # 멤버십·단위 동기
+
+
+def test_query_param_ticker_is_whitelisted():
+    """`?tk=` 는 앵커 카드가 쓰는 **비신뢰 입력** — 마크업·경로·SQL 류는 전부 None.
+
+    app.py 가 normalize_input 결과만 session_state["ticker"] 에 넣고, 그 값은
+    unsafe_allow_html 히어로/사이드바 라벨로 흘러가므로 여기서 차단되어야 한다.
+    """
+    import ticker_names as tn
+    for bad in ('<script>alert(1)</script>', '"><img src=x onerror=alert(1)>', "A<B",
+                "javascript:alert(1)", "../../etc/passwd", "GC=F<script>", "<b>x</b>"):
+        assert tn.normalize_input(bad) is None, bad
+    # 정상 매크로 심볼은 통과 (시드 화이트리스트 경유)
+    assert tn.normalize_input("GC=F") == "GC=F"
+    assert tn.normalize_input("krw=x") == "KRW=X"
+    assert tn.normalize_input("^TNX") == "^TNX"
+
+
+def test_series_profile_and_percentile():
+    """성과 프로필(수익률·52주 위치·변동성·200일 이격) + 역사 백분위 — 순수·graceful."""
+    import numpy as np
+    import pandas as pd
+    from dashboard import data as ddata
+    idx = pd.date_range("2024-01-01", periods=400, freq="D")
+    up = pd.DataFrame({"Close": np.linspace(100.0, 150.0, 400)}, index=idx)
+    p = ddata.series_profile(up)
+    assert p["r1y"] > 0 and p["ytd"] > 0 and p["last"] == 150.0
+    assert p["hi52"] == 150.0 and p["pos52"] == pytest.approx(1.0)
+    assert p["vol_ann"] is not None and p["ma200_gap"] > 0     # 상승 → 200일선 위
+    assert ddata.history_percentile(up) > 95                   # 최근값이 최고 → 상위 백분위
+    dn = pd.DataFrame({"Close": np.linspace(150.0, 100.0, 400)}, index=idx)
+    assert ddata.series_profile(dn)["ma200_gap"] < 0
+    assert ddata.history_percentile(dn) < 5
+    # 짧은 이력·결측 graceful
+    assert ddata.series_profile(pd.DataFrame({"Close": [1.0, 2.0]})) is None
+    assert ddata.series_profile(None) is None
+    assert ddata.history_percentile(pd.DataFrame({"Close": [1.0, 2.0]})) is None
+    short = pd.DataFrame({"Close": np.linspace(10.0, 11.0, 20)},
+                         index=pd.date_range("2026-06-20", periods=20, freq="D"))
+    sp = ddata.series_profile(short)
+    # 창을 못 덮는 구간은 None — 20일치로 "1년/3개월/YTD" 라벨을 만들면 허위
+    assert sp is not None and sp["r1y"] is None and sp["r3m"] is None
+    assert sp["ytd"] is None and sp["ma200_gap"] is None
+    assert sp["r1w"] is not None                                # 1주는 덮음
+    # tz-aware 인덱스에서도 YTD 계산 (yfinance 미국장 인덱스)
+    tzs = pd.DataFrame({"Close": np.linspace(100.0, 110.0, 400)},
+                       index=pd.date_range("2025-06-01", periods=400, freq="D",
+                                           tz="America/New_York"))
+    assert ddata.series_profile(tzs)["ytd"] is not None
+
+
+def test_macro_correlations(monkeypatch):
+    """연관 자산 상관 — 90일 피어슨·30일 등락·미지원 티커 []·yf 실패 graceful []."""
+    import numpy as np
+    import pandas as pd
+    import yfinance as yf
+    from dashboard import views
+    idx = pd.date_range("2026-01-01", periods=180, freq="D")
+    base = pd.Series(np.linspace(100.0, 120.0, 180), index=idx)
+    frames = {"GC=F": base, "^TNX": pd.Series(np.linspace(5.0, 4.0, 180), index=idx),  # 역방향
+              "DX-Y.NYB": base * 1.01, "SI=F": base * 0.5}
+    df = pd.concat({k: pd.DataFrame({"Close": v}) for k, v in frames.items()}, axis=1)
+    monkeypatch.setattr(yf, "download", lambda *a, **k: df)
+    out = views.macro_correlations("GC=F")
+    assert len(out) == 3 and {r["symbol"] for r in out} == {"^TNX", "DX-Y.NYB", "SI=F"}
+    tnx = next(r for r in out if r["symbol"] == "^TNX")
+    assert tnx["corr90"] is not None and tnx["chg90" if False else "chg30"] is not None
+    assert all(r.get("note") for r in out)                       # 관계 설명 필수
+    assert views.macro_correlations("NVDA") == []                # 미지원 → 빈 목록
+
+    def _boom(*a, **k):
+        raise RuntimeError("net down")
+
+    monkeypatch.setattr(yf, "download", _boom)
+    assert views.macro_correlations("GC=F") == []                # graceful
 
 
 def test_views_chart_news_events(tmp_path, monkeypatch):
@@ -1063,3 +1242,82 @@ def test_load_kr_holdings(tmp_path):
     empty = tmp_path / "e.json"
     empty.write_text("{}")
     assert data.load_kr_holdings(str(empty)) == {}
+
+
+def test_backtest_persist_roundtrip(tmp_path, monkeypatch):
+    """백테스트 결과 디스크 영속 — equity DataFrame 직렬화 왕복."""
+    import pandas as pd
+
+    from dashboard import views
+    monkeypatch.setattr(views, "_backtest_last_path", lambda: tmp_path / "bt.json")
+    assert views.backtest_last() is None              # 파일 없음 → None
+    eq = pd.DataFrame({"ml": [1.0, 1.1], "qqq": [1.0, 0.9]})
+    views._backtest_persist({"ml": {"cagr": 0.2, "sharpe": 1.1}, "qqq": {"cagr": 0.1},
+                             "overlay": {}, "verdict": "채택", "reasons": ["r1"],
+                             "equity": eq, "wf": {"ignored": object()}})
+    d = views.backtest_last()
+    assert d["verdict"] == "채택" and d["asof"] and d["ml"]["cagr"] == 0.2
+    assert list(d["equity"].columns) == ["ml", "qqq"] and len(d["equity"]) == 2
+
+
+def test_valuation_score_kr_no_dart_suppressed():
+    """KR 열화모드(DART 미가용·per None) — yfinance garbage 로 게이지 오도 방지 → None."""
+    from dashboard import data
+    kr_yf = {"market_type": "kr", "per": None, "forward_pe": None, "peg": None,
+             "psr": None, "roe": 0.19, "kr_yf_fallback": True}
+    # 목표가만 있어도 KR 열화모드면 억제 (야후 KR 목표가도 불신)
+    assert data.valuation_score(286250, kr_yf, {"target_mean": 480000}, {}) is None
+    # DART 가용(per 존재)이면 정상 채점
+    kr_dart = {"market_type": "kr", "per": 12.0, "pbr": 1.1, "roe": 0.12,
+               "eps_ttm": 5000, "eps_fwd": 5800}
+    got = data.valuation_score(60000, kr_dart, {"target_mean": 72000}, {})
+    assert got is not None and -1.0 <= got["score"] <= 1.0
+
+
+def test_valuation_metrics_kr_suppresses_yf_multiples(monkeypatch):
+    """KR yfinance 폴백 — 신뢰불가 멀티플(forward_pe·peg·psr) 폐기 + 폴백 마커.
+
+    밀폐: 다른 테스트가 .env(DART 키)를 로드하면 DART 경로가 성공해 순서 의존 실패
+    → DART 를 명시적으로 미가용 처리해 yf 폴백 분기를 고정 검증.
+    """
+    from providers import earnings_data, kr_fundamentals
+    monkeypatch.setattr(kr_fundamentals, "recent_annual_metrics",
+                        lambda t, **k: {"confidence": "missing"})
+    m = earnings_data.valuation_metrics("005930.KS")
+    assert m.get("market_type") == "kr"
+    assert m.get("forward_pe") is None and m.get("peg") is None and m.get("psr") is None
+    assert m.get("kr_yf_fallback") is True
+
+
+def test_ohlc_disk_fallback_prevents_blank(tmp_path, monkeypatch):
+    """yfinance 실패(빈값) 시 디스크 폴백 → 차트 blank 방지 (마감 후 재방문 케이스)."""
+    import pandas as pd
+
+    from dashboard import cached
+    monkeypatch.setattr(cached, "_ohlc_disk_path",
+                        lambda t, period: tmp_path / f"{t}__{period}.parquet")
+    good = pd.DataFrame({"Open": [1.0, 2.0], "High": [1.0, 2.0], "Low": [1.0, 2.0],
+                         "Close": [1.0, 2.0], "Volume": [10, 20]},
+                        index=pd.to_datetime(["2026-07-07", "2026-07-08"]))
+    import providers.market_data as md
+    monkeypatch.setattr(md, "_history_cached", lambda t, period="1y": good)
+    assert len(cached.ohlc.__wrapped__("005930.KS", "max")) == 2   # 정상 → 디스크 백업
+    # 이제 yfinance 실패(빈 DataFrame) → 디스크 폴백이 마지막 정상 데이터 반환
+    monkeypatch.setattr(md, "_history_cached", lambda t, period="1y": pd.DataFrame())
+    out = cached.ohlc.__wrapped__("005930.KS", "max")
+    assert out is not None and not out.empty and len(out) == 2       # blank 아님
+
+
+def test_valuation_score_kr_trailing_gauge():
+    """KR DART 트레일링(PER·PBR·ROE) 게이지 — forward/PEG 없어도 채점(기존엔 상시 공백)."""
+    from dashboard import data
+    kr = {"market_type": "kr", "per": 12.0, "pbr": 1.0, "roe": 0.15,
+          "forward_pe": None, "peg": None, "eps_ttm": 5000, "eps_fwd": None}
+    got = data.valuation_score(60000, kr, {}, {})
+    assert got is not None and got["n"] >= 2            # PER + P/B·ROE → 게이지 표시
+    assert "PER" in got["sub"] and "P/B" in got["sub"]
+    # 저평가 방향: PER 12(이익수익률 8.3%)·PBR 1.0 vs 정당 P/B(ROE15%→2.0) → 저평가(+)
+    assert got["score"] > 0
+    # KR yfinance 목표가(신뢰불가)는 게이지에 반영 안 됨 — target 만으론 채점 불가
+    kr_only_tgt = {"market_type": "kr", "per": None, "pbr": None, "roe": None}
+    assert data.valuation_score(60000, kr_only_tgt, {"target_mean": 99999}, {}) is None

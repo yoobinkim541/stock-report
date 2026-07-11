@@ -92,22 +92,44 @@ _TEMPLATE = r"""
            font:12px Pretendard, -apple-system, sans-serif; }
   .tbtn { background:#131722; color:#d1d4dc; border:1px solid #1e222d; border-radius:6px;
           padding:3px 9px; font:12px Pretendard, -apple-system, sans-serif; cursor:pointer;
-          line-height:1.5; }
+          line-height:1.5; white-space:nowrap; }
   .tbtn:hover { border-color:#2f81f7; }
   .tbtn.on { border-color:#2f81f7; color:#2f81f7; background:rgba(47,129,247,.08); }
+  .tsep { width:1px; align-self:stretch; background:#1e222d; margin:0 2px; }
   #tool-hint { color:#9198a6; font-size:11px; margin-left:4px; }
+  /* 좌측 도구 독 (풀뷰 — TradingView 배치) */
+  #wrap.dock { display:flex; gap:8px; align-items:stretch; }
+  #wrap.dock #tools { flex-direction:column; align-items:stretch; width:112px;
+                      margin:0; align-self:flex-start; position:sticky; top:0; }
+  #wrap.dock .tsep { width:auto; height:1px; margin:2px 0; }
+  #wrap.dock #tool-hint { margin:2px 0 0; white-space:normal; }
+  #wrap.dock #ohlcbar { order:-1; margin:0 0 4px; white-space:normal; }
+  #wrap.dock #chartcol { flex:1; min-width:0; }
 </style>
+<div id="wrap">
 <div id="tools">
   <button id="bt-mag" class="tbtn on" title="그리기·편집 시 봉의 시가/고가/저가/종가에 착 붙음">🧲 자석</button>
   <button id="bt-hline" class="tbtn" title="차트에 짧게 긋기 = 시작점 가격 수평선">─ 수평선</button>
+  <button id="bt-vline" class="tbtn" title="차트에 짧게 긋기 = 시작점 날짜 수직선">│ 수직선</button>
+  <button id="bt-cross" class="tbtn" title="차트에 짧게 긋기 = 시작점 크로스라인(수평+수직)">✚ 크로스</button>
+  <button id="bt-ray" class="tbtn" title="두 점을 긋면 오른쪽으로 무한 연장">↗ 레이</button>
+  <button id="bt-ext" class="tbtn" title="두 점을 긋면 양방향 무한 연장">⤢ 연장선</button>
+  <span class="tsep"></span>
   <button id="bt-fib" class="tbtn" title="고점↔저점 긋기 = 되돌림 레벨 자동">🔱 피보나치</button>
   <button id="bt-meas" class="tbtn" title="박스 드래그 = Δ가격·Δ%·봉수·기간">📏 측정</button>
+  <button id="bt-long" class="tbtn" title="진입→목표 위로 박스 드래그 = 롱 포지션(RR 1:1 손절 자동 · 조정은 지우고 다시)">📈 롱</button>
+  <button id="bt-short" class="tbtn" title="진입→목표 아래로 박스 드래그 = 숏 포지션(RR 1:1 손절 자동)">📉 숏</button>
+  <button id="bt-text" class="tbtn" title="차트에 짧게 긋기 = 시작점에 텍스트 메모">📝 메모</button>
+  <span class="tsep"></span>
   <button id="bt-clear" class="tbtn" title="직접 그린 도형 전체 제거">🗑 지우기</button>
   <span id="tool-hint"></span>
   <span id="ohlcbar" style="margin-left:auto;font:11px 'JetBrains Mono', ui-monospace, monospace;
         color:#9198a6;white-space:nowrap"></span>
 </div>
+<div id="chartcol">
 <div id="chart" style="width:100%;min-height:@@HEIGHT@@px"></div>
+</div>
+</div>
 <div id="detail" style="display:none;margin-top:6px;padding:8px 12px;border:1px solid #1e222d;
   border-radius:8px;background:#131722;color:#d1d4dc;
   font:12px 'JetBrains Mono', ui-monospace, monospace"></div>
@@ -125,6 +147,8 @@ _TEMPLATE = r"""
   const fitVH = @@FIT_VH@@;                      // 풀뷰 — 부모 창 높이에 맞춰 리사이즈
   const pctMode = @@PCT_MODE@@;                  // 비교(%) 모드 — 가격 포맷 대신 %
   const yLog = @@Y_LOG@@;                        // 로그 스케일 — 도형 y 좌표는 log10 공간
+  if (@@DOCK@@) document.getElementById("wrap").classList.add("dock");   // 풀뷰 좌측 도구 독
+  const live = @@LIVE@@;                         // ⚡ live — 피더 localStorage 실시간 패치
   function vhFit() {                             // same-origin iframe — frameElement 직접 리사이즈
     try {
       const fe = window.frameElement;
@@ -139,8 +163,8 @@ _TEMPLATE = r"""
     try {
       window.parent.addEventListener("resize", () => {
         const h = vhFit();
-        guard = true;
-        Plotly.relayout(gd, {height: h}).then(() => { guard = false; });
+        guard++;
+        Plotly.relayout(gd, {height: h}).then(() => { unguard(); });
       });
     } catch (e) {}
   }
@@ -150,7 +174,21 @@ _TEMPLATE = r"""
     if (k.startsWith("yaxis")) fig.layout[k].fixedrange = true;
   }
   const hoverMode = fig.layout.hovermode || "x unified";
-  let guard = false, dragging = false, hoverOff = false;
+  // guard = **카운터** (boolean 금지). plotly relayout 은 자기 이벤트를 비동기 emit 하는데
+  // (emit 은 항상 해당 호출의 .then 보다 앞 — plotly.js 3.6 소스 확정) 여러 relayout 이
+  // 겹치면 boolean 은 다른 호출의 .then 이 조기 해제 → 메아리가 새어 무한 루프(탭 프리즈).
+  // 카운터는 전 in-flight 가 끝나야 0 — 자기 메아리는 항상 guard>0 구간에 도착한다.
+  let guard = 0, dragging = false, hoverOff = false;
+  const unguard = () => { guard = Math.max(0, guard - 1); };
+  let drawGuard = 0;                             // 도형/주석 자기 relayout 전용 카운터
+  const undraw = () => { drawGuard = Math.max(0, drawGuard - 1); };
+  // ⚠️ plotly 는 {shapes:[...]} relayout 의 자기 이벤트를 **비동기**로(promise .then 이
+  // guard=false 로 되돌린 뒤) emit 한다 → boolean guard 만으론 자기 메아리를 못 막아,
+  // applyDraw→메아리→magnet 재스냅→applyDraw 무한 루프로 탭이 얼어붙었다(실측 확정).
+  // 방어는 **내용 기반**(카운터는 sync/async/수동 emit 에 드리프트): (1) 새 draw 이벤트의
+  // 마지막 도형이 이미 우리가 만든 tool-*/서버 도형이면 = 자기 메아리 → 무시,
+  // (2) 자석 snapShape 는 좌표가 실제로 바뀔 때만 applyDraw(멱등 — 이미 스냅된 메아리는
+  //     재적용 안 해 루프가 끊김). 두 가드가 named/unnamed 도형을 각각 커버.
 
   const volAxis = @@VOL_AXIS@@;                  // 거래량 패널 축 id (없으면 null)
   // 전역 거래량 상위 2% 분위 캡 — 스파이크가 창에 들어와도 평상 막대가 읽히게
@@ -210,13 +248,13 @@ _TEMPLATE = r"""
     const visDelta = Math.abs((applied[0] ?? 1e18) - curY.price[0])
                    + Math.abs((applied[1] ?? 1e18) - curY.price[1]);
     if (!busy && now - lastApply >= minGap && visDelta > span * 0.004) {
-      busy = true; guard = true; lastApply = now;
+      busy = true; guard++; lastApply = now;
       const t0 = performance.now();
       const upd = {"yaxis.range": curY.price.slice()};
       if (volAxis && !dragging) upd[volAxis + ".range"] = [0, curY.vol[1]];
       Plotly.relayout(gd, upd).then(() => {
         costMs = costMs * 0.7 + (performance.now() - t0) * 0.3;   // 비용 EMA
-        busy = false; guard = false;
+        busy = false; unguard();
       });
     }
     if (!done || dragging) raf = requestAnimationFrame(animStep);
@@ -267,8 +305,8 @@ _TEMPLATE = r"""
 
   function muteHover() {                         // 제스처 중 hover 연산 중지 (1회)
     if (hoverOff) return;
-    hoverOff = true; guard = true;
-    Plotly.relayout(gd, {hovermode: false}).then(() => { guard = false; });
+    hoverOff = true; guard++;
+    Plotly.relayout(gd, {hovermode: false}).then(() => { unguard(); });
   }
 
   function finishGesture() {                     // 제스처 끝 1회 — 콜아웃·hover 복원
@@ -281,11 +319,57 @@ _TEMPLATE = r"""
     callouts(x0, x1, upd);                       // 무거운 주석 갱신은 여기서만
     if (hoverOff) { upd["hovermode"] = hoverMode; hoverOff = false; }
     if (Object.keys(upd).length) {
-      guard = true;
-      Plotly.relayout(gd, upd).then(() => { guard = false; });
+      guard++;
+      Plotly.relayout(gd, upd).then(() => { unguard(); });
     }
   }
   const rescale = finishGesture;                 // 초기 표시창 경로 하위호환
+
+  // ── 커스텀 크로스헤어 — plotly 스파이크 대신 순수 DOM 오버레이 ──
+  // 스파이크는 마우스무브마다 plotly 재그리기 유발(다중 트레이스 스터터·성능 회귀 확정).
+  // DOM translate 는 리플로우/재그리기 0 — rAF 스로틀 + 가격 버블(y축 매핑·log 대응).
+  const xhV = document.createElement("div");
+  const xhH = document.createElement("div");
+  const xhY = document.createElement("div");
+  xhV.style.cssText = "position:absolute;top:0;left:0;width:0;border-left:1px dashed #6b7385;" +
+    "pointer-events:none;display:none;z-index:3";
+  xhH.style.cssText = "position:absolute;top:0;left:0;height:0;border-top:1px dashed #6b7385;" +
+    "pointer-events:none;display:none;z-index:3";
+  xhY.style.cssText = "position:absolute;top:0;left:0;pointer-events:none;display:none;z-index:4;" +
+    "background:#2a2e39;color:#d1d4dc;font:10px 'JetBrains Mono',monospace;" +
+    "padding:1px 4px;border-radius:3px;transform-origin:left center";
+  let xhRaf = null, xhEvt = null;                      // 부착은 newPlot 후 (newPlot 이 div 를 비움)
+  function xhHide() { xhV.style.display = xhH.style.display = xhY.style.display = "none"; }
+  function xhApply() {
+    xhRaf = null;
+    const e = xhEvt;
+    if (!e) return;
+    const drag = gd.querySelector(".nsewdrag");        // 메인(가격) 플롯 영역
+    if (!drag) return;
+    const pr = drag.getBoundingClientRect(), gr = gd.getBoundingClientRect();
+    if (e.clientX < pr.left || e.clientX > pr.right
+        || e.clientY < pr.top || e.clientY > pr.bottom) { xhHide(); return; }
+    const x = e.clientX - gr.left, y = e.clientY - gr.top;
+    xhV.style.display = xhH.style.display = "block";
+    xhV.style.transform = "translateX(" + x + "px)";
+    xhV.style.top = (pr.top - gr.top) + "px";
+    xhV.style.height = pr.height + "px";
+    xhH.style.transform = "translateY(" + y + "px)";
+    xhH.style.left = (pr.left - gr.left) + "px";
+    xhH.style.width = pr.width + "px";
+    const yr = gd.layout.yaxis && gd.layout.yaxis.range;
+    if (yr) {                                          // y 가격 버블 (축좌표 → fmtVal 이 환산)
+      const frac = (e.clientY - pr.top) / pr.height;
+      xhY.textContent = fmtVal(yr[1] + (yr[0] - yr[1]) * frac);
+      xhY.style.display = "block";
+      xhY.style.transform = "translate(" + (pr.right - gr.left + 2) + "px, " + (y - 8) + "px)";
+    }
+  }
+  gd.addEventListener("mousemove", (e) => {
+    xhEvt = e;
+    if (!xhRaf) xhRaf = requestAnimationFrame(xhApply);
+  });
+  gd.addEventListener("mouseleave", xhHide);
 
   // ── OHLC 데이터창 — 호버 봉의 시·고·저·종·거래량·등락% 리드아웃 (bounds 재사용) ──
   const ohlcEl = document.getElementById("ohlcbar");
@@ -398,24 +482,38 @@ _TEMPLATE = r"""
     return v.toFixed(2);
   }
 
+  const TOOL_BTNS = [["bt-hline", "hline"], ["bt-vline", "vline"], ["bt-cross", "cross"],
+                     ["bt-ray", "ray"], ["bt-ext", "ext"], ["bt-fib", "fib"],
+                     ["bt-meas", "meas"], ["bt-long", "long"], ["bt-short", "short"],
+                     ["bt-text", "text"]];
+
   function setTool(next) {                       // 도구 토글 (상호 배타) + dragmode 전환
     tool = (tool === next) ? null : next;
-    const dm = {hline: "drawline", fib: "drawline", meas: "drawrect"}[tool] || "pan";
-    guard = true;
-    Plotly.relayout(gd, {dragmode: dm}).then(() => { guard = false; });
-    for (const [id, name] of [["bt-hline", "hline"], ["bt-fib", "fib"], ["bt-meas", "meas"]])
+    const dm = {hline: "drawline", vline: "drawline", cross: "drawline",
+                ray: "drawline", ext: "drawline", fib: "drawline", text: "drawline",
+                meas: "drawrect", long: "drawrect", short: "drawrect"}[tool] || "pan";
+    guard++;
+    Plotly.relayout(gd, {dragmode: dm}).then(() => { unguard(); });
+    for (const [id, name] of TOOL_BTNS)
       document.getElementById(id).classList.toggle("on", tool === name);
     document.getElementById("tool-hint").textContent = {
       hline: "차트에 짧게 긋기 = 시작점 가격 수평선",
+      vline: "차트에 짧게 긋기 = 시작점 날짜 수직선",
+      cross: "차트에 짧게 긋기 = 시작점 크로스라인",
+      ray: "두 점을 그으면 오른쪽으로 연장",
+      ext: "두 점을 그으면 양방향 연장",
       fib: "고점↔저점으로 드래그 = 되돌림 레벨",
       meas: "측정할 구간을 박스로 드래그",
+      long: "진입→목표 위로 드래그 = 롱 (손절 RR 1:1 자동)",
+      short: "진입→목표 아래로 드래그 = 숏 (손절 RR 1:1 자동)",
+      text: "차트에 짧게 긋기 = 그 지점 메모",
     }[tool] || "";
   }
 
   function applyDraw(shapes, anns) {             // 도형/주석 일괄 반영 (자기이벤트 가드)
-    guard = true;
+    drawGuard++;                                 // 도형 메아리 전용 카운터 — 루프 차단 핵심
     Plotly.relayout(gd, {shapes: shapes, annotations: anns}).then(() => {
-      guard = false;
+      undraw();
       scheduleSave();                            // 도구 산출물 영속화
     });
   }
@@ -433,6 +531,118 @@ _TEMPLATE = r"""
     anns.push({name: "tool-hline", xref: "paper", x: 1, xanchor: "left", y: y, yref: "y",
                showarrow: false, text: "<b>" + fmtVal(y) + "</b>",
                font: {size: 10, color: "#ffffff"}, bgcolor: "#f59e0b", borderpad: 2});
+    applyDraw(shapes, anns);
+    setTool(null);
+  }
+
+  function makeVline(sh, shapes, idx) {          // 그은 선 → 전고 수직선 + 상단 날짜 라벨
+    let ms = toMs(sh.x0);
+    if (magnet) ms = snapPoint(ms, sh.y0)[0];
+    shapes.splice(idx, 1);
+    const x = toISO(ms);
+    shapes.push({type: "line", name: "tool-vline", xref: "x", x0: x, x1: x,
+                 yref: "paper", y0: 0, y1: 1,
+                 line: {color: "#f59e0b", width: 1.2, dash: "dot"}});
+    const anns = curAnns();
+    anns.push({name: "tool-vline", x: x, xref: "x", y: 1, yref: "paper",
+               yanchor: "bottom", showarrow: false,
+               text: new Date(ms).toISOString().slice(0, 10),
+               font: {size: 9, color: "#f59e0b"}, bgcolor: "rgba(19,23,34,.75)"});
+    applyDraw(shapes, anns);
+    setTool(null);
+  }
+
+  function makeCross(sh, shapes, idx) {          // 크로스라인 = 수평선 + 수직선 세트
+    let ms = toMs(sh.x0), y = sh.y0;
+    if (magnet) { const p = snapPoint(ms, y); ms = p[0]; y = p[1]; }
+    shapes.splice(idx, 1);
+    const x = toISO(ms);
+    shapes.push({type: "line", name: "tool-cross", xref: "paper", x0: 0, x1: 1,
+                 yref: "y", y0: y, y1: y, line: {color: "#8b93a7", width: 1, dash: "dot"}});
+    shapes.push({type: "line", name: "tool-cross", xref: "x", x0: x, x1: x,
+                 yref: "paper", y0: 0, y1: 1, line: {color: "#8b93a7", width: 1, dash: "dot"}});
+    const anns = curAnns();
+    anns.push({name: "tool-cross", xref: "paper", x: 1, xanchor: "left", y: y, yref: "y",
+               showarrow: false, text: fmtVal(y),
+               font: {size: 9, color: "#8b93a7"}, bgcolor: "rgba(19,23,34,.75)"});
+    applyDraw(shapes, anns);
+    setTool(null);
+  }
+
+  function makeRay(sh, shapes, idx, both) {      // 레이/연장선 — (ms,y) 기울기로 외삽
+    let x0 = toMs(sh.x0), y0 = sh.y0, x1 = toMs(sh.x1), y1 = sh.y1;
+    if (magnet) { [x0, y0] = snapPoint(x0, y0); [x1, y1] = snapPoint(x1, y1); }
+    if (x1 === x0) { setTool(null); return; }    // 세로 = 기울기 무한 — 수직선 도구 안내
+    if (x1 < x0) { const t = [x0, y0]; [x0, y0] = [x1, y1]; [x1, y1] = t; }
+    const slope = (y1 - y0) / (x1 - x0);
+    const lastMs = bounds.length ? bounds[bounds.length - 1][0] : x1;
+    const span = Math.max(lastMs - (bounds.length ? bounds[0][0] : x0), x1 - x0);
+    const xr = lastMs + span * 0.25;             // 오른쪽 여유 연장 (팬 시에도 길게)
+    const yr = y0 + slope * (xr - x0);
+    let xs = x0, ys = y0;
+    if (both) { xs = x0 - (x1 - x0) - span * 0.25; ys = y0 + slope * (xs - x0); }
+    shapes.splice(idx, 1);
+    shapes.push({type: "line", name: both ? "tool-ext" : "tool-ray", xref: "x",
+                 x0: toISO(xs), x1: toISO(xr), yref: "y", y0: ys, y1: yr,
+                 line: {color: "#2f81f7", width: 1.4}});
+    applyDraw(shapes, curAnns());
+    setTool(null);
+  }
+
+  function makeText(sh, shapes, idx) {           // 메모 — 시작점에 텍스트 주석
+    let ms = toMs(sh.x0), y = sh.y0;
+    if (magnet) { const p = snapPoint(ms, y); ms = p[0]; y = p[1]; }
+    shapes.splice(idx, 1);
+    let txt = "";
+    try { txt = (window.prompt("메모 내용", "") || "").slice(0, 60); } catch (e) {}
+    const anns = curAnns();
+    if (txt)
+      anns.push({name: "tool-note", x: toISO(ms), y: y, yref: "y", showarrow: true,
+                 arrowhead: 2, ax: 0, ay: -28, text: txt,
+                 font: {size: 11, color: "#e8e8ea"}, bgcolor: "#2a2e39",
+                 bordercolor: "#3d4354", borderpad: 4});
+    applyDraw(shapes, anns);
+    setTool(null);
+  }
+
+  function makePosition(sh, shapes, idx, dir) {  // 롱/숏 포지션 — RR 박스 (TV 스타일)
+    let y0 = sh.y0, y1 = sh.y1;                  // 드래그 시작=진입, 끝=목표
+    let x0 = toMs(sh.x0), x1 = toMs(sh.x1);
+    if (magnet) { [x0, y0] = snapPoint(x0, y0); [x1, y1] = snapPoint(x1, y1); }
+    const entry = fromY(y0), target = fromY(y1);
+    if (!entry || entry === target) { setTool(null); return; }
+    // 방향 가드 — 롱은 목표>진입, 숏은 목표<진입. 반대로 그으면 목표=손절 넌센스가
+    // 되므로(적대 리뷰 확정) 도형을 버리고 힌트만 갱신, 도구는 유지해 재시도.
+    if ((dir === "long") !== (target > entry)) {
+      shapes.splice(idx, 1);
+      applyDraw(shapes, curAnns());
+      document.getElementById("tool-hint").textContent =
+        dir === "long" ? "롱은 진입에서 위(목표)로 드래그하세요" : "숏은 진입에서 아래로 드래그하세요";
+      return;
+    }
+    // 손절 = **축 공간** 대칭 RR 1:1 — 선형축에선 가격 대칭(종전과 동일), 로그축에선
+    // 퍼센트 대칭이라 손절가가 0 이하(log10=NaN)로 떨어질 수 없다 (적대 리뷰 확정 픽스)
+    const stopAx = y0 - (y1 - y0);
+    const stop = fromY(stopAx);
+    const xa = toISO(Math.min(x0, x1)), xb = toISO(Math.max(x0, x1));
+    shapes.splice(idx, 1);
+    shapes.push({type: "rect", name: "tool-pos", xref: "x", x0: xa, x1: xb,   // 보상 존
+                 yref: "y", y0: y0, y1: y1,
+                 line: {color: "#26a69a", width: 1}, fillcolor: "#26a69a22"});
+    shapes.push({type: "rect", name: "tool-pos", xref: "x", x0: xa, x1: xb,   // 위험 존
+                 yref: "y", y0: y0, y1: stopAx,
+                 line: {color: "#ef5350", width: 1}, fillcolor: "#ef535022"});
+    const pctT = entry ? ((target / entry - 1) * 100) : 0;
+    const pctS = entry ? ((stop / entry - 1) * 100) : 0;
+    const anns = curAnns();
+    anns.push({name: "tool-pos", x: toISO((Math.min(x0, x1) + Math.max(x0, x1)) / 2),
+               y: y1, yref: "y", yanchor: dir === "long" ? "bottom" : "top", showarrow: false,
+               text: "<b>" + (dir === "long" ? "롱" : "숏") + "</b> 진입 " + fmtVal(y0)
+                     + " · 목표 " + fmtVal(y1) + " (" + (pctT >= 0 ? "+" : "") + pctT.toFixed(2)
+                     + "%) · 손절 " + fmtVal(stopAx) + " (" + (pctS >= 0 ? "+" : "")
+                     + pctS.toFixed(2) + "%) · RR 1:1",
+               font: {size: 10, color: "#ffffff"},
+               bgcolor: dir === "long" ? "#26a69a" : "#ef5350", borderpad: 3, opacity: 0.92});
     applyDraw(shapes, anns);
     setTool(null);
   }
@@ -491,15 +701,27 @@ _TEMPLATE = r"""
     setTool(null);
   }
 
-  function snapShape(sh, shapes) {               // 🧲 — 선/박스 끝점을 봉·OHLC 로
+  const _same = (a, b) => a === b || (typeof a === "number" && typeof b === "number"
+                                      && Math.abs(a - b) < 1e-9);
+
+  function snapShape(sh, shapes) {               // 🧲 — 선/박스 끝점을 봉·OHLC 로 (멱등)
+    // ⚠️ 좌표가 실제로 바뀔 때만 applyDraw — 이미 스냅된 도형의 자기 메아리는 변화 0 이라
+    // 재적용하지 않아 무한 루프가 끊긴다(실측 확정 프리즈의 핵심 방어).
     if (sh.type === "line" && sh.xref !== "paper") {
       const p0 = snapPoint(toMs(sh.x0), sh.y0), p1 = snapPoint(toMs(sh.x1), sh.y1);
-      sh.x0 = toISO(p0[0]); sh.y0 = p0[1]; sh.x1 = toISO(p1[0]); sh.y1 = p1[1];
+      const x0 = toISO(p0[0]), x1 = toISO(p1[0]);
+      if (_same(sh.x0, x0) && _same(sh.y0, p0[1]) && _same(sh.x1, x1) && _same(sh.y1, p1[1]))
+        return true;                             // 변화 없음 → 자기 메아리 → 무시
+      sh.x0 = x0; sh.y0 = p0[1]; sh.x1 = x1; sh.y1 = p1[1];
     } else if (sh.type === "rect") {
       const p0 = snapPoint(toMs(sh.x0), sh.y0), p1 = snapPoint(toMs(sh.x1), sh.y1);
-      sh.x0 = toISO(p0[0]); sh.y0 = p0[1]; sh.x1 = toISO(p1[0]); sh.y1 = p1[1];
+      const x0 = toISO(p0[0]), x1 = toISO(p1[0]);
+      if (_same(sh.x0, x0) && _same(sh.y0, p0[1]) && _same(sh.x1, x1) && _same(sh.y1, p1[1]))
+        return true;
+      sh.x0 = x0; sh.y0 = p0[1]; sh.x1 = x1; sh.y1 = p1[1];
     } else if (sh.type === "line" && sh.xref === "paper" && (sh.name || "") === "tool-hline") {
       const y = snapPoint(bounds.length ? bounds[bounds.length - 1][0] : 0, sh.y0)[1];
+      if (_same(sh.y0, y) && _same(sh.y1, y)) return true;   // 변화 없음 → 무시
       sh.y0 = sh.y1 = y;                         // 수평선 편집 — 가격만 스냅
       const nth = shapes.filter(s => (s.name || "") === "tool-hline").indexOf(sh);
       const anns = curAnns();
@@ -539,12 +761,22 @@ _TEMPLATE = r"""
     const shapes = (gd.layout.shapes || []).slice();
     const sh = shapes[idx];
     if (!sh || sh.type === "path") return true;  // 자유곡선 — 스냅 제외
+    // 새 draw 이벤트인데 마지막 도형이 이미 우리가 만든 tool-* 도형이면 = applyDraw 자기 메아리
+    // (진짜 새 draw 는 항상 무명 raw 도형을 append) → 재처리 금지(무한 루프 차단·drift 방지)
+    if (isNew && String(sh.name || "").startsWith("tool-")) return true;
     if (sh.yref && sh.yref !== "y") return true; // 가격 패널 외(거래량·RSI) — 제외
     // 서버 도형(평단선·현재가선)은 사용자 편집/자석 대상 아님 — 스냅이 평단을 움직이면 안 됨
     if (idx < baseShapeCount && !String(sh.name || "").startsWith("tool-")) return true;
     if (isNew && tool === "hline" && sh.type === "line") { makeHline(sh, shapes, idx); return true; }
+    if (isNew && tool === "vline" && sh.type === "line") { makeVline(sh, shapes, idx); return true; }
+    if (isNew && tool === "cross" && sh.type === "line") { makeCross(sh, shapes, idx); return true; }
+    if (isNew && tool === "ray" && sh.type === "line") { makeRay(sh, shapes, idx, false); return true; }
+    if (isNew && tool === "ext" && sh.type === "line") { makeRay(sh, shapes, idx, true); return true; }
+    if (isNew && tool === "text" && sh.type === "line") { makeText(sh, shapes, idx); return true; }
     if (isNew && tool === "fib" && sh.type === "line") { makeFib(sh, shapes, idx); return true; }
     if (isNew && tool === "meas" && sh.type === "rect") { makeMeasure(sh, shapes, idx); return true; }
+    if (isNew && tool === "long" && sh.type === "rect") { makePosition(sh, shapes, idx, "long"); return true; }
+    if (isNew && tool === "short" && sh.type === "rect") { makePosition(sh, shapes, idx, "short"); return true; }
     if (magnet && (sh.name || "") !== "tool-meas" && !String(sh.name || "").startsWith("tool-fib"))
       return snapShape(sh, shapes) || true;
     return true;
@@ -554,9 +786,8 @@ _TEMPLATE = r"""
     magnet = !magnet;
     ev.target.classList.toggle("on", magnet);
   };
-  document.getElementById("bt-hline").onclick = () => setTool("hline");
-  document.getElementById("bt-fib").onclick = () => setTool("fib");
-  document.getElementById("bt-meas").onclick = () => setTool("meas");
+  for (const [id, name] of TOOL_BTNS)
+    document.getElementById(id).onclick = () => setTool(name);
   document.getElementById("bt-clear").onclick = () => {   // 서버 오버레이만 남기고 제거
     // 도형 = 보존 복사본으로 되돌림(직접 그린 것·도구 도형 모두 제거·인덱스 밀림 무관).
     // 주석 = 이름 필터 (tn-hi/tn-lo 콜아웃은 팬 중 갱신되므로 복사본 복원 금지)
@@ -566,7 +797,96 @@ _TEMPLATE = r"""
     document.getElementById("detail").style.display = "none";
   };
 
+  // ── ⚡ live 실시간 패치 — 피더 iframe 의 localStorage push 를 받아 **마지막 봉만**
+  // in-place 갱신. live 모드의 메인 html 은 바이트 안정(서버 bake 없음)이라 8초
+  // fragment 재실행이 iframe 을 재마운트하지 않는다 = 그리던 드로잉·뷰·상태 유지 ──
+  function arr(a) {                                // plotly 6 typed-array 스펙 디코드
+    // fig.to_json() 은 숫자 배열을 {dtype, bdata(base64)} 로 직렬화 — Array.from 은
+    // 그 객체에서 빈 배열이 되므로 dtype 별 TypedArray 로 풀어 평범한 배열로 반환.
+    if (Array.isArray(a)) return a.slice();
+    if (a && a.bdata) {
+      try {
+        const bin = atob(a.bdata);
+        const buf = new Uint8Array(bin.length);
+        for (let i = 0; i < bin.length; i++) buf[i] = bin.charCodeAt(i);
+        const T = {f8: Float64Array, f4: Float32Array, i4: Int32Array, u4: Uint32Array,
+                   i2: Int16Array, u2: Uint16Array, i1: Int8Array, u1: Uint8Array}[a.dtype];
+        if (T) return Array.from(new T(buf.buffer));
+      } catch (e) {}
+      return [];
+    }
+    return (a && a.length) ? Array.from(a) : [];
+  }
+
+  function patchLast(p) {
+    if (!gd.layout || !gd.data) return;            // newPlot 완료 전 폴링 틱 무시
+    if (!bounds.length || pctMode) return;
+    const b = bounds[bounds.length - 1];           // bounds 갱신 — yFit·스냅·리드아웃 공유
+    b[5] = p;
+    if (p > b[2]) b[2] = p;
+    if (p < b[1]) b[1] = p;
+    const tr = (gd.data || [])[0];                 // 메인 가격 트레이스 = 항상 첫번째
+    if (tr && tr.type === "candlestick") {
+      const c = arr(tr.close), h = arr(tr.high), l = arr(tr.low);
+      if (c.length) {
+        c[c.length - 1] = p;
+        h[h.length - 1] = Math.max(h[h.length - 1], p);
+        l[l.length - 1] = Math.min(l[l.length - 1], p);
+        Plotly.restyle(gd, {close: [c], high: [h], low: [l]}, [0]);
+      }
+    } else if (tr) {
+      const y = arr(tr.y);
+      if (y.length) {
+        y[y.length - 1] = p;
+        Plotly.restyle(gd, {y: [y]}, [0]);
+      }
+    }
+    const upd = {};                                // 현재가 점선·우측 라벨 (tn-last)
+    (gd.layout.shapes || []).forEach((s, i) => {
+      if ((s.name || "") === "tn-last") {
+        upd["shapes[" + i + "].y0"] = toY(p);
+        upd["shapes[" + i + "].y1"] = toY(p);
+      }
+    });
+    (gd.layout.annotations || []).forEach((a, i) => {
+      if ((a.name || "") === "tn-last") {
+        upd["annotations[" + i + "].y"] = toY(p);
+        upd["annotations[" + i + "].text"] = "<b>" + fmtVal(toY(p)) + "</b>";
+      }
+    });
+    if (Object.keys(upd).length) {
+      guard++;                                     // 카운터 규약 (boolean 대입 금지)
+      Plotly.relayout(gd, upd).then(() => { unguard(); });
+    }
+    const xr = gd.layout.xaxis && gd.layout.xaxis.range;
+    if (xr) {                                      // 마지막 봉이 보이면 y 부드럽게 재맞춤
+      const x1 = Date.parse(xr[1]) || +xr[1];
+      if (x1 >= b[0]) setTarget(Date.parse(xr[0]) || +xr[0], x1);
+    }
+    ohlcReadout(b[0]);
+  }
+  if (live && storeKey) {
+    const rtKey = "tnrt:" + String(storeKey).split(":")[0];   // 키 = 티커 (봉·스케일 공용)
+    let lastP = null;
+    const applyRt = () => {
+      let d = null;
+      try { d = JSON.parse(localStorage.getItem(rtKey) || "null"); } catch (e) {}
+      if (!d || !(d.p > 0) || Date.now() - (d.w || 0) > 30000) return;   // 신선한 값만
+      if (d.p === lastP) return;
+      lastP = d.p;
+      patchLast(d.p);
+    };
+    try {                                          // 피더(형제 iframe) 기록 = storage 이벤트
+      window.addEventListener("storage", (ev) => {
+        if (!ev || ev.key == null || ev.key === rtKey) applyRt();
+      });
+    } catch (e) {}
+    setInterval(applyRt, 2000);                    // storage 이벤트 유실 폴백
+  }
+
   Plotly.newPlot(gd, fig.data, fig.layout, @@CONFIG@@).then(() => {
+    gd.style.position = "relative";                    // 크로스헤어 오버레이 부착 (newPlot 후)
+    gd.appendChild(xhV); gd.appendChild(xhH); gd.appendChild(xhY);
     // 저장된 드로잉 복원 — 서버 도형 뒤에 append (지우기·보호 가드와 정합).
     // 하단 지표 구성이 바뀌어 사라진 서브패널 축(y3 등)을 참조하는 도형은 제외(고아 방지)
     const saved = loadDrawings();
@@ -574,27 +894,27 @@ _TEMPLATE = r"""
       const axes = new Set(Object.keys(fig.layout).filter((k) => k.startsWith("yaxis"))
         .map((k) => "y" + k.slice(5)));
       const okRef = (r) => !r || r === "paper" || axes.has(r);
-      guard = true;
+      drawGuard++;                               // 복원도 도형 메아리 — drawGuard 로
       Plotly.relayout(gd, {
         shapes: (gd.layout.shapes || []).concat(saved.shapes.filter((s) => okRef(s.yref))),
         annotations: (gd.layout.annotations || []).concat(
           saved.anns.filter((a) => okRef(a.yref))),
-      }).then(() => { guard = false; });
+      }).then(() => { undraw(); });
     }
     const last = bounds.length ? bounds[bounds.length - 1][0] : null;
     const freshView = loadFreshView();           // ⚡자동갱신·설정변경 직후 = 보던 위치 복원
     if (freshView) {
-      guard = true;                              // 저장된 원문 그대로 — 재직렬화 왕복 금지
+      guard++;                              // 저장된 원문 그대로 — 재직렬화 왕복 금지
       Plotly.relayout(gd, {"xaxis.range": [freshView[0], freshView[1]]})
-        .then(() => { guard = false; rescale(); });
+        .then(() => { unguard(); rescale(); });
     } else if (last && @@VIEW_MS@@) {            // 초기 표시창 (기간 라디오)
       const x0 = last - @@VIEW_MS@@;
       const first = bounds[0][0];
       if (x0 > first) {
-        guard = true;
+        guard++;
         Plotly.relayout(gd, {"xaxis.range": [new Date(x0).toISOString(),
                                              new Date(last + @@VIEW_MS@@ * 0.02).toISOString()]})
-          .then(() => { guard = false; rescale(); });
+          .then(() => { unguard(); rescale(); });
       }
     }
     let gestureTimer = null;
@@ -609,9 +929,19 @@ _TEMPLATE = r"""
     // 휠 줌은 틱마다 relayout 이 발생(연속 제스처) — 틱 중엔 y 목표 갱신만(저비용),
     // 콜아웃·hover 복원 등 무거운 마무리는 마지막 틱 후 160ms 에 1회 (줌 랙 제거)
     gd.on("plotly_relayout", (e) => {
+      // 도형 이벤트는 drawGuard, 그 외(팬/줌/애니)는 guard — 가드 분리로
+      // (1) 자기 도형 메아리 1차 차단(내용 기반 방어는 2차), (2) 팬 애니메이션
+      // 중 사용자 도형 이벤트가 guard 에 삼켜져 자석이 간헐 미적용되던 것 해결.
+      const hasShapes = e && (Array.isArray(e.shapes)
+          || Object.keys(e).some((k) => k.startsWith("shapes[")));
+      if (hasShapes) {
+        if (drawGuard > 0) return;               // applyDraw/복원 자기 메아리
+        dragging = false;
+        if (handleShapes(e)) scheduleSave();     // 드로잉 도구·🧲 자석 경로 + 영속화
+        return;
+      }
       if (guard) return;
       dragging = false;
-      if (handleShapes(e)) { scheduleSave(); return; }   // 드로잉 도구·🧲 자석 경로 + 영속화
       const keys = Object.keys(e || {});
       if (keys.some(k => k.startsWith("xaxis.range")) || e["xaxis.autorange"]) {
         muteHover();
@@ -653,7 +983,9 @@ def pannable_chart_html(fig, hist, *, height: int = 460, view_days=None,
                         fit_viewport: bool = False,
                         pct_mode: bool = False,
                         y_log: bool = False,
-                        store_key: str | None = None) -> str:
+                        store_key: str | None = None,
+                        dock: bool = False,
+                        live: bool = False) -> str:
     """fig(charts.price_chart 산출) → 자동 y 리스케일·드로잉 도구·인차트 마커 상세 임베드 HTML.
 
     bounds_json — y 맞춤 프레임 오버라이드 (비교 모드: compare_bounds_json 의 % 프레임).
@@ -661,6 +993,10 @@ def pannable_chart_html(fig, hist, *, height: int = 460, view_days=None,
     y_log — 로그 스케일: 도형/축 y 좌표가 log10 공간 (스냅·측정이 실가격으로 환산).
     store_key — 드로잉 영속화 localStorage 키(예: "NVDA:1d:lin"). None=비영속.
                 스케일(lin/log/pct)을 키에 포함해야 좌표계 혼선이 없다(호출부 책임).
+    dock — True 면 도구바를 좌측 세로 독으로 (풀뷰 — TradingView 배치).
+    live — ⚡자동갱신: realtime_feed_html 피더의 localStorage push(tnrt:티커)를 받아
+           마지막 봉·현재가선을 in-place 패치. 호출부는 live 시 서버측 실시간 bake 를
+           생략해 html 을 바이트 안정으로 유지해야 함(재마운트=드로잉 리셋 방지).
     """
     bounds = bounds_json if bounds_json is not None else price_bounds_json(hist)
     config = json.dumps({
@@ -680,9 +1016,33 @@ def pannable_chart_html(fig, hist, *, height: int = 460, view_days=None,
             .replace("@@FIT_VH@@", json.dumps(bool(fit_viewport)))
             .replace("@@PCT_MODE@@", json.dumps(bool(pct_mode)))
             .replace("@@Y_LOG@@", json.dumps(bool(y_log)))
+            .replace("@@LIVE@@", json.dumps(bool(live)))
             .replace("@@LAST_CLOSE@@", json.dumps(last_close))
             .replace("@@STORE_KEY@@", json.dumps(store_key))
+            .replace("@@DOCK@@", json.dumps(bool(dock)))
             .replace("@@CONFIG@@", config)
             .replace("@@BOUNDS@@", bounds)
             .replace("@@FIG@@", fig.to_json()))       # fig JSON 은 마지막 (토큰 오염 차단)
     return html
+
+
+def realtime_feed_html(store_key: str, price, seq=None) -> str:
+    """⚡ live 피더 — 초소형 컴포넌트가 실시간가를 localStorage 로 차트 iframe 에 push (순수).
+
+    live 모드의 메인 차트 html 은 바이트 안정이어야 한다(변경=iframe 재마운트=그리던
+    드로잉 리셋+수 MB 재전송) — 가격은 이 <1KB 피더만 나른다. seq(기본 서버시각)가
+    매 재실행 html 을 바꿔 피더만 재마운트→재기록: 가격이 같아도 신선도(w)가 갱신돼
+    메인 차트의 30s stale 가드를 통과한다. storage 이벤트는 same-origin 형제 iframe
+    에 전파(2s 폴링 폴백 병행). 키 = "tnrt:" + 티커(store_key 의 첫 세그먼트).
+    """
+    key = "tnrt:" + str(store_key).split(":")[0]
+    try:
+        p = float(price) if price and float(price) > 0 else None
+    except Exception:
+        p = None
+    if seq is None:
+        import time
+        seq = int(time.time() * 1000)
+    return ("<script>/*" + str(seq) + "*/(function(){try{localStorage.setItem("
+            + json.dumps(key) + ",JSON.stringify({p:" + json.dumps(p)
+            + ",w:Date.now()}))}catch(e){}})();</script>")

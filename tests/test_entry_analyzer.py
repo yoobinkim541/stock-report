@@ -91,13 +91,47 @@ def test_format_alert_message_is_explanatory_not_prescriptive():
         display_name="기아",
     ))
 
-    assert "진입 후보 감지(정보형) — 000270.KS · 기아" in msg
+    assert "진입 후보(정보형) — 기아 (000270.KS)" in msg
     assert "🟢 기아 (Kia) · 점수 0.75/1.00" in msg
     assert "[ 한줄 판단 ]" in msg
     assert "[ 왜 떴나 ]" in msg
+    assert "[ 왜 조심해야 하나 ]" in msg
     assert "[ 참고 레벨 ]" in msg
     assert "[ 매매 가이드 ]" not in msg
     assert "표본:     24건 (보통)" in msg
+    assert "보정 1.0× (최소위험 -3.0% 적용)" in msg
     assert "무효화선:" in msg
     assert "하방 P25 -0.9%, 최소 -3.0% 적용" in msg
+    assert "목표 참고:" in msg and "+8.2%" in msg
+    assert "판단 해석" in msg
     assert "정보형 알림 — 자동 주문 아님" in msg
+
+
+def test_format_alert_message_flags_tiny_p25_inflated_reward_risk():
+    msg = format_alert_message(_entry_score(
+        ticker="000660.KS",
+        underlying="000660.KS",
+        current_drawdown=-0.28,
+        current_rsi=37.0,
+        current_vix=16.1,
+        current_mom_20d=0.027,
+        current_mom_60d=-0.08,
+        current_price=2_103_000.0,
+        n_similar=24,
+        win_prob_20d=0.76,
+        win_prob_60d=0.68,
+        expected_ret_20d=0.077,
+        expected_ret_60d=0.134,
+        downside_p25_20d=-0.0014,
+        upside_p75_20d=0.2038,
+        score=0.87,
+        reasons=["승률 76% (강세)", "손익비 55.0× (양호)"],
+        currency="KRW",
+        display_name="SK하이닉스",
+    ))
+
+    assert "진입 후보(정보형) — SK하이닉스 (000660.KS)" in msg
+    assert "보정 2.6× (원시 55.0×, P25 왜곡 가능)" in msg
+    assert "원시 손익비 55.0×는 하방 P25 -0.1%가 너무 작아 과대 표시 가능" in msg
+    assert "목표 참고:" in msg and "+20.4%" in msg
+    assert "무효화선:" in msg and "-3.0%" in msg

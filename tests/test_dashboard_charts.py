@@ -822,14 +822,14 @@ def test_heikin_ashi_transform():
     assert charts.heikin_ashi(None) is None
 
 
-def test_price_chart_crosshair_spikes():
-    """십자선 — x 전 패널·y 가격 패널 스파이크 (TradingView 크로스헤어)."""
+def test_price_chart_no_plotly_spikes():
+    """십자선은 embed JS DOM 오버레이 — plotly 스파이크 금지 (마우스무브 재그리기
+    스터터 성능 회귀 확정 → 제거. 재도입 방지 회귀)."""
     fig = charts.price_chart(_ohlcv(), "T", show_volume=True, show_rsi=True)
-    assert fig.layout.xaxis.showspikes is True and fig.layout.xaxis.spikemode == "across"
-    assert fig.layout.yaxis.showspikes is True            # 가격 패널
-    assert fig.layout.yaxis3.showspikes is not True       # 서브패널은 y 스파이크 없음
-    fig1 = charts.price_chart(_ohlcv(), "T")              # 단일 패널
-    assert fig1.layout.yaxis.showspikes is True
+    assert fig.layout.xaxis.showspikes is not True
+    assert fig.layout.yaxis.showspikes is not True
+    fig1 = charts.price_chart(_ohlcv(), "T")
+    assert fig1.layout.yaxis.showspikes is not True
 
 
 def test_price_chart_log_scale_yref_none_annotations():
@@ -892,3 +892,47 @@ def test_volume_axis_spike_cap():
     vr = fig.layout.yaxis2.range
     assert vr is not None and vr[1] < 100_000_000     # 1B 스파이크에 미지배
     assert vr[1] >= 10_000_000 * 1.1                  # 평상 막대는 안 잘림
+
+
+def test_view_window_windows_long_history():
+    """윈도잉 — 뷰(기간)의 pan_mult배+워밍업만 tail 로 남기고 최근 데이터는 보존."""
+    idx = pd.date_range("2016-01-01", periods=3000, freq="D")
+    hist = pd.DataFrame({"Close": range(3000)}, index=idx)
+    w = charts.view_window(hist, 365)
+    view_bars = int((idx >= idx[-1] - pd.Timedelta(days=365)).sum())
+    assert len(w) == view_bars * 5 + 250              # 팬버퍼 5× + 워밍업 250
+    assert len(w) < len(hist)
+    assert w.index[-1] == hist.index[-1]              # 최신 봉 보존 (tail)
+    assert int(w["Close"].iloc[-1]) == 2999
+
+
+def test_view_window_full_and_short_passthrough():
+    """'전체'(None)·짧은 데이터·빈 값은 무윈도잉 그대로 (동일 객체)."""
+    idx = pd.date_range("2024-01-01", periods=500, freq="D")
+    hist = pd.DataFrame({"Close": range(500)}, index=idx)
+    assert charts.view_window(hist, None) is hist     # 전체 = 전량
+    assert charts.view_window(hist, 90) is hist       # floor(800) > len → 그대로
+    assert charts.view_window(None, 90) is None
+    empty = pd.DataFrame({"Close": []})
+    assert charts.view_window(empty, 90) is empty
+
+
+def test_view_window_floor_and_series():
+    """짧은 뷰는 floor(기본 800봉) 보장 — Series 도 지원 (비교 오버레이용)."""
+    idx = pd.date_range("2000-01-01", periods=11000, freq="D")
+    s = pd.Series(range(11000), index=idx, dtype=float)
+    w = charts.view_window(s, 90)                     # 뷰 91봉×5+250=705 < floor
+    assert len(w) == 800
+    assert float(w.iloc[-1]) == 10999.0
+
+
+def test_view_window_serialization_shrinks():
+    """윈도잉된 fig 직렬화가 전량 대비 유의미하게 작다 (payload 회귀 방어)."""
+    idx = pd.date_range("1995-01-01", periods=11000, freq="D")
+    close = pd.Series([100.0 + (i % 500) for i in range(11000)], index=idx)
+    hist = pd.DataFrame({"Open": close, "High": close * 1.01, "Low": close * 0.99,
+                         "Close": close, "Volume": [1e6] * 11000}, index=idx)
+    full = charts.price_chart(hist, "T", view_days=180, show_volume=True)
+    win = charts.price_chart(charts.view_window(hist, 180), "T",
+                             view_days=180, show_volume=True)
+    assert len(win.to_json()) < len(full.to_json()) * 0.25

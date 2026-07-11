@@ -32,6 +32,12 @@ PATH=/home/ubuntu/.local/bin:/usr/local/bin:/usr/bin:/bin
 # 옵션 지표 스냅샷 (ATM IV·풋콜비·스큐·기대변동폭) — 학습 피처 축적
 20 21 * * 1-5 cd /home/ubuntu/projects/stock-report && uv run python crons/options_snapshot.py >> /tmp/options_snapshot.log 2>&1     # 21:20 UTC = 06:20 KST (us_mock_report 21:30 충돌 회피)
 
+# /tmp 위생 — 주간 로그 트림 + 스모크 잔재 청소
+30 20 * * 0 cd /home/ubuntu/projects/stock-report && bash scripts/trim_tmp_logs.sh >> /tmp/trim_tmp_logs.log 2>&1   # 일요일 20:30 UTC
+
+# 핵심 데이터 일일 백업 (store DB·스냅샷·설정 — 14일 보존)
+40 20 * * * cd /home/ubuntu/projects/stock-report && bash scripts/backup_stock_data.sh >> /tmp/backup_stock_data.log 2>&1   # 20:40 UTC = 05:40 KST
+
 # 주식 모으기 자동 기록 — 미 정규장 마감 직후 종가·확정 종가 환율로 소수점 계좌 기록 (플랜 없으면 no-op·기록 전용)
 10 21 * * 1-5 cd /home/ubuntu/projects/stock-report && uv run python crons/accumulate_daily.py >> /tmp/accumulate_daily.log 2>&1   # 21:10 UTC = 06:10 KST
 # 어닝 컨센서스·리비전·서프라이즈·밸류에이션 point-in-time 스냅샷 — 실적/주가반응 예측 학습데이터 축적
@@ -53,6 +59,7 @@ PATH=/home/ubuntu/.local/bin:/usr/local/bin:/usr/bin:/bin
 # 단기(1분봉) 모의 트레이딩 엔진 (INTRADAY_MOCK_ENABLED=true 일 때만 — 꺼져있으면 즉시 no-op·shadow 기본)
 * * * * * cd /home/ubuntu/projects/stock-report && flock -n /tmp/intraday_mock_track.lock uv run python crons/intraday_mock_track.py >> /tmp/intraday_mock_track.log 2>&1   # 매 1분 (열린 시장만 내부 처리)
 # 실시간 시세 WS 상시 프로세스 워치독 (REALTIME_ENABLED=true 일 때만 기동·opt-in)
+* * * * * bash /home/ubuntu/projects/stock-report/scripts/bot_watchdog.sh >> /tmp/bot_watchdog.log 2>&1   # 봇 자가복구 (PID 파일 기반·fcntl 이중기동 안전)
 * * * * * cd /home/ubuntu/projects/stock-report && bash scripts/kis_stream_watchdog.sh >> /tmp/kis_stream_watchdog.log 2>&1   # 매 1분 (꺼져있으면 no-op)
 # 퀀트 터미널 streamlit 대시보드 워치독 (DASHBOARD_ENABLED=true 일 때만 기동·opt-in)
 * * * * * cd /home/ubuntu/projects/stock-report && bash scripts/dashboard_watchdog.sh >> /tmp/dashboard_watchdog.log 2>&1   # 매 1분 (꺼져있으면 no-op)

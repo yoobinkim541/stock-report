@@ -80,14 +80,52 @@ def test_build_report_includes_llm_rationale_when_available(monkeypatch):
         }, "ok")
 
     monkeypatch.setattr(R.llm_rationale, "run", fake_run)
-    txt = R.build_report()
+    txt = R.build_report(detail=True)
     assert seen["market"] == "US"
     assert seen["positions"][0]["ticker"] == "MSFT"
     assert seen["scorecard"]["n_buy"] == 3
+    assert "현금 $800 · 현금비중 16.0%" in txt
+    assert "상태 해석" in txt
+    assert "보유 요약" in txt
+    assert "평가손익 ▲5.0% (+$200)" in txt
+    assert "Microsoft (MSFT)" in txt
+    assert "최근 결정 (2026-06-26)" in txt
+    assert "근거: 품질 점수와 추세 신호 우위" in txt
+    assert "해석: 추세 근거가 편입 조건을 뒷받침합니다." in txt
     assert "🧠 LLM 판단근거" in txt
     assert "QQQ 대비 초과수익" in txt
     assert "MSFT 비중" in txt
     assert "신뢰도 68/100" in txt
+
+
+def test_build_report_interprets_recent_factor_decisions(monkeypatch):
+    monkeypatch.setattr(kis_mock, "get_balance", lambda: {
+        "ok": True,
+        "positions": {},
+        "pos_value": 0.0,
+        "cash_usd": 100_000.0,
+        "nav": 100_000.0,
+    })
+    monkeypatch.setattr(R, "_snapshots", lambda: [])
+    monkeypatch.setattr(R, "_scorecard_rows", lambda: [])
+    monkeypatch.setattr(R, "_recent_decisions", lambda: (
+        [{"date": "2026-07-08", "side": "편입", "ticker": "ADBE", "policy_score": 0.62,
+          "rationale": {"one_line_reason": "value 0.45·quality 0.02·mom 0.50"}}],
+        "2026-07-08",
+    ))
+    monkeypatch.setattr(R, "_llm_shadow_summary", lambda: (
+        {"n": 0, "hit_rate": None, "avg_delta": None, "by_action": {}}, 0))
+    monkeypatch.setattr(R.llm_rationale, "run", lambda payload: (None, "disabled"))
+    from providers import market_data
+    monkeypatch.setattr(market_data, "fetch_kospi_stats",
+                        lambda since_date=None, symbol=None: {"return_pct": -3.0, "mdd": 0.04})
+
+    txt = R.build_report(detail=True)
+    assert "Adobe (ADBE)" in txt
+    assert "근거: value 0.45·quality 0.02·mom 0.50" in txt
+    assert "해석: 밸류 보통 · 퀄리티 약함 · 모멘텀 보통 · 퀄리티 보완 필요" in txt
+    assert "검증 상태" in txt
+    assert "LLM Shadow: 성숙 표본 없음" in txt
 
 
 if __name__ == "__main__":
@@ -118,7 +156,7 @@ def test_build_report_shows_sleeve_state(monkeypatch):
     except Exception:
         pass
 
-    text = R.build_report()
+    text = R.build_report(detail=True)
     assert "구조레버 슬리브" in text
     assert "×1.30" in text and "목표 30%" in text
     assert "QLD 300주 (30%)" in text
@@ -143,3 +181,44 @@ def test_build_report_sleeve_hidden_when_off_and_flat(monkeypatch):
     except Exception:
         pass
     assert "구조레버 슬리브" not in R.build_report()
+
+
+def test_build_report_defaults_to_compact(monkeypatch):
+    monkeypatch.setenv("MOCK_REPORT_LLM_ENABLED", "1")
+    monkeypatch.setattr(kis_mock, "get_balance", lambda: {
+        "ok": True,
+        "positions": {
+            "CRM": {"shares": 294, "avg_price": 160.22, "cur_price": 166.58, "value": 48_975.0},
+            "INTC": {"shares": 330, "avg_price": 123.58, "cur_price": 110.24, "value": 36_379.0},
+        },
+        "pos_value": 85_354.0,
+        "cash_usd": 71_170.0,
+        "nav": 156_524.0,
+    })
+    monkeypatch.setattr(R, "_snapshots", lambda: [
+        {"date": "2026-07-01 21:30", "kind": "snapshot", "nav": 158_000.0},
+    ])
+    monkeypatch.setattr(R, "_scorecard_rows", lambda: [])
+    monkeypatch.setattr(R, "_recent_decisions", lambda: (
+        [{"date": "2026-07-09", "side": "편입", "ticker": "AMZN",
+          "rationale": {"one_line_reason": "value 0.32·quality 0.01·mom 0.46"}}],
+        "2026-07-09",
+    ))
+    monkeypatch.setattr(R, "_llm_shadow_summary", lambda: (
+        {"n": 0, "hit_rate": None, "avg_delta": None, "by_action": {}}, 0))
+    monkeypatch.setattr(R.llm_rationale, "run", lambda payload: pytest.fail("compact report should not call LLM rationale"))
+    from providers import market_data
+    monkeypatch.setattr(market_data, "fetch_kospi_stats",
+                        lambda since_date=None, symbol=None: {"return_pct": -3.0, "mdd": 0.04})
+
+    txt = R.build_report()
+    assert "US 모의" in txt
+    assert "판단" in txt
+    assert "보유 2종목" in txt
+    assert "CRM" in txt and "INTC" in txt
+    assert "최근 결정" in txt
+    assert "체크" in txt
+    assert "상세: /paper us full" in txt
+    assert "🧠 LLM 판단근거" not in txt
+    assert "검증 상태" not in txt
+    assert "123.58→110.24" not in txt

@@ -75,6 +75,10 @@ cached.market_temp_history = lambda: [{"date": "2026-07-07", "score": 0.1},
 cached.next_earnings = lambda t: None
 cached.chart_news = lambda t: [{"date": "2026-07-01", "direction": 1, "strength": 4,
                                 "event_type": "실적", "title": "beat"}]
+cached.macro_corr = lambda t: [{"symbol": "^TNX", "label": "미 10년물", "note": "역상관 경향",
+                                "corr90": -0.62, "chg30": 1.4}]
+cached.llm_related = lambda t: ([{"ticker": "AMD", "relation": "경쟁사", "reason": "GPU"}], "cached")
+cached.llm_related.clear = lambda: None
 cached.macro_assets = lambda: [
     {"symbol": "KRW=X", "label": "달러/원 환율", "emoji": "\U0001f4b1", "unit": "₩",
      "ticker": "KRW=X", "price": 1505.05, "chg": -3.2, "pct": -0.21, "spark": [1500, 1503, 1505]},
@@ -127,6 +131,10 @@ cached.screener = lambda n: {"rows": [{"rank": 1, "ticker": "NVDA", "name": "NVI
     "meta": {"ic": 0.05, "icir": 0.8, "top_decile": 0.02, "train_end": "2026-06-01",
              "importance": {"mom_126d": 100, "rsi_14": 50}}}
 cached.backtest = lambda: {"error":"skip"}
+cached.backtest_last = lambda: {"ml": {"cagr": 0.21, "sharpe": 1.1, "mdd": -0.18},
+    "qqq": {"cagr": 0.18, "sharpe": 0.9, "mdd": -0.22}, "overlay": {},
+    "verdict": "비채택", "reasons": ["OOS 개선 미달"], "equity": None,
+    "asof": "2026-07-08 12:00"}
 cached.sp500_heatmap = lambda: [
     {"ticker":"AAPL","name":"Apple","sector_kr":"기술","market_cap":4e12,"pct":1.96},
     {"ticker":"MSFT","name":"Microsoft","sector_kr":"기술","market_cap":2.8e12,"pct":3.17},
@@ -463,6 +471,38 @@ def test_sidebar_paper_rail_and_nav(monkeypatch):
     assert not at.exception, str(at.exception)
 
 
+def test_ticker_page_macro_view():
+    """매크로 자산(금)은 주식 섹션(호가·진입레벨·밸류·재무·포지션관리) 대신 전용 뷰.
+
+    성과 프로필·연관 자산 상관이 뜨고, 주식 전용 섹션은 렌더되지 않아야 한다.
+    """
+    macro_stub = '''
+st.session_state["ticker"] = "GC=F"
+'''
+    at = AppTest.from_string(_STUBS + macro_stub
+                             + "\nfrom dashboard.pages import ticker\nticker.render()\n",
+                             default_timeout=30)
+    at.run()
+    assert not at.exception, str(at.exception)
+    body = " ".join(str(m.value) for m in at.markdown) + " ".join(str(c.value) for c in at.caption)
+    assert "성과 프로필" in body and "연관 자산" in body
+    # 주식 전용 섹션 부재 (매크로엔 무의미)
+    for stock_only in ("진입 레벨 가이드", "포지션 관리", "실시간 호가"):
+        assert stock_only not in body, f"매크로 뷰에 주식 섹션 노출: {stock_only}"
+
+
+def test_ticker_page_macro_krw_fx_timing():
+    """환율(KRW=X)은 환전 타이밍 + 포트 민감도 특화 섹션."""
+    at = AppTest.from_string(_STUBS + '\nst.session_state["ticker"] = "KRW=X"\n'
+                             + "\nfrom dashboard.pages import ticker\nticker.render()\n",
+                             default_timeout=30)
+    at.run()
+    assert not at.exception, str(at.exception)
+    body = " ".join(str(m.value) for m in at.markdown) + \
+        " ".join(str(c.value) for c in at.caption) + " ".join(str(i.value) for i in at.info)
+    assert "환전 타이밍" in body and "민감도" in body
+
+
 def test_ticker_page_etf_view():
     """ETF 티커는 개별주 섹션 대신 ETF 전용 뷰(프로필·Top10·보수·괴리율·배당) — 무예외."""
     etf_stub = '''
@@ -575,6 +615,46 @@ research._screener_section()
     assert "매매신호 아님" in caps
 
 
+def test_ticker_chart_live_stable_html_and_feeder():
+    """⚡ live — 메인 차트 html 바이트 안정(8초 재실행 재마운트 방지) + 피더가 가격을 나름.
+
+    live 모드에서 실시간가를 서버 bake 하면 srcdoc 이 8초마다 바뀌어 iframe 재마운트
+    (그리던 드로잉 리셋 + 수 MB 재전송) — 가격이 달라도 메인 html 은 불변이어야 하고
+    가격은 초소형 피더(tnrt localStorage push)만 나른다. 비 live 는 종전 bake 유지.
+    """
+    def _script(px, live):
+        # ⚠️ _STUBS 는 이미 % 포맷 소비돼 리터럴 % 를 품음 — 재-% 포맷 금지(f-string 결합)
+        return _STUBS + f'''
+cached.realtime_quote = lambda t: {{"price": {px}}}
+st.session_state["_chart_live"] = {live}
+from dashboard.pages import ticker
+ticker.render()
+'''
+    docs = {}
+    for px in ("172.5", "199.25"):
+        at = AppTest.from_string(_script(px, True), default_timeout=30)
+        at.run()
+        assert not at.exception, str(at.exception)
+        frames = [i.proto.srcdoc for i in at.get("iframe")]
+        main = [s for s in frames if "patchLast" in s]
+        feed = [s for s in frames if "tnrt:MSFT" in s and len(s) < 1024]
+        assert len(main) == 1 and len(feed) == 1, "live: 메인 차트 1 + 피더 1 이어야"
+        assert "const live = true" in main[0]
+        assert px in feed[0]                        # 가격은 피더가 나름
+        assert px not in main[0]                    # 메인 html 엔 실시간가 미포함 (bake 0)
+        docs[px] = main[0]
+    assert docs["172.5"] == docs["199.25"], "실시간가가 달라도 메인 html 은 바이트 불변"
+    # 비 live — 종전 서버 bake 유지 (bounds JSON 에 실시간가 반영·피더 없음)
+    at = AppTest.from_string(_script("172.5", False), default_timeout=30)
+    at.run()
+    assert not at.exception, str(at.exception)
+    frames = [i.proto.srcdoc for i in at.get("iframe")]
+    main = [s for s in frames if "patchLast" in s]
+    assert len(main) == 1 and "const live = false" in main[0]
+    assert "172.5" in main[0]                       # bake 로 bounds 에 실시간가
+    assert not any("tnrt:MSFT" in s and len(s) < 1024 for s in frames)   # 피더 없음
+
+
 def test_reconnect_watchdog_html_contract():
     """서버 재기동 워치독 — health 폴링·down→up 전이 시 parent reload 계약."""
     from dashboard import auth
@@ -582,6 +662,52 @@ def test_reconnect_watchdog_html_contract():
     assert "/_stcore/health" in h and "2500" in h
     assert "window.parent.location.reload" in h
     assert "down = true" in h                       # 실패 → 회복 전이만 리로드
+    assert "AbortController" in h                   # fetch hang 방어 타임아웃
+    assert ">= 3" in h                              # 연속 3회 실패부터 다운 판정
+
+
+_WATCHDOG_HARNESS = r"""
+let tick = null;
+global.setInterval = (fn, ms) => { tick = fn; return 0; };
+let reloads = 0;
+global.window = { parent: { location: { reload() { reloads++; } } } };
+const outcomes = [];                       // 틱마다 소비 — 'ok' | 'fail'
+global.fetch = () => (outcomes.shift() === "ok"
+  ? Promise.resolve({ ok: true }) : Promise.reject(new Error("ECONNRESET")));
+__SCRIPT__
+(async () => {
+  function fail(m) { console.error("FAIL " + m); process.exit(1); }
+  if (!tick) fail("no_interval");
+  // 1) 일시적 reset 1회 → 즉시 회복: reload 금지 (hair-trigger 튕김 방지)
+  outcomes.push("fail", "ok"); await tick(); await tick();
+  if (reloads !== 0) fail("single_blip_reloaded");
+  // 2) 2연속 실패 → 회복: 아직 임계(3) 미달 — reload 금지
+  outcomes.push("fail", "fail", "ok"); await tick(); await tick(); await tick();
+  if (reloads !== 0) fail("two_blips_reloaded");
+  // 3) 연속 3회 실패(진짜 다운) → 회복: reload 정확히 1회
+  outcomes.push("fail", "fail", "fail", "ok");
+  await tick(); await tick(); await tick(); await tick();
+  if (reloads !== 1) fail("no_reload_after_downtime reloads=" + reloads);
+  console.log("OK watchdog");
+})();
+"""
+
+
+@pytest.mark.skipif(__import__("shutil").which("node") is None,
+                    reason="node 미설치 — 런타임 JS 검증 스킵")
+def test_reconnect_watchdog_runtime(tmp_path):
+    """워치독 런타임 — 단일/2연속 실패는 무시, 3연속 실패 후 회복 시만 reload 1회."""
+    import re
+    import subprocess
+
+    from dashboard import auth
+    h = auth.reconnect_watchdog_html(1000)
+    js = re.findall(r"<script>(.*?)</script>", h, re.S)[0]
+    runner = tmp_path / "watchdog.js"
+    runner.write_text(_WATCHDOG_HARNESS.replace("__SCRIPT__", js), encoding="utf-8")
+    r = subprocess.run(["node", str(runner)], capture_output=True, text=True, timeout=30)
+    assert r.returncode == 0, f"watchdog runtime fail: {r.stdout}\n{r.stderr}"
+    assert "OK watchdog" in r.stdout
 
 
 def test_chart_full_page():
