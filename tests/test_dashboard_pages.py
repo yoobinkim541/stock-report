@@ -725,3 +725,21 @@ chart_full.render()
     assert "↙" in labels                              # 복귀 버튼
     body = " ".join(str(getattr(m, "value", "")) for m in at.markdown)
     assert "Microsoft" in body or "MSFT" in body      # 히어로 라벨
+
+
+def test_ticker_chart_new_indicators_render():
+    """V-series 지표(켈트너·KAMA·샹들리에·Aroon·%b·PVT) 전체 선택 렌더 — 무예외."""
+    script = _STUBS + '''
+cached.realtime_quote = lambda t: None
+st.session_state["_top_1d"] = ["이동평균선", "켈트너 채널", "KAMA", "샹들리에 엑시트"]
+st.session_state["_bot_1d"] = ["거래량", "RSI", "MACD", "스토캐스틱", "Aroon", "%b", "PVT"]
+from dashboard.pages import ticker
+ticker.render()
+'''
+    at = AppTest.from_string(script, default_timeout=30)
+    at.run()
+    assert not at.exception, str(at.exception)
+    frames = [i.proto.srcdoc for i in at.get("iframe")]
+    main = [s for s in frames if "bt-reg" in s]
+    assert main, "차트 iframe 에 신규 도구 버튼 미포함"
+    assert "bt-avwap" in main[0] and "bt-vprof" in main[0]

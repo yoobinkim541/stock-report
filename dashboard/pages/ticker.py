@@ -113,7 +113,7 @@ _MA_DEFAULT = {"1d": [60, 120, 200], "1wk": [60, 120, 200],   # 요청 기본값
                "1mo": [5, 10, 20, 60, 120, 200], "5m": [20, 60], "1h": [20, 60]}
 _TOP_INDS = ["이동평균선", "자동 추세선·채널", "지수이평(EMA)", "볼린저 밴드", "일목균형표",
              "슈퍼트렌드", "엔벨로프", "파라볼릭 SAR", "프라이스 채널", "매물대", "프랙탈",
-             "VWAP(세션)", "앵커드 VWAP"]
+             "VWAP(세션)", "앵커드 VWAP", "켈트너 채널", "KAMA", "샹들리에 엑시트"]
 
 
 def _chart_events(ticker, df, ev_sel) -> tuple[list, list]:
@@ -417,7 +417,8 @@ def _price_chart(ticker, hist, avg_cost, trades, fullscreen: bool = False,
                           key=f"_ev_{tf}_{'macro' if ticker_names.is_macro(ticker) else 'eq'}",
                           label_visibility="collapsed") or []
         st.markdown("**하단 지표** — 서브 패널")
-        bottom = st.pills("하단 지표", ["거래량", "RSI", "MACD", "스토캐스틱"], selection_mode="multi",
+        bottom = st.pills("하단 지표", ["거래량", "RSI", "MACD", "스토캐스틱",
+                                     "Aroon", "%b", "PVT"], selection_mode="multi",
                           default=["거래량", "RSI"], key=f"_bot_{tf}",
                           label_visibility="collapsed") or []
         log_scale = st.toggle("로그 스케일", key=f"_logscale_{tf}",
@@ -438,6 +439,9 @@ def _price_chart(ticker, hist, avg_cost, trades, fullscreen: bool = False,
     show_rsi = "RSI" in bottom
     show_macd = "MACD" in bottom
     show_stoch = "스토캐스틱" in bottom
+    show_aroon = "Aroon" in bottom
+    show_bbpct = "%b" in bottom
+    show_pvt = "PVT" in bottom
     tls = []
     if want_lines or want_short or want_long:
         ch_key = tuple(k for k, w in (("short", want_short), ("long", want_long)) if w)
@@ -530,6 +534,9 @@ def _price_chart(ticker, hist, avg_cost, trades, fullscreen: bool = False,
         emas=emas, psar="파라볼릭 SAR" in top, donchian_on="프라이스 채널" in top,
         vwap=("VWAP(세션)" in top and tf in ("5m", "1h")), avwap="앵커드 VWAP" in top,
         compare=compare, show_macd=show_macd, show_stoch=show_stoch, log_scale=use_log,
+        keltner="켈트너 채널" in top, kama="KAMA" in top,
+        chandelier="샹들리에 엑시트" in top,
+        show_aroon=show_aroon, show_bbpct=show_bbpct, show_pvt=show_pvt,
         events=events, zones=zones)
     if fullscreen:                                  # ⛶ 풀뷰 — 뷰포트 거의 채우는 높이
         fig.update_layout(height=840)
@@ -564,7 +571,8 @@ def _price_chart(ticker, hist, avg_cost, trades, fullscreen: bool = False,
             st.components.v1.html(plotly_embed.realtime_feed_html(_sk, _rtp), height=0)
     st.caption("🖱️ 드래그=이동(y축 자동 맞춤) · 휠=확대/축소 · 더블클릭=원위치 · "
                "✏️ 모드바 직접 그리기(선·자유곡선·박스)·지우개 + 차트 위 도구바: "
-               "🧲 자석(봉 OHLC 스냅)·─ 수평선·🔱 피보나치·📏 측정·🗑 지우기 · "
+               "🧲 자석(봉 OHLC 스냅)·─ 수평선·🔱 피보나치·📏 측정·📐 회귀추세(±2σ)·"
+               "⚓ 고정VWAP·📊 볼륨프로필(POC)·🗑 지우기 · "
                "드로잉은 이 브라우저에 종목·봉·스케일별 자동 저장")
     selected = _selected_trade(event, trades or []) if legacy else None
     if selected:

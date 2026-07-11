@@ -936,3 +936,70 @@ def test_view_window_serialization_shrinks():
     win = charts.price_chart(charts.view_window(hist, 180), "T",
                              view_days=180, show_volume=True)
     assert len(win.to_json()) < len(full.to_json()) * 0.25
+
+
+def test_kama_series_adapts():
+    """KAMA — 워밍업 후 유한 + 강추세에선 가격 근접·마지막 값이 SMA30 보다 가깝다."""
+    idx = pd.date_range("2024-01-01", periods=200, freq="D")
+    c = pd.Series([100.0 + i for i in range(200)], index=idx)   # 완전 추세(ER≈1)
+    k = charts.kama_series(c)
+    assert k.iloc[:10].isna().all()                 # 워밍업 NaN
+    assert k.iloc[-1] == k.iloc[-1]
+    sma30 = float(c.rolling(30).mean().iloc[-1])
+    assert abs(float(k.iloc[-1]) - float(c.iloc[-1])) < abs(sma30 - float(c.iloc[-1]))
+
+
+def _ohlcv_v(n=300):
+    idx = pd.date_range("2024-01-01", periods=n, freq="D")
+    c = pd.Series([100 + i * 0.1 + (i % 13) for i in range(n)], index=idx, dtype=float)
+    return pd.DataFrame({"Open": c, "High": c * 1.02, "Low": c * 0.98, "Close": c,
+                         "Volume": [1e6 + (i % 5) * 1e5 for i in range(n)]}, index=idx)
+
+
+def test_price_chart_new_top_overlays():
+    """켈트너·KAMA·샹들리에 — 트레이스 존재 + 켈트너 상단>하단·샹들리에 롱<고가."""
+    hist = _ohlcv_v()
+    fig = charts.price_chart(hist, "T", keltner=True, kama=True, chandelier=True)
+    names = [t.name or "" for t in fig.data]
+    for want in ("켈트너 상단", "켈트너 하단", "KAMA(10·2·30)", "샹들리에 롱스탑", "샹들리에 숏스탑"):
+        assert any(want in n for n in names), f"누락: {want}"
+    up = next(t for t in fig.data if (t.name or "") == "켈트너 상단")
+    dn = next(t for t in fig.data if (t.name or "") == "켈트너 하단")
+    assert float(up.y[-1]) > float(dn.y[-1])
+    ls = next(t for t in fig.data if (t.name or "") == "샹들리에 롱스탑")
+    assert float(ls.y[-1]) < float(hist["High"].iloc[-1])
+
+
+def test_price_chart_new_bottom_panels_and_8panes():
+    """Aroon·%b·PVT 서브패널 — 8패널 동적 배정·yaxis8 존재·높이 확장."""
+    hist = _ohlcv_v()
+    fig = charts.price_chart(hist, "T", show_volume=True, show_rsi=True, show_macd=True,
+                             show_stoch=True, show_aroon=True, show_bbpct=True,
+                             show_pvt=True)
+    assert fig.layout.yaxis8 is not None            # 가격 + 서브 7 = 8행
+    assert (fig.layout.height or 0) > 1000          # 다패널 높이 확장
+    names = [t.name or "" for t in fig.data]
+    for want in ("Aroon Up", "Aroon Down", "%b(20·2σ)", "PVT"):
+        assert any(want in n for n in names), f"누락: {want}"
+    ar = next(t for t in fig.data if (t.name or "") == "Aroon Up")
+    vals = [v for v in ar.y if v == v]
+    assert vals and all(0 <= v <= 100 for v in vals)
+
+
+def test_price_chart_new_panels_graceful_without_data():
+    """OHLC 없으면 Aroon 자동 비활성·Volume 없으면 PVT 비활성 (무예외·행 미배정)."""
+    idx = pd.date_range("2024-01-01", periods=100, freq="D")
+    hist = pd.DataFrame({"Close": [100.0 + i for i in range(100)]}, index=idx)
+    fig = charts.price_chart(hist, "T", show_aroon=True, show_pvt=True, show_bbpct=True)
+    # aroon(OHLC)·pvt(Volume) 스킵 → %b 만 = 2패널
+    assert fig.layout.yaxis2 is not None and getattr(fig.layout, "yaxis3", None) is None
+
+
+def test_price_chart_compare_disables_new_overlays():
+    """비교(%) 모드 — 켈트너·KAMA·샹들리에 자동 비활성 (절대가격 오버레이 규약)."""
+    hist = _ohlcv_v()
+    cmp_s = pd.Series([50.0 + i * 0.1 for i in range(len(hist))], index=hist.index)
+    fig = charts.price_chart(hist, "T", compare={"C": cmp_s},
+                             keltner=True, kama=True, chandelier=True)
+    names = [t.name or "" for t in fig.data]
+    assert not any("켈트너" in n or "KAMA" in n or "샹들리에" in n for n in names)

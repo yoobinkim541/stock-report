@@ -786,6 +786,8 @@ def price_chart(hist, ticker: str = "", *, kind: str = "line", avg_cost=None,
                 emas=(), psar: bool = False, donchian_on: bool = False,
                 vwap: bool = False, avwap: bool = False, compare=None,
                 show_macd: bool = False, show_stoch: bool = False, log_scale: bool = False,
+                keltner: bool = False, kama: bool = False, chandelier: bool = False,
+                show_aroon: bool = False, show_bbpct: bool = False, show_pvt: bool = False,
                 events=None, zones=None):
     """가격 차트 + 기술적 분석 도구 (TradingView 풍 멀티패널).
 
@@ -809,15 +811,19 @@ def price_chart(hist, ticker: str = "", *, kind: str = "line", avg_cost=None,
         mas, emas = (), ()
         bollinger = ichimoku = supertrend = envelope = fractals = vol_profile = False
         psar = donchian_on = vwap = avwap = False
+        keltner = kama = chandelier = False
         log_scale = False              # % 축엔 로그 무의미
         events, zones = None, None     # 절대가격 오버레이 — % 축과 공존 불가
     close = hist["Close"]
     has_ohlc = {"Open", "High", "Low"} <= cols
     show_volume = show_volume and "Volume" in cols
     show_stoch = show_stoch and has_ohlc                # 스토캐스틱은 High/Low 필요
+    show_aroon = show_aroon and has_ohlc                # Aroon 은 High/Low 필요
+    show_pvt = show_pvt and "Volume" in cols            # PVT 는 거래량 필요
 
-    # 하단 서브패널 — 순서 고정(거래량 → RSI → MACD → 스토캐스틱). 행 번호 동적 배정.
-    sub = [("vol", show_volume), ("rsi", show_rsi), ("macd", show_macd), ("stoch", show_stoch)]
+    # 하단 서브패널 — 순서 고정(거래량→RSI→MACD→스토→Aroon→%b→PVT). 행 번호 동적 배정.
+    sub = [("vol", show_volume), ("rsi", show_rsi), ("macd", show_macd), ("stoch", show_stoch),
+           ("aroon", show_aroon), ("bbpct", show_bbpct), ("pvt", show_pvt)]
     active = [name for name, on in sub if on]
     panes = 1 + len(active)
     row_of = {name: i + 2 for i, name in enumerate(active)}   # 가격=1, 서브=2..
@@ -825,12 +831,16 @@ def price_chart(hist, ticker: str = "", *, kind: str = "line", avg_cost=None,
     rsi_row = row_of.get("rsi")
     macd_row = row_of.get("macd")
     stoch_row = row_of.get("stoch")
+    aroon_row = row_of.get("aroon")
+    bbpct_row = row_of.get("bbpct")
+    pvt_row = row_of.get("pvt")
     if panes > 1:
         from plotly.subplots import make_subplots
-        # 2·3패널은 기존 튜닝 비율 유지(회귀 방어), 4·5패널만 일반 분배 규칙
+        # 2·3패널은 기존 튜닝 비율 유지(회귀 방어), 4·5패널만 일반 분배 규칙,
+        # 6+ 패널(신규 하단지표 Aroon·%b·PVT)은 가격 0.40 + 서브 균등 분배
         _HEIGHTS = {2: [0.70, 0.30], 3: [0.58, 0.19, 0.23],
                     4: [0.52, 0.16, 0.16, 0.16], 5: [0.46, 0.135, 0.135, 0.135, 0.135]}
-        heights = _HEIGHTS[panes]
+        heights = _HEIGHTS.get(panes) or ([0.40] + [0.60 / (panes - 1)] * (panes - 1))
         fig = make_subplots(rows=panes, cols=1, shared_xaxes=True,
                             row_heights=heights, vertical_spacing=0.05)
     else:
@@ -902,6 +912,35 @@ def price_chart(hist, ticker: str = "", *, kind: str = "line", avg_cost=None,
         fig.add_trace(_SC(x=bi, y=(ma20 - 2 * sd)[bb_ok], name="BB하단",
                           line=dict(color="#8b93a7", width=0.8, dash="dot"),
                           fill="tonexty", fillcolor="rgba(139,147,167,0.08)"))
+
+    # ── 켈트너 채널 (EMA20 ± 2×ATR10) ──
+    if keltner and has_ohlc and len(close) >= 20:
+        k_mid = close.ewm(span=20, adjust=False).mean()
+        k_atr = _atr_series(hist, 10)
+        k_ok = k_mid.notna() & k_atr.notna()
+        ki = hist.index[k_ok]
+        fig.add_trace(_SC(x=ki, y=(k_mid + 2 * k_atr)[k_ok], name="켈트너 상단",
+                          line=dict(color="#22d3ee", width=0.8, dash="dot")))
+        fig.add_trace(_SC(x=ki, y=(k_mid - 2 * k_atr)[k_ok], name="켈트너 하단",
+                          line=dict(color="#22d3ee", width=0.8, dash="dot"),
+                          fill="tonexty", fillcolor="rgba(34,211,238,0.06)"))
+        fig.add_trace(_SC(x=ki, y=k_mid[k_ok], name="켈트너 중심", showlegend=False,
+                          line=dict(color="#22d3ee", width=0.7)))
+
+    # ── KAMA (카우프만 적응 이동평균 10·2·30) — 추세=빠르게·횡보=느리게 ──
+    if kama and len(close) >= 12:
+        fig.add_trace(_SC(x=hist.index, y=kama_series(close), name="KAMA(10·2·30)",
+                          line=dict(color="#f59e0b", width=1.3)))
+
+    # ── 샹들리에 엑시트 (22·3×ATR) — 트레일링 스탑 라인 ──
+    if chandelier and has_ohlc and len(close) >= 22:
+        c_atr = _atr_series(hist, 22)
+        fig.add_trace(_SC(x=hist.index, y=hist["High"].rolling(22).max() - 3 * c_atr,
+                          name="샹들리에 롱스탑",
+                          line=dict(color=_GREEN, width=1, dash="dash")))
+        fig.add_trace(_SC(x=hist.index, y=hist["Low"].rolling(22).min() + 3 * c_atr,
+                          name="샹들리에 숏스탑",
+                          line=dict(color=_RED, width=1, dash="dash")))
 
     if avg_cost and avg_cost > 0:
         fig.add_hline(y=avg_cost, line=dict(color=theme.MUTED, dash="dash", width=1.2),
@@ -998,7 +1037,50 @@ def price_chart(hist, ticker: str = "", *, kind: str = "line", avg_cost=None,
             fig.add_hline(y=lv, line=dict(color=c, dash="dot", width=0.7), row=stoch_row, col=1)
         fig.update_yaxes(range=[0, 100], row=stoch_row, col=1, tickvals=[20, 50, 80])
 
-    chart_height = {1: 380, 2: 540, 3: 680, 4: 800, 5: 900}[panes]
+    # ── Aroon 패널 (25) — 신고/신저 이후 경과 기반 추세 강도 (0~100) ──
+    if aroon_row:
+        n_ar = 25
+        ar_up = hist["High"].rolling(n_ar + 1).apply(
+            lambda x: float(x.argmax()) / n_ar * 100, raw=True)
+        ar_dn = hist["Low"].rolling(n_ar + 1).apply(
+            lambda x: float(x.argmin()) / n_ar * 100, raw=True)
+        fig.add_trace(go.Scatter(x=hist.index, y=ar_up, name="Aroon Up", showlegend=False,
+                                 line=dict(color=_GREEN, width=1.2)), row=aroon_row, col=1)
+        fig.add_trace(go.Scatter(x=hist.index, y=ar_dn, name="Aroon Down", showlegend=False,
+                                 line=dict(color=_RED, width=1.2)), row=aroon_row, col=1)
+        fig.add_hline(y=70, line=dict(color=theme.MUTED, dash="dot", width=0.7),
+                      row=aroon_row, col=1)
+        fig.add_hline(y=30, line=dict(color=theme.MUTED, dash="dot", width=0.7),
+                      row=aroon_row, col=1)
+        fig.update_yaxes(range=[0, 100], row=aroon_row, col=1, tickvals=[30, 70])
+
+    # ── 볼린저 %b 패널 (20·2σ) — 밴드 내 위치 (0=하단·1=상단) ──
+    if bbpct_row:
+        b_ma = close.rolling(20).mean()
+        b_sd = close.rolling(20).std()
+        pctb = (close - (b_ma - 2 * b_sd)) / (4 * b_sd).replace(0, float("nan"))
+        fig.add_hrect(y0=0, y1=1, fillcolor="rgba(120,130,180,0.08)", line_width=0,
+                      row=bbpct_row, col=1)
+        fig.add_trace(go.Scatter(x=hist.index, y=pctb, name="%b(20·2σ)", showlegend=False,
+                                 line=dict(color="#22d3ee", width=1.2)), row=bbpct_row, col=1)
+        for lv, c in ((1.0, _RED), (0.0, _GREEN)):
+            fig.add_hline(y=lv, line=dict(color=c, dash="dot", width=0.7),
+                          row=bbpct_row, col=1)
+        fig.update_yaxes(row=bbpct_row, col=1, tickvals=[0, 0.5, 1])
+
+    # ── PVT 패널 — 가격 거래량 트렌드 (등락률×거래량 누적 · OBV 계열) ──
+    if pvt_row:
+        pvt = (close.pct_change().fillna(0) * hist["Volume"]).cumsum()
+        fig.add_trace(go.Scatter(x=hist.index, y=pvt, name="PVT", showlegend=False,
+                                 line=dict(color="#e879f9", width=1.2)), row=pvt_row, col=1)
+        if len(pvt) >= 20:
+            fig.add_trace(go.Scatter(x=hist.index, y=pvt.rolling(20).mean(),
+                                     name="PVT MA20", showlegend=False,
+                                     line=dict(color="#3b82f6", width=1)), row=pvt_row, col=1)
+        fig.update_yaxes(row=pvt_row, col=1, nticks=3)
+
+    chart_height = ({1: 380, 2: 540, 3: 680, 4: 800, 5: 900}.get(panes)
+                    or 900 + 85 * (panes - 5))
     fig.update_layout(margin=dict(t=14, b=64, l=14, r=46), dragmode="pan",
                       legend=dict(orientation="h", x=0.0, xanchor="left",
                                   y=1.0, yanchor="bottom", font=dict(size=10),
@@ -1124,6 +1206,29 @@ def supertrend_series(hist, period: int = 10, mult: float = 3.0):
             trend[i] = 1 if close[i] > fub[i] else -1
         line[i] = flb[i] if trend[i] == 1 else fub[i]
     return line, trend
+
+
+def kama_series(close, n: int = 10, fast: int = 2, slow: int = 30):
+    """카우프만 적응 이동평균 (KAMA) — 효율비(ER) 기반 스무딩, 표준 재귀식 (순수).
+
+    추세 구간(ER→1)은 빠른 EMA, 횡보(ER→0)는 느린 EMA 로 자동 전환 —
+    레짐 감지(ml/regime_classifier)와 같은 Kaufman ER 계보의 표시용 오버레이.
+    """
+    import numpy as np
+    import pandas as pd
+    c = close.astype(float)
+    change = (c - c.shift(n)).abs()
+    vol = c.diff().abs().rolling(n).sum()
+    er = (change / vol.replace(0, np.nan)).clip(0, 1).fillna(0.0)
+    sc = (er * (2 / (fast + 1) - 2 / (slow + 1)) + 2 / (slow + 1)) ** 2
+    vals, scv = c.to_numpy(), sc.to_numpy()
+    out = np.full(len(vals), np.nan)
+    if len(vals) <= n:
+        return pd.Series(out, index=c.index)
+    out[n] = vals[n]
+    for i in range(n + 1, len(vals)):             # 재귀 정의 — 벡터화 불가
+        out[i] = out[i - 1] + scv[i] * (vals[i] - out[i - 1])
+    return pd.Series(out, index=c.index)
 
 
 def fractal_points(hist, k: int = 2):
