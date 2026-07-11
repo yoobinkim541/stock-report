@@ -77,6 +77,8 @@ cached.chart_news = lambda t: [{"date": "2026-07-01", "direction": 1, "strength"
                                 "event_type": "실적", "title": "beat"}]
 cached.macro_corr = lambda t: [{"symbol": "^TNX", "label": "미 10년물", "note": "역상관 경향",
                                 "corr90": -0.62, "chg30": 1.4}]
+cached.llm_related = lambda t: ([{"ticker": "AMD", "relation": "경쟁사", "reason": "GPU"}], "cached")
+cached.llm_related.clear = lambda: None
 cached.macro_assets = lambda: [
     {"symbol": "KRW=X", "label": "달러/원 환율", "emoji": "\U0001f4b1", "unit": "₩",
      "ticker": "KRW=X", "price": 1505.05, "chg": -3.2, "pct": -0.21, "spark": [1500, 1503, 1505]},

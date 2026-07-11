@@ -99,6 +99,40 @@ gd.emit("plotly_relayout", { shapes: gd.layout.shapes });
 const mAnn = (gd.layout.annotations || []).filter(a => a.name === "tool-meas");
 if (gd.layout.shapes.filter(s => s.name === "tool-meas").length !== 1 || !mAnn.length
     || mAnn[0].text.indexOf("봉") < 0) fail("measure");
+// 4.5) 신규 도구 — 수직선·크로스·레이·롱 포지션 (TV 확장 도구 세트 · 자석 OFF 경로)
+el("bt-mag").onclick({ target: el("bt-mag") });   // 자석 OFF — 원값 그대로 검증
+el("bt-vline").onclick();
+gd.layout.shapes = gd.layout.shapes.concat([{ type: "line", xref: "x", yref: "y",
+  x0: iso(D0), y0: 130, x1: iso(D0 + 864e5), y1: 131 }]);
+gd.emit("plotly_relayout", { shapes: gd.layout.shapes });
+const vl = gd.layout.shapes.filter((s) => s.name === "tool-vline");
+if (vl.length !== 1 || vl[0].yref !== "paper" || vl[0].x0 !== vl[0].x1) fail("vline");
+el("bt-cross").onclick();
+gd.layout.shapes = gd.layout.shapes.concat([{ type: "line", xref: "x", yref: "y",
+  x0: iso(D0), y0: 140, x1: iso(D0 + 864e5), y1: 141 }]);
+gd.emit("plotly_relayout", { shapes: gd.layout.shapes });
+if (gd.layout.shapes.filter((s) => s.name === "tool-cross").length !== 2) fail("cross_pair");
+el("bt-ray").onclick();
+gd.layout.shapes = gd.layout.shapes.concat([{ type: "line", xref: "x", yref: "y",
+  x0: iso(D0), y0: 130, x1: iso(D1), y1: 150 }]);
+gd.emit("plotly_relayout", { shapes: gd.layout.shapes });
+const ray = gd.layout.shapes.filter((s) => s.name === "tool-ray");
+if (ray.length !== 1) fail("ray");
+if (Date.parse(ray[0].x1) <= Date.parse(iso(D1))) fail("ray_not_extended");   // 우측 연장
+el("bt-long").onclick();
+gd.layout.shapes = gd.layout.shapes.concat([{ type: "rect", xref: "x", yref: "y",
+  x0: iso(D0), y0: 130, x1: iso(D1), y1: 150 }]);   // 진입 130 → 목표 150
+gd.emit("plotly_relayout", { shapes: gd.layout.shapes });
+const pos = gd.layout.shapes.filter((s) => s.name === "tool-pos");
+if (pos.length !== 2) fail("pos_zones " + pos.length);
+const stopZone = pos.find((s) => Math.min(s.y0, s.y1) < 130);
+if (!stopZone || Math.abs(Math.min(stopZone.y0, stopZone.y1) - 110) > 1e-6)
+  fail("pos_rr_stop " + JSON.stringify(pos.map((s) => [s.y0, s.y1])));        // RR 1:1 → 110
+const posAnn = (gd.layout.annotations || []).filter((a) => a.name === "tool-pos");
+if (posAnn.length !== 1 || !/롱/.test(posAnn[0].text) || !/RR 1:1/.test(posAnn[0].text))
+  fail("pos_ann");
+el("bt-mag").onclick({ target: el("bt-mag") });   // 자석 복원 (후속 영속화 테스트는 스냅 전제)
+
 // 5) 지우기 — 서버 도형만 정확 복원 + 저장소도 클리어
 el("bt-clear").onclick();
 if (JSON.stringify(gd.layout.shapes) !== JSON.stringify(BASE)) fail("clear_restore");

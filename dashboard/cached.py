@@ -219,6 +219,12 @@ def macro_corr(t):
     return views.macro_correlations(t)
 
 
+@st.cache_data(ttl=3600, show_spinner=False)
+def llm_related(t):
+    """🤖 LLM 연관 종목 추천 (세션 1h 캐시 — 디스크 24h 캐시는 provider). 버튼 게이트 전용."""
+    return views.llm_related_tickers(t)
+
+
 @st.cache_data(ttl=_TTL_HEAVY, show_spinner="TR·PR 계산 중…")
 def tr_pr(t, years=5):
     return views.etf_tr_pr(t, years)
