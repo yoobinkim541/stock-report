@@ -452,3 +452,162 @@ def test_drawing_no_infinite_relayout_loop(tmp_path):
     r = subprocess.run([_NODE, str(runner)], capture_output=True, text=True, timeout=30)
     assert r.returncode == 0, f"loop guard fail: {r.stdout}\n{r.stderr}"
     assert "OK bounded" in r.stdout
+
+
+# ── TV 갭 도구 3종 — 📐 회귀추세 · ⚓ 고정VWAP · 📊 볼륨프로필 (V-series) ────────
+_TOOLS2_HARNESS = r"""
+const relayoutCalls = [];
+let gd = null;
+const els = {};
+function el(id) {
+  if (!els[id]) els[id] = { id, style: {}, innerHTML: "", textContent: "", _h: {},
+    _s: new Set(id === "bt-mag" ? ["on"] : []),
+    classList: { toggle(c, on) { on ? this._s.add(c) : this._s.delete(c); } },
+    on(e, f) { this._h[e] = f; }, emit(e, p) { if (this._h[e]) this._h[e](p); },
+    appendChild() {}, addEventListener() {}, querySelector() { return null; },
+    getBoundingClientRect() { return { top: 0 }; } };
+  els[id].classList._s = els[id]._s;
+  if (id === "chart") gd = els[id];
+  return els[id];
+}
+global.document = { getElementById: el,
+                    createElement: () => ({ style: {}, textContent: "" }) };
+global.window = { frameElement: null, parent: { innerHeight: 900, addEventListener() {} } };
+global.performance = { now: () => 1 };
+global.requestAnimationFrame = () => null;
+global.Plotly = {
+  newPlot(g, d, l, c) { g.data = d; g.layout = l; return { then(cb) { cb(); return this; } }; },
+  relayout(g, u) { relayoutCalls.push(u);
+    for (const k of Object.keys(u)) if (!k.includes(".") && !k.includes("[")) g.layout[k] = u[k];
+    return { then(cb) { cb(); return this; } }; },
+  addTraces(g, trs) { g.data = (g.data || []).concat(trs); },
+  deleteTraces(g, idxs) { g.data = g.data.filter((t, i) => !idxs.includes(i)); },
+};
+const _ls = {};
+global.localStorage = { getItem: (k) => (k in _ls ? _ls[k] : null),
+                        setItem: (k, v) => { _ls[k] = String(v); },
+                        removeItem: (k) => { delete _ls[k]; } };
+global.setTimeout = (fn) => { fn(); return 0; };
+global.clearTimeout = () => {};
+__SCRIPT__
+const iso = (d) => new Date(d).toISOString();
+const D0 = Date.parse("2025-02-01"), D1 = Date.parse("2025-03-01");
+const BASE = JSON.parse(JSON.stringify(gd.layout.shapes || []));
+function fail(m) { console.error("FAIL " + m); process.exit(1); }
+
+// 1) 📐 회귀추세 — 박스 드래그 = 중심선+상/하단 3선 + 라벨
+el("bt-reg").onclick();
+gd.layout.shapes = BASE.concat([{ type: "rect", xref: "x", yref: "y",
+  x0: iso(D0), y0: 120, x1: iso(D1), y1: 160 }]);
+gd.emit("plotly_relayout", { shapes: gd.layout.shapes });
+const regs = gd.layout.shapes.filter(s => s.name === "tool-reg");
+if (regs.length !== 3) fail("reg_lines " + regs.length);
+if (!(gd.layout.annotations || []).some(a => a.name === "tool-reg"
+    && a.text.indexOf("±2σ") >= 0)) fail("reg_ann");
+// 중심선 기울기 = 데이터 추세(우상향 합성 데이터) 반영
+const mid = regs[0];
+if (!(mid.y1 > mid.y0)) fail("reg_slope");
+
+// 2) 📊 볼륨프로필 — 박스 드래그 = 빈 히스토그램 + POC 라인 + 외곽 박스
+el("bt-vprof").onclick();
+gd.layout.shapes = gd.layout.shapes.concat([{ type: "rect", xref: "x", yref: "y",
+  x0: iso(D0), y0: 120, x1: iso(D1), y1: 160 }]);
+gd.emit("plotly_relayout", { shapes: gd.layout.shapes });
+const vps = gd.layout.shapes.filter(s => s.name === "tool-vprof");
+if (vps.length < 6) fail("vprof_shapes " + vps.length);
+if (!vps.some(s => s.type === "line")) fail("vprof_poc_line");
+if (!(gd.layout.annotations || []).some(a => a.name === "tool-vprof"
+    && a.text.indexOf("POC") >= 0)) fail("vprof_poc_ann");
+
+// 3) ⚓ 고정VWAP — 짧게 긋기 = VWAP 트레이스 추가 + 앵커 영속화
+const nData = gd.data.length;
+el("bt-avwap").onclick();
+gd.layout.shapes = gd.layout.shapes.concat([{ type: "line", xref: "x", yref: "y",
+  x0: iso(D0), y0: 130, x1: iso(D0 + 864e5), y1: 131 }]);
+gd.emit("plotly_relayout", { shapes: gd.layout.shapes });
+const vtr = gd.data.filter(t => t && t.meta === "tool-avwap");
+if (vtr.length !== 1) fail("avwap_trace " + vtr.length);
+if (!(vtr[0].y.length > 2 && vtr[0].y[0] > 0)) fail("avwap_values");
+const doc = JSON.parse(_ls["tndraw:TEST:1d:lin"] || "{}");
+if (!Array.isArray(doc.vwaps) || doc.vwaps.length !== 1) fail("avwap_persist " + JSON.stringify(doc.vwaps));
+
+// 4) 🗑 지우기 — VWAP 트레이스·도형·저장소 모두 정리
+el("bt-clear").onclick();
+if (gd.data.some(t => t && t.meta === "tool-avwap")) fail("clear_vwap_trace");
+if (JSON.stringify(gd.layout.shapes) !== JSON.stringify(BASE)) fail("clear_shapes");
+if (Object.keys(_ls).some(k => k.startsWith("tndraw:"))) fail("clear_storage");
+
+// 5) 재로드 복원 — vwap 앵커 저장 → 새 세션에서 트레이스 재계산 (도형 없이 vwaps 만)
+el("bt-avwap").onclick();
+gd.layout.shapes = BASE.concat([{ type: "line", xref: "x", yref: "y",
+  x0: iso(D0), y0: 130, x1: iso(D0 + 864e5), y1: 131 }]);
+gd.emit("plotly_relayout", { shapes: gd.layout.shapes });
+if (!JSON.parse(_ls["tndraw:TEST:1d:lin"] || "{}").vwaps.length) fail("persist_before_reload");
+for (const k of Object.keys(els)) delete els[k];   // 새 세션 모사 — storage 유지
+gd = null;
+__SCRIPT__
+if (!gd || !gd.data) fail("reload_gd");
+if (gd.data.filter(t => t && t.meta === "tool-avwap").length !== 1) fail("vwap_restore");
+console.log("OK tools2");
+"""
+
+
+@pytest.mark.skipif(_NODE is None, reason="node 미설치 — 런타임 JS 검증 스킵")
+def test_new_drawing_tools_runtime(tmp_path):
+    """📐 회귀추세·📊 볼륨프로필·⚓ 고정VWAP — 생성·영속화·지우기·재로드 복원."""
+    idx = pd.date_range("2025-01-01", periods=70, freq="D")
+    df = pd.DataFrame({"Open": range(100, 170), "High": range(101, 171),
+                       "Low": range(99, 169), "Close": range(100, 170),
+                       "Volume": [1e6] * 70}, index=idx)
+    fig = charts.price_chart(df, "TEST", kind="candle", show_volume=True,
+                             show_rsi=True, avg_cost=140.0)
+    html = plotly_embed.pannable_chart_html(fig, df, height=460, view_days=90,
+                                            vol_axis="yaxis2", store_key="TEST:1d:lin")
+    js = re.findall(r"<script>(.*?)</script>", html, re.S)[-1]
+    runner = tmp_path / "tools2.js"
+    runner.write_text(_TOOLS2_HARNESS.replace("__SCRIPT__", js), encoding="utf-8")
+    r = subprocess.run([_NODE, str(runner)], capture_output=True, text=True, timeout=30)
+    assert r.returncode == 0, f"tools2 fail: {r.stdout}\n{r.stderr}"
+    assert "OK tools2" in r.stdout
+
+
+@pytest.mark.skipif(_NODE is None, reason="node 미설치 — 런타임 JS 검증 스킵")
+def test_new_tools_no_infinite_loop(tmp_path):
+    """신규 도구 3종도 비동기 자기 메아리 무한 relayout 없이 유계 (프리즈 회귀 방어)."""
+    idx = pd.date_range("2025-01-01", periods=70, freq="D")
+    df = pd.DataFrame({"Open": range(100, 170), "High": range(101, 171),
+                       "Low": range(99, 169), "Close": range(100, 170),
+                       "Volume": [1e6] * 70}, index=idx)
+    fig = charts.price_chart(df, "TEST", kind="candle", show_volume=True, avg_cost=140.0)
+    html = plotly_embed.pannable_chart_html(fig, df, height=460, view_days=90,
+                                            vol_axis="yaxis2", store_key="TEST:1d:lin")
+    js = re.findall(r"<script>(.*?)</script>", html, re.S)[-1]
+    stub = _ASYNC_HARNESS.split("__SCRIPT__")[0]
+    stub = stub.replace("global.Plotly = {", "global.Plotly = {\n"
+                        "  addTraces(g, trs) { g.data = (g.data || []).concat(trs); },\n"
+                        "  deleteTraces(g, idxs) { g.data = g.data.filter((t, i) => !idxs.includes(i)); },")
+    body = r"""
+const iso = (d) => new Date(d).toISOString();
+const D0 = Date.parse("2025-02-01"), D1 = Date.parse("2025-03-01");
+const BASE = JSON.parse(JSON.stringify(gd.layout.shapes || []));
+function fail(m) { console.error("FAIL " + m); process.exit(1); }
+try { pump(); } catch (e) { fail("init " + e.message); }
+for (const [btn, shape] of [
+    ["bt-reg", { type: "rect", xref: "x", yref: "y", x0: iso(D0), y0: 120, x1: iso(D1), y1: 160 }],
+    ["bt-vprof", { type: "rect", xref: "x", yref: "y", x0: iso(D0), y0: 120, x1: iso(D1), y1: 160 }],
+    ["bt-avwap", { type: "line", xref: "x", yref: "y", x0: iso(D0), y0: 130, x1: iso(D0 + 864e5), y1: 131 }]]) {
+  el(btn).onclick();
+  try { pump(); } catch (e) { fail(btn + "_select " + e.message); }
+  RELAYOUTS = 0;
+  gd.layout.shapes = (gd.layout.shapes || []).concat([shape]);
+  gd._h["plotly_relayout"]({ shapes: gd.layout.shapes });
+  try { pump(); } catch (e) { fail(btn + "_LOOP (" + e.message + ") n=" + RELAYOUTS); }
+  if (RELAYOUTS > 25) fail(btn + " relayout 폭주 " + RELAYOUTS);
+}
+console.log("OK tools2 bounded");
+"""
+    runner = tmp_path / "tools2loop.js"
+    runner.write_text(stub + js + body, encoding="utf-8")
+    r = subprocess.run([_NODE, str(runner)], capture_output=True, text=True, timeout=30)
+    assert r.returncode == 0, f"tools2 loop fail: {r.stdout}\n{r.stderr}"
+    assert "OK tools2 bounded" in r.stdout

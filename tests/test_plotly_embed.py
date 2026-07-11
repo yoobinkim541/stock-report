@@ -213,3 +213,17 @@ def test_embed_live_flag_and_feed():
     # seq 가 재실행마다 html 을 바꿔 피더 재마운트(신선도 w 재기록)를 보장
     assert (plotly_embed.realtime_feed_html("T:1d:lin", 1.0, seq=1)
             != plotly_embed.realtime_feed_html("T:1d:lin", 1.0, seq=2))
+
+
+def test_embed_new_tools_contract():
+    """📐 회귀추세·⚓ 고정VWAP·📊 볼륨프로필 — 버튼·구현·영속화 스키마 계약 (V-series)."""
+    hist = _hist()
+    fig = charts.price_chart(hist, "T", kind="candle", show_volume=True)
+    html = plotly_embed.pannable_chart_html(fig, hist, view_days=180,
+                                            store_key="T:1d:lin")
+    for token in ("bt-reg", "bt-avwap", "bt-vprof", "makeReg", "makeAvwap", "makeVprof",
+                  "vwapTrace", "clearVwaps", "vwaps:", "tool-reg", "tool-vprof",
+                  "tool-avwap", "±2σ", "POC"):
+        assert token in html, f"누락: {token}"
+    # 비교(%) 모드에선 실가격×거래량 도구 불가 안내가 배선돼 있어야
+    assert "비교(%) 모드에선 사용 불가" in html
