@@ -49,9 +49,14 @@ def test_embed_drawing_tools_contract():
     hist = _hist()
     fig = charts.price_chart(hist, "T", kind="candle")
     html = plotly_embed.pannable_chart_html(fig, hist)
-    # 툴바 버튼
-    for bid in ('id="bt-mag"', 'id="bt-hline"', 'id="bt-fib"', 'id="bt-meas"', 'id="bt-clear"'):
+    # 툴바 버튼 (+⏪ 리플레이 바)
+    for bid in ('id="bt-mag"', 'id="bt-hline"', 'id="bt-fib"', 'id="bt-meas"', 'id="bt-clear"',
+                'id="bt-replay"', 'id="replaybar"', 'id="rp-slider"', 'id="rp-play"'):
         assert bid in html, f"툴바 버튼 누락: {bid}"
+    # 리플레이 핵심 로직 — 커튼·클램프(미래 누출 차단)·영속화 제외
+    for token in ("function replayApply", "function replayStop", "replay-curtain",
+                  "replayCut !== null"):
+        assert token in html, f"리플레이 로직 누락: {token}"
     # 핵심 로직
     for token in ("function snapPoint", "function makeFib", "function makeMeasure",
                   "function makeHline", "function handleShapes", "FIB_LEVELS",
