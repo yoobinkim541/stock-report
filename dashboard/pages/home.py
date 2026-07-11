@@ -27,6 +27,8 @@ def render():
     c2.metric("QQQ 낙폭", f"{ph['drawdown']:+.1f}%")
     c3.metric("DCA 배율", f"{ph['dca']}×")
 
+    _ai_briefing_card()
+
     st.divider()
     _market_bar()
     _macro_row()
@@ -95,6 +97,28 @@ def render():
             st.write(f"{e['marker']} `{e['date_str']}` {e['title']}")
 
     st.caption("표시·정보용 · 주문 집행 없음 · 과거 기반, 미래 보장 아님")
+
+
+def _ai_briefing_card():
+    """🌅 AI 포트폴리오 브리핑 — 크론 산출 JSON 표시 (없으면 조용히 생략·표시 전용)."""
+    b = cached.ai_briefing()
+    if not b:
+        return
+    with st.expander(f"🌅 AI 브리핑 — {b.get('summary', '')[:60]}", expanded=False):
+        st.markdown(f"**{b.get('summary', '')}**")
+        c1, c2 = st.columns(2)
+        with c1:
+            st.markdown("**📌 오늘 주목**")
+            for h in b.get("highlights") or []:
+                st.markdown(f"- {h}")
+        with c2:
+            st.markdown("**⚠️ 리스크**")
+            for r in b.get("risks") or []:
+                st.markdown(f"- {r}")
+        if b.get("checkpoints"):
+            st.markdown("**✅ 체크포인트** — " + " · ".join(b["checkpoints"]))
+        st.caption(f"{b.get('generated_at', '')} · {b.get('model', '')} · LLM 해설"
+                   "(계산된 지표·뉴스 DATA 한정) — 검증 안 된 참고용·매매신호 아님")
 
 
 def _market_bar():

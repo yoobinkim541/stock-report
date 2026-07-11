@@ -78,6 +78,7 @@ cached.chart_news = lambda t: [{"date": "2026-07-01", "direction": 1, "strength"
 cached.macro_corr = lambda t: [{"symbol": "^TNX", "label": "미 10년물", "note": "역상관 경향",
                                 "corr90": -0.62, "chg30": 1.4}]
 cached.llm_related = lambda t: ([{"ticker": "AMD", "relation": "경쟁사", "reason": "GPU"}], "cached")
+cached.ai_briefing = lambda: None
 cached.llm_related.clear = lambda: None
 cached.macro_assets = lambda: [
     {"symbol": "KRW=X", "label": "달러/원 환율", "emoji": "\U0001f4b1", "unit": "₩",
@@ -823,3 +824,30 @@ ticker.render()
     assert "클라우드 성장" in body and "PER 부담" in body
     caps = " ".join(str(c.value) for c in at.caption)
     assert "매매신호 아님" in caps and "판단(신호·배분)에 미반영" in caps.replace("시스템 ", "시스템")
+
+
+def test_home_ai_briefing_card():
+    """🌅 홈 AI 브리핑 카드 — 크론 JSON 있으면 표시·없으면 조용히 생략 (표시 전용)."""
+    body_script = _STUBS + '''
+cached.ai_briefing = lambda: {"summary": "기술주 중심 — 실적 시즌 진입",
+    "highlights": ["MSFT — 분기 매출 증가"], "risks": ["기술주 집중"],
+    "checkpoints": ["CPI"], "generated_at": "2026-07-11 07:45", "model": "gpt-5.5"}
+from dashboard.pages import home
+home.render()
+'''
+    at = AppTest.from_string(body_script, default_timeout=30)
+    at.run()
+    assert not at.exception, str(at.exception)
+    body = " ".join(str(getattr(m, "value", "")) for m in at.markdown)
+    assert "기술주 중심 — 실적 시즌 진입" in body and "MSFT — 분기 매출 증가" in body
+    caps = " ".join(str(c.value) for c in at.caption)
+    assert "매매신호 아님" in caps
+    # 브리핑 없음 → 카드 미표시·무예외
+    at2 = AppTest.from_string(_STUBS + '''
+from dashboard.pages import home
+home.render()
+''', default_timeout=30)
+    at2.run()
+    assert not at2.exception, str(at2.exception)
+    body2 = " ".join(str(getattr(m, "value", "")) for m in at2.markdown)
+    assert "오늘 주목" not in body2

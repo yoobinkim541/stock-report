@@ -141,6 +141,7 @@ crons/news_spike_detector.py (크론 매 1분)
 | `crons/accumulate_daily.py` | **주식 모으기 자동 기록** — 등록 플랜(`lib/accumulation` store 문서: 종목·금액 ₩/\$·매일/매주/매월)을 미 마감 직후 그날 종가×확정 종가 환율로 소수점 계좌에 매수 **기록**(멱등 last_run·휴장 스킵·천원 단위·텔레그램 요약). **실계좌 주문 0** — 키움 주식모으기 실매수의 거울. 플랜 없으면 no-op | 평일 21:10 UTC |
 | `crons/earnings_snapshot.py` | 어닝 컨센서스·★리비전 모멘텀·서프라이즈·밸류에이션 point-in-time 적재 (실적/주가반응 예측 학습데이터 — 무룩어헤드) | 평일 22:10 UTC |
 | `crons/news_llm_snapshot.py` | **LLM 뉴스 구조화 라벨 적재** (`NEWS_LLM_LABELS_ENABLED` opt-in) — 티커태그·미라벨 이벤트만 배치 라벨(회당 30건 캡) → news 축 피처 원천. KR 00:30·US 15:00 모의 결정 직전 신선화 | 평일 00:05·14:05 UTC |
+| `crons/daily_ai_briefing.py` | 🌅 **포트폴리오 AI 모닝 브리핑** — 보유종목 AI 분석 프리페치(24h 캐시 프라임 → 대시보드 버튼 즉시) + 보유 전체 DATA 브리핑 생성(`llm_briefing.json` 홈 카드 + 텔레그램·신규 생성 시만 발송). `DASH_AI_BRIEFING_ENABLED` opt-in·처방 금지어/균형 필터는 `providers/llm_analysis` | 평일 22:45 UTC |
 | `crons/naver_flow_snapshot.py` | KR 투자자 수급 + KOSPI200 멤버십 forward 스냅샷 (Naver — pykrx 공백 복구, 시점별 이력 축적) | 평일 07:30 UTC |
 | `crons/earnings_model_retrain.py` | 어닝 예측(G3 서프라이즈·G4 주가반응) 주간 재학습 + 모델 캐시 (엣지 게이트: AUC>0.52·skill>0.02 시만 저장 → /earnings 라이브 예측 공급) | 토 03:50 UTC |
 | `crons/institutional_snapshot.py` | 기관 매집 강도·13F 지분 주간 스냅샷 적재 (델타 추적용) + 상위 5 다이제스트 발송 | 토 01:30 UTC |
@@ -313,6 +314,8 @@ crons/news_spike_detector.py (크론 매 1분)
 | `NEWS_LLM_LABELS_ENABLED` | — | `false` (LLM 뉴스 구조화 라벨 크론 opt-in. off면 라벨 미적재 → news 축 미기록·score 재정규화) |
 | `NEWS_LLM_LABELS_MODEL` / `NEWS_LLM_LABELS_PROVIDER` / `NEWS_LLM_LABELS_TIMEOUT` | — | `gpt-5-mini` / `openai-codex` / `90` |
 | `NEWS_LLM_LABELS_MAX` | — | `30` (회당 라벨 배치 상한 — 일 2회 실행 비용 캡) |
+| `DASH_AI_BRIEFING_ENABLED` | — | `false` (🌅 AI 모닝 브리핑 크론+홈 카드. 모델/프로바이더/타임아웃은 `DASH_AI_BRIEFING_MODEL·_PROVIDER·_TIMEOUT` — 기본은 `INVESTMENT_REPORT_LLM_*` 상속) |
+| `DASH_AI_BRIEFING_PREFETCH_MAX` | — | `12` (브리핑 크론의 보유종목 AI 분석 프리페치 상한) |
 | `INVESTMENT_REPORT_LLM_ENABLED` | — | `1` (일일 리포트 LLM overlay — fact guard 통과 시만 코멘트 추가·결과는 store `llm_overlay_log` 축적) |
 | `SAVE_TICKER_API_BASE` | — | `https://saveticker.com/api` (뉴스 + 경제캘린더 `/calendar/events`) |
 | `DART_API_KEY` | — | — (DART OpenAPI 키 — KR 공시. 없으면 대시보드 공시탭 graceful 안내) |

@@ -46,6 +46,7 @@ PATH=/home/ubuntu/.local/bin:/usr/local/bin:/usr/bin:/bin
 10 22 * * 1-5 cd /home/ubuntu/projects/stock-report && uv run python crons/earnings_snapshot.py >> /tmp/earnings_snapshot.log 2>&1   # 22:10 UTC = 07:10 KST
 # LLM 뉴스 구조화 라벨 point-in-time 적재 (NEWS_LLM_LABELS_ENABLED=true 일 때만 — KR 00:30·US 15:00 모의 결정 직전 신선화)
 5 0,14 * * 1-5 cd /home/ubuntu/projects/stock-report && uv run python crons/news_llm_snapshot.py >> /tmp/news_llm_snapshot.log 2>&1   # 00:05·14:05 UTC
+45 22 * * 1-5 cd /home/ubuntu/projects/stock-report && uv run python crons/daily_ai_briefing.py >> /tmp/daily_ai_briefing.log 2>&1   # 07:45 KST — 아침 리포트 직전 AI 브리핑+프리페치
 
 # 국내주식 모의 페이퍼트레이딩 (KIWOOM_MOCK_ENABLED=true 일 때만 동작 — 장 개장 직후)
 # flock: 재실행·중복 집행 방지 (멱등). KRX 휴장일엔 주문이 거부될 뿐(모의 — 무해, 로그만).

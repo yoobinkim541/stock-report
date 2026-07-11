@@ -260,6 +260,12 @@ def llm_related(t):
     return views.llm_related_tickers(t)
 
 
+@st.cache_data(ttl=900, show_spinner=False)
+def ai_briefing():
+    """🌅 AI 브리핑 JSON (15분 캐시 — 파일은 크론이 평일 22:45 UTC 갱신)."""
+    return views.ai_briefing()
+
+
 @st.cache_data(ttl=3600, show_spinner=False)
 def llm_analysis(t, facts_json: str):
     """🤖 LLM 종목 분석 해설 (세션 1h 캐시 — 디스크 24h 는 provider). 버튼 게이트 전용."""
