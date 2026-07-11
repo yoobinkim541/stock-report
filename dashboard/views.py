@@ -831,6 +831,18 @@ def llm_related_tickers(ticker: str, force: bool = False):
         return None, f"call failed: {str(exc)[:80]}"
 
 
+def ai_briefing() -> dict | None:
+    """🌅 포트폴리오 AI 브리핑 — 크론이 저장한 JSON (홈 카드 · 없으면 None graceful)."""
+    try:
+        from providers.llm_analysis import BRIEF_PATH
+        import json as _j
+        with open(BRIEF_PATH, encoding="utf-8") as fp:
+            d = _j.load(fp)
+        return d if isinstance(d, dict) and d.get("summary") else None
+    except Exception:
+        return None
+
+
 def llm_stock_analysis(ticker: str, facts: dict, force: bool = False):
     """🤖 LLM 종목 분석 해설 — (dict|None, 상태). 금지어 필터·24h 캐시는 provider 가.
 
