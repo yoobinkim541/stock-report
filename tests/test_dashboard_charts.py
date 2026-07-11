@@ -1062,3 +1062,15 @@ def test_price_chart_fundamentals_panel():
     # 빈/무효 rows → 패널 없음
     fig2 = charts.price_chart(hist, "T", fundamentals=[{"date": "2024-01-01"}])
     assert getattr(fig2.layout, "yaxis2", None) is None
+
+
+def test_price_chart_fundamentals_unsorted_rows():
+    """비정렬 rows 방어 — 바 폭(min 간격)이 음수가 되던 실측 버그 회귀."""
+    hist = _ohlcv_v(200)
+    rows = [{"date": "2024-12-31", "revenue": 6.6e10, "net_income": 1.9e10, "margin": 0.29},
+            {"date": "2024-03-31", "revenue": 5.0e10, "net_income": 1.2e10, "margin": 0.24},
+            {"date": "2024-09-30", "revenue": 6.1e10, "net_income": 1.7e10, "margin": 0.28},
+            {"date": "2024-06-30", "revenue": 5.5e10, "net_income": 1.5e10, "margin": 0.27}]
+    fig = charts.price_chart(hist, "T", fundamentals=rows)      # 예외 없이 빌드
+    bar = next(t for t in fig.data if (t.name or "") == "매출")
+    assert bar.width and float(bar.width) > 0

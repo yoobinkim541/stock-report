@@ -779,12 +779,16 @@ cached.chart_fundamentals = lambda t: {"quarterly": [
     {"date": "2026-03-31", "revenue": 6.4e10, "net_income": 1.8e10, "margin": 0.28}],
     "annual": []}
 st.session_state["_bot_1d"] = ["거래량", "펀더멘털"]
+from dashboard.pages import ticker
+ticker.render()
 '''
     at = AppTest.from_string(script, default_timeout=30)
     at.run()
     assert not at.exception, str(at.exception)
     caps = " ".join(str(c.value) for c in at.caption)
     assert "펀더멘털 패널" in caps and "분기" in caps
+    frames = [i.proto.srcdoc for i in at.get("iframe")]
+    assert any('"매출"' in s for s in frames), "차트 iframe 에 매출 트레이스 없음"
     # ETF 등 데이터 없음 → 정직 안내
     script2 = script.replace('"quarterly": [', '"quarterly_x": [')
     at2 = AppTest.from_string(script2, default_timeout=30)
