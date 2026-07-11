@@ -156,6 +156,12 @@ class EntryScore:
     currency:      str = "USD"   # "KRW" for Korean stocks
     display_name:  str = ""      # 한글명 (한국 주식) 또는 티커
 
+    # ── 사후 검증/학습용 참고 지표 (point-in-time) ──
+    technical_rating: str = ""
+    technical_score:  float | None = None
+    pivot_p:          float | None = None
+    pivot_position:   str = ""     # below_s1 | below_p | above_p | above_r1 | ""
+
 
 # ── 피처 계산 ─────────────────────────────────────────────────────────────────
 
@@ -414,6 +420,35 @@ def analyze_entry(
         kr_info      = KR_META.get(ticker)
         display_name = kr_info[0] if kr_info else ticker
 
+        technical_rating = ""
+        technical_score: float | None = None
+        pivot_p: float | None = None
+        pivot_position = ""
+        try:
+            from ml.technical_rating import compute_technical_rating, pivot_points
+            rating = compute_technical_rating(price_df)
+            if rating:
+                summary = rating.get("summary") or {}
+                technical_rating = str(summary.get("rating") or "")
+                technical_score = summary.get("score")
+                if technical_score is not None:
+                    technical_score = float(technical_score)
+            piv = pivot_points(price_df)
+            if piv:
+                pivot_p = float(piv.get("P"))
+                s1 = float(piv.get("S1"))
+                r1 = float(piv.get("R1"))
+                if cur_price < s1:
+                    pivot_position = "below_s1"
+                elif cur_price < pivot_p:
+                    pivot_position = "below_p"
+                elif cur_price > r1:
+                    pivot_position = "above_r1"
+                else:
+                    pivot_position = "above_p"
+        except Exception:
+            pass
+
         return EntryScore(
             ticker           = ticker,
             category         = category,
@@ -437,6 +472,10 @@ def analyze_entry(
             timestamp        = datetime.now(KST).strftime("%Y-%m-%d %H:%M KST"),
             currency         = currency,
             display_name     = display_name,
+            technical_rating = technical_rating,
+            technical_score  = technical_score,
+            pivot_p          = pivot_p,
+            pivot_position   = pivot_position,
         )
 
     except Exception as e:
