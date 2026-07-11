@@ -334,7 +334,7 @@ def _price_chart(ticker, hist, avg_cost, trades, fullscreen: bool = False):
     kind = ckind.segmented_control("차트 종류", ["📈 라인", "🕯️ 캔들", "🟩 HA"], default="📈 라인",
                                    label_visibility="collapsed", key="_chart_kind",
                                    help="HA = 하이킨아시(평활 캔들·표시용 — 실체결가와 다름)")
-    # 기간 = 초기 표시 창만 — 데이터는 항상 전체(max) 로드라 과거로 무한 드래그 가능
+    # 기간 = 초기 표시 창 — 데이터는 뷰의 5배 팬버퍼로 윈도잉(charts.view_window·"전체"=전량)
     period = cper.radio("기간", ["3mo", "6mo", "1y", "5y", "전체"], index=1, horizontal=True,
                         label_visibility="collapsed", key="_chart_period")
     view_days = {"3mo": 90, "6mo": 180, "1y": 365, "5y": 1825, "전체": None}[period]
@@ -467,6 +467,12 @@ def _price_chart(ticker, hist, avg_cost, trades, fullscreen: bool = False):
                       else "TR(배당재투자·조정종가) 기준")
                    + " · 가격 지표(캔들·평단·MA·매물대 등) 비활성")
         show_vol = show_vol and "Volume" in getattr(df, "columns", [])   # PR 스왑 후 재판정
+    # 직렬화 윈도잉 — max 전량(장기주 ~11k봉) fig+bounds 직렬화가 지표/기간 토글마다
+    # 수 MB push + 수초 ScriptRunner 점유의 주원인. 뷰의 5배 팬버퍼+지표 워밍업만
+    # 남긴다("전체"=무윈도잉). 이하 실시간 패치·이벤트마커·HA·bounds 전부 같은 윈도우.
+    df = charts.view_window(df, view_days)
+    if compare:
+        compare = {k: charts.view_window(s, view_days) for k, s in compare.items()}
     # ⚡ 실시간 — 마지막 봉을 KIS 실시간가로 패치 (fresh 시·비교 모드 제외).
     # 캐시된 df 원본 오염 금지 → copy 후 수정. HA 변환 앞이라 HA 도 최신가 반영.
     if not compare and df is not None and not getattr(df, "empty", True):
