@@ -139,8 +139,8 @@ _TEMPLATE = r"""
     try {
       window.parent.addEventListener("resize", () => {
         const h = vhFit();
-        guard = true;
-        Plotly.relayout(gd, {height: h}).then(() => { guard = false; });
+        guard++;
+        Plotly.relayout(gd, {height: h}).then(() => { unguard(); });
       });
     } catch (e) {}
   }
@@ -150,7 +150,14 @@ _TEMPLATE = r"""
     if (k.startsWith("yaxis")) fig.layout[k].fixedrange = true;
   }
   const hoverMode = fig.layout.hovermode || "x unified";
-  let guard = false, dragging = false, hoverOff = false;
+  // guard = **카운터** (boolean 금지). plotly relayout 은 자기 이벤트를 비동기 emit 하는데
+  // (emit 은 항상 해당 호출의 .then 보다 앞 — plotly.js 3.6 소스 확정) 여러 relayout 이
+  // 겹치면 boolean 은 다른 호출의 .then 이 조기 해제 → 메아리가 새어 무한 루프(탭 프리즈).
+  // 카운터는 전 in-flight 가 끝나야 0 — 자기 메아리는 항상 guard>0 구간에 도착한다.
+  let guard = 0, dragging = false, hoverOff = false;
+  const unguard = () => { guard = Math.max(0, guard - 1); };
+  let drawGuard = 0;                             // 도형/주석 자기 relayout 전용 카운터
+  const undraw = () => { drawGuard = Math.max(0, drawGuard - 1); };
   // ⚠️ plotly 는 {shapes:[...]} relayout 의 자기 이벤트를 **비동기**로(promise .then 이
   // guard=false 로 되돌린 뒤) emit 한다 → boolean guard 만으론 자기 메아리를 못 막아,
   // applyDraw→메아리→magnet 재스냅→applyDraw 무한 루프로 탭이 얼어붙었다(실측 확정).
@@ -217,13 +224,13 @@ _TEMPLATE = r"""
     const visDelta = Math.abs((applied[0] ?? 1e18) - curY.price[0])
                    + Math.abs((applied[1] ?? 1e18) - curY.price[1]);
     if (!busy && now - lastApply >= minGap && visDelta > span * 0.004) {
-      busy = true; guard = true; lastApply = now;
+      busy = true; guard++; lastApply = now;
       const t0 = performance.now();
       const upd = {"yaxis.range": curY.price.slice()};
       if (volAxis && !dragging) upd[volAxis + ".range"] = [0, curY.vol[1]];
       Plotly.relayout(gd, upd).then(() => {
         costMs = costMs * 0.7 + (performance.now() - t0) * 0.3;   // 비용 EMA
-        busy = false; guard = false;
+        busy = false; unguard();
       });
     }
     if (!done || dragging) raf = requestAnimationFrame(animStep);
@@ -274,8 +281,8 @@ _TEMPLATE = r"""
 
   function muteHover() {                         // 제스처 중 hover 연산 중지 (1회)
     if (hoverOff) return;
-    hoverOff = true; guard = true;
-    Plotly.relayout(gd, {hovermode: false}).then(() => { guard = false; });
+    hoverOff = true; guard++;
+    Plotly.relayout(gd, {hovermode: false}).then(() => { unguard(); });
   }
 
   function finishGesture() {                     // 제스처 끝 1회 — 콜아웃·hover 복원
@@ -288,8 +295,8 @@ _TEMPLATE = r"""
     callouts(x0, x1, upd);                       // 무거운 주석 갱신은 여기서만
     if (hoverOff) { upd["hovermode"] = hoverMode; hoverOff = false; }
     if (Object.keys(upd).length) {
-      guard = true;
-      Plotly.relayout(gd, upd).then(() => { guard = false; });
+      guard++;
+      Plotly.relayout(gd, upd).then(() => { unguard(); });
     }
   }
   const rescale = finishGesture;                 // 초기 표시창 경로 하위호환
@@ -454,8 +461,8 @@ _TEMPLATE = r"""
   function setTool(next) {                       // 도구 토글 (상호 배타) + dragmode 전환
     tool = (tool === next) ? null : next;
     const dm = {hline: "drawline", fib: "drawline", meas: "drawrect"}[tool] || "pan";
-    guard = true;
-    Plotly.relayout(gd, {dragmode: dm}).then(() => { guard = false; });
+    guard++;
+    Plotly.relayout(gd, {dragmode: dm}).then(() => { unguard(); });
     for (const [id, name] of [["bt-hline", "hline"], ["bt-fib", "fib"], ["bt-meas", "meas"]])
       document.getElementById(id).classList.toggle("on", tool === name);
     document.getElementById("tool-hint").textContent = {
@@ -466,9 +473,9 @@ _TEMPLATE = r"""
   }
 
   function applyDraw(shapes, anns) {             // 도형/주석 일괄 반영 (자기이벤트 가드)
-    guard = true;
+    drawGuard++;                                 // 도형 메아리 전용 카운터 — 루프 차단 핵심
     Plotly.relayout(gd, {shapes: shapes, annotations: anns}).then(() => {
-      guard = false;
+      undraw();
       scheduleSave();                            // 도구 산출물 영속화
     });
   }
@@ -644,27 +651,27 @@ _TEMPLATE = r"""
       const axes = new Set(Object.keys(fig.layout).filter((k) => k.startsWith("yaxis"))
         .map((k) => "y" + k.slice(5)));
       const okRef = (r) => !r || r === "paper" || axes.has(r);
-      guard = true;
+      drawGuard++;                               // 복원도 도형 메아리 — drawGuard 로
       Plotly.relayout(gd, {
         shapes: (gd.layout.shapes || []).concat(saved.shapes.filter((s) => okRef(s.yref))),
         annotations: (gd.layout.annotations || []).concat(
           saved.anns.filter((a) => okRef(a.yref))),
-      }).then(() => { guard = false; });
+      }).then(() => { undraw(); });
     }
     const last = bounds.length ? bounds[bounds.length - 1][0] : null;
     const freshView = loadFreshView();           // ⚡자동갱신·설정변경 직후 = 보던 위치 복원
     if (freshView) {
-      guard = true;                              // 저장된 원문 그대로 — 재직렬화 왕복 금지
+      guard++;                              // 저장된 원문 그대로 — 재직렬화 왕복 금지
       Plotly.relayout(gd, {"xaxis.range": [freshView[0], freshView[1]]})
-        .then(() => { guard = false; rescale(); });
+        .then(() => { unguard(); rescale(); });
     } else if (last && @@VIEW_MS@@) {            // 초기 표시창 (기간 라디오)
       const x0 = last - @@VIEW_MS@@;
       const first = bounds[0][0];
       if (x0 > first) {
-        guard = true;
+        guard++;
         Plotly.relayout(gd, {"xaxis.range": [new Date(x0).toISOString(),
                                              new Date(last + @@VIEW_MS@@ * 0.02).toISOString()]})
-          .then(() => { guard = false; rescale(); });
+          .then(() => { unguard(); rescale(); });
       }
     }
     let gestureTimer = null;
@@ -679,9 +686,19 @@ _TEMPLATE = r"""
     // 휠 줌은 틱마다 relayout 이 발생(연속 제스처) — 틱 중엔 y 목표 갱신만(저비용),
     // 콜아웃·hover 복원 등 무거운 마무리는 마지막 틱 후 160ms 에 1회 (줌 랙 제거)
     gd.on("plotly_relayout", (e) => {
+      // 도형 이벤트는 drawGuard, 그 외(팬/줌/애니)는 guard — 가드 분리로
+      // (1) 자기 도형 메아리 1차 차단(내용 기반 방어는 2차), (2) 팬 애니메이션
+      // 중 사용자 도형 이벤트가 guard 에 삼켜져 자석이 간헐 미적용되던 것 해결.
+      const hasShapes = e && (Array.isArray(e.shapes)
+          || Object.keys(e).some((k) => k.startsWith("shapes[")));
+      if (hasShapes) {
+        if (drawGuard > 0) return;               // applyDraw/복원 자기 메아리
+        dragging = false;
+        if (handleShapes(e)) scheduleSave();     // 드로잉 도구·🧲 자석 경로 + 영속화
+        return;
+      }
       if (guard) return;
       dragging = false;
-      if (handleShapes(e)) { scheduleSave(); return; }   // 드로잉 도구·🧲 자석 경로 + 영속화
       const keys = Object.keys(e || {});
       if (keys.some(k => k.startsWith("xaxis.range")) || e["xaxis.autorange"]) {
         muteHover();
