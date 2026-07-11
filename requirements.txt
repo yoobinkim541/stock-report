@@ -45,6 +45,7 @@ multipledispatch==1.0.0
 multitasking==0.0.13
 narwhals==2.22.1
 numpy==2.4.6
+nvidia-nccl-cu12==2.30.7
 optuna==4.9.0
 packaging==26.2
 pandas==2.3.3
@@ -98,4 +99,5 @@ webencodings==0.5.1
 websockets==16.0
 werkzeug==3.1.8
 wrapt==2.2.2
+xgboost==3.2.0
 yfinance==1.4.1

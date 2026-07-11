@@ -795,3 +795,31 @@ ticker.render()
     at2.run()
     assert not at2.exception, str(at2.exception)
     assert "펀더멘털 데이터 없음" in " ".join(str(c.value) for c in at2.caption)
+
+
+def test_ticker_llm_analysis_section():
+    """🤖 AI 종목 분석 — 버튼 게이트·클릭 시 구조화 해설 렌더 (views 스텁·무LLM)."""
+    script = _STUBS + '''
+import dashboard.views as _views
+cached.realtime_quote = lambda t: None
+cached.llm_analysis = lambda t, fj: ({
+    "summary": "고성장 대비 밸류 부담 공존", "bulls": ["클라우드 성장"],
+    "bears": ["PER 부담"], "valuation": "프리미엄 구간.",
+    "technicals": "200일선 아래.", "checkpoints": ["다음 분기 마진"],
+    "generated_at": "2026-07-11 06:00", "model": "gpt-5.5"}, "ok")
+from dashboard.pages import ticker
+ticker.render()
+'''
+    at = AppTest.from_string(script, default_timeout=30)
+    at.run()
+    assert not at.exception, str(at.exception)
+    btns = [b for b in at.button if "분석 생성" in str(b.label)]
+    assert btns, "분석 생성 버튼 미발견 (버튼 게이트)"
+    btns[0].click()
+    at.run()
+    assert not at.exception, str(at.exception)
+    body = " ".join(str(getattr(m, "value", "")) for m in at.markdown)
+    assert "고성장 대비 밸류 부담 공존" in body
+    assert "클라우드 성장" in body and "PER 부담" in body
+    caps = " ".join(str(c.value) for c in at.caption)
+    assert "매매신호 아님" in caps and "판단(신호·배분)에 미반영" in caps.replace("시스템 ", "시스템")

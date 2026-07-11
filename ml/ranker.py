@@ -1,4 +1,4 @@
-"""ml/ranker.py — LightGBM 기반 종목 선택 모델
+"""ml/ranker.py — GBDT 기반 종목 선택 모델
 
 목표: QQQ 대비 초과수익률(excess return) 예측 → 종목 랭킹 생성
 
@@ -21,6 +21,8 @@ import fmt
 
 import numpy as np
 import pandas as pd
+
+from ml import gbdt_adapters as gbdt
 
 logger = logging.getLogger(__name__)
 
@@ -85,18 +87,20 @@ def train_ranker(
     dataset: dict,
     train_frac: float = 0.7,
     use_ranker: bool = True,
+    backend: str = "lightgbm",
 ) -> RankerResult:
-    """시계열 분할로 LGBMRanker(기본) 또는 LGBMRegressor 학습, OOS 성능 평가.
+    """시계열 분할로 GBDT ranker/regressor 학습, OOS 성능 평가.
 
     Args:
         dataset:     build_ml_dataset() 반환값
         train_frac:  학습 기간 비율 (나머지는 OOS 평가)
-        use_ranker:  True=LGBMRanker(lambdarank), False=LGBMRegressor
+        use_ranker:  True=ranker(lambdarank/pairwise), False=regressor
+        backend:     lightgbm(기본 챔피언) 또는 xgboost(챌린저)
 
     Returns:
         RankerResult
     """
-    import lightgbm as lgb
+    backend = gbdt.normalize_backend(backend)
 
     features: pd.DataFrame = dataset["features"]
     excess:   pd.Series    = dataset["excess"]
@@ -130,7 +134,7 @@ def train_ranker(
 
     logger.info("학습: %d행 | OOS: %d행 | 분할일: %s | 모델: %s",
                 len(X_train), len(X_test), split_date.date(),
-                "LGBMRanker" if use_ranker else "LGBMRegressor")
+                f"{gbdt.backend_label(backend)} {'ranker' if use_ranker else 'regressor'}")
 
     feat_names = list(features.columns)
 
@@ -140,37 +144,11 @@ def train_ranker(
         date_order = np.argsort(train_dates, kind="stable")
         X_train_sorted = X_train[date_order]
 
-        model = lgb.LGBMRanker(
-            objective="lambdarank",
-            n_estimators=200,
-            num_leaves=31,
-            learning_rate=0.05,
-            min_child_samples=5,
-            subsample=0.8,
-            colsample_bytree=0.8,
-            reg_alpha=0.1,
-            reg_lambda=0.1,
-            random_state=42,
-            verbose=-1,
-            n_jobs=-1,
-        )
-        model.fit(X_train_sorted, labels, group=groups, feature_name=feat_names)
+        model = gbdt.make_ranker(backend=backend, random_state=42)
+        gbdt.fit_ranker_model(model, X_train_sorted, labels, groups, feat_names, backend)
     else:
-        model = lgb.LGBMRegressor(
-            objective="regression",
-            n_estimators=200,
-            num_leaves=31,
-            learning_rate=0.05,
-            min_child_samples=20,
-            subsample=0.8,
-            colsample_bytree=0.8,
-            reg_alpha=0.1,
-            reg_lambda=0.1,
-            random_state=42,
-            verbose=-1,
-            n_jobs=-1,
-        )
-        model.fit(X_train, y_train, feature_name=feat_names)
+        model = gbdt.make_regressor(backend=backend, random_state=42)
+        gbdt.fit_regressor_model(model, X_train, y_train, feat_names, backend)
 
     # OOS 예측
     preds = model.predict(X_test)
@@ -190,8 +168,7 @@ def train_ranker(
     oos_hit_rate = float((y_test[top_mask] > 0).mean()) if top_mask.any() else 0.0
 
     # feature importance
-    fi = pd.Series(model.feature_importances_, index=feat_names, name="importance")
-    fi = fi.sort_values(ascending=False)
+    fi = gbdt.feature_importance(model, feat_names)
 
     logger.info(
         "OOS IC=%.3f  ICIR=%.2f  top10%%=%.2f%%  hit=%.1f%%",
@@ -208,6 +185,10 @@ def train_ranker(
         oos_hit_rate=oos_hit_rate,
         feature_importance=fi,
         meta={
+            "backend": backend,
+            "backend_label": gbdt.backend_label(backend),
+            "model_type": type(model).__name__,
+            "use_ranker": bool(use_ranker),
             "n_train": int(train_valid.sum()),
             "n_test":  int(test_valid.sum()),
             "n_tickers": features.index.get_level_values("ticker").nunique(),
@@ -218,7 +199,10 @@ def train_ranker(
 
 def _monthly_ic(preds: np.ndarray, actuals: np.ndarray, dates: pd.Index) -> pd.Series:
     """월별 rank IC (Spearman correlation) 계산."""
-    from scipy.stats import spearmanr
+    try:
+        from scipy.stats import spearmanr
+    except ImportError:
+        spearmanr = None
 
     df = pd.DataFrame({"pred": preds, "actual": actuals, "date": dates})
     df["ym"] = df["date"].dt.to_period("M")
@@ -227,7 +211,10 @@ def _monthly_ic(preds: np.ndarray, actuals: np.ndarray, dates: pd.Index) -> pd.S
     for _, g in df.groupby("ym"):
         if len(g) < 5:
             continue
-        corr, _ = spearmanr(g["pred"], g["actual"])
+        if spearmanr is not None:
+            corr, _ = spearmanr(g["pred"], g["actual"])
+        else:
+            corr = g["pred"].rank(method="average").corr(g["actual"].rank(method="average"))
         if np.isfinite(corr):
             ics.append(corr)
     return pd.Series(ics)
@@ -240,6 +227,7 @@ def walk_forward_backtest(
     n_folds: int = 4,
     min_train_months: int = 12,
     embargo: int | None = None,
+    backend: str = "lightgbm",
 ) -> dict:
     """롤링 Walk-forward 백테스트 — 폴드별 독립 학습 + OOS 평가 (Purged).
 
@@ -255,9 +243,7 @@ def walk_forward_backtest(
         icir           — mean_ic / std_ic
         n_folds        — 실행된 폴드 수
     """
-    import lightgbm as lgb
-    from scipy.stats import spearmanr
-
+    backend = gbdt.normalize_backend(backend)
     features: pd.DataFrame = dataset["features"]
     excess:   pd.Series    = dataset["excess"]
 
@@ -269,7 +255,7 @@ def walk_forward_backtest(
     min_train_days = min_train_months * 21
     usable = [d for d in unique_dates if (d - unique_dates[0]).days >= min_train_days]
     if len(usable) < n_folds * 21:
-        return {"mean_ic": None, "std_ic": None, "icir": None,
+        return {"backend": backend, "mean_ic": None, "std_ic": None, "icir": None,
                 "n_folds": 0, "fold_ics": [], "fold_top10_rets": []}
 
     fold_size = len(usable) // n_folds
@@ -304,13 +290,9 @@ def walk_forward_backtest(
         if len(X_tr) < 500 or len(X_te) < 100:
             continue
 
-        model = lgb.LGBMRegressor(
-            n_estimators=200, num_leaves=31, learning_rate=0.05,
-            min_child_samples=20, subsample=0.8, colsample_bytree=0.8,
-            reg_alpha=0.1, reg_lambda=0.1, random_state=42, verbose=-1, n_jobs=-1,
-        )
-        model.fit(X_tr, y_tr, feature_name=list(features.columns))
-        preds = model.predict(features[test_mask][valid_te])
+        model = gbdt.make_regressor(backend=backend, random_state=42)
+        gbdt.fit_regressor_model(model, X_tr, y_tr, list(features.columns), backend)
+        preds = np.asarray(model.predict(X_te)).ravel()
 
         test_dates_fold = features[test_mask][valid_te].index.get_level_values("date")
         monthly_ics = _monthly_ic(preds, y_te, test_dates_fold)
@@ -322,7 +304,7 @@ def walk_forward_backtest(
             fold_top10.append(float(y_te[top_mask].mean()))
 
     if not fold_ics:
-        return {"mean_ic": None, "std_ic": None, "icir": None,
+        return {"backend": backend, "mean_ic": None, "std_ic": None, "icir": None,
                 "n_folds": 0, "fold_ics": [], "fold_top10_rets": []}
 
     ics   = np.array(fold_ics)
@@ -331,10 +313,11 @@ def walk_forward_backtest(
     icir  = mean / std if std > 0 else 0.0
 
     logger.info(
-        "Walk-forward %d폴드: mean_IC=%.3f  std=%.3f  ICIR=%.2f",
-        len(fold_ics), mean, std, icir,
+        "Walk-forward %s %d폴드: mean_IC=%.3f  std=%.3f  ICIR=%.2f",
+        gbdt.backend_label(backend), len(fold_ics), mean, std, icir,
     )
     return {
+        "backend":        backend,
         "mean_ic":        mean,
         "std_ic":         std,
         "icir":           icir,
@@ -342,6 +325,130 @@ def walk_forward_backtest(
         "fold_ics":       fold_ics,
         "fold_top10_rets": fold_top10,
     }
+
+
+def evaluate_ranker_backend(
+    dataset: dict,
+    *,
+    backend: str = "xgboost",
+    train_frac: float = 0.7,
+    use_ranker: bool = False,
+    n_folds: int = 4,
+    min_train_months: int = 12,
+) -> dict:
+    """Evaluate a backend as a shadow challenger without saving/adopting it."""
+    backend = gbdt.normalize_backend(backend)
+    if not gbdt.backend_available(backend):
+        return {
+            "backend": backend,
+            "backend_label": gbdt.backend_label(backend),
+            "available": False,
+            "error": f"{gbdt.backend_label(backend)} 미설치",
+        }
+    try:
+        result = train_ranker(dataset, train_frac=train_frac, use_ranker=use_ranker, backend=backend)
+        wf = walk_forward_backtest(
+            dataset,
+            n_folds=n_folds,
+            min_train_months=min_train_months,
+            backend=backend,
+        )
+        return {
+            "backend": backend,
+            "backend_label": gbdt.backend_label(backend),
+            "available": True,
+            "use_ranker": bool(use_ranker),
+            "model_type": type(result.model).__name__,
+            "oos_ic": result.oos_ic,
+            "oos_icir": result.oos_icir,
+            "oos_top_decile_ret": result.oos_top_decile_ret,
+            "oos_hit_rate": result.oos_hit_rate,
+            "wf_mean_ic": wf.get("mean_ic"),
+            "wf_icir": wf.get("icir"),
+            "wf_n_folds": wf.get("n_folds", 0),
+            "wf_fold_ics": wf.get("fold_ics", []),
+        }
+    except (gbdt.BackendUnavailable, ImportError) as e:
+        return {
+            "backend": backend,
+            "backend_label": gbdt.backend_label(backend),
+            "available": False,
+            "error": str(e),
+        }
+
+
+def compare_ranker_backends(
+    dataset: dict,
+    *,
+    backends: tuple[str, ...] = ("lightgbm", "xgboost"),
+    train_frac: float = 0.7,
+    use_ranker: bool = False,
+    n_folds: int = 4,
+    improvement_tol: float = 0.01,
+) -> dict:
+    """Compare installed GBDT backends on the same dataset without adoption."""
+    evaluations = [
+        evaluate_ranker_backend(
+            dataset,
+            backend=backend,
+            train_frac=train_frac,
+            use_ranker=use_ranker,
+            n_folds=n_folds,
+        )
+        for backend in backends
+    ]
+    successful = [ev for ev in evaluations if ev.get("available")]
+
+    def score(ev: dict) -> float | None:
+        wf_score = ev.get("wf_mean_ic")
+        return float(wf_score) if wf_score is not None else ev.get("oos_ic")
+
+    best = None
+    for ev in successful:
+        ev_score = score(ev)
+        if ev_score is None:
+            continue
+        if best is None or ev_score > score(best):
+            best = ev
+
+    champion = next((ev for ev in evaluations if ev.get("backend") == gbdt.normalize_backend(backends[0])), None)
+    best_score = score(best) if best else None
+    champion_score = score(champion) if champion and champion.get("available") else None
+    adopt_candidate = (
+        best is not None
+        and champion is not None
+        and best.get("backend") != champion.get("backend")
+        and best_score is not None
+        and champion_score is not None
+        and best_score >= champion_score + improvement_tol
+    )
+
+    return {
+        "results": evaluations,
+        "best_backend": best.get("backend") if best else None,
+        "champion_backend": champion.get("backend") if champion else gbdt.normalize_backend(backends[0]),
+        "adopt_candidate": bool(adopt_candidate),
+        "improvement_tol": improvement_tol,
+    }
+
+
+def format_backend_evaluation(evaluation: dict, champion_wf_ic: float | None = None, tol: float = 0.01) -> str:
+    """Compact Korean status line for cron reports."""
+    label = evaluation.get("backend_label") or gbdt.backend_label(evaluation.get("backend"))
+    if not evaluation.get("available"):
+        return f"{label} challenger: 보류 ({evaluation.get('error', '평가 불가')})"
+
+    def fmt_num(value, digits: int = 3) -> str:
+        return "n/a" if value is None else f"{float(value):+.{digits}f}"
+
+    wf = evaluation.get("wf_mean_ic")
+    suffix = "shadow 유지"
+    if champion_wf_ic is not None and wf is not None and float(wf) >= float(champion_wf_ic) + tol:
+        suffix = "후보 우위 관찰"
+    return (
+        f"{label} challenger: OOS IC {fmt_num(evaluation.get('oos_ic'))} · "
+        f"WF IC {fmt_num(wf, 4)} · {suffix}"
+    )
 
 
 def save_ranker(result: RankerResult, path: Path = MODEL_CACHE) -> None:
@@ -522,7 +629,7 @@ def rank_today(
     # LGBMRanker 는 점수 스케일이 임의이므로 ±0.15σ, 회귀는 예측수익 단위(0.005)로 환산(펀더멘털 틸트와 동일).
     try:
         s_std = float(ranking["score"].std(ddof=0))
-        is_rank_model = type(result.model).__name__ == "LGBMRanker"
+        is_rank_model = gbdt.is_ranker_model(result.model)
         surv_unit = (0.15 * s_std if is_rank_model else 0.005) if (np.isfinite(s_std) and s_std > 0) else 0.0
         flags = ranking.get("surv_flag")
         if surv_unit > 0 and flags is not None:
@@ -542,7 +649,7 @@ def rank_today(
         cand = ranking.head(top_n * 2).copy()
         fund = _fundamental_scores(cand["ticker"].tolist())
         if fund:
-            is_rank_model = type(result.model).__name__ == "LGBMRanker"
+            is_rank_model = gbdt.is_ranker_model(result.model)
             if is_rank_model:
                 s_std = float(cand["score"].std(ddof=0))
                 unit  = 0.15 * s_std if np.isfinite(s_std) and s_std > 0 else 0.0
@@ -624,14 +731,17 @@ def format_ranking_report(ranking: pd.DataFrame, result: RankerResult, detail_to
 
     상위 detail_top개는 ATR 기반 매매 가이드(권장 매수·목표·손절) 포함.
     """
-    # LGBMRanker(lambdarank) 점수는 임의 스케일 — %수익률로 표시하면 오해 유발
-    is_rank_model = type(result.model).__name__ == "LGBMRanker"
+    # Ranker(lambdarank/pairwise) 점수는 임의 스케일 — %수익률로 표시하면 오해 유발
+    is_rank_model = gbdt.is_ranker_model(result.model)
+    meta = result.meta or {}
+    backend = meta.get("backend") or gbdt.model_backend_name(result.model)
+    backend_label = gbdt.backend_label(backend)
     max_abs = float(ranking["score"].abs().max()) if len(ranking) else 1.0
 
     ic_grade = ("낮음" if abs(result.oos_ic) < 0.03
                 else "보통" if abs(result.oos_ic) < 0.06 else "양호")
     lines = [
-        "📈 종목 랭킹 (LightGBM · QQQ 초과수익 기준)",
+        f"📈 종목 랭킹 ({backend_label} · QQQ 초과수익 기준)",
         fmt.SEP,
         f"모델 신뢰도 {ic_grade} (OOS IC {result.oos_ic:+.3f}) · 학습 ~{result.train_end_date}",
         fmt.SEP,

@@ -831,6 +831,21 @@ def llm_related_tickers(ticker: str, force: bool = False):
         return None, f"call failed: {str(exc)[:80]}"
 
 
+def llm_stock_analysis(ticker: str, facts: dict, force: bool = False):
+    """🤖 LLM 종목 분석 해설 — (dict|None, 상태). 금지어 필터·24h 캐시는 provider 가.
+
+    facts 는 호출부(ticker 페이지)가 **이미 계산된 지표**로 조립 — 여기선 추가 네트워크 0.
+    표시 전용(정직 라벨은 UI 가) — graceful: 실패 시 (None, 사유).
+    """
+    try:
+        import ticker_names
+        from providers import llm_analysis
+        name = ticker_names.display_name(ticker, allow_net=False) or ticker
+        return llm_analysis.analyze(ticker, name, facts or {}, force=force)
+    except Exception as exc:
+        return None, f"call failed: {str(exc)[:80]}"
+
+
 def chart_news_events(ticker: str, limit: int = 120) -> list[dict]:
     """차트 뉴스 이벤트 마커 — LLM 구조화 라벨(point-in-time JSONL)에서 해당 종목 추출.
 
