@@ -788,7 +788,7 @@ def price_chart(hist, ticker: str = "", *, kind: str = "line", avg_cost=None,
                 show_macd: bool = False, show_stoch: bool = False, log_scale: bool = False,
                 keltner: bool = False, kama: bool = False, chandelier: bool = False,
                 show_aroon: bool = False, show_bbpct: bool = False, show_pvt: bool = False,
-                events=None, zones=None):
+                fundamentals=None, events=None, zones=None):
     """가격 차트 + 기술적 분석 도구 (TradingView 풍 멀티패널).
 
     패널: 가격(+MA·BB·일목·추세선·평단·기간 최고/최저·현재가 라벨) / 거래량(방향색 바+MA20)
@@ -821,9 +821,15 @@ def price_chart(hist, ticker: str = "", *, kind: str = "line", avg_cost=None,
     show_aroon = show_aroon and has_ohlc                # Aroon 은 High/Low 필요
     show_pvt = show_pvt and "Volume" in cols            # PVT 는 거래량 필요
 
-    # 하단 서브패널 — 순서 고정(거래량→RSI→MACD→스토→Aroon→%b→PVT). 행 번호 동적 배정.
+    # 유효 펀더멘털 행만 (매출 or 순이익 하나는 있어야) — ETF·매크로는 빈 rows → 패널 생략
+    fund_rows = [r for r in (fundamentals or [])
+                 if r.get("date") and (r.get("revenue") is not None
+                                       or r.get("net_income") is not None)]
+
+    # 하단 서브패널 — 순서 고정(거래량→RSI→MACD→스토→Aroon→%b→PVT→펀더멘털). 행 동적 배정.
     sub = [("vol", show_volume), ("rsi", show_rsi), ("macd", show_macd), ("stoch", show_stoch),
-           ("aroon", show_aroon), ("bbpct", show_bbpct), ("pvt", show_pvt)]
+           ("aroon", show_aroon), ("bbpct", show_bbpct), ("pvt", show_pvt),
+           ("fund", bool(fund_rows))]
     active = [name for name, on in sub if on]
     panes = 1 + len(active)
     row_of = {name: i + 2 for i, name in enumerate(active)}   # 가격=1, 서브=2..
@@ -834,6 +840,7 @@ def price_chart(hist, ticker: str = "", *, kind: str = "line", avg_cost=None,
     aroon_row = row_of.get("aroon")
     bbpct_row = row_of.get("bbpct")
     pvt_row = row_of.get("pvt")
+    fund_row = row_of.get("fund")
     if panes > 1:
         from plotly.subplots import make_subplots
         # 2·3패널은 기존 튜닝 비율 유지(회귀 방어), 4·5패널만 일반 분배 규칙,
@@ -1079,6 +1086,43 @@ def price_chart(hist, ticker: str = "", *, kind: str = "line", avg_cost=None,
                                      line=dict(color="#3b82f6", width=1)), row=pvt_row, col=1)
         fig.update_yaxes(row=pvt_row, col=1, nticks=3)
 
+    # ── 펀더멘털 패널 — 분기(연간) 매출 바 + 순이익 라인 (TV img08 갭 · 전유 데이터) ──
+    if fund_row:
+        import pandas as pd
+        f_xs = [pd.Timestamp(r["date"]) for r in fund_rows]
+        f_rev = [r.get("revenue") for r in fund_rows]
+        f_ni = [r.get("net_income") for r in fund_rows]
+        f_hover = []
+        for r in fund_rows:
+            h = f"{r['date']} · 매출 {fmt_big(r.get('revenue'))} · 순이익 {fmt_big(r.get('net_income'))}"
+            if r.get("margin") is not None:
+                h += f" · 순마진 {r['margin'] * 100:.1f}%"
+            f_hover.append(h)
+        if any(v is not None for v in f_rev):
+            # 바 폭 명시(간격의 45%·ms) — 자동 폭은 분기 간격 전체를 채워 뭉툭 (실측)
+            if len(f_xs) >= 2:
+                _bw = min((f_xs[i + 1] - f_xs[i]).total_seconds() * 1000
+                          for i in range(len(f_xs) - 1)) * 0.45
+            else:
+                _bw = 40 * 86400000.0
+            fig.add_trace(go.Bar(x=f_xs, y=f_rev, name="매출", showlegend=False,
+                                 width=_bw,
+                                 marker=dict(color="rgba(47,129,247,0.55)"),
+                                 customdata=f_hover,
+                                 hovertemplate="%{customdata}<extra></extra>"),
+                          row=fund_row, col=1)
+        if any(v is not None for v in f_ni):
+            ni_colors = [_GREEN if (v or 0) >= 0 else _RED for v in f_ni]
+            fig.add_trace(go.Scatter(x=f_xs, y=f_ni, name="순이익", showlegend=False,
+                                     mode="lines+markers", customdata=f_hover,
+                                     hovertemplate="%{customdata}<extra></extra>",
+                                     marker=dict(size=5, color=ni_colors),
+                                     line=dict(color="#f59e0b", width=1.3)),
+                          row=fund_row, col=1)
+        fig.add_hline(y=0, line=dict(color=theme.MUTED, dash="dot", width=0.7),
+                      row=fund_row, col=1)
+        fig.update_yaxes(row=fund_row, col=1, nticks=3, tickformat="~s")
+
     chart_height = ({1: 380, 2: 540, 3: 680, 4: 800, 5: 900}.get(panes)
                     or 900 + 85 * (panes - 5))
     fig.update_layout(margin=dict(t=14, b=64, l=14, r=46), dragmode="pan",
@@ -1206,6 +1250,17 @@ def supertrend_series(hist, period: int = 10, mult: float = 3.0):
             trend[i] = 1 if close[i] > fub[i] else -1
         line[i] = flb[i] if trend[i] == 1 else fub[i]
     return line, trend
+
+
+def fmt_big(v) -> str:
+    """큰 통화 숫자 축약 — 1.23T/45.6B/789M (펀더멘털 hover·라벨용, 순수)."""
+    if v is None or v != v:
+        return "—"
+    a = abs(float(v))
+    for div, suf in ((1e12, "T"), (1e9, "B"), (1e6, "M")):
+        if a >= div:
+            return f"{float(v) / div:,.1f}{suf}"
+    return f"{float(v):,.0f}"
 
 
 def kama_series(close, n: int = 10, fast: int = 2, slow: int = 30):

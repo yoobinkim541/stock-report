@@ -242,6 +242,12 @@ def chart_news(t):
     return views.chart_news_events(t)
 
 
+@st.cache_data(ttl=_TTL_HEAVY, show_spinner="펀더멘털 불러오는 중…")
+def chart_fundamentals(t):
+    """차트 펀더멘털 패널 — 분기 매출·순이익 (provider 12h 디스크캐시 위 세션 캐시)."""
+    return views.chart_fundamentals(t)
+
+
 @st.cache_data(ttl=1800, show_spinner="연관 자산 분석 중…")
 def macro_corr(t):
     """매크로 자산 연관 카드 — 90일 상관·30일 등락 (30분 캐시)."""

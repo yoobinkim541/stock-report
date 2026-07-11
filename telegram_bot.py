@@ -1448,6 +1448,11 @@ def notify_entry_signals() -> None:
         from ml.entry_analyzer import analyze_all_entries, check_alert_signals, format_alert_message
         # watch 유니버스: 포트폴리오 + US50 + KR10 + 레버리지
         scores  = analyze_all_entries(days=756, n_similar=25, universe="watch")
+        try:
+            from ml.entry_feedback import record_entry_scores
+            record_entry_scores(scores, source="auto_watch", universe="watch")
+        except Exception as e:
+            logger.debug("진입 후보 스냅샷 저장 생략: %s", e)
         alerts  = check_alert_signals(scores)
         for s in alerts:
             msg = format_alert_message(s)

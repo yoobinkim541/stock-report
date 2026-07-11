@@ -125,12 +125,24 @@ _TEMPLATE = r"""
   <button id="bt-avwap" class="tbtn" title="차트에 짧게 긋기 = 그 봉부터 고정(앵커드) VWAP">⚓ 고정VWAP</button>
   <button id="bt-vprof" class="tbtn" title="구간을 박스로 드래그 = 가격대별 거래량 프로필 + POC">📊 볼륨프로필</button>
   <span class="tsep"></span>
+  <button id="bt-replay" class="tbtn" title="과거 시점으로 되감아 한 봉씩 재생 — 매매 연습 (미래 봉 가림)">⏪ 리플레이</button>
   <button id="bt-clear" class="tbtn" title="직접 그린 도형 전체 제거">🗑 지우기</button>
   <span id="tool-hint"></span>
   <span id="ohlcbar" style="margin-left:auto;font:11px 'JetBrains Mono', ui-monospace, monospace;
         color:#9198a6;white-space:nowrap"></span>
 </div>
 <div id="chartcol">
+<div id="replaybar" style="display:none; gap:6px; align-items:center; margin:0 0 6px 2px;
+     font:12px Pretendard, -apple-system, sans-serif; color:#d1d4dc">
+  <button id="rp-back" class="tbtn" title="10봉 뒤로">⏮</button>
+  <button id="rp-play" class="tbtn" title="재생 / 일시정지">▶</button>
+  <button id="rp-step" class="tbtn" title="한 봉 앞으로">▶|</button>
+  <select id="rp-speed" class="tbtn" title="재생 속도">
+    <option value="1">1×</option><option value="3">3×</option><option value="10">10×</option>
+  </select>
+  <input id="rp-slider" type="range" min="1" max="100" value="50" style="flex:1">
+  <button id="rp-exit" class="tbtn" title="리플레이 종료">✕</button>
+</div>
 <div id="chart" style="width:100%;min-height:@@HEIGHT@@px"></div>
 </div>
 </div>
@@ -211,8 +223,11 @@ _TEMPLATE = r"""
   const toY = (v) => (yLog ? Math.log10(v) : v);        // 데이터값 → 축좌표
   const fromY = (v) => (yLog ? Math.pow(10, v) : v);    // 축좌표 → 데이터값
 
+  let replayCut = null;                          // ⏪ 리플레이 컷(ms) — 이후 봉은 커튼+클램프
+
   function yFit(x0, x1) {                        // 보이는 구간 고저·거래량 최대 + 패딩
     if (!bounds.length) return null;
+    if (replayCut !== null) x1 = Math.min(x1, replayCut);   // 미래 봉이 y 를 누출하면 안 됨
     let lo = Infinity, hi = -Infinity, vmax = 0;
     for (let i = lowerBound(x0); i < bounds.length && bounds[i][0] <= x1; i++) {
       const b = bounds[i];
@@ -282,6 +297,7 @@ _TEMPLATE = r"""
   const lastClose = @@LAST_CLOSE@@;
 
   function callouts(x0, x1, upd) {              // 보이는 구간 최고/최저 콜아웃 팬 추종
+    if (replayCut !== null) x1 = Math.min(x1, replayCut);   // 리플레이 — 미래 극값 누출 차단
     let hi = -Infinity, hiT = 0, lo = Infinity, loT = 0;
     for (const [t, l, h] of bounds) {
       if (t >= x0 && t <= x1) {
@@ -379,6 +395,7 @@ _TEMPLATE = r"""
   const ohlcEl = document.getElementById("ohlcbar");
   function ohlcReadout(ms) {
     if (!ohlcEl || !bounds.length) return;
+    if (replayCut !== null && ms > replayCut) ms = replayCut;   // 커튼 뒤 봉 값 누출 차단
     const i = Math.min(Math.max(lowerBound(ms), 0), bounds.length - 1);
     const idx = (i > 0 && Math.abs(bounds[i - 1][0] - ms) < Math.abs(bounds[i][0] - ms)) ? i - 1 : i;
     const b = bounds[idx];
@@ -406,7 +423,8 @@ _TEMPLATE = r"""
   function saveDrawings() {
     if (!storeKey) return;
     try {
-      const shapes = (gd.layout.shapes || []).slice(baseShapeCount);
+      const shapes = (gd.layout.shapes || []).slice(baseShapeCount)
+        .filter((s) => (s.name || "") !== "replay-curtain");   // 리플레이 커튼은 일시 상태
       const anns = (gd.layout.annotations || []).filter(
         (a) => String(a.name || "").startsWith("tool-"));
       const k = "tndraw:" + storeKey;
@@ -953,6 +971,96 @@ _TEMPLATE = r"""
     applyDraw(JSON.parse(JSON.stringify(baseShapes)), anns);
     try { if (storeKey) localStorage.removeItem("tndraw:" + storeKey); } catch (e) {}
     document.getElementById("detail").style.display = "none";
+    if (replayCut !== null) replayApply();       // 리플레이 중이면 커튼은 유지 (일시 상태)
+  };
+
+  // ── ⏪ 바 리플레이 — 과거로 되감아 한 봉씩 재생 (매매 연습 · 미래 봉 커튼) ──
+  // 커튼 = layer:"above" rect 가 컷 이후를 가림. y맞춤·콜아웃·데이터창은 replayCut 으로
+  // 클램프해 미래 정보(고저·값)가 새지 않게 한다. 커튼은 일시 상태 — 영속화 제외.
+  let replayIdx = 0, replayTimer = null;
+  const rpBar = document.getElementById("replaybar");
+  const rpSlider = document.getElementById("rp-slider");
+  const rpPlay = document.getElementById("rp-play");
+
+  function curtainX0(i) {                        // 봉 i 와 다음 봉 사이 중간
+    const t = bounds[i][0];
+    const nxt = i + 1 < bounds.length ? bounds[i + 1][0]
+                                      : t + (t - bounds[Math.max(0, i - 1)][0] || 864e5);
+    return (t + nxt) / 2;
+  }
+
+  function replayApply() {                       // 커튼 갱신 + 뷰 우측을 컷에 정렬 + y 재맞춤
+    if (replayCut === null || !bounds.length) return;
+    const shapes = (gd.layout.shapes || []).filter((s) => (s.name || "") !== "replay-curtain");
+    const farRight = bounds[bounds.length - 1][0] + 400 * 864e5;
+    shapes.push({type: "rect", name: "replay-curtain", xref: "x", yref: "paper",
+                 x0: toISO(replayCut), x1: toISO(farRight), y0: 0, y1: 1,
+                 fillcolor: "#131722", opacity: 0.96, line: {width: 0}, layer: "above"});
+    drawGuard++;
+    Plotly.relayout(gd, {shapes: shapes}).then(() => { undraw(); });
+    const xr = gd.layout.xaxis.range;
+    if (xr) {
+      const w = Math.max(864e5, Date.parse(xr[1]) - Date.parse(xr[0]));
+      const x1 = replayCut + w * 0.10, x0 = x1 - w;
+      guard++;
+      Plotly.relayout(gd, {"xaxis.range": [toISO(x0), toISO(x1)]}).then(() => { unguard(); });
+      setTarget(x0, x1);
+    }
+    ohlcReadout(bounds[replayIdx][0]);
+    rpSlider.value = String(replayIdx);
+  }
+
+  function replayStop() {
+    if (replayTimer) { clearInterval(replayTimer); replayTimer = null; }
+    rpPlay.textContent = "▶";
+    replayCut = null;
+    rpBar.style.display = "none";
+    document.getElementById("bt-replay").classList.toggle("on", false);
+    const shapes = (gd.layout.shapes || []).filter((s) => (s.name || "") !== "replay-curtain");
+    drawGuard++;
+    Plotly.relayout(gd, {shapes: shapes}).then(() => { undraw(); });
+    finishGesture();                             // 콜아웃·y 를 실제 최신 구간으로 복원
+  }
+
+  function replayStep(n) {
+    if (replayCut === null) return;
+    replayIdx = Math.max(1, Math.min(bounds.length - 1, replayIdx + n));
+    replayCut = curtainX0(replayIdx);
+    replayApply();
+    if (replayIdx >= bounds.length - 1 && replayTimer) {   // 끝 도달 — 자동 정지
+      clearInterval(replayTimer); replayTimer = null; rpPlay.textContent = "▶";
+    }
+  }
+
+  document.getElementById("bt-replay").onclick = () => {
+    if (replayCut !== null) { replayStop(); return; }
+    if (!bounds.length) return;
+    replayIdx = Math.max(1, Math.floor(bounds.length * 0.5));
+    rpSlider.min = "1";
+    rpSlider.max = String(bounds.length - 1);
+    replayCut = curtainX0(replayIdx);
+    rpBar.style.display = "flex";
+    document.getElementById("bt-replay").classList.toggle("on", true);
+    replayApply();
+  };
+  rpPlay.onclick = () => {
+    if (replayCut === null) return;
+    if (replayTimer) { clearInterval(replayTimer); replayTimer = null; rpPlay.textContent = "▶"; return; }
+    const spd = parseFloat(document.getElementById("rp-speed").value || "1") || 1;
+    replayTimer = setInterval(() => replayStep(1), Math.max(50, 600 / spd));
+    rpPlay.textContent = "⏸";
+  };
+  document.getElementById("rp-step").onclick = () => replayStep(1);
+  document.getElementById("rp-back").onclick = () => replayStep(-10);
+  document.getElementById("rp-exit").onclick = () => replayStop();
+  rpSlider.oninput = (e) => {
+    if (replayCut === null) return;
+    const v = parseInt(((e && e.target) || rpSlider).value, 10);
+    if (!isNaN(v)) {
+      replayIdx = Math.max(1, Math.min(bounds.length - 1, v));
+      replayCut = curtainX0(replayIdx);
+      replayApply();
+    }
   };
 
   // ── ⚡ live 실시간 패치 — 피더 iframe 의 localStorage push 를 받아 **마지막 봉만**

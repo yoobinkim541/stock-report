@@ -171,6 +171,24 @@ const nRestored = (gd.layout.shapes || []).length - BASE.length;
 if (nRestored !== 1) fail("persist_restore n=" + nRestored);
 const rs = gd.layout.shapes[gd.layout.shapes.length - 1];
 if (rs.y0 !== Math.round(rs.y0)) fail("persist_snapped_coords");   // 저장 전 스냅값 유지
+
+// 7) ⏪ 리플레이 — 커튼 생성/스텝 이동/저장 제외/종료 (매매 연습 모드)
+el("bt-replay").onclick();
+let cur = gd.layout.shapes.filter((s) => s.name === "replay-curtain");
+if (cur.length !== 1 || cur[0].layer !== "above" || cur[0].yref !== "paper") fail("replay_curtain");
+const cutBefore = cur[0].x0;
+el("rp-step").onclick();                          // 한 봉 앞으로 → 커튼 전진
+cur = gd.layout.shapes.filter((s) => s.name === "replay-curtain");
+if (cur.length !== 1 || Date.parse(cur[0].x0) <= Date.parse(cutBefore)) fail("replay_step");
+// 리플레이 중 새 도형을 그려도 커튼은 localStorage 에 저장되지 않아야 (일시 상태)
+gd.layout.shapes = gd.layout.shapes.concat([{ type: "line", xref: "x", yref: "y",
+  x0: iso(D0), y0: 131, x1: iso(D1), y1: 151 }]);
+gd.emit("plotly_relayout", { shapes: gd.layout.shapes });
+const savedRp = JSON.parse(_ls["tndraw:TEST:1d:lin"] || "{}");
+if ((savedRp.shapes || []).some((s) => s.name === "replay-curtain")) fail("replay_persisted");
+if (!(savedRp.shapes || []).length) fail("replay_draw_not_saved");   // 도형 자체는 저장
+el("rp-exit").onclick();
+if (gd.layout.shapes.some((s) => s.name === "replay-curtain")) fail("replay_exit");
 console.log("OK");
 """
 

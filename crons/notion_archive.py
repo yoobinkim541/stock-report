@@ -2,7 +2,8 @@
 """
 notion_archive.py — 일일 리포트를 Notion 월/주 계층 페이지에 누적 아카이빙.
 
-계층:  [대시보드 부모] → 📚 리포트 아카이브 → 26/06(월) → 1주차(주) → 일별 토글
+계층:  [대시보드 부모] → 📚 리포트 아카이브 → 26/06(월) → 1주차(주)
+       → 일별 요약 토글 + 일별 풀 리포트 페이지
 
 설계 원칙:
   - 페이지는 find-or-create (제목 매칭, 자식 리스팅 기반 → search 의 지연
@@ -84,6 +85,16 @@ def _para(text: str, bold: bool = False, color: str = "default") -> dict:
 def _h3(text: str) -> dict:
     return {"object": "block", "type": "heading_3",
             "heading_3": {"rich_text": _rt(text)}}
+
+
+def _h2(text: str) -> dict:
+    return {"object": "block", "type": "heading_2",
+            "heading_2": {"rich_text": _rt(text)}}
+
+
+def _bullet(text: str) -> dict:
+    return {"object": "block", "type": "bulleted_list_item",
+            "bulleted_list_item": {"rich_text": _rt(text)}}
 
 
 def _callout(text: str, emoji: str = "💡", color: str = "gray_background") -> dict:
@@ -216,6 +227,89 @@ def _delete_blocks(block_ids: list[str]) -> tuple[int, int]:
     return ok, fail
 
 
+def _chunks(text: str, size: int = 1800) -> list[str]:
+    """Notion rich_text 2,000자 제한을 피하는 안전 분할."""
+    s = str(text or "")
+    if len(s) <= size:
+        return [s]
+    return [s[i:i + size] for i in range(0, len(s), size)]
+
+
+def _full_report_blocks(report_date: str, markdown_text: str) -> list[dict]:
+    """풀 Markdown 리포트 전문을 Notion 블록으로 변환한다.
+
+    Markdown을 완전 렌더링하려 들기보다, 헤더/불릿 정도만 살리고 표·문단은 원문
+    라인 그대로 보존한다. 긴 라인은 1,800자 단위로 쪼개 Notion 제한을 피한다.
+    """
+    raw = markdown_text or ""
+    blocks: list[dict] = [
+        _callout(
+            f"원문 Markdown 전문 · {report_date} · {len(raw):,}자",
+            "📄",
+            "blue_background",
+        )
+    ]
+    in_code = False
+    for line in raw.splitlines():
+        s = line.rstrip()
+        if not s.strip():
+            continue
+        if s.strip().startswith("```"):
+            in_code = not in_code
+            blocks.append(_para(s))
+            continue
+        if in_code:
+            for chunk in _chunks(s):
+                blocks.append(_para(chunk))
+            continue
+        if s.startswith("## "):
+            blocks.append(_h2(s[3:].strip()))
+            continue
+        if s.startswith("### "):
+            blocks.append(_h3(s[4:].strip()))
+            continue
+        if s.startswith("# "):
+            blocks.append(_h2(s[2:].strip()))
+            continue
+        if s[:2] in ("- ", "* "):
+            for chunk in _chunks(s[2:].strip()):
+                blocks.append(_bullet(chunk))
+            continue
+        for chunk in _chunks(s):
+            blocks.append(_para(chunk))
+    return blocks or [_para("(풀 리포트 없음)")]
+
+
+def _full_report_title(report_date: str, weekday: str) -> str:
+    return f"📄 {report_date} ({weekday}) · 풀 리포트"
+
+
+def _replace_page_children(page_id: str, blocks: list[dict]) -> bool:
+    """페이지 본문 안전 교체: append 성공 후 기존 블록 삭제."""
+    try:
+        old_ids = [b["id"] for b in _iter_children(page_id)
+                   if b.get("type") != "child_database"]
+    except NotionListError as e:
+        old_ids = []
+        logger.warning("풀 리포트 기존 블록 조회 실패 — 삭제 생략: %s", e)
+    if not append_children(page_id, blocks):
+        return False
+    deleted, failed = _delete_blocks(old_ids)
+    if deleted or failed:
+        logger.info("풀 리포트 기존 블록 정리: 삭제 %d건%s",
+                    deleted, f", 실패 {failed}건" if failed else "")
+    return True
+
+
+def _upsert_full_report_page(week_id: str, report_date: str,
+                             weekday: str, markdown_text: str) -> bool:
+    title = _full_report_title(report_date, weekday)
+    page_id = find_or_create_page(week_id, title, icon="📄")
+    if not page_id:
+        return False
+    return _replace_page_children(page_id, _full_report_blocks(report_date, markdown_text))
+
+
 # ── 루트 페이지 해석(캐시) ───────────────────────────────────────────────────────
 
 def _dashboard_parent_id() -> str | None:
@@ -291,12 +385,14 @@ def week_of_month(d: date) -> int:
 
 # ── 메인: 일별 리포트 upsert ─────────────────────────────────────────────────────
 
-def archive_report(report_date: str, summary_text: str) -> str | None:
-    """리포트 요약을 월/주 계층에 누적. 아카이브 루트 페이지 id 반환(대시보드 링크용).
+def archive_report(report_date: str, summary_text: str, full_text: str | None = None) -> str | None:
+    """리포트 요약과 풀 리포트를 월/주 계층에 누적. 아카이브 루트 id 반환.
 
     report_date: 'YYYY-MM-DD' (리포트 자체 날짜)
     summary_text: 일일 요약 본문(여러 줄). 비어 있으면 일별 항목은 추가하지 않고
                   루트만 보장한다(대시보드 링크가 항상 살아 있도록).
+    full_text: investment-report-YYYY-MM-DD.md 전문. 있으면 주차 페이지 아래 별도
+               일별 풀 리포트 페이지로 멱등 upsert 한다.
     """
     if not os.getenv("NOTION_TOKEN"):
         logger.warning("NOTION_TOKEN 없음 — 아카이브 생략")
@@ -307,8 +403,10 @@ def archive_report(report_date: str, summary_text: str) -> str | None:
         logger.error("아카이브 루트 해석 실패 — 아카이브 생략")
         return None
 
-    if not (summary_text and summary_text.strip() and report_date):
-        logger.info("요약 없음 — 루트만 보장, 일별 항목 생략")
+    has_summary = bool(summary_text and summary_text.strip())
+    has_full = bool(full_text and full_text.strip())
+    if not ((has_summary or has_full) and report_date):
+        logger.info("리포트 본문 없음 — 루트만 보장, 일별 항목 생략")
         return root_id
 
     try:
@@ -334,21 +432,30 @@ def archive_report(report_date: str, summary_text: str) -> str | None:
     # 항상 존재한다(중복은 다음 5일 재아카이빙 때 자가치유).
     weekday = _WEEKDAY_KR[d.weekday()]
     title    = f"📅 {report_date} ({weekday}) · 투자 리포트"
-    lines    = [l for l in summary_text.strip().split("\n") if l.strip()][:90]
+    lines    = [l for l in (summary_text or "").strip().split("\n") if l.strip()][:90]
 
-    try:
-        old_ids = _find_toggle_ids(week_id, report_date)
-    except NotionListError as e:
-        old_ids = []   # 조회 실패 → 삭제 생략(중복 가능하나 데이터 보존 우선, 다음 회차 정리)
-        logger.warning("기존 토글 조회 실패 — 중복 제거 생략: %s", e)
+    deleted = failed = 0
+    if has_summary:
+        try:
+            old_ids = _find_toggle_ids(week_id, report_date)
+        except NotionListError as e:
+            old_ids = []   # 조회 실패 → 삭제 생략(중복 가능하나 데이터 보존 우선, 다음 회차 정리)
+            logger.warning("기존 토글 조회 실패 — 중복 제거 생략: %s", e)
 
-    ok = append_children(week_id, [_toggle(title, [_para(l) for l in lines])])
-    if not ok:
-        logger.error("아카이브 일별 추가 실패: %s (기존본 유지)", report_date)
-        return root_id
+        ok = append_children(week_id, [_toggle(title, [_para(l) for l in lines])])
+        if not ok:
+            logger.error("아카이브 일별 요약 추가 실패: %s (기존본 유지)", report_date)
+            return root_id
+        deleted, failed = _delete_blocks(old_ids)
 
-    deleted, failed = _delete_blocks(old_ids)
-    logger.info("아카이브 완료: %s → %s / %s (%d줄, 교체 %d건%s)",
-                report_date, month_title, week_title, len(lines), deleted,
+    full_ok = False
+    if has_full:
+        full_ok = _upsert_full_report_page(week_id, report_date, weekday, full_text or "")
+        if not full_ok:
+            logger.error("아카이브 풀 리포트 추가 실패: %s", report_date)
+
+    logger.info("아카이브 완료: %s → %s / %s (요약 %d줄%s, 교체 %d건%s)",
+                report_date, month_title, week_title, len(lines),
+                " · 풀 리포트" if full_ok else "", deleted,
                 f", 삭제실패 {failed}" if failed else "")
     return root_id
