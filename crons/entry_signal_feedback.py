@@ -30,7 +30,11 @@ def main() -> int:
     added = entry_feedback.backfill_outcomes()
     s20 = entry_feedback.summarize_feedback(horizon=20)
     s60 = entry_feedback.summarize_feedback(horizon=60)
-    logger.info("백필 %d건 · 20d n=%s · 60d n=%s", added, s20.get("n"), s60.get("n"))
+    adjust = entry_feedback.learn_feedback_adjustments(horizon=20)
+    logger.info(
+        "백필 %d건 · 20d n=%s · 60d n=%s · 보정학습 adopted=%s (%s)",
+        added, s20.get("n"), s60.get("n"), adjust.get("adopted"), adjust.get("reason"),
+    )
 
     if added or os.getenv("ENTRY_FEEDBACK_ALWAYS_SEND", "false").lower() == "true":
         send_cron_telegram("\n".join([
@@ -38,6 +42,7 @@ def main() -> int:
             f"신규 성숙 outcome: {added}건",
             entry_feedback.format_feedback_summary(s20),
             entry_feedback.format_feedback_summary(s60),
+            f"점수 보정학습: {'채택' if adjust.get('adopted') else '대기'} — {adjust.get('reason')}",
             "⚠️ 정보형 추천 검증 — 실거래 주문 아님",
         ]))
     return 0

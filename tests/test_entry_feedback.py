@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 """test_entry_feedback.py — entry signal snapshot/outcome ledger."""
+import json
 import os
 import sys
 
@@ -121,3 +122,96 @@ def test_build_outcome_marks_target_success():
     assert out["diagnosis"] == "목표 도달"
     assert "technical_confirmed" in out["factor_tags"]
     assert "pivot_confirmed" in out["factor_tags"]
+
+
+def _training_row(i: int, *, confirmed: bool) -> dict:
+    return {
+        "id": f"2026-01-{(i % 28) + 1:02d}:test:watch:{'GOOD' if confirmed else 'BAD'}{i}",
+        "date": f"2026-01-{(i % 28) + 1:02d}",
+        "ticker": f"{'GOOD' if confirmed else 'BAD'}{i}",
+        "signal": "enter",
+        "score": 0.70 if confirmed else 0.75,
+        "success": confirmed,
+        "r_multiple": 1.5 if confirmed else -1.0,
+        "features": {
+            "technical_rating": "🟢 매수" if confirmed else "🔴 매도",
+            "pivot_position": "above_p" if confirmed else "below_p",
+            "mom_20d": 0.04 if confirmed else -0.03,
+            "mom_60d": 0.08 if confirmed else -0.06,
+            "vix": 16.0,
+            "n_similar": 32,
+            "win_prob_20d": 0.64,
+            "win_prob_60d": 0.70 if confirmed else 0.55,
+            "drawdown": -0.18,
+            "reward_risk": 1.8,
+        },
+    }
+
+
+def test_learn_feedback_adjustments_adopts_validated_model(tmp_path):
+    rows = []
+    for i in range(20):
+        rows.append(_training_row(i, confirmed=False))
+        rows.append(_training_row(i, confirmed=True))
+
+    model_path = tmp_path / "entry_feedback_adjustments.json"
+    result = F.learn_feedback_adjustments(rows=rows, save=True, path=model_path)
+
+    assert result["adopted"] is True
+    assert result["adjustments"]["technical_conflict"] < 0
+    assert result["adjustments"]["technical_confirmed"] > 0
+    assert result["challenger"]["excess"] > result["champion"]["excess"]
+
+    saved = json.loads(model_path.read_text())
+    assert saved["adjustments"]["technical_conflict"] < 0
+    assert saved["meta"]["oos_n"] == result["oos_n"]
+
+
+def test_apply_score_adjustment_uses_saved_model(tmp_path):
+    model_path = tmp_path / "entry_feedback_adjustments.json"
+    model_path.write_text(json.dumps({
+        "version": 1,
+        "adjustments": {
+            "technical_conflict": -0.03,
+            "pivot_not_recovered": -0.02,
+        },
+        "meta": {},
+    }))
+    context = {
+        "features": {
+            "technical_rating": "🔴 매도",
+            "pivot_position": "below_p",
+            "mom_20d": 0.02,
+            "mom_60d": 0.03,
+            "vix": 15.0,
+            "n_similar": 30,
+            "win_prob_20d": 0.60,
+            "win_prob_60d": 0.70,
+            "drawdown": -0.12,
+            "reward_risk": 1.5,
+        }
+    }
+
+    adjusted, delta, factors = F.apply_score_adjustment(0.75, context, path=model_path)
+
+    assert adjusted == 0.70
+    assert delta == -0.05
+    assert "technical_conflict" in factors
+    assert "pivot_not_recovered" in factors
+
+
+def test_apply_score_adjustment_can_be_disabled(tmp_path):
+    model_path = tmp_path / "entry_feedback_adjustments.json"
+    model_path.write_text(json.dumps({
+        "adjustments": {"technical_conflict": -0.03},
+        "meta": {},
+    }))
+    adjusted, delta, factors = F.apply_score_adjustment(
+        0.75,
+        {"features": {"technical_rating": "🔴 매도", "n_similar": 30}},
+        path=model_path,
+        enabled=False,
+    )
+    assert adjusted == 0.75
+    assert delta == 0.0
+    assert factors == ["technical_conflict"]

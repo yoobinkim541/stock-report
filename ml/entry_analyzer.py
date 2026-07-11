@@ -151,6 +151,9 @@ class EntryScore:
     signal:   str              # "enter" / "wait" / "avoid"
     reasons:  list[str] = field(default_factory=list)
     timestamp: str = ""
+    raw_score: float | None = None
+    feedback_adjustment: float = 0.0
+    feedback_factors: list[str] = field(default_factory=list)
 
     # ── 한국 주식 전용 ──
     currency:      str = "USD"   # "KRW" for Korean stocks
@@ -406,15 +409,6 @@ def analyze_entry(
         elif rsi_v > 65:
             reasons.append(f"RSI {rsi_v:.0f} (과매수)")
 
-        # 신호 분류
-        sp = get_score_params()
-        if score >= sp["enter_threshold"]:
-            signal = "enter"
-        elif score >= sp["wait_threshold"]:
-            signal = "wait"
-        else:
-            signal = "avoid"
-
         # 한국 주식 메타
         currency     = "KRW" if is_kr_stock(ticker) else "USD"
         kr_info      = KR_META.get(ticker)
@@ -449,6 +443,50 @@ def analyze_entry(
         except Exception:
             pass
 
+        raw_score = score
+        feedback_adjustment = 0.0
+        feedback_factors: list[str] = []
+        adjust_context = {
+            "features": {
+                "drawdown": cur_dd,
+                "rsi": rsi_v,
+                "vix": float(cur["vix"]),
+                "mom_20d": float(cur["mom_20d"]),
+                "mom_60d": float(cur["mom_60d"]),
+                "n_similar": len(rets_20),
+                "win_prob_20d": win_20,
+                "win_prob_60d": win_60,
+                "expected_ret_20d": exp_20,
+                "expected_ret_60d": exp_60,
+                "downside_p25_20d": p25_20,
+                "upside_p75_20d": p75_20,
+                "technical_rating": technical_rating,
+                "technical_score": technical_score,
+                "pivot_p": pivot_p,
+                "pivot_position": pivot_position,
+                "reward_risk": rr,
+            },
+            "reward_risk": rr,
+            "score": raw_score,
+        }
+        try:
+            from ml.entry_feedback import apply_score_adjustment
+            score, feedback_adjustment, feedback_factors = apply_score_adjustment(raw_score, adjust_context)
+        except Exception as e:
+            logger.debug("진입 추천 성과 보정 스킵(%s): %s", ticker, e)
+            score = raw_score
+        if abs(feedback_adjustment) >= 0.01:
+            reasons.append(f"성과학습 보정 {feedback_adjustment:+.2f}")
+
+        # 신호 분류
+        sp = get_score_params()
+        if score >= sp["enter_threshold"]:
+            signal = "enter"
+        elif score >= sp["wait_threshold"]:
+            signal = "wait"
+        else:
+            signal = "avoid"
+
         return EntryScore(
             ticker           = ticker,
             category         = category,
@@ -470,6 +508,9 @@ def analyze_entry(
             signal           = signal,
             reasons          = reasons,
             timestamp        = datetime.now(KST).strftime("%Y-%m-%d %H:%M KST"),
+            raw_score        = round(raw_score, 3),
+            feedback_adjustment = round(feedback_adjustment, 4),
+            feedback_factors = feedback_factors,
             currency         = currency,
             display_name     = display_name,
             technical_rating = technical_rating,

@@ -14,9 +14,12 @@ from __future__ import annotations
 
 import logging
 import math
+import json
+import os
 import re
 from collections import Counter
 from datetime import datetime, timezone, timedelta
+from pathlib import Path
 from typing import Iterable
 
 import pandas as pd
@@ -26,6 +29,12 @@ logger = logging.getLogger(__name__)
 KST = timezone(timedelta(hours=9))
 SURFACE = "entry_signals"
 HORIZONS = (20, 60)
+ADJUST_PATH = Path(os.path.expanduser("~/reports/ml-cache/entry_feedback_adjustments.json"))
+MIN_ADJUST_SAMPLES = int(os.getenv("ENTRY_FEEDBACK_ADJUST_MIN_SAMPLES", "30"))
+MIN_FACTOR_SAMPLES = int(os.getenv("ENTRY_FEEDBACK_FACTOR_MIN_SAMPLES", "8"))
+FACTOR_ADJUST_CAP = 0.04
+TOTAL_ADJUST_CAP = 0.08
+FACTOR_SCORE_PER_R = 0.035
 
 
 def _today_kst() -> str:
@@ -63,8 +72,68 @@ def _sample_quality(n: int) -> str:
     return "low"
 
 
+def _clamp(v: float, lo: float, hi: float) -> float:
+    return min(hi, max(lo, float(v)))
+
+
+def _as_float(v, default: float = 0.0) -> float:
+    try:
+        if v is None:
+            return default
+        x = float(v)
+        return x if math.isfinite(x) else default
+    except (TypeError, ValueError):
+        return default
+
+
+def _as_int(v, default: int = 0) -> int:
+    try:
+        if v is None:
+            return default
+        return int(v)
+    except (TypeError, ValueError):
+        return default
+
+
 def _decision_id(date: str, source: str, universe: str, ticker: str) -> str:
     return f"{date}:{_slug(source)}:{_slug(universe)}:{ticker}"
+
+
+def pre_signal_factors(obj: dict) -> list[str]:
+    """추천 시점에 이미 알 수 있는 조건 태그만 추출한다."""
+    obj_dict = obj if isinstance(obj, dict) else {}
+    f = obj_dict.get("features") or obj_dict
+    tags: list[str] = []
+    technical = str(f.get("technical_rating") or "")
+    pivot_position = str(f.get("pivot_position") or "")
+    win20 = _as_float(f.get("win_prob_20d"))
+    win60 = _as_float(f.get("win_prob_60d"))
+    reward_risk = _as_float(f.get("reward_risk") if "reward_risk" in f else obj_dict.get("reward_risk"))
+    drawdown = _as_float(f.get("drawdown"))
+
+    if "매도" in technical:
+        tags.append("technical_conflict")
+    if "매수" in technical:
+        tags.append("technical_confirmed")
+    if pivot_position in ("below_p", "below_s1"):
+        tags.append("pivot_not_recovered")
+    if pivot_position in ("above_p", "above_r1"):
+        tags.append("pivot_confirmed")
+    if _as_float(f.get("mom_20d")) < 0 and _as_float(f.get("mom_60d")) < 0:
+        tags.append("falling_momentum")
+    if _as_float(f.get("vix")) >= 28:
+        tags.append("high_vix")
+    if _as_int(f.get("n_similar")) < 20:
+        tags.append("small_sample")
+    if win60 < win20:
+        tags.append("weak_60d_confirmation")
+    if reward_risk >= 2.0:
+        tags.append("strong_reward_risk")
+    if win20 >= 0.65:
+        tags.append("high_win_prob")
+    if drawdown <= -0.30:
+        tags.append("severe_drawdown")
+    return tags
 
 
 def _reward_risk(score) -> tuple[float, float]:
@@ -98,6 +167,9 @@ def score_to_decision(score, *, source: str, universe: str, date: str | None = N
         "underlying": score.underlying,
         "signal": score.signal,
         "score": float(score.score),
+        "raw_score": float(score.raw_score) if score.raw_score is not None else float(score.score),
+        "feedback_adjustment": float(score.feedback_adjustment or 0.0),
+        "feedback_factors": list(score.feedback_factors or []),
         "alert_candidate": bool(score.signal == "enter" and score.score >= 0.60),
         "current_price": round(float(score.current_price), 4),
         "buy_low": round(float(buy_lo), 4),
@@ -123,6 +195,7 @@ def score_to_decision(score, *, source: str, universe: str, date: str | None = N
             "technical_score": score.technical_score,
             "pivot_p": score.pivot_p,
             "pivot_position": score.pivot_position,
+            "reward_risk": rr,
         },
         "reasons": list(score.reasons or []),
     }
@@ -410,6 +483,9 @@ _TAG_LABELS = {
     "high_vix": "고 VIX",
     "small_sample": "표본 부족",
     "weak_60d_confirmation": "60일 확인 약함",
+    "strong_reward_risk": "손익비 강함",
+    "high_win_prob": "승률 강함",
+    "severe_drawdown": "대폭 하락",
 }
 
 
@@ -426,3 +502,177 @@ def format_feedback_summary(summary: dict) -> str:
         f"성공 요인: {_fmt_tags(summary.get('top_success_factors'))}\n"
         f"실패 요인: {_fmt_tags(summary.get('top_failure_factors'))}"
     )
+
+
+def _fit_factor_adjustments(rows: list[dict]) -> dict[str, float]:
+    if len(rows) < MIN_FACTOR_SAMPLES:
+        return {}
+    base_r = sum(_as_float(r.get("r_multiple")) for r in rows) / len(rows)
+    factor_rows: dict[str, list[dict]] = {}
+    for row in rows:
+        for tag in pre_signal_factors(row):
+            factor_rows.setdefault(tag, []).append(row)
+
+    adjustments: dict[str, float] = {}
+    for tag, tagged in factor_rows.items():
+        if len(tagged) < MIN_FACTOR_SAMPLES:
+            continue
+        tag_r = sum(_as_float(r.get("r_multiple")) for r in tagged) / len(tagged)
+        adj = _clamp((tag_r - base_r) * FACTOR_SCORE_PER_R, -FACTOR_ADJUST_CAP, FACTOR_ADJUST_CAP)
+        if abs(adj) >= 0.005:
+            adjustments[tag] = round(adj, 4)
+    return adjustments
+
+
+def _score_with_adjustment(row: dict, adjustments: dict[str, float]) -> tuple[float, float, list[str]]:
+    score = _as_float(row.get("score"))
+    tags = pre_signal_factors(row)
+    raw_adj = sum(float(adjustments.get(tag, 0.0)) for tag in tags)
+    adj = _clamp(raw_adj, -TOTAL_ADJUST_CAP, TOTAL_ADJUST_CAP)
+    return round(_clamp(score + adj, 0.0, 1.0), 4), round(adj, 4), tags
+
+
+def _eval_adjustments(rows: list[dict], adjustments: dict[str, float], threshold: float) -> dict:
+    selected = []
+    for row in rows:
+        adj_score, _, _ = _score_with_adjustment(row, adjustments)
+        if adj_score >= threshold:
+            selected.append(row)
+    if not selected:
+        return {"excess": 0.0, "mdd": 0.0, "n": 0, "win_rate": 0.0}
+    r_vals = [_as_float(r.get("r_multiple")) for r in selected]
+    wins = sum(1 for r in selected if r.get("success"))
+    return {
+        "excess": round(sum(r_vals) / len(r_vals), 4),
+        "mdd": round(max([0.0] + [-r for r in r_vals if r < 0]), 4),
+        "n": len(selected),
+        "win_rate": round(wins / len(selected), 4),
+    }
+
+
+def load_feedback_adjustments(path: Path | str | None = None) -> dict:
+    model_path = Path(path or ADJUST_PATH)
+    try:
+        if not model_path.exists():
+            return {"adjustments": {}, "meta": {"status": "missing"}}
+        model = json.loads(model_path.read_text())
+        if not isinstance(model, dict):
+            return {"adjustments": {}, "meta": {"status": "invalid"}}
+        adjustments = model.get("adjustments") or {}
+        if not isinstance(adjustments, dict):
+            adjustments = {}
+        model["adjustments"] = {
+            str(k): _clamp(_as_float(v), -FACTOR_ADJUST_CAP, FACTOR_ADJUST_CAP)
+            for k, v in adjustments.items()
+        }
+        return model
+    except Exception as e:
+        logger.warning("진입 추천 보정 모델 로드 실패: %s", e)
+        return {"adjustments": {}, "meta": {"status": "load_failed", "error": str(e)}}
+
+
+def apply_score_adjustment(base_score: float, context: dict, *,
+                           path: Path | str | None = None,
+                           enabled: bool | None = None) -> tuple[float, float, list[str]]:
+    """저장된 사후성과 보정치를 현재 추천 점수에 보수적으로 반영."""
+    if enabled is None:
+        enabled = os.getenv("ENTRY_FEEDBACK_ADJUST_ENABLED", "true").lower() == "true"
+    tags = pre_signal_factors(context)
+    if not enabled:
+        return round(_clamp(base_score, 0.0, 1.0), 4), 0.0, tags
+    model = load_feedback_adjustments(path)
+    adjustments = model.get("adjustments") or {}
+    adj = sum(float(adjustments.get(tag, 0.0)) for tag in tags)
+    adj = _clamp(adj, -TOTAL_ADJUST_CAP, TOTAL_ADJUST_CAP)
+    return round(_clamp(_as_float(base_score) + adj, 0.0, 1.0), 4), round(adj, 4), tags
+
+
+def learn_feedback_adjustments(rows: list[dict] | None = None, *,
+                               horizon: int = 20,
+                               save: bool = True,
+                               path: Path | str | None = None) -> dict:
+    """사후 성과를 이용해 조건별 점수 보정치를 학습하고, 검증 통과 시 저장."""
+    rows = list(rows if rows is not None else training_rows(horizon=horizon))
+    rows = [r for r in rows if r.get("r_multiple") is not None]
+    rows.sort(key=lambda r: (str(r.get("date") or ""), str(r.get("ticker") or "")))
+    if len(rows) < MIN_ADJUST_SAMPLES:
+        return {
+            "adopted": False,
+            "reason": f"표본 부족({len(rows)}/{MIN_ADJUST_SAMPLES})",
+            "horizon": horizon,
+            "n": len(rows),
+            "adjustments": {},
+        }
+
+    split = max(MIN_FACTOR_SAMPLES, int(len(rows) * 0.6))
+    if len(rows) - split < max(5, MIN_FACTOR_SAMPLES // 2):
+        split = max(1, len(rows) // 2)
+    train = rows[:split]
+    oos = rows[split:]
+    adjustments = _fit_factor_adjustments(train)
+    if not adjustments:
+        return {
+            "adopted": False,
+            "reason": "유효한 조건별 보정치 없음",
+            "horizon": horizon,
+            "n": len(rows),
+            "train_n": len(train),
+            "oos_n": len(oos),
+            "adjustments": {},
+        }
+
+    try:
+        from ml.entry_analyzer import get_score_params
+        threshold = float(get_score_params().get("enter_threshold", 0.62))
+    except Exception:
+        threshold = 0.62
+
+    champion = _eval_adjustments(oos, {}, threshold)
+    challenger = _eval_adjustments(oos, adjustments, threshold)
+
+    try:
+        from ml.adaptive.reward import should_adopt
+        index_mdd = max(float(champion.get("mdd") or 0.0) * 1.1, 1.0)
+        min_samples = max(5, min(MIN_FACTOR_SAMPLES, len(oos)))
+        adopted = should_adopt(challenger, champion, index_mdd=index_mdd, min_samples=min_samples)
+    except Exception:
+        adopted = (
+            challenger.get("n", 0) >= max(5, min(MIN_FACTOR_SAMPLES, len(oos)))
+            and challenger.get("excess", 0.0) > champion.get("excess", 0.0)
+        )
+
+    result = {
+        "adopted": bool(adopted),
+        "reason": "검증 통과" if adopted else "검증 구간에서 기존 점수 대비 개선 부족",
+        "horizon": horizon,
+        "n": len(rows),
+        "train_n": len(train),
+        "oos_n": len(oos),
+        "threshold": round(threshold, 4),
+        "adjustments": adjustments,
+        "champion": champion,
+        "challenger": challenger,
+    }
+    if adopted and save:
+        model_path = Path(path or ADJUST_PATH)
+        model_path.parent.mkdir(parents=True, exist_ok=True)
+        payload = {
+            "version": 1,
+            "learned_at": _now_kst(),
+            "horizon": int(horizon),
+            "adjustments": adjustments,
+            "meta": {
+                "n": len(rows),
+                "train_n": len(train),
+                "oos_n": len(oos),
+                "threshold": round(threshold, 4),
+                "champion": champion,
+                "challenger": challenger,
+                "total_adjust_cap": TOTAL_ADJUST_CAP,
+                "factor_adjust_cap": FACTOR_ADJUST_CAP,
+            },
+        }
+        model_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2))
+        result["path"] = str(model_path)
+        logger.info("진입 추천 성과 보정 모델 저장: %s", model_path)
+    return result
