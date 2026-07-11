@@ -131,6 +131,16 @@ if (!stopZone || Math.abs(Math.min(stopZone.y0, stopZone.y1) - 110) > 1e-6)
 const posAnn = (gd.layout.annotations || []).filter((a) => a.name === "tool-pos");
 if (posAnn.length !== 1 || !/롱/.test(posAnn[0].text) || !/RR 1:1/.test(posAnn[0].text))
   fail("pos_ann");
+if (/NaN/.test(posAnn[0].text)) fail("pos_nan_label");
+// 방향 가드 — 롱인데 아래로 드래그(진입 150→목표 130) = 도형 폐기·도구 유지 (넌센스 방지)
+el("bt-long").onclick();
+const nBefore = gd.layout.shapes.filter((s) => s.name === "tool-pos").length;
+gd.layout.shapes = gd.layout.shapes.concat([{ type: "rect", xref: "x", yref: "y",
+  x0: iso(D0), y0: 150, x1: iso(D1), y1: 130 }]);
+gd.emit("plotly_relayout", { shapes: gd.layout.shapes });
+if (gd.layout.shapes.filter((s) => s.name === "tool-pos").length !== nBefore)
+  fail("pos_direction_guard");
+el("bt-long").onclick();                          // 도구 해제 (가드는 도구 유지가 정상)
 el("bt-mag").onclick({ target: el("bt-mag") });   // 자석 복원 (후속 영속화 테스트는 스냅 전제)
 
 // 5) 지우기 — 서버 도형만 정확 복원 + 저장소도 클리어

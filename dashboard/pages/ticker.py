@@ -184,21 +184,23 @@ def _llm_related_section(ticker):
     with st.expander("🤖 AI 연관 종목 추천"):
         st.caption("LLM 아이디어 — **검증 안 된 참고용·매매신호 아님** · 응답 티커는 "
                    "화이트리스트 검증(환각 폐기) · 24시간 캐시")
-        go_key = f"_llmrel_go_{ticker}"
-        if not st.session_state.get(go_key):
+        res_key = f"_llmrel_res_{ticker}"
+        if res_key not in st.session_state:
             if st.button("🤖 추천 받기", key=f"_llmrel_btn_{ticker}",
                          help="LLM 1회 호출 (최대 60초·이후 24h 캐시)"):
-                st.session_state[go_key] = True
+                with st.spinner("LLM 연관 종목 생성 중… (최대 60초)"):
+                    st.session_state[res_key] = cached.llm_related(ticker)
                 st.rerun(scope="fragment")
             return
-        with st.spinner("LLM 연관 종목 생성 중… (최대 60초)"):
-            items, status = cached.llm_related(ticker)
+        # 결과는 세션에 고정 — 캐시 만료 후 리런이 버튼 없이 LLM 을 재호출하는 누수 방지
+        items, status = st.session_state[res_key]
         if not items:
             msg = {"disabled": "DASH_LLM_RELATED_ENABLED=0 — 비활성화됨",
                    "empty": "LLM 이 검증 통과 종목을 내지 못했습니다 — 잠시 후 다시 시도"}
             st.info(msg.get(status, f"추천 실패 — {status}"))
             if st.button("다시 시도", key=f"_llmrel_retry_{ticker}"):
                 cached.llm_related.clear()
+                st.session_state.pop(res_key, None)
                 st.rerun(scope="fragment")
             return
         for it in items:

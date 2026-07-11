@@ -191,6 +191,10 @@ def test_auth_cookie_token_roundtrip():
         assert auth.verify_token(bad, "pw", "salt", now=now) is False
     # 토큰에 비밀번호 평문 미포함 + 쿠키 안전 문자만
     assert "pw" not in tok and re.fullmatch(r"\d+\.[0-9a-f]{64}", tok)
+    # 비ASCII/임의 쿠키값이 로그인 게이트를 크래시시키면 안 됨 (compare_digest TypeError DoS)
+    for weird in ("9999999999.ábc", "9999999999." + "가" * 64, "9999999999." + "A" * 64,
+                  "9999999999." + "0" * 63):
+        assert auth.verify_token(weird, "pw", "salt", now=now) is False   # no raise
 
 
 def test_auth_cookie_html_injection_safe():

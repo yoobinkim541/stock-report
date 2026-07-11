@@ -117,8 +117,8 @@ _TEMPLATE = r"""
   <span class="tsep"></span>
   <button id="bt-fib" class="tbtn" title="고점↔저점 긋기 = 되돌림 레벨 자동">🔱 피보나치</button>
   <button id="bt-meas" class="tbtn" title="박스 드래그 = Δ가격·Δ%·봉수·기간">📏 측정</button>
-  <button id="bt-long" class="tbtn" title="진입→목표로 박스 드래그 = 롱 포지션(RR 1:1 손절 자동·수정 가능)">📈 롱</button>
-  <button id="bt-short" class="tbtn" title="진입→목표로 박스 드래그 = 숏 포지션(RR 1:1 손절 자동)">📉 숏</button>
+  <button id="bt-long" class="tbtn" title="진입→목표 위로 박스 드래그 = 롱 포지션(RR 1:1 손절 자동 · 조정은 지우고 다시)">📈 롱</button>
+  <button id="bt-short" class="tbtn" title="진입→목표 아래로 박스 드래그 = 숏 포지션(RR 1:1 손절 자동)">📉 숏</button>
   <button id="bt-text" class="tbtn" title="차트에 짧게 긋기 = 시작점에 텍스트 메모">📝 메모</button>
   <span class="tsep"></span>
   <button id="bt-clear" class="tbtn" title="직접 그린 도형 전체 제거">🗑 지우기</button>
@@ -610,16 +610,26 @@ _TEMPLATE = r"""
     if (magnet) { [x0, y0] = snapPoint(x0, y0); [x1, y1] = snapPoint(x1, y1); }
     const entry = fromY(y0), target = fromY(y1);
     if (!entry || entry === target) { setTool(null); return; }
-    const risk = Math.abs(target - entry);       // RR 1:1 기본 — 박스 편집으로 조정
-    const stop = dir === "long" ? entry - risk : entry + risk;
-    const stopAx = toY(stop);
+    // 방향 가드 — 롱은 목표>진입, 숏은 목표<진입. 반대로 그으면 목표=손절 넌센스가
+    // 되므로(적대 리뷰 확정) 도형을 버리고 힌트만 갱신, 도구는 유지해 재시도.
+    if ((dir === "long") !== (target > entry)) {
+      shapes.splice(idx, 1);
+      applyDraw(shapes, curAnns());
+      document.getElementById("tool-hint").textContent =
+        dir === "long" ? "롱은 진입에서 위(목표)로 드래그하세요" : "숏은 진입에서 아래로 드래그하세요";
+      return;
+    }
+    // 손절 = **축 공간** 대칭 RR 1:1 — 선형축에선 가격 대칭(종전과 동일), 로그축에선
+    // 퍼센트 대칭이라 손절가가 0 이하(log10=NaN)로 떨어질 수 없다 (적대 리뷰 확정 픽스)
+    const stopAx = y0 - (y1 - y0);
+    const stop = fromY(stopAx);
     const xa = toISO(Math.min(x0, x1)), xb = toISO(Math.max(x0, x1));
     shapes.splice(idx, 1);
     shapes.push({type: "rect", name: "tool-pos", xref: "x", x0: xa, x1: xb,   // 보상 존
-                 yref: "y", y0: y0, y1: y1, editable: true,
+                 yref: "y", y0: y0, y1: y1,
                  line: {color: "#26a69a", width: 1}, fillcolor: "#26a69a22"});
     shapes.push({type: "rect", name: "tool-pos", xref: "x", x0: xa, x1: xb,   // 위험 존
-                 yref: "y", y0: y0, y1: stopAx, editable: true,
+                 yref: "y", y0: y0, y1: stopAx,
                  line: {color: "#ef5350", width: 1}, fillcolor: "#ef535022"});
     const pctT = entry ? ((target / entry - 1) * 100) : 0;
     const pctS = entry ? ((stop / entry - 1) * 100) : 0;
