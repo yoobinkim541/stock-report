@@ -301,3 +301,36 @@ def test_snapshot_row_flatten(monkeypatch):
 if __name__ == "__main__":
     import pytest
     sys.exit(pytest.main([__file__, "-v"]))
+
+
+def test_fund_rows_pure_parse():
+    """_fund_rows — yfinance 손익계산서 프레임 → 날짜 오름차순 rows·마진 계산 (순수)."""
+    from providers import earnings_data as ed
+    stmt = pd.DataFrame(
+        {pd.Timestamp("2025-12-31"): {"Total Revenue": 6.0e10, "Net Income": 1.5e10},
+         pd.Timestamp("2025-09-30"): {"Total Revenue": 5.0e10, "Net Income": -1.0e9}})
+    rows = ed._fund_rows(stmt)
+    assert [r["date"] for r in rows] == ["2025-09-30", "2025-12-31"]   # 오름차순
+    assert rows[1]["revenue"] == 6.0e10 and rows[1]["net_income"] == 1.5e10
+    assert abs(rows[1]["margin"] - 0.25) < 1e-9
+    assert rows[0]["margin"] < 0                                       # 적자 분기 음수 마진
+    # 결측·비프레임 graceful
+    assert ed._fund_rows(None) == []
+    assert ed._fund_rows(pd.DataFrame()) == []
+    assert ed._fund_rows(pd.DataFrame({pd.Timestamp("2025-12-31"): {"기타": 1.0}})) == []
+
+
+def test_quarterly_fundamentals_graceful(monkeypatch, tmp_path):
+    """quarterly_fundamentals — 네트워크 실패 시 빈 rows·빈 결과는 캐시 안 함."""
+    from providers import earnings_data as ed
+    monkeypatch.setattr(ed, "_CACHE_DIR", tmp_path)
+    class _Boom:
+        @property
+        def quarterly_income_stmt(self):
+            raise RuntimeError("rate limit")
+        @property
+        def income_stmt(self):
+            raise RuntimeError("rate limit")
+    out = ed.quarterly_fundamentals("FAKE", _t=_Boom())
+    assert out["quarterly"] == [] and out["annual"] == []
+    assert not list(tmp_path.glob("earnings_fund_*"))                  # 실패 미캐시

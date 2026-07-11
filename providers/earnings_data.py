@@ -176,6 +176,72 @@ def valuation_metrics(ticker: str, *, _t=None) -> dict:
     return out
 
 
+# ── 분기 펀더멘털 시계열 (차트 오버레이용) ─────────────────────────────────────
+
+def _fund_rows(stmt) -> list[dict]:
+    """손익계산서 DataFrame(yfinance income_stmt — 행=항목·열=기간말) → rows (순수).
+
+    [{date, revenue, net_income, margin}] 날짜 오름차순. 항목 결측·비프레임은 [].
+    """
+    rows = []
+    try:
+        import pandas as pd
+        if stmt is None or getattr(stmt, "empty", True):
+            return rows
+        idx = set(stmt.index)
+
+        def _pick(*names):
+            for n in names:
+                if n in idx:
+                    return stmt.loc[n]
+            return None
+
+        rev = _pick("Total Revenue", "Operating Revenue")
+        ni = _pick("Net Income", "Net Income Common Stockholders",
+                   "Net Income Continuous Operations")
+        if rev is None and ni is None:
+            return rows
+        for c in stmt.columns:
+            try:
+                d = str(pd.Timestamp(c).date())
+            except Exception:
+                continue
+            r = _f(rev.get(c)) if rev is not None else None
+            n = _f(ni.get(c)) if ni is not None else None
+            if r is None and n is None:
+                continue
+            rows.append({"date": d, "revenue": r, "net_income": n,
+                         "margin": (n / r) if (r and n is not None) else None})
+        rows.sort(key=lambda x: x["date"])
+    except Exception as e:
+        logger.debug("_fund_rows: %s", e)
+    return rows
+
+
+def quarterly_fundamentals(ticker: str, *, force: bool = False, _t=None) -> dict:
+    """분기(+연간) 매출·순이익·순마진 시계열 — 차트 펀더멘털 서브패널용 (12h 캐시).
+
+    US=yfinance quarterly_income_stmt(최근 ~5분기)·income_stmt(연간 ~4년). KR 도
+    yfinance 가 주는 만큼(있으면) — ETF·매크로는 손익계산서가 없어 빈 rows(graceful).
+    """
+    key = f"fund_{ticker}"
+    if not force:
+        c = _cache_get(key)
+        if c is not None:
+            return c
+    quarterly, annual = [], []
+    try:
+        t = _t or _ticker(ticker)
+        quarterly = _fund_rows(getattr(t, "quarterly_income_stmt", None))
+        annual = _fund_rows(getattr(t, "income_stmt", None))
+    except Exception as e:
+        logger.debug("quarterly_fundamentals(%s): %s", ticker, e)
+    out = {"ticker": ticker, "quarterly": quarterly, "annual": annual}
+    if quarterly or annual:                          # 빈 실패 결과는 캐시하지 않음(재시도 허용)
+        _cache_put(key, out)
+    return out
+
+
 # ── 과거 서프라이즈 (G2) ────────────────────────────────────────────────────────
 
 def earnings_history(ticker: str, *, limit: int = 12, _t=None) -> list[dict]:

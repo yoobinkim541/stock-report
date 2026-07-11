@@ -418,7 +418,7 @@ def _price_chart(ticker, hist, avg_cost, trades, fullscreen: bool = False,
                           label_visibility="collapsed") or []
         st.markdown("**하단 지표** — 서브 패널")
         bottom = st.pills("하단 지표", ["거래량", "RSI", "MACD", "스토캐스틱",
-                                     "Aroon", "%b", "PVT"], selection_mode="multi",
+                                     "Aroon", "%b", "PVT", "펀더멘털"], selection_mode="multi",
                           default=["거래량", "RSI"], key=f"_bot_{tf}",
                           label_visibility="collapsed") or []
         log_scale = st.toggle("로그 스케일", key=f"_logscale_{tf}",
@@ -442,6 +442,7 @@ def _price_chart(ticker, hist, avg_cost, trades, fullscreen: bool = False,
     show_aroon = "Aroon" in bottom
     show_bbpct = "%b" in bottom
     show_pvt = "PVT" in bottom
+    show_fund = "펀더멘털" in bottom
     tls = []
     if want_lines or want_short or want_long:
         ch_key = tuple(k for k, w in (("short", want_short), ("long", want_long)) if w)
@@ -518,6 +519,19 @@ def _price_chart(ticker, hist, avg_cost, trades, fullscreen: bool = False,
         else:
             use_ha = False
             st.caption("⚠️ 하이킨아시는 OHLC 필요 — 라인으로 표시")
+    # 📊 펀더멘털 패널 데이터 — 분기 우선·부족하면 연간 (ETF·매크로는 빈 rows → 생략)
+    fund_rows = None
+    if show_fund and not compare:
+        _fd = cached.chart_fundamentals(ticker) or {}
+        fund_rows = _fd.get("quarterly") or []
+        _fund_label = "분기"
+        if len(fund_rows) < 4 and (_fd.get("annual") or []):
+            fund_rows, _fund_label = _fd.get("annual"), "연간"
+        if fund_rows:
+            st.caption(f"📊 펀더멘털 패널 — {_fund_label} 매출(바)·순이익(라인) · "
+                       "hover 에 순마진 · yfinance 손익계산서 · 표시·참고용")
+        else:
+            st.caption("ℹ️ 펀더멘털 데이터 없음 (ETF·매크로·일부 KR) — 패널 생략")
     events, zones = _chart_events(ticker, _df_events, ev_sel) if not compare else ([], [])
     if "진입존 🎯" in ev_sel and not compare:
         try:
@@ -537,6 +551,7 @@ def _price_chart(ticker, hist, avg_cost, trades, fullscreen: bool = False,
         keltner="켈트너 채널" in top, kama="KAMA" in top,
         chandelier="샹들리에 엑시트" in top,
         show_aroon=show_aroon, show_bbpct=show_bbpct, show_pvt=show_pvt,
+        fundamentals=fund_rows,
         events=events, zones=zones)
     if fullscreen:                                  # ⛶ 풀뷰 — 뷰포트 거의 채우는 높이
         fig.update_layout(height=840)
