@@ -297,6 +297,59 @@ console.log("OK bounded");
 """
 
 
+# ── guard 창 도형완성 드롭 회귀 ("자석 가끔 안 먹음") ─────────────────────────
+# animStep y-lerp·muteHover·setTool 등 프로그램 relayout 이 in-flight(guard=true)인
+# 순간 사용자의 도형완성 relayout 이 도착하면 통째로 드롭되던 버그 — 도형 이벤트는
+# guard 를 우회해 항상 처리되어야 한다(메아리 루프는 내용 기반 가드가 차단).
+_GUARD_DROP_BODY = r"""
+const iso = (d) => new Date(d).toISOString();
+const D0 = Date.parse("2025-02-01"), D1 = Date.parse("2025-03-01");
+const BASE = JSON.parse(JSON.stringify(gd.layout.shapes || []));
+function fail(m) { console.error("FAIL " + m); process.exit(1); }
+try { pump(); } catch (e) { fail("init_pump " + e.message); }
+
+// ── guard=true(프로그램 relayout in-flight) 창에서 수평선 완성 — 드롭 금지 ──
+// setTool 의 dragmode relayout 직후(pump 전) = guard=true 인 창을 그대로 재현.
+el("bt-hline").onclick();                        // guard=true (.then 아직 미해소)
+gd.layout.shapes = BASE.concat([{ type: "line", xref: "x", yref: "y",
+  x0: iso(D0), y0: 140.3, x1: iso(D0 + 864e5), y1: 141 }]);
+gd._h["plotly_relayout"]({ shapes: gd.layout.shapes });   // guard 창에서 도착
+try { pump(); } catch (e) { fail("HLINE_GUARD_LOOP " + e.message); }
+if (gd.layout.shapes.filter(s => s.name === "tool-hline").length !== 1)
+  fail("guarded_hline_dropped");
+
+// ── 자석(tool=null·raw 선)도 guard 창에서 스냅되어야 ──
+el("bt-meas").onclick(); el("bt-meas").onclick(); // 토글 온·오프 → guard=true 창
+gd.layout.shapes = gd.layout.shapes.concat([{ type: "line", xref: "x", yref: "y",
+  x0: iso(D0 + 3e5), y0: 131.4, x1: iso(D1 + 3e5), y1: 158.2 }]);
+gd._h["plotly_relayout"]({ shapes: gd.layout.shapes });
+try { pump(); } catch (e) { fail("MAGNET_GUARD_LOOP " + e.message); }
+const ln = gd.layout.shapes[gd.layout.shapes.length - 1];
+if (ln.y0 !== Math.round(ln.y0)) fail("guarded_magnet_dropped " + ln.y0);
+console.log("OK guard-bypass");
+"""
+
+
+@pytest.mark.skipif(_NODE is None, reason="node 미설치 — 런타임 JS 검증 스킵")
+def test_shape_event_survives_guard_window(tmp_path):
+    """guard=true 창에 도착한 도형완성 이벤트가 드롭되지 않는다 (자석·도구 신뢰성)."""
+    idx = pd.date_range("2025-01-01", periods=70, freq="D")
+    df = pd.DataFrame({"Open": range(100, 170), "High": range(101, 171),
+                       "Low": range(99, 169), "Close": range(100, 170),
+                       "Volume": [1e6] * 70}, index=idx)
+    fig = charts.price_chart(df, "TEST", kind="candle", show_volume=True,
+                             show_rsi=True, avg_cost=140.0)
+    html = plotly_embed.pannable_chart_html(fig, df, height=460, view_days=90,
+                                            vol_axis="yaxis2", store_key="TEST:1d:lin")
+    js = re.findall(r"<script>(.*?)</script>", html, re.S)[-1]
+    stub = _ASYNC_HARNESS.split("__SCRIPT__")[0]   # 비동기 메아리 스텁 재사용
+    runner = tmp_path / "guard.js"
+    runner.write_text(stub + js + _GUARD_DROP_BODY, encoding="utf-8")
+    r = subprocess.run([_NODE, str(runner)], capture_output=True, text=True, timeout=30)
+    assert r.returncode == 0, f"guard drop fail: {r.stdout}\n{r.stderr}"
+    assert "OK guard-bypass" in r.stdout
+
+
 @pytest.mark.skipif(_NODE is None, reason="node 미설치 — 런타임 JS 검증 스킵")
 def test_drawing_no_infinite_relayout_loop(tmp_path):
     """드로잉 시 자기 메아리 무한 relayout 루프(=탭 프리즈) 회귀 방어.
