@@ -68,3 +68,4 @@ reports/*
 *.swo
 .DS_Store
 .vercel/
+price_alerts.json.lock

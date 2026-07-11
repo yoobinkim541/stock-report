@@ -451,6 +451,10 @@ def test_price_chart_trend_lines_overlay():
     assert ch_lower, "채널 fill 없음"
     anns = " ".join(a.text for a in fig.layout.annotations)
     assert "지지선" in anns and "상승채널" in anns
+    tl_anns = [a for a in fig.layout.annotations if a.text in ("지지선 (3터치)", "단기 상승채널(60)")]
+    assert tl_anns and all(a.bgcolor for a in tl_anns)      # 선과 글씨가 겹치지 않도록 칩 배경
+    assert all(a.borderpad >= 4 and a.xshift >= 10 for a in tl_anns)
+    assert all(a.yshift > 0 for a in tl_anns)
     assert fig.layout.newshape.line.color == "#f59e0b"      # 수동 드로잉 기본 스타일
     assert "drawline" in charts.PAN_DRAW_CFG["modeBarButtonsToAdd"]
     # 빈 입력 무변화

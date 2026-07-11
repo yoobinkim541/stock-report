@@ -90,7 +90,7 @@ _TEMPLATE = r"""
 <style>
   #tools { display:flex; gap:6px; align-items:center; flex-wrap:wrap; margin:0 0 6px 2px;
            font:12px Pretendard, -apple-system, sans-serif; }
-  .tbtn { background:#131722; color:#d1d4dc; border:1px solid #1e222d; border-radius:6px;
+  .tbtn { box-sizing:border-box; background:#131722; color:#d1d4dc; border:1px solid #1e222d; border-radius:6px;
           padding:3px 9px; font:12px Pretendard, -apple-system, sans-serif; cursor:pointer;
           line-height:1.5; white-space:nowrap; }
   .tbtn:hover { border-color:#2f81f7; }
@@ -98,13 +98,24 @@ _TEMPLATE = r"""
   .tsep { width:1px; align-self:stretch; background:#1e222d; margin:0 2px; }
   #tool-hint { color:#9198a6; font-size:11px; margin-left:4px; }
   /* 좌측 도구 독 (풀뷰 — TradingView 배치) */
-  #wrap.dock { display:flex; gap:8px; align-items:stretch; }
-  #wrap.dock #tools { flex-direction:column; align-items:stretch; width:112px;
-                      margin:0; align-self:flex-start; position:sticky; top:0; }
+  #wrap.dock { display:grid; grid-template-columns:128px minmax(0, 1fr); gap:10px;
+               align-items:start; width:100%; max-width:100%; overflow:hidden; }
+  #wrap.dock #tools { grid-column:1; flex-direction:column; flex-wrap:nowrap; align-items:stretch;
+                      width:128px; min-width:0; max-width:128px; max-height:calc(100vh - 112px);
+                      overflow-y:auto; overflow-x:hidden; margin:0; align-self:flex-start;
+                      position:sticky; top:0; z-index:3; padding-right:2px; }
+  #wrap.dock .tbtn { width:100%; min-width:0; padding:4px 7px; overflow:hidden; text-overflow:ellipsis; }
   #wrap.dock .tsep { width:auto; height:1px; margin:2px 0; }
-  #wrap.dock #tool-hint { margin:2px 0 0; white-space:normal; }
-  #wrap.dock #ohlcbar { order:-1; margin:0 0 4px; white-space:normal; }
-  #wrap.dock #chartcol { flex:1; min-width:0; }
+  #wrap.dock #tool-hint { margin:2px 0 0; white-space:normal; overflow-wrap:anywhere; }
+  #wrap.dock #ohlcbar { order:-1; margin:0 0 4px; white-space:normal; overflow:hidden; text-overflow:ellipsis; }
+  #wrap.dock #chartcol { grid-column:2; min-width:0; width:100%; overflow:hidden; }
+  @media (max-width: 760px) {
+    #wrap.dock { display:block; overflow:visible; }
+    #wrap.dock #tools { width:auto; max-width:none; max-height:none; flex-direction:row;
+                        flex-wrap:nowrap; overflow-x:auto; overflow-y:hidden; margin:0 0 6px 0;
+                        position:static; padding-right:0; }
+    #wrap.dock .tbtn { width:auto; flex:0 0 auto; }
+  }
 </style>
 <div id="wrap">
 <div id="tools">
@@ -1152,6 +1163,7 @@ _TEMPLATE = r"""
 
   Plotly.newPlot(gd, fig.data, fig.layout, @@CONFIG@@).then(() => {
     gd.style.position = "relative";                    // 크로스헤어 오버레이 부착 (newPlot 후)
+    try { Plotly.Plots.resize(gd); } catch (e) {}       // dock/grid 폭 확정 후 1회 보정
     gd.appendChild(xhV); gd.appendChild(xhH); gd.appendChild(xhY);
     // 저장된 드로잉 복원 — 서버 도형 뒤에 append (지우기·보호 가드와 정합).
     // 하단 지표 구성이 바뀌어 사라진 서브패널 축(y3 등)을 참조하는 도형은 제외(고아 방지)

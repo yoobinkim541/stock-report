@@ -197,6 +197,21 @@ def test_embed_fit_viewport_contract():
     assert "const fitVH = false" in norm
 
 
+def test_embed_dock_layout_reserves_chart_column():
+    """풀뷰 좌측 도구 독 — 차트와 겹치지 않도록 고정 컬럼을 예약한다."""
+    hist = _hist(40)
+    fig = charts.price_chart(hist, "T")
+    html = plotly_embed.pannable_chart_html(fig, hist, dock=True)
+    for token in (
+        "grid-template-columns:128px minmax(0, 1fr)",
+        "#wrap.dock #chartcol { grid-column:2",
+        "#wrap.dock .tbtn { width:100%",
+        "text-overflow:ellipsis",
+        "Plotly.Plots.resize(gd)",
+    ):
+        assert token in html, f"풀뷰 독 레이아웃 계약 누락: {token}"
+
+
 def test_embed_live_flag_and_feed():
     """⚡ live — 플래그 배선 + 피더 계약 (키 파생·None 가격·seq 로 html 변화)."""
     hist = _hist()

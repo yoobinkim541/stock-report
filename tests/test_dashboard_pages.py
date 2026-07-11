@@ -743,3 +743,26 @@ ticker.render()
     main = [s for s in frames if "bt-reg" in s]
     assert main, "차트 iframe 에 신규 도구 버튼 미포함"
     assert "bt-avwap" in main[0] and "bt-vprof" in main[0]
+
+
+def test_ticker_compare_tray_renders_active_state():
+    """종목 비교 — 풀폭 트레이에서 선택 상태·제거 버튼·% 비교 차트가 함께 렌더."""
+    script = _STUBS + '''
+cached.realtime_quote = lambda t: None
+st.session_state["_cmp_panel_open"] = True
+st.session_state["_cmp_active"] = ["QQQ", "SPY"]
+from dashboard.pages import ticker
+ticker.render()
+'''
+    at = AppTest.from_string(script, default_timeout=30)
+    at.run()
+    assert not at.exception, str(at.exception)
+    body = " ".join(str(getattr(m, "value", "")) for m in at.markdown)
+    caps = " ".join(str(getattr(c, "value", "")) for c in at.caption)
+    assert "종목 비교" in body
+    assert "기간 시작=0% 상대수익" in caps
+    labels = " ".join(str(b.label) for b in at.button)
+    assert "× Invesco QQQ" in labels and "× SPDR S&P 500" in labels
+    frames = [i.proto.srcdoc for i in at.get("iframe")]
+    main = [s for s in frames if "const pctMode = true" in s]
+    assert main, "비교 선택 시 % 상대수익 차트로 렌더되어야 함"

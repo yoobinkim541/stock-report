@@ -752,6 +752,16 @@ def _add_trend_lines(fig, items: list[dict]) -> None:
     지지=초록 대시·저항=빨강 대시·채널=중심 점선+상하단(반투명 fill·path 폴백). 표시·참고용.
     """
     go = _go()
+
+    def _label_yshift(item: dict) -> int:
+        kind = item.get("kind")
+        trend = (item.get("meta") or {}).get("trend")
+        if kind == "resistance" or trend == "down":
+            return -16
+        if kind == "support" or trend == "up":
+            return 16
+        return 14
+
     for it in items or []:
         kind = it.get("kind")
         if kind == "channel":
@@ -774,8 +784,17 @@ def _add_trend_lines(fig, items: list[dict]) -> None:
             color = _GREEN if kind == "support" else _RED
             fig.add_trace(go.Scatter(x=[it["x0"], it["x1"]], y=[it["y0"], it["y1"]],
                                      name=it["label"], line=dict(color=color, width=1.4, dash="dash")))
-        fig.add_annotation(x=it["x1"], y=it["y1"], xanchor="left", showarrow=False,
-                           text=it["label"], font=dict(size=10, color=theme.MUTED))
+        fig.add_annotation(
+            x=it["x1"], y=it["y1"], xanchor="left", yanchor="middle",
+            xshift=10, yshift=_label_yshift(it), showarrow=False,
+            text=it["label"],
+            font=dict(size=11, color="#d1d4dc"),
+            bgcolor="rgba(13, 17, 23, 0.82)",
+            bordercolor=color,
+            borderwidth=1,
+            borderpad=4,
+            opacity=0.96,
+        )
 
 
 def price_chart(hist, ticker: str = "", *, kind: str = "line", avg_cost=None,
@@ -1081,7 +1100,7 @@ def price_chart(hist, ticker: str = "", *, kind: str = "line", avg_cost=None,
 
     chart_height = ({1: 380, 2: 540, 3: 680, 4: 800, 5: 900}.get(panes)
                     or 900 + 85 * (panes - 5))
-    fig.update_layout(margin=dict(t=14, b=64, l=14, r=46), dragmode="pan",
+    fig.update_layout(margin=dict(t=14, b=64, l=14, r=72), dragmode="pan",
                       legend=dict(orientation="h", x=0.0, xanchor="left",
                                   y=1.0, yanchor="bottom", font=dict(size=10),
                                   bgcolor="rgba(0,0,0,0)", itemsizing="constant"),
