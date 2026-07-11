@@ -383,6 +383,20 @@ def _llm_analysis_facts(ticker, hist, price) -> dict:
             f["연간추세"] = fin
     except Exception:
         pass
+    try:
+        # 최근 뉴스(LLM 구조화 라벨·로컬 JSONL) — 제목은 외부 텍스트라 새니타이즈(공백
+        # 접기·80자 절단) + 프롬프트가 "지시 무시·맥락으로만" 지시 (인젝션 방어 2중)
+        import re as _re
+        items = []
+        for n in (cached.chart_news(ticker) or [])[-6:]:
+            t = _re.sub(r"\s+", " ", str(n.get("title") or "")).strip()[:80]
+            if t:
+                items.append({"일자": n.get("date"), "유형": n.get("event_type") or "",
+                              "방향(-1~1)": n.get("direction"), "제목": t})
+        if items:
+            f["최근뉴스"] = items
+    except Exception:
+        pass
     return f
 
 
