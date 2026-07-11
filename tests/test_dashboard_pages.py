@@ -766,3 +766,28 @@ ticker.render()
     frames = [i.proto.srcdoc for i in at.get("iframe")]
     main = [s for s in frames if "const pctMode = true" in s]
     assert main, "비교 선택 시 % 상대수익 차트로 렌더되어야 함"
+
+
+def test_ticker_chart_fundamentals_panel_renders():
+    """펀더멘털 하단 지표 — 스텁 rows 로 렌더 무예외 + 캡션 표기 (W-series)."""
+    script = _STUBS + '''
+cached.realtime_quote = lambda t: None
+cached.chart_fundamentals = lambda t: {"quarterly": [
+    {"date": "2025-06-30", "revenue": 5.0e10, "net_income": 1.2e10, "margin": 0.24},
+    {"date": "2025-09-30", "revenue": 5.5e10, "net_income": 1.4e10, "margin": 0.25},
+    {"date": "2025-12-31", "revenue": 6.0e10, "net_income": 1.6e10, "margin": 0.27},
+    {"date": "2026-03-31", "revenue": 6.4e10, "net_income": 1.8e10, "margin": 0.28}],
+    "annual": []}
+st.session_state["_bot_1d"] = ["거래량", "펀더멘털"]
+'''
+    at = AppTest.from_string(script, default_timeout=30)
+    at.run()
+    assert not at.exception, str(at.exception)
+    caps = " ".join(str(c.value) for c in at.caption)
+    assert "펀더멘털 패널" in caps and "분기" in caps
+    # ETF 등 데이터 없음 → 정직 안내
+    script2 = script.replace('"quarterly": [', '"quarterly_x": [')
+    at2 = AppTest.from_string(script2, default_timeout=30)
+    at2.run()
+    assert not at2.exception, str(at2.exception)
+    assert "펀더멘털 데이터 없음" in " ".join(str(c.value) for c in at2.caption)

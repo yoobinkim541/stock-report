@@ -856,6 +856,15 @@ def chart_news_events(ticker: str, limit: int = 120) -> list[dict]:
         return []
 
 
+def chart_fundamentals(ticker: str) -> dict:
+    """차트 펀더멘털 서브패널 — 분기(+연간) 매출·순이익·마진 (graceful 빈 dict)."""
+    try:
+        from providers import earnings_data
+        return earnings_data.quarterly_fundamentals(ticker) or {}
+    except Exception:
+        return {}
+
+
 # ── 수집 뉴스 (시장·캘린더 — 출처별·중요도순) ─────────────────────────────────
 
 # 출처 표시 순서·라벨 (뉴스성 소스 우선, 수치성 스냅샷 후순위)

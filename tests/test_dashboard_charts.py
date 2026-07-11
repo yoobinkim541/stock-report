@@ -1036,3 +1036,29 @@ def test_price_chart_compare_disables_new_overlays():
                              keltner=True, kama=True, chandelier=True)
     names = [t.name or "" for t in fig.data]
     assert not any("켈트너" in n or "KAMA" in n or "샹들리에" in n for n in names)
+
+
+def test_fmt_big():
+    assert charts.fmt_big(2.85e12) == "2.9T"
+    assert charts.fmt_big(6.6e10) == "66.0B"
+    assert charts.fmt_big(-2.0e9) == "-2.0B"
+    assert charts.fmt_big(1.5e7) == "15.0M"
+    assert charts.fmt_big(999) == "999"
+    assert charts.fmt_big(None) == "—"
+
+
+def test_price_chart_fundamentals_panel():
+    """펀더멘털 서브패널 — 매출 바+순이익 라인·마진 hover·빈 rows 는 패널 생략."""
+    hist = _ohlcv_v(200)
+    rows = [{"date": "2024-03-31", "revenue": 5.0e10, "net_income": 1.2e10, "margin": 0.24},
+            {"date": "2024-06-30", "revenue": 5.5e10, "net_income": -1.0e9, "margin": -0.02},
+            {"date": "2024-09-30", "revenue": 6.1e10, "net_income": 1.7e10, "margin": 0.28}]
+    fig = charts.price_chart(hist, "T", fundamentals=rows)
+    names = [t.name or "" for t in fig.data]
+    assert "매출" in names and "순이익" in names
+    assert fig.layout.yaxis2 is not None            # 가격+펀더멘털 2행
+    rev = next(t for t in fig.data if (t.name or "") == "매출")
+    assert "순마진" in rev.customdata[0] and "50.0B" in rev.customdata[0]
+    # 빈/무효 rows → 패널 없음
+    fig2 = charts.price_chart(hist, "T", fundamentals=[{"date": "2024-01-01"}])
+    assert getattr(fig2.layout, "yaxis2", None) is None
