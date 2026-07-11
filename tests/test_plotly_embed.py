@@ -51,7 +51,9 @@ def test_embed_drawing_tools_contract():
     html = plotly_embed.pannable_chart_html(fig, hist)
     # 툴바 버튼 (+⏪ 리플레이 바)
     for bid in ('id="bt-mag"', 'id="bt-hline"', 'id="bt-fib"', 'id="bt-meas"', 'id="bt-clear"',
-                'id="bt-replay"', 'id="replaybar"', 'id="rp-slider"', 'id="rp-play"'):
+                'id="bt-replay"', 'id="replaybar"', 'id="rp-slider"', 'id="rp-play"',
+                'id="bt-chan"', 'id="bt-fork"', 'id="bt-gann"', 'id="bt-fibext"',
+                'id="bt-fibtz"', 'id="bt-cycle"', 'id="bt-ell"', 'id="bt-xabcd"', 'id="bt-sess"'):
         assert bid in html, f"툴바 버튼 누락: {bid}"
     # 리플레이 핵심 로직 — 커튼·클램프(미래 누출 차단)·영속화 제외
     for token in ("function replayApply", "function replayStop", "replay-curtain",

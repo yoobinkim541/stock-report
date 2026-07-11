@@ -172,6 +172,76 @@ if (nRestored !== 1) fail("persist_restore n=" + nRestored);
 const rs = gd.layout.shapes[gd.layout.shapes.length - 1];
 if (rs.y0 !== Math.round(rs.y0)) fail("persist_snapped_coords");   // 저장 전 스냅값 유지
 
+// 6.5) 잔여 백로그 도구 — 채널(2단계)·피치포크·갠 팬·피보확장·타임존·순환선·엘리엇
+el("bt-mag").onclick({ target: el("bt-mag") });   // 자석 OFF — 좌표 기대값을 정확히 검증
+el("bt-chan").onclick();
+gd.layout.shapes = gd.layout.shapes.concat([{ type: "line", xref: "x", yref: "y",
+  x0: iso(D0), y0: 130, x1: iso(D1), y1: 150 }]);      // ① 기준선
+gd.emit("plotly_relayout", { shapes: gd.layout.shapes });
+if (gd.layout.shapes.filter((s) => s.name === "tool-chan").length !== 1) fail("chan_base");
+gd.layout.shapes = gd.layout.shapes.concat([{ type: "line", xref: "x", yref: "y",
+  x0: iso(D0), y0: 140, x1: iso(D0 + 864e5), y1: 141 }]);   // ② 폭 (오프셋 +10)
+gd.emit("plotly_relayout", { shapes: gd.layout.shapes });
+const chan = gd.layout.shapes.filter((s) => s.name === "tool-chan");
+if (chan.length !== 3) fail("chan_lines " + chan.length);   // 기준+평행+중간
+const par = chan[1];
+if (Math.abs((par.y0 - chan[0].y0) - (par.y1 - chan[0].y1)) > 1e-9) fail("chan_parallel");
+el("bt-fork").onclick();
+gd.layout.shapes = gd.layout.shapes.concat([{ type: "line", xref: "x", yref: "y",
+  x0: iso(D0), y0: 120, x1: iso(D0 + 10 * 864e5), y1: 140 }]);
+gd.emit("plotly_relayout", { shapes: gd.layout.shapes });
+gd.layout.shapes = gd.layout.shapes.concat([{ type: "line", xref: "x", yref: "y",
+  x0: iso(D0 + 20 * 864e5), y0: 125, x1: iso(D0 + 21 * 864e5), y1: 126 }]);
+gd.emit("plotly_relayout", { shapes: gd.layout.shapes });
+if (gd.layout.shapes.filter((s) => s.name === "tool-fork").length !== 3) fail("fork_tines");
+el("bt-gann").onclick();
+gd.layout.shapes = gd.layout.shapes.concat([{ type: "line", xref: "x", yref: "y",
+  x0: iso(D0), y0: 130, x1: iso(D1), y1: 150 }]);
+gd.emit("plotly_relayout", { shapes: gd.layout.shapes });
+if (gd.layout.shapes.filter((s) => s.name === "tool-gann").length !== 9) fail("gann_rays");
+el("bt-fibext").onclick();
+gd.layout.shapes = gd.layout.shapes.concat([{ type: "line", xref: "x", yref: "y",
+  x0: iso(D0), y0: 130, x1: iso(D0 + 10 * 864e5), y1: 150 }]);   // A→B (+20)
+gd.emit("plotly_relayout", { shapes: gd.layout.shapes });
+gd.layout.shapes = gd.layout.shapes.concat([{ type: "line", xref: "x", yref: "y",
+  x0: iso(D0 + 15 * 864e5), y0: 140, x1: iso(D0 + 16 * 864e5), y1: 141 }]);  // C=140
+gd.emit("plotly_relayout", { shapes: gd.layout.shapes });
+const fx = gd.layout.shapes.filter((s) => s.name === "tool-fibext");
+if (fx.length !== 6) fail("fibext_levels " + fx.length);
+if (!fx.some((s) => Math.abs(s.y0 - 160) < 1e-6)) fail("fibext_1x");   // C+파동×1 = 160
+el("bt-fibtz").onclick();
+gd.layout.shapes = gd.layout.shapes.concat([{ type: "line", xref: "x", yref: "y",
+  x0: iso(D0), y0: 130, x1: iso(D0 + 864e5), y1: 131 }]);
+gd.emit("plotly_relayout", { shapes: gd.layout.shapes });
+const tz = gd.layout.shapes.filter((s) => s.name === "tool-fibtz");
+if (tz.length < 5 || tz.some((s) => s.yref !== "paper")) fail("fibtz " + tz.length);
+el("bt-cycle").onclick();
+gd.layout.shapes = gd.layout.shapes.concat([{ type: "line", xref: "x", yref: "y",
+  x0: iso(D0), y0: 130, x1: iso(D0 + 5 * 864e5), y1: 131 }]);   // 주기 5일
+gd.emit("plotly_relayout", { shapes: gd.layout.shapes });
+const cyc = gd.layout.shapes.filter((s) => s.name === "tool-cycle");
+if (cyc.length < 5 || cyc.length > 40) fail("cycle " + cyc.length);
+el("bt-ell").onclick();
+for (let i = 0; i < 3; i++) {
+  gd.layout.shapes = gd.layout.shapes.concat([{ type: "line", xref: "x", yref: "y",
+    x0: iso(D0 + i * 5 * 864e5), y0: 130 + i * 5, x1: iso(D0 + (i * 5 + 1) * 864e5), y1: 131 }]);
+  gd.emit("plotly_relayout", { shapes: gd.layout.shapes });
+}
+if (gd.layout.shapes.filter((s) => s.name === "tool-ell").length !== 2) fail("ell_segments");
+const ellAnn = (gd.layout.annotations || []).filter((a) => a.name === "tool-ell");
+if (ellAnn.length !== 3 || !/1/.test(ellAnn[0].text)) fail("ell_labels " + ellAnn.length);
+el("bt-ell").onclick();                            // 버튼 재클릭 = 완료(pending 해제)
+// 세션 프로파일 — 일봉 bounds 에선 인트라데이 가드로 미생성
+el("bt-sess").onclick();
+if (gd.layout.shapes.some((s) => s.name === "tool-sess")) fail("sess_daily_guard");
+if (!/인트라데이/.test(el("tool-hint").textContent || "")) fail("sess_hint");
+el("bt-mag").onclick({ target: el("bt-mag") });   // 자석 복원
+// 지우기 — 신규 도구 도형 전부 제거 (이후 기존 5)6) 섹션이 재검증)
+el("bt-clear").onclick();
+for (const nm of ["tool-chan", "tool-fork", "tool-gann", "tool-fibext", "tool-fibtz",
+                  "tool-cycle", "tool-ell"])
+  if (gd.layout.shapes.some((s) => (s.name || "") === nm)) fail("clear_" + nm);
+
 // 7) ⏪ 리플레이 — 커튼 생성/스텝 이동/저장 제외/종료 (매매 연습 모드)
 el("bt-replay").onclick();
 let cur = gd.layout.shapes.filter((s) => s.name === "replay-curtain");
