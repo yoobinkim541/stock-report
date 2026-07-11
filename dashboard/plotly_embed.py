@@ -92,22 +92,44 @@ _TEMPLATE = r"""
            font:12px Pretendard, -apple-system, sans-serif; }
   .tbtn { background:#131722; color:#d1d4dc; border:1px solid #1e222d; border-radius:6px;
           padding:3px 9px; font:12px Pretendard, -apple-system, sans-serif; cursor:pointer;
-          line-height:1.5; }
+          line-height:1.5; white-space:nowrap; }
   .tbtn:hover { border-color:#2f81f7; }
   .tbtn.on { border-color:#2f81f7; color:#2f81f7; background:rgba(47,129,247,.08); }
+  .tsep { width:1px; align-self:stretch; background:#1e222d; margin:0 2px; }
   #tool-hint { color:#9198a6; font-size:11px; margin-left:4px; }
+  /* 좌측 도구 독 (풀뷰 — TradingView 배치) */
+  #wrap.dock { display:flex; gap:8px; align-items:stretch; }
+  #wrap.dock #tools { flex-direction:column; align-items:stretch; width:112px;
+                      margin:0; align-self:flex-start; position:sticky; top:0; }
+  #wrap.dock .tsep { width:auto; height:1px; margin:2px 0; }
+  #wrap.dock #tool-hint { margin:2px 0 0; white-space:normal; }
+  #wrap.dock #ohlcbar { order:-1; margin:0 0 4px; white-space:normal; }
+  #wrap.dock #chartcol { flex:1; min-width:0; }
 </style>
+<div id="wrap">
 <div id="tools">
   <button id="bt-mag" class="tbtn on" title="그리기·편집 시 봉의 시가/고가/저가/종가에 착 붙음">🧲 자석</button>
   <button id="bt-hline" class="tbtn" title="차트에 짧게 긋기 = 시작점 가격 수평선">─ 수평선</button>
+  <button id="bt-vline" class="tbtn" title="차트에 짧게 긋기 = 시작점 날짜 수직선">│ 수직선</button>
+  <button id="bt-cross" class="tbtn" title="차트에 짧게 긋기 = 시작점 크로스라인(수평+수직)">✚ 크로스</button>
+  <button id="bt-ray" class="tbtn" title="두 점을 긋면 오른쪽으로 무한 연장">↗ 레이</button>
+  <button id="bt-ext" class="tbtn" title="두 점을 긋면 양방향 무한 연장">⤢ 연장선</button>
+  <span class="tsep"></span>
   <button id="bt-fib" class="tbtn" title="고점↔저점 긋기 = 되돌림 레벨 자동">🔱 피보나치</button>
   <button id="bt-meas" class="tbtn" title="박스 드래그 = Δ가격·Δ%·봉수·기간">📏 측정</button>
+  <button id="bt-long" class="tbtn" title="진입→목표 위로 박스 드래그 = 롱 포지션(RR 1:1 손절 자동 · 조정은 지우고 다시)">📈 롱</button>
+  <button id="bt-short" class="tbtn" title="진입→목표 아래로 박스 드래그 = 숏 포지션(RR 1:1 손절 자동)">📉 숏</button>
+  <button id="bt-text" class="tbtn" title="차트에 짧게 긋기 = 시작점에 텍스트 메모">📝 메모</button>
+  <span class="tsep"></span>
   <button id="bt-clear" class="tbtn" title="직접 그린 도형 전체 제거">🗑 지우기</button>
   <span id="tool-hint"></span>
   <span id="ohlcbar" style="margin-left:auto;font:11px 'JetBrains Mono', ui-monospace, monospace;
         color:#9198a6;white-space:nowrap"></span>
 </div>
+<div id="chartcol">
 <div id="chart" style="width:100%;min-height:@@HEIGHT@@px"></div>
+</div>
+</div>
 <div id="detail" style="display:none;margin-top:6px;padding:8px 12px;border:1px solid #1e222d;
   border-radius:8px;background:#131722;color:#d1d4dc;
   font:12px 'JetBrains Mono', ui-monospace, monospace"></div>
@@ -125,6 +147,7 @@ _TEMPLATE = r"""
   const fitVH = @@FIT_VH@@;                      // 풀뷰 — 부모 창 높이에 맞춰 리사이즈
   const pctMode = @@PCT_MODE@@;                  // 비교(%) 모드 — 가격 포맷 대신 %
   const yLog = @@Y_LOG@@;                        // 로그 스케일 — 도형 y 좌표는 log10 공간
+  if (@@DOCK@@) document.getElementById("wrap").classList.add("dock");   // 풀뷰 좌측 도구 독
   function vhFit() {                             // same-origin iframe — frameElement 직접 리사이즈
     try {
       const fe = window.frameElement;
@@ -458,17 +481,31 @@ _TEMPLATE = r"""
     return v.toFixed(2);
   }
 
+  const TOOL_BTNS = [["bt-hline", "hline"], ["bt-vline", "vline"], ["bt-cross", "cross"],
+                     ["bt-ray", "ray"], ["bt-ext", "ext"], ["bt-fib", "fib"],
+                     ["bt-meas", "meas"], ["bt-long", "long"], ["bt-short", "short"],
+                     ["bt-text", "text"]];
+
   function setTool(next) {                       // 도구 토글 (상호 배타) + dragmode 전환
     tool = (tool === next) ? null : next;
-    const dm = {hline: "drawline", fib: "drawline", meas: "drawrect"}[tool] || "pan";
+    const dm = {hline: "drawline", vline: "drawline", cross: "drawline",
+                ray: "drawline", ext: "drawline", fib: "drawline", text: "drawline",
+                meas: "drawrect", long: "drawrect", short: "drawrect"}[tool] || "pan";
     guard++;
     Plotly.relayout(gd, {dragmode: dm}).then(() => { unguard(); });
-    for (const [id, name] of [["bt-hline", "hline"], ["bt-fib", "fib"], ["bt-meas", "meas"]])
+    for (const [id, name] of TOOL_BTNS)
       document.getElementById(id).classList.toggle("on", tool === name);
     document.getElementById("tool-hint").textContent = {
       hline: "차트에 짧게 긋기 = 시작점 가격 수평선",
+      vline: "차트에 짧게 긋기 = 시작점 날짜 수직선",
+      cross: "차트에 짧게 긋기 = 시작점 크로스라인",
+      ray: "두 점을 그으면 오른쪽으로 연장",
+      ext: "두 점을 그으면 양방향 연장",
       fib: "고점↔저점으로 드래그 = 되돌림 레벨",
       meas: "측정할 구간을 박스로 드래그",
+      long: "진입→목표 위로 드래그 = 롱 (손절 RR 1:1 자동)",
+      short: "진입→목표 아래로 드래그 = 숏 (손절 RR 1:1 자동)",
+      text: "차트에 짧게 긋기 = 그 지점 메모",
     }[tool] || "";
   }
 
@@ -493,6 +530,118 @@ _TEMPLATE = r"""
     anns.push({name: "tool-hline", xref: "paper", x: 1, xanchor: "left", y: y, yref: "y",
                showarrow: false, text: "<b>" + fmtVal(y) + "</b>",
                font: {size: 10, color: "#ffffff"}, bgcolor: "#f59e0b", borderpad: 2});
+    applyDraw(shapes, anns);
+    setTool(null);
+  }
+
+  function makeVline(sh, shapes, idx) {          // 그은 선 → 전고 수직선 + 상단 날짜 라벨
+    let ms = toMs(sh.x0);
+    if (magnet) ms = snapPoint(ms, sh.y0)[0];
+    shapes.splice(idx, 1);
+    const x = toISO(ms);
+    shapes.push({type: "line", name: "tool-vline", xref: "x", x0: x, x1: x,
+                 yref: "paper", y0: 0, y1: 1,
+                 line: {color: "#f59e0b", width: 1.2, dash: "dot"}});
+    const anns = curAnns();
+    anns.push({name: "tool-vline", x: x, xref: "x", y: 1, yref: "paper",
+               yanchor: "bottom", showarrow: false,
+               text: new Date(ms).toISOString().slice(0, 10),
+               font: {size: 9, color: "#f59e0b"}, bgcolor: "rgba(19,23,34,.75)"});
+    applyDraw(shapes, anns);
+    setTool(null);
+  }
+
+  function makeCross(sh, shapes, idx) {          // 크로스라인 = 수평선 + 수직선 세트
+    let ms = toMs(sh.x0), y = sh.y0;
+    if (magnet) { const p = snapPoint(ms, y); ms = p[0]; y = p[1]; }
+    shapes.splice(idx, 1);
+    const x = toISO(ms);
+    shapes.push({type: "line", name: "tool-cross", xref: "paper", x0: 0, x1: 1,
+                 yref: "y", y0: y, y1: y, line: {color: "#8b93a7", width: 1, dash: "dot"}});
+    shapes.push({type: "line", name: "tool-cross", xref: "x", x0: x, x1: x,
+                 yref: "paper", y0: 0, y1: 1, line: {color: "#8b93a7", width: 1, dash: "dot"}});
+    const anns = curAnns();
+    anns.push({name: "tool-cross", xref: "paper", x: 1, xanchor: "left", y: y, yref: "y",
+               showarrow: false, text: fmtVal(y),
+               font: {size: 9, color: "#8b93a7"}, bgcolor: "rgba(19,23,34,.75)"});
+    applyDraw(shapes, anns);
+    setTool(null);
+  }
+
+  function makeRay(sh, shapes, idx, both) {      // 레이/연장선 — (ms,y) 기울기로 외삽
+    let x0 = toMs(sh.x0), y0 = sh.y0, x1 = toMs(sh.x1), y1 = sh.y1;
+    if (magnet) { [x0, y0] = snapPoint(x0, y0); [x1, y1] = snapPoint(x1, y1); }
+    if (x1 === x0) { setTool(null); return; }    // 세로 = 기울기 무한 — 수직선 도구 안내
+    if (x1 < x0) { const t = [x0, y0]; [x0, y0] = [x1, y1]; [x1, y1] = t; }
+    const slope = (y1 - y0) / (x1 - x0);
+    const lastMs = bounds.length ? bounds[bounds.length - 1][0] : x1;
+    const span = Math.max(lastMs - (bounds.length ? bounds[0][0] : x0), x1 - x0);
+    const xr = lastMs + span * 0.25;             // 오른쪽 여유 연장 (팬 시에도 길게)
+    const yr = y0 + slope * (xr - x0);
+    let xs = x0, ys = y0;
+    if (both) { xs = x0 - (x1 - x0) - span * 0.25; ys = y0 + slope * (xs - x0); }
+    shapes.splice(idx, 1);
+    shapes.push({type: "line", name: both ? "tool-ext" : "tool-ray", xref: "x",
+                 x0: toISO(xs), x1: toISO(xr), yref: "y", y0: ys, y1: yr,
+                 line: {color: "#2f81f7", width: 1.4}});
+    applyDraw(shapes, curAnns());
+    setTool(null);
+  }
+
+  function makeText(sh, shapes, idx) {           // 메모 — 시작점에 텍스트 주석
+    let ms = toMs(sh.x0), y = sh.y0;
+    if (magnet) { const p = snapPoint(ms, y); ms = p[0]; y = p[1]; }
+    shapes.splice(idx, 1);
+    let txt = "";
+    try { txt = (window.prompt("메모 내용", "") || "").slice(0, 60); } catch (e) {}
+    const anns = curAnns();
+    if (txt)
+      anns.push({name: "tool-note", x: toISO(ms), y: y, yref: "y", showarrow: true,
+                 arrowhead: 2, ax: 0, ay: -28, text: txt,
+                 font: {size: 11, color: "#e8e8ea"}, bgcolor: "#2a2e39",
+                 bordercolor: "#3d4354", borderpad: 4});
+    applyDraw(shapes, anns);
+    setTool(null);
+  }
+
+  function makePosition(sh, shapes, idx, dir) {  // 롱/숏 포지션 — RR 박스 (TV 스타일)
+    let y0 = sh.y0, y1 = sh.y1;                  // 드래그 시작=진입, 끝=목표
+    let x0 = toMs(sh.x0), x1 = toMs(sh.x1);
+    if (magnet) { [x0, y0] = snapPoint(x0, y0); [x1, y1] = snapPoint(x1, y1); }
+    const entry = fromY(y0), target = fromY(y1);
+    if (!entry || entry === target) { setTool(null); return; }
+    // 방향 가드 — 롱은 목표>진입, 숏은 목표<진입. 반대로 그으면 목표=손절 넌센스가
+    // 되므로(적대 리뷰 확정) 도형을 버리고 힌트만 갱신, 도구는 유지해 재시도.
+    if ((dir === "long") !== (target > entry)) {
+      shapes.splice(idx, 1);
+      applyDraw(shapes, curAnns());
+      document.getElementById("tool-hint").textContent =
+        dir === "long" ? "롱은 진입에서 위(목표)로 드래그하세요" : "숏은 진입에서 아래로 드래그하세요";
+      return;
+    }
+    // 손절 = **축 공간** 대칭 RR 1:1 — 선형축에선 가격 대칭(종전과 동일), 로그축에선
+    // 퍼센트 대칭이라 손절가가 0 이하(log10=NaN)로 떨어질 수 없다 (적대 리뷰 확정 픽스)
+    const stopAx = y0 - (y1 - y0);
+    const stop = fromY(stopAx);
+    const xa = toISO(Math.min(x0, x1)), xb = toISO(Math.max(x0, x1));
+    shapes.splice(idx, 1);
+    shapes.push({type: "rect", name: "tool-pos", xref: "x", x0: xa, x1: xb,   // 보상 존
+                 yref: "y", y0: y0, y1: y1,
+                 line: {color: "#26a69a", width: 1}, fillcolor: "#26a69a22"});
+    shapes.push({type: "rect", name: "tool-pos", xref: "x", x0: xa, x1: xb,   // 위험 존
+                 yref: "y", y0: y0, y1: stopAx,
+                 line: {color: "#ef5350", width: 1}, fillcolor: "#ef535022"});
+    const pctT = entry ? ((target / entry - 1) * 100) : 0;
+    const pctS = entry ? ((stop / entry - 1) * 100) : 0;
+    const anns = curAnns();
+    anns.push({name: "tool-pos", x: toISO((Math.min(x0, x1) + Math.max(x0, x1)) / 2),
+               y: y1, yref: "y", yanchor: dir === "long" ? "bottom" : "top", showarrow: false,
+               text: "<b>" + (dir === "long" ? "롱" : "숏") + "</b> 진입 " + fmtVal(y0)
+                     + " · 목표 " + fmtVal(y1) + " (" + (pctT >= 0 ? "+" : "") + pctT.toFixed(2)
+                     + "%) · 손절 " + fmtVal(stopAx) + " (" + (pctS >= 0 ? "+" : "")
+                     + pctS.toFixed(2) + "%) · RR 1:1",
+               font: {size: 10, color: "#ffffff"},
+               bgcolor: dir === "long" ? "#26a69a" : "#ef5350", borderpad: 3, opacity: 0.92});
     applyDraw(shapes, anns);
     setTool(null);
   }
@@ -618,8 +767,15 @@ _TEMPLATE = r"""
     // 서버 도형(평단선·현재가선)은 사용자 편집/자석 대상 아님 — 스냅이 평단을 움직이면 안 됨
     if (idx < baseShapeCount && !String(sh.name || "").startsWith("tool-")) return true;
     if (isNew && tool === "hline" && sh.type === "line") { makeHline(sh, shapes, idx); return true; }
+    if (isNew && tool === "vline" && sh.type === "line") { makeVline(sh, shapes, idx); return true; }
+    if (isNew && tool === "cross" && sh.type === "line") { makeCross(sh, shapes, idx); return true; }
+    if (isNew && tool === "ray" && sh.type === "line") { makeRay(sh, shapes, idx, false); return true; }
+    if (isNew && tool === "ext" && sh.type === "line") { makeRay(sh, shapes, idx, true); return true; }
+    if (isNew && tool === "text" && sh.type === "line") { makeText(sh, shapes, idx); return true; }
     if (isNew && tool === "fib" && sh.type === "line") { makeFib(sh, shapes, idx); return true; }
     if (isNew && tool === "meas" && sh.type === "rect") { makeMeasure(sh, shapes, idx); return true; }
+    if (isNew && tool === "long" && sh.type === "rect") { makePosition(sh, shapes, idx, "long"); return true; }
+    if (isNew && tool === "short" && sh.type === "rect") { makePosition(sh, shapes, idx, "short"); return true; }
     if (magnet && (sh.name || "") !== "tool-meas" && !String(sh.name || "").startsWith("tool-fib"))
       return snapShape(sh, shapes) || true;
     return true;
@@ -629,9 +785,8 @@ _TEMPLATE = r"""
     magnet = !magnet;
     ev.target.classList.toggle("on", magnet);
   };
-  document.getElementById("bt-hline").onclick = () => setTool("hline");
-  document.getElementById("bt-fib").onclick = () => setTool("fib");
-  document.getElementById("bt-meas").onclick = () => setTool("meas");
+  for (const [id, name] of TOOL_BTNS)
+    document.getElementById(id).onclick = () => setTool(name);
   document.getElementById("bt-clear").onclick = () => {   // 서버 오버레이만 남기고 제거
     // 도형 = 보존 복사본으로 되돌림(직접 그린 것·도구 도형 모두 제거·인덱스 밀림 무관).
     // 주석 = 이름 필터 (tn-hi/tn-lo 콜아웃은 팬 중 갱신되므로 복사본 복원 금지)
@@ -740,7 +895,8 @@ def pannable_chart_html(fig, hist, *, height: int = 460, view_days=None,
                         fit_viewport: bool = False,
                         pct_mode: bool = False,
                         y_log: bool = False,
-                        store_key: str | None = None) -> str:
+                        store_key: str | None = None,
+                        dock: bool = False) -> str:
     """fig(charts.price_chart 산출) → 자동 y 리스케일·드로잉 도구·인차트 마커 상세 임베드 HTML.
 
     bounds_json — y 맞춤 프레임 오버라이드 (비교 모드: compare_bounds_json 의 % 프레임).
@@ -748,6 +904,7 @@ def pannable_chart_html(fig, hist, *, height: int = 460, view_days=None,
     y_log — 로그 스케일: 도형/축 y 좌표가 log10 공간 (스냅·측정이 실가격으로 환산).
     store_key — 드로잉 영속화 localStorage 키(예: "NVDA:1d:lin"). None=비영속.
                 스케일(lin/log/pct)을 키에 포함해야 좌표계 혼선이 없다(호출부 책임).
+    dock — True 면 도구바를 좌측 세로 독으로 (풀뷰 — TradingView 배치).
     """
     bounds = bounds_json if bounds_json is not None else price_bounds_json(hist)
     config = json.dumps({
@@ -769,6 +926,7 @@ def pannable_chart_html(fig, hist, *, height: int = 460, view_days=None,
             .replace("@@Y_LOG@@", json.dumps(bool(y_log)))
             .replace("@@LAST_CLOSE@@", json.dumps(last_close))
             .replace("@@STORE_KEY@@", json.dumps(store_key))
+            .replace("@@DOCK@@", json.dumps(bool(dock)))
             .replace("@@CONFIG@@", config)
             .replace("@@BOUNDS@@", bounds)
             .replace("@@FIG@@", fig.to_json()))       # fig JSON 은 마지막 (토큰 오염 차단)

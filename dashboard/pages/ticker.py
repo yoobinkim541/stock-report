@@ -50,6 +50,7 @@ def render():
     # 매크로·지수 자산 — 주식 섹션(호가·진입레벨·밸류·재무·포지션관리) 대신 전용 뷰
     if ticker_names.is_macro(ticker):
         _macro_sections(ticker, hist)
+        _llm_related_section(ticker)
         return
 
     # 실시간 호가 — 접이식(기본 접힘)·8초 자동갱신 (차트 우선 레이아웃)
@@ -66,6 +67,7 @@ def render():
     else:
         _analysis_snapshot(ticker)
         _detail_sections(ticker, yf_price)
+    _llm_related_section(ticker)
     _manage_position(ticker, cur, pos)
 
 
@@ -177,6 +179,51 @@ def _price_chart_frag(ticker, hist, avg_cost, trades, fullscreen: bool = False):
     진입레벨·분석 섹션)가 재실행돼 체감 버벅임의 주원인이 된다 (H-series UX 모델 복원).
     """
     _price_chart(ticker, hist, avg_cost, trades, fullscreen)
+
+
+@st.fragment
+def _llm_related_section(ticker):
+    """🤖 AI 연관 종목 — LLM 아이디어 (버튼 게이트·표시 전용·환각은 provider 가 폐기).
+
+    fragment — 추천/이동 버튼이 페이지 전체 rerun 을 유발하지 않음. 정직 라벨 필수.
+    """
+    with st.expander("🤖 AI 연관 종목 추천"):
+        st.caption("LLM 아이디어 — **검증 안 된 참고용·매매신호 아님** · 응답 티커는 "
+                   "화이트리스트 검증(환각 폐기) · 24시간 캐시")
+        res_key = f"_llmrel_res_{ticker}"
+        if res_key not in st.session_state:
+            if st.button("🤖 추천 받기", key=f"_llmrel_btn_{ticker}",
+                         help="LLM 1회 호출 (최대 60초·이후 24h 캐시)"):
+                with st.spinner("LLM 연관 종목 생성 중… (최대 60초)"):
+                    st.session_state[res_key] = cached.llm_related(ticker)
+                st.rerun(scope="fragment")
+            return
+        # 결과는 세션에 고정 — 캐시 만료 후 리런이 버튼 없이 LLM 을 재호출하는 누수 방지
+        items, status = st.session_state[res_key]
+        if not items:
+            msg = {"disabled": "DASH_LLM_RELATED_ENABLED=0 — 비활성화됨",
+                   "empty": "LLM 이 검증 통과 종목을 내지 못했습니다 — 잠시 후 다시 시도"}
+            st.info(msg.get(status, f"추천 실패 — {status}"))
+            if st.button("다시 시도", key=f"_llmrel_retry_{ticker}"):
+                cached.llm_related.clear()
+                st.session_state.pop(res_key, None)
+                st.rerun(scope="fragment")
+            return
+        for it in items:
+            c1, c2, c3 = st.columns([2.2, 3, 0.9], vertical_alignment="center")
+            c1.write(f"**{ticker_names.label(it['ticker'], maxlen=24)}** "
+                     f"<span style='color:{theme.MUTED};font-size:.72rem'>"
+                     f"{it.get('relation', '')}</span>", unsafe_allow_html=True)
+            c2.caption(it.get("reason", ""))
+            if c3.button("분석 →", key=f"_llmrel_nav_{ticker}_{it['ticker']}"):
+                st.session_state["ticker"] = it["ticker"]
+                _tp = st.session_state.get("_ticker_page")
+                if _tp is not None:
+                    st.switch_page(_tp)
+                else:
+                    st.rerun()
+        st.caption(f"상태: {'디스크 캐시' if status == 'cached' else 'LLM 신규 생성'} · "
+                   "표시·아이디어용 — 투자 판단·자동 반영 없음")
 
 
 def _macro_sections(ticker, hist):
@@ -490,7 +537,7 @@ def _price_chart(ticker, hist, avg_cost, trades, fullscreen: bool = False):
                 fig, df, height=h, view_days=view_days,
                 vol_axis="yaxis2" if show_vol else None, bounds_json=_bj,
                 fit_viewport=fullscreen, pct_mode=bool(compare), y_log=use_log,
-                store_key=_sk),
+                store_key=_sk, dock=fullscreen),
             height=h + 164)
     st.caption("🖱️ 드래그=이동(y축 자동 맞춤) · 휠=확대/축소 · 더블클릭=원위치 · "
                "✏️ 모드바 직접 그리기(선·자유곡선·박스)·지우개 + 차트 위 도구바: "

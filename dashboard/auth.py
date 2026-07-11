@@ -14,6 +14,7 @@ from __future__ import annotations
 import hashlib
 import hmac
 import os
+import re
 import secrets as _secrets
 import time
 
@@ -64,6 +65,10 @@ def verify_token(token: str, secret: str | None, salt: str,
     if not secret or not token or "." not in str(token):
         return False
     exp_s, _, sig = str(token).partition(".")
+    # 서명 형식 선검증 — compare_digest 는 비ASCII 문자열에 TypeError 를 던진다.
+    # 임의(손상·조작) 쿠키가 로그인 게이트 자체를 크래시시키면 안 됨 (적대 리뷰 확정 DoS)
+    if not re.fullmatch(r"[0-9a-f]{64}", sig or ""):
+        return False
     try:
         exp = int(exp_s)
     except ValueError:
@@ -72,7 +77,10 @@ def verify_token(token: str, secret: str | None, salt: str,
         return False
     want = hmac.new(_token_key(secret, salt), f"tn-auth:{exp}".encode(),
                     hashlib.sha256).hexdigest()
-    return hmac.compare_digest(sig, want)
+    try:
+        return hmac.compare_digest(sig, want)
+    except TypeError:
+        return False
 
 
 def _set_cookie_html(token: str, ttl_s: int = TOKEN_TTL_S) -> str:

@@ -191,6 +191,10 @@ def test_auth_cookie_token_roundtrip():
         assert auth.verify_token(bad, "pw", "salt", now=now) is False
     # 토큰에 비밀번호 평문 미포함 + 쿠키 안전 문자만
     assert "pw" not in tok and re.fullmatch(r"\d+\.[0-9a-f]{64}", tok)
+    # 비ASCII/임의 쿠키값이 로그인 게이트를 크래시시키면 안 됨 (compare_digest TypeError DoS)
+    for weird in ("9999999999.ábc", "9999999999." + "가" * 64, "9999999999." + "A" * 64,
+                  "9999999999." + "0" * 63):
+        assert auth.verify_token(weird, "pw", "salt", now=now) is False   # no raise
 
 
 def test_auth_cookie_html_injection_safe():
@@ -520,6 +524,65 @@ def test_price_alerts_cross_process_serialized(tmp_path):
     assert chk.returncode == 0, chk.stderr[-800:]
     n = int(chk.stdout.strip().splitlines()[-1])
     assert n == 30, f"lost update! {n}/30"
+
+
+def test_llm_related_parse_hallucination_defense():
+    """🤖 연관 종목 파서 — 환각 티커 폐기·자기 제외·enum 강등·중복 제거·펜스 허용."""
+    from providers import llm_related
+    raw = """다음과 같이 추천합니다:
+```json
+[
+ {"ticker": "AMD", "relation": "경쟁사", "reason": "GPU 직접 경쟁"},
+ {"ticker": "FAKE123XYZ", "relation": "경쟁사", "reason": "환각"},
+ {"ticker": "<script>", "relation": "경쟁사", "reason": "주입"},
+ {"ticker": "NVDA", "relation": "경쟁사", "reason": "자기 자신"},
+ {"ticker": "amd", "relation": "경쟁사", "reason": "중복(소문자)"},
+ {"ticker": "005930.KS", "relation": "이상한관계", "reason": "국내 — enum 밖 관계"},
+ {"ticker": "TSM", "relation": "공급망", "reason": "파운드리"}
+]
+```"""
+    out = llm_related.parse_related(raw, "NVDA")
+    tks = [o["ticker"] for o in out]
+    assert "AMD" in tks and "TSM" in tks and "005930.KS" in tks
+    assert "NVDA" not in tks and not any("FAKE" in t or "<" in t for t in tks)
+    assert tks.count("AMD") == 1                              # 중복 제거
+    kr = next(o for o in out if o["ticker"] == "005930.KS")
+    assert kr["relation"] == "연관"                            # enum 밖 → 강등
+    # 잡문·비배열 graceful
+    assert llm_related.parse_related("추천 없음", "NVDA") == []
+    assert llm_related.parse_related('{"ticker": "AMD"}', "NVDA") == []
+    assert llm_related.parse_related("", "NVDA") == []
+
+
+def test_llm_related_runner_and_cache(tmp_path, monkeypatch):
+    """🤖 연관 종목 러너 — 정상 호출→캐시 적재→2회차 cached, 실패·비활성 graceful."""
+    from providers import llm_related
+    monkeypatch.setattr(llm_related, "CACHE_DIR", tmp_path)
+    payload = '[{"ticker": "AMD", "relation": "경쟁사", "reason": "GPU"}]'
+
+    class _R:
+        returncode = 0
+        stdout = payload
+        stderr = ""
+
+    calls = []
+
+    def runner(cmd, **kw):
+        calls.append(cmd)
+        assert "hermes" == cmd[0] and "-Q" in cmd
+        return _R()
+
+    items, status = llm_related.related_tickers("NVDA", name="NVIDIA", runner=runner)
+    assert status == "ok" and items[0]["ticker"] == "AMD" and len(calls) == 1
+    items2, status2 = llm_related.related_tickers("NVDA", runner=runner)
+    assert status2 == "cached" and items2 == items and len(calls) == 1   # 디스크 캐시 히트
+
+    def boom(cmd, **kw):
+        raise RuntimeError("no hermes")
+
+    assert llm_related.related_tickers("MSFT", runner=boom)[1].startswith("call failed")
+    monkeypatch.setenv("DASH_LLM_RELATED_ENABLED", "0")
+    assert llm_related.related_tickers("MSFT", runner=runner)[1] == "disabled"
 
 
 def test_is_macro_classification_and_units():
