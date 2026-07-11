@@ -803,6 +803,35 @@ def test_price_chart_events_log_scale_zones_converted():
     assert 90 < float(ev.y[0]) < 210                             # 트레이스 raw
 
 
+def test_price_chart_fund_eps_panel():
+    """분기 EPS 서브패널 — beat 초록/miss 빨강 바 + 예상 마커·빈 데이터 무패널·비교 차단."""
+    hist = _ohlcv()
+    eps = [{"date": "2024-03-15", "eps_est": 2.0, "eps_actual": 2.3, "surprise_pct": 15.0},
+           {"date": "2024-06-14", "eps_est": 2.1, "eps_actual": 1.9, "surprise_pct": -9.5},
+           {"date": "2024-09-13", "eps_est": None, "eps_actual": 2.5, "surprise_pct": None},
+           {"date": None, "eps_est": 1.0, "eps_actual": 1.0, "surprise_pct": 0.0},   # 무발표일 스킵
+           {"date": "2024-12-13", "eps_est": 2.2, "eps_actual": None, "surprise_pct": None}]  # 무실적 스킵
+    fig = charts.price_chart(hist, "T", show_volume=True, fund_eps=eps)
+    bars = [tr for tr in fig.data if getattr(tr, "name", "") == "분기 EPS"]
+    assert len(bars) == 1 and len(bars[0].x) == 3                 # 유효 3행만
+    cols = list(bars[0].marker.color)
+    assert cols[0] == charts._GREEN and cols[1] == charts._RED    # beat/miss 색
+    assert cols[2] == charts._GREEN                               # 서프라이즈 None → 중립(≥0) 초록
+    est = [tr for tr in fig.data if getattr(tr, "name", "") == "예상 EPS"]
+    assert len(est) == 1 and len(est[0].x) == 2                   # est 있는 행만
+    assert any("+15.0%" in h for h in bars[0].customdata)
+    # 패널 행이 실제로 늘었는지 (가격+거래량+EPS = yaxis3 존재)
+    assert fig.layout.yaxis3 is not None
+    # 빈/무효 데이터 → 패널 없음
+    fig0 = charts.price_chart(hist, "T", show_volume=True, fund_eps=[])
+    assert not [tr for tr in fig0.data if getattr(tr, "name", "") == "분기 EPS"]
+    # 비교 모드 → 자동 차단
+    import pandas as pd
+    cmp_s = pd.Series(hist["Close"].values * 1.1, index=hist.index)
+    figc = charts.price_chart(hist, "T", compare={"C": cmp_s}, fund_eps=eps)
+    assert not [tr for tr in figc.data if getattr(tr, "name", "") == "분기 EPS"]
+
+
 def test_heikin_ashi_transform():
     """하이킨아시 — 정의 검증(HA종가·재귀 시가·고저 포섭)·Volume 보존·graceful."""
     hist = _ohlcv(50)
