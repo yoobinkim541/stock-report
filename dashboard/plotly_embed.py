@@ -125,6 +125,16 @@ _TEMPLATE = r"""
   <button id="bt-avwap" class="tbtn" title="차트에 짧게 긋기 = 그 봉부터 고정(앵커드) VWAP">⚓ 고정VWAP</button>
   <button id="bt-vprof" class="tbtn" title="구간을 박스로 드래그 = 가격대별 거래량 프로필 + POC">📊 볼륨프로필</button>
   <span class="tsep"></span>
+  <button id="bt-chan" class="tbtn" title="① 기준선 긋기 ② 반대편에서 짧게 긋기 = 평행 채널">∥ 채널</button>
+  <button id="bt-fork" class="tbtn" title="① P0→P1 긋기 ② P2에서 짧게 긋기 = 앤드류스 피치포크">🍴 피치포크</button>
+  <button id="bt-gann" class="tbtn" title="1×1 기준선을 그으면 갠 팬(1/8~8배 레이 9개)">🪜 갠 팬</button>
+  <button id="bt-fibext" class="tbtn" title="① A→B 파동 긋기 ② C에서 짧게 긋기 = 피보나치 확장 레벨">𝐄 피보확장</button>
+  <button id="bt-fibtz" class="tbtn" title="짧게 긋기 = 앵커 봉부터 피보나치 봉수(1·2·3·5·8…) 수직선">⏱ 타임존</button>
+  <button id="bt-cycle" class="tbtn" title="한 주기 폭을 그으면 등간격 순환 수직선 반복">🌀 순환선</button>
+  <button id="bt-ell" class="tbtn" title="점마다 짧게 긋기(1~5·A·B·C) · 버튼 재클릭=완료">🔤 엘리엇</button>
+  <button id="bt-xabcd" class="tbtn" title="점 5개 짧게 긋기(X·A·B·C·D) — 5점에서 자동 완료">◇ XABCD</button>
+  <button id="bt-sess" class="tbtn" title="최근 10세션 가격대별 거래량 (인트라데이 5분·1시간 전용)">🧱 세션VP</button>
+  <span class="tsep"></span>
   <button id="bt-replay" class="tbtn" title="과거 시점으로 되감아 한 봉씩 재생 — 매매 연습 (미래 봉 가림)">⏪ 리플레이</button>
   <button id="bt-clear" class="tbtn" title="직접 그린 도형 전체 제거">🗑 지우기</button>
   <span id="tool-hint"></span>
@@ -513,7 +523,10 @@ _TEMPLATE = r"""
                      ["bt-ray", "ray"], ["bt-ext", "ext"], ["bt-fib", "fib"],
                      ["bt-meas", "meas"], ["bt-long", "long"], ["bt-short", "short"],
                      ["bt-text", "text"], ["bt-reg", "reg"], ["bt-avwap", "avwap"],
-                     ["bt-vprof", "vprof"]];
+                     ["bt-vprof", "vprof"], ["bt-chan", "chan"], ["bt-fork", "fork"],
+                     ["bt-gann", "gann"], ["bt-fibext", "fibext"], ["bt-fibtz", "fibtz"],
+                     ["bt-cycle", "cycle"], ["bt-ell", "ell"], ["bt-xabcd", "xabcd"]];
+  let pending = null;                            // 다단계 제스처 상태 {kind, pts:[[ms,y],...]}
 
   function setTool(next) {                       // 도구 토글 (상호 배타) + dragmode 전환
     // 고정VWAP·볼륨프로필은 실가격×거래량 계산 — 비교(%) 프레임(4열 bounds)에선 불가
@@ -522,9 +535,12 @@ _TEMPLATE = r"""
       return;
     }
     tool = (tool === next) ? null : next;
+    pending = null;                              // 도구 전환/해제 = 다단계 진행 취소(프리뷰 유지)
     const dm = {hline: "drawline", vline: "drawline", cross: "drawline",
                 ray: "drawline", ext: "drawline", fib: "drawline", text: "drawline",
-                avwap: "drawline",
+                avwap: "drawline", chan: "drawline", fork: "drawline", gann: "drawline",
+                fibext: "drawline", fibtz: "drawline", cycle: "drawline",
+                ell: "drawline", xabcd: "drawline",
                 meas: "drawrect", long: "drawrect", short: "drawrect",
                 reg: "drawrect", vprof: "drawrect"}[tool] || "pan";
     guard++;
@@ -545,6 +561,14 @@ _TEMPLATE = r"""
       reg: "회귀 구간을 박스로 드래그 = 추세선 ±2σ 채널",
       avwap: "차트에 짧게 긋기 = 그 봉부터 고정 VWAP",
       vprof: "프로필 구간을 박스로 드래그 = 가격대별 거래량 + POC",
+      chan: "① 기준선을 그으세요",
+      fork: "① P0→P1 을 그으세요",
+      gann: "1×1 기준선을 그으면 갠 팬 레이 9개",
+      fibext: "① 파동 A→B 를 그으세요",
+      fibtz: "짧게 긋기 = 앵커 봉부터 피보 봉수 수직선",
+      cycle: "한 주기 폭을 그으면 등간격 반복",
+      ell: "점마다 짧게 긋기 (1~5·A·B·C) · 버튼 재클릭=완료",
+      xabcd: "점 5개 짧게 긋기 (X·A·B·C·D)",
     }[tool] || "";
   }
 
@@ -683,6 +707,201 @@ _TEMPLATE = r"""
                bgcolor: dir === "long" ? "#26a69a" : "#ef5350", borderpad: 3, opacity: 0.92});
     applyDraw(shapes, anns);
     setTool(null);
+  }
+
+  function makeChan(sh, shapes, idx) {           // ∥ 평행 채널 — ①기준선 ②폭(짧게 긋기)
+    if (!pending || pending.kind !== "chan") {
+      let x0 = toMs(sh.x0), y0 = sh.y0, x1 = toMs(sh.x1), y1 = sh.y1;
+      if (magnet) { [x0, y0] = snapPoint(x0, y0); [x1, y1] = snapPoint(x1, y1); }
+      shapes.splice(idx, 1);
+      if (x1 === x0) { applyDraw(shapes, curAnns()); return; }
+      if (x1 < x0) { const t = [x0, y0]; [x0, y0] = [x1, y1]; [x1, y1] = t; }
+      shapes.push({type: "line", name: "tool-chan", xref: "x", x0: toISO(x0), x1: toISO(x1),
+                   yref: "y", y0: y0, y1: y1, line: {color: "#2f81f7", width: 1.4}});
+      pending = {kind: "chan", pts: [[x0, y0], [x1, y1]]};
+      applyDraw(shapes, curAnns());
+      document.getElementById("tool-hint").textContent = "② 폭: 채널 반대편 지점에서 짧게 긋기";
+      return;                                    // 도구 유지 — 2단계
+    }
+    const bx0 = pending.pts[0][0], by0 = pending.pts[0][1];
+    const bx1 = pending.pts[1][0], by1 = pending.pts[1][1];
+    let px = toMs(sh.x0), py = sh.y0;
+    if (magnet) { const p = snapPoint(px, py); px = p[0]; py = p[1]; }
+    shapes.splice(idx, 1);
+    const slope = (by1 - by0) / (bx1 - bx0);
+    const off = py - (by0 + slope * (px - bx0));   // 기준선 대비 세로 오프셋
+    shapes.push({type: "line", name: "tool-chan", xref: "x", x0: toISO(bx0), x1: toISO(bx1),
+                 yref: "y", y0: by0 + off, y1: by1 + off, line: {color: "#2f81f7", width: 1.4}});
+    shapes.push({type: "line", name: "tool-chan", xref: "x", x0: toISO(bx0), x1: toISO(bx1),
+                 yref: "y", y0: by0 + off / 2, y1: by1 + off / 2,
+                 line: {color: "#2f81f7", width: 0.8, dash: "dot"}});
+    pending = null;
+    applyDraw(shapes, curAnns());
+    setTool(null);
+  }
+
+  function makeFork(sh, shapes, idx) {           // 🍴 앤드류스 피치포크 — ①P0→P1 ②P2
+    if (!pending || pending.kind !== "fork") {
+      let x0 = toMs(sh.x0), y0 = sh.y0, x1 = toMs(sh.x1), y1 = sh.y1;
+      if (magnet) { [x0, y0] = snapPoint(x0, y0); [x1, y1] = snapPoint(x1, y1); }
+      shapes.splice(idx, 1);
+      shapes.push({type: "line", name: "tool-fork-pre", xref: "x", x0: toISO(x0), x1: toISO(x1),
+                   yref: "y", y0: y0, y1: y1, line: {color: "#e879f9", width: 1, dash: "dot"}});
+      pending = {kind: "fork", pts: [[x0, y0], [x1, y1]]};
+      applyDraw(shapes, curAnns());
+      document.getElementById("tool-hint").textContent = "② P2(세 번째 피벗)에서 짧게 긋기";
+      return;
+    }
+    const x0 = pending.pts[0][0], y0 = pending.pts[0][1];
+    const x1 = pending.pts[1][0], y1 = pending.pts[1][1];
+    let x2 = toMs(sh.x0), y2 = sh.y0;
+    if (magnet) { const p = snapPoint(x2, y2); x2 = p[0]; y2 = p[1]; }
+    shapes.splice(idx, 1);
+    shapes = shapes.filter((x) => (x.name || "") !== "tool-fork-pre");   // 프리뷰 제거
+    const mx = (x1 + x2) / 2, my = (y1 + y2) / 2;
+    pending = null;
+    if (mx === x0) { applyDraw(shapes, curAnns()); setTool(null); return; }
+    const slope = (my - y0) / (mx - x0);
+    const lastMs = bounds.length ? bounds[bounds.length - 1][0] : mx;
+    const span = Math.max(lastMs - (bounds.length ? bounds[0][0] : x0), Math.abs(mx - x0), 1);
+    const xr = Math.max(mx, lastMs) + span * 0.15;
+    const yAt = (bx, by) => by + slope * (xr - bx);
+    shapes.push({type: "line", name: "tool-fork", xref: "x", x0: toISO(x0), x1: toISO(xr),
+                 yref: "y", y0: y0, y1: yAt(x0, y0), line: {color: "#e879f9", width: 1.5}});
+    shapes.push({type: "line", name: "tool-fork", xref: "x", x0: toISO(x1), x1: toISO(xr),
+                 yref: "y", y0: y1, y1: yAt(x1, y1), line: {color: "#e879f9", width: 1}});
+    shapes.push({type: "line", name: "tool-fork", xref: "x", x0: toISO(x2), x1: toISO(xr),
+                 yref: "y", y0: y2, y1: yAt(x2, y2), line: {color: "#e879f9", width: 1}});
+    applyDraw(shapes, curAnns());
+    setTool(null);
+  }
+
+  function makeGann(sh, shapes, idx) {           // 🪜 갠 팬 — 그은 선 = 1×1, 배율 레이 9개
+    let x0 = toMs(sh.x0), y0 = sh.y0, x1 = toMs(sh.x1), y1 = sh.y1;
+    if (magnet) { [x0, y0] = snapPoint(x0, y0); [x1, y1] = snapPoint(x1, y1); }
+    shapes.splice(idx, 1);
+    if (x1 === x0) { applyDraw(shapes, curAnns()); setTool(null); return; }
+    if (x1 < x0) { const t = [x0, y0]; [x0, y0] = [x1, y1]; [x1, y1] = t; }
+    const s1 = (y1 - y0) / (x1 - x0);
+    const lastMs = bounds.length ? bounds[bounds.length - 1][0] : x1;
+    const xr = lastMs + Math.max(lastMs - (bounds.length ? bounds[0][0] : x0), x1 - x0, 1) * 0.15;
+    const anns = curAnns();
+    const RAYS = [[8, "8×1"], [4, ""], [3, ""], [2, "2×1"], [1, "1×1"],
+                  [1 / 2, "1×2"], [1 / 3, ""], [1 / 4, ""], [1 / 8, "1×8"]];
+    for (const rl of RAYS) {
+      const r = rl[0], lab = rl[1];
+      const ye = y0 + s1 * r * (xr - x0);
+      shapes.push({type: "line", name: "tool-gann", xref: "x", x0: toISO(x0), x1: toISO(xr),
+                   yref: "y", y0: y0, y1: ye,
+                   line: {color: r === 1 ? "#f59e0b" : "#8b93a7", width: r === 1 ? 1.6 : 0.8}});
+      if (lab) anns.push({name: "tool-gann", x: toISO(xr), xanchor: "left", y: ye, yref: "y",
+                          showarrow: false, text: lab, font: {size: 9, color: "#8b93a7"},
+                          bgcolor: "rgba(19,23,34,.7)"});
+    }
+    applyDraw(shapes, anns);
+    setTool(null);
+  }
+
+  const FIBEXT_LEVELS = [[0.382, "#ff9800"], [0.618, "#089981"], [1, "#4caf50"],
+                         [1.272, "#00bcd4"], [1.618, "#f23645"], [2, "#787b86"]];
+
+  function makeFibExt(sh, shapes, idx) {         // 𝐄 피보나치 확장 — ①A→B 파동 ②C
+    if (!pending || pending.kind !== "fibext") {
+      let x0 = toMs(sh.x0), y0 = sh.y0, x1 = toMs(sh.x1), y1 = sh.y1;
+      if (magnet) { [x0, y0] = snapPoint(x0, y0); [x1, y1] = snapPoint(x1, y1); }
+      shapes.splice(idx, 1);
+      shapes.push({type: "line", name: "tool-fibext-pre", xref: "x", x0: toISO(x0), x1: toISO(x1),
+                   yref: "y", y0: y0, y1: y1, line: {color: "#089981", width: 1, dash: "dot"}});
+      pending = {kind: "fibext", pts: [[x0, y0], [x1, y1]]};
+      applyDraw(shapes, curAnns());
+      document.getElementById("tool-hint").textContent = "② C(되돌림 끝)에서 짧게 긋기";
+      return;
+    }
+    const ay = pending.pts[0][1], by = pending.pts[1][1];
+    let cx = toMs(sh.x0), cy = sh.y0;
+    if (magnet) { const p = snapPoint(cx, cy); cx = p[0]; cy = p[1]; }
+    shapes.splice(idx, 1);
+    shapes = shapes.filter((x) => (x.name || "") !== "tool-fibext-pre");   // 프리뷰 제거
+    pending = null;
+    const wave = by - ay;                        // 파동 크기 (축 공간 — 로그축은 % 파동)
+    const lastMs = bounds.length ? bounds[bounds.length - 1][0] : cx;
+    const xr = lastMs + Math.max(lastMs - (bounds.length ? bounds[0][0] : cx), 1) * 0.10;
+    const anns = curAnns();
+    for (const lv of FIBEXT_LEVELS) {
+      const r = lv[0], c = lv[1];
+      const y = cy + wave * r;
+      shapes.push({type: "line", name: "tool-fibext", xref: "x", x0: toISO(cx), x1: toISO(xr),
+                   yref: "y", y0: y, y1: y, line: {color: c, width: 1}});
+      anns.push({name: "tool-fibext", x: toISO(xr), xanchor: "left", y: y, yref: "y",
+                 showarrow: false, text: r.toFixed(3) + " · " + fmtVal(y),
+                 font: {size: 9, color: c}, bgcolor: "rgba(19,23,34,.75)"});
+    }
+    applyDraw(shapes, anns);
+    setTool(null);
+  }
+
+  function makeFibTz(sh, shapes, idx) {          // ⏱ 피보나치 타임존 — 앵커+피보 봉수 수직선
+    let ms = toMs(sh.x0);
+    if (magnet) ms = snapPoint(ms, sh.y0)[0];
+    shapes.splice(idx, 1);
+    const i0 = Math.min(Math.max(lowerBound(ms), 0), bounds.length - 1);
+    const anns = curAnns();
+    for (const n of [0, 1, 2, 3, 5, 8, 13, 21, 34, 55]) {
+      const j = i0 + n;
+      if (j >= bounds.length) break;
+      const x = toISO(bounds[j][0]);
+      shapes.push({type: "line", name: "tool-fibtz", xref: "x", x0: x, x1: x,
+                   yref: "paper", y0: 0, y1: 1,
+                   line: {color: "#22d3ee", width: n === 0 ? 1.2 : 0.7, dash: "dot"}});
+      anns.push({name: "tool-fibtz", x: x, xref: "x", y: 1, yref: "paper", yanchor: "bottom",
+                 showarrow: false, text: String(n), font: {size: 8, color: "#22d3ee"}});
+    }
+    applyDraw(shapes, anns);
+    setTool(null);
+  }
+
+  function makeCycle(sh, shapes, idx) {          // 🌀 순환선 — 그은 폭 = 주기, 등간격 반복
+    let x0 = toMs(sh.x0), x1 = toMs(sh.x1);
+    if (magnet) { x0 = snapPoint(x0, sh.y0)[0]; x1 = snapPoint(x1, sh.y1)[0]; }
+    shapes.splice(idx, 1);
+    const step = Math.abs(x1 - x0);
+    if (!step) { applyDraw(shapes, curAnns()); setTool(null); return; }
+    const start = Math.min(x0, x1);
+    const end = (bounds.length ? bounds[bounds.length - 1][0] : Math.max(x0, x1)) + step;
+    let k = 0;
+    for (let x = start; x <= end && k < 40; x += step, k++)
+      shapes.push({type: "line", name: "tool-cycle", xref: "x", x0: toISO(x), x1: toISO(x),
+                   yref: "paper", y0: 0, y1: 1,
+                   line: {color: "#8b93a7", width: k === 0 ? 1.1 : 0.6, dash: "dot"}});
+    applyDraw(shapes, curAnns());
+    setTool(null);
+  }
+
+  function makePattern(sh, shapes, idx, kind) {  // 🔤 엘리엇 / ◇ XABCD — 점 누적 폴리라인
+    let px = toMs(sh.x0), py = sh.y0;
+    if (magnet) { const p = snapPoint(px, py); px = p[0]; py = p[1]; }
+    shapes.splice(idx, 1);
+    if (!pending || pending.kind !== kind) pending = {kind: kind, pts: []};
+    pending.pts.push([px, py]);
+    const labs = kind === "xabcd" ? ["X", "A", "B", "C", "D"]
+                                  : ["1", "2", "3", "4", "5", "A", "B", "C"];
+    const kept = shapes.filter((x) => (x.name || "") !== "tool-" + kind);   // 프리뷰 교체
+    const anns = curAnns().filter((a) => (a.name || "") !== "tool-" + kind);
+    const pts = pending.pts;
+    for (let i = 1; i < pts.length; i++)
+      kept.push({type: "line", name: "tool-" + kind, xref: "x",
+                 x0: toISO(pts[i - 1][0]), x1: toISO(pts[i][0]),
+                 yref: "y", y0: pts[i - 1][1], y1: pts[i][1],
+                 line: {color: "#26a69a", width: 1.3}});
+    for (let i = 0; i < pts.length; i++)
+      anns.push({name: "tool-" + kind, x: toISO(pts[i][0]), y: pts[i][1], yref: "y",
+                 yanchor: "bottom", showarrow: false,
+                 text: "<b>" + (labs[i] || "?") + "</b>",
+                 font: {size: 10, color: "#26a69a"}, bgcolor: "rgba(19,23,34,.8)"});
+    applyDraw(kept, anns);
+    if (pts.length >= labs.length) { pending = null; setTool(null); return; }
+    document.getElementById("tool-hint").textContent =
+      "다음 점(" + (labs[pts.length] || "") + ")에서 짧게 긋기 · 버튼 재클릭=완료";
   }
 
   const FIB_LEVELS = [[0, "#787b86"], [0.236, "#f23645"], [0.382, "#ff9800"], [0.5, "#4caf50"],
@@ -949,6 +1168,15 @@ _TEMPLATE = r"""
     if (isNew && tool === "reg" && sh.type === "rect") { makeReg(sh, shapes, idx); return true; }
     if (isNew && tool === "vprof" && sh.type === "rect") { makeVprof(sh, shapes, idx); return true; }
     if (isNew && tool === "avwap" && sh.type === "line") { makeAvwap(sh, shapes, idx); return true; }
+    if (isNew && tool === "chan" && sh.type === "line") { makeChan(sh, shapes, idx); return true; }
+    if (isNew && tool === "fork" && sh.type === "line") { makeFork(sh, shapes, idx); return true; }
+    if (isNew && tool === "gann" && sh.type === "line") { makeGann(sh, shapes, idx); return true; }
+    if (isNew && tool === "fibext" && sh.type === "line") { makeFibExt(sh, shapes, idx); return true; }
+    if (isNew && tool === "fibtz" && sh.type === "line") { makeFibTz(sh, shapes, idx); return true; }
+    if (isNew && tool === "cycle" && sh.type === "line") { makeCycle(sh, shapes, idx); return true; }
+    if (isNew && (tool === "ell" || tool === "xabcd") && sh.type === "line") {
+      makePattern(sh, shapes, idx, tool); return true;
+    }
     // 자석 스냅 제외: 측정·피보 + 회귀/볼륨프로필(파생 도형 — 스냅이 ±2σ·빈 정렬을 깨뜨림)
     if (magnet && (sh.name || "") !== "tool-meas" && !String(sh.name || "").startsWith("tool-fib")
         && !String(sh.name || "").startsWith("tool-reg")
@@ -963,6 +1191,58 @@ _TEMPLATE = r"""
   };
   for (const [id, name] of TOOL_BTNS)
     document.getElementById(id).onclick = () => setTool(name);
+  document.getElementById("bt-sess").onclick = () => {    // 🧱 세션별 볼륨 프로파일 (인트라데이)
+    if (!bounds.length || bounds[0].length < 6) {
+      document.getElementById("tool-hint").textContent = "세션 프로파일은 비교(%) 모드 제외";
+      return;
+    }
+    const gaps = [];                             // 봉 간격 중앙값으로 인트라데이 판정
+    for (let i = 1; i < Math.min(bounds.length, 60); i++) gaps.push(bounds[i][0] - bounds[i - 1][0]);
+    gaps.sort((a, b) => a - b);
+    const med = gaps[Math.floor(gaps.length / 2)] || 864e5;
+    if (med >= 864e5 * 0.9) {
+      document.getElementById("tool-hint").textContent =
+        "세션 프로파일은 인트라데이(5분·1시간) 봉 전용 — 봉 단위를 바꿔 주세요";
+      return;
+    }
+    const byDay = new Map();                     // UTC 일자별 세션 그룹
+    for (const b of bounds) {
+      const d = new Date(b[0]).toISOString().slice(0, 10);
+      if (!byDay.has(d)) byDay.set(d, []);
+      byDay.get(d).push(b);
+    }
+    const days = Array.from(byDay.keys()).slice(-10);   // 최근 10세션
+    const shapes = (gd.layout.shapes || []).filter((x) => (x.name || "") !== "tool-sess");
+    for (const d of days) {
+      const rows = byDay.get(d);
+      if (rows.length < 5) continue;
+      let pLo = Infinity, pHi = -Infinity;
+      for (const b of rows) { if (b[1] < pLo) pLo = b[1]; if (b[2] > pHi) pHi = b[2]; }
+      if (!(pHi > pLo)) continue;
+      const NB = 16, binH = (pHi - pLo) / NB, vols = new Array(NB).fill(0);
+      for (const b of rows) {                    // 고저가 걸친 빈에 거래량 균등 분배 (vprof 동일)
+        const v = b[3] || 0;
+        const b0 = Math.max(0, Math.min(NB - 1, Math.floor((b[1] - pLo) / binH)));
+        const b1 = Math.max(b0, Math.min(NB - 1, Math.floor((b[2] - pLo) / binH)));
+        const per = v / (b1 - b0 + 1);
+        for (let k = b0; k <= b1; k++) vols[k] += per;
+      }
+      const vmax = Math.max.apply(null, vols) || 1;
+      const s0 = rows[0][0], s1 = rows[rows.length - 1][0] + med;
+      for (let k = 0; k < NB; k++) {
+        if (!vols[k]) continue;
+        const w = (vols[k] / vmax) * (s1 - s0) * 0.6;
+        shapes.push({type: "rect", name: "tool-sess", xref: "x",
+                     x0: toISO(s0), x1: toISO(s0 + w), yref: "y",
+                     y0: toY(pLo + k * binH), y1: toY(pLo + (k + 1) * binH),
+                     line: {width: 0}, fillcolor: "rgba(47,129,247,0.16)"});
+      }
+    }
+    applyDraw(shapes, curAnns());
+    document.getElementById("tool-hint").textContent =
+      "세션 프로파일 — 최근 10세션 · 다시 클릭=갱신 · 🗑 지우기로 제거";
+  };
+
   document.getElementById("bt-clear").onclick = () => {   // 서버 오버레이만 남기고 제거
     // 도형 = 보존 복사본으로 되돌림(직접 그린 것·도구 도형 모두 제거·인덱스 밀림 무관).
     // 주석 = 이름 필터 (tn-hi/tn-lo 콜아웃은 팬 중 갱신되므로 복사본 복원 금지)
