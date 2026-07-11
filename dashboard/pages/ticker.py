@@ -67,6 +67,7 @@ def render():
     else:
         _analysis_snapshot(ticker)
         _detail_sections(ticker, yf_price)
+    _llm_analysis_section(ticker, hist, cur or yf_price)
     _llm_related_section(ticker)
     _manage_position(ticker, cur, pos)
 
@@ -317,6 +318,140 @@ def _compare_controls(ticker: str, tf: str, tf_label: str) -> tuple[list[str], b
             if tf != "1d":
                 st.caption("ℹ️ PR 기준은 일봉 전용 — 현재 봉 단위에선 TR(조정종가)로 표시")
         return active, bool(pr_mode and tf == "1d")
+
+
+def _llm_analysis_facts(ticker, hist, price) -> dict:
+    """🤖 LLM DATA 블록 — **이미 계산된 지표만** 조립 (추가 네트워크 0 · 결측 생략).
+
+    LLM 은 이 DATA 밖 수치를 근거로 못 쓰게 프롬프트가 지시 — 환각 노출면 축소.
+    """
+    def _r(v, nd=2):
+        # LLM 이 raw 정밀도("0.34013999")를 그대로 서술하는 것 방지 — 숫자만 반올림
+        try:
+            return round(float(v), nd)
+        except (TypeError, ValueError):
+            return v
+
+    f: dict = {"현재가": _r(price)}
+    try:
+        prof = data.series_profile(hist) or {}
+        f["기술"] = {"1개월수익률%": _r(prof.get("r1m"), 1), "3개월%": _r(prof.get("r3m"), 1),
+                    "1년%": _r(prof.get("r1y"), 1), "52주위치(0~1)": _r(prof.get("pos52")),
+                    "연변동성%": _r(prof.get("vol_ann"), 1),
+                    "200일선이격%": _r(prof.get("ma200_gap"), 1)}
+    except Exception:
+        pass
+    try:
+        v = cached.valuation(ticker) or {}
+        m = v.get("metrics") or {}
+        val = {k: _r(m.get(k)) for k in ("per", "pbr", "psr", "roe", "eps_ttm", "div_yield")
+               if m.get(k) is not None}
+        if val:
+            f["밸류에이션"] = val
+        c = v.get("consensus") or {}
+        cons = {k: _r(c.get(k)) for k in ("n_analysts", "target_mean", "revision_momentum")
+                if c.get(k) is not None}
+        if cons:
+            f["컨센서스"] = cons
+        h = (v.get("history") or [])[:4]
+        sur = [x.get("surprise_pct") for x in h if x.get("surprise_pct") is not None]
+        if sur:
+            f["최근실적서프라이즈%"] = sur
+    except Exception:
+        pass
+    try:
+        rows = ((cached.chart_fundamentals(ticker) or {}).get("quarterly") or [])[-4:]
+        if rows:
+            f["분기펀더멘털"] = [
+                {"분기": r.get("date"), "매출": charts.fmt_big(r.get("revenue")),
+                 "순이익": charts.fmt_big(r.get("net_income")),
+                 "순마진%": (round(r["margin"] * 100, 1)
+                          if r.get("margin") is not None else None)}
+                for r in rows]
+    except Exception:
+        pass
+    try:
+        acc = ((cached.institutional(ticker) or {}).get("accum") or {})
+        if acc.get("accum_score") is not None:
+            f["기관매집점수(0~10)"] = acc.get("accum_score")
+    except Exception:
+        pass
+    try:
+        tr = (cached.financials(ticker) or {}).get("trends") or {}
+        fin = {k: _r(tr.get(k), 3) for k in ("rev_yoy", "net_margin") if tr.get(k) is not None}
+        if fin:
+            f["연간추세"] = fin
+    except Exception:
+        pass
+    return f
+
+
+@st.fragment
+def _llm_analysis_section(ticker, hist, price):
+    """🤖 AI 종목 분석 — 계산된 지표(DATA) 한정 LLM 해설 (버튼 게이트·표시 전용).
+
+    처방(매수/매도·목표가)은 프롬프트 금지 + provider 금지어 필터 이중 차단.
+    강점/리스크 균형 강제(한쪽 비면 폐기) — 정직 라벨 필수.
+    """
+    import json as _j
+    with st.expander("🤖 AI 종목 분석"):
+        st.caption("LLM 해설 — **검증 안 된 참고용·매매신호 아님** · 이 시스템이 계산한 "
+                   "지표(DATA)만 근거로 서술 · 처방 금지어 필터·강점/리스크 균형 강제 · "
+                   "24시간 캐시")
+        def _frag_rerun():
+            # AppTest 의 버튼 클릭은 풀 rerun 이라 scope="fragment" 가 예외 — 폴백 (실브라우저는 fragment)
+            try:
+                st.rerun(scope="fragment")
+            except Exception:
+                st.rerun()
+
+        res_key = f"_llman_res_{ticker}"
+        facts_json = _j.dumps(_llm_analysis_facts(ticker, hist, price),
+                              ensure_ascii=False, sort_keys=True, default=str)
+        if res_key not in st.session_state:
+            if st.button("🤖 분석 생성", key=f"_llman_btn_{ticker}",
+                         help="LLM 1회 호출 (최대 90초·이후 24h 캐시)"):
+                with st.spinner("AI 분석 생성 중… (최대 90초)"):
+                    st.session_state[res_key] = cached.llm_analysis(ticker, facts_json)
+                # rerun 없이 같은 런에서 바로 아래 렌더로 폴스루
+            else:
+                return
+        ana, status = st.session_state[res_key]
+        if not ana:
+            msg = {"disabled": "DASH_LLM_ANALYSIS_ENABLED=0 — 비활성화됨",
+                   "empty": "LLM 이 검증(스키마·금지어·강점/리스크 균형) 통과 해설을 "
+                            "내지 못했습니다 — 다시 시도"}
+            st.info(msg.get(status, f"분석 실패 — {status}"))
+            if st.button("다시 시도", key=f"_llman_retry_{ticker}"):
+                cached.llm_analysis.clear()
+                st.session_state.pop(res_key, None)
+                _frag_rerun()
+            return
+        st.markdown(f"**{ana.get('summary', '')}**")
+        c1, c2 = st.columns(2)
+        with c1:
+            st.markdown("**💪 강점**")
+            for b in ana.get("bulls") or []:
+                st.markdown(f"- {b}")
+        with c2:
+            st.markdown("**⚠️ 리스크**")
+            for b in ana.get("bears") or []:
+                st.markdown(f"- {b}")
+        if ana.get("valuation"):
+            st.markdown(f"**밸류에이션** — {ana['valuation']}")
+        if ana.get("technicals"):
+            st.markdown(f"**기술적 위치** — {ana['technicals']}")
+        if ana.get("checkpoints"):
+            st.markdown("**✅ 체크포인트** — " + " · ".join(ana["checkpoints"]))
+        st.caption(f"상태: {'디스크 캐시' if status == 'cached' else 'LLM 신규 생성'} · "
+                   f"{ana.get('generated_at', '')} · {ana.get('model', '')} · "
+                   "표시·참고용 — 시스템 판단(신호·배분)에 미반영")
+        if st.button("🔄 재생성", key=f"_llman_re_{ticker}", help="캐시 무시하고 새로 생성"):
+            from dashboard import views as _views
+            with st.spinner("AI 분석 재생성 중… (최대 90초)"):
+                st.session_state[res_key] = _views.llm_stock_analysis(
+                    ticker, _j.loads(facts_json), force=True)
+            _frag_rerun()
 
 
 @st.fragment

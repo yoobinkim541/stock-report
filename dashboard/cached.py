@@ -260,6 +260,17 @@ def llm_related(t):
     return views.llm_related_tickers(t)
 
 
+@st.cache_data(ttl=3600, show_spinner=False)
+def llm_analysis(t, facts_json: str):
+    """🤖 LLM 종목 분석 해설 (세션 1h 캐시 — 디스크 24h 는 provider). 버튼 게이트 전용."""
+    import json as _j
+    try:
+        facts = _j.loads(facts_json)
+    except Exception:
+        facts = {}
+    return views.llm_stock_analysis(t, facts)
+
+
 @st.cache_data(ttl=_TTL_HEAVY, show_spinner="TR·PR 계산 중…")
 def tr_pr(t, years=5):
     return views.etf_tr_pr(t, years)
