@@ -527,7 +527,7 @@ def _price_chart(ticker, hist, avg_cost, trades, fullscreen: bool = False,
                           label_visibility="collapsed") or []
         st.markdown("**하단 지표** — 서브 패널")
         bottom = st.pills("하단 지표", ["거래량", "RSI", "MACD", "스토캐스틱",
-                                     "Aroon", "%b", "PVT"], selection_mode="multi",
+                                     "Aroon", "%b", "PVT", "분기 EPS"], selection_mode="multi",
                           default=["거래량", "RSI"], key=f"_bot_{tf}",
                           label_visibility="collapsed") or []
         log_scale = st.toggle("로그 스케일", key=f"_logscale_{tf}",
@@ -646,6 +646,9 @@ def _price_chart(ticker, hist, avg_cost, trades, fullscreen: bool = False,
         keltner="켈트너 채널" in top, kama="KAMA" in top,
         chandelier="샹들리에 엑시트" in top,
         show_aroon=show_aroon, show_bbpct=show_bbpct, show_pvt=show_pvt,
+        fund_eps=(((cached.valuation(ticker) or {}).get("history") or [])
+                  if "분기 EPS" in bottom and not compare
+                  and not ticker_names.is_macro(ticker) else None),
         events=events, zones=zones)
     if fullscreen:                                  # ⛶ 풀뷰 — 뷰포트 거의 채우는 높이
         fig.update_layout(height=840)

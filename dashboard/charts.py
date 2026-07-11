@@ -807,7 +807,7 @@ def price_chart(hist, ticker: str = "", *, kind: str = "line", avg_cost=None,
                 show_macd: bool = False, show_stoch: bool = False, log_scale: bool = False,
                 keltner: bool = False, kama: bool = False, chandelier: bool = False,
                 show_aroon: bool = False, show_bbpct: bool = False, show_pvt: bool = False,
-                events=None, zones=None):
+                events=None, zones=None, fund_eps=None):
     """가격 차트 + 기술적 분석 도구 (TradingView 풍 멀티패널).
 
     패널: 가격(+MA·BB·일목·추세선·평단·기간 최고/최저·현재가 라벨) / 거래량(방향색 바+MA20)
@@ -833,6 +833,7 @@ def price_chart(hist, ticker: str = "", *, kind: str = "line", avg_cost=None,
         keltner = kama = chandelier = False
         log_scale = False              # % 축엔 로그 무의미
         events, zones = None, None     # 절대가격 오버레이 — % 축과 공존 불가
+        fund_eps = None                # 분기 EPS 패널도 메인 종목 전용 — 비교 시 제외
     close = hist["Close"]
     has_ohlc = {"Open", "High", "Low"} <= cols
     show_volume = show_volume and "Volume" in cols
@@ -841,8 +842,12 @@ def price_chart(hist, ticker: str = "", *, kind: str = "line", avg_cost=None,
     show_pvt = show_pvt and "Volume" in cols            # PVT 는 거래량 필요
 
     # 하단 서브패널 — 순서 고정(거래량→RSI→MACD→스토→Aroon→%b→PVT). 행 번호 동적 배정.
+    # 분기 EPS — 유효 행(발표일+실제 EPS)만. 비교(%) 모드는 아래 cmp_mode 절이 차단.
+    fund_eps = [r for r in (fund_eps or [])
+                if r.get("date") and r.get("eps_actual") is not None]
     sub = [("vol", show_volume), ("rsi", show_rsi), ("macd", show_macd), ("stoch", show_stoch),
-           ("aroon", show_aroon), ("bbpct", show_bbpct), ("pvt", show_pvt)]
+           ("aroon", show_aroon), ("bbpct", show_bbpct), ("pvt", show_pvt),
+           ("eps", bool(fund_eps))]
     active = [name for name, on in sub if on]
     panes = 1 + len(active)
     row_of = {name: i + 2 for i, name in enumerate(active)}   # 가격=1, 서브=2..
@@ -853,6 +858,7 @@ def price_chart(hist, ticker: str = "", *, kind: str = "line", avg_cost=None,
     aroon_row = row_of.get("aroon")
     bbpct_row = row_of.get("bbpct")
     pvt_row = row_of.get("pvt")
+    eps_row = row_of.get("eps")
     if panes > 1:
         from plotly.subplots import make_subplots
         # 2·3패널은 기존 튜닝 비율 유지(회귀 방어), 4·5패널만 일반 분배 규칙,
@@ -1097,6 +1103,40 @@ def price_chart(hist, ticker: str = "", *, kind: str = "line", avg_cost=None,
                                      name="PVT MA20", showlegend=False,
                                      line=dict(color="#3b82f6", width=1)), row=pvt_row, col=1)
         fig.update_yaxes(row=pvt_row, col=1, nticks=3)
+
+    # ── 분기 EPS 패널 — 실제(beat 초록/miss 빨강 바) vs 예상(회색 마커) · 서프라이즈 hover ──
+    # TradingView 유료 '펀더멘털 오버레이' 대응 — 데이터는 valuation history(24분기·기캐시).
+    if eps_row and fund_eps:
+        import pandas as pd
+        rows = sorted(fund_eps, key=lambda r: r["date"])
+        xs = [pd.Timestamp(r["date"]) for r in rows]
+        idx_tz = getattr(hist.index, "tz", None)
+        if idx_tz is not None:
+            xs = [x.tz_localize(idx_tz) if x.tzinfo is None else x for x in xs]
+        act = [float(r["eps_actual"]) for r in rows]
+        est = [r.get("eps_est") for r in rows]
+        colors = [(_GREEN if (r.get("surprise_pct") or 0) >= 0 else _RED) for r in rows]
+        hover = [f"발표 {r['date']} · EPS {r['eps_actual']} vs 예상 "
+                 f"{r.get('eps_est', '—')}"
+                 + (f" ({r['surprise_pct']:+.1f}%)" if r.get("surprise_pct") is not None else "")
+                 for r in rows]
+        fig.add_trace(go.Bar(x=xs, y=act, name="분기 EPS", showlegend=False,
+                             marker=dict(color=colors), opacity=0.85,
+                             width=40 * 86400000, customdata=hover,
+                             hovertemplate="%{customdata}<extra></extra>"),
+                      row=eps_row, col=1)
+        est_x = [x for x, e in zip(xs, est) if e is not None]
+        est_y = [float(e) for e in est if e is not None]
+        if est_y:
+            fig.add_trace(go.Scatter(x=est_x, y=est_y, name="예상 EPS", showlegend=False,
+                                     mode="markers",
+                                     marker=dict(symbol="line-ew-open", size=14,
+                                                 color=theme.MUTED,
+                                                 line=dict(width=2, color=theme.MUTED)),
+                                     hoverinfo="skip"),
+                          row=eps_row, col=1)
+        fig.update_yaxes(row=eps_row, col=1, nticks=3, title_text="EPS",
+                         title_font=dict(size=9, color=theme.MUTED))
 
     chart_height = ({1: 380, 2: 540, 3: 680, 4: 800, 5: 900}.get(panes)
                     or 900 + 85 * (panes - 5))
