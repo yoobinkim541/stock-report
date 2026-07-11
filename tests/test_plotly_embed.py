@@ -190,3 +190,26 @@ def test_embed_fit_viewport_contract():
         assert token in full, f"누락: {token}"
     norm = plotly_embed.pannable_chart_html(fig, hist)
     assert "const fitVH = false" in norm
+
+
+def test_embed_live_flag_and_feed():
+    """⚡ live — 플래그 배선 + 피더 계약 (키 파생·None 가격·seq 로 html 변화)."""
+    hist = _hist()
+    fig = charts.price_chart(hist, "T", kind="candle")
+    live = plotly_embed.pannable_chart_html(fig, hist, view_days=180,
+                                            store_key="NVDA:1d:lin", live=True)
+    off = plotly_embed.pannable_chart_html(fig, hist, view_days=180,
+                                           store_key="NVDA:1d:lin")
+    assert "const live = true" in live and "const live = false" in off
+    assert "patchLast" in live and "tnrt:" in live
+    # 피더 — 초소형(<1KB)·티커 키·가격/신선도 페이로드
+    feed = plotly_embed.realtime_feed_html("NVDA:1d:lin", 123.45, seq=7)
+    assert len(feed) < 1024
+    assert '"tnrt:NVDA"' in feed and "123.45" in feed and "Date.now()" in feed
+    # 가격 불가(None·0·쓰레기) → p:null (차트가 무시)
+    for bad in (None, 0, "x"):
+        assert '"p": null' in plotly_embed.realtime_feed_html("T:1d:lin", bad, seq=7) \
+            or "null" in plotly_embed.realtime_feed_html("T:1d:lin", bad, seq=7)
+    # seq 가 재실행마다 html 을 바꿔 피더 재마운트(신선도 w 재기록)를 보장
+    assert (plotly_embed.realtime_feed_html("T:1d:lin", 1.0, seq=1)
+            != plotly_embed.realtime_feed_html("T:1d:lin", 1.0, seq=2))

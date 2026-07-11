@@ -1053,8 +1053,12 @@ def _add_extremes_and_last(fig, hist, view_days, panes) -> None:
                            font=dict(size=10, color=_BLUE), arrowcolor=_BLUE, **kw)
     prev = float(hist["Close"].iloc[-2]) if len(hist) > 1 else last
     chip = _GREEN if last >= prev else _RED
-    fig.add_hline(y=last, line=dict(color=chip, dash="dot", width=0.8), **kw)
-    fig.add_annotation(xref="x domain", x=1.0, y=last, xanchor="left", showarrow=False,
+    # name=tn-last — ⚡live 클라이언트 패치(plotly_embed patchLast)가 이름으로 찾아
+    # 현재가선·라벨을 in-place 이동 (tool-* 아님 → 드로잉 보호·지우기 로직과 무간섭)
+    fig.add_hline(y=last, name="tn-last",
+                  line=dict(color=chip, dash="dot", width=0.8), **kw)
+    fig.add_annotation(name="tn-last", xref="x domain", x=1.0, y=last, xanchor="left",
+                       showarrow=False,
                        text=f"<b>{last:,.0f}</b>", font=dict(size=11, color="#ffffff"),
                        bgcolor=chip, borderpad=2, **({"row": 1, "col": 1} if panes > 1 else {}))
 

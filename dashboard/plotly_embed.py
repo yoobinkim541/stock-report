@@ -148,6 +148,7 @@ _TEMPLATE = r"""
   const pctMode = @@PCT_MODE@@;                  // 비교(%) 모드 — 가격 포맷 대신 %
   const yLog = @@Y_LOG@@;                        // 로그 스케일 — 도형 y 좌표는 log10 공간
   if (@@DOCK@@) document.getElementById("wrap").classList.add("dock");   // 풀뷰 좌측 도구 독
+  const live = @@LIVE@@;                         // ⚡ live — 피더 localStorage 실시간 패치
   function vhFit() {                             // same-origin iframe — frameElement 직접 리사이즈
     try {
       const fe = window.frameElement;
@@ -796,6 +797,93 @@ _TEMPLATE = r"""
     document.getElementById("detail").style.display = "none";
   };
 
+  // ── ⚡ live 실시간 패치 — 피더 iframe 의 localStorage push 를 받아 **마지막 봉만**
+  // in-place 갱신. live 모드의 메인 html 은 바이트 안정(서버 bake 없음)이라 8초
+  // fragment 재실행이 iframe 을 재마운트하지 않는다 = 그리던 드로잉·뷰·상태 유지 ──
+  function arr(a) {                                // plotly 6 typed-array 스펙 디코드
+    // fig.to_json() 은 숫자 배열을 {dtype, bdata(base64)} 로 직렬화 — Array.from 은
+    // 그 객체에서 빈 배열이 되므로 dtype 별 TypedArray 로 풀어 평범한 배열로 반환.
+    if (Array.isArray(a)) return a.slice();
+    if (a && a.bdata) {
+      try {
+        const bin = atob(a.bdata);
+        const buf = new Uint8Array(bin.length);
+        for (let i = 0; i < bin.length; i++) buf[i] = bin.charCodeAt(i);
+        const T = {f8: Float64Array, f4: Float32Array, i4: Int32Array, u4: Uint32Array,
+                   i2: Int16Array, u2: Uint16Array, i1: Int8Array, u1: Uint8Array}[a.dtype];
+        if (T) return Array.from(new T(buf.buffer));
+      } catch (e) {}
+      return [];
+    }
+    return (a && a.length) ? Array.from(a) : [];
+  }
+
+  function patchLast(p) {
+    if (!gd.layout || !gd.data) return;            // newPlot 완료 전 폴링 틱 무시
+    if (!bounds.length || pctMode) return;
+    const b = bounds[bounds.length - 1];           // bounds 갱신 — yFit·스냅·리드아웃 공유
+    b[5] = p;
+    if (p > b[2]) b[2] = p;
+    if (p < b[1]) b[1] = p;
+    const tr = (gd.data || [])[0];                 // 메인 가격 트레이스 = 항상 첫번째
+    if (tr && tr.type === "candlestick") {
+      const c = arr(tr.close), h = arr(tr.high), l = arr(tr.low);
+      if (c.length) {
+        c[c.length - 1] = p;
+        h[h.length - 1] = Math.max(h[h.length - 1], p);
+        l[l.length - 1] = Math.min(l[l.length - 1], p);
+        Plotly.restyle(gd, {close: [c], high: [h], low: [l]}, [0]);
+      }
+    } else if (tr) {
+      const y = arr(tr.y);
+      if (y.length) {
+        y[y.length - 1] = p;
+        Plotly.restyle(gd, {y: [y]}, [0]);
+      }
+    }
+    const upd = {};                                // 현재가 점선·우측 라벨 (tn-last)
+    (gd.layout.shapes || []).forEach((s, i) => {
+      if ((s.name || "") === "tn-last") {
+        upd["shapes[" + i + "].y0"] = toY(p);
+        upd["shapes[" + i + "].y1"] = toY(p);
+      }
+    });
+    (gd.layout.annotations || []).forEach((a, i) => {
+      if ((a.name || "") === "tn-last") {
+        upd["annotations[" + i + "].y"] = toY(p);
+        upd["annotations[" + i + "].text"] = "<b>" + fmtVal(toY(p)) + "</b>";
+      }
+    });
+    if (Object.keys(upd).length) {
+      guard++;                                     // 카운터 규약 (boolean 대입 금지)
+      Plotly.relayout(gd, upd).then(() => { unguard(); });
+    }
+    const xr = gd.layout.xaxis && gd.layout.xaxis.range;
+    if (xr) {                                      // 마지막 봉이 보이면 y 부드럽게 재맞춤
+      const x1 = Date.parse(xr[1]) || +xr[1];
+      if (x1 >= b[0]) setTarget(Date.parse(xr[0]) || +xr[0], x1);
+    }
+    ohlcReadout(b[0]);
+  }
+  if (live && storeKey) {
+    const rtKey = "tnrt:" + String(storeKey).split(":")[0];   // 키 = 티커 (봉·스케일 공용)
+    let lastP = null;
+    const applyRt = () => {
+      let d = null;
+      try { d = JSON.parse(localStorage.getItem(rtKey) || "null"); } catch (e) {}
+      if (!d || !(d.p > 0) || Date.now() - (d.w || 0) > 30000) return;   // 신선한 값만
+      if (d.p === lastP) return;
+      lastP = d.p;
+      patchLast(d.p);
+    };
+    try {                                          // 피더(형제 iframe) 기록 = storage 이벤트
+      window.addEventListener("storage", (ev) => {
+        if (!ev || ev.key == null || ev.key === rtKey) applyRt();
+      });
+    } catch (e) {}
+    setInterval(applyRt, 2000);                    // storage 이벤트 유실 폴백
+  }
+
   Plotly.newPlot(gd, fig.data, fig.layout, @@CONFIG@@).then(() => {
     gd.style.position = "relative";                    // 크로스헤어 오버레이 부착 (newPlot 후)
     gd.appendChild(xhV); gd.appendChild(xhH); gd.appendChild(xhY);
@@ -896,7 +984,8 @@ def pannable_chart_html(fig, hist, *, height: int = 460, view_days=None,
                         pct_mode: bool = False,
                         y_log: bool = False,
                         store_key: str | None = None,
-                        dock: bool = False) -> str:
+                        dock: bool = False,
+                        live: bool = False) -> str:
     """fig(charts.price_chart 산출) → 자동 y 리스케일·드로잉 도구·인차트 마커 상세 임베드 HTML.
 
     bounds_json — y 맞춤 프레임 오버라이드 (비교 모드: compare_bounds_json 의 % 프레임).
@@ -905,6 +994,9 @@ def pannable_chart_html(fig, hist, *, height: int = 460, view_days=None,
     store_key — 드로잉 영속화 localStorage 키(예: "NVDA:1d:lin"). None=비영속.
                 스케일(lin/log/pct)을 키에 포함해야 좌표계 혼선이 없다(호출부 책임).
     dock — True 면 도구바를 좌측 세로 독으로 (풀뷰 — TradingView 배치).
+    live — ⚡자동갱신: realtime_feed_html 피더의 localStorage push(tnrt:티커)를 받아
+           마지막 봉·현재가선을 in-place 패치. 호출부는 live 시 서버측 실시간 bake 를
+           생략해 html 을 바이트 안정으로 유지해야 함(재마운트=드로잉 리셋 방지).
     """
     bounds = bounds_json if bounds_json is not None else price_bounds_json(hist)
     config = json.dumps({
@@ -924,6 +1016,7 @@ def pannable_chart_html(fig, hist, *, height: int = 460, view_days=None,
             .replace("@@FIT_VH@@", json.dumps(bool(fit_viewport)))
             .replace("@@PCT_MODE@@", json.dumps(bool(pct_mode)))
             .replace("@@Y_LOG@@", json.dumps(bool(y_log)))
+            .replace("@@LIVE@@", json.dumps(bool(live)))
             .replace("@@LAST_CLOSE@@", json.dumps(last_close))
             .replace("@@STORE_KEY@@", json.dumps(store_key))
             .replace("@@DOCK@@", json.dumps(bool(dock)))
@@ -931,3 +1024,25 @@ def pannable_chart_html(fig, hist, *, height: int = 460, view_days=None,
             .replace("@@BOUNDS@@", bounds)
             .replace("@@FIG@@", fig.to_json()))       # fig JSON 은 마지막 (토큰 오염 차단)
     return html
+
+
+def realtime_feed_html(store_key: str, price, seq=None) -> str:
+    """⚡ live 피더 — 초소형 컴포넌트가 실시간가를 localStorage 로 차트 iframe 에 push (순수).
+
+    live 모드의 메인 차트 html 은 바이트 안정이어야 한다(변경=iframe 재마운트=그리던
+    드로잉 리셋+수 MB 재전송) — 가격은 이 <1KB 피더만 나른다. seq(기본 서버시각)가
+    매 재실행 html 을 바꿔 피더만 재마운트→재기록: 가격이 같아도 신선도(w)가 갱신돼
+    메인 차트의 30s stale 가드를 통과한다. storage 이벤트는 same-origin 형제 iframe
+    에 전파(2s 폴링 폴백 병행). 키 = "tnrt:" + 티커(store_key 의 첫 세그먼트).
+    """
+    key = "tnrt:" + str(store_key).split(":")[0]
+    try:
+        p = float(price) if price and float(price) > 0 else None
+    except Exception:
+        p = None
+    if seq is None:
+        import time
+        seq = int(time.time() * 1000)
+    return ("<script>/*" + str(seq) + "*/(function(){try{localStorage.setItem("
+            + json.dumps(key) + ",JSON.stringify({p:" + json.dumps(p)
+            + ",w:Date.now()}))}catch(e){}})();</script>")

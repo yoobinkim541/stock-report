@@ -615,6 +615,46 @@ research._screener_section()
     assert "매매신호 아님" in caps
 
 
+def test_ticker_chart_live_stable_html_and_feeder():
+    """⚡ live — 메인 차트 html 바이트 안정(8초 재실행 재마운트 방지) + 피더가 가격을 나름.
+
+    live 모드에서 실시간가를 서버 bake 하면 srcdoc 이 8초마다 바뀌어 iframe 재마운트
+    (그리던 드로잉 리셋 + 수 MB 재전송) — 가격이 달라도 메인 html 은 불변이어야 하고
+    가격은 초소형 피더(tnrt localStorage push)만 나른다. 비 live 는 종전 bake 유지.
+    """
+    def _script(px, live):
+        # ⚠️ _STUBS 는 이미 % 포맷 소비돼 리터럴 % 를 품음 — 재-% 포맷 금지(f-string 결합)
+        return _STUBS + f'''
+cached.realtime_quote = lambda t: {{"price": {px}}}
+st.session_state["_chart_live"] = {live}
+from dashboard.pages import ticker
+ticker.render()
+'''
+    docs = {}
+    for px in ("172.5", "199.25"):
+        at = AppTest.from_string(_script(px, True), default_timeout=30)
+        at.run()
+        assert not at.exception, str(at.exception)
+        frames = [i.proto.srcdoc for i in at.get("iframe")]
+        main = [s for s in frames if "patchLast" in s]
+        feed = [s for s in frames if "tnrt:MSFT" in s and len(s) < 1024]
+        assert len(main) == 1 and len(feed) == 1, "live: 메인 차트 1 + 피더 1 이어야"
+        assert "const live = true" in main[0]
+        assert px in feed[0]                        # 가격은 피더가 나름
+        assert px not in main[0]                    # 메인 html 엔 실시간가 미포함 (bake 0)
+        docs[px] = main[0]
+    assert docs["172.5"] == docs["199.25"], "실시간가가 달라도 메인 html 은 바이트 불변"
+    # 비 live — 종전 서버 bake 유지 (bounds JSON 에 실시간가 반영·피더 없음)
+    at = AppTest.from_string(_script("172.5", False), default_timeout=30)
+    at.run()
+    assert not at.exception, str(at.exception)
+    frames = [i.proto.srcdoc for i in at.get("iframe")]
+    main = [s for s in frames if "patchLast" in s]
+    assert len(main) == 1 and "const live = false" in main[0]
+    assert "172.5" in main[0]                       # bake 로 bounds 에 실시간가
+    assert not any("tnrt:MSFT" in s and len(s) < 1024 for s in frames)   # 피더 없음
+
+
 def test_reconnect_watchdog_html_contract():
     """서버 재기동 워치독 — health 폴링·down→up 전이 시 parent reload 계약."""
     from dashboard import auth

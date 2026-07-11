@@ -297,6 +297,88 @@ console.log("OK bounded");
 """
 
 
+# ── ⚡ live 실시간 클라이언트 패치 (피더 localStorage → 마지막 봉 in-place) ────
+_LIVE_HARNESS = r"""
+const relayoutCalls = [];
+let gd = null;
+const els = {};
+const intervalFns = [];
+const winHandlers = {};
+function el(id) {
+  if (!els[id]) els[id] = { id, style: {}, innerHTML: "", _h: {}, _s: new Set(id === "bt-mag" ? ["on"] : []),
+    classList: { toggle(c, on) { on ? this._s.add(c) : this._s.delete(c); } },
+    on(e, f) { this._h[e] = f; }, emit(e, p) { if (this._h[e]) this._h[e](p); },
+    appendChild() {}, addEventListener() {}, querySelector() { return null; },
+    getBoundingClientRect() { return { top: 0 }; } };
+  els[id].classList._s = els[id]._s;
+  if (id === "chart") gd = els[id];
+  return els[id];
+}
+global.document = { getElementById: el,
+                    createElement: () => ({ style: {}, textContent: "" }) };
+global.window = { frameElement: null, parent: { innerHeight: 900, addEventListener() {} },
+                  addEventListener(t, f) { winHandlers[t] = f; } };
+global.performance = { now: () => 1 };
+global.requestAnimationFrame = () => null;
+global.Plotly = {
+  newPlot(g, d, l, c) { g.data = d; g.layout = l; return { then(cb) { cb(); return this; } }; },
+  relayout(g, u) { relayoutCalls.push(u);
+    for (const k of Object.keys(u)) if (!k.includes(".") && !k.includes("[")) g.layout[k] = u[k];
+    return { then(cb) { cb(); return this; } }; },
+  restyle(g, u, idx) {
+    const t = g.data[(idx || [0])[0]];
+    for (const k of Object.keys(u)) t[k] = u[k][0];
+    return { then(cb) { cb(); return this; } }; },
+};
+const _ls = {};
+global.localStorage = { getItem: (k) => (k in _ls ? _ls[k] : null),
+                        setItem: (k, v) => { _ls[k] = String(v); },
+                        removeItem: (k) => { delete _ls[k]; } };
+global.setTimeout = (fn) => { fn(); return 0; };
+global.clearTimeout = () => {};
+global.setInterval = (fn) => { intervalFns.push(fn); return 0; };
+__SCRIPT__
+function fail(m) { console.error("FAIL " + m); process.exit(1); }
+if (!intervalFns.length) fail("no_poll_interval");        // live 폴링 미등록
+if (!winHandlers.storage) fail("no_storage_listener");    // 피더 push 리스너 미등록
+// 1) 신선한 push → 마지막 봉(캔들 close/high)·현재가선(tn-last)·리드아웃 패치
+_ls["tnrt:TEST"] = JSON.stringify({ p: 210.5, w: Date.now() });
+winHandlers.storage({ key: "tnrt:TEST" });
+const c = gd.data[0].close;
+if (c[c.length - 1] !== 210.5) fail("close_not_patched " + c[c.length - 1]);
+if (gd.data[0].high[c.length - 1] !== 210.5) fail("high_not_patched");
+const moved = relayoutCalls.some(u => Object.keys(u).some(
+  k => /^shapes\[\d+\]\.y0$/.test(k) && u[k] === 210.5));
+if (!moved) fail("tn_last_shape_not_moved");
+if (!/210\.50/.test(el("ohlcbar").innerHTML)) fail("readout " + el("ohlcbar").innerHTML);
+// 2) stale(>30s) push 는 무시 — 죽은 탭의 낡은 값 방어
+_ls["tnrt:TEST"] = JSON.stringify({ p: 999.9, w: Date.now() - 60000 });
+intervalFns.forEach(fn => fn());
+if (gd.data[0].close[c.length - 1] !== 210.5) fail("stale_applied");
+console.log("OK live");
+"""
+
+
+@pytest.mark.skipif(_NODE is None, reason="node 미설치 — 런타임 JS 검증 스킵")
+def test_live_realtime_client_patch(tmp_path):
+    """⚡ live — 피더 push 로 마지막 봉·현재가선 in-place 패치, stale 값은 무시."""
+    idx = pd.date_range("2025-01-01", periods=70, freq="D")
+    df = pd.DataFrame({"Open": range(100, 170), "High": range(101, 171),
+                       "Low": range(99, 169), "Close": range(100, 170),
+                       "Volume": [1e6] * 70}, index=idx)
+    fig = charts.price_chart(df, "TEST", kind="candle", show_volume=True,
+                             view_days=90, avg_cost=140.0)
+    html = plotly_embed.pannable_chart_html(fig, df, height=460, view_days=90,
+                                            vol_axis="yaxis2",
+                                            store_key="TEST:1d:lin", live=True)
+    js = re.findall(r"<script>(.*?)</script>", html, re.S)[-1]
+    runner = tmp_path / "live.js"
+    runner.write_text(_LIVE_HARNESS.replace("__SCRIPT__", js), encoding="utf-8")
+    r = subprocess.run([_NODE, str(runner)], capture_output=True, text=True, timeout=30)
+    assert r.returncode == 0, f"live patch fail: {r.stdout}\n{r.stderr}"
+    assert "OK live" in r.stdout
+
+
 # ── guard 창 도형완성 드롭 회귀 ("자석 가끔 안 먹음") ─────────────────────────
 # animStep y-lerp·muteHover·setTool 등 프로그램 relayout 이 in-flight(guard=true)인
 # 순간 사용자의 도형완성 relayout 이 도착하면 통째로 드롭되던 버그 — 도형 이벤트는

@@ -164,11 +164,14 @@ def _chart_events(ticker, df, ev_sel) -> tuple[list, list]:
 
 @st.fragment(run_every=8)
 def _price_chart_live(ticker, hist, avg_cost, trades, fullscreen: bool = False):
-    """⚡ 자동 갱신 차트 — 8초 fragment 재실행 (실시간 마지막 봉 패치 + 뷰·드로잉 유지).
+    """⚡ 자동 갱신 차트 — 8초 fragment 재실행 (실시간가는 피더가 클라이언트 패치).
 
-    드로잉=localStorage 복원 · 뷰 위치=60초 신선 규칙 복원이라 재실행이 화면을 안 깨뜨림.
+    live 모드의 메인 차트 html 은 **바이트 안정** — 실시간가를 서버에서 bake 하면
+    8초마다 srcdoc 이 바뀌어 iframe 재마운트(그리던 드로잉 리셋 + 수 MB 재전송)가
+    일어난다. 대신 초소형 피더 컴포넌트가 localStorage 로 가격을 push 하고 차트
+    iframe 이 마지막 봉·현재가선만 in-place 패치 (plotly_embed live 경로).
     """
-    _price_chart(ticker, hist, avg_cost, trades, fullscreen)
+    _price_chart(ticker, hist, avg_cost, trades, fullscreen, live=True)
 
 
 @st.fragment
@@ -311,10 +314,13 @@ def _macro_sections(ticker, hist):
     st.caption("표시·참고용 — 상관은 국면에 따라 변하며 인과가 아님 · 주문 집행 없음")
 
 
-def _price_chart(ticker, hist, avg_cost, trades, fullscreen: bool = False):
+def _price_chart(ticker, hist, avg_cost, trades, fullscreen: bool = False,
+                 live: bool = False):
     """가격 차트 — 봉·기간·라인/캔들·지표·비교 컨트롤 (풀뷰 페이지와 공용 컴포넌트).
 
     fullscreen=True 면 차트 풀뷰 페이지 모드 — 높이 확대·⛶ 는 복귀 버튼.
+    live=True(⚡자동갱신 래퍼) — 실시간가 서버 bake 생략 + 피더 컴포넌트로 클라이언트
+    패치 (html 바이트 안정 = 8초 재실행이 iframe 을 재마운트하지 않음).
     """
     # 컨트롤 한 줄 — 봉 | 라인/캔들 | 지표 | 비교 | 기간 | ⛶ (좁은 화면은 자동 줄바꿈)
     ctf, ckind, c3, c4, cper, cfull = st.columns([1.45, 0.72, 0.34, 0.34, 1.4, 0.35],
@@ -473,9 +479,15 @@ def _price_chart(ticker, hist, avg_cost, trades, fullscreen: bool = False):
     df = charts.view_window(df, view_days)
     if compare:
         compare = {k: charts.view_window(s, view_days) for k, s in compare.items()}
+    # ⚡ live(자동갱신) — 실시간가는 **클라이언트 패치**(피더 iframe → localStorage →
+    # plotly_embed patchLast). 서버 bake 를 하면 8초마다 srcdoc 이 바뀌어 iframe
+    # 재마운트(그리던 드로잉 리셋 + 대형 재전송)가 일어나므로 live 땐 생략해 html 을
+    # 바이트 안정으로 유지. HA·비교·구형 렌더러는 클라 패치 미지원 → 종전 bake 유지.
+    _client_rt = (bool(live) and not compare and not legacy and kind != "🟩 HA"
+                  and df is not None and not getattr(df, "empty", True))
     # ⚡ 실시간 — 마지막 봉을 KIS 실시간가로 패치 (fresh 시·비교 모드 제외).
     # 캐시된 df 원본 오염 금지 → copy 후 수정. HA 변환 앞이라 HA 도 최신가 반영.
-    if not compare and df is not None and not getattr(df, "empty", True):
+    if not compare and not _client_rt and df is not None and not getattr(df, "empty", True):
         _rt = (cached.realtime_quote(ticker) or {}).get("price")
         if _rt and _rt > 0:
             df = df.copy()
@@ -543,8 +555,13 @@ def _price_chart(ticker, hist, avg_cost, trades, fullscreen: bool = False):
                 fig, df, height=h, view_days=view_days,
                 vol_axis="yaxis2" if show_vol else None, bounds_json=_bj,
                 fit_viewport=fullscreen, pct_mode=bool(compare), y_log=use_log,
-                store_key=_sk, dock=fullscreen),
+                store_key=_sk, dock=fullscreen, live=_client_rt),
             height=h + 164)
+        if _client_rt:
+            # ⚡ 피더 — <1KB 컴포넌트만 8초 재실행마다 재마운트(가격+신선도 push).
+            # 메인 차트 html 은 위에서 바이트 안정 → 드로잉·뷰·플롯 상태 유지.
+            _rtp = (cached.realtime_quote(ticker) or {}).get("price")
+            st.components.v1.html(plotly_embed.realtime_feed_html(_sk, _rtp), height=0)
     st.caption("🖱️ 드래그=이동(y축 자동 맞춤) · 휠=확대/축소 · 더블클릭=원위치 · "
                "✏️ 모드바 직접 그리기(선·자유곡선·박스)·지우개 + 차트 위 도구바: "
                "🧲 자석(봉 OHLC 스냅)·─ 수평선·🔱 피보나치·📏 측정·🗑 지우기 · "
