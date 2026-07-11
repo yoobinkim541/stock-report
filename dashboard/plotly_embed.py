@@ -121,6 +121,10 @@ _TEMPLATE = r"""
   <button id="bt-short" class="tbtn" title="진입→목표 아래로 박스 드래그 = 숏 포지션(RR 1:1 손절 자동)">📉 숏</button>
   <button id="bt-text" class="tbtn" title="차트에 짧게 긋기 = 시작점에 텍스트 메모">📝 메모</button>
   <span class="tsep"></span>
+  <button id="bt-reg" class="tbtn" title="구간을 박스로 드래그 = 종가 회귀 추세선 ±2σ 채널">📐 회귀추세</button>
+  <button id="bt-avwap" class="tbtn" title="차트에 짧게 긋기 = 그 봉부터 고정(앵커드) VWAP">⚓ 고정VWAP</button>
+  <button id="bt-vprof" class="tbtn" title="구간을 박스로 드래그 = 가격대별 거래량 프로필 + POC">📊 볼륨프로필</button>
+  <span class="tsep"></span>
   <button id="bt-clear" class="tbtn" title="직접 그린 도형 전체 제거">🗑 지우기</button>
   <span id="tool-hint"></span>
   <span id="ohlcbar" style="margin-left:auto;font:11px 'JetBrains Mono', ui-monospace, monospace;
@@ -406,8 +410,13 @@ _TEMPLATE = r"""
       const anns = (gd.layout.annotations || []).filter(
         (a) => String(a.name || "").startsWith("tool-"));
       const k = "tndraw:" + storeKey;
-      if (!shapes.length && !anns.length) { localStorage.removeItem(k); return; }
-      localStorage.setItem(k, JSON.stringify({v: 1, shapes: shapes, anns: anns}));
+      if (!shapes.length && !anns.length && !vwapAnchors.length) {
+        localStorage.removeItem(k);
+        return;
+      }
+      // vwaps = ⚓ 앵커(ms)만 저장 — 트레이스는 로드 시 bounds 로 재계산 (v1 하위호환)
+      localStorage.setItem(k, JSON.stringify({v: 1, shapes: shapes, anns: anns,
+                                              vwaps: vwapAnchors.slice()}));
     } catch (e) {}                               // 사파리 프라이빗 등 — 조용히 비영속
   }
   function scheduleSave() {
@@ -485,13 +494,21 @@ _TEMPLATE = r"""
   const TOOL_BTNS = [["bt-hline", "hline"], ["bt-vline", "vline"], ["bt-cross", "cross"],
                      ["bt-ray", "ray"], ["bt-ext", "ext"], ["bt-fib", "fib"],
                      ["bt-meas", "meas"], ["bt-long", "long"], ["bt-short", "short"],
-                     ["bt-text", "text"]];
+                     ["bt-text", "text"], ["bt-reg", "reg"], ["bt-avwap", "avwap"],
+                     ["bt-vprof", "vprof"]];
 
   function setTool(next) {                       // 도구 토글 (상호 배타) + dragmode 전환
+    // 고정VWAP·볼륨프로필은 실가격×거래량 계산 — 비교(%) 프레임(4열 bounds)에선 불가
+    if (pctMode && (next === "avwap" || next === "vprof")) {
+      document.getElementById("tool-hint").textContent = "비교(%) 모드에선 사용 불가";
+      return;
+    }
     tool = (tool === next) ? null : next;
     const dm = {hline: "drawline", vline: "drawline", cross: "drawline",
                 ray: "drawline", ext: "drawline", fib: "drawline", text: "drawline",
-                meas: "drawrect", long: "drawrect", short: "drawrect"}[tool] || "pan";
+                avwap: "drawline",
+                meas: "drawrect", long: "drawrect", short: "drawrect",
+                reg: "drawrect", vprof: "drawrect"}[tool] || "pan";
     guard++;
     Plotly.relayout(gd, {dragmode: dm}).then(() => { unguard(); });
     for (const [id, name] of TOOL_BTNS)
@@ -507,6 +524,9 @@ _TEMPLATE = r"""
       long: "진입→목표 위로 드래그 = 롱 (손절 RR 1:1 자동)",
       short: "진입→목표 아래로 드래그 = 숏 (손절 RR 1:1 자동)",
       text: "차트에 짧게 긋기 = 그 지점 메모",
+      reg: "회귀 구간을 박스로 드래그 = 추세선 ±2σ 채널",
+      avwap: "차트에 짧게 긋기 = 그 봉부터 고정 VWAP",
+      vprof: "프로필 구간을 박스로 드래그 = 가격대별 거래량 + POC",
     }[tool] || "";
   }
 
@@ -701,6 +721,137 @@ _TEMPLATE = r"""
     setTool(null);
   }
 
+  function makeReg(sh, shapes, idx) {            // 📐 구간 회귀 추세 — OLS 중심선 ±2σ 채널
+    const lo = Math.min(toMs(sh.x0), toMs(sh.x1)), hi = Math.max(toMs(sh.x0), toMs(sh.x1));
+    shapes.splice(idx, 1);
+    const xs = [], ys = [];
+    for (let i = lowerBound(lo); i < bounds.length && bounds[i][0] <= hi; i++) {
+      const b = bounds[i];
+      xs.push(b[0]);
+      ys.push(toY(b.length >= 6 ? b[5] : b[1]));  // 종가 (로그축은 log 공간에서 회귀)
+    }
+    if (xs.length < 3) { applyDraw(shapes, curAnns()); setTool(null); return; }
+    const n = xs.length;
+    const mx = xs.reduce((a, v) => a + v, 0) / n, my = ys.reduce((a, v) => a + v, 0) / n;
+    let sxy = 0, sxx = 0;
+    for (let i = 0; i < n; i++) { sxy += (xs[i] - mx) * (ys[i] - my); sxx += (xs[i] - mx) * (xs[i] - mx); }
+    const slope = sxx ? sxy / sxx : 0, icpt = my - slope * mx;
+    let sd = 0;
+    for (let i = 0; i < n; i++) { const r = ys[i] - (icpt + slope * xs[i]); sd += r * r; }
+    sd = Math.sqrt(sd / n);
+    const xa = toISO(xs[0]), xb = toISO(xs[n - 1]);
+    const yA = icpt + slope * xs[0], yB = icpt + slope * xs[n - 1];
+    for (const [off, w, dash] of [[0, 1.3, "solid"], [2 * sd, 1, "dot"], [-2 * sd, 1, "dot"]])
+      shapes.push({type: "line", name: "tool-reg", xref: "x", x0: xa, x1: xb, yref: "y",
+                   y0: yA + off, y1: yB + off, line: {color: "#2f81f7", width: w, dash: dash}});
+    const vA = fromY(yA), vB = fromY(yB);
+    const pct = vA ? ((vB / vA - 1) * 100) : 0;
+    const anns = curAnns();
+    anns.push({name: "tool-reg", x: xb, xanchor: "left", y: yB, yref: "y", showarrow: false,
+               text: "회귀 " + (pct >= 0 ? "+" : "") + pct.toFixed(1) + "% · " + n + "봉 · ±2σ",
+               font: {size: 9, color: "#2f81f7"}, bgcolor: "rgba(19,23,34,.75)"});
+    applyDraw(shapes, anns);
+    setTool(null);
+  }
+
+  // ── ⚓ 고정(앵커드) VWAP — 앵커 봉부터 누적 (저+고+종)/3 × 거래량 트레이스 ──
+  // 도형이 아닌 **트레이스**(hover·범례 가능) — 영속화는 앵커(ms) 목록만 저장·재계산.
+  const vwapAnchors = [];
+  function vwapTrace(anchorMs) {
+    if (pctMode) return null;                    // 비교(%) 프레임 — 실가격 없음
+    const xs = [], ys = [];
+    let pv = 0, vv = 0;
+    for (let i = lowerBound(anchorMs); i < bounds.length; i++) {
+      const b = bounds[i];
+      if (b.length < 6) return null;
+      const v = b[3] || 0;
+      pv += ((b[1] + b[2] + b[5]) / 3) * v;
+      vv += v;
+      if (vv > 0) { xs.push(toISO(b[0])); ys.push(pv / vv); }
+    }
+    if (xs.length < 2) return null;
+    return {x: xs, y: ys, mode: "lines", name: "고정 VWAP", showlegend: false,
+            meta: "tool-avwap", hovertemplate: "고정 VWAP %{y:,.2f}<extra></extra>",
+            line: {color: "#e879f9", width: 1.4, dash: "dot"}};
+  }
+  function addVwap(anchorMs) {
+    const tr = vwapTrace(anchorMs);
+    if (!tr) return false;
+    vwapAnchors.push(anchorMs);
+    try { Plotly.addTraces(gd, [tr]); } catch (e) {}
+    scheduleSave();
+    return true;
+  }
+  function clearVwaps() {
+    const idxs = (gd.data || []).map((t, i) => (t && t.meta === "tool-avwap" ? i : -1))
+      .filter((i) => i >= 0);
+    if (idxs.length) { try { Plotly.deleteTraces(gd, idxs); } catch (e) {} }
+    vwapAnchors.length = 0;
+  }
+  function makeAvwap(sh, shapes, idx) {
+    let ms = toMs(sh.x0);
+    if (magnet) ms = snapPoint(ms, sh.y0)[0];
+    shapes.splice(idx, 1);
+    const anns = curAnns();
+    const tr = vwapTrace(ms);
+    if (tr)                                      // ⚓ 앵커 표식 (지우기·영속화는 tool-* 규약)
+      anns.push({name: "tool-avwap", x: tr.x[0], y: toY(tr.y[0]), yref: "y",
+                 showarrow: false, yanchor: "top", text: "⚓",
+                 font: {size: 12, color: "#e879f9"}});
+    applyDraw(shapes, anns);
+    addVwap(ms);
+    setTool(null);
+  }
+
+  function makeVprof(sh, shapes, idx) {          // 📊 고정범위 볼륨 프로필 — 가격빈 히스토그램+POC
+    const lo = Math.min(toMs(sh.x0), toMs(sh.x1)), hi = Math.max(toMs(sh.x0), toMs(sh.x1));
+    shapes.splice(idx, 1);
+    const rows = [];
+    let pLo = Infinity, pHi = -Infinity;
+    for (let i = lowerBound(lo); i < bounds.length && bounds[i][0] <= hi; i++) {
+      const b = bounds[i];
+      if (b.length < 6) { applyDraw(shapes, curAnns()); setTool(null); return; }
+      rows.push(b);
+      if (b[1] < pLo) pLo = b[1];
+      if (b[2] > pHi) pHi = b[2];
+    }
+    if (rows.length < 3 || !(pHi > pLo)) { applyDraw(shapes, curAnns()); setTool(null); return; }
+    const NB = 24, binH = (pHi - pLo) / NB, vols = new Array(NB).fill(0);
+    for (const b of rows) {
+      const v = b[3] || 0;
+      const b0 = Math.max(0, Math.min(NB - 1, Math.floor((b[1] - pLo) / binH)));
+      const b1 = Math.max(b0, Math.min(NB - 1, Math.floor((b[2] - pLo) / binH)));
+      const per = v / (b1 - b0 + 1);             // 봉 거래량을 고저가 걸친 빈에 균등 분배
+      for (let k = b0; k <= b1; k++) vols[k] += per;
+    }
+    const vmax = Math.max.apply(null, vols) || 1;
+    let poc = 0;
+    for (let k = 1; k < NB; k++) if (vols[k] > vols[poc]) poc = k;
+    const spanMs = Math.max(hi - lo, 1);
+    for (let k = 0; k < NB; k++) {               // 히스토그램 — 구간 오른쪽 벽에서 왼쪽으로
+      if (!vols[k]) continue;
+      const w = (vols[k] / vmax) * spanMs * 0.35;
+      shapes.push({type: "rect", name: "tool-vprof", xref: "x",
+                   x0: toISO(hi - w), x1: toISO(hi), yref: "y",
+                   y0: toY(pLo + k * binH), y1: toY(pLo + (k + 1) * binH),
+                   line: {width: 0}, fillcolor: k === poc ? "#f59e0b66" : "#2f81f733"});
+    }
+    const pocY = pLo + (poc + 0.5) * binH;
+    shapes.push({type: "line", name: "tool-vprof", xref: "x", x0: toISO(lo), x1: toISO(hi),
+                 yref: "y", y0: toY(pocY), y1: toY(pocY),
+                 line: {color: "#f59e0b", width: 1.2, dash: "dot"}});
+    shapes.push({type: "rect", name: "tool-vprof", xref: "x", x0: toISO(lo), x1: toISO(hi),
+                 yref: "y", y0: toY(pLo), y1: toY(pHi),
+                 line: {color: "#8b93a7", width: 0.8, dash: "dot"},
+                 fillcolor: "rgba(0,0,0,0)"});
+    const anns = curAnns();
+    anns.push({name: "tool-vprof", x: toISO(hi), xanchor: "left", y: toY(pocY), yref: "y",
+               showarrow: false, text: "POC " + fmtVal(toY(pocY)),
+               font: {size: 9, color: "#f59e0b"}, bgcolor: "rgba(19,23,34,.75)"});
+    applyDraw(shapes, anns);
+    setTool(null);
+  }
+
   const _same = (a, b) => a === b || (typeof a === "number" && typeof b === "number"
                                       && Math.abs(a - b) < 1e-9);
 
@@ -777,7 +928,13 @@ _TEMPLATE = r"""
     if (isNew && tool === "meas" && sh.type === "rect") { makeMeasure(sh, shapes, idx); return true; }
     if (isNew && tool === "long" && sh.type === "rect") { makePosition(sh, shapes, idx, "long"); return true; }
     if (isNew && tool === "short" && sh.type === "rect") { makePosition(sh, shapes, idx, "short"); return true; }
-    if (magnet && (sh.name || "") !== "tool-meas" && !String(sh.name || "").startsWith("tool-fib"))
+    if (isNew && tool === "reg" && sh.type === "rect") { makeReg(sh, shapes, idx); return true; }
+    if (isNew && tool === "vprof" && sh.type === "rect") { makeVprof(sh, shapes, idx); return true; }
+    if (isNew && tool === "avwap" && sh.type === "line") { makeAvwap(sh, shapes, idx); return true; }
+    // 자석 스냅 제외: 측정·피보 + 회귀/볼륨프로필(파생 도형 — 스냅이 ±2σ·빈 정렬을 깨뜨림)
+    if (magnet && (sh.name || "") !== "tool-meas" && !String(sh.name || "").startsWith("tool-fib")
+        && !String(sh.name || "").startsWith("tool-reg")
+        && !String(sh.name || "").startsWith("tool-vprof"))
       return snapShape(sh, shapes) || true;
     return true;
   }
@@ -791,6 +948,7 @@ _TEMPLATE = r"""
   document.getElementById("bt-clear").onclick = () => {   // 서버 오버레이만 남기고 제거
     // 도형 = 보존 복사본으로 되돌림(직접 그린 것·도구 도형 모두 제거·인덱스 밀림 무관).
     // 주석 = 이름 필터 (tn-hi/tn-lo 콜아웃은 팬 중 갱신되므로 복사본 복원 금지)
+    clearVwaps();                                // ⚓ 고정 VWAP 트레이스도 제거
     const anns = curAnns().filter((a) => !String(a.name || "").startsWith("tool-"));
     applyDraw(JSON.parse(JSON.stringify(baseShapes)), anns);
     try { if (storeKey) localStorage.removeItem("tndraw:" + storeKey); } catch (e) {}
@@ -901,6 +1059,7 @@ _TEMPLATE = r"""
           saved.anns.filter((a) => okRef(a.yref))),
       }).then(() => { undraw(); });
     }
+    for (const ms of ((saved && saved.vwaps) || [])) addVwap(+ms);   // ⚓ 앵커 재계산 복원
     const last = bounds.length ? bounds[bounds.length - 1][0] : null;
     const freshView = loadFreshView();           // ⚡자동갱신·설정변경 직후 = 보던 위치 복원
     if (freshView) {
