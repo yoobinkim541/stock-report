@@ -27,6 +27,27 @@ if "tn_light" not in st.session_state:
     except Exception:
         st.session_state["tn_light"] = False
 theme.inject_global_css()   # 세션 tn_light 를 읽어 라이트/다크 표면 CSS 주입
+
+# st.dataframe 은 canvas(glide-grid) 라 CSS 로 못 칠함 — config 테마(다크)만 따라 라이트
+# 모드서 어둡게 남는다. pandas Styler 셀 배경은 canvas 에 렌더되므로(헤더 제외) 라이트
+# 모드일 때만 전 st.dataframe 을 밝은 셀 Styler 로 감싼다(monkeypatch — 21개 호출부 무수정,
+# column_config·on_select 호환 검증됨). 래퍼는 **호출 시점 모드를 확인**(토글 왕복 안전) ·
+# DataFrame 아닌 인자·Styler·다크 모드는 원본 그대로.
+if not getattr(st, "_tn_df_patched", False):
+    import pandas as _pd
+    _orig_dataframe = st.dataframe
+
+    def _themed_dataframe(data=None, *a, **k):
+        try:
+            if theme.is_light() and isinstance(data, _pd.DataFrame):
+                data = data.style.set_properties(
+                    **{"background-color": "#ffffff", "color": "#1a2233"})
+        except Exception:
+            pass
+        return _orig_dataframe(data, *a, **k)
+
+    st.dataframe = _themed_dataframe
+    st._tn_df_patched = True
 # 선택 지속 — 매 런 쿠키를 현재 모드로 동기화 (다음 전체 새로고침에서 무플래시 복원 근접)
 st.components.v1.html(
     "<script>parent.document.cookie='tn_theme="
