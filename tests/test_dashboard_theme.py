@@ -354,3 +354,15 @@ def test_light_override_covers_native_surfaces():
     for sel in ('.stApp {', '[data-testid="stSidebar"]', '[data-testid="stMetric"]',
                 '[data-baseweb="select"]', "#f7f8fa"):
         assert sel in ov, f"누락: {sel}"
+
+
+def test_mobile_css_and_deploy_hidden():
+    """모바일 반응형 — 메트릭 컴팩트·소형폰 티어·Deploy 크롬 숨김 (모바일 UI 개선)."""
+    css = theme._CSS
+    assert "@media (max-width: 600px)" in css and "@media (max-width: 430px)" in css
+    # 메트릭 카드 모바일 축소 규칙
+    assert 'stMetricValue' in css and 'stMetric' in css
+    # Streamlit dev 크롬(Deploy) 숨김
+    assert 'stAppDeployButton' in css and "display: none" in css
+    # 세로 스택 간격 축소
+    assert "stVerticalBlock" in css
