@@ -412,6 +412,73 @@ _TEMPLATE = r"""
   });
   gd.addEventListener("mouseleave", xhHide);
 
+  // ── 📱 모바일 핀치 줌 — 두 손가락으로 x축 폭 조절 (데스크톱 휠 줌 등가) ──
+  // plotly.js 는 터치 핀치 x-zoom 을 안정 지원하지 않고 브라우저 페이지 줌이 먼저 먹음.
+  // → 직접 구현: 핀치 시작 중점의 **데이터 x 를 화면 위치에 고정**한 채 range 스케일.
+  //   손가락 벌리면(dist↑) 폭 축소=확대 / 오므리면 폭 확대=축소. y 는 기존 setTarget 재사용.
+  // capture:true 로 plotly 드래그 레이어보다 먼저 받고, 2손가락일 때만 preventDefault
+  // (1손가락은 plotly 팬 그대로) — passive:false 라야 페이지 줌 차단 가능.
+  let pinch = null;
+  const dataSpan = bounds.length ? (bounds[bounds.length - 1][0] - bounds[0][0]) : 0;
+  const minSpan = (() => {                        // 최소 폭 = 약 5봉 (과도 확대 방지)
+    if (bounds.length < 6) return dataSpan || 1;
+    let g = Infinity;
+    for (let i = 1; i < bounds.length; i++) g = Math.min(g, bounds[i][0] - bounds[i - 1][0]);
+    return (isFinite(g) ? g : 86400000) * 5;
+  })();
+  function plotRect() {
+    const drag = gd.querySelector(".nsewdrag");
+    return drag ? drag.getBoundingClientRect() : null;
+  }
+  function curXRange() {
+    const xr = gd.layout && gd.layout.xaxis && gd.layout.xaxis.range;
+    if (!xr) return null;
+    return [Date.parse(xr[0]) || +xr[0], Date.parse(xr[1]) || +xr[1]];
+  }
+  gd.addEventListener("touchstart", (e) => {
+    if (!e.touches || e.touches.length !== 2) { pinch = null; return; }
+    const xr = curXRange(), rect = plotRect();
+    if (!xr || !rect || !rect.width) return;
+    const t0 = e.touches[0], t1 = e.touches[1];
+    pinch = {dist: Math.hypot(t0.clientX - t1.clientX, t0.clientY - t1.clientY) || 1,
+             x0: xr[0], x1: xr[1], rect: rect,
+             cx: (t0.clientX + t1.clientX) / 2};
+    dragging = true;
+    muteHover();
+    e.preventDefault();                           // 페이지 핀치 줌 차단
+  }, {passive: false, capture: true});
+  gd.addEventListener("touchmove", (e) => {
+    if (!pinch || !e.touches || e.touches.length !== 2) return;
+    e.preventDefault();
+    const t0 = e.touches[0], t1 = e.touches[1];
+    const dist = Math.hypot(t0.clientX - t1.clientX, t0.clientY - t1.clientY) || 1;
+    const anchorFrac = Math.max(0, Math.min(1, (pinch.cx - pinch.rect.left) / pinch.rect.width));
+    const anchorMs = pinch.x0 + (pinch.x1 - pinch.x0) * anchorFrac;   // 고정할 데이터 x
+    let span = (pinch.x1 - pinch.x0) * (pinch.dist / dist);           // dist↑ → span↓ = 확대
+    span = Math.max(minSpan, Math.min(span, dataSpan || span));       // 5봉~전체 클램프
+    let n0 = anchorMs - span * anchorFrac, n1 = n0 + span;
+    if (dataSpan) {                                                   // 데이터 밖으로 못 나가게
+      const lo = bounds[0][0], hi = bounds[bounds.length - 1][0] + minSpan * 0.4;
+      if (n0 < lo) { n0 = lo; n1 = lo + span; }
+      if (n1 > hi) { n1 = hi; n0 = hi - span; }
+    }
+    guard++;
+    Plotly.relayout(gd, {"xaxis.range": [new Date(n0).toISOString(),
+                                         new Date(n1).toISOString()]})
+      .then(() => { unguard(); });
+    setTarget(n0, n1);                            // y 자동 맞춤 (lerp 루프)
+  }, {passive: false, capture: true});
+  function endPinch() {
+    if (!pinch) return;
+    pinch = null;
+    dragging = false;
+    finishGesture();                             // 콜아웃·hover 복원·뷰 저장
+  }
+  gd.addEventListener("touchend", (e) => {
+    if (pinch && (!e.touches || e.touches.length < 2)) endPinch();
+  }, {passive: false, capture: true});
+  gd.addEventListener("touchcancel", endPinch, {passive: false, capture: true});
+
   // ── OHLC 데이터창 — 호버 봉의 시·고·저·종·거래량·등락% 리드아웃 (bounds 재사용) ──
   const ohlcEl = document.getElementById("ohlcbar");
   function ohlcReadout(ms) {
