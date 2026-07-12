@@ -839,7 +839,8 @@ def _price_chart(ticker, hist, avg_cost, trades, fullscreen: bool = False,
                 fig, df, height=h, view_days=view_days,
                 vol_axis="yaxis2" if show_vol else None, bounds_json=_bj,
                 fit_viewport=fullscreen, pct_mode=bool(compare), y_log=use_log,
-                store_key=_sk, dock=fullscreen, live=_client_rt),
+                store_key=_sk, dock=fullscreen, live=_client_rt,
+                light=theme.is_light()),
             height=h + 164)
         if _client_rt:
             # ⚡ 피더 — <1KB 컴포넌트만 8초 재실행마다 재마운트(가격+신선도 push).

@@ -851,3 +851,19 @@ home.render()
     assert not at2.exception, str(at2.exception)
     body2 = " ".join(str(getattr(m, "value", "")) for m in at2.markdown)
     assert "오늘 주목" not in body2
+
+
+def test_app_theme_toggle_light_dark():
+    """라이트/다크 토글 — tn_light 세션에 따라 라이트 오버라이드 주입 여부 전환."""
+    at = AppTest.from_file(os.path.join(ROOT, "dashboard", "app.py"), default_timeout=60)
+    at.session_state["_authed"] = True
+    at.run()
+    assert not at.exception, str(at.exception)
+    dark_md = " ".join(str(getattr(m, "value", "")) for m in at.markdown)
+    assert "#f7f8fa" not in dark_md                    # 다크 기본 — 라이트 오버라이드 미주입
+    # 라이트로 전환
+    at.session_state["tn_light"] = True
+    at.run()
+    assert not at.exception, str(at.exception)
+    light_md = " ".join(str(getattr(m, "value", "")) for m in at.markdown)
+    assert "#f7f8fa" in light_md and "--tn-panel:#ffffff" in light_md

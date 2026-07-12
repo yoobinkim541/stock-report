@@ -11,38 +11,65 @@ from __future__ import annotations
 import math
 from urllib.parse import quote as _urlquote
 
-# ── 팔레트 (config.toml 과 동일) ─────────────────────────────────────────────
-BG = "#0a0e17"
-PANEL = "#131722"
-PANEL2 = "#1a2030"
-BORDER = "#222631"
-GRID = "#1e222d"
-TEXT = "#d1d4dc"
-MUTED = "#9198a6"   # 캡션·라벨 가독 상향(기존 #787b86 은 너무 흐림)
+# ── 팔레트 ────────────────────────────────────────────────────────────────────
+# 표면색(BG/PANEL/TEXT/…)은 **CSS 변수 참조 문자열**이다 — HTML/SVG 빌더가 이 값을
+# f-string 으로 박으면 `var(--tn-panel)` 이 되어 라이트/다크가 브라우저에서 자동 전환된다.
+# 실제 hex 값은 `inject_global_css(light=…)` 가 모드별로 `.stApp` 에 주입한다(_SURF).
+# ⚠️ 표면 상수를 plotly 색으로 쓰면 안 됨(plotly 는 hex 필요) — 차트는 AXIS_*/HOVER_* 사용.
+BG = "var(--tn-bg)"
+PANEL = "var(--tn-panel)"
+PANEL2 = "var(--tn-panel2)"
+BORDER = "var(--tn-border)"
+GRID = "var(--tn-grid)"
+TEXT = "var(--tn-text)"
+MUTED = "var(--tn-muted)"
+
+# 시맨틱 색 — 라이트/다크 공통 (등락·델타·배지). 실제 hex.
 GREEN = "#26a69a"
 RED = "#ef5350"
 BLUE = "#2962ff"
 AMBER = "#f7a600"
 VIOLET = "#9b5de5"
 
+# 표면 실제값 (inject_global_css 가 CSS 변수로 주입)
+_SURF = {
+    "dark":  {"bg": "#0a0e17", "panel": "#131722", "panel2": "#1a2030",
+              "border": "#222631", "grid": "#1e222d", "text": "#d1d4dc", "muted": "#9198a6"},
+    "light": {"bg": "#f7f8fa", "panel": "#ffffff", "panel2": "#eef1f6",
+              "border": "#dce2ea", "grid": "#e9ecf2", "text": "#1a2233", "muted": "#5c6472"},
+}
+
+# plotly 축·주석 — **테마 중립 그레이**(hex). 투명 paper 로 배경은 페이지를 따르고,
+# 그리드·눈금·라벨은 라이트/다크 양쪽서 읽히는 반투명/중간 그레이로 고정(모드 전달 불필요).
+AXIS_GRID = "rgba(128,135,150,0.18)"
+AXIS_LINE = "rgba(128,135,150,0.38)"
+AXIS_TEXT = "#8b93a7"                 # 눈금·주석 라벨 (중립)
+AXIS_STRONG = "#6b7385"               # 현재가선 등 강조 라벨
+HOVER_BG = "rgba(24,28,38,0.94)"      # 툴팁 — 자체 배경(다크 툴팁은 라이트서도 OK)
+HOVER_BORDER = "rgba(128,135,150,0.4)"
+
 _MONO = "'JetBrains Mono', ui-monospace, monospace"
 
 
 # ── plotly 테마 (순수·plotly lazy) ───────────────────────────────────────────
 def apply_plotly_theme(fig):
-    """모든 차트에 적용하는 TradingView 풍 다크 레이아웃."""
+    """모든 차트에 적용하는 TradingView 풍 레이아웃 (테마 중립 — 투명 paper·중립 그레이 축).
+
+    배경 투명 → 페이지 라이트/다크를 그대로 따름. 그리드·눈금은 AXIS_* 중립 그레이라
+    양쪽서 읽힘(모드 전달 불필요·차트는 순수 유지)."""
     fig.update_layout(
         paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
-        font=dict(family=_MONO, size=12, color=MUTED),
+        font=dict(family=_MONO, size=12, color=AXIS_TEXT),
         colorway=[BLUE, GREEN, RED, AMBER, VIOLET, "#00bcd4", "#ff7043", "#66bb6a"],
         hovermode="x unified",
-        hoverlabel=dict(bgcolor=PANEL, bordercolor=BORDER, font_family=_MONO, font_size=12),
-        legend=dict(bgcolor="rgba(0,0,0,0)", font=dict(color=MUTED, size=11)),
+        hoverlabel=dict(bgcolor=HOVER_BG, bordercolor=HOVER_BORDER, font_family=_MONO,
+                        font_size=12, font_color="#e8eaf0"),
+        legend=dict(bgcolor="rgba(0,0,0,0)", font=dict(color=AXIS_TEXT, size=11)),
     )
-    fig.update_xaxes(gridcolor=GRID, zerolinecolor=GRID, linecolor=BORDER,
-                     tickfont=dict(color=MUTED, family=_MONO), title_font=dict(color=MUTED))
-    fig.update_yaxes(gridcolor=GRID, zerolinecolor=GRID, linecolor=BORDER,
-                     tickfont=dict(color=MUTED, family=_MONO), title_font=dict(color=MUTED))
+    fig.update_xaxes(gridcolor=AXIS_GRID, zerolinecolor=AXIS_GRID, linecolor=AXIS_LINE,
+                     tickfont=dict(color=AXIS_TEXT, family=_MONO), title_font=dict(color=AXIS_TEXT))
+    fig.update_yaxes(gridcolor=AXIS_GRID, zerolinecolor=AXIS_GRID, linecolor=AXIS_LINE,
+                     tickfont=dict(color=AXIS_TEXT, family=_MONO), title_font=dict(color=AXIS_TEXT))
     return fig
 
 
@@ -487,9 +514,84 @@ def econ_calendar_html(events: list, start=None, weeks: int = 3) -> str:
 
 
 # ── 전역 CSS 주입 (streamlit lazy) ───────────────────────────────────────────
-def inject_global_css():
+def _surface_vars(light: bool) -> str:
+    """모드별 표면 CSS 변수 정의 (.stApp 에 주입 — 모든 var(--tn-*) 소비자 자동 전환)."""
+    s = _SURF["light"] if light else _SURF["dark"]
+    return ("  --tn-bg:%(bg)s; --tn-panel:%(panel)s; --tn-panel2:%(panel2)s;"
+            " --tn-border:%(border)s; --tn-grid:%(grid)s; --tn-text:%(text)s;"
+            " --tn-muted:%(muted)s;" % s)
+
+
+# 라이트 모드 — 네이티브 Streamlit 표면(config.toml=dark 로 칠해진 것)을 덮는 오버라이드.
+# Streamlit 1.58 은 CSS 변수 미노출(Emotion 해시 클래스)이라 testid 선택자 + !important 로
+# 주요 표면만 정확히 재도색한다. 텍스트는 !important 없이(인라인 시맨틱 색 보존) 특이도로.
+_LIGHT_OVERRIDE = """
+<style>
+.stApp { background:
+    radial-gradient(1100px 460px at 50% -8%, #dfe7f533 0%, transparent 60%),
+    #f7f8fa !important; }
+[data-testid="stHeader"] { background: transparent !important; }
+[data-testid="stSidebar"] { background: #ffffff !important; border-right: 1px solid #dce2ea !important; }
+[data-testid="stMetric"], [data-testid="stExpander"] { background: #ffffff !important; border-color: #dce2ea !important; }
+[data-testid="stMetric"]:hover { border-color: #b9c2d0 !important; }
+[data-testid="stMetricValue"] { color: #1a2233 !important; }
+[data-testid="stDataFrame"], [data-testid="stTable"] { border-color: #dce2ea !important; }
+.stTabs [data-baseweb="tab-list"] { border-bottom-color: #dce2ea !important; }
+.stTabs [aria-selected="true"] { background: #ffffff !important; }
+/* 입력·선택·버튼 (baseweb) */
+[data-baseweb="select"] > div, [data-baseweb="input"] > div, [data-baseweb="base-input"],
+.stTextInput input, .stNumberInput input, [data-baseweb="popover"] [role="listbox"],
+[data-testid="stChatInput"] { background: #ffffff !important; border-color: #dce2ea !important; }
+[data-testid="stWidgetLabel"] p, .stRadio label, .stCheckbox label { color: #3a4353 !important; }
+/* 버튼·세그먼트·라디오 pill·팝오버 트리거 — 다크 표면 → 라이트 (primary 파랑은 유지) */
+.stButton button:not([kind="primary"]):not([data-testid="stBaseButton-primary"]),
+[data-testid="stBaseButton-secondary"], [data-testid="stBaseButton-tertiary"],
+[data-testid="stBaseButton-borderless"], [data-testid="stFormSubmitButton"] button,
+[data-testid="stPopover"] button, [data-testid="stButtonGroup"] button,
+[data-baseweb="segmented-control"] button, [data-testid="stRadio"] label {
+  background: #ffffff !important; color: #1a2233 !important; border-color: #dce2ea !important; }
+[data-testid="stButtonGroup"] button[aria-checked="true"],
+[data-testid="stButtonGroup"] button[aria-selected="true"],
+[data-testid="stRadio"] label[data-checked="true"] {
+  background: #eaf1ff !important; color: #1a56db !important; border-color: #9fc0f5 !important; }
+[data-testid="stButtonGroup"] button:hover, .stButton button:hover { border-color: #9fc0f5 !important; }
+/* 팝오버/드롭다운 내용 배경 */
+[data-baseweb="popover"] [data-testid="stPopoverBody"], [data-baseweb="menu"] {
+  background: #ffffff !important; }
+/* 본문 텍스트 — !important 없이(인라인 시맨틱 색 보존) 특이도로 다크 기본색만 교체 */
+.stApp p, .stApp li, .stApp label, .stMarkdown, [data-testid="stMarkdownContainer"],
+.stApp h1, .stApp h2, .stApp h3, .stApp h4, [data-testid="stMetricLabel"] p { color: #1a2233; }
+[data-testid="stCaptionContainer"], .stApp small { color: #5c6472; }
+.stCode, pre, code { background: #eef1f6 !important; color: #1a2233 !important; }
+/* alert/info 톤 (라이트) */
+[data-testid="stAlert"] { background: #eef2fb !important; }
+::-webkit-scrollbar-track { background: #eef1f6; }
+::-webkit-scrollbar-thumb { background: #c3ccd8; }
+::-webkit-scrollbar-thumb:hover { background: #a9b4c4; }
+</style>
+"""
+
+
+def inject_global_css(light: bool | None = None):
+    """전역 테마 CSS 주입 — 표면 CSS 변수(모드별) + 공통 규칙(+라이트 오버라이드).
+
+    light 미지정 시 세션 상태(theme.is_light)를 읽어 자동 결정."""
     import streamlit as st
-    st.markdown(_CSS, unsafe_allow_html=True)
+    if light is None:
+        light = is_light()
+    st.markdown(f"<style>.stApp {{\n{_surface_vars(light)}\n}}</style>" + _CSS,
+                unsafe_allow_html=True)
+    if light:
+        st.markdown(_LIGHT_OVERRIDE, unsafe_allow_html=True)
+
+
+def is_light() -> bool:
+    """현재 라이트 모드 여부 — 세션 상태(기본 다크). streamlit 없으면 False."""
+    try:
+        import streamlit as st
+        return bool(st.session_state.get("tn_light", False))
+    except Exception:
+        return False
 
 
 def render(html: str):
