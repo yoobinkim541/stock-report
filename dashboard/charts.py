@@ -11,7 +11,7 @@ from dashboard import theme
 _GREEN = theme.GREEN
 _RED = theme.RED
 _BLUE = theme.BLUE
-_GRID = theme.GRID
+_GRID = theme.AXIS_GRID
 
 
 def _go():
@@ -249,9 +249,9 @@ def price_line(hist, ticker: str = "", avg_cost=None, trades=None, view_days=Non
                                      name=f"MA{win}", line=dict(width=1)))
     # 평단(avg cost) 수평 점선 — 보유 종목의 매수 평균가를 차트에 오버레이
     if avg_cost and avg_cost > 0:
-        fig.add_hline(y=avg_cost, line=dict(color=theme.MUTED, dash="dash", width=1.2),
+        fig.add_hline(y=avg_cost, line=dict(color=theme.AXIS_TEXT, dash="dash", width=1.2),
                       annotation_text=f"평단 ${avg_cost:,.2f}", annotation_position="top left",
-                      annotation_font=dict(color=theme.MUTED, size=11))
+                      annotation_font=dict(color=theme.AXIS_TEXT, size=11))
     _add_trade_markers(fig, hist, trades or [])
     fig.update_layout(margin=dict(t=10, b=10, l=10, r=10),
                       legend=dict(orientation="h", y=1.1), hovermode="x unified")
@@ -275,9 +275,9 @@ def price_candle(hist, ticker: str = "", avg_cost=None, trades=None, view_days=N
             fig.add_trace(go.Scatter(x=hist.index, y=close.rolling(win).mean(),
                                      name=f"MA{win}", line=dict(width=1)))
     if avg_cost and avg_cost > 0:
-        fig.add_hline(y=avg_cost, line=dict(color=theme.MUTED, dash="dash", width=1.2),
+        fig.add_hline(y=avg_cost, line=dict(color=theme.AXIS_TEXT, dash="dash", width=1.2),
                       annotation_text=f"평단 ${avg_cost:,.2f}", annotation_position="top left",
-                      annotation_font=dict(color=theme.MUTED, size=11))
+                      annotation_font=dict(color=theme.AXIS_TEXT, size=11))
     _add_trade_markers(fig, hist, trades or [])
     fig.update_layout(margin=dict(t=10, b=10, l=10, r=10),
                       legend=dict(orientation="h", y=1.1),
@@ -449,9 +449,9 @@ def nav_curve(points: list[dict], currency: str = "₩"):
                              line=dict(color=color, width=2), fill="tozeroy",
                              fillcolor=("rgba(52,211,153,0.08)" if up else "rgba(248,113,113,0.08)"),
                              hovertemplate="%{x}<br>NAV " + currency + "%{y:,.0f}<extra></extra>"))
-    fig.add_hline(y=navs[0], line=dict(color=theme.MUTED, dash="dash", width=1),
+    fig.add_hline(y=navs[0], line=dict(color=theme.AXIS_TEXT, dash="dash", width=1),
                   annotation_text="인셉션", annotation_position="top left",
-                  annotation_font=dict(color=theme.MUTED, size=11))
+                  annotation_font=dict(color=theme.AXIS_TEXT, size=11))
     lo, hi = min(navs), max(navs)
     pad = (hi - lo) * 0.15 or hi * 0.01 or 1.0
     fig.update_layout(margin=dict(t=10, b=10, l=10, r=10), height=280, showlegend=False,
@@ -512,10 +512,10 @@ def intraday_candle(hist, ticker: str = "", trades=None, vwap=None,
                       fillcolor="rgba(59,130,246,0.10)", line=dict(color="#3b82f6", width=1))
     for lv in (levels or []):
         if lv.get("y"):
-            fig.add_hline(y=lv["y"], line=dict(color=lv.get("color", theme.MUTED),
+            fig.add_hline(y=lv["y"], line=dict(color=lv.get("color", theme.AXIS_TEXT),
                                                dash="dash", width=1.1),
                           annotation_text=lv.get("label", ""), annotation_position="right",
-                          annotation_font=dict(size=10, color=lv.get("color", theme.MUTED)))
+                          annotation_font=dict(size=10, color=lv.get("color", theme.AXIS_TEXT)))
     _add_trade_markers(fig, hist, trades or [])
     fig.update_layout(margin=dict(t=10, b=10, l=10, r=10),
                       legend=dict(orientation="h", y=1.1), hovermode="x unified")
@@ -534,7 +534,7 @@ def analyst_ratings(dist: dict):
     if not any(counts):
         return _t(go.Figure())
     top = counts.index(max(counts))
-    sem = {0: _RED, 1: _RED, 2: theme.MUTED, 3: _GREEN, 4: _GREEN}
+    sem = {0: _RED, 1: _RED, 2: theme.AXIS_TEXT, 3: _GREEN, 4: _GREEN}
     colors = [sem[i] if i == top else "#2a2e39" for i in range(5)]
     fig = go.Figure(go.Bar(
         x=[lb for _, lb in order], y=counts,
@@ -585,9 +585,9 @@ def target_price_fan(hist, price, high, mean, low, currency: str = "$"):
         fig.add_annotation(x=future, y=tv, xanchor="left", showarrow=False,
                            text=f" {name} {fmt(tv)} ({(tv / p - 1) * 100:+.1f}%)",
                            font=dict(size=11, color=color))
-    fig.add_hline(y=p, line=dict(color=theme.MUTED, dash="dash", width=1),
+    fig.add_hline(y=p, line=dict(color=theme.AXIS_TEXT, dash="dash", width=1),
                   annotation_text=f"현재 {fmt(p)}", annotation_position="bottom left",
-                  annotation_font=dict(size=10, color=theme.MUTED))
+                  annotation_font=dict(size=10, color=theme.AXIS_TEXT))
     fig.update_layout(margin=dict(t=10, b=10, l=10, r=150), height=340, showlegend=False,
                       hovermode="closest")
     return _t(fig)
@@ -688,7 +688,7 @@ def _add_event_markers(fig, hist, events, panes) -> None:
         if base != base or ts < low.index[0]:       # NaN·범위 밖 스킵
             continue
         g = groups.setdefault((str(ev.get("marker", "•"))[:1],
-                               ev.get("color") or theme.MUTED),
+                               ev.get("color") or theme.AXIS_TEXT),
                               {"x": [], "y": [], "hover": []})
         g["x"].append(ts)
         g["y"].append(float(base) * 0.985)
@@ -892,7 +892,7 @@ def price_chart(hist, ticker: str = "", *, kind: str = "line", avg_cost=None,
                               hovertemplate="%{y:+.2f}%<extra>" + lab + "</extra>",
                               line=dict(color=_CMP_COLORS[i % len(_CMP_COLORS)],
                                         width=1.6)))
-        fig.add_hline(y=0, line=dict(color=theme.MUTED, dash="dot", width=0.8),
+        fig.add_hline(y=0, line=dict(color=theme.AXIS_TEXT, dash="dot", width=0.8),
                       row=1 if panes > 1 else None, col=1 if panes > 1 else None)
     elif kind == "candle" and has_ohlc:
         fig.add_trace(go.Candlestick(
@@ -975,9 +975,9 @@ def price_chart(hist, ticker: str = "", *, kind: str = "line", avg_cost=None,
                           line=dict(color=_RED, width=1, dash="dash")))
 
     if avg_cost and avg_cost > 0:
-        fig.add_hline(y=avg_cost, line=dict(color=theme.MUTED, dash="dash", width=1.2),
+        fig.add_hline(y=avg_cost, line=dict(color=theme.AXIS_TEXT, dash="dash", width=1.2),
                       annotation_text=f"평단 {avg_cost:,.2f}", annotation_position="top left",
-                      annotation_font=dict(color=theme.MUTED, size=11),
+                      annotation_font=dict(color=theme.AXIS_TEXT, size=11),
                       row=1 if panes > 1 else None, col=1 if panes > 1 else None)
     _add_trend_lines(fig, trend_lines or [])
     _add_top_indicators(fig, hist, supertrend=supertrend, envelope=envelope,
@@ -1048,7 +1048,7 @@ def price_chart(hist, ticker: str = "", *, kind: str = "line", avg_cost=None,
                                  line=dict(color="#3b82f6", width=1.2)), row=macd_row, col=1)
         fig.add_trace(go.Scatter(x=hist.index, y=signal, name="시그널(9)", showlegend=False,
                                  line=dict(color="#f59e0b", width=1.2)), row=macd_row, col=1)
-        fig.add_hline(y=0, line=dict(color=theme.MUTED, dash="dot", width=0.7),
+        fig.add_hline(y=0, line=dict(color=theme.AXIS_TEXT, dash="dot", width=0.7),
                       row=macd_row, col=1)
         fig.update_yaxes(row=macd_row, col=1, nticks=3)
 
@@ -1080,9 +1080,9 @@ def price_chart(hist, ticker: str = "", *, kind: str = "line", avg_cost=None,
                                  line=dict(color=_GREEN, width=1.2)), row=aroon_row, col=1)
         fig.add_trace(go.Scatter(x=hist.index, y=ar_dn, name="Aroon Down", showlegend=False,
                                  line=dict(color=_RED, width=1.2)), row=aroon_row, col=1)
-        fig.add_hline(y=70, line=dict(color=theme.MUTED, dash="dot", width=0.7),
+        fig.add_hline(y=70, line=dict(color=theme.AXIS_TEXT, dash="dot", width=0.7),
                       row=aroon_row, col=1)
-        fig.add_hline(y=30, line=dict(color=theme.MUTED, dash="dot", width=0.7),
+        fig.add_hline(y=30, line=dict(color=theme.AXIS_TEXT, dash="dot", width=0.7),
                       row=aroon_row, col=1)
         fig.update_yaxes(range=[0, 100], row=aroon_row, col=1, tickvals=[30, 70])
 
@@ -1138,12 +1138,12 @@ def price_chart(hist, ticker: str = "", *, kind: str = "line", avg_cost=None,
             fig.add_trace(go.Scatter(x=est_x, y=est_y, name="예상 EPS", showlegend=False,
                                      mode="markers",
                                      marker=dict(symbol="line-ew-open", size=14,
-                                                 color=theme.MUTED,
-                                                 line=dict(width=2, color=theme.MUTED)),
+                                                 color=theme.AXIS_TEXT,
+                                                 line=dict(width=2, color=theme.AXIS_TEXT)),
                                      hoverinfo="skip"),
                           row=eps_row, col=1)
         fig.update_yaxes(row=eps_row, col=1, nticks=3, title_text="EPS",
-                         title_font=dict(size=9, color=theme.MUTED))
+                         title_font=dict(size=9, color=theme.AXIS_TEXT))
 
     # ── 펀더멘털 패널 — 분기(연간) 매출 바 + 순이익 라인 (TV img08 갭 · 전유 데이터) ──
     if fund_row:
@@ -1179,7 +1179,7 @@ def price_chart(hist, ticker: str = "", *, kind: str = "line", avg_cost=None,
                                      marker=dict(size=5, color=ni_colors),
                                      line=dict(color="#f59e0b", width=1.3)),
                           row=fund_row, col=1)
-        fig.add_hline(y=0, line=dict(color=theme.MUTED, dash="dot", width=0.7),
+        fig.add_hline(y=0, line=dict(color=theme.AXIS_TEXT, dash="dot", width=0.7),
                       row=fund_row, col=1)
         fig.update_yaxes(row=fund_row, col=1, nticks=3, tickformat="~s")
 
@@ -1561,7 +1561,7 @@ def growth_compare(dates, port_pct, qqq_pct):
     fig.add_trace(go.Scatter(x=dates, y=qqq_pct, name="QQQ",
                              hovertemplate="%{y:+.2f}%<extra>QQQ</extra>",
                              line=dict(color="#f59e0b", width=1.4, dash="dot")))
-    fig.add_hline(y=0, line=dict(color=theme.MUTED, dash="dot", width=0.7))
+    fig.add_hline(y=0, line=dict(color=theme.AXIS_TEXT, dash="dot", width=0.7))
     fig.update_layout(margin=dict(t=8, b=10, l=10, r=12), height=280,
                       hovermode="x unified",
                       legend=dict(orientation="h", x=0.0, y=1.0, yanchor="bottom",
@@ -1598,7 +1598,7 @@ def price_levels(price: float, levels: list, zones: list | None = None):
             showlegend=False, hovertemplate=f"{row_label}: %{{x:,.2f}}<extra></extra>"))
         seen_kind.add(kind)
     if price:
-        fig.add_vline(x=price, line=dict(color=theme.TEXT, dash="dash", width=1.2),
+        fig.add_vline(x=price, line=dict(color=theme.AXIS_STRONG, dash="dash", width=1.2),
                       annotation_text=f"현재 {price:,.0f}", annotation_position="top")
     fig.update_layout(margin=dict(t=26, b=10, l=10, r=30),
                       height=max(180, 34 * len({r for r, _, _ in levels}) + 60),
