@@ -735,6 +735,10 @@ h1 {{ font-size: 1.7rem !important; }}
 /* ── 캡션 가독 (흐린 회색 상향) ──────────────────────────────────────── */
 [data-testid="stCaptionContainer"] {{ color: {MUTED} !important; }}
 
+/* ── Streamlit dev 크롬 숨김 (Deploy 버튼·데코) — 개인 대시보드 깔끔하게 ──── */
+[data-testid="stAppDeployButton"], .stDeployButton {{ display: none !important; }}
+[data-testid="stDecoration"] {{ display: none !important; }}
+
 /* ── 모바일 반응형 (≤600px) — 커스텀 컴포넌트 축소·재배치 ─────────────── */
 @media (max-width: 600px) {{
   /* 신규 카드·스트립 — 모바일 축소 (인라인 스타일은 !important 로 우선) */
@@ -743,9 +747,11 @@ h1 {{ font-size: 1.7rem !important; }}
   div[style*="min-width:104px"] {{ min-width: 44% !important; }}
   .tn-tape {{ font-size: 0.7rem; }}
 
-  .block-container {{ padding-top: 1.4rem; padding-left: .8rem; padding-right: .8rem; }}
+  .block-container {{ padding-top: 1.1rem; padding-left: .7rem; padding-right: .7rem;
+                      padding-bottom: 1.6rem; }}
   h1 {{ font-size: 1.4rem !important; }}
-  .tn-hero {{ gap: 12px; margin: 2px 0 14px; }}
+  h2, h3 {{ font-size: 1.08rem !important; }}
+  .tn-hero {{ gap: 12px; margin: 2px 0 12px; }}
   .tn-badge {{ width: 46px; height: 46px; font-size: .95rem; }}
   .tn-hero-name {{ font-size: 1.2rem; }}
   .tn-price {{ font-size: 1.6rem; }}
@@ -753,6 +759,28 @@ h1 {{ font-size: 1.7rem !important; }}
   /* 워치리스트: 스파크라인 숨기고 3열로 (좁은 폭 판독) */
   .tn-wl-row {{ grid-template-columns: 1fr auto auto; gap: 8px; }}
   .tn-wl-spark {{ display: none; }}
+
+  /* ── 메트릭 카드 — 데스크톱 3열이 모바일에선 세로 스택되며 각 카드가 화면을 꽉
+        채워 세로 공간이 폭발한다. 패딩·값 폰트를 줄여 컴팩트하게 (핵심 개선). ── */
+  [data-testid="stMetric"] {{ padding: 9px 12px 8px !important; }}
+  [data-testid="stMetricValue"] {{ font-size: 1.25rem !important; }}
+  [data-testid="stMetricLabel"] p {{ font-size: .66rem !important; }}
+  [data-testid="stMetricDelta"] {{ font-size: .78rem !important; }}
+  /* 세로 스택 간격 축소 (기본 1rem gap → 촘촘) — 카드·섹션이 덜 벌어짐 */
+  [data-testid="stVerticalBlock"] {{ gap: .55rem !important; }}
+  [data-testid="stHorizontalBlock"] {{ gap: .5rem !important; }}
+  /* 탭·버튼 터치 타깃은 유지하되 폰트만 소폭 축소 */
+  .stTabs [data-baseweb="tab"] {{ padding: 7px 10px; font-size: .84rem; }}
+  [data-testid="stExpander"] summary {{ padding: 8px 12px; }}
+}}
+
+/* ── 소형 폰(≤430px) — 한 단계 더 촘촘 ──────────────────────────────── */
+@media (max-width: 430px) {{
+  [data-testid="stMetricValue"] {{ font-size: 1.12rem !important; }}
+  [data-testid="stMetric"] {{ padding: 8px 10px 7px !important; }}
+  .tn-price {{ font-size: 1.4rem; }}
+  .tn-badge {{ width: 40px; height: 40px; font-size: .85rem; }}
+  .block-container {{ padding-left: .55rem; padding-right: .55rem; }}
 }}
 </style>
 """
