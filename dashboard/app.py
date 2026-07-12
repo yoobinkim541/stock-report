@@ -19,7 +19,19 @@ import ticker_names  # 종목명 resolver (검색·표시 — 루트 모듈, sys
 from dashboard import auth, cached, data, theme
 
 st.set_page_config(page_title="퀀트 터미널", page_icon="📊", layout="wide")
-theme.inject_global_css()
+
+# 테마 모드 — 세션 없으면 쿠키(지난 방문 선택)에서 복원 (기본 다크). inject 전에 확정.
+if "tn_light" not in st.session_state:
+    try:
+        st.session_state["tn_light"] = (st.context.cookies.get("tn_theme") == "light")
+    except Exception:
+        st.session_state["tn_light"] = False
+theme.inject_global_css()   # 세션 tn_light 를 읽어 라이트/다크 표면 CSS 주입
+# 선택 지속 — 매 런 쿠키를 현재 모드로 동기화 (다음 전체 새로고침에서 무플래시 복원 근접)
+st.components.v1.html(
+    "<script>parent.document.cookie='tn_theme="
+    + ("light" if st.session_state["tn_light"] else "dark")
+    + "; path=/; max-age=31536000; SameSite=Lax'</script>", height=0)
 
 # 서버 재기동 감지 워치독 — 배포/재시작 후 좀비 탭이 자동 새로고침 → 로그인 게이트
 st.components.v1.html(auth.reconnect_watchdog_html(), height=0)
@@ -83,7 +95,11 @@ with st.sidebar:
         for _k in ("scr_done", "bt_done"):
             st.session_state.pop(_k, None)
         st.rerun()
-    st.caption(f"⏱ {datetime.now().strftime('%m/%d %H:%M')} 기준 · 캐시 15~60분")
+    _lc, _tc = st.columns([1, 1.1], vertical_alignment="center")
+    _lc.caption(f"⏱ {datetime.now().strftime('%m/%d %H:%M')} · 캐시 15~60분")
+    # ☀️/🌙 테마 토글 — key=tn_light 라 다음 런 최상단 inject 가 새 값을 읽음(쿠키 지속)
+    _tc.toggle("☀️ 라이트" if st.session_state.get("tn_light") else "🌙 다크",
+               key="tn_light", help="라이트/다크 모드 전환 (선택은 이 브라우저에 기억)")
 
     # 보유 종목 워치리스트 (터미널 레일 — 무네트워크: 스냅샷 수익률)
     _wl = sorted(_holdings, key=lambda h: h.get("value", 0) or 0, reverse=True)

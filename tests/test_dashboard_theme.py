@@ -118,7 +118,7 @@ def test_apply_plotly_theme():
     fig = theme.apply_plotly_theme(go.Figure())
     assert fig.layout.paper_bgcolor == "rgba(0,0,0,0)"
     assert "JetBrains" in fig.layout.font.family
-    assert fig.layout.xaxis.gridcolor == theme.GRID
+    assert fig.layout.xaxis.gridcolor == theme.AXIS_GRID
 
 
 def test_theme_import_no_streamlit():
@@ -326,3 +326,31 @@ def test_market_temp_spark():
     h2 = theme.market_temp_html(0.2, spark=[0.5, 0.1])
     assert "식는 중" in h2
     assert "일 ·" not in theme.market_temp_html(0.2, spark=None)
+
+
+def test_light_dark_surface_vars():
+    """표면 CSS 변수 — 모드별 값 주입·plotly 중립 그레이 분리 (라이트모드 W)."""
+    dark = theme._surface_vars(False)
+    light = theme._surface_vars(True)
+    assert "--tn-bg:#0a0e17" in dark and "--tn-panel:#131722" in dark
+    assert "--tn-bg:#f7f8fa" in light and "--tn-panel:#ffffff" in light
+    assert "--tn-text:#1a2233" in light
+    # 표면 상수는 var 참조 (HTML 자동 전환) — plotly 는 별도 중립 hex
+    assert theme.PANEL == "var(--tn-panel)" and theme.TEXT == "var(--tn-text)"
+    assert theme.AXIS_GRID.startswith("rgba") and theme.AXIS_TEXT.startswith("#")
+    # is_light — streamlit 없으면 False (순수 fallback)
+    assert theme.is_light() is False
+
+
+def test_css_uses_vars_not_hardcoded_surfaces():
+    """_CSS 가 표면색을 var 로 참조 (하드코딩 다크 hex 제거 — 라이트 전환 가능)."""
+    css = theme._CSS
+    assert "var(--tn-panel)" in css and "var(--tn-border)" in css and "var(--tn-text)" in css
+
+
+def test_light_override_covers_native_surfaces():
+    """라이트 오버라이드 — 앱/사이드바/메트릭/입력 등 네이티브 표면 재도색 규칙 존재."""
+    ov = theme._LIGHT_OVERRIDE
+    for sel in ('.stApp {', '[data-testid="stSidebar"]', '[data-testid="stMetric"]',
+                '[data-baseweb="select"]', "#f7f8fa"):
+        assert sel in ov, f"누락: {sel}"

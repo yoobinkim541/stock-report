@@ -88,15 +88,20 @@ def compare_bounds_json(main_hist, compare: dict, view_days=None) -> str:
 # ── HTML/JS 템플릿 (평문 — f-string 아님 · @@TOKEN@@ 치환) ─────────────────────
 _TEMPLATE = r"""
 <style>
+  /* 표면색 = CSS 변수 — 기본 다크, #wrap.tn-light 에서 라이트 재정의 (부모 테마와 동조) */
+  #wrap { --e-panel:#131722; --e-text:#d1d4dc; --e-border:#1e222d; --e-muted:#9198a6;
+          --e-xh:#6b7385; --e-bub:#2a2e39; }
+  #wrap.tn-light { --e-panel:#ffffff; --e-text:#1a2233; --e-border:#dce2ea; --e-muted:#5c6472;
+                   --e-xh:#9aa3b2; --e-bub:#e9edf3; }
   #tools { display:flex; gap:6px; align-items:center; flex-wrap:wrap; margin:0 0 6px 2px;
            font:12px Pretendard, -apple-system, sans-serif; }
-  .tbtn { box-sizing:border-box; background:#131722; color:#d1d4dc; border:1px solid #1e222d; border-radius:6px;
+  .tbtn { box-sizing:border-box; background:var(--e-panel); color:var(--e-text); border:1px solid var(--e-border); border-radius:6px;
           padding:3px 9px; font:12px Pretendard, -apple-system, sans-serif; cursor:pointer;
           line-height:1.5; white-space:nowrap; }
   .tbtn:hover { border-color:#2f81f7; }
   .tbtn.on { border-color:#2f81f7; color:#2f81f7; background:rgba(47,129,247,.08); }
-  .tsep { width:1px; align-self:stretch; background:#1e222d; margin:0 2px; }
-  #tool-hint { color:#9198a6; font-size:11px; margin-left:4px; }
+  .tsep { width:1px; align-self:stretch; background:var(--e-border); margin:0 2px; }
+  #tool-hint { color:var(--e-muted); font-size:11px; margin-left:4px; }
   /* 좌측 도구 독 (풀뷰 — TradingView 배치) */
   #wrap.dock { display:grid; grid-template-columns:128px minmax(0, 1fr); gap:10px;
                align-items:start; width:100%; max-width:100%; overflow:hidden; }
@@ -150,11 +155,11 @@ _TEMPLATE = r"""
   <button id="bt-clear" class="tbtn" title="직접 그린 도형 전체 제거">🗑 지우기</button>
   <span id="tool-hint"></span>
   <span id="ohlcbar" style="margin-left:auto;font:11px 'JetBrains Mono', ui-monospace, monospace;
-        color:#9198a6;white-space:nowrap"></span>
+        color:var(--e-muted);white-space:nowrap"></span>
 </div>
 <div id="chartcol">
 <div id="replaybar" style="display:none; gap:6px; align-items:center; margin:0 0 6px 2px;
-     font:12px Pretendard, -apple-system, sans-serif; color:#d1d4dc">
+     font:12px Pretendard, -apple-system, sans-serif; color:var(--e-text)">
   <button id="rp-back" class="tbtn" title="10봉 뒤로">⏮</button>
   <button id="rp-play" class="tbtn" title="재생 / 일시정지">▶</button>
   <button id="rp-step" class="tbtn" title="한 봉 앞으로">▶|</button>
@@ -167,8 +172,8 @@ _TEMPLATE = r"""
 <div id="chart" style="width:100%;min-height:@@HEIGHT@@px"></div>
 </div>
 </div>
-<div id="detail" style="display:none;margin-top:6px;padding:8px 12px;border:1px solid #1e222d;
-  border-radius:8px;background:#131722;color:#d1d4dc;
+<div id="detail" style="display:none;margin-top:6px;padding:8px 12px;border:1px solid var(--e-border);
+  border-radius:8px;background:var(--e-panel);color:var(--e-text);
   font:12px 'JetBrains Mono', ui-monospace, monospace"></div>
 <script src="@@CDN@@"></script>
 <script>
@@ -185,6 +190,7 @@ _TEMPLATE = r"""
   const pctMode = @@PCT_MODE@@;                  // 비교(%) 모드 — 가격 포맷 대신 %
   const yLog = @@Y_LOG@@;                        // 로그 스케일 — 도형 y 좌표는 log10 공간
   if (@@DOCK@@) document.getElementById("wrap").classList.add("dock");   // 풀뷰 좌측 도구 독
+  if (@@LIGHTMODE@@) document.getElementById("wrap").classList.add("tn-light");  // 부모 라이트 테마 동조
   const live = @@LIVE@@;                         // ⚡ live — 피더 localStorage 실시간 패치
   function vhFit() {                             // same-origin iframe — frameElement 직접 리사이즈
     try {
@@ -372,12 +378,12 @@ _TEMPLATE = r"""
   const xhV = document.createElement("div");
   const xhH = document.createElement("div");
   const xhY = document.createElement("div");
-  xhV.style.cssText = "position:absolute;top:0;left:0;width:0;border-left:1px dashed #6b7385;" +
+  xhV.style.cssText = "position:absolute;top:0;left:0;width:0;border-left:1px dashed var(--e-xh);" +
     "pointer-events:none;display:none;z-index:3";
-  xhH.style.cssText = "position:absolute;top:0;left:0;height:0;border-top:1px dashed #6b7385;" +
+  xhH.style.cssText = "position:absolute;top:0;left:0;height:0;border-top:1px dashed var(--e-xh);" +
     "pointer-events:none;display:none;z-index:3";
   xhY.style.cssText = "position:absolute;top:0;left:0;pointer-events:none;display:none;z-index:4;" +
-    "background:#2a2e39;color:#d1d4dc;font:10px 'JetBrains Mono',monospace;" +
+    "background:var(--e-bub);color:var(--e-text);font:10px 'JetBrains Mono',monospace;" +
     "padding:1px 4px;border-radius:3px;transform-origin:left center";
   let xhRaf = null, xhEvt = null;                      // 부착은 newPlot 후 (newPlot 이 div 를 비움)
   function xhHide() { xhV.style.display = xhH.style.display = xhY.style.display = "none"; }
@@ -1353,7 +1359,7 @@ _TEMPLATE = r"""
     const farRight = bounds[bounds.length - 1][0] + 400 * 864e5;
     shapes.push({type: "rect", name: "replay-curtain", xref: "x", yref: "paper",
                  x0: toISO(replayCut), x1: toISO(farRight), y0: 0, y1: 1,
-                 fillcolor: "#131722", opacity: 0.96, line: {width: 0}, layer: "above"});
+                 fillcolor: "rgba(128,135,150,0.16)", opacity: 1, line: {width: 0}, layer: "above"});
     drawGuard++;
     Plotly.relayout(gd, {shapes: shapes}).then(() => { undraw(); });
     const xr = gd.layout.xaxis.range;
@@ -1595,7 +1601,7 @@ _TEMPLATE = r"""
       el.innerHTML = `<b>${c[1]}</b> ${c[7] || ""} &nbsp;·&nbsp; 수량 ${c[2]}주 ` +
         `&nbsp;·&nbsp; 체결 ${c[9] || ""} ${Number(c[3]).toLocaleString()} ` +
         `&nbsp;·&nbsp; 평단 ${c[4] != null ? Number(c[4]).toLocaleString() : "—"} ` +
-        `<span style="color:#9198a6">${c[5] || ""} · ${c[6] || ""} ${c[8] ? "· " + c[8] : ""}</span>`;
+        `<span style="color:var(--e-muted)">${c[5] || ""} · ${c[6] || ""} ${c[8] ? "· " + c[8] : ""}</span>`;
     });
   });
 })();
@@ -1611,7 +1617,8 @@ def pannable_chart_html(fig, hist, *, height: int = 460, view_days=None,
                         y_log: bool = False,
                         store_key: str | None = None,
                         dock: bool = False,
-                        live: bool = False) -> str:
+                        live: bool = False,
+                        light: bool = False) -> str:
     """fig(charts.price_chart 산출) → 자동 y 리스케일·드로잉 도구·인차트 마커 상세 임베드 HTML.
 
     bounds_json — y 맞춤 프레임 오버라이드 (비교 모드: compare_bounds_json 의 % 프레임).
@@ -1623,6 +1630,8 @@ def pannable_chart_html(fig, hist, *, height: int = 460, view_days=None,
     live — ⚡자동갱신: realtime_feed_html 피더의 localStorage push(tnrt:티커)를 받아
            마지막 봉·현재가선을 in-place 패치. 호출부는 live 시 서버측 실시간 bake 를
            생략해 html 을 바이트 안정으로 유지해야 함(재마운트=드로잉 리셋 방지).
+    light — 부모 라이트 테마 동조: 도구바·크로스헤어·리드아웃을 라이트 색으로
+            (#wrap.tn-light CSS 변수). 차트 배경은 투명이라 페이지 색을 그대로 따름.
     """
     bounds = bounds_json if bounds_json is not None else price_bounds_json(hist)
     config = json.dumps({
@@ -1646,6 +1655,7 @@ def pannable_chart_html(fig, hist, *, height: int = 460, view_days=None,
             .replace("@@LAST_CLOSE@@", json.dumps(last_close))
             .replace("@@STORE_KEY@@", json.dumps(store_key))
             .replace("@@DOCK@@", json.dumps(bool(dock)))
+            .replace("@@LIGHTMODE@@", json.dumps(bool(light)))
             .replace("@@CONFIG@@", config)
             .replace("@@BOUNDS@@", bounds)
             .replace("@@FIG@@", fig.to_json()))       # fig JSON 은 마지막 (토큰 오염 차단)
