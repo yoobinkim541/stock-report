@@ -249,3 +249,16 @@ def test_embed_new_tools_contract():
         assert token in html, f"누락: {token}"
     # 비교(%) 모드에선 실가격×거래량 도구 불가 안내가 배선돼 있어야
     assert "비교(%) 모드에선 사용 불가" in html
+
+
+def test_embed_pinch_zoom_contract():
+    """📱 모바일 핀치 줌 — 터치 핸들러·앵커 고정·페이지줌 차단·클램프 계약."""
+    hist = _hist()
+    fig = charts.price_chart(hist, "T", kind="candle", show_volume=True)
+    html = plotly_embed.pannable_chart_html(fig, hist, view_days=180)
+    for token in ('addEventListener("touchstart"', '"touchmove"', '"touchend"', '"touchcancel"',
+                  "passive: false", "capture: true", "anchorMs", "minSpan", "dataSpan",
+                  "e.preventDefault()"):
+        assert token in html, f"누락: {token}"
+    # 2손가락 게이트 — 1손가락 팬(plotly)은 방해하지 않음
+    assert "e.touches.length !== 2" in html

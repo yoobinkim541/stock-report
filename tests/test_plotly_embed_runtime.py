@@ -699,3 +699,111 @@ console.log("OK tools2 bounded");
     r = subprocess.run([_NODE, str(runner)], capture_output=True, text=True, timeout=30)
     assert r.returncode == 0, f"tools2 loop fail: {r.stdout}\n{r.stderr}"
     assert "OK tools2 bounded" in r.stdout
+
+
+# ── 📱 모바일 핀치 줌 — 두 손가락 x축 폭 조절 (앵커 고정·클램프·페이지줌 차단) ──
+_PINCH_HARNESS = r"""
+const relayoutCalls = [];
+let gd = null;
+const els = {};
+const NSEW = { getBoundingClientRect() { return { left: 0, top: 0, right: 1000, bottom: 400,
+                                                  width: 1000, height: 400 }; } };
+function el(id) {
+  if (!els[id]) els[id] = { id, style: {}, innerHTML: "", textContent: "", _h: {}, _t: {},
+    _s: new Set(id === "bt-mag" ? ["on"] : []),
+    classList: { toggle(c, on) { on ? this._s.add(c) : this._s.delete(c); } },
+    on(e, f) { this._h[e] = f; }, emit(e, p) { if (this._h[e]) this._h[e](p); },
+    addEventListener(e, f) { (this._t[e] = this._t[e] || []).push(f); },
+    fire(e, p) { (this._t[e] || []).forEach(f => f(p)); },
+    appendChild() {}, querySelector(sel) { return sel === ".nsewdrag" ? NSEW : null; },
+    getBoundingClientRect() { return { top: 0, left: 0, width: 1000, height: 400 }; } };
+  els[id].classList._s = els[id]._s;
+  if (id === "chart") gd = els[id];
+  return els[id];
+}
+global.document = { getElementById: el, createElement: () => ({ style: {}, textContent: "" }) };
+global.window = { frameElement: null, parent: { innerHeight: 900, addEventListener() {} },
+                  addEventListener() {} };
+global.performance = { now: () => 1 };
+global.requestAnimationFrame = () => null;
+global.Plotly = {
+  newPlot(g, d, l) { g.data = d; g.layout = l; return { then(cb) { cb(); return this; } }; },
+  relayout(g, u) { relayoutCalls.push(u);
+    for (const k of Object.keys(u)) if (!k.includes(".") && !k.includes("[")) g.layout[k] = u[k];
+    if (u["xaxis.range"]) g.layout.xaxis = Object.assign(g.layout.xaxis || {}, {range: u["xaxis.range"]});
+    return { then(cb) { cb(); return this; } }; },
+  addTraces() {}, deleteTraces() {},
+  Plots: { resize() {} },
+};
+const _ls = {};
+global.localStorage = { getItem: (k) => (k in _ls ? _ls[k] : null),
+                        setItem: (k, v) => { _ls[k] = String(v); }, removeItem: (k) => { delete _ls[k]; } };
+global.setTimeout = (fn) => { fn(); return 0; };
+global.clearTimeout = () => {};
+global.setInterval = () => 0;
+__SCRIPT__
+function fail(m) { console.error("FAIL " + m); process.exit(1); }
+const X0 = Date.parse("2025-02-01"), X1 = Date.parse("2025-03-01");
+gd.layout.xaxis = { range: [new Date(X0).toISOString(), new Date(X1).toISOString()] };
+const span0 = X1 - X0;
+const T = (cx) => ({ clientX: cx, clientY: 200, preventDefault() {} });
+let pdCount = 0;
+function touch(name, xs) {
+  const ev = { touches: xs.map(T), preventDefault() { pdCount++; } };
+  gd.fire(name, ev);
+  return ev;
+}
+
+// 1) 1손가락 = 핀치 아님 (relayout 무·preventDefault 무)
+relayoutCalls.length = 0;
+touch("touchstart", [400]);
+touch("touchmove", [420]);
+if (relayoutCalls.some(u => u["xaxis.range"])) fail("single_finger_zoomed");
+if (pdCount !== 0) fail("single_finger_prevented");
+
+// 2) 2손가락 벌리기(dist 200→400) = 확대(폭 절반·앵커 중점 고정)
+relayoutCalls.length = 0; pdCount = 0;
+touch("touchstart", [400, 600]);          // cx=500(frac .5) dist=200
+if (pdCount < 1) fail("start_not_prevented");    // 페이지 줌 차단
+touch("touchmove", [300, 700]);           // dist=400 → scale .5
+if (pdCount < 2) fail("move_not_prevented");
+const zi = relayoutCalls.filter(u => u["xaxis.range"]).pop();
+if (!zi) fail("no_zoom_relayout");
+const n0 = Date.parse(zi["xaxis.range"][0]), n1 = Date.parse(zi["xaxis.range"][1]);
+if (Math.abs((n1 - n0) - span0 * 0.5) > span0 * 0.02) fail("span_not_halved " + ((n1 - n0) / span0));
+if (Math.abs((n0 + n1) / 2 - (X0 + X1) / 2) > span0 * 0.02) fail("anchor_not_fixed");
+
+// 3) 2손가락 오므리기 = 축소(폭 확대) — 전체 데이터 폭으로 클램프
+relayoutCalls.length = 0;
+touch("touchstart", [300, 700]);          // dist=400
+touch("touchmove", [480, 520]);           // dist=40 → scale 10 → 클램프
+const zo = relayoutCalls.filter(u => u["xaxis.range"]).pop();
+const o0 = Date.parse(zo["xaxis.range"][0]), o1 = Date.parse(zo["xaxis.range"][1]);
+if ((o1 - o0) <= span0) fail("zoom_out_not_wider " + ((o1 - o0) / span0));
+
+// 4) touchend 로 핀치 종료 → 이후 1손가락 이동이 다시 줌 유발 안 함
+touch("touchend", []);
+relayoutCalls.length = 0; pdCount = 0;
+touch("touchmove", [500]);
+if (relayoutCalls.some(u => u["xaxis.range"])) fail("zoom_after_end");
+console.log("OK pinch");
+"""
+
+
+@pytest.mark.skipif(_NODE is None, reason="node 미설치 — 런타임 JS 검증 스킵")
+def test_pinch_zoom_runtime(tmp_path):
+    """📱 핀치 줌 — 2손가락 벌리기=확대(앵커 고정·폭 절반)·오므리기=축소(클램프)·
+    1손가락 무시·페이지 줌 차단(preventDefault)·touchend 종료."""
+    idx = pd.date_range("2025-01-01", periods=70, freq="D")
+    df = pd.DataFrame({"Open": range(100, 170), "High": range(101, 171),
+                       "Low": range(99, 169), "Close": range(100, 170),
+                       "Volume": [1e6] * 70}, index=idx)
+    fig = charts.price_chart(df, "TEST", kind="candle", show_volume=True, view_days=90)
+    html = plotly_embed.pannable_chart_html(fig, df, height=460, view_days=90,
+                                            vol_axis="yaxis2", store_key="TEST:1d:lin")
+    js = re.findall(r"<script>(.*?)</script>", html, re.S)[-1]
+    runner = tmp_path / "pinch.js"
+    runner.write_text(_PINCH_HARNESS.replace("__SCRIPT__", js), encoding="utf-8")
+    r = subprocess.run([_NODE, str(runner)], capture_output=True, text=True, timeout=30)
+    assert r.returncode == 0, f"pinch fail: {r.stdout}\n{r.stderr}"
+    assert "OK pinch" in r.stdout
