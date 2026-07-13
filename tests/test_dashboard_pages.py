@@ -279,6 +279,24 @@ def test_ai_console_chat_state_is_surface_scoped(monkeypatch):
     assert ai_console._prompt_key("market") != ai_console._prompt_key("portfolio")
 
 
+def test_ai_console_run_agent_question_marks_context_fallback(monkeypatch):
+    from dashboard.pages import ai_console
+
+    fake_state = {}
+    monkeypatch.setattr(ai_console.st, "session_state", fake_state)
+    monkeypatch.setattr(ai_console.agent, "answer", lambda question, surface: {
+        "ok": True,
+        "answer": "fallback answer",
+        "context": {"event_count": 0, "memory_count": 0, "context_error": "boom"},
+    })
+
+    ai_console._run_agent_question("테스트", "portfolio")
+
+    msgs = fake_state[ai_console._chat_key("portfolio")]
+    assert msgs[-1]["content"] == "fallback answer"
+    assert "context fallback" in msgs[-1]["meta"]
+
+
 def test_ai_console_strategy_canvas_uses_matrix_dsl(monkeypatch):
     from dashboard.pages import ai_console
     import pandas as pd

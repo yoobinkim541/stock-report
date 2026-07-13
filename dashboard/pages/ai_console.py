@@ -225,6 +225,8 @@ def _run_agent_question(question: str, surface: str):
         ctx = result.get("context") or {}
         meta = (f"events {ctx.get('event_count', 0)} · memory {ctx.get('memory_count', 0)}"
                 if ctx else "")
+        if ctx.get("context_error"):
+            meta = f"{meta} · context fallback" if meta else "context fallback"
         st.session_state[chat_key].append({
             "role": "assistant",
             "content": result.get("answer", ""),
@@ -293,6 +295,8 @@ def _chat_context_rail(surface: str, pack: dict):
     paper = pack.get("paper") or {}
     if paper.get("errors"):
         st.caption("paper: " + " · ".join(paper["errors"]))
+    if pack.get("context_error"):
+        st.warning(f"컨텍스트 일부를 불러오지 못했습니다: {pack['context_error']}")
 
 
 def _memory_tab(surface: str):

@@ -45,6 +45,13 @@ _GUARDED_FILES = ("dca_weights.json", "target_weights.json", "leverage_state.jso
                   "portfolio_snapshot.json", "price_alerts.json")
 
 
+def _advisor_provider() -> str:
+    return os.environ.get(
+        "STOCK_ADVISOR_LLM_PROVIDER",
+        os.environ.get("INVESTMENT_REPORT_LLM_PROVIDER", "openai-codex"),
+    )
+
+
 def _snapshot_editable_files() -> dict:
     """advisor 실행 전 편집 허용 파일 원본 스냅샷 (없는 파일은 None)."""
     snap = {}
@@ -374,7 +381,7 @@ def ask_portfolio_advisor(question: str, market: dict, runner=subprocess.run) ->
         "-q",
         prompt,
         "--provider",
-        "openai-codex",
+        _advisor_provider(),
         "--model",
         ADVISOR_MODEL,
         "--toolsets",
