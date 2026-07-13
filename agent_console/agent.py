@@ -22,7 +22,7 @@ _SURFACE_TITLES = {
 
 
 def build_context_prompt(surface: str = "market") -> str:
-    pack = context.context_pack(surface)
+    pack = _safe_context_pack(surface)
     top_events = pack["sources"]["events"][:8]
     memory = pack["memory"][:8]
     lines = [
@@ -38,9 +38,12 @@ def build_context_prompt(surface: str = "market") -> str:
     lines += ["", "[누적 World Memory]"]
     for item in memory:
         lines.append(f"- {item.get('observed_at')} · {item.get('kind')} · {item.get('title')}")
-    shared_section = shared_memory.build_context_section(
-        {"screen": surface, "query": "stock-report AI 콘솔 컨텍스트 프롬프트", "limit": 4}
-    )
+    try:
+        shared_section = shared_memory.build_context_section(
+            {"screen": surface, "query": "stock-report AI 콘솔 컨텍스트 프롬프트", "limit": 4}
+        )
+    except Exception:
+        shared_section = ""
     if shared_section:
         lines += ["", shared_section]
     lines += ["", "[화면별 초점]", *[f"- {x}" for x in pack["focus"]]]
@@ -53,28 +56,86 @@ def answer(question: str, surface: str = "market") -> dict:
     if not question:
         return {"ok": False, "error": "질문을 입력해 주세요."}
 
-    history = storage.list_conversation(limit=12, context_surface=surface)
-    storage.add_conversation("user", question, surface)
-    pack = context.context_pack(surface)
-    response = _compose_answer(question, pack, history=history)
-    storage.add_conversation("assistant", response, surface)
+    history = _safe_list_conversation(limit=12, surface=surface)
+    _safe_add_conversation("user", question, surface)
+    pack = _safe_context_pack(surface)
+    try:
+        response = _compose_answer(question, pack, history=history)
+    except Exception as exc:
+        response = _compose_error_fallback_answer(question, pack, exc)
+    _safe_add_conversation("assistant", response, surface)
     try:
         shared_memory.append_chat_exchange(question, response, surface)
     except Exception:
         pass
+    sources = pack.get("sources") or {}
     return {
         "ok": True,
         "answer": response,
         "surface": surface,
         "context": {
-            "event_count": len(pack["sources"]["events"]),
-            "memory_count": len(pack["memory"]),
+            "event_count": len(sources.get("events") or []),
+            "memory_count": len(pack.get("memory") or []),
             "shared_memory_count": (pack.get("shared_memory") or {}).get("recordCount", 0),
-            "source_counts": pack["sources"]["source_counts"],
-            "symbol_counts": pack["sources"]["symbol_counts"],
+            "source_counts": sources.get("source_counts") or [],
+            "symbol_counts": sources.get("symbol_counts") or [],
+            "context_error": pack.get("context_error"),
         },
-        "conversation": storage.list_conversation(limit=20, context_surface=surface),
+        "conversation": _safe_list_conversation(limit=20, surface=surface),
     }
+
+
+def _safe_context_pack(surface: str) -> dict:
+    try:
+        return context.context_pack(surface)
+    except Exception as exc:
+        return _fallback_context_pack(surface, str(exc))
+
+
+def _fallback_context_pack(surface: str, error: str = "") -> dict:
+    surface = str(surface or "market").strip().lower()
+    try:
+        focus = context.focus_for_surface(surface)
+    except Exception:
+        focus = []
+    return {
+        "ok": False,
+        "surface": surface,
+        "generated_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+        "project": "stock-report",
+        "sources": {"events": [], "source_counts": [], "symbol_counts": []},
+        "reports": [],
+        "ml_activity": [],
+        "portfolio": {"holdings": [], "summary": {}, "risk": {}, "targets": {}, "errors": [error] if error else []},
+        "paper": {"kr": None, "us": None, "combined": None, "errors": [error] if error else []},
+        "models": {"items": []},
+        "memory": [],
+        "focus": focus,
+        "shared_memory": {"ok": False, "error": error, "records": []} if error else {"ok": True, "records": []},
+        "context_error": error,
+    }
+
+
+def _safe_list_conversation(limit: int, surface: str) -> list[dict]:
+    try:
+        return storage.list_conversation(limit=limit, context_surface=surface)
+    except Exception:
+        return []
+
+
+def _safe_add_conversation(role: str, message: str, surface: str) -> int | None:
+    try:
+        return storage.add_conversation(role, message, surface)
+    except Exception:
+        return None
+
+
+def _compose_error_fallback_answer(question: str, pack: dict, exc: Exception) -> str:
+    base = _fallback_general_chat(question, pack, history=[])
+    return "\n\n".join([
+        base,
+        f"참고: 답변 조립 중 일부 내부 컨텍스트 오류가 있었습니다. 핵심 질문은 계속 처리하되, 세부 수치가 비어 있을 수 있습니다. (`{type(exc).__name__}`)",
+    ])
 
 
 def _compose_answer(question: str, pack: dict, history: list[dict] | None = None) -> str:
@@ -814,14 +875,17 @@ def _build_general_chat_prompt(question: str, pack: dict, history: list[dict] | 
             ctx.append(f"- memory: {title}")
     portfolio_ctx = _compact_portfolio_context(pack)
     paper_ctx = _compact_paper_context(pack)
-    shared_section = shared_memory.build_context_section(
-        {
-            "screen": pack.get("surface") or "market",
-            "query": question,
-            "provider": "codex-cli",
-            "limit": 6,
-        }
-    )
+    try:
+        shared_section = shared_memory.build_context_section(
+            {
+                "screen": pack.get("surface") or "market",
+                "query": question,
+                "provider": "codex-cli",
+                "limit": 6,
+            }
+        )
+    except Exception:
+        shared_section = ""
     return "\n".join([
         "너는 stock-report 안의 대화형 에이전트다.",
         "사용자는 한국어로 편하게 말한다. 너도 한국어로 자연스럽게 답한다.",

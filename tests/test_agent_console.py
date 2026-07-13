@@ -187,6 +187,89 @@ def test_agent_trading_logic_question_uses_logic_report():
     assert "시장 설명이 매매 판단을 덮고" in answer
 
 
+def test_agent_answer_survives_context_pack_failure(monkeypatch, tmp_path):
+    _isolate(monkeypatch, tmp_path)
+    monkeypatch.setenv("AGENT_CONSOLE_LLM_ENABLED", "0")
+
+    from agent_console import agent, context
+
+    def broken_context(surface):
+        raise RuntimeError("context boom")
+
+    monkeypatch.setattr(context, "context_pack", broken_context)
+
+    result = agent.answer("안녕", "portfolio")
+
+    assert result["ok"] is True
+    assert result["context"]["context_error"] == "context boom"
+    assert "안녕" in result["answer"]
+
+
+def test_agent_answer_survives_conversation_store_failure(monkeypatch):
+    monkeypatch.setenv("AGENT_CONSOLE_LLM_ENABLED", "0")
+
+    from agent_console import agent, context, storage
+
+    monkeypatch.setattr(storage, "list_conversation", lambda *args, **kwargs: (_ for _ in ()).throw(RuntimeError("db read")))
+    monkeypatch.setattr(storage, "add_conversation", lambda *args, **kwargs: (_ for _ in ()).throw(RuntimeError("db write")))
+    monkeypatch.setattr(
+        context,
+        "context_pack",
+        lambda surface: {
+            "ok": True,
+            "surface": surface,
+            "generated_at": "2026-07-13T06:40:00+00:00",
+            "sources": {"events": [], "source_counts": [], "symbol_counts": []},
+            "reports": [],
+            "ml_activity": [],
+            "portfolio": {"holdings": [], "summary": {}, "risk": {}, "targets": {}, "errors": []},
+            "paper": {"kr": None, "us": None, "combined": None, "errors": []},
+            "models": {"items": []},
+            "memory": [],
+            "focus": [],
+        },
+    )
+
+    result = agent.answer("안녕", "market")
+
+    assert result["ok"] is True
+    assert result["conversation"] == []
+    assert "안녕" in result["answer"]
+
+
+def test_agent_answer_survives_answer_composition_failure(monkeypatch):
+    monkeypatch.setenv("AGENT_CONSOLE_LLM_ENABLED", "0")
+
+    from agent_console import agent, context, storage
+
+    monkeypatch.setattr(storage, "list_conversation", lambda *args, **kwargs: [])
+    monkeypatch.setattr(storage, "add_conversation", lambda *args, **kwargs: 1)
+    monkeypatch.setattr(
+        context,
+        "context_pack",
+        lambda surface: {
+            "ok": True,
+            "surface": surface,
+            "generated_at": "2026-07-13T06:41:00+00:00",
+            "sources": {"events": [], "source_counts": [], "symbol_counts": []},
+            "reports": [],
+            "ml_activity": [],
+            "portfolio": {"holdings": [], "summary": {}, "risk": {}, "targets": {}, "errors": []},
+            "paper": {"kr": None, "us": None, "combined": None, "errors": []},
+            "models": {"items": []},
+            "memory": [],
+            "focus": [],
+        },
+    )
+    monkeypatch.setattr(agent, "_compose_answer", lambda *args, **kwargs: (_ for _ in ()).throw(ValueError("bad route")))
+
+    result = agent.answer("테스트 질문", "market")
+
+    assert result["ok"] is True
+    assert "답변 조립 중 일부 내부 컨텍스트 오류" in result["answer"]
+    assert "ValueError" in result["answer"]
+
+
 def test_agent_portfolio_risk_question_uses_holdings_not_market_template(monkeypatch):
     monkeypatch.setenv("AGENT_CONSOLE_LLM_ENABLED", "0")
     from agent_console.agent import _compose_answer
