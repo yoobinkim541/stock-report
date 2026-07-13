@@ -272,3 +272,47 @@ def ingest_recent_memory(hours: int = 72) -> dict:
         )
     changed = storage.upsert_memory_events(events)
     return {"ok": True, "considered": len(events), "changed": changed, "total_recent": len(storage.list_memory_events())}
+
+
+def ingest_arca_proxy(max_pages: int = 2, proxy: str | None = None) -> dict:
+    """Fetch Arca through the local SOCKS tunnel and store successful rows in cache + World Memory."""
+    proxy = proxy or os.getenv("STOCK_COLLECTOR_ARCA_PROXY") or "socks5://127.0.0.1:1080"
+    try:
+        from reports import source_collector
+
+        status = source_collector.arca_proxy_status(proxy)
+        if not status.get("reachable"):
+            return {"ok": False, "proxy": status, "fetched": 0, "written": 0, "changed": 0,
+                    "error": status.get("error") or "proxy unavailable"}
+        events = source_collector.fetch_arca_events(max_pages=max_pages, proxy=proxy, prefer_proxy=True)
+        written = source_collector.append_events(events, cache_dir=source_cache_dir())
+    except Exception as exc:
+        return {"ok": False, "proxy": {"proxy": proxy}, "fetched": 0, "written": 0,
+                "changed": 0, "error": str(exc)}
+
+    memory_events = []
+    for row in events:
+        memory_events.append(
+            {
+                "observed_at": row.get("published_at") or datetime.now(timezone.utc).isoformat(timespec="seconds"),
+                "source": "arca:proxy",
+                "kind": "community_signal",
+                "title": row.get("title") or "",
+                "body": row.get("body") or row.get("title") or "",
+                "symbols": row.get("tickers") or row.get("tags") or [],
+                "impact": "sentiment",
+                "confidence": 0.5,
+                "metadata": {"url": row.get("url"), "category": row.get("category"),
+                             "proxy": proxy, "source": row.get("source")},
+            }
+        )
+    changed = storage.upsert_memory_events(memory_events)
+    return {
+        "ok": bool(events),
+        "proxy": status,
+        "fetched": len(events),
+        "written": written,
+        "changed": changed,
+        "events": events[:12],
+        "error": "" if events else "no arca rows parsed",
+    }

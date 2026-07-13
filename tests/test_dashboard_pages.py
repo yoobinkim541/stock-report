@@ -200,6 +200,32 @@ cached.learning_evolution = lambda s: {"surface":s,
     "series":[{"date":"2026-06-01","excess":0.01,"ic":0.02,"adopted":False},
               {"date":"2026-06-08","excess":0.03,"ic":0.06,"adopted":True}],
     "adoptions":[{"date":"2026-06-08","excess_challenger":0.03}],"n_runs":2}
+from agent_console import agent as _agent_agent
+from agent_console import context as _agent_context
+from agent_console import storage as _agent_storage
+_agent_context.context_pack = lambda surface="market", hours=72: {
+    "ok": True, "surface": surface, "generated_at": "2026-07-13T00:00:00+00:00",
+    "sources": {"events": [{"source": "unit", "title": "금리 하락", "tickers": ["QQQ"]}],
+                "source_counts": [("unit", 1)], "symbol_counts": [("QQQ", 1)]},
+    "reports": [{"name": "investment-summary.txt"}], "ml_activity": [],
+    "paper": {"kr": None, "us": None, "combined": None, "errors": []},
+    "models": {"items": []},
+    "memory": [{"observed_at": "2026-07-13", "source": "unit", "kind": "market_note",
+                "title": "기억", "body": "", "symbols": ["QQQ"], "impact": "context"}],
+    "focus": ["시장 맥락", "모의투자 영향"]}
+_agent_context.ingest_recent_memory = lambda hours=72: {"ok": True, "changed": 1}
+_agent_context.focus_for_surface = lambda surface: ["시장 맥락"]
+_agent_agent.answer = lambda question, surface="market": {"ok": True, "answer": "### 답변\\n테스트"}
+_agent_agent.build_context_prompt = lambda surface="market": "prompt"
+_agent_storage.list_memory_events = lambda limit=80: [
+    {"observed_at": "2026-07-13", "source": "unit", "kind": "market_note",
+     "title": "기억", "body": "", "symbols": ["QQQ"], "impact": "context"}]
+_agent_storage.upsert_memory_events = lambda events: len(list(events))
+_agent_storage.save_scenario = lambda payload: {"name": payload.get("name", "테스트")}
+_agent_storage.list_scenarios = lambda limit=50: [
+    {"name": "랩", "description": "테스트", "updated_at": "2026-07-13",
+     "rules": {"max_loss_pct": 8}, "assumptions": {"total_weight_pct": 100},
+     "allocations": [{"symbol": "QQQ", "weight_pct": 100}]}]
 st.session_state["ticker"] = "MSFT"
 ''' % ROOT
 
@@ -215,6 +241,7 @@ def _script(mod, call):
     ("from dashboard.pages import market", "market.render()"),
     ("from dashboard.pages import paper", "paper.render()"),
     ("from dashboard.pages import research", "research.render()"),
+    ("from dashboard.pages import ai_console", "ai_console.render()"),
 ])
 def test_page_renders_without_exception(mod, call):
     at = AppTest.from_string(_script(mod, call), default_timeout=30)

@@ -372,6 +372,44 @@ def test_fetch_arca_falls_back_to_direct(monkeypatch):
     assert events[0]["category"] == "📰뉴스"
 
 
+def test_fetch_arca_prefers_proxy_when_requested(monkeypatch):
+    monkeypatch.setattr(sc, "arca_proxy_status", lambda proxy=None: {"reachable": True, "proxy": proxy})
+
+    def fake_proxy_get(url, proxy, timeout=0, **kwargs):
+        assert proxy == "socks5://127.0.0.1:1080"
+
+        class R:
+            text = '<a href="/b/stock/222?p=1">🧠분석 QQQ 반등 통계</a>'
+
+        return R()
+
+    monkeypatch.setattr(sc, "_bounded_get_via_proxy", fake_proxy_get)
+    events = sc.fetch_arca_events(max_pages=1, proxy="socks5://127.0.0.1:1080", prefer_proxy=True)
+    assert len(events) == 1
+    assert events[0]["url"].endswith("/222")
+    assert events[0]["source"] == "arca"
+
+
+def test_fetch_arca_proxy_challenge_falls_back_to_jina(monkeypatch):
+    monkeypatch.setattr(sc, "arca_proxy_status", lambda proxy=None: {"reachable": True, "proxy": proxy})
+
+    class ProxyR:
+        text = "Just a moment... Cloudflare challenge"
+
+    monkeypatch.setattr(sc, "_bounded_get_via_proxy", lambda *a, **k: ProxyR())
+
+    def fake_get(url, timeout=0, **kwargs):
+        class R:
+            text = "[📰뉴스 반도체 뉴스](https://arca.live/b/stock/333?p=1)"
+
+        return R()
+
+    monkeypatch.setattr(sc, "_bounded_get", fake_get)
+    events = sc.fetch_arca_events(max_pages=1, proxy="socks5://127.0.0.1:1080", prefer_proxy=True)
+    assert len(events) == 1
+    assert events[0]["url"].endswith("/333")
+
+
 def test_parse_wgb_html():
     html = '''
     <tr><td><a href="/x">5 years</a></td><td>3.456%</td></tr>

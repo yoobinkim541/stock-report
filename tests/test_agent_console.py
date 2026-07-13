@@ -107,3 +107,32 @@ def test_server_endpoints(monkeypatch, tmp_path):
     ).json
     assert scenario["ok"] is True
     assert client.get("/api/portfolio-lab/scenarios").json["scenarios"][0]["name"] == "랩 테스트"
+
+
+def test_ingest_arca_proxy(monkeypatch, tmp_path):
+    _isolate(monkeypatch, tmp_path)
+
+    from agent_console import context, storage
+    from reports import source_collector
+
+    monkeypatch.setattr(source_collector, "arca_proxy_status", lambda proxy=None: {"reachable": True, "proxy": proxy})
+    monkeypatch.setattr(
+        source_collector,
+        "fetch_arca_events",
+        lambda max_pages=2, proxy=None, prefer_proxy=False: [
+            {
+                "source": "arca",
+                "title": "📰뉴스 QQQ 반등",
+                "url": "https://arca.live/b/stock/444",
+                "category": "📰뉴스",
+                "tickers": ["QQQ"],
+            }
+        ],
+    )
+
+    result = context.ingest_arca_proxy(max_pages=1, proxy="socks5://127.0.0.1:1080")
+
+    assert result["ok"] is True
+    assert result["fetched"] == 1
+    assert result["changed"] == 1
+    assert storage.list_memory_events()[0]["source"] == "arca:proxy"

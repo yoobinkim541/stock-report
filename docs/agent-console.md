@@ -2,6 +2,8 @@
 
 `agent_console`은 기존 `stock-report` 옆에 붙는 로컬 우선 콘솔이다. 외부 GUI를 통째로 합치지 않고, 지금 프로젝트가 이미 만드는 리포트/모의투자/ML 원장/뉴스 캐시를 읽어 대화형 컨텍스트 레이어와 World Memory를 제공한다.
 
+Cloudflare로 접속 중인 기존 Streamlit 대시보드에서는 사이드바의 `AI 콘솔` 페이지로 같은 기능을 쓴다. 이 경우 별도 Flask 포트(`8797`)를 띄우지 않아도 된다.
+
 ## 포함한 것
 
 - 대화형 에이전트: 현재 화면(`market`, `portfolio`, `ticker`, `paper`, `lab`)에 맞춰 최근 이벤트, 누적 기억, ML/모의투자 상태를 묶어 답변한다.
@@ -9,15 +11,27 @@
 - Context Layer: 기존 `~/reports`, `~/reports/source-cache`, `~/reports/ml-data`를 읽어 모든 화면에서 필요한 근거를 API로 제공한다.
 - Portfolio Lab: 실제 자산 연동 없이 전략 가설, 비중, 손실한도, 운용 규칙을 저장한다.
 - Local Install Prompt: 노트북에서 같은 콘솔을 설치하도록 붙여넣을 프롬프트를 제공한다.
+- Arca proxy ingest: 서버에 이미 열려 있는 SOCKS 터널(`socks5://127.0.0.1:1080`)을 이용해 아카라이브 주식채널 공개 글 조회를 시도하고, 성공한 글만 `source-cache`와 World Memory에 저장한다.
 
 ## 의도적으로 뺀 것
 
-- Arca 수집 UI: Cloudflare challenge와 브라우저 쿠키 의존성이 있어 서버 사이드 통합에서 깨지기 쉽다.
 - Toss 실제 자산 연동: FinanceAgentGUI의 Toss API는 읽기 전용 데모 성격이고, 개인 인증 정보를 다루므로 v0에서 제외한다.
 - 자동 실주문: 이 콘솔은 분석/검증/시나리오 저장 전용이다.
 - Binance/Magazine류 부가 탭: 현재 투자 워크플로우와 직접 연결되지 않아 제외한다.
 
+Arca는 Cloudflare challenge를 자동 우회하지 않는다. SOCKS 터널로 일반 공개 페이지를 조회해 보고, challenge가 나오면 실패 상태를 표시한다.
+
 ## 실행
+
+### 기존 대시보드 안에서 사용
+
+```bash
+bash scripts/run_dashboard.sh
+```
+
+대시보드 사이드바에서 `AI 콘솔`을 연다.
+
+### 별도 Flask 콘솔로 사용
 
 ```bash
 cd /home/ubuntu/projects/stock-report
@@ -40,6 +54,7 @@ AGENT_CONSOLE_PORT=8798 bash scripts/run_agent_console.sh
 - `AGENT_CONSOLE_ML_DATA_DIR`: ML/추천/성과 원장. 기본값은 `~/reports/ml-data`.
 - `AGENT_CONSOLE_HOST`: 바인드 주소. 기본값은 `127.0.0.1`.
 - `AGENT_CONSOLE_PORT`: 포트. 기본값은 `8797`.
+- `STOCK_COLLECTOR_ARCA_PROXY`: Arca 조회에 사용할 프록시. 서버 기본 수동 버튼은 `socks5://127.0.0.1:1080`을 사용한다.
 
 ## API
 
