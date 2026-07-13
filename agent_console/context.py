@@ -113,6 +113,10 @@ def ml_activity(limit: int = 80) -> list[dict]:
 
 
 def paper_state() -> dict:
+    live = os.getenv("AGENT_CONSOLE_LIVE_PAPER", "0").lower() in {"1", "true", "yes", "on"}
+    if not live:
+        return _offline_paper_state()
+
     out = {"kr": None, "us": None, "combined": None, "errors": []}
     try:
         from dashboard import views
@@ -127,6 +131,92 @@ def paper_state() -> dict:
     except Exception as exc:
         out["errors"].append(str(exc))
     return out
+
+
+def _offline_paper_state() -> dict:
+    out = {"kr": None, "us": None, "combined": None, "errors": []}
+    try:
+        out["kr"] = _offline_paper_summary("kr_mock")
+    except Exception as exc:
+        out["errors"].append(f"kr_mock: {exc}")
+    try:
+        out["us"] = _offline_paper_summary("us_mock")
+    except Exception as exc:
+        out["errors"].append(f"us_mock: {exc}")
+    out["combined"] = _fallback_combined_paper(out["kr"], out["us"])
+    return out
+
+
+def _offline_paper_summary(surface: str) -> dict:
+    spec = {
+        "kr_mock": ("kr_mock_history", "₩", "KOSPI"),
+        "us_mock": ("us_mock_history", "$", "QQQ"),
+    }.get(surface, ("kr_mock_history", "₩", "KOSPI"))
+    hist_name, currency, bench_name = spec
+    out: dict = {
+        "surface": surface,
+        "currency": currency,
+        "bench_name": bench_name,
+        "balance_ok": False,
+        "nav": None,
+        "cash": None,
+        "positions": [],
+        "nav_series": [],
+        "inception_date": None,
+        "cum_ret": None,
+        "day_ret": None,
+        "strat_mdd": None,
+        "bench_ret": None,
+        "bench_mdd": None,
+        "cost": None,
+        "scorecard": {},
+        "decisions": [],
+    }
+    try:
+        import store
+
+        hist = store.all(hist_name)
+    except Exception:
+        hist = []
+    snaps = [r for r in hist if r.get("kind") == "snapshot" and r.get("nav") is not None]
+    if snaps:
+        out["nav_series"] = [{"date": str(r.get("date", ""))[:10], "nav": float(r["nav"])} for r in snaps]
+        out["nav"] = float(snaps[-1]["nav"])
+        out["cash"] = snaps[-1].get("cash")
+        out["inception_date"] = str(snaps[0].get("date", ""))[:10]
+        first_nav = float(snaps[0]["nav"])
+        if first_nav:
+            out["cum_ret"] = (float(snaps[-1]["nav"]) / first_nav - 1.0) * 100.0
+        if len(snaps) >= 2:
+            prev_nav = float(snaps[-2]["nav"])
+            out["day_ret"] = (float(snaps[-1]["nav"]) / prev_nav - 1.0) * 100.0 if prev_nav else None
+        mdd = _max_drawdown([float(row["nav"]) for row in snaps])
+        out["strat_mdd"] = mdd * 100.0 if mdd is not None else None
+
+    decisions = [
+        r for r in hist
+        if r.get("kind") in {"decision", "trade_decision", "rebalance", "order"}
+        or r.get("side") is not None
+        or r.get("ticker") is not None
+        or r.get("code") is not None
+    ]
+    decisions.sort(key=lambda r: str(r.get("date") or r.get("ts") or r.get("created_at") or ""), reverse=True)
+    out["decisions"] = decisions[:20]
+    return out
+
+
+def _max_drawdown(values: list[float]) -> float | None:
+    peak = None
+    worst = 0.0
+    for raw in values:
+        value = float(raw)
+        if value <= 0:
+            continue
+        if peak is None or value > peak:
+            peak = value
+        if peak:
+            worst = min(worst, value / peak - 1.0)
+    return abs(worst) if peak else None
 
 
 def portfolio_state() -> dict:

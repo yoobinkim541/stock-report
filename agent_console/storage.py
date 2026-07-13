@@ -214,12 +214,18 @@ def add_conversation(role: str, message: str, context_surface: str = "market") -
             return int(cur.lastrowid)
 
 
-def list_conversation(limit: int = 30) -> list[dict]:
+def list_conversation(limit: int = 30, *, context_surface: str | None = None) -> list[dict]:
     limit = max(1, min(int(limit or 30), 200))
+    where = ""
+    args: list = []
+    if context_surface:
+        where = " WHERE context_surface = ?"
+        args.append(str(context_surface))
+    args.append(limit)
     with connect() as conn:
         rows = conn.execute(
-            "SELECT * FROM conversation_notes ORDER BY created_at DESC, id DESC LIMIT ?",
-            (limit,),
+            f"SELECT * FROM conversation_notes{where} ORDER BY created_at DESC, id DESC LIMIT ?",
+            args,
         ).fetchall()
     return [dict(row) for row in rows][::-1]
 

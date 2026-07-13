@@ -46,6 +46,25 @@ def test_storage_memory_and_scenario(monkeypatch, tmp_path):
     assert storage.list_scenarios()[0]["rules"]["max_loss_pct"] == 8
 
 
+def test_storage_conversation_filters_by_surface(monkeypatch, tmp_path):
+    _isolate(monkeypatch, tmp_path)
+
+    from agent_console import storage
+
+    storage.add_conversation("user", "시장 질문", "market")
+    storage.add_conversation("assistant", "시장 답변", "market")
+    storage.add_conversation("user", "포트폴리오 질문", "portfolio")
+    storage.add_conversation("assistant", "포트폴리오 답변", "portfolio")
+
+    market = storage.list_conversation(limit=10, context_surface="market")
+    portfolio = storage.list_conversation(limit=10, context_surface="portfolio")
+    all_rows = storage.list_conversation(limit=10)
+
+    assert [row["message"] for row in market] == ["시장 질문", "시장 답변"]
+    assert [row["message"] for row in portfolio] == ["포트폴리오 질문", "포트폴리오 답변"]
+    assert len(all_rows) == 4
+
+
 def test_context_pack_empty(monkeypatch, tmp_path):
     _isolate(monkeypatch, tmp_path)
 
@@ -57,6 +76,21 @@ def test_context_pack_empty(monkeypatch, tmp_path):
     assert "sources" in pack
     assert "memory" in pack
     assert pack["shared_memory"]["ok"] is True
+
+
+def test_context_paper_state_defaults_to_offline(monkeypatch, tmp_path):
+    _isolate(monkeypatch, tmp_path)
+    monkeypatch.delenv("AGENT_CONSOLE_LIVE_PAPER", raising=False)
+
+    from agent_console import context
+
+    monkeypatch.setattr(
+        context,
+        "_offline_paper_state",
+        lambda: {"kr": {"surface": "offline"}, "us": None, "combined": None, "errors": []},
+    )
+
+    assert context.paper_state()["kr"]["surface"] == "offline"
 
 
 def test_shared_memory_context_contract(monkeypatch, tmp_path):

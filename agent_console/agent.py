@@ -53,7 +53,7 @@ def answer(question: str, surface: str = "market") -> dict:
     if not question:
         return {"ok": False, "error": "질문을 입력해 주세요."}
 
-    history = storage.list_conversation(limit=12)
+    history = storage.list_conversation(limit=12, context_surface=surface)
     storage.add_conversation("user", question, surface)
     pack = context.context_pack(surface)
     response = _compose_answer(question, pack, history=history)
@@ -73,7 +73,7 @@ def answer(question: str, surface: str = "market") -> dict:
             "source_counts": pack["sources"]["source_counts"],
             "symbol_counts": pack["sources"]["symbol_counts"],
         },
-        "conversation": storage.list_conversation(limit=20),
+        "conversation": storage.list_conversation(limit=20, context_surface=surface),
     }
 
 
