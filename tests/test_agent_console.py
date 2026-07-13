@@ -95,7 +95,8 @@ def test_server_endpoints(monkeypatch, tmp_path):
 
     chat = client.post("/api/agent/chat", json={"surface": "market", "message": "왜 오른 거야?"}).json
     assert chat["ok"] is True
-    assert "컨텍스트 답변" in chat["answer"]
+    assert "현재 시장 상황 인식" in chat["answer"]
+    assert "시장 신호 점수" in chat["answer"]
 
     scenario = client.post(
         "/api/portfolio-lab/scenarios",

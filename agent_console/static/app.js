@@ -146,6 +146,82 @@ function renderCompactItems(rows, options) {
   }).join("");
 }
 
+function inlineMarkdown(value) {
+  return escapeHtml(value)
+    .replace(/`([^`]+)`/g, "<code>$1</code>")
+    .replace(/\*\*([^*]+)\*\*/g, "<strong>$1</strong>");
+}
+
+function renderLiteMarkdown(value) {
+  const lines = String(value ?? "").split("\n");
+  const html = [];
+  let listMode = null;
+  let tableRows = [];
+
+  const closeList = () => {
+    if (!listMode) return;
+    html.push(`</${listMode}>`);
+    listMode = null;
+  };
+  const flushTable = () => {
+    if (!tableRows.length) return;
+    const [head, ...body] = tableRows;
+    html.push(`<table class="md-table"><thead><tr>${head.map((cell) => `<th>${inlineMarkdown(cell)}</th>`).join("")}</tr></thead><tbody>`);
+    body.forEach((row) => {
+      html.push(`<tr>${row.map((cell) => `<td>${inlineMarkdown(cell)}</td>`).join("")}</tr>`);
+    });
+    html.push("</tbody></table>");
+    tableRows = [];
+  };
+
+  lines.forEach((raw) => {
+    const line = raw.trimEnd();
+    const trimmed = line.trim();
+    if (!trimmed) {
+      closeList();
+      flushTable();
+      return;
+    }
+    if (/^\|.+\|$/.test(trimmed)) {
+      closeList();
+      const cells = trimmed.slice(1, -1).split("|").map((cell) => cell.trim());
+      if (!cells.every((cell) => /^:?-{3,}:?$/.test(cell))) tableRows.push(cells);
+      return;
+    }
+    flushTable();
+    if (trimmed.startsWith("#### ")) {
+      closeList();
+      html.push(`<h4>${inlineMarkdown(trimmed.slice(5))}</h4>`);
+    } else if (trimmed.startsWith("### ")) {
+      closeList();
+      html.push(`<h3>${inlineMarkdown(trimmed.slice(4))}</h3>`);
+    } else if (trimmed.startsWith("> ")) {
+      closeList();
+      html.push(`<blockquote>${inlineMarkdown(trimmed.slice(2))}</blockquote>`);
+    } else if (/^\d+\.\s+/.test(trimmed)) {
+      if (listMode !== "ol") {
+        closeList();
+        listMode = "ol";
+        html.push("<ol>");
+      }
+      html.push(`<li>${inlineMarkdown(trimmed.replace(/^\d+\.\s+/, ""))}</li>`);
+    } else if (trimmed.startsWith("- ")) {
+      if (listMode !== "ul") {
+        closeList();
+        listMode = "ul";
+        html.push("<ul>");
+      }
+      html.push(`<li>${inlineMarkdown(trimmed.slice(2))}</li>`);
+    } else {
+      closeList();
+      html.push(`<p>${inlineMarkdown(trimmed)}</p>`);
+    }
+  });
+  closeList();
+  flushTable();
+  return html.join("");
+}
+
 function renderMemory(events) {
   $("memoryCount").textContent = `${events.length} rows`;
   $("memoryList").innerHTML = events.length
@@ -185,8 +261,12 @@ function addMessage(role, body) {
   const conversation = $("conversation");
   const node = document.createElement("article");
   node.className = `message ${role}`;
-  node.innerHTML = `<span class="role">${role === "user" ? "나" : "Agent"}</span><pre class="body"></pre>`;
-  node.querySelector("pre").textContent = body;
+  if (role === "assistant") {
+    node.innerHTML = `<span class="role">Agent</span><div class="body rich">${renderLiteMarkdown(body)}</div>`;
+  } else {
+    node.innerHTML = `<span class="role">나</span><pre class="body"></pre>`;
+    node.querySelector("pre").textContent = body;
+  }
   conversation.appendChild(node);
   conversation.scrollTop = conversation.scrollHeight;
 }

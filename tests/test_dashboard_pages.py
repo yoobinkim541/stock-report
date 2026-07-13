@@ -249,6 +249,19 @@ def test_page_renders_without_exception(mod, call):
     assert not at.exception, f"{mod}: {at.exception}"
 
 
+def test_ai_console_strategy_canvas_allocation_normalize():
+    from dashboard.pages import ai_console
+
+    rows = ai_console._normalize_allocations([
+        {"symbol": "QQQ", "weight_pct": 45, "note": "core"},
+        {"symbol": "CASH", "weight_pct": 15, "note": "buffer"},
+    ])
+
+    assert [r["symbol"] for r in rows] == ["QQQ", "CASH"]
+    assert round(sum(r["weight_pct"] for r in rows), 6) == 100.0
+    assert rows[0]["weight_pct"] == 75.0
+
+
 def test_entry_app_runs_through_nav():
     """app.py 엔트리: 인증 통과 후 sys.path·사이드바·st.navigation·기본 홈 렌더 무예외.
 

@@ -8,6 +8,7 @@ from __future__ import annotations
 import os
 import sys
 from datetime import datetime, timezone
+from math import sqrt
 
 import pandas as pd
 import streamlit as st
@@ -63,7 +64,7 @@ def render():
     _context_glance(pack)
 
     tab_chat, tab_memory, tab_lab, tab_connectors = st.tabs(
-        ["대화", "시장 기억", "포트폴리오 랩", "로컬 커넥터"])
+        ["대화", "시장 기억", "전략 캔버스", "로컬 커넥터"])
     with tab_chat:
         _chat_tab(surface, pack)
     with tab_memory:
@@ -319,49 +320,355 @@ def _memory_tab(surface: str):
 
 
 def _lab_tab(surface: str):
-    st.markdown("##### 포트폴리오 전략랩")
-    with st.form("agent_scenario_form"):
-        c1, c2 = st.columns([1.4, 0.6])
-        name = c1.text_input("시나리오 이름", value="AI 맥락 기반 테스트")
-        max_loss = c2.number_input("최대 손실한도 %", min_value=0.0, max_value=100.0, value=8.0, step=0.5)
-        desc = st.text_area("전략 가설", placeholder="어떤 시장 맥락에서 어떤 비중 조합을 테스트할지 적어주세요.")
-        alloc_text = st.text_area(
-            "비중",
-            value="QQQ 45 핵심 성장\nTLT 20 금리 방어\nGLD 10 꼬리위험\nCASH 25 기회 대기",
-            help="한 줄에 `티커 비중 메모` 형식",
-            height=130,
+    st.markdown("##### 전략 캔버스")
+    st.markdown(
+        """
+        <div class="widget-flow">
+          <div><b>W-001</b><span>포트폴리오 입력</span></div>
+          <i></i>
+          <div><b>W-009</b><span>RSI 현금화 규칙</span></div>
+          <i></i>
+          <div><b>W-010</b><span>Buy & Hold 비교</span></div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+    _ensure_canvas_defaults()
+    alloc_text = st.session_state.get("strategy_canvas_alloc_text", "")
+    allocs = _normalize_allocations(_parse_allocations(alloc_text))
+    market_symbols = [a["symbol"] for a in allocs if a.get("symbol") and a.get("symbol") != "CASH"]
+    signal_options = market_symbols or ["QQQ"]
+
+    setup_cols = st.columns([1, 1, 1, 1], gap="small")
+    period = setup_cols[0].selectbox("기간", ["3mo", "6mo", "1y", "2y"], index=2,
+                                     format_func=lambda x: {"3mo": "3개월", "6mo": "6개월",
+                                                            "1y": "1년", "2y": "2년"}[x],
+                                     key="strategy_canvas_period")
+    signal_symbol = setup_cols[1].selectbox("신호 기준", signal_options,
+                                            index=0, key="strategy_canvas_signal")
+    buy_rsi = setup_cols[2].number_input("매수 RSI", min_value=1, max_value=99, value=30,
+                                         step=1, key="strategy_canvas_buy_rsi")
+    sell_rsi = setup_cols[3].number_input("현금화 RSI", min_value=1, max_value=99, value=70,
+                                          step=1, key="strategy_canvas_sell_rsi")
+
+    top_left, top_right = st.columns([0.96, 1.04], gap="large")
+    with top_left:
+        st.markdown(
+            """
+            <div class="widget-card-head">
+              <span>W-001 · 입력</span>
+              <b>포트폴리오 구성</b>
+            </div>
+            """,
+            unsafe_allow_html=True,
         )
-        rules = st.text_area("운용 규칙", placeholder="예: VIX 25 이상이면 레버리지 신규 진입 중단", height=90)
-        if st.form_submit_button("시나리오 저장", type="primary"):
-            allocations = _parse_allocations(alloc_text)
-            total = sum(float(x.get("weight_pct") or 0) for x in allocations)
+        st.text_area(
+            "비중",
+            key="strategy_canvas_alloc_text",
+            help="한 줄에 `티커 비중 메모` 형식",
+            height=152,
+        )
+        if allocs:
+            st.dataframe(
+                pd.DataFrame([{
+                    "자산": a["symbol"],
+                    "비중": f"{a['weight_pct']:.1f}%",
+                    "메모": a.get("note", ""),
+                } for a in allocs]),
+                hide_index=True,
+                width="stretch",
+                height=190,
+            )
+        else:
+            st.warning("비중을 `QQQ 50 핵심` 형식으로 입력해 주세요.")
+
+    with top_right:
+        st.markdown(
+            """
+            <div class="widget-card-head">
+              <span>W-009 · 함수 위젯</span>
+              <b>RSI 매수·현금화 규칙</b>
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
+        rule_cols = st.columns(3)
+        rule_cols[0].metric("매수", f"RSI ≤ {buy_rsi}")
+        rule_cols[1].metric("현금화", f"RSI ≥ {sell_rsi}")
+        rule_cols[2].metric("체결", "다음 날")
+        st.markdown(
+            f"""
+            <div class="rule-matrix">
+              <div><span>source</span><b>{signal_symbol}</b></div>
+              <div><span>lookback</span><b>14일</b></div>
+              <div><span>cost</span><b>0 bps</b></div>
+              <div><span>mode</span><b>정보형 백테스트</b></div>
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
+        st.caption("현금화 상태에서는 포트폴리오 수익률을 0으로 두고, 신호 다음 거래일부터 노출을 바꿉니다.")
+
+    result_col, side_col = st.columns([1.48, 0.72], gap="large")
+    with result_col:
+        st.markdown(
+            """
+            <div class="widget-card-head">
+              <span>W-010 · 백테스트 비교</span>
+              <b>Buy & Hold vs RSI 현금화 전략</b>
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
+        run = st.button("캔버스 실행", type="primary", width="stretch",
+                        disabled=not bool(allocs), key="strategy_canvas_run")
+        if run:
+            with st.spinner("시세를 불러와 캔버스를 실행 중..."):
+                st.session_state["strategy_canvas_result"] = _strategy_canvas_backtest(
+                    allocs, period=period, signal_symbol=signal_symbol,
+                    buy_rsi=int(buy_rsi), sell_rsi=int(sell_rsi),
+                )
+
+        result = st.session_state.get("strategy_canvas_result")
+        if result and result.get("ok"):
+            st.plotly_chart(_strategy_canvas_chart(result["equity"]), width="stretch",
+                            config={"displayModeBar": False})
+            st.dataframe(result["metrics"], hide_index=True, width="stretch")
+            st.caption(result.get("note", ""))
+        elif result and not result.get("ok"):
+            st.warning(result.get("error", "캔버스 실행 실패"))
+        else:
+            st.info("캔버스 실행을 누르면 현재 비중과 RSI 규칙으로 1일봉 비교 차트를 만듭니다.")
+
+    with side_col:
+        _canvas_saved_scenarios(surface, alloc_text, allocs, buy_rsi, sell_rsi, signal_symbol)
+
+
+def _ensure_canvas_defaults():
+    if "strategy_canvas_alloc_text" in st.session_state:
+        return
+    st.session_state["strategy_canvas_alloc_text"] = _default_canvas_allocations()
+
+
+def _default_canvas_allocations() -> str:
+    try:
+        holdings = data.load_holdings()
+    except Exception:
+        holdings = []
+    rows = []
+    for row in sorted(holdings or [], key=lambda r: float(r.get("weight") or 0), reverse=True)[:7]:
+        ticker = str(row.get("ticker") or "").upper().strip()
+        weight = data._try_float(row.get("weight"))
+        if not ticker or weight is None:
+            continue
+        note = str(row.get("name") or "").strip()
+        rows.append(f"{ticker} {weight:.1f} {note}".rstrip())
+    if rows:
+        return "\n".join(rows)
+    return "QQQ 45 핵심 성장\nTLT 20 금리 방어\nGLD 10 꼬리위험\nCASH 25 기회 대기"
+
+
+def _normalize_allocations(allocations: list[dict]) -> list[dict]:
+    rows = []
+    for row in allocations or []:
+        symbol = str(row.get("symbol") or "").upper().strip()
+        weight = data._try_float(row.get("weight_pct"))
+        if not symbol or weight is None or weight < 0:
+            continue
+        rows.append({"symbol": symbol, "weight_pct": float(weight), "note": row.get("note", "")})
+    total = sum(r["weight_pct"] for r in rows)
+    if total <= 0:
+        return []
+    return [{**r, "weight_pct": r["weight_pct"] / total * 100.0} for r in rows]
+
+
+def _canvas_saved_scenarios(surface: str, alloc_text: str, allocs: list[dict],
+                            buy_rsi: int, sell_rsi: int, signal_symbol: str):
+    st.markdown("##### Scenario")
+    with st.form("agent_scenario_form"):
+        name = st.text_input("시나리오 이름", value="RSI 현금화 캔버스")
+        max_loss = st.number_input("최대 손실한도 %", min_value=0.0, max_value=100.0,
+                                   value=8.0, step=0.5)
+        desc = st.text_area("전략 가설", height=86,
+                            placeholder="어떤 시장 맥락에서 이 규칙이 유리한지 적어주세요.")
+        if st.form_submit_button("시나리오 저장", type="primary", width="stretch"):
+            total = sum(float(x.get("weight_pct") or 0) for x in allocs)
             scenario = storage.save_scenario({
                 "name": name,
                 "description": desc,
-                "allocations": allocations,
+                "allocations": allocs,
                 "rules": {
                     "max_loss_pct": max_loss,
-                    "text": rules,
+                    "text": f"{signal_symbol} RSI <= {buy_rsi} 매수, RSI >= {sell_rsi} 현금화",
                     "live_orders": False,
                     "actual_asset_link": False,
                 },
-                "assumptions": {"surface": surface, "total_weight_pct": round(total, 2)},
-                "metrics": {"saved_from": "streamlit_dashboard", "allocation_count": len(allocations)},
+                "assumptions": {
+                    "surface": surface,
+                    "total_weight_pct": round(total, 2),
+                    "raw_allocations": alloc_text,
+                },
+                "metrics": {"saved_from": "strategy_canvas", "allocation_count": len(allocs)},
             })
             st.toast(f"{scenario['name']} 저장 완료 · 합계 {total:.1f}%")
 
-    scenarios = storage.list_scenarios(limit=50)
+    scenarios = storage.list_scenarios(limit=12)
     if not scenarios:
         st.caption("저장된 시나리오 없음")
         return
-    for scenario in scenarios[:12]:
-        with st.expander(f"{scenario['name']} · {scenario.get('updated_at', '')}", expanded=False):
-            st.write(scenario.get("description") or "설명 없음")
-            st.caption(f"손실한도 {scenario.get('rules', {}).get('max_loss_pct', '—')}% · "
-                       f"비중합계 {scenario.get('assumptions', {}).get('total_weight_pct', '—')}%")
-            allocs = scenario.get("allocations") or []
-            if allocs:
-                st.dataframe(pd.DataFrame(allocs), hide_index=True, width="stretch")
+    for scenario in scenarios[:5]:
+        st.markdown(
+            f"<div class='scenario-row'><b>{scenario.get('name', '시나리오')}</b>"
+            f"<span>{scenario.get('updated_at', '')}</span></div>",
+            unsafe_allow_html=True,
+        )
+
+
+def _strategy_canvas_backtest(allocations: list[dict], *, period: str, signal_symbol: str,
+                              buy_rsi: int, sell_rsi: int) -> dict:
+    if buy_rsi >= sell_rsi:
+        return {"ok": False, "error": "매수 RSI는 현금화 RSI보다 낮아야 합니다."}
+
+    allocs = _normalize_allocations(allocations)
+    weights = {row["symbol"]: row["weight_pct"] / 100.0 for row in allocs}
+    market_symbols = [symbol for symbol in weights if symbol != "CASH"]
+    if not market_symbols:
+        return {"ok": False, "error": "백테스트할 시장 자산이 없습니다."}
+
+    fetch_symbols = tuple(sorted(set(market_symbols + [signal_symbol])))
+    close = _canvas_prices(fetch_symbols, period)
+    if close.empty:
+        return {"ok": False, "error": "시세를 불러오지 못했습니다."}
+    missing = [symbol for symbol in market_symbols if symbol not in close.columns]
+    available_symbols = [symbol for symbol in market_symbols if symbol in close.columns]
+    if signal_symbol not in close.columns:
+        return {"ok": False, "error": f"{signal_symbol} 신호 기준 시세가 없습니다."}
+    if not available_symbols:
+        return {"ok": False, "error": "사용 가능한 포트폴리오 자산 시세가 없습니다."}
+
+    returns = close[available_symbols].pct_change().fillna(0.0)
+    port_ret = pd.Series(0.0, index=returns.index)
+    for symbol in available_symbols:
+        port_ret = port_ret.add(returns[symbol].fillna(0.0) * weights.get(symbol, 0.0), fill_value=0.0)
+
+    rsi = _rsi_series(close[signal_symbol]).reindex(port_ret.index)
+    invested = []
+    exposure = 1.0
+    for value in rsi:
+        if pd.notna(value):
+            if float(value) <= buy_rsi:
+                exposure = 1.0
+            elif float(value) >= sell_rsi:
+                exposure = 0.0
+        invested.append(exposure)
+    exposure_series = pd.Series(invested, index=port_ret.index).shift(1).fillna(1.0)
+    rsi_ret = port_ret * exposure_series
+
+    equity = pd.DataFrame({
+        "date": port_ret.index,
+        "Buy & Hold": (1 + port_ret).cumprod() * 100.0,
+        "RSI 현금화": (1 + rsi_ret).cumprod() * 100.0,
+        "노출": exposure_series * 100.0,
+        "RSI": rsi,
+    }).dropna(subset=["Buy & Hold", "RSI 현금화"])
+    if len(equity) < 20:
+        return {"ok": False, "error": "백테스트에 필요한 데이터가 부족합니다."}
+
+    metrics = pd.DataFrame([
+        {"전략": "Buy & Hold", **_canvas_metrics(equity.set_index("date")["Buy & Hold"])},
+        {"전략": "RSI 현금화", **_canvas_metrics(equity.set_index("date")["RSI 현금화"])},
+    ])
+    note = f"{period} · {signal_symbol} RSI(14) · 노출일 {equity['노출'].mean():.0f}%"
+    if missing:
+        note += " · 제외: " + ", ".join(missing)
+    return {"ok": True, "equity": equity, "metrics": metrics, "note": note}
+
+
+@st.cache_data(ttl=3600, show_spinner=False)
+def _canvas_prices(symbols: tuple[str, ...], period: str) -> pd.DataFrame:
+    try:
+        import yfinance as yf
+    except Exception:
+        return pd.DataFrame()
+    try:
+        raw = yf.download(list(symbols), period=period, interval="1d", auto_adjust=True,
+                          progress=False, threads=False)
+    except Exception:
+        return pd.DataFrame()
+    if raw is None or raw.empty:
+        return pd.DataFrame()
+    if isinstance(raw.columns, pd.MultiIndex):
+        first = raw.columns.get_level_values(0)
+        if "Close" in first:
+            close = raw["Close"].copy()
+        elif "Adj Close" in first:
+            close = raw["Adj Close"].copy()
+        else:
+            return pd.DataFrame()
+    else:
+        col = "Close" if "Close" in raw.columns else "Adj Close" if "Adj Close" in raw.columns else None
+        if not col:
+            return pd.DataFrame()
+        close = raw[[col]].rename(columns={col: symbols[0]}).copy()
+    if isinstance(close, pd.Series):
+        close = close.to_frame(symbols[0])
+    close.columns = [str(col).upper() for col in close.columns]
+    close.index = pd.to_datetime(close.index)
+    return close.sort_index().dropna(how="all")
+
+
+def _rsi_series(close: pd.Series, period: int = 14) -> pd.Series:
+    series = pd.to_numeric(close, errors="coerce").dropna()
+    delta = series.diff()
+    gain = delta.clip(lower=0).rolling(period, min_periods=period).mean()
+    loss = (-delta.clip(upper=0)).rolling(period, min_periods=period).mean()
+    rs = gain / loss.replace(0, 1e-9)
+    return 100 - (100 / (1 + rs))
+
+
+def _canvas_metrics(equity: pd.Series) -> dict:
+    eq = pd.to_numeric(equity, errors="coerce").dropna()
+    if len(eq) < 2:
+        return {"누적수익": "—", "CAGR": "—", "MDD": "—", "Vol": "—", "Sharpe": "—"}
+    rets = eq.pct_change().dropna()
+    days = max(1, int((eq.index[-1] - eq.index[0]).days))
+    cumulative = float(eq.iloc[-1] / eq.iloc[0] - 1)
+    cagr = float((eq.iloc[-1] / eq.iloc[0]) ** (365.25 / days) - 1)
+    drawdown = eq / eq.cummax() - 1
+    mdd = float(drawdown.min())
+    vol = float(rets.std() * sqrt(252)) if len(rets) > 1 else 0.0
+    sharpe = float(rets.mean() / rets.std() * sqrt(252)) if len(rets) > 1 and rets.std() > 0 else 0.0
+    return {
+        "누적수익": f"{cumulative * 100:+.1f}%",
+        "CAGR": f"{cagr * 100:+.1f}%",
+        "MDD": f"{mdd * 100:.1f}%",
+        "Vol": f"{vol * 100:.1f}%",
+        "Sharpe": f"{sharpe:.2f}",
+    }
+
+
+def _strategy_canvas_chart(equity: pd.DataFrame):
+    import plotly.graph_objects as go
+
+    fig = go.Figure()
+    fig.add_trace(go.Scatter(
+        x=equity["date"], y=equity["Buy & Hold"], mode="lines",
+        name="Buy & Hold", line={"color": "#059669", "width": 2.4},
+    ))
+    fig.add_trace(go.Scatter(
+        x=equity["date"], y=equity["RSI 현금화"], mode="lines",
+        name="RSI 현금화", line={"color": "#7c3aed", "width": 2.2},
+    ))
+    fig.update_layout(
+        height=360,
+        margin={"l": 8, "r": 8, "t": 10, "b": 8},
+        hovermode="x unified",
+        legend={"orientation": "h", "y": 1.06, "x": 0.02},
+        yaxis_title="시작값 100",
+        xaxis_title=None,
+    )
+    return fig
 
 
 def _connectors_tab():
@@ -519,6 +826,139 @@ def _inject_codex_css():
           font-size:.82rem;
           line-height:1.35;
           overflow-wrap:anywhere;
+        }
+        .widget-flow {
+          display:grid;
+          grid-template-columns:minmax(0,1fr) 22px minmax(0,1fr) 22px minmax(0,1fr);
+          align-items:center;
+          gap:8px;
+          padding:10px;
+          margin:2px 0 14px;
+          border:1px solid rgba(16,185,129,.18);
+          border-radius:8px;
+          background:rgba(6,78,59,.10);
+        }
+        .widget-flow div {
+          display:flex;
+          align-items:center;
+          justify-content:space-between;
+          gap:10px;
+          padding:9px 11px;
+          border:1px solid rgba(148,163,184,.18);
+          border-radius:7px;
+          background:rgba(15,23,42,.42);
+          min-height:42px;
+        }
+        .widget-flow b {
+          color:rgba(110,231,183,.98);
+          font-size:.78rem;
+          white-space:nowrap;
+        }
+        .widget-flow span {
+          color:rgba(226,232,240,.94);
+          font-size:.86rem;
+          text-align:right;
+        }
+        .widget-flow i {
+          display:block;
+          height:1px;
+          background:linear-gradient(90deg,rgba(16,185,129,.20),rgba(16,185,129,.82));
+          position:relative;
+        }
+        .widget-flow i:after {
+          content:"";
+          position:absolute;
+          right:-1px;
+          top:-3px;
+          width:7px;
+          height:7px;
+          border-top:1px solid rgba(16,185,129,.9);
+          border-right:1px solid rgba(16,185,129,.9);
+          transform:rotate(45deg);
+        }
+        .widget-card-head {
+          padding:10px 11px;
+          margin:2px 0 10px;
+          border:1px solid rgba(148,163,184,.18);
+          border-radius:8px;
+          background:rgba(15,23,42,.34);
+        }
+        .widget-card-head span {
+          display:block;
+          color:rgba(148,163,184,.88);
+          font-size:.75rem;
+          margin-bottom:2px;
+        }
+        .widget-card-head b {
+          display:block;
+          color:rgba(241,245,249,.98);
+          font-size:.98rem;
+        }
+        .rule-matrix {
+          display:grid;
+          grid-template-columns:repeat(2,minmax(0,1fr));
+          gap:8px;
+          margin:10px 0;
+        }
+        .rule-matrix div {
+          border:1px solid rgba(148,163,184,.16);
+          border-radius:7px;
+          padding:9px 10px;
+          background:rgba(2,6,23,.24);
+          min-height:58px;
+        }
+        .rule-matrix span {
+          display:block;
+          color:rgba(148,163,184,.82);
+          font-size:.73rem;
+          margin-bottom:3px;
+        }
+        .rule-matrix b {
+          display:block;
+          color:rgba(226,232,240,.96);
+          font-size:.9rem;
+          overflow-wrap:anywhere;
+        }
+        .scenario-row {
+          display:flex;
+          align-items:center;
+          justify-content:space-between;
+          gap:10px;
+          border:1px solid rgba(148,163,184,.16);
+          border-radius:8px;
+          background:rgba(2,6,23,.22);
+          padding:8px 9px;
+          margin-bottom:7px;
+        }
+        .scenario-row b {
+          color:rgba(226,232,240,.96);
+          font-size:.82rem;
+          overflow-wrap:anywhere;
+        }
+        .scenario-row span {
+          color:rgba(148,163,184,.78);
+          font-size:.72rem;
+          white-space:nowrap;
+        }
+        @media (max-width: 760px) {
+          .widget-flow {
+            grid-template-columns:1fr;
+          }
+          .widget-flow i {
+            height:14px;
+            width:1px;
+            margin:0 auto;
+            background:linear-gradient(180deg,rgba(16,185,129,.20),rgba(16,185,129,.82));
+          }
+          .widget-flow i:after {
+            right:-3px;
+            top:auto;
+            bottom:-1px;
+            transform:rotate(135deg);
+          }
+          .widget-flow span {
+            text-align:left;
+          }
         }
         </style>
         """,
