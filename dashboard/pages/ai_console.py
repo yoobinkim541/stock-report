@@ -138,8 +138,7 @@ def _chat_tab(surface: str, pack: dict):
 
         for msg in st.session_state["agent_chat_messages"][-16:]:
             role = msg.get("role", "assistant")
-            avatar = "🧠" if role == "assistant" else "⌁"
-            with st.chat_message(role, avatar=avatar):
+            with st.chat_message(role):
                 st.markdown(msg.get("content", ""))
                 if msg.get("meta"):
                     st.caption(msg["meta"])
