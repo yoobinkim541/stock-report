@@ -137,7 +137,8 @@ def _chat_tab(surface: str, pack: dict):
             _run_agent_question(pending, surface)
 
         for msg in st.session_state["agent_chat_messages"][-16:]:
-            role = msg.get("role", "assistant")
+            role_raw = str(msg.get("role", "assistant")).strip().lower()
+            role = "user" if role_raw in {"user", "human"} else "assistant"
             with st.chat_message(role):
                 st.markdown(msg.get("content", ""))
                 if msg.get("meta"):
