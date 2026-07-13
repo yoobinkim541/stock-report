@@ -262,6 +262,23 @@ def test_ai_console_strategy_canvas_allocation_normalize():
     assert rows[0]["weight_pct"] == 75.0
 
 
+def test_ai_console_chat_state_is_surface_scoped(monkeypatch):
+    from dashboard.pages import ai_console
+
+    fake_state = {}
+    monkeypatch.setattr(ai_console.st, "session_state", fake_state)
+
+    ai_console._ensure_chat_state("market")
+    ai_console._ensure_chat_state("portfolio")
+    fake_state[ai_console._chat_key("market")].append({"role": "user", "content": "시장 질문"})
+    fake_state[ai_console._chat_key("portfolio")].append({"role": "user", "content": "포트 질문"})
+
+    assert ai_console._chat_key("market") != ai_console._chat_key("portfolio")
+    assert fake_state[ai_console._chat_key("market")][-1]["content"] == "시장 질문"
+    assert fake_state[ai_console._chat_key("portfolio")][-1]["content"] == "포트 질문"
+    assert ai_console._prompt_key("market") != ai_console._prompt_key("portfolio")
+
+
 def test_ai_console_strategy_canvas_uses_matrix_dsl(monkeypatch):
     from dashboard.pages import ai_console
     import pandas as pd

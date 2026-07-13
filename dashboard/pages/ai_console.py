@@ -125,7 +125,8 @@ def _context_glance(pack: dict):
 
 
 def _chat_tab(surface: str, pack: dict):
-    _ensure_chat_state()
+    _ensure_chat_state(surface)
+    chat_key = _chat_key(surface)
     chat_col, rail_col = st.columns([1.48, 0.72], gap="large")
 
     with chat_col:
@@ -138,7 +139,7 @@ def _chat_tab(surface: str, pack: dict):
         if pending:
             _run_agent_question(pending, surface)
 
-        for msg in st.session_state["agent_chat_messages"][-16:]:
+        for msg in st.session_state[chat_key][-16:]:
             role_raw = str(msg.get("role", "assistant")).strip().lower()
             role = "user" if role_raw in {"user", "human"} else "assistant"
             with st.chat_message(role):
@@ -155,10 +156,19 @@ def _chat_tab(surface: str, pack: dict):
         _chat_context_rail(surface, pack)
 
 
-def _ensure_chat_state():
-    if "agent_chat_messages" in st.session_state:
+def _chat_key(surface: str) -> str:
+    return f"agent_chat_messages_{str(surface or 'market').strip().lower()}"
+
+
+def _prompt_key(surface: str) -> str:
+    return f"agent_show_prompt_{str(surface or 'market').strip().lower()}"
+
+
+def _ensure_chat_state(surface: str):
+    key = _chat_key(surface)
+    if key in st.session_state:
         return
-    st.session_state["agent_chat_messages"] = [
+    st.session_state[key] = [
         {
             "role": "assistant",
             "content": "현재 시장 자료, 모의투자 원장, World Memory를 읽고 있습니다. 질문을 던지면 이 맥락 안에서 답합니다.",
@@ -206,20 +216,22 @@ def _run_agent_question(question: str, surface: str):
     question = str(question or "").strip()
     if not question:
         return
-    st.session_state["agent_chat_messages"].append({"role": "user", "content": question})
+    _ensure_chat_state(surface)
+    chat_key = _chat_key(surface)
+    st.session_state[chat_key].append({"role": "user", "content": question})
     with st.spinner("컨텍스트 읽는 중..."):
         result = agent.answer(question, surface)
     if result.get("ok"):
         ctx = result.get("context") or {}
         meta = (f"events {ctx.get('event_count', 0)} · memory {ctx.get('memory_count', 0)}"
                 if ctx else "")
-        st.session_state["agent_chat_messages"].append({
+        st.session_state[chat_key].append({
             "role": "assistant",
             "content": result.get("answer", ""),
             "meta": meta,
         })
     else:
-        st.session_state["agent_chat_messages"].append({
+        st.session_state[chat_key].append({
             "role": "assistant",
             "content": result.get("error", "답변 생성 실패"),
             "meta": "error",
@@ -247,14 +259,15 @@ def _chat_context_rail(surface: str, pack: dict):
     )
 
     c1, c2 = st.columns(2)
+    prompt_key = _prompt_key(surface)
     if c1.button("프롬프트", key=f"agent_prompt_{surface}", width="stretch"):
-        st.session_state["agent_show_prompt"] = not st.session_state.get("agent_show_prompt", False)
+        st.session_state[prompt_key] = not st.session_state.get(prompt_key, False)
     if c2.button("초기화", key=f"agent_clear_{surface}", width="stretch"):
-        st.session_state.pop("agent_chat_messages", None)
-        _ensure_chat_state()
+        st.session_state.pop(_chat_key(surface), None)
+        _ensure_chat_state(surface)
         st.rerun()
 
-    if st.session_state.get("agent_show_prompt"):
+    if st.session_state.get(prompt_key):
         st.code(agent.build_context_prompt(surface), language="text")
 
     st.markdown("##### Events")
