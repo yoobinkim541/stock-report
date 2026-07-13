@@ -262,6 +262,36 @@ def test_ai_console_strategy_canvas_allocation_normalize():
     assert rows[0]["weight_pct"] == 75.0
 
 
+def test_ai_console_strategy_canvas_uses_matrix_dsl(monkeypatch):
+    from dashboard.pages import ai_console
+    import pandas as pd
+
+    idx = pd.date_range("2026-01-01", periods=60, freq="D")
+    close = pd.DataFrame(
+        {
+            "QQQ": [
+                *range(100, 130),
+                *range(130, 100, -1),
+            ][:60],
+        },
+        index=idx,
+    )
+    monkeypatch.setattr(ai_console, "_canvas_prices", lambda symbols, period: close)
+
+    result = ai_console._strategy_canvas_backtest(
+        [{"symbol": "QQQ", "weight_pct": 100}],
+        period="3mo",
+        signal_symbol="QQQ",
+        buy_rsi=30,
+        sell_rsi=70,
+    )
+
+    assert result["ok"] is True
+    assert result["functionSpec"]["language"] == "portfolio-matrix-dsl"
+    assert "Sortino" in result["metrics"].columns
+    assert result["matrix"]
+
+
 def test_entry_app_runs_through_nav():
     """app.py 엔트리: 인증 통과 후 sys.path·사이드바·st.navigation·기본 홈 렌더 무예외.
 

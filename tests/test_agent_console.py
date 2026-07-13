@@ -8,6 +8,7 @@ def _isolate(monkeypatch, tmp_path: Path) -> None:
     monkeypatch.setenv("AGENT_CONSOLE_REPORTS_DIR", str(tmp_path / "reports"))
     monkeypatch.setenv("AGENT_CONSOLE_SOURCE_CACHE_DIR", str(tmp_path / "reports" / "source-cache"))
     monkeypatch.setenv("AGENT_CONSOLE_ML_DATA_DIR", str(tmp_path / "reports" / "ml-data"))
+    monkeypatch.setenv("AGENT_CONSOLE_SHARED_MEMORY_DIR", str(tmp_path / "data" / "shared-memory"))
 
 
 def test_storage_memory_and_scenario(monkeypatch, tmp_path):
@@ -55,6 +56,60 @@ def test_context_pack_empty(monkeypatch, tmp_path):
     assert pack["surface"] == "market"
     assert "sources" in pack
     assert "memory" in pack
+    assert pack["shared_memory"]["ok"] is True
+
+
+def test_shared_memory_context_contract(monkeypatch, tmp_path):
+    _isolate(monkeypatch, tmp_path)
+
+    from agent_console import shared_memory
+
+    record = shared_memory.append_chat_exchange(
+        "나는 레버리지는 손실한도 안에서만 쓰고 싶어",
+        "최대 손실한도를 먼저 정하고 그 안에서 QLD/TQQQ 후보를 비교하겠습니다.",
+        "portfolio",
+    )
+    packet = shared_memory.build_context_packet(
+        {"screen": "portfolio", "query": "레버리지 손실한도", "provider": "codex-cli"}
+    )
+    section = shared_memory.build_context_section({"screen": "portfolio", "query": "레버리지"})
+
+    assert record is not None
+    assert packet["schemaVersion"] == "finance-agent-gui.shared-memory.v1"
+    assert "contextMemorySummary" in packet
+    assert packet["memories"][0]["title"].startswith("나는 레버리지는")
+    assert "[컨텍스트 메모리]" in section
+    assert "레버리지" in section
+
+
+def test_portfolio_matrix_dsl_rsi_controls_exposure():
+    import pandas as pd
+
+    from agent_console.portfolio_matrix_dsl import rsi_cash_program, run_portfolio_matrix_dsl
+
+    dates = pd.date_range("2026-01-01", periods=40, freq="D")
+    prices = pd.DataFrame(
+        {
+            "QQQ": [
+                *range(100, 116),
+                *range(116, 92, -1),
+            ][:40],
+        },
+        index=dates,
+    )
+
+    result = run_portfolio_matrix_dsl(
+        prices,
+        {"QQQ": 1.0},
+        signal_symbol="QQQ",
+        program=rsi_cash_program(30, 70, period=2),
+        label="RSI 현금화",
+    )
+
+    assert result.ok is True
+    assert "Sortino" in result.metrics.columns
+    assert result.trades
+    assert result.matrix
 
 
 def test_agent_trading_logic_question_uses_logic_report():
@@ -116,6 +171,29 @@ def test_agent_general_question_does_not_force_market_template(monkeypatch):
 
     assert "현재 시장 상황 인식" not in answer
     assert "할 수 있습니다" in answer or "일반 질문" in answer
+    assert "비활성화" not in answer
+
+
+def test_agent_asset_short_question_handles_sol(monkeypatch):
+    monkeypatch.setenv("AGENT_CONSOLE_LLM_ENABLED", "0")
+    from agent_console.agent import _compose_answer
+
+    pack = {
+        "surface": "market",
+        "generated_at": "2026-07-13T05:01:00+00:00",
+        "sources": {"events": [], "source_counts": [], "symbol_counts": []},
+        "memory": [],
+        "reports": [],
+        "paper": {},
+        "ml_activity": [],
+    }
+
+    answer = _compose_answer("sol top 2+ 는 어떄", pack)
+
+    assert "솔라나" in answer
+    assert "SOL-USD" in answer
+    assert "현재 시장 상황 인식" not in answer
+    assert "비활성화" not in answer
 
 
 def test_agent_codex_chat_runner_writes_last_message(monkeypatch, tmp_path):
@@ -182,6 +260,9 @@ def test_server_endpoints(monkeypatch, tmp_path):
     assert chat["ok"] is True
     assert "현재 시장 상황 인식" in chat["answer"]
     assert "시장 신호 점수" in chat["answer"]
+    assert client.get("/api/memory?limit=5").json["ok"] is True
+    memory_context = client.post("/api/memory/context", json={"screen": "market", "query": "금리"}).json
+    assert memory_context["schemaVersion"] == "finance-agent-gui.shared-memory.v1"
 
     scenario = client.post(
         "/api/portfolio-lab/scenarios",

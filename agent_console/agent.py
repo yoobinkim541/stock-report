@@ -4,10 +4,11 @@ from collections import Counter
 from datetime import datetime, timedelta, timezone
 import os
 from pathlib import Path
+import re
 import subprocess
 import tempfile
 
-from . import context, storage
+from . import context, shared_memory, storage
 
 _KST = timezone(timedelta(hours=9))
 
@@ -37,6 +38,11 @@ def build_context_prompt(surface: str = "market") -> str:
     lines += ["", "[누적 World Memory]"]
     for item in memory:
         lines.append(f"- {item.get('observed_at')} · {item.get('kind')} · {item.get('title')}")
+    shared_section = shared_memory.build_context_section(
+        {"screen": surface, "query": "stock-report AI 콘솔 컨텍스트 프롬프트", "limit": 4}
+    )
+    if shared_section:
+        lines += ["", shared_section]
     lines += ["", "[화면별 초점]", *[f"- {x}" for x in pack["focus"]]]
     return "\n".join(lines)
 
@@ -52,6 +58,10 @@ def answer(question: str, surface: str = "market") -> dict:
     pack = context.context_pack(surface)
     response = _compose_answer(question, pack, history=history)
     storage.add_conversation("assistant", response, surface)
+    try:
+        shared_memory.append_chat_exchange(question, response, surface)
+    except Exception:
+        pass
     return {
         "ok": True,
         "answer": response,
@@ -59,6 +69,7 @@ def answer(question: str, surface: str = "market") -> dict:
         "context": {
             "event_count": len(pack["sources"]["events"]),
             "memory_count": len(pack["memory"]),
+            "shared_memory_count": (pack.get("shared_memory") or {}).get("recordCount", 0),
             "source_counts": pack["sources"]["source_counts"],
             "symbol_counts": pack["sources"]["symbol_counts"],
         },
@@ -69,6 +80,9 @@ def answer(question: str, surface: str = "market") -> dict:
 def _compose_answer(question: str, pack: dict, history: list[dict] | None = None) -> str:
     if _is_trading_logic_question(question) or _is_trading_followup(question, history):
         return _compose_trading_logic_answer(question, pack)
+    asset = _extract_asset_symbol(question)
+    if asset:
+        return _compose_asset_opinion_answer(question, pack, history, asset)
     if not _is_market_context_question(question, pack):
         return _compose_general_chat_answer(question, pack, history)
 
@@ -133,6 +147,98 @@ def _compose_answer(question: str, pack: dict, history: list[dict] | None = None
     lines.append("")
     lines.append("#### Codex에게 바로 물어볼 질문")
     lines.extend(_next_questions(surface, read))
+    return "\n".join(lines)
+
+
+_ASSET_ALIASES = {
+    "btc": ("BTC-USD", "비트코인"),
+    "bitcoin": ("BTC-USD", "비트코인"),
+    "eth": ("ETH-USD", "이더리움"),
+    "ethereum": ("ETH-USD", "이더리움"),
+    "sol": ("SOL-USD", "솔라나"),
+    "solana": ("SOL-USD", "솔라나"),
+    "xrp": ("XRP-USD", "리플"),
+    "doge": ("DOGE-USD", "도지코인"),
+    "qqq": ("QQQ", "QQQ"),
+    "spy": ("SPY", "SPY"),
+    "tqqq": ("TQQQ", "TQQQ"),
+    "qld": ("QLD", "QLD"),
+    "soxl": ("SOXL", "SOXL"),
+    "nvda": ("NVDA", "엔비디아"),
+    "mu": ("MU", "마이크론"),
+}
+
+
+def _extract_asset_symbol(question: str) -> tuple[str, str] | None:
+    q = str(question or "").strip()
+    ql = q.lower()
+    intent_words = (
+        "어때", "어떰", "어떠", "top", "탑", "티어", "매수", "진입", "목표",
+        "가냐", "가능", "전망", "보유", "팔", "살", "+", "롱", "숏",
+    )
+    if not any(word in ql for word in intent_words):
+        return None
+    for raw in re.findall(r"\$?[A-Za-z][A-Za-z0-9.-]{1,12}", q):
+        token = raw.lstrip("$").lower()
+        if token in _ASSET_ALIASES:
+            return _ASSET_ALIASES[token]
+        if raw.isupper() and 2 <= len(raw) <= 6 and token not in {"top"}:
+            return (raw.upper(), raw.upper())
+    return None
+
+
+def _compose_asset_opinion_answer(question: str, pack: dict, history: list[dict] | None,
+                                  asset: tuple[str, str]) -> str:
+    symbol, name = asset
+    llm_prompt = (
+        f"자산 질문입니다. 사용자가 '{question}'라고 물었습니다. "
+        f"대상은 {name}({symbol})로 해석하세요. 현재 제공된 컨텍스트에 직접 데이터가 부족하면 부족하다고 말하고, "
+        "조건부 판단, 확인할 가격/상대강도/리스크를 한국어로 짧게 답하세요."
+    )
+    llm = _try_llm_chat(llm_prompt, pack, history)
+    if llm:
+        return llm
+
+    ql = str(question or "").lower()
+    top2 = "top" in ql or "탑" in ql or "2+" in ql
+    if symbol == "SOL-USD":
+        take = (
+            "짧게 보면 **SOL은 '상위권 재평가 후보'는 맞지만, top 2+를 바로 베팅할 근거는 아직 확인이 필요**합니다."
+            if top2 else
+            "**SOL은 강한 베타 자산이라 리스크온 구간에서는 좋지만, 단독 확신 매수보다 조건부 접근이 맞습니다.**"
+        )
+        checks = [
+            "SOL/BTC와 SOL/ETH 상대강도가 고점을 다시 높이는지",
+            "네트워크 수수료·활성주소·DEX/DeFi 거래량이 가격보다 먼저 개선되는지",
+            "BTC가 위험선호를 유지하고 ETH 대비 내러티브가 실제 자금 유입으로 이어지는지",
+        ]
+        risks = [
+            "가동 중단/성능 이슈 재발",
+            "락업·대형 물량·밸리데이터 집중 리스크",
+            "크립토 전체가 risk-off로 꺾일 때 SOL이 더 크게 빠지는 베타 리스크",
+        ]
+    else:
+        take = f"**{name}({symbol})은 지금 로컬 컨텍스트만으로 확정 판단하기보다 조건부로 보는 게 맞습니다.**"
+        checks = [
+            f"{symbol} 자체 추세가 시장/동종 자산 대비 강한지",
+            "거래량을 동반한 돌파인지, 단순 반등인지",
+            "손절 기준을 먼저 정해도 기대수익/위험비가 남는지",
+        ]
+        risks = ["직접 뉴스·가격 데이터 부족", "시장 전체 risk-off 전환", "거래량 없는 단기 반등"]
+
+    lines = [f"### {name}({symbol}) 의견", ""]
+    lines.append(f"> {take}")
+    lines.append("")
+    lines.append("#### 지금 볼 조건")
+    lines.extend(f"- {item}" for item in checks)
+    lines.append("")
+    lines.append("#### 조심할 점")
+    lines.extend(f"- {item}" for item in risks)
+    lines.append("")
+    lines.append(
+        "결론적으로, 이 질문이 '포트폴리오 top 2 비중 후보냐'는 뜻이면 **소액/조건부 후보**에 가깝고, "
+        "'시총 top 2 이상 가능하냐'는 뜻이면 **가능성은 있지만 아직 검증해야 할 내러티브**로 보겠습니다."
+    )
     return "\n".join(lines)
 
 
@@ -270,10 +376,19 @@ def _build_general_chat_prompt(question: str, pack: dict, history: list[dict] | 
         title = item.get("title")
         if title:
             ctx.append(f"- memory: {title}")
+    shared_section = shared_memory.build_context_section(
+        {
+            "screen": pack.get("surface") or "market",
+            "query": question,
+            "provider": "codex-cli",
+            "limit": 6,
+        }
+    )
     return "\n".join([
         "너는 stock-report 안의 대화형 에이전트다.",
         "사용자는 한국어로 편하게 말한다. 너도 한국어로 자연스럽게 답한다.",
         "투자 데이터가 필요한 질문이면 주어진 컨텍스트를 참고하되, 일반 질문이면 억지로 시장 리포트로 바꾸지 않는다.",
+        "공유 메모리는 참고 맥락일 뿐이며 현재 사용자 질문과 화면 컨텍스트가 우선한다.",
         "실제 매매 지시는 피하고, 판단 근거와 확인할 점을 짧고 명확하게 말한다.",
         "모르면 모른다고 말하고, 필요한 정보가 무엇인지 묻는다.",
         "",
@@ -282,6 +397,8 @@ def _build_general_chat_prompt(question: str, pack: dict, history: list[dict] | 
         "",
         "[사용 가능한 투자 컨텍스트]",
         *(ctx or ["- 없음"]),
+        "",
+        shared_section or "[컨텍스트 메모리]\n- 없음",
         "",
         f"[사용자 질문]\n{question}",
         "",
@@ -303,8 +420,8 @@ def _fallback_general_chat(question: str, pack: dict) -> str:
         return "이전 답변기가 질문 의도보다 화면 맥락을 먼저 봐서 시장 리포트를 반복했습니다. 이제 범위 밖 질문은 일반 챗봇 답변으로, 투자 질문은 데이터 기반 답변으로 나누도록 바꿨습니다."
     return (
         f"질문은 이해했습니다: **{q}**\n\n"
-        "다만 지금 로컬 모델 호출이 비활성화되어 있어 깊은 일반 답변은 제한됩니다. "
-        "그래도 이 프로젝트의 시장 데이터, 포트폴리오, 모의투자, 단기 트레이딩과 연결해서 물으면 바로 구체적으로 답할 수 있습니다."
+        "모델 응답을 바로 받지는 못했지만, 질문을 시장 데이터·포트폴리오·모의투자·단기 트레이딩 중 어디에 연결할지 말해주면 "
+        "그 맥락으로 바로 이어서 답하겠습니다."
     )
 
 

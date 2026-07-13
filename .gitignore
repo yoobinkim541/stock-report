@@ -60,6 +60,8 @@ tasks-telegram-bot.md
 reports/*
 !reports/llm_decision.py
 ~/reports/
+data/shared-memory/*
+!data/shared-memory/.gitkeep
 
 # ── IDE ─────────────────────────────────
 .vscode/

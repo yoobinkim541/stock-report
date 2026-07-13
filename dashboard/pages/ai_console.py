@@ -16,6 +16,7 @@ import streamlit as st
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 
 from agent_console import agent, context, storage
+from agent_console.portfolio_matrix_dsl import rsi_cash_program, run_portfolio_matrix_dsl
 from dashboard import data
 
 
@@ -408,7 +409,7 @@ def _lab_tab(surface: str):
             """,
             unsafe_allow_html=True,
         )
-        st.caption("현금화 상태에서는 포트폴리오 수익률을 0으로 두고, 신호 다음 거래일부터 노출을 바꿉니다.")
+        st.caption("FinanceAgentGUI의 portfolio-matrix-dsl 방식처럼 신호를 target_weight 행렬로 해석하고 다음 거래일부터 노출을 바꿉니다.")
 
     result_col, side_col = st.columns([1.48, 0.72], gap="large")
     with result_col:
@@ -436,6 +437,10 @@ def _lab_tab(surface: str):
                             config={"displayModeBar": False})
             st.dataframe(result["metrics"], hide_index=True, width="stretch")
             st.caption(result.get("note", ""))
+            trades = result.get("trades") or []
+            if trades:
+                with st.expander(f"DSL 체결 로그 {len(trades)}건", expanded=False):
+                    st.dataframe(pd.DataFrame(trades), hide_index=True, width="stretch", height=180)
         elif result and not result.get("ok"):
             st.warning(result.get("error", "캔버스 실행 실패"))
         else:
@@ -501,6 +506,11 @@ def _canvas_saved_scenarios(surface: str, alloc_text: str, allocs: list[dict],
                 "rules": {
                     "max_loss_pct": max_loss,
                     "text": f"{signal_symbol} RSI <= {buy_rsi} 매수, RSI >= {sell_rsi} 현금화",
+                    "functionSpec": {
+                        "language": "portfolio-matrix-dsl",
+                        "executionMode": "matrix-dsl",
+                        "program": rsi_cash_program(int(buy_rsi), int(sell_rsi)),
+                    },
                     "live_orders": False,
                     "actual_asset_link": False,
                 },
@@ -547,42 +557,32 @@ def _strategy_canvas_backtest(allocations: list[dict], *, period: str, signal_sy
     if not available_symbols:
         return {"ok": False, "error": "사용 가능한 포트폴리오 자산 시세가 없습니다."}
 
-    returns = close[available_symbols].pct_change().fillna(0.0)
-    port_ret = pd.Series(0.0, index=returns.index)
-    for symbol in available_symbols:
-        port_ret = port_ret.add(returns[symbol].fillna(0.0) * weights.get(symbol, 0.0), fill_value=0.0)
+    run = run_portfolio_matrix_dsl(
+        close,
+        weights,
+        signal_symbol=signal_symbol,
+        program=rsi_cash_program(int(buy_rsi), int(sell_rsi)),
+        label="RSI 현금화",
+    )
+    if not run.ok:
+        return {"ok": False, "error": run.error or "DSL 백테스트 실패"}
 
-    rsi = _rsi_series(close[signal_symbol]).reindex(port_ret.index)
-    invested = []
-    exposure = 1.0
-    for value in rsi:
-        if pd.notna(value):
-            if float(value) <= buy_rsi:
-                exposure = 1.0
-            elif float(value) >= sell_rsi:
-                exposure = 0.0
-        invested.append(exposure)
-    exposure_series = pd.Series(invested, index=port_ret.index).shift(1).fillna(1.0)
-    rsi_ret = port_ret * exposure_series
-
-    equity = pd.DataFrame({
-        "date": port_ret.index,
-        "Buy & Hold": (1 + port_ret).cumprod() * 100.0,
-        "RSI 현금화": (1 + rsi_ret).cumprod() * 100.0,
-        "노출": exposure_series * 100.0,
-        "RSI": rsi,
-    }).dropna(subset=["Buy & Hold", "RSI 현금화"])
-    if len(equity) < 20:
-        return {"ok": False, "error": "백테스트에 필요한 데이터가 부족합니다."}
-
-    metrics = pd.DataFrame([
-        {"전략": "Buy & Hold", **_canvas_metrics(equity.set_index("date")["Buy & Hold"])},
-        {"전략": "RSI 현금화", **_canvas_metrics(equity.set_index("date")["RSI 현금화"])},
-    ])
-    note = f"{period} · {signal_symbol} RSI(14) · 노출일 {equity['노출'].mean():.0f}%"
+    note = f"{period} · {run.note}"
     if missing:
         note += " · 제외: " + ", ".join(missing)
-    return {"ok": True, "equity": equity, "metrics": metrics, "note": note}
+    return {
+        "ok": True,
+        "equity": run.equity,
+        "metrics": run.metrics,
+        "note": note,
+        "trades": run.trades,
+        "matrix": run.matrix[:2000],
+        "functionSpec": {
+            "language": "portfolio-matrix-dsl",
+            "executionMode": "matrix-dsl",
+            "program": rsi_cash_program(int(buy_rsi), int(sell_rsi)),
+        },
+    }
 
 
 @st.cache_data(ttl=3600, show_spinner=False)

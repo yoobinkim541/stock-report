@@ -6,7 +6,7 @@ from collections import Counter
 from datetime import datetime, timezone
 from pathlib import Path
 
-from . import storage
+from . import shared_memory, storage
 
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
@@ -191,7 +191,7 @@ def context_pack(surface: str = "market", *, hours: int = 72) -> dict:
             text = str(value).lstrip("$").upper()
             if 1 <= len(text) <= 12:
                 symbols[text] += 1
-    return {
+    pack = {
         "ok": True,
         "surface": surface,
         "generated_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
@@ -208,6 +208,12 @@ def context_pack(surface: str = "market", *, hours: int = 72) -> dict:
         "memory": memory,
         "focus": focus_for_surface(surface),
     }
+    try:
+        shared_memory.sync_external_layer_from_pack(pack)
+        pack["shared_memory"] = shared_memory.status(limit=8)
+    except Exception as exc:
+        pack["shared_memory"] = {"ok": False, "error": str(exc), "records": []}
+    return pack
 
 
 def focus_for_surface(surface: str) -> list[str]:
