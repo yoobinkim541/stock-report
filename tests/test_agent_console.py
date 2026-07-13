@@ -153,6 +153,80 @@ def test_agent_trading_logic_question_uses_logic_report():
     assert "시장 설명이 매매 판단을 덮고" in answer
 
 
+def test_agent_portfolio_risk_question_uses_holdings_not_market_template(monkeypatch):
+    monkeypatch.setenv("AGENT_CONSOLE_LLM_ENABLED", "0")
+    from agent_console.agent import _compose_answer
+
+    pack = {
+        "surface": "portfolio",
+        "generated_at": "2026-07-13T06:01:00+00:00",
+        "sources": {"events": [], "source_counts": [], "symbol_counts": []},
+        "memory": [],
+        "reports": [],
+        "ml_activity": [],
+        "paper": {},
+        "portfolio": {
+            "holdings": [
+                {"ticker": "NVDA", "name": "Nvidia", "weight": 32.0, "ret": 18.0, "value": 32000},
+                {"ticker": "MU", "name": "Micron", "weight": 24.0, "ret": -7.0, "value": 24000},
+                {"ticker": "CASH", "name": "Cash", "weight": 20.0, "ret": 0.0, "value": 20000},
+                {"ticker": "QLD", "name": "ProShares Ultra QQQ", "weight": 12.0, "ret": -3.0, "value": 12000},
+                {"ticker": "MSFT", "name": "Microsoft", "weight": 12.0, "ret": 4.0, "value": 12000},
+            ],
+            "summary": {},
+            "risk": {},
+            "targets": {},
+            "errors": [],
+        },
+    }
+
+    answer = _compose_answer("현재 비중에서 먼저 줄여야 할 리스크를 봐줘", pack)
+
+    assert "먼저 줄일 리스크" in answer
+    assert "우선 줄일 후보" in answer
+    assert "NVDA" in answer
+    assert "MU" in answer
+    assert "시장 신호 점수" not in answer
+    assert "Codex에게 바로 물어볼 질문" not in answer
+
+
+def test_agent_portfolio_loss_limit_scenario_uses_loss_budget(monkeypatch):
+    monkeypatch.setenv("AGENT_CONSOLE_LLM_ENABLED", "0")
+    from agent_console.agent import _compose_answer
+
+    pack = {
+        "surface": "portfolio",
+        "generated_at": "2026-07-13T06:02:00+00:00",
+        "sources": {"events": [], "source_counts": [], "symbol_counts": []},
+        "memory": [],
+        "reports": [],
+        "ml_activity": [],
+        "paper": {},
+        "portfolio": {
+            "holdings": [
+                {"ticker": "NVDA", "name": "Nvidia", "weight": 32.0, "ret": 18.0, "value": 32000},
+                {"ticker": "MU", "name": "Micron", "weight": 24.0, "ret": -7.0, "value": 24000},
+                {"ticker": "CASH", "name": "Cash", "weight": 20.0, "ret": 0.0, "value": 20000},
+                {"ticker": "QLD", "name": "ProShares Ultra QQQ", "weight": 12.0, "ret": -3.0, "value": 12000},
+                {"ticker": "MSFT", "name": "Microsoft", "weight": 12.0, "ret": 4.0, "value": 12000},
+            ],
+            "summary": {},
+            "risk": {},
+            "targets": {},
+            "errors": [],
+        },
+    }
+
+    answer = _compose_answer("최대 손실한도 1% 기준으로 시나리오를 제안해줘", pack)
+
+    assert "최대 손실한도 시나리오" in answer
+    assert "계좌 손실한도 1.0%" in answer
+    assert "포지션 크기 공식" in answer
+    assert "손절폭 5%면 최대 20%" in answer
+    assert "시장 신호 점수" not in answer
+    assert "Codex에게 바로 물어볼 질문" not in answer
+
+
 def test_agent_general_question_does_not_force_market_template(monkeypatch):
     monkeypatch.setenv("AGENT_CONSOLE_LLM_ENABLED", "0")
     from agent_console.agent import _compose_answer
@@ -288,6 +362,7 @@ def test_server_endpoints(monkeypatch, tmp_path):
     monkeypatch.setattr(context, "latest_reports", lambda limit=10: [])
     monkeypatch.setattr(context, "ml_activity", lambda limit=80: [])
     monkeypatch.setattr(context, "paper_state", lambda: {"kr": None, "us": None, "combined": None, "errors": []})
+    monkeypatch.setattr(context, "portfolio_state", lambda: {"holdings": [], "summary": {}, "risk": {}, "targets": {}, "errors": []})
     monkeypatch.setattr(context, "model_state", lambda: {"items": []})
 
     app = create_app()

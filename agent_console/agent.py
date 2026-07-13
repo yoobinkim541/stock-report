@@ -81,6 +81,8 @@ def _compose_answer(question: str, pack: dict, history: list[dict] | None = None
     resolved_question = _resolve_followup_question(question, history)
     if _is_trading_logic_question(question) or _is_trading_followup(question, history):
         return _compose_trading_logic_answer(question, pack)
+    if _is_portfolio_risk_question(resolved_question, pack):
+        return _compose_portfolio_risk_answer(resolved_question, pack, history)
     if _is_domestic_etf_question(resolved_question, history):
         return _compose_domestic_etf_answer(question, resolved_question, pack, history)
     asset = _extract_asset_symbol(resolved_question)
@@ -150,6 +152,214 @@ def _compose_answer(question: str, pack: dict, history: list[dict] | None = None
     lines.append("")
     lines.append("#### Codex에게 바로 물어볼 질문")
     lines.extend(_next_questions(surface, read))
+    return "\n".join(lines)
+
+
+def _is_portfolio_risk_question(question: str, pack: dict | None = None) -> bool:
+    q = str(question or "").lower()
+    surface = str((pack or {}).get("surface") or "").lower()
+    risk_words = (
+        "현재 비중", "비중", "줄여", "줄일", "축소", "리스크", "위험",
+        "최대 손실", "손실한도", "손실 한도", "max loss", "시나리오",
+        "현금", "레버리지", "리밸런싱", "리밸런스",
+    )
+    return surface == "portfolio" and any(word in q for word in risk_words)
+
+
+def _compose_portfolio_risk_answer(question: str, pack: dict, history: list[dict] | None = None) -> str:
+    q = str(question or "")
+    portfolio = pack.get("portfolio") or {}
+    holdings = portfolio.get("holdings") or []
+    paper = pack.get("paper") or {}
+    limit_pct = _extract_loss_limit_pct(q) or _extract_loss_limit_pct(_last_user_question(history)) or 1.0
+    is_scenario = any(word in q.lower() for word in ("시나리오", "손실한도", "손실 한도", "최대 손실", "max loss"))
+
+    if not holdings:
+        return "\n".join([
+            "### 포트폴리오 리스크 점검",
+            "",
+            "> 현재 보유 비중 스냅샷을 읽지 못했습니다. `portfolio_snapshot.json` 또는 보유 데이터 동기화가 먼저 필요합니다.",
+            "",
+            "그래도 방향은 이렇습니다: 손실한도 기준 답변은 시장 뉴스보다 **포지션 크기, 종목별 손절폭, 상관관계, 현금 비중**을 먼저 봐야 합니다.",
+        ])
+
+    risk = _portfolio_risk_snapshot(holdings, paper)
+    if is_scenario:
+        return _portfolio_loss_scenario_answer(question, pack, risk, limit_pct)
+    return _portfolio_reduce_risk_answer(question, pack, risk, limit_pct)
+
+
+def _extract_loss_limit_pct(text: str) -> float | None:
+    source = str(text or "").lower()
+    match = re.search(r"(?:최대\s*)?(?:손실\s*한도|손실한도|max\s*loss|loss)\D{0,8}(\d+(?:\.\d+)?)\s*%", source)
+    if not match:
+        match = re.search(r"(\d+(?:\.\d+)?)\s*%\s*(?:안|이내|손실|한도)", source)
+    if not match:
+        return None
+    try:
+        value = float(match.group(1))
+    except ValueError:
+        return None
+    return value if 0 < value <= 50 else None
+
+
+def _portfolio_risk_snapshot(holdings: list[dict], paper: dict) -> dict:
+    rows = []
+    for raw in holdings:
+        ticker = str(raw.get("ticker") or raw.get("symbol") or "").upper().strip()
+        if not ticker:
+            continue
+        rows.append({
+            "ticker": ticker,
+            "name": str(raw.get("name") or ticker).strip(),
+            "weight": _num(raw.get("weight"), 0.0),
+            "ret": _num(raw.get("ret"), 0.0),
+            "value": _num(raw.get("value"), 0.0),
+        })
+    rows.sort(key=lambda row: row["weight"], reverse=True)
+    top_weight = rows[0]["weight"] if rows else 0.0
+    top3_weight = sum(row["weight"] for row in rows[:3])
+    negative = [row for row in rows if row["ret"] < 0]
+    drawdown_accounts = []
+    for key in ("kr", "us"):
+        account = paper.get(key) if isinstance(paper, dict) else None
+        if isinstance(account, dict):
+            drawdown_accounts.append({
+                "label": "KR 모의" if key == "kr" else "US 모의",
+                "mdd": _num(account.get("strat_mdd"), None),
+                "cum_ret": _num(account.get("cum_ret"), None),
+                "cash": _num(account.get("cash"), None),
+                "currency": account.get("currency") or "",
+            })
+    concentration = "높음" if top_weight >= 25 or top3_weight >= 65 else "보통" if top_weight >= 15 else "낮음"
+    reduce_first = _rank_reduce_candidates(rows)
+    return {
+        "holdings": rows,
+        "top_weight": top_weight,
+        "top3_weight": top3_weight,
+        "negative": negative,
+        "drawdown_accounts": drawdown_accounts,
+        "concentration": concentration,
+        "reduce_first": reduce_first,
+    }
+
+
+def _rank_reduce_candidates(rows: list[dict]) -> list[dict]:
+    candidates = []
+    for row in rows:
+        score = 0.0
+        reasons = []
+        if row["weight"] >= 25:
+            score += 4
+            reasons.append("단일 비중 과대")
+        elif row["weight"] >= 15:
+            score += 2
+            reasons.append("상위 비중")
+        if row["ret"] < -8:
+            score += 3
+            reasons.append("손실 확대")
+        elif row["ret"] < 0:
+            score += 1
+            reasons.append("약세")
+        if row["ticker"] in {"TQQQ", "SOXL", "SQQQ", "SOXS", "QLD", "SSO"}:
+            score += 3
+            reasons.append("레버리지/고변동")
+        if row["ticker"] in {"NVDA", "MU", "SMH", "SOXX", "TSM", "AVGO", "AMD", "INTC", "QCOM"}:
+            score += 1.5
+            reasons.append("반도체/AI 베타")
+        candidates.append({**row, "score": score, "reasons": reasons or ["비중 점검"]})
+    candidates.sort(key=lambda row: (row["score"], row["weight"]), reverse=True)
+    return candidates[:5]
+
+
+def _portfolio_reduce_risk_answer(question: str, pack: dict, risk: dict, limit_pct: float) -> str:
+    holdings = risk["holdings"]
+    reduce_first = risk["reduce_first"]
+    lines = ["### 먼저 줄일 리스크", ""]
+    lines.append(f"`{_format_kst(pack.get('generated_at'))}` · **현재 비중 기준**")
+    lines.append("")
+    lines.append(
+        f"> 시장 국면보다 먼저 볼 것은 **집중도와 한 번 틀렸을 때 계좌 손실이 {limit_pct:.1f}% 안에서 멈추는지**입니다."
+    )
+    lines.append("")
+    lines.append("#### 현재 구조")
+    lines.append(f"- 보유 종목 수: {len(holdings)}개")
+    lines.append(f"- 1위 비중: {_fmt_pct(risk['top_weight'])}")
+    lines.append(f"- 상위 3개 합산: {_fmt_pct(risk['top3_weight'])}")
+    lines.append(f"- 집중도 판정: **{risk['concentration']}**")
+    if risk["negative"]:
+        neg = ", ".join(f"{row['ticker']} {_fmt_pct(row['ret'])}" for row in risk["negative"][:4])
+        lines.append(f"- 손실 구간 보유: {neg}")
+
+    lines.append("")
+    lines.append("#### 우선 줄일 후보")
+    lines.append("")
+    lines.append("| 우선 | 종목 | 비중 | 손익 | 줄이는 이유 |")
+    lines.append("|---:|---|---:|---:|---|")
+    for idx, row in enumerate(reduce_first[:4], start=1):
+        lines.append(
+            f"| {idx} | {row['ticker']} | {_fmt_pct(row['weight'])} | {_fmt_pct(row['ret'])} | {', '.join(row['reasons'][:3])} |"
+        )
+
+    lines.append("")
+    lines.append("#### 실행 순서")
+    lines.extend([
+        "1. **단일 25% 초과 포지션부터 상한을 낮춥니다.** 좋은 종목이어도 포트 전체를 흔드는 비중이면 먼저 깎습니다.",
+        "2. **손실 중인 고베타/레버리지부터 줄입니다.** 반등 기대보다 손실한도 유지가 우선입니다.",
+        "3. **상위 3개 합산이 60%를 넘으면 현금 또는 저상관 자산으로 옮깁니다.** 새 매수보다 포트 흔들림을 줄이는 단계입니다.",
+    ])
+    lines.append("")
+    lines.append("#### 바로 쓸 기준")
+    lines.append(
+        f"각 포지션은 `비중 × 허용 하락폭 ≤ {limit_pct:.1f}%`로 잡겠습니다. "
+        "예를 들어 20% 비중이면 해당 종목의 허용 하락폭은 약 5%입니다. 그보다 크게 흔들릴 종목은 비중을 낮춰야 합니다."
+    )
+    return "\n".join(lines)
+
+
+def _portfolio_loss_scenario_answer(question: str, pack: dict, risk: dict, limit_pct: float) -> str:
+    holdings = risk["holdings"]
+    top = risk["reduce_first"][0] if risk["reduce_first"] else None
+    current_high_beta = sum(
+        row["weight"]
+        for row in holdings
+        if row["ticker"] in {"TQQQ", "SOXL", "QLD", "SSO", "NVDA", "MU", "SMH", "SOXX", "AMD", "TSM", "AVGO"}
+    )
+    lines = ["### 최대 손실한도 시나리오", ""]
+    lines.append(f"`{_format_kst(pack.get('generated_at'))}` · **계좌 손실한도 {limit_pct:.1f}% 기준**")
+    lines.append("")
+    lines.append(
+        "> 이 답변에서는 시장 뉴스보다 **한 번의 틀린 판단이 계좌 전체에 몇 % 손실을 만들 수 있는지**를 기준으로 봅니다."
+    )
+    lines.append("")
+    lines.append("#### 현재 위험 예산")
+    lines.append(f"- 상위 1개 비중: {_fmt_pct(risk['top_weight'])}")
+    lines.append(f"- 상위 3개 비중: {_fmt_pct(risk['top3_weight'])}")
+    lines.append(f"- AI/반도체/레버리지 성격 비중 추정: {_fmt_pct(current_high_beta)}")
+    if top:
+        lines.append(f"- 가장 먼저 점검할 포지션: **{top['ticker']}** ({_fmt_pct(top['weight'])}, {', '.join(top['reasons'][:2])})")
+    lines.append("")
+    lines.append("#### 시나리오")
+    lines.append("")
+    lines.append("| 모드 | 조건 | 공격/고베타 | 현금/방어 | 행동 |")
+    lines.append("|---|---|---:|---:|---|")
+    lines.append("| 방어 | HYG/LQD 약세, 달러/유가 상승, 상위 보유 손절선 접근 | 40% 이하 | 30% 이상 | 레버리지 중지, 손실 포지션 먼저 축소 |")
+    lines.append("| 기본 | 주식 반등은 있으나 크레딧 확인 전 | 50~60% | 20~30% | 신규 매수는 분할, 상위 3개 60% 이하 유지 |")
+    lines.append("| 공격 | QQQ/반도체 반등 + 크레딧 안정 + 보유 상위 종목 거래대금 동반 | 65~75% | 10~20% | 손실한도 내에서만 레버리지/테마 ETF 추가 |")
+    lines.append("")
+    lines.append("#### 포지션 크기 공식")
+    lines.append(
+        f"- 종목별 최대 비중 = `{limit_pct:.1f}% / 예상 손절폭%`입니다. "
+        "손절폭 5%면 최대 20%, 손절폭 10%면 최대 10%입니다."
+    )
+    lines.append("- 레버리지 ETF는 같은 손절폭이라도 실질 변동성이 크므로 계산 비중의 1/2만 씁니다.")
+    lines.append("- 이미 손실 중인 포지션은 신규 진입 후보보다 위험 예산을 먼저 차지한 것으로 봅니다.")
+    lines.append("")
+    lines.append("#### 지금 결론")
+    lines.append(
+        "지금은 공격 신호를 새로 찾기보다 **상위 비중과 고베타 묶음을 먼저 낮춰 손실한도 여유를 만드는 단계**입니다. "
+        "그 다음에 크레딧과 반도체 수급이 같이 좋아질 때만 공격 비중을 다시 켜는 쪽이 맞습니다."
+    )
     return "\n".join(lines)
 
 

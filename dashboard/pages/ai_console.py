@@ -92,6 +92,7 @@ def _safe_context(surface: str, hours: int) -> dict:
             "sources": {"events": [], "source_counts": [], "symbol_counts": []},
             "reports": [],
             "ml_activity": [],
+            "portfolio": {"holdings": [], "summary": {}, "risk": {}, "targets": {}, "errors": [str(exc)]},
             "paper": {"errors": [str(exc)]},
             "models": {"items": []},
             "memory": [],

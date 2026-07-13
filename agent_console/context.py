@@ -129,6 +129,27 @@ def paper_state() -> dict:
     return out
 
 
+def portfolio_state() -> dict:
+    out = {"holdings": [], "summary": {}, "risk": {}, "targets": {}, "errors": []}
+    try:
+        from dashboard import data, views
+
+        holdings = data.load_holdings()
+        out["holdings"] = sorted(holdings or [], key=lambda row: float(row.get("weight") or 0), reverse=True)
+        out["summary"] = data.portfolio_summary()
+        try:
+            out["targets"] = views.target_weights_map()
+        except Exception as exc:
+            out["errors"].append(f"targets: {exc}")
+        try:
+            out["risk"] = views.risk_summary(data.portfolio_weights())
+        except Exception as exc:
+            out["errors"].append(f"risk: {exc}")
+    except Exception as exc:
+        out["errors"].append(str(exc))
+    return out
+
+
 def _fallback_combined_paper(kr: dict | None, us: dict | None) -> dict:
     rows = [row for row in (kr, us) if isinstance(row, dict)]
     return {
@@ -203,6 +224,7 @@ def context_pack(surface: str = "market", *, hours: int = 72) -> dict:
         },
         "reports": latest_reports(),
         "ml_activity": ml_activity(),
+        "portfolio": portfolio_state(),
         "paper": paper_state(),
         "models": model_state(),
         "memory": memory,
