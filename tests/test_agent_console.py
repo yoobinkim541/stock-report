@@ -196,6 +196,53 @@ def test_agent_asset_short_question_handles_sol(monkeypatch):
     assert "비활성화" not in answer
 
 
+def test_agent_followup_correction_remembers_domestic_etf_context(monkeypatch):
+    monkeypatch.setenv("AGENT_CONSOLE_LLM_ENABLED", "0")
+    from agent_console.agent import _compose_answer
+
+    pack = {
+        "surface": "market",
+        "generated_at": "2026-07-13T05:01:00+00:00",
+        "sources": {"events": [], "source_counts": [], "symbol_counts": []},
+        "memory": [],
+        "reports": [],
+        "paper": {},
+        "ml_activity": [],
+    }
+    history = [
+        {"role": "user", "message": "sol ai top 2+ 은 어때"},
+        {"role": "assistant", "message": "SOL-USD 기준으로 답할게."},
+    ]
+
+    answer = _compose_answer("아니아니 국내 etf", pack, history=history)
+
+    assert "국내 ETF" in answer
+    assert "직전 질문" in answer
+    assert "SOL-USD" not in answer
+    assert "솔라나" not in answer
+    assert "모델 응답을 바로 받지는 못했지만" not in answer
+
+
+def test_agent_domestic_etf_question_does_not_extract_crypto_sol(monkeypatch):
+    monkeypatch.setenv("AGENT_CONSOLE_LLM_ENABLED", "0")
+    from agent_console.agent import _compose_answer
+
+    pack = {
+        "surface": "market",
+        "generated_at": "2026-07-13T05:01:00+00:00",
+        "sources": {"events": [], "source_counts": [], "symbol_counts": []},
+        "memory": [],
+        "reports": [],
+        "paper": {},
+        "ml_activity": [],
+    }
+
+    answer = _compose_answer("SOL AI top 2+ 국내 ETF 어때", pack, history=[])
+
+    assert "국내 ETF" in answer
+    assert "SOL-USD" not in answer
+
+
 def test_agent_codex_chat_runner_writes_last_message(monkeypatch, tmp_path):
     from agent_console.agent import _try_codex_chat
 

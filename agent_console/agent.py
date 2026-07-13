@@ -78,13 +78,16 @@ def answer(question: str, surface: str = "market") -> dict:
 
 
 def _compose_answer(question: str, pack: dict, history: list[dict] | None = None) -> str:
+    resolved_question = _resolve_followup_question(question, history)
     if _is_trading_logic_question(question) or _is_trading_followup(question, history):
         return _compose_trading_logic_answer(question, pack)
-    asset = _extract_asset_symbol(question)
+    if _is_domestic_etf_question(resolved_question, history):
+        return _compose_domestic_etf_answer(question, resolved_question, pack, history)
+    asset = _extract_asset_symbol(resolved_question)
     if asset:
-        return _compose_asset_opinion_answer(question, pack, history, asset)
-    if not _is_market_context_question(question, pack):
-        return _compose_general_chat_answer(question, pack, history)
+        return _compose_asset_opinion_answer(resolved_question, pack, history, asset)
+    if not _is_market_context_question(resolved_question, pack):
+        return _compose_general_chat_answer(resolved_question, pack, history)
 
     events = pack["sources"]["events"]
     memory = pack["memory"]
@@ -169,9 +172,40 @@ _ASSET_ALIASES = {
 }
 
 
+def _resolve_followup_question(question: str, history: list[dict] | None = None) -> str:
+    q = str(question or "").strip()
+    if not q or not _looks_like_followup_correction(q):
+        return q
+    previous = _last_user_question(history)
+    if not previous:
+        return q
+    return f"{previous} / 정정: {q}"
+
+
+def _last_user_question(history: list[dict] | None = None) -> str:
+    for row in reversed(history or []):
+        if row.get("role") != "user":
+            continue
+        text = str(row.get("message") or row.get("content") or "").strip()
+        if text:
+            return text
+    return ""
+
+
+def _looks_like_followup_correction(question: str) -> bool:
+    q = str(question or "").strip().lower()
+    if not q or len(q) > 60:
+        return False
+    correction_words = ("아니", "아니아니", "그거 말고", "말고", "아니고", "정정", "그 뜻", "그게 아니라")
+    context_words = ("국내", "etf", "코스피", "코스닥", "한국", "미국", "종목", "브랜드", "상장")
+    return any(word in q for word in correction_words) and any(word in q for word in context_words)
+
+
 def _extract_asset_symbol(question: str) -> tuple[str, str] | None:
     q = str(question or "").strip()
     ql = q.lower()
+    if _is_domestic_etf_question(q):
+        return None
     intent_words = (
         "어때", "어떰", "어떠", "top", "탑", "티어", "매수", "진입", "목표",
         "가냐", "가능", "전망", "보유", "팔", "살", "+", "롱", "숏",
@@ -185,6 +219,61 @@ def _extract_asset_symbol(question: str) -> tuple[str, str] | None:
         if raw.isupper() and 2 <= len(raw) <= 6 and token not in {"top"}:
             return (raw.upper(), raw.upper())
     return None
+
+
+def _is_domestic_etf_question(question: str, history: list[dict] | None = None) -> bool:
+    q = str(question or "").lower()
+    has_etf = "etf" in q or "상장지수" in q
+    domestic = any(word in q for word in ("국내", "한국", "코스피", "코스닥", "krx", "kospi", "kosdaq"))
+    brands = ("kodex", "tiger", "ace", "sol", "rise", "kbstar", "hanaro", "koact", "히어로즈")
+    ai_theme = "ai" in q or "인공지능" in q or "반도체" in q or "top" in q or "탑" in q
+    if has_etf and (domestic or any(brand in q for brand in brands)):
+        return True
+    if domestic and ai_theme and _last_user_question(history):
+        return True
+    return False
+
+
+def _compose_domestic_etf_answer(question: str, resolved_question: str, pack: dict,
+                                 history: list[dict] | None) -> str:
+    llm_prompt = (
+        "사용자의 최신 발화는 직전 질문에 대한 정정입니다. "
+        f"직전 맥락까지 합친 질문: '{resolved_question}'. "
+        "여기서 SOL은 크립토 심볼이 아니라 국내 상장 ETF 브랜드/상품명일 가능성이 높습니다. "
+        "정확한 종목코드가 없으면 확정 가격·수익률은 만들지 말고, 국내 AI 테마 ETF 평가 프레임으로 답하세요. "
+        "이전 질문을 기억했다는 점을 반영해 한국어로 자연스럽게 답하세요."
+    )
+    llm = _try_llm_chat(llm_prompt, pack, history)
+    if llm:
+        return llm
+
+    previous = _last_user_question(history)
+    lines = ["### 국내 ETF 기준으로 다시 볼게요", ""]
+    if previous:
+        lines.append(f"> 방금 말은 직전 질문 **“{previous}”**에서 `SOL`을 코인이 아니라 **국내 상장 ETF** 쪽으로 정정한 걸로 이해했습니다.")
+    else:
+        lines.append("> `SOL`을 코인이 아니라 국내 ETF 브랜드/상품명 쪽으로 보겠습니다.")
+    lines.append("")
+    lines.append("#### 먼저 정정")
+    lines.append("- 여기서 `SOL`은 **국내 ETF 브랜드명/상품명**으로 보겠습니다.")
+    lines.append("- `AI top 2+`는 상품명이 정확히 필요합니다. 종목코드가 없으면 가격·괴리율·구성종목 비중은 단정하면 안 됩니다.")
+    lines.append("")
+    lines.append("#### 평가 기준")
+    lines.extend([
+        "- **구성 상위 2종목 집중도**: 이름처럼 top 2 비중이 크면 상승 탄력은 좋지만, 종목 리스크도 같이 커집니다.",
+        "- **AI 노출의 질**: 단순 테마명보다 반도체, 전력, 데이터센터, 소프트웨어 중 어디에 실제로 베팅하는지 봐야 합니다.",
+        "- **거래대금/스프레드**: 국내 테마 ETF는 유동성이 얇으면 진입가보다 청산가가 더 중요해집니다.",
+        "- **총보수와 괴리율**: 장기 보유면 총보수, 단기 매매면 괴리율과 호가 간격을 먼저 봅니다.",
+    ])
+    lines.append("")
+    lines.append("#### 내 판단")
+    lines.append(
+        "국내 AI 집중 ETF라면 **개별 AI/반도체주를 직접 고르기 부담스러울 때 쓰는 위성 포지션**으로는 괜찮습니다. "
+        "다만 top 2 집중형이면 분산 ETF라기보다 `테마 압축 베팅`에 가까워서, 포트 핵심 비중보다는 손실한도를 정한 보조 비중이 맞습니다."
+    )
+    lines.append("")
+    lines.append("종목코드나 정확한 ETF명을 주면 구성종목, 거래대금, 보수, 최근 수익률 기준으로 바로 다시 평가할게요.")
+    return "\n".join(lines)
 
 
 def _compose_asset_opinion_answer(question: str, pack: dict, history: list[dict] | None,
@@ -249,7 +338,8 @@ def _is_market_context_question(question: str, pack: dict | None = None) -> bool
         "시장", "증시", "종목", "주식", "포트폴리오", "보유", "비중", "수익률", "리스크",
         "뉴스", "이슈", "금리", "유가", "달러", "환율", "vix", "qqq", "spy", "반도체",
         "ai", "레버리지", "mdd", "벤치", "오른", "내린", "상승", "하락", "반등", "조정",
-        "매수", "매도", "진입", "청산", "추천", "성과", "왜 올", "왜 떨",
+        "매수", "매도", "진입", "청산", "추천", "성과", "왜 올", "왜 떨", "etf",
+        "국내", "코스피", "코스닥", "kospi", "kosdaq", "kodex", "tiger", "ace", "sol",
     )
     if any(word in q for word in market_words):
         return True
