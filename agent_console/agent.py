@@ -81,6 +81,8 @@ def _compose_answer(question: str, pack: dict, history: list[dict] | None = None
     resolved_question = _resolve_followup_question(question, history)
     if _is_trading_logic_question(question) or _is_trading_followup(question, history):
         return _compose_trading_logic_answer(question, pack)
+    if _is_portfolio_preference_question(question, pack, history):
+        return _compose_portfolio_preference_answer(question, pack, history)
     if _is_portfolio_risk_question(resolved_question, pack):
         return _compose_portfolio_risk_answer(resolved_question, pack, history)
     if _is_domestic_etf_question(resolved_question, history):
@@ -363,6 +365,126 @@ def _portfolio_loss_scenario_answer(question: str, pack: dict, risk: dict, limit
     return "\n".join(lines)
 
 
+def _is_portfolio_preference_question(question: str, pack: dict | None = None,
+                                      history: list[dict] | None = None) -> bool:
+    q = str(question or "").lower()
+    surface = str((pack or {}).get("surface") or "").lower()
+    if surface != "portfolio":
+        return False
+    preference_words = (
+        "들고 가", "들고가", "가져가", "유지", "계속", "보유", "홀딩", "hold", "keep",
+        "팔기 싫", "팔고 싶지", "안 팔", "남기고", "남겨", "가지고",
+    )
+    if not any(word in q for word in preference_words):
+        return False
+    if _resolve_portfolio_symbol(question, (pack or {}).get("portfolio", {}).get("holdings") or []):
+        return True
+    previous = _last_user_question(history).lower()
+    return any(word in previous for word in ("비중", "리스크", "손실", "줄여", "시나리오"))
+
+
+def _resolve_portfolio_symbol(question: str, holdings: list[dict]) -> str | None:
+    q = str(question or "")
+    ql = q.lower()
+    tickers = {str(row.get("ticker") or row.get("symbol") or "").upper() for row in holdings}
+    tickers.discard("")
+
+    for raw in re.findall(r"\$?[A-Za-z][A-Za-z0-9.-]{1,12}", q):
+        token = raw.lstrip("$").upper()
+        if token in tickers:
+            return token
+
+    for row in holdings:
+        ticker = str(row.get("ticker") or row.get("symbol") or "").upper().strip()
+        name = str(row.get("name") or "").strip()
+        if ticker and ticker.lower() in ql:
+            return ticker
+        if name and name.lower() in ql:
+            return ticker
+
+    try:
+        import ticker_names
+        chunks = re.findall(r"[A-Za-z0-9.-]{2,}|[가-힣A-Za-z0-9&+.-]+", q)
+        for chunk in chunks:
+            term = re.sub(r"(은|는|이|가|을|를|도|만|으로|에는|에서|까지|부터)$", "", chunk.strip())
+            if not term:
+                continue
+            resolved = ticker_names.resolve(term, allow_net=False)
+            if resolved and resolved.upper() in tickers:
+                return resolved.upper()
+    except Exception:
+        pass
+    return None
+
+
+def _compose_portfolio_preference_answer(question: str, pack: dict,
+                                         history: list[dict] | None = None) -> str:
+    portfolio = pack.get("portfolio") or {}
+    holdings = portfolio.get("holdings") or []
+    ticker = _resolve_portfolio_symbol(question, holdings)
+    limit_pct = _extract_loss_limit_pct(question) or _extract_loss_limit_pct(_last_user_question(history)) or 1.0
+    if not holdings or not ticker:
+        return "\n".join([
+            "### 보유 희망 조건 반영",
+            "",
+            "> 이건 시장 해설 질문이 아니라 `특정 종목은 유지하고 싶다`는 조건 추가로 이해했습니다.",
+            "",
+            "다만 현재 보유 스냅샷에서 해당 종목을 특정하지 못했습니다. 종목명이나 티커를 한 번만 더 명확히 주면, 그 종목을 보호 포지션으로 두고 나머지에서 줄일 후보를 다시 짜겠습니다.",
+        ])
+
+    risk = _portfolio_risk_snapshot(holdings, pack.get("paper") or {})
+    protected = next((row for row in risk["holdings"] if row["ticker"] == ticker), None)
+    other_candidates = _rank_reduce_candidates([row for row in risk["holdings"] if row["ticker"] != ticker])
+    name = protected["name"] if protected else ticker
+    weight = protected["weight"] if protected else 0.0
+    ret = protected["ret"] if protected else 0.0
+    allowable_drop = (limit_pct / weight * 100) if weight > 0 else None
+    action = "유지 가능" if weight <= 20 else "유지하되 추가 확대 금지"
+    if weight >= 25:
+        action = "핵심 보유는 가능하지만 일부 상한 조정 필요"
+
+    lines = [f"### {name}({ticker}) 유지 조건부 리밸런싱", ""]
+    lines.append(f"`{_format_kst(pack.get('generated_at'))}` · **보유 희망 조건 반영**")
+    lines.append("")
+    lines.append(
+        f"> 문맥상 이건 새 시장 분석이 아니라 **{ticker}는 들고 가고 싶으니, 다른 곳에서 리스크를 줄이자**는 요청으로 이해했습니다."
+    )
+    lines.append("")
+    lines.append("#### 결론")
+    lines.append(
+        f"- {ticker}는 지금 감축 1순위로 보지 않고 **보호 포지션**으로 둡니다."
+    )
+    lines.append(f"- 현재 비중은 {_fmt_pct(weight)}, 손익은 {_fmt_pct(ret)}입니다.")
+    lines.append(f"- 판단: **{action}**. 보유와 추가매수는 분리해서 봐야 합니다.")
+    if allowable_drop is not None:
+        lines.append(
+            f"- 계좌 손실한도 {limit_pct:.1f}% 기준으로, {ticker} 단독 허용 하락폭은 약 {allowable_drop:.1f}%입니다. "
+            "이보다 넓게 들고 가고 싶다면 다른 고베타 비중을 줄여야 합니다."
+        )
+
+    lines.append("")
+    lines.append("#### 대신 줄일 후보")
+    if other_candidates:
+        lines.append("")
+        lines.append("| 우선 | 종목 | 비중 | 손익 | 이유 |")
+        lines.append("|---:|---|---:|---:|---|")
+        for idx, row in enumerate(other_candidates[:4], start=1):
+            lines.append(
+                f"| {idx} | {row['ticker']} | {_fmt_pct(row['weight'])} | {_fmt_pct(row['ret'])} | {', '.join(row['reasons'][:3])} |"
+            )
+    else:
+        lines.append("- 현재 보유 스냅샷에서는 대체 감축 후보가 충분히 보이지 않습니다.")
+
+    lines.append("")
+    lines.append("#### 운용 규칙")
+    lines.extend([
+        f"1. **{ticker}는 매도 후보에서 빼고, 비중 상한만 둡니다.** 손실한도 초과 전까지는 보유 논리를 유지합니다.",
+        "2. **손실 중인 레버리지/고베타를 먼저 줄입니다.** 원하는 종목을 들고 가려면 다른 쪽에서 변동성을 줄여야 합니다.",
+        "3. **추가매수는 별도 조건입니다.** 유지 판단이 곧 물타기나 비중 확대 신호는 아닙니다.",
+    ])
+    return "\n".join(lines)
+
+
 _ASSET_ALIASES = {
     "btc": ("BTC-USD", "비트코인"),
     "bitcoin": ("BTC-USD", "비트코인"),
@@ -377,6 +499,7 @@ _ASSET_ALIASES = {
     "tqqq": ("TQQQ", "TQQQ"),
     "qld": ("QLD", "QLD"),
     "soxl": ("SOXL", "SOXL"),
+    "orcl": ("ORCL", "오라클"),
     "nvda": ("NVDA", "엔비디아"),
     "mu": ("MU", "마이크론"),
 }
@@ -422,10 +545,24 @@ def _extract_asset_symbol(question: str) -> tuple[str, str] | None:
     )
     if not any(word in ql for word in intent_words):
         return None
-    for raw in re.findall(r"\$?[A-Za-z][A-Za-z0-9.-]{1,12}", q):
+    raw_tokens = re.findall(r"\$?[A-Za-z][A-Za-z0-9.-]{1,12}", q)
+    for raw in raw_tokens:
         token = raw.lstrip("$").lower()
         if token in _ASSET_ALIASES:
             return _ASSET_ALIASES[token]
+    try:
+        import ticker_names
+        for chunk in re.findall(r"[A-Za-z0-9.-]{2,}|[가-힣A-Za-z0-9&+.-]+", q):
+            term = re.sub(r"(은|는|이|가|을|를|도|만|으로|에는|에서|까지|부터)$", "", chunk.strip())
+            if not term:
+                continue
+            resolved = ticker_names.resolve(term, allow_net=False)
+            if resolved:
+                return (resolved, ticker_names.display_name(resolved, allow_net=False) or resolved)
+    except Exception:
+        pass
+    for raw in raw_tokens:
+        token = raw.lstrip("$").lower()
         if raw.isupper() and 2 <= len(raw) <= 6 and token not in {"top"}:
             return (raw.upper(), raw.upper())
     return None
@@ -543,7 +680,6 @@ def _compose_asset_opinion_answer(question: str, pack: dict, history: list[dict]
 
 def _is_market_context_question(question: str, pack: dict | None = None) -> bool:
     q = str(question or "").lower()
-    surface = str((pack or {}).get("surface") or "").lower()
     market_words = (
         "시장", "증시", "종목", "주식", "포트폴리오", "보유", "비중", "수익률", "리스크",
         "뉴스", "이슈", "금리", "유가", "달러", "환율", "vix", "qqq", "spy", "반도체",
@@ -553,7 +689,7 @@ def _is_market_context_question(question: str, pack: dict | None = None) -> bool
     )
     if any(word in q for word in market_words):
         return True
-    return surface in {"portfolio", "paper", "ticker", "lab"} and len(q) <= 80
+    return False
 
 
 def _is_trading_followup(question: str, history: list[dict] | None) -> bool:
@@ -575,7 +711,7 @@ def _compose_general_chat_answer(question: str, pack: dict, history: list[dict] 
     llm = _try_llm_chat(question, pack, history)
     if llm:
         return llm
-    return _fallback_general_chat(question, pack)
+    return _fallback_general_chat(question, pack, history)
 
 
 def _try_llm_chat(question: str, pack: dict, history: list[dict] | None = None,
@@ -676,6 +812,8 @@ def _build_general_chat_prompt(question: str, pack: dict, history: list[dict] | 
         title = item.get("title")
         if title:
             ctx.append(f"- memory: {title}")
+    portfolio_ctx = _compact_portfolio_context(pack)
+    paper_ctx = _compact_paper_context(pack)
     shared_section = shared_memory.build_context_section(
         {
             "screen": pack.get("surface") or "market",
@@ -688,15 +826,25 @@ def _build_general_chat_prompt(question: str, pack: dict, history: list[dict] | 
         "너는 stock-report 안의 대화형 에이전트다.",
         "사용자는 한국어로 편하게 말한다. 너도 한국어로 자연스럽게 답한다.",
         "투자 데이터가 필요한 질문이면 주어진 컨텍스트를 참고하되, 일반 질문이면 억지로 시장 리포트로 바꾸지 않는다.",
+        "후속 발화가 정정, 조건 추가, 선호 표현이면 직전 질문을 다시 해석해서 답한다.",
+        "포트폴리오 화면에서는 시장 총평보다 현재 보유, 비중, 손실한도, 사용자의 보유 선호를 우선한다.",
+        "같은 템플릿을 반복하지 말고, 사용자의 최신 문장에 직접 답한다.",
         "공유 메모리는 참고 맥락일 뿐이며 현재 사용자 질문과 화면 컨텍스트가 우선한다.",
         "실제 매매 지시는 피하고, 판단 근거와 확인할 점을 짧고 명확하게 말한다.",
         "모르면 모른다고 말하고, 필요한 정보가 무엇인지 묻는다.",
+        f"현재 화면: {pack.get('surface') or 'market'}",
         "",
         "[최근 대화]",
         *(hist or ["- 없음"]),
         "",
         "[사용 가능한 투자 컨텍스트]",
         *(ctx or ["- 없음"]),
+        "",
+        "[포트폴리오 스냅샷]",
+        *(portfolio_ctx or ["- 없음"]),
+        "",
+        "[모의투자/단기 원장 요약]",
+        *(paper_ctx or ["- 없음"]),
         "",
         shared_section or "[컨텍스트 메모리]\n- 없음",
         "",
@@ -706,9 +854,60 @@ def _build_general_chat_prompt(question: str, pack: dict, history: list[dict] | 
     ])
 
 
-def _fallback_general_chat(question: str, pack: dict) -> str:
+def _compact_portfolio_context(pack: dict) -> list[str]:
+    portfolio = pack.get("portfolio") or {}
+    holdings = portfolio.get("holdings") or []
+    if not holdings:
+        return []
+    lines = []
+    summary = portfolio.get("summary") or {}
+    if summary:
+        total = _num(summary.get("total_usd"), None)
+        ret = _num(summary.get("return_pct"), None)
+        n_holdings = summary.get("n_holdings") or len(holdings)
+        parts = [f"보유 {n_holdings}개"]
+        if total is not None:
+            parts.append(f"총액 ${total:,.0f}")
+        if ret is not None:
+            parts.append(f"손익 {_fmt_pct(ret)}")
+        lines.append("- " + " · ".join(parts))
+    for row in holdings[:8]:
+        ticker = str(row.get("ticker") or row.get("symbol") or "").upper()
+        if not ticker:
+            continue
+        name = str(row.get("name") or ticker)
+        weight = _fmt_pct(row.get("weight"))
+        ret = _fmt_pct(row.get("ret"))
+        lines.append(f"- {name}({ticker}) 비중 {weight}, 손익 {ret}")
+    return lines
+
+
+def _compact_paper_context(pack: dict) -> list[str]:
+    paper = pack.get("paper") or {}
+    ml_rows = pack.get("ml_activity") or []
+    lines = []
+    for key, label in (("kr", "KR 모의"), ("us", "US 모의")):
+        item = paper.get(key)
+        if not isinstance(item, dict):
+            continue
+        parts = [label]
+        if item.get("cum_ret") is not None:
+            parts.append(f"누적 {_fmt_pct(item.get('cum_ret'))}")
+        if item.get("strat_mdd") is not None:
+            parts.append(f"MDD {_fmt_pct(item.get('strat_mdd'))}")
+        if item.get("decisions") is not None:
+            parts.append(f"결정 {len(item.get('decisions') or [])}건")
+        lines.append("- " + " · ".join(parts))
+    if ml_rows:
+        counts = Counter(row.get("_file", "unknown") for row in ml_rows)
+        lines.append("- ML 원장 " + ", ".join(f"{name} {cnt}건" for name, cnt in counts.most_common(4)))
+    return lines
+
+
+def _fallback_general_chat(question: str, pack: dict, history: list[dict] | None = None) -> str:
     q = str(question or "").strip()
     ql = q.lower()
+    surface = str(pack.get("surface") or "market")
     if any(word in ql for word in ("안녕", "ㅎㅇ", "hello", "hi")):
         return "안녕. 이제 투자 질문뿐 아니라 일반 질문도 대화처럼 받을게요. 필요하면 시장 데이터, 모의투자, 단기 로직 쪽으로 바로 이어서 볼 수 있습니다."
     if "뭐" in ql and any(word in ql for word in ("할 수", "가능", "기능")):
@@ -718,10 +917,44 @@ def _fallback_general_chat(question: str, pack: dict) -> str:
         )
     if "왜" in ql and "반복" in ql:
         return "이전 답변기가 질문 의도보다 화면 맥락을 먼저 봐서 시장 리포트를 반복했습니다. 이제 범위 밖 질문은 일반 챗봇 답변으로, 투자 질문은 데이터 기반 답변으로 나누도록 바꿨습니다."
+    if surface == "portfolio":
+        holdings = ((pack.get("portfolio") or {}).get("holdings") or [])
+        top = holdings[0] if holdings else None
+        lines = ["### 포트폴리오 맥락으로 답할게요", ""]
+        previous = _last_user_question(history)
+        if previous:
+            lines.append(f"> 직전 질문 **“{previous}”**에 이어진 말로 보고, 시장 총평보다 보유 비중 쪽을 먼저 보겠습니다.")
+        else:
+            lines.append("> 이 화면에서는 시장 총평보다 보유 비중, 손실한도, 사용자의 보유 선호를 먼저 보겠습니다.")
+        if top:
+            lines.append("")
+            lines.append("#### 현재 먼저 보이는 점")
+            lines.append(f"- 1위 비중은 {top.get('ticker')} {_fmt_pct(top.get('weight'))}입니다.")
+            lines.append("- 특정 종목을 유지하고 싶다면 그 종목을 감축 후보에서 빼고, 나머지 고베타/손실 포지션에서 위험 예산을 맞추는 방식이 맞습니다.")
+            lines.append("- 추가매수와 계속 보유는 다른 판단입니다. 보유는 가능해도 비중 확대는 손실한도 여유가 있을 때만 봅니다.")
+        return "\n".join(lines)
+    if surface == "paper":
+        return (
+            "### 모의투자 맥락으로 답할게요\n\n"
+            "이 화면에서는 시장 해설보다 **결정 원장, 성숙 표본, 손익비, MDD, 거래비용**을 먼저 봐야 합니다. "
+            "짧게 말하면 아직 답이 애매한 질문은 `돈을 벌었나`보다 `충분히 자주 검증됐나`로 먼저 판단하겠습니다."
+        )
+    if surface == "lab":
+        return (
+            "### 전략랩 맥락으로 답할게요\n\n"
+            "이 말은 새 시장 리포트가 아니라 전략 조건 조정으로 보겠습니다. "
+            "좋은 전략랩 답변은 `진입 조건`, `청산 조건`, `손실한도`, `검증 기간`, `실패 시 끌 조건`으로 쪼개야 합니다."
+        )
+    if surface == "ticker":
+        return (
+            "### 종목 맥락으로 답할게요\n\n"
+            "종목 질문은 시장 총평보다 해당 종목의 **보유 여부, 최근 뉴스, 상대강도, 손절 기준**이 먼저입니다. "
+            "티커가 화면에서 특정되지 않으면 종목명이나 티커를 기준으로 다시 연결하겠습니다."
+        )
     return (
         f"질문은 이해했습니다: **{q}**\n\n"
-        "모델 응답을 바로 받지는 못했지만, 질문을 시장 데이터·포트폴리오·모의투자·단기 트레이딩 중 어디에 연결할지 말해주면 "
-        "그 맥락으로 바로 이어서 답하겠습니다."
+        "지금은 로컬 모델 응답을 바로 받지 못했지만, 시장 템플릿으로 억지 전환하지 않고 질문 자체에 답하는 방향으로 처리하겠습니다. "
+        "투자 판단이 필요한 질문이면 근거, 리스크, 확인 조건 순서로 이어가겠습니다."
     )
 
 

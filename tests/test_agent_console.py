@@ -227,6 +227,151 @@ def test_agent_portfolio_loss_limit_scenario_uses_loss_budget(monkeypatch):
     assert "Codex에게 바로 물어볼 질문" not in answer
 
 
+def test_agent_portfolio_keep_holding_followup_respects_preference(monkeypatch):
+    monkeypatch.setenv("AGENT_CONSOLE_LLM_ENABLED", "0")
+    from agent_console.agent import _compose_answer
+
+    pack = {
+        "surface": "portfolio",
+        "generated_at": "2026-07-13T06:32:00+00:00",
+        "sources": {"events": [], "source_counts": [], "symbol_counts": []},
+        "memory": [],
+        "reports": [],
+        "ml_activity": [],
+        "paper": {},
+        "portfolio": {
+            "holdings": [
+                {"ticker": "ORCL", "name": "오라클", "weight": 20.0, "ret": 41.1, "value": 20000},
+                {"ticker": "NVDA", "name": "Nvidia", "weight": 18.0, "ret": 12.0, "value": 18000},
+                {"ticker": "QLD", "name": "ProShares Ultra QQQ", "weight": 12.0, "ret": -3.0, "value": 12000},
+                {"ticker": "MU", "name": "Micron", "weight": 10.0, "ret": -7.0, "value": 10000},
+            ],
+            "summary": {},
+            "risk": {},
+            "targets": {},
+            "errors": [],
+        },
+    }
+    history = [
+        {"role": "user", "message": "현재 비중에서 먼저 줄여야 할 리스크를 봐줘"},
+        {"role": "assistant", "message": "먼저 줄일 리스크를 보겠습니다."},
+    ]
+
+    answer = _compose_answer("근데 오라클은 들고 가고 싶은데", pack, history=history)
+
+    assert "오라클(ORCL) 유지 조건부 리밸런싱" in answer
+    assert "보호 포지션" in answer
+    assert "대신 줄일 후보" in answer
+    assert "QLD" in answer
+    assert "시장 신호 점수" not in answer
+    assert "포트폴리오 로직 점검" not in answer
+
+
+def test_agent_portfolio_keep_weight_followup_beats_risk_template(monkeypatch):
+    monkeypatch.setenv("AGENT_CONSOLE_LLM_ENABLED", "0")
+    from agent_console.agent import _compose_answer
+
+    pack = {
+        "surface": "portfolio",
+        "generated_at": "2026-07-13T06:34:00+00:00",
+        "sources": {"events": [], "source_counts": [], "symbol_counts": []},
+        "memory": [],
+        "reports": [],
+        "ml_activity": [],
+        "paper": {},
+        "portfolio": {
+            "holdings": [
+                {"ticker": "ORCL", "name": "오라클", "weight": 20.0, "ret": 41.1, "value": 20000},
+                {"ticker": "QLD", "name": "ProShares Ultra QQQ", "weight": 12.0, "ret": -3.0, "value": 12000},
+                {"ticker": "MU", "name": "Micron", "weight": 10.0, "ret": -7.0, "value": 10000},
+            ],
+            "summary": {},
+            "risk": {},
+            "targets": {},
+            "errors": [],
+        },
+    }
+
+    answer = _compose_answer("오라클 비중은 유지하고 싶은데", pack, history=[])
+
+    assert "오라클(ORCL) 유지 조건부 리밸런싱" in answer
+    assert "보호 포지션" in answer
+    assert "먼저 줄일 리스크" not in answer
+    assert "시장 신호 점수" not in answer
+
+
+def test_agent_portfolio_ambiguous_complaint_does_not_use_market_template(monkeypatch):
+    monkeypatch.setenv("AGENT_CONSOLE_LLM_ENABLED", "0")
+    from agent_console.agent import _compose_answer
+
+    pack = {
+        "surface": "portfolio",
+        "generated_at": "2026-07-13T06:35:00+00:00",
+        "sources": {"events": [], "source_counts": [], "symbol_counts": []},
+        "memory": [],
+        "reports": [],
+        "ml_activity": [],
+        "paper": {},
+        "portfolio": {
+            "holdings": [
+                {"ticker": "ORCL", "name": "오라클", "weight": 20.0, "ret": 41.1, "value": 20000},
+                {"ticker": "QLD", "name": "ProShares Ultra QQQ", "weight": 12.0, "ret": -3.0, "value": 12000},
+            ],
+            "summary": {},
+            "risk": {},
+            "targets": {},
+            "errors": [],
+        },
+    }
+
+    answer = _compose_answer("왜 같은 말만 반복해?", pack)
+
+    assert "시장 신호 점수" not in answer
+    assert "포트폴리오 로직 점검" not in answer
+    assert "반복" in answer
+
+
+def test_agent_korean_asset_name_routes_to_asset_answer(monkeypatch):
+    monkeypatch.setenv("AGENT_CONSOLE_LLM_ENABLED", "0")
+    from agent_console.agent import _compose_answer
+
+    pack = {
+        "surface": "market",
+        "generated_at": "2026-07-13T06:36:00+00:00",
+        "sources": {"events": [], "source_counts": [], "symbol_counts": []},
+        "memory": [],
+        "reports": [],
+        "paper": {},
+        "ml_activity": [],
+    }
+
+    answer = _compose_answer("오라클 어때", pack)
+
+    assert "Oracle(ORCL) 의견" in answer
+    assert "시장 신호 점수" not in answer
+
+
+def test_agent_lab_short_followup_does_not_use_market_template(monkeypatch):
+    monkeypatch.setenv("AGENT_CONSOLE_LLM_ENABLED", "0")
+    from agent_console.agent import _compose_answer
+
+    pack = {
+        "surface": "lab",
+        "generated_at": "2026-07-13T06:37:00+00:00",
+        "sources": {"events": [], "source_counts": [], "symbol_counts": []},
+        "memory": [],
+        "reports": [],
+        "paper": {},
+        "ml_activity": [],
+    }
+
+    answer = _compose_answer("이 조건 너무 보수적인데", pack)
+
+    assert "전략랩 맥락" in answer
+    assert "시장 신호 점수" not in answer
+    assert "현재 시장 상황 인식" not in answer
+
+
 def test_agent_general_question_does_not_force_market_template(monkeypatch):
     monkeypatch.setenv("AGENT_CONSOLE_LLM_ENABLED", "0")
     from agent_console.agent import _compose_answer
