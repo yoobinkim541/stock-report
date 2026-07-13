@@ -2,6 +2,10 @@ from __future__ import annotations
 
 from collections import Counter
 from datetime import datetime, timedelta, timezone
+import os
+from pathlib import Path
+import subprocess
+import tempfile
 
 from . import context, storage
 
@@ -43,9 +47,10 @@ def answer(question: str, surface: str = "market") -> dict:
     if not question:
         return {"ok": False, "error": "질문을 입력해 주세요."}
 
+    history = storage.list_conversation(limit=12)
     storage.add_conversation("user", question, surface)
     pack = context.context_pack(surface)
-    response = _compose_answer(question, pack)
+    response = _compose_answer(question, pack, history=history)
     storage.add_conversation("assistant", response, surface)
     return {
         "ok": True,
@@ -61,7 +66,12 @@ def answer(question: str, surface: str = "market") -> dict:
     }
 
 
-def _compose_answer(question: str, pack: dict) -> str:
+def _compose_answer(question: str, pack: dict, history: list[dict] | None = None) -> str:
+    if _is_trading_logic_question(question) or _is_trading_followup(question, history):
+        return _compose_trading_logic_answer(question, pack)
+    if not _is_market_context_question(question, pack):
+        return _compose_general_chat_answer(question, pack, history)
+
     events = pack["sources"]["events"]
     memory = pack["memory"]
     reports = pack["reports"]
@@ -124,6 +134,414 @@ def _compose_answer(question: str, pack: dict) -> str:
     lines.append("#### Codex에게 바로 물어볼 질문")
     lines.extend(_next_questions(surface, read))
     return "\n".join(lines)
+
+
+def _is_market_context_question(question: str, pack: dict | None = None) -> bool:
+    q = str(question or "").lower()
+    surface = str((pack or {}).get("surface") or "").lower()
+    market_words = (
+        "시장", "증시", "종목", "주식", "포트폴리오", "보유", "비중", "수익률", "리스크",
+        "뉴스", "이슈", "금리", "유가", "달러", "환율", "vix", "qqq", "spy", "반도체",
+        "ai", "레버리지", "mdd", "벤치", "오른", "내린", "상승", "하락", "반등", "조정",
+        "매수", "매도", "진입", "청산", "추천", "성과", "왜 올", "왜 떨",
+    )
+    if any(word in q for word in market_words):
+        return True
+    return surface in {"portfolio", "paper", "ticker", "lab"} and len(q) <= 80
+
+
+def _is_trading_followup(question: str, history: list[dict] | None) -> bool:
+    q = str(question or "").strip().lower()
+    if len(q) > 36:
+        return False
+    follow_words = ("그럼", "그래서", "어떻게", "바꿔", "수정", "왜", "기준", "다음", "더")
+    if not any(word in q for word in follow_words):
+        return False
+    for row in reversed(history or []):
+        if row.get("role") != "assistant":
+            continue
+        text = str(row.get("message") or "")
+        return "모의·단기투자 로직 평가" in text or "단기투자" in text
+    return False
+
+
+def _compose_general_chat_answer(question: str, pack: dict, history: list[dict] | None = None) -> str:
+    llm = _try_llm_chat(question, pack, history)
+    if llm:
+        return llm
+    return _fallback_general_chat(question, pack)
+
+
+def _try_llm_chat(question: str, pack: dict, history: list[dict] | None = None,
+                  runner=subprocess.run) -> str | None:
+    if os.getenv("AGENT_CONSOLE_LLM_ENABLED", "1").lower() in {"0", "false", "no", "off"}:
+        return None
+    prompt = _build_general_chat_prompt(question, pack, history)
+    return _try_codex_chat(prompt, runner=runner) or _try_hermes_chat(prompt, runner=runner)
+
+
+def _try_codex_chat(prompt: str, runner=subprocess.run) -> str | None:
+    if os.getenv("AGENT_CONSOLE_CODEX_ENABLED", "1").lower() in {"0", "false", "no", "off"}:
+        return None
+    out_path = None
+    try:
+        with tempfile.NamedTemporaryFile(prefix="agent-codex-", suffix=".txt", delete=False) as tmp:
+            out_path = tmp.name
+        cmd = [
+            "codex",
+            "exec",
+            "--ephemeral",
+            "--sandbox",
+            "read-only",
+            "--ask-for-approval",
+            "never",
+            "--cd",
+            os.getenv("AGENT_CONSOLE_CODEX_CWD", "/tmp"),
+            "--skip-git-repo-check",
+            "--color",
+            "never",
+            "--output-last-message",
+            out_path,
+        ]
+        model = os.getenv("AGENT_CONSOLE_CODEX_MODEL")
+        if model:
+            cmd.extend(["--model", model])
+        cmd.append(prompt)
+        timeout = int(os.getenv("AGENT_CONSOLE_CODEX_TIMEOUT", os.getenv("AGENT_CONSOLE_LLM_TIMEOUT", "75")) or "75")
+        result = runner(cmd, capture_output=True, text=True, timeout=max(10, min(timeout, 240)))
+        if getattr(result, "returncode", 1) != 0:
+            return None
+        text = Path(out_path).read_text(encoding="utf-8", errors="replace").strip() if out_path else ""
+        if not text:
+            text = (getattr(result, "stdout", "") or "").strip()
+        return text[:6000] if text else None
+    except Exception:
+        return None
+    finally:
+        if out_path:
+            try:
+                Path(out_path).unlink(missing_ok=True)
+            except Exception:
+                pass
+
+
+def _try_hermes_chat(prompt: str, runner=subprocess.run) -> str | None:
+    if os.getenv("AGENT_CONSOLE_HERMES_ENABLED", "1").lower() in {"0", "false", "no", "off"}:
+        return None
+    cmd = [
+        "hermes",
+        "chat",
+        "-q",
+        prompt,
+        "--provider",
+        os.getenv("AGENT_CONSOLE_LLM_PROVIDER", os.getenv("INVESTMENT_REPORT_LLM_PROVIDER", "openai-codex")),
+        "--model",
+        os.getenv("AGENT_CONSOLE_LLM_MODEL", os.getenv("INVESTMENT_REPORT_LLM_MODEL", "gpt-5-mini")),
+        "-Q",
+    ]
+    timeout = int(os.getenv("AGENT_CONSOLE_LLM_TIMEOUT", "60") or "60")
+    try:
+        result = runner(cmd, capture_output=True, text=True, timeout=max(10, min(timeout, 180)))
+    except Exception:
+        return None
+    if getattr(result, "returncode", 1) != 0:
+        return None
+    text = (getattr(result, "stdout", "") or "").strip()
+    if not text:
+        return None
+    return text[:6000]
+
+
+def _build_general_chat_prompt(question: str, pack: dict, history: list[dict] | None = None) -> str:
+    events = (pack.get("sources") or {}).get("events") or []
+    memory = pack.get("memory") or []
+    hist = []
+    for row in (history or [])[-6:]:
+        role = "사용자" if row.get("role") == "user" else "에이전트"
+        msg = str(row.get("message") or "").replace("\n", " ")[:500]
+        if msg:
+            hist.append(f"- {role}: {msg}")
+    ctx = []
+    for item in events[:4]:
+        title = item.get("title") or item.get("summary")
+        if title:
+            ctx.append(f"- {item.get('source', 'source')}: {title}")
+    for item in memory[:3]:
+        title = item.get("title")
+        if title:
+            ctx.append(f"- memory: {title}")
+    return "\n".join([
+        "너는 stock-report 안의 대화형 에이전트다.",
+        "사용자는 한국어로 편하게 말한다. 너도 한국어로 자연스럽게 답한다.",
+        "투자 데이터가 필요한 질문이면 주어진 컨텍스트를 참고하되, 일반 질문이면 억지로 시장 리포트로 바꾸지 않는다.",
+        "실제 매매 지시는 피하고, 판단 근거와 확인할 점을 짧고 명확하게 말한다.",
+        "모르면 모른다고 말하고, 필요한 정보가 무엇인지 묻는다.",
+        "",
+        "[최근 대화]",
+        *(hist or ["- 없음"]),
+        "",
+        "[사용 가능한 투자 컨텍스트]",
+        *(ctx or ["- 없음"]),
+        "",
+        f"[사용자 질문]\n{question}",
+        "",
+        "답변:",
+    ])
+
+
+def _fallback_general_chat(question: str, pack: dict) -> str:
+    q = str(question or "").strip()
+    ql = q.lower()
+    if any(word in ql for word in ("안녕", "ㅎㅇ", "hello", "hi")):
+        return "안녕. 이제 투자 질문뿐 아니라 일반 질문도 대화처럼 받을게요. 필요하면 시장 데이터, 모의투자, 단기 로직 쪽으로 바로 이어서 볼 수 있습니다."
+    if "뭐" in ql and any(word in ql for word in ("할 수", "가능", "기능")):
+        return (
+            "저는 지금 이 프로젝트 안에서 시장 맥락 설명, 모의투자/단기투자 로직 평가, 포트폴리오 시나리오 정리, "
+            "코드 변경 방향 설명을 할 수 있습니다. 일반 질문도 답하되, 실시간 정보가 필요한 내용은 현재 수집된 데이터 기준으로 답합니다."
+        )
+    if "왜" in ql and "반복" in ql:
+        return "이전 답변기가 질문 의도보다 화면 맥락을 먼저 봐서 시장 리포트를 반복했습니다. 이제 범위 밖 질문은 일반 챗봇 답변으로, 투자 질문은 데이터 기반 답변으로 나누도록 바꿨습니다."
+    return (
+        f"질문은 이해했습니다: **{q}**\n\n"
+        "다만 지금 로컬 모델 호출이 비활성화되어 있어 깊은 일반 답변은 제한됩니다. "
+        "그래도 이 프로젝트의 시장 데이터, 포트폴리오, 모의투자, 단기 트레이딩과 연결해서 물으면 바로 구체적으로 답할 수 있습니다."
+    )
+
+
+def _is_trading_logic_question(question: str) -> bool:
+    q = str(question or "").lower()
+    logic_words = ("평가", "어때", "어떤", "로직", "문제", "개선", "잘", "돈", "성과")
+    trading_words = (
+        "모의투자", "모의 투자", "페이퍼", "paper", "단기투자", "단기 투자",
+        "단기트레이딩", "단기 트레이딩", "intraday", "슬리브", "가상체결",
+    )
+    return any(w in q for w in trading_words) and any(w in q for w in logic_words)
+
+
+def _compose_trading_logic_answer(question: str, pack: dict) -> str:
+    paper = pack.get("paper") or {}
+    ml_rows = pack.get("ml_activity") or []
+    reports = pack.get("reports") or []
+    market_read = _market_read(question, pack)
+    paper_eval = _paper_logic_eval(paper)
+    intraday_eval = _intraday_logic_eval(ml_rows)
+    verdict = _trading_verdict(paper_eval, intraday_eval)
+
+    lines = ["### 모의·단기투자 로직 평가", ""]
+    lines.append(f"`{_format_kst(pack.get('generated_at'))}` · **{verdict['label']}**")
+    lines.append("")
+    lines.append(f"> {verdict['summary']}")
+    lines.append("")
+    lines.append(
+        "이 질문에서 시장 국면은 배경일 뿐이고, 핵심은 **로직이 돈을 벌 구조인지, 아직 검증 전인지, 어디서 깨질지**입니다."
+    )
+
+    lines.append("")
+    lines.append("#### 로직별 판정")
+    lines.append("")
+    lines.append("| 영역 | 판정 | 근거 |")
+    lines.append("|---|---|---|")
+    for row in _logic_rows(paper_eval, intraday_eval, market_read):
+        lines.append(f"| {row['area']} | {row['verdict']} | {row['reason']} |")
+
+    lines.append("")
+    lines.append("#### 내가 보는 장점")
+    lines.extend([
+        "- **성과 검증 구조는 맞습니다.** 결정 원장과 outcome 원장을 분리해 사후 적중률을 볼 수 있게 한 건 좋은 방향입니다.",
+        "- **MDD·벤치마크·거래비용을 같이 보는 점도 맞습니다.** 단순 수익률만 보면 회전율 높은 전략이 과대평가됩니다.",
+        "- **단기투자 축 설계는 이전보다 좋아졌습니다.** ORB, VWAP, 거래량, 호가 불균형, 뉴스 축을 두고 EMA/RSI/BB는 낮은 가중으로 둔 점은 합리적입니다.",
+    ])
+
+    lines.append("")
+    lines.append("#### 지금 가장 약한 부분")
+    lines.extend(_logic_weaknesses(paper_eval, intraday_eval, market_read))
+
+    lines.append("")
+    lines.append("#### 바로 바꿔야 할 기준")
+    lines.extend([
+        "1. **단기투자는 표본 100건 전까지 채택 금지**  현재처럼 표본이 적으면 승률이나 순손익은 거의 의미가 없습니다.",
+        "2. **목표 지표를 수익률보다 R-multiple로 통일**  단기투자는 종목 가격대가 달라서 `+원/$`보다 `+R`, `max adverse excursion`, `time stop`이 더 중요합니다.",
+        "3. **매수·매도 횟수 제한 대신 일손실 정지 유지**  횟수 제한은 엣지를 막을 수 있고, 손실한도는 계좌 생존을 지킵니다. 방향은 맞습니다.",
+        "4. **시장 게이트를 보조 신호로 낮추기**  지금처럼 MIXED/지정학을 매번 말하는 건 과합니다. 단기 체결 판단은 가격·거래량·VWAP·손절폭이 1순위여야 합니다.",
+        "5. **실패 원인 태깅을 자동화**  실패한 거래마다 `진입축 실패`, `청산 지연`, `뉴스 역방향`, `손절폭 과소`, `유동성 부족` 중 하나를 붙여야 학습이 됩니다.",
+    ])
+
+    lines.append("")
+    lines.append("#### 결론")
+    lines.append(
+        "**모의투자 로직은 관찰 가능한 시스템으로는 괜찮지만 아직 채택 판정 전이고, 단기투자 로직은 설계는 좋아졌지만 "
+        "표본이 너무 적어서 돈 버는 로직이라고 부르면 안 됩니다.** 지금 해야 할 일은 더 보수적으로 막는 게 아니라, "
+        "손실한도 안에서 충분히 많이 체결시키고 실패 원인을 축별로 쌓는 것입니다."
+    )
+
+    lines.append("")
+    lines.append("#### 현재 읽은 데이터")
+    lines.append(f"- 모의투자: {_paper_data_line(paper_eval)}")
+    lines.append(f"- 단기투자: {_intraday_data_line(intraday_eval)}")
+    if reports:
+        lines.append(f"- 최신 리포트: {reports[0].get('name')} ({reports[0].get('mtime')})")
+    return "\n".join(lines)
+
+
+def _paper_logic_eval(paper: dict) -> dict:
+    accounts = []
+    for key, label in (("kr", "KR 모의"), ("us", "US 모의")):
+        item = paper.get(key)
+        if not isinstance(item, dict):
+            continue
+        scorecard = item.get("scorecard") or {}
+        cost = item.get("cost") or {}
+        accounts.append({
+            "key": key,
+            "label": label,
+            "nav": item.get("nav"),
+            "cum_ret": item.get("cum_ret"),
+            "strat_mdd": item.get("strat_mdd"),
+            "bench_ret": item.get("bench_ret"),
+            "bench_mdd": item.get("bench_mdd"),
+            "cost_drag": cost.get("drag"),
+            "turnover": cost.get("turnover"),
+            "buy_hit": scorecard.get("buy_hit"),
+            "n_buy": scorecard.get("n_buy") or 0,
+            "sell_hit": scorecard.get("sell_hit"),
+            "n_sell": scorecard.get("n_sell") or 0,
+            "decision_n": len(item.get("decisions") or []),
+            "sleeve": item.get("sleeve"),
+        })
+    matured = sum(a["n_buy"] + a["n_sell"] for a in accounts)
+    decision_n = sum(a["decision_n"] for a in accounts)
+    max_mdd_gap = max([
+        _num(a["strat_mdd"], 0) - _num(a["bench_mdd"], 0)
+        for a in accounts
+        if a.get("strat_mdd") is not None and a.get("bench_mdd") is not None
+    ] or [0])
+    max_turnover = max([_num(a.get("turnover"), 0) for a in accounts] or [0])
+    return {
+        "accounts": accounts,
+        "matured": matured,
+        "decision_n": decision_n,
+        "max_mdd_gap": max_mdd_gap,
+        "max_turnover": max_turnover,
+    }
+
+
+def _intraday_logic_eval(ml_rows: list[dict]) -> dict:
+    file_counts = Counter(row.get("_file", "unknown") for row in ml_rows)
+    decisions = [r for r in ml_rows if "intraday" in str(r.get("_file", "")).lower()
+                 and "decision" in str(r.get("_file", "")).lower()]
+    outcomes = [r for r in ml_rows if "intraday" in str(r.get("_file", "")).lower()
+                and "outcome" in str(r.get("_file", "")).lower()]
+    success = [r for r in outcomes if bool(r.get("success") or r.get("correct"))]
+    net = sum(_num(r.get("net_pnl"), 0) for r in outcomes)
+    r_values = [_num(r.get("r") or r.get("net_r") or r.get("fwd_excess"), None) for r in outcomes]
+    r_values = [v for v in r_values if v is not None]
+    return {
+        "file_counts": file_counts,
+        "decision_n": len(decisions),
+        "outcome_n": len(outcomes),
+        "success_n": len(success),
+        "hit": (len(success) / len(outcomes) * 100.0) if outcomes else None,
+        "net": net,
+        "avg_r": (sum(r_values) / len(r_values)) if r_values else None,
+    }
+
+
+def _trading_verdict(paper_eval: dict, intraday_eval: dict) -> dict:
+    if intraday_eval["outcome_n"] < 30 and paper_eval["matured"] < 30:
+        return {
+            "label": "OBSERVE - 표본 부족",
+            "summary": "구조는 좋아졌지만 아직 돈 버는 로직으로 판정할 만큼 성숙한 표본이 없습니다.",
+        }
+    if paper_eval["max_mdd_gap"] > 0.5:
+        return {
+            "label": "CAUTION - 낙폭 관리 미흡",
+            "summary": "성과보다 먼저 MDD가 벤치보다 깊어지는 구간을 줄여야 합니다.",
+        }
+    return {
+        "label": "WATCH - 검증 진행",
+        "summary": "로직은 운영 가능한 형태지만, 채택은 순손익·MDD·비용·표본을 더 쌓은 뒤 판단해야 합니다.",
+    }
+
+
+def _logic_rows(paper_eval: dict, intraday_eval: dict, market_read: dict) -> list[dict]:
+    paper_reason = f"결정 {paper_eval['decision_n']}건, 성숙 표본 {paper_eval['matured']}건"
+    if paper_eval["max_mdd_gap"] > 0:
+        paper_reason += f", MDD가 벤치보다 최대 {_fmt_pp(paper_eval['max_mdd_gap'])} 깊음"
+    else:
+        paper_reason += ", MDD 비교는 크게 나쁘지 않음"
+
+    intraday_reason = f"outcome {intraday_eval['outcome_n']}건"
+    if intraday_eval["hit"] is not None:
+        intraday_reason += f", 승률 {_fmt_pct(intraday_eval['hit'])}"
+    else:
+        intraday_reason += ", 승률 미성숙"
+
+    return [
+        {"area": "중장기 모의투자", "verdict": "관찰 가능하지만 채택 전", "reason": paper_reason},
+        {"area": "단기투자", "verdict": "설계는 합리적, 표본 부족", "reason": intraday_reason},
+        {"area": "위험관리", "verdict": "방향 맞음", "reason": "횟수 제한보다 일손실 정지·포지션 리스크 예산으로 관리하는 구조가 맞음"},
+        {"area": "시장 게이트", "verdict": "보조로 낮춰야 함", "reason": f"현재 {market_read['status']} / {market_read['top_theme']} 판단은 배경이지 단기 진입의 주신호가 아님"},
+    ]
+
+
+def _logic_weaknesses(paper_eval: dict, intraday_eval: dict, market_read: dict) -> list[str]:
+    lines = []
+    if intraday_eval["outcome_n"] < 100:
+        lines.append(f"- **단기투자 표본이 너무 적습니다.** outcome {intraday_eval['outcome_n']}건이면 승률·평균손익이 쉽게 흔들립니다.")
+    if paper_eval["matured"] < 50:
+        lines.append(f"- **모의투자 성숙 표본도 부족합니다.** 성숙 표본 {paper_eval['matured']}건으로는 feature별 우위를 단정하기 어렵습니다.")
+    if paper_eval["max_turnover"] >= 100:
+        lines.append(f"- **회전율 비용을 계속 봐야 합니다.** 최대 회전율 {_fmt_pct(paper_eval['max_turnover'])}면 작은 엣지는 비용에 먹힐 수 있습니다.")
+    if market_read["top_theme"] == "지정학":
+        lines.append("- **시장 설명이 매매 판단을 덮고 있습니다.** 지정학은 리스크 예산 조절에는 유용하지만 단기 체결 트리거가 되면 안 됩니다.")
+    if not lines:
+        lines.append("- **가장 큰 약점은 아직 채택 기준이 빡빡하게 문서화되지 않은 점입니다.** 언제 shadow에서 실제 모의집행으로 올릴지 기준이 필요합니다.")
+    return lines
+
+
+def _paper_data_line(paper_eval: dict) -> str:
+    if not paper_eval["accounts"]:
+        return "계좌 요약 없음"
+    parts = []
+    for a in paper_eval["accounts"]:
+        parts.append(
+            f"{a['label']} 누적 {_fmt_pct(a.get('cum_ret'))}, MDD {_fmt_pct(a.get('strat_mdd'))}, "
+            f"결정 {a['decision_n']}건"
+        )
+    return " · ".join(parts)
+
+
+def _intraday_data_line(intraday_eval: dict) -> str:
+    counts = intraday_eval["file_counts"]
+    source = ", ".join(f"{name} {cnt}건" for name, cnt in counts.items()
+                       if "intraday" in str(name).lower()) or "원장 없음"
+    hit = "—" if intraday_eval["hit"] is None else _fmt_pct(intraday_eval["hit"])
+    return f"{source} · outcome {intraday_eval['outcome_n']}건 · 승률 {hit}"
+
+
+def _num(value, default=0.0):
+    try:
+        if value is None:
+            return default
+        return float(value)
+    except Exception:
+        return default
+
+
+def _fmt_pct(value) -> str:
+    if value is None:
+        return "—"
+    try:
+        return f"{float(value):+.1f}%" if float(value) < 0 else f"{float(value):.1f}%"
+    except Exception:
+        return "—"
+
+
+def _fmt_pp(value) -> str:
+    try:
+        return f"{float(value):.1f}%p"
+    except Exception:
+        return "—"
 
 
 def _market_read(question: str, pack: dict) -> dict:

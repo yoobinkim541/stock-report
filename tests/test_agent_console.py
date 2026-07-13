@@ -57,6 +57,91 @@ def test_context_pack_empty(monkeypatch, tmp_path):
     assert "memory" in pack
 
 
+def test_agent_trading_logic_question_uses_logic_report():
+    from agent_console.agent import _compose_answer
+
+    pack = {
+        "surface": "market",
+        "generated_at": "2026-07-13T05:01:00+00:00",
+        "sources": {
+            "events": [{"source": "unit", "title": "이란 긴장과 유가 상승"}],
+            "source_counts": [("unit", 1)],
+            "symbol_counts": [("QQQ", 1)],
+        },
+        "memory": [],
+        "reports": [],
+        "paper": {
+            "kr": {
+                "cum_ret": 1.2, "strat_mdd": 3.5, "bench_mdd": 4.0,
+                "cost": {"turnover": 60.0},
+                "scorecard": {"buy_hit": 55.0, "n_buy": 12, "sell_hit": None, "n_sell": 0},
+                "decisions": [{"ticker": "005930"}] * 20,
+            },
+            "us": {
+                "cum_ret": -0.8, "strat_mdd": 3.9, "bench_mdd": 3.7,
+                "cost": {"turnover": 102.0},
+                "scorecard": {"buy_hit": None, "n_buy": 0, "sell_hit": None, "n_sell": 0},
+                "decisions": [{"ticker": "QQQ"}] * 5,
+            },
+        },
+        "ml_activity": [
+            {"_file": "kr_intraday_decisions.jsonl", "ticker": "005930"},
+            {"_file": "kr_intraday_outcomes.jsonl", "success": True, "net_pnl": 1000},
+        ],
+    }
+
+    answer = _compose_answer("지금 우리가 가지고 있는 모의투자랑 단기투자 로직을 평가해줘", pack)
+
+    assert "모의·단기투자 로직 평가" in answer
+    assert "현재 시장 상황 인식" not in answer
+    assert "표본" in answer
+    assert "시장 설명이 매매 판단을 덮고" in answer
+
+
+def test_agent_general_question_does_not_force_market_template(monkeypatch):
+    monkeypatch.setenv("AGENT_CONSOLE_LLM_ENABLED", "0")
+    from agent_console.agent import _compose_answer
+
+    pack = {
+        "surface": "market",
+        "generated_at": "2026-07-13T05:01:00+00:00",
+        "sources": {"events": [], "source_counts": [], "symbol_counts": []},
+        "memory": [],
+        "reports": [],
+        "paper": {},
+        "ml_activity": [],
+    }
+
+    answer = _compose_answer("안녕 뭐 할 수 있어?", pack)
+
+    assert "현재 시장 상황 인식" not in answer
+    assert "할 수 있습니다" in answer or "일반 질문" in answer
+
+
+def test_agent_codex_chat_runner_writes_last_message(monkeypatch, tmp_path):
+    from agent_console.agent import _try_codex_chat
+
+    monkeypatch.setenv("AGENT_CONSOLE_CODEX_CWD", str(tmp_path))
+
+    def fake_runner(cmd, **kwargs):
+        out_path = cmd[cmd.index("--output-last-message") + 1]
+        assert cmd[:2] == ["codex", "exec"]
+        assert "--ephemeral" in cmd
+        assert "--sandbox" in cmd and "read-only" in cmd
+        assert "--ask-for-approval" in cmd and "never" in cmd
+        with open(out_path, "w", encoding="utf-8") as f:
+            f.write("Codex 응답")
+
+        class Result:
+            returncode = 0
+            stdout = ""
+            stderr = ""
+
+        return Result()
+
+    assert _try_codex_chat("테스트", runner=fake_runner) == "Codex 응답"
+
+
 def test_server_endpoints(monkeypatch, tmp_path):
     _isolate(monkeypatch, tmp_path)
 
