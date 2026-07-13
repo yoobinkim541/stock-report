@@ -141,10 +141,6 @@ def portfolio_state() -> dict:
             out["targets"] = views.target_weights_map()
         except Exception as exc:
             out["errors"].append(f"targets: {exc}")
-        try:
-            out["risk"] = views.risk_summary(data.portfolio_weights())
-        except Exception as exc:
-            out["errors"].append(f"risk: {exc}")
     except Exception as exc:
         out["errors"].append(str(exc))
     return out
