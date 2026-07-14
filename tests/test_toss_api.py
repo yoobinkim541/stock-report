@@ -201,3 +201,39 @@ def test_kiwoom_parse_us_balance():
     assert r["avg_price_usd"] == 180.5 and r["value_usd"] == 4200.0
     assert r["return_pct"] == pytest.approx(16.34, abs=0.01)
     assert K._parse_us_balance({}) == []
+
+
+# ── 키움 해외 거래내역 → trade_events (차트 마커·모으기 실행 이력) ────────────
+
+def test_kiwoom_parse_us_transactions():
+    import kiwoom_sync_rest as K
+    result = {"return_code": 0, "result_list": [
+        {"deal_dt": "20260713", "deal_kind_nm": "해외주식매수", "stk_cd": "AAPL",
+         "stk_nm": "애플", "deal_qty": "2", "deal_amt": "420.50", "deal_no": "T001"},
+        {"deal_dt": "20260713", "deal_kind_nm": "주식모으기매수", "stk_cd": "MSFT",
+         "stk_nm": "마이크로소프트", "deal_qty": "0.5", "deal_amt": "225.00", "deal_no": "T002"},
+        {"deal_dt": "20260712", "deal_kind_nm": "외화입금", "stk_cd": "", "deal_qty": "0",
+         "deal_amt": "1000", "deal_no": "T003"},                    # 비체결 → 스킵
+        {"deal_dt": "20260712", "deal_kind_nm": "해외주식매도", "stk_cd": "NVDA",
+         "stk_nm": "엔비디아", "deal_qty": "1", "deal_amt": "180.00", "deal_no": "T004"},
+    ]}
+    rows = K._parse_us_transactions(result)
+    assert [r["ticker"] for r in rows] == ["AAPL", "MSFT", "NVDA"]
+    assert rows[0]["side"] == "buy" and rows[0]["price"] == 210.25   # deal_amt/qty 근사
+    assert rows[1]["kind"] == "주식모으기매수" and rows[1]["qty"] == 0.5   # 모으기 = 소수점 매수
+    assert rows[2]["side"] == "sell"
+    assert K._parse_us_transactions({}) == []
+
+
+def test_kiwoom_sync_us_transactions_idempotent(monkeypatch):
+    """event_id=거래번호 — 같은 내역 재동기화해도 원장 중복 없음 (store 격리는 conftest)."""
+    import kiwoom_sync_rest as K
+    from lib import trade_events
+    rows = [{"ticker": "AAPL", "side": "buy", "qty": 2.0, "price": 210.25,
+             "date": "20260713", "deal_no": "TX9", "kind": "해외주식매수", "name": "애플"}]
+    monkeypatch.setattr(K, "fetch_us_transactions", lambda days=7: rows)
+    assert K.sync_us_transactions() == 1
+    assert K.sync_us_transactions() == 1                             # record_trade 가 중복 스킵
+    mine = [t for t in trade_events.all_trades() if t.get("broker_order_id") == "TX9"]
+    assert len(mine) == 1 and mine[0]["date"] == "2026-07-13"
+    assert mine[0]["note"] == "해외주식매수" and mine[0]["source"] == "kiwoom_us_sync"

@@ -61,6 +61,26 @@ def backup_chat(prompt: str, *, timeout: int = 120, runner=None) -> tuple[str | 
     return text, f"backup:{BACKUP_CLI}"
 
 
+def chat_once(prompt: str, *, model: str = "gpt-5-mini", provider: str = "openai-codex",
+              timeout: int = 90, runner=None) -> tuple[str | None, str]:
+    """전체 체인 1회 호출 — hermes 1차 → (게이트 시) agy 백업. (텍스트|None, 상태).
+
+    새 코드용 공용 진입점 (기존 4개 호출부는 자체 hermes cmd 유지 — 회귀 방지).
+    """
+    run = runner or subprocess.run
+    try:
+        result = run(["hermes", "chat", "-q", prompt, "--provider", provider,
+                      "--model", model, "-Q"],
+                     capture_output=True, text=True, timeout=timeout)
+        if getattr(result, "returncode", 1) == 0:
+            text = (getattr(result, "stdout", "") or "").strip()
+            if text:
+                return text, "hermes"
+    except Exception as e:
+        logger.info("hermes 호출 실패: %s", str(e)[:120])
+    return backup_chat(prompt, timeout=timeout, runner=runner)
+
+
 def status() -> dict:
     """hermes/백업 CLI 설치·버전 상태 (진단용 — --check)."""
     out = {"backup_enabled": backup_enabled(), "backup_cli": BACKUP_CLI}

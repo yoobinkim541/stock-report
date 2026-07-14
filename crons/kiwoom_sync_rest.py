@@ -276,6 +276,104 @@ def fetch_us_balance() -> list[dict] | None:
     return rows
 
 
+def _parse_us_transactions(result: dict) -> list[dict]:
+    """ust21100(미국주식 거래내역) → 체결 행 (순수). 매수/매도만 — 입출금·환전 등은 제외.
+
+    단가 필드가 응답에 없을 수 있어 deal_amt/deal_qty 로 근사(수수료 포함 소폭 오차 — 표시용).
+    '모으기' 체결도 여기 일반 매수로 나타남(전용 TR 부재) → 거래종류명을 note 로 보존.
+    """
+    def _num(item, key):
+        try:
+            return float(str(item.get(key, "") or "0").replace(",", "").strip() or "0")
+        except (TypeError, ValueError):
+            return 0.0
+
+    rows = []
+    for item in (result or {}).get("result_list", []) or []:
+        kind = str(item.get("deal_kind_nm", "") or "").strip()
+        side = "buy" if "매수" in kind else ("sell" if "매도" in kind else None)
+        ticker = str(item.get("stk_cd", "") or "").strip().upper()
+        qty = _num(item, "deal_qty")
+        if not side or not ticker or qty <= 0:
+            continue                              # 입출금·환전·배당 등 비체결 행 스킵
+        amt = abs(_num(item, "deal_amt"))
+        rows.append({
+            "ticker": ticker, "side": side, "qty": qty,
+            "price": round(amt / qty, 4) if amt > 0 else None,
+            "date": str(item.get("deal_dt", "") or "").strip(),
+            "deal_no": str(item.get("deal_no", "") or "").strip(),
+            "kind": kind, "name": str(item.get("stk_nm", "") or "").strip(),
+        })
+    return rows
+
+
+def fetch_us_transactions(days: int = 7) -> list[dict] | None:
+    """키움 REST 해외 거래내역(ust21100) 최근 N일 — 실패→None. read-only."""
+    try:
+        import requests as _req
+        from kiwoom_rest_api.auth.token import TokenManager
+    except ImportError:
+        return None
+    if not os.getenv("KIWOOM_API_KEY") or not os.getenv("KIWOOM_API_SECRET"):
+        return None
+    try:
+        from datetime import timedelta
+        tok = TokenManager().access_token
+        if not tok:
+            return None
+        end = datetime.now()
+        resp = _req.post(
+            "https://api.kiwoom.com/api/us/acnt",
+            headers={"content-type": "application/json;charset=UTF-8",
+                     "Authorization": f"Bearer {tok}", "api-id": "ust21100"},
+            json={"strt_dt": (end - timedelta(days=days)).strftime("%Y%m%d"),
+                  "end_dt": end.strftime("%Y%m%d"),
+                  "tp": "", "stex_tp": "", "stk_cd": "", "krw_repl_skip_yn": "Y"},
+            timeout=15,
+        )
+        resp.raise_for_status()
+        result = resp.json()
+    except Exception as e:
+        logger.error("키움 해외 거래내역 API 실패: %s", e)
+        return None
+    if result.get("return_code", -1) != 0:
+        logger.error("키움 해외 거래내역 오류: %s", result.get("return_msg", "unknown"))
+        return None
+    return _parse_us_transactions(result)
+
+
+def sync_us_transactions() -> int:
+    """해외 체결 → trade_events 원장 기록 (event_id=거래번호 멱등 — 차트 ▲▼ 마커 원천).
+
+    '주식모으기' 체결도 일반 매수로 함께 기록됨(거래종류명 note 보존) — 모으기 약정
+    자체는 REST 미제공이라 실행 이력으로만 확인 가능(정직 한계).
+    """
+    rows = fetch_us_transactions()
+    if not rows:
+        return 0
+    import sys
+    if PROJECT_DIR not in sys.path:
+        sys.path.insert(0, PROJECT_DIR)
+    from lib import trade_events
+
+    added = 0
+    for r in rows:
+        try:
+            d = r["date"]
+            ts = f"{d[:4]}-{d[4:6]}-{d[6:8]}T00:00:00" if len(d) == 8 else None
+            trade_events.record_trade(
+                ticker=r["ticker"], side=r["side"], qty=r["qty"], price=r["price"],
+                account=os.getenv("KIWOOM_ACCOUNT_NO", "kiwoom_us"), source="kiwoom_us_sync",
+                market="US", currency="USD", timestamp=ts, confirmed=True,
+                broker_order_id=r["deal_no"], note=r["kind"],
+                event_id=f"kiwoomus:{r['deal_no']}" if r["deal_no"] else None)
+            added += 1
+        except Exception as e:
+            logger.warning("해외 체결 기록 실패(1건 무시): %s", e)
+    logger.info("키움 해외 체결 %d건 원장 반영 (모으기 포함 — 거래종류명 보존)", added)
+    return added
+
+
 def sync_us_balance() -> None:
     """해외 잔고 확인 + (OVERSEAS_SYNC_SOURCE=kiwoom 일 때만) 스냅샷 반영.
 
@@ -316,6 +414,10 @@ def main():
         sync_us_balance()
     except Exception as e:
         logger.warning("키움 해외 동기화 실패(격리): %s", e)
+    try:
+        sync_us_transactions()      # 체결 → trade_events (차트 ▲▼ 마커·모으기 실행 이력 포함)
+    except Exception as e:
+        logger.warning("키움 해외 체결 동기화 실패(격리): %s", e)
 
     holdings = fetch_domestic_balance()
     if holdings is None:                       # API/키/토큰/연결 실패 — 조용히 묻히지 않게 알림

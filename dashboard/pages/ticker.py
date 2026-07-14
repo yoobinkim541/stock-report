@@ -40,7 +40,29 @@ def render():
     else:
         _analysis_snapshot(ticker)
         _detail_sections(ticker, yf_price)
+    _world_context(ticker)
     _manage_position(ticker, cur, pos)
+
+
+def _world_context(ticker):
+    """🧭 축적 맥락 — 월드 메모리 이슈 타임라인 + 스토리 체인 (영구 저장소·컨텍스트 전용)."""
+    wt = cached.world_timeline(ticker)
+    issues, chain = (wt or {}).get("issues") or [], (wt or {}).get("chain") or []
+    if not issues and not chain:
+        return
+    n_total = ((wt.get("stats") or {}).get("issues") or 0)
+    with st.expander(f"🧭 축적 맥락 — 월드 메모리 (관련 이슈 {len(issues)}건 · 전체 {n_total}건)",
+                     expanded=False):
+        if chain:
+            st.markdown("**스토리 체인 (오래된→최신)**")
+            for s in chain:
+                icon = "🟢" if s.get("bias") == "긍정" else "🔴" if s.get("bias") == "부정" else "⚪"
+                st.markdown(f"{icon} `{str(s.get('from'))[:10]}` {s.get('summary')}")
+        if issues:
+            st.markdown("**관련 이슈 타임라인**")
+            for i in reversed(issues):
+                st.markdown(f"- `{i['issue_date']}` [{i['category']}·{i['importance']}] {i['title']}")
+        st.caption("영구 축적 저장소(월드 메모리) — 인과 서술 재료·컨텍스트 전용, 매매신호 아님")
 
 
 @st.fragment

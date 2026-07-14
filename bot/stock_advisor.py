@@ -262,6 +262,15 @@ def build_advisor_prompt(question: str, market: dict) -> str:
                            f"{packet}\n\n")
     except Exception:
         pass
+    # 월드 메모리 회고 — 질문 관련 이슈 타임라인 (있으면 — '어디서 시작해 여기까지' 서술 재료)
+    try:
+        from lib.world_memory import timeline_text
+        tl = timeline_text(question, limit=6)
+        if tl:
+            memory_text += ("[축적 시장 맥락 — 관련 이슈 타임라인(오래된→최신). 인과 서술 재료·"
+                            "사실은 이 목록에 있는 것만 인용]\n" + tl + "\n\n")
+    except Exception:
+        pass
 
     return (
         "너는 한국어로 답하는 포트폴리오 상담 보조자다.\n"

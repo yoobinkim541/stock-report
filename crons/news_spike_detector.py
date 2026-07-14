@@ -359,6 +359,16 @@ def main() -> None:
         if _send_telegram(msg):
             sent_count += 1
             logger.info("발송 완료: %s", (event.get("title") or "")[:40])
+            try:                                 # 중요 속보 → 월드 메모리 영구 축적 (dedupe·실패 무시)
+                from lib.world_memory import log_issue
+                tickers = [t.lstrip("$") for t in (event.get("tags") or []) if str(t).startswith("$")]
+                log_issue((event.get("title") or "")[:300], category="속보",
+                          region="KR" if any(t.isdigit() for t in tickers) else "GLOBAL",
+                          importance="high" if score >= 8 else "medium",
+                          tickers=tickers, source="news_spike",
+                          payload={"score": score, "reason": reason})
+            except Exception as e:
+                logger.info("월드 메모리 기록 실패(무시): %s", e)
 
     if state_dirty:
         _save_state(state)

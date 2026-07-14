@@ -829,3 +829,15 @@ def intraday_chart(symbol: str, market: str, date: str, interval: str = "1m") ->
     except Exception as e:
         out["trades"], out["trades_error"] = [], str(e)
     return out
+
+
+def world_timeline(ticker: str, limit: int = 10) -> dict:
+    """월드 메모리 축적 맥락 — 종목 관련 이슈 타임라인 + 스토리 체인 (read-only). graceful."""
+    try:
+        from lib.world_memory import stats, story_chain, timeline
+        base = str(ticker or "").split(".")[0].upper()
+        return {"issues": timeline(base, limit=limit),
+                "chain": story_chain(f"ticker:{base}", limit=8),
+                "stats": stats()}
+    except Exception as e:
+        return {"issues": [], "chain": [], "error": str(e)}
