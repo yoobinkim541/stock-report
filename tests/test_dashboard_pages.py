@@ -972,3 +972,43 @@ def test_app_theme_toggle_light_dark():
     assert not at.exception, str(at.exception)
     light_md = " ".join(str(getattr(m, "value", "")) for m in at.markdown)
     assert "#f7f8fa" in light_md and "--tn-panel:#ffffff" in light_md
+
+
+def test_ai_console_auto_question_routes_and_appends_to_single_thread(monkeypatch):
+    """자동 맥락 UX — 버튼 선택 없이 질문하면 infer_surface 로 라우팅되고
+    메시지는 단일(auto) 스레드에 쌓인다. meta 에 추론 맥락 표기."""
+    from dashboard.pages import ai_console
+
+    fake_state = {}
+    monkeypatch.setattr(ai_console.st, "session_state", fake_state)
+    seen = {}
+
+    def fake_answer(question, surface):
+        seen["surface"] = surface
+        return {"ok": True, "answer": "auto answer",
+                "context": {"event_count": 1, "memory_count": 2}}
+
+    monkeypatch.setattr(ai_console.agent, "answer", fake_answer)
+
+    ai_console._run_agent_question_auto("내 포트폴리오에서 먼저 줄여야 할 리스크 봐줘")
+
+    assert seen["surface"] == "portfolio"
+    assert fake_state["agent_auto_surface"] == "portfolio"
+    msgs = fake_state[ai_console._chat_key(ai_console._AUTO_CHAT)]
+    assert msgs[-1]["content"] == "auto answer"
+    assert "포트폴리오" in msgs[-1]["meta"]
+
+
+def test_ai_console_surface_pin_overrides_inference(monkeypatch):
+    """맥락 고정(pin) 시 추론을 건너뛰고 고정 surface 로 실행."""
+    from dashboard.pages import ai_console
+
+    fake_state = {"agent_surface_pin": "paper"}
+    monkeypatch.setattr(ai_console.st, "session_state", fake_state)
+    seen = {}
+    monkeypatch.setattr(ai_console.agent, "answer", lambda q, s: (seen.setdefault("surface", s),
+                                                                  {"ok": True, "answer": "x", "context": {}})[1])
+
+    ai_console._run_agent_question_auto("오늘 시장 분위기 요약해줘")
+
+    assert seen["surface"] == "paper"

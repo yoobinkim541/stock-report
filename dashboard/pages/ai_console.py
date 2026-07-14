@@ -38,30 +38,17 @@ def render():
             <div class="codex-kicker">stock-report agent</div>
             <h1>AI 콘솔</h1>
           </div>
-          <span>context · memory · lab</span>
+          <span>그냥 질문하세요 — 맥락(시장·포트폴리오·종목·모의투자·전략)은 자동으로 잡습니다</span>
         </div>
         """,
         unsafe_allow_html=True,
     )
 
-    top = st.columns([1.2, 0.7, 0.9], vertical_alignment="bottom")
-    surface = top[0].segmented_control(
-        "화면 맥락",
-        list(_SURFACES),
-        default=st.session_state.get("agent_surface", "market"),
-        format_func=lambda key: _SURFACES.get(key, key),
-        key="agent_surface",
-    ) or "market"
-    hours = top[1].selectbox("수집 범위", [24, 72, 168, 336], index=1,
-                             format_func=lambda h: f"{h}h" if h < 168 else f"{h // 24}d",
-                             key="agent_hours")
-    if top[2].button("메모리 적재", width="stretch", help="최근 뉴스/리포트/ML 원장을 World Memory로 적재"):
-        with st.spinner("최근 컨텍스트를 World Memory에 적재 중..."):
-            result = context.ingest_recent_memory(hours=int(hours))
-        _context_pack.clear()
-        st.toast(f"메모리 {result.get('changed', 0)}건 반영")
+    # 맥락은 질문에서 자동 추론 — 마지막 추론값이 컨텍스트 글랜스/레일의 기준
+    surface = _current_surface()
+    hours = int(st.session_state.get("agent_hours", 72))
 
-    pack = _safe_context(surface, int(hours))
+    pack = _safe_context(surface, hours)
     _context_glance(pack)
 
     tab_chat, tab_memory, tab_lab, tab_connectors = st.tabs(
@@ -74,6 +61,18 @@ def render():
         _lab_tab(surface)
     with tab_connectors:
         _connectors_tab()
+
+
+_AUTO_CHAT = "auto"          # 단일 대화 스레드 키 (맥락은 메시지 단위로 자동 라우팅)
+_PIN_AUTO = "자동"
+
+
+def _current_surface() -> str:
+    """현재 기준 맥락 — 수동 고정(pin)이 있으면 그것, 없으면 마지막 자동 추론값."""
+    pin = st.session_state.get("agent_surface_pin", _PIN_AUTO)
+    if pin in _SURFACES:
+        return pin
+    return st.session_state.get("agent_auto_surface", "market")
 
 
 @st.cache_data(ttl=60, show_spinner=False)
@@ -125,19 +124,23 @@ def _context_glance(pack: dict):
 
 
 def _chat_tab(surface: str, pack: dict):
-    _ensure_chat_state(surface)
-    chat_key = _chat_key(surface)
+    _ensure_chat_state(_AUTO_CHAT)
+    chat_key = _chat_key(_AUTO_CHAT)
     chat_col, rail_col = st.columns([1.48, 0.72], gap="large")
 
     with chat_col:
+        pin = st.session_state.get("agent_surface_pin", _PIN_AUTO)
+        mode_label = ("맥락 자동" if pin == _PIN_AUTO
+                      else f"맥락 고정 · {_SURFACES.get(pin, pin)}")
         st.markdown(
-            f"<div class='codex-chat-head'><b>{_SURFACES.get(surface, surface)}</b>"
+            f"<div class='codex-chat-head'><b>{mode_label}"
+            f"<span class='codex-chip'>{_SURFACES.get(surface, surface)}</span></b>"
             f"<span>{pack.get('generated_at', '')}</span></div>",
             unsafe_allow_html=True,
         )
-        pending = _quick_prompts(surface)
+        pending = _quick_prompts()
         if pending:
-            _run_agent_question(pending, surface)
+            _run_agent_question_auto(pending)
 
         for msg in st.session_state[chat_key][-16:]:
             role_raw = str(msg.get("role", "assistant")).strip().lower()
@@ -147,9 +150,10 @@ def _chat_tab(surface: str, pack: dict):
                 if msg.get("meta"):
                     st.caption(msg["meta"])
 
-        user_text = st.chat_input("AI 콘솔에 질문하기", key=f"agent_chat_input_{surface}")
+        user_text = st.chat_input("무엇이든 질문하기 — 포트폴리오·종목·시장·모의투자·전략",
+                                  key="agent_chat_input_auto")
         if user_text:
-            _run_agent_question(user_text, surface)
+            _run_agent_question_auto(user_text)
             st.rerun()
 
     with rail_col:
@@ -171,60 +175,60 @@ def _ensure_chat_state(surface: str):
     st.session_state[key] = [
         {
             "role": "assistant",
-            "content": "현재 시장 자료, 모의투자 원장, World Memory를 읽고 있습니다. 질문을 던지면 이 맥락 안에서 답합니다.",
-            "meta": "local context ready",
+            "content": "그냥 질문하시면 됩니다. 질문 내용에 따라 시장·포트폴리오·종목·모의투자·전략 맥락을 자동으로 잡아 "
+                       "시장 자료·모의투자 원장·World Memory 안에서 답합니다.",
+            "meta": "local context ready · 맥락 자동",
         }
     ]
 
 
-def _quick_prompts(surface: str) -> str | None:
-    prompts = {
-        "market": [
-            "오늘 시장 변화가 어디서 시작됐는지 추적해줘",
-            "보유종목에 영향을 줄 이벤트만 골라줘",
-            "Arca/뉴스/ML 원장이 서로 충돌하는 부분 찾아줘",
-        ],
-        "portfolio": [
-            "현재 비중에서 먼저 줄여야 할 리스크를 봐줘",
-            "현금과 레버리지 사용 조건을 다시 잡아줘",
-            "최대 손실한도 기준으로 시나리오를 제안해줘",
-        ],
-        "paper": [
-            "모의투자 성과가 좋아진 이유와 나빠진 이유를 나눠줘",
-            "단기 트레이딩이 돈을 못 버는 원인을 추적해줘",
-            "성공한 결정과 실패한 결정의 공통 feature를 찾아줘",
-        ],
-        "ticker": [
-            "이 종목 추천이 성공/실패할 조건을 정리해줘",
-            "뉴스와 기술 추세가 충돌하는지 봐줘",
-            "20일/60일 관점의 체크포인트를 나눠줘",
-        ],
-        "lab": [
-            "이 전략랩 가설을 검증 가능한 규칙으로 바꿔줘",
-            "레버리지 전략의 손실한도 조건을 설계해줘",
-            "실패 시 먼저 꺼야 할 신호를 정해줘",
-        ],
-    }
-    cols = st.columns(3)
-    for idx, text in enumerate(prompts.get(surface, prompts["market"])):
-        if cols[idx].button(text, key=f"agent_quick_{surface}_{idx}", width="stretch"):
+def _quick_prompts() -> str | None:
+    """도메인을 가로지르는 추천 질문 4개 — 눌러도 되고, 그냥 아래에 입력해도 된다."""
+    prompts = [
+        "오늘 시장 변화가 어디서 시작됐는지 추적해줘",
+        "내 포트폴리오에서 먼저 줄여야 할 리스크 봐줘",
+        "모의투자 성과가 좋아진 이유와 나빠진 이유를 나눠줘",
+        "보유종목에 영향을 줄 이벤트만 골라줘",
+    ]
+    cols = st.columns(4)
+    for idx, text in enumerate(prompts):
+        if cols[idx].button(text, key=f"agent_quick_auto_{idx}", width="stretch"):
             return text
     return None
 
 
-def _run_agent_question(question: str, surface: str):
+def _run_agent_question_auto(question: str):
+    """단일 스레드 UX — 질문에서 맥락을 추론(또는 pin)해 실행하고 추론값을 기억한다."""
     question = str(question or "").strip()
     if not question:
         return
-    _ensure_chat_state(surface)
-    chat_key = _chat_key(surface)
+    pin = st.session_state.get("agent_surface_pin", _PIN_AUTO)
+    if pin in _SURFACES:
+        surface = pin
+    else:
+        prev = st.session_state.get("agent_auto_surface", "market")
+        surface = agent.infer_surface(question, default=prev)
+    st.session_state["agent_auto_surface"] = surface
+    _run_agent_question(question, surface, chat_key=_chat_key(_AUTO_CHAT))
+
+
+def _run_agent_question(question: str, surface: str, chat_key: str | None = None):
+    question = str(question or "").strip()
+    if not question:
+        return
+    if chat_key is None:
+        _ensure_chat_state(surface)
+        chat_key = _chat_key(surface)
+    else:
+        _ensure_chat_state(_AUTO_CHAT)
     st.session_state[chat_key].append({"role": "user", "content": question})
     with st.spinner("컨텍스트 읽는 중..."):
         result = agent.answer(question, surface)
     if result.get("ok"):
         ctx = result.get("context") or {}
-        meta = (f"events {ctx.get('event_count', 0)} · memory {ctx.get('memory_count', 0)}"
-                if ctx else "")
+        meta = f"맥락 {_SURFACES.get(surface, surface)}"
+        if ctx:
+            meta += f" · events {ctx.get('event_count', 0)} · memory {ctx.get('memory_count', 0)}"
         if ctx.get("context_error"):
             meta = f"{meta} · context fallback" if meta else "context fallback"
         st.session_state[chat_key].append({
@@ -251,7 +255,7 @@ def _chat_context_rail(surface: str, pack: dict):
     st.markdown(
         f"""
         <div class="codex-rail-card">
-          <div><span>surface</span><b>{_SURFACES.get(surface, surface)}</b></div>
+          <div><span>맥락 (자동)</span><b>{_SURFACES.get(surface, surface)}</b></div>
           <div><span>events</span><b>{len(events)}</b></div>
           <div><span>memory</span><b>{len(memory)}</b></div>
           <div><span>models</span><b>{len(models)}</b></div>
@@ -260,13 +264,28 @@ def _chat_context_rail(surface: str, pack: dict):
         unsafe_allow_html=True,
     )
 
+    with st.expander("⚙️ 설정", expanded=False):
+        st.selectbox("맥락 고정", [_PIN_AUTO, *list(_SURFACES)],
+                     format_func=lambda k: k if k == _PIN_AUTO else _SURFACES.get(k, k),
+                     key="agent_surface_pin",
+                     help="기본은 자동 — 질문 내용으로 맥락을 추론합니다. 특정 맥락에 고정하고 싶을 때만 바꾸세요.")
+        st.selectbox("수집 범위", [24, 72, 168, 336], index=1,
+                     format_func=lambda h: f"{h}h" if h < 168 else f"{h // 24}d",
+                     key="agent_hours")
+        if st.button("메모리 적재", width="stretch",
+                     help="최근 뉴스/리포트/ML 원장을 World Memory로 적재"):
+            with st.spinner("최근 컨텍스트를 World Memory에 적재 중..."):
+                result = context.ingest_recent_memory(hours=int(st.session_state.get("agent_hours", 72)))
+            _context_pack.clear()
+            st.toast(f"메모리 {result.get('changed', 0)}건 반영")
+
     c1, c2 = st.columns(2)
     prompt_key = _prompt_key(surface)
     if c1.button("프롬프트", key=f"agent_prompt_{surface}", width="stretch"):
         st.session_state[prompt_key] = not st.session_state.get(prompt_key, False)
-    if c2.button("초기화", key=f"agent_clear_{surface}", width="stretch"):
-        st.session_state.pop(_chat_key(surface), None)
-        _ensure_chat_state(surface)
+    if c2.button("초기화", key="agent_clear_auto", width="stretch"):
+        st.session_state.pop(_chat_key(_AUTO_CHAT), None)
+        _ensure_chat_state(_AUTO_CHAT)
         st.rerun()
 
     if st.session_state.get(prompt_key):
@@ -787,6 +806,19 @@ def _inject_codex_css():
           color:rgba(148,163,184,.86);
           font-size:.78rem;
           overflow-wrap:anywhere;
+        }
+        .codex-chip {
+          display:inline-block;
+          margin-left:8px;
+          padding:2px 9px;
+          border:1px solid rgba(56,189,248,.35);
+          border-radius:999px;
+          background:rgba(56,189,248,.12);
+          color:rgba(125,211,252,.96) !important;
+          font-size:.72rem !important;
+          font-weight:600;
+          vertical-align:middle;
+          white-space:nowrap;
         }
         div[data-testid="stChatMessage"] {
           border:1px solid rgba(148,163,184,.18);

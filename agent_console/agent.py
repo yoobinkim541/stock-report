@@ -20,6 +20,52 @@ _SURFACE_TITLES = {
     "lab": "전략 가설 점검",
 }
 
+# 자동 맥락 라우팅 키워드 — 질문 텍스트만으로 surface 를 추론 (순수·보수적).
+# portfolio > paper > lab 순서로 동점 해소. ticker 는 자산 심볼 추출로 판정.
+_SURFACE_ROUTE_HINTS = (
+    ("portfolio", ("포트폴리오", "보유", "비중", "리밸런", "손실한도", "손절 기준",
+                   "현금", "레버리지", "배당", "리스크", "줄여야", "줄일", "내 계좌",
+                   "평단", "익절", "분산")),
+    ("paper", ("모의", "페이퍼", "단기 트레이딩", "인트라데이", "intraday",
+               "트레이딩 성과", "원장", "가상 체결", "자동매매", "판단근거")),
+    ("lab", ("전략랩", "전략 캔버스", "백테스트", "가설", "시나리오", "규칙으로",
+             "손익비", "dsl", "그리드서치")),
+)
+
+
+def infer_surface(question: str, history: list[dict] | None = None,
+                  default: str = "market") -> str:
+    """질문에서 화면 맥락(surface)을 자동 추론 — 버튼 선택 없이 바로 질문하는 UX 용.
+
+    우선순위: 도메인 키워드 득점 > 자산 심볼(→ticker) > 짧은 후속 발화(직전 맥락 유지)
+    > market. 순수 함수(네트워크 0) — ticker_names resolve 는 allow_net=False 경유.
+    """
+    default = str(default or "market").strip().lower()
+    if default not in _SURFACE_TITLES:
+        default = "market"
+    q = str(question or "").strip().lower()
+    if not q:
+        return default
+
+    best_surface, best_score = "", 0
+    for surface, words in _SURFACE_ROUTE_HINTS:
+        score = sum(1 for w in words if w in q)
+        if score > best_score:
+            best_surface, best_score = surface, score
+    if best_score > 0:
+        return best_surface
+
+    try:
+        if _extract_asset_symbol(question):
+            return "ticker"
+    except Exception:
+        pass
+
+    # 짧은 후속/정정 발화("그럼?", "왜?", "국내로 다시")는 직전 맥락 유지
+    if len(q) <= 20 and (history or default != "market"):
+        return default
+    return "market"
+
 
 def build_context_prompt(surface: str = "market") -> str:
     pack = _safe_context_pack(surface)

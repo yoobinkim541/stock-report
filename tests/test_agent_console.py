@@ -687,3 +687,27 @@ def test_ingest_arca_proxy(monkeypatch, tmp_path):
     assert result["fetched"] == 1
     assert result["changed"] == 1
     assert storage.list_memory_events()[0]["source"] == "arca:proxy"
+
+
+def test_infer_surface_routes_by_question_keywords():
+    """자동 맥락 라우팅 — 버튼 없이 질문만으로 surface 추론 (순수·무네트워크)."""
+    from agent_console import agent
+
+    assert agent.infer_surface("내 포트폴리오에서 먼저 줄여야 할 리스크 봐줘") == "portfolio"
+    assert agent.infer_surface("모의투자 성과가 좋아진 이유 나눠줘") == "paper"
+    assert agent.infer_surface("이 가설을 백테스트 규칙으로 바꿔줘") == "lab"
+    assert agent.infer_surface("오늘 시장 분위기 요약해줘") == "market"
+    # 자산 심볼 + 의도어 → ticker (심볼 추출은 _extract_asset_symbol 재사용)
+    assert agent.infer_surface("NVDA 지금 매수해도 어때?") == "ticker"
+
+
+def test_infer_surface_short_followup_keeps_previous():
+    """짧은 후속 발화는 직전 맥락 유지 · 빈 질문/이상 default 는 안전 폴백."""
+    from agent_console import agent
+
+    assert agent.infer_surface("그럼 왜?", default="portfolio") == "portfolio"
+    assert agent.infer_surface("", default="paper") == "paper"
+    assert agent.infer_surface("그럼?", default="없는화면") == "market"
+    # 긴 일반 질문은 직전 맥락과 무관하게 market
+    long_q = "다음 분기 거시 경기 흐름과 인플레이션 전개를 근거와 함께 설명해줘"
+    assert agent.infer_surface(long_q, default="portfolio") == "market"
