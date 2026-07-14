@@ -8,7 +8,6 @@ from __future__ import annotations
 import os
 import sys
 from datetime import datetime, timezone
-from math import sqrt
 
 import pandas as pd
 import streamlit as st
@@ -650,36 +649,6 @@ def _canvas_prices(symbols: tuple[str, ...], period: str) -> pd.DataFrame:
     close.columns = [str(col).upper() for col in close.columns]
     close.index = pd.to_datetime(close.index)
     return close.sort_index().dropna(how="all")
-
-
-def _rsi_series(close: pd.Series, period: int = 14) -> pd.Series:
-    series = pd.to_numeric(close, errors="coerce").dropna()
-    delta = series.diff()
-    gain = delta.clip(lower=0).rolling(period, min_periods=period).mean()
-    loss = (-delta.clip(upper=0)).rolling(period, min_periods=period).mean()
-    rs = gain / loss.replace(0, 1e-9)
-    return 100 - (100 / (1 + rs))
-
-
-def _canvas_metrics(equity: pd.Series) -> dict:
-    eq = pd.to_numeric(equity, errors="coerce").dropna()
-    if len(eq) < 2:
-        return {"누적수익": "—", "CAGR": "—", "MDD": "—", "Vol": "—", "Sharpe": "—"}
-    rets = eq.pct_change().dropna()
-    days = max(1, int((eq.index[-1] - eq.index[0]).days))
-    cumulative = float(eq.iloc[-1] / eq.iloc[0] - 1)
-    cagr = float((eq.iloc[-1] / eq.iloc[0]) ** (365.25 / days) - 1)
-    drawdown = eq / eq.cummax() - 1
-    mdd = float(drawdown.min())
-    vol = float(rets.std() * sqrt(252)) if len(rets) > 1 else 0.0
-    sharpe = float(rets.mean() / rets.std() * sqrt(252)) if len(rets) > 1 and rets.std() > 0 else 0.0
-    return {
-        "누적수익": f"{cumulative * 100:+.1f}%",
-        "CAGR": f"{cagr * 100:+.1f}%",
-        "MDD": f"{mdd * 100:.1f}%",
-        "Vol": f"{vol * 100:.1f}%",
-        "Sharpe": f"{sharpe:.2f}",
-    }
 
 
 def _strategy_canvas_chart(equity: pd.DataFrame):

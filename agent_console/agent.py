@@ -826,7 +826,22 @@ def _try_llm_chat(question: str, pack: dict, history: list[dict] | None = None,
     if os.getenv("AGENT_CONSOLE_LLM_ENABLED", "1").lower() in {"0", "false", "no", "off"}:
         return None
     prompt = _build_general_chat_prompt(question, pack, history)
-    return _try_codex_chat(prompt, runner=runner) or _try_hermes_chat(prompt, runner=runner)
+    return (_try_codex_chat(prompt, runner=runner)
+            or _try_hermes_chat(prompt, runner=runner)
+            or _try_agy_backup(prompt))
+
+
+def _try_agy_backup(prompt: str) -> str | None:
+    """레포 표준 LLM 백업 체인(lib/llm_cli — agy·빈 스크래치 cwd) 최종 폴백.
+
+    LLM_BACKUP_ENABLED 게이트 off(기본)면 no-op — codex/hermes 동시 장애 시에만 의미.
+    """
+    try:
+        from lib import llm_cli
+        text, _note = llm_cli.backup_chat(prompt)
+        return (text or "").strip()[:6000] or None
+    except Exception:
+        return None
 
 
 def _try_codex_chat(prompt: str, runner=subprocess.run) -> str | None:

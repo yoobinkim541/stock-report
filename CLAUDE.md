@@ -319,6 +319,7 @@ crons/news_spike_detector.py (크론 매 1분)
 | `NOTION_ARCHIVE_ROOT_ID` | — | — (아카이브 루트 페이지 강제 지정. 미설정 시 대시보드 부모 아래 자동탐색·생성 후 `~/.cache` 캐시) |
 | `NOTION_ARCHIVE_PARENT_ID` | — | — (루트를 만들 부모. 기본: 대시보드의 부모 페이지) |
 | `AGENT_MEMORY_ENABLED` | — | `true` (공유 에이전트 메모리 — hermes/codex·Antigravity 공용 컨텍스트 패킷. `/ask` 프롬프트 주입+대화 축적·일일 압축(1회/일·실패 1h 재시도·미완 skipped)·레닥션. 저장: `~/.local/share/stock-report/shared-memory/`(git 밖·local-only). CLI: `python -m lib.agent_memory --status|--note|--summary`. FinanceAgentGUI(BSD-3) shared-agent-memory 이식) |
+| `AGENT_CONSOLE_*` | — | AI 콘솔/agent_console 튜닝 — `_LLM_ENABLED`(기본 1)·`_CODEX_ENABLED`/`_HERMES_ENABLED`·`_LLM_MODEL·_PROVIDER·_TIMEOUT`·`_SHARED_MEMORY_DIR`(기본 = `AGENT_MEMORY_DIR` 와 동일 통합 디렉토리)·`_HOST/_PORT`(선택 Flask 콘솔 127.0.0.1:8797). LLM 폴백: codex exec(read-only 샌드박스·cwd /tmp)→hermes chat→agy 백업(`LLM_BACKUP_ENABLED` 시) |
 | `LLM_BACKUP_ENABLED` | — | `false` (hermes 실패 시 Antigravity CLI `agy --print` 백업 — /ask·overlay·속보판정·뉴스라벨 4경로. 빈 스크래치 cwd 실행(레포 파일도구 차단)·출력은 기존 guard/파서 검증 통과 시만 채택. 진단: `python -m lib.llm_cli --check`) |
 | `LLM_BACKUP_CLI` | — | `agy` (백업 CLI 바이너리명) |
 | `NEWS_SPIKE_LLM_ENABLED` | — | `false` (속보 경계선[규칙 5~6점]만 LLM 2차 판정. off면 규칙 점수만 — 기존 동작 불변) |
