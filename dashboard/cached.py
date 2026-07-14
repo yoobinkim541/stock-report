@@ -54,6 +54,11 @@ def social_sentiment():
     return views.social_sentiment()
 
 
+@st.cache_data(ttl=900, show_spinner=False)
+def world_timeline(t):
+    return views.world_timeline(t)
+
+
 @st.cache_data(ttl=_TTL, show_spinner="불러오는 중…")
 def earnings(t):
     return views.earnings_calendar(t)

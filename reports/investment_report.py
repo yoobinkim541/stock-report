@@ -635,13 +635,25 @@ def _generate_llm_overlay(clean_data, source_digest="", runner=subprocess.run):
             except Exception as exc:
                 return None, f"call failed: {_short_status(exc)}"
 
+    guard_source = dict(clean_data)
+    guard_source["source_digest"] = source_digest
+
     if getattr(result, "returncode", 1) != 0:
+        # 백업 LLM (agy — LLM_BACKUP_ENABLED 시): 출력도 동일 fact guard 통과해야 채택
+        try:
+            from lib.llm_cli import backup_chat
+            btext, bnote = backup_chat(prompt, timeout=timeout, runner=runner)
+        except Exception:
+            btext, bnote = None, ""
+        if btext:
+            issues = _validate_llm_overlay(btext, guard_source)
+            if issues:
+                return None, "fact guard rejected backup output: " + _short_status("; ".join(issues))
+            return btext, f"ok ({bnote})"
         stderr = _short_status(getattr(result, "stderr", ""))
         return None, f"call failed: non-zero exit{': ' + stderr if stderr else ''}"
 
     text = (getattr(result, "stdout", "") or "").strip()
-    guard_source = dict(clean_data)
-    guard_source["source_digest"] = source_digest
     issues = _validate_llm_overlay(text, guard_source)
     if issues:
         return None, "fact guard rejected output: " + _short_status("; ".join(issues))

@@ -216,19 +216,28 @@ def _parse_llm_verdict(text: str) -> tuple[int, str] | None:
 
 
 def _llm_score(event: dict, runner=None) -> tuple[int, str] | None:
-    """LLM 2차 판정 — 성공 시 (점수, 이유), 실패 시 None."""
+    """LLM 2차 판정 — 성공 시 (점수, 이유), 실패 시 None. hermes 실패 시 백업(agy) 시도."""
     import subprocess
     run = runner or subprocess.run
-    cmd = ["hermes", "chat", "-q", _llm_prompt(event),
+    prompt = _llm_prompt(event)
+    cmd = ["hermes", "chat", "-q", prompt,
            "--provider", NEWS_LLM_PROVIDER, "--model", NEWS_LLM_MODEL, "-Q"]
+    text = None
     try:
         result = run(cmd, capture_output=True, text=True, timeout=NEWS_LLM_TIMEOUT)
+        if getattr(result, "returncode", 1) == 0:
+            text = getattr(result, "stdout", "") or ""
     except Exception as e:
-        logger.info("LLM 판정 호출 실패 — 규칙 점수 유지: %s", e)
-        return None
-    if getattr(result, "returncode", 1) != 0:
-        return None
-    return _parse_llm_verdict(getattr(result, "stdout", "") or "")
+        logger.info("LLM 판정 호출 실패: %s", e)
+    if text is None:
+        try:
+            from lib.llm_cli import backup_chat
+            text, _note = backup_chat(prompt, timeout=NEWS_LLM_TIMEOUT, runner=runner)
+        except Exception:
+            text = None
+    if text is None:
+        return None                      # 백업까지 실패 → 규칙 점수 유지 (호출부)
+    return _parse_llm_verdict(text)
 
 
 def judge_importance(event: dict, *, allow_llm: bool = False, runner=None) -> tuple[int, str, bool]:
@@ -350,6 +359,16 @@ def main() -> None:
         if _send_telegram(msg):
             sent_count += 1
             logger.info("발송 완료: %s", (event.get("title") or "")[:40])
+            try:                                 # 중요 속보 → 월드 메모리 영구 축적 (dedupe·실패 무시)
+                from lib.world_memory import log_issue
+                tickers = [t.lstrip("$") for t in (event.get("tags") or []) if str(t).startswith("$")]
+                log_issue((event.get("title") or "")[:300], category="속보",
+                          region="KR" if any(t.isdigit() for t in tickers) else "GLOBAL",
+                          importance="high" if score >= 8 else "medium",
+                          tickers=tickers, source="news_spike",
+                          payload={"score": score, "reason": reason})
+            except Exception as e:
+                logger.info("월드 메모리 기록 실패(무시): %s", e)
 
     if state_dirty:
         _save_state(state)

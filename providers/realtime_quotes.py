@@ -1,14 +1,17 @@
 #!/usr/bin/env python3
 """realtime_quotes.py — 실시간 시세 캐시의 **읽기전용 클라이언트** (폴백의 단일 seam).
 
-kis_stream.py 가 ~/.cache/kis_realtime_quotes.json 에 최신 틱을 쓰고, 봇·크론 소비자는
-이 모듈로 읽는다. 핵심 계약: **절대 예외를 던지지 않고**, 비활성/없음/stale 이면 None 을
-반환해 호출부가 기존 yfinance 경로로 우아하게 폴백하게 한다.
+소스 2계층 (WS 신선 > REST 신선 > None→yfinance):
+  1차: kis_stream.py → ~/.cache/kis_realtime_quotes.json (KIS WS 틱·호가 — 세션 41심볼 캡)
+  2차: quotes_poller.py → ~/.cache/rest_quotes.json (토스 배치 200 + 키움 KR 폴백 —
+       WS 캡 밖 롱테일 현재가. 가격만 — 호가/체결강도는 WS 전용)
 
-신선도 2단:
-  1) heartbeat — 스트림 프로세스가 살아있고 최근 갱신했는가(HEARTBEAT_STALE_S 초). 죽었으면 캐시 전체 불신.
-  2) 심볼별 ts — 해당 종목 틱이 max_age_s 이내인가.
-둘 중 하나라도 실패하면 None.
+핵심 계약: **절대 예외를 던지지 않고**, 비활성/없음/stale 이면 None 을 반환해
+호출부가 기존 yfinance 경로로 우아하게 폴백하게 한다. 소비자는 이 seam 만 안다.
+
+신선도 2단 (계층별 독립):
+  1) heartbeat — writer 프로세스가 살아있고 최근 갱신했는가. 죽었으면 그 캐시 전체 불신.
+  2) 심볼별 ts — 해당 종목 값이 max_age_s 이내인가.
 """
 from __future__ import annotations
 
@@ -17,6 +20,7 @@ import os
 import time
 
 CACHE_PATH = os.path.expanduser("~/.cache/kis_realtime_quotes.json")
+REST_CACHE_PATH = os.path.expanduser("~/.cache/rest_quotes.json")
 HEARTBEAT_KEY = "__heartbeat__"
 
 
@@ -29,10 +33,20 @@ def _int_env(name: str, default: int) -> int:
 
 DEFAULT_STALE_S = _int_env("REALTIME_STALE_S", 60)
 HEARTBEAT_STALE_S = _int_env("REALTIME_HEARTBEAT_STALE_S", 120)
+REST_HEARTBEAT_STALE_S = _int_env("QUOTES_POLL_HEARTBEAT_STALE_S", 90)   # 폴 주기(10s)×여유
+
+
+def ws_enabled() -> bool:
+    return os.getenv("REALTIME_ENABLED", "false").lower() == "true"
+
+
+def poll_enabled() -> bool:
+    return os.getenv("QUOTES_POLL_ENABLED", "false").lower() == "true"
 
 
 def enabled() -> bool:
-    return os.getenv("REALTIME_ENABLED", "false").lower() == "true"
+    """실시간 seam 활성 — WS 또는 REST 폴러 중 하나라도 켜져 있으면 참."""
+    return ws_enabled() or poll_enabled()
 
 
 # ── 순수 신선도 (폐형해 테스트 대상) ─────────────────────────────────────────
@@ -49,9 +63,9 @@ def _is_fresh(ts, now: float, max_age_s: float) -> bool:
 
 # ── 캐시 읽기 (예외 무발) ─────────────────────────────────────────────────────
 
-def _read_cache() -> dict:
+def _read_cache(path: str | None = None) -> dict:
     try:
-        with open(CACHE_PATH, encoding="utf-8") as f:
+        with open(CACHE_PATH if path is None else path, encoding="utf-8") as f:
             d = json.load(f)
         return d if isinstance(d, dict) else {}
     except Exception:
@@ -69,8 +83,8 @@ def heartbeat_age(cache: dict | None = None) -> float | None:
 
 
 def _live_cache() -> dict | None:
-    """활성+heartbeat 신선이면 캐시 dict, 아니면 None(전체 폴백)."""
-    if not enabled():
+    """WS 캐시: 활성+heartbeat 신선이면 dict, 아니면 None(전체 폴백)."""
+    if not ws_enabled():
         return None
     cache = _read_cache()
     if not cache:
@@ -81,14 +95,36 @@ def _live_cache() -> dict | None:
     return cache
 
 
-def _entry(symbol: str, max_age_s: int, cache: dict | None = None) -> dict | None:
-    cache = _live_cache() if cache is None else cache
+def _rest_cache() -> dict | None:
+    """REST 폴 캐시(quotes_poller): 활성+heartbeat 신선이면 dict, 아니면 None."""
+    if not poll_enabled():
+        return None
+    cache = _read_cache(REST_CACHE_PATH)
+    if not cache:
+        return None
+    age = heartbeat_age(cache)
+    if age is None or age > REST_HEARTBEAT_STALE_S:
+        return None       # 폴러 죽음/장 마감 대기 → 캐시 전체 불신
+    return cache
+
+
+def _pick(cache: dict | None, symbol: str, max_age_s: int) -> dict | None:
     if not cache:
         return None
     e = cache.get(symbol) or cache.get(symbol.upper())
     if not isinstance(e, dict):
         return None
     return e if _is_fresh(e.get("ts"), time.time(), max_age_s) else None
+
+
+def _entry(symbol: str, max_age_s: int, cache: dict | None = None) -> dict | None:
+    """WS 신선 우선 → REST 폴 신선 → None. cache 인자는 테스트 주입용(WS 계층)."""
+    e = _pick(_live_cache() if cache is None else cache, symbol, max_age_s)
+    if e is not None:
+        return e
+    if cache is None:                       # 명시 주입 시엔 그 계층만 (테스트 결정성)
+        return _pick(_rest_cache(), symbol, max_age_s)
+    return None
 
 
 # ── 공개 reader ───────────────────────────────────────────────────────────────

@@ -74,6 +74,14 @@ def main() -> int:
     n = news_labels.append_labels(labels)
     logger.info("라벨 적재 %d/%d건 → %s (검증 폐기 %d건)",
                 n, len(targets), news_labels.LABELS_PATH, len(targets) - n)
+
+    # 월드 메모리 이슈 적재 (영구 축적 — dedupe 멱등·실패 무시)
+    try:
+        from lib.world_memory import ingest_from_labels
+        added = ingest_from_labels(labels)
+        logger.info("월드 메모리 이슈 +%d건", added)
+    except Exception as e:
+        logger.warning("월드 메모리 적재 실패(무시): %s", e)
     return 0
 
 
