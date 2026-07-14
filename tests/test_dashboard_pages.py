@@ -15,6 +15,23 @@ pytest.importorskip("streamlit")
 pytest.importorskip("plotly")
 from streamlit.testing.v1 import AppTest  # noqa: E402
 
+
+@pytest.fixture(scope="module", autouse=True)
+def _restore_dashboard_modules():
+    """_STUBS 가 AppTest 인프로세스로 dashboard.data/cached 모듈 속성을 직접 덮어씀 —
+    같은 pytest 세션의 후속 테스트(test_dashboard.py 등)가 가짜 보유종목을 보지 않도록
+    원본 속성을 스냅샷하고 모듈 종료 시 복원."""
+    from dashboard import cached, data
+    saved = [(mod, dict(vars(mod))) for mod in (data, cached)]
+    yield
+    for mod, snap in saved:
+        for key in list(vars(mod)):
+            if key not in snap:
+                delattr(mod, key)
+        for key, val in snap.items():
+            setattr(mod, key, val)
+
+
 _STUBS = '''
 import os, sys
 sys.path.insert(0, %r)
@@ -28,9 +45,49 @@ data.load_holdings = lambda *a, **k: [
 data.portfolio_summary = lambda *a, **k: {"total_usd":10000.0,"return_pct":15.0,"n_holdings":2}
 data.portfolio_weights = lambda *a, **k: {"MSFT":0.4,"NVDA":0.6}
 data.trade_events = lambda *a, **k: []
+data.load_kr_holdings = lambda *a, **k: {}
+data.ticker_alerts = lambda t: [{"id": "ab12cd34", "ticker": "MSFT", "price": 380.0,
+                                 "type": "buy", "note": "지지선", "triggered": False,
+                                 "created_at": "2026-07-09T10:00:00"}]
+data.add_ticker_alert = lambda *a, **k: "ab12cd34"
+data.remove_ticker_alert = lambda i: True
 cached.econ = lambda *a, **k: [{"marker":"\U0001f534","date_str":"06/29 21:30","title":"CPI"}]
 cached.news = lambda t: "뉴스 본문"
 cached.etf = lambda t: {"ticker": t, "is_etf": False}
+cached.tr_pr = lambda t, years=5: None
+cached.fx_now = lambda: 1400.0
+cached.port_history = lambda: [
+    {"date": "2026-07-06", "total_usd": 9300.0, "total_krw": 14000000, "exchange_rate": 1505.0,
+     "qqq_price": 700.0},
+    {"date": "2026-07-07", "total_usd": 9411.0, "total_krw": 14239554, "exchange_rate": 1513.0,
+     "qqq_price": 704.9}]
+cached.target_weights_map = lambda: {"MSFT": 0.5, "NVDA": 0.4, "SGOV": 0.1}
+cached.income_summary = lambda *a, **k: {"records": [{"amount": 12.5}], "total": 12.5,
+    "est_monthly": 20.0, "est_detail": {"note": "최근 3개월 평균 배당 기준"}}
+cached.fx_timing = lambda: {"ok": True, "rate": 1509.8, "pct_display": 96.1,
+    "emoji": "\U0001f534", "verdict": "원화 약세 구간", "multiplier": 0.3,
+    "action": "환전 최소화 - 필요분만"}
+cached.etf_peers = lambda t: {}
+cached.screener_last = lambda: None
+cached.trendlines_for = lambda *a, **k: []
+cached.market_temp_history = lambda: [{"date": "2026-07-07", "score": 0.1},
+                                      {"date": "2026-07-08", "score": 0.2}]
+cached.next_earnings = lambda t: None
+cached.chart_news = lambda t: [{"date": "2026-07-01", "direction": 1, "strength": 4,
+                                "event_type": "실적", "title": "beat"}]
+cached.macro_corr = lambda t: [{"symbol": "^TNX", "label": "미 10년물", "note": "역상관 경향",
+                                "corr90": -0.62, "chg30": 1.4}]
+cached.llm_related = lambda t: ([{"ticker": "AMD", "relation": "경쟁사", "reason": "GPU"}], "cached")
+cached.ai_briefing = lambda: None
+cached.llm_related.clear = lambda: None
+cached.macro_assets = lambda: [
+    {"symbol": "KRW=X", "label": "달러/원 환율", "emoji": "\U0001f4b1", "unit": "₩",
+     "ticker": "KRW=X", "price": 1505.05, "chg": -3.2, "pct": -0.21, "spark": [1500, 1503, 1505]},
+    {"symbol": "GC=F", "label": "금", "emoji": "\U0001f947", "unit": "$/oz", "ticker": "GC=F",
+     "price": 4105.3, "chg": 12.1, "pct": 0.30, "spark": [4090, 4100, 4105]},
+    {"symbol": "BTC-USD", "label": "비트코인", "emoji": "₿", "unit": "$", "ticker": "BTC-USD",
+     "price": 64162, "chg": 980, "pct": 1.55, "spark": [63000, 63800, 64162]}]
+cached.portfolio_flows = lambda: {}
 cached.social_sentiment = lambda: {"summary": {"title": "미국 레딧 게시물 분석",
     "published_at": "2026-07-05T10:00:00+09:00", "url": "https://t.me/insidertracking/1",
     "top_tickers": ["MU", "SNDK", "NVDA"],
@@ -67,12 +124,26 @@ cached.risk_struct = lambda: {"port_vol":0.2,"n_eff":3.5,"n_assets":5,"mdd_est":
                 "kelly_half":{"conservative":0.5,"moderate":0.9,"trailing":1.1}}}
 cached.ohlc = lambda t, period="6mo": pd.DataFrame(
     {"Open":range(100,170),"High":range(101,171),"Low":range(99,169),"Close":range(100,170)}, index=_IDX)
-cached.screener = lambda n: {"rows":[],"error":"skip"}
+cached.screener = lambda n: {"rows": [{"rank": 1, "ticker": "NVDA", "name": "NVIDIA",
+    "score": 2.54, "price": 196.9, "tech_rating": "매수", "surv_flag": False,
+    "reason": "52주 고점 근접 · 6M 모멘텀 +42%%", "rsi_14": 62.0,
+    "close_vs_52w_high": 0.97, "mom_126d": 0.42, "excess_mom_60d": 0.08, "fund_score": 72.0}],
+    "feats": {"NVDA": {"rsi_14": 62.0, "mom_126d": 0.42}},
+    "meta": {"ic": 0.05, "icir": 0.8, "top_decile": 0.02, "train_end": "2026-06-01",
+             "importance": {"mom_126d": 100, "rsi_14": 50}}}
 cached.backtest = lambda: {"error":"skip"}
+cached.backtest_last = lambda: {"ml": {"cagr": 0.21, "sharpe": 1.1, "mdd": -0.18},
+    "qqq": {"cagr": 0.18, "sharpe": 0.9, "mdd": -0.22}, "overlay": {},
+    "verdict": "비채택", "reasons": ["OOS 개선 미달"], "equity": None,
+    "asof": "2026-07-08 12:00"}
 cached.sp500_heatmap = lambda: [
     {"ticker":"AAPL","name":"Apple","sector_kr":"기술","market_cap":4e12,"pct":1.96},
     {"ticker":"MSFT","name":"Microsoft","sector_kr":"기술","market_cap":2.8e12,"pct":3.17},
     {"ticker":"JPM","name":"JPMorgan","sector_kr":"금융","market_cap":9e11,"pct":-2.18}]
+cached.sp500_valuation = lambda: {"per": 27.3, "fper": 21.9, "eps_growth_pct": 24.7,
+    "peg": 1.11, "n": 100, "cov_trailing_pct": 68.0, "cov_forward_pct": 66.0,
+    "per_reported": 32.28, "per_pctile_all": 97.8, "per_pctile_20y": 91.7,
+    "hist_n": 1867, "asof": "2026-07-08"}
 cached.market_indicators = lambda: {"fear_greed":{"score":32.0,"rating":"fear","prev_week":26.0,"prev_month":56.0},
     "indices":[{"ticker":"^GSPC","name":"S&P 500","price":6000.0,"chg":1.2,"rsi_d":63.0,"rsi_w":81.0},
                {"ticker":"^IXIC","name":"나스닥","price":20000.0,"chg":0.8,"rsi_d":58.0,"rsi_w":75.0}]}
@@ -277,6 +348,11 @@ def test_ticker_position_management_renders():
     assert not at.exception, str(at.exception)
     assert len(at.number_input) >= 1                 # 주수/단가 입력
     assert any("기록" in str(b.label) for b in at.button)   # 추가/적립/축소 기록 버튼
+    assert any("적립 금액 (₩)" in str(getattr(n, "label", "")) for n in at.number_input)
+    assert any("적용 환율" in str(getattr(n, "label", "")) for n in at.number_input)
+    seg = " ".join(str(s) for s in at.segmented_control)
+    assert "매일" in seg and "매주" in seg and "매월" in seg
+    assert any("적립 1회 기록" in str(b.label) for b in at.button)
     # 안전 라벨(실주문 아님) 노출
     assert any("실주문 아님" in str(c.value) or "기록 전용" in str(c.value) for c in at.caption)
 
@@ -378,7 +454,7 @@ def test_home_shows_market_map():
                              default_timeout=30)
     at.run()
     assert not at.exception, str(at.exception)
-    assert any("S&P 500 시장 맵" in str(m.value) for m in at.markdown)   # 시장맵 섹션
+    assert any("시장 맵" in str(m.value) for m in at.markdown)   # 시장맵 섹션 (3맵 탭 통합)
     assert any("시장 지표" in str(m.value) for m in at.markdown)          # F&G·RSI 패널 (O2)
 
 
@@ -394,6 +470,38 @@ def test_sidebar_paper_rail_and_nav(monkeypatch):
     at.session_state["_nav_to_paper"] = True          # 레일 버튼 클릭 시뮬
     at.run()
     assert not at.exception, str(at.exception)
+
+
+def test_ticker_page_macro_view():
+    """매크로 자산(금)은 주식 섹션(호가·진입레벨·밸류·재무·포지션관리) 대신 전용 뷰.
+
+    성과 프로필·연관 자산 상관이 뜨고, 주식 전용 섹션은 렌더되지 않아야 한다.
+    """
+    macro_stub = '''
+st.session_state["ticker"] = "GC=F"
+'''
+    at = AppTest.from_string(_STUBS + macro_stub
+                             + "\nfrom dashboard.pages import ticker\nticker.render()\n",
+                             default_timeout=30)
+    at.run()
+    assert not at.exception, str(at.exception)
+    body = " ".join(str(m.value) for m in at.markdown) + " ".join(str(c.value) for c in at.caption)
+    assert "성과 프로필" in body and "연관 자산" in body
+    # 주식 전용 섹션 부재 (매크로엔 무의미)
+    for stock_only in ("진입 레벨 가이드", "포지션 관리", "실시간 호가"):
+        assert stock_only not in body, f"매크로 뷰에 주식 섹션 노출: {stock_only}"
+
+
+def test_ticker_page_macro_krw_fx_timing():
+    """환율(KRW=X)은 환전 타이밍 + 포트 민감도 특화 섹션."""
+    at = AppTest.from_string(_STUBS + '\nst.session_state["ticker"] = "KRW=X"\n'
+                             + "\nfrom dashboard.pages import ticker\nticker.render()\n",
+                             default_timeout=30)
+    at.run()
+    assert not at.exception, str(at.exception)
+    body = " ".join(str(m.value) for m in at.markdown) + \
+        " ".join(str(c.value) for c in at.caption) + " ".join(str(i.value) for i in at.info)
+    assert "환전 타이밍" in body and "민감도" in body
 
 
 def test_ticker_page_etf_view():
@@ -450,3 +558,312 @@ cached.etf = lambda t: {"ticker": "069500.KS", "stock_code": "069500", "is_etf":
     assert any("구성종목" in str(s.value) for s in at.subheader)
     assert len(at.dataframe) >= 1
     assert not any("PER" == m.label for m in at.metric)
+
+
+def test_ticker_page_etf_tr_pr_and_peer_score():
+    """ETF 뷰 신규 섹션 — TR vs PR 지표·차트 + 동종그룹 비교표·점수 게이지 (합성 주입)."""
+    etf_stub = '''
+st.session_state["ticker"] = "QQQI"
+cached.etf = lambda t: {"ticker": "QQQI", "is_etf": True, "name": "NEOS NDX High Income",
+    "expense_ratio": 0.0068, "price": 55.8, "nav": 56.1, "premium_pct": -0.5,
+    "dividends": {"count_12m": 12, "per_share_12m": 7.6, "yield_pct": 13.7, "freq_label": "매월"}}
+_TIDX = pd.date_range("2023-01-01", periods=900, freq="D")
+_TR = pd.Series([100.0 * 1.0006 ** i for i in range(900)], index=_TIDX)
+_PR = pd.Series([100.0 * 1.0001 ** i for i in range(900)], index=_TIDX)
+cached.tr_pr = lambda t, years=5: {"tr": _TR, "pr": _PR, "asof": "2026-07-08"}
+_ROW = {"ticker": "QQQI", "expense_ratio": 0.0068, "aum": 1.3e10, "div_yield_pct": 13.7,
+        "div_count_12m": 12, "tr_1y": 22.2, "tr_3y_ann": 18.0, "pr_1y": 6.1, "pr_3y_ann": 2.0,
+        "mdd": 20.0, "mdd_window_y": 3.0, "history_years": 2.4, "avg_dollar_vol": 5e7,
+        "tracking_diff": -9.3, "score": 60,
+        "score_detail": {"score": 60, "components": {"비용": 38, "성과": 62, "인컴": 88,
+                         "리스크": 50, "유동성": 75}, "n_peers": 4, "low_confidence": False,
+                         "basis": "1y", "strategy": "covered_call"}}
+_ROW2 = dict(_ROW, ticker="QYLD", score=47, tr_1y=21.7)
+cached.etf_peers = lambda t: {"group": {"key": "ndx_covered_call",
+    "name": "나스닥100 커버드콜", "strategy": "covered_call", "bench": "QQQ"},
+    "rows": [_ROW, _ROW2], "asof": "2026-07-08 07:00 UTC"}
+'''
+    at = AppTest.from_string(_STUBS + etf_stub + "\nfrom dashboard.pages import ticker\nticker.render()\n",
+                             default_timeout=30)
+    at.run()
+    assert not at.exception, at.exception
+    body = (" ".join(str(x) for x in at.markdown)
+            + " ".join(m.label for m in at.metric)
+            + " ".join(str(x.value) for x in at.subheader))
+    assert "TR vs PR" in body and "분배 기여" in body            # TR/PR 섹션
+    assert "동종 ETF 비교" in body and "나스닥100 커버드콜" in body   # 피어 섹션
+    html_body = " ".join(str(getattr(x, "value", "")) for x in at.markdown)
+    assert "ETF 점수" in html_body                               # 점수 게이지 (HTML 마크다운)
+    assert "매매신호 아님" in " ".join(str(c.value) for c in at.caption)
+    assert len(at.dataframe) >= 1                                # 피어 지표표
+
+
+def test_research_screener_enriched():
+    """스크리너 — 기업명·판단근거 컬럼 + 무엣지 캡션 (합성 주입)."""
+    script = _STUBS + '''
+st.session_state["scr_done"] = True
+from dashboard.pages import research
+research._screener_section()
+'''
+    at = AppTest.from_string(script, default_timeout=30)
+    at.run()
+    assert not at.exception, at.exception
+    assert len(at.dataframe) >= 1
+    df0 = at.dataframe[0].value
+    assert "판단근거" in df0.columns and "종목" in df0.columns
+    assert "NVIDIA (NVDA)" in str(df0["종목"].iloc[0])            # 기업명 병기
+    caps = " ".join(str(c.value) for c in at.caption)
+    assert "매매신호 아님" in caps
+
+
+def test_ticker_chart_live_stable_html_and_feeder():
+    """⚡ live — 메인 차트 html 바이트 안정(8초 재실행 재마운트 방지) + 피더가 가격을 나름.
+
+    live 모드에서 실시간가를 서버 bake 하면 srcdoc 이 8초마다 바뀌어 iframe 재마운트
+    (그리던 드로잉 리셋 + 수 MB 재전송) — 가격이 달라도 메인 html 은 불변이어야 하고
+    가격은 초소형 피더(tnrt localStorage push)만 나른다. 비 live 는 종전 bake 유지.
+    """
+    def _script(px, live):
+        # ⚠️ _STUBS 는 이미 % 포맷 소비돼 리터럴 % 를 품음 — 재-% 포맷 금지(f-string 결합)
+        return _STUBS + f'''
+cached.realtime_quote = lambda t: {{"price": {px}}}
+st.session_state["_chart_live"] = {live}
+from dashboard.pages import ticker
+ticker.render()
+'''
+    docs = {}
+    for px in ("172.5", "199.25"):
+        at = AppTest.from_string(_script(px, True), default_timeout=30)
+        at.run()
+        assert not at.exception, str(at.exception)
+        frames = [i.proto.srcdoc for i in at.get("iframe")]
+        main = [s for s in frames if "patchLast" in s]
+        feed = [s for s in frames if "tnrt:MSFT" in s and len(s) < 1024]
+        assert len(main) == 1 and len(feed) == 1, "live: 메인 차트 1 + 피더 1 이어야"
+        assert "const live = true" in main[0]
+        assert px in feed[0]                        # 가격은 피더가 나름
+        assert px not in main[0]                    # 메인 html 엔 실시간가 미포함 (bake 0)
+        docs[px] = main[0]
+    assert docs["172.5"] == docs["199.25"], "실시간가가 달라도 메인 html 은 바이트 불변"
+    # 비 live — 종전 서버 bake 유지 (bounds JSON 에 실시간가 반영·피더 없음)
+    at = AppTest.from_string(_script("172.5", False), default_timeout=30)
+    at.run()
+    assert not at.exception, str(at.exception)
+    frames = [i.proto.srcdoc for i in at.get("iframe")]
+    main = [s for s in frames if "patchLast" in s]
+    assert len(main) == 1 and "const live = false" in main[0]
+    assert "172.5" in main[0]                       # bake 로 bounds 에 실시간가
+    assert not any("tnrt:MSFT" in s and len(s) < 1024 for s in frames)   # 피더 없음
+
+
+def test_reconnect_watchdog_html_contract():
+    """서버 재기동 워치독 — health 폴링·down→up 전이 시 parent reload 계약."""
+    from dashboard import auth
+    h = auth.reconnect_watchdog_html(2500)
+    assert "/_stcore/health" in h and "2500" in h
+    assert "window.parent.location.reload" in h
+    assert "down = true" in h                       # 실패 → 회복 전이만 리로드
+    assert "AbortController" in h                   # fetch hang 방어 타임아웃
+    assert ">= 3" in h                              # 연속 3회 실패부터 다운 판정
+
+
+_WATCHDOG_HARNESS = r"""
+let tick = null;
+global.setInterval = (fn, ms) => { tick = fn; return 0; };
+let reloads = 0;
+global.window = { parent: { location: { reload() { reloads++; } } } };
+const outcomes = [];                       // 틱마다 소비 — 'ok' | 'fail'
+global.fetch = () => (outcomes.shift() === "ok"
+  ? Promise.resolve({ ok: true }) : Promise.reject(new Error("ECONNRESET")));
+__SCRIPT__
+(async () => {
+  function fail(m) { console.error("FAIL " + m); process.exit(1); }
+  if (!tick) fail("no_interval");
+  // 1) 일시적 reset 1회 → 즉시 회복: reload 금지 (hair-trigger 튕김 방지)
+  outcomes.push("fail", "ok"); await tick(); await tick();
+  if (reloads !== 0) fail("single_blip_reloaded");
+  // 2) 2연속 실패 → 회복: 아직 임계(3) 미달 — reload 금지
+  outcomes.push("fail", "fail", "ok"); await tick(); await tick(); await tick();
+  if (reloads !== 0) fail("two_blips_reloaded");
+  // 3) 연속 3회 실패(진짜 다운) → 회복: reload 정확히 1회
+  outcomes.push("fail", "fail", "fail", "ok");
+  await tick(); await tick(); await tick(); await tick();
+  if (reloads !== 1) fail("no_reload_after_downtime reloads=" + reloads);
+  console.log("OK watchdog");
+})();
+"""
+
+
+@pytest.mark.skipif(__import__("shutil").which("node") is None,
+                    reason="node 미설치 — 런타임 JS 검증 스킵")
+def test_reconnect_watchdog_runtime(tmp_path):
+    """워치독 런타임 — 단일/2연속 실패는 무시, 3연속 실패 후 회복 시만 reload 1회."""
+    import re
+    import subprocess
+
+    from dashboard import auth
+    h = auth.reconnect_watchdog_html(1000)
+    js = re.findall(r"<script>(.*?)</script>", h, re.S)[0]
+    runner = tmp_path / "watchdog.js"
+    runner.write_text(_WATCHDOG_HARNESS.replace("__SCRIPT__", js), encoding="utf-8")
+    r = subprocess.run(["node", str(runner)], capture_output=True, text=True, timeout=30)
+    assert r.returncode == 0, f"watchdog runtime fail: {r.stdout}\n{r.stderr}"
+    assert "OK watchdog" in r.stdout
+
+
+def test_chart_full_page():
+    """차트 풀뷰 — 동일 컨트롤(_price_chart 공용)·840 높이·복귀 버튼 (무예외)."""
+    script = _STUBS + '''
+st.session_state["ticker"] = "MSFT"
+cached.realtime_quote = lambda t: None
+from dashboard.pages import chart_full
+chart_full.render()
+'''
+    at = AppTest.from_string(script, default_timeout=30)
+    at.run()
+    assert not at.exception, at.exception
+    labels = " ".join(str(b.label) for b in at.button)
+    assert "↙" in labels                              # 복귀 버튼
+    body = " ".join(str(getattr(m, "value", "")) for m in at.markdown)
+    assert "Microsoft" in body or "MSFT" in body      # 히어로 라벨
+
+
+def test_ticker_chart_new_indicators_render():
+    """V-series 지표(켈트너·KAMA·샹들리에·Aroon·%b·PVT) 전체 선택 렌더 — 무예외."""
+    script = _STUBS + '''
+cached.realtime_quote = lambda t: None
+st.session_state["_top_1d"] = ["이동평균선", "켈트너 채널", "KAMA", "샹들리에 엑시트"]
+st.session_state["_bot_1d"] = ["거래량", "RSI", "MACD", "스토캐스틱", "Aroon", "%b", "PVT"]
+from dashboard.pages import ticker
+ticker.render()
+'''
+    at = AppTest.from_string(script, default_timeout=30)
+    at.run()
+    assert not at.exception, str(at.exception)
+    frames = [i.proto.srcdoc for i in at.get("iframe")]
+    main = [s for s in frames if "bt-reg" in s]
+    assert main, "차트 iframe 에 신규 도구 버튼 미포함"
+    assert "bt-avwap" in main[0] and "bt-vprof" in main[0]
+
+
+def test_ticker_compare_tray_renders_active_state():
+    """종목 비교 — 풀폭 트레이에서 선택 상태·제거 버튼·% 비교 차트가 함께 렌더."""
+    script = _STUBS + '''
+cached.realtime_quote = lambda t: None
+st.session_state["_cmp_panel_open"] = True
+st.session_state["_cmp_active"] = ["QQQ", "SPY"]
+from dashboard.pages import ticker
+ticker.render()
+'''
+    at = AppTest.from_string(script, default_timeout=30)
+    at.run()
+    assert not at.exception, str(at.exception)
+    body = " ".join(str(getattr(m, "value", "")) for m in at.markdown)
+    caps = " ".join(str(getattr(c, "value", "")) for c in at.caption)
+    assert "종목 비교" in body
+    assert "기간 시작=0% 상대수익" in caps
+    labels = " ".join(str(b.label) for b in at.button)
+    assert "× Invesco QQQ" in labels and "× SPDR S&P 500" in labels
+    frames = [i.proto.srcdoc for i in at.get("iframe")]
+    main = [s for s in frames if "const pctMode = true" in s]
+    assert main, "비교 선택 시 % 상대수익 차트로 렌더되어야 함"
+
+
+def test_ticker_chart_fundamentals_panel_renders():
+    """펀더멘털 하단 지표 — 스텁 rows 로 렌더 무예외 + 캡션 표기 (W-series)."""
+    script = _STUBS + '''
+cached.realtime_quote = lambda t: None
+cached.chart_fundamentals = lambda t: {"quarterly": [
+    {"date": "2025-06-30", "revenue": 5.0e10, "net_income": 1.2e10, "margin": 0.24},
+    {"date": "2025-09-30", "revenue": 5.5e10, "net_income": 1.4e10, "margin": 0.25},
+    {"date": "2025-12-31", "revenue": 6.0e10, "net_income": 1.6e10, "margin": 0.27},
+    {"date": "2026-03-31", "revenue": 6.4e10, "net_income": 1.8e10, "margin": 0.28}],
+    "annual": []}
+st.session_state["_bot_1d"] = ["거래량", "펀더멘털"]
+from dashboard.pages import ticker
+ticker.render()
+'''
+    at = AppTest.from_string(script, default_timeout=30)
+    at.run()
+    assert not at.exception, str(at.exception)
+    caps = " ".join(str(c.value) for c in at.caption)
+    assert "펀더멘털 패널" in caps and "분기" in caps
+    frames = [i.proto.srcdoc for i in at.get("iframe")]
+    assert any('"매출"' in s for s in frames), "차트 iframe 에 매출 트레이스 없음"
+    # ETF 등 데이터 없음 → 정직 안내
+    script2 = script.replace('"quarterly": [', '"quarterly_x": [')
+    at2 = AppTest.from_string(script2, default_timeout=30)
+    at2.run()
+    assert not at2.exception, str(at2.exception)
+    assert "펀더멘털 데이터 없음" in " ".join(str(c.value) for c in at2.caption)
+
+
+def test_ticker_llm_analysis_section():
+    """🤖 AI 종목 분석 — 버튼 게이트·클릭 시 구조화 해설 렌더 (views 스텁·무LLM)."""
+    script = _STUBS + '''
+import dashboard.views as _views
+cached.realtime_quote = lambda t: None
+cached.llm_analysis = lambda t, fj: ({
+    "summary": "고성장 대비 밸류 부담 공존", "bulls": ["클라우드 성장"],
+    "bears": ["PER 부담"], "valuation": "프리미엄 구간.",
+    "technicals": "200일선 아래.", "checkpoints": ["다음 분기 마진"],
+    "generated_at": "2026-07-11 06:00", "model": "gpt-5.5"}, "ok")
+from dashboard.pages import ticker
+ticker.render()
+'''
+    at = AppTest.from_string(script, default_timeout=30)
+    at.run()
+    assert not at.exception, str(at.exception)
+    btns = [b for b in at.button if "분석 생성" in str(b.label)]
+    assert btns, "분석 생성 버튼 미발견 (버튼 게이트)"
+    btns[0].click()
+    at.run()
+    assert not at.exception, str(at.exception)
+    body = " ".join(str(getattr(m, "value", "")) for m in at.markdown)
+    assert "고성장 대비 밸류 부담 공존" in body
+    assert "클라우드 성장" in body and "PER 부담" in body
+    caps = " ".join(str(c.value) for c in at.caption)
+    assert "매매신호 아님" in caps and "판단(신호·배분)에 미반영" in caps.replace("시스템 ", "시스템")
+
+
+def test_home_ai_briefing_card():
+    """🌅 홈 AI 브리핑 카드 — 크론 JSON 있으면 표시·없으면 조용히 생략 (표시 전용)."""
+    body_script = _STUBS + '''
+cached.ai_briefing = lambda: {"summary": "기술주 중심 — 실적 시즌 진입",
+    "highlights": ["MSFT — 분기 매출 증가"], "risks": ["기술주 집중"],
+    "checkpoints": ["CPI"], "generated_at": "2026-07-11 07:45", "model": "gpt-5.5"}
+from dashboard.pages import home
+home.render()
+'''
+    at = AppTest.from_string(body_script, default_timeout=30)
+    at.run()
+    assert not at.exception, str(at.exception)
+    body = " ".join(str(getattr(m, "value", "")) for m in at.markdown)
+    assert "기술주 중심 — 실적 시즌 진입" in body and "MSFT — 분기 매출 증가" in body
+    caps = " ".join(str(c.value) for c in at.caption)
+    assert "매매신호 아님" in caps
+    # 브리핑 없음 → 카드 미표시·무예외
+    at2 = AppTest.from_string(_STUBS + '''
+from dashboard.pages import home
+home.render()
+''', default_timeout=30)
+    at2.run()
+    assert not at2.exception, str(at2.exception)
+    body2 = " ".join(str(getattr(m, "value", "")) for m in at2.markdown)
+    assert "오늘 주목" not in body2
+
+
+def test_app_theme_toggle_light_dark():
+    """라이트/다크 토글 — tn_light 세션에 따라 라이트 오버라이드 주입 여부 전환."""
+    at = AppTest.from_file(os.path.join(ROOT, "dashboard", "app.py"), default_timeout=60)
+    at.session_state["_authed"] = True
+    at.run()
+    assert not at.exception, str(at.exception)
+    dark_md = " ".join(str(getattr(m, "value", "")) for m in at.markdown)
+    assert "#f7f8fa" not in dark_md                    # 다크 기본 — 라이트 오버라이드 미주입
+    # 라이트로 전환
+    at.session_state["tn_light"] = True
+    at.run()
+    assert not at.exception, str(at.exception)
+    light_md = " ".join(str(getattr(m, "value", "")) for m in at.markdown)
+    assert "#f7f8fa" in light_md and "--tn-panel:#ffffff" in light_md

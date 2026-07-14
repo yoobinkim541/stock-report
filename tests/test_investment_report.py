@@ -324,8 +324,11 @@ def test_mobile_summary_separates_position_review_from_risk_bucket():
     )
 
     assert "📌 오늘 할 일: 비중점검" in text
+    assert "오늘 결론" in text
+    assert "💼 내 포트 43/100 · 주의 · 신규매수는 소액/선별" in text
     assert "✅ 실행 우선순위" in text
-    assert "비중점검 · UnitedHealth (UNH)" in text
+    assert "1. 🟠 UnitedHealth (UNH) · 비중점검" in text
+    assert "행동: 실적 전 20~30% 일부축소, 나머지 보유" in text
     assert "UnitedHealth (UNH)" in text
     assert "위험관리 · UnitedHealth (UNH)" not in text
 
@@ -420,6 +423,32 @@ def test_mobile_block_lines_stay_short():
 
     for line in _mobile_pick_block("상위", items):
         assert len(line) < 120, f"Mobile line too long: {len(line)} chars"
+
+
+def test_mobile_pick_block_cleans_company_suffix_and_dedupes_price_reason():
+    items = [
+        {
+            "ticker": "DXCM",
+            "company_name": "DexCom, Inc.",
+            "total_score": 79,
+            "grade": "A",
+            "decision_v2": {"action": "강한 매수후보", "one_line_reason": "재무 79점(B) · 일일 신호 긍정"},
+        },
+        {
+            "ticker": "005930.KS",
+            "company_name": "삼성전자",
+            "total_score": 73,
+            "grade": "B",
+            "decision_v2": {"action": "보유", "one_line_reason": "재무 73점(B) · 1일 -6.92% 급락 · 일일 -6.92% 하락"},
+        },
+    ]
+
+    block = "\n".join(_mobile_pick_block("상위", items, limit=2))
+
+    assert "DexCom (DXCM)" in block
+    assert "DexCom, Inc." not in block
+    assert "1일 -6.92% 급락" in block
+    assert "일일 -6.92% 하락" not in block
 
 
 # ── ETF 비교 평가 테스트 ──────────────────────────────────────────────

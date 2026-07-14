@@ -135,23 +135,52 @@ def learning_evolution(surface):
     return views.learning_evolution(surface)
 
 
+def _ohlc_disk_path(t, period):
+    from pathlib import Path
+    safe = "".join(c if (c.isalnum() or c in ".-_") else "_" for c in str(t))
+    return Path.home() / "reports" / "ml-cache" / "ohlc_cache" / f"{safe}__{period}.parquet"
+
+
 @st.cache_data(ttl=_TTL, show_spinner="가격 불러오는 중…")
 def ohlc(t, period="6mo"):
-    """OHLC 가격 히스토리 (가격차트용·U3). _history_cached 재사용."""
+    """OHLC 가격 히스토리 (가격차트용·U3). _history_cached 재사용.
+
+    yfinance 가 빈 값(레이트리밋·일시장애)을 주면 차트가 통째로 안 뜨는데(가격 데이터
+    없음), @st.cache_data 가 그 빈 값을 15분 캐싱해 blank 가 지속됨 — 특히 KR 은
+    DART 부재로 페이지당 yfinance 호출이 많아 취약. → 성공 시 디스크 백업, 실패 시
+    **마지막 정상 데이터로 폴백**해 blank 차트를 방지(약간 stale 해도 표시 우선).
+    """
+    df = None
     try:
         from providers.market_data import _history_cached
-        return _history_cached(t, period=period)
+        df = _history_cached(t, period=period)
     except Exception:
-        return None
+        df = None
+    if df is not None and not getattr(df, "empty", True):
+        try:                                       # 성공 — 마지막 정상 데이터 디스크 백업
+            p = _ohlc_disk_path(t, period)
+            p.parent.mkdir(parents=True, exist_ok=True)
+            df.to_parquet(p)
+        except Exception:
+            pass
+        return df
+    try:                                           # 실패/빈값 — 디스크 폴백(blank 방지)
+        p = _ohlc_disk_path(t, period)
+        if p.exists():
+            import pandas as pd
+            return pd.read_parquet(p)
+    except Exception:
+        pass
+    return df
 
 
-@st.cache_data(ttl=8, show_spinner=False)
+@st.cache_data(ttl=3, show_spinner=False)
 def realtime_quote(ticker):
     """실시간 시세+호가 (KIS·8s 캐시). off/미보유 시 None → yfinance 폴백."""
     return views.realtime_quote(ticker)
 
 
-@st.cache_data(ttl=_TTL_SLOW, show_spinner="시장 맵 불러오는 중… (최초 ~1분·이후 30분 캐시)")
+@st.cache_data(ttl=300, show_spinner="시장 맵 불러오는 중…")
 def sp500_heatmap():
     """S&P500 시장 맵 rows (섹터·시총 정적 + 당일 등락 라이브·30분 캐시·크론 스냅샷 우선)."""
     return views.sp500_heatmap()
@@ -176,3 +205,148 @@ def intraday_day(market, date):
 @st.cache_data(ttl=60, show_spinner="분봉 불러오는 중…")
 def intraday_chart(symbol, market, date, interval):
     return views.intraday_chart(symbol, market, date, interval)
+
+
+@st.cache_data(ttl=_TTL, show_spinner="봉 데이터 불러오는 중…")
+def ohlc_tf(t, tf):
+    return views.ohlc_tf(t, tf)
+
+
+@st.cache_data(ttl=300, show_spinner="코스피200 맵 불러오는 중…")
+def kr200_heatmap():
+    return views.kr200_heatmap()
+
+
+@st.cache_data(ttl=300, show_spinner="러셀2000 맵 불러오는 중…")
+def russell2000_heatmap():
+    return views.russell2000_heatmap()
+
+
+@st.cache_data(ttl=_TTL, show_spinner="추세선 감지 중…")
+def trendlines_for(t, tf, lines, ch_key):
+    return views.trendlines_for(t, tf, lines=lines, channels=tuple(ch_key))
+
+
+@st.cache_data(ttl=300, show_spinner=False)
+def market_tape():
+    return views.market_tape()
+
+
+@st.cache_data(ttl=900, show_spinner="매크로 자산 불러오는 중…")
+def macro_assets():
+    """환율·금·비트코인 등 매크로 자산 시세 + 30일 스파크라인 (15분 캐시).
+
+    5분 TTL 은 홈 재방문마다 yf 배치(8심볼) 블로킹을 유발 — 표시용이라 15분이면 충분.
+    """
+    return views.macro_assets()
+
+
+@st.cache_data(ttl=1800, show_spinner=False)
+def chart_news(t):
+    """차트 뉴스 이벤트 마커 — LLM 라벨 로컬 JSONL (30분 캐시·무네트워크)."""
+    return views.chart_news_events(t)
+
+
+@st.cache_data(ttl=_TTL_HEAVY, show_spinner="펀더멘털 불러오는 중…")
+def chart_fundamentals(t):
+    """차트 펀더멘털 패널 — 분기 매출·순이익 (provider 12h 디스크캐시 위 세션 캐시)."""
+    return views.chart_fundamentals(t)
+
+
+@st.cache_data(ttl=1800, show_spinner="연관 자산 분석 중…")
+def macro_corr(t):
+    """매크로 자산 연관 카드 — 90일 상관·30일 등락 (30분 캐시)."""
+    return views.macro_correlations(t)
+
+
+@st.cache_data(ttl=3600, show_spinner=False)
+def llm_related(t):
+    """🤖 LLM 연관 종목 추천 (세션 1h 캐시 — 디스크 24h 캐시는 provider). 버튼 게이트 전용."""
+    return views.llm_related_tickers(t)
+
+
+@st.cache_data(ttl=900, show_spinner=False)
+def ai_briefing():
+    """🌅 AI 브리핑 JSON (15분 캐시 — 파일은 크론이 평일 22:45 UTC 갱신)."""
+    return views.ai_briefing()
+
+
+@st.cache_data(ttl=3600, show_spinner=False)
+def llm_analysis(t, facts_json: str):
+    """🤖 LLM 종목 분석 해설 (세션 1h 캐시 — 디스크 24h 는 provider). 버튼 게이트 전용."""
+    import json as _j
+    try:
+        facts = _j.loads(facts_json)
+    except Exception:
+        facts = {}
+    return views.llm_stock_analysis(t, facts)
+
+
+@st.cache_data(ttl=_TTL_HEAVY, show_spinner="TR·PR 계산 중…")
+def tr_pr(t, years=5):
+    return views.etf_tr_pr(t, years)
+
+
+@st.cache_data(ttl=_TTL_HEAVY, show_spinner="동종 ETF 비교 중…")
+def etf_peers(t):
+    return views.etf_peer_compare(t)
+
+
+@st.cache_data(ttl=300, show_spinner="모으기 계획 계산 중…")
+def accumulation():
+    return views.accumulation_plan()
+
+
+@st.cache_data(ttl=120, show_spinner=False)
+def fx_now():
+    return views.fx_now()
+
+
+@st.cache_data(ttl=1800, show_spinner=False)
+def fx_timing():
+    return views.fx_timing()
+
+
+@st.cache_data(ttl=900, show_spinner=False)
+def port_history():
+    return views.portfolio_history()
+
+
+@st.cache_data(ttl=900, show_spinner=False)
+def target_weights_map():
+    return views.target_weights_map()
+
+
+@st.cache_data(ttl=3600, show_spinner=False)
+def income_summary(qqqi_shares=0.0, qqqi_usd=0.0):
+    return views.income_summary(qqqi_shares, qqqi_usd)
+
+
+@st.cache_data(ttl=3600, show_spinner="S&P500 밸류 집계 중… (12h 캐시)")
+def sp500_valuation():
+    return views.sp500_valuation()
+
+
+@st.cache_data(ttl=60, show_spinner=False)
+def screener_last():
+    return views.screener_last()
+
+
+@st.cache_data(ttl=60, show_spinner=False)
+def backtest_last():
+    return views.backtest_last()
+
+
+@st.cache_data(ttl=900, show_spinner=False)
+def portfolio_flows():
+    return views.portfolio_flows()
+
+
+@st.cache_data(ttl=900, show_spinner=False)
+def market_temp_history():
+    return views.market_temp_history()
+
+
+@st.cache_data(ttl=12 * 3600, show_spinner=False)
+def next_earnings(t):
+    return views.next_earnings(t)

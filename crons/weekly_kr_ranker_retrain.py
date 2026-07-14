@@ -34,7 +34,13 @@ def main() -> int:
     logger.info("=== weekly_kr_ranker_retrain 시작 ===")
     try:
         from ml.data_pipeline import build_ml_dataset, KR_BENCHMARK
-        from ml.ranker import train_ranker, walk_forward_backtest, adopt_if_better
+        from ml.ranker import (
+            adopt_if_better,
+            evaluate_ranker_backend,
+            format_backend_evaluation,
+            train_ranker,
+            walk_forward_backtest,
+        )
         from ml.kr_ranker import KR_MODE, KR_MODEL_CACHE
 
         ds = build_ml_dataset(mode=KR_MODE, days=756, forward_days=20, benchmark_ticker=KR_BENCHMARK)
@@ -47,6 +53,14 @@ def main() -> int:
         wf = walk_forward_backtest(ds, n_folds=4)
         mean_ic = wf.get("mean_ic")
         fold_str = " / ".join(f"{x:+.3f}" for x in wf.get("fold_ics", []))
+        xgb_line = ""
+        xgb_enabled = os.getenv(
+            "KR_RANKER_XGB_CHALLENGER_ENABLED",
+            os.getenv("RANKER_XGB_CHALLENGER_ENABLED", "1"),
+        ).lower() not in {"0", "false", "no", "off"}
+        if xgb_enabled:
+            xgb_eval = evaluate_ranker_backend(ds, backend="xgboost", use_ranker=False, n_folds=3)
+            xgb_line = format_backend_evaluation(xgb_eval, champion_wf_ic=mean_ic)
 
         adopt_str = ("채택 ✅" if adopted else f"보류 ⏸️ (챔피언 IC {champ_ic:+.3f} 유지)")
         msg = "\n".join(x for x in [
@@ -54,6 +68,7 @@ def main() -> int:
             "━━━━━━━━━━━━━━",
             f"분할 OOS IC: {result.oos_ic:+.3f}  ICIR: {result.oos_icir:.2f}  → {adopt_str}",
             (f"WF 평균 IC: {mean_ic:+.4f}" if mean_ic is not None else "WF: 데이터 부족"),
+            xgb_line,
             (f"폴드별 IC: {fold_str}" if fold_str else ""),
             f"상위10% 초과수익(vs KOSPI): {result.oos_top_decile_ret*100:+.1f}%",
             "⚠️ KR 데이터 한계(섹터/옵션/13F 부족) — IC 변동 클 수 있음",

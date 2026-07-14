@@ -143,17 +143,64 @@ def screener(top_n: int = 20) -> dict:
     """NASDAQ100 LightGBM 랭킹 스크리너 (무엣지·정보용). QT3."""
     from ml.ranker import load_ranker, rank_today
     try:
+        import ticker_names
+        from dashboard.data import screener_drivers
         df = rank_today(mode="nasdaq100", top_n=top_n)
         res = load_ranker()
-        rows = df.to_dict("records") if (df is not None and not df.empty) else []
+        raw = df.to_dict("records") if (df is not None and not df.empty) else []
+        imp = {}
+        if res is not None and getattr(res, "feature_importance", None) is not None:
+            try:
+                imp = res.feature_importance.to_dict()
+            except Exception:
+                imp = {}
+        core = ("rank", "ticker", "score", "price", "tech_rating", "surv_flag")
+        rows, feats = [], {}
+        for r in raw:
+            t = r.get("ticker", "")
+            f = {k: v for k, v in r.items() if k not in core}
+            feats[t] = f
+            rows.append({
+                "rank": r.get("rank"), "ticker": t,
+                "name": ticker_names.display_name(t, allow_net=False) or "",
+                "score": r.get("score"), "price": r.get("price"),
+                "tech_rating": r.get("tech_rating"), "surv_flag": r.get("surv_flag"),
+                "reason": screener_drivers(f, imp),
+                "rsi_14": f.get("rsi_14"), "close_vs_52w_high": f.get("close_vs_52w_high"),
+                "mom_126d": f.get("mom_126d"), "excess_mom_60d": f.get("excess_mom_60d"),
+                "fund_score": f.get("fund_score"),
+            })
         meta = {}
         if res is not None:
             meta = {"ic": getattr(res, "oos_ic", None), "icir": getattr(res, "oos_icir", None),
                     "top_decile": getattr(res, "oos_top_decile_ret", None),
-                    "train_end": getattr(res, "train_end_date", None)}
-        return {"rows": rows, "meta": meta}
+                    "train_end": getattr(res, "train_end_date", None),
+                    "importance": dict(sorted(imp.items(), key=lambda x: -x[1])[:15])}
+        out = {"rows": rows, "feats": feats, "meta": meta}
+        if rows:                                      # 마지막 실행 디스크 영속 (재방문 즉시 표시)
+            try:
+                import json
+                from datetime import datetime
+                try:                                  # 직전 실행 순위 → 변동(▲▼NEW) 표시용
+                    prev = json.loads(_screener_last_path().read_text())
+                    out["prev_ranks"] = {r0.get("ticker"): r0.get("rank")
+                                         for r0 in (prev.get("rows") or [])}
+                    out["prev_asof"] = prev.get("asof")
+                except Exception:
+                    pass
+                out2 = dict(out)
+                out2["asof"] = datetime.now().strftime("%Y-%m-%d %H:%M KST")
+                out2["topn"] = top_n
+                pth = _screener_last_path()
+                pth.parent.mkdir(parents=True, exist_ok=True)
+                tmp = pth.with_suffix(".tmp")
+                tmp.write_text(json.dumps(out2, ensure_ascii=False))
+                tmp.replace(pth)
+            except Exception:
+                pass
+        return out
     except Exception as e:
-        return {"error": str(e), "rows": [], "meta": {}}
+        return {"error": str(e), "rows": [], "feats": {}, "meta": {}}
 
 
 def backtest_summary() -> dict:
@@ -170,9 +217,11 @@ def backtest_summary() -> dict:
         data = build_real_sweetspot_data("QQQ", days=756)
         r = optimize_sweet_spot(data)
         verdict, reasons = _ml_adoption_verdict(r.ml_result, r.qqq_result)
-        return {"ml": _m(r.ml_result), "overlay": _m(r.overlay_result), "qqq": _m(r.qqq_result),
-                "verdict": verdict, "reasons": list(reasons or []),
-                "equity": getattr(r, "equity", None), "wf": getattr(r, "wf_summary", {})}
+        out = {"ml": _m(r.ml_result), "overlay": _m(r.overlay_result), "qqq": _m(r.qqq_result),
+               "verdict": verdict, "reasons": list(reasons or []),
+               "equity": getattr(r, "equity", None), "wf": getattr(r, "wf_summary", {})}
+        _backtest_persist(out)                       # 마지막 실행 디스크 영속 (재방문 즉시 표시)
+        return out
     except Exception as e:
         return {"error": str(e)}
 
@@ -262,6 +311,13 @@ def paper_summary(surface: str = "kr_mock") -> dict:
             nav = bal.get("nav") or ((bal.get("pos_value") or 0.0)
                                      + (bal.get("cash_krw" if surface == "kr_mock" else "cash_usd") or 0.0))
             out["cash"] = bal.get("cash_krw" if surface == "kr_mock" else "cash_usd")
+            if surface == "us_mock":
+                # 통화 구성 분해 — KIS 모의는 통합증거금(USD 예수금 0·원화가 증거금)이라
+                # NAV=원화총자산 환산·'현금'=파생값. 표시 레이어가 정직하게 라벨링(달러/원화 혼동 방지).
+                out["fx"] = bal.get("fx")
+                out["krw_asset"] = bal.get("krw_asset")
+                out["usd_deposit"] = bal.get("usd_deposit")
+                out["cash_derived"] = bool(bal.get("cash_derived"))
             for sym, p in (bal.get("positions") or {}).items():
                 sh = int(p.get("shares", 0) or 0)
                 if sh <= 0:
@@ -489,8 +545,17 @@ def realtime_quote(ticker: str) -> dict | None:
         price = market_data._realtime_current(t)
     except Exception:
         price = None
+    try:                                    # 2) WS 실시간 캐시 호가 (워치리스트 = 1초 갱신·진짜 실시간)
+        from providers import realtime_quotes
+        ob = realtime_quotes.get_orderbook(sym, max_age_s=15)
+        if ob and (ob.get("bids") or ob.get("asks")):
+            return {"price": price or realtime_quotes.get_price(sym),
+                    "bids": ob.get("bids") or [], "asks": ob.get("asks") or [],
+                    "ts": ob.get("ts"), "source": "kis_ws", "market": market}
+    except Exception:
+        pass
     snap = None
-    try:                                    # 2) REST 온디맨드 (임의 티커·호가 포함)
+    try:                                    # 3) REST 온디맨드 (임의 티커·호가 포함 — 폴백)
         from providers import kis_quote
         snap = kis_quote.get_snapshot(sym, market=market)
     except Exception:
@@ -571,8 +636,27 @@ def _sp500_heatmap_live() -> list[dict]:
         rows.append({
             "ticker": t, "name": sp500_seed.SP500.get(t) or t,
             "sector_kr": kr_map.get(sec_map.get(t) or "") or "기타",
+            "sub": tech_subsector(sec_map.get(t), getattr(sp500_meta, "INDUSTRY", {}).get(t)),
             "market_cap": float(cap), "pct": p})
     return rows
+
+
+# 기술 섹터 세부 카테고리 — yfinance industry → 한글 버킷 (트리맵 3계층)
+_TECH_SUB = {
+    "Semiconductors": "반도체", "Semiconductor Equipment & Materials": "반도체",
+    "Software - Application": "소프트웨어·클라우드", "Software - Infrastructure": "소프트웨어·클라우드",
+    "Information Technology Services": "IT서비스",
+    "Computer Hardware": "하드웨어·장비", "Communication Equipment": "하드웨어·장비",
+    "Scientific & Technical Instruments": "하드웨어·장비", "Electronic Components": "하드웨어·장비",
+    "Consumer Electronics": "하드웨어·장비", "Solar": "하드웨어·장비",
+}
+
+
+def tech_subsector(sector, industry) -> str | None:
+    """기술 섹터만 세부 카테고리 반환 (그 외 None — 2계층 유지). 순수."""
+    if sector != "Technology" or not industry:
+        return None
+    return _TECH_SUB.get(industry, "기타 기술")
 
 
 def market_indicators() -> dict:
@@ -619,6 +703,193 @@ def market_indicators() -> dict:
             pass
         out["indices"].append(row)
     return out
+
+
+# ── 매크로 자산 (환율·금·원자재·암호화폐·금리) ────────────────────────────────
+
+# (yf 심볼, 라벨, 이모지, 소수자리) — 단위는 `ticker_names.macro_unit` 단일 소스.
+# 카드 클릭은 `?tk=<심볼>` 앵커 → 종목분석(매크로 전용 뷰). 전부 yfinance OHLC 조회 가능.
+_MACRO_SPECS = [
+    ("KRW=X", "달러/원 환율", "💱", 2),
+    ("GC=F", "금", "🥇", 1),
+    ("BTC-USD", "비트코인", "₿", 0),
+    ("ETH-USD", "이더리움", "Ξ", 0),
+    ("SI=F", "은", "🥈", 2),
+    ("CL=F", "WTI 유가", "🛢️", 2),
+    ("^TNX", "미 10년물 금리", "🏦", 2),
+    ("DX-Y.NYB", "달러 인덱스", "💵", 2),
+]
+
+
+def macro_assets() -> list[dict]:
+    """홈 매크로 자산 카드 — [{symbol,label,emoji,price,chg,pct,unit,spark,ticker}].
+
+    yfinance 1개월 일봉 배치 1회 → 최신가·전일대비·30일 스파크라인. 개별 심볼 실패는
+    조용히 스킵(부분 성공 허용), 전체 실패는 []. 표시·참고용(주문 경로 없음).
+    """
+    try:
+        import warnings
+        warnings.filterwarnings("ignore")
+        import yfinance as yf
+        df = yf.download([s[0] for s in _MACRO_SPECS], period="1mo", progress=False,
+                         group_by="ticker", threads=True)
+    except Exception:
+        return []
+    import ticker_names
+    out = []
+    for sym, label, emoji, dec in _MACRO_SPECS:
+        try:
+            c = df[sym]["Close"].dropna()
+            if len(c) < 2 or not float(c.iloc[-2]):
+                continue
+            last, prev = float(c.iloc[-1]), float(c.iloc[-2])
+            out.append({
+                "symbol": sym, "label": label, "emoji": emoji,
+                "unit": ticker_names.macro_unit(sym), "ticker": sym,
+                "price": round(last, dec), "chg": round(last - prev, dec),
+                "pct": round((last / prev - 1) * 100, 2),
+                "spark": [float(v) for v in c.tail(30).tolist()],
+            })
+        except Exception:
+            continue
+    return out
+
+
+# 매크로 자산별 연관 세트 — (심볼, 라벨, 관계 설명)
+_MACRO_REL = {
+    "KRW=X": [("DX-Y.NYB", "달러 인덱스", "달러 강세 ↔ 원화 약세"),
+              ("^KS11", "코스피", "원화 약세 시 외인 수급 압박"),
+              ("^TNX", "미 10년물", "금리차 → 환율 압력")],
+    "DX-Y.NYB": [("KRW=X", "달러/원", "달러 강세 ↔ 원화 약세"),
+                 ("GC=F", "금", "달러 강세 시 금 압박(역상관 경향)"),
+                 ("^TNX", "미 10년물", "미 금리 ↑ → 달러 강세 경향")],
+    "GC=F": [("^TNX", "미 10년물", "실질금리 ↑ = 무이자 자산 금 압박(역상관 경향)"),
+             ("DX-Y.NYB", "달러 인덱스", "달러 표시 자산 — 역상관 경향"),
+             ("SI=F", "은", "귀금속 동행 (금은비 확인)")],
+    "SI=F": [("GC=F", "금", "귀금속 동행"), ("DX-Y.NYB", "달러 인덱스", "역상관 경향")],
+    "BTC-USD": [("^IXIC", "나스닥", "리스크온 자산 동행 경향"),
+                ("GC=F", "금", "'디지털 금' 서사 — 국면 따라 상이"),
+                ("DX-Y.NYB", "달러 인덱스", "유동성 국면 역상관 경향")],
+    "ETH-USD": [("BTC-USD", "비트코인", "암호화폐 동행(베타 높음)"),
+                ("^IXIC", "나스닥", "리스크온 동행 경향")],
+    "CL=F": [("DX-Y.NYB", "달러 인덱스", "달러 표시 원자재 — 역상관 경향"),
+             ("^GSPC", "S&P500", "경기 수요 프록시")],
+    "^TNX": [("^IXIC", "나스닥", "금리 ↑ = 성장주 할인율 압박"),
+             ("GC=F", "금", "실질금리 프록시 — 역상관 경향"),
+             ("DX-Y.NYB", "달러 인덱스", "금리차 → 달러")],
+    "^VIX": [("^GSPC", "S&P500", "공포지수 — 강한 역상관")],
+    "^GSPC": [("^IXIC", "나스닥", "미 대형주 동행"), ("^KS11", "코스피", "글로벌 동조")],
+    "^IXIC": [("^GSPC", "S&P500", "미 대형주 동행"), ("^TNX", "미 10년물", "금리 민감(성장주)")],
+}
+
+
+def macro_correlations(ticker: str) -> list[dict]:
+    """매크로 자산 연관 카드 — 관련 자산들과의 90일 상관 + 30일 등락. graceful [].
+
+    [{symbol, label, note, corr90, chg30}]. yf 6mo 배치 1회. 상관은 일수익률 피어슨.
+    """
+    rel = _MACRO_REL.get((ticker or "").upper())
+    if not rel:
+        return []
+    try:
+        import warnings
+        warnings.filterwarnings("ignore")
+        import yfinance as yf
+        syms = [ticker] + [s for s, _, _ in rel]
+        df = yf.download(syms, period="6mo", progress=False, group_by="ticker", threads=True)
+        base = df[ticker]["Close"].dropna().pct_change().dropna()
+    except Exception:
+        return []
+    out = []
+    for sym, label, note in rel:
+        try:
+            c = df[sym]["Close"].dropna()
+            r = c.pct_change().dropna()
+            joined = base.tail(90).align(r.tail(90), join="inner")
+            corr = float(joined[0].corr(joined[1])) if len(joined[0]) >= 30 else None
+            m30 = c[c.index >= c.index[-1] - __import__("pandas").Timedelta(days=30)]
+            chg30 = ((float(c.iloc[-1]) / float(m30.iloc[0]) - 1) * 100) if len(m30) >= 2 else None
+            out.append({"symbol": sym, "label": label, "note": note,
+                        "corr90": round(corr, 2) if corr == corr and corr is not None else None,
+                        "chg30": round(chg30, 2) if chg30 is not None else None})
+        except Exception:
+            continue
+    return out
+
+
+def llm_related_tickers(ticker: str, force: bool = False):
+    """🤖 LLM 연관 종목 추천 — (목록|None, 상태). 환각 방어·24h 디스크 캐시는 provider 가.
+
+    표시 전용(정직 라벨은 UI 가) — graceful: 실패 시 (None, 사유).
+    """
+    try:
+        import ticker_names
+        from providers import llm_related
+        name = ticker_names.display_name(ticker, allow_net=False) or ticker
+        return llm_related.related_tickers(ticker, name=name, force=force)
+    except Exception as exc:
+        return None, f"call failed: {str(exc)[:80]}"
+
+
+def ai_briefing() -> dict | None:
+    """🌅 포트폴리오 AI 브리핑 — 크론이 저장한 JSON (홈 카드 · 없으면 None graceful)."""
+    try:
+        from providers.llm_analysis import BRIEF_PATH
+        import json as _j
+        with open(BRIEF_PATH, encoding="utf-8") as fp:
+            d = _j.load(fp)
+        return d if isinstance(d, dict) and d.get("summary") else None
+    except Exception:
+        return None
+
+
+def llm_stock_analysis(ticker: str, facts: dict, force: bool = False):
+    """🤖 LLM 종목 분석 해설 — (dict|None, 상태). 금지어 필터·24h 캐시는 provider 가.
+
+    facts 는 호출부(ticker 페이지)가 **이미 계산된 지표**로 조립 — 여기선 추가 네트워크 0.
+    표시 전용(정직 라벨은 UI 가) — graceful: 실패 시 (None, 사유).
+    """
+    try:
+        import ticker_names
+        from providers import llm_analysis
+        name = ticker_names.display_name(ticker, allow_net=False) or ticker
+        return llm_analysis.analyze(ticker, name, facts or {}, force=force)
+    except Exception as exc:
+        return None, f"call failed: {str(exc)[:80]}"
+
+
+def chart_news_events(ticker: str, limit: int = 120) -> list[dict]:
+    """차트 뉴스 이벤트 마커 — LLM 구조화 라벨(point-in-time JSONL)에서 해당 종목 추출.
+
+    라벨 tickers 는 base 심볼(무 .KS 접미) — 입력 티커도 base 로 매칭. 파일 없음(라벨
+    크론 미가동)·실패는 [] (graceful). [{date, direction, strength, event_type, title}].
+    """
+    try:
+        from providers import news_labels
+        base = (ticker or "").upper().split(".")[0]
+        out = []
+        for r in news_labels.load_labels():
+            if base not in (r.get("tickers") or []):
+                continue
+            d = str(r.get("published_at") or "")[:10]
+            if not d:
+                continue
+            out.append({"date": d, "direction": r.get("direction"),
+                        "strength": r.get("strength"),
+                        "event_type": r.get("event_type") or "",
+                        "title": r.get("title_head") or ""})
+        return out[-limit:]
+    except Exception:
+        return []
+
+
+def chart_fundamentals(ticker: str) -> dict:
+    """차트 펀더멘털 서브패널 — 분기(+연간) 매출·순이익·마진 (graceful 빈 dict)."""
+    try:
+        from providers import earnings_data
+        return earnings_data.quarterly_fundamentals(ticker) or {}
+    except Exception:
+        return {}
 
 
 # ── 수집 뉴스 (시장·캘린더 — 출처별·중요도순) ─────────────────────────────────
@@ -841,3 +1112,406 @@ def world_timeline(ticker: str, limit: int = 10) -> dict:
                 "stats": stats()}
     except Exception as e:
         return {"issues": [], "chain": [], "error": str(e)}
+
+
+def ohlc_tf(ticker: str, tf: str = "1d"):
+    """타임프레임별 OHLCV — 1d/1wk/1mo 는 전체(주·월봉은 일봉 리샘플·무추가호출),
+    5m 은 최근 60일·1h 는 최근 2년 (yfinance 인트라데이 보존 한계).
+    2h/4h 는 yfinance 미지원 → 1h 를 리샘플(같은 2년 한계). 실패 None."""
+    try:
+        from providers.market_data import _history_cached
+        agg = {"Open": "first", "High": "max", "Low": "min", "Close": "last"}
+        if tf in ("1d", "1wk", "1mo"):
+            d = _history_cached(ticker, period="max")
+            if d is None or getattr(d, "empty", True) or tf == "1d":
+                return d
+            rule = "W" if tf == "1wk" else "ME"
+            if "Volume" in d.columns:
+                agg["Volume"] = "sum"
+            return d.resample(rule).agg(agg).dropna(subset=["Open"])
+        import yfinance as yf
+        resample_rule = {"2h": "2h", "4h": "4h"}.get(tf)
+        interval = "1h" if resample_rule else tf
+        period = "60d" if tf == "5m" else "730d"
+        df = yf.Ticker(ticker).history(period=period, interval=interval)
+        if df is None or df.empty:
+            return None
+        if resample_rule:
+            if "Volume" in df.columns:
+                agg["Volume"] = "sum"
+            df = df.resample(resample_rule).agg(agg).dropna(subset=["Open"])
+        return df if not df.empty else None
+    except Exception:
+        return None
+
+
+# ── 코스피200·러셀2000 시장 맵 (sp500_heatmap 패턴 — 스냅샷 우선·라이브 self-heal) ──
+
+_KR200_SNAP = os.path.expanduser("~/reports/ml-cache/kr200_heatmap.json")
+_RUSSELL_SNAP = os.path.expanduser("~/reports/ml-cache/russell2000_heatmap.json")
+
+_NASDAQ_SECTOR_KR = {
+    "Technology": "기술", "Telecommunications": "커뮤니케이션", "Health Care": "헬스케어",
+    "Finance": "금융", "Real Estate": "부동산", "Consumer Discretionary": "경기소비재",
+    "Consumer Staples": "필수소비재", "Industrials": "산업재", "Basic Materials": "소재",
+    "Energy": "에너지", "Utilities": "유틸리티",
+}
+_NON_COMMON = ("Warrant", "Right", "Unit", "Preferred", "Depositary", "Notes")
+
+
+def _snap_or(build, snap_path: str, max_age_s: int = 5400) -> list[dict]:
+    """스냅샷(<max_age) 우선 → 없으면 build() 후 self-heal 기록 (sp500 패턴 공용)."""
+    import json
+    import time
+    try:
+        if time.time() - os.stat(snap_path).st_mtime < max_age_s:
+            with open(snap_path, encoding="utf-8") as f:
+                rows = json.load(f)
+            if rows:
+                return rows
+    except Exception:
+        pass
+    rows = build()
+    if rows:
+        try:
+            from safe_io import atomic_write_json
+            atomic_write_json(snap_path, rows)
+        except Exception:
+            pass
+    return rows
+
+
+def kr200_heatmap() -> list[dict]:
+    """코스피200 시장 맵 rows — 크론 스냅샷 우선(즉시) → 라이브(199종목 배치 ~30초)."""
+    return _snap_or(_kr200_heatmap_live, _KR200_SNAP)
+
+
+def _kr200_heatmap_live() -> list[dict]:
+    """kr200_meta(업종·시총·이름) + yf 배치 당일 등락%. 타일=한글명·라벨=티커(클릭 계약)."""
+    try:
+        import kr200_meta
+    except Exception:
+        return []
+    codes = sorted(kr200_meta.MARKET_CAP)
+    tickers = [f"{c}.KS" for c in codes]
+    pct: dict[str, float] = {}
+    try:
+        import warnings
+        warnings.filterwarnings("ignore")
+        import yfinance as yf
+        df = yf.download(tickers, period="2d", progress=False, group_by="ticker", threads=True)
+        for t in tickers:
+            try:
+                c = df[t]["Close"].dropna()
+                if len(c) >= 2 and c.iloc[-2]:
+                    pct[t] = round((c.iloc[-1] / c.iloc[-2] - 1) * 100, 2)
+            except Exception:
+                pass
+    except Exception:
+        return []
+    rows = []
+    for c in codes:
+        t = f"{c}.KS"
+        p = pct.get(t)
+        cap = kr200_meta.MARKET_CAP.get(c) or 0
+        if p is None or cap <= 0:
+            continue
+        nm = kr200_meta.NAME.get(c) or c
+        rows.append({"ticker": t, "name": nm, "tile": nm[:7],
+                     "sector_kr": kr200_meta.SECTOR.get(c) or "기타",
+                     "market_cap": float(cap), "pct": p})
+    return rows
+
+
+def russell2000_heatmap() -> list[dict]:
+    """러셀2000 근사 시장 맵 — 美 보통주 시총 1001~3000위 (NASDAQ 스크리너 1콜·정직 라벨)."""
+    return _snap_or(_russell2000_live, _RUSSELL_SNAP)
+
+
+def _russell2000_live() -> list[dict]:
+    """NASDAQ 스크리너(전 종목 시총·섹터·당일%) → 시총 1001~3000위. graceful []."""
+    try:
+        import requests
+        r = requests.get("https://api.nasdaq.com/api/screener/stocks",
+                         params={"tableonly": "true", "limit": "0", "download": "true"},
+                         headers={"User-Agent": "Mozilla/5.0 (X11; Linux x86_64)",
+                                  "Accept": "application/json"}, timeout=45)
+        r.raise_for_status()
+        raw = (r.json().get("data") or {}).get("rows") or []
+    except Exception:
+        return []
+    stocks = []
+    for it in raw:
+        sym = (it.get("symbol") or "").strip()
+        name = (it.get("name") or "").strip()
+        if not sym or "^" in sym or "/" in sym or any(x in name for x in _NON_COMMON):
+            continue
+        try:
+            cap = float(it.get("marketCap") or 0)
+            p = float(str(it.get("pctchange") or "").replace("%", "") or "nan")
+        except ValueError:
+            continue
+        if cap <= 0 or p != p:
+            continue
+        stocks.append((cap, sym, name, (it.get("sector") or "").strip(), p))
+    stocks.sort(reverse=True)
+    return [{"ticker": sym, "name": name[:40],
+             "sector_kr": _NASDAQ_SECTOR_KR.get(sec, "기타"),
+             "market_cap": cap, "pct": p}
+            for cap, sym, name, sec, p in stocks[1000:3000]]
+
+
+def trendlines_for(ticker: str, tf: str = "1d", *, lines: bool = True,
+                   channels: tuple[str, ...] = ()) -> list[dict]:
+    """자동 추세선·채널 감지 (dashboard.trendlines) — 표시·참고용. graceful []."""
+    try:
+        from dashboard import trendlines as tl
+        df = ohlc_tf(ticker, tf)
+        return tl.detect_trendlines(df, channels=channels, lines=lines)
+    except Exception:
+        return []
+
+
+_TAPE_SYMS = [("^VIX", "VIX", 2), ("DX-Y.NYB", "달러 인덱스", 2), ("KRW=X", "달러 환율", 2),
+              ("^KS11", "코스피", 2), ("^KQ11", "코스닥", 2), ("^IXIC", "나스닥", 2),
+              ("^GSPC", "S&P500", 2), ("NQ=F", "나스닥100 선물", 1), ("ES=F", "S&P 선물", 1),
+              ("GC=F", "금", 1), ("BTC-USD", "비트코인", 0), ("^TNX", "미10년물", 2)]
+
+
+def market_tape() -> list[dict]:
+    """하단 마퀴 띠 데이터 — [{label, value, chg, pct}]. yf 2d 배치·graceful []."""
+    try:
+        import warnings
+        warnings.filterwarnings("ignore")
+        import yfinance as yf
+        df = yf.download([s for s, _, _ in _TAPE_SYMS], period="2d", progress=False,
+                         group_by="ticker", threads=True)
+    except Exception:
+        return []
+    out = []
+    for sym, label, dec in _TAPE_SYMS:
+        try:
+            c = df[sym]["Close"].dropna()
+            if len(c) < 2 or not c.iloc[-2]:
+                continue
+            last, prev = float(c.iloc[-1]), float(c.iloc[-2])
+            out.append({"label": label, "value": round(last, dec),
+                        "chg": round(last - prev, dec),
+                        "pct": round((last / prev - 1) * 100, 2)})
+        except Exception:
+            continue
+    return out
+
+
+def etf_tr_pr(ticker: str, years: int = 5):
+    """ETF TR(배당재투자)/PR(가격) 시리즈 — {"tr","pr","asof"} | None. graceful."""
+    try:
+        from providers import etf_compare
+        return etf_compare.tr_pr_series(ticker, years)
+    except Exception:
+        return None
+
+
+def etf_peer_compare(ticker: str) -> dict:
+    """동종그룹 지표+점수 — {"group","rows","asof"} | {} (그룹 없음/실패). graceful."""
+    try:
+        from providers import etf_compare
+        return etf_compare.peer_report(ticker)
+    except Exception:
+        return {}
+
+
+def accumulation_plan() -> dict:
+    """주식 모으기(소수점 DCA) 계획 — bot.order_generator.build() (graceful {})."""
+    try:
+        from bot import order_generator
+        return order_generator.build() or {}
+    except Exception:
+        return {}
+
+
+def fx_now() -> float | None:
+    """USD/KRW 실시간 환율 (graceful None) — 적립 폼 적용 환율 자동 채움."""
+    try:
+        from providers.market_data import fetch_exchange_rate
+        return fetch_exchange_rate()
+    except Exception:
+        return None
+
+
+def fx_timing() -> dict:
+    """환전 타이밍 판정 (providers.fx_timing — 아침 리포트와 동일 산식). graceful {}."""
+    try:
+        from providers.fx_timing import fetch_fx_timing
+        return fetch_fx_timing() or {}
+    except Exception:
+        return {}
+
+
+def portfolio_history() -> list:
+    """일별 포트 히스토리 (portfolio_tracker — store 경유). graceful []."""
+    try:
+        import portfolio_tracker
+        return portfolio_tracker.load_history() or []
+    except Exception:
+        return []
+
+
+def target_weights_map() -> dict:
+    """목표 비중 {ticker: 분수} (봇 /rebalance 와 동일 소스). graceful {}."""
+    try:
+        from barbell_strategy import load_target_weights
+        return load_target_weights() or {}
+    except Exception:
+        return {}
+
+
+def income_summary(qqqi_shares: float = 0.0, qqqi_usd: float = 0.0) -> dict:
+    """인컴 트래커 — 분배금 기록 누적 + QQQI 월 예상(추정·네트워크 graceful)."""
+    out = {"records": [], "total": 0.0, "est_monthly": None}
+    try:
+        import store
+        recs = store.all("qqqi_dividends") or []
+        out["records"] = recs
+        out["total"] = sum(float(r.get("amount") or r.get("amount_usd") or 0) for r in recs)
+    except Exception:
+        pass
+    try:
+        if qqqi_shares > 0:
+            from providers.market_data import estimate_qqqi_monthly_dividend
+            est = estimate_qqqi_monthly_dividend(qqqi_shares, qqqi_usd) or {}
+            out["est_monthly"] = est.get("monthly_usd") or est.get("estimated_monthly_usd")
+            out["est_detail"] = est
+    except Exception:
+        pass
+    return out
+
+
+def sp500_valuation() -> dict:
+    """S&P500 지수 밸류 (상위 100 시총가중 집계 — market_valuation). graceful {}."""
+    try:
+        from providers.market_valuation import sp500_valuation as _v
+        return _v() or {}
+    except Exception:
+        return {}
+
+
+_SCREENER_LAST = None                       # 경로 상수 (홈 기준 — 워크트리 무관)
+
+
+def _screener_last_path():
+    from pathlib import Path
+    return Path.home() / "reports" / "ml-cache" / "screener_last.json"
+
+
+def screener_last() -> dict | None:
+    """마지막 스크리너 실행 결과 (디스크 영속 — 나이 무관 표시·asof 병기). 없으면 None."""
+    try:
+        import json
+        p = _screener_last_path()
+        return json.loads(p.read_text()) if p.exists() else None
+    except Exception:
+        return None
+
+
+def _backtest_last_path():
+    from pathlib import Path
+    return Path.home() / "reports" / "ml-cache" / "backtest_last.json"
+
+
+def _backtest_persist(out: dict) -> None:
+    """백테스트 결과 JSON 영속 (equity 는 컬럼별 값 배열 — graceful·실패 무시)."""
+    try:
+        import json
+        from datetime import datetime
+
+        import pandas as pd
+        eq, eq_j = out.get("equity"), None
+        if eq is not None:
+            try:
+                df = eq if isinstance(eq, pd.DataFrame) else pd.DataFrame({"equity": pd.Series(eq)})
+                eq_j = {str(c): [None if pd.isna(x) else float(x) for x in df[c].tolist()]
+                        for c in df.columns}
+            except Exception:
+                eq_j = None
+
+        def _mm(d):
+            try:
+                return {k: (None if v is None else float(v)) for k, v in (d or {}).items()}
+            except Exception:
+                return {}
+
+        payload = {"ml": _mm(out.get("ml")), "overlay": _mm(out.get("overlay")),
+                   "qqq": _mm(out.get("qqq")), "verdict": str(out.get("verdict") or ""),
+                   "reasons": [str(x) for x in out.get("reasons") or []], "equity": eq_j,
+                   "asof": datetime.now().strftime("%Y-%m-%d %H:%M")}
+        p = _backtest_last_path()
+        p.parent.mkdir(parents=True, exist_ok=True)
+        tmp = p.with_suffix(".tmp")
+        tmp.write_text(json.dumps(payload, ensure_ascii=False))
+        tmp.replace(p)
+    except Exception:
+        pass
+
+
+def backtest_last() -> dict | None:
+    """마지막 백테스트 결과 (디스크 영속 — 나이 무관 표시·asof 병기). 없으면 None."""
+    try:
+        import json
+        p = _backtest_last_path()
+        if not p.exists():
+            return None
+        d = json.loads(p.read_text())
+        if d.get("equity"):
+            import pandas as pd
+            d["equity"] = pd.DataFrame(d["equity"])
+        return d
+    except Exception:
+        return None
+
+
+def portfolio_flows() -> dict:
+    """일자별 외부 현금흐름(USD) — 거래 원장 합산 (적립/추가 +·축소 −). graceful {}."""
+    try:
+        from lib import trade_events as te
+        out: dict = {}
+        for r in te.all_trades():
+            if str(r.get("currency") or "USD") != "USD":
+                continue
+            src = str(r.get("source") or "")
+            if "mock" in src or "mock" in str(r.get("account") or ""):
+                continue
+            qty, px = r.get("qty"), r.get("price")
+            if not qty or not px:
+                continue
+            amt = float(qty) * float(px)
+            d = str(r.get("date") or "")[:10]
+            if not d:
+                continue
+            out[d] = out.get(d, 0.0) + (amt if r.get("side") == "buy" else -amt)
+        return out
+    except Exception:
+        return {}
+
+
+def market_temp_history(limit: int = 30) -> list:
+    """시장 온도계 일별 이력 (store — 크론 적재). graceful []."""
+    try:
+        import store
+        rows = store.all("market_temp_history") or []
+        return rows[-limit:]
+    except Exception:
+        return []
+
+
+def next_earnings(ticker: str):
+    """다음 실적 발표일 (yfinance calendar) — date | None. graceful."""
+    try:
+        import yfinance as yf
+        cal = yf.Ticker(ticker).calendar or {}
+        ed = cal.get("Earnings Date")
+        if isinstance(ed, (list, tuple)) and ed:
+            return ed[0]
+        return ed or None
+    except Exception:
+        return None

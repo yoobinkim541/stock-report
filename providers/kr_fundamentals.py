@@ -18,6 +18,7 @@ def _empty(ticker: str) -> dict:
     return {
         "per": None,
         "forward_pe": None,
+        "peg": None,
         "pbr": None,
         "psr": None,
         "roe": None,

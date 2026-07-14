@@ -35,6 +35,7 @@ def test_kr_valuation_metrics_calculates_core_ratios():
     assert v["market_type"] == "kr"
     assert v["source"] == "DART+marcap"
     assert v["per"] == 14.0
+    assert v["peg"] is None
     assert v["pbr"] == 1.75
     assert v["psr"] == 1.4
     assert v["roe"] == 0.125

@@ -19,7 +19,43 @@ import ticker_names  # 종목명 resolver (검색·표시 — 루트 모듈, sys
 from dashboard import auth, cached, data, theme
 
 st.set_page_config(page_title="퀀트 터미널", page_icon="📊", layout="wide")
-theme.inject_global_css()
+
+# 테마 모드 — 세션 없으면 쿠키(지난 방문 선택)에서 복원 (기본 다크). inject 전에 확정.
+if "tn_light" not in st.session_state:
+    try:
+        st.session_state["tn_light"] = (st.context.cookies.get("tn_theme") == "light")
+    except Exception:
+        st.session_state["tn_light"] = False
+theme.inject_global_css()   # 세션 tn_light 를 읽어 라이트/다크 표면 CSS 주입
+
+# st.dataframe 은 canvas(glide-grid) 라 CSS 로 못 칠함 — config 테마(다크)만 따라 라이트
+# 모드서 어둡게 남는다. pandas Styler 셀 배경은 canvas 에 렌더되므로(헤더 제외) 라이트
+# 모드일 때만 전 st.dataframe 을 밝은 셀 Styler 로 감싼다(monkeypatch — 21개 호출부 무수정,
+# column_config·on_select 호환 검증됨). 래퍼는 **호출 시점 모드를 확인**(토글 왕복 안전) ·
+# DataFrame 아닌 인자·Styler·다크 모드는 원본 그대로.
+if not getattr(st, "_tn_df_patched", False):
+    import pandas as _pd
+    _orig_dataframe = st.dataframe
+
+    def _themed_dataframe(data=None, *a, **k):
+        try:
+            if theme.is_light() and isinstance(data, _pd.DataFrame):
+                data = data.style.set_properties(
+                    **{"background-color": "#ffffff", "color": "#1a2233"})
+        except Exception:
+            pass
+        return _orig_dataframe(data, *a, **k)
+
+    st.dataframe = _themed_dataframe
+    st._tn_df_patched = True
+# 선택 지속 — 매 런 쿠키를 현재 모드로 동기화 (다음 전체 새로고침에서 무플래시 복원 근접)
+st.components.v1.html(
+    "<script>parent.document.cookie='tn_theme="
+    + ("light" if st.session_state["tn_light"] else "dark")
+    + "; path=/; max-age=31536000; SameSite=Lax'</script>", height=0)
+
+# 서버 재기동 감지 워치독 — 배포/재시작 후 좀비 탭이 자동 새로고침 → 로그인 게이트
+st.components.v1.html(auth.reconnect_watchdog_html(), height=0)
 
 if not auth.password_gate():
     st.stop()
@@ -28,6 +64,17 @@ if not auth.password_gate():
 _holdings = data.load_holdings()
 _held = [h["ticker"] for h in _holdings if h.get("ticker")]
 st.session_state.setdefault("ticker", _held[0] if _held else "MSFT")
+
+# 순수 HTML 카드(매크로 자산 등)의 클릭 = `?tk=<티커>` 링크 — 여기서 소비 후 파라미터 제거.
+# 링크 클릭은 브라우저 네비게이션(세션 재생성)이라 **사이드바 위젯보다 먼저** 반영해야
+# 이번 런부터 ticker 가 맞는다. 정규화 실패는 조용히 무시(주소창 임의값 방어).
+_qtk = st.query_params.get("tk")
+if _qtk:
+    _qnorm = ticker_names.normalize_input(_qtk)
+    st.query_params.clear()                        # 재클릭·새로고침 루프 방지
+    if _qnorm:
+        st.session_state["ticker"] = _qnorm
+        st.session_state["_nav_to_ticker"] = True  # st.navigation 이후 switch_page (기존 경로)
 
 with st.sidebar:
     st.markdown("### 🔎 종목")
@@ -69,7 +116,11 @@ with st.sidebar:
         for _k in ("scr_done", "bt_done"):
             st.session_state.pop(_k, None)
         st.rerun()
-    st.caption(f"⏱ {datetime.now().strftime('%m/%d %H:%M')} 기준 · 캐시 15~60분")
+    _lc, _tc = st.columns([1, 1.1], vertical_alignment="center")
+    _lc.caption(f"⏱ {datetime.now().strftime('%m/%d %H:%M')} · 캐시 15~60분")
+    # ☀️/🌙 테마 토글 — key=tn_light 라 다음 런 최상단 inject 가 새 값을 읽음(쿠키 지속)
+    _tc.toggle("☀️ 라이트" if st.session_state.get("tn_light") else "🌙 다크",
+               key="tn_light", help="라이트/다크 모드 전환 (선택은 이 브라우저에 기억)")
 
     # 보유 종목 워치리스트 (터미널 레일 — 무네트워크: 스냅샷 수익률)
     _wl = sorted(_holdings, key=lambda h: h.get("value", 0) or 0, reverse=True)
@@ -88,7 +139,12 @@ with st.sidebar:
                      help="계좌 현황·NAV 곡선·판단근거 원장"):
             st.session_state["_nav_to_paper"] = True   # 페이지 객체 생성 후 switch (아래)
 
-from dashboard.pages import home, market, paper, portfolio, research
+    # 💰 주식 모으기 레일 (소수점 DCA 통합 관리 — 계획·기록·비중 편집 다이얼로그)
+    from dashboard import accumulate as _accum
+    st.markdown("<div style='height:8px'></div>", unsafe_allow_html=True)
+    _accum.sidebar_rail()
+
+from dashboard.pages import chart_full, home, market, paper, portfolio, research
 from dashboard.pages import ticker as ticker_pg
 
 _home_pg = st.Page(home.render, title="홈", icon="🏠", url_path="home", default=True)
@@ -97,11 +153,14 @@ _ticker_pg = st.Page(ticker_pg.render, title="종목 분석", icon="🔍", url_p
 _market_pg = st.Page(market.render, title="시장·캘린더", icon="🗓️", url_path="market")
 _paper_pg = st.Page(paper.render, title="모의투자", icon="🧪", url_path="paper")
 _research_pg = st.Page(research.render, title="리서치", icon="🔬", url_path="research")
+_chart_pg = st.Page(chart_full.render, title="차트 풀뷰", icon="🖥️", url_path="chart")
 
 # 홈 보유표 행 클릭 → 종목 분석 자동 이동용 (switch_page 는 StreamlitPage 객체 필요)
 st.session_state["_ticker_page"] = _ticker_pg
+st.session_state["_chart_page"] = _chart_pg          # ⛶ 전체화면 풀차트 왕복용
 
-nav = st.navigation([_home_pg, _portfolio_pg, _ticker_pg, _market_pg, _paper_pg, _research_pg])
+nav = st.navigation([_home_pg, _portfolio_pg, _ticker_pg, _chart_pg, _market_pg,
+                     _paper_pg, _research_pg])
 # 사이드바에서 종목을 새로 고르면 종목 분석 페이지로 이동 (홈 행클릭과 동일 UX)
 if st.session_state.pop("_nav_to_ticker", False):
     st.switch_page(_ticker_pg)
@@ -109,3 +168,13 @@ if st.session_state.pop("_nav_to_ticker", False):
 if st.session_state.pop("_nav_to_paper", False):
     st.switch_page(_paper_pg)
 nav.run()
+
+# 하단 시장 마퀴 띠 — 전 페이지 공통 (VIX·달러·코스피/닥·나스닥·선물 — 5분 캐시·graceful)
+try:
+    from dashboard import cached as _cached
+    from dashboard import theme as _theme
+    _tape = _theme.market_tape_html(_cached.market_tape())
+    if _tape:
+        st.markdown(_tape, unsafe_allow_html=True)
+except Exception:
+    pass

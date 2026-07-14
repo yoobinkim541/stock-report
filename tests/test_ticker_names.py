@@ -172,7 +172,15 @@ def test_search_candidates():
 def test_universe_contains_holdings_and_popular():
     u = ticker_names.universe()
     assert "MU" in u and "NVDA" in u and "005930.KS" in u
+    assert "NVDL" in u and "TSLL" in u
     assert u == sorted(u)  # 정렬됨
+
+
+def test_single_stock_leverage_names_and_aliases():
+    assert ticker_names.resolve("엔비디아 2배") == "NVDL"
+    assert ticker_names.resolve("테슬라 레버리지") == "TSLL"
+    assert ticker_names.resolve("MSTR 2배") == "MSTU"
+    assert ticker_names.label("NVDL") == "GraniteShares 2x Long NVDA (NVDL)"
 
 
 def test_search_label_appends_korean_for_typeahead():
@@ -204,3 +212,14 @@ def test_cache_expired_offline_returns_stale(monkeypatch, tmp_path):
     ticker_names._save_cache({"ZZZZ": {"name": "Old", "ts": 0}})  # 만료(ts=0)
     monkeypatch.setattr(ticker_names, "_yf_cache", None)
     assert ticker_names.display_name("ZZZZ", allow_net=False) == "Old"
+
+
+def test_kr_etf_seed_search_and_display():
+    """국내 ETF 시드 병합 — 한글명 검색·resolve·display (KODEX/TIGER 등 ~1,100)."""
+    import ticker_names as tn
+    assert tn.resolve("KODEX 200") == "069500.KS"
+    assert tn.resolve("TIGER 미국S&P500") == "360750.KS"
+    assert tn.display_name("069500.KS", allow_net=False) == "KODEX 200"
+    assert tn.normalize_input("069500.KS") == "069500.KS"
+    hits = dict(tn.search("KODEX", limit=8))
+    assert "069500.KS" in hits

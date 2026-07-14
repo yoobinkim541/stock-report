@@ -1425,8 +1425,33 @@ def _short_stock_label(item):
     ticker = item.get("ticker", "")
     name = _KOSPI_NAMES.get(ticker) or item.get("company_name") or item.get("company") or _company_name(ticker)
     if name and name != ticker:
-        return fmt.name(ticker, name[:16])   # '회사명 (티커)' (CLAUDE.md 규칙·길면 절단)
+        return fmt.name(ticker, _clean_company_label(name), maxlen=24)   # '회사명 (티커)' 통일
     return ticker
+
+
+def _clean_company_label(name: str) -> str:
+    """모바일 표시용 회사명. 법인 접미사 제거 후 단어 단위로 자연스럽게 축약."""
+    text = " ".join(str(name or "").replace(",", " ").split())
+    suffix_patterns = (
+        r"\bIncorporated\b", r"\bInc\.?\b", r"\bCorporation\b", r"\bCorp\.?\b",
+        r"\bCompany\b", r"\bCo\.?\b", r"\bLtd\.?\b", r"\bLimited\b",
+        r"\bPLC\b", r"\bN\.V\.?\b", r"\bS\.A\.?\b",
+    )
+    for pat in suffix_patterns:
+        text = re.sub(pat, "", text, flags=re.IGNORECASE)
+    text = re.sub(r"\s+[.,]+$", "", text)
+    text = re.sub(r"\s+\.", "", text)
+    text = " ".join(text.split())
+    if len(text) <= 24:
+        return text
+    words = text.split()
+    out = []
+    for word in words:
+        cand = " ".join(out + [word])
+        if len(cand) > 24:
+            break
+        out.append(word)
+    return " ".join(out) if out else text[:23].rstrip() + "…"
 
 
 def _mobile_pick_items(items, limit=2, exclude_tickers=None):
@@ -1497,11 +1522,44 @@ def _mobile_reason_without_finance(item):
     """one_line_reason에서 재무 점수 중복 세그먼트 제거 (점수는 게이지로 표시)."""
     reason = (item.get("decision_v2") or {}).get("one_line_reason", "")
     parts = [p for p in reason.split(" · ") if not p.startswith("재무 ")]
+    parts = _dedupe_mobile_reasons(parts)
     return _compact_text(" · ".join(parts), 44)
 
 
+def _reason_key(part: str) -> tuple[str, float] | None:
+    """같은 의미의 등락 문구(1일/일일, 1개월)를 중복 제거하기 위한 키."""
+    text = str(part or "")
+    horizon = None
+    if text.startswith("일일 ") or text.startswith("1일 "):
+        horizon = "1일"
+    elif text.startswith("1개월 ") or text.startswith("1mo "):
+        horizon = "1개월"
+    if not horizon:
+        return None
+    m = re.search(r"([-+]?\d+(?:\.\d+)?)%", text)
+    if not m:
+        return None
+    try:
+        return horizon, round(float(m.group(1)), 1)
+    except ValueError:
+        return None
+
+
+def _dedupe_mobile_reasons(parts: list[str]) -> list[str]:
+    seen = set()
+    out = []
+    for part in parts:
+        key = _reason_key(part)
+        if key and key in seen:
+            continue
+        if key:
+            seen.add(key)
+        out.append(part)
+    return out
+
+
 def _mobile_pick_block(title, items, limit=2, exclude_tickers=None):
-    """종목 픽 → 게이지 바 + 액션 인디케이터 멀티라인 블록."""
+    """종목 픽 → 모바일용 압축 카드. 참고 스캔은 액션보다 정보 위계가 낮게 보이도록 짧게."""
     lines = [title]
     picks = _mobile_pick_items(items, limit, exclude_tickers)
     if not picks:
@@ -1514,11 +1572,10 @@ def _mobile_pick_block(title, items, limit=2, exclude_tickers=None):
         grade = item.get("grade") or (item.get("fundamental") or {}).get("grade")
         action = (item.get("decision_v2") or {}).get("action", "데이터부족")
         score_txt = f"{score:.0f}" if isinstance(score, (int, float)) else "?"
-        lines.append(f"{_grade_emoji(grade)} {_short_stock_label(item)} {score_txt}점 {_score_bar(score)}")
-        detail = f"{_ACTION_EMOJI.get(action, '▪️')} {action}"
+        lines.append(f"{_grade_emoji(grade)} {_short_stock_label(item)} {score_txt}점 · {action}")
+        detail = "근거: "
         reason = _mobile_reason_without_finance(item)
-        if reason:
-            detail += f" · {reason}"
+        detail += reason or "추가 확인 필요"
         lines.append(f"    {detail}")
     return lines
 
@@ -1626,7 +1683,9 @@ def _fx_timing_mobile_line(timing):
         mult = "1×"
     emoji = timing.get("emoji", "💱")
     verdict = timing.get("verdict", "분할")
-    return f"💱 환전 {emoji} {verdict} · {rate} · {pct_s} · {mult} (예측 아님)"
+    action = _compact_text(timing.get("action") or "", 22)
+    action_s = f" → {action}" if action else ""
+    return f"💱 환전 {emoji} {verdict} · {rate} · {pct_s}{action_s} · {mult} (예측 아님)"
 
 
 # ── report assembly helpers (순수 추출: generate_report 의 dict/텍스트 조립부) ──
@@ -1911,6 +1970,60 @@ def _portfolio_action_plan(portfolio_results, limit=5):
     return rows[:limit]
 
 
+def _portfolio_score_label(score) -> str:
+    s = _safe_float(score)
+    if s is None:
+        return "데이터 부족"
+    if s >= 75:
+        return "양호 · 계획 유지"
+    if s >= 60:
+        return "보통 · 선별 매수"
+    if s >= 45:
+        return "중립 · 신규매수는 선별"
+    return "주의 · 신규매수는 소액/선별"
+
+
+def _phase_action_note(phase) -> str:
+    if not phase:
+        return "시장 국면 확인 후 정액 분할 중심"
+    _, label, dca, _ = phase
+    label_s = str(label)
+    if "Phase 1" in label_s:
+        return f"조정 초입: 신규매수는 소액 분할, 적립 {dca}"
+    if any(f"Phase {n}" in label_s for n in (2, 3, 4, 5)):
+        return f"하락 심화: 계획된 분할만, 현금/레버리지 점검"
+    if "과열" in label_s or "bull" in label_s.lower():
+        return f"과열권: 추격 금지, 적립 {dca}"
+    return f"정상 구간: 정액 적립 중심, 적립 {dca}"
+
+
+def _fx_conclusion(timing) -> str:
+    if not timing:
+        return ""
+    if not timing.get("ok"):
+        return f"환전: {timing.get('verdict') or '데이터 부족'}"
+    pct = timing.get("pct_display")
+    verdict = timing.get("verdict", "분할")
+    action = timing.get("action") or ""
+    pct_s = f"{pct}%ile" if pct is not None else "위치 N/A"
+    return _compact_text(f"환전: {verdict} · {pct_s}" + (f" · {action}" if action else ""), 74)
+
+
+def _today_conclusion_lines(action_plan, phase=None, fx_timing=None) -> list[str]:
+    """모바일 상단용 2~3줄 결론. 새 판단 없이 기존 phase/action/fx를 압축."""
+    lines = [_phase_action_note(phase)]
+    if action_plan:
+        first = action_plan[0]
+        detail = f" — {first['detail']}" if first.get("detail") else ""
+        lines.append(_compact_text(f"우선 확인: {first['bucket']} {first['label']}{detail}", 78))
+    else:
+        lines.append("우선 확인: 신규 위험 항목 없음, 기존 계획 유지")
+    fx = _fx_conclusion(fx_timing)
+    if fx:
+        lines.append(fx)
+    return lines
+
+
 def _action_plan_headline(rows):
     if not rows:
         return "포트폴리오 유지"
@@ -1923,10 +2036,15 @@ def _action_plan_mobile_lines(rows):
     if not rows:
         return ["  포트폴리오 유지"]
     lines = []
-    for row in rows:
-        extras = f" ({' · '.join(row['extras'])})" if row.get("extras") else ""
-        detail = f" — {row['detail']}" if row.get("detail") else ""
-        lines.append(f"  {row['emoji']} {row['bucket']} · {row['label']}{detail}{extras}")
+    for idx, row in enumerate(rows, 1):
+        extras = " · ".join(row.get("extras") or [])
+        lines.append(f"{idx}. {row['emoji']} {row['label']} · {row['bucket']}")
+        detail = row.get("detail") or row.get("action") or "확인 필요"
+        if extras:
+            lines.append(f"   행동: {detail}")
+            lines.append(f"   근거: {extras}")
+        else:
+            lines.append(f"   행동: {detail}")
     return lines
 
 
@@ -1955,9 +2073,13 @@ def _build_mobile_summary(today_str, spy_change, market, kospi_str, avg_score,
         L.append(f"📊 {today_str} 투자 리포트")
     L.append(f"📌 오늘 할 일: {todo}")
     L.append(fmt.SEP)
+    L.append("오늘 결론")
+    L.extend(_today_conclusion_lines(action_plan, phase=phase, fx_timing=fx_timing))
+    L.append(fmt.SEP)
 
     # ── 내 포트폴리오 (점수·신호·매수관심·위험) ──
-    L.append(f"💼 내 포트 {avg_score:.0f}/100  ·  🟢{pos_count} ⚪{neu_count} 🟡{warn_count} 🔴{crit_count}")
+    L.append(f"💼 내 포트 {avg_score:.0f}/100 · {_portfolio_score_label(avg_score)}")
+    L.append(f"신호 분포 🟢{pos_count} ⚪{neu_count} 🟡{warn_count} 🔴{crit_count}")
     L.append(_score_bar(avg_score, 14))
     L.append("✅ 실행 우선순위")
     L.extend(_action_plan_mobile_lines(action_plan))
@@ -1979,7 +2101,8 @@ def _build_mobile_summary(today_str, spy_change, market, kospi_str, avg_score,
     scan.extend(_mobile_pick_block("🇰🇷 KOSPI 주의", kospi_watch, exclude_tickers={r.get("ticker") for r in kospi_top_mobile}))
     if scan:
         L.append(fmt.SEP)
-        L.append("🔎 참고 스캔 (종목선택 무엣지·정보용)")
+        L.append("🔎 참고 스캔")
+        L.append("종목선택 무엣지 · 정보용")
         L.extend(scan)
     if accum_picks:
         L.append("")
@@ -2342,6 +2465,7 @@ def generate_report():
     _sig = [r["signal"]["overall_signal"] for r in portfolio_results]
     _pos, _neu = _sig.count("Positive"), _sig.count("Neutral")
     _warn, _crit = _sig.count("Warning"), _sig.count("Critical")
+    avg_score = sum(r["fundamental"]["total_score"] for r in portfolio_results) / len(portfolio_results) if portfolio_results else 0
     _action_plan = _portfolio_action_plan(portfolio_results, limit=5)
     lines.append("## 0. 오늘 한눈에")
     if _ph:
@@ -2352,9 +2476,14 @@ def generate_report():
                      f"{fmt.pct(_pnl1mo) if _pnl1mo is not None else '—'}")
     lines.append(f"- **신호 분포:** 🟢{_pos} ⚪{_neu} 🟡{_warn} 🔴{_crit}")
     lines.append(f"- **오늘 할 일:** {_action_plan_headline(_action_plan)}")
+    lines.append(f"- **포트 점수 해석:** {_portfolio_score_label(avg_score)}")
     _fx_line = _fx_timing_mobile_line(fx_timing)
     if _fx_line:
         lines.append(f"- **{_fx_line}**")
+    lines.append("")
+    lines.append("**오늘 결론**")
+    for line in _today_conclusion_lines(_action_plan, phase=_ph, fx_timing=fx_timing):
+        lines.append(f"- {line}")
     if _action_plan:
         lines.append("")
         lines.append("**실행 우선순위**")

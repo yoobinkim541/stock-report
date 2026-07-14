@@ -75,6 +75,11 @@ def _entry_universe(chat_id: str, universe: str, title: str, _send) -> None:
     try:
         from ml.entry_analyzer import analyze_all_entries, format_entry_report
         scores = analyze_all_entries(universe=universe)
+        try:
+            from ml.entry_feedback import record_entry_scores
+            record_entry_scores(scores, source="manual_command", universe=universe)
+        except Exception as e:
+            logger.debug("진입 후보 스냅샷 저장 생략: %s", e)
         report = format_entry_report(scores, title=title)   # title 에 이미 이모지 — 중복(📊 📊) 제거
         for chunk in _split(report):
             _send(chat_id, chunk)
@@ -121,6 +126,11 @@ def _entry_single(chat_id: str, ticker: str, _send) -> None:
         if score is None:
             _send(chat_id, f"❌ {fmt.name(ticker)} 분석 실패 — 데이터 부족 (최소 120일 필요)")
             return
+        try:
+            from ml.entry_feedback import record_entry_scores
+            record_entry_scores([score], source="manual_single", universe="single")
+        except Exception as e:
+            logger.debug("진입 후보 스냅샷 저장 생략: %s", e)
 
         msg = format_alert_message(score)
         try:

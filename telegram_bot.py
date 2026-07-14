@@ -1448,6 +1448,11 @@ def notify_entry_signals() -> None:
         from ml.entry_analyzer import analyze_all_entries, check_alert_signals, format_alert_message
         # watch 유니버스: 포트폴리오 + US50 + KR10 + 레버리지
         scores  = analyze_all_entries(days=756, n_similar=25, universe="watch")
+        try:
+            from ml.entry_feedback import record_entry_scores
+            record_entry_scores(scores, source="auto_watch", universe="watch")
+        except Exception as e:
+            logger.debug("진입 후보 스냅샷 저장 생략: %s", e)
         alerts  = check_alert_signals(scores)
         for s in alerts:
             msg = format_alert_message(s)
@@ -1943,19 +1948,21 @@ def _dispatch_paper(chat_id: str, args: list):
     owner 전용(_GUEST_COMMANDS 미포함). 구 /mock·/usmock 을 병합 (alias 하위호환).
     """
     typing(chat_id)
-    sub = (str(args[0]).lower() if args else "")
+    norm_args = [str(a).lower() for a in (args or [])]
+    detail = any(a in ("full", "detail", "detailed", "상세") for a in norm_args)
+    sub = next((a for a in norm_args if a in ("kr", "us")), "")
     try:
         if sub == "kr":
             from crons.kiwoom_mock_report import build_report
-            send_html(chat_id, build_report(html=True))
+            send_html(chat_id, build_report(html=True, detail=detail))
         elif sub == "us":
             from crons.us_mock_report import build_report
-            send_html(chat_id, build_report(html=True))
+            send_html(chat_id, build_report(html=True, detail=detail))
         else:                                   # 인자 없음 — 국내·미국 둘 다
             from crons.kiwoom_mock_report import build_report as _kr_report
             from crons.us_mock_report import build_report as _us_report
-            send_html(chat_id, _kr_report(html=True))
-            send_html(chat_id, _us_report(html=True))
+            send_html(chat_id, _kr_report(html=True, detail=detail))
+            send_html(chat_id, _us_report(html=True, detail=detail))
     except Exception as e:
         send(chat_id, f"⚠️ 모의 현황 조회 실패: {e}")
         logger.exception("cmd_paper")

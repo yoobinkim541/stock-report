@@ -14,7 +14,8 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 # ── FakeTicker ──────────────────────────────────────────────────────────────
 class FakeTicker:
-    def __init__(self, info=None, divs=None, edates=None, ee=None, re=None, rev=None, apt=None, cal=None):
+    def __init__(self, info=None, divs=None, edates=None, ee=None, re=None, rev=None, apt=None, cal=None,
+                 rec=None):
         self.info = info or {}
         self.dividends = divs if divs is not None else pd.Series(dtype=float)
         self._edates = edates
@@ -23,6 +24,7 @@ class FakeTicker:
         self.eps_revisions = rev
         self.analyst_price_targets = apt
         self.calendar = cal
+        self.recommendations_summary = rec
 
     @property
     def earnings_dates(self):
@@ -36,7 +38,8 @@ def _us_ticker():
     info = {"trailingPE": 25.3, "forwardPE": 22.0, "priceToBook": 12.0,
             "priceToSalesTrailing12Months": 11.0, "returnOnEquity": 0.35,
             "trailingEps": 11.8, "forwardEps": 13.2, "dividendYield": 0.008,
-            "fiveYearAvgDividendYield": 0.9, "payoutRatio": 0.25}
+            "fiveYearAvgDividendYield": 0.9, "payoutRatio": 0.25,
+            "trailingPegRatio": 1.42}
     idx = pd.date_range("2022-03-01", periods=16, freq="QS")     # 4년 분기배당
     divs = pd.Series([0.5 * (1.1 ** (i // 4)) for i in range(16)], index=idx)  # 연 +10%
     edates = pd.DataFrame(
@@ -45,16 +48,21 @@ def _us_ticker():
         index=pd.to_datetime(["2026-01-25", "2025-10-25", "2026-04-25"]))
     ee = pd.DataFrame({"numberOfAnalysts": [30, 28], "avg": [2.95, 12.5]}, index=["0q", "+1q"])
     rev = pd.DataFrame({"upLast30days": [5, 6], "downLast30days": [1, 2]}, index=["0q", "+1q"])
-    apt = {"current": 400.0, "mean": 460.0}
+    apt = {"current": 400.0, "mean": 460.0, "high": 520.0, "low": 390.0, "median": 455.0}
+    rec = pd.DataFrame([
+        {"period": "-1m", "strongBuy": 10, "buy": 11, "hold": 8, "sell": 1, "strongSell": 0},
+        {"period": "0m", "strongBuy": 12, "buy": 14, "hold": 7, "sell": 2, "strongSell": 1},
+    ])
     import datetime
     cal = {"Earnings Date": [datetime.date(2026, 4, 25)]}
-    return FakeTicker(info, divs, edates, ee, None, rev, apt, cal)
+    return FakeTicker(info, divs, edates, ee, None, rev, apt, cal, rec)
 
 
 def test_valuation_metrics_us():
     from providers import earnings_data as ed
     v = ed.valuation_metrics("MSFT", _t=_us_ticker())
     assert v["per"] == 25.3 and v["pbr"] == 12.0 and v["psr"] == 11.0
+    assert v["forward_pe"] == 22.0 and v["peg"] == 1.42
     assert v["roe"] == 0.35 and v["eps_ttm"] == 11.8 and v["eps_fwd"] == 13.2
     assert v["div_yield"] == 0.008 and v["payout"] == 0.25
     assert abs(v["div_growth_1y"] - 0.10) < 1e-6     # 결정적 10%
@@ -79,9 +87,14 @@ def test_earnings_history_drops_future_and_orders():
 def test_consensus_and_revision_momentum():
     from providers import earnings_data as ed
     c = ed.consensus("MSFT", _t=_us_ticker())
-    assert c["eps_fwd_avg"] == 12.5 and c["n_analysts"] == 30 or c["n_analysts"] == 28
+    assert c["eps_fwd_avg"] == 12.5
+    assert c["n_analysts"] == 28
     assert c["revision_momentum"] == 0.5       # (6-2)/(6+2)
     assert c["target_mean"] == 460.0 and c["target_upside_pct"] == 15.0
+    assert c["target_high"] == 520.0 and c["target_low"] == 390.0
+    assert c["target_median"] == 455.0
+    assert c["rec_strong_buy"] == 12 and c["rec_buy"] == 14
+    assert c["rec_hold"] == 7 and c["rec_sell"] == 2 and c["rec_strong_sell"] == 1
 
 
 def test_next_earnings_with_injected_today():
@@ -288,3 +301,36 @@ def test_snapshot_row_flatten(monkeypatch):
 if __name__ == "__main__":
     import pytest
     sys.exit(pytest.main([__file__, "-v"]))
+
+
+def test_fund_rows_pure_parse():
+    """_fund_rows — yfinance 손익계산서 프레임 → 날짜 오름차순 rows·마진 계산 (순수)."""
+    from providers import earnings_data as ed
+    stmt = pd.DataFrame(
+        {pd.Timestamp("2025-12-31"): {"Total Revenue": 6.0e10, "Net Income": 1.5e10},
+         pd.Timestamp("2025-09-30"): {"Total Revenue": 5.0e10, "Net Income": -1.0e9}})
+    rows = ed._fund_rows(stmt)
+    assert [r["date"] for r in rows] == ["2025-09-30", "2025-12-31"]   # 오름차순
+    assert rows[1]["revenue"] == 6.0e10 and rows[1]["net_income"] == 1.5e10
+    assert abs(rows[1]["margin"] - 0.25) < 1e-9
+    assert rows[0]["margin"] < 0                                       # 적자 분기 음수 마진
+    # 결측·비프레임 graceful
+    assert ed._fund_rows(None) == []
+    assert ed._fund_rows(pd.DataFrame()) == []
+    assert ed._fund_rows(pd.DataFrame({pd.Timestamp("2025-12-31"): {"기타": 1.0}})) == []
+
+
+def test_quarterly_fundamentals_graceful(monkeypatch, tmp_path):
+    """quarterly_fundamentals — 네트워크 실패 시 빈 rows·빈 결과는 캐시 안 함."""
+    from providers import earnings_data as ed
+    monkeypatch.setattr(ed, "_CACHE_DIR", tmp_path)
+    class _Boom:
+        @property
+        def quarterly_income_stmt(self):
+            raise RuntimeError("rate limit")
+        @property
+        def income_stmt(self):
+            raise RuntimeError("rate limit")
+    out = ed.quarterly_fundamentals("FAKE", _t=_Boom())
+    assert out["quarterly"] == [] and out["annual"] == []
+    assert not list(tmp_path.glob("earnings_fund_*"))                  # 실패 미캐시

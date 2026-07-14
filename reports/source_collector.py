@@ -362,23 +362,38 @@ def _parse_arca_html(html_text: str) -> list[tuple[str, str]]:
 
 def fetch_arca_events(max_pages: int = 2) -> list[dict]:
     events = []
-    link_pat = re.compile(r"\[([^\]]+)\]\(https://arca\.live/b/stock/(\d+)\?p=(\d+)\)")
+    # 스킴은 http/https 모두 허용 — jina 는 내부 URL 스킴을 href 에 그대로 반사(라이브 실증:
+    # http 내부 요청이면 링크도 http://arca.live/... 라 https 고정 패턴은 0건). ?p= 꼬리도 선택.
+    link_pat = re.compile(r"\[([^\]]+)\]\(https?://arca\.live/b/stock/(\d+)[^)]*\)")
+
+    seen_posts: set[str] = set()
 
     def _add(post_id: str, text: str) -> None:
-        if not any(label in text for label in ARCA_LABELS):
+        if post_id in seen_posts:
+            return                                    # 페이지 간 중복(핀 고정 글 등)
+        label = next((lb for lb in ARCA_LABELS if lb in text), "")
+        if not label:
             return
+        seen_posts.add(post_id)
+        title = text[text.index(label):]              # 게시글 번호 프리픽스 제거
+        # 꼬리 메타([댓글수] 작성자 날짜 조회 추천) 제거 — 실패해도 원문 유지(graceful)
+        title = re.sub(r"\s*(\[\d+\])?\s*\S{1,20}\s+\d{4}\.\d{2}\.\d{2}\s+\d+\s+\d+\s*$",
+                       "", title) or title
         events.append({
             "source": "arca",
-            "title": text[:140],
+            "title": title[:140],
             "url": f"https://arca.live/b/stock/{post_id}",
             "source_url": "https://arca.live/b/stock",
-            "category": next((label for label in ARCA_LABELS if label in text), ""),
-            "tickers": _extract_tickers(text),
+            "category": label,
+            "tickers": _extract_tickers(title),
         })
 
     for page in range(1, max_pages + 1):
         try:
-            resp = _bounded_get(f"https://r.jina.ai/http://arca.live/b/stock?p={page}", timeout=20)
+            # x-wait-for-selector: 게시글 행(.vrow) 렌더 완료까지 대기 — jina 부분 렌더
+            # (공지만 있는 11KB 응답·간헐 0건의 유력 원인) 재발 방지
+            resp = _bounded_get(f"https://r.jina.ai/http://arca.live/b/stock?p={page}",
+                                timeout=25, headers={"x-wait-for-selector": ".vrow"})
             for match in link_pat.finditer(resp.text):
                 _add(match.group(2), " ".join(match.group(1).split()).replace("**", "").strip())
         except Exception as e:

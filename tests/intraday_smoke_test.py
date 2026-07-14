@@ -88,6 +88,9 @@ def _synth_session(n=60, base=61000.0, tick=100.0, vol=1000.0, breakout_at=None)
 def run_tests() -> list[str]:
     failures = []
     tmp = tempfile.mkdtemp(prefix="intraday_smoke_")
+    import atexit
+    import shutil
+    atexit.register(shutil.rmtree, tmp, ignore_errors=True)   # 전 종료경로 정리 — /tmp 누수 방지
     today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
 
     # ── i1: 심볼 변환 ─────────────────────────────────────────────────────────
@@ -267,6 +270,10 @@ def run_tests() -> list[str]:
         *[(f"{k} 차단", lambda r, k=k: r[k] == (False, k))
           for k in ("halt", "eod_window", "max_trades", "cooldown", "held", "stale_data", "spread", "qty")],
     )
+    failures += _check("guards_loss_budget", lambda: None,
+        ("max_trades=0 은 무제한", lambda _: ax.entry_guards({**base_ctx, "trades_today": 99, "max_trades": 0}) == (True, "ok")),
+        ("손실예산 0 차단", lambda _: ax.entry_guards({**base_ctx, "loss_budget": 0.0}) == (False, "loss_budget")),
+    )
     failures += _check("spread_cap", lambda: None,
         ("KR 2틱 하한(6.1만원=~32bps)", lambda _: ax.spread_cap_bps(61450, "KR", 25.0) > 30.0),
         ("US 캡 그대로", lambda _: ax.spread_cap_bps(400.0, "US", 5.0) == 5.0),
@@ -301,6 +308,24 @@ def run_tests() -> list[str]:
         ("포지션 캡 1/3", lambda _: ax.position_size(1_000_000, 0.05, 61450, 61440) == int(1_000_000 / 3 / 61450)),
         ("stop_dist 0 → 0", lambda _: ax.position_size(1_000_000, 0.005, 61450, 61450) == 0),
         ("호가단위 표", lambda _: ax.kr_tick(61450) == 100 and ax.kr_tick(1500) == 1 and ax.kr_tick(600000) == 1000),
+        # 마찰 포함 사이징 — 분모에 friction 가산 → 스탑 도달 총손실 ≈ 예산 (R=-1 정합).
+        # 수치는 1/3 가치캡(542주)이 안 걸리는 리스크측 채택 구간으로 선정
+        ("마찰 포함 주수 축소", lambda _: ax.position_size(100_000_000, 0.005, 61450, 60000, friction=300.0)
+            == int(500_000 / (1450 + 300))),
+        ("남은 손실예산으로 주수 축소", lambda _: ax.position_size(100_000_000, 0.005, 61450, 60000,
+                                                               friction=300.0, loss_budget=17_500)
+            == int(17_500 / (1450 + 300))),
+        ("최소 명목 미달 → 0", lambda _: ax.position_size(1_000_000, 0.005, 61450, 61150,
+                                                          min_notional=1_000_000) == 0),
+    )
+    failures += _check("friction_stop", lambda: None,
+        # 61450: 1틱=100 → 페널티 왕복 (스프레드/2+틱)×2=300 + 수수료·거래세 22bps ≈ 135 → ~435
+        ("마찰/주 구성", lambda _: 400 < ax.friction_per_share(61450, "KR", spread=100.0) < 480),
+        ("호가 미상 = 1틱 가정", lambda _: ax.friction_per_share(61450, "KR")
+            == ax.friction_per_share(61450, "KR", spread=100.0)),
+        ("스탑 하한 = 마찰×배수", lambda _: abs((61450 - ax.stop_with_floor(61450, 100.0, 1.2,
+            435.0, floor_mult=3.0)) - 1305.0) < 1e-6),
+        ("ATR 넓으면 ATR 채택", lambda _: 61450 - ax.stop_with_floor(61450, 2000.0, 1.2, 435.0) == 2400.0),
     )
     failures += _check("virtual_fill", lambda: None,
         ("매수=best_ask 기준", lambda _: ax.virtual_fill("buy", 61400, 61500, 61450, "KR")[0] == 61500),
@@ -333,7 +358,7 @@ def run_tests() -> list[str]:
         ("KR 기본가중 합 1", lambda r: abs(sum(v for k, v in ip.DEFAULTS["kr"].items() if k.startswith("w_")) - 1.0) < 1e-9),
     )
 
-    # ── i10: 엔진 — 진입→멱등→손절→쿨다운→orphan 수리 (전부 모킹·쓰기 tmp 격리) ──
+    # ── i10: 엔진 — 진입→멱등→손절→즉시 재진입 가능→orphan 수리 (전부 모킹·쓰기 tmp 격리) ──
     logger.info("[i10] 엔진 사이클")
     failures += _engine_tests(tmp)
 
@@ -525,7 +550,7 @@ def _engine_tests(tmp: str) -> list[str]:
             chk("net R 음수", len(outs) == 1 and outs[0]["realized_r"] < 0)
             chk("fwd_excess=realized_r", len(outs) == 1 and outs[0]["fwd_excess"] == outs[0]["realized_r"])
             chk("포지션 제거", pos_key not in state["positions"])
-            chk("쿨다운 설정", state["cooldown_until"].get(pos_key, 0) > 0)
+            chk("기본 쿨다운 없음", state["cooldown_until"].get(pos_key, 0) <= 0)
             chk("체결 이벤트(sell)", any(e["side"] == "sell" for e in events))
             chk("day_pnl 반영", state["counters"]["KR"]["day_pnl"] != 0.0)
 

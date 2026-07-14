@@ -29,7 +29,15 @@ EN: dict[str, str] = {
     # 지수·ETF·레버리지
     "QQQ": "Invesco QQQ", "SPY": "SPDR S&P 500", "TLT": "iShares 20+ Treasury",
     "QLD": "ProShares Ultra QQQ", "TQQQ": "ProShares UltraPro QQQ",
-    "SOXL": "Direxion Semi Bull 3x", "UPRO": "ProShares UltraPro S&P500",
+    "SQQQ": "ProShares UltraPro Short QQQ",
+    "SOXL": "Direxion Semi Bull 3x", "SOXS": "Direxion Semi Bear 3x",
+    "SSO": "ProShares Ultra S&P500", "UPRO": "ProShares UltraPro S&P500",
+    "NVDL": "GraniteShares 2x Long NVDA", "NVD": "GraniteShares 2x Short NVDA",
+    "TSLL": "Direxion TSLA Bull 2x", "AAPU": "Direxion AAPL Bull 2x",
+    "AMZU": "Direxion AMZN Bull 2x", "GGLL": "Direxion GOOGL Bull 2x",
+    "MSFU": "Direxion MSFT Bull 2x", "METU": "Direxion META Bull 2x",
+    "CONL": "GraniteShares 2x Long COIN", "PLTU": "GraniteShares 2x Long PLTR",
+    "MSTU": "T-Rex 2x Long MSTR",
     "QYLD": "Global X Nasdaq Covered Call",
     # 인기 US (검색·표시)
     "AAPL": "Apple", "AMZN": "Amazon", "META": "Meta Platforms", "TSLA": "Tesla",
@@ -66,6 +74,11 @@ EN: dict[str, str] = {
     "JEPI": "JPMorgan Equity Premium", "JEPQ": "JPMorgan Nasdaq Premium",
     "DIA": "SPDR Dow Jones", "IWM": "iShares Russell 2000",
     "GLD": "SPDR Gold", "SLV": "iShares Silver", "ARKK": "ARK Innovation",
+    # ── 매크로 자산 (환율·원자재·암호화폐·금리·지수 — 홈 매크로 카드·검색·차트) ──
+    "KRW=X": "USD/KRW", "GC=F": "Gold Futures", "SI=F": "Silver Futures",
+    "CL=F": "WTI Crude Oil", "BTC-USD": "Bitcoin", "ETH-USD": "Ethereum",
+    "^TNX": "US 10Y Treasury Yield", "DX-Y.NYB": "US Dollar Index",
+    "^VIX": "CBOE Volatility Index", "^GSPC": "S&P 500 Index", "^IXIC": "NASDAQ Composite",
 }
 
 # 검색 별칭 (한글 대표명 + 추가 영문 별칭). 첫 항목이 대표 한글명(있으면).
@@ -83,6 +96,23 @@ KO: dict[str, tuple[str, ...]] = {
     "QQQ": ("나스닥100", "나스닥"),
     "SPY": ("S&P500", "에스앤피"),
     "TLT": ("미국 장기국채",),
+    "QLD": ("나스닥 2배", "QLD"),
+    "TQQQ": ("나스닥 3배", "티큐", "TQQQ"),
+    "SQQQ": ("나스닥 인버스 3배", "에스큐", "SQQQ"),
+    "SOXL": ("반도체 3배", "속슬", "SOXL"),
+    "SOXS": ("반도체 인버스 3배", "속스", "SOXS"),
+    "SSO": ("S&P500 2배", "SSO"),
+    "NVDL": ("엔비디아 2배", "NVDA 2배", "엔비디아 레버리지", "NVDL"),
+    "NVD": ("엔비디아 인버스 2배", "NVDA 인버스", "NVD"),
+    "TSLL": ("테슬라 2배", "TSLA 2배", "테슬라 레버리지", "TSLL"),
+    "AAPU": ("애플 2배", "AAPL 2배", "애플 레버리지", "AAPU"),
+    "AMZU": ("아마존 2배", "AMZN 2배", "아마존 레버리지", "AMZU"),
+    "GGLL": ("구글 2배", "알파벳 2배", "GOOGL 2배", "GGLL"),
+    "MSFU": ("마이크로소프트 2배", "MSFT 2배", "MSFU"),
+    "METU": ("메타 2배", "META 2배", "METU"),
+    "CONL": ("코인베이스 2배", "COIN 2배", "CONL"),
+    "PLTU": ("팔란티어 2배", "PLTR 2배", "PLTU"),
+    "MSTU": ("마이크로스트래티지 2배", "MSTR 2배", "MSTU"),
     "AAPL": ("애플", "APPLE"),
     "AMZN": ("아마존", "AMAZON"),
     "META": ("메타", "페이스북", "FACEBOOK"),
@@ -180,6 +210,18 @@ KO: dict[str, tuple[str, ...]] = {
     "GLD": ("금 ETF", "골드"),
     "SLV": ("은 ETF", "실버"),
     "ARKK": ("아크 이노베이션", "ARK"),
+    # ── 매크로 자산 (한글 검색 별칭 — 홈 카드 클릭·통합 검색) ──
+    "KRW=X": ("달러 환율", "원달러", "달러원", "환율"),
+    "GC=F": ("금", "금 선물", "골드"),
+    "SI=F": ("은", "은 선물"),
+    "CL=F": ("유가", "wti", "원유", "국제유가"),
+    "BTC-USD": ("비트코인", "비트", "btc"),
+    "ETH-USD": ("이더리움", "이더", "eth"),
+    "^TNX": ("미국 10년물 금리", "미국채금리", "국채금리", "10년물"),
+    "DX-Y.NYB": ("달러 인덱스", "달러지수", "dxy"),
+    "^VIX": ("변동성지수", "공포지수", "빅스"),
+    "^GSPC": ("에스앤피500", "s&p500", "스앤피"),
+    "^IXIC": ("나스닥", "나스닥종합"),
 }
 
 # 한국 상장주(.KS) 한글 표시명 (KOSPI 시총 상위 — data_pipeline.KR_TOP10_META 와 동일값).
@@ -207,6 +249,12 @@ try:
 except Exception:
     _SP500 = {}
 
+# 국내 ETF(.KS) 티커→한글명 시드 — scripts/gen_kr_etf_seed.py (Naver etfItemList·~1,100).
+try:
+    from kr_etf_seed import KR_ETF as _KR_ETF
+except Exception:
+    _KR_ETF = {}
+
 
 def _build_index() -> dict[str, str]:
     idx: dict[str, str] = {}
@@ -219,11 +267,13 @@ def _build_index() -> dict[str, str]:
         idx.setdefault(_norm(nm), t)
     for t, nm in _SP500.items():          # S&P500 영문명 (큐레이트 뒤 — EN/KO/KR 우선)
         idx.setdefault(_norm(nm), t)
+    for t, nm in _KR_ETF.items():         # 국내 ETF 한글명 (KODEX 200 등)
+        idx.setdefault(_norm(nm), t)
     return idx
 
 
 _INDEX = _build_index()
-_ALL_TICKERS = set(EN) | set(KR) | set(KO) | set(_SP500)
+_ALL_TICKERS = set(EN) | set(KR) | set(KO) | set(_SP500) | set(_KR_ETF)
 
 
 # ── yfinance 디스크캐시 (graceful) ────────────────────────────────────
@@ -280,7 +330,7 @@ def display_name(ticker: str, allow_net: bool = True) -> str | None:
         return None
     tu = t.upper()
     if t.endswith(".KS") or t.endswith(".KQ"):
-        return KR.get(t) or KR.get(tu) or _yf_name(t, allow_net)
+        return KR.get(t) or KR.get(tu) or _KR_ETF.get(tu) or _yf_name(t, allow_net)
     return EN.get(tu) or _SP500.get(tu) or _yf_name(tu, allow_net)
 
 
@@ -334,6 +384,26 @@ def resolve(query: str, allow_net: bool = False) -> str | None:
             if nq and nq in _norm(ent.get("name", "")):
                 return tk
     return None
+
+
+# 매크로/지수 자산 → 표시 단위. 주식 분석(밸류·재무·기관·공시) 대신 매크로 전용 뷰 대상.
+# 단위 단일 소스 — 히어로·홈 카드가 공유(환율에 "USD", 금리에 "USD" 붙는 오표기 방지).
+MACRO_UNITS: dict[str, str] = {
+    "KRW=X": "₩", "GC=F": "$/oz", "SI=F": "$/oz", "CL=F": "$/bbl",
+    "BTC-USD": "$", "ETH-USD": "$", "^TNX": "%", "DX-Y.NYB": "",
+    "^VIX": "", "^GSPC": "pt", "^IXIC": "pt",
+}
+MACRO: set[str] = set(MACRO_UNITS)
+
+
+def is_macro(ticker: str) -> bool:
+    """매크로·지수 자산 여부 (환율·원자재·암호화폐·금리·지수 — 대시보드 뷰 분기)."""
+    return (ticker or "").strip().upper() in MACRO
+
+
+def macro_unit(ticker: str) -> str:
+    """매크로 자산 표시 단위 (₩·$/oz·% 등). 매크로가 아니면 ''."""
+    return MACRO_UNITS.get((ticker or "").strip().upper(), "")
 
 
 _US_TICKER_RE = re.compile(r"^[A-Z]{1,5}([.\-][A-Z]{1,2})?$")

@@ -95,3 +95,24 @@ def test_fundamental_trends_empty():
 if __name__ == "__main__":
     import pytest
     sys.exit(pytest.main([__file__, "-v"]))
+
+
+def test_fundamental_trends_roe():
+    """ROE 추세 — 연간 순이익÷자기자본 + 최대 3년 변화 pp (합성 cf·무네트워크)."""
+    import pytest
+    from providers import edgar
+
+    def fy(vals):
+        return {"units": {"USD": [{"end": e, "val": v, "fp": "FY", "form": "10-K"}
+                                  for e, v in vals]}}
+    cf = {"facts": {"us-gaap": {
+        "Revenues": fy([("2022-12-31", 100), ("2023-12-31", 110), ("2024-12-31", 120)]),
+        "NetIncomeLoss": fy([("2022-12-31", 10), ("2023-12-31", 15), ("2024-12-31", 24)]),
+        "StockholdersEquity": fy([("2022-12-31", 100), ("2023-12-31", 100),
+                                  ("2024-12-31", 120)]),
+    }}}
+    f = edgar.fundamental_trends("X", asof="2025-06-01", cf=cf)
+    assert f["roe"] == pytest.approx(0.20)               # 24/120
+    assert f["roe_chg_3y"] == pytest.approx(0.10)        # 0.20 − 0.10(2022)
+    f2 = edgar.fundamental_trends("X", cf={})
+    assert f2["roe"] is None and f2["roe_chg_3y"] is None

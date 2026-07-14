@@ -91,8 +91,34 @@ def _dividend_cagr(divs, years: int):
         return None
 
 
+def _merge_naver_forward(kr: dict) -> None:
+    """DART 트레일링 metrics 에 Naver 증권사 컨센서스 포워드 축 병합 (in-place).
+
+    DART 는 forward 를 제공 안 해 KR 가치평가가 트레일링 전용이던 한계 해소 —
+    고ROE 성장주(잔여이익 영구모델의 '고평가' 편향) 정정. 실패 시 무변경(graceful).
+    """
+    try:
+        from providers import naver_consensus
+        nv = naver_consensus.summary(kr.get("ticker") or "")
+        fwd = (nv or {}).get("fwd") or {}
+        eps_fwd = fwd.get("eps")
+        if not eps_fwd or eps_fwd <= 0:
+            return
+        kr["eps_fwd"] = eps_fwd
+        mc, sh = kr.get("market_cap"), kr.get("shares")
+        if mc and sh and sh > 0:
+            price = mc / sh
+            kr["forward_pe"] = round(price / eps_fwd, 2)
+        roe_f = fwd.get("roe")
+        kr["roe_fwd"] = roe_f / 100.0 if roe_f is not None else None
+        kr["kr_consensus_source"] = "naver"
+        kr["kr_consensus_year"] = fwd.get("year")
+    except Exception as e:
+        logger.debug("Naver 포워드 병합 실패: %s", e)
+
+
 def valuation_metrics(ticker: str, *, _t=None) -> dict:
-    """PER·forwardPE·PBR·PSR·ROE·EPS(ttm/fwd)·배당률·payout·배당성장(1y/3y). 결측 None.
+    """PER·forwardPE·PEG·PBR·PSR·ROE·EPS(ttm/fwd)·배당률·payout·배당성장(1y/3y). 결측 None.
 
     US/KR 공통(yfinance .info + dividends). KR 은 forward 계열이 대체로 None(열화모드).
     """
@@ -101,11 +127,12 @@ def valuation_metrics(ticker: str, *, _t=None) -> dict:
             from providers import kr_fundamentals
             kr = kr_fundamentals.recent_annual_metrics(ticker)
             if kr and kr.get("confidence") != "missing" and not kr.get("error"):
+                _merge_naver_forward(kr)          # 차기연도 컨센서스 EPS → 포워드 축
                 return kr
         except Exception as e:
             logger.debug("KR DART 밸류에이션 실패 %s: %s", ticker, e)
 
-    out = {k: None for k in ("per", "forward_pe", "pbr", "psr", "roe", "eps_ttm", "eps_fwd",
+    out = {k: None for k in ("per", "forward_pe", "peg", "pbr", "psr", "roe", "eps_ttm", "eps_fwd",
                              "div_yield", "div_yield_5y_avg", "payout", "div_growth_1y", "div_growth_3y")}
     out["market_type"] = "kr" if is_kr(ticker) else "us"
     try:
@@ -118,6 +145,7 @@ def valuation_metrics(ticker: str, *, _t=None) -> dict:
             info = {}
         out["per"] = _f(info.get("trailingPE"))
         out["forward_pe"] = _f(info.get("forwardPE"))
+        out["peg"] = _f(info.get("trailingPegRatio") or info.get("pegRatio"))
         out["pbr"] = _f(info.get("priceToBook"))
         out["psr"] = _f(info.get("priceToSalesTrailing12Months"))
         out["roe"] = _f(info.get("returnOnEquity"))
@@ -138,6 +166,79 @@ def valuation_metrics(ticker: str, *, _t=None) -> dict:
             logger.debug("배당 이력 실패 %s: %s", ticker, e)
     except Exception as e:
         logger.warning("밸류에이션 조회 실패 %s: %s", ticker, e)
+    if is_kr(ticker):
+        # KR .KS/.KQ 는 yfinance 밸류에이션 멀티플이 실제와 크게 어긋남(삼성 forwardPE 4.4·
+        # PEG 0.2·PSR 4.8 = 명백한 오류) → 오해 소지 큰 멀티플은 폐기(가치평가 게이지 오염 차단).
+        # 정밀 PER/PBR/ROE 는 DART 경로(recent_annual_metrics)가 담당 — DART_API_KEY 필요.
+        for _k in ("forward_pe", "peg", "psr"):
+            out[_k] = None
+        out["kr_yf_fallback"] = True                # UI: "DART 키 설정 시 정밀 계산" 안내용
+    return out
+
+
+# ── 분기 펀더멘털 시계열 (차트 오버레이용) ─────────────────────────────────────
+
+def _fund_rows(stmt) -> list[dict]:
+    """손익계산서 DataFrame(yfinance income_stmt — 행=항목·열=기간말) → rows (순수).
+
+    [{date, revenue, net_income, margin}] 날짜 오름차순. 항목 결측·비프레임은 [].
+    """
+    rows = []
+    try:
+        import pandas as pd
+        if stmt is None or getattr(stmt, "empty", True):
+            return rows
+        idx = set(stmt.index)
+
+        def _pick(*names):
+            for n in names:
+                if n in idx:
+                    return stmt.loc[n]
+            return None
+
+        rev = _pick("Total Revenue", "Operating Revenue")
+        ni = _pick("Net Income", "Net Income Common Stockholders",
+                   "Net Income Continuous Operations")
+        if rev is None and ni is None:
+            return rows
+        for c in stmt.columns:
+            try:
+                d = str(pd.Timestamp(c).date())
+            except Exception:
+                continue
+            r = _f(rev.get(c)) if rev is not None else None
+            n = _f(ni.get(c)) if ni is not None else None
+            if r is None and n is None:
+                continue
+            rows.append({"date": d, "revenue": r, "net_income": n,
+                         "margin": (n / r) if (r and n is not None) else None})
+        rows.sort(key=lambda x: x["date"])
+    except Exception as e:
+        logger.debug("_fund_rows: %s", e)
+    return rows
+
+
+def quarterly_fundamentals(ticker: str, *, force: bool = False, _t=None) -> dict:
+    """분기(+연간) 매출·순이익·순마진 시계열 — 차트 펀더멘털 서브패널용 (12h 캐시).
+
+    US=yfinance quarterly_income_stmt(최근 ~5분기)·income_stmt(연간 ~4년). KR 도
+    yfinance 가 주는 만큼(있으면) — ETF·매크로는 손익계산서가 없어 빈 rows(graceful).
+    """
+    key = f"fund_{ticker}"
+    if not force:
+        c = _cache_get(key)
+        if c is not None:
+            return c
+    quarterly, annual = [], []
+    try:
+        t = _t or _ticker(ticker)
+        quarterly = _fund_rows(getattr(t, "quarterly_income_stmt", None))
+        annual = _fund_rows(getattr(t, "income_stmt", None))
+    except Exception as e:
+        logger.debug("quarterly_fundamentals(%s): %s", ticker, e)
+    out = {"ticker": ticker, "quarterly": quarterly, "annual": annual}
+    if quarterly or annual:                          # 빈 실패 결과는 캐시하지 않음(재시도 허용)
+        _cache_put(key, out)
     return out
 
 
@@ -173,9 +274,26 @@ def earnings_history(ticker: str, *, limit: int = 12, _t=None) -> list[dict]:
 # ── 컨센서스·리비전 (G3 피처 소스, US 중심) ─────────────────────────────────────
 
 def consensus(ticker: str, *, _t=None) -> dict:
-    """포워드 컨센서스 + ★리비전 모멘텀 + 목표가. KR 은 대체로 None(열화모드)."""
+    """포워드 컨센서스 + ★리비전 모멘텀 + 목표가. KR 은 Naver 증권사 컨센서스."""
     out = {k: None for k in ("eps_fwd_avg", "n_analysts", "rev_fwd_avg", "eps_rev_up_30d",
-                             "eps_rev_down_30d", "revision_momentum", "target_mean", "target_upside_pct")}
+                             "eps_rev_down_30d", "revision_momentum", "target_mean", "target_upside_pct",
+                             "target_high", "target_low", "target_median",
+                             "rec_strong_buy", "rec_buy", "rec_hold", "rec_sell", "rec_strong_sell")}
+    if is_kr(ticker) and _t is None:
+        # yfinance 의 KR 목표가·추정치는 실제와 어긋나 신뢰불가 → Naver(국내 증권사
+        # 컨센서스)로 대체. 리비전·분포 등 미제공 필드는 None 유지(소비자 graceful).
+        try:
+            from providers import naver_consensus
+            nv = naver_consensus.summary(ticker)
+            if nv.get("target_mean"):
+                out["target_mean"] = nv["target_mean"]
+                out["eps_fwd_avg"] = (nv.get("fwd") or {}).get("eps")
+                out["recomm_mean"] = nv.get("recomm_mean")
+                out["source"] = "naver"
+                return out
+        except Exception as e:
+            logger.debug("KR Naver 컨센서스 실패 %s: %s", ticker, e)
+        return out                                   # Naver 실패 — yfinance 로 가지 않음
     try:
         t = _t or _ticker(ticker)
         # 포워드 EPS 컨센서스(다음 분기 '+1q')
@@ -204,15 +322,31 @@ def consensus(ticker: str, *, _t=None) -> dict:
                 out["revision_momentum"] = round((up - dn) / tot, 3) if tot > 0 else None
         except Exception:
             pass
-        # 목표가
+        # 목표가 (최고/평균/중앙/최저 — 팬 차트용)
         try:
             apt = t.analyst_price_targets
             if isinstance(apt, dict):
                 mean = _f(apt.get("mean"))
                 cur = _f(apt.get("current"))
                 out["target_mean"] = mean
+                out["target_high"] = _f(apt.get("high"))
+                out["target_low"] = _f(apt.get("low"))
+                out["target_median"] = _f(apt.get("median"))
                 if mean and cur and cur > 0:
                     out["target_upside_pct"] = round((mean / cur - 1.0) * 100.0, 1)
+        except Exception:
+            pass
+        # 의견 분포 (적극매도~적극매수 — 최근월 '0m' 행)
+        try:
+            rs = t.recommendations_summary
+            if rs is not None and len(rs):
+                row = rs.iloc[0]
+                if "period" in rs.columns and (rs["period"] == "0m").any():
+                    row = rs[rs["period"] == "0m"].iloc[0]
+                for src, dst in (("strongBuy", "rec_strong_buy"), ("buy", "rec_buy"),
+                                 ("hold", "rec_hold"), ("sell", "rec_sell"),
+                                 ("strongSell", "rec_strong_sell")):
+                    out[dst] = _f(row.get(src))
         except Exception:
             pass
     except Exception as e:

@@ -47,6 +47,30 @@ def test_builders():
     assert na._divider()["type"] == "divider"
 
 
+def _block_text(block):
+    btype = block.get("type")
+    rich = (block.get(btype) or {}).get("rich_text", [])
+    return "".join(rt.get("plain_text") or rt.get("text", {}).get("content", "") for rt in rich)
+
+
+def test_full_report_blocks_preserve_readable_structure():
+    blocks = na._full_report_blocks(
+        "2026-06-23",
+        "# 리포트 제목\n"
+        "## 핵심 요약\n"
+        "### 세부 근거\n"
+        "- 첫 번째 항목\n"
+        f"{'x' * 2500}\n",
+    )
+
+    types = [b["type"] for b in blocks]
+    assert types[:5] == ["callout", "heading_2", "heading_2", "heading_3", "bulleted_list_item"]
+    assert "원문 Markdown 전문" in _block_text(blocks[0])
+    assert _block_text(blocks[1]) == "리포트 제목"
+    assert _block_text(blocks[4]) == "첫 번째 항목"
+    assert all(len(_block_text(b)) <= 1800 for b in blocks if b["type"] == "paragraph")
+
+
 # ── 3. NOTION_TOKEN 없을 때 graceful skip ─────────────────────────────────────
 def test_no_token(monkeypatch):
     monkeypatch.delenv("NOTION_TOKEN", raising=False)
@@ -153,6 +177,12 @@ def _toggle_labels(blocks):
             for b in blocks if b.get("type") == "toggle"]
 
 
+def _first_week_id(fake, root_id):
+    month_id = next(b["id"] for b in fake.children[root_id]
+                    if b.get("type") == "child_page" and not b.get("archived"))
+    return next(b["id"] for b in fake.children[month_id] if b.get("type") == "child_page")
+
+
 def test_tree_and_idempotency(monkeypatch, tmp_path):
     dash = "378a13e7-df00-815a-9fe7-feac02ee5dc6"
     parent = "PARENT-ROOT"
@@ -192,6 +222,39 @@ def test_tree_and_idempotency(monkeypatch, tmp_path):
                if "2026-06-23" in "".join(rt.get("plain_text", "") for rt in t["toggle"]["rich_text"]))
     body23 = [c["paragraph"]["rich_text"][0]["text"]["content"] for c in t23["toggle"]["children"]]
     assert "줄1-수정" in body23, "멱등 교체 후 최신 내용 반영"
+
+
+def test_full_report_page_created_and_replaced(monkeypatch, tmp_path):
+    dash = "378a13e7-df00-815a-9fe7-feac02ee5dc6"
+    parent = "PARENT-ROOT"
+    fake = FakeNotion(dash, parent)
+    _setup(monkeypatch, tmp_path, fake)
+
+    root = na.archive_report(
+        "2026-06-23",
+        "요약1",
+        full_text="# 제목\n본문1\n" + ("x" * 2500),
+    )
+    assert root is not None
+
+    week_id = _first_week_id(fake, root)
+    full_pages = [b for b in fake.children[week_id]
+                  if b.get("type") == "child_page" and "풀 리포트" in b["child_page"]["title"]]
+    assert len(full_pages) == 1
+    page_id = full_pages[0]["id"]
+    body = fake.children[page_id]
+    assert any(b["type"] == "callout" and "원문 Markdown 전문" in _block_text(b) for b in body)
+    assert any(b["type"] == "heading_2" and _block_text(b) == "제목" for b in body)
+    assert any("본문1" in _block_text(b) for b in body)
+    assert all(len(_block_text(b)) <= 1800 for b in body)
+
+    na.archive_report("2026-06-23", "요약2", full_text="# 제목\n본문2")
+    full_pages_after = [b for b in fake.children[week_id]
+                        if b.get("type") == "child_page" and "풀 리포트" in b["child_page"]["title"]]
+    assert len(full_pages_after) == 1
+    body_text = "\n".join(_block_text(b) for b in fake.children[page_id])
+    assert "본문2" in body_text
+    assert "본문1" not in body_text
 
 
 def test_resolve_root_uses_cache(monkeypatch, tmp_path):

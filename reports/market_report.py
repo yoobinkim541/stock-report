@@ -73,6 +73,14 @@ MAJOR_INDICES = {
     "^KS11": "KOSPI",
 }
 
+NON_EQUITY_TICKERS = {"SGOV", "BIL", "SHV", "SHY", "QQQI", "SPMO", "QLD", "TQQQ", "UPRO"}
+LOW_TRUST_MARKERS = ("카더라", "소식통", "rumor", "unconfirmed")
+MARKET_NEWS_KEYWORDS = (
+    "fed", "fomc", "cpi", "ppi", "gdp", "employment", "jobs", "oil", "iran",
+    "tariff", "rate", "inflation", "연준", "금리", "고용", "물가", "유가", "이란",
+    "호르무즈", "전쟁", "원유", "국채",
+)
+
 # ─────────────────────────────────────────────
 # Utilities
 # ─────────────────────────────────────────────
@@ -92,13 +100,133 @@ def pct_str(value: Optional[float], decimals: int = 2) -> str:
     return f"{sign}{value:.{decimals}f}%"
 
 
-def price_str(value: Optional[float]) -> str:
+def price_str(value: Optional[float], symbol: str | None = None) -> str:
     """Format a price value."""
     if value is None:
         return "[데이터 없음]"
+    if symbol and symbol.startswith("^KS"):
+        return f"{value:,.2f}pt"
+    if symbol == "KRW=X":
+        return f"₩{value:,.2f}"
     if value >= 1000:
         return f"${value:,.2f}"
     return f"${value:.2f}"
+
+
+def is_non_equity(sym: str) -> bool:
+    return (sym or "").upper().split(".")[0] in NON_EQUITY_TICKERS
+
+
+def _short_ticker_list(tickers: list[str], limit: int = 4) -> str:
+    shown = [t for t in tickers if t][:limit]
+    suffix = f" 외 {len(tickers) - limit}개" if len(tickers) > limit else ""
+    return ", ".join(shown) + suffix if shown else "없음"
+
+
+def _market_snapshot() -> dict:
+    """섹션 0/요약용 빠른 시장 스냅샷. 실패해도 빈 dict."""
+    out = {}
+    for symbol, name in MAJOR_INDICES.items():
+        try:
+            hist = yf.Ticker(symbol).history(period="5d")
+            if hist is None or hist.empty or len(hist) < 2:
+                continue
+            prev = float(hist["Close"].iloc[-2])
+            curr = float(hist["Close"].iloc[-1])
+            change = ((curr - prev) / prev) * 100 if prev > 0 else None
+            out[symbol] = {"name": name, "close": curr, "change": change}
+        except Exception:
+            continue
+    return out
+
+
+def _sector_snapshot() -> list[dict]:
+    rows = []
+    for symbol, name in SECTOR_ETFS.items():
+        try:
+            hist = yf.Ticker(symbol).history(period="5d")
+            if hist is None or hist.empty or len(hist) < 2:
+                continue
+            prev = float(hist["Close"].iloc[-2])
+            curr = float(hist["Close"].iloc[-1])
+            change = ((curr - prev) / prev) * 100 if prev > 0 else None
+            if change is not None:
+                rows.append({"symbol": symbol, "name": name, "change": change, "close": curr})
+        except Exception:
+            continue
+    rows.sort(key=lambda r: r["change"], reverse=True)
+    return rows
+
+
+def _news_title(item: dict) -> str:
+    return str(item.get("title") or "")
+
+
+def _news_has_portfolio_ticker(item: dict) -> bool:
+    text = (_news_title(item) + " " + " ".join(item.get("tickers") or [])).upper()
+    for ticker in PORTFOLIO_TICKERS:
+        base = ticker.upper().split(".")[0]
+        if base and (f"${base}" in text or re.search(rf"\b{re.escape(base)}\b", text)):
+            return True
+    return False
+
+
+def _news_is_market_relevant(item: dict) -> bool:
+    text = (_news_title(item) + " " + str(item.get("content") or item.get("group_summary") or "")).lower()
+    return any(k.lower() in text for k in MARKET_NEWS_KEYWORDS)
+
+
+def _news_is_low_trust(item: dict) -> bool:
+    text = _news_title(item).lower()
+    return any(marker.lower() in text for marker in LOW_TRUST_MARKERS)
+
+
+def _news_trust_label(item: dict) -> str:
+    return "신뢰도 낮음·확인 필요" if _news_is_low_trust(item) else ""
+
+
+def _format_news_bullet(item: dict, include_snippet: bool = True) -> str:
+    line = format_news_item(item, include_snippet=include_snippet)
+    trust = _news_trust_label(item)
+    if trust:
+        line = line.replace("- **", f"- `{trust}` **", 1)
+    return line
+
+
+def _compact_cached_digest(digest: str, max_items: int = 6) -> str:
+    """source cache digest를 본문용으로 축약. 포트/시장 관련 항목을 우선 보존."""
+    if not digest:
+        return ""
+    lines = [line.rstrip() for line in digest.splitlines() if line.strip()]
+    summary = [line for line in lines if line.startswith("- ") and " — " not in line][:4]
+    item_lines = [line for line in lines if line.startswith("- [")]
+
+    def relevant(line: str) -> bool:
+        upper = line.upper()
+        if any(t.upper().split(".")[0] in upper for t in PORTFOLIO_TICKERS):
+            return True
+        return any(k.upper() in upper for k in MARKET_NEWS_KEYWORDS)
+
+    picked = [line for line in item_lines if relevant(line)][:max_items]
+    if len(picked) < max_items:
+        picked.extend([line for line in item_lines if line not in picked][: max_items - len(picked)])
+    out = ["## 누적 수집 자료", ""]
+    out.extend(summary[:4])
+    if picked:
+        out.append("")
+        out.extend(picked[:max_items])
+    return "\n".join(out)
+
+
+def _portfolio_focus_line() -> str:
+    non_equity = [t for t in PORTFOLIO_TICKERS if is_non_equity(t)]
+    equity = [t for t in PORTFOLIO_TICKERS if not is_non_equity(t)]
+    bits = []
+    if equity:
+        bits.append(f"개별주 뉴스/목표가 확인: {_short_ticker_list(equity)}")
+    if non_equity:
+        bits.append(f"역할형 ETF RSI 매매판정 제외: {_short_ticker_list(non_equity)}")
+    return " · ".join(bits) if bits else "보유종목 데이터 확인 필요"
 
 
 def rsi_from_prices(prices):
@@ -340,6 +468,46 @@ def format_arca_post(post: dict) -> str:
 # Section Builders
 # ─────────────────────────────────────────────
 
+def section_0_today_summary() -> str:
+    """오늘 결론 — 시황 리포트의 읽기 방향을 먼저 제시."""
+    lines = ["## 0. 오늘 요약", ""]
+    market = _market_snapshot()
+    sectors = _sector_snapshot()
+
+    spy = market.get("SPY", {})
+    qqq = market.get("QQQ", {})
+    spy_chg = spy.get("change")
+    qqq_chg = qqq.get("change")
+
+    if qqq_chg is not None and qqq_chg <= -1:
+        market_note = f"기술주 약세: NASDAQ {pct_str(qqq_chg)}"
+    elif spy_chg is not None and spy_chg <= -0.5:
+        market_note = f"시장 약세: S&P 500 {pct_str(spy_chg)}"
+    elif spy_chg is not None and spy_chg >= 0.5:
+        market_note = f"시장 강세: S&P 500 {pct_str(spy_chg)}"
+    elif spy_chg is not None or qqq_chg is not None:
+        market_note = "시장 혼조/보합권"
+    else:
+        market_note = "시장 지수 데이터 확인 필요"
+
+    if sectors:
+        leaders = ", ".join(f"{r['name']} {pct_str(r['change'], 1)}" for r in sectors[:2])
+        laggards = ", ".join(f"{r['name']} {pct_str(r['change'], 1)}" for r in sectors[-2:])
+        sector_note = f"섹터: 강세 {leaders} / 약세 {laggards}"
+    else:
+        sector_note = "섹터: 데이터 확인 필요"
+
+    lines.extend([
+        f"- **시장:** {market_note}",
+        f"- **포트:** {_portfolio_focus_line()}",
+        f"- **섹터:** {sector_note}",
+        "- **주의:** 이 리포트는 시장·뉴스 브리핑입니다. 체결 판단은 투자 리포트/리밸런싱 리포트 기준으로 분리합니다.",
+        "- **데이터 품질:** KOSPI는 지수 포인트로 표시하고, 현금성/역할형 ETF에는 RSI 매매판정을 적용하지 않습니다.",
+        "",
+    ])
+    return "\n".join(lines)
+
+
 def section_1_market_overview() -> str:
     """📈 시장 개요"""
     lines = []
@@ -364,7 +532,7 @@ def section_1_market_overview() -> str:
                     change = None
                 arrow = arrow_for_change(change)
                 lines.append(
-                    f"- **{name} ({symbol})**: {price_str(curr_close)} "
+                    f"- **{name} ({symbol})**: {price_str(curr_close, symbol)} "
                     f"{arrow} {pct_str(change)}"
                 )
                 details[symbol] = {"change": change, "close": curr_close}
@@ -470,17 +638,47 @@ def section_2_top_news() -> str:
             pass
 
     if headlines:
-        lines.append("### 시장 헤드라인")
-        lines.append("")
-        for prefix, item in headlines[:5]:
-            lines.append(format_news_item(item))
-        lines.append("")
+        all_items = [item for _, item in headlines]
+        direct = []
+        market_related = []
+        low_trust = []
+        other = []
+        for item in all_items:
+            if _news_is_low_trust(item):
+                low_trust.append(item)
+            if _news_has_portfolio_ticker(item):
+                direct.append(item)
+            elif _news_is_market_relevant(item):
+                market_related.append(item)
+            else:
+                other.append(item)
 
-        if portfolio_news:
-            lines.append("### 포트폴리오 관련 뉴스")
+        if direct:
+            lines.append("### 포트폴리오 직접 관련")
             lines.append("")
-            for item in portfolio_news[:5]:
-                lines.append(format_news_item(item))
+            for item in direct[:5]:
+                lines.append(_format_news_bullet(item))
+            lines.append("")
+
+        if market_related:
+            lines.append("### 시장 영향")
+            lines.append("")
+            for item in market_related[:5]:
+                lines.append(_format_news_bullet(item))
+            lines.append("")
+
+        if low_trust:
+            lines.append("### 저신뢰·확인 필요")
+            lines.append("")
+            for item in low_trust[:3]:
+                lines.append(_format_news_bullet(item, include_snippet=False))
+            lines.append("")
+
+        if other and not direct and not market_related:
+            lines.append("### 기타 헤드라인")
+            lines.append("")
+            for item in other[:3]:
+                lines.append(_format_news_bullet(item, include_snippet=False))
             lines.append("")
     else:
         lines.append("[데이터 없음] (사유: 뉴스 데이터를 불러올 수 없음)")
@@ -488,7 +686,7 @@ def section_2_top_news() -> str:
 
     cached_digest = load_cached_source_digest()
     if cached_digest:
-        lines.append(cached_digest.rstrip())
+        lines.append(_compact_cached_digest(cached_digest).rstrip())
         lines.append("")
 
     arca_posts = fetch_arca_stock_posts()
@@ -509,6 +707,7 @@ def section_3_sector_performance() -> str:
     lines.append("## 3. 🏭 섹터별 시황 (Sector Performance)")
     lines.append("")
 
+    rows = []
     for symbol, name in SECTOR_ETFS.items():
         try:
             ticker = yf.Ticker(symbol)
@@ -525,8 +724,20 @@ def section_3_sector_performance() -> str:
                 change = None
             arrow = arrow_for_change(change)
             lines.append(f"- **{name} ({symbol})**: {price_str(curr)} {arrow} {pct_str(change)}")
+            if change is not None:
+                rows.append({"symbol": symbol, "name": name, "change": change})
         except Exception as e:
             lines.append(f"- **{name} ({symbol})**: [데이터 없음] (사유: {e})")
+
+    if rows:
+        rows.sort(key=lambda r: r["change"], reverse=True)
+        leaders = ", ".join(f"{r['name']} {pct_str(r['change'], 1)}" for r in rows[:3])
+        laggards = ", ".join(f"{r['name']} {pct_str(r['change'], 1)}" for r in rows[-3:])
+        lines.extend([
+            "",
+            f"- **해석:** 상대강세 {leaders}",
+            f"- **주의:** 상대약세 {laggards}",
+        ])
 
     lines.append("")
     return "\n".join(lines)
@@ -565,9 +776,9 @@ def section_4_technical_analysis() -> str:
         lines.append(f"- **Signal Line**: {signal_line if signal_line is not None else '[데이터 없음]'}")
         if macd_line is not None and signal_line is not None:
             if macd_line > signal_line:
-                lines.append("  - 📈 MACD가 시그널선 위 → 상승 신호 (Bullish)")
+                lines.append("  - 📈 MACD가 시그널선 위 → 단기 모멘텀 우위 참고")
             else:
-                lines.append("  - 📉 MACD가 시그널선 아래 → 하락 신호 (Bearish)")
+                lines.append("  - 📉 MACD가 시그널선 아래 → 단기 모멘텀 약세 참고")
 
         # SMA
         sma50 = sma(closes, 50)
@@ -575,6 +786,8 @@ def section_4_technical_analysis() -> str:
         current_price = closes.iloc[-1]
         lines.append(f"- **50일 SMA**: {price_str(sma50) if sma50 is not None else '[데이터 없음]'}")
         lines.append(f"- **200일 SMA**: {price_str(sma200) if sma200 is not None else '[데이터 없음]'}")
+        if sma200 is None:
+            lines.append("  - 장기 추세 판단은 200일선 결측으로 생략")
         # 0 분모 방어 — sma 값이 0이면 이격도(%) 계산 불가
         if sma50 is not None and sma50 > 0:
             pct_above_50 = ((current_price - sma50) / sma50) * 100
@@ -684,6 +897,32 @@ def section_5_fear_greed() -> str:
     return "\n".join(lines)
 
 
+def _portfolio_verdict(sym: str, rsi_val, curr_price, sma50_val, sma200_val) -> str:
+    if is_non_equity(sym):
+        return "역할형/현금성 ETF — RSI 매매판정 제외, 보유 목적 기준 확인"
+
+    signals = []
+    if rsi_val is not None and rsi_val > 70:
+        signals.append("기술 과열 참고")
+    if rsi_val is not None and rsi_val < 30:
+        signals.append("기술 과매도 참고")
+    if curr_price is not None and sma50_val is not None and sma200_val is not None:
+        if curr_price > sma50_val and curr_price > sma200_val:
+            signals.append("50/200일선 상회")
+        elif curr_price < sma50_val and curr_price < sma200_val:
+            signals.append("50/200일선 하회")
+        else:
+            signals.append("추세 혼조")
+    elif curr_price is not None and sma50_val is not None:
+        signals.append("50일선 상회" if curr_price > sma50_val else "50일선 하회")
+
+    if signals:
+        return " · ".join(signals) + " (자동 매매 신호 아님)"
+    if rsi_val is not None or sma50_val is not None:
+        return "기술 지표 중립권"
+    return "데이터 부족"
+
+
 def section_6_portfolio_analysis() -> str:
     """💼 보유종목 분석"""
     lines = []
@@ -758,35 +997,7 @@ def section_6_portfolio_analysis() -> str:
             except Exception:
                 pass
 
-            # Verdict
-            signals = []
-            if rsi_val is not None and rsi_val > 70:
-                signals.append("과매수")
-            if rsi_val is not None and rsi_val < 30:
-                signals.append("과매도")
-            if sma50_val and sma200_val:
-                if curr_price > sma50_val and curr_price > sma200_val:
-                    signals.append("장기 상승세")
-                elif curr_price < sma50_val and curr_price < sma200_val:
-                    signals.append("장기 하락세")
-                else:
-                    signals.append("혼조")
-            if signals:
-                parts = []
-                for s in signals:
-                    if "과매수" in s:
-                        parts.append(f"⚠️ {s}")
-                    elif "과매도" in s:
-                        parts.append(f"🟢 {s}")
-                    elif "상승세" in s:
-                        parts.append(f"🟢 {s}")
-                    elif "하락세" in s:
-                        parts.append(f"🔴 {s}")
-                    else:
-                        parts.append(f"➡️ {s}")
-                lines.append(f"  - **판단**: {', '.join(parts)}")
-            else:
-                lines.append("  - **판단**: 데이터 부족")
+            lines.append(f"  - **상태 해석**: {_portfolio_verdict(sym, rsi_val, curr_price, sma50_val, sma200_val)}")
 
         except Exception as e:
             lines.append(f"  [데이터 없음] (사유: {e})")
@@ -797,16 +1008,20 @@ def section_6_portfolio_analysis() -> str:
 
 
 def section_7_buy_sell_signals() -> str:
-    """🎯 매수/매도 타이밍"""
+    """🎯 참고 기술 신호"""
     lines = []
-    lines.append("## 7. 🎯 매수/매도 타이밍 (Buy/Sell Signals)")
+    lines.append("## 7. 🎯 참고 기술 신호 (자동 매매 신호 아님)")
     lines.append("")
 
     signals_found = False
     all_results = {}
+    skipped = []
 
     for sym in PORTFOLIO_TICKERS:
         try:
+            if is_non_equity(sym):
+                skipped.append(sym)
+                continue
             ticker = yf.Ticker(sym)
             hist = ticker.history(period="6mo")
             if hist.empty or len(hist) < 50:
@@ -823,9 +1038,9 @@ def section_7_buy_sell_signals() -> str:
             # RSI signals
             if rsi_val is not None:
                 if rsi_val > 70:
-                    sym_signals["과매수 (Overbought)"] = f"RSI {rsi_val:.1f} > 70, 매도 신호 구간"
+                    sym_signals["과열 참고"] = f"RSI {rsi_val:.1f} > 70, 추격 주의"
                 elif rsi_val < 30:
-                    sym_signals["과매도 (Oversold)"] = f"RSI {rsi_val:.1f} < 30, 매수 기회 구간"
+                    sym_signals["과매도 참고"] = f"RSI {rsi_val:.1f} < 30, 반등 확인 필요"
 
             # SMA signals
             if sma50_val is not None:
@@ -846,9 +1061,9 @@ def section_7_buy_sell_signals() -> str:
                 sma200_prev = sma(closes[:-1], 200)
                 if sma50_prev is not None and sma200_prev is not None:
                     if sma50_prev <= sma200_prev and sma50_val > sma200_val:
-                        sym_signals["🟢 골든크로스"] = "50일선이 200일선을 돌파!"
+                        sym_signals["🟢 골든크로스"] = "50일선이 200일선을 상향 돌파"
                     elif sma50_prev >= sma200_prev and sma50_val < sma200_val:
-                        sym_signals["🔴 데스크로스"] = "50일선이 200일선을 하향 돌파!"
+                        sym_signals["🔴 데스크로스"] = "50일선이 200일선을 하향 돌파"
 
             if sym_signals:
                 all_results[sym] = sym_signals
@@ -857,6 +1072,9 @@ def section_7_buy_sell_signals() -> str:
             continue
 
     if all_results:
+        if skipped:
+            lines.append(f"- 역할형/현금성 ETF는 RSI 매매판정 제외: {_short_ticker_list(skipped)}")
+            lines.append("")
         for sym, sym_signals in all_results.items():
             lines.append(f"### {sym}")
             for signal_type, desc in sym_signals.items():
@@ -865,6 +1083,8 @@ def section_7_buy_sell_signals() -> str:
             signals_found = True
 
     if not signals_found:
+        if skipped:
+            lines.append(f"- 역할형/현금성 ETF는 RSI 매매판정 제외: {_short_ticker_list(skipped)}")
         lines.append("[데이터 없음] (사유: 신호를 계산할 충분한 데이터 없음)")
         lines.append("")
 
@@ -872,72 +1092,22 @@ def section_7_buy_sell_signals() -> str:
 
 
 def section_8_major_investors() -> str:
-    """👑 대형 투자자 동향"""
+    """👑 대형 투자자 고정 참고자료"""
     lines = []
-    lines.append("## 8. 👑 대형 투자자 동향 (Major Investors)")
+    lines.append("## 부록 A. 👑 대형 투자자 동향 (고정 참고자료)")
     lines.append("")
-    lines.append("*참고: 이 자료는 알려진 공개 포지션 기준이며, 실제 최신 13F 데이터는 SEC EDGAR에서 확인하세요.*")
+    lines.append("*당일 신호가 아니라 공개 13F/알려진 성향 기반의 고정 참고자료입니다. 최신성은 SEC EDGAR 등에서 별도 확인하세요.*")
     lines.append("")
 
-    investors = {
-        "워렌 버핏 (Berkshire Hathaway)": {
-            "desc": "버크셔 해서웨이의 대표적인 장기 보유 종목",
-            "holdings": {
-                "AAPL": "약 3.9억주 (포트폴리오 40%+)",
-                "BAC": "은행 부문 대표 투자",
-                "AXP": "아메리칸 익스프레스 - 장기 보유",
-                "KO": "코카콜라 - 배당주 장기 보유",
-                "OXY": "옥시덴탈 - 최근 추가 매수",
-            },
-            "recent": "2024년 들어 AAPL 일부 축소, OXY 지분 확대, 현금성 자산 증가",
-        },
-        "빌 애크먼 (Pershing Square)": {
-            "desc": "헤지펀드 퍼싱스퀘어의 집중 투자 포트폴리오",
-            "holdings": {
-                "CP": "캐나다 퍼시픽 캔자스시티 철도 - 최대 보유",
-                "GOOGL": "알파벳 - 대형 기술주",
-                "HLT": "힐튼 호텔 - 소비 관련",
-            },
-            "recent": "GOOGL 비중 확대 및 장기 투자 지속",
-        },
-        "스탠리 드러켄밀러 (Duquesne)": {
-            "desc": "유명 헤지펀드 매니저, 기술주 중심",
-            "holdings": {
-                "NVDA": "AI 반도체 대표주 - 대량 매수",
-                "COIN": "코인베이스 - 암호화폐 익스포저",
-                "META": "메타플랫폼스 - AI 투자 수혜 기대",
-            },
-            "recent": "NVDA 및 AI 관련주에 적극적 투자, COIN 신규 매수",
-        },
-        "레이 달리오 (Bridgewater)": {
-            "desc": "세계 최대 헤지펀드, 분산 투자 전략",
-            "holdings": {
-                "GOOGL": "알파벳 - 기술주 비중 유지",
-                "NVDA": "AI/반도체 익스포저",
-                "KO": "코카콜라 - 안전 자산",
-            },
-            "recent": "2024년 빅테크 비중 축소 및 방어주 비중 확대",
-        },
-        "국민연금 (NPS)": {
-            "desc": "한국 국민연금공단, 글로벌 분산 투자",
-            "holdings": {
-                "AAPL": "애플 - 대형 기술주",
-                "MSFT": "마이크로소프트 - AI 투자",
-                "NVDA": "엔비디아 - 반도체",
-                "AMZN": "아마존 - 전자상거래/클라우드",
-            },
-            "recent": "해외 주식 비중 확대 추세, AI 관련주 중심 리밸런싱",
-        },
-    }
-
-    for name, data in investors.items():
-        lines.append(f"### {name}")
-        lines.append(f"- **설명**: {data['desc']}")
-        lines.append("- **주요 보유 종목**:")
-        for sym, desc in data["holdings"].items():
-            lines.append(f"  - {sym}: {desc}")
-        lines.append(f"- **최근 동향**: {data['recent']}")
-        lines.append("")
+    investors = [
+        ("Berkshire Hathaway", "가치/현금 비중 참고", "최신 보유 변화는 13F 확인 필요"),
+        ("Pershing Square", "집중 포트폴리오 참고", "보유 종목은 분기별 변동 가능"),
+        ("Duquesne", "매크로/성장주 방향성 참고", "당일 매매 근거로 사용하지 않음"),
+        ("Bridgewater", "분산·매크로 포지션 참고", "시장 레짐 참고자료"),
+        ("NPS", "장기 글로벌 분산 투자 참고", "국내외 대형주 수급 힌트 수준"),
+    ]
+    for name, focus, caveat in investors:
+        lines.append(f"- **{name}:** {focus} · {caveat}")
 
     return "\n".join(lines)
 
@@ -1009,7 +1179,7 @@ def section_9_analyst_reports() -> str:
 def section_10_economic_calendar() -> str:
     """📅 경제 일정"""
     lines = []
-    lines.append("## 10. 📅 경제 일정 (Economic Calendar)")
+    lines.append("## 10. 📅 경제 일정 (실제 캘린더 우선)")
     lines.append("")
 
     weekday_names = {
@@ -1026,58 +1196,32 @@ def section_10_economic_calendar() -> str:
     lines.append(f"**오늘 ({TODAY_STR}, {today_name}) 주요 경제 일정:**")
     lines.append("")
 
-    # Generic weekly schedule
-    weekly_schedule = {
-        0: ("월요일", [
-            "📊 제조업 PMI (Markit/S&P Global)",
-            "📊 서비스업 PMI (Markit/S&P Global)",
-            "🏭 내구재 주문 (Durable Goods Orders)",
-        ]),
-        1: ("화요일", [
-            "📈 소비자물가지수(CPI) - 매월 둘째주",
-            "📈 생산자물가지수(PPI) - 매월 셋째주",
-            "🏠 주택가격지수 (Case-Shiller)",
-            "📊 컨퍼런스보드 소비자신뢰지수",
-        ]),
-        2: ("수요일", [
-            "📊 ADP 고용보고서",
-            "📈 GDP (분기별, 수정치)",
-            "🏠 주택착공/건축허가",
-            "📋 연준 FOMC 회의록 (8주간격)",
-            "🛢️ EIA 원유재고",
-        ]),
-        3: ("목요일", [
-            "📋 주간 실업수당 청구건수",
-            "📊 무역수지",
-            "🏠 기존주택매매",
-            "📈 생산자물가지수(PPI) (월 셋째주)",
-        ]),
-        4: ("금요일", [
-            "📊 고용보고서 (비농업고용지수, 실업률) - 매월 첫째주",
-            "📈 미시건대 소비자심리지수",
-            "🏠 신규주택매매",
-        ]),
-    }
+    events = []
+    try:
+        from providers.econ_calendar import upcoming_events
+        events = upcoming_events(days=7, start=KST_NOW.date())
+    except Exception:
+        events = []
 
-    if WEEKDAY in weekly_schedule:
-        day_name, events = weekly_schedule[WEEKDAY]
-        for event in events:
-            lines.append(f"  - {event}")
+    today_events = [e for e in events if e.get("when") and e["when"].date().isoformat() == TODAY_STR]
+    if today_events:
+        for ev in today_events[:8]:
+            lines.append(f"  - {ev.get('marker', '⚪')} {ev.get('date_str', '—')} · {ev.get('title')}")
     else:
-        lines.append("  - 오늘은 주요 경제 지표 발표가 없는 주말입니다.")
+        lines.append("  - 실제 캘린더 기준 확인된 오늘 일정 없음 또는 데이터 미확보")
+
+    upcoming = [e for e in events if e not in today_events]
+    lines.append("")
+    lines.append("**향후 7일 확인 일정:**")
+    lines.append("")
+    if upcoming:
+        for ev in upcoming[:12]:
+            lines.append(f"  - {ev.get('marker', '⚪')} {ev.get('date_str', '—')} · {ev.get('title')}")
+    else:
+        lines.append("  - 실제 캘린더 데이터 미확보")
 
     lines.append("")
-    lines.append("**이번 주 주요 일정:**")
-    lines.append("")
-    for day_num in range(5):
-        if day_num in weekly_schedule:
-            day_name, events = weekly_schedule[day_num]
-            lines.append(f"  **{day_name}**")
-            for event in events:
-                lines.append(f"    - {event}")
-            lines.append("")
-
-    lines.append("*출처: 경제 캘린더는 일반적인 일정이며, 실제 발표 일정은 변경될 수 있습니다.*")
+    lines.append("*출처: SaveTicker 경제 캘린더. API 실패 시 일반 반복 일정을 오늘 일정처럼 표시하지 않습니다.*")
     lines.append("")
     return "\n".join(lines)
 
@@ -1117,9 +1261,10 @@ def collect_section_bullets(report: str, heading: str, limit: int) -> list[str]:
 
 def build_mobile_summary(report: str) -> str:
     """Build a short Telegram-first market summary."""
+    summary_lines = collect_section_bullets(report, "오늘 요약", 5)
     market_lines = collect_section_bullets(report, "시장 개요", 4)
     news_lines = collect_section_bullets(report, "주요 뉴스", 3)
-    signal_lines = collect_section_bullets(report, "매수/매도 타이밍", 3)
+    signal_lines = collect_section_bullets(report, "참고 기술 신호", 3)
 
     if "전반적으로 상승" in report:
         conclusion = "상승 우위. 신규 매수는 과열 여부 확인 후 분할 접근."
@@ -1135,8 +1280,18 @@ def build_mobile_summary(report: str) -> str:
         "",
         f"결론: {conclusion}",
         "",
-        "핵심 지수:",
+        "오늘 요약:",
     ]
+
+    if summary_lines:
+        lines.extend(summary_lines)
+    else:
+        lines.append("- 시황 요약 데이터 확인 불가")
+
+    lines.extend([
+        "",
+        "핵심 지수:",
+    ])
 
     if market_lines:
         lines.extend(market_lines)
@@ -1176,13 +1331,14 @@ def build_report() -> str:
     lines.append("")
 
     sections = [
+        ("오늘 요약", section_0_today_summary),
         ("시장 개요", section_1_market_overview),
         ("주요 뉴스 & 이슈", section_2_top_news),
         ("섹터별 시황", section_3_sector_performance),
         ("기술적 분석", section_4_technical_analysis),
         ("공포·탐욕 지수", section_5_fear_greed),
         ("보유종목 분석", section_6_portfolio_analysis),
-        ("매수/매도 타이밍", section_7_buy_sell_signals),
+        ("참고 기술 신호", section_7_buy_sell_signals),
         ("대형 투자자 동향", section_8_major_investors),
         ("애널리스트 리포트", section_9_analyst_reports),
         ("경제 일정", section_10_economic_calendar),
