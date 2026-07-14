@@ -17,7 +17,7 @@ if str(PROJECT_DIR) not in sys.path:
 
 import fmt  # 루트 모듈 — sys.path 세팅 이후 import
 
-ADVISOR_MODEL = os.environ.get("STOCK_ADVISOR_MODEL", "gpt-5.5")
+ADVISOR_MODEL = os.environ.get("STOCK_ADVISOR_MODEL", "gpt-5.6-sol")
 EDITABLE_FILES = [
     "portfolio_snapshot.json",
     "price_alerts.json",

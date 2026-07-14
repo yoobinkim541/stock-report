@@ -102,7 +102,7 @@ def test_ask_portfolio_advisor_uses_configured_codex_model_runner():
     kwargs = calls[0][1]
     assert cmd[:4] == ["hermes", "chat", "-q", calls[0][0][3]]
     assert "--provider" in cmd and "openai-codex" in cmd
-    assert "--model" in cmd and "gpt-5.5" in cmd
+    assert "--model" in cmd and "gpt-5.6-sol" in cmd
     assert "--toolsets" in cmd and "file" in cmd
     assert kwargs["cwd"] == PROJECT_DIR
 
