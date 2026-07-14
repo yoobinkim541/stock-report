@@ -328,7 +328,7 @@ def fetch_us_transactions(days: int = 7) -> list[dict] | None:
                      "Authorization": f"Bearer {tok}", "api-id": "ust21100"},
             json={"strt_dt": (end - timedelta(days=days)).strftime("%Y%m%d"),
                   "end_dt": end.strftime("%Y%m%d"),
-                  "tp": "", "stex_tp": "", "stk_cd": "", "krw_repl_skip_yn": "Y"},
+                  "tp": "0", "stex_tp": "", "stk_cd": "", "krw_repl_skip_yn": "Y"},  # tp=0 전체(매수·매도) — 빈값은 999999 "구분 입력" 거부
             timeout=15,
         )
         resp.raise_for_status()
