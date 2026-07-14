@@ -29,6 +29,8 @@ PATH=/home/ubuntu/.local/bin:/usr/local/bin:/usr/bin:/bin
 50 22 * * 1-5 cd /home/ubuntu/projects/stock-report && uv run python crons/paper_track.py >> /tmp/paper_track.log 2>&1               # 22:50 UTC = 07:50 KST
 # 키움 REST API 국내주식 잔고 동기화
 35 23 * * 1-5 cd /home/ubuntu/projects/stock-report && uv run python crons/kiwoom_sync_rest.py >> /tmp/kiwoom_sync_rest.log 2>&1      # 23:35 UTC = 08:35 KST
+# 토스증권 잔고 확인/동기화 (read-only — 기본 diff 보고만·OVERSEAS_SYNC_SOURCE=toss 시 반영)
+40 22 * * 1-5 cd /home/ubuntu/projects/stock-report && uv run python crons/toss_sync.py >> /tmp/toss_sync.log 2>&1      # 22:40 UTC = 07:40 KST (미장 마감 후·리포트 23:00 전)
 # 옵션 지표 스냅샷 (ATM IV·풋콜비·스큐·기대변동폭) — 학습 피처 축적
 20 21 * * 1-5 cd /home/ubuntu/projects/stock-report && uv run python crons/options_snapshot.py >> /tmp/options_snapshot.log 2>&1     # 21:20 UTC = 06:20 KST (us_mock_report 21:30 충돌 회피)
 # 어닝 컨센서스·리비전·서프라이즈·밸류에이션 point-in-time 스냅샷 — 실적/주가반응 예측 학습데이터 축적

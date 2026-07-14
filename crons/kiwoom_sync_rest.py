@@ -198,8 +198,124 @@ def _touch_sync_timestamp():
     _shadow_to_store(snap)
 
 
+# ── 해외주식(미국) — 키움 REST 해외 지원 (read-only 잔고·주문 경로 0) ──────────
+
+def _parse_us_balance(result: dict) -> list[dict]:
+    """ust21070(미국주식 원장잔고확인) 응답 → overseas_general.holdings_usd 행 (순수).
+
+    필드: result_list[{stk_cd, frgn_stk_nm, qty, frgn_stk_book_uv(장부단가),
+    now_pric(현재가), evlt_amt(평가금액), pl_amt(손익금액), crnc_code}]. USD 만 채택.
+    """
+    def _num(item, key):
+        raw = item.get(key, "")
+        try:
+            return float(str(raw).replace(",", "").replace("%", "").strip() or "0")
+        except (TypeError, ValueError):
+            return 0.0
+
+    rows = []
+    for item in (result or {}).get("result_list", []) or []:
+        ticker = str(item.get("stk_cd", "") or "").strip().upper()
+        if not ticker:
+            continue
+        crnc = str(item.get("crnc_code", "") or "").upper()
+        if crnc and crnc != "USD":                       # 미국(USD) 잔고만 — 타통화 제외
+            continue
+        shares = _num(item, "qty") or _num(item, "poss_qty")
+        avg = _num(item, "frgn_stk_book_uv")
+        cur = _num(item, "now_pric")
+        value = _num(item, "evlt_amt") or round(shares * cur, 4)
+        pnl = _num(item, "pl_amt") or round((cur - avg) * shares, 4)
+        rows.append({
+            "name": str(item.get("frgn_stk_nm", "") or ticker).strip(),
+            "ticker": ticker, "shares": shares,
+            "avg_price_usd": avg, "current_price_usd": cur,
+            "cost_usd": round(shares * avg, 4), "value_usd": value, "pnl_usd": pnl,
+            "return_pct": round((cur / avg - 1) * 100, 2) if avg > 0 and cur > 0 else 0.0,
+        })
+    return rows
+
+
+def fetch_us_balance() -> list[dict] | None:
+    """키움 REST 해외주식 잔고(ust21070·/api/us/acnt) — 실패→None, 정상·보유없음→[].
+
+    국내(kt00018)와 동일 토큰·도메인(read-only 조회 전용) — 주문 TR 없음.
+    """
+    try:
+        import requests as _req
+        from kiwoom_rest_api.auth.token import TokenManager
+    except ImportError:
+        logger.error("kiwoom-rest-api 미설치")
+        return None
+    if not os.getenv("KIWOOM_API_KEY") or not os.getenv("KIWOOM_API_SECRET"):
+        return None
+    try:
+        tok = TokenManager().access_token
+        if not tok:
+            return None
+        resp = _req.post(
+            "https://api.kiwoom.com/api/us/acnt",
+            headers={
+                "content-type": "application/json;charset=UTF-8",
+                "Authorization": f"Bearer {tok}",
+                "api-id": "ust21070",
+            },
+            json={"stex_tp": "", "stk_cd": ""},          # 전체 거래소·전체 종목
+            timeout=15,
+        )
+        resp.raise_for_status()
+        result = resp.json()
+    except Exception as e:
+        logger.error("키움 해외 잔고 API 실패: %s", e)
+        return None
+    if result.get("return_code", -1) != 0:
+        logger.error("키움 해외 API 오류: %s", result.get("return_msg", "unknown"))
+        return None
+    rows = _parse_us_balance(result)
+    logger.info("키움 해외 잔고: %d개 종목", len(rows))
+    return rows
+
+
+def sync_us_balance() -> None:
+    """해외 잔고 확인 + (OVERSEAS_SYNC_SOURCE=kiwoom 일 때만) 스냅샷 반영.
+
+    기본은 diff 보고만 — 토스 동기화와 이중 writer 충돌 방지(lib/overseas_snapshot 단일
+    apply 소스 원칙). 해외 계좌 미개설/기능 미가입이면 API 오류 → 조용히 스킵(로그만).
+    """
+    rows = fetch_us_balance()
+    if rows is None:
+        logger.info("키움 해외 잔고 조회 불가 — 스킵 (해외 미개설/키 문제면 정상)")
+        return
+    import sys
+    if PROJECT_DIR not in sys.path:
+        sys.path.insert(0, PROJECT_DIR)
+    from lib import overseas_snapshot as osnap
+
+    diff = osnap.diff_holdings(osnap.load_current_overseas(), rows)
+    if osnap.can_apply("kiwoom"):
+        if rows:
+            summary = osnap.update_overseas_holdings(rows, source="kiwoom")
+            total = sum(h.get("value_usd", 0) for h in rows)
+            _notify("📊 키움 해외주식 동기화 (OVERSEAS_SYNC_SOURCE=kiwoom)\n"
+                    "━━━━━━━━━━━━━━━━━━━━━━━\n"
+                    f"{summary}\n\n  총평가  ${total:,.2f}")
+        else:
+            logger.info("키움 해외 보유 0건 — 스냅샷 미변경(안전)")
+    elif diff:
+        _notify("🔗 키움 해외 잔고 — 스냅샷과 차이 (보고만·반영하려면 OVERSEAS_SYNC_SOURCE=kiwoom)\n"
+                + "\n".join(diff[:12]))
+    else:
+        logger.info("키움 해외 잔고 %d종목 — 스냅샷과 일치", len(rows))
+
+
 def main():
     logger.info("키움 국내주식 동기화 시작")
+
+    # 해외주식(미국) — 키움 REST 해외 지원 확인·동기화 (실패는 격리 — 국내 흐름 불변)
+    try:
+        sync_us_balance()
+    except Exception as e:
+        logger.warning("키움 해외 동기화 실패(격리): %s", e)
 
     holdings = fetch_domestic_balance()
     if holdings is None:                       # API/키/토큰/연결 실패 — 조용히 묻히지 않게 알림

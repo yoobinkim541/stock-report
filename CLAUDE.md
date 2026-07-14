@@ -76,6 +76,7 @@ crons/news_spike_detector.py (크론 매 1분)
 | `providers/naver_kr.py` | KR 수급(외인/기관/개인 순매수)+KOSPI200 멤버십(Naver — pykrx 공백 복구, 서버서 동작). investor_flow_features·kospi200_members. **Naver HTML=EUC-KR** | — |
 | `providers/news_labels.py` | **LLM 뉴스 구조화 라벨층** — 수집 뉴스 → {티커,유형,방향,강도} point-in-time JSONL(published/labeled 시각 보존·무룩어헤드) + `news_axis`(방향×강도 감쇠합 [0,1]). 환각 방어(입력 태그 밖 티커 폐기·enum 검증). LLM=**피처 생성기 한정**(선택/타이밍 위임 금지 — 재현불가 출력은 백테스트 불성립) | `~/reports/ml-data/news_llm_labels.jsonl` |
 | `providers/kis_quote.py` | KIS **실계좌 시세 read-only** REST — 실전 도메인(`openapi.koreainvestment.com:9443`) 하드락·현재가·10단계 호가·거래량(**KR·美 모두 무료 실시간**). 주문 경로 0(grep 강제)·`REALTIME_ENABLED` 게이트·실전키 fail-closed | `~/.cache/kis_quote_token.json` |
+| `providers/toss_api.py` | 토스증권 Open API **읽기전용** 어댑터 — OAuth2 client credentials(토큰 디스크 영속)·계좌/잔고(holdings)/현재가/환율. **주문 경로 0**(grep 강제)·도메인 하드락(`openapi.tossinvest.com`)·키 없으면 fail-closed | `~/.cache/toss_token.json` |
 | `providers/realtime_quotes.py` | 실시간 캐시 **읽기전용 클라이언트** = 폴백 단일 seam. get_price/orderbook/best/volume, 2단 신선도(heartbeat+심볼 ts). stale·비활성·없음 → None → 소비자 yfinance 폴백. 예외 무발 | `~/.cache/kis_realtime_quotes.json` |
 | `providers/intraday_bars.py` | 단기 1분봉 데이터층 — kis_stream 틱→OHLCV 집계(누적 볼륨 차분·v_anom/v_partial)·JSONL bar store reader(5m 리샘플·yfinance 폴백)·분대별 거래량 프로파일·심볼 변환 단일 진실원(base_symbol/to_yf/market_of) | `~/reports/ml-data/intraday_bars/*.jsonl` |
 | `providers/intraday_universe.py` | 단기 동적 유니버스 스캐너 ("stocks in play") — KR KIS 거래대금 순위(+필터: 거래대금·가격·보통주만·ETF/스팩 제외)·US 히트맵 스냅샷 재사용 → \|등락\| 상위 top-K. 히스테리시스(보유 유지)·실패 시 정적 `INTRADAY_UNIVERSE_*` 폴백 | `~/.cache/intraday_universe.json` |
@@ -115,7 +116,8 @@ crons/news_spike_detector.py (크론 매 1분)
 | `crons/notion_archive.py` | 일일 리포트 → Notion 월(`26/06`)/주(`4주차`) 계층 페이지 누적 아카이빙 (멱등 upsert, 대시보드와 독립) | notion_sync 가 호출 |
 | `crons/news_spike_detector.py` | 속보 수집 + 급증 감지 + 텔레그램 알림 (+ 실시간 시세 동반표시). **경계선(규칙 5~6점)만 LLM 2차 판정**(`NEWS_SPIKE_LLM_ENABLED` opt-in·회당 상한·실패 시 규칙 점수 유지) | 매 1분 |
 | `scripts/kis_stream_watchdog.sh` | 실시간 시세 WS 상시 프로세스(kis_stream) 재기동 — `REALTIME_ENABLED=true` 시만 기동(opt-in·꺼지면 no-op) | 매 1분 |
-| `crons/kiwoom_sync_rest.py` | 키움 REST API 국내주식 잔고 동기화 | 평일 23:35 UTC |
+| `crons/kiwoom_sync_rest.py` | 키움 REST API 국내주식 잔고 동기화 + **해외주식(미국) 잔고**(ust21070 read-only — 기본 diff 보고만·`OVERSEAS_SYNC_SOURCE=kiwoom` 시 overseas_general 반영) | 평일 23:35 UTC |
+| `crons/toss_sync.py` | 토스증권 잔고 확인/동기화 (`--check`=연결 확인) — US 보유 diff 보고·`OVERSEAS_SYNC_SOURCE=toss` 시만 overseas_general 반영(단일 apply 소스 — `lib/overseas_snapshot`). KR 보유는 항상 보고만(domestic 권위=키움) | 평일 22:40 UTC |
 | `crons/sp500_heatmap_snapshot.py` | 대시보드 홈 S&P500 시장맵 스냅샷 적재(`_sp500_heatmap_live`→JSON) — 콜드로드 즉시화. 표시데이터 | 매 20분 |
 | `crons/kiwoom_mock_track.py` | 국내주식 자동 페이퍼트레이딩 (키움 **모의투자** — 신호 기반 리밸런스·모의 도메인 하드락·편입/퇴출 근거 원장 적재). **회전율 억제**(무거래밴드+랭크 히스테리시스)·**거래비용 적립**(수수료+증권거래세→리포트 계기)·★가격 축 3종(mom12·hi52·lowvol) point-in-time 원장 수집·**분할매수/매도**(`KR_MOCK_TRANCHES` 회당 목표 1/N·`lib/tranche`)·**최소보유**(`KR_MOCK_MIN_HOLD_DAYS`) | 평일 00:30 UTC |
 | `crons/intraday_mock_track.py` | **단기(1분봉) 모의 트레이딩 엔진** — 유니버스 갱신→orphan 수리→bar/호가 적재→일손실 halt→청산(우선: stop→target→timestop→collapse→EOD flat)→진입(축 5+3 점수+가드 8종). **shadow 기본**(`INTRADAY_SHADOW_ONLY` — 가상체결만 원장)·청산 즉시 net-of-cost R 보상·trade_events→차트 ▲▼ 마커. `INTRADAY_MOCK_ENABLED` off 면 no-op | 매 1분 |
@@ -300,6 +302,9 @@ crons/news_spike_detector.py (크론 매 1분)
 | `ADAPTIVE_KR_AXES_ENABLED` | — | `false` (KR 가격축 주간 재검증 권고를 shadow 기록 → 모의 선택 정책에 반영. off면 평가·텔레그램만. **모의 한정 — 실계좌 집행 0**) |
 | `ADAPTIVE_US_AXES_ENABLED` | — | `false` (US 가격축 주간 재검증 권고 shadow → 모의 선택 반영. KR 보다 약한 검증[상폐 가격 부재·커버리지 강등] — 동일 안전장치) |
 | `US_MOCK_LEV_SLEEVE` / `US_MOCK_LEV_SYMBOL` | — | `false` / `QLD` (Tier3 게이트 GO shadow 신선 시 US 모의 NAV×(reco−1) 을 2x ETF 슬리브로 — **모의 한정 라이브 검증**. 게이트 NO-GO/stale 시 청산 방향) |
+| `TOSS_API_KEY` / `TOSS_API_SECRET` | — | — (토스증권 Open API client id/secret — corp.tossinvest.com/ko/open-api 발급. 절대 커밋 금지) |
+| `TOSS_ACCOUNT_SEQ` | — | — (사용 계좌 accountSeq. 미설정 시 첫 BROKERAGE 계좌 자동 선택) |
+| `OVERSEAS_SYNC_SOURCE` | — | — (`toss`\|`kiwoom`\|빈값. 해외(USD) 잔고를 portfolio_snapshot 에 **실반영할 단일 소스** — 빈값(기본)은 두 크론 모두 diff 보고만. 이중 writer lost-update 구조적 차단) |
 | `SYNC_TOKEN` | — | — (portfolio_sync_server 인증) |
 | `SYNC_PORT` | — | `8765` |
 | `NOTION_TOKEN` | — | — (Notion 대시보드 동기화·아카이빙. 없으면 notion_sync 스킵) |
@@ -488,6 +493,7 @@ MSFT, QQQI, ORCL, SAP, UNH, SGOV, NVDA, GOOGL, SPMO
   (`openapi…:9443`·`ops…:21000`)을 하드락하되 **주문 URL/TR/함수가 코드에 없다**(테스트가 소스 grep 으로 강제).
   실시간은 *가격 숫자*만 제공 → 알림·표시·페이퍼 지정가에만 쓰이고 실계좌 집행은 불변(없음). `REALTIME_ENABLED`
   off(기본)면 전 소비자가 yfinance 로 투명 폴백 — 실시간 장애가 기존 흐름을 깨지 않는다
+- **토스증권·키움 해외 API 는 잔고 read-only 전용** — `providers/toss_api.py`(주문 경로 0·grep 강제·도메인 하드락)·`kiwoom_sync_rest.fetch_us_balance`(ust21070 조회만). 실계좌 자동매매는 여전히 없음. 해외 스냅샷 실반영은 `OVERSEAS_SYNC_SOURCE` 단일 소스만(기본 빈값=보고만)
 - `portfolio_snapshot.json` writer 3종(`holding_manager._save`·`portfolio_sync_server`·`kiwoom_sync_rest`)은
   모두 `safe_io.atomic_write_json` + `safe_io.file_write_lock` 경유 — 직접 `json.dump`/in-place write 금지.
   (atomic rename 으로 torn read 방지 + 교차 프로세스 락으로 동시 쓰기 lost update 방지) → 이후 `store.shadow_doc` 비차단 동기화
