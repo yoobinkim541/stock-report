@@ -1,0 +1,140 @@
+<!doctype html>
+<html lang="ko">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Stock Agent Console</title>
+    <link rel="stylesheet" href="/styles.css" />
+  </head>
+  <body>
+    <header class="topbar">
+      <div class="brand">
+        <h1>Stock Agent Console</h1>
+        <p>World Memory · Context Layer · Portfolio Lab</p>
+      </div>
+      <div class="status-strip" aria-live="polite">
+        <span id="healthBadge" class="badge muted">연결 확인 중</span>
+        <span id="dbPath" class="path"></span>
+      </div>
+    </header>
+
+    <nav class="controlbar" aria-label="context controls">
+      <div class="segmented" id="surfaceTabs">
+        <button type="button" data-surface="market">시장</button>
+        <button type="button" data-surface="portfolio">포트폴리오</button>
+        <button type="button" data-surface="ticker">종목</button>
+        <button type="button" data-surface="paper">모의투자</button>
+        <button type="button" data-surface="lab">전략랩</button>
+      </div>
+      <label class="field-inline">
+        <span>범위</span>
+        <select id="hoursSelect">
+          <option value="24">24h</option>
+          <option value="72" selected>72h</option>
+          <option value="168">7d</option>
+          <option value="336">14d</option>
+        </select>
+      </label>
+      <button type="button" id="refreshBtn">새로고침</button>
+      <button type="button" id="ingestBtn">메모리 적재</button>
+      <button type="button" id="installBtn">로컬 프롬프트</button>
+    </nav>
+
+    <main class="workspace">
+      <section class="panel agent-panel" aria-labelledby="agentTitle">
+        <div class="panel-head">
+          <div>
+            <h2 id="agentTitle">대화형 에이전트</h2>
+            <span id="activeSurface" class="subtle">market</span>
+          </div>
+          <span id="contextStamp" class="subtle"></span>
+        </div>
+        <div id="conversation" class="conversation" aria-live="polite"></div>
+        <form id="chatForm" class="chat-form">
+          <textarea id="chatInput" rows="4" placeholder="예: PLTR 추천이 왜 떴고 실패하면 어떤 지표를 봐야 해?"></textarea>
+          <button type="submit">질문</button>
+        </form>
+      </section>
+
+      <aside class="panel context-panel" aria-labelledby="contextTitle">
+        <div class="panel-head">
+          <h2 id="contextTitle">컨텍스트 레이어</h2>
+          <span id="eventCount" class="badge"></span>
+        </div>
+        <div id="focusList" class="chip-grid"></div>
+        <div class="metric-grid">
+          <div>
+            <span class="label">소스</span>
+            <strong id="sourceSummary">-</strong>
+          </div>
+          <div>
+            <span class="label">심볼</span>
+            <strong id="symbolSummary">-</strong>
+          </div>
+          <div>
+            <span class="label">모델</span>
+            <strong id="modelSummary">-</strong>
+          </div>
+          <div>
+            <span class="label">리포트</span>
+            <strong id="reportSummary">-</strong>
+          </div>
+        </div>
+        <div class="section-split">
+          <h3>최근 이벤트</h3>
+          <div id="eventList" class="compact-list"></div>
+        </div>
+        <div class="section-split">
+          <h3>모의투자 상태</h3>
+          <div id="paperState" class="compact-list"></div>
+        </div>
+      </aside>
+
+      <section class="panel memory-panel" aria-labelledby="memoryTitle">
+        <div class="panel-head">
+          <h2 id="memoryTitle">시장 기억</h2>
+          <span id="memoryCount" class="badge"></span>
+        </div>
+        <form id="memoryForm" class="inline-form">
+          <input id="memoryTitleInput" type="text" placeholder="기억 제목" />
+          <input id="memorySymbolsInput" type="text" placeholder="심볼: QQQ, NVDA" />
+          <textarea id="memoryBodyInput" rows="3" placeholder="관찰 내용"></textarea>
+          <button type="submit">추가</button>
+        </form>
+        <div id="memoryList" class="timeline"></div>
+      </section>
+
+      <section class="panel lab-panel" aria-labelledby="labTitle">
+        <div class="panel-head">
+          <h2 id="labTitle">포트폴리오 전략랩</h2>
+          <span id="scenarioCount" class="badge"></span>
+        </div>
+        <form id="scenarioForm" class="scenario-form">
+          <div class="form-row">
+            <input id="scenarioName" type="text" placeholder="시나리오 이름" value="AI 맥락 기반 테스트" />
+            <input id="scenarioMaxLoss" type="number" min="0" max="100" step="0.5" value="8" aria-label="max loss percent" />
+          </div>
+          <textarea id="scenarioDesc" rows="3" placeholder="전략 가설"></textarea>
+          <textarea id="scenarioAllocations" rows="5">QQQ 45 핵심 성장
+TLT 20 금리 방어
+GLD 10 꼬리위험
+CASH 25 기회 대기</textarea>
+          <textarea id="scenarioRules" rows="4" placeholder="운용 규칙: 예) VIX 25 이상이면 레버리지 신규 진입 중단"></textarea>
+          <button type="submit">시나리오 저장</button>
+        </form>
+        <div id="scenarioList" class="scenario-list"></div>
+      </section>
+
+      <section class="panel prompt-panel" aria-labelledby="promptTitle">
+        <div class="panel-head">
+          <h2 id="promptTitle">로컬 노트북 설치 프롬프트</h2>
+          <button type="button" id="copyPromptBtn">복사</button>
+        </div>
+        <textarea id="installPrompt" rows="14" readonly></textarea>
+      </section>
+    </main>
+
+    <div id="toast" class="toast" role="status" aria-live="polite"></div>
+    <script src="/app.js"></script>
+  </body>
+</html>

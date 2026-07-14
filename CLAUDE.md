@@ -319,6 +319,7 @@ crons/news_spike_detector.py (크론 매 1분)
 | `NOTION_ARCHIVE_ROOT_ID` | — | — (아카이브 루트 페이지 강제 지정. 미설정 시 대시보드 부모 아래 자동탐색·생성 후 `~/.cache` 캐시) |
 | `NOTION_ARCHIVE_PARENT_ID` | — | — (루트를 만들 부모. 기본: 대시보드의 부모 페이지) |
 | `AGENT_MEMORY_ENABLED` | — | `true` (공유 에이전트 메모리 — hermes/codex·Antigravity 공용 컨텍스트 패킷. `/ask` 프롬프트 주입+대화 축적·일일 압축(1회/일·실패 1h 재시도·미완 skipped)·레닥션. 저장: `~/.local/share/stock-report/shared-memory/`(git 밖·local-only). CLI: `python -m lib.agent_memory --status|--note|--summary`. FinanceAgentGUI(BSD-3) shared-agent-memory 이식) |
+| `AGENT_CONSOLE_*` | — | AI 콘솔/agent_console 튜닝 — `_LLM_ENABLED`(기본 1)·`_CODEX_ENABLED`/`_HERMES_ENABLED`·`_LLM_MODEL·_PROVIDER·_TIMEOUT`·`_SHARED_MEMORY_DIR`(기본 = `AGENT_MEMORY_DIR` 와 동일 통합 디렉토리)·`_HOST/_PORT`(선택 Flask 콘솔 127.0.0.1:8797). LLM 폴백: codex exec(read-only 샌드박스·cwd /tmp)→hermes chat→agy 백업(`LLM_BACKUP_ENABLED` 시) |
 | `LLM_BACKUP_ENABLED` | — | `false` (hermes 실패 시 Antigravity CLI `agy --print` 백업 — /ask·overlay·속보판정·뉴스라벨 4경로. 빈 스크래치 cwd 실행(레포 파일도구 차단)·출력은 기존 guard/파서 검증 통과 시만 채택. 진단: `python -m lib.llm_cli --check`) |
 | `LLM_BACKUP_CLI` | — | `agy` (백업 CLI 바이너리명) |
 | `NEWS_SPIKE_LLM_ENABLED` | — | `false` (속보 경계선[규칙 5~6점]만 LLM 2차 판정. off면 규칙 점수만 — 기존 동작 불변) |
@@ -400,7 +401,7 @@ crons/news_spike_detector.py (크론 매 1분)
 | `providers/insider.py` | 내부자거래 (SEC Form 4·edgar 재사용·parse_form4 순수) + 최근 SEC 공시 |
 | `providers/dart.py` | KR 공시 (DART OpenAPI·corpCode 매핑·`DART_API_KEY` 없으면 graceful) |
 
-**6페이지(멀티페이지·plotly 차트화):** 🏠홈(포트 글랜스)·💼포트폴리오(리스크 시각화)·🔍종목 분석(가격차트+밸류/재무/기관/공시/실적 **섹션**)·🗓️시장·캘린더(경제+뉴스)·🧪모의투자(자동 페이퍼트레이딩 계좌+판단근거 원장)·🔬리서치(랭킹 스크리너+ML 백테스트+정책 학습). 검증: `tests/test_dashboard*.py` — data/views 순수로직 + **charts 단위** + **페이지 렌더 AppTest(반드시 비루트 cwd**·streamlit sys.path 함정 가드).
+**8페이지(멀티페이지·plotly 차트화):** 🏠홈(포트 글랜스)·💼포트폴리오(리스크 시각화)·🔍종목 분석(가격차트+밸류/재무/기관/공시/실적 **섹션**)·🖥️차트 풀뷰·🗓️시장·캘린더(경제+뉴스)·🧪모의투자(자동 페이퍼트레이딩 계좌+판단근거 원장)·🔬리서치(랭킹 스크리너+ML 백테스트+정책 학습)·🧠**AI 콘솔**(`pages/ai_console.py` — `agent_console/` 패키지 UI: **단일 대화 스레드 + 자동 맥락 라우팅**[`agent.infer_surface` 순수함수 — 질문 키워드→portfolio/paper/lab·자산 심볼→ticker·짧은 후속은 직전 맥락 유지·수동 pin 은 ⚙️설정에만]·전략 캔버스[`portfolio_matrix_dsl` RSI 현금비중 프로그램 — 표시·시뮬 전용]·공유메모리 열람. LLM 은 codex/hermes CLI chat 경유·**주문 경로 0**. **메모리 단일 진실원 = lib**: 월드 메모리는 `lib.world_memory`(콘솔 읽기=`context.world_memory_rows`·쓰기=`context.log_world_issue` — /ask·크론·🧭 카드와 같은 축적, ML 원장은 오염 방지 위해 월드 적재 제외), 공유 메모리 디렉토리 기본값도 `lib/agent_memory` 와 동일(`~/.local/share/stock-report/shared-memory` — 노트북 기록은 `record_chat` 위임·`memory_summary.md` 단일 writer = lib). 콘솔 자체 테이블(market_memory)·구 `data/shared-memory/` 는 legacy 폴백 — `uv run python -m agent_console.migrate_memory` 로 1회 이관). 검증: `tests/test_dashboard*.py` — data/views 순수로직 + **charts 단위** + **페이지 렌더 AppTest(반드시 비루트 cwd**·streamlit sys.path 함정 가드).
 
 > **UX 모델(H-series):** 종목선택은 사이드바 **단일 검색 셀렉트박스**(한/영/티커·리셋버그 없음) 하나로 통일. 무거운 계산(종목분석 5섹션·리서치 스크리너/백테스트)은 **`@st.fragment`+`st.segmented_control`/버튼 게이트**로 **활성 것만 실행**(전체 리로드·스피너 연속 제거 — 부분 rerun). 다크 터미널 유지하되 간격·대비·컴포넌트 라운드 다듬고 **≤600px 반응형**(theme.py 미디어쿼리 — 배지·게이지·워치리스트 축소). **시각 검증 한계**: 서버 로컬호스트+게이트라 자동 스크린샷 불가 → AppTest(구조·무예외)+theme 단위로 회귀 차단, 최종 룩은 육안.
 >

@@ -1,0 +1,78 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "finance-agent-gui.shared-memory.v1",
+  "title": "FinanceAgentGUI Shared Agent Memory",
+  "type": "object",
+  "required": ["schemaVersion", "id", "createdAt", "title", "summary", "source"],
+  "properties": {
+    "schemaVersion": {
+      "const": "finance-agent-gui.shared-memory.v1"
+    },
+    "id": {
+      "type": "string"
+    },
+    "createdAt": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "updatedAt": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "visibility": {
+      "const": "local-only"
+    },
+    "title": {
+      "type": "string",
+      "maxLength": 120
+    },
+    "summary": {
+      "type": "string",
+      "maxLength": 1800
+    },
+    "decisions": {
+      "type": "array",
+      "items": { "type": "string" }
+    },
+    "openQuestions": {
+      "type": "array",
+      "items": { "type": "string" }
+    },
+    "tags": {
+      "type": "array",
+      "items": { "type": "string" }
+    },
+    "artifacts": {
+      "type": "array",
+      "items": { "type": "string" }
+    },
+    "messages": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["role", "text"],
+        "properties": {
+          "role": { "type": "string" },
+          "text": { "type": "string" },
+          "createdAt": { "type": "string" }
+        }
+      }
+    },
+    "source": {
+      "type": "object",
+      "required": ["app", "surface", "provider", "writer"],
+      "properties": {
+        "app": { "const": "FinanceAgentGUI" },
+        "surface": { "type": "string" },
+        "screen": { "type": "string" },
+        "provider": { "type": "string" },
+        "providerLabel": { "type": "string" },
+        "writer": { "type": "string" }
+      }
+    },
+    "contextPacket": {
+      "type": ["object", "null"]
+    }
+  },
+  "additionalProperties": true
+}

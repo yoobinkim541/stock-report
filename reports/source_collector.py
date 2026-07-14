@@ -10,6 +10,8 @@ import html as html_mod
 import json
 import logging
 import os
+import socket
+import subprocess
 import sys
 import re
 import time as time_mod
@@ -17,6 +19,7 @@ from collections import Counter
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Iterable
+from urllib.parse import urlparse
 
 import requests
 
@@ -162,6 +165,92 @@ def _bounded_get(url: str, *, timeout: int = 20, max_bytes: int = 5_000_000, **k
                 raise ValueError(f"응답 과대(>{max_bytes}B) — {url[:60]}")
             chunks.append(chunk)
         return _BoundedResponse(b"".join(chunks), r.encoding)
+
+
+def _proxy_from_env() -> str:
+    return (os.getenv("STOCK_COLLECTOR_ARCA_PROXY")
+            or os.getenv("ARCA_PROXY")
+            or os.getenv("CRAWL_PROXY")
+            or "").strip()
+
+
+def _proxy_host_port(proxy: str) -> tuple[str, int] | None:
+    try:
+        parsed = urlparse(proxy)
+    except Exception:
+        return None
+    if not parsed.hostname:
+        return None
+    return parsed.hostname, int(parsed.port or 1080)
+
+
+def arca_proxy_status(proxy: str | None = None) -> dict:
+    """Arca 전용 프록시 상태. 네트워크 요청 없이 로컬 SOCKS 포트 리슨 여부만 확인한다."""
+    proxy = (proxy or _proxy_from_env() or "").strip()
+    if not proxy:
+        return {"enabled": False, "proxy": "", "reachable": False, "error": "proxy unset"}
+    hp = _proxy_host_port(proxy)
+    if not hp:
+        return {"enabled": True, "proxy": proxy, "reachable": False, "error": "invalid proxy url"}
+    host, port = hp
+    try:
+        with socket.create_connection((host, port), timeout=0.35):
+            return {"enabled": True, "proxy": proxy, "reachable": True, "host": host, "port": port}
+    except Exception as exc:
+        return {"enabled": True, "proxy": proxy, "reachable": False, "host": host, "port": port,
+                "error": str(exc)[:160]}
+
+
+def _curl_proxy_args(proxy: str) -> list[str]:
+    parsed = urlparse(proxy)
+    scheme = parsed.scheme.lower()
+    host_port = f"{parsed.hostname}:{parsed.port or 1080}"
+    if scheme in ("socks5", "socks5h", "socks"):
+        return ["--socks5-hostname", host_port]
+    if scheme == "socks4":
+        return ["--socks4", host_port]
+    if scheme in ("http", "https"):
+        return ["--proxy", proxy]
+    raise ValueError(f"지원하지 않는 프록시 프로토콜: {scheme or 'unknown'}")
+
+
+def _bounded_get_via_proxy(url: str, proxy: str, *, timeout: int = 20,
+                           max_bytes: int = 5_000_000, headers: dict | None = None):
+    """curl 기반 프록시 fetch.
+
+    requests는 PySocks가 없으면 SOCKS를 못 타므로, 서버에 이미 있는 curl을 사용한다.
+    Cloudflare 우회를 자동화하지 않고 일반 GET만 수행한다.
+    """
+    status = arca_proxy_status(proxy)
+    if not status.get("reachable"):
+        raise RuntimeError(f"proxy unavailable: {status.get('error') or proxy}")
+    cmd = [
+        "curl", "-fsSL", "--compressed", "--max-time", str(int(timeout)),
+        "--user-agent", (headers or HEADERS).get("User-Agent", HEADERS["User-Agent"]),
+        *_curl_proxy_args(proxy),
+    ]
+    for key, value in (headers or {}).items():
+        if key.lower() == "user-agent":
+            continue
+        cmd.extend(["-H", f"{key}: {value}"])
+    cmd.append(url)
+    proc = subprocess.run(cmd, check=False, capture_output=True, timeout=timeout + 3)
+    if proc.returncode != 0:
+        err = proc.stderr.decode("utf-8", errors="replace").strip() or f"curl exit {proc.returncode}"
+        raise RuntimeError(err[:240])
+    if len(proc.stdout) > max_bytes:
+        raise ValueError(f"응답 과대(>{max_bytes}B) — {url[:60]}")
+    return _BoundedResponse(proc.stdout, "utf-8")
+
+
+def _is_cloudflare_challenge(text: str) -> bool:
+    lower = (text or "").lower()
+    return (
+        "just a moment" in lower
+        or "cf-challenge" in lower
+        or "checking if the site connection is secure" in lower
+        or "cloudflare challenge" in lower
+    )
 
 
 def event_id(event: dict) -> str:
@@ -360,7 +449,8 @@ def _parse_arca_html(html_text: str) -> list[tuple[str, str]]:
     return out
 
 
-def fetch_arca_events(max_pages: int = 2) -> list[dict]:
+def fetch_arca_events(max_pages: int = 2, *, proxy: str | None = None,
+                      prefer_proxy: bool = False) -> list[dict]:
     events = []
     # 스킴은 http/https 모두 허용 — jina 는 내부 URL 스킴을 href 에 그대로 반사(라이브 실증:
     # http 내부 요청이면 링크도 http://arca.live/... 라 https 고정 패턴은 0건). ?p= 꼬리도 선택.
@@ -387,6 +477,24 @@ def fetch_arca_events(max_pages: int = 2) -> list[dict]:
             "category": label,
             "tickers": _extract_tickers(title),
         })
+
+    proxy = (proxy or _proxy_from_env() or "").strip()
+    if prefer_proxy and proxy:
+        for page in range(1, max_pages + 1):
+            try:
+                resp = _bounded_get_via_proxy(f"https://arca.live/b/stock?p={page}", proxy, timeout=18)
+                if _is_cloudflare_challenge(resp.text):
+                    _note_error("arca", "proxy: Cloudflare challenge")
+                    logger.warning("arca p%d proxy 응답이 Cloudflare challenge", page)
+                    continue
+                for post_id, text in _parse_arca_html(resp.text):
+                    _add(post_id, text)
+            except Exception as e:
+                logger.warning("arca p%d proxy 실패: %s", page, e)
+                _note_error("arca", f"proxy: {e}")
+        if events:
+            _LAST_ERRORS.pop("arca", None)
+            return events
 
     for page in range(1, max_pages + 1):
         try:
