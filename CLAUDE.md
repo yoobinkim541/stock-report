@@ -65,6 +65,7 @@ crons/news_spike_detector.py (크론 매 1분)
 | `kis_stream.py` | KIS 실시간 시세 **읽기전용** WebSocket 상시 프로세스 — 실전 WS(`ops.koreainvestment.com:21000`) 하드락·체결(가격·거래량)/호가 → 캐시 coalesce flush. `REALTIME_ENABLED` 게이트·주문경로 0(grep 강제)·재접속 백오프·watchdog 재기동 + **틱→1분봉 sink**(`INTRADAY_BARS_ENABLED` 시 `providers/intraday_bars.BarAggregator` — 단기 모의 데이터층) | `~/.cache/kis_realtime_quotes.json` |
 | `safe_io.py` | 멀티프로세스 안전 파일 I/O — atomic write + 교차 프로세스 쓰기 락(portfolio_snapshot writer 공용) | `<path>.lock` |
 | `ticker_names.py` | 종목 티커↔회사명 **단일 진실원**(표시·검색 공용) — 큐레이트 EN/KO/KR 시드(**US 대형주 ~70 확장: 버크셔·JPM·월마트·비자·J&J·코카콜라·인기 ETF 등 한글별칭 포함** → universe 118; **L: S&P500 전체(`sp500_seed` ~503) 병합 → universe ~543**) + 역인덱스 + yfinance 디스크캐시(graceful). `display_name`(US 영문·.KS 한글)·`label`(`회사명 (티커)`·maxlen)·`resolve`(한/영/티커→티커)·`normalize_input`(자유입력→정규 티커\|None·티커형은 정확매칭만→부분매칭 오염 차단·시드밖 리터럴 통과)·`search`. `fmt.name`·대시보드 검색(accept_new_options)·리포트·PNG·노션 공용. 경량(lazy yfinance) | `~/reports/ml-cache/ticker_names.json` |
+| `lib/agent_memory.py` | 공유 에이전트 메모리 — events.jsonl(append-only)·사용자 노트북(타임스탬프→일별 롤업 압축 상태머신)·`memory_summary.md` 2계층 패킷(사용자 기억+외부[최신 리포트 요약·뉴스 다이제스트]) → advisor 프롬프트 주입(참고·지시 아님)+`/ask` 대화 축적. 비밀값 레닥션·15분 외부 캐시. 원저작 FinanceAgentGUI(devninjadev·BSD-3) 포팅 | `~/.local/share/stock-report/shared-memory/` |
 | `notify.py` | 텔레그램 발송 단일 진실원 — send_telegram(4096 분할·토큰 마스킹)·send_photo (봇 제외 전 모듈 공용) | — |
 | `providers/market_data.py` | 시장 데이터 수집층 — fetch_qqq_data·rsi·vix·fear_greed·ma200·portfolio_value·환율·캐시·leverage_state (barbell 에서 분리, 재export 호환) | `~/.cache/barbell_anchor·last_prices.json` |
 | `kiwoom_mock.py` | 키움 **모의투자** 어댑터 — 모의 도메인(`mockapi.kiwoom.com`) 하드락 + 토큰·잔고(kt00018)·주문(kt10000/kt10001). 실거래 경로 없음 | — |
@@ -313,6 +314,7 @@ crons/news_spike_detector.py (크론 매 1분)
 | `NOTION_TOKEN` | — | — (Notion 대시보드 동기화·아카이빙. 없으면 notion_sync 스킵) |
 | `NOTION_ARCHIVE_ROOT_ID` | — | — (아카이브 루트 페이지 강제 지정. 미설정 시 대시보드 부모 아래 자동탐색·생성 후 `~/.cache` 캐시) |
 | `NOTION_ARCHIVE_PARENT_ID` | — | — (루트를 만들 부모. 기본: 대시보드의 부모 페이지) |
+| `AGENT_MEMORY_ENABLED` | — | `true` (공유 에이전트 메모리 — hermes/codex·Antigravity 공용 컨텍스트 패킷. `/ask` 프롬프트 주입+대화 축적·일일 압축(1회/일·실패 1h 재시도·미완 skipped)·레닥션. 저장: `~/.local/share/stock-report/shared-memory/`(git 밖·local-only). CLI: `python -m lib.agent_memory --status|--note|--summary`. FinanceAgentGUI(BSD-3) shared-agent-memory 이식) |
 | `LLM_BACKUP_ENABLED` | — | `false` (hermes 실패 시 Antigravity CLI `agy --print` 백업 — /ask·overlay·속보판정·뉴스라벨 4경로. 빈 스크래치 cwd 실행(레포 파일도구 차단)·출력은 기존 guard/파서 검증 통과 시만 채택. 진단: `python -m lib.llm_cli --check`) |
 | `LLM_BACKUP_CLI` | — | `agy` (백업 CLI 바이너리명) |
 | `NEWS_SPIKE_LLM_ENABLED` | — | `false` (속보 경계선[규칙 5~6점]만 LLM 2차 판정. off면 규칙 점수만 — 기존 동작 불변) |

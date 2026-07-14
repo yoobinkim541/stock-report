@@ -18,3 +18,6 @@ import tempfile
 # ── import 시점에 즉시 격리 (테스트 모듈 수집 전) ────────────────────────
 _TMPDIR = tempfile.mkdtemp(prefix="stock_report_test_db_")
 os.environ["STOCK_REPORT_DB"] = os.path.join(_TMPDIR, "test.db")
+
+# 공유 에이전트 메모리도 tmp 격리 — 테스트가 라이브 노트북/이벤트를 오염하지 않게
+os.environ.setdefault("AGENT_MEMORY_DIR", os.path.join(_TMPDIR, "shared-memory"))
