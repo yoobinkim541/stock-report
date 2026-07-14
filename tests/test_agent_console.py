@@ -9,6 +9,9 @@ def _isolate(monkeypatch, tmp_path: Path) -> None:
     monkeypatch.setenv("AGENT_CONSOLE_SOURCE_CACHE_DIR", str(tmp_path / "reports" / "source-cache"))
     monkeypatch.setenv("AGENT_CONSOLE_ML_DATA_DIR", str(tmp_path / "reports" / "ml-data"))
     monkeypatch.setenv("AGENT_CONSOLE_SHARED_MEMORY_DIR", str(tmp_path / "data" / "shared-memory"))
+    # 단일 월드 메모리(lib.world_memory)도 테스트별 격리 — DB_PATH 는 호출 시점 참조
+    from lib import world_memory as _wm
+    monkeypatch.setattr(_wm, "DB_PATH", tmp_path / "world_issue_log.sqlite3")
 
 
 def test_storage_memory_and_scenario(monkeypatch, tmp_path):
@@ -686,7 +689,13 @@ def test_ingest_arca_proxy(monkeypatch, tmp_path):
     assert result["ok"] is True
     assert result["fetched"] == 1
     assert result["changed"] == 1
-    assert storage.list_memory_events()[0]["source"] == "arca:proxy"
+    # 단일 진실원 = lib.world_memory (콘솔 자체 테이블이 아니라 공용 타임라인에 적재)
+    from lib import world_memory
+
+    rows = world_memory.timeline(limit=5)
+    assert rows and rows[0]["title"].startswith("📰뉴스 QQQ")
+    assert rows[0]["source"] == "arca:proxy"
+    assert storage.list_memory_events() == []  # 콘솔 로컬 테이블엔 더 안 씀
 
 
 def test_infer_surface_routes_by_question_keywords():
@@ -711,3 +720,75 @@ def test_infer_surface_short_followup_keeps_previous():
     # 긴 일반 질문은 직전 맥락과 무관하게 market
     long_q = "다음 분기 거시 경기 흐름과 인플레이션 전개를 근거와 함께 설명해줘"
     assert agent.infer_surface(long_q, default="portfolio") == "market"
+
+
+def test_context_pack_memory_reads_unified_world_memory(monkeypatch, tmp_path):
+    """컨텍스트 팩 memory = lib.world_memory 타임라인 (크론·/ask 와 같은 축적)."""
+    _isolate(monkeypatch, tmp_path)
+
+    from agent_console import context
+    from lib import world_memory
+
+    world_memory.log_issue("반도체 수출 규제 확대", category="정책", importance="high",
+                           tickers=["NVDA"], body="규제 대상 확대 발표", source="test")
+
+    rows = context.world_memory_rows(limit=10)
+    assert rows and rows[0]["title"] == "반도체 수출 규제 확대"
+    assert rows[0]["symbols"] == ["NVDA"]
+
+    pack = context.context_pack("market")
+    assert any(m.get("title") == "반도체 수출 규제 확대" for m in pack["memory"])
+
+
+def test_ingest_recent_memory_writes_world_not_console_table(monkeypatch, tmp_path):
+    """메모리 적재 버튼 → 월드 메모리 기록 (ML 원장은 오염 방지 위해 제외)·멱등."""
+    _isolate(monkeypatch, tmp_path)
+
+    from agent_console import context, storage
+
+    monkeypatch.setattr(context, "recent_source_events",
+                        lambda hours=72, limit=120: [
+                            {"source": "saveticker", "title": "AI 서버 수요 급증",
+                             "tickers": ["NVDA"], "published_at": "2026-07-14T01:00:00+00:00"}])
+    monkeypatch.setattr(context, "latest_reports", lambda limit=8: [])
+
+    first = context.ingest_recent_memory(hours=24)
+    second = context.ingest_recent_memory(hours=24)
+
+    assert first["changed"] == 1
+    assert second["changed"] == 0          # dedupe 멱등
+    from lib import world_memory
+    assert world_memory.timeline(limit=5)[0]["title"] == "AI 서버 수요 급증"
+    assert storage.list_memory_events() == []
+
+
+def test_migrate_memory_moves_console_rows_to_world(monkeypatch, tmp_path):
+    """마이그레이션 CLI — 구 콘솔 market_memory → 단일 월드 메모리 (재실행 안전)."""
+    _isolate(monkeypatch, tmp_path)
+
+    from agent_console import migrate_memory, storage
+
+    storage.upsert_memory_events([
+        {"observed_at": "2026-07-10T00:00:00+00:00", "source": "arca:proxy",
+         "kind": "community_signal", "title": "이관 대상 메모", "symbols": ["QQQ"]},
+    ])
+
+    out1 = migrate_memory.migrate_world_memory()
+    out2 = migrate_memory.migrate_world_memory()   # 재실행 → 전부 중복 스킵
+
+    assert out1["moved"] == 1
+    assert out2["moved"] == 0 and out2["skipped_dup"] == 1
+    from lib import world_memory
+    assert world_memory.timeline(limit=5)[0]["title"] == "이관 대상 메모"
+
+
+def test_shared_memory_dir_defaults_to_lib_location(monkeypatch):
+    """공유 메모리 기본 디렉토리 = lib/agent_memory 와 동일 (AGENT_MEMORY_DIR 존중)."""
+    from agent_console import shared_memory
+
+    monkeypatch.delenv("AGENT_CONSOLE_SHARED_MEMORY_DIR", raising=False)
+    monkeypatch.setenv("AGENT_MEMORY_DIR", "/tmp/unified-mem")
+    assert str(shared_memory.shared_memory_dir()) == "/tmp/unified-mem"
+
+    monkeypatch.delenv("AGENT_MEMORY_DIR", raising=False)
+    assert str(shared_memory.shared_memory_dir()).endswith(".local/share/stock-report/shared-memory")

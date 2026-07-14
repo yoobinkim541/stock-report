@@ -320,6 +320,7 @@ def _chat_context_rail(surface: str, pack: dict):
 
 def _memory_tab(surface: str):
     st.markdown("##### World Memory")
+    st.caption("단일 월드 메모리 — 뉴스 크론·텔레그램 /ask·종목분석 🧭 카드와 같은 축적을 읽고 씁니다.")
     with st.form("agent_memory_add", clear_on_submit=True):
         c1, c2 = st.columns([1.2, 0.8])
         title = c1.text_input("제목")
@@ -327,22 +328,18 @@ def _memory_tab(surface: str):
         body = st.text_area("관찰 내용", height=100)
         submitted = st.form_submit_button("수동 기억 추가", type="primary")
         if submitted:
-            payload = {
-                "observed_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
-                "source": "dashboard:manual",
-                "kind": "market_note",
-                "title": title or body[:80] or "수동 메모",
-                "body": body,
-                "symbols": [x.strip().upper() for x in symbols.replace(",", " ").split() if x.strip()],
-                "impact": "context",
-                "confidence": 0.65,
-                "metadata": {"surface": surface},
-            }
-            storage.upsert_memory_events([payload])
+            context.log_world_issue(
+                title or body[:80] or "수동 메모",
+                category="메모",
+                importance="high",
+                tickers=[x.strip().upper() for x in symbols.replace(",", " ").split() if x.strip()],
+                body=body,
+                source=f"dashboard:manual:{surface}",
+            )
             _context_pack.clear()
             st.toast("시장 기억 추가 완료")
 
-    rows = storage.list_memory_events(limit=120)
+    rows = context.world_memory_rows(limit=120)
     if not rows:
         st.info("아직 저장된 시장 기억이 없습니다. 상단의 메모리 적재를 먼저 실행해 보세요.")
         return
@@ -352,7 +349,7 @@ def _memory_tab(surface: str):
         "종류": r.get("kind"),
         "제목": r.get("title"),
         "심볼": ", ".join(r.get("symbols") or []),
-        "영향": r.get("impact"),
+        "중요도": r.get("impact"),
     } for r in rows])
     st.dataframe(df, hide_index=True, width="stretch", height=360)
 

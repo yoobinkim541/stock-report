@@ -21,3 +21,5 @@ os.environ["STOCK_REPORT_DB"] = os.path.join(_TMPDIR, "test.db")
 
 # 공유 에이전트 메모리도 tmp 격리 — 테스트가 라이브 노트북/이벤트를 오염하지 않게
 os.environ.setdefault("AGENT_MEMORY_DIR", os.path.join(_TMPDIR, "shared-memory"))
+# 월드 메모리 SQLite 도 tmp 격리 (콘솔 통합 후 콘솔 테스트가 lib.world_memory 를 쓰므로 필수)
+os.environ.setdefault("WORLD_MEMORY_DB", os.path.join(_TMPDIR, "shared-memory", "world_issue_log.sqlite3"))

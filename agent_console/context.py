@@ -286,10 +286,63 @@ def model_state() -> dict:
     return {"items": items}
 
 
+def world_memory_rows(limit: int = 50, query: str = "") -> list[dict]:
+    """월드 메모리 단일 진실원(lib.world_memory) 타임라인 → 콘솔 memory 행 매핑.
+
+    /ask·대시보드 🧭·크론 자동 적재와 같은 축적을 콘솔이 읽는다.
+    lib 불가·비어 있으면 콘솔 로컬 storage(구 데이터) 폴백 — 마이그레이션 전 기록 보존.
+    """
+    try:
+        from lib import world_memory
+
+        rows = world_memory.timeline(query, limit=limit)
+        mapped = [{
+            "id": r.get("event_id"),
+            "observed_at": r.get("issue_date"),
+            "source": r.get("source") or "world",
+            "kind": r.get("category"),
+            "title": r.get("title"),
+            "body": r.get("body") or "",
+            "symbols": r.get("tickers") or [],
+            "impact": r.get("importance"),
+            "confidence": None,
+            "metadata": {},
+        } for r in rows]
+        if mapped:
+            return mapped
+    except Exception:
+        pass
+    return storage.list_memory_events(limit=limit)
+
+
+def log_world_issue(title: str, *, category: str = "메모", importance: str = "medium",
+                    tickers: list[str] | None = None, body: str = "",
+                    source: str = "console", observed_at: str = "") -> bool:
+    """단일 월드 메모리에 이슈 기록 (dedupe 멱등). lib 불가 시 콘솔 storage 폴백."""
+    title = str(title or "").strip()
+    if not title:
+        return False
+    try:
+        from lib import world_memory
+
+        issue_date = str(observed_at or "")[:10] or None
+        eid = world_memory.log_issue(title, category=category, importance=importance,
+                                     issue_date=issue_date, tickers=tickers or [],
+                                     body=body, source=source)
+        return eid is not None
+    except Exception:
+        changed = storage.upsert_memory_events([{
+            "observed_at": observed_at or datetime.now(timezone.utc).isoformat(timespec="seconds"),
+            "source": source, "kind": category, "title": title, "body": body,
+            "symbols": tickers or [], "impact": importance,
+        }])
+        return changed > 0
+
+
 def context_pack(surface: str = "market", *, hours: int = 72) -> dict:
     surface = str(surface or "market").strip().lower()
     events = recent_source_events(hours=hours)
-    memory = storage.list_memory_events(limit=50)
+    memory = world_memory_rows(limit=50)
     symbols = Counter()
     sources = Counter()
     for row in events:
@@ -336,6 +389,11 @@ def focus_for_surface(surface: str) -> list[str]:
 
 
 def ingest_recent_memory(hours: int = 72) -> dict:
+    """최근 뉴스·리포트를 **단일 월드 메모리(lib.world_memory)** 에 적재 (dedupe 멱등).
+
+    ML 원장(decisions/outcomes)은 append-only 원장이 이미 진실원 — 월드 메모리에
+    중복 적재하지 않는다(콘솔 팩이 ml_activity 로 직접 읽음).
+    """
     events = []
     for row in recent_source_events(hours=hours, limit=120):
         title = str(row.get("title") or row.get("summary") or "").strip()
@@ -368,24 +426,33 @@ def ingest_recent_memory(hours: int = 72) -> dict:
                 "metadata": {"path": report.get("path"), "name": report.get("name")},
             }
         )
-    for row in ml_activity(limit=40):
-        ticker = row.get("ticker") or row.get("symbol") or row.get("asset") or ""
-        title = row.get("title") or row.get("decision") or row.get("action") or row.get("_file") or "ML activity"
-        events.append(
-            {
-                "observed_at": row.get("ts") or row.get("created_at") or row.get("decided_at") or row.get("_mtime"),
-                "source": f"ml:{row.get('_file') or 'unknown'}",
-                "kind": "model_activity",
-                "title": str(title)[:300],
-                "body": json.dumps(row, ensure_ascii=False)[:2000],
-                "symbols": [ticker] if ticker else [],
-                "impact": "learn",
-                "confidence": 0.6,
-                "metadata": {"file": row.get("_file")},
-            }
-        )
-    changed = storage.upsert_memory_events(events)
-    return {"ok": True, "considered": len(events), "changed": changed, "total_recent": len(storage.list_memory_events())}
+    changed = _log_ingest_events_to_world(events)
+    return {"ok": True, "considered": len(events), "changed": changed,
+            "total_recent": len(world_memory_rows(limit=200))}
+
+
+def _log_ingest_events_to_world(events: list[dict]) -> int:
+    """수집 이벤트 목록을 단일 월드 메모리에 기록 (dedupe 멱등 — 반복 실행 안전)."""
+    category_map = {"market_event": "수집", "report": "리포트", "community_signal": "커뮤니티"}
+    importance_map = {"report": "medium"}
+    changed = 0
+    for ev in events:
+        kind = str(ev.get("kind") or "")
+        if kind == "model_activity":
+            # ML 원장(decisions/outcomes)은 append-only 원장이 이미 진실원 — 월드 메모리
+            # 중복 적재로 /ask 타임라인을 오염시키지 않는다 (콘솔 팩이 원장을 직접 읽음).
+            continue
+        if log_world_issue(
+            str(ev.get("title") or ""),
+            category=category_map.get(kind, kind or "수집"),
+            importance=importance_map.get(kind, "low"),
+            tickers=[str(t) for t in (ev.get("symbols") or [])][:8],
+            body=str(ev.get("body") or "")[:1200],
+            source=str(ev.get("source") or "console"),
+            observed_at=str(ev.get("observed_at") or ""),
+        ):
+            changed += 1
+    return changed
 
 
 def ingest_arca_proxy(max_pages: int = 2, proxy: str | None = None) -> dict:
@@ -414,13 +481,9 @@ def ingest_arca_proxy(max_pages: int = 2, proxy: str | None = None) -> dict:
                 "title": row.get("title") or "",
                 "body": row.get("body") or row.get("title") or "",
                 "symbols": row.get("tickers") or row.get("tags") or [],
-                "impact": "sentiment",
-                "confidence": 0.5,
-                "metadata": {"url": row.get("url"), "category": row.get("category"),
-                             "proxy": proxy, "source": row.get("source")},
             }
         )
-    changed = storage.upsert_memory_events(memory_events)
+    changed = _log_ingest_events_to_world(memory_events)
     return {
         "ok": bool(events),
         "proxy": status,

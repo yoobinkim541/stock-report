@@ -15,9 +15,20 @@ DEFAULT_PROVIDER = "codex-cli"
 
 
 def shared_memory_dir() -> Path:
-    override = os.getenv("AGENT_CONSOLE_SHARED_MEMORY_DIR")
+    """공유 메모리 단일 디렉토리 — lib/agent_memory(AGENT_MEMORY_DIR)와 같은 곳이 기본.
+
+    codex(hermes)·Antigravity·텔레그램 /ask·AI 콘솔이 전부 한 기억을 읽고 쓴다.
+    구 위치(레포 안 data/shared-memory)에 기록이 남아 있으면
+    `uv run python -m agent_console.migrate_memory` 로 1회 이관.
+    """
+    override = os.getenv("AGENT_CONSOLE_SHARED_MEMORY_DIR") or os.getenv("AGENT_MEMORY_DIR")
     if override:
         return Path(override).expanduser()
+    return Path.home() / ".local" / "share" / "stock-report" / "shared-memory"
+
+
+def legacy_shared_memory_dir() -> Path:
+    """통합 전 콘솔 전용 위치 (마이그레이션 소스)."""
     return PROJECT_ROOT / "data" / "shared-memory"
 
 
@@ -163,9 +174,23 @@ def append_chat_exchange(question: str, answer: str, surface: str = "market",
             },
         }
     )
-    _append_user_notebook(record, question, answer)
+    # 노트북 기록은 lib/agent_memory 포맷(### 날짜 헤딩·일별 롤업 파서 호환)이 단일 진실원.
+    # lib 사용 불가 시에만 콘솔 자체 포맷 폴백 — 두 포맷이 섞이는 것 방지.
+    if not _record_chat_via_lib(question, answer, surface):
+        _append_user_notebook(record, question, answer)
     refresh_context_memory_summary()
     return record
+
+
+def _record_chat_via_lib(question: str, answer: str, surface: str) -> bool:
+    try:
+        from lib import agent_memory as _lib_mem
+        if not _lib_mem.enabled():
+            return False
+        _lib_mem.record_chat(question, answer, source=f"console:{surface}")
+        return True
+    except Exception:
+        return False
 
 
 def _guess_tags(text: str, surface: str) -> list[str]:
@@ -369,6 +394,21 @@ def _strip_world_memory_suggestions(text: str) -> str:
 
 
 def refresh_context_memory_summary() -> str:
+    """memory_summary.md 단일 writer = lib/agent_memory (사용자+외부 2계층 패킷).
+
+    통합 디렉토리에서 콘솔이 자체 포맷으로 덮어쓰면 /ask·codex·agy 가 읽는 패킷이
+    퇴화하므로 lib 에 위임. lib 사용 불가 시에만 콘솔 자체 빌더 폴백.
+    """
+    try:
+        from lib import agent_memory as _lib_mem
+        if _lib_mem.enabled():
+            return _lib_mem.refresh_memory_summary(force=True)
+    except Exception:
+        pass
+    return _legacy_refresh_summary()
+
+
+def _legacy_refresh_summary() -> str:
     ensure_store()
     paths = _paths()
     user_layer = _read_bounded(paths["user_notebook"], 4500)
@@ -504,12 +544,12 @@ def status(limit: int = 8, offset: int = 0) -> dict:
             }
         },
         "paths": {
-            "directory": "data/shared-memory",
-            "events": "data/shared-memory/events.jsonl",
-            "index": "data/shared-memory/index.json",
-            "memorySummary": "data/shared-memory/memory_summary.md",
-            "userNotebook": "data/shared-memory/user_memory_notebook.md",
-            "externalBriefing": "data/shared-memory/external_memory_briefing.md",
+            "directory": str(paths["directory"]),
+            "events": str(paths["events"]),
+            "index": str(paths["index"]),
+            "memorySummary": str(paths["summary"]),
+            "userNotebook": str(paths["user_notebook"]),
+            "externalBriefing": str(paths["external_briefing"]),
             "schema": "config/shared-memory.schema.json",
             "docs": "docs/shared-agent-memory.md",
         },
