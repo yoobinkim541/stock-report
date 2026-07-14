@@ -133,18 +133,28 @@ def label_events(events: list[dict], runner=None) -> list[dict]:
         return []
     import subprocess
     run = runner or subprocess.run
-    cmd = ["hermes", "chat", "-q", build_label_prompt(events),
+    prompt = build_label_prompt(events)
+    cmd = ["hermes", "chat", "-q", prompt,
            "--provider", NEWS_LLM_PROVIDER, "--model", NEWS_LLM_MODEL, "-Q"]
+    text = None
     try:
         result = run(cmd, capture_output=True, text=True, timeout=NEWS_LLM_TIMEOUT)
+        if getattr(result, "returncode", 1) == 0:
+            text = getattr(result, "stdout", "") or ""
+        else:
+            logger.warning("뉴스 라벨 LLM 비정상 종료: %s",
+                           str(getattr(result, "stderr", ""))[:200])
     except Exception as e:
         logger.warning("뉴스 라벨 LLM 호출 실패: %s", e)
-        return []
-    if getattr(result, "returncode", 1) != 0:
-        logger.warning("뉴스 라벨 LLM 비정상 종료: %s",
-                       str(getattr(result, "stderr", ""))[:200])
-        return []
-    return parse_labels(getattr(result, "stdout", "") or "", events)
+    if text is None:
+        try:
+            from lib.llm_cli import backup_chat
+            text, _note = backup_chat(prompt, timeout=NEWS_LLM_TIMEOUT, runner=runner)
+        except Exception:
+            text = None
+    if text is None:
+        return []                        # 백업까지 실패 → 다음 회차 재시도 (graceful)
+    return parse_labels(text, events)    # 검증(환각 방어)은 파서가 동일 적용
 
 
 def append_labels(labels: list[dict], path: Path | None = None) -> int:

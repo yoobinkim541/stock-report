@@ -366,6 +366,22 @@ def _local_fallback(question: str, market: dict) -> str:
     return "\n".join(lines)
 
 
+def _backup_or_local(prompt: str, question: str, market: dict, runner) -> str:
+    """hermes 실패 시 백업 LLM(agy — LLM_BACKUP_ENABLED 시) → 그것도 실패면 로컬 ML 폴백.
+
+    백업은 빈 스크래치 cwd 에서 실행되어 파일 도구가 레포에 닿지 않음 → 답변 전용
+    (설정 파일 편집은 백업 모드에서 미지원 — 답변에 정직 표기).
+    """
+    try:
+        from lib.llm_cli import backup_chat
+        text, note = backup_chat(prompt, timeout=120, runner=runner)
+    except Exception:
+        text, note = None, "backup import 실패"
+    if text:
+        return text + f"\n\n⚙️ 백업 LLM({note}) 응답 — 파일 편집 기능은 이 모드에서 미지원"
+    return _local_fallback(question, market)
+
+
 def ask_portfolio_advisor(question: str, market: dict, runner=subprocess.run) -> str:
     prompt = build_advisor_prompt(question, market)
     cmd = [
@@ -387,7 +403,7 @@ def ask_portfolio_advisor(question: str, market: dict, runner=subprocess.run) ->
     try:
         result = runner(cmd, capture_output=True, text=True, timeout=120, cwd=PROJECT_DIR)
     except Exception:
-        return _local_fallback(question, market)
+        return _backup_or_local(prompt, question, market, runner)
     finally:
         # advisor가 파일 도구로 설정 파일을 편집했을 수 있음 →
         # 1) 범위/구조 가드 (위반 파일은 실행 전 스냅샷 롤백) → 2) store 권위로 재동기화
@@ -395,11 +411,11 @@ def ask_portfolio_advisor(question: str, market: dict, runner=subprocess.run) ->
         _sync_editable_to_store()
 
     if getattr(result, "returncode", 1) != 0:
-        return _local_fallback(question, market)
+        return _backup_or_local(prompt, question, market, runner)
 
     answer = (getattr(result, "stdout", "") or "").strip()
     if not answer:
-        return _local_fallback(question, market)
+        return _backup_or_local(prompt, question, market, runner)
     if violations:
         answer += ("\n\n🛡️ 편집 가드: 아래 파일 변경이 범위 검증에 실패해 원상 복구됨\n- "
                    + "\n- ".join(violations))

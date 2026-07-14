@@ -313,6 +313,8 @@ crons/news_spike_detector.py (크론 매 1분)
 | `NOTION_TOKEN` | — | — (Notion 대시보드 동기화·아카이빙. 없으면 notion_sync 스킵) |
 | `NOTION_ARCHIVE_ROOT_ID` | — | — (아카이브 루트 페이지 강제 지정. 미설정 시 대시보드 부모 아래 자동탐색·생성 후 `~/.cache` 캐시) |
 | `NOTION_ARCHIVE_PARENT_ID` | — | — (루트를 만들 부모. 기본: 대시보드의 부모 페이지) |
+| `LLM_BACKUP_ENABLED` | — | `false` (hermes 실패 시 Antigravity CLI `agy --print` 백업 — /ask·overlay·속보판정·뉴스라벨 4경로. 빈 스크래치 cwd 실행(레포 파일도구 차단)·출력은 기존 guard/파서 검증 통과 시만 채택. 진단: `python -m lib.llm_cli --check`) |
+| `LLM_BACKUP_CLI` | — | `agy` (백업 CLI 바이너리명) |
 | `NEWS_SPIKE_LLM_ENABLED` | — | `false` (속보 경계선[규칙 5~6점]만 LLM 2차 판정. off면 규칙 점수만 — 기존 동작 불변) |
 | `NEWS_SPIKE_LLM_MODEL` / `NEWS_SPIKE_LLM_PROVIDER` | — | `gpt-5-mini` / `openai-codex` |
 | `NEWS_SPIKE_LLM_MAX_PER_RUN` / `NEWS_SPIKE_LLM_TIMEOUT` | — | `3` / `20` (회당 LLM 판정 상한·초 — 매 1분 크론 비용 통제) |
