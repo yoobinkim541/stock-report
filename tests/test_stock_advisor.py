@@ -107,6 +107,24 @@ def test_ask_portfolio_advisor_uses_configured_codex_model_runner():
     assert kwargs["cwd"] == PROJECT_DIR
 
 
+def test_ask_portfolio_advisor_uses_configured_provider_env(monkeypatch):
+    from stock_advisor import ask_portfolio_advisor
+
+    monkeypatch.setenv("STOCK_ADVISOR_LLM_PROVIDER", "google")
+
+    calls = []
+
+    def fake_run(cmd, **kwargs):
+        calls.append((cmd, kwargs))
+        return FakeCompleted(stdout="결론: Gemini provider 확인")
+
+    answer = ask_portfolio_advisor("지금 추가매수해도 돼?", sample_market(), runner=fake_run)
+
+    assert "Gemini provider 확인" in answer
+    cmd = calls[0][0]
+    assert "--provider" in cmd and "google" in cmd
+
+
 def test_ask_portfolio_advisor_falls_back_when_codex_fails():
     from stock_advisor import ask_portfolio_advisor
 
