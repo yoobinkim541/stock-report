@@ -51,6 +51,8 @@ PATH=/home/ubuntu/.local/bin:/usr/local/bin:/usr/bin:/bin
 * * * * * cd /home/ubuntu/projects/stock-report && flock -n /tmp/news_spike_detector.lock uv run python crons/news_spike_detector.py >> /tmp/news_spike_detector.log 2>&1   # 매 1분 (flock: 중복실행·상태 RMW 경합 방지)
 # 단기(1분봉) 모의 트레이딩 엔진 (INTRADAY_MOCK_ENABLED=true 일 때만 — 꺼져있으면 즉시 no-op·shadow 기본)
 * * * * * cd /home/ubuntu/projects/stock-report && flock -n /tmp/intraday_mock_track.lock uv run python crons/intraday_mock_track.py >> /tmp/intraday_mock_track.log 2>&1   # 매 1분 (열린 시장만 내부 처리)
+# REST 시세 폴러 워치독 (QUOTES_POLL_ENABLED=true 일 때만 기동 — 토스 배치 200 + 키움 KR 폴백·WS 캡 밖 롱테일)
+* * * * * cd /home/ubuntu/projects/stock-report && bash scripts/quotes_poller_watchdog.sh >> /tmp/quotes_poller_watchdog.log 2>&1   # 매 1분 (꺼져있으면 no-op)
 # 실시간 시세 WS 상시 프로세스 워치독 (REALTIME_ENABLED=true 일 때만 기동·opt-in)
 * * * * * cd /home/ubuntu/projects/stock-report && bash scripts/kis_stream_watchdog.sh >> /tmp/kis_stream_watchdog.log 2>&1   # 매 1분 (꺼져있으면 no-op)
 # 퀀트 터미널 streamlit 대시보드 워치독 (DASHBOARD_ENABLED=true 일 때만 기동·opt-in)

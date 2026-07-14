@@ -77,7 +77,8 @@ crons/news_spike_detector.py (크론 매 1분)
 | `providers/news_labels.py` | **LLM 뉴스 구조화 라벨층** — 수집 뉴스 → {티커,유형,방향,강도} point-in-time JSONL(published/labeled 시각 보존·무룩어헤드) + `news_axis`(방향×강도 감쇠합 [0,1]). 환각 방어(입력 태그 밖 티커 폐기·enum 검증). LLM=**피처 생성기 한정**(선택/타이밍 위임 금지 — 재현불가 출력은 백테스트 불성립) | `~/reports/ml-data/news_llm_labels.jsonl` |
 | `providers/kis_quote.py` | KIS **실계좌 시세 read-only** REST — 실전 도메인(`openapi.koreainvestment.com:9443`) 하드락·현재가·10단계 호가·거래량(**KR·美 모두 무료 실시간**). 주문 경로 0(grep 강제)·`REALTIME_ENABLED` 게이트·실전키 fail-closed | `~/.cache/kis_quote_token.json` |
 | `providers/toss_api.py` | 토스증권 Open API **읽기전용** 어댑터 — OAuth2 client credentials(토큰 디스크 영속)·계좌/잔고(holdings)/현재가/환율. **주문 경로 0**(grep 강제)·도메인 하드락(`openapi.tossinvest.com`)·키 없으면 fail-closed | `~/.cache/toss_token.json` |
-| `providers/realtime_quotes.py` | 실시간 캐시 **읽기전용 클라이언트** = 폴백 단일 seam. get_price/orderbook/best/volume, 2단 신선도(heartbeat+심볼 ts). stale·비활성·없음 → None → 소비자 yfinance 폴백. 예외 무발 | `~/.cache/kis_realtime_quotes.json` |
+| `providers/realtime_quotes.py` | 실시간 캐시 **읽기전용 클라이언트** = 폴백 단일 seam — **2계층: KIS WS 신선 > REST 폴 신선 > None(yfinance)**. get_price/orderbook/best/volume, 2단 신선도(heartbeat+심볼 ts). 예외 무발 | `~/.cache/kis_realtime_quotes.json`·`rest_quotes.json` |
+| `quotes_poller.py` | REST 시세 폴러 상시 프로세스 — **토스 배치(200심볼/호출·KR+US 혼합) 1차 + 키움 ka10095(KR 복수코드) 폴백**으로 KIS WS 캡(41심볼) 밖 롱테일 현재가 수집(포트폴리오+모의 유니버스+단기 스캐너, 5분마다 재구성). 열린 시장만 폴링·read-only(주문 TR 0 grep 강제)·`QUOTES_POLL_ENABLED` opt-in·워치독 재기동 | `~/.cache/rest_quotes.json` |
 | `providers/intraday_bars.py` | 단기 1분봉 데이터층 — kis_stream 틱→OHLCV 집계(누적 볼륨 차분·v_anom/v_partial)·JSONL bar store reader(5m 리샘플·yfinance 폴백)·분대별 거래량 프로파일·심볼 변환 단일 진실원(base_symbol/to_yf/market_of) | `~/reports/ml-data/intraday_bars/*.jsonl` |
 | `providers/intraday_universe.py` | 단기 동적 유니버스 스캐너 ("stocks in play") — KR KIS 거래대금 순위(+필터: 거래대금·가격·보통주만·ETF/스팩 제외)·US 히트맵 스냅샷 재사용 → \|등락\| 상위 top-K. 히스테리시스(보유 유지)·실패 시 정적 `INTRADAY_UNIVERSE_*` 폴백 | `~/.cache/intraday_universe.json` |
 
@@ -285,6 +286,8 @@ crons/news_spike_detector.py (크론 매 1분)
 | `KR_MOCK_STUB_FRAC` | — | `0.5` (min_hold 보호 예외 — 포지션 가치가 목표(budget/N)의 이 비율 **미만**인 스텁[트란치 빌드 중 이탈한 반쪽]은 청산 허용. 저비중 잔재 60일 자본잠식 방지) |
 | `KR_MOCK_MIN_HOLD_DAYS` | — | `60` (편입 후 최소 보유일 — 미만이면 타깃이탈이어도 청산 보류. **`backtest/kr_policy_backtest` 비용 OOS 실증**: 슬로우 신호 과잉거래가 순수익 ~2.4%p 잠식·최소보유가 gross 보존하며 비용만 절감[반기>월간 64% 연도·cross-axis·gross 보존=ROBUST]. **기본 60=모의 활성**(OOS 권고값 반영·모의로 라이브 검증)·`0` 으로 되돌리면 현행 무제한 회전. **모의 한정**·꼬리위험(2023 등) 있어 실계좌는 모의 검증 후 수동) |
 | `{KR,US}_MOCK_BUY_BPS` / `{KR,US}_MOCK_SELL_BPS` | — | KR `2`/`20` · US `15`/`15` (거래비용 bps — 수수료+KR 증권거래세. `ml/adaptive/costs.py`. 리포트 누적비용·회전율 계기 + 보상 fwd_excess net-of-cost 차감) |
+| `QUOTES_POLL_ENABLED` | — | `false` (REST 시세 폴러 opt-in — 토스 배치 200심볼 + 키움 KR ka10095 폴백. KIS WS 캡(41) 밖 롱테일 현재가 확장. WS 없이 단독 켜도 realtime seam 활성) |
+| `QUOTES_POLL_SECS` / `QUOTES_POLL_MAX` / `QUOTES_POLL_EXTRA` | — | `10` / `200` / — (폴 주기 초·심볼 캡·추가 심볼 쉼표목록) |
 | `REALTIME_ENABLED` | — | `false` (KIS 실시간 시세 수신·소비 **마스터 게이트**. off면 stream 미기동·전 소비자 yfinance 폴백) |
 | `REALTIME_US_ENABLED` | — | `false` (美 해외 실시간 스트림. **미국=무료 실시간 0분지연**·별도 신청 불필요(open-trading-api 확정). off면 美 미구독→yfinance) |
 | `REALTIME_KR_MAX` / `REALTIME_US_MAX` / `REALTIME_FLUSH_SECS` | — | `10` / `10` / `1.0` (WS 워치리스트 시장별 캡·캐시 flush 주기. 41심볼/세션 제한 대응) |
