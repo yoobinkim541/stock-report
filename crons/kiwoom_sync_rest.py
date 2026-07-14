@@ -445,5 +445,30 @@ def main():
     )
 
 
+def check_us() -> int:
+    """해외 계좌 연결 확인만 (읽기 조회·스냅샷/원장 미변경) — `--check-us`."""
+    rows = fetch_us_balance()
+    if rows is None:
+        print("❌ 키움 해외 잔고 조회 실패 — 키/토큰/해외계좌 개설 여부 확인 (로그 참조)")
+        return 1
+    total = sum(h.get("value_usd", 0) for h in rows)
+    print(f"✅ 키움 해외 연결 OK — 보유 {len(rows)}종목 · 총평가 ${total:,.2f}")
+    for h in rows:
+        print(f"  {h['ticker']:6s} {h.get('name', ''):20s} {h['shares']:>10g}주"
+              f"  평단 ${h['avg_price_usd']:,.2f}  {h['return_pct']:+.1f}%")
+    txs = fetch_us_transactions(days=7)
+    if txs is None:
+        print("⚠️ 해외 거래내역(ust21100) 조회 실패")
+    else:
+        print(f"최근 7일 체결 {len(txs)}건" + (" (주식모으기 체결 포함 시 거래종류명으로 표시)" if txs else ""))
+        for t in txs[:10]:
+            print(f"  {t['date']} {t['kind']} {t['ticker']} {t['qty']:g}주"
+                  + (f" @${t['price']:,.2f}" if t.get("price") else ""))
+    return 0
+
+
 if __name__ == "__main__":
+    import sys as _sys
+    if "--check-us" in _sys.argv:
+        _sys.exit(check_us())
     main()
