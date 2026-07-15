@@ -451,6 +451,37 @@ def test_agent_portfolio_ambiguous_complaint_does_not_use_market_template(monkey
     assert "반복" in answer
 
 
+def test_agent_my_portfolio_question_gives_overview_not_hallucinated_ticker(monkeypatch):
+    """'내 포트폴리오 어때' 가 '내'→내수주(326230.KS) 부분매칭으로 단일종목 의견에
+    오분류되던 회귀 방지 — 실제 보유 개요를 준다."""
+    monkeypatch.setenv("AGENT_CONSOLE_LLM_ENABLED", "0")
+    from agent_console.agent import _compose_answer, _extract_asset_symbol
+
+    # 흔한 한글어가 티커로 환각되지 않아야 함
+    assert _extract_asset_symbol("내 포트폴리오 어때") is None
+    assert _extract_asset_symbol("시장 어때") is None
+    # 진짜 티커/종목명은 그대로 추출
+    assert (_extract_asset_symbol("NVDA 어때") or (None,))[0] == "NVDA"
+
+    pack = {
+        "surface": "portfolio",
+        "generated_at": "2026-07-15T06:35:00+00:00",
+        "sources": {"events": [], "source_counts": [], "symbol_counts": []},
+        "memory": [], "reports": [], "ml_activity": [], "paper": {},
+        "portfolio": {
+            "holdings": [
+                {"ticker": "QQQI", "name": "Neos Nasdaq", "weight": 20.9, "ret": 5.2, "value": 2000},
+                {"ticker": "UNH", "name": "유나이티드헬스", "weight": 14.9, "ret": 33.5, "value": 1400},
+            ],
+            "summary": {}, "risk": {}, "targets": {}, "errors": [],
+        },
+    }
+    answer = _compose_answer("내 포트폴리오 어때", pack)
+    assert "내 포트폴리오 현황" in answer
+    assert "326230" not in answer and "내수주" not in answer  # 환각 티커 없어야
+    assert "QQQI" in answer  # 실제 보유가 나와야
+
+
 def test_agent_korean_asset_name_routes_to_asset_answer(monkeypatch):
     monkeypatch.setenv("AGENT_CONSOLE_LLM_ENABLED", "0")
     from agent_console.agent import _compose_answer

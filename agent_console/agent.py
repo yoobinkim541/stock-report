@@ -197,6 +197,8 @@ def _compose_answer(question: str, pack: dict, history: list[dict] | None = None
     asset = _extract_asset_symbol(resolved_question)
     if asset:
         return _compose_asset_opinion_answer(resolved_question, pack, history, asset)
+    if _is_portfolio_overview_question(resolved_question, pack):
+        return _compose_portfolio_overview_answer(resolved_question, pack, history)
     if not _is_market_context_question(resolved_question, pack):
         return _compose_general_chat_answer(resolved_question, pack, history)
 
@@ -273,6 +275,58 @@ def _is_portfolio_risk_question(question: str, pack: dict | None = None) -> bool
         "현금", "레버리지", "리밸런싱", "리밸런스",
     )
     return surface == "portfolio" and any(word in q for word in risk_words)
+
+
+def _is_portfolio_overview_question(question: str, pack: dict | None = None) -> bool:
+    """티커 없이 '내 포트폴리오 어때/현황'류 → 개요 분기 (자산의견 오분류 방지).
+
+    surface 만으로 켜면 불평·메타 질문("왜 같은 말만 반복해?")까지 걸리므로,
+    질문에 **포트폴리오 명시어**가 있을 때만 개요로 본다.
+    """
+    pack = pack if isinstance(pack, dict) else {}
+    holdings = (pack.get("portfolio") or {}).get("holdings") or []
+    if not holdings:
+        return False
+    q = str(question or "").lower()
+    portfolio_nouns = ("포트폴리오", "내 포트", "포트", "내 계좌", "보유", "내 종목",
+                       "내 자산", "내 주식", "내 계좌")
+    if not any(w in q for w in portfolio_nouns):
+        return False
+    overview_words = ("어때", "어떄", "어떠", "현황", "상태", "봐줘", "봐 줘",
+                      "점검", "요약", "정리", "전체", "보여", "괜찮")
+    return any(w in q for w in overview_words) or len(q) <= 12
+
+
+def _compose_portfolio_overview_answer(question: str, pack: dict, history: list[dict] | None = None) -> str:
+    portfolio = pack.get("portfolio") or {}
+    holdings = portfolio.get("holdings") or []
+    if not holdings:
+        return _compose_portfolio_risk_answer(question, pack, history)
+    risk = _portfolio_risk_snapshot(holdings, pack.get("paper") or {})
+    rows = risk["holdings"]
+    lines = [
+        "### 내 포트폴리오 현황",
+        "",
+        f"- 보유 **{len(rows)}종목** · 집중도 **{risk['concentration']}** "
+        f"(최대 비중 {risk['top_weight']:.1f}% · 상위3 {risk['top3_weight']:.1f}%)",
+        "",
+        "**비중 상위**",
+    ]
+    for row in rows[:6]:
+        lines.append(f"- {row['name']} ({row['ticker']}) · {row['weight']:.1f}% · {row['ret']:+.1f}%")
+    if risk["negative"]:
+        losers = ", ".join(f"{r['ticker']} {r['ret']:+.1f}%" for r in risk["negative"][:4])
+        lines += ["", f"**손실 종목**: {losers}"]
+    reduce_first = risk.get("reduce_first") or []
+    if reduce_first:
+        top = reduce_first[0]
+        lines += ["", f"**먼저 볼 조정 후보**: {top['ticker']} — {', '.join(top.get('reasons', []))}"]
+    lines += [
+        "",
+        "> 이건 보유 스냅샷 기반 요약입니다. 매매 지시가 아니라, 비중·손실·집중도를 먼저 보는 관점입니다. "
+        "특정 종목이 궁금하면 티커로 물어보시고, 손실한도 시나리오가 필요하면 '손실한도 N%'로 물어보세요.",
+    ]
+    return "\n".join(lines)
 
 
 def _compose_portfolio_risk_answer(question: str, pack: dict, history: list[dict] | None = None) -> str:
@@ -641,6 +695,16 @@ def _looks_like_followup_correction(question: str) -> bool:
     return any(word in q for word in correction_words) and any(word in q for word in context_words)
 
 
+# ticker_names.resolve 는 부분매칭이라 흔한 한글어가 엉뚱한 티커로 걸린다
+# ("내"→내수주 326230.KS, "시장"→VTI, "포트폴리오"→475350.KS). 자산 추출에서 제외.
+_NON_TICKER_TERMS = {
+    "포트폴리오", "시장", "종목", "종목들", "보유", "전체", "상황", "현황", "상태",
+    "요즘", "오늘", "지금", "수익", "손실", "자산", "계좌", "투자", "전략", "리밸런싱",
+    "비중", "분석", "의견", "생각", "느낌", "최근", "이거", "그거", "우리", "코스피",
+    "코스닥", "나스닥", "다우", "시황", "뉴스", "가격", "관리", "정리", "요약", "점검",
+}
+
+
 def _extract_asset_symbol(question: str) -> tuple[str, str] | None:
     q = str(question or "").strip()
     ql = q.lower()
@@ -661,7 +725,10 @@ def _extract_asset_symbol(question: str) -> tuple[str, str] | None:
         import ticker_names
         for chunk in re.findall(r"[A-Za-z0-9.-]{2,}|[가-힣A-Za-z0-9&+.-]+", q):
             term = re.sub(r"(은|는|이|가|을|를|도|만|으로|에는|에서|까지|부터)$", "", chunk.strip())
-            if not term:
+            if not term or term in _NON_TICKER_TERMS:
+                continue
+            # 1글자 한글("내" 등)은 부분매칭으로 엉뚱한 티커에 걸리므로 제외
+            if len(term) < 2 and not term.isascii():
                 continue
             resolved = ticker_names.resolve(term, allow_net=False)
             if resolved:
