@@ -895,6 +895,7 @@ def _try_llm_chat(question: str, pack: dict, history: list[dict] | None = None,
     prompt = _build_general_chat_prompt(question, pack, history)
     return (_try_codex_chat(prompt, runner=runner)
             or _try_hermes_chat(prompt, runner=runner)
+            or _try_gemini_chat(prompt, runner=runner)
             or _try_agy_backup(prompt))
 
 
@@ -924,8 +925,6 @@ def _try_codex_chat(prompt: str, runner=subprocess.run) -> str | None:
             "--ephemeral",
             "--sandbox",
             "read-only",
-            "--ask-for-approval",
-            "never",
             "--cd",
             os.getenv("AGENT_CONSOLE_CODEX_CWD", "/tmp"),
             "--skip-git-repo-check",
@@ -968,6 +967,39 @@ def _try_hermes_chat(prompt: str, runner=subprocess.run) -> str | None:
         os.getenv("AGENT_CONSOLE_LLM_PROVIDER", os.getenv("INVESTMENT_REPORT_LLM_PROVIDER", "openai-codex")),
         "--model",
         os.getenv("AGENT_CONSOLE_LLM_MODEL", os.getenv("INVESTMENT_REPORT_LLM_MODEL", "gpt-5-mini")),
+        "-Q",
+    ]
+    timeout = int(os.getenv("AGENT_CONSOLE_LLM_TIMEOUT", "60") or "60")
+    try:
+        result = runner(cmd, capture_output=True, text=True, timeout=max(10, min(timeout, 180)))
+    except Exception:
+        return None
+    if getattr(result, "returncode", 1) != 0:
+        return None
+    text = (getattr(result, "stdout", "") or "").strip()
+    if not text:
+        return None
+    return text[:6000]
+
+
+def _try_gemini_chat(prompt: str, runner=subprocess.run) -> str | None:
+    """hermes 경유 Gemini 직통 호출 — codex/hermes(openai-codex) 동시 장애 시 3차 폴백.
+
+    hermes 는 openai-codex 인증 만료 시 OpenRouter 로 자동 강등되는데 그 크레딧이
+    바닥나면 전 경로가 죽는다. Gemini 는 hermes 에 등록된 별도 API 키로 그 경로를
+    타지 않아 codex/OpenRouter 장애와 무관하게 동작 — 필수 설치물 없음(hermes 내장).
+    """
+    if os.getenv("AGENT_CONSOLE_GEMINI_ENABLED", "1").lower() in {"0", "false", "no", "off"}:
+        return None
+    cmd = [
+        "hermes",
+        "chat",
+        "-q",
+        prompt,
+        "--provider",
+        "gemini",
+        "--model",
+        os.getenv("AGENT_CONSOLE_GEMINI_MODEL", "gemini-2.5-flash"),
         "-Q",
     ]
     timeout = int(os.getenv("AGENT_CONSOLE_LLM_TIMEOUT", "60") or "60")

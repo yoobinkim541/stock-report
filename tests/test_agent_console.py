@@ -623,7 +623,8 @@ def test_agent_codex_chat_runner_writes_last_message(monkeypatch, tmp_path):
         assert cmd[:2] == ["codex", "exec"]
         assert "--ephemeral" in cmd
         assert "--sandbox" in cmd and "read-only" in cmd
-        assert "--ask-for-approval" in cmd and "never" in cmd
+        # codex-cli 0.144+ 는 exec 모드에 승인 프롬프트가 없어 --ask-for-approval 이 제거됨
+        assert "--ask-for-approval" not in cmd
         with open(out_path, "w", encoding="utf-8") as f:
             f.write("Codex 응답")
 
@@ -635,6 +636,59 @@ def test_agent_codex_chat_runner_writes_last_message(monkeypatch, tmp_path):
         return Result()
 
     assert _try_codex_chat("테스트", runner=fake_runner) == "Codex 응답"
+
+
+def test_agent_gemini_chat_runner_builds_correct_command(monkeypatch):
+    from agent_console.agent import _try_gemini_chat
+
+    def fake_runner(cmd, **kwargs):
+        assert cmd[:2] == ["hermes", "chat"]
+        assert "-q" in cmd and "테스트" in cmd
+        assert "--provider" in cmd and "gemini" in cmd
+        assert "--model" in cmd and "gemini-2.5-flash" in cmd
+
+        class Result:
+            returncode = 0
+            stdout = "Gemini 응답"
+            stderr = ""
+
+        return Result()
+
+    assert _try_gemini_chat("테스트", runner=fake_runner) == "Gemini 응답"
+
+
+def test_agent_gemini_chat_disabled_by_env(monkeypatch):
+    from agent_console.agent import _try_gemini_chat
+
+    monkeypatch.setenv("AGENT_CONSOLE_GEMINI_ENABLED", "0")
+    assert _try_gemini_chat("테스트", runner=lambda *a, **k: (_ for _ in ()).throw(
+        AssertionError("gate off 인데 runner 가 호출됨"))) is None
+
+
+def test_agent_llm_chat_falls_through_codex_hermes_to_gemini(monkeypatch):
+    """codex·hermes(openai-codex) 둘 다 실패해도 gemini 폴백이 실답을 채택한다."""
+    from agent_console.agent import _try_llm_chat
+
+    def fake_runner(cmd, **kwargs):
+        class Result:
+            returncode = 1
+            stdout = ""
+            stderr = "auth expired"
+
+        if cmd[:2] == ["codex", "exec"]:
+            return Result()
+        if cmd[:2] == ["hermes", "chat"] and "gemini" not in cmd:
+            return Result()
+        if cmd[:2] == ["hermes", "chat"] and "gemini" in cmd:
+            class Ok:
+                returncode = 0
+                stdout = "Gemini 실답"
+                stderr = ""
+            return Ok()
+        raise AssertionError(f"예상 못한 cmd: {cmd}")
+
+    pack = {"surface": "market", "sources": {"events": []}, "memory": []}
+    assert _try_llm_chat("질문", pack, runner=fake_runner) == "Gemini 실답"
 
 
 def test_server_endpoints(monkeypatch, tmp_path):
