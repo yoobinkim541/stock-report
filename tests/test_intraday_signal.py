@@ -152,3 +152,57 @@ def test_lmt_style_bb_volume_alert_is_not_high_confidence():
     )
 
     assert is_high_confidence_intraday_signal(sig) is False
+
+
+def test_bullish_divergence_counts_toward_confidence_confirmation():
+    """↕️ RSI 강세 다이버전스도 EMA·거래량과 동급으로 롱 확신 조건에 포함돼야 한다."""
+    sig = _intraday_sig(alerts=["📈 거래량 증가 3×", "🎯 VWAP 상향 돌파 (+0.20%)", "↕️ RSI 강세 다이버전스"])
+    assert is_high_confidence_intraday_signal(sig) is True
+
+
+def test_bearish_divergence_alone_is_not_bullish_confirmation():
+    sig = _intraday_sig(alerts=["📈 거래량 증가 3×", "🚀 5m 모멘텀 +1.8%", "↕️ RSI 약세 다이버전스"])
+    assert is_high_confidence_intraday_signal(sig) is False
+
+
+def _synthetic_intraday_df(n=40, base=100.0):
+    idx = pd.date_range("2026-07-14 09:30", periods=n, freq="5min")
+    close = pd.Series([base + i * 0.05 for i in range(n)], index=idx)
+    return pd.DataFrame({"Open": close - 0.02, "High": close + 0.05, "Low": close - 0.05,
+                         "Close": close, "Volume": [1000.0] * n}, index=idx)
+
+
+def test_analyze_intraday_emits_divergence_alert(monkeypatch):
+    """analyze_intraday 가 최근 확정된 다이버전스를 알림·점수에 반영한다."""
+    import ml.features as mlf
+    import ml.intraday_signal as intraday_signal
+
+    df = _synthetic_intraday_df()
+    monkeypatch.setattr(intraday_signal, "fetch_intraday", lambda *a, **k: df)
+    recent_date = df.index[-3]                      # "최근 6봉 이내" 조건 충족
+    monkeypatch.setattr(mlf, "rsi_divergence_events", lambda *a, **k: [
+        {"type": "bullish", "date": recent_date, "prior_date": df.index[-10],
+         "price": 105.0, "rsi": 45.0, "prior_price": 103.0, "prior_rsi": 35.0},
+    ])
+
+    sig = intraday_signal.analyze_intraday("TEST", interval="5m")
+    assert sig is not None
+    assert any("강세 다이버전스" in a for a in sig.alerts)
+
+
+def test_analyze_intraday_ignores_stale_divergence(monkeypatch):
+    """6봉보다 오래된 다이버전스는 알림에 반영하지 않는다(더 이상 '현재' 상태 아님)."""
+    import ml.features as mlf
+    import ml.intraday_signal as intraday_signal
+
+    df = _synthetic_intraday_df()
+    monkeypatch.setattr(intraday_signal, "fetch_intraday", lambda *a, **k: df)
+    stale_date = df.index[-20]
+    monkeypatch.setattr(mlf, "rsi_divergence_events", lambda *a, **k: [
+        {"type": "bullish", "date": stale_date, "prior_date": df.index[-30],
+         "price": 105.0, "rsi": 45.0, "prior_price": 103.0, "prior_rsi": 35.0},
+    ])
+
+    sig = intraday_signal.analyze_intraday("TEST", interval="5m")
+    assert sig is not None
+    assert not any("다이버전스" in a for a in sig.alerts)

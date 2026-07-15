@@ -697,7 +697,7 @@ def _price_chart(ticker, hist, avg_cost, trades, fullscreen: bool = False,
                           key=f"_ev_{tf}_{'macro' if ticker_names.is_macro(ticker) else 'eq'}",
                           label_visibility="collapsed") or []
         st.markdown("**하단 지표** — 서브 패널")
-        bottom = st.pills("하단 지표", ["거래량", "RSI", "MACD", "스토캐스틱",
+        bottom = st.pills("하단 지표", ["거래량", "RSI", "RSI 다이버전스", "MACD", "스토캐스틱",
                                      "Aroon", "%b", "PVT", "분기 EPS", "펀더멘털"],
                           selection_mode="multi",
                           default=["거래량", "RSI"], key=f"_bot_{tf}",
@@ -718,6 +718,7 @@ def _price_chart(ticker, hist, avg_cost, trades, fullscreen: bool = False,
             st.caption(f"ℹ️ {tf_label}봉은 {_TF_SPAN[tf]}까지 제공 (yfinance 보존 한계) · 주/월/일봉은 전체 이력")
     label = ticker_names.label(ticker)
     show_rsi = "RSI" in bottom
+    show_rsi_div = show_rsi and "RSI 다이버전스" in bottom
     show_macd = "MACD" in bottom
     show_stoch = "스토캐스틱" in bottom
     show_aroon = "Aroon" in bottom
@@ -822,7 +823,7 @@ def _price_chart(ticker, hist, avg_cost, trades, fullscreen: bool = False,
     fig = charts.price_chart(
         df, label, kind=("candle" if (kind == "🕯️ 캔들" or use_ha) else "line"),
         avg_cost=avg_cost, trades=trades, view_days=view_days, mas=mas,
-        show_rsi=show_rsi, bollinger="볼린저 밴드" in top,
+        show_rsi=show_rsi, show_rsi_div=show_rsi_div, bollinger="볼린저 밴드" in top,
         ichimoku="일목균형표" in top, trend_lines=tls, show_volume=show_vol,
         supertrend="슈퍼트렌드" in top, envelope="엔벨로프" in top,
         fractals="프랙탈" in top, vol_profile="매물대" in top,

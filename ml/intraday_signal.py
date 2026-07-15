@@ -321,6 +321,7 @@ def is_high_confidence_intraday_signal(sig: IntradaySignal, min_score: float = 0
     bullish_alerts = [
         alert for alert in sig.alerts
         if any(token in alert for token in ("거래량", "EMA", "RSI 반등", "VWAP", "BB 상방", "모멘텀"))
+        or "강세 다이버전스" in alert
     ]
     if len(bullish_alerts) < 3:
         return False
@@ -411,6 +412,22 @@ def analyze_intraday(
     elif mom12 < -0.015:
         alerts.append(f"🔻 {interval} 급락 {mom12*100:+.1f}%")
         score_parts.append(0.05)
+
+    # 7. RSI 다이버전스 — 단기봉이라 일봉보다 좁은 피봇창(3봉)·짧은 유효거리(30봉)
+    try:
+        from ml.features import rsi_divergence_events
+        div_events = rsi_divergence_events(close, feat["rsi"], pivot_window=3, max_gap=30)
+    except Exception:
+        div_events = []
+    if div_events:
+        last_div = div_events[-1]
+        recent = (len(feat) - 1) - feat.index.get_loc(last_div["date"]) <= 6  # 최근 6봉 이내만 유효
+        if recent and last_div["type"] == "bullish":
+            alerts.append("↕️ RSI 강세 다이버전스")
+            score_parts.append(0.20)
+        elif recent and last_div["type"] == "bearish":
+            alerts.append("↕️ RSI 약세 다이버전스")
+            score_parts.append(0.05)   # 롱 전용 신호 체계 — 경고성 정보만, 숏 트리거 아님
 
     score = min(1.0, sum(score_parts))
 
