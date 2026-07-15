@@ -90,6 +90,13 @@ def load_cfg() -> dict:
                             "US": max(spread_soft_us, spread_hard_us)},
         "flat_buffer_min": int(_env_f("INTRADAY_FLAT_BUFFER_MIN", 15)),
         "entry_cutoff_min": int(_env_f("INTRADAY_ENTRY_CUTOFF_MIN", 30)),
+        # 개장 첫 N분은 진입 보류 — 개장 동시호가 직후 스프레드가 구조적으로 넓어
+        # 하필 이 순간에 몰리는 진입기준 통과 신호가 스프레드 가드에 거의 매번
+        # 막히던 문제 방어(2026-07-15 실측). US 는 개장 변동성이 커 기본 더 김.
+        "open_buffer_min": {"KR": int(_env_f("INTRADAY_OPEN_BUFFER_MIN_KR",
+                                             _env_f("INTRADAY_OPEN_BUFFER_MIN", 2))),
+                            "US": int(_env_f("INTRADAY_OPEN_BUFFER_MIN_US",
+                                             _env_f("INTRADAY_OPEN_BUFFER_MIN", 3)))},
         "stale_flat_min": int(_env_f("INTRADAY_STALE_FLAT_MIN", 10)),
         "orb_minutes": int(_env_f("INTRADAY_ORB_MINUTES", 15)),
         "explore_enabled": os.getenv("INTRADAY_EXPLORE_ENABLED", "true").lower() == "true",
@@ -768,6 +775,7 @@ def run_market(mk: str, state: dict, cfg: dict, *, dry: bool = False) -> list[st
                if stop else 0)                      # _do_entry 와 동일 산식 — 가드 일관성
         ok, why = ax.entry_guards({
             "halt": state["halt"].get(mk, False), "now_min": now_min, "close_min": close_min,
+            "open_min": _OPEN_MIN[mk], "open_buffer_min": _cfg_market_value(cfg, "open_buffer_min", mk, 0),
             "flat_buffer_min": cfg["flat_buffer_min"], "entry_cutoff_min": cfg["entry_cutoff_min"],
             "trades_today": c.get("trades", 0), "max_trades": cfg["max_trades"],
             "cooldown_ok": int(cfg.get("cooldown_min") or 0) <= 0

@@ -92,6 +92,51 @@ def test_us_spread_guard_uses_hard_cap_while_soft_cap_can_stay_tight():
     assert ax.entry_guards({**base, "spread": 60.0, "spread_cap": cap}) == (False, "spread")
 
 
+def test_open_window_guard_blocks_first_minutes_then_releases():
+    """개장 첫 N분(open_buffer_min)은 진입 보류 — 개장 동시호가 스프레드 방어."""
+    from ml import intraday_axes as ax
+
+    US_OPEN = 9 * 60 + 30
+    base = {"halt": False, "close_min": 16 * 60, "flat_buffer_min": 15,
+            "entry_cutoff_min": 30, "trades_today": 0, "max_trades": 0,
+            "cooldown_ok": True, "held": False, "fresh": True,
+            "spread": 1.0, "spread_cap": 50.0, "loss_budget": 100.0, "qty": 1,
+            "open_min": US_OPEN, "open_buffer_min": 3}
+
+    assert ax.entry_guards({**base, "now_min": US_OPEN}) == (False, "open_window")
+    assert ax.entry_guards({**base, "now_min": US_OPEN + 1}) == (False, "open_window")
+    assert ax.entry_guards({**base, "now_min": US_OPEN + 2}) == (False, "open_window")
+    assert ax.entry_guards({**base, "now_min": US_OPEN + 3}) == (True, "ok")
+    assert ax.entry_guards({**base, "now_min": US_OPEN + 30}) == (True, "ok")
+
+
+def test_open_window_guard_is_noop_without_open_min_key():
+    """open_min 을 안 넘기는 구 호출부는 기존 동작 그대로(하위호환)."""
+    from ml import intraday_axes as ax
+
+    base = {"halt": False, "now_min": 9 * 60 + 30,
+            "close_min": 16 * 60, "flat_buffer_min": 15, "entry_cutoff_min": 30,
+            "trades_today": 0, "max_trades": 0, "cooldown_ok": True, "held": False,
+            "fresh": True, "spread": 1.0, "spread_cap": 50.0, "loss_budget": 100.0, "qty": 1}
+
+    assert ax.entry_guards(dict(base)) == (True, "ok")
+
+
+def test_load_cfg_open_buffer_min_defaults_and_env_override(monkeypatch):
+    from crons import intraday_mock_track as eng
+
+    monkeypatch.delenv("INTRADAY_OPEN_BUFFER_MIN", raising=False)
+    monkeypatch.delenv("INTRADAY_OPEN_BUFFER_MIN_KR", raising=False)
+    monkeypatch.delenv("INTRADAY_OPEN_BUFFER_MIN_US", raising=False)
+    cfg = eng.load_cfg()
+    assert cfg["open_buffer_min"] == {"KR": 2, "US": 3}
+
+    monkeypatch.setenv("INTRADAY_OPEN_BUFFER_MIN_US", "5")
+    cfg2 = eng.load_cfg()
+    assert cfg2["open_buffer_min"]["US"] == 5
+    assert cfg2["open_buffer_min"]["KR"] == 2   # KR 은 별도 override 없이 기본 유지
+
+
 def test_intraday_universe_expands_leverage_watchlist(monkeypatch):
     from providers import intraday_universe as iu
 

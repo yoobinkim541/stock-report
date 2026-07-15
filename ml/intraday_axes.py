@@ -246,10 +246,20 @@ def spread_cap_bps(price: float, market: str, cap_bps: float) -> float:
 def entry_guards(ctx: dict) -> tuple[bool, str]:
     """진입 하드가드. ctx 는 엔진이 조립한 순수 dict — 순서 고정:
 
-    halt → EOD 창 → 일왕복 상한 → 쿨다운 → 기보유 → 신선도 → 스프레드 → 손실예산 → qty.
+    halt → 개장 창 → EOD 창 → 일왕복 상한 → 쿨다운 → 기보유 → 신선도 → 스프레드 →
+    손실예산 → qty.
+
+    개장 창: 실측상 미국장 진입기준 통과 신호가 거의 전부 개장 첫 1분(09:30~09:31 ET)에
+    몰리는데, 그 순간이 하필 호가 스프레드가 구조적으로 가장 넓은 개장 동시호가 직후라
+    스프레드 가드에 거의 매번 막혀 기록이 텅 빔(2026-07-15 실측: 최근 9일 미국 진입
+    1건뿐). open_min 이 주어지면 open_buffer_min 만큼 진입을 보류해 스프레드가
+    정상화될 시간을 준다. ctx 에 open_min 이 없으면(구 호출부) 기존 동작 그대로 무영향.
     """
     if ctx.get("halt"):
         return False, "halt"
+    open_min = ctx.get("open_min")
+    if open_min is not None and ctx["now_min"] < open_min + ctx.get("open_buffer_min", 0):
+        return False, "open_window"
     if ctx["now_min"] >= ctx["close_min"] - ctx.get("flat_buffer_min", 15) - ctx.get("entry_cutoff_min", 30):
         return False, "eod_window"
     max_trades = int(ctx.get("max_trades", 0) or 0)
