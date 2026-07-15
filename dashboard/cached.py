@@ -149,6 +149,13 @@ def ohlc(t, period="6mo"):
     없음), @st.cache_data 가 그 빈 값을 15분 캐싱해 blank 가 지속됨 — 특히 KR 은
     DART 부재로 페이지당 yfinance 호출이 많아 취약. → 성공 시 디스크 백업, 실패 시
     **마지막 정상 데이터로 폴백**해 blank 차트를 방지(약간 stale 해도 표시 우선).
+
+    최신 봉 종가 NaN 보정: 마감 직후 미확정, 또는(드물게) 급변동일 데이터 공백으로
+    최근 일봉의 Close 가 NaN 이면 dropna 소비자(히어로·기술지표·차트 라인)가 그 봉을
+    통째로 건너뛰어 실제로는 크게 움직인 날이 현재가·차트에 전혀 안 보이는 사고가
+    난다(IBM 2026-07-14 실적쇼크 급락 사례 — 히어로가 며칠 전 종가를 "현재가"로
+    표시). ML/백테스트가 쓰는 `_history_cached` 원본은 건드리지 않고 이 표시 레이어
+    사본에서만 실시간 시세로 보정, 실패 시 (고가+저가)/2 근사로라도 변동을 드러낸다.
     """
     df = None
     try:
@@ -157,6 +164,7 @@ def ohlc(t, period="6mo"):
     except Exception:
         df = None
     if df is not None and not getattr(df, "empty", True):
+        df = _fill_stale_last_close(t, df)
         try:                                       # 성공 — 마지막 정상 데이터 디스크 백업
             p = _ohlc_disk_path(t, period)
             p.parent.mkdir(parents=True, exist_ok=True)
@@ -171,6 +179,36 @@ def ohlc(t, period="6mo"):
             return pd.read_parquet(p)
     except Exception:
         pass
+    return df
+
+
+def _fill_stale_last_close(t, df):
+    """최근 일봉 Close 가 NaN 이면 실시간가로, 그마저 실패하면 (고가+저가)/2 로 보정.
+
+    표시 전용 근사 — 원본 df 를 변형하지 않고 사본만 고친다.
+    """
+    try:
+        import pandas as pd
+        if "Close" not in df.columns or not pd.isna(df["Close"].iloc[-1]):
+            return df
+        price = None
+        try:
+            import yfinance as yf
+            # FastInfo 는 dict 인터페이스가 camelCase 키(.get("lastPrice"))만 인식하고
+            # snake_case(.get("last_price"))는 항상 None 을 반환 — 속성 접근만 정확
+            price = getattr(yf.Ticker(t).fast_info, "last_price", None)
+        except Exception:
+            price = None
+        if not price:
+            hi = df["High"].iloc[-1] if "High" in df.columns else None
+            lo = df["Low"].iloc[-1] if "Low" in df.columns else None
+            if pd.notna(hi) and pd.notna(lo):
+                price = (float(hi) + float(lo)) / 2
+        if price:
+            df = df.copy()
+            df.iloc[-1, df.columns.get_loc("Close")] = float(price)
+    except Exception:
+        return df
     return df
 
 
