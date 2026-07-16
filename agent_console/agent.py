@@ -105,10 +105,12 @@ def answer(question: str, surface: str = "market") -> dict:
     history = _safe_list_conversation(limit=12, surface=surface)
     _safe_add_conversation("user", question, surface)
     pack = _safe_context_pack(surface)
+    _reset_llm_engine()
     try:
         response = _compose_answer(question, pack, history=history)
     except Exception as exc:
         response = _compose_error_fallback_answer(question, pack, exc)
+    engine = _LAST_LLM_ENGINE or "local-rules"
     _safe_add_conversation("assistant", response, surface)
     try:
         shared_memory.append_chat_exchange(question, response, surface)
@@ -120,6 +122,7 @@ def answer(question: str, surface: str = "market") -> dict:
         "answer": response,
         "surface": surface,
         "context": {
+            "engine": engine,
             "event_count": len(sources.get("events") or []),
             "memory_count": len(pack.get("memory") or []),
             "shared_memory_count": (pack.get("shared_memory") or {}).get("recordCount", 0),
@@ -818,7 +821,26 @@ def _compose_general_chat_answer(question: str, pack: dict, history: list[dict] 
     llm = _try_llm_chat(question, pack, history)
     if llm:
         return llm
-    return _fallback_general_chat(question, pack, history)
+    fallback = _fallback_general_chat(question, pack, history)
+    if os.getenv("AGENT_CONSOLE_LLM_ENABLED", "1").lower() in {"0", "false", "no", "off"}:
+        return fallback
+    return (fallback + "\n\n⚠️ LLM 엔진(codex→hermes→agy) 응답을 받지 못해 규칙 기반 폴백으로 답했습니다. "
+            "서버에서 `codex --version`·`hermes --version`·API 크레딧/모델 설정을 확인해 주세요.")
+
+
+# 마지막 답변을 만든 엔진 (codex/hermes/agy — LLM 미개입이면 None=local-rules).
+# answer() 가 매 호출 초기화 후 context.engine 으로 노출 → UI 가 정직하게 표기.
+_LAST_LLM_ENGINE: str | None = None
+
+
+def _mark_llm_engine(name: str) -> None:
+    global _LAST_LLM_ENGINE
+    _LAST_LLM_ENGINE = name
+
+
+def _reset_llm_engine() -> None:
+    global _LAST_LLM_ENGINE
+    _LAST_LLM_ENGINE = None
 
 
 def _try_llm_chat(question: str, pack: dict, history: list[dict] | None = None,
@@ -839,7 +861,10 @@ def _try_agy_backup(prompt: str) -> str | None:
     try:
         from lib import llm_cli
         text, _note = llm_cli.backup_chat(prompt)
-        return (text or "").strip()[:6000] or None
+        out = (text or "").strip()[:6000] or None
+        if out:
+            _mark_llm_engine("agy")
+        return out
     except Exception:
         return None
 
@@ -848,37 +873,52 @@ def _try_codex_chat(prompt: str, runner=subprocess.run) -> str | None:
     if os.getenv("AGENT_CONSOLE_CODEX_ENABLED", "1").lower() in {"0", "false", "no", "off"}:
         return None
     out_path = None
+    want_search = os.getenv("AGENT_CONSOLE_CODEX_SEARCH", "1").lower() not in {"0", "false", "no", "off"}
     try:
         with tempfile.NamedTemporaryFile(prefix="agent-codex-", suffix=".txt", delete=False) as tmp:
             out_path = tmp.name
-        cmd = [
-            "codex",
-            "exec",
-            "--ephemeral",
-            "--sandbox",
-            "read-only",
-            "--ask-for-approval",
-            "never",
-            "--cd",
-            os.getenv("AGENT_CONSOLE_CODEX_CWD", "/tmp"),
-            "--skip-git-repo-check",
-            "--color",
-            "never",
-            "--output-last-message",
-            out_path,
-        ]
-        model = os.getenv("AGENT_CONSOLE_CODEX_MODEL")
-        if model:
-            cmd.extend(["--model", model])
-        cmd.append(prompt)
+
+        def build_cmd(search: bool) -> list[str]:
+            cmd = [
+                "codex",
+                "exec",
+                "--ephemeral",
+                "--sandbox",
+                "read-only",
+                "--ask-for-approval",
+                "never",
+                "--cd",
+                os.getenv("AGENT_CONSOLE_CODEX_CWD", "/tmp"),
+                "--skip-git-repo-check",
+                "--color",
+                "never",
+                "--output-last-message",
+                out_path,
+            ]
+            if search:
+                # 웹 검색 도구 활성화 — 최신 시장 정보를 로컬 수집분 밖에서도 보강
+                cmd.append("--search")
+            model = os.getenv("AGENT_CONSOLE_CODEX_MODEL")
+            if model:
+                cmd.extend(["--model", model])
+            cmd.append(prompt)
+            return cmd
+
         timeout = int(os.getenv("AGENT_CONSOLE_CODEX_TIMEOUT", os.getenv("AGENT_CONSOLE_LLM_TIMEOUT", "75")) or "75")
-        result = runner(cmd, capture_output=True, text=True, timeout=max(10, min(timeout, 240)))
+        timeout = max(10, min(timeout, 240))
+        result = runner(build_cmd(want_search), capture_output=True, text=True, timeout=timeout)
+        if getattr(result, "returncode", 1) != 0 and want_search:
+            # 구버전 codex 가 --search 미지원이면 즉시 실패 → 검색 없이 1회 재시도
+            result = runner(build_cmd(False), capture_output=True, text=True, timeout=timeout)
         if getattr(result, "returncode", 1) != 0:
             return None
         text = Path(out_path).read_text(encoding="utf-8", errors="replace").strip() if out_path else ""
         if not text:
             text = (getattr(result, "stdout", "") or "").strip()
-        return text[:6000] if text else None
+        if text:
+            _mark_llm_engine("codex")
+            return text[:6000]
+        return None
     except Exception:
         return None
     finally:
@@ -913,6 +953,7 @@ def _try_hermes_chat(prompt: str, runner=subprocess.run) -> str | None:
     text = (getattr(result, "stdout", "") or "").strip()
     if not text:
         return None
+    _mark_llm_engine("hermes")
     return text[:6000]
 
 
@@ -957,6 +998,7 @@ def _build_general_chat_prompt(question: str, pack: dict, history: list[dict] | 
         "공유 메모리는 참고 맥락일 뿐이며 현재 사용자 질문과 화면 컨텍스트가 우선한다.",
         "실제 매매 지시는 피하고, 판단 근거와 확인할 점을 짧고 명확하게 말한다.",
         "모르면 모른다고 말하고, 필요한 정보가 무엇인지 묻는다.",
+        "최신 시세·뉴스 등 실시간 정보가 필요하고 웹 검색 도구가 있으면 검색해서 보강하되, 정보의 시점을 명시한다.",
         f"현재 화면: {pack.get('surface') or 'market'}",
         "",
         "[최근 대화]",

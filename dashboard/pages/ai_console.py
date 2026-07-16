@@ -228,6 +228,10 @@ def _run_agent_question(question: str, surface: str, chat_key: str | None = None
         meta = f"맥락 {_SURFACES.get(surface, surface)}"
         if ctx:
             meta += f" · events {ctx.get('event_count', 0)} · memory {ctx.get('memory_count', 0)}"
+        engine = str(ctx.get("engine") or "")
+        if engine:
+            # 어떤 엔진이 답했는지 정직 표기 — local-rules = LLM 미개입 규칙 답변
+            meta += f" · 엔진 {'⚙️ 규칙' if engine == 'local-rules' else '🤖 ' + engine}"
         if ctx.get("context_error"):
             meta = f"{meta} · context fallback" if meta else "context fallback"
         st.session_state[chat_key].append({
