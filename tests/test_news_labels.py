@@ -138,6 +138,23 @@ def test_prompt_contains_defense_and_markers():
 
 # ── 크론 선별 (pick_events) ──────────────────────────────────────────────────
 
+class FakeCompleted:
+    def __init__(self, stdout="", stderr="", returncode=0):
+        self.stdout, self.stderr, self.returncode = stdout, stderr, returncode
+
+
+def test_label_events_heuristic_fallback(monkeypatch):
+    def runner(cmd, **kw):
+        return FakeCompleted(returncode=1, stderr="402")
+
+    labels = NL.label_events(_events(), runner=runner)
+    assert len(labels) == 2
+    assert labels[0]["id"] == "e1" and labels[0]["event_type"] == "실적"
+    assert labels[0]["direction"] == 1
+    assert labels[1]["id"] == "e2" and labels[1]["event_type"] == "규제"
+    assert labels[1]["direction"] == -1
+
+
 def test_pick_events_filters_and_caps():
     import news_llm_snapshot as S
     events = [
