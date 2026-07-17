@@ -513,8 +513,9 @@ def _llm_related_section(ticker):
         items, status = st.session_state[res_key]
         if not items:
             msg = {"disabled": "DASH_LLM_RELATED_ENABLED=0 — 비활성화됨",
-                   "empty": "LLM 이 검증 통과 종목을 내지 못했습니다 — 잠시 후 다시 시도"}
-            st.info(msg.get(status, f"추천 실패 — {status}"))
+                   "empty": "LLM 이 검증 통과 종목을 내지 못했습니다 — 잠시 후 다시 시도",
+                   "fallback": "LLM 호출이 실패해 로컬 폴백으로 대체했습니다"}
+            st.info(msg.get(status.split(" (", 1)[0], f"추천 실패 — {status}"))
             if st.button("다시 시도", key=f"_llmrel_retry_{ticker}"):
                 cached.llm_related.clear()
                 st.session_state.pop(res_key, None)
@@ -533,7 +534,9 @@ def _llm_related_section(ticker):
                     st.switch_page(_tp)
                 else:
                     st.rerun()
-        st.caption(f"상태: {'디스크 캐시' if status == 'cached' else 'LLM 신규 생성'} · "
+        status_label = {'cached': '디스크 캐시', 'fallback': '로컬 폴백'}.get(
+            status.split(' (', 1)[0], 'LLM 신규 생성')
+        st.caption(f"상태: {status_label} · "
                    "표시·아이디어용 — 투자 판단·자동 반영 없음")
 
 

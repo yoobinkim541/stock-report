@@ -580,7 +580,8 @@ def test_llm_related_runner_and_cache(tmp_path, monkeypatch):
     def boom(cmd, **kw):
         raise RuntimeError("no hermes")
 
-    assert llm_related.related_tickers("MSFT", runner=boom)[1].startswith("call failed")
+    items, status = llm_related.related_tickers("MSFT", runner=boom)
+    assert status.startswith("fallback") and items
     monkeypatch.setenv("DASH_LLM_RELATED_ENABLED", "0")
     assert llm_related.related_tickers("MSFT", runner=runner)[1] == "disabled"
 
