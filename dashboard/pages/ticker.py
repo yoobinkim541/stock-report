@@ -479,7 +479,9 @@ def _llm_analysis_section(ticker, hist, price):
             st.markdown(f"**기술적 위치** — {ana['technicals']}")
         if ana.get("checkpoints"):
             st.markdown("**✅ 체크포인트** — " + " · ".join(ana["checkpoints"]))
-        st.caption(f"상태: {'디스크 캐시' if status == 'cached' else 'LLM 신규 생성'} · "
+        status_label = {'cached': '디스크 캐시', 'fallback': '로컬 폴백'}.get(
+            status, 'LLM 신규 생성')
+        st.caption(f"상태: {status_label} · "
                    f"{ana.get('generated_at', '')} · {ana.get('model', '')} · "
                    "표시·참고용 — 시스템 판단(신호·배분)에 미반영")
         if st.button("🔄 재생성", key=f"_llman_re_{ticker}", help="캐시 무시하고 새로 생성"):
