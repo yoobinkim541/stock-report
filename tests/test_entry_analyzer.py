@@ -1,6 +1,10 @@
 import json
 from datetime import datetime, timedelta
 
+import numpy as np
+import pandas as pd
+import pytest
+
 from ml.entry_analyzer import EntryScore, KST, check_alert_signals, format_alert_message
 
 
@@ -208,3 +212,50 @@ def test_alert_v2_stop_first_and_parabolic():
     assert "25건 중 5건은 목표 前 손절 선행" in msg
     assert "파라볼릭 조정 레짐" in msg
     assert "승률·기대는 무손절 보유 기준" in msg
+
+
+def test_compute_entry_score_divergence_neutral_by_default():
+    """w_div 기본값 0.0 — div_v 부호와 무관하게 점수가 동일해야 한다(신규 축 미채용)."""
+    from ml.entry_analyzer import DEFAULT_SCORE_PARAMS, compute_entry_score
+
+    base_args = (0.6, 0.05, -0.03, 40.0, -0.10)
+    score_neutral, _ = compute_entry_score(*base_args, 0.0, "stock", params=DEFAULT_SCORE_PARAMS)
+    score_bullish, _ = compute_entry_score(*base_args, 1.0, "stock", params=DEFAULT_SCORE_PARAMS)
+    score_bearish, _ = compute_entry_score(*base_args, -1.0, "stock", params=DEFAULT_SCORE_PARAMS)
+    assert score_neutral == score_bullish == score_bearish
+
+
+def test_compute_entry_score_divergence_moves_score_when_weighted():
+    """w_div>0 이면 강세 다이버전스가 점수를 올리고 약세가 내린다."""
+    from ml.entry_analyzer import compute_entry_score
+
+    params = {"w_win": 0.35, "w_rr": 0.25, "w_rsi": 0.15, "w_dd": 0.15, "w_div": 0.10,
+              "enter_threshold": 0.62, "wait_threshold": 0.40}
+    base_args = (0.6, 0.05, -0.03, 40.0, -0.10)
+    bullish, _ = compute_entry_score(*base_args, 1.0, "stock", params=params)
+    neutral, _ = compute_entry_score(*base_args, 0.0, "stock", params=params)
+    bearish, _ = compute_entry_score(*base_args, -1.0, "stock", params=params)
+    assert bullish > neutral > bearish
+    assert bullish - neutral == pytest.approx(0.05, abs=1e-9)   # div_s 1.0→0.5 차 × w_div
+
+
+def test_compute_entry_score_missing_w_div_key_defaults_to_zero():
+    """구버전 캐시 entry_score_params.json(w_div 키 없음) 로드돼도 크래시 없이 중립."""
+    from ml.entry_analyzer import compute_entry_score
+
+    legacy_params = {"w_win": 0.40, "w_rr": 0.30, "w_rsi": 0.15, "w_dd": 0.15,
+                     "enter_threshold": 0.62, "wait_threshold": 0.40}
+    score, _ = compute_entry_score(0.6, 0.05, -0.03, 40.0, -0.10, 1.0, "stock", params=legacy_params)
+    assert score >= 0.0
+
+
+def test_compute_ticker_features_includes_divergence_column():
+    from ml.entry_analyzer import _compute_ticker_features
+
+    idx = pd.date_range("2024-01-01", periods=300, freq="D")
+    price = pd.Series(100 + np.linspace(0, 30, 300) + np.sin(np.arange(300) / 9) * 4, index=idx)
+    vix = pd.Series(18.0, index=idx)
+    feat = _compute_ticker_features(price, vix)
+    assert "divergence" in feat.columns
+    assert feat["divergence"].isin([-1.0, 0.0, 1.0]).all()
+    assert not feat["divergence"].isna().any()

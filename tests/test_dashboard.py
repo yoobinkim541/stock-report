@@ -580,7 +580,8 @@ def test_llm_related_runner_and_cache(tmp_path, monkeypatch):
     def boom(cmd, **kw):
         raise RuntimeError("no hermes")
 
-    assert llm_related.related_tickers("MSFT", runner=boom)[1].startswith("call failed")
+    items, status = llm_related.related_tickers("MSFT", runner=boom)
+    assert status.startswith("fallback") and items
     monkeypatch.setenv("DASH_LLM_RELATED_ENABLED", "0")
     assert llm_related.related_tickers("MSFT", runner=runner)[1] == "disabled"
 
@@ -1306,6 +1307,59 @@ def test_ohlc_disk_fallback_prevents_blank(tmp_path, monkeypatch):
     monkeypatch.setattr(md, "_history_cached", lambda t, period="1y": pd.DataFrame())
     out = cached.ohlc.__wrapped__("005930.KS", "max")
     assert out is not None and not out.empty and len(out) == 2       # blank 아님
+
+
+def test_ohlc_fills_stale_nan_close_with_live_quote(monkeypatch):
+    """최근 일봉 Close 가 NaN(급락일 데이터 공백)이면 실시간가로 보정 —
+    IBM 2026-07-14 실적쇼크 급락이 히어로·차트에서 통째로 사라졌던 사고 회귀 방지."""
+    import pandas as pd
+
+    from dashboard import cached
+    import providers.market_data as md
+
+    raw = pd.DataFrame(
+        {"Open": [290.5, 226.37], "High": [297.5, 229.92], "Low": [289.1, 213.22],
+         "Close": [290.23, float("nan")], "Volume": [5024200, 67422893]},
+        index=pd.to_datetime(["2026-07-13", "2026-07-14"]),
+    )
+    monkeypatch.setattr(md, "_history_cached", lambda t, period="1y": raw)
+    monkeypatch.setattr(cached, "_ohlc_disk_path", lambda t, period: None)
+
+    class FakeFastInfo:
+        last_price = 217.07  # 실제 yfinance FastInfo 는 속성 접근만 지원(.get()은 camelCase만)
+
+    class FakeTicker:
+        def __init__(self, t):
+            self.fast_info = FakeFastInfo()
+
+    monkeypatch.setattr("yfinance.Ticker", FakeTicker)
+    out = cached.ohlc.__wrapped__("IBM", "max")
+    assert not pd.isna(out["Close"].iloc[-1])
+    assert out["Close"].iloc[-1] == 217.07
+    assert out["Close"].iloc[0] == 290.23                # 이전 정상 봉은 불변
+
+
+def test_ohlc_fills_stale_nan_close_falls_back_to_high_low_midpoint(monkeypatch):
+    """실시간가 조회도 실패하면 (고가+저가)/2 근사로라도 급변동을 드러낸다."""
+    import pandas as pd
+
+    from dashboard import cached
+    import providers.market_data as md
+
+    raw = pd.DataFrame(
+        {"Open": [226.37], "High": [229.92], "Low": [213.22],
+         "Close": [float("nan")], "Volume": [67422893]},
+        index=pd.to_datetime(["2026-07-14"]),
+    )
+    monkeypatch.setattr(md, "_history_cached", lambda t, period="1y": raw)
+    monkeypatch.setattr(cached, "_ohlc_disk_path", lambda t, period: None)
+
+    def boom(t):
+        raise RuntimeError("network down")
+
+    monkeypatch.setattr("yfinance.Ticker", boom)
+    out = cached.ohlc.__wrapped__("IBM", "max")
+    assert out["Close"].iloc[-1] == (229.92 + 213.22) / 2
 
 
 def test_valuation_score_kr_trailing_gauge():

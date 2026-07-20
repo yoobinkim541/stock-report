@@ -479,7 +479,9 @@ def _llm_analysis_section(ticker, hist, price):
             st.markdown(f"**기술적 위치** — {ana['technicals']}")
         if ana.get("checkpoints"):
             st.markdown("**✅ 체크포인트** — " + " · ".join(ana["checkpoints"]))
-        st.caption(f"상태: {'디스크 캐시' if status == 'cached' else 'LLM 신규 생성'} · "
+        status_label = {'cached': '디스크 캐시', 'fallback': '로컬 폴백'}.get(
+            status, 'LLM 신규 생성')
+        st.caption(f"상태: {status_label} · "
                    f"{ana.get('generated_at', '')} · {ana.get('model', '')} · "
                    "표시·참고용 — 시스템 판단(신호·배분)에 미반영")
         if st.button("🔄 재생성", key=f"_llman_re_{ticker}", help="캐시 무시하고 새로 생성"):
@@ -511,8 +513,9 @@ def _llm_related_section(ticker):
         items, status = st.session_state[res_key]
         if not items:
             msg = {"disabled": "DASH_LLM_RELATED_ENABLED=0 — 비활성화됨",
-                   "empty": "LLM 이 검증 통과 종목을 내지 못했습니다 — 잠시 후 다시 시도"}
-            st.info(msg.get(status, f"추천 실패 — {status}"))
+                   "empty": "LLM 이 검증 통과 종목을 내지 못했습니다 — 잠시 후 다시 시도",
+                   "fallback": "LLM 호출이 실패해 로컬 폴백으로 대체했습니다"}
+            st.info(msg.get(status.split(" (", 1)[0], f"추천 실패 — {status}"))
             if st.button("다시 시도", key=f"_llmrel_retry_{ticker}"):
                 cached.llm_related.clear()
                 st.session_state.pop(res_key, None)
@@ -531,7 +534,9 @@ def _llm_related_section(ticker):
                     st.switch_page(_tp)
                 else:
                     st.rerun()
-        st.caption(f"상태: {'디스크 캐시' if status == 'cached' else 'LLM 신규 생성'} · "
+        status_label = {'cached': '디스크 캐시', 'fallback': '로컬 폴백'}.get(
+            status.split(' (', 1)[0], 'LLM 신규 생성')
+        st.caption(f"상태: {status_label} · "
                    "표시·아이디어용 — 투자 판단·자동 반영 없음")
 
 
@@ -697,7 +702,7 @@ def _price_chart(ticker, hist, avg_cost, trades, fullscreen: bool = False,
                           key=f"_ev_{tf}_{'macro' if ticker_names.is_macro(ticker) else 'eq'}",
                           label_visibility="collapsed") or []
         st.markdown("**하단 지표** — 서브 패널")
-        bottom = st.pills("하단 지표", ["거래량", "RSI", "MACD", "스토캐스틱",
+        bottom = st.pills("하단 지표", ["거래량", "RSI", "RSI 다이버전스", "MACD", "스토캐스틱",
                                      "Aroon", "%b", "PVT", "분기 EPS", "펀더멘털"],
                           selection_mode="multi",
                           default=["거래량", "RSI"], key=f"_bot_{tf}",
@@ -718,6 +723,7 @@ def _price_chart(ticker, hist, avg_cost, trades, fullscreen: bool = False,
             st.caption(f"ℹ️ {tf_label}봉은 {_TF_SPAN[tf]}까지 제공 (yfinance 보존 한계) · 주/월/일봉은 전체 이력")
     label = ticker_names.label(ticker)
     show_rsi = "RSI" in bottom
+    show_rsi_div = show_rsi and "RSI 다이버전스" in bottom
     show_macd = "MACD" in bottom
     show_stoch = "스토캐스틱" in bottom
     show_aroon = "Aroon" in bottom
@@ -822,7 +828,7 @@ def _price_chart(ticker, hist, avg_cost, trades, fullscreen: bool = False,
     fig = charts.price_chart(
         df, label, kind=("candle" if (kind == "🕯️ 캔들" or use_ha) else "line"),
         avg_cost=avg_cost, trades=trades, view_days=view_days, mas=mas,
-        show_rsi=show_rsi, bollinger="볼린저 밴드" in top,
+        show_rsi=show_rsi, show_rsi_div=show_rsi_div, bollinger="볼린저 밴드" in top,
         ichimoku="일목균형표" in top, trend_lines=tls, show_volume=show_vol,
         supertrend="슈퍼트렌드" in top, envelope="엔벨로프" in top,
         fractals="프랙탈" in top, vol_profile="매물대" in top,

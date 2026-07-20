@@ -34,12 +34,16 @@ def _band(fn, r_band) -> dict | None:
 def _spot_price(ticker: str) -> float | None:
     try:
         import yfinance as yf
-        p = (yf.Ticker(ticker).fast_info or {}).get("last_price")
+        # FastInfo 는 dict .get() 이 camelCase 키만 인식해 .get("last_price") 는 항상
+        # None — 속성 접근(.last_price)만 정확 (dashboard/cached.py 와 동일 원인 버그)
+        p = getattr(yf.Ticker(ticker).fast_info, "last_price", None)
         if p:
             return float(p)
         h = yf.Ticker(ticker).history(period="5d")
         if not h.empty:
-            return float(h["Close"].iloc[-1])
+            c = h["Close"].dropna()
+            if len(c):
+                return float(c.iloc[-1])
     except Exception:
         pass
     return None

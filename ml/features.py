@@ -57,6 +57,87 @@ def rsi(close: pd.Series, period: int = 14) -> pd.Series:
     return out.rename(f"rsi_{period}")
 
 
+def find_pivots(series: pd.Series, window: int = 5) -> tuple[pd.Series, pd.Series]:
+    """좌우 window 개 봉보다 엄격히 높은/낮은 지점 = 피봇 고점/저점 불리언 마스크.
+
+    `rolling(...).max() == series`(동률 포함) 로 정의하면 평탄 구간의 모든 점이
+    서로 동률 피봇으로 잡혀 진짜 두 고점 사이에 잡음 피봇이 끼어들며 페어링이
+    엉뚱한 이웃끼리 맺어진다 — 엄격 부등호(자기 자신 제외 좌/우 윈도우 각각)로
+    방지. 좌우 window 개 봉을 모두 봐야 피봇이 확정되므로(중앙 정렬), 마지막
+    window 개 봉은 항상 미확정 상태로 남는다 — 호출부가 필요에 따라 지연 처리.
+    """
+    left_max = series.shift(1).rolling(window, min_periods=window).max()
+    right_max = series.shift(-window).rolling(window, min_periods=window).max()
+    left_min = series.shift(1).rolling(window, min_periods=window).min()
+    right_min = series.shift(-window).rolling(window, min_periods=window).min()
+    is_high = series.notna() & left_max.notna() & right_max.notna() & (series > left_max) & (series > right_max)
+    is_low = series.notna() & left_min.notna() & right_min.notna() & (series < left_min) & (series < right_min)
+    return is_high, is_low
+
+
+def rsi_divergence_events(close: pd.Series, rsi_series: pd.Series, *,
+                           pivot_window: int = 5, max_gap: int = 60) -> list[dict]:
+    """가격 피봇과 RSI 값을 비교해 강세/약세 다이버전스 지점을 찾는다 (표시·분석용).
+
+    - 약세(bearish): 가격 고점 상승 + RSI 고점 하락 → 상승모멘텀 약화(고점 매도 참고)
+    - 강세(bullish): 가격 저점 하락 + RSI 저점 상승 → 하락모멘텀 약화(저점 매수 참고)
+    직전 피봇과 max_gap 봉 이내인 경우만 비교(너무 먼 과거 피봇은 무의미).
+    반환: [{type, prior_date, date, price, rsi, prior_price, prior_rsi}, ...] date 오름차순.
+    차트 표시용 — 피봇 확정에 쓰인 미래 봉을 그대로 노출하므로 ML/실시간 판단엔
+    rsi_divergence() 사용.
+    """
+    close, rsi_series = close.align(rsi_series, join="inner")
+    is_high, is_low = find_pivots(close, pivot_window)
+    out: list[dict] = []
+    for mask, kind, better in ((is_high, "bearish", lambda a, b: b > a),
+                               (is_low, "bullish", lambda a, b: b < a)):
+        idx = close.index[mask.fillna(False)]
+        for a, b in zip(idx, idx[1:]):
+            gap = close.index.get_loc(b) - close.index.get_loc(a)
+            if gap < 1 or gap > max_gap:
+                continue
+            price_a, price_b = float(close[a]), float(close[b])
+            rsi_a, rsi_b = rsi_series.get(a), rsi_series.get(b)
+            if pd.isna(rsi_a) or pd.isna(rsi_b):
+                continue
+            price_diverges = better(price_a, price_b)
+            rsi_confirms = (rsi_b < rsi_a) if kind == "bearish" else (rsi_b > rsi_a)
+            if price_diverges and rsi_confirms:
+                out.append({"type": kind, "prior_date": a, "date": b,
+                           "price": price_b, "rsi": float(rsi_b),
+                           "prior_price": price_a, "prior_rsi": float(rsi_a)})
+    return sorted(out, key=lambda d: d["date"])
+
+
+def rsi_divergence(close: pd.Series, rsi_series: pd.Series, *,
+                    pivot_window: int = 5, max_gap: int = 60,
+                    persist_bars: int | None = None) -> pd.Series:
+    """다이버전스 방향 피처 — 약세=-1·강세=+1·해당없음=0. no-lookahead.
+
+    피봇 고점/저점은 좌우 pivot_window 개 봉이 있어야 확정되므로, 행 t 의 값은
+    t 시점에 아직 안 온 미래 봉을 쓰지 않도록 확정 시점(피봇 후 pivot_window 봉)
+    으로 지연(shift) 배치한다 — compute_features 의 "행 t는 t 이전 데이터만
+    사용" 불변식을 유지. 확정 시점부터 persist_bars(기본=pivot_window) 개 봉
+    동안 값을 유지 — 단발 스파이크면 "현재 다이버전스 상태냐"를 마지막 봉만
+    보는 소비자(단기신호·진입점수)가 확정 당일 외엔 항상 0으로 놓쳐버리기 때문
+    (겹치면 최신 이벤트가 우선). 차트 등 완결된 구간 표시엔 rsi_divergence_events() 사용.
+    """
+    persist_bars = pivot_window if persist_bars is None else persist_bars
+    out = pd.Series(0.0, index=close.index, name="rsi_divergence")
+    events = rsi_divergence_events(close, rsi_series, pivot_window=pivot_window, max_gap=max_gap)
+    n = len(close.index)
+    for ev in events:
+        try:
+            confirm_pos = close.index.get_loc(ev["date"]) + pivot_window
+        except KeyError:
+            continue
+        if confirm_pos >= n:
+            continue
+        end_pos = min(n, confirm_pos + max(1, persist_bars))
+        out.iloc[confirm_pos:end_pos] = 1.0 if ev["type"] == "bullish" else -1.0
+    return out
+
+
 def macd(
     close: pd.Series,
     fast: int = 12,
@@ -306,7 +387,7 @@ def compute_features(
 
     피처 그룹:
       이동평균    : SMA(5/10/20/50/200), EMA(12/26/50)
-      오실레이터  : RSI(14), MACD, Stochastic(14,3), Williams %R(14), CCI(20)
+      오실레이터  : RSI(14), RSI 다이버전스, MACD, Stochastic(14,3), Williams %R(14), CCI(20)
       밴드        : Bollinger(20)
       모멘텀      : 1/5/10/21/63/126일, 이격도(20/60/120), 가격가속도(감마)
       변동성      : 실현변동성(10/21/63), ATR(14), VoV(변동성의변동성)
@@ -325,8 +406,10 @@ def compute_features(
         parts.append(ema(close, s))
 
     # ── 오실레이터 ───────────────────────────────────────────────────────────
-    parts.append(rsi(close, 14))
+    rsi_14 = rsi(close, 14)
+    parts.append(rsi_14)
     parts.append(rsi(close, 7))            # 단기 RSI
+    parts.append(rsi_divergence(close, rsi_14))   # 다이버전스(약세-1/강세+1) — 랭커가 가중치 학습
     parts.append(macd(close))
     parts.append(stochastic(close, df))
     parts.append(williams_r(close, df))

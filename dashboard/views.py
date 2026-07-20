@@ -826,8 +826,23 @@ def llm_related_tickers(ticker: str, force: bool = False):
         import ticker_names
         from providers import llm_related
         name = ticker_names.display_name(ticker, allow_net=False) or ticker
-        return llm_related.related_tickers(ticker, name=name, force=force)
+        items, status = llm_related.related_tickers(ticker, name=name, force=force)
+        if items:
+            return items, status
+        fallback = llm_related._fallback_related(ticker, name)
+        if fallback:
+            return fallback, f"fallback ({status})" if status and status != "fallback" else "fallback"
+        return items, status
     except Exception as exc:
+        try:
+            import ticker_names
+            from providers import llm_related
+            name = ticker_names.display_name(ticker, allow_net=False) or ticker
+            fallback = llm_related._fallback_related(ticker, name)
+            if fallback:
+                return fallback, f"fallback (call failed: {str(exc)[:40]})"
+        except Exception:
+            pass
         return None, f"call failed: {str(exc)[:80]}"
 
 
@@ -853,8 +868,20 @@ def llm_stock_analysis(ticker: str, facts: dict, force: bool = False):
         import ticker_names
         from providers import llm_analysis
         name = ticker_names.display_name(ticker, allow_net=False) or ticker
-        return llm_analysis.analyze(ticker, name, facts or {}, force=force)
+        ana, status = llm_analysis.analyze(ticker, name, facts or {}, force=force)
+        if ana:
+            return ana, status
+        fallback = llm_analysis._analysis_fallback(ticker, name, facts or {})
+        return fallback, f"fallback ({status})" if status and status != "fallback" else "fallback"
     except Exception as exc:
+        try:
+            import ticker_names
+            from providers import llm_analysis
+            name = ticker_names.display_name(ticker, allow_net=False) or ticker
+            fallback = llm_analysis._analysis_fallback(ticker, name, facts or {})
+            return fallback, f"fallback (call failed: {str(exc)[:40]})"
+        except Exception:
+            pass
         return None, f"call failed: {str(exc)[:80]}"
 
 

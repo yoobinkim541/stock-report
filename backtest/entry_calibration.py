@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
 """entry_calibration.py — entry_analyzer 점수 가중치·임계값 walk-forward 캘리브레이션
 
-진입 점수의 수작업 가중치(승률 40% / 손익비 30% / RSI 15% / 낙폭 15%)와
-enter 임계값(0.62)을 과거 데이터로 검증·재추정한다.
+진입 점수의 수작업 가중치(승률 40% / 손익비 30% / RSI 15% / 낙폭 15% / 다이버전스 0%)와
+enter 임계값(0.62)을 과거 데이터로 검증·재추정한다. 다이버전스(w_div)는 신규 축이라
+기본 가중치 0 — 이 스크립트의 OOS 재추정이 실제로 개선을 확인해야만 채택된다.
 
 방법:
   1. 유니버스 전 종목 × 과거 평가일(5거래일 간격)에 대해 점수 구성요소를 재현
@@ -105,7 +106,8 @@ def build_samples(days: int = 1260) -> pd.DataFrame:
             rows.append({
                 "ticker": ticker, "date": t, "category": category,
                 "win_20": win_20, "exp_20": exp_20, "p25_20": p25_20,
-                "rsi": float(cur["rsi"]), "dd": dd_v, "fwd_20": float(fwd),
+                "rsi": float(cur["rsi"]), "dd": dd_v,
+                "div": float(cur.get("divergence", 0.0)), "fwd_20": float(fwd),
             })
         logger.info("%s: 샘플 누적 %d", ticker, len(rows))
 
@@ -117,7 +119,7 @@ def evaluate(samples: pd.DataFrame, params: dict) -> dict:
     scores = samples.apply(
         lambda r: compute_entry_score(
             r["win_20"], r["exp_20"], r["p25_20"], r["rsi"], r["dd"],
-            r["category"], params=params,
+            r.get("div", 0.0), r["category"], params=params,
         )[0],
         axis=1,
     )
@@ -132,20 +134,25 @@ def evaluate(samples: pd.DataFrame, params: dict) -> dict:
 
 
 def grid_search(cal: pd.DataFrame) -> tuple[dict, dict]:
-    """가중치·임계값 그리드 탐색 — enter 신호 평균 20일 수익 최대화."""
+    """가중치·임계값 그리드 탐색 — enter 신호 평균 20일 수익 최대화.
+
+    w_div(RSI 다이버전스) 는 신규 축이라 0.0(미채용)을 그리드에 포함해 기존 4축
+    조합과 동등 비교 — OOS 에서 진짜 개선일 때만 evaluate()가 자연히 채택.
+    """
     best_params, best_metrics = None, {"mean_fwd": float("-inf")}
     grid = itertools.product(
         [0.30, 0.40, 0.50],          # w_win
         [0.20, 0.30, 0.40],          # w_rr
         [0.05, 0.15],                # w_rsi
+        [0.0, 0.10],                 # w_div
         [0.55, 0.62, 0.68, 0.74],    # enter_threshold
     )
-    for w_win, w_rr, w_rsi, thr in grid:
-        w_dd = round(1.0 - w_win - w_rr - w_rsi, 4)
+    for w_win, w_rr, w_rsi, w_div, thr in grid:
+        w_dd = round(1.0 - w_win - w_rr - w_rsi - w_div, 4)
         if not (0.0 <= w_dd <= 0.35):
             continue
         params = {"w_win": w_win, "w_rr": w_rr, "w_rsi": w_rsi, "w_dd": w_dd,
-                  "enter_threshold": thr, "wait_threshold": 0.40}
+                  "w_div": w_div, "enter_threshold": thr, "wait_threshold": 0.40}
         m = evaluate(cal, params)
         if m["n"] >= MIN_SIGNALS and m["mean_fwd"] > best_metrics["mean_fwd"]:
             best_params, best_metrics = params, m

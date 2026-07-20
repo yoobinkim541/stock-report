@@ -47,12 +47,15 @@ ALERT_SCORE_MIN  = 0.60   # 알림 발송 최소 점수
 # ── 진입 점수 파라미터 (backtest/entry_calibration.py가 walk-forward로 재추정) ──
 SCORE_PARAMS_PATH = Path(os.path.expanduser("~/reports/ml-cache/entry_score_params.json"))
 DEFAULT_SCORE_PARAMS = {
-    "w_win": 0.40, "w_rr": 0.30, "w_rsi": 0.15, "w_dd": 0.15,
+    "w_win": 0.40, "w_rr": 0.30, "w_rsi": 0.15, "w_dd": 0.15, "w_div": 0.0,
     "enter_threshold": 0.62, "wait_threshold": 0.40,
 }
 # 안전 범위 — 캘리브레이션/적응 산출물이 손상돼도 극단값이 라이브 진입 점수에 주입되지 않도록 클램프.
+# w_div 기본 0.0 — RSI 다이버전스는 신규 축이라 backtest/entry_calibration.py 워크포워드
+# OOS 재추정이 채택할 때까지 라이브 점수에 영향 없음(수집만, 가중치 0).
 SCORE_PARAM_BOUNDS = {
     "w_win": (0.0, 1.0), "w_rr": (0.0, 1.0), "w_rsi": (0.0, 0.5), "w_dd": (0.0, 0.5),
+    "w_div": (0.0, 0.3),
     "enter_threshold": (0.45, 0.85), "wait_threshold": (0.20, 0.60),
 }
 _score_params_cache: dict | None = None
@@ -192,6 +195,13 @@ def _compute_ticker_features(price: pd.Series, vix: pd.Series) -> pd.DataFrame:
     _rsi = _rsi.mask((loss == 0) & (gain == 0), 50.0)
     feat["rsi"] = _rsi.fillna(50)
 
+    # RSI 다이버전스 (약세=-1·강세=+1·해당없음=0, no-lookahead — ml/features 공용)
+    try:
+        from ml.features import rsi_divergence
+        feat["divergence"] = rsi_divergence(price, feat["rsi"])
+    except Exception:
+        feat["divergence"] = 0.0
+
     # 모멘텀
     feat["mom_20d"] = price.pct_change(20).fillna(0)
     feat["mom_60d"] = price.pct_change(60).fillna(0)
@@ -295,12 +305,15 @@ def compute_entry_score(
     p25_20: float,
     rsi_v:  float,
     dd_v:   float,
+    div_v:  float = 0.0,
     category: str = "stock",
     params: dict | None = None,
 ) -> tuple[float, float]:
     """복합 진입 점수 (0~1)와 손익비 계산 — analyze_entry와 캘리브레이션 공용.
 
     가중치는 get_score_params()에서 로드 (walk-forward 캘리브레이션 결과 반영).
+    div_v: RSI 다이버전스(-1 약세·0 없음·+1 강세) — w_div 기본 0.0 이라 캘리브레이션이
+    채택하기 전엔 점수에 영향 없음.
     """
     p = params or get_score_params()
 
@@ -320,7 +333,11 @@ def compute_entry_score(
     else:
         dd_s = max(0.0, min(1.0, (-dd_v - 0.05) / 0.25)) if dd_v < -0.05 else 0.0
 
-    score = win_s * p["w_win"] + rr_s * p["w_rr"] + rsi_s * p["w_rsi"] + dd_s * p["w_dd"]
+    # 5. RSI 다이버전스 — 강세(+1)면 가산, 약세(-1)면 감산, 없음(0)이면 중립(0.5)
+    div_s = max(0.0, min(1.0, (div_v + 1) / 2))
+
+    score = (win_s * p["w_win"] + rr_s * p["w_rr"] + rsi_s * p["w_rsi"] + dd_s * p["w_dd"]
+             + div_s * p.get("w_div", 0.0))
     return score, rr
 
 
@@ -394,7 +411,8 @@ def analyze_entry(
         # ── 진입 점수 계산 ──────────────────────────────────────────────────
         rsi_v = float(cur["rsi"])
         dd_v  = float(cur["drawdown"])
-        score, rr = compute_entry_score(win_20, exp_20, p25_20, rsi_v, dd_v, category)
+        div_v = float(cur.get("divergence", 0.0))
+        score, rr = compute_entry_score(win_20, exp_20, p25_20, rsi_v, dd_v, div_v, category)
 
         reasons: list[str] = []
         if win_20 >= 0.65:
@@ -413,6 +431,10 @@ def analyze_entry(
             reasons.append(f"RSI {rsi_v:.0f} (과매도)")
         elif rsi_v > 65:
             reasons.append(f"RSI {rsi_v:.0f} (과매수)")
+        if div_v > 0:
+            reasons.append("RSI 강세 다이버전스")
+        elif div_v < 0:
+            reasons.append("RSI 약세 다이버전스")
 
         # 한국 주식 메타
         currency     = "KRW" if is_kr_stock(ticker) else "USD"

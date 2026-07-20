@@ -719,6 +719,37 @@ def _add_entry_zones(fig, zones, panes) -> None:
                            **({"row": 1, "col": 1} if panes > 1 else {}))
 
 
+def _add_rsi_divergence(fig, hist, rsi_series, rsi_row) -> None:
+    """RSI 다이버전스 — 가격·RSI 피봇쌍을 잇는 점선+마커 (표시·참고용, 무엣지).
+
+    약세(고점 상승+RSI 하락)=빨강, 강세(저점 하락+RSI 상승)=초록. 최근 6개만 표시
+    (오래된 다이버전스가 쌓이면 패널이 어지러워짐). 실행 로직 미반영 — ml/entry_analyzer
+    쪽 판단은 별도 워크포워드 검증을 통과한 가중치로만 반영된다.
+    """
+    if rsi_row is None or rsi_series is None:
+        return
+    try:
+        from ml.features import rsi_divergence_events
+        events = rsi_divergence_events(hist["Close"], rsi_series, pivot_window=5, max_gap=90)
+    except Exception:
+        return
+    go = _go()
+    for ev in events[-6:]:
+        a, b = ev.get("prior_date"), ev.get("date")
+        if a not in hist.index or b not in hist.index:
+            continue
+        bearish = ev["type"] == "bearish"
+        color = _RED if bearish else _GREEN
+        label = "약세 다이버전스" if bearish else "강세 다이버전스"
+        fig.add_trace(go.Scatter(
+            x=[a, b], y=[ev["prior_rsi"], ev["rsi"]], mode="lines+markers",
+            name=label, showlegend=False,
+            line=dict(color=color, width=1.6, dash="dash"),
+            marker=dict(size=6, symbol="diamond", color=color),
+            hovertemplate=f"{label}<extra></extra>",
+        ), row=rsi_row, col=1)
+
+
 def heikin_ashi(hist):
     """하이킨아시 변환 — 표시용 평활 캔들 (OHLC 재계산·Volume 보존·순수).
 
@@ -799,7 +830,8 @@ def _add_trend_lines(fig, items: list[dict]) -> None:
 
 def price_chart(hist, ticker: str = "", *, kind: str = "line", avg_cost=None,
                 trades=None, view_days=None, mas=(60, 120, 200),
-                show_rsi: bool = False, bollinger: bool = False, ichimoku: bool = False,
+                show_rsi: bool = False, show_rsi_div: bool = False,
+                bollinger: bool = False, ichimoku: bool = False,
                 trend_lines=None, show_volume: bool = False, supertrend: bool = False,
                 envelope: bool = False, fractals: bool = False, vol_profile: bool = False,
                 emas=(), psar: bool = False, donchian_on: bool = False,
@@ -1033,6 +1065,8 @@ def price_chart(hist, ticker: str = "", *, kind: str = "line", avg_cost=None,
         for lv, c in ((70, _RED), (30, _GREEN)):
             fig.add_hline(y=lv, line=dict(color=c, dash="dot", width=0.7), row=rsi_row, col=1)
         fig.update_yaxes(range=[0, 100], row=rsi_row, col=1, tickvals=[30, 50, 70])
+        if show_rsi_div and not cmp_mode:
+            _add_rsi_divergence(fig, hist, rsi, rsi_row)
 
     # ── MACD 패널 (12·26·9) — 히스토그램(방향색) + MACD·시그널 라인 ──
     if macd_row:

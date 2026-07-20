@@ -451,6 +451,37 @@ def test_agent_portfolio_ambiguous_complaint_does_not_use_market_template(monkey
     assert "반복" in answer
 
 
+def test_agent_my_portfolio_question_gives_overview_not_hallucinated_ticker(monkeypatch):
+    """'내 포트폴리오 어때' 가 '내'→내수주(326230.KS) 부분매칭으로 단일종목 의견에
+    오분류되던 회귀 방지 — 실제 보유 개요를 준다."""
+    monkeypatch.setenv("AGENT_CONSOLE_LLM_ENABLED", "0")
+    from agent_console.agent import _compose_answer, _extract_asset_symbol
+
+    # 흔한 한글어가 티커로 환각되지 않아야 함
+    assert _extract_asset_symbol("내 포트폴리오 어때") is None
+    assert _extract_asset_symbol("시장 어때") is None
+    # 진짜 티커/종목명은 그대로 추출
+    assert (_extract_asset_symbol("NVDA 어때") or (None,))[0] == "NVDA"
+
+    pack = {
+        "surface": "portfolio",
+        "generated_at": "2026-07-15T06:35:00+00:00",
+        "sources": {"events": [], "source_counts": [], "symbol_counts": []},
+        "memory": [], "reports": [], "ml_activity": [], "paper": {},
+        "portfolio": {
+            "holdings": [
+                {"ticker": "QQQI", "name": "Neos Nasdaq", "weight": 20.9, "ret": 5.2, "value": 2000},
+                {"ticker": "UNH", "name": "유나이티드헬스", "weight": 14.9, "ret": 33.5, "value": 1400},
+            ],
+            "summary": {}, "risk": {}, "targets": {}, "errors": [],
+        },
+    }
+    answer = _compose_answer("내 포트폴리오 어때", pack)
+    assert "내 포트폴리오 현황" in answer
+    assert "326230" not in answer and "내수주" not in answer  # 환각 티커 없어야
+    assert "QQQI" in answer  # 실제 보유가 나와야
+
+
 def test_agent_korean_asset_name_routes_to_asset_answer(monkeypatch):
     monkeypatch.setenv("AGENT_CONSOLE_LLM_ENABLED", "0")
     from agent_console.agent import _compose_answer
@@ -592,7 +623,8 @@ def test_agent_codex_chat_runner_writes_last_message(monkeypatch, tmp_path):
         assert cmd[:2] == ["codex", "exec"]
         assert "--ephemeral" in cmd
         assert "--sandbox" in cmd and "read-only" in cmd
-        assert "--ask-for-approval" in cmd and "never" in cmd
+        # codex-cli 0.144+ 는 exec 모드에 승인 프롬프트가 없어 --ask-for-approval 이 제거됨
+        assert "--ask-for-approval" not in cmd
         with open(out_path, "w", encoding="utf-8") as f:
             f.write("Codex 응답")
 
@@ -604,6 +636,59 @@ def test_agent_codex_chat_runner_writes_last_message(monkeypatch, tmp_path):
         return Result()
 
     assert _try_codex_chat("테스트", runner=fake_runner) == "Codex 응답"
+
+
+def test_agent_gemini_chat_runner_builds_correct_command(monkeypatch):
+    from agent_console.agent import _try_gemini_chat
+
+    def fake_runner(cmd, **kwargs):
+        assert cmd[:2] == ["hermes", "chat"]
+        assert "-q" in cmd and "테스트" in cmd
+        assert "--provider" in cmd and "gemini" in cmd
+        assert "--model" in cmd and "gemini-2.5-flash" in cmd
+
+        class Result:
+            returncode = 0
+            stdout = "Gemini 응답"
+            stderr = ""
+
+        return Result()
+
+    assert _try_gemini_chat("테스트", runner=fake_runner) == "Gemini 응답"
+
+
+def test_agent_gemini_chat_disabled_by_env(monkeypatch):
+    from agent_console.agent import _try_gemini_chat
+
+    monkeypatch.setenv("AGENT_CONSOLE_GEMINI_ENABLED", "0")
+    assert _try_gemini_chat("테스트", runner=lambda *a, **k: (_ for _ in ()).throw(
+        AssertionError("gate off 인데 runner 가 호출됨"))) is None
+
+
+def test_agent_llm_chat_falls_through_codex_hermes_to_gemini(monkeypatch):
+    """codex·hermes(openai-codex) 둘 다 실패해도 gemini 폴백이 실답을 채택한다."""
+    from agent_console.agent import _try_llm_chat
+
+    def fake_runner(cmd, **kwargs):
+        class Result:
+            returncode = 1
+            stdout = ""
+            stderr = "auth expired"
+
+        if cmd[:2] == ["codex", "exec"]:
+            return Result()
+        if cmd[:2] == ["hermes", "chat"] and "gemini" not in cmd:
+            return Result()
+        if cmd[:2] == ["hermes", "chat"] and "gemini" in cmd:
+            class Ok:
+                returncode = 0
+                stdout = "Gemini 실답"
+                stderr = ""
+            return Ok()
+        raise AssertionError(f"예상 못한 cmd: {cmd}")
+
+    pack = {"surface": "market", "sources": {"events": []}, "memory": []}
+    assert _try_llm_chat("질문", pack, runner=fake_runner) == "Gemini 실답"
 
 
 def test_server_endpoints(monkeypatch, tmp_path):

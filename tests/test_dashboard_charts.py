@@ -430,6 +430,41 @@ def test_price_chart_indicators_composite():
     assert "MA200" not in [tr.name for tr in fig3.data]
 
 
+def test_price_chart_rsi_divergence_toggle(monkeypatch):
+    """RSI 다이버전스 토글 — 탐지 결과가 있으면 RSI 패널에 마커 라인이 그려진다.
+
+    탐지 로직 정확성 자체는 tests/test_ml_features.py 가 전담(피봇·no-lookahead) —
+    여기선 price_chart 가 그 결과를 올바른 서브패널에 배선하는지만 검증.
+    """
+    import ml.features as mlf
+
+    hist = pd.DataFrame({"Open": [100.0 + i * 0.1 for i in range(60)],
+                         "High": [101.0 + i * 0.1 for i in range(60)],
+                         "Low": [99.0 + i * 0.1 for i in range(60)],
+                         "Close": [100.5 + i * 0.1 for i in range(60)],
+                         "Volume": [10.0] * 60}, index=pd.date_range("2024-01-01", periods=60))
+    fake_events = [{"type": "bearish", "prior_date": hist.index[10], "date": hist.index[30],
+                    "price": 120.0, "rsi": 60.0, "prior_price": 110.0, "prior_rsi": 70.0}]
+    monkeypatch.setattr(mlf, "rsi_divergence_events", lambda *a, **k: fake_events)
+
+    fig_on = charts.price_chart(hist, "T", show_rsi=True, show_rsi_div=True)
+    names_on = [tr.name for tr in fig_on.data]
+    assert any("약세 다이버전스" in (n or "") for n in names_on)
+    div_tr = next(tr for tr in fig_on.data if tr.name == "약세 다이버전스")
+    assert div_tr.yaxis == "y2"                            # RSI 서브패널과 동일 축
+    assert list(div_tr.y) == [70.0, 60.0]
+
+    # 토글 꺼지면 다이버전스 트레이스 없음 (RSI 자체는 유지)
+    fig_off = charts.price_chart(hist, "T", show_rsi=True, show_rsi_div=False)
+    names_off = [tr.name for tr in fig_off.data]
+    assert not any("다이버전스" in (n or "") for n in names_off)
+    assert "RSI(14)" in names_off
+
+    # RSI 패널 자체가 없으면(show_rsi=False) 다이버전스도 당연히 없음
+    fig_norsi = charts.price_chart(hist, "T", show_rsi=False, show_rsi_div=True)
+    assert not any("다이버전스" in (tr.name or "") for tr in fig_norsi.data)
+
+
 def test_price_chart_trend_lines_overlay():
     """추세선·채널 오버레이 — 지지/저항 대시 선분·채널 상하단 fill·annotation·드로잉 스타일."""
     import pandas as pd
