@@ -73,6 +73,11 @@ AGENT_CONSOLE_PORT=8798 bash scripts/run_agent_console.sh
 - `POST /api/memory/events`
 - `POST /api/agent/chat`
 - `GET /api/agent/context-prompt`
+- `GET /api/wiki/pages`
+- `GET /api/wiki/pages/<page_id>`
+- `POST /api/wiki/pages`
+- `POST /api/wiki/capture`
+- `DELETE /api/wiki/pages/<page_id>`
 - `GET /api/portfolio-lab/scenarios`
 - `POST /api/portfolio-lab/scenarios`
 - `GET /api/local-install-prompt`

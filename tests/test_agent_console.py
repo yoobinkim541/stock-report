@@ -175,6 +175,38 @@ def test_agent_context_prompt_includes_wiki(monkeypatch, tmp_path):
     assert "wiki card" in prompt
 
 
+def test_wiki_api_routes(monkeypatch, tmp_path):
+    _isolate(monkeypatch, tmp_path)
+
+    from agent_console.server import create_app
+
+    app = create_app()
+    client = app.test_client()
+
+    capture = client.post(
+        "/api/wiki/capture",
+        json={
+            "question": "손실한도 1% 기준으로 QQQ와 TQQQ를 비교해줘",
+            "answer": "QQQ는 기본, TQQQ는 손실한도와 변동성 예산을 더 크게 씁니다.",
+            "surface": "portfolio",
+            "title": "손실한도와 레버리지",
+            "status": "reviewed",
+            "kind": "playbook",
+            "tags": ["risk", "portfolio"],
+        },
+    )
+    assert capture.status_code == 200
+    page_id = capture.get_json()["page"]["id"]
+
+    got = client.get(f"/api/wiki/pages/{page_id}")
+    listed = client.get("/api/wiki/pages?query=손실한도&surface=portfolio&status=all&limit=10")
+
+    assert got.status_code == 200
+    assert got.get_json()["page"]["title"] == "손실한도와 레버리지"
+    assert listed.status_code == 200
+    assert listed.get_json()["pages"][0]["title"] == "손실한도와 레버리지"
+
+
 def test_portfolio_matrix_dsl_rsi_controls_exposure():
     import pandas as pd
 

@@ -5,7 +5,7 @@ from pathlib import Path
 
 from flask import Flask, jsonify, request, send_from_directory
 
-from . import agent, context, shared_memory, storage
+from . import agent, context, shared_memory, storage, wiki
 
 
 STATIC_DIR = Path(__file__).resolve().parent / "static"
@@ -77,6 +77,56 @@ def create_app() -> Flask:
             return jsonify({"ok": False, "error": "event object required"}), 400
         changed = storage.upsert_memory_events([event])
         return jsonify({"ok": True, "changed": changed})
+
+    @app.get("/api/wiki/pages")
+    def wiki_pages():
+        query = request.args.get("query", "")
+        surface = request.args.get("surface", "all")
+        status = request.args.get("status", "all")
+        limit = int(request.args.get("limit", "20") or 20)
+        return jsonify({
+            "ok": True,
+            "pages": wiki.list_pages(query=query, surface=surface, status=status, limit=limit),
+            "stats": wiki.stats(),
+        })
+
+    @app.get("/api/wiki/pages/<page_id>")
+    def wiki_page_get(page_id: str):
+        page = wiki.get_page(page_id)
+        if not page:
+            return jsonify({"ok": False, "error": "page not found"}), 404
+        return jsonify({"ok": True, "page": page})
+
+    @app.post("/api/wiki/pages")
+    def wiki_page_upsert():
+        payload = request.get_json(force=True)
+        if not isinstance(payload, dict):
+            return jsonify({"ok": False, "error": "page object required"}), 400
+        return jsonify({"ok": True, "page": wiki.upsert_page(payload)})
+
+    @app.post("/api/wiki/capture")
+    def wiki_capture():
+        payload = request.get_json(force=True)
+        if not isinstance(payload, dict):
+            return jsonify({"ok": False, "error": "payload object required"}), 400
+        page = wiki.capture_from_chat(
+            payload.get("question", ""),
+            payload.get("answer", ""),
+            surface=payload.get("surface", "market"),
+            title=payload.get("title"),
+            status=payload.get("status", "draft"),
+            kind=payload.get("kind", "playbook"),
+            tags=payload.get("tags") or [],
+            source_refs=payload.get("source_refs") or [],
+        )
+        return jsonify({"ok": True, "page": page})
+
+    @app.delete("/api/wiki/pages/<page_id>")
+    def wiki_page_delete(page_id: str):
+        deleted = wiki.delete_page(page_id)
+        if not deleted:
+            return jsonify({"ok": False, "error": "page not found"}), 404
+        return jsonify({"ok": True, "deleted": True})
 
     @app.post("/api/agent/chat")
     def agent_chat():
