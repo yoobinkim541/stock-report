@@ -119,6 +119,62 @@ def test_shared_memory_context_contract(monkeypatch, tmp_path):
     assert "레버리지" in section
 
 
+def test_wiki_capture_and_context_section(monkeypatch, tmp_path):
+    _isolate(monkeypatch, tmp_path)
+
+    from agent_console import wiki
+
+    page = wiki.capture_from_chat(
+        "손실한도 1% 안에서 QQQ와 TQQQ를 비교해줘",
+        "QQQ는 기본, TQQQ는 손실한도와 변동성 예산을 더 크게 씁니다.",
+        surface="portfolio",
+        title="손실한도와 레버리지",
+        status="reviewed",
+        kind="playbook",
+        tags=["risk", "portfolio"],
+        source_refs=["conversation:001"],
+    )
+    pages = wiki.list_pages(query="손실한도", surface="portfolio")
+    section = wiki.build_context_section(query="손실한도", surface="portfolio", limit=4)
+
+    assert page["title"] == "손실한도와 레버리지"
+    assert pages and pages[0]["title"] == "손실한도와 레버리지"
+    assert "[위키 지식]" in section
+    assert "손실한도와 레버리지" in section
+
+
+def test_agent_context_prompt_includes_wiki(monkeypatch, tmp_path):
+    _isolate(monkeypatch, tmp_path)
+
+    from agent_console import agent, context
+
+    monkeypatch.setattr(
+        context,
+        "context_pack",
+        lambda surface: {
+            "ok": True,
+            "surface": surface,
+            "generated_at": "2026-07-13T06:45:00+00:00",
+            "sources": {"events": [], "source_counts": [], "symbol_counts": []},
+            "reports": [],
+            "ml_activity": [],
+            "portfolio": {"holdings": [], "summary": {}, "risk": {}, "targets": {}, "errors": []},
+            "paper": {"kr": None, "us": None, "combined": None, "errors": []},
+            "models": {"items": []},
+            "memory": [],
+            "focus": [],
+        },
+    )
+    monkeypatch.setattr(agent.shared_memory, "build_context_section", lambda payload: "[컨텍스트 메모리]\n- shared")
+    monkeypatch.setattr(agent.wiki, "build_context_section", lambda **kwargs: "[위키 지식]\n- wiki card")
+
+    prompt = agent.build_context_prompt("portfolio")
+
+    assert "[컨텍스트 메모리]" in prompt
+    assert "[위키 지식]" in prompt
+    assert "wiki card" in prompt
+
+
 def test_portfolio_matrix_dsl_rsi_controls_exposure():
     import pandas as pd
 

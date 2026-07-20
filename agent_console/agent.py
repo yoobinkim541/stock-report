@@ -8,7 +8,7 @@ import re
 import subprocess
 import tempfile
 
-from . import context, shared_memory, storage
+from . import context, shared_memory, storage, wiki
 
 _KST = timezone(timedelta(hours=9))
 
@@ -92,6 +92,16 @@ def build_context_prompt(surface: str = "market") -> str:
         shared_section = ""
     if shared_section:
         lines += ["", shared_section]
+    try:
+        wiki_section = wiki.build_context_section(
+            query="stock-report AI 콘솔 컨텍스트 프롬프트",
+            surface=surface,
+            limit=4,
+        )
+    except Exception:
+        wiki_section = ""
+    if wiki_section:
+        lines += ["", wiki_section]
     lines += ["", "[화면별 초점]", *[f"- {x}" for x in pack["focus"]]]
     return "\n".join(lines)
 
@@ -1046,6 +1056,14 @@ def _build_general_chat_prompt(question: str, pack: dict, history: list[dict] | 
         )
     except Exception:
         shared_section = ""
+    try:
+        wiki_section = wiki.build_context_section(
+            query=question,
+            surface=pack.get("surface") or "market",
+            limit=4,
+        )
+    except Exception:
+        wiki_section = ""
     return "\n".join([
         "너는 stock-report 안의 대화형 에이전트다.",
         "사용자는 한국어로 편하게 말한다. 너도 한국어로 자연스럽게 답한다.",
@@ -1071,6 +1089,8 @@ def _build_general_chat_prompt(question: str, pack: dict, history: list[dict] | 
         *(paper_ctx or ["- 없음"]),
         "",
         shared_section or "[컨텍스트 메모리]\n- 없음",
+        "",
+        wiki_section or "[위키 지식]\n- 없음",
         "",
         f"[사용자 질문]\n{question}",
         "",
