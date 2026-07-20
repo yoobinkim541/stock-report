@@ -877,3 +877,64 @@ def test_shared_memory_dir_defaults_to_lib_location(monkeypatch):
 
     monkeypatch.delenv("AGENT_MEMORY_DIR", raising=False)
     assert str(shared_memory.shared_memory_dir()).endswith(".local/share/stock-report/shared-memory")
+
+
+def test_codex_chat_includes_web_search_flag(monkeypatch, tmp_path):
+    """codex exec 에 --search(웹 검색) 기본 포함 — 최신 정보 보강."""
+    from agent_console.agent import _try_codex_chat
+
+    monkeypatch.setenv("AGENT_CONSOLE_CODEX_CWD", str(tmp_path))
+    seen = {}
+
+    def fake_runner(cmd, **kwargs):
+        seen["cmd"] = cmd
+        out_path = cmd[cmd.index("--output-last-message") + 1]
+        with open(out_path, "w", encoding="utf-8") as f:
+            f.write("검색 보강 응답")
+
+        class Result:
+            returncode = 0
+            stdout = ""
+
+        return Result()
+
+    assert _try_codex_chat("최신 뉴스", runner=fake_runner) == "검색 보강 응답"
+    assert "--search" in seen["cmd"]
+
+
+def test_codex_chat_retries_without_search_on_failure(monkeypatch, tmp_path):
+    """--search 미지원 구버전 codex → 즉시 실패 시 검색 없이 1회 재시도."""
+    from agent_console.agent import _try_codex_chat
+
+    monkeypatch.setenv("AGENT_CONSOLE_CODEX_CWD", str(tmp_path))
+    calls = []
+
+    def fake_runner(cmd, **kwargs):
+        calls.append(list(cmd))
+
+        class Result:
+            returncode = 1 if len(calls) == 1 else 0
+            stdout = "재시도 응답"
+
+        if len(calls) == 2:
+            out_path = cmd[cmd.index("--output-last-message") + 1]
+            with open(out_path, "w", encoding="utf-8") as f:
+                f.write("재시도 응답")
+        return Result()
+
+    assert _try_codex_chat("테스트", runner=fake_runner) == "재시도 응답"
+    assert len(calls) == 2
+    assert "--search" in calls[0] and "--search" not in calls[1]
+
+
+def test_answer_reports_engine_local_rules_when_llm_off(monkeypatch, tmp_path):
+    """LLM off 시 답변 엔진 = local-rules 로 정직 표기 (UI meta 원천)."""
+    _isolate(monkeypatch, tmp_path)
+    monkeypatch.setenv("AGENT_CONSOLE_LLM_ENABLED", "0")
+
+    from agent_console import agent
+
+    result = agent.answer("안녕", "market")
+
+    assert result["ok"] is True
+    assert result["context"]["engine"] == "local-rules"
