@@ -47,4 +47,6 @@ def test_download_latest_saveticker_report_saves_raw_and_text(monkeypatch, tmp_p
     assert Path(result["text_path"]).read_text(encoding="utf-8") == "REPORT TEXT"
     manifest = json.loads(Path(result["manifest_path"]).read_text(encoding="utf-8"))
     assert manifest["source"] == "saveticker_report_pdf"
+    assert manifest["ttl_days"] == 180
+    assert result["expires_at"].startswith("2027-")
     assert result["downloaded_url"].endswith(".pdf")

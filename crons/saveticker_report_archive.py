@@ -72,7 +72,7 @@ def download_report_pdf(url: str) -> Path:
         return Path(tf.name)
 
 
-def download_latest_saveticker_report(report_page_url: str = REPORT_PAGE_URL, ttl_days: int = 30) -> dict | None:
+def download_latest_saveticker_report(report_page_url: str = REPORT_PAGE_URL, ttl_days: int | None = None) -> dict | None:
     urls = discover_report_pdf_urls(report_page_url)
     if not urls:
         logger.info("SaveTicker 리포트 PDF 링크를 찾지 못함")
@@ -90,7 +90,6 @@ def download_latest_saveticker_report(report_page_url: str = REPORT_PAGE_URL, tt
             url=report_url,
             payload=pdf_path.read_bytes(),
             suffix=Path(report_url).suffix or ".pdf",
-            ttl_days=ttl_days,
         )
         text = extract_text_from_pdf_or_ocr(str(pdf_path)) or ""
         if text.strip():

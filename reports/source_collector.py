@@ -596,7 +596,6 @@ def _saveticker_article_record(item: dict, base: str) -> dict:
         url=url or base,
         payload=raw_payload,
         suffix=".json",
-        ttl_days=30,
     )
     save_extracted_text(raw_record, body_raw)
     return {

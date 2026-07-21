@@ -6,6 +6,16 @@ from pathlib import Path
 import reports.raw_archive as ra
 
 
+def test_resolve_raw_ttl_days_uses_source_policy():
+    assert ra.resolve_raw_ttl_days("saveticker_report_pdf") == 180
+    assert ra.resolve_raw_ttl_days("saveticker", kind="json") == 60
+    assert ra.resolve_raw_ttl_days("telegram:insidertracking", kind="json") == 14
+    assert ra.resolve_raw_ttl_days("arca", kind="html") == 7
+    assert ra.resolve_raw_ttl_days("fred", kind="json") == 30
+    assert ra.resolve_raw_ttl_days("custom", kind="json") == 30
+    assert ra.resolve_raw_ttl_days("saveticker_report_pdf", ttl_days=21) == 21
+
+
 def test_save_raw_artifact_writes_original_and_manifest(tmp_path, monkeypatch):
     monkeypatch.setenv("STOCK_REPORT_REPORTS_DIR", str(tmp_path / "reports"))
     rec = ra.save_raw_artifact(
@@ -27,6 +37,21 @@ def test_save_raw_artifact_writes_original_and_manifest(tmp_path, monkeypatch):
     assert manifest["text_path"] == rec["text_path"]
 
 
+
+
+def test_save_raw_artifact_uses_source_policy_when_ttl_missing(tmp_path, monkeypatch):
+    monkeypatch.setenv("STOCK_REPORT_REPORTS_DIR", str(tmp_path / "reports"))
+    rec = ra.save_raw_artifact(
+        source="saveticker_report_pdf",
+        kind="pdf",
+        fetched_at=datetime(2026, 7, 21, 9, 0, tzinfo=timezone.utc),
+        title="2026-07-21 Daily Report",
+        url="https://saveticker.com/report",
+        payload=b"%PDF-1.4 sample",
+        suffix=".pdf",
+    )
+
+    assert rec["expires_at"].startswith("2027-")
 def test_cleanup_expired_raw_artifacts_keeps_text_sidecar(tmp_path, monkeypatch):
     monkeypatch.setenv("STOCK_REPORT_REPORTS_DIR", str(tmp_path / "reports"))
     rec = ra.save_raw_artifact(
