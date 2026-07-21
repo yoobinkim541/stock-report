@@ -2,16 +2,15 @@ from __future__ import annotations
 
 from collections import Counter, defaultdict
 from collections.abc import Iterable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
+import hashlib
 import math
-import random
+import re
 from typing import Any
 
 import numpy as np
 import plotly.graph_objects as go
-
-from dashboard import wiki_browser
 
 
 STATUS_COLORS = {
@@ -30,6 +29,9 @@ SURFACE_COLORS = {
     "wiki": "#67e8f9",
 }
 
+VALID_STATUSES = ("draft", "reviewed", "stable", "archived")
+WIKI_SURFACE = "wiki"
+
 
 @dataclass(frozen=True)
 class WikiGraphNode:
@@ -39,8 +41,8 @@ class WikiGraphNode:
     kind: str
     status: str
     summary: str
-    tags: tuple[str, ...]
-    source_refs: tuple[str, ...]
+    tags: tuple[str, ...] = field(default_factory=tuple)
+    source_refs: tuple[str, ...] = field(default_factory=tuple)
     degree: int = 0
     level: int = 0
     selected: bool = False
@@ -62,34 +64,198 @@ def _clean(value: object, limit: int = 2000) -> str:
     return text[: max(0, limit - 1)].rstrip() + "…"
 
 
-def _surface_color(surface: str) -> str:
-    return SURFACE_COLORS.get(str(surface or "wiki").lower(), "#67e8f9")
+def _slugify(text: str) -> str:
+    slug = re.sub(r"[^0-9a-zA-Z가-힣]+", "-", _clean(text, 120).lower())
+    slug = re.sub(r"-+", "-", slug).strip("-")
+    return slug or "wiki"
 
 
-def _status_color(status: str) -> str:
-    return STATUS_COLORS.get(str(status or "draft").lower(), "#60a5fa")
+def _dedupe_texts(values: Iterable[object], *, limit: int = 12, item_limit: int = 60) -> list[str]:
+    out: list[str] = []
+    seen: set[str] = set()
+    for raw in values or []:
+        text = _clean(raw, item_limit)
+        if not text or text in seen:
+            continue
+        seen.add(text)
+        out.append(text)
+        if len(out) >= limit:
+            break
+    return out
 
 
-def _stable_seed(text: str) -> int:
-    value = 0
-    for idx, ch in enumerate(str(text or "")[:64]):
-        value = (value * 131 + ord(ch) + idx) % (2**32)
-    return value
+def _tokens(text: str) -> set[str]:
+    text = _clean(text, 600).lower()
+    return {
+        token
+        for token in re.findall(r"[0-9a-zA-Z가-힣_.$+-]{2,}", text)
+        if token not in {"그리고", "그러면", "어떻게", "지금", "the", "and", "for", "with", "about"}
+    }
 
 
-def _page_tags(page: dict[str, Any]) -> set[str]:
-    return {str(tag).strip().lower() for tag in (page.get("tags") or []) if str(tag).strip()}
+def _now() -> str:
+    return datetime.now(timezone.utc).isoformat(timespec="seconds")
 
 
-def _page_refs(page: dict[str, Any]) -> set[str]:
-    return {str(ref).strip().lower() for ref in (page.get("source_refs") or []) if str(ref).strip()}
+def _page_id(title: str, surface: str, kind: str) -> str:
+    key = "|".join([_clean(title, 160), _clean(surface, 60).lower(), _clean(kind, 40).lower()])
+    return hashlib.sha256(key.encode("utf-8")).hexdigest()[:20]
+
+
+def _status_from_tags(tags: list[str]) -> str:
+    for tag in tags:
+        clean = _clean(tag, 60).lower()
+        if clean in VALID_STATUSES:
+            return clean
+        if clean.startswith("status:"):
+            candidate = clean.split(":", 1)[1].strip()
+            if candidate in VALID_STATUSES:
+                return candidate
+    return "draft"
+
+
+def _record_to_page(record: dict[str, Any]) -> dict[str, Any]:
+    tags = _dedupe_texts(record.get("tags") or [], limit=20, item_limit=60)
+    summary = _clean(record.get("summary") or "", 2400)
+    decisions = _dedupe_texts(record.get("decisions") or [], limit=8, item_limit=280)
+    open_questions = _dedupe_texts(record.get("openQuestions") or [], limit=8, item_limit=280)
+    messages = record.get("messages") or []
+    source = record.get("source") or {}
+    body_parts = []
+    body_text = _clean(record.get("body") or "", 6000)
+    if body_text:
+        body_parts.append(body_text)
+    elif summary:
+        body_parts.append(summary)
+    if decisions:
+        body_parts.append("핵심 정리\n- " + "\n- ".join(decisions))
+    if open_questions:
+        body_parts.append("열린 질문\n- " + "\n- ".join(open_questions))
+    if messages:
+        msg_lines = []
+        for msg in messages[:4]:
+            role = _clean((msg or {}).get("role") or "", 32)
+            text = _clean((msg or {}).get("text") or "", 260)
+            if text:
+                msg_lines.append(f"{role}: {text}")
+        if msg_lines:
+            body_parts.append("대화 발췌\n- " + "\n- ".join(msg_lines))
+    return {
+        "id": record.get("id") or _page_id(record.get("title") or "위키 페이지", record.get("surface") or WIKI_SURFACE, record.get("kind") or "note"),
+        "title": _clean(record.get("title") or "위키 페이지", 160),
+        "slug": _slugify(record.get("title") or "위키 페이지"),
+        "summary": summary,
+        "body": "\n\n".join(part for part in body_parts if part).strip(),
+        "tags": tags,
+        "status": _status_from_tags(tags),
+        "surface": _clean(source.get("surface") or source.get("screen") or record.get("surface") or WIKI_SURFACE, 60).lower() or WIKI_SURFACE,
+        "kind": _clean(record.get("kind") or "note", 40).lower() or "note",
+        "confidence": float(record.get("confidence") or source.get("confidence") or 0.5),
+        "created_at": record.get("createdAt") or "",
+        "updated_at": record.get("updatedAt") or record.get("createdAt") or "",
+        "source": source,
+        "source_refs": _dedupe_texts(record.get("artifacts") or [], limit=12, item_limit=120),
+        "decisions": decisions,
+        "openQuestions": open_questions,
+        "messages": messages,
+        "snippet": summary[:260] if summary else "",
+        "raw": record,
+    }
+
+
+def _normalize_page(page: dict[str, Any] | WikiGraphNode) -> dict[str, Any]:
+    if isinstance(page, WikiGraphNode):
+        return {
+            "id": page.id,
+            "title": page.title,
+            "slug": _slugify(page.title),
+            "summary": page.summary,
+            "body": "",
+            "tags": list(page.tags),
+            "status": page.status,
+            "surface": page.surface,
+            "kind": page.kind,
+            "confidence": 0.5,
+            "created_at": "",
+            "updated_at": "",
+            "source": {},
+            "source_refs": list(page.source_refs),
+            "decisions": [],
+            "openQuestions": [],
+            "messages": [],
+            "snippet": page.summary[:260] if page.summary else "",
+            "raw": {},
+        }
+    if not isinstance(page, dict):
+        return _record_to_page({"title": page})
+    if {"title", "summary", "body"}.intersection(page):
+        tags = _dedupe_texts(page.get("tags") or [], limit=20, item_limit=60)
+        source_refs = _dedupe_texts(page.get("source_refs") or [], limit=12, item_limit=120)
+        normalized = {
+            "id": page.get("id") or _page_id(page.get("title") or "위키 페이지", page.get("surface") or WIKI_SURFACE, page.get("kind") or "note"),
+            "title": _clean(page.get("title") or "위키 페이지", 160),
+            "slug": _slugify(page.get("title") or "위키 페이지"),
+            "summary": _clean(page.get("summary") or "", 2400),
+            "body": _clean(page.get("body") or "", 6000),
+            "tags": tags,
+            "status": _clean(page.get("status") or _status_from_tags(tags), 40),
+            "surface": _clean(page.get("surface") or WIKI_SURFACE, 60).lower() or WIKI_SURFACE,
+            "kind": _clean(page.get("kind") or "note", 40).lower() or "note",
+            "confidence": float(page.get("confidence") or 0.5),
+            "created_at": page.get("created_at") or page.get("createdAt") or "",
+            "updated_at": page.get("updated_at") or page.get("updatedAt") or page.get("createdAt") or "",
+            "source": dict(page.get("source") or {}),
+            "source_refs": source_refs,
+            "decisions": _dedupe_texts(page.get("decisions") or [], limit=8, item_limit=280),
+            "openQuestions": _dedupe_texts(page.get("openQuestions") or [], limit=8, item_limit=280),
+            "messages": list(page.get("messages") or []),
+            "snippet": _clean(page.get("summary") or page.get("body") or "", 260),
+            "raw": dict(page),
+        }
+        return normalized
+    return _record_to_page(dict(page))
+
+
+def _normalize_pages(pages: Iterable[dict[str, Any] | WikiGraphNode]) -> list[dict[str, Any]]:
+    return [_normalize_page(page) for page in pages or []]
+
+
+def _matches_surface(page: dict[str, Any], surface: str) -> bool:
+    return surface == "all" or page.get("surface") == surface.lower()
+
+
+def _matches_status(page: dict[str, Any], status: str) -> bool:
+    return status == "all" or page.get("status") == status.lower()
+
+
+def _matches_query(page: dict[str, Any], query: str) -> bool:
+    if not query:
+        return True
+    haystack = " ".join(
+        [
+            str(page.get("title") or ""),
+            str(page.get("summary") or ""),
+            str(page.get("body") or ""),
+            " ".join(page.get("tags") or []),
+            " ".join(page.get("decisions") or []),
+            " ".join(page.get("openQuestions") or []),
+            " ".join((msg or {}).get("text") or "" for msg in page.get("messages") or []),
+        ]
+    ).lower()
+    return all(token in haystack for token in _tokens(query))
+
+
+def _visible_pages(pages: list[dict[str, Any]], *, query: str = "", surface: str = "all", status: str = "all") -> list[dict[str, Any]]:
+    visible = [page for page in pages if _matches_surface(page, surface) and _matches_status(page, status) and _matches_query(page, query)]
+    visible.sort(key=lambda page: (page.get("updated_at") or page.get("created_at") or "", page.get("title") or ""), reverse=True)
+    return visible
 
 
 def _edge_similarity(left: dict[str, Any], right: dict[str, Any]) -> tuple[int, int, int]:
-    left_tags = _page_tags(left)
-    right_tags = _page_tags(right)
-    left_refs = _page_refs(left)
-    right_refs = _page_refs(right)
+    left_tags = {str(tag).strip().lower() for tag in (left.get("tags") or []) if str(tag).strip()}
+    right_tags = {str(tag).strip().lower() for tag in (right.get("tags") or []) if str(tag).strip()}
+    left_refs = {str(ref).strip().lower() for ref in (left.get("source_refs") or []) if str(ref).strip()}
+    right_refs = {str(ref).strip().lower() for ref in (right.get("source_refs") or []) if str(ref).strip()}
     tag_hits = len(left_tags & right_tags)
     ref_hits = len(left_refs & right_refs)
     same_surface = int((left.get("surface") or "").lower() == (right.get("surface") or "").lower())
@@ -184,7 +350,7 @@ def _fill_by_degree(pages: list[dict[str, Any]], adjacency: dict[str, dict[str, 
 def _cluster_centers(surfaces: list[str], focus_surface: str) -> dict[str, np.ndarray]:
     uniq = [surface for surface in surfaces if surface]
     if not uniq:
-        return {"wiki": np.array([0.0, 0.0], dtype=float)}
+        return {WIKI_SURFACE: np.array([0.0, 0.0], dtype=float)}
     uniq = list(dict.fromkeys(uniq))
     if focus_surface in uniq:
         uniq = [focus_surface, *[surface for surface in uniq if surface != focus_surface]]
@@ -201,14 +367,14 @@ def _cluster_centers(surfaces: list[str], focus_surface: str) -> dict[str, np.nd
 def _layout_nodes(nodes: list[dict[str, Any]], edges: list[WikiGraphEdge], *, focus_surface: str, selected_id: str) -> dict[str, tuple[float, float]]:
     if not nodes:
         return {}
-    surfaces = [str(node.get("surface") or "wiki").lower() for node in nodes]
+    surfaces = [str(node.get("surface") or WIKI_SURFACE).lower() for node in nodes]
     centers = _cluster_centers(surfaces, focus_surface)
-    seed = _stable_seed(focus_surface + "|" + selected_id + "|" + str(len(nodes)))
+    seed = sum(ord(ch) for ch in f"{focus_surface}|{selected_id}|{len(nodes)}")
     rng = np.random.default_rng(seed)
     positions = np.zeros((len(nodes), 2), dtype=float)
     node_index = {str(node["id"]): idx for idx, node in enumerate(nodes)}
     for idx, node in enumerate(nodes):
-        surface = str(node.get("surface") or "wiki").lower()
+        surface = str(node.get("surface") or WIKI_SURFACE).lower()
         center = centers.get(surface, np.array([0.0, 0.0], dtype=float))
         positions[idx] = center + rng.normal(scale=0.45, size=2)
         if str(node.get("id") or "") == selected_id:
@@ -240,7 +406,7 @@ def _layout_nodes(nodes: list[dict[str, Any]], edges: list[WikiGraphEdge], *, fo
             disp[j] += step
 
         for idx, node in enumerate(nodes):
-            surface = str(node.get("surface") or "wiki").lower()
+            surface = str(node.get("surface") or WIKI_SURFACE).lower()
             center = centers.get(surface, np.array([0.0, 0.0], dtype=float))
             disp[idx] += (center - positions[idx]) * 0.02
             if str(node.get("id") or "") == selected_id:
@@ -263,7 +429,7 @@ def build_wiki_graph_model(
     depth: int = 2,
     max_nodes: int = 96,
 ) -> dict[str, Any]:
-    normalized = [wiki_browser._normalize_page(page) for page in pages or []]
+    normalized = [_normalize_page(page) for page in pages or []]
     if not normalized:
         return {
             "nodes": [],
@@ -273,17 +439,14 @@ def build_wiki_graph_model(
             "visible": [],
             "generated_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
         }
-    visible = wiki_browser._visible_pages(normalized, query=query, surface=surface, status=status)
+    visible = _visible_pages(normalized, query=query, surface=surface, status=status)
     corpus = visible or normalized
     adjacency, ref_counter = _build_adjacency(corpus)
     pages_by_id = {str(page.get("id") or ""): page for page in corpus if str(page.get("id") or "")}
     selected_id = str(selected_page_id or "").strip()
     if selected_id and selected_id not in pages_by_id:
         selected_id = ""
-    if not selected_id:
-        seed_ids = _rank_seed_pages(corpus, adjacency, selected_id=selected_id)
-    else:
-        seed_ids = [selected_id]
+    seed_ids = _rank_seed_pages(corpus, adjacency, selected_id=selected_id)
     if not seed_ids and corpus:
         seed_ids = [str(corpus[0].get("id") or "")]
     node_ids, level_map = _expand_nodes(seed_ids, pages_by_id, adjacency, depth, max_nodes=max_nodes)
@@ -295,17 +458,13 @@ def build_wiki_graph_model(
         page = pages_by_id.get(pid)
         if not page:
             continue
-        node_edges = adjacency.get(pid) or {}
-        degree = len(node_edges)
-        if pid in seed_ids:
-            level = 0
-        else:
-            level = level_map.get(pid, min(4, 1 + degree // 4))
+        degree = len(adjacency.get(pid) or {})
+        level = 0 if pid in seed_ids else level_map.get(pid, min(4, 1 + degree // 4))
         nodes.append(
             {
                 "id": pid,
                 "title": page.get("title") or pid,
-                "surface": page.get("surface") or "wiki",
+                "surface": page.get("surface") or WIKI_SURFACE,
                 "kind": page.get("kind") or "note",
                 "status": page.get("status") or "draft",
                 "summary": page.get("summary") or "",
@@ -323,7 +482,7 @@ def build_wiki_graph_model(
                 continue
             edges[(a, b)] = WikiGraphEdge(source=a, target=b, weight=edge.weight, tags=edge.tags, refs=edge.refs)
     ordered_edges = list(edges.values())
-    positions = _layout_nodes(nodes, ordered_edges, focus_surface=(surface if surface != "all" else (nodes[0]["surface"] if nodes else "wiki")), selected_id=selected_id)
+    positions = _layout_nodes(nodes, ordered_edges, focus_surface=(surface if surface != "all" else (nodes[0]["surface"] if nodes else WIKI_SURFACE)), selected_id=selected_id)
     return {
         "nodes": nodes,
         "edges": ordered_edges,
@@ -404,13 +563,12 @@ def _build_figure(model: dict[str, Any]) -> go.Figure:
     custom_sel: list[list[str]] = []
     size_sel: list[float] = []
     color_sel: list[str] = []
+    hover_sel: list[str] = []
     x_rest: list[float] = []
     y_rest: list[float] = []
-    text_rest: list[str] = []
     custom_rest: list[list[str]] = []
     size_rest: list[float] = []
     color_rest: list[str] = []
-    hover_sel: list[str] = []
     hover_rest: list[str] = []
 
     for node in nodes:
@@ -432,7 +590,6 @@ def _build_figure(model: dict[str, Any]) -> go.Figure:
         else:
             x_rest.append(pos[0])
             y_rest.append(pos[1])
-            text_rest.append("")
             custom_rest.append([node["id"]])
             size_rest.append(size)
             color_rest.append(color)
@@ -451,7 +608,8 @@ def _build_figure(model: dict[str, Any]) -> go.Figure:
                     "opacity": 0.72,
                 },
                 customdata=custom_rest,
-                hovertemplate=[f"{text}<extra></extra>" for text in hover_rest],
+                hovertext=hover_rest,
+                hovertemplate="%{hovertext}<extra></extra>",
                 hoverinfo="text",
                 showlegend=False,
             )
@@ -472,7 +630,8 @@ def _build_figure(model: dict[str, Any]) -> go.Figure:
                     "opacity": 0.98,
                 },
                 customdata=custom_sel,
-                hovertemplate=[f"{text}<extra></extra>" for text in hover_sel],
+                hovertext=hover_sel,
+                hovertemplate="%{hovertext}<extra></extra>",
                 hoverinfo="text",
                 showlegend=False,
             )
