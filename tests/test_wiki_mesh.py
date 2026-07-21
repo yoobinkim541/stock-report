@@ -42,6 +42,19 @@ def test_build_wiki_graph_model_links_related_pages():
     assert model["positions"]["page-a"]
 
 
+def test_build_wiki_graph_model_respects_max_nodes():
+    pages = [
+        {"id": "page-a", "title": "A", "summary": "A", "tags": ["alpha"], "source_refs": ["shared"]},
+        {"id": "page-b", "title": "B", "summary": "B", "tags": ["alpha"], "source_refs": ["shared"]},
+        {"id": "page-c", "title": "C", "summary": "C", "tags": ["beta"], "source_refs": ["other"]},
+    ]
+
+    model = wiki_mesh.build_wiki_graph_model(pages, selected_page_id="page-a", depth=4, max_nodes=2)
+
+    assert len(model["nodes"]) == 2
+    assert {node["id"] for node in model["nodes"]} <= {"page-a", "page-b"}
+
+
 def test_extract_selected_page_id_reads_plotly_customdata():
     event = {
         "selection": {
