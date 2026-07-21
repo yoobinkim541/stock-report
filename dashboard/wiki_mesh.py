@@ -651,6 +651,10 @@ def _build_figure(model: dict[str, Any]) -> go.Figure:
     return fig
 
 
+def _status_color(status: object) -> str:
+    return STATUS_COLORS.get(str(status or "draft").lower(), STATUS_COLORS["draft"])
+
+
 def render_wiki_mesh(
     pages: Iterable[dict[str, Any]],
     *,
@@ -664,20 +668,6 @@ def render_wiki_mesh(
 ) -> str:
     import streamlit as st
 
-    model = build_wiki_graph_model(
-        pages,
-        selected_page_id=selected_page_id,
-        query=query,
-        surface=surface,
-        status=status,
-        depth=depth,
-        max_nodes=max_nodes,
-    )
-    nodes = model.get("nodes") or []
-    if not nodes:
-        st.info("조건에 맞는 관계 그래프가 없습니다.")
-        return ""
-
     st.markdown(
         f"""
         <div class="widget-card-head">
@@ -690,11 +680,25 @@ def render_wiki_mesh(
     depth_col, fit_col, stat_col = st.columns([0.75, 0.4, 1.1], gap="small")
     graph_depth = depth_col.slider("깊이", min_value=1, max_value=4, value=max(1, min(int(depth or 2), 4)), key=f"{key}_depth")
     fit_pressed = fit_col.button("Fit", width="stretch", key=f"{key}_fit")
-    stat_col.caption(
-        f"{len(nodes)} nodes · {len(model.get('edges') or [])} links · surface {surface} · status {status}"
-    )
     if fit_pressed:
         st.session_state[f"{key}_fit_token"] = datetime.now(timezone.utc).isoformat(timespec="seconds")
+
+    model = build_wiki_graph_model(
+        pages,
+        selected_page_id=selected_page_id,
+        query=query,
+        surface=surface,
+        status=status,
+        depth=graph_depth,
+        max_nodes=max_nodes,
+    )
+    nodes = model.get("nodes") or []
+    if not nodes:
+        st.info("조건에 맞는 관계 그래프가 없습니다.")
+        return ""
+
+    stat_col.caption(f"{len(nodes)} nodes · {len(model.get('edges') or [])} links · surface {surface} · status {status}")
+    st.caption("그래프의 점을 클릭하면 해당 위키 페이지가 미리보기로 열립니다.")
 
     fig = _build_figure({**model, "selected_id": selected_page_id})
     event = st.plotly_chart(
