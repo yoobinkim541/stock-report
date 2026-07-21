@@ -8,7 +8,7 @@ from agent_console import shared_memory, storage, wiki
 
 SURFACE_OPTIONS = ["all", "market", "portfolio", "ticker", "paper", "lab", "wiki"]
 STATUS_OPTIONS = ["all", "draft", "reviewed", "stable", "archived"]
-KIND_OPTIONS = ["all", "note", "playbook", "decision", "risk", "concept"]
+KIND_OPTIONS = ["note", "playbook", "decision", "risk", "concept"]
 
 
 def render():
@@ -33,7 +33,7 @@ def render():
     f1, f2, f3 = st.columns([1, 1, 1])
     surface = f1.selectbox("surface", SURFACE_OPTIONS, index=0, key="wiki_surface_filter")
     status = f2.selectbox("status", STATUS_OPTIONS, index=0, key="wiki_status_filter")
-    kind_filter = f3.selectbox("kind", KIND_OPTIONS, index=0, key="wiki_kind_filter")
+    kind_filter = f3.selectbox("kind", ["all", *KIND_OPTIONS], index=0, key="wiki_kind_filter")
 
     pages = wiki.list_pages(query=query, surface=surface, status=status, limit=60)
     if kind_filter != "all":
@@ -63,29 +63,25 @@ def render():
         default_page = selected_page or _blank_page(query=query, surface=surface)
         with st.form("wiki_editor", clear_on_submit=False):
             title = st.text_input("제목", value=default_page.get("title", ""))
-            surface_options = SURFACE_OPTIONS[1:]
             editor_surface = st.selectbox(
                 "surface",
-                surface_options,
-                index=surface_options.index(default_page.get("surface", "market"))
-                if default_page.get("surface", "market") in surface_options
-                else 0,
+                SURFACE_OPTIONS[1:],
+                index=max(0, SURFACE_OPTIONS[1:].index(default_page.get("surface", "market"))
+                      if default_page.get("surface", "market") in SURFACE_OPTIONS[1:] else 0),
                 key="wiki_editor_surface",
             )
             kind = st.selectbox(
                 "kind",
-                KIND_OPTIONS[1:],
-                index=KIND_OPTIONS[1:].index(default_page.get("kind", "note"))
-                if default_page.get("kind", "note") in KIND_OPTIONS[1:]
-                else 0,
+                KIND_OPTIONS,
+                index=max(0, KIND_OPTIONS.index(default_page.get("kind", "note"))
+                      if default_page.get("kind", "note") in KIND_OPTIONS else 0),
                 key="wiki_editor_kind",
             )
             editor_status = st.selectbox(
                 "status",
                 ["draft", "reviewed", "stable", "archived"],
-                index=["draft", "reviewed", "stable", "archived"].index(default_page.get("status", "draft"))
-                if default_page.get("status", "draft") in ["draft", "reviewed", "stable", "archived"]
-                else 0,
+                index=max(0, ["draft", "reviewed", "stable", "archived"].index(default_page.get("status", "draft"))
+                      if default_page.get("status", "draft") in ["draft", "reviewed", "stable", "archived"] else 0),
                 key="wiki_editor_status",
             )
             tags = st.text_input("tags", value=", ".join(default_page.get("tags", [])))
@@ -118,7 +114,7 @@ def render():
         if not pairs:
             st.caption("현재 표면에 연결된 대화가 없습니다.")
         else:
-            for pair in reversed(pairs[-6:]):
+            for idx, pair in enumerate(reversed(pairs[-6:]), start=1):
                 with st.expander(f"{pair['question'][:54]}{'…' if len(pair['question']) > 54 else ''}"):
                     st.markdown(f"**Q.** {pair['question']}")
                     st.markdown(f"**A.** {pair['answer']}")
