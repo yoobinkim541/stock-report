@@ -9,12 +9,38 @@ across surfaces and makes short follow-ups easier to route.
 
 import os
 from collections.abc import Iterable
+from datetime import datetime
 
 try:
     from agent_console import agent, context, shared_memory, storage, wiki
 except Exception:  # pragma: no cover - safe no-op when optional deps are unavailable
     agent = None
 else:
+    def _safe_context_pack(surface: str) -> dict:
+        try:
+            return context.context_pack(surface)
+        except Exception as exc:
+            try:
+                focus = context.focus_for_surface(surface)
+            except Exception:
+                focus = []
+            return {
+                "ok": False,
+                "surface": str(surface or "market").strip().lower(),
+                "generated_at": datetime.utcnow().isoformat(timespec="seconds"),
+                "project": "stock-report",
+                "sources": {"events": [], "source_counts": [], "symbol_counts": []},
+                "reports": [],
+                "ml_activity": [],
+                "portfolio": {"holdings": [], "summary": {}, "risk": {}, "targets": {}, "errors": [str(exc)]},
+                "paper": {"kr": None, "us": None, "combined": None, "errors": [str(exc)]},
+                "models": {"items": []},
+                "memory": [],
+                "focus": focus,
+                "shared_memory": {"ok": False, "error": str(exc), "records": []},
+                "context_error": str(exc),
+            }
+
     def _recent_conversation_history(surface: str, limit: int = 12) -> list[dict]:
         surface = str(surface or "market").strip().lower()
         limit = max(1, min(int(limit or 12), 50))
@@ -109,7 +135,7 @@ else:
             storage.add_conversation("user", question, surface)
         except Exception:
             pass
-        pack = context.context_pack(surface)
+        pack = _safe_context_pack(surface)
         agent._reset_llm_engine()
         try:
             response = agent._compose_answer(question, pack, history=history)
