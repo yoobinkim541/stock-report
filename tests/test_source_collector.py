@@ -42,8 +42,8 @@ def test_load_recent_events_reads_multiple_days_and_dedupes(tmp_path):
 
 def test_build_digest_groups_by_source_and_limits_items():
     events = [
-        {"source": "saveticker", "source_url": "https://saveticker.com/api", "title": "AI chip demand", "url": "https://e/1", "tickers": ["NVDA"]},
-        {"source": "arca", "source_url": "https://arca.live/b/stock", "title": "환율 경계", "url": "https://e/2", "category": "📰뉴스"},
+        {"source": "saveticker", "source_url": "https://saveticker.com/api", "title": "AI chip demand", "url": "https://e/1", "tickers": ["NVDA"], "classification": {"kind": "article", "topic": "기술/AI", "trust": "B"}},
+        {"source": "arca", "source_url": "https://arca.live/b/stock", "title": "환율 경계", "url": "https://e/2", "category": "📰뉴스", "classification": {"kind": "news", "topic": "정책/재정", "trust": "C"}},
     ]
 
     digest = sc.build_digest(events, limit=5)
@@ -51,6 +51,9 @@ def test_build_digest_groups_by_source_and_limits_items():
     assert "누적 수집 자료" in digest
     assert "saveticker 1건" in digest
     assert "arca 1건" in digest
+    assert "반복 분류" in digest
+    assert "반복 주제" in digest
+    assert "신뢰 등급" in digest
     assert "신뢰 소스" in digest
     assert "https://saveticker.com/api" in digest
     assert "AI chip demand" in digest
@@ -94,6 +97,7 @@ def test_fetch_market_snapshot_events_includes_common_market_and_portfolio_data(
     titles = "\n".join(e["title"] for e in events)
 
     assert len(events) >= 40
+    assert events[0]["classification"]["source_family"] == "market_data"
     assert "QQQ Nasdaq 100 ETF" in titles
     assert "XLK Technology ETF" in titles
     assert "HYG High-yield bond ETF" in titles
@@ -250,6 +254,8 @@ def test_fetch_saveticker_events_normalizes_dict_tickers(monkeypatch, tmp_path):
     event = events[0]
     assert event["tickers"] == ["SPCX"]   # dict → symbol 문자열로 정규화
     assert all(isinstance(t, str) for t in event["tickers"])
+    assert event["classification"]["source_family"] == "news"
+    assert event["classification"]["wiki_eligible"] is False
     assert event["body_raw"] == "상장 기대감이 커지며 거래량이 급증했다.\n\n우주 섹터 전반이 강세를 보였다."
     assert event["body"] == event["body_raw"]
     assert Path(event["raw_path"]).exists()
@@ -371,6 +377,7 @@ def test_fetch_telegram_falls_back_to_direct_html(monkeypatch):
     assert len(events) == 1
     assert events[0]["title"] == "연준 금리 동결 시사"
     assert events[0]["url"] == "https://t.me/chanx/9"
+    assert events[0]["classification"]["source_family"] == "community"
     assert any(u.startswith("https://t.me/s/chanx") for u in calls)   # 폴백 경로 사용됨
 
 
@@ -415,6 +422,7 @@ def test_fetch_arca_falls_back_to_direct(monkeypatch):
     events = sc.fetch_arca_events(max_pages=1)
     assert len(events) == 1 and events[0]["url"].endswith("/111")
     assert events[0]["category"] == "📰뉴스"
+    assert events[0]["classification"]["source_family"] == "community"
 
 
 def test_fetch_arca_prefers_proxy_when_requested(monkeypatch):

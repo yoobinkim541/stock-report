@@ -116,6 +116,134 @@ NEWS_THEME_KEYWORDS = {
     "정책/재정": ("재무장관", "세금", "관세", "예산", "부채", "재정"),
 }
 
+SOURCE_CLASSIFICATION = {
+    "saveticker": {"family": "news", "kind": "article", "trust": "B", "horizon": "1d"},
+    "saveticker_report_pdf": {"family": "report", "kind": "report", "trust": "B", "horizon": "1w"},
+    "arca": {"family": "community", "kind": "community_signal", "trust": "C", "horizon": "intraday"},
+    "telegram": {"family": "community", "kind": "community_signal", "trust": "C", "horizon": "intraday"},
+    "yahoo_finance": {"family": "market_data", "kind": "snapshot", "trust": "A", "horizon": "intraday"},
+    "fred": {"family": "macro_data", "kind": "macro_snapshot", "trust": "A", "horizon": "1d"},
+    "worldgovernmentbonds": {"family": "macro_data", "kind": "macro_snapshot", "trust": "A", "horizon": "1d"},
+}
+ARCA_KIND_MAP = {"🧠분석": "analysis", "📰뉴스": "news", "ℹ️정보": "info", "실적": "earnings"}
+TELEGRAM_KIND_MAP = {"reddit_analysis": "analysis", "breaking": "breaking", "premarket": "premarket"}
+
+
+def _source_root(source: str) -> str:
+    return str(source or "").strip().lower().split(":", 1)[0]
+
+
+def _normalize_labels(values) -> list[str]:
+    out: list[str] = []
+    for value in values or []:
+        if isinstance(value, str):
+            label = value
+        elif isinstance(value, dict):
+            label = value.get("name") or value.get("label") or value.get("symbol") or value.get("kind") or value.get("topic") or ""
+        else:
+            label = ""
+        label = str(label).strip()
+        if label:
+            out.append(label)
+    return out
+
+
+def _topic_from_text(text: str) -> str:
+    lower = str(text or "").lower()
+    for theme, words in NEWS_THEME_KEYWORDS.items():
+        if any(word.lower() in lower for word in words):
+            return theme
+    return ""
+
+
+def _classify_event(event: dict) -> dict:
+    def _clip(value: object, limit: int = 240) -> str:
+        text = str(value or "").replace("\x00", " ").strip()
+        if len(text) <= limit:
+            return text
+        return text[: max(0, limit - 1)].rstrip() + "…"
+
+    row = dict(event or {})
+    source = str(row.get("source") or "unknown").strip() or "unknown"
+    root = _source_root(source)
+    profile = SOURCE_CLASSIFICATION.get(root, {"family": "other", "kind": "event", "trust": "C", "horizon": "1d"})
+
+    title = _clip(row.get("title") or "", 260)
+    body = _clip(row.get("body") or "", 2200)
+    body_raw = _clip(row.get("body_raw") or "", 2200)
+    excerpt = _clip(row.get("body_excerpt") or "", 500)
+    category = _clip(row.get("category") or "", 60)
+    scan_text = " ".join(part for part in (title, body_raw, body, excerpt, category) if part).strip()
+
+    labels = _normalize_labels(row.get("tags"))
+    if category:
+        labels.append(category)
+
+    kind = str(row.get("kind") or row.get("type") or profile["kind"] or "event").strip() or profile["kind"]
+    if root == "saveticker_report_pdf":
+        kind = "report"
+    elif root == "arca":
+        kind = ARCA_KIND_MAP.get(category, "community_signal")
+    elif root == "telegram":
+        try:
+            from reports.social_sentiment import classify_post
+            kind = TELEGRAM_KIND_MAP.get(classify_post(scan_text), "community_signal")
+        except Exception:
+            kind = "community_signal"
+    elif root in {"yahoo_finance", "fred", "worldgovernmentbonds"}:
+        kind = str(row.get("type") or kind or profile["kind"]).strip() or profile["kind"]
+    elif root == "saveticker":
+        if any(label.lower() in {"analysis", "report"} for label in labels):
+            kind = "analysis"
+
+    topic = _topic_from_text(" ".join([scan_text, " ".join(labels)]))
+    if not topic:
+        if root.startswith("telegram"):
+            topic = "텔레그램"
+        elif root == "arca":
+            topic = category or "아카"
+        elif root.startswith("saveticker"):
+            topic = "SaveTicker"
+        elif root == "yahoo_finance":
+            topic = "시장데이터"
+        elif root in {"fred", "worldgovernmentbonds"}:
+            topic = "금리/거시"
+        else:
+            topic = root
+
+    text_len = len(scan_text)
+    wiki_eligible = False
+    if root == "saveticker_report_pdf":
+        wiki_eligible = True
+    elif root == "saveticker":
+        wiki_eligible = kind in {"analysis", "report"} or text_len >= 700
+    elif root == "arca":
+        wiki_eligible = kind in {"analysis", "earnings"} or text_len >= 800
+    elif root == "telegram":
+        wiki_eligible = kind == "analysis" or text_len >= 900
+
+    trust = profile["trust"]
+    confidence_map = {"A": 0.92, "B": 0.8, "C": 0.62, "D": 0.45}
+    confidence = confidence_map.get(trust, 0.55)
+
+    classification = {
+        "source_family": profile["family"],
+        "kind": kind,
+        "topic": topic,
+        "trust": trust,
+        "horizon": profile["horizon"],
+        "wiki_eligible": wiki_eligible,
+        "confidence": confidence,
+        "labels": labels[:8],
+    }
+    row["classification"] = classification
+    row["source_family"] = classification["source_family"]
+    row["topic"] = classification["topic"]
+    row["trust"] = classification["trust"]
+    row["wiki_eligible"] = classification["wiki_eligible"]
+    row["horizon"] = classification["horizon"]
+    return row
+
 
 class _BoundedResponse:
     """크기 제한 읽기를 마친 응답 래퍼 (.text/.json/.raise_for_status 호환)."""
@@ -344,6 +472,9 @@ def build_digest(events: list[dict], limit: int = 12) -> str:
     source_counts = Counter(e.get("source", "unknown") for e in events)
     ticker_counts = Counter(t for e in events for t in _normalize_symbols(e.get("tickers")))
     tag_counts = Counter(t for e in events for t in _normalize_symbols(e.get("tags")))
+    kind_counts = Counter((e.get("classification") or {}).get("kind") for e in events if (e.get("classification") or {}).get("kind"))
+    topic_counts = Counter((e.get("classification") or {}).get("topic") for e in events if (e.get("classification") or {}).get("topic"))
+    trust_counts = Counter((e.get("classification") or {}).get("trust") for e in events if (e.get("classification") or {}).get("trust"))
     trusted_sources = sorted({url for e in events for url in [e.get("source_url")] if isinstance(url, str) and url})
     lines = ["## 누적 수집 자료", ""]
     lines.append("- " + ", ".join(f"{src} {cnt}건" for src, cnt in source_counts.most_common()))
@@ -351,6 +482,12 @@ def build_digest(events: list[dict], limit: int = 12) -> str:
         lines.append("- 반복 등장 종목: " + ", ".join(f"{t} {c}건" for t, c in ticker_counts.most_common(8)))
     if tag_counts:
         lines.append("- 반복 테마: " + ", ".join(f"{t} {c}건" for t, c in tag_counts.most_common(8)))
+    if kind_counts:
+        lines.append("- 반복 분류: " + ", ".join(f"{t} {c}건" for t, c in kind_counts.most_common(8)))
+    if topic_counts:
+        lines.append("- 반복 주제: " + ", ".join(f"{t} {c}건" for t, c in topic_counts.most_common(8)))
+    if trust_counts:
+        lines.append("- 신뢰 등급: " + ", ".join(f"{t} {c}건" for t, c in trust_counts.most_common(8)))
     if trusted_sources:
         lines.append("- 신뢰 소스: " + ", ".join(trusted_sources[:6]))
     # 레딧/WSB 심리 한 줄 (insidertracking 분석 포스트 구조화 — 있으면)
@@ -537,7 +674,7 @@ def fetch_saveticker_events() -> list[dict]:
                 "raw_sha256": record["raw_sha256"],
                 "raw_source": record["raw_source"],
             })
-    return events
+    return [_classify_event(event) for event in events]
 
 
 def _parse_arca_html(html_text: str) -> list[tuple[str, str]]:
@@ -607,7 +744,7 @@ def fetch_arca_events(max_pages: int = 2, *, proxy: str | None = None,
                 _note_error("arca", f"proxy: {e}")
         if events:
             _LAST_ERRORS.pop("arca", None)
-            return events
+            return [_classify_event(event) for event in events]
 
     for page in range(1, max_pages + 1):
         try:
@@ -633,7 +770,7 @@ def fetch_arca_events(max_pages: int = 2, *, proxy: str | None = None,
                 _note_error("arca", f"직접: {e}")
     if events:
         _LAST_ERRORS.pop("arca", None)
-    return events
+    return [_classify_event(event) for event in events]
 
 
 def _telegram_titles_from_html(html_text: str, channel: str) -> tuple[list[str], list[str]]:
@@ -728,7 +865,7 @@ def fetch_telegram_channel_events(channels: list[str] = TELEGRAM_NEWS_CHANNELS) 
                 "tickers": _extract_tickers(scan_text),
                 "tags": tags,
             })
-    return events
+    return [_classify_event(event) for event in events]
 
 
 def _pct(current: float | None, base: float | None) -> float | None:
@@ -788,7 +925,7 @@ def fetch_market_snapshot_events(yf_module=None) -> list[dict]:
                 "return_1y_pct": _pct(current, year_base),
             },
         })
-    return events
+    return [_classify_event(event) for event in events]
 
 
 def _fred_api_latest(series_id: str):
@@ -882,7 +1019,7 @@ def fetch_fred_macro_events(series: dict[str, str] = FRED_SERIES) -> list[dict]:
         })
     if events:
         _LAST_ERRORS.pop("fred", None)
-    return events
+    return [_classify_event(event) for event in events]
 
 
 def _parse_yields_from_world_gov_bonds(markdown: str, maturities: tuple[int, ...] = (5, 10, 20, 30)) -> dict[str, float]:
@@ -939,7 +1076,7 @@ def fetch_world_gov_bond_events(countries: dict[str, str] = WORLD_GOV_BOND_COUNT
             })
     if events:
         _LAST_ERRORS.pop("worldgovernmentbonds", None)
-    return events
+    return [_classify_event(event) for event in events]
 
 
 # ── 소스별 수집 헬스 (수집 공백 가시화 — 조용한 실패 차단) ────────────────────
