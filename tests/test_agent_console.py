@@ -175,6 +175,48 @@ def test_agent_context_prompt_includes_wiki(monkeypatch, tmp_path):
     assert "wiki card" in prompt
 
 
+def test_wiki_auto_curate_from_chat_updates_existing_page(monkeypatch, tmp_path):
+    _isolate(monkeypatch, tmp_path)
+
+    from agent_console import wiki
+
+    existing = wiki.capture_from_chat(
+        "손실한도 1% 기준으로 QQQ와 TQQQ를 비교해줘",
+        "QQQ는 기본, TQQQ는 손실한도와 변동성 예산을 더 크게 씁니다.",
+        surface="portfolio",
+        title="손실한도와 레버리지",
+        status="draft",
+        kind="playbook",
+        tags=["risk", "portfolio"],
+        source_refs=["conversation:001"],
+    )
+
+    def fake_llm(prompt: str) -> str:
+        assert "JSON object" in prompt
+        return (
+            '{"action":"update","title":"손실한도와 레버리지","summary":"손실한도 1%에서는 QQQ를 기본으로 두고 TQQQ는 예산을 더 크게 봅니다.",'
+            '"body":"손실한도 1%에서는 QQQ를 기본으로 두고 TQQQ는 변동성 예산을 더 크게 잡습니다.\\n- QQQ 기본\\n- TQQQ는 보수적\\n- 현금 완충 필요",'
+            '"kind":"playbook","status":"reviewed","tags":["risk","portfolio","leverage"],'
+            '"source_refs":["conversation:002"],"target_id":"'
+            + existing["id"]
+            + '","confidence":0.91,"reason":"merge with existing"}'
+        )
+
+    saved = wiki.auto_curate_from_chat(
+        "손실한도 1% 안에서 QQQ와 TQQQ를 다시 정리해줘",
+        "QQQ는 기본, TQQQ는 손실한도와 변동성 예산을 더 크게 씁니다.\n- QQQ 기본\n- TQQQ는 보수적\n- 현금 완충 필요",
+        surface="portfolio",
+        llm=fake_llm,
+        pack={"focus": ["포트폴리오"]},
+        history=[{"role": "user", "message": "손실한도 1%"}],
+    )
+
+    assert saved is not None
+    assert saved["page"]["id"] == existing["id"]
+    assert "현금 완충 필요" in saved["page"]["body"]
+    assert "leverage" in saved["page"]["tags"]
+
+
 def test_wiki_api_routes(monkeypatch, tmp_path):
     _isolate(monkeypatch, tmp_path)
 
@@ -235,6 +277,44 @@ def test_portfolio_matrix_dsl_rsi_controls_exposure():
     assert "Sortino" in result.metrics.columns
     assert result.trades
     assert result.matrix
+
+
+def test_agent_answer_autocurates_wiki(monkeypatch, tmp_path):
+    _isolate(monkeypatch, tmp_path)
+
+    from agent_console import agent, context
+
+    monkeypatch.setattr(
+        context,
+        "context_pack",
+        lambda surface: {
+            "ok": True,
+            "surface": surface,
+            "generated_at": "2026-07-13T06:45:00+00:00",
+            "sources": {"events": [], "source_counts": [], "symbol_counts": []},
+            "reports": [],
+            "ml_activity": [],
+            "portfolio": {"holdings": [], "summary": {}, "risk": {}, "targets": {}, "errors": []},
+            "paper": {"kr": None, "us": None, "combined": None, "errors": []},
+            "models": {"items": []},
+            "memory": [],
+            "focus": ["포트폴리오 맥락"],
+        },
+    )
+    calls = []
+
+    def fake_curate(question, answer, **kwargs):
+        calls.append({"question": question, "answer": answer, "kwargs": kwargs})
+        return {"ok": True, "action": "create", "page": {"id": "abc"}}
+
+    monkeypatch.setattr(agent.wiki, "auto_curate_from_chat", fake_curate)
+    monkeypatch.setattr(agent, "_compose_answer", lambda question, pack, history=None: "### 답변\n테스트")
+
+    result = agent.answer("손실한도 1% 안에서 QQQ와 TQQQ를 다시 정리해줘", "portfolio")
+
+    assert result["ok"] is True
+    assert calls and calls[0]["question"].startswith("손실한도 1%")
+    assert calls[0]["kwargs"]["surface"] == "portfolio"
 
 
 def test_agent_trading_logic_question_uses_logic_report():

@@ -124,6 +124,18 @@ def answer(question: str, surface: str = "market") -> dict:
         shared_memory.append_chat_exchange(question, response, surface)
     except Exception:
         pass
+    try:
+        if os.getenv("AGENT_CONSOLE_WIKI_AUTOCURATE_ENABLED", "1").lower() not in {"0", "false", "no", "off"}:
+            wiki.auto_curate_from_chat(
+                question,
+                response,
+                surface=surface,
+                pack=pack,
+                history=history,
+                llm=_try_llm_prompt,
+            )
+    except Exception:
+        pass
     sources = pack.get("sources") or {}
     return {
         "ok": True,
@@ -903,6 +915,12 @@ def _try_llm_chat(question: str, pack: dict, history: list[dict] | None = None,
     if os.getenv("AGENT_CONSOLE_LLM_ENABLED", "1").lower() in {"0", "false", "no", "off"}:
         return None
     prompt = _build_general_chat_prompt(question, pack, history)
+    return _try_llm_prompt(prompt, runner=runner)
+
+
+def _try_llm_prompt(prompt: str, runner=subprocess.run) -> str | None:
+    if os.getenv("AGENT_CONSOLE_LLM_ENABLED", "1").lower() in {"0", "false", "no", "off"}:
+        return None
     return (_try_codex_chat(prompt, runner=runner)
             or _try_hermes_chat(prompt, runner=runner)
             or _try_gemini_chat(prompt, runner=runner)
