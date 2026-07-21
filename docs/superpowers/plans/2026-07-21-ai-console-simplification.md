@@ -22,7 +22,7 @@
 
 **Files:**
 - Modify: `dashboard/app.py`
-- Delete: `dashboard/pages/ai_wiki.py`
+- Delete: `dashboard/pages/retired_wiki_page.py`
 - Modify: `docs/agent-console.md`
 
 **Interfaces:**
@@ -31,15 +31,15 @@
 
 - [ ] **Step 1: Write the regression check**
 
-Update the dashboard smoke coverage so the app still imports and renders when the standalone wiki page is no longer present. Keep the existing `ai_console` page render smoke test and remove any direct dependency on `dashboard.pages.ai_wiki`.
+Update the dashboard smoke coverage so the app still imports and renders when the standalone wiki page is no longer present. Keep the existing `ai_console` page render smoke test and remove any direct dependency on `dashboard.pages.ai_console`.
 
 - [ ] **Step 2: Remove the nav entry**
 
-Delete the `st.Page(ai_wiki.render, ...)` registration from `dashboard/app.py` and remove `ai_wiki` from the import list and `st.navigation([...])` page array.
+Delete the `st.Page(retired_wiki_page.render, ...)` registration from `dashboard/app.py` and remove `retired_wiki_page` from the import list and `st.navigation([...])` page array.
 
 - [ ] **Step 3: Delete the unused page file**
 
-Remove `dashboard/pages/ai_wiki.py` once the AI Console owns the wiki workflow.
+Remove `dashboard/pages/retired_wiki_page.py` once the AI Console owns the wiki workflow.
 
 - [ ] **Step 4: Sync the docs**
 
@@ -75,7 +75,7 @@ Refactor `dashboard/pages/ai_console.py` so the main page becomes:
 3. a collapsed `기억·위키` drawer,
 4. a collapsed `고급 도구` drawer.
 
-Keep the existing chat history and context inference behavior, but stop exposing `시장 기억`, `AI 위키`, `전략 캔버스`, and `로컬 커넥터` as top-level tabs.
+Keep the existing chat history and context inference behavior, but stop exposing `시장 기억`, `기억·위키`, `전략 캔버스`, and `로컬 커넥터` as top-level tabs.
 
 - [ ] **Step 3: Merge memory and wiki into one drawer**
 
@@ -103,7 +103,7 @@ Expected: the AI Console page renders cleanly and the wiki/context tests still p
 - Modify: `tests/test_dashboard_pages.py`
 
 **Interfaces:**
-- Consumes: the simplified `dashboard/pages/ai_console.py` and the removed `dashboard/pages/ai_wiki.py`
+- Consumes: the simplified `dashboard/pages/ai_console.py` and the removed `dashboard/pages/retired_wiki_page.py`
 - Produces: documentation and tests that describe the chat-first AI Console accurately
 
 - [ ] **Step 1: Update the operator guide**
@@ -112,7 +112,7 @@ Rewrite the AI Console section in `docs/agent-console.md` so it explains the new
 
 - [ ] **Step 2: Remove stale references**
 
-Search the repo for `AI 위키` as a standalone page label and delete or rewrite references that still suggest it is a separate destination.
+Search the repo for `기억·위키` as a standalone page label and delete or rewrite references that still suggest it is a separate destination.
 
 - [ ] **Step 3: Run the final verification pass**
 
@@ -123,6 +123,6 @@ Expected: all dashboard and agent-console tests pass with the simplified layout.
 
 ```bash
 git add dashboard/app.py dashboard/pages/ai_console.py docs/agent-console.md tests/test_agent_console.py tests/test_dashboard_pages.py docs/superpowers/plans/2026-07-21-ai-console-simplification.md
-git rm dashboard/pages/ai_wiki.py
+git rm dashboard/pages/retired_wiki_page.py
 git commit -m "add) AI 콘솔을 채팅 중심으로 단순화"
 ```

@@ -28,6 +28,7 @@ _SURFACES = {
 }
 
 
+
 def render():
     _inject_codex_css()
     st.markdown(
@@ -37,31 +38,25 @@ def render():
             <div class="codex-kicker">stock-report agent</div>
             <h1>AI 콘솔</h1>
           </div>
-          <span>그냥 질문하세요 — 맥락(시장·포트폴리오·종목·모의투자·전략)은 자동으로 잡습니다</span>
+          <span>채팅이 우선이고, 기억·위키·도구는 오른쪽으로 접어 둡니다</span>
         </div>
         """,
         unsafe_allow_html=True,
     )
 
-    # 맥락은 질문에서 자동 추론 — 마지막 추론값이 컨텍스트 글랜스/레일의 기준
     surface = _current_surface()
     hours = int(st.session_state.get("agent_hours", 72))
-
     pack = _safe_context(surface, hours)
-    _context_glance(pack)
 
-    tab_chat, tab_memory, tab_wiki, tab_lab, tab_connectors = st.tabs(
-        ["대화", "시장 기억", "AI 위키", "전략 캔버스", "로컬 커넥터"])
-    with tab_chat:
+    chat_col, rail_col = st.columns([1.5, 0.7], gap="large")
+    with chat_col:
         _chat_tab(surface, pack)
-    with tab_memory:
-        _memory_tab(surface)
-    with tab_wiki:
-        _wiki_tab(surface, pack)
-    with tab_lab:
-        _lab_tab(surface)
-    with tab_connectors:
-        _connectors_tab()
+    with rail_col:
+        _context_rail(surface, pack)
+        with st.expander("기억·위키", expanded=False):
+            _knowledge_drawer(surface, pack)
+        with st.expander("고급 도구", expanded=False):
+            _advanced_tools(surface)
 
 
 _AUTO_CHAT = "auto"          # 단일 대화 스레드 키 (맥락은 메시지 단위로 자동 라우팅)
@@ -124,41 +119,38 @@ def _context_glance(pack: dict):
         right.caption("심볼/태그: " + (" · ".join(f"{name} {cnt}" for name, cnt in symbol_counts[:8]) or "—"))
 
 
+
 def _chat_tab(surface: str, pack: dict):
     _ensure_chat_state(_AUTO_CHAT)
     chat_key = _chat_key(_AUTO_CHAT)
-    chat_col, rail_col = st.columns([1.48, 0.72], gap="large")
 
-    with chat_col:
-        pin = st.session_state.get("agent_surface_pin", _PIN_AUTO)
-        mode_label = ("맥락 자동" if pin == _PIN_AUTO
-                      else f"맥락 고정 · {_SURFACES.get(pin, pin)}")
-        st.markdown(
-            f"<div class='codex-chat-head'><b>{mode_label}"
-            f"<span class='codex-chip'>{_SURFACES.get(surface, surface)}</span></b>"
-            f"<span>{pack.get('generated_at', '')}</span></div>",
-            unsafe_allow_html=True,
-        )
-        pending = _quick_prompts()
-        if pending:
-            _run_agent_question_auto(pending)
+    pin = st.session_state.get("agent_surface_pin", _PIN_AUTO)
+    mode_label = ("맥락 자동" if pin == _PIN_AUTO
+                  else f"맥락 고정 · {_SURFACES.get(pin, pin)}")
+    st.markdown(
+        f"<div class='codex-chat-head'><b>{mode_label}"
+        f"<span class='codex-chip'>{_SURFACES.get(surface, surface)}</span></b>"
+        f"<span>{pack.get('generated_at', '')}</span></div>",
+        unsafe_allow_html=True,
+    )
 
-        for msg in st.session_state[chat_key][-16:]:
-            role_raw = str(msg.get("role", "assistant")).strip().lower()
-            role = "user" if role_raw in {"user", "human"} else "assistant"
-            with st.chat_message(role):
-                st.markdown(msg.get("content", ""))
-                if msg.get("meta"):
-                    st.caption(msg["meta"])
+    pending = _quick_prompts()
+    if pending:
+        _run_agent_question_auto(pending)
 
-        user_text = st.chat_input("무엇이든 질문하기 — 포트폴리오·종목·시장·모의투자·전략",
-                                  key="agent_chat_input_auto")
-        if user_text:
-            _run_agent_question_auto(user_text)
-            st.rerun()
+    for msg in st.session_state[chat_key][-16:]:
+        role_raw = str(msg.get("role", "assistant")).strip().lower()
+        role = "user" if role_raw in {"user", "human"} else "assistant"
+        with st.chat_message(role):
+            st.markdown(msg.get("content", ""))
+            if msg.get("meta"):
+                st.caption(msg["meta"])
 
-    with rail_col:
-        _chat_context_rail(surface, pack)
+    user_text = st.chat_input("무엇이든 질문하기 — 포트폴리오·종목·시장·모의투자·전략",
+                              key="agent_chat_input_auto")
+    if user_text:
+        _run_agent_question_auto(user_text)
+        st.rerun()
 
 
 def _chat_key(surface: str) -> str:
@@ -183,15 +175,19 @@ def _ensure_chat_state(surface: str):
     ]
 
 
-def _quick_prompts() -> str | None:
-    """도메인을 가로지르는 추천 질문 4개 — 눌러도 되고, 그냥 아래에 입력해도 된다."""
-    prompts = [
+
+def _quick_prompt_texts() -> list[str]:
+    return [
         "오늘 시장 변화가 어디서 시작됐는지 추적해줘",
-        "내 포트폴리오에서 먼저 줄여야 할 리스크 봐줘",
-        "모의투자 성과가 좋아진 이유와 나빠진 이유를 나눠줘",
-        "보유종목에 영향을 줄 이벤트만 골라줘",
+        "포트폴리오에서 먼저 줄일 리스크 봐줘",
+        "이 대화를 위키에 남길 포인트만 정리해줘",
     ]
-    cols = st.columns(4)
+
+
+def _quick_prompts() -> str | None:
+    """도메인을 가로지르는 추천 질문 3개 — 눌러도 되고, 그냥 아래에 입력해도 된다."""
+    prompts = _quick_prompt_texts()
+    cols = st.columns(len(prompts))
     for idx, text in enumerate(prompts):
         if cols[idx].button(text, key=f"agent_quick_auto_{idx}", width="stretch"):
             return text
@@ -249,7 +245,8 @@ def _run_agent_question(question: str, surface: str, chat_key: str | None = None
         })
 
 
-def _chat_context_rail(surface: str, pack: dict):
+
+def _context_rail(surface: str, pack: dict):
     st.markdown("##### Context")
     sources = pack.get("sources") or {}
     events = sources.get("events") or []
@@ -260,7 +257,7 @@ def _chat_context_rail(surface: str, pack: dict):
     st.markdown(
         f"""
         <div class="codex-rail-card">
-          <div><span>맥락 (자동)</span><b>{_SURFACES.get(surface, surface)}</b></div>
+          <div><span>맥락</span><b>{_SURFACES.get(surface, surface)}</b></div>
           <div><span>events</span><b>{len(events)}</b></div>
           <div><span>memory</span><b>{len(memory)}</b></div>
           <div><span>models</span><b>{len(models)}</b></div>
@@ -268,6 +265,19 @@ def _chat_context_rail(surface: str, pack: dict):
         """,
         unsafe_allow_html=True,
     )
+
+    focus = pack.get("focus") or []
+    if focus:
+        st.caption(" · ".join(focus[:3]))
+
+    if events:
+        st.markdown("##### Signals")
+        for item in events[:3]:
+            title = item.get("title") or item.get("summary") or "제목 없음"
+            st.markdown(
+                f"<div class='codex-feed-item'><b>{item.get('source', 'source')}</b><span>{title}</span></div>",
+                unsafe_allow_html=True,
+            )
 
     with st.expander("⚙️ 설정", expanded=False):
         st.selectbox("맥락 고정", [_PIN_AUTO, *list(_SURFACES)],
@@ -296,24 +306,6 @@ def _chat_context_rail(surface: str, pack: dict):
     if st.session_state.get(prompt_key):
         st.code(agent.build_context_prompt(surface), language="text")
 
-    st.markdown("##### Events")
-    if events:
-        for item in events[:7]:
-            title = item.get("title") or item.get("summary") or "제목 없음"
-            st.markdown(f"<div class='codex-feed-item'><b>{item.get('source', 'source')}</b><span>{title}</span></div>",
-                        unsafe_allow_html=True)
-    else:
-        st.caption("최근 이벤트 없음")
-
-    st.markdown("##### Memory")
-    if memory:
-        for item in memory[:5]:
-            st.markdown(f"<div class='codex-feed-item'><b>{item.get('kind', 'memory')}</b>"
-                        f"<span>{item.get('title', '제목 없음')}</span></div>",
-                        unsafe_allow_html=True)
-    else:
-        st.caption("World Memory 비어 있음")
-
     if reports:
         st.caption(f"latest report: {reports[0].get('name')}")
     paper = pack.get("paper") or {}
@@ -321,6 +313,20 @@ def _chat_context_rail(surface: str, pack: dict):
         st.caption("paper: " + " · ".join(paper["errors"]))
     if pack.get("context_error"):
         st.warning(f"컨텍스트 일부를 불러오지 못했습니다: {pack['context_error']}")
+
+
+def _knowledge_drawer(surface: str, pack: dict):
+    st.caption("대화, 기억, 위키를 한 곳에서 정리합니다.")
+    _memory_tab(surface)
+    st.divider()
+    _wiki_tab(surface, pack)
+
+
+def _advanced_tools(surface: str):
+    st.caption("자주 쓰지 않는 도구는 여기로 묶었습니다.")
+    _lab_tab(surface)
+    st.divider()
+    _connectors_tab()
 
 
 def _memory_tab(surface: str):
@@ -360,7 +366,7 @@ def _memory_tab(surface: str):
 
 
 def _wiki_tab(surface: str, pack: dict):
-    st.markdown("##### AI 위키")
+    st.markdown("##### 위키")
     st.caption("대화와 메모를 카드로 승격해 챗봇이 다시 읽는 지식층입니다.")
 
     stats = wiki.stats()
