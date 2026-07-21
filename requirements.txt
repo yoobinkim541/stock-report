@@ -64,6 +64,7 @@ pygments==2.20.0
 pykrx==1.2.8
 pyparsing==3.3.2
 pypdf==6.12.2
+pymupdf==1.28.0
 pytest==9.0.3
 python-dateutil==2.9.0.post0
 python-dotenv==1.2.2

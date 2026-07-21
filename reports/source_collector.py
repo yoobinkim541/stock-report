@@ -22,6 +22,7 @@ from typing import Iterable
 from urllib.parse import urlparse
 
 import requests
+from bs4 import BeautifulSoup
 
 logger = logging.getLogger(__name__)
 
@@ -410,6 +411,69 @@ def _combine_body_raw(*parts: object) -> str:
     return body
 
 
+def _saveticker_html_to_text(html_text: str) -> str:
+    if not html_text:
+        return ""
+    soup = BeautifulSoup(html_text, "html.parser")
+    main = soup.find("article") or soup.find("main") or soup.body or soup
+    text = main.get_text("\n", strip=True) if main else html_text
+    lines = [line.strip() for line in text.splitlines()]
+    cleaned = "\n".join(line for line in lines if line)
+    return cleaned.strip()
+
+
+def _fetch_saveticker_article_body(url: str) -> str:
+    if not url:
+        return ""
+    try:
+        resp = _bounded_get(url, timeout=15)
+        html_text = resp.text.strip()
+        if not html_text or _is_cloudflare_challenge(html_text):
+            return ""
+        text = _saveticker_html_to_text(html_text)
+        return text
+    except Exception:
+        return ""
+
+
+def _saveticker_article_record(item: dict, base: str) -> dict:
+    from reports.raw_archive import save_extracted_text, save_raw_artifact
+
+    fetched_at = datetime.now(KST)
+    title = str(item.get("title") or "").strip()
+    url = str(item.get("url") or item.get("link") or "").strip()
+    content = str(item.get("content") or "").strip()
+    summary = str(item.get("group_summary") or "").strip()
+    body_raw = _combine_body_raw(content, summary)
+    if len(body_raw) < 80 and url:
+        body_raw = _combine_body_raw(content, summary, _fetch_saveticker_article_body(url))
+    if not body_raw:
+        body_raw = _combine_body_raw(title, content, summary) or title
+
+    raw_payload = json.dumps(item, ensure_ascii=False, sort_keys=True)
+    raw_record = save_raw_artifact(
+        source="saveticker_article",
+        kind="json",
+        fetched_at=fetched_at,
+        title=title or url or "saveticker article",
+        url=url or base,
+        payload=raw_payload,
+        suffix=".json",
+        ttl_days=30,
+    )
+    save_extracted_text(raw_record, body_raw)
+    return {
+        "body_raw": body_raw,
+        "body": body_raw,
+        "body_excerpt": body_raw[:500],
+        "raw_path": raw_record["raw_path"],
+        "text_path": raw_record["text_path"],
+        "manifest_path": raw_record["manifest_path"],
+        "raw_sha256": raw_record["sha256"],
+        "raw_source": raw_record["source"],
+    }
+
+
 def _fetch_arca_post_body(post_id: str, *, proxy: str | None = None) -> str:
     """Arca 게시글 본문을 가능한 한 원문에 가깝게 수집한다."""
     proxy = (proxy or _proxy_from_env() or "").strip()
@@ -454,7 +518,8 @@ def fetch_saveticker_events() -> list[dict]:
             if not title:
                 continue
             text = " ".join(str(item.get(k) or "") for k in ("title", "content", "group_summary"))
-            body_raw = _combine_body_raw(item.get("content"), item.get("group_summary")) or text
+            record = _saveticker_article_record(item, base)
+            body_raw = record["body_raw"] or _combine_body_raw(item.get("content"), item.get("group_summary")) or text
             events.append({
                 "source": "saveticker",
                 "source_url": base,
@@ -466,6 +531,11 @@ def fetch_saveticker_events() -> list[dict]:
                 "body_excerpt": body_raw[:500],
                 "tickers": _normalize_tickers(item.get("tickers")) or _extract_tickers(text),
                 "tags": item.get("tag_names") or [],
+                "raw_path": record["raw_path"],
+                "text_path": record["text_path"],
+                "manifest_path": record["manifest_path"],
+                "raw_sha256": record["raw_sha256"],
+                "raw_source": record["raw_source"],
             })
     return events
 

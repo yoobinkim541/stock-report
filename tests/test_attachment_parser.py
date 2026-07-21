@@ -9,6 +9,8 @@ import os
 import sys
 import tempfile
 import unittest
+
+import pytest
 from pathlib import Path
 from unittest.mock import patch
 
@@ -242,3 +244,16 @@ class TestSummaryBuilders(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+def test_extract_text_from_pdf_or_ocr_prefers_pdf_text(monkeypatch, tmp_path):
+    monkeypatch.setattr(ap, "extract_text_from_pdf", lambda path: "REPORT TEXT")
+    monkeypatch.setattr(ap, "_render_pdf_pages_to_images", lambda path: pytest.fail("render should not run"))
+    assert ap.extract_text_from_pdf_or_ocr(str(tmp_path / "report.pdf")) == "REPORT TEXT"
+
+
+def test_extract_text_from_pdf_or_ocr_runs_ocr_when_pdf_text_missing(monkeypatch, tmp_path):
+    monkeypatch.setattr(ap, "extract_text_from_pdf", lambda path: None)
+    monkeypatch.setattr(ap, "_render_pdf_pages_to_images", lambda path: [str(tmp_path / "page-1.png"), str(tmp_path / "page-2.png")])
+    monkeypatch.setattr(ap, "extract_text_from_image", lambda path: "PAGE")
+    assert ap.extract_text_from_pdf_or_ocr(str(tmp_path / "report.pdf")) == "PAGE\nPAGE"

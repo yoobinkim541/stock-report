@@ -218,7 +218,7 @@ def test_build_digest_survives_dict_tickers_in_corrupt_cache():
     assert "스페이스X 급등" in digest   # dict 티커 이벤트도 크래시 없이 항목으로 표시
 
 
-def test_fetch_saveticker_events_normalizes_dict_tickers(monkeypatch):
+def test_fetch_saveticker_events_normalizes_dict_tickers(monkeypatch, tmp_path):
     class FakeResponse:
         def __init__(self, payload):
             self._payload = payload
@@ -228,6 +228,9 @@ def test_fetch_saveticker_events_normalizes_dict_tickers(monkeypatch):
 
         def json(self):
             return self._payload
+
+    monkeypatch.setenv("STOCK_REPORT_REPORTS_DIR", str(tmp_path / "reports"))
+    monkeypatch.setattr(sc, "_fetch_saveticker_article_body", lambda url: "")
 
     payload = {"news_list": [{
         "title": "스페이스X 상장 급등",
@@ -244,10 +247,48 @@ def test_fetch_saveticker_events_normalizes_dict_tickers(monkeypatch):
     events = sc.fetch_saveticker_events()
 
     assert events, "이벤트가 비어있으면 안 됨"
-    assert events[0]["tickers"] == ["SPCX"]   # dict → symbol 문자열로 정규화
-    assert all(isinstance(t, str) for t in events[0]["tickers"])
-    assert events[0]["body_raw"] == "상장 기대감이 커지며 거래량이 급증했다.\n\n우주 섹터 전반이 강세를 보였다."
-    assert events[0]["body"] == events[0]["body_raw"]
+    event = events[0]
+    assert event["tickers"] == ["SPCX"]   # dict → symbol 문자열로 정규화
+    assert all(isinstance(t, str) for t in event["tickers"])
+    assert event["body_raw"] == "상장 기대감이 커지며 거래량이 급증했다.\n\n우주 섹터 전반이 강세를 보였다."
+    assert event["body"] == event["body_raw"]
+    assert Path(event["raw_path"]).exists()
+    assert Path(event["text_path"]).exists()
+    assert Path(event["manifest_path"]).exists()
+    assert Path(event["text_path"]).read_text(encoding="utf-8") == event["body_raw"]
+
+
+def test_fetch_saveticker_events_enriches_thin_articles(monkeypatch, tmp_path):
+    class FakeResponse:
+        def __init__(self, payload):
+            self._payload = payload
+
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return self._payload
+
+    monkeypatch.setenv("STOCK_REPORT_REPORTS_DIR", str(tmp_path / "reports"))
+    monkeypatch.setattr(sc, "_fetch_saveticker_article_body", lambda url: "상세 기사 본문")
+
+    payload = {"news_list": [{
+        "title": "오라클 급등",
+        "content": "짧은 본문",
+        "group_summary": "",
+        "url": "https://e/orcl",
+        "created_at": "2026-06-16",
+        "tickers": [{"id": 17135, "name": None, "symbol": "ORCL"}],
+        "tag_names": ["실적"],
+    }]}
+
+    monkeypatch.setattr(sc.requests, "get", lambda *args, **kwargs: FakeResponse(payload))
+
+    events = sc.fetch_saveticker_events()
+
+    assert events
+    assert "상세 기사 본문" in events[0]["body_raw"]
+    assert Path(events[0]["raw_path"]).exists()
 
 
 # ── 소스별 수집 헬스 (수집 공백 가시화) ──────────────────────────────────────
