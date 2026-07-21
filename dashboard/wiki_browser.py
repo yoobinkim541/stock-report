@@ -128,7 +128,7 @@ def _kind_from_record(record: dict[str, Any]) -> str:
 
 def _is_wiki_record(record: dict[str, Any]) -> bool:
     tags = [_clean(tag, 60).lower() for tag in (record.get("tags") or [])]
-    if WIKI_TAG := "wiki" in tags:
+    if "wiki" in tags:
         return True
     source = record.get("source") or {}
     surface = _clean(source.get("surface") or source.get("screen") or "", 60).lower()
@@ -162,7 +162,7 @@ def _record_to_page(record: dict[str, Any]) -> dict[str, Any]:
         if msg_lines:
             body_parts.append("대화 발췌\n- " + "\n- ".join(msg_lines))
     return {
-        "id": record.get("id"),
+        "id": record.get("id") or _page_id(record.get("title") or "위키 페이지", record.get("surface") or WIKI_SURFACE, record.get("kind") or "note"),
         "title": _clean(record.get("title") or "위키 페이지", 160),
         "slug": _slugify(record.get("title") or "위키 페이지"),
         "summary": summary,
@@ -262,8 +262,8 @@ def _source_weight(page: dict[str, Any], counter: Counter[str]) -> int:
 def _related_score(selected: dict[str, Any], candidate: dict[str, Any], *, counter: Counter[str]) -> tuple[int, int, str]:
     selected_tags = {str(tag).lower() for tag in selected.get("tags") or []}
     candidate_tags = {str(tag).lower() for tag in candidate.get("tags") or []}
-    tag_hits = len(selected_tags & candidate_tags)
     source_hits = len(set(selected.get("source_refs") or []) & set(candidate.get("source_refs") or []))
+    tag_hits = len(selected_tags & candidate_tags)
     source_weight = _source_weight(candidate, counter)
     recency = str(candidate.get("updated_at") or candidate.get("created_at") or "")
     return (tag_hits * 4 + source_hits * 6 + source_weight, tag_hits + source_hits, recency)
@@ -353,11 +353,35 @@ def _last_chat_exchange(rows: list[dict[str, Any]]) -> dict[str, str] | None:
     return None
 
 
+def _extract_selected_page_id(event: Any) -> str:
+    if not event:
+        return ""
+    selection = None
+    if isinstance(event, dict):
+        selection = event.get("selection") or event.get("points") or event
+    else:
+        selection = getattr(event, "selection", None) or getattr(event, "points", None) or event
+    points = []
+    if isinstance(selection, dict):
+        points = selection.get("points") or []
+    elif isinstance(selection, Iterable):
+        points = list(selection)
+    for point in points:
+        try:
+            customdata = point.get("customdata") if isinstance(point, dict) else getattr(point, "customdata", None)
+            if customdata:
+                return str(customdata[0] if isinstance(customdata, (list, tuple)) else customdata)
+        except Exception:
+            continue
+    return ""
+
+
 def render_wiki_tab(surface: str, pack: dict[str, Any] | None = None) -> None:
     import pandas as pd
     import streamlit as st
 
     from agent_console import wiki
+    from dashboard import wiki_mesh
 
     st.markdown("##### AI 위키")
     st.caption("대화와 메모를 카드로 승격해 챗봇이 다시 읽는 지식층입니다.")
@@ -393,6 +417,19 @@ def render_wiki_tab(surface: str, pack: dict[str, Any] | None = None) -> None:
         index=0,
         key="agent_wiki_status_filter",
     )
+
+    graph_selected = wiki_mesh.render_wiki_mesh(
+        pages_all,
+        selected_page_id=st.session_state.get("agent_wiki_selected_page_id", ""),
+        query=query,
+        surface=surface_filter,
+        status=status_filter,
+        depth=int(st.session_state.get("agent_wiki_graph_depth", 2)),
+        max_nodes=96,
+        key="agent_wiki_graph",
+    )
+    if graph_selected:
+        st.session_state["agent_wiki_selected_page_id"] = graph_selected
 
     browser = build_browser_model(
         pages_all,
