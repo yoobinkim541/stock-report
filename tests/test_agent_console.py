@@ -175,6 +175,21 @@ def test_agent_context_prompt_includes_wiki(monkeypatch, tmp_path):
     assert "wiki card" in prompt
 
 
+def test_wiki_auto_curate_skips_transient_acknowledgements(monkeypatch, tmp_path):
+    _isolate(monkeypatch, tmp_path)
+
+    from agent_console import wiki
+
+    assert wiki.auto_curate_from_chat(
+        "진행해줘",
+        "ㅇㅇ 진행해",
+        surface="portfolio",
+        llm=None,
+        pack={"focus": []},
+        history=[],
+    ) is None
+
+
 def test_wiki_auto_curate_from_chat_updates_existing_page(monkeypatch, tmp_path):
     _isolate(monkeypatch, tmp_path)
 

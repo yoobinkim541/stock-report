@@ -401,6 +401,40 @@ def _normalize_tickers(raw) -> list[str]:
     return out
 
 
+def _combine_body_raw(*parts: object) -> str:
+    body = "\n\n".join(
+        str(part).replace("\x00", " ").strip()
+        for part in parts
+        if str(part or "").strip()
+    ).strip()
+    return body
+
+
+def _fetch_arca_post_body(post_id: str, *, proxy: str | None = None) -> str:
+    """Arca 게시글 본문을 가능한 한 원문에 가깝게 수집한다."""
+    proxy = (proxy or _proxy_from_env() or "").strip()
+    if proxy:
+        try:
+            resp = _bounded_get_via_proxy(
+                f"https://arca.live/b/stock/{post_id}",
+                proxy,
+                timeout=18,
+            )
+            body = resp.text.strip()
+            if body:
+                return body
+        except Exception:
+            pass
+    try:
+        resp = _bounded_get(f"https://r.jina.ai/http://arca.live/b/stock/{post_id}", timeout=25)
+        body = resp.text.strip()
+        if body:
+            return body
+    except Exception:
+        pass
+    return ""
+
+
 def fetch_saveticker_events() -> list[dict]:
     base = os.getenv("SAVE_TICKER_API_BASE", "https://saveticker.com/api").rstrip("/")
     paths = [
@@ -420,12 +454,16 @@ def fetch_saveticker_events() -> list[dict]:
             if not title:
                 continue
             text = " ".join(str(item.get(k) or "") for k in ("title", "content", "group_summary"))
+            body_raw = _combine_body_raw(item.get("content"), item.get("group_summary")) or text
             events.append({
                 "source": "saveticker",
                 "source_url": base,
                 "title": title,
                 "url": item.get("url") or item.get("link") or "",
                 "published_at": item.get("created_at") or item.get("published_at") or "",
+                "body_raw": body_raw,
+                "body": body_raw,
+                "body_excerpt": body_raw[:500],
                 "tickers": _normalize_tickers(item.get("tickers")) or _extract_tickers(text),
                 "tags": item.get("tag_names") or [],
             })
@@ -469,12 +507,17 @@ def fetch_arca_events(max_pages: int = 2, *, proxy: str | None = None,
         # 꼬리 메타([댓글수] 작성자 날짜 조회 추천) 제거 — 실패해도 원문 유지(graceful)
         title = re.sub(r"\s*(\[\d+\])?\s*\S{1,20}\s+\d{4}\.\d{2}\.\d{2}\s+\d+\s+\d+\s*$",
                        "", title) or title
+        body_raw = _fetch_arca_post_body(post_id, proxy=proxy)
+        body = body_raw or title
         events.append({
             "source": "arca",
             "title": title[:140],
             "url": f"https://arca.live/b/stock/{post_id}",
             "source_url": "https://arca.live/b/stock",
             "category": label,
+            "body_raw": body_raw or body,
+            "body": body,
+            "body_excerpt": body[:500],
             "tickers": _extract_tickers(title),
         })
 
@@ -609,7 +652,9 @@ def fetch_telegram_channel_events(channels: list[str] = TELEGRAM_NEWS_CHANNELS) 
                 "source_url": f"https://t.me/s/{channel}",
                 "title": title[:180],
                 "url": url,
+                "body_raw": body,
                 "body": body,
+                "body_excerpt": body[:500],
                 "tickers": _extract_tickers(scan_text),
                 "tags": tags,
             })

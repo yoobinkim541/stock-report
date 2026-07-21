@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+import json
 import hashlib
 import re
 from collections import Counter
+from collections.abc import Callable
 from datetime import datetime, timezone
 from typing import Iterable
 
@@ -102,7 +104,12 @@ def _record_to_page(record: dict) -> dict:
     open_questions = _dedupe_texts(record.get("openQuestions") or [], limit=8, item_limit=280)
     messages = record.get("messages") or []
     source = record.get("source") or {}
-    body_parts = [summary]
+    body_parts = []
+    body_text = _clean(record.get("body") or "", 6000)
+    if body_text:
+        body_parts.append(body_text)
+    elif summary:
+        body_parts.append(summary)
     if decisions:
         body_parts.append("핵심 정리\n- " + "\n- ".join(decisions))
     if open_questions:
@@ -253,6 +260,7 @@ def upsert_page(payload: dict) -> dict:
         "updatedAt": _now(),
         "title": title,
         "summary": summary,
+        "body": body,
         "tags": tags,
         "decisions": decisions,
         "openQuestions": open_questions,
@@ -393,3 +401,355 @@ def _extract_questions(text: str) -> list[str]:
         if len(out) >= 4:
             break
     return out
+
+
+AUTO_CURATE_MIN_LENGTH = 40
+AUTO_CURATE_MAX_LENGTH = 6000
+AUTO_CURATE_MIN_SCORE = 5
+_TRANSIENT_ACK_PATTERNS = (
+    "진행해줘", "진행해봐", "진행해", "ㄱㄱ", "ok", "okay", "오케이", "좋아",
+    "확인해봐", "해봐", "보여줘", "감사", "고마워", "알겠", "이해", "테스트 메세지",
+)
+_RULE_KEYWORDS = (
+    "규칙", "기준", "조건", "정책", "가드레일", "예외", "검증", "체크",
+    "원문", "본문", "raw", "body", "저장", "수집", "기억", "위키", "재사용",
+    "편향", "bias", "학습", "메모리", "결정", "선택", "실패", "성공",
+    "손실한도", "레버리지", "비중", "현금", "변동성", "포트폴리오", "mdd",
+)
+
+
+def auto_curate_from_chat(
+    question: str,
+    answer: str,
+    *,
+    surface: str = "market",
+    llm: Callable[[str], str | None] | None = None,
+    pack: dict | None = None,
+    history: list[dict] | None = None,
+) -> dict | None:
+    """대화를 위키 카드로 자동 승격한다.
+
+    재사용 가능한 규칙/결정/편향 교정만 올리고, 짧은 진행 확인/한 번성 응답은 건너뛴다.
+    """
+    question = _clean(question, AUTO_CURATE_MAX_LENGTH)
+    answer = _clean(answer, AUTO_CURATE_MAX_LENGTH)
+    surface = _clean(surface or WIKI_SURFACE, 60).lower() or WIKI_SURFACE
+    if not question or not answer:
+        return None
+    if not _should_auto_curate(question, answer):
+        return None
+
+    candidates = list_pages(query=question, surface=surface, limit=5)
+    target = _best_candidate_page(question, surface, candidates)
+    plan = None
+    if llm is not None:
+        try:
+            prompt = _build_auto_curation_prompt(
+                question=question,
+                answer=answer,
+                surface=surface,
+                candidates=candidates,
+                pack=pack or {},
+                history=history or [],
+            )
+            plan = _parse_curation_plan(llm(prompt))
+        except Exception:
+            plan = None
+    if not plan:
+        plan = _heuristic_curation_plan(question, answer, surface=surface, target=target)
+    if not plan:
+        return None
+
+    action = _clean(plan.get("action") or "create", 20).lower()
+    if action not in {"create", "update", "skip"}:
+        action = "create"
+    if action == "skip":
+        return None
+
+    payload = _plan_to_page_payload(
+        plan,
+        question=question,
+        answer=answer,
+        surface=surface,
+        target=target,
+    )
+    if not payload:
+        return None
+
+    saved = upsert_page(payload)
+    return {
+        "ok": True,
+        "action": action,
+        "source": "llm" if llm is not None and plan.get("source") == "llm" else "heuristic",
+        "page": saved,
+    }
+
+
+def _should_auto_curate(question: str, answer: str) -> bool:
+    text = f"{question}\n{answer}".lower()
+    if len(question) < 10 or len(answer) < AUTO_CURATE_MIN_LENGTH:
+        return False
+    if any(pat in text for pat in _TRANSIENT_ACK_PATTERNS) and not any(k in text for k in _RULE_KEYWORDS):
+        return False
+    score = 0
+    if len(answer) >= 180:
+        score += 1
+    if len(answer) >= 500:
+        score += 1
+    if text.count("\n") >= 2 or any(line.strip().startswith(("-", "*", "•", "1.", "2.", "3.")) for line in text.splitlines()):
+        score += 2
+    if any(k in text for k in _RULE_KEYWORDS):
+        score += 2
+    if any(k in question.lower() for k in ("정리", "기준", "규칙", "학습", "위키", "기억", "비교", "조건")):
+        score += 1
+    if any(k in text for k in ("예외", "검증", "재현", "실패", "성공", "원문", "본문", "저장", "수집")):
+        score += 1
+    return score >= AUTO_CURATE_MIN_SCORE
+
+
+def _build_auto_curation_prompt(
+    *,
+    question: str,
+    answer: str,
+    surface: str,
+    candidates: list[dict],
+    pack: dict,
+    history: list[dict],
+) -> str:
+    lines = [
+        "너는 stock-report AI 위키 정리기다.",
+        "목표: 재사용 가능한 규칙, 결정, 저장/수집 원칙, 실패 교정만 하나의 위키 카드로 정리한다.",
+        "짧은 진행 확인, 단발성 수다, 상태 보고, 확인 대답은 생성 금지다.",
+        "반드시 JSON object만 출력한다. 마크다운, 설명문, 코드펜스는 금지한다.",
+        "가능한 action 값은 create, update, skip 이다.",
+        "update 를 고를 때는 target_id 를 기존 후보 페이지 id 로 지정한다.",
+        "확신이 낮으면 status 는 draft, 중간이면 reviewed, 이미 안정적인 운영 규칙이면 stable 이다.",
+        "필드: action, title, summary, body, kind, status, tags, source_refs, target_id, confidence, reason.",
+        f"surface: {surface}",
+        "",
+        "[사용자 질문]",
+        question,
+        "",
+        "[모델 답변]",
+        answer,
+    ]
+    if history:
+        lines += ["", "[최근 대화 힌트]"]
+        for row in history[-4:]:
+            role = _clean(row.get("role") or "", 24)
+            msg = _clean(row.get("message") or "", 180)
+            if msg:
+                lines.append(f"- {role}: {msg}")
+    if pack.get("focus"):
+        lines += ["", "[화면 초점]", *[f"- {item}" for item in pack.get("focus")[:4]]]
+    if candidates:
+        lines += ["", "[기존 위키 후보]"]
+        for page in candidates[:5]:
+            lines.append(
+                f"- id={page.get('id')} | title={page.get('title')} | "
+                f"status={page.get('status')} | kind={page.get('kind')} | "
+                f"summary={_clean(page.get('summary') or '', 160)}"
+            )
+    lines += [
+        "",
+        "JSON 예시:",
+        '{"action":"create","title":"손실한도와 레버리지","summary":"...","body":"...","kind":"playbook","status":"reviewed","tags":["risk","portfolio"],"source_refs":["conversation:123"],"target_id":"","confidence":0.86,"reason":"..."}',
+    ]
+    return "\n".join(lines)
+
+
+def _parse_curation_plan(text: str | None) -> dict | None:
+    text = _clean(text or "", 8000)
+    if not text:
+        return None
+    candidates = [text]
+    code_blocks = re.findall(r"```(?:json)?\\s*(.*?)```", text, flags=re.S | re.I)
+    candidates[:0] = [block.strip() for block in code_blocks if block.strip()]
+    brace = re.search(r"\{.*\}", text, flags=re.S)
+    if brace:
+        candidates.insert(0, brace.group(0))
+    for chunk in candidates:
+        try:
+            parsed = json.loads(chunk)
+        except Exception:
+            continue
+        if isinstance(parsed, dict):
+            parsed["source"] = "llm"
+            return parsed
+    return None
+
+
+def _heuristic_curation_plan(
+    question: str,
+    answer: str,
+    *,
+    surface: str,
+    target: dict | None = None,
+) -> dict | None:
+    text = f"{question}\n{answer}".lower()
+    if not _should_auto_curate(question, answer):
+        return None
+    kind = _infer_kind_from_text(text)
+    if kind == "note" and not any(k in text for k in ("규칙", "기준", "조건", "검증", "원문", "본문", "저장", "수집")):
+        return None
+    status = "draft"
+    if any(token in text for token in ("규칙", "기준", "조건", "손실한도", "레버리지", "검증", "원문", "본문", "편향", "수집")):
+        status = "reviewed"
+    title = _derive_title(question, answer)
+    plan = {
+        "action": "update" if target else "create",
+        "title": title,
+        "summary": _clean(answer[:900] or question[:900], 900),
+        "body": _clean(answer, 6000),
+        "kind": kind,
+        "status": status,
+        "tags": _auto_tags(text, surface, kind),
+        "source_refs": [],
+        "target_id": target.get("id") if target else "",
+        "confidence": 0.72 if status == "reviewed" else 0.58,
+        "reason": "heuristic curation",
+        "source": "heuristic",
+    }
+    return plan
+
+
+def _plan_to_page_payload(
+    plan: dict,
+    *,
+    question: str,
+    answer: str,
+    surface: str,
+    target: dict | None = None,
+) -> dict | None:
+    if not isinstance(plan, dict):
+        return None
+    target_id = _clean(plan.get("target_id") or (target.get("id") if target else ""), 80)
+    title = _clean(plan.get("title") or _derive_title(question, answer), 160)
+    summary = _clean(plan.get("summary") or answer[:2400] or question[:2400], 2400)
+    body = _clean(plan.get("body") or answer or summary, 6000)
+    kind = _clean(plan.get("kind") or "playbook", 40).lower() or "playbook"
+    if kind not in VALID_KINDS:
+        kind = "note"
+    status = _clean(plan.get("status") or "draft", 40).lower() or "draft"
+    if status not in VALID_STATUSES:
+        status = "draft"
+    confidence = _num_or_default(plan.get("confidence"), 0.5)
+    tags = _dedupe_texts([
+        WIKI_TAG,
+        surface,
+        kind,
+        status,
+        *(plan.get("tags") or []),
+    ], limit=20, item_limit=60)
+    source_refs = _dedupe_texts([
+        *(plan.get("source_refs") or []),
+        f"conversation:{_page_id(question, surface, kind)}",
+    ], limit=12, item_limit=180)
+    messages = [
+        {"role": "user", "text": question},
+        {"role": "assistant", "text": answer},
+    ]
+    if target:
+        messages = _merge_messages(target.get("messages") or [], messages)
+        source_refs = _dedupe_texts([*(target.get("source_refs") or []), *source_refs], limit=12, item_limit=180)
+        tags = _dedupe_texts([*(target.get("tags") or []), *tags], limit=20, item_limit=60)
+        summary = summary or target.get("summary") or ""
+        body = body or target.get("body") or summary
+    if not title or not body:
+        return None
+    return {
+        "id": target_id or _page_id(title, surface, kind),
+        "title": title,
+        "summary": summary,
+        "body": body,
+        "surface": surface,
+        "kind": kind,
+        "status": status,
+        "tags": tags,
+        "source_refs": source_refs,
+        "messages": messages,
+        "confidence": confidence,
+    }
+
+
+def _best_candidate_page(question: str, surface: str, candidates: list[dict]) -> dict | None:
+    if not candidates:
+        return None
+    scored: list[tuple[int, dict]] = []
+    for page in candidates:
+        score = _candidate_score(page.get("raw") or {}, question, surface, "all")
+        scored.append((score, page))
+    scored.sort(key=lambda item: item[0], reverse=True)
+    best_score, best_page = scored[0]
+    if best_score < AUTO_CURATE_MIN_SCORE:
+        return None
+    return best_page
+
+
+def _infer_kind_from_text(text: str) -> str:
+    q = str(text or "").lower()
+    if any(token in q for token in ("손실", "리스크", "위험", "mdd", "최대손실")):
+        return "risk"
+    if any(token in q for token in ("결정", "선택", "교체", "승격", "update")):
+        return "decision"
+    if any(token in q for token in ("규칙", "전략", "백테스트", "방법", "시나리오")):
+        return "playbook"
+    if any(token in q for token in ("개념", "정의", "용어", "무엇", "왜")):
+        return "concept"
+    return "note"
+
+
+def _derive_title(question: str, answer: str) -> str:
+    q = _clean(question, 120)
+    if q:
+        return q[:80]
+    a = _clean(answer, 120)
+    return a[:80] or "위키 페이지"
+
+
+def _auto_tags(text: str, surface: str, kind: str) -> list[str]:
+    tags = {WIKI_TAG, surface, kind}
+    mapping = {
+        "portfolio": ("포트폴리오", "비중", "손실한도", "레버리지", "현금", "mdd"),
+        "market": ("시장", "지정학", "유가", "달러", "크레딧", "금리"),
+        "ticker": ("종목", "티커", "실적", "밸류", "차트"),
+        "paper": ("모의투자", "단기", "트레이딩", "원장", "검증"),
+        "lab": ("전략", "백테스트", "rsi", "dsl", "시나리오"),
+    }
+    for tag, words in mapping.items():
+        if any(word in text for word in words):
+            tags.add(tag)
+    if "위키" in text or "기억" in text:
+        tags.add("wiki")
+    return sorted(tags)
+
+
+def _num_or_default(value: object, default: float = 0.5) -> float:
+    try:
+        return float(value)
+    except Exception:
+        return default
+
+
+def _merge_messages(existing: list[dict], new_messages: list[dict]) -> list[dict]:
+    rows = []
+    seen: set[tuple[str, str]] = set()
+    for row in list(existing or []) + list(new_messages or []):
+        if not isinstance(row, dict):
+            continue
+        role = _clean(row.get("role") or "", 32)
+        text = _clean(row.get("text") or "", 2200)
+        if not text:
+            continue
+        key = (role, text)
+        if key in seen:
+            continue
+        seen.add(key)
+        rows.append(
+            {
+                "role": role or "user",
+                "text": text,
+                "createdAt": _clean(row.get("createdAt") or _now(), 80),
+            }
+        )
+    return rows[:8]

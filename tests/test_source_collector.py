@@ -231,6 +231,8 @@ def test_fetch_saveticker_events_normalizes_dict_tickers(monkeypatch):
 
     payload = {"news_list": [{
         "title": "스페이스X 상장 급등",
+        "content": "상장 기대감이 커지며 거래량이 급증했다.",
+        "group_summary": "우주 섹터 전반이 강세를 보였다.",
         "url": "https://e/spcx",
         "created_at": "2026-06-16",
         "tickers": [{"id": 17135, "name": None, "symbol": "SPCX"}],
@@ -244,6 +246,8 @@ def test_fetch_saveticker_events_normalizes_dict_tickers(monkeypatch):
     assert events, "이벤트가 비어있으면 안 됨"
     assert events[0]["tickers"] == ["SPCX"]   # dict → symbol 문자열로 정규화
     assert all(isinstance(t, str) for t in events[0]["tickers"])
+    assert events[0]["body_raw"] == "상장 기대감이 커지며 거래량이 급증했다.\n\n우주 섹터 전반이 강세를 보였다."
+    assert events[0]["body"] == events[0]["body_raw"]
 
 
 # ── 소스별 수집 헬스 (수집 공백 가시화) ──────────────────────────────────────
