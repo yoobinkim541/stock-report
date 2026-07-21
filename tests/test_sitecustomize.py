@@ -28,6 +28,49 @@ def test_sitecustomize_merges_recent_history_and_preserves_followups(monkeypatch
     assert agent.infer_surface("그럼?", history=history, default="market") == "portfolio"
 
 
+def test_sitecustomize_answer_uses_merged_history(monkeypatch, tmp_path):
+    _isolate(monkeypatch, tmp_path)
+
+    import sitecustomize  # noqa: F401  - runtime patch side effect
+    from agent_console import agent, context, storage
+
+    storage.add_conversation("user", "포트폴리오에서 오라클은 들고 가고 싶어", "portfolio")
+    storage.add_conversation("assistant", "오라클은 보호 포지션으로 두고 다른 고베타를 줄이겠습니다.", "portfolio")
+
+    monkeypatch.setattr(
+        context,
+        "context_pack",
+        lambda surface: {
+            "ok": True,
+            "surface": surface,
+            "generated_at": "2026-07-21T00:00:00+00:00",
+            "sources": {"events": [], "source_counts": [], "symbol_counts": []},
+            "reports": [],
+            "ml_activity": [],
+            "portfolio": {"holdings": [], "summary": {}, "risk": {}, "targets": {}, "errors": []},
+            "paper": {"kr": None, "us": None, "combined": None, "errors": []},
+            "models": {"items": []},
+            "memory": [],
+            "focus": [],
+        },
+    )
+    captured = {}
+
+    def fake_compose(question, pack, history=None):
+        captured["history"] = history or []
+        return (
+            "질문은 이해했습니다: **그럼?**\n\n"
+            "지금은 로컬 모델 응답을 바로 받지 못했지만, 질문 자체에 답하는 방향으로 처리하겠습니다."
+        )
+
+    monkeypatch.setattr(agent, "_compose_answer", fake_compose)
+
+    result = agent.answer("그럼?", "portfolio")
+    assert any("오라클" in row.get("message", "") for row in captured["history"])
+    assert "후속으로 이해했습니다" in result["answer"]
+    assert result["surface"] == "portfolio"
+
+
 def test_sitecustomize_humanizes_generic_fallback(monkeypatch, tmp_path):
     _isolate(monkeypatch, tmp_path)
 
