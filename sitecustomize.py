@@ -80,6 +80,8 @@ else:
         if not q:
             return default
 
+        if not history:
+            history = _recent_conversation_history(default, limit=8)
         recent_surface = _most_recent_surface(history)
 
         best_surface, best_score = "", 0
