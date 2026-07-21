@@ -7,17 +7,14 @@ It keeps the existing engine intact, but merges recent conversation history
 across surfaces and makes short follow-ups easier to route.
 """
 
+import os
 from collections.abc import Iterable
-from datetime import datetime
 
 try:
     from agent_console import agent, context, shared_memory, storage, wiki
 except Exception:  # pragma: no cover - safe no-op when optional deps are unavailable
     agent = None
 else:
-    _ORIG_INFER_SURFACE = agent.infer_surface
-    _ORIG_ANSWER = agent.answer
-
     def _recent_conversation_history(surface: str, limit: int = 12) -> list[dict]:
         surface = str(surface or "market").strip().lower()
         limit = max(1, min(int(limit or 12), 50))
