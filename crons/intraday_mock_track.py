@@ -90,6 +90,12 @@ def load_cfg() -> dict:
                             "US": max(spread_soft_us, spread_hard_us)},
         "flat_buffer_min": int(_env_f("INTRADAY_FLAT_BUFFER_MIN", 15)),
         "entry_cutoff_min": int(_env_f("INTRADAY_ENTRY_CUTOFF_MIN", 30)),
+        "candidate_base_dir": os.getenv("INTRADAY_CANDIDATE_BASE_DIR", ""),
+        "minimum_hold_min": int(_env_f("INTRADAY_MINIMUM_HOLD_MIN", 3)),
+        "micro_risk_mult": {
+            "KR": _env_f("INTRADAY_MICRO_RISK_MULT_KR", _env_f("INTRADAY_MICRO_RISK_MULT", 0.10)),
+            "US": _env_f("INTRADAY_MICRO_RISK_MULT_US", _env_f("INTRADAY_MICRO_RISK_MULT", 0.10)),
+        },
         # 개장 첫 N분은 진입 보류 — 개장 동시호가 직후 스프레드가 구조적으로 넓어
         # 하필 이 순간에 몰리는 진입기준 통과 신호가 스프레드 가드에 거의 매번
         # 막히던 문제 방어(2026-07-15 실측). US 는 개장 변동성이 커 기본 더 김.
@@ -696,7 +702,8 @@ def run_market(mk: str, state: dict, cfg: dict, *, dry: bool = False) -> list[st
         _, score = _score(sym) if bar else (None, None)
         cfg_exit = {"timestop_min": params.get("timestop_min", 90),
                     "theta_exit": params.get("theta_exit", 0.25),
-                    "flat_buffer_min": cfg["flat_buffer_min"]}
+                    "flat_buffer_min": cfg["flat_buffer_min"],
+                    "minimum_hold_min": cfg.get("minimum_hold_min", 3)}
         res = ax.check_exit(pos, bar, score, now_min, close_min, cfg_exit)
         if res:
             reason, ref_px = res
@@ -732,11 +739,46 @@ def run_market(mk: str, state: dict, cfg: dict, *, dry: bool = False) -> list[st
         trade_axes = _execution_axes(axes, trade_sym, bars.get(trade_sym), feats.get(trade_sym))
         if trade_axes is None:
             continue
-        cands.append((score, sym, trade_sym, trade_axes))
+        from ml import intraday_sample_factory as sf
+        ob = obs.get(trade_sym)
+        sp_abs = None
+        if ob and ob.get("best_bid") and ob.get("best_ask"):
+            sp_abs = float(ob["best_ask"]) - float(ob["best_bid"])
+        setups = sf.detect_setups(trade_axes, bars.get(trade_sym), market=mk)
+        for setup in setups:
+            estimated_cost = sf.estimated_cost_per_share(trade_axes["_meta"]["close"], mk, sp_abs)
+            sample = sf.classify_sample(
+                setup,
+                market=mk,
+                confirm_bars=int(setup.get("confirm_bars") or 0),
+                expected_move=float(setup.get("expected_move") or 0.0),
+                estimated_cost=estimated_cost,
+            )
+            sample["id"] = sf.candidate_id(
+                today, mk, trade_sym, trade_axes["_meta"].get("epoch_min") or ep, sample["setup_type"]
+            )
+            sample.update({
+                "date": today,
+                "market": mk,
+                "ticker": trade_sym,
+                "signal_ticker": sym if sym != trade_sym else None,
+                "bar_ts": trade_axes["_meta"].get("bar_ts"),
+                "entry_price": trade_axes["_meta"].get("close"),
+                "score": round(score, 4),
+                "features": {k: v for k, v in trade_axes.items() if k != "_meta"},
+            })
+            try:
+                from ml.intraday_candidate_ledger import CandidateLedger
+                base_dir = cfg.get("candidate_base_dir") or None
+                CandidateLedger(mk.lower(), base_dir=base_dir).log_candidate(sample)
+            except Exception as e:
+                logger.warning("[%s] candidate 기록 실패 %s: %s", mk, trade_sym, e)
+            if sample.get("sample_mode") in {"micro", "normal"}:
+                cands.append((score, sym, trade_sym, trade_axes, sample))
     # 세션 최고점 진단 — 결정 0건이 휴면(점수 미달)인지 고장인지 로그만으로 구분.
     # 신고점 갱신 시에만 한 줄 기록(단조증가라 일 수 회) — 매분 스팸 없음.
     if cands:
-        top_score, top_sym, top_trade, _ = max(cands)
+        top_score, top_sym, top_trade, _, _ = max(cands, key=lambda x: x[0])
         _today = state.get("session_date", {}).get(mk)
         _d = state.setdefault("diag", {}).get(mk) or {}
         if _d.get("date") != _today or top_score > float(_d.get("best") or -9):
@@ -747,10 +789,18 @@ def run_market(mk: str, state: dict, cfg: dict, *, dry: bool = False) -> list[st
                         mk, top_sym, suffix, top_score, float(params.get("theta_entry", 0.55)),
                         float(_cfg_market_value(cfg, "explore_entry", mk, 0.48)))
     max_concurrent = _max_concurrent(mk, cfg)
-    for score, signal_sym, sym, axes in sorted(cands, reverse=True):
+    for score, signal_sym, sym, axes, sample in sorted(cands, reverse=True, key=lambda x: x[0]):
         if max_concurrent > 0 and n_pos >= max_concurrent:
             break
-        risk_mult, entry_mode = _entry_risk_mult(score, params, cfg, mk)
+        if f"{mk}:{sym}" in state["positions"]:
+            continue
+        if sample.get("sample_mode") == "normal":
+            risk_mult, entry_mode = 1.0, "normal"
+        elif sample.get("sample_mode") == "micro":
+            risk_mult = float(_cfg_market_value(cfg, "micro_risk_mult", mk, 0.10))
+            entry_mode = "micro"
+        else:
+            continue
         if risk_mult <= 0:
             continue
         ob = obs.get(sym)

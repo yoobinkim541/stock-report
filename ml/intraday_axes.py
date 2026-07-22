@@ -303,7 +303,9 @@ def check_exit(pos: dict, bar: dict | None, score: float | None,
         progress_r = abs(c - float(pos["entry_price"])) / rps
         if held_min >= int(cfg.get("timestop_min", 90)) and progress_r < 0.3:
             return "timestop", c
-        if score is not None and score < float(cfg.get("theta_exit", 0.25)):
+        minimum_hold_min = int(cfg.get("minimum_hold_min", 0) or 0)
+        if (score is not None and score < float(cfg.get("theta_exit", 0.25))
+                and held_min >= minimum_hold_min):
             return "signal_collapse", c
         if now_min >= flat_at:
             return "eod_flat", c
