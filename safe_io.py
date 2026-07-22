@@ -39,6 +39,28 @@ def atomic_write_json(path: str, obj, *, indent: int = 2) -> None:
         raise
 
 
+def atomic_write_text(path: str, text: str) -> None:
+    """text 를 path 에 원자적으로 기록 (temp→fsync→rename). 실패 시 원본 보존.
+
+    JSONL 처럼 JSON 이 아닌 텍스트 전체 재작성용. atomic_write_json 과 같은
+    보장을 준다 — 독자는 항상 옛/새 중 '완전한' 파일만 본다.
+    """
+    path = os.path.abspath(path)
+    d = os.path.dirname(path)
+    os.makedirs(d, exist_ok=True)
+    fd, tmp = tempfile.mkstemp(dir=d, suffix=".tmp")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            f.write(text)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp, path)
+    except BaseException:
+        with contextlib.suppress(OSError):
+            os.unlink(tmp)
+        raise
+
+
 class LockTimeout(RuntimeError):
     """제한 시간 내 파일 쓰기 락을 잡지 못함."""
 
