@@ -2,29 +2,16 @@
 
 import { useEffect, useMemo, useState } from 'react';
 import {
-  Activity,
   ArrowRight,
-  BarChart3,
   BookOpen,
   Bot,
-  Clock3,
   Database,
-  FileText,
-  Filter,
-  Globe,
   Layers3,
-  Link2,
-  MessageSquare,
-  Network,
-  PanelLeft,
   Play,
   Plus,
-  Radar,
   Search,
   Send,
   ShieldCheck,
-  Sparkles,
-  TrendingUp,
   Wifi,
 } from 'lucide-react';
 import {
@@ -202,7 +189,7 @@ function parseAllocationDraft(text: string): StrategyAllocation[] {
 function normalizeAllocations(rows: StrategyAllocation[]) {
   const total = rows.reduce((sum, row) => sum + row.weight, 0);
   if (total <= 0) return [];
-  return rows.map((row) => ({ ...row, weight: row.weight / total * 100 }));
+  return rows.map((row) => ({ ...row, weight: (row.weight / total) * 100 }));
 }
 
 function makeKnowledgeEntries(): KnowledgeEntry[] {
@@ -324,10 +311,6 @@ export default function HomePage() {
     setChatFeed((current) => [...current, userMessage, assistantReply]);
     setChatDraft('');
     setActiveSurface('chat');
-  };
-
-  const saveScenario = () => {
-    setRunStamp(`캔버스 반영 · ${new Date().toLocaleTimeString('ko-KR', { hour: '2-digit', minute: '2-digit' })}`);
   };
 
   return (
