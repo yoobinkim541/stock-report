@@ -1,0 +1,2 @@
+[tool.vercel]
+entrypoint = "portfolio_sync_server:app"
