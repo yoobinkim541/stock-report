@@ -190,7 +190,7 @@ def _tokens(text: str) -> set[str]:
 def list_pages(*, query: str = "", surface: str = "all", status: str = "all", limit: int = 20) -> list[dict]:
     limit = max(1, min(int(limit or 20), 400))
     try:
-        rows = shared_memory.list_records(limit=400)
+        rows = shared_memory.all_records()
     except Exception:
         rows = []
     pages = [row for row in rows if _is_wiki_record(row)]
@@ -213,14 +213,14 @@ def get_page(page_id: str) -> dict | None:
     page_id = _clean(page_id, 80)
     if not page_id:
         return None
-    for row in shared_memory.list_records(limit=400):
+    for row in shared_memory.all_records():
         if row.get("id") == page_id and _is_wiki_record(row):
             return _record_to_page(row)
     return None
 
 
 def stats() -> dict:
-    rows = [row for row in shared_memory.list_records(limit=400) if _is_wiki_record(row)]
+    rows = [row for row in shared_memory.all_records() if _is_wiki_record(row)]
     status_counts = Counter()
     kind_counts = Counter()
     surface_counts = Counter()

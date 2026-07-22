@@ -251,6 +251,19 @@ def list_records(limit: int = 50, offset: int = 0) -> list[dict]:
     return rows[offset: offset + limit]
 
 
+def all_records() -> list[dict]:
+    """전체 레코드를 createdAt 내림차순으로 반환한다. 창(window) 없음.
+
+    list_records() 는 limit/offset 페이지네이션 계약이라 최대 100 으로 클램프한다.
+    위키 같은 지식층은 '전수'가 필요하므로 이 함수를 쓴다. _read_jsonl 이 어차피
+    파일 전체를 읽으므로 추가 I/O 비용은 없다.
+    """
+    ensure_store()
+    rows = _read_jsonl(_paths()["events"])
+    rows.sort(key=lambda row: row.get("createdAt") or "", reverse=True)
+    return rows
+
+
 def delete_record(record_id: str) -> bool:
     ensure_store()
     record_id = str(record_id or "").strip()
