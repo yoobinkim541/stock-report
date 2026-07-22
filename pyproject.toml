@@ -1,2 +1,11 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "stock-report"
+version = "0.0.0"
+requires-python = ">=3.11"
+
 [tool.vercel]
 entrypoint = "portfolio_sync_server:app"
