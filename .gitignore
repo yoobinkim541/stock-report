@@ -42,6 +42,7 @@ env/
 
 # ── Claude 로컬 설정 ─────────────────────
 .claude/
+.superpowers/
 
 # ── 임시/작업 파일 ────────────────────────
 claude_continue_result.txt
@@ -62,6 +63,12 @@ reports/*
 ~/reports/
 data/shared-memory/*
 !data/shared-memory/.gitkeep
+
+# ── Node / Next.js 프론트 ─────────────────
+node_modules/
+.next/
+out/
+*.tsbuildinfo
 
 # ── IDE ─────────────────────────────────
 .vscode/
