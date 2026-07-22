@@ -62,9 +62,9 @@ export type ChartPoint = {
 
 export const pageMeta: Record<RouteKey, { kicker: string; title: string; subtitle: string }> = {
   home: {
-    kicker: 'control room',
-    title: '홈 대시보드',
-    subtitle: '시장, 포트폴리오, 위키, 전략, 리서치를 하나의 콘솔로 묶은 시작 화면입니다.',
+    kicker: 'landing',
+    title: 'React 랜딩 페이지',
+    subtitle: '메인은 Cloudflare 출입문이고, React는 가볍게 안내와 연결만 담당합니다.',
   },
   portfolio: {
     kicker: 'portfolio',
@@ -114,7 +114,7 @@ export const pageMeta: Record<RouteKey, { kicker: string; title: string; subtitl
 };
 
 export const navItems: Array<{ key: RouteKey; label: string; href: string }> = [
-  { key: 'home', label: '홈', href: '/' },
+  { key: 'home', label: '랜딩', href: '/' },
   { key: 'portfolio', label: '포트폴리오', href: '/portfolio' },
   { key: 'analysis', label: '종목 분석', href: '/analysis' },
   { key: 'charts', label: '차트 풀뷰', href: '/charts/fullview' },
