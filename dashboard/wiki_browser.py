@@ -376,6 +376,36 @@ def _extract_selected_page_id(event: Any) -> str:
     return ""
 
 
+def _wiki_stats() -> dict[str, Any]:
+    from agent_console import wiki
+
+    stats_fn = getattr(wiki, "stats", None)
+    if callable(stats_fn):
+        try:
+            return stats_fn()
+        except Exception:
+            pass
+    pages = []
+    try:
+        pages = wiki.list_pages(query="", surface="all", status="all", limit=400)
+    except Exception:
+        pages = []
+    counter = Counter()
+    kind_counter = Counter()
+    latest = None
+    for page in pages:
+        counter[str(page.get("status") or "draft")] += 1
+        kind_counter[str(page.get("kind") or "note")] += 1
+        if latest is None or str(page.get("updated_at") or page.get("created_at") or "") > str(latest.get("updated_at") or latest.get("created_at") or ""):
+            latest = page
+    return {
+        "total": len(pages),
+        "status_counts": dict(counter),
+        "kind_counts": dict(kind_counter),
+        "latest": latest or {},
+    }
+
+
 def render_wiki_tab(surface: str, pack: dict[str, Any] | None = None) -> None:
     import pandas as pd
     import streamlit as st
@@ -386,7 +416,7 @@ def render_wiki_tab(surface: str, pack: dict[str, Any] | None = None) -> None:
     st.markdown("##### AI 위키")
     st.caption("대화와 메모를 카드로 승격해 챗봇이 다시 읽는 지식층입니다.")
 
-    stats = wiki.stats()
+    stats = _wiki_stats()
     cols = st.columns(4)
     cols[0].metric("페이지", f"{stats.get('total', 0)}")
     cols[1].metric("초안", f"{stats.get('status_counts', {}).get('draft', 0)}")
@@ -458,116 +488,105 @@ def render_wiki_tab(surface: str, pack: dict[str, Any] | None = None) -> None:
                     btn1, btn2 = st.columns(2)
                     if btn1.button("불러오기", key=f"wiki_load_{page.get('id')}", width="stretch"):
                         st.session_state["agent_wiki_selected_page_id"] = page.get("id")
-                        st.rerun()
+                        st.toast("위키 페이지를 불러왔습니다.")
                     if btn2.button("삭제", key=f"wiki_drop_{page.get('id')}", width="stretch"):
                         if wiki.delete_page(page.get("id")):
                             st.session_state.pop("agent_wiki_selected_page_id", None)
-                            st.success("위키 페이지 삭제 완료")
+                            st.toast("위키 페이지 삭제 완료")
                             st.rerun()
         else:
-            st.info("조건에 맞는 페이지가 없습니다.")
+            st.info("필터에 맞는 위키가 없습니다.")
 
-    selected = browser.get("selected") or {}
-    related = browser.get("related") or []
     with center:
-        st.markdown("##### 페이지 미리보기")
-        if selected:
+        st.markdown("##### 선택 페이지")
+        selected = browser.get("selected") or {}
+        if not selected:
+            st.info("왼쪽에서 페이지를 선택해 보세요.")
+        else:
             with st.container(border=True):
-                st.markdown(f"**{selected.get('title', '위키')}**")
-                st.caption(
-                    f"{selected.get('surface', 'wiki')} · {selected.get('kind', 'note')} · {selected.get('status', 'draft')}"
-                    f" · {selected.get('updated_at') or selected.get('created_at') or '—'}"
-                )
+                st.markdown(f"**{selected.get('title', '위키 페이지')}**")
+                st.caption(f"{selected.get('surface', 'wiki')} · {selected.get('kind', 'note')} · {selected.get('status', 'draft')}")
                 if selected.get("summary"):
                     st.write(selected["summary"])
                 if selected.get("body"):
-                    st.markdown(selected["body"])
-                if selected.get("source_refs"):
-                    st.markdown("###### 원문 근거")
-                    st.code("\n".join(selected["source_refs"]), language="text")
+                    st.markdown("##### 본문")
+                    st.write(selected["body"])
                 if selected.get("tags"):
-                    st.markdown("###### 태그")
-                    st.caption(" · ".join(selected["tags"]))
-                if selected.get("source"):
-                    st.markdown("###### 메타데이터")
-                    st.json(selected["source"])
-
-            st.markdown("##### 편집")
-            with st.form("agent_wiki_editor", clear_on_submit=False):
-                title = st.text_input("제목", value=selected.get("title") or st.session_state.get("agent_wiki_title", ""))
-                kind_options = ["playbook", "decision", "risk", "concept", "note"]
-                kind = st.selectbox(
-                    "종류",
-                    kind_options,
-                    index=kind_options.index(selected.get("kind", "playbook"))
-                    if selected.get("kind", "playbook") in kind_options else 0,
-                )
-                status = st.selectbox(
-                    "상태",
-                    list(VALID_STATUSES),
-                    index=list(VALID_STATUSES).index(selected.get("status", "draft"))
-                    if selected.get("status", "draft") in VALID_STATUSES else 0,
-                )
-                tags = st.text_input("태그", value=", ".join(selected.get("tags", [])))
-                summary = st.text_area("요약", value=selected.get("summary", ""), height=120)
-                body = st.text_area("본문", value=selected.get("body", ""), height=180)
-                source_refs = st.text_input("source refs", value=", ".join(selected.get("source_refs", [])))
-                if st.form_submit_button("저장", type="primary", width="stretch"):
-                    saved = wiki.upsert_page(
-                        {
-                            "id": selected.get("id"),
-                            "title": title,
-                            "surface": surface_filter if surface_filter != "all" else surface,
-                            "kind": kind,
-                            "status": status,
-                            "tags": [item.strip() for item in tags.replace(";", ",").split(",") if item.strip()],
-                            "summary": summary,
-                            "body": body,
-                            "source_refs": [item.strip() for item in source_refs.replace(";", ",").split(",") if item.strip()],
-                            "confidence": selected.get("confidence", 0.7),
-                        }
-                    )
-                    st.session_state["agent_wiki_selected_page_id"] = saved.get("id")
-                    st.success("위키 페이지를 저장했습니다.")
-                    st.rerun()
-        else:
-            st.info("선택된 위키 페이지가 없습니다.")
+                    st.caption("태그: " + " · ".join(selected["tags"]))
+                if selected.get("source_refs"):
+                    st.caption("source refs: " + ", ".join(selected["source_refs"]))
+                related = browser.get("related") or []
+                if related:
+                    st.markdown("##### 관련 페이지")
+                    for page in related[:4]:
+                        st.markdown(f"- {page.get('title', '위키')} · {page.get('status', 'draft')} · {page.get('surface', 'wiki')}")
 
     with right:
-        st.markdown("##### 관련 문서")
-        if related:
-            for page in related[:6]:
-                with st.container(border=True):
-                    st.markdown(f"**{page.get('title', '위키')}**")
-                    st.caption(f"{page.get('surface', 'wiki')} · {page.get('kind', 'note')} · {page.get('status', 'draft')}")
-                    if page.get("summary"):
-                        st.caption(str(page["summary"])[:180])
-                    if page.get("tags"):
-                        st.caption(" · ".join(page["tags"][:5]))
-        else:
-            st.caption("관련 문서가 없습니다.")
+        st.markdown("##### 편집기")
+        selected_page = wiki.get_page(st.session_state.get("agent_wiki_selected_page_id", ""))
+        default_page = selected_page or {"title": query[:80] or "새 위키 페이지", "surface": surface if surface != "all" else "market", "kind": "note", "status": "draft", "tags": [], "summary": "", "body": "", "source_refs": [], "confidence": 0.7}
+        with st.form("wiki_editor", clear_on_submit=False):
+            title = st.text_input("제목", value=default_page.get("title", ""))
+            editor_surface = st.selectbox(
+                "surface",
+                SURFACE_OPTIONS[1:],
+                index=max(0, SURFACE_OPTIONS[1:].index(default_page.get("surface", "market"))
+                      if default_page.get("surface", "market") in SURFACE_OPTIONS[1:] else 0),
+                key="wiki_editor_surface",
+            )
+            kind = st.selectbox(
+                "kind",
+                KIND_OPTIONS[1:],
+                index=max(0, KIND_OPTIONS[1:].index(default_page.get("kind", "note"))
+                      if default_page.get("kind", "note") in KIND_OPTIONS[1:] else 0),
+                key="wiki_editor_kind",
+            )
+            editor_status = st.selectbox(
+                "status",
+                ["draft", "reviewed", "stable", "archived"],
+                index=max(0, ["draft", "reviewed", "stable", "archived"].index(default_page.get("status", "draft"))
+                      if default_page.get("status", "draft") in ["draft", "reviewed", "stable", "archived"] else 0),
+                key="wiki_editor_status",
+            )
+            tags = st.text_input("tags", value=", ".join(default_page.get("tags", [])))
+            summary = st.text_area("요약", value=default_page.get("summary", ""), height=130)
+            body = st.text_area("본문", value=default_page.get("body", ""), height=220)
+            source_refs = st.text_input("source refs", value=", ".join(default_page.get("source_refs", [])))
+            if st.form_submit_button("위키 저장", type="primary", width="stretch"):
+                saved = wiki.upsert_page(
+                    {
+                        "id": default_page.get("id"),
+                        "title": title,
+                        "surface": editor_surface,
+                        "kind": kind,
+                        "status": editor_status,
+                        "tags": [item.strip() for item in tags.replace(";", ",").split(",") if item.strip()],
+                        "summary": summary,
+                        "body": body,
+                        "source_refs": [item.strip() for item in source_refs.replace(";", ",").split(",") if item.strip()],
+                        "confidence": default_page.get("confidence", 0.7),
+                    }
+                )
+                st.session_state["agent_wiki_selected_page_id"] = saved.get("id")
+                st.success("위키 페이지를 저장했습니다.")
+                st.rerun()
 
-        st.markdown("##### 현재 대화 승격")
-        chat_rows = []
-        if pack and isinstance(pack, dict):
-            chat_rows = pack.get("chat_rows") or []
-        if not chat_rows:
-            from streamlit import session_state as _session_state
-            chat_rows = _session_state.get("agent_chat_messages_auto", [])
-        exchange = _last_chat_exchange(list(chat_rows or []))
+        st.markdown("##### 최근 대화에서 승격")
+        chat_rows = st.session_state.get("agent_chat_messages_auto", [])
+        exchange = _last_chat_exchange(chat_rows)
         if exchange:
             st.markdown(f"**Q.** {exchange['question']}")
             st.markdown(f"**A.** {exchange['answer']}")
             capture_col, reset_col = st.columns(2)
-            if capture_col.button("이 대화를 위키로", type="primary", width="stretch", key=f"wiki_capture_{exchange['id']}"):
+            if capture_col.button("이 대화를 위키로", type="primary", width="stretch"):
                 saved = wiki.capture_from_chat(
                     exchange["question"],
                     exchange["answer"],
-                    surface=surface_filter if surface_filter != "all" else surface,
+                    surface=surface,
                     title=exchange["question"],
                     status="draft",
                     kind="playbook",
-                    tags=["conversation", surface_filter if surface_filter != "all" else surface],
+                    tags=["conversation", surface],
                     source_refs=[f"conversation:{exchange['id']}"],
                 )
                 st.session_state["agent_wiki_selected_page_id"] = saved.get("id")
@@ -580,7 +599,7 @@ def render_wiki_tab(surface: str, pack: dict[str, Any] | None = None) -> None:
             st.caption("현재 대화 기록이 없어 승격할 항목이 없습니다.")
 
         with st.expander("위키가 챗봇에 들어가는 방식", expanded=False):
-            section = wiki.build_context_section(query=query or selected.get("title", ""), surface=surface_filter if surface_filter != "all" else surface, limit=4)
+            section = wiki.build_context_section(query=query or selected.get("title", ""), surface=surface, limit=4)
             if section:
                 st.code(section, language="text")
             else:
