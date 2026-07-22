@@ -15,7 +15,7 @@ import {
   Sparkles,
   TrendingUp,
 } from 'lucide-react';
-import { navItems, sidebarStats, sidebarWatchlist } from '../lib/dashboard-data';
+import { navItems, pageMeta, sidebarStats, sidebarWatchlist } from '../lib/dashboard-data';
 
 type ShellProps = {
   children: ReactNode;
@@ -35,6 +35,8 @@ const iconMap = {
 
 export function AppShell({ children }: ShellProps) {
   const pathname = usePathname();
+  const activeItem = navItems.find((item) => pathname === item.href || (item.href !== '/' && pathname.startsWith(item.href))) ?? navItems[0];
+  const meta = pageMeta[activeItem.key];
 
   return (
     <div className="shell">
@@ -113,7 +115,21 @@ export function AppShell({ children }: ShellProps) {
         </section>
       </aside>
 
-      <main className="content">{children}</main>
+      <main className="content">
+        <header className="page-top">
+          <div>
+            <div className="page-kicker">stock-report / {meta.kicker}</div>
+            <h2>{meta.title}</h2>
+            <p>{meta.subtitle}</p>
+          </div>
+          <div className="page-actions">
+            <span className="status-chip teal">market data</span>
+            <span className="status-chip violet">World Memory</span>
+            <span className="status-chip amber">graph layer</span>
+          </div>
+        </header>
+        {children}
+      </main>
     </div>
   );
 }
