@@ -217,3 +217,135 @@ def get_page(page_id: str) -> dict | None:
         if row.get("id") == page_id and _is_wiki_record(row):
             return _record_to_page(row)
     return None
+
+
+def stats() -> dict:
+    rows = [row for row in shared_memory.list_records(limit=400) if _is_wiki_record(row)]
+    status_counts = Counter()
+    kind_counts = Counter()
+    surface_counts = Counter()
+    latest: dict | None = None
+    for row in rows:
+        page = _record_to_page(row)
+        status_counts[page.get("status", "draft")] += 1
+        kind_counts[page.get("kind", "note")] += 1
+        surface_counts[page.get("surface", WIKI_SURFACE)] += 1
+        if not latest:
+            latest = page
+            continue
+        latest_at = str(latest.get("updated_at") or latest.get("created_at") or "")
+        page_at = str(page.get("updated_at") or page.get("created_at") or "")
+        if page_at > latest_at:
+            latest = page
+    return {
+        "total": len(rows),
+        "status_counts": dict(status_counts),
+        "kind_counts": dict(kind_counts),
+        "surface_counts": dict(surface_counts),
+        "latest": latest or {},
+    }
+
+
+def upsert_page(page: dict) -> dict:
+    page = dict(page or {})
+    title = _clean(page.get("title") or "위키 페이지", 160)
+    surface = _clean(page.get("surface") or WIKI_SURFACE, 60).lower() or WIKI_SURFACE
+    kind = _clean(page.get("kind") or "note", 40).lower()
+    if kind not in VALID_KINDS:
+        kind = "note"
+    status = _clean(page.get("status") or "draft", 24).lower()
+    if status not in VALID_STATUSES:
+        status = "draft"
+    page_id = _clean(page.get("id") or _page_id(title, surface, kind), 80)
+
+    existing = get_page(page_id) or {}
+    created_at = _clean(existing.get("created_at") or page.get("created_at") or _now(), 80)
+    updated_at = _clean(page.get("updated_at") or _now(), 80)
+    tags = _dedupe_texts([*([WIKI_TAG, surface, kind, status]), *(page.get("tags") or [])], limit=20, item_limit=60)
+    record = {
+        "id": page_id,
+        "title": title,
+        "summary": _clean(page.get("summary") or "", 2400),
+        "body": _clean(page.get("body") or "", 6000),
+        "tags": tags,
+        "artifacts": _dedupe_texts(page.get("source_refs") or [], limit=12, item_limit=120),
+        "messages": page.get("messages") or [],
+        "decisions": _dedupe_texts(page.get("decisions") or [], limit=8, item_limit=280),
+        "openQuestions": _dedupe_texts(page.get("openQuestions") or [], limit=8, item_limit=280),
+        "confidence": float(page.get("confidence") or existing.get("confidence") or 0.5),
+        "createdAt": created_at,
+        "updatedAt": updated_at,
+        "kind": kind,
+        "source": {
+            "surface": surface,
+            "screen": surface,
+            "provider": "codex-cli",
+            "providerLabel": "Codex CLI",
+            "writer": "codex-cli",
+        },
+    }
+    if existing and existing.get("id"):
+        shared_memory.delete_record(page_id)
+    saved = shared_memory.append_record(record)
+    return _record_to_page(saved)
+
+
+def delete_page(page_id: str) -> bool:
+    page_id = _clean(page_id, 80)
+    if not page_id:
+        return False
+    return shared_memory.delete_record(page_id)
+
+
+def capture_from_chat(question: str, answer: str, *, surface: str = WIKI_SURFACE,
+                      title: str | None = None, status: str = "draft",
+                      kind: str = "playbook", tags: list[str] | None = None,
+                      source_refs: list[str] | None = None,
+                      confidence: float = 0.7) -> dict:
+    title = _clean(title or question or "대화 위키", 160)
+    body = "\n\n".join(
+        part for part in [
+            f"Q. {_clean(question, 2400)}" if question else "",
+            f"A. {_clean(answer, 6000)}" if answer else "",
+        ]
+        if part
+    )
+    return upsert_page(
+        {
+            "title": title,
+            "surface": surface,
+            "kind": kind if kind in VALID_KINDS else "playbook",
+            "status": status if status in VALID_STATUSES else "draft",
+            "tags": tags or ["conversation"],
+            "summary": _clean(answer or question or title, 2400),
+            "body": body,
+            "source_refs": source_refs or [],
+            "confidence": confidence,
+        }
+    )
+
+
+def build_context_section(*, query: str = "", surface: str = WIKI_SURFACE, limit: int = 4,
+                          status: str = "all") -> str:
+    pages = list_pages(query=query, surface=surface, status=status, limit=limit)
+    if not pages:
+        return ""
+    lines = ["[AI 위키]"]
+    for idx, page in enumerate(pages, start=1):
+        header = f"{idx}. {page.get('title', '위키 페이지')}"
+        meta = " · ".join(
+            item for item in [
+                page.get("surface", WIKI_SURFACE),
+                page.get("kind", "note"),
+                page.get("status", "draft"),
+            ]
+            if item
+        )
+        lines.append(f"{header} ({meta})")
+        if page.get("summary"):
+            lines.append(f"- 요약: {page['summary']}")
+        if page.get("body"):
+            lines.append(f"- 본문: {page['body'][:800]}")
+        if page.get("tags"):
+            lines.append(f"- 태그: {', '.join(page['tags'][:8])}")
+    return "\n".join(lines).strip()
