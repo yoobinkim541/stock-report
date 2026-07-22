@@ -1023,3 +1023,96 @@ def _inject_codex_css():
           right:-1px;
           top:-3px;
           width:7px;
+          height:7px;
+          border-top:1px solid rgba(16,185,129,.9);
+          border-right:1px solid rgba(16,185,129,.9);
+          transform:rotate(45deg);
+        }
+        .widget-card-head {
+          padding:10px 11px;
+          margin:2px 0 10px;
+          border:1px solid rgba(148,163,184,.18);
+          border-radius:8px;
+          background:rgba(15,23,42,.34);
+        }
+        .widget-card-head span {
+          display:block;
+          color:rgba(148,163,184,.88);
+          font-size:.75rem;
+          margin-bottom:2px;
+        }
+        .widget-card-head b {
+          display:block;
+          color:rgba(241,245,249,.98);
+          font-size:.98rem;
+        }
+        .rule-matrix {
+          display:grid;
+          grid-template-columns:repeat(2,minmax(0,1fr));
+          gap:8px;
+          margin:10px 0;
+        }
+        .rule-matrix div {
+          border:1px solid rgba(148,163,184,.16);
+          border-radius:7px;
+          padding:9px 10px;
+          background:rgba(2,6,23,.24);
+          min-height:58px;
+        }
+        .rule-matrix span {
+          display:block;
+          color:rgba(148,163,184,.82);
+          font-size:.73rem;
+          margin-bottom:3px;
+        }
+        .rule-matrix b {
+          display:block;
+          color:rgba(226,232,240,.96);
+          font-size:.9rem;
+          overflow-wrap:anywhere;
+        }
+        .scenario-row {
+          display:flex;
+          align-items:center;
+          justify-content:space-between;
+          gap:10px;
+          border:1px solid rgba(148,163,184,.16);
+          border-radius:8px;
+          background:rgba(2,6,23,.22);
+          padding:8px 9px;
+          margin-bottom:7px;
+        }
+        .scenario-row b {
+          color:rgba(226,232,240,.96);
+          font-size:.82rem;
+          overflow-wrap:anywhere;
+        }
+        .scenario-row span {
+          color:rgba(148,163,184,.78);
+          font-size:.72rem;
+          white-space:nowrap;
+        }
+        @media (max-width: 760px) {
+          .widget-flow {
+            grid-template-columns:1fr;
+          }
+          .widget-flow i {
+            height:14px;
+            width:1px;
+            margin:0 auto;
+            background:linear-gradient(180deg,rgba(16,185,129,.20),rgba(16,185,129,.82));
+          }
+          .widget-flow i:after {
+            right:-3px;
+            top:auto;
+            bottom:-1px;
+            transform:rotate(135deg);
+          }
+          .widget-flow span {
+            text-align:left;
+          }
+        }
+        </style>
+        """,
+        unsafe_allow_html=True,
+    )
