@@ -59,6 +59,54 @@ export type ChartPoint = {
   strategy: number;
 };
 
+export const pageMeta: Record<RouteKey, { kicker: string; title: string; subtitle: string }> = {
+  home: {
+    kicker: 'control room',
+    title: '홈 대시보드',
+    subtitle: '시장, 포트폴리오, 위키, 전략, 리서치를 하나의 콘솔로 묶은 시작 화면입니다.',
+  },
+  portfolio: {
+    kicker: 'portfolio',
+    title: '포트폴리오',
+    subtitle: '보유, 현금, 손익, 레버리지를 같은 기준으로 읽는 요약 화면입니다.',
+  },
+  analysis: {
+    kicker: 'analysis',
+    title: '종목 분석',
+    subtitle: '개별 종목의 논리와 리스크를 핵심 신호 위주로 정리하는 화면입니다.',
+  },
+  charts: {
+    kicker: 'chart room',
+    title: '차트 풀뷰',
+    subtitle: '가격과 보조지표를 크게 펼쳐 추세와 과열을 함께 보는 화면입니다.',
+  },
+  'market-calendar': {
+    kicker: 'calendar',
+    title: '시장-캘린더',
+    subtitle: '실적, 지표, 중앙은행 일정과 크레딧 이벤트를 먼저 잡는 화면입니다.',
+  },
+  'mock-invest': {
+    kicker: 'paper trading',
+    title: '모의투자',
+    subtitle: '가상 체결과 백테스트를 손실 한도 안에서 시험하는 화면입니다.',
+  },
+  research: {
+    kicker: 'research',
+    title: '리서치',
+    subtitle: '뉴스, 텔레그램, 리포트 원문을 승격 대기열로 모아두는 화면입니다.',
+  },
+  'ai-console': {
+    kicker: 'ai console',
+    title: 'AI 콘솔',
+    subtitle: '질문을 넣으면 문맥과 위키를 읽고 자동으로 답을 조립하는 대화 공간입니다.',
+  },
+  'ai-wiki': {
+    kicker: 'ai wiki',
+    title: 'AI 위키',
+    subtitle: 'World Memory와 승격된 판단을 그래프로 다시 읽는 정리층입니다.',
+  },
+};
+
 export const navItems: Array<{ key: RouteKey; label: string; href: string }> = [
   { key: 'home', label: '홈', href: '/' },
   { key: 'portfolio', label: '포트폴리오', href: '/portfolio' },
