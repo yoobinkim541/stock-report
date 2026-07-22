@@ -7,7 +7,8 @@ export type RouteKey =
   | 'mock-invest'
   | 'research'
   | 'ai-console'
-  | 'ai-wiki';
+  | 'ai-wiki'
+  | 'bridge';
 
 export type TickerRow = {
   symbol: string;
@@ -105,6 +106,11 @@ export const pageMeta: Record<RouteKey, { kicker: string; title: string; subtitl
     title: 'AI 위키',
     subtitle: 'World Memory와 승격된 판단을 그래프로 다시 읽는 정리층입니다.',
   },
+  bridge: {
+    kicker: 'bridge',
+    title: '파이썬 출입문',
+    subtitle: '터널 주소가 바뀌어도 여기 한 곳만 바꾸면 되는 고정 진입점입니다.',
+  },
 };
 
 export const navItems: Array<{ key: RouteKey; label: string; href: string }> = [
@@ -117,6 +123,7 @@ export const navItems: Array<{ key: RouteKey; label: string; href: string }> = [
   { key: 'research', label: '리서치', href: '/research' },
   { key: 'ai-console', label: 'AI 콘솔', href: '/ai-console' },
   { key: 'ai-wiki', label: 'AI 위키', href: '/ai-wiki' },
+  { key: 'bridge', label: '파이썬 출입문', href: '/bridge' },
 ];
 
 export const sidebarStats = [
