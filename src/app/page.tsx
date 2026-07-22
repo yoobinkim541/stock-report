@@ -1,277 +1,233 @@
-import { ArrowRight, ExternalLink, Layers3, PlugZap, ShieldCheck, Sparkles } from 'lucide-react';
+import {
+  ArrowRight,
+  BarChart3,
+  BookOpen,
+  Bot,
+  Building2,
+  ExternalLink,
+  FlaskConical,
+  Home,
+  LineChart,
+  Lock,
+  PieChart,
+  ServerCog,
+  ShieldCheck,
+  Wallet,
+} from 'lucide-react';
 
 import { gatewayUrl } from '../lib/gateway';
 
-const cards = [
+const screens = [
+  { icon: Home, title: '홈', body: '오늘의 시장 요약과 먼저 확인할 항목을 모아 봅니다.' },
+  { icon: Wallet, title: '포트폴리오', body: '보유 구성과 비중, 리스크 노출을 한 화면에서 점검합니다.' },
+  { icon: Building2, title: '종목 분석', body: '가치평가·재무·수급 지표를 종목 단위로 묶어 보여줍니다.' },
+  { icon: LineChart, title: '차트', body: '추세, 이동평균, 지지·저항 구간을 확인합니다.' },
+  { icon: BarChart3, title: '시장', body: '지수와 섹터 흐름, 주요 일정을 추적합니다.' },
+  { icon: FlaskConical, title: '모의투자', body: '실제 주문 없이 전략을 시뮬레이션합니다.' },
+  { icon: PieChart, title: '리서치', body: '리포트와 수집한 원문을 아카이브해 다시 찾습니다.' },
+  { icon: Bot, title: 'AI 콘솔', body: '대화로 분석을 요청하고 결과를 바로 확인합니다.' },
+  { icon: BookOpen, title: 'AI 위키', body: '대화에서 얻은 판단을 지식 카드로 승격해 재사용합니다.' },
+];
+
+const highlights = [
   {
-    title: 'React',
-    body: '가벼운 랜딩, 상태 요약, 진입 버튼만 담당합니다.',
+    title: '자동매매 0 · 하드블록',
+    body: '주문 실행 경로를 아예 두지 않았습니다. 연동은 조회 전용이고, 자동 집행은 설계 단계에서 막혀 있습니다.',
   },
   {
-    title: 'Python',
-    body: '시장 수집, OCR, 메모리 승격, 무거운 워크플로우를 처리합니다.',
+    title: '동시성 · 데이터 정합성',
+    body: '상태 파일은 원자적 쓰기와 락으로 다루고, 기록은 정해진 단일 writer 를 통해서만 남깁니다.',
   },
   {
-    title: 'Bridge',
-    body: '터널 주소가 바뀌어도 이 한 군데만 바꾸면 됩니다.',
+    title: '백테스트 OOS 게이트',
+    body: '표본 외 검증을 통과하지 못한 전략은 반영하지 않습니다. 결과가 나쁘면 그대로 NO-GO 로 남깁니다.',
   },
+  {
+    title: '운영 신뢰성',
+    body: '워치독이 프로세스 생존뿐 아니라 코드 변경까지 감지해, 낡은 프로세스가 조용히 남는 상황을 막습니다.',
+  },
+];
+
+const stats = [
+  { num: '136', label: '테스트 파일' },
+  { num: '41', label: '크론 스크립트' },
+  { num: '24', label: '데이터 프로바이더' },
+  { num: '9', label: '대시보드 화면' },
+];
+
+const stack = [
+  'Python 3.11',
+  'Streamlit',
+  'Next.js 14',
+  'TypeScript',
+  'Cloudflare Tunnel',
+  'Vercel',
+  'Oracle Cloud',
 ];
 
 export default function HomePage() {
   return (
-    <main
-      style={{
-        minHeight: '100vh',
-        padding: '28px',
-        background:
-          'radial-gradient(circle at top left, rgba(52, 215, 201, 0.12), transparent 24%), radial-gradient(circle at 85% 10%, rgba(167, 139, 250, 0.12), transparent 20%), linear-gradient(180deg, #050810 0%, #070b14 52%, #090d18 100%)',
-      }}
-    >
-      <div style={{ maxWidth: 1240, margin: '0 auto', display: 'grid', gap: 18 }}>
-        <header
-          style={{
-            display: 'flex',
-            alignItems: 'center',
-            justifyContent: 'space-between',
-            gap: 16,
-            padding: '10px 4px',
-          }}
-        >
-          <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
-            <div
-              style={{
-                width: 38,
-                height: 38,
-                borderRadius: 12,
-                display: 'grid',
-                placeItems: 'center',
-                background: 'rgba(52, 215, 201, 0.12)',
-                border: '1px solid rgba(52, 215, 201, 0.18)',
-              }}
-            >
-              <Sparkles size={18} color="var(--teal)" />
-            </div>
-            <div>
-              <div style={{ fontSize: 12, color: 'var(--muted)', letterSpacing: '0.08em', textTransform: 'uppercase' }}>
-                stock-report
-              </div>
-              <div style={{ fontSize: 14, color: 'var(--text)' }}>React landing gateway</div>
-            </div>
-          </div>
-          <span className="status-chip teal">gateway ready</span>
-        </header>
-
-        <section
-          style={{
-            display: 'grid',
-            gridTemplateColumns: 'minmax(0, 1.15fr) minmax(320px, 0.85fr)',
-            gap: 18,
-            alignItems: 'stretch',
-          }}
-        >
-          <div
-            style={{
-              padding: 28,
-              borderRadius: 28,
-              border: '1px solid rgba(148, 163, 184, 0.14)',
-              background: 'linear-gradient(180deg, rgba(14, 20, 34, 0.92), rgba(10, 15, 26, 0.84))',
-              boxShadow: '0 30px 80px rgba(0, 0, 0, 0.32)',
-              display: 'grid',
-              gap: 18,
-            }}
-          >
-            <div>
-              <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', marginBottom: 14 }}>
-                <span className="status-chip teal">React only front door</span>
-                <span className="status-chip violet">Cloudflare tunnel</span>
-                <span className="status-chip amber">Python app</span>
-              </div>
-              <h1 style={{ margin: 0, fontSize: 52, lineHeight: 1.02, letterSpacing: 0 }}>
-                React는 입구만 맡고,
-                <br />
-                본체는 터널로 바로 엽니다.
-              </h1>
-              <p style={{ margin: '16px 0 0', maxWidth: 760, fontSize: 17, lineHeight: 1.7, color: 'var(--muted)' }}>
-                지금 이 프론트는 무거운 대시보드가 아니라 고정 랜딩 페이지예요. 시장 자료, 포트폴리오, 위키,
-                수집과 백필은 Python 앱이 처리하고, React는 가장 안정적인 출입문만 제공합니다.
-              </p>
-            </div>
-
-            <div style={{ display: 'flex', flexWrap: 'wrap', gap: 12 }}>
-              <a
-                href={gatewayUrl}
-                target="_blank"
-                rel="noreferrer"
-                className="status-chip teal"
-                style={{
-                  display: 'inline-flex',
-                  alignItems: 'center',
-                  gap: 8,
-                  padding: '14px 18px',
-                  fontSize: 15,
-                  fontWeight: 700,
-                }}
-              >
-                Python 앱 열기
-                <ExternalLink size={15} />
-              </a>
-              <a
-                href="/bridge"
-                className="status-chip violet"
-                style={{
-                  display: 'inline-flex',
-                  alignItems: 'center',
-                  gap: 8,
-                  padding: '14px 18px',
-                  fontSize: 15,
-                  fontWeight: 700,
-                }}
-              >
-                출입문 설정
-                <ArrowRight size={15} />
-              </a>
-            </div>
-
-            <div
-              style={{
-                display: 'grid',
-                gridTemplateColumns: 'repeat(3, minmax(0, 1fr))',
-                gap: 12,
-                marginTop: 4,
-              }}
-            >
-              {[
-                ['최근 이벤트', '40건'],
-                ['누적 기억', '50건'],
-                ['모델 파일', '4개'],
-              ].map(([label, value]) => (
-                <div
-                  key={label}
-                  style={{
-                    padding: 16,
-                    borderRadius: 18,
-                    border: '1px solid rgba(148, 163, 184, 0.12)',
-                    background: 'rgba(7, 11, 20, 0.66)',
-                  }}
-                >
-                  <div style={{ fontSize: 12, color: 'var(--muted)', marginBottom: 6 }}>{label}</div>
-                  <div style={{ fontSize: 20, fontWeight: 700 }}>{value}</div>
-                </div>
-              ))}
-            </div>
-          </div>
-
-          <div
-            style={{
-              padding: 24,
-              borderRadius: 28,
-              border: '1px solid rgba(148, 163, 184, 0.14)',
-              background: 'rgba(14, 20, 34, 0.76)',
-              boxShadow: '0 24px 72px rgba(0, 0, 0, 0.26)',
-              display: 'grid',
-              gap: 16,
-            }}
-          >
-            <div className="report-status">
-              <PlugZap size={14} />
-              fixed doorway
-            </div>
-            <div>
-              <h2 style={{ margin: '6px 0 8px', fontSize: 26 }}>한 번만 연결하면 됩니다</h2>
-              <p style={{ margin: 0, color: 'var(--muted)', lineHeight: 1.7 }}>
-                주소가 바뀌는 Cloudflare 터널은 React 쪽에서 한 줄만 바꾸면 되고, 나머지는 그대로 둡니다.
-                그래서 이 페이지는 메뉴가 아니라 실제 출입문 역할만 합니다.
-              </p>
-            </div>
-
-            <div style={{ display: 'grid', gap: 10 }}>
-              <div
-                style={{
-                  padding: 14,
-                  borderRadius: 18,
-                  background: 'rgba(7, 11, 20, 0.7)',
-                  border: '1px solid rgba(52, 215, 201, 0.14)',
-                }}
-              >
-                <div style={{ color: 'var(--muted)', fontSize: 12, marginBottom: 4 }}>gateway url</div>
-                <div style={{ fontSize: 14, wordBreak: 'break-all' }}>{gatewayUrl}</div>
-              </div>
-
-              <div
-                style={{
-                  padding: 14,
-                  borderRadius: 18,
-                  background: 'rgba(7, 11, 20, 0.7)',
-                  border: '1px solid rgba(167, 139, 250, 0.14)',
-                }}
-              >
-                <div style={{ color: 'var(--muted)', fontSize: 12, marginBottom: 4 }}>role</div>
-                <div style={{ fontSize: 14 }}>React = 안내 / Python = 실행</div>
-              </div>
-            </div>
-          </div>
-        </section>
-
-        <section
-          style={{
-            display: 'grid',
-            gridTemplateColumns: 'repeat(3, minmax(0, 1fr))',
-            gap: 14,
-          }}
-        >
-          {cards.map((card) => (
-            <article
-              key={card.title}
-              style={{
-                padding: 18,
-                borderRadius: 22,
-                border: '1px solid rgba(148, 163, 184, 0.12)',
-                background: 'rgba(14, 20, 34, 0.72)',
-                minHeight: 132,
-              }}
-            >
-              <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 12 }}>
-                <div
-                  style={{
-                    width: 30,
-                    height: 30,
-                    borderRadius: 10,
-                    display: 'grid',
-                    placeItems: 'center',
-                    background: 'rgba(52, 215, 201, 0.08)',
-                    border: '1px solid rgba(52, 215, 201, 0.12)',
-                  }}
-                >
-                  <Layers3 size={15} color="var(--teal)" />
-                </div>
-                <strong style={{ fontSize: 16 }}>{card.title}</strong>
-              </div>
-              <p style={{ margin: 0, color: 'var(--muted)', lineHeight: 1.65 }}>{card.body}</p>
-            </article>
-          ))}
-        </section>
-
-        <section
-          style={{
-            display: 'flex',
-            flexWrap: 'wrap',
-            gap: 10,
-            alignItems: 'center',
-            justifyContent: 'space-between',
-            padding: '16px 18px',
-            borderRadius: 20,
-            border: '1px solid rgba(148, 163, 184, 0.12)',
-            background: 'rgba(7, 11, 20, 0.68)',
-          }}
-        >
-          <div style={{ display: 'flex', alignItems: 'center', gap: 10, color: 'var(--muted)' }}>
-            <ShieldCheck size={15} />
-            <span>React 쪽은 가볍게 유지하고, 무거운 기능은 Python 앱에서 계속 돌립니다.</span>
+    <main className="lp-page">
+      <div className="lp-wrap">
+        <nav className="lp-nav">
+          <div className="lp-card-title">
+            <ServerCog size={18} color="var(--teal)" />
+            Stock Report
           </div>
           <a href={gatewayUrl} target="_blank" rel="noreferrer" className="status-chip teal">
-            바로 열기
+            대시보드 열기
           </a>
+        </nav>
+
+        <header className="lp-hero">
+          <div className="lp-hero-copy">
+            <span className="lp-kicker">개인 투자 인텔리전스 터미널</span>
+            <h1 className="lp-title">
+              시장 수집부터 리스크 점검까지,
+              <br />
+              개인 서버에서 도는 투자 분석 터미널
+            </h1>
+            <p className="lp-lead">
+              데이터 수집·정제, 지표 계산, 백테스트, 리포트 생성까지 직접 만들어 한 대의 서버에서 운영합니다.
+              이 페이지는 그 터미널로 들어가는 입구이고, 실제 화면은 비밀번호 뒤에 있습니다.
+            </p>
+          </div>
+
+          <div className="lp-cta-row">
+            <a href={gatewayUrl} target="_blank" rel="noreferrer" className="lp-cta">
+              대시보드 열기
+              <ExternalLink size={16} />
+            </a>
+            <a href="/bridge" className="lp-cta-ghost">
+              출입문 설정
+              <ArrowRight size={16} />
+            </a>
+          </div>
+
+          <div className="lp-chips">
+            <span className="lp-chip">
+              <Lock size={11} /> 비밀번호 필요
+            </span>
+            <span className="lp-chip">개인 서버 구동</span>
+            <span className="lp-chip">표시 전용 · 주문 0</span>
+          </div>
+        </header>
+
+        <section className="lp-section">
+          <div className="lp-mock">
+            <div className="lp-mock-label">UI 예시 — 실제 데이터가 아닌 레이아웃 표현입니다</div>
+            <div className="lp-mock-body">
+              <div className="lp-mock-side">
+                <div className="lp-mock-line accent" />
+                <div className="lp-mock-line short" />
+                <div className="lp-mock-line" />
+                <div className="lp-mock-line short" />
+                <div className="lp-mock-line" />
+              </div>
+              <div className="lp-mock-main">
+                <div className="lp-mock-card">
+                  <div className="lp-mock-line short" />
+                  <svg className="lp-spark" viewBox="0 0 320 56" preserveAspectRatio="none" aria-hidden="true">
+                    <polyline
+                      points="0,44 40,38 80,41 120,26 160,30 200,18 240,23 280,12 320,16"
+                      fill="none"
+                      stroke="var(--teal)"
+                      strokeWidth="2"
+                    />
+                  </svg>
+                </div>
+                <div className="lp-mock-card">
+                  <div className="lp-mock-line" />
+                  <div className="lp-mock-line short" />
+                </div>
+              </div>
+            </div>
+          </div>
         </section>
+
+        <section className="lp-section">
+          <div className="lp-section-head">
+            <h2>무엇을 볼 수 있나</h2>
+            <p>대시보드는 9개 화면으로 나뉘어 있습니다.</p>
+          </div>
+          <div className="lp-grid-3">
+            {screens.map(({ icon: Icon, title, body }) => (
+              <article key={title} className="lp-card">
+                <div className="lp-card-title">
+                  <Icon size={16} color="var(--teal)" />
+                  {title}
+                </div>
+                <p className="lp-card-body">{body}</p>
+              </article>
+            ))}
+          </div>
+        </section>
+
+        <section className="lp-section">
+          <div className="lp-section-head">
+            <h2>어떻게 돌아가나</h2>
+            <p>무거운 처리는 개인 서버가 맡고, 바깥에는 입구만 노출합니다.</p>
+          </div>
+          <div className="lp-flow">
+            <div className="lp-flow-step">
+              <div className="lp-card-title">Oracle Cloud VM</div>
+              <p className="lp-card-body">Streamlit 대시보드, ML 파이프라인, 크론 작업이 상주합니다.</p>
+            </div>
+            <div className="lp-flow-arrow">
+              <ArrowRight size={18} />
+            </div>
+            <div className="lp-flow-step">
+              <div className="lp-card-title">Cloudflare Tunnel</div>
+              <p className="lp-card-body">서버를 직접 열지 않고 HTTPS 만 중계합니다.</p>
+            </div>
+            <div className="lp-flow-arrow">
+              <ArrowRight size={18} />
+            </div>
+            <div className="lp-flow-step">
+              <div className="lp-card-title">Vercel 현관</div>
+              <p className="lp-card-body">지금 보고 있는 이 페이지. 소개와 진입만 담당합니다.</p>
+            </div>
+          </div>
+          <div className="lp-stack">
+            {stack.map((item) => (
+              <span key={item} className="lp-chip">
+                {item}
+              </span>
+            ))}
+          </div>
+        </section>
+
+        <section className="lp-section">
+          <div className="lp-section-head">
+            <h2>설계에서 신경 쓴 것</h2>
+            <p>편의보다 안전과 재현성을 우선했습니다.</p>
+          </div>
+          <div className="lp-grid-3">
+            {highlights.map(({ title, body }) => (
+              <article key={title} className="lp-card">
+                <div className="lp-card-title">
+                  <ShieldCheck size={16} color="var(--violet)" />
+                  {title}
+                </div>
+                <p className="lp-card-body">{body}</p>
+              </article>
+            ))}
+          </div>
+          <div className="lp-stat-row">
+            {stats.map(({ num, label }) => (
+              <div key={label} className="lp-stat">
+                <span className="lp-stat-num">{num}</span>
+                <span className="lp-stat-label">{label}</span>
+              </div>
+            ))}
+          </div>
+        </section>
+
+        <footer className="lp-foot">
+          데이터와 모델은 개인 서버에서 구동되며 Cloudflare 는 HTTPS 만 중계합니다.
+          <br />
+          표시·정보용이며 매매 신호가 아닙니다. 투자 판단과 책임은 이용자 본인에게 있습니다.
+        </footer>
       </div>
     </main>
   );
