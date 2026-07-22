@@ -9,6 +9,7 @@ import {
   Bot,
   Clock3,
   Database,
+  ExternalLink,
   FileText,
   Layers3,
   Search,
@@ -31,6 +32,7 @@ const iconMap = {
   research: FileText,
   'ai-console': Bot,
   'ai-wiki': BookOpen,
+  bridge: ExternalLink,
 } as const;
 
 export function AppShell({ children }: ShellProps) {
