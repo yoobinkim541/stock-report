@@ -1,4 +1,3 @@
-import Link from 'next/link';
 import { ArrowRight, ExternalLink, PlugZap, ShieldCheck } from 'lucide-react';
 import { AppShell } from '../../components/app-shell';
 
@@ -61,20 +60,14 @@ export default function BridgePage() {
 
             <div style={{ display: 'grid', gap: 12 }}>
               {bridgeUrl ? (
-                <Link
-                  href={bridgeUrl}
-                  target="_blank"
-                  rel="noreferrer"
-                  className="highlight"
-                  style={{ display: 'block' }}
-                >
+                <a href={bridgeUrl} target="_blank" rel="noreferrer" className="highlight" style={{ display: 'block' }}>
                   <div className="highlight-top">
                     <strong>Python 프론트 열기</strong>
                     <ExternalLink size={14} />
                   </div>
                   <p>{bridgeUrl}</p>
                   <p>새 탭으로 열립니다.</p>
-                </Link>
+                </a>
               ) : (
                 <div className="highlight">
                   <div className="highlight-top">
