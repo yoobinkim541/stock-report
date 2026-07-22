@@ -6,9 +6,9 @@ import streamlit as st
 from agent_console import wiki
 
 
-SURFACE_OPTIONS = ["all", "market", "portfolio", "ticker", "paper", "lab", "wiki"]
+from dashboard.wiki_browser import KIND_OPTIONS, SURFACE_OPTIONS
+
 STATUS_OPTIONS = ["all", "draft", "reviewed", "stable", "archived"]
-KIND_OPTIONS = ["all", "note", "playbook", "decision", "risk", "concept"]
 
 
 def _safe_wiki_stats() -> dict:
