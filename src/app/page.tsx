@@ -1,6 +1,6 @@
 import { ArrowRight, ExternalLink, Layers3, PlugZap, ShieldCheck, Sparkles } from 'lucide-react';
 
-const gatewayUrl = 'https://growing-chester-concepts-cow.trycloudflare.com/';
+import { gatewayUrl } from '../lib/gateway';
 
 const cards = [
   {

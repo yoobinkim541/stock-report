@@ -2,8 +2,8 @@
 # cloudflared_watchdog.sh — 퀀트 터미널 quick 터널 유지 + URL 변경 시 Vercel 현관 자동 갱신.
 #
 # DASHBOARD_ENABLED=true 일 때만 기동(opt-in·기본 no-op). cloudflared 프로세스가
-# 죽으면 재시작 → 새 trycloudflare URL 확보 → dashboard/landing/index.html 의
-# 링크를 교체하고 git push → Vercel 가 자동 재배포(rootDirectory=dashboard/landing).
+# 죽으면 재시작 → 새 trycloudflare URL 확보 → src/lib/gateway.ts 의 상수를 교체하고
+# git push → Vercel(Next.js 앱)이 자동 재배포.
 # 그래서 Vercel 현관 주소는 항상 고정이고, 그 뒤 터널만 자동 추적된다(도메인 불요).
 #
 # ⚠️ pkill -f 금지(자기 cmdline 자기매치 함정) → cloudflared 종료는 PID 파일로만.
@@ -14,7 +14,7 @@ LOG="/tmp/cloudflared.log"
 LOCK="/tmp/cloudflared_watchdog.lock"
 PID_FILE="$HOME/.local/state/stock-report/cloudflared.pid"
 URL_FILE="$HOME/.cache/dashboard_tunnel_url.txt"
-LANDING="$PROJECT_DIR/dashboard/landing/index.html"
+LANDING="$PROJECT_DIR/src/lib/gateway.ts"
 mkdir -p "$(dirname "$PID_FILE")" "$(dirname "$URL_FILE")"
 
 # 동시 실행 방지
@@ -62,9 +62,9 @@ if [ "$NEW" != "$CUR" ]; then
     fi
     cd "$WT" || exit 1
     git fetch -q origin master && git reset -q --hard origin/master
-    sed -i -E "s#https://[a-z0-9-]+\.trycloudflare\.com#${NEW}#g" dashboard/landing/index.html
-    if ! git diff --quiet -- dashboard/landing/index.html 2>/dev/null; then
-        git add dashboard/landing/index.html
+    sed -i -E "s#https://[a-z0-9-]+\.trycloudflare\.com#${NEW}#g" src/lib/gateway.ts
+    if ! git diff --quiet -- src/lib/gateway.ts 2>/dev/null; then
+        git add src/lib/gateway.ts
         git commit -q -m "chore(dashboard): 터널 URL 자동 갱신 (${NEW})" && \
         git push -q origin HEAD:master && echo "  Vercel 현관 갱신 push 완료"
     fi

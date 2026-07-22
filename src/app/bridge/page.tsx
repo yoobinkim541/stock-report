@@ -1,7 +1,7 @@
 import { ArrowRight, ExternalLink, PlugZap, ShieldCheck } from 'lucide-react';
 import { AppShell } from '../../components/app-shell';
 
-const bridgeUrl = 'https://growing-chester-concepts-cow.trycloudflare.com/';
+import { gatewayUrl } from '../../lib/gateway';
 
 export default function BridgePage() {
   return (
@@ -59,12 +59,12 @@ export default function BridgePage() {
             </div>
 
             <div style={{ display: 'grid', gap: 12 }}>
-              <a href={bridgeUrl} target="_blank" rel="noreferrer" className="highlight" style={{ display: 'block' }}>
+              <a href={gatewayUrl} target="_blank" rel="noreferrer" className="highlight" style={{ display: 'block' }}>
                 <div className="highlight-top">
                   <strong>Python 앱 열기</strong>
                   <ExternalLink size={14} />
                 </div>
-                <p>{bridgeUrl}</p>
+                <p>{gatewayUrl}</p>
                 <p>새 탭으로 열립니다.</p>
               </a>
             </div>
