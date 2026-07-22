@@ -11,6 +11,40 @@ STATUS_OPTIONS = ["all", "draft", "reviewed", "stable", "archived"]
 KIND_OPTIONS = ["all", "note", "playbook", "decision", "risk", "concept"]
 
 
+def _safe_wiki_stats() -> dict:
+    stats_fn = getattr(wiki, "stats", None)
+    if callable(stats_fn):
+        try:
+            return stats_fn()
+        except Exception:
+            pass
+    pages = []
+    try:
+        pages = wiki.list_pages(query="", surface="all", status="all", limit=400)
+    except Exception:
+        pages = []
+    status_counts = {"draft": 0, "reviewed": 0, "stable": 0, "archived": 0}
+    kind_counts: dict[str, int] = {}
+    surface_counts: dict[str, int] = {}
+    latest: dict = {}
+    for page in pages:
+        status = str(page.get("status") or "draft")
+        status_counts[status] = status_counts.get(status, 0) + 1
+        kind = str(page.get("kind") or "note")
+        kind_counts[kind] = kind_counts.get(kind, 0) + 1
+        surface = str(page.get("surface") or "wiki")
+        surface_counts[surface] = surface_counts.get(surface, 0) + 1
+        if not latest or str(page.get("updated_at") or page.get("created_at") or "") > str(latest.get("updated_at") or latest.get("created_at") or ""):
+            latest = page
+    return {
+        "total": len(pages),
+        "status_counts": status_counts,
+        "kind_counts": kind_counts,
+        "surface_counts": surface_counts,
+        "latest": latest,
+    }
+
+
 def render():
     st.markdown(
         """
@@ -25,7 +59,7 @@ def render():
         unsafe_allow_html=True,
     )
 
-    stats = wiki.stats()
+    stats = _safe_wiki_stats()
     cols = st.columns(4)
     cols[0].metric("페이지", f"{stats.get('total', 0)}")
     cols[1].metric("초안", f"{stats.get('status_counts', {}).get('draft', 0)}")
