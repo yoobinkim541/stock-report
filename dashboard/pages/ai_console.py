@@ -29,7 +29,6 @@ _SURFACES = {
 }
 
 
-
 def render():
     _inject_codex_css()
     st.markdown(
@@ -39,25 +38,31 @@ def render():
             <div class="codex-kicker">stock-report agent</div>
             <h1>AI 콘솔</h1>
           </div>
-          <span>채팅이 우선이고, 기억·위키·도구는 오른쪽으로 접어 둡니다</span>
+          <span>그냥 질문하세요 — 맥락(시장·포트폴리오·종목·모의투자·전략)은 자동으로 잡습니다</span>
         </div>
         """,
         unsafe_allow_html=True,
     )
 
+    # 맥락은 질문에서 자동 추론 — 마지막 추론값이 컨텍스트 글랜스/레일의 기준
     surface = _current_surface()
     hours = int(st.session_state.get("agent_hours", 72))
-    pack = _safe_context(surface, hours)
 
-    chat_col, rail_col = st.columns([1.5, 0.7], gap="large")
-    with chat_col:
+    pack = _safe_context(surface, hours)
+    _context_glance(pack)
+
+    tab_chat, tab_memory, tab_wiki, tab_lab, tab_connectors = st.tabs(
+        ["대화", "시장 기억", "AI 위키", "전략 캔버스", "로컬 커넥터"])
+    with tab_chat:
         _chat_tab(surface, pack)
-    with rail_col:
-        _context_rail(surface, pack)
-        with st.expander("기억·위키", expanded=False):
-            _knowledge_drawer(surface, pack)
-        with st.expander("고급 도구", expanded=False):
-            _advanced_tools(surface)
+    with tab_memory:
+        _memory_tab(surface)
+    with tab_wiki:
+        _wiki_tab(surface, pack)
+    with tab_lab:
+        _lab_tab(surface)
+    with tab_connectors:
+        _connectors_tab()
 
 
 _AUTO_CHAT = "auto"          # 단일 대화 스레드 키 (맥락은 메시지 단위로 자동 라우팅)
@@ -120,38 +125,41 @@ def _context_glance(pack: dict):
         right.caption("심볼/태그: " + (" · ".join(f"{name} {cnt}" for name, cnt in symbol_counts[:8]) or "—"))
 
 
-
 def _chat_tab(surface: str, pack: dict):
     _ensure_chat_state(_AUTO_CHAT)
     chat_key = _chat_key(_AUTO_CHAT)
+    chat_col, rail_col = st.columns([1.48, 0.72], gap="large")
 
-    pin = st.session_state.get("agent_surface_pin", _PIN_AUTO)
-    mode_label = ("맥락 자동" if pin == _PIN_AUTO
-                  else f"맥락 고정 · {_SURFACES.get(pin, pin)}")
-    st.markdown(
-        f"<div class='codex-chat-head'><b>{mode_label}"
-        f"<span class='codex-chip'>{_SURFACES.get(surface, surface)}</span></b>"
-        f"<span>{pack.get('generated_at', '')}</span></div>",
-        unsafe_allow_html=True,
-    )
+    with chat_col:
+        pin = st.session_state.get("agent_surface_pin", _PIN_AUTO)
+        mode_label = ("맥락 자동" if pin == _PIN_AUTO
+                      else f"맥락 고정 · {_SURFACES.get(pin, pin)}")
+        st.markdown(
+            f"<div class='codex-chat-head'><b>{mode_label}"
+            f"<span class='codex-chip'>{_SURFACES.get(surface, surface)}</span></b>"
+            f"<span>{pack.get('generated_at', '')}</span></div>",
+            unsafe_allow_html=True,
+        )
+        pending = _quick_prompts()
+        if pending:
+            _run_agent_question_auto(pending)
 
-    pending = _quick_prompts()
-    if pending:
-        _run_agent_question_auto(pending)
+        for msg in st.session_state[chat_key][-16:]:
+            role_raw = str(msg.get("role", "assistant")).strip().lower()
+            role = "user" if role_raw in {"user", "human"} else "assistant"
+            with st.chat_message(role):
+                st.markdown(msg.get("content", ""))
+                if msg.get("meta"):
+                    st.caption(msg["meta"])
 
-    for msg in st.session_state[chat_key][-16:]:
-        role_raw = str(msg.get("role", "assistant")).strip().lower()
-        role = "user" if role_raw in {"user", "human"} else "assistant"
-        with st.chat_message(role):
-            st.markdown(msg.get("content", ""))
-            if msg.get("meta"):
-                st.caption(msg["meta"])
+        user_text = st.chat_input("무엇이든 질문하기 — 포트폴리오·종목·시장·모의투자·전략",
+                                  key="agent_chat_input_auto")
+        if user_text:
+            _run_agent_question_auto(user_text)
+            st.rerun()
 
-    user_text = st.chat_input("무엇이든 질문하기 — 포트폴리오·종목·시장·모의투자·전략",
-                              key="agent_chat_input_auto")
-    if user_text:
-        _run_agent_question_auto(user_text)
-        st.rerun()
+    with rail_col:
+        _chat_context_rail(surface, pack)
 
 
 def _chat_key(surface: str) -> str:
@@ -176,19 +184,15 @@ def _ensure_chat_state(surface: str):
     ]
 
 
-
-def _quick_prompt_texts() -> list[str]:
-    return [
-        "오늘 시장 변화가 어디서 시작됐는지 추적해줘",
-        "포트폴리오에서 먼저 줄일 리스크 봐줘",
-        "이 대화를 위키에 남길 포인트만 정리해줘",
-    ]
-
-
 def _quick_prompts() -> str | None:
-    """도메인을 가로지르는 추천 질문 3개 — 눌러도 되고, 그냥 아래에 입력해도 된다."""
-    prompts = _quick_prompt_texts()
-    cols = st.columns(len(prompts))
+    """도메인을 가로지르는 추천 질문 4개 — 눌러도 되고, 그냥 아래에 입력해도 된다."""
+    prompts = [
+        "오늘 시장 변화가 어디서 시작됐는지 추적해줘",
+        "내 포트폴리오에서 먼저 줄여야 할 리스크 봐줘",
+        "모의투자 성과가 좋아진 이유와 나빠진 이유를 나눠줘",
+        "보유종목에 영향을 줄 이벤트만 골라줘",
+    ]
+    cols = st.columns(4)
     for idx, text in enumerate(prompts):
         if cols[idx].button(text, key=f"agent_quick_auto_{idx}", width="stretch"):
             return text
@@ -246,8 +250,7 @@ def _run_agent_question(question: str, surface: str, chat_key: str | None = None
         })
 
 
-
-def _context_rail(surface: str, pack: dict):
+def _chat_context_rail(surface: str, pack: dict):
     st.markdown("##### Context")
     sources = pack.get("sources") or {}
     events = sources.get("events") or []
@@ -258,7 +261,7 @@ def _context_rail(surface: str, pack: dict):
     st.markdown(
         f"""
         <div class="codex-rail-card">
-          <div><span>맥락</span><b>{_SURFACES.get(surface, surface)}</b></div>
+          <div><span>맥락 (자동)</span><b>{_SURFACES.get(surface, surface)}</b></div>
           <div><span>events</span><b>{len(events)}</b></div>
           <div><span>memory</span><b>{len(memory)}</b></div>
           <div><span>models</span><b>{len(models)}</b></div>
@@ -266,19 +269,6 @@ def _context_rail(surface: str, pack: dict):
         """,
         unsafe_allow_html=True,
     )
-
-    focus = pack.get("focus") or []
-    if focus:
-        st.caption(" · ".join(focus[:3]))
-
-    if events:
-        st.markdown("##### Signals")
-        for item in events[:3]:
-            title = item.get("title") or item.get("summary") or "제목 없음"
-            st.markdown(
-                f"<div class='codex-feed-item'><b>{item.get('source', 'source')}</b><span>{title}</span></div>",
-                unsafe_allow_html=True,
-            )
 
     with st.expander("⚙️ 설정", expanded=False):
         st.selectbox("맥락 고정", [_PIN_AUTO, *list(_SURFACES)],
@@ -307,6 +297,24 @@ def _context_rail(surface: str, pack: dict):
     if st.session_state.get(prompt_key):
         st.code(agent.build_context_prompt(surface), language="text")
 
+    st.markdown("##### Events")
+    if events:
+        for item in events[:7]:
+            title = item.get("title") or item.get("summary") or "제목 없음"
+            st.markdown(f"<div class='codex-feed-item'><b>{item.get('source', 'source')}</b><span>{title}</span></div>",
+                        unsafe_allow_html=True)
+    else:
+        st.caption("최근 이벤트 없음")
+
+    st.markdown("##### Memory")
+    if memory:
+        for item in memory[:5]:
+            st.markdown(f"<div class='codex-feed-item'><b>{item.get('kind', 'memory')}</b>"
+                        f"<span>{item.get('title', '제목 없음')}</span></div>",
+                        unsafe_allow_html=True)
+    else:
+        st.caption("World Memory 비어 있음")
+
     if reports:
         st.caption(f"latest report: {reports[0].get('name')}")
     paper = pack.get("paper") or {}
@@ -314,20 +322,6 @@ def _context_rail(surface: str, pack: dict):
         st.caption("paper: " + " · ".join(paper["errors"]))
     if pack.get("context_error"):
         st.warning(f"컨텍스트 일부를 불러오지 못했습니다: {pack['context_error']}")
-
-
-def _knowledge_drawer(surface: str, pack: dict):
-    st.caption("대화, 기억, 위키를 한 곳에서 정리합니다.")
-    _memory_tab(surface)
-    st.divider()
-    _wiki_tab(surface, pack)
-
-
-def _advanced_tools(surface: str):
-    st.caption("자주 쓰지 않는 도구는 여기로 묶었습니다.")
-    _lab_tab(surface)
-    st.divider()
-    _connectors_tab()
 
 
 def _memory_tab(surface: str):
@@ -367,7 +361,6 @@ def _memory_tab(surface: str):
 
 
 def _wiki_tab(surface: str, pack: dict):
-    return wiki_browser.render_wiki_tab(surface, pack)
     st.markdown("##### 위키")
     st.caption("대화와 메모를 카드로 승격해 챗봇이 다시 읽는 지식층입니다.")
 
@@ -900,3 +893,133 @@ def _inject_codex_css():
           letter-spacing:.08em;
           margin-bottom:2px;
         }
+        .codex-chat-head {
+          display:flex;
+          align-items:center;
+          justify-content:space-between;
+          gap:12px;
+          padding:9px 11px;
+          border:1px solid rgba(148,163,184,.18);
+          border-radius:8px;
+          background:rgba(15,23,42,.38);
+          margin-bottom:10px;
+        }
+        .codex-chat-head span {
+          color:rgba(148,163,184,.86);
+          font-size:.78rem;
+          overflow-wrap:anywhere;
+        }
+        .codex-chip {
+          display:inline-block;
+          margin-left:8px;
+          padding:2px 9px;
+          border:1px solid rgba(56,189,248,.35);
+          border-radius:999px;
+          background:rgba(56,189,248,.12);
+          color:rgba(125,211,252,.96) !important;
+          font-size:.72rem !important;
+          font-weight:600;
+          vertical-align:middle;
+          white-space:nowrap;
+        }
+        div[data-testid="stChatMessage"] {
+          border:1px solid rgba(148,163,184,.18);
+          border-radius:8px;
+          background:rgba(15,23,42,.28);
+          padding:10px 12px;
+          margin-bottom:9px;
+        }
+        div[data-testid="stChatMessage"]:has([data-testid="chatAvatarIcon-user"]) {
+          background:rgba(30,41,59,.38);
+        }
+        div[data-testid="stChatInput"] textarea {
+          border-radius:8px;
+        }
+        .codex-rail-card {
+          display:grid;
+          grid-template-columns:repeat(2,minmax(0,1fr));
+          gap:8px;
+          margin:2px 0 10px;
+        }
+        .codex-rail-card div {
+          border:1px solid rgba(148,163,184,.18);
+          border-radius:8px;
+          background:rgba(15,23,42,.32);
+          padding:9px 10px;
+          min-height:58px;
+        }
+        .codex-rail-card span {
+          display:block;
+          color:rgba(148,163,184,.82);
+          font-size:.74rem;
+          margin-bottom:3px;
+        }
+        .codex-rail-card b {
+          display:block;
+          font-size:.94rem;
+          overflow-wrap:anywhere;
+        }
+        .codex-feed-item {
+          border:1px solid rgba(148,163,184,.16);
+          border-radius:8px;
+          background:rgba(2,6,23,.22);
+          padding:8px 9px;
+          margin-bottom:7px;
+        }
+        .codex-feed-item b {
+          display:block;
+          color:rgba(203,213,225,.96);
+          font-size:.78rem;
+          margin-bottom:2px;
+        }
+        .codex-feed-item span {
+          display:block;
+          color:rgba(226,232,240,.9);
+          font-size:.82rem;
+          line-height:1.35;
+          overflow-wrap:anywhere;
+        }
+        .widget-flow {
+          display:grid;
+          grid-template-columns:minmax(0,1fr) 22px minmax(0,1fr) 22px minmax(0,1fr);
+          align-items:center;
+          gap:8px;
+          padding:10px;
+          margin:2px 0 14px;
+          border:1px solid rgba(16,185,129,.18);
+          border-radius:8px;
+          background:rgba(6,78,59,.10);
+        }
+        .widget-flow div {
+          display:flex;
+          align-items:center;
+          justify-content:space-between;
+          gap:10px;
+          padding:9px 11px;
+          border:1px solid rgba(148,163,184,.18);
+          border-radius:7px;
+          background:rgba(15,23,42,.42);
+          min-height:42px;
+        }
+        .widget-flow b {
+          color:rgba(110,231,183,.98);
+          font-size:.78rem;
+          white-space:nowrap;
+        }
+        .widget-flow span {
+          color:rgba(226,232,240,.94);
+          font-size:.86rem;
+          text-align:right;
+        }
+        .widget-flow i {
+          display:block;
+          height:1px;
+          background:linear-gradient(90deg,rgba(16,185,129,.20),rgba(16,185,129,.82));
+          position:relative;
+        }
+        .widget-flow i:after {
+          content:"";
+          position:absolute;
+          right:-1px;
+          top:-3px;
+          width:7px;
