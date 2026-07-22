@@ -1,0 +1,11 @@
+{
+  "$schema": "https://openapi.vercel.sh/vercel.json",
+  "env": {
+    "VERCEL_SUPPORT_LARGE_FUNCTIONS": "1"
+  },
+  "functions": {
+    "app.py": {
+      "excludeFiles": "{.agents/**,.codex/**,.venv/**,docs/**,data/**,reports/**,ml/**,bot/**,crons/**,dashboard/**,providers/**,backtest/**,kiwoom_sync/**,agent_console/**,tests/**,__pycache__/**,**/*.pyc,*.png,*.jpg,*.jpeg,*.gif,*.pdf,*.zip,*.csv,*.parquet,*.feather,*.xlsx,*.ipynb}"
+    }
+  }
+}
