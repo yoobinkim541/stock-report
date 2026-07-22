@@ -16,6 +16,10 @@
 
 - `events.jsonl`: append-only local records.
 - `index.json`: latest-record snapshot generated from JSONL.
+  두 writer 가 키를 나눠 쓴다 — `agent_console/shared_memory` 는
+  `ok/schemaVersion/updatedAt/recordCount/latestRecordAt/records`,
+  `lib/agent_memory` 는 `latestAt/latestTitle/count`. 양쪽 모두 기존 내용을 읽어
+  자기 키만 갱신하며, `events.jsonl.lock` 사이드카 flock 으로 직렬화된다.
 - `memory_summary.md`: prompt context packet (writer = lib/agent_memory).
 - `user_memory_notebook.md`: user chat memory notebook (일별 롤업 압축).
 - `external_memory_briefing.md` / `*_state.json`: external briefing + 상태.
@@ -31,3 +35,19 @@
 - Do not store API keys, tokens, passwords, raw attachments, cookies, or private absolute paths.
 - Store user-visible answer text and compact decisions, not hidden action blocks.
 - Use `[컨텍스트 메모리]` in prompts when injecting `memory_summary.md`.
+
+## 쓰기 규약
+
+- `events.jsonl` 을 쓰는 모든 코드는 `safe_io.file_write_lock(EVENTS_PATH)` 를 잡는다.
+  현재 writer: `shared_memory.append_record` / `delete_record` / `upsert_record`,
+  `lib/agent_memory._append_event`.
+- flock 은 재진입 불가다. 락 안에서 호출하는 내부 함수는 락을 다시 잡지 않는다
+  (`_write_index_locked`, `_write_jsonl_locked`).
+- 전체 재작성은 반드시 `safe_io.atomic_write_text` 를 쓴다 (temp→fsync→rename).
+- 위키처럼 전수 조회가 필요한 소비자는 `list_records()` 가 아니라
+  `all_records()` 를 쓴다. `list_records` 는 최대 100 으로 클램프된다.
+
+### 알려진 부채
+
+`_write_index_locked()` 는 매 쓰기마다 최신 200건 스냅샷(약 119KB)을 재작성한다.
+현재 규모(수십~수백 건)에서는 무해하나, 레코드가 수천 건이 되면 디바운스가 필요하다.
