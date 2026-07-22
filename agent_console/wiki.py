@@ -284,9 +284,7 @@ def upsert_page(page: dict) -> dict:
             "writer": "codex-cli",
         },
     }
-    if existing and existing.get("id"):
-        shared_memory.delete_record(page_id)
-    saved = shared_memory.append_record(record)
+    saved = shared_memory.upsert_record(record)
     return _record_to_page(saved)
 
 

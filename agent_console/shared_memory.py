@@ -8,6 +8,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Iterable
 
+import safe_io
+
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 SCHEMA_VERSION = "finance-agent-gui.shared-memory.v1"
@@ -139,10 +141,11 @@ def normalize_record(payload: dict) -> dict:
 def append_record(payload: dict) -> dict:
     ensure_store()
     record = normalize_record(payload)
-    with _paths()["events"].open("a", encoding="utf-8") as f:
-        f.write(json.dumps(record, ensure_ascii=False, sort_keys=True) + "\n")
-    _write_index()
-    refresh_context_memory_summary()
+    with _events_lock():
+        with _paths()["events"].open("a", encoding="utf-8") as f:
+            f.write(json.dumps(record, ensure_ascii=False, sort_keys=True) + "\n")
+        _write_index_locked()
+    refresh_context_memory_summary()   # 락 밖 — 다른 파일을 쓰고 오래 걸린다
     return record
 
 
@@ -224,6 +227,23 @@ def _append_user_notebook(record: dict, question: str, answer: str) -> None:
         f.write(line)
 
 
+def _events_lock():
+    """events.jsonl 사이드카 락.
+
+    lib/agent_memory 도 같은 경로로 이 락을 잡으므로 두 모듈의 쓰기가 직렬화된다.
+    주의: flock 은 재진입 불가 — 이 블록 안에서 다시 _events_lock() 을 호출하면
+    LockTimeout 이 난다. 내부 호출은 _write_index_locked() 처럼 락을 잡지 않는
+    버전을 쓴다.
+    """
+    return safe_io.file_write_lock(str(_paths()["events"]), timeout=30.0)
+
+
+def _write_jsonl_locked(rows: list[dict]) -> None:
+    """전체 재작성 — 락 보유 중에만 호출."""
+    text = "".join(json.dumps(row, ensure_ascii=False, sort_keys=True) + "\n" for row in rows)
+    safe_io.atomic_write_text(str(_paths()["events"]), text)
+
+
 def _read_jsonl(path: Path) -> list[dict]:
     if not path.exists():
         return []
@@ -269,33 +289,63 @@ def delete_record(record_id: str) -> bool:
     record_id = str(record_id or "").strip()
     if not record_id:
         return False
-    paths = _paths()
-    rows = _read_jsonl(paths["events"])
-    kept = [row for row in rows if row.get("id") != record_id]
-    if len(kept) == len(rows):
-        return False
-    with paths["events"].open("w", encoding="utf-8") as f:
-        for row in kept:
-            f.write(json.dumps(row, ensure_ascii=False, sort_keys=True) + "\n")
-    _write_index()
+    with _events_lock():
+        rows = _read_jsonl(_paths()["events"])
+        kept = [row for row in rows if row.get("id") != record_id]
+        if len(kept) == len(rows):
+            return False
+        _write_jsonl_locked(kept)
+        _write_index_locked()
     refresh_context_memory_summary()
     return True
 
 
-def _write_index() -> None:
+def upsert_record(record: dict) -> dict:
+    """id 기준 치환-또는-추가를 한 번의 원자적 재작성으로 수행한다.
+
+    delete_record + append_record 조합은 그 사이에 죽으면 레코드가 사라지는
+    창이 있었다. 이 함수는 그 창을 없앤다.
+    """
+    ensure_store()
+    normalized = normalize_record(record)
+    record_id = str(normalized.get("id") or "").strip()
+    if not record_id:
+        return append_record(record)
+    with _events_lock():
+        rows = _read_jsonl(_paths()["events"])
+        kept = [row for row in rows if row.get("id") != record_id]
+        kept.append(normalized)
+        _write_jsonl_locked(kept)
+        _write_index_locked()
+    refresh_context_memory_summary()
+    return normalized
+
+
+def _write_index_locked() -> None:
+    """index.json 갱신 — 락 보유 중에만 호출.
+
+    lib/agent_memory 가 같은 파일에 latestAt/latestTitle/count 를 쓰므로,
+    기존 내용을 읽어 자기 키만 덮어쓰고 상대 키는 보존한다.
+    """
     paths = _paths()
     rows = _read_jsonl(paths["events"])
     rows.sort(key=lambda row: row.get("createdAt") or "", reverse=True)
     latest = rows[:200]
-    payload = {
+    try:
+        existing = json.loads(paths["index"].read_text(encoding="utf-8"))
+        if not isinstance(existing, dict):
+            existing = {}
+    except Exception:
+        existing = {}
+    existing.update({
         "ok": True,
         "schemaVersion": SCHEMA_VERSION,
         "updatedAt": _now(),
         "recordCount": len(rows),
         "latestRecordAt": latest[0].get("createdAt") if latest else "",
         "records": latest,
-    }
-    paths["index"].write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+    })
+    safe_io.atomic_write_json(str(paths["index"]), existing)
 
 
 def query_shared_memories(query: str = "", screen: str = "", provider: str = DEFAULT_PROVIDER,
