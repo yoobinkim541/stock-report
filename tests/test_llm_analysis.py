@@ -82,6 +82,14 @@ def test_analyze_ok_cache_and_failures(monkeypatch, tmp_path):
     # 실패 graceful → 로컬 폴백
     out4, status4 = la.analyze("T2", "T", {}, runner=lambda *a, **k: _Res("", 1), force=True)
     assert status4.startswith("fallback") and out4["model"] == "local-fallback"
+    retry_calls = []
+
+    def retry_runner(cmd, **kw):
+        retry_calls.append(cmd)
+        return _Res(json.dumps(_GOOD, ensure_ascii=False))
+
+    out5, status5 = la.analyze("T2", "T", {}, runner=retry_runner)
+    assert status5 == "ok" and out5["model"] != "local-fallback" and len(retry_calls) == 1
     assert la.analyze("T3", "T", {}, runner=lambda *a, **k: _Res("no json"), force=True)[1].startswith("fallback")
     monkeypatch.setenv("DASH_LLM_ANALYSIS_ENABLED", "0")
     assert la.analyze("T4", "T", {})[1] == "disabled"

@@ -354,13 +354,6 @@ def related_tickers(ticker: str, name: str = "", context: str = "",
 
     fallback = _fallback_related(ticker, name, context)
     if fallback:
-        try:
-            file_cache.harden_dir(CACHE_DIR)
-            _tmp = cp.with_suffix(".tmp")
-            _tmp.write_text(json.dumps(fallback, ensure_ascii=False), encoding="utf-8")
-            os.replace(_tmp, cp)
-        except Exception:
-            pass
         if first_error:
             return fallback, f"fallback ({first_error})"
         return fallback, "fallback"

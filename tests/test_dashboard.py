@@ -582,8 +582,27 @@ def test_llm_related_runner_and_cache(tmp_path, monkeypatch):
 
     items, status = llm_related.related_tickers("MSFT", runner=boom)
     assert status.startswith("fallback") and items
+    before_retry = len(calls)
+    items3, status3 = llm_related.related_tickers("MSFT", name="Microsoft", runner=runner)
+    assert status3 == "ok" and items3[0]["ticker"] == "AMD"
+    assert len(calls) == before_retry + 1                 # fallback 은 24h 성공 캐시에 고정하지 않음
     monkeypatch.setenv("DASH_LLM_RELATED_ENABLED", "0")
     assert llm_related.related_tickers("MSFT", runner=runner)[1] == "disabled"
+
+
+def test_llm_related_view_delegates_fallback_to_provider(monkeypatch):
+    """view 레이어는 provider 결과를 전달하고 내부 fallback 함수를 직접 호출하지 않는다."""
+    from dashboard import views
+    from providers import llm_related
+
+    monkeypatch.setattr(llm_related, "related_tickers", lambda *a, **k: (None, "empty"))
+
+    def forbidden_fallback(*args, **kwargs):
+        raise AssertionError("view should not call provider private fallback")
+
+    monkeypatch.setattr(llm_related, "_fallback_related", forbidden_fallback)
+
+    assert views.llm_related_tickers("NVDA") == (None, "empty")
 
 
 def test_is_macro_classification_and_units():

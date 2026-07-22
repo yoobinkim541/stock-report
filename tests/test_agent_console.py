@@ -332,7 +332,8 @@ def test_agent_answer_autocurates_wiki(monkeypatch, tmp_path):
     assert calls[0]["kwargs"]["surface"] == "portfolio"
 
 
-def test_agent_trading_logic_question_uses_logic_report():
+def test_agent_trading_logic_question_uses_logic_report(monkeypatch):
+    monkeypatch.setenv("AGENT_CONSOLE_LLM_ENABLED", "0")
     from agent_console.agent import _compose_answer
 
     pack = {
@@ -454,6 +455,37 @@ def test_agent_answer_survives_answer_composition_failure(monkeypatch):
     assert result["ok"] is True
     assert "답변 조립 중 일부 내부 컨텍스트 오류" in result["answer"]
     assert "ValueError" in result["answer"]
+
+
+def test_agent_console_prefers_llm_when_enabled(monkeypatch):
+    monkeypatch.setenv("AGENT_CONSOLE_LLM_ENABLED", "1")
+
+    from agent_console import agent
+
+    calls = []
+
+    def fake_llm(question, pack, history=None):
+        calls.append((question, pack.get("surface")))
+        return "LLM이 직접 만든 답변"
+
+    monkeypatch.setattr(agent, "_try_llm_chat", fake_llm)
+    pack = {
+        "surface": "market",
+        "generated_at": "2026-07-13T06:41:00+00:00",
+        "sources": {"events": [], "source_counts": [], "symbol_counts": []},
+        "reports": [],
+        "ml_activity": [],
+        "portfolio": {"holdings": [], "summary": {}, "risk": {}, "targets": {}, "errors": []},
+        "paper": {"kr": None, "us": None, "combined": None, "errors": []},
+        "models": {"items": []},
+        "memory": [],
+        "focus": [],
+    }
+
+    answer = agent._compose_answer("지금 시장이랑 포트폴리오 리스크를 봐줘", pack, history=[])
+
+    assert answer == "LLM이 직접 만든 답변"
+    assert calls == [("지금 시장이랑 포트폴리오 리스크를 봐줘", "market")]
 
 
 def test_agent_portfolio_risk_question_uses_holdings_not_market_template(monkeypatch):
@@ -876,6 +908,7 @@ def test_agent_llm_chat_falls_through_codex_hermes_to_gemini(monkeypatch):
 
 def test_server_endpoints(monkeypatch, tmp_path):
     _isolate(monkeypatch, tmp_path)
+    monkeypatch.setenv("AGENT_CONSOLE_LLM_ENABLED", "0")
 
     from agent_console import context
     from agent_console.server import create_app

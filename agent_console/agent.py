@@ -211,6 +211,9 @@ def _compose_error_fallback_answer(question: str, pack: dict, exc: Exception) ->
 
 def _compose_answer(question: str, pack: dict, history: list[dict] | None = None) -> str:
     resolved_question = _resolve_followup_question(question, history)
+    llm = _try_llm_chat(resolved_question, pack, history)
+    if llm:
+        return llm
     if _is_trading_logic_question(question) or _is_trading_followup(question, history):
         return _compose_trading_logic_answer(question, pack)
     if _is_portfolio_preference_question(question, pack, history):
