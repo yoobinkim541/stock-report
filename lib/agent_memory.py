@@ -85,10 +85,11 @@ def _time_text(dt: datetime | None = None) -> str:
 
 
 def _write_text_atomic(path: Path, text: str) -> None:
+    """원자적 텍스트 쓰기 — 구현은 safe_io 단일 소스에 위임."""
     MEMORY_DIR.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_suffix(path.suffix + ".tmp")
-    tmp.write_text(text, encoding="utf-8")
-    os.replace(tmp, path)
+    import safe_io
+
+    safe_io.atomic_write_text(str(path), text)
 
 
 def _read_text(path: Path) -> str:
@@ -417,12 +418,17 @@ def _append_event(payload: dict, now: datetime | None = None) -> None:
         rec = {"schemaVersion": SCHEMA_VERSION, "id": uuid.uuid4().hex[:16],
                "createdAt": (now or _now()).isoformat(timespec="seconds"),
                "visibility": "local-only", **payload}
-        with open(EVENTS_PATH, "a", encoding="utf-8") as f:
-            f.write(json.dumps(rec, ensure_ascii=False) + "\n")
-        idx = _read_json(INDEX_PATH, {}) or {}
-        idx.update({"latestAt": rec["createdAt"], "latestTitle": rec.get("title", ""),
-                    "count": int(idx.get("count", 0)) + 1})
-        _write_text_atomic(INDEX_PATH, json.dumps(idx, ensure_ascii=False, indent=2))
+        import safe_io
+
+        # agent_console/shared_memory 와 같은 사이드카 락 — 전체 재작성과 직렬화된다.
+        # 이게 없으면 shared_memory 가 파일을 재작성하는 동안 이 append 가 사라진다.
+        with safe_io.file_write_lock(str(EVENTS_PATH), timeout=30.0):
+            with open(EVENTS_PATH, "a", encoding="utf-8") as f:
+                f.write(json.dumps(rec, ensure_ascii=False) + "\n")
+            idx = _read_json(INDEX_PATH, {}) or {}
+            idx.update({"latestAt": rec["createdAt"], "latestTitle": rec.get("title", ""),
+                        "count": int(idx.get("count", 0)) + 1})
+            safe_io.atomic_write_json(str(INDEX_PATH), idx)
     except Exception as e:
         logger.warning("이벤트 기록 실패(무시): %s", e)
 
