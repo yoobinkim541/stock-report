@@ -18,6 +18,7 @@ import {
   Network,
   PanelLeft,
   Play,
+  Plus,
   Radar,
   Search,
   Send,
@@ -178,13 +179,6 @@ const connectorCards: ConnectorCard[] = [
     tone: 'amber',
   },
 ];
-
-function slugify(value: string) {
-  return value
-    .toLowerCase()
-    .replace(/[^a-z0-9가-힣]+/g, '-')
-    .replace(/^-+|-+$/g, '');
-}
 
 function formatAllocationLines(entries: StrategyAllocation[]) {
   return entries.map((entry) => `${entry.symbol} ${entry.weight.toFixed(1)} ${entry.memo}`.trim()).join('\n');
@@ -666,8 +660,8 @@ export default function HomePage() {
                 <div className="composer" style={{ marginBottom: 14 }}>
                   <div className="composer-actions" style={{ marginBottom: 0 }}>
                     <div className="helper">검색하거나 클릭하면 문서가 선택됩니다. 이게 바로 위키의 상위 레이어입니다.</div>
-                    <button type="button" className="primary-btn" onClick={() => setSelectedKnowledgeId('wiki-wiki')}>
-                      현재 대화 승격 <PlusIcon />
+                    <button type="button" className="primary-btn" onClick={() => setSelectedKnowledgeId('wiki-regime')}>
+                      현재 대화 승격 <Plus size={15} style={{ marginLeft: 6, verticalAlign: 'middle' }} />
                     </button>
                   </div>
                   <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
@@ -696,13 +690,7 @@ export default function HomePage() {
                       <button
                         key={entry.id}
                         type="button"
-                        onClick={() => {
-                          setSelectedKnowledgeId(entry.id);
-                          const wikiNode = entry.id.startsWith('wiki-') ? entry.id.replace('wiki-', '') : null;
-                          if (wikiNode) {
-                            setActiveSurface('knowledge');
-                          }
-                        }}
+                        onClick={() => setSelectedKnowledgeId(entry.id)}
                         style={{
                           textAlign: 'left',
                           width: '100%',
@@ -964,10 +952,8 @@ export default function HomePage() {
                   {[12, 24, 36, 48].map((y) => (
                     <line key={y} x1="6" y1={y} x2="94" y2={y} stroke="rgba(148, 163, 184, 0.12)" strokeDasharray="2 2" />
                   ))}
-                  <path d={buildLinePath(selectedCurve.buyHold)} fill="none" stroke="rgba(16, 185, 129, 0.98)" strokeWidth="2.2" strokeLinejoin="round" strokeLinecap="round" />
-                  <path d={buildLinePath(selectedCurve.strategy)} fill="none" stroke="rgba(168, 85, 247, 0.98)" strokeWidth="2.2" strokeLinejoin="round" strokeLinecap="round" />
-                  <circle cx="8" cy="54" r="1.8" fill="rgba(148, 163, 184, 0.6)" />
-                  <circle cx="92" cy="12" r="1.8" fill="rgba(148, 163, 184, 0.6)" />
+                  <path d={chartBuyHold} fill="none" stroke="rgba(16, 185, 129, 0.98)" strokeWidth="2.2" strokeLinejoin="round" strokeLinecap="round" />
+                  <path d={chartStrategy} fill="none" stroke="rgba(168, 85, 247, 0.98)" strokeWidth="2.2" strokeLinejoin="round" strokeLinecap="round" />
                 </svg>
                 <div className="hero-meta" style={{ marginTop: 12 }}>
                   <span className="status-chip teal">Buy & Hold</span>
@@ -1210,8 +1196,4 @@ export default function HomePage() {
       </main>
     </div>
   );
-}
-
-function PlusIcon() {
-  return <span aria-hidden="true" />;
 }
