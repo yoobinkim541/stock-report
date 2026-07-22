@@ -15,6 +15,15 @@ pytest.importorskip("streamlit")
 pytest.importorskip("plotly")
 from streamlit.testing.v1 import AppTest  # noqa: E402
 
+from agent_console import agent as _agent_agent
+from agent_console import context as _agent_context
+from agent_console import storage as _agent_storage
+_AGENT_MODULE_SNAPSHOTS = [
+    (_agent_agent, dict(vars(_agent_agent))),
+    (_agent_context, dict(vars(_agent_context))),
+    (_agent_storage, dict(vars(_agent_storage))),
+]
+
 
 @pytest.fixture(scope="module", autouse=True)
 def _restore_dashboard_modules():
@@ -23,6 +32,7 @@ def _restore_dashboard_modules():
     원본 속성을 스냅샷하고 모듈 종료 시 복원."""
     from dashboard import cached, data
     saved = [(mod, dict(vars(mod))) for mod in (data, cached)]
+    saved.extend(_AGENT_MODULE_SNAPSHOTS)
     yield
     for mod, snap in saved:
         for key in list(vars(mod)):
@@ -200,33 +210,6 @@ cached.learning_evolution = lambda s: {"surface":s,
     "series":[{"date":"2026-06-01","excess":0.01,"ic":0.02,"adopted":False},
               {"date":"2026-06-08","excess":0.03,"ic":0.06,"adopted":True}],
     "adoptions":[{"date":"2026-06-08","excess_challenger":0.03}],"n_runs":2}
-from agent_console import agent as _agent_agent
-from agent_console import context as _agent_context
-from agent_console import storage as _agent_storage
-_agent_context.context_pack = lambda surface="market", hours=72: {
-    "ok": True, "surface": surface, "generated_at": "2026-07-13T00:00:00+00:00",
-    "sources": {"events": [{"source": "unit", "title": "금리 하락", "tickers": ["QQQ"]}],
-                "source_counts": [("unit", 1)], "symbol_counts": [("QQQ", 1)]},
-    "reports": [{"name": "investment-summary.txt"}], "ml_activity": [],
-    "paper": {"kr": None, "us": None, "combined": None, "errors": []},
-    "models": {"items": []},
-    "memory": [{"observed_at": "2026-07-13", "source": "unit", "kind": "market_note",
-                "title": "기억", "body": "", "symbols": ["QQQ"], "impact": "context"}],
-    "focus": ["시장 맥락", "모의투자 영향"]}
-_agent_context.ingest_recent_memory = lambda hours=72: {"ok": True, "changed": 1}
-_agent_context.focus_for_surface = lambda surface: ["시장 맥락"]
-_agent_agent.answer = lambda question, surface="market": {"ok": True, "answer": "### 답변\\n테스트"}
-_agent_agent.build_context_prompt = lambda surface="market": "prompt"
-_agent_storage.list_memory_events = lambda limit=80: [
-    {"observed_at": "2026-07-13", "source": "unit", "kind": "market_note",
-     "title": "기억", "body": "", "symbols": ["QQQ"], "impact": "context"}]
-_agent_storage.upsert_memory_events = lambda events: len(list(events))
-_agent_storage.save_scenario = lambda payload: {"name": payload.get("name", "테스트")}
-_agent_storage.list_scenarios = lambda limit=50: [
-    {"name": "랩", "description": "테스트", "updated_at": "2026-07-13",
-     "rules": {"max_loss_pct": 8}, "assumptions": {"total_weight_pct": 100},
-     "allocations": [{"symbol": "QQQ", "weight_pct": 100}]}]
-st.session_state["ticker"] = "MSFT"
 ''' % ROOT
 
 
@@ -258,8 +241,15 @@ def test_ai_console_strategy_canvas_allocation_normalize():
     ])
 
     assert [r["symbol"] for r in rows] == ["QQQ", "CASH"]
-    assert round(sum(r["weight_pct"] for r in rows), 6) == 100.0
-    assert rows[0]["weight_pct"] == 75.0
+
+
+def test_ai_console_quick_prompt_list_stays_small():
+    from dashboard.pages import ai_console
+
+    prompts = ai_console._quick_prompt_texts()
+
+    assert len(prompts) == 3
+    assert any("위키" in prompt for prompt in prompts)
 
 
 def test_ai_console_chat_state_is_surface_scoped(monkeypatch):

@@ -5,6 +5,7 @@ attachment_parser.py — 텔레그램 첨부파일 파서
 PDF / 이미지에서 포트폴리오 현황·매도내역 추출 및 임시 보관
 """
 
+import contextlib
 import json
 import logging
 import os
@@ -111,6 +112,56 @@ def extract_text_from_image(path: str) -> str | None:
             if os.path.exists(out_file):
                 os.unlink(out_file)
     return None
+
+
+def _render_pdf_pages_to_images(path: str) -> list[str]:
+    """PyMuPDF 로 PDF 페이지를 임시 PNG 파일로 렌더링."""
+    try:
+        import fitz
+    except Exception as e:
+        logger.warning(f"PyMuPDF 없음 — PDF 렌더 불가: {e}")
+        return []
+
+    image_paths: list[str] = []
+    try:
+        doc = fitz.open(path)
+        try:
+            for idx, page in enumerate(doc):
+                pix = page.get_pixmap(matrix=fitz.Matrix(2.0, 2.0), alpha=False)
+                with tempfile.NamedTemporaryFile(suffix=f"-page{idx + 1}.png", delete=False) as tf:
+                    image_path = tf.name
+                pix.save(image_path)
+                image_paths.append(image_path)
+        finally:
+            doc.close()
+    except Exception as e:
+        logger.warning(f"PDF 렌더 실패: {e}")
+    return image_paths
+
+
+def extract_text_from_pdf_or_ocr(path: str) -> str | None:
+    """PDF 텍스트를 우선 추출하고, 실패하면 페이지를 렌더해서 OCR 한다."""
+    text = extract_text_from_pdf(path)
+    if text and text.strip():
+        return text.strip()
+
+    image_paths = _render_pdf_pages_to_images(path)
+    if not image_paths:
+        return None
+
+    parts: list[str] = []
+    try:
+        for image_path in image_paths:
+            chunk = extract_text_from_image(image_path)
+            if chunk and chunk.strip():
+                parts.append(chunk.strip())
+    finally:
+        for image_path in image_paths:
+            with contextlib.suppress(FileNotFoundError):
+                os.unlink(image_path)
+
+    combined = "\n".join(parts).strip()
+    return combined or None
 
 
 # ──────────────────────────────────────────────────────────

@@ -42,8 +42,8 @@ def test_load_recent_events_reads_multiple_days_and_dedupes(tmp_path):
 
 def test_build_digest_groups_by_source_and_limits_items():
     events = [
-        {"source": "saveticker", "source_url": "https://saveticker.com/api", "title": "AI chip demand", "url": "https://e/1", "tickers": ["NVDA"]},
-        {"source": "arca", "source_url": "https://arca.live/b/stock", "title": "환율 경계", "url": "https://e/2", "category": "📰뉴스"},
+        {"source": "saveticker", "source_url": "https://saveticker.com/api", "title": "AI chip demand", "url": "https://e/1", "tickers": ["NVDA"], "classification": {"kind": "article", "topic": "기술/AI", "trust": "B"}},
+        {"source": "arca", "source_url": "https://arca.live/b/stock", "title": "환율 경계", "url": "https://e/2", "category": "📰뉴스", "classification": {"kind": "news", "topic": "정책/재정", "trust": "C"}},
     ]
 
     digest = sc.build_digest(events, limit=5)
@@ -51,6 +51,9 @@ def test_build_digest_groups_by_source_and_limits_items():
     assert "누적 수집 자료" in digest
     assert "saveticker 1건" in digest
     assert "arca 1건" in digest
+    assert "반복 분류" in digest
+    assert "반복 주제" in digest
+    assert "신뢰 등급" in digest
     assert "신뢰 소스" in digest
     assert "https://saveticker.com/api" in digest
     assert "AI chip demand" in digest
@@ -94,6 +97,7 @@ def test_fetch_market_snapshot_events_includes_common_market_and_portfolio_data(
     titles = "\n".join(e["title"] for e in events)
 
     assert len(events) >= 40
+    assert events[0]["classification"]["source_family"] == "market_data"
     assert "QQQ Nasdaq 100 ETF" in titles
     assert "XLK Technology ETF" in titles
     assert "HYG High-yield bond ETF" in titles
@@ -218,7 +222,7 @@ def test_build_digest_survives_dict_tickers_in_corrupt_cache():
     assert "스페이스X 급등" in digest   # dict 티커 이벤트도 크래시 없이 항목으로 표시
 
 
-def test_fetch_saveticker_events_normalizes_dict_tickers(monkeypatch):
+def test_fetch_saveticker_events_normalizes_dict_tickers(monkeypatch, tmp_path):
     class FakeResponse:
         def __init__(self, payload):
             self._payload = payload
@@ -228,6 +232,9 @@ def test_fetch_saveticker_events_normalizes_dict_tickers(monkeypatch):
 
         def json(self):
             return self._payload
+
+    monkeypatch.setenv("STOCK_REPORT_REPORTS_DIR", str(tmp_path / "reports"))
+    monkeypatch.setattr(sc, "_fetch_saveticker_article_body", lambda url: "")
 
     payload = {"news_list": [{
         "title": "스페이스X 상장 급등",
@@ -244,10 +251,53 @@ def test_fetch_saveticker_events_normalizes_dict_tickers(monkeypatch):
     events = sc.fetch_saveticker_events()
 
     assert events, "이벤트가 비어있으면 안 됨"
-    assert events[0]["tickers"] == ["SPCX"]   # dict → symbol 문자열로 정규화
-    assert all(isinstance(t, str) for t in events[0]["tickers"])
-    assert events[0]["body_raw"] == "상장 기대감이 커지며 거래량이 급증했다.\n\n우주 섹터 전반이 강세를 보였다."
-    assert events[0]["body"] == events[0]["body_raw"]
+    event = events[0]
+    assert event["tickers"] == ["SPCX"]   # dict → symbol 문자열로 정규화
+    assert all(isinstance(t, str) for t in event["tickers"])
+    assert event["classification"]["source_family"] == "news"
+    assert event["classification"]["wiki_eligible"] is False
+    assert event["body_raw"] == "상장 기대감이 커지며 거래량이 급증했다.\n\n우주 섹터 전반이 강세를 보였다."
+    assert event["body"] == event["body_raw"]
+    assert Path(event["raw_path"]).exists()
+    assert Path(event["text_path"]).exists()
+    assert Path(event["manifest_path"]).exists()
+    manifest = json.loads(Path(event["manifest_path"]).read_text(encoding="utf-8"))
+    assert manifest["ttl_days"] == 60
+    assert manifest["expires_at"].startswith("2026-09-")
+    assert Path(event["text_path"]).read_text(encoding="utf-8") == event["body_raw"]
+
+
+def test_fetch_saveticker_events_enriches_thin_articles(monkeypatch, tmp_path):
+    class FakeResponse:
+        def __init__(self, payload):
+            self._payload = payload
+
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return self._payload
+
+    monkeypatch.setenv("STOCK_REPORT_REPORTS_DIR", str(tmp_path / "reports"))
+    monkeypatch.setattr(sc, "_fetch_saveticker_article_body", lambda url: "상세 기사 본문")
+
+    payload = {"news_list": [{
+        "title": "오라클 급등",
+        "content": "짧은 본문",
+        "group_summary": "",
+        "url": "https://e/orcl",
+        "created_at": "2026-06-16",
+        "tickers": [{"id": 17135, "name": None, "symbol": "ORCL"}],
+        "tag_names": ["실적"],
+    }]}
+
+    monkeypatch.setattr(sc.requests, "get", lambda *args, **kwargs: FakeResponse(payload))
+
+    events = sc.fetch_saveticker_events()
+
+    assert events
+    assert "상세 기사 본문" in events[0]["body_raw"]
+    assert Path(events[0]["raw_path"]).exists()
 
 
 # ── 소스별 수집 헬스 (수집 공백 가시화) ──────────────────────────────────────
@@ -330,6 +380,7 @@ def test_fetch_telegram_falls_back_to_direct_html(monkeypatch):
     assert len(events) == 1
     assert events[0]["title"] == "연준 금리 동결 시사"
     assert events[0]["url"] == "https://t.me/chanx/9"
+    assert events[0]["classification"]["source_family"] == "community"
     assert any(u.startswith("https://t.me/s/chanx") for u in calls)   # 폴백 경로 사용됨
 
 
@@ -374,6 +425,7 @@ def test_fetch_arca_falls_back_to_direct(monkeypatch):
     events = sc.fetch_arca_events(max_pages=1)
     assert len(events) == 1 and events[0]["url"].endswith("/111")
     assert events[0]["category"] == "📰뉴스"
+    assert events[0]["classification"]["source_family"] == "community"
 
 
 def test_fetch_arca_prefers_proxy_when_requested(monkeypatch):

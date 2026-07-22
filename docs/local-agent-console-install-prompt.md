@@ -8,6 +8,7 @@
 목표:
 - 기존 stock-report 저장소를 받아서 agent_console을 로컬에서 실행한다.
 - 브라우저에서 http://127.0.0.1:8797 로 접속할 수 있게 한다.
+- SaveTicker 원본과 추출 텍스트도 함께 옮길 수 있으면 ~/reports/raw 와 ~/reports/text 를 복사한다.
 - 실제 주문, Toss 실제 자산 연동, Arca Cloudflare 우회는 하지 않는다.
 - 우선 로컬 파일 기반 World Memory, Context Layer, Portfolio Lab만 동작시키면 된다.
 
@@ -41,6 +42,8 @@
 서버에 있는 기존 데이터까지 가져오려면:
 - ~/reports/source-cache
 - ~/reports/ml-data
+- ~/reports/raw
+- ~/reports/text
 - ~/.local/share/stock-report/agent_console.sqlite3
 이 세 경로를 노트북의 원하는 폴더로 복사한 뒤 위 환경변수를 그 경로에 맞춰 설정한다.
 

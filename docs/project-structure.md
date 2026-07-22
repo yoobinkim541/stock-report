@@ -11,6 +11,8 @@
 - `kiwoom_sync/`: 키움 동기화 관련 하위 모듈
 - `logs/`: 로컬 로그
 - `data/backups/portfolio/`: 오래된 포트폴리오 스냅샷 백업
+- `reports/raw/`: SaveTicker 기사/리포트 원본 아카이브
+- `reports/text/`: 원본에서 추출한 텍스트 사이드카
 
 ## 루트에 남기는 파일
 
