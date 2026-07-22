@@ -1089,7 +1089,197 @@ def _try_gemini_chat(prompt: str, runner=subprocess.run) -> str | None:
     return text[:6000]
 
 
+
+_INTENT_STOP_CONDITIONS = (
+    "종목명이 불명확함",
+    "검색 도구가 없음",
+    "최신 데이터 접근 실패",
+    "사용자가 특정 기준을 안 줘서 비교축이 불명확함",
+)
+
+
+def _classify_question_intent(question: str, pack: dict | None = None,
+                              history: list[dict] | None = None) -> dict:
+    """Return the LLM contract for the user's question.
+
+    This classifier does not generate answers. It pins the user's intent before
+    local screen context is added, so market/memory context cannot hijack the
+    response format. The retrieval_plan field is deliberately structured so a
+    future provider layer can execute it directly.
+    """
+    q = str(question or "").strip()
+    ql = q.lower()
+    surface = str((pack or {}).get("surface") or "market")
+
+    if _looks_like_meta_question(ql):
+        return _intent_contract(
+            "meta",
+            answer_style="왜 그렇게 답했는지, 무엇을 고치면 되는지 설명",
+            required_steps=["직전 답변의 라우팅/컨텍스트/도구 사용 문제를 먼저 설명", "투자 시장 템플릿으로 전환하지 않음"],
+            forbidden_templates=["현재 시장 상황 인식", "MIXED", "시장 신호 점수"],
+        )
+
+    if _looks_like_technical_analysis(ql):
+        return _intent_contract(
+            "technical_analysis",
+            answer_style="가격·추세·거래량·지표만 사용한 기술적 분석",
+            required_steps=["가격 구조 확인", "이동평균/상대강도/거래량 확인", "진입·무효화 조건 분리"],
+            retrieval_plan=["가격 히스토리", "거래량", "이동평균/RSI/MACD 등 차트 지표"],
+            forbidden_templates=["뉴스 제외", "거시 제외", "재무제표 제외", "현재 시장 상황 인식", "시장 신호 점수"],
+        )
+
+    if _looks_like_peer_compare(ql):
+        subject, peers = _peer_compare_subject_and_peers(q)
+        return _intent_contract(
+            "peer_compare",
+            answer_style="동종사 비교표 + 핵심 차이 + 최근 데이터 기준 해석",
+            subject=subject,
+            default_peers=peers,
+            required_steps=[
+                "기본 피어 기준으로 비교해볼게 라고 진행",
+                "비교표에 밸류에이션, 성장, 수익성, 건전성, 최근 실적/뉴스를 포함",
+                "로컬 컨텍스트에 없으면 검색해서 보강",
+            ],
+            retrieval_plan=[
+                "Yahoo Finance 최신 시세·밸류에이션·재무 요약",
+                "최근 실적자료/IR 발표",
+                "웹 검색으로 최신 뉴스와 이벤트 확인",
+                "가능하면 SEC/공시 원문으로 재무제표 교차확인",
+            ],
+            forbidden_templates=["현재 시장 상황 인식", "MIXED", "시장 신호 점수"],
+        )
+
+    if _looks_like_portfolio_review(ql, surface):
+        return _intent_contract(
+            "portfolio_review",
+            answer_style="시장 총평보다 보유 비중, 손실, 집중도, 현금, 리스크 예산 우선",
+            required_steps=["보유 비중 확인", "손실/수익률 확인", "집중도와 현금 비중 확인", "먼저 줄일 리스크와 유지 조건 분리"],
+            retrieval_plan=["로컬 포트폴리오 스냅샷", "보유 종목별 최신 시세가 필요하면 검색/quote 보강"],
+            forbidden_templates=["현재 시장 상황 인식", "MIXED", "시장 신호 점수"],
+        )
+
+    if _looks_like_market_brief(ql):
+        return _intent_contract(
+            "market_brief",
+            answer_style="오늘 시장 흐름, 뉴스, 지표, 섹터, 리스크를 종합",
+            required_steps=["최신 뉴스/지수/금리/유가/달러 흐름 확인", "시장 신호와 리스크 요약", "포트폴리오 영향은 별도 분리"],
+            retrieval_plan=["웹 검색 최신 시장 뉴스", "주요 지수/금리/유가/달러", "최근 수집 이벤트와 리포트"],
+        )
+
+    try:
+        asset = _extract_asset_symbol(q)
+    except Exception:
+        asset = None
+    if asset:
+        symbol, name = asset
+        return _intent_contract(
+            "ticker_research",
+            answer_style="개별 종목 리서치: 사업/재무/실적/뉴스/밸류에이션/차트 분리",
+            subject=symbol,
+            required_steps=[f"{name}({symbol}) 기준으로 해석", "최신 데이터가 필요하면 검색", "로컬 컨텍스트 부족만으로 중단하지 않음"],
+            retrieval_plan=["Yahoo Finance 시세·재무 요약", "최근 실적자료/IR", "웹 검색 최신 뉴스", "동종사 비교가 필요하면 피어 자동 선정"],
+            forbidden_templates=["현재 시장 상황 인식", "MIXED", "시장 신호 점수"],
+        )
+
+    return _intent_contract(
+        "general",
+        answer_style="사용자 질문에 직접 답변",
+        required_steps=["화면 맥락보다 사용자 최신 문장 우선", "투자 데이터가 필요한 경우에만 검색/컨텍스트 사용"],
+        forbidden_templates=["억지 시장 리포트", "시장 신호 점수"],
+    )
+
+
+def _intent_contract(name: str, *, answer_style: str, subject: str = "",
+                     default_peers: list[str] | None = None,
+                     required_steps: list[str] | None = None,
+                     retrieval_plan: list[str] | None = None,
+                     forbidden_templates: list[str] | None = None) -> dict:
+    return {
+        "name": name,
+        "answer_style": answer_style,
+        "subject": subject,
+        "default_peers": default_peers or [],
+        "required_steps": required_steps or [],
+        "retrieval_plan": retrieval_plan or [],
+        "forbidden_templates": forbidden_templates or [],
+        "stop_conditions": list(_INTENT_STOP_CONDITIONS),
+    }
+
+
+def _intent_contract_lines(intent: dict) -> list[str]:
+    lines = [
+        "[질문 의도]",
+        f"- intent: {intent.get('name')}",
+        f"- answer_style: {intent.get('answer_style')}",
+        "- 원칙: 화면/메모리보다 사용자 최신 질문 의도가 우선입니다.",
+        "- 컨텍스트 부족은 답변 중단 조건이 아니라 검색 트리거입니다.",
+    ]
+    if intent.get("subject"):
+        lines.append(f"- subject: {intent['subject']}")
+    peers = intent.get("default_peers") or []
+    if peers:
+        lines.append("- default_peers: " + ", ".join(peers))
+    retrieval = intent.get("retrieval_plan") or []
+    if retrieval:
+        lines.append("- retrieval_plan:")
+        lines.extend(f"  - {item}" for item in retrieval)
+    required = intent.get("required_steps") or []
+    if required:
+        lines.append("- required_answer_steps:")
+        lines.extend(f"  - {item}" for item in required)
+    forbidden = intent.get("forbidden_templates") or []
+    if forbidden:
+        lines.append("- 시장 템플릿 금지: " + ", ".join(forbidden))
+    lines.append("- 답변 중단 가능 조건: " + ", ".join(intent.get("stop_conditions") or _INTENT_STOP_CONDITIONS))
+    if intent.get("name") == "peer_compare":
+        lines.append("- 출력 형식: 피어 비교표를 먼저 제시하고, 표 아래에 핵심 차이와 확인한 최신 정보 시점을 씁니다.")
+    return lines
+
+
+def _looks_like_meta_question(ql: str) -> bool:
+    return "왜" in ql and any(word in ql for word in ("답", "했", "안 했", "이렇게", "반복", "못", "고쳐"))
+
+
+def _looks_like_technical_analysis(ql: str) -> bool:
+    return any(word in ql for word in ("기술적 분석", "기술 분석", "차트만", "기술적", "보조지표", "이동평균"))
+
+
+def _looks_like_peer_compare(ql: str) -> bool:
+    compare_words = ("비교", "피어", "peer", "동종", "다른", "경쟁사", "같은 업종")
+    domain_words = ("ib", "은행", "증권", "금융", "회사", "종목")
+    known_subject = any(word in ql for word in ("jpm", "jp모건", "jp 모건", "j.p. morgan", "jpmorgan", "골드만", "모건스탠리"))
+    return any(word in ql for word in compare_words) and (known_subject or any(word in ql for word in domain_words))
+
+
+def _peer_compare_subject_and_peers(question: str) -> tuple[str, list[str]]:
+    ql = str(question or "").lower()
+    if any(word in ql for word in ("jpm", "jp모건", "jp 모건", "j.p. morgan", "jpmorgan")):
+        return "JPM", ["JPM", "GS", "MS", "BAC", "C"]
+    if any(word in ql for word in ("골드만", "goldman", "gs")):
+        return "GS", ["GS", "JPM", "MS", "BAC", "C"]
+    if any(word in ql for word in ("모건스탠리", "morgan stanley", "ms")):
+        return "MS", ["MS", "JPM", "GS", "BAC", "C"]
+    try:
+        asset = _extract_asset_symbol(question)
+    except Exception:
+        asset = None
+    if asset:
+        return asset[0], [asset[0]]
+    return "", ["JPM", "GS", "MS", "BAC", "C"]
+
+
+def _looks_like_portfolio_review(ql: str, surface: str) -> bool:
+    portfolio_words = ("내 포트", "포트", "포트폴리오", "보유", "비중", "손실", "수익률", "리스크", "현금", "계좌")
+    return any(word in ql for word in portfolio_words) or surface == "portfolio"
+
+
+def _looks_like_market_brief(ql: str) -> bool:
+    return any(word in ql for word in ("오늘 시장", "시장 어때", "시장 분위기", "증시", "나스닥", "s&p", "fomc", "금리", "유가", "달러"))
+
+
 def _build_general_chat_prompt(question: str, pack: dict, history: list[dict] | None = None) -> str:
+    intent = _classify_question_intent(question, pack, history)
+    intent_lines = _intent_contract_lines(intent)
     events = (pack.get("sources") or {}).get("events") or []
     memory = pack.get("memory") or []
     hist = []
@@ -1137,9 +1327,12 @@ def _build_general_chat_prompt(question: str, pack: dict, history: list[dict] | 
         "같은 템플릿을 반복하지 말고, 사용자의 최신 문장에 직접 답한다.",
         "공유 메모리는 참고 맥락일 뿐이며 현재 사용자 질문과 화면 컨텍스트가 우선한다.",
         "실제 매매 지시는 피하고, 판단 근거와 확인할 점을 짧고 명확하게 말한다.",
-        "모르면 모른다고 말하고, 필요한 정보가 무엇인지 묻는다.",
+        "컨텍스트가 부족하다는 이유만으로 답변을 중단하지 않는다. 부족하면 먼저 검색 또는 필요한 데이터 보강으로 전환한다.",
+        "종목명이 불명확하거나, 검색 도구가 없거나, 최신 데이터 접근이 실패하거나, 비교축이 불명확할 때만 짧게 확인 질문을 한다.",
         "최신 시세·뉴스 등 실시간 정보가 필요하고 웹 검색 도구가 있으면 검색해서 보강하되, 정보의 시점을 명시한다.",
         f"현재 화면: {pack.get('surface') or 'market'}",
+        "",
+        *intent_lines,
         "",
         "[최근 대화]",
         *(hist or ["- 없음"]),

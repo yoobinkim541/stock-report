@@ -488,6 +488,110 @@ def test_agent_console_prefers_llm_when_enabled(monkeypatch):
     assert calls == [("지금 시장이랑 포트폴리오 리스크를 봐줘", "market")]
 
 
+def test_agent_peer_compare_prompt_requires_search_and_default_ib_peers(monkeypatch):
+    monkeypatch.setenv("AGENT_CONSOLE_LLM_ENABLED", "1")
+    from agent_console import agent
+
+    seen = {}
+
+    def fake_prompt(prompt, runner=None):
+        seen["prompt"] = prompt
+        return "피어 비교 답변"
+
+    monkeypatch.setattr(agent, "_try_llm_prompt", fake_prompt)
+    pack = {
+        "surface": "market",
+        "generated_at": "2026-07-22T00:00:00+00:00",
+        "sources": {"events": [], "source_counts": [], "symbol_counts": []},
+        "reports": [],
+        "ml_activity": [],
+        "portfolio": {"holdings": [], "summary": {}, "risk": {}, "targets": {}, "errors": []},
+        "paper": {"kr": None, "us": None, "combined": None, "errors": []},
+        "models": {"items": []},
+        "memory": [],
+        "focus": [],
+    }
+
+    assert agent._try_llm_chat("JP모건 다른 IB랑 비교해줘", pack, history=[]) == "피어 비교 답변"
+
+    prompt = seen["prompt"]
+    assert "intent: peer_compare" in prompt
+    for ticker in ("JPM", "GS", "MS", "BAC", "C"):
+        assert ticker in prompt
+    assert "Yahoo Finance" in prompt or "야후 파이낸스" in prompt
+    assert "최근 실적" in prompt
+    assert "웹 검색" in prompt
+    assert "컨텍스트 부족" in prompt and "검색 트리거" in prompt
+    assert "비교표" in prompt
+
+
+def test_agent_meta_question_prompt_forbids_market_template(monkeypatch):
+    monkeypatch.setenv("AGENT_CONSOLE_LLM_ENABLED", "1")
+    from agent_console import agent
+
+    seen = {}
+    monkeypatch.setattr(agent, "_try_llm_prompt", lambda prompt, runner=None: seen.setdefault("prompt", prompt) or "메타 답변")
+    pack = {"surface": "market", "sources": {"events": []}, "memory": [], "portfolio": {}, "paper": {}}
+
+    agent._try_llm_chat("왜 이렇게 답했어?", pack, history=[])
+
+    prompt = seen["prompt"]
+    assert "intent: meta" in prompt
+    assert "시장 템플릿 금지" in prompt
+    assert "시장 신호 점수" in prompt
+    assert "MIXED" in prompt
+
+
+def test_agent_portfolio_prompt_prioritizes_holdings_risk_and_loss(monkeypatch):
+    monkeypatch.setenv("AGENT_CONSOLE_LLM_ENABLED", "1")
+    from agent_console import agent
+
+    seen = {}
+    monkeypatch.setattr(agent, "_try_llm_prompt", lambda prompt, runner=None: seen.setdefault("prompt", prompt) or "포트 답변")
+    pack = {
+        "surface": "market",
+        "sources": {"events": []},
+        "memory": [],
+        "portfolio": {
+            "holdings": [
+                {"ticker": "NVDA", "name": "Nvidia", "weight": 32.0, "ret": 18.0},
+                {"ticker": "CASH", "name": "Cash", "weight": 20.0, "ret": 0.0},
+            ],
+            "summary": {},
+            "risk": {},
+            "targets": {},
+            "errors": [],
+        },
+        "paper": {},
+    }
+
+    agent._try_llm_chat("내 포트 평가해줘", pack, history=[])
+
+    prompt = seen["prompt"]
+    assert "intent: portfolio_review" in prompt
+    assert "보유 비중" in prompt
+    assert "손실" in prompt
+    assert "리스크" in prompt
+    assert "시장 총평보다" in prompt
+
+
+def test_agent_technical_analysis_prompt_excludes_news_and_macro(monkeypatch):
+    monkeypatch.setenv("AGENT_CONSOLE_LLM_ENABLED", "1")
+    from agent_console import agent
+
+    seen = {}
+    monkeypatch.setattr(agent, "_try_llm_prompt", lambda prompt, runner=None: seen.setdefault("prompt", prompt) or "기술 답변")
+    pack = {"surface": "market", "sources": {"events": []}, "memory": [], "portfolio": {}, "paper": {}}
+
+    agent._try_llm_chat("NVDA 기술적 분석만 해봐", pack, history=[])
+
+    prompt = seen["prompt"]
+    assert "intent: technical_analysis" in prompt
+    assert "뉴스 제외" in prompt
+    assert "거시 제외" in prompt
+    assert "가격" in prompt and "거래량" in prompt
+
+
 def test_agent_portfolio_risk_question_uses_holdings_not_market_template(monkeypatch):
     monkeypatch.setenv("AGENT_CONSOLE_LLM_ENABLED", "0")
     from agent_console.agent import _compose_answer
