@@ -1,5 +1,6 @@
 'use client';
 
+import type { ReactNode } from 'react';
 import Link from 'next/link';
 import { usePathname } from 'next/navigation';
 import {
@@ -17,7 +18,7 @@ import {
 import { navItems, sidebarStats, sidebarWatchlist } from '../lib/dashboard-data';
 
 type ShellProps = {
-  children: React.ReactNode;
+  children: ReactNode;
 };
 
 const iconMap = {
