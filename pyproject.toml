@@ -9,7 +9,12 @@ requires-python = ">=3.11"
 
 [tool.setuptools]
 packages = []
-py-modules = []
+py-modules = [
+  "portfolio_sync_server",
+  "store",
+  "notify",
+  "safe_io",
+]
 
 [tool.vercel]
 entrypoint = "portfolio_sync_server:app"
