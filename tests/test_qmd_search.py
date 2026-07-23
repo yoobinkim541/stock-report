@@ -11,7 +11,7 @@ class _Result:
         self.returncode = returncode
 
 
-def test_qmd_search_parses_json_results_and_builds_query_command(monkeypatch):
+def test_qmd_search_parses_json_results_and_builds_search_command(monkeypatch):
     monkeypatch.setenv("AGENT_CONSOLE_QMD_ENABLED", "1")
     monkeypatch.setenv("AGENT_CONSOLE_QMD_BIN", "qmd")
     monkeypatch.setenv("AGENT_CONSOLE_QMD_COLLECTIONS", "wiki")
@@ -34,7 +34,7 @@ def test_qmd_search_parses_json_results_and_builds_query_command(monkeypatch):
     results = qmd_search.search("손실한도", limit=3, runner=fake_runner)
 
     assert calls
-    assert calls[0][:2] == ["qmd", "query"]
+    assert calls[0][:2] == ["qmd", "search"]
     assert calls[0][2] == "손실한도"
     assert "--format" in calls[0]
     assert "json" in calls[0]
@@ -88,3 +88,18 @@ def test_qmd_export_pages_writes_markdown_mirror(monkeypatch, tmp_path):
     assert "# 손실한도와 레버리지" in text
     assert "surface: portfolio" in text
     assert "손실한도 1% 기준" in text
+
+
+def test_qmd_search_can_use_query_command_when_configured(monkeypatch):
+    monkeypatch.setenv("AGENT_CONSOLE_QMD_ENABLED", "1")
+    monkeypatch.setenv("AGENT_CONSOLE_QMD_COMMAND", "query")
+    calls = []
+
+    def fake_runner(cmd, capture_output, text, timeout):
+        calls.append(cmd)
+        return _Result("[]")
+
+    from agent_console import qmd_search
+
+    assert qmd_search.search("손실한도", runner=fake_runner) == []
+    assert calls[0][:2] == ["qmd", "query"]

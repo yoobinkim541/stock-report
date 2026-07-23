@@ -35,6 +35,11 @@ def collections() -> list[str]:
     return [item.strip() for item in raw.split(",") if item.strip()]
 
 
+def search_command() -> str:
+    command = os.getenv("AGENT_CONSOLE_QMD_COMMAND", "search").strip().lower()
+    return command if command in {"search", "query"} else "search"
+
+
 def wiki_docs_dir() -> Path:
     override = os.getenv("AGENT_CONSOLE_QMD_WIKI_DIR", "").strip()
     if override:
@@ -49,6 +54,7 @@ def status() -> dict:
         "bin": binary,
         "installed": shutil.which(binary) is not None,
         "collections": collections(),
+        "command": search_command(),
         "wiki_dir": str(wiki_docs_dir()),
     }
 
@@ -79,7 +85,7 @@ def search(
     if not enabled() or not query:
         return []
     limit = max(1, min(int(limit or 10), 50))
-    cmd = [qmd_bin(), "query", query, "--format", "json", "-n", str(limit)]
+    cmd = [qmd_bin(), search_command(), query, "--format", "json", "-n", str(limit)]
     for collection in collections():
         cmd.extend(["-c", collection])
     try:

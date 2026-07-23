@@ -9,6 +9,7 @@ def _isolate(monkeypatch, tmp_path: Path) -> None:
     monkeypatch.setenv("AGENT_CONSOLE_SOURCE_CACHE_DIR", str(tmp_path / "reports" / "source-cache"))
     monkeypatch.setenv("AGENT_CONSOLE_ML_DATA_DIR", str(tmp_path / "reports" / "ml-data"))
     monkeypatch.setenv("AGENT_CONSOLE_SHARED_MEMORY_DIR", str(tmp_path / "data" / "shared-memory"))
+    monkeypatch.setenv("AGENT_CONSOLE_QMD_ENABLED", "0")
     # 단일 월드 메모리(lib.world_memory)도 테스트별 격리 — DB_PATH 는 호출 시점 참조
     from lib import world_memory as _wm
     monkeypatch.setattr(_wm, "DB_PATH", tmp_path / "world_issue_log.sqlite3")

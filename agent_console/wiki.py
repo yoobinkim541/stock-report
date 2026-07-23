@@ -276,49 +276,18 @@ def _page_from_qmd_hit(hit: dict, *, by_id: dict[str, dict], surface: str, statu
         return None
     page_id = _clean(hit.get("page_id") or hit.get("id"), 120)
     source = by_id.get(page_id)
-    if source:
-        page = dict(source)
-        if status and status != "all" and page.get("status") != status:
-            return None
-        if surface and surface != "all" and page.get("surface") != surface:
-            return None
-        page["search_provider"] = "qmd"
-        page["search_score"] = hit.get("score")
-        if hit.get("summary"):
-            page["qmd_snippet"] = _clean(hit.get("summary"), 500)
-        return page
-    hit_surface = _clean(hit.get("surface") or surface or WIKI_SURFACE, 60).lower() or WIKI_SURFACE
-    hit_status = _clean(hit.get("status") or "draft", 40).lower() or "draft"
-    if surface and surface != "all" and hit_surface not in {surface, "all", WIKI_SURFACE}:
+    if not source:
         return None
-    if status and status != "all" and hit_status != status:
+    page = dict(source)
+    if status and status != "all" and page.get("status") != status:
         return None
-    title = _clean(hit.get("title") or "qmd 문서", 160)
-    summary = _clean(hit.get("summary") or hit.get("snippet") or "", 2400)
-    body = _clean(hit.get("body") or summary, 6000)
-    return {
-        "id": page_id or _page_id(title, hit_surface, "note"),
-        "title": title,
-        "slug": _slugify(title),
-        "summary": summary,
-        "body": body,
-        "tags": _dedupe_texts([*(hit.get("tags") or []), "qmd"], limit=20, item_limit=60),
-        "status": hit_status if hit_status in VALID_STATUSES else "draft",
-        "surface": hit_surface,
-        "kind": _clean(hit.get("kind") or "note", 40).lower() or "note",
-        "confidence": 0.5,
-        "created_at": "",
-        "updated_at": "",
-        "source": {"provider": "qmd"},
-        "source_refs": _dedupe_texts(hit.get("source_refs") or [], limit=12, item_limit=120),
-        "decisions": [],
-        "openQuestions": [],
-        "messages": [],
-        "snippet": summary[:260] if summary else "",
-        "raw": hit,
-        "search_provider": "qmd",
-        "search_score": hit.get("score"),
-    }
+    if surface and surface != "all" and page.get("surface") != surface:
+        return None
+    page["search_provider"] = "qmd"
+    page["search_score"] = hit.get("score")
+    if hit.get("summary"):
+        page["qmd_snippet"] = _clean(hit.get("summary"), 500)
+    return page
 
 
 def get_page(page_id: str) -> dict | None:
