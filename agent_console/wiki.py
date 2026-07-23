@@ -4,7 +4,7 @@ import json
 import os
 import hashlib
 import re
-from collections import Counter
+from collections import Counter, defaultdict
 from collections.abc import Callable
 from datetime import datetime, timezone
 from pathlib import Path
@@ -17,6 +17,7 @@ WIKI_TAG = "wiki"
 WIKI_SURFACE = "wiki"
 VALID_STATUSES = ("draft", "reviewed", "stable", "archived")
 VALID_KINDS = ("note", "playbook", "decision", "risk", "concept", "source_digest")
+MAX_LINKS = 12
 
 
 def _now() -> str:
@@ -48,6 +49,11 @@ def _dedupe_texts(values: Iterable[object], *, limit: int = 12, item_limit: int 
         if len(out) >= limit:
             break
     return out
+
+
+def _clean_links(values: Iterable[object], *, self_id: str = "", limit: int = MAX_LINKS) -> list[str]:
+    filtered = [v for v in (values or []) if _clean(v, 80) != self_id]
+    return _dedupe_texts(filtered, limit=limit, item_limit=80)
 
 
 def _page_id(title: str, surface: str, kind: str) -> str:
@@ -135,6 +141,33 @@ def _is_wiki_record(record: dict) -> bool:
     return surface == WIKI_SURFACE
 
 
+def _wiki_records() -> list[dict]:
+    try:
+        rows = shared_memory.all_records()
+    except Exception:
+        rows = []
+    return [row for row in rows if _is_wiki_record(row)]
+
+
+def _backlink_index(records: list[dict]) -> dict[str, list[str]]:
+    index: dict[str, list[str]] = defaultdict(list)
+    for row in records:
+        row_id = _clean(row.get("id"), 80)
+        if not row_id:
+            continue
+        for target_id in _clean_links(row.get("links") or [], self_id=row_id):
+            index[target_id].append(row_id)
+    return index
+
+
+def _apply_backlinks(pages: list[dict], records: list[dict]) -> list[dict]:
+    index = _backlink_index(records)
+    for page in pages:
+        page_id = _clean(page.get("id"), 80)
+        page["backlinks"] = _dedupe_texts(index.get(page_id, []), limit=MAX_LINKS, item_limit=80)
+    return pages
+
+
 def _record_to_page(record: dict) -> dict:
     tags = _dedupe_texts(record.get("tags") or [], limit=20, item_limit=60)
     summary = _clean(record.get("summary") or "", 2400)
@@ -181,6 +214,8 @@ def _record_to_page(record: dict) -> dict:
         "updated_at": record.get("updatedAt") or record.get("createdAt") or "",
         "source": source,
         "source_refs": source_refs,
+        "links": _clean_links(record.get("links") or [], self_id=_clean(record.get("id"), 80)),
+        "backlinks": [],
         "decisions": decisions,
         "openQuestions": open_questions,
         "messages": messages,
@@ -235,17 +270,13 @@ def list_pages(*, query: str = "", surface: str = "all", status: str = "all", li
     query = _clean(query, 600)
     surface = _clean(surface or "all", 60).lower() or "all"
     status = _clean(status or "all", 40).lower() or "all"
-    try:
-        rows = shared_memory.all_records()
-    except Exception:
-        rows = []
-    records = [row for row in rows if _is_wiki_record(row)]
+    records = _wiki_records()
     if not records:
         return []
     fallback = _fallback_ranked_pages(records, query=query, surface=surface, status=status, limit=limit)
     qmd_pages = _qmd_ranked_pages(records, query=query, surface=surface, status=status, limit=limit)
     if not qmd_pages:
-        return fallback
+        return _apply_backlinks(fallback, records)
     merged: list[dict] = []
     seen: set[str] = set()
     for page in [*qmd_pages, *fallback]:
@@ -257,7 +288,7 @@ def list_pages(*, query: str = "", surface: str = "all", status: str = "all", li
         merged.append(page)
         if len(merged) >= limit:
             break
-    return merged
+    return _apply_backlinks(merged, records)
 
 
 def _fallback_ranked_pages(records: list[dict], *, query: str, surface: str, status: str, limit: int) -> list[dict]:
@@ -337,14 +368,16 @@ def get_page(page_id: str) -> dict | None:
     page_id = _clean(page_id, 80)
     if not page_id:
         return None
-    for row in shared_memory.all_records():
-        if row.get("id") == page_id and _is_wiki_record(row):
-            return _record_to_page(row)
+    records = _wiki_records()
+    for row in records:
+        if row.get("id") == page_id:
+            page = _record_to_page(row)
+            return _apply_backlinks([page], records)[0]
     return None
 
 
 def stats() -> dict:
-    rows = [row for row in shared_memory.all_records() if _is_wiki_record(row)]
+    rows = _wiki_records()
     status_counts = Counter()
     kind_counts = Counter()
     surface_counts = Counter()
@@ -533,6 +566,7 @@ def upsert_page(page: dict) -> dict:
     source_refs = _dedupe_texts(page.get("source_refs") or [], limit=12, item_limit=120)
     status = normalize_trust_status(page.get("status") or "draft", source_refs)
     page_id = _clean(page.get("id") or _page_id(title, surface, kind), 80)
+    links = _clean_links(page.get("links") or [], self_id=page_id)
 
     existing = get_page(page_id) or {}
     created_at = _clean(existing.get("created_at") or page.get("created_at") or _now(), 80)
@@ -545,6 +579,7 @@ def upsert_page(page: dict) -> dict:
         "body": _clean(page.get("body") or "", 6000),
         "tags": tags,
         "artifacts": source_refs,
+        "links": links,
         "messages": page.get("messages") or [],
         "decisions": _dedupe_texts(page.get("decisions") or [], limit=8, item_limit=280),
         "openQuestions": _dedupe_texts(page.get("openQuestions") or [], limit=8, item_limit=280),

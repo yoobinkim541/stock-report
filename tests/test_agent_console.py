@@ -144,6 +144,71 @@ def test_wiki_capture_and_context_section(monkeypatch, tmp_path):
     assert "손실한도와 레버리지" in section
 
 
+def test_wiki_upsert_page_persists_links(monkeypatch, tmp_path):
+    _isolate(monkeypatch, tmp_path)
+
+    from agent_console import wiki
+
+    target = wiki.upsert_page({
+        "title": "링크 대상 페이지",
+        "summary": "대상 요약",
+        "body": "대상 본문",
+        "surface": "market",
+        "kind": "note",
+        "status": "draft",
+        "tags": ["wiki"],
+        "source_refs": [],
+    })
+    source = wiki.upsert_page({
+        "title": "링크 출발 페이지",
+        "summary": "출발 요약",
+        "body": "출발 본문",
+        "surface": "market",
+        "kind": "note",
+        "status": "draft",
+        "tags": ["wiki"],
+        "source_refs": [],
+        "links": [target["id"], target["id"], ""],
+    })
+
+    assert source["links"] == [target["id"]]
+
+
+def test_wiki_get_page_and_list_pages_compute_backlinks(monkeypatch, tmp_path):
+    _isolate(monkeypatch, tmp_path)
+
+    from agent_console import wiki
+
+    target = wiki.upsert_page({
+        "title": "백링크 대상 페이지",
+        "summary": "대상 요약",
+        "body": "대상 본문",
+        "surface": "market",
+        "kind": "note",
+        "status": "draft",
+        "tags": ["wiki"],
+        "source_refs": [],
+    })
+    source = wiki.upsert_page({
+        "title": "백링크 출발 페이지",
+        "summary": "출발 요약",
+        "body": "출발 본문",
+        "surface": "market",
+        "kind": "note",
+        "status": "draft",
+        "tags": ["wiki"],
+        "source_refs": [],
+        "links": [target["id"]],
+    })
+
+    fetched_target = wiki.get_page(target["id"])
+    assert fetched_target["backlinks"] == [source["id"]]
+
+    listed = {page["id"]: page for page in wiki.list_pages(surface="market", limit=10)}
+    assert listed[target["id"]]["backlinks"] == [source["id"]]
+    assert listed[source["id"]]["links"] == [target["id"]]
+
+
 def test_wiki_conversation_only_pages_stay_unverified_draft(monkeypatch, tmp_path):
     _isolate(monkeypatch, tmp_path)
 
