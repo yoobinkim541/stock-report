@@ -768,7 +768,7 @@ def auto_curate_from_chat(
         except Exception:
             plan = None
     if not plan:
-        plan = _heuristic_curation_plan(question, answer, surface=surface, target=target)
+        plan = _heuristic_curation_plan(question, answer, surface=surface, target=target, candidates=candidates)
     if not plan:
         return None
 
@@ -836,7 +836,8 @@ def _build_auto_curation_prompt(
         "가능한 action 값은 create, update, skip 이다.",
         "update 를 고를 때는 target_id 를 기존 후보 페이지 id 로 지정한다.",
         "확신이 낮으면 status 는 draft, 중간이면 reviewed, 이미 안정적인 운영 규칙이면 stable 이다.",
-        "필드: action, title, summary, body, kind, status, tags, source_refs, target_id, confidence, reason.",
+        "필드: action, title, summary, body, kind, status, tags, source_refs, links, target_id, confidence, reason.",
+        "관련 있는 기존 위키 후보가 있으면 해당 id 를 links 배열에 넣는다. 관련 없으면 links 는 빈 배열이다.",
         f"surface: {surface}",
         "",
         "[사용자 질문]",
@@ -865,7 +866,7 @@ def _build_auto_curation_prompt(
     lines += [
         "",
         "JSON 예시:",
-        '{"action":"create","title":"손실한도와 레버리지","summary":"...","body":"...","kind":"playbook","status":"reviewed","tags":["risk","portfolio"],"source_refs":["conversation:123"],"target_id":"","confidence":0.86,"reason":"..."}',
+        '{"action":"create","title":"손실한도와 레버리지","summary":"...","body":"...","kind":"playbook","status":"reviewed","tags":["risk","portfolio"],"source_refs":["conversation:123"],"links":[],"target_id":"","confidence":0.86,"reason":"..."}',
     ]
     return "\n".join(lines)
 
@@ -897,6 +898,7 @@ def _heuristic_curation_plan(
     *,
     surface: str,
     target: dict | None = None,
+    candidates: list[dict] | None = None,
 ) -> dict | None:
     text = f"{question}\n{answer}".lower()
     if not _should_auto_curate(question, answer):
@@ -908,6 +910,7 @@ def _heuristic_curation_plan(
     if any(token in text for token in ("규칙", "기준", "조건", "손실한도", "레버리지", "검증", "원문", "본문", "편향", "수집")):
         status = "reviewed"
     title = _derive_title(question, answer)
+    target_id = target.get("id") if target else ""
     plan = {
         "action": "update" if target else "create",
         "title": title,
@@ -917,7 +920,8 @@ def _heuristic_curation_plan(
         "status": status,
         "tags": _auto_tags(text, surface, kind),
         "source_refs": [],
-        "target_id": target.get("id") if target else "",
+        "links": _auto_link_candidates(question, surface, candidates or [], exclude_id=target_id),
+        "target_id": target_id,
         "confidence": 0.72 if status == "reviewed" else 0.58,
         "reason": "heuristic curation",
         "source": "heuristic",
@@ -935,7 +939,12 @@ def _plan_to_page_payload(
 ) -> dict | None:
     if not isinstance(plan, dict):
         return None
-    target_id = _clean(plan.get("target_id") or (target.get("id") if target else ""), 80)
+    action = _clean(plan.get("action") or "create", 20).lower()
+    plan_target_id = plan.get("target_id") if "target_id" in plan else None
+    target_id = _clean(
+        plan_target_id if plan_target_id is not None else (target.get("id") if target and action != "create" else ""),
+        80
+    )
     title = _clean(plan.get("title") or _derive_title(question, answer), 160)
     summary = _clean(plan.get("summary") or answer[:2400] or question[:2400], 2400)
     body = _clean(plan.get("body") or answer or summary, 6000)
@@ -946,6 +955,10 @@ def _plan_to_page_payload(
     if status not in VALID_STATUSES:
         status = "draft"
     confidence = _num_or_default(plan.get("confidence"), 0.5)
+    final_id = target_id or _page_id(title, surface, kind)
+    links = _clean_links(plan.get("links") or [], self_id=final_id)
+    if target and action != "create":
+        links = _clean_links([*(target.get("links") or []), *links], self_id=final_id)
     tags = _dedupe_texts([
         WIKI_TAG,
         surface,
@@ -961,7 +974,7 @@ def _plan_to_page_payload(
         {"role": "user", "text": question},
         {"role": "assistant", "text": answer},
     ]
-    if target:
+    if target and action != "create":
         messages = _merge_messages(target.get("messages") or [], messages)
         source_refs = _dedupe_texts([*(target.get("source_refs") or []), *source_refs], limit=12, item_limit=180)
         tags = _dedupe_texts([*(target.get("tags") or []), *tags], limit=20, item_limit=60)
@@ -970,7 +983,7 @@ def _plan_to_page_payload(
     if not title or not body:
         return None
     return {
-        "id": target_id or _page_id(title, surface, kind),
+        "id": final_id,
         "title": title,
         "summary": summary,
         "body": body,
@@ -979,6 +992,7 @@ def _plan_to_page_payload(
         "status": status,
         "tags": tags,
         "source_refs": source_refs,
+        "links": links,
         "messages": messages,
         "confidence": confidence,
     }
@@ -996,6 +1010,28 @@ def _best_candidate_page(question: str, surface: str, candidates: list[dict]) ->
     if best_score < AUTO_CURATE_MIN_SCORE:
         return None
     return best_page
+
+
+def _auto_link_candidates(
+    question: str,
+    surface: str,
+    candidates: list[dict],
+    *,
+    exclude_id: str = "",
+    limit: int = 3,
+) -> list[str]:
+    scored: list[tuple[int, str]] = []
+    seen: set[str] = set()
+    for page in candidates:
+        page_id = _clean(page.get("id"), 80)
+        if not page_id or page_id == exclude_id or page_id in seen:
+            continue
+        seen.add(page_id)
+        score = _candidate_score(page.get("raw") or {}, question, surface, "all")
+        if score >= AUTO_CURATE_MIN_SCORE:
+            scored.append((score, page_id))
+    scored.sort(key=lambda item: item[0], reverse=True)
+    return [page_id for _score, page_id in scored[:limit]]
 
 
 def _infer_kind_from_text(text: str) -> str:

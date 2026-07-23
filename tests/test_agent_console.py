@@ -536,6 +536,91 @@ def test_wiki_auto_curate_from_chat_updates_existing_page(monkeypatch, tmp_path)
     assert "leverage" in saved["page"]["tags"]
 
 
+def test_wiki_auto_curate_llm_plan_links_are_persisted(monkeypatch, tmp_path):
+    _isolate(monkeypatch, tmp_path)
+
+    from agent_console import wiki
+
+    related = wiki.upsert_page({
+        "title": "레버리지 손실한도 기준",
+        "summary": "레버리지 상품의 손실한도 원칙",
+        "body": "TQQQ 같은 레버리지 상품은 손실한도를 더 좁게 잡는다.",
+        "surface": "portfolio",
+        "kind": "playbook",
+        "status": "reviewed",
+        "tags": ["risk", "portfolio"],
+        "source_refs": ["conversation:seed"],
+    })
+
+    def fake_llm(prompt: str) -> str:
+        assert "links" in prompt
+        return (
+            '{"action":"create","title":"현금 비중과 변동성 예산","summary":"현금 비중은 변동성 예산과 함께 본다.",'
+            '"body":"변동성이 커지면 현금 비중을 늘린다.\\n- 변동성 지표 확인\\n- 현금 20% 하한",'
+            '"kind":"playbook","status":"reviewed","tags":["risk","portfolio"],'
+            '"source_refs":["conversation:003"],"links":["' + related["id"] + '"],'
+            '"target_id":"","confidence":0.8,"reason":"related to leverage loss limit"}'
+        )
+
+    saved = wiki.auto_curate_from_chat(
+        "현금 비중 기준은 변동성 예산과 어떻게 맞춰?",
+        "변동성이 커지면 현금 비중을 늘린다.\n- 변동성 지표 확인\n- 현금 20% 하한\n- 손실 한도 검증 필요",
+        surface="portfolio",
+        llm=fake_llm,
+        pack={"focus": ["포트폴리오"]},
+        history=[],
+    )
+
+    assert saved is not None
+    assert related["id"] in saved["page"]["links"]
+
+    backfilled = wiki.get_page(related["id"])
+    assert saved["page"]["id"] in backfilled["backlinks"]
+
+
+def test_wiki_auto_curate_heuristic_auto_links_related_candidate(monkeypatch, tmp_path):
+    _isolate(monkeypatch, tmp_path)
+
+    from agent_console import wiki
+
+    first = wiki.upsert_page({
+        "title": "변동성 예산 원칙 A",
+        "summary": "변동성 예산 원칙 A 요약",
+        "body": "변동성 예산 원칙 A 본문",
+        "surface": "portfolio",
+        "kind": "playbook",
+        "status": "reviewed",
+        "tags": ["risk", "portfolio"],
+        "source_refs": ["conversation:seed-a"],
+    })
+    second = wiki.upsert_page({
+        "title": "변동성 예산 원칙 B",
+        "summary": "변동성 예산 원칙 B 요약",
+        "body": "변동성 예산 원칙 B 본문",
+        "surface": "portfolio",
+        "kind": "playbook",
+        "status": "reviewed",
+        "tags": ["risk", "portfolio"],
+        "source_refs": ["conversation:seed-b"],
+    })
+
+    saved = wiki.auto_curate_from_chat(
+        "변동성 예산 원칙을 다시 정리해줘",
+        "변동성이 커지면 현금 비중을 늘린다.\n- 변동성 지표 확인\n- 현금 20% 하한\n- 손실 한도 검증 필요",
+        surface="portfolio",
+        llm=None,
+        pack={"focus": []},
+        history=[],
+    )
+
+    assert saved is not None
+    target_id = saved["page"]["id"]
+    assert target_id in {first["id"], second["id"]}
+    other_id = second["id"] if target_id == first["id"] else first["id"]
+    assert other_id in saved["page"]["links"]
+    assert target_id not in saved["page"]["links"]
+
+
 def test_wiki_api_routes(monkeypatch, tmp_path):
     _isolate(monkeypatch, tmp_path)
 
