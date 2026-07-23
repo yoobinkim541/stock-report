@@ -939,12 +939,7 @@ def _plan_to_page_payload(
 ) -> dict | None:
     if not isinstance(plan, dict):
         return None
-    action = _clean(plan.get("action") or "create", 20).lower()
-    plan_target_id = plan.get("target_id") if "target_id" in plan else None
-    target_id = _clean(
-        plan_target_id if plan_target_id is not None else (target.get("id") if target and action != "create" else ""),
-        80
-    )
+    target_id = _clean(plan.get("target_id") or (target.get("id") if target else ""), 80)
     title = _clean(plan.get("title") or _derive_title(question, answer), 160)
     summary = _clean(plan.get("summary") or answer[:2400] or question[:2400], 2400)
     body = _clean(plan.get("body") or answer or summary, 6000)
@@ -957,7 +952,7 @@ def _plan_to_page_payload(
     confidence = _num_or_default(plan.get("confidence"), 0.5)
     final_id = target_id or _page_id(title, surface, kind)
     links = _clean_links(plan.get("links") or [], self_id=final_id)
-    if target and action != "create":
+    if target:
         links = _clean_links([*(target.get("links") or []), *links], self_id=final_id)
     tags = _dedupe_texts([
         WIKI_TAG,
@@ -974,7 +969,7 @@ def _plan_to_page_payload(
         {"role": "user", "text": question},
         {"role": "assistant", "text": answer},
     ]
-    if target and action != "create":
+    if target:
         messages = _merge_messages(target.get("messages") or [], messages)
         source_refs = _dedupe_texts([*(target.get("source_refs") or []), *source_refs], limit=12, item_limit=180)
         tags = _dedupe_texts([*(target.get("tags") or []), *tags], limit=20, item_limit=60)

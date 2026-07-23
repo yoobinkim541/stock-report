@@ -545,7 +545,7 @@ def test_wiki_auto_curate_llm_plan_links_are_persisted(monkeypatch, tmp_path):
         "title": "레버리지 손실한도 기준",
         "summary": "레버리지 상품의 손실한도 원칙",
         "body": "TQQQ 같은 레버리지 상품은 손실한도를 더 좁게 잡는다.",
-        "surface": "portfolio",
+        "surface": "market",
         "kind": "playbook",
         "status": "reviewed",
         "tags": ["risk", "portfolio"],
@@ -576,6 +576,44 @@ def test_wiki_auto_curate_llm_plan_links_are_persisted(monkeypatch, tmp_path):
 
     backfilled = wiki.get_page(related["id"])
     assert saved["page"]["id"] in backfilled["backlinks"]
+
+
+def test_wiki_auto_curate_llm_update_with_blank_target_id_falls_back_to_matched_candidate(monkeypatch, tmp_path):
+    _isolate(monkeypatch, tmp_path)
+
+    from agent_console import wiki
+
+    existing = wiki.upsert_page({
+        "title": "변동성 예산 원칙 A",
+        "summary": "변동성 예산 원칙 A 요약",
+        "body": "변동성 예산 원칙 A 본문",
+        "surface": "portfolio",
+        "kind": "playbook",
+        "status": "reviewed",
+        "tags": ["risk", "portfolio"],
+        "source_refs": ["conversation:seed-a"],
+    })
+
+    def fake_llm(prompt: str) -> str:
+        return (
+            '{"action":"update","title":"변동성 예산 원칙 A","summary":"업데이트된 요약",'
+            '"body":"변동성이 커지면 현금 비중을 늘린다.\\n- 변동성 지표 확인\\n- 현금 20% 하한\\n- 손실 한도 검증 필요",'
+            '"kind":"playbook","status":"reviewed","tags":["risk","portfolio"],'
+            '"source_refs":["conversation:updated"],"links":[],"target_id":"","confidence":0.8,'
+            '"reason":"blank target_id should still fall back to matched candidate"}'
+        )
+
+    saved = wiki.auto_curate_from_chat(
+        "변동성 예산 원칙을 다시 정리해줘",
+        "변동성이 커지면 현금 비중을 늘린다.\n- 변동성 지표 확인\n- 현금 20% 하한\n- 손실 한도 검증 필요",
+        surface="portfolio",
+        llm=fake_llm,
+        pack={"focus": []},
+        history=[],
+    )
+
+    assert saved is not None
+    assert saved["page"]["id"] == existing["id"]
 
 
 def test_wiki_auto_curate_heuristic_auto_links_related_candidate(monkeypatch, tmp_path):
