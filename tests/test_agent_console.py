@@ -465,6 +465,72 @@ def test_wiki_context_section_includes_search_and_trust_metadata(monkeypatch, tm
     assert "출처: source:saveticker:qmd-meta" in section
 
 
+def test_wiki_index_md_shows_link_marker(monkeypatch, tmp_path):
+    _isolate(monkeypatch, tmp_path)
+
+    from agent_console import wiki
+
+    first = wiki.upsert_page({
+        "title": "링크 원본 페이지",
+        "summary": "원본 요약",
+        "body": "원본 본문",
+        "surface": "market",
+        "kind": "note",
+        "status": "draft",
+        "tags": ["wiki"],
+        "source_refs": [],
+    })
+    wiki.upsert_page({
+        "title": "링크 대상 페이지",
+        "summary": "대상 요약",
+        "body": "대상 본문",
+        "surface": "market",
+        "kind": "note",
+        "status": "draft",
+        "tags": ["wiki"],
+        "source_refs": [],
+        "links": [first["id"]],
+    })
+
+    wiki.rebuild_artifacts()
+    index_text = (wiki.wiki_artifacts_dir() / "index.md").read_text(encoding="utf-8")
+
+    assert "[[링크 대상 페이지]]" in index_text
+    assert "🔗1" in index_text
+
+
+def test_wiki_context_section_includes_related_pages(monkeypatch, tmp_path):
+    _isolate(monkeypatch, tmp_path)
+
+    from agent_console import wiki
+
+    related = wiki.upsert_page({
+        "title": "연관 위키 페이지",
+        "summary": "연관 요약",
+        "body": "연관 본문",
+        "surface": "market",
+        "kind": "note",
+        "status": "draft",
+        "tags": ["wiki"],
+        "source_refs": [],
+    })
+    wiki.upsert_page({
+        "title": "중심 위키 페이지",
+        "summary": "중심 요약 텍스트",
+        "body": "중심 본문",
+        "surface": "market",
+        "kind": "note",
+        "status": "draft",
+        "tags": ["wiki"],
+        "source_refs": [],
+        "links": [related["id"]],
+    })
+
+    section = wiki.build_context_section(query="중심 위키 페이지", surface="market", limit=4)
+
+    assert "관련: [[연관 위키 페이지]]" in section
+
+
 def test_wiki_list_pages_prefers_qmd_search_when_available(monkeypatch, tmp_path):
     _isolate(monkeypatch, tmp_path)
 

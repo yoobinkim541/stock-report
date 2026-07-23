@@ -559,7 +559,9 @@ def _render_index_md(pages: list[dict]) -> str:
                 _clean(page.get("verification_status") or "unverified", 40),
             ])
             summary = _clean(page.get("summary") or page.get("body") or "", 180)
-            lines.append(f"- [[{title}]] ({meta}) — {summary}")
+            link_count = len({*(page.get("links") or []), *(page.get("backlinks") or [])})
+            marker = f" [\U0001f517{link_count}]" if link_count else ""
+            lines.append(f"- [[{title}]] ({meta}) — {summary}{marker}")
         lines.append("")
     return "\n".join(lines).strip() + "\n"
 
@@ -694,11 +696,28 @@ def capture_from_chat(question: str, answer: str, *, surface: str = WIKI_SURFACE
     )
 
 
+def _title_lookup_for(page_ids: set[str]) -> dict[str, str]:
+    if not page_ids:
+        return {}
+    lookup: dict[str, str] = {}
+    for row in _wiki_records():
+        row_id = _clean(row.get("id"), 80)
+        if row_id in page_ids:
+            lookup[row_id] = _clean(row.get("title") or "위키 페이지", 160)
+    return lookup
+
+
 def build_context_section(*, query: str = "", surface: str = WIKI_SURFACE, limit: int = 4,
                           status: str = "all") -> str:
     pages = list_pages(query=query, surface=surface, status=status, limit=limit)
     if not pages:
         return ""
+    related_ids = {
+        rid
+        for page in pages
+        for rid in [*(page.get("links") or []), *(page.get("backlinks") or [])]
+    }
+    title_lookup = _title_lookup_for(related_ids)
     lines = ["[위키 지식]"]
     for idx, page in enumerate(pages, start=1):
         header = f"{idx}. {page.get('title', '위키 페이지')}"
@@ -727,6 +746,12 @@ def build_context_section(*, query: str = "", surface: str = WIKI_SURFACE, limit
         lines.append(f"- 검증: {page.get('verification_status', 'unverified')}")
         for warning in page.get("trust_warnings") or []:
             lines.append(f"- 주의: {warning}")
+        related_ids_for_page = _dedupe_texts(
+            [*(page.get("links") or []), *(page.get("backlinks") or [])], limit=6, item_limit=80
+        )
+        related_titles = [title_lookup[rid] for rid in related_ids_for_page if rid in title_lookup]
+        if related_titles:
+            lines.append(f"- 관련: {', '.join(f'[[{t}]]' for t in related_titles)}")
         if page.get("tags"):
             lines.append(f"- 태그: {', '.join(page['tags'][:8])}")
     return "\n".join(lines).strip()
