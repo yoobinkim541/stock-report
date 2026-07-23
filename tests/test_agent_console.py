@@ -307,6 +307,103 @@ def test_wiki_lint_flags_source_less_promoted_pages_and_open_questions(monkeypat
     assert result["ok"] is False
 
 
+def test_wiki_lint_flags_orphan_page(monkeypatch, tmp_path):
+    _isolate(monkeypatch, tmp_path)
+
+    from agent_console import wiki
+
+    result = wiki.lint_pages([
+        {
+            "id": "solo1",
+            "title": "고립된 페이지",
+            "status": "draft",
+            "verification_status": "unverified",
+            "source_refs": [],
+            "surface": "market",
+            "kind": "note",
+            "links": [],
+            "backlinks": [],
+        }
+    ])
+
+    codes = {issue["code"] for issue in result["issues"]}
+    assert "orphan_page" in codes
+
+
+def test_wiki_lint_flags_missing_cross_ref(monkeypatch, tmp_path):
+    _isolate(monkeypatch, tmp_path)
+
+    from agent_console import wiki
+
+    result = wiki.lint_pages([
+        {
+            "id": "tickerA",
+            "title": "NVDA 메모 A",
+            "status": "draft",
+            "verification_status": "unverified",
+            "source_refs": [],
+            "surface": "market",
+            "kind": "note",
+            "tags": ["wiki", "ticker:nvda"],
+            "links": [],
+            "backlinks": [],
+        },
+        {
+            "id": "tickerB",
+            "title": "NVDA 메모 B",
+            "status": "draft",
+            "verification_status": "unverified",
+            "source_refs": [],
+            "surface": "market",
+            "kind": "note",
+            "tags": ["wiki", "ticker:nvda"],
+            "links": [],
+            "backlinks": [],
+        },
+    ])
+
+    codes = {issue["code"] for issue in result["issues"]}
+    assert "missing_cross_ref" in codes
+    cross_ref_issues = [issue for issue in result["issues"] if issue["code"] == "missing_cross_ref"]
+    assert len(cross_ref_issues) == 1
+
+
+def test_wiki_lint_skips_missing_cross_ref_when_linked(monkeypatch, tmp_path):
+    _isolate(monkeypatch, tmp_path)
+
+    from agent_console import wiki
+
+    result = wiki.lint_pages([
+        {
+            "id": "tickerC",
+            "title": "NVDA 메모 C",
+            "status": "draft",
+            "verification_status": "unverified",
+            "source_refs": [],
+            "surface": "market",
+            "kind": "note",
+            "tags": ["wiki", "ticker:nvda"],
+            "links": ["tickerD"],
+            "backlinks": [],
+        },
+        {
+            "id": "tickerD",
+            "title": "NVDA 메모 D",
+            "status": "draft",
+            "verification_status": "unverified",
+            "source_refs": [],
+            "surface": "market",
+            "kind": "note",
+            "tags": ["wiki", "ticker:nvda"],
+            "links": [],
+            "backlinks": ["tickerC"],
+        },
+    ])
+
+    codes = {issue["code"] for issue in result["issues"]}
+    assert "missing_cross_ref" not in codes
+
+
 def test_wiki_search_health_reports_qmd_or_fallback(monkeypatch, tmp_path):
     _isolate(monkeypatch, tmp_path)
 

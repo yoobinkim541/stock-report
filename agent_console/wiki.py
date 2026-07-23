@@ -423,6 +423,65 @@ def search_health() -> dict:
     }
 
 
+def _lint_relational_issues(pages: list[dict]) -> list[dict]:
+    issues: list[dict] = []
+    valid_pages = [page for page in pages or [] if isinstance(page, dict) and _clean(page.get("id") or "", 80)]
+
+    for page in valid_pages:
+        page_id = _clean(page.get("id"), 80)
+        title = _clean(page.get("title") or "위키 페이지", 160)
+        links = set(_clean_links(page.get("links") or [], self_id=page_id))
+        backlinks = set(_clean_links(page.get("backlinks") or [], self_id=page_id))
+        if not links and not backlinks:
+            issues.append({
+                "code": "orphan_page",
+                "severity": "info",
+                "page_id": page_id,
+                "title": title,
+                "message": "다른 페이지와 연결이 없습니다.",
+            })
+
+    ticker_index: dict[str, list[dict]] = defaultdict(list)
+    ref_index: dict[str, list[dict]] = defaultdict(list)
+    for page in valid_pages:
+        for tag in page.get("tags") or []:
+            clean_tag = _clean(tag, 60).lower()
+            if clean_tag.startswith("ticker:"):
+                ticker_index[clean_tag].append(page)
+        for ref in page.get("source_refs") or page.get("artifacts") or []:
+            clean_ref = _clean(ref, 200)
+            if clean_ref:
+                ref_index[clean_ref].append(page)
+
+    seen_pairs: set[tuple[str, str]] = set()
+    for group in [*ticker_index.values(), *ref_index.values()]:
+        if len(group) < 2:
+            continue
+        for i in range(len(group)):
+            for j in range(i + 1, len(group)):
+                left, right = group[i], group[j]
+                left_id = _clean(left.get("id"), 80)
+                right_id = _clean(right.get("id"), 80)
+                if not left_id or not right_id or left_id == right_id:
+                    continue
+                pair = tuple(sorted((left_id, right_id)))
+                if pair in seen_pairs:
+                    continue
+                left_links = set(_clean_links(left.get("links") or [], self_id=left_id))
+                right_links = set(_clean_links(right.get("links") or [], self_id=right_id))
+                if right_id in left_links or left_id in right_links:
+                    continue
+                seen_pairs.add(pair)
+                issues.append({
+                    "code": "missing_cross_ref",
+                    "severity": "warning",
+                    "page_id": left_id,
+                    "title": f"{left.get('title')} / {right.get('title')}",
+                    "message": f"'{left.get('title')}'와(과) '{right.get('title')}'가 태그·출처를 공유하지만 서로 연결되어 있지 않습니다.",
+                })
+    return issues
+
+
 def lint_pages(pages: list[dict] | None = None) -> dict:
     if pages is None:
         pages = list_pages(status="all", surface="all", limit=400)
@@ -459,6 +518,7 @@ def lint_pages(pages: list[dict] | None = None) -> dict:
                 "title": title,
                 "message": "요약과 본문이 모두 비어 있습니다.",
             })
+    issues.extend(_lint_relational_issues(pages or []))
     return {"ok": not issues, "issue_count": len(issues), "issues": issues}
 
 
