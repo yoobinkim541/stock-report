@@ -252,6 +252,21 @@ def test_ai_console_quick_prompt_list_stays_small():
     assert any("위키" in prompt for prompt in prompts)
 
 
+
+def test_ai_console_context_glance_items_are_compact():
+    from dashboard.pages import ai_console
+
+    items = ai_console._context_glance_items({
+        "sources": {"events": [{"title": "a"}, {"title": "b"}]},
+        "memory": [{"title": "m"}],
+        "models": {"items": [{"name": "x"}]},
+        "reports": [{"name": "investment-report-2026-07-23.md"}],
+    })
+
+    assert [item["label"] for item in items] == ["최근 이벤트", "누적 기억", "모델 파일", "최신 리포트"]
+    assert [item["value"] for item in items] == ["2건", "1건", "1개", "investment-report-2026-07-23.md"]
+
+
 def test_ai_console_chat_state_is_surface_scoped(monkeypatch):
     from dashboard.pages import ai_console
 
@@ -285,6 +300,53 @@ def test_ai_console_run_agent_question_marks_context_fallback(monkeypatch):
     msgs = fake_state[ai_console._chat_key("portfolio")]
     assert msgs[-1]["content"] == "fallback answer"
     assert "context fallback" in msgs[-1]["meta"]
+
+
+def test_ai_console_run_agent_question_uses_fast_progress_path(monkeypatch):
+    from dashboard.pages import ai_console
+
+    fake_state = {}
+    updates = []
+    seen = {}
+
+    class FakeStatus:
+        def __init__(self, label, **kwargs):
+            updates.append(label)
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            return False
+
+        def update(self, **kwargs):
+            if kwargs.get("label"):
+                updates.append(kwargs["label"])
+
+    def fake_answer(question, surface, *, async_postprocess=False):
+        seen["async_postprocess"] = async_postprocess
+        return {
+            "ok": True,
+            "answer": "fast answer",
+            "context": {
+                "event_count": 1,
+                "memory_count": 2,
+                "postprocess": {"wiki_autocurate": "queued"},
+            },
+        }
+
+    monkeypatch.setattr(ai_console.st, "session_state", fake_state)
+    monkeypatch.setattr(ai_console.st, "status", FakeStatus)
+    monkeypatch.setattr(ai_console.agent, "answer", fake_answer)
+
+    ai_console._run_agent_question("빠르게 답해줘", "market")
+
+    msgs = fake_state[ai_console._chat_key("market")]
+    assert msgs[-1]["content"] == "fast answer"
+    assert seen["async_postprocess"] is True
+    assert len(set(updates)) >= 4
+    assert any("LLM" in label for label in updates)
+    assert "후처리 queued" in msgs[-1]["meta"]
 
 
 def test_ai_console_strategy_canvas_uses_matrix_dsl(monkeypatch):

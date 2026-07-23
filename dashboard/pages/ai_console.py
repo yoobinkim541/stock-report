@@ -5,6 +5,7 @@
 """
 from __future__ import annotations
 
+import html
 import os
 import sys
 from datetime import datetime, timezone
@@ -101,28 +102,47 @@ def _safe_context(surface: str, hours: int) -> dict:
         }
 
 
-def _context_glance(pack: dict):
+def _esc(value: object) -> str:
+    return html.escape(str(value if value not in (None, "") else "—"))
+
+
+def _context_glance_items(pack: dict) -> tuple[dict[str, str], ...]:
     sources = pack.get("sources") or {}
     reports = pack.get("reports") or []
     models = (pack.get("models") or {}).get("items") or []
     memory = pack.get("memory") or []
+    return (
+        {"label": "최근 이벤트", "value": f"{len(sources.get('events') or [])}건"},
+        {"label": "누적 기억", "value": f"{len(memory)}건"},
+        {"label": "모델 파일", "value": f"{len(models)}개"},
+        {"label": "최신 리포트", "value": reports[0].get("name", "—") if reports else "—"},
+    )
 
-    m = st.columns(4)
-    m[0].metric("최근 이벤트", f"{len(sources.get('events') or [])}건")
-    m[1].metric("누적 기억", f"{len(memory)}건")
-    m[2].metric("모델 파일", f"{len(models)}개")
-    m[3].metric("최신 리포트", reports[0].get("name", "—") if reports else "—")
+
+def _context_glance(pack: dict):
+    items = _context_glance_items(pack)
+    st.markdown(
+        "<div class='codex-glance'>"
+        + "".join(
+            f"<div><span>{_esc(item['label'])}</span><b>{_esc(item['value'])}</b></div>"
+            for item in items
+        )
+        + "</div>",
+        unsafe_allow_html=True,
+    )
 
     focus = pack.get("focus") or []
     if focus:
-        st.caption(" · ".join(focus))
+        st.caption(" · ".join(focus[:4]))
 
+    sources = pack.get("sources") or {}
     source_counts = sources.get("source_counts") or []
     symbol_counts = sources.get("symbol_counts") or []
     if source_counts or symbol_counts:
-        left, right = st.columns(2)
-        left.caption("소스: " + (" · ".join(f"{name} {cnt}" for name, cnt in source_counts[:6]) or "—"))
-        right.caption("심볼/태그: " + (" · ".join(f"{name} {cnt}" for name, cnt in symbol_counts[:8]) or "—"))
+        st.caption(
+            "소스 " + (" · ".join(f"{name} {cnt}" for name, cnt in source_counts[:5]) or "—")
+            + "  /  심볼 " + (" · ".join(f"{name} {cnt}" for name, cnt in symbol_counts[:6]) or "—")
+        )
 
 
 def _chat_tab(surface: str, pack: dict):
@@ -184,15 +204,70 @@ def _ensure_chat_state(surface: str):
     ]
 
 
-def _quick_prompts() -> str | None:
-    """도메인을 가로지르는 추천 질문 4개 — 눌러도 되고, 그냥 아래에 입력해도 된다."""
-    prompts = [
+_AGENT_PROGRESS_LABELS = (
+    "맥락 읽는 중",
+    "질문 의도 고정 중",
+    "필요 데이터 확인 중",
+    "LLM 분석 요청 중",
+    "답변 정리 중",
+)
+
+
+def _quick_prompt_texts() -> tuple[str, ...]:
+    return (
         "오늘 시장 변화가 어디서 시작됐는지 추적해줘",
         "내 포트폴리오에서 먼저 줄여야 할 리스크 봐줘",
-        "모의투자 성과가 좋아진 이유와 나빠진 이유를 나눠줘",
-        "보유종목에 영향을 줄 이벤트만 골라줘",
-    ]
-    cols = st.columns(4)
+        "최근 대화에서 위키로 남길 판단을 정리해줘",
+    )
+
+
+def _chat_progress_labels() -> tuple[str, ...]:
+    return _AGENT_PROGRESS_LABELS
+
+
+def _answer_agent_fast(question: str, surface: str) -> dict:
+    try:
+        return agent.answer(question, surface, async_postprocess=True)
+    except TypeError as exc:
+        if "async_postprocess" not in str(exc):
+            raise
+        return agent.answer(question, surface)
+
+
+def _safe_status_update(status, **kwargs) -> None:
+    update = getattr(status, "update", None)
+    if not callable(update):
+        return
+    try:
+        update(**kwargs)
+    except Exception:
+        pass
+
+
+def _answer_with_progress(question: str, surface: str) -> dict:
+    labels = _chat_progress_labels()
+    status_factory = getattr(st, "status", None)
+    if callable(status_factory):
+        status_context = status_factory(labels[0], expanded=True)
+        with status_context as status:
+            updater = status or status_context
+            for label in labels[1:]:
+                _safe_status_update(updater, label=label, state="running", expanded=True)
+            result = _answer_agent_fast(question, surface)
+            post = ((result.get("context") or {}).get("postprocess") or {}).get("wiki_autocurate")
+            done_label = "답변 표시 완료"
+            if post == "queued":
+                done_label = "답변 표시 완료 · 위키 정리는 뒤에서 진행"
+            _safe_status_update(updater, label=done_label, state="complete", expanded=False)
+            return result
+    with st.spinner(labels[-2] if len(labels) >= 2 else "답변 생성 중"):
+        return _answer_agent_fast(question, surface)
+
+
+def _quick_prompts() -> str | None:
+    """도메인을 가로지르는 추천 질문 — 눌러도 되고, 그냥 아래에 입력해도 된다."""
+    prompts = _quick_prompt_texts()
+    cols = st.columns(len(prompts))
     for idx, text in enumerate(prompts):
         if cols[idx].button(text, key=f"agent_quick_auto_{idx}", width="stretch"):
             return text
@@ -224,8 +299,7 @@ def _run_agent_question(question: str, surface: str, chat_key: str | None = None
     else:
         _ensure_chat_state(_AUTO_CHAT)
     st.session_state[chat_key].append({"role": "user", "content": question})
-    with st.spinner("컨텍스트 읽는 중..."):
-        result = agent.answer(question, surface)
+    result = _answer_with_progress(question, surface)
     if result.get("ok"):
         ctx = result.get("context") or {}
         meta = f"맥락 {_SURFACES.get(surface, surface)}"
@@ -235,6 +309,9 @@ def _run_agent_question(question: str, surface: str, chat_key: str | None = None
         if engine:
             # 어떤 엔진이 답했는지 정직 표기 — local-rules = LLM 미개입 규칙 답변
             meta += f" · 엔진 {'⚙️ 규칙' if engine == 'local-rules' else '🤖 ' + engine}"
+        post = (ctx.get("postprocess") or {}).get("wiki_autocurate")
+        if post:
+            meta += f" · 후처리 {post}"
         if ctx.get("context_error"):
             meta = f"{meta} · context fallback" if meta else "context fallback"
         st.session_state[chat_key].append({
@@ -748,9 +825,9 @@ def _inject_codex_css():
           align-items:flex-end;
           justify-content:space-between;
           gap:16px;
-          padding:2px 0 10px;
-          border-bottom:1px solid rgba(148,163,184,.18);
-          margin-bottom:14px;
+          padding:0 0 12px;
+          border-bottom:1px solid rgba(148,163,184,.14);
+          margin-bottom:12px;
         }
         .codex-console-title h1 {
           margin:0;
@@ -768,15 +845,42 @@ def _inject_codex_css():
           letter-spacing:.08em;
           margin-bottom:2px;
         }
+        .codex-glance {
+          display:grid;
+          grid-template-columns:repeat(4,minmax(0,1fr));
+          gap:8px;
+          margin:0 0 8px;
+        }
+        .codex-glance div {
+          border:1px solid rgba(148,163,184,.14);
+          border-radius:8px;
+          background:rgba(15,23,42,.24);
+          padding:8px 10px;
+          min-height:52px;
+        }
+        .codex-glance span {
+          display:block;
+          color:rgba(148,163,184,.78);
+          font-size:.72rem;
+          margin-bottom:3px;
+        }
+        .codex-glance b {
+          display:block;
+          color:rgba(226,232,240,.96);
+          font-size:.9rem;
+          font-weight:680;
+          line-height:1.25;
+          overflow-wrap:anywhere;
+        }
         .codex-chat-head {
           display:flex;
           align-items:center;
           justify-content:space-between;
           gap:12px;
-          padding:9px 11px;
-          border:1px solid rgba(148,163,184,.18);
+          padding:8px 10px;
+          border:1px solid rgba(148,163,184,.14);
           border-radius:8px;
-          background:rgba(15,23,42,.38);
+          background:rgba(15,23,42,.26);
           margin-bottom:10px;
         }
         .codex-chat-head span {
@@ -798,11 +902,11 @@ def _inject_codex_css():
           white-space:nowrap;
         }
         div[data-testid="stChatMessage"] {
-          border:1px solid rgba(148,163,184,.18);
+          border:1px solid rgba(148,163,184,.13);
           border-radius:8px;
-          background:rgba(15,23,42,.28);
-          padding:10px 12px;
-          margin-bottom:9px;
+          background:rgba(15,23,42,.20);
+          padding:9px 11px;
+          margin-bottom:8px;
         }
         div[data-testid="stChatMessage"]:has([data-testid="chatAvatarIcon-user"]) {
           background:rgba(30,41,59,.38);
@@ -817,11 +921,11 @@ def _inject_codex_css():
           margin:2px 0 10px;
         }
         .codex-rail-card div {
-          border:1px solid rgba(148,163,184,.18);
+          border:1px solid rgba(148,163,184,.13);
           border-radius:8px;
-          background:rgba(15,23,42,.32);
-          padding:9px 10px;
-          min-height:58px;
+          background:rgba(15,23,42,.22);
+          padding:8px 9px;
+          min-height:52px;
         }
         .codex-rail-card span {
           display:block;
@@ -966,6 +1070,9 @@ def _inject_codex_css():
           color:rgba(148,163,184,.78);
           font-size:.72rem;
           white-space:nowrap;
+        }
+        @media (max-width: 980px) {
+          .codex-glance { grid-template-columns:repeat(2,minmax(0,1fr)); }
         }
         @media (max-width: 760px) {
           .widget-flow {
