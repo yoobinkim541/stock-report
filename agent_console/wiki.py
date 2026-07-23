@@ -472,12 +472,14 @@ def _lint_relational_issues(pages: list[dict]) -> list[dict]:
                 if right_id in left_links or left_id in right_links:
                     continue
                 seen_pairs.add(pair)
+                left_title = _clean(left.get("title") or "위키 페이지", 160)
+                right_title = _clean(right.get("title") or "위키 페이지", 160)
                 issues.append({
                     "code": "missing_cross_ref",
                     "severity": "warning",
                     "page_id": left_id,
-                    "title": f"{left.get('title')} / {right.get('title')}",
-                    "message": f"'{left.get('title')}'와(과) '{right.get('title')}'가 태그·출처를 공유하지만 서로 연결되어 있지 않습니다.",
+                    "title": f"{left_title} / {right_title}",
+                    "message": f"'{left_title}'와(과) '{right_title}'가 태그·출처를 공유하지만 서로 연결되어 있지 않습니다.",
                 })
     return issues
 

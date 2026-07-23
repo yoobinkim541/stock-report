@@ -148,6 +148,9 @@ def _group_label(key: str) -> tuple[str, str, str]:
 
 
 def _link_pages_sharing_events(pages: list[dict], page_event_keys: dict[str, set[str]]) -> None:
+    # links 는 매 배치마다 통째로 재계산되어 덮어써진다 (대화 경로의 links 는 대상
+    # 병합 시 기존 links 와 합쳐지는 것과 다름) — 소스 다이제스트는 결정적 재생성이
+    # 전제이므로 이전 배치의 links 를 보존할 이유가 없다.
     for left in pages:
         left_id = left.get("id")
         left_keys = page_event_keys.get(left_id) or set()
