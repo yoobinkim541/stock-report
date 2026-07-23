@@ -287,6 +287,53 @@ def test_ai_console_run_agent_question_marks_context_fallback(monkeypatch):
     assert "context fallback" in msgs[-1]["meta"]
 
 
+def test_ai_console_run_agent_question_uses_fast_progress_path(monkeypatch):
+    from dashboard.pages import ai_console
+
+    fake_state = {}
+    updates = []
+    seen = {}
+
+    class FakeStatus:
+        def __init__(self, label, **kwargs):
+            updates.append(label)
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            return False
+
+        def update(self, **kwargs):
+            if kwargs.get("label"):
+                updates.append(kwargs["label"])
+
+    def fake_answer(question, surface, *, async_postprocess=False):
+        seen["async_postprocess"] = async_postprocess
+        return {
+            "ok": True,
+            "answer": "fast answer",
+            "context": {
+                "event_count": 1,
+                "memory_count": 2,
+                "postprocess": {"wiki_autocurate": "queued"},
+            },
+        }
+
+    monkeypatch.setattr(ai_console.st, "session_state", fake_state)
+    monkeypatch.setattr(ai_console.st, "status", FakeStatus)
+    monkeypatch.setattr(ai_console.agent, "answer", fake_answer)
+
+    ai_console._run_agent_question("빠르게 답해줘", "market")
+
+    msgs = fake_state[ai_console._chat_key("market")]
+    assert msgs[-1]["content"] == "fast answer"
+    assert seen["async_postprocess"] is True
+    assert len(set(updates)) >= 4
+    assert any("LLM" in label for label in updates)
+    assert "후처리 queued" in msgs[-1]["meta"]
+
+
 def test_ai_console_strategy_canvas_uses_matrix_dsl(monkeypatch):
     from dashboard.pages import ai_console
     import pandas as pd
