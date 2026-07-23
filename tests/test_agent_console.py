@@ -809,6 +809,43 @@ def test_agent_lab_short_followup_does_not_use_market_template(monkeypatch):
     assert "현재 시장 상황 인식" not in answer
 
 
+def test_domestic_market_question_uses_llm_instead_of_generic_market_template(monkeypatch):
+    from agent_console import agent
+
+    pack = {
+        "surface": "market",
+        "generated_at": "2026-07-23T07:41:00+00:00",
+        "sources": {
+            "events": [
+                {"source": "saveticker", "title": "한국 증시와 원화, AI 지출 낙관론에 상승"},
+            ],
+            "source_counts": [],
+            "symbol_counts": [],
+        },
+        "memory": [],
+        "reports": [],
+        "ml_activity": [],
+        "portfolio": {},
+        "paper": {},
+        "models": {},
+        "focus": [],
+    }
+    seen = {}
+
+    def fake_llm(question, pack, history=None):
+        seen["question"] = question
+        return "### 한국증시 요약\n코스피·코스닥과 원화/외국인 수급을 중심으로 답했습니다."
+
+    monkeypatch.setattr(agent, "_try_llm_chat", fake_llm)
+
+    answer = agent._compose_answer("한국증시는 어땠어", pack, history=[])
+
+    assert "한국증시 요약" in answer
+    assert "현재 시장 상황 인식" not in answer
+    assert "시장 신호 점수" not in answer
+    assert "한국증시는 어땠어" in seen["question"]
+
+
 def test_agent_general_question_does_not_force_market_template(monkeypatch):
     monkeypatch.setenv("AGENT_CONSOLE_LLM_ENABLED", "0")
     from agent_console.agent import _compose_answer
@@ -949,6 +986,34 @@ def test_agent_gemini_chat_disabled_by_env(monkeypatch):
     monkeypatch.setenv("AGENT_CONSOLE_GEMINI_ENABLED", "0")
     assert _try_gemini_chat("테스트", runner=lambda *a, **k: (_ for _ in ()).throw(
         AssertionError("gate off 인데 runner 가 호출됨"))) is None
+
+
+def test_agent_llm_chat_rejects_unusable_non_korean_codex_output(monkeypatch):
+    from agent_console import agent
+
+    calls = []
+
+    class Result:
+        returncode = 0
+        stdout = ""
+        stderr = ""
+
+    def fake_runner(cmd, capture_output, text, timeout):
+        calls.append(cmd)
+        if cmd[:2] == ["codex", "exec"]:
+            out_path = cmd[cmd.index("--output-last-message") + 1]
+            Path(out_path).write_text("你好，我无法给到相关内容。", encoding="utf-8")
+        elif cmd[:2] == ["hermes", "chat"] and "gemini" not in cmd:
+            return type("R", (), {"returncode": 2, "stdout": "", "stderr": "auth"})()
+        elif cmd[:2] == ["hermes", "chat"] and "gemini" in cmd:
+            return type("R", (), {"returncode": 0, "stdout": "한국어 Gemini 답변", "stderr": ""})()
+        return Result()
+
+    agent._reset_llm_engine()
+    answer = agent._try_llm_prompt("한국증시는 어땠어", runner=fake_runner)
+
+    assert answer == "한국어 Gemini 답변"
+    assert agent._LAST_LLM_ENGINE == "gemini"
 
 
 def test_agent_llm_chat_falls_through_codex_hermes_to_gemini(monkeypatch):

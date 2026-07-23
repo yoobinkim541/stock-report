@@ -260,6 +260,8 @@ def _compose_answer(question: str, pack: dict, history: list[dict] | None = None
         return _compose_portfolio_risk_answer(resolved_question, pack, history)
     if _is_domestic_etf_question(resolved_question, history):
         return _compose_domestic_etf_answer(question, resolved_question, pack, history)
+    if _is_domestic_market_question(resolved_question):
+        return _compose_domestic_market_answer(question, resolved_question, pack, history)
     asset = _extract_asset_symbol(resolved_question)
     if asset:
         return _compose_asset_opinion_answer(resolved_question, pack, history, asset)
@@ -821,6 +823,70 @@ def _is_domestic_etf_question(question: str, history: list[dict] | None = None) 
     return False
 
 
+def _is_domestic_market_question(question: str) -> bool:
+    q = str(question or "").lower().replace(" ", "")
+    domestic_words = ("한국증시", "국내증시", "한국시장", "국내시장", "코스피", "코스닥", "kospi", "kosdaq", "krx")
+    if not any(word in q for word in domestic_words):
+        return False
+    return not _is_domestic_etf_question(question)
+
+
+def _compose_domestic_market_answer(question: str, resolved_question: str, pack: dict,
+                                    history: list[dict] | None) -> str:
+    events = (pack.get("sources") or {}).get("events") or []
+    korean_events = _domestic_market_events(events, limit=8)
+    event_lines = [f"- {item.get('source', 'source')} · {item.get('title') or item.get('summary')}" for item in korean_events]
+    llm_prompt = "\n".join([
+        "사용자는 한국 증시 상황을 물었습니다.",
+        f"질문: {resolved_question or question}",
+        "반드시 한국 시장 중심으로 답하세요: 코스피, 코스닥, 원화, 외국인/기관 수급, 반도체·2차전지·자동차·금융 등 업종 흐름을 우선합니다.",
+        "미국 AI/성장주 템플릿, RISK-ON/RISK-OFF 시장 신호 점수표, HYG/LQD 같은 미국 크레딧 검증을 기본 답변으로 쓰지 마세요.",
+        "제공된 로컬 이벤트에 한국 시장 단서가 부족하면 부족하다고 말하고, 확인해야 할 데이터 항목을 구체적으로 적으세요.",
+        "가능하면 '오늘 확인된 점 / 아직 확인할 점 / 내 해석' 순서로 짧게 정리하세요.",
+        "",
+        "[한국 관련 로컬 이벤트]",
+        *(event_lines or ["- 없음"]),
+    ])
+    llm = _try_llm_chat(llm_prompt, pack, history)
+    if llm:
+        return llm
+
+    lines = ["### 한국증시 요약", ""]
+    if korean_events:
+        lines.append("> 로컬 수집분 기준으로는 한국 증시·원화 관련 단서가 일부 잡혔습니다. 다만 코스피/코스닥 지수 수치와 외국인·기관 순매수 데이터는 별도 확인이 필요합니다.")
+    else:
+        lines.append("> 현재 로컬 컨텍스트에는 한국 증시 전용 데이터가 부족합니다. 코스피/코스닥 등락률, 원/달러 환율, 외국인·기관 수급을 먼저 확인해야 합니다.")
+    lines.append("")
+    lines.append("#### 오늘 확인된 한국 관련 단서")
+    if korean_events:
+        lines.extend(event_lines[:6])
+    else:
+        lines.append("- 한국 시장 관련 수집 이벤트 없음")
+    lines.append("")
+    lines.append("#### 해석 프레임")
+    lines.extend([
+        "- **지수:** 코스피 대형주와 코스닥 성장주의 방향이 같은지 먼저 봅니다.",
+        "- **환율:** 원화 강세면 외국인 수급에 우호적이고, 원화 약세면 반등 신뢰도를 낮춥니다.",
+        "- **업종:** 반도체가 지수를 끌었는지, 2차전지·바이오·금융으로 확산됐는지를 나눠 봅니다.",
+        "- **수급:** 외국인 선물/현물 순매수와 기관 프로그램 매매가 같은 방향인지 확인합니다.",
+    ])
+    lines.append("")
+    lines.append("결론적으로, 지금 질문에는 전역 시장 레짐보다 **한국 지수·환율·외국인 수급**을 먼저 붙여서 봐야 합니다.")
+    return "\n".join(lines)
+
+
+def _domestic_market_events(events: list[dict], *, limit: int = 8) -> list[dict]:
+    words = ("한국", "국내", "코스피", "코스닥", "kospi", "kosdaq", "krx", "원화", "원/달러", "환율", "외국인", "기관")
+    out = []
+    for item in events or []:
+        text = f"{item.get('title') or ''} {item.get('summary') or ''}".lower()
+        if any(word in text for word in words):
+            out.append(item)
+            if len(out) >= limit:
+                break
+    return out
+
+
 def _compose_domestic_etf_answer(question: str, resolved_question: str, pack: dict,
                                  history: list[dict] | None) -> str:
     llm_prompt = (
@@ -990,6 +1056,24 @@ def _try_llm_prompt(prompt: str, runner=subprocess.run) -> str | None:
             or _try_agy_backup(prompt))
 
 
+def _is_usable_llm_output(prompt: str, text: str) -> bool:
+    text = str(text or "").strip()
+    if not text:
+        return False
+    lowered = text.lower()
+    bad_markers = (
+        "无法给到", "無法", "不能提供", "i cannot provide", "i can't provide",
+        "unable to provide", "cannot assist", "as an ai language model",
+    )
+    if any(marker in lowered for marker in bad_markers):
+        return False
+    prompt_has_korean = bool(re.search(r"[가-힣]", str(prompt or "")))
+    output_has_korean = bool(re.search(r"[가-힣]", text))
+    if prompt_has_korean and not output_has_korean:
+        return False
+    return True
+
+
 def _try_agy_backup(prompt: str) -> str | None:
     """레포 표준 LLM 백업 체인(lib/llm_cli — agy·빈 스크래치 cwd) 최종 폴백.
 
@@ -999,9 +1083,10 @@ def _try_agy_backup(prompt: str) -> str | None:
         from lib import llm_cli
         text, _note = llm_cli.backup_chat(prompt)
         out = (text or "").strip()[:6000] or None
-        if out:
+        if out and _is_usable_llm_output(prompt, out):
             _mark_llm_engine("agy")
-        return out
+            return out
+        return None
     except Exception:
         return None
 
@@ -1051,7 +1136,7 @@ def _try_codex_chat(prompt: str, runner=subprocess.run) -> str | None:
         text = Path(out_path).read_text(encoding="utf-8", errors="replace").strip() if out_path else ""
         if not text:
             text = (getattr(result, "stdout", "") or "").strip()
-        if text:
+        if text and _is_usable_llm_output(prompt, text):
             _mark_llm_engine("codex")
             return text[:6000]
         return None
@@ -1087,7 +1172,7 @@ def _try_hermes_chat(prompt: str, runner=subprocess.run) -> str | None:
     if getattr(result, "returncode", 1) != 0:
         return None
     text = (getattr(result, "stdout", "") or "").strip()
-    if not text:
+    if not text or not _is_usable_llm_output(prompt, text):
         return None
     _mark_llm_engine("hermes")
     return text[:6000]
@@ -1121,7 +1206,7 @@ def _try_gemini_chat(prompt: str, runner=subprocess.run) -> str | None:
     if getattr(result, "returncode", 1) != 0:
         return None
     text = (getattr(result, "stdout", "") or "").strip()
-    if not text:
+    if not text or not _is_usable_llm_output(prompt, text):
         return None
     _mark_llm_engine("gemini")
     return text[:6000]
