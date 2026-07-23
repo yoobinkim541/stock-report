@@ -45,6 +45,7 @@ env/
 .superpowers/
 
 # ── 임시/작업 파일 ────────────────────────
+.worktrees/
 claude_continue_result.txt
 codex_night_task.sh
 codex_prompt.txt
