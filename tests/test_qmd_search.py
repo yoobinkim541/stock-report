@@ -35,7 +35,9 @@ def test_qmd_search_parses_json_results_and_builds_query_command(monkeypatch):
 
     assert calls
     assert calls[0][:2] == ["qmd", "query"]
-    assert "--json" in calls[0]
+    assert calls[0][2] == "손실한도"
+    assert "--format" in calls[0]
+    assert "json" in calls[0]
     assert "-n" in calls[0]
     assert results[0]["title"] == "손실한도와 레버리지"
     assert results[0]["page_id"] == "wiki-page-001"

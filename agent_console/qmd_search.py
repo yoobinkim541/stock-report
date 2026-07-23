@@ -79,7 +79,7 @@ def search(
     if not enabled() or not query:
         return []
     limit = max(1, min(int(limit or 10), 50))
-    cmd = [qmd_bin(), "query", query, "--json", "-n", str(limit)]
+    cmd = [qmd_bin(), "query", query, "--format", "json", "-n", str(limit)]
     for collection in collections():
         cmd.extend(["-c", collection])
     try:
