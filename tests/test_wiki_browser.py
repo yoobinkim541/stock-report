@@ -75,7 +75,7 @@ def test_build_browser_model_prefers_selected_page_and_filters_surface():
     assert model["selected_id"] == "p1"
     assert model["selected"]["id"] == "p1"
     assert model["visible_count"] == 2
-    assert [page["id"] for page in model["visible"]] == ["p1", "p2"]
+    assert [page["id"] for page in model["visible"]] == ["p1", "p4"]
 
 
 def test_related_pages_uses_tags_and_source_refs():
@@ -117,3 +117,52 @@ def test_aliases_are_available():
 
     assert [page["id"] for page in filtered] == ["p1", "p4"]
     assert picked == "p4"
+
+
+def test_build_wiki_health_model_counts_trust_and_search_state():
+    health = wiki_browser.build_wiki_health_model(
+        [
+            {"id": "a", "verification_status": "source-backed", "openQuestions": ["확인할 것"]},
+            {"id": "b", "verification_status": "unverified", "trust_warnings": ["원문 출처 없음"]},
+        ],
+        search_health={"provider": "qmd", "qmd": {"file_count": 7, "installed": True}, "fallback_available": True},
+        lint={"issue_count": 1, "issues": [{"page_id": "b", "code": "source_missing_for_promoted"}]},
+    )
+
+    assert health["provider"] == "qmd"
+    assert health["qmd_file_count"] == 7
+    assert health["source_backed_count"] == 1
+    assert health["unverified_count"] == 1
+    assert health["open_question_count"] == 1
+    assert health["lint_issue_count"] == 1
+
+
+def test_build_selected_evidence_model_orders_judgment_evidence_and_prompt_preview():
+    model = wiki_browser.build_selected_evidence_model(
+        {
+            "title": "AI CAPEX 검증 규칙",
+            "summary": "CAPEX는 수요와 비용을 같이 봅니다.",
+            "body": "긴 본문",
+            "verification_status": "source-backed",
+            "source_refs": ["source:saveticker:ai-capex"],
+            "openQuestions": ["전력비 영향은?"],
+            "trust_warnings": [],
+        },
+        context_section="[위키 지식]\n- preview",
+    )
+
+    assert model["judgment"] == "CAPEX는 수요와 비용을 같이 봅니다."
+    assert model["evidence"] == ["source:saveticker:ai-capex"]
+    assert model["verification_status"] == "source-backed"
+    assert model["open_questions"] == ["전력비 영향은?"]
+    assert "[위키 지식]" in model["prompt_preview"]
+
+
+def test_promotion_guardrail_blocks_promoted_conversation_only_pages():
+    blocked = wiki_browser.promotion_guardrail("stable", ["conversation:123"])
+    allowed = wiki_browser.promotion_guardrail("reviewed", ["source:saveticker:abc"])
+
+    assert blocked["allowed"] is False
+    assert blocked["downgraded_to"] == "draft"
+    assert "source ref" in blocked["message"]
+    assert allowed["allowed"] is True

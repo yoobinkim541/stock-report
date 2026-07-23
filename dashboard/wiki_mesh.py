@@ -20,6 +20,13 @@ STATUS_COLORS = {
     "archived": "#94a3b8",
 }
 
+TRUST_COLORS = {
+    "source-backed": "#22c55e",
+    "unverified": "#f59e0b",
+    "lint": "#ef4444",
+    "archived": "#94a3b8",
+}
+
 SURFACE_COLORS = {
     "market": "#22d3ee",
     "portfolio": "#a78bfa",
@@ -114,6 +121,33 @@ def _status_from_tags(tags: list[str]) -> str:
     return "draft"
 
 
+def _has_non_conversation_source_refs(refs: Iterable[object]) -> bool:
+    for raw in refs or []:
+        ref = _clean(raw, 240).lower()
+        if not ref:
+            continue
+        if ref.startswith("conversation:") or ref.startswith("chat:"):
+            continue
+        return True
+    return False
+
+
+def _verification_status(page: dict[str, Any]) -> str:
+    explicit = _clean(page.get("verification_status") or "", 40)
+    if explicit:
+        return explicit
+    return "source-backed" if _has_non_conversation_source_refs(page.get("source_refs") or []) else "unverified"
+
+
+def trust_color_for_node(node: dict[str, Any]) -> str:
+    if int(node.get("lint_issue_count") or 0) > 0:
+        return TRUST_COLORS["lint"]
+    if str(node.get("status") or "").lower() == "archived":
+        return TRUST_COLORS["archived"]
+    verification = _clean(node.get("verification_status") or "unverified", 40)
+    return TRUST_COLORS.get(verification, TRUST_COLORS["unverified"])
+
+
 def _record_to_page(record: dict[str, Any]) -> dict[str, Any]:
     tags = _dedupe_texts(record.get("tags") or [], limit=20, item_limit=60)
     summary = _clean(record.get("summary") or "", 2400)
@@ -173,6 +207,9 @@ def _normalize_page(page: dict[str, Any] | WikiGraphNode) -> dict[str, Any]:
             "body": "",
             "tags": list(page.tags),
             "status": page.status,
+            "verification_status": "source-backed" if _has_non_conversation_source_refs(page.source_refs) else "unverified",
+            "trust_warnings": [],
+            "lint_issue_count": 0,
             "surface": page.surface,
             "kind": page.kind,
             "confidence": 0.5,
@@ -199,6 +236,9 @@ def _normalize_page(page: dict[str, Any] | WikiGraphNode) -> dict[str, Any]:
             "body": _clean(page.get("body") or "", 6000),
             "tags": tags,
             "status": _clean(page.get("status") or _status_from_tags(tags), 40),
+            "verification_status": _verification_status({**page, "source_refs": source_refs}),
+            "trust_warnings": _dedupe_texts(page.get("trust_warnings") or [], limit=6, item_limit=180),
+            "lint_issue_count": int(page.get("lint_issue_count") or 0),
             "surface": _clean(page.get("surface") or WIKI_SURFACE, 60).lower() or WIKI_SURFACE,
             "kind": _clean(page.get("kind") or "note", 40).lower() or "note",
             "confidence": float(page.get("confidence") or 0.5),
@@ -467,6 +507,9 @@ def build_wiki_graph_model(
                 "surface": page.get("surface") or WIKI_SURFACE,
                 "kind": page.get("kind") or "note",
                 "status": page.get("status") or "draft",
+                "verification_status": page.get("verification_status") or "unverified",
+                "trust_warnings": tuple(page.get("trust_warnings") or ()),
+                "lint_issue_count": int(page.get("lint_issue_count") or 0),
                 "summary": page.get("summary") or "",
                 "tags": tuple(page.get("tags") or ()),
                 "source_refs": tuple(page.get("source_refs") or ()),
@@ -475,6 +518,7 @@ def build_wiki_graph_model(
                 "selected": pid == selected_id,
             }
         )
+        nodes[-1]["color"] = trust_color_for_node(nodes[-1])
     for node in nodes:
         for edge in adjacency.get(node["id"], {}).values():
             a, b = sorted((edge.source, edge.target))
@@ -502,6 +546,7 @@ def _node_hover(node: dict[str, Any]) -> str:
     return (
         f"<b>{_clean(node.get('title') or '', 80)}</b><br>"
         f"{node.get('surface', 'wiki')} · {node.get('kind', 'note')} · {node.get('status', 'draft')}<br>"
+        f"verification {node.get('verification_status', 'unverified')} · lint {node.get('lint_issue_count', 0)}<br>"
         f"degree {node.get('degree', 0)} · refs {refs}<br>"
         f"{summary}<br>"
         f"tags: {tags}"
@@ -576,7 +621,7 @@ def _build_figure(model: dict[str, Any]) -> go.Figure:
         size = 11 + min(12, node.get("degree", 0) * 1.8)
         if node.get("selected"):
             size += 8
-        color = _status_color(node.get("status"))
+        color = node.get("color") or trust_color_for_node(node)
         hover = _node_hover(node)
         label = _clean(node.get("title") or "", 18)
         if node.get("selected") or node.get("degree", 0) >= 3:

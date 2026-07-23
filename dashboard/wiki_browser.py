@@ -86,6 +86,98 @@ def _tokens(text: str) -> set[str]:
     }
 
 
+_QUERY_ALIASES = {
+    "손실": {"손실", "손실한도", "리스크", "risk", "leverage", "레버리지"},
+    "손실한도": {"손실", "손실한도", "리스크", "risk", "leverage", "레버리지"},
+    "리스크": {"손실", "손실한도", "리스크", "risk", "위험"},
+    "레버리지": {"레버리지", "leverage", "tqqq", "손실한도", "risk"},
+}
+
+
+def _expanded_query_tokens(text: str) -> set[str]:
+    out: set[str] = set()
+    for token in _tokens(text):
+        out.update(_QUERY_ALIASES.get(token, {token}))
+    return out
+
+
+def _has_non_conversation_source_refs(refs: Iterable[object]) -> bool:
+    for raw in refs or []:
+        ref = _clean(raw, 240).lower()
+        if not ref:
+            continue
+        if ref.startswith("conversation:") or ref.startswith("chat:"):
+            continue
+        return True
+    return False
+
+
+def _verification_status(page: dict[str, Any]) -> str:
+    explicit = _clean(page.get("verification_status") or "", 40)
+    if explicit:
+        return explicit
+    return "source-backed" if _has_non_conversation_source_refs(page.get("source_refs") or []) else "unverified"
+
+
+def _trust_warnings(page: dict[str, Any]) -> list[str]:
+    warnings = _dedupe_texts(page.get("trust_warnings") or [], limit=6, item_limit=180)
+    if warnings:
+        return warnings
+    if _verification_status(page) == "unverified":
+        return ["원문 출처 없음: 대화 기반 draft로만 참고합니다."]
+    return []
+
+
+def promotion_guardrail(status: str, source_refs: Iterable[object]) -> dict[str, Any]:
+    status = _clean(status or "draft", 40).lower() or "draft"
+    if status in {"reviewed", "stable"} and not _has_non_conversation_source_refs(source_refs):
+        return {
+            "allowed": False,
+            "downgraded_to": "draft",
+            "message": "reviewed/stable에는 conversation 이외의 source ref가 필요합니다.",
+        }
+    return {"allowed": True, "downgraded_to": status, "message": ""}
+
+
+def build_wiki_health_model(pages: Iterable[dict[str, Any] | WikiPage], *, search_health: dict[str, Any] | None = None, lint: dict[str, Any] | None = None) -> dict[str, Any]:
+    normalized = _normalize_pages(pages)
+    source_backed = sum(1 for page in normalized if page.get("verification_status") == "source-backed")
+    unverified = sum(1 for page in normalized if page.get("verification_status") != "source-backed")
+    open_questions = sum(len(page.get("openQuestions") or []) for page in normalized)
+    search_health = dict(search_health or {})
+    qmd = dict(search_health.get("qmd") or {})
+    lint = dict(lint or {})
+    return {
+        "page_count": len(normalized),
+        "provider": search_health.get("provider") or "fallback",
+        "qmd_installed": bool(qmd.get("installed")),
+        "qmd_file_count": int(qmd.get("file_count") or 0),
+        "fallback_available": bool(search_health.get("fallback_available", True)),
+        "source_backed_count": source_backed,
+        "unverified_count": unverified,
+        "open_question_count": open_questions,
+        "lint_issue_count": int(lint.get("issue_count") or len(lint.get("issues") or [])),
+    }
+
+
+def build_selected_evidence_model(page: dict[str, Any] | WikiPage | None, *, context_section: str = "") -> dict[str, Any]:
+    if not page:
+        return {"ok": False}
+    normalized = _normalize_page(page)
+    return {
+        "ok": True,
+        "title": normalized.get("title") or "위키 페이지",
+        "judgment": normalized.get("summary") or normalized.get("body") or "",
+        "body": normalized.get("body") or "",
+        "evidence": list(normalized.get("source_refs") or []),
+        "verification_status": normalized.get("verification_status") or "unverified",
+        "warnings": list(normalized.get("trust_warnings") or []),
+        "open_questions": list(normalized.get("openQuestions") or []),
+        "prompt_preview": context_section,
+        "tags": list(normalized.get("tags") or []),
+    }
+
+
 def _now() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="seconds")
 
@@ -193,7 +285,7 @@ def _normalize_page(page: dict[str, Any] | WikiPage) -> dict[str, Any]:
         return page.as_dict()
     if not isinstance(page, dict):
         return _record_to_page({"title": page})
-    if {"title", "summary", "body"}.intersection(page):
+    if {"title", "summary", "body", "verification_status", "source_refs", "openQuestions"}.intersection(page):
         tags = _dedupe_texts(page.get("tags") or [], limit=20, item_limit=60)
         source_refs = _dedupe_texts(page.get("source_refs") or [], limit=12, item_limit=120)
         normalized = {
@@ -204,6 +296,8 @@ def _normalize_page(page: dict[str, Any] | WikiPage) -> dict[str, Any]:
             "body": _clean(page.get("body") or "", 6000),
             "tags": tags,
             "status": _clean(page.get("status") or _status_from_tags(tags), 40),
+            "verification_status": _verification_status({**page, "source_refs": source_refs}),
+            "trust_warnings": _trust_warnings({**page, "source_refs": source_refs}),
             "surface": _clean(page.get("surface") or WIKI_SURFACE, 60).lower() or WIKI_SURFACE,
             "kind": _clean(page.get("kind") or "note", 40).lower() or "note",
             "confidence": float(page.get("confidence") or 0.5),
@@ -226,7 +320,12 @@ def _normalize_pages(pages: Iterable[dict[str, Any] | WikiPage]) -> list[dict[st
 
 
 def _matches_surface(page: dict[str, Any], surface: str) -> bool:
-    return surface == "all" or page.get("surface") == surface.lower()
+    if surface == "all":
+        return True
+    target = surface.lower()
+    if page.get("surface") == target:
+        return True
+    return target in {str(tag).lower() for tag in page.get("tags") or []}
 
 
 def _matches_status(page: dict[str, Any], status: str) -> bool:
@@ -247,12 +346,20 @@ def _matches_query(page: dict[str, Any], query: str) -> bool:
             " ".join((msg or {}).get("text") or "" for msg in page.get("messages") or []),
         ]
     ).lower()
-    return all(token in haystack for token in _tokens(query))
+    return all(any(alias in haystack for alias in _QUERY_ALIASES.get(token, {token})) for token in _tokens(query))
 
 
 def _visible_pages(pages: list[dict[str, Any]], *, query: str = "", surface: str = "all", status: str = "all") -> list[dict[str, Any]]:
     visible = [page for page in pages if _matches_surface(page, surface) and _matches_status(page, status) and _matches_query(page, query)]
-    visible.sort(key=lambda page: (page.get("updated_at") or page.get("created_at") or "", page.get("title") or ""), reverse=True)
+    target = surface.lower()
+    visible.sort(
+        key=lambda page: (
+            1 if surface != "all" and page.get("surface") == target else 0,
+            page.get("updated_at") or page.get("created_at") or "",
+            page.get("title") or "",
+        ),
+        reverse=True,
+    )
     return visible
 
 
@@ -429,6 +536,24 @@ def render_wiki_tab(surface: str, pack: dict[str, Any] | None = None) -> None:
     cols[3].metric("최근", latest.get("title", "—")[:20] if latest else "—")
 
     pages_all = wiki.list_pages(query="", surface="all", status="all", limit=400)
+    try:
+        search_health = wiki.search_health()
+    except Exception:
+        search_health = {"provider": "fallback", "fallback_available": True, "qmd": {}}
+    try:
+        lint = wiki.lint_pages(pages_all)
+    except Exception:
+        lint = {"issue_count": 0, "issues": []}
+    health = build_wiki_health_model(pages_all, search_health=search_health, lint=lint)
+
+    hcols = st.columns(6)
+    hcols[0].metric("검색", str(health.get("provider") or "fallback"))
+    hcols[1].metric("qmd files", f"{health.get('qmd_file_count', 0)}")
+    hcols[2].metric("source-backed", f"{health.get('source_backed_count', 0)}")
+    hcols[3].metric("unverified", f"{health.get('unverified_count', 0)}")
+    hcols[4].metric("lint", f"{health.get('lint_issue_count', 0)}")
+    hcols[5].metric("open Q", f"{health.get('open_question_count', 0)}")
+
     if not pages_all:
         st.info("아직 위키 카드가 없습니다. 아래에서 현재 대화를 위키로 승격해 보세요.")
         return
@@ -508,17 +633,44 @@ def render_wiki_tab(surface: str, pack: dict[str, Any] | None = None) -> None:
             st.info("왼쪽에서 페이지를 선택해 보세요.")
         else:
             with st.container(border=True):
-                st.markdown(f"**{selected.get('title', '위키 페이지')}**")
+                prompt_preview = wiki.build_context_section(query=query or selected.get("title", ""), surface=surface, limit=4)
+                evidence = build_selected_evidence_model(selected, context_section=prompt_preview)
+                st.markdown(f"**{evidence.get('title', '위키 페이지')}**")
                 st.caption(f"{selected.get('surface', 'wiki')} · {selected.get('kind', 'note')} · {selected.get('status', 'draft')}")
-                if selected.get("summary"):
-                    st.write(selected["summary"])
-                if selected.get("body"):
+
+                st.markdown("##### 판단")
+                st.write(evidence.get("judgment") or "요약된 판단이 아직 없습니다.")
+
+                st.markdown("##### 근거")
+                refs = evidence.get("evidence") or []
+                if refs:
+                    for ref in refs[:8]:
+                        st.caption(f"source ref · {ref}")
+                else:
+                    st.warning("원문 출처가 없어 대화 기반 참고로만 사용됩니다.")
+
+                st.markdown("##### 검증")
+                st.caption(f"verification: {evidence.get('verification_status', 'unverified')}")
+                for warning in evidence.get("warnings") or []:
+                    st.warning(warning)
+
+                if evidence.get("open_questions"):
+                    st.markdown("##### 열린 질문")
+                    for item in evidence["open_questions"][:6]:
+                        st.markdown(f"- {item}")
+
+                if evidence.get("body"):
                     st.markdown("##### 본문")
-                    st.write(selected["body"])
-                if selected.get("tags"):
-                    st.caption("태그: " + " · ".join(selected["tags"]))
-                if selected.get("source_refs"):
-                    st.caption("source refs: " + ", ".join(selected["source_refs"]))
+                    st.write(evidence["body"])
+                if evidence.get("tags"):
+                    st.caption("태그: " + " · ".join(evidence["tags"]))
+
+                with st.expander("프롬프트 주입 미리보기", expanded=False):
+                    if evidence.get("prompt_preview"):
+                        st.code(evidence["prompt_preview"], language="text")
+                    else:
+                        st.caption("현재 필터로 주입될 위키 지식이 없습니다.")
+
                 related = browser.get("related") or []
                 if related:
                     st.markdown("##### 관련 페이지")
@@ -556,6 +708,10 @@ def render_wiki_tab(surface: str, pack: dict[str, Any] | None = None) -> None:
             summary = st.text_area("요약", value=default_page.get("summary", ""), height=130)
             body = st.text_area("본문", value=default_page.get("body", ""), height=220)
             source_refs = st.text_input("source refs", value=", ".join(default_page.get("source_refs", [])))
+            parsed_source_refs = [item.strip() for item in source_refs.replace(";", ",").split(",") if item.strip()]
+            guardrail = promotion_guardrail(editor_status, parsed_source_refs)
+            if not guardrail.get("allowed"):
+                st.warning(f"승격 불가: {guardrail.get('message')} 저장 시 {guardrail.get('downgraded_to')}로 낮아집니다.")
             if st.form_submit_button("위키 저장", type="primary", width="stretch"):
                 saved = wiki.upsert_page(
                     {
@@ -567,7 +723,7 @@ def render_wiki_tab(surface: str, pack: dict[str, Any] | None = None) -> None:
                         "tags": [item.strip() for item in tags.replace(";", ",").split(",") if item.strip()],
                         "summary": summary,
                         "body": body,
-                        "source_refs": [item.strip() for item in source_refs.replace(";", ",").split(",") if item.strip()],
+                        "source_refs": parsed_source_refs,
                         "confidence": default_page.get("confidence", 0.7),
                     }
                 )

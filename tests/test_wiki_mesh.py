@@ -65,3 +65,24 @@ def test_extract_selected_page_id_reads_plotly_customdata():
     }
 
     assert wiki_mesh._extract_selected_page_id(event) == "page-b"
+
+def test_wiki_graph_nodes_carry_trust_metadata_and_color():
+    pages = [
+        {"id": "good", "title": "Good", "summary": "S", "verification_status": "source-backed", "source_refs": ["source:a"]},
+        {"id": "warn", "title": "Warn", "summary": "S", "verification_status": "unverified", "source_refs": ["conversation:1"]},
+        {"id": "bad", "title": "Bad", "summary": "S", "verification_status": "source-backed", "source_refs": ["source:b"], "lint_issue_count": 1},
+    ]
+
+    model = wiki_mesh.build_wiki_graph_model(pages, max_nodes=10)
+    by_id = {node["id"]: node for node in model["nodes"]}
+
+    assert by_id["good"]["verification_status"] == "source-backed"
+    assert by_id["good"]["color"] == wiki_mesh.TRUST_COLORS["source-backed"]
+    assert by_id["warn"]["color"] == wiki_mesh.TRUST_COLORS["unverified"]
+    assert by_id["bad"]["color"] == wiki_mesh.TRUST_COLORS["lint"]
+
+
+def test_trust_color_for_node_prioritizes_lint_then_verification():
+    assert wiki_mesh.trust_color_for_node({"lint_issue_count": 1, "verification_status": "source-backed"}) == wiki_mesh.TRUST_COLORS["lint"]
+    assert wiki_mesh.trust_color_for_node({"verification_status": "source-backed"}) == wiki_mesh.TRUST_COLORS["source-backed"]
+    assert wiki_mesh.trust_color_for_node({"verification_status": "unverified"}) == wiki_mesh.TRUST_COLORS["unverified"]
