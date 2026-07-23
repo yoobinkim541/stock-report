@@ -8,7 +8,7 @@ from collections.abc import Callable
 from datetime import datetime, timezone
 from typing import Iterable
 
-from . import shared_memory, storage
+from . import qmd_search, shared_memory, storage
 
 
 WIKI_TAG = "wiki"
@@ -189,24 +189,136 @@ def _tokens(text: str) -> set[str]:
 
 def list_pages(*, query: str = "", surface: str = "all", status: str = "all", limit: int = 20) -> list[dict]:
     limit = max(1, min(int(limit or 20), 400))
+    query = _clean(query, 600)
+    surface = _clean(surface or "all", 60).lower() or "all"
+    status = _clean(status or "all", 40).lower() or "all"
     try:
         rows = shared_memory.all_records()
     except Exception:
         rows = []
-    pages = [row for row in rows if _is_wiki_record(row)]
-    if not pages:
+    records = [row for row in rows if _is_wiki_record(row)]
+    if not records:
         return []
+    fallback = _fallback_ranked_pages(records, query=query, surface=surface, status=status, limit=limit)
+    qmd_pages = _qmd_ranked_pages(records, query=query, surface=surface, status=status, limit=limit)
+    if not qmd_pages:
+        return fallback
+    merged: list[dict] = []
+    seen: set[str] = set()
+    for page in [*qmd_pages, *fallback]:
+        page_id = _clean(page.get("id"), 120)
+        if page_id and page_id in seen:
+            continue
+        if page_id:
+            seen.add(page_id)
+        merged.append(page)
+        if len(merged) >= limit:
+            break
+    return merged
+
+
+def _fallback_ranked_pages(records: list[dict], *, query: str, surface: str, status: str, limit: int) -> list[dict]:
     scored: list[tuple[int, int, dict]] = []
-    for idx, row in enumerate(pages):
+    for idx, row in enumerate(records):
         page = _record_to_page(row)
         if status and status != "all" and page["status"] != status.lower():
             continue
         score = _candidate_score(row, query, surface, status)
         scored.append((score, -idx, page))
     if not scored:
-        scored = [(0, -idx, _record_to_page(row)) for idx, row in enumerate(pages)]
+        scored = [(0, -idx, _record_to_page(row)) for idx, row in enumerate(records)]
     scored.sort(key=lambda item: (item[0], item[1], item[2].get("updated_at", "")), reverse=True)
     return [page for _score, _idx, page in scored[:limit]]
+
+
+def _qmd_ranked_pages(records: list[dict], *, query: str, surface: str, status: str, limit: int) -> list[dict]:
+    if not query:
+        return []
+    try:
+        if not getattr(qmd_search, "enabled", lambda: True)():
+            return []
+        qmd_status = getattr(qmd_search, "status", lambda: {"installed": True})()
+        if isinstance(qmd_status, dict) and qmd_status.get("installed") is False:
+            return []
+    except Exception:
+        return []
+    source_pages = [_record_to_page(row) for row in records]
+    try:
+        qmd_search.export_pages(source_pages)
+    except Exception:
+        pass
+    try:
+        hits = qmd_search.search(query, limit=limit, surface=surface, status=status)
+    except Exception:
+        return []
+    if not hits:
+        return []
+    by_id = {_clean(page.get("id"), 120): page for page in source_pages if page.get("id")}
+    out: list[dict] = []
+    seen: set[str] = set()
+    for hit in hits:
+        page = _page_from_qmd_hit(hit, by_id=by_id, surface=surface, status=status)
+        if not page:
+            continue
+        page_id = _clean(page.get("id"), 120)
+        if page_id and page_id in seen:
+            continue
+        if page_id:
+            seen.add(page_id)
+        out.append(page)
+        if len(out) >= limit:
+            break
+    return out
+
+
+def _page_from_qmd_hit(hit: dict, *, by_id: dict[str, dict], surface: str, status: str) -> dict | None:
+    if not isinstance(hit, dict):
+        return None
+    page_id = _clean(hit.get("page_id") or hit.get("id"), 120)
+    source = by_id.get(page_id)
+    if source:
+        page = dict(source)
+        if status and status != "all" and page.get("status") != status:
+            return None
+        if surface and surface != "all" and page.get("surface") != surface:
+            return None
+        page["search_provider"] = "qmd"
+        page["search_score"] = hit.get("score")
+        if hit.get("summary"):
+            page["qmd_snippet"] = _clean(hit.get("summary"), 500)
+        return page
+    hit_surface = _clean(hit.get("surface") or surface or WIKI_SURFACE, 60).lower() or WIKI_SURFACE
+    hit_status = _clean(hit.get("status") or "draft", 40).lower() or "draft"
+    if surface and surface != "all" and hit_surface not in {surface, "all", WIKI_SURFACE}:
+        return None
+    if status and status != "all" and hit_status != status:
+        return None
+    title = _clean(hit.get("title") or "qmd 문서", 160)
+    summary = _clean(hit.get("summary") or hit.get("snippet") or "", 2400)
+    body = _clean(hit.get("body") or summary, 6000)
+    return {
+        "id": page_id or _page_id(title, hit_surface, "note"),
+        "title": title,
+        "slug": _slugify(title),
+        "summary": summary,
+        "body": body,
+        "tags": _dedupe_texts([*(hit.get("tags") or []), "qmd"], limit=20, item_limit=60),
+        "status": hit_status if hit_status in VALID_STATUSES else "draft",
+        "surface": hit_surface,
+        "kind": _clean(hit.get("kind") or "note", 40).lower() or "note",
+        "confidence": 0.5,
+        "created_at": "",
+        "updated_at": "",
+        "source": {"provider": "qmd"},
+        "source_refs": _dedupe_texts(hit.get("source_refs") or [], limit=12, item_limit=120),
+        "decisions": [],
+        "openQuestions": [],
+        "messages": [],
+        "snippet": summary[:260] if summary else "",
+        "raw": hit,
+        "search_provider": "qmd",
+        "search_score": hit.get("score"),
+    }
 
 
 def get_page(page_id: str) -> dict | None:

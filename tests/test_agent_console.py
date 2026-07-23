@@ -143,6 +143,61 @@ def test_wiki_capture_and_context_section(monkeypatch, tmp_path):
     assert "손실한도와 레버리지" in section
 
 
+def test_wiki_list_pages_prefers_qmd_search_when_available(monkeypatch, tmp_path):
+    _isolate(monkeypatch, tmp_path)
+
+    from agent_console import wiki
+
+    fallback = wiki.capture_from_chat(
+        "레버리지 원칙",
+        "로컬 점수 검색으로 잡히는 기존 페이지입니다.",
+        surface="portfolio",
+        title="기존 로컬 후보",
+        status="reviewed",
+        kind="playbook",
+    )
+    qmd_target = wiki.capture_from_chat(
+        "손실한도 1%",
+        "qmd 의미 검색으로 먼저 잡혀야 하는 페이지입니다.",
+        surface="portfolio",
+        title="qmd 우선 후보",
+        status="reviewed",
+        kind="playbook",
+    )
+    calls = []
+
+    class FakeQmd:
+        @staticmethod
+        def export_pages(pages):
+            calls.append(("export", len(pages)))
+            return {"ok": True, "files": []}
+
+        @staticmethod
+        def search(query, *, limit=10, surface="all", status="all"):
+            calls.append(("search", query, limit, surface, status))
+            return [
+                {
+                    "provider": "qmd",
+                    "page_id": qmd_target["id"],
+                    "title": "qmd 우선 후보",
+                    "summary": "qmd hit",
+                    "score": 0.98,
+                }
+            ]
+
+    monkeypatch.setattr(wiki, "qmd_search", FakeQmd, raising=False)
+
+    pages = wiki.list_pages(query="레버리지", surface="portfolio", limit=3)
+    section = wiki.build_context_section(query="레버리지", surface="portfolio", limit=3)
+
+    assert pages[0]["id"] == qmd_target["id"]
+    assert pages[0]["search_provider"] == "qmd"
+    assert fallback["id"] in {page["id"] for page in pages}
+    assert ("export", 2) in calls
+    assert "[위키 지식]" in section
+    assert "qmd 우선 후보" in section
+
+
 def test_agent_context_prompt_includes_wiki(monkeypatch, tmp_path):
     _isolate(monkeypatch, tmp_path)
 
