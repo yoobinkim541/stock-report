@@ -61,6 +61,7 @@ uv.lock
 # ── 생성된 리포트 (로컬 저장) ─────────────
 reports/*
 !reports/llm_decision.py
+!reports/combined_daily_report.py
 ~/reports/
 data/shared-memory/*
 !data/shared-memory/.gitkeep

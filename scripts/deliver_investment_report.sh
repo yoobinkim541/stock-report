@@ -34,6 +34,16 @@ REPORT_EXIT=$?
 # Generate CSV from JSON summary
 "$PYTHON_BIN" reports/save_csv.py 2>>/tmp/invest_report_stderr.txt
 
+# Generate market/news report for the unified daily delivery.
+# Market data sources are best-effort; the combined report records missing files instead of failing the investment report.
+if "$PYTHON_BIN" reports/market_report.py > /tmp/market_report_stdout.txt 2>/tmp/market_report_stderr.txt; then
+    MARKET_EXIT=0
+else
+    MARKET_EXIT=$?
+    echo "[WARN] 시장 리포트 생성 실패 (exit ${MARKET_EXIT})" >&2
+    cat /tmp/market_report_stderr.txt >&2 || true
+fi
+
 # ── Intelligence Barbell v2.1 분석 ────────────────────────────────────
 # Phase 변화 시 자동으로 텔레그램 알림 발송 (중복 발송 없음)
 "$PYTHON_BIN" barbell_strategy.py > /tmp/barbell_report.txt 2>>/tmp/invest_report_stderr.txt
@@ -53,6 +63,10 @@ REPORT_FILE="$HOME/reports/investment-report-${DATE}.md"
 JSON_FILE="$HOME/reports/investment-data-${DATE}.json"
 SUMMARY_FILE="$HOME/reports/investment-summary-${DATE}.txt"
 CHART_FILE="$HOME/reports/investment-chart-${DATE}.png"
+MARKET_REPORT_FILE="$HOME/reports/daily-report-${DATE}.md"
+MARKET_SUMMARY_FILE="$HOME/reports/daily-summary-${DATE}.txt"
+COMBINED_REPORT_FILE="$HOME/reports/combined-daily-report-${DATE}.md"
+COMBINED_SUMMARY_FILE="$HOME/reports/combined-daily-summary-${DATE}.txt"
 
 END_TIME=$(date +%s)
 DURATION=$((END_TIME - START_TIME))
@@ -65,6 +79,24 @@ fi
 
 if [ ! -f "$SUMMARY_FILE" ]; then
     echo "[FAIL] Summary not generated"
+    cat /tmp/invest_report_stderr.txt
+    exit 1
+fi
+
+"$PYTHON_BIN" reports/combined_daily_report.py \
+    --date "$DATE" \
+    --investment-report "$REPORT_FILE" \
+    --investment-summary "$SUMMARY_FILE" \
+    --market-report "$MARKET_REPORT_FILE" \
+    --market-summary "$MARKET_SUMMARY_FILE" \
+    --barbell-report /tmp/barbell_report.txt \
+    --tracker-report /tmp/tracker_report.txt \
+    --out-report "$COMBINED_REPORT_FILE" \
+    --out-summary "$COMBINED_SUMMARY_FILE" \
+    2>>/tmp/invest_report_stderr.txt
+
+if [ ! -f "$COMBINED_REPORT_FILE" ] || [ ! -f "$COMBINED_SUMMARY_FILE" ]; then
+    echo "[FAIL] Combined daily report not generated"
     cat /tmp/invest_report_stderr.txt
     exit 1
 fi
@@ -92,14 +124,14 @@ PY
 }
 
 if [ -n "$STOCK_BOT_TOKEN" ]; then
-    HEADER="📊 주식 투자 자동화 레포트 - ${DATE}"
+    HEADER="📊 통합 데일리 투자 리포트 - ${DATE}"
     send_telegram sendMessage \
         -d "chat_id=${STOCK_BOT_CHAT_ID}" \
         -d "text=${HEADER}"
 
     send_telegram sendMessage \
         -d "chat_id=${STOCK_BOT_CHAT_ID}" \
-        --data-urlencode "text@${SUMMARY_FILE}"
+        --data-urlencode "text@${COMBINED_SUMMARY_FILE}"
 
     # 시각화 대시보드 (생성된 경우에만) — 수익률·RSI·매집강도 4분할 그래프
     if [ -f "$CHART_FILE" ]; then
@@ -111,12 +143,12 @@ if [ -n "$STOCK_BOT_TOKEN" ]; then
 
     send_telegram sendDocument \
         -F "chat_id=${STOCK_BOT_CHAT_ID}" \
-        -F "document=@${REPORT_FILE}" \
-        -F "caption=전체 레포트 (${DATE})"
+        -F "document=@${COMBINED_REPORT_FILE}" \
+        -F "caption=통합 데일리 리포트 (${DATE})"
 fi
 
 # ── stdout: compact delivery report (this goes to Hermes cron output) ──
-REPORT_SIZE=$(wc -c < "$REPORT_FILE")
+REPORT_SIZE=$(wc -c < "$COMBINED_REPORT_FILE")
 PORTFOLIO_COUNT=$("$PYTHON_BIN" -c "
 import json
 snap = json.load(open('portfolio_snapshot.json'))
@@ -125,7 +157,7 @@ tickers = {h['ticker'] for s in ('overseas_general', 'overseas_fractional')
 print(len(tickers))
 " 2>/dev/null || echo "?")
 
-echo "📊 주식 투자 레포트 전송 완료"
+echo "📊 통합 데일리 투자 리포트 전송 완료"
 echo "━━━━━━━━━━━━━━━━━━"
 echo "날짜: ${DATE}"
 echo "실행 시간: ${DURATION}초"
@@ -138,6 +170,8 @@ echo "  - NASDAQ 100: ${INVESTMENT_REPORT_MAX_NASDAQ_SCAN}종목 스캔"
 echo "  - KOSPI 상위: ${INVESTMENT_REPORT_MAX_KOSPI_SCAN}종목 스캔"
 echo "  - LLM overlay: ${INVESTMENT_REPORT_LLM_MODEL:-gpt-5-mini} (fact guard 통과 시만 리포트에 추가)"
 echo "  - LLM decision: ${INVESTMENT_REPORT_LLM_DECISION_MODEL:-${INVESTMENT_REPORT_LLM_MODEL:-gpt-5-mini}} (${INVESTMENT_REPORT_LLM_DECISION_MODE}, schema guard)"
+echo "  - 시장/뉴스 리포트: exit ${MARKET_EXIT}"
+echo "  - 통합 문서: ${COMBINED_REPORT_FILE}"
 echo "  - API 비용: yfinance 무료 + SaveTicker 무료"
 echo ""
 echo "✅ @Stock_botbot 으로 전송 완료"
