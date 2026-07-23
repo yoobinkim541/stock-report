@@ -13,7 +13,7 @@ VALID_STATUSES = ("draft", "reviewed", "stable", "archived")
 # surface / kind 선택 목록의 단일 진실원. 첫 항목 "all" 은 필터 전용이라
 # 편집 UI 는 [1:] 를 쓴다. dashboard/pages/ai_wiki.py 가 여기서 가져간다.
 SURFACE_OPTIONS = ["all", "market", "portfolio", "ticker", "paper", "lab", "wiki"]
-KIND_OPTIONS = ["all", "note", "playbook", "decision", "risk", "concept"]
+KIND_OPTIONS = ["all", "note", "playbook", "decision", "risk", "concept", "source_digest"]
 
 
 @dataclass(frozen=True)

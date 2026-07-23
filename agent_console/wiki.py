@@ -16,7 +16,7 @@ from . import qmd_search, shared_memory, storage
 WIKI_TAG = "wiki"
 WIKI_SURFACE = "wiki"
 VALID_STATUSES = ("draft", "reviewed", "stable", "archived")
-VALID_KINDS = ("note", "playbook", "decision", "risk", "concept")
+VALID_KINDS = ("note", "playbook", "decision", "risk", "concept", "source_digest")
 
 
 def _now() -> str:

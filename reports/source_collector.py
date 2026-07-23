@@ -635,13 +635,22 @@ def _fetch_arca_post_body(post_id: str, *, proxy: str | None = None) -> str:
     return ""
 
 
+def _saveticker_max_pages() -> int:
+    try:
+        return max(1, min(20, int(os.getenv("STOCK_COLLECTOR_SAVETICKER_MAX_PAGES", "3"))))
+    except (TypeError, ValueError):
+        return 3
+
+
 def fetch_saveticker_events() -> list[dict]:
     base = os.getenv("SAVE_TICKER_API_BASE", "https://saveticker.com/api").rstrip("/")
-    paths = [
-        ("news/top-stories", None),
-        ("news/list", {"page": 1, "page_size": 30, "sort": "created_at_desc"}),
-    ]
+    paths = [("news/top-stories", None)]
+    paths.extend(
+        ("news/list", {"page": page, "page_size": 30, "sort": "created_at_desc"})
+        for page in range(1, _saveticker_max_pages() + 1)
+    )
     events = []
+    seen_keys: set[str] = set()
     for path, params in paths:
         try:
             resp = requests.get(f"{base}/{path}", headers=HEADERS, params=params, timeout=12)
@@ -649,10 +658,19 @@ def fetch_saveticker_events() -> list[dict]:
             data = resp.json()
         except Exception:
             continue
-        for item in data.get("news_list") or data.get("data") or []:
+        items = data.get("news_list") or data.get("data") or []
+        if params and not items:
+            break
+        for item in items:
             title = item.get("title") or ""
             if not title:
                 continue
+            url = item.get("url") or item.get("link") or ""
+            dedupe_key = str(url or title).strip().lower()
+            if dedupe_key and dedupe_key in seen_keys:
+                continue
+            if dedupe_key:
+                seen_keys.add(dedupe_key)
             text = " ".join(str(item.get(k) or "") for k in ("title", "content", "group_summary"))
             record = _saveticker_article_record(item, base)
             body_raw = record["body_raw"] or _combine_body_raw(item.get("content"), item.get("group_summary")) or text
@@ -660,7 +678,7 @@ def fetch_saveticker_events() -> list[dict]:
                 "source": "saveticker",
                 "source_url": base,
                 "title": title,
-                "url": item.get("url") or item.get("link") or "",
+                "url": url,
                 "published_at": item.get("created_at") or item.get("published_at") or "",
                 "body_raw": body_raw,
                 "body": body_raw,
@@ -674,7 +692,6 @@ def fetch_saveticker_events() -> list[dict]:
                 "raw_source": record["raw_source"],
             })
     return [_classify_event(event) for event in events]
-
 
 def _parse_arca_html(html_text: str) -> list[tuple[str, str]]:
     """arca.live 게시판 HTML → [(post_id, 제목텍스트)] (순수 — jina 장애 시 직접 폴백용)."""
@@ -772,35 +789,119 @@ def fetch_arca_events(max_pages: int = 2, *, proxy: str | None = None,
     return [_classify_event(event) for event in events]
 
 
-def _telegram_titles_from_html(html_text: str, channel: str) -> tuple[list[str], list[str]]:
-    """t.me/s/<channel> 공개 HTML 에서 메시지 텍스트·링크 추출 (순수 — 테스트 가능).
+def _telegram_text_from_fragment(fragment: str) -> str:
+    raw = re.sub(r"<br\s*/?>", " ", fragment or "", flags=re.I)
+    txt = html_mod.unescape(re.sub(r"<[^>]+>", "", raw))
+    return " ".join(txt.split()).strip()
 
-    jina 마크다운의 **bold** 파싱은 굵은 제목이 없는 채널에서 0건이 되는 함정
-    (insidertracking 수집 공백의 유력 원인) → 위젯 메시지 div 직접 파싱 폴백.
+
+def _telegram_messages_from_html(html_text: str, channel: str) -> list[dict]:
+    """t.me/s 공개 HTML을 메시지 카드 단위로 파싱한다.
+
+    제목, 본문, URL이 같은 카드에서 나오도록 묶어 jina 제목 리스트와 직접 HTML
+    본문 리스트가 인덱스로 어긋나는 문제를 막는다.
     """
+    if not html_text:
+        return []
+    soup = BeautifulSoup(html_text, "html.parser")
+    cards = soup.select(".tgme_widget_message")
+    messages: list[dict] = []
+
+    def _url_from(node) -> str:
+        link = node.select_one("a.tgme_widget_message_date[href]") if hasattr(node, "select_one") else None
+        if link and link.get("href"):
+            return str(link.get("href"))
+        for a in node.find_all("a", href=True) if hasattr(node, "find_all") else []:
+            href = str(a.get("href") or "")
+            if re.match(rf"https://t\.me/{re.escape(channel)}/\d+", href):
+                return href
+        return ""
+
+    if cards:
+        for card in cards:
+            text_node = card.select_one(".tgme_widget_message_text")
+            if not text_node:
+                continue
+            body_raw = _telegram_text_from_fragment(str(text_node))
+            if not body_raw:
+                continue
+            messages.append({
+                "title": body_raw[:180],
+                "url": _url_from(card),
+                "body_raw": body_raw[:TELEGRAM_BODY_MAX],
+                "raw_html": str(card),
+            })
+        return messages
+
+    # 테스트/간소 HTML 폴백: text div와 뒤따르는 링크를 순서대로 매칭한다.
     titles = []
-    for m in re.finditer(r'class="tgme_widget_message_text[^"]*"[^>]*>(.*?)</div>',
-                         html_text, re.S):
-        raw = re.sub(r"<br\s*/?>", " ", m.group(1))
-        txt = html_mod.unescape(re.sub(r"<[^>]+>", "", raw))
-        txt = " ".join(txt.split())
+    raw_fragments = []
+    for m in re.finditer(r'class="tgme_widget_message_text[^"]*"[^>]*>(.*?)</div>', html_text, re.S):
+        raw_fragments.append(m.group(0))
+        txt = _telegram_text_from_fragment(m.group(1))
         if txt:
             titles.append(txt)
     urls = re.findall(rf'href="(https://t\.me/{re.escape(channel)}/\d+)"', html_text)
-    return titles, urls
+    out = []
+    for idx, title in enumerate(titles):
+        out.append({
+            "title": title[:180],
+            "url": urls[idx] if idx < len(urls) else "",
+            "body_raw": title[:TELEGRAM_BODY_MAX],
+            "raw_html": raw_fragments[idx] if idx < len(raw_fragments) else title,
+        })
+    return out
+
+
+def _telegram_titles_from_html(html_text: str, channel: str) -> tuple[list[str], list[str]]:
+    """t.me/s/<channel> 공개 HTML 에서 메시지 텍스트·링크 추출 (순수 — 테스트 가능)."""
+    messages = _telegram_messages_from_html(html_text, channel)
+    return [m.get("title", "") for m in messages], [m.get("url", "") for m in messages]
 
 
 TELEGRAM_BODY_MAX = 3000    # 이벤트 body 상한 (레딧 분석 등 장문 구조화 파싱용)
 
 
-def _telegram_message_texts(channel: str) -> tuple[list[str], list[str]]:
-    """t.me/s 직접 HTML — (전체 메시지 텍스트 목록, 링크 목록). 실패 시 ([], [])."""
+def _telegram_direct_messages(channel: str) -> list[dict]:
+    """t.me/s 직접 HTML — 메시지 카드 목록. 실패 시 []."""
     try:
         resp = _bounded_get(f"https://t.me/s/{channel}", timeout=15)
-        return _telegram_titles_from_html(resp.text, channel)
+        return _telegram_messages_from_html(resp.text, channel)
     except Exception as e:
         logger.info("telegram:%s 직접 HTML 실패: %s", channel, e)
-        return [], []
+        return []
+
+
+def _telegram_message_texts(channel: str) -> tuple[list[str], list[str]]:
+    """t.me/s 직접 HTML — (전체 메시지 텍스트 목록, 링크 목록). 실패 시 ([], [])."""
+    messages = _telegram_direct_messages(channel)
+    return [m.get("body_raw", "") for m in messages], [m.get("url", "") for m in messages]
+
+
+def _archive_telegram_message(channel: str, message: dict) -> dict:
+    from reports.raw_archive import save_extracted_text, save_raw_artifact
+
+    title = str(message.get("title") or message.get("body_raw") or f"telegram {channel}").strip()
+    body_raw = str(message.get("body_raw") or title).strip()
+    url = str(message.get("url") or f"https://t.me/s/{channel}").strip()
+    raw_payload = str(message.get("raw_html") or body_raw)
+    raw_record = save_raw_artifact(
+        source=f"telegram:{channel}",
+        kind="html",
+        fetched_at=datetime.now(KST),
+        title=title or f"telegram {channel}",
+        url=url,
+        payload=raw_payload,
+        suffix=".html",
+    )
+    save_extracted_text(raw_record, body_raw)
+    return {
+        "raw_path": raw_record["raw_path"],
+        "text_path": raw_record["text_path"],
+        "manifest_path": raw_record["manifest_path"],
+        "raw_sha256": raw_record["sha256"],
+        "raw_source": raw_record["source"],
+    }
 
 
 def fetch_telegram_channel_events(channels: list[str] = TELEGRAM_NEWS_CHANNELS) -> list[dict]:
@@ -809,43 +910,41 @@ def fetch_telegram_channel_events(channels: list[str] = TELEGRAM_NEWS_CHANNELS) 
         channel = channel.strip().lstrip("@")
         if not channel:
             continue
-        titles: list[str] = []
-        urls: list[str] = []
-        bodies_by_url: dict[str, str] = {}
+        jina_messages: list[dict] = []
         try:
             resp = _bounded_get(f"https://r.jina.ai/http://t.me/s/{channel}", timeout=20)
             markdown = resp.text
             titles = [" ".join(m.group(1).split()) for m in re.finditer(r"\*\*([^*]+)\*\*", markdown)]
             urls = re.findall(rf"https://t\.me/{re.escape(channel)}/\d+", markdown)
+            for idx, title in enumerate(titles):
+                jina_messages.append({
+                    "title": title[:180],
+                    "url": urls[idx] if idx < len(urls) else "",
+                    "body_raw": title[:TELEGRAM_BODY_MAX],
+                    "raw_html": title,
+                })
         except Exception as e:
             logger.warning("telegram:%s jina 수집 실패 — 직접 HTML 폴백 시도: %s", channel, e)
 
-        if titles:
-            # jina 성공 = 제목만 확보 → 장문 본문(레딧 분석·프리마켓 등)은 직접 HTML 로 보강
-            texts, t_urls = _telegram_message_texts(channel)
-            bodies_by_url = {u: t[:TELEGRAM_BODY_MAX] for u, t in zip(t_urls, texts)}
-        else:
-            # 폴백: t.me/s 공개 프리뷰 직접 파싱 (jina 장애/레이트리밋·bold 없는 채널 대응)
-            texts, urls = _telegram_message_texts(channel)
-            titles = texts
-            bodies_by_url = {u: t[:TELEGRAM_BODY_MAX] for u, t in zip(urls, texts)}
+        # 직접 HTML 카드 파싱을 canonical 경로로 사용한다. 실패할 때만 jina 제목을 이벤트화한다.
+        messages = _telegram_direct_messages(channel) or jina_messages
 
-        if not titles:
+        if not messages:
             logger.warning("telegram:%s 수집 0건 (jina·직접 모두) — 채널명/차단 확인 필요", channel)
             _note_error(f"telegram:{channel}", "jina·직접 HTML 모두 0건 — 채널명/차단 확인")
         else:
             _LAST_ERRORS.pop(f"telegram:{channel}", None)
-        for idx, title in enumerate(titles):
+        for message in messages:
+            title = str(message.get("title") or "").strip()
             if not title:
                 continue
-            # 이모지·기호 단독 항목 제외 (실제 글자 4자 미만)
             if len(re.sub(r"[^\w가-힣]", "", title)) < 4:
                 continue
-            url = urls[idx] if idx < len(urls) else ""
-            body = bodies_by_url.get(url, "")
-            scan_text = body or title           # 티커/테마 추출은 본문 우선(장문 포스트 대응)
+            body = str(message.get("body_raw") or title).strip()[:TELEGRAM_BODY_MAX]
+            url = str(message.get("url") or "").strip()
+            scan_text = body or title
             tags = _extract_news_tags(scan_text)
-            try:                                # 포스트 유형 태그 (레딧분석·속보·프리마켓 — 표시/필터용)
+            try:
                 from reports.social_sentiment import classify_post
                 kind = {"reddit_analysis": "레딧분석", "breaking": "속보",
                         "premarket": "프리마켓"}.get(classify_post(scan_text))
@@ -853,6 +952,7 @@ def fetch_telegram_channel_events(channels: list[str] = TELEGRAM_NEWS_CHANNELS) 
                     tags = tags + [kind]
             except Exception:
                 pass
+            archive = _archive_telegram_message(channel, {**message, "title": title, "body_raw": body, "url": url})
             events.append({
                 "source": f"telegram:{channel}",
                 "source_url": f"https://t.me/s/{channel}",
@@ -863,9 +963,13 @@ def fetch_telegram_channel_events(channels: list[str] = TELEGRAM_NEWS_CHANNELS) 
                 "body_excerpt": body[:500],
                 "tickers": _extract_tickers(scan_text),
                 "tags": tags,
+                "raw_path": archive["raw_path"],
+                "text_path": archive["text_path"],
+                "manifest_path": archive["manifest_path"],
+                "raw_sha256": archive["raw_sha256"],
+                "raw_source": archive["raw_source"],
             })
     return [_classify_event(event) for event in events]
-
 
 def _pct(current: float | None, base: float | None) -> float | None:
     if current is None or base is None or base <= 0:

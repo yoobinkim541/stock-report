@@ -37,6 +37,25 @@ def test_save_raw_artifact_writes_original_and_manifest(tmp_path, monkeypatch):
     assert manifest["text_path"] == rec["text_path"]
 
 
+def test_save_raw_artifact_keeps_json_raw_and_manifest_separate(tmp_path, monkeypatch):
+    monkeypatch.setenv("STOCK_REPORT_REPORTS_DIR", str(tmp_path / "reports"))
+    rec = ra.save_raw_artifact(
+        source="saveticker_article",
+        kind="json",
+        fetched_at=datetime(2026, 7, 21, 9, 0, tzinfo=timezone.utc),
+        title="NVDA earnings",
+        url="https://saveticker.com/api/news/list",
+        payload='{"title":"NVDA earnings","content":"original json"}',
+        suffix=".json",
+    )
+
+    assert rec["raw_path"] != rec["manifest_path"]
+    assert Path(rec["raw_path"]).read_text(encoding="utf-8") == '{"title":"NVDA earnings","content":"original json"}'
+    manifest = json.loads(Path(rec["manifest_path"]).read_text(encoding="utf-8"))
+    assert manifest["raw_path"] == rec["raw_path"]
+    assert manifest["manifest_path"] == rec["manifest_path"]
+
+
 
 
 def test_save_raw_artifact_uses_source_policy_when_ttl_missing(tmp_path, monkeypatch):

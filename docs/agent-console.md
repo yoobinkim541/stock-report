@@ -80,3 +80,15 @@ AGENT_CONSOLE_PORT=8798 bash scripts/run_agent_console.sh
 ## 운영 메모
 
 이 콘솔은 기존 대시보드를 대체하지 않는다. 대시보드는 차트와 운영 화면, 에이전트 콘솔은 맥락 축적과 질문 응답, 전략 실험의 가벼운 작업대 역할로 나눈다. `기억·위키`는 그 사이에서 반복되는 판단을 정리해 다음 답변에 재사용하는 지식 카드 레이어다.
+
+## Source-Backed Wiki Curator
+
+The source collector keeps SaveTicker, Telegram, Arca, market, and macro events in `~/reports/source-cache`. `reports.source_wiki_curator` reads that cache and updates deterministic wiki pages by topic, source type, and repeated tickers. These pages use `kind=source_digest`, preserve URL/text/raw source refs, and are intended to become AI console context before generic memory.
+
+Operational command:
+
+```bash
+uv run python -m reports.source_wiki_curator --hours 48 --limit 8
+```
+
+The production crontab runs it shortly after `reports/source_collector.py`, so newly collected source events become qmd-searchable wiki context without waiting for a chat autocuration pass.

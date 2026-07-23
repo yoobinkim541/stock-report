@@ -300,6 +300,44 @@ def test_fetch_saveticker_events_enriches_thin_articles(monkeypatch, tmp_path):
     assert Path(events[0]["raw_path"]).exists()
 
 
+def test_fetch_saveticker_events_paginates_news_list(monkeypatch, tmp_path):
+    class FakeResponse:
+        def __init__(self, payload):
+            self._payload = payload
+
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return self._payload
+
+    calls = []
+
+    def fake_get(url, **kwargs):
+        calls.append((url, kwargs.get("params") or {}))
+        params = kwargs.get("params") or {}
+        if url.endswith("/news/top-stories"):
+            return FakeResponse({"news_list": []})
+        page = int(params.get("page") or 1)
+        return FakeResponse({"news_list": [{
+            "title": f"페이지 {page} 반도체 뉴스",
+            "content": f"본문 {page}",
+            "url": f"https://e/page-{page}",
+            "created_at": "2026-07-23",
+            "tag_names": ["기술/AI"],
+        }]})
+
+    monkeypatch.setenv("STOCK_REPORT_REPORTS_DIR", str(tmp_path / "reports"))
+    monkeypatch.setenv("STOCK_COLLECTOR_SAVETICKER_MAX_PAGES", "2")
+    monkeypatch.setattr(sc, "_fetch_saveticker_article_body", lambda url: "")
+    monkeypatch.setattr(sc.requests, "get", fake_get)
+
+    events = sc.fetch_saveticker_events()
+
+    assert [params.get("page") for url, params in calls if url.endswith("/news/list")] == [1, 2]
+    assert [event["title"] for event in events] == ["페이지 1 반도체 뉴스", "페이지 2 반도체 뉴스"]
+
+
 # ── 소스별 수집 헬스 (수집 공백 가시화) ──────────────────────────────────────
 
 def test_update_and_load_source_health_roundtrip(tmp_path):
@@ -360,7 +398,71 @@ def test_telegram_titles_from_html_parses_widget_text():
     assert urls == ["https://t.me/insidertracking/123", "https://t.me/insidertracking/124"]
 
 
-def test_fetch_telegram_falls_back_to_direct_html(monkeypatch):
+def test_telegram_messages_from_html_keeps_card_text_and_url_together():
+    html = '''
+    <div class="tgme_widget_message">
+      <div class="tgme_widget_message_text js-message_text" dir="auto">
+        GE 버노바 2026년 2분기 실적 요약<br/>매출과 마진 개선
+      </div>
+      <a class="tgme_widget_message_date" href="https://t.me/insidertracking/58906"><time></time></a>
+    </div>
+    <div class="tgme_widget_message">
+      <div class="tgme_widget_message_text js-message_text" dir="auto">
+        요르단 공군기지 이란 미사일 공격
+      </div>
+      <a class="tgme_widget_message_date" href="https://t.me/insidertracking/58907"><time></time></a>
+    </div>
+    '''
+
+    messages = sc._telegram_messages_from_html(html, "insidertracking")
+
+    assert [m["url"] for m in messages] == [
+        "https://t.me/insidertracking/58906",
+        "https://t.me/insidertracking/58907",
+    ]
+    assert messages[0]["title"].startswith("GE 버노바")
+    assert "매출과 마진 개선" in messages[0]["body_raw"]
+    assert "요르단" not in messages[0]["body_raw"]
+    assert "tgme_widget_message" in messages[0]["raw_html"]
+
+
+def test_fetch_telegram_archives_raw_and_text(monkeypatch, tmp_path):
+    class _Resp:
+        def __init__(self, text):
+            self.text = text
+
+    html = '''
+    <div class="tgme_widget_message">
+      <div class="tgme_widget_message_text js-message_text" dir="auto">
+        엔비디아 AI 서버 수요 확대<br/>원문: NVIDIA AI server demand expands
+      </div>
+      <a class="tgme_widget_message_date" href="https://t.me/insidertracking/60001"><time></time></a>
+    </div>
+    '''
+
+    def fake_get(url, timeout=0):
+        if url.startswith("https://r.jina.ai/"):
+            return _Resp("plain markdown without bold titles")
+        return _Resp(html)
+
+    monkeypatch.setenv("STOCK_REPORT_REPORTS_DIR", str(tmp_path / "reports"))
+    monkeypatch.setattr(sc, "_bounded_get", fake_get)
+
+    events = sc.fetch_telegram_channel_events(["insidertracking"])
+
+    assert len(events) == 1
+    event = events[0]
+    assert event["source"] == "telegram:insidertracking"
+    assert event["url"] == "https://t.me/insidertracking/60001"
+    assert "엔비디아" in event["body_raw"]
+    assert Path(event["raw_path"]).exists()
+    assert Path(event["text_path"]).read_text(encoding="utf-8") == event["body_raw"]
+    manifest = json.loads(Path(event["manifest_path"]).read_text(encoding="utf-8"))
+    assert manifest["source"] == "telegram:insidertracking"
+    assert manifest["ttl_days"] == 14
+
+
+def test_fetch_telegram_falls_back_to_direct_html(monkeypatch, tmp_path):
     """jina 가 bold 없는 마크다운(제목 0건)을 줘도 직접 HTML 폴백으로 수집."""
     calls = []
 
@@ -375,6 +477,7 @@ def test_fetch_telegram_falls_back_to_direct_html(monkeypatch):
         return _Resp('<div class="tgme_widget_message_text">연준 금리 동결 시사</div>'
                      '<a href="https://t.me/chanx/9"></a>')
 
+    monkeypatch.setenv("STOCK_REPORT_REPORTS_DIR", str(tmp_path / "reports"))
     monkeypatch.setattr(sc, "_bounded_get", fake_get)
     events = sc.fetch_telegram_channel_events(["chanx"])
     assert len(events) == 1
