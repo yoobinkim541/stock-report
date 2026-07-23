@@ -62,6 +62,7 @@ uv.lock
 reports/*
 !reports/llm_decision.py
 !reports/combined_daily_report.py
+!reports/market_risk_report.py
 ~/reports/
 data/shared-memory/*
 !data/shared-memory/.gitkeep

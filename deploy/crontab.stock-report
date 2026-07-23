@@ -17,6 +17,8 @@ PATH=/home/ubuntu/.local/bin:/usr/local/bin:/usr/bin:/bin
 # ── 상시 리포트·전략 (매일) ──────────────────────────────────────────────────
 # 일일 투자 리포트 생성·발송 (investment_report + barbell_strategy + portfolio_tracker)
 0 23 * * * cd /home/ubuntu/projects/stock-report && bash scripts/deliver_investment_report.sh >> /tmp/deliver_investment_report.log 2>&1   # 23:00 UTC = 08:00 KST
+# 시장 위험 보고서 생성·발송 (cross-asset risk flash + deep dive)
+20 23 * * * cd /home/ubuntu/projects/stock-report && flock -n /tmp/market_risk_report.lock bash scripts/deliver_market_risk_report.sh >> /tmp/deliver_market_risk_report.log 2>&1   # 23:20 UTC = 08:20 KST
 
 # ── 평일(월~금) ML·동기화 크론 ───────────────────────────────────────────────
 # ML 종목 랭킹 발송
