@@ -144,6 +144,165 @@ def test_wiki_capture_and_context_section(monkeypatch, tmp_path):
     assert "손실한도와 레버리지" in section
 
 
+def test_wiki_conversation_only_pages_stay_unverified_draft(monkeypatch, tmp_path):
+    _isolate(monkeypatch, tmp_path)
+
+    from agent_console import wiki
+
+    page = wiki.capture_from_chat(
+        "손실한도 규칙을 reviewed 로 저장해줘",
+        "검증이라는 단어가 있어도 이 답변은 대화에서 나온 규칙일 뿐입니다.",
+        surface="portfolio",
+        title="대화 기반 손실한도 규칙",
+        status="reviewed",
+        kind="playbook",
+        tags=["risk", "portfolio"],
+        source_refs=["conversation:abc123"],
+    )
+    section = wiki.build_context_section(query="손실한도", surface="portfolio", limit=4)
+
+    assert page["status"] == "draft"
+    assert page["verification_status"] == "unverified"
+    assert any("원문 출처 없음" in warning for warning in page["trust_warnings"])
+    assert "검증: unverified" in section
+    assert "원문 출처 없음" in section
+
+
+def test_source_backed_wiki_page_can_be_reviewed(monkeypatch, tmp_path):
+    _isolate(monkeypatch, tmp_path)
+
+    from agent_console import wiki
+
+    page = wiki.upsert_page({
+        "title": "FOMC 원문 기반 금리 판단",
+        "summary": "FOMC 원문과 시장 반응을 대조한 판단입니다.",
+        "body": "원문 release 와 가격 반응을 함께 봅니다.",
+        "surface": "market",
+        "kind": "decision",
+        "status": "reviewed",
+        "tags": ["macro"],
+        "source_refs": ["source:saveticker:2026-07-23", "https://example.com/fomc"],
+    })
+
+    assert page["status"] == "reviewed"
+    assert page["verification_status"] == "source-backed"
+    assert page["trust_warnings"] == []
+
+
+def test_wiki_rebuild_artifacts_writes_index_log_open_questions_and_lint(monkeypatch, tmp_path):
+    _isolate(monkeypatch, tmp_path)
+
+    from agent_console import wiki
+
+    wiki.upsert_page({
+        "title": "AI CAPEX 검증 규칙",
+        "summary": "AI CAPEX 뉴스는 마진과 현금흐름을 함께 본다.",
+        "body": "CAPEX 확대는 수요 신호이면서 비용 압박일 수 있습니다.",
+        "surface": "market",
+        "kind": "playbook",
+        "status": "reviewed",
+        "tags": ["ai", "capex"],
+        "source_refs": ["source:saveticker:ai-capex"],
+        "openQuestions": ["전력비 상승이 마진을 얼마나 압박하는가?"],
+    })
+
+    result = wiki.rebuild_artifacts()
+    files = result["files"]
+
+    assert result["ok"] is True
+    assert result["page_count"] == 1
+    assert set(files) == {"index.md", "log.md", "open-questions.md", "lint.md"}
+    assert "AI CAPEX 검증 규칙" in (wiki.wiki_artifacts_dir() / "index.md").read_text(encoding="utf-8")
+    assert "## [" in (wiki.wiki_artifacts_dir() / "log.md").read_text(encoding="utf-8")
+    assert "전력비 상승" in (wiki.wiki_artifacts_dir() / "open-questions.md").read_text(encoding="utf-8")
+    assert "source_missing_for_promoted" not in (wiki.wiki_artifacts_dir() / "lint.md").read_text(encoding="utf-8")
+
+
+def test_wiki_lint_flags_source_less_promoted_pages_and_open_questions(monkeypatch, tmp_path):
+    _isolate(monkeypatch, tmp_path)
+
+    from agent_console import wiki
+
+    result = wiki.lint_pages([
+        {
+            "id": "bad1",
+            "title": "출처 없는 stable 규칙",
+            "status": "stable",
+            "verification_status": "unverified",
+            "source_refs": [],
+            "openQuestions": ["어떤 원문으로 검증했나?"],
+            "surface": "portfolio",
+            "kind": "playbook",
+        }
+    ])
+
+    codes = {issue["code"] for issue in result["issues"]}
+    assert "source_missing_for_promoted" in codes
+    assert "open_questions_present" in codes
+    assert result["ok"] is False
+
+
+def test_wiki_search_health_reports_qmd_or_fallback(monkeypatch, tmp_path):
+    _isolate(monkeypatch, tmp_path)
+
+    from agent_console import wiki
+
+    monkeypatch.setattr(
+        wiki.qmd_search,
+        "health",
+        lambda: {"enabled": True, "installed": False, "provider": "qmd", "file_count": 0},
+        raising=False,
+    )
+
+    health = wiki.search_health()
+
+    assert health["provider"] == "fallback"
+    assert health["qmd"]["installed"] is False
+    assert health["fallback_available"] is True
+
+
+def test_wiki_context_section_includes_search_and_trust_metadata(monkeypatch, tmp_path):
+    _isolate(monkeypatch, tmp_path)
+
+    from agent_console import wiki
+
+    page = wiki.upsert_page({
+        "title": "qmd 검색 메타 규칙",
+        "summary": "qmd 검색 결과도 검증 상태와 출처를 함께 보여준다.",
+        "body": "검색 점수만으로 신뢰하지 않는다.",
+        "surface": "market",
+        "kind": "playbook",
+        "status": "reviewed",
+        "source_refs": ["source:saveticker:qmd-meta"],
+    })
+
+    class FakeQmd:
+        @staticmethod
+        def enabled():
+            return True
+
+        @staticmethod
+        def status():
+            return {"installed": True}
+
+        @staticmethod
+        def export_pages(pages):
+            return {"ok": True, "files": []}
+
+        @staticmethod
+        def search(query, *, limit=10, surface="all", status="all"):
+            return [{"page_id": page["id"], "summary": "qmd snippet", "score": 0.93}]
+
+    monkeypatch.setattr(wiki, "qmd_search", FakeQmd, raising=False)
+
+    section = wiki.build_context_section(query="검색 메타", surface="market", limit=2)
+
+    assert "검색: qmd" in section
+    assert "score=0.93" in section
+    assert "검증: source-backed" in section
+    assert "출처: source:saveticker:qmd-meta" in section
+
+
 def test_wiki_list_pages_prefers_qmd_search_when_available(monkeypatch, tmp_path):
     _isolate(monkeypatch, tmp_path)
 
@@ -197,6 +356,30 @@ def test_wiki_list_pages_prefers_qmd_search_when_available(monkeypatch, tmp_path
     assert ("export", 2) in calls
     assert "[위키 지식]" in section
     assert "qmd 우선 후보" in section
+
+
+def test_agent_prompt_mentions_wiki_trust_and_source_backing(monkeypatch, tmp_path):
+    _isolate(monkeypatch, tmp_path)
+
+    from agent_console import agent
+
+    pack = {
+        "surface": "market",
+        "sources": {"events": [], "source_counts": [], "symbol_counts": []},
+        "memory": [],
+        "reports": [],
+        "ml_activity": [],
+        "portfolio": {"holdings": []},
+        "paper": {},
+        "models": {},
+        "focus": [],
+    }
+
+    prompt = agent._build_general_chat_prompt("AI CAPEX 규칙 다시 설명해줘", pack, history=[])
+
+    assert "위키 지식은 검증 상태" in prompt
+    assert "conversation-only" in prompt
+    assert "source-backed" in prompt
 
 
 def test_agent_context_prompt_includes_wiki(monkeypatch, tmp_path):

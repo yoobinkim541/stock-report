@@ -1,11 +1,13 @@
 from __future__ import annotations
 
 import json
+import os
 import hashlib
 import re
 from collections import Counter
 from collections.abc import Callable
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Iterable
 
 from . import qmd_search, shared_memory, storage
@@ -63,6 +65,42 @@ def _status_from_tags(tags: list[str]) -> str:
             if candidate in VALID_STATUSES:
                 return candidate
     return "draft"
+
+
+def has_non_conversation_source_refs(page_or_refs: object) -> bool:
+    refs = page_or_refs
+    if isinstance(page_or_refs, dict):
+        refs = page_or_refs.get("source_refs") or page_or_refs.get("artifacts") or []
+    for raw in refs or []:
+        ref = _clean(raw, 300).lower()
+        if not ref:
+            continue
+        if ref.startswith("conversation:") or ref.startswith("chat:"):
+            continue
+        return True
+    return False
+
+
+def verification_status_for(source_refs: list[str] | tuple[str, ...] | None) -> str:
+    return "source-backed" if has_non_conversation_source_refs(source_refs or []) else "unverified"
+
+
+def trust_warnings_for(status: str, source_refs: list[str] | tuple[str, ...] | None) -> list[str]:
+    verification = verification_status_for(source_refs)
+    if verification == "source-backed":
+        return []
+    if status in {"reviewed", "stable"}:
+        return ["원문 출처 없음: conversation-only 페이지는 reviewed/stable 근거로 쓰지 않습니다."]
+    return ["원문 출처 없음: 대화 기반 draft로만 참고합니다."]
+
+
+def normalize_trust_status(status: str, source_refs: list[str] | tuple[str, ...] | None) -> str:
+    status = _clean(status or "draft", 24).lower()
+    if status not in VALID_STATUSES:
+        status = "draft"
+    if status in {"reviewed", "stable"} and not has_non_conversation_source_refs(source_refs or []):
+        return "draft"
+    return status
 
 
 def _surface_from_record(record: dict) -> str:
@@ -123,6 +161,9 @@ def _record_to_page(record: dict) -> dict:
                 msg_lines.append(f"{role}: {text}")
         if msg_lines:
             body_parts.append("대화 발췌\n- " + "\n- ".join(msg_lines))
+    source_refs = _dedupe_texts(record.get("artifacts") or [], limit=12, item_limit=120)
+    status = normalize_trust_status(_status_from_tags(tags), source_refs)
+    warnings = trust_warnings_for(status, source_refs)
     return {
         "id": record.get("id"),
         "title": _clean(record.get("title") or "위키 페이지", 160),
@@ -130,14 +171,16 @@ def _record_to_page(record: dict) -> dict:
         "summary": summary,
         "body": "\n\n".join(part for part in body_parts if part).strip(),
         "tags": tags,
-        "status": _status_from_tags(tags),
+        "status": status,
+        "verification_status": verification_status_for(source_refs),
+        "trust_warnings": warnings,
         "surface": _surface_from_record(record),
         "kind": _kind_from_record(record),
         "confidence": float(record.get("confidence") or source.get("confidence") or 0.5),
         "created_at": record.get("createdAt") or "",
         "updated_at": record.get("updatedAt") or record.get("createdAt") or "",
         "source": source,
-        "source_refs": _dedupe_texts(record.get("artifacts") or [], limit=12, item_limit=120),
+        "source_refs": source_refs,
         "decisions": decisions,
         "openQuestions": open_questions,
         "messages": messages,
@@ -327,6 +370,159 @@ def stats() -> dict:
     }
 
 
+def wiki_artifacts_dir() -> Path:
+    override = os.getenv("AGENT_CONSOLE_WIKI_ARTIFACTS_DIR", "").strip()
+    if override:
+        return Path(override).expanduser()
+    return Path(shared_memory.shared_memory_dir()) / "llm-wiki"
+
+
+def search_health() -> dict:
+    try:
+        qmd = qmd_search.health() if hasattr(qmd_search, "health") else qmd_search.status()
+    except Exception:
+        qmd = {"enabled": False, "installed": False}
+    qmd_available = bool(qmd.get("enabled") and qmd.get("installed"))
+    return {
+        "provider": "qmd" if qmd_available else "fallback",
+        "qmd": qmd,
+        "fallback_available": True,
+    }
+
+
+def lint_pages(pages: list[dict] | None = None) -> dict:
+    if pages is None:
+        pages = list_pages(status="all", surface="all", limit=400)
+    issues: list[dict] = []
+    for page in pages or []:
+        if not isinstance(page, dict):
+            continue
+        page_id = _clean(page.get("id") or "", 80)
+        title = _clean(page.get("title") or "위키 페이지", 160)
+        status = _clean(page.get("status") or "draft", 40).lower()
+        refs = page.get("source_refs") or page.get("artifacts") or []
+        if status in {"reviewed", "stable"} and not has_non_conversation_source_refs(refs):
+            issues.append({
+                "code": "source_missing_for_promoted",
+                "severity": "error",
+                "page_id": page_id,
+                "title": title,
+                "message": "reviewed/stable 페이지에는 conversation 이외의 원문 출처가 필요합니다.",
+            })
+        open_questions = page.get("openQuestions") or page.get("open_questions") or []
+        if open_questions:
+            issues.append({
+                "code": "open_questions_present",
+                "severity": "info",
+                "page_id": page_id,
+                "title": title,
+                "message": f"열린 질문 {len(open_questions)}건이 남아 있습니다.",
+            })
+        if not page.get("summary") and not page.get("body"):
+            issues.append({
+                "code": "empty_page",
+                "severity": "warning",
+                "page_id": page_id,
+                "title": title,
+                "message": "요약과 본문이 모두 비어 있습니다.",
+            })
+    return {"ok": not issues, "issue_count": len(issues), "issues": issues}
+
+
+def rebuild_artifacts() -> dict:
+    pages = list_pages(status="all", surface="all", limit=400)
+    out_dir = wiki_artifacts_dir()
+    out_dir.mkdir(parents=True, exist_ok=True)
+    lint = lint_pages(pages)
+    payloads = {
+        "index.md": _render_index_md(pages),
+        "log.md": _render_log_md(pages),
+        "open-questions.md": _render_open_questions_md(pages),
+        "lint.md": _render_lint_md(lint),
+    }
+    for name, body in payloads.items():
+        (out_dir / name).write_text(body, encoding="utf-8")
+    return {
+        "ok": True,
+        "dir": str(out_dir),
+        "files": sorted(payloads),
+        "page_count": len(pages),
+        "lint": lint,
+    }
+
+
+def _render_index_md(pages: list[dict]) -> str:
+    lines = ["# LLM Wiki Index", "", f"Generated: {_now()}", ""]
+    by_surface: dict[str, list[dict]] = {}
+    for page in pages:
+        by_surface.setdefault(page.get("surface") or WIKI_SURFACE, []).append(page)
+    for surface in sorted(by_surface):
+        lines += [f"## {surface}", ""]
+        for page in sorted(by_surface[surface], key=lambda item: str(item.get("title") or "")):
+            title = _clean(page.get("title") or "위키 페이지", 160)
+            meta = " · ".join([
+                _clean(page.get("kind") or "note", 40),
+                _clean(page.get("status") or "draft", 40),
+                _clean(page.get("verification_status") or "unverified", 40),
+            ])
+            summary = _clean(page.get("summary") or page.get("body") or "", 180)
+            lines.append(f"- [[{title}]] ({meta}) — {summary}")
+        lines.append("")
+    return "\n".join(lines).strip() + "\n"
+
+
+def _render_log_md(pages: list[dict]) -> str:
+    lines = ["# LLM Wiki Log", ""]
+    ordered = sorted(pages, key=lambda item: str(item.get("updated_at") or item.get("created_at") or ""), reverse=True)
+    for page in ordered:
+        stamp = _clean(page.get("updated_at") or page.get("created_at") or "unknown", 80)
+        title = _clean(page.get("title") or "위키 페이지", 160)
+        lines += [
+            f"## [{stamp}] {page.get('surface', WIKI_SURFACE)} | {title}",
+            f"- status: {page.get('status', 'draft')} · verification: {page.get('verification_status', 'unverified')}",
+        ]
+        refs = [_display_ref(ref) for ref in (page.get("source_refs") or [])[:4]]
+        if refs:
+            lines.append("- sources: " + ", ".join(refs))
+        lines.append("")
+    if len(lines) == 2:
+        lines.append("- No wiki pages yet.")
+    return "\n".join(lines).strip() + "\n"
+
+
+def _render_open_questions_md(pages: list[dict]) -> str:
+    lines = ["# LLM Wiki Open Questions", ""]
+    count = 0
+    for page in pages:
+        questions = page.get("openQuestions") or page.get("open_questions") or []
+        for question in questions:
+            count += 1
+            lines.append(f"- **{_clean(page.get('title') or '위키 페이지', 120)}**: {_clean(question, 240)}")
+    if not count:
+        lines.append("- No open questions.")
+    return "\n".join(lines).strip() + "\n"
+
+
+def _render_lint_md(lint: dict) -> str:
+    lines = ["# LLM Wiki Lint", "", f"ok: {bool(lint.get('ok'))}", f"issues: {lint.get('issue_count', 0)}", ""]
+    issues = lint.get("issues") or []
+    if not issues:
+        lines.append("No blocking issues.")
+    for issue in issues:
+        lines.append(
+            f"- `{issue.get('code')}` [{issue.get('severity')}] "
+            f"{issue.get('title')}: {issue.get('message')}"
+        )
+    return "\n".join(lines).strip() + "\n"
+
+
+def _display_ref(ref: object) -> str:
+    text = _clean(ref, 200)
+    if text.startswith(str(Path.home())) or text.startswith("/"):
+        return Path(text).name or "local-file"
+    return text
+
+
 def upsert_page(page: dict) -> dict:
     page = dict(page or {})
     title = _clean(page.get("title") or "위키 페이지", 160)
@@ -334,9 +530,8 @@ def upsert_page(page: dict) -> dict:
     kind = _clean(page.get("kind") or "note", 40).lower()
     if kind not in VALID_KINDS:
         kind = "note"
-    status = _clean(page.get("status") or "draft", 24).lower()
-    if status not in VALID_STATUSES:
-        status = "draft"
+    source_refs = _dedupe_texts(page.get("source_refs") or [], limit=12, item_limit=120)
+    status = normalize_trust_status(page.get("status") or "draft", source_refs)
     page_id = _clean(page.get("id") or _page_id(title, surface, kind), 80)
 
     existing = get_page(page_id) or {}
@@ -349,7 +544,7 @@ def upsert_page(page: dict) -> dict:
         "summary": _clean(page.get("summary") or "", 2400),
         "body": _clean(page.get("body") or "", 6000),
         "tags": tags,
-        "artifacts": _dedupe_texts(page.get("source_refs") or [], limit=12, item_limit=120),
+        "artifacts": source_refs,
         "messages": page.get("messages") or [],
         "decisions": _dedupe_texts(page.get("decisions") or [], limit=8, item_limit=280),
         "openQuestions": _dedupe_texts(page.get("openQuestions") or [], limit=8, item_limit=280),
@@ -425,6 +620,18 @@ def build_context_section(*, query: str = "", surface: str = WIKI_SURFACE, limit
             lines.append(f"- 요약: {page['summary']}")
         if page.get("body"):
             lines.append(f"- 본문: {page['body'][:800]}")
+        if page.get("search_provider"):
+            search_line = f"- 검색: {page.get('search_provider')}"
+            if page.get("search_score") is not None:
+                search_line += f" (score={page.get('search_score')})"
+            lines.append(search_line)
+        if page.get("updated_at"):
+            lines.append(f"- 갱신: {page.get('updated_at')}")
+        if page.get("source_refs"):
+            lines.append(f"- 출처: {', '.join(page['source_refs'][:4])}")
+        lines.append(f"- 검증: {page.get('verification_status', 'unverified')}")
+        for warning in page.get("trust_warnings") or []:
+            lines.append(f"- 주의: {warning}")
         if page.get("tags"):
             lines.append(f"- 태그: {', '.join(page['tags'][:8])}")
     return "\n".join(lines).strip()

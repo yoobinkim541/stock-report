@@ -59,6 +59,21 @@ def status() -> dict:
     }
 
 
+def health() -> dict:
+    base = status()
+    docs_dir = wiki_docs_dir()
+    try:
+        file_count = sum(1 for path in docs_dir.glob("*.md") if path.is_file())
+    except Exception:
+        file_count = 0
+    return {
+        "provider": "qmd",
+        **base,
+        "file_count": file_count,
+        "fallback_available": True,
+    }
+
+
 def export_pages(pages: list[dict]) -> dict:
     out_dir = wiki_docs_dir()
     out_dir.mkdir(parents=True, exist_ok=True)

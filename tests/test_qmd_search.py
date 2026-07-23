@@ -103,3 +103,25 @@ def test_qmd_search_can_use_query_command_when_configured(monkeypatch):
 
     assert qmd_search.search("손실한도", runner=fake_runner) == []
     assert calls[0][:2] == ["qmd", "query"]
+
+
+def test_qmd_health_reports_installation_and_wiki_file_count(monkeypatch, tmp_path):
+    wiki_dir = tmp_path / "wiki-md"
+    wiki_dir.mkdir()
+    (wiki_dir / "a.md").write_text("# A", encoding="utf-8")
+    (wiki_dir / "b.md").write_text("# B", encoding="utf-8")
+    monkeypatch.setenv("AGENT_CONSOLE_QMD_ENABLED", "1")
+    monkeypatch.setenv("AGENT_CONSOLE_QMD_BIN", "qmd")
+    monkeypatch.setenv("AGENT_CONSOLE_QMD_WIKI_DIR", str(wiki_dir))
+
+    from agent_console import qmd_search
+
+    monkeypatch.setattr(qmd_search.shutil, "which", lambda binary: "/usr/bin/qmd" if binary == "qmd" else None)
+
+    health = qmd_search.health()
+
+    assert health["provider"] == "qmd"
+    assert health["enabled"] is True
+    assert health["installed"] is True
+    assert health["file_count"] == 2
+    assert health["fallback_available"] is True

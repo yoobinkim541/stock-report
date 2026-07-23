@@ -36,6 +36,16 @@
 - Store user-visible answer text and compact decisions, not hidden action blocks.
 - Use `[컨텍스트 메모리]` in prompts when injecting `memory_summary.md`.
 
+## LLM Wiki 운영 규약
+
+- Raw/source refs are the evidence layer. `conversation:*` refs are useful history, but they are not primary evidence.
+- Conversation-only wiki pages are normalized to `draft` and `verification_status=unverified`; they must not be promoted to `reviewed` or `stable` until a non-conversation source ref is attached.
+- Source-backed pages use `verification_status=source-backed` and may be used as answer evidence when current context does not contradict them.
+- Generated wiki mirrors live under the shared-memory directory in `llm-wiki/`: `index.md`, `log.md`, `open-questions.md`, and `lint.md`. They are regenerated artifacts, not the canonical store.
+- Run `agent_console.wiki.rebuild_artifacts()` after meaningful wiki ingestion batches to refresh the markdown index/log/lint view.
+- qmd is optional. `agent_console.qmd_search.health()` reports whether qmd is installed and how many markdown mirror files are available; deterministic fallback search remains active when qmd is unavailable.
+- LLM prompts must treat `[위키 지식]` as trust-tagged context: `source-backed` may support claims, while `unverified` or `conversation-only` must be phrased as tentative memory.
+
 ## 쓰기 규약
 
 - `events.jsonl` 을 쓰는 모든 코드는 `safe_io.file_write_lock(EVENTS_PATH)` 를 잡는다.
