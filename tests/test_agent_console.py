@@ -332,6 +332,55 @@ def test_agent_answer_autocurates_wiki(monkeypatch, tmp_path):
     assert calls[0]["kwargs"]["surface"] == "portfolio"
 
 
+def test_agent_answer_async_postprocess_does_not_block_on_wiki(monkeypatch, tmp_path):
+    import threading
+    import time
+
+    _isolate(monkeypatch, tmp_path)
+
+    from agent_console import agent, context
+
+    monkeypatch.setattr(
+        context,
+        "context_pack",
+        lambda surface: {
+            "ok": True,
+            "surface": surface,
+            "generated_at": "2026-07-13T06:45:00+00:00",
+            "sources": {"events": [], "source_counts": [], "symbol_counts": []},
+            "reports": [],
+            "ml_activity": [],
+            "portfolio": {"holdings": [], "summary": {}, "risk": {}, "targets": {}, "errors": []},
+            "paper": {"kr": None, "us": None, "combined": None, "errors": []},
+            "models": {"items": []},
+            "memory": [],
+            "focus": ["포트폴리오 맥락"],
+        },
+    )
+    started = threading.Event()
+    release = threading.Event()
+
+    def slow_curate(question, answer, **kwargs):
+        started.set()
+        release.wait(timeout=2)
+        return {"ok": True}
+
+    monkeypatch.setattr(agent.wiki, "auto_curate_from_chat", slow_curate)
+    monkeypatch.setattr(agent, "_compose_answer", lambda question, pack, history=None: "빠른 답변")
+
+    t0 = time.monotonic()
+    result = agent.answer("후처리 비동기 테스트", "market", async_postprocess=True)
+    elapsed = time.monotonic() - t0
+
+    assert result["ok"] is True
+    assert result["answer"] == "빠른 답변"
+    assert result["context"]["postprocess"]["wiki_autocurate"] == "queued"
+    assert elapsed < 0.5
+    assert started.wait(timeout=1)
+    release.set()
+    agent._LAST_POSTPROCESS_THREAD.join(timeout=1)
+
+
 def test_agent_trading_logic_question_uses_logic_report(monkeypatch):
     monkeypatch.setenv("AGENT_CONSOLE_LLM_ENABLED", "0")
     from agent_console.agent import _compose_answer
@@ -1066,6 +1115,32 @@ def test_server_endpoints(monkeypatch, tmp_path):
     ).json
     assert scenario["ok"] is True
     assert client.get("/api/portfolio-lab/scenarios").json["scenarios"][0]["name"] == "랩 테스트"
+
+
+def test_agent_chat_stream_emits_stage_before_answer(monkeypatch, tmp_path):
+    _isolate(monkeypatch, tmp_path)
+
+    from agent_console import agent
+    from agent_console.server import create_app
+
+    seen = {}
+
+    def fake_answer(message, surface, **kwargs):
+        seen["kwargs"] = kwargs
+        return {"ok": True, "answer": "스트림 답변", "surface": surface, "context": {}}
+
+    monkeypatch.setattr(agent, "answer", fake_answer)
+
+    client = create_app().test_client()
+    resp = client.post("/api/agent/chat/stream", json={"surface": "market", "message": "느려?"})
+    body = resp.data.decode("utf-8")
+
+    assert resp.status_code == 200
+    assert resp.mimetype == "text/event-stream"
+    assert body.index("event: stage") < body.index("event: answer")
+    assert "맥락 읽는 중" in body
+    assert "스트림 답변" in body
+    assert seen["kwargs"]["async_postprocess"] is True
 
 
 def test_ingest_arca_proxy(monkeypatch, tmp_path):

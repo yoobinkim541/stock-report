@@ -269,6 +269,82 @@ function addMessage(role, body) {
   }
   conversation.appendChild(node);
   conversation.scrollTop = conversation.scrollHeight;
+  return node;
+}
+
+function updateAssistantMessage(node, body) {
+  const bodyNode = node?.querySelector(".body");
+  if (!bodyNode) return;
+  bodyNode.classList.add("rich");
+  bodyNode.innerHTML = renderLiteMarkdown(body);
+  $("conversation").scrollTop = $("conversation").scrollHeight;
+}
+
+const CHAT_PROGRESS_STAGES = [
+  "맥락 읽는 중",
+  "필요 데이터 확인 중",
+  "LLM 분석 요청 중",
+  "답변 압축 중",
+  "후처리 분리 중",
+  "거의 완료",
+];
+
+function startChatProgress(node, button) {
+  const startedAt = Date.now();
+  let idx = 0;
+  const render = () => {
+    const label = CHAT_PROGRESS_STAGES[Math.min(idx, CHAT_PROGRESS_STAGES.length - 1)];
+    const elapsed = Math.max(1, Math.round((Date.now() - startedAt) / 1000));
+    updateAssistantMessage(node, `### ${label}\n\n${elapsed}초째 처리 중입니다. 화면 컨텍스트와 질문 의도에 맞춰 답변을 만들고 있어요.`);
+    setBusy(button, true, label);
+    idx += 1;
+  };
+  render();
+  const timer = window.setInterval(render, 2600);
+  return () => window.clearInterval(timer);
+}
+
+function parseStreamFrame(frame) {
+  const lines = frame.split("\n");
+  const event = (lines.find((line) => line.startsWith("event:")) || "event: message").slice(6).trim();
+  const dataLine = lines.find((line) => line.startsWith("data:"));
+  if (!dataLine) return null;
+  return { event, data: JSON.parse(dataLine.slice(5).trim()) };
+}
+
+async function requestChatStream(payload, onStage) {
+  const resp = await fetch("/api/agent/chat/stream", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+  });
+  if (!resp.ok || !resp.body) throw new Error(`${resp.status} ${resp.statusText}`);
+
+  const reader = resp.body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = "";
+  let final = null;
+
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    buffer += decoder.decode(value, { stream: true });
+    let boundary = buffer.indexOf("\n\n");
+    while (boundary >= 0) {
+      const raw = buffer.slice(0, boundary).trim();
+      buffer = buffer.slice(boundary + 2);
+      if (raw) {
+        const frame = parseStreamFrame(raw);
+        if (frame?.event === "stage") onStage?.(frame.data);
+        if (frame?.event === "answer") final = frame.data;
+      }
+      boundary = buffer.indexOf("\n\n");
+    }
+  }
+
+  if (!final) throw new Error("스트림 답변을 받지 못했습니다");
+  if (final.ok === false) throw new Error(final.error || "답변 생성 실패");
+  return final;
 }
 
 async function sendChat(event) {
@@ -279,16 +355,22 @@ async function sendChat(event) {
   const button = event.submitter;
   addMessage("user", message);
   input.value = "";
-  setBusy(button, true, "답변 중");
+  const assistantNode = addMessage("assistant", "### 맥락 읽는 중\n\n질문을 받았습니다.");
+  const stopProgress = startChatProgress(assistantNode, button);
   try {
-    const data = await requestJson("/api/agent/chat", {
+    const payload = { surface: state.surface, message };
+    const data = await requestChatStream(payload, (stage) => {
+      if (stage?.label) updateAssistantMessage(assistantNode, `### ${stage.label}\n\n${stage.detail || "분석을 진행하고 있습니다."}`);
+    }).catch(() => requestJson("/api/agent/chat", {
       method: "POST",
-      body: JSON.stringify({ surface: state.surface, message }),
-    });
-    addMessage("assistant", data.answer || "");
+      body: JSON.stringify(payload),
+    }));
+    stopProgress();
+    updateAssistantMessage(assistantNode, data.answer || "");
     toast("답변 생성 완료");
   } catch (error) {
-    addMessage("assistant", `오류: ${error.message}`);
+    stopProgress();
+    updateAssistantMessage(assistantNode, `오류: ${error.message}`);
   } finally {
     setBusy(button, false);
   }

@@ -7,6 +7,7 @@ from pathlib import Path
 import re
 import subprocess
 import tempfile
+import threading
 
 from . import context, shared_memory, storage, wiki
 
@@ -106,7 +107,7 @@ def build_context_prompt(surface: str = "market") -> str:
     return "\n".join(lines)
 
 
-def answer(question: str, surface: str = "market") -> dict:
+def answer(question: str, surface: str = "market", *, async_postprocess: bool = False) -> dict:
     question = str(question or "").strip()
     surface = str(surface or "market").strip().lower()
     if not question:
@@ -122,22 +123,7 @@ def answer(question: str, surface: str = "market") -> dict:
         response = _compose_error_fallback_answer(question, pack, exc)
     engine = _LAST_LLM_ENGINE or "local-rules"
     _safe_add_conversation("assistant", response, surface)
-    try:
-        shared_memory.append_chat_exchange(question, response, surface)
-    except Exception:
-        pass
-    try:
-        if os.getenv("AGENT_CONSOLE_WIKI_AUTOCURATE_ENABLED", "1").lower() not in {"0", "false", "no", "off"}:
-            wiki.auto_curate_from_chat(
-                question,
-                response,
-                surface=surface,
-                pack=pack,
-                history=history,
-                llm=_try_llm_prompt,
-            )
-    except Exception:
-        pass
+    postprocess = _postprocess_chat(question, response, surface, pack, history, async_mode=async_postprocess)
     sources = pack.get("sources") or {}
     return {
         "ok": True,
@@ -151,9 +137,64 @@ def answer(question: str, surface: str = "market") -> dict:
             "source_counts": sources.get("source_counts") or [],
             "symbol_counts": sources.get("symbol_counts") or [],
             "context_error": pack.get("context_error"),
+            "postprocess": postprocess,
         },
         "conversation": _safe_list_conversation(limit=20, surface=surface),
     }
+
+
+_LAST_POSTPROCESS_THREAD: threading.Thread | None = None
+
+
+def _wiki_autocurate_enabled() -> bool:
+    return os.getenv("AGENT_CONSOLE_WIKI_AUTOCURATE_ENABLED", "1").lower() not in {"0", "false", "no", "off"}
+
+
+def _run_wiki_autocurate(question: str, response: str, surface: str, pack: dict, history: list[dict] | None) -> None:
+    if not _wiki_autocurate_enabled():
+        return
+    try:
+        wiki.auto_curate_from_chat(
+            question,
+            response,
+            surface=surface,
+            pack=pack,
+            history=history,
+            llm=_try_llm_prompt,
+        )
+    except Exception:
+        pass
+
+
+def _run_postprocess_async(question: str, response: str, surface: str, pack: dict,
+                           history: list[dict] | None) -> bool:
+    global _LAST_POSTPROCESS_THREAD
+    if not _wiki_autocurate_enabled():
+        return False
+    thread = threading.Thread(
+        target=_run_wiki_autocurate,
+        args=(question, response, surface, pack, history),
+        name="agent-console-postprocess",
+        daemon=True,
+    )
+    _LAST_POSTPROCESS_THREAD = thread
+    thread.start()
+    return True
+
+
+def _postprocess_chat(question: str, response: str, surface: str, pack: dict,
+                      history: list[dict] | None, *, async_mode: bool) -> dict:
+    try:
+        shared_memory.append_chat_exchange(question, response, surface)
+    except Exception:
+        pass
+    if not _wiki_autocurate_enabled():
+        return {"wiki_autocurate": "disabled"}
+    if async_mode:
+        queued = _run_postprocess_async(question, response, surface, pack, history)
+        return {"wiki_autocurate": "queued" if queued else "disabled"}
+    _run_wiki_autocurate(question, response, surface, pack, history)
+    return {"wiki_autocurate": "done"}
 
 
 def _safe_context_pack(surface: str) -> dict:
