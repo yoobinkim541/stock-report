@@ -270,6 +270,53 @@ def _compose_answer(question: str, pack: dict, history: list[dict] | None = None
     if not _is_market_context_question(resolved_question, pack):
         return _compose_general_chat_answer(resolved_question, pack, history)
 
+    return _compose_market_context_answer(resolved_question, pack, history)
+
+
+def _compose_market_context_answer(question: str, pack: dict, history: list[dict] | None = None) -> str:
+    llm_prompt = _build_market_context_prompt(question, pack)
+    llm = _try_llm_chat(llm_prompt, pack, history)
+    if llm:
+        return llm
+    return _compose_market_context_fallback(question, pack)
+
+
+def _build_market_context_prompt(question: str, pack: dict) -> str:
+    events = (pack.get("sources") or {}).get("events") or []
+    source_counts = (pack.get("sources") or {}).get("source_counts") or []
+    symbol_counts = (pack.get("sources") or {}).get("symbol_counts") or []
+    memory = pack.get("memory") or []
+    lines = [
+        "사용자는 시장 상황을 물었습니다.",
+        f"질문: {question}",
+        "고정 RISK-ON/RISK-OFF 템플릿이나 신호 점수표를 기본으로 쓰지 말고, 질문 의도에 맞춰 시장을 분석하세요.",
+        "로컬 이벤트, 월드 메모리, 리포트 상태를 근거로 쓰되, 부족한 최신 데이터는 부족하다고 말하고 필요한 확인 항목을 제시하세요.",
+        "한국어로 자연스럽게 답하고, 결론/근거/확인할 점 순서로 짧게 정리하세요.",
+        "",
+        "[최근 이벤트]",
+    ]
+    for item in events[:8]:
+        title = item.get("title") or item.get("summary")
+        if title:
+            lines.append(f"- {item.get('source', 'source')} · {title}")
+    if len(lines) <= 7:
+        lines.append("- 없음")
+    if memory:
+        lines += ["", "[월드 메모리]"]
+        for item in memory[:5]:
+            title = item.get("title")
+            if title:
+                lines.append(f"- {title}")
+    if source_counts or symbol_counts:
+        lines += ["", "[수집 요약]"]
+        if source_counts:
+            lines.append("- 소스: " + ", ".join(f"{src} {cnt}" for src, cnt in source_counts[:6]))
+        if symbol_counts:
+            lines.append("- 심볼: " + ", ".join(f"{sym} {cnt}" for sym, cnt in symbol_counts[:8]))
+    return "\n".join(lines)
+
+
+def _compose_market_context_fallback(question: str, pack: dict) -> str:
     events = pack["sources"]["events"]
     memory = pack["memory"]
     reports = pack["reports"]

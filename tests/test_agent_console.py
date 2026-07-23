@@ -809,6 +809,43 @@ def test_agent_lab_short_followup_does_not_use_market_template(monkeypatch):
     assert "현재 시장 상황 인식" not in answer
 
 
+def test_market_context_question_uses_llm_before_generic_market_template(monkeypatch):
+    from agent_console import agent
+
+    pack = {
+        "surface": "market",
+        "generated_at": "2026-07-23T07:41:00+00:00",
+        "sources": {
+            "events": [
+                {"source": "saveticker", "title": "AI 성장주와 크레딧 스프레드 동반 개선"},
+            ],
+            "source_counts": [],
+            "symbol_counts": [],
+        },
+        "memory": [],
+        "reports": [],
+        "ml_activity": [],
+        "portfolio": {},
+        "paper": {},
+        "models": {},
+        "focus": [],
+    }
+    seen = {}
+
+    def fake_llm(question, pack, history=None):
+        seen["question"] = question
+        return "### LLM 시장 분석\n템플릿이 아니라 LLM이 컨텍스트를 해석했습니다."
+
+    monkeypatch.setattr(agent, "_try_llm_chat", fake_llm)
+
+    answer = agent._compose_answer("오늘 시장 분위기 요약해줘", pack, history=[])
+
+    assert "LLM 시장 분석" in answer
+    assert "현재 시장 상황 인식" not in answer
+    assert "시장 신호 점수" not in answer
+    assert "오늘 시장 분위기 요약해줘" in seen["question"]
+
+
 def test_domestic_market_question_uses_llm_instead_of_generic_market_template(monkeypatch):
     from agent_console import agent
 
@@ -1045,6 +1082,7 @@ def test_agent_llm_chat_falls_through_codex_hermes_to_gemini(monkeypatch):
 def test_server_endpoints(monkeypatch, tmp_path):
     _isolate(monkeypatch, tmp_path)
 
+    from agent_console import agent as agent_module
     from agent_console import context
     from agent_console.server import create_app
 
@@ -1066,6 +1104,12 @@ def test_server_endpoints(monkeypatch, tmp_path):
     monkeypatch.setattr(context, "portfolio_state", lambda: {"holdings": [], "summary": {}, "risk": {}, "targets": {}, "errors": []})
     monkeypatch.setattr(context, "model_state", lambda: {"items": []})
 
+    def fake_llm(question, pack, history=None):
+        agent_module._mark_llm_engine("unit-llm")
+        return "**결론**\n금리 하락을 LLM이 해석했습니다."
+
+    monkeypatch.setattr(agent_module, "_try_llm_chat", fake_llm)
+
     app = create_app()
     client = app.test_client()
 
@@ -1081,8 +1125,10 @@ def test_server_endpoints(monkeypatch, tmp_path):
 
     chat = client.post("/api/agent/chat", json={"surface": "market", "message": "왜 오른 거야?"}).json
     assert chat["ok"] is True
-    assert "현재 시장 상황 인식" in chat["answer"]
-    assert "시장 신호 점수" in chat["answer"]
+    assert "금리 하락을 LLM이 해석했습니다" in chat["answer"]
+    assert "현재 시장 상황 인식" not in chat["answer"]
+    assert "시장 신호 점수" not in chat["answer"]
+    assert chat["context"]["engine"] == "unit-llm"
     assert client.get("/api/memory?limit=5").json["ok"] is True
     memory_context = client.post("/api/memory/context", json={"screen": "market", "query": "금리"}).json
     assert memory_context["schemaVersion"] == "finance-agent-gui.shared-memory.v1"

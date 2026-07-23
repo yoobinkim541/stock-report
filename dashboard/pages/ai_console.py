@@ -119,6 +119,41 @@ def _context_glance_items(pack: dict) -> tuple[dict[str, str], ...]:
     )
 
 
+def _infer_context_detail(question: str, surface: str) -> str:
+    q = str(question or "").lower().replace(" ", "")
+    if surface == "market":
+        if any(word in q for word in ("한국증시", "국내증시", "한국시장", "국내시장", "코스피", "코스닥", "kospi", "kosdaq")):
+            return "한국증시"
+        if any(word in q for word in ("미국증시", "미국시장", "나스닥", "s&p", "sp500", "다우", "qqq", "spy")):
+            return "미국증시"
+        if any(word in q for word in ("유가", "달러", "환율", "금리", "vix", "크레딧", "hyg", "lqd")):
+            return "크로스에셋"
+        return "전역시장"
+    return _SURFACES.get(surface, surface)
+
+
+def _count_label(count: int, cap: int | None = None, unit: str = "개") -> str:
+    suffix = "+" if cap is not None and count >= cap else ""
+    return f"{count}{unit}{suffix}"
+
+
+def _rail_status_items(surface: str, pack: dict) -> list[dict[str, str]]:
+    sources = pack.get("sources") or {}
+    events = sources.get("events") or []
+    memory = pack.get("memory") or []
+    models = (pack.get("models") or {}).get("items") or []
+    detail = str(st.session_state.get("agent_auto_detail") or _SURFACES.get(surface, surface))
+    engine = str(st.session_state.get("agent_last_engine") or "대기")
+    return [
+        {"label": "맥락", "value": _SURFACES.get(surface, surface)},
+        {"label": "세부", "value": detail},
+        {"label": "엔진", "value": engine},
+        {"label": "events", "value": _count_label(len(events), 40, "개")},
+        {"label": "memory", "value": _count_label(len(memory), 50, "개")},
+        {"label": "models", "value": _count_label(len(models), None, "개")},
+    ]
+
+
 def _context_glance(pack: dict):
     items = _context_glance_items(pack)
     st.markdown(
@@ -286,6 +321,7 @@ def _run_agent_question_auto(question: str):
         prev = st.session_state.get("agent_auto_surface", "market")
         surface = agent.infer_surface(question, default=prev)
     st.session_state["agent_auto_surface"] = surface
+    st.session_state["agent_auto_detail"] = _infer_context_detail(question, surface)
     _run_agent_question(question, surface, chat_key=_chat_key(_AUTO_CHAT))
 
 
@@ -307,6 +343,7 @@ def _run_agent_question(question: str, surface: str, chat_key: str | None = None
             meta += f" · events {ctx.get('event_count', 0)} · memory {ctx.get('memory_count', 0)}"
         engine = str(ctx.get("engine") or "")
         if engine:
+            st.session_state["agent_last_engine"] = "규칙" if engine == "local-rules" else engine
             # 어떤 엔진이 답했는지 정직 표기 — local-rules = LLM 미개입 규칙 답변
             meta += f" · 엔진 {'⚙️ 규칙' if engine == 'local-rules' else '🤖 ' + engine}"
         post = (ctx.get("postprocess") or {}).get("wiki_autocurate")
@@ -332,18 +369,16 @@ def _chat_context_rail(surface: str, pack: dict):
     sources = pack.get("sources") or {}
     events = sources.get("events") or []
     memory = pack.get("memory") or []
-    models = (pack.get("models") or {}).get("items") or []
     reports = pack.get("reports") or []
+    status_items = _rail_status_items(surface, pack)
 
     st.markdown(
-        f"""
-        <div class="codex-rail-card">
-          <div><span>맥락 (자동)</span><b>{_SURFACES.get(surface, surface)}</b></div>
-          <div><span>events</span><b>{len(events)}</b></div>
-          <div><span>memory</span><b>{len(memory)}</b></div>
-          <div><span>models</span><b>{len(models)}</b></div>
-        </div>
-        """,
+        '<div class="codex-rail-card">'
+        + "".join(
+            f"<div><span>{_esc(item['label'])}</span><b>{_esc(item['value'])}</b></div>"
+            for item in status_items
+        )
+        + "</div>",
         unsafe_allow_html=True,
     )
 

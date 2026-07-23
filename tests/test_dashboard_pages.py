@@ -267,6 +267,32 @@ def test_ai_console_context_glance_items_are_compact():
     assert [item["value"] for item in items] == ["2건", "1건", "1개", "investment-report-2026-07-23.md"]
 
 
+def test_ai_console_rail_status_items_show_engine_detail_and_capped_counts(monkeypatch):
+    from dashboard.pages import ai_console
+
+    fake_state = {
+        "agent_auto_detail": "한국증시",
+        "agent_last_engine": "codex",
+    }
+    monkeypatch.setattr(ai_console.st, "session_state", fake_state)
+
+    items = ai_console._rail_status_items(
+        "market",
+        {
+            "sources": {"events": [{"title": str(i)} for i in range(40)]},
+            "memory": [{"title": str(i)} for i in range(50)],
+            "models": {"items": [{"name": str(i)} for i in range(4)]},
+        },
+    )
+
+    assert items[0] == {"label": "맥락", "value": "시장"}
+    assert {"label": "세부", "value": "한국증시"} in items
+    assert {"label": "엔진", "value": "codex"} in items
+    assert {"label": "events", "value": "40개+"} in items
+    assert {"label": "memory", "value": "50개+"} in items
+    assert {"label": "models", "value": "4개"} in items
+
+
 def test_ai_console_chat_state_is_surface_scoped(monkeypatch):
     from dashboard.pages import ai_console
 
