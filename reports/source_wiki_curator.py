@@ -13,6 +13,7 @@ KST = timezone(timedelta(hours=9))
 MIN_GROUP_EVENTS = 2
 MAX_EVENTS_PER_PAGE = 8
 MAX_SOURCE_REFS = 12
+MAX_CURATOR_LINKS = 12
 GENERIC_TOPICS = {"기타", "saveticker", "텔레그램", "시장데이터"}
 GENERIC_KINDS = {"article", "community_signal", "snapshot", "macro_snapshot", "event", "report"}
 
@@ -79,6 +80,10 @@ def _source_refs(events: list[dict]) -> list[str]:
     return _dedupe(refs)
 
 
+def _event_key(event: dict) -> str:
+    return _clean(event.get("url"), 300) or _clean(event.get("title"), 220)
+
+
 def _is_strong_group(events: list[dict]) -> bool:
     if len(events) >= MIN_GROUP_EVENTS:
         return True
@@ -142,6 +147,26 @@ def _group_label(key: str) -> tuple[str, str, str]:
     return group_type, label, label
 
 
+def _link_pages_sharing_events(pages: list[dict], page_event_keys: dict[str, set[str]]) -> None:
+    for left in pages:
+        left_id = left.get("id")
+        left_keys = page_event_keys.get(left_id) or set()
+        if not left_keys:
+            left["links"] = []
+            continue
+        linked: list[str] = []
+        for right in pages:
+            right_id = right.get("id")
+            if right_id == left_id:
+                continue
+            right_keys = page_event_keys.get(right_id) or set()
+            if left_keys & right_keys:
+                linked.append(right_id)
+            if len(linked) >= MAX_CURATOR_LINKS:
+                break
+        left["links"] = linked
+
+
 def build_wiki_pages_from_events(events: list[dict], now: datetime | None = None) -> list[dict]:
     now = now or datetime.now(KST)
     groups: dict[str, list[dict]] = defaultdict(list)
@@ -161,6 +186,7 @@ def build_wiki_pages_from_events(events: list[dict], now: datetime | None = None
                 groups[f"ticker:{ticker.strip().upper()}"].append(event)
 
     pages: list[dict] = []
+    page_event_keys: dict[str, set[str]] = {}
     for key, rows in sorted(groups.items(), key=lambda item: (-len(item[1]), item[0])):
         group_type, label, display = _group_label(key)
         rows = sorted(rows, key=lambda event: str(event.get("published_at") or event.get("collected_at") or ""), reverse=True)
@@ -177,8 +203,9 @@ def build_wiki_pages_from_events(events: list[dict], now: datetime | None = None
             *(f"source:{src}" for src in source_roots),
             *(f"ticker:{ticker}" for ticker, _count in ticker_counts.most_common(8)),
         ], limit=20)
+        page_id = f"source-{group_type}-{_slug(label)}"
         pages.append({
-            "id": f"source-{group_type}-{_slug(label)}",
+            "id": page_id,
             "title": f"수집 소스 위키: {display}",
             "surface": "market",
             "kind": "source_digest",
@@ -193,6 +220,8 @@ def build_wiki_pages_from_events(events: list[dict], now: datetime | None = None
             ],
             "confidence": 0.78 if _status_for(rows, refs) == "reviewed" else 0.55,
         })
+        page_event_keys[page_id] = {key for key in (_event_key(row) for row in rows) if key}
+    _link_pages_sharing_events(pages, page_event_keys)
     return pages
 
 

@@ -95,3 +95,38 @@ def test_build_wiki_pages_from_events_dedupes_source_refs_and_skips_weak_groups(
     assert refs.count("https://saveticker.com/rates") == 1
     assert refs.count("/tmp/rates.txt") == 1
     assert refs.count("/tmp/rates.json") == 1
+
+
+def test_build_wiki_pages_from_events_links_pages_sharing_events():
+    events = [
+        {
+            "source": "saveticker",
+            "title": "엔비디아 AI 서버 수요 확대",
+            "url": "https://saveticker.com/nvda",
+            "body_raw": "AI 서버와 반도체 수요가 확대됐다.",
+            "topic": "기술/AI",
+            "tags": ["기술/AI"],
+            "tickers": ["NVDA"],
+            "text_path": "/tmp/nvda.txt",
+            "raw_path": "/tmp/nvda.json",
+            "classification": {"kind": "article", "topic": "기술/AI", "trust": "B"},
+        },
+        {
+            "source": "telegram:insidertracking",
+            "title": "AI 데이터센터 전력 수요 증가",
+            "url": "https://t.me/insidertracking/1",
+            "body_raw": "반도체와 데이터센터 전력 병목이 같이 언급됐다.",
+            "topic": "기술/AI",
+            "tags": ["기술/AI"],
+            "tickers": ["NVDA"],
+            "text_path": "/tmp/tg.txt",
+            "raw_path": "/tmp/tg.html",
+            "classification": {"kind": "community_signal", "topic": "기술/AI", "trust": "C"},
+        },
+    ]
+
+    pages = swc.build_wiki_pages_from_events(events, now=datetime(2026, 7, 23, 10, 0, tzinfo=KST))
+    by_id = {page["id"]: page for page in pages}
+
+    assert by_id["source-topic-기술-ai"]["links"] == ["source-ticker-nvda"]
+    assert by_id["source-ticker-nvda"]["links"] == ["source-topic-기술-ai"]
