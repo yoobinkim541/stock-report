@@ -28,6 +28,7 @@ stock_report.db-shm
 *.sqlite3
 
 # ── Python ──────────────────────────────
+uv.lock
 __pycache__/
 *.pyc
 *.pyo

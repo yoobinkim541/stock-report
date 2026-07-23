@@ -470,7 +470,7 @@ def _engine_tests(tmp: str) -> list[str]:
     start = now_kst.replace(second=0, microsecond=0) - timedelta(minutes=n_bars)
     idx = pd.date_range(start, periods=n_bars, freq="min")   # start 가 tz-aware(KST)
     o, h, l, c, v = [], [], [], [], []
-    px = 61000.0
+    px = 1500.0
     for i in range(n_bars):
         # 개장 15분 넓은 범위(±150) → 마지막 3봉 완만한 돌파(+150/봉·과확장 페널티 미발동)
         drift = 150.0 if i >= 32 else (150.0 if i % 4 == 1 else (-150.0 if i % 4 == 3 else 0.0))
@@ -483,8 +483,8 @@ def _engine_tests(tmp: str) -> list[str]:
     bars_now = {"005930": df_bo}
 
     last_c = float(df_bo["Close"].iloc[-1])
-    ob = {"bids": [(last_c, 2000)], "asks": [(last_c + 100, 200)],   # 1틱 스프레드·매수 우세(OFI)
-          "best_bid": last_c, "best_ask": last_c + 100, "ts": 0}
+    ob = {"bids": [(last_c, 2000)], "asks": [(last_c + 1, 200)],   # 좁은 스프레드·매수 우세(OFI)
+          "best_bid": last_c, "best_ask": last_c + 1, "ts": 0}
 
     try:
         eng._LEDGER_BASE = ledger_dir

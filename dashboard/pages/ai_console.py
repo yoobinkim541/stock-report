@@ -184,15 +184,73 @@ def _ensure_chat_state(surface: str):
     ]
 
 
-def _quick_prompts() -> str | None:
-    """도메인을 가로지르는 추천 질문 4개 — 눌러도 되고, 그냥 아래에 입력해도 된다."""
-    prompts = [
+_AGENT_PROGRESS_LABELS = (
+    "맥락 읽는 중",
+    "질문 의도 고정 중",
+    "필요 데이터 확인 중",
+    "LLM 분석 요청 중",
+    "답변 압축 중",
+)
+
+
+def _chat_progress_labels() -> tuple[str, ...]:
+    return _AGENT_PROGRESS_LABELS
+
+
+def _answer_agent_fast(question: str, surface: str) -> dict:
+    try:
+        return agent.answer(question, surface, async_postprocess=True)
+    except TypeError as exc:
+        if "async_postprocess" not in str(exc):
+            raise
+        return agent.answer(question, surface)
+
+
+def _safe_status_update(status, **kwargs) -> None:
+    try:
+        update = getattr(status, "update", None)
+    except Exception:
+        return
+    if not callable(update):
+        return
+    try:
+        update(**kwargs)
+    except Exception:
+        pass
+
+
+def _answer_with_progress(question: str, surface: str) -> dict:
+    labels = _chat_progress_labels()
+    status_factory = getattr(st, "status", None)
+    if callable(status_factory):
+        status_context = status_factory(labels[0], expanded=True)
+        with status_context as status:
+            updater = status or status_context
+            for label in labels[1:]:
+                _safe_status_update(updater, label=label, state="running", expanded=True)
+            result = _answer_agent_fast(question, surface)
+            post = ((result.get("context") or {}).get("postprocess") or {}).get("wiki_autocurate")
+            done_label = "답변 표시 완료"
+            if post == "queued":
+                done_label = "답변 표시 완료 · 위키 정리는 뒤에서 진행"
+            _safe_status_update(updater, label=done_label, state="complete", expanded=False)
+            return result
+    with st.spinner(labels[-2] if len(labels) >= 2 else "답변 생성 중"):
+        return _answer_agent_fast(question, surface)
+
+
+def _quick_prompt_texts() -> tuple[str, ...]:
+    return (
         "오늘 시장 변화가 어디서 시작됐는지 추적해줘",
         "내 포트폴리오에서 먼저 줄여야 할 리스크 봐줘",
-        "모의투자 성과가 좋아진 이유와 나빠진 이유를 나눠줘",
-        "보유종목에 영향을 줄 이벤트만 골라줘",
-    ]
-    cols = st.columns(4)
+        "최근 대화에서 위키로 남길 판단을 정리해줘",
+    )
+
+
+def _quick_prompts() -> str | None:
+    """도메인을 가로지르는 추천 질문 — 눌러도 되고, 그냥 아래에 입력해도 된다."""
+    prompts = _quick_prompt_texts()
+    cols = st.columns(len(prompts))
     for idx, text in enumerate(prompts):
         if cols[idx].button(text, key=f"agent_quick_auto_{idx}", width="stretch"):
             return text
@@ -224,8 +282,7 @@ def _run_agent_question(question: str, surface: str, chat_key: str | None = None
     else:
         _ensure_chat_state(_AUTO_CHAT)
     st.session_state[chat_key].append({"role": "user", "content": question})
-    with st.spinner("컨텍스트 읽는 중..."):
-        result = agent.answer(question, surface)
+    result = _answer_with_progress(question, surface)
     if result.get("ok"):
         ctx = result.get("context") or {}
         meta = f"맥락 {_SURFACES.get(surface, surface)}"
@@ -235,6 +292,9 @@ def _run_agent_question(question: str, surface: str, chat_key: str | None = None
         if engine:
             # 어떤 엔진이 답했는지 정직 표기 — local-rules = LLM 미개입 규칙 답변
             meta += f" · 엔진 {'⚙️ 규칙' if engine == 'local-rules' else '🤖 ' + engine}"
+        post = (ctx.get("postprocess") or {}).get("wiki_autocurate")
+        if post:
+            meta += f" · 후처리 {post}"
         if ctx.get("context_error"):
             meta = f"{meta} · context fallback" if meta else "context fallback"
         st.session_state[chat_key].append({

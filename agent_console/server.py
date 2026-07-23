@@ -1,9 +1,10 @@
 from __future__ import annotations
 
+import json
 import os
 from pathlib import Path
 
-from flask import Flask, jsonify, request, send_from_directory
+from flask import Flask, Response, jsonify, request, send_from_directory, stream_with_context
 
 from . import agent, context, shared_memory, storage, wiki
 
@@ -131,7 +132,31 @@ def create_app() -> Flask:
     @app.post("/api/agent/chat")
     def agent_chat():
         payload = request.get_json(force=True)
-        return jsonify(agent.answer(payload.get("message", ""), payload.get("surface", "market")))
+        return jsonify(agent.answer(
+            payload.get("message", ""),
+            payload.get("surface", "market"),
+            async_postprocess=True,
+        ))
+
+    @app.post("/api/agent/chat/stream")
+    def agent_chat_stream():
+        payload = request.get_json(force=True)
+        message = payload.get("message", "")
+        surface = payload.get("surface", "market")
+
+        def frame(event: str, data: dict) -> str:
+            return f"event: {event}\ndata: {json.dumps(data, ensure_ascii=False)}\n\n"
+
+        @stream_with_context
+        def generate():
+            yield frame("stage", {"label": "맥락 읽는 중", "detail": "최근 대화와 화면 컨텍스트를 확인하고 있습니다."})
+            try:
+                result = agent.answer(message, surface, async_postprocess=True)
+                yield frame("answer", result)
+            except Exception as exc:
+                yield frame("answer", {"ok": False, "error": str(exc)})
+
+        return Response(generate(), mimetype="text/event-stream")
 
     @app.get("/api/agent/context-prompt")
     def context_prompt():

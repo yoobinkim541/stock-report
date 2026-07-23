@@ -110,6 +110,20 @@ def test_open_window_guard_blocks_first_minutes_then_releases():
     assert ax.entry_guards({**base, "now_min": US_OPEN + 30}) == (True, "ok")
 
 
+def test_signal_collapse_waits_for_minimum_hold_but_hard_exits_do_not():
+    from ml import intraday_axes as ax
+
+    pos = {"entry_price": 100.0, "stop": 95.0, "target": 110.0,
+           "entry_min": 600, "risk_per_share": 5.0}
+    cfg = {"timestop_min": 90, "theta_exit": 0.25, "flat_buffer_min": 15,
+           "minimum_hold_min": 3}
+
+    assert ax.check_exit(pos, {"h": 101.0, "l": 99.0, "c": 100.0}, 0.1, 602, 960, cfg) is None
+    assert ax.check_exit(pos, {"h": 101.0, "l": 99.0, "c": 100.0}, 0.1, 603, 960, cfg) == ("signal_collapse", 100.0)
+    assert ax.check_exit(pos, {"h": 101.0, "l": 94.0, "c": 94.0}, 0.1, 601, 960, cfg) == ("stop", 94.0)
+    assert ax.check_exit(pos, {"h": 111.0, "l": 99.0, "c": 109.0}, 0.1, 601, 960, cfg) == ("target", 110.0)
+
+
 def test_open_window_guard_is_noop_without_open_min_key():
     """open_min 을 안 넘기는 구 호출부는 기존 동작 그대로(하위호환)."""
     from ml import intraday_axes as ax
@@ -204,3 +218,55 @@ def test_intraday_us_signal_executes_leveraged_etf_with_loss_budget(monkeypatch,
     assert pos["qty"] * pos["risk_per_share"] <= pos["loss_budget_entry"] + 1e-9
     assert any(e["sym"] == "TQQQ" and e["side"] == "buy" for e in events)
     assert any("QQQ 신호" in n for n in notes)
+
+
+def test_intraday_engine_records_observe_only_candidate_without_entry(monkeypatch, tmp_path):
+    from crons import intraday_mock_track as eng
+    from providers import intraday_bars as ib
+    from providers import intraday_universe as iu
+    from providers import realtime_quotes as rq
+    import ml.intraday_signal as intraday_signal
+
+    bars_df = _bars("005930", price=70000.0, tz="Asia/Seoul")
+    monkeypatch.setattr(eng, "_LEDGER_BASE", str(tmp_path / "ledger"))
+    monkeypatch.setattr(eng, "_market_open", lambda mk: mk == "KR")
+    monkeypatch.setattr(eng, "_news_events", lambda now_epoch: [])
+    monkeypatch.setattr(eng, "_record_event", lambda *a, **k: None)
+    monkeypatch.setattr(iu, "refresh", lambda mk, keep=None, **k: ["005930"])
+    monkeypatch.setattr(ib, "load_bars", lambda sym, date=None, **k: bars_df)
+    monkeypatch.setattr(ib, "available_dates", lambda base_dir=None: [])
+    monkeypatch.setattr(intraday_signal, "compute_intraday_features",
+                        lambda df: pd.DataFrame({"atr": [10.0] * len(df)}, index=df.index))
+    monkeypatch.setattr(rq, "enabled", lambda: True)
+    monkeypatch.setattr(rq, "heartbeat_age", lambda cache=None: 1.0)
+    monkeypatch.setattr(rq, "is_fresh", lambda sym, **k: True)
+    monkeypatch.setattr(rq, "get_orderbook", lambda sym: {"best_bid": 69990.0, "best_ask": 70010.0, "bids": [], "asks": []})
+
+    def fake_axes(sym, mk, df, feats, **_kwargs):
+        close = float(df["Close"].iloc[-1])
+        return {
+            "orb": None, "vwap": 0.75, "volspike": 0.2, "ofi": 0.0,
+            "news": None, "ema": 0.5, "rsi": 0.4, "bb": 0.3,
+            "_meta": {"close": close, "atr": 10.0, "bar_ts": df.index[-1].isoformat(),
+                      "epoch_min": int(df.index[-1].timestamp() // 60), "symbol": sym,
+                      "vol_z_tod": 1.0, "regime_er": 0.2},
+        }
+
+    monkeypatch.setattr(eng, "_symbol_axes", fake_axes)
+    monkeypatch.setitem(eng._OPEN_MIN, "KR", bars_df.index[0].hour * 60 + bars_df.index[0].minute)
+    monkeypatch.setitem(eng._CLOSE_MIN, "KR", bars_df.index[-1].hour * 60 + bars_df.index[-1].minute + 180)
+
+    cfg = {**eng.load_cfg(), "markets": ["KR"], "shadow": True,
+           "sleeve_frac": 0.20, "risk_per_trade": 0.02, "daily_loss_halt": 0.01,
+           "min_notional": {"KR": 0.0, "US": 0.0}, "entry_cutoff_min": 30,
+           "candidate_base_dir": str(tmp_path / "candidates")}
+    state = eng._blank_state()
+
+    eng.run_market("KR", state, cfg)
+
+    from ml.intraday_candidate_ledger import CandidateLedger
+    rows = CandidateLedger("kr", base_dir=tmp_path / "candidates").read_candidates()
+    assert len(rows) == 1
+    assert rows[0]["setup_type"] == "vwap_reclaim"
+    assert rows[0]["sample_mode"] == "observe_only"
+    assert state["positions"] == {}

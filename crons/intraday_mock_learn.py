@@ -144,6 +144,54 @@ def gate_eval(rows: list[dict], market: str) -> dict:
     return out
 
 
+
+def candidate_setup_summary(market: str, base_dir=None) -> dict:
+    from collections import Counter, defaultdict
+    from ml.intraday_candidate_ledger import CandidateLedger
+
+    ledger = CandidateLedger(market, base_dir=base_dir)
+    candidates = ledger.read_candidates()
+    outcomes = ledger.read_outcomes()
+    by_id = {row.get("id"): row for row in candidates}
+    out = defaultdict(lambda: {
+        "n_candidates": 0,
+        "modes": Counter(),
+        "n_outcomes_15m": 0,
+        "avg_net_return_15m": None,
+    })
+    returns_15 = defaultdict(list)
+
+    for row in candidates:
+        setup = row.get("setup_type") or "unknown"
+        out[setup]["n_candidates"] += 1
+        out[setup]["modes"][row.get("sample_mode") or "unknown"] += 1
+
+    for row in outcomes:
+        if row.get("horizon_min") != 15:
+            continue
+        candidate = by_id.get(row.get("candidate_id")) or {}
+        setup = candidate.get("setup_type") or "unknown"
+        out[setup]["n_outcomes_15m"] += 1
+        if row.get("net_return_est") is not None:
+            returns_15[setup].append(float(row["net_return_est"]))
+
+    final = {}
+    for setup, data in out.items():
+        vals = returns_15.get(setup, [])
+        final[setup] = {
+            **data,
+            "modes": dict(data["modes"]),
+            "avg_net_return_15m": round(sum(vals) / len(vals), 6) if vals else None,
+        }
+    return final
+
+
+def _candidate_setup_line(candidate_summary: dict) -> str:
+    return " · ".join(
+        f"{k} n{v['n_candidates']}/15m {v['avg_net_return_15m']}"
+        for k, v in sorted(candidate_summary.items())[:4]
+    )
+
 def _index_mdd(market: str, dates: list[str]) -> float:
     """OOS 기간 벤치마크 일봉 MDD (동일 분수 단위). 실패 시 보수 0.10."""
     try:
@@ -172,14 +220,17 @@ def run_market(market: str) -> str:
     rows = ledger.training_set()
     orphans = [d for d in ledger.pending() if d.get("side") == "단기진입" and d.get("ok") is not False]
     gate = gate_eval(rows, market)
+    candidate_summary = candidate_setup_summary(market)
+    setup_line = _candidate_setup_line(candidate_summary)
     snap = evolution.snapshot(rows)
     date = datetime.now(KST).strftime("%Y-%m-%d")
 
-    base_rec = {"date": date, "gate": gate, **snap}
+    base_rec = {"date": date, "gate": gate, "candidate_summary": candidate_summary, **snap}
     if len(rows) < MIN_SAMPLES:
         evolution.record_learning(f"{market}_intraday", {
             **base_rec, "adopted": False, "reason": f"콜드스타트 (표본 {len(rows)}/{MIN_SAMPLES})"})
         return (f"{flag} 단기 {market.upper()} — 표본 {len(rows)}/{MIN_SAMPLES} 콜드스타트"
+                + (f"\n후보셋업 {setup_line}" if setup_line else "")
                 + (f" · ⚠️orphan {len(orphans)}" if orphans else ""))
 
     idx_mdd = _index_mdd(market, [r.get("date", "") for r in rows])
@@ -200,6 +251,7 @@ def run_market(market: str) -> str:
                  f"·PSR {g.get('psr')}·PBO {g.get('pbo')}"
                  + (f"·news축 표본 {g['news_axis_n']}" if g.get("news_axis_n") is not None else ""))
     return (f"{flag} 단기 {market.upper()} (표본 {len(rows)})\n{out['reason']}\n{gate_line}"
+            + (f"\n후보셋업 {setup_line}" if setup_line else "")
             + (f"\n⚠️ orphan pending {len(orphans)}건" if orphans else ""))
 
 
