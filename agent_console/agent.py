@@ -161,7 +161,7 @@ def _run_wiki_autocurate(question: str, response: str, surface: str, pack: dict,
             surface=surface,
             pack=pack,
             history=history,
-            llm=_try_llm_prompt,
+            llm=lambda p: _try_llm_prompt(p, max_timeout=30),
         )
     except Exception:
         pass
@@ -1095,12 +1095,12 @@ def _try_llm_chat(question: str, pack: dict, history: list[dict] | None = None,
     return _try_llm_prompt(prompt, runner=runner)
 
 
-def _try_llm_prompt(prompt: str, runner=subprocess.run) -> str | None:
+def _try_llm_prompt(prompt: str, runner=subprocess.run, max_timeout: int | None = None) -> str | None:
     if os.getenv("AGENT_CONSOLE_LLM_ENABLED", "1").lower() in {"0", "false", "no", "off"}:
         return None
-    return (_try_codex_chat(prompt, runner=runner)
-            or _try_hermes_chat(prompt, runner=runner)
-            or _try_gemini_chat(prompt, runner=runner)
+    return (_try_codex_chat(prompt, runner=runner, max_timeout=max_timeout)
+            or _try_hermes_chat(prompt, runner=runner, max_timeout=max_timeout)
+            or _try_gemini_chat(prompt, runner=runner, max_timeout=max_timeout)
             or _try_agy_backup(prompt))
 
 
@@ -1139,7 +1139,7 @@ def _try_agy_backup(prompt: str) -> str | None:
         return None
 
 
-def _try_codex_chat(prompt: str, runner=subprocess.run) -> str | None:
+def _try_codex_chat(prompt: str, runner=subprocess.run, max_timeout: int | None = None) -> str | None:
     if os.getenv("AGENT_CONSOLE_CODEX_ENABLED", "1").lower() in {"0", "false", "no", "off"}:
         return None
     out_path = None
@@ -1175,6 +1175,8 @@ def _try_codex_chat(prompt: str, runner=subprocess.run) -> str | None:
 
         timeout = int(os.getenv("AGENT_CONSOLE_CODEX_TIMEOUT", os.getenv("AGENT_CONSOLE_LLM_TIMEOUT", "75")) or "75")
         timeout = max(10, min(timeout, 240))
+        if max_timeout is not None:
+            timeout = min(timeout, max_timeout)
         result = runner(build_cmd(want_search), capture_output=True, text=True, timeout=timeout)
         if getattr(result, "returncode", 1) != 0 and want_search:
             # 구버전 codex 가 --search 미지원이면 즉시 실패 → 검색 없이 1회 재시도
@@ -1198,7 +1200,7 @@ def _try_codex_chat(prompt: str, runner=subprocess.run) -> str | None:
                 pass
 
 
-def _try_hermes_chat(prompt: str, runner=subprocess.run) -> str | None:
+def _try_hermes_chat(prompt: str, runner=subprocess.run, max_timeout: int | None = None) -> str | None:
     if os.getenv("AGENT_CONSOLE_HERMES_ENABLED", "1").lower() in {"0", "false", "no", "off"}:
         return None
     cmd = [
@@ -1214,6 +1216,8 @@ def _try_hermes_chat(prompt: str, runner=subprocess.run) -> str | None:
     ]
     timeout = int(os.getenv("AGENT_CONSOLE_LLM_TIMEOUT", "60") or "60")
     try:
+        if max_timeout is not None:
+            timeout = min(timeout, max_timeout)
         result = runner(cmd, capture_output=True, text=True, timeout=max(10, min(timeout, 180)))
     except Exception:
         return None
@@ -1226,7 +1230,7 @@ def _try_hermes_chat(prompt: str, runner=subprocess.run) -> str | None:
     return text[:6000]
 
 
-def _try_gemini_chat(prompt: str, runner=subprocess.run) -> str | None:
+def _try_gemini_chat(prompt: str, runner=subprocess.run, max_timeout: int | None = None) -> str | None:
     """hermes 경유 Gemini 직통 호출 — codex/hermes(openai-codex) 동시 장애 시 3차 폴백.
 
     hermes 는 openai-codex 인증 만료 시 OpenRouter 로 자동 강등되는데 그 크레딧이
@@ -1248,6 +1252,8 @@ def _try_gemini_chat(prompt: str, runner=subprocess.run) -> str | None:
     ]
     timeout = int(os.getenv("AGENT_CONSOLE_LLM_TIMEOUT", "60") or "60")
     try:
+        if max_timeout is not None:
+            timeout = min(timeout, max_timeout)
         result = runner(cmd, capture_output=True, text=True, timeout=max(10, min(timeout, 180)))
     except Exception:
         return None
