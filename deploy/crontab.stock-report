@@ -79,6 +79,7 @@ PATH=/home/ubuntu/.local/bin:/usr/local/bin:/usr/bin:/bin
 # 전체 소스 수집 (텔레그램 채널·FRED·국채·시장 스냅샷) → JSONL 캐시
 5,35 * * * * cd /home/ubuntu/projects/stock-report && uv run python reports/source_collector.py >> /tmp/source_collector.log 2>&1     # 매 30분 (:05/:35)
 8,38 * * * * cd /home/ubuntu/projects/stock-report && uv run python -m reports.source_wiki_curator --hours 48 --limit 8 >> /tmp/source_wiki_curator.log 2>&1   # source-cache -> LLM wiki 자동 갱신
+8,38 * * * * cd /home/ubuntu/projects/stock-report && uv run python -c "from agent_console.wiki import archive_stale_pages; from agent_console.shared_memory import ensure_store; ensure_store(); archive_stale_pages(max_age_days=30)" >> /tmp/wiki_archive.log 2>&1   # 위키 스테일 페이지 자동 아카이브/만료 삭제
 
 # ── 주간 스냅샷 (토요일) ─────────────────────────────────────────────────────
 # 사용자 프로필 주간 증류 (공유 에이전트 메모리 — 대화 롤업+행동 신호 → LLM 압축·실패 시 기존 유지)
