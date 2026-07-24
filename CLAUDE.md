@@ -101,6 +101,7 @@ Strong success criteria let you loop independently. Weak criteria ("make it work
 
 - If user-facing behavior, commands, or UX change, update `README.md`.
 - If file roles, env vars, or operating rules change, update this file.
+- If cron cadence, raw-archive TTLs, World Memory ingestion paths, or wiki LLM curation logic change, update `docs/data-collection-pipeline.md`.
 - Keep docs current with the actual code, not with plans or wishful intent.
 
 ## Nested harnesses
