@@ -278,7 +278,7 @@ def ingest_from_labels(labels: list[dict] | None = None) -> int:
                 title, category=str(lb.get("event_type") or "기타"), region=region,
                 importance=_IMPORTANCE_BY_STRENGTH.get(int(lb.get("strength", 0) or 0), "low"),
                 issue_date=str(lb.get("published_at") or "")[:10] or None,
-                tickers=tickers, source="news_llm_label",
+                tickers=tickers, source="news_llm_label", body=str(lb.get("body") or ""),
                 payload={"direction": direction, "strength": lb.get("strength")})
             if eid:
                 added += 1

@@ -145,6 +145,7 @@ def heuristic_labels(events: list[dict]) -> list[dict]:
             "direction": direction,
             "strength": _infer_strength(text, direction),
             "title_head": title[:80],
+            "body": body,
         })
     return out
 
@@ -193,6 +194,7 @@ def parse_labels(text: str, events: list[dict]) -> list[dict]:
             "direction": direction,
             "strength": strength,
             "title_head": str(ev.get("title") or "")[:80],
+            "body": str(ev.get("body") or ""),
         })
     return out
 
