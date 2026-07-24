@@ -124,3 +124,72 @@ def test_main_dry_run_prints_report_and_returns_zero(monkeypatch, tmp_path, caps
 
     assert exit_code == 0
     assert "[위키 헬스 체크]" in captured.out
+
+
+def _sample_report():
+    return {
+        "dry_run": False,
+        "stats": {
+            "total": 10,
+            "trust_counts": {"unverified": 3},
+            "status_counts": {"archived": 2},
+        },
+        "lint_issues": [],
+        "stale_count": 1,
+        "unused_count": 1,
+        "very_unused_count": 0,
+        "recommendations": [],
+    }
+
+
+def test_run_llm_health_review_returns_list(monkeypatch):
+    import agent_console.agent as agent_module
+    from reports import wiki_health_check
+
+    monkeypatch.setattr(
+        agent_module,
+        "_try_llm_prompt",
+        lambda prompt, **kwargs: (
+            '{"actions": [{"page_id": "p1", "action": "archive", "reason": "stale"}], '
+            '"health_score": 7, "summary": "ok"}'
+        ),
+    )
+
+    actions = wiki_health_check.run_llm_health_review(_sample_report())
+
+    assert actions == [{"page_id": "p1", "action": "archive", "reason": "stale"}]
+
+
+def test_run_llm_health_review_failure_graceful(monkeypatch):
+    import agent_console.agent as agent_module
+    from reports import wiki_health_check
+
+    def _raise(prompt, **kwargs):
+        raise RuntimeError("llm unavailable")
+
+    monkeypatch.setattr(agent_module, "_try_llm_prompt", _raise)
+
+    actions = wiki_health_check.run_llm_health_review(_sample_report())
+
+    assert actions == []
+
+
+def test_main_with_llm_gate_skips_llm_on_dry_run(monkeypatch, tmp_path):
+    _isolate(monkeypatch, tmp_path)
+
+    import sys
+
+    from reports import wiki_health_check
+
+    called = []
+    monkeypatch.setattr(
+        wiki_health_check,
+        "run_llm_health_review",
+        lambda report: called.append(report) or [],
+    )
+    monkeypatch.setattr(sys, "argv", ["wiki_health_check", "--dry-run"])
+
+    exit_code = wiki_health_check.main()
+
+    assert exit_code == 0
+    assert called == []

@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 import argparse
+import json
 import sys
 
 from agent_console import wiki
@@ -48,6 +49,37 @@ def build_health_report(dry_run: bool = False) -> dict:
     return report
 
 
+def run_llm_health_review(report: dict) -> list[dict]:
+    """LLM에게 위키 상태를 보여주고 구체적인 큐레이션 액션 추천받기"""
+    from agent_console.agent import _try_llm_prompt
+
+    stats_data = report["stats"]
+    prompt = f"""위키 상태 리포트:
+- 전체: {stats_data['total']}페이지
+- 미검증: {stats_data['trust_counts']['unverified']}
+- Archived: {stats_data['status_counts']['archived']}
+- 스테일(14일+): {report['stale_count']}
+- 미사용(30일+): {report['unused_count']}
+
+린트 이슈:
+{json.dumps(report['lint_issues'][:10], indent=2, ensure_ascii=False)}
+
+다음 중 어떤 액션이 필요할까요?
+1. 어떤 페이지를 archived/삭제할까?
+2. 어떤 페이지들을 병합할까?
+3. 어떤 페이지를 재활성화(unarchive)할까?
+4. 전반적인 위키 건강도 평가 (1-10)
+
+JSON으로 응답해주세요:
+{{"actions": [{{"page_id": "...", "action": "archive|delete|merge|reactivate", "reason": "..."}}], "health_score": 8, "summary": "..."}}"""
+
+    try:
+        llm_response = _try_llm_prompt(prompt)
+        return json.loads(llm_response).get("actions", [])
+    except Exception:
+        return []
+
+
 def format_report(report: dict) -> str:
     stats_data = report.get("stats", {})
     status_counts = stats_data.get("status_counts", {})
@@ -84,6 +116,25 @@ def main() -> int:
     args = parser.parse_args()
 
     report = build_health_report(dry_run=args.dry_run)
+
+    if not args.dry_run:
+        try:
+            llm_actions = run_llm_health_review(report)
+        except Exception:
+            llm_actions = []
+        for action in llm_actions:
+            act = action.get("action")
+            page_id = action.get("page_id")
+            if act == "archive":
+                wiki.archive_stale_pages(max_age_days=0)
+            elif act == "delete":
+                wiki.delete_page(page_id)
+            elif act == "reactivate":
+                page = wiki.get_page(page_id)
+                if page:
+                    page["status"] = "active"
+                    wiki.upsert_page(page)
+
     print(format_report(report))
     return 0
 
