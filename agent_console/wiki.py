@@ -1471,14 +1471,11 @@ def _recently_created_dedup(question: str, surface: str, *, hours: int = 24) -> 
 
 
 def _derive_title(question: str, answer: str) -> str:
-    """답변에서 핵심 주제 bullet 을 추출해 제목으로, 없으면 질문."""
-    cleaned = _clean(answer, 300)
-    for line in cleaned.splitlines():
-        stripped = line.strip()
-        if stripped.startswith(("-", "•", "*")):
-            candidate = stripped.lstrip("-•*").strip()
-            if 12 <= len(candidate) <= 60 and any(c in candidate for c in (",", ":", "→")):
-                return candidate
+    """답변에서 bullet point 기반 제목을 추출, 없으면 질문."""
+    for line in _clean(answer, 300).splitlines():
+        stripped = line.strip().lstrip("-•*").strip()
+        if 12 <= len(stripped) <= 55:
+            return stripped[:80]
     q = _clean(question, 120)
     if q:
         return q[:80]
