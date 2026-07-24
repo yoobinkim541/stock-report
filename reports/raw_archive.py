@@ -180,6 +180,43 @@ def _load_manifest(path: Path) -> dict | None:
         return None
 
 
+def _dedupe_index_path() -> Path:
+    return reports_root() / "raw_archive_dedupe_index.json"
+
+
+def load_dedupe_index() -> dict[str, str]:
+    """archived_at 시각으로 키를 저장하는 간이 크로스런 dedupe 인덱스.
+
+    같은 기사가 API 응답에 계속 남아있는 동안(예: saveticker top-stories) 매 폴링마다
+    save_raw_artifact 가 재호출돼 파일이 무한 중복 저장되는 걸 막는다. 파일 수만 개를
+    스캔하지 않고 O(1) 조회하기 위한 별도 인덱스.
+    """
+    path = _dedupe_index_path()
+    if not path.exists():
+        return {}
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+        return data if isinstance(data, dict) else {}
+    except Exception:
+        return {}
+
+
+def save_dedupe_index(index: dict[str, str], *, now: datetime | None = None, keep_days: int = 14) -> None:
+    now = _ensure_tz(now or datetime.now(KST))
+    cutoff = now - timedelta(days=keep_days)
+    pruned = {}
+    for key, ts in index.items():
+        try:
+            dt = datetime.fromisoformat(ts)
+            if dt.tzinfo is None:
+                dt = dt.replace(tzinfo=KST)
+        except Exception:
+            continue
+        if dt >= cutoff:
+            pruned[key] = ts
+    _dedupe_index_path().write_text(json.dumps(pruned, ensure_ascii=False), encoding="utf-8")
+
+
 def cleanup_expired_raw_artifacts(now: datetime | None = None, ttl_days: int = 30) -> dict:
     now = _ensure_tz(now or datetime.now(KST))
     deleted_raw = 0

@@ -44,6 +44,9 @@ PATH=/home/ubuntu/.local/bin:/usr/local/bin:/usr/bin:/bin
 # 핵심 데이터 일일 백업 (store DB·스냅샷·설정 — 14일 보존)
 40 20 * * * cd /home/ubuntu/projects/stock-report && bash scripts/backup_stock_data.sh >> /tmp/backup_stock_data.log 2>&1   # 20:40 UTC = 05:40 KST
 
+# raw 아카이브 TTL 청소 (소스별 TTL — reports/raw_archive.py RAW_TTL_DAYS_BY_SOURCE. 이게 없으면 raw/가 무기한 누적됨)
+45 20 * * * cd /home/ubuntu/projects/stock-report && uv run python crons/raw_archive_cleanup.py >> /tmp/raw_archive_cleanup.log 2>&1   # 20:45 UTC = 05:45 KST
+
 # 주식 모으기 자동 기록 — 미 정규장 마감 직후 종가·확정 종가 환율로 소수점 계좌 기록 (플랜 없으면 no-op·기록 전용)
 10 21 * * 1-5 cd /home/ubuntu/projects/stock-report && uv run python crons/accumulate_daily.py >> /tmp/accumulate_daily.log 2>&1   # 21:10 UTC = 06:10 KST
 # 어닝 컨센서스·리비전·서프라이즈·밸류에이션 point-in-time 스냅샷 — 실적/주가반응 예측 학습데이터 축적

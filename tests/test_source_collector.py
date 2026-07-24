@@ -267,6 +267,42 @@ def test_fetch_saveticker_events_normalizes_dict_tickers(monkeypatch, tmp_path):
     assert Path(event["text_path"]).read_text(encoding="utf-8") == event["body_raw"]
 
 
+def test_fetch_saveticker_events_skips_rearchive_for_recently_seen_article(monkeypatch, tmp_path):
+    """같은 기사가 API 응답에 계속 남아있어도 재폴링마다 원본을 재저장하면 안 된다(디스크 낭비 버그 회귀 방지)."""
+    class FakeResponse:
+        def __init__(self, payload):
+            self._payload = payload
+
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return self._payload
+
+    monkeypatch.setenv("STOCK_REPORT_REPORTS_DIR", str(tmp_path / "reports"))
+    monkeypatch.setattr(sc, "_fetch_saveticker_article_body", lambda url: "")
+
+    payload = {"news_list": [{
+        "title": "반복 노출 기사",
+        "content": "매 폴링마다 API 응답에 남아있는 기사.",
+        "url": "https://e/repeat",
+        "created_at": "2026-07-24",
+        "tag_names": ["기술/AI"],
+    }]}
+    monkeypatch.setattr(sc.requests, "get", lambda *args, **kwargs: FakeResponse(payload))
+
+    first = sc.fetch_saveticker_events()
+    assert first[0]["raw_path"]
+    manifests_after_first = list((tmp_path / "reports" / "raw").rglob("*.manifest.json"))
+    assert len(manifests_after_first) == 1
+
+    second = sc.fetch_saveticker_events()
+    assert second[0]["raw_path"] == ""          # 재저장 생략 — 새 아카이브 안 만듦
+    assert second[0]["body_raw"]                 # 본문 자체는 API 응답에서 계속 채워짐
+    manifests_after_second = list((tmp_path / "reports" / "raw").rglob("*.manifest.json"))
+    assert len(manifests_after_second) == 1       # 파일 수 그대로 — 중복 저장 안 됨
+
+
 def test_fetch_saveticker_events_enriches_thin_articles(monkeypatch, tmp_path):
     class FakeResponse:
         def __init__(self, payload):

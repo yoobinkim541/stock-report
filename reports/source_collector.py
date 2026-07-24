@@ -643,6 +643,8 @@ def _saveticker_max_pages() -> int:
 
 
 def fetch_saveticker_events() -> list[dict]:
+    from reports.raw_archive import load_dedupe_index, save_dedupe_index
+
     base = os.getenv("SAVE_TICKER_API_BASE", "https://saveticker.com/api").rstrip("/")
     paths = [("news/top-stories", None)]
     paths.extend(
@@ -651,6 +653,9 @@ def fetch_saveticker_events() -> list[dict]:
     )
     events = []
     seen_keys: set[str] = set()
+    dedupe_index = load_dedupe_index()
+    dedupe_dirty = False
+    now_iso = datetime.now(KST).isoformat(timespec="seconds")
     for path, params in paths:
         try:
             resp = requests.get(f"{base}/{path}", headers=HEADERS, params=params, timeout=12)
@@ -672,8 +677,20 @@ def fetch_saveticker_events() -> list[dict]:
             if dedupe_key:
                 seen_keys.add(dedupe_key)
             text = " ".join(str(item.get(k) or "") for k in ("title", "content", "group_summary"))
-            record = _saveticker_article_record(item, base)
-            body_raw = record["body_raw"] or _combine_body_raw(item.get("content"), item.get("group_summary")) or text
+            if dedupe_key and dedupe_key in dedupe_index:
+                # 같은 기사가 API 응답에 계속 남아있는 동안 매 폴링(30분)마다 원본을 재저장하던
+                # 버그 수정 — 최근에 이미 아카이브했으면 재수집/재저장 생략(디스크·네트워크 낭비 방지).
+                body_raw = _combine_body_raw(item.get("content"), item.get("group_summary")) or text
+                raw_path = text_path = manifest_path = raw_sha256 = raw_source = ""
+            else:
+                record = _saveticker_article_record(item, base)
+                body_raw = record["body_raw"] or _combine_body_raw(item.get("content"), item.get("group_summary")) or text
+                raw_path, text_path = record["raw_path"], record["text_path"]
+                manifest_path, raw_sha256, raw_source = (
+                    record["manifest_path"], record["raw_sha256"], record["raw_source"])
+                if dedupe_key:
+                    dedupe_index[dedupe_key] = now_iso
+                    dedupe_dirty = True
             events.append({
                 "source": "saveticker",
                 "source_url": base,
@@ -685,12 +702,14 @@ def fetch_saveticker_events() -> list[dict]:
                 "body_excerpt": body_raw[:500],
                 "tickers": _normalize_tickers(item.get("tickers")) or _extract_tickers(text),
                 "tags": item.get("tag_names") or [],
-                "raw_path": record["raw_path"],
-                "text_path": record["text_path"],
-                "manifest_path": record["manifest_path"],
-                "raw_sha256": record["raw_sha256"],
-                "raw_source": record["raw_source"],
+                "raw_path": raw_path,
+                "text_path": text_path,
+                "manifest_path": manifest_path,
+                "raw_sha256": raw_sha256,
+                "raw_source": raw_source,
             })
+    if dedupe_dirty:
+        save_dedupe_index(dedupe_index, now=datetime.now(KST))
     return [_classify_event(event) for event in events]
 
 def _parse_arca_html(html_text: str) -> list[tuple[str, str]]:
