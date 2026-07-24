@@ -43,6 +43,36 @@ def test_plan_cash_buffer_leaves_headroom():
     assert o.get(("A", "buy")) == 9
 
 
+def test_plan_cash_usd_zero_still_caps_buys():
+    """cash_usd=0 은 '현금 없음'(캡 0)이지 '정보 없음'(캡 미적용)이 아니다.
+    (2026-07-24 회귀방지: 예전엔 cash_usd>0 도 같이 요구해서 정확히 0일 때 캡이
+    통째로 빠지고 예산 기준 풀사이즈 매수가 그대로 나갔음 — 실계좌에서 실제로 발생)."""
+    sigs = [{"ticker": "A", "price": 100, "policy_score": 0.9}]
+    o = _orders(T.plan_rebalance(sigs, {}, budget_usd=10000, max_positions=1, cash_usd=0))
+    assert ("A", "buy") not in o
+
+
+def test_plan_min_cash_usd_skips_buys():
+    """가용현금(cash_usd*cash_buffer)이 min_cash_usd 밑이면 매수 자체를 생성 안 함
+    (2026-07-24: '주문가능금액 부족' 거부의 절반이 여기서 나옴 — 소액 매수 시도 API 낭비 방지)."""
+    sigs = [{"ticker": "A", "price": 100, "policy_score": 0.9}]
+    o = _orders(T.plan_rebalance(sigs, {}, budget_usd=10000, max_positions=1,
+                                 cash_usd=300, min_cash_usd=500))
+    assert ("A", "buy") not in o                                       # 300 < 500 → 매수 생성 안 함
+    o2 = _orders(T.plan_rebalance(sigs, {}, budget_usd=10000, max_positions=1,
+                                  cash_usd=600, min_cash_usd=500))
+    assert o2.get(("A", "buy")) == 6                                    # 600 >= 500 → 정상 사이징
+
+
+def test_plan_min_cash_usd_does_not_block_sells():
+    """min_cash_usd 는 매수만 막는다 — 타깃이탈 매도(현금확보)는 항상 그대로 나가야 함."""
+    sigs = [{"ticker": "A", "price": 100, "policy_score": 0.9}]
+    o = _orders(T.plan_rebalance(sigs, {"X": {"shares": 5}}, budget_usd=10000, max_positions=1,
+                                 cash_usd=0, min_cash_usd=500))
+    assert o.get(("X", "sell")) == 5
+    assert ("A", "buy") not in o
+
+
 def test_plan_rebal_band_skips_small_adjust():
     """무거래 밴드: 목표 대비 band 이내 보유종목은 조정 skip (회전율↓)."""
     sigs = [{"ticker": "A", "price": 100, "policy_score": 0.9}]

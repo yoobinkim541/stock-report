@@ -142,6 +142,13 @@ SLIPPAGE = _float_env("US_MOCK_SLIPPAGE", 0.01)
 # 주문가능금액(frcr_use_psbl_amt)의 일부만 매수에 사용 — 수수료(KIS 해외 ~0.25%)·통합증거금
 # USD 환산 haircut·지정가 틱업 여유. 1% 슬리피지만으론 "주문가능금액 부족" 거부가 남아 별도 버퍼.
 CASH_BUFFER = _float_env("US_MOCK_CASH_BUFFER", 0.95)
+# cash_usd 가 KIS 실측(frcr_use_psbl_amt)이 아니라 nav-pos_value 역산 추정치(kis_mock.get_balance
+# 의 cash_derived=True)일 때 — 포지션 평가액이 NAV 근접/초과 시 부정확해지기 쉬워 더 보수적으로
+# (2026-07-24: 실계좌 확인 결과 cash_derived=True·frcr_use_psbl_amt=0 상태에서도 매수 재시도 반복
+# → 주문가능금액 부족 실패의 주 원인이었음)
+CASH_BUFFER_DERIVED = _float_env("US_MOCK_CASH_BUFFER_DERIVED", 0.5)
+# 이 밑으로 남은 현금이면 매수 자체를 시도 안 함(어차피 실패할 소액 주문 API 낭비 방지)
+MIN_CASH_USD = _float_env("US_MOCK_MIN_CASH_USD", 500.0)
 REBAL_BAND = _float_env("US_MOCK_REBAL_BAND", 0.25)   # 무거래 밴드(목표比 ±25% 벗어날 때만 조정·회전율↓)
 EXIT_BUFFER = _int_env("US_MOCK_EXIT_BUFFER", 2)      # 히스테리시스(top-N+2 안이면 보유 유지·경계 flip 방지)
 # ★분할매수·분할매도 — 회당 목표 1/N (N회 평균 진입/청산·분산 축소·bps 비용 불변). 기본 3·1=일괄.
@@ -385,13 +392,17 @@ def plan_rebalance(signals: list[dict], positions: dict, budget_usd: float,
                    rebal_band: float = 0.0, exit_buffer: int = 0,
                    leverage_symbols: set[str] | None = None,
                    leverage_max_positions: int | None = None,
-                   leverage_budget_frac: float | None = None) -> list[dict]:
+                   leverage_budget_frac: float | None = None,
+                   min_cash_usd: float = 0.0) -> list[dict]:
     """목표 바스켓(policy_score 상위 N 균등) vs 보유 → 정수주 지정가 주문계획.
 
     반환: [{symbol, side('buy'|'sell'), qty, reason}]. 매도 먼저(현금확보)·예산0/음수면 매수생략·현금 러닝캡.
     cash_buffer<1 이면 주문가능금액의 그 비율만 매수에 사용(수수료·통합증거금 FX·틱업 여유).
     rebal_band>0: 보유종목 조정을 |현재가치−목표가치|/목표가치 > band 일 때만(잔챙이 skip·회전율↓).
     exit_buffer>0: 보유종목이 top-(N+buffer) 안이면 유지(경계 flip-flop 방지·회전율↓).
+    min_cash_usd: 매수 가용현금(cash_usd*cash_buffer)이 이 밑이면 매수 자체를 생성 안 함
+    (2026-07-24: 회당 목표주수>0인데 실제 KIS 주문가능금액은 이미 0인 경우가 있어 — 어차피
+    거부될 소액 매수 시도로 API 콜만 낭비하는 걸 방지).
     """
     orders: list[dict] = []
     ranked = sorted([s for s in signals if s.get("price", 0) > 0],
@@ -412,7 +423,12 @@ def plan_rebalance(signals: list[dict], positions: dict, budget_usd: float,
             orders.append({"symbol": sym, "side": "sell", "qty": sh, "reason": "타깃이탈"})
 
     target_values = _target_values(buys, budget_usd, leverage_symbols, leverage_budget_frac)
-    remaining = (cash_usd * cash_buffer) if (cash_usd is not None and cash_usd > 0) else None
+    # cash_usd=0 은 "현금 없음"(캡=0)이지 "정보 없음"(캡 미적용)이 아니다 — is not None 만 검사
+    # (2026-07-24: 예전엔 cash_usd>0 도 요구해서 실계좌 현금 정확히 0일 때 캡이 통째로 빠져
+    # 예산 기준 풀사이즈 매수가 그대로 나가던 게 '주문가능금액 부족' 실패의 근본 원인이었음)
+    remaining = (cash_usd * cash_buffer) if cash_usd is not None else None
+    if remaining is not None and remaining < min_cash_usd:
+        remaining = 0.0   # 매수 후보는 훑되 전부 tgt<=cur 로 클램프 — 신규매수 생성 안 함
     for s in buys:
         sym, price = s["ticker"], s["price"]
         per = target_values.get(sym, 0.0)
@@ -461,12 +477,17 @@ def main(argv: list[str] | None = None) -> int:
         logger.info("KOREA_MOCK_ENABLED 아님 — US 모의 페이퍼트레이딩 생략")
         return 0
 
+    cash_derived = False
     if not dry:
         bal = kis_mock.get_balance()
         if not bal["ok"]:
             logger.error("KIS 모의 잔고 조회 실패 — 주문 보류")
             return 1
         positions, cash, nav = bal["positions"], bal["cash_usd"], bal["nav"]
+        cash_derived = bool(bal.get("cash_derived"))
+        logger.info("잔고: cash=$%s(%s) nav=$%s pos_value=$%s", f"{cash or 0:,.0f}",
+                    "역산추정" if cash_derived else "실측", f"{nav or 0:,.0f}",
+                    f"{bal.get('pos_value') or 0:,.0f}")
     else:
         positions, cash, nav = {}, SEED_USD, SEED_USD    # dry-run: 시드 가정 미리보기
     if nav is None:
@@ -494,12 +515,14 @@ def main(argv: list[str] | None = None) -> int:
         s for s in signals
         if not (LEV_SLEEVE_ENABLED and s.get("ticker") == LEV_SLEEVE_SYMBOL)
     ]
+    effective_cash_buffer = CASH_BUFFER_DERIVED if cash_derived else CASH_BUFFER
     plan = plan_rebalance(trade_signals, positions_stock, budget, MAX_POS, cash_usd=cash,
-                          slippage=SLIPPAGE, quote_fn=_rt_best, cash_buffer=CASH_BUFFER,
+                          slippage=SLIPPAGE, quote_fn=_rt_best, cash_buffer=effective_cash_buffer,
                           rebal_band=REBAL_BAND, exit_buffer=EXIT_BUFFER,
                           leverage_symbols=leverage_symbols,
                           leverage_max_positions=LEV_ETF_MAX_POS,
-                          leverage_budget_frac=LEV_ETF_MAX_WEIGHT)
+                          leverage_budget_frac=LEV_ETF_MAX_WEIGHT,
+                          min_cash_usd=MIN_CASH_USD)
     # ★분할매수/매도: 종목 주문을 회당 목표의 1/N 로 상한 (슬리브는 별도 — 제외)
     if TRANCHES > 1 and plan:
         from lib.tranche import plan_tranches

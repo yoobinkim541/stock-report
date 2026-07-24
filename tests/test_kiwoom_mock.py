@@ -256,6 +256,16 @@ def test_plan_cash_running_cap():
     assert total <= 6
 
 
+def test_plan_cash_krw_zero_still_caps_buys():
+    """cash_krw=0 은 '현금 없음'(캡 0)이지 '정보 없음'(캡 미적용)이 아니다.
+    (2026-07-24 회귀방지: us_mock_track.py 와 동일한 버그 — cash_krw>0 도 같이 요구해서
+    정확히 0일 때 캡이 통째로 빠지고 예산 기준 풀사이즈 매수가 그대로 나갔음)."""
+    import kiwoom_mock_track as kt
+    signals = [_sig("005930", "강한 매수후보", 80, 50000)]
+    orders = kt.plan_rebalance(signals, {}, budget_krw=1_000_000, max_positions=1, cash_krw=0)
+    assert [o for o in orders if o["side"] == "buy"] == []
+
+
 def test_plan_rebal_band_skips_small_adjust():
     """무거래 밴드: 목표 대비 band 이내 보유종목은 조정 skip (회전율↓·증권거래세 절감)."""
     import kiwoom_mock_track as kt

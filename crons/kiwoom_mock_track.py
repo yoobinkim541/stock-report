@@ -287,7 +287,10 @@ def plan_rebalance(signals: list[dict], positions: dict, budget_krw: float,
 
     # 2) 매수/조정: 예산 0/음수면 전면 생략 (음수 예산 → 유령매도 방지)
     per = (budget_krw / len(buys)) if (buys and budget_krw > 0) else 0.0
-    remaining = cash_krw if (cash_krw is not None and cash_krw > 0) else None
+    # cash_krw=0 은 "현금 없음"(캡=0)이지 "정보 없음"(캡 미적용)이 아니다 — is not None 만 검사
+    # (2026-07-24: us_mock_track.py 와 동일한 버그 — cash_krw>0 도 요구하면 현금 정확히 0일 때
+    # 캡이 통째로 빠져 예산 기준 풀사이즈 매수가 그대로 나감)
+    remaining = cash_krw
     for s in buys:
         code, price = s["code"], s["price"]
         if per <= 0 or price <= 0:
