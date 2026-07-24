@@ -222,6 +222,7 @@ def _record_to_page(record: dict) -> dict:
         "decisions": decisions,
         "openQuestions": open_questions,
         "messages": messages,
+        "feedback": record.get("feedback") or {},
         "snippet": summary[:260] if summary else "",
         "raw": record,
     }
@@ -535,6 +536,18 @@ def lint_pages(pages: list[dict] | None = None) -> dict:
                     "title": title,
                     "message": "이 페이지가 30일간 사용되지 않았습니다. archived 또는 삭제를 고려하세요.",
                 })
+        feedback = page.get("feedback") or {}
+        if isinstance(feedback, dict):
+            helpful = feedback.get("helpful", 0)
+            not_helpful = feedback.get("not_helpful", 0)
+            if not_helpful > helpful * 2 and not_helpful >= 2:
+                issues.append({
+                    "code": "high_negative_feedback",
+                    "severity": "warning",
+                    "page_id": page_id,
+                    "title": title,
+                    "message": f"not_helpful({not_helpful})이 helpful({helpful})의 2배를 초과합니다. 페이지 개선 또는 삭제를 고려하세요.",
+                })
     issues.extend(_lint_relational_issues(pages or []))
     return {"ok": not issues, "issue_count": len(issues), "issues": issues}
 
@@ -680,6 +693,7 @@ def upsert_page(page: dict) -> dict:
         "useCount": int(page.get("useCount") if page.get("useCount") is not None else existing.get("useCount") or 0),
         "lastUsedAt": _clean(page.get("lastUsedAt") or existing.get("lastUsedAt") or "", 80),
         "lastQuery": _clean(page.get("lastQuery") or existing.get("lastQuery") or "", 200),
+        "feedback": page.get("feedback") if page.get("feedback") is not None else existing.get("feedback") or {},
         "source": {
             "surface": surface,
             "screen": surface,
@@ -716,6 +730,35 @@ def track_page_usage(page_id: str, query: str) -> None:
         "useCount": (page.get("useCount") or 0) + 1,
         "lastUsedAt": _now(),
         "lastQuery": _clean(query, 200),
+    })
+    rebuild_artifacts()
+
+
+def _store_page_feedback(page_id: str, rating: str) -> None:
+    """페이지의 유용성 피드백을 저장/증분한다. rating: 'helpful' | 'not_helpful' | 'neutral'."""
+    if rating not in ("helpful", "not_helpful", "neutral"):
+        return
+    page = get_page(page_id)
+    if not page:
+        return
+    existing_feedback = dict(page.get("feedback") or {})
+    existing_feedback[rating] = existing_feedback.get(rating, 0) + 1
+    upsert_page({
+        "id": page["id"],
+        "title": page.get("title"),
+        "summary": page.get("summary"),
+        "body": page.get("body"),
+        "surface": page.get("surface"),
+        "kind": page.get("kind"),
+        "status": page.get("status"),
+        "tags": page.get("tags") or [],
+        "source_refs": page.get("source_refs") or [],
+        "links": page.get("links") or [],
+        "messages": page.get("messages") or [],
+        "decisions": page.get("decisions") or [],
+        "openQuestions": page.get("openQuestions") or [],
+        "confidence": page.get("confidence"),
+        "feedback": existing_feedback,
     })
     rebuild_artifacts()
 
@@ -1089,6 +1132,7 @@ def auto_curate_from_chat(
     candidates = list_pages(query=question, surface=surface, limit=5)
     target = _best_candidate_page(question, surface, candidates)
     plan = None
+    page_feedback = None
     if llm is not None:
         try:
             prompt = _build_auto_curation_prompt(
@@ -1099,7 +1143,10 @@ def auto_curate_from_chat(
                 pack=pack or {},
                 history=history or [],
             )
-            plan = _parse_curation_plan(llm(prompt))
+            llm_text = llm(prompt)
+            plan = _parse_curation_plan(llm_text)
+            if plan and isinstance(plan.get("page_feedback"), dict):
+                page_feedback = plan["page_feedback"]
         except Exception:
             plan = None
     if not plan:
@@ -1152,6 +1199,11 @@ def auto_curate_from_chat(
         return None
 
     saved = upsert_page(payload)
+
+    if page_feedback:
+        for fb_page_id, rating in page_feedback.items():
+            _store_page_feedback(str(fb_page_id), str(rating))
+
     return {
         "ok": True,
         "action": action,
@@ -1232,7 +1284,7 @@ def _build_auto_curation_prompt(
         "가능한 action 값은 create, update, skip, delete, merge, split 이다.",
         "update 를 고를 때는 target_id 를 기존 후보 페이지 id 로 지정한다.",
         "확신이 낮으면 status 는 draft, 중간이면 reviewed, 이미 안정적인 운영 규칙이면 stable 이다.",
-        "필드: action, title, summary, body, kind, status, tags, source_refs, links, target_id, confidence, reason.",
+        "필드: action, title, summary, body, kind, status, tags, source_refs, links, target_id, confidence, reason, page_feedback.",
         "관련 있는 기존 위키 후보가 있으면 해당 id 를 links 배열에 넣는다. 관련 없으면 links 는 빈 배열이다.",
         "action이 delete면 target_id(삭제할 기존 후보 id)와 reason만 있으면 된다.",
         "delete 판단 기준: 30일 이상 갱신 안 됨, 현재 시장 상황과 모순, 다른 페이지와 완전히 중복, 내용이 부실하거나 검증 불가능.",
@@ -1258,11 +1310,20 @@ def _build_auto_curation_prompt(
     if candidates:
         lines += ["", "[기존 위키 후보]"]
         for page in candidates[:5]:
+            use_count = page.get("useCount", 0)
+            last_used = page.get("lastUsedAt", "") or ""
             lines.append(
                 f"- id={page.get('id')} | title={page.get('title')} | "
                 f"status={page.get('status')} | kind={page.get('kind')} | "
+                f"useCount={use_count} | lastUsedAt={last_used[:16]} | "
                 f"summary={_clean(page.get('summary') or '', 160)}"
             )
+    lines += ["", "[페이지 피드백]"]
+    lines.append("제공된 위키 페이지 중 이 대화에 도움이 된 것과 아닌 것 평가:")
+    for page in candidates[:5]:
+        pid = page.get('id', '')
+        lines.append(f'- "{pid}": "helpful" | "not_helpful" | "neutral"')
+    lines.append('page_feedback 필드: {"page_id_1": "helpful", "page_id_2": "neutral"}')
     lines += [
         "",
         "JSON 예시 (create/update/delete/merge/split):",
