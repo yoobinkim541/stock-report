@@ -8,9 +8,11 @@
 
 정직: LLM 라벨 = 피처 후보일 뿐 엣지 아님 — 승격은 기존 OOS 게이트가 결정.
 안전: NEWS_LLM_LABELS_ENABLED=true 여야 동작(기본 off). 실패·미설치 → 조용히 스킵.
-비용: 회당 NEWS_LLM_LABELS_MAX(기본 30)건 한 번의 배치 호출 — 일 2회 ≈ 수백 토큰/회.
-크론 (평일 00:05·14:05 UTC — KR 00:30·US 15:00 모의 결정 직전):
-    5 0,14 * * 1-5 cd <repo> && uv run python crons/news_llm_snapshot.py
+비용: 회당 NEWS_LLM_LABELS_MAX(기본 30)건 한 번의 배치 호출 — 배치당 총량은 비슷하게
+     유지되면서(같은 백로그를 더 잘게 나눠 처리) World Memory 반영 지연만 줄어든다.
+크론 (평일 매시 05분 — 2026-07-24부터 하루 2회에서 시간당으로 변경. 뉴스 많은 날
+     하루 2회로는 회당 상한(30건)에 걸려 다음 배치까지 밀리는 경우가 있었음):
+    5 * * * 1-5 cd <repo> && uv run python crons/news_llm_snapshot.py
 """
 from __future__ import annotations
 

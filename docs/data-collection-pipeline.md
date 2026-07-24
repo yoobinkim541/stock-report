@@ -41,7 +41,7 @@ World Memory(`lib/world_memory.py`, SQLite `world_issue_log.sqlite3`)로 들어�
 
 | 경로 | 소스명(`payload.source`) | 빈도 | 트리거 |
 |---|---|---|---|
-| LLM 구조화 라벨링 | `news_llm_label` | **하루 2번** (평일 00:05·14:05 UTC = 09:05·23:05 KST) | `crons/news_llm_snapshot.py` — KR/US 모의매매 결정 직전 스냅샷. §4 참고 |
+| LLM 구조화 라벨링 | `news_llm_label` | **시간당 1번** (평일 매시 05분, 2026-07-24부터) | `crons/news_llm_snapshot.py`. §4 참고 |
 | 속보 알림(중요도 7+) | `news_spike` | **~1분 이내** | `crons/news_spike_detector.py` — 발송 성공한 속보만 `log_issue()`로 영구 기록 |
 | 대시보드 수동 입력 | `dashboard:manual:*` | 즉시 (제출 시) | AI 콘솔 "시장 기억" 탭 폼 |
 | 최근 이벤트 일괄 적재 | `console:*` | **수동 트리거만** (자동 스케줄 없음) | "메모리 적재" 버튼 또는 `POST /api/memory/ingest` 직접 호출 (`agent_console/context.py: ingest_recent_memory`) |
@@ -63,10 +63,10 @@ World Memory UI(대시보드 "시장 기억" 탭)는 검색(제목·본문·티�
 
 ## 3. 뉴스 LLM 라벨링 (`crons/news_llm_snapshot.py`)
 
-- **하루 2번**, 평일만: 00:05·14:05 UTC (KR 00:30·US 15:00 모의 결정 직전)
-- 회당 최대 30건(`NEWS_LLM_LABELS_MAX`)만 LLM 배치 호출 — 비용 통제
+- **시간당 1번**, 평일만: 매시 05분 (2026-07-24부터 — 이전엔 하루 2번(00:05·14:05 UTC, KR/US 모의 결정 직전)이었으나, 뉴스 많은 날 회당 상한(30건)에 걸려 다음 배치까지 밀리는 경우가 있어 변경)
+- 회당 최대 30건(`NEWS_LLM_LABELS_MAX`)만 LLM 배치 호출 — 비용 통제. 배치가 잘게 나뉘어도 하루 총 처리량은 대체로 비슷 — 상한 여유(하루 최대 720건)만 커짐
 - 출력 라벨(`{티커, 이벤트유형, 방향, 강도}`)은 `{us,kr}_mock_track`의 `news_axis` 피처가 되며, 기본 가중치 0(관찰 전용) — 주간 학습의 신규 축 게이트(최소 20쌍+안정성)를 통과해야 실제 가중치가 붙는다
-- `issue_date`는 **기사의 실제 `published_at` 기준**(point-in-time, look-ahead 방지) — 라벨링이 늦게 일어나도 World Memory엔 원래 발행일로 귀속됨. 그래서 "오늘 라벨링 배치 결과"가 꼭 "오늘 발행 기사"는 아님.
+- `issue_date`는 **기사의 실제 `published_at` 기준**(point-in-time, look-ahead 방지) — 라벨링이 늦게 일어나도 World Memory엔 원래 발행일로 귀속됨. 그래서 "이번 라벨링 배치 결과"가 꼭 "방금 발행된 기사"는 아님.
 - 속보(`news_spike`, §2)와는 완전히 다른 경로 — 이쪽은 즉시성보다 구조화 품질/비용 통제가 목적
 
 ## 4. 위키 LLM 로직
@@ -88,8 +88,8 @@ World Memory UI(대시보드 "시장 기억" 탭)는 검색(제목·본문·티�
 
 1. **매 1분** — `news_spike_detector.py`(saveticker 속보), (참고: 시세 폴러/워치독류는 이 문서 범위 밖)
 2. **30분마다** — `source_collector.py`(전 소스 원본 수집), `source_wiki_curator.py`(위키 생성/갱신), `archive_stale_pages`(위키 스테일 정리)
-3. **2시간마다** — `wiki_health_check.py`(LLM 헬스 리뷰)
-4. **하루 2번(평일)** — `news_llm_snapshot.py`(뉴스 구조화 라벨링, 모의결정 직전)
+3. **시간당(평일)** — `news_llm_snapshot.py`(뉴스 구조화 라벨링, 2026-07-24부터 하루 2번에서 변경)
+4. **2시간마다** — `wiki_health_check.py`(LLM 헬스 리뷰)
 5. **매일** — `raw_archive_cleanup.py`(20:45 UTC, TTL 청소)
 6. **트리거 기반(스케줄 없음)** — `auto_curate_from_chat()`(채팅마다), `ingest_recent_memory`(버튼/API 수동 호출)
 
