@@ -457,9 +457,11 @@ def _memory_tab(surface: str):
             _context_pack.clear()
             st.toast("시장 기억 추가 완료")
 
-    rows = context.world_memory_rows(limit=120)
+    search = st.text_input("검색", key="_wm_search", placeholder="제목·본문·티커로 검색")
+    rows = context.world_memory_rows(limit=120, query=search.strip())
     if not rows:
-        st.info("아직 저장된 시장 기억이 없습니다. 상단의 메모리 적재를 먼저 실행해 보세요.")
+        st.info("검색 결과가 없습니다." if search.strip() else
+                "아직 저장된 시장 기억이 없습니다. 상단의 메모리 적재를 먼저 실행해 보세요.")
         return
     df = pd.DataFrame([{
         "시각": r.get("observed_at"),
@@ -469,7 +471,32 @@ def _memory_tab(surface: str):
         "심볼": ", ".join(r.get("symbols") or []),
         "중요도": r.get("impact"),
     } for r in rows])
-    st.dataframe(df, hide_index=True, width="stretch", height=360)
+    event = st.dataframe(df, hide_index=True, width="stretch", height=360,
+                          on_select="rerun", selection_mode="single-row", key="_wm_tbl")
+    _memory_detail(event, rows)
+
+
+def _memory_detail(event, rows):
+    """선택 행 상세 카드 — 본문(body) 전문 표시. research.py `_screener_detail`과 동일 패턴."""
+    from dashboard import theme
+    try:
+        sel = event.selection.rows
+    except Exception:
+        sel = []
+    if not sel or sel[0] >= len(rows):
+        return
+    r = rows[sel[0]]
+    symbols = ", ".join(r.get("symbols") or []) or "—"
+    body_html = html.escape(r.get("body") or "").replace("\n", "<br>") or "본문 없음"
+    st.markdown(
+        f'<div style="background:{theme.PANEL};border:1px solid {theme.BORDER};'
+        f'border-left:4px solid {theme.BLUE};border-radius:12px;padding:12px 16px;margin-top:8px">'
+        f'<div style="display:flex;gap:14px;align-items:baseline;flex-wrap:wrap">'
+        f'<b style="font-size:1.05rem">{html.escape(r.get("title") or "제목 없음")}</b>'
+        f'<span style="color:{theme.MUTED};font-size:0.78rem">{r.get("observed_at") or ""} · '
+        f'{r.get("source") or ""} · {symbols} · {r.get("impact") or ""}</span></div>'
+        f'<div style="margin-top:8px;white-space:pre-wrap;font-size:0.9rem">{body_html}</div></div>',
+        unsafe_allow_html=True)
 
 
 def _wiki_tab(surface: str, pack: dict):
