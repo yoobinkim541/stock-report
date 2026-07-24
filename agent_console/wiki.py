@@ -548,24 +548,35 @@ def rebuild_artifacts() -> dict:
 
 def _render_index_md(pages: list[dict]) -> str:
     lines = ["# LLM Wiki Index", "", f"Generated: {_now()}", ""]
+    active_pages = [page for page in pages if page.get("status") != "archived"]
+    archived_pages = [page for page in pages if page.get("status") == "archived"]
     by_surface: dict[str, list[dict]] = {}
-    for page in pages:
+    for page in active_pages:
         by_surface.setdefault(page.get("surface") or WIKI_SURFACE, []).append(page)
     for surface in sorted(by_surface):
         lines += [f"## {surface}", ""]
         for page in sorted(by_surface[surface], key=lambda item: str(item.get("title") or "")):
-            title = _clean(page.get("title") or "위키 페이지", 160)
-            meta = " · ".join([
-                _clean(page.get("kind") or "note", 40),
-                _clean(page.get("status") or "draft", 40),
-                _clean(page.get("verification_status") or "unverified", 40),
-            ])
-            summary = _clean(page.get("summary") or page.get("body") or "", 180)
-            link_count = len({*(page.get("links") or []), *(page.get("backlinks") or [])})
-            marker = f" [\U0001f517{link_count}]" if link_count else ""
-            lines.append(f"- [[{title}]] ({meta}) — {summary}{marker}")
+            lines.append(_render_index_entry(page))
         lines.append("")
+    if archived_pages:
+        lines += ["<details>", "<summary>## Archived</summary>", ""]
+        for page in sorted(archived_pages, key=lambda item: str(item.get("title") or "")):
+            lines.append(_render_index_entry(page))
+        lines += ["", "</details>", ""]
     return "\n".join(lines).strip() + "\n"
+
+
+def _render_index_entry(page: dict) -> str:
+    title = _clean(page.get("title") or "위키 페이지", 160)
+    meta = " · ".join([
+        _clean(page.get("kind") or "note", 40),
+        _clean(page.get("status") or "draft", 40),
+        _clean(page.get("verification_status") or "unverified", 40),
+    ])
+    summary = _clean(page.get("summary") or page.get("body") or "", 180)
+    link_count = len({*(page.get("links") or []), *(page.get("backlinks") or [])})
+    marker = f" [\U0001f517{link_count}]" if link_count else ""
+    return f"- [[{title}]] ({meta}) — {summary}{marker}"
 
 
 def _render_log_md(pages: list[dict]) -> str:
@@ -668,6 +679,63 @@ def delete_page(page_id: str) -> bool:
     if not page_id:
         return False
     return shared_memory.delete_record(page_id)
+
+
+def _is_page_stale(page: dict, max_age_days: int = 30) -> bool:
+    updated_str = page.get("updated_at") or page.get("updatedAt") or page.get("created_at") or page.get("createdAt") or ""
+    if not updated_str:
+        return True
+    try:
+        updated = datetime.fromisoformat(str(updated_str).replace("Z", "+00:00"))
+    except ValueError:
+        return False
+    if updated.tzinfo is None:
+        updated = updated.replace(tzinfo=timezone.utc)
+    return (datetime.now(timezone.utc) - updated).days >= max_age_days
+
+
+def list_stale_pages(max_age_days: int = 30) -> list[dict]:
+    pages = list_pages(status="all", surface="all", limit=400)
+    return [page for page in pages if page.get("status") != "archived" and _is_page_stale(page, max_age_days)]
+
+
+def archive_stale_pages(max_age_days: int = 30, dry_run: bool = False, max_archive_days: int = 90) -> dict:
+    pages = list_pages(status="all", surface="all", limit=400)
+    to_archive = [page for page in pages if page.get("status") != "archived" and _is_page_stale(page, max_age_days)]
+    archived_pages = [page for page in pages if page.get("status") == "archived"]
+    to_delete = [page for page in archived_pages if _is_page_stale(page, max_archive_days)]
+    stale_skipped = len([page for page in archived_pages if _is_page_stale(page, max_age_days)]) - len(to_delete)
+
+    if not dry_run:
+        for page in to_delete:
+            delete_page(page["id"])
+        for page in to_archive:
+            upsert_page({
+                "id": page["id"],
+                "title": page.get("title"),
+                "summary": page.get("summary"),
+                "body": page.get("body"),
+                "surface": page.get("surface"),
+                "kind": page.get("kind"),
+                "status": "archived",
+                "tags": _dedupe_texts([*(page.get("tags") or []), "archived_reason:stale"], limit=20, item_limit=60),
+                "source_refs": page.get("source_refs") or [],
+                "links": page.get("links") or [],
+                "messages": page.get("messages") or [],
+                "decisions": page.get("decisions") or [],
+                "openQuestions": page.get("openQuestions") or [],
+                "confidence": page.get("confidence"),
+            })
+        if to_archive or to_delete:
+            rebuild_artifacts()
+
+    return {
+        "archived": len(to_archive),
+        "deleted": len(to_delete),
+        "stale_skipped": max(0, stale_skipped),
+        "total": len(pages),
+        "dry_run": dry_run,
+    }
 
 
 def capture_from_chat(question: str, answer: str, *, surface: str = WIKI_SURFACE,
