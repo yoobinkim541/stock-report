@@ -1083,6 +1083,8 @@ def auto_curate_from_chat(
         return None
     if not _should_auto_curate(question, answer):
         return None
+    if _recently_created_dedup(question, surface):
+        return {"ok": False, "action": "skipped_dedup", "reason": "최근 24시간 내 유사한 질문으로 위키 페이지가 생성되어 중복을 건너뜁니다."}
 
     candidates = list_pages(query=question, surface=surface, limit=5)
     target = _best_candidate_page(question, surface, candidates)
@@ -1443,7 +1445,40 @@ def _infer_kind_from_text(text: str) -> str:
     return "note"
 
 
+def _recently_created_dedup(question: str, surface: str, *, hours: int = 24) -> bool:
+    """최근 hours 시간 내 유사한 제목/요약의 페이지가 있으면 True 반환."""
+    recent = list_pages(surface=surface, limit=20)
+    cutoff = datetime.now(timezone.utc) - timedelta(hours=hours)
+    question_tokens = _tokens(question[:200])
+    for page in recent:
+        created_str = page.get("created_at") or ""
+        if not created_str:
+            continue
+        try:
+            created = datetime.fromisoformat(str(created_str).replace("Z", "+00:00"))
+        except Exception:
+            continue
+        if created.tzinfo is None:
+            created = created.replace(tzinfo=timezone.utc)
+        if created < cutoff:
+            continue
+        title_summary = (page.get("title") or "") + " " + (page.get("summary") or "")
+        page_tokens = _tokens(title_summary[:500])
+        overlap = question_tokens & page_tokens
+        if len(overlap) >= 5:
+            return True
+    return False
+
+
 def _derive_title(question: str, answer: str) -> str:
+    """답변에서 핵심 주제 bullet 을 추출해 제목으로, 없으면 질문."""
+    cleaned = _clean(answer, 300)
+    for line in cleaned.splitlines():
+        stripped = line.strip()
+        if stripped.startswith(("-", "•", "*")):
+            candidate = stripped.lstrip("-•*").strip()
+            if 12 <= len(candidate) <= 60 and any(c in candidate for c in (",", ":", "→")):
+                return candidate
     q = _clean(question, 120)
     if q:
         return q[:80]

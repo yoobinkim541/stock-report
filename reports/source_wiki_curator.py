@@ -225,6 +225,15 @@ def build_wiki_pages_from_events(events: list[dict], now: datetime | None = None
         })
         page_event_keys[page_id] = {key for key in (_event_key(row) for row in rows) if key}
     _link_pages_sharing_events(pages, page_event_keys)
+    # 회화 위키 페이지와 교차 링크: source_digest ↔ playbook/decision
+    from agent_console.wiki import list_pages as wiki_list_pages
+    for page in pages:
+        display = page.get("title", "").replace("수집 소스 위키: ", "") or ""
+        existing = wiki_list_pages(query=display, surface="all", limit=3)
+        conv_ids = [p["id"] for p in existing if p.get("kind") in ("playbook", "decision")]
+        if conv_ids:
+            current = page.get("links") or []
+            page["links"] = _dedupe([*current, *conv_ids], limit=MAX_CURATOR_LINKS)
     return pages
 
 
