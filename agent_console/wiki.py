@@ -1,14 +1,17 @@
 from __future__ import annotations
 
+import functools
 import json
 import os
 import hashlib
 import re
+import threading
+import time
 from collections import Counter, defaultdict
 from collections.abc import Callable
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Iterable
+from typing import Any, Iterable
 
 from . import qmd_search, shared_memory, storage
 
@@ -18,6 +21,43 @@ WIKI_SURFACE = "wiki"
 VALID_STATUSES = ("draft", "reviewed", "stable", "archived")
 VALID_KINDS = ("note", "playbook", "decision", "risk", "concept", "source_digest")
 MAX_LINKS = 12
+
+_CACHE: dict[str, tuple[float, Any]] = {}
+_CACHE_TTL = 30.0
+
+
+def _cached(key_prefix: str, ttl: float = _CACHE_TTL):
+    """결과를 TTL 동안 재사용한다.
+
+    args/kwargs가 리스트·딕셔너리(예: lint_pages의 pages 인자)를 포함할 수 있어
+    hash()가 아니라 repr() 로 키를 만든다 — hash(list)는 TypeError를 낸다.
+    """
+    def decorator(func):
+        @functools.wraps(func)
+        def wrapper(*args, **kwargs):
+            k = f"{key_prefix}:{args!r}:{sorted(kwargs.items())!r}"
+            now = time.monotonic()
+            cached = _CACHE.get(k)
+            if cached and (now - cached[0]) < ttl:
+                return cached[1]
+            r = func(*args, **kwargs)
+            _CACHE[k] = (now, r)
+            return r
+        return wrapper
+    return decorator
+
+
+_REBUILD_TIMER: threading.Timer | None = None
+_REBUILD_LOCK = threading.Lock()
+
+
+def _debounced_rebuild():
+    global _REBUILD_TIMER
+    with _REBUILD_LOCK:
+        if _REBUILD_TIMER and _REBUILD_TIMER.is_alive():
+            _REBUILD_TIMER.cancel()
+        _REBUILD_TIMER = threading.Timer(1.0, rebuild_artifacts)
+        _REBUILD_TIMER.start()
 
 
 def _now() -> str:
@@ -380,6 +420,7 @@ def get_page(page_id: str) -> dict | None:
     return None
 
 
+@_cached("stats")
 def stats() -> dict:
     rows = _wiki_records()
     status_counts = Counter()
@@ -489,6 +530,7 @@ def _lint_relational_issues(pages: list[dict]) -> list[dict]:
     return issues
 
 
+@_cached("lint_pages")
 def lint_pages(pages: list[dict] | None = None) -> dict:
     if pages is None:
         pages = list_pages(status="all", surface="all", limit=400)
@@ -703,6 +745,7 @@ def upsert_page(page: dict) -> dict:
         },
     }
     saved = shared_memory.upsert_record(record)
+    _CACHE.clear()
     return _record_to_page(saved)
 
 
@@ -731,7 +774,7 @@ def track_page_usage(page_id: str, query: str) -> None:
         "lastUsedAt": _now(),
         "lastQuery": _clean(query, 200),
     })
-    rebuild_artifacts()
+    _debounced_rebuild()
 
 
 def _store_page_feedback(page_id: str, rating: str) -> None:
@@ -760,7 +803,7 @@ def _store_page_feedback(page_id: str, rating: str) -> None:
         "confidence": page.get("confidence"),
         "feedback": existing_feedback,
     })
-    rebuild_artifacts()
+    _debounced_rebuild()
 
 
 def _last_used_or_created(page: dict) -> str:
@@ -785,7 +828,9 @@ def delete_page(page_id: str) -> bool:
     page_id = _clean(page_id, 80)
     if not page_id:
         return False
-    return shared_memory.delete_record(page_id)
+    deleted = shared_memory.delete_record(page_id)
+    _CACHE.clear()
+    return deleted
 
 
 def _is_page_stale(page: dict, max_age_days: int = 30) -> bool:
@@ -896,6 +941,7 @@ def _merge_pages(source_ids: list[str], target_id: str, llm_synthesis: str) -> d
         "confidence": target.get("confidence"),
     })
 
+    _CACHE.clear()
     return {"action": "merge", "target": target_id, "deleted": merged_source_ids}
 
 
@@ -956,6 +1002,7 @@ def _split_page(source_id: str, new_titles: list[str], llm_bodies: list[str]) ->
         "links": source.get("links") or [],
     })
 
+    _CACHE.clear()
     return {"action": "split", "source": source_id, "created": new_ids}
 
 
@@ -1251,6 +1298,7 @@ def _should_auto_curate(question: str, answer: str) -> bool:
     return score >= AUTO_CURATE_MIN_SCORE
 
 
+@_cached("wiki_context")
 def _build_wiki_context_section() -> str:
     """LLM이 위키 전체 상태를 인지할 수 있도록 stats + lint 요약을 생성한다."""
     stats_data = stats()
