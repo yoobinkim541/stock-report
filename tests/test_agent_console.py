@@ -1937,3 +1937,206 @@ def test_wiki_auto_curate_llm_delete_without_target_id_is_noop(monkeypatch, tmp_
     )
 
     assert result is None
+
+
+def test_merge_pages_combines_sources_and_deletes_them(monkeypatch, tmp_path):
+    _isolate(monkeypatch, tmp_path)
+
+    from agent_console import wiki
+
+    target = wiki.upsert_page({
+        "title": "NVDA 실적 메모",
+        "summary": "NVDA Q2 실적 요약",
+        "body": "NVDA Q2 매출은 예상치를 상회했다.",
+        "surface": "market",
+        "kind": "note",
+        "status": "draft",
+        "source_refs": [],
+    })
+    source = wiki.upsert_page({
+        "title": "NVDA 실적 메모 (중복)",
+        "summary": "NVDA Q2 실적 요약 중복본",
+        "body": "NVDA 데이터센터 매출이 급증했다.",
+        "surface": "market",
+        "kind": "note",
+        "status": "draft",
+        "source_refs": [],
+    })
+
+    result = wiki._merge_pages([source["id"]], target["id"], "두 메모는 같은 NVDA Q2 실적을 다룬다.")
+
+    assert result["action"] == "merge"
+    assert result["target"] == target["id"]
+    assert result["deleted"] == [source["id"]]
+
+    assert wiki.get_page(source["id"]) is None
+    merged = wiki.get_page(target["id"])
+    assert "데이터센터 매출" in merged["body"]
+    assert "두 메모는 같은 NVDA Q2 실적을 다룬다" in merged["body"]
+    assert f"merged_from:{source['id']}" in merged["tags"]
+
+
+def test_split_page_creates_new_pages_and_archives_source(monkeypatch, tmp_path):
+    _isolate(monkeypatch, tmp_path)
+
+    from agent_console import wiki
+
+    source = wiki.upsert_page({
+        "title": "NVDA 사업 전반",
+        "summary": "NVDA AI와 데이터센터를 함께 다룬 메모",
+        "body": "AI 매출과 데이터센터 매출이 모두 성장했다.",
+        "surface": "market",
+        "kind": "note",
+        "status": "draft",
+        "source_refs": [],
+    })
+
+    result = wiki._split_page(
+        source["id"],
+        ["NVDA AI 매출", "NVDA 데이터센터 매출"],
+        ["AI 매출 관련 내용입니다.", "데이터센터 매출 관련 내용입니다."],
+    )
+
+    assert result["action"] == "split"
+    assert result["source"] == source["id"]
+    assert len(result["created"]) == 2
+
+    reloaded_source = wiki.get_page(source["id"])
+    assert reloaded_source["status"] == "archived"
+    for new_id in result["created"]:
+        assert f"split_into:{new_id}" in reloaded_source["tags"]
+
+    first_id, second_id = result["created"]
+    first_page = wiki.get_page(first_id)
+    second_page = wiki.get_page(second_id)
+    assert first_page["title"] == "NVDA AI 매출"
+    assert "AI 매출 관련 내용입니다." in first_page["body"]
+    assert second_id in first_page["links"]
+    assert first_id in second_page["links"]
+
+
+def test_wiki_auto_curate_llm_merge_action_merges_pages(monkeypatch, tmp_path):
+    _isolate(monkeypatch, tmp_path)
+
+    from agent_console import wiki
+
+    target = wiki.upsert_page({
+        "title": "NVDA 실적 메모",
+        "summary": "NVDA Q2 실적 요약",
+        "body": "NVDA Q2 매출은 예상치를 상회했다.",
+        "surface": "market",
+        "kind": "note",
+        "status": "draft",
+        "source_refs": [],
+    })
+    source = wiki.upsert_page({
+        "title": "NVDA 실적 메모 (중복)",
+        "summary": "NVDA Q2 실적 요약 중복본",
+        "body": "NVDA 데이터센터 매출이 급증했다.",
+        "surface": "market",
+        "kind": "note",
+        "status": "draft",
+        "source_refs": [],
+    })
+
+    def fake_llm(prompt: str) -> str:
+        assert "merge" in prompt
+        return (
+            '{"action":"merge","target_page_id":"' + target["id"] + '",'
+            '"source_page_ids":["' + source["id"] + '"],'
+            '"body":"두 메모는 같은 NVDA Q2 실적을 다룬다.",'
+            '"reason":"두 페이지가 NVDA Q2 실적으로 완전히 중복됨"}'
+        )
+
+    result = wiki.auto_curate_from_chat(
+        "NVDA 실적 메모 두 개가 중복되는데 병합 기준을 정리해줘",
+        "네, 두 메모 모두 NVDA Q2 실적을 다루고 있어 병합이 맞습니다.\n- 중복 내용 확인\n- 병합 후 삭제\n검증 결과 병합 대상입니다.",
+        surface="market",
+        llm=fake_llm,
+        pack={"focus": []},
+        history=[],
+    )
+
+    assert result is not None
+    assert result["ok"] is True
+    assert result["action"] == "merge"
+    assert result["target"] == target["id"]
+    assert wiki.get_page(source["id"]) is None
+
+
+def test_wiki_auto_curate_llm_split_action_splits_page(monkeypatch, tmp_path):
+    _isolate(monkeypatch, tmp_path)
+
+    from agent_console import wiki
+
+    source = wiki.upsert_page({
+        "title": "NVDA 사업 전반",
+        "summary": "NVDA AI와 데이터센터를 함께 다룬 메모",
+        "body": "AI 매출과 데이터센터 매출이 모두 성장했다.",
+        "surface": "market",
+        "kind": "note",
+        "status": "draft",
+        "source_refs": [],
+    })
+
+    def fake_llm(prompt: str) -> str:
+        assert "split" in prompt
+        return (
+            '{"action":"split","source_page_id":"' + source["id"] + '",'
+            '"new_titles":["NVDA AI 매출","NVDA 데이터센터 매출"],'
+            '"new_bodies":["AI 매출 관련 내용입니다.","데이터센터 매출 관련 내용입니다."],'
+            '"reason":"두 개의 서로 다른 주제를 다루고 있음"}'
+        )
+
+    result = wiki.auto_curate_from_chat(
+        "NVDA 사업 전반 메모가 두 주제를 다루는데 분할 기준을 정리해줘",
+        "네, AI 매출과 데이터센터 매출은 서로 다른 주제라 분할하는 게 맞습니다.\n- 주제 분리 확인\n- 분할 후 교차 링크\n검증 결과 분할 대상입니다.",
+        surface="market",
+        llm=fake_llm,
+        pack={"focus": []},
+        history=[],
+    )
+
+    assert result is not None
+    assert result["ok"] is True
+    assert result["action"] == "split"
+    assert result["source"] == source["id"]
+    assert len(result["created"]) == 2
+    assert wiki.get_page(source["id"])["status"] == "archived"
+
+
+def test_wiki_lint_missing_cross_ref_suggests_merge(monkeypatch, tmp_path):
+    _isolate(monkeypatch, tmp_path)
+
+    from agent_console import wiki
+
+    result = wiki.lint_pages([
+        {
+            "id": "tickerA",
+            "title": "NVDA 메모 A",
+            "status": "draft",
+            "verification_status": "unverified",
+            "source_refs": [],
+            "surface": "market",
+            "kind": "note",
+            "tags": ["wiki", "ticker:nvda"],
+            "links": [],
+            "backlinks": [],
+        },
+        {
+            "id": "tickerB",
+            "title": "NVDA 메모 B",
+            "status": "draft",
+            "verification_status": "unverified",
+            "source_refs": [],
+            "surface": "market",
+            "kind": "note",
+            "tags": ["wiki", "ticker:nvda"],
+            "links": [],
+            "backlinks": [],
+        },
+    ])
+
+    cross_ref_issues = [issue for issue in result["issues"] if issue["code"] == "missing_cross_ref"]
+    assert len(cross_ref_issues) == 1
+    assert cross_ref_issues[0]["suggested"] == "merge"

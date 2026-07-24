@@ -480,6 +480,7 @@ def _lint_relational_issues(pages: list[dict]) -> list[dict]:
                     "page_id": left_id,
                     "title": f"{left_title} / {right_title}",
                     "message": f"'{left_title}'와(과) '{right_title}'가 태그·출처를 공유하지만 서로 연결되어 있지 않습니다.",
+                    "suggested": "merge",
                 })
     return issues
 
@@ -738,6 +739,120 @@ def archive_stale_pages(max_age_days: int = 30, dry_run: bool = False, max_archi
     }
 
 
+def _merge_pages(source_ids: list[str], target_id: str, llm_synthesis: str) -> dict | None:
+    target_id = _clean(target_id, 80)
+    target = get_page(target_id)
+    if not target:
+        return None
+    source_ids = [_clean(sid, 80) for sid in (source_ids or []) if _clean(sid, 80) and _clean(sid, 80) != target_id]
+    sources = [page for sid in source_ids if (page := get_page(sid))]
+    if not sources:
+        return None
+
+    body_parts = [target.get("body") or "", *[page.get("body") or "" for page in sources]]
+    synthesis = _clean(llm_synthesis, 2400)
+    if synthesis:
+        body_parts.append(synthesis)
+    merged_body = "\n\n".join(part for part in body_parts if part).strip()
+
+    tags = _dedupe_texts([
+        *(target.get("tags") or []),
+        *[tag for page in sources for tag in (page.get("tags") or [])],
+        *[f"merged_from:{page['id']}" for page in sources],
+    ], limit=20, item_limit=60)
+    source_refs = _dedupe_texts([
+        *(target.get("source_refs") or []),
+        *[ref for page in sources for ref in (page.get("source_refs") or [])],
+    ], limit=12, item_limit=180)
+    links = _clean_links([
+        *(target.get("links") or []),
+        *[link for page in sources for link in (page.get("links") or [])],
+    ], self_id=target_id)
+
+    merged_source_ids = [page["id"] for page in sources]
+    for sid in merged_source_ids:
+        delete_page(sid)
+
+    upsert_page({
+        "id": target_id,
+        "title": target.get("title"),
+        "summary": target.get("summary") or synthesis,
+        "body": merged_body,
+        "surface": target.get("surface"),
+        "kind": target.get("kind"),
+        "status": target.get("status"),
+        "tags": tags,
+        "source_refs": source_refs,
+        "links": links,
+        "messages": target.get("messages") or [],
+        "decisions": target.get("decisions") or [],
+        "openQuestions": target.get("openQuestions") or [],
+        "confidence": target.get("confidence"),
+    })
+
+    return {"action": "merge", "target": target_id, "deleted": merged_source_ids}
+
+
+def _split_page(source_id: str, new_titles: list[str], llm_bodies: list[str]) -> dict | None:
+    source_id = _clean(source_id, 80)
+    source = get_page(source_id)
+    if not source:
+        return None
+    titles = [_clean(title, 160) for title in (new_titles or []) if _clean(title, 160)]
+    if not titles:
+        return None
+    bodies = list(llm_bodies or [])
+
+    new_pages = []
+    for idx, title in enumerate(titles):
+        body = _clean(bodies[idx] if idx < len(bodies) else source.get("body") or "", 6000)
+        created = upsert_page({
+            "title": title,
+            "summary": body[:900],
+            "body": body,
+            "surface": source.get("surface"),
+            "kind": source.get("kind"),
+            "status": "draft",
+            "tags": _dedupe_texts([*(source.get("tags") or []), f"split_from:{source_id}"], limit=20, item_limit=60),
+            "source_refs": source.get("source_refs") or [],
+        })
+        new_pages.append(created)
+
+    new_ids = [page["id"] for page in new_pages]
+    for page in new_pages:
+        other_ids = [pid for pid in new_ids if pid != page["id"]]
+        upsert_page({
+            "id": page["id"],
+            "title": page.get("title"),
+            "summary": page.get("summary"),
+            "body": page.get("body"),
+            "surface": page.get("surface"),
+            "kind": page.get("kind"),
+            "status": page.get("status"),
+            "tags": page.get("tags"),
+            "source_refs": page.get("source_refs"),
+            "links": _clean_links([*(page.get("links") or []), *other_ids], self_id=page["id"]),
+        })
+
+    upsert_page({
+        "id": source_id,
+        "title": source.get("title"),
+        "summary": source.get("summary"),
+        "body": source.get("body"),
+        "surface": source.get("surface"),
+        "kind": source.get("kind"),
+        "status": "archived",
+        "tags": _dedupe_texts([
+            *(source.get("tags") or []),
+            *[f"split_into:{sid}" for sid in new_ids],
+        ], limit=20, item_limit=60),
+        "source_refs": source.get("source_refs") or [],
+        "links": source.get("links") or [],
+    })
+
+    return {"action": "split", "source": source_id, "created": new_ids}
+
+
 def capture_from_chat(question: str, answer: str, *, surface: str = WIKI_SURFACE,
                       title: str | None = None, status: str = "draft",
                       kind: str = "playbook", tags: list[str] | None = None,
@@ -928,10 +1043,11 @@ def auto_curate_from_chat(
         return None
 
     action = _clean(plan.get("action") or "create", 20).lower()
-    if action not in {"create", "update", "skip", "delete"}:
+    if action not in {"create", "update", "skip", "delete", "merge", "split"}:
         action = "create"
     if action == "skip":
         return None
+    plan_source = "llm" if llm is not None and plan.get("source") == "llm" else "heuristic"
     if action == "delete":
         target_id = _clean(plan.get("target_id") or (target.get("id") if target else ""), 80)
         if not target_id:
@@ -940,12 +1056,25 @@ def auto_curate_from_chat(
         if not deleted:
             return None
         rebuild_artifacts()
-        return {
-            "ok": True,
-            "action": "delete",
-            "page_id": target_id,
-            "source": "llm" if llm is not None and plan.get("source") == "llm" else "heuristic",
-        }
+        return {"ok": True, "action": "delete", "page_id": target_id, "source": plan_source}
+    if action == "merge":
+        target_id = _clean(plan.get("target_page_id") or "", 80)
+        source_ids = [_clean(sid, 80) for sid in (plan.get("source_page_ids") or [])]
+        synthesis = _clean(plan.get("body") or plan.get("summary") or "", 2400)
+        merge_result = _merge_pages(source_ids, target_id, synthesis)
+        if not merge_result:
+            return None
+        rebuild_artifacts()
+        return {"ok": True, "source": plan_source, **merge_result}
+    if action == "split":
+        source_id = _clean(plan.get("source_page_id") or "", 80)
+        new_titles = plan.get("new_titles") or []
+        new_bodies = plan.get("new_bodies") or []
+        split_result = _split_page(source_id, new_titles, new_bodies)
+        if not split_result:
+            return None
+        rebuild_artifacts()
+        return {"ok": True, "source": plan_source, **split_result}
 
     payload = _plan_to_page_payload(
         plan,
@@ -1002,13 +1131,15 @@ def _build_auto_curation_prompt(
         "목표: 재사용 가능한 규칙, 결정, 저장/수집 원칙, 실패 교정만 하나의 위키 카드로 정리한다.",
         "짧은 진행 확인, 단발성 수다, 상태 보고, 확인 대답은 생성 금지다.",
         "반드시 JSON object만 출력한다. 마크다운, 설명문, 코드펜스는 금지한다.",
-        "가능한 action 값은 create, update, skip, delete 이다.",
+        "가능한 action 값은 create, update, skip, delete, merge, split 이다.",
         "update 를 고를 때는 target_id 를 기존 후보 페이지 id 로 지정한다.",
         "확신이 낮으면 status 는 draft, 중간이면 reviewed, 이미 안정적인 운영 규칙이면 stable 이다.",
         "필드: action, title, summary, body, kind, status, tags, source_refs, links, target_id, confidence, reason.",
         "관련 있는 기존 위키 후보가 있으면 해당 id 를 links 배열에 넣는다. 관련 없으면 links 는 빈 배열이다.",
         "action이 delete면 target_id(삭제할 기존 후보 id)와 reason만 있으면 된다.",
         "delete 판단 기준: 30일 이상 갱신 안 됨, 현재 시장 상황과 모순, 다른 페이지와 완전히 중복, 내용이 부실하거나 검증 불가능.",
+        "action이 merge면 target_page_id(병합 대상), source_page_ids(흡수될 후보 id 목록), body(합성 요약), reason이 필요하다.",
+        "action이 split이면 source_page_id(분할할 후보 id), new_titles(새 페이지 제목 목록), new_bodies(각 제목에 대응하는 본문 목록), reason이 필요하다.",
         f"surface: {surface}",
         "",
         "[사용자 질문]",
@@ -1036,8 +1167,11 @@ def _build_auto_curation_prompt(
             )
     lines += [
         "",
-        "JSON 예시:",
+        "JSON 예시 (create/update/delete/merge/split):",
         '{"action":"create","title":"손실한도와 레버리지","summary":"...","body":"...","kind":"playbook","status":"reviewed","tags":["risk","portfolio"],"source_refs":["conversation:123"],"links":[],"target_id":"","confidence":0.86,"reason":"..."}',
+        '{"action":"delete","target_id":"id-to-delete","reason":"..."}',
+        '{"action":"merge","target_page_id":"id-to-merge-into","source_page_ids":["id-to-absorb"],"body":"...","reason":"..."}',
+        '{"action":"split","source_page_id":"id-to-split","new_titles":["...","..."],"new_bodies":["...","..."],"reason":"..."}',
     ]
     return "\n".join(lines)
 
