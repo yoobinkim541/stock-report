@@ -169,8 +169,8 @@ def _classify_event(event: dict) -> dict:
     profile = SOURCE_CLASSIFICATION.get(root, {"family": "other", "kind": "event", "trust": "C", "horizon": "1d"})
 
     title = _clip(row.get("title") or "", 260)
-    body = _clip(row.get("body") or "", 2200)
-    body_raw = _clip(row.get("body_raw") or "", 2200)
+    body = _clip(row.get("body") or "", 4000)
+    body_raw = _clip(row.get("body_raw") or "", 4000)
     excerpt = _clip(row.get("body_excerpt") or "", 500)
     category = _clip(row.get("category") or "", 60)
     scan_text = " ".join(part for part in (title, body_raw, body, excerpt, category) if part).strip()

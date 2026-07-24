@@ -447,7 +447,7 @@ def _log_ingest_events_to_world(events: list[dict]) -> int:
             category=category_map.get(kind, kind or "수집"),
             importance=importance_map.get(kind, "low"),
             tickers=[str(t) for t in (ev.get("symbols") or [])][:8],
-            body=str(ev.get("body") or "")[:1200],
+            body=str(ev.get("body") or "")[:4000],
             source=str(ev.get("source") or "console"),
             observed_at=str(ev.get("observed_at") or ""),
         ):

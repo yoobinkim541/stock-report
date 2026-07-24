@@ -33,7 +33,7 @@ def migrate_world_memory(dry_run: bool = False) -> dict:
             category=str(r.get("kind") or "수집"),
             importance=str(r.get("impact") or "low"),
             tickers=[str(t) for t in (r.get("symbols") or [])][:8],
-            body=str(r.get("body") or "")[:1200],
+            body=str(r.get("body") or "")[:4000],
             source=str(r.get("source") or "console:migrated"),
             observed_at=str(r.get("observed_at") or ""),
         )

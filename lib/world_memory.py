@@ -116,7 +116,7 @@ def log_issue(title: str, *, category: str = "기타", region: str = "GLOBAL",
         if dup:
             return None
         eid = uuid.uuid4().hex[:16]
-        pj = json.dumps({**(payload or {}), "tickers": tickers or [], "body": body[:1200],
+        pj = json.dumps({**(payload or {}), "tickers": tickers or [], "body": body[:4000],
                          "source": source}, ensure_ascii=False)
         conn.execute(
             "INSERT INTO world_issue_entries (event_id, as_of, issue_date, category, region,"
@@ -127,7 +127,7 @@ def log_issue(title: str, *, category: str = "기타", region: str = "GLOBAL",
         try:
             conn.execute("INSERT INTO world_issue_fts (event_id, title, body, tickers)"
                          " VALUES (?,?,?,?)",
-                         (eid, str(title)[:300], body[:1200], " ".join(tickers or [])))
+                         (eid, str(title)[:300], body[:4000], " ".join(tickers or [])))
         except sqlite3.OperationalError:
             pass
         conn.commit()
@@ -178,7 +178,7 @@ def _rows_to_issues(rows) -> list[dict]:
         out.append({"event_id": r[0], "issue_date": r[1], "category": r[2],
                     "importance": r[3], "title": r[4],
                     "tickers": payload.get("tickers") or [],
-                    "body": (payload.get("body") or "")[:200], "source": payload.get("source")})
+                    "body": (payload.get("body") or "")[:4000], "source": payload.get("source")})
     return out
 
 
