@@ -335,9 +335,32 @@ def _f(d: dict, key: str) -> float:
 
 # ── 주문 ──────────────────────────────────────────────────────────────────────
 
+def _held_shares(symbol: str) -> float | None:
+    """체결확인용 단일 종목 보유수량 — 잔고조회 자체가 실패하면 None(비교 불가)."""
+    bal = get_balance()
+    if not bal.get("ok"):
+        return None
+    return (bal.get("positions") or {}).get(symbol.upper(), {}).get("shares")
+
+
+def _post_order_once(url: str, headers: dict, body: dict) -> dict | None:
+    try:
+        r = requests.post(url, headers=headers, json=body, timeout=15, allow_redirects=False)
+        r.raise_for_status()
+        return r.json()
+    except Exception as e:
+        logger.error("KIS 모의 주문 실패: %s", e)
+        return None
+
+
 def place_order(symbol: str, qty: int, side: str, price: float,
                 excd: str | None = None) -> dict:
     """해외 모의 주문(정수주·지정가). 계좌# 미설정/수량0 → fail-closed.
+
+    주문 POST 는 원칙적으로 재시도 금지(응답 유실 시 재시도하면 중복체결 위험) — 단, 500 등으로
+    응답을 못 받으면 재시도 전에 잔고 조회(GET·재시도 안전)로 실제 체결 여부를 먼저 확인한다:
+    체결 확인되면 재시도 없이 성공 반환, 미체결 확인되면 그때만 1회 재시도, 확인 자체가
+    안 되면(잔고조회도 실패) 재시도하지 않고 실패 반환(체결 여부 모르는 채 재시도 금지).
 
     반환: {ok, ord_no, msg, raw}
     """
@@ -359,13 +382,22 @@ def place_order(symbol: str, qty: int, side: str, price: float,
         return {"ok": False, "ord_no": None, "msg": "토큰 없음", "raw": None}
     url = _MOCK_BASE + _ORDER_URL
     _assert_mock_url(url)
-    try:
-        r = requests.post(url, headers=h, json=body, timeout=15, allow_redirects=False)
-        r.raise_for_status()
-        res = r.json()
-    except Exception as e:
-        logger.error("KIS 모의 주문 실패 [%s %s]: %s", side, symbol, e)
-        return {"ok": False, "ord_no": None, "msg": "요청 실패", "raw": None}
+
+    before = _held_shares(symbol)
+    res = _post_order_once(url, h, body)
+    if res is None:
+        after = _held_shares(symbol)
+        if before is not None and after is not None and after != before:
+            logger.warning("KIS 모의 주문 [%s %s] 응답 유실이었지만 실체결 확인(%s→%s) — 재시도 생략",
+                           side, symbol, before, after)
+            return {"ok": True, "ord_no": None, "msg": "체결 확인됨(주문 응답 유실)", "raw": None}
+        if before is None or after is None:
+            return {"ok": False, "ord_no": None, "msg": "요청 실패(체결여부 확인불가 — 재시도 안 함)",
+                    "raw": None}
+        logger.info("KIS 모의 주문 [%s %s] 미체결 확인 — 1회 재시도", side, symbol)
+        res = _post_order_once(url, h, body)
+        if res is None:
+            return {"ok": False, "ord_no": None, "msg": "요청 실패(재시도 후에도)", "raw": None}
     ok = str(res.get("rt_cd", "")) == "0"
     return {"ok": ok, "ord_no": (res.get("output") or {}).get("ODNO"),
             "msg": res.get("msg1", ""), "raw": res}
