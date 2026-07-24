@@ -4,8 +4,11 @@
 from __future__ import annotations
 
 import argparse
+import json
+import os
 import re
 from collections import Counter, defaultdict
+from collections.abc import Callable
 from datetime import datetime, timedelta, timezone
 from typing import Iterable
 
@@ -170,7 +173,58 @@ def _link_pages_sharing_events(pages: list[dict], page_event_keys: dict[str, set
         left["links"] = linked
 
 
-def build_wiki_pages_from_events(events: list[dict], now: datetime | None = None) -> list[dict]:
+def _llm_enrich_event_group(group_title: str, events: list[dict], llm_fn: Callable[[str], str | None] | None) -> dict | None:
+    """LLM으로 이벤트 그룹의 제목/요약/태그를 생성한다. 실패 시 None 반환."""
+    if not llm_fn:
+        return None
+    if os.getenv("SOURCE_WIKI_LLM_ENABLED", "1") == "0":
+        return None
+    event_lines = []
+    for i, event in enumerate(events[:8]):
+        event_lines.append(
+            f"{i+1}. [{_clean(event.get('source'), 40)}] "
+            f"{_clean(event.get('title'), 200)} — "
+            f"{_clean(event.get('body_raw') or event.get('body') or event.get('body_excerpt'), 300)}"
+        )
+    prompt = (
+        "너는 stock-report 위키 큐레이터. 아래 수집 이벤트 분석:\n"
+        f"그룹 주제: {group_title}\n"
+        f"이벤트 수: {len(events)}건\n\n"
+        + "\n".join(event_lines)
+        + "\n\n"
+        "1. 제목 (8-15자, 명사형)\n"
+        "2. 2문장 요약\n"
+        "3. 태그 3-5개\n"
+        "4. 검색 키워드 (다른 위키 연결용)\n"
+        'JSON: {"title": "...", "summary": "...", "tags": [...], "search_keywords": [...]}\n'
+        "반드시 JSON object만 출력한다. 마크다운, 코드펜스는 금지."
+    )
+    try:
+        raw = llm_fn(prompt)
+        if not raw:
+            return None
+        # JSON 추출
+        brace = re.search(r"\{.*\}", raw, flags=re.S)
+        if not brace:
+            return None
+        parsed = json.loads(brace.group(0))
+        if not isinstance(parsed, dict):
+            return None
+        result = {}
+        if parsed.get("title"):
+            result["title"] = _clean(parsed["title"], 160)
+        if parsed.get("summary"):
+            result["summary"] = _clean(parsed["summary"], 2400)
+        if parsed.get("tags") and isinstance(parsed["tags"], list):
+            result["tags"] = _dedupe(parsed["tags"], limit=10)
+        if parsed.get("search_keywords") and isinstance(parsed["search_keywords"], list):
+            result["search_keywords"] = _dedupe(parsed["search_keywords"], limit=8)
+        return result if result else None
+    except Exception:
+        return None
+
+
+def build_wiki_pages_from_events(events: list[dict], now: datetime | None = None, llm_fn: Callable[[str], str | None] | None = None) -> list[dict]:
     now = now or datetime.now(KST)
     groups: dict[str, list[dict]] = defaultdict(list)
     for event in events or []:
@@ -207,7 +261,7 @@ def build_wiki_pages_from_events(events: list[dict], now: datetime | None = None
             *(f"ticker:{ticker}" for ticker, _count in ticker_counts.most_common(8)),
         ], limit=20)
         page_id = f"source-{group_type}-{_slug(label)}"
-        pages.append({
+        page = {
             "id": page_id,
             "title": f"수집 소스 위키: {display}",
             "surface": "market",
@@ -222,7 +276,18 @@ def build_wiki_pages_from_events(events: list[dict], now: datetime | None = None
                 "공식 자료와 충돌하는 커뮤니티성 단서가 있는가?",
             ],
             "confidence": 0.78 if _status_for(rows, refs) == "reviewed" else 0.55,
-        })
+        }
+        # LLM enrich: 3+ 이벤트 그룹만 LLM으로 제목/요약/태그 생성
+        if len(rows) >= 3:
+            enriched = _llm_enrich_event_group(display, rows, llm_fn)
+            if enriched:
+                if enriched.get("title"):
+                    page["title"] = f"수집 소스 위키: {enriched['title']}"
+                if enriched.get("summary"):
+                    page["summary"] = enriched["summary"]
+                if enriched.get("tags"):
+                    page["tags"] = _dedupe([*tags, *enriched["tags"]], limit=20)
+        pages.append(page)
         page_event_keys[page_id] = {key for key in (_event_key(row) for row in rows) if key}
     _link_pages_sharing_events(pages, page_event_keys)
     # 회화 위키 페이지와 교차 링크: source_digest ↔ playbook/decision
