@@ -860,10 +860,24 @@ def auto_curate_from_chat(
         return None
 
     action = _clean(plan.get("action") or "create", 20).lower()
-    if action not in {"create", "update", "skip"}:
+    if action not in {"create", "update", "skip", "delete"}:
         action = "create"
     if action == "skip":
         return None
+    if action == "delete":
+        target_id = _clean(plan.get("target_id") or (target.get("id") if target else ""), 80)
+        if not target_id:
+            return None
+        deleted = delete_page(target_id)
+        if not deleted:
+            return None
+        rebuild_artifacts()
+        return {
+            "ok": True,
+            "action": "delete",
+            "page_id": target_id,
+            "source": "llm" if llm is not None and plan.get("source") == "llm" else "heuristic",
+        }
 
     payload = _plan_to_page_payload(
         plan,
@@ -920,11 +934,13 @@ def _build_auto_curation_prompt(
         "목표: 재사용 가능한 규칙, 결정, 저장/수집 원칙, 실패 교정만 하나의 위키 카드로 정리한다.",
         "짧은 진행 확인, 단발성 수다, 상태 보고, 확인 대답은 생성 금지다.",
         "반드시 JSON object만 출력한다. 마크다운, 설명문, 코드펜스는 금지한다.",
-        "가능한 action 값은 create, update, skip 이다.",
+        "가능한 action 값은 create, update, skip, delete 이다.",
         "update 를 고를 때는 target_id 를 기존 후보 페이지 id 로 지정한다.",
         "확신이 낮으면 status 는 draft, 중간이면 reviewed, 이미 안정적인 운영 규칙이면 stable 이다.",
         "필드: action, title, summary, body, kind, status, tags, source_refs, links, target_id, confidence, reason.",
         "관련 있는 기존 위키 후보가 있으면 해당 id 를 links 배열에 넣는다. 관련 없으면 links 는 빈 배열이다.",
+        "action이 delete면 target_id(삭제할 기존 후보 id)와 reason만 있으면 된다.",
+        "delete 판단 기준: 30일 이상 갱신 안 됨, 현재 시장 상황과 모순, 다른 페이지와 완전히 중복, 내용이 부실하거나 검증 불가능.",
         f"surface: {surface}",
         "",
         "[사용자 질문]",

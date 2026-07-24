@@ -1869,3 +1869,71 @@ def test_answer_reports_engine_local_rules_when_llm_off(monkeypatch, tmp_path):
 
     assert result["ok"] is True
     assert result["context"]["engine"] == "local-rules"
+
+
+def test_wiki_parse_curation_plan_handles_delete_action():
+    from agent_console import wiki
+
+    plan = wiki._parse_curation_plan(
+        '{"action":"delete","target_id":"abc123","reason":"stale and superseded"}'
+    )
+
+    assert plan is not None
+    assert plan["action"] == "delete"
+    assert plan["target_id"] == "abc123"
+
+
+def test_wiki_auto_curate_llm_delete_action_removes_page(monkeypatch, tmp_path):
+    _isolate(monkeypatch, tmp_path)
+
+    from agent_console import wiki
+
+    existing = wiki.upsert_page({
+        "title": "오래된 임시 메모",
+        "summary": "더 이상 유효하지 않음",
+        "body": "이 페이지는 삭제 대상 후보입니다.",
+        "surface": "portfolio",
+        "kind": "note",
+        "status": "draft",
+        "tags": ["misc"],
+        "source_refs": [],
+    })
+
+    def fake_llm(prompt: str) -> str:
+        assert "delete" in prompt
+        return '{"action":"delete","target_id":"' + existing["id"] + '","reason":"stale and superseded"}'
+
+    result = wiki.auto_curate_from_chat(
+        "위키 페이지 삭제 기준을 정리해줘. 오래된 메모는 지워도 될까?",
+        "네, 아래 기준에 맞으면 삭제합니다.\n- 30일 이상 갱신 안 됨\n- 최신 리포트와 모순\n- 중복 내용\n검증 결과 이 페이지는 삭제 대상입니다.",
+        surface="portfolio",
+        llm=fake_llm,
+        pack={"focus": []},
+        history=[],
+    )
+
+    assert result is not None
+    assert result["ok"] is True
+    assert result["action"] == "delete"
+    assert result["page_id"] == existing["id"]
+    assert wiki.get_page(existing["id"]) is None
+
+
+def test_wiki_auto_curate_llm_delete_without_target_id_is_noop(monkeypatch, tmp_path):
+    _isolate(monkeypatch, tmp_path)
+
+    from agent_console import wiki
+
+    def fake_llm(prompt: str) -> str:
+        return '{"action":"delete","target_id":"","reason":"no target"}'
+
+    result = wiki.auto_curate_from_chat(
+        "위키 페이지 삭제 기준을 정리해줘. 오래된 메모는 지워도 될까?",
+        "네, 아래 기준에 맞으면 삭제합니다.\n- 30일 이상 갱신 안 됨\n- 최신 리포트와 모순\n- 중복 내용\n검증 결과 이 페이지는 삭제 대상입니다.",
+        surface="portfolio",
+        llm=fake_llm,
+        pack={"focus": []},
+        history=[],
+    )
+
+    assert result is None
