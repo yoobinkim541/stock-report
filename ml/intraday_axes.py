@@ -287,9 +287,16 @@ def check_exit(pos: dict, bar: dict | None, score: float | None,
                now_min: int, close_min: int, cfg: dict) -> tuple[str, float] | None:
     """(exit_reason, 보수적 체결 기준가) | None.
 
-    pos: {entry_price, stop, target, entry_min, risk_per_share}
+    pos: {entry_price, stop, target, entry_min, risk_per_share} — score_ema/collapse_streak/
+         score_history 는 이 함수가 매 호출마다 pos 에 직접 축적한다(호출측 상태 재사용).
     bar: 최신 확정 봉 {h, l, c} (없으면 EOD 만 판정 — 엔진이 REST 가로 처리)
     우선순위: stop → target → timestop → signal_collapse → eod_flat.
+
+    signal_collapse 는 raw score 대신 EMA(cfg.score_ema_alpha, 기본 1.0=스무딩 없음)로
+    판정하고, cfg.collapse_confirm_bars(기본 1) 연속 봉 확정 후에만 청산한다. 게다가
+    cfg.minimum_hold_min(기본 0) 이전에는 signal_collapse 자체를 평가하지 않는다 —
+    진입 직후 몇 분은 노이즈로 판단, 실제 신호가 자리잡을 시간을 준다. 셋 다 cfg에
+    없으면 이전 동작(단봉 즉시 청산)과 동일 — 호출측(정책 파라미터)이 명시적으로 켠다.
     """
     flat_at = close_min - int(cfg.get("flat_buffer_min", 15))
     if bar:
@@ -303,8 +310,21 @@ def check_exit(pos: dict, bar: dict | None, score: float | None,
         progress_r = abs(c - float(pos["entry_price"])) / rps
         if held_min >= int(cfg.get("timestop_min", 90)) and progress_r < 0.3:
             return "timestop", c
-        if score is not None and score < float(cfg.get("theta_exit", 0.25)):
-            return "signal_collapse", c
+        if score is not None:
+            alpha = float(cfg.get("score_ema_alpha", 1.0))
+            prev_ema = pos.get("score_ema")
+            ema = score if prev_ema is None else alpha * score + (1 - alpha) * float(prev_ema)
+            pos["score_ema"] = ema
+            pos.setdefault("score_history", []).append(
+                {"min": now_min, "raw": round(score, 4), "ema": round(ema, 4)})
+            minimum_hold_min = int(cfg.get("minimum_hold_min", 0) or 0)
+            if ema < float(cfg.get("theta_exit", 0.25)) and held_min >= minimum_hold_min:
+                streak = int(pos.get("collapse_streak", 0)) + 1
+                pos["collapse_streak"] = streak
+                if streak >= int(cfg.get("collapse_confirm_bars", 1)):
+                    return "signal_collapse", c
+            else:
+                pos["collapse_streak"] = 0
         if now_min >= flat_at:
             return "eod_flat", c
         return None

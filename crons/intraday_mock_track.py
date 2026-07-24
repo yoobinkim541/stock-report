@@ -90,6 +90,7 @@ def load_cfg() -> dict:
                             "US": max(spread_soft_us, spread_hard_us)},
         "flat_buffer_min": int(_env_f("INTRADAY_FLAT_BUFFER_MIN", 15)),
         "entry_cutoff_min": int(_env_f("INTRADAY_ENTRY_CUTOFF_MIN", 30)),
+        "minimum_hold_min": int(_env_f("INTRADAY_MINIMUM_HOLD_MIN", 3)),
         # 개장 첫 N분은 진입 보류 — 개장 동시호가 직후 스프레드가 구조적으로 넓어
         # 하필 이 순간에 몰리는 진입기준 통과 신호가 스프레드 가드에 거의 매번
         # 막히던 문제 방어(2026-07-15 실측). US 는 개장 변동성이 커 기본 더 김.
@@ -427,7 +428,8 @@ def _do_exit(state: dict, key: str, pos: dict, reason: str, ref_px: float, mk: s
                 "cost": round(cost, 2), "slippage_penalty": round(penalty, 2),
                 "net_pnl": round(net, 2), "realized_r": round(realized_r, 4),
                 "fwd_excess": round(realized_r, 4), "success": bool(net > 0),
-                "date": now.strftime("%Y-%m-%d")})
+                "date": now.strftime("%Y-%m-%d"),
+                "score_history": pos.get("score_history", [])})
         except Exception as e:
             logger.error("outcome 기록 실패 %s: %s", sym, e)
     _record_event(sym, mk, "sell", qty, exit_px, decision_id=pos["decision_id"],
@@ -696,6 +698,9 @@ def run_market(mk: str, state: dict, cfg: dict, *, dry: bool = False) -> list[st
         _, score = _score(sym) if bar else (None, None)
         cfg_exit = {"timestop_min": params.get("timestop_min", 90),
                     "theta_exit": params.get("theta_exit", 0.25),
+                    "score_ema_alpha": params.get("score_ema_alpha", 0.5),
+                    "collapse_confirm_bars": params.get("collapse_confirm_bars", 2),
+                    "minimum_hold_min": cfg.get("minimum_hold_min", 3),
                     "flat_buffer_min": cfg["flat_buffer_min"]}
         res = ax.check_exit(pos, bar, score, now_min, close_min, cfg_exit)
         if res:

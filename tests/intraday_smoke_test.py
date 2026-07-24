@@ -298,6 +298,56 @@ def run_tests() -> list[str]:
         ("bar 부재 장중 None", lambda _: ax.check_exit(pos, None, None, 500, 930, cfg) is None),
     )
 
+    # ── i7b: signal_collapse 안정화 — EMA 스무딩 + 연속봉 확정 (2026-07-24) ──────
+    # cfg에 score_ema_alpha/collapse_confirm_bars 없으면 기존 단봉 즉시청산과 동일(위 i7).
+    # 실제 운영 파라미터(ml/intraday_policy.py DEFAULTS)는 0.5/2 — 여기서 명시적으로 켜서 검증.
+    logger.info("[i7b] signal_collapse 안정화")
+    bar_flat = {"h": 61500, "l": 61400, "c": 61470}   # stop/target 안 건드리는 봉
+
+    def _fresh_pos():
+        return {"entry_price": 61450.0, "stop": 61150.0, "target": 62050.0,
+                "entry_min": 100, "risk_per_share": 300.0}
+
+    cfg_stab = {**cfg, "score_ema_alpha": 0.5, "collapse_confirm_bars": 2}
+
+    pos_confirm = _fresh_pos()
+    r1 = ax.check_exit(pos_confirm, bar_flat, 0.1, 150, 930, cfg_stab)
+    r2 = ax.check_exit(pos_confirm, bar_flat, 0.1, 151, 930, cfg_stab)
+
+    pos_reset = _fresh_pos()
+    rr1 = ax.check_exit(pos_reset, bar_flat, 0.1, 150, 930, cfg_stab)      # streak 1
+    rr2 = ax.check_exit(pos_reset, bar_flat, 0.6, 151, 930, cfg_stab)      # 회복 → streak 리셋
+    rr3 = ax.check_exit(pos_reset, bar_flat, 0.1, 152, 930, cfg_stab)      # streak 다시 1 (3 아님)
+
+    cfg_ema_only = {**cfg, "score_ema_alpha": 0.5, "collapse_confirm_bars": 1}
+    pos_ema = _fresh_pos()
+    e1 = ax.check_exit(pos_ema, bar_flat, 0.6, 150, 930, cfg_ema_only)     # ema=0.6 프라이밍
+    e2 = ax.check_exit(pos_ema, bar_flat, 0.0, 151, 930, cfg_ema_only)     # ema=0.3 — 단봉 급락에도 방어
+    e3 = ax.check_exit(pos_ema, bar_flat, 0.0, 152, 930, cfg_ema_only)     # ema=0.15 — 계속 낮으면 결국 청산
+
+    pos_hist = _fresh_pos()
+    ax.check_exit(pos_hist, bar_flat, 0.5, 150, 930, cfg)
+    ax.check_exit(pos_hist, bar_flat, 0.4, 151, 930, cfg)
+
+    # 최소 보유시간(minimum_hold_min) — 진입 직후 N분은 signal_collapse 자체를 평가 안 함
+    cfg_minhold = {**cfg, "collapse_confirm_bars": 1, "minimum_hold_min": 3}
+    pos_minhold = _fresh_pos()  # entry_min=100
+    mh1 = ax.check_exit(pos_minhold, bar_flat, 0.0, 101, 930, cfg_minhold)   # held 1분 — 유예 중
+    mh2 = ax.check_exit(pos_minhold, bar_flat, 0.0, 104, 930, cfg_minhold)   # held 4분 — 유예 끝
+
+    failures += _check("collapse_stabilization", lambda: None,
+        ("연속봉 미확정 시 유지", lambda _: r1 is None),
+        ("연속 2봉째 확정 청산", lambda _: r2 is not None and r2[0] == "signal_collapse"),
+        ("점수 회복 시 streak 리셋", lambda _: rr1 is None and rr2 is None and rr3 is None),
+        ("최소 보유시간 전엔 collapse 유예", lambda _: mh1 is None),
+        ("최소 보유시간 지나면 collapse 평가 재개", lambda _: mh2 is not None and mh2[0] == "signal_collapse"),
+        ("리셋 후 streak==1 (누적 아님)", lambda _: pos_reset["collapse_streak"] == 1),
+        ("EMA가 단봉 급락 방어", lambda _: e2 is None),
+        ("계속 낮으면 EMA도 결국 청산", lambda _: e3 is not None and e3[0] == "signal_collapse"),
+        ("score_history 축적", lambda _: len(pos_hist.get("score_history", [])) == 2
+                                        and pos_hist["score_history"][0]["raw"] == 0.5),
+    )
+
     # ── i8: 사이징·가상체결·호가단위 ──────────────────────────────────────────
     logger.info("[i8] 사이징·체결")
     failures += _check("sizing", lambda: None,
