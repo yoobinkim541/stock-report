@@ -642,6 +642,38 @@ def test_agent_context_prompt_includes_wiki(monkeypatch, tmp_path):
     assert "wiki card" in prompt
 
 
+def test_build_wiki_context_section_included_in_curation_prompt(monkeypatch, tmp_path):
+    _isolate(monkeypatch, tmp_path)
+
+    from agent_console import wiki
+
+    wiki.upsert_page({
+        "title": "손실한도 규칙",
+        "summary": "손실한도 1% 기준",
+        "body": "손실한도 1% 기준 본문",
+        "surface": "portfolio",
+        "kind": "playbook",
+        "status": "draft",
+        "tags": ["risk"],
+        "source_refs": [],
+    })
+
+    section = wiki._build_wiki_context_section()
+    assert "[현재 위키 상태]" in section
+    assert "전체 페이지: 1" in section
+
+    prompt = wiki._build_auto_curation_prompt(
+        question="질문",
+        answer="답변",
+        surface="portfolio",
+        candidates=[],
+        pack={},
+        history=[],
+    )
+    assert "[현재 위키 상태]" in prompt
+    assert "전체 페이지: 1" in prompt
+
+
 def test_wiki_auto_curate_skips_transient_acknowledgements(monkeypatch, tmp_path):
     _isolate(monkeypatch, tmp_path)
 

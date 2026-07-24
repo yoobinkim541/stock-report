@@ -1117,6 +1117,36 @@ def _should_auto_curate(question: str, answer: str) -> bool:
     return score >= AUTO_CURATE_MIN_SCORE
 
 
+def _build_wiki_context_section() -> str:
+    """LLM이 위키 전체 상태를 인지할 수 있도록 stats + lint 요약을 생성한다."""
+    stats_data = stats()
+    lint_data = lint_pages()
+    status_counts = stats_data.get("status_counts", {})
+    pages = list_pages(status="all", surface="all", limit=400)
+    verification_counts = Counter(page.get("verification_status") for page in pages)
+
+    lines = ["[현재 위키 상태]"]
+    lines.append(f"- 전체 페이지: {stats_data.get('total', 0)}")
+    active = sum(status_counts.get(s, 0) for s in ("draft", "reviewed", "stable"))
+    lines.append(f"- 활성: {active}")
+    lines.append(f"- Archived: {status_counts.get('archived', 0)}")
+    lines.append(f"- 미검증(unverified): {verification_counts.get('unverified', 0)}")
+    lines.append(f"- 검증됨(source-backed): {verification_counts.get('source-backed', 0)}")
+
+    lint_issues = lint_data.get("issues", [])
+    if lint_issues:
+        lines.append(f"- 린트 이슈: {len(lint_issues)}개")
+        for issue in lint_issues[:5]:
+            lines.append(f"  - {issue.get('title', '?')}: {issue.get('code', '?')}")
+
+    kind_counts = stats_data.get("kind_counts", {})
+    if kind_counts:
+        kinds = ", ".join(f"{k}: {c}" for k, c in sorted(kind_counts.items()))
+        lines.append(f"- 유형: {kinds}")
+
+    return "\n".join(lines)
+
+
 def _build_auto_curation_prompt(
     *,
     question: str,
@@ -1128,6 +1158,8 @@ def _build_auto_curation_prompt(
 ) -> str:
     lines = [
         "너는 stock-report AI 위키 정리기다.",
+        _build_wiki_context_section(),
+        "",
         "목표: 재사용 가능한 규칙, 결정, 저장/수집 원칙, 실패 교정만 하나의 위키 카드로 정리한다.",
         "짧은 진행 확인, 단발성 수다, 상태 보고, 확인 대답은 생성 금지다.",
         "반드시 JSON object만 출력한다. 마크다운, 설명문, 코드펜스는 금지한다.",
