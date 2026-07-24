@@ -6,7 +6,7 @@ import hashlib
 import re
 from collections import Counter, defaultdict
 from collections.abc import Callable
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Iterable
 
@@ -212,6 +212,9 @@ def _record_to_page(record: dict) -> dict:
         "confidence": float(record.get("confidence") or source.get("confidence") or 0.5),
         "created_at": record.get("createdAt") or "",
         "updated_at": record.get("updatedAt") or record.get("createdAt") or "",
+        "useCount": int(record.get("useCount") or 0),
+        "lastUsedAt": record.get("lastUsedAt") or "",
+        "lastQuery": record.get("lastQuery") or "",
         "source": source,
         "source_refs": source_refs,
         "links": _clean_links(record.get("links") or [], self_id=_clean(record.get("id"), 80)),
@@ -521,6 +524,17 @@ def lint_pages(pages: list[dict] | None = None) -> dict:
                 "title": title,
                 "message": "요약과 본문이 모두 비어 있습니다.",
             })
+        if status != "archived":
+            last_used = _last_used_or_created(page)
+            cutoff = (datetime.now(timezone.utc) - timedelta(days=30)).isoformat()
+            if not last_used or last_used < cutoff:
+                issues.append({
+                    "code": "zero_usage",
+                    "severity": "minor",
+                    "page_id": page_id,
+                    "title": title,
+                    "message": "이 페이지가 30일간 사용되지 않았습니다. archived 또는 삭제를 고려하세요.",
+                })
     issues.extend(_lint_relational_issues(pages or []))
     return {"ok": not issues, "issue_count": len(issues), "issues": issues}
 
@@ -663,6 +677,9 @@ def upsert_page(page: dict) -> dict:
         "createdAt": created_at,
         "updatedAt": updated_at,
         "kind": kind,
+        "useCount": int(page.get("useCount") if page.get("useCount") is not None else existing.get("useCount") or 0),
+        "lastUsedAt": _clean(page.get("lastUsedAt") or existing.get("lastUsedAt") or "", 80),
+        "lastQuery": _clean(page.get("lastQuery") or existing.get("lastQuery") or "", 200),
         "source": {
             "surface": surface,
             "screen": surface,
@@ -673,6 +690,52 @@ def upsert_page(page: dict) -> dict:
     }
     saved = shared_memory.upsert_record(record)
     return _record_to_page(saved)
+
+
+def track_page_usage(page_id: str, query: str) -> None:
+    """페이지가 LLM 컨텍스트로 제공될 때 호출한다. useCount 증가, lastUsedAt/lastQuery 갱신."""
+    page = get_page(page_id)
+    if not page:
+        return
+    upsert_page({
+        "id": page["id"],
+        "title": page.get("title"),
+        "summary": page.get("summary"),
+        "body": page.get("body"),
+        "surface": page.get("surface"),
+        "kind": page.get("kind"),
+        "status": page.get("status"),
+        "tags": page.get("tags") or [],
+        "source_refs": page.get("source_refs") or [],
+        "links": page.get("links") or [],
+        "messages": page.get("messages") or [],
+        "decisions": page.get("decisions") or [],
+        "openQuestions": page.get("openQuestions") or [],
+        "confidence": page.get("confidence"),
+        "created_at": page.get("created_at"),
+        "useCount": (page.get("useCount") or 0) + 1,
+        "lastUsedAt": _now(),
+        "lastQuery": _clean(query, 200),
+    })
+    rebuild_artifacts()
+
+
+def _last_used_or_created(page: dict) -> str:
+    return page.get("lastUsedAt") or page.get("createdAt") or page.get("created_at") or ""
+
+
+def list_unused_pages(days: int = 30) -> list[dict]:
+    """지정된 일수 이상(또는 한 번도) 사용되지 않은 활성 페이지를 반환한다."""
+    pages = list_pages(status="all", surface="all", limit=400)
+    cutoff = (datetime.now(timezone.utc) - timedelta(days=days)).isoformat()
+    unused = []
+    for page in pages:
+        if page.get("status") == "archived":
+            continue
+        last_used = _last_used_or_created(page)
+        if not last_used or last_used < cutoff:
+            unused.append(page)
+    return unused
 
 
 def delete_page(page_id: str) -> bool:
@@ -1132,6 +1195,7 @@ def _build_wiki_context_section() -> str:
     lines.append(f"- Archived: {status_counts.get('archived', 0)}")
     lines.append(f"- 미검증(unverified): {verification_counts.get('unverified', 0)}")
     lines.append(f"- 검증됨(source-backed): {verification_counts.get('source-backed', 0)}")
+    lines.append(f"- 미사용(30일+): {len(list_unused_pages(30))}")
 
     lint_issues = lint_data.get("issues", [])
     if lint_issues:

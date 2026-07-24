@@ -674,6 +674,109 @@ def test_build_wiki_context_section_included_in_curation_prompt(monkeypatch, tmp
     assert "전체 페이지: 1" in prompt
 
 
+def test_wiki_track_page_usage_increments_use_count_and_last_used(monkeypatch, tmp_path):
+    _isolate(monkeypatch, tmp_path)
+
+    from agent_console import wiki
+
+    page = wiki.upsert_page({
+        "title": "사용량 테스트",
+        "summary": "요약",
+        "body": "본문",
+        "surface": "portfolio",
+        "kind": "note",
+        "status": "draft",
+        "source_refs": [],
+    })
+
+    wiki.track_page_usage(page["id"], "손실한도 질문")
+    wiki.track_page_usage(page["id"], "레버리지 질문")
+
+    fetched = wiki.get_page(page["id"])
+    assert fetched["useCount"] == 2
+    assert fetched["lastQuery"] == "레버리지 질문"
+    assert fetched["lastUsedAt"]
+
+
+def test_wiki_list_unused_pages_flags_old_and_never_used_pages(monkeypatch, tmp_path):
+    _isolate(monkeypatch, tmp_path)
+
+    from datetime import datetime, timedelta, timezone
+
+    from agent_console import wiki
+
+    def _iso(days_ago: int) -> str:
+        return (datetime.now(timezone.utc) - timedelta(days=days_ago)).isoformat(timespec="seconds")
+
+    recent = wiki.upsert_page({
+        "title": "최근 페이지",
+        "summary": "요약",
+        "body": "본문",
+        "surface": "portfolio",
+        "kind": "note",
+        "status": "draft",
+        "source_refs": [],
+        "created_at": _iso(1),
+    })
+    old_unused = wiki.upsert_page({
+        "title": "오래되고 미사용",
+        "summary": "요약",
+        "body": "본문",
+        "surface": "portfolio",
+        "kind": "note",
+        "status": "draft",
+        "source_refs": [],
+        "created_at": _iso(45),
+    })
+
+    unused_ids = {p["id"] for p in wiki.list_unused_pages(days=30)}
+
+    assert old_unused["id"] in unused_ids
+    assert recent["id"] not in unused_ids
+
+
+def test_wiki_lint_flags_zero_usage_pages(monkeypatch, tmp_path):
+    _isolate(monkeypatch, tmp_path)
+
+    from agent_console import wiki
+
+    result = wiki.lint_pages([
+        {
+            "id": "unused1",
+            "title": "미사용 페이지",
+            "status": "draft",
+            "verification_status": "unverified",
+            "source_refs": [],
+            "surface": "market",
+            "kind": "note",
+            "createdAt": "2000-01-01T00:00:00+00:00",
+        }
+    ])
+
+    codes = {issue["code"] for issue in result["issues"]}
+    assert "zero_usage" in codes
+
+
+def test_wiki_context_section_includes_unused_page_count(monkeypatch, tmp_path):
+    _isolate(monkeypatch, tmp_path)
+
+    from agent_console import wiki
+
+    wiki.upsert_page({
+        "title": "장기 방치 페이지",
+        "summary": "요약",
+        "body": "본문",
+        "surface": "portfolio",
+        "kind": "note",
+        "status": "draft",
+        "source_refs": [],
+        "created_at": "2000-01-01T00:00:00+00:00",
+    })
+
+    section = wiki._build_wiki_context_section()
+    assert "미사용(30일+): 1" in section
+
+
 def test_wiki_auto_curate_skips_transient_acknowledgements(monkeypatch, tmp_path):
     _isolate(monkeypatch, tmp_path)
 
