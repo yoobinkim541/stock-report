@@ -321,6 +321,26 @@ def upsert_record(record: dict) -> dict:
     return normalized
 
 
+def batch_upsert_delete(*, upserts: list[dict], deletes: list[str]) -> dict:
+    """원자적 배치: 모든 upsert + delete를 한 번의 파일 재작성으로 처리한다.
+
+    merge/split처럼 여러 upsert_record/delete_record 호출을 순차로 하면 그 사이에
+    죽었을 때 부분 적용된 상태가 남는다. 이 함수는 하나의 락 구간에서 전부 반영한다.
+    """
+    ensure_store()
+    with _events_lock():
+        rows = _read_jsonl(_paths()["events"])
+        delete_set = {str(d) for d in (deletes or []) if d}
+        rows = [row for row in rows if row.get("id") not in delete_set]
+        upsert_ids = {str(r["id"]) for r in (upserts or []) if r.get("id")}
+        rows = [row for row in rows if row.get("id") not in upsert_ids]
+        rows.extend(normalize_record(r) for r in (upserts or []))
+        _write_jsonl_locked(rows)
+        _write_index_locked()
+    refresh_context_memory_summary()
+    return {"ok": True, "upserted": len(upserts or []), "deleted": len(deletes or [])}
+
+
 def _write_index_locked() -> None:
     """index.json 갱신 — 락 보유 중에만 호출.
 

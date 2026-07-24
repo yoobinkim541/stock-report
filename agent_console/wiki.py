@@ -701,7 +701,8 @@ def _display_ref(ref: object) -> str:
     return text
 
 
-def upsert_page(page: dict) -> dict:
+def _build_wiki_record(page: dict, *, existing: dict | None = None) -> dict:
+    """upsert_page()의 정규화 로직 — merge/split의 배치 업서트도 같은 정규화를 거치도록 분리."""
     page = dict(page or {})
     title = _clean(page.get("title") or "위키 페이지", 160)
     surface = _clean(page.get("surface") or WIKI_SURFACE, 60).lower() or WIKI_SURFACE
@@ -713,11 +714,12 @@ def upsert_page(page: dict) -> dict:
     page_id = _clean(page.get("id") or _page_id(title, surface, kind), 80)
     links = _clean_links(page.get("links") or [], self_id=page_id)
 
-    existing = get_page(page_id) or {}
+    if existing is None:
+        existing = get_page(page_id) or {}
     created_at = _clean(existing.get("created_at") or page.get("created_at") or _now(), 80)
     updated_at = _clean(page.get("updated_at") or _now(), 80)
     tags = _dedupe_texts([*([WIKI_TAG, surface, kind, status]), *(page.get("tags") or [])], limit=20, item_limit=60)
-    record = {
+    return {
         "id": page_id,
         "title": title,
         "summary": _clean(page.get("summary") or "", 2400),
@@ -744,6 +746,10 @@ def upsert_page(page: dict) -> dict:
             "writer": "codex-cli",
         },
     }
+
+
+def upsert_page(page: dict) -> dict:
+    record = _build_wiki_record(page)
     saved = shared_memory.upsert_record(record)
     _CACHE.clear()
     return _record_to_page(saved)
@@ -921,10 +927,8 @@ def _merge_pages(source_ids: list[str], target_id: str, llm_synthesis: str) -> d
     ], self_id=target_id)
 
     merged_source_ids = [page["id"] for page in sources]
-    for sid in merged_source_ids:
-        delete_page(sid)
 
-    upsert_page({
+    record = _build_wiki_record({
         "id": target_id,
         "title": target.get("title"),
         "summary": target.get("summary") or synthesis,
@@ -939,7 +943,9 @@ def _merge_pages(source_ids: list[str], target_id: str, llm_synthesis: str) -> d
         "decisions": target.get("decisions") or [],
         "openQuestions": target.get("openQuestions") or [],
         "confidence": target.get("confidence"),
-    })
+    }, existing=target)
+
+    shared_memory.batch_upsert_delete(upserts=[record], deletes=merged_source_ids)
 
     _CACHE.clear()
     return {"action": "merge", "target": target_id, "deleted": merged_source_ids}
@@ -955,10 +961,10 @@ def _split_page(source_id: str, new_titles: list[str], llm_bodies: list[str]) ->
         return None
     bodies = list(llm_bodies or [])
 
-    new_pages = []
+    base_payloads = []
     for idx, title in enumerate(titles):
         body = _clean(bodies[idx] if idx < len(bodies) else source.get("body") or "", 6000)
-        created = upsert_page({
+        base_payloads.append({
             "title": title,
             "summary": body[:900],
             "body": body,
@@ -968,25 +974,18 @@ def _split_page(source_id: str, new_titles: list[str], llm_bodies: list[str]) ->
             "tags": _dedupe_texts([*(source.get("tags") or []), f"split_from:{source_id}"], limit=20, item_limit=60),
             "source_refs": source.get("source_refs") or [],
         })
-        new_pages.append(created)
 
-    new_ids = [page["id"] for page in new_pages]
-    for page in new_pages:
-        other_ids = [pid for pid in new_ids if pid != page["id"]]
-        upsert_page({
-            "id": page["id"],
-            "title": page.get("title"),
-            "summary": page.get("summary"),
-            "body": page.get("body"),
-            "surface": page.get("surface"),
-            "kind": page.get("kind"),
-            "status": page.get("status"),
-            "tags": page.get("tags"),
-            "source_refs": page.get("source_refs"),
-            "links": _clean_links([*(page.get("links") or []), *other_ids], self_id=page["id"]),
-        })
+    new_ids = [_build_wiki_record(payload, existing={})["id"] for payload in base_payloads]
 
-    upsert_page({
+    upserts = []
+    for page_id, payload in zip(new_ids, base_payloads):
+        other_ids = [pid for pid in new_ids if pid != page_id]
+        upserts.append(_build_wiki_record(
+            {**payload, "id": page_id, "links": other_ids},
+            existing={},
+        ))
+
+    upserts.append(_build_wiki_record({
         "id": source_id,
         "title": source.get("title"),
         "summary": source.get("summary"),
@@ -1000,7 +999,9 @@ def _split_page(source_id: str, new_titles: list[str], llm_bodies: list[str]) ->
         ], limit=20, item_limit=60),
         "source_refs": source.get("source_refs") or [],
         "links": source.get("links") or [],
-    })
+    }, existing=source))
+
+    shared_memory.batch_upsert_delete(upserts=upserts, deletes=[])
 
     _CACHE.clear()
     return {"action": "split", "source": source_id, "created": new_ids}
@@ -1655,4 +1656,4 @@ def _merge_messages(existing: list[dict], new_messages: list[dict]) -> list[dict
                 "createdAt": _clean(row.get("createdAt") or _now(), 80),
             }
         )
-    return rows[:8]
+    return rows[:16]
