@@ -826,17 +826,30 @@ def _extract_asset_symbol(question: str) -> tuple[str, str] | None:
     ql = q.lower()
     if _is_domestic_etf_question(q):
         return None
+    raw_tokens = re.findall(r"\$?[A-Za-z][A-Za-z0-9.-]{1,12}", q)
+    for raw in raw_tokens:
+        token = raw.lstrip("$").lower()
+        if token in _ASSET_ALIASES:
+            return _ASSET_ALIASES[token]
+    # 영문 토큰이 실제 티커와 "정확히" 일치할 때는 의도 단어 없이도 신뢰한다(2026-07-25)
+    # — "LLY는 1조 달러가 넘을텐데"처럼 매수/전망 같은 의도어가 없는 종목 언급도 놓치지
+    # 않기 위함. resolve() 결과가 입력과 다르면(예: "AI"가 부분일치로 ABNB에 매핑) 그건
+    # 오탐 위험이 큰 부분매칭이므로 여기서는 받아들이지 않고 기존 의도 단어 게이트로 넘긴다.
+    try:
+        import ticker_names
+        for raw in raw_tokens:
+            token = raw.lstrip("$").upper()
+            resolved = ticker_names.resolve(token, allow_net=False)
+            if resolved and resolved.upper() == token:
+                return (resolved, ticker_names.display_name(resolved, allow_net=False) or resolved)
+    except Exception:
+        pass
     intent_words = (
         "어때", "어떰", "어떠", "top", "탑", "티어", "매수", "진입", "목표",
         "가냐", "가능", "전망", "보유", "팔", "살", "+", "롱", "숏",
     )
     if not any(word in ql for word in intent_words):
         return None
-    raw_tokens = re.findall(r"\$?[A-Za-z][A-Za-z0-9.-]{1,12}", q)
-    for raw in raw_tokens:
-        token = raw.lstrip("$").lower()
-        if token in _ASSET_ALIASES:
-            return _ASSET_ALIASES[token]
     try:
         import ticker_names
         for chunk in re.findall(r"[A-Za-z0-9.-]{2,}|[가-힣A-Za-z0-9&+.-]+", q):

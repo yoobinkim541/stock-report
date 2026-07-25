@@ -1406,6 +1406,23 @@ def test_agent_portfolio_ambiguous_complaint_does_not_use_market_template(monkey
     assert "반복" in answer
 
 
+def test_extract_asset_symbol_exact_ticker_without_intent_word():
+    """의도 단어(매수/전망/어때 등) 없이 종목만 언급해도 정확 티커면 인식해야 함(2026-07-25).
+
+    'LLY는 1조 달러가 넘을텐데'가 의도어 부재로 티커 추출에 실패 → 무관한 '시장 상황'
+    템플릿으로 빠지던 회귀. 단, 부분매칭(예: "AI"→ABNB, "경기"→ETF)까지 의도어 없이
+    허용하면 일반 거시 질문이 오분류되므로, 정확 티커 매칭만 게이트를 우회한다.
+    """
+    from agent_console.agent import _extract_asset_symbol
+
+    assert _extract_asset_symbol("LLY는 1조 달러가 넘을텐데") == ("LLY", "Eli Lilly")
+    assert _extract_asset_symbol("QQQ 요즘 계속 오르네") is not None
+    # 일반 거시 질문은 부분매칭 오탐 없이 여전히 None (회귀 방지)
+    assert _extract_asset_symbol(
+        "다음 분기 거시 경기 흐름과 인플레이션 전개를 근거와 함께 설명해줘"
+    ) is None
+
+
 def test_agent_my_portfolio_question_gives_overview_not_hallucinated_ticker(monkeypatch):
     """'내 포트폴리오 어때' 가 '내'→내수주(326230.KS) 부분매칭으로 단일종목 의견에
     오분류되던 회귀 방지 — 실제 보유 개요를 준다."""
