@@ -559,7 +559,38 @@ def _saveticker_html_to_text(html_text: str) -> str:
     return cleaned.strip()
 
 
-def _fetch_saveticker_article_body(url: str) -> str:
+def _saveticker_article_url(item: dict) -> str:
+    """saveticker API 응답엔 url/link 필드가 없음(2026-07-25 실측 확인 — top-stories·news/list
+    둘 다) — id 로 직접 구성. 실측: https://saveticker.com/news/{id} 가 실제 기사 페이지(200)."""
+    url = str(item.get("url") or item.get("link") or "").strip()
+    if url:
+        return url
+    aid = item.get("id")
+    return f"https://saveticker.com/news/{aid}" if aid else ""
+
+
+_SAVETICKER_DISCLAIMER = "본 콘텐츠는 투자 권유 목적이 아닌 정보 제공용입니다."
+
+
+def _strip_saveticker_boilerplate(text: str, title: str = "") -> str:
+    """추출 텍스트에서 상단 메타데이터 헤더(태그·티커·시각·출처+제목)와 하단 면책조항 제거.
+
+    페이지 구조 실측(2026-07-25): <article> 첫 블록이 'SAVE PICK · 속보 · $TICKER · 시각 ·
+    출처: X · {제목}' 형태로 제목까지 끝나 — 제목이 등장하는 줄까지를 헤더로 보고 그 다음
+    줄부터를 본문으로 채택. 제목 매칭 실패 시(페이지 구조 변형 등) 원문 그대로 반환(안전).
+    """
+    lines = text.splitlines()
+    title = (title or "").strip()
+    if title:
+        for i, line in enumerate(lines):
+            if title in line:
+                lines = lines[i + 1:]
+                break
+    cleaned = [ln for ln in lines if ln.strip() and ln.strip() != _SAVETICKER_DISCLAIMER]
+    return "\n".join(cleaned).strip()
+
+
+def _fetch_saveticker_article_body(url: str, title: str = "") -> str:
     if not url:
         return ""
     try:
@@ -568,7 +599,7 @@ def _fetch_saveticker_article_body(url: str) -> str:
         if not html_text or _is_cloudflare_challenge(html_text):
             return ""
         text = _saveticker_html_to_text(html_text)
-        return text
+        return _strip_saveticker_boilerplate(text, title)
     except Exception:
         return ""
 
@@ -578,7 +609,7 @@ def _saveticker_article_record(item: dict, base: str) -> dict:
 
     fetched_at = datetime.now(KST)
     title = str(item.get("title") or "").strip()
-    url = str(item.get("url") or item.get("link") or "").strip()
+    url = _saveticker_article_url(item)
     content = str(item.get("content") or "").strip()
     summary = str(item.get("group_summary") or "").strip()
     body_raw = _combine_body_raw(content, summary)
@@ -586,7 +617,11 @@ def _saveticker_article_record(item: dict, base: str) -> dict:
     # 거의 안 걸림 — 말줄임표로 끝나면 길이 무관하게 전체 기사를 마저 가져온다(2026-07-25).
     looks_truncated = body_raw.endswith("...") or body_raw.endswith("…")
     if (len(body_raw) < 80 or looks_truncated) and url:
-        body_raw = _combine_body_raw(content, summary, _fetch_saveticker_article_body(url))
+        fetched = _fetch_saveticker_article_body(url, title=title)
+        if fetched and len(fetched) > len(body_raw):
+            body_raw = fetched   # 전체 기사가 미리보기의 상위집합 — 미리보기 중복 없이 이걸로 대체
+        elif fetched:
+            body_raw = _combine_body_raw(content, summary, fetched)
     if not body_raw:
         body_raw = _combine_body_raw(title, content, summary) or title
 
@@ -673,7 +708,7 @@ def fetch_saveticker_events() -> list[dict]:
             title = item.get("title") or ""
             if not title:
                 continue
-            url = item.get("url") or item.get("link") or ""
+            url = _saveticker_article_url(item)
             dedupe_key = str(url or title).strip().lower()
             if dedupe_key and dedupe_key in seen_keys:
                 continue

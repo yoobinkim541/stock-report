@@ -234,7 +234,7 @@ def test_fetch_saveticker_events_normalizes_dict_tickers(monkeypatch, tmp_path):
             return self._payload
 
     monkeypatch.setenv("STOCK_REPORT_REPORTS_DIR", str(tmp_path / "reports"))
-    monkeypatch.setattr(sc, "_fetch_saveticker_article_body", lambda url: "")
+    monkeypatch.setattr(sc, "_fetch_saveticker_article_body", lambda url, title="": "")
 
     payload = {"news_list": [{
         "title": "스페이스X 상장 급등",
@@ -280,7 +280,7 @@ def test_fetch_saveticker_events_skips_rearchive_for_recently_seen_article(monke
             return self._payload
 
     monkeypatch.setenv("STOCK_REPORT_REPORTS_DIR", str(tmp_path / "reports"))
-    monkeypatch.setattr(sc, "_fetch_saveticker_article_body", lambda url: "")
+    monkeypatch.setattr(sc, "_fetch_saveticker_article_body", lambda url, title="": "")
 
     payload = {"news_list": [{
         "title": "반복 노출 기사",
@@ -315,7 +315,7 @@ def test_fetch_saveticker_events_enriches_thin_articles(monkeypatch, tmp_path):
             return self._payload
 
     monkeypatch.setenv("STOCK_REPORT_REPORTS_DIR", str(tmp_path / "reports"))
-    monkeypatch.setattr(sc, "_fetch_saveticker_article_body", lambda url: "상세 기사 본문")
+    monkeypatch.setattr(sc, "_fetch_saveticker_article_body", lambda url, title="": "상세 기사 본문")
 
     payload = {"news_list": [{
         "title": "오라클 급등",
@@ -336,6 +336,40 @@ def test_fetch_saveticker_events_enriches_thin_articles(monkeypatch, tmp_path):
     assert Path(events[0]["raw_path"]).exists()
 
 
+def test_saveticker_article_url_falls_back_to_id():
+    """saveticker API 응답엔 url/link 필드가 없음(2026-07-25 실측) — id 로 직접 구성.
+
+    실측: https://saveticker.com/news/{id} 가 실제 기사 페이지(200)로 확인됨.
+    """
+    assert sc._saveticker_article_url({"id": 176642}) == "https://saveticker.com/news/176642"
+    assert sc._saveticker_article_url({"url": "https://e/x", "id": 1}) == "https://e/x"   # url 있으면 그대로
+    assert sc._saveticker_article_url({}) == ""                                            # id 도 없으면 빈 문자열
+
+
+def test_strip_saveticker_boilerplate_removes_header_and_disclaimer():
+    """실측 페이지 구조(2026-07-25): 메타헤더(제목까지) + 본문 + 고정 면책조항 → 본문만 남아야 함."""
+    title = "반도체 실적 시험대"
+    raw = (
+        f"SAVE PICK · 속보 · $QCOM · 16:09 · 출처: 로이터 · {title}\n"
+        "글로벌 반도체주가 극심한 변동성을 보이는 가운데, 다음 주 SK하이닉스와 삼성전자,\n"
+        "일본 키옥시아 등 3사가 메모리 반도체 시장의 투자심리를 좌우할 실적을 발표한다.\n"
+        f"{sc._SAVETICKER_DISCLAIMER}"
+    )
+    cleaned = sc._strip_saveticker_boilerplate(raw, title)
+    assert "SAVE PICK" not in cleaned
+    assert title not in cleaned
+    assert sc._SAVETICKER_DISCLAIMER not in cleaned
+    assert cleaned.startswith("글로벌 반도체주가")
+    assert cleaned.endswith("실적을 발표한다.")
+
+
+def test_strip_saveticker_boilerplate_returns_original_when_title_not_found():
+    raw = "제목 매칭 안 되는 본문\n" + sc._SAVETICKER_DISCLAIMER
+    cleaned = sc._strip_saveticker_boilerplate(raw, "다른 제목")
+    assert "제목 매칭 안 되는 본문" in cleaned
+    assert sc._SAVETICKER_DISCLAIMER not in cleaned   # 면책조항은 제목 매칭 여부와 무관하게 제거
+
+
 def test_fetch_saveticker_events_enriches_ellipsis_truncated_preview(monkeypatch, tmp_path):
     """summary가 80자 넘어도 '...'로 끝나면(saveticker 자체 미리보기 잘림) 전체 기사를 마저 가져온다.
 
@@ -353,16 +387,16 @@ def test_fetch_saveticker_events_enriches_ellipsis_truncated_preview(monkeypatch
             return self._payload
 
     monkeypatch.setenv("STOCK_REPORT_REPORTS_DIR", str(tmp_path / "reports"))
-    monkeypatch.setattr(sc, "_fetch_saveticker_article_body", lambda url: "전체 기사 본문 — 훨씬 더 긴 내용")
+    monkeypatch.setattr(sc, "_fetch_saveticker_article_body", lambda url, title="": "전체 기사 본문 — 훨씬 더 긴 내용")
 
     thin_summary = ("글로벌 반도체주가 극심한 변동성을 보이는 가운데, 다음 주 SK하이닉스와 삼성전자, "
                     "일본 키옥시아 등 3사가 메모리 반도체 시장의 투자심리를 좌...")
     assert len(thin_summary) >= 80   # 재현하려는 상황(80자 넘지만 잘림) 전제 확인
     payload = {"news_list": [{
+        "id": 999,   # 실제 API 응답엔 url/link 없음 — id 로 URL 구성돼야 enrichment 가 됨
         "title": "반도체 실적 시험대",
         "content": "",
         "group_summary": thin_summary,
-        "url": "https://e/semis",
         "created_at": "2026-07-24",
         "tickers": [{"id": 1, "name": None, "symbol": "MU"}],
         "tag_names": ["실적"],
@@ -372,6 +406,7 @@ def test_fetch_saveticker_events_enriches_ellipsis_truncated_preview(monkeypatch
     events = sc.fetch_saveticker_events()
     assert events
     assert "전체 기사 본문" in events[0]["body_raw"]
+    assert events[0]["url"] == "https://saveticker.com/news/999"
 
 
 def test_fetch_saveticker_events_paginates_news_list(monkeypatch, tmp_path):
@@ -403,7 +438,7 @@ def test_fetch_saveticker_events_paginates_news_list(monkeypatch, tmp_path):
 
     monkeypatch.setenv("STOCK_REPORT_REPORTS_DIR", str(tmp_path / "reports"))
     monkeypatch.setenv("STOCK_COLLECTOR_SAVETICKER_MAX_PAGES", "2")
-    monkeypatch.setattr(sc, "_fetch_saveticker_article_body", lambda url: "")
+    monkeypatch.setattr(sc, "_fetch_saveticker_article_body", lambda url, title="": "")
     monkeypatch.setattr(sc.requests, "get", fake_get)
 
     events = sc.fetch_saveticker_events()
