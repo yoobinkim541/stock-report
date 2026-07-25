@@ -79,14 +79,27 @@ def render():
             st.plotly_chart(charts.allocation_donut(kr_chart_rows), width="stretch",
                             config={"displayModeBar": False})
         with kright:
-            st.caption(f"국내 보유 종목 &nbsp;·&nbsp; 예수금 ₩{kr.get('cash', 0):,.0f}",
+            st.caption(f"국내 보유 종목 &nbsp;·&nbsp; 예수금 ₩{kr.get('cash', 0):,.0f}"
+                      "&nbsp;·&nbsp; 🔍 **행을 클릭**하면 해당 종목 상세 분석으로 이동",
                       unsafe_allow_html=True)
             kdf = pd.DataFrame([{
                 "종목": r["ticker"] or r["name"], "이름": (r["name"] or "")[:18],
                 "평가액(₩)": round(r["value"]), "손익%": round(r["ret"] or 0, 1),
                 "비중%": round(r["value"] / ktotal * 100, 1) if ktotal else 0.0,
             } for r in krows])
-            st.dataframe(kdf, hide_index=True, width="stretch")
+            kev = st.dataframe(kdf, hide_index=True, width="stretch",
+                               on_select="rerun", selection_mode="single-row")
+            ksel = kev.selection.rows if hasattr(kev, "selection") else []
+            if ksel:
+                kpicked = kdf.iloc[ksel[0]]["종목"]
+                if kpicked and kpicked != st.session_state.get("ticker"):
+                    st.session_state["ticker"] = kpicked
+                    st.toast(f"종목 분석 → {kpicked}")
+                    _tp = st.session_state.get("_ticker_page")
+                    if _tp is not None:
+                        st.switch_page(_tp)   # 종목 분석 페이지로 자동 이동
+                    else:
+                        st.rerun()            # 단독 렌더(테스트) 폴백
 
     # Phase 행동 지침 (표시 전용)
     st.info(f"**이번 국면 {ph['emoji']} {ph['label']}** · 권장 DCA 배율 **{ph['dca']}×** "
