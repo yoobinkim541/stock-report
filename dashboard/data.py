@@ -64,14 +64,20 @@ def _merged_usd(snap: dict) -> list[dict]:
 
 
 def portfolio_summary(path: str | None = None) -> dict:
-    """USD 해외북 총액·수익률·종목수 (헤더용) — general+fractional 티커별 합산."""
+    """USD 해외북 총자산(NAV=보유+예수금)·수익률·종목수 (헤더용) — general+fractional 티커별 합산.
+
+    total_usd 는 예수금 포함 NAV(2026-07-25 변경 — 전엔 보유평가액만). return_pct 는 예수금
+    섞으면 왜곡되므로 보유 기준 유지. holdings_usd/cash_usd 로 분해값도 같이 제공.
+    """
     snap = _load_snap(path)
     usd = _merged_usd(snap)
-    total = sum(h.get("value_usd", 0) or 0 for h in usd)
+    holdings = sum(h.get("value_usd", 0) or 0 for h in usd)
     cost = sum(h.get("cost_usd", 0) or 0 for h in usd)
-    ret = (total / cost - 1) * 100 if cost else 0.0
-    return {"total_usd": total, "return_pct": ret, "n_holdings": len(usd),
-            "cost_usd": cost, "pnl_usd": total - cost}
+    cash = float(snap.get("overseas_general", {}).get("cash_usd") or 0)
+    ret = (holdings / cost - 1) * 100 if cost else 0.0
+    return {"total_usd": holdings + cash, "holdings_usd": holdings, "cash_usd": cash,
+            "return_pct": ret, "n_holdings": len(usd),
+            "cost_usd": cost, "pnl_usd": holdings - cost}
 
 
 def load_holdings(path: str | None = None) -> list[dict]:
@@ -841,23 +847,28 @@ def twr_series(records: list, flows_by_date: dict) -> dict:
 
 
 def load_kr_holdings(path: str | None = None) -> dict:
-    """국내(KR)북 보유 — 키움 동기화 스냅샷 domestic 섹션 (원화). graceful {}."""
+    """국내(KR)북 보유 — 동기화 스냅샷 domestic 섹션 (원화, 소스는 DOMESTIC_SYNC_SOURCE — 토스/키움).
+
+    graceful {} (보유·예수금 둘 다 없을 때만). cash 필드는 2026-07-25 추가.
+    """
     snap = _load_snap(path)
     dom = snap.get("domestic") or {}
     rows = []
     for h in dom.get("holdings") or []:
         sh = _try_float(h.get("shares")) or 0
         cur = _try_float(h.get("current_price")) or 0
-        rows.append({"name": h.get("name") or h.get("ticker") or "?",
+        rows.append({"ticker": h.get("ticker") or "", "name": h.get("name") or h.get("ticker") or "?",
                      "shares": sh, "avg": _try_float(h.get("avg_price")),
                      "cur": cur, "value": sh * cur,
                      "ret": _try_float(h.get("return_pct")),
                      "pnl": _try_float(h.get("pnl_krw"))})
-    if not rows:
-        return {}
+    cash = float(dom.get("cash_krw") or 0)
     total = sum(r["value"] for r in rows)
-    return {"rows": rows, "total": total,
-            "last_sync": snap.get("last_domestic_sync")}
+    if not rows and not cash:
+        return {}
+    return {"rows": rows, "total": total, "cash": cash, "total_with_cash": total + cash,
+            "last_sync": snap.get("last_domestic_sync"),
+            "source": snap.get("last_domestic_sync_source")}
 
 
 # ── 가격 알림 (bot/price_alerts store 재사용 — 차트→알림 연동) ─────────────────

@@ -1,4 +1,5 @@
-"""홈 — 글랜스 랜딩 (포트폴리오 중심). 히어로 KPI + 배분 도넛 + 클릭 보유표 + Phase + 오늘 일정."""
+"""홈 — 글랜스 랜딩 (포트폴리오 중심). 히어로 KPI(예수금 포함 NAV) + USD 배분 도넛(클릭 보유표)
++ 국내 배분 도넛(보유표, 2026-07-25 추가) + Phase + 오늘 일정."""
 from __future__ import annotations
 
 import os
@@ -20,7 +21,8 @@ def render():
     theme.render(theme.ticker_hero_html(
         symbol="PORT", name="내 포트폴리오", price=summ["total_usd"],
         change=summ.get("pnl_usd"), change_pct=summ["return_pct"],
-        asof="USD 해외북 · 스냅샷 기준", currency="USD"))
+        asof=f"USD 해외북 · 예수금 ${summ.get('cash_usd', 0):,.0f} 포함 · 스냅샷 기준",
+        currency="USD"))
 
     c1, c2, c3 = st.columns(3)
     c1.metric("Phase", f"{ph['emoji']} {ph['label']}")
@@ -63,6 +65,28 @@ def render():
                         st.rerun()            # 단독 렌더(테스트) 폴백
     else:
         st.warning("보유 데이터 없음 — portfolio_snapshot 확인")
+
+    kr = data.load_kr_holdings()
+    if kr.get("rows"):
+        st.divider()
+        kleft, kright = st.columns([1, 1.3])
+        krows = kr["rows"]
+        ktotal = kr.get("total") or 0
+        with kleft:
+            st.caption("🇰🇷 국내 배분")
+            kr_chart_rows = [{"ticker": r["ticker"] or r["name"], "value": r["value"], "name": r["name"]}
+                             for r in krows]
+            st.plotly_chart(charts.allocation_donut(kr_chart_rows), width="stretch",
+                            config={"displayModeBar": False})
+        with kright:
+            st.caption(f"국내 보유 종목 &nbsp;·&nbsp; 예수금 ₩{kr.get('cash', 0):,.0f}",
+                      unsafe_allow_html=True)
+            kdf = pd.DataFrame([{
+                "종목": r["ticker"] or r["name"], "이름": (r["name"] or "")[:18],
+                "평가액(₩)": round(r["value"]), "손익%": round(r["ret"] or 0, 1),
+                "비중%": round(r["value"] / ktotal * 100, 1) if ktotal else 0.0,
+            } for r in krows])
+            st.dataframe(kdf, hide_index=True, width="stretch")
 
     # Phase 행동 지침 (표시 전용)
     st.info(f"**이번 국면 {ph['emoji']} {ph['label']}** · 권장 DCA 배율 **{ph['dca']}×** "

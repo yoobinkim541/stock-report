@@ -38,6 +38,19 @@ def test_portfolio_summary(tmp_path):
     assert abs(s["return_pct"] - (340 / 300 - 1) * 100) < 1e-6
 
 
+def test_portfolio_summary_includes_cash_in_total_not_return(tmp_path):
+    """total_usd 는 예수금 포함 NAV, return_pct 는 보유 기준 유지(현금 섞으면 왜곡 — 2026-07-25)."""
+    snap = tmp_path / "portfolio_snapshot.json"
+    snap.write_text(json.dumps({"overseas_general": {
+        "cash_usd": 69.78,
+        "holdings_usd": [{"ticker": "MSFT", "value_usd": 240, "cost_usd": 200}],
+    }}), encoding="utf-8")
+    s = data.portfolio_summary(str(snap))
+    assert abs(s["total_usd"] - (240 + 69.78)) < 1e-6
+    assert abs(s["holdings_usd"] - 240) < 1e-9 and abs(s["cash_usd"] - 69.78) < 1e-9
+    assert abs(s["return_pct"] - (240 / 200 - 1) * 100) < 1e-6   # 예수금 미포함
+
+
 def test_holding_position(tmp_path):
     """보유 포지션 조회 — 평단·주수·손익 (J2 · 해외 general)."""
     snap = tmp_path / "portfolio_snapshot.json"
@@ -1243,6 +1256,26 @@ def test_load_kr_holdings(tmp_path):
     empty = tmp_path / "e.json"
     empty.write_text("{}")
     assert data.load_kr_holdings(str(empty)) == {}
+
+
+def test_load_kr_holdings_includes_cash(tmp_path):
+    """cash_krw 포함 + 예수금만 있고 보유 종목 없어도 빈 dict 아님(2026-07-25)."""
+    p = tmp_path / "snap.json"
+    p.write_text(json.dumps({"domestic": {
+        "cash_krw": 41011,
+        "holdings": [{"ticker": "0167A0", "name": "SOL AI반도체TOP2플러스",
+                     "avg_price": 20681, "current_price": 17185, "shares": 23,
+                     "pnl_krw": -80415, "return_pct": -16.91}],
+    }}), encoding="utf-8")
+    kr = data.load_kr_holdings(str(p))
+    assert kr["cash"] == 41011.0
+    assert abs(kr["total_with_cash"] - (kr["total"] + 41011.0)) < 1e-6
+    assert kr["rows"][0]["ticker"] == "0167A0"
+
+    cash_only = tmp_path / "cash_only.json"
+    cash_only.write_text(json.dumps({"domestic": {"cash_krw": 5000, "holdings": []}}))
+    kr2 = data.load_kr_holdings(str(cash_only))
+    assert kr2 != {} and kr2["cash"] == 5000.0 and kr2["rows"] == []
 
 
 def test_backtest_persist_roundtrip(tmp_path, monkeypatch):

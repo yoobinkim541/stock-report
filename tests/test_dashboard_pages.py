@@ -620,6 +620,26 @@ def test_portfolio_shows_tier3_gate():
     assert "Tier3 구조적 레버리지 게이트" in caps and "슬리브 ✅ ON" in caps
 
 
+def test_portfolio_shows_kr_section_with_cash(monkeypatch):
+    """포트폴리오 — 국내(KR) 섹션에 예수금·소스명 표시 (2026-07-25 추가)."""
+    body_script = _STUBS + '''
+data.load_kr_holdings = lambda *a, **k: {
+    "rows": [{"ticker": "0167A0", "name": "SOL AI반도체TOP2플러스", "shares": 23,
+              "avg": 20681.3, "cur": 17185.0, "value": 395255.0, "ret": -16.91, "pnl": -80415.0}],
+    "total": 395255.0, "cash": 41011.0, "total_with_cash": 436266.0,
+    "last_sync": "2026-07-25T04:35:00", "source": "toss"}
+from dashboard.pages import portfolio
+portfolio.render()
+'''
+    at = AppTest.from_string(body_script, default_timeout=30)
+    at.run()
+    assert not at.exception, str(at.exception)
+    body = " ".join(str(getattr(m, "value", "")) for m in at.markdown)
+    assert "토스 동기화" in body
+    metrics = {m.label: m.value for m in at.metric}
+    assert metrics.get("예수금") == "₩41,011"
+
+
 def test_home_has_donut_and_holdings():
     """홈: 도넛(plotly) + 보유표 + KPI 가 렌더되는지(요소 존재)."""
     at = AppTest.from_string(_script("from dashboard.pages import home", "home.render()"),
@@ -629,6 +649,28 @@ def test_home_has_donut_and_holdings():
     assert len(at.metric) >= 3               # Phase·낙폭·DCA (총액은 히어로 HTML)
     assert len(at.dataframe) >= 1            # 보유표
     assert any("국면" in str(i.value) for i in at.info)  # Phase 행동 박스
+
+
+def test_home_shows_kr_donut_and_holdings_with_cash():
+    """홈 — 국내(KR) 배분 도넛+보유표+예수금 (2026-07-25 추가)."""
+    body_script = _STUBS + '''
+data.load_kr_holdings = lambda *a, **k: {
+    "rows": [{"ticker": "0167A0", "name": "SOL AI반도체TOP2플러스", "shares": 23,
+              "avg": 20681.3, "cur": 17185.0, "value": 395255.0, "ret": -16.91, "pnl": -80415.0}],
+    "total": 395255.0, "cash": 41011.0, "total_with_cash": 436266.0,
+    "last_sync": "2026-07-25T04:35:00"}
+from dashboard.pages import home
+home.render()
+'''
+    at = AppTest.from_string(body_script, default_timeout=30)
+    at.run()
+    assert not at.exception, str(at.exception)
+    assert any("국내 배분" in str(c.value) for c in at.caption)
+    caps = " ".join(str(c.value) for c in at.caption)
+    assert "예수금 ₩41,011" in caps
+    assert len(at.dataframe) >= 2                          # USD 보유표 + KR 보유표
+    kr_df = at.dataframe[-1].value
+    assert "0167A0" in kr_df["종목"].values
 
 
 def test_home_shows_market_map():

@@ -37,22 +37,24 @@ def render():
 
 
 def _headline(hist, rows):
-    """총액($·₩) + 기간 수익 분해 (환율 기여 — 원화 투자자 관점)."""
+    """총액($·₩) + 예수금 + 기간 수익 분해 (환율 기여 — 원화 투자자 관점)."""
     fx = data.fx_attribution(hist, days=30)
+    cash_usd = data.portfolio_summary().get("cash_usd", 0) or 0
     total = sum((r.get("value") or 0) for r in rows)
     last = hist[-1] if hist else {}
-    m = st.columns(4)
+    m = st.columns(5)
     m[0].metric("총 평가액 ($)", data.f_usd(total, 0))
+    m[1].metric("예수금 ($)", data.f_usd(cash_usd, 0))
     krw = last.get("total_krw")
-    m[1].metric("총 평가액 (₩)", f"₩{krw:,.0f}" if krw else "—",
+    m[2].metric("총 평가액 (₩)", f"₩{krw:,.0f}" if krw else "—",
                 help=f"환율 {last.get('exchange_rate', 0):,.0f}원 기준 (일별 기록)")
     if fx:
-        m[2].metric(f"수익률 $ ({fx['window_days']}일)", f"{fx['usd_ret']:+.2f}%")
-        m[3].metric("환율 기여", f"{fx['fx_ret']:+.2f}%p",
+        m[3].metric(f"수익률 $ ({fx['window_days']}일)", f"{fx['usd_ret']:+.2f}%")
+        m[4].metric("환율 기여", f"{fx['fx_ret']:+.2f}%p",
                     help=f"₩수익 {fx['krw_ret']:+.2f}% 중 환차 몫 — "
                          f"{fx.get('from')}~{fx.get('to')}")
     else:
-        m[2].metric("수익률", "—", help="일별 기록 2일 이상 필요")
+        m[3].metric("수익률", "—", help="일별 기록 2일 이상 필요")
 
 
 def _growth_section(hist):
@@ -262,28 +264,33 @@ def _holdings_table(rows):
 
 
 def _kr_section():
-    """🇰🇷 국내(KR)북 — 키움 잔고 동기화 표시 (리스크 모델은 USD북 한정 — 분리 명시)."""
+    """🇰🇷 국내(KR)북 — 국내 잔고 동기화 표시 (리스크 모델은 USD북 한정 — 분리 명시)."""
     kr = data.load_kr_holdings()
     if not kr:
         return
-    st.markdown("##### 🇰🇷 국내 보유 — 키움 동기화")
-    k1, k2 = st.columns([1, 2.2], vertical_alignment="center")
+    src = {"toss": "토스", "kiwoom": "키움"}.get(kr.get("source"), kr.get("source") or "?")
+    st.markdown(f"##### 🇰🇷 국내 보유 — {src} 동기화")
+    k1, k2, k3 = st.columns([1, 1, 2.2], vertical_alignment="center")
     k1.metric("국내 평가액", f"₩{kr['total']:,.0f}",
-              help=f"마지막 동기화 {kr.get('last_sync') or '—'} (평일 08:35 KST 크론)")
-    with k2:
-        st.dataframe(pd.DataFrame([{
-            "종목": r["name"], "주수": r["shares"], "평단": r["avg"],
-            "현재가": r["cur"], "평가액": r["value"], "손익%": r["ret"],
-        } for r in kr["rows"]]), hide_index=True, width="stretch",
-            height=min(250, 44 + 35 * len(kr["rows"])),
-            column_config={
-                "평단": st.column_config.NumberColumn(format="localized"),
-                "현재가": st.column_config.NumberColumn(format="localized"),
-                "평가액": st.column_config.NumberColumn(format="localized"),
-                "손익%": st.column_config.NumberColumn(format="%+.1f%%"),
-            })
+              help=f"마지막 동기화 {kr.get('last_sync') or '—'} (평일 자동 동기화)")
+    k2.metric("예수금", f"₩{kr.get('cash', 0):,.0f}")
+    with k3:
+        if kr["rows"]:
+            st.dataframe(pd.DataFrame([{
+                "종목": r["name"], "주수": r["shares"], "평단": r["avg"],
+                "현재가": r["cur"], "평가액": r["value"], "손익%": r["ret"],
+            } for r in kr["rows"]]), hide_index=True, width="stretch",
+                height=min(250, 44 + 35 * len(kr["rows"])),
+                column_config={
+                    "평단": st.column_config.NumberColumn(format="localized"),
+                    "현재가": st.column_config.NumberColumn(format="localized"),
+                    "평가액": st.column_config.NumberColumn(format="localized"),
+                    "손익%": st.column_config.NumberColumn(format="%+.1f%%"),
+                })
+        else:
+            st.caption("보유 종목 없음 — 예수금만 있음")
     st.caption("위 리스크·성장·리밸런스 분석은 **USD 해외북 한정** — 국내북은 잔고 표시만"
-               "(키움 kt00018 동기화·기록 전용)")
+               "(단일소스 동기화·기록 전용)")
 
 
 def _income_section(rows):
