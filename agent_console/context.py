@@ -306,6 +306,7 @@ def world_memory_rows(limit: int = 50, query: str = "") -> list[dict]:
             "symbols": r.get("tickers") or [],
             "impact": r.get("importance"),
             "confidence": None,
+            "url": r.get("url"),
             "metadata": {},
         } for r in rows]
         if mapped:

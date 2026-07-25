@@ -37,6 +37,28 @@ def test_parse_valid_label():
     assert lb["published_at"] == "2026-07-06T10:00:00+09:00"
 
 
+def test_parse_labels_carries_url_from_event():
+    """url 은 LLM 출력이 아니라 원본 이벤트에서 그대로 전달(2026-07-25 — World Memory 원문링크용)."""
+    events = [{"id": "e1", "title": "엔비디아 실적 서프라이즈", "tags": ["$NVDA"],
+              "published_at": "2026-07-06T10:00:00+09:00", "url": "https://example.com/nvda"}]
+    out = NL.parse_labels(
+        '{"id": "e1", "tickers": ["NVDA"], "event_type": "실적", "direction": 1, "strength": 4}',
+        events)
+    assert out[0]["url"] == "https://example.com/nvda"
+    # url 없는 이벤트는 빈 문자열(없음) — 예외 없음
+    out2 = NL.parse_labels(
+        '{"id": "e1", "tickers": ["NVDA"], "event_type": "실적", "direction": 1, "strength": 4}',
+        _events())
+    assert out2[0]["url"] == ""
+
+
+def test_heuristic_labels_carries_url_from_event():
+    events = [{"id": "e1", "title": "엔비디아 실적 서프라이즈", "tags": ["$NVDA"],
+              "published_at": "2026-07-06T10:00:00+09:00", "url": "https://example.com/nvda"}]
+    out = NL.heuristic_labels(events)
+    assert out and out[0]["url"] == "https://example.com/nvda"
+
+
 def test_parse_rejects_hallucinated_ticker():
     # e1 태그는 NVDA 뿐 — TSLA 라벨은 환각 → 폐기 (fact guard 철학)
     out = NL.parse_labels(

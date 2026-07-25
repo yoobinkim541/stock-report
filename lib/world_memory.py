@@ -178,7 +178,8 @@ def _rows_to_issues(rows) -> list[dict]:
         out.append({"event_id": r[0], "issue_date": r[1], "category": r[2],
                     "importance": r[3], "title": r[4],
                     "tickers": payload.get("tickers") or [],
-                    "body": (payload.get("body") or "")[:4000], "source": payload.get("source")})
+                    "body": (payload.get("body") or "")[:4000], "source": payload.get("source"),
+                    "url": payload.get("url") or None})
     return out
 
 
@@ -279,7 +280,8 @@ def ingest_from_labels(labels: list[dict] | None = None) -> int:
                 importance=_IMPORTANCE_BY_STRENGTH.get(int(lb.get("strength", 0) or 0), "low"),
                 issue_date=str(lb.get("published_at") or "")[:10] or None,
                 tickers=tickers, source="news_llm_label", body=str(lb.get("body") or ""),
-                payload={"direction": direction, "strength": lb.get("strength")})
+                payload={"direction": direction, "strength": lb.get("strength"),
+                        "url": str(lb.get("url") or "")})
             if eid:
                 added += 1
                 for t in tickers[:3]:            # 티커별 스토리 상태 체인 (방향 있으면)

@@ -68,6 +68,16 @@ def test_ingest_from_labels(wm):
     assert wm.story_chain("ticker:005930") == []                       # direction=0 → 체인 없음
 
 
+def test_ingest_from_labels_carries_url(wm):
+    """라벨의 url 이 payload 를 거쳐 timeline() 조회에도 그대로 노출(2026-07-25 — 원문링크용)."""
+    labels = [{"id": "a", "title_head": "MSFT 클라우드 성장", "event_type": "실적", "direction": 1,
+              "strength": 4, "tickers": ["MSFT"], "published_at": "2026-07-10T10:00:00+09:00",
+              "url": "https://example.com/msft-cloud"}]
+    assert wm.ingest_from_labels(labels) == 1
+    hits = wm.timeline("MSFT")
+    assert hits and hits[0]["url"] == "https://example.com/msft-cloud"
+
+
 def test_views_world_timeline_graceful(wm, monkeypatch):
     from dashboard import views
     wm.log_issue("테스트 이슈", issue_date="2026-07-10", tickers=["NVDA"])

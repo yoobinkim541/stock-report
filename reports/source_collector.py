@@ -582,7 +582,10 @@ def _saveticker_article_record(item: dict, base: str) -> dict:
     content = str(item.get("content") or "").strip()
     summary = str(item.get("group_summary") or "").strip()
     body_raw = _combine_body_raw(content, summary)
-    if len(body_raw) < 80 and url:
+    # saveticker 자체 미리보기가 80~90자 근처서 "..."로 잘려 오는 경우가 흔해 길이만으로는
+    # 거의 안 걸림 — 말줄임표로 끝나면 길이 무관하게 전체 기사를 마저 가져온다(2026-07-25).
+    looks_truncated = body_raw.endswith("...") or body_raw.endswith("…")
+    if (len(body_raw) < 80 or looks_truncated) and url:
         body_raw = _combine_body_raw(content, summary, _fetch_saveticker_article_body(url))
     if not body_raw:
         body_raw = _combine_body_raw(title, content, summary) or title

@@ -488,6 +488,12 @@ def _memory_detail(event, rows):
     r = rows[sel[0]]
     symbols = ", ".join(r.get("symbols") or []) or "—"
     body_html = html.escape(r.get("body") or "").replace("\n", "<br>") or "본문 없음"
+    url = str(r.get("url") or "")
+    link_html = ""
+    if url.startswith("http://") or url.startswith("https://"):   # href 삽입 전 스킴 검증(안전)
+        link_html = (f'<div style="margin-top:10px">'
+                    f'<a href="{html.escape(url, quote=True)}" target="_blank" rel="noopener noreferrer" '
+                    f'style="color:{theme.BLUE};font-size:0.85rem">원문 보기 →</a></div>')
     st.markdown(
         f'<div style="background:{theme.PANEL};border:1px solid {theme.BORDER};'
         f'border-left:4px solid {theme.BLUE};border-radius:12px;padding:12px 16px;margin-top:8px">'
@@ -495,7 +501,8 @@ def _memory_detail(event, rows):
         f'<b style="font-size:1.05rem">{html.escape(r.get("title") or "제목 없음")}</b>'
         f'<span style="color:{theme.MUTED};font-size:0.78rem">{r.get("observed_at") or ""} · '
         f'{r.get("source") or ""} · {symbols} · {r.get("impact") or ""}</span></div>'
-        f'<div style="margin-top:8px;white-space:pre-wrap;font-size:0.9rem">{body_html}</div></div>',
+        f'<div style="margin-top:8px;white-space:pre-wrap;font-size:0.9rem">{body_html}</div>'
+        f'{link_html}</div>',
         unsafe_allow_html=True)
 
 

@@ -336,6 +336,44 @@ def test_fetch_saveticker_events_enriches_thin_articles(monkeypatch, tmp_path):
     assert Path(events[0]["raw_path"]).exists()
 
 
+def test_fetch_saveticker_events_enriches_ellipsis_truncated_preview(monkeypatch, tmp_path):
+    """summary가 80자 넘어도 '...'로 끝나면(saveticker 자체 미리보기 잘림) 전체 기사를 마저 가져온다.
+
+    2026-07-25 회귀방지 — saveticker 미리보기가 대개 80~90자서 '...'로 잘려 오는데,
+    예전엔 len<80 조건에 안 걸려서 이 잘린 미리보기가 그대로 World Memory 까지 흘러갔음.
+    """
+    class FakeResponse:
+        def __init__(self, payload):
+            self._payload = payload
+
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return self._payload
+
+    monkeypatch.setenv("STOCK_REPORT_REPORTS_DIR", str(tmp_path / "reports"))
+    monkeypatch.setattr(sc, "_fetch_saveticker_article_body", lambda url: "전체 기사 본문 — 훨씬 더 긴 내용")
+
+    thin_summary = ("글로벌 반도체주가 극심한 변동성을 보이는 가운데, 다음 주 SK하이닉스와 삼성전자, "
+                    "일본 키옥시아 등 3사가 메모리 반도체 시장의 투자심리를 좌...")
+    assert len(thin_summary) >= 80   # 재현하려는 상황(80자 넘지만 잘림) 전제 확인
+    payload = {"news_list": [{
+        "title": "반도체 실적 시험대",
+        "content": "",
+        "group_summary": thin_summary,
+        "url": "https://e/semis",
+        "created_at": "2026-07-24",
+        "tickers": [{"id": 1, "name": None, "symbol": "MU"}],
+        "tag_names": ["실적"],
+    }]}
+    monkeypatch.setattr(sc.requests, "get", lambda *args, **kwargs: FakeResponse(payload))
+
+    events = sc.fetch_saveticker_events()
+    assert events
+    assert "전체 기사 본문" in events[0]["body_raw"]
+
+
 def test_fetch_saveticker_events_paginates_news_list(monkeypatch, tmp_path):
     class FakeResponse:
         def __init__(self, payload):

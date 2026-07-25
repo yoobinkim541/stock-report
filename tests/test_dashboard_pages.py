@@ -253,6 +253,37 @@ def test_ai_console_quick_prompt_list_stays_small():
 
 
 
+def test_ai_console_memory_detail_shows_source_link(monkeypatch):
+    """World Memory 상세카드 — url 있으면 '원문 보기' 링크(2026-07-25), 없으면 링크 생략."""
+    from dashboard.pages import ai_console
+    calls = []
+    monkeypatch.setattr(ai_console.st, "markdown", lambda html_str, **k: calls.append(html_str))
+
+    class _Sel:
+        rows = [0]
+
+    class _Event:
+        selection = _Sel()
+
+    rows = [{"title": "MSFT 클라우드 성장", "observed_at": "2026-07-25", "source": "news_llm_label",
+            "symbols": ["MSFT"], "impact": "high", "body": "본문 텍스트",
+            "url": "https://example.com/msft"}]
+    ai_console._memory_detail(_Event(), rows)
+    assert calls and "원문 보기" in calls[0] and 'href="https://example.com/msft"' in calls[0]
+    assert 'target="_blank"' in calls[0] and 'rel="noopener noreferrer"' in calls[0]
+
+    calls.clear()
+    rows_no_url = [{**rows[0], "url": None}]
+    ai_console._memory_detail(_Event(), rows_no_url)
+    assert calls and "원문 보기" not in calls[0]
+
+    # 안전: javascript: 스킴 등은 href 로 절대 안 들어가야 함
+    calls.clear()
+    rows_bad_url = [{**rows[0], "url": "javascript:alert(1)"}]
+    ai_console._memory_detail(_Event(), rows_bad_url)
+    assert calls and "javascript:" not in calls[0]
+
+
 def test_ai_console_context_glance_items_are_compact():
     from dashboard.pages import ai_console
 
