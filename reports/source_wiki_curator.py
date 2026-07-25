@@ -302,22 +302,26 @@ def build_wiki_pages_from_events(events: list[dict], now: datetime | None = None
     return pages
 
 
-def curate_recent_source_wiki(hours: int = 48, limit: int = 8) -> dict:
+def curate_recent_source_wiki(hours: int = 48, limit: int = 0) -> dict:
+    """limit<=0 이면 계산된 그룹을 전부 저장(무제한). LLM enrich 비용은 이미 그룹 계산
+    단계에서 지불되므로(2026-07-25 확인), 저장 단계에서만 자르던 상위-N 캡은 소수
+    거시 주제가 매번 상위권을 독점해 종목별/유형별 신규 페이지가 영구히 저장되지 않는
+    문제를 낳았음 — 캡을 없애 모든 후보 그룹이 위키에 반영되게 한다."""
     from agent_console import wiki
     from reports.source_collector import load_recent_events
 
     events = load_recent_events(hours=max(1, int(hours)))
     pages = build_wiki_pages_from_events(events)
-    saved = []
-    for page in pages[: max(1, int(limit))]:
-        saved.append(wiki.upsert_page(page))
+    limit = int(limit)
+    rows = pages if limit <= 0 else pages[:max(1, limit)]
+    saved = [wiki.upsert_page(page) for page in rows]
     return {"ok": True, "events": len(events), "pages": len(pages), "saved": len(saved), "page_ids": [p.get("id") for p in saved]}
 
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Build source-backed wiki pages from recent source-cache events.")
     parser.add_argument("--hours", type=int, default=48)
-    parser.add_argument("--limit", type=int, default=8)
+    parser.add_argument("--limit", type=int, default=0, help="0 = 무제한(전체 저장)")
     args = parser.parse_args(argv)
     result = curate_recent_source_wiki(hours=args.hours, limit=args.limit)
     print(f"source wiki curator: events={result['events']} pages={result['pages']} saved={result['saved']}")

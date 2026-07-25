@@ -130,3 +130,34 @@ def test_build_wiki_pages_from_events_links_pages_sharing_events():
 
     assert by_id["source-topic-기술-ai"]["links"] == ["source-ticker-nvda"]
     assert by_id["source-ticker-nvda"]["links"] == ["source-topic-기술-ai"]
+
+
+def test_curate_recent_source_wiki_limit_zero_saves_all_groups(monkeypatch):
+    """2026-07-25 회귀방지 — 소수 거시 주제가 이벤트 수에서 항상 상위권을 독점해,
+    limit 캡이 있으면 종목별/유형별 신규 페이지가 영구히 저장되지 않는 문제가 있었음.
+    limit<=0 은 계산된 그룹을 전부 저장(무제한)해야 한다."""
+    events = [
+        {"source": "saveticker", "title": f"이벤트 {i}", "url": f"https://saveticker.com/{i}",
+         "body_raw": "내용", "topic": topic, "tags": [topic],
+         "classification": {"kind": "article", "topic": topic, "trust": "B"}}
+        for i, topic in enumerate(["금리/채권", "금리/채권", "유가/원자재", "유가/원자재",
+                                    "기술/AI", "기술/AI", "정책/재정", "정책/재정",
+                                    "인플레/고용", "인플레/고용"])
+    ]
+
+    import reports.source_collector as source_collector
+    from agent_console import wiki
+
+    monkeypatch.setattr(source_collector, "load_recent_events", lambda hours: events)
+    saved_ids = []
+    monkeypatch.setattr(wiki, "upsert_page", lambda page: saved_ids.append(page["id"]) or page)
+
+    result = swc.curate_recent_source_wiki(hours=48, limit=0)
+    assert result["pages"] == 5
+    assert result["saved"] == 5
+    assert len(saved_ids) == 5
+
+    saved_ids.clear()
+    result = swc.curate_recent_source_wiki(hours=48, limit=2)
+    assert result["saved"] == 2
+    assert len(saved_ids) == 2

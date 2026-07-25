@@ -75,12 +75,18 @@ World Memory UI(대시보드 "시장 기억" 탭)는 검색(제목·본문·티�
 
 | 무엇을 | 스크립트/함수 | 빈도 | LLM 사용 |
 |---|---|---|---|
-| 페이지 신규 생성/갱신 | `reports/source_wiki_curator.py` | **30분마다** (`8,38 * * * *`) | O — 이벤트 3개+ 그룹이면 LLM이 제목/요약/태그 생성 (`SOURCE_WIKI_LLM_ENABLED`, 기본 켜짐) |
+| 페이지 신규 생성/갱신 | `reports/source_wiki_curator.py` | **30분마다** (`8,38 * * * *`, `--limit 0`=무제한) | O — 이벤트 3개+ 그룹이면 LLM이 제목/요약/태그 생성 (`SOURCE_WIKI_LLM_ENABLED`, 기본 켜짐) |
 | 스테일 페이지 아카이브 | `agent_console.wiki.archive_stale_pages()` | 30분마다 (`8,38 * * * *`) | X — 규칙(30일 이상 미사용 시 자동 아카이브) |
 | 헬스체크 기반 archive/delete/reactivate | `reports/wiki_health_check.py` | **2시간마다** (`15 */2 * * *`) | O — `run_llm_health_review()`가 판단 |
 | 대화 중 merge/split/delete/create | `agent_console/wiki.py: auto_curate_from_chat()` | **크론 아님 — AI 콘솔 채팅마다 즉시** | O |
 
 위키 쓰기 규약(신뢰 등급, `verification_status`, source-backed 승격 조건 등)은 [`shared-agent-memory.md`의 "LLM Wiki 운영 규약"](shared-agent-memory.md) 참조.
+
+> **2026-07-25**: `source_wiki_curator`가 매 실행마다 이벤트 개수 상위 N개 그룹만 저장하던
+> `--limit 8` 캡을 제거함(`--limit 0`=무제한). 소수 거시 주제(중동/전쟁·기술/AI 등)가
+> 이벤트 수에서 항상 상위권을 독점해, 종목별/유형별 신규 페이지가 하루 넘게 하나도
+> 저장되지 못하는 문제가 있었음 — LLM enrich 비용은 그룹 계산 단계에서 이미 지불되므로
+> 저장 캡 제거의 추가 비용은 거의 없음.
 
 ## 5. 전체 크론 빈도 한눈에
 
