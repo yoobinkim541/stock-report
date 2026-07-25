@@ -433,6 +433,22 @@ def main():
             logger.warning("타임스탬프 갱신 실패: %s", e)
         return
 
+    # DOMESTIC_SYNC_SOURCE 가 다른 소스(예: toss)로 명시돼 있으면 국내 스냅샷 쓰기는 건너뜀
+    # (2026-07-25 — 토스로 국내주식 보유 시 이중 writer 충돌 방지. 미지정이면 기존처럼 kiwoom
+    # 이 기본 — 여기서 처음 도입된 개념이라 opt-in 이 아니라 opt-out 으로 하위호환 유지).
+    import sys
+    if PROJECT_DIR not in sys.path:
+        sys.path.insert(0, PROJECT_DIR)
+    from lib import domestic_snapshot as dsnap
+    other_source = dsnap.apply_source() not in ("", "kiwoom")
+    if other_source:
+        logger.info("DOMESTIC_SYNC_SOURCE=%s — 키움 국내 스냅샷 쓰기 생략(보고만)", dsnap.apply_source())
+        try:
+            _touch_sync_timestamp()
+        except Exception as e:
+            logger.warning("타임스탬프 갱신 실패: %s", e)
+        return
+
     summary = update_portfolio(holdings)
     logger.info("업데이트 완료:\n%s", summary)
 

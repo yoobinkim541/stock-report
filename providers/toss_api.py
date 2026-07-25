@@ -190,6 +190,14 @@ def holdings(account_seq=None) -> list[dict]:
     return normalize_holdings(holdings_raw(account_seq))
 
 
+def buying_power(currency: str = "KRW", account_seq=None) -> float | None:
+    """매수가능금액(예수금) — GET /api/v1/buying-power. currency: 'KRW'|'USD'. 실패 → None."""
+    res = _result(_get("/api/v1/buying-power", params={"currency": currency}, account_seq=account_seq))
+    if isinstance(res, dict) and res.get("cashBuyingPower") is not None:
+        return _dec(res.get("cashBuyingPower"))
+    return None
+
+
 def prices(symbols: list[str]) -> dict[str, float]:
     """현재가 — {symbol: last}. 최대 200개. 실패 → {}."""
     if not symbols:

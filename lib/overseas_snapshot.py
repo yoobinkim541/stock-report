@@ -79,6 +79,7 @@ def update_overseas_holdings(holdings: list[dict], *, source: str,
         existing = {str(h.get("ticker", "")).upper(): h
                     for h in sect.get("holdings_usd", []) if h.get("ticker")}
         had_prior = bool(snap.get("last_overseas_sync"))
+        fresh = {}
         for h in holdings:
             tk = str(h.get("ticker", "")).upper()
             if not tk:
@@ -95,8 +96,24 @@ def update_overseas_holdings(holdings: list[dict], *, source: str,
                     "market": "US", "currency": "USD", "confirmed": True,
                     "note": f"{source} 해외 잔고 동기화 수량 변화",
                 })
-            existing[tk] = h
-        sect["holdings_usd"] = list(existing.values())
+            fresh[tk] = h
+        # 전량매도 감지 — 이전엔 있었는데 이번 조회엔 없는 종목(브로커 실제 보유가 곧 진실).
+        # 예전엔 fresh 에 없는 종목을 그냥 existing 에 남겨둬서 매도해도 스냅샷에서 안 지워졌음
+        # (ORCX 전량매도 미반영 사례, 2026-07-25).
+        for tk, old_h in existing.items():
+            if tk in fresh:
+                continue
+            old_shares = float(old_h.get("shares", 0) or 0)
+            if had_prior and old_shares > 1e-8:
+                trade_recs.append({
+                    "ticker": tk, "side": "sell", "qty": old_shares,
+                    "price": old_h.get("current_price_usd") or old_h.get("avg_price_usd"),
+                    "avg_price": old_h.get("avg_price_usd"),
+                    "account": source, "source": f"{source}_sync",
+                    "market": "US", "currency": "USD", "confirmed": True,
+                    "note": f"{source} 해외 잔고 동기화 — 전량매도 감지(스냅샷에서 제거)",
+                })
+        sect["holdings_usd"] = list(fresh.values())   # 최신 조회로 완전 대체(merge 아님)
         snap["last_overseas_sync"] = datetime.now().isoformat()
         snap["last_overseas_sync_source"] = source
         safe_io.atomic_write_json(path, snap)
