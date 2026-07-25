@@ -346,6 +346,36 @@ def test_kiwoom_parse_us_balance():
     assert K._parse_us_balance({}) == []
 
 
+def test_kiwoom_parse_us_deposit():
+    import kiwoom_sync_rest as K
+    result = {"return_code": 0, "result_list": [
+        {"crnc_code": "USD", "fc_entra": "77.34", "fc_ord_alowa": "69.78"},
+    ]}
+    assert K._parse_us_deposit(result) == pytest.approx(69.78)
+    assert K._parse_us_deposit({"result_list": []}) is None
+    assert K._parse_us_deposit({}) is None
+
+
+def test_update_overseas_holdings_writes_cash_usd(tmp_path, monkeypatch):
+    from lib import overseas_snapshot as O
+    snap_path = tmp_path / "portfolio_snapshot.json"
+    snap_path.write_text(json.dumps({"snapshot_date": "2026-07-07"}), encoding="utf-8")
+    from lib import trade_events
+    monkeypatch.setattr(trade_events, "record_trade", lambda **kw: None)
+
+    rows = [{"ticker": "MSFT", "name": "마이크로소프트", "shares": 1,
+             "avg_price_usd": 400.0, "current_price_usd": 440.0}]
+    summary = O.update_overseas_holdings(rows, source="kiwoom", cash_usd=69.78, portfolio_path=str(snap_path))
+    assert "예수금" in summary
+    snap = json.loads(snap_path.read_text(encoding="utf-8"))
+    assert snap["overseas_general"]["cash_usd"] == 69.78
+
+    # cash_usd=None 이면 기존 값 유지(덮어쓰지 않음)
+    O.update_overseas_holdings(rows, source="kiwoom", cash_usd=None, portfolio_path=str(snap_path))
+    snap2 = json.loads(snap_path.read_text(encoding="utf-8"))
+    assert snap2["overseas_general"]["cash_usd"] == 69.78
+
+
 def test_kiwoom_domestic_write_skipped_when_other_source_active(monkeypatch):
     """DOMESTIC_SYNC_SOURCE=toss 면 키움 국내 스냅샷 쓰기(update_portfolio)를 건너뜀.
 

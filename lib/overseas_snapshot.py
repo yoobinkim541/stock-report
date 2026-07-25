@@ -56,11 +56,13 @@ def diff_holdings(current: list[dict], fetched: list[dict]) -> list[str]:
 
 
 def update_overseas_holdings(holdings: list[dict], *, source: str,
+                             cash_usd: float | None = None,
                              portfolio_path: str | None = None) -> str:
-    """overseas_general.holdings_usd 갱신 — can_apply(source) 확인은 호출부 책임.
+    """overseas_general.holdings_usd(+cash_usd) 갱신 — can_apply(source) 확인은 호출부 책임.
 
     holdings: [{ticker, name, shares, avg_price_usd, current_price_usd,
                 cost_usd, value_usd, pnl_usd, return_pct}]  (USD 종목만 넣을 것)
+    cash_usd: 예수금(주문가능금액). None 이면 기존 값 유지(조회 실패 시 덮어쓰지 않음).
     반환: 사람용 요약 문자열.
     """
     path = portfolio_path or PORTFOLIO_PATH
@@ -114,6 +116,8 @@ def update_overseas_holdings(holdings: list[dict], *, source: str,
                     "note": f"{source} 해외 잔고 동기화 — 전량매도 감지(스냅샷에서 제거)",
                 })
         sect["holdings_usd"] = list(fresh.values())   # 최신 조회로 완전 대체(merge 아님)
+        if cash_usd is not None:
+            sect["cash_usd"] = round(float(cash_usd), 2)
         snap["last_overseas_sync"] = datetime.now().isoformat()
         snap["last_overseas_sync_source"] = source
         safe_io.atomic_write_json(path, snap)
@@ -131,6 +135,8 @@ def update_overseas_holdings(holdings: list[dict], *, source: str,
 
     lines = [f"  {h['ticker']} {h.get('name', '')} {h.get('shares', 0):g}주 "
              f"{h.get('return_pct', 0):+.1f}%" for h in holdings]
+    if cash_usd is not None:
+        lines.append(f"  예수금 ${cash_usd:,.2f}")
     return "\n".join(lines) or "(보유 없음)"
 
 

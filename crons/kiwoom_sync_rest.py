@@ -276,6 +276,57 @@ def fetch_us_balance() -> list[dict] | None:
     return rows
 
 
+def _parse_us_deposit(result: dict) -> float | None:
+    """ust21110(해외주식 예수금) 응답 → USD 주문가능금액 (순수). USD 행 없으면 None.
+
+    result_list 항목 중 crnc_code=USD 의 fc_ord_alowa(외화주문가능금액) 채택 — 원시
+    예수금(fc_entra)이 아니라 주문가능액을 쓰는 이유는 domestic(토스 buying-power)과
+    같은 개념으로 맞추기 위함(2026-07-25, 라이브 조회로 fc_entra=fc_ord_alowa 동일값
+    확인된 계좌도 있었지만 개념상 주문가능액이 더 안전한 표시).
+    """
+    for item in (result or {}).get("result_list", []) or []:
+        if str(item.get("crnc_code", "")).upper() == "USD":
+            try:
+                return float(str(item.get("fc_ord_alowa", "") or "0").replace(",", "").strip())
+            except (TypeError, ValueError):
+                return None
+    return None
+
+
+def fetch_us_deposit() -> float | None:
+    """키움 REST 해외 USD 예수금(ust21110·/api/us/acnt) — 실패 → None."""
+    try:
+        import requests as _req
+        from kiwoom_rest_api.auth.token import TokenManager
+    except ImportError:
+        logger.error("kiwoom-rest-api 미설치")
+        return None
+    if not os.getenv("KIWOOM_API_KEY") or not os.getenv("KIWOOM_API_SECRET"):
+        return None
+    try:
+        tok = TokenManager().access_token
+        if not tok:
+            return None
+        resp = _req.post(
+            "https://api.kiwoom.com/api/us/acnt",
+            headers={
+                "content-type": "application/json;charset=UTF-8",
+                "Authorization": f"Bearer {tok}",
+                "api-id": "ust21110",
+            },
+            json={}, timeout=15,
+        )
+        resp.raise_for_status()
+        result = resp.json()
+    except Exception as e:
+        logger.error("키움 해외 예수금 API 실패: %s", e)
+        return None
+    if result.get("return_code", -1) != 0:
+        logger.error("키움 해외 예수금 API 오류: %s", result.get("return_msg", "unknown"))
+        return None
+    return _parse_us_deposit(result)
+
+
 def _parse_us_transactions(result: dict) -> list[dict]:
     """ust21100(미국주식 거래내역) → 체결 행 (순수). 매수/매도만 — 입출금·환전 등은 제외.
 
@@ -390,9 +441,11 @@ def sync_us_balance() -> None:
     from lib import overseas_snapshot as osnap
 
     diff = osnap.diff_holdings(osnap.load_current_overseas(), rows)
+    cash_usd = fetch_us_deposit()
+    logger.info("키움 해외 예수금(USD): %s", f"{cash_usd:,.2f}" if cash_usd is not None else "조회 실패")
     if osnap.can_apply("kiwoom"):
         if rows:
-            summary = osnap.update_overseas_holdings(rows, source="kiwoom")
+            summary = osnap.update_overseas_holdings(rows, source="kiwoom", cash_usd=cash_usd)
             total = sum(h.get("value_usd", 0) for h in rows)
             _notify("📊 키움 해외주식 동기화 (OVERSEAS_SYNC_SOURCE=kiwoom)\n"
                     "━━━━━━━━━━━━━━━━━━━━━━━\n"
