@@ -610,6 +610,64 @@ def test_agent_prompt_mentions_wiki_trust_and_source_backing(monkeypatch, tmp_pa
     assert "source-backed" in prompt
 
 
+def test_agent_prompt_pins_peer_compare_intent_contract(monkeypatch, tmp_path):
+    _isolate(monkeypatch, tmp_path)
+
+    from agent_console import agent
+
+    pack = {
+        "surface": "market",
+        "sources": {"events": [], "source_counts": [], "symbol_counts": []},
+        "memory": [],
+        "reports": [],
+        "ml_activity": [],
+        "portfolio": {"holdings": []},
+        "paper": {},
+        "models": {},
+        "focus": [],
+    }
+
+    prompt = agent._build_general_chat_prompt("JP모건 다른 IB랑 비교해줘", pack, history=[])
+
+    assert "[질문 의도]" in prompt
+    assert "intent: peer_compare" in prompt
+    assert "default_peers: JPM, GS, MS, BAC, C" in prompt
+    assert "Yahoo Finance" in prompt
+    assert "컨텍스트 부족은 답변 중단 조건이 아니라 검색 트리거" in prompt
+    assert "시장 템플릿 금지: 현재 시장 상황 인식, MIXED, 시장 신호 점수" in prompt
+
+
+def test_agent_prompt_pins_non_market_intents_and_forbidden_templates(monkeypatch, tmp_path):
+    _isolate(monkeypatch, tmp_path)
+
+    from agent_console import agent
+
+    base_pack = {
+        "surface": "market",
+        "sources": {"events": [], "source_counts": [], "symbol_counts": []},
+        "memory": [],
+        "reports": [],
+        "ml_activity": [],
+        "portfolio": {"holdings": []},
+        "paper": {},
+        "models": {},
+        "focus": [],
+    }
+
+    technical = agent._build_general_chat_prompt("NVDA 기술적 분석만 해봐", base_pack, history=[])
+    assert "intent: technical_analysis" in technical
+    assert "뉴스 제외" in technical
+    assert "거시 제외" in technical
+    assert "가격·추세·거래량·지표만" in technical
+
+    portfolio_pack = {**base_pack, "surface": "portfolio", "portfolio": {"holdings": [{"ticker": "LLY", "weight": 12.5, "ret": 4.2}]}}
+    portfolio = agent._build_general_chat_prompt("내 포트 평가해줘", portfolio_pack, history=[])
+    assert "intent: portfolio_review" in portfolio
+    assert "보유 비중" in portfolio
+    assert "손실/수익률" in portfolio
+    assert "시장 템플릿 금지: 현재 시장 상황 인식, MIXED, 시장 신호 점수" in portfolio
+
+
 def test_agent_context_prompt_includes_wiki(monkeypatch, tmp_path):
     _isolate(monkeypatch, tmp_path)
 
