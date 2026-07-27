@@ -1,8 +1,4 @@
-"""AI 콘솔 — World Memory + 대화형 컨텍스트 + 포트폴리오 전략랩.
-
-기존 Cloudflare/Streamlit 대시보드 안에서 agent_console 코어를 직접 호출한다.
-별도 Flask 포트 없이 같은 인증·사이드바·배포 경로를 사용한다.
-"""
+"""AI 콘솔 — World Memory + 대화형 컨텍스트 + 포트폴리오 전략랩."""
 from __future__ import annotations
 
 import html
@@ -15,11 +11,8 @@ import streamlit as st
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 
-from agent_console import agent, context, storage, wiki
-from agent_console.portfolio_matrix_dsl import rsi_cash_program, run_portfolio_matrix_dsl
-from dashboard import chat_references
-from dashboard import data
-from dashboard import wiki_browser
+from agent_console import agent, context, storage
+from dashboard import chat_feedback, chat_references, data, wiki_browser
 
 
 _SURFACES = {
@@ -29,6 +22,15 @@ _SURFACES = {
     "paper": "모의투자",
     "lab": "전략랩",
 }
+_AUTO_CHAT = "auto"
+_PIN_AUTO = "자동"
+_AGENT_PROGRESS_LABELS = (
+    "맥락 읽는 중",
+    "질문 의도 고정 중",
+    "필요 데이터 확인 중",
+    "LLM 분석 요청 중",
+    "답변 정리 중",
+)
 
 
 def render():
@@ -40,21 +42,20 @@ def render():
             <div class="codex-kicker">stock-report agent</div>
             <h1>AI 콘솔</h1>
           </div>
-          <span>그냥 질문하세요 — 맥락(시장·포트폴리오·종목·모의투자·전략)은 자동으로 잡습니다</span>
+          <span>그냥 질문하세요. 맥락은 자동으로 잡고, 답변 아래에 참고 위키·출처·검토 경로를 남깁니다.</span>
         </div>
         """,
         unsafe_allow_html=True,
     )
 
-    # 맥락은 질문에서 자동 추론 — 마지막 추론값이 컨텍스트 글랜스/레일의 기준
     surface = _current_surface()
     hours = int(st.session_state.get("agent_hours", 72))
-
     pack = _safe_context(surface, hours)
     _context_glance(pack)
 
     tab_chat, tab_memory, tab_wiki, tab_lab, tab_connectors = st.tabs(
-        ["대화", "시장 기억", "AI 위키", "전략 캔버스", "로컬 커넥터"])
+        ["대화", "시장 기억", "AI 위키", "전략 캔버스", "로컬 커넥터"]
+    )
     with tab_chat:
         _chat_tab(surface, pack)
     with tab_memory:
@@ -67,12 +68,7 @@ def render():
         _connectors_tab()
 
 
-_AUTO_CHAT = "auto"          # 단일 대화 스레드 키 (맥락은 메시지 단위로 자동 라우팅)
-_PIN_AUTO = "자동"
-
-
 def _current_surface() -> str:
-    """현재 기준 맥락 — 수동 고정(pin)이 있으면 그것, 없으면 마지막 자동 추론값."""
     pin = st.session_state.get("agent_surface_pin", _PIN_AUTO)
     if pin in _SURFACES:
         return pin
@@ -100,6 +96,7 @@ def _safe_context(surface: str, hours: int) -> dict:
             "models": {"items": []},
             "memory": [],
             "focus": context.focus_for_surface(surface),
+            "context_error": str(exc),
         }
 
 
@@ -107,17 +104,37 @@ def _esc(value: object) -> str:
     return html.escape(str(value if value not in (None, "") else "—"))
 
 
-def _context_glance_items(pack: dict) -> tuple[dict[str, str], ...]:
+def _context_glance(pack: dict):
     sources = pack.get("sources") or {}
     reports = pack.get("reports") or []
     models = (pack.get("models") or {}).get("items") or []
     memory = pack.get("memory") or []
-    return (
+    items = (
         {"label": "최근 이벤트", "value": f"{len(sources.get('events') or [])}건"},
         {"label": "누적 기억", "value": f"{len(memory)}건"},
         {"label": "모델 파일", "value": f"{len(models)}개"},
         {"label": "최신 리포트", "value": reports[0].get("name", "—") if reports else "—"},
     )
+    st.markdown(
+        "<div class='codex-glance'>"
+        + "".join(
+            f"<div><span>{_esc(item['label'])}</span><b>{_esc(item['value'])}</b></div>"
+            for item in items
+        )
+        + "</div>",
+        unsafe_allow_html=True,
+    )
+
+    focus = pack.get("focus") or []
+    if focus:
+        st.caption(" · ".join(focus[:4]))
+    source_counts = sources.get("source_counts") or []
+    symbol_counts = sources.get("symbol_counts") or []
+    if source_counts or symbol_counts:
+        st.caption(
+            "소스 " + (" · ".join(f"{name} {cnt}" for name, cnt in source_counts[:5]) or "—")
+            + "  /  심볼 " + (" · ".join(f"{name} {cnt}" for name, cnt in symbol_counts[:6]) or "—")
+        )
 
 
 def _infer_context_detail(question: str, surface: str) -> str:
@@ -133,60 +150,6 @@ def _infer_context_detail(question: str, surface: str) -> str:
     return _SURFACES.get(surface, surface)
 
 
-def _count_label(count: int, cap: int | None = None, unit: str = "개") -> str:
-    suffix = "+" if cap is not None and count >= cap else ""
-    return f"{count}{unit}{suffix}"
-
-
-def _rail_status_items(surface: str, pack: dict) -> list[dict[str, str]]:
-    sources = pack.get("sources") or {}
-    events = sources.get("events") or []
-    memory = pack.get("memory") or []
-    models = (pack.get("models") or {}).get("items") or []
-    snapshot = pack.get("market_snapshot") or {}
-    quote_count = len(snapshot.get("quotes") or [])
-    detail = str(st.session_state.get("agent_auto_detail") or _SURFACES.get(surface, surface))
-    engine = str(st.session_state.get("agent_last_engine") or "대기")
-    items = [
-        {"label": "맥락", "value": _SURFACES.get(surface, surface)},
-        {"label": "세부", "value": detail},
-        {"label": "엔진", "value": engine},
-        {"label": "events", "value": _count_label(len(events), 40, "개")},
-        {"label": "memory", "value": _count_label(len(memory), 50, "개")},
-        {"label": "models", "value": _count_label(len(models), None, "개")},
-    ]
-    if snapshot:
-        items.append({"label": "실시간", "value": str(snapshot.get("status") or "unavailable")})
-        items.append({"label": "quotes", "value": _count_label(quote_count, None, "개")})
-    return items
-
-
-def _context_glance(pack: dict):
-    items = _context_glance_items(pack)
-    st.markdown(
-        "<div class='codex-glance'>"
-        + "".join(
-            f"<div><span>{_esc(item['label'])}</span><b>{_esc(item['value'])}</b></div>"
-            for item in items
-        )
-        + "</div>",
-        unsafe_allow_html=True,
-    )
-
-    focus = pack.get("focus") or []
-    if focus:
-        st.caption(" · ".join(focus[:4]))
-
-    sources = pack.get("sources") or {}
-    source_counts = sources.get("source_counts") or []
-    symbol_counts = sources.get("symbol_counts") or []
-    if source_counts or symbol_counts:
-        st.caption(
-            "소스 " + (" · ".join(f"{name} {cnt}" for name, cnt in source_counts[:5]) or "—")
-            + "  /  심볼 " + (" · ".join(f"{name} {cnt}" for name, cnt in symbol_counts[:6]) or "—")
-        )
-
-
 def _chat_tab(surface: str, pack: dict):
     _ensure_chat_state(_AUTO_CHAT)
     chat_key = _chat_key(_AUTO_CHAT)
@@ -194,14 +157,14 @@ def _chat_tab(surface: str, pack: dict):
 
     with chat_col:
         pin = st.session_state.get("agent_surface_pin", _PIN_AUTO)
-        mode_label = ("맥락 자동" if pin == _PIN_AUTO
-                      else f"맥락 고정 · {_SURFACES.get(pin, pin)}")
+        mode_label = "맥락 자동" if pin == _PIN_AUTO else f"맥락 고정 · {_SURFACES.get(pin, pin)}"
         st.markdown(
-            f"<div class='codex-chat-head'><b>{mode_label}"
-            f"<span class='codex-chip'>{_SURFACES.get(surface, surface)}</span></b>"
-            f"<span>{pack.get('generated_at', '')}</span></div>",
+            f"<div class='codex-chat-head'><b>{_esc(mode_label)}"
+            f"<span class='codex-chip'>{_esc(_SURFACES.get(surface, surface))}</span></b>"
+            f"<span>{_esc(pack.get('generated_at', ''))}</span></div>",
             unsafe_allow_html=True,
         )
+
         pending = _quick_prompts()
         if pending:
             _run_agent_question_auto(pending, pack)
@@ -213,11 +176,17 @@ def _chat_tab(surface: str, pack: dict):
                 st.markdown(msg.get("content", ""))
                 if msg.get("meta"):
                     st.caption(msg["meta"])
-                if role == "assistant" and msg.get("references"):
-                    _render_reference_panel(msg["references"], key_prefix=f"{chat_key}_{idx}")
+                if role == "assistant":
+                    if msg.get("references"):
+                        _render_reference_panel(msg["references"], key_prefix=f"{chat_key}_{idx}")
+                    if msg.get("trace"):
+                        _render_trace_panel(msg["trace"], key_prefix=f"{chat_key}_{idx}")
+                    _render_feedback_controls(msg, surface, key_prefix=f"{chat_key}_{idx}")
 
-        user_text = st.chat_input("무엇이든 질문하기 — 포트폴리오·종목·시장·모의투자·전략",
-                                  key="agent_chat_input_auto")
+        user_text = st.chat_input(
+            "무엇이든 질문하기 — 포트폴리오·종목·시장·모의투자·전략",
+            key="agent_chat_input_auto",
+        )
         if user_text:
             _run_agent_question_auto(user_text, pack)
             st.rerun()
@@ -238,23 +207,11 @@ def _ensure_chat_state(surface: str):
     key = _chat_key(surface)
     if key in st.session_state:
         return
-    st.session_state[key] = [
-        {
-            "role": "assistant",
-            "content": "그냥 질문하시면 됩니다. 질문 내용에 따라 시장·포트폴리오·종목·모의투자·전략 맥락을 자동으로 잡아 "
-                       "시장 자료·모의투자 원장·World Memory 안에서 답합니다.",
-            "meta": "local context ready · 맥락 자동",
-        }
-    ]
-
-
-_AGENT_PROGRESS_LABELS = (
-    "맥락 읽는 중",
-    "질문 의도 고정 중",
-    "필요 데이터 확인 중",
-    "LLM 분석 요청 중",
-    "답변 정리 중",
-)
+    st.session_state[key] = [{
+        "role": "assistant",
+        "content": "그냥 질문하시면 됩니다. 질문 내용에 따라 시장·포트폴리오·종목·모의투자·전략 맥락을 자동으로 잡아 답합니다.",
+        "meta": "local context ready · 맥락 자동",
+    }]
 
 
 def _quick_prompt_texts() -> tuple[str, ...]:
@@ -265,8 +222,13 @@ def _quick_prompt_texts() -> tuple[str, ...]:
     )
 
 
-def _chat_progress_labels() -> tuple[str, ...]:
-    return _AGENT_PROGRESS_LABELS
+def _quick_prompts() -> str | None:
+    prompts = _quick_prompt_texts()
+    cols = st.columns(len(prompts))
+    for idx, text in enumerate(prompts):
+        if cols[idx].button(text, key=f"agent_quick_auto_{idx}", width="stretch"):
+            return text
+    return None
 
 
 def _answer_agent_fast(question: str, surface: str) -> dict:
@@ -280,22 +242,20 @@ def _answer_agent_fast(question: str, surface: str) -> dict:
 
 def _safe_status_update(status, **kwargs) -> None:
     update = getattr(status, "update", None)
-    if not callable(update):
-        return
-    try:
-        update(**kwargs)
-    except Exception:
-        pass
+    if callable(update):
+        try:
+            update(**kwargs)
+        except Exception:
+            pass
 
 
 def _answer_with_progress(question: str, surface: str) -> dict:
-    labels = _chat_progress_labels()
     status_factory = getattr(st, "status", None)
     if callable(status_factory):
-        status_context = status_factory(labels[0], expanded=True)
+        status_context = status_factory(_AGENT_PROGRESS_LABELS[0], expanded=True)
         with status_context as status:
             updater = status or status_context
-            for label in labels[1:]:
+            for label in _AGENT_PROGRESS_LABELS[1:]:
                 _safe_status_update(updater, label=label, state="running", expanded=True)
             result = _answer_agent_fast(question, surface)
             post = ((result.get("context") or {}).get("postprocess") or {}).get("wiki_autocurate")
@@ -304,22 +264,11 @@ def _answer_with_progress(question: str, surface: str) -> dict:
                 done_label = "답변 표시 완료 · 위키 정리는 뒤에서 진행"
             _safe_status_update(updater, label=done_label, state="complete", expanded=False)
             return result
-    with st.spinner(labels[-2] if len(labels) >= 2 else "답변 생성 중"):
+    with st.spinner("답변 생성 중"):
         return _answer_agent_fast(question, surface)
 
 
-def _quick_prompts() -> str | None:
-    """도메인을 가로지르는 추천 질문 — 눌러도 되고, 그냥 아래에 입력해도 된다."""
-    prompts = _quick_prompt_texts()
-    cols = st.columns(len(prompts))
-    for idx, text in enumerate(prompts):
-        if cols[idx].button(text, key=f"agent_quick_auto_{idx}", width="stretch"):
-            return text
-    return None
-
-
 def _run_agent_question_auto(question: str, pack: dict):
-    """단일 스레드 UX — 질문에서 맥락을 추론(또는 pin)해 실행하고 추론값을 기억한다."""
     question = str(question or "").strip()
     if not question:
         return
@@ -343,16 +292,14 @@ def _run_agent_question(question: str, surface: str, pack: dict, chat_key: str |
         chat_key = _chat_key(surface)
     else:
         _ensure_chat_state(_AUTO_CHAT)
+
     st.session_state[chat_key].append({"role": "user", "content": question})
     result = _answer_with_progress(question, surface)
     if result.get("ok"):
         ctx = result.get("context") or {}
-        references = chat_references.build_answer_references(
-            question,
-            surface,
-            pack,
-            result.get("answer", ""),
-        )
+        answer = result.get("answer", "")
+        references = chat_references.build_answer_references(question, surface, pack, answer)
+        trace = chat_feedback.build_trace(question, surface, pack, result, references)
         ref_counts = {
             "wiki": len(references.get("wiki") or []),
             "sources": len(references.get("sources") or []),
@@ -365,8 +312,7 @@ def _run_agent_question(question: str, surface: str, pack: dict, chat_key: str |
         engine = str(ctx.get("engine") or "")
         if engine:
             st.session_state["agent_last_engine"] = "규칙" if engine == "local-rules" else engine
-            # 어떤 엔진이 답했는지 정직 표기 — local-rules = LLM 미개입 규칙 답변
-            meta += f" · 엔진 {'⚙️ 규칙' if engine == 'local-rules' else '🤖 ' + engine}"
+            meta += f" · 엔진 {'규칙' if engine == 'local-rules' else engine}"
         post = (ctx.get("postprocess") or {}).get("wiki_autocurate")
         if post:
             meta += f" · 후처리 {post}"
@@ -376,15 +322,18 @@ def _run_agent_question(question: str, surface: str, pack: dict, chat_key: str |
             meta = f"{meta} · context fallback" if meta else "context fallback"
         st.session_state[chat_key].append({
             "role": "assistant",
-            "content": result.get("answer", ""),
+            "content": answer,
             "meta": meta,
+            "question": question,
             "references": references,
+            "trace": trace,
         })
     else:
         st.session_state[chat_key].append({
             "role": "assistant",
             "content": result.get("error", "답변 생성 실패"),
             "meta": "error",
+            "question": question,
         })
 
 
@@ -439,34 +388,82 @@ def _render_reference_panel(references: dict, key_prefix: str) -> None:
                         st.caption(ref.get("reason") or "출처 정보")
 
 
+def _render_trace_panel(trace: dict, key_prefix: str) -> None:
+    steps = list((trace or {}).get("steps") or [])
+    if not steps:
+        return
+    with st.expander("검토 경로", expanded=False):
+        st.caption("내부 추론 전문이 아니라, 답변을 만들 때 확인한 공개 가능한 단계 요약입니다.")
+        for step in steps:
+            st.markdown(
+                f"<div class='codex-trace-row'><span>{_esc(step.get('label'))}</span><b>{_esc(step.get('value'))}</b></div>",
+                unsafe_allow_html=True,
+            )
+
+
+def _render_feedback_controls(msg: dict, surface: str, key_prefix: str) -> None:
+    if msg.get("role") != "assistant" or not msg.get("question"):
+        return
+    state_key = f"{key_prefix}_feedback_saved"
+    if st.session_state.get(state_key):
+        st.caption(f"피드백 저장됨: {st.session_state[state_key]}")
+        return
+    cols = st.columns(3)
+    options = (("helpful", "도움됨"), ("neutral", "애매함"), ("not_helpful", "별로"))
+    for col, (rating, label) in zip(cols, options):
+        if col.button(label, key=f"{key_prefix}_fb_{rating}", width="stretch"):
+            chat_feedback.record_answer_feedback(
+                question=msg.get("question", ""),
+                answer=msg.get("content", ""),
+                surface=surface,
+                rating=rating,
+                references=msg.get("references") or {},
+                trace=msg.get("trace") or {},
+            )
+            st.session_state[state_key] = label
+            st.toast("피드백을 저장했습니다.")
+            st.rerun()
+
+
 def _chat_context_rail(surface: str, pack: dict):
     st.markdown("##### Context")
     sources = pack.get("sources") or {}
     events = sources.get("events") or []
     memory = pack.get("memory") or []
     reports = pack.get("reports") or []
-    status_items = _rail_status_items(surface, pack)
-
+    detail = str(st.session_state.get("agent_auto_detail") or _SURFACES.get(surface, surface))
+    engine = str(st.session_state.get("agent_last_engine") or "대기")
+    snapshot = pack.get("market_snapshot") or {}
+    status_items = [
+        {"label": "맥락", "value": _SURFACES.get(surface, surface)},
+        {"label": "세부", "value": detail},
+        {"label": "엔진", "value": engine},
+        {"label": "events", "value": f"{len(events)}개"},
+        {"label": "memory", "value": f"{len(memory)}개"},
+        {"label": "quotes", "value": f"{len(snapshot.get('quotes') or [])}개"},
+    ]
     st.markdown(
         '<div class="codex-rail-card">'
-        + "".join(
-            f"<div><span>{_esc(item['label'])}</span><b>{_esc(item['value'])}</b></div>"
-            for item in status_items
-        )
+        + "".join(f"<div><span>{_esc(item['label'])}</span><b>{_esc(item['value'])}</b></div>" for item in status_items)
         + "</div>",
         unsafe_allow_html=True,
     )
 
-    with st.expander("⚙️ 설정", expanded=False):
-        st.selectbox("맥락 고정", [_PIN_AUTO, *list(_SURFACES)],
-                     format_func=lambda k: k if k == _PIN_AUTO else _SURFACES.get(k, k),
-                     key="agent_surface_pin",
-                     help="기본은 자동 — 질문 내용으로 맥락을 추론합니다. 특정 맥락에 고정하고 싶을 때만 바꾸세요.")
-        st.selectbox("수집 범위", [24, 72, 168, 336], index=1,
-                     format_func=lambda h: f"{h}h" if h < 168 else f"{h // 24}d",
-                     key="agent_hours")
-        if st.button("메모리 적재", width="stretch",
-                     help="최근 뉴스/리포트/ML 원장을 World Memory로 적재"):
+    with st.expander("설정", expanded=False):
+        st.selectbox(
+            "맥락 고정",
+            [_PIN_AUTO, *list(_SURFACES)],
+            format_func=lambda k: k if k == _PIN_AUTO else _SURFACES.get(k, k),
+            key="agent_surface_pin",
+        )
+        st.selectbox(
+            "수집 범위",
+            [24, 72, 168, 336],
+            index=1,
+            format_func=lambda h: f"{h}h" if h < 168 else f"{h // 24}d",
+            key="agent_hours",
+        )
+        if st.button("메모리 적재", width="stretch"):
             with st.spinner("최근 컨텍스트를 World Memory에 적재 중..."):
                 result = context.ingest_recent_memory(hours=int(st.session_state.get("agent_hours", 72)))
             _context_pack.clear()
@@ -480,40 +477,36 @@ def _chat_context_rail(surface: str, pack: dict):
         st.session_state.pop(_chat_key(_AUTO_CHAT), None)
         _ensure_chat_state(_AUTO_CHAT)
         st.rerun()
-
     if st.session_state.get(prompt_key):
         st.code(agent.build_context_prompt(surface), language="text")
 
     st.markdown("##### Events")
-    if events:
-        for item in events[:7]:
-            title = item.get("title") or item.get("summary") or "제목 없음"
-            st.markdown(f"<div class='codex-feed-item'><b>{item.get('source', 'source')}</b><span>{title}</span></div>",
-                        unsafe_allow_html=True)
-    else:
+    for item in events[:7]:
+        title = item.get("title") or item.get("summary") or "제목 없음"
+        st.markdown(
+            f"<div class='codex-feed-item'><b>{_esc(item.get('source', 'source'))}</b><span>{_esc(title)}</span></div>",
+            unsafe_allow_html=True,
+        )
+    if not events:
         st.caption("최근 이벤트 없음")
 
     st.markdown("##### Memory")
-    if memory:
-        for item in memory[:5]:
-            st.markdown(f"<div class='codex-feed-item'><b>{item.get('kind', 'memory')}</b>"
-                        f"<span>{item.get('title', '제목 없음')}</span></div>",
-                        unsafe_allow_html=True)
-    else:
+    for item in memory[:5]:
+        st.markdown(
+            f"<div class='codex-feed-item'><b>{_esc(item.get('kind', 'memory'))}</b><span>{_esc(item.get('title', '제목 없음'))}</span></div>",
+            unsafe_allow_html=True,
+        )
+    if not memory:
         st.caption("World Memory 비어 있음")
-
     if reports:
         st.caption(f"latest report: {reports[0].get('name')}")
-    paper = pack.get("paper") or {}
-    if paper.get("errors"):
-        st.caption("paper: " + " · ".join(paper["errors"]))
     if pack.get("context_error"):
         st.warning(f"컨텍스트 일부를 불러오지 못했습니다: {pack['context_error']}")
 
 
 def _memory_tab(surface: str):
     st.markdown("##### World Memory")
-    st.caption("단일 월드 메모리 — 뉴스 크론·텔레그램 /ask·종목분석 🧭 카드와 같은 축적을 읽고 씁니다.")
+    st.caption("뉴스·텔레그램·리포트·대화가 쌓이는 단일 기억층입니다.")
     with st.form("agent_memory_add", clear_on_submit=True):
         c1, c2 = st.columns([1.2, 0.8])
         title = c1.text_input("제목")
@@ -535,8 +528,7 @@ def _memory_tab(surface: str):
     search = st.text_input("검색", key="_wm_search", placeholder="제목·본문·티커로 검색")
     rows = context.world_memory_rows(limit=120, query=search.strip())
     if not rows:
-        st.info("검색 결과가 없습니다." if search.strip() else
-                "아직 저장된 시장 기억이 없습니다. 상단의 메모리 적재를 먼저 실행해 보세요.")
+        st.info("검색 결과가 없습니다." if search.strip() else "아직 저장된 시장 기억이 없습니다.")
         return
     df = pd.DataFrame([{
         "시각": r.get("observed_at"),
@@ -546,14 +538,11 @@ def _memory_tab(surface: str):
         "심볼": ", ".join(r.get("symbols") or []),
         "중요도": r.get("impact"),
     } for r in rows])
-    event = st.dataframe(df, hide_index=True, width="stretch", height=360,
-                          on_select="rerun", selection_mode="single-row", key="_wm_tbl")
+    event = st.dataframe(df, hide_index=True, width="stretch", height=360, on_select="rerun", selection_mode="single-row", key="_wm_tbl")
     _memory_detail(event, rows)
 
 
 def _memory_detail(event, rows):
-    """선택 행 상세 카드 — 본문(body) 전문 표시. research.py `_screener_detail`과 동일 패턴."""
-    from dashboard import theme
     try:
         sel = event.selection.rows
     except Exception:
@@ -565,21 +554,155 @@ def _memory_detail(event, rows):
     body_html = html.escape(r.get("body") or "").replace("\n", "<br>") or "본문 없음"
     url = str(r.get("url") or "")
     link_html = ""
-    if url.startswith("http://") or url.startswith("https://"):   # href 삽입 전 스킴 검증(안전)
-        link_html = (f'<div style="margin-top:10px">'
-                    f'<a href="{html.escape(url, quote=True)}" target="_blank" rel="noopener noreferrer" '
-                    f'style="color:{theme.BLUE};font-size:0.85rem">원문 보기 →</a></div>')
+    if url.startswith("http://") or url.startswith("https://"):
+        link_html = f'<div style="margin-top:10px"><a href="{html.escape(url, quote=True)}" target="_blank" rel="noopener noreferrer">원문 보기</a></div>'
     st.markdown(
-        f'<div style="background:{theme.PANEL};border:1px solid {theme.BORDER};'
-        f'border-left:4px solid {theme.BLUE};border-radius:12px;padding:12px 16px;margin-top:8px">'
-        f'<div style="display:flex;gap:14px;align-items:baseline;flex-wrap:wrap">'
-        f'<b style="font-size:1.05rem">{html.escape(r.get("title") or "제목 없음")}</b>'
-        f'<span style="color:{theme.MUTED};font-size:0.78rem">{r.get("observed_at") or ""} · '
-        f'{r.get("source") or ""} · {symbols} · {r.get("impact") or ""}</span></div>'
-        f'<div style="margin-top:8px;white-space:pre-wrap;font-size:0.9rem">{body_html}</div>'
-        f'{link_html}</div>',
-        unsafe_allow_html=True)
+        f"<div class='codex-detail'><b>{_esc(r.get('title') or '제목 없음')}</b>"
+        f"<span>{_esc(r.get('observed_at') or '')} · {_esc(r.get('source') or '')} · {_esc(symbols)} · {_esc(r.get('impact') or '')}</span>"
+        f"<div>{body_html}</div>{link_html}</div>",
+        unsafe_allow_html=True,
+    )
 
 
 def _wiki_tab(surface: str, pack: dict):
     return wiki_browser.render_wiki_tab(surface, pack)
+
+
+def _lab_tab(surface: str):
+    st.markdown("##### 전략 캔버스")
+    st.caption("비중과 규칙을 저장해 챗봇/위키가 다시 읽는 전략 가설로 남깁니다.")
+    default_text = _default_canvas_allocations()
+    alloc_text = st.text_area("포트폴리오 비중", value=st.session_state.get("strategy_canvas_alloc_text", default_text), height=150, key="strategy_canvas_alloc_text")
+    allocs = _normalize_allocations(_parse_allocations(alloc_text))
+    if allocs:
+        st.dataframe(pd.DataFrame(allocs), hide_index=True, width="stretch", height=220)
+    else:
+        st.info("한 줄에 `티커 비중 메모` 형식으로 입력해 주세요. 예: QQQ 45 핵심 성장")
+
+    c1, c2, c3 = st.columns(3)
+    buy_rsi = c1.number_input("매수 RSI", min_value=1, max_value=99, value=30, step=1)
+    sell_rsi = c2.number_input("현금화 RSI", min_value=1, max_value=99, value=70, step=1)
+    max_loss = c3.number_input("최대 손실한도 %", min_value=0.0, max_value=100.0, value=8.0, step=0.5)
+    hypothesis = st.text_area("전략 가설", height=90, placeholder="어떤 시장에서 이 전략이 유리하고, 어떤 조건에서 꺼야 하는지 적어주세요.")
+    if st.button("시나리오 저장", type="primary", width="stretch", disabled=not bool(allocs)):
+        scenario = storage.save_scenario({
+            "name": "AI 콘솔 전략 캔버스",
+            "description": hypothesis,
+            "allocations": allocs,
+            "rules": {
+                "max_loss_pct": max_loss,
+                "text": f"RSI <= {int(buy_rsi)} 매수, RSI >= {int(sell_rsi)} 현금화",
+                "live_orders": False,
+                "actual_asset_link": False,
+            },
+            "assumptions": {"surface": surface, "raw_allocations": alloc_text},
+            "metrics": {"saved_from": "ai_console_strategy_canvas", "allocation_count": len(allocs)},
+        })
+        st.toast(f"{scenario.get('name', '시나리오')} 저장 완료")
+
+    scenarios = storage.list_scenarios(limit=8)
+    if scenarios:
+        st.markdown("##### 저장된 시나리오")
+        for scenario in scenarios:
+            st.markdown(
+                f"<div class='scenario-row'><b>{_esc(scenario.get('name', '시나리오'))}</b><span>{_esc(scenario.get('updated_at', ''))}</span></div>",
+                unsafe_allow_html=True,
+            )
+
+
+def _default_canvas_allocations() -> str:
+    try:
+        holdings = data.load_holdings()
+    except Exception:
+        holdings = []
+    rows = []
+    for row in sorted(holdings or [], key=lambda r: float(r.get("weight") or 0), reverse=True)[:7]:
+        ticker = str(row.get("ticker") or "").upper().strip()
+        weight = data._try_float(row.get("weight"))
+        if not ticker or weight is None:
+            continue
+        note = str(row.get("name") or "").strip()
+        rows.append(f"{ticker} {weight:.1f} {note}".rstrip())
+    if rows:
+        return "\n".join(rows)
+    return "QQQ 45 핵심 성장\nTLT 20 금리 방어\nGLD 10 꼬리위험\nCASH 25 기회 대기"
+
+
+def _parse_allocations(text: str) -> list[dict]:
+    rows = []
+    for line in str(text or "").splitlines():
+        parts = line.strip().split()
+        if len(parts) < 2:
+            continue
+        weight = data._try_float(parts[1])
+        if weight is None:
+            continue
+        rows.append({"symbol": parts[0].upper(), "weight_pct": weight, "note": " ".join(parts[2:])})
+    return rows
+
+
+def _normalize_allocations(allocations: list[dict]) -> list[dict]:
+    rows = []
+    for row in allocations or []:
+        symbol = str(row.get("symbol") or "").upper().strip()
+        weight = data._try_float(row.get("weight_pct"))
+        if not symbol or weight is None or weight < 0:
+            continue
+        rows.append({"symbol": symbol, "weight_pct": float(weight), "note": row.get("note", "")})
+    total = sum(r["weight_pct"] for r in rows)
+    if total <= 0:
+        return []
+    return [{**r, "weight_pct": round(r["weight_pct"] / total * 100.0, 2)} for r in rows]
+
+
+def _connectors_tab():
+    st.markdown("##### 로컬 커넥터")
+    c1, c2 = st.columns(2)
+    with c1:
+        st.markdown("**Arca — 서버 SOCKS 터널**")
+        proxy = os.getenv("STOCK_COLLECTOR_ARCA_PROXY", "socks5://127.0.0.1:1080")
+        try:
+            from reports import source_collector
+            status = source_collector.arca_proxy_status(proxy)
+        except Exception as exc:
+            status = {"reachable": False, "proxy": proxy, "error": str(exc)}
+        st.metric("터널", "UP" if status.get("reachable") else "DOWN", help=status.get("proxy") or proxy)
+        if status.get("error"):
+            st.caption(f"상태: {status['error']}")
+        pages = st.number_input("조회 페이지", min_value=1, max_value=5, value=2, step=1, key="arca_proxy_pages")
+        if st.button("Arca 프록시 수집", type="primary", width="stretch"):
+            with st.spinner("Arca를 SOCKS 터널로 조회 중..."):
+                result = context.ingest_arca_proxy(max_pages=int(pages), proxy=proxy)
+            _context_pack.clear()
+            if result.get("ok"):
+                st.success(f"수집 {result.get('fetched', 0)}건 · 캐시 {result.get('written', 0)}건 · 메모리 {result.get('changed', 0)}건")
+            else:
+                st.warning(f"Arca 수집 실패: {result.get('error') or 'unknown'}")
+    with c2:
+        st.markdown("**Toss — 로컬 스냅샷 예정**")
+        st.markdown("- 읽기 전용 자산 스냅샷\n- 주문/매매 연결 없음\n- 보유·현금·거래내역 요약만 Context Layer에 반영")
+    st.code(
+        "Arca: 서버 SOCKS 127.0.0.1:1080 -> source-cache + World Memory\n"
+        "Toss: 노트북 local snapshot -> ~/reports/local-connectors/*.json",
+        language="text",
+    )
+
+
+def _inject_codex_css():
+    st.markdown(
+        """
+        <style>
+        .codex-console-title{display:flex;align-items:flex-end;justify-content:space-between;gap:16px;padding:0 0 12px;border-bottom:1px solid rgba(148,163,184,.14);margin-bottom:12px}
+        .codex-console-title h1{margin:0;font-size:1.55rem;line-height:1.15;letter-spacing:0}
+        .codex-console-title span,.codex-kicker{color:rgba(148,163,184,.92);font-size:.82rem}.codex-kicker{text-transform:uppercase;letter-spacing:.08em;margin-bottom:2px}
+        .codex-glance{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:8px;margin:0 0 8px}.codex-glance div{border:1px solid rgba(148,163,184,.14);border-radius:8px;background:rgba(15,23,42,.24);padding:8px 10px;min-height:52px}.codex-glance span{display:block;color:rgba(148,163,184,.78);font-size:.72rem;margin-bottom:3px}.codex-glance b{display:block;color:rgba(226,232,240,.96);font-size:.9rem;font-weight:680;line-height:1.25;overflow-wrap:anywhere}
+        .codex-chat-head{display:flex;align-items:center;justify-content:space-between;gap:12px;padding:8px 10px;border:1px solid rgba(148,163,184,.14);border-radius:8px;background:rgba(15,23,42,.26);margin-bottom:10px}.codex-chat-head span{color:rgba(148,163,184,.86);font-size:.78rem;overflow-wrap:anywhere}.codex-chip{display:inline-block;margin-left:8px;padding:2px 9px;border:1px solid rgba(56,189,248,.35);border-radius:999px;background:rgba(56,189,248,.12);color:rgba(125,211,252,.96)!important;font-size:.72rem!important;font-weight:600;vertical-align:middle;white-space:nowrap}
+        div[data-testid="stChatMessage"]{border:1px solid rgba(148,163,184,.13);border-radius:8px;background:rgba(15,23,42,.20);padding:9px 11px;margin-bottom:8px}div[data-testid="stChatInput"] textarea{border-radius:8px}
+        .codex-rail-card{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:8px;margin:2px 0 10px}.codex-rail-card div{border:1px solid rgba(148,163,184,.13);border-radius:8px;background:rgba(15,23,42,.22);padding:8px 9px;min-height:52px}.codex-rail-card span{display:block;color:rgba(148,163,184,.82);font-size:.74rem;margin-bottom:3px}.codex-rail-card b{display:block;font-size:.94rem;overflow-wrap:anywhere}
+        .codex-feed-item,.scenario-row,.codex-detail{border:1px solid rgba(148,163,184,.16);border-radius:8px;background:rgba(2,6,23,.22);padding:8px 9px;margin-bottom:7px}.codex-feed-item b,.scenario-row b,.codex-detail b{display:block;color:rgba(226,232,240,.96);font-size:.82rem;margin-bottom:2px}.codex-feed-item span,.scenario-row span,.codex-detail span{display:block;color:rgba(148,163,184,.86);font-size:.76rem;line-height:1.35}.codex-detail div{margin-top:8px;white-space:pre-wrap;font-size:.9rem;line-height:1.55}
+        .codex-trace-row{display:flex;justify-content:space-between;gap:12px;border:1px solid rgba(148,163,184,.13);border-radius:7px;background:rgba(15,23,42,.22);padding:7px 9px;margin-bottom:6px}.codex-trace-row span{color:rgba(148,163,184,.82);font-size:.76rem}.codex-trace-row b{color:rgba(226,232,240,.94);font-size:.82rem;text-align:right;overflow-wrap:anywhere}
+        @media(max-width:980px){.codex-glance{grid-template-columns:repeat(2,minmax(0,1fr))}}
+        </style>
+        """,
+        unsafe_allow_html=True,
+    )
