@@ -142,9 +142,11 @@ def _rail_status_items(surface: str, pack: dict) -> list[dict[str, str]]:
     events = sources.get("events") or []
     memory = pack.get("memory") or []
     models = (pack.get("models") or {}).get("items") or []
+    snapshot = pack.get("market_snapshot") or {}
+    quote_count = len(snapshot.get("quotes") or [])
     detail = str(st.session_state.get("agent_auto_detail") or _SURFACES.get(surface, surface))
     engine = str(st.session_state.get("agent_last_engine") or "대기")
-    return [
+    items = [
         {"label": "맥락", "value": _SURFACES.get(surface, surface)},
         {"label": "세부", "value": detail},
         {"label": "엔진", "value": engine},
@@ -152,6 +154,10 @@ def _rail_status_items(surface: str, pack: dict) -> list[dict[str, str]]:
         {"label": "memory", "value": _count_label(len(memory), 50, "개")},
         {"label": "models", "value": _count_label(len(models), None, "개")},
     ]
+    if snapshot:
+        items.append({"label": "실시간", "value": str(snapshot.get("status") or "unavailable")})
+        items.append({"label": "quotes", "value": _count_label(quote_count, None, "개")})
+    return items
 
 
 def _context_glance(pack: dict):
@@ -341,6 +347,8 @@ def _run_agent_question(question: str, surface: str, chat_key: str | None = None
         meta = f"맥락 {_SURFACES.get(surface, surface)}"
         if ctx:
             meta += f" · events {ctx.get('event_count', 0)} · memory {ctx.get('memory_count', 0)}"
+            if ctx.get("market_quote_count") is not None:
+                meta += f" · quotes {ctx.get('market_quote_count', 0)}"
         engine = str(ctx.get("engine") or "")
         if engine:
             st.session_state["agent_last_engine"] = "규칙" if engine == "local-rules" else engine

@@ -6,7 +6,7 @@ from collections import Counter
 from datetime import datetime, timezone
 from pathlib import Path
 
-from . import shared_memory, storage
+from . import realtime_market, shared_memory, storage
 
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
@@ -367,6 +367,7 @@ def context_pack(surface: str = "market", *, hours: int = 72) -> dict:
         "portfolio": portfolio_state(),
         "paper": paper_state(),
         "models": model_state(),
+        "market_snapshot": realtime_market.build_market_snapshot(),
         "memory": memory,
         "focus": focus_for_surface(surface),
     }

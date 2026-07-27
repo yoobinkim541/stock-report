@@ -9,7 +9,7 @@ import subprocess
 import tempfile
 import threading
 
-from . import context, shared_memory, storage, wiki
+from . import context, realtime_market, shared_memory, storage, wiki
 
 _KST = timezone(timedelta(hours=9))
 
@@ -126,6 +126,7 @@ def answer(question: str, surface: str = "market", *, async_postprocess: bool = 
     _safe_add_conversation("assistant", response, surface)
     postprocess = _postprocess_chat(question, response, surface, pack, history, async_mode=async_postprocess)
     sources = pack.get("sources") or {}
+    market_snapshot = pack.get("market_snapshot") or {}
     return {
         "ok": True,
         "answer": response,
@@ -137,6 +138,8 @@ def answer(question: str, surface: str = "market", *, async_postprocess: bool = 
             "shared_memory_count": (pack.get("shared_memory") or {}).get("recordCount", 0),
             "source_counts": sources.get("source_counts") or [],
             "symbol_counts": sources.get("symbol_counts") or [],
+            "market_snapshot_status": market_snapshot.get("status"),
+            "market_quote_count": len(market_snapshot.get("quotes") or []),
             "context_error": pack.get("context_error"),
             "postprocess": postprocess,
         },
@@ -222,6 +225,7 @@ def _fallback_context_pack(surface: str, error: str = "") -> dict:
         "portfolio": {"holdings": [], "summary": {}, "risk": {}, "targets": {}, "errors": [error] if error else []},
         "paper": {"kr": None, "us": None, "combined": None, "errors": [error] if error else []},
         "models": {"items": []},
+        "market_snapshot": {"ok": False, "status": "unavailable", "quotes": [], "unavailable": []},
         "memory": [],
         "focus": focus,
         "shared_memory": {"ok": False, "error": error, "records": []} if error else {"ok": True, "records": []},
@@ -287,6 +291,7 @@ def _build_market_context_prompt(question: str, pack: dict) -> str:
     source_counts = (pack.get("sources") or {}).get("source_counts") or []
     symbol_counts = (pack.get("sources") or {}).get("symbol_counts") or []
     memory = pack.get("memory") or []
+    snapshot_ctx = _compact_market_snapshot_context(pack)
     lines = [
         "사용자는 시장 상황을 물었습니다.",
         f"질문: {question}",
@@ -296,6 +301,8 @@ def _build_market_context_prompt(question: str, pack: dict) -> str:
         "",
         "[최근 이벤트]",
     ]
+    if snapshot_ctx:
+        lines += ["", "[실시간/최신 시장 스냅샷]", *snapshot_ctx]
     for item in events[:8]:
         title = item.get("title") or item.get("summary")
         if title:
@@ -1472,6 +1479,7 @@ def _build_general_chat_prompt(question: str, pack: dict, history: list[dict] | 
             ctx.append(f"- memory: {title}")
     portfolio_ctx = _compact_portfolio_context(pack)
     paper_ctx = _compact_paper_context(pack)
+    market_snapshot_ctx = _compact_market_snapshot_context(pack)
     try:
         shared_section = shared_memory.build_context_section(
             {
@@ -1515,6 +1523,9 @@ def _build_general_chat_prompt(question: str, pack: dict, history: list[dict] | 
         "[사용 가능한 투자 컨텍스트]",
         *(ctx or ["- 없음"]),
         "",
+        "[실시간/최신 시장 스냅샷]",
+        *(market_snapshot_ctx or ["- 없음"]),
+        "",
         "[포트폴리오 스냅샷]",
         *(portfolio_ctx or ["- 없음"]),
         "",
@@ -1529,6 +1540,15 @@ def _build_general_chat_prompt(question: str, pack: dict, history: list[dict] | 
         "",
         "답변:",
     ])
+
+
+def _compact_market_snapshot_context(pack: dict) -> list[str]:
+    snapshot = pack.get("market_snapshot") or {}
+    try:
+        lines = realtime_market.compact_snapshot_lines(snapshot)
+    except Exception:
+        return []
+    return [line for line in lines if str(line or "").strip()]
 
 
 def _compact_portfolio_context(pack: dict) -> list[str]:

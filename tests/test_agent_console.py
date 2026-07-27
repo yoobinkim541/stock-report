@@ -668,6 +668,39 @@ def test_agent_prompt_pins_non_market_intents_and_forbidden_templates(monkeypatc
     assert "시장 템플릿 금지: 현재 시장 상황 인식, MIXED, 시장 신호 점수" in portfolio
 
 
+def test_agent_prompt_includes_realtime_market_snapshot(monkeypatch, tmp_path):
+    _isolate(monkeypatch, tmp_path)
+
+    from agent_console import agent
+
+    pack = {
+        "surface": "market",
+        "sources": {"events": [], "source_counts": [], "symbol_counts": []},
+        "memory": [],
+        "reports": [],
+        "ml_activity": [],
+        "portfolio": {"holdings": []},
+        "paper": {},
+        "models": {},
+        "focus": [],
+        "market_snapshot": {
+            "ok": True,
+            "status": "partial",
+            "quotes": [
+                {"symbol": "QQQ", "price": 550.5, "source": "rest_cache:toss", "age_s": 3},
+            ],
+            "as_of": "2026-07-27T05:00:00+00:00",
+        },
+    }
+
+    prompt = agent._build_general_chat_prompt("오늘 시장 어때", pack, history=[])
+
+    assert "[실시간/최신 시장 스냅샷]" in prompt
+    assert "QQQ" in prompt
+    assert "550.5" in prompt
+    assert "시점" in prompt
+
+
 def test_agent_context_prompt_includes_wiki(monkeypatch, tmp_path):
     _isolate(monkeypatch, tmp_path)
 
