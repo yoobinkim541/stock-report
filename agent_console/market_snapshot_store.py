@@ -3,12 +3,43 @@ from __future__ import annotations
 import json
 import os
 import time
+from datetime import datetime, timezone
 from pathlib import Path
 
 
 DEFAULT_FILE_PATH = Path(os.path.expanduser("~/.cache/kr_market_microstructure.json"))
 DEFAULT_REDIS_KEY = "market:kr:microstructure"
 DEFAULT_MAX_AGE_S = 120
+
+
+def _iso_from_ts(ts: float) -> str:
+    return datetime.fromtimestamp(float(ts), timezone.utc).isoformat(timespec="seconds")
+
+
+def _dict_or_empty(value) -> dict:
+    return value if isinstance(value, dict) else {}
+
+
+def normalize_market_microstructure(payload: dict, now: float | None = None) -> dict:
+    """Normalize one Korean intraday market snapshot for chat consumption."""
+    payload = dict(payload or {})
+    ts = time.time() if now is None else float(now)
+    max_age = int(payload.get("max_age_s") or os.getenv("KR_MARKET_MICROSTRUCTURE_STALE_S", DEFAULT_MAX_AGE_S))
+    return {
+        "schema": "kr-market-microstructure.v1",
+        "ts": ts,
+        "max_age_s": max_age,
+        "as_of": payload.get("as_of") or _iso_from_ts(ts),
+        "source": payload.get("source") or "unknown",
+        "indices": _dict_or_empty(payload.get("indices")),
+        "investor_flow": _dict_or_empty(payload.get("investor_flow")),
+        "k200_futures": payload.get("k200_futures") if isinstance(payload.get("k200_futures"), dict) else None,
+        "breadth": payload.get("breadth") if isinstance(payload.get("breadth"), dict) else payload.get("advancers_decliners"),
+        "fx": _dict_or_empty(payload.get("fx")),
+        "field_status": _dict_or_empty(payload.get("field_status")),
+        "errors": list(payload.get("errors") or []),
+        "unavailable": list(payload.get("unavailable") or []),
+    }
 
 
 class FileSnapshotStore:
@@ -80,6 +111,24 @@ def default_store():
     if redis_url:
         return RedisSnapshotStore(redis_url, os.getenv("KR_MARKET_MICROSTRUCTURE_REDIS_KEY", DEFAULT_REDIS_KEY))
     return FileSnapshotStore()
+
+
+def write_market_microstructure(payload: dict, store=None) -> bool:
+    """Write a normalized snapshot to the configured store.
+
+    Redis deployments also keep the file snapshot warm as a local fallback.
+    """
+    normalized = normalize_market_microstructure(payload)
+    target = store or default_store()
+    try:
+        ok = bool(target.write(normalized))
+    except TypeError:
+        ok = bool(target.write(normalized, ttl_s=normalized.get("max_age_s")))
+    except Exception:
+        ok = False
+    if ok and isinstance(target, RedisSnapshotStore):
+        FileSnapshotStore().write(normalized)
+    return ok
 
 
 def _fresh(payload: dict, now: float | None = None) -> bool:

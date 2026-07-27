@@ -113,7 +113,7 @@ def build_market_snapshot(symbols: list[str] | None = None, now: float | None = 
             quotes.append(quote)
         else:
             missing.append({"symbol": symbol, "market": _market_for(symbol), "reason": "fresh quote unavailable"})
-    fx = _fx_snapshot()
+    fx = _fx_snapshot() or (micro.get("fx") if isinstance(micro.get("fx"), dict) else None)
     populated_fields = set()
     if (indices.get("kospi") or {}).get("price") is not None:
         populated_fields.add("kospi_index")

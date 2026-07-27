@@ -15,7 +15,8 @@ import glob
 import json
 import time
 import subprocess
-from datetime import datetime
+from datetime import datetime, timezone
+from zoneinfo import ZoneInfo
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -315,6 +316,25 @@ def check_source_collection() -> tuple[str, str] | None:
     return ("source_stale", "⚠️ 뉴스/매크로 수집 공백 출처 감지\n" + "\n".join(lines))
 
 
+
+def _intraday_bar_start_grace(*, kr_open: bool, us_open: bool,
+                              now_utc: datetime | None = None,
+                              grace_min: int = 20) -> bool:
+    """Return True during the first grace_min minutes after a market open."""
+    now = now_utc or datetime.now(timezone.utc)
+    if now.tzinfo is None:
+        now = now.replace(tzinfo=timezone.utc)
+    checks = []
+    if kr_open:
+        checks.append((now.astimezone(ZoneInfo("Asia/Seoul")), 9 * 60))
+    if us_open:
+        checks.append((now.astimezone(ZoneInfo("America/New_York")), 9 * 60 + 30))
+    for local_now, open_min in checks:
+        minute = local_now.hour * 60 + local_now.minute
+        if open_min <= minute < open_min + grace_min:
+            return True
+    return False
+
 def check_intraday_bars() -> tuple[str, str] | None:
     """단기 1분봉 sink 고장 감지 — INTRADAY_BARS_ENABLED 인데 장중 당일 bar 미갱신.
 
@@ -327,16 +347,55 @@ def check_intraday_bars() -> tuple[str, str] | None:
             sys.path.insert(0, PROJECT_DIR)
         from ml.intraday_signal import is_kr_market_open, is_us_market_open
         from providers import intraday_bars
-        if not (is_kr_market_open() or is_us_market_open()):
+        kr_open = is_kr_market_open()
+        us_open = is_us_market_open()
+        if not (kr_open or us_open):
             return None
         path = intraday_bars.bar_path(intraday_bars.today_utc())
         age = (time.time() - path.stat().st_mtime) if path.exists() else None
+        if (age is None or age > 20 * 60) and _intraday_bar_start_grace(kr_open=kr_open, us_open=us_open):
+            return None
     except Exception as e:
         return ("intraday_bars_error", f"⚠️ 단기 bar 점검 실패: {e}")
     if age is None or age > 20 * 60:      # 개장 초 유예 포함 20분
         gap = "파일 없음" if age is None else f"{age / 60:.0f}분 미갱신"
         return ("intraday_bars_stale",
                 f"⚠️ 단기 1분봉 sink 정체 — 장중인데 당일 bar {gap} (kis_stream 재시작 필요 가능)")
+    return None
+
+
+def check_market_microstructure_snapshot() -> tuple[str, str] | None:
+    """AI 콘솔 장중 시장 미시구조 스냅샷 신선도와 필드 공백을 점검."""
+    if os.getenv("KR_MARKET_MICROSTRUCTURE_ENABLED", "false").lower() not in {"1", "true", "yes", "on"}:
+        return None
+    try:
+        if PROJECT_DIR not in sys.path:
+            sys.path.insert(0, PROJECT_DIR)
+        from agent_console import market_snapshot_store
+
+        payload = market_snapshot_store.default_store().read()
+        if not payload:
+            return ("market_microstructure_missing", "⚠️ 장중 시장 미시구조 스냅샷 없음 — kr_microstructure_snapshot cron 확인 필요")
+        ts = float(payload.get("ts") or 0)
+        max_age_s = float(payload.get("max_age_s") or os.getenv("KR_MARKET_MICROSTRUCTURE_STALE_S", "120"))
+        if ts > 0 and time.time() - ts > max_age_s:
+            age_min = (time.time() - ts) / 60
+            return ("market_microstructure_stale", f"⚠️ 장중 시장 미시구조 스냅샷 정체 — {age_min:.0f}분 전 자료")
+        required = [x.strip() for x in os.getenv("KR_MARKET_MICROSTRUCTURE_REQUIRED_FIELDS", "indices,investor_flow,k200_futures,breadth,fx").split(",") if x.strip()]
+        status = payload.get("field_status") or {}
+        missing = []
+        for field in required:
+            row = status.get(field) if isinstance(status, dict) else None
+            value = payload.get(field)
+            if isinstance(row, dict) and row.get("ok"):
+                continue
+            if value:
+                continue
+            missing.append(field)
+        if missing:
+            return ("market_microstructure_partial", "⚠️ 장중 시장 미시구조 일부 미연결: " + ", ".join(missing[:6]))
+    except Exception as e:
+        return ("market_microstructure_error", f"⚠️ 장중 시장 미시구조 점검 실패: {e}")
     return None
 
 
@@ -369,6 +428,7 @@ def main():
         check_barbell_state_age,
         check_store_db,
         check_source_collection,
+        check_market_microstructure_snapshot,
         check_intraday_bars,
     ]
 

@@ -600,7 +600,7 @@ def _engine_tests(tmp: str) -> list[str]:
             chk("net R 음수", len(outs) == 1 and outs[0]["realized_r"] < 0)
             chk("fwd_excess=realized_r", len(outs) == 1 and outs[0]["fwd_excess"] == outs[0]["realized_r"])
             chk("포지션 제거", pos_key not in state["positions"])
-            chk("기본 쿨다운 없음", state["cooldown_until"].get(pos_key, 0) <= 0)
+            chk("청산 후 기본 쿨다운 설정", state["cooldown_until"].get(pos_key, 0) > 0)
             chk("체결 이벤트(sell)", any(e["side"] == "sell" for e in events))
             chk("day_pnl 반영", state["counters"]["KR"]["day_pnl"] != 0.0)
 

@@ -73,6 +73,7 @@ def load_cfg() -> dict:
     spread_hard_kr = _env_f("INTRADAY_HARD_SPREAD_BPS_KR", spread_soft_kr)
     spread_hard_us = _env_f("INTRADAY_HARD_SPREAD_BPS_US", 50.0)
     max_concurrent_default = int(_env_f("INTRADAY_MAX_CONCURRENT_POS", _DEFAULT_MAX_CONCURRENT))
+    cooldown_default = int(_env_f("INTRADAY_COOLDOWN_MIN", 30))
     return {
         "enabled": os.getenv("INTRADAY_MOCK_ENABLED", "false").lower() == "true",
         "shadow": os.getenv("INTRADAY_SHADOW_ONLY", "true").lower() == "true",
@@ -80,7 +81,9 @@ def load_cfg() -> dict:
         "sleeve_frac": _env_f("INTRADAY_SLEEVE_FRAC", 0.10),
         "risk_per_trade": _env_f("INTRADAY_RISK_PER_TRADE", 0.005),
         "max_trades": int(_env_f("INTRADAY_MAX_TRADES_DAY", 0)),
-        "cooldown_min": int(_env_f("INTRADAY_COOLDOWN_MIN", 0)),
+        "cooldown_min": cooldown_default,
+        "collapse_cooldown_min": int(_env_f("INTRADAY_COLLAPSE_COOLDOWN_MIN", cooldown_default)),
+        "stop_cooldown_min": int(_env_f("INTRADAY_STOP_COOLDOWN_MIN", max(cooldown_default, 60))),
         "stop_friction_mult": _env_f("INTRADAY_STOP_FRICTION_MULT", 3.0),
         "min_notional": {"KR": _env_f("INTRADAY_MIN_NOTIONAL_KRW", 100000),
                          "US": _env_f("INTRADAY_MIN_NOTIONAL_USD", 150)},
@@ -106,12 +109,24 @@ def load_cfg() -> dict:
             "US": _env_f("INTRADAY_EXPLORE_ENTRY_US", _env_f("INTRADAY_EXPLORE_ENTRY", 0.48)),
         },
         "explore_risk_mult": {
-            "KR": _env_f("INTRADAY_EXPLORE_RISK_MULT_KR", _env_f("INTRADAY_EXPLORE_RISK_MULT", 0.35)),
+            "KR": _env_f("INTRADAY_EXPLORE_RISK_MULT_KR", _env_f("INTRADAY_EXPLORE_RISK_MULT", 0.15)),
             "US": _env_f("INTRADAY_EXPLORE_RISK_MULT_US", _env_f("INTRADAY_EXPLORE_RISK_MULT", 0.50)),
         },
         "max_concurrent": {
             "KR": int(_env_f("INTRADAY_MAX_CONCURRENT_POS_KR", max_concurrent_default)),
             "US": int(_env_f("INTRADAY_MAX_CONCURRENT_POS_US", max_concurrent_default)),
+        },
+        "explore_confirm_bars": {
+            "KR": int(_env_f("INTRADAY_EXPLORE_CONFIRM_BARS_KR", _env_f("INTRADAY_EXPLORE_CONFIRM_BARS", 2))),
+            "US": int(_env_f("INTRADAY_EXPLORE_CONFIRM_BARS_US", _env_f("INTRADAY_EXPLORE_CONFIRM_BARS", 2))),
+        },
+        "normal_confirm_bars": {
+            "KR": int(_env_f("INTRADAY_NORMAL_CONFIRM_BARS_KR", _env_f("INTRADAY_NORMAL_CONFIRM_BARS", 1))),
+            "US": int(_env_f("INTRADAY_NORMAL_CONFIRM_BARS_US", _env_f("INTRADAY_NORMAL_CONFIRM_BARS", 1))),
+        },
+        "explore_spread_cap": {
+            "KR": _env_f("INTRADAY_EXPLORE_SPREAD_BPS_KR", _env_f("INTRADAY_EXPLORE_SPREAD_BPS", 12.0)),
+            "US": _env_f("INTRADAY_EXPLORE_SPREAD_BPS_US", _env_f("INTRADAY_EXPLORE_SPREAD_BPS", 25.0)),
         },
         "leverage_enabled": lev_enabled,
         "leverage_map": lev_map,
@@ -123,7 +138,7 @@ def load_cfg() -> dict:
 def _blank_state() -> dict:
     return {"session_date": {}, "positions": {}, "counters": {}, "halt": {},
             "cooldown_until": {}, "obi_hist": {}, "last_processed_bar": {},
-            "profiles": {}, "last_run": None}
+            "entry_confirm": {}, "profiles": {}, "last_run": None}
 
 
 def load_state() -> dict:
@@ -384,15 +399,62 @@ def _entry_risk_mult(score: float, params: dict, cfg: dict, mk: str | None = Non
     return (mult, "explore") if mult > 0 else (0.0, "skip")
 
 
+
+def _entry_confirm_bars(entry_mode: str, cfg: dict, mk: str) -> int:
+    key = "explore_confirm_bars" if entry_mode == "explore" else "normal_confirm_bars"
+    return max(1, int(_cfg_market_value(cfg, key, mk, 1)))
+
+
+def _entry_confirmation_ok(state: dict, mk: str, sym: str, score: float, entry_mode: str,
+                           params: dict, cfg: dict, epoch_min: int | None) -> bool:
+    """Require consecutive confirmed bars before weak/explore entries can fire."""
+    need = _entry_confirm_bars(entry_mode, cfg, mk)
+    if need <= 1:
+        return True
+    if epoch_min is None:
+        return False
+    theta_entry = float(params.get("theta_entry", 0.55))
+    threshold = theta_entry if entry_mode == "normal" else min(
+        theta_entry, float(_cfg_market_value(cfg, "explore_entry", mk, 0.48)))
+    key = f"{mk}:{sym}"
+    rec = (state.setdefault("entry_confirm", {}).get(key) or {})
+    prev_epoch = rec.get("epoch")
+    prev_streak = int(rec.get("streak") or 0)
+    streak = prev_streak + 1 if prev_epoch == epoch_min - 1 and score >= threshold else 1
+    if score < threshold:
+        streak = 0
+    state["entry_confirm"][key] = {
+        "epoch": epoch_min,
+        "streak": streak,
+        "score": round(float(score), 4),
+        "entry_mode": entry_mode,
+    }
+    return streak >= need
+
+
+def _exit_cooldown_min(reason: str, net: float, cfg: dict) -> int:
+    if reason == "stop":
+        return max(0, int(cfg.get("stop_cooldown_min", cfg.get("cooldown_min", 0)) or 0))
+    if reason == "signal_collapse":
+        return max(0, int(cfg.get("collapse_cooldown_min", cfg.get("cooldown_min", 0)) or 0))
+    if net < 0:
+        return max(0, int(cfg.get("cooldown_min", 0) or 0))
+    return 0
+
 def _max_concurrent(mk: str, cfg: dict) -> int:
     return max(0, int(_cfg_market_value(cfg, "max_concurrent", mk, _DEFAULT_MAX_CONCURRENT)))
 
 
-def _entry_spread_cap(price: float, mk: str, cfg: dict) -> float:
-    """진입 차단에는 하드캡을 쓰고, 실제 스프레드는 마찰/수량 산식에 반영한다."""
+def _entry_spread_cap(price: float, mk: str, cfg: dict, entry_mode: str | None = None) -> float:
+    """진입 차단에는 하드캡을 쓰고, 탐색 진입은 더 좁은 스프레드만 허용한다."""
     from ml import intraday_axes as ax
     caps = cfg.get("spread_hard_cap") or cfg.get("spread_cap") or {}
-    return ax.spread_cap_bps(price, mk, float(caps.get(mk, 0.0)))
+    cap = ax.spread_cap_bps(price, mk, float(caps.get(mk, 0.0)))
+    if entry_mode == "explore":
+        explore_cap = _cfg_market_value(cfg, "explore_spread_cap", mk, None)
+        if explore_cap is not None:
+            cap = min(cap, float(explore_cap))
+    return cap
 
 
 # ── 청산·진입 실행 ────────────────────────────────────────────────────────────
@@ -439,8 +501,8 @@ def _do_exit(state: dict, key: str, pos: dict, reason: str, ref_px: float, mk: s
     c = state["counters"].setdefault(mk, {"trades": 0, "day_pnl": 0.0, "sleeve_pnl_cum": 0.0})
     c["day_pnl"] = c.get("day_pnl", 0.0) + net
     c["sleeve_pnl_cum"] = c.get("sleeve_pnl_cum", 0.0) + net
-    cooldown_min = int(cfg.get("cooldown_min") or 0)
-    if net < 0 and cooldown_min > 0:                # 선택 옵션. 기본은 즉시 재진입 허용.
+    cooldown_min = _exit_cooldown_min(reason, net, cfg)
+    if cooldown_min > 0:
         state["cooldown_until"][key] = time.time() + cooldown_min * 60
     else:
         state["cooldown_until"].pop(key, None)
@@ -507,6 +569,7 @@ def _do_entry(state: dict, sym: str, mk: str, axes: dict, score: float, params: 
                   avg_price=fill["price"], shadow=shadow,
                   note=f"단기 {'탐색 ' if entry_mode == 'explore' else ''}진입 score={score:.2f} stop={stop:,.0f}"
                        + (" (shadow)" if shadow else ""), dry=dry)
+    state.get("entry_confirm", {}).pop(f"{mk}:{sym}", None)
     state["positions"][f"{mk}:{sym}"] = {
         "decision_id": did, "ticker": sym, "market": mk, "qty": qty,
         "entry_price": fill["price"], "entry_epoch": time.time(),
@@ -598,6 +661,8 @@ def run_market(mk: str, state: dict, cfg: dict, *, dry: bool = False) -> list[st
         state["halt"][mk] = False
         state["cooldown_until"] = {k: v for k, v in state["cooldown_until"].items()
                                    if not k.startswith(f"{mk}:")}
+        state["entry_confirm"] = {k: v for k, v in state.get("entry_confirm", {}).items()
+                                  if not k.startswith(f"{mk}:")}
         state["profiles"].pop(mk, None)
         state["obi_hist"] = {k: v for k, v in state["obi_hist"].items()
                              if k not in [f"{mk}:{s}" for s in universe + held]}
@@ -758,6 +823,9 @@ def run_market(mk: str, state: dict, cfg: dict, *, dry: bool = False) -> list[st
         risk_mult, entry_mode = _entry_risk_mult(score, params, cfg, mk)
         if risk_mult <= 0:
             continue
+        if not _entry_confirmation_ok(state, mk, sym, score, entry_mode, params, cfg, axes.get("_meta", {}).get("epoch_min")):
+            logger.info("[%s] %s score %.2f %s — 진입 확인 대기", mk, sym, score, entry_mode)
+            continue
         ob = obs.get(sym)
         meta = axes["_meta"]
         sp = ax.spread_bps((ob or {}).get("best_bid"), (ob or {}).get("best_ask"))
@@ -786,7 +854,7 @@ def run_market(mk: str, state: dict, cfg: dict, *, dry: bool = False) -> list[st
             "cooldown_ok": int(cfg.get("cooldown_min") or 0) <= 0
                            or time.time() >= float(state["cooldown_until"].get(f"{mk}:{sym}") or 0),
             "held": False, "fresh": fresh.get(sym, False),
-            "spread": sp, "spread_cap": _entry_spread_cap(meta["close"], mk, cfg),
+            "spread": sp, "spread_cap": _entry_spread_cap(meta["close"], mk, cfg, entry_mode),
             "loss_budget": loss_budget, "qty": qty})
         if not ok:
             suffix = f"({signal_sym} 신호)" if signal_sym != sym else ""

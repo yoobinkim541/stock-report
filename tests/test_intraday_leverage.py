@@ -68,6 +68,71 @@ def test_entry_risk_mult_opens_explore_band():
     assert eng._entry_risk_mult(0.50, params, {**cfg, "explore_enabled": False}, "KR") == (0.0, "skip")
 
 
+def test_explore_entry_requires_consecutive_confirmation():
+    from crons import intraday_mock_track as eng
+
+    state = eng._blank_state()
+    params = {"theta_entry": 0.55}
+    cfg = {
+        "explore_entry": {"KR": 0.40},
+        "explore_confirm_bars": {"KR": 2},
+    }
+
+    assert eng._entry_confirmation_ok(state, "KR", "950160", 0.47, "explore", params, cfg, 100) is False
+    assert eng._entry_confirmation_ok(state, "KR", "950160", 0.46, "explore", params, cfg, 101) is True
+
+
+def test_explore_entry_confirmation_resets_on_bar_gap():
+    from crons import intraday_mock_track as eng
+
+    state = eng._blank_state()
+    params = {"theta_entry": 0.55}
+    cfg = {
+        "explore_entry": {"KR": 0.40},
+        "explore_confirm_bars": {"KR": 2},
+    }
+
+    assert eng._entry_confirmation_ok(state, "KR", "950160", 0.47, "explore", params, cfg, 100) is False
+    assert eng._entry_confirmation_ok(state, "KR", "950160", 0.46, "explore", params, cfg, 103) is False
+
+
+def test_normal_entry_does_not_require_extra_confirmation_by_default():
+    from crons import intraday_mock_track as eng
+
+    state = eng._blank_state()
+    params = {"theta_entry": 0.55}
+    cfg = {"normal_confirm_bars": {"KR": 1}}
+
+    assert eng._entry_confirmation_ok(state, "KR", "322000", 0.70, "normal", params, cfg, 100) is True
+
+
+def test_exit_cooldown_blocks_signal_collapse_and_stop_by_default():
+    from crons import intraday_mock_track as eng
+
+    cfg = {
+        "cooldown_min": 30,
+        "collapse_cooldown_min": 30,
+        "stop_cooldown_min": 60,
+    }
+
+    assert eng._exit_cooldown_min("signal_collapse", 100.0, cfg) == 30
+    assert eng._exit_cooldown_min("stop", 100.0, cfg) == 60
+    assert eng._exit_cooldown_min("target", -1.0, cfg) == 30
+    assert eng._exit_cooldown_min("target", 1.0, cfg) == 0
+
+
+def test_explore_uses_stricter_spread_cap():
+    from crons import intraday_mock_track as eng
+
+    cfg = {
+        "spread_hard_cap": {"KR": 25.0},
+        "explore_spread_cap": {"KR": 12.0},
+    }
+
+    assert eng._entry_spread_cap(20_000.0, "KR", cfg, "normal") >= 25.0
+    assert eng._entry_spread_cap(20_000.0, "KR", cfg, "explore") == 12.0
+
+
 def test_zero_max_concurrent_means_loss_budget_controls_open_positions():
     from crons import intraday_mock_track as eng
 

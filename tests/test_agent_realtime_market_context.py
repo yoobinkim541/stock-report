@@ -126,3 +126,19 @@ def test_compact_snapshot_lines_include_microstructure_fields():
     assert "K200 선물" in text
     assert "상승 512" in text
     assert "하락 318" in text
+
+
+def test_realtime_snapshot_uses_microstructure_fx_when_toss_disabled(monkeypatch):
+    from agent_console import realtime_market
+
+    monkeypatch.setenv("AGENT_CONSOLE_TOSS_FX_ENABLED", "0")
+    monkeypatch.setattr(
+        realtime_market.market_snapshot_store,
+        "load_market_microstructure",
+        lambda: {"as_of": "2026-07-27T10:15:00+09:00", "fx": {"pair": "USD/KRW", "rate": 1387.2, "source": "kr_microstructure"}},
+    )
+
+    snapshot = realtime_market.build_market_snapshot(symbols=[], now=1000.0)
+
+    assert snapshot["fx"]["rate"] == 1387.2
+    assert "USD/KRW" in "\n".join(realtime_market.compact_snapshot_lines(snapshot))
