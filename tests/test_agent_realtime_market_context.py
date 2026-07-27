@@ -66,3 +66,63 @@ def test_context_pack_includes_market_snapshot(monkeypatch, tmp_path):
     pack = context.context_pack("market")
 
     assert pack["market_snapshot"]["quotes"][0]["symbol"] == "QQQ"
+
+def test_realtime_snapshot_merges_market_microstructure_store(monkeypatch):
+    from agent_console import realtime_market
+
+    payload = {
+        "as_of": "2026-07-27T05:00:00+00:00",
+        "source": "kiwoom_collector",
+        "indices": {
+            "kospi": {"price": 3210.5, "change_pct": 0.7},
+            "kosdaq": {"price": 820.1, "change_pct": -0.2},
+        },
+        "investor_flow": {
+            "kospi": {"foreign_net": 120000000000, "institution_net": -50000000000, "individual_net": -70000000000},
+        },
+        "k200_futures": {"price": 425.5, "change_pct": 0.4, "foreign_net": 3500},
+        "breadth": {"advancers": 512, "decliners": 318, "unchanged": 75},
+    }
+    monkeypatch.setattr(realtime_market.market_snapshot_store, "load_market_microstructure", lambda: payload)
+
+    snapshot = realtime_market.build_market_snapshot(symbols=[], now=1000.0)
+
+    assert snapshot["ok"] is True
+    assert snapshot["status"] == "partial"
+    assert snapshot["indices"]["kospi"]["price"] == 3210.5
+    assert snapshot["investor_flow"]["kospi"]["foreign_net"] == 120000000000
+    assert snapshot["k200_futures"]["foreign_net"] == 3500
+    assert snapshot["breadth"]["advancers"] == 512
+    unavailable = {row["field"] for row in snapshot["unavailable"]}
+    assert "kospi_index" not in unavailable
+    assert "kosdaq_index" not in unavailable
+    assert "investor_flow" not in unavailable
+    assert "k200_futures" not in unavailable
+    assert "advancers_decliners" not in unavailable
+
+def test_compact_snapshot_lines_include_microstructure_fields():
+    from agent_console import realtime_market
+
+    snapshot = {
+        "status": "partial",
+        "as_of": "2026-07-27T05:00:00+00:00",
+        "indices": {
+            "kospi": {"price": 3210.5, "change_pct": 0.7},
+            "kosdaq": {"price": 820.1, "change_pct": -0.2},
+        },
+        "investor_flow": {
+            "kospi": {"foreign_net": 120000000000, "institution_net": -50000000000},
+        },
+        "k200_futures": {"price": 425.5, "change_pct": 0.4, "foreign_net": 3500},
+        "breadth": {"advancers": 512, "decliners": 318},
+    }
+
+    text = "\n".join(realtime_market.compact_snapshot_lines(snapshot))
+
+    assert "KOSPI" in text
+    assert "KOSDAQ" in text
+    assert "외국인" in text
+    assert "기관" in text
+    assert "K200 선물" in text
+    assert "상승 512" in text
+    assert "하락 318" in text
