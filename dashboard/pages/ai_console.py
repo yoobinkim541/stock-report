@@ -17,6 +17,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspa
 
 from agent_console import agent, context, storage, wiki
 from agent_console.portfolio_matrix_dsl import rsi_cash_program, run_portfolio_matrix_dsl
+from dashboard import chat_references
 from dashboard import data
 from dashboard import wiki_browser
 
@@ -203,20 +204,22 @@ def _chat_tab(surface: str, pack: dict):
         )
         pending = _quick_prompts()
         if pending:
-            _run_agent_question_auto(pending)
+            _run_agent_question_auto(pending, pack)
 
-        for msg in st.session_state[chat_key][-16:]:
+        for idx, msg in enumerate(st.session_state[chat_key][-16:]):
             role_raw = str(msg.get("role", "assistant")).strip().lower()
             role = "user" if role_raw in {"user", "human"} else "assistant"
             with st.chat_message(role):
                 st.markdown(msg.get("content", ""))
                 if msg.get("meta"):
                     st.caption(msg["meta"])
+                if role == "assistant" and msg.get("references"):
+                    _render_reference_panel(msg["references"], key_prefix=f"{chat_key}_{idx}")
 
         user_text = st.chat_input("무엇이든 질문하기 — 포트폴리오·종목·시장·모의투자·전략",
                                   key="agent_chat_input_auto")
         if user_text:
-            _run_agent_question_auto(user_text)
+            _run_agent_question_auto(user_text, pack)
             st.rerun()
 
     with rail_col:
@@ -315,7 +318,7 @@ def _quick_prompts() -> str | None:
     return None
 
 
-def _run_agent_question_auto(question: str):
+def _run_agent_question_auto(question: str, pack: dict):
     """단일 스레드 UX — 질문에서 맥락을 추론(또는 pin)해 실행하고 추론값을 기억한다."""
     question = str(question or "").strip()
     if not question:
@@ -328,10 +331,10 @@ def _run_agent_question_auto(question: str):
         surface = agent.infer_surface(question, default=prev)
     st.session_state["agent_auto_surface"] = surface
     st.session_state["agent_auto_detail"] = _infer_context_detail(question, surface)
-    _run_agent_question(question, surface, chat_key=_chat_key(_AUTO_CHAT))
+    _run_agent_question(question, surface, pack, chat_key=_chat_key(_AUTO_CHAT))
 
 
-def _run_agent_question(question: str, surface: str, chat_key: str | None = None):
+def _run_agent_question(question: str, surface: str, pack: dict, chat_key: str | None = None):
     question = str(question or "").strip()
     if not question:
         return
@@ -344,6 +347,16 @@ def _run_agent_question(question: str, surface: str, chat_key: str | None = None
     result = _answer_with_progress(question, surface)
     if result.get("ok"):
         ctx = result.get("context") or {}
+        references = chat_references.build_answer_references(
+            question,
+            surface,
+            pack,
+            result.get("answer", ""),
+        )
+        ref_counts = {
+            "wiki": len(references.get("wiki") or []),
+            "sources": len(references.get("sources") or []),
+        }
         meta = f"맥락 {_SURFACES.get(surface, surface)}"
         if ctx:
             meta += f" · events {ctx.get('event_count', 0)} · memory {ctx.get('memory_count', 0)}"
@@ -357,12 +370,15 @@ def _run_agent_question(question: str, surface: str, chat_key: str | None = None
         post = (ctx.get("postprocess") or {}).get("wiki_autocurate")
         if post:
             meta += f" · 후처리 {post}"
+        if ref_counts["wiki"] or ref_counts["sources"]:
+            meta += f" · 참고 위키 {ref_counts['wiki']} · 출처 {ref_counts['sources']}"
         if ctx.get("context_error"):
             meta = f"{meta} · context fallback" if meta else "context fallback"
         st.session_state[chat_key].append({
             "role": "assistant",
             "content": result.get("answer", ""),
             "meta": meta,
+            "references": references,
         })
     else:
         st.session_state[chat_key].append({
@@ -370,6 +386,57 @@ def _run_agent_question(question: str, surface: str, chat_key: str | None = None
             "content": result.get("error", "답변 생성 실패"),
             "meta": "error",
         })
+
+
+def _open_wiki_reference(page_id: str | None) -> None:
+    page_id = str(page_id or "").strip()
+    if page_id:
+        st.session_state["agent_wiki_selected_page_id"] = page_id
+    wiki_page = st.session_state.get("_wiki_page")
+    if wiki_page is not None:
+        st.switch_page(wiki_page)
+
+
+def _render_reference_panel(references: dict, key_prefix: str) -> None:
+    wiki_refs = list(references.get("wiki") or [])
+    source_refs = list(references.get("sources") or [])
+    if not wiki_refs and not source_refs:
+        return
+
+    with st.expander(f"참고 자료 · 위키 {len(wiki_refs)} · 출처 {len(source_refs)}", expanded=False):
+        if wiki_refs:
+            st.markdown("##### 참고 위키")
+            for idx, ref in enumerate(wiki_refs):
+                with st.container(border=True):
+                    st.markdown(f"**{_esc(ref.get('title') or '위키 페이지')}**")
+                    st.caption(
+                        f"{_esc(ref.get('surface') or 'wiki')} · {_esc(ref.get('page_kind') or 'note')} · "
+                        f"{_esc(ref.get('status') or 'draft')} · {_esc(ref.get('verification_status') or 'unverified')}"
+                    )
+                    if ref.get("summary"):
+                        st.write(ref["summary"])
+                    if ref.get("source_refs"):
+                        st.caption("원문 단서: " + " · ".join(str(item) for item in ref.get("source_refs")[:4]))
+                    if st.button("AI 위키에서 열기", key=f"{key_prefix}_wiki_{idx}_{ref.get('id')}", width="stretch"):
+                        _open_wiki_reference(ref.get("id"))
+
+        if source_refs:
+            st.markdown("##### 원문 출처")
+            for idx, ref in enumerate(source_refs):
+                with st.container(border=True):
+                    st.markdown(f"**{_esc(ref.get('title') or '원문 출처')}**")
+                    meta_bits = [ref.get("source"), ref.get("published_at")]
+                    st.caption(" · ".join(str(item) for item in meta_bits if item))
+                    if ref.get("summary"):
+                        st.write(ref["summary"])
+                    url = str(ref.get("url") or "").strip()
+                    path = ((ref.get("metadata") or {}).get("path") or "")
+                    if url:
+                        st.markdown(f"[원문 열기]({url})")
+                    elif path:
+                        st.caption(f"파일 경로: {path}")
+                    else:
+                        st.caption(ref.get("reason") or "출처 정보")
 
 
 def _chat_context_rail(surface: str, pack: dict):
@@ -516,662 +583,3 @@ def _memory_detail(event, rows):
 
 def _wiki_tab(surface: str, pack: dict):
     return wiki_browser.render_wiki_tab(surface, pack)
-
-
-def _lab_tab(surface: str):
-    st.markdown("##### 전략 캔버스")
-    st.markdown(
-        """
-        <div class="widget-flow">
-          <div><b>W-001</b><span>포트폴리오 입력</span></div>
-          <i></i>
-          <div><b>W-009</b><span>RSI 현금화 규칙</span></div>
-          <i></i>
-          <div><b>W-010</b><span>Buy & Hold 비교</span></div>
-        </div>
-        """,
-        unsafe_allow_html=True,
-    )
-
-    _ensure_canvas_defaults()
-    alloc_text = st.session_state.get("strategy_canvas_alloc_text", "")
-    allocs = _normalize_allocations(_parse_allocations(alloc_text))
-    market_symbols = [a["symbol"] for a in allocs if a.get("symbol") and a.get("symbol") != "CASH"]
-    signal_options = market_symbols or ["QQQ"]
-
-    setup_cols = st.columns([1, 1, 1, 1], gap="small")
-    period = setup_cols[0].selectbox("기간", ["3mo", "6mo", "1y", "2y"], index=2,
-                                     format_func=lambda x: {"3mo": "3개월", "6mo": "6개월",
-                                                            "1y": "1년", "2y": "2년"}[x],
-                                     key="strategy_canvas_period")
-    signal_symbol = setup_cols[1].selectbox("신호 기준", signal_options,
-                                            index=0, key="strategy_canvas_signal")
-    buy_rsi = setup_cols[2].number_input("매수 RSI", min_value=1, max_value=99, value=30,
-                                         step=1, key="strategy_canvas_buy_rsi")
-    sell_rsi = setup_cols[3].number_input("현금화 RSI", min_value=1, max_value=99, value=70,
-                                          step=1, key="strategy_canvas_sell_rsi")
-
-    top_left, top_right = st.columns([0.96, 1.04], gap="large")
-    with top_left:
-        st.markdown(
-            """
-            <div class="widget-card-head">
-              <span>W-001 · 입력</span>
-              <b>포트폴리오 구성</b>
-            </div>
-            """,
-            unsafe_allow_html=True,
-        )
-        st.text_area(
-            "비중",
-            key="strategy_canvas_alloc_text",
-            help="한 줄에 `티커 비중 메모` 형식",
-            height=152,
-        )
-        if allocs:
-            st.dataframe(
-                pd.DataFrame([{
-                    "자산": a["symbol"],
-                    "비중": f"{a['weight_pct']:.1f}%",
-                    "메모": a.get("note", ""),
-                } for a in allocs]),
-                hide_index=True,
-                width="stretch",
-                height=190,
-            )
-        else:
-            st.warning("비중을 `QQQ 50 핵심` 형식으로 입력해 주세요.")
-
-    with top_right:
-        st.markdown(
-            """
-            <div class="widget-card-head">
-              <span>W-009 · 함수 위젯</span>
-              <b>RSI 매수·현금화 규칙</b>
-            </div>
-            """,
-            unsafe_allow_html=True,
-        )
-        rule_cols = st.columns(3)
-        rule_cols[0].metric("매수", f"RSI ≤ {buy_rsi}")
-        rule_cols[1].metric("현금화", f"RSI ≥ {sell_rsi}")
-        rule_cols[2].metric("체결", "다음 날")
-        st.markdown(
-            f"""
-            <div class="rule-matrix">
-              <div><span>source</span><b>{signal_symbol}</b></div>
-              <div><span>lookback</span><b>14일</b></div>
-              <div><span>cost</span><b>0 bps</b></div>
-              <div><span>mode</span><b>정보형 백테스트</b></div>
-            </div>
-            """,
-            unsafe_allow_html=True,
-        )
-        st.caption("FinanceAgentGUI의 portfolio-matrix-dsl 방식처럼 신호를 target_weight 행렬로 해석하고 다음 거래일부터 노출을 바꿉니다.")
-
-    result_col, side_col = st.columns([1.48, 0.72], gap="large")
-    with result_col:
-        st.markdown(
-            """
-            <div class="widget-card-head">
-              <span>W-010 · 백테스트 비교</span>
-              <b>Buy & Hold vs RSI 현금화 전략</b>
-            </div>
-            """,
-            unsafe_allow_html=True,
-        )
-        run = st.button("캔버스 실행", type="primary", width="stretch",
-                        disabled=not bool(allocs), key="strategy_canvas_run")
-        if run:
-            with st.spinner("시세를 불러와 캔버스를 실행 중..."):
-                st.session_state["strategy_canvas_result"] = _strategy_canvas_backtest(
-                    allocs, period=period, signal_symbol=signal_symbol,
-                    buy_rsi=int(buy_rsi), sell_rsi=int(sell_rsi),
-                )
-
-        result = st.session_state.get("strategy_canvas_result")
-        if result and result.get("ok"):
-            st.plotly_chart(_strategy_canvas_chart(result["equity"]), width="stretch",
-                            config={"displayModeBar": False})
-            st.dataframe(result["metrics"], hide_index=True, width="stretch")
-            st.caption(result.get("note", ""))
-            trades = result.get("trades") or []
-            if trades:
-                with st.expander(f"DSL 체결 로그 {len(trades)}건", expanded=False):
-                    st.dataframe(pd.DataFrame(trades), hide_index=True, width="stretch", height=180)
-        elif result and not result.get("ok"):
-            st.warning(result.get("error", "캔버스 실행 실패"))
-        else:
-            st.info("캔버스 실행을 누르면 현재 비중과 RSI 규칙으로 1일봉 비교 차트를 만듭니다.")
-
-    with side_col:
-        _canvas_saved_scenarios(surface, alloc_text, allocs, buy_rsi, sell_rsi, signal_symbol)
-
-
-def _ensure_canvas_defaults():
-    if "strategy_canvas_alloc_text" in st.session_state:
-        return
-    st.session_state["strategy_canvas_alloc_text"] = _default_canvas_allocations()
-
-
-def _default_canvas_allocations() -> str:
-    try:
-        holdings = data.load_holdings()
-    except Exception:
-        holdings = []
-    rows = []
-    for row in sorted(holdings or [], key=lambda r: float(r.get("weight") or 0), reverse=True)[:7]:
-        ticker = str(row.get("ticker") or "").upper().strip()
-        weight = data._try_float(row.get("weight"))
-        if not ticker or weight is None:
-            continue
-        note = str(row.get("name") or "").strip()
-        rows.append(f"{ticker} {weight:.1f} {note}".rstrip())
-    if rows:
-        return "\n".join(rows)
-    return "QQQ 45 핵심 성장\nTLT 20 금리 방어\nGLD 10 꼬리위험\nCASH 25 기회 대기"
-
-
-def _normalize_allocations(allocations: list[dict]) -> list[dict]:
-    rows = []
-    for row in allocations or []:
-        symbol = str(row.get("symbol") or "").upper().strip()
-        weight = data._try_float(row.get("weight_pct"))
-        if not symbol or weight is None or weight < 0:
-            continue
-        rows.append({"symbol": symbol, "weight_pct": float(weight), "note": row.get("note", "")})
-    total = sum(r["weight_pct"] for r in rows)
-    if total <= 0:
-        return []
-    return [{**r, "weight_pct": r["weight_pct"] / total * 100.0} for r in rows]
-
-
-def _canvas_saved_scenarios(surface: str, alloc_text: str, allocs: list[dict],
-                            buy_rsi: int, sell_rsi: int, signal_symbol: str):
-    st.markdown("##### Scenario")
-    with st.form("agent_scenario_form"):
-        name = st.text_input("시나리오 이름", value="RSI 현금화 캔버스")
-        max_loss = st.number_input("최대 손실한도 %", min_value=0.0, max_value=100.0,
-                                   value=8.0, step=0.5)
-        desc = st.text_area("전략 가설", height=86,
-                            placeholder="어떤 시장 맥락에서 이 규칙이 유리한지 적어주세요.")
-        if st.form_submit_button("시나리오 저장", type="primary", width="stretch"):
-            total = sum(float(x.get("weight_pct") or 0) for x in allocs)
-            scenario = storage.save_scenario({
-                "name": name,
-                "description": desc,
-                "allocations": allocs,
-                "rules": {
-                    "max_loss_pct": max_loss,
-                    "text": f"{signal_symbol} RSI <= {buy_rsi} 매수, RSI >= {sell_rsi} 현금화",
-                    "functionSpec": {
-                        "language": "portfolio-matrix-dsl",
-                        "executionMode": "matrix-dsl",
-                        "program": rsi_cash_program(int(buy_rsi), int(sell_rsi)),
-                    },
-                    "live_orders": False,
-                    "actual_asset_link": False,
-                },
-                "assumptions": {
-                    "surface": surface,
-                    "total_weight_pct": round(total, 2),
-                    "raw_allocations": alloc_text,
-                },
-                "metrics": {"saved_from": "strategy_canvas", "allocation_count": len(allocs)},
-            })
-            st.toast(f"{scenario['name']} 저장 완료 · 합계 {total:.1f}%")
-
-    scenarios = storage.list_scenarios(limit=12)
-    if not scenarios:
-        st.caption("저장된 시나리오 없음")
-        return
-    for scenario in scenarios[:5]:
-        st.markdown(
-            f"<div class='scenario-row'><b>{scenario.get('name', '시나리오')}</b>"
-            f"<span>{scenario.get('updated_at', '')}</span></div>",
-            unsafe_allow_html=True,
-        )
-
-
-def _strategy_canvas_backtest(allocations: list[dict], *, period: str, signal_symbol: str,
-                              buy_rsi: int, sell_rsi: int) -> dict:
-    if buy_rsi >= sell_rsi:
-        return {"ok": False, "error": "매수 RSI는 현금화 RSI보다 낮아야 합니다."}
-
-    allocs = _normalize_allocations(allocations)
-    weights = {row["symbol"]: row["weight_pct"] / 100.0 for row in allocs}
-    market_symbols = [symbol for symbol in weights if symbol != "CASH"]
-    if not market_symbols:
-        return {"ok": False, "error": "백테스트할 시장 자산이 없습니다."}
-
-    fetch_symbols = tuple(sorted(set(market_symbols + [signal_symbol])))
-    close = _canvas_prices(fetch_symbols, period)
-    if close.empty:
-        return {"ok": False, "error": "시세를 불러오지 못했습니다."}
-    missing = [symbol for symbol in market_symbols if symbol not in close.columns]
-    available_symbols = [symbol for symbol in market_symbols if symbol in close.columns]
-    if signal_symbol not in close.columns:
-        return {"ok": False, "error": f"{signal_symbol} 신호 기준 시세가 없습니다."}
-    if not available_symbols:
-        return {"ok": False, "error": "사용 가능한 포트폴리오 자산 시세가 없습니다."}
-
-    run = run_portfolio_matrix_dsl(
-        close,
-        weights,
-        signal_symbol=signal_symbol,
-        program=rsi_cash_program(int(buy_rsi), int(sell_rsi)),
-        label="RSI 현금화",
-    )
-    if not run.ok:
-        return {"ok": False, "error": run.error or "DSL 백테스트 실패"}
-
-    note = f"{period} · {run.note}"
-    if missing:
-        note += " · 제외: " + ", ".join(missing)
-    return {
-        "ok": True,
-        "equity": run.equity,
-        "metrics": run.metrics,
-        "note": note,
-        "trades": run.trades,
-        "matrix": run.matrix[:2000],
-        "functionSpec": {
-            "language": "portfolio-matrix-dsl",
-            "executionMode": "matrix-dsl",
-            "program": rsi_cash_program(int(buy_rsi), int(sell_rsi)),
-        },
-    }
-
-
-@st.cache_data(ttl=3600, show_spinner=False)
-def _canvas_prices(symbols: tuple[str, ...], period: str) -> pd.DataFrame:
-    try:
-        import yfinance as yf
-    except Exception:
-        return pd.DataFrame()
-    try:
-        raw = yf.download(list(symbols), period=period, interval="1d", auto_adjust=True,
-                          progress=False, threads=False)
-    except Exception:
-        return pd.DataFrame()
-    if raw is None or raw.empty:
-        return pd.DataFrame()
-    if isinstance(raw.columns, pd.MultiIndex):
-        first = raw.columns.get_level_values(0)
-        if "Close" in first:
-            close = raw["Close"].copy()
-        elif "Adj Close" in first:
-            close = raw["Adj Close"].copy()
-        else:
-            return pd.DataFrame()
-    else:
-        col = "Close" if "Close" in raw.columns else "Adj Close" if "Adj Close" in raw.columns else None
-        if not col:
-            return pd.DataFrame()
-        close = raw[[col]].rename(columns={col: symbols[0]}).copy()
-    if isinstance(close, pd.Series):
-        close = close.to_frame(symbols[0])
-    close.columns = [str(col).upper() for col in close.columns]
-    close.index = pd.to_datetime(close.index)
-    return close.sort_index().dropna(how="all")
-
-
-def _strategy_canvas_chart(equity: pd.DataFrame):
-    import plotly.graph_objects as go
-
-    fig = go.Figure()
-    fig.add_trace(go.Scatter(
-        x=equity["date"], y=equity["Buy & Hold"], mode="lines",
-        name="Buy & Hold", line={"color": "#059669", "width": 2.4},
-    ))
-    fig.add_trace(go.Scatter(
-        x=equity["date"], y=equity["RSI 현금화"], mode="lines",
-        name="RSI 현금화", line={"color": "#7c3aed", "width": 2.2},
-    ))
-    fig.update_layout(
-        height=360,
-        margin={"l": 8, "r": 8, "t": 10, "b": 8},
-        hovermode="x unified",
-        legend={"orientation": "h", "y": 1.06, "x": 0.02},
-        yaxis_title="시작값 100",
-        xaxis_title=None,
-    )
-    return fig
-
-
-def _connectors_tab():
-    st.markdown("##### 로컬 커넥터")
-    c1, c2 = st.columns(2)
-    with c1:
-        st.markdown("**Arca — 서버 SOCKS 터널**")
-        proxy = os.getenv("STOCK_COLLECTOR_ARCA_PROXY", "socks5://127.0.0.1:1080")
-        try:
-            from reports import source_collector
-            status = source_collector.arca_proxy_status(proxy)
-        except Exception as exc:
-            status = {"enabled": True, "proxy": proxy, "reachable": False, "error": str(exc)}
-        st.metric("터널", "UP" if status.get("reachable") else "DOWN",
-                  help=status.get("proxy") or proxy)
-        if status.get("error"):
-            st.caption(f"상태: {status['error']}")
-        pages = st.number_input("조회 페이지", min_value=1, max_value=5, value=2, step=1,
-                                key="arca_proxy_pages")
-        if st.button("Arca 프록시 수집", type="primary", width="stretch",
-                     help="127.0.0.1:1080 SOCKS 터널로 아카라이브 주식채널을 조회합니다. "
-                          "Cloudflare challenge는 우회하지 않고 실패로 표시합니다."):
-            with st.spinner("Arca를 SOCKS 터널로 조회 중..."):
-                result = context.ingest_arca_proxy(max_pages=int(pages), proxy=proxy)
-            _context_pack.clear()
-            if result.get("ok"):
-                st.success(f"수집 {result.get('fetched', 0)}건 · 캐시 {result.get('written', 0)}건 · "
-                           f"메모리 {result.get('changed', 0)}건")
-                for row in result.get("events", [])[:6]:
-                    st.markdown(f"- [{row.get('category', 'arca')}] {row.get('title')} — {row.get('url')}")
-            else:
-                st.warning(f"Arca 수집 실패: {result.get('error') or 'unknown'}")
-        st.caption("자동 CAPTCHA/Cloudflare 우회 없음 · 성공한 공개 글만 World Memory에 저장")
-    with c2:
-        st.markdown("**Toss — 로컬 스냅샷 예정**")
-        st.markdown("- 읽기 전용 자산 스냅샷\n- 주문/매매 연결 없음\n- 보유·현금·거래내역 요약만 Context Layer에 반영")
-    st.code(
-        "Arca: 서버 SOCKS 127.0.0.1:1080 -> source-cache + World Memory\n"
-        "Toss: 노트북 local snapshot -> ~/reports/local-connectors/*.json",
-        language="text",
-    )
-
-
-def _parse_allocations(text: str) -> list[dict]:
-    rows = []
-    for line in str(text or "").splitlines():
-        parts = line.strip().split()
-        if len(parts) < 2:
-            continue
-        weight = data._try_float(parts[1])
-        if weight is None:
-            continue
-        rows.append({"symbol": parts[0].upper(), "weight_pct": weight, "note": " ".join(parts[2:])})
-    return rows
-
-
-def _inject_codex_css():
-    st.markdown(
-        """
-        <style>
-        .codex-console-title {
-          display:flex;
-          align-items:flex-end;
-          justify-content:space-between;
-          gap:16px;
-          padding:0 0 12px;
-          border-bottom:1px solid rgba(148,163,184,.14);
-          margin-bottom:12px;
-        }
-        .codex-console-title h1 {
-          margin:0;
-          font-size:1.55rem;
-          line-height:1.15;
-          letter-spacing:0;
-        }
-        .codex-console-title span,
-        .codex-kicker {
-          color:rgba(148,163,184,.92);
-          font-size:.82rem;
-        }
-        .codex-kicker {
-          text-transform:uppercase;
-          letter-spacing:.08em;
-          margin-bottom:2px;
-        }
-        .codex-glance {
-          display:grid;
-          grid-template-columns:repeat(4,minmax(0,1fr));
-          gap:8px;
-          margin:0 0 8px;
-        }
-        .codex-glance div {
-          border:1px solid rgba(148,163,184,.14);
-          border-radius:8px;
-          background:rgba(15,23,42,.24);
-          padding:8px 10px;
-          min-height:52px;
-        }
-        .codex-glance span {
-          display:block;
-          color:rgba(148,163,184,.78);
-          font-size:.72rem;
-          margin-bottom:3px;
-        }
-        .codex-glance b {
-          display:block;
-          color:rgba(226,232,240,.96);
-          font-size:.9rem;
-          font-weight:680;
-          line-height:1.25;
-          overflow-wrap:anywhere;
-        }
-        .codex-chat-head {
-          display:flex;
-          align-items:center;
-          justify-content:space-between;
-          gap:12px;
-          padding:8px 10px;
-          border:1px solid rgba(148,163,184,.14);
-          border-radius:8px;
-          background:rgba(15,23,42,.26);
-          margin-bottom:10px;
-        }
-        .codex-chat-head span {
-          color:rgba(148,163,184,.86);
-          font-size:.78rem;
-          overflow-wrap:anywhere;
-        }
-        .codex-chip {
-          display:inline-block;
-          margin-left:8px;
-          padding:2px 9px;
-          border:1px solid rgba(56,189,248,.35);
-          border-radius:999px;
-          background:rgba(56,189,248,.12);
-          color:rgba(125,211,252,.96) !important;
-          font-size:.72rem !important;
-          font-weight:600;
-          vertical-align:middle;
-          white-space:nowrap;
-        }
-        div[data-testid="stChatMessage"] {
-          border:1px solid rgba(148,163,184,.13);
-          border-radius:8px;
-          background:rgba(15,23,42,.20);
-          padding:9px 11px;
-          margin-bottom:8px;
-        }
-        div[data-testid="stChatMessage"]:has([data-testid="chatAvatarIcon-user"]) {
-          background:rgba(30,41,59,.38);
-        }
-        div[data-testid="stChatInput"] textarea {
-          border-radius:8px;
-        }
-        .codex-rail-card {
-          display:grid;
-          grid-template-columns:repeat(2,minmax(0,1fr));
-          gap:8px;
-          margin:2px 0 10px;
-        }
-        .codex-rail-card div {
-          border:1px solid rgba(148,163,184,.13);
-          border-radius:8px;
-          background:rgba(15,23,42,.22);
-          padding:8px 9px;
-          min-height:52px;
-        }
-        .codex-rail-card span {
-          display:block;
-          color:rgba(148,163,184,.82);
-          font-size:.74rem;
-          margin-bottom:3px;
-        }
-        .codex-rail-card b {
-          display:block;
-          font-size:.94rem;
-          overflow-wrap:anywhere;
-        }
-        .codex-feed-item {
-          border:1px solid rgba(148,163,184,.16);
-          border-radius:8px;
-          background:rgba(2,6,23,.22);
-          padding:8px 9px;
-          margin-bottom:7px;
-        }
-        .codex-feed-item b {
-          display:block;
-          color:rgba(203,213,225,.96);
-          font-size:.78rem;
-          margin-bottom:2px;
-        }
-        .codex-feed-item span {
-          display:block;
-          color:rgba(226,232,240,.9);
-          font-size:.82rem;
-          line-height:1.35;
-          overflow-wrap:anywhere;
-        }
-        .widget-flow {
-          display:grid;
-          grid-template-columns:minmax(0,1fr) 22px minmax(0,1fr) 22px minmax(0,1fr);
-          align-items:center;
-          gap:8px;
-          padding:10px;
-          margin:2px 0 14px;
-          border:1px solid rgba(16,185,129,.18);
-          border-radius:8px;
-          background:rgba(6,78,59,.10);
-        }
-        .widget-flow div {
-          display:flex;
-          align-items:center;
-          justify-content:space-between;
-          gap:10px;
-          padding:9px 11px;
-          border:1px solid rgba(148,163,184,.18);
-          border-radius:7px;
-          background:rgba(15,23,42,.42);
-          min-height:42px;
-        }
-        .widget-flow b {
-          color:rgba(110,231,183,.98);
-          font-size:.78rem;
-          white-space:nowrap;
-        }
-        .widget-flow span {
-          color:rgba(226,232,240,.94);
-          font-size:.86rem;
-          text-align:right;
-        }
-        .widget-flow i {
-          display:block;
-          height:1px;
-          background:linear-gradient(90deg,rgba(16,185,129,.20),rgba(16,185,129,.82));
-          position:relative;
-        }
-        .widget-flow i:after {
-          content:"";
-          position:absolute;
-          right:-1px;
-          top:-3px;
-          width:7px;
-          height:7px;
-          border-top:1px solid rgba(16,185,129,.9);
-          border-right:1px solid rgba(16,185,129,.9);
-          transform:rotate(45deg);
-        }
-        .widget-card-head {
-          padding:10px 11px;
-          margin:2px 0 10px;
-          border:1px solid rgba(148,163,184,.18);
-          border-radius:8px;
-          background:rgba(15,23,42,.34);
-        }
-        .widget-card-head span {
-          display:block;
-          color:rgba(148,163,184,.88);
-          font-size:.75rem;
-          margin-bottom:2px;
-        }
-        .widget-card-head b {
-          display:block;
-          color:rgba(241,245,249,.98);
-          font-size:.98rem;
-        }
-        .rule-matrix {
-          display:grid;
-          grid-template-columns:repeat(2,minmax(0,1fr));
-          gap:8px;
-          margin:10px 0;
-        }
-        .rule-matrix div {
-          border:1px solid rgba(148,163,184,.16);
-          border-radius:7px;
-          padding:9px 10px;
-          background:rgba(2,6,23,.24);
-          min-height:58px;
-        }
-        .rule-matrix span {
-          display:block;
-          color:rgba(148,163,184,.82);
-          font-size:.73rem;
-          margin-bottom:3px;
-        }
-        .rule-matrix b {
-          display:block;
-          color:rgba(226,232,240,.96);
-          font-size:.9rem;
-          overflow-wrap:anywhere;
-        }
-        .scenario-row {
-          display:flex;
-          align-items:center;
-          justify-content:space-between;
-          gap:10px;
-          border:1px solid rgba(148,163,184,.16);
-          border-radius:8px;
-          background:rgba(2,6,23,.22);
-          padding:8px 9px;
-          margin-bottom:7px;
-        }
-        .scenario-row b {
-          color:rgba(226,232,240,.96);
-          font-size:.82rem;
-          overflow-wrap:anywhere;
-        }
-        .scenario-row span {
-          color:rgba(148,163,184,.78);
-          font-size:.72rem;
-          white-space:nowrap;
-        }
-        @media (max-width: 980px) {
-          .codex-glance { grid-template-columns:repeat(2,minmax(0,1fr)); }
-        }
-        @media (max-width: 760px) {
-          .widget-flow {
-            grid-template-columns:1fr;
-          }
-          .widget-flow i {
-            height:14px;
-            width:1px;
-            margin:0 auto;
-            background:linear-gradient(180deg,rgba(16,185,129,.20),rgba(16,185,129,.82));
-          }
-          .widget-flow i:after {
-            right:-3px;
-            top:auto;
-            bottom:-1px;
-            transform:rotate(135deg);
-          }
-          .widget-flow span {
-            text-align:left;
-          }
-        }
-        </style>
-        """,
-        unsafe_allow_html=True,
-    )

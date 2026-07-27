@@ -9,7 +9,7 @@ import os
 import sys
 from datetime import datetime
 
-# streamlit run 은 sys.path[0]=dashboard/ 로 잡으므로 프로젝트 루트를 추가해야
+# streamlit run 은 sys.path[0]=dashboard/ 로 잡히므로 프로젝트 루트를 추가해야
 # `from dashboard import …`·providers/reports/ml import 가 동작한다(필수).
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -144,7 +144,7 @@ with st.sidebar:
     st.markdown("<div style='height:8px'></div>", unsafe_allow_html=True)
     _accum.sidebar_rail()
 
-from dashboard.pages import ai_console, chart_full, home, market, paper, portfolio, research
+from dashboard.pages import ai_console, ai_wiki, chart_full, home, market, paper, portfolio, research
 from dashboard.pages import ticker as ticker_pg
 
 _home_pg = st.Page(home.render, title="홈", icon="🏠", url_path="home", default=True)
@@ -159,6 +159,7 @@ _chart_pg = st.Page(chart_full.render, title="차트 풀뷰", icon="🖥️", ur
 # 홈 보유표 행 클릭 → 종목 분석 자동 이동용 (switch_page 는 StreamlitPage 객체 필요)
 st.session_state["_ticker_page"] = _ticker_pg
 st.session_state["_chart_page"] = _chart_pg          # ⛶ 전체화면 풀차트 왕복용
+st.session_state["_wiki_page"] = st.Page(ai_wiki.render, title="AI 위키", icon="🗂️", url_path="wiki")
 
 nav = st.navigation([_home_pg, _portfolio_pg, _ticker_pg, _chart_pg, _market_pg,
                      _paper_pg, _research_pg, _agent_pg])
