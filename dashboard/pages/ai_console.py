@@ -12,7 +12,8 @@ import streamlit as st
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 
 from agent_console import agent, context, storage
-from dashboard import chat_feedback, chat_references, data, wiki_browser
+from agent_console import portfolio_matrix_dsl
+from dashboard import cached, chat_feedback, chat_references, data, wiki_browser
 
 
 _SURFACES = {
@@ -104,17 +105,22 @@ def _esc(value: object) -> str:
     return html.escape(str(value if value not in (None, "") else "—"))
 
 
-def _context_glance(pack: dict):
+def _context_glance_items(pack: dict) -> list[dict]:
     sources = pack.get("sources") or {}
     reports = pack.get("reports") or []
     models = (pack.get("models") or {}).get("items") or []
     memory = pack.get("memory") or []
-    items = (
+    return [
         {"label": "최근 이벤트", "value": f"{len(sources.get('events') or [])}건"},
         {"label": "누적 기억", "value": f"{len(memory)}건"},
         {"label": "모델 파일", "value": f"{len(models)}개"},
         {"label": "최신 리포트", "value": reports[0].get("name", "—") if reports else "—"},
-    )
+    ]
+
+
+def _context_glance(pack: dict):
+    sources = pack.get("sources") or {}
+    items = _context_glance_items(pack)
     st.markdown(
         "<div class='codex-glance'>"
         + "".join(
@@ -135,6 +141,29 @@ def _context_glance(pack: dict):
             "소스 " + (" · ".join(f"{name} {cnt}" for name, cnt in source_counts[:5]) or "—")
             + "  /  심볼 " + (" · ".join(f"{name} {cnt}" for name, cnt in symbol_counts[:6]) or "—")
         )
+
+
+def _count_value(rows, *, cap: int | None = None) -> str:
+    count = len(rows or [])
+    suffix = "+" if cap is not None and count >= cap else ""
+    return f"{count}개{suffix}"
+
+
+def _rail_status_items(surface: str, pack: dict) -> list[dict]:
+    sources = pack.get("sources") or {}
+    snapshot = pack.get("market_snapshot") or {}
+    detail = str(st.session_state.get("agent_auto_detail") or _SURFACES.get(surface, surface))
+    engine = str(st.session_state.get("agent_last_engine") or "대기")
+    return [
+        {"label": "맥락", "value": _SURFACES.get(surface, surface)},
+        {"label": "세부", "value": detail},
+        {"label": "엔진", "value": engine},
+        {"label": "events", "value": _count_value(sources.get("events") or [], cap=40)},
+        {"label": "memory", "value": _count_value(pack.get("memory") or [], cap=50)},
+        {"label": "models", "value": _count_value((pack.get("models") or {}).get("items") or [])},
+        {"label": "quotes", "value": _count_value(snapshot.get("quotes") or [])},
+        {"label": "실시간", "value": str(snapshot.get("status") or "unavailable")},
+    ]
 
 
 def _infer_context_detail(question: str, surface: str) -> str:
@@ -268,7 +297,7 @@ def _answer_with_progress(question: str, surface: str) -> dict:
         return _answer_agent_fast(question, surface)
 
 
-def _run_agent_question_auto(question: str, pack: dict):
+def _run_agent_question_auto(question: str, pack: dict | None = None):
     question = str(question or "").strip()
     if not question:
         return
@@ -280,13 +309,17 @@ def _run_agent_question_auto(question: str, pack: dict):
         surface = agent.infer_surface(question, default=prev)
     st.session_state["agent_auto_surface"] = surface
     st.session_state["agent_auto_detail"] = _infer_context_detail(question, surface)
+    if pack is None:
+        pack = _safe_context(surface, int(st.session_state.get("agent_hours", 72)))
     _run_agent_question(question, surface, pack, chat_key=_chat_key(_AUTO_CHAT))
 
 
-def _run_agent_question(question: str, surface: str, pack: dict, chat_key: str | None = None):
+def _run_agent_question(question: str, surface: str, pack: dict | None = None, chat_key: str | None = None):
     question = str(question or "").strip()
     if not question:
         return
+    if pack is None:
+        pack = _safe_context(surface, int(st.session_state.get("agent_hours", 72)))
     if chat_key is None:
         _ensure_chat_state(surface)
         chat_key = _chat_key(surface)
@@ -431,17 +464,7 @@ def _chat_context_rail(surface: str, pack: dict):
     events = sources.get("events") or []
     memory = pack.get("memory") or []
     reports = pack.get("reports") or []
-    detail = str(st.session_state.get("agent_auto_detail") or _SURFACES.get(surface, surface))
-    engine = str(st.session_state.get("agent_last_engine") or "대기")
-    snapshot = pack.get("market_snapshot") or {}
-    status_items = [
-        {"label": "맥락", "value": _SURFACES.get(surface, surface)},
-        {"label": "세부", "value": detail},
-        {"label": "엔진", "value": engine},
-        {"label": "events", "value": f"{len(events)}개"},
-        {"label": "memory", "value": f"{len(memory)}개"},
-        {"label": "quotes", "value": f"{len(snapshot.get('quotes') or [])}개"},
-    ]
+    status_items = _rail_status_items(surface, pack)
     st.markdown(
         '<div class="codex-rail-card">'
         + "".join(f"<div><span>{_esc(item['label'])}</span><b>{_esc(item['value'])}</b></div>" for item in status_items)
@@ -653,6 +676,56 @@ def _normalize_allocations(allocations: list[dict]) -> list[dict]:
     if total <= 0:
         return []
     return [{**r, "weight_pct": round(r["weight_pct"] / total * 100.0, 2)} for r in rows]
+
+
+def _canvas_prices(symbols: list[str], period: str) -> pd.DataFrame:
+    frames = {}
+    for symbol in symbols:
+        ticker = str(symbol or "").upper().strip()
+        if not ticker or ticker == "CASH":
+            continue
+        try:
+            frame = cached.ohlc(ticker, period=period)
+        except Exception:
+            frame = pd.DataFrame()
+        if frame is None or frame.empty:
+            continue
+        close = frame["Close"] if "Close" in frame.columns else frame.iloc[:, -1]
+        frames[ticker] = pd.to_numeric(close, errors="coerce")
+    return pd.DataFrame(frames).dropna(how="all")
+
+
+def _strategy_canvas_backtest(
+    allocations: list[dict],
+    *,
+    period: str,
+    signal_symbol: str,
+    buy_rsi: int,
+    sell_rsi: int,
+) -> dict:
+    rows = _normalize_allocations(allocations)
+    weights = {row["symbol"]: float(row["weight_pct"]) / 100.0 for row in rows}
+    signal = str(signal_symbol or (rows[0]["symbol"] if rows else "")).upper().strip()
+    symbols = list(dict.fromkeys([*weights, signal]))
+    close = _canvas_prices(symbols, period)
+    program = portfolio_matrix_dsl.rsi_cash_program(buy_rsi, sell_rsi)
+    run = portfolio_matrix_dsl.run_portfolio_matrix_dsl(
+        close,
+        weights,
+        signal_symbol=signal,
+        program=program,
+        label="RSI 현금화",
+    )
+    return {
+        "ok": run.ok,
+        "functionSpec": {"language": portfolio_matrix_dsl.MATRIX_DSL_LANGUAGE, "program": program},
+        "equity": run.equity,
+        "metrics": run.metrics,
+        "trades": run.trades,
+        "matrix": run.matrix,
+        "note": run.note,
+        "error": run.error,
+    }
 
 
 def _connectors_tab():

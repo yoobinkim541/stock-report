@@ -119,6 +119,12 @@ else:
                 f"{response}\n\n"
                 "지금은 모델 응답이 잠깐 비어 있어서 규칙 기반으로 짧게 답했지만, 이어지는 문맥은 같이 보존했습니다."
             )
+        if not previous and len(question) <= 28 and "질문은 이해했습니다:" in response:
+            return (
+                f"짧은 후속으로 이해했습니다.\n\n"
+                f"{response}\n\n"
+                "이전 맥락이 비어 있어도 시장 템플릿으로 억지 전환하지 않고, 지금 질문의 의도를 유지하겠습니다."
+            )
         if surface == "portfolio" and previous and len(question) <= 28 and "질문은 이해했습니다:" in response:
             return (
                 f"방금 말은 **“{previous}”**에 이어진 질문으로 읽었습니다.\n\n"

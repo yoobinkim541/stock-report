@@ -191,6 +191,9 @@ def _format_holdings(portfolio: dict) -> str:
 def build_ml_context() -> str:
     """ML 모델 현재 판단을 문자열로 반환 — 프롬프트에 주입용."""
     lines = ["[ML 모델 판단]"]
+    if os.getenv("STOCK_ADVISOR_ML_CONTEXT_ENABLED", "0").lower() not in {"1", "true", "yes", "on"}:
+        lines.append("- 기본 비활성화: 무거운 ML 로딩은 STOCK_ADVISOR_ML_CONTEXT_ENABLED=true 일 때만 프롬프트에 포함")
+        return "\n".join(lines)
     try:
         import warnings; warnings.filterwarnings("ignore")
 

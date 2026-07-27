@@ -627,7 +627,7 @@ def render_wiki_tab(surface: str, pack: dict[str, Any] | None = None) -> None:
             st.info("필터에 맞는 위키가 없습니다.")
 
     with center:
-        st.markdown("##### 선택 페이지")
+        st.markdown("##### 페이지 미리보기")
         selected = browser.get("selected") or {}
         if not selected:
             st.info("왼쪽에서 페이지를 선택해 보세요.")

@@ -123,6 +123,7 @@ def answer(question: str, surface: str = "market", *, async_postprocess: bool = 
     except Exception as exc:
         response = _compose_error_fallback_answer(question, pack, exc)
     engine = _LAST_LLM_ENGINE or "local-rules"
+    response = _humanize_generic_fallback(question, surface, history, response)
     _safe_add_conversation("assistant", response, surface)
     postprocess = _postprocess_chat(question, response, surface, pack, history, async_mode=async_postprocess)
     sources = pack.get("sources") or {}
@@ -807,6 +808,26 @@ def _last_user_question(history: list[dict] | None = None) -> str:
         if text:
             return text
     return ""
+
+
+def _humanize_generic_fallback(question: str, surface: str, history: list[dict] | None, response: str) -> str:
+    q = str(question or "").strip()
+    if len(q) > 28 or "질문은 이해했습니다:" not in str(response or ""):
+        return response
+    previous = _last_user_question(history)
+    if previous:
+        return (
+            f"방금 말은 **“{previous}”**의 후속으로 이해했습니다.\n\n"
+            f"{response}\n\n"
+            "지금은 모델 응답이 잠깐 비어 있어서 규칙 기반으로 짧게 답했지만, 이어지는 문맥은 같이 보존했습니다."
+        )
+    if surface == "portfolio" or _looks_like_followup_correction(q) or q in {"그럼", "그럼?", "그러면", "그래서"}:
+        return (
+            f"짧은 후속으로 이해했습니다.\n\n"
+            f"{response}\n\n"
+            "이전 맥락이 비어 있어도 시장 템플릿으로 억지 전환하지 않고, 지금 질문의 의도를 유지하겠습니다."
+        )
+    return response
 
 
 def _looks_like_followup_correction(question: str) -> bool:

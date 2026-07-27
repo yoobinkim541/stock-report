@@ -55,34 +55,32 @@ def _prepare_analysis_hermes_home(max_tokens: int):
     """이 호출에만 model.max_tokens 캡을 적용한 HERMES_HOME 오버레이 생성."""
     base_home = os.environ.get("HERMES_HOME") or os.path.expanduser("~/.hermes")
     base_config = os.path.join(base_home, "config.yaml")
-    if not os.path.isfile(base_config):
-        return None
+    overlay = str(CACHE_DIR.parent / f"hermes-overlay-{int(max_tokens)}-analysis")
     try:
+        os.makedirs(overlay, exist_ok=True)
+        for name in (".env", "auth.json"):
+            src = os.path.join(base_home, name)
+            dst = os.path.join(overlay, name)
+            if os.path.exists(src) and not os.path.lexists(dst):
+                os.symlink(src, dst)
+        if not os.path.isfile(base_config):
+            return overlay
         import yaml
 
         with open(base_config, "r", encoding="utf-8") as fh:
             cfg = yaml.safe_load(fh) or {}
         if not isinstance(cfg, dict):
-            return None
+            return overlay
         model_cfg = cfg.get("model")
         if not isinstance(model_cfg, dict):
             model_cfg = {}
         model_cfg["max_tokens"] = int(max_tokens)
         cfg["model"] = model_cfg
 
-        overlay = os.path.join(os.path.expanduser("~/.cache"), "stock-report",
-                               f"hermes-overlay-{int(max_tokens)}-analysis")
-        os.makedirs(overlay, exist_ok=True)
         tmp_path = os.path.join(overlay, ".config.yaml.tmp")
         with open(tmp_path, "w", encoding="utf-8") as fh:
             yaml.safe_dump(cfg, fh, allow_unicode=True, sort_keys=False)
         os.replace(tmp_path, os.path.join(overlay, "config.yaml"))
-
-        for name in (".env", "auth.json"):
-            src = os.path.join(base_home, name)
-            dst = os.path.join(overlay, name)
-            if os.path.exists(src) and not os.path.lexists(dst):
-                os.symlink(src, dst)
         return overlay
     except Exception:
         return None
