@@ -12,6 +12,19 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 import providers.realtime_quotes as rq
 
 
+@pytest.fixture(autouse=True)
+def isolated_realtime_env(monkeypatch):
+    for name in (
+        "REALTIME_ENABLED",
+        "QUOTES_POLL_ENABLED",
+        "REDIS_URL",
+        "UPSTASH_REDIS_URL",
+        "REALTIME_WS_REDIS_KEY",
+        "REALTIME_REST_REDIS_KEY",
+    ):
+        monkeypatch.delenv(name, raising=False)
+
+
 def _write_cache(tmp_path, symbols: dict, *, hb_age: float = 0.0):
     now = time.time()
     cache = {"__heartbeat__": {"ts": now - hb_age, "connected": True}}
@@ -99,6 +112,53 @@ def test_heartbeat_age(live):
     live({"AAPL": {"price": 1, "ts": time.time()}}, hb_age=5)
     age = rq.heartbeat_age()
     assert age is not None and 3 < age < 8
+
+
+def test_rest_cache_prefers_redis_when_available(monkeypatch, tmp_path):
+    now = time.time()
+    monkeypatch.setenv("REALTIME_ENABLED", "false")
+    monkeypatch.setenv("QUOTES_POLL_ENABLED", "true")
+    monkeypatch.setenv("REDIS_URL", "redis://localhost:6379/0")
+    monkeypatch.setattr(rq, "REST_CACHE_PATH", str(tmp_path / "missing_rest.json"))
+    monkeypatch.setattr(
+        rq,
+        "_read_redis_cache",
+        lambda key: {
+            "__heartbeat__": {"ts": now},
+            "NVDA": {"price": 181.5, "volume": 1000, "ts": now - 2, "src": "redis", "session": "overnight"},
+        },
+    )
+
+    assert rq.get_price("NVDA") == 181.5
+    assert rq.get_volume("NVDA") == 1000.0
+
+
+def test_rest_cache_falls_back_to_file_when_redis_stale(monkeypatch, tmp_path):
+    now = time.time()
+    rest = tmp_path / "rest.json"
+    rest.write_text(
+        json.dumps(
+            {
+                "__heartbeat__": {"ts": now},
+                "NVDA": {"price": 182.0, "ts": now - 2, "src": "file"},
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("REALTIME_ENABLED", "false")
+    monkeypatch.setenv("QUOTES_POLL_ENABLED", "true")
+    monkeypatch.setenv("REDIS_URL", "redis://localhost:6379/0")
+    monkeypatch.setattr(rq, "REST_CACHE_PATH", str(rest))
+    monkeypatch.setattr(
+        rq,
+        "_read_redis_cache",
+        lambda key: {
+            "__heartbeat__": {"ts": now - 600},
+            "NVDA": {"price": 181.5, "ts": now - 600, "src": "redis"},
+        },
+    )
+
+    assert rq.get_price("NVDA") == 182.0
 
 
 if __name__ == "__main__":

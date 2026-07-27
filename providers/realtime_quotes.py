@@ -1,16 +1,16 @@
 #!/usr/bin/env python3
 """realtime_quotes.py — 실시간 시세 캐시의 **읽기전용 클라이언트** (폴백의 단일 seam).
 
-소스 2계층 (WS 신선 > REST 신선 > None→yfinance):
-  1차: kis_stream.py → ~/.cache/kis_realtime_quotes.json (KIS WS 틱·호가 — 세션 41심볼 캡)
-  2차: quotes_poller.py → ~/.cache/rest_quotes.json (토스 배치 200 + 키움 KR 폴백 —
+소스 2계층 (WS 신선 > REST 신선 > None→yfinance), 각 계층은 Redis 신선 > 파일 신선:
+  1차: kis_stream.py → Redis quotes:ws + ~/.cache/kis_realtime_quotes.json (KIS WS 틱·호가 — 세션 41심볼 캡)
+  2차: quotes_poller.py → Redis quotes:rest + ~/.cache/rest_quotes.json (토스 배치 200 + 키움 KR 폴백 —
        WS 캡 밖 롱테일 현재가. 가격만 — 호가/체결강도는 WS 전용)
 
 핵심 계약: **절대 예외를 던지지 않고**, 비활성/없음/stale 이면 None 을 반환해
 호출부가 기존 yfinance 경로로 우아하게 폴백하게 한다. 소비자는 이 seam 만 안다.
 
 신선도 2단 (계층별 독립):
-  1) heartbeat — writer 프로세스가 살아있고 최근 갱신했는가. 죽었으면 그 캐시 전체 불신.
+  1) heartbeat — writer 프로세스가 살아있고 최근 갱신했는가. Redis가 stale이면 파일 fallback, 둘 다 죽었으면 캐시 전체 불신.
   2) 심볼별 ts — 해당 종목 값이 max_age_s 이내인가.
 """
 from __future__ import annotations
@@ -22,6 +22,8 @@ import time
 CACHE_PATH = os.path.expanduser("~/.cache/kis_realtime_quotes.json")
 REST_CACHE_PATH = os.path.expanduser("~/.cache/rest_quotes.json")
 HEARTBEAT_KEY = "__heartbeat__"
+WS_REDIS_KEY = "quotes:ws"
+REST_REDIS_KEY = "quotes:rest"
 
 
 def _int_env(name: str, default: int) -> int:
@@ -49,6 +51,46 @@ def enabled() -> bool:
     return ws_enabled() or poll_enabled()
 
 
+def _redis_url() -> str:
+    return os.getenv("REDIS_URL") or os.getenv("UPSTASH_REDIS_URL") or ""
+
+
+def _redis_client():
+    import redis
+
+    return redis.Redis.from_url(_redis_url(), decode_responses=True, socket_timeout=1.0, socket_connect_timeout=1.0)
+
+
+def _read_redis_cache(key: str) -> dict:
+    if not _redis_url():
+        return {}
+    try:
+        raw = _redis_client().get(key)
+        data = json.loads(raw) if raw else {}
+        return data if isinstance(data, dict) else {}
+    except Exception:
+        return {}
+
+
+def _write_redis_cache(key: str, payload: dict, ttl_s: int | None = None) -> bool:
+    if not _redis_url() or not isinstance(payload, dict):
+        return False
+    try:
+        ttl = int(ttl_s or os.getenv("REALTIME_REDIS_TTL_S", "180"))
+        _redis_client().setex(key, ttl, json.dumps(payload, ensure_ascii=False, sort_keys=True))
+        return True
+    except Exception:
+        return False
+
+
+def write_ws_cache(payload: dict) -> bool:
+    return _write_redis_cache(os.getenv("REALTIME_WS_REDIS_KEY", WS_REDIS_KEY), payload)
+
+
+def write_rest_cache(payload: dict) -> bool:
+    return _write_redis_cache(os.getenv("REALTIME_REST_REDIS_KEY", REST_REDIS_KEY), payload)
+
+
 # ── 순수 신선도 (폐형해 테스트 대상) ─────────────────────────────────────────
 
 def _is_fresh(ts, now: float, max_age_s: float) -> bool:
@@ -64,8 +106,17 @@ def _is_fresh(ts, now: float, max_age_s: float) -> bool:
 # ── 캐시 읽기 (예외 무발) ─────────────────────────────────────────────────────
 
 def _read_cache(path: str | None = None) -> dict:
+    target = CACHE_PATH if path is None else path
+    if target == CACHE_PATH:
+        redis_cache = _read_redis_cache(os.getenv("REALTIME_WS_REDIS_KEY", WS_REDIS_KEY))
+        if redis_cache and heartbeat_age(redis_cache) is not None and heartbeat_age(redis_cache) <= HEARTBEAT_STALE_S:
+            return redis_cache
+    if target == REST_CACHE_PATH:
+        redis_cache = _read_redis_cache(os.getenv("REALTIME_REST_REDIS_KEY", REST_REDIS_KEY))
+        if redis_cache and heartbeat_age(redis_cache) is not None and heartbeat_age(redis_cache) <= REST_HEARTBEAT_STALE_S:
+            return redis_cache
     try:
-        with open(CACHE_PATH if path is None else path, encoding="utf-8") as f:
+        with open(target, encoding="utf-8") as f:
             d = json.load(f)
         return d if isinstance(d, dict) else {}
     except Exception:

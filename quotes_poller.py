@@ -33,6 +33,8 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from dotenv import load_dotenv
 load_dotenv()
 
+from providers import realtime_quotes
+
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 logger = logging.getLogger(__name__)
 
@@ -243,6 +245,7 @@ def poll_once(now: datetime | None = None, *, universe: list[str] | None = None,
         with open(tmp, "w", encoding="utf-8") as f:
             json.dump(cache, f)
         os.replace(tmp, cache_path)
+    realtime_quotes.write_rest_cache(cache)
     return len(prices)
 
 

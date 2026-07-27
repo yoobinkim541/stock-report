@@ -42,6 +42,9 @@ KR_MARKET_MICROSTRUCTURE_ENABLED=true .venv/bin/python crons/kr_microstructure_s
 - `AGENT_CONSOLE_TOSS_FX_ENABLED=true`: Toss API 환율 fallback 활성화
 - `QUOTES_POLL_ENABLED=true`: US/KR REST quote poller 활성화
 - `REALTIME_US_ENABLED=true`: KIS US WebSocket quote stream 활성화
+- `REALTIME_REST_REDIS_KEY=quotes:rest`: REST quote cache Redis key
+- `REALTIME_WS_REDIS_KEY=quotes:ws`: KIS WebSocket quote cache Redis key
+- `REALTIME_REDIS_TTL_S=180`: quote cache Redis TTL
 
 ## Built-in Sources
 
@@ -68,6 +71,16 @@ Broker/KRX bridge data still takes precedence for fields it provides. The built-
 During every non-closed US session, `quotes_poller.py` polls US symbols and writes `session` metadata to `~/.cache/rest_quotes.json`. AI Console quote lines preserve that metadata so overnight prices are visibly separated from regular-session prices.
 
 Overnight data remains source-dependent. The current built-in route uses the same read-only quote providers as the REST poller, so if the broker source does not return a valid overnight price the cache is not fabricated. If a dedicated Blue Ocean/IBKR overnight feed is added later, it should set `venue`, `spread_pct`, `liquidity_flag`, and `tradable` on each quote entry rather than replacing the session contract.
+
+## Shared Redis Cache
+
+When `REDIS_URL` or `UPSTASH_REDIS_URL` is present, market and quote writers mirror their JSON cache to Redis while keeping the local file warm:
+
+- Korean microstructure: `market:kr:microstructure`
+- KIS WebSocket quotes: `quotes:ws`
+- REST quote poller: `quotes:rest`
+
+Readers prefer Redis only when its heartbeat is fresh. If Redis is missing, unreachable, or stale, they fall back to the existing file cache. This keeps single-server operation simple while allowing Vercel functions, local daemons, healthchecks, and future workers to share the same 24-hour tracking state.
 
 ## Broker/KRX Bridge Shape
 

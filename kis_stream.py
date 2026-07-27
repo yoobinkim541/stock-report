@@ -390,6 +390,7 @@ def _flush(latest: dict, market: str, connected: bool = True) -> None:
         out = {k: v for k, v in latest.items()}
         out[realtime_quotes.HEARTBEAT_KEY] = {"ts": time.time(), "connected": connected, "market": market}
         safe_io.atomic_write_json(realtime_quotes.CACHE_PATH, out)
+        realtime_quotes.write_ws_cache(out)
     except Exception as e:
         logger.debug("실시간 캐시 flush 실패(무시): %s", e)
 

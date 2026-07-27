@@ -3,6 +3,7 @@
 import json
 import os
 import sys
+import time
 
 import pytest
 
@@ -148,6 +149,17 @@ def test_parse_subscribe_ack_extracts_key_iv():
     assert ks.parse_subscribe_ack(ack) == {"tr_id": "H0STCNI0", "key": "KEY32", "iv": "IV16"}
     assert ks.parse_subscribe_ack(json.dumps({"header": {"tr_id": "H0STASP0"}, "body": {"rt_cd": "0"}})) is None
     assert ks.parse_subscribe_ack("0|H0STCNT0|001|x") is None    # 데이터프레임 아님
+
+
+def test_flush_mirrors_ws_cache_to_redis(tmp_path, monkeypatch):
+    seen = {}
+    monkeypatch.setattr(ks.realtime_quotes, "CACHE_PATH", str(tmp_path / "kis_realtime_quotes.json"))
+    monkeypatch.setattr(ks.realtime_quotes, "write_ws_cache", lambda payload: seen.setdefault("payload", payload) or True)
+
+    ks._flush({"QQQ": {"price": 550.5, "ts": time.time(), "src": "kis_ws"}}, market="KR/US")
+
+    assert seen["payload"]["QQQ"]["price"] == 550.5
+    assert seen["payload"]["__heartbeat__"]["market"] == "KR/US"
 
 
 # ── 읽기전용 구조 불변 ────────────────────────────────────────────────────────

@@ -16,6 +16,9 @@ def test_realtime_snapshot_reads_fresh_cache_and_formats_lines(monkeypatch, tmp_
     }
     path = tmp_path / "rest_quotes.json"
     path.write_text(json.dumps(cache), encoding="utf-8")
+    monkeypatch.delenv("REDIS_URL", raising=False)
+    monkeypatch.delenv("UPSTASH_REDIS_URL", raising=False)
+    monkeypatch.setenv("REALTIME_ENABLED", "false")
     monkeypatch.setenv("QUOTES_POLL_ENABLED", "true")
     monkeypatch.setattr(realtime_quotes, "REST_CACHE_PATH", str(path))
 
@@ -158,6 +161,9 @@ def test_realtime_snapshot_exposes_us_quote_session(monkeypatch, tmp_path):
     }
     path = tmp_path / "rest_quotes.json"
     path.write_text(json.dumps(cache), encoding="utf-8")
+    monkeypatch.delenv("REDIS_URL", raising=False)
+    monkeypatch.delenv("UPSTASH_REDIS_URL", raising=False)
+    monkeypatch.setenv("REALTIME_ENABLED", "false")
     monkeypatch.setenv("QUOTES_POLL_ENABLED", "true")
     monkeypatch.setattr(realtime_quotes, "REST_CACHE_PATH", str(path))
 

@@ -213,3 +213,18 @@ def test_poll_once_us_overnight_polls_us_symbols(tmp_path):
     assert n == 1
     assert data["NVDA"]["session"] == "overnight"
     assert data["__heartbeat__"]["us_session"] == "overnight"
+
+
+def test_poll_once_mirrors_rest_cache_to_redis(tmp_path, monkeypatch):
+    cache = str(tmp_path / "rest_quotes.json")
+    seen = {}
+    overnight = datetime(2026, 7, 14, 1, 0, tzinfo=timezone.utc)
+    monkeypatch.setattr(Q.realtime_quotes, "write_rest_cache", lambda payload: seen.setdefault("payload", payload) or True)
+
+    n = Q.poll_once(now=overnight, universe=["NVDA"],
+                    toss_fn=lambda symbols: {"NVDA": 181.0},
+                    kiwoom_fn=lambda codes: {}, cache_path=cache)
+
+    assert n == 1
+    assert seen["payload"]["NVDA"]["price"] == 181.0
+    assert seen["payload"]["NVDA"]["session"] == "overnight"
