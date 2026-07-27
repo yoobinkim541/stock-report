@@ -36,6 +36,16 @@ KR_MARKET_MICROSTRUCTURE_ENABLED=true .venv/bin/python crons/kr_microstructure_s
 - `REDIS_URL` 또는 `UPSTASH_REDIS_URL`: 있으면 Redis에 쓰고 파일 fallback도 같이 유지
 - `AGENT_CONSOLE_TOSS_FX_ENABLED=true`: Toss API 환율 fallback 활성화
 
+## Built-in Public Fallbacks
+
+`providers.kr_microstructure` can fill part of the snapshot without a broker bridge:
+
+- `indices`: Naver realtime index JSON for `KOSPI`, `KOSDAQ`, and `KPI200` as `kospi200`
+- `breadth`: Naver mobile stock count JSON for KOSPI/KOSDAQ total, up, and down counts; unchanged is calculated as `total - up - down`
+- `fx`: Toss API when `AGENT_CONSOLE_TOSS_FX_ENABLED=true` and credentials are present
+
+Broker/KRX bridge data still takes precedence for fields it provides. `investor_flow` and `k200_futures` remain unavailable unless a trusted bridge writes them, because the current public fallback does not provide reliable intraday values for those fields.
+
 ## Broker/KRX Bridge Shape
 
 외부 수집기가 `KR_MARKET_MICROSTRUCTURE_SOURCE_FILE`에 아래 형태로 쓰면 collector가 그대로 정규화합니다.

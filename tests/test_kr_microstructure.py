@@ -50,3 +50,56 @@ def test_collect_sources_keeps_fetcher_failures_bounded():
 
     assert sources["indices"]["kospi"]["price"] == 3310.2
     assert errors == ["breadth: boom"]
+
+
+
+def test_parse_naver_realtime_index_payload_maps_core_indices():
+    from providers import kr_microstructure as km
+
+    payload = {
+        "datas": [
+            {
+                "symbolCode": "KOSPI",
+                "closePriceRaw": "6755.75",
+                "fluctuationsRatioRaw": "0.97",
+                "compareToPreviousClosePriceRaw": "65.13",
+                "localTradedAt": "2026-07-27T16:03:00+09:00",
+            },
+            {
+                "symbolCode": "KPI200",
+                "closePriceRaw": "452.22",
+                "fluctuationsRatioRaw": "0.31",
+                "localTradedAt": "2026-07-27T16:03:00+09:00",
+            },
+        ]
+    }
+
+    got = km.parse_naver_index_payload(payload)
+
+    assert got["kospi"]["price"] == 6755.75
+    assert got["kospi"]["change_pct"] == 0.97
+    assert got["kospi"]["change"] == 65.13
+    assert got["kospi"]["source"] == "naver_realtime_index"
+    assert got["kospi200"]["price"] == 452.22
+
+
+def test_parse_naver_breadth_payloads_sums_markets_and_preserves_breakdown():
+    from providers import kr_microstructure as km
+
+    payloads = {
+        ("KOSPI", "marketValue"): {"totalCount": 2471, "marketStatus": "CLOSE"},
+        ("KOSPI", "up"): {"totalCount": 1549, "marketStatus": "CLOSE"},
+        ("KOSPI", "down"): {"totalCount": 763, "marketStatus": "CLOSE"},
+        ("KOSDAQ", "marketValue"): {"totalCount": 1822, "marketStatus": "CLOSE"},
+        ("KOSDAQ", "up"): {"totalCount": 1007, "marketStatus": "CLOSE"},
+        ("KOSDAQ", "down"): {"totalCount": 628, "marketStatus": "CLOSE"},
+    }
+
+    got = km.parse_naver_breadth_payloads(payloads)
+
+    assert got["advancers"] == 2556
+    assert got["decliners"] == 1391
+    assert got["unchanged"] == 346
+    assert got["markets"]["kospi"]["unchanged"] == 159
+    assert got["markets"]["kosdaq"]["unchanged"] == 187
+    assert got["source"] == "naver_stock_counts"

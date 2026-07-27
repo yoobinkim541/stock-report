@@ -192,7 +192,7 @@ def compact_snapshot_lines(snapshot: dict) -> list[str]:
     if isinstance(fx, dict) and fx.get("rate"):
         lines.append(f"- {fx.get('pair', 'USD/KRW')}: {float(fx['rate']):,.2f} · {fx.get('source', 'fx')}")
     indices = snapshot.get("indices") or {}
-    for key, label in (("kospi", "KOSPI"), ("kosdaq", "KOSDAQ")):
+    for key, label in (("kospi", "KOSPI"), ("kosdaq", "KOSDAQ"), ("kospi200", "KOSPI200")):
         row = indices.get(key) or {}
         if row.get("price") is not None:
             lines.append(f"- {label}: {float(row['price']):,.2f} · {_fmt_signed(row.get('change_pct'), suffix='%')}")

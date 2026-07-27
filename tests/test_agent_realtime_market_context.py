@@ -76,6 +76,7 @@ def test_realtime_snapshot_merges_market_microstructure_store(monkeypatch):
         "indices": {
             "kospi": {"price": 3210.5, "change_pct": 0.7},
             "kosdaq": {"price": 820.1, "change_pct": -0.2},
+            "kospi200": {"price": 452.2, "change_pct": 0.31},
         },
         "investor_flow": {
             "kospi": {"foreign_net": 120000000000, "institution_net": -50000000000, "individual_net": -70000000000},
@@ -109,6 +110,7 @@ def test_compact_snapshot_lines_include_microstructure_fields():
         "indices": {
             "kospi": {"price": 3210.5, "change_pct": 0.7},
             "kosdaq": {"price": 820.1, "change_pct": -0.2},
+            "kospi200": {"price": 452.2, "change_pct": 0.31},
         },
         "investor_flow": {
             "kospi": {"foreign_net": 120000000000, "institution_net": -50000000000},
@@ -121,6 +123,7 @@ def test_compact_snapshot_lines_include_microstructure_fields():
 
     assert "KOSPI" in text
     assert "KOSDAQ" in text
+    assert "KOSPI200" in text
     assert "외국인" in text
     assert "기관" in text
     assert "K200 선물" in text

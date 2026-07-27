@@ -10,6 +10,9 @@ from zoneinfo import ZoneInfo
 
 KST = ZoneInfo("Asia/Seoul")
 FIELDS = ("indices", "investor_flow", "k200_futures", "breadth", "fx")
+NAVER_INDEX_CODES = {"KOSPI": "kospi", "KOSDAQ": "kosdaq", "KPI200": "kospi200"}
+NAVER_MARKETS = ("KOSPI", "KOSDAQ")
+NAVER_BREADTH_SORTS = ("marketValue", "up", "down")
 
 
 def _asof(now: datetime | None = None) -> str:
@@ -67,7 +70,7 @@ def field_status(name: str, source: str, ok: bool, as_of: str | None, error: str
 def normalize_indices(raw: dict) -> dict:
     raw = _dict(raw)
     out = {}
-    for key in ("kospi", "kosdaq"):
+    for key in ("kospi", "kosdaq", "kospi200"):
         row = _dict(raw.get(key) or raw.get(key.upper()))
         price = _float(row.get("price") or row.get("value") or row.get("last"))
         if price is None:
@@ -159,6 +162,109 @@ def _snapshot_file_path() -> Path | None:
     return Path(raw).expanduser() if raw else None
 
 
+def naver_enabled() -> bool:
+    return os.getenv("KR_MARKET_MICROSTRUCTURE_NAVER_ENABLED", "true").lower() in {"1", "true", "yes", "on"}
+
+
+def _http_json(url: str) -> dict:
+    try:
+        import requests
+
+        resp = requests.get(
+            url,
+            timeout=8,
+            headers={"User-Agent": "Mozilla/5.0", "Accept": "application/json"},
+        )
+        resp.raise_for_status()
+        data = resp.json()
+        return data if isinstance(data, dict) else {}
+    except Exception:
+        return {}
+
+
+def parse_naver_index_payload(payload: dict) -> dict:
+    out = {}
+    for row in _dict(payload).get("datas") or []:
+        row = _dict(row)
+        key = NAVER_INDEX_CODES.get(str(row.get("symbolCode") or row.get("itemCode") or "").upper())
+        if not key:
+            continue
+        price = _float(row.get("closePriceRaw") or row.get("closePrice"))
+        if price is None:
+            continue
+        item = {
+            "price": price,
+            "source": "naver_realtime_index",
+        }
+        change_pct = _float(row.get("fluctuationsRatioRaw") or row.get("fluctuationsRatio"))
+        if change_pct is not None:
+            item["change_pct"] = change_pct
+        change = _float(row.get("compareToPreviousClosePriceRaw") or row.get("compareToPreviousClosePrice"))
+        if change is not None:
+            item["change"] = change
+        if row.get("localTradedAt"):
+            item["as_of"] = str(row.get("localTradedAt"))
+        if row.get("marketStatus"):
+            item["market_status"] = str(row.get("marketStatus"))
+        out[key] = item
+    return out
+
+
+def fetch_naver_indices() -> dict:
+    if not naver_enabled():
+        return {}
+    out = {}
+    for code in NAVER_INDEX_CODES:
+        payload = _http_json(f"https://polling.finance.naver.com/api/realtime/domestic/index/{code}")
+        out.update(parse_naver_index_payload(payload))
+    return out
+
+
+def parse_naver_breadth_payloads(payloads: dict) -> dict | None:
+    markets = {}
+    total_adv = total_dec = total_unchanged = 0
+    for market in NAVER_MARKETS:
+        rows = {sort: _dict(payloads.get((market, sort)) or payloads.get(f"{market}:{sort}")) for sort in NAVER_BREADTH_SORTS}
+        total = _int(rows["marketValue"].get("totalCount"))
+        adv = _int(rows["up"].get("totalCount"))
+        dec = _int(rows["down"].get("totalCount"))
+        if total is None or adv is None or dec is None:
+            continue
+        unchanged = max(0, total - adv - dec)
+        key = market.lower()
+        markets[key] = {
+            "total": total,
+            "advancers": adv,
+            "decliners": dec,
+            "unchanged": unchanged,
+        }
+        status = rows["marketValue"].get("marketStatus") or rows["up"].get("marketStatus") or rows["down"].get("marketStatus")
+        if status:
+            markets[key]["market_status"] = str(status)
+        total_adv += adv
+        total_dec += dec
+        total_unchanged += unchanged
+    if not markets:
+        return None
+    return {
+        "advancers": total_adv,
+        "decliners": total_dec,
+        "unchanged": total_unchanged,
+        "markets": markets,
+        "source": "naver_stock_counts",
+    }
+
+
+def fetch_naver_breadth() -> dict | None:
+    if not naver_enabled():
+        return None
+    payloads = {}
+    for market in NAVER_MARKETS:
+        for sort in NAVER_BREADTH_SORTS:
+            payloads[(market, sort)] = _http_json(f"https://m.stock.naver.com/api/stocks/{sort}/{market}?page=1&pageSize=1")
+    return parse_naver_breadth_payloads(payloads)
+
+
 def fetch_snapshot_file() -> dict:
     path = _snapshot_file_path()
     if not path:
@@ -171,7 +277,9 @@ def fetch_snapshot_file() -> dict:
 
 
 def fetch_indices() -> dict:
-    return _dict(fetch_snapshot_file().get("indices"))
+    out = fetch_naver_indices()
+    out.update(_dict(fetch_snapshot_file().get("indices")))
+    return out
 
 
 def fetch_investor_flow() -> dict:
@@ -185,7 +293,9 @@ def fetch_k200_futures() -> dict | None:
 
 def fetch_breadth() -> dict | None:
     value = fetch_snapshot_file().get("breadth") or fetch_snapshot_file().get("advancers_decliners")
-    return value if isinstance(value, dict) else None
+    if isinstance(value, dict):
+        return value
+    return fetch_naver_breadth()
 
 
 def fetch_fx() -> dict:
