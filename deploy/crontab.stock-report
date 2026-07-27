@@ -64,6 +64,8 @@ PATH=/home/ubuntu/.local/bin:/usr/local/bin:/usr/bin:/bin
 30 7 * * 1-5 cd /home/ubuntu/projects/stock-report && uv run python crons/naver_flow_snapshot.py >> /tmp/naver_flow_snapshot.log 2>&1   # 07:30 UTC = 16:30 KST
 
 # ── 고빈도 수집·감지 ─────────────────────────────────────────────────────────
+# AI 콘솔 장중 시장 미시구조 스냅샷 (KOSPI/KOSDAQ·수급·K200선물·시장폭·USD/KRW — 연결된 소스만 기록)
+* * * * * cd /home/ubuntu/projects/stock-report && flock -n /tmp/kr_microstructure_snapshot.lock env KR_MARKET_MICROSTRUCTURE_ENABLED=true AGENT_CONSOLE_TOSS_FX_ENABLED=true uv run python crons/kr_microstructure_snapshot.py >> /tmp/kr_microstructure_snapshot.log 2>&1   # 매 1분 (AI 콘솔 장중 미시구조 스냅샷 — 현재 연결 소스만 기록·미연결 필드는 명시)
 # 속보 수집 + 급증 감지 + 텔레그램 알림
 * * * * * cd /home/ubuntu/projects/stock-report && flock -n /tmp/news_spike_detector.lock uv run python crons/news_spike_detector.py >> /tmp/news_spike_detector.log 2>&1   # 매 1분 (flock: 중복실행·상태 RMW 경합 방지)
 # 단기(1분봉) 모의 트레이딩 엔진 (INTRADAY_MOCK_ENABLED=true 일 때만 — 꺼져있으면 즉시 no-op·shadow 기본)
