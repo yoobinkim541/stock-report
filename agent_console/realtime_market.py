@@ -45,7 +45,7 @@ def _quote_from_cache(symbol: str, *, now: float, max_age_s: int) -> dict | None
         entry = realtime_quotes._entry(symbol, max_age_s) or {}
         ts = float(entry.get("ts") or now)
         source = str(entry.get("src") or entry.get("source") or "realtime_cache")
-        return {
+        out = {
             "symbol": symbol,
             "market": _market_for(symbol),
             "price": float(price),
@@ -55,6 +55,9 @@ def _quote_from_cache(symbol: str, *, now: float, max_age_s: int) -> dict | None
             "source": f"rest_cache:{source}" if source not in {"kis_ws", "kis_rest"} else source,
             "fresh": True,
         }
+        if entry.get("session"):
+            out["session"] = str(entry.get("session"))
+        return out
     except Exception:
         return None
 
@@ -187,7 +190,8 @@ def compact_snapshot_lines(snapshot: dict) -> list[str]:
         age = row.get("age_s")
         volume = row.get("volume")
         tail = f" · 거래량 {volume:,.0f}" if isinstance(volume, (int, float)) else ""
-        lines.append(f"- {symbol}: {price:g} · {src} · {age}s 전{tail}")
+        session = f" · {row.get('session')}" if row.get("session") else ""
+        lines.append(f"- {symbol}: {price:g} · {src}{session} · {age}s 전{tail}")
     fx = snapshot.get("fx")
     if isinstance(fx, dict) and fx.get("rate"):
         lines.append(f"- {fx.get('pair', 'USD/KRW')}: {float(fx['rate']):,.2f} · {fx.get('source', 'fx')}")

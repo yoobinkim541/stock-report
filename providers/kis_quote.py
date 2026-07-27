@@ -33,12 +33,16 @@ _KR_PRICE_URL = "/uapi/domestic-stock/v1/quotations/inquire-price"
 _KR_ASKING_URL = "/uapi/domestic-stock/v1/quotations/inquire-asking-price-exp-ccn"
 _OVRS_PRICE_URL = "/uapi/overseas-price/v1/quotations/price"
 _KR_VOLRANK_URL = "/uapi/domestic-stock/v1/quotations/volume-rank"
+_K200_FUTURES_PRICE_URL = "/uapi/domestic-futureoption/v1/quotations/inquire-price"
+_K200_FUTURES_BOARD_URL = "/uapi/domestic-futureoption/v1/quotations/display-board-futures"
 
 # 시세 조회 TR (읽기전용). 응답 필드명은 라이브 스모크 전 확정 금지.
 _TR_KR_PRICE = "FHKST01010100"    # 국내 현재가
 _TR_KR_ASKING = "FHKST01010200"   # 국내 호가+예상체결 (10단계)
 _TR_OVRS_PRICE = "HHDFS00000300"  # 해외 현재가 (S6서 동작 확인된 TR)
 _TR_KR_VOLRANK = "FHPST01710000"  # 국내 거래량/거래대금 순위 (단기 스캐너용 — 조회 전용)
+_TR_FUTURES_PRICE = "FHMIF10000000"  # 국내 선물옵션 현재가
+_TR_FUTURES_BOARD = "FHPIF05030200"  # 국내옵션전광판_선물
 
 _TOKEN_FILE = os.path.expanduser("~/.cache/kis_quote_token.json")
 _token_cache: dict = {"token": None, "exp": 0.0}
@@ -90,6 +94,16 @@ def _f(d: dict, key: str) -> float:
         return 0.0
 
 
+def _maybe_f(d: dict, key: str) -> float | None:
+    raw = d.get(key) if isinstance(d, dict) else None
+    if raw in (None, ""):
+        return None
+    try:
+        return float(str(raw).replace(",", "").strip())
+    except (ValueError, TypeError):
+        return None
+
+
 def parse_kr_price(output: dict) -> dict:
     """국내 현재가 output → {price, volume}. stck_prpr=현재가·acml_vol=누적거래량."""
     return {"price": _f(output, "stck_prpr") or None, "volume": _f(output, "acml_vol")}
@@ -134,6 +148,33 @@ def parse_volume_rank(rows: list[dict]) -> list[dict]:
                     "price": _f(r, "stck_prpr"), "chg_pct": _f(r, "prdy_ctrt"),
                     "volume": _f(r, "acml_vol"), "turnover": _f(r, "acml_tr_pbmn")})
     return out
+
+
+def parse_futureoption_price(output: dict) -> dict:
+    """국내 선물옵션 현재가 output → KOSPI200 선물 스냅샷 일부."""
+    out = {
+        "price": _maybe_f(output, "futs_prpr"),
+        "change_pct": _maybe_f(output, "futs_prdy_ctrt"),
+        "basis": _maybe_f(output, "basis"),
+        "kospi200_index": _maybe_f(output, "kospi200_nmix"),
+        "volume": _maybe_f(output, "acml_vol"),
+    }
+    return {k: v for k, v in out.items() if v is not None}
+
+
+def select_k200_futures_code(rows: list[dict]) -> str | None:
+    """선물 전광판 rows에서 거래량이 가장 큰 현재 월물 코드를 고른다."""
+    best_code = None
+    best_volume = -1.0
+    for row in rows or []:
+        if not isinstance(row, dict):
+            continue
+        code = str(row.get("futs_shrn_iscd") or "").strip()
+        volume = _f(row, "acml_vol")
+        if code and volume > best_volume:
+            best_code = code
+            best_volume = volume
+    return best_code
 
 
 # ── 토큰 (디스크 영속) ────────────────────────────────────────────────────────
@@ -316,3 +357,36 @@ def volume_rank_kr() -> list[dict] | None:
         return None
     rows = parse_volume_rank(j.get("output") or [])
     return rows or None
+
+
+def get_k200_futures() -> dict | None:
+    """KOSPI200 지수선물 현재가. 반환 {price, change_pct, basis, ...} 또는 None."""
+    if not is_enabled():
+        return None
+    market_code = os.getenv("KIS_K200_FUTURES_MARKET_CODE", "F")
+    code = os.getenv("KIS_K200_FUTURES_CODE") or os.getenv("K200_FUTURES_CODE")
+    if not code:
+        h_board = _headers(_TR_FUTURES_BOARD)
+        if not h_board:
+            return None
+        board = _http_get(_QUOTE_BASE + _K200_FUTURES_BOARD_URL, h_board, {
+            "FID_COND_MRKT_DIV_CODE": market_code,
+            "FID_COND_SCR_DIV_CODE": os.getenv("KIS_K200_FUTURES_SCREEN_CODE", "20503"),
+            "FID_COND_MRKT_CLS_CODE": os.getenv("KIS_K200_FUTURES_CLASS_CODE", "MKI"),
+        }, retries=1)
+        code = select_k200_futures_code((board or {}).get("output") or [])
+    if not code:
+        return None
+    h = _headers(_TR_FUTURES_PRICE)
+    if not h:
+        return None
+    j = _http_get(_QUOTE_BASE + _K200_FUTURES_PRICE_URL, h, {
+        "FID_COND_MRKT_DIV_CODE": market_code,
+        "FID_INPUT_ISCD": code,
+    }, retries=1)
+    if not j:
+        return None
+    parsed = parse_futureoption_price(j.get("output1") or j.get("output") or {})
+    if not parsed.get("price"):
+        return None
+    return {**parsed, "symbol": code, "ts": time.time(), "source": "kis_futureoption"}

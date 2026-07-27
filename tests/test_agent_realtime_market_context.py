@@ -145,3 +145,23 @@ def test_realtime_snapshot_uses_microstructure_fx_when_toss_disabled(monkeypatch
 
     assert snapshot["fx"]["rate"] == 1387.2
     assert "USD/KRW" in "\n".join(realtime_market.compact_snapshot_lines(snapshot))
+
+
+def test_realtime_snapshot_exposes_us_quote_session(monkeypatch, tmp_path):
+    from agent_console import realtime_market
+    from providers import realtime_quotes
+
+    now = time.time()
+    cache = {
+        "__heartbeat__": {"ts": now, "us_session": "premarket"},
+        "QQQ": {"price": 550.5, "ts": now - 2, "src": "toss", "session": "premarket"},
+    }
+    path = tmp_path / "rest_quotes.json"
+    path.write_text(json.dumps(cache), encoding="utf-8")
+    monkeypatch.setenv("QUOTES_POLL_ENABLED", "true")
+    monkeypatch.setattr(realtime_quotes, "REST_CACHE_PATH", str(path))
+
+    snapshot = realtime_market.build_market_snapshot(symbols=["QQQ"], now=now)
+
+    assert snapshot["quotes"][0]["session"] == "premarket"
+    assert "premarket" in "\n".join(realtime_market.compact_snapshot_lines(snapshot))

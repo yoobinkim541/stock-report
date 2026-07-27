@@ -103,3 +103,76 @@ def test_parse_naver_breadth_payloads_sums_markets_and_preserves_breakdown():
     assert got["markets"]["kospi"]["unchanged"] == 159
     assert got["markets"]["kosdaq"]["unchanged"] == 187
     assert got["source"] == "naver_stock_counts"
+
+
+def test_parse_kiwoom_investor_flow_sums_sector_rows_to_market_krw():
+    from providers import kr_microstructure as km
+
+    payload = {
+        "inds_netprps": [
+            {"inds_nm": "대형주", "frgnr_netprps": "+1,200", "orgn_netprps": "-300", "ind_netprps": "-900"},
+            {"inds_nm": "중형주", "frgnr_netprps": "+200", "orgn_netprps": "-50", "ind_netprps": "-150"},
+        ]
+    }
+
+    got = km.parse_kiwoom_investor_flow_payload(payload, market="kospi")
+
+    assert got["kospi"]["foreign_net"] == 1400000000
+    assert got["kospi"]["institution_net"] == -350000000
+    assert got["kospi"]["individual_net"] == -1050000000
+    assert got["kospi"]["unit"] == "KRW"
+    assert got["kospi"]["source"] == "kiwoom_ka10051"
+
+
+def test_parse_kiwoom_investor_flow_prefers_composite_total_row():
+    from providers import kr_microstructure as km
+
+    payload = {
+        "inds_netprps": [
+            {"inds_nm": "종합(KOSPI)", "frgnr_netprps": "-30,516", "orgn_netprps": "+8,609", "ind_netprps": "+21,694"},
+            {"inds_nm": "대형주", "frgnr_netprps": "-28,967", "orgn_netprps": "+8,596", "ind_netprps": "+20,259"},
+        ]
+    }
+
+    got = km.parse_kiwoom_investor_flow_payload(payload, market="kospi")
+
+    assert got["kospi"]["foreign_net"] == -30516000000
+    assert got["kospi"]["institution_net"] == 8609000000
+    assert got["kospi"]["individual_net"] == 21694000000
+
+
+def test_fetch_investor_flow_prefers_file_then_kiwoom(monkeypatch):
+    from providers import kr_microstructure as km
+
+    file_flow = {"kospi": {"foreign_net": 1, "source": "fixture"}}
+    monkeypatch.setattr(km, "fetch_snapshot_file", lambda: {"investor_flow": file_flow})
+    monkeypatch.setattr(km, "fetch_kiwoom_investor_flow", lambda: {"kospi": {"foreign_net": 2}})
+
+    assert km.fetch_investor_flow() == file_flow
+
+    monkeypatch.setattr(km, "fetch_snapshot_file", lambda: {})
+    assert km.fetch_investor_flow()["kospi"]["foreign_net"] == 2
+
+
+def test_fetch_k200_futures_prefers_file_then_kis_without_aliasing_index(monkeypatch):
+    from providers import kr_microstructure as km
+
+    file_futures = {"price": 425.5, "source": "fixture"}
+    monkeypatch.setattr(km, "fetch_snapshot_file", lambda: {"k200_futures": file_futures, "indices": {"kospi200": {"price": 452.2}}})
+    monkeypatch.setattr(km, "fetch_kis_k200_futures", lambda: {"price": 426.0, "source": "kis_futureoption"})
+    assert km.fetch_k200_futures() == file_futures
+
+    monkeypatch.setattr(km, "fetch_snapshot_file", lambda: {"indices": {"kospi200": {"price": 452.2}}})
+    assert km.fetch_k200_futures() == {"price": 426.0, "source": "kis_futureoption"}
+
+    monkeypatch.setattr(km, "fetch_kis_k200_futures", lambda: None)
+    assert km.fetch_k200_futures() is None
+
+
+def test_normalize_futures_preserves_symbol_and_basis():
+    from providers import kr_microstructure as km
+
+    got = km.normalize_futures({"symbol": "A05608", "price": "1070.34", "basis": "1.09", "source": "kis_futureoption"})
+
+    assert got["symbol"] == "A05608"
+    assert got["basis"] == 1.09

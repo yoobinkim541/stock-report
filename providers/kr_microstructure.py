@@ -13,6 +13,7 @@ FIELDS = ("indices", "investor_flow", "k200_futures", "breadth", "fx")
 NAVER_INDEX_CODES = {"KOSPI": "kospi", "KOSDAQ": "kosdaq", "KPI200": "kospi200"}
 NAVER_MARKETS = ("KOSPI", "KOSDAQ")
 NAVER_BREADTH_SORTS = ("marketValue", "up", "down")
+KIWOOM_MARKETS = {"kospi": "0", "kosdaq": "1"}
 
 
 def _asof(now: datetime | None = None) -> str:
@@ -118,15 +119,21 @@ def normalize_futures(raw: dict) -> dict | None:
     price = _float(row.get("price") or row.get("last") or row.get("value"))
     foreign_net = _float(row.get("foreign_net") or row.get("foreigner_net"))
     change_pct = _float(row.get("change_pct") or row.get("pct") or row.get("changeRate"))
-    if price is None and foreign_net is None and change_pct is None:
+    basis = _float(row.get("basis"))
+    volume = _float(row.get("volume"))
+    if price is None and foreign_net is None and change_pct is None and basis is None and volume is None:
         return None
-    out = _clean(row, ("source", "as_of"))
+    out = _clean(row, ("source", "as_of", "symbol", "name"))
     if price is not None:
         out["price"] = price
     if change_pct is not None:
         out["change_pct"] = change_pct
     if foreign_net is not None:
         out["foreign_net"] = foreign_net
+    if basis is not None:
+        out["basis"] = basis
+    if volume is not None:
+        out["volume"] = volume
     return out
 
 
@@ -276,19 +283,100 @@ def fetch_snapshot_file() -> dict:
         return {}
 
 
+def kiwoom_enabled() -> bool:
+    return os.getenv("KR_MARKET_MICROSTRUCTURE_KIWOOM_ENABLED", "true").lower() in {"1", "true", "yes", "on"}
+
+
+def kis_futures_enabled() -> bool:
+    return os.getenv("KR_MARKET_MICROSTRUCTURE_KIS_FUTURES_ENABLED", "true").lower() in {"1", "true", "yes", "on"}
+
+
 def fetch_indices() -> dict:
     out = fetch_naver_indices()
     out.update(_dict(fetch_snapshot_file().get("indices")))
     return out
 
 
+def _amount_unit_krw() -> float:
+    return _float(os.getenv("KIWOOM_INVESTOR_FLOW_AMOUNT_UNIT_KRW", "1000000")) or 1000000.0
+
+
+def parse_kiwoom_investor_flow_payload(payload: dict, *, market: str) -> dict:
+    rows = _dict(payload).get("inds_netprps")
+    if not isinstance(rows, list):
+        return {}
+    total_rows = []
+    for row in rows:
+        name = str(_dict(row).get("inds_nm") or "").strip()
+        if name in {"종합", "전체", "코스피", "코스닥", "KOSPI", "KOSDAQ"} or name.startswith("종합("):
+            total_rows.append(row)
+    source_rows = total_rows or rows
+    totals = {"foreign_net": 0.0, "institution_net": 0.0, "individual_net": 0.0}
+    any_value = False
+    for row in source_rows:
+        row = _dict(row)
+        values = {
+            "foreign_net": _float(row.get("frgnr_netprps")),
+            "institution_net": _float(row.get("orgn_netprps")),
+            "individual_net": _float(row.get("ind_netprps")),
+        }
+        for key, value in values.items():
+            if value is not None:
+                totals[key] += value
+                any_value = True
+    if not any_value:
+        return {}
+    unit = _amount_unit_krw()
+    item = {key: value * unit for key, value in totals.items()}
+    item.update({"unit": "KRW", "source": "kiwoom_ka10051"})
+    return {market.lower(): item}
+
+
+def fetch_kiwoom_investor_flow() -> dict:
+    if not kiwoom_enabled():
+        return {}
+    try:
+        from kiwoom_rest_api.auth.token import TokenManager
+        from kiwoom_rest_api.koreanstock.sector import Sector
+
+        if not os.getenv("KIWOOM_API_KEY") or not os.getenv("KIWOOM_API_SECRET"):
+            return {}
+        api = Sector(base_url="https://api.kiwoom.com", token_manager=TokenManager(), use_async=False)
+        out = {}
+        for market, code in KIWOOM_MARKETS.items():
+            payload = api.industrywise_investor_net_buy_request_ka10051(
+                mrkt_tp=code,
+                amt_qty_tp="0",
+                stex_tp=os.getenv("KIWOOM_INVESTOR_FLOW_STEX_TP", "3"),
+                base_dt=os.getenv("KIWOOM_INVESTOR_FLOW_BASE_DT", ""),
+            )
+            out.update(parse_kiwoom_investor_flow_payload(payload, market=market))
+        return out
+    except Exception:
+        return {}
+
+
 def fetch_investor_flow() -> dict:
-    return _dict(fetch_snapshot_file().get("investor_flow"))
+    file_value = _dict(fetch_snapshot_file().get("investor_flow"))
+    return file_value or fetch_kiwoom_investor_flow()
+
+
+def fetch_kis_k200_futures() -> dict | None:
+    if not kis_futures_enabled():
+        return None
+    try:
+        from providers import kis_quote
+
+        return kis_quote.get_k200_futures()
+    except Exception:
+        return None
 
 
 def fetch_k200_futures() -> dict | None:
     value = fetch_snapshot_file().get("k200_futures")
-    return value if isinstance(value, dict) else None
+    if isinstance(value, dict):
+        return value
+    return fetch_kis_k200_futures()
 
 
 def fetch_breadth() -> dict | None:

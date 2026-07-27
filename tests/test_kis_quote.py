@@ -128,3 +128,43 @@ def test_http_get_circuit_breaker_opens_and_self_heals(monkeypatch):
 
 if __name__ == "__main__":
     sys.exit(pytest.main([__file__, "-v"]))
+
+
+def test_parse_futureoption_price_output():
+    from providers import kis_quote as kq
+
+    got = kq.parse_futureoption_price({
+        "futs_prpr": "425.50",
+        "futs_prdy_ctrt": "+0.41",
+        "basis": "1.25",
+        "kospi200_nmix": "424.25",
+        "acml_vol": "123,456",
+    })
+
+    assert got == {
+        "price": 425.5,
+        "change_pct": 0.41,
+        "basis": 1.25,
+        "kospi200_index": 424.25,
+        "volume": 123456.0,
+    }
+
+
+def test_select_k200_futures_code_from_display_board_prefers_highest_volume():
+    from providers import kis_quote as kq
+
+    rows = [
+        {"futs_shrn_iscd": "A05609", "hts_kor_isnm": "미니F 202609", "acml_vol": "2,277"},
+        {"futs_shrn_iscd": "A05608", "hts_kor_isnm": "미니F 202608", "acml_vol": "137,756"},
+    ]
+
+    assert kq.select_k200_futures_code(rows) == "A05608"
+
+
+def test_parse_futureoption_price_omits_missing_optional_fields():
+    from providers import kis_quote as kq
+
+    got = kq.parse_futureoption_price({"futs_prpr": "425.50", "kospi200_nmix": ""})
+
+    assert got["price"] == 425.5
+    assert "kospi200_index" not in got

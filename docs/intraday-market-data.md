@@ -6,7 +6,7 @@ AI 콘솔은 장중 시장 질문을 받을 때 `agent_console.market_snapshot_s
 
 - `indices`: `kospi`, `kosdaq` 현재가와 등락률
 - `investor_flow`: KOSPI/KOSDAQ 외국인, 기관, 개인 순매수
-- `k200_futures`: KOSPI200 선물 현재가, 등락률, 외국인 선물 순매수
+- `k200_futures`: KOSPI200 선물 현재가, 등락률, 베이시스, 거래량, 가능하면 외국인 선물 순매수
 - `breadth`: 상승, 하락, 보합 종목 수
 - `fx`: USD/KRW 환율
 - `field_status`: 각 필드별 `ok`, `source`, `as_of`, `error`
@@ -33,18 +33,25 @@ KR_MARKET_MICROSTRUCTURE_ENABLED=true .venv/bin/python crons/kr_microstructure_s
 - `KR_MARKET_MICROSTRUCTURE_STALE_S=120`: stale 기준
 - `KR_MARKET_MICROSTRUCTURE_SOURCE_FILE=/path/to/broker_snapshot.json`: 증권사/KRX 브리지 산출물을 읽는 입력 파일
 - `KR_MARKET_MICROSTRUCTURE_REQUIRED_FIELDS=indices,investor_flow,k200_futures,breadth,fx`: 헬스체크 필수 필드
+- `KR_MARKET_MICROSTRUCTURE_KIWOOM_ENABLED=true`: Kiwoom `ka10051` 업종별 투자자 순매수 수집 활성화
+- `KIWOOM_INVESTOR_FLOW_STEX_TP=3`: Kiwoom 수급 거래소 구분. 기본은 통합
+- `KIWOOM_INVESTOR_FLOW_AMOUNT_UNIT_KRW=1000000`: Kiwoom 금액 필드를 KRW로 환산하는 배수
+- `KR_MARKET_MICROSTRUCTURE_KIS_FUTURES_ENABLED=true`: KIS 국내선물옵션 현재가 수집 활성화
+- `KIS_K200_FUTURES_CODE=A05608`: 지정하면 해당 선물코드를 조회. 비워두면 선물 전광판에서 거래량 최대 월물을 선택
 - `REDIS_URL` 또는 `UPSTASH_REDIS_URL`: 있으면 Redis에 쓰고 파일 fallback도 같이 유지
 - `AGENT_CONSOLE_TOSS_FX_ENABLED=true`: Toss API 환율 fallback 활성화
 
-## Built-in Public Fallbacks
+## Built-in Sources
 
-`providers.kr_microstructure` can fill part of the snapshot without a broker bridge:
+`providers.kr_microstructure` can fill the snapshot without a separate bridge when credentials and feature flags are present:
 
 - `indices`: Naver realtime index JSON for `KOSPI`, `KOSDAQ`, and `KPI200` as `kospi200`
 - `breadth`: Naver mobile stock count JSON for KOSPI/KOSDAQ total, up, and down counts; unchanged is calculated as `total - up - down`
 - `fx`: Toss API when `AGENT_CONSOLE_TOSS_FX_ENABLED=true` and credentials are present
+- `investor_flow`: Kiwoom REST `ka10051` industry investor net-buy data, normalized to KOSPI/KOSDAQ foreign/institution/individual net KRW
+- `k200_futures`: KIS domestic futureoption display board selects the most active KOSPI200 futures contract, then `inquire-price` fills price, change percent, basis, and volume
 
-Broker/KRX bridge data still takes precedence for fields it provides. `investor_flow` and `k200_futures` remain unavailable unless a trusted bridge writes them, because the current public fallback does not provide reliable intraday values for those fields.
+Broker/KRX bridge data still takes precedence for fields it provides. The built-in KIS futures path currently covers price-side futures data; foreign futures net contracts still require a broker/KRX bridge field such as `foreign_net`.
 
 ## Broker/KRX Bridge Shape
 

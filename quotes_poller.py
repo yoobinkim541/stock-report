@@ -26,6 +26,7 @@ import sys
 import time
 from datetime import datetime, timezone
 from pathlib import Path
+from zoneinfo import ZoneInfo
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
@@ -60,12 +61,24 @@ def kr_market_open(now: datetime | None = None) -> bool:
 
 
 def us_market_open(now: datetime | None = None) -> bool:
-    """미 정규장 포괄 13:00~21:10 UTC (서머 13:30~20:00·겨울 14:30~21:00)."""
+    """미국 프리장·정규장·애프터장 창(04:00~20:00 ET)."""
+    return us_trading_session(now) != "closed"
+
+
+def us_trading_session(now: datetime | None = None) -> str:
+    """미국 주식 세션: premarket / regular / afterhours / closed."""
     now = now or datetime.now(timezone.utc)
-    if now.weekday() >= 5:
-        return False
-    m = now.hour * 60 + now.minute
-    return 13 * 60 <= m <= 21 * 60 + 10
+    ny = now.astimezone(ZoneInfo("America/New_York"))
+    if ny.weekday() >= 5:
+        return "closed"
+    m = ny.hour * 60 + ny.minute
+    if 4 * 60 <= m < 9 * 60 + 30:
+        return "premarket"
+    if 9 * 60 + 30 <= m < 16 * 60:
+        return "regular"
+    if 16 * 60 <= m < 20 * 60:
+        return "afterhours"
+    return "closed"
 
 
 def _base(sym: str) -> str:
@@ -180,7 +193,9 @@ def poll_once(now: datetime | None = None, *, universe: list[str] | None = None,
               cache_path: str = CACHE_PATH) -> int:
     """1회 폴링 — 열린 시장 심볼만 조회해 캐시 쓰기. 반환 = 갱신 심볼 수."""
     now = now or datetime.now(timezone.utc)
-    kr_open, us_open = kr_market_open(now), us_market_open(now)
+    kr_open = kr_market_open(now)
+    us_session = us_trading_session(now)
+    us_open = us_session != "closed"
     if not (kr_open or us_open):
         return 0
     symbols = [s for s in (universe if universe is not None else build_universe())
@@ -208,8 +223,11 @@ def poll_once(now: datetime | None = None, *, universe: list[str] | None = None,
     except Exception:
         pass
     for sym, (px, src) in prices.items():
-        cache[sym] = {"price": px, "ts": ts, "src": src}
-    cache["__heartbeat__"] = {"ts": ts, "n": len(prices)}
+        entry = {"price": px, "ts": ts, "src": src}
+        if not is_kr_symbol(sym):
+            entry["session"] = us_session
+        cache[sym] = entry
+    cache["__heartbeat__"] = {"ts": ts, "n": len(prices), "us_session": us_session}
     try:
         import safe_io
         safe_io.atomic_write_json(cache_path, cache)

@@ -37,7 +37,8 @@ def test_kr_market_open_kst_window():
 
 def test_us_market_open_window():
     assert Q.us_market_open(datetime(2026, 7, 13, 14, 0, tzinfo=timezone.utc))
-    assert not Q.us_market_open(datetime(2026, 7, 13, 22, 0, tzinfo=timezone.utc))
+    assert Q.us_market_open(datetime(2026, 7, 13, 22, 0, tzinfo=timezone.utc))
+    assert not Q.us_market_open(datetime(2026, 7, 13, 0, 30, tzinfo=timezone.utc))
     assert not Q.us_market_open(datetime(2026, 7, 11, 15, 0, tzinfo=timezone.utc))  # 토
 
 
@@ -162,3 +163,38 @@ def test_realtime_all_disabled(monkeypatch):
     monkeypatch.setenv("REALTIME_ENABLED", "false")
     monkeypatch.setenv("QUOTES_POLL_ENABLED", "false")
     assert rq.enabled() is False and rq.get_price("MSFT") is None
+
+
+def test_us_trading_session_covers_premarket_regular_and_afterhours():
+    assert Q.us_trading_session(datetime(2026, 7, 13, 8, 30, tzinfo=timezone.utc)) == "premarket"
+    assert Q.us_trading_session(datetime(2026, 7, 13, 14, 0, tzinfo=timezone.utc)) == "regular"
+    assert Q.us_trading_session(datetime(2026, 7, 13, 21, 30, tzinfo=timezone.utc)) == "afterhours"
+    assert Q.us_trading_session(datetime(2026, 7, 13, 1, 0, tzinfo=timezone.utc)) == "closed"
+    assert Q.us_trading_session(datetime(2026, 7, 11, 14, 0, tzinfo=timezone.utc)) == "closed"
+
+
+def test_poll_once_us_premarket_writes_session_metadata(tmp_path):
+    cache = str(tmp_path / "rest_quotes.json")
+    premarket = datetime(2026, 7, 13, 8, 30, tzinfo=timezone.utc)
+
+    n = Q.poll_once(now=premarket, universe=["MSFT"],
+                    toss_fn=lambda symbols: {"MSFT": 501.0},
+                    kiwoom_fn=lambda codes: {}, cache_path=cache)
+
+    data = json.loads(open(cache, encoding="utf-8").read())
+    assert n == 1
+    assert data["MSFT"]["session"] == "premarket"
+    assert data["__heartbeat__"]["us_session"] == "premarket"
+
+
+def test_poll_once_us_afterhours_polls_us_symbols(tmp_path):
+    cache = str(tmp_path / "rest_quotes.json")
+    afterhours = datetime(2026, 7, 13, 21, 30, tzinfo=timezone.utc)
+
+    n = Q.poll_once(now=afterhours, universe=["NVDA"],
+                    toss_fn=lambda symbols: {"NVDA": 180.0},
+                    kiwoom_fn=lambda codes: {}, cache_path=cache)
+
+    data = json.loads(open(cache, encoding="utf-8").read())
+    assert n == 1
+    assert data["NVDA"]["session"] == "afterhours"
