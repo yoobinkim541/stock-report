@@ -61,17 +61,23 @@ def kr_market_open(now: datetime | None = None) -> bool:
 
 
 def us_market_open(now: datetime | None = None) -> bool:
-    """미국 프리장·정규장·애프터장 창(04:00~20:00 ET)."""
+    """미국 overnight·프리장·정규장·애프터장 창(20:00~20:00 ET)."""
     return us_trading_session(now) != "closed"
 
 
 def us_trading_session(now: datetime | None = None) -> str:
-    """미국 주식 세션: premarket / regular / afterhours / closed."""
+    """미국 주식 세션: overnight / premarket / regular / afterhours / closed."""
     now = now or datetime.now(timezone.utc)
     ny = now.astimezone(ZoneInfo("America/New_York"))
-    if ny.weekday() >= 5:
-        return "closed"
     m = ny.hour * 60 + ny.minute
+    if ny.weekday() == 5:
+        return "closed"
+    if ny.weekday() == 6 and m < 20 * 60:
+        return "closed"
+    if ny.weekday() == 4 and m >= 20 * 60:
+        return "closed"
+    if m < 4 * 60 or m >= 20 * 60:
+        return "overnight"
     if 4 * 60 <= m < 9 * 60 + 30:
         return "premarket"
     if 9 * 60 + 30 <= m < 16 * 60:

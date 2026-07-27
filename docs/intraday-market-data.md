@@ -40,6 +40,8 @@ KR_MARKET_MICROSTRUCTURE_ENABLED=true .venv/bin/python crons/kr_microstructure_s
 - `KIS_K200_FUTURES_CODE=A05608`: 지정하면 해당 선물코드를 조회. 비워두면 선물 전광판에서 거래량 최대 월물을 선택
 - `REDIS_URL` 또는 `UPSTASH_REDIS_URL`: 있으면 Redis에 쓰고 파일 fallback도 같이 유지
 - `AGENT_CONSOLE_TOSS_FX_ENABLED=true`: Toss API 환율 fallback 활성화
+- `QUOTES_POLL_ENABLED=true`: US/KR REST quote poller 활성화
+- `REALTIME_US_ENABLED=true`: KIS US WebSocket quote stream 활성화
 
 ## Built-in Sources
 
@@ -52,6 +54,20 @@ KR_MARKET_MICROSTRUCTURE_ENABLED=true .venv/bin/python crons/kr_microstructure_s
 - `k200_futures`: KIS domestic futureoption display board selects the most active KOSPI200 futures contract, then `inquire-price` fills price, change percent, basis, and volume
 
 Broker/KRX bridge data still takes precedence for fields it provides. The built-in KIS futures path currently covers price-side futures data; foreign futures net contracts still require a broker/KRX bridge field such as `foreign_net`.
+
+## US 24-Hour Tracking
+
+`quotes_poller.us_trading_session()` treats US equities as sessioned, not simply open or closed:
+
+- `overnight`: Sunday 20:00 ET through Friday 04:00 ET overnight windows, excluding Saturday and Friday after 20:00 ET
+- `premarket`: 04:00-09:30 ET
+- `regular`: 09:30-16:00 ET
+- `afterhours`: 16:00-20:00 ET
+- `closed`: Saturday, Sunday before 20:00 ET, and Friday after 20:00 ET
+
+During every non-closed US session, `quotes_poller.py` polls US symbols and writes `session` metadata to `~/.cache/rest_quotes.json`. AI Console quote lines preserve that metadata so overnight prices are visibly separated from regular-session prices.
+
+Overnight data remains source-dependent. The current built-in route uses the same read-only quote providers as the REST poller, so if the broker source does not return a valid overnight price the cache is not fabricated. If a dedicated Blue Ocean/IBKR overnight feed is added later, it should set `venue`, `spread_pct`, `liquidity_flag`, and `tradable` on each quote entry rather than replacing the session contract.
 
 ## Broker/KRX Bridge Shape
 
