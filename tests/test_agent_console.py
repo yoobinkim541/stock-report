@@ -2488,3 +2488,48 @@ def test_stock_compare_contract_forbids_market_template_and_sets_peers(monkeypat
     assert "현재 시장 상황 인식" in lines
     assert "시장 신호 점수" in lines
     assert "피어 비교표" in lines
+
+
+def test_general_llm_answer_rejects_forbidden_market_template(monkeypatch, tmp_path):
+    _isolate(monkeypatch, tmp_path)
+
+    from agent_console import agent
+
+    pack = {
+        "surface": "market",
+        "sources": {"events": []},
+        "memory": [],
+        "portfolio": {"holdings": []},
+        "paper": {},
+        "models": {"items": []},
+        "market_snapshot": {"quotes": []},
+    }
+    monkeypatch.setattr(agent, "_try_llm_chat", lambda *args, **kwargs: "현재 시장 상황 인식\n시장 신호 점수\n엉뚱한 답")
+    monkeypatch.setattr(agent, "_fallback_general_chat", lambda question, pack, history: "직접 답변 fallback")
+    monkeypatch.setenv("AGENT_CONSOLE_LLM_ENABLED", "0")
+
+    out = agent._compose_answer("왜 이렇게 답했어?", pack, history=[])
+
+    assert out == "직접 답변 fallback"
+
+
+def test_llm_primary_answer_survives_when_not_forbidden(monkeypatch, tmp_path):
+    _isolate(monkeypatch, tmp_path)
+
+    from agent_console import agent
+
+    pack = {
+        "surface": "market",
+        "sources": {"events": []},
+        "memory": [],
+        "portfolio": {"holdings": []},
+        "paper": {},
+        "models": {"items": []},
+        "market_snapshot": {"quotes": []},
+    }
+    monkeypatch.setattr(agent, "_try_llm_chat", lambda *args, **kwargs: "JP모건은 GS/MS/BAC/C와 비교해야 합니다.")
+
+    out = agent._compose_answer("JP모건 다른 IB랑 비교해줘", pack, history=[])
+
+    assert "JP모건" in out
+    assert "시장 신호 점수" not in out

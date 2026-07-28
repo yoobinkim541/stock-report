@@ -269,6 +269,7 @@ def _compose_error_fallback_answer(question: str, pack: dict, exc: Exception) ->
 
 
 def _compose_answer(question: str, pack: dict, history: list[dict] | None = None) -> str:
+    intent = _classify_question_intent(question, pack, history)
     resolved_question = _resolve_followup_question(question, history)
     if _is_trading_logic_question(question) or _is_trading_followup(question, history):
         return _compose_trading_logic_answer(question, pack)
@@ -286,15 +287,17 @@ def _compose_answer(question: str, pack: dict, history: list[dict] | None = None
     if _is_portfolio_overview_question(resolved_question, pack):
         return _compose_portfolio_overview_answer(resolved_question, pack, history)
     if not _is_market_context_question(resolved_question, pack):
-        return _compose_general_chat_answer(resolved_question, pack, history)
+        return _compose_general_chat_answer(resolved_question, pack, history, intent=intent)
 
-    return _compose_market_context_answer(resolved_question, pack, history)
+    return _compose_market_context_answer(resolved_question, pack, history, intent=intent)
 
 
-def _compose_market_context_answer(question: str, pack: dict, history: list[dict] | None = None) -> str:
+def _compose_market_context_answer(question: str, pack: dict, history: list[dict] | None = None,
+                                   intent: dict | None = None) -> str:
     llm_prompt = _build_market_context_prompt(question, pack)
     llm = _try_llm_chat(llm_prompt, pack, history)
-    if llm:
+    intent = intent or _classify_question_intent(question, pack, history)
+    if llm and not _violates_forbidden_templates(llm, intent):
         return llm
     return _compose_market_context_fallback(question, pack)
 
@@ -949,7 +952,7 @@ def _compose_domestic_market_answer(question: str, resolved_question: str, pack:
         *(event_lines or ["- 없음"]),
     ])
     llm = _try_llm_chat(llm_prompt, pack, history)
-    if llm:
+    if llm and not _violates_forbidden_templates(llm, _classify_question_intent(question, pack, history)):
         return llm
 
     lines = ["### 한국증시 요약", ""]
@@ -998,7 +1001,7 @@ def _compose_domestic_etf_answer(question: str, resolved_question: str, pack: di
         "이전 질문을 기억했다는 점을 반영해 한국어로 자연스럽게 답하세요."
     )
     llm = _try_llm_chat(llm_prompt, pack, history)
-    if llm:
+    if llm and not _violates_forbidden_templates(llm, _classify_question_intent(question, pack, history)):
         return llm
 
     previous = _last_user_question(history)
@@ -1039,7 +1042,7 @@ def _compose_asset_opinion_answer(question: str, pack: dict, history: list[dict]
         "조건부 판단, 확인할 가격/상대강도/리스크를 한국어로 짧게 답하세요."
     )
     llm = _try_llm_chat(llm_prompt, pack, history)
-    if llm:
+    if llm and not _violates_forbidden_templates(llm, _classify_question_intent(question, pack, history)):
         return llm
 
     ql = str(question or "").lower()
@@ -1114,9 +1117,11 @@ def _is_trading_followup(question: str, history: list[dict] | None) -> bool:
     return False
 
 
-def _compose_general_chat_answer(question: str, pack: dict, history: list[dict] | None = None) -> str:
+def _compose_general_chat_answer(question: str, pack: dict, history: list[dict] | None = None,
+                                 intent: dict | None = None) -> str:
     llm = _try_llm_chat(question, pack, history)
-    if llm:
+    intent = intent or _classify_question_intent(question, pack, history)
+    if llm and not _violates_forbidden_templates(llm, intent):
         return llm
     fallback = _fallback_general_chat(question, pack, history)
     if os.getenv("AGENT_CONSOLE_LLM_ENABLED", "1").lower() in {"0", "false", "no", "off"}:
@@ -1355,6 +1360,11 @@ def _intent_contract_lines(intent: dict) -> list[str]:
     if intent.get("name") == "stock_compare":
         lines.append("- 출력 형식: 피어 비교표를 먼저 제시하고, 표 아래에 핵심 차이와 확인한 최신 정보 시점을 씁니다.")
     return lines
+
+
+def _violates_forbidden_templates(text: str, intent: dict) -> bool:
+    body = str(text or "")
+    return any(template and template in body for template in intent.get("forbidden_templates") or [])
 
 
 def _try_llm_prompt(prompt: str, runner=subprocess.run, max_timeout: int | None = None) -> str | None:
