@@ -92,3 +92,13 @@ uv run python -m reports.source_wiki_curator --hours 48 --limit 8
 ```
 
 The production crontab runs it shortly after `reports/source_collector.py`, so newly collected source events become qmd-searchable wiki context without waiting for a chat autocuration pass.
+
+## Evidence/Wiki/Strategy Context
+
+AI 콘솔은 원문 소스, 위키 페이지, 실시간 시세, 모의투자 로그를 Evidence 기반 맥락으로 묶어 사용한다.
+
+- `reports.evidence_cards.EvidenceCard`는 원문과 raw payload를 보존한다.
+- `reports.source_wiki_curator`는 수집 이벤트를 EvidenceCard로 정규화한 뒤 source-backed wiki page를 만든다.
+- 질문 의도는 화면 맥락보다 사용자 최신 문장을 우선한다.
+- `stock_compare`, `meta_debug`, `technical_analysis`, `strategy_review`에서는 시장 상황 템플릿을 금지한다.
+- 단기투자 표본은 실거래 빈도 증가가 아니라 shadow decision과 outcome label로 먼저 축적한다.

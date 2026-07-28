@@ -213,6 +213,11 @@ def _record_to_page(record: dict) -> dict:
     summary = _clean(record.get("summary") or "", 2400)
     decisions = _dedupe_texts(record.get("decisions") or [], limit=8, item_limit=280)
     open_questions = _dedupe_texts(record.get("openQuestions") or [], limit=8, item_limit=280)
+    evidence_ids = _dedupe_texts(record.get("evidence_ids") or [], limit=100, item_limit=120)
+    conflicting_evidence_ids = _dedupe_texts(
+        record.get("conflicting_evidence_ids") or [], limit=100, item_limit=120
+    )
+    answer_hints = _dedupe_texts(record.get("answer_hints") or [], limit=12, item_limit=280)
     messages = record.get("messages") or []
     source = record.get("source") or {}
     body_parts = []
@@ -261,6 +266,10 @@ def _record_to_page(record: dict) -> dict:
         "backlinks": [],
         "decisions": decisions,
         "openQuestions": open_questions,
+        "evidence_ids": evidence_ids,
+        "conflicting_evidence_ids": conflicting_evidence_ids,
+        "staleness_policy": _clean(record.get("staleness_policy") or "", 120),
+        "answer_hints": answer_hints,
         "messages": messages,
         "feedback": record.get("feedback") or {},
         "snippet": summary[:260] if summary else "",
@@ -716,6 +725,18 @@ def _build_wiki_record(page: dict, *, existing: dict | None = None) -> dict:
 
     if existing is None:
         existing = get_page(page_id) or {}
+    evidence_ids = page.get("evidence_ids") if "evidence_ids" in page else existing.get("evidence_ids")
+    conflicting_evidence_ids = (
+        page.get("conflicting_evidence_ids")
+        if "conflicting_evidence_ids" in page
+        else existing.get("conflicting_evidence_ids")
+    )
+    answer_hints = page.get("answer_hints") if "answer_hints" in page else existing.get("answer_hints")
+    staleness_policy = (
+        page.get("staleness_policy")
+        if "staleness_policy" in page
+        else existing.get("staleness_policy")
+    )
     created_at = _clean(existing.get("created_at") or page.get("created_at") or _now(), 80)
     updated_at = _clean(page.get("updated_at") or _now(), 80)
     tags = _dedupe_texts([*([WIKI_TAG, surface, kind, status]), *(page.get("tags") or [])], limit=20, item_limit=60)
@@ -730,6 +751,12 @@ def _build_wiki_record(page: dict, *, existing: dict | None = None) -> dict:
         "messages": page.get("messages") or [],
         "decisions": _dedupe_texts(page.get("decisions") or [], limit=8, item_limit=280),
         "openQuestions": _dedupe_texts(page.get("openQuestions") or [], limit=8, item_limit=280),
+        "evidence_ids": _dedupe_texts(evidence_ids or [], limit=100, item_limit=120),
+        "conflicting_evidence_ids": _dedupe_texts(
+            conflicting_evidence_ids or [], limit=100, item_limit=120
+        ),
+        "staleness_policy": _clean(staleness_policy or "", 120),
+        "answer_hints": _dedupe_texts(answer_hints or [], limit=12, item_limit=280),
         "confidence": float(page.get("confidence") or existing.get("confidence") or 0.5),
         "createdAt": created_at,
         "updatedAt": updated_at,
@@ -1047,8 +1074,10 @@ def _title_lookup_for(page_ids: set[str]) -> dict[str, str]:
 
 
 def build_context_section(*, query: str = "", surface: str = WIKI_SURFACE, limit: int = 4,
-                          status: str = "all") -> str:
-    pages = list_pages(query=query, surface=surface, status=status, limit=limit)
+                          status: str = "all", pages: list[dict] | None = None) -> str:
+    pages = pages if isinstance(pages, list) else list_pages(
+        query=query, surface=surface, status=status, limit=limit
+    )
     if not pages:
         return ""
     related_ids = {
@@ -1082,6 +1111,17 @@ def build_context_section(*, query: str = "", surface: str = WIKI_SURFACE, limit
             lines.append(f"- 갱신: {page.get('updated_at')}")
         if page.get("source_refs"):
             lines.append(f"- 출처: {', '.join(page['source_refs'][:4])}")
+        evidence_count = len(page.get("evidence_ids") or [])
+        conflict_count = len(page.get("conflicting_evidence_ids") or [])
+        if evidence_count or conflict_count:
+            evidence_line = f"- 근거: {evidence_count}개"
+            if conflict_count:
+                evidence_line += f" (상충 {conflict_count}개)"
+            lines.append(evidence_line)
+        if page.get("staleness_policy"):
+            lines.append(f"- 갱신 정책: {page['staleness_policy']}")
+        for hint in (page.get("answer_hints") or [])[:2]:
+            lines.append(f"- 답변 힌트: {_clean(hint, 220)}")
         lines.append(f"- 검증: {page.get('verification_status', 'unverified')}")
         for warning in page.get("trust_warnings") or []:
             lines.append(f"- 주의: {warning}")

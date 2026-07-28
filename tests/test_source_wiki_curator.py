@@ -132,6 +132,44 @@ def test_build_wiki_pages_from_events_links_pages_sharing_events():
     assert by_id["source-ticker-nvda"]["links"] == ["source-topic-기술-ai"]
 
 
+def test_build_wiki_pages_from_events_attaches_evidence_metadata():
+    events = [
+        {
+            "source": "telegram:insidertracking",
+            "title": "AI 데이터센터 전력 수요 증가",
+            "url": "https://t.me/insidertracking/1",
+            "body_raw": "반도체와 데이터센터 전력 병목이 같이 언급됐다.",
+            "topic": "기술/AI",
+            "tags": ["기술/AI"],
+            "tickers": ["NVDA"],
+            "classification": {"kind": "community_signal", "topic": "기술/AI", "trust": "C"},
+        },
+        {
+            "source": "telegram:insidertracking",
+            "title": "AI CAPEX 과열 우려",
+            "url": "https://t.me/insidertracking/2",
+            "body_raw": "CAPEX 부담과 마진 둔화 가능성이 언급됐다.",
+            "topic": "기술/AI",
+            "tags": ["기술/AI"],
+            "tickers": ["NVDA"],
+            "classification": {"kind": "community_signal", "topic": "기술/AI", "trust": "C"},
+        },
+    ]
+
+    pages = swc.build_wiki_pages_from_events(events, now=datetime(2026, 7, 28, 10, 0, tzinfo=KST))
+    page = next(page for page in pages if page["id"] == "source-topic-기술-ai")
+
+    assert page["status"] == "draft"
+    assert page["confidence"] == 0.45
+    assert len(page["evidence_ids"]) == 2
+    assert page["conflicting_evidence_ids"] == []
+    assert page["staleness_policy"] == "refresh_after_12h"
+    assert page["answer_hints"] == [
+        "커뮤니티/텔레그램 단독 신호는 가격·수급·공식 자료와 교차확인 전에는 보조 근거로 둡니다.",
+        "최신성은 evidence freshness를 우선 확인합니다.",
+    ]
+
+
 def test_curate_recent_source_wiki_limit_zero_saves_all_groups(monkeypatch):
     """2026-07-25 회귀방지 — 소수 거시 주제가 이벤트 수에서 항상 상위권을 독점해,
     limit 캡이 있으면 종목별/유형별 신규 페이지가 영구히 저장되지 않는 문제가 있었음.

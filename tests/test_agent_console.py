@@ -174,6 +174,47 @@ def test_wiki_upsert_page_persists_links(monkeypatch, tmp_path):
     assert source["links"] == [target["id"]]
 
 
+def test_wiki_upsert_page_round_trips_evidence_metadata_and_renders_context(monkeypatch, tmp_path):
+    _isolate(monkeypatch, tmp_path)
+
+    from agent_console import wiki
+
+    saved = wiki.upsert_page({
+        "title": "AI CAPEX 근거 카드",
+        "summary": "AI CAPEX 수요와 비용을 함께 추적합니다.",
+        "body": "공식 자료와 가격 반응을 교차확인합니다.",
+        "surface": "market",
+        "kind": "source_digest",
+        "status": "reviewed",
+        "source_refs": ["https://example.com/ai-capex"],
+        "evidence_ids": ["evidence-demand", "evidence-cost"],
+        "conflicting_evidence_ids": ["evidence-margin-risk"],
+        "staleness_policy": "refresh_after_12h",
+        "answer_hints": [
+            "커뮤니티 단독 신호는 공식 자료와 교차확인합니다.",
+            "최신 evidence freshness를 먼저 확인합니다.",
+        ],
+    })
+
+    fetched = wiki.get_page(saved["id"])
+    section = wiki.build_context_section(
+        query="AI CAPEX",
+        surface="market",
+        pages=[fetched],
+    )
+
+    assert fetched["evidence_ids"] == ["evidence-demand", "evidence-cost"]
+    assert fetched["conflicting_evidence_ids"] == ["evidence-margin-risk"]
+    assert fetched["staleness_policy"] == "refresh_after_12h"
+    assert fetched["answer_hints"] == [
+        "커뮤니티 단독 신호는 공식 자료와 교차확인합니다.",
+        "최신 evidence freshness를 먼저 확인합니다.",
+    ]
+    assert "근거: 2개 (상충 1개)" in section
+    assert "갱신 정책: refresh_after_12h" in section
+    assert "답변 힌트: 커뮤니티 단독 신호는 공식 자료와 교차확인합니다." in section
+
+
 def test_wiki_get_page_and_list_pages_compute_backlinks(monkeypatch, tmp_path):
     _isolate(monkeypatch, tmp_path)
 
@@ -630,11 +671,11 @@ def test_agent_prompt_pins_peer_compare_intent_contract(monkeypatch, tmp_path):
     prompt = agent._build_general_chat_prompt("JP모건 다른 IB랑 비교해줘", pack, history=[])
 
     assert "[질문 의도]" in prompt
-    assert "intent: peer_compare" in prompt
+    assert "intent: stock_compare" in prompt
     assert "default_peers: JPM, GS, MS, BAC, C" in prompt
     assert "Yahoo Finance" in prompt
     assert "컨텍스트 부족은 답변 중단 조건이 아니라 검색 트리거" in prompt
-    assert "시장 템플릿 금지: 현재 시장 상황 인식, MIXED, 시장 신호 점수" in prompt
+    assert "시장 템플릿 금지: 현재 시장 상황 인식, MIXED, RISK-ON, 시장 신호 점수" in prompt
 
 
 def test_agent_prompt_pins_non_market_intents_and_forbidden_templates(monkeypatch, tmp_path):
@@ -656,9 +697,8 @@ def test_agent_prompt_pins_non_market_intents_and_forbidden_templates(monkeypatc
 
     technical = agent._build_general_chat_prompt("NVDA 기술적 분석만 해봐", base_pack, history=[])
     assert "intent: technical_analysis" in technical
-    assert "뉴스 제외" in technical
-    assert "거시 제외" in technical
     assert "가격·추세·거래량·지표만" in technical
+    assert "시장 템플릿 금지: 현재 시장 상황 인식, RISK-ON, 시장 신호 점수" in technical
 
     portfolio_pack = {**base_pack, "surface": "portfolio", "portfolio": {"holdings": [{"ticker": "LLY", "weight": 12.5, "ret": 4.2}]}}
     portfolio = agent._build_general_chat_prompt("내 포트 평가해줘", portfolio_pack, history=[])
@@ -2383,3 +2423,290 @@ def test_wiki_lint_missing_cross_ref_suggests_merge(monkeypatch, tmp_path):
     cross_ref_issues = [issue for issue in result["issues"] if issue["code"] == "missing_cross_ref"]
     assert len(cross_ref_issues) == 1
     assert cross_ref_issues[0]["suggested"] == "merge"
+
+
+def test_evidence_context_usage_summary_counts_real_sources(monkeypatch, tmp_path):
+    _isolate(monkeypatch, tmp_path)
+
+    from agent_console.evidence_context import build_usage_summary, format_usage_lines
+
+    pack = {
+        "sources": {"events": [{"title": "a"}, {"title": "b"}]},
+        "memory": [{"title": "m"}],
+        "market_snapshot": {"quotes": [{"symbol": "QQQ"}, {"symbol": "NVDA"}], "status": "ok"},
+        "paper": {"kr": {"decisions": [{"id": 1}, {"id": 2}, {"id": 3}]}},
+    }
+    summary = build_usage_summary(
+        pack,
+        wiki_pages=[{"id": "w1"}, {"id": "w2"}],
+        intent={"name": "market_analysis"},
+    )
+
+    assert summary == {
+        "intent": "market_analysis",
+        "events": 2,
+        "wiki": 2,
+        "realtime": 2,
+        "logs": 3,
+        "engine": "pending",
+        "retrieval": {"quote": "ok", "news": "ok", "broker": "unavailable"},
+    }
+    assert format_usage_lines(summary) == [
+        "맥락: 시장 events 2 / wiki 2 / 실시간 2 / 로그 3",
+        "엔진: pending",
+        "수집: quote ok, news ok, broker unavailable",
+    ]
+
+
+def test_answer_context_exposes_intent_and_evidence_usage(monkeypatch, tmp_path):
+    _isolate(monkeypatch, tmp_path)
+
+    from agent_console import agent
+
+    monkeypatch.setattr(agent, "_safe_context_pack", lambda surface: {
+        "surface": surface,
+        "sources": {"events": [{"title": "시장 뉴스"}], "source_counts": [], "symbol_counts": []},
+        "memory": [],
+        "shared_memory": {"recordCount": 0},
+        "market_snapshot": {"quotes": [{"symbol": "QQQ"}], "status": "ok"},
+        "paper": {"kr": {"decisions": [{"id": "d1"}]}},
+        "portfolio": {"holdings": []},
+        "ml_activity": [],
+        "focus": [],
+    })
+    monkeypatch.setattr(agent, "_safe_list_conversation", lambda limit, surface: [])
+    monkeypatch.setattr(agent, "_safe_add_conversation", lambda *args, **kwargs: None)
+    monkeypatch.setattr(agent, "_postprocess_chat", lambda *args, **kwargs: {"wiki_autocurate": "disabled"})
+    wiki_pages = [
+        {"id": "w1", "title": "첫 번째 위키", "surface": "market", "kind": "note", "status": "draft"},
+        {"id": "w2", "title": "두 번째 위키", "surface": "market", "kind": "note", "status": "draft"},
+    ]
+    calls = []
+    monkeypatch.setattr(agent.wiki, "list_pages", lambda **kwargs: calls.append(kwargs) or wiki_pages)
+
+    def fake_compose(question, pack, history=None):
+        prompt = agent._build_general_chat_prompt(question, pack, history)
+        assert "첫 번째 위키" in prompt
+        return "한국 시장은 수급 확인이 필요합니다."
+
+    monkeypatch.setattr(agent, "_compose_answer", fake_compose)
+
+    result = agent.answer("한국증시는 어땠어", "market")
+
+    assert result["context"]["intent"] == "market_analysis"
+    assert result["context"]["evidence_usage"]["events"] == 1
+    assert result["context"]["evidence_usage"]["wiki"] == 2
+    assert result["context"]["evidence_usage"]["realtime"] == 1
+    assert result["context"]["evidence_usage_lines"][0] == "맥락: 시장 events 1 / wiki 2 / 실시간 1 / 로그 1"
+    assert len(calls) == 1
+
+
+def test_intent_names_match_evidence_strategy_spec(monkeypatch, tmp_path):
+    _isolate(monkeypatch, tmp_path)
+
+    from agent_console import agent
+
+    assert agent._classify_question_intent("왜 이렇게 답했어?")["name"] == "meta_debug"
+    assert agent._classify_question_intent("JP모건 다른 IB랑 비교해줘")["name"] == "stock_compare"
+    assert agent._classify_question_intent("한국증시는 어땠어")["name"] == "market_analysis"
+    assert agent._classify_question_intent("단기투자 실적이 안좋은 이유가 뭘까")["name"] == "strategy_review"
+    assert agent._classify_question_intent("지금 수급이랑 코스피 선물 확인해줘")["name"] == "live_market_check"
+    assert agent._classify_question_intent("LLM wiki에 뭐가 쌓였어")["name"] == "wiki_lookup"
+
+
+def test_earnings_questions_do_not_route_to_strategy_review(monkeypatch, tmp_path):
+    _isolate(monkeypatch, tmp_path)
+
+    from agent_console import agent
+
+    assert agent._classify_question_intent("JP모건 실적을 다른 IB랑 비교해줘")["name"] == "stock_compare"
+    assert agent._classify_question_intent("삼성전자 실적 어땠어")["name"] == "ticker_research"
+
+
+def test_special_intents_are_authoritative_in_the_llm_prompt(monkeypatch, tmp_path):
+    _isolate(monkeypatch, tmp_path)
+
+    from agent_console import agent
+
+    pack = {
+        "surface": "market",
+        "sources": {"events": []},
+        "memory": [],
+        "portfolio": {"holdings": []},
+        "paper": {},
+        "models": {"items": []},
+        "market_snapshot": {"quotes": []},
+    }
+    prompts = []
+    monkeypatch.setattr(
+        agent,
+        "_try_llm_prompt",
+        lambda prompt, **kwargs: prompts.append(prompt) or "질문 의도에 맞춘 답변",
+    )
+
+    cases = [
+        ("QQQ 기술적 분석해줘", "technical_analysis"),
+        ("지금 수급이랑 코스피 선물 확인해줘", "live_market_check"),
+        ("JP모건 실적을 다른 IB랑 비교해줘", "stock_compare"),
+    ]
+    for question, expected_intent in cases:
+        prompts.clear()
+        assert agent._compose_answer(question, pack, history=[]) == "질문 의도에 맞춘 답변"
+        assert len(prompts) == 1
+        assert f"intent: {expected_intent}" in prompts[0]
+
+
+def test_strategy_review_contract_precedes_asset_opinion(monkeypatch, tmp_path):
+    _isolate(monkeypatch, tmp_path)
+
+    from agent_console import agent
+
+    pack = {
+        "surface": "market",
+        "sources": {"events": []},
+        "memory": [],
+        "portfolio": {"holdings": []},
+        "paper": {},
+        "models": {"items": []},
+        "market_snapshot": {"quotes": []},
+    }
+    prompts = []
+    monkeypatch.setattr(
+        agent,
+        "_try_llm_prompt",
+        lambda prompt, **kwargs: prompts.append(prompt) or "전략 검토 답변",
+    )
+    monkeypatch.setattr(
+        agent,
+        "_compose_asset_opinion_answer",
+        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("asset opinion route used")),
+    )
+
+    assert agent._compose_answer("QQQ 매매 전략 검토해줘", pack, history=[]) == "전략 검토 답변"
+    assert len(prompts) == 1
+    assert "intent: strategy_review" in prompts[0]
+
+
+def test_strategy_logic_questions_keep_dedicated_rules_composer(monkeypatch, tmp_path):
+    _isolate(monkeypatch, tmp_path)
+
+    from agent_console import agent
+
+    monkeypatch.setattr(agent, "_compose_trading_logic_answer", lambda *args, **kwargs: "rules strategy report")
+    monkeypatch.setattr(
+        agent,
+        "_compose_general_chat_answer",
+        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("general strategy route used")),
+    )
+
+    assert agent._compose_answer("모의투자 단기투자 로직 평가해줘", {}, history=[]) == "rules strategy report"
+
+
+def test_stock_compare_contract_forbids_market_template_and_sets_peers(monkeypatch, tmp_path):
+    _isolate(monkeypatch, tmp_path)
+
+    from agent_console import agent
+
+    intent = agent._classify_question_intent("JP모건 다른 IB랑 비교해줘")
+    lines = "\n".join(agent._intent_contract_lines(intent))
+
+    assert intent["subject"] == "JPM"
+    assert intent["default_peers"] == ["JPM", "GS", "MS", "BAC", "C"]
+    assert "Yahoo Finance 최신 시세" in lines
+    assert "현재 시장 상황 인식" in lines
+    assert "시장 신호 점수" in lines
+    assert "피어 비교표" in lines
+
+
+def test_forbidden_template_contract_allows_exclusion_wording_but_blocks_risk_on(monkeypatch, tmp_path):
+    _isolate(monkeypatch, tmp_path)
+
+    from agent_console import agent
+
+    technical = agent._classify_question_intent("QQQ 기술적 분석해줘")
+    assert agent._violates_forbidden_templates(
+        "뉴스 제외하고 가격과 거래량만 보겠습니다.",
+        technical,
+    ) is False
+
+    for question in (
+        "QQQ 기술적 분석해줘",
+        "JP모건 다른 IB랑 비교해줘",
+        "왜 이렇게 답했어?",
+    ):
+        intent = agent._classify_question_intent(question)
+        assert agent._violates_forbidden_templates("현재는 RISK-ON 구간입니다.", intent) is True
+
+
+def test_general_llm_answer_rejects_forbidden_market_template(monkeypatch, tmp_path):
+    _isolate(monkeypatch, tmp_path)
+
+    from agent_console import agent
+
+    pack = {
+        "surface": "market",
+        "sources": {"events": []},
+        "memory": [],
+        "portfolio": {"holdings": []},
+        "paper": {},
+        "models": {"items": []},
+        "market_snapshot": {"quotes": []},
+    }
+    monkeypatch.setattr(agent, "_try_llm_chat", lambda *args, **kwargs: "현재 시장 상황 인식\n시장 신호 점수\n엉뚱한 답")
+    monkeypatch.setattr(agent, "_fallback_general_chat", lambda question, pack, history: "직접 답변 fallback")
+    monkeypatch.setenv("AGENT_CONSOLE_LLM_ENABLED", "0")
+
+    out = agent._compose_answer("왜 이렇게 답했어?", pack, history=[])
+
+    assert out == "직접 답변 fallback"
+
+
+def test_answer_reports_rules_engine_when_llm_output_is_rejected(monkeypatch, tmp_path):
+    _isolate(monkeypatch, tmp_path)
+
+    from agent_console import agent
+
+    monkeypatch.setattr(agent, "_safe_context_pack", lambda surface: {
+        **agent._fallback_context_pack(surface),
+        "context_error": "",
+    })
+    monkeypatch.setattr(agent, "_safe_list_conversation", lambda limit, surface: [])
+    monkeypatch.setattr(agent, "_safe_add_conversation", lambda *args, **kwargs: None)
+    monkeypatch.setattr(agent, "_postprocess_chat", lambda *args, **kwargs: {"wiki_autocurate": "disabled"})
+    monkeypatch.setattr(agent.wiki, "list_pages", lambda **kwargs: [])
+
+    def rejected_llm(*args, **kwargs):
+        agent._mark_llm_engine("codex")
+        return "현재 시장 상황 인식\nRISK-ON\n시장 신호 점수"
+
+    monkeypatch.setattr(agent, "_try_llm_chat", rejected_llm)
+    monkeypatch.setattr(agent, "_fallback_general_chat", lambda *args, **kwargs: "직접 답변 fallback")
+
+    result = agent.answer("왜 이렇게 답했어?", "market")
+
+    assert result["answer"] == "직접 답변 fallback"
+    assert result["context"]["engine"] == "local-rules"
+    assert result["context"]["fallback_reason"] == "forbidden_template"
+    assert result["context"]["evidence_usage"]["fallback_reason"] == "forbidden_template"
+
+
+def test_llm_primary_answer_survives_when_not_forbidden(monkeypatch, tmp_path):
+    _isolate(monkeypatch, tmp_path)
+
+    from agent_console import agent
+
+    pack = {
+        "surface": "market",
+        "sources": {"events": []},
+        "memory": [],
+        "portfolio": {"holdings": []},
+        "paper": {},
+        "models": {"items": []},
+        "market_snapshot": {"quotes": []},
+    }
+    expected = "고유 LLM 응답: JP모건은 GS/MS/BAC/C와 비교해야 합니다."
+    monkeypatch.setattr(agent, "_try_llm_chat", lambda *args, **kwargs: expected)
+
+    out = agent._compose_answer("JP모건 다른 IB랑 비교해줘", pack, history=[])
+
+    assert out == expected

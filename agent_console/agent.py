@@ -9,7 +9,7 @@ import subprocess
 import tempfile
 import threading
 
-from . import context, realtime_market, shared_memory, storage, wiki
+from . import context, evidence_context, realtime_market, shared_memory, storage, wiki
 
 _KST = timezone(timedelta(hours=9))
 
@@ -117,12 +117,27 @@ def answer(question: str, surface: str = "market", *, async_postprocess: bool = 
     history = _safe_list_conversation(limit=12, surface=surface)
     _safe_add_conversation("user", question, surface)
     pack = _safe_context_pack(surface)
+    try:
+        wiki_pages = wiki.list_pages(query=question, surface=surface, limit=4)
+    except Exception:
+        wiki_pages = []
+    pack["_wiki_context_pages"] = wiki_pages
     _reset_llm_engine()
     try:
         response = _compose_answer(question, pack, history=history)
     except Exception as exc:
+        _mark_rules_fallback("compose_error")
         response = _compose_error_fallback_answer(question, pack, exc)
     engine = _LAST_LLM_ENGINE or "local-rules"
+    fallback_reason = _LAST_FALLBACK_REASON
+    intent = _classify_question_intent(question, pack, history)
+    evidence_usage = evidence_context.build_usage_summary(
+        pack,
+        wiki_pages=wiki_pages,
+        intent=intent,
+        engine=engine,
+        fallback_reason=fallback_reason,
+    )
     response = _humanize_generic_fallback(question, surface, history, response)
     _safe_add_conversation("assistant", response, surface)
     postprocess = _postprocess_chat(question, response, surface, pack, history, async_mode=async_postprocess)
@@ -134,6 +149,10 @@ def answer(question: str, surface: str = "market", *, async_postprocess: bool = 
         "surface": surface,
         "context": {
             "engine": engine,
+            "fallback_reason": fallback_reason,
+            "intent": intent.get("name"),
+            "evidence_usage": evidence_usage,
+            "evidence_usage_lines": evidence_context.format_usage_lines(evidence_usage),
             "event_count": len(sources.get("events") or []),
             "memory_count": len(pack.get("memory") or []),
             "shared_memory_count": (pack.get("shared_memory") or {}).get("recordCount", 0),
@@ -257,9 +276,20 @@ def _compose_error_fallback_answer(question: str, pack: dict, exc: Exception) ->
 
 
 def _compose_answer(question: str, pack: dict, history: list[dict] | None = None) -> str:
+    intent = _classify_question_intent(question, pack, history)
     resolved_question = _resolve_followup_question(question, history)
+    if intent.get("name") in {
+        "technical_analysis",
+        "live_market_check",
+        "stock_compare",
+        "wiki_lookup",
+        "meta_debug",
+    }:
+        return _compose_general_chat_answer(question, pack, history, intent=intent)
     if _is_trading_logic_question(question) or _is_trading_followup(question, history):
         return _compose_trading_logic_answer(question, pack)
+    if intent.get("name") == "strategy_review":
+        return _compose_general_chat_answer(question, pack, history, intent=intent)
     if _is_portfolio_preference_question(question, pack, history):
         return _compose_portfolio_preference_answer(question, pack, history)
     if _is_portfolio_risk_question(resolved_question, pack):
@@ -274,15 +304,17 @@ def _compose_answer(question: str, pack: dict, history: list[dict] | None = None
     if _is_portfolio_overview_question(resolved_question, pack):
         return _compose_portfolio_overview_answer(resolved_question, pack, history)
     if not _is_market_context_question(resolved_question, pack):
-        return _compose_general_chat_answer(resolved_question, pack, history)
+        return _compose_general_chat_answer(resolved_question, pack, history, intent=intent)
 
-    return _compose_market_context_answer(resolved_question, pack, history)
+    return _compose_market_context_answer(resolved_question, pack, history, intent=intent)
 
 
-def _compose_market_context_answer(question: str, pack: dict, history: list[dict] | None = None) -> str:
+def _compose_market_context_answer(question: str, pack: dict, history: list[dict] | None = None,
+                                   intent: dict | None = None) -> str:
     llm_prompt = _build_market_context_prompt(question, pack)
     llm = _try_llm_chat(llm_prompt, pack, history)
-    if llm:
+    intent = intent or _classify_question_intent(question, pack, history)
+    if _accept_llm_response(llm, intent):
         return llm
     return _compose_market_context_fallback(question, pack)
 
@@ -873,7 +905,7 @@ def _extract_asset_symbol(question: str) -> tuple[str, str] | None:
     except Exception:
         pass
     intent_words = (
-        "어때", "어떰", "어떠", "top", "탑", "티어", "매수", "진입", "목표",
+        "어때", "어땠", "어떰", "어떠", "top", "탑", "티어", "매수", "진입", "목표",
         "가냐", "가능", "전망", "보유", "팔", "살", "+", "롱", "숏",
     )
     if not any(word in ql for word in intent_words):
@@ -937,7 +969,7 @@ def _compose_domestic_market_answer(question: str, resolved_question: str, pack:
         *(event_lines or ["- 없음"]),
     ])
     llm = _try_llm_chat(llm_prompt, pack, history)
-    if llm:
+    if _accept_llm_response(llm, _classify_question_intent(question, pack, history)):
         return llm
 
     lines = ["### 한국증시 요약", ""]
@@ -986,7 +1018,7 @@ def _compose_domestic_etf_answer(question: str, resolved_question: str, pack: di
         "이전 질문을 기억했다는 점을 반영해 한국어로 자연스럽게 답하세요."
     )
     llm = _try_llm_chat(llm_prompt, pack, history)
-    if llm:
+    if _accept_llm_response(llm, _classify_question_intent(question, pack, history)):
         return llm
 
     previous = _last_user_question(history)
@@ -1027,7 +1059,7 @@ def _compose_asset_opinion_answer(question: str, pack: dict, history: list[dict]
         "조건부 판단, 확인할 가격/상대강도/리스크를 한국어로 짧게 답하세요."
     )
     llm = _try_llm_chat(llm_prompt, pack, history)
-    if llm:
+    if _accept_llm_response(llm, _classify_question_intent(question, pack, history)):
         return llm
 
     ql = str(question or "").lower()
@@ -1102,12 +1134,14 @@ def _is_trading_followup(question: str, history: list[dict] | None) -> bool:
     return False
 
 
-def _compose_general_chat_answer(question: str, pack: dict, history: list[dict] | None = None) -> str:
+def _compose_general_chat_answer(question: str, pack: dict, history: list[dict] | None = None,
+                                 intent: dict | None = None) -> str:
     llm = _try_llm_chat(question, pack, history)
-    if llm:
+    intent = intent or _classify_question_intent(question, pack, history)
+    if _accept_llm_response(llm, intent):
         return llm
     fallback = _fallback_general_chat(question, pack, history)
-    if os.getenv("AGENT_CONSOLE_LLM_ENABLED", "1").lower() in {"0", "false", "no", "off"}:
+    if _LAST_FALLBACK_REASON in {"llm_disabled", "forbidden_template"}:
         return fallback
     return (fallback + "\n\n⚠️ LLM 엔진(codex→hermes→agy) 응답을 받지 못해 규칙 기반 폴백으로 답했습니다. "
             "서버에서 `codex --version`·`hermes --version`·API 크레딧/모델 설정을 확인해 주세요.")
@@ -1116,16 +1150,25 @@ def _compose_general_chat_answer(question: str, pack: dict, history: list[dict] 
 # 마지막 답변을 만든 엔진 (codex/hermes/agy — LLM 미개입이면 None=local-rules).
 # answer() 가 매 호출 초기화 후 context.engine 으로 노출 → UI 가 정직하게 표기.
 _LAST_LLM_ENGINE: str | None = None
+_LAST_FALLBACK_REASON: str | None = None
 
 
 def _mark_llm_engine(name: str) -> None:
-    global _LAST_LLM_ENGINE
+    global _LAST_LLM_ENGINE, _LAST_FALLBACK_REASON
     _LAST_LLM_ENGINE = name
+    _LAST_FALLBACK_REASON = None
+
+
+def _mark_rules_fallback(reason: str) -> None:
+    global _LAST_LLM_ENGINE, _LAST_FALLBACK_REASON
+    _LAST_LLM_ENGINE = None
+    _LAST_FALLBACK_REASON = str(reason or "rules_fallback")
 
 
 def _reset_llm_engine() -> None:
-    global _LAST_LLM_ENGINE
+    global _LAST_LLM_ENGINE, _LAST_FALLBACK_REASON
     _LAST_LLM_ENGINE = None
+    _LAST_FALLBACK_REASON = None
 
 
 def _try_llm_chat(question: str, pack: dict, history: list[dict] | None = None,
@@ -1169,6 +1212,26 @@ def _looks_like_technical_analysis(ql: str) -> bool:
     return any(word in ql for word in ("기술적 분석", "기술 분석", "차트만", "기술적", "보조지표", "이동평균"))
 
 
+def _looks_like_strategy_review(ql: str) -> bool:
+    return any(word in ql for word in (
+        "단기투자",
+        "모의투자",
+        "데이트레이딩",
+        "매매 전략",
+        "전략 로직",
+        "shadow decision",
+        "riskgovernor",
+    ))
+
+
+def _looks_like_live_market_check(ql: str) -> bool:
+    return any(word in ql for word in ("지금 수급", "코스피 선물", "상승 하락 종목", "상승/하락", "장중", "실시간 시장", "현재 수급"))
+
+
+def _looks_like_wiki_lookup(ql: str) -> bool:
+    return any(word in ql for word in ("wiki", "위키", "지식 카드", "쌓였", "근거 카드"))
+
+
 def _looks_like_peer_compare(ql: str) -> bool:
     compare_words = ("비교", "피어", "peer", "동종", "다른", "경쟁사", "같은 업종")
     domain_words = ("ib", "은행", "증권", "금융", "회사", "종목")
@@ -1209,10 +1272,10 @@ def _classify_question_intent(question: str, pack: dict | None = None,
 
     if _looks_like_meta_question(ql):
         return _intent_contract(
-            "meta",
+            "meta_debug",
             answer_style="왜 그렇게 답했는지, 무엇을 고치면 되는지 설명",
             required_steps=["직전 답변의 라우팅/컨텍스트/도구 사용 문제를 먼저 설명", "투자 시장 템플릿으로 전환하지 않음"],
-            forbidden_templates=["현재 시장 상황 인식", "MIXED", "시장 신호 점수"],
+            forbidden_templates=["현재 시장 상황 인식", "MIXED", "RISK-ON", "시장 신호 점수"],
         )
     if _looks_like_technical_analysis(ql):
         return _intent_contract(
@@ -1220,12 +1283,20 @@ def _classify_question_intent(question: str, pack: dict | None = None,
             answer_style="가격·추세·거래량·지표만 사용한 기술적 분석",
             required_steps=["가격 구조 확인", "이동평균/상대강도/거래량 확인", "진입·무효화 조건 분리"],
             retrieval_plan=["가격 히스토리", "거래량", "이동평균/RSI/MACD 등 차트 지표"],
-            forbidden_templates=["뉴스 제외", "거시 제외", "재무제표 제외", "현재 시장 상황 인식", "시장 신호 점수"],
+            forbidden_templates=["현재 시장 상황 인식", "RISK-ON", "시장 신호 점수"],
+        )
+    if _looks_like_live_market_check(ql):
+        return _intent_contract(
+            "live_market_check",
+            answer_style="장중 시세·수급·선물·시장폭 freshness를 먼저 확인",
+            required_steps=["실시간 스냅샷 확인", "수급/선물/시장폭 가능 여부 표시", "데이터 unavailable을 결론과 분리"],
+            retrieval_plan=["market_snapshot", "broker/KRX 수급", "KOSPI200 선물", "상승/하락 종목 수", "USD/KRW"],
+            forbidden_templates=["현재 시장 상황 인식", "시장 신호 점수"],
         )
     if _looks_like_peer_compare(ql):
         subject, peers = _peer_compare_subject_and_peers(q)
         return _intent_contract(
-            "peer_compare",
+            "stock_compare",
             answer_style="동종사 비교표 + 핵심 차이 + 최근 데이터 기준 해석",
             subject=subject,
             default_peers=peers,
@@ -1240,7 +1311,23 @@ def _classify_question_intent(question: str, pack: dict | None = None,
                 "웹 검색으로 최신 뉴스와 이벤트 확인",
                 "가능하면 SEC/공시 원문으로 재무제표 교차확인",
             ],
+            forbidden_templates=["현재 시장 상황 인식", "MIXED", "RISK-ON", "시장 신호 점수"],
+        )
+    if _looks_like_strategy_review(ql):
+        return _intent_contract(
+            "strategy_review",
+            answer_style="모의투자 로그, signal decision, outcome label, 비용/슬리피지 기반 개선 분석",
+            required_steps=["모의투자 로그 확인", "결정 시점 feature와 outcome 분리", "비용/슬리피지 반영", "개선 가설 제시"],
+            retrieval_plan=["kr/us mock ledger", "DecisionSnapshot", "OutcomeLabel", "RiskGovernor 경고"],
             forbidden_templates=["현재 시장 상황 인식", "MIXED", "시장 신호 점수"],
+        )
+    if _looks_like_wiki_lookup(ql):
+        return _intent_contract(
+            "wiki_lookup",
+            answer_style="위키/근거 카드 현황과 검증 상태를 요약",
+            required_steps=["source-backed와 unverified 분리", "stale 위키 표시", "원문 출처 링크 우선"],
+            retrieval_plan=["LLM wiki", "source wiki", "QMD local search"],
+            forbidden_templates=["현재 시장 상황 인식", "시장 신호 점수"],
         )
     if _looks_like_portfolio_review(ql, surface):
         return _intent_contract(
@@ -1252,7 +1339,7 @@ def _classify_question_intent(question: str, pack: dict | None = None,
         )
     if _looks_like_market_brief(ql):
         return _intent_contract(
-            "market_brief",
+            "market_analysis",
             answer_style="오늘 시장 흐름, 뉴스, 지표, 섹터, 리스크를 종합",
             required_steps=["최신 뉴스/지수/금리/유가/달러 흐름 확인", "시장 신호와 리스크 요약", "포트폴리오 영향은 별도 분리"],
             retrieval_plan=["웹 검색 최신 시장 뉴스", "주요 지수/금리/유가/달러", "최근 수집 이벤트와 리포트"],
@@ -1304,9 +1391,26 @@ def _intent_contract_lines(intent: dict) -> list[str]:
     if forbidden:
         lines.append("- 시장 템플릿 금지: " + ", ".join(forbidden))
     lines.append("- 답변 중단 가능 조건: " + ", ".join(intent.get("stop_conditions") or _INTENT_STOP_CONDITIONS))
-    if intent.get("name") == "peer_compare":
+    if intent.get("name") == "stock_compare":
         lines.append("- 출력 형식: 피어 비교표를 먼저 제시하고, 표 아래에 핵심 차이와 확인한 최신 정보 시점을 씁니다.")
     return lines
+
+
+def _violates_forbidden_templates(text: str, intent: dict) -> bool:
+    body = str(text or "")
+    return any(template and template in body for template in intent.get("forbidden_templates") or [])
+
+
+def _accept_llm_response(text: str | None, intent: dict) -> bool:
+    if text and not _violates_forbidden_templates(text, intent):
+        return True
+    if text:
+        _mark_rules_fallback("forbidden_template")
+    elif os.getenv("AGENT_CONSOLE_LLM_ENABLED", "1").lower() in {"0", "false", "no", "off"}:
+        _mark_rules_fallback("llm_disabled")
+    else:
+        _mark_rules_fallback("llm_unavailable")
+    return False
 
 
 def _try_llm_prompt(prompt: str, runner=subprocess.run, max_timeout: int | None = None) -> str | None:
@@ -1517,6 +1621,7 @@ def _build_general_chat_prompt(question: str, pack: dict, history: list[dict] | 
             query=question,
             surface=pack.get("surface") or "market",
             limit=4,
+            pages=pack.get("_wiki_context_pages"),
         )
     except Exception:
         wiki_section = ""
@@ -1619,6 +1724,14 @@ def _compact_paper_context(pack: dict) -> list[str]:
     if ml_rows:
         counts = Counter(row.get("_file", "unknown") for row in ml_rows)
         lines.append("- ML 원장 " + ", ".join(f"{name} {cnt}건" for name, cnt in counts.most_common(4)))
+    experiments = pack.get("strategy_experiments") or {}
+    if experiments.get("ok"):
+        lines.append(
+            "- 전략 실험 "
+            f"shadow decisions {experiments.get('recent_decisions', 0)}건 · "
+            f"outcome labels {experiments.get('recent_labels', 0)}건 · "
+            f"risk {experiments.get('risk_action', 'observe')}"
+        )
     return lines
 
 
