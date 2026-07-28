@@ -109,3 +109,55 @@ def test_label_shadow_decision_rejects_malformed_decision():
 
     with pytest.raises(ValueError, match="long.*short"):
         label_shadow_decision(decision, [{"minute": 0, "price": 70000}])
+
+
+def test_label_shadow_decision_marks_null_horizon_price_pending():
+    decision = DecisionSnapshot(
+        id="d4",
+        timestamp="2026-07-28T09:00:00+09:00",
+        symbol="005930",
+        session_phase="open",
+        features={"price": 70000},
+        signals={},
+        decision="long",
+        position_context={},
+        expected_edge=0.004,
+        risk_budget=0.01,
+        cost_estimate=0.001,
+    )
+
+    labels = label_shadow_decision(
+        decision,
+        [{"minute": 0, "price": 70000}, {"minute": 5, "price": None}],
+        horizons=(5,),
+    )
+
+    assert len(labels) == 1
+    assert labels[0].quality_label == "pending"
+    assert labels[0].pending_reason == "missing_price"
+
+
+def test_label_shadow_decision_marks_missing_entry_price_pending():
+    decision = DecisionSnapshot(
+        id="d5",
+        timestamp="2026-07-28T09:00:00+09:00",
+        symbol="005930",
+        session_phase="open",
+        features={},
+        signals={},
+        decision="long",
+        position_context={},
+        expected_edge=0.004,
+        risk_budget=0.01,
+        cost_estimate=0.001,
+    )
+
+    labels = label_shadow_decision(
+        decision,
+        [{"minute": 0, "price": None}, {"minute": 5, "price": 70400}],
+        horizons=(5, 15),
+    )
+
+    assert [label.horizon for label in labels] == ["5m", "15m"]
+    assert all(label.quality_label == "pending" for label in labels)
+    assert all(label.pending_reason == "missing_entry_price" for label in labels)

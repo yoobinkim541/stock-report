@@ -41,43 +41,63 @@ class OutcomeLabel:
         return asdict(self)
 
 
+def _as_price(value: Any) -> float | None:
+    try:
+        price = float(value)
+    except (TypeError, ValueError):
+        return None
+    return price if price > 0 else None
+
+
 def _price_at(prices: list[dict], minute: int) -> float | None:
     for row in prices:
         if int(row.get("minute", -1)) == minute:
-            return float(row.get("price"))
+            price = _as_price(row.get("price"))
+            if price is not None:
+                return price
     return None
 
 
 def _path_returns(entry: float, prices: list[dict], horizon: int) -> list[float]:
     rows = [row for row in prices if int(row.get("minute", -1)) <= horizon]
-    return [(float(row.get("price")) / entry) - 1 for row in rows if row.get("price") is not None]
+    returns: list[float] = []
+    for row in rows:
+        price = _as_price(row.get("price"))
+        if price is not None:
+            returns.append((price / entry) - 1)
+    return returns
+
+
+def _pending_labels(decision: DecisionSnapshot, horizons: tuple[int, ...],
+                    reason: str) -> list[OutcomeLabel]:
+    return [OutcomeLabel(
+        decision_id=decision.id,
+        horizon=f"{horizon}m",
+        realized_return=0.0,
+        max_adverse_excursion=0.0,
+        max_favorable_excursion=0.0,
+        slippage=0.0,
+        fees=0.0,
+        stop_hit=False,
+        take_profit_hit=False,
+        quality_label="pending",
+        pending_reason=reason,
+    ) for horizon in horizons]
 
 
 def label_shadow_decision(decision: DecisionSnapshot, prices: list[dict], *,
                           horizons: tuple[int, ...] = (5, 15, 30)) -> list[OutcomeLabel]:
     if decision.decision not in {"long", "short"}:
         raise ValueError("decision must be 'long' or 'short'")
-    entry = float(decision.features.get("price") or _price_at(prices, 0) or 0.0)
-    if entry <= 0:
-        return []
+    entry = _as_price(decision.features.get("price")) or _price_at(prices, 0)
+    if entry is None:
+        return _pending_labels(decision, horizons, "missing_entry_price")
     labels: list[OutcomeLabel] = []
     side = -1.0 if decision.decision == "short" else 1.0
     for horizon in horizons:
         exit_price = _price_at(prices, horizon)
         if exit_price is None:
-            labels.append(OutcomeLabel(
-                decision_id=decision.id,
-                horizon=f"{horizon}m",
-                realized_return=0.0,
-                max_adverse_excursion=0.0,
-                max_favorable_excursion=0.0,
-                slippage=0.0,
-                fees=0.0,
-                stop_hit=False,
-                take_profit_hit=False,
-                quality_label="pending",
-                pending_reason="missing_price",
-            ))
+            labels.extend(_pending_labels(decision, (horizon,), "missing_price"))
             continue
         gross = ((float(exit_price) / entry) - 1) * side
         net = gross - float(decision.cost_estimate or 0.0)
