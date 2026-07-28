@@ -82,6 +82,37 @@ def test_context_pack_empty(monkeypatch, tmp_path):
     assert pack["shared_memory"]["ok"] is True
 
 
+def test_context_pack_exposes_prediction_market_summary(monkeypatch, tmp_path):
+    _isolate(monkeypatch, tmp_path)
+
+    from agent_console import context
+
+    row = {
+        "source": "polymarket",
+        "title": "Will the Fed cut rates in September?: Yes 63.0%",
+        "url": "https://polymarket.com/event/fed-decision-september",
+        "collected_at": "2026-07-28T10:00:00+09:00",
+        "metrics": {
+            "yes_probability": 0.63,
+            "volume": 640000.0,
+            "liquidity": 18000.0,
+            "open_interest": 70000.0,
+            "end_date": "2026-09-16T00:00:00Z",
+        },
+        "classification": {"topic": "Fed", "kind": "prediction_market"},
+    }
+    monkeypatch.setattr(context, "recent_source_events", lambda hours=72, limit=60: [row])
+
+    pack = context.context_pack("market")
+
+    assert pack["prediction_markets"]["count"] == 1
+    item = pack["prediction_markets"]["items"][0]
+    assert item["title"].startswith("Will the Fed cut")
+    assert item["yes_probability"] == 0.63
+    assert item["topic"] == "Fed"
+    assert item["source"] == "polymarket"
+
+
 def test_context_paper_state_defaults_to_offline(monkeypatch, tmp_path):
     _isolate(monkeypatch, tmp_path)
     monkeypatch.delenv("AGENT_CONSOLE_LIVE_PAPER", raising=False)
@@ -2499,6 +2530,39 @@ def test_answer_context_exposes_intent_and_evidence_usage(monkeypatch, tmp_path)
     assert result["context"]["evidence_usage"]["realtime"] == 1
     assert result["context"]["evidence_usage_lines"][0] == "맥락: 시장 events 1 / wiki 2 / 실시간 1 / 로그 1"
     assert len(calls) == 1
+
+
+def test_market_prompt_includes_prediction_market_context(monkeypatch, tmp_path):
+    _isolate(monkeypatch, tmp_path)
+
+    from agent_console import agent
+
+    pack = {
+        "surface": "market",
+        "sources": {"events": [], "source_counts": [], "symbol_counts": []},
+        "memory": [],
+        "market_snapshot": {"quotes": []},
+        "prediction_markets": {
+            "count": 1,
+            "items": [
+                {
+                    "title": "Will the Fed cut rates in September?: Yes 63.0%",
+                    "yes_probability": 0.63,
+                    "volume": 640000.0,
+                    "liquidity": 18000.0,
+                    "topic": "Fed",
+                    "url": "https://polymarket.com/event/fed-decision-september",
+                    "end_date": "2026-09-16T00:00:00Z",
+                }
+            ],
+        },
+    }
+
+    prompt = agent._build_market_context_prompt("시장 위험을 폴리마켓까지 보고 판단해줘", pack)
+
+    assert "[예측시장/Polymarket]" in prompt
+    assert "Yes 63.0%" in prompt
+    assert "검증된 사실이 아니라" in prompt
 
 
 def test_intent_names_match_evidence_strategy_spec(monkeypatch, tmp_path):

@@ -325,6 +325,7 @@ def _build_market_context_prompt(question: str, pack: dict) -> str:
     symbol_counts = (pack.get("sources") or {}).get("symbol_counts") or []
     memory = pack.get("memory") or []
     snapshot_ctx = _compact_market_snapshot_context(pack)
+    prediction_ctx = _compact_prediction_market_context(pack)
     lines = [
         "사용자는 시장 상황을 물었습니다.",
         f"질문: {question}",
@@ -336,6 +337,8 @@ def _build_market_context_prompt(question: str, pack: dict) -> str:
     ]
     if snapshot_ctx:
         lines += ["", "[실시간/최신 시장 스냅샷]", *snapshot_ctx]
+    if prediction_ctx:
+        lines += ["", "[예측시장/Polymarket]", *prediction_ctx]
     for item in events[:8]:
         title = item.get("title") or item.get("summary")
         if title:
@@ -1605,6 +1608,7 @@ def _build_general_chat_prompt(question: str, pack: dict, history: list[dict] | 
     portfolio_ctx = _compact_portfolio_context(pack)
     paper_ctx = _compact_paper_context(pack)
     market_snapshot_ctx = _compact_market_snapshot_context(pack)
+    prediction_ctx = _compact_prediction_market_context(pack)
     try:
         shared_section = shared_memory.build_context_section(
             {
@@ -1652,6 +1656,9 @@ def _build_general_chat_prompt(question: str, pack: dict, history: list[dict] | 
         "[실시간/최신 시장 스냅샷]",
         *(market_snapshot_ctx or ["- 없음"]),
         "",
+        "[예측시장/Polymarket]",
+        *(prediction_ctx or ["- 없음"]),
+        "",
         "[포트폴리오 스냅샷]",
         *(portfolio_ctx or ["- 없음"]),
         "",
@@ -1675,6 +1682,34 @@ def _compact_market_snapshot_context(pack: dict) -> list[str]:
     except Exception:
         return []
     return [line for line in lines if str(line or "").strip()]
+
+
+def _compact_prediction_market_context(pack: dict) -> list[str]:
+    state = pack.get("prediction_markets") or {}
+    items = state.get("items") or []
+    lines = []
+    for item in items[:6]:
+        title = str(item.get("title") or "").strip()
+        prob = _num(item.get("yes_probability"), None)
+        if not title or prob is None:
+            continue
+        parts = [f"Yes {prob * 100:.1f}%"]
+        volume = _num(item.get("volume"), None)
+        liquidity = _num(item.get("liquidity"), None)
+        topic = str(item.get("topic") or "").strip()
+        end_date = str(item.get("end_date") or "").strip()
+        if topic:
+            parts.append(topic)
+        if volume is not None:
+            parts.append(f"volume {volume:,.0f}")
+        if liquidity is not None:
+            parts.append(f"liquidity {liquidity:,.0f}")
+        if end_date:
+            parts.append(f"end {end_date[:10]}")
+        lines.append(f"- {title} · " + " · ".join(parts))
+    if lines:
+        lines.append("- 주의: Polymarket 가격은 crowd-implied probability이며 검증된 사실이 아니라 보조 리스크 신호입니다.")
+    return lines
 
 
 def _compact_portfolio_context(pack: dict) -> list[str]:

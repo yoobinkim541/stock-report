@@ -11,6 +11,7 @@ Cloudflare로 접속 중인 기존 Streamlit 대시보드에서는 사이드바�
 - Shared Memory: FinanceAgentGUI의 `data/shared-memory` 계약을 사용해 사용자 학습 메모리와 외부 시장 브리핑을 `memory_summary.md`로 묶어 프롬프트에 주입한다.
 - 기억·위키: 대화와 메모를 승격해 `shared-memory`에 `surface=wiki` 기록으로 저장하고, 다음 답변에서 다시 읽는 지식층이다. 뉴스/메모는 가능한 한 원문(`body_raw`)을 함께 보존하고, 자동 승격은 재사용 가능한 규칙·결정·편향 교정만 좁게 올린다.
 - Context Layer: 기존 `~/reports`, `~/reports/source-cache`, `~/reports/ml-data`를 읽어 모든 화면에서 필요한 근거를 API로 제공한다. SaveTicker 원본은 `~/reports/raw`, 추출 텍스트는 `~/reports/text`에 남겨 위키와 World Memory가 원문 근거를 추적할 수 있게 한다. 보관 기준은 대략 SaveTicker 리포트 PDF 180일, SaveTicker 기사 60일, Telegram 14일, Arca 7일, Yahoo/FRED/WorldGovBonds 30일이며, 파생 텍스트와 위키/월드 메모리는 더 길게 유지한다.
+- Polymarket signal: 공개 Gamma API에서 시장/거시 관련 예측시장 확률을 읽어 `source=polymarket` 이벤트로 저장한다. 이 값은 crowd-implied probability라서 사실 검증이 아니라 보조 리스크 신호로만 프롬프트에 들어간다.
 - Portfolio Lab: 실제 자산 연동 없이 전략 가설, 비중, 손실한도, 운용 규칙을 저장한다.
 - Strategy Canvas: FinanceAgentGUI의 `portfolio-matrix-dsl` 방식으로 RSI 현금화 규칙을 실행하고, Sortino/Calmar/Ulcer/UPI/Beta까지 표준 평가 지표를 표시한다.
 - Local Install Prompt: 노트북에서 같은 콘솔을 설치하도록 붙여넣을 프롬프트를 제공한다.
@@ -60,6 +61,9 @@ AGENT_CONSOLE_PORT=8798 bash scripts/run_agent_console.sh
 - `AGENT_CONSOLE_HOST`: 바인드 주소. 기본값은 `127.0.0.1`.
 - `AGENT_CONSOLE_PORT`: 포트. 기본값은 `8797`.
 - `STOCK_COLLECTOR_ARCA_PROXY`: Arca 조회에 사용할 프록시. 서버 기본 수동 버튼은 `socks5://127.0.0.1:1080`을 사용한다.
+- `STOCK_COLLECTOR_POLYMARKET_LIMIT`: Polymarket 이벤트 조회 개수. 기본값은 `80`.
+- `STOCK_COLLECTOR_POLYMARKET_MIN_VOLUME`: Polymarket market 최소 거래량 필터. 기본값은 `10000`.
+- `STOCK_COLLECTOR_POLYMARKET_KEYWORDS`: 쉼표로 구분한 Polymarket 필터 키워드. 기본값은 Fed, CPI, election, oil, Nvidia, AI, geopolitical 키워드 묶음이다.
 
 ## API
 
@@ -83,7 +87,7 @@ AGENT_CONSOLE_PORT=8798 bash scripts/run_agent_console.sh
 
 ## Source-Backed Wiki Curator
 
-The source collector keeps SaveTicker, Telegram, Arca, market, and macro events in `~/reports/source-cache`. `reports.source_wiki_curator` reads that cache and updates deterministic wiki pages by topic, source type, and repeated tickers. These pages use `kind=source_digest`, preserve URL/text/raw source refs, and are intended to become AI console context before generic memory.
+The source collector keeps SaveTicker, Telegram, Arca, Polymarket, market, and macro events in `~/reports/source-cache`. `reports.source_wiki_curator` reads that cache and updates deterministic wiki pages by topic, source type, and repeated tickers. These pages use `kind=source_digest`, preserve URL/text/raw source refs, and are intended to become AI console context before generic memory.
 
 Operational command:
 
