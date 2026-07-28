@@ -190,13 +190,20 @@ def _run_wiki_autocurate(question: str, response: str, surface: str, pack: dict,
         pass
 
 
+def _run_postprocess_bundle(question: str, response: str, surface: str, pack: dict,
+                            history: list[dict] | None) -> None:
+    try:
+        shared_memory.append_chat_exchange(question, response, surface)
+    except Exception:
+        pass
+    _run_wiki_autocurate(question, response, surface, pack, history)
+
+
 def _run_postprocess_async(question: str, response: str, surface: str, pack: dict,
                            history: list[dict] | None) -> bool:
     global _LAST_POSTPROCESS_THREAD
-    if not _wiki_autocurate_enabled():
-        return False
     thread = threading.Thread(
-        target=_run_wiki_autocurate,
+        target=_run_postprocess_bundle,
         args=(question, response, surface, pack, history),
         name="agent-console-postprocess",
         daemon=True,
@@ -208,15 +215,16 @@ def _run_postprocess_async(question: str, response: str, surface: str, pack: dic
 
 def _postprocess_chat(question: str, response: str, surface: str, pack: dict,
                       history: list[dict] | None, *, async_mode: bool) -> dict:
+    if async_mode:
+        queued = _run_postprocess_async(question, response, surface, pack, history)
+        wiki_state = "queued" if queued and _wiki_autocurate_enabled() else "disabled"
+        return {"wiki_autocurate": wiki_state}
     try:
         shared_memory.append_chat_exchange(question, response, surface)
     except Exception:
         pass
     if not _wiki_autocurate_enabled():
         return {"wiki_autocurate": "disabled"}
-    if async_mode:
-        queued = _run_postprocess_async(question, response, surface, pack, history)
-        return {"wiki_autocurate": "queued" if queued else "disabled"}
     _run_wiki_autocurate(question, response, surface, pack, history)
     return {"wiki_autocurate": "done"}
 
