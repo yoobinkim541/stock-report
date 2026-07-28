@@ -35,6 +35,7 @@ class OutcomeLabel:
     stop_hit: bool
     take_profit_hit: bool
     quality_label: str
+    pending_reason: str = ""
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -54,6 +55,8 @@ def _path_returns(entry: float, prices: list[dict], horizon: int) -> list[float]
 
 def label_shadow_decision(decision: DecisionSnapshot, prices: list[dict], *,
                           horizons: tuple[int, ...] = (5, 15, 30)) -> list[OutcomeLabel]:
+    if decision.decision not in {"long", "short"}:
+        raise ValueError("decision must be 'long' or 'short'")
     entry = float(decision.features.get("price") or _price_at(prices, 0) or 0.0)
     if entry <= 0:
         return []
@@ -62,6 +65,19 @@ def label_shadow_decision(decision: DecisionSnapshot, prices: list[dict], *,
     for horizon in horizons:
         exit_price = _price_at(prices, horizon)
         if exit_price is None:
+            labels.append(OutcomeLabel(
+                decision_id=decision.id,
+                horizon=f"{horizon}m",
+                realized_return=0.0,
+                max_adverse_excursion=0.0,
+                max_favorable_excursion=0.0,
+                slippage=0.0,
+                fees=0.0,
+                stop_hit=False,
+                take_profit_hit=False,
+                quality_label="pending",
+                pending_reason="missing_price",
+            ))
             continue
         gross = ((float(exit_price) / entry) - 1) * side
         net = gross - float(decision.cost_estimate or 0.0)

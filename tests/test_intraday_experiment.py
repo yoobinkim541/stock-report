@@ -1,4 +1,5 @@
 from ml.intraday_experiment import DecisionSnapshot, RiskGovernor, label_shadow_decision
+import pytest
 
 
 def test_label_shadow_decision_creates_multiple_horizons():
@@ -60,3 +61,51 @@ def test_risk_governor_blocks_stale_or_loss_cluster():
     assert "stale_data" in stale["reasons"]
     assert loss_cluster["action"] == "size_down"
     assert "loss_cluster" in loss_cluster["reasons"]
+
+
+def test_label_shadow_decision_marks_missing_horizon_pending():
+    decision = DecisionSnapshot(
+        id="d2",
+        timestamp="2026-07-28T09:00:00+09:00",
+        symbol="005930",
+        session_phase="open",
+        features={"price": 70000},
+        signals={},
+        decision="long",
+        position_context={},
+        expected_edge=0.004,
+        risk_budget=0.01,
+        cost_estimate=0.001,
+    )
+
+    labels = label_shadow_decision(
+        decision,
+        [{"minute": 0, "price": 70000}, {"minute": 5, "price": 70400}],
+        horizons=(5, 15),
+    )
+
+    assert [label.horizon for label in labels] == ["5m", "15m"]
+    assert labels[1].quality_label == "pending"
+    assert labels[1].pending_reason == "missing_price"
+    assert labels[1].realized_return == 0.0
+    assert labels[1].max_adverse_excursion == 0.0
+    assert labels[1].max_favorable_excursion == 0.0
+
+
+def test_label_shadow_decision_rejects_malformed_decision():
+    decision = DecisionSnapshot(
+        id="d3",
+        timestamp="2026-07-28T09:00:00+09:00",
+        symbol="005930",
+        session_phase="open",
+        features={"price": 70000},
+        signals={},
+        decision="hold",
+        position_context={},
+        expected_edge=0.004,
+        risk_budget=0.01,
+        cost_estimate=0.001,
+    )
+
+    with pytest.raises(ValueError, match="long.*short"):
+        label_shadow_decision(decision, [{"minute": 0, "price": 70000}])
