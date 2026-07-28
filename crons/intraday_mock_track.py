@@ -26,6 +26,7 @@ import os
 import sys
 import time
 from datetime import datetime, timezone
+from pathlib import Path
 from zoneinfo import ZoneInfo
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -130,6 +131,13 @@ def load_cfg() -> dict:
         },
         "leverage_enabled": lev_enabled,
         "leverage_map": lev_map,
+        "lifecycle": {
+            "partial_target_r": _env_f("INTRADAY_PARTIAL_TARGET_R", 1.0),
+            "full_target_r": _env_f("INTRADAY_FULL_TARGET_R", 2.0),
+            "partial_stop_r": _env_f("INTRADAY_PARTIAL_STOP_R", 0.5),
+            "full_stop_r": _env_f("INTRADAY_FULL_STOP_R", 1.0),
+            "breakeven_stop_r": _env_f("INTRADAY_BREAKEVEN_STOP_R", 0.0),
+        },
     }
 
 
@@ -285,6 +293,23 @@ def _record_event(sym: str, mk: str, side: str, qty: int, px: float, *,
             note=note[:140], event_id=f"intr-{decision_id}-{direction}")
     except Exception as e:
         logger.warning("trade_events 기록 실패(무시): %s", e)
+
+
+def _diag_path(mk: str) -> Path:
+    base = Path(_LEDGER_BASE) if _LEDGER_BASE else Path(os.path.expanduser("~/reports/ml-data"))
+    return base / f"{mk.lower()}_intraday_diagnostics.jsonl"
+
+
+def _write_diag(mk: str, rec: dict, *, dry: bool = False) -> None:
+    if dry:
+        return
+    try:
+        path = _diag_path(mk)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with open(path, "a", encoding="utf-8") as f:
+            f.write(json.dumps(rec, ensure_ascii=False) + "\n")
+    except Exception as e:
+        logger.warning("[%s] 진단 원장 기록 실패(무시): %s", mk, e)
 
 
 # ── 심볼 점수 (축 조립) ───────────────────────────────────────────────────────
@@ -460,56 +485,94 @@ def _entry_spread_cap(price: float, mk: str, cfg: dict, entry_mode: str | None =
 # ── 청산·진입 실행 ────────────────────────────────────────────────────────────
 
 def _do_exit(state: dict, key: str, pos: dict, reason: str, ref_px: float, mk: str,
-             cfg: dict, ledger, *, orderbook=None, dry=False, notes=None) -> bool:
+             cfg: dict, ledger, *, orderbook=None, dry=False, notes=None,
+             qty: int | None = None, final: bool = True) -> bool:
     from ml.adaptive import costs
-    sym, qty = pos["ticker"], int(pos["qty"])
-    fill = _fill("sell", sym, qty, mk, shadow=bool(pos.get("shadow", True)),
+    sym = pos["ticker"]
+    held_qty = int(pos["qty"])
+    sell_qty = min(held_qty, int(qty or held_qty))
+    if sell_qty < 1:
+        return False
+    fill = _fill("sell", sym, sell_qty, mk, shadow=bool(pos.get("shadow", True)),
                  orderbook=orderbook, last_price=ref_px, dry=dry)
     if fill is None:
         (notes if notes is not None else []).append(f"⚠️ {sym} 청산 실패({reason}) — 다음 분 재시도")
         return False
     # 손절/목표는 판정가가 권위 (호가가 더 유리해도 보수 유지)
-    exit_px = min(fill["price"], ref_px) if reason in ("stop",) else \
-        (ref_px if reason == "target" else fill["price"])
+    if reason in ("stop", "partial_stop"):
+        exit_px = min(fill["price"], ref_px)
+    elif reason in ("target", "partial_target"):
+        exit_px = ref_px
+    else:
+        exit_px = fill["price"]
     entry_px = float(pos["entry_price"])
-    gross = (exit_px - entry_px) * qty
-    cost = (costs.order_cost(entry_px * qty, "buy", mk)
-            + costs.order_cost(exit_px * qty, "sell", mk))
-    penalty = (float(pos.get("penalty_entry") or 0) + fill["penalty"]) * qty
+    gross = (exit_px - entry_px) * sell_qty
+    cost = (costs.order_cost(entry_px * sell_qty, "buy", mk)
+            + costs.order_cost(exit_px * sell_qty, "sell", mk))
+    penalty = (float(pos.get("penalty_entry") or 0) + fill["penalty"]) * sell_qty
     net = gross - cost - penalty
     rps = max(float(pos.get("risk_per_share") or 0), 1e-9)
-    realized_r = net / (rps * qty)
+    leg_r = net / (rps * sell_qty)
     now = datetime.now(_TZ[mk])
     holding_min = int((time.time() - float(pos.get("entry_epoch") or time.time())) / 60)
+    leg_rec = {
+        "reason": reason, "qty": sell_qty, "exit_price": round(exit_px, 4),
+        "gross_pnl": round(gross, 2), "cost": round(cost, 2),
+        "slippage_penalty": round(penalty, 2), "net_pnl": round(net, 2),
+        "realized_r": round(leg_r, 4), "ts": now.isoformat(timespec="seconds"),
+    }
+    prior_legs = list(pos.get("exit_legs") or [])
+    total_net = float(pos.get("realized_net_pnl") or 0.0) + net
+    total_gross = float(pos.get("realized_gross_pnl") or 0.0) + gross
+    total_cost = float(pos.get("realized_cost") or 0.0) + cost
+    total_penalty = float(pos.get("realized_penalty") or 0.0) + penalty
+    total_qty = int(pos.get("initial_qty") or (sell_qty + int(pos.get("realized_qty") or 0)))
+    realized_r = total_net / (rps * max(total_qty, 1))
     if not dry:
-        try:
-            ledger.log_outcome({
-                "decision_id": pos["decision_id"], "exit_ts": now.isoformat(timespec="seconds"),
-                "exit_reason": reason, "entry_price": entry_px, "exit_price": round(exit_px, 4),
-                "qty": qty, "holding_min": holding_min, "gross_pnl": round(gross, 2),
-                "cost": round(cost, 2), "slippage_penalty": round(penalty, 2),
-                "net_pnl": round(net, 2), "realized_r": round(realized_r, 4),
-                "fwd_excess": round(realized_r, 4), "success": bool(net > 0),
-                "date": now.strftime("%Y-%m-%d"),
-                "score_history": pos.get("score_history", [])})
-        except Exception as e:
-            logger.error("outcome 기록 실패 %s: %s", sym, e)
-    _record_event(sym, mk, "sell", qty, exit_px, decision_id=pos["decision_id"],
-                  direction="out", avg_price=entry_px, shadow=bool(pos.get("shadow", True)),
-                  note=f"단기 {reason} R={realized_r:+.2f}"
+        if final:
+            try:
+                ledger.log_outcome({
+                    "decision_id": pos["decision_id"], "exit_ts": now.isoformat(timespec="seconds"),
+                    "exit_reason": reason, "entry_price": entry_px, "exit_price": round(exit_px, 4),
+                    "qty": total_qty, "holding_min": holding_min, "gross_pnl": round(total_gross, 2),
+                    "cost": round(total_cost, 2), "slippage_penalty": round(total_penalty, 2),
+                    "net_pnl": round(total_net, 2), "realized_r": round(realized_r, 4),
+                    "fwd_excess": round(realized_r, 4), "success": bool(total_net > 0),
+                    "date": now.strftime("%Y-%m-%d"),
+                    "score_history": pos.get("score_history", []),
+                    "exit_legs": prior_legs + [leg_rec]})
+            except Exception as e:
+                logger.error("outcome 기록 실패 %s: %s", sym, e)
+    event_direction = f"out-{reason}-{held_qty}"
+    _record_event(sym, mk, "sell", sell_qty, exit_px, decision_id=pos["decision_id"],
+                  direction=event_direction, avg_price=entry_px, shadow=bool(pos.get("shadow", True)),
+                  note=f"단기 {reason} {sell_qty}주 R={leg_r:+.2f}"
                        + (" (shadow)" if pos.get("shadow", True) else ""), dry=dry)
     c = state["counters"].setdefault(mk, {"trades": 0, "day_pnl": 0.0, "sleeve_pnl_cum": 0.0})
     c["day_pnl"] = c.get("day_pnl", 0.0) + net
     c["sleeve_pnl_cum"] = c.get("sleeve_pnl_cum", 0.0) + net
-    cooldown_min = _exit_cooldown_min(reason, net, cfg)
-    if cooldown_min > 0:
+    if not final:
+        try:
+            from ml.intraday_lifecycle import apply_filled_leg
+            apply_filled_leg(pos, {"reason": reason, "qty": sell_qty}, cfg.get("lifecycle") or {})
+        except Exception:
+            pos["qty"] = held_qty - sell_qty
+        pos["realized_qty"] = int(pos.get("realized_qty") or 0) + sell_qty
+        pos["realized_net_pnl"] = total_net
+        pos["realized_gross_pnl"] = total_gross
+        pos["realized_cost"] = total_cost
+        pos["realized_penalty"] = total_penalty
+        pos["exit_legs"] = prior_legs + [leg_rec]
+    cooldown_min = _exit_cooldown_min(reason, total_net if final else net, cfg)
+    if final and cooldown_min > 0:
         state["cooldown_until"][key] = time.time() + cooldown_min * 60
     else:
         state["cooldown_until"].pop(key, None)
-    state["positions"].pop(key, None)
+    if final:
+        state["positions"].pop(key, None)
     (notes if notes is not None else []).append(
-        f"{'🟢' if net > 0 else '🔴'} {sym} 청산[{reason}] {qty}주 @ {exit_px:,.2f} "
-        f"net {net:+,.0f} (R{realized_r:+.2f})")
+        f"{'🟢' if net > 0 else '🔴'} {sym} 청산[{reason}] {sell_qty}주 @ {exit_px:,.2f} "
+        f"net {net:+,.0f} (R{leg_r:+.2f})")
     return True
 
 
@@ -572,12 +635,18 @@ def _do_entry(state: dict, sym: str, mk: str, axes: dict, score: float, params: 
     state.get("entry_confirm", {}).pop(f"{mk}:{sym}", None)
     state["positions"][f"{mk}:{sym}"] = {
         "decision_id": did, "ticker": sym, "market": mk, "qty": qty,
+        "initial_qty": qty,
         "entry_price": fill["price"], "entry_epoch": time.time(),
         "entry_min": now.hour * 60 + now.minute, "stop": stop, "target": target,
         "risk_per_share": (price - stop) + friction, "shadow": shadow,
         "penalty_entry": fill["penalty"], "last_score": score,
         "signal_ticker": meta.get("signal_ticker"), "loss_budget_entry": loss_budget,
         "entry_mode": entry_mode, "risk_mult": risk_mult, "risk_frac": risk_frac}
+    try:
+        from ml.intraday_lifecycle import initialize_lifecycle
+        initialize_lifecycle(state["positions"][f"{mk}:{sym}"], cfg.get("lifecycle") or {})
+    except Exception:
+        pass
     c = state["counters"].setdefault(mk, {"trades": 0, "day_pnl": 0.0, "sleeve_pnl_cum": 0.0})
     c["trades"] = c.get("trades", 0) + 1
     (notes if notes is not None else []).append(
@@ -629,12 +698,25 @@ def _repair_orphans(state: dict, mk: str, ledger, *, dry=False) -> int:
 
 def run_market(mk: str, state: dict, cfg: dict, *, dry: bool = False) -> list[str]:
     notes: list[str] = []
+    diag = {
+        "market": mk,
+        "ts": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+        "candidates": 0,
+        "entries": 0,
+        "skip_reasons": {},
+    }
+
+    def _skip(reason: str, n: int = 1) -> None:
+        diag["skip_reasons"][reason] = int(diag["skip_reasons"].get(reason, 0)) + n
+
     from ml.adaptive import Ledger
     ledger = Ledger(f"{mk.lower()}_intraday", base_dir=_LEDGER_BASE)
 
     if not _market_open(mk):
         if any(k.startswith(f"{mk}:") for k in state["positions"]):
             _flatten_all(state, mk, "stale_flat", cfg, ledger, dry=dry, notes=notes)
+        diag["status"] = "market_closed"
+        _write_diag(mk, diag, dry=dry)
         return notes
 
     now = _now_local(mk)
@@ -716,6 +798,9 @@ def run_market(mk: str, state: dict, cfg: dict, *, dry: bool = False) -> list[st
     if bars_stale and now_min > _OPEN_MIN[mk] + cfg["stale_flat_min"]:
         if any(k.startswith(f"{mk}:") for k in state["positions"]):
             _flatten_all(state, mk, "stale_flat", cfg, ledger, dry=dry, notes=notes)
+        _skip("bars_stale")
+        diag["status"] = "bars_stale"
+        _write_diag(mk, diag, dry=dry)
         return notes
 
     # ③ 일손실 halt
@@ -767,19 +852,29 @@ def run_market(mk: str, state: dict, cfg: dict, *, dry: bool = False) -> list[st
                     "collapse_confirm_bars": params.get("collapse_confirm_bars", 2),
                     "minimum_hold_min": cfg.get("minimum_hold_min", 3),
                     "flat_buffer_min": cfg["flat_buffer_min"]}
-        res = ax.check_exit(pos, bar, score, now_min, close_min, cfg_exit)
-        if res:
-            reason, ref_px = res
-            if bar is None:                      # bar 부재 EOD — REST 가로 대체
-                ref_px = _rest_price(sym, mk) or ref_px
-            _do_exit(state, key, pos, reason, ref_px, mk, cfg, ledger,
-                     orderbook=obs.get(sym), dry=dry, notes=notes)
+        from ml.intraday_lifecycle import evaluate_exit_plan
+        legs = evaluate_exit_plan(pos, bar, score, now_min, close_min,
+                                  {**cfg_exit, **(cfg.get("lifecycle") or {})})
+        if legs:
+            for leg in legs:
+                reason, ref_px = leg["reason"], leg["ref_price"]
+                if bar is None:                  # bar 부재 EOD — REST 가로 대체
+                    ref_px = _rest_price(sym, mk) or ref_px
+                ok = _do_exit(state, key, pos, reason, ref_px, mk, cfg, ledger,
+                              orderbook=obs.get(sym), dry=dry, notes=notes,
+                              qty=leg.get("qty"), final=bool(leg.get("final")))
+                if not ok or key not in state["positions"]:
+                    break
+            if bar is not None:
+                state["last_processed_bar"][key] = int(df.index[-1].timestamp() // 60)
         elif bar is not None:
             pos["last_score"] = score
             state["last_processed_bar"][key] = int(df.index[-1].timestamp() // 60)
 
     # ⑤ 진입
     if state["halt"].get(mk):
+        diag["status"] = "halt"
+        _write_diag(mk, diag, dry=dry)
         return notes
     n_pos = sum(1 for k in state["positions"] if k.startswith(f"{mk}:"))
     cands = []
@@ -788,20 +883,26 @@ def run_market(mk: str, state: dict, cfg: dict, *, dry: bool = False) -> list[st
         key = f"{mk}:{sym}"
         trade_key = f"{mk}:{trade_sym}"
         if trade_key in state["positions"]:
+            _skip("held")
             continue
         df = bars.get(sym)
         if df is None or df.empty:
+            _skip("no_bar")
             continue
         ep = int(df.index[-1].timestamp() // 60)
         if state["last_processed_bar"].get(key) == ep:
+            _skip("duplicate_bar")
             continue                              # 새 bar 없음 — 중복 판단 방지
         axes, score = _score(sym)
         state["last_processed_bar"][key] = ep
         if axes is None or score is None:
+            _skip("no_features")
             continue
         trade_axes = _execution_axes(axes, trade_sym, bars.get(trade_sym), feats.get(trade_sym))
         if trade_axes is None:
+            _skip("no_execution_axes")
             continue
+        diag["candidates"] += 1
         cands.append((score, sym, trade_sym, trade_axes))
     # 세션 최고점 진단 — 결정 0건이 휴면(점수 미달)인지 고장인지 로그만으로 구분.
     # 신고점 갱신 시에만 한 줄 기록(단조증가라 일 수 회) — 매분 스팸 없음.
@@ -822,9 +923,11 @@ def run_market(mk: str, state: dict, cfg: dict, *, dry: bool = False) -> list[st
             break
         risk_mult, entry_mode = _entry_risk_mult(score, params, cfg, mk)
         if risk_mult <= 0:
+            _skip("score_below_threshold")
             continue
         if not _entry_confirmation_ok(state, mk, sym, score, entry_mode, params, cfg, axes.get("_meta", {}).get("epoch_min")):
             logger.info("[%s] %s score %.2f %s — 진입 확인 대기", mk, sym, score, entry_mode)
+            _skip("confirm_wait")
             continue
         ob = obs.get(sym)
         meta = axes["_meta"]
@@ -859,11 +962,17 @@ def run_market(mk: str, state: dict, cfg: dict, *, dry: bool = False) -> list[st
         if not ok:
             suffix = f"({signal_sym} 신호)" if signal_sym != sym else ""
             logger.info("[%s] %s%s score %.2f %s — 가드 차단(%s)", mk, sym, suffix, score, entry_mode, why)
+            _skip(why)
             continue
         if _do_entry(state, sym, mk, axes, score, params, cfg, sleeve, ledger,
                      orderbook=ob, loss_budget=loss_budget, risk_mult=risk_mult,
                      entry_mode=entry_mode, dry=dry, notes=notes):
             n_pos += 1
+            diag["entries"] += 1
+        else:
+            _skip("entry_failed")
+    diag["status"] = "ok"
+    _write_diag(mk, diag, dry=dry)
     return notes
 
 

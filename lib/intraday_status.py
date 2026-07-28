@@ -12,6 +12,7 @@ from datetime import datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
 
 _STATE_PATH = os.path.expanduser("~/.cache/intraday_mock_state.json")
+_DATA_DIR = os.path.expanduser("~/reports/ml-data")
 _TZ = {"KR": ZoneInfo("Asia/Seoul"), "US": ZoneInfo("America/New_York")}
 
 
@@ -21,6 +22,27 @@ def _state() -> dict:
             return json.load(f)
     except Exception:
         return {}
+
+
+def _latest_diagnostics(mk: str) -> dict | None:
+    path = os.path.join(_DATA_DIR, f"{mk.lower()}_intraday_diagnostics.jsonl")
+    try:
+        with open(path, encoding="utf-8") as f:
+            lines = [line.strip() for line in f if line.strip()]
+        if not lines:
+            return None
+        rec = json.loads(lines[-1])
+        skips = rec.get("skip_reasons") or {}
+        top_skip = sorted(skips.items(), key=lambda kv: (-int(kv[1]), kv[0]))[:3]
+        return {
+            "status": rec.get("status"),
+            "candidates": int(rec.get("candidates") or 0),
+            "entries": int(rec.get("entries") or 0),
+            "top_skip": top_skip,
+            "ts": rec.get("ts"),
+        }
+    except Exception:
+        return None
 
 
 def intraday_summary(market: str) -> dict | None:
@@ -39,7 +61,8 @@ def intraday_summary(market: str) -> dict | None:
                 if o.get("date") == today]
     except Exception:
         pass
-    if not counters and not positions and not outs:
+    diagnostics = _latest_diagnostics(mk)
+    if not counters and not positions and not outs and not diagnostics:
         return None
     net_today = sum(float(o.get("net_pnl") or 0) for o in outs)
     return {
@@ -52,6 +75,7 @@ def intraday_summary(market: str) -> dict | None:
                             "shadow": p.get("shadow", True)} for p in positions],
         "shadow": os.getenv("INTRADAY_SHADOW_ONLY", "true").lower() == "true",
         "currency": "₩" if mk == "KR" else "$",
+        "diagnostics": diagnostics,
     }
 
 
@@ -77,4 +101,8 @@ def intraday_section(market: str, html: bool = False) -> list[str]:
     if s["open_positions"]:
         ops = " · ".join(f"{p['ticker']} {p['qty']}주" for p in s["open_positions"][:4])
         lines.append(f"오픈 {len(s['open_positions'])}건: {ops}")
+    diag = s.get("diagnostics")
+    if diag:
+        top = " · ".join(f"{k} {v}" for k, v in diag.get("top_skip", [])) or "차단 없음"
+        lines.append(f"진입진단 후보 {diag['candidates']} · 진입 {diag['entries']} · {top}")
     return lines

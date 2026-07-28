@@ -22,6 +22,7 @@ env: US_MOCK_UNIVERSE(쉼표 티커, 기본 내장)·US_MOCK_MAX_POS(5)·US_MOCK
      US_MOCK_INCLUDE_LEVERAGE(true)·US_MOCK_LEVERAGE_UNIVERSE(QLD,TQQQ,SQQQ,SOXL,SSO,SOXS)
      US_MOCK_INCLUDE_SINGLE_LEVERAGE(true)·US_MOCK_SINGLE_LEVERAGE_UNIVERSE(NVDL,TSLL,AAPU,...)
      US_MOCK_LEVERAGE_MAX_POS(2)·US_MOCK_LEVERAGE_MAX_WEIGHT(0.35)
+     US_MOCK_LEV_SLEEVE_MODE(shadow|paper|off, 기본 shadow) — paper 에서만 구조레버 mock 주문 반영
 """
 from __future__ import annotations
 
@@ -158,12 +159,32 @@ LEV_ETF_MAX_POS = _int_env("US_MOCK_LEVERAGE_MAX_POS", 2)
 LEV_ETF_MAX_WEIGHT = _float_env("US_MOCK_LEVERAGE_MAX_WEIGHT", 0.35)
 
 # ★Tier3 구조적 레버리지 슬리브 (모의 한정 라이브 검증) — 게이트 GO shadow 가 신선할 때만
-# NAV 의 (reco_lev − 1) 비율을 2x ETF 로 보유 → 유효 레버리지 ≈ reco_lev. 기본 off(opt-in).
-LEV_SLEEVE_ENABLED = os.getenv("US_MOCK_LEV_SLEEVE", "false").lower() == "true"
+# NAV 의 (reco_lev − 1) 비율을 2x ETF 로 보유 → 유효 레버리지 ≈ reco_lev.
+# 기본은 shadow: 추천·진단만 남기고 주문/예산에는 반영하지 않는다. paper 모드에서만 mock 주문.
 LEV_SLEEVE_SYMBOL = os.getenv("US_MOCK_LEV_SYMBOL", "QLD")   # 2x NASDAQ100 (kis 해외 모의 주문가능)
 LEV_SHADOW_PATH = os.path.expanduser("~/reports/ml-cache/structural_leverage_shadow.json")
 LEV_SHADOW_MAX_AGE_D = 21          # 주간 게이트 2회 이상 누락 시 stale → 슬리브 청산 방향
 LEV_SLEEVE_MAX_FRAC = 0.5          # (reco−1) 상한 — reco 클램프(1.5)와 정합
+
+
+def leverage_sleeve_mode() -> str:
+    """Runtime structural leverage sleeve mode.
+
+    Legacy US_MOCK_LEV_SLEEVE=true maps to paper so existing deployments keep
+    their explicit opt-in behavior.
+    """
+    raw = os.getenv("US_MOCK_LEV_SLEEVE_MODE")
+    if raw is None and _bool_env("US_MOCK_LEV_SLEEVE", False):
+        return "paper"
+    mode = str(raw or "shadow").strip().lower()
+    return mode if mode in {"off", "shadow", "paper"} else "shadow"
+
+
+def leverage_sleeve_paper_enabled() -> bool:
+    return leverage_sleeve_mode() == "paper"
+
+
+LEV_SLEEVE_ENABLED = leverage_sleeve_paper_enabled()
 
 
 def load_lev_shadow(path: str | None = None) -> float | None:
@@ -503,17 +524,21 @@ def main(argv: list[str] | None = None) -> int:
     # 슬리브 종목은 선택 로직 대상에서 제외(positions 분리 — '타깃이탈' 오청산 방지).
     sleeve_frac, sleeve_orders = 0.0, []
     positions_stock = {k: v for k, v in positions.items() if k != LEV_SLEEVE_SYMBOL}
-    if LEV_SLEEVE_ENABLED:
+    sleeve_mode = leverage_sleeve_mode()
+    if sleeve_mode != "off":
         reco = load_lev_shadow()
         lev_px = _rt_best(LEV_SLEEVE_SYMBOL, "buy") or (kis_mock.get_price(LEV_SLEEVE_SYMBOL) if not dry else None)
-        sleeve_frac, sleeve_orders = sleeve_plan(reco, nav, positions, lev_px,
+        shadow_frac, shadow_orders = sleeve_plan(reco, nav, positions, lev_px,
                                                  band=REBAL_BAND, symbol=LEV_SLEEVE_SYMBOL)
-        logger.info("슬리브: reco=%s → 비중 %.0f%% · 주문 %d건", reco, sleeve_frac * 100, len(sleeve_orders))
+        if sleeve_mode == "paper":
+            sleeve_frac, sleeve_orders = shadow_frac, shadow_orders
+        logger.info("슬리브[%s]: reco=%s → 비중 %.0f%% · 주문 %d건",
+                    sleeve_mode, reco, shadow_frac * 100, len(shadow_orders))
 
     budget = nav * INVEST * (1.0 - sleeve_frac)
     trade_signals = [
         s for s in signals
-        if not (LEV_SLEEVE_ENABLED and s.get("ticker") == LEV_SLEEVE_SYMBOL)
+        if not (sleeve_mode == "paper" and s.get("ticker") == LEV_SLEEVE_SYMBOL)
     ]
     effective_cash_buffer = CASH_BUFFER_DERIVED if cash_derived else CASH_BUFFER
     plan = plan_rebalance(trade_signals, positions_stock, budget, MAX_POS, cash_usd=cash,
