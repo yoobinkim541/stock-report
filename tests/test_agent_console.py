@@ -2437,11 +2437,25 @@ def test_answer_context_exposes_intent_and_evidence_usage(monkeypatch, tmp_path)
     monkeypatch.setattr(agent, "_safe_list_conversation", lambda limit, surface: [])
     monkeypatch.setattr(agent, "_safe_add_conversation", lambda *args, **kwargs: None)
     monkeypatch.setattr(agent, "_postprocess_chat", lambda *args, **kwargs: {"wiki_autocurate": "disabled"})
-    monkeypatch.setattr(agent, "_compose_answer", lambda question, pack, history=None: "한국 시장은 수급 확인이 필요합니다.")
+    wiki_pages = [
+        {"id": "w1", "title": "첫 번째 위키", "surface": "market", "kind": "note", "status": "draft"},
+        {"id": "w2", "title": "두 번째 위키", "surface": "market", "kind": "note", "status": "draft"},
+    ]
+    calls = []
+    monkeypatch.setattr(agent.wiki, "list_pages", lambda **kwargs: calls.append(kwargs) or wiki_pages)
+
+    def fake_compose(question, pack, history=None):
+        prompt = agent._build_general_chat_prompt(question, pack, history)
+        assert "첫 번째 위키" in prompt
+        return "한국 시장은 수급 확인이 필요합니다."
+
+    monkeypatch.setattr(agent, "_compose_answer", fake_compose)
 
     result = agent.answer("한국증시는 어땠어", "market")
 
     assert result["context"]["intent"] == "market_analysis"
     assert result["context"]["evidence_usage"]["events"] == 1
+    assert result["context"]["evidence_usage"]["wiki"] == 2
     assert result["context"]["evidence_usage"]["realtime"] == 1
-    assert result["context"]["evidence_usage_lines"][0] == "맥락: 시장 events 1 / wiki 0 / 실시간 1 / 로그 1"
+    assert result["context"]["evidence_usage_lines"][0] == "맥락: 시장 events 1 / wiki 2 / 실시간 1 / 로그 1"
+    assert len(calls) == 1

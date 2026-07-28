@@ -1047,8 +1047,10 @@ def _title_lookup_for(page_ids: set[str]) -> dict[str, str]:
 
 
 def build_context_section(*, query: str = "", surface: str = WIKI_SURFACE, limit: int = 4,
-                          status: str = "all") -> str:
-    pages = list_pages(query=query, surface=surface, status=status, limit=limit)
+                          status: str = "all", pages: list[dict] | None = None) -> str:
+    pages = pages if isinstance(pages, list) else list_pages(
+        query=query, surface=surface, status=status, limit=limit
+    )
     if not pages:
         return ""
     related_ids = {

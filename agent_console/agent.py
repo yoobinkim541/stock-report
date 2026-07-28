@@ -117,6 +117,11 @@ def answer(question: str, surface: str = "market", *, async_postprocess: bool = 
     history = _safe_list_conversation(limit=12, surface=surface)
     _safe_add_conversation("user", question, surface)
     pack = _safe_context_pack(surface)
+    try:
+        wiki_pages = wiki.list_pages(query=question, surface=surface, limit=4)
+    except Exception:
+        wiki_pages = []
+    pack["_wiki_context_pages"] = wiki_pages
     _reset_llm_engine()
     try:
         response = _compose_answer(question, pack, history=history)
@@ -124,7 +129,9 @@ def answer(question: str, surface: str = "market", *, async_postprocess: bool = 
         response = _compose_error_fallback_answer(question, pack, exc)
     engine = _LAST_LLM_ENGINE or "local-rules"
     intent = _classify_question_intent(question, pack, history)
-    evidence_usage = evidence_context.build_usage_summary(pack, intent=intent, engine=engine)
+    evidence_usage = evidence_context.build_usage_summary(
+        pack, wiki_pages=wiki_pages, intent=intent, engine=engine
+    )
     response = _humanize_generic_fallback(question, surface, history, response)
     _safe_add_conversation("assistant", response, surface)
     postprocess = _postprocess_chat(question, response, surface, pack, history, async_mode=async_postprocess)
@@ -1522,6 +1529,7 @@ def _build_general_chat_prompt(question: str, pack: dict, history: list[dict] | 
             query=question,
             surface=pack.get("surface") or "market",
             limit=4,
+            pages=pack.get("_wiki_context_pages"),
         )
     except Exception:
         wiki_section = ""
