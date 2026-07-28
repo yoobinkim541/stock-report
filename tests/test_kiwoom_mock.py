@@ -56,6 +56,13 @@ class _Rec:
         return R({})
 
 
+@pytest.fixture(autouse=True)
+def isolated_token_file(monkeypatch, tmp_path):
+    monkeypatch.setattr(kiwoom_mock, "_TOKEN_FILE", str(tmp_path / "kiwoom_mock_token.json"))
+    kiwoom_mock._token_cache.update(token=None, exp=0.0)
+    return tmp_path
+
+
 @pytest.fixture
 def rec(monkeypatch):
     r = _Rec()
@@ -144,6 +151,46 @@ def test_token_uses_expires_dt(rec, monkeypatch):
     monkeypatch.setattr(kiwoom_mock.requests, "post", post)
     kiwoom_mock._token_cache.update(token=None, exp=0.0)
     assert kiwoom_mock._get_token() == "tok-dt"
+
+
+def test_token_missing_logs_sanitized_error(rec, monkeypatch, caplog):
+    def post(url, headers=None, json=None, timeout=None, allow_redirects=None):
+        class R:
+            status_code = 200
+            def raise_for_status(s): pass
+            def json(s):
+                return {"return_code": 8001, "return_msg": "App Key 검증 실패"}
+        return R()
+
+    monkeypatch.setattr(kiwoom_mock.requests, "post", post)
+    kiwoom_mock._token_cache.update(token=None, exp=0.0)
+
+    with caplog.at_level("ERROR"):
+        assert kiwoom_mock._get_token() is None
+
+    text = caplog.text
+    assert "모의 토큰 응답에 token 없음" in text
+    assert "8001" in text
+    assert "App Key 검증 실패" in text
+    assert "secret" not in text.lower()
+
+
+def test_token_reuses_disk_cache_without_http(rec, monkeypatch, isolated_token_file):
+    import time
+    import safe_io
+
+    safe_io.atomic_write_json(
+        kiwoom_mock._TOKEN_FILE,
+        {"token": "disk-token", "exp": time.time() + 3600},
+    )
+
+    def post(*_a, **_k):
+        raise AssertionError("fresh token request should not happen when disk cache is valid")
+
+    monkeypatch.setattr(kiwoom_mock.requests, "post", post)
+    kiwoom_mock._token_cache.update(token=None, exp=0.0)
+
+    assert kiwoom_mock._get_token() == "disk-token"
 
 
 # ── 4. is_enabled 게이팅 ──────────────────────────────────────────────────────

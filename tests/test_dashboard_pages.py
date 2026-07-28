@@ -549,6 +549,18 @@ def test_portfolio_renders_risk_kpis():
     assert len(at.dataframe) >= 1
 
 
+def test_portfolio_renders_when_risk_struct_is_none():
+    """리스크 모델이 데이터 부족으로 None 을 반환해도 포트폴리오 페이지는 깨지지 않는다."""
+    script = _script(
+        "from dashboard import cached\nfrom dashboard.pages import portfolio",
+        "cached.risk_struct = lambda: None\nportfolio.render()",
+    )
+    at = AppTest.from_string(script, default_timeout=30)
+    at.run()
+    assert not at.exception
+    assert any("리스크 분석 불가" in str(w.value) for w in at.warning)
+
+
 def test_research_screener_gated_no_autocompute():
     """리서치 진입(기본 '종목 랭킹') 시 스크리너 자동실행 안 함 — ▶버튼 + 안내만 (H2 지연제거)."""
     at = AppTest.from_string(_script("from dashboard.pages import research", "research.render()"),

@@ -58,7 +58,8 @@ def risk_summary(weights: dict) -> dict:
     if not weights:
         return {"error": "보유 데이터 없음 — portfolio_snapshot 확인 필요"}
     try:
-        return risk_model.portfolio_risk_summary(weights)
+        summ = risk_model.portfolio_risk_summary(weights)
+        return summ if isinstance(summ, dict) else {"error": "리스크 계산 데이터 부족"}
     except Exception as e:
         return {"error": str(e)}
 
@@ -277,6 +278,96 @@ def paper_scorecard(rows: list[dict]) -> dict:
     return {"buy_hit": buy_hit, "n_buy": n_buy, "sell_hit": sell_hit, "n_sell": n_sell}
 
 
+def _paper_position_key(row: dict) -> str:
+    raw = str(row.get("code") or row.get("ticker") or row.get("symbol") or "").strip()
+    return raw.removesuffix(".KS").removesuffix(".KQ").upper()
+
+
+def _paper_position_ticker(code: str, currency: str) -> str:
+    if currency == "₩" and code.isdigit():
+        return f"{code}.KS"
+    return code
+
+
+def _reconstruct_positions_from_history(hist: list[dict], decisions: list[dict], currency: str) -> list[dict]:
+    """잔고 API 실패 시 성공 주문 로그로 보유 내역을 복원한다.
+
+    과거 스냅샷은 보유 종목 수만 저장하므로, 수량은 order append-log에서 재구성하고
+    가격은 point-in-time 결정 원장의 최신/동일일 가격을 사용한다.
+    """
+    by_key: dict[str, list[dict]] = {}
+    for row in decisions or []:
+        key = _paper_position_key(row)
+        if key:
+            by_key.setdefault(key, []).append(row)
+
+    def price_for(code: str, date: str) -> float | None:
+        rows = by_key.get(code, [])
+        same_day = [r for r in rows if str(r.get("date") or "")[:10] == str(date or "")[:10]]
+        candidates = same_day or rows
+        for row in candidates:
+            try:
+                px = float(row.get("price") or 0)
+            except (TypeError, ValueError):
+                px = 0.0
+            if px > 0:
+                return px
+        return None
+
+    positions: dict[str, dict] = {}
+    for row in sorted(hist or [], key=lambda r: str(r.get("date") or "")):
+        if row.get("kind") != "order" or row.get("ok") is not True:
+            continue
+        code = _paper_position_key(row)
+        if not code:
+            continue
+        try:
+            qty = int(row.get("qty") or 0)
+        except (TypeError, ValueError):
+            qty = 0
+        if qty <= 0:
+            continue
+        pos = positions.setdefault(code, {"shares": 0, "cost": 0.0})
+        side = str(row.get("side") or "").lower()
+        px = price_for(code, str(row.get("date") or ""))
+        if side == "buy":
+            pos["shares"] += qty
+            if px:
+                pos["cost"] += px * qty
+        elif side == "sell":
+            if pos["shares"] <= 0:
+                continue
+            avg = pos["cost"] / pos["shares"] if pos["shares"] and pos["cost"] else 0.0
+            sell_qty = min(qty, int(pos["shares"]))
+            pos["shares"] -= sell_qty
+            pos["cost"] = max(0.0, pos["cost"] - avg * sell_qty)
+
+    out = []
+    for code, pos in positions.items():
+        shares = int(pos.get("shares") or 0)
+        if shares <= 0:
+            continue
+        latest = (by_key.get(code) or [{}])[0]
+        cur_price = price_for(code, str(latest.get("date") or "")) or (
+            pos["cost"] / shares if pos.get("cost") else 0.0
+        )
+        avg = pos["cost"] / shares if shares and pos.get("cost") else cur_price
+        ticker = _paper_position_ticker(code, currency)
+        name = latest.get("name")
+        if not name:
+            try:
+                import ticker_names
+                name = ticker_names.display_name(ticker, allow_net=False) or ticker
+            except Exception:
+                name = ticker
+        value = cur_price * shares
+        ret = ((cur_price / avg - 1.0) * 100.0) if avg else None
+        out.append({"symbol": code, "name": name, "shares": shares, "avg": avg,
+                    "cur": cur_price, "value": value, "ret": ret})
+    out.sort(key=lambda r: -(r.get("value") or 0))
+    return out
+
+
 def paper_summary(surface: str = "kr_mock") -> dict:
     """자동 모의투자 계좌 요약 — NAV 시계열·벤치마크·MDD·보유·비용·결정 원장. read-only·graceful.
 
@@ -289,7 +380,7 @@ def paper_summary(surface: str = "kr_mock") -> dict:
                  "balance_ok": False, "nav": None, "cash": None, "positions": [],
                  "nav_series": [], "inception_date": None, "cum_ret": None, "day_ret": None,
                  "strat_mdd": None, "bench_ret": None, "bench_mdd": None,
-                 "cost": None, "scorecard": {}, "decisions": []}
+                 "cost": None, "scorecard": {}, "decisions": [], "order_history": []}
 
     # 1) EOD NAV 스냅샷 시계열 (store — 오프라인에서도 가용)
     snaps: list[dict] = []
@@ -298,6 +389,13 @@ def paper_summary(surface: str = "kr_mock") -> dict:
         hist = store.all(hist_name)
         snaps = [r for r in hist if r.get("kind") == "snapshot" and r.get("nav") is not None]
         out["nav_series"] = [{"date": str(r.get("date", ""))[:10], "nav": float(r["nav"])} for r in snaps]
+        out["order_history"] = [
+            r for r in sorted(
+                [row for row in hist if row.get("kind") == "order"],
+                key=lambda row: str(row.get("date") or ""),
+                reverse=True,
+            )
+        ][:50]
     except Exception:
         hist = []
 
@@ -404,6 +502,8 @@ def paper_summary(surface: str = "kr_mock") -> dict:
                 r["name"] = r["ticker"]
         out["decisions"] = rows
         out["scorecard"] = paper_scorecard(rows)
+        if not out["positions"]:
+            out["positions"] = _reconstruct_positions_from_history(hist, rows, cur)
     except Exception:
         pass
     return out

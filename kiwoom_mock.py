@@ -21,6 +21,7 @@ env:
 from __future__ import annotations
 
 import logging
+import json
 import os
 import time
 
@@ -32,6 +33,7 @@ _MOCK_BASE  = "https://mockapi.kiwoom.com"   # ★ 하드락 — 변경 금지
 _ORDER_URL  = "/api/dostk/ordr"
 _ACNT_URL   = "/api/dostk/acnt"
 _TOKEN_URL  = "/oauth2/token"
+_TOKEN_FILE = os.path.expanduser("~/.cache/kiwoom_mock_token.json")
 
 _token_cache: dict = {"token": None, "exp": 0.0}
 
@@ -81,10 +83,33 @@ def _first_num(d: dict, keys: list[str]):
 
 # ── 토큰 ──────────────────────────────────────────────────────────────────────
 
+def _load_token_disk(now: float) -> str | None:
+    try:
+        with open(_TOKEN_FILE, encoding="utf-8") as f:
+            d = json.load(f)
+        if d.get("token") and now < float(d.get("exp", 0)) - 60:
+            _token_cache.update(token=d["token"], exp=float(d["exp"]))
+            return d["token"]
+    except Exception:
+        pass
+    return None
+
+
+def _save_token_disk(token: str, exp: float) -> None:
+    try:
+        import safe_io
+        safe_io.atomic_write_json(_TOKEN_FILE, {"token": token, "exp": exp})
+    except Exception as e:
+        logger.debug("모의 토큰 디스크 저장 실패(무시): %s", e)
+
+
 def _get_token() -> str | None:
     now = time.time()
     if _token_cache["token"] and now < _token_cache["exp"] - 30:
         return _token_cache["token"]
+    disk = _load_token_disk(now)
+    if disk:
+        return disk
     if not _key() or not _secret():
         logger.error("모의 앱키 없음 (KIWOOM_MOCK_API_KEY 또는 KIWOOM_API_KEY)")
         return None
@@ -101,7 +126,13 @@ def _get_token() -> str | None:
         j = r.json()
         tok = j.get("token") or j.get("access_token")
         if not tok:
-            logger.error("모의 토큰 응답에 token 없음")
+            logger.error(
+                "모의 토큰 응답에 token 없음: status=%s return_code=%s return_msg=%s keys=%s",
+                getattr(r, "status_code", None),
+                j.get("return_code"),
+                j.get("return_msg") or j.get("error") or j.get("message"),
+                sorted(j.keys()),
+            )
             return None
         # 만료: 키움은 expires_dt(YYYYMMDDHHMMSS) 반환. 없으면 expires_in, 둘 다 없으면 1h.
         exp = now + 3600
@@ -114,6 +145,7 @@ def _get_token() -> str | None:
         logger.error("모의 토큰 발급 실패: %s", e)   # fail-closed: 파싱 오류 포함 None 반환
         return None
     _token_cache.update(token=tok, exp=exp)
+    _save_token_disk(tok, exp)
     return tok
 
 

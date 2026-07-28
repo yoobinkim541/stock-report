@@ -815,6 +815,45 @@ def test_views_paper_summary_assembles(monkeypatch, tmp_path):
     assert len(d["nav_series"]) == 2
 
 
+def test_views_paper_summary_reconstructs_positions_when_balance_unavailable(monkeypatch, tmp_path):
+    """잔고 API가 꺼져도 성공 주문 이력과 결정 원장 가격으로 보유 내역을 복원한다."""
+    import store
+    from dashboard import views
+    from ml import adaptive
+    from providers import market_data
+
+    hist = [
+        {"kind": "snapshot", "date": "2026-07-24 15:40", "nav": 9_379_829.0, "cash": 159_029.0, "positions": 2},
+        {"kind": "order", "date": "2026-07-10 09:31", "code": "005930", "side": "buy", "qty": 5, "ok": True},
+        {"kind": "order", "date": "2026-07-20 09:31", "code": "207940", "side": "buy", "qty": 2, "ok": True},
+        {"kind": "order", "date": "2026-07-24 09:31", "code": "000270", "side": "sell", "qty": 1, "ok": True},
+        {"kind": "order", "date": "2026-07-24 09:31", "code": "035720", "side": "buy", "qty": 1, "ok": False},
+    ]
+    monkeypatch.setattr(store, "all", lambda name, **k: list(hist))
+
+    import kiwoom_mock
+    monkeypatch.setattr(kiwoom_mock, "get_balance", lambda: {"ok": False})
+    monkeypatch.setattr(market_data, "fetch_kospi_stats", lambda *a, **k: {})
+
+    led = adaptive.Ledger("kr_mock", base_dir=tmp_path)
+    led.log_decision({"date": "2026-07-10", "ticker": "005930.KS", "code": "005930",
+                      "side": "편입", "order_side": "buy", "qty": 5, "price": 70000.0,
+                      "rationale": {"one_line_reason": "삼성전자 편입"}, "ok": True})
+    led.log_decision({"date": "2026-07-20", "ticker": "207940.KS", "code": "207940",
+                      "side": "편입", "order_side": "buy", "qty": 2, "price": 1383000.0,
+                      "rationale": {"one_line_reason": "삼바 편입"}, "ok": True})
+    monkeypatch.setattr(adaptive, "Ledger", lambda s: led)
+
+    d = views.paper_summary("kr_mock")
+
+    assert d["balance_ok"] is False
+    assert d["nav"] == 9_379_829.0
+    assert [(p["symbol"], p["shares"]) for p in d["positions"]] == [("207940", 2), ("005930", 5)]
+    assert d["positions"][0]["avg"] == 1_383_000.0
+    assert d["positions"][0]["value"] == 2_766_000.0
+    assert [r["code"] for r in d["order_history"]] == ["000270", "035720", "207940", "005930"]
+
+
 def test_views_paper_summary_graceful_empty(monkeypatch):
     """store·잔고·원장 전부 실패해도 무예외 — 빈 뼈대 반환 (크론 미실행 신규 환경)."""
     import store

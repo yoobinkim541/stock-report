@@ -118,6 +118,20 @@ def _account_section(surface: str):
             st.caption(f"💸 누적 거래비용 {_money(c['total'], cur)}\n\n"
                        f"회전율 {c['turnover']:.0f}% · 드래그 −{c['drag']:.2f}%p")
 
+    orders = d.get("order_history") or []
+    if orders:
+        st.markdown("##### 최근 주문 내역")
+        st.dataframe(pd.DataFrame([{
+            "시각": r.get("date"),
+            "종목": r.get("code") or r.get("symbol") or r.get("ticker"),
+            "방향": "매수" if r.get("side") == "buy" else ("매도" if r.get("side") == "sell" else r.get("side")),
+            "수량": r.get("qty"),
+            "사유": r.get("reason") or "—",
+            "상태": "✅ 성공" if r.get("ok") is True else ("❌ 실패" if r.get("ok") is False else "—"),
+            "메시지": r.get("msg") or "—",
+        } for r in orders[:30]]), hide_index=True, width="stretch",
+            column_config={"메시지": st.column_config.TextColumn(width="large")})
+
     # ── 🏗️ 구조레버 슬리브 (US — Tier3 게이트 GO 시 모의 라이브 검증) ──────────
     sl = d.get("sleeve")
     if sl:

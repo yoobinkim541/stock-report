@@ -76,6 +76,9 @@ def _growth_section(hist):
 
 def _risk_section():
     s = cached.risk_struct()
+    if not isinstance(s, dict):
+        st.warning("리스크 분석 불가: 데이터 부족")
+        return
     if s.get("error"):
         st.warning(f"리스크 분석 불가: {s['error']}")
         return
