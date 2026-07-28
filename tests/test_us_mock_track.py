@@ -240,3 +240,24 @@ def test_sleeve_plan_band_and_price_guard():
 def test_sleeve_plan_max_frac_clamp():
     frac, _ = T.sleeve_plan(2.5, 100_000, {}, 50.0, symbol="QLD")   # 폭주 reco
     assert frac == T.LEV_SLEEVE_MAX_FRAC
+
+
+def test_leverage_sleeve_mode_defaults_to_shadow_and_legacy_bool_enables_paper(monkeypatch):
+    monkeypatch.delenv("US_MOCK_LEV_SLEEVE_MODE", raising=False)
+    monkeypatch.delenv("US_MOCK_LEV_SLEEVE", raising=False)
+    assert T.leverage_sleeve_mode() == "shadow"
+    assert T.leverage_sleeve_paper_enabled() is False
+
+    monkeypatch.setenv("US_MOCK_LEV_SLEEVE", "true")
+    assert T.leverage_sleeve_mode() == "paper"
+    assert T.leverage_sleeve_paper_enabled() is True
+
+
+def test_leverage_sleeve_mode_accepts_off_shadow_paper(monkeypatch):
+    for mode in ("off", "shadow", "paper"):
+        monkeypatch.setenv("US_MOCK_LEV_SLEEVE_MODE", mode)
+        monkeypatch.delenv("US_MOCK_LEV_SLEEVE", raising=False)
+        assert T.leverage_sleeve_mode() == mode
+
+    monkeypatch.setenv("US_MOCK_LEV_SLEEVE_MODE", "bad-value")
+    assert T.leverage_sleeve_mode() == "shadow"

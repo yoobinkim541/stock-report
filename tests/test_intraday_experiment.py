@@ -1,4 +1,9 @@
-from ml.intraday_experiment import DecisionSnapshot, RiskGovernor, label_shadow_decision
+from ml.intraday_experiment import (
+    DecisionSnapshot,
+    RiskGovernor,
+    label_lifecycle_decision,
+    label_shadow_decision,
+)
 import pytest
 
 
@@ -228,3 +233,57 @@ def test_label_shadow_decision_marks_missing_entry_price_pending():
     assert [label.horizon for label in labels] == ["5m", "15m"]
     assert all(label.quality_label == "pending" for label in labels)
     assert all(label.pending_reason == "missing_entry_price" for label in labels)
+
+
+def test_label_lifecycle_decision_records_partial_target_then_full_target():
+    decision = DecisionSnapshot(
+        id="life1",
+        timestamp="2026-07-28T09:00:00+09:00",
+        symbol="005930",
+        session_phase="open",
+        features={"price": 100.0},
+        signals={},
+        decision="long",
+        position_context={"qty": 10},
+        expected_edge=2.0,
+        risk_budget=2.0,
+        cost_estimate=0.0,
+    )
+
+    label = label_lifecycle_decision(decision, [
+        {"minute": 0, "price": 100.0},
+        {"minute": 1, "high": 102.2, "low": 100.5, "price": 101.8},
+        {"minute": 2, "high": 104.5, "low": 101.5, "price": 104.0},
+    ])
+
+    assert label.partial_target_hit is True
+    assert label.full_target_hit is True
+    assert label.partial_stop_hit is False
+    assert label.full_stop_hit is False
+    assert label.quality_label == "good"
+    assert label.realized_r > 1.0
+
+
+def test_label_lifecycle_decision_prefers_full_stop_when_same_bar_hits_both():
+    decision = DecisionSnapshot(
+        id="life2",
+        timestamp="2026-07-28T09:00:00+09:00",
+        symbol="005930",
+        session_phase="open",
+        features={"price": 100.0},
+        signals={},
+        decision="long",
+        position_context={"qty": 10},
+        expected_edge=2.0,
+        risk_budget=2.0,
+        cost_estimate=0.0,
+    )
+
+    label = label_lifecycle_decision(decision, [
+        {"minute": 0, "price": 100.0},
+        {"minute": 1, "high": 104.5, "low": 97.8, "price": 100.0},
+    ])
+
+    assert label.full_stop_hit is True
+    assert label.full_target_hit is False
+    assert label.quality_label == "bad"
