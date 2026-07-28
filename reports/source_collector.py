@@ -121,12 +121,19 @@ SOURCE_CLASSIFICATION = {
     "saveticker_report_pdf": {"family": "report", "kind": "report", "trust": "B", "horizon": "1w"},
     "arca": {"family": "community", "kind": "community_signal", "trust": "C", "horizon": "intraday"},
     "telegram": {"family": "community", "kind": "community_signal", "trust": "C", "horizon": "intraday"},
+    "polymarket": {"family": "prediction_market", "kind": "prediction_market", "trust": "B", "horizon": "intraday"},
     "yahoo_finance": {"family": "market_data", "kind": "snapshot", "trust": "A", "horizon": "intraday"},
     "fred": {"family": "macro_data", "kind": "macro_snapshot", "trust": "A", "horizon": "1d"},
     "worldgovernmentbonds": {"family": "macro_data", "kind": "macro_snapshot", "trust": "A", "horizon": "1d"},
 }
 ARCA_KIND_MAP = {"🧠분석": "analysis", "📰뉴스": "news", "ℹ️정보": "info", "실적": "earnings"}
 TELEGRAM_KIND_MAP = {"reddit_analysis": "analysis", "breaking": "breaking", "premarket": "premarket"}
+POLYMARKET_API_BASE = "https://gamma-api.polymarket.com"
+POLYMARKET_DEFAULT_KEYWORDS = [
+    "fed", "fomc", "rate", "rates", "cpi", "inflation", "recession", "tariff",
+    "trump", "oil", "bitcoin", "btc", "ethereum", "nvidia", "ai", "semiconductor",
+    "china", "taiwan", "russia", "ukraine", "israel", "iran",
+]
 
 
 def _source_root(source: str) -> str:
@@ -190,6 +197,8 @@ def _classify_event(event: dict) -> dict:
             kind = TELEGRAM_KIND_MAP.get(classify_post(scan_text), "community_signal")
         except Exception:
             kind = "community_signal"
+    elif root == "polymarket":
+        kind = "prediction_market"
     elif root in {"yahoo_finance", "fred", "worldgovernmentbonds"}:
         kind = str(row.get("type") or kind or profile["kind"]).strip() or profile["kind"]
     elif root == "saveticker":
@@ -197,11 +206,15 @@ def _classify_event(event: dict) -> dict:
             kind = "analysis"
 
     topic = _topic_from_text(" ".join([scan_text, " ".join(labels)]))
+    if root == "polymarket" and labels:
+        topic = labels[0]
     if not topic:
         if root.startswith("telegram"):
             topic = "텔레그램"
         elif root == "arca":
             topic = category or "아카"
+        elif root == "polymarket":
+            topic = "예측시장"
         elif root.startswith("saveticker"):
             topic = "SaveTicker"
         elif root == "yahoo_finance":
@@ -221,6 +234,8 @@ def _classify_event(event: dict) -> dict:
         wiki_eligible = kind in {"analysis", "earnings"} or text_len >= 800
     elif root == "telegram":
         wiki_eligible = kind == "analysis" or text_len >= 900
+    elif root == "polymarket":
+        wiki_eligible = True
 
     trust = profile["trust"]
     confidence_map = {"A": 0.92, "B": 0.8, "C": 0.62, "D": 0.45}
@@ -1239,6 +1254,196 @@ def fetch_world_gov_bond_events(countries: dict[str, str] = WORLD_GOV_BOND_COUNT
     return [_classify_event(event) for event in events]
 
 
+def _as_float(value: object) -> float | None:
+    try:
+        if value in (None, ""):
+            return None
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _json_list(value: object) -> list:
+    if isinstance(value, list):
+        return value
+    if isinstance(value, tuple):
+        return list(value)
+    if isinstance(value, str):
+        text = value.strip()
+        if not text:
+            return []
+        try:
+            parsed = json.loads(text)
+            return parsed if isinstance(parsed, list) else []
+        except json.JSONDecodeError:
+            return []
+    return []
+
+
+def _polymarket_labels(event: dict) -> list[str]:
+    labels = []
+    for item in event.get("tags") or []:
+        if isinstance(item, str):
+            text = item
+        elif isinstance(item, dict):
+            text = item.get("label") or item.get("name") or item.get("slug") or ""
+        else:
+            text = ""
+        text = str(text).strip()
+        if text:
+            labels.append(text)
+    category = str(event.get("category") or "").strip()
+    if category:
+        labels.append(category)
+    return _normalize_symbols(labels)
+
+
+def _polymarket_yes_probability(market: dict) -> float | None:
+    outcomes = [str(item).strip().lower() for item in _json_list(market.get("outcomes"))]
+    prices = [_as_float(item) for item in _json_list(market.get("outcomePrices"))]
+    if not prices:
+        return None
+    try:
+        idx = outcomes.index("yes")
+    except ValueError:
+        idx = 0
+    if idx >= len(prices):
+        return None
+    price = prices[idx]
+    if price is None:
+        return None
+    return round(price, 4)
+
+
+def _polymarket_matches_keywords(event: dict, market: dict, keywords: list[str]) -> bool:
+    if not keywords:
+        return True
+    haystack = " ".join(
+        str(part or "")
+        for part in [
+            event.get("title"),
+            event.get("slug"),
+            event.get("category"),
+            market.get("question"),
+            market.get("slug"),
+            " ".join(_polymarket_labels(event)),
+        ]
+    ).lower()
+    for raw in keywords:
+        word = str(raw).lower().strip()
+        if not word:
+            continue
+        if re.search(rf"(?<![a-z0-9]){re.escape(word)}(?![a-z0-9])", haystack):
+            return True
+    return False
+
+
+def _polymarket_default_keywords() -> list[str]:
+    raw = os.getenv("STOCK_COLLECTOR_POLYMARKET_KEYWORDS", "").strip()
+    if not raw:
+        return POLYMARKET_DEFAULT_KEYWORDS
+    return [item.strip() for item in raw.split(",") if item.strip()]
+
+
+def fetch_polymarket_events(limit: int | None = None, *, min_volume: float | None = None,
+                            keywords: list[str] | None = None) -> list[dict]:
+    """Collect public Polymarket probabilities as auxiliary market-risk signals."""
+    limit = limit if limit is not None else int(os.getenv("STOCK_COLLECTOR_POLYMARKET_LIMIT", "80"))
+    min_volume = min_volume if min_volume is not None else float(os.getenv("STOCK_COLLECTOR_POLYMARKET_MIN_VOLUME", "10000"))
+    keywords = _polymarket_default_keywords() if keywords is None else keywords
+    request_limit = min(200, max(50, int(limit) * 4))
+    try:
+        resp = requests.get(
+            f"{POLYMARKET_API_BASE}/events",
+            headers=PLAIN_HEADERS,
+            params={
+                "active": True,
+                "closed": False,
+                "archived": False,
+                "limit": request_limit,
+                "order": "volume",
+                "ascending": False,
+            },
+            timeout=15,
+        )
+        resp.raise_for_status()
+        payload = resp.json()
+    except Exception as exc:
+        logger.warning("polymarket 수집 실패: %s", exc)
+        _note_error("polymarket", exc)
+        return []
+
+    events: list[dict] = []
+    for event in payload if isinstance(payload, list) else []:
+        if event.get("closed") is True or event.get("active") is False:
+            continue
+        labels = _polymarket_labels(event)
+        event_slug = str(event.get("slug") or event.get("ticker") or event.get("id") or "").strip()
+        event_url = f"https://polymarket.com/event/{event_slug}" if event_slug else "https://polymarket.com"
+        markets = event.get("markets") if isinstance(event.get("markets"), list) else [event]
+        for market in markets:
+            if market.get("closed") is True or market.get("active") is False:
+                continue
+            probability = _polymarket_yes_probability(market)
+            if probability is None:
+                continue
+            volume = _as_float(market.get("volume")) or _as_float(event.get("volume")) or 0.0
+            if min_volume is not None and volume < float(min_volume):
+                continue
+            if not _polymarket_matches_keywords(event, market, keywords):
+                continue
+            liquidity = _as_float(market.get("liquidity")) or _as_float(event.get("liquidity"))
+            open_interest = _as_float(market.get("openInterest")) or _as_float(event.get("openInterest"))
+            end_date = str(market.get("endDate") or event.get("endDate") or "").strip()
+            question = str(market.get("question") or event.get("title") or "").strip()
+            event_title = str(event.get("title") or question or event_slug).strip()
+            market_id = str(market.get("id") or market.get("conditionId") or "").strip()
+            market_slug = str(market.get("slug") or market_id).strip()
+            url = event_url
+            if len(markets) > 1 and market_slug:
+                url = f"{event_url}#market-{market_slug}"
+            title = f"{question or event_title}: Yes {probability * 100:.1f}%"
+            body = (
+                f"Polymarket implied probability for '{question or event_title}' is "
+                f"{probability * 100:.1f}% Yes. Volume {volume:.0f}; "
+                f"liquidity {liquidity or 0:.0f}; open interest {open_interest or 0:.0f}. "
+                "Prediction-market prices are crowd-implied probabilities, not verified facts."
+            )
+            events.append({
+                "source": "polymarket",
+                "source_url": POLYMARKET_API_BASE,
+                "type": "prediction_market",
+                "title": title,
+                "url": url,
+                "published_at": event.get("published_at") or event.get("publishedAt") or event.get("startDate") or "",
+                "body_raw": body,
+                "body": body,
+                "body_excerpt": body[:500],
+                "tickers": _extract_tickers(" ".join([question, event_title])),
+                "tags": labels,
+                "markets": ["prediction_market"],
+                "metrics": {
+                    "event_id": str(event.get("id") or ""),
+                    "market_id": market_id,
+                    "yes_probability": probability,
+                    "volume": float(volume),
+                    "liquidity": None if liquidity is None else float(liquidity),
+                    "open_interest": None if open_interest is None else float(open_interest),
+                    "end_date": end_date,
+                },
+                "raw_payload": {
+                    "event_id": str(event.get("id") or ""),
+                    "market_id": market_id,
+                    "event": event,
+                    "market": market,
+                },
+            })
+    if events:
+        _LAST_ERRORS.pop("polymarket", None)
+    events.sort(key=lambda row: ((row.get("metrics") or {}).get("volume") or 0.0), reverse=True)
+    return [_classify_event(event) for event in events[: max(1, int(limit))]]
+
+
 # ── 소스별 수집 헬스 (수집 공백 가시화 — 조용한 실패 차단) ────────────────────
 
 HEALTH_FILE = "source_health.json"
@@ -1251,6 +1456,7 @@ SOURCE_STALE_HOURS = {
     "yahoo_finance": 24,
     "fred": 72,
     "worldgovernmentbonds": 72,
+    "polymarket": 12,
 }
 
 
@@ -1258,7 +1464,7 @@ def expected_sources() -> list[str]:
     """수집기가 시도해야 하는 소스 전체 (텔레그램은 채널별 분리 — 채널 단위 공백 감지)."""
     return (["saveticker", "arca"]
             + [f"telegram:{c}" for c in TELEGRAM_NEWS_CHANNELS]
-            + ["yahoo_finance", "fred", "worldgovernmentbonds"])
+            + ["yahoo_finance", "fred", "worldgovernmentbonds", "polymarket"])
 
 
 def update_source_health(events: list[dict], cache_dir: Path | str = DEFAULT_CACHE_DIR,
@@ -1357,6 +1563,7 @@ def collect_once(cache_dir: Path | str = DEFAULT_CACHE_DIR, now: datetime | None
         ("yahoo_finance", fetch_market_snapshot_events),
         ("fred", fetch_fred_macro_events),
         ("worldgovernmentbonds", fetch_world_gov_bond_events),
+        ("polymarket", fetch_polymarket_events),
     ]
     events: list[dict] = []
     for name, fn in fetchers:

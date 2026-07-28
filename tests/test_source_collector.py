@@ -194,6 +194,132 @@ def test_fetch_world_gov_bond_events_emits_common_maturities(monkeypatch):
     assert "#30Y" in urls[-1]
 
 
+def test_fetch_polymarket_events_normalizes_gamma_markets(monkeypatch):
+    class FakeResponse:
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return [
+                {
+                    "id": "100",
+                    "slug": "fed-decision-september",
+                    "title": "Fed decision in September?",
+                    "category": "Economics",
+                    "volume": "900000",
+                    "liquidity": "25000",
+                    "openInterest": "120000",
+                    "endDate": "2026-09-16T00:00:00Z",
+                    "active": True,
+                    "closed": False,
+                    "tags": [{"label": "Fed"}, {"label": "Rates"}],
+                    "markets": [
+                        {
+                            "id": "200",
+                            "slug": "fed-cut-in-september",
+                            "question": "Will the Fed cut rates in September?",
+                            "outcomes": '["Yes","No"]',
+                            "outcomePrices": '["0.63","0.37"]',
+                            "volume": "640000",
+                            "liquidity": "18000",
+                            "openInterest": "70000",
+                            "endDate": "2026-09-16T00:00:00Z",
+                            "active": True,
+                            "closed": False,
+                        }
+                    ],
+                }
+            ]
+
+    calls = []
+
+    def fake_get(url, **kwargs):
+        calls.append((url, kwargs))
+        return FakeResponse()
+
+    monkeypatch.setattr(sc.requests, "get", fake_get)
+
+    events = sc.fetch_polymarket_events(limit=5, min_volume=1000, keywords=["Fed"])
+
+    assert calls[0][0] == "https://gamma-api.polymarket.com/events"
+    assert calls[0][1]["params"]["active"] is True
+    assert len(events) == 1
+    event = events[0]
+    assert event["source"] == "polymarket"
+    assert event["source_url"] == "https://gamma-api.polymarket.com"
+    assert event["url"] == "https://polymarket.com/event/fed-decision-september"
+    assert "63.0%" in event["title"]
+    assert event["metrics"]["yes_probability"] == 0.63
+    assert event["metrics"]["volume"] == 640000.0
+    assert event["metrics"]["liquidity"] == 18000.0
+    assert event["classification"]["source_family"] == "prediction_market"
+    assert event["classification"]["kind"] == "prediction_market"
+    assert event["classification"]["topic"] == "Fed"
+    assert event["wiki_eligible"] is True
+    assert event["raw_payload"]["event_id"] == "100"
+
+
+def test_expected_sources_include_polymarket():
+    assert "polymarket" in sc.expected_sources()
+
+
+def test_polymarket_keyword_matching_uses_word_boundaries():
+    event = {"title": "Will Gedion Timothewos be the next Prime Minister of Ethiopia?", "category": "Politics"}
+    market = {"question": "Will Gedion Timothewos be the next Prime Minister of Ethiopia?"}
+
+    assert sc._polymarket_matches_keywords(event, market, ["ai"]) is False
+    assert sc._polymarket_matches_keywords({"title": "AI data center capex"}, {"question": ""}, ["ai"]) is True
+
+
+def test_polymarket_multi_market_event_keeps_distinct_cache_rows(monkeypatch, tmp_path):
+    class FakeResponse:
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return [
+                {
+                    "id": "300",
+                    "slug": "where-will-rates-end-year",
+                    "title": "Where will rates end the year?",
+                    "category": "Fed",
+                    "active": True,
+                    "closed": False,
+                    "markets": [
+                        {
+                            "id": "301",
+                            "slug": "rates-above-4",
+                            "question": "Will rates end above 4%?",
+                            "outcomes": '["Yes","No"]',
+                            "outcomePrices": '["0.52","0.48"]',
+                            "volume": "20000",
+                            "active": True,
+                            "closed": False,
+                        },
+                        {
+                            "id": "302",
+                            "slug": "rates-below-3",
+                            "question": "Will rates end below 3%?",
+                            "outcomes": '["Yes","No"]',
+                            "outcomePrices": '["0.18","0.82"]',
+                            "volume": "21000",
+                            "active": True,
+                            "closed": False,
+                        },
+                    ],
+                }
+            ]
+
+    monkeypatch.setattr(sc.requests, "get", lambda *args, **kwargs: FakeResponse())
+
+    events = sc.fetch_polymarket_events(limit=5, min_volume=1000, keywords=["rates"])
+    written = sc.append_events(events, cache_dir=tmp_path / "cache")
+
+    assert len(events) == 2
+    assert written == 2
+    assert len({event["url"] for event in events}) == 2
+
+
 def test_normalize_tickers_extracts_symbols_from_dicts():
     # SaveTicker 가 tickers 를 dict 리스트로 줄 때 symbol 만 추출
     assert sc._normalize_tickers([{"id": 17135, "name": None, "symbol": "SPCX"}]) == ["SPCX"]
@@ -606,11 +732,29 @@ def test_collect_once_isolates_source_crash(tmp_path, monkeypatch):
     monkeypatch.setattr(sc, "fetch_market_snapshot_events", lambda: [])
     monkeypatch.setattr(sc, "fetch_fred_macro_events", lambda: [])
     monkeypatch.setattr(sc, "fetch_world_gov_bond_events", lambda: [])
+    monkeypatch.setattr(sc, "fetch_polymarket_events", lambda: [])
     fetched, written = sc.collect_once(cache_dir=tmp_path / "cache")
     assert fetched == 1 and written == 1
     h = sc.load_source_health(tmp_path / "cache")
     assert h["saveticker"]["last_count"] == 0                     # 크래시 소스 = 0건 기록
     assert h["telegram:yuzukinaok1"]["last_count"] == 1
+
+
+def test_collect_once_includes_polymarket(tmp_path, monkeypatch):
+    monkeypatch.setattr(sc, "fetch_saveticker_events", lambda: [])
+    monkeypatch.setattr(sc, "fetch_arca_events", lambda max_pages=2: [])
+    monkeypatch.setattr(sc, "fetch_telegram_channel_events", lambda: [])
+    monkeypatch.setattr(sc, "fetch_market_snapshot_events", lambda: [])
+    monkeypatch.setattr(sc, "fetch_fred_macro_events", lambda: [])
+    monkeypatch.setattr(sc, "fetch_world_gov_bond_events", lambda: [])
+    monkeypatch.setattr(sc, "fetch_polymarket_events",
+                        lambda: [{"source": "polymarket", "title": "Fed cut odds", "url": "https://polymarket.com/event/fed"}])
+
+    fetched, written = sc.collect_once(cache_dir=tmp_path / "cache")
+
+    assert fetched == 1 and written == 1
+    h = sc.load_source_health(tmp_path / "cache")
+    assert h["polymarket"]["last_count"] == 1
 
 
 # ── 죽은 출처 복구 — 직접 폴백·FRED API·오류 원인 기록 ───────────────────────

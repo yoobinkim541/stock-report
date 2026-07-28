@@ -139,6 +139,50 @@ def strategy_experiment_state() -> dict:
     }
 
 
+def _as_float(value) -> float | None:
+    try:
+        if value in (None, ""):
+            return None
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def prediction_market_state(events: list[dict] | None = None, limit: int = 8) -> dict:
+    rows = events if events is not None else recent_source_events(hours=72, limit=120)
+    items = []
+    for row in rows or []:
+        if str(row.get("source") or "").split(":", 1)[0] != "polymarket":
+            continue
+        metrics = row.get("metrics") or {}
+        yes_probability = _as_float(metrics.get("yes_probability"))
+        if yes_probability is None:
+            continue
+        items.append({
+            "source": "polymarket",
+            "title": str(row.get("title") or "")[:220],
+            "url": row.get("url") or "",
+            "topic": (row.get("classification") or {}).get("topic") or row.get("topic") or "예측시장",
+            "yes_probability": round(yes_probability, 4),
+            "volume": _as_float(metrics.get("volume")),
+            "liquidity": _as_float(metrics.get("liquidity")),
+            "open_interest": _as_float(metrics.get("open_interest")),
+            "end_date": metrics.get("end_date") or "",
+            "collected_at": row.get("collected_at") or row.get("published_at") or "",
+        })
+    items.sort(key=lambda item: (
+        item.get("volume") or 0.0,
+        item.get("liquidity") or 0.0,
+        item.get("collected_at") or "",
+    ), reverse=True)
+    return {
+        "ok": True,
+        "count": len(items),
+        "items": items[:limit],
+        "caveat": "Prediction-market prices are crowd-implied probabilities, not verified facts.",
+    }
+
+
 def paper_state() -> dict:
     live = os.getenv("AGENT_CONSOLE_LIVE_PAPER", "0").lower() in {"1", "true", "yes", "on"}
     if not live:
@@ -394,6 +438,7 @@ def context_pack(surface: str = "market", *, hours: int = 72) -> dict:
         "portfolio": portfolio_state(),
         "paper": paper_state(),
         "strategy_experiments": strategy_experiment_state(),
+        "prediction_markets": prediction_market_state(events),
         "models": model_state(),
         "market_snapshot": realtime_market.build_market_snapshot(),
         "memory": memory,
