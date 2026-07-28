@@ -9,7 +9,7 @@ import subprocess
 import tempfile
 import threading
 
-from . import context, realtime_market, shared_memory, storage, wiki
+from . import context, evidence_context, realtime_market, shared_memory, storage, wiki
 
 _KST = timezone(timedelta(hours=9))
 
@@ -123,6 +123,8 @@ def answer(question: str, surface: str = "market", *, async_postprocess: bool = 
     except Exception as exc:
         response = _compose_error_fallback_answer(question, pack, exc)
     engine = _LAST_LLM_ENGINE or "local-rules"
+    intent = _classify_question_intent(question, pack, history)
+    evidence_usage = evidence_context.build_usage_summary(pack, intent=intent, engine=engine)
     response = _humanize_generic_fallback(question, surface, history, response)
     _safe_add_conversation("assistant", response, surface)
     postprocess = _postprocess_chat(question, response, surface, pack, history, async_mode=async_postprocess)
@@ -134,6 +136,9 @@ def answer(question: str, surface: str = "market", *, async_postprocess: bool = 
         "surface": surface,
         "context": {
             "engine": engine,
+            "intent": intent.get("name"),
+            "evidence_usage": evidence_usage,
+            "evidence_usage_lines": evidence_context.format_usage_lines(evidence_usage),
             "event_count": len(sources.get("events") or []),
             "memory_count": len(pack.get("memory") or []),
             "shared_memory_count": (pack.get("shared_memory") or {}).get("recordCount", 0),
@@ -1252,7 +1257,7 @@ def _classify_question_intent(question: str, pack: dict | None = None,
         )
     if _looks_like_market_brief(ql):
         return _intent_contract(
-            "market_brief",
+            "market_analysis",
             answer_style="오늘 시장 흐름, 뉴스, 지표, 섹터, 리스크를 종합",
             required_steps=["최신 뉴스/지수/금리/유가/달러 흐름 확인", "시장 신호와 리스크 요약", "포트폴리오 영향은 별도 분리"],
             retrieval_plan=["웹 검색 최신 시장 뉴스", "주요 지수/금리/유가/달러", "최근 수집 이벤트와 리포트"],

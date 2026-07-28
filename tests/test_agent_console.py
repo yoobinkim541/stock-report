@@ -2383,3 +2383,65 @@ def test_wiki_lint_missing_cross_ref_suggests_merge(monkeypatch, tmp_path):
     cross_ref_issues = [issue for issue in result["issues"] if issue["code"] == "missing_cross_ref"]
     assert len(cross_ref_issues) == 1
     assert cross_ref_issues[0]["suggested"] == "merge"
+
+
+def test_evidence_context_usage_summary_counts_real_sources(monkeypatch, tmp_path):
+    _isolate(monkeypatch, tmp_path)
+
+    from agent_console.evidence_context import build_usage_summary, format_usage_lines
+
+    pack = {
+        "sources": {"events": [{"title": "a"}, {"title": "b"}]},
+        "memory": [{"title": "m"}],
+        "market_snapshot": {"quotes": [{"symbol": "QQQ"}, {"symbol": "NVDA"}], "status": "ok"},
+        "paper": {"kr": {"decisions": [{"id": 1}, {"id": 2}, {"id": 3}]}},
+    }
+    summary = build_usage_summary(
+        pack,
+        wiki_pages=[{"id": "w1"}, {"id": "w2"}],
+        intent={"name": "market_analysis"},
+    )
+
+    assert summary == {
+        "intent": "market_analysis",
+        "events": 2,
+        "wiki": 2,
+        "realtime": 2,
+        "logs": 3,
+        "engine": "pending",
+        "retrieval": {"quote": "ok", "news": "ok", "broker": "unavailable"},
+    }
+    assert format_usage_lines(summary) == [
+        "맥락: 시장 events 2 / wiki 2 / 실시간 2 / 로그 3",
+        "엔진: pending",
+        "수집: quote ok, news ok, broker unavailable",
+    ]
+
+
+def test_answer_context_exposes_intent_and_evidence_usage(monkeypatch, tmp_path):
+    _isolate(monkeypatch, tmp_path)
+
+    from agent_console import agent
+
+    monkeypatch.setattr(agent, "_safe_context_pack", lambda surface: {
+        "surface": surface,
+        "sources": {"events": [{"title": "시장 뉴스"}], "source_counts": [], "symbol_counts": []},
+        "memory": [],
+        "shared_memory": {"recordCount": 0},
+        "market_snapshot": {"quotes": [{"symbol": "QQQ"}], "status": "ok"},
+        "paper": {"kr": {"decisions": [{"id": "d1"}]}},
+        "portfolio": {"holdings": []},
+        "ml_activity": [],
+        "focus": [],
+    })
+    monkeypatch.setattr(agent, "_safe_list_conversation", lambda limit, surface: [])
+    monkeypatch.setattr(agent, "_safe_add_conversation", lambda *args, **kwargs: None)
+    monkeypatch.setattr(agent, "_postprocess_chat", lambda *args, **kwargs: {"wiki_autocurate": "disabled"})
+    monkeypatch.setattr(agent, "_compose_answer", lambda question, pack, history=None: "한국 시장은 수급 확인이 필요합니다.")
+
+    result = agent.answer("한국증시는 어땠어", "market")
+
+    assert result["context"]["intent"] == "market_analysis"
+    assert result["context"]["evidence_usage"]["events"] == 1
+    assert result["context"]["evidence_usage"]["realtime"] == 1
+    assert result["context"]["evidence_usage_lines"][0] == "맥락: 시장 events 1 / wiki 0 / 실시간 1 / 로그 1"
