@@ -2556,6 +2556,52 @@ def test_special_intents_are_authoritative_in_the_llm_prompt(monkeypatch, tmp_pa
         assert f"intent: {expected_intent}" in prompts[0]
 
 
+def test_strategy_review_contract_precedes_asset_opinion(monkeypatch, tmp_path):
+    _isolate(monkeypatch, tmp_path)
+
+    from agent_console import agent
+
+    pack = {
+        "surface": "market",
+        "sources": {"events": []},
+        "memory": [],
+        "portfolio": {"holdings": []},
+        "paper": {},
+        "models": {"items": []},
+        "market_snapshot": {"quotes": []},
+    }
+    prompts = []
+    monkeypatch.setattr(
+        agent,
+        "_try_llm_prompt",
+        lambda prompt, **kwargs: prompts.append(prompt) or "전략 검토 답변",
+    )
+    monkeypatch.setattr(
+        agent,
+        "_compose_asset_opinion_answer",
+        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("asset opinion route used")),
+    )
+
+    assert agent._compose_answer("QQQ 매매 전략 검토해줘", pack, history=[]) == "전략 검토 답변"
+    assert len(prompts) == 1
+    assert "intent: strategy_review" in prompts[0]
+
+
+def test_strategy_logic_questions_keep_dedicated_rules_composer(monkeypatch, tmp_path):
+    _isolate(monkeypatch, tmp_path)
+
+    from agent_console import agent
+
+    monkeypatch.setattr(agent, "_compose_trading_logic_answer", lambda *args, **kwargs: "rules strategy report")
+    monkeypatch.setattr(
+        agent,
+        "_compose_general_chat_answer",
+        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("general strategy route used")),
+    )
+
+    assert agent._compose_answer("모의투자 단기투자 로직 평가해줘", {}, history=[]) == "rules strategy report"
+
+
 def test_stock_compare_contract_forbids_market_template_and_sets_peers(monkeypatch, tmp_path):
     _isolate(monkeypatch, tmp_path)
 

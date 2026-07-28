@@ -288,6 +288,8 @@ def _compose_answer(question: str, pack: dict, history: list[dict] | None = None
         return _compose_general_chat_answer(question, pack, history, intent=intent)
     if _is_trading_logic_question(question) or _is_trading_followup(question, history):
         return _compose_trading_logic_answer(question, pack)
+    if intent.get("name") == "strategy_review":
+        return _compose_general_chat_answer(question, pack, history, intent=intent)
     if _is_portfolio_preference_question(question, pack, history):
         return _compose_portfolio_preference_answer(question, pack, history)
     if _is_portfolio_risk_question(resolved_question, pack):
