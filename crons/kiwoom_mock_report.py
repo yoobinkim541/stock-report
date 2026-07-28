@@ -210,9 +210,8 @@ def _llm_shadow_summary():
 
 def _snapshots() -> list[dict]:
     try:
-        import store
-        return [r for r in store.all("kr_mock_history")
-                if r.get("kind") == "snapshot" and r.get("nav") is not None]
+        from lib import mock_generations
+        return mock_generations.active_snapshots("kr_mock_history")
     except Exception as e:
         logger.warning("히스토리 조회 실패: %s", e)
         return []
@@ -247,6 +246,16 @@ def build_report(html: bool = False, detail: bool | None = None) -> str:
            f"{today.strftime('%Y-%m-%d')} ({_WEEKDAY_KR[today.weekday()]}) {today.strftime('%H:%M')} KST")
     if not bal.get("ok"):
         return hdr + "\n━━━━━━━━━━━━━━━━━━━\n  ⚠️ 잔고 조회 실패 — 모의 연결/모의투자 신청 확인 필요"
+
+    # 계좌 만기 리셋으로 세대가 넘어간 이력이 있으면 헤더에 표시 (누적수익률·MDD가
+    # 리셋 이전 세대와 섞이지 않는다는 걸 알 수 있도록)
+    try:
+        from lib import mock_generations
+        gen_no = mock_generations.generation_count("kr_mock_history")
+        if gen_no > 1:
+            hdr += f" · 세대{gen_no}"
+    except Exception as e:
+        logger.warning("세대 정보 조회 실패: %s", e)
 
     positions = bal["positions"]
     cash = bal["cash_krw"]
