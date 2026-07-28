@@ -2527,9 +2527,9 @@ def test_llm_primary_answer_survives_when_not_forbidden(monkeypatch, tmp_path):
         "models": {"items": []},
         "market_snapshot": {"quotes": []},
     }
-    monkeypatch.setattr(agent, "_try_llm_chat", lambda *args, **kwargs: "JP모건은 GS/MS/BAC/C와 비교해야 합니다.")
+    expected = "고유 LLM 응답: JP모건은 GS/MS/BAC/C와 비교해야 합니다."
+    monkeypatch.setattr(agent, "_try_llm_chat", lambda *args, **kwargs: expected)
 
     out = agent._compose_answer("JP모건 다른 IB랑 비교해줘", pack, history=[])
 
-    assert "JP모건" in out
-    assert "시장 신호 점수" not in out
+    assert out == expected
