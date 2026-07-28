@@ -1181,6 +1181,18 @@ def _looks_like_technical_analysis(ql: str) -> bool:
     return any(word in ql for word in ("기술적 분석", "기술 분석", "차트만", "기술적", "보조지표", "이동평균"))
 
 
+def _looks_like_strategy_review(ql: str) -> bool:
+    return any(word in ql for word in ("단기투자", "모의투자", "데이트레이딩", "실적", "손실 원인", "왜 졌", "성과"))
+
+
+def _looks_like_live_market_check(ql: str) -> bool:
+    return any(word in ql for word in ("지금 수급", "코스피 선물", "상승 하락 종목", "상승/하락", "장중", "실시간 시장", "현재 수급"))
+
+
+def _looks_like_wiki_lookup(ql: str) -> bool:
+    return any(word in ql for word in ("wiki", "위키", "지식 카드", "쌓였", "근거 카드"))
+
+
 def _looks_like_peer_compare(ql: str) -> bool:
     compare_words = ("비교", "피어", "peer", "동종", "다른", "경쟁사", "같은 업종")
     domain_words = ("ib", "은행", "증권", "금융", "회사", "종목")
@@ -1221,7 +1233,7 @@ def _classify_question_intent(question: str, pack: dict | None = None,
 
     if _looks_like_meta_question(ql):
         return _intent_contract(
-            "meta",
+            "meta_debug",
             answer_style="왜 그렇게 답했는지, 무엇을 고치면 되는지 설명",
             required_steps=["직전 답변의 라우팅/컨텍스트/도구 사용 문제를 먼저 설명", "투자 시장 템플릿으로 전환하지 않음"],
             forbidden_templates=["현재 시장 상황 인식", "MIXED", "시장 신호 점수"],
@@ -1234,10 +1246,34 @@ def _classify_question_intent(question: str, pack: dict | None = None,
             retrieval_plan=["가격 히스토리", "거래량", "이동평균/RSI/MACD 등 차트 지표"],
             forbidden_templates=["뉴스 제외", "거시 제외", "재무제표 제외", "현재 시장 상황 인식", "시장 신호 점수"],
         )
+    if _looks_like_live_market_check(ql):
+        return _intent_contract(
+            "live_market_check",
+            answer_style="장중 시세·수급·선물·시장폭 freshness를 먼저 확인",
+            required_steps=["실시간 스냅샷 확인", "수급/선물/시장폭 가능 여부 표시", "데이터 unavailable을 결론과 분리"],
+            retrieval_plan=["market_snapshot", "broker/KRX 수급", "KOSPI200 선물", "상승/하락 종목 수", "USD/KRW"],
+            forbidden_templates=["현재 시장 상황 인식", "시장 신호 점수"],
+        )
+    if _looks_like_strategy_review(ql):
+        return _intent_contract(
+            "strategy_review",
+            answer_style="모의투자 로그, signal decision, outcome label, 비용/슬리피지 기반 개선 분석",
+            required_steps=["모의투자 로그 확인", "결정 시점 feature와 outcome 분리", "비용/슬리피지 반영", "개선 가설 제시"],
+            retrieval_plan=["kr/us mock ledger", "DecisionSnapshot", "OutcomeLabel", "RiskGovernor 경고"],
+            forbidden_templates=["현재 시장 상황 인식", "MIXED", "시장 신호 점수"],
+        )
+    if _looks_like_wiki_lookup(ql):
+        return _intent_contract(
+            "wiki_lookup",
+            answer_style="위키/근거 카드 현황과 검증 상태를 요약",
+            required_steps=["source-backed와 unverified 분리", "stale 위키 표시", "원문 출처 링크 우선"],
+            retrieval_plan=["LLM wiki", "source wiki", "QMD local search"],
+            forbidden_templates=["현재 시장 상황 인식", "시장 신호 점수"],
+        )
     if _looks_like_peer_compare(ql):
         subject, peers = _peer_compare_subject_and_peers(q)
         return _intent_contract(
-            "peer_compare",
+            "stock_compare",
             answer_style="동종사 비교표 + 핵심 차이 + 최근 데이터 기준 해석",
             subject=subject,
             default_peers=peers,
@@ -1316,7 +1352,7 @@ def _intent_contract_lines(intent: dict) -> list[str]:
     if forbidden:
         lines.append("- 시장 템플릿 금지: " + ", ".join(forbidden))
     lines.append("- 답변 중단 가능 조건: " + ", ".join(intent.get("stop_conditions") or _INTENT_STOP_CONDITIONS))
-    if intent.get("name") == "peer_compare":
+    if intent.get("name") == "stock_compare":
         lines.append("- 출력 형식: 피어 비교표를 먼저 제시하고, 표 아래에 핵심 차이와 확인한 최신 정보 시점을 씁니다.")
     return lines
 

@@ -630,7 +630,7 @@ def test_agent_prompt_pins_peer_compare_intent_contract(monkeypatch, tmp_path):
     prompt = agent._build_general_chat_prompt("JP모건 다른 IB랑 비교해줘", pack, history=[])
 
     assert "[질문 의도]" in prompt
-    assert "intent: peer_compare" in prompt
+    assert "intent: stock_compare" in prompt
     assert "default_peers: JPM, GS, MS, BAC, C" in prompt
     assert "Yahoo Finance" in prompt
     assert "컨텍스트 부족은 답변 중단 조건이 아니라 검색 트리거" in prompt
@@ -2459,3 +2459,32 @@ def test_answer_context_exposes_intent_and_evidence_usage(monkeypatch, tmp_path)
     assert result["context"]["evidence_usage"]["realtime"] == 1
     assert result["context"]["evidence_usage_lines"][0] == "맥락: 시장 events 1 / wiki 2 / 실시간 1 / 로그 1"
     assert len(calls) == 1
+
+
+def test_intent_names_match_evidence_strategy_spec(monkeypatch, tmp_path):
+    _isolate(monkeypatch, tmp_path)
+
+    from agent_console import agent
+
+    assert agent._classify_question_intent("왜 이렇게 답했어?")["name"] == "meta_debug"
+    assert agent._classify_question_intent("JP모건 다른 IB랑 비교해줘")["name"] == "stock_compare"
+    assert agent._classify_question_intent("한국증시는 어땠어")["name"] == "market_analysis"
+    assert agent._classify_question_intent("단기투자 실적이 안좋은 이유가 뭘까")["name"] == "strategy_review"
+    assert agent._classify_question_intent("지금 수급이랑 코스피 선물 확인해줘")["name"] == "live_market_check"
+    assert agent._classify_question_intent("LLM wiki에 뭐가 쌓였어")["name"] == "wiki_lookup"
+
+
+def test_stock_compare_contract_forbids_market_template_and_sets_peers(monkeypatch, tmp_path):
+    _isolate(monkeypatch, tmp_path)
+
+    from agent_console import agent
+
+    intent = agent._classify_question_intent("JP모건 다른 IB랑 비교해줘")
+    lines = "\n".join(agent._intent_contract_lines(intent))
+
+    assert intent["subject"] == "JPM"
+    assert intent["default_peers"] == ["JPM", "GS", "MS", "BAC", "C"]
+    assert "Yahoo Finance 최신 시세" in lines
+    assert "현재 시장 상황 인식" in lines
+    assert "시장 신호 점수" in lines
+    assert "피어 비교표" in lines
