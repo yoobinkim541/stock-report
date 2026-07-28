@@ -836,6 +836,32 @@ def test_build_wiki_context_section_included_in_curation_prompt(monkeypatch, tmp
     assert "전체 페이지: 1" in prompt
 
 
+def test_auto_curation_prompt_lists_all_chat_kind_options():
+    """LLM이 예시 하나(playbook)만 보고 kind를 고정하지 않도록, 선택 가능한 kind를 전부 명시해야 한다."""
+    from agent_console import wiki
+
+    prompt = wiki._build_auto_curation_prompt(
+        question="질문", answer="답변", surface="market",
+        candidates=[], pack={}, history=[],
+    )
+
+    for kind in ("playbook", "risk", "decision", "concept", "note"):
+        assert kind in prompt
+    assert "source_digest" in prompt  # "이 경로에서 쓰지 않는다" 로 명시적으로 배제됨
+
+
+def test_plan_to_page_payload_defaults_missing_kind_to_note():
+    """kind 를 안 준 계획은 playbook(특정 종류)이 아니라 note(범용)로 떨어져야 편중이 줄어든다."""
+    from agent_console import wiki
+
+    payload = wiki._plan_to_page_payload(
+        {"action": "create", "title": "제목", "summary": "요약", "body": "본문"},
+        question="질문", answer="답변", surface="market",
+    )
+
+    assert payload["kind"] == "note"
+
+
 def test_wiki_track_page_usage_increments_use_count_and_last_used(monkeypatch, tmp_path):
     _isolate(monkeypatch, tmp_path)
 
@@ -2530,6 +2556,66 @@ def test_answer_context_exposes_intent_and_evidence_usage(monkeypatch, tmp_path)
     assert result["context"]["evidence_usage"]["realtime"] == 1
     assert result["context"]["evidence_usage_lines"][0] == "맥락: 시장 events 1 / wiki 2 / 실시간 1 / 로그 1"
     assert len(calls) == 1
+
+
+def test_answer_tracks_wiki_page_usage(monkeypatch, tmp_path):
+    """답변에 선택된 위키 페이지는 useCount 가 올라가야 한다 — 그래야 미사용 페이지 판별이 가능해진다."""
+    _isolate(monkeypatch, tmp_path)
+
+    from agent_console import agent, wiki
+
+    page1 = wiki.upsert_page({
+        "title": "손실한도 규칙", "summary": "요약", "body": "본문",
+        "surface": "market", "kind": "playbook", "status": "reviewed", "source_refs": [],
+    })
+    page2 = wiki.upsert_page({
+        "title": "레버리지 규칙", "summary": "요약", "body": "본문",
+        "surface": "market", "kind": "risk", "status": "reviewed", "source_refs": [],
+    })
+
+    monkeypatch.setattr(agent, "_safe_context_pack", lambda surface: {
+        "surface": surface,
+        "sources": {"events": [], "source_counts": [], "symbol_counts": []},
+        "memory": [], "shared_memory": {"recordCount": 0},
+        "market_snapshot": {"quotes": [], "status": "ok"},
+        "paper": {}, "portfolio": {"holdings": []}, "ml_activity": [], "focus": [],
+    })
+    monkeypatch.setattr(agent, "_safe_list_conversation", lambda limit, surface: [])
+    monkeypatch.setattr(agent, "_safe_add_conversation", lambda *args, **kwargs: None)
+    monkeypatch.setattr(agent, "_postprocess_chat", lambda *args, **kwargs: {"wiki_autocurate": "disabled"})
+    monkeypatch.setattr(agent.wiki, "list_pages",
+                        lambda **kwargs: [page1, page2])
+    monkeypatch.setattr(agent, "_compose_answer", lambda question, pack, history=None: "답변")
+
+    agent.answer("손실한도 질문", "market")
+
+    assert wiki.get_page(page1["id"])["useCount"] == 1
+    assert wiki.get_page(page1["id"])["lastQuery"] == "손실한도 질문"
+    assert wiki.get_page(page2["id"])["useCount"] == 1
+
+
+def test_answer_tracking_survives_unknown_page_id(monkeypatch, tmp_path):
+    """list_pages 가 저장소에 없는 페이지(id 불일치 등)를 돌려줘도 answer() 는 죽지 않아야 한다."""
+    _isolate(monkeypatch, tmp_path)
+
+    from agent_console import agent
+
+    monkeypatch.setattr(agent, "_safe_context_pack", lambda surface: {
+        "surface": surface,
+        "sources": {"events": [], "source_counts": [], "symbol_counts": []},
+        "memory": [], "shared_memory": {"recordCount": 0},
+        "market_snapshot": {"quotes": [], "status": "ok"},
+        "paper": {}, "portfolio": {"holdings": []}, "ml_activity": [], "focus": [],
+    })
+    monkeypatch.setattr(agent, "_safe_list_conversation", lambda limit, surface: [])
+    monkeypatch.setattr(agent, "_safe_add_conversation", lambda *args, **kwargs: None)
+    monkeypatch.setattr(agent, "_postprocess_chat", lambda *args, **kwargs: {"wiki_autocurate": "disabled"})
+    monkeypatch.setattr(agent.wiki, "list_pages", lambda **kwargs: [{"id": "no-such-page"}])
+    monkeypatch.setattr(agent, "_compose_answer", lambda question, pack, history=None: "답변")
+
+    result = agent.answer("아무 질문", "market")
+
+    assert result["ok"] is True
 
 
 def test_market_prompt_includes_prediction_market_context(monkeypatch, tmp_path):

@@ -122,6 +122,11 @@ def answer(question: str, surface: str = "market", *, async_postprocess: bool = 
     except Exception:
         wiki_pages = []
     pack["_wiki_context_pages"] = wiki_pages
+    for _wp in wiki_pages:
+        try:
+            wiki.track_page_usage(_wp.get("id"), question)
+        except Exception:
+            pass
     _reset_llm_engine()
     try:
         response = _compose_answer(question, pack, history=history)

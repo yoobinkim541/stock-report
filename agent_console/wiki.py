@@ -1390,6 +1390,13 @@ def _build_auto_curation_prompt(
         "가능한 action 값은 create, update, skip, delete, merge, split 이다.",
         "update 를 고를 때는 target_id 를 기존 후보 페이지 id 로 지정한다.",
         "확신이 낮으면 status 는 draft, 중간이면 reviewed, 이미 안정적인 운영 규칙이면 stable 이다.",
+        "kind 는 아래 5개 중 내용에 가장 맞는 것 하나를 고른다 (기본값에 기대지 말고 매번 명시할 것):",
+        "- playbook: 재사용 가능한 전략/절차/체크리스트 (예: 손실한도 대응 순서)",
+        "- risk: 손실·MDD·레버리지 등 위험 요인 판단이나 경고",
+        "- decision: 특정 시점에 내린 구체적 의사결정과 그 근거",
+        "- concept: 용어·지표·구조에 대한 정의/설명",
+        "- note: 위 4개에 안 맞는 그 외 재사용 가능한 메모",
+        "source_digest 는 이 경로에서 쓰지 않는다 (수집 파이프라인 전용 kind).",
         "필드: action, title, summary, body, kind, status, tags, source_refs, links, target_id, confidence, reason, page_feedback.",
         "관련 있는 기존 위키 후보가 있으면 해당 id 를 links 배열에 넣는다. 관련 없으면 links 는 빈 배열이다.",
         "action이 delete면 target_id(삭제할 기존 후보 id)와 reason만 있으면 된다.",
@@ -1514,7 +1521,7 @@ def _plan_to_page_payload(
     title = _clean(plan.get("title") or _derive_title(question, answer), 160)
     summary = _clean(plan.get("summary") or answer[:2400] or question[:2400], 2400)
     body = _clean(plan.get("body") or answer or summary, 6000)
-    kind = _clean(plan.get("kind") or "playbook", 40).lower() or "playbook"
+    kind = _clean(plan.get("kind") or "note", 40).lower() or "note"
     if kind not in VALID_KINDS:
         kind = "note"
     status = _clean(plan.get("status") or "draft", 40).lower() or "draft"
