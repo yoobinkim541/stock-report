@@ -171,3 +171,38 @@ def test_realtime_snapshot_exposes_us_quote_session(monkeypatch, tmp_path):
 
     assert snapshot["quotes"][0]["session"] == "premarket"
     assert "premarket" in "\n".join(realtime_market.compact_snapshot_lines(snapshot))
+
+
+def test_context_pack_includes_strategy_experiment_summary(monkeypatch, tmp_path):
+    from agent_console import context
+
+    monkeypatch.setenv("AGENT_CONSOLE_ML_DATA_DIR", str(tmp_path / "ml-data"))
+    ml_dir = tmp_path / "ml-data"
+    ml_dir.mkdir()
+    (ml_dir / "intraday_shadow_decisions.jsonl").write_text(
+        '{"id":"d1","symbol":"005930"}\n{"id":"d2","symbol":"000660"}\n',
+        encoding="utf-8",
+    )
+    (ml_dir / "intraday_outcome_labels.jsonl").write_text(
+        '{"decision_id":"d1","quality_label":"bad"}\n',
+        encoding="utf-8",
+    )
+
+    monkeypatch.setattr(context, "recent_source_events", lambda **kwargs: [])
+    monkeypatch.setattr(context, "world_memory_rows", lambda **kwargs: [])
+    monkeypatch.setattr(context, "latest_reports", lambda *args, **kwargs: [])
+    monkeypatch.setattr(context, "ml_activity", lambda *args, **kwargs: [])
+    monkeypatch.setattr(context, "portfolio_state", lambda: {"holdings": []})
+    monkeypatch.setattr(context, "paper_state", lambda: {})
+    monkeypatch.setattr(context, "model_state", lambda: {})
+    monkeypatch.setattr(context.realtime_market, "build_market_snapshot", lambda: {"quotes": [], "status": "empty"})
+
+    pack = context.context_pack("market")
+
+    assert pack["strategy_experiments"] == {
+        "ok": True,
+        "recent_decisions": 2,
+        "recent_labels": 1,
+        "risk_action": "observe",
+        "reasons": [],
+    }

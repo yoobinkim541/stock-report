@@ -1678,6 +1678,14 @@ def _compact_paper_context(pack: dict) -> list[str]:
     if ml_rows:
         counts = Counter(row.get("_file", "unknown") for row in ml_rows)
         lines.append("- ML 원장 " + ", ".join(f"{name} {cnt}건" for name, cnt in counts.most_common(4)))
+    experiments = pack.get("strategy_experiments") or {}
+    if experiments.get("ok"):
+        lines.append(
+            "- 전략 실험 "
+            f"shadow decisions {experiments.get('recent_decisions', 0)}건 · "
+            f"outcome labels {experiments.get('recent_labels', 0)}건 · "
+            f"risk {experiments.get('risk_action', 'observe')}"
+        )
     return lines
 
 

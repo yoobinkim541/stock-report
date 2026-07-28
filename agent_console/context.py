@@ -112,6 +112,33 @@ def ml_activity(limit: int = 80) -> list[dict]:
     return rows[:limit]
 
 
+def _count_jsonl(path: Path, *, limit: int = 500) -> int:
+    try:
+        if not path.exists():
+            return 0
+        count = 0
+        with path.open("r", encoding="utf-8", errors="replace") as fh:
+            for count, _line in enumerate(fh, start=1):
+                if count >= limit:
+                    break
+        return count
+    except Exception:
+        return 0
+
+
+def strategy_experiment_state() -> dict:
+    root = ml_data_dir()
+    decisions = _count_jsonl(root / "intraday_shadow_decisions.jsonl")
+    labels = _count_jsonl(root / "intraday_outcome_labels.jsonl")
+    return {
+        "ok": True,
+        "recent_decisions": decisions,
+        "recent_labels": labels,
+        "risk_action": "observe",
+        "reasons": [],
+    }
+
+
 def paper_state() -> dict:
     live = os.getenv("AGENT_CONSOLE_LIVE_PAPER", "0").lower() in {"1", "true", "yes", "on"}
     if not live:
@@ -366,6 +393,7 @@ def context_pack(surface: str = "market", *, hours: int = 72) -> dict:
         "ml_activity": ml_activity(),
         "portfolio": portfolio_state(),
         "paper": paper_state(),
+        "strategy_experiments": strategy_experiment_state(),
         "models": model_state(),
         "market_snapshot": realtime_market.build_market_snapshot(),
         "memory": memory,
