@@ -12,6 +12,8 @@ from collections.abc import Callable
 from datetime import datetime, timedelta, timezone
 from typing import Iterable
 
+from reports.evidence_cards import cards_to_source_refs, event_to_evidence_card
+
 KST = timezone(timedelta(hours=9))
 MIN_GROUP_EVENTS = 2
 MAX_EVENTS_PER_PAGE = 8
@@ -100,6 +102,33 @@ def _status_for(events: list[dict], refs: list[str]) -> str:
     if roots - {"telegram", "arca"}:
         return "reviewed"
     return "draft"
+
+
+def _community_only(events: list[dict]) -> bool:
+    roots = {_root_source(event.get("source")) for event in events}
+    return bool(roots) and roots <= {"telegram", "arca"}
+
+
+def _confidence_for_group(events: list[dict], evidence_cards: list) -> float:
+    if not evidence_cards:
+        return 0.5
+    if _community_only(events):
+        return min(float(card.confidence) for card in evidence_cards)
+    return 0.78 if _status_for(events, cards_to_source_refs(evidence_cards)) == "reviewed" else 0.55
+
+
+def _staleness_policy_for(evidence_cards: list) -> str:
+    if any(card.freshness == "intraday" for card in evidence_cards):
+        return "refresh_after_12h"
+    return "refresh_after_24h"
+
+
+def _answer_hints_for(events: list[dict], evidence_cards: list) -> list[str]:
+    hints = []
+    if _community_only(events):
+        hints.append("커뮤니티/텔레그램 단독 신호는 가격·수급·공식 자료와 교차확인 전에는 보조 근거로 둡니다.")
+    hints.append("최신성은 evidence freshness를 우선 확인합니다.")
+    return hints
 
 
 def _summary_for(topic: str, events: list[dict]) -> str:
@@ -249,7 +278,8 @@ def build_wiki_pages_from_events(events: list[dict], now: datetime | None = None
         rows = sorted(rows, key=lambda event: str(event.get("published_at") or event.get("collected_at") or ""), reverse=True)
         if not _is_strong_group(rows):
             continue
-        refs = _source_refs(rows)
+        evidence_cards = [event_to_evidence_card(row, now=now) for row in rows]
+        refs = cards_to_source_refs(evidence_cards)
         source_roots = sorted({_root_source(row.get("source")) for row in rows})
         ticker_counts = Counter(t for row in rows for t in (row.get("tickers") or []) if isinstance(t, str) and t.strip())
         tags = _dedupe([
@@ -275,7 +305,11 @@ def build_wiki_pages_from_events(events: list[dict], now: datetime | None = None
                 f"{display} 신호가 가격·크레딧·환율 데이터에서도 확인되는가?",
                 "공식 자료와 충돌하는 커뮤니티성 단서가 있는가?",
             ],
-            "confidence": 0.78 if _status_for(rows, refs) == "reviewed" else 0.55,
+            "evidence_ids": [card.id for card in evidence_cards],
+            "conflicting_evidence_ids": [],
+            "staleness_policy": _staleness_policy_for(evidence_cards),
+            "answer_hints": _answer_hints_for(rows, evidence_cards),
+            "confidence": _confidence_for_group(rows, evidence_cards),
         }
         # LLM enrich: 3+ 이벤트 그룹만 LLM으로 제목/요약/태그 생성
         if len(rows) >= 3:
