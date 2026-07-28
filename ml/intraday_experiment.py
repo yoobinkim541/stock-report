@@ -130,8 +130,32 @@ class RiskGovernor:
         if not data_fresh:
             reasons.append("stale_data")
             return {"action": "shadow_only", "reasons": reasons}
-        bad_count = sum(1 for label in labels if label.quality_label == "bad")
-        if bad_count >= self.max_bad_labels:
+        latest_labels: dict[str, tuple[int, OutcomeLabel]] = {}
+        for label in labels:
+            horizon = str(label.horizon or "").lower().removesuffix("m")
+            try:
+                horizon_order = int(horizon)
+            except ValueError:
+                horizon_order = -1
+            current = latest_labels.get(label.decision_id)
+            if current is None or horizon_order >= current[0]:
+                latest_labels[label.decision_id] = (horizon_order, label)
+
+        ordered_decisions: list[DecisionSnapshot] = []
+        seen_decision_ids: set[str] = set()
+        for decision in sorted(decisions, key=lambda item: item.timestamp):
+            if decision.id in seen_decision_ids:
+                continue
+            seen_decision_ids.add(decision.id)
+            ordered_decisions.append(decision)
+
+        consecutive_losses = 0
+        for decision in reversed(ordered_decisions):
+            latest = latest_labels.get(decision.id)
+            if latest is None or latest[1].quality_label != "bad":
+                break
+            consecutive_losses += 1
+        if consecutive_losses >= self.max_bad_labels:
             reasons.append("loss_cluster")
         if len(decisions) > self.max_turnover:
             reasons.append("excess_turnover")

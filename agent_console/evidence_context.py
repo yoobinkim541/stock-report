@@ -15,12 +15,13 @@ def _paper_decision_count(paper: dict) -> int:
 
 
 def build_usage_summary(pack: dict, *, wiki_pages: list[dict] | None = None,
-                        intent: dict | None = None, engine: str = "pending") -> dict:
+                        intent: dict | None = None, engine: str = "pending",
+                        fallback_reason: str | None = None) -> dict:
     sources = pack.get("sources") or {}
     market_snapshot = pack.get("market_snapshot") or {}
     quote_count = _len(market_snapshot.get("quotes"))
     event_count = _len(sources.get("events"))
-    return {
+    summary = {
         "intent": (intent or {}).get("name") or "general",
         "events": event_count,
         "wiki": _len(wiki_pages),
@@ -33,6 +34,9 @@ def build_usage_summary(pack: dict, *, wiki_pages: list[dict] | None = None,
             "broker": "ok" if (market_snapshot.get("broker") or {}).get("ok") else "unavailable",
         },
     }
+    if fallback_reason:
+        summary["fallback_reason"] = fallback_reason
+    return summary
 
 
 def format_usage_lines(summary: dict) -> list[str]:

@@ -32,7 +32,7 @@ def test_label_shadow_decision_creates_multiple_horizons():
     assert labels[2].max_favorable_excursion > 0
 
 
-def test_risk_governor_blocks_stale_or_loss_cluster():
+def test_risk_governor_does_not_count_multiple_horizons_as_multiple_losses():
     decision = DecisionSnapshot(
         id="d1",
         timestamp="2026-07-28T09:00:00+09:00",
@@ -54,13 +54,80 @@ def test_risk_governor_blocks_stale_or_loss_cluster():
         {"minute": 30, "price": 68700},
     ])
 
-    stale = RiskGovernor(max_bad_labels=2).assess([decision], labels, data_fresh=False)
-    loss_cluster = RiskGovernor(max_bad_labels=2).assess([decision], labels, data_fresh=True)
+    result = RiskGovernor(max_bad_labels=2).assess([decision], labels, data_fresh=True)
+
+    assert result == {"action": "allow", "reasons": []}
+
+
+def test_risk_governor_blocks_stale_data_or_consecutive_losing_decisions():
+    decisions = [
+        DecisionSnapshot(
+            id=f"d{index}",
+            timestamp=f"2026-07-28T09:{index:02d}:00+09:00",
+            symbol="005930",
+            session_phase="open",
+            features={"price": 70000},
+            signals={"momentum": 0.7},
+            decision="long",
+            position_context={},
+            expected_edge=0.004,
+            risk_budget=0.01,
+            cost_estimate=0.001,
+            reason_codes=["open_momentum"],
+        )
+        for index in (1, 2)
+    ]
+    labels = [
+        label
+        for decision in decisions
+        for label in label_shadow_decision(decision, [
+            {"minute": 0, "price": 70000},
+            {"minute": 5, "price": 69000},
+            {"minute": 15, "price": 68800},
+            {"minute": 30, "price": 68700},
+        ])
+    ]
+
+    stale = RiskGovernor(max_bad_labels=2).assess(decisions, labels, data_fresh=False)
+    loss_cluster = RiskGovernor(max_bad_labels=2).assess(decisions, labels, data_fresh=True)
 
     assert stale["action"] == "shadow_only"
     assert "stale_data" in stale["reasons"]
     assert loss_cluster["action"] == "size_down"
     assert "loss_cluster" in loss_cluster["reasons"]
+
+
+def test_risk_governor_requires_losses_to_be_consecutive():
+    decisions = [
+        DecisionSnapshot(
+            id=f"d{index}",
+            timestamp=f"2026-07-28T09:{index:02d}:00+09:00",
+            symbol="005930",
+            session_phase="open",
+            features={"price": 70000},
+            signals={},
+            decision="long",
+            position_context={},
+            expected_edge=0.004,
+            risk_budget=0.01,
+            cost_estimate=0.001,
+        )
+        for index in (1, 2, 3)
+    ]
+    exit_prices = (69000, 71000, 69000)
+    labels = [
+        label
+        for decision, exit_price in zip(decisions, exit_prices)
+        for label in label_shadow_decision(
+            decision,
+            [{"minute": 0, "price": 70000}, {"minute": 30, "price": exit_price}],
+            horizons=(30,),
+        )
+    ]
+
+    result = RiskGovernor(max_bad_labels=2).assess(decisions, labels, data_fresh=True)
+
+    assert result == {"action": "allow", "reasons": []}
 
 
 def test_label_shadow_decision_marks_missing_horizon_pending():
