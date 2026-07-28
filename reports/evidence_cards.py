@@ -152,17 +152,8 @@ def event_to_evidence_card(event: dict, *, now: datetime | None = None) -> Evide
     event_time = _parse_time(event.get("published_at") or event.get("collected_at")) or now
     topic = _clean(event.get("topic") or (event.get("classification") or {}).get("topic"), 120)
     event_type = _event_type(event)
-    payload = {
-        "source": event.get("source"),
-        "url": event.get("url"),
-        "title": event.get("title"),
-        "body_raw": event.get("body_raw") or event.get("body") or event.get("body_excerpt"),
-        "raw_path": event.get("raw_path"),
-        "text_path": event.get("text_path"),
-        "classification": event.get("classification") or {},
-    }
     return EvidenceCard(
-        id=_id_for(payload),
+        id=_id_for(event),
         source_type=_source_type(event.get("source")),
         source_name=_clean(event.get("source"), 120) or "unknown",
         source_url=_clean(event.get("url"), 500),
@@ -186,7 +177,9 @@ def trade_log_to_evidence_card(row: dict, *, now: datetime | None = None) -> Evi
     now = now or datetime.now(timezone.utc)
     symbol = _clean(row.get("symbol") or row.get("ticker"), 24).upper()
     title = f"{symbol or 'UNKNOWN'} 모의투자 결과"
-    body = _clean(row.get("reason") or row.get("reason_codes") or row.get("note"), 800)
+    raw_reason = row.get("reason") or row.get("reason_codes") or row.get("note") or ""
+    raw_reason_text = str(raw_reason)
+    body = _clean(raw_reason, 800)
     payload = dict(row)
     return EvidenceCard(
         id=_id_for({"trade": payload}),
@@ -195,7 +188,7 @@ def trade_log_to_evidence_card(row: dict, *, now: datetime | None = None) -> Evi
         source_url="",
         captured_at=now.astimezone(timezone.utc).isoformat(timespec="seconds"),
         event_time=_clean(row.get("timestamp") or now.isoformat(), 80),
-        raw_text="\n".join(part for part in [title, body] if part),
+        raw_text="\n".join(part for part in [title, raw_reason_text] if part),
         raw_payload=payload,
         symbols=[symbol] if symbol else [],
         markets=[_clean(row.get("market") or "KR", 16)],

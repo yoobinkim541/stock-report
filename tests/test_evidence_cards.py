@@ -1,6 +1,10 @@
 from datetime import datetime, timedelta, timezone
 
-from reports.evidence_cards import cards_to_source_refs, event_to_evidence_card
+from reports.evidence_cards import (
+    cards_to_source_refs,
+    event_to_evidence_card,
+    trade_log_to_evidence_card,
+)
 
 
 KST = timezone(timedelta(hours=9))
@@ -64,3 +68,42 @@ def test_cards_to_source_refs_keeps_url_and_raw_paths_deduped():
         "/tmp/nvda.txt",
         "/tmp/nvda.json",
     ]
+
+
+def test_event_ids_include_complete_raw_event_payload():
+    first = {
+        "source": "saveticker",
+        "url": "https://saveticker.com/nvda",
+        "title": "엔비디아 AI 서버 수요 확대",
+        "body_raw": "AI 서버 수요 확대",
+        "published_at": "2026-07-28T09:00:00+09:00",
+        "tickers": ["NVDA"],
+        "tags": ["기술/AI"],
+    }
+    second = {**first, "published_at": "2026-07-28T10:00:00+09:00"}
+
+    assert event_to_evidence_card(first).id != event_to_evidence_card(second).id
+
+
+def test_trade_log_to_evidence_card_preserves_raw_reason_for_shadow_trade():
+    raw_reason = "  shadow decision: 주문하지 않음\n근거: 변동성 확대와 유동성 부족  " + ("추가 원문 " * 300)
+    row = {
+        "source": "shadow_trade_log",
+        "symbol": "NVDA",
+        "market": "US",
+        "timestamp": "2026-07-28T10:00:00+00:00",
+        "decision": "hold",
+        "reason": raw_reason,
+        "mode": "shadow",
+    }
+
+    card = trade_log_to_evidence_card(row, now=datetime(2026, 7, 28, 10, 1, tzinfo=timezone.utc))
+    data = card.to_dict()
+
+    assert data["source_type"] == "mock_trade_log"
+    assert data["source_name"] == "shadow_trade_log"
+    assert data["event_type"] == "strategy_outcome"
+    assert data["confidence"] == 0.82
+    assert data["raw_text"] == f"NVDA 모의투자 결과\n{raw_reason}"
+    assert data["raw_payload"] == row
+    assert len(data["claims"][0]) < len(raw_reason)
