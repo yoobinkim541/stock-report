@@ -56,11 +56,49 @@ def test_holding_position(tmp_path):
     snap = tmp_path / "portfolio_snapshot.json"
     snap.write_text(json.dumps({"overseas_general": {"holdings_usd": [
         {"ticker": "NVDA", "shares": 2.7875, "avg_price_usd": 190.29, "value_usd": 536.7,
-         "cost_usd": 530.4, "return_pct": 1.18},
+         "cost_usd": 530.4334, "return_pct": 1.18},
     ]}}), encoding="utf-8")
     p = data.holding_position("NVDA", str(snap))
-    assert p and abs(p["avg_price_usd"] - 190.29) < 1e-6 and abs(p["shares"] - 2.7875) < 1e-6
+    # avg_price_usd 는 이제 cost_usd/shares 로 재계산(_merged_usd) — general+fractional 합산 시
+    # 가중평단이 필요해서다. 저장된 필드를 그대로 반환하던 예전보다 4자리 반올림 오차만큼 느슨하게 검증.
+    assert p and abs(p["avg_price_usd"] - 190.29) < 1e-4 and abs(p["shares"] - 2.7875) < 1e-6
     assert data.holding_position("ZZZZ", str(snap)) is None   # 비보유 → None
+
+
+def test_holding_position_finds_fractional_only_holding(tmp_path):
+    """소수점계좌(overseas_fractional)에만 있는 보유(예: 0.1468주)도 조회돼야 한다.
+
+    이전엔 overseas_general 만 봐서 fractional-only 보유가 '미보유'로 잘못 표시되고
+    ➖축소 UI 도 '보유하지 않은 종목입니다'로 차단됐다 (2026-07-29 버그 리포트).
+    """
+    snap = tmp_path / "portfolio_snapshot.json"
+    snap.write_text(json.dumps({"overseas_fractional": {"holdings": [
+        {"ticker": "TQQQ", "name": "TQQQ", "shares": 0.1468, "avg_price_usd": 378.32,
+         "cost_usd": 55.5374, "value_usd": 55.76},
+    ]}}), encoding="utf-8")
+    p = data.holding_position("TQQQ", str(snap))
+    assert p is not None
+    assert abs(p["shares"] - 0.1468) < 1e-6
+    assert abs(p["avg_price_usd"] - 378.32) < 1e-2
+
+
+def test_holding_position_merges_general_and_fractional_lots(tmp_path):
+    """같은 티커가 general·fractional 양쪽에 별도 lot 로 있으면 합산돼야 한다."""
+    snap = tmp_path / "portfolio_snapshot.json"
+    snap.write_text(json.dumps({
+        "overseas_general": {"holdings_usd": [
+            {"ticker": "NVDA", "shares": 2.0, "avg_price_usd": 180.0,
+             "cost_usd": 360.0, "value_usd": 400.0},
+        ]},
+        "overseas_fractional": {"holdings": [
+            {"ticker": "NVDA", "shares": 0.5, "avg_price_usd": 190.0,
+             "cost_usd": 95.0, "value_usd": 100.0},
+        ]},
+    }), encoding="utf-8")
+    p = data.holding_position("NVDA", str(snap))
+    assert p is not None
+    assert abs(p["shares"] - 2.5) < 1e-6
+    assert abs(p["value"] - 500.0) < 1e-6
 
 
 def test_trade_events_reads_ledger(tmp_path, monkeypatch):

@@ -119,11 +119,16 @@ def load_holdings(path: str | None = None) -> list[dict]:
 
 
 def holding_position(ticker: str, path: str | None = None) -> dict | None:
-    """현재 보유 포지션(해외 general — avg_price_usd 보유): {shares,avg_price_usd,value,ret,cost} or None."""
+    """현재 보유 포지션(해외 general+fractional 티커별 합산): {shares,avg_price_usd,value,ret,cost} or None.
+
+    general(정수)·fractional(소수점)이 같은 티커를 각자 별도 lot 로 들고 있을 수 있어
+    (예: NVDA general 2.79주 + fractional 0.76주) _merged_usd 로 합산한다. general 만 보던
+    이전 구현은 fractional-only 보유(예: 0.1468주)가 '미보유'로 잘못 표시되는 버그가 있었다.
+    """
     snap = _load_snap(path)
     tu = (ticker or "").upper()
-    for h in snap.get("overseas_general", {}).get("holdings_usd", []) or []:
-        if (h.get("ticker") or "").upper() == tu and (h.get("shares", 0) or 0) > 0:
+    for h in _merged_usd(snap):
+        if h.get("ticker") == tu and (h.get("shares", 0) or 0) > 0:
             return {"shares": h.get("shares", 0) or 0, "avg_price_usd": h.get("avg_price_usd"),
                     "value": h.get("value_usd", 0) or 0, "ret": h.get("return_pct", 0) or 0,
                     "cost": h.get("cost_usd", 0) or 0}

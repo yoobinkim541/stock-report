@@ -167,8 +167,15 @@ def buy_holding(ticker: str, shares: float, price_usd: float,
     """
     매수 기록: 기존 포지션 있으면 평단가 재계산, 없으면 신규 추가.
     fractional=True 이면 소수점 계좌에 기록.
+
+    소수점 주수인데 fractional=False 로 호출되면 강제로 fractional 계좌에 기록한다
+    (2026-07-29 버그: DCA/추가 UI가 fractional= 를 안 넘겨 general(정수) 계좌에
+    소수점 수량이 들어갔고, 다음 브로커 동기화가 general 을 통째로 덮어쓰며 유실됐다 —
+    정수 아닌 수량이 general 에 들어갈 길을 원천 차단).
     """
     ticker = ticker.upper()
+    if not fractional and shares != int(shares):
+        fractional = True
     trade_rec = None
     # load→mutate→write 를 하나의 파일락으로 감싸 교차 프로세스(kiwoom_sync·sync_server) lost update 방지
     with safe_io.file_write_lock(PORTFOLIO_PATH):

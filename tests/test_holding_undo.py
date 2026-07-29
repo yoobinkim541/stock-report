@@ -41,6 +41,32 @@ def _holding(p, section="overseas_general", key="holdings_usd", ticker="NVDA"):
                  if h.get("ticker") == ticker), None)
 
 
+def test_buy_holding_forces_fractional_for_non_integer_shares(iso):
+    """소수점 주수인데 fractional 인자를 안 넘기면(기본 False) general 이 아니라
+    fractional 계좌로 강제 기록돼야 한다.
+
+    2026-07-29 버그: 대시보드 적립/추가 버튼이 fractional= 를 안 넘겨 소수점 매수가
+    overseas_general(정수 전용)에 기록됐고, 다음 브로커 동기화가 general 을 통째로
+    덮어쓰며 그 포지션이 조용히 사라졌다.
+    """
+    hm.buy_holding("AVGO", 0.1468, 378.32)              # fractional 인자 생략 — 옛날엔 general 로 감
+
+    assert _holding(iso, section="overseas_general", ticker="AVGO") is None
+    h = _holding(iso, section="overseas_fractional", key="holdings", ticker="AVGO")
+    assert h is not None
+    assert h["shares"] == pytest.approx(0.1468, abs=1e-6)
+    assert h["avg_price_usd"] == pytest.approx(378.32, abs=1e-2)
+
+
+def test_buy_holding_keeps_whole_shares_in_general_by_default(iso):
+    """정수 주수는 fractional 인자를 안 줬을 때 여전히 general 로 간다 (회귀 방지)."""
+    hm.buy_holding("NVDA", 2.0, 100.0)
+
+    assert _holding(iso, section="overseas_fractional", key="holdings", ticker="NVDA") is None
+    h = _holding(iso, section="overseas_general", ticker="NVDA")
+    assert h is not None and h["shares"] == 2.0
+
+
 def test_buy_undo_partial_restores_avg(iso):
     hm.buy_holding("NVDA", 2.0, 100.0)                 # 평단 100 × 2주
     hm.buy_holding("NVDA", 1.0, 190.0)                 # → 평단 130 × 3주
