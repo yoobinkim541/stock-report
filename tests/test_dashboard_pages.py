@@ -640,20 +640,19 @@ def test_ticker_page_per_self_band_renders_on_valuation_tab():
     at = AppTest.from_string(script, default_timeout=30)
     at.run()
     assert not at.exception, str(at.exception)
-    body = " ".join(str(getattr(m, "value", "")) for m in at.markdown)
-    assert "자체 역사 PER 밴드" in body
+    # 2026-07-29: 부가 분석은 접이식(expander)으로 이동 — 라벨은 markdown 이 아니라 expander 에 있음
+    assert any("자체 역사 PER 밴드" in str(e.label) for e in at.expander)
     labels = [m.label for m in at.metric]
     assert "최저" in labels and "최고" in labels and "현재 PER" in labels
 
 
 def test_ticker_page_per_self_band_hidden_when_insufficient_history():
-    """실적 이력 부족(기본 stub — 1개뿐)이면 밴드 섹션 자체가 안 뜬다."""
+    """실적 이력 부족(기본 stub — 1개뿐)이면 밴드 섹션(expander) 자체가 안 뜬다."""
     script = _STUBS + 'st.session_state["ticker"] = "MSFT"\nfrom dashboard.pages import ticker\nticker.render()\n'
     at = AppTest.from_string(script, default_timeout=30)
     at.run()
     assert not at.exception, str(at.exception)
-    body = " ".join(str(getattr(m, "value", "")) for m in at.markdown)
-    assert "자체 역사 PER 밴드" not in body
+    assert not any("자체 역사 PER 밴드" in str(e.label) for e in at.expander)
 
 
 def test_ticker_page_peer_comparables_renders_for_us():
@@ -666,8 +665,7 @@ def test_ticker_page_peer_comparables_renders_for_us():
     at = AppTest.from_string(script, default_timeout=30)
     at.run()
     assert not at.exception, str(at.exception)
-    body = " ".join(str(getattr(m, "value", "")) for m in at.markdown)
-    assert "동종업계 비교" in body
+    assert any("동종업계 비교" in str(e.label) for e in at.expander)
     assert len(at.dataframe) >= 1
 
 
@@ -681,8 +679,7 @@ def test_ticker_page_peer_comparables_hidden_for_kr_without_dart_key():
     at = AppTest.from_string(script, default_timeout=30)
     at.run()
     assert not at.exception, str(at.exception)
-    body = " ".join(str(getattr(m, "value", "")) for m in at.markdown)
-    assert "동종업계 비교" not in body
+    assert not any("동종업계 비교" in str(e.label) for e in at.expander)
 
 
 def test_paper_kpis_and_decisions():

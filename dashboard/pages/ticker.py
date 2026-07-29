@@ -1499,17 +1499,17 @@ def _per_self_band_section(ticker, m):
     band = data.per_self_band(rows, hist2, current_per=m.get("per"))
     if not band:
         return
-    st.markdown("##### 📐 자체 역사 PER 밴드")
-    g = st.columns(4)
-    g[0].metric("최저", data.f_ratio(band["min"]))
-    g[1].metric("중앙값", data.f_ratio(band["median"]))
-    g[2].metric("최고", data.f_ratio(band["max"]))
-    cur = band.get("current")
-    delta = None
-    if cur is not None and band["median"]:
-        delta = f"{(cur / band['median'] - 1) * 100:+.0f}% vs 중앙값"
-    g[3].metric("현재 PER", data.f_ratio(cur), delta=delta, delta_color="inverse")
-    st.caption(f"최근 {band['n']}개 분기 TTM-EPS 기준 역산 — 표본이 적어 참고용, 매매신호 아님")
+    with st.expander("📐 자체 역사 PER 밴드 — 지금이 비싼지/싼지"):
+        g = st.columns(4)
+        g[0].metric("최저", data.f_ratio(band["min"]))
+        g[1].metric("중앙값", data.f_ratio(band["median"]))
+        g[2].metric("최고", data.f_ratio(band["max"]))
+        cur = band.get("current")
+        delta = None
+        if cur is not None and band["median"]:
+            delta = f"{(cur / band['median'] - 1) * 100:+.0f}% vs 중앙값"
+        g[3].metric("현재 PER", data.f_ratio(cur), delta=delta, delta_color="inverse")
+        st.caption(f"최근 {band['n']}개 분기 TTM-EPS 기준 역산 — 표본이 적어 참고용, 매매신호 아님")
 
 
 def _peer_comparables_section(ticker, m, is_kr):
@@ -1532,14 +1532,14 @@ def _peer_comparables_section(ticker, m, is_kr):
                      "ROE(%)": (pm.get("roe") or 0) * 100 if pm.get("roe") is not None else None})
     if len(rows) < 2:
         return
-    st.markdown("##### 🏭 동종업계 비교")
-    st.dataframe(pd.DataFrame(rows), hide_index=True, width="stretch",
-                 column_config={
-                     "PER": st.column_config.NumberColumn(format="%.1f"),
-                     "PBR": st.column_config.NumberColumn(format="%.2f"),
-                     "ROE(%)": st.column_config.NumberColumn(format="%.1f%%"),
-                 })
-    st.caption("같은 섹터 시총 상위 종목(정적 섹터 시드 기준) · 첫 행 = 현재 종목")
+    with st.expander("🏭 동종업계 비교"):
+        st.dataframe(pd.DataFrame(rows), hide_index=True, width="stretch",
+                     column_config={
+                         "PER": st.column_config.NumberColumn(format="%.1f"),
+                         "PBR": st.column_config.NumberColumn(format="%.2f"),
+                         "ROE(%)": st.column_config.NumberColumn(format="%.1f%%"),
+                     })
+        st.caption("같은 섹터 시총 상위 종목(정적 섹터 시드 기준) · 첫 행 = 현재 종목")
 
 
 def _f_krw(v, dec=0):
