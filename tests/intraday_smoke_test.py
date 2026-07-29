@@ -585,13 +585,16 @@ def _engine_tests(tmp: str) -> list[str]:
         eng.run_market("KR", state, cfg)
         chk("멱등(같은 분 재실행)", len(led.read_decisions()) == 1)
 
-        # 손절 봉 — low 가 stop 아래
+        # 손절 봉 — low 가 전액손절선(full_stop, entry - full_stop_r*risk_per_share) 아래.
+        # 2026-07-28 라이프사이클 도입(ba06d1e) 이후 pos["stop"]은 참고용 명목 스탑일 뿐,
+        # 실제 전액청산 트리거는 lifecycle.full_stop_price (마찰 포함 risk_per_share 기준이라
+        # pos["stop"]보다 더 깊다) — 그 사이 구간은 반액손절(partial_stop)만 발동한다.
         if pos_key in state["positions"]:
-            stop = state["positions"][pos_key]["stop"]
+            full_stop = state["positions"][pos_key]["lifecycle"]["full_stop_price"]
             last_ts = idx[-1] + timedelta(minutes=1)
             df_stop = pd.concat([df_bo, pd.DataFrame(
-                {"Open": [stop + 50], "High": [stop + 80], "Low": [stop - 200],
-                 "Close": [stop - 100], "Volume": [3000.0]},
+                {"Open": [full_stop + 50], "High": [full_stop + 80], "Low": [full_stop - 200],
+                 "Close": [full_stop - 100], "Volume": [3000.0]},
                 index=pd.DatetimeIndex([last_ts]))])
             bars_now["005930"] = df_stop
             eng.run_market("KR", state, cfg)
