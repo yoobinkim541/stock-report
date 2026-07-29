@@ -1178,6 +1178,57 @@ def test_peg_textbook_and_eps_growth():
     assert data.eps_growth_fwd({"eps_ttm": 0.0, "eps_fwd": 1.0}) is None
 
 
+def test_per_self_band_computes_ttm_eps_per_at_each_quarter():
+    """분기 실적으로 TTM-EPS PER 역산 — 자체 역사 밴드(2026-07-29 종목분석 보강)."""
+    import pandas as pd
+    hist = pd.DataFrame(
+        {"Close": [50.0, 55.0, 60.0, 64.0]},
+        index=pd.DatetimeIndex(["2025-07-01", "2025-10-01", "2026-01-01", "2026-04-01"]),
+    )
+    rows = [
+        {"date": "2026-04-01", "eps_actual": 1.0}, {"date": "2026-01-01", "eps_actual": 1.0},
+        {"date": "2025-10-01", "eps_actual": 1.0}, {"date": "2025-07-01", "eps_actual": 1.0},
+        {"date": "2025-04-01", "eps_actual": 1.0}, {"date": "2025-01-01", "eps_actual": 1.0},
+        {"date": "2024-10-01", "eps_actual": 1.0},
+    ]
+    band = data.per_self_band(rows, hist, current_per=15.5)
+
+    assert band["n"] == 4
+    assert band["min"] == pytest.approx(12.5)
+    assert band["max"] == pytest.approx(16.0)
+    assert band["median"] == pytest.approx(15.0)
+    assert band["current"] == 15.5
+
+
+def test_per_self_band_none_on_insufficient_quarters():
+    import pandas as pd
+    hist = pd.DataFrame({"Close": [50.0]}, index=pd.DatetimeIndex(["2025-07-01"]))
+    rows = [{"date": "2025-07-01", "eps_actual": 1.0}]
+    assert data.per_self_band(rows, hist) is None
+    assert data.per_self_band([], hist) is None
+    assert data.per_self_band(None, None) is None
+
+
+def test_sector_peers_kr_ranks_by_market_cap():
+    """SK하이닉스(000660) 동일 섹터(반도체) 피어 — 정적 kr200_meta 시드."""
+    peers = data.sector_peers("000660.KS", limit=4)
+    assert peers
+    assert all(p.endswith(".KS") for p in peers)
+    assert "005930.KS" in peers   # 삼성전자 — 같은 섹터 시총 최상위라 상위 4위 안에 들어야 함
+
+
+def test_sector_peers_us_excludes_self():
+    peers = data.sector_peers("MSFT", limit=4)
+    assert peers
+    assert "MSFT" not in peers
+    assert len(peers) <= 4
+
+
+def test_sector_peers_unknown_ticker_returns_empty():
+    assert data.sector_peers("ZZZZZNOPE") == []
+    assert data.sector_peers("") == []
+
+
 def test_format_screener_features():
     """피처 표시 — 한글 라벨·카테고리·스마트 포맷·중요도 정렬·미등록 폴백 (순수)."""
     feats = {"obv": -79_488_400, "mom_126d": 0.42, "golden_cross": 1.0,

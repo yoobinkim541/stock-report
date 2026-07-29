@@ -125,6 +125,7 @@ cached.institutional = lambda t: {"accum":{"accum_score":7.2,
 cached.insider = lambda t: {"transactions":[],"error":""}
 cached.disclosures = lambda t: {"list":[],"error":"","market":"US"}
 cached.earnings = lambda t: {"history":[{"date":"2026-04-30","eps_est":2.1,"eps_actual":2.3,"surprise_pct":9.5}]}
+cached.earnings_history_deep = lambda t, limit=12: []
 cached.intrinsic = lambda t: {"rim":{"low":250,"mid":320,"high":400},"ddm":None,"upside_pct":12.0,"ddm_reliable":False}
 cached.risk = lambda: "리스크 텍스트"
 cached.risk_struct = lambda: {"port_vol":0.2,"n_eff":3.5,"n_assets":5,"mdd_est":0.3,
@@ -621,6 +622,67 @@ def test_ticker_page_kr_institutional_shows_flow_not_13f():
     assert "외인" in body and "수급" in body
     assert "13F" not in body
     assert "SEC Form 4" not in body
+
+
+def test_ticker_page_per_self_band_renders_on_valuation_tab():
+    """가치평가 탭 — 자체 역사 PER 밴드 (분기 실적 4개 이상일 때만 계산, 2026-07-29 보강)."""
+    script = _STUBS + (
+        'st.session_state["ticker"] = "MSFT"\n'
+        'cached.earnings_history_deep = lambda t, limit=12: [\n'
+        '    {"date": "2026-04-01", "eps_actual": 1.0}, {"date": "2026-01-01", "eps_actual": 1.0},\n'
+        '    {"date": "2025-10-01", "eps_actual": 1.0}, {"date": "2025-07-01", "eps_actual": 1.0},\n'
+        '    {"date": "2025-04-01", "eps_actual": 1.0}, {"date": "2025-01-01", "eps_actual": 1.0},\n'
+        '    {"date": "2024-10-01", "eps_actual": 1.0}]\n'
+        'cached.ohlc = lambda t, period="6mo": pd.DataFrame(\n'
+        '    {"Close": [50.0, 55.0, 60.0, 64.0]},\n'
+        '    index=pd.DatetimeIndex(["2025-07-01", "2025-10-01", "2026-01-01", "2026-04-01"]))\n'
+        'from dashboard.pages import ticker\nticker.render()\n')
+    at = AppTest.from_string(script, default_timeout=30)
+    at.run()
+    assert not at.exception, str(at.exception)
+    body = " ".join(str(getattr(m, "value", "")) for m in at.markdown)
+    assert "자체 역사 PER 밴드" in body
+    labels = [m.label for m in at.metric]
+    assert "최저" in labels and "최고" in labels and "현재 PER" in labels
+
+
+def test_ticker_page_per_self_band_hidden_when_insufficient_history():
+    """실적 이력 부족(기본 stub — 1개뿐)이면 밴드 섹션 자체가 안 뜬다."""
+    script = _STUBS + 'st.session_state["ticker"] = "MSFT"\nfrom dashboard.pages import ticker\nticker.render()\n'
+    at = AppTest.from_string(script, default_timeout=30)
+    at.run()
+    assert not at.exception, str(at.exception)
+    body = " ".join(str(getattr(m, "value", "")) for m in at.markdown)
+    assert "자체 역사 PER 밴드" not in body
+
+
+def test_ticker_page_peer_comparables_renders_for_us():
+    """미국 종목은 DART 키 제약이 없어 섹터 피어 비교가 항상 뜬다(sp500_meta 정적 시드)."""
+    script = _STUBS + (
+        'st.session_state["ticker"] = "MSFT"\n'
+        'cached.valuation = lambda t: {"metrics":{"per":30.0,"pbr":10.0,"roe":0.4,"market_type":"us"},\n'
+        '    "consensus":{"n_analysts":5}, "history":[]}\n'
+        'from dashboard.pages import ticker\nticker.render()\n')
+    at = AppTest.from_string(script, default_timeout=30)
+    at.run()
+    assert not at.exception, str(at.exception)
+    body = " ".join(str(getattr(m, "value", "")) for m in at.markdown)
+    assert "동종업계 비교" in body
+    assert len(at.dataframe) >= 1
+
+
+def test_ticker_page_peer_comparables_hidden_for_kr_without_dart_key():
+    """국내 DART_API_KEY 미설정(kr_yf_fallback)이면 이 종목 멀티플부터 신뢰 불가 — 피어비교 생략."""
+    script = _STUBS + (
+        'st.session_state["ticker"] = "005930.KS"\n'
+        'cached.valuation = lambda t: {"metrics":{"per":None,"market_type":"kr","kr_yf_fallback":True},\n'
+        '    "consensus":{}, "history":[]}\n'
+        'from dashboard.pages import ticker\nticker.render()\n')
+    at = AppTest.from_string(script, default_timeout=30)
+    at.run()
+    assert not at.exception, str(at.exception)
+    body = " ".join(str(getattr(m, "value", "")) for m in at.markdown)
+    assert "동종업계 비교" not in body
 
 
 def test_paper_kpis_and_decisions():

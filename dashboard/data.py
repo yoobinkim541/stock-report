@@ -469,6 +469,85 @@ def peg_textbook(metrics) -> dict | None:
             "yahoo": _try_float(m.get("peg"))}
 
 
+def per_self_band(earnings_rows: list, hist, current_per=None) -> dict | None:
+    """분기 실적 이력으로 TTM-EPS PER 밴드 계산 — 이 종목이 자체 역사 대비 비싼지/싼지.
+
+    earnings_rows: [{date, eps_actual, ...}] 최신순 (providers.earnings_data.earnings_history).
+    hist: OHLC DataFrame(Close 필요·DatetimeIndex). 각 분기말 시점의 trailing-4Q EPS 합으로
+    당시 PER 을 역산한다(정확한 히스토리컬 PER — EPS 고정가정 근사 아님). 표본 2개 미만이면 None.
+    """
+    rows = [r for r in (earnings_rows or [])
+            if r.get("date") and r.get("eps_actual") is not None]
+    if len(rows) < 4 or hist is None or getattr(hist, "empty", True) or "Close" not in getattr(hist, "columns", []):
+        return None
+    try:
+        close = hist["Close"].dropna()
+        if getattr(close.index, "tz", None) is not None:
+            close = close.copy()
+            close.index = close.index.tz_localize(None)
+    except Exception:
+        return None
+    from datetime import datetime
+    pers = []
+    for i in range(len(rows) - 3):
+        window = rows[i:i + 4]
+        try:
+            ttm_eps = sum(float(w["eps_actual"]) for w in window)
+        except (TypeError, ValueError):
+            continue
+        if ttm_eps <= 0:
+            continue
+        try:
+            anchor = datetime.fromisoformat(str(rows[i]["date"])[:10])
+            price = close.asof(anchor)
+        except Exception:
+            continue
+        try:
+            price_f = float(price)
+        except (TypeError, ValueError):
+            continue
+        if price_f != price_f:   # NaN
+            continue
+        pers.append(price_f / ttm_eps)
+    if len(pers) < 2:
+        return None
+    pers.sort()
+    mid = pers[len(pers) // 2]
+    return {"min": pers[0], "max": pers[-1], "median": mid, "current": current_per, "n": len(pers)}
+
+
+def sector_peers(ticker: str, *, limit: int = 4) -> list[str]:
+    """같은 섹터 시총 상위 종목(자기 제외) — kr200_meta(KR)/sp500_meta(US) 정적 시드 기준.
+
+    라이브 피어 스캔이 아니라 정적 섹터 시드 한정(빠름·무료) — 시드에 없는 종목은 빈 리스트.
+    """
+    t = (ticker or "").strip().upper()
+    if not t:
+        return []
+    is_kr = t.endswith(".KS") or t.endswith(".KQ")
+    try:
+        if is_kr:
+            import kr200_meta as meta
+            code = t.replace(".KS", "").replace(".KQ", "")
+            sector = meta.SECTOR.get(code)
+            if not sector:
+                return []
+            cands = [(c, meta.MARKET_CAP.get(c, 0)) for c, s in meta.SECTOR.items()
+                     if s == sector and c != code]
+            cands.sort(key=lambda x: -x[1])
+            return [f"{c}.KS" for c, _ in cands[:limit]]
+        import sp500_meta as meta
+        sector = meta.SECTOR.get(t)
+        if not sector:
+            return []
+        cands = [(tk, meta.MARKET_CAP.get(tk, 0)) for tk, s in meta.SECTOR.items()
+                 if s == sector and tk != t]
+        cands.sort(key=lambda x: -x[1])
+        return [tk for tk, _ in cands[:limit]]
+    except Exception:
+        return []
+
+
 # 스크리너 피처 표시 메타 — (한글 라벨, 카테고리, 포맷 kind)
 # kind: price($)·pct(분수→%)·ratio(배율→%)·osc(1dp)·num·vol(축약)·flag(✓/—)·beta(2dp)
 _FEAT_META = {

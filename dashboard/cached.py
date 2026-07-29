@@ -65,6 +65,16 @@ def earnings(t):
 
 
 @st.cache_data(ttl=_TTL, show_spinner="불러오는 중…")
+def earnings_history_deep(t, limit=12):
+    """PER 자체역사 밴드용 — earnings_calendar(limit=6 고정) 보다 긴 이력이 필요(2026-07-29)."""
+    from providers import earnings_data
+    try:
+        return earnings_data.earnings_history(t, limit=limit)
+    except Exception:
+        return []
+
+
+@st.cache_data(ttl=_TTL, show_spinner="불러오는 중…")
 def intrinsic(t):
     return views.intrinsic_value(t)
 

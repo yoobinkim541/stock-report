@@ -1389,6 +1389,9 @@ def _valuation(ticker, price=None):
                     "현재는 yfinance 제한 데이터라 신뢰 불가한 멀티플(Fwd PE·PEG·PSR)은 숨김 처리했습니다.")
     else:
         st.warning(f"밸류에이션 데이터 없음 ({v.get('metrics_error', '')})")
+    if m:
+        _per_self_band_section(ticker, m)
+        _peer_comparables_section(ticker, m, is_kr)
     c = v.get("consensus") or {}
     cur_sym = "₩" if is_kr else "$"
     _fmt_t = (lambda x: f"₩{x:,.0f}") if is_kr else (lambda x: f"${x:,.2f}")
@@ -1480,6 +1483,63 @@ def _valuation(ticker, price=None):
         st.markdown("##### 📈 실적 서프라이즈 이력")
         _surprise_chart(h, "실적 서프라이즈 (최근)", key=f"{ticker}_val")
     st.caption("정보·표시용 · 매매신호 아님")
+
+
+def _per_self_band_section(ticker, m):
+    """자체 역사 PER 밴드 — 최근 분기 실적 기준 TTM-EPS 로 당시 PER 역산(2026-07-29 종목분석 보강).
+
+    피어 비교와 달리 API 키·네트워크 부담 없이 항상 계산 가능 — 이 종목이 자기 자신의
+    최근 역사 대비 비싼지/싼지를 보여주는 기본 지표.
+    """
+    try:
+        hist2 = cached.ohlc(ticker, period="2y")
+        rows = cached.earnings_history_deep(ticker)
+    except Exception:
+        return
+    band = data.per_self_band(rows, hist2, current_per=m.get("per"))
+    if not band:
+        return
+    st.markdown("##### 📐 자체 역사 PER 밴드")
+    g = st.columns(4)
+    g[0].metric("최저", data.f_ratio(band["min"]))
+    g[1].metric("중앙값", data.f_ratio(band["median"]))
+    g[2].metric("최고", data.f_ratio(band["max"]))
+    cur = band.get("current")
+    delta = None
+    if cur is not None and band["median"]:
+        delta = f"{(cur / band['median'] - 1) * 100:+.0f}% vs 중앙값"
+    g[3].metric("현재 PER", data.f_ratio(cur), delta=delta, delta_color="inverse")
+    st.caption(f"최근 {band['n']}개 분기 TTM-EPS 기준 역산 — 표본이 적어 참고용, 매매신호 아님")
+
+
+def _peer_comparables_section(ticker, m, is_kr):
+    """동종업계 비교 — 같은 섹터 시총 상위 종목 PER·PBR·ROE 나란히(2026-07-29 종목분석 보강).
+
+    국내는 DART_API_KEY 없으면(kr_yf_fallback) 이 종목 자체 멀티플부터 신뢰 불가라 생략.
+    """
+    if is_kr and m.get("kr_yf_fallback"):
+        return
+    peers = data.sector_peers(ticker)
+    if not peers:
+        return
+    rows = [{"종목": ticker_names.label(ticker, m.get("name")), "PER": m.get("per"),
+             "PBR": m.get("pbr"), "ROE(%)": (m.get("roe") or 0) * 100 if m.get("roe") is not None else None}]
+    for p in peers:
+        pm = (cached.valuation(p) or {}).get("metrics") or {}
+        if not pm or (pm.get("market_type") == "kr" and pm.get("kr_yf_fallback")):
+            continue
+        rows.append({"종목": ticker_names.label(p), "PER": pm.get("per"), "PBR": pm.get("pbr"),
+                     "ROE(%)": (pm.get("roe") or 0) * 100 if pm.get("roe") is not None else None})
+    if len(rows) < 2:
+        return
+    st.markdown("##### 🏭 동종업계 비교")
+    st.dataframe(pd.DataFrame(rows), hide_index=True, width="stretch",
+                 column_config={
+                     "PER": st.column_config.NumberColumn(format="%.1f"),
+                     "PBR": st.column_config.NumberColumn(format="%.2f"),
+                     "ROE(%)": st.column_config.NumberColumn(format="%.1f%%"),
+                 })
+    st.caption("같은 섹터 시총 상위 종목(정적 섹터 시드 기준) · 첫 행 = 현재 종목")
 
 
 def _f_krw(v, dec=0):
