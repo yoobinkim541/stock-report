@@ -365,6 +365,43 @@ def test_views_financials_routes_us_to_edgar(monkeypatch):
     assert f["trends"]["rev_yoy"] == 0.2
 
 
+def test_views_institutional_routes_kr_to_naver_flow(monkeypatch):
+    """국내(.KS/.KQ) 는 13F 대신 Naver 수급 — 13F(SEC 전용)는 시도조차 안 함(2026-07-29)."""
+    from dashboard import views
+    from providers import kr_market_data, naver_kr
+    from reports import institutional_flow
+
+    monkeypatch.setattr(naver_kr, "investor_flow_features",
+                        lambda code: {"foreign_net_5d": 12000, "n": 20})
+    monkeypatch.setattr(institutional_flow, "fetch_13f",
+                        lambda t: (_ for _ in ()).throw(AssertionError("13F should not be called for KR")))
+    monkeypatch.setattr(institutional_flow, "rank_accumulation", lambda tickers, enrich_top=1: [])
+
+    out = views.institutional("005930.KS")
+
+    assert out["is_kr"] is True
+    assert out["kr_flow"]["foreign_net_5d"] == 12000
+    assert "inst13f" not in out
+
+
+def test_views_institutional_routes_us_to_13f(monkeypatch):
+    """미국 티커는 기존대로 13F — Naver 수급은 시도 안 함."""
+    from dashboard import views
+    from providers import naver_kr
+    from reports import institutional_flow
+
+    monkeypatch.setattr(institutional_flow, "fetch_13f", lambda t: {"n_holders": 3})
+    monkeypatch.setattr(institutional_flow, "rank_accumulation", lambda tickers, enrich_top=1: [])
+    monkeypatch.setattr(naver_kr, "investor_flow_features",
+                        lambda code: (_ for _ in ()).throw(AssertionError("Naver flow should not be called for US")))
+
+    out = views.institutional("MSFT")
+
+    assert out["is_kr"] is False
+    assert out["inst13f"]["n_holders"] == 3
+    assert "kr_flow" not in out
+
+
 def test_views_risk_no_weights():
     from dashboard import views
     assert "보유 데이터 없음" in views.risk_report_text({})

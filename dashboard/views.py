@@ -65,13 +65,26 @@ def risk_summary(weights: dict) -> dict:
 
 
 def institutional(ticker: str) -> dict:
-    """선택 종목 13F 지분 + 매집 강도(가능 시)."""
+    """선택 종목 기관·수급 데이터 — 매집 강도(공통) + 시장별 분기.
+
+    美: 13F 기관 지분(SEC). 국내(.KS/.KQ): 13F 대신 Naver 외인·기관 수급
+    (외인/기관 순매수 5일·스마트머니 20일·외인보유율·외인 연속매수일) — 13F/Form4 는
+    구조적으로 한국 종목엔 적용되지 않아 시도조차 안 함(2026-07-29, 국내주 분석 보강).
+    """
     from reports import institutional_flow
-    out: dict = {"ticker": ticker}
-    try:
-        out["inst13f"] = institutional_flow.fetch_13f(ticker)
-    except Exception as e:
-        out["error_13f"] = str(e)
+    is_kr = str(ticker or "").upper().endswith((".KS", ".KQ"))
+    out: dict = {"ticker": ticker, "is_kr": is_kr}
+    if is_kr:
+        try:
+            from providers import kr_market_data, naver_kr
+            out["kr_flow"] = naver_kr.investor_flow_features(kr_market_data.norm_code(ticker))
+        except Exception as e:
+            out["error_kr_flow"] = str(e)
+    else:
+        try:
+            out["inst13f"] = institutional_flow.fetch_13f(ticker)
+        except Exception as e:
+            out["error_13f"] = str(e)
     try:
         ranked = institutional_flow.rank_accumulation([ticker], enrich_top=1)
         out["accum"] = ranked[0] if ranked else None

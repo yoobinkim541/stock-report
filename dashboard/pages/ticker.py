@@ -1585,8 +1585,30 @@ def _financials(ticker):
         st.warning(f"재무 데이터 없음 — {source} 확인 필요 ({f.get('error', '')})")
 
 
+def _kr_flow_section(flow: dict) -> None:
+    """국내 종목 외인·기관 수급 — 13F/Form4 가 구조적으로 안 붙는 자리를 대체(2026-07-29)."""
+    if not flow or not flow.get("n"):
+        st.info("국내 수급 데이터 없음 (Naver 조회 실패 또는 신규상장 등 이력 부족)")
+        return
+    st.markdown("##### 🌏 외인·기관 수급 (Naver)")
+    g = st.columns(3)
+    g[0].metric("외인 순매수(5일)", f"{flow['foreign_net_5d']:+,.0f}주"
+                if flow.get("foreign_net_5d") is not None else "—")
+    g[1].metric("기관 순매수(5일)", f"{flow['inst_net_5d']:+,.0f}주"
+                if flow.get("inst_net_5d") is not None else "—")
+    g[2].metric("스마트머니(20일)", f"{flow['smart_net_20d']:+,.0f}주"
+                if flow.get("smart_net_20d") is not None else "—",
+                help="외인+기관 순매수 합(20일) — 개인 대비 정보우위 자금 흐름 근사치")
+    h = st.columns(2)
+    h[0].metric("외인 보유율", data.f_frac_pct(flow.get("foreign_ratio")))
+    h[1].metric("외인 연속 순매수일", f"{flow['foreign_buy_streak']}일"
+                if flow.get("foreign_buy_streak") is not None else "—")
+    st.caption("정보·표시용 — 수급은 후행지표, 단독 매매 신호로 쓰지 않음")
+
+
 def _institutional(ticker):
     i = cached.institutional(ticker)
+    is_kr = i.get("is_kr", False)
     acc = i.get("accum")
     if acc:
         st.metric("매집 강도 점수", data.f_ratio(acc.get("accum_score"), 1),
@@ -1598,12 +1620,17 @@ def _institutional(ticker):
             g[1].metric("CMF", data.f_ratio(sig.get("cmf"), 2))
             g[2].metric("상승/하락 거래량", data.f_ratio(sig.get("updown_ratio"), 2))
         inst = acc.get("institutional")
-        if inst:
+        if inst and not is_kr:
             st.caption("13F 기관 지분 (교차검증)")
             st.dataframe(pd.DataFrame([inst]) if isinstance(inst, dict) else pd.DataFrame(inst),
                          hide_index=True, width="stretch")
     else:
         st.info(f"기관 매집 데이터 없음 ({i.get('error_accum', '')})")
+
+    if is_kr:
+        _kr_flow_section(i.get("kr_flow"))
+        return   # 13F·SEC Form4 는 미국 종목 전용 — 국내는 여기서 끝
+
     ins = cached.insider(ticker)
     txs = ins.get("transactions") or []
     if txs:

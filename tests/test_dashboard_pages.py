@@ -605,6 +605,24 @@ def test_ticker_position_management_renders():
     assert any("실주문 아님" in str(c.value) or "기록 전용" in str(c.value) for c in at.caption)
 
 
+def test_ticker_page_kr_institutional_shows_flow_not_13f():
+    """국내 종목의 '기관·내부자' 탭 — 13F/Form4 대신 외인·기관 수급이 뜬다(2026-07-29 보강)."""
+    script = _STUBS + (
+        'st.session_state["ticker"] = "005930.KS"\n'
+        'st.session_state["ticker_section"] = "기관·내부자"\n'
+        'cached.institutional = lambda t: {"is_kr": True, "accum": None,\n'
+        '    "kr_flow": {"foreign_net_5d": 15000, "inst_net_5d": -3000, "smart_net_20d": 42000,\n'
+        '                "foreign_ratio": 0.512, "foreign_buy_streak": 4, "n": 20}}\n'
+        'from dashboard.pages import ticker\nticker.render()\n')
+    at = AppTest.from_string(script, default_timeout=30)
+    at.run()
+    assert not at.exception, str(at.exception)
+    body = " ".join(str(getattr(m, "value", "")) for m in at.markdown) + " ".join(m.label for m in at.metric)
+    assert "외인" in body and "수급" in body
+    assert "13F" not in body
+    assert "SEC Form 4" not in body
+
+
 def test_paper_kpis_and_decisions():
     """모의투자: 계좌 KPI(NAV·누적·vs지수·MDD) + 로직평가 + 판단근거 원장표 + 안전 라벨 (P1)."""
     at = AppTest.from_string(_script("from dashboard.pages import paper", "paper.render()"),
