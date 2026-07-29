@@ -66,6 +66,7 @@ reports/*
 !reports/market_risk_report.py
 !reports/wiki_health_check.py
 !reports/wiki_distillation.py
+!reports/notable_investors_wiki.py
 ~/reports/
 data/shared-memory/*
 !data/shared-memory/.gitkeep
