@@ -851,10 +851,30 @@ def twr_series(records: list, flows_by_date: dict) -> dict:
             "flows_total": flows_total, "n_days": len(rec)}
 
 
+def kr_display_label(ticker: str, name: str | None = None) -> str:
+    """국내 종목 표시명 — 코스피200 구성종목은 '이름 (티커)', 그 외는 이름만.
+
+    국내 티커(6자리 코드)는 사람이 보고 바로 알아보기 어려워 이름을 우선 표시한다.
+    다만 코스피200 구성종목은 코드로도 자주 검색·참조되니 티커를 병기한다.
+    """
+    tk = (ticker or "").strip()
+    nm = (name or "").strip() or tk
+    try:
+        import kr200_meta
+        code = tk.replace(".KS", "").replace(".KQ", "")
+        if code in kr200_meta.NAME and nm != tk:
+            return f"{nm} ({tk})"
+    except Exception:
+        pass
+    return nm
+
+
 def load_kr_holdings(path: str | None = None) -> dict:
     """국내(KR)북 보유 — 동기화 스냅샷 domestic 섹션 (원화, 소스는 DOMESTIC_SYNC_SOURCE — 토스/키움).
 
     graceful {} (보유·예수금 둘 다 없을 때만). cash 필드는 2026-07-25 추가.
+    display 필드(2026-07-29): 코스피200 구성종목은 '이름 (티커)', 그 외는 이름만 — ticker
+    필드는 종목 분석 이동용으로 그대로 유지(표시와 내비게이션 키 분리).
     """
     snap = _load_snap(path)
     dom = snap.get("domestic") or {}
@@ -862,7 +882,9 @@ def load_kr_holdings(path: str | None = None) -> dict:
     for h in dom.get("holdings") or []:
         sh = _try_float(h.get("shares")) or 0
         cur = _try_float(h.get("current_price")) or 0
-        rows.append({"ticker": h.get("ticker") or "", "name": h.get("name") or h.get("ticker") or "?",
+        tk = h.get("ticker") or ""
+        nm = h.get("name") or tk or "?"
+        rows.append({"ticker": tk, "name": nm, "display": kr_display_label(tk, nm),
                      "shares": sh, "avg": _try_float(h.get("avg_price")),
                      "cur": cur, "value": sh * cur,
                      "ret": _try_float(h.get("return_pct")),

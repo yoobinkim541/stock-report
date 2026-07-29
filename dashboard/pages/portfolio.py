@@ -280,7 +280,7 @@ def _kr_section():
     with k3:
         if kr["rows"]:
             st.dataframe(pd.DataFrame([{
-                "종목": r["name"], "주수": r["shares"], "평단": r["avg"],
+                "종목": r["display"], "주수": r["shares"], "평단": r["avg"],
                 "현재가": r["cur"], "평가액": r["value"], "손익%": r["ret"],
             } for r in kr["rows"]]), hide_index=True, width="stretch",
                 height=min(250, 44 + 35 * len(kr["rows"])),

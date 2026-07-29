@@ -1355,6 +1355,37 @@ def test_load_kr_holdings_includes_cash(tmp_path):
     assert kr2 != {} and kr2["cash"] == 5000.0 and kr2["rows"] == []
 
 
+def test_kr_display_label_shows_name_only_for_non_kospi200():
+    """코스피200 아닌 종목(ETF 등)은 6자리 코드 대신 이름만 — 코드는 안 읽힘(2026-07-29)."""
+    assert data.kr_display_label("0167A0", "SOL AI반도체TOP2플러스") == "SOL AI반도체TOP2플러스"
+
+
+def test_kr_display_label_shows_ticker_and_name_for_kospi200_member():
+    """코스피200 구성종목(예: 000660 SK하이닉스)은 코드로도 검색되니 이름+티커 병기."""
+    assert data.kr_display_label("000660", "SK하이닉스") == "SK하이닉스 (000660)"
+
+
+def test_kr_display_label_falls_back_to_ticker_when_name_missing():
+    assert data.kr_display_label("000660", None) == "000660"
+    assert data.kr_display_label("000660", "") == "000660"
+
+
+def test_load_kr_holdings_populates_display_field(tmp_path):
+    """display 필드 — 코스피200 구성종목은 병기, 그 외는 이름만 (ticker 필드는 내비게이션용 그대로)."""
+    p = tmp_path / "snap.json"
+    p.write_text(json.dumps({"domestic": {"holdings": [
+        {"ticker": "000660", "name": "SK하이닉스", "avg_price": 200000,
+         "current_price": 210000, "shares": 1, "return_pct": 5.0},
+        {"ticker": "0167A0", "name": "SOL AI반도체TOP2플러스", "avg_price": 20681,
+         "current_price": 17185, "shares": 23, "return_pct": -16.91},
+    ]}}), encoding="utf-8")
+    kr = data.load_kr_holdings(str(p))
+    by_ticker = {r["ticker"]: r for r in kr["rows"]}
+    assert by_ticker["000660"]["display"] == "SK하이닉스 (000660)"
+    assert by_ticker["0167A0"]["display"] == "SOL AI반도체TOP2플러스"
+    assert by_ticker["000660"]["ticker"] == "000660"   # 내비게이션 키는 변함없이 실제 티커
+
+
 def test_backtest_persist_roundtrip(tmp_path, monkeypatch):
     """백테스트 결과 디스크 영속 — equity DataFrame 직렬화 왕복."""
     import pandas as pd

@@ -689,7 +689,8 @@ def test_portfolio_shows_kr_section_with_cash(monkeypatch):
     """포트폴리오 — 국내(KR) 섹션에 예수금·소스명 표시 (2026-07-25 추가)."""
     body_script = _STUBS + '''
 data.load_kr_holdings = lambda *a, **k: {
-    "rows": [{"ticker": "0167A0", "name": "SOL AI반도체TOP2플러스", "shares": 23,
+    "rows": [{"ticker": "0167A0", "name": "SOL AI반도체TOP2플러스",
+              "display": "SOL AI반도체TOP2플러스", "shares": 23,
               "avg": 20681.3, "cur": 17185.0, "value": 395255.0, "ret": -16.91, "pnl": -80415.0}],
     "total": 395255.0, "cash": 41011.0, "total_with_cash": 436266.0,
     "last_sync": "2026-07-25T04:35:00", "source": "toss"}
@@ -720,7 +721,8 @@ def test_home_shows_kr_donut_and_holdings_with_cash():
     """홈 — 국내(KR) 배분 도넛+보유표+예수금 (2026-07-25 추가)."""
     body_script = _STUBS + '''
 data.load_kr_holdings = lambda *a, **k: {
-    "rows": [{"ticker": "0167A0", "name": "SOL AI반도체TOP2플러스", "shares": 23,
+    "rows": [{"ticker": "0167A0", "name": "SOL AI반도체TOP2플러스",
+              "display": "SOL AI반도체TOP2플러스", "shares": 23,
               "avg": 20681.3, "cur": 17185.0, "value": 395255.0, "ret": -16.91, "pnl": -80415.0}],
     "total": 395255.0, "cash": 41011.0, "total_with_cash": 436266.0,
     "last_sync": "2026-07-25T04:35:00"}
@@ -735,7 +737,9 @@ home.render()
     assert "예수금 ₩41,011" in caps
     assert len(at.dataframe) >= 2                          # USD 보유표 + KR 보유표
     kr_df = at.dataframe[-1].value
-    assert "0167A0" in kr_df["종목"].values
+    # 종목 열엔 코스피200 아닌 종목은 이름만(코드 안 보임) — display 필드 사용(2026-07-29)
+    assert "SOL AI반도체TOP2플러스" in kr_df["종목"].values
+    assert "0167A0" not in kr_df["종목"].values
 
 
 def test_home_shows_market_map():

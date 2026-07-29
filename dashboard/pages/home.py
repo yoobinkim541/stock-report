@@ -74,7 +74,9 @@ def render():
         ktotal = kr.get("total") or 0
         with kleft:
             st.caption("🇰🇷 국내 배분")
-            kr_chart_rows = [{"ticker": r["ticker"] or r["name"], "value": r["value"], "name": r["name"]}
+            # 국내 티커(6자리 코드)는 웨지 라벨로 못 알아봐서 display(이름 우선)를 넣는다
+            # — allocation_donut 은 공용(해외 도넛도 씀)이라 함수 자체는 안 건드림.
+            kr_chart_rows = [{"ticker": r["display"], "value": r["value"], "name": r["name"]}
                              for r in krows]
             st.plotly_chart(charts.allocation_donut(kr_chart_rows), width="stretch",
                             config={"displayModeBar": False})
@@ -83,18 +85,18 @@ def render():
                       "&nbsp;·&nbsp; 🔍 **행을 클릭**하면 해당 종목 상세 분석으로 이동",
                       unsafe_allow_html=True)
             kdf = pd.DataFrame([{
-                "종목": r["ticker"] or r["name"], "이름": (r["name"] or "")[:18],
+                "종목": r["display"],
                 "평가액(₩)": round(r["value"]), "손익%": round(r["ret"] or 0, 1),
                 "비중%": round(r["value"] / ktotal * 100, 1) if ktotal else 0.0,
             } for r in krows])
             kev = st.dataframe(kdf, hide_index=True, width="stretch",
                                on_select="rerun", selection_mode="single-row")
             ksel = kev.selection.rows if hasattr(kev, "selection") else []
-            if ksel:
-                kpicked = kdf.iloc[ksel[0]]["종목"]
+            if ksel and ksel[0] < len(krows):
+                kpicked = krows[ksel[0]]["ticker"]        # 내비게이션은 실제 티커 — 표시값과 분리
                 if kpicked and kpicked != st.session_state.get("ticker"):
                     st.session_state["ticker"] = kpicked
-                    st.toast(f"종목 분석 → {kpicked}")
+                    st.toast(f"종목 분석 → {krows[ksel[0]]['display']}")
                     _tp = st.session_state.get("_ticker_page")
                     if _tp is not None:
                         st.switch_page(_tp)   # 종목 분석 페이지로 자동 이동
