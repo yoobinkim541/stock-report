@@ -977,6 +977,36 @@ def load_kr_holdings(path: str | None = None) -> dict:
             "source": snap.get("last_domestic_sync_source")}
 
 
+def load_watchlist() -> list[dict]:
+    """관심종목 — lib.watchlist 원본에 회사명·실시간가 오버레이(표시용, 순수).
+
+    가격은 load_holdings() 와 동일하게 실시간가 캐시(providers.market_data._realtime_current)
+    만 사용 — 관심종목은 보유가 아니라 스트림 워치리스트에 자동 포함되지 않으므로 캐시에
+    없으면 None(대시보드가 '—' 로 표시). 개별 yfinance fetch 는 테이블 다건 렌더 시 느려서 안 함.
+    """
+    from lib import watchlist as _wl
+    try:
+        import ticker_names
+    except Exception:
+        ticker_names = None
+    try:
+        from providers import market_data as _md
+    except Exception:
+        _md = None
+
+    rows = []
+    for e in _wl.list_watchlist():
+        tk = e.get("ticker", "")
+        nm = ticker_names.display_name(tk, allow_net=False) if ticker_names else None
+        price = _md._realtime_current(tk) if (_md and tk) else None
+        rows.append({
+            "ticker": tk, "name": nm or tk, "price": price,
+            "reason": e.get("reason", ""), "source": e.get("source", ""),
+            "note": e.get("note"), "added_at": e.get("added_at", ""),
+        })
+    return rows
+
+
 # ── 가격 알림 (bot/price_alerts store 재사용 — 차트→알림 연동) ─────────────────
 
 def ticker_alerts(ticker: str) -> list[dict]:
