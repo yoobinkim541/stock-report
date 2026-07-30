@@ -1474,7 +1474,7 @@ def test_load_kr_holdings_populates_display_field(tmp_path):
     assert by_ticker["000660"]["ticker"] == "000660"   # 내비게이션 키는 변함없이 실제 티커
 
 
-def test_load_watchlist_overlays_name_and_price(monkeypatch):
+def test_load_watchlist_overlays_name(monkeypatch):
     from lib import watchlist as _wl
 
     monkeypatch.setattr(_wl, "list_watchlist", lambda: [
@@ -1486,33 +1486,14 @@ def test_load_watchlist_overlays_name_and_price(monkeypatch):
     import ticker_names
     monkeypatch.setattr(ticker_names, "display_name", lambda t, allow_net=False: "Apple Inc")
 
-    import providers.market_data as _md
-    monkeypatch.setattr(_md, "_realtime_current", lambda t: 254.10 if t == "AAPL" else None)
-
     rows = data.load_watchlist()
 
     assert len(rows) == 1
     assert rows[0]["ticker"] == "AAPL"
     assert rows[0]["name"] == "Apple Inc"
-    assert rows[0]["price"] == 254.10
+    assert "price" not in rows[0]
     assert rows[0]["reason"] == "버핏 신규 편입 (2026-05-15)"
     assert rows[0]["added_at"] == "2026-05-16T00:00:00+00:00"
-
-
-def test_load_watchlist_graceful_when_price_unavailable(monkeypatch):
-    from lib import watchlist as _wl
-
-    monkeypatch.setattr(_wl, "list_watchlist", lambda: [
-        {"ticker": "ZZZZ", "reason": "수동 추가", "source": "manual", "note": None,
-         "added_at": "2026-05-16T00:00:00+00:00", "updated_at": "2026-05-16T00:00:00+00:00"},
-    ])
-
-    import providers.market_data as _md
-    monkeypatch.setattr(_md, "_realtime_current", lambda t: None)
-
-    rows = data.load_watchlist()
-
-    assert rows[0]["price"] is None
 
 
 def test_load_watchlist_empty_returns_empty_list(monkeypatch):

@@ -127,7 +127,7 @@ cached.disclosures = lambda t: {"list":[],"error":"","market":"US"}
 cached.earnings = lambda t: {"history":[{"date":"2026-04-30","eps_est":2.1,"eps_actual":2.3,"surprise_pct":9.5}]}
 cached.earnings_history_deep = lambda t, limit=12: []
 data.load_watchlist = lambda *a, **k: [
-    {"ticker": "AAPL", "name": "Apple Inc", "price": 254.10,
+    {"ticker": "AAPL", "name": "Apple Inc",
      "reason": "Berkshire Hathaway (Warren Buffett) 신규 편입 (2026-05-15)",
      "source": "notable_investor:berkshire", "note": None, "added_at": "2026-05-16T00:00:00+00:00"},
 ]

@@ -978,29 +978,25 @@ def load_kr_holdings(path: str | None = None) -> dict:
 
 
 def load_watchlist() -> list[dict]:
-    """관심종목 — lib.watchlist 원본에 회사명·실시간가 오버레이(표시용, 순수).
+    """관심종목 — lib.watchlist 원본에 회사명 오버레이(표시용, 순수).
 
-    가격은 load_holdings() 와 동일하게 실시간가 캐시(providers.market_data._realtime_current)
-    만 사용 — 관심종목은 보유가 아니라 스트림 워치리스트에 자동 포함되지 않으므로 캐시에
-    없으면 None(대시보드가 '—' 로 표시). 개별 yfinance fetch 는 테이블 다건 렌더 시 느려서 안 함.
+    가격(price)은 넣지 않는다(2026-07-30) — providers.market_data._realtime_current 는
+    KIS 실시간 스트림 구독 종목에만 값을 주는데(kis_stream.compute_watchlist 의 구독
+    대상은 핵심지수+장중유니버스+보유종목+활성알림뿐, 관심종목은 소스가 아님), 관심종목
+    티커는 거의 항상 구독 밖이라 사실상 늘 None — 빈 컬럼을 보여주느니 아예 안 보여준다.
     """
     from lib import watchlist as _wl
     try:
         import ticker_names
     except Exception:
         ticker_names = None
-    try:
-        from providers import market_data as _md
-    except Exception:
-        _md = None
 
     rows = []
     for e in _wl.list_watchlist():
         tk = e.get("ticker", "")
         nm = ticker_names.display_name(tk, allow_net=False) if ticker_names else None
-        price = _md._realtime_current(tk) if (_md and tk) else None
         rows.append({
-            "ticker": tk, "name": nm or tk, "price": price,
+            "ticker": tk, "name": nm or tk,
             "reason": e.get("reason", ""), "source": e.get("source", ""),
             "note": e.get("note"), "added_at": e.get("added_at", ""),
         })

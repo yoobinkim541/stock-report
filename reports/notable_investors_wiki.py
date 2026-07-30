@@ -152,11 +152,14 @@ def run(filer_key: str, *, dry_run: bool = False) -> dict:
         for h in diff["new"]:
             if not h.get("ticker"):
                 continue
-            watchlist.add_ticker(
-                h["ticker"],
-                reason=f"{snapshot['filer_name']} 신규 편입 ({snapshot['filing_date']})",
-                source=f"notable_investor:{filer_key}",
-            )
+            try:
+                watchlist.add_ticker(
+                    h["ticker"],
+                    reason=f"{snapshot['filer_name']} 신규 편입 ({snapshot['filing_date']})",
+                    source=f"notable_investor:{filer_key}",
+                )
+            except Exception as e:
+                logger.warning("관심종목 추가 실패(무시) %s: %s", h["ticker"], e)
 
     return {"ok": True, "filer": filer_key, "status": "updated",
             "accession": snapshot["accession"], "new": diff["new"], "exited": diff["exited"],

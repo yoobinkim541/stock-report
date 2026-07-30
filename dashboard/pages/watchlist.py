@@ -25,16 +25,12 @@ def render():
 
     df = pd.DataFrame([{
         "티커": r["ticker"], "종목": r["name"],
-        "현재가": r["price"] if r["price"] is not None else None,
         "추가 사유": r["reason"], "추가일": r["added_at"][:10] if r["added_at"] else "",
     } for r in rows])
 
     st.caption("🔍 **행을 클릭**하면 해당 종목 상세 분석으로 이동")
     event = st.dataframe(
         df, hide_index=True, width="stretch", on_select="rerun", selection_mode="single-row",
-        column_config={
-            "현재가": st.column_config.NumberColumn(format="$%.2f"),
-        },
     )
     try:
         sel = event.selection.rows
