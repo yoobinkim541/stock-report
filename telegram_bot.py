@@ -77,6 +77,7 @@ from holding_manager import refresh_portfolio_prices
 from bot.stock_advisor import ask_portfolio_advisor
 from bot.tax_commands import cmd_tax
 from bot.holding_commands import cmd_holding, cmd_dividend, cmd_apply_snapshot
+from bot.watchlist_commands import cmd_watch
 from bot.accum_commands import cmd_accum
 from bot.entry_commands import cmd_entry
 from bot.earnings_commands import cmd_earnings
@@ -201,6 +202,7 @@ _OWNER_MENU = [
     {"command": "tax",       "description": "실현손익 & 양도세 (sim/sell/history/delete/import)"},
     {"command": "ask",       "description": "AI 포트폴리오 상담"},
     {"command": "alert",     "description": "가격 알림 관리 (add/list/remove)"},
+    {"command": "watch",     "description": "관심종목 관리 (add/list/remove)"},
     {"command": "accum",     "description": "기관 매집 추적 — OBV·CMF·13F 매집 강도"},
     {"command": "earnings",  "description": "실적·밸류에이션 — PER/PBR/ROE·서프라이즈·PEAD (예: /earnings NVDA)"},
     {"command": "indicators","description": "종목 기술적 지표 — RSI·이동평균·모멘텀·52주 위치 (예: /indicators QQQ)"},
@@ -252,7 +254,7 @@ HELP_SECTIONS = [
     ("포트폴리오", ["portfolio", "rebalance", "risk", "history"]),
     ("주문·모의", ["order", "paper"]),
     ("보유·세금", ["holding", "tax"]),
-    ("AI·알림", ["ask", "alert"]),
+    ("AI·알림", ["ask", "alert", "watch"]),
     ("ML·신호 (참고)", ["signals"]),
 ]
 
@@ -2027,6 +2029,7 @@ _COMMAND_HANDLERS = {
     "/report": _dispatch_report,
     "/signals": _dispatch_signals,   # 무엣지 신호 우산 (구 ranking·entry·intraday·leverage·meta)
     "/alert": lambda chat_id, args: _dispatch_with_typing(cmd_alert, chat_id, args),
+    "/watch": lambda chat_id, args: _dispatch_with_send(cmd_watch, chat_id, args),
     "/dividend": lambda chat_id, args: _dispatch_with_send(cmd_dividend, chat_id, args),
     "/holding": lambda chat_id, args: _dispatch_with_send(cmd_holding, chat_id, args),
     "/accum": lambda chat_id, args: _dispatch_with_send(cmd_accum, chat_id, args),
