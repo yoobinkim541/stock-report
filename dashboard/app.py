@@ -144,7 +144,7 @@ with st.sidebar:
     st.markdown("<div style='height:8px'></div>", unsafe_allow_html=True)
     _accum.sidebar_rail()
 
-from dashboard.pages import ai_console, ai_wiki, chart_full, home, market, paper, portfolio, research
+from dashboard.pages import ai_console, ai_wiki, chart_full, home, market, paper, portfolio, research, watchlist
 from dashboard.pages import ticker as ticker_pg
 
 _home_pg = st.Page(home.render, title="홈", icon="🏠", url_path="home", default=True)
@@ -155,13 +155,14 @@ _paper_pg = st.Page(paper.render, title="모의투자", icon="🧪", url_path="p
 _research_pg = st.Page(research.render, title="리서치", icon="🔬", url_path="research")
 _agent_pg = st.Page(ai_console.render, title="AI 콘솔", icon="🧠", url_path="agent")
 _chart_pg = st.Page(chart_full.render, title="차트 풀뷰", icon="🖥️", url_path="chart")
+_watchlist_pg = st.Page(watchlist.render, title="관심종목", icon="⭐", url_path="watchlist")
 
 # 홈 보유표 행 클릭 → 종목 분석 자동 이동용 (switch_page 는 StreamlitPage 객체 필요)
 st.session_state["_ticker_page"] = _ticker_pg
 st.session_state["_chart_page"] = _chart_pg          # ⛶ 전체화면 풀차트 왕복용
 st.session_state["_wiki_page"] = st.Page(ai_wiki.render, title="AI 위키", icon="🗂️", url_path="wiki")
 
-nav = st.navigation([_home_pg, _portfolio_pg, _ticker_pg, _chart_pg, _market_pg,
+nav = st.navigation([_home_pg, _portfolio_pg, _watchlist_pg, _ticker_pg, _chart_pg, _market_pg,
                      _paper_pg, _research_pg, _agent_pg])
 # 사이드바에서 종목을 새로 고르면 종목 분석 페이지로 이동 (홈 행클릭과 동일 UX)
 if st.session_state.pop("_nav_to_ticker", False):

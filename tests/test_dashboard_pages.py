@@ -126,6 +126,11 @@ cached.insider = lambda t: {"transactions":[],"error":""}
 cached.disclosures = lambda t: {"list":[],"error":"","market":"US"}
 cached.earnings = lambda t: {"history":[{"date":"2026-04-30","eps_est":2.1,"eps_actual":2.3,"surprise_pct":9.5}]}
 cached.earnings_history_deep = lambda t, limit=12: []
+data.load_watchlist = lambda *a, **k: [
+    {"ticker": "AAPL", "name": "Apple Inc", "price": 254.10,
+     "reason": "Berkshire Hathaway (Warren Buffett) 신규 편입 (2026-05-15)",
+     "source": "notable_investor:berkshire", "note": None, "added_at": "2026-05-16T00:00:00+00:00"},
+]
 cached.intrinsic = lambda t: {"rim":{"low":250,"mid":320,"high":400},"ddm":None,"upside_pct":12.0,"ddm_reliable":False}
 cached.risk = lambda: "리스크 텍스트"
 cached.risk_struct = lambda: {"port_vol":0.2,"n_eff":3.5,"n_assets":5,"mdd_est":0.3,
@@ -1278,3 +1283,26 @@ def test_ai_console_surface_pin_overrides_inference(monkeypatch):
     ai_console._run_agent_question_auto("오늘 시장 분위기 요약해줘")
 
     assert seen["surface"] == "paper"
+
+
+def test_watchlist_page_renders_rows_and_navigates_on_click():
+    """관심종목 페이지 — 테이블 렌더 + 행 클릭 시 종목분석 이동(2026-07-29)."""
+    script = _STUBS + 'from dashboard.pages import watchlist\nwatchlist.render()\n'
+    at = AppTest.from_string(script, default_timeout=30)
+    at.run()
+    assert not at.exception, str(at.exception)
+    assert len(at.dataframe) >= 1
+    df = at.dataframe[0].value
+    assert "AAPL" in df["티커"].values
+    assert "Apple Inc" in df["종목"].values
+
+
+def test_watchlist_page_empty_shows_message():
+    script = (_STUBS + 'data.load_watchlist = lambda *a, **k: []\n'
+              'from dashboard.pages import watchlist\nwatchlist.render()\n')
+    at = AppTest.from_string(script, default_timeout=30)
+    at.run()
+    assert not at.exception, str(at.exception)
+    body = " ".join(str(getattr(el, "value", "")) for el in at.info) + \
+        " ".join(str(getattr(el, "value", "")) for el in at.markdown)
+    assert "관심종목" in body
