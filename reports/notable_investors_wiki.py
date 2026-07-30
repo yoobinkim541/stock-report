@@ -147,6 +147,16 @@ def run(filer_key: str, *, dry_run: bool = False) -> dict:
             "filer": filer_key, "accession": snapshot["accession"],
             "filing_date": snapshot["filing_date"], "holdings": snapshot["holdings"],
         })
+        # 신규편입(티커 해석된 것만) → 관심종목 자동 추가
+        from lib import watchlist
+        for h in diff["new"]:
+            if not h.get("ticker"):
+                continue
+            watchlist.add_ticker(
+                h["ticker"],
+                reason=f"{snapshot['filer_name']} 신규 편입 ({snapshot['filing_date']})",
+                source=f"notable_investor:{filer_key}",
+            )
 
     return {"ok": True, "filer": filer_key, "status": "updated",
             "accession": snapshot["accession"], "new": diff["new"], "exited": diff["exited"],

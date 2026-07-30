@@ -171,6 +171,44 @@ def test_run_first_snapshot_reports_no_new_or_exited(monkeypatch, tmp_path):
     assert result["exited"] == []
 
 
+def test_run_adds_new_positions_with_ticker_to_watchlist(monkeypatch, tmp_path):
+    """신규편입(diff['new'])이 감지되면 티커가 있는 항목만 관심종목에 자동 추가돼야 한다."""
+    history_path = tmp_path / "history.jsonl"
+    monkeypatch.setattr(niw, "HISTORY_PATH", history_path)
+    history_path.write_text(
+        '{"filer": "berkshire", "accession": "acc-old", '
+        '"holdings": [{"issuer": "OLD CO", "cusip": "OLD", "ticker": "OLD", "weight_pct": 1.0, "value_usd": 1.0}]}\n',
+        encoding="utf-8",
+    )
+
+    from providers import thirteenf
+    monkeypatch.setattr(thirteenf, "latest_holdings", lambda key: {
+        "filer": "berkshire", "filer_name": "Berkshire Hathaway (Warren Buffett)",
+        "cik": "1067983", "accession": "acc-new", "filing_date": "2026-08-15",
+        "total_value_usd": 1e9,
+        "holdings": [
+            _holding("NEWCO INC", "NNN", "NEWC", weight=5.0),   # 티커 있음 — 추가돼야 함
+            _holding("UNRESOLVED CO", "UUU", None, weight=1.0),  # 티커 없음 — 스킵돼야 함
+        ],
+    })
+
+    from agent_console import wiki
+    monkeypatch.setattr(wiki, "upsert_page", lambda p: p)
+
+    added = []
+    from lib import watchlist
+    monkeypatch.setattr(watchlist, "add_ticker",
+                        lambda ticker, reason, source, **kw: added.append((ticker, reason, source)) or {})
+
+    result = niw.run("berkshire")
+
+    assert result["status"] == "updated"
+    assert len(added) == 1
+    assert added[0][0] == "NEWC"
+    assert "Berkshire" in added[0][1]
+    assert added[0][2] == "notable_investor:berkshire"
+
+
 def test_run_returns_not_ok_when_fetch_fails(monkeypatch):
     from providers import thirteenf
     monkeypatch.setattr(thirteenf, "latest_holdings", lambda key: None)
