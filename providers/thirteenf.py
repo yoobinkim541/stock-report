@@ -32,6 +32,8 @@ _HOLDINGS_TTL_H = 24 * 3   # 13F는 분기 1회라 캐시 오래 둬도 무방 �
 # 필러 레지스트리 — 필요 시 추가만 하면 됨(CIK 10자리)
 FILERS: dict[str, dict] = {
     "berkshire": {"cik": "0001067983", "name": "Berkshire Hathaway (Warren Buffett)"},
+    "bridgewater": {"cik": "0001350694", "name": "Bridgewater Associates"},
+    "scion": {"cik": "0001649339", "name": "Scion Asset Management (Michael Burry)"},
 }
 
 

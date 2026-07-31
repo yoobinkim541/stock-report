@@ -1,0 +1,50 @@
+[
+  {
+    "key": "duquesne",
+    "display_name": "Duquesne Family Office (Stanley Druckenmiller)",
+    "source_kind": "seed",
+    "freshness": "proxy",
+    "holdings_count": null,
+    "top_holdings": [],
+    "portfolio_concentration": null,
+    "cash_ratio": null,
+    "options_exposure": null,
+    "reported_return": null,
+    "return_proxy": null,
+    "notes": [
+      "Public 13F path is not wired yet; this seed reserves the comparison slot."
+    ]
+  },
+  {
+    "key": "founders_fund",
+    "display_name": "Founders Fund (Peter Thiel)",
+    "source_kind": "seed",
+    "freshness": "proxy",
+    "holdings_count": null,
+    "top_holdings": [],
+    "portfolio_concentration": null,
+    "cash_ratio": null,
+    "options_exposure": null,
+    "reported_return": null,
+    "return_proxy": null,
+    "notes": [
+      "Public 13F path is not wired yet; this seed reserves the comparison slot."
+    ]
+  },
+  {
+    "key": "nps",
+    "display_name": "National Pension Service",
+    "source_kind": "seed",
+    "freshness": "proxy",
+    "holdings_count": null,
+    "top_holdings": [],
+    "portfolio_concentration": null,
+    "cash_ratio": null,
+    "options_exposure": null,
+    "reported_return": null,
+    "return_proxy": null,
+    "notes": [
+      "Public holdings are heterogeneous across disclosures; this seed keeps the institution visible without inventing values."
+    ]
+  }
+]
