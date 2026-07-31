@@ -118,7 +118,7 @@ def test_run_updates_wiki_and_history_on_new_filing(monkeypatch, tmp_path):
 
     assert result["status"] == "updated"
     assert len(saved_pages) == 1
-    assert saved_pages[0]["id"] == "institution-watch-berkshire"
+    assert saved_pages[0]["id"] == "notable-investor-berkshire"
     assert saved_pages[0]["kind"] == "source_digest"
     assert history_path.exists()
     recorded = history_path.read_text(encoding="utf-8").strip()
@@ -134,6 +134,8 @@ def test_run_writes_snapshot_and_pattern_digests(monkeypatch, tmp_path):
         "display_name": key.title(),
         "source_kind": "13f",
         "freshness": "fresh",
+        "cik": "0001067983" if key == "berkshire" else "0000000000",
+        "accession": "0000950123-26-003958" if key == "berkshire" else "0000950123-26-003959",
         "holdings_count": 1,
         "top_holdings": [{"ticker": "AAPL", "issuer": "APPLE", "weight_pct": 10.0, "value_usd": 100.0}],
         "portfolio_concentration": 0.4,

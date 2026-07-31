@@ -371,18 +371,20 @@ def build_common_moves_digest(snapshots: list[dict], comparison: dict, analysis:
     names = ", ".join(snapshot.get("display_name", snapshot.get("institution_key", "")) for snapshot in snapshots)
     shared_moves = list(analysis.get("shared_moves") or []) or ["No shared moves supplied"]
     divergences = list(analysis.get("divergences") or []) or ["No divergences supplied"]
+    source_backed = bool(snapshots) and all(bool(_snapshot_source_refs(snapshot)) for snapshot in snapshots)
     source_refs: list[str] = []
-    seen_refs: set[str] = set()
-    for snapshot in snapshots:
-        page_ref = f"wiki:institution-watch-{snapshot['institution_key']}"
-        if page_ref not in seen_refs:
-            seen_refs.add(page_ref)
-            source_refs.append(page_ref)
-        for ref in _snapshot_source_refs(snapshot):
-            if ref in seen_refs:
-                continue
-            seen_refs.add(ref)
-            source_refs.append(ref)
+    if source_backed:
+        seen_refs: set[str] = set()
+        for snapshot in snapshots:
+            page_ref = f"wiki:institution-watch-{snapshot['institution_key']}"
+            if page_ref not in seen_refs:
+                seen_refs.add(page_ref)
+                source_refs.append(page_ref)
+            for ref in _snapshot_source_refs(snapshot):
+                if ref in seen_refs:
+                    continue
+                seen_refs.add(ref)
+                source_refs.append(ref)
     body = "\n".join([
         f"Institutions: {names}",
         f"Compared rows: {len(comparison.get('rows') or [])}",
@@ -398,13 +400,20 @@ def build_common_moves_digest(snapshots: list[dict], comparison: dict, analysis:
         "id": "institution-watch-common-moves",
         "title": "기관투자자 공통 패턴",
         "surface": "market",
-        "kind": "source_digest",
-        "status": "reviewed",
-        "tags": ["wiki", "market", "source_digest", "institution_watch", "common_moves", "llm_synthesis"],
+        "kind": "source_digest" if source_backed else "note",
+        "status": "reviewed" if source_backed else "draft",
+        "tags": [
+            "wiki",
+            "market",
+            "institution_watch",
+            "common_moves",
+            "llm_synthesis",
+            *(["source_digest"] if source_backed else []),
+        ],
         "summary": analysis.get("summary") or f"{len(shared_moves)} shared moves across {len(snapshots)} institutions",
         "body": body,
         "source_refs": source_refs,
-        "confidence": min(float(analysis.get("confidence", 0.5)), 0.6),
+        "confidence": min(float(analysis.get("confidence", 0.5)), 0.6 if source_backed else 0.55),
     }
 
 

@@ -168,14 +168,16 @@ def test_build_common_moves_digest_is_distillable_and_carries_provenance():
             "accession": "0000950123-26-003958",
         },
         {
-            "institution_key": "nps",
-            "display_name": "National Pension Service",
-            "source_kind": "seed",
+            "institution_key": "bridgewater",
+            "display_name": "Bridgewater Associates",
+            "source_kind": "13f",
+            "cik": "0001350694",
+            "accession": "0000950123-26-003959",
         },
     ]
     page = iw.build_common_moves_digest(
         snapshots,
-        {"rows": [{"institution_key": "berkshire"}, {"institution_key": "nps"}]},
+        {"rows": [{"institution_key": "berkshire"}, {"institution_key": "bridgewater"}]},
         {
             "summary": "Both institutions look defensive.",
             "shared_moves": ["Trim cyclical exposure"],
@@ -187,8 +189,42 @@ def test_build_common_moves_digest_is_distillable_and_carries_provenance():
     assert page["kind"] == "source_digest"
     assert page["status"] == "reviewed"
     assert "wiki:institution-watch-berkshire" in page["source_refs"]
-    assert "wiki:institution-watch-nps" in page["source_refs"]
-    assert len(page["source_refs"]) == 4
+    assert "wiki:institution-watch-bridgewater" in page["source_refs"]
+    assert len(page["source_refs"]) == 6
     assert "source_digest" in page["tags"]
     assert "llm_synthesis" in page["tags"]
     assert page["confidence"] == 0.6
+
+
+def test_build_common_moves_digest_stays_draft_for_mixed_source_inputs():
+    from reports import institution_watch as iw
+
+    snapshots = [
+        {
+            "institution_key": "berkshire",
+            "display_name": "Berkshire Hathaway",
+            "source_kind": "13f",
+            "cik": "0001067983",
+            "accession": "0000950123-26-003958",
+        },
+        {
+            "institution_key": "nps",
+            "display_name": "National Pension Service",
+            "source_kind": "seed",
+        },
+    ]
+    page = iw.build_common_moves_digest(
+        snapshots,
+        {"rows": [{"institution_key": "berkshire"}, {"institution_key": "nps"}]},
+        {
+            "summary": "Mixed provenance should stay draft.",
+            "shared_moves": ["Trim cyclical exposure"],
+            "divergences": ["Only Berkshire has disclosed holdings detail"],
+            "confidence": 0.9,
+        },
+    )
+
+    assert page["kind"] == "note"
+    assert page["status"] == "draft"
+    assert page["source_refs"] == []
+    assert "source_digest" not in page["tags"]
