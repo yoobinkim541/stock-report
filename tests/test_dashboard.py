@@ -890,6 +890,58 @@ def test_views_paper_summary_assembles(monkeypatch, tmp_path):
     assert len(d["nav_series"]) == 2
 
 
+def test_views_paper_summary_stitches_lifetime_across_generations(monkeypatch, tmp_path):
+    """세대가 둘 이상이면 현재 세대와 전체 누적 성과가 분리되어 계산돼야 한다."""
+    import store
+    from dashboard import views
+    from ml import adaptive
+    from providers import market_data
+
+    hist = [
+        {"kind": "snapshot", "date": "2026-01-05 15:40", "nav": 10_000_000.0, "cash": 1_000_000.0},
+        {"kind": "snapshot", "date": "2026-01-06 15:40", "nav": 8_000_000.0, "cash": 800_000.0},
+        {"date": "2026-04-03 09:00", "kind": "generation_boundary", "generation": 1},
+        {"kind": "snapshot", "date": "2026-04-04 15:40", "nav": 10_000_000.0, "cash": 1_000_000.0},
+        {"kind": "snapshot", "date": "2026-04-05 15:40", "nav": 11_000_000.0, "cash": 1_100_000.0},
+    ]
+    monkeypatch.setattr(store, "all", lambda name, **k: list(hist))
+    import kiwoom_mock
+    monkeypatch.setattr(kiwoom_mock, "get_balance", lambda: {
+        "ok": True,
+        "nav": 11_000_000.0,
+        "pos_value": 9_900_000.0,
+        "cash_krw": 1_100_000.0,
+        "positions": {},
+    })
+    def fake_stats(since, symbol="^KS11"):
+        if since == "2026-01-05":
+            return {"return_pct": 20.0, "mdd": 0.20}
+        return {"return_pct": 6.0, "mdd": 0.05}
+    monkeypatch.setattr(market_data, "fetch_kospi_stats", fake_stats)
+    class _Ledger:
+        def __init__(self, *_a, **_k):
+            pass
+
+        def read_decisions(self):
+            return []
+
+        def read_outcomes(self):
+            return []
+
+    monkeypatch.setattr(adaptive, "Ledger", _Ledger)
+
+    d = views.paper_summary("kr_mock")
+
+    assert d["balance_ok"] is True
+    assert d["generation_count"] == 2
+    assert abs(d["cum_ret"] - 10.0) < 1e-6
+    assert round(d["lifetime_cum_ret"], 2) == -12.0
+    assert d["bench_ret"] == 6.0 and round(d["lifetime_bench_ret"], 2) == 20.0
+    assert [round(r["nav"], 0) for r in d["lifetime_nav_series"]] == [
+        10_000_000.0, 8_000_000.0, 8_000_000.0, 8_800_000.0
+    ]
+
+
 def test_views_paper_summary_reconstructs_positions_when_balance_unavailable(monkeypatch, tmp_path):
     """잔고 API가 꺼져도 성공 주문 이력과 결정 원장 가격으로 보유 내역을 복원한다."""
     import store
@@ -927,6 +979,36 @@ def test_views_paper_summary_reconstructs_positions_when_balance_unavailable(mon
     assert d["positions"][0]["avg"] == 1_383_000.0
     assert d["positions"][0]["value"] == 2_766_000.0
     assert [r["code"] for r in d["order_history"]] == ["000270", "035720", "207940", "005930"]
+
+
+def test_views_paper_summary_labels_kr_positions_without_company_name(monkeypatch, tmp_path):
+    """잔고 API가 회사명을 주지 않아도 국내 종목은 코드만으로 표시명을 복원한다."""
+    import store
+    from dashboard import views
+    from providers import market_data
+
+    hist = [{"kind": "snapshot", "date": "2026-07-24 15:40", "nav": 9_379_829.0, "cash": 159_029.0}]
+    monkeypatch.setattr(store, "all", lambda name, **k: list(hist))
+
+    import kiwoom_mock
+    monkeypatch.setattr(kiwoom_mock, "get_balance", lambda: {
+        "ok": True,
+        "positions": {
+            "005930": {"name": "", "shares": 10, "avg_price": 70_000.0,
+                        "cur_price": 75_000.0, "value": 750_000.0, "pnl": 50_000.0,
+                        "return_pct": 7.14},
+        },
+        "pos_value": 750_000.0,
+        "cash_krw": 8_629_829.0,
+        "nav": 9_379_829.0,
+        "raw": {},
+    })
+    monkeypatch.setattr(market_data, "fetch_kospi_stats", lambda *a, **k: {})
+
+    d = views.paper_summary("kr_mock")
+    assert d["balance_ok"] is True
+    assert d["positions"][0]["symbol"] == "005930"
+    assert d["positions"][0]["name"] == "삼성전자"
 
 
 def test_views_paper_summary_graceful_empty(monkeypatch):
@@ -1023,6 +1105,28 @@ def test_views_paper_glance_from_snapshots(monkeypatch):
     assert abs(kr["day_ret"] - 5.0) < 1e-9 and kr["n_days"] == 2
     us = g[1]
     assert us["cum_ret"] == 0.0 and us["day_ret"] == 0.0           # 단일 스냅샷
+
+
+def test_views_paper_glance_stitches_lifetime_after_boundary(monkeypatch):
+    import store
+    from dashboard import views
+    hists = {"kr_mock_history": [
+                 {"kind": "snapshot", "date": "2026-01-05 06:40", "nav": 10_000_000.0},
+                 {"kind": "snapshot", "date": "2026-01-06 06:40", "nav": 8_000_000.0},
+                 {"kind": "generation_boundary", "generation": 1},
+                 {"kind": "snapshot", "date": "2026-04-04 06:40", "nav": 10_000_000.0},
+                 {"kind": "snapshot", "date": "2026-04-05 06:40", "nav": 11_000_000.0}],
+             "us_mock_history": []}
+    monkeypatch.setattr(store, "all", lambda name, **k: list(hists.get(name, [])))
+
+    g = views.paper_glance()
+
+    assert [r["surface"] for r in g] == ["kr_mock"]
+    kr = g[0]
+    assert round(kr["cum_ret"], 2) == -12.0
+    assert round(kr["current_cum_ret"], 2) == 10.0
+    assert round(kr["day_ret"], 2) == 10.0
+    assert kr["n_days"] == 2 and kr["generation"] == 2
 
 
 def test_views_paper_glance_empty_and_error(monkeypatch):

@@ -362,6 +362,17 @@ def build_report(html: bool = False, detail: bool | None = None) -> str:
     day_ret = (nav / prev_nav - 1.0) * 100.0 if prev_nav else 0.0
 
     try:
+        from lib import mock_generations
+        roll = mock_generations.generation_rollup("us_mock_history")
+    except Exception as e:
+        logger.warning("세대 롤업 실패: %s", e)
+        roll = {}
+    lifetime = roll.get("lifetime") or {}
+    life_cum_ret = lifetime.get("cum_return_pct")
+    life_mdd_pct = lifetime.get("mdd_pct")
+    life_inception_date = lifetime.get("start_date")
+
+    try:
         from providers import market_data
         bm = market_data.fetch_kospi_stats(inception_date, symbol="QQQ")   # US 벤치마크
     except Exception as e:
@@ -369,6 +380,17 @@ def build_report(html: bool = False, detail: bool | None = None) -> str:
         bm = {"return_pct": None, "mdd": None}
     q_ret = bm.get("return_pct")
     q_mdd_pct = bm["mdd"] * 100.0 if bm.get("mdd") is not None else None
+    if life_inception_date:
+        try:
+            from providers import market_data
+            bm_life = market_data.fetch_kospi_stats(life_inception_date, symbol="QQQ")
+        except Exception as e:
+            logger.warning("QQQ 전체 통계 실패: %s", e)
+            bm_life = {"return_pct": None, "mdd": None}
+    else:
+        bm_life = {"return_pct": None, "mdd": None}
+    q_life_ret = bm_life.get("return_pct")
+    q_life_mdd_pct = bm_life["mdd"] * 100.0 if bm_life.get("mdd") is not None else None
 
     held = {c: p for c, p in positions.items() if int(p.get("shares", 0) or 0) > 0}
     holding_stats = _holding_stats(held)
@@ -409,6 +431,7 @@ def build_report(html: bool = False, detail: bool | None = None) -> str:
     shadow, pending_shadow = _llm_shadow_summary()
     recent, last = _recent_decisions()
     excess = (cum_ret - q_ret) if q_ret is not None else None
+    life_excess = (life_cum_ret - q_life_ret) if (life_cum_ret is not None and q_life_ret is not None) else None
 
     if not detail:
         lines = [hdr, fmt.sep()]
@@ -420,11 +443,21 @@ def build_report(html: bool = False, detail: bool | None = None) -> str:
             lines.append(f"QQQ대비 {fmt.pct(excess)}p {'✅' if excess >= 0 else '⚠️'} · QQQ {fmt.spct(q_ret, 2)}")
         else:
             lines.append(f"NAV {_B(fmt.money(nav, abbrev=True))} · 전일 {fmt.spct(day_ret, 2)} · 누적 {fmt.spct(cum_ret, 2)}")
+        if life_cum_ret is not None and life_cum_ret != cum_ret:
+            lines.append(f"전체 누적 {fmt.spct(life_cum_ret, 2)} · 세대 {fmt.spct(cum_ret, 2)}")
+        if life_excess is not None:
+            lines.append(f"전체 QQQ대비 {fmt.pct(life_excess)}p · QQQ {fmt.spct(q_life_ret, 2)}")
         if q_mdd_pct is not None:
             ok = "✅" if strat_mdd <= q_mdd_pct else "⚠️"
             lines.append(f"MDD {strat_mdd:.1f}% vs QQQ {q_mdd_pct:.1f}% {ok}")
         else:
             lines.append(f"MDD {strat_mdd:.1f}%")
+        if life_mdd_pct is not None and life_mdd_pct != strat_mdd:
+            if q_life_mdd_pct is not None:
+                ok_life = "✅" if life_mdd_pct <= q_life_mdd_pct else "⚠️"
+                lines.append(f"전체 MDD {life_mdd_pct:.1f}% vs QQQ {q_life_mdd_pct:.1f}% {ok_life}")
+            else:
+                lines.append(f"전체 MDD {life_mdd_pct:.1f}%")
         if cash is not None:
             cash_w = cash / nav * 100.0 if nav else 0.0
             label = "여유증거금" if bal.get("cash_derived") else "현금"
@@ -478,11 +511,21 @@ def build_report(html: bool = False, detail: bool | None = None) -> str:
     ))
     if excess is not None:
         lines.append(f"QQQ대비 {_B(fmt.pct(excess) + 'p')} {'✅' if excess >= 0 else '⚠️'} · QQQ {fmt.spct(q_ret, 2)}")
+    if life_cum_ret is not None and life_cum_ret != cum_ret:
+        lines.append(f"전체 누적 {_B(fmt.spct(life_cum_ret, 2))} · 세대 {_B(fmt.spct(cum_ret, 2))}")
+    if life_excess is not None:
+        lines.append(f"전체 QQQ대비 {_B(fmt.pct(life_excess) + 'p')} · QQQ {fmt.spct(q_life_ret, 2)}")
     if q_mdd_pct is not None:
         ok = "✅" if strat_mdd <= q_mdd_pct else "⚠️"
         lines.append(f"MDD {strat_mdd:.1f}% vs QQQ {q_mdd_pct:.1f}% {ok}")
     else:
         lines.append(f"MDD {strat_mdd:.1f}%")
+    if life_mdd_pct is not None and life_mdd_pct != strat_mdd:
+        if q_life_mdd_pct is not None:
+            ok_life = "✅" if life_mdd_pct <= q_life_mdd_pct else "⚠️"
+            lines.append(f"전체 MDD {life_mdd_pct:.1f}% vs QQQ {q_life_mdd_pct:.1f}% {ok_life}")
+        else:
+            lines.append(f"전체 MDD {life_mdd_pct:.1f}%")
     cash_summary = _cash_line(cash, nav, bal)
     if cash_summary:
         lines.append(cash_summary)

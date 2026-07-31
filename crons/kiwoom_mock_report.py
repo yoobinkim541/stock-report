@@ -278,6 +278,17 @@ def build_report(html: bool = False, detail: bool | None = None) -> str:
     cum_ret = (nav / inception_nav - 1.0) * 100.0 if inception_nav else 0.0
     day_ret = (nav / prev_nav - 1.0) * 100.0 if prev_nav else 0.0
 
+    try:
+        from lib import mock_generations
+        roll = mock_generations.generation_rollup("kr_mock_history")
+    except Exception as e:
+        logger.warning("세대 롤업 실패: %s", e)
+        roll = {}
+    lifetime = roll.get("lifetime") or {}
+    life_cum_ret = lifetime.get("cum_return_pct")
+    life_mdd_pct = lifetime.get("mdd_pct")
+    life_inception_date = lifetime.get("start_date")
+
     # KOSPI 벤치 (인셉션~오늘)
     try:
         from providers import market_data
@@ -287,8 +298,20 @@ def build_report(html: bool = False, detail: bool | None = None) -> str:
         kospi = {"return_pct": None, "mdd": None}
     k_ret, k_mdd = kospi.get("return_pct"), kospi.get("mdd")
     k_mdd_pct = k_mdd * 100.0 if k_mdd is not None else None
+    if life_inception_date:
+        try:
+            from providers import market_data
+            kospi_life = market_data.fetch_kospi_stats(life_inception_date)
+        except Exception as e:
+            logger.warning("KOSPI 전체 통계 실패: %s", e)
+            kospi_life = {"return_pct": None, "mdd": None}
+    else:
+        kospi_life = {"return_pct": None, "mdd": None}
+    k_life_ret = kospi_life.get("return_pct")
+    k_life_mdd_pct = kospi_life["mdd"] * 100.0 if kospi_life.get("mdd") is not None else None
 
     excess = (cum_ret - k_ret) if k_ret is not None else None
+    life_excess = (life_cum_ret - k_life_ret) if (life_cum_ret is not None and k_life_ret is not None) else None
     held = {c: p for c, p in positions.items() if int(p.get("shares", 0) or 0) > 0}
     holding_stats = _holding_stats(held)
     _total_pnl, summary_rows = _holding_summary_lines(holding_stats) if holding_stats else (0.0, [])
@@ -313,11 +336,21 @@ def build_report(html: bool = False, detail: bool | None = None) -> str:
     if not detail:
         lines = [hdr, fmt.sep()]
         lines.append(f"NAV {_B(fmt.money(nav, '₩', abbrev=True))} · 전일 {fmt.spct(day_ret, 2)} · 누적 {fmt.spct(cum_ret, 2)}")
+        if life_cum_ret is not None and life_cum_ret != cum_ret:
+            lines.append(f"전체 누적 {fmt.spct(life_cum_ret, 2)} · 세대 {fmt.spct(cum_ret, 2)}")
         if excess is not None:
             lines.append(f"KOSPI 대비 {fmt.pct(excess)}p {'✅' if excess >= 0 else '⚠️'} · KOSPI {fmt.spct(k_ret, 2)}")
+        if life_excess is not None:
+            lines.append(f"전체 KOSPI 대비 {fmt.pct(life_excess)}p · KOSPI {fmt.spct(k_life_ret, 2)}")
         if k_mdd_pct is not None:
             ok_mdd = "✅" if strat_mdd <= k_mdd_pct else "⚠️"
             lines.append(f"MDD {strat_mdd:.1f}% vs KOSPI {k_mdd_pct:.1f}% {ok_mdd}")
+        if life_mdd_pct is not None and life_mdd_pct != strat_mdd:
+            ok_life = "✅" if life_mdd_pct <= (k_life_mdd_pct if k_life_mdd_pct is not None else life_mdd_pct) else "⚠️"
+            if k_life_mdd_pct is not None:
+                lines.append(f"전체 MDD {life_mdd_pct:.1f}% vs KOSPI {k_life_mdd_pct:.1f}% {ok_life}")
+            else:
+                lines.append(f"전체 MDD {life_mdd_pct:.1f}%")
         else:
             lines.append(f"MDD {strat_mdd:.1f}%")
         if cash is not None:
@@ -367,11 +400,21 @@ def build_report(html: bool = False, detail: bool | None = None) -> str:
         f"전일 {fmt.spct(day_ret, 2)}",
         f"누적 {_B(fmt.spct(cum_ret, 2))}",
     ))
+    if life_cum_ret is not None and life_cum_ret != cum_ret:
+        lines.append(f"전체 누적 {_B(fmt.spct(life_cum_ret, 2))} · 세대 {_B(fmt.spct(cum_ret, 2))}")
     if excess is not None:
         lines.append(f"KOSPI 대비 {_B(fmt.pct(excess) + 'p')} {'✅' if excess >= 0 else '⚠️'} · KOSPI {fmt.spct(k_ret, 2)}")
+    if life_excess is not None:
+        lines.append(f"전체 KOSPI 대비 {_B(fmt.pct(life_excess) + 'p')} · KOSPI {fmt.spct(k_life_ret, 2)}")
     if k_mdd_pct is not None:
         ok_mdd = "대비 방어 ✅" if strat_mdd <= k_mdd_pct else "보다 깊음 ⚠️"
         lines.append(f"MDD {strat_mdd:.1f}% vs KOSPI {k_mdd_pct:.1f}% {ok_mdd}")
+    if life_mdd_pct is not None and life_mdd_pct != strat_mdd:
+        if k_life_mdd_pct is not None:
+            ok_life = "대비 방어 ✅" if life_mdd_pct <= k_life_mdd_pct else "보다 깊음 ⚠️"
+            lines.append(f"전체 MDD {life_mdd_pct:.1f}% vs KOSPI {k_life_mdd_pct:.1f}% {ok_life}")
+        else:
+            lines.append(f"전체 MDD {life_mdd_pct:.1f}%")
     else:
         lines.append(f"MDD {strat_mdd:.1f}%")
     if cash is not None:

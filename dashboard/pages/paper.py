@@ -58,23 +58,40 @@ def _account_section(surface: str):
     excess = None
     if d.get("cum_ret") is not None and d.get("bench_ret") is not None:
         excess = d["cum_ret"] - d["bench_ret"]
+    life_excess = None
+    if d.get("lifetime_cum_ret") is not None and d.get("lifetime_bench_ret") is not None:
+        life_excess = d["lifetime_cum_ret"] - d["lifetime_bench_ret"]
     is_margin = surface == "us_mock" and d.get("fx")   # 통합증거금 — 원화가 증거금·USD 예수금 0
     m = st.columns(4)
     m[0].metric("NAV", _money(d["nav"], cur),
                 delta=(f"{d['day_ret']:+.2f}% 전일" if d.get("day_ret") is not None else None),
                 help=("계좌 원화 총자산 ÷ 환율 (통합증거금 — 환율 변동도 NAV 에 반영됨)"
                       if is_margin else None))
-    m[1].metric("누적 수익률", data.f_pct_s(d.get("cum_ret"), 2),
-                help=f"인셉션 {d.get('inception_date') or '—'} 이후")
-    m[2].metric(f"vs {bench}", (f"{excess:+.2f}%p" if excess is not None else "—"),
+    m[1].metric("세대 누적 수익률", data.f_pct_s(d.get("cum_ret"), 2),
+                help=f"세대 {d.get('generation') or '—'} · 인셉션 {d.get('inception_date') or '—'} 이후")
+    m[2].metric("전체 누적 수익률", data.f_pct_s(d.get("lifetime_cum_ret"), 2),
+                help=f"최초 {d.get('lifetime_inception_date') or d.get('inception_date') or '—'} 이후")
+    m[3].metric(f"세대 vs {bench}", (f"{excess:+.2f}%p" if excess is not None else "—"),
                 delta=(f"{bench} {d['bench_ret']:+.2f}%" if d.get("bench_ret") is not None else None),
-                delta_color="off", help="1순위 목표: 지수 아웃퍼폼")
+                delta_color="off", help="현재 세대 기준 지수 아웃퍼폼")
+
+    m2 = st.columns(3)
+    m2[0].metric(f"전체 vs {bench}", (f"{life_excess:+.2f}%p" if life_excess is not None else "—"),
+                 delta=(f"{bench} {d['lifetime_bench_ret']:+.2f}%"
+                        if d.get("lifetime_bench_ret") is not None else None),
+                 delta_color="off", help="세대 경계를 이어붙인 전체 성과")
     mdd_ok = (d.get("strat_mdd") is not None and d.get("bench_mdd") is not None
               and d["strat_mdd"] <= d["bench_mdd"])
-    m[3].metric("MDD (전략)", data.f_pct(d.get("strat_mdd")),
-                delta=(f"지수 {data.f_pct(d.get('bench_mdd'))} {'✅' if mdd_ok else '⚠️'}"
-                       if d.get("bench_mdd") is not None else None),
-                delta_color="off", help="2순위 목표: 최대낙폭 ≤ 지수")
+    m2[1].metric("MDD (세대)", data.f_pct(d.get("strat_mdd")),
+                 delta=(f"지수 {data.f_pct(d.get('bench_mdd'))} {'✅' if mdd_ok else '⚠️'}"
+                        if d.get("bench_mdd") is not None else None),
+                 delta_color="off", help="현재 세대 최대낙폭")
+    life_mdd_ok = (d.get("lifetime_strat_mdd") is not None and d.get("lifetime_bench_mdd") is not None
+                   and d["lifetime_strat_mdd"] <= d["lifetime_bench_mdd"])
+    m2[2].metric("MDD (전체)", data.f_pct(d.get("lifetime_strat_mdd")),
+                 delta=(f"지수 {data.f_pct(d.get('lifetime_bench_mdd'))} {'✅' if life_mdd_ok else '⚠️'}"
+                        if d.get("lifetime_bench_mdd") is not None else None),
+                 delta_color="off", help="리셋 구간을 이어붙인 전체 최대낙폭")
 
     # ── NAV 곡선 ─────────────────────────────────────────────────────────────
     series = d.get("nav_series") or []

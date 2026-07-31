@@ -302,6 +302,20 @@ def _paper_position_ticker(code: str, currency: str) -> str:
     return code
 
 
+def _paper_position_name(code: str, currency: str, name: str | None = None) -> str:
+    base = (name or "").strip()
+    if base and base != code:
+        return base
+    ticker = _paper_position_ticker(code, currency)
+    try:
+        import ticker_names
+        return ticker_names.display_name(ticker, allow_net=False) \
+            or ticker_names.display_name(code, allow_net=False) \
+            or ticker
+    except Exception:
+        return ticker
+
+
 def _reconstruct_positions_from_history(hist: list[dict], decisions: list[dict], currency: str) -> list[dict]:
     """잔고 API 실패 시 성공 주문 로그로 보유 내역을 복원한다.
 
@@ -365,14 +379,7 @@ def _reconstruct_positions_from_history(hist: list[dict], decisions: list[dict],
             pos["cost"] / shares if pos.get("cost") else 0.0
         )
         avg = pos["cost"] / shares if shares and pos.get("cost") else cur_price
-        ticker = _paper_position_ticker(code, currency)
-        name = latest.get("name")
-        if not name:
-            try:
-                import ticker_names
-                name = ticker_names.display_name(ticker, allow_net=False) or ticker
-            except Exception:
-                name = ticker
+        name = _paper_position_name(code, currency, latest.get("name"))
         value = cur_price * shares
         ret = ((cur_price / avg - 1.0) * 100.0) if avg else None
         out.append({"symbol": code, "name": name, "shares": shares, "avg": avg,
@@ -393,6 +400,10 @@ def paper_summary(surface: str = "kr_mock") -> dict:
                  "balance_ok": False, "nav": None, "cash": None, "positions": [],
                  "nav_series": [], "inception_date": None, "cum_ret": None, "day_ret": None,
                  "strat_mdd": None, "bench_ret": None, "bench_mdd": None,
+                 "generation_count": 1, "generation": 1,
+                 "lifetime_inception_date": None, "lifetime_cum_ret": None,
+                 "lifetime_strat_mdd": None, "lifetime_bench_ret": None,
+                 "lifetime_bench_mdd": None, "lifetime_nav_series": [],
                  "cost": None, "scorecard": {}, "decisions": [], "order_history": []}
 
     # 1) EOD NAV 스냅샷 시계열 (store — 오프라인에서도 가용)
@@ -400,8 +411,6 @@ def paper_summary(surface: str = "kr_mock") -> dict:
     try:
         import store
         hist = store.all(hist_name)
-        snaps = [r for r in hist if r.get("kind") == "snapshot" and r.get("nav") is not None]
-        out["nav_series"] = [{"date": str(r.get("date", ""))[:10], "nav": float(r["nav"])} for r in snaps]
         out["order_history"] = [
             r for r in sorted(
                 [row for row in hist if row.get("kind") == "order"],
@@ -411,6 +420,13 @@ def paper_summary(surface: str = "kr_mock") -> dict:
         ][:50]
     except Exception:
         hist = []
+
+    try:
+        from lib import mock_generations
+        snaps = mock_generations.active_snapshots(hist_name)
+    except Exception:
+        snaps = [r for r in hist if r.get("kind") == "snapshot" and r.get("nav") is not None]
+    out["nav_series"] = [{"date": str(r.get("date", ""))[:10], "nav": float(r["nav"])} for r in snaps]
 
     # 2) 라이브 잔고 (모의 API — 비활성/장애 시 마지막 스냅샷 폴백)
     nav = None
@@ -438,7 +454,7 @@ def paper_summary(surface: str = "kr_mock") -> dict:
                 ret = p.get("return_pct")
                 if ret is None:
                     ret = (curp - avg) / avg * 100.0 if avg > 0 else 0.0
-                out["positions"].append({"symbol": sym, "name": p.get("name", "") or sym,
+                out["positions"].append({"symbol": sym, "name": _paper_position_name(sym, cur, p.get("name")),
                                          "shares": sh, "avg": avg, "cur": curp,
                                          "value": p.get("value", 0) or 0, "ret": ret})
             out["positions"].sort(key=lambda r: -(r["value"] or 0))
@@ -462,6 +478,36 @@ def paper_summary(surface: str = "kr_mock") -> dict:
         if len(snaps) >= 2:
             prev_nav = float(snaps[-2]["nav"])
             out["day_ret"] = (nav / prev_nav - 1.0) * 100.0 if prev_nav else None
+
+    # 3a) 세대 롤업 — 현재 세대 + 전체 누적 곡선(리셋 구간 stitch) 분리 계산
+    try:
+        from lib import mock_generations
+        roll = mock_generations.generation_rollup(hist_name)
+        out["generation_count"] = roll.get("generation_count") or 1
+        out["generation"] = out["generation_count"]
+        current_roll = roll.get("current") or {}
+        lifetime_roll = roll.get("lifetime") or {}
+        out["lifetime_inception_date"] = lifetime_roll.get("start_date")
+        out["lifetime_cum_ret"] = lifetime_roll.get("cum_return_pct")
+        out["lifetime_strat_mdd"] = lifetime_roll.get("mdd_pct")
+        out["lifetime_nav_series"] = [
+            {"date": str(r.get("date", ""))[:10], "nav": float(r["nav"])}
+            for r in (lifetime_roll.get("nav_series") or [])
+        ]
+        if lifetime_roll.get("start_date"):
+            try:
+                from providers import market_data
+                bm_life = market_data.fetch_kospi_stats(
+                    lifetime_roll["start_date"], symbol=bench_sym)
+                out["lifetime_bench_ret"] = bm_life.get("return_pct")
+                out["lifetime_bench_mdd"] = (
+                    bm_life["mdd"] * 100.0 if bm_life.get("mdd") is not None else None
+                )
+            except Exception:
+                pass
+        # 현재 세대 스냅샷은 이미 상단에서 active_snapshots() 기준으로 반영된다.
+    except Exception:
+        pass
 
     # 3b) 🏗️ Tier3 구조레버 슬리브 상태 (US 모의 — 게이트·목표 vs 보유 가시화)
     if surface == "us_mock":
@@ -534,18 +580,28 @@ def paper_glance() -> list[dict]:
     out = []
     for surface, label, cur, hist_name in specs:
         try:
-            import store
-            snaps = [r for r in store.all(hist_name)
-                     if r.get("kind") == "snapshot" and r.get("nav") is not None]
+            from lib import mock_generations
+            roll = mock_generations.generation_rollup(hist_name)
+            current = roll.get("current") or {}
+            lifetime = roll.get("lifetime") or {}
+            snaps = current.get("nav_series") or []
             if not snaps:
                 continue
-            nav = float(snaps[-1]["nav"])
-            first = float(snaps[0]["nav"])
-            prev = float(snaps[-2]["nav"]) if len(snaps) >= 2 else first
-            out.append({"surface": surface, "label": label, "currency": cur, "nav": nav,
-                        "cum_ret": (nav / first - 1.0) * 100.0 if first else 0.0,
-                        "day_ret": (nav / prev - 1.0) * 100.0 if prev else 0.0,
-                        "n_days": len(snaps)})
+            nav = float(current.get("nav")) if current.get("nav") is not None else float(snaps[-1])
+            out.append({
+                "surface": surface,
+                "label": label,
+                "currency": cur,
+                "nav": nav,
+                "cum_ret": lifetime.get("cum_return_pct") if lifetime.get("cum_return_pct") is not None
+                else current.get("cum_return_pct"),
+                "current_cum_ret": current.get("cum_return_pct"),
+                "day_ret": current.get("day_return_pct"),
+                "n_days": current.get("n_snapshots") or len(snaps),
+                "generation": roll.get("generation_count") or 1,
+                "lifetime_n_days": lifetime.get("n_snapshots") or len(snaps),
+                "lifetime_inception_date": lifetime.get("start_date"),
+            })
         except Exception:
             continue
     return out

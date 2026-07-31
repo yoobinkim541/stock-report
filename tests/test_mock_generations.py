@@ -133,3 +133,29 @@ def test_generation_count_tracks_closed_boundaries():
 
     store.append("kr_mock_history", {"date": "2026-04-03 06:40", "kind": "generation_boundary", "generation": 1})
     assert mock_generations.generation_count("kr_mock_history", store_module=store) == 2
+
+
+def test_generation_rollup_stitches_lifetime_curve_across_boundaries():
+    store = _FakeStore()
+    store.append("kr_mock_history", _snap("2026-01-05 06:40", 10_000_000))
+    store.append("kr_mock_history", _snap("2026-01-06 06:40", 8_000_000))
+    store.append("kr_mock_history", {"date": "2026-04-03 06:40", "kind": "generation_boundary", "generation": 1})
+    store.append("kr_mock_history", _snap("2026-04-04 06:40", 10_000_000))
+    store.append("kr_mock_history", _snap("2026-04-05 06:40", 11_000_000))
+
+    roll = mock_generations.generation_rollup(
+        "kr_mock_history",
+        store_module=store,
+        max_drawdown_fn=lambda series: 1.0 - (min(series) / series[0]) if series else 0.0,
+    )
+
+    assert roll["generation_count"] == 2
+    assert roll["current"]["generation"] == 2
+    assert roll["current"]["nav"] == 11_000_000
+    assert round(roll["current"]["cum_return_pct"], 2) == 10.0
+    assert round(roll["current"]["day_return_pct"], 2) == 10.0
+    assert round(roll["lifetime"]["cum_return_pct"], 2) == -12.0
+    assert round(roll["lifetime"]["mdd_pct"], 2) == 20.0
+    assert [round(r["nav"], 0) for r in roll["lifetime"]["nav_series"]] == [
+        10_000_000, 8_000_000, 8_000_000, 8_800_000
+    ]
