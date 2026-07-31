@@ -536,6 +536,139 @@ def build_common_moves_analysis(snapshots: list[dict], comparison: dict) -> dict
     }
 
 
+def _legacy_history_path(history_path: Path | None = None) -> Path:
+    return history_path or (Path.home() / "reports" / "ml-data" / "notable_investors_13f.jsonl")
+
+
+def _legacy_load_history(history_path: Path | None, filer_key: str) -> list[dict]:
+    path = _legacy_history_path(history_path)
+    if not path.exists():
+        return []
+    rows = []
+    try:
+        with open(path, encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                rec = json.loads(line)
+                if rec.get("filer") == filer_key:
+                    rows.append(rec)
+    except Exception as e:
+        logger.warning("이력 로드 실패(무시): %s", e)
+    return rows
+
+
+def _legacy_append_history(history_path: Path | None, rec: dict) -> None:
+    path = _legacy_history_path(history_path)
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with open(path, "a", encoding="utf-8") as f:
+            f.write(json.dumps(rec, ensure_ascii=False) + "\n")
+    except Exception as e:
+        logger.warning("이력 기록 실패(무시): %s", e)
+
+
+def _legacy_diff_holdings(prev: list[dict] | None, cur: list[dict]) -> dict:
+    """이전(없으면 빈) vs 현재 보유 — cusip 기준 신규 편입/청산."""
+    prev_by_cusip = {h["cusip"]: h for h in (prev or [])}
+    cur_by_cusip = {h["cusip"]: h for h in cur}
+    new_positions = [h for c, h in cur_by_cusip.items() if c not in prev_by_cusip]
+    exited_positions = [h for c, h in prev_by_cusip.items() if c not in cur_by_cusip]
+    new_positions.sort(key=lambda h: -h.get("weight_pct", 0))
+    exited_positions.sort(key=lambda h: -h.get("weight_pct", 0))
+    return {"new": new_positions, "exited": exited_positions}
+
+
+def _legacy_fmt_holding(h: dict) -> str:
+    tk = f" ({h['ticker']})" if h.get("ticker") else ""
+    return f"{h['issuer']}{tk} — {h.get('weight_pct', 0):.1f}% · ${h.get('value_usd', 0) / 1e9:.2f}B"
+
+
+def build_legacy_investor_page(snapshot: dict, diff: dict) -> dict:
+    filer_key = snapshot["filer"]
+    holdings = snapshot["holdings"]
+    top = holdings[:10]
+    lines = [
+        f"필링일: {snapshot['filing_date']} · 총 {len(holdings)}종목 · "
+        f"총액 ${snapshot['total_value_usd'] / 1e9:.1f}B",
+        "",
+        "상위 10 종목:",
+        *[f"- {_legacy_fmt_holding(h)}" for h in top],
+    ]
+    if diff["new"]:
+        lines += ["", "🆕 신규 편입:", *[f"- {_legacy_fmt_holding(h)}" for h in diff["new"]]]
+    if diff["exited"]:
+        lines += ["", "📤 청산(전량 매도):", *[f"- {_legacy_fmt_holding(h)}" for h in diff["exited"]]]
+    lines += [
+        "",
+        f"출처: SEC EDGAR 13F-HR (accession {snapshot['accession']})",
+        "정보·표시용 — 13F 는 분기말 기준 45일 지연 공시라 현재 포지션과 다를 수 있음",
+    ]
+    top_tickers = [h["ticker"] for h in top if h.get("ticker")]
+    tags = ["wiki", "market", "source_digest", "notable_investor", "13f", filer_key,
+            *(f"ticker:{t}" for t in top_tickers[:8])]
+    return {
+        "id": f"notable-investor-{filer_key}",
+        "title": f"기관투자자 위키: {snapshot['filer_name']}",
+        "surface": "market",
+        "kind": "source_digest",
+        "status": "reviewed",
+        "tags": tags,
+        "summary": (f"{snapshot['filing_date']} 13F 기준 {len(holdings)}종목·"
+                    f"${snapshot['total_value_usd'] / 1e9:.1f}B · "
+                    f"신규편입 {len(diff['new'])}·청산 {len(diff['exited'])}"),
+        "body": "\n".join(lines),
+        "source_refs": [
+            f"https://www.sec.gov/cgi-bin/browse-edgar?action=getcompany&CIK={snapshot['cik']}"
+            f"&type=13F-HR&dateb=&owner=include&count=10"
+        ],
+        "staleness_policy": "refresh_after_90d",
+        "confidence": 0.9,
+    }
+
+
+def run_legacy_investor(filer_key: str, *, dry_run: bool = False, history_path: Path | None = None) -> dict:
+    snapshot = thirteenf.latest_holdings(filer_key)
+    if not snapshot:
+        return {"ok": False, "filer": filer_key, "reason": "fetch_failed"}
+
+    history = _legacy_load_history(history_path, filer_key)
+    if any(h.get("accession") == snapshot["accession"] for h in history):
+        return {"ok": True, "filer": filer_key, "status": "unchanged",
+                "accession": snapshot["accession"]}
+
+    is_first_snapshot = not history
+    prev = None if is_first_snapshot else history[-1]["holdings"]
+    diff = {"new": [], "exited": []} if is_first_snapshot else _legacy_diff_holdings(prev, snapshot["holdings"])
+    page = build_legacy_investor_page(snapshot, diff)
+
+    if not dry_run:
+        from agent_console import wiki
+        wiki.upsert_page(page)
+        _legacy_append_history(history_path, {
+            "date": datetime.now(KST).strftime("%Y-%m-%d %H:%M"),
+            "filer": filer_key, "accession": snapshot["accession"],
+            "filing_date": snapshot["filing_date"], "holdings": snapshot["holdings"],
+        })
+        from lib import watchlist
+        for h in diff["new"]:
+            if not h.get("ticker"):
+                continue
+            try:
+                watchlist.add_ticker(
+                    h["ticker"],
+                    reason=f"{snapshot['filer_name']} 신규 편입 ({snapshot['filing_date']})",
+                    source=f"notable_investor:{filer_key}",
+                )
+            except Exception as e:
+                logger.warning("관심종목 추가 실패(무시) %s: %s", h["ticker"], e)
+
+    return {"ok": True, "filer": filer_key, "status": "updated",
+            "accession": snapshot["accession"], "new": diff["new"], "exited": diff["exited"],
+            "filer_name": snapshot["filer_name"], "filing_date": snapshot["filing_date"]}
+
+
 def _normalize_run_keys(institution_keys) -> tuple[list[str], bool]:
     if institution_keys is None:
         return [row["key"] for row in list_institutions()], False
