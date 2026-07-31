@@ -2,6 +2,7 @@
 """Reusable institution registry and normalized snapshot model for watchlist UI."""
 from __future__ import annotations
 
+import argparse
 import json
 import logging
 import os
@@ -18,6 +19,29 @@ logger = logging.getLogger(__name__)
 KST = timezone(timedelta(hours=9))
 HISTORY_PATH = Path.home() / "reports" / "ml-data" / "notable_investors_13f.jsonl"
 _SEED_PATH = Path(__file__).resolve().parent.parent / "data" / "institution_watch_seed.json"
+_DEFAULT_13F_META = {
+    "berkshire": {
+        "category": "holding_company",
+        "primary_sources": ["13f"],
+        "metric_capabilities": ["holdings", "concentration", "source_refs"],
+        "refresh_policy": "quarterly",
+        "confidence": 0.95,
+    },
+    "bridgewater": {
+        "category": "hedge_fund",
+        "primary_sources": ["13f"],
+        "metric_capabilities": ["holdings", "concentration", "source_refs"],
+        "refresh_policy": "quarterly",
+        "confidence": 0.9,
+    },
+    "scion": {
+        "category": "hedge_fund",
+        "primary_sources": ["13f"],
+        "metric_capabilities": ["holdings", "concentration", "source_refs"],
+        "refresh_policy": "quarterly",
+        "confidence": 0.9,
+    },
+}
 _UNAVAILABLE_METRICS = (
     "portfolio_concentration",
     "cash_ratio",
@@ -38,18 +62,30 @@ def _load_seed_rows() -> list[dict]:
 def _build_registry() -> dict[str, dict]:
     registry: dict[str, dict] = {}
     for key, meta in thirteenf.FILERS.items():
+        defaults = _DEFAULT_13F_META.get(key, {})
         registry[key] = {
             "key": key,
             "display_name": meta["name"],
             "source_kind": "13f",
+            "category": defaults.get("category") or "hedge_fund",
             "freshness": "fresh",
+            "primary_sources": list(defaults.get("primary_sources") or ["13f"]),
+            "metric_capabilities": list(defaults.get("metric_capabilities")
+                                         or ["holdings", "concentration", "source_refs"]),
+            "refresh_policy": defaults.get("refresh_policy") or "quarterly",
+            "confidence": defaults.get("confidence") or 0.9,
         }
     for row in _load_seed_rows():
         registry[row["key"]] = {
             "key": row["key"],
             "display_name": row.get("display_name") or row["key"],
             "source_kind": row.get("source_kind") or "seed",
+            "category": row.get("category") or "seed",
             "freshness": row.get("freshness") or "proxy",
+            "primary_sources": list(row.get("primary_sources") or []),
+            "metric_capabilities": list(row.get("metric_capabilities") or []),
+            "refresh_policy": row.get("refresh_policy") or "manual",
+            "confidence": row.get("confidence") if row.get("confidence") is not None else 0.35,
         }
     return registry
 
@@ -85,6 +121,7 @@ def _normalize_seed_snapshot(meta: dict, row: dict) -> dict:
         "institution_key": meta["key"],
         "display_name": row.get("display_name") or meta["display_name"],
         "source_kind": "seed",
+        "category": row.get("category") or meta.get("category") or "seed",
         "freshness": freshness,
         "holdings_count": row.get("holdings_count") or 0,
         "top_holdings": row.get("top_holdings") or [],
@@ -93,6 +130,10 @@ def _normalize_seed_snapshot(meta: dict, row: dict) -> dict:
         "options_exposure": row.get("options_exposure"),
         "reported_return": row.get("reported_return"),
         "return_proxy": row.get("return_proxy"),
+        "primary_sources": list(row.get("primary_sources") or meta.get("primary_sources") or []),
+        "metric_capabilities": list(row.get("metric_capabilities") or meta.get("metric_capabilities") or []),
+        "refresh_policy": row.get("refresh_policy") or meta.get("refresh_policy") or "manual",
+        "confidence": row.get("confidence") if row.get("confidence") is not None else meta.get("confidence", 0.35),
         "availability_flags": {},
         "notes": list(row.get("notes") or []),
     }
@@ -117,6 +158,7 @@ def _normalize_13f_snapshot(meta: dict, raw: dict) -> dict:
         "institution_key": meta["key"],
         "display_name": raw.get("filer_name") or meta["display_name"],
         "source_kind": "13f",
+        "category": meta.get("category") or "hedge_fund",
         "freshness": meta.get("freshness") or "fresh",
         "holdings_count": len(holdings),
         "top_holdings": _normalize_top_holdings(holdings),
@@ -125,6 +167,11 @@ def _normalize_13f_snapshot(meta: dict, raw: dict) -> dict:
         "options_exposure": None,
         "reported_return": None,
         "return_proxy": None,
+        "primary_sources": list(meta.get("primary_sources") or ["13f"]),
+        "metric_capabilities": list(meta.get("metric_capabilities")
+                                     or ["holdings", "concentration", "source_refs"]),
+        "refresh_policy": meta.get("refresh_policy") or "quarterly",
+        "confidence": meta.get("confidence") or 0.9,
         "availability_flags": {},
         "notes": notes,
         "filing_date": raw.get("filing_date"),
@@ -144,8 +191,12 @@ def _normalize_13f_snapshot(meta: dict, raw: dict) -> dict:
 
 def list_institutions() -> list[dict]:
     rows = list(INSTITUTION_REGISTRY.values())
-    rows.sort(key=lambda row: (row["source_kind"], row["display_name"].lower()))
+    rows.sort(key=lambda row: (row["source_kind"], row.get("category", ""), row["display_name"].lower()))
     return [dict(row) for row in rows]
+
+
+def source_backed_institution_keys() -> list[str]:
+    return [row["key"] for row in list_institutions() if row.get("source_kind") == "13f"]
 
 
 def latest_snapshot(institution_key: str) -> dict | None:
@@ -177,6 +228,7 @@ def compare_institutions(keys: list[str], *, snapshots: dict[str, dict] | None =
             "institution_key": snapshot["institution_key"],
             "display_name": snapshot["display_name"],
             "source_kind": snapshot["source_kind"],
+            "category": snapshot.get("category") or "",
             "freshness": snapshot["freshness"],
             "holdings_count": snapshot["holdings_count"],
             "portfolio_concentration": snapshot.get("portfolio_concentration"),
@@ -189,6 +241,10 @@ def compare_institutions(keys: list[str], *, snapshots: dict[str, dict] | None =
             "reported_return_flag": flags.get("reported_return", "unavailable"),
             "return_proxy": snapshot.get("return_proxy"),
             "return_proxy_flag": flags.get("return_proxy", "unavailable"),
+            "primary_sources": list(snapshot.get("primary_sources") or []),
+            "metric_capabilities": list(snapshot.get("metric_capabilities") or []),
+            "refresh_policy": snapshot.get("refresh_policy") or "",
+            "confidence": snapshot.get("confidence"),
         })
     return {
         "selected_keys": [row["institution_key"] for row in rows],
@@ -321,9 +377,14 @@ def build_snapshot_digest(snapshot: dict, diff: dict) -> dict:
     note_lines = [f"- {note}" for note in (snapshot.get("notes") or [])] or ["- None"]
     source_refs = _snapshot_source_refs(snapshot)
     is_source_backed = bool(source_refs)
+    primary_sources = ", ".join(snapshot.get("primary_sources") or []) or "—"
+    metric_caps = ", ".join(snapshot.get("metric_capabilities") or []) or "—"
     body = "\n".join([
         f"Source: {snapshot.get('source_kind')}",
+        f"Category: {snapshot.get('category') or 'seed'}",
         f"Freshness: {snapshot.get('freshness')}",
+        f"Primary sources: {primary_sources}",
+        f"Metric capabilities: {metric_caps}",
         f"Holdings count: {snapshot.get('holdings_count', 0)}",
         f"Portfolio concentration: {_fmt_pct(snapshot.get('portfolio_concentration'))}",
         f"Cash ratio: {snapshot.get('cash_ratio')} ({flags.get('cash_ratio', 'unavailable')})",
@@ -353,6 +414,7 @@ def build_snapshot_digest(snapshot: dict, diff: dict) -> dict:
             "institution_watch",
             snapshot["institution_key"],
             f"source:{snapshot.get('source_kind')}",
+            f"category:{snapshot.get('category') or 'seed'}",
             *([] if not is_source_backed else ["source_digest"]),
         ],
         "summary": (
@@ -387,6 +449,7 @@ def build_common_moves_digest(snapshots: list[dict], comparison: dict, analysis:
                 source_refs.append(ref)
     body = "\n".join([
         f"Institutions: {names}",
+        f"Categories: {', '.join(sorted({snapshot.get('category') or 'seed' for snapshot in snapshots}))}",
         f"Compared rows: {len(comparison.get('rows') or [])}",
         f"Provenance refs: {len(source_refs)}",
         "",
@@ -694,10 +757,14 @@ def _add_new_positions_to_watchlist(snapshot: dict, diff: dict) -> None:
             logger.warning("관심종목 추가 실패(무시) %s: %s", ticker, e)
 
 
-def run(institution_keys=None, *, dry_run: bool = False) -> dict:
+def run(institution_keys=None, *, dry_run: bool = False, analysis_keys=None) -> dict:
     """Persist per-institution snapshot digests and a cross-institution pattern digest."""
     keys, single = _normalize_run_keys(institution_keys)
+    analysis_keys_norm = None
+    if analysis_keys is not None:
+        analysis_keys_norm, _ = _normalize_run_keys(analysis_keys)
     snapshots: list[dict] = []
+    snapshots_by_key: dict[str, dict] = {}
     updated: list[dict] = []
     unchanged: list[dict] = []
     failed: list[dict] = []
@@ -730,6 +797,7 @@ def run(institution_keys=None, *, dry_run: bool = False) -> dict:
 
         snapshot["_diff"] = diff
         snapshots.append(snapshot)
+        snapshots_by_key[key] = snapshot
 
         if unchanged and unchanged[-1]["institution_key"] == key:
             continue
@@ -747,11 +815,14 @@ def run(institution_keys=None, *, dry_run: bool = False) -> dict:
 
     analysis = None
     if snapshots and not single:
-        comparison = compare_institutions([snapshot["institution_key"] for snapshot in snapshots], snapshots={
-            snapshot["institution_key"]: snapshot for snapshot in snapshots
-        })
-        analysis = build_common_moves_analysis(snapshots, comparison)
-        pattern_page = build_common_moves_digest(snapshots, comparison, analysis)
+        pattern_keys = analysis_keys_norm or [snapshot["institution_key"] for snapshot in snapshots]
+        pattern_snapshots = [snapshots_by_key[key] for key in pattern_keys if key in snapshots_by_key]
+        if not pattern_snapshots:
+            pattern_snapshots = list(snapshots)
+            pattern_keys = [snapshot["institution_key"] for snapshot in pattern_snapshots]
+        comparison = compare_institutions(pattern_keys, snapshots=snapshots_by_key)
+        analysis = build_common_moves_analysis(pattern_snapshots, comparison)
+        pattern_page = build_common_moves_digest(pattern_snapshots, comparison, analysis)
         if dry_run:
             saved_pages.append(pattern_page)
         else:
@@ -790,3 +861,42 @@ def run(institution_keys=None, *, dry_run: bool = False) -> dict:
         "analysis": analysis or {},
         "pages": saved_pages,
     }
+
+
+def _default_run_keys() -> list[str]:
+    return [row["key"] for row in list_institutions()]
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--dry-run", action="store_true")
+    parser.add_argument(
+        "--keys",
+        nargs="*",
+        default=None,
+        help="Override the institution keys to persist (defaults to all registered institutions).",
+    )
+    parser.add_argument(
+        "--analysis-keys",
+        nargs="*",
+        default=None,
+        help="Override the institution keys used for the common-pattern wiki digest.",
+    )
+    args = parser.parse_args(argv)
+
+    keys = args.keys if args.keys else _default_run_keys()
+    analysis_keys = args.analysis_keys if args.analysis_keys else source_backed_institution_keys()
+    result = run(keys, dry_run=args.dry_run, analysis_keys=analysis_keys or None)
+    logger.info(
+        "기관 watch 완료: 선택 %d개 · 갱신 %d · 변동 없음 %d · 실패 %d · 패턴 %d",
+        len(result.get("selected_keys") or []),
+        len(result.get("updated") or []),
+        len(result.get("unchanged") or []),
+        len(result.get("failed") or []),
+        len([p for p in result.get("pages") or [] if p.get("id") == "institution-watch-common-moves"]),
+    )
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

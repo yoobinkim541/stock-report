@@ -23,6 +23,16 @@ _SOURCE_LABELS = {
     "seed": "시드",
 }
 
+_CATEGORY_LABELS = {
+    "holding_company": "지주회사",
+    "asset_manager": "운용사",
+    "hedge_fund": "헤지펀드",
+    "family_office": "패밀리오피스",
+    "venture_fund": "벤처펀드",
+    "pension": "연기금",
+    "seed": "시드",
+}
+
 _FLAG_LABELS = {
     "available": "공개",
     "proxy": "프록시",
@@ -43,6 +53,11 @@ def _fmt_pct(value, flag: str) -> str:
         return f"{value} ({_FLAG_LABELS.get(flag, flag)})"
 
 
+def _fmt_sources(value) -> str:
+    items = [str(v) for v in (value or []) if str(v).strip()]
+    return ", ".join(items[:3]) if items else "—"
+
+
 def _render_institution_cards(rows: list[dict]):
     if not rows:
         st.info("기관 허브에 표시할 스냅샷이 아직 없습니다.")
@@ -56,12 +71,14 @@ def _render_institution_cards(rows: list[dict]):
                 "\n".join([
                     f"#### {row.get('display_name', row.get('key', '기관'))}",
                     (
-                        f"`{_SOURCE_LABELS.get(row.get('source_kind'), row.get('source_kind', ''))}`"
+                        f"`{_CATEGORY_LABELS.get(row.get('category'), row.get('category', ''))}`"
+                        f" · `{_SOURCE_LABELS.get(row.get('source_kind'), row.get('source_kind', ''))}`"
                         f" · `{_FRESHNESS_LABELS.get(row.get('freshness'), row.get('freshness', ''))}`"
                     ),
                     f"- 보유 종목 수: {int(row.get('holdings_count') or 0)}",
                     f"- 현금 비중: {_flag_text(flags, 'cash_ratio')}",
                     f"- 옵션 노출: {_flag_text(flags, 'options_exposure')}",
+                    f"- 주요 출처: {_fmt_sources(row.get('primary_sources'))}",
                 ])
             )
 
@@ -73,6 +90,7 @@ def _render_comparison_table(comparison: dict):
         return
     table = pd.DataFrame([{
         "기관": row.get("display_name"),
+        "카테고리": _CATEGORY_LABELS.get(row.get("category"), row.get("category")),
         "소스": _SOURCE_LABELS.get(row.get("source_kind"), row.get("source_kind")),
         "신선도": _FRESHNESS_LABELS.get(row.get("freshness"), row.get("freshness")),
         "보유 종목 수": row.get("holdings_count"),
@@ -81,6 +99,7 @@ def _render_comparison_table(comparison: dict):
         "옵션 노출": _fmt_pct(row.get("options_exposure"), row.get("options_exposure_flag")),
         "수익률": _fmt_pct(row.get("reported_return"), row.get("reported_return_flag")),
         "대체 수익률": _fmt_pct(row.get("return_proxy"), row.get("return_proxy_flag")),
+        "주요 출처": _fmt_sources(row.get("primary_sources")),
     } for row in rows])
     st.dataframe(table, hide_index=True, width="stretch")
 
@@ -105,10 +124,35 @@ def render():
     st.caption("유명 기관투자자 스냅샷과 직접 추가한 종목을 함께 보는 허브 "
               "· 표시 전용 · 삭제는 텔레그램 봇 /watch remove")
 
-    hub = cached.institution_watch()
+    hub_all = cached.institution_watch()
+    all_rows = list(hub_all.get("institutions") or [])
+    all_keys = [row.get("key") for row in all_rows if row.get("key")]
+    label_by_key = {
+        row["key"]: (
+            f"{row.get('display_name', row['key'])}"
+            f" · {_CATEGORY_LABELS.get(row.get('category'), row.get('category', ''))}"
+            f" · {_SOURCE_LABELS.get(row.get('source_kind'), row.get('source_kind', ''))}"
+            f" · {_FRESHNESS_LABELS.get(row.get('freshness'), row.get('freshness', ''))}"
+        )
+        for row in all_rows
+    }
     st.markdown("### 기관투자자 허브")
-    if hub.get("error"):
-        st.warning(f"기관 허브 로드 실패: {hub['error']}")
+    if hub_all.get("error"):
+        st.warning(f"기관 허브 로드 실패: {hub_all['error']}")
+    selected_keys = []
+    if all_keys:
+        if "_institution_watch_keys" not in st.session_state:
+            st.session_state["_institution_watch_keys"] = list(all_keys)
+        default_keys = list(st.session_state.get("_institution_watch_keys", all_keys))
+        selected_keys = st.multiselect(
+            "비교할 기관",
+            options=all_keys,
+            default=[key for key in default_keys if key in all_keys],
+            format_func=lambda key: label_by_key.get(key, key),
+            key="_institution_watch_keys",
+        )
+        st.caption(f"선택 {len(selected_keys)} / 전체 {len(all_keys)}")
+    hub = hub_all if len(selected_keys) == len(all_keys) else cached.institution_watch(tuple(selected_keys))
     _render_institution_cards(list(hub.get("institutions") or []))
     st.markdown("### 비교 테이블")
     _render_comparison_table(hub.get("comparison") or {})

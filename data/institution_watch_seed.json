@@ -1,7 +1,8 @@
 [
   {
-    "key": "duquesne",
-    "display_name": "Duquesne Family Office (Stanley Druckenmiller)",
+    "key": "citadel",
+    "display_name": "Citadel Advisors (Ken Griffin)",
+    "category": "hedge_fund",
     "source_kind": "seed",
     "freshness": "proxy",
     "holdings_count": null,
@@ -11,13 +12,37 @@
     "options_exposure": null,
     "reported_return": null,
     "return_proxy": null,
+    "primary_sources": ["public_letter", "press_release", "manual"],
+    "metric_capabilities": ["holdings", "return_proxy"],
+    "confidence": 0.35,
+    "notes": [
+      "Public 13F path is not wired yet; this seed keeps the institution visible without inventing values."
+    ]
+  },
+  {
+    "key": "duquesne",
+    "display_name": "Duquesne Family Office (Stanley Druckenmiller)",
+    "category": "family_office",
+    "source_kind": "seed",
+    "freshness": "proxy",
+    "holdings_count": null,
+    "top_holdings": [],
+    "portfolio_concentration": null,
+    "cash_ratio": null,
+    "options_exposure": null,
+    "reported_return": null,
+    "return_proxy": null,
+    "primary_sources": ["public_letter", "press_release", "manual"],
+    "metric_capabilities": ["holdings", "return_proxy"],
+    "confidence": 0.35,
     "notes": [
       "Public 13F path is not wired yet; this seed reserves the comparison slot."
     ]
   },
   {
-    "key": "founders_fund",
-    "display_name": "Founders Fund (Peter Thiel)",
+    "key": "pershing_square",
+    "display_name": "Pershing Square Capital Management (Bill Ackman)",
+    "category": "hedge_fund",
     "source_kind": "seed",
     "freshness": "proxy",
     "holdings_count": null,
@@ -27,6 +52,89 @@
     "options_exposure": null,
     "reported_return": null,
     "return_proxy": null,
+    "primary_sources": ["public_letter", "press_release", "manual"],
+    "metric_capabilities": ["holdings", "return_proxy"],
+    "confidence": 0.35,
+    "notes": [
+      "Public 13F path is not wired yet; this seed keeps the institution visible without inventing values."
+    ]
+  },
+  {
+    "key": "point72",
+    "display_name": "Point72 Asset Management (Steve Cohen)",
+    "category": "hedge_fund",
+    "source_kind": "seed",
+    "freshness": "proxy",
+    "holdings_count": null,
+    "top_holdings": [],
+    "portfolio_concentration": null,
+    "cash_ratio": null,
+    "options_exposure": null,
+    "reported_return": null,
+    "return_proxy": null,
+    "primary_sources": ["public_letter", "press_release", "manual"],
+    "metric_capabilities": ["holdings", "return_proxy"],
+    "confidence": 0.35,
+    "notes": [
+      "Public 13F path is not wired yet; this seed keeps the institution visible without inventing values."
+    ]
+  },
+  {
+    "key": "third_point",
+    "display_name": "Third Point LLC (Dan Loeb)",
+    "category": "hedge_fund",
+    "source_kind": "seed",
+    "freshness": "proxy",
+    "holdings_count": null,
+    "top_holdings": [],
+    "portfolio_concentration": null,
+    "cash_ratio": null,
+    "options_exposure": null,
+    "reported_return": null,
+    "return_proxy": null,
+    "primary_sources": ["public_letter", "press_release", "manual"],
+    "metric_capabilities": ["holdings", "return_proxy"],
+    "confidence": 0.35,
+    "notes": [
+      "Public 13F path is not wired yet; this seed keeps the institution visible without inventing values."
+    ]
+  },
+  {
+    "key": "tudor",
+    "display_name": "Tudor Investment Corp. (Paul Tudor Jones)",
+    "category": "hedge_fund",
+    "source_kind": "seed",
+    "freshness": "proxy",
+    "holdings_count": null,
+    "top_holdings": [],
+    "portfolio_concentration": null,
+    "cash_ratio": null,
+    "options_exposure": null,
+    "reported_return": null,
+    "return_proxy": null,
+    "primary_sources": ["public_letter", "press_release", "manual"],
+    "metric_capabilities": ["holdings", "return_proxy"],
+    "confidence": 0.35,
+    "notes": [
+      "Public 13F path is not wired yet; this seed keeps the institution visible without inventing values."
+    ]
+  },
+  {
+    "key": "founders_fund",
+    "display_name": "Founders Fund (Peter Thiel)",
+    "category": "venture_fund",
+    "source_kind": "seed",
+    "freshness": "proxy",
+    "holdings_count": null,
+    "top_holdings": [],
+    "portfolio_concentration": null,
+    "cash_ratio": null,
+    "options_exposure": null,
+    "reported_return": null,
+    "return_proxy": null,
+    "primary_sources": ["public_letter", "press_release", "manual"],
+    "metric_capabilities": ["holdings", "return_proxy"],
+    "confidence": 0.35,
     "notes": [
       "Public 13F path is not wired yet; this seed reserves the comparison slot."
     ]
@@ -34,6 +142,7 @@
   {
     "key": "nps",
     "display_name": "National Pension Service",
+    "category": "pension",
     "source_kind": "seed",
     "freshness": "proxy",
     "holdings_count": null,
@@ -43,6 +152,9 @@
     "options_exposure": null,
     "reported_return": null,
     "return_proxy": null,
+    "primary_sources": ["annual_report", "public_disclosure", "manual"],
+    "metric_capabilities": ["holdings", "reported_return", "return_proxy"],
+    "confidence": 0.45,
     "notes": [
       "Public holdings are heterogeneous across disclosures; this seed keeps the institution visible without inventing values."
     ]

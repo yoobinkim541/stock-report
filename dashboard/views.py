@@ -1239,7 +1239,7 @@ def institution_watch_summary(keys=None) -> dict:
         from reports import institution_watch
 
         registry = institution_watch.list_institutions()
-        if keys:
+        if keys is not None:
             wanted = {str(key) for key in keys}
             registry = [row for row in registry if row.get("key") in wanted]
         selected_keys = [row.get("key") for row in registry if row.get("key")]
@@ -1254,11 +1254,16 @@ def institution_watch_summary(keys=None) -> dict:
                 "key": snapshot["institution_key"],
                 "display_name": snapshot["display_name"],
                 "source_kind": snapshot.get("source_kind", ""),
+                "category": snapshot.get("category", ""),
                 "freshness": snapshot.get("freshness", ""),
                 "holdings_count": snapshot.get("holdings_count", 0),
                 "availability_flags": dict(snapshot.get("availability_flags") or {}),
                 "top_holdings": list(snapshot.get("top_holdings") or []),
                 "notes": list(snapshot.get("notes") or []),
+                "primary_sources": list(snapshot.get("primary_sources") or []),
+                "metric_capabilities": list(snapshot.get("metric_capabilities") or []),
+                "refresh_policy": snapshot.get("refresh_policy", ""),
+                "confidence": snapshot.get("confidence"),
             })
         comparison = institution_watch.compare_institutions(selected_keys, snapshots=snapshots)
         analysis = _institution_analysis(list(snapshots.values()), comparison)

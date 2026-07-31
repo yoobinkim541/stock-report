@@ -1370,28 +1370,30 @@ def test_watchlist_page_renders_institution_hub_and_rows():
 cached.institution_watch = lambda keys=None: {
     "institutions": [
         {"key": "berkshire", "display_name": "Berkshire Hathaway", "source_kind": "13f",
-         "freshness": "fresh", "holdings_count": 27, "availability_flags": {"cash_ratio": "unavailable",
+         "category": "holding_company", "freshness": "fresh", "holdings_count": 27,
+         "primary_sources": ["13f"], "availability_flags": {"cash_ratio": "unavailable",
          "options_exposure": "unavailable"}},
         {"key": "bridgewater", "display_name": "Bridgewater", "source_kind": "13f",
-         "freshness": "fresh", "holdings_count": 120, "availability_flags": {"cash_ratio": "unavailable",
+         "category": "hedge_fund", "freshness": "fresh", "holdings_count": 120,
+         "primary_sources": ["13f"], "availability_flags": {"cash_ratio": "unavailable",
          "options_exposure": "available"}},
     ],
     "comparison": {
         "rows": [
-            {"display_name": "Berkshire Hathaway", "source_kind": "13f", "freshness": "fresh",
+            {"display_name": "Berkshire Hathaway", "category": "holding_company", "source_kind": "13f", "freshness": "fresh",
              "holdings_count": 27, "portfolio_concentration": None,
              "portfolio_concentration_flag": "unavailable", "cash_ratio": None,
              "cash_ratio_flag": "unavailable", "options_exposure": None,
              "options_exposure_flag": "unavailable", "reported_return": None,
              "reported_return_flag": "unavailable", "return_proxy": 0.12,
-             "return_proxy_flag": "available"},
-            {"display_name": "Bridgewater", "source_kind": "13f", "freshness": "proxy",
+             "return_proxy_flag": "available", "primary_sources": ["13f"]},
+            {"display_name": "Bridgewater", "category": "hedge_fund", "source_kind": "13f", "freshness": "proxy",
              "holdings_count": 120, "portfolio_concentration": 0.33,
              "portfolio_concentration_flag": "available", "cash_ratio": 0.05,
              "cash_ratio_flag": "proxy", "options_exposure": 0.14,
              "options_exposure_flag": "available", "reported_return": 0.08,
              "reported_return_flag": "proxy", "return_proxy": 0.1,
-             "return_proxy_flag": "available"},
+             "return_proxy_flag": "available", "primary_sources": ["13f"]},
         ],
         "selected_keys": ["berkshire", "bridgewater"],
     },
@@ -1410,6 +1412,59 @@ watchlist.render()
     comparison = next(item.value for item in at.dataframe if "현금 비중" in item.value.columns)
     assert comparison.loc[0, "현금 비중"] == "— (비공개)"
     assert comparison.loc[1, "현금 비중"] == "5.0% (프록시)"
+
+
+def test_watchlist_page_filters_selected_institutions():
+    script = _STUBS + '''
+import streamlit as st
+st.session_state["_institution_watch_keys"] = ["berkshire"]
+st.session_state["_inst_calls"] = []
+
+def _hub(keys=None):
+    st.session_state["_inst_calls"].append(keys)
+    all_rows = [
+        {"key": "berkshire", "display_name": "Berkshire Hathaway", "source_kind": "13f",
+         "category": "holding_company", "freshness": "fresh", "holdings_count": 27,
+         "primary_sources": ["13f"], "availability_flags": {"cash_ratio": "unavailable",
+         "options_exposure": "unavailable"}},
+        {"key": "bridgewater", "display_name": "Bridgewater", "source_kind": "13f",
+         "category": "hedge_fund", "freshness": "fresh", "holdings_count": 120,
+         "primary_sources": ["13f"], "availability_flags": {"cash_ratio": "unavailable",
+         "options_exposure": "available"}},
+    ]
+    if keys:
+        wanted = set(keys)
+        all_rows = [row for row in all_rows if row["key"] in wanted]
+    return {
+        "institutions": all_rows,
+        "comparison": {
+            "rows": [
+                {"display_name": row["display_name"], "category": row["category"], "source_kind": row["source_kind"],
+                 "freshness": row["freshness"], "holdings_count": row["holdings_count"],
+                 "portfolio_concentration": None, "portfolio_concentration_flag": "unavailable",
+                 "cash_ratio": None, "cash_ratio_flag": "unavailable",
+                 "options_exposure": None, "options_exposure_flag": "unavailable",
+                 "reported_return": None, "reported_return_flag": "unavailable",
+                 "return_proxy": None, "return_proxy_flag": "unavailable",
+                 "primary_sources": row["primary_sources"]}
+                for row in all_rows
+            ],
+            "selected_keys": [row["key"] for row in all_rows],
+        },
+        "analysis": {"shared_moves": [], "divergences": [], "confidence": 0.0, "summary": "LLM 요약", "mode": "heuristic"},
+    }
+
+cached.institution_watch = _hub
+data.load_watchlist = lambda *a, **k: []
+from dashboard.pages import watchlist
+watchlist.render()
+'''
+    at = AppTest.from_string(script, default_timeout=30).run()
+
+    assert at.session_state["_inst_calls"][-1] == ("berkshire",)
+    body = " ".join(str(item.value) for item in at.markdown)
+    assert "Berkshire Hathaway" in body
+    assert "Bridgewater" not in body
 
 
 def test_watchlist_page_clicks_through_to_ticker_detail():

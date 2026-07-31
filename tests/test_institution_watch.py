@@ -13,6 +13,16 @@ def test_registry_exposes_13f_and_seed_institutions():
     assert {"berkshire", "bridgewater", "scion", "duquesne", "founders_fund", "nps"} <= keys
 
 
+def test_registry_expands_to_more_named_proxy_institutions():
+    from reports import institution_watch as iw
+
+    rows = {row["key"]: row for row in iw.list_institutions()}
+
+    assert {"citadel", "pershing_square", "point72", "third_point", "tudor"} <= rows.keys()
+    assert rows["citadel"]["category"] == "hedge_fund"
+    assert rows["nps"]["category"] == "pension"
+
+
 def test_latest_snapshot_marks_unavailable_metrics(monkeypatch):
     from reports import institution_watch as iw
 
@@ -228,3 +238,148 @@ def test_build_common_moves_digest_stays_draft_for_mixed_source_inputs():
     assert page["status"] == "draft"
     assert page["source_refs"] == []
     assert "source_digest" not in page["tags"]
+
+
+def test_run_uses_analysis_keys_for_source_backed_pattern_digest(monkeypatch, tmp_path):
+    from reports import institution_watch as iw
+
+    monkeypatch.setattr(iw, "HISTORY_PATH", tmp_path / "history.jsonl")
+
+    snapshots = {
+        "berkshire": {
+            "institution_key": "berkshire",
+            "display_name": "Berkshire Hathaway",
+            "source_kind": "13f",
+            "category": "holding_company",
+            "freshness": "fresh",
+            "cik": "0001067983",
+            "accession": "0000950123-26-003958",
+            "holdings_count": 1,
+            "top_holdings": [{"ticker": "AAPL", "issuer": "APPLE", "weight_pct": 10.0, "value_usd": 100.0}],
+            "portfolio_concentration": 0.4,
+            "cash_ratio": None,
+            "options_exposure": None,
+            "reported_return": None,
+            "return_proxy": None,
+            "primary_sources": ["13f"],
+            "metric_capabilities": ["holdings", "concentration", "source_refs"],
+            "refresh_policy": "quarterly",
+            "confidence": 0.9,
+            "availability_flags": {
+                "cash_ratio": "unavailable",
+                "options_exposure": "unavailable",
+                "reported_return": "unavailable",
+                "return_proxy": "unavailable",
+            },
+            "notes": [],
+        },
+        "bridgewater": {
+            "institution_key": "bridgewater",
+            "display_name": "Bridgewater Associates",
+            "source_kind": "13f",
+            "category": "hedge_fund",
+            "freshness": "fresh",
+            "cik": "0001350694",
+            "accession": "0000950123-26-003959",
+            "holdings_count": 1,
+            "top_holdings": [{"ticker": "MSFT", "issuer": "MICROSOFT", "weight_pct": 10.0, "value_usd": 100.0}],
+            "portfolio_concentration": 0.4,
+            "cash_ratio": None,
+            "options_exposure": None,
+            "reported_return": None,
+            "return_proxy": None,
+            "primary_sources": ["13f"],
+            "metric_capabilities": ["holdings", "concentration", "source_refs"],
+            "refresh_policy": "quarterly",
+            "confidence": 0.9,
+            "availability_flags": {
+                "cash_ratio": "unavailable",
+                "options_exposure": "unavailable",
+                "reported_return": "unavailable",
+                "return_proxy": "unavailable",
+            },
+            "notes": [],
+        },
+        "nps": {
+            "institution_key": "nps",
+            "display_name": "National Pension Service",
+            "source_kind": "seed",
+            "category": "pension",
+            "freshness": "proxy",
+            "holdings_count": 0,
+            "top_holdings": [],
+            "portfolio_concentration": None,
+            "cash_ratio": None,
+            "options_exposure": None,
+            "reported_return": None,
+            "return_proxy": None,
+            "primary_sources": ["annual_report"],
+            "metric_capabilities": ["holdings", "reported_return", "return_proxy"],
+            "refresh_policy": "manual",
+            "confidence": 0.45,
+            "availability_flags": {
+                "cash_ratio": "unavailable",
+                "options_exposure": "unavailable",
+                "reported_return": "unavailable",
+                "return_proxy": "unavailable",
+            },
+            "notes": [],
+        },
+    }
+    monkeypatch.setattr(iw, "latest_snapshot", lambda key: snapshots.get(key))
+    monkeypatch.setattr(iw, "build_common_moves_analysis", lambda snapshots, comparison: {
+        "summary": "공통 보유를 요약했습니다.",
+        "shared_moves": ["AAPL이 반복됩니다."],
+        "divergences": ["기관별 공개 범위가 다릅니다."],
+        "confidence": 0.5,
+        "mode": "heuristic",
+    })
+
+    saved_pages = []
+    from agent_console import wiki
+    monkeypatch.setattr(wiki, "upsert_page", lambda page: saved_pages.append(page) or page)
+    monkeypatch.setattr(wiki, "rebuild_artifacts", lambda: None)
+
+    result = iw.run(["berkshire", "bridgewater", "nps"], dry_run=False, analysis_keys=["berkshire", "bridgewater"])
+
+    assert result["ok"] is True
+    assert any(page["kind"] == "source_digest" and page["id"] == "institution-watch-common-moves"
+               for page in saved_pages)
+    assert any(page["id"] == "institution-watch-berkshire" for page in saved_pages)
+    assert any(page["id"] == "institution-watch-nps" for page in saved_pages)
+
+
+def test_main_routes_cron_to_source_backed_analysis_subset(monkeypatch):
+    from reports import institution_watch as iw
+
+    monkeypatch.setattr(iw, "list_institutions", lambda: [
+        {"key": "berkshire", "source_kind": "13f"},
+        {"key": "bridgewater", "source_kind": "13f"},
+        {"key": "nps", "source_kind": "seed"},
+    ])
+    monkeypatch.setattr(iw, "source_backed_institution_keys", lambda: ["berkshire", "bridgewater"])
+
+    captured = {}
+
+    def fake_run(keys, *, dry_run=False, analysis_keys=None):
+        captured["keys"] = list(keys)
+        captured["dry_run"] = dry_run
+        captured["analysis_keys"] = list(analysis_keys or [])
+        return {
+            "ok": True,
+            "selected_keys": list(keys),
+            "updated": [],
+            "unchanged": [],
+            "failed": [],
+            "analysis": {},
+            "pages": [{"id": "institution-watch-common-moves"}],
+        }
+
+    monkeypatch.setattr(iw, "run", fake_run)
+
+    exit_code = iw.main(["--dry-run"])
+
+    assert exit_code == 0
+    assert captured["keys"] == ["berkshire", "bridgewater", "nps"]
+    assert captured["dry_run"] is True
+    assert captured["analysis_keys"] == ["berkshire", "bridgewater"]
