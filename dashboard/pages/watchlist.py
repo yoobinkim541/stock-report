@@ -89,7 +89,8 @@ def _render_common_moves(analysis: dict):
     shared_moves = list(analysis.get("shared_moves") or [])
     divergences = list(analysis.get("divergences") or [])
     confidence = float(analysis.get("confidence") or 0.0)
-    st.markdown("### LLM 공통 패턴 요약")
+    heading = "LLM 공통 패턴 요약" if analysis.get("mode") == "llm" else "공통 패턴 요약"
+    st.markdown(f"### {heading}")
     if analysis.get("summary"):
         st.markdown(analysis["summary"])
     st.caption(f"신뢰도 {confidence:.2f}")

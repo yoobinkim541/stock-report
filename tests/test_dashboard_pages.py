@@ -1396,7 +1396,7 @@ cached.institution_watch = lambda keys=None: {
         "selected_keys": ["berkshire", "bridgewater"],
     },
     "analysis": {"shared_moves": ["현금 비중 확대"], "divergences": ["옵션 사용 여부 차이"], "confidence": 0.8,
-                 "summary": "LLM 요약"},
+                 "summary": "LLM 요약", "mode": "llm"},
 }
 from dashboard.pages import watchlist
 watchlist.render()
@@ -1404,6 +1404,7 @@ watchlist.render()
     at = AppTest.from_string(script, default_timeout=30).run()
 
     assert any("Berkshire Hathaway" in item.value for item in at.markdown)
+    assert any("LLM 공통 패턴 요약" in item.value for item in at.markdown)
     assert any("LLM 요약" in item.value for item in at.markdown)
     assert any("관심종목" in item.value for item in at.title)
     comparison = next(item.value for item in at.dataframe if "현금 비중" in item.value.columns)
@@ -1445,6 +1446,24 @@ watchlist.render()
 
     assert at.session_state["ticker"] == "AAPL"
     assert at.session_state["_switch_calls"] == ["ticker-page"]
+
+
+def test_watchlist_page_uses_generic_label_for_fallback_analysis():
+    script = _STUBS + '''
+cached.institution_watch = lambda keys=None: {
+    "institutions": [],
+    "comparison": {"rows": [], "selected_keys": []},
+    "analysis": {"shared_moves": [], "divergences": [], "confidence": 0.0,
+                 "summary": "휴리스틱 요약", "mode": "heuristic"},
+}
+data.load_watchlist = lambda *a, **k: []
+from dashboard.pages import watchlist
+watchlist.render()
+'''
+    at = AppTest.from_string(script, default_timeout=30).run()
+
+    assert any("공통 패턴 요약" in item.value for item in at.markdown)
+    assert not any("LLM 공통 패턴 요약" in item.value for item in at.markdown)
 
 
 def test_institution_watch_summary_uses_llm_prompt(monkeypatch):
