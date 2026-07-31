@@ -134,9 +134,12 @@ def render():
     except Exception:
         sel = []
     if sel and sel[0] < len(rows):
-        st.session_state["ticker"] = rows[sel[0]]["ticker"]
-        pg = st.session_state.get("_ticker_page")
-        if pg:
-            st.switch_page(pg)
-        else:
-            st.rerun()
+        picked = rows[sel[0]]["ticker"]
+        if picked and picked != st.session_state.get("ticker"):
+            st.session_state["ticker"] = picked
+            st.toast(f"종목 분석 → {picked}")
+            pg = st.session_state.get("_ticker_page")
+            if pg:
+                st.switch_page(pg)
+            else:
+                st.rerun()
