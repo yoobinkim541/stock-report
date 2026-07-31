@@ -103,7 +103,6 @@ def render():
     st.title("⭐ 관심종목")
     st.caption("유명 기관투자자 스냅샷과 직접 추가한 종목을 함께 보는 허브 "
               "· 표시 전용 · 삭제는 텔레그램 봇 /watch remove")
-    st.markdown("### 관심종목 허브")
 
     hub = cached.institution_watch()
     st.markdown("### 기관투자자 허브")

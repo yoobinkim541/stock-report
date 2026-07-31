@@ -1376,8 +1376,27 @@ cached.institution_watch = lambda keys=None: {
          "freshness": "fresh", "holdings_count": 120, "availability_flags": {"cash_ratio": "unavailable",
          "options_exposure": "available"}},
     ],
-    "comparison": {"rows": [], "selected_keys": ["berkshire", "bridgewater"]},
-    "analysis": {"shared_moves": ["현금 비중 확대"], "divergences": ["옵션 사용 여부 차이"], "confidence": 0.8},
+    "comparison": {
+        "rows": [
+            {"display_name": "Berkshire Hathaway", "source_kind": "13f", "freshness": "fresh",
+             "holdings_count": 27, "portfolio_concentration": None,
+             "portfolio_concentration_flag": "unavailable", "cash_ratio": None,
+             "cash_ratio_flag": "unavailable", "options_exposure": None,
+             "options_exposure_flag": "unavailable", "reported_return": None,
+             "reported_return_flag": "unavailable", "return_proxy": 0.12,
+             "return_proxy_flag": "available"},
+            {"display_name": "Bridgewater", "source_kind": "13f", "freshness": "proxy",
+             "holdings_count": 120, "portfolio_concentration": 0.33,
+             "portfolio_concentration_flag": "available", "cash_ratio": 0.05,
+             "cash_ratio_flag": "proxy", "options_exposure": 0.14,
+             "options_exposure_flag": "available", "reported_return": 0.08,
+             "reported_return_flag": "proxy", "return_proxy": 0.1,
+             "return_proxy_flag": "available"},
+        ],
+        "selected_keys": ["berkshire", "bridgewater"],
+    },
+    "analysis": {"shared_moves": ["현금 비중 확대"], "divergences": ["옵션 사용 여부 차이"], "confidence": 0.8,
+                 "summary": "LLM 요약"},
 }
 from dashboard.pages import watchlist
 watchlist.render()
@@ -1385,8 +1404,100 @@ watchlist.render()
     at = AppTest.from_string(script, default_timeout=30).run()
 
     assert any("Berkshire Hathaway" in item.value for item in at.markdown)
-    assert any("현금 비중 확대" in item.value for item in at.markdown)
-    assert any("관심종목" in item.value for item in at.markdown)
+    assert any("LLM 요약" in item.value for item in at.markdown)
+    assert any("관심종목" in item.value for item in at.title)
+    comparison = next(item.value for item in at.dataframe if "현금 비중" in item.value.columns)
+    assert comparison.loc[0, "현금 비중"] == "— (비공개)"
+    assert comparison.loc[1, "현금 비중"] == "5.0% (프록시)"
+
+
+def test_watchlist_page_clicks_through_to_ticker_detail():
+    script = _STUBS + '''
+import streamlit as st
+from types import SimpleNamespace
+
+cached.institution_watch = lambda keys=None: {
+    "institutions": [],
+    "comparison": {"rows": [], "selected_keys": []},
+    "analysis": {"shared_moves": [], "divergences": [], "confidence": 0.0, "summary": "LLM 요약"},
+}
+data.load_watchlist = lambda *a, **k: [
+    {"ticker": "AAPL", "name": "Apple Inc", "reason": "기관 편입", "added_at": "2026-07-01T00:00:00"},
+]
+st.session_state["_ticker_page"] = "ticker-page"
+st.session_state["_switch_calls"] = []
+
+class _Event:
+    def __init__(self, rows):
+        self.selection = SimpleNamespace(rows=rows)
+
+def fake_dataframe(df, *args, **kwargs):
+    if "티커" in getattr(df, "columns", []):
+        return _Event([0])
+    return _Event([])
+
+st.dataframe = fake_dataframe
+st.switch_page = lambda page: st.session_state["_switch_calls"].append(page)
+from dashboard.pages import watchlist
+watchlist.render()
+'''
+    at = AppTest.from_string(script, default_timeout=30).run()
+
+    assert at.session_state["ticker"] == "AAPL"
+    assert at.session_state["_switch_calls"] == ["ticker-page"]
+
+
+def test_institution_watch_summary_uses_llm_prompt(monkeypatch):
+    from agent_console import agent
+    from dashboard import views
+    from reports import institution_watch as iw
+
+    monkeypatch.setattr(iw, "list_institutions", lambda: [
+        {"key": "berkshire", "display_name": "Berkshire Hathaway"},
+        {"key": "bridgewater", "display_name": "Bridgewater"},
+    ])
+    monkeypatch.setattr(iw, "latest_snapshot", lambda key: {
+        "institution_key": key,
+        "display_name": key.title(),
+        "source_kind": "13f",
+        "freshness": "fresh",
+        "holdings_count": 2,
+        "top_holdings": [{"ticker": "AAPL", "issuer": "APPLE", "weight_pct": 12.0, "value_usd": 100.0}],
+        "portfolio_concentration": 0.4,
+        "cash_ratio": None,
+        "options_exposure": None,
+        "reported_return": None,
+        "return_proxy": 12.0,
+        "availability_flags": {"cash_ratio": "unavailable", "options_exposure": "unavailable"},
+        "notes": [],
+    })
+    monkeypatch.setattr(iw, "compare_institutions", lambda keys, snapshots=None: {
+        "selected_keys": keys,
+        "rows": [
+            {"display_name": "Berkshire Hathaway", "source_kind": "13f", "freshness": "fresh",
+             "holdings_count": 2, "portfolio_concentration": 0.4, "portfolio_concentration_flag": "available",
+             "cash_ratio": None, "cash_ratio_flag": "unavailable", "options_exposure": None,
+             "options_exposure_flag": "unavailable", "reported_return": None,
+             "reported_return_flag": "unavailable", "return_proxy": 12.0, "return_proxy_flag": "available"},
+            {"display_name": "Bridgewater", "source_kind": "13f", "freshness": "fresh",
+             "holdings_count": 2, "portfolio_concentration": 0.4, "portfolio_concentration_flag": "available",
+             "cash_ratio": None, "cash_ratio_flag": "unavailable", "options_exposure": None,
+             "options_exposure_flag": "unavailable", "reported_return": None,
+             "reported_return_flag": "unavailable", "return_proxy": 12.0, "return_proxy_flag": "available"},
+        ],
+    })
+    monkeypatch.setattr(agent, "_try_llm_prompt", lambda prompt, runner=None, max_timeout=None: (
+        '{"summary":"LLM 공통 패턴 요약","shared_moves":["현금 비중 확대"],'
+        '"divergences":["옵션 사용 여부 차이"],"confidence":0.73}'
+    ))
+
+    result = views.institution_watch_summary()
+
+    assert result["selected_keys"] == ["berkshire", "bridgewater"]
+    assert result["analysis"]["summary"] == "LLM 공통 패턴 요약"
+    assert result["analysis"]["shared_moves"] == ["현금 비중 확대"]
+    assert result["analysis"]["divergences"] == ["옵션 사용 여부 차이"]
+    assert result["analysis"]["confidence"] == 0.73
 
 
 def test_watchlist_page_handles_empty_institution_hub_gracefully():

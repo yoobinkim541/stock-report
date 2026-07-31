@@ -5,6 +5,7 @@ app.py 에서 st.cache_data 로 감싼다. provider 는 함수 내부 import(테
 """
 from __future__ import annotations
 
+import json
 import os
 import re
 
@@ -1216,7 +1217,7 @@ def wiki_pipeline_health_summary() -> dict:
         }
 
 
-def _institution_analysis(snapshots: list[dict], comparison: dict) -> dict:
+def _institution_analysis_fallback(snapshots: list[dict], comparison: dict) -> dict:
     if not snapshots:
         return {
             "summary": "표시할 기관 데이터가 아직 없습니다.",
@@ -1268,6 +1269,66 @@ def _institution_analysis(snapshots: list[dict], comparison: dict) -> dict:
         "summary": f"{len(rows)}개 기관 비교 기준으로 공통 패턴과 차이를 함께 요약했습니다.",
         "shared_moves": shared_moves,
         "divergences": divergences,
+        "confidence": round(confidence, 2),
+    }
+
+
+def _institution_analysis(snapshots: list[dict], comparison: dict) -> dict:
+    fallback = _institution_analysis_fallback(snapshots, comparison)
+    if not snapshots:
+        return fallback
+
+    try:
+        from agent_console.agent import _try_llm_prompt
+    except Exception:
+        return fallback
+
+    payload = {
+        "snapshots": snapshots,
+        "comparison_rows": comparison.get("rows") or [],
+    }
+    prompt = "\n".join([
+        "너는 기관투자자 비교 페이지의 요약기다.",
+        "아래 JSON 데이터만 보고, source-backed snapshot 들의 공통 패턴과 차이를 간결하게 요약해라.",
+        "반드시 과장 없이 쓰고, 없거나 공개되지 않은 값은 추정하지 마라.",
+        "출력은 JSON object만 허용한다. 키는 summary(string), shared_moves(array of strings),",
+        "divergences(array of strings), confidence(number 0.0~1.0) 이어야 한다.",
+        "shared_moves 와 divergences 는 각각 1~3개 정도가 적당하다.",
+        "",
+        json.dumps(payload, ensure_ascii=False, default=str),
+    ])
+    try:
+        text = _try_llm_prompt(prompt, max_timeout=20)
+    except Exception:
+        text = None
+    if not text:
+        return fallback
+
+    parsed = None
+    try:
+        parsed = json.loads(text)
+    except Exception:
+        match = re.search(r"\{.*\}", text, re.S)
+        if match:
+            try:
+                parsed = json.loads(match.group(0))
+            except Exception:
+                parsed = None
+    if not isinstance(parsed, dict):
+        return fallback
+
+    summary = str(parsed.get("summary") or fallback["summary"]).strip()
+    shared_moves = [str(item).strip() for item in (parsed.get("shared_moves") or []) if str(item).strip()]
+    divergences = [str(item).strip() for item in (parsed.get("divergences") or []) if str(item).strip()]
+    try:
+        confidence = float(parsed.get("confidence"))
+    except Exception:
+        confidence = float(fallback.get("confidence") or 0.0)
+    confidence = min(max(confidence, 0.0), 1.0)
+    return {
+        "summary": summary,
+        "shared_moves": shared_moves or fallback["shared_moves"],
+        "divergences": divergences or fallback["divergences"],
         "confidence": round(confidence, 2),
     }
 
