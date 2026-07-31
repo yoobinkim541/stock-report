@@ -81,6 +81,7 @@ def test_normalize_input_names_and_tickers():
     assert ticker_names.normalize_input("A069500") == "069500.KS"
     assert ticker_names.normalize_input("069500") == "069500.KS"
     assert ticker_names.normalize_input("KODEX 200") == "069500.KS"
+    assert ticker_names.normalize_input("SOL AI top 2+") == "0167A0.KS"
 
 
 def test_normalize_input_freeform_literal_ticker():
@@ -132,6 +133,11 @@ def test_display_name_us_english():
 def test_display_name_kr_korean():
     assert ticker_names.display_name("005930.KS", allow_net=False) == "삼성전자"
     assert ticker_names.display_name("000660.KS", allow_net=False) == "SK하이닉스"
+
+
+def test_display_name_kr_bare_code():
+    assert ticker_names.display_name("005930", allow_net=False) == "삼성전자"
+    assert ticker_names.label("005930") == "삼성전자 (005930)"
 
 
 def test_display_name_unknown_offline_none():

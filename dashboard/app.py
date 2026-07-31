@@ -74,7 +74,14 @@ if _qtk:
     st.query_params.clear()                        # 재클릭·새로고침 루프 방지
     if _qnorm:
         st.session_state["ticker"] = _qnorm
-        st.session_state["_nav_to_ticker"] = True  # st.navigation 이후 switch_page (기존 경로)
+        try:
+            _qetf = cached.etf(_qnorm)
+        except Exception:
+            _qetf = {}
+        if (_qetf or {}).get("is_etf") and (_qetf.get("market_type") or "").lower() == "kr":
+            st.session_state["_nav_to_kr_etf"] = True
+        else:
+            st.session_state["_nav_to_ticker"] = True  # st.navigation 이후 switch_page (기존 경로)
 
 with st.sidebar:
     st.markdown("### 🔎 종목")
@@ -101,7 +108,14 @@ with st.sidebar:
         _tk = ticker_names.normalize_input(_sel)   # 자유입력 티커/이름 → 정규 티커 (없으면 None)
         if _tk:
             st.session_state["ticker"] = _tk
-            st.session_state["_nav_to_ticker"] = True   # 검색·선택 → 종목 분석으로 자동 이동
+            try:
+                _etf = cached.etf(_tk)
+            except Exception:
+                _etf = {}
+            if (_etf or {}).get("is_etf") and (_etf.get("market_type") or "").lower() == "kr":
+                st.session_state["_nav_to_kr_etf"] = True   # 검색·선택 → 국내 ETF 전용으로 이동
+            else:
+                st.session_state["_nav_to_ticker"] = True   # 검색·선택 → 종목 분석으로 자동 이동
             # 위젯 표시를 정규 티커로 맞춤: _tk!=_sel(리터럴·대소문자 차) 이면 _tsel_sync 를 비워
             # 다음 rerun 의 reconciliation 이 _tsel←_tk 로 자기보정.
             if _tk != _sel:
@@ -144,12 +158,13 @@ with st.sidebar:
     st.markdown("<div style='height:8px'></div>", unsafe_allow_html=True)
     _accum.sidebar_rail()
 
-from dashboard.pages import ai_console, ai_wiki, chart_full, home, market, paper, portfolio, research, watchlist
+from dashboard.pages import ai_console, ai_wiki, chart_full, home, kr_etf, market, paper, portfolio, research, watchlist
 from dashboard.pages import ticker as ticker_pg
 
 _home_pg = st.Page(home.render, title="홈", icon="🏠", url_path="home", default=True)
 _portfolio_pg = st.Page(portfolio.render, title="포트폴리오", icon="💼", url_path="portfolio")
 _ticker_pg = st.Page(ticker_pg.render, title="종목 분석", icon="🔍", url_path="ticker")
+_kr_etf_pg = st.Page(kr_etf.render, title="국내 ETF", icon="🇰🇷", url_path="kr-etf")
 _market_pg = st.Page(market.render, title="시장·캘린더", icon="🗓️", url_path="market")
 _paper_pg = st.Page(paper.render, title="모의투자", icon="🧪", url_path="paper")
 _research_pg = st.Page(research.render, title="리서치", icon="🔬", url_path="research")
@@ -159,14 +174,18 @@ _watchlist_pg = st.Page(watchlist.render, title="관심종목", icon="⭐", url_
 
 # 홈 보유표 행 클릭 → 종목 분석 자동 이동용 (switch_page 는 StreamlitPage 객체 필요)
 st.session_state["_ticker_page"] = _ticker_pg
+st.session_state["_kr_etf_page"] = _kr_etf_pg
 st.session_state["_chart_page"] = _chart_pg          # ⛶ 전체화면 풀차트 왕복용
 st.session_state["_wiki_page"] = st.Page(ai_wiki.render, title="AI 위키", icon="🗂️", url_path="wiki")
 
-nav = st.navigation([_home_pg, _portfolio_pg, _watchlist_pg, _ticker_pg, _chart_pg, _market_pg,
-                     _paper_pg, _research_pg, _agent_pg])
+nav = st.navigation([_home_pg, _portfolio_pg, _watchlist_pg, _ticker_pg, _kr_etf_pg, _chart_pg,
+                     _market_pg, _paper_pg, _research_pg, _agent_pg])
 # 사이드바에서 종목을 새로 고르면 종목 분석 페이지로 이동 (홈 행클릭과 동일 UX)
 if st.session_state.pop("_nav_to_ticker", False):
     st.switch_page(_ticker_pg)
+# 국내 ETF 는 전용 페이지로 분리
+if st.session_state.pop("_nav_to_kr_etf", False):
+    st.switch_page(_kr_etf_pg)
 # 사이드바 모의 레일 버튼 → 모의투자 페이지 (위 _nav_to_ticker 와 동일 패턴)
 if st.session_state.pop("_nav_to_paper", False):
     st.switch_page(_paper_pg)

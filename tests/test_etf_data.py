@@ -71,6 +71,18 @@ def test_parse_kr_top_holdings():
     assert out[0]["amount"] == 70_000_000
 
 
+def test_kr_seed_etf_codes_are_recognized(monkeypatch):
+    assert E.is_etf("0167A0.KS") is True
+
+    monkeypatch.setattr(E, "_latest_kr_market_row", lambda code: {})
+    monkeypatch.setattr(E, "_kr_yfinance_overlay", lambda out: None)
+    monkeypatch.setattr(E, "_kr_pykrx_overlay", lambda out: None)
+
+    out = E.kr_etf_summary("0167A0.KS")
+    assert out["is_etf"] is True
+    assert out["name"] == "SOL AI반도체TOP2플러스"
+
+
 def test_is_etf_known_list_and_quote_type():
     assert E.is_etf("QQQI") is True                  # 보유 ETF — 오프라인 폴백
     assert E.is_etf("SGOV") is True

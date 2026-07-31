@@ -38,6 +38,12 @@ try:
 except Exception:
     pass
 
+try:
+    from kr_etf_seed import KR_ETF as _META_KR_ETF
+    _KNOWN_KR_ETFS = {str(k).split(".")[0] for k in _META_KR_ETF}
+except Exception:
+    _KNOWN_KR_ETFS = set()
+
 _KR_ETF_META = {
     "069500": {
         "name": "KODEX 200",
@@ -54,6 +60,13 @@ _KR_ETF_META = {
     "233740": {"name": "KODEX 코스닥150레버리지", "family": "삼성자산운용", "category": "국내 레버리지", "benchmark": "KOSDAQ 150"},
     "229200": {"name": "KODEX 코스닥150", "family": "삼성자산운용", "category": "국내 주식형", "benchmark": "KOSDAQ 150"},
     "305720": {"name": "KODEX 2차전지산업", "family": "삼성자산운용", "category": "국내 테마형", "benchmark": "FnGuide 2차전지산업"},
+    "0167A0": {
+        "name": "SOL AI반도체TOP2플러스",
+        "family": "신한자산운용",
+        "category": "국내 테마형",
+        "benchmark": "FnGuide AI반도체 TOP2+",
+        "description": "AI 반도체 대표 종목에 집중하는 국내 테마 ETF",
+    },
     "360750": {"name": "TIGER 미국S&P500", "family": "미래에셋자산운용", "category": "해외 주식형", "benchmark": "S&P 500"},
     "133690": {"name": "TIGER 미국나스닥100", "family": "미래에셋자산운용", "category": "해외 주식형", "benchmark": "NASDAQ 100"},
     "379800": {"name": "KODEX 미국S&P500TR", "family": "삼성자산운용", "category": "해외 주식형", "benchmark": "S&P 500 TR"},
@@ -73,9 +86,27 @@ def kr_code(ticker: str) -> str | None:
     return base if len(base) == 6 and base.isdigit() else None
 
 
+def _kr_etf_key(ticker: str) -> str | None:
+    """국내 ETF의 정규 키(.KS 포함). 숫자/문자 코드 모두 seed 기준으로 허용."""
+    s = str(ticker or "").strip().upper()
+    if not s:
+        return None
+    if s in _META_KR_ETF:
+        return s
+    base = s.split(".")[0]
+    if f"{base}.KS" in _META_KR_ETF:
+        return f"{base}.KS"
+    if base in _KNOWN_KR_ETFS:
+        return f"{base}.KS"
+    code = kr_code(s)
+    if code:
+        return f"{code}.KS"
+    return None
+
+
 def normalize_ticker(ticker: str) -> str:
-    code = kr_code(ticker)
-    return f"{code}.KS" if code else str(ticker or "").upper()
+    key = _kr_etf_key(ticker)
+    return key if key else str(ticker or "").upper()
 
 
 def _load_cache(ticker: str):
@@ -264,23 +295,26 @@ def is_etf(ticker: str, quote_type: str | None = None) -> bool:
     """
     if quote_type:
         return str(quote_type).upper() in ("ETF", "MUTUALFUND")
-    code = kr_code(ticker)
-    if code:
-        return code in _KR_ETF_META
+    key = _kr_etf_key(ticker)
+    if key:
+        base = key.split(".")[0]
+        return base in _KR_ETF_META or base in _KNOWN_KR_ETFS
     return str(ticker).upper().split(".")[0] in _KNOWN_ETFS
 
 
 def _kr_etf_base(ticker: str) -> dict:
-    code = kr_code(ticker) or ""
+    key = _kr_etf_key(ticker) or str(ticker or "").upper()
+    code = key.split(".")[0] if key else ""
     meta = _KR_ETF_META.get(code, {})
+    seed_name = _META_KR_ETF.get(key) if key else None
     return {
-        "ticker": f"{code}.KS" if code else str(ticker or "").upper(),
+        "ticker": key,
         "stock_code": code,
-        "is_etf": bool(code and code in _KR_ETF_META),
+        "is_etf": bool(code and (code in _KR_ETF_META or code in _KNOWN_KR_ETFS)),
         "market_type": "kr",
         "currency": "KRW",
         "source": "KR ETF fallback",
-        "name": meta.get("name"),
+        "name": meta.get("name") or seed_name,
         "family": meta.get("family"),
         "category": meta.get("category"),
         "benchmark": meta.get("benchmark"),
@@ -418,7 +452,7 @@ def etf_summary(ticker: str) -> dict:
         return cached
 
     out: dict = {"ticker": tk, "is_etf": is_etf(tk)}
-    if kr_code(tk):
+    if _kr_etf_key(tk) and out["is_etf"]:
         out = kr_etf_summary(tk)
         _save_cache(tk, out)
         return out

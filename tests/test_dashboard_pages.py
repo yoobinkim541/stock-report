@@ -263,6 +263,7 @@ def _script(mod, call):
     ("from dashboard.pages import market", "market.render()"),
     ("from dashboard.pages import paper", "paper.render()"),
     ("from dashboard.pages import research", "research.render()"),
+    ("from dashboard.pages import kr_etf", "kr_etf.render()"),
     ("from dashboard.pages import ai_console", "ai_console.render()"),
 ])
 def test_page_renders_without_exception(mod, call):
@@ -974,6 +975,32 @@ cached.etf = lambda t: {"ticker": "QQQI", "is_etf": True,
     assert not any("PER" == m.label for m in at.metric)      # 주식 밸류 섹션 미렌더
 
 
+def test_kr_etf_page_renders_domestic_only():
+    """국내 ETF 전용 페이지는 원화 기준 표시와 ETF 섹션을 유지한다."""
+    etf_stub = '''
+st.session_state["ticker"] = "0167A0.KS"
+cached.etf = lambda t: {"ticker": "0167A0.KS", "stock_code": "0167A0", "is_etf": True,
+    "market_type": "kr", "currency": "KRW", "name": "SOL AI반도체TOP2플러스",
+    "description": "AI 반도체 대표 종목에 집중하는 국내 테마 ETF",
+    "family": "신한자산운용", "category": "국내 테마형", "benchmark": "FnGuide AI반도체 TOP2+",
+    "total_assets": 1200000000000, "nav": 10250.0, "price": 10210.0, "premium_pct": -0.39,
+    "tracking_error_pct": 0.12, "expense_ratio": 0.0045, "inception": "2023-06-21",
+    "top_holdings": [
+        {"symbol": "000660", "name": "SK하이닉스", "pct": 18.5, "shares": 200, "amount": 36000000},
+        {"symbol": "005930", "name": "삼성전자", "pct": 16.2, "shares": 400, "amount": 70000000}],
+    "dividends": {"count_12m": 4, "per_share_12m": 120.0, "yield_pct": 1.2, "freq_label": "분기"}}
+'''
+    at = AppTest.from_string(_STUBS + etf_stub + "\nfrom dashboard.pages import kr_etf\nkr_etf.render()\n",
+                             default_timeout=30)
+    at.run()
+    assert not at.exception, at.exception
+    body = (" ".join(str(x) for x in at.markdown)
+            + " ".join(m.label for m in at.metric)
+            + " ".join(str(x.value) for x in at.subheader))
+    assert "국내 ETF 전용" in body
+    assert "추적오차" in body and "NAV" in body
+
+
 def test_ticker_page_kr_etf_view():
     """국내 ETF는 원화·추종지수·구성종목 중심의 ETF 분석 화면을 렌더한다."""
     etf_stub = '''
@@ -1205,7 +1232,7 @@ ticker.render()
     body = " ".join(str(getattr(m, "value", "")) for m in at.markdown)
     caps = " ".join(str(getattr(c, "value", "")) for c in at.caption)
     assert "종목 비교" in body
-    assert "기간 시작=0% 상대수익" in caps
+    assert "공통 시작점=0% 상대수익" in caps
     labels = " ".join(str(b.label) for b in at.button)
     assert "× Invesco QQQ" in labels and "× SPDR S&P 500" in labels
     frames = [i.proto.srcdoc for i in at.get("iframe")]

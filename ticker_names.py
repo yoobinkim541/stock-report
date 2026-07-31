@@ -210,6 +210,7 @@ KO: dict[str, tuple[str, ...]] = {
     "GLD": ("금 ETF", "골드"),
     "SLV": ("은 ETF", "실버"),
     "ARKK": ("아크 이노베이션", "ARK"),
+    "0167A0.KS": ("SOL AI반도체TOP2플러스", "SOL AI top 2+", "SOL AI TOP 2+", "SOL AI top2+"),
     # ── 매크로 자산 (한글 검색 별칭 — 홈 카드 클릭·통합 검색) ──
     "KRW=X": ("달러 환율", "원달러", "달러원", "환율"),
     "GC=F": ("금", "금 선물", "골드"),
@@ -329,6 +330,11 @@ def display_name(ticker: str, allow_net: bool = True) -> str | None:
     if not t:
         return None
     tu = t.upper()
+    if _KR_CODE_RE.match(tu):  # 6자리 국내 코드도 .KS 로 정규화해 표시명 복원
+        norm = normalize_input(tu)
+        if norm:
+            t = norm
+            tu = norm.upper()
     if t.endswith(".KS") or t.endswith(".KQ"):
         return KR.get(t) or KR.get(tu) or _KR_ETF.get(tu) or _yf_name(t, allow_net)
     return EN.get(tu) or _SP500.get(tu) or _yf_name(tu, allow_net)
