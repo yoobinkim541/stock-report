@@ -14,6 +14,18 @@ NAVER_INDEX_CODES = {"KOSPI": "kospi", "KOSDAQ": "kosdaq", "KPI200": "kospi200"}
 NAVER_MARKETS = ("KOSPI", "KOSDAQ")
 NAVER_BREADTH_SORTS = ("marketValue", "up", "down")
 KIWOOM_MARKETS = {"kospi": "0", "kosdaq": "1"}
+KIWOOM_INTRA_FLOW_METHODS = (
+    "intraday_investor_trading_request_ka10063",
+    "intraday_investor_trading",
+)
+KIWOOM_AFTER_HOURS_FLOW_METHODS = (
+    "after_hours_investor_trading_request_ka10066",
+    "after_hours_investor_trading",
+)
+KIWOOM_SECTOR_FLOW_METHODS = (
+    "industrywise_investor_net_buy_request_ka10051",
+    "industry_investor_net_buy",
+)
 
 
 def _asof(now: datetime | None = None) -> str:
@@ -95,7 +107,7 @@ def normalize_investor_flow(raw: dict) -> dict:
         row = _dict(raw.get(key) or raw.get(key.upper()))
         if not row:
             continue
-        item = _clean(row, ("source", "as_of", "unit"))
+        item = _clean(row, ("source", "as_of", "unit", "scope", "basis", "base_dt", "market"))
         for src, dst in (
             ("foreign_net", "foreign_net"),
             ("foreigner_net", "foreign_net"),
@@ -332,25 +344,102 @@ def parse_kiwoom_investor_flow_payload(payload: dict, *, market: str) -> dict:
     return {market.lower(): item}
 
 
+def _kiwoom_market_phase(now: datetime | None = None) -> str:
+    current = now or datetime.now(KST)
+    if current.tzinfo is None:
+        current = current.replace(tzinfo=KST)
+    current = current.astimezone(KST)
+    # 장중 우선, 장마감 후에는 after-hours 우선
+    return "intraday" if current.weekday() < 5 and (current.hour < 15 or (current.hour == 15 and current.minute < 40)) else "after_hours"
+
+
+def _call_kiwoom_flow_method(api, method_names: tuple[str, ...], **kwargs):
+    for name in method_names:
+        func = getattr(api, name, None)
+        if callable(func):
+            return func(**kwargs)
+    return None
+
+
+def _build_kiwoom_clients():
+    market_api = None
+    sector_api = None
+    token_manager = None
+    try:
+        from kiwoom_rest_api.auth.token import TokenManager
+        token_manager = TokenManager()
+    except Exception:
+        token_manager = None
+    try:
+        from kiwoom_rest_api.koreanstock.market import Market
+    except Exception:
+        Market = None  # type: ignore[assignment]
+    try:
+        from kiwoom_rest_api.koreanstock.sector import Sector
+    except Exception:
+        Sector = None  # type: ignore[assignment]
+    if token_manager is None:
+        return None, None
+    if Market is not None:
+        market_api = Market(base_url="https://api.kiwoom.com", token_manager=token_manager, use_async=False)
+    if Sector is not None:
+        sector_api = Sector(base_url="https://api.kiwoom.com", token_manager=token_manager, use_async=False)
+    return market_api, sector_api
+
+
+def _flow_request_kwargs(*, market: str, base_dt: str, scope: str) -> dict:
+    kwargs = {
+        "mrkt_tp": KIWOOM_MARKETS.get(market, market),
+        "amt_qty_tp": "0",
+        "stex_tp": os.getenv("KIWOOM_INVESTOR_FLOW_STEX_TP", "3"),
+        "base_dt": base_dt,
+    }
+    return kwargs
+
+
+def _kiwoom_flow_payload(api, *, market: str, scope: str, base_dt: str):
+    kwargs = _flow_request_kwargs(market=market, base_dt=base_dt, scope=scope)
+    if scope == "after_hours":
+        payload = _call_kiwoom_flow_method(api, KIWOOM_AFTER_HOURS_FLOW_METHODS, **kwargs)
+    elif scope == "intraday":
+        payload = _call_kiwoom_flow_method(api, KIWOOM_INTRA_FLOW_METHODS, **kwargs)
+    else:
+        payload = None
+    if payload:
+        return payload
+    return _call_kiwoom_flow_method(api, KIWOOM_SECTOR_FLOW_METHODS, **kwargs)
+
+
 def fetch_kiwoom_investor_flow() -> dict:
     if not kiwoom_enabled():
         return {}
     try:
-        from kiwoom_rest_api.auth.token import TokenManager
-        from kiwoom_rest_api.koreanstock.sector import Sector
-
         if not os.getenv("KIWOOM_API_KEY") or not os.getenv("KIWOOM_API_SECRET"):
             return {}
-        api = Sector(base_url="https://api.kiwoom.com", token_manager=TokenManager(), use_async=False)
+        market_api, sector_api = _build_kiwoom_clients()
+        if market_api is None and sector_api is None:
+            return {}
+        base_dt = os.getenv("KIWOOM_INVESTOR_FLOW_BASE_DT") or datetime.now(KST).strftime("%Y%m%d")
+        scope = _kiwoom_market_phase()
         out = {}
-        for market, code in KIWOOM_MARKETS.items():
-            payload = api.industrywise_investor_net_buy_request_ka10051(
-                mrkt_tp=code,
-                amt_qty_tp="0",
-                stex_tp=os.getenv("KIWOOM_INVESTOR_FLOW_STEX_TP", "3"),
-                base_dt=os.getenv("KIWOOM_INVESTOR_FLOW_BASE_DT", ""),
-            )
-            out.update(parse_kiwoom_investor_flow_payload(payload, market=market))
+        for market in KIWOOM_MARKETS:
+            payload = None
+            source = None
+            if market_api is not None:
+                payload = _kiwoom_flow_payload(market_api, market=market, scope=scope, base_dt=base_dt)
+                source = "kiwoom_ka10063" if scope == "intraday" else "kiwoom_ka10066"
+            if not payload and sector_api is not None:
+                payload = _kiwoom_flow_payload(sector_api, market=market, scope=scope, base_dt=base_dt)
+                source = "kiwoom_ka10051"
+            parsed = parse_kiwoom_investor_flow_payload(payload, market=market)
+            if parsed:
+                row = parsed.get(market)
+                if isinstance(row, dict):
+                    row["source"] = source
+                    row["scope"] = "market" if source != "kiwoom_ka10051" else "industry"
+                    row["basis"] = "intraday" if scope == "intraday" else "after_hours"
+                    row["base_dt"] = base_dt or None
+                out.update(parsed)
         return out
     except Exception:
         return {}

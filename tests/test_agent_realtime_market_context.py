@@ -116,7 +116,7 @@ def test_compact_snapshot_lines_include_microstructure_fields():
             "kospi200": {"price": 452.2, "change_pct": 0.31},
         },
         "investor_flow": {
-            "kospi": {"foreign_net": 120000000000, "institution_net": -50000000000},
+            "kospi": {"foreign_net": 120000000000, "institution_net": -50000000000, "scope": "market", "basis": "intraday"},
         },
         "k200_futures": {"price": 425.5, "change_pct": 0.4, "foreign_net": 3500},
         "breadth": {"advancers": 512, "decliners": 318},
@@ -132,6 +132,8 @@ def test_compact_snapshot_lines_include_microstructure_fields():
     assert "K200 선물" in text
     assert "상승 512" in text
     assert "하락 318" in text
+    assert "market" in text
+    assert "intraday" in text
 
 
 def test_realtime_snapshot_uses_microstructure_fx_when_toss_disabled(monkeypatch):

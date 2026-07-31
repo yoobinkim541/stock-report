@@ -33,7 +33,7 @@ KR_MARKET_MICROSTRUCTURE_ENABLED=true .venv/bin/python crons/kr_microstructure_s
 - `KR_MARKET_MICROSTRUCTURE_STALE_S=120`: stale 기준
 - `KR_MARKET_MICROSTRUCTURE_SOURCE_FILE=/path/to/broker_snapshot.json`: 증권사/KRX 브리지 산출물을 읽는 입력 파일
 - `KR_MARKET_MICROSTRUCTURE_REQUIRED_FIELDS=indices,investor_flow,k200_futures,breadth,fx`: 헬스체크 필수 필드
-- `KR_MARKET_MICROSTRUCTURE_KIWOOM_ENABLED=true`: Kiwoom `ka10051` 업종별 투자자 순매수 수집 활성화
+- `KR_MARKET_MICROSTRUCTURE_KIWOOM_ENABLED=true`: Kiwoom 장중 투자자 수급 수집 활성화
 - `KIWOOM_INVESTOR_FLOW_STEX_TP=3`: Kiwoom 수급 거래소 구분. 기본은 통합
 - `KIWOOM_INVESTOR_FLOW_AMOUNT_UNIT_KRW=1000000`: Kiwoom 금액 필드를 KRW로 환산하는 배수
 - `KR_MARKET_MICROSTRUCTURE_KIS_FUTURES_ENABLED=true`: KIS 국내선물옵션 현재가 수집 활성화
@@ -53,10 +53,12 @@ KR_MARKET_MICROSTRUCTURE_ENABLED=true .venv/bin/python crons/kr_microstructure_s
 - `indices`: Naver realtime index JSON for `KOSPI`, `KOSDAQ`, and `KPI200` as `kospi200`
 - `breadth`: Naver mobile stock count JSON for KOSPI/KOSDAQ total, up, and down counts; unchanged is calculated as `total - up - down`
 - `fx`: Toss API when `AGENT_CONSOLE_TOSS_FX_ENABLED=true` and credentials are present
-- `investor_flow`: Kiwoom REST `ka10051` industry investor net-buy data, normalized to KOSPI/KOSDAQ foreign/institution/individual net KRW
+- `investor_flow`: Kiwoom REST `ka10063` intraday investor trading data first, `ka10066` after-hours trading second, `ka10051` industry flow last-resort fallback. All are normalized to KOSPI/KOSDAQ foreign/institution/individual net KRW and tagged with `scope`/`basis`.
 - `k200_futures`: KIS domestic futureoption display board selects the most active KOSPI200 futures contract, then `inquire-price` fills price, change percent, basis, and volume
 
 Broker/KRX bridge data still takes precedence for fields it provides. The built-in KIS futures path currently covers price-side futures data; foreign futures net contracts still require a broker/KRX bridge field such as `foreign_net`.
+
+For the investor-flow field, the snapshot prefers the market-wide intraday Kiwoom path because that is the closest match to the MTS "장중 투자자별 매매" screen. If that route is unavailable, the collector falls back to the after-hours market path and finally the sector-level path.
 
 ## US 24-Hour Tracking
 

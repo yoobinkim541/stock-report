@@ -141,6 +141,83 @@ def test_parse_kiwoom_investor_flow_prefers_composite_total_row():
     assert got["kospi"]["individual_net"] == 21694000000
 
 
+def test_fetch_kiwoom_investor_flow_prefers_market_intraday_then_tags_scope(monkeypatch):
+    from providers import kr_microstructure as km
+
+    class MarketApi:
+        def __init__(self):
+            self.calls = []
+
+        def intraday_investor_trading_request_ka10063(self, **kwargs):
+            self.calls.append(kwargs)
+            return {
+                "inds_netprps": [
+                    {"inds_nm": "종합(KOSPI)", "frgnr_netprps": "+12,000", "orgn_netprps": "-5,000", "ind_netprps": "-7,000"},
+                ]
+            }
+
+    class SectorApi:
+        def __init__(self):
+            self.called = False
+
+        def industrywise_investor_net_buy_request_ka10051(self, **kwargs):
+            self.called = True
+            raise AssertionError("sector fallback should not be used when market API works")
+
+    market_api = MarketApi()
+    sector_api = SectorApi()
+    monkeypatch.setenv("KIWOOM_API_KEY", "k")
+    monkeypatch.setenv("KIWOOM_API_SECRET", "s")
+    monkeypatch.setenv("KIWOOM_INVESTOR_FLOW_BASE_DT", "20260731")
+    monkeypatch.setattr(km, "_build_kiwoom_clients", lambda: (market_api, sector_api))
+    monkeypatch.setattr(km, "_kiwoom_market_phase", lambda now=None: "intraday")
+
+    got = km.fetch_kiwoom_investor_flow()
+
+    assert market_api.calls
+    assert market_api.calls[0]["mrkt_tp"] == "0"
+    assert market_api.calls[0]["amt_qty_tp"] == "0"
+    assert got["kospi"]["foreign_net"] == 12000000000
+    assert got["kospi"]["institution_net"] == -5000000000
+    assert got["kospi"]["source"] == "kiwoom_ka10063"
+    assert got["kospi"]["scope"] == "market"
+    assert got["kospi"]["basis"] == "intraday"
+    assert got["kospi"]["base_dt"] == "20260731"
+    assert sector_api.called is False
+
+
+def test_fetch_kiwoom_investor_flow_falls_back_to_sector_when_market_missing(monkeypatch):
+    from providers import kr_microstructure as km
+
+    class SectorApi:
+        def __init__(self):
+            self.calls = []
+
+        def industrywise_investor_net_buy_request_ka10051(self, **kwargs):
+            self.calls.append(kwargs)
+            return {
+                "inds_netprps": [
+                    {"inds_nm": "종합(KOSDAQ)", "frgnr_netprps": "-1,500", "orgn_netprps": "+900", "ind_netprps": "+600"},
+                ]
+            }
+
+    sector_api = SectorApi()
+    monkeypatch.setenv("KIWOOM_API_KEY", "k")
+    monkeypatch.setenv("KIWOOM_API_SECRET", "s")
+    monkeypatch.setenv("KIWOOM_INVESTOR_FLOW_BASE_DT", "20260731")
+    monkeypatch.setattr(km, "_build_kiwoom_clients", lambda: (None, sector_api))
+    monkeypatch.setattr(km, "_kiwoom_market_phase", lambda now=None: "intraday")
+
+    got = km.fetch_kiwoom_investor_flow()
+
+    assert sector_api.calls
+    assert got["kosdaq"]["foreign_net"] == -1500000000
+    assert got["kosdaq"]["institution_net"] == 900000000
+    assert got["kosdaq"]["source"] == "kiwoom_ka10051"
+    assert got["kosdaq"]["scope"] == "industry"
+    assert got["kosdaq"]["basis"] == "intraday"
+
+
 def test_fetch_investor_flow_prefers_file_then_kiwoom(monkeypatch):
     from providers import kr_microstructure as km
 

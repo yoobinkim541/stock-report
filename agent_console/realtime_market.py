@@ -203,10 +203,17 @@ def compact_snapshot_lines(snapshot: dict) -> list[str]:
     flow = snapshot.get("investor_flow") or {}
     kospi_flow = flow.get("kospi") or flow.get("KOSPI") or {}
     if kospi_flow:
+        scope = ""
+        if kospi_flow.get("scope") or kospi_flow.get("basis"):
+            parts = [str(kospi_flow.get("scope")).replace("_", "-") if kospi_flow.get("scope") else ""]
+            if kospi_flow.get("basis"):
+                parts.append(str(kospi_flow.get("basis")).replace("_", "-"))
+            scope = " · " + " / ".join([p for p in parts if p])
         lines.append(
             "- KOSPI 수급: "
             f"외국인 {_fmt_krw_net(kospi_flow.get('foreign_net'))} · "
             f"기관 {_fmt_krw_net(kospi_flow.get('institution_net'))}"
+            f"{scope}"
         )
     fut = snapshot.get("k200_futures") or {}
     if fut:
