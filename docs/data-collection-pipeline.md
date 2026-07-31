@@ -82,11 +82,13 @@ World Memory UI(대시보드 "시장 기억" 탭)는 검색(제목·본문·티�
 
 위키 쓰기 규약(신뢰 등급, `verification_status`, source-backed 승격 조건 등)은 [`shared-agent-memory.md`의 "LLM Wiki 운영 규약"](shared-agent-memory.md) 참조.
 
-> **2026-07-25**: `source_wiki_curator`가 매 실행마다 이벤트 개수 상위 N개 그룹만 저장하던
+> **2026-07-25 / 2026-07-31**: `source_wiki_curator`가 매 실행마다 이벤트 개수 상위 N개 그룹만 저장하던
 > `--limit 8` 캡을 제거함(`--limit 0`=무제한). 소수 거시 주제(중동/전쟁·기술/AI 등)가
 > 이벤트 수에서 항상 상위권을 독점해, 종목별/유형별 신규 페이지가 하루 넘게 하나도
 > 저장되지 못하는 문제가 있었음 — LLM enrich 비용은 그룹 계산 단계에서 이미 지불되므로
-> 저장 캡 제거의 추가 비용은 거의 없음.
+> 저장 캡 제거의 추가 비용은 거의 없음. 2026-07-31에는 source digest 본문 길이와 후속 질문
+> 섹션을 늘려 지식 자산화 밀도를 높이고, `wiki_distillation` 주기를 6시간마다로 올려
+> 판단 카드 승격을 하루 4회 이상 시도하도록 바꿨다.
 
 ## 5. 전체 크론 빈도 한눈에
 
@@ -94,10 +96,11 @@ World Memory UI(대시보드 "시장 기억" 탭)는 검색(제목·본문·티�
 
 1. **매 1분** — `news_spike_detector.py`(saveticker 속보), (참고: 시세 폴러/워치독류는 이 문서 범위 밖)
 2. **30분마다** — `source_collector.py`(전 소스 원본 수집), `source_wiki_curator.py`(위키 생성/갱신), `archive_stale_pages`(위키 스테일 정리)
-3. **시간당(평일)** — `news_llm_snapshot.py`(뉴스 구조화 라벨링, 2026-07-24부터 하루 2번에서 변경)
-4. **2시간마다** — `wiki_health_check.py`(LLM 헬스 리뷰 · 구조화된 파이프라인 헬스 리포트 사용)
-5. **매일** — `raw_archive_cleanup.py`(20:45 UTC, TTL 청소)
-6. **트리거 기반(스케줄 없음)** — `auto_curate_from_chat()`(채팅마다), `ingest_recent_memory`(버튼/API 수동 호출)
+3. **6시간마다** — `wiki_distillation.py`(source_digest → playbook/risk/concept 판단카드)
+4. **시간당(평일)** — `news_llm_snapshot.py`(뉴스 구조화 라벨링, 2026-07-24부터 하루 2번에서 변경)
+5. **2시간마다** — `wiki_health_check.py`(LLM 헬스 리뷰 · 구조화된 파이프라인 헬스 리포트 사용)
+6. **매일** — `raw_archive_cleanup.py`(20:45 UTC, TTL 청소)
+7. **트리거 기반(스케줄 없음)** — `auto_curate_from_chat()`(채팅마다), `ingest_recent_memory`(버튼/API 수동 호출)
 
 전체 크론 단일 진실원은 `deploy/crontab.stock-report`(적용은 `crontab deploy/crontab.stock-report`) — 이 문서의 빈도는 그 파일에서 파생된 것이니, 크론탭이 바뀌면 이 표도 같이 바뀌어야 한다.
 

@@ -92,10 +92,12 @@ The source collector keeps SaveTicker, Telegram, Arca, Polymarket, market, and m
 Operational command:
 
 ```bash
-uv run python -m reports.source_wiki_curator --hours 48 --limit 8
+uv run python -m reports.source_wiki_curator --hours 48 --limit 0
 ```
 
 The production crontab runs it shortly after `reports/source_collector.py`, so newly collected source events become qmd-searchable wiki context without waiting for a chat autocuration pass.
+
+`reports.wiki_distillation` now runs every 6 hours, so source digests can turn into reusable playbook/risk/concept cards throughout the day instead of waiting for a weekly batch.
 
 ## Evidence/Wiki/Strategy Context
 

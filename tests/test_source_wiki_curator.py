@@ -170,6 +170,51 @@ def test_build_wiki_pages_from_events_attaches_evidence_metadata():
     ]
 
 
+def test_build_wiki_pages_from_events_body_adds_insights_and_followups():
+    events = [
+        {
+            "source": "saveticker",
+            "title": "AI 서버 수요 확대",
+            "url": "https://saveticker.com/1",
+            "body_raw": "AI 서버와 반도체 수요가 확대됐다.",
+            "topic": "기술/AI",
+            "tags": ["기술/AI"],
+            "tickers": ["NVDA"],
+            "classification": {"kind": "article", "topic": "기술/AI", "trust": "B"},
+        },
+        {
+            "source": "telegram:insidertracking",
+            "title": "반도체 전력 수요 증가",
+            "url": "https://t.me/insidertracking/2",
+            "body_raw": "반도체와 데이터센터 전력 병목이 같이 언급됐다.",
+            "topic": "기술/AI",
+            "tags": ["기술/AI"],
+            "tickers": ["NVDA"],
+            "classification": {"kind": "community_signal", "topic": "기술/AI", "trust": "C"},
+        },
+        {
+            "source": "telegram:insidertracking",
+            "title": "메모리 CAPEX 확대",
+            "url": "https://t.me/insidertracking/3",
+            "body_raw": "CAPEX 확대와 공급 제약이 같이 언급됐다.",
+            "topic": "기술/AI",
+            "tags": ["기술/AI"],
+            "tickers": ["AMD"],
+            "classification": {"kind": "community_signal", "topic": "기술/AI", "trust": "C"},
+        },
+    ]
+
+    pages = swc.build_wiki_pages_from_events(events, now=datetime(2026, 7, 23, 10, 0, tzinfo=KST))
+    page = next(page for page in pages if page["id"] == "source-topic-기술-ai")
+
+    assert "핵심 관찰:" in page["body"]
+    assert "출처 분포:" in page["body"]
+    assert "반복 티커:" in page["body"]
+    assert "후속 질문:" in page["body"]
+    assert "NVDA" in page["body"]
+    assert "AMD" in page["body"]
+
+
 def test_curate_recent_source_wiki_limit_zero_saves_all_groups(monkeypatch):
     """2026-07-25 회귀방지 — 소수 거시 주제가 이벤트 수에서 항상 상위권을 독점해,
     limit 캡이 있으면 종목별/유형별 신규 페이지가 영구히 저장되지 않는 문제가 있었음.

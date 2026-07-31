@@ -29,7 +29,7 @@ from agent_console import wiki
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 logger = logging.getLogger(__name__)
 
-MAX_CANDIDATES_PER_RUN = 3
+MAX_CANDIDATES_PER_RUN = 5
 _JUDGMENT_KINDS = ("playbook", "risk", "decision", "concept")
 _DISTILLABLE_KINDS = ("playbook", "risk", "concept")
 

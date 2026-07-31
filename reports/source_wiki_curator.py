@@ -16,7 +16,7 @@ from reports.evidence_cards import cards_to_source_refs, event_to_evidence_card
 
 KST = timezone(timedelta(hours=9))
 MIN_GROUP_EVENTS = 2
-MAX_EVENTS_PER_PAGE = 8
+MAX_EVENTS_PER_PAGE = 12
 MAX_SOURCE_REFS = 12
 MAX_CURATOR_LINKS = 12
 GENERIC_TOPICS = {"기타", "saveticker", "텔레그램", "시장데이터"}
@@ -142,12 +142,48 @@ def _summary_for(topic: str, events: list[dict]) -> str:
     return " · ".join(bits)
 
 
+def _group_insights(events: list[dict]) -> list[str]:
+    insights: list[str] = []
+    sources = Counter(_root_source(event.get("source")) for event in events)
+    tickers = Counter(t for event in events for t in (event.get("tickers") or []) if isinstance(t, str) and t.strip())
+    kinds = Counter(_clean((event.get("classification") or {}).get("kind") or event.get("kind"), 60) for event in events)
+    if sources:
+        insights.append("출처 분포: " + ", ".join(f"{src} {count}건" for src, count in sources.most_common(6)))
+    if tickers:
+        insights.append("반복 티커: " + ", ".join(f"{ticker} {count}건" for ticker, count in tickers.most_common(8)))
+    if kinds:
+        insights.append("신호 유형: " + ", ".join(f"{kind} {count}건" for kind, count in kinds.most_common(6)))
+    return insights
+
+
+def _followup_questions(display: str, events: list[dict]) -> list[str]:
+    sources = Counter(_root_source(event.get("source")) for event in events)
+    tickers = Counter(t for event in events for t in (event.get("tickers") or []) if isinstance(t, str) and t.strip())
+    questions = [
+        f"{display} 신호가 가격·크레딧·환율 데이터에서도 확인되는가?",
+        "공식 자료와 충돌하는 커뮤니티성 단서가 있는가?",
+    ]
+    if tickers:
+        top_ticker = tickers.most_common(1)[0][0]
+        questions.append(f"{top_ticker} 관련 후속 공시·수급·실적 변화가 이어지는가?")
+    if len(sources) >= 2:
+        questions.append("출처별 신뢰도 차이가 결과 해석을 바꿀 정도인가?")
+    return questions[:4]
+
+
 def _body_for(topic: str, events: list[dict], now: datetime) -> str:
     lines = [
         f"수집 기준: {now.astimezone(KST).isoformat(timespec='minutes')}",
         "",
-        "핵심 근거:",
+        f"요약: {topic} 관련 수집 이벤트 {len(events)}건",
+        "",
     ]
+    lines.extend([
+        "핵심 관찰:",
+        *[f"- {item}" for item in _group_insights(events)[:3]],
+        "",
+        "핵심 근거:",
+    ])
     for event in events[:MAX_EVENTS_PER_PAGE]:
         source = event.get("source") or "unknown"
         title = _clean(event.get("title"), 180)
@@ -159,7 +195,11 @@ def _body_for(topic: str, events: list[dict], now: datetime) -> str:
         if url:
             line += f" ({url})"
         lines.append(line)
+    questions = _followup_questions(topic, events)
     lines.extend([
+        "",
+        "후속 질문:",
+        *[f"- {question}" for question in questions],
         "",
         "답변 사용법:",
         f"- {topic} 질문에서는 위 근거를 최신 수집 신호로 먼저 확인합니다.",
