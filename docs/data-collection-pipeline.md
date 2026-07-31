@@ -1,6 +1,6 @@
 # 데이터 수집 · World Memory · 위키 파이프라인
 
-> 최종 확인: 2026-07-24 (라이브 크론탭 `deploy/crontab.stock-report` + 코드 직접 확인 기준)
+> 최종 확인: 2026-07-31 (라이브 크론탭 `deploy/crontab.stock-report` + 코드 직접 확인 기준)
 
 이 문서는 "뭐가 얼마나 자주 도는지 · 어디서 원본이 얼마나 보존되는지 · LLM이 어디를 언제 건드리는지"를 한 곳에 모은 운영 참조다. 각 컴포넌트의 세부 계약(디렉토리 구조, 신뢰 등급, 쓰기 규약)은 중복 설명하지 않고 [`agent-console.md`](agent-console.md), [`shared-agent-memory.md`](shared-agent-memory.md)를 참조한다 — 이 문서는 **빈도·경로·최근 변경**에 집중한다.
 
@@ -77,7 +77,7 @@ World Memory UI(대시보드 "시장 기억" 탭)는 검색(제목·본문·티�
 |---|---|---|---|
 | 페이지 신규 생성/갱신 | `reports/source_wiki_curator.py` | **30분마다** (`8,38 * * * *`, `--limit 0`=무제한) | O — 이벤트 3개+ 그룹이면 LLM이 제목/요약/태그 생성 (`SOURCE_WIKI_LLM_ENABLED`, 기본 켜짐) |
 | 스테일 페이지 아카이브 | `agent_console.wiki.archive_stale_pages()` | 30분마다 (`8,38 * * * *`) | X — 규칙(30일 이상 미사용 시 자동 아카이브) |
-| 헬스체크 기반 archive/delete/reactivate | `reports/wiki_health_check.py` | **2시간마다** (`15 */2 * * *`) | O — `run_llm_health_review()`가 판단 |
+| 헬스체크 기반 archive/delete/reactivate | `reports/wiki_health_check.py` | **2시간마다** (`15 */2 * * *`) | O — `reports/wiki_pipeline_health.py` 구조화 리포트를 바탕으로 `run_llm_health_review()`가 판단 |
 | 대화 중 merge/split/delete/create | `agent_console/wiki.py: auto_curate_from_chat()` | **크론 아님 — AI 콘솔 채팅마다 즉시** | O |
 
 위키 쓰기 규약(신뢰 등급, `verification_status`, source-backed 승격 조건 등)은 [`shared-agent-memory.md`의 "LLM Wiki 운영 규약"](shared-agent-memory.md) 참조.
@@ -95,7 +95,7 @@ World Memory UI(대시보드 "시장 기억" 탭)는 검색(제목·본문·티�
 1. **매 1분** — `news_spike_detector.py`(saveticker 속보), (참고: 시세 폴러/워치독류는 이 문서 범위 밖)
 2. **30분마다** — `source_collector.py`(전 소스 원본 수집), `source_wiki_curator.py`(위키 생성/갱신), `archive_stale_pages`(위키 스테일 정리)
 3. **시간당(평일)** — `news_llm_snapshot.py`(뉴스 구조화 라벨링, 2026-07-24부터 하루 2번에서 변경)
-4. **2시간마다** — `wiki_health_check.py`(LLM 헬스 리뷰)
+4. **2시간마다** — `wiki_health_check.py`(LLM 헬스 리뷰 · 구조화된 파이프라인 헬스 리포트 사용)
 5. **매일** — `raw_archive_cleanup.py`(20:45 UTC, TTL 청소)
 6. **트리거 기반(스케줄 없음)** — `auto_curate_from_chat()`(채팅마다), `ingest_recent_memory`(버튼/API 수동 호출)
 

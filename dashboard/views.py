@@ -1199,6 +1199,23 @@ def source_health_summary() -> dict:
         return {"health": {}, "stale": [], "error": str(e)}
 
 
+def wiki_pipeline_health_summary() -> dict:
+    """LLM 위키 파이프라인 헬스 (source/wiki/curation 요약) — AI 콘솔용."""
+    try:
+        from reports.wiki_pipeline_health import build_pipeline_health_report
+        return build_pipeline_health_report(dry_run=True)
+    except Exception as e:
+        return {
+            "dry_run": True,
+            "generated_at": "",
+            "source_health": {"overall": {}, "sources": [], "stale_sources": [], "recent": {}},
+            "wiki_health": {},
+            "curation_health": {},
+            "recommendations": [],
+            "error": str(e),
+        }
+
+
 def etf_overview(ticker: str) -> dict:
     """ETF 전용 요약 (providers.etf_data) — 비ETF {"is_etf": False}. graceful."""
     try:

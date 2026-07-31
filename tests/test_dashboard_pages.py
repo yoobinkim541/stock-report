@@ -108,6 +108,21 @@ cached.social_sentiment = lambda: {"summary": {"title": "미국 레딧 게시물
                   "tickers": [], "bullets": ["Risk-On"]}]}}
 cached.source_health = lambda: {"health": {"saveticker": {"last_count": 12}},
     "stale": [{"source": "telegram:insidertracking", "hours": None, "threshold": 12}]}
+cached.wiki_pipeline_health = lambda: {"dry_run": True, "generated_at": "2026-07-31T00:00:00+00:00",
+    "source_health": {"overall": {"tracked_sources": 2, "expected_sources": 2,
+    "healthy_sources": 1, "stale_sources": 1, "missing_success_sources": 0},
+    "sources": [{"source": "saveticker", "observed": True, "has_success": True},
+                {"source": "telegram:insidertracking", "observed": True, "has_success": False}],
+    "stale_sources": [{"source": "telegram:insidertracking", "hours": 18.0, "threshold": 12}],
+    "recent": {"event_total": 2, "sources": {"saveticker": 2}}},
+    "wiki_health": {"source_backed_count": 1, "unverified_count": 1, "stale_count": 1,
+        "unused_count": 2, "open_question_count": 1, "stats": {"total": 2,
+        "status_counts": {"reviewed": 1, "stable": 1, "archived": 0}}},
+    "curation_health": {"source_digest_count": 1, "source_digest_linked_count": 0,
+        "source_digest_unlinked_count": 1}, "recommendations": [
+            {"category": "collection", "title": "소스 수집 공백 점검", "detail": "telegram:insidertracking 18.0h/12h"},
+            {"category": "curation", "title": "큐레이션 승격 경로 보강", "detail": "source_digest 1개가 judgment page로 연결되지 않음"},
+        ]}
 cached.collected_news = lambda hours=48: {"hours": hours, "groups": {
     "saveticker": [{"title": "엔비디아 [실적] 서프라이즈", "url": "https://example.com/1",
                     "score": 8, "reason": "포트폴리오 종목", "published_at": "2026-07-06T10:00:00+09:00",
@@ -256,6 +271,29 @@ def test_ai_console_quick_prompt_list_stays_small():
 
     assert len(prompts) == 3
     assert any("위키" in prompt for prompt in prompts)
+
+
+def test_wiki_pipeline_health_summary_wraps_report(monkeypatch):
+    from dashboard import views
+    from reports import wiki_pipeline_health
+
+    monkeypatch.setattr(
+        wiki_pipeline_health,
+        "build_pipeline_health_report",
+        lambda dry_run=False: {
+            "dry_run": dry_run,
+            "generated_at": "2026-07-31T00:00:00+00:00",
+            "source_health": {"overall": {"tracked_sources": 2, "expected_sources": 2}},
+            "wiki_health": {"source_backed_count": 1, "unverified_count": 1},
+            "curation_health": {"source_digest_unlinked_count": 1},
+            "recommendations": [{"category": "collection", "title": "소스 수집 공백 점검", "detail": "telegram"}],
+        },
+    )
+
+    report = views.wiki_pipeline_health_summary()
+
+    assert report["source_health"]["overall"]["tracked_sources"] == 2
+    assert report["curation_health"]["source_digest_unlinked_count"] == 1
 
 
 
@@ -627,6 +665,18 @@ def test_ticker_page_kr_institutional_shows_flow_not_13f():
     assert "외인" in body and "수급" in body
     assert "13F" not in body
     assert "SEC Form 4" not in body
+
+
+def test_ticker_page_kr_bare_code_shows_company_name():
+    """국내 6자리 코드만 들어와도 종목 분석 화면이 회사명으로 정상 표기된다."""
+    script = _STUBS + (
+        'st.session_state["ticker"] = "005930"\n'
+        'from dashboard.pages import ticker\nticker.render()\n')
+    at = AppTest.from_string(script, default_timeout=30)
+    at.run()
+    assert not at.exception, str(at.exception)
+    body = " ".join(str(getattr(m, "value", "")) for m in at.markdown)
+    assert "삼성전자" in body
 
 
 def test_ticker_page_per_self_band_renders_on_valuation_tab():

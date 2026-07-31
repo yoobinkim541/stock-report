@@ -86,6 +86,43 @@ def test_build_health_report_flags_very_unused_pages(monkeypatch, tmp_path):
     assert any("60일" in rec for rec in report["recommendations"])
 
 
+def test_build_health_report_wraps_pipeline_report(monkeypatch, tmp_path):
+    _isolate(monkeypatch, tmp_path)
+
+    from reports import wiki_health_check
+
+    monkeypatch.setattr(
+        wiki_health_check,
+        "build_pipeline_health_report",
+        lambda dry_run=False: {
+            "dry_run": dry_run,
+            "generated_at": "2026-07-31T00:00:00+00:00",
+            "source_health": {"overall": {"tracked_sources": 1, "expected_sources": 1, "healthy_sources": 1, "stale_sources": 0, "missing_success_sources": 0}},
+            "wiki_health": {
+                "stats": {"total": 2, "status_counts": {"archived": 0, "reviewed": 1, "stable": 1}},
+                "lint": {"issues": []},
+                "stale_count": 0,
+                "unused_count": 0,
+                "source_backed_count": 1,
+                "unverified_count": 1,
+                "source_missing_for_promoted_count": 0,
+            },
+            "curation_health": {"source_digest_count": 1, "source_digest_linked_count": 1, "source_digest_unlinked_count": 0},
+            "recommendations": [{"category": "healthy", "title": "파이프라인 안정", "detail": "ok"}],
+        },
+    )
+    monkeypatch.setattr(wiki_health_check.wiki, "list_stale_pages", lambda max_age_days=14: [])
+    monkeypatch.setattr(wiki_health_check.wiki, "list_unused_pages", lambda days=30: [])
+
+    report = wiki_health_check.build_health_report(dry_run=True)
+    text = wiki_health_check.format_report(report)
+
+    assert report["pipeline_report"]["source_health"]["overall"]["tracked_sources"] == 1
+    assert report["source_health"]["overall"]["healthy_sources"] == 1
+    assert "소스 파이프라인" in text
+    assert "큐레이션" in text
+
+
 def test_format_report_contains_key_sections(monkeypatch, tmp_path):
     _isolate(monkeypatch, tmp_path)
 

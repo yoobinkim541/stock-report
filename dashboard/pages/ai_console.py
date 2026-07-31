@@ -588,7 +588,44 @@ def _memory_detail(event, rows):
 
 
 def _wiki_tab(surface: str, pack: dict):
+    _wiki_pipeline_health_panel()
+    st.divider()
     return wiki_browser.render_wiki_tab(surface, pack)
+
+
+def _wiki_pipeline_health_panel():
+    health = cached.wiki_pipeline_health()
+    source_section = health.get("source_health") or {}
+    wiki_section = health.get("wiki_health") or {}
+    curation_section = health.get("curation_health") or {}
+    overall = source_section.get("overall") or {}
+
+    st.markdown("##### 파이프라인 헬스")
+    if health.get("error"):
+        st.warning(f"헬스 리포트 로드 실패: {health['error']}")
+        return
+
+    cols = st.columns(5)
+    cols[0].metric("소스", f"{overall.get('healthy_sources', 0)}/{overall.get('expected_sources', 0)}")
+    cols[1].metric("소스 공백", f"{overall.get('stale_sources', 0)}")
+    cols[2].metric("source-backed", f"{wiki_section.get('source_backed_count', 0)}")
+    cols[3].metric("미검증", f"{wiki_section.get('unverified_count', 0)}")
+    cols[4].metric("미연결 digest", f"{curation_section.get('source_digest_unlinked_count', 0)}")
+
+    st.caption(
+        f"stale pages {wiki_section.get('stale_count', 0)} · "
+        f"unused {wiki_section.get('unused_count', 0)} · "
+        f"open Q {wiki_section.get('open_question_count', 0)}"
+    )
+    recs = health.get("recommendations") or []
+    if recs:
+        st.markdown("**권장 액션**")
+        for rec in recs[:3]:
+            st.markdown(
+                f"- [{_esc(rec.get('category', 'unknown'))}] {_esc(rec.get('title', '—'))} — {_esc(rec.get('detail', '—'))}"
+            )
+    else:
+        st.caption("즉시 조치가 필요한 항목이 없습니다.")
 
 
 def _lab_tab(surface: str):

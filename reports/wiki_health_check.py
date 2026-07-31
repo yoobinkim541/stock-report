@@ -11,20 +11,31 @@ import json
 import sys
 
 from agent_console import wiki
+from reports.wiki_pipeline_health import build_pipeline_health_report
 
 STALE_MAX_AGE_DAYS = 14
 VERY_UNUSED_DAYS = 60
 
 
+def _pipeline_report(report: dict) -> dict:
+    return report.get("pipeline_report") or report
+
+
 def build_health_report(dry_run: bool = False) -> dict:
-    stats_data = wiki.stats()
-    lint_data = wiki.lint_pages()
+    pipeline_report = build_pipeline_health_report(dry_run=dry_run)
+    wiki_health = pipeline_report.get("wiki_health") or {}
+    stats_data = dict(wiki_health.get("stats") or wiki.stats())
+    lint_data = dict(wiki_health.get("lint") or wiki.lint_pages())
     stale_pages = wiki.list_stale_pages(max_age_days=STALE_MAX_AGE_DAYS)
     unused_pages = wiki.list_unused_pages(days=30)
     very_unused_pages = wiki.list_unused_pages(days=VERY_UNUSED_DAYS)
 
     report = {
         "dry_run": dry_run,
+        "pipeline_report": pipeline_report,
+        "source_health": pipeline_report.get("source_health") or {},
+        "wiki_health": wiki_health,
+        "curation_health": pipeline_report.get("curation_health") or {},
         "stats": stats_data,
         "lint_issues": lint_data.get("issues", []),
         "stale_count": len(stale_pages),
@@ -33,8 +44,16 @@ def build_health_report(dry_run: bool = False) -> dict:
         "recommendations": [],
     }
 
+    for rec in pipeline_report.get("recommendations") or []:
+        if not isinstance(rec, dict):
+            continue
+        report["recommendations"].append(
+            f"[{rec.get('category', 'unknown')}] {rec.get('title', '—')}: {rec.get('detail', '—')}"
+        )
+
     if not dry_run:
         archive_result = wiki.archive_stale_pages(max_age_days=STALE_MAX_AGE_DAYS)
+        report["archive_result"] = archive_result
         if archive_result.get("archived") or archive_result.get("deleted"):
             report["recommendations"].append(
                 f"stale 페이지 {archive_result.get('archived', 0)}개 archive, "
@@ -53,16 +72,27 @@ def run_llm_health_review(report: dict) -> list[dict]:
     """LLM에게 위키 상태를 보여주고 구체적인 큐레이션 액션 추천받기"""
     from agent_console.agent import _try_llm_prompt
 
-    stats_data = report["stats"]
+    pipeline = _pipeline_report(report)
+    source_health = pipeline.get("source_health") or {}
+    wiki_health = pipeline.get("wiki_health") or {}
+    curation_health = pipeline.get("curation_health") or {}
+    stats_data = report.get("stats") or wiki_health.get("stats") or {}
+    source_overall = source_health.get("overall") or {}
     prompt = f"""위키 상태 리포트:
-- 전체: {stats_data['total']}페이지
-- 미검증: {stats_data['trust_counts']['unverified']}
-- Archived: {stats_data['status_counts']['archived']}
-- 스테일(14일+): {report['stale_count']}
-- 미사용(30일+): {report['unused_count']}
+소스 tracked: {source_overall.get('tracked_sources', 0)} / expected {source_overall.get('expected_sources', 0)}
+소스 stale: {source_overall.get('stale_sources', 0)} / no-success: {source_overall.get('missing_success_sources', 0)}
+위키 total: {stats_data.get('total', 0)}
+위키 unverified: {wiki_health.get('unverified_count', 0)}
+위키 archived: {stats_data.get('status_counts', {}).get('archived', 0)}
+스테일(14일+): {wiki_health.get('stale_count', report.get('stale_count', 0))}
+미사용(30일+): {wiki_health.get('unused_count', report.get('unused_count', 0))}
+source_digest unlinked: {curation_health.get('source_digest_unlinked_count', 0)}
 
 린트 이슈:
-{json.dumps(report['lint_issues'][:10], indent=2, ensure_ascii=False)}
+{json.dumps((report.get('lint_issues') or [])[:10], indent=2, ensure_ascii=False)}
+
+권장 액션:
+{json.dumps((pipeline.get('recommendations') or [])[:5], indent=2, ensure_ascii=False)}
 
 다음 중 어떤 액션이 필요할까요?
 1. 어떤 페이지를 archived/삭제할까?
@@ -81,7 +111,11 @@ JSON으로 응답해주세요:
 
 
 def format_report(report: dict) -> str:
-    stats_data = report.get("stats", {})
+    pipeline = _pipeline_report(report)
+    source_section = pipeline.get("source_health") or {}
+    wiki_section = pipeline.get("wiki_health") or {}
+    curation_section = pipeline.get("curation_health") or {}
+    stats_data = report.get("stats") or wiki_section.get("stats") or {}
     status_counts = stats_data.get("status_counts", {})
     lines = ["[위키 헬스 체크]"]
     lines.append("(DRY RUN — 실제 변경 없음)" if report.get("dry_run") else "(실행 모드 — 스테일 페이지 archive 적용됨)")
@@ -91,6 +125,19 @@ def format_report(report: dict) -> str:
     lines.append(f"  Archived: {status_counts.get('archived', 0)}")
     lines.append(f"  스테일({STALE_MAX_AGE_DAYS}일+): {report.get('stale_count', 0)}")
     lines.append(f"  미사용(30일+): {report.get('unused_count', 0)}")
+    lines.append("")
+
+    source_overall = source_section.get("overall") or {}
+    lines.append(
+        f"소스 파이프라인: tracked {source_overall.get('tracked_sources', 0)} / "
+        f"expected {source_overall.get('expected_sources', 0)} · "
+        f"healthy {source_overall.get('healthy_sources', 0)} · stale {source_overall.get('stale_sources', 0)}"
+    )
+    lines.append(
+        f"큐레이션: source_digest {curation_section.get('source_digest_count', 0)} · "
+        f"linked {curation_section.get('source_digest_linked_count', 0)} · "
+        f"unlinked {curation_section.get('source_digest_unlinked_count', 0)}"
+    )
     lines.append("")
 
     lint_issues = report.get("lint_issues") or []

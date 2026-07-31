@@ -49,6 +49,11 @@ def source_health():
     return views.source_health_summary()
 
 
+@st.cache_data(ttl=600, show_spinner=False)
+def wiki_pipeline_health():
+    return views.wiki_pipeline_health_summary()
+
+
 @st.cache_data(ttl=900, show_spinner=False)
 def social_sentiment():
     return views.social_sentiment()
