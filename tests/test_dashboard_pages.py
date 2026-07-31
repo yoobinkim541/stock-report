@@ -153,6 +153,24 @@ cached.risk_struct = lambda: {"port_vol":0.2,"n_eff":3.5,"n_assets":5,"mdd_est":
     "factor_net":{"QQQ":0.95,"TLT":-0.1},"factor_caveat":"베타 참고",
     "leverage":{"recommend":1.3,"dd_cap":1.3,"current":1.0,
                 "kelly_half":{"conservative":0.5,"moderate":0.9,"trailing":1.1}}}
+cached.institution_watch = lambda keys=None: {
+    "institutions": [
+        {"key": "berkshire", "display_name": "Berkshire Hathaway", "source_kind": "13f",
+         "freshness": "fresh", "holdings_count": 27,
+         "availability_flags": {"cash_ratio": "unavailable", "options_exposure": "unavailable"}},
+    ],
+    "comparison": {"rows": [
+        {"display_name": "Berkshire Hathaway", "source_kind": "13f", "freshness": "fresh",
+         "holdings_count": 27, "portfolio_concentration": 0.51,
+         "portfolio_concentration_flag": "available", "cash_ratio": None, "cash_ratio_flag": "unavailable",
+         "options_exposure": None, "options_exposure_flag": "unavailable",
+         "reported_return": None, "reported_return_flag": "unavailable",
+         "return_proxy": None, "return_proxy_flag": "unavailable"}
+    ], "selected_keys": ["berkshire"]},
+    "analysis": {"summary": "1개 기관 비교 기준으로 공통 패턴과 차이를 함께 요약했습니다.",
+                 "shared_moves": ["상위 보유 구성이 유지되고 있습니다."],
+                 "divergences": ["공시 범위가 제한적입니다."], "confidence": 0.45},
+}
 cached.ohlc = lambda t, period="6mo": pd.DataFrame(
     {"Open":range(100,170),"High":range(101,171),"Low":range(99,169),"Close":range(100,170)}, index=_IDX)
 cached.screener = lambda n: {"rows": [{"rank": 1, "ticker": "NVDA", "name": "NVIDIA",
@@ -1342,9 +1360,50 @@ def test_watchlist_page_renders_rows_and_navigates_on_click():
     at.run()
     assert not at.exception, str(at.exception)
     assert len(at.dataframe) >= 1
-    df = at.dataframe[0].value
+    df = next(item.value for item in at.dataframe if "티커" in item.value.columns)
     assert "AAPL" in df["티커"].values
     assert "Apple Inc" in df["종목"].values
+
+
+def test_watchlist_page_renders_institution_hub_and_rows():
+    script = _STUBS + '''
+cached.institution_watch = lambda keys=None: {
+    "institutions": [
+        {"key": "berkshire", "display_name": "Berkshire Hathaway", "source_kind": "13f",
+         "freshness": "fresh", "holdings_count": 27, "availability_flags": {"cash_ratio": "unavailable",
+         "options_exposure": "unavailable"}},
+        {"key": "bridgewater", "display_name": "Bridgewater", "source_kind": "13f",
+         "freshness": "fresh", "holdings_count": 120, "availability_flags": {"cash_ratio": "unavailable",
+         "options_exposure": "available"}},
+    ],
+    "comparison": {"rows": [], "selected_keys": ["berkshire", "bridgewater"]},
+    "analysis": {"shared_moves": ["현금 비중 확대"], "divergences": ["옵션 사용 여부 차이"], "confidence": 0.8},
+}
+from dashboard.pages import watchlist
+watchlist.render()
+'''
+    at = AppTest.from_string(script, default_timeout=30).run()
+
+    assert any("Berkshire Hathaway" in item.value for item in at.markdown)
+    assert any("현금 비중 확대" in item.value for item in at.markdown)
+    assert any("관심종목" in item.value for item in at.markdown)
+
+
+def test_watchlist_page_handles_empty_institution_hub_gracefully():
+    script = _STUBS + '''
+cached.institution_watch = lambda keys=None: {
+    "institutions": [],
+    "comparison": {"rows": [], "selected_keys": []},
+    "analysis": {"shared_moves": [], "divergences": [], "confidence": 0.0},
+}
+from dashboard.pages import watchlist
+watchlist.render()
+'''
+    at = AppTest.from_string(script, default_timeout=30).run()
+
+    assert not at.exception, str(at.exception)
+    info_body = " ".join(str(getattr(item, "value", "")) for item in at.info)
+    assert "기관 허브에 표시할 스냅샷이 아직 없습니다." in info_body
 
 
 def test_watchlist_page_empty_shows_message():

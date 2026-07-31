@@ -59,6 +59,11 @@ def social_sentiment():
     return views.social_sentiment()
 
 
+@st.cache_data(ttl=_TTL, show_spinner=False)
+def institution_watch(keys=None):
+    return views.institution_watch_summary(keys)
+
+
 @st.cache_data(ttl=900, show_spinner=False)
 def world_timeline(t):
     return views.world_timeline(t)

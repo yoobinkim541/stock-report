@@ -1216,6 +1216,112 @@ def wiki_pipeline_health_summary() -> dict:
         }
 
 
+def _institution_analysis(snapshots: list[dict], comparison: dict) -> dict:
+    if not snapshots:
+        return {
+            "summary": "표시할 기관 데이터가 아직 없습니다.",
+            "shared_moves": [],
+            "divergences": [],
+            "confidence": 0.0,
+        }
+    shared_moves: list[str] = []
+    divergences: list[str] = []
+    rows = list(comparison.get("rows") or [])
+    repeated: dict[str, int] = {}
+    for snapshot in snapshots:
+        for holding in snapshot.get("top_holdings") or []:
+            ticker = str(holding.get("ticker") or "").strip().upper()
+            if not ticker:
+                continue
+            repeated[ticker] = repeated.get(ticker, 0) + 1
+    overlap = [ticker for ticker, count in repeated.items() if count >= 2]
+    if overlap:
+        shared_moves.append(f"여러 기관 상위 보유에서 {', '.join(overlap[:3])} 가 반복됩니다.")
+    fresh_rows = [row for row in rows if row.get("freshness") == "fresh"]
+    if fresh_rows:
+        shared_moves.append(f"최신 공시 기반으로 {len(fresh_rows)}개 기관 스냅샷을 비교 중입니다.")
+    unavailable_cash = [
+        row for row in rows
+        if row.get("cash_ratio_flag") == "unavailable"
+    ]
+    if unavailable_cash:
+        shared_moves.append("현금 비중은 기관별 공시 범위가 달라 직접 비교 가능한 표본이 제한적입니다.")
+    option_flags = {row.get("options_exposure_flag") for row in rows}
+    if len(option_flags - {None}) > 1:
+        divergences.append("옵션 노출 공개 수준이 기관마다 달라 해석 폭이 다릅니다.")
+    counts = [int(row.get("holdings_count") or 0) for row in rows]
+    if counts and (max(counts) - min(counts) >= 25):
+        divergences.append("집중형 포트폴리오와 분산형 포트폴리오가 함께 보여 운용 스타일 차이가 큽니다.")
+    if not shared_moves:
+        shared_moves.append("아직 공통 패턴을 단정할 만큼 충분한 겹침이 보이지 않습니다.")
+    if not divergences:
+        divergences.append("눈에 띄는 차이는 다음 공시 업데이트에서 더 선명해질 가능성이 큽니다.")
+    confidence = 0.35
+    if overlap:
+        confidence += 0.2
+    if len(rows) >= 3:
+        confidence += 0.15
+    if fresh_rows:
+        confidence += 0.1
+    confidence = min(confidence, 0.8)
+    return {
+        "summary": f"{len(rows)}개 기관 비교 기준으로 공통 패턴과 차이를 함께 요약했습니다.",
+        "shared_moves": shared_moves,
+        "divergences": divergences,
+        "confidence": round(confidence, 2),
+    }
+
+
+def institution_watch_summary(keys=None) -> dict:
+    """기관투자자 허브용 비교 스냅샷 (watchlist UI 전용)."""
+    try:
+        from reports import institution_watch
+
+        registry = institution_watch.list_institutions()
+        if keys:
+            wanted = {str(key) for key in keys}
+            registry = [row for row in registry if row.get("key") in wanted]
+        selected_keys = [row.get("key") for row in registry if row.get("key")]
+        snapshots: dict[str, dict] = {}
+        institutions: list[dict] = []
+        for key in selected_keys:
+            snapshot = institution_watch.latest_snapshot(key)
+            if snapshot is None:
+                continue
+            snapshots[key] = snapshot
+            institutions.append({
+                "key": snapshot["institution_key"],
+                "display_name": snapshot["display_name"],
+                "source_kind": snapshot.get("source_kind", ""),
+                "freshness": snapshot.get("freshness", ""),
+                "holdings_count": snapshot.get("holdings_count", 0),
+                "availability_flags": dict(snapshot.get("availability_flags") or {}),
+                "top_holdings": list(snapshot.get("top_holdings") or []),
+                "notes": list(snapshot.get("notes") or []),
+            })
+        comparison = institution_watch.compare_institutions(selected_keys, snapshots=snapshots)
+        analysis = _institution_analysis(list(snapshots.values()), comparison)
+        return {
+            "institutions": institutions,
+            "comparison": comparison,
+            "analysis": analysis,
+            "selected_keys": comparison.get("selected_keys") or [],
+        }
+    except Exception as e:
+        return {
+            "institutions": [],
+            "comparison": {"rows": [], "selected_keys": []},
+            "analysis": {
+                "summary": "기관 허브 데이터를 불러오지 못했습니다.",
+                "shared_moves": [],
+                "divergences": [],
+                "confidence": 0.0,
+            },
+            "selected_keys": [],
+            "error": str(e),
+        }
+
+
 def etf_overview(ticker: str) -> dict:
     """ETF 전용 요약 (providers.etf_data) — 비ETF {"is_etf": False}. graceful."""
     try:
