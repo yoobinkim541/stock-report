@@ -270,7 +270,7 @@ def _compare_controls(ticker: str, tf: str, tf_label: str) -> tuple[list[str], b
     with st.container(border=True):
         h1, h2, h3 = st.columns([1.2, 2.6, 0.75], vertical_alignment="bottom")
         h1.markdown("**⇄ 종목 비교**")
-        h1.caption("기간 시작=0% 상대수익")
+        h1.caption("공통 시작점=0% 상대수익")
 
         opts = [t for t in ticker_names.universe() if t != ticker and t not in active]
         pending = st.session_state.get("_cmp_add")
@@ -329,7 +329,7 @@ def _compare_controls(ticker: str, tf: str, tf_label: str) -> tuple[list[str], b
                     st.session_state["_cmp_active"] = [x for x in active if x != tk]
                     _rerun_chart_fragment()
         else:
-            st.caption("비교할 종목을 추가하면 차트가 % 상대수익 모드로 전환됩니다")
+            st.caption("비교할 종목을 추가하면 차트가 공통 시작점 기준 % 상대수익 모드로 전환됩니다")
 
         pr_mode = False
         if active:

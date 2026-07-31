@@ -57,11 +57,17 @@ def compare_bounds_json(main_hist, compare: dict, view_days=None) -> str:
     메인 행만 거래량 탑재(거래량 패널=메인 기준). yFit 은 구간 내 행들의 min/max
     스캔이라 시리즈별 행이 섞여 있어도 동작.
     """
-    from dashboard.charts import normalize_pct
+    from dashboard.charts import compare_anchor_ts, normalize_pct
     rows = []
+    anchor_ts = None
+    if main_hist is not None and not getattr(main_hist, "empty", True):
+        try:
+            anchor_ts = compare_anchor_ts(main_hist["Close"], view_days)
+        except Exception:
+            anchor_ts = None
 
     def _rows(series, vol=None):
-        ns = normalize_pct(series, view_days)
+        ns = normalize_pct(series, anchor_ts=anchor_ts)
         if ns is None:
             return
         for i, (ts, p) in enumerate(zip(ns.index, ns.values)):

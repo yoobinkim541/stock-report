@@ -65,8 +65,18 @@ def test_dart_parse_corpcode():
 
 def test_dart_graceful_without_key(monkeypatch):
     monkeypatch.delenv("DART_API_KEY", raising=False)
+    monkeypatch.setattr(dart, "_load_env", lambda: None)
     out = dart.recent_disclosures("005930.KS")
     assert out["list"] == [] and "미설정" in out["error"]
+
+
+def test_dart_key_loads_from_dotenv(tmp_path, monkeypatch):
+    dotenv_file = tmp_path / ".env"
+    dotenv_file.write_text("DART_API_KEY=abc123\n", encoding="utf-8")
+    monkeypatch.delenv("DART_API_KEY", raising=False)
+    monkeypatch.setattr(dart, "_DOTENV_PATH", dotenv_file)
+    assert dart._key() == "abc123"
+    assert os.getenv("DART_API_KEY") == "abc123"
 
 
 def test_dart_graceful_non_kr(monkeypatch):
@@ -105,6 +115,7 @@ def test_dart_extract_major_accounts_prefers_consolidated():
 
 def test_dart_financial_accounts_graceful_without_key(monkeypatch):
     monkeypatch.delenv("DART_API_KEY", raising=False)
+    monkeypatch.setattr(dart, "_load_env", lambda: None)
     out = dart.financial_accounts("005930.KS", year=2025)
     assert out["list"] == [] and "미설정" in out["error"]
 

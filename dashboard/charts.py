@@ -117,6 +117,17 @@ def _initial_view(fig, hist, view_days, *, lo_col="Low", hi_col="High", y_overri
     return fig
 
 
+def compare_anchor_ts(series, view_days=None):
+    """비교 차트 공통 시작 시각 — 메인 시계열의 표시창 시작 시점을 우선 앵커로 사용."""
+    import pandas as pd
+    s = series.dropna()
+    if s is None or len(s) == 0:
+        return None
+    if view_days:
+        return s.index[-1] - pd.Timedelta(days=int(view_days))
+    return s.index[0]
+
+
 def cmp_initial_yrange(close, compare, view_days):
     """비교(%) 모드 초기 y 범위 — 전 시리즈 normalize_pct 후 표시창 min/max (순수).
 
@@ -124,15 +135,15 @@ def cmp_initial_yrange(close, compare, view_days):
     _initial_view 가 % 축에 가격대(예: 45~55)를 넣어 선이 화면 밖으로 나가던 버그의 해법.
     """
     import pandas as pd
+    anchor_ts = compare_anchor_ts(close, view_days)
     lo = hi = None
     for s in [close] + list((compare or {}).values()):
         if s is None or len(getattr(s, "dropna", lambda: [])()) < 2:
             continue
-        ns = normalize_pct(s, view_days)
+        ns = normalize_pct(s, anchor_ts=anchor_ts)
         win = ns
-        if view_days:
-            start = ns.index[-1] - pd.Timedelta(days=int(view_days))
-            w = ns[ns.index >= start]
+        if anchor_ts is not None:
+            w = ns[ns.index >= anchor_ts]
             if len(w) >= 2:
                 win = w
         wlo, whi = float(win.min()), float(win.max())
@@ -608,22 +619,27 @@ _MA_COLORS = {5: "#e879f9", 10: "#22d3ee", 20: "#f59e0b", 60: "#9333ea",
 _CMP_COLORS = ["#f59e0b", "#e879f9", "#22d3ee"]   # 비교 종목 팔레트 (메인=BLUE)
 
 
-def normalize_pct(series, view_days=None):
+def normalize_pct(series, view_days=None, anchor_ts=None):
     """종가 시리즈 → 표시창 시작=0% 기준 상대수익률(%) — 비교 오버레이용 (순수).
 
     앵커 = 마지막 봉 − view_days 이후 첫 봉의 값(없으면 첫 봉). 앵커 이전 구간도
     같은 앵커로 환산해 팬 백 시 연속 표시(리베이스 앵커는 표시창 시작 고정 — v2 JS 재기준).
+    anchor_ts 를 주면 해당 시각을 공통 비교 시작점으로 사용한다.
     """
     import pandas as pd
     s = series.dropna()
     if s is None or len(s) == 0:
         return s
-    anchor_val = float(s.iloc[0])
-    if view_days:
-        start = s.index[-1] - pd.Timedelta(days=int(view_days))
-        after = s[s.index >= start]
+    if anchor_ts is None and view_days:
+        anchor_ts = s.index[-1] - pd.Timedelta(days=int(view_days))
+    if anchor_ts is not None:
+        after = s[s.index >= anchor_ts]
         if len(after):
             anchor_val = float(after.iloc[0])
+        else:
+            anchor_val = float(s.iloc[0])
+    else:
+        anchor_val = float(s.iloc[0])
     if anchor_val == 0:
         return s * float("nan")
     return (s / anchor_val - 1.0) * 100.0
@@ -914,12 +930,13 @@ def price_chart(hist, ticker: str = "", *, kind: str = "line", avg_cost=None,
     # 대용량(≥1500봉) 라인은 WebGL(Scattergl) — 캔들/소용량은 SVG 유지(스타일 동일)
     _SC = go.Scattergl if len(close.dropna()) >= 1500 else go.Scatter
     if cmp_mode:                       # 비교 — % 상대수익 라인 (메인 + 비교 각자 인덱스)
-        n_main = normalize_pct(close, view_days)
+        anchor_ts = compare_anchor_ts(close, view_days)
+        n_main = normalize_pct(close, anchor_ts=anchor_ts)
         fig.add_trace(_SC(x=n_main.index, y=n_main, name=ticker or "메인",
                           hovertemplate="%{y:+.2f}%<extra>" + (ticker or "메인") + "</extra>",
                           line=dict(color=_BLUE, width=2)))
         for i, (lab, s) in enumerate(compare.items()):
-            ns = normalize_pct(s, view_days)
+            ns = normalize_pct(s, anchor_ts=anchor_ts)
             fig.add_trace(_SC(x=ns.index, y=ns, name=lab,
                               hovertemplate="%{y:+.2f}%<extra>" + lab + "</extra>",
                               line=dict(color=_CMP_COLORS[i % len(_CMP_COLORS)],

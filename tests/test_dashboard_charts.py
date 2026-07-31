@@ -619,6 +619,23 @@ def test_price_chart_compare_mode():
     assert not [a for a in fig.layout.annotations or [] if a.name in ("tn-hi", "tn-lo")]
 
 
+def test_price_chart_compare_shared_anchor_zero():
+    """비교 시리즈도 메인 시작점에 공통 정렬 — 시작점에서 0%, 이전 구간은 음수."""
+    main_idx = pd.date_range("2024-01-05", periods=30, freq="D")
+    cmp_idx = pd.date_range("2024-01-01", periods=40, freq="D")
+    main_close = pd.Series([100.0 + i for i in range(30)], index=main_idx)
+    hist = pd.DataFrame({"Open": main_close, "High": main_close + 1.0, "Low": main_close - 1.0,
+                         "Close": main_close, "Volume": [1e6] * 30}, index=main_idx)
+    cmp_s = pd.Series([50.0 + i * 2.0 for i in range(40)], index=cmp_idx)
+    fig = charts.price_chart(hist, "MAIN", compare={"CMP": cmp_s})
+    main_tr = next(tr for tr in fig.data if tr.name == "MAIN")
+    cmp_tr = next(tr for tr in fig.data if tr.name == "CMP")
+    cmp_points = {pd.Timestamp(x): float(y) for x, y in zip(cmp_tr.x, cmp_tr.y)}
+    assert abs(main_tr.y[0]) < 1e-9
+    assert abs(cmp_points[main_idx[0]]) < 1e-9        # 공통 시작점 = 0%
+    assert cmp_points[cmp_idx[0]] < 0                 # 시작점 이전은 음수 %
+
+
 def test_price_chart_compare_empty_series_ignored():
     """비교 시리즈가 전부 무효(None·짧음)면 일반 모드 유지."""
     import plotly.graph_objects as go

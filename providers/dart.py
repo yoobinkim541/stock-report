@@ -13,12 +13,26 @@ from datetime import date, timedelta
 from pathlib import Path
 from xml.etree import ElementTree as ET
 
+from dotenv import load_dotenv
+
 _BASE = "https://opendart.fss.or.kr/api"
 _CACHE = Path(os.path.expanduser("~/reports/ml-cache/dart_corpcode.xml"))
+_DOTENV_PATH = Path(__file__).resolve().parent.parent / ".env"
+
+
+def _load_env() -> None:
+    try:
+        load_dotenv(_DOTENV_PATH, override=False)
+    except Exception:
+        pass
 
 
 def _key() -> str | None:
-    return os.getenv("DART_API_KEY")
+    key = (os.getenv("DART_API_KEY") or "").strip()
+    if key:
+        return key
+    _load_env()
+    return (os.getenv("DART_API_KEY") or "").strip() or None
 
 
 def stock_code(ticker: str) -> str | None:

@@ -158,6 +158,21 @@ def test_compare_bounds_json_pct_scale():
     assert len(vols) == 40                              # 거래량은 메인 행에만
 
 
+def test_compare_bounds_json_shared_anchor_zero():
+    """비교 프레임도 메인 시작점에 공통 정렬 — 그 시점 메인/비교 행이 모두 0%."""
+    main_idx = pd.date_range("2024-01-05", periods=20, freq="D")
+    cmp_idx = pd.date_range("2024-01-01", periods=30, freq="D")
+    main_hist = pd.DataFrame({"Open": [100.0] * 20, "High": [101.0] * 20,
+                              "Low": [99.0] * 20, "Close": [100.0] * 20,
+                              "Volume": [5.0] * 20}, index=main_idx)
+    cmp_s = pd.Series([50.0 + i * 2.0 for i in range(30)], index=cmp_idx)
+    b = json.loads(plotly_embed.compare_bounds_json(main_hist, {"C": cmp_s}, None))
+    anchor_ms = int(main_idx[0].timestamp() * 1000)
+    anchor_rows = [r for r in b if r[0] == anchor_ms]
+    assert any(abs(r[2]) < 1e-9 and r[3] > 0 for r in anchor_rows)   # 메인 행
+    assert any(abs(r[2]) < 1e-9 and r[3] == 0 for r in anchor_rows)   # 비교 행
+
+
 def test_pannable_bounds_override():
     """bounds_json 오버라이드가 임베드 JS 프레임을 대체 (비교 모드 % y-fit)."""
     hist = _hist(30)
