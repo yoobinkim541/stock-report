@@ -54,3 +54,5 @@ fix round 3:
     - "home/research 페이지와 같은 선택 상태 방어 패턴으로 맞춰서, 실제 클릭 이동 동작은 유지하되 중복 rerun 만 제거했다."
   tests:
     - ".venv/bin/pytest tests/test_dashboard_pages.py -q -> 70 passed in 17.02s"
+  commit:
+    - "7e5c30f230f1d8def8de95da7d1c0b8ab1f54940"
