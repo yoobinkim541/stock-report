@@ -68,6 +68,27 @@ def test_select_distillation_candidates_respects_limit():
     assert len(candidates) == 2
 
 
+def test_institution_digest_is_distillable(monkeypatch, tmp_path):
+    _isolate(monkeypatch, tmp_path)
+    from agent_console import wiki
+    from reports import wiki_distillation as wd
+
+    digest = wiki.upsert_page({
+        "title": "기관 공통 패턴: 현금 확대",
+        "summary": "s",
+        "body": "b",
+        "surface": "market",
+        "kind": "source_digest",
+        "status": "reviewed",
+        "source_refs": ["wiki:institution-watch-1"],
+        "tags": ["wiki", "market", "source_digest", "institution_watch"],
+    })
+
+    candidates = wd.select_distillation_candidates(wiki.list_pages(status="all", limit=50))
+
+    assert digest["id"] in [page["id"] for page in candidates]
+
+
 def test_distill_one_creates_payload_linked_to_source(monkeypatch, tmp_path):
     _isolate(monkeypatch, tmp_path)
     from agent_console import wiki

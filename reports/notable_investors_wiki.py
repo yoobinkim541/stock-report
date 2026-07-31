@@ -121,49 +121,10 @@ def build_wiki_page(snapshot: dict, diff: dict) -> dict:
 
 
 def run(filer_key: str, *, dry_run: bool = False) -> dict:
-    from providers import thirteenf
+    from reports import institution_watch
 
-    snapshot = thirteenf.latest_holdings(filer_key)
-    if not snapshot:
-        return {"ok": False, "filer": filer_key, "reason": "fetch_failed"}
-
-    history = _load_history(filer_key)
-    if any(h.get("accession") == snapshot["accession"] for h in history):
-        return {"ok": True, "filer": filer_key, "status": "unchanged",
-                "accession": snapshot["accession"]}
-
-    is_first_snapshot = not history
-    # 첫 실행은 비교 기준선이 없어 전 종목이 diff상 '신규'로 잡힌다 — 실제로는 그냥
-    # 처음 들여다본 것뿐이라 신규편입으로 표시/알림하면 오해를 산다. 기준선만 세운다.
-    prev = None if is_first_snapshot else history[-1]["holdings"]
-    diff = {"new": [], "exited": []} if is_first_snapshot else diff_holdings(prev, snapshot["holdings"])
-    page = build_wiki_page(snapshot, diff)
-
-    if not dry_run:
-        from agent_console import wiki
-        wiki.upsert_page(page)
-        _append_history({
-            "date": datetime.now(KST).strftime("%Y-%m-%d %H:%M"),
-            "filer": filer_key, "accession": snapshot["accession"],
-            "filing_date": snapshot["filing_date"], "holdings": snapshot["holdings"],
-        })
-        # 신규편입(티커 해석된 것만) → 관심종목 자동 추가
-        from lib import watchlist
-        for h in diff["new"]:
-            if not h.get("ticker"):
-                continue
-            try:
-                watchlist.add_ticker(
-                    h["ticker"],
-                    reason=f"{snapshot['filer_name']} 신규 편입 ({snapshot['filing_date']})",
-                    source=f"notable_investor:{filer_key}",
-                )
-            except Exception as e:
-                logger.warning("관심종목 추가 실패(무시) %s: %s", h["ticker"], e)
-
-    return {"ok": True, "filer": filer_key, "status": "updated",
-            "accession": snapshot["accession"], "new": diff["new"], "exited": diff["exited"],
-            "filer_name": snapshot["filer_name"], "filing_date": snapshot["filing_date"]}
+    institution_watch.HISTORY_PATH = HISTORY_PATH
+    return institution_watch.run(filer_key, dry_run=dry_run)
 
 
 def main() -> int:

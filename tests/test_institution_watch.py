@@ -156,7 +156,7 @@ def test_build_snapshot_digest_attaches_sec_provenance_for_13f(monkeypatch):
     assert page["source_refs"][1].endswith("/000095012326003958/")
 
 
-def test_build_common_moves_digest_stays_draft_but_carries_provenance():
+def test_build_common_moves_digest_is_distillable_and_carries_provenance():
     from reports import institution_watch as iw
 
     snapshots = [
@@ -184,8 +184,11 @@ def test_build_common_moves_digest_stays_draft_but_carries_provenance():
         },
     )
 
-    assert page["kind"] == "note"
-    assert page["status"] == "draft"
-    assert len(page["source_refs"]) == 2
+    assert page["kind"] == "source_digest"
+    assert page["status"] == "reviewed"
+    assert "wiki:institution-watch-berkshire" in page["source_refs"]
+    assert "wiki:institution-watch-nps" in page["source_refs"]
+    assert len(page["source_refs"]) == 4
+    assert "source_digest" in page["tags"]
     assert "llm_synthesis" in page["tags"]
     assert page["confidence"] == 0.6

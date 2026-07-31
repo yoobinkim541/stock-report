@@ -118,10 +118,50 @@ def test_run_updates_wiki_and_history_on_new_filing(monkeypatch, tmp_path):
 
     assert result["status"] == "updated"
     assert len(saved_pages) == 1
-    assert saved_pages[0]["id"] == "notable-investor-berkshire"
+    assert saved_pages[0]["id"] == "institution-watch-berkshire"
+    assert saved_pages[0]["kind"] == "source_digest"
     assert history_path.exists()
     recorded = history_path.read_text(encoding="utf-8").strip()
     assert "acc-new" in recorded
+
+
+def test_run_writes_snapshot_and_pattern_digests(monkeypatch, tmp_path):
+    from reports import institution_watch as iw
+
+    monkeypatch.setattr(iw, "HISTORY_PATH", tmp_path / "history.jsonl")
+    monkeypatch.setattr(iw, "latest_snapshot", lambda key: {
+        "institution_key": key,
+        "display_name": key.title(),
+        "source_kind": "13f",
+        "freshness": "fresh",
+        "holdings_count": 1,
+        "top_holdings": [{"ticker": "AAPL", "issuer": "APPLE", "weight_pct": 10.0, "value_usd": 100.0}],
+        "portfolio_concentration": 0.4,
+        "cash_ratio": None,
+        "options_exposure": None,
+        "reported_return": None,
+        "return_proxy": 12.0,
+        "availability_flags": {"cash_ratio": "unavailable", "options_exposure": "unavailable"},
+        "notes": [],
+    })
+    monkeypatch.setattr(iw, "build_common_moves_analysis", lambda snapshots, comparison: {
+        "summary": "공통 보유를 요약했습니다.",
+        "shared_moves": ["AAPL이 반복됩니다."],
+        "divergences": ["기관별 공개 범위가 다릅니다."],
+        "confidence": 0.5,
+        "mode": "heuristic",
+    })
+
+    saved_pages = []
+    from agent_console import wiki
+    monkeypatch.setattr(wiki, "upsert_page", lambda page: saved_pages.append(page) or page)
+    monkeypatch.setattr(wiki, "rebuild_artifacts", lambda: None)
+
+    result = iw.run(["berkshire", "bridgewater"], dry_run=False)
+
+    assert result["ok"] is True
+    assert any(page["kind"] == "source_digest" for page in saved_pages)
+    assert any("공통 패턴" in page["title"] for page in saved_pages)
 
 
 def test_run_dry_run_does_not_write_wiki_or_history(monkeypatch, tmp_path):

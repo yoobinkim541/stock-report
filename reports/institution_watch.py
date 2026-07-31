@@ -3,15 +3,20 @@
 from __future__ import annotations
 
 import json
+import logging
 import os
 import re
 import sys
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from providers import thirteenf
 
+logger = logging.getLogger(__name__)
+KST = timezone(timedelta(hours=9))
+HISTORY_PATH = Path.home() / "reports" / "ml-data" / "notable_investors_13f.jsonl"
 _SEED_PATH = Path(__file__).resolve().parent.parent / "data" / "institution_watch_seed.json"
 _UNAVAILABLE_METRICS = (
     "portfolio_concentration",
@@ -218,6 +223,81 @@ def _snapshot_source_refs(snapshot: dict) -> list[str]:
     return []
 
 
+def _holding_identity(holding: dict) -> str:
+    for key in ("cusip", "ticker", "issuer"):
+        value = str(holding.get(key) or "").strip().upper()
+        if value:
+            return f"{key}:{value}"
+    return json.dumps(holding, sort_keys=True, ensure_ascii=False, default=str)
+
+
+def diff_holdings(prev: list[dict] | None, cur: list[dict]) -> dict:
+    """Compare prior vs current holdings by stable security identity."""
+    prev_by_id = {_holding_identity(h): h for h in (prev or [])}
+    cur_by_id = {_holding_identity(h): h for h in cur}
+    new_positions = [h for identity, h in cur_by_id.items() if identity not in prev_by_id]
+    exited_positions = [h for identity, h in prev_by_id.items() if identity not in cur_by_id]
+    new_positions.sort(key=lambda h: -float(h.get("weight_pct") or 0.0))
+    exited_positions.sort(key=lambda h: -float(h.get("weight_pct") or 0.0))
+    return {"new": new_positions, "exited": exited_positions}
+
+
+def _load_history(institution_key: str) -> list[dict]:
+    if not HISTORY_PATH.exists():
+        return []
+    rows = []
+    try:
+        with open(HISTORY_PATH, encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                rec = json.loads(line)
+                if rec.get("institution_key") == institution_key or rec.get("filer") == institution_key:
+                    rows.append(rec)
+    except Exception as e:
+        logger.warning("기관 이력 로드 실패(무시): %s", e)
+    return rows
+
+
+def _append_history(rec: dict) -> None:
+    try:
+        HISTORY_PATH.parent.mkdir(parents=True, exist_ok=True)
+        with open(HISTORY_PATH, "a", encoding="utf-8") as f:
+            f.write(json.dumps(rec, ensure_ascii=False, default=str) + "\n")
+    except Exception as e:
+        logger.warning("기관 이력 기록 실패(무시): %s", e)
+
+
+def _snapshot_holdings(snapshot: dict) -> list[dict]:
+    return list(snapshot.get("top_holdings") or snapshot.get("holdings") or [])
+
+
+def _has_same_snapshot(history: list[dict], snapshot: dict) -> bool:
+    accession = snapshot.get("accession")
+    if accession:
+        return any(row.get("accession") == accession for row in history)
+    current = _snapshot_holdings(snapshot)
+    if not history:
+        return False
+    previous = history[-1].get("top_holdings") or history[-1].get("holdings") or []
+    return {_holding_identity(h) for h in previous} == {_holding_identity(h) for h in current}
+
+
+def _history_record(snapshot: dict) -> dict:
+    institution_key = snapshot["institution_key"]
+    holdings = _snapshot_holdings(snapshot)
+    return {
+        "date": datetime.now(KST).strftime("%Y-%m-%d %H:%M"),
+        "institution_key": institution_key,
+        "filer": institution_key,
+        "accession": snapshot.get("accession"),
+        "filing_date": snapshot.get("filing_date"),
+        "top_holdings": holdings,
+        "holdings": holdings,
+    }
+
+
 def build_snapshot_digest(snapshot: dict, diff: dict) -> dict:
     top_lines = []
     for holding in snapshot.get("top_holdings") or []:
@@ -294,6 +374,10 @@ def build_common_moves_digest(snapshots: list[dict], comparison: dict, analysis:
     source_refs: list[str] = []
     seen_refs: set[str] = set()
     for snapshot in snapshots:
+        page_ref = f"wiki:institution-watch-{snapshot['institution_key']}"
+        if page_ref not in seen_refs:
+            seen_refs.add(page_ref)
+            source_refs.append(page_ref)
         for ref in _snapshot_source_refs(snapshot):
             if ref in seen_refs:
                 continue
@@ -314,9 +398,9 @@ def build_common_moves_digest(snapshots: list[dict], comparison: dict, analysis:
         "id": "institution-watch-common-moves",
         "title": "기관투자자 공통 패턴",
         "surface": "market",
-        "kind": "note",
-        "status": "draft",
-        "tags": ["wiki", "market", "institution_watch", "common_moves", "llm_synthesis"],
+        "kind": "source_digest",
+        "status": "reviewed",
+        "tags": ["wiki", "market", "source_digest", "institution_watch", "common_moves", "llm_synthesis"],
         "summary": analysis.get("summary") or f"{len(shared_moves)} shared moves across {len(snapshots)} institutions",
         "body": body,
         "source_refs": source_refs,
@@ -440,4 +524,127 @@ def build_common_moves_analysis(snapshots: list[dict], comparison: dict) -> dict
         "divergences": divergences or fallback["divergences"],
         "confidence": round(confidence, 2),
         "mode": "llm",
+    }
+
+
+def _normalize_run_keys(institution_keys) -> tuple[list[str], bool]:
+    if institution_keys is None:
+        return [row["key"] for row in list_institutions()], False
+    if isinstance(institution_keys, str):
+        return [institution_keys], True
+    return list(institution_keys), False
+
+
+def _add_new_positions_to_watchlist(snapshot: dict, diff: dict) -> None:
+    from lib import watchlist
+
+    for holding in diff.get("new") or []:
+        ticker = holding.get("ticker")
+        if not ticker:
+            continue
+        try:
+            watchlist.add_ticker(
+                ticker,
+                reason=f"{snapshot['display_name']} 신규 편입 ({snapshot.get('filing_date') or 'latest snapshot'})",
+                source=f"notable_investor:{snapshot['institution_key']}",
+            )
+        except Exception as e:
+            logger.warning("관심종목 추가 실패(무시) %s: %s", ticker, e)
+
+
+def run(institution_keys=None, *, dry_run: bool = False) -> dict:
+    """Persist per-institution snapshot digests and a cross-institution pattern digest."""
+    keys, single = _normalize_run_keys(institution_keys)
+    snapshots: list[dict] = []
+    updated: list[dict] = []
+    unchanged: list[dict] = []
+    failed: list[dict] = []
+    saved_pages: list[dict] = []
+
+    for key in keys:
+        snapshot = latest_snapshot(key)
+        if not snapshot:
+            failed.append({"institution_key": key, "reason": "fetch_failed"})
+            continue
+
+        history = _load_history(key)
+        if _has_same_snapshot(history, snapshot):
+            diff = {"new": [], "exited": []}
+            unchanged.append({
+                "institution_key": key,
+                "status": "unchanged",
+                "accession": snapshot.get("accession"),
+            })
+        else:
+            previous = None if not history else (history[-1].get("top_holdings") or history[-1].get("holdings") or [])
+            diff = {"new": [], "exited": []} if not history else diff_holdings(previous, _snapshot_holdings(snapshot))
+            updated.append({
+                "institution_key": key,
+                "status": "updated",
+                "accession": snapshot.get("accession"),
+                "new": diff["new"],
+                "exited": diff["exited"],
+            })
+
+        snapshot["_diff"] = diff
+        snapshots.append(snapshot)
+
+        if unchanged and unchanged[-1]["institution_key"] == key:
+            continue
+
+        page = build_snapshot_digest(snapshot, diff)
+        if dry_run:
+            saved_pages.append(page)
+            continue
+
+        from agent_console import wiki
+        saved_pages.append(wiki.upsert_page(page))
+        if not history or not _has_same_snapshot(history, snapshot):
+            _append_history(_history_record(snapshot))
+            _add_new_positions_to_watchlist(snapshot, diff)
+
+    analysis = None
+    if snapshots and not single:
+        comparison = compare_institutions([snapshot["institution_key"] for snapshot in snapshots], snapshots={
+            snapshot["institution_key"]: snapshot for snapshot in snapshots
+        })
+        analysis = build_common_moves_analysis(snapshots, comparison)
+        pattern_page = build_common_moves_digest(snapshots, comparison, analysis)
+        if dry_run:
+            saved_pages.append(pattern_page)
+        else:
+            from agent_console import wiki
+            saved_pages.append(wiki.upsert_page(pattern_page))
+            if saved_pages:
+                wiki.rebuild_artifacts()
+
+    ok = bool(snapshots) and not (single and failed)
+    if single:
+        key = keys[0] if keys else None
+        if failed:
+            return {"ok": False, "filer": key, "institution_key": key, "reason": failed[0]["reason"]}
+        row = (updated or unchanged)[0]
+        snapshot = snapshots[0]
+        return {
+            "ok": True,
+            "filer": key,
+            "institution_key": key,
+            "status": row["status"],
+            "accession": row.get("accession"),
+            "new": row.get("new", []),
+            "exited": row.get("exited", []),
+            "filer_name": snapshot["display_name"],
+            "filing_date": snapshot.get("filing_date"),
+            "analysis": analysis or {},
+            "pages": saved_pages,
+        }
+    return {
+        "ok": ok,
+        "dry_run": dry_run,
+        "selected_keys": [snapshot["institution_key"] for snapshot in snapshots],
+        "updated": updated,
+        "unchanged": unchanged,
+        "failed": failed,
+        "analysis": analysis or {},
+        "pages": saved_pages,
     }
