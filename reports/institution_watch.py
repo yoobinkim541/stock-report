@@ -196,6 +196,27 @@ def _fmt_pct(value) -> str:
     return f"{float(value) * 100:.1f}%"
 
 
+def _thirteenf_source_refs(snapshot: dict) -> list[str]:
+    cik = snapshot.get("cik")
+    accession = snapshot.get("accession")
+    if not cik or not accession:
+        return []
+    accession_nodash = str(accession).replace("-", "")
+    return [
+        (
+            f"https://www.sec.gov/cgi-bin/browse-edgar?action=getcompany&CIK={cik}"
+            f"&type=13F-HR&dateb=&owner=include&count=10"
+        ),
+        f"https://www.sec.gov/Archives/edgar/data/{int(cik)}/{accession_nodash}/",
+    ]
+
+
+def _snapshot_source_refs(snapshot: dict) -> list[str]:
+    if snapshot.get("source_kind") == "13f":
+        return _thirteenf_source_refs(snapshot)
+    return []
+
+
 def build_snapshot_digest(snapshot: dict, diff: dict) -> dict:
     top_lines = []
     for holding in snapshot.get("top_holdings") or []:
@@ -217,6 +238,8 @@ def build_snapshot_digest(snapshot: dict, diff: dict) -> dict:
     ] or ["- None"]
     flags = snapshot.get("availability_flags") or {}
     note_lines = [f"- {note}" for note in (snapshot.get("notes") or [])] or ["- None"]
+    source_refs = _snapshot_source_refs(snapshot)
+    is_source_backed = bool(source_refs)
     body = "\n".join([
         f"Source: {snapshot.get('source_kind')}",
         f"Freshness: {snapshot.get('freshness')}",
@@ -241,15 +264,15 @@ def build_snapshot_digest(snapshot: dict, diff: dict) -> dict:
         "id": f"institution-watch-{snapshot['institution_key']}",
         "title": f"기관투자자 스냅샷: {snapshot['display_name']}",
         "surface": "market",
-        "kind": "source_digest",
-        "status": "reviewed",
+        "kind": "source_digest" if is_source_backed else "note",
+        "status": "reviewed" if is_source_backed else "draft",
         "tags": [
             "wiki",
             "market",
-            "source_digest",
             "institution_watch",
             snapshot["institution_key"],
             f"source:{snapshot.get('source_kind')}",
+            *([] if not is_source_backed else ["source_digest"]),
         ],
         "summary": (
             f"{snapshot['display_name']} · {snapshot.get('source_kind')} · "
@@ -258,8 +281,8 @@ def build_snapshot_digest(snapshot: dict, diff: dict) -> dict:
             f"options {flags.get('options_exposure', 'unavailable')}"
         ),
         "body": body,
-        "source_refs": [],
-        "confidence": 0.8 if snapshot.get("source_kind") == "13f" else 0.6,
+        "source_refs": source_refs,
+        "confidence": 0.8 if is_source_backed else 0.55,
     }
 
 
@@ -267,9 +290,18 @@ def build_common_moves_digest(snapshots: list[dict], comparison: dict, analysis:
     names = ", ".join(snapshot.get("display_name", snapshot.get("institution_key", "")) for snapshot in snapshots)
     shared_moves = list(analysis.get("shared_moves") or []) or ["No shared moves supplied"]
     divergences = list(analysis.get("divergences") or []) or ["No divergences supplied"]
+    source_refs: list[str] = []
+    seen_refs: set[str] = set()
+    for snapshot in snapshots:
+        for ref in _snapshot_source_refs(snapshot):
+            if ref in seen_refs:
+                continue
+            seen_refs.add(ref)
+            source_refs.append(ref)
     body = "\n".join([
         f"Institutions: {names}",
         f"Compared rows: {len(comparison.get('rows') or [])}",
+        f"Provenance refs: {len(source_refs)}",
         "",
         "Shared moves:",
         *[f"- {item}" for item in shared_moves],
@@ -281,11 +313,11 @@ def build_common_moves_digest(snapshots: list[dict], comparison: dict, analysis:
         "id": "institution-watch-common-moves",
         "title": "기관투자자 공통 패턴",
         "surface": "market",
-        "kind": "source_digest",
-        "status": "reviewed",
-        "tags": ["wiki", "market", "source_digest", "institution_watch", "common_moves"],
+        "kind": "note",
+        "status": "draft",
+        "tags": ["wiki", "market", "institution_watch", "common_moves", "llm_synthesis"],
         "summary": analysis.get("summary") or f"{len(shared_moves)} shared moves across {len(snapshots)} institutions",
         "body": body,
-        "source_refs": [],
-        "confidence": analysis.get("confidence", 0.5),
+        "source_refs": source_refs,
+        "confidence": min(float(analysis.get("confidence", 0.5)), 0.6),
     }
