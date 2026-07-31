@@ -16,8 +16,10 @@ barbell_strategy.py(2200줄 god-module)에서 잘라낸 데이터/상태 접근 
 import os
 import json
 import time
+import re
 import logging
 from datetime import datetime, timezone, timedelta
+from pathlib import Path
 
 import numpy as np
 import requests
@@ -111,6 +113,95 @@ ANCHOR_RESET_RECOVERY = 0.95   # 앵커 대비 -5% 이내 회복 시 롤링 고�
 # 같은 QQQ 1y 데이터를 각자 다운로드하던 중복 제거 (rate-limit 보호)
 _HIST_CACHE: dict[tuple, tuple[float, "object"]] = {}
 _HIST_CACHE_TTL_S = 300
+
+
+def _ohlc_disk_path(symbol: str, period: str) -> Path:
+    safe = "".join(c if (c.isalnum() or c in ".-_") else "_" for c in str(symbol))
+    return Path.home() / "reports" / "ml-cache" / "ohlc_cache" / f"{safe}__{period}.parquet"
+
+
+def load_cached_ohlc(symbol: str, period: str = "1y"):
+    """대시보드가 저장한 로컬 OHLC parquet 를 읽는다. 없으면 None."""
+    try:
+        p = _ohlc_disk_path(symbol, period)
+        if p.exists():
+            import pandas as pd
+            df = pd.read_parquet(p)
+            if df is not None and not getattr(df, "empty", True):
+                return df
+    except Exception:
+        pass
+    return None
+
+
+def _cached_price_paths(symbol: str) -> list[Path]:
+    """ml/data_pipeline 가 남긴 price_*.pkl 캐시 후보를 최근 길이 순으로 반환."""
+    cache_dir = Path.home() / "reports" / "ml-cache"
+    if not cache_dir.exists():
+        return []
+    try:
+        prefix = f"price_{str(symbol)}_"
+        scored: list[tuple[int, Path]] = []
+        for p in cache_dir.iterdir():
+            if not p.is_file():
+                continue
+            if not p.name.startswith(prefix) or not p.name.endswith(".pkl"):
+                continue
+            m = re.search(r"_(\d+)d_", p.name)
+            days = int(m.group(1)) if m else -1
+            scored.append((days, p))
+        scored.sort(key=lambda item: item[0], reverse=True)
+        return [p for _, p in scored]
+    except Exception:
+        return []
+
+
+def load_cached_price_ohlc(symbol: str):
+    """ml/data_pipeline 의 price_* pickle 캐시를 읽어 OHLC DataFrame 을 반환."""
+    try:
+        from ml._safe_cache import safe_unpickle
+    except Exception:
+        return None
+    for path in _cached_price_paths(symbol):
+        try:
+            df = safe_unpickle(path)
+            if df is not None and not getattr(df, "empty", True):
+                return df
+        except Exception:
+            continue
+    return None
+
+
+def load_ohlc_close_series(symbol: str, periods: tuple[str, ...] = ("1y", "2y", "5y", "max")):
+    """로컬 OHLC 캐시 우선, 그 다음 price_*.pkl 캐시, 마지막으로 yfinance.
+
+    Close 시계열만 반환한다.
+    """
+    import pandas as pd
+    per = (periods,) if isinstance(periods, str) else periods
+    for period in per:
+        hist = load_cached_ohlc(symbol, period)
+        if hist is not None and not getattr(hist, "empty", True) and "Close" in getattr(hist, "columns", []):
+            close = hist["Close"].dropna()
+            if len(close):
+                return close
+    hist = load_cached_price_ohlc(symbol)
+    if hist is not None and not getattr(hist, "empty", True) and "Close" in getattr(hist, "columns", []):
+        close = hist["Close"].dropna()
+        if len(close):
+            return close
+    if yf is None:
+        return None
+    for period in per:
+        try:
+            hist = yf.Ticker(symbol).history(period=period)
+        except Exception:
+            hist = pd.DataFrame()
+        if hist is not None and not getattr(hist, "empty", True) and "Close" in getattr(hist, "columns", []):
+            close = hist["Close"].dropna()
+            if len(close):
+                return close
+    return None
 
 
 def _history_cached(symbol: str, period: str = "1y"):

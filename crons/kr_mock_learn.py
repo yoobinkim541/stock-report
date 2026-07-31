@@ -118,20 +118,20 @@ def _default_price_fn(ticker: str, start_date: str, horizon: int):
     MDD = 보유 horizon 구간의 peak-to-trough 낙폭(양수) → 지수 MDD 와 동일 단위로 비교 가능.
     """
     try:
-        import yfinance as yf
         import pandas as pd
+        from providers import market_data
         from ml.data_pipeline import KR_BENCHMARK
         from ml.adaptive import reward as _reward
         start = pd.Timestamp(start_date)
-        end = start + pd.Timedelta(days=horizon * 2 + 10)
-        data = yf.download([ticker, KR_BENCHMARK], start=start.strftime("%Y-%m-%d"),
-                           end=end.strftime("%Y-%m-%d"), progress=False, group_by="ticker")
-        try:
-            s = data[ticker]["Close"].dropna()
-            k = data[KR_BENCHMARK]["Close"].dropna()
-        except Exception:
+        s = market_data.load_ohlc_close_series(ticker)
+        k = market_data.load_ohlc_close_series(KR_BENCHMARK)
+        if s is None or k is None:
             return None
         common = s.index.intersection(k.index)          # 공통 거래일로 정렬
+        try:
+            common = common[common >= start]
+        except Exception:
+            pass
         s, k = s.reindex(common), k.reindex(common)
         if len(common) <= horizon:
             return None                                   # 미성숙

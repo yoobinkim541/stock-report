@@ -2,7 +2,10 @@
 """test_kr_mock_learning.py — KR 정책 강화(보상 백필·fit·eval·게이트) 무네트워크."""
 import os
 import sys
+import pickle
+from pathlib import Path
 
+import pandas as pd
 import pytest
 
 ROOT = os.path.join(os.path.dirname(__file__), "..")
@@ -11,6 +14,34 @@ sys.path.insert(0, os.path.join(ROOT, "crons"))
 
 import kr_mock_learn as L                    # noqa: E402
 from ml.adaptive.ledger import Ledger        # noqa: E402
+
+
+def _write_cached_ohlc(base: Path, symbol: str, closes: list[float], period: str = "max") -> None:
+    cache_dir = base / "reports" / "ml-cache" / "ohlc_cache"
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    safe = "".join(c if (c.isalnum() or c in ".-_") else "_" for c in str(symbol))
+    idx = pd.date_range("2026-05-01", periods=len(closes), freq="B")
+    df = pd.DataFrame({
+        "Open": closes,
+        "High": [c + 1 for c in closes],
+        "Low": [c - 1 for c in closes],
+        "Close": closes,
+    }, index=idx)
+    df.to_parquet(cache_dir / f"{safe}__{period}.parquet")
+
+
+def _write_price_cache(base: Path, symbol: str, closes: list[float], days: int = 756) -> None:
+    cache_dir = base / "reports" / "ml-cache"
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    idx = pd.date_range("2026-05-01", periods=len(closes), freq="B")
+    df = pd.DataFrame({
+        "Open": closes,
+        "High": [c + 1 for c in closes],
+        "Low": [c - 1 for c in closes],
+        "Close": closes,
+    }, index=idx)
+    cache_key = f"price_{symbol}_{days}d_test"
+    (cache_dir / f"{cache_key}.pkl").write_bytes(pickle.dumps(df))
 
 
 def test_pearson():
@@ -99,6 +130,46 @@ def test_backfill_excludes_unfilled_decisions(tmp_path):
     assert added == 1                                            # ok=True 편입만 성숙(ok=False 제외)
     outs = lg.read_outcomes()
     assert len(outs) == 1 and outs[0]["decision_id"] == "2026-05-01:005930.KS"
+
+
+def test_default_price_fn_uses_cached_ohlc_when_yfinance_unavailable(tmp_path, monkeypatch):
+    """학습 크론은 로컬 OHLC 캐시를 먼저 사용해야 네트워크 없이도 outcome 이 성숙한다."""
+    monkeypatch.setenv("HOME", str(tmp_path))
+    _write_cached_ohlc(tmp_path, "005930.KS", [100, 101, 102, 103, 104])
+    _write_cached_ohlc(tmp_path, "^KS11", [200, 200, 200, 200, 200])
+
+    import yfinance as yf
+    monkeypatch.setattr(yf, "download", lambda *a, **k: (_ for _ in ()).throw(RuntimeError("offline")))
+
+    out = L._default_price_fn("005930.KS", "2026-05-01", 3)
+    assert out is not None
+    stock_ret, idx_ret, stock_mdd, idx_mdd = out
+    assert stock_ret == pytest.approx(0.03, abs=1e-4)
+    assert idx_ret == pytest.approx(0.0, abs=1e-4)
+    assert stock_mdd == pytest.approx(0.0, abs=1e-4)
+    assert idx_mdd == pytest.approx(0.0, abs=1e-4)
+
+
+def test_default_price_fn_uses_price_cache_when_ohlc_cache_missing(tmp_path, monkeypatch):
+    """price_*.pkl 캐시만 있어도 학습 크론이 벤치마크를 읽을 수 있어야 한다."""
+    monkeypatch.setenv("HOME", str(tmp_path))
+    _write_price_cache(tmp_path, "005930.KS", [100, 101, 102, 103, 104])
+    _write_price_cache(tmp_path, "^KS11", [200, 200, 200, 200, 200])
+
+    from providers import market_data
+    assert market_data._cached_price_paths("005930.KS")
+    assert market_data._cached_price_paths("^KS11")
+
+    import yfinance as yf
+    monkeypatch.setattr(yf, "download", lambda *a, **k: (_ for _ in ()).throw(RuntimeError("offline")))
+
+    out = L._default_price_fn("005930.KS", "2026-05-01", 3)
+    assert out is not None
+    stock_ret, idx_ret, stock_mdd, idx_mdd = out
+    assert stock_ret == pytest.approx(0.03, abs=1e-4)
+    assert idx_ret == pytest.approx(0.0, abs=1e-4)
+    assert stock_mdd == pytest.approx(0.0, abs=1e-4)
+    assert idx_mdd == pytest.approx(0.0, abs=1e-4)
 
 
 if __name__ == "__main__":

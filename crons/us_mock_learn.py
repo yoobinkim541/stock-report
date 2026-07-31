@@ -99,19 +99,19 @@ def eval_policy(oos_rows: list[dict], params: dict, max_positions: int = 5) -> d
 def _default_price_fn(ticker: str, start_date: str, horizon: int):
     """보유기간 (종목수익, QQQ수익, 종목MDD, QQQ MDD). 미성숙/실패 → None. 공통 거래일 정렬."""
     try:
-        import yfinance as yf
         import pandas as pd
+        from providers import market_data
         from ml.adaptive import reward as _reward
         start = pd.Timestamp(start_date)
-        end = start + pd.Timedelta(days=horizon * 2 + 10)
-        data = yf.download([ticker, BENCHMARK], start=start.strftime("%Y-%m-%d"),
-                           end=end.strftime("%Y-%m-%d"), progress=False, group_by="ticker")
-        try:
-            s = data[ticker]["Close"].dropna()
-            b = data[BENCHMARK]["Close"].dropna()
-        except Exception:
+        s = market_data.load_ohlc_close_series(ticker)
+        b = market_data.load_ohlc_close_series(BENCHMARK)
+        if s is None or b is None:
             return None
         common = s.index.intersection(b.index)
+        try:
+            common = common[common >= start]
+        except Exception:
+            pass
         s, b = s.reindex(common), b.reindex(common)
         if len(common) <= horizon:
             return None

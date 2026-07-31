@@ -2,13 +2,42 @@
 """test_us_mock_learn.py — US 모의 보상 백필 + 정책 적합 (무네트워크·fake ledger/price)."""
 import os
 import sys
+import pickle
+from pathlib import Path
 
+import pandas as pd
 import pytest
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "crons"))
 
 import us_mock_learn as L
+
+
+def _write_cached_ohlc(base: Path, symbol: str, closes: list[float], period: str = "max") -> None:
+    cache_dir = base / "reports" / "ml-cache" / "ohlc_cache"
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    idx = pd.date_range("2026-05-01", periods=len(closes), freq="B")
+    df = pd.DataFrame({
+        "Open": closes,
+        "High": [c + 1 for c in closes],
+        "Low": [c - 1 for c in closes],
+        "Close": closes,
+    }, index=idx)
+    df.to_parquet(cache_dir / f"{symbol}__{period}.parquet")
+
+
+def _write_price_cache(base: Path, symbol: str, closes: list[float], days: int = 756) -> None:
+    cache_dir = base / "reports" / "ml-cache"
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    idx = pd.date_range("2026-05-01", periods=len(closes), freq="B")
+    df = pd.DataFrame({
+        "Open": closes,
+        "High": [c + 1 for c in closes],
+        "Low": [c - 1 for c in closes],
+        "Close": closes,
+    }, index=idx)
+    (cache_dir / f"price_{symbol}_{days}d_test.pkl").write_bytes(pickle.dumps(df))
 
 
 class _FakeLedger:
@@ -72,6 +101,42 @@ def test_backfill_skips_failed_orders():
     added = L.backfill_outcomes(led, price_fn=lambda t, d, h: (0.10, 0.04, 0.05, 0.03))
     assert added == 1                                    # 집행건만
     assert [o["decision_id"] for o in led.outcomes] == [2]
+
+
+def test_default_price_fn_uses_cached_ohlc_when_yfinance_unavailable(tmp_path, monkeypatch):
+    """US 학습 크론도 로컬 OHLC 캐시를 먼저 사용해 네트워크 없이 outcome 을 성숙시켜야 한다."""
+    monkeypatch.setenv("HOME", str(tmp_path))
+    _write_cached_ohlc(tmp_path, "AAPL", [100, 101, 102, 103, 104])
+    _write_cached_ohlc(tmp_path, "QQQ", [200, 200, 200, 200, 200])
+
+    import yfinance as yf
+    monkeypatch.setattr(yf, "download", lambda *a, **k: (_ for _ in ()).throw(RuntimeError("offline")))
+
+    out = L._default_price_fn("AAPL", "2026-05-01", 3)
+    assert out is not None
+    stock_ret, bench_ret, stock_mdd, bench_mdd = out
+    assert stock_ret == pytest.approx(0.03, abs=1e-4)
+    assert bench_ret == pytest.approx(0.0, abs=1e-4)
+    assert stock_mdd == pytest.approx(0.0, abs=1e-4)
+    assert bench_mdd == pytest.approx(0.0, abs=1e-4)
+
+
+def test_default_price_fn_uses_price_cache_when_ohlc_cache_missing(tmp_path, monkeypatch):
+    """price_*.pkl 캐시만 있어도 US 학습 크론이 벤치마크를 읽을 수 있어야 한다."""
+    monkeypatch.setenv("HOME", str(tmp_path))
+    _write_price_cache(tmp_path, "AAPL", [100, 101, 102, 103, 104])
+    _write_price_cache(tmp_path, "QQQ", [200, 200, 200, 200, 200])
+
+    import yfinance as yf
+    monkeypatch.setattr(yf, "download", lambda *a, **k: (_ for _ in ()).throw(RuntimeError("offline")))
+
+    out = L._default_price_fn("AAPL", "2026-05-01", 3)
+    assert out is not None
+    stock_ret, bench_ret, stock_mdd, bench_mdd = out
+    assert stock_ret == pytest.approx(0.03, abs=1e-4)
+    assert bench_ret == pytest.approx(0.0, abs=1e-4)
+    assert stock_mdd == pytest.approx(0.0, abs=1e-4)
+    assert bench_mdd == pytest.approx(0.0, abs=1e-4)
 
 
 def test_fit_policy_positive_correlation_dominates():
