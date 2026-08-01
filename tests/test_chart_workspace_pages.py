@@ -40,3 +40,4 @@ chart_workspace_ui.render_chart_workspace(workspace, render_charts=False)
     assert "동기화" in body
     assert "MSFT" in body
     assert "QQQ" in body
+    assert "분석 레일" in body

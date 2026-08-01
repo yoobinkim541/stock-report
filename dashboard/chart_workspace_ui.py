@@ -3,9 +3,10 @@ from __future__ import annotations
 
 from typing import Any
 
+import pandas as pd
 import streamlit as st
 
-from dashboard import cached, chart_workspace, charts, data, theme
+from dashboard import cached, chart_analysis, chart_workspace, charts, data, theme
 
 _PERIOD_DAYS = {"3mo": 90, "6mo": 180, "1y": 365, "5y": 1825, "전체": None}
 _TF_LABEL = {
@@ -186,5 +187,173 @@ def render_chart_workspace(
             if render_charts:
                 _render_panel_chart(panel, height=390 if len(panels) > 1 else 760)
 
+    _render_analysis_rail(ws, render_charts=render_charts)
+
     st.session_state["_cw_workspace"] = chart_workspace.normalize_workspace(ws)
     return st.session_state["_cw_workspace"]
+
+
+def _render_analysis_rail(ws: dict[str, Any], *, render_charts: bool) -> None:
+    st.divider()
+    st.markdown("##### 분석 레일")
+    panel = _active_panel(ws)
+    if not panel:
+        st.caption("활성 패널을 선택하면 분석 레일이 표시됩니다.")
+        return
+    st.caption(
+        f"{panel['ticker']} 활성 패널 기준 · 상대강도, 멀티타임프레임, 계절성, 자동 패턴 후보"
+    )
+    if not render_charts:
+        st.caption("차트 렌더링이 꺼진 모드에서는 데이터 조회 없이 분석 레일 구조만 표시합니다.")
+        return
+
+    try:
+        hist = _load_panel_hist(panel)
+    except Exception as exc:
+        st.warning(f"{panel['ticker']} 분석 데이터 로딩 실패: {exc}")
+        return
+    if hist is None or getattr(hist, "empty", True):
+        st.info(f"{panel['ticker']} 분석 데이터 없음")
+        return
+
+    benchmark = _benchmark_ticker(panel)
+    try:
+        bench_hist = cached.ohlc(benchmark, period="max") if benchmark else None
+    except Exception:
+        bench_hist = None
+
+    rs = chart_analysis.relative_strength_summary(hist, bench_hist) if bench_hist is not None else {"ok": False}
+    patterns = chart_analysis.pattern_candidates(hist)
+    seasonality = chart_analysis.seasonality_summary(hist)
+    mtfa = chart_analysis.multi_timeframe_summary(_analysis_ohlc_loader, panel["ticker"])
+
+    m1, m2, m3, m4 = st.columns(4)
+    m1.metric("상대강도", _quadrant_label(rs.get("quadrant")) if rs.get("ok") else "데이터 부족")
+    m2.metric("60일 RS", _pct(rs.get("relative_strength_60d")) if rs.get("ok") else "—")
+    m3.metric("20일 모멘텀", _pct(rs.get("relative_momentum_20d")) if rs.get("ok") else "—")
+    m4.metric("패턴 후보", str(len(patterns)))
+
+    left, right = st.columns([1.05, 1.0], gap="large")
+    with left:
+        _render_mtfa_table(mtfa)
+        _render_pattern_table(patterns)
+    with right:
+        _render_seasonality_table(seasonality)
+
+
+def _active_panel(ws: dict[str, Any]) -> dict[str, Any] | None:
+    panels = list((ws or {}).get("panels") or [])
+    active = (ws or {}).get("active_panel")
+    for panel in panels:
+        if panel.get("id") == active:
+            return panel
+    return panels[0] if panels else None
+
+
+def _benchmark_ticker(panel: dict[str, Any]) -> str:
+    compare = [str(x).strip().upper() for x in panel.get("compare") or [] if str(x).strip()]
+    if compare:
+        return compare[0]
+    ticker = str(panel.get("ticker") or "").upper()
+    if ticker.endswith((".KS", ".KQ")) or (ticker.isdigit() and len(ticker) == 6):
+        return "^KS11"
+    return "QQQ"
+
+
+def _analysis_ohlc_loader(ticker: str, tf: str):
+    if tf == "1d":
+        return cached.ohlc(ticker, period="max")
+    return cached.ohlc_tf(ticker, tf)
+
+
+def _render_mtfa_table(mtfa: dict[str, Any]) -> None:
+    st.markdown("###### 멀티타임프레임")
+    rows = []
+    for row in mtfa.get("rows") or []:
+        rows.append(
+            {
+                "봉": _TF_LABEL.get(row.get("timeframe"), row.get("timeframe")),
+                "상태": "OK" if row.get("ok") else "부족",
+                "추세": _trend_label(row.get("trend")),
+                "RSI": _rsi_zone_label(row.get("rsi_zone")),
+                "최근가": row.get("last") if row.get("ok") else row.get("reason"),
+            }
+        )
+    if rows:
+        st.dataframe(pd.DataFrame(rows), hide_index=True, width="stretch", height=min(220, 44 + 32 * len(rows)))
+    else:
+        st.caption("멀티타임프레임 분석 결과 없음")
+
+
+def _render_pattern_table(patterns: list[dict[str, Any]]) -> None:
+    st.markdown("###### 자동 패턴 후보")
+    if not patterns:
+        st.caption("현재 구간에서 우선 표시할 자동 패턴 후보가 없습니다.")
+        return
+    rows = []
+    for row in patterns:
+        rows.append(
+            {
+                "패턴": _pattern_label(row.get("kind")),
+                "방향": _direction_label(row.get("direction")),
+                "신뢰": _pct(row.get("confidence")),
+                "무효화": row.get("invalidation_price"),
+                "근거": ", ".join(row.get("evidence") or []),
+            }
+        )
+    st.dataframe(pd.DataFrame(rows), hide_index=True, width="stretch", height=min(240, 44 + 32 * len(rows)))
+
+
+def _render_seasonality_table(seasonality: dict[str, Any]) -> None:
+    st.markdown("###### 월별 계절성")
+    if not seasonality.get("ok"):
+        st.caption("월별 계절성을 계산할 만큼 긴 이력이 없습니다.")
+        return
+    rows = []
+    for row in seasonality.get("months") or []:
+        rows.append(
+            {
+                "월": f"{row.get('month')}월",
+                "평균": _pct(row.get("avg_return")),
+                "승률": _pct(row.get("win_rate")),
+                "표본": row.get("sample"),
+            }
+        )
+    st.dataframe(pd.DataFrame(rows), hide_index=True, width="stretch", height=430)
+
+
+def _pct(value: Any) -> str:
+    try:
+        if value is None:
+            return "—"
+        return f"{float(value) * 100:.1f}%"
+    except (TypeError, ValueError):
+        return "—"
+
+
+def _quadrant_label(value: Any) -> str:
+    return {
+        "leading": "주도",
+        "weakening": "둔화",
+        "lagging": "소외",
+        "improving": "개선",
+    }.get(str(value or ""), "—")
+
+
+def _trend_label(value: Any) -> str:
+    return {"up": "상승", "down": "하락", "mixed": "혼조"}.get(str(value or ""), "—")
+
+
+def _rsi_zone_label(value: Any) -> str:
+    return {"overbought": "과열", "oversold": "침체", "neutral": "중립"}.get(str(value or ""), "—")
+
+
+def _pattern_label(value: Any) -> str:
+    return {
+        "channel_breakout": "채널 돌파",
+        "bollinger_squeeze_expansion": "밴드 압축 해소",
+    }.get(str(value or ""), str(value or "—"))
+
+
+def _direction_label(value: Any) -> str:
+    return {"up": "상방", "down": "하방"}.get(str(value or ""), "—")
