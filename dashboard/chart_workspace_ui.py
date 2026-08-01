@@ -246,7 +246,7 @@ def _render_alert_manager(ws: dict[str, Any], panels: list[dict[str, Any]]) -> N
     if not active_panel:
         return
     st.markdown("##### 알림 매니저")
-    st.caption("활성 패널 기준으로 가격 crossing 알림을 저장합니다. 서버 평가 API와 연결되어 웹훅/텔레그램 알림으로 확장할 수 있습니다.")
+    st.caption("활성 패널 기준으로 가격 crossing 알림을 저장합니다. 서버 평가 API는 가격·인디케이터·드로잉 라인·멀티컨디션 알림까지 처리할 수 있습니다.")
     try:
         rules = views.chart_alert_rules(workspace_id, limit=20) if workspace_id else []
     except Exception:

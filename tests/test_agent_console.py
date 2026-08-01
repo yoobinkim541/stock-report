@@ -2193,6 +2193,28 @@ def test_chart_alert_rules_round_trip_and_filter(monkeypatch, tmp_path):
     assert storage.list_chart_alert_rules(workspace_id="other") == []
 
 
+def test_chart_alert_rules_accept_multi_condition_indicator_alert(monkeypatch, tmp_path):
+    _isolate(monkeypatch, tmp_path)
+
+    from agent_console import storage
+
+    rule = storage.save_chart_alert_rule({
+        "workspace_id": "workspace-1",
+        "store_key": "cw:workspace-1:AAPL:1d:lin",
+        "symbol": "AAPL",
+        "timeframe": "1d",
+        "name": "AAPL technical",
+        "condition": {
+            "all": [
+                {"type": "price", "operator": "crossing_up", "value": 210.0},
+                {"type": "indicator", "field": "rsi_14", "operator": "less_than", "value": 70.0},
+            ]
+        },
+    })
+
+    assert rule["condition"]["all"][1]["field"] == "rsi_14"
+
+
 def test_strategy_studio_api_routes(monkeypatch, tmp_path):
     _isolate(monkeypatch, tmp_path)
 
@@ -2335,6 +2357,44 @@ def test_chart_alert_api_routes_round_trip(monkeypatch, tmp_path):
     assert evaluation.status_code == 200
     assert evaluation.json["triggered"] is True
     assert evaluation.json["event"]["symbol"] == "MSFT"
+
+
+def test_chart_alert_api_evaluates_multi_condition_payload(monkeypatch, tmp_path):
+    _isolate(monkeypatch, tmp_path)
+
+    from agent_console.server import create_app
+
+    app = create_app()
+    client = app.test_client()
+    saved = client.post("/api/chart-alerts/rules", json={
+        "workspace_id": "workspace-1",
+        "store_key": "cw:workspace-1:MSFT:1d:lin",
+        "symbol": "MSFT",
+        "timeframe": "1d",
+        "name": "MSFT price + RSI",
+        "condition": {
+            "all": [
+                {"type": "price", "operator": "crossing_up", "value": 400.0},
+                {"type": "indicator", "field": "rsi_14", "operator": "less_than", "value": 65.0},
+            ]
+        },
+    })
+    rule = saved.json["rule"]
+
+    evaluation = client.post(
+        f"/api/chart-alerts/rules/{rule['id']}/evaluate",
+        json={
+            "previous_price": 399.0,
+            "current_price": 401.0,
+            "previous_values": {"rsi_14": 62.0},
+            "current_values": {"rsi_14": 63.0},
+            "as_of": "2026-08-01T12:00:00Z",
+        },
+    )
+
+    assert evaluation.status_code == 200
+    assert evaluation.json["triggered"] is True
+    assert evaluation.json["event"]["condition_count"] == 2
 
 
 def test_context_pack_exposes_strategy_studio_state(monkeypatch, tmp_path):

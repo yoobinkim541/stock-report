@@ -282,10 +282,12 @@ def create_app() -> Flask:
         rule = storage.get_chart_alert_rule(rule_id)
         if not rule:
             return jsonify({"ok": False, "error": "chart alert rule not found"}), 404
-        result = chart_alerts.evaluate_price_alert(
+        result = chart_alerts.evaluate_chart_alert(
             rule,
             previous_price=payload.get("previous_price"),
             current_price=payload.get("current_price"),
+            previous_values=payload.get("previous_values") if isinstance(payload.get("previous_values"), dict) else {},
+            current_values=payload.get("current_values") if isinstance(payload.get("current_values"), dict) else {},
             as_of=payload.get("as_of"),
         )
         if result.get("triggered"):

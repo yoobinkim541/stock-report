@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from agent_console.chart_alerts import evaluate_price_alert
+from agent_console.chart_alerts import evaluate_chart_alert, evaluate_price_alert
 
 
 def _rule(operator: str, value: float = 100.0, **extra):
@@ -45,3 +45,68 @@ def test_price_alert_frequency_once_suppresses_after_trigger():
 
     assert result["triggered"] is False
     assert result["reason"] == "already_triggered"
+
+
+def test_multi_condition_alert_requires_all_conditions_to_trigger():
+    rule = {
+        "id": "alert-2",
+        "symbol": "AAPL",
+        "name": "AAPL price + RSI",
+        "condition": {
+            "all": [
+                {"type": "price", "operator": "crossing_up", "value": 100.0},
+                {"type": "indicator", "field": "rsi_14", "operator": "less_than", "value": 70.0},
+            ]
+        },
+    }
+
+    result = evaluate_chart_alert(
+        rule,
+        previous_price=99.0,
+        current_price=101.0,
+        previous_values={"rsi_14": 68.0},
+        current_values={"rsi_14": 69.0},
+        as_of="2026-08-01T12:00:00Z",
+    )
+    failed = evaluate_chart_alert(
+        rule,
+        previous_price=99.0,
+        current_price=101.0,
+        previous_values={"rsi_14": 71.0},
+        current_values={"rsi_14": 72.0},
+    )
+
+    assert result["triggered"] is True
+    assert result["event"]["condition_count"] == 2
+    assert result["event"]["matched_conditions"] == ["price:crossing_up", "indicator:rsi_14:less_than"]
+    assert failed["triggered"] is False
+    assert failed["reason"] == "condition_not_met"
+
+
+def test_drawing_line_alert_interpolates_threshold_at_current_time():
+    rule = {
+        "id": "alert-3",
+        "symbol": "AAPL",
+        "name": "trendline break",
+        "condition": {
+            "type": "drawing_line",
+            "operator": "crossing_up",
+            "x0": "2026-08-01T10:00:00Z",
+            "y0": 100.0,
+            "x1": "2026-08-01T12:00:00Z",
+            "y1": 110.0,
+        },
+    }
+
+    result = evaluate_chart_alert(
+        rule,
+        previous_price=103.0,
+        current_price=106.0,
+        previous_values={"time": "2026-08-01T10:30:00Z"},
+        current_values={"time": "2026-08-01T11:00:00Z"},
+        as_of="2026-08-01T11:00:00Z",
+    )
+
+    assert result["triggered"] is True
+    assert result["event"]["threshold"] == 105.0
+    assert result["event"]["operator"] == "crossing_up"
