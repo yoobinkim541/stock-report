@@ -111,6 +111,13 @@ def test_build_browser_model_related_pages_use_full_corpus_not_visible_slice():
     assert model["related"][0]["id"] == "p4"
 
 
+def test_build_browser_model_groups_visible_pages_by_surface():
+    model = wiki_browser.build_browser_model(PAGES, selected_page_id="p1", query="", surface="all", status="all")
+
+    assert [group["surface"] for group in model["groups"]] == ["market", "portfolio"]
+    assert [group["count"] for group in model["groups"]] == [2, 2]
+
+
 def test_aliases_are_available():
     filtered = wiki_browser.filter_pages(PAGES, query="레버리지", surface="portfolio", status="all")
     picked = wiki_browser.pick_selected_page(PAGES, selected_page_id="p4", query="", surface="all", status="all")
@@ -135,6 +142,25 @@ def test_build_wiki_health_model_counts_trust_and_search_state():
     assert health["unverified_count"] == 1
     assert health["open_question_count"] == 1
     assert health["lint_issue_count"] == 1
+
+
+def test_build_wiki_health_model_reports_surface_counts_and_recommendations():
+    health = wiki_browser.build_wiki_health_model(
+        [
+            {"id": "a", "surface": "market", "kind": "source_digest", "verification_status": "unverified", "source_refs": []},
+            {"id": "b", "surface": "market", "kind": "source_digest", "verification_status": "unverified", "source_refs": []},
+            {"id": "c", "surface": "market", "kind": "source_digest", "verification_status": "unverified", "source_refs": []},
+            {"id": "d", "surface": "market", "kind": "source_digest", "verification_status": "unverified", "source_refs": []},
+            {"id": "e", "surface": "portfolio", "kind": "note", "verification_status": "source-backed", "source_refs": ["source:1"]},
+        ],
+        search_health={"provider": "qmd", "qmd": {"file_count": 1, "installed": True}, "fallback_available": True},
+        lint={"issue_count": 2, "issues": [{"code": "orphan_page"}, {"code": "missing_cross_ref"}]},
+    )
+
+    assert health["surface_counts"]["market"] == 4
+    assert health["kind_counts"]["source_digest"] == 4
+    assert any("편중" in rec["title"] for rec in health["recommendations"])
+    assert any("고립" in rec["title"] or "교차 연결" in rec["title"] for rec in health["recommendations"])
 
 
 def test_build_selected_evidence_model_orders_judgment_evidence_and_prompt_preview():

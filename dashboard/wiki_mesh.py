@@ -39,6 +39,15 @@ SURFACE_COLORS = {
 VALID_STATUSES = ("draft", "reviewed", "stable", "archived")
 WIKI_SURFACE = "wiki"
 WIKI_BODY_LIMIT = 12000
+SURFACE_ORDER = ["market", "portfolio", "ticker", "paper", "lab", "wiki"]
+SURFACE_LABELS = {
+    "market": "시장",
+    "portfolio": "포트폴리오",
+    "ticker": "티커",
+    "paper": "페이퍼",
+    "lab": "랩",
+    "wiki": "기타",
+}
 
 
 @dataclass(frozen=True)
@@ -147,6 +156,31 @@ def trust_color_for_node(node: dict[str, Any]) -> str:
         return TRUST_COLORS["archived"]
     verification = _clean(node.get("verification_status") or "unverified", 40)
     return TRUST_COLORS.get(verification, TRUST_COLORS["unverified"])
+
+
+def _surface_label(surface: str) -> str:
+    clean = _clean(surface, 40).lower()
+    return SURFACE_LABELS.get(clean, _clean(surface, 40) or "기타")
+
+
+def _surface_color(surface: str) -> str:
+    return SURFACE_COLORS.get(_clean(surface, 40).lower(), SURFACE_COLORS["wiki"])
+
+
+def _ordered_surfaces(surfaces: list[str], focus_surface: str = "") -> list[str]:
+    uniq = [surface for surface in surfaces if surface]
+    if not uniq:
+        return [WIKI_SURFACE]
+    uniq = list(dict.fromkeys(uniq))
+    focus = _clean(focus_surface, 40).lower()
+    if focus and focus in uniq:
+        ordered = [focus]
+        ordered.extend([surface for surface in SURFACE_ORDER if surface in uniq and surface != focus])
+        ordered.extend(sorted(surface for surface in uniq if surface not in ordered))
+        return ordered
+    ordered = [surface for surface in SURFACE_ORDER if surface in uniq]
+    ordered.extend(sorted(surface for surface in uniq if surface not in ordered))
+    return ordered
 
 
 def _record_to_page(record: dict[str, Any]) -> dict[str, Any]:
@@ -389,12 +423,7 @@ def _fill_by_degree(pages: list[dict[str, Any]], adjacency: dict[str, dict[str, 
 
 
 def _cluster_centers(surfaces: list[str], focus_surface: str) -> dict[str, np.ndarray]:
-    uniq = [surface for surface in surfaces if surface]
-    if not uniq:
-        return {WIKI_SURFACE: np.array([0.0, 0.0], dtype=float)}
-    uniq = list(dict.fromkeys(uniq))
-    if focus_surface in uniq:
-        uniq = [focus_surface, *[surface for surface in uniq if surface != focus_surface]]
+    uniq = _ordered_surfaces(surfaces, focus_surface)
     if len(uniq) == 1:
         return {uniq[0]: np.array([0.0, 0.0], dtype=float)}
     centers: dict[str, np.ndarray] = {uniq[0]: np.array([0.0, 0.0], dtype=float)}
@@ -475,6 +504,7 @@ def build_wiki_graph_model(
         return {
             "nodes": [],
             "edges": [],
+            "groups": [],
             "selected": None,
             "selected_id": "",
             "visible": [],
@@ -514,6 +544,8 @@ def build_wiki_graph_model(
                 "summary": page.get("summary") or "",
                 "tags": tuple(page.get("tags") or ()),
                 "source_refs": tuple(page.get("source_refs") or ()),
+                "group": page.get("surface") or WIKI_SURFACE,
+                "surface_color": _surface_color(page.get("surface") or WIKI_SURFACE),
                 "degree": degree,
                 "level": level,
                 "selected": pid == selected_id,
@@ -527,11 +559,31 @@ def build_wiki_graph_model(
                 continue
             edges[(a, b)] = WikiGraphEdge(source=a, target=b, weight=edge.weight, tags=edge.tags, refs=edge.refs)
     ordered_edges = list(edges.values())
-    positions = _layout_nodes(nodes, ordered_edges, focus_surface=(surface if surface != "all" else (nodes[0]["surface"] if nodes else WIKI_SURFACE)), selected_id=selected_id)
+    focus_surface = surface if surface != "all" else ""
+    positions = _layout_nodes(nodes, ordered_edges, focus_surface=focus_surface, selected_id=selected_id)
+    groups: list[dict[str, Any]] = []
+    by_surface: dict[str, list[dict[str, Any]]] = defaultdict(list)
+    for node in nodes:
+        by_surface[str(node.get("surface") or WIKI_SURFACE).lower()].append(node)
+    for group_surface in _ordered_surfaces(list(by_surface), focus_surface):
+        group_nodes = by_surface.get(group_surface) or []
+        coords = [positions.get(node["id"]) for node in group_nodes if positions.get(node["id"]) is not None]
+        centroid = (
+            float(sum(pt[0] for pt in coords) / len(coords)) if coords else 0.0,
+            float(sum(pt[1] for pt in coords) / len(coords)) if coords else 0.0,
+        )
+        groups.append({
+            "surface": group_surface,
+            "label": _surface_label(group_surface),
+            "count": len(group_nodes),
+            "color": _surface_color(group_surface),
+            "centroid": centroid,
+        })
     return {
         "nodes": nodes,
         "edges": ordered_edges,
         "positions": positions,
+        "groups": groups,
         "selected": next((node for node in nodes if node["id"] == selected_id), None),
         "selected_id": selected_id,
         "visible": visible,
@@ -581,6 +633,7 @@ def _build_figure(model: dict[str, Any]) -> go.Figure:
     nodes = model.get("nodes") or []
     positions = model.get("positions") or {}
     edges = model.get("edges") or []
+    groups = model.get("groups") or []
     fig = go.Figure()
     if edges:
         xs: list[float | None] = []
@@ -622,7 +675,7 @@ def _build_figure(model: dict[str, Any]) -> go.Figure:
         size = 11 + min(12, node.get("degree", 0) * 1.8)
         if node.get("selected"):
             size += 8
-        color = node.get("color") or trust_color_for_node(node)
+        fill_color = node.get("surface_color") or _surface_color(node.get("surface") or WIKI_SURFACE)
         hover = _node_hover(node)
         label = _clean(node.get("title") or "", 18)
         if node.get("selected") or node.get("degree", 0) >= 3:
@@ -631,14 +684,14 @@ def _build_figure(model: dict[str, Any]) -> go.Figure:
             text_sel.append(label)
             custom_sel.append([node["id"]])
             size_sel.append(size)
-            color_sel.append(color)
+            color_sel.append(fill_color)
             hover_sel.append(hover)
         else:
             x_rest.append(pos[0])
             y_rest.append(pos[1])
             custom_rest.append([node["id"]])
             size_rest.append(size)
-            color_rest.append(color)
+            color_rest.append(fill_color)
             hover_rest.append(hover)
 
     if x_rest:
@@ -650,7 +703,7 @@ def _build_figure(model: dict[str, Any]) -> go.Figure:
                 marker={
                     "size": size_rest,
                     "color": color_rest,
-                    "line": {"width": 1, "color": "rgba(15,23,42,0.95)"},
+                    "line": {"width": 1.2, "color": "rgba(15,23,42,0.95)"},
                     "opacity": 0.72,
                 },
                 customdata=custom_rest,
@@ -672,7 +725,7 @@ def _build_figure(model: dict[str, Any]) -> go.Figure:
                 marker={
                     "size": size_sel,
                     "color": color_sel,
-                    "line": {"width": 2, "color": "rgba(255,255,255,0.9)"},
+                    "line": {"width": 2.5, "color": "rgba(255,255,255,0.92)"},
                     "opacity": 0.98,
                 },
                 customdata=custom_sel,
@@ -680,6 +733,26 @@ def _build_figure(model: dict[str, Any]) -> go.Figure:
                 hovertemplate="%{hovertext}<extra></extra>",
                 hoverinfo="text",
                 showlegend=False,
+            )
+        )
+
+    annotations = []
+    for group in groups:
+        centroid = group.get("centroid") or (0.0, 0.0)
+        count = int(group.get("count") or 0)
+        if count <= 0:
+            continue
+        annotations.append(
+            dict(
+                x=float(centroid[0]),
+                y=float(centroid[1]),
+                text=f"{group.get('label', group.get('surface', '기타'))}<br>{count}개",
+                showarrow=False,
+                font={"size": 11, "color": "rgba(226,232,240,0.94)"},
+                bgcolor="rgba(15,23,42,0.45)",
+                bordercolor=group.get("color") or "rgba(148,163,184,0.35)",
+                borderwidth=1,
+                borderpad=3,
             )
         )
 
@@ -692,6 +765,7 @@ def _build_figure(model: dict[str, Any]) -> go.Figure:
         yaxis={"visible": False, "fixedrange": True, "scaleanchor": "x", "scaleratio": 1},
         dragmode="lasso",
         hovermode="closest",
+        annotations=annotations,
         showlegend=False,
     )
     return fig
@@ -743,7 +817,24 @@ def render_wiki_mesh(
         st.info("조건에 맞는 관계 그래프가 없습니다.")
         return ""
 
-    stat_col.caption(f"{len(nodes)} nodes · {len(model.get('edges') or [])} links · surface {surface} · status {status}")
+    groups = model.get("groups") or []
+    legend_bits = []
+    for group in groups[:6]:
+        legend_bits.append(
+            f"<span style='display:inline-flex;align-items:center;gap:6px;margin-right:10px;'>"
+            f"<span style='width:10px;height:10px;border-radius:999px;display:inline-block;background:{group.get('color')};'></span>"
+            f"{group.get('label')} {int(group.get('count') or 0)}"
+            f"</span>"
+        )
+    if legend_bits:
+        st.markdown(
+            "<div style='margin:0 0 6px 0;color:rgba(226,232,240,.88);font-size:.82rem;'>"
+            + "surface 그룹: "
+            + "".join(legend_bits)
+            + "</div>",
+            unsafe_allow_html=True,
+        )
+    stat_col.caption(f"{len(nodes)} nodes · {len(model.get('edges') or [])} links · {len(groups)} groups · surface {surface} · status {status}")
     st.caption("그래프의 점을 클릭하면 해당 위키 문서가 읽기 패널로 열립니다.")
 
     fig = _build_figure({**model, "selected_id": selected_page_id})

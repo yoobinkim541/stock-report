@@ -11,6 +11,14 @@ from typing import Any
 WIKI_SURFACE = "wiki"
 VALID_STATUSES = ("draft", "reviewed", "stable", "archived")
 WIKI_BODY_LIMIT = 12000
+SURFACE_LABELS = {
+    "market": "시장",
+    "portfolio": "포트폴리오",
+    "ticker": "티커",
+    "paper": "페이퍼",
+    "lab": "랩",
+    "wiki": "기타",
+}
 # surface / kind 선택 목록의 단일 진실원. 첫 항목 "all" 은 필터 전용이라
 # 편집 UI 는 [1:] 를 쓴다. dashboard/pages/ai_wiki.py 가 여기서 가져간다.
 SURFACE_OPTIONS = ["all", "market", "portfolio", "ticker", "paper", "lab", "wiki"]
@@ -113,6 +121,53 @@ def _has_non_conversation_source_refs(refs: Iterable[object]) -> bool:
     return False
 
 
+def _surface_label(surface: str) -> str:
+    clean = str(surface or "wiki").strip().lower()
+    return SURFACE_LABELS.get(clean, clean or "기타")
+
+
+def _group_visible_pages(pages: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    groups: dict[str, list[dict[str, Any]]] = {}
+    for page in pages:
+        surface = str(page.get("surface") or "wiki").lower()
+        groups.setdefault(surface, []).append(page)
+    ordered_surfaces = [surface for surface in ["market", "portfolio", "ticker", "paper", "lab", "wiki"] if surface in groups]
+    ordered_surfaces.extend(sorted(surface for surface in groups if surface not in ordered_surfaces))
+    return [
+        {
+            "surface": surface,
+            "label": _surface_label(surface),
+            "count": len(groups[surface]),
+            "pages": groups[surface],
+        }
+        for surface in ordered_surfaces
+    ]
+
+
+def _render_page_card(page: dict[str, Any]) -> str:
+    import streamlit as st
+
+    with st.container(border=True):
+        st.markdown(f"**{page.get('title', '위키')}**")
+        st.caption(f"{page.get('surface', 'wiki')} · {page.get('kind', 'note')} · {page.get('status', 'draft')}")
+        if page.get("summary"):
+            st.caption(str(page["summary"])[:180])
+        if page.get("tags"):
+            st.caption(" · ".join(page["tags"][:5]))
+        btn1, btn2 = st.columns(2)
+        if btn1.button("불러오기", key=f"wiki_load_{page.get('id')}", width="stretch"):
+            selected_id = str(page.get("id") or "")
+            st.session_state["agent_wiki_selected_page_id"] = selected_id
+            st.toast("위키 페이지를 불러왔습니다.")
+            return selected_id
+        if btn2.button("삭제", key=f"wiki_drop_{page.get('id')}", width="stretch"):
+            if wiki.delete_page(page.get("id")):
+                st.session_state.pop("agent_wiki_selected_page_id", None)
+                st.toast("위키 페이지 삭제 완료")
+                st.rerun()
+    return ""
+
+
 def _verification_status(page: dict[str, Any]) -> str:
     explicit = _clean(page.get("verification_status") or "", 40)
     if explicit:
@@ -145,11 +200,61 @@ def build_wiki_health_model(pages: Iterable[dict[str, Any] | WikiPage], *, searc
     source_backed = sum(1 for page in normalized if page.get("verification_status") == "source-backed")
     unverified = sum(1 for page in normalized if page.get("verification_status") != "source-backed")
     open_questions = sum(len(page.get("openQuestions") or []) for page in normalized)
+    surface_counts = Counter(page.get("surface") or WIKI_SURFACE for page in normalized)
+    kind_counts = Counter(page.get("kind") or "note" for page in normalized)
+    total = len(normalized)
+    lint = dict(lint or {})
+    lint_issues = lint.get("issues") or []
+    lint_codes = Counter(str(issue.get("code") or "") for issue in lint_issues if isinstance(issue, dict))
+    recommendations: list[dict[str, str]] = []
+    if total and surface_counts:
+        dominant_surface, dominant_count = surface_counts.most_common(1)[0]
+        if dominant_count / max(1, total) >= 0.6 and total >= 5:
+            recommendations.append({
+                "category": "balance",
+                "title": f"{_surface_label(dominant_surface)} 편중 완화",
+                "detail": f"{_surface_label(dominant_surface)} 문서가 {dominant_count}/{total}개로 많습니다. 시장/포트폴리오/티커 간 파생 문서 분리를 늘려 보세요.",
+            })
+    if total and kind_counts.get("source_digest", 0) >= max(4, int(total * 0.4)):
+        recommendations.append({
+            "category": "curation",
+            "title": "source_digest 증류 강화",
+            "detail": "요약만 있는 문서가 많습니다. 판단 카드(playbook/risk/decision/concept)로 더 자주 승격해 재사용성을 높이세요.",
+        })
+    if unverified > source_backed:
+        recommendations.append({
+            "category": "trust",
+            "title": "원문 출처 보강",
+            "detail": "대화 기반 초안이 더 많습니다. reviewed/stable 문서는 source refs를 붙이고, 판단이 섞인 메모는 원문/뉴스와 교차확인하세요.",
+        })
+    if int(lint_codes.get("orphan_page", 0)) > 0:
+        recommendations.append({
+            "category": "connectivity",
+            "title": "고립 문서 연결",
+            "detail": f"고립 문서 {int(lint_codes.get('orphan_page', 0))}건이 있습니다. 같은 surface나 topic으로 교차 링크를 추가하면 그래프가 더 살아납니다.",
+        })
+    if int(lint_codes.get("missing_cross_ref", 0)) > 0:
+        recommendations.append({
+            "category": "connectivity",
+            "title": "중복 출처 교차 연결",
+            "detail": f"공유 태그/출처를 가진 문서 {int(lint_codes.get('missing_cross_ref', 0))}건이 연결되어 있지 않습니다. merge 또는 cross-link가 필요합니다.",
+        })
+    if int(lint_codes.get("zero_usage", 0)) > 0:
+        recommendations.append({
+            "category": "hygiene",
+            "title": "미사용 문서 정리",
+            "detail": f"30일 이상 사용되지 않은 문서 {int(lint_codes.get('zero_usage', 0))}건이 있습니다. archive 또는 split/merge 후보를 검토하세요.",
+        })
+    if not recommendations and total:
+        recommendations.append({
+            "category": "healthy",
+            "title": "위키 구조 양호",
+            "detail": "surface 그룹과 본문 읽기 흐름이 안정적입니다. 다음 단계는 source-backed 비율과 judgment 카드 축적을 조금 더 끌어올리는 것입니다.",
+        })
     search_health = dict(search_health or {})
     qmd = dict(search_health.get("qmd") or {})
-    lint = dict(lint or {})
     return {
-        "page_count": len(normalized),
+        "page_count": total,
         "provider": search_health.get("provider") or "fallback",
         "qmd_installed": bool(qmd.get("installed")),
         "qmd_file_count": int(qmd.get("file_count") or 0),
@@ -158,6 +263,9 @@ def build_wiki_health_model(pages: Iterable[dict[str, Any] | WikiPage], *, searc
         "unverified_count": unverified,
         "open_question_count": open_questions,
         "lint_issue_count": int(lint.get("issue_count") or len(lint.get("issues") or [])),
+        "surface_counts": dict(surface_counts),
+        "kind_counts": dict(kind_counts),
+        "recommendations": recommendations,
     }
 
 
@@ -432,6 +540,7 @@ def build_browser_model(pages: Iterable[dict[str, Any] | WikiPage], *, selected_
         "status": status,
         "visible": visible,
         "visible_count": len(visible),
+        "groups": _group_visible_pages(visible),
         "selected_id": selected_id,
         "selected": selected,
         "related": related,
@@ -609,32 +718,28 @@ def render_wiki_tab(surface: str, pack: dict[str, Any] | None = None) -> None:
     load_selected_id = ""
     with left:
         st.markdown("##### 문서 브라우저")
-        st.caption(f"{browser.get('visible_count', 0)}개 표시")
+        st.caption(f"{browser.get('visible_count', 0)}개 표시 · {len(browser.get('groups') or [])}개 그룹")
         visible = browser.get("visible") or []
+        groups = browser.get("groups") or []
         if visible:
-            for page in visible:
-                with st.container(border=True):
-                    st.markdown(f"**{page.get('title', '위키')}**")
-                    st.caption(f"{page.get('surface', 'wiki')} · {page.get('kind', 'note')} · {page.get('status', 'draft')}")
-                    if page.get("summary"):
-                        st.caption(str(page["summary"])[:180])
-                    if page.get("tags"):
-                        st.caption(" · ".join(page["tags"][:5]))
-                    btn1, btn2 = st.columns(2)
-                    if btn1.button("불러오기", key=f"wiki_load_{page.get('id')}", width="stretch"):
-                        load_selected_id = str(page.get("id") or "")
-                        selected_page_id = load_selected_id
-                        st.session_state["agent_wiki_selected_page_id"] = selected_page_id
-                        st.toast("위키 페이지를 불러왔습니다.")
-                    if btn2.button("삭제", key=f"wiki_drop_{page.get('id')}", width="stretch"):
-                        if wiki.delete_page(page.get("id")):
-                            st.session_state.pop("agent_wiki_selected_page_id", None)
-                            st.toast("위키 페이지 삭제 완료")
-                            st.rerun()
+            if surface_filter == "all" and groups:
+                for group in groups:
+                    st.markdown(f"**{group.get('label', group.get('surface', 'wiki'))}** · {group.get('count', 0)}개")
+                    for page in group.get("pages") or []:
+                        loaded = _render_page_card(page)
+                        if loaded:
+                            load_selected_id = loaded
+            else:
+                for page in visible:
+                    loaded = _render_page_card(page)
+                    if loaded:
+                        load_selected_id = loaded
         else:
             st.info("필터에 맞는 위키가 없습니다.")
 
     if load_selected_id:
+        selected_page_id = load_selected_id
+        st.session_state["agent_wiki_selected_page_id"] = selected_page_id
         browser = build_browser_model(
             pages_all,
             selected_page_id=selected_page_id,

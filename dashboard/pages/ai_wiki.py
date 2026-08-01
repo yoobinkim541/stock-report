@@ -6,7 +6,7 @@ import streamlit as st
 from agent_console import wiki
 
 
-from dashboard.wiki_browser import KIND_OPTIONS, SURFACE_OPTIONS
+from dashboard.wiki_browser import KIND_OPTIONS, SURFACE_OPTIONS, build_wiki_health_model
 
 STATUS_OPTIONS = ["all", "draft", "reviewed", "stable", "archived"]
 
@@ -66,6 +66,41 @@ def render():
     cols[2].metric("검토", f"{stats.get('status_counts', {}).get('reviewed', 0)}")
     latest = stats.get("latest") or {}
     cols[3].metric("최근", (latest.get("title", "—") or "—")[:20])
+
+    try:
+        pages_all = wiki.list_pages(query="", surface="all", status="all", limit=400)
+    except Exception:
+        pages_all = []
+    try:
+        search_health = wiki.search_health()
+    except Exception:
+        search_health = {"provider": "fallback", "fallback_available": True, "qmd": {}}
+    try:
+        lint = wiki.lint_pages(pages_all)
+    except Exception:
+        lint = {"issue_count": 0, "issues": []}
+    health = build_wiki_health_model(pages_all, search_health=search_health, lint=lint)
+
+    surface_counts = health.get("surface_counts") or {}
+    if surface_counts:
+        st.markdown("##### 그룹 분포")
+        surface_series = pd.Series(surface_counts).sort_values(ascending=False)
+        st.bar_chart(surface_series, height=180)
+        kind_counts = health.get("kind_counts") or {}
+        if kind_counts:
+            top_kinds = ", ".join(
+                f"{k}: {v}" for k, v in sorted(kind_counts.items(), key=lambda item: (-item[1], item[0]))[:6]
+            )
+            st.caption(f"kind 분포 · {top_kinds}")
+
+    recommendations = health.get("recommendations") or []
+    if recommendations:
+        st.markdown("##### 개선 권고")
+        for rec in recommendations[:5]:
+            with st.container(border=True):
+                st.markdown(f"**{rec.get('title', '권고')}**")
+                st.caption(rec.get("category", "general"))
+                st.write(rec.get("detail", ""))
 
     query = st.text_input("검색", key="wiki_query", placeholder="손실한도, 레버리지, SOL, 중동, 크레딧...")
     f1, f2, f3 = st.columns([1, 1, 1])

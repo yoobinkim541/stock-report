@@ -42,6 +42,26 @@ def test_build_wiki_graph_model_links_related_pages():
     assert model["positions"]["page-a"]
 
 
+def test_build_wiki_graph_model_groups_nodes_by_surface():
+    pages = [
+        {"id": "m1", "title": "시장 1", "summary": "시장", "surface": "market", "kind": "note", "tags": ["market"], "source_refs": []},
+        {"id": "m2", "title": "시장 2", "summary": "시장", "surface": "market", "kind": "note", "tags": ["market"], "source_refs": []},
+        {"id": "p1", "title": "포트폴리오 1", "summary": "포트폴리오", "surface": "portfolio", "kind": "note", "tags": ["portfolio"], "source_refs": []},
+        {"id": "t1", "title": "티커 1", "summary": "티커", "surface": "ticker", "kind": "note", "tags": ["ticker"], "source_refs": []},
+    ]
+
+    model = wiki_mesh.build_wiki_graph_model(pages, selected_page_id="", depth=1, max_nodes=10)
+    by_id = {node["id"]: node for node in model["nodes"]}
+    groups = {group["surface"]: group for group in model["groups"]}
+
+    assert [group["surface"] for group in model["groups"]] == ["market", "portfolio", "ticker"]
+    assert groups["market"]["count"] == 2
+    assert groups["portfolio"]["count"] == 1
+    assert by_id["m1"]["surface_color"] == wiki_mesh.SURFACE_COLORS["market"]
+    assert by_id["p1"]["group"] == "portfolio"
+    assert model["positions"]["m1"] != model["positions"]["p1"]
+
+
 def test_build_wiki_graph_model_respects_max_nodes():
     pages = [
         {"id": "page-a", "title": "A", "summary": "A", "tags": ["alpha"], "source_refs": ["shared"]},
