@@ -9,6 +9,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Iterable
 
+from dashboard import chart_workspace
 from ml.strategy_studio import StrategySpec, strategy_spec_hash
 
 
@@ -115,6 +116,43 @@ def ensure_schema(conn: sqlite3.Connection | None = None) -> None:
             );
             CREATE INDEX IF NOT EXISTS idx_strategy_spec_versions_spec
                 ON strategy_spec_versions(spec_id, version DESC);
+
+            CREATE TABLE IF NOT EXISTS chart_workspaces (
+                id              TEXT PRIMARY KEY,
+                name            TEXT NOT NULL,
+                layout          TEXT NOT NULL,
+                workspace_json  TEXT NOT NULL,
+                current_version INTEGER NOT NULL,
+                created_at      TEXT NOT NULL,
+                updated_at      TEXT NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS idx_chart_workspaces_updated
+                ON chart_workspaces(updated_at DESC);
+
+            CREATE TABLE IF NOT EXISTS chart_workspace_versions (
+                row_id          INTEGER PRIMARY KEY AUTOINCREMENT,
+                workspace_id    TEXT NOT NULL,
+                version         INTEGER NOT NULL,
+                name            TEXT NOT NULL,
+                workspace_json  TEXT NOT NULL,
+                note            TEXT NOT NULL,
+                source          TEXT NOT NULL,
+                created_at      TEXT NOT NULL,
+                UNIQUE(workspace_id, version)
+            );
+            CREATE INDEX IF NOT EXISTS idx_chart_workspace_versions_workspace
+                ON chart_workspace_versions(workspace_id, version DESC);
+
+            CREATE TABLE IF NOT EXISTS chart_templates (
+                id              TEXT PRIMARY KEY,
+                kind            TEXT NOT NULL,
+                name            TEXT NOT NULL,
+                template_json   TEXT NOT NULL,
+                created_at      TEXT NOT NULL,
+                updated_at      TEXT NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS idx_chart_templates_kind
+                ON chart_templates(kind, updated_at DESC);
             """
         )
         conn.commit()
@@ -526,3 +564,251 @@ def strategy_spec_catalog(limit: int = 50) -> dict[str, Any]:
         "specs": specs,
         "version_total": sum(len(list_strategy_versions(row["id"], limit=20)) for row in specs[:10]),
     }
+
+
+def _chart_workspace_row(row: sqlite3.Row) -> dict[str, Any]:
+    workspace = json.loads(row["workspace_json"] or "{}")
+    return {
+        "id": row["id"],
+        "name": row["name"],
+        "layout": row["layout"],
+        "version": int(row["current_version"]),
+        "workspace": workspace,
+        "created_at": row["created_at"],
+        "updated_at": row["updated_at"],
+    }
+
+
+def _chart_workspace_version_row(row: sqlite3.Row) -> dict[str, Any]:
+    workspace = json.loads(row["workspace_json"] or "{}")
+    return {
+        "id": row["workspace_id"],
+        "version_row_id": row["row_id"],
+        "workspace_id": row["workspace_id"],
+        "version": int(row["version"]),
+        "name": row["name"],
+        "workspace": workspace,
+        "note": row["note"],
+        "source": row["source"],
+        "created_at": row["created_at"],
+    }
+
+
+def _chart_template_row(row: sqlite3.Row) -> dict[str, Any]:
+    payload = json.loads(row["template_json"] or "{}")
+    return {
+        "id": row["id"],
+        "kind": row["kind"],
+        "name": row["name"],
+        "template": payload,
+        "payload": payload.get("payload") if isinstance(payload, dict) else None,
+        "created_at": row["created_at"],
+        "updated_at": row["updated_at"],
+    }
+
+
+def _next_chart_workspace_version(workspace_id: str) -> tuple[int, str]:
+    with connect() as conn:
+        row = conn.execute(
+            """
+            SELECT COALESCE(MAX(version), 0) AS version
+            FROM chart_workspace_versions
+            WHERE workspace_id = ?
+            """,
+            (workspace_id,),
+        ).fetchone()
+    return int(row["version"] or 0) + 1, _now()
+
+
+def save_chart_workspace(workspace: dict[str, Any]) -> dict[str, Any]:
+    payload = chart_workspace.normalize_workspace(workspace)
+    workspace_id = str(payload.get("id") or "").strip()
+    if not workspace_id or workspace_id == "default":
+        workspace_id = chart_workspace.workspace_id(payload)
+    payload["id"] = workspace_id
+    return save_chart_workspace_version(workspace_id, payload, source="create")
+
+
+def save_chart_workspace_version(
+    workspace_id: str,
+    workspace: dict[str, Any],
+    *,
+    note: str = "",
+    source: str = "ui",
+) -> dict[str, Any]:
+    workspace_id = str(workspace_id or "").strip()
+    if not workspace_id:
+        raise ValueError("workspace_id is required")
+    payload = chart_workspace.normalize_workspace({**(workspace or {}), "id": workspace_id})
+    errors, _warnings = chart_workspace.validate_workspace(payload)
+    if errors:
+        raise ValueError("; ".join(errors))
+    payload["id"] = workspace_id
+    version, now = _next_chart_workspace_version(workspace_id)
+    with connect() as conn:
+        with conn:
+            conn.execute(
+                """
+                INSERT INTO chart_workspace_versions
+                    (workspace_id, version, name, workspace_json, note, source, created_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    workspace_id,
+                    version,
+                    str(payload.get("name") or "Workspace"),
+                    _json(payload),
+                    str(note or ""),
+                    str(source or "ui"),
+                    now,
+                ),
+            )
+            conn.execute(
+                """
+                INSERT INTO chart_workspaces
+                    (id, name, layout, workspace_json, current_version, created_at, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(id) DO UPDATE SET
+                    name=excluded.name,
+                    layout=excluded.layout,
+                    workspace_json=excluded.workspace_json,
+                    current_version=excluded.current_version,
+                    updated_at=excluded.updated_at
+                """,
+                (
+                    workspace_id,
+                    str(payload.get("name") or "Workspace"),
+                    str(payload.get("layout") or "1"),
+                    _json(payload),
+                    version,
+                    now,
+                    now,
+                ),
+            )
+    return get_chart_workspace(workspace_id) or {
+        "id": workspace_id,
+        "version": version,
+        "workspace": payload,
+    }
+
+
+def list_chart_workspaces(limit: int = 50) -> list[dict[str, Any]]:
+    limit = max(1, min(int(limit or 50), 200))
+    with connect() as conn:
+        rows = conn.execute(
+            "SELECT * FROM chart_workspaces ORDER BY updated_at DESC LIMIT ?",
+            (limit,),
+        ).fetchall()
+    return [_chart_workspace_row(row) for row in rows]
+
+
+def get_chart_workspace(
+    workspace_id: str,
+    version: int | None = None,
+) -> dict[str, Any] | None:
+    workspace_id = str(workspace_id or "").strip()
+    if not workspace_id:
+        return None
+    with connect() as conn:
+        if version is None:
+            row = conn.execute(
+                "SELECT * FROM chart_workspaces WHERE id = ?",
+                (workspace_id,),
+            ).fetchone()
+            return _chart_workspace_row(row) if row else None
+        row = conn.execute(
+            """
+            SELECT row_id, workspace_id, version, name, workspace_json, note, source, created_at
+            FROM chart_workspace_versions
+            WHERE workspace_id = ? AND version = ?
+            """,
+            (workspace_id, int(version)),
+        ).fetchone()
+    return _chart_workspace_version_row(row) if row else None
+
+
+def list_chart_workspace_versions(
+    workspace_id: str,
+    limit: int = 30,
+) -> list[dict[str, Any]]:
+    workspace_id = str(workspace_id or "").strip()
+    if not workspace_id:
+        return []
+    limit = max(1, min(int(limit or 30), 200))
+    with connect() as conn:
+        rows = conn.execute(
+            """
+            SELECT row_id, workspace_id, version, name, workspace_json, note, source, created_at
+            FROM chart_workspace_versions
+            WHERE workspace_id = ?
+            ORDER BY version DESC
+            LIMIT ?
+            """,
+            (workspace_id, limit),
+        ).fetchall()
+    return [_chart_workspace_version_row(row) for row in rows]
+
+
+def save_chart_template(template: dict[str, Any]) -> dict[str, Any]:
+    payload = dict(template or {})
+    template_id = str(payload.get("id") or "").strip()
+    kind = str(payload.get("kind") or "").strip()
+    name = str(payload.get("name") or template_id or "Template").strip()
+    if not template_id:
+        raw = _json(payload)
+        template_id = hashlib.sha256(raw.encode("utf-8")).hexdigest()[:16]
+        payload["id"] = template_id
+    if kind not in {"style", "indicators", "series"}:
+        raise ValueError(f"unsupported chart template kind: {kind}")
+    payload["kind"] = kind
+    payload["name"] = name
+    now = _now()
+    with connect() as conn:
+        with conn:
+            conn.execute(
+                """
+                INSERT INTO chart_templates
+                    (id, kind, name, template_json, created_at, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?)
+                ON CONFLICT(id) DO UPDATE SET
+                    kind=excluded.kind,
+                    name=excluded.name,
+                    template_json=excluded.template_json,
+                    updated_at=excluded.updated_at
+                """,
+                (template_id, kind, name, _json(payload), now, now),
+            )
+    rows = list_chart_templates(kind=kind, limit=200)
+    return next((row for row in rows if row["id"] == template_id), {
+        "id": template_id,
+        "kind": kind,
+        "name": name,
+        "template": payload,
+        "payload": payload.get("payload"),
+        "created_at": now,
+        "updated_at": now,
+    })
+
+
+def list_chart_templates(
+    kind: str | None = None,
+    limit: int = 50,
+) -> list[dict[str, Any]]:
+    limit = max(1, min(int(limit or 50), 200))
+    with connect() as conn:
+        if kind:
+            rows = conn.execute(
+                """
+                SELECT * FROM chart_templates
+                WHERE kind = ?
+                ORDER BY updated_at DESC
+                LIMIT ?
+                """,
+                (str(kind), limit),
+            ).fetchall()
+        else:
+            rows = conn.execute(
+                "SELECT * FROM chart_templates ORDER BY updated_at DESC LIMIT ?",
+                (limit,),
+            ).fetchall()
+    return [_chart_template_row(row) for row in rows]
