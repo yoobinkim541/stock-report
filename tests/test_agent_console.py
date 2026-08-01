@@ -2238,6 +2238,38 @@ def test_chart_drawing_snapshot_api_routes(monkeypatch, tmp_path):
     assert listing.json["snapshots"][0]["store_key"] == "cw:workspace-1:AAPL:1d:lin"
 
 
+def test_agent_console_api_allows_configured_chart_embed_cors(monkeypatch, tmp_path):
+    _isolate(monkeypatch, tmp_path)
+    monkeypatch.setenv("AGENT_CONSOLE_CORS_ORIGINS", "http://localhost:8501")
+
+    from agent_console.server import create_app
+
+    app = create_app()
+    client = app.test_client()
+    response = client.options(
+        "/api/chart-workspaces/workspace-1/drawings",
+        headers={
+            "Origin": "http://localhost:8501",
+            "Access-Control-Request-Method": "POST",
+            "Access-Control-Request-Headers": "Content-Type",
+        },
+    )
+
+    assert response.headers["Access-Control-Allow-Origin"] == "http://localhost:8501"
+    assert "POST" in response.headers["Access-Control-Allow-Methods"]
+    assert "Content-Type" in response.headers["Access-Control-Allow-Headers"]
+
+    denied = client.options(
+        "/api/chart-workspaces/workspace-1/drawings",
+        headers={
+            "Origin": "https://example.com",
+            "Access-Control-Request-Method": "POST",
+            "Access-Control-Request-Headers": "Content-Type",
+        },
+    )
+    assert "Access-Control-Allow-Origin" not in denied.headers
+
+
 def test_context_pack_exposes_strategy_studio_state(monkeypatch, tmp_path):
     _isolate(monkeypatch, tmp_path)
 

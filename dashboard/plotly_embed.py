@@ -580,7 +580,32 @@ _TEMPLATE = r"""
 
   // ── 드로잉 영속화 — localStorage (키=티커:봉:스케일 · 서버 도형 이후만 저장) ──
   const storeKey = @@STORE_KEY@@;                // null 이면 영속화 없음 (구형/테스트)
+  const drawingSyncUrl = @@DRAWING_SYNC_URL@@;    // 선택: Agent Console 서버 스냅샷 API
   let saveTimer = null;
+  function normalizeDrawingDoc(d) {
+    if (!d || d.v !== 1 || !Array.isArray(d.shapes) || !Array.isArray(d.anns)) return null;
+    if (!Array.isArray(d.vwaps)) d.vwaps = [];
+    return d;
+  }
+  function serverDrawingUrl() {
+    if (!drawingSyncUrl || !storeKey) return null;
+    try {
+      const u = new URL(drawingSyncUrl, window.location.href);
+      u.searchParams.set("store_key", storeKey);
+      return u.toString();
+    } catch (e) { return null; }
+  }
+  function uploadServerDrawings(doc) {
+    if (!drawingSyncUrl || !storeKey || !doc || typeof fetch === "undefined") return;
+    try {
+      fetch(drawingSyncUrl, {
+        method: "POST",
+        headers: {"Content-Type": "application/json"},
+        body: JSON.stringify({store_key: storeKey, "drawing": doc, source: "chart_embed"}),
+        keepalive: true,
+      }).catch(() => {});
+    } catch (e) {}
+  }
   function saveDrawings() {
     if (!storeKey) return;
     try {
@@ -591,11 +616,13 @@ _TEMPLATE = r"""
       const k = "tndraw:" + storeKey;
       if (!shapes.length && !anns.length && !vwapAnchors.length) {
         localStorage.removeItem(k);
+        uploadServerDrawings({v: 1, shapes: [], anns: [], vwaps: []});
         return;
       }
       // vwaps = ⚓ 앵커(ms)만 저장 — 트레이스는 로드 시 bounds 로 재계산 (v1 하위호환)
-      localStorage.setItem(k, JSON.stringify({v: 1, shapes: shapes, anns: anns,
-                                              vwaps: vwapAnchors.slice()}));
+      const doc = {v: 1, shapes: shapes, anns: anns, vwaps: vwapAnchors.slice()};
+      localStorage.setItem(k, JSON.stringify(doc));
+      uploadServerDrawings(doc);
     } catch (e) {}                               // 사파리 프라이빗 등 — 조용히 비영속
   }
   function scheduleSave() {
@@ -607,8 +634,7 @@ _TEMPLATE = r"""
     if (!storeKey) return null;
     try {
       const d = JSON.parse(localStorage.getItem("tndraw:" + storeKey) || "null");
-      if (!d || d.v !== 1 || !Array.isArray(d.shapes) || !Array.isArray(d.anns)) return null;
-      return d;
+      return normalizeDrawingDoc(d);
     } catch (e) { return null; }
   }
 
@@ -638,6 +664,46 @@ _TEMPLATE = r"""
   // 개수가 아닌 **깊은 복사본**을 보존 기준으로 삼는다(지우개로 인덱스가 밀려도 안전).
   const baseShapes = JSON.parse(JSON.stringify(fig.layout.shapes || []));
   const baseShapeCount = baseShapes.length;      // 앞쪽 N개 = 서버 도형 → 스냅/편집 금지
+
+  function clearVwapTraces() {
+    const idxs = (gd.data || []).map((t, i) => (t && t.meta === "tool-avwap") ? i : null)
+      .filter((i) => i !== null);
+    if (!idxs.length || !Plotly.deleteTraces) return;
+    try { Plotly.deleteTraces(gd, idxs); } catch (e) {}
+  }
+  function applyDrawingDoc(saved, replace) {
+    saved = normalizeDrawingDoc(saved);
+    if (!saved) return;
+    const axes = new Set(Object.keys(fig.layout).filter((k) => k.startsWith("yaxis"))
+      .map((k) => "y" + k.slice(5)));
+    const okRef = (r) => !r || r === "paper" || axes.has(r);
+    const shapeBase = replace ? (gd.layout.shapes || []).slice(0, baseShapeCount) : (gd.layout.shapes || []);
+    const annBase = replace
+      ? (gd.layout.annotations || []).filter((a) => !String(a.name || "").startsWith("tool-"))
+      : (gd.layout.annotations || []);
+    drawGuard++;
+    Plotly.relayout(gd, {
+      shapes: shapeBase.concat(saved.shapes.filter((s) => okRef(s.yref))),
+      annotations: annBase.concat(saved.anns.filter((a) => okRef(a.yref))),
+    }).then(() => { undraw(); });
+  }
+  function restoreServerDrawings() {
+    const url = serverDrawingUrl();
+    if (!url || typeof fetch === "undefined") return;
+    try {
+      fetch(url, {method: "GET"}).then((r) => r && r.ok ? r.json() : null).then((payload) => {
+        const doc = normalizeDrawingDoc(payload && payload.snapshot && payload.snapshot.drawing);
+        if (!doc) return;
+        try { localStorage.setItem("tndraw:" + storeKey, JSON.stringify(doc)); } catch (e) {}
+        applyDrawingDoc(doc, true);
+        if (doc.vwaps && doc.vwaps.length) {
+          vwapAnchors.length = 0;
+          clearVwapTraces();
+          for (const ms of doc.vwaps) addVwap(+ms);
+        }
+      }).catch(() => {});
+    } catch (e) {}
+  }
 
   function nearestRow(ms) {                      // 가장 가까운 봉 (이진 탐색 + 이웃 비교)
     if (!bounds.length) return null;
@@ -1589,17 +1655,10 @@ _TEMPLATE = r"""
     // 하단 지표 구성이 바뀌어 사라진 서브패널 축(y3 등)을 참조하는 도형은 제외(고아 방지)
     const saved = loadDrawings();
     if (saved && (saved.shapes.length || saved.anns.length)) {
-      const axes = new Set(Object.keys(fig.layout).filter((k) => k.startsWith("yaxis"))
-        .map((k) => "y" + k.slice(5)));
-      const okRef = (r) => !r || r === "paper" || axes.has(r);
-      drawGuard++;                               // 복원도 도형 메아리 — drawGuard 로
-      Plotly.relayout(gd, {
-        shapes: (gd.layout.shapes || []).concat(saved.shapes.filter((s) => okRef(s.yref))),
-        annotations: (gd.layout.annotations || []).concat(
-          saved.anns.filter((a) => okRef(a.yref))),
-      }).then(() => { undraw(); });
+      applyDrawingDoc(saved, false);
     }
     for (const ms of ((saved && saved.vwaps) || [])) addVwap(+ms);   // ⚓ 앵커 재계산 복원
+    restoreServerDrawings();                         // 서버 스냅샷이 있으면 local 복원 뒤 최신값으로 교체
     const last = bounds.length ? bounds[bounds.length - 1][0] : null;
     const freshView = loadFreshView();           // ⚡자동갱신·설정변경 직후 = 보던 위치 복원
     if (freshView) {
@@ -1683,6 +1742,7 @@ def pannable_chart_html(fig, hist, *, height: int = 460, view_days=None,
                         pct_mode: bool = False,
                         y_log: bool = False,
                         store_key: str | None = None,
+                        drawing_sync_url: str | None = None,
                         crosshair_key: str | None = None,
                         dock: bool = False,
                         live: bool = False,
@@ -1694,6 +1754,9 @@ def pannable_chart_html(fig, hist, *, height: int = 460, view_days=None,
     y_log — 로그 스케일: 도형/축 y 좌표가 log10 공간 (스냅·측정이 실가격으로 환산).
     store_key — 드로잉 영속화 localStorage 키(예: "NVDA:1d:lin"). None=비영속.
                 스케일(lin/log/pct)을 키에 포함해야 좌표계 혼선이 없다(호출부 책임).
+    drawing_sync_url — 선택 Agent Console 드로잉 스냅샷 API endpoint. 지정하면
+                       localStorage 복원 뒤 서버 최신 스냅샷을 받아 교체하고, 저장 때
+                       같은 endpoint 로 POST 해 기기 간 복원 기반을 만든다.
     crosshair_key — 멀티 iframe 크로스헤어 동기화 키. 같은 키를 공유하는 차트들이
                     localStorage 브리지로 현재 시간축 위치를 따라간다. None=비동기.
     dock — True 면 도구바를 좌측 세로 독으로 (풀뷰 — TradingView 배치).
@@ -1724,6 +1787,7 @@ def pannable_chart_html(fig, hist, *, height: int = 460, view_days=None,
             .replace("@@LIVE@@", json.dumps(bool(live)))
             .replace("@@LAST_CLOSE@@", json.dumps(last_close))
             .replace("@@STORE_KEY@@", json.dumps(store_key))
+            .replace("@@DRAWING_SYNC_URL@@", json.dumps(drawing_sync_url))
             .replace("@@CROSSHAIR_KEY@@", json.dumps(crosshair_key))
             .replace("@@DOCK@@", json.dumps(bool(dock)))
             .replace("@@LIGHTMODE@@", json.dumps(bool(light)))

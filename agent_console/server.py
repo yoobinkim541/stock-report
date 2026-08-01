@@ -15,6 +15,21 @@ def create_app() -> Flask:
     app = Flask(__name__, static_folder=str(STATIC_DIR), static_url_path="")
     storage.ensure_schema()
 
+    @app.after_request
+    def add_cors_headers(response):
+        origin = str(request.headers.get("Origin") or "").strip()
+        allowed = {
+            item.strip().rstrip("/")
+            for item in str(os.getenv("AGENT_CONSOLE_CORS_ORIGINS") or "http://localhost:8501,http://127.0.0.1:8501").split(",")
+            if item.strip()
+        }
+        if origin and origin.rstrip("/") in allowed:
+            response.headers.setdefault("Access-Control-Allow-Origin", origin)
+            response.headers.setdefault("Vary", "Origin")
+            response.headers.setdefault("Access-Control-Allow-Methods", "GET, POST, DELETE, OPTIONS")
+            response.headers.setdefault("Access-Control-Allow-Headers", "Content-Type")
+        return response
+
     @app.get("/")
     def index():
         return send_from_directory(STATIC_DIR, "index.html")

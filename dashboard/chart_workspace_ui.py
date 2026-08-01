@@ -1,6 +1,7 @@
 """Streamlit renderer for saved chart workspaces."""
 from __future__ import annotations
 
+import os
 from typing import Any
 
 import pandas as pd
@@ -66,6 +67,22 @@ def _crosshair_store_key(ws: dict[str, Any]) -> str | None:
     return f"cw:{safe_scope}:xh"
 
 
+def _drawing_sync_url(ws: dict[str, Any], store_key: str | None) -> str | None:
+    if not store_key:
+        return None
+    workspace_id = str((ws or {}).get("id") or "").strip()
+    if not workspace_id:
+        return None
+    if str(store_key).startswith("cw:global:"):
+        return None
+    safe_workspace = "".join(ch if ch.isalnum() or ch in ".-_" else "_" for ch in workspace_id)
+    base = str(os.getenv("AGENT_CONSOLE_URL") or "").strip()
+    if not base:
+        port = str(os.getenv("AGENT_CONSOLE_PORT") or "8797").strip() or "8797"
+        base = f"http://127.0.0.1:{port}"
+    return f"{base.rstrip('/')}/api/chart-workspaces/{safe_workspace}/drawings"
+
+
 def _load_panel_hist(panel: dict[str, Any]):
     ticker = panel["ticker"]
     tf = panel["timeframe"]
@@ -125,6 +142,7 @@ def _render_panel_chart(ws: dict[str, Any], panel: dict[str, Any], *, height: in
     from dashboard import plotly_embed
 
     bounds = plotly_embed.compare_bounds_json(hist, compare, view_days) if compare else None
+    store_key = _drawing_store_key(ws, panel, compare=bool(compare))
     st.components.v1.html(
         plotly_embed.pannable_chart_html(
             fig,
@@ -133,7 +151,8 @@ def _render_panel_chart(ws: dict[str, Any], panel: dict[str, Any], *, height: in
             view_days=view_days,
             bounds_json=bounds,
             pct_mode=bool(compare),
-            store_key=_drawing_store_key(ws, panel, compare=bool(compare)),
+            store_key=store_key,
+            drawing_sync_url=_drawing_sync_url(ws, store_key),
             crosshair_key=_crosshair_store_key(ws),
             light=theme.is_light(),
         ),

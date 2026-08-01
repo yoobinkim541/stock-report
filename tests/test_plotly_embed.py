@@ -98,6 +98,31 @@ def test_embed_persistence_and_readout_contract():
     assert "const storeKey = null" in norm
 
 
+def test_embed_server_drawing_sync_contract():
+    """드로잉 서버 스냅샷 동기화 — 선택 endpoint 주입·GET 복원·POST 저장 계약."""
+    hist = _hist()
+    fig = charts.price_chart(hist, "T", kind="candle")
+    html = plotly_embed.pannable_chart_html(
+        fig,
+        hist,
+        store_key="cw:w1:NVDA:1d:lin",
+        drawing_sync_url="http://127.0.0.1:8797/api/chart-workspaces/w1/drawings",
+    )
+    for token in (
+        'const drawingSyncUrl = "http://127.0.0.1:8797/api/chart-workspaces/w1/drawings"',
+        "function serverDrawingUrl",
+        "function restoreServerDrawings",
+        "function uploadServerDrawings",
+        "searchParams.set(\"store_key\", storeKey)",
+        'fetch(drawingSyncUrl',
+        '"drawing": doc',
+    ):
+        assert token in html, f"누락: {token}"
+
+    norm = plotly_embed.pannable_chart_html(fig, hist, store_key="cw:w1:NVDA:1d:lin")
+    assert "const drawingSyncUrl = null" in norm
+
+
 def test_embed_crosshair_sync_contract():
     """멀티 iframe 크로스헤어 동기화 — localStorage 브리지와 키 주입 계약."""
     hist = _hist()

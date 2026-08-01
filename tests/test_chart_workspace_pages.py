@@ -80,6 +80,19 @@ def test_workspace_drawing_store_key_respects_sync_scope():
     assert chart_workspace_ui._drawing_store_key(ws, panel, compare=False) is None
 
 
+def test_workspace_drawing_sync_url_targets_agent_console(monkeypatch):
+    from dashboard import chart_workspace_ui
+
+    monkeypatch.setenv("AGENT_CONSOLE_URL", "http://agent.local")
+
+    assert (
+        chart_workspace_ui._drawing_sync_url({"id": "layout 1"}, "cw:layout_1:MSFT:1d:lin")
+        == "http://agent.local/api/chart-workspaces/layout_1/drawings"
+    )
+    assert chart_workspace_ui._drawing_sync_url({"id": "layout 1"}, None) is None
+    assert chart_workspace_ui._drawing_sync_url({"id": "layout 1"}, "cw:global:MSFT:1d:lin") is None
+
+
 def test_workspace_crosshair_store_key_respects_sync_toggle():
     from dashboard import chart_workspace_ui
 
