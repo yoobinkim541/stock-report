@@ -1617,6 +1617,8 @@ def _analysis_snapshot(ticker, hist=None, price=None):
             st.plotly_chart(charts.analyst_ratings(rec), width="stretch", config=_NOBAR,
                             key=f"{ticker}_kr_analysis_ratings")
             st.caption(f"애널리스트 {total_rec}명 중 {buyers}명 매수 · {rec_counts.get('hold', 0)}명 보유 · {sellers}명 매도")
+        else:
+            st.info("애널리스트 의견 데이터 없음 — 분포 차트를 표시하지 않았습니다.", icon="ℹ️")
         if c.get("target_mean") and price:
             st.plotly_chart(
                 charts.target_price_fan(cached.ohlc(ticker, period="1y"), price,
@@ -1625,6 +1627,14 @@ def _analysis_snapshot(ticker, hist=None, price=None):
                 width="stretch", config=_NOBAR,
                 key=f"{ticker}_kr_analysis_target_fan")
             st.caption("목표가 분포는 최고·평균·최저 컨센서스를 함께 표시합니다.")
+        else:
+            missing = []
+            if not c.get("target_mean"):
+                missing.append("컨센서스 목표가")
+            if not price:
+                missing.append("현재가")
+            st.info(f"목표가 팬 차트 표시 불가 — {' / '.join(missing) if missing else '필수 입력'} 부족",
+                    icon="ℹ️")
         details = list(filter(None, [
             f"매출 YoY {data.f_frac_pct(tr.get('rev_yoy'))}" if tr.get("rev_yoy") is not None else None,
             f"순마진 {data.f_frac_pct(tr.get('net_margin'))}" if tr.get("net_margin") is not None else None,

@@ -1390,6 +1390,39 @@ ticker.render()
     assert "리비전 모멘텀" in body
 
 
+def test_ticker_page_kr_core_context_shows_fallback_when_consensus_inputs_missing():
+    script = _STUBS + '''
+cached.realtime_quote = lambda t: None
+cached.ohlc = lambda t, period="max": pd.DataFrame()
+cached.valuation = lambda t: {
+    "metrics": {"market_type": "kr", "source": "DART", "fiscal_year": 2025,
+                 "confidence": "high", "per": 12.0, "forward_pe": 9.5, "pbr": 1.1,
+                 "roe": 0.18, "eps_ttm": 5000},
+    "consensus": {},
+    "history": [],
+}
+cached.financials = lambda t: {"trends": {
+    "rev_yoy": 0.11, "net_margin": 0.15, "debt_to_assets": 0.3, "n_years": 5}}
+cached.institutional = lambda t: {
+    "accum": {"accum_score": 72.0},
+    "kr_flow": {"foreign_net_5d": 12000, "inst_net_5d": 8000, "smart_net_20d": 20000,
+                "foreign_ratio": 0.47, "foreign_buy_streak": 4, "n": 20},
+}
+cached.disclosures = lambda t: {"list": [], "error": "", "market": "KR"}
+cached.earnings = lambda t: {"history": []}
+cached.earnings_history_deep = lambda t, limit=12: []
+st.session_state["ticker"] = "005930.KS"
+from dashboard.pages import ticker
+ticker.render()
+'''
+    at = AppTest.from_string(script, default_timeout=30)
+    at.run()
+    assert not at.exception, str(at.exception)
+    info_body = " ".join(str(getattr(item, "value", "")) for item in at.info)
+    assert "애널리스트 의견 데이터 없음" in info_body
+    assert "목표가 팬 차트 표시 불가" in info_body
+
+
 def test_ticker_llm_analysis_section():
     """🤖 AI 종목 분석 — 버튼 게이트·클릭 시 구조화 해설 렌더 (views 스텁·무LLM)."""
     script = _STUBS + '''
