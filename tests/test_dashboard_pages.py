@@ -1346,6 +1346,50 @@ ticker.render()
     assert "펀더멘털 데이터 없음" in " ".join(str(c.value) for c in at2.caption)
 
 
+def test_ticker_page_kr_core_context_is_visible_without_expander():
+    script = _STUBS + '''
+cached.realtime_quote = lambda t: None
+cached.valuation = lambda t: {
+    "metrics": {"market_type": "kr", "source": "DART+marcap", "fiscal_year": 2025,
+                 "confidence": "high", "per": 12.0, "forward_pe": 9.5, "pbr": 1.1,
+                 "roe": 0.18, "eps_ttm": 5000, "eps_fwd": 5600, "market_cap": 1_000_000,
+                 "net_income": 80_000, "equity": 450_000, "bps": 20000,
+                 "kr_consensus_source": "naver", "kr_consensus_year": 2026},
+    "consensus": {"target_mean": 68000.0, "target_high": 76000.0, "target_low": 62000.0,
+                   "target_upside_pct": 12.5, "revision_momentum": 0.07, "n_analysts": 8,
+                   "rec_buy": 4, "rec_hold": 3, "rec_strong_buy": 1, "eps_rev_up_30d": 2,
+                   "eps_rev_down_30d": 1},
+    "history": [{"date": "2026-07-01", "surprise_pct": 5.4, "eps_est": 1100, "eps_actual": 1160}],
+}
+cached.financials = lambda t: {"trends": {
+    "rev_yoy": 0.11, "net_margin": 0.15, "debt_to_assets": 0.3, "n_years": 5}}
+cached.institutional = lambda t: {
+    "accum": {"accum_score": 72.0},
+    "kr_flow": {"foreign_net_5d": 12000, "inst_net_5d": 8000, "smart_net_20d": 20000,
+                "foreign_ratio": 0.47, "foreign_buy_streak": 4, "n": 20},
+}
+cached.disclosures = lambda t: {"list": [{"date": "2026-07-30"}], "error": "", "market": "KR"}
+cached.earnings = lambda t: {"history": [{"date": "2026-07-01", "surprise_pct": 5.4}]}
+cached.earnings_history_deep = lambda t, limit=12: [
+    {"date": "2026-07-01", "eps_actual": 1.0},
+    {"date": "2026-04-01", "eps_actual": 1.0},
+    {"date": "2026-01-01", "eps_actual": 1.0},
+    {"date": "2025-10-01", "eps_actual": 1.0},
+    {"date": "2025-07-01", "eps_actual": 1.0},
+]
+st.session_state["ticker"] = "005930.KS"
+from dashboard.pages import ticker
+ticker.render()
+'''
+    at = AppTest.from_string(script, default_timeout=30)
+    at.run()
+    assert not at.exception, str(at.exception)
+    assert not any("한국 종목 심화 컨텍스트" in str(e.label) for e in at.expander)
+    body = " ".join(str(getattr(m, "value", "")) for m in at.markdown)
+    assert "목표가 여력" in body
+    assert "리비전 모멘텀" in body
+
+
 def test_ticker_llm_analysis_section():
     """🤖 AI 종목 분석 — 버튼 게이트·클릭 시 구조화 해설 렌더 (views 스텁·무LLM)."""
     script = _STUBS + '''
