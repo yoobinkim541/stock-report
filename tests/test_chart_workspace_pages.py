@@ -20,6 +20,7 @@ from dashboard import chart_workspace_ui
 
 _orig_catalog = chart_workspace_ui.cached.chart_workspace_catalog
 _orig_versions = chart_workspace_ui.cached.chart_workspace_versions
+_orig_alert_runs = chart_workspace_ui.views.chart_alert_runs
 
 workspace = {{
     "id": "w1",
@@ -43,10 +44,23 @@ try:
         {{"id": workspace_id, "version": 3, "created_at": "2026-08-01T00:00:00+00:00"}},
         {{"id": workspace_id, "version": 2, "created_at": "2026-07-31T00:00:00+00:00"}},
     ]
+    chart_workspace_ui.views.chart_alert_runs = lambda workspace_id, limit=5: [
+        {{
+            "id": 7,
+            "workspace_id": workspace_id,
+            "rule_count": 2,
+            "event_count": 1,
+            "missing_bars": [],
+            "notification": {{"attempted": 1, "delivered": 1, "failed": 0, "failures": []}},
+            "status": "ok",
+            "created_at": "2026-08-01T00:05:00+00:00",
+        }}
+    ]
     chart_workspace_ui.render_chart_workspace(workspace, render_charts=False)
 finally:
     chart_workspace_ui.cached.chart_workspace_catalog = _orig_catalog
     chart_workspace_ui.cached.chart_workspace_versions = _orig_versions
+    chart_workspace_ui.views.chart_alert_runs = _orig_alert_runs
 """
     at = AppTest.from_string(script, default_timeout=30)
     at.run()
@@ -61,6 +75,8 @@ finally:
     assert "저장된 레이아웃" in body
     assert "Saved Layout" in body
     assert "알림 매니저" in body
+    assert "최근 실행" in body
+    assert "발송 1/1" in body
 
 
 def test_workspace_drawing_store_key_respects_sync_scope():

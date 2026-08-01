@@ -265,6 +265,15 @@ def create_app() -> Flask:
             ),
         })
 
+    @app.get("/api/chart-alerts/runs")
+    def chart_alert_runs():
+        limit = int(request.args.get("limit", "20") or 20)
+        workspace_id = request.args.get("workspace_id")
+        return jsonify({
+            "ok": True,
+            "runs": storage.list_chart_alert_runs(workspace_id=workspace_id, limit=limit),
+        })
+
     @app.post("/api/chart-alerts/rules")
     def chart_alert_rule_save():
         payload = request.get_json(silent=True) or {}

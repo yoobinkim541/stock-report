@@ -2352,6 +2352,92 @@ def test_chart_alert_worker_loads_bars_updates_state_and_notifies(monkeypatch, t
     assert saved["last_state"]["event"]["alert_id"] == rule["id"]
 
 
+def test_chart_alert_run_history_round_trips_and_filters(monkeypatch, tmp_path):
+    _isolate(monkeypatch, tmp_path)
+
+    from agent_console import storage
+
+    saved = storage.save_chart_alert_run({
+        "workspace_id": "workspace-1",
+        "rule_count": 2,
+        "event_count": 1,
+        "missing_bars": [{"symbol": "MSFT", "timeframe": "5m"}],
+        "notification": {"attempted": 1, "delivered": 1, "failed": 0, "failures": []},
+        "status": "ok",
+    })
+
+    assert saved["id"] > 0
+    assert saved["workspace_id"] == "workspace-1"
+    assert saved["event_count"] == 1
+    assert saved["notification"]["delivered"] == 1
+    listed = storage.list_chart_alert_runs(workspace_id="workspace-1")
+    assert [row["id"] for row in listed] == [saved["id"]]
+    assert listed[0]["missing_bars"][0]["symbol"] == "MSFT"
+    assert storage.list_chart_alert_runs(workspace_id="other") == []
+
+
+def test_chart_alert_worker_persists_run_history(monkeypatch, tmp_path):
+    _isolate(monkeypatch, tmp_path)
+
+    import pandas as pd
+    from agent_console import storage
+    from agent_console.chart_alert_worker import run_chart_alert_cycle
+
+    storage.save_chart_alert_rule({
+        "workspace_id": "workspace-1",
+        "store_key": "cw:workspace-1:AAPL:5m:lin",
+        "symbol": "AAPL",
+        "timeframe": "5m",
+        "name": "AAPL breakout",
+        "condition": {"type": "price", "operator": "crossing_up", "value": 100.0},
+        "message": "AAPL crossed 100",
+        "frequency": "once",
+        "enabled": True,
+    })
+    bars = pd.DataFrame(
+        {"Close": [99.0, 101.0]},
+        index=pd.date_range("2026-08-01 09:30", periods=2, freq="5min", tz="UTC"),
+    )
+
+    result = run_chart_alert_cycle(
+        workspace_id="workspace-1",
+        notify=False,
+        load_bars_fn=lambda symbol, timeframe: bars,
+    )
+
+    runs = storage.list_chart_alert_runs(workspace_id="workspace-1")
+    assert result["run_id"] == runs[0]["id"]
+    assert runs[0]["rule_count"] == 1
+    assert runs[0]["event_count"] == 1
+    assert runs[0]["status"] == "ok"
+
+
+def test_chart_alert_run_history_api_routes(monkeypatch, tmp_path):
+    _isolate(monkeypatch, tmp_path)
+
+    from agent_console import storage
+    from agent_console.server import create_app
+
+    storage.save_chart_alert_run({
+        "workspace_id": "workspace-1",
+        "rule_count": 2,
+        "event_count": 1,
+        "missing_bars": [],
+        "notification": {"attempted": 1, "delivered": 1, "failed": 0, "failures": []},
+        "status": "ok",
+    })
+
+    client = create_app().test_client()
+    result = client.get("/api/chart-alerts/runs", query_string={"workspace_id": "workspace-1"})
+
+    assert result.status_code == 200
+    payload = result.json
+    assert payload["ok"] is True
+    assert len(payload["runs"]) == 1
+    assert payload["runs"][0]["event_count"] == 1
+    assert payload["runs"][0]["notification"]["delivered"] == 1
+
+
 def test_strategy_studio_api_routes(monkeypatch, tmp_path):
     _isolate(monkeypatch, tmp_path)
 

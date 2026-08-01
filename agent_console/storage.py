@@ -186,6 +186,20 @@ def ensure_schema(conn: sqlite3.Connection | None = None) -> None:
                 ON chart_alert_rules(workspace_id, updated_at DESC);
             CREATE INDEX IF NOT EXISTS idx_chart_alert_rules_symbol
                 ON chart_alert_rules(symbol, timeframe, enabled);
+
+            CREATE TABLE IF NOT EXISTS chart_alert_runs (
+                id                INTEGER PRIMARY KEY AUTOINCREMENT,
+                workspace_id      TEXT NOT NULL,
+                status            TEXT NOT NULL,
+                rule_count        INTEGER NOT NULL,
+                event_count       INTEGER NOT NULL,
+                missing_bars_json TEXT NOT NULL,
+                notification_json TEXT NOT NULL,
+                result_json       TEXT NOT NULL,
+                created_at        TEXT NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS idx_chart_alert_runs_workspace
+                ON chart_alert_runs(workspace_id, created_at DESC);
             """
         )
         conn.commit()
@@ -670,6 +684,21 @@ def _chart_alert_rule_row(row: sqlite3.Row) -> dict[str, Any]:
     }
 
 
+def _chart_alert_run_row(row: sqlite3.Row) -> dict[str, Any]:
+    result = json.loads(row["result_json"] or "{}")
+    return {
+        "id": int(row["id"]),
+        "workspace_id": row["workspace_id"],
+        "status": row["status"],
+        "rule_count": int(row["rule_count"]),
+        "event_count": int(row["event_count"]),
+        "missing_bars": json.loads(row["missing_bars_json"] or "[]"),
+        "notification": json.loads(row["notification_json"] or "{}"),
+        "result": result,
+        "created_at": row["created_at"],
+    }
+
+
 def _next_chart_workspace_version(workspace_id: str) -> tuple[int, str]:
     with connect() as conn:
         row = conn.execute(
@@ -1072,6 +1101,74 @@ def update_chart_alert_state(rule_id: str, state: dict[str, Any]) -> dict[str, A
     if saved is None:
         raise ValueError(f"chart alert rule not found: {rule_id}")
     return saved
+
+
+def save_chart_alert_run(payload: dict[str, Any]) -> dict[str, Any]:
+    data = dict(payload or {})
+    workspace_id = str(data.get("workspace_id") or "").strip()
+    status = str(data.get("status") or "ok").strip().lower() or "ok"
+    missing_bars = data.get("missing_bars") if isinstance(data.get("missing_bars"), list) else []
+    notification = data.get("notification") if isinstance(data.get("notification"), dict) else {}
+    result = data.get("result") if isinstance(data.get("result"), dict) else dict(data)
+    rule_count = int(data.get("rule_count") or 0)
+    event_count = int(data.get("event_count") or 0)
+    now = str(data.get("created_at") or _now())
+    with connect() as conn:
+        with conn:
+            cur = conn.execute(
+                """
+                INSERT INTO chart_alert_runs
+                    (workspace_id, status, rule_count, event_count, missing_bars_json,
+                     notification_json, result_json, created_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    workspace_id,
+                    status,
+                    rule_count,
+                    event_count,
+                    _json(missing_bars),
+                    _json(notification),
+                    _json(result),
+                    now,
+                ),
+            )
+            run_id = int(cur.lastrowid)
+    rows = list_chart_alert_runs(workspace_id=workspace_id or None, limit=1)
+    return next((row for row in rows if row["id"] == run_id), {
+        "id": run_id,
+        "workspace_id": workspace_id,
+        "status": status,
+        "rule_count": rule_count,
+        "event_count": event_count,
+        "missing_bars": missing_bars,
+        "notification": notification,
+        "result": result,
+        "created_at": now,
+    })
+
+
+def list_chart_alert_runs(*, workspace_id: str | None = None, limit: int = 20) -> list[dict[str, Any]]:
+    clauses = []
+    params: list[Any] = []
+    if workspace_id:
+        clauses.append("workspace_id = ?")
+        params.append(str(workspace_id).strip())
+    where = " WHERE " + " AND ".join(clauses) if clauses else ""
+    limit = max(1, min(int(limit or 20), 200))
+    with connect() as conn:
+        rows = conn.execute(
+            f"""
+            SELECT id, workspace_id, status, rule_count, event_count, missing_bars_json,
+                   notification_json, result_json, created_at
+            FROM chart_alert_runs
+            {where}
+            ORDER BY created_at DESC, id DESC
+            LIMIT ?
+            """,
+            (*params, limit),
+        ).fetchall()
+    return [_chart_alert_run_row(row) for row in rows]
 
 
 def save_chart_template(template: dict[str, Any]) -> dict[str, Any]:

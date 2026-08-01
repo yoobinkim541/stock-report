@@ -1938,6 +1938,14 @@ def chart_alert_rules(workspace_id: str, limit: int = 50) -> list[dict]:
         return []
 
 
+def chart_alert_runs(workspace_id: str, limit: int = 5) -> list[dict]:
+    """차트 알림 워커 실행 이력."""
+    try:
+        return storage.list_chart_alert_runs(workspace_id=workspace_id, limit=limit)
+    except Exception:
+        return []
+
+
 def chart_alert_rule_save(rule: dict) -> dict:
     """차트 알림 룰 저장."""
     return storage.save_chart_alert_rule(rule)

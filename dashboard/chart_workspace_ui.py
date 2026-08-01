@@ -303,6 +303,35 @@ def _render_alert_manager(ws: dict[str, Any], panels: list[dict[str, Any]]) -> N
     else:
         st.caption("저장된 차트 알림이 아직 없습니다.")
 
+    try:
+        runs = views.chart_alert_runs(workspace_id, limit=5) if workspace_id else []
+    except Exception:
+        runs = []
+    if runs:
+        latest = runs[0]
+        notification = latest.get("notification") or {}
+        attempted = int(notification.get("attempted") or 0)
+        delivered = int(notification.get("delivered") or 0)
+        missing = len(latest.get("missing_bars") or [])
+        st.caption(
+            f"최근 실행 · 룰 {latest.get('rule_count', 0)} · 트리거 {latest.get('event_count', 0)} · "
+            f"발송 {delivered}/{attempted} · 누락 {missing} · {latest.get('created_at', '—')}"
+        )
+        if len(runs) > 1:
+            st.dataframe(
+                pd.DataFrame([{
+                    "시각": row.get("created_at"),
+                    "룰": row.get("rule_count"),
+                    "트리거": row.get("event_count"),
+                    "발송": f"{(row.get('notification') or {}).get('delivered', 0)}/{(row.get('notification') or {}).get('attempted', 0)}",
+                    "누락": len(row.get("missing_bars") or []),
+                    "상태": row.get("status"),
+                } for row in runs[:5]]),
+                hide_index=True,
+                width="stretch",
+                height=min(220, 44 + 32 * min(len(runs), 5)),
+            )
+
 
 def _alert_operator_label(operator: str) -> str:
     return {

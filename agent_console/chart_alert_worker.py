@@ -60,14 +60,27 @@ def run_chart_alert_cycle(
     if notify and events:
         notification = chart_alert_dispatcher.dispatch_alert_events(events, send_fn=send_fn)
 
-    return {
+    result = {
         "ok": True,
+        "workspace_id": str(workspace_id).strip() if workspace_id else "",
         "rule_count": len(rules),
         "event_count": len(events),
         "events": events,
         "missing_bars": missing_bars,
         "notification": notification,
     }
+    saved_run = storage.save_chart_alert_run({
+        "workspace_id": result["workspace_id"],
+        "status": "ok",
+        "rule_count": result["rule_count"],
+        "event_count": result["event_count"],
+        "missing_bars": result["missing_bars"],
+        "notification": result["notification"],
+        "result": result,
+    })
+    result["run_id"] = saved_run["id"]
+    result["created_at"] = saved_run["created_at"]
+    return result
 
 
 def load_chart_alert_bars(symbol: str, timeframe: str) -> pd.DataFrame | None:
