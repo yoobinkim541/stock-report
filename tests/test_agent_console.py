@@ -2215,6 +2215,56 @@ def test_chart_alert_rules_accept_multi_condition_indicator_alert(monkeypatch, t
     assert rule["condition"]["all"][1]["field"] == "rsi_14"
 
 
+def test_chart_alert_batch_api_evaluates_saved_rules_from_bars(monkeypatch, tmp_path):
+    _isolate(monkeypatch, tmp_path)
+
+    from agent_console.server import create_app
+    from agent_console import storage
+
+    app = create_app()
+    client = app.test_client()
+    rule = client.post("/api/chart-alerts/rules", json={
+        "workspace_id": "workspace-1",
+        "store_key": "cw:workspace-1:AAPL:5m:lin",
+        "symbol": "AAPL",
+        "timeframe": "5m",
+        "name": "AAPL price + RSI",
+        "condition": {
+            "all": [
+                {"type": "price", "operator": "crossing_up", "value": 100.0},
+                {"type": "indicator", "field": "rsi_14", "operator": "less_than", "value": 100.0},
+            ]
+        },
+        "frequency": "once",
+        "enabled": True,
+    }).json["rule"]
+    closes = [
+        100, 99, 98, 97, 96,
+        95, 96, 97, 98, 99,
+        98, 97, 96, 95, 94,
+        95, 96, 97, 99, 101,
+    ]
+    bars = [
+        {"time": f"2026-08-01T{9 + (30 + i * 5) // 60:02d}:{(30 + i * 5) % 60:02d}:00Z", "close": close}
+        for i, close in enumerate(closes)
+    ]
+
+    result = client.post("/api/chart-alerts/evaluate-batch", json={
+        "workspace_id": "workspace-1",
+        "bars": {"AAPL": bars},
+    })
+
+    assert result.status_code == 200
+    payload = result.json
+    assert payload["ok"] is True
+    assert payload["event_count"] == 1
+    assert payload["events"][0]["alert_id"] == rule["id"]
+    assert payload["events"][0]["matched_conditions"] == ["price:crossing_up", "indicator:rsi_14:less_than"]
+    saved = storage.get_chart_alert_rule(rule["id"])
+    assert saved["last_state"]["triggered"] is True
+    assert saved["last_state"]["event"]["alert_id"] == rule["id"]
+
+
 def test_strategy_studio_api_routes(monkeypatch, tmp_path):
     _isolate(monkeypatch, tmp_path)
 

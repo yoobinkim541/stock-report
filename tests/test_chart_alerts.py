@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import pandas as pd
+
 from agent_console.chart_alerts import evaluate_chart_alert, evaluate_price_alert
 
 
@@ -110,3 +112,41 @@ def test_drawing_line_alert_interpolates_threshold_at_current_time():
     assert result["triggered"] is True
     assert result["event"]["threshold"] == 105.0
     assert result["event"]["operator"] == "crossing_up"
+
+
+def test_alert_runner_computes_rsi_and_evaluates_saved_rules_from_bars():
+    from agent_console.chart_alert_runner import evaluate_alert_rules
+
+    idx = pd.date_range("2026-08-01 09:30", periods=20, freq="5min", tz="UTC")
+    closes = [
+        100, 99, 98, 97, 96,
+        95, 96, 97, 98, 99,
+        98, 97, 96, 95, 94,
+        95, 96, 97, 99, 101,
+    ]
+    bars = pd.DataFrame({"close": closes}, index=idx)
+    rule = {
+        "id": "alert-rsi-1",
+        "symbol": "AAPL",
+        "name": "AAPL price + RSI",
+        "condition": {
+            "all": [
+                {"type": "price", "operator": "crossing_up", "value": 100.0},
+                {"type": "indicator", "field": "rsi_14", "operator": "less_than", "value": 100.0},
+            ]
+        },
+        "frequency": "once",
+        "enabled": True,
+    }
+
+    events = evaluate_alert_rules([rule], {"AAPL": bars})
+
+    assert len(events) == 1
+    event = events[0]
+    assert event["alert_id"] == "alert-rsi-1"
+    assert event["symbol"] == "AAPL"
+    assert event["current_price"] == 101.0
+    assert event["previous_price"] == 99.0
+    assert event["condition_count"] == 2
+    assert event["matched_conditions"] == ["price:crossing_up", "indicator:rsi_14:less_than"]
+    assert event["indicator_values"]["rsi_14"] < 100.0

@@ -5,7 +5,7 @@ from pathlib import Path
 
 from flask import Flask, jsonify, request, send_from_directory
 
-from . import agent, chart_alerts, context, shared_memory, storage, strategy_studio, wiki
+from . import agent, chart_alert_runner, chart_alerts, context, shared_memory, storage, strategy_studio, wiki
 
 
 STATIC_DIR = Path(__file__).resolve().parent / "static"
@@ -298,6 +298,30 @@ def create_app() -> Flask:
                 "last_checked_at": payload.get("as_of"),
             })
         return jsonify({"ok": True, **result})
+
+    @app.post("/api/chart-alerts/evaluate-batch")
+    def chart_alert_batch_evaluate():
+        payload = request.get_json(silent=True) or {}
+        workspace_id = str(payload.get("workspace_id") or "").strip() or None
+        symbol = str(payload.get("symbol") or "").strip().upper() or None
+        bars = payload.get("bars") if isinstance(payload.get("bars"), dict) else {}
+        rules = storage.list_chart_alert_rules(
+            workspace_id=workspace_id,
+            symbol=symbol,
+            enabled=True,
+            limit=int(payload.get("limit") or 200),
+        )
+        events = chart_alert_runner.evaluate_alert_rules(rules, bars, as_of=payload.get("as_of"))
+        for event in events:
+            alert_id = str(event.get("alert_id") or "").strip()
+            if alert_id:
+                storage.update_chart_alert_state(alert_id, {
+                    "triggered": True,
+                    "event": event,
+                    "last_price": event.get("current_price"),
+                    "last_checked_at": event.get("as_of") or payload.get("as_of"),
+                })
+        return jsonify({"ok": True, "event_count": len(events), "events": events})
 
     @app.get("/api/local-install-prompt")
     def local_install_prompt():
