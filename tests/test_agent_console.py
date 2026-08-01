@@ -2265,6 +2265,78 @@ def test_chart_alert_batch_api_evaluates_saved_rules_from_bars(monkeypatch, tmp_
     assert saved["last_state"]["event"]["alert_id"] == rule["id"]
 
 
+def test_chart_alert_runner_computes_extended_indicator_values():
+    import pandas as pd
+
+    from agent_console import chart_alert_runner
+
+    idx = pd.date_range("2026-08-01T09:30:00Z", periods=40, freq="5min")
+    bars = pd.DataFrame({
+        "open": [100 + i * 0.3 for i in range(40)],
+        "high": [101 + i * 0.3 for i in range(40)],
+        "low": [99 + i * 0.3 for i in range(40)],
+        "close": [100 + i * 0.3 + (0.4 if i % 5 == 0 else 0.0) for i in range(40)],
+        "volume": [1000 + i * 25 for i in range(40)],
+    }, index=idx)
+
+    values = chart_alert_runner._indicator_values(bars, idx[-1])
+
+    assert values["time"] == idx[-1].isoformat()
+    assert isinstance(values["rsi_14"], float)
+    assert isinstance(values["macd"], float)
+    assert isinstance(values["macd_signal"], float)
+    assert isinstance(values["macd_hist"], float)
+    assert isinstance(values["vwap"], float)
+    assert isinstance(values["volume_zscore_20"], float)
+
+
+def test_chart_alert_batch_api_evaluates_macd_hist_condition(monkeypatch, tmp_path):
+    _isolate(monkeypatch, tmp_path)
+
+    from agent_console.server import create_app
+
+    app = create_app()
+    client = app.test_client()
+    rule = client.post("/api/chart-alerts/rules", json={
+        "workspace_id": "workspace-1",
+        "store_key": "cw:workspace-1:AAPL:5m:lin",
+        "symbol": "AAPL",
+        "timeframe": "5m",
+        "name": "AAPL price + MACD",
+        "condition": {
+            "all": [
+                {"type": "price", "operator": "crossing_up", "value": 111.5},
+                {"type": "indicator", "field": "macd_hist", "operator": "greater_than", "value": -999.0},
+            ]
+        },
+        "frequency": "once",
+        "enabled": True,
+    }).json["rule"]
+    bars = [
+        {
+            "time": f"2026-08-01T{9 + (30 + i * 5) // 60:02d}:{(30 + i * 5) % 60:02d}:00Z",
+            "open": 100 + i * 0.3,
+            "high": 101 + i * 0.3,
+            "low": 99 + i * 0.3,
+            "close": 100 + i * 0.3,
+            "volume": 1000 + i * 25,
+        }
+        for i in range(40)
+    ]
+
+    result = client.post("/api/chart-alerts/evaluate-batch", json={
+        "workspace_id": "workspace-1",
+        "bars": {"AAPL": bars},
+    })
+
+    assert result.status_code == 200
+    payload = result.json
+    assert payload["event_count"] == 1
+    assert payload["events"][0]["alert_id"] == rule["id"]
+    assert payload["events"][0]["matched_conditions"] == ["price:crossing_up", "indicator:macd_hist:greater_than"]
+    assert isinstance(payload["events"][0]["indicator_values"]["macd_hist"], float)
+
+
 def test_chart_alert_batch_api_can_dispatch_notifications(monkeypatch, tmp_path):
     _isolate(monkeypatch, tmp_path)
 

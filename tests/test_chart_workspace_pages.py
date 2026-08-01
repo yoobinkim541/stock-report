@@ -208,6 +208,26 @@ def test_alert_condition_payload_can_include_rsi_filter():
     }
 
 
+def test_alert_condition_payload_can_include_selected_indicator_filter():
+    from dashboard import chart_workspace_ui
+
+    condition = chart_workspace_ui._alert_condition_payload(
+        price_operator="crossing_down",
+        price_value=120.0,
+        indicator_enabled=True,
+        indicator_field="macd_hist",
+        indicator_operator="greater_than",
+        indicator_value=0.0,
+    )
+
+    assert condition == {
+        "all": [
+            {"type": "price", "operator": "crossing_down", "value": 120.0},
+            {"type": "indicator", "field": "macd_hist", "operator": "greater_than", "value": 0.0},
+        ]
+    }
+
+
 def test_alert_rule_label_summarizes_multi_condition():
     from dashboard import chart_workspace_ui
 
@@ -221,3 +241,18 @@ def test_alert_rule_label_summarizes_multi_condition():
     })
 
     assert label == "상향 돌파 320 · RSI(14) 미만 70"
+
+
+def test_alert_rule_label_uses_indicator_display_names():
+    from dashboard import chart_workspace_ui
+
+    label = chart_workspace_ui._alert_rule_label({
+        "condition": {
+            "all": [
+                {"type": "price", "operator": "crossing_down", "value": 120.0},
+                {"type": "indicator", "field": "macd_hist", "operator": "greater_than", "value": 0.0},
+            ]
+        }
+    })
+
+    assert label == "하향 이탈 120 · MACD 히스토그램 초과 0"

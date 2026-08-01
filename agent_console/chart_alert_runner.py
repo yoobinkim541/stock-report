@@ -84,7 +84,49 @@ def _indicator_values(bars: pd.DataFrame, timestamp: Any) -> dict[str, Any]:
     rsi = _rsi(close, 14)
     if not rsi.empty and pd.notna(rsi.iloc[-1]):
         values["rsi_14"] = float(rsi.iloc[-1])
+    macd, signal, hist = _macd(close)
+    if not macd.empty and pd.notna(macd.iloc[-1]):
+        values["macd"] = float(macd.iloc[-1])
+    if not signal.empty and pd.notna(signal.iloc[-1]):
+        values["macd_signal"] = float(signal.iloc[-1])
+    if not hist.empty and pd.notna(hist.iloc[-1]):
+        values["macd_hist"] = float(hist.iloc[-1])
+    vwap = _vwap(bars)
+    if not vwap.empty and pd.notna(vwap.iloc[-1]):
+        values["vwap"] = float(vwap.iloc[-1])
+    vol_z = _volume_zscore(bars, 20)
+    if not vol_z.empty and pd.notna(vol_z.iloc[-1]):
+        values["volume_zscore_20"] = float(vol_z.iloc[-1])
     return values
+
+
+def _macd(series: pd.Series) -> tuple[pd.Series, pd.Series, pd.Series]:
+    series = pd.to_numeric(series, errors="coerce")
+    fast = series.ewm(span=12, adjust=False, min_periods=12).mean()
+    slow = series.ewm(span=26, adjust=False, min_periods=26).mean()
+    macd = fast - slow
+    signal = macd.ewm(span=9, adjust=False, min_periods=9).mean()
+    return macd, signal, macd - signal
+
+
+def _vwap(bars: pd.DataFrame) -> pd.Series:
+    if not {"high", "low", "close", "volume"} <= set(bars.columns):
+        return pd.Series(dtype="float64")
+    high = pd.to_numeric(bars["high"], errors="coerce")
+    low = pd.to_numeric(bars["low"], errors="coerce")
+    close = pd.to_numeric(bars["close"], errors="coerce")
+    volume = pd.to_numeric(bars["volume"], errors="coerce")
+    typical = (high + low + close) / 3.0
+    return (typical * volume).cumsum() / volume.cumsum().replace(0, pd.NA)
+
+
+def _volume_zscore(bars: pd.DataFrame, period: int) -> pd.Series:
+    if "volume" not in bars.columns:
+        return pd.Series(dtype="float64")
+    volume = pd.to_numeric(bars["volume"], errors="coerce")
+    mean = volume.rolling(period, min_periods=period).mean()
+    std = volume.rolling(period, min_periods=period).std().replace(0, pd.NA)
+    return (volume - mean) / std
 
 
 def _rsi(series: pd.Series, period: int) -> pd.Series:

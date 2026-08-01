@@ -20,6 +20,14 @@ _TF_LABEL = {
     "1mo": "월",
 }
 _KIND_LABEL = {"line": "라인", "candle": "캔들", "heikin_ashi": "HA"}
+_ALERT_INDICATOR_LABELS = {
+    "rsi_14": "RSI(14)",
+    "macd": "MACD",
+    "macd_signal": "MACD 시그널",
+    "macd_hist": "MACD 히스토그램",
+    "vwap": "VWAP",
+    "volume_zscore_20": "거래량 z-score(20)",
+}
 
 
 def _layout_columns(layout: str):
@@ -283,23 +291,28 @@ def _render_alert_manager(ws: dict[str, Any], panels: list[dict[str, Any]]) -> N
         frequency = c3.selectbox("빈도", ["once", "per_bar"], format_func=lambda v: "한 번" if v == "once" else "봉마다", key=f"_cw_alert_freq_{workspace_id}_{active_id}")
         name = c4.text_input("이름", value=f"{symbol} {_alert_operator_label(operator)}", key=f"_cw_alert_name_{workspace_id}_{active_id}")
         message = st.text_input("메시지", value=f"{symbol} {operator} {threshold:g}", key=f"_cw_alert_msg_{workspace_id}_{active_id}")
-        r1, r2, r3 = st.columns([0.75, 1.0, 1.0], vertical_alignment="bottom")
-        rsi_enabled = r1.checkbox("RSI 조건", value=False, key=f"_cw_alert_rsi_enabled_{workspace_id}_{active_id}")
-        rsi_operator = r2.selectbox(
-            "RSI 조건",
+        r1, r2, r3, r4 = st.columns([0.75, 1.15, 1.0, 1.0], vertical_alignment="bottom")
+        indicator_enabled = r1.checkbox("보조 조건", value=False, key=f"_cw_alert_indicator_enabled_{workspace_id}_{active_id}")
+        indicator_field = r2.selectbox(
+            "지표",
+            list(_ALERT_INDICATOR_LABELS),
+            format_func=lambda field: _ALERT_INDICATOR_LABELS.get(str(field), str(field)),
+            key=f"_cw_alert_indicator_field_{workspace_id}_{active_id}",
+            disabled=not indicator_enabled,
+        )
+        indicator_operator = r3.selectbox(
+            "지표 조건",
             ["less_than", "greater_than"],
             format_func=_alert_operator_label,
-            key=f"_cw_alert_rsi_operator_{workspace_id}_{active_id}",
-            disabled=not rsi_enabled,
+            key=f"_cw_alert_indicator_operator_{workspace_id}_{active_id}",
+            disabled=not indicator_enabled,
         )
-        rsi_value = r3.number_input(
-            "RSI 값",
-            min_value=0.0,
-            max_value=100.0,
-            value=70.0,
+        indicator_value = r4.number_input(
+            "지표 값",
+            value=70.0 if indicator_field == "rsi_14" else 0.0,
             step=1.0,
-            key=f"_cw_alert_rsi_value_{workspace_id}_{active_id}",
-            disabled=not rsi_enabled,
+            key=f"_cw_alert_indicator_value_{workspace_id}_{active_id}",
+            disabled=not indicator_enabled,
         )
         store_key = _drawing_store_key(ws, active_panel, compare=bool(active_panel.get("compare")))
         if st.button("알림 저장", key=f"_cw_alert_save_{workspace_id}_{active_id}", width="stretch", disabled=not bool(workspace_id and store_key and threshold > 0)):
@@ -313,9 +326,10 @@ def _render_alert_manager(ws: dict[str, Any], panels: list[dict[str, Any]]) -> N
                     "condition": _alert_condition_payload(
                         price_operator=operator,
                         price_value=float(threshold),
-                        rsi_enabled=bool(rsi_enabled),
-                        rsi_operator=str(rsi_operator),
-                        rsi_value=float(rsi_value),
+                        indicator_enabled=bool(indicator_enabled),
+                        indicator_field=str(indicator_field),
+                        indicator_operator=str(indicator_operator),
+                        indicator_value=float(indicator_value),
                     ),
                     "message": message,
                     "frequency": frequency,
@@ -423,9 +437,7 @@ def _alert_condition_leaf_label(condition: dict[str, Any]) -> str:
     operator_text = _alert_operator_label(str(condition.get("operator") or ""))
     if ctype == "indicator":
         field = str(condition.get("field") or "").strip().lower()
-        if field == "rsi_14":
-            return f"RSI(14) {operator_text} {value_text}"
-        return f"{field or 'indicator'} {operator_text} {value_text}"
+        return f"{_ALERT_INDICATOR_LABELS.get(field, field or 'indicator')} {operator_text} {value_text}"
     return f"{operator_text} {value_text}"
 
 
@@ -436,14 +448,22 @@ def _alert_condition_payload(
     rsi_enabled: bool = False,
     rsi_operator: str = "less_than",
     rsi_value: float = 70.0,
+    indicator_enabled: bool | None = None,
+    indicator_field: str = "rsi_14",
+    indicator_operator: str = "less_than",
+    indicator_value: float = 70.0,
 ) -> dict[str, Any]:
     price = {"type": "price", "operator": str(price_operator), "value": float(price_value)}
-    if not rsi_enabled:
+    enabled = bool(rsi_enabled) if indicator_enabled is None else bool(indicator_enabled)
+    field = "rsi_14" if rsi_enabled and indicator_enabled is None else str(indicator_field or "rsi_14")
+    op = str(rsi_operator if rsi_enabled and indicator_enabled is None else indicator_operator)
+    value = float(rsi_value if rsi_enabled and indicator_enabled is None else indicator_value)
+    if not enabled:
         return price
     return {
         "all": [
             price,
-            {"type": "indicator", "field": "rsi_14", "operator": str(rsi_operator), "value": float(rsi_value)},
+            {"type": "indicator", "field": field, "operator": op, "value": value},
         ]
     }
 
