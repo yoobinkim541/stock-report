@@ -78,3 +78,13 @@ def test_workspace_drawing_store_key_respects_sync_scope():
 
     ws["sync"]["drawings"] = "off"
     assert chart_workspace_ui._drawing_store_key(ws, panel, compare=False) is None
+
+
+def test_workspace_crosshair_store_key_respects_sync_toggle():
+    from dashboard import chart_workspace_ui
+
+    ws = {"id": "layout-1", "sync": {"crosshair": True}}
+    assert chart_workspace_ui._crosshair_store_key(ws) == "cw:layout-1:xh"
+
+    ws["sync"]["crosshair"] = False
+    assert chart_workspace_ui._crosshair_store_key(ws) is None

@@ -58,6 +58,14 @@ def _drawing_store_key(ws: dict[str, Any], panel: dict[str, Any], *, compare: bo
     return f"cw:{safe_scope}:{safe_ticker}:{timeframe}:{scale}"
 
 
+def _crosshair_store_key(ws: dict[str, Any]) -> str | None:
+    if not bool(((ws or {}).get("sync") or {}).get("crosshair")):
+        return None
+    scope = str((ws or {}).get("id") or "default").strip() or "default"
+    safe_scope = "".join(ch if ch.isalnum() or ch in ".-_" else "_" for ch in scope)
+    return f"cw:{safe_scope}:xh"
+
+
 def _load_panel_hist(panel: dict[str, Any]):
     ticker = panel["ticker"]
     tf = panel["timeframe"]
@@ -126,6 +134,7 @@ def _render_panel_chart(ws: dict[str, Any], panel: dict[str, Any], *, height: in
             bounds_json=bounds,
             pct_mode=bool(compare),
             store_key=_drawing_store_key(ws, panel, compare=bool(compare)),
+            crosshair_key=_crosshair_store_key(ws),
             light=theme.is_light(),
         ),
         height=height + 150,

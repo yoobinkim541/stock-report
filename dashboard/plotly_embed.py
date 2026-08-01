@@ -205,6 +205,8 @@ _TEMPLATE = r"""
   const fitVH = @@FIT_VH@@;                      // 풀뷰 — 부모 창 높이에 맞춰 리사이즈
   const pctMode = @@PCT_MODE@@;                  // 비교(%) 모드 — 가격 포맷 대신 %
   const yLog = @@Y_LOG@@;                        // 로그 스케일 — 도형 y 좌표는 log10 공간
+  const crosshairKey = @@CROSSHAIR_KEY@@;        // 멀티 iframe 크로스헤어 동기화 키
+  const chartNonce = Math.random().toString(36).slice(2);
   if (@@DOCK@@) {
     const wrap = document.getElementById("wrap");
     wrap.classList.add("dock");   // 풀뷰 도구 독
@@ -431,6 +433,51 @@ _TEMPLATE = r"""
       xhY.style.display = "block";
       xhY.style.transform = "translate(" + (pr.right - gr.left + 2) + "px, " + (y - 8) + "px)";
     }
+    publishCrosshair(e, pr);
+  }
+  function publishCrosshair(e, pr) {
+    if (!crosshairKey) return;
+    const xr = curXRange();
+    if (!xr || !pr || !pr.width) return;
+    const frac = Math.max(0, Math.min(1, (e.clientX - pr.left) / pr.width));
+    const ms = xr[0] + (xr[1] - xr[0]) * frac;
+    try {
+      localStorage.setItem("tnxh:" + crosshairKey, JSON.stringify({
+        src: chartNonce, ms: ms, frac: frac, ts: Date.now()
+      }));
+    } catch (err) {}
+  }
+  function renderRemoteCrosshair(payload) {
+    if (!crosshairKey || !payload || payload.src === chartNonce) return;
+    if (!payload.ms || Date.now() - (payload.ts || 0) > 5000) { xhHide(); return; }
+    const rect = plotRect();
+    const xr = curXRange();
+    if (!rect || !xr || !rect.width) return;
+    const frac = (Number(payload.ms) - xr[0]) / Math.max(1, xr[1] - xr[0]);
+    if (frac < 0 || frac > 1) { xhHide(); return; }
+    const gr = gd.getBoundingClientRect();
+    const x = rect.left - gr.left + rect.width * frac;
+    xhV.style.display = "block";
+    xhV.style.transform = "translateX(" + x + "px)";
+    xhV.style.top = (rect.top - gr.top) + "px";
+    xhV.style.height = rect.height + "px";
+    xhH.style.display = "none";
+    xhY.style.display = "none";
+    ohlcReadout(Number(payload.ms));
+  }
+  function applyRemoteCrosshair() {
+    if (!crosshairKey) return;
+    try {
+      renderRemoteCrosshair(JSON.parse(localStorage.getItem("tnxh:" + crosshairKey) || "null"));
+    } catch (err) {}
+  }
+  if (crosshairKey) {
+    try {
+      window.addEventListener("storage", (ev) => {
+        if (ev && ev.key === "tnxh:" + crosshairKey) applyRemoteCrosshair();
+      });
+    } catch (err) {}
+    setInterval(applyRemoteCrosshair, 350);
   }
   gd.addEventListener("mousemove", (e) => {
     xhEvt = e;
@@ -1636,6 +1683,7 @@ def pannable_chart_html(fig, hist, *, height: int = 460, view_days=None,
                         pct_mode: bool = False,
                         y_log: bool = False,
                         store_key: str | None = None,
+                        crosshair_key: str | None = None,
                         dock: bool = False,
                         live: bool = False,
                         light: bool = False) -> str:
@@ -1646,6 +1694,8 @@ def pannable_chart_html(fig, hist, *, height: int = 460, view_days=None,
     y_log — 로그 스케일: 도형/축 y 좌표가 log10 공간 (스냅·측정이 실가격으로 환산).
     store_key — 드로잉 영속화 localStorage 키(예: "NVDA:1d:lin"). None=비영속.
                 스케일(lin/log/pct)을 키에 포함해야 좌표계 혼선이 없다(호출부 책임).
+    crosshair_key — 멀티 iframe 크로스헤어 동기화 키. 같은 키를 공유하는 차트들이
+                    localStorage 브리지로 현재 시간축 위치를 따라간다. None=비동기.
     dock — True 면 도구바를 좌측 세로 독으로 (풀뷰 — TradingView 배치).
     live — ⚡자동갱신: realtime_feed_html 피더의 localStorage push(tnrt:티커)를 받아
            마지막 봉·현재가선을 in-place 패치. 호출부는 live 시 서버측 실시간 bake 를
@@ -1674,6 +1724,7 @@ def pannable_chart_html(fig, hist, *, height: int = 460, view_days=None,
             .replace("@@LIVE@@", json.dumps(bool(live)))
             .replace("@@LAST_CLOSE@@", json.dumps(last_close))
             .replace("@@STORE_KEY@@", json.dumps(store_key))
+            .replace("@@CROSSHAIR_KEY@@", json.dumps(crosshair_key))
             .replace("@@DOCK@@", json.dumps(bool(dock)))
             .replace("@@LIGHTMODE@@", json.dumps(bool(light)))
             .replace("@@CONFIG@@", config)

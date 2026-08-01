@@ -98,6 +98,25 @@ def test_embed_persistence_and_readout_contract():
     assert "const storeKey = null" in norm
 
 
+def test_embed_crosshair_sync_contract():
+    """멀티 iframe 크로스헤어 동기화 — localStorage 브리지와 키 주입 계약."""
+    hist = _hist()
+    fig = charts.price_chart(hist, "T", kind="candle")
+    html = plotly_embed.pannable_chart_html(fig, hist, crosshair_key="cw:layout:xh")
+    for token in (
+        'const crosshairKey = "cw:layout:xh"',
+        "function publishCrosshair",
+        "function applyRemoteCrosshair",
+        '"tnxh:" + crosshairKey',
+        'window.addEventListener("storage"',
+        "chartNonce",
+    ):
+        assert token in html, f"누락: {token}"
+
+    norm = plotly_embed.pannable_chart_html(fig, hist)
+    assert "const crosshairKey = null" in norm
+
+
 def test_embed_view_position_contract():
     """뷰 위치 유지 — 60초 신선 + 기간 라디오(vm) 일치 시만 복원 (⚡자동갱신 무점프)."""
     hist = _hist()
