@@ -197,11 +197,11 @@ def _run_wiki_autocurate(question: str, response: str, surface: str, pack: dict,
 
 def _run_postprocess_bundle(question: str, response: str, surface: str, pack: dict,
                             history: list[dict] | None) -> None:
+    _run_wiki_autocurate(question, response, surface, pack, history)
     try:
         shared_memory.append_chat_exchange(question, response, surface)
     except Exception:
         pass
-    _run_wiki_autocurate(question, response, surface, pack, history)
 
 
 def _run_postprocess_async(question: str, response: str, surface: str, pack: dict,
