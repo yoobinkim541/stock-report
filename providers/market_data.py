@@ -31,6 +31,7 @@ except ImportError:
 
 import store    # SQLite 통합 저장소 (설정 블롭 권위 사본 + 파일 미러)
 import safe_io  # 교차 프로세스 쓰기 락 (상태파일 read-modify-write 직렬화)
+from ohlc_utils import normalize_ohlc_frame
 
 # portfolio_snapshot 경로 단일 소스 — portfolio_universe(STOCK_REPORT_PROJECT_DIR env 반영).
 from portfolio_universe import PORTFOLIO_SNAPSHOT_PATH as PORTFOLIO_PATH
@@ -128,7 +129,7 @@ def load_cached_ohlc(symbol: str, period: str = "1y"):
             import pandas as pd
             df = pd.read_parquet(p)
             if df is not None and not getattr(df, "empty", True):
-                return df
+                return normalize_ohlc_frame(df)
     except Exception:
         pass
     return None
@@ -166,7 +167,7 @@ def load_cached_price_ohlc(symbol: str):
         try:
             df = safe_unpickle(path)
             if df is not None and not getattr(df, "empty", True):
-                return df
+                return normalize_ohlc_frame(df)
         except Exception:
             continue
     return None
@@ -182,11 +183,13 @@ def load_ohlc_close_series(symbol: str, periods: tuple[str, ...] = ("1y", "2y", 
     for period in per:
         hist = load_cached_ohlc(symbol, period)
         if hist is not None and not getattr(hist, "empty", True) and "Close" in getattr(hist, "columns", []):
+            hist = normalize_ohlc_frame(hist)
             close = hist["Close"].dropna()
             if len(close):
                 return close
     hist = load_cached_price_ohlc(symbol)
     if hist is not None and not getattr(hist, "empty", True) and "Close" in getattr(hist, "columns", []):
+        hist = normalize_ohlc_frame(hist)
         close = hist["Close"].dropna()
         if len(close):
             return close
@@ -198,6 +201,7 @@ def load_ohlc_close_series(symbol: str, periods: tuple[str, ...] = ("1y", "2y", 
         except Exception:
             hist = pd.DataFrame()
         if hist is not None and not getattr(hist, "empty", True) and "Close" in getattr(hist, "columns", []):
+            hist = normalize_ohlc_frame(hist)
             close = hist["Close"].dropna()
             if len(close):
                 return close
@@ -216,6 +220,7 @@ def _history_cached(symbol: str, period: str = "1y"):
     except Exception:
         hist = pd.DataFrame()
     if hist is not None and not hist.empty:
+        hist = normalize_ohlc_frame(hist)
         now = time.time()
         # 만료 엔트리 정리 — 인-프로세스 캐시 무한 증가 방지 (상시 봇 프로세스)
         for k in [k for k, v in _HIST_CACHE.items() if now - v[0] >= _HIST_CACHE_TTL_S]:
@@ -232,6 +237,7 @@ def fetch_kospi_stats(since_date: str | None = None, symbol: str = "^KS11") -> d
     """
     import pandas as pd
     hist = _history_cached(symbol, "1y")
+    hist = normalize_ohlc_frame(hist)
     if hist is None or getattr(hist, "empty", True) or "Close" not in getattr(hist, "columns", []):
         return {"return_pct": None, "mdd": None}
     close = hist["Close"].dropna()

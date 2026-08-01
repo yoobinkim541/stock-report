@@ -102,3 +102,46 @@ finally:
     )
     assert "B 본문" in refreshed_body
     assert "A 본문" not in refreshed_body
+
+
+def test_wiki_browser_preview_uses_full_page_body_when_list_view_is_summary_only():
+    script = f"""
+import os, sys, streamlit as st
+sys.path.insert(0, {ROOT!r})
+from agent_console import wiki
+from dashboard import wiki_browser
+_wiki_stubs = {{
+    "stats": wiki.stats,
+    "list_pages": wiki.list_pages,
+    "get_page": wiki.get_page,
+    "build_context_section": wiki.build_context_section,
+    "delete_page": wiki.delete_page,
+    "upsert_page": wiki.upsert_page,
+    "capture_from_chat": wiki.capture_from_chat,
+}}
+try:
+    st.session_state["agent_wiki_selected_page_id"] = "p2"
+    wiki.stats = lambda: {{"total": 2, "status_counts": {{"draft": 1, "reviewed": 1, "stable": 0, "archived": 0}}, "latest": {{"title": "문서 B"}}}}
+    wiki.list_pages = lambda *args, **kwargs: [
+        {{"id": "p1", "title": "문서 A", "summary": "A 요약", "tags": ["wiki"], "status": "draft", "surface": "portfolio", "kind": "note", "source_refs": ["conversation:001"], "updated_at": "2026-07-13T01:00:00+00:00"}},
+        {{"id": "p2", "title": "문서 B", "summary": "B 요약", "tags": ["wiki"], "status": "reviewed", "surface": "portfolio", "kind": "note", "source_refs": ["conversation:002"], "updated_at": "2026-07-13T02:00:00+00:00"}},
+    ]
+    wiki.get_page = lambda page_id: {{"id": page_id, "title": "문서 B", "summary": "B 요약", "body": "B 전체 본문", "tags": ["wiki"], "status": "reviewed", "surface": "portfolio", "kind": "note", "source_refs": ["conversation:002"], "updated_at": "2026-07-13T02:00:00+00:00"}} if page_id == "p2" else {{"id": page_id, "title": "문서 A", "summary": "A 요약", "body": "A 전체 본문", "tags": ["wiki"], "status": "draft", "surface": "portfolio", "kind": "note", "source_refs": ["conversation:001"], "updated_at": "2026-07-13T01:00:00+00:00"}}
+    wiki.build_context_section = lambda **kwargs: "[위키 지식]\\n- stub"
+    wiki.delete_page = lambda page_id: True
+    wiki.upsert_page = lambda payload: dict(payload, id=payload.get("id") or "p1")
+    wiki.capture_from_chat = lambda *args, **kwargs: {{"id": "p1", "title": "captured"}}
+    wiki_browser.render_wiki_tab('market', {{"chat_rows": [{{"role": "user", "content": "질문"}}, {{"role": "assistant", "content": "답변"}}]}})
+finally:
+    for _name, _value in _wiki_stubs.items():
+        setattr(wiki, _name, _value)
+"""
+    at = AppTest.from_string(script, default_timeout=30)
+    at.run()
+    assert not at.exception, str(at.exception)
+    body = " ".join(
+        str(getattr(item, "value", ""))
+        for collection in (at.markdown, at.caption, getattr(at, "text", []), getattr(at, "info", []), getattr(at, "warning", []))
+        for item in collection
+    )
+    assert "B 전체 본문" in body

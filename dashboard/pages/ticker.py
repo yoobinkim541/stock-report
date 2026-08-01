@@ -65,7 +65,7 @@ def render():
     if (etf or {}).get("is_etf"):
         _etf_sections(ticker, etf, cur)
     else:
-        _analysis_snapshot(ticker)
+        _analysis_snapshot(ticker, hist, cur or yf_price)
         _detail_sections(ticker, yf_price)
     _world_context(ticker)
     _llm_analysis_section(ticker, hist, cur or yf_price)
@@ -413,6 +413,7 @@ def _llm_analysis_facts(ticker, hist, price) -> dict:
         except (TypeError, ValueError):
             return v
 
+    ctx = _analysis_context(ticker, hist, price)
     f: dict = {"현재가": _r(price)}
     try:
         prof = data.series_profile(hist) or {}
@@ -423,7 +424,7 @@ def _llm_analysis_facts(ticker, hist, price) -> dict:
     except Exception:
         pass
     try:
-        v = cached.valuation(ticker) or {}
+        v = ctx["valuation"] or {}
         m = v.get("metrics") or {}
         val = {k: _r(m.get(k)) for k in ("per", "pbr", "psr", "roe", "eps_ttm", "div_yield")
                if m.get(k) is not None}
@@ -452,16 +453,66 @@ def _llm_analysis_facts(ticker, hist, price) -> dict:
     except Exception:
         pass
     try:
-        acc = ((cached.institutional(ticker) or {}).get("accum") or {})
+        acc = (ctx["institutional"].get("accum") or {})
         if acc.get("accum_score") is not None:
             f["기관매집점수(0~10)"] = acc.get("accum_score")
     except Exception:
         pass
     try:
-        tr = (cached.financials(ticker) or {}).get("trends") or {}
+        tr = ctx["financials"].get("trends") or {}
         fin = {k: _r(tr.get(k), 3) for k in ("rev_yoy", "net_margin") if tr.get(k) is not None}
         if fin:
             f["연간추세"] = fin
+    except Exception:
+        pass
+    try:
+        m = ctx["metrics"] or {}
+        c = ctx["consensus"] or {}
+        flow = ctx["kr_flow"] or {}
+        band = ctx["band"]
+        dd = ctx["disclosures"] or {}
+        if m.get("market_type") == "kr":
+            kr = {}
+            kr_val = {k: _r(m.get(k)) for k in (
+                "per", "forward_pe", "peg", "pbr", "psr", "roe", "eps_ttm", "eps_fwd",
+                "market_cap", "net_income", "equity", "bps"
+            ) if m.get(k) is not None}
+            if kr_val:
+                kr["밸류에이션"] = kr_val
+            kr_base = {k: v for k, v in (
+                ("source", m.get("source")),
+                ("fiscal_year", m.get("fiscal_year")),
+                ("confidence", m.get("confidence")),
+                ("kr_consensus_source", m.get("kr_consensus_source")),
+                ("kr_consensus_year", m.get("kr_consensus_year")),
+                ("fs_nm", m.get("fs_nm")),
+            ) if v is not None}
+            if kr_base:
+                kr["기준"] = kr_base
+            kr_cons = {k: _r(c.get(k)) for k in (
+                "target_mean", "target_high", "target_low", "target_upside_pct",
+                "recomm_mean", "revision_momentum", "n_analysts"
+            ) if c.get(k) is not None}
+            if kr_cons:
+                kr["컨센서스"] = kr_cons
+            kr_flow = {k: _r(flow.get(k)) for k in (
+                "foreign_net_5d", "inst_net_5d", "smart_net_20d", "foreign_ratio",
+                "foreign_buy_streak", "n"
+            ) if flow.get(k) is not None}
+            if kr_flow:
+                kr["수급"] = kr_flow
+            if band:
+                kr["자체PER밴드"] = {k: _r(band.get(k)) for k in ("min", "median", "max", "current", "n")
+                                   if band.get(k) is not None}
+            if dd.get("list"):
+                kr["공시"] = {"count": len(dd.get("list") or []),
+                              "last": (dd.get("list") or [{}])[0].get("date")}
+            latest = next((x for x in ctx["history"] if x.get("surprise_pct") is not None), None)
+            if latest:
+                kr["최근실적"] = {k: _r(latest.get(k)) for k in ("surprise_pct", "eps_est", "eps_actual")
+                                 if latest.get(k) is not None}
+            if kr:
+                f["KR심화"] = kr
     except Exception:
         pass
     try:
@@ -1393,12 +1444,96 @@ def _detail_sections(ticker, price):
         _valuation(ticker, price)
 
 
-def _analysis_snapshot(ticker):
+def _analysis_context(ticker, hist=None, price=None) -> dict:
+    """개별주 분석용 공통 컨텍스트 — 요약/LLM/심화 패널이 공유하는 원자료 묶음."""
+    v = cached.valuation(ticker) or {}
+    f = cached.financials(ticker) or {}
+    iv = cached.intrinsic(ticker) or {}
+    i = cached.institutional(ticker) or {}
+    dd = cached.disclosures(ticker) or {}
+    m = v.get("metrics") or {}
+    c = v.get("consensus") or {}
+    tr = f.get("trends") or {}
+    acc = i.get("accum") or {}
+    flow = i.get("kr_flow") or {}
+    history = v.get("history") or []
+    summary = data.company_analysis_summary(m, tr, iv)
+    is_kr = m.get("market_type") == "kr"
+
+    if is_kr:
+        checks = list(summary.get("checks") or [])
+        if m.get("fiscal_year"):
+            checks.insert(0, f"DART {m.get('fiscal_year')}년")
+        if m.get("kr_consensus_source") == "naver":
+            checks.insert(1, f"Naver {m.get('kr_consensus_year') or '차기'}E 컨센서스")
+        if flow.get("n"):
+            checks.append(f"Naver 수급 {flow['n']}일")
+        if dd.get("list"):
+            checks.append(f"최근 공시 {len(dd.get('list') or [])}건")
+        latest_surprise = next((x for x in history if x.get("surprise_pct") is not None), None)
+        if latest_surprise and latest_surprise.get("surprise_pct") is not None:
+            checks.append(f"최근 실적 {latest_surprise['surprise_pct']:+.1f}%")
+        summary["checks"] = list(dict.fromkeys(checks))[:5]
+
+        positives = list(summary.get("positives") or [])
+        risks = list(summary.get("risks") or [])
+        kr_positives: list[str] = []
+        kr_risks: list[str] = []
+        upside = c.get("target_upside_pct")
+        if upside is not None:
+            up = float(upside)
+            if up >= 10:
+                kr_positives.append(f"목표가 여력 {up:+.0f}%")
+            elif up <= -10:
+                kr_risks.append(f"목표가 괴리 {up:+.0f}%")
+        rev = c.get("revision_momentum")
+        if rev is not None:
+            rv = float(rev)
+            if rv >= 0.05:
+                kr_positives.append(f"리비전 {rv:+.2f}")
+            elif rv <= -0.05:
+                kr_risks.append(f"리비전 {rv:+.2f}")
+        if acc.get("accum_score") is not None:
+            sc = float(acc["accum_score"])
+            if sc >= 60:
+                kr_positives.append(f"매집 {sc:.1f}")
+            elif sc <= 45:
+                kr_risks.append(f"매집 {sc:.1f}")
+        summary["positives"] = (kr_positives + positives)[:4] or summary.get("positives", [])
+        summary["risks"] = (kr_risks + risks)[:4] or summary.get("risks", [])
+
+    band = None
+    if is_kr:
+        try:
+            hist2 = hist if hist is not None else cached.ohlc(ticker, period="2y")
+            band = data.per_self_band(cached.earnings_history_deep(ticker), hist2,
+                                      current_per=m.get("per"))
+        except Exception:
+            band = None
+    return {
+        "ticker": ticker,
+        "price": price,
+        "valuation": v,
+        "financials": f,
+        "intrinsic": iv,
+        "institutional": i,
+        "disclosures": dd,
+        "metrics": m,
+        "consensus": c,
+        "trends": tr,
+        "accum": acc,
+        "kr_flow": flow,
+        "history": history,
+        "summary": summary,
+        "band": band,
+        "is_kr": is_kr,
+    }
+
+
+def _analysis_snapshot(ticker, hist=None, price=None):
     """개별주 첫 화면용 압축 판단. 상세 섹션의 원자료를 먼저 읽기 쉽게 요약한다."""
-    v = cached.valuation(ticker)
-    f = cached.financials(ticker)
-    iv = cached.intrinsic(ticker)
-    summary = data.company_analysis_summary(v.get("metrics") or {}, (f.get("trends") or {}), iv)
+    ctx = _analysis_context(ticker, hist, price)
+    summary = ctx["summary"]
 
     st.subheader("기업 판단 요약")
     checks = list(summary["checks"])
@@ -1413,6 +1548,62 @@ def _analysis_snapshot(ticker):
         pass
     theme.render(theme.analysis_card_html(summary["verdict"], summary["positives"],
                                           summary["risks"], checks))
+
+    if ctx["is_kr"]:
+        m = ctx["metrics"]
+        c = ctx["consensus"]
+        tr = ctx["trends"]
+        flow = ctx["kr_flow"]
+        band = ctx["band"]
+        dd = ctx["disclosures"]
+        with st.expander("🇰🇷 한국 종목 심화 컨텍스트", expanded=False):
+            r1 = st.columns(4)
+            r1[0].metric("밸류 출처", str(m.get("source") or "DART"))
+            r1[1].metric("기준연도", f"{m.get('fiscal_year') or '—'}")
+            r1[2].metric("컨센서스", f"{c.get('target_mean'):,.0f}" if c.get("target_mean") else "—")
+            r1[3].metric("신뢰도", str(m.get("confidence") or "—"))
+
+            r2 = st.columns(4)
+            r2[0].metric("PER", data.f_ratio(m.get("per")))
+            r2[1].metric("PBR", data.f_ratio(m.get("pbr")))
+            r2[2].metric("ROE", data.f_frac_pct(m.get("roe")))
+            r2[3].metric("EPS(TTM)", _f_krw(m.get("eps_ttm")))
+
+            r3 = st.columns(4)
+            r3[0].metric("Forward PE", data.f_ratio(m.get("forward_pe")))
+            r3[1].metric("목표가 여력", f"{c.get('target_upside_pct'):+.1f}%"
+                         if c.get("target_upside_pct") is not None else "—")
+            r3[2].metric("리비전 모멘텀", data.f_ratio(c.get("revision_momentum"), 2))
+            r3[3].metric("애널리스트", f"{int(c.get('n_analysts') or 0)}명")
+
+            r4 = st.columns(4)
+            r4[0].metric("외인 5일", f"{flow['foreign_net_5d']:+,.0f}주"
+                         if flow.get("foreign_net_5d") is not None else "—")
+            r4[1].metric("기관 5일", f"{flow['inst_net_5d']:+,.0f}주"
+                         if flow.get("inst_net_5d") is not None else "—")
+            r4[2].metric("스마트머니 20일", f"{flow['smart_net_20d']:+,.0f}주"
+                         if flow.get("smart_net_20d") is not None else "—")
+            r4[3].metric("외인 보유율", data.f_frac_pct(flow.get("foreign_ratio")))
+
+            r5 = st.columns(4)
+            latest = next((x for x in ctx["history"] if x.get("surprise_pct") is not None), None)
+            r5[0].metric("최근 실적", f"{latest.get('surprise_pct'):+.1f}%"
+                         if latest and latest.get("surprise_pct") is not None else "—")
+            r5[1].metric("공시 건수", f"{len(dd.get('list') or [])}건" if dd.get("list") else "—")
+            r5[2].metric("자체 PER 밴드", f"{band['median']:.1f}x"
+                         if band and band.get("median") is not None else "—")
+            r5[3].metric("밴드 표본", f"{band['n']}개" if band and band.get("n") is not None else "—")
+
+            if band:
+                st.caption(f"최근 {band['n']}개 분기 TTM-EPS 기준 역산 — "
+                           f"최저 {band['min']:.1f}x · 중앙값 {band['median']:.1f}x · 최고 {band['max']:.1f}x")
+            if tr:
+                st.caption(" · ".join(filter(None, [
+                    f"매출 YoY {data.f_frac_pct(tr.get('rev_yoy'))}" if tr.get("rev_yoy") is not None else None,
+                    f"순마진 {data.f_frac_pct(tr.get('net_margin'))}" if tr.get("net_margin") is not None else None,
+                    f"부채/자산 {data.f_frac_pct(tr.get('debt_to_assets'))}" if tr.get("debt_to_assets") is not None else None,
+                    f"연속 보고연수 {int(tr.get('n_years') or 0)}년" if tr.get("n_years") is not None else None,
+                ])))
 
 
 def _valuation(ticker, price=None):

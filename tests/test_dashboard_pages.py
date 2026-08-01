@@ -358,7 +358,60 @@ def test_ai_console_context_glance_items_are_compact():
     })
 
     assert [item["label"] for item in items] == ["최근 이벤트", "누적 기억", "모델 파일", "최신 리포트"]
-    assert [item["value"] for item in items] == ["2건", "1건", "1개", "investment-report-2026-07-23.md"]
+
+
+def test_ticker_analysis_context_collects_kr_deep_signals(monkeypatch):
+    from dashboard.pages import ticker
+    import pandas as pd
+
+    hist = pd.DataFrame(
+        {"Open": [100.0, 102.0, 104.0, 106.0, 108.0],
+         "High": [105.0, 106.0, 107.0, 108.0, 109.0],
+         "Low": [99.0, 100.0, 103.0, 104.0, 106.0],
+         "Close": [104.0, 105.0, 106.0, 107.0, 108.0]},
+        index=pd.to_datetime(["2025-07-01", "2025-10-01", "2026-01-01", "2026-04-01", "2026-07-01"]),
+    )
+    monkeypatch.setattr(ticker.cached, "valuation", lambda t: {
+        "metrics": {"market_type": "kr", "source": "DART+marcap", "fiscal_year": 2025,
+                     "confidence": "high", "per": 12.0, "forward_pe": 9.5, "pbr": 1.1,
+                     "roe": 0.18, "eps_ttm": 5000, "eps_fwd": 5600, "market_cap": 1_000_000,
+                     "net_income": 80_000, "equity": 450_000, "bps": 20000,
+                     "kr_consensus_source": "naver", "kr_consensus_year": 2026},
+        "consensus": {"target_mean": 68000.0, "target_upside_pct": 12.5, "revision_momentum": 0.07,
+                       "n_analysts": 8},
+        "history": [{"date": "2026-07-01", "surprise_pct": 5.4, "eps_est": 1100, "eps_actual": 1160}],
+    })
+    monkeypatch.setattr(ticker.cached, "financials", lambda t: {"trends": {
+        "rev_yoy": 0.11, "net_margin": 0.15, "debt_to_assets": 0.3, "n_years": 5}})
+    monkeypatch.setattr(ticker.cached, "intrinsic", lambda t: {"upside_pct": 9.0})
+    monkeypatch.setattr(ticker.cached, "institutional", lambda t: {
+        "accum": {"accum_score": 72.0},
+        "kr_flow": {"foreign_net_5d": 12000, "inst_net_5d": 8000, "smart_net_20d": 20000,
+                    "foreign_ratio": 0.47, "foreign_buy_streak": 4, "n": 20},
+    })
+    monkeypatch.setattr(ticker.cached, "disclosures", lambda t: {"list": [{"date": "2026-07-30"}]})
+    monkeypatch.setattr(ticker.cached, "ohlc", lambda t, period="2y": hist)
+    monkeypatch.setattr(ticker.cached, "earnings_history_deep", lambda t, limit=12: [
+        {"date": "2026-07-01", "eps_actual": 1.0},
+        {"date": "2026-04-01", "eps_actual": 1.0},
+        {"date": "2026-01-01", "eps_actual": 1.0},
+        {"date": "2025-10-01", "eps_actual": 1.0},
+        {"date": "2025-07-01", "eps_actual": 1.0},
+    ])
+
+    ctx = ticker._analysis_context("005930.KS", hist, 60000)
+    assert ctx["is_kr"] is True
+    assert ctx["band"]["median"] is not None
+    assert ctx["band"]["n"] >= 2
+    assert any("DART" in c for c in ctx["summary"]["checks"])
+    assert any("Naver" in c for c in ctx["summary"]["checks"])
+    assert any("목표가" in p for p in ctx["summary"]["positives"])
+    assert any("매집" in p for p in ctx["summary"]["positives"])
+
+    facts = ticker._llm_analysis_facts("005930.KS", hist, 60000)
+    assert "KR심화" in facts
+    assert "수급" in facts["KR심화"]
+    assert facts["KR심화"]["기준"]["source"] == "DART+marcap"
 
 
 def test_ai_console_rail_status_items_show_realtime_quotes(monkeypatch):

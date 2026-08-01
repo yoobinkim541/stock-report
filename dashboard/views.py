@@ -8,6 +8,8 @@ from __future__ import annotations
 import os
 import re
 
+from ohlc_utils import normalize_ohlc_frame
+
 
 def _strip_html(s: str) -> str:
     """텔레그램용 HTML 태그 제거 (st.code 모노스페이스 렌더용)."""
@@ -1414,24 +1416,24 @@ def ohlc_tf(ticker: str, tf: str = "1d"):
         from providers.market_data import _history_cached
         agg = {"Open": "first", "High": "max", "Low": "min", "Close": "last"}
         if tf in ("1d", "1wk", "1mo"):
-            d = _history_cached(ticker, period="max")
+            d = normalize_ohlc_frame(_history_cached(ticker, period="max"))
             if d is None or getattr(d, "empty", True) or tf == "1d":
                 return d
             rule = "W" if tf == "1wk" else "ME"
             if "Volume" in d.columns:
                 agg["Volume"] = "sum"
-            return d.resample(rule).agg(agg).dropna(subset=["Open"])
+            return normalize_ohlc_frame(d.resample(rule).agg(agg).dropna(subset=["Open"]))
         import yfinance as yf
         resample_rule = {"2h": "2h", "4h": "4h"}.get(tf)
         interval = "1h" if resample_rule else tf
         period = "60d" if tf == "5m" else "730d"
-        df = yf.Ticker(ticker).history(period=period, interval=interval)
+        df = normalize_ohlc_frame(yf.Ticker(ticker).history(period=period, interval=interval))
         if df is None or df.empty:
             return None
         if resample_rule:
             if "Volume" in df.columns:
                 agg["Volume"] = "sum"
-            df = df.resample(resample_rule).agg(agg).dropna(subset=["Open"])
+            df = normalize_ohlc_frame(df.resample(resample_rule).agg(agg).dropna(subset=["Open"]))
         return df if not df.empty else None
     except Exception:
         return None

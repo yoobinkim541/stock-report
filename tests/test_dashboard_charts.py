@@ -131,6 +131,22 @@ def test_price_candle_ohlc_and_ma():
     assert fig.layout.xaxis.rangeslider.visible is True         # 과거 탐색 레인지슬라이더 (내비 개편)
 
 
+def test_price_candle_collapses_duplicate_timestamps():
+    idx = pd.to_datetime(["2025-01-01 09:30", "2025-01-01 09:30", "2025-01-02 09:30"])
+    hist = pd.DataFrame({"Open": [100.0, 101.0, 103.0],
+                         "High": [102.0, 104.0, 106.0],
+                         "Low": [99.0, 98.0, 102.0],
+                         "Close": [101.0, 102.5, 105.5],
+                         "Volume": [10.0, 20.0, 30.0]}, index=idx)
+    fig = charts.price_candle(hist, "TST")
+    candle = next(tr for tr in fig.data if getattr(tr, "type", "") == "candlestick")
+    assert len(candle.x) == 2
+    assert list(candle.open) == [100.0, 103.0]
+    assert list(candle.high) == [104.0, 106.0]
+    assert list(candle.low) == [98.0, 102.0]
+    assert list(candle.close) == [102.5, 105.5]
+
+
 def test_price_candle_avg_cost_hline():
     fig = charts.price_candle(_ohlc(30), "NVDA", avg_cost=115.0)
     assert any(getattr(s, "type", None) == "line" for s in (fig.layout.shapes or ())), "평단 hline 없음"

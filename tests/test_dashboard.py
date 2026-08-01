@@ -1236,6 +1236,30 @@ def test_ohlc_tf_resamples_weekly_monthly(monkeypatch):
     assert views.ohlc_tf("TST", "1d") is daily                      # 일봉 = 원본 passthrough
 
 
+def test_ohlc_tf_collapses_duplicate_daily_rows(monkeypatch):
+    """일봉 원본에도 중복 시점이 섞이면 하나의 봉으로 병합해야 한다."""
+    import pandas as pd
+    from dashboard import views
+    import providers.market_data as md
+
+    idx = pd.to_datetime(["2026-01-05 00:00", "2026-01-05 00:00", "2026-01-06 00:00"])
+    raw = pd.DataFrame({"Open": [10.0, 11.0, 13.0],
+                        "High": [12.0, 14.0, 15.0],
+                        "Low": [9.0, 8.0, 12.0],
+                        "Close": [11.0, 13.0, 14.5],
+                        "Volume": [100.0, 200.0, 300.0]}, index=idx)
+    monkeypatch.setattr(md, "_history_cached", lambda t, period="max": raw)
+
+    out = views.ohlc_tf("TST", "1d")
+    assert len(out) == 2
+    assert list(out["Open"]) == [10.0, 13.0]
+    assert list(out["High"]) == [14.0, 15.0]
+    assert list(out["Low"]) == [8.0, 12.0]
+    assert list(out["Close"]) == [13.0, 14.5]
+    assert list(out["Volume"]) == [300.0, 300.0]
+    assert out.index.is_monotonic_increasing and out.index.is_unique
+
+
 # ── 가치평가 종합 점수 (게이지용 · 순수) ──────────────────────────────────────
 def test_valuation_score_undervalued():
     m = {"peg": 0.8, "per": 20.0, "forward_pe": 16.0, "eps_ttm": 5.0, "eps_fwd": 6.5}

@@ -646,15 +646,22 @@ def render_wiki_tab(surface: str, pack: dict[str, Any] | None = None) -> None:
 
     with center:
         st.markdown("##### 페이지 미리보기")
-        selected = browser.get("selected") or {}
-        if not selected:
+        browser_selected = browser.get("selected") or {}
+        preview_page = wiki.get_page(selected_page_id) or browser_selected
+        if not preview_page:
             st.info("왼쪽에서 페이지를 선택해 보세요.")
         else:
             with st.container(border=True):
-                prompt_preview = wiki.build_context_section(query=query or selected.get("title", ""), surface=surface, limit=4)
-                evidence = build_selected_evidence_model(selected, context_section=prompt_preview)
+                prompt_preview = wiki.build_context_section(
+                    query=query or preview_page.get("title", ""),
+                    surface=str(preview_page.get("surface") or surface_filter or surface),
+                    limit=4,
+                )
+                evidence = build_selected_evidence_model(preview_page, context_section=prompt_preview)
                 st.markdown(f"**{evidence.get('title', '위키 페이지')}**")
-                st.caption(f"{selected.get('surface', 'wiki')} · {selected.get('kind', 'note')} · {selected.get('status', 'draft')}")
+                st.caption(
+                    f"{preview_page.get('surface', 'wiki')} · {preview_page.get('kind', 'note')} · {preview_page.get('status', 'draft')}"
+                )
 
                 st.markdown("##### 판단")
                 st.write(evidence.get("judgment") or "요약된 판단이 아직 없습니다.")
@@ -697,8 +704,8 @@ def render_wiki_tab(surface: str, pack: dict[str, Any] | None = None) -> None:
 
     with right:
         st.markdown("##### 편집기")
-        selected_page = wiki.get_page(st.session_state.get("agent_wiki_selected_page_id", ""))
-        default_page = selected_page or {"title": query[:80] or "새 위키 페이지", "surface": surface if surface != "all" else "market", "kind": "note", "status": "draft", "tags": [], "summary": "", "body": "", "source_refs": [], "confidence": 0.7}
+        editor_page = wiki.get_page(st.session_state.get("agent_wiki_selected_page_id", ""))
+        default_page = editor_page or {"title": query[:80] or "새 위키 페이지", "surface": surface if surface != "all" else "market", "kind": "note", "status": "draft", "tags": [], "summary": "", "body": "", "source_refs": [], "confidence": 0.7}
         with st.form("wiki_editor", clear_on_submit=False):
             title = st.text_input("제목", value=default_page.get("title", ""))
             editor_surface = st.selectbox(
@@ -777,7 +784,7 @@ def render_wiki_tab(surface: str, pack: dict[str, Any] | None = None) -> None:
             st.caption("현재 대화 기록이 없어 승격할 항목이 없습니다.")
 
         with st.expander("위키가 챗봇에 들어가는 방식", expanded=False):
-            section = wiki.build_context_section(query=query or selected.get("title", ""), surface=surface, limit=4)
+            section = wiki.build_context_section(query=query or preview_page.get("title", ""), surface=surface, limit=4)
             if section:
                 st.code(section, language="text")
             else:

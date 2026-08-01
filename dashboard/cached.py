@@ -8,6 +8,7 @@ from __future__ import annotations
 import streamlit as st
 
 from dashboard import data, views
+from ohlc_utils import normalize_ohlc_frame
 
 _TTL = 900       # 15분
 _TTL_SLOW = 1800  # 30분
@@ -180,7 +181,7 @@ def ohlc(t, period="6mo"):
     df = None
     try:
         from providers.market_data import _history_cached
-        df = _history_cached(t, period=period)
+        df = normalize_ohlc_frame(_history_cached(t, period=period))
     except Exception:
         df = None
     if df is not None and not getattr(df, "empty", True):
@@ -196,7 +197,7 @@ def ohlc(t, period="6mo"):
         p = _ohlc_disk_path(t, period)
         if p.exists():
             import pandas as pd
-            return pd.read_parquet(p)
+            return normalize_ohlc_frame(pd.read_parquet(p))
     except Exception:
         pass
     return df

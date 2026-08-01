@@ -25,6 +25,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
+from ohlc_utils import normalize_ohlc_frame
+
 logger = logging.getLogger(__name__)
 
 BAR_DIR = Path(os.path.expanduser("~/reports/ml-data/intraday_bars"))
@@ -229,7 +231,7 @@ def load_bars(symbol: str, date_utc: str | None = None, *, interval: str = "1m",
                 .agg({"Open": "first", "High": "max", "Low": "min",
                       "Close": "last", "Volume": "sum"})
                 .dropna(subset=["Open"]))
-    return df
+    return normalize_ohlc_frame(df)
 
 
 def _slice_latest_session(df, *, date_utc: str | None = None, market: str | None = None):
@@ -288,7 +290,7 @@ def load_bars_with_fallback(symbol: str, market: str | None = None,
             df = fetch_intraday(yf_t, interval=interval, days=fetch_days)
             if df is not None and not getattr(df, "empty", True):
                 df = _slice_latest_session(df, date_utc=date_utc, market=mk)
-                return df, "yfinance"
+                return normalize_ohlc_frame(df), "yfinance"
     except Exception as e:
         logger.debug("yfinance 폴백 실패(%s): %s", symbol, e)
     import pandas as pd

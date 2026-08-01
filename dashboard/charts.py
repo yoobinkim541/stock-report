@@ -8,6 +8,7 @@ from __future__ import annotations
 from datetime import timedelta
 
 from dashboard import theme
+from ohlc_utils import normalize_ohlc_frame, normalize_time_series
 
 # 팔레트 단일 진실원 = theme (TradingView Terminal Noir). 테스트가 _GREEN/_RED 참조.
 _GREEN = theme.GREEN
@@ -141,6 +142,7 @@ def _initial_view(fig, hist, view_days, *, lo_col="Low", hi_col="High", y_overri
     y_override=(lo, hi) — 비교(%) 모드처럼 트레이스 단위가 가격이 아닐 때 y 만 주입.
     log_scale — 로그축이면 계산한 y범위를 log10 으로 변환(y_override=% 모드는 로그 없음).
     """
+    hist = normalize_ohlc_frame(hist)
     if not view_days or hist is None or getattr(hist, "empty", True):
         return fig
     import pandas as pd
@@ -170,7 +172,10 @@ def _initial_view(fig, hist, view_days, *, lo_col="Low", hi_col="High", y_overri
 def compare_anchor_ts(series, view_days=None):
     """비교 차트 공통 시작 시각 — 메인 시계열의 표시창 시작 시점을 우선 앵커로 사용."""
     import pandas as pd
-    s = series.dropna()
+    s = normalize_time_series(series)
+    if s is None:
+        return None
+    s = s.dropna()
     if s is None or len(s) == 0:
         return None
     if view_days:
@@ -213,6 +218,7 @@ def _trade_price(hist, trade: dict):
     except (TypeError, ValueError):
         pass
     try:
+        hist = normalize_ohlc_frame(hist)
         close = hist["Close"].dropna()
         if close.empty:
             return None
@@ -227,6 +233,7 @@ def _trade_price(hist, trade: dict):
 
 
 def _add_trade_markers(fig, hist, trades):
+    hist = normalize_ohlc_frame(hist)
     if not trades:
         return
     go = _go()
@@ -300,6 +307,7 @@ def price_line(hist, ticker: str = "", avg_cost=None, trades=None, view_days=Non
     """가격 라인 + 20/60일 이동평균 (+ 보유 시 평단 수평선). hist: OHLC DataFrame(Close 필요)."""
     go = _go()
     fig = go.Figure()
+    hist = normalize_ohlc_frame(hist)
     if hist is None or getattr(hist, "empty", True) or "Close" not in getattr(hist, "columns", []):
         return _t(fig)
     close = hist["Close"]
@@ -324,6 +332,7 @@ def price_candle(hist, ticker: str = "", avg_cost=None, trades=None, view_days=N
     """가격 캔들(OHLC) + 20/60일 이동평균 (+ 보유 시 평단 수평선). hist: OHLC DataFrame."""
     go = _go()
     fig = go.Figure()
+    hist = normalize_ohlc_frame(hist)
     cols = set(getattr(hist, "columns", []))
     if hist is None or getattr(hist, "empty", True) or not {"Open", "High", "Low", "Close"} <= cols:
         return _t(fig)
@@ -561,6 +570,7 @@ def intraday_candle(hist, ticker: str = "", trades=None, vwap=None,
     """
     go = _go()
     fig = go.Figure()
+    hist = normalize_ohlc_frame(hist)
     cols = set(getattr(hist, "columns", []))
     if hist is None or getattr(hist, "empty", True) or not {"Open", "High", "Low", "Close"} <= cols:
         return _t(fig)
@@ -622,6 +632,7 @@ def target_price_fan(hist, price, high, mean, low, currency: str = "$"):
     """
     go = _go()
     fig = go.Figure()
+    hist = normalize_ohlc_frame(hist)
     p = float(price or 0)
     if not p or not mean:
         return _t(fig)
@@ -683,7 +694,10 @@ def normalize_pct(series, view_days=None, anchor_ts=None):
     anchor_ts 를 주면 해당 시각을 공통 비교 시작점으로 사용한다.
     """
     import pandas as pd
-    s = series.dropna()
+    s = normalize_time_series(series)
+    if s is None:
+        return s
+    s = s.dropna()
     if s is None or len(s) == 0:
         return s
     if anchor_ts is None and view_days:
@@ -712,6 +726,10 @@ def view_window(hist, view_days, pan_mult: int = 5, warmup_bars: int = 250,
     팬버퍼 구간에서 깨지지 않을 여유분. view_days=None(전체)·짧은 데이터는 그대로
     반환. DataFrame/Series 모두 지원(tail 뷰 반환).
     """
+    if hasattr(hist, "columns"):
+        hist = normalize_ohlc_frame(hist)
+    else:
+        hist = normalize_time_series(hist)
     if view_days is None or hist is None or getattr(hist, "empty", True):
         return hist
     import pandas as pd
@@ -831,6 +849,7 @@ def heikin_ashi(hist):
     """
     import numpy as np
     import pandas as pd
+    hist = normalize_ohlc_frame(hist)
     cols = set(getattr(hist, "columns", []))
     if hist is None or getattr(hist, "empty", True) or not {"Open", "High", "Low", "Close"} <= cols:
         return hist
@@ -923,6 +942,7 @@ def price_chart(hist, ticker: str = "", *, kind: str = "line", avg_cost=None,
     최고/최저 콜아웃)는 자동 비활성 — RSI·거래량 서브패널은 메인 종목 기준 유지.
     """
     go = _go()
+    hist = normalize_ohlc_frame(hist)
     cols = set(getattr(hist, "columns", []))
     if hist is None or getattr(hist, "empty", True) or "Close" not in cols:
         return _t(go.Figure())
@@ -1325,6 +1345,7 @@ def price_chart(hist, ticker: str = "", *, kind: str = "line", avg_cost=None,
 def _add_extremes_and_last(fig, hist, view_days, panes) -> None:
     """표시창 최고/최저 콜아웃(현재가 대비 %·날짜) + 현재가 점선·우측 라벨."""
     import pandas as pd
+    hist = normalize_ohlc_frame(hist)
     cols = set(hist.columns)
     win = hist
     if view_days:
@@ -1366,6 +1387,7 @@ def _initial_view_sub(fig, hist, view_days, y_override=None, log_scale: bool = F
     y_override=(lo, hi) — 비교(%) 모드에서 가격 창 대신 % 프레임 주입.
     log_scale — 로그축이면 가격 y범위를 log10 으로 변환.
     """
+    hist = normalize_ohlc_frame(hist)
     if not view_days or hist is None or getattr(hist, "empty", True):
         return fig
     import pandas as pd
@@ -1395,6 +1417,7 @@ def _initial_view_sub(fig, hist, view_days, y_override=None, log_scale: bool = F
 
 def _atr_series(hist, n: int = 10):
     import pandas as pd
+    hist = normalize_ohlc_frame(hist)
     h, l, c = hist["High"], hist["Low"], hist["Close"]
     prev = c.shift(1)
     tr = pd.concat([h - l, (h - prev).abs(), (l - prev).abs()], axis=1).max(axis=1)
@@ -1404,6 +1427,7 @@ def _atr_series(hist, n: int = 10):
 def supertrend_series(hist, period: int = 10, mult: float = 3.0):
     """슈퍼트렌드 — (line, trend[±1]) 시리즈. 표준 반복식(밴드 래칫)."""
     import numpy as np
+    hist = normalize_ohlc_frame(hist)
     atr = _atr_series(hist, period).values
     hl2 = ((hist["High"] + hist["Low"]) / 2).values
     close = hist["Close"].values
@@ -1460,6 +1484,7 @@ def kama_series(close, n: int = 10, fast: int = 2, slow: int = 30):
 def fractal_points(hist, k: int = 2):
     """윌리엄스 프랙탈 — (고점 프랙탈 idx, 저점 프랙탈 idx). 5봉(±k) 패턴·확정분만."""
     import numpy as np
+    hist = normalize_ohlc_frame(hist)
     h, l = hist["High"].values, hist["Low"].values
     n = len(h)
     tops, bots = [], []
@@ -1477,6 +1502,7 @@ def volume_profile_bins(hist, bins: int = 40):
     반환 (bin_centers, volumes) | None(Volume 없음).
     """
     import numpy as np
+    hist = normalize_ohlc_frame(hist)
     if "Volume" not in hist.columns:
         return None
     typ = ((hist["High"] + hist["Low"] + hist["Close"]) / 3).values
@@ -1545,6 +1571,7 @@ def _add_top_indicators(fig, hist, *, supertrend=False, envelope=False,
 def parabolic_sar_series(hist, af: float = 0.02, af_step: float = 0.02, af_max: float = 0.2):
     """파라볼릭 SAR — (sar, trend[±1]). 표준 반복식 (Wilder)."""
     import numpy as np
+    hist = normalize_ohlc_frame(hist)
     h, l = hist["High"].values, hist["Low"].values
     n = len(h)
     sar = np.full(n, np.nan)
@@ -1583,6 +1610,7 @@ def parabolic_sar_series(hist, af: float = 0.02, af_step: float = 0.02, af_max: 
 
 def donchian(hist, n: int = 20):
     """프라이스 채널(돈치안) — (upper, lower, mid)."""
+    hist = normalize_ohlc_frame(hist)
     up = hist["High"].rolling(n).max()
     lo = hist["Low"].rolling(n).min()
     return up, lo, (up + lo) / 2
@@ -1590,6 +1618,7 @@ def donchian(hist, n: int = 20):
 
 def session_vwap(hist):
     """세션(일자별 리셋) VWAP — 인트라데이 전용. Volume 없으면 None."""
+    hist = normalize_ohlc_frame(hist)
     if "Volume" not in hist.columns:
         return None
     tp = (hist["High"] + hist["Low"] + hist["Close"]) / 3
@@ -1602,6 +1631,7 @@ def session_vwap(hist):
 
 def anchored_vwap(hist, anchor=None):
     """앵커드 VWAP — anchor(Timestamp) 이후 누적. Volume 없으면 None."""
+    hist = normalize_ohlc_frame(hist)
     if "Volume" not in hist.columns:
         return None
     df = hist if anchor is None else hist[hist.index >= anchor]

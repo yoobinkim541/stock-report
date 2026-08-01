@@ -56,6 +56,35 @@ def test_fetch_qqq_realtime_overlay(monkeypatch):
     assert md.fetch_qqq_data()["current"] == 95.0
 
 
+def test_history_cached_normalizes_duplicate_rows(monkeypatch):
+    """_history_cached 는 중복 타임스탬프를 하나의 봉으로 합쳐야 한다."""
+    import pandas as pd
+
+    raw = pd.DataFrame({"Open": [100.0, 101.0, 103.0],
+                        "High": [102.0, 104.0, 106.0],
+                        "Low": [99.0, 98.0, 102.0],
+                        "Close": [101.0, 102.5, 105.5],
+                        "Volume": [10.0, 20.0, 30.0]},
+                       index=pd.to_datetime(["2026-01-01", "2026-01-01", "2026-01-02"]))
+
+    class FakeTicker:
+        def __init__(self, symbol):
+            self.symbol = symbol
+
+        def history(self, period="1y"):
+            return raw
+
+    monkeypatch.setattr(md, "_HIST_CACHE", {})
+    monkeypatch.setattr(md.yf, "Ticker", FakeTicker)
+
+    out = md._history_cached("TST", "1y")
+    assert list(out.index) == list(pd.to_datetime(["2026-01-01", "2026-01-02"]))
+    assert list(out["Open"]) == [100.0, 103.0]
+    assert list(out["High"]) == [104.0, 106.0]
+    assert list(out["Low"]) == [98.0, 102.0]
+    assert list(out["Close"]) == [102.5, 105.5]
+
+
 def test_liquidated_sgov_no_ghost(monkeypatch, tmp_path):
     """SGOV/QQQI 전량청산(holdings 에 없음) 시 유령 기본수량 평가가 0 이어야 함 (감사 확정 회귀).
 
