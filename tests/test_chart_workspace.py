@@ -114,3 +114,12 @@ def test_dashboard_workspace_wrappers_forward_storage(monkeypatch):
     assert views.chart_workspace_catalog()["count"] == 1
     assert views.chart_workspace_detail("w1")["id"] == "w1"
     assert cached.chart_workspace_catalog()["workspaces"][0]["id"] == "w1"
+
+
+def test_workspace_ai_patch_heuristic_handles_intraday_vwap():
+    ws = cw.default_workspace("NVDA")
+    proposal = cw.propose_workspace_patch("5분봉으로 바꾸고 VWAP랑 거래량을 봐줘", ws)
+    assert proposal["ok"] is True
+    assert proposal["patch"]["panels[0].timeframe"] == "5m"
+    assert "VWAP(세션)" in proposal["patch"]["panels[0].top_indicators"]
+    assert "거래량" in proposal["after"]["panels"][0]["bottom_indicators"]

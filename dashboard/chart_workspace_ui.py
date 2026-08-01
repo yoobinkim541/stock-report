@@ -128,7 +128,7 @@ def render_chart_workspace(
     st.session_state["_cw_workspace"] = ws
 
     st.markdown(f"#### {ws['name']}")
-    c1, c2, c3, c4, c5 = st.columns([1.1, 0.9, 0.9, 0.9, 1.2], vertical_alignment="center")
+    c1, c2, c3, c4, c5, c6 = st.columns([1.1, 0.9, 0.9, 0.9, 1.2, 0.55], vertical_alignment="center")
     layout = c1.segmented_control(
         "레이아웃",
         ["1", "2v", "2h", "2x2", "3+1", "2x3"],
@@ -146,6 +146,28 @@ def render_chart_workspace(
         index=["off", "layout_symbol", "global_symbol"].index(ws["sync"].get("drawings", "layout_symbol")),
         key="_cw_sync_drawings",
     )
+    with c6.popover("AI"):
+        prompt = st.text_area(
+            "요청",
+            key="_cw_ai_prompt",
+            placeholder="예: 5분봉으로 바꾸고 VWAP/매물대를 추가해줘",
+        )
+        if st.button("미리보기", key="_cw_ai_preview", width="stretch"):
+            st.session_state["_cw_patch_preview"] = chart_workspace.propose_workspace_patch(prompt, ws)
+        preview = st.session_state.get("_cw_patch_preview")
+        if preview:
+            st.caption(preview.get("summary") or "패치 미리보기")
+            for row in preview.get("diff") or []:
+                st.markdown(f"`{row['path']}`")
+                st.caption(f"{row.get('before')} -> {row.get('after')}")
+            for warning in preview.get("warnings") or []:
+                st.warning(warning)
+            if st.button("적용", key="_cw_ai_apply", width="stretch"):
+                ws = preview["after"]
+                st.session_state["_cw_workspace"] = ws
+                st.session_state.pop("_cw_patch_preview", None)
+                st.toast("차트 워크스페이스 패치를 적용했습니다.")
+                st.rerun()
     st.caption("동기화 설정은 워크스페이스에 저장됩니다. 크로스헤어 동기화는 브라우저 런타임 검증 전까지 설정값만 보관합니다.")
 
     active = ws.get("active_panel") or "p1"

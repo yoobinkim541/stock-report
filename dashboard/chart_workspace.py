@@ -276,3 +276,62 @@ def diff_workspaces(before: dict, after: dict) -> list[dict[str, Any]]:
 
     walk("", left, right)
     return rows
+
+
+def propose_workspace_patch(prompt: str, workspace: dict) -> dict[str, Any]:
+    """Convert a natural-language chart request into a safe workspace patch.
+
+    This is a deterministic first pass. It gives the UI the same preview/apply
+    shape that a future LLM-backed chart agent can return.
+    """
+    text = str(prompt or "").lower()
+    before = normalize_workspace(workspace)
+    patch: dict[str, Any] = {}
+    panel = before["panels"][0]
+    top = list(panel.get("top_indicators") or [])
+    bottom = list(panel.get("bottom_indicators") or [])
+    warnings: list[str] = []
+
+    if any(token in text for token in ("5분", "5m", "분봉", "intraday", "장중")):
+        patch["panels[0].timeframe"] = "5m"
+        if "VWAP(세션)" not in top:
+            top.append("VWAP(세션)")
+        if "거래량" not in bottom:
+            bottom.append("거래량")
+        warnings.append("5분봉 데이터는 provider 보존 기간과 장중 수집 상태에 따라 제한될 수 있습니다.")
+    if any(token in text for token in ("1시간", "1h")):
+        patch["panels[0].timeframe"] = "1h"
+    if any(token in text for token in ("일봉", "1d")):
+        patch["panels[0].timeframe"] = "1d"
+    if any(token in text for token in ("추세", "trend", "모멘텀")):
+        for name in ("이동평균선", "자동 추세선·채널", "지수이평(EMA)"):
+            if name not in top:
+                top.append(name)
+    if any(token in text for token in ("변동성", "volatility", "밴드", "압축", "스퀴즈")):
+        for name in ("볼린저 밴드", "켈트너 채널"):
+            if name not in top:
+                top.append(name)
+    if any(token in text for token in ("매물대", "volume profile", "볼륨프로필")) and "매물대" not in top:
+        top.append("매물대")
+    if "macd" in text and "MACD" not in bottom:
+        bottom.append("MACD")
+    if "rsi" in text and "RSI" not in bottom:
+        bottom.append("RSI")
+    if any(token in text for token in ("비교 제거", "비교 빼", "비교 없")):
+        patch["panels[0].compare"] = []
+
+    if top:
+        patch["panels[0].top_indicators"] = top[:8]
+    if bottom:
+        patch["panels[0].bottom_indicators"] = bottom[:6]
+
+    after = apply_workspace_patch(before, patch) if patch else before
+    return {
+        "ok": True,
+        "summary": "차트 요청을 워크스페이스 패치로 변환했습니다.",
+        "patch": patch,
+        "before": before,
+        "after": after,
+        "diff": diff_workspaces(before, after),
+        "warnings": warnings,
+    }
