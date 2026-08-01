@@ -94,7 +94,7 @@ def load_cfg() -> dict:
                             "US": max(spread_soft_us, spread_hard_us)},
         "flat_buffer_min": int(_env_f("INTRADAY_FLAT_BUFFER_MIN", 15)),
         "entry_cutoff_min": int(_env_f("INTRADAY_ENTRY_CUTOFF_MIN", 30)),
-        "minimum_hold_min": int(_env_f("INTRADAY_MINIMUM_HOLD_MIN", 3)),
+        "minimum_hold_min": int(_env_f("INTRADAY_MINIMUM_HOLD_MIN", 5)),
         # 개장 첫 N분은 진입 보류 — 개장 동시호가 직후 스프레드가 구조적으로 넓어
         # 하필 이 순간에 몰리는 진입기준 통과 신호가 스프레드 가드에 거의 매번
         # 막히던 문제 방어(2026-07-15 실측). US 는 개장 변동성이 커 기본 더 김.
@@ -132,11 +132,12 @@ def load_cfg() -> dict:
         "leverage_enabled": lev_enabled,
         "leverage_map": lev_map,
         "lifecycle": {
-            "partial_target_r": _env_f("INTRADAY_PARTIAL_TARGET_R", 1.0),
+            "partial_target_r": _env_f("INTRADAY_PARTIAL_TARGET_R", 1.5),
             "full_target_r": _env_f("INTRADAY_FULL_TARGET_R", 2.0),
-            "partial_stop_r": _env_f("INTRADAY_PARTIAL_STOP_R", 0.5),
+            "partial_stop_r": _env_f("INTRADAY_PARTIAL_STOP_R", 0.75),
             "full_stop_r": _env_f("INTRADAY_FULL_STOP_R", 1.0),
-            "breakeven_stop_r": _env_f("INTRADAY_BREAKEVEN_STOP_R", 0.0),
+            "breakeven_stop_r": _env_f("INTRADAY_BREAKEVEN_STOP_R", 0.25),
+            "partial_exit_min_hold_min": int(_env_f("INTRADAY_PARTIAL_EXIT_MIN_HOLD_MIN", 12)),
         },
     }
 
@@ -846,12 +847,13 @@ def run_market(mk: str, state: dict, cfg: dict, *, dry: bool = False) -> list[st
                 bar = {"h": float(df["High"].iloc[-1]), "l": float(df["Low"].iloc[-1]),
                        "c": float(df["Close"].iloc[-1])}
         _, score = _score(sym) if bar else (None, None)
-        cfg_exit = {"timestop_min": params.get("timestop_min", 90),
-                    "theta_exit": params.get("theta_exit", 0.25),
-                    "score_ema_alpha": params.get("score_ema_alpha", 0.5),
-                    "collapse_confirm_bars": params.get("collapse_confirm_bars", 2),
-                    "minimum_hold_min": cfg.get("minimum_hold_min", 3),
-                    "flat_buffer_min": cfg["flat_buffer_min"]}
+        cfg_exit = {"timestop_min": params.get("timestop_min", 120),
+                    "theta_exit": params.get("theta_exit", 0.22),
+                    "score_ema_alpha": params.get("score_ema_alpha", 0.35),
+                    "collapse_confirm_bars": params.get("collapse_confirm_bars", 3),
+                    "minimum_hold_min": cfg.get("minimum_hold_min", 5),
+                    "flat_buffer_min": cfg["flat_buffer_min"],
+                    "partial_exit_min_hold_min": cfg.get("partial_exit_min_hold_min", 12)}
         from ml.intraday_lifecycle import evaluate_exit_plan
         legs = evaluate_exit_plan(pos, bar, score, now_min, close_min,
                                   {**cfg_exit, **(cfg.get("lifecycle") or {})})

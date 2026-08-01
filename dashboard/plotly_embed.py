@@ -120,6 +120,16 @@ _TEMPLATE = r"""
   #wrap.dock #tool-hint { margin:2px 0 0; white-space:normal; overflow-wrap:anywhere; }
   #wrap.dock #ohlcbar { order:-1; margin:0 0 4px; white-space:normal; overflow:hidden; text-overflow:ellipsis; }
   #wrap.dock #chartcol { grid-column:2; min-width:0; width:100%; overflow:hidden; }
+  #wrap.dock.cmp { display:block; overflow:visible; }
+  #wrap.dock.cmp #tools { width:auto; max-width:none; max-height:none; flex-direction:row;
+                          flex-wrap:wrap; align-items:center; overflow:visible; margin:0 0 6px 0;
+                          position:static; padding-right:0; }
+  #wrap.dock.cmp .tbtn { width:auto; flex:0 0 auto; }
+  #wrap.dock.cmp .tsep { width:1px; height:auto; margin:0 2px; }
+  #wrap.dock.cmp #tool-hint { margin:2px 0 0; white-space:normal; overflow-wrap:anywhere; }
+  #wrap.dock.cmp #ohlcbar { order:99; margin-left:auto; margin-bottom:0; white-space:normal; }
+  #wrap.dock.cmp #chartcol { grid-column:1; min-width:0; width:100%; overflow:hidden; }
+  #wrap.dock.cmp #bt-avwap, #wrap.dock.cmp #bt-vprof { display:none; }
   @media (max-width: 760px) {
     #wrap.dock { display:block; overflow:visible; }
     #wrap.dock #tools { width:auto; max-width:none; max-height:none; flex-direction:row;
@@ -195,7 +205,11 @@ _TEMPLATE = r"""
   const fitVH = @@FIT_VH@@;                      // 풀뷰 — 부모 창 높이에 맞춰 리사이즈
   const pctMode = @@PCT_MODE@@;                  // 비교(%) 모드 — 가격 포맷 대신 %
   const yLog = @@Y_LOG@@;                        // 로그 스케일 — 도형 y 좌표는 log10 공간
-  if (@@DOCK@@) document.getElementById("wrap").classList.add("dock");   // 풀뷰 좌측 도구 독
+  if (@@DOCK@@) {
+    const wrap = document.getElementById("wrap");
+    wrap.classList.add("dock");   // 풀뷰 도구 독
+    if (pctMode) wrap.classList.add("cmp");   // 비교(%) 모드 — 상단 랩형 툴바
+  }
   if (@@LIGHTMODE@@) document.getElementById("wrap").classList.add("tn-light");  // 부모 라이트 테마 동조
   const live = @@LIVE@@;                         // ⚡ live — 피더 localStorage 실시간 패치
   function vhFit() {                             // same-origin iframe — frameElement 직접 리사이즈

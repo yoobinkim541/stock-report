@@ -232,6 +232,42 @@ def load_bars(symbol: str, date_utc: str | None = None, *, interval: str = "1m",
     return df
 
 
+def _slice_latest_session(df, *, date_utc: str | None = None, market: str | None = None):
+    """여러 세션이 섞인 yfinance 분봉은 한 세션만 남겨 차트를 읽기 쉽게 만든다."""
+    import pandas as pd
+
+    if df is None or getattr(df, "empty", True):
+        return df
+    try:
+        idx = pd.DatetimeIndex(df.index)
+    except Exception:
+        return df
+    if len(idx) < 2:
+        return df
+    tz = _TZ.get((market or "").upper())
+    if idx.tz is not None:
+        session_idx = idx.tz_convert(tz or "UTC").normalize()
+    else:
+        session_idx = idx.normalize()
+    session_dates = pd.Index(session_idx).unique().sort_values()
+    if len(session_dates) == 0:
+        return df
+    target = session_dates[-1]
+    if date_utc:
+        try:
+            want = str(date_utc)[:10]
+            as_str = [str(ts)[:10] for ts in session_dates]
+            if want in as_str:
+                target = session_dates[as_str.index(want)]
+        except Exception:
+            pass
+    mask = session_idx == target
+    sliced = df.loc[mask]
+    if sliced is not None and not getattr(sliced, "empty", True):
+        return sliced
+    return df
+
+
 def load_bars_with_fallback(symbol: str, market: str | None = None,
                             date_utc: str | None = None, *, interval: str = "1m"):
     """bar store 우선, 없으면 yfinance 폴백 (대시보드·백필 전용 — 엔진 핫패스 금지).
@@ -247,9 +283,11 @@ def load_bars_with_fallback(symbol: str, market: str | None = None,
         cands = [to_yf(symbol, mk)]
         if mk == "KR" and cands[0].endswith(".KS"):
             cands.append(cands[0][:-3] + ".KQ")   # 스캐너 코드는 시장 미상 — 코스닥 재시도
+        fetch_days = {"1m": 7, "5m": 60, "15m": 60, "1h": 730}.get(interval, 7)
         for yf_t in cands:
-            df = fetch_intraday(yf_t, interval=interval, days=1)
+            df = fetch_intraday(yf_t, interval=interval, days=fetch_days)
             if df is not None and not getattr(df, "empty", True):
+                df = _slice_latest_session(df, date_utc=date_utc, market=mk)
                 return df, "yfinance"
     except Exception as e:
         logger.debug("yfinance 폴백 실패(%s): %s", symbol, e)

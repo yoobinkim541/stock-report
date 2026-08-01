@@ -36,6 +36,10 @@ def test_uptrend_channel_labeled_up():
     for ch in chans:
         assert ch["meta"]["trend"] == "up"
         assert ch["meta"]["slope_per_bar"] > 0
+        assert "R²" in ch["label"]
+        assert ch["touches"] == ch["meta"]["touches"]
+        assert ch["meta"]["confidence"] is not None
+        assert ch["meta"]["band_pct"] >= 0
         assert ch["upper"][0] > ch["lower"][0] and ch["upper"][1] > ch["lower"][1]
 
 

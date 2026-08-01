@@ -21,13 +21,14 @@ AXES = ("orb", "vwap", "volspike", "ofi", "news", "ema", "rsi", "bb")
 
 _COMMON = {
     "theta_entry": 0.55,     # 진입 점수 문턱
-    "theta_exit": 0.25,      # 신호 붕괴 청산 문턱
-    "stop_atr_mult": 1.2,    # 손절 = 진입가 − mult×ATR(14,1m)
+    "theta_exit": 0.22,      # 신호 붕괴 청산 문턱
+    "stop_atr_mult": 1.4,    # 손절 = 진입가 − mult×ATR(14,1m)
     "target_r": 2.0,         # 목표 = 진입가 + R×손절폭
-    "timestop_min": 90,      # 무진전 타임스톱(분)
-    "score_ema_alpha": 0.5,        # 청산 판정용 점수 EMA 스무딩(1.0=스무딩 없음) — 결측축
+    "timestop_min": 120,     # 무진전 타임스톱(분)
+    "score_ema_alpha": 0.35,       # 청산 판정용 점수 EMA 스무딩(1.0=스무딩 없음) — 결측축
                                     # 재정규화발 단봉 점수 출렁임 완화 (2026-07-24)
-    "collapse_confirm_bars": 2,    # signal_collapse 확정에 필요한 연속 봉 수 (2026-07-24)
+    "collapse_confirm_bars": 3,    # signal_collapse 확정에 필요한 연속 봉 수 (2026-07-24)
+    "partial_exit_min_hold_min": 12,  # 부분익절·부분손절은 초반 노이즈 구간을 지난 뒤만 허용
 }
 
 DEFAULTS = {
@@ -42,7 +43,8 @@ BOUNDS = {**{f"w_{a}": (0.0, 0.5) for a in AXES},
           "theta_entry": (0.40, 0.75), "theta_exit": (0.10, 0.45),
           "stop_atr_mult": (0.8, 2.0), "target_r": (1.0, 3.0),
           "timestop_min": (30, 180),
-          "score_ema_alpha": (0.2, 1.0), "collapse_confirm_bars": (1, 4)}
+          "score_ema_alpha": (0.2, 1.0), "collapse_confirm_bars": (1, 4),
+          "partial_exit_min_hold_min": (0, 60)}
 
 
 def _mk(market: str) -> str:

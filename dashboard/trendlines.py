@@ -146,19 +146,30 @@ def _channel(df: pd.DataFrame, length: int, name: str, atr_med: float) -> dict |
         trend = "up" if slope > 0 else "down"
     proj = PROJ_BARS
     xs = [0, len(closes) - 1 + proj]
+
     def _y(xv, off=0.0):
         return float(np.exp(intercept + slope * xv + off))
+
+    touch_tol = max(0.35 * sigma, 0.0015)
+    upper_hits = int(np.sum(np.abs(resid - BAND_MULT * sigma) <= touch_tol))
+    lower_hits = int(np.sum(np.abs(resid + BAND_MULT * sigma) <= touch_tol))
+    touches = upper_hits + lower_hits
+    band_pct = ((float(_y(xs[1], BAND_MULT * sigma)) - float(_y(xs[1], -BAND_MULT * sigma)))
+                / max(float(closes[-1]), 1e-9)) * 100.0
+    confidence = min(1.0, max(0.0, 0.7 * r2 + 0.3 * min(1.0, move / max(thresh, 1e-9))))
     out = {
         "kind": "channel",
         "label": {"up": f"{name} 상승채널", "down": f"{name} 하락채널",
-                  "flat": f"{name} 횡보채널"}[trend] + f"({length})",
+                  "flat": f"{name} 횡보채널"}[trend] + f"({length}) · R² {r2:.2f} · {touches}터치",
         "x0": idx[0], "x1": _proj_ts(df.index, proj),
         "y0": _y(xs[0]), "y1": _y(xs[1]),
         "upper": (_y(xs[0], BAND_MULT * sigma), _y(xs[1], BAND_MULT * sigma)),
         "lower": (_y(xs[0], -BAND_MULT * sigma), _y(xs[1], -BAND_MULT * sigma)),
-        "path": None, "touches": 0,
+        "path": None, "touches": int(touches),
         "meta": {"slope_per_bar": float(slope), "r2": round(r2, 3), "trend": trend,
-                 "window": length, "score": r2, "tol": None, "projected_bars": proj},
+                 "window": length, "score": round(confidence, 3), "tol": None,
+                 "projected_bars": proj, "touches": int(touches), "band_pct": round(band_pct, 2),
+                 "confidence": round(confidence, 3)},
     }
     if abs(slope) * (length - 1) > 0.25:                        # 로그 곡률 큼 → 폴리라인 폴백
         step = max(length // 24, 1)

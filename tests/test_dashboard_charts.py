@@ -153,6 +153,32 @@ def test_price_candle_handles_missing_ohlc():
     assert _is_fig(charts.price_candle(pd.DataFrame()))
 
 
+def test_price_candle_compresses_weekend_gaps():
+    idx = pd.to_datetime(["2024-01-05", "2024-01-08", "2024-01-09"])
+    hist = pd.DataFrame({"Open": [100.0, 101.0, 102.0],
+                         "High": [101.0, 102.0, 103.0],
+                         "Low": [99.0, 100.0, 101.0],
+                         "Close": [100.5, 101.5, 102.5]}, index=idx)
+    fig = charts.price_candle(hist, "AAPL")
+    rbounds = [tuple(getattr(rb, "bounds", ()) or ()) for rb in (fig.layout.xaxis.rangebreaks or [])]
+    assert ("sat", "mon") in rbounds
+
+
+def test_intraday_candle_smooth_mode_hides_off_session():
+    idx = pd.date_range("2024-01-02 09:30", periods=24, freq="5min")
+    hist = pd.DataFrame({
+        "Open": [100.0 + i * 0.3 for i in range(len(idx))],
+        "High": [100.4 + i * 0.3 for i in range(len(idx))],
+        "Low": [99.8 + i * 0.3 for i in range(len(idx))],
+        "Close": [100.2 + i * 0.3 for i in range(len(idx))],
+        "Volume": [100.0 + i for i in range(len(idx))],
+    }, index=idx)
+    fig = charts.intraday_candle(hist, "AAPL", smooth=True)
+    patterns = [getattr(rb, "pattern", None) for rb in (fig.layout.xaxis.rangebreaks or [])]
+    assert "hour" in patterns
+    assert any(getattr(tr, "type", "") == "candlestick" for tr in fig.data)
+
+
 # ── M2 S&P500 시장 맵 트리맵 ──────────────────────────────────────────
 _HEAT_ROWS = [
     {"ticker": "AAPL", "name": "Apple", "sector_kr": "기술", "market_cap": 4e12, "pct": 1.96},

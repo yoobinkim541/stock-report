@@ -1240,6 +1240,30 @@ ticker.render()
     assert main, "비교 선택 시 % 상대수익 차트로 렌더되어야 함"
 
 
+def test_compare_window_aligns_to_shared_start():
+    """비교 창은 공통 시작점부터 잘라서 불필요한 선행 공백을 줄여야 한다."""
+    import pandas as pd
+    from dashboard.pages import ticker
+
+    main_idx = pd.date_range("2004-08-01", periods=40, freq="D")
+    spy_idx = pd.date_range("1993-01-01", periods=5000, freq="D")
+    goog_idx = pd.date_range("2004-08-01", periods=40, freq="D")
+    df = pd.DataFrame({"Close": [100.0 + i for i in range(40)]}, index=main_idx)
+    compare = {
+        "SPY": pd.Series([50.0 + i for i in range(len(spy_idx))], index=spy_idx),
+        "GOOGL": pd.Series([80.0 + i for i in range(40)], index=goog_idx),
+    }
+
+    trimmed_df, trimmed_compare = ticker._align_compare_window(df, compare, None)
+
+    assert trimmed_df.index[0] == main_idx[0]
+    assert trimmed_df.index[-1] == main_idx[-1]
+    assert trimmed_compare["SPY"].index[0] == main_idx[0]
+    assert trimmed_compare["SPY"].index[-1] == main_idx[-1]
+    assert trimmed_compare["GOOGL"].index[0] == main_idx[0]
+    assert trimmed_compare["GOOGL"].index[-1] == main_idx[-1]
+
+
 def test_ticker_chart_fundamentals_panel_renders():
     """펀더멘털 하단 지표 — 스텁 rows 로 렌더 무예외 + 캡션 표기 (W-series)."""
     script = _STUBS + '''

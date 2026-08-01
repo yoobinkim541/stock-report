@@ -20,31 +20,40 @@ def _pos(**overrides):
 def test_lifecycle_takes_half_profit_at_one_r_and_moves_stop_to_breakeven():
     pos = initialize_lifecycle(_pos())
 
-    legs = evaluate_exit_plan(pos, {"h": 102.2, "l": 100.5, "c": 101.8}, 0.7, 610, 930, {})
+    legs = evaluate_exit_plan(pos, {"h": 103.2, "l": 100.5, "c": 102.8}, 0.7, 620, 930, {})
 
     assert [leg["reason"] for leg in legs] == ["partial_target"]
     assert legs[0]["qty"] == 5
-    assert legs[0]["ref_price"] == 102.0
+    assert legs[0]["ref_price"] == 103.0
     assert pos["qty"] == 10
     apply_filled_leg(pos, legs[0], {})
     assert pos["qty"] == 5
     assert pos["lifecycle"]["partial_target_taken"] is True
-    assert pos["stop"] == 100.0
+    assert pos["stop"] == 100.5
 
 
 def test_lifecycle_can_take_half_stop_then_full_stop_on_remaining_quantity():
     pos = initialize_lifecycle(_pos())
 
-    first = evaluate_exit_plan(pos, {"h": 100.4, "l": 98.8, "c": 99.0}, 0.7, 610, 930, {})
+    first = evaluate_exit_plan(pos, {"h": 100.4, "l": 98.4, "c": 99.0}, 0.7, 615, 930, {})
     apply_filled_leg(pos, first[0], {})
-    second = evaluate_exit_plan(pos, {"h": 99.2, "l": 97.6, "c": 97.8}, 0.7, 611, 930, {})
+    second = evaluate_exit_plan(pos, {"h": 99.2, "l": 97.6, "c": 97.8}, 0.7, 616, 930, {})
 
     assert [leg["reason"] for leg in first] == ["partial_stop"]
     assert first[0]["qty"] == 5
-    assert first[0]["ref_price"] == 99.0
+    assert first[0]["ref_price"] == 98.5
     assert [leg["reason"] for leg in second] == ["stop"]
     assert second[0]["qty"] == 5
     assert second[0]["final"] is True
+
+
+def test_lifecycle_delays_partial_exits_until_hold_window():
+    pos = initialize_lifecycle(_pos())
+
+    legs = evaluate_exit_plan(pos, {"h": 103.1, "l": 100.8, "c": 102.2}, 0.7, 610, 930, {})
+
+    assert legs == []
+    assert pos["qty"] == 10
 
 
 def test_lifecycle_prefers_stop_when_stop_and_target_touch_same_bar():
@@ -79,13 +88,13 @@ def test_intraday_engine_keeps_position_after_partial_exit_and_logs_final_total(
     ))
 
     partial_ok = eng._do_exit(
-        state, key, state["positions"][key], "partial_target", 102.0, "KR", {},
+        state, key, state["positions"][key], "partial_target", 103.0, "KR", {},
         ledger, qty=5, final=False, notes=[],
     )
     assert partial_ok is True
     assert state["positions"][key]["qty"] == 5
     assert state["positions"][key]["lifecycle"]["partial_target_taken"] is True
-    assert state["positions"][key]["stop"] == 100.0
+    assert state["positions"][key]["stop"] == 100.5
     final_ok = eng._do_exit(
         state, key, state["positions"][key], "target", 104.0, "KR", {},
         ledger, qty=5, final=True, notes=[],
@@ -98,6 +107,35 @@ def test_intraday_engine_keeps_position_after_partial_exit_and_logs_final_total(
     assert outcomes[0]["qty"] == 10
     assert outcomes[0]["exit_reason"] == "target"
     assert outcomes[0]["exit_legs"][0]["reason"] == "partial_target"
+
+
+def test_intraday_yfinance_fallback_keeps_single_session(monkeypatch):
+    import pandas as pd
+    from providers import intraday_bars as ib
+    import ml.intraday_signal as intraday_signal
+
+    idx = pd.DatetimeIndex([
+        "2026-07-08 09:30:00-04:00",
+        "2026-07-08 09:31:00-04:00",
+        "2026-07-09 09:30:00-04:00",
+        "2026-07-09 09:31:00-04:00",
+    ])
+    df = pd.DataFrame({
+        "Open": [100.0, 100.5, 101.0, 101.4],
+        "High": [100.4, 100.8, 101.4, 101.8],
+        "Low": [99.8, 100.2, 100.8, 101.1],
+        "Close": [100.2, 100.7, 101.2, 101.6],
+        "Volume": [100, 120, 130, 140],
+    }, index=idx)
+
+    monkeypatch.setattr(ib, "load_bars", lambda *a, **k: pd.DataFrame())
+    monkeypatch.setattr(intraday_signal, "fetch_intraday", lambda *a, **k: df)
+
+    out, src = ib.load_bars_with_fallback("AAPL", "US", "2026-07-09", interval="1m")
+
+    assert src == "yfinance"
+    assert len({str(ts.date()) for ts in out.index}) == 1
+    assert str(out.index[0].date()) == "2026-07-09"
 
 
 def test_intraday_run_records_us_entry_skip_diagnostics(monkeypatch, tmp_path):

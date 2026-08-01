@@ -1369,6 +1369,13 @@ def intraday_chart(symbol: str, market: str, date: str, interval: str = "1m") ->
             typ = (df["High"] + df["Low"] + df["Close"]) / 3
             cv = df["Volume"].cumsum().replace(0, float("nan"))
             out["vwap"] = list((typ * df["Volume"]).cumsum() / cv)
+            out["bar_count"] = len(df)
+            out["bar_first"] = df.index[0].isoformat() if len(df.index) else None
+            out["bar_last"] = df.index[-1].isoformat() if len(df.index) else None
+            try:
+                out["session_count"] = len({str(ts.date()) for ts in df.index})
+            except Exception:
+                out["session_count"] = None
             open_min = 9 * 60 if mk == "KR" else 9 * 60 + 30    # OR 은 세션 개장분만
             fmin = df.index[0].hour * 60 + df.index[0].minute
             if fmin <= open_min + 1 and len(df) >= 15:

@@ -264,6 +264,65 @@ def _compare_suggestions(ticker: str, active: list[str]) -> list[str]:
     return out[:6]
 
 
+def _align_compare_window(df, compare: dict, view_days=None):
+    """비교 창은 모든 시리즈의 공통 구간만 남겨 x축 공백을 줄인다."""
+    import pandas as pd
+
+    if df is None or getattr(df, "empty", True) or not compare:
+        return df, compare
+
+    def _bounds(series):
+        try:
+            s = series.dropna()
+        except Exception:
+            return None
+        if s is None or len(s) < 1:
+            return None
+        try:
+            return pd.Timestamp(s.index[0]), pd.Timestamp(s.index[-1])
+        except Exception:
+            return None
+
+    bounds = []
+    main = df["Close"] if "Close" in getattr(df, "columns", []) else df
+    main_bounds = _bounds(main)
+    if main_bounds:
+        bounds.append(main_bounds)
+    for series in (compare or {}).values():
+        b = _bounds(series)
+        if b:
+            bounds.append(b)
+    if not bounds:
+        return df, compare
+
+    start = max(b[0] for b in bounds)
+    end = min(b[1] for b in bounds)
+    if start >= end:
+        return df, compare
+
+    try:
+        trimmed_df = df.loc[(df.index >= start) & (df.index <= end)]
+    except Exception:
+        return df, compare
+    if trimmed_df is None or getattr(trimmed_df, "empty", True):
+        return df, compare
+
+    trimmed_compare = {}
+    for key, series in (compare or {}).items():
+        if series is None:
+            continue
+        try:
+            trimmed = series.loc[(series.index >= start) & (series.index <= end)]
+        except Exception:
+            trimmed = series
+        if trimmed is not None and len(getattr(trimmed, "dropna", lambda: [])()) >= 2:
+            trimmed_compare[key] = trimmed
+
+    if not trimmed_compare:
+        return df, compare
+    return trimmed_df, trimmed_compare
+
+
 def _compare_controls(ticker: str, tf: str, tf_label: str) -> tuple[list[str], bool]:
     """풀폭 비교 트레이 — 추가/삭제/추천/PR 기준을 한 곳에서 조작."""
     active = _compare_state(ticker)
@@ -648,7 +707,8 @@ def _price_chart(ticker, hist, avg_cost, trades, fullscreen: bool = False,
                 st.switch_page(pg)
     tf_label = ctf.segmented_control("봉", list(_TF), default="1일",
                                      label_visibility="collapsed", key="_chart_tf") or "1일"
-    kind = ckind.segmented_control("차트 종류", ["📈 라인", "🕯️ 캔들", "🟩 HA"], default="📈 라인",
+    kind_default = "🟩 HA" if tf_label == "5분" else "📈 라인"
+    kind = ckind.segmented_control("차트 종류", ["📈 라인", "🕯️ 캔들", "🟩 HA"], default=kind_default,
                                    label_visibility="collapsed", key="_chart_kind",
                                    help="HA = 하이킨아시(평활 캔들·표시용 — 실체결가와 다름)")
     # 기간 = 초기 표시 창 — 데이터는 뷰의 5배 팬버퍼로 윈도잉(charts.view_window·"전체"=전량)
@@ -765,6 +825,7 @@ def _price_chart(ticker, hist, avg_cost, trades, fullscreen: bool = False,
                       else "TR(배당재투자·조정종가) 기준")
                    + " · 가격 지표(캔들·평단·MA·매물대 등) 비활성")
         show_vol = show_vol and "Volume" in getattr(df, "columns", [])   # PR 스왑 후 재판정
+        df, compare = _align_compare_window(df, compare, view_days)
     # 직렬화 윈도잉 — max 전량(장기주 ~11k봉) fig+bounds 직렬화가 지표/기간 토글마다
     # 수 MB push + 수초 ScriptRunner 점유의 주원인. 뷰의 5배 팬버퍼+지표 워밍업만
     # 남긴다("전체"=무윈도잉). 이하 실시간 패치·이벤트마커·HA·bounds 전부 같은 윈도우.

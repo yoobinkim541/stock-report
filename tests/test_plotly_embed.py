@@ -229,6 +229,21 @@ def test_embed_dock_layout_reserves_chart_column():
         assert token in html, f"풀뷰 독 레이아웃 계약 누락: {token}"
 
 
+def test_embed_compare_mode_uses_compact_toolbar_layout():
+    """비교(%) 모드 풀뷰 — 세로 독 대신 상단 랩형 툴바를 써야 한다."""
+    hist = _hist(40)
+    fig = charts.price_chart(hist, "T", compare={"C": hist["Close"]})
+    html = plotly_embed.pannable_chart_html(fig, hist, dock=True, pct_mode=True)
+    for token in (
+        'wrap.classList.add("cmp")',
+        "#wrap.dock.cmp { display:block; overflow:visible; }",
+        "#wrap.dock.cmp #tools { width:auto; max-width:none; max-height:none; flex-direction:row;",
+        "flex-wrap:wrap; align-items:center; overflow:visible;",
+        "#wrap.dock.cmp #bt-avwap, #wrap.dock.cmp #bt-vprof { display:none; }",
+    ):
+        assert token in html, f"비교 모드 독 레이아웃 계약 누락: {token}"
+
+
 def test_embed_live_flag_and_feed():
     """⚡ live — 플래그 배선 + 피더 계약 (키 파생·None 가격·seq 로 html 변화)."""
     hist = _hist()

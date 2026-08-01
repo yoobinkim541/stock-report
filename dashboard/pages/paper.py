@@ -244,7 +244,7 @@ def _intraday_section(surface: str):
                   {"y": last.get("target"), "label": "목표", "color": "#22c55e"}]
     fig = charts.intraday_candle(bars, sym, trades=ch.get("trades"),
                                  vwap=ch.get("vwap"), or_range=ch.get("or_range"),
-                                 levels=levels)
+                                 levels=levels, smooth=(interval == "5m"))
     event = None
     try:
         event = st.plotly_chart(fig, width="stretch", config=charts.PAN_CFG,
@@ -253,7 +253,14 @@ def _intraday_section(surface: str):
     except TypeError:
         st.plotly_chart(fig, width="stretch", config=charts.PAN_CFG)
     src_note = {"store": "자체 1분봉(실시간 수집)", "yfinance": "yfinance 폴백(지연)"}.get(ch.get("src"), "")
-    st.caption(f"▲매수 ▼매도 마커 클릭 → 판단근거 · VWAP 점선 · 파란 박스=시가범위(OR 15분) · {src_note}")
+    bar_count = ch.get("bar_count")
+    bar_span = ""
+    if ch.get("bar_first") and ch.get("bar_last"):
+        bar_span = f" · {str(ch.get('bar_first'))[:16]}~{str(ch.get('bar_last'))[:16]}"
+    sess = ch.get("session_count")
+    sess_note = f" · {sess}세션" if sess else ""
+    st.caption(f"▲매수 ▼매도 마커 클릭 → 판단근거 · VWAP 점선 · 파란 박스=시가범위(OR 15분) · "
+               f"{src_note}{f' · {bar_count}봉' if bar_count else ''}{sess_note}{bar_span}")
     st.caption(charts.PAN_HINT)
 
     sel = _selected_intraday_trade(event, ch.get("trades") or [])

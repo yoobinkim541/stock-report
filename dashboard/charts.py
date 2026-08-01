@@ -5,6 +5,8 @@
 """
 from __future__ import annotations
 
+from datetime import timedelta
+
 from dashboard import theme
 
 # 팔레트 단일 진실원 = theme (TradingView Terminal Noir). 테스트가 _GREEN/_RED 참조.
@@ -35,11 +37,59 @@ PAN_DRAW_CFG = {**PAN_CFG,
                 "modeBarButtonsToAdd": ["drawline", "drawopenpath", "drawrect", "eraseshape"]}
 
 
-def _pannable(fig, *, rangeslider: bool = True, height: int = 360):
+def _pannable(fig, *, rangeslider: bool = True, height: int = 360, rangebreaks=None):
     """가격 차트 공통 내비게이션 — pan 드래그 + 하단 레인지슬라이더(과거 탐색)."""
-    fig.update_layout(dragmode="pan", height=height,
-                      xaxis=dict(rangeslider=dict(visible=rangeslider, thickness=0.08)))
+    xaxis = dict(rangeslider=dict(visible=rangeslider, thickness=0.08))
+    if rangebreaks:
+        xaxis["rangebreaks"] = rangebreaks
+    fig.update_layout(dragmode="pan", height=height, xaxis=xaxis)
     return fig
+
+
+def _market_from_ticker(ticker: str) -> str:
+    t = str(ticker or "").strip().upper()
+    if t.endswith((".KS", ".KQ")) or (t.isdigit() and len(t) == 6):
+        return "KR"
+    return "US"
+
+
+def _trading_rangebreaks(index, ticker: str = "") -> list[dict]:
+    """주말·휴장일·비거래시간을 압축하는 Plotly rangebreaks."""
+    import pandas as pd
+
+    try:
+        idx = pd.DatetimeIndex(index).dropna()
+    except Exception:
+        return []
+    if len(idx) < 3:
+        return []
+    idx = idx.sort_values()
+    breaks: list[dict] = [{"bounds": ["sat", "mon"]}]
+
+    med = idx.to_series().diff().median()
+    if med is not None and med < pd.Timedelta(days=1):
+        market = _market_from_ticker(ticker)
+        # 시장별 정규장 외 시간 압축 — 주말/휴장일 사이 공백을 이어 붙이고,
+        # 5분봉·1분봉은 장외 시간을 접어서 일봉/주봉처럼 읽히게 만든다.
+        if market == "KR":
+            breaks.insert(0, {"bounds": [15.5, 9], "pattern": "hour"})
+        else:
+            breaks.insert(0, {"bounds": [16, 9.5], "pattern": "hour"})
+
+    # 최근 구간에서 빠진 평일(휴장/공휴일)을 실제 날짜로도 숨긴다.
+    if med is not None and med <= pd.Timedelta(days=3):
+        norm = idx.tz_convert("UTC").normalize() if idx.tz is not None else idx.normalize()
+        present = {ts.date() for ts in pd.DatetimeIndex(norm).unique()}
+        cur = norm[0].date()
+        end = norm[-1].date()
+        missing = []
+        while cur <= end and len(missing) < 365:
+            if cur.weekday() < 5 and cur not in present:
+                missing.append(cur.isoformat())
+            cur += timedelta(days=1)
+        if missing:
+            breaks.append({"values": missing})
+    return breaks
 
 
 def _logr(lo, hi):
@@ -266,7 +316,8 @@ def price_line(hist, ticker: str = "", avg_cost=None, trades=None, view_days=Non
     _add_trade_markers(fig, hist, trades or [])
     fig.update_layout(margin=dict(t=10, b=10, l=10, r=10),
                       legend=dict(orientation="h", y=1.1), hovermode="x unified")
-    return _initial_view(_pannable(_t(fig)), hist, view_days, lo_col="Close", hi_col="Close")
+    return _initial_view(_pannable(_t(fig), rangebreaks=_trading_rangebreaks(hist.index, ticker)),
+                         hist, view_days, lo_col="Close", hi_col="Close")
 
 
 def price_candle(hist, ticker: str = "", avg_cost=None, trades=None, view_days=None):
@@ -293,7 +344,8 @@ def price_candle(hist, ticker: str = "", avg_cost=None, trades=None, view_days=N
     fig.update_layout(margin=dict(t=10, b=10, l=10, r=10),
                       legend=dict(orientation="h", y=1.1),
                       hovermode="x unified")
-    return _initial_view(_pannable(_t(fig)), hist, view_days)
+    return _initial_view(_pannable(_t(fig), rangebreaks=_trading_rangebreaks(hist.index, ticker)),
+                         hist, view_days)
 
 
 def market_treemap(rows: list[dict], height: int = 560):
@@ -498,20 +550,24 @@ def learning_curve(series):
 
 
 def intraday_candle(hist, ticker: str = "", trades=None, vwap=None,
-                    or_range=None, levels=None):
+                    or_range=None, levels=None, *, smooth: bool = False):
     """단기(1m/5m) 캔들 + ▲▼ 트레이드 마커 + VWAP·시가범위(OR) 박스·스톱/목표선.
 
     hist: 분봉 OHLCV DataFrame · trades: trade_events 레코드(마커 클릭용 customdata 포함)
     vwap: hist.index 정렬 시계열 | None · or_range: (hi, lo, end_ts) | None ·
     levels: [{"y", "label", "color"}] (스톱·목표 수평 점선).
+    smooth=True 면 하이킨아시로 평활 표시(분봉 노이즈 감소) — trade marker 는 raw 가격을
+    유지해 언제 사고 팔았는지 읽기 쉽게 둔다.
     """
     go = _go()
     fig = go.Figure()
     cols = set(getattr(hist, "columns", []))
     if hist is None or getattr(hist, "empty", True) or not {"Open", "High", "Low", "Close"} <= cols:
         return _t(fig)
+    plot_hist = heikin_ashi(hist) if smooth else hist
     fig.add_trace(go.Candlestick(
-        x=hist.index, open=hist["Open"], high=hist["High"], low=hist["Low"], close=hist["Close"],
+        x=plot_hist.index, open=plot_hist["Open"], high=plot_hist["High"], low=plot_hist["Low"],
+        close=plot_hist["Close"],
         name=ticker or "OHLC", increasing_line_color=_GREEN, decreasing_line_color=_RED,
         increasing_fillcolor=_GREEN, decreasing_fillcolor=_RED, line=dict(width=1)))
     if vwap is not None and len(vwap) == len(hist):
@@ -530,7 +586,7 @@ def intraday_candle(hist, ticker: str = "", trades=None, vwap=None,
     _add_trade_markers(fig, hist, trades or [])
     fig.update_layout(margin=dict(t=10, b=10, l=10, r=10),
                       legend=dict(orientation="h", y=1.1), hovermode="x unified")
-    return _pannable(_t(fig), height=400)
+    return _pannable(_t(fig), height=400, rangebreaks=_trading_rangebreaks(hist.index, ticker))
 
 
 def analyst_ratings(dist: dict):
@@ -888,6 +944,7 @@ def price_chart(hist, ticker: str = "", *, kind: str = "line", avg_cost=None,
     show_stoch = show_stoch and has_ohlc                # 스토캐스틱은 High/Low 필요
     show_aroon = show_aroon and has_ohlc                # Aroon 은 High/Low 필요
     show_pvt = show_pvt and "Volume" in cols            # PVT 는 거래량 필요
+    rangebreaks = _trading_rangebreaks(hist.index, ticker)
 
     # 하단 서브패널 — 순서 고정(거래량→RSI→MACD→스토→Aroon→%b→PVT→EPS→펀더멘털).
     # 분기 EPS — 유효 행(발표일+실제 EPS)만. 비교(%) 모드는 아래 cmp_mode 절이 차단.
@@ -1039,7 +1096,7 @@ def price_chart(hist, ticker: str = "", *, kind: str = "line", avg_cost=None,
 
     # ── 기간 최고/최저 콜아웃 + 현재가 점선·우측 라벨 (TradingView 풍) ──
     if cmp_mode:                       # % 축 — 가격 콜아웃 대신 % 포맷만
-        fig.update_yaxes(ticksuffix="%", tickformat=".1f",
+        fig.update_yaxes(separatethousands=True, ticksuffix="%", tickformat=".1f",
                          row=1 if panes > 1 else None,
                          col=1 if panes > 1 else None)
     else:
@@ -1251,12 +1308,15 @@ def price_chart(hist, ticker: str = "", *, kind: str = "line", avg_cost=None,
                          col=1 if panes > 1 else None)
         _log_fixup_price_shapes(fig)       # 가격축 도형·주석 y → log10 (plotly 규약)
     _t(fig)
+    if rangebreaks:
+        fig.update_xaxes(rangebreaks=rangebreaks)
     if panes > 1:
         fig.update_xaxes(rangeslider_visible=False)   # 서브플롯 제약 — 팬/줌으로 탐색
         return _initial_view_sub(fig, hist, view_days,
                                   y_override=(cmp_initial_yrange(close, compare, view_days)
                                               if cmp_mode else None), log_scale=log_scale)
-    fig.update_layout(xaxis=dict(rangeslider=dict(visible=True, thickness=0.08)))
+    fig.update_layout(xaxis=dict(rangeslider=dict(visible=True, thickness=0.08),
+                                 rangebreaks=rangebreaks))
     return _initial_view(fig, hist, view_days,
                          y_override=(cmp_initial_yrange(close, compare, view_days)
                                      if cmp_mode else None), log_scale=log_scale)
