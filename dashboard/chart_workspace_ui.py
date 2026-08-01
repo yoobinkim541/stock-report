@@ -42,6 +42,22 @@ def _caption_panel(panel: dict[str, Any]) -> str:
     return f"{_TF_LABEL.get(panel['timeframe'], panel['timeframe'])} · {_KIND_LABEL.get(panel['chart_kind'], panel['chart_kind'])} · {top} · {bottom} · {compare}"
 
 
+def _drawing_store_key(ws: dict[str, Any], panel: dict[str, Any], *, compare: bool) -> str | None:
+    mode = str(((ws or {}).get("sync") or {}).get("drawings") or "layout_symbol")
+    if mode == "off":
+        return None
+    ticker = str((panel or {}).get("ticker") or "").upper().strip() or "UNKNOWN"
+    timeframe = str((panel or {}).get("timeframe") or "1d").lower().strip() or "1d"
+    scale = "pct" if compare else "lin"
+    if mode == "global_symbol":
+        scope = "global"
+    else:
+        scope = str((ws or {}).get("id") or "default").strip() or "default"
+    safe_scope = "".join(ch if ch.isalnum() or ch in ".-_" else "_" for ch in scope)
+    safe_ticker = "".join(ch if ch.isalnum() or ch in ".-_" else "_" for ch in ticker)
+    return f"cw:{safe_scope}:{safe_ticker}:{timeframe}:{scale}"
+
+
 def _load_panel_hist(panel: dict[str, Any]):
     ticker = panel["ticker"]
     tf = panel["timeframe"]
@@ -50,7 +66,7 @@ def _load_panel_hist(panel: dict[str, Any]):
     return cached.ohlc_tf(ticker, tf)
 
 
-def _render_panel_chart(panel: dict[str, Any], *, height: int = 420) -> None:
+def _render_panel_chart(ws: dict[str, Any], panel: dict[str, Any], *, height: int = 420) -> None:
     hist = _load_panel_hist(panel)
     if hist is None or getattr(hist, "empty", True):
         st.info(f"{panel['ticker']} 가격 데이터 없음")
@@ -109,7 +125,7 @@ def _render_panel_chart(panel: dict[str, Any], *, height: int = 420) -> None:
             view_days=view_days,
             bounds_json=bounds,
             pct_mode=bool(compare),
-            store_key=f"{panel['ticker']}:{panel['timeframe']}:{'pct' if compare else 'lin'}:workspace",
+            store_key=_drawing_store_key(ws, panel, compare=bool(compare)),
             light=theme.is_light(),
         ),
         height=height + 150,
@@ -186,7 +202,7 @@ def render_chart_workspace(
                 st.session_state["_cw_workspace"] = ws
                 st.rerun()
             if render_charts:
-                _render_panel_chart(panel, height=390 if len(panels) > 1 else 760)
+                _render_panel_chart(ws, panel, height=390 if len(panels) > 1 else 760)
 
     _render_analysis_rail(ws, render_charts=render_charts)
 

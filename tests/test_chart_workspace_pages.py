@@ -60,3 +60,21 @@ finally:
     assert "분석 레일" in body
     assert "저장된 레이아웃" in body
     assert "Saved Layout" in body
+
+
+def test_workspace_drawing_store_key_respects_sync_scope():
+    from dashboard import chart_workspace_ui
+
+    ws = {
+        "id": "layout-1",
+        "sync": {"drawings": "layout_symbol"},
+    }
+    panel = {"id": "p1", "ticker": "MSFT", "timeframe": "1d"}
+
+    assert chart_workspace_ui._drawing_store_key(ws, panel, compare=False) == "cw:layout-1:MSFT:1d:lin"
+
+    ws["sync"]["drawings"] = "global_symbol"
+    assert chart_workspace_ui._drawing_store_key(ws, panel, compare=True) == "cw:global:MSFT:1d:pct"
+
+    ws["sync"]["drawings"] = "off"
+    assert chart_workspace_ui._drawing_store_key(ws, panel, compare=False) is None
