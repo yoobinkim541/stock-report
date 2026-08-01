@@ -31,3 +31,10 @@
 
 ## Unexpected issues
 - One new smoke test initially assumed the default stub exposed forward-EPS inputs for the existing `멀티플 기준가` card. I corrected the test fixture so it verifies the intended visible-section behavior without relying on unrelated stub omissions.
+
+## Round 1 Fix Notes
+- Addressed the review finding that `_per_self_band_section(...)` was treating unexpected fetch/runtime failures as a normal info note.
+- Kept the existing missing-history info fallback intact, but changed unexpected PER-band fetch failures to `st.error(...)` so real regressions are now visibly marked as failures.
+- Added a focused regression test that forces the PER-band fetch path to raise `RuntimeError("band fetch failed")` and asserts the page renders an error block instead of an info note.
+- Strengthened the combined visible-sections smoke test to assert the peer comparison dataframe and caption are actually present, not only that the expander is gone.
+- Verification rerun: `./.venv/bin/python -m pytest tests/test_dashboard_pages.py -k "per_self_band or peer_comparables or per_band_and_peer_sections_are_visible" -q` -> `6 passed, 73 deselected`

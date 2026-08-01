@@ -785,6 +785,33 @@ def test_ticker_page_per_self_band_hidden_when_insufficient_history():
     assert "자체 역사 PER 밴드를 표시할 실적 이력이 부족합니다." in info_body
 
 
+def test_ticker_page_per_self_band_fetch_failure_shows_error():
+    """PER 밴드 원본 fetch 실패는 info 가 아니라 error 블록으로 드러난다."""
+    script = _STUBS + (
+        'st.session_state["ticker"] = "MSFT"\n'
+        'def _band_ohlc(t, period="6mo"):\n'
+        '    if period == "2y":\n'
+        '        raise RuntimeError("band fetch failed")\n'
+        '    return pd.DataFrame(\n'
+        '        {"Close": [50.0, 55.0, 60.0, 64.0]},\n'
+        '        index=pd.DatetimeIndex(["2025-07-01", "2025-10-01", "2026-01-01", "2026-04-01"]))\n'
+        'cached.ohlc = _band_ohlc\n'
+        'cached.earnings_history_deep = lambda t, limit=12: [\n'
+        '    {"date": "2026-04-01", "eps_actual": 1.0}, {"date": "2026-01-01", "eps_actual": 1.0},\n'
+        '    {"date": "2025-10-01", "eps_actual": 1.0}, {"date": "2025-07-01", "eps_actual": 1.0},\n'
+        '    {"date": "2025-04-01", "eps_actual": 1.0}, {"date": "2025-01-01", "eps_actual": 1.0},\n'
+        '    {"date": "2024-10-01", "eps_actual": 1.0}]\n'
+        'from dashboard.pages import ticker\n'
+        'ticker.render()\n'
+    )
+    at = AppTest.from_string(script, default_timeout=30)
+    at.run()
+    assert not at.exception, str(at.exception)
+    assert any("자체 역사 PER 밴드" in str(e.value) for e in at.error)
+    assert "band fetch failed" in " ".join(str(e.value) for e in at.error)
+    assert not any("자체 역사 PER 밴드" in str(e.label) for e in at.expander)
+
+
 def test_ticker_page_peer_comparables_renders_for_us():
     """미국 종목은 피어 비교가 접힘 없이 본문에 바로 보인다."""
     script = _STUBS + (
@@ -800,6 +827,7 @@ def test_ticker_page_peer_comparables_renders_for_us():
     assert "같은 섹터 시총 상위 종목" in caps
     comparison = next(item.value for item in at.dataframe if "ROE(%)" in item.value.columns)
     assert "종목" in comparison.columns
+    assert comparison.shape[0] >= 2
     assert comparison.iloc[0]["종목"]
 
 
@@ -842,6 +870,10 @@ def test_ticker_page_per_band_and_peer_sections_are_visible():
     labels = [m.label for m in at.metric]
     assert "현재 PER" in labels
     assert "멀티플 기준가" in labels
+    caps = " ".join(str(c.value) for c in at.caption)
+    assert "같은 섹터 시총 상위 종목" in caps
+    comparison = next(item.value for item in at.dataframe if "ROE(%)" in item.value.columns)
+    assert comparison.shape[0] >= 2
 
 
 def test_paper_kpis_and_decisions():

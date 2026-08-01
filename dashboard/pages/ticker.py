@@ -1789,8 +1789,8 @@ def _per_self_band_section(ticker, m):
     try:
         hist2 = cached.ohlc(ticker, period="2y")
         rows = cached.earnings_history_deep(ticker)
-    except Exception:
-        st.info("자체 역사 PER 밴드를 표시할 데이터를 불러오지 못했습니다.")
+    except Exception as e:
+        st.error(f"자체 역사 PER 밴드를 표시할 데이터를 불러오지 못했습니다 — {e}")
         return
     band = data.per_self_band(rows, hist2, current_per=m.get("per"))
     if not band:
