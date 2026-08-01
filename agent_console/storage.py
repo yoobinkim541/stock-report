@@ -153,6 +153,19 @@ def ensure_schema(conn: sqlite3.Connection | None = None) -> None:
             );
             CREATE INDEX IF NOT EXISTS idx_chart_templates_kind
                 ON chart_templates(kind, updated_at DESC);
+
+            CREATE TABLE IF NOT EXISTS chart_drawing_snapshots (
+                workspace_id TEXT NOT NULL,
+                store_key    TEXT NOT NULL,
+                drawing_json TEXT NOT NULL,
+                source       TEXT NOT NULL,
+                version      INTEGER NOT NULL,
+                created_at   TEXT NOT NULL,
+                updated_at   TEXT NOT NULL,
+                PRIMARY KEY(workspace_id, store_key)
+            );
+            CREATE INDEX IF NOT EXISTS idx_chart_drawing_snapshots_workspace
+                ON chart_drawing_snapshots(workspace_id, updated_at DESC);
             """
         )
         conn.commit()
@@ -607,6 +620,18 @@ def _chart_template_row(row: sqlite3.Row) -> dict[str, Any]:
     }
 
 
+def _chart_drawing_snapshot_row(row: sqlite3.Row) -> dict[str, Any]:
+    return {
+        "workspace_id": row["workspace_id"],
+        "store_key": row["store_key"],
+        "drawing": json.loads(row["drawing_json"] or "{}"),
+        "source": row["source"],
+        "version": int(row["version"]),
+        "created_at": row["created_at"],
+        "updated_at": row["updated_at"],
+    }
+
+
 def _next_chart_workspace_version(workspace_id: str) -> tuple[int, str]:
     with connect() as conn:
         row = conn.execute(
@@ -747,6 +772,100 @@ def list_chart_workspace_versions(
             (workspace_id, limit),
         ).fetchall()
     return [_chart_workspace_version_row(row) for row in rows]
+
+
+def save_chart_drawing_snapshot(
+    workspace_id: str,
+    store_key: str,
+    drawing: dict[str, Any],
+    *,
+    source: str = "browser",
+) -> dict[str, Any]:
+    workspace_id = str(workspace_id or "").strip()
+    store_key = str(store_key or "").strip()
+    if not workspace_id:
+        raise ValueError("workspace_id is required")
+    if not store_key:
+        raise ValueError("store_key is required")
+    if not isinstance(drawing, dict):
+        raise ValueError("drawing must be an object")
+    drawing_json = _json(drawing)
+    if len(drawing_json.encode("utf-8")) > 1_000_000:
+        raise ValueError("drawing snapshot is too large")
+    now = _now()
+    with connect() as conn:
+        with conn:
+            row = conn.execute(
+                """
+                SELECT version, created_at
+                FROM chart_drawing_snapshots
+                WHERE workspace_id = ? AND store_key = ?
+                """,
+                (workspace_id, store_key),
+            ).fetchone()
+            version = int(row["version"] or 0) + 1 if row else 1
+            created_at = row["created_at"] if row else now
+            conn.execute(
+                """
+                INSERT INTO chart_drawing_snapshots
+                    (workspace_id, store_key, drawing_json, source, version, created_at, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(workspace_id, store_key) DO UPDATE SET
+                    drawing_json=excluded.drawing_json,
+                    source=excluded.source,
+                    version=excluded.version,
+                    updated_at=excluded.updated_at
+                """,
+                (
+                    workspace_id,
+                    store_key,
+                    drawing_json,
+                    str(source or "browser"),
+                    version,
+                    created_at,
+                    now,
+                ),
+            )
+    snapshot = get_chart_drawing_snapshot(workspace_id, store_key)
+    if snapshot is None:
+        raise RuntimeError("chart drawing snapshot was not saved")
+    return snapshot
+
+
+def get_chart_drawing_snapshot(workspace_id: str, store_key: str) -> dict[str, Any] | None:
+    workspace_id = str(workspace_id or "").strip()
+    store_key = str(store_key or "").strip()
+    if not workspace_id or not store_key:
+        return None
+    with connect() as conn:
+        row = conn.execute(
+            """
+            SELECT workspace_id, store_key, drawing_json, source, version, created_at, updated_at
+            FROM chart_drawing_snapshots
+            WHERE workspace_id = ? AND store_key = ?
+            """,
+            (workspace_id, store_key),
+        ).fetchone()
+    return _chart_drawing_snapshot_row(row) if row else None
+
+
+def list_chart_drawing_snapshots(workspace_id: str, limit: int = 50) -> list[dict[str, Any]]:
+    workspace_id = str(workspace_id or "").strip()
+    if not workspace_id:
+        return []
+    limit = max(1, min(int(limit or 50), 200))
+    with connect() as conn:
+        rows = conn.execute(
+            """
+            SELECT workspace_id, store_key, drawing_json, source, version, created_at, updated_at
+            FROM chart_drawing_snapshots
+            WHERE workspace_id = ?
+            ORDER BY updated_at DESC, store_key ASC
+            LIMIT ?
+            """,
+            (workspace_id, limit),
+        ).fetchall()
+    return [_chart_drawing_snapshot_row(row) for row in rows]
 
 
 def save_chart_template(template: dict[str, Any]) -> dict[str, Any]:

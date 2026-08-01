@@ -2126,6 +2126,42 @@ def test_strategy_studio_version_store_round_trips(monkeypatch, tmp_path):
     assert storage.list_strategy_versions(created["id"])[0]["version"] == 3
 
 
+def test_chart_drawing_snapshots_round_trip_latest_version(monkeypatch, tmp_path):
+    _isolate(monkeypatch, tmp_path)
+
+    from agent_console import storage
+
+    drawing = {
+        "v": 1,
+        "shapes": [{"kind": "trendline", "x0": "2026-01-01", "y0": 100, "x1": "2026-01-02", "y1": 104}],
+        "anns": [{"text": "breakout", "x": "2026-01-02", "y": 104}],
+    }
+    created = storage.save_chart_drawing_snapshot(
+        "workspace-1",
+        "cw:workspace-1:AAPL:1d:lin",
+        drawing,
+        source="browser",
+    )
+    assert created["workspace_id"] == "workspace-1"
+    assert created["store_key"] == "cw:workspace-1:AAPL:1d:lin"
+    assert created["drawing"] == drawing
+    assert created["version"] == 1
+
+    updated_drawing = {**drawing, "shapes": [*drawing["shapes"], {"kind": "hline", "y": 101}]}
+    updated = storage.save_chart_drawing_snapshot(
+        "workspace-1",
+        "cw:workspace-1:AAPL:1d:lin",
+        updated_drawing,
+        source="browser",
+    )
+
+    assert updated["version"] == 2
+    assert storage.get_chart_drawing_snapshot("workspace-1", "cw:workspace-1:AAPL:1d:lin")["drawing"] == updated_drawing
+    listed = storage.list_chart_drawing_snapshots("workspace-1")
+    assert [row["store_key"] for row in listed] == ["cw:workspace-1:AAPL:1d:lin"]
+    assert listed[0]["version"] == 2
+
+
 def test_strategy_studio_api_routes(monkeypatch, tmp_path):
     _isolate(monkeypatch, tmp_path)
 
@@ -2169,6 +2205,37 @@ def test_strategy_studio_api_routes(monkeypatch, tmp_path):
     patch_preview = client.post(f"/api/strategy-studio/specs/{saved['id']}/patch-preview", json={"question": "손절을 ATR로 바꿔줘"}).json
     assert patch_preview["ok"] is True
     assert patch_preview["patch"]["rules"]["exit"][0]["op"] == "<"
+
+
+def test_chart_drawing_snapshot_api_routes(monkeypatch, tmp_path):
+    _isolate(monkeypatch, tmp_path)
+
+    from agent_console.server import create_app
+
+    app = create_app()
+    client = app.test_client()
+    payload = {
+        "store_key": "cw:workspace-1:AAPL:1d:lin",
+        "drawing": {"v": 1, "shapes": [{"kind": "fib", "x0": "2026-01-01", "x1": "2026-01-10"}]},
+        "source": "browser",
+    }
+
+    saved = client.post("/api/chart-workspaces/workspace-1/drawings", json=payload)
+    assert saved.status_code == 200
+    assert saved.json["ok"] is True
+    assert saved.json["snapshot"]["version"] == 1
+
+    fetched = client.get(
+        "/api/chart-workspaces/workspace-1/drawings",
+        query_string={"store_key": "cw:workspace-1:AAPL:1d:lin"},
+    )
+    assert fetched.status_code == 200
+    assert fetched.json["ok"] is True
+    assert fetched.json["snapshot"]["drawing"] == payload["drawing"]
+
+    listing = client.get("/api/chart-workspaces/workspace-1/drawings/list")
+    assert listing.status_code == 200
+    assert listing.json["snapshots"][0]["store_key"] == "cw:workspace-1:AAPL:1d:lin"
 
 
 def test_context_pack_exposes_strategy_studio_state(monkeypatch, tmp_path):

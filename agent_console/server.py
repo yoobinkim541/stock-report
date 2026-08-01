@@ -193,6 +193,44 @@ def create_app() -> Flask:
         pack = payload.get("pack") if isinstance(payload.get("pack"), dict) else {}
         return jsonify(strategy_studio.propose_strategy_patch(question, spec.get("spec") or spec, history=history, pack=pack))
 
+    @app.get("/api/chart-workspaces/<workspace_id>/drawings")
+    def chart_workspace_drawing_get(workspace_id: str):
+        store_key = str(request.args.get("store_key") or "").strip()
+        if not store_key:
+            return jsonify({"ok": False, "error": "store_key is required"}), 400
+        snapshot = storage.get_chart_drawing_snapshot(workspace_id, store_key)
+        if not snapshot:
+            return jsonify({"ok": False, "error": "drawing snapshot not found", "snapshot": None}), 404
+        return jsonify({"ok": True, "snapshot": snapshot})
+
+    @app.get("/api/chart-workspaces/<workspace_id>/drawings/list")
+    def chart_workspace_drawing_list(workspace_id: str):
+        limit = int(request.args.get("limit", "50") or 50)
+        return jsonify({
+            "ok": True,
+            "snapshots": storage.list_chart_drawing_snapshots(workspace_id, limit=limit),
+        })
+
+    @app.post("/api/chart-workspaces/<workspace_id>/drawings")
+    def chart_workspace_drawing_save(workspace_id: str):
+        payload = request.get_json(silent=True) or {}
+        store_key = str(payload.get("store_key") or "").strip()
+        drawing = payload.get("drawing")
+        if not store_key:
+            return jsonify({"ok": False, "error": "store_key is required"}), 400
+        if not isinstance(drawing, dict):
+            return jsonify({"ok": False, "error": "drawing object required"}), 400
+        try:
+            snapshot = storage.save_chart_drawing_snapshot(
+                workspace_id,
+                store_key,
+                drawing,
+                source=str(payload.get("source") or "browser"),
+            )
+        except ValueError as exc:
+            return jsonify({"ok": False, "error": str(exc)}), 400
+        return jsonify({"ok": True, "snapshot": snapshot})
+
     @app.get("/api/local-install-prompt")
     def local_install_prompt():
         path = Path(__file__).resolve().parent.parent / "docs" / "local-agent-console-install-prompt.md"
