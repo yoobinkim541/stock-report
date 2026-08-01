@@ -577,9 +577,10 @@ def render_wiki_tab(surface: str, pack: dict[str, Any] | None = None) -> None:
         key="agent_wiki_status_filter",
     )
 
+    selected_page_id = st.session_state.get("agent_wiki_selected_page_id", "")
     graph_selected = wiki_mesh.render_wiki_mesh(
         pages_all,
-        selected_page_id=st.session_state.get("agent_wiki_selected_page_id", ""),
+        selected_page_id=selected_page_id,
         query=query,
         surface=surface_filter,
         status=status_filter,
@@ -588,19 +589,22 @@ def render_wiki_tab(surface: str, pack: dict[str, Any] | None = None) -> None:
         key="agent_wiki_graph",
     )
     if graph_selected:
-        st.session_state["agent_wiki_selected_page_id"] = graph_selected
+        selected_page_id = graph_selected
+        st.session_state["agent_wiki_selected_page_id"] = selected_page_id
 
     browser = build_browser_model(
         pages_all,
-        selected_page_id=st.session_state.get("agent_wiki_selected_page_id", ""),
+        selected_page_id=selected_page_id,
         query=query,
         surface=surface_filter,
         status=status_filter,
     )
     if browser.get("selected_id"):
-        st.session_state["agent_wiki_selected_page_id"] = browser["selected_id"]
+        selected_page_id = browser["selected_id"]
+        st.session_state["agent_wiki_selected_page_id"] = selected_page_id
 
     left, center, right = st.columns([0.92, 1.18, 0.9], gap="large")
+    load_selected_id = ""
     with left:
         st.markdown("##### 문서 브라우저")
         st.caption(f"{browser.get('visible_count', 0)}개 표시")
@@ -616,7 +620,9 @@ def render_wiki_tab(surface: str, pack: dict[str, Any] | None = None) -> None:
                         st.caption(" · ".join(page["tags"][:5]))
                     btn1, btn2 = st.columns(2)
                     if btn1.button("불러오기", key=f"wiki_load_{page.get('id')}", width="stretch"):
-                        st.session_state["agent_wiki_selected_page_id"] = page.get("id")
+                        load_selected_id = str(page.get("id") or "")
+                        selected_page_id = load_selected_id
+                        st.session_state["agent_wiki_selected_page_id"] = selected_page_id
                         st.toast("위키 페이지를 불러왔습니다.")
                     if btn2.button("삭제", key=f"wiki_drop_{page.get('id')}", width="stretch"):
                         if wiki.delete_page(page.get("id")):
@@ -625,6 +631,18 @@ def render_wiki_tab(surface: str, pack: dict[str, Any] | None = None) -> None:
                             st.rerun()
         else:
             st.info("필터에 맞는 위키가 없습니다.")
+
+    if load_selected_id:
+        browser = build_browser_model(
+            pages_all,
+            selected_page_id=selected_page_id,
+            query=query,
+            surface=surface_filter,
+            status=status_filter,
+        )
+        if browser.get("selected_id"):
+            selected_page_id = browser["selected_id"]
+            st.session_state["agent_wiki_selected_page_id"] = selected_page_id
 
     with center:
         st.markdown("##### 페이지 미리보기")
