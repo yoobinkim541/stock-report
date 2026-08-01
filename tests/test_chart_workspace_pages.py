@@ -187,3 +187,37 @@ def test_alert_event_markers_follow_panel_symbol():
             "note": "price:crossing_up, indicator:rsi_14:less_than · MSFT crossed 320",
         }
     ]
+
+
+def test_alert_condition_payload_can_include_rsi_filter():
+    from dashboard import chart_workspace_ui
+
+    condition = chart_workspace_ui._alert_condition_payload(
+        price_operator="crossing_up",
+        price_value=320.0,
+        rsi_enabled=True,
+        rsi_operator="less_than",
+        rsi_value=70.0,
+    )
+
+    assert condition == {
+        "all": [
+            {"type": "price", "operator": "crossing_up", "value": 320.0},
+            {"type": "indicator", "field": "rsi_14", "operator": "less_than", "value": 70.0},
+        ]
+    }
+
+
+def test_alert_rule_label_summarizes_multi_condition():
+    from dashboard import chart_workspace_ui
+
+    label = chart_workspace_ui._alert_rule_label({
+        "condition": {
+            "all": [
+                {"type": "price", "operator": "crossing_up", "value": 320.0},
+                {"type": "indicator", "field": "rsi_14", "operator": "less_than", "value": 70.0},
+            ]
+        }
+    })
+
+    assert label == "상향 돌파 320 · RSI(14) 미만 70"

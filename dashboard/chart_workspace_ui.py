@@ -283,6 +283,24 @@ def _render_alert_manager(ws: dict[str, Any], panels: list[dict[str, Any]]) -> N
         frequency = c3.selectbox("빈도", ["once", "per_bar"], format_func=lambda v: "한 번" if v == "once" else "봉마다", key=f"_cw_alert_freq_{workspace_id}_{active_id}")
         name = c4.text_input("이름", value=f"{symbol} {_alert_operator_label(operator)}", key=f"_cw_alert_name_{workspace_id}_{active_id}")
         message = st.text_input("메시지", value=f"{symbol} {operator} {threshold:g}", key=f"_cw_alert_msg_{workspace_id}_{active_id}")
+        r1, r2, r3 = st.columns([0.75, 1.0, 1.0], vertical_alignment="bottom")
+        rsi_enabled = r1.checkbox("RSI 조건", value=False, key=f"_cw_alert_rsi_enabled_{workspace_id}_{active_id}")
+        rsi_operator = r2.selectbox(
+            "RSI 조건",
+            ["less_than", "greater_than"],
+            format_func=_alert_operator_label,
+            key=f"_cw_alert_rsi_operator_{workspace_id}_{active_id}",
+            disabled=not rsi_enabled,
+        )
+        rsi_value = r3.number_input(
+            "RSI 값",
+            min_value=0.0,
+            max_value=100.0,
+            value=70.0,
+            step=1.0,
+            key=f"_cw_alert_rsi_value_{workspace_id}_{active_id}",
+            disabled=not rsi_enabled,
+        )
         store_key = _drawing_store_key(ws, active_panel, compare=bool(active_panel.get("compare")))
         if st.button("알림 저장", key=f"_cw_alert_save_{workspace_id}_{active_id}", width="stretch", disabled=not bool(workspace_id and store_key and threshold > 0)):
             try:
@@ -292,7 +310,13 @@ def _render_alert_manager(ws: dict[str, Any], panels: list[dict[str, Any]]) -> N
                     "symbol": symbol,
                     "timeframe": timeframe,
                     "name": name,
-                    "condition": {"type": "price", "operator": operator, "value": float(threshold)},
+                    "condition": _alert_condition_payload(
+                        price_operator=operator,
+                        price_value=float(threshold),
+                        rsi_enabled=bool(rsi_enabled),
+                        rsi_operator=str(rsi_operator),
+                        rsi_value=float(rsi_value),
+                    ),
                     "message": message,
                     "frequency": frequency,
                     "enabled": True,
@@ -384,12 +408,44 @@ def _alert_operator_label(operator: str) -> str:
 
 def _alert_rule_label(rule: dict[str, Any]) -> str:
     condition = rule.get("condition") or {}
+    leaves = condition.get("all") if isinstance(condition.get("all"), list) else [condition]
+    labels = [_alert_condition_leaf_label(item) for item in leaves if isinstance(item, dict)]
+    return " · ".join(label for label in labels if label) or "—"
+
+
+def _alert_condition_leaf_label(condition: dict[str, Any]) -> str:
     value = condition.get("value")
     try:
         value_text = f"{float(value):g}"
     except (TypeError, ValueError):
         value_text = str(value or "—")
-    return f"{_alert_operator_label(str(condition.get('operator') or ''))} {value_text}"
+    ctype = str(condition.get("type") or "price").strip().lower()
+    operator_text = _alert_operator_label(str(condition.get("operator") or ""))
+    if ctype == "indicator":
+        field = str(condition.get("field") or "").strip().lower()
+        if field == "rsi_14":
+            return f"RSI(14) {operator_text} {value_text}"
+        return f"{field or 'indicator'} {operator_text} {value_text}"
+    return f"{operator_text} {value_text}"
+
+
+def _alert_condition_payload(
+    *,
+    price_operator: str,
+    price_value: float,
+    rsi_enabled: bool = False,
+    rsi_operator: str = "less_than",
+    rsi_value: float = 70.0,
+) -> dict[str, Any]:
+    price = {"type": "price", "operator": str(price_operator), "value": float(price_value)}
+    if not rsi_enabled:
+        return price
+    return {
+        "all": [
+            price,
+            {"type": "indicator", "field": "rsi_14", "operator": str(rsi_operator), "value": float(rsi_value)},
+        ]
+    }
 
 
 def _alert_run_events(run: dict[str, Any]) -> list[dict[str, Any]]:
