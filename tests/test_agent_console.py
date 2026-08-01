@@ -2307,6 +2307,51 @@ def test_chart_alert_batch_api_can_dispatch_notifications(monkeypatch, tmp_path)
     assert sent and "AAPL crossed 100" in sent[0]
 
 
+def test_chart_alert_worker_loads_bars_updates_state_and_notifies(monkeypatch, tmp_path):
+    _isolate(monkeypatch, tmp_path)
+
+    import pandas as pd
+    from agent_console import storage
+    from agent_console.chart_alert_worker import run_chart_alert_cycle
+
+    rule = storage.save_chart_alert_rule({
+        "workspace_id": "workspace-1",
+        "store_key": "cw:workspace-1:AAPL:5m:lin",
+        "symbol": "AAPL",
+        "timeframe": "5m",
+        "name": "AAPL breakout",
+        "condition": {"type": "price", "operator": "crossing_up", "value": 100.0},
+        "message": "AAPL crossed 100",
+        "frequency": "once",
+        "enabled": True,
+    })
+    idx = pd.date_range("2026-08-01 09:30", periods=2, freq="5min", tz="UTC")
+    bars = pd.DataFrame({"Close": [99.0, 101.0]}, index=idx)
+    calls: list[tuple[str, str]] = []
+    sent: list[str] = []
+
+    def load_bars(symbol: str, timeframe: str):
+        calls.append((symbol, timeframe))
+        return bars
+
+    result = run_chart_alert_cycle(
+        workspace_id="workspace-1",
+        notify=True,
+        load_bars_fn=load_bars,
+        send_fn=lambda text: sent.append(text) or True,
+    )
+
+    assert calls == [("AAPL", "5m")]
+    assert result["rule_count"] == 1
+    assert result["event_count"] == 1
+    assert result["missing_bars"] == []
+    assert result["notification"]["delivered"] == 1
+    assert sent and "AAPL crossed 100" in sent[0]
+    saved = storage.get_chart_alert_rule(rule["id"])
+    assert saved["last_state"]["triggered"] is True
+    assert saved["last_state"]["event"]["alert_id"] == rule["id"]
+
+
 def test_strategy_studio_api_routes(monkeypatch, tmp_path):
     _isolate(monkeypatch, tmp_path)
 

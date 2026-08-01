@@ -181,3 +181,27 @@ def test_alert_dispatcher_formats_and_sends_triggered_events():
         "AAPL crossed 100 with RSI filter\n"
         "2026-08-01T12:00:00Z"
     ]
+
+
+def test_chart_alert_worker_main_exposes_cron_friendly_cli(monkeypatch, capsys):
+    from agent_console import chart_alert_worker
+
+    calls: list[dict] = []
+    monkeypatch.setattr(chart_alert_worker, "run_chart_alert_cycle", lambda **kwargs: calls.append(kwargs) or {
+        "ok": True,
+        "rule_count": 2,
+        "event_count": 1,
+        "missing_bars": [],
+        "notification": {"attempted": 1, "delivered": 1, "failed": 0, "failures": []},
+    })
+
+    code = chart_alert_worker.main(["--workspace-id", "workspace-1", "--symbol", "AAPL", "--notify"])
+
+    assert code == 0
+    assert calls == [{
+        "workspace_id": "workspace-1",
+        "symbols": ["AAPL"],
+        "notify": True,
+        "limit": 200,
+    }]
+    assert '"event_count": 1' in capsys.readouterr().out
