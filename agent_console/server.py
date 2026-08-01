@@ -5,7 +5,7 @@ from pathlib import Path
 
 from flask import Flask, jsonify, request, send_from_directory
 
-from . import agent, chart_alert_runner, chart_alerts, context, shared_memory, storage, strategy_studio, wiki
+from . import agent, chart_alert_dispatcher, chart_alert_runner, chart_alerts, context, shared_memory, storage, strategy_studio, wiki
 
 
 STATIC_DIR = Path(__file__).resolve().parent / "static"
@@ -321,7 +321,10 @@ def create_app() -> Flask:
                     "last_price": event.get("current_price"),
                     "last_checked_at": event.get("as_of") or payload.get("as_of"),
                 })
-        return jsonify({"ok": True, "event_count": len(events), "events": events})
+        notification = {"attempted": 0, "delivered": 0, "failed": 0, "failures": []}
+        if bool(payload.get("notify")) and events:
+            notification = chart_alert_dispatcher.dispatch_alert_events(events)
+        return jsonify({"ok": True, "event_count": len(events), "events": events, "notification": notification})
 
     @app.get("/api/local-install-prompt")
     def local_install_prompt():

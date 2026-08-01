@@ -150,3 +150,34 @@ def test_alert_runner_computes_rsi_and_evaluates_saved_rules_from_bars():
     assert event["condition_count"] == 2
     assert event["matched_conditions"] == ["price:crossing_up", "indicator:rsi_14:less_than"]
     assert event["indicator_values"]["rsi_14"] < 100.0
+
+
+def test_alert_dispatcher_formats_and_sends_triggered_events():
+    from agent_console.chart_alert_dispatcher import dispatch_alert_events
+
+    sent: list[str] = []
+    event = {
+        "alert_id": "alert-rsi-1",
+        "name": "AAPL price + RSI",
+        "symbol": "AAPL",
+        "as_of": "2026-08-01T12:00:00Z",
+        "operator": "all",
+        "threshold": 100.0,
+        "previous_price": 99.0,
+        "current_price": 101.0,
+        "matched_conditions": ["price:crossing_up", "indicator:rsi_14:less_than"],
+        "message": "AAPL crossed 100 with RSI filter",
+    }
+
+    result = dispatch_alert_events([event], send_fn=lambda text: sent.append(text) or True)
+
+    assert result["attempted"] == 1
+    assert result["delivered"] == 1
+    assert sent == [
+        "🔔 차트 알림\n"
+        "AAPL · AAPL price + RSI\n"
+        "현재가 101.00 · 이전 99.00\n"
+        "조건 price:crossing_up, indicator:rsi_14:less_than\n"
+        "AAPL crossed 100 with RSI filter\n"
+        "2026-08-01T12:00:00Z"
+    ]

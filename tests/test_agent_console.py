@@ -2265,6 +2265,48 @@ def test_chart_alert_batch_api_evaluates_saved_rules_from_bars(monkeypatch, tmp_
     assert saved["last_state"]["event"]["alert_id"] == rule["id"]
 
 
+def test_chart_alert_batch_api_can_dispatch_notifications(monkeypatch, tmp_path):
+    _isolate(monkeypatch, tmp_path)
+
+    from agent_console.server import create_app
+    from agent_console import chart_alert_dispatcher
+
+    sent: list[str] = []
+    monkeypatch.setattr(chart_alert_dispatcher, "send_alert_message", lambda text: sent.append(text) or True)
+
+    app = create_app()
+    client = app.test_client()
+    rule = client.post("/api/chart-alerts/rules", json={
+        "workspace_id": "workspace-1",
+        "store_key": "cw:workspace-1:AAPL:5m:lin",
+        "symbol": "AAPL",
+        "timeframe": "5m",
+        "name": "AAPL breakout",
+        "condition": {"type": "price", "operator": "crossing_up", "value": 100.0},
+        "message": "AAPL crossed 100",
+        "frequency": "once",
+        "enabled": True,
+    }).json["rule"]
+    bars = [
+        {"time": "2026-08-01T09:30:00Z", "close": 99.0},
+        {"time": "2026-08-01T09:35:00Z", "close": 101.0},
+    ]
+
+    result = client.post("/api/chart-alerts/evaluate-batch", json={
+        "workspace_id": "workspace-1",
+        "bars": {"AAPL": bars},
+        "notify": True,
+    })
+
+    assert result.status_code == 200
+    payload = result.json
+    assert payload["event_count"] == 1
+    assert payload["notification"]["attempted"] == 1
+    assert payload["notification"]["delivered"] == 1
+    assert rule["id"] in payload["events"][0]["alert_id"]
+    assert sent and "AAPL crossed 100" in sent[0]
+
+
 def test_strategy_studio_api_routes(monkeypatch, tmp_path):
     _isolate(monkeypatch, tmp_path)
 
