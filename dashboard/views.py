@@ -9,6 +9,8 @@ import os
 import re
 from typing import Any
 
+from agent_console import storage
+from dashboard import chart_workspace
 from ohlc_utils import normalize_ohlc_frame
 
 
@@ -1879,3 +1881,67 @@ def next_earnings(ticker: str):
         return ed or None
     except Exception:
         return None
+
+
+def chart_workspace_catalog(limit: int = 50) -> dict:
+    """저장된 차트 워크스페이스 목록."""
+    try:
+        rows = storage.list_chart_workspaces(limit=limit)
+        return {
+            "ok": True,
+            "count": len(rows),
+            "workspaces": rows,
+            "latest": rows[0] if rows else None,
+        }
+    except Exception as exc:
+        return {"ok": False, "error": str(exc), "count": 0, "workspaces": []}
+
+
+def chart_workspace_detail(workspace_id: str | None = None, version: int | None = None) -> dict:
+    """차트 워크스페이스 단건. 없으면 기본 워크스페이스를 반환."""
+    try:
+        if workspace_id:
+            row = storage.get_chart_workspace(workspace_id, version=version)
+            if row:
+                return row
+        ws = chart_workspace.default_workspace()
+        return {
+            "id": ws["id"],
+            "name": ws["name"],
+            "layout": ws["layout"],
+            "version": 0,
+            "workspace": ws,
+        }
+    except Exception as exc:
+        ws = chart_workspace.default_workspace()
+        return {"id": ws["id"], "version": 0, "workspace": ws, "error": str(exc)}
+
+
+def chart_workspace_versions(workspace_id: str, limit: int = 30) -> list[dict]:
+    """차트 워크스페이스 버전 이력."""
+    try:
+        return storage.list_chart_workspace_versions(workspace_id, limit=limit)
+    except Exception:
+        return []
+
+
+def chart_workspace_save(workspace: dict) -> dict:
+    """차트 워크스페이스 저장."""
+    return storage.save_chart_workspace(workspace)
+
+
+def chart_workspace_patch_preview(
+    workspace: dict,
+    *,
+    patch: dict | None = None,
+) -> dict:
+    """차트 워크스페이스 patch 미리보기."""
+    before = chart_workspace.normalize_workspace(workspace)
+    after = chart_workspace.apply_workspace_patch(before, patch or {})
+    return {
+        "ok": True,
+        "before": before,
+        "after": after,
+        "patch": patch or {},
+        "diff": chart_workspace.diff_workspaces(before, after),
+    }

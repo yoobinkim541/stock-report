@@ -86,3 +86,31 @@ def test_chart_template_storage_filters_kind(tmp_path, monkeypatch):
     assert [r["id"] for r in storage.list_chart_templates(kind="indicators")] == [
         "trend"
     ]
+
+
+def test_dashboard_workspace_wrappers_forward_storage(monkeypatch):
+    from dashboard import cached, views
+
+    monkeypatch.setattr(
+        views.storage,
+        "list_chart_workspaces",
+        lambda limit=50: [{"id": "w1", "name": "Main"}],
+    )
+    monkeypatch.setattr(
+        views.storage,
+        "get_chart_workspace",
+        lambda workspace_id, version=None: {
+            "id": workspace_id or "w1",
+            "workspace": cw.default_workspace("AAPL"),
+        },
+    )
+    monkeypatch.setattr(
+        views.storage,
+        "list_chart_workspace_versions",
+        lambda workspace_id, limit=30: [{"version": 1}],
+    )
+
+    cached.chart_workspace_catalog.clear()
+    assert views.chart_workspace_catalog()["count"] == 1
+    assert views.chart_workspace_detail("w1")["id"] == "w1"
+    assert cached.chart_workspace_catalog()["workspaces"][0]["id"] == "w1"

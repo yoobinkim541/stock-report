@@ -429,3 +429,18 @@ def market_temp_history():
 @st.cache_data(ttl=12 * 3600, show_spinner=False)
 def next_earnings(t):
     return views.next_earnings(t)
+
+
+@st.cache_data(ttl=30, show_spinner=False)
+def chart_workspace_catalog():
+    return views.chart_workspace_catalog()
+
+
+@st.cache_data(ttl=30, show_spinner=False)
+def chart_workspace_detail(workspace_id=None, version=None):
+    return views.chart_workspace_detail(workspace_id, version=version)
+
+
+@st.cache_data(ttl=30, show_spinner=False)
+def chart_workspace_versions(workspace_id):
+    return views.chart_workspace_versions(workspace_id)
