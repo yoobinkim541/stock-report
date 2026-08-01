@@ -236,11 +236,19 @@ cached.paper = lambda s: {"surface":s,"currency":"₩" if s=="kr_mock" else "$",
               if s=="us_mock" else None),
     "decisions":[{"date":"2026-06-02","side":"편입","ticker":"005930.KS","name":"삼성전자 (005930.KS)",
                   "qty":10,"price":70000.0,"policy_score":0.812,
+                  "base_score":0.812,"selection_score":0.914,"momentum_score":0.936,
+                  "momentum_tilt":0.102,"momentum_multiplier":1.12,"momentum_state":"strong",
+                  "overlay_active":True,"regime":"risk_on","market":"kr",
+                  "reason_codes":["regime:risk_on","state:strong"],
                   "reason":"score 85·A등급·수급 양호","ok":True,
                   "features":{"mom12":0.71,"hi52":0.95,"lowvol":0.6,"pead":0.58},
                   "fwd_excess":0.021,"correct":True,"matured_at":"2026-06-20"},
                  {"date":"2026-06-02","side":"퇴출","ticker":"000660.KS","name":"SK하이닉스 (000660.KS)",
                   "qty":5,"price":180000.0,"policy_score":0.31,
+                  "base_score":0.31,"selection_score":0.31,"momentum_score":0.5,
+                  "momentum_tilt":0.0,"momentum_multiplier":1.0,"momentum_state":"inactive",
+                  "overlay_active":False,"regime":"—","market":"kr",
+                  "reason_codes":["flag:off"],
                   "reason":"타깃이탈","ok":True,"features":{},
                   "fwd_excess":None,"correct":None,"matured_at":None}]}
 cached.learning_evolution = lambda s: {"surface":s,
@@ -894,6 +902,9 @@ def test_paper_kpis_and_decisions():
     assert not at.exception, str(at.exception)
     assert len(at.metric) >= 8                    # 계좌 4 + 예수금 + 로직평가 4
     assert len(at.dataframe) >= 2                 # 보유표 + 결정 원장표
+    decision_df = next(item.value for item in at.dataframe if "정책점수" in item.value.columns)
+    for col in ("선택점수", "모멘텀점수", "틸트", "배수", "상태", "오버레이", "레짐"):
+        assert col in decision_df.columns
     assert any("판단 근거" in str(m.value) for m in at.markdown)
     assert any("실거래 아님" in str(c.value) for c in at.caption)   # 안전 라벨
 

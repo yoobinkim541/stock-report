@@ -263,6 +263,25 @@ def test_plan_rebalances_delta_up():
     assert buy["side"] == "buy" and buy["qty"] == 15
 
 
+def test_plan_rebalances_with_momentum_multiplier_partial_trim():
+    import kiwoom_mock_track as kt
+    signals = [
+        {"code": "A", "is_buy": True, "price": 100, "policy_score": 0.90,
+         "selection_score": 0.96, "momentum_multiplier": 1.20},
+        {"code": "B", "is_buy": True, "price": 100, "policy_score": 0.85,
+         "selection_score": 0.78, "momentum_multiplier": 0.50},
+    ]
+    orders = kt.plan_rebalance(
+        signals,
+        {"B": {"shares": 20, "cur_price": 100}},
+        budget_krw=2_000,
+        max_positions=2,
+        target_multipliers={"A": 1.20, "B": 0.50},
+    )
+    assert any(o["code"] == "A" and o["side"] == "buy" for o in orders)
+    assert any(o["code"] == "B" and o["side"] == "sell" for o in orders)
+
+
 def test_plan_skips_zero_price():
     import kiwoom_mock_track as kt
     signals = [_sig("005930", "강한 매수후보", 80, 0)]   # 가격 0 → 제외
@@ -496,6 +515,57 @@ def test_main_aborts_on_balance_failure(monkeypatch):
     monkeypatch.setattr(kiwoom_mock, "place_order", lambda *a, **k: ordered.__setitem__("n", ordered["n"] + 1))
     assert kt.main() == 1
     assert ordered["n"] == 0, "잔고 실패 시 주문 0"
+
+
+def test_compute_kr_signals_attaches_momentum_overlay_fields(monkeypatch):
+    import pandas as pd
+    import kiwoom_mock_track as kt
+    from reports import daily_signals, fundamental_score, investment_report as ir
+    from ml import kr_policy, kr_ranker
+    import providers.market_data as md
+    from providers import news_labels
+
+    monkeypatch.setenv("KR_MOCK_MOMENTUM_OVERLAY_ENABLED", "true")
+    monkeypatch.setattr(ir, "KOSPI_TOP30", ["005930.KS"])
+    monkeypatch.setattr(fundamental_score, "score_ticker",
+                        lambda tk: {"total_score": 82, "grade": "A"})
+    monkeypatch.setattr(daily_signals, "detect_signals",
+                        lambda tk: {"price_info": {"current_price": 100, "1mo_change_pct": 8},
+                                    "overall_signal": "Positive"})
+    monkeypatch.setattr(ir, "_decision_v2",
+                        lambda fund, sig, grade, ticker=None: {
+                            "action": "강한 매수후보", "confidence": 88, "one_line_reason": "trend",
+                            "financial": {"status": "ok"}, "timing": {"status": "ok"},
+                            "news": {"status": "ok"}, "risk": {"status": "ok"},
+                        })
+    close = pd.Series([100 + i for i in range(260)], index=pd.bdate_range("2025-01-02", periods=260))
+    monkeypatch.setattr(md, "_history_cached", lambda *a, **k: pd.DataFrame({"Close": close}))
+    monkeypatch.setattr(news_labels, "news_axis", lambda tk: None, raising=False)
+    monkeypatch.setattr(kt, "load_ohlc_close_series", lambda *a, **k: close)
+    monkeypatch.setattr(kt, "_overlay_regime", lambda: ("risk_on", 0.9))
+    monkeypatch.setattr(kt, "_overlay_fresh", lambda *a, **k: True)
+    monkeypatch.setattr(kr_ranker, "kr_scores_by_ticker", lambda top_n=0: {"005930.KS": 1.0})
+    monkeypatch.setattr(kr_policy, "load_params", lambda: {})
+    monkeypatch.setattr(kr_policy, "score", lambda feats, params=None: 0.81)
+    monkeypatch.setattr(kt, "score_momentum_overlay",
+                        lambda base, feats, **kw: {
+                            "base_score": base, "momentum_score": 0.91, "selection_score": 0.96,
+                            "momentum_tilt": 0.15, "momentum_multiplier": 1.15,
+                            "overlay_active": True, "momentum_state": "strong",
+                            "reason_codes": ["regime:risk_on", "state:strong"],
+                            "momentum_reason_codes": ["regime:risk_on", "state:strong"],
+                            "market": "kr", "regime": "risk_on", "overlay_weight": 0.45,
+                        })
+
+    sigs = kt.compute_kr_signals(limit=1)
+
+    assert len(sigs) == 1
+    sig = sigs[0]
+    assert sig["overlay_active"] is True
+    assert sig["momentum_state"] == "strong"
+    assert sig["selection_score"] == 0.96
+    assert sig["momentum_multiplier"] == 1.15
+    assert sig["base_score"] == 0.81 and sig["policy_score"] == 0.81
 
 
 if __name__ == "__main__":

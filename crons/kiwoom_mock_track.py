@@ -45,9 +45,14 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from dotenv import load_dotenv
 load_dotenv()
 
+import pandas as pd
 import kiwoom_mock
 from lib import mock_llm_execution as llm_exec
 from lib import trade_events
+from ml.mock_momentum_overlay import (build_momentum_features,
+                                       inactive_momentum_overlay,
+                                       score_momentum_overlay)
+from providers.market_data import load_ohlc_close_series
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 logger = logging.getLogger(__name__)
@@ -69,6 +74,13 @@ def _float_env(name: str, default: float) -> float:
         return default
 
 
+def _bool_env(name: str, default: bool = False) -> bool:
+    raw = os.getenv(name)
+    if raw is None:
+        return default
+    return str(raw).lower() in ("1", "true", "yes", "on")
+
+
 UNIVERSE   = _int_env("KR_MOCK_UNIVERSE", 20)
 MAX_POS    = _int_env("KR_MOCK_MAX_POS", 5)
 INVEST     = _float_env("KR_MOCK_INVEST", 0.9)
@@ -76,6 +88,9 @@ SEED_KRW   = _float_env("KIWOOM_MOCK_SEED", 10_000_000)
 SLIPPAGE   = _float_env("KR_MOCK_SLIPPAGE", 0.01)   # 매수 사이징 슬리피지 버퍼(+1%)
 REBAL_BAND = _float_env("KR_MOCK_REBAL_BAND", 0.25)  # 무거래 밴드(목표比 ±25% 벗어날 때만 조정·회전율↓)
 EXIT_BUFFER = _int_env("KR_MOCK_EXIT_BUFFER", 2)     # 히스테리시스(top-N+2 안이면 보유 유지·경계 flip 방지)
+MOMENTUM_OVERLAY_ENABLED = _bool_env("KR_MOCK_MOMENTUM_OVERLAY_ENABLED", False)
+MOMENTUM_BENCHMARK = "^KS11"
+MOMENTUM_FRESH_DAYS = _int_env("KR_MOCK_MOMENTUM_FRESH_DAYS", 5)
 # ★최소 보유기간 — backtest/kr_policy_backtest 비용 OOS 실증(슬로우 신호 과잉거래가 순수익 ~2.4%p
 # 잠식·최소보유가 gross 보존하며 비용만 절감·반기>월간 64% 연도·cross-axis=ROBUST). **모의 활성**:
 # 기본 60(OOS 권고값 반영·모의로 라이브 검증). KR_MOCK_MIN_HOLD_DAYS=0 으로 되돌리면 현행 무제한 회전.
@@ -100,6 +115,37 @@ def _rt_best(code: str, side: str):
         pass
     return None
 
+
+def _overlay_regime() -> tuple[str | None, float]:
+    """모멘텀 오버레이용 레짐 라벨. risk_on/neutral 외에는 비활성."""
+    try:
+        from ml.adaptive.regime import current_regime
+        regime, confidence = current_regime()
+        regime = str(regime or "").lower()
+        confidence = float(confidence or 0.0)
+        if confidence < 0.5:
+            return None, confidence
+        if regime in {"risk_on", "neutral"}:
+            return regime, confidence
+        return None, confidence
+    except Exception:
+        return None, 0.0
+
+
+def _overlay_fresh(close, benchmark_close, *, max_age_days: int = MOMENTUM_FRESH_DAYS) -> bool:
+    """일봉 히스토리 최신성 가드. 주말은 허용하고 장기 지연만 차단."""
+    try:
+        c = getattr(close, "index", None)
+        b = getattr(benchmark_close, "index", None)
+        last_c = pd.Timestamp(c[-1]).normalize() if c is not None and len(c) else None
+        last_b = pd.Timestamp(b[-1]).normalize() if b is not None and len(b) else None
+        if last_c is None or last_b is None:
+            return False
+        today = pd.Timestamp(datetime.now(KST)).normalize()
+        return max((today - last_c).days, (today - last_b).days) <= max_age_days
+    except Exception:
+        return False
+
 _BUY_ACTIONS  = ("강한 매수후보", "관심/분할매수")
 _SELL_ACTIONS = ("매도검토", "손절/매도검토")
 
@@ -117,6 +163,26 @@ def compute_kr_signals(limit: int = UNIVERSE) -> list[dict]:
     from reports.daily_signals import detect_signals
 
     from ml import kr_policy
+    params = kr_policy.load_params()
+    overlay_enabled = _bool_env("KR_MOCK_MOMENTUM_OVERLAY_ENABLED", False)
+    overlay_regime, overlay_conf = _overlay_regime()
+    benchmark_close = None
+    overlay_reason_codes: list[str] = []
+    overlay_ready = overlay_enabled and overlay_regime is not None
+    if overlay_ready:
+        try:
+            benchmark_close = load_ohlc_close_series(MOMENTUM_BENCHMARK, periods=("2y", "1y"))
+        except Exception:
+            benchmark_close = None
+    if not overlay_enabled:
+        overlay_reason_codes = ["flag:off"]
+    elif overlay_regime is None:
+        overlay_reason_codes = ["gate:regime:missing"]
+    elif benchmark_close is None:
+        overlay_reason_codes = ["gate:benchmark"]
+    elif len(benchmark_close.dropna()) < 253:
+        overlay_reason_codes = ["gate:history"]
+        overlay_ready = False
 
     out = []
     for tk in KOSPI_TOP30[:limit]:
@@ -164,6 +230,24 @@ def compute_kr_signals(limit: int = UNIVERSE) -> list[dict]:
                 },
                 "features": feats,
             })
+            overlay_features = None
+            overlay_fresh = False
+            overlay_reasons = list(overlay_reason_codes)
+            if overlay_ready:
+                close = None
+                try:
+                    close = load_ohlc_close_series(tk, periods=("2y", "1y"))
+                except Exception:
+                    close = None
+                if close is not None:
+                    overlay_fresh = _overlay_fresh(close, benchmark_close)
+                    overlay_features = build_momentum_features(close, benchmark_close)
+                else:
+                    overlay_reasons = ["gate:history"]
+            s = out[-1]
+            s["overlay_features"] = overlay_features
+            s["overlay_fresh"] = overlay_fresh
+            s["overlay_reason_codes"] = overlay_reasons
         except Exception as e:
             logger.warning("KR 신호 실패 %s: %s", tk, e)
 
@@ -181,9 +265,37 @@ def compute_kr_signals(limit: int = UNIVERSE) -> list[dict]:
     except Exception as e:
         logger.warning("KR ranker 점수 주입 실패(폴백: 규칙 가중만): %s", e)
 
-    params = kr_policy.load_params()
     for s in out:
-        s["policy_score"] = round(kr_policy.score(s["features"], params), 6)
+        base_score = round(kr_policy.score(s["features"], params), 6)
+        s["base_score"] = base_score
+        overlay_features = s.pop("overlay_features", None)
+        fresh = bool(s.pop("overlay_fresh", False))
+        overlay_reasons = s.pop("overlay_reason_codes", overlay_reason_codes)
+        if overlay_features is not None:
+            overlay = score_momentum_overlay(
+                base_score, overlay_features, market="kr",
+                regime=overlay_regime, freshness_ok=fresh,
+            )
+            overlay["overlay_features"] = overlay_features
+        else:
+            overlay = inactive_momentum_overlay(
+                base_score, market="kr", regime=overlay_regime,
+                reason_codes=overlay_reasons,
+            )
+        s["selection_score"] = overlay["selection_score"]
+        s["momentum_score"] = overlay["momentum_score"]
+        s["momentum_tilt"] = overlay["momentum_tilt"]
+        s["momentum_multiplier"] = overlay["momentum_multiplier"]
+        s["momentum_state"] = overlay["momentum_state"]
+        s["overlay_active"] = overlay["overlay_active"]
+        s["regime"] = overlay.get("regime")
+        s["market"] = overlay.get("market")
+        s["reason_codes"] = overlay.get("reason_codes")
+        s["momentum_reason_codes"] = overlay.get("momentum_reason_codes")
+        s["overlay_weight"] = overlay.get("overlay_weight")
+        if overlay.get("overlay_features") is not None:
+            s["overlay_features"] = overlay["overlay_features"]
+        s["policy_score"] = base_score
     return out
 
 
@@ -236,7 +348,8 @@ def plan_rebalance(signals: list[dict], positions: dict, budget_krw: float,
                    slippage: float = 0.0, quote_fn=None,
                    rebal_band: float = 0.0, exit_buffer: int = 0,
                    min_hold_days: int = 0, held_days: dict | None = None,
-                   stub_frac: float = 0.0) -> list[dict]:
+                   stub_frac: float = 0.0,
+                   target_multipliers: dict[str, float] | None = None) -> list[dict]:
     """목표 바스켓 vs 현재 보유 → 시장가 주문계획.
 
     signals:   [{code, action, score, price, is_buy, is_sell}, ...]
@@ -265,7 +378,11 @@ def plan_rebalance(signals: list[dict], positions: dict, budget_krw: float,
     # 랭킹 = 학습된 정책 점수(policy_score) 우선, 없으면 펀더멘털 score 폴백
     ranked = sorted(
         [s for s in signals if s.get("is_buy") and s.get("price", 0) > 0],
-        key=lambda s: -(s.get("policy_score") if s.get("policy_score") is not None else s.get("score", 0) / 100.0),
+        key=lambda s: -(
+            s.get("selection_score")
+            if s.get("selection_score") is not None
+            else (s.get("policy_score") if s.get("policy_score") is not None else s.get("score", 0) / 100.0)
+        ),
     )
     buys = ranked[:max_positions]
     # 히스테리시스: 매도는 top-(N+buffer) 밖 종목만 (경계 flip-flop 방지)
@@ -287,13 +404,30 @@ def plan_rebalance(signals: list[dict], positions: dict, budget_krw: float,
 
     # 2) 매수/조정: 예산 0/음수면 전면 생략 (음수 예산 → 유령매도 방지)
     per = (budget_krw / len(buys)) if (buys and budget_krw > 0) else 0.0
+    target_values: dict[str, float] = {}
+    total_raw = 0.0
+    for s in buys:
+        code = s["code"]
+        mult = 1.0
+        if target_multipliers and code in target_multipliers:
+            mult = float(target_multipliers.get(code) or 0.0)
+        elif s.get("momentum_multiplier") is not None:
+            mult = float(s.get("momentum_multiplier") or 0.0)
+        mult = max(0.0, mult)
+        target_values[code] = per * mult
+        total_raw += target_values[code]
+    if budget_krw > 0 and total_raw > budget_krw:
+        scale = budget_krw / total_raw
+        target_values = {code: val * scale for code, val in target_values.items()}
+
     # cash_krw=0 은 "현금 없음"(캡=0)이지 "정보 없음"(캡 미적용)이 아니다 — is not None 만 검사
     # (2026-07-24: us_mock_track.py 와 동일한 버그 — cash_krw>0 도 요구하면 현금 정확히 0일 때
     # 캡이 통째로 빠져 예산 기준 풀사이즈 매수가 그대로 나감)
     remaining = cash_krw
     for s in buys:
         code, price = s["code"], s["price"]
-        if per <= 0 or price <= 0:
+        per_sym = target_values.get(code, per)
+        if per_sym <= 0 or price <= 0:
             continue
         cur = int(positions.get(code, {}).get("shares", 0) or 0)
         eff_price = price * (1.0 + max(0.0, slippage))   # 슬리피지 버퍼
@@ -305,9 +439,9 @@ def plan_rebalance(signals: list[dict], positions: dict, budget_krw: float,
             if q and q > 0:
                 eff_price = q
         # 무거래 밴드: 이미 보유 중이고 목표 대비 band 이내면 조정 skip (신규 진입은 항상 매수)
-        if rebal_band > 0 and cur > 0 and abs(cur * eff_price - per) <= rebal_band * per:
+        if rebal_band > 0 and cur > 0 and abs(cur * eff_price - per_sym) <= rebal_band * per_sym:
             continue
-        tgt = int(per // eff_price)
+        tgt = int(per_sym // eff_price)
         if remaining is not None:                         # 가용현금 러닝 캡
             tgt = min(tgt, cur + int(remaining // eff_price))
         tgt = max(0, tgt)                                  # 음수 목표 클램프(유령매도 차단)
@@ -352,7 +486,17 @@ def _log_decision(ledger, sig: dict, code: str, kind: str, order_side: str,
             "qty": qty,
             "price": sig.get("price"),
             "action": sig.get("action"),
+            "base_score": sig.get("base_score"),
             "policy_score": sig.get("policy_score"),
+            "selection_score": sig.get("selection_score"),
+            "momentum_score": sig.get("momentum_score"),
+            "momentum_tilt": sig.get("momentum_tilt"),
+            "momentum_multiplier": sig.get("momentum_multiplier"),
+            "momentum_state": sig.get("momentum_state"),
+            "overlay_active": sig.get("overlay_active"),
+            "regime": sig.get("regime"),
+            "market": sig.get("market"),
+            "reason_codes": sig.get("reason_codes"),
             "score": sig.get("score"),
             "rationale": sig.get("rationale"),
             "features": sig.get("features"),      # point-in-time — 학습 입력

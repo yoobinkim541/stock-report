@@ -125,6 +125,49 @@ def test_quote_fn_none_is_baseline():
     assert base == none == {("A", "buy"): 10}
 
 
+def test_compute_us_signals_attaches_momentum_overlay_fields(monkeypatch):
+    import pandas as pd
+    import us_mock_track as ut
+    from ml import ranker, us_policy
+    import providers.market_data as md
+    from providers import earnings_data, news_labels
+
+    monkeypatch.setenv("US_MOCK_MOMENTUM_OVERLAY_ENABLED", "true")
+    close = pd.Series([100 + i for i in range(260)], index=pd.bdate_range("2025-01-02", periods=260))
+    monkeypatch.setattr(ut, "_safe_earnings", lambda tk: {"per": 20, "pbr": 2, "roe": 15, "confidence": 80})
+    monkeypatch.setattr(ut, "_safe_signals", lambda tk: {"price_info": {"current_price": 100, "1mo_change_pct": 7}})
+    monkeypatch.setattr(ut, "_safe_fund", lambda tk: {"confidence": 80})
+    monkeypatch.setattr(md, "_history_cached", lambda *a, **k: pd.DataFrame({"Close": close}))
+    monkeypatch.setattr(earnings_data, "earnings_history",
+                        lambda tk, limit=4: [{"date": "2026-07-01", "surprise_pct": 6.0}])
+    monkeypatch.setattr(news_labels, "news_axis", lambda tk: None, raising=False)
+    monkeypatch.setattr(ut, "load_ohlc_close_series", lambda *a, **k: close)
+    monkeypatch.setattr(ut, "_overlay_regime", lambda: ("risk_on", 0.9))
+    monkeypatch.setattr(ut, "_overlay_fresh", lambda *a, **k: True)
+    monkeypatch.setattr(ranker, "scores_by_ticker", lambda tks: {"AAPL": 1.0}, raising=False)
+    monkeypatch.setattr(us_policy, "load_params", lambda: {})
+    monkeypatch.setattr(us_policy, "score", lambda feats, params=None: 0.77)
+    monkeypatch.setattr(ut, "score_momentum_overlay",
+                        lambda base, feats, **kw: {
+                            "base_score": base, "momentum_score": 0.94, "selection_score": 0.98,
+                            "momentum_tilt": 0.21, "momentum_multiplier": 1.18,
+                            "overlay_active": True, "momentum_state": "strong",
+                            "reason_codes": ["regime:risk_on", "state:strong"],
+                            "momentum_reason_codes": ["regime:risk_on", "state:strong"],
+                            "market": "us", "regime": "risk_on", "overlay_weight": 0.50,
+                        })
+
+    sigs = ut.compute_us_signals(["AAPL"])
+
+    assert len(sigs) == 1
+    sig = sigs[0]
+    assert sig["overlay_active"] is True
+    assert sig["momentum_state"] == "strong"
+    assert sig["selection_score"] == 0.98
+    assert sig["momentum_multiplier"] == 1.18
+    assert sig["base_score"] == 0.77 and sig["policy_score"] == 0.77
+
+
 def test_universe_includes_leveraged_etfs_by_default(monkeypatch):
     monkeypatch.delenv("US_MOCK_UNIVERSE", raising=False)
     monkeypatch.delenv("US_MOCK_INCLUDE_LEVERAGE", raising=False)
@@ -184,6 +227,24 @@ def test_plan_caps_leveraged_positions_and_budget():
     assert o.get(("A", "buy")) == 233
     assert o.get(("B", "buy")) == 233
     assert o.get(("C", "buy")) == 233
+
+
+def test_plan_rebalances_with_momentum_multiplier_partial_trim():
+    sigs = [
+        {"ticker": "A", "price": 100, "policy_score": 0.90,
+         "selection_score": 0.96, "momentum_multiplier": 1.20},
+        {"ticker": "B", "price": 100, "policy_score": 0.85,
+         "selection_score": 0.78, "momentum_multiplier": 0.50},
+    ]
+    orders = T.plan_rebalance(
+        sigs,
+        {"B": {"shares": 20}},
+        budget_usd=2_000,
+        max_positions=2,
+        target_multipliers={"A": 1.20, "B": 0.50},
+    )
+    assert any(o["symbol"] == "A" and o["side"] == "buy" for o in orders)
+    assert any(o["symbol"] == "B" and o["side"] == "sell" for o in orders)
 
 
 if __name__ == "__main__":

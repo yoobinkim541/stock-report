@@ -318,12 +318,21 @@ def _decisions_section(surface: str):
         return
 
     def _row(r):
+        overlay_active = bool(r.get("overlay_active"))
+        mult = r.get("momentum_multiplier")
         base = {
             "날짜": r["date"],
             "구분": f"{_SIDE_ICON.get(r.get('side'), '')} {r.get('side', '')}",
             "종목": r.get("name") or r.get("ticker"),
             "수량": r.get("qty"),
             "정책점수": data.f_ratio(r.get("policy_score"), 3),
+            "선택점수": data.f_ratio(r.get("selection_score"), 3),
+            "오버레이": "켜짐" if overlay_active else "꺼짐",
+            "상태": r.get("momentum_state") or "inactive",
+            "모멘텀점수": data.f_ratio(r.get("momentum_score"), 3) if overlay_active else "—",
+            "배수": f"×{float(mult):.2f}" if overlay_active and mult is not None else "—",
+            "틸트": data.f_ratio(r.get("momentum_tilt"), 3),
+            "레짐": r.get("regime") or "—",
             "판단 근거": r.get("reason") or "—",
             "체결": "✅" if r.get("ok") else ("❌" if r.get("ok") is False else "—"),
             "실현 순초과": data.f_frac_pct_s(r.get("fwd_excess"), 2),

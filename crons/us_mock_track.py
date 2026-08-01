@@ -37,9 +37,14 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from dotenv import load_dotenv
 load_dotenv()
 
+import pandas as pd
 import kis_mock
 from lib import mock_llm_execution as llm_exec
 from lib import trade_events
+from ml.mock_momentum_overlay import (build_momentum_features,
+                                       inactive_momentum_overlay,
+                                       score_momentum_overlay)
+from providers.market_data import load_ohlc_close_series
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 logger = logging.getLogger(__name__)
@@ -185,6 +190,9 @@ def leverage_sleeve_paper_enabled() -> bool:
 
 
 LEV_SLEEVE_ENABLED = leverage_sleeve_paper_enabled()
+MOMENTUM_OVERLAY_ENABLED = _bool_env("US_MOCK_MOMENTUM_OVERLAY_ENABLED", False)
+MOMENTUM_BENCHMARK = "QQQ"
+MOMENTUM_FRESH_DAYS = _int_env("US_MOCK_MOMENTUM_FRESH_DAYS", 5)
 
 
 def load_lev_shadow(path: str | None = None) -> float | None:
@@ -250,13 +258,64 @@ def _rt_best(sym: str, side: str):
     return None
 
 
+def _overlay_regime() -> tuple[str | None, float]:
+    """모멘텀 오버레이용 레짐 라벨. risk_on/neutral 외에는 비활성."""
+    try:
+        from ml.adaptive.regime import current_regime
+        regime, confidence = current_regime()
+        regime = str(regime or "").lower()
+        confidence = float(confidence or 0.0)
+        if confidence < 0.5:
+            return None, confidence
+        if regime in {"risk_on", "neutral"}:
+            return regime, confidence
+        return None, confidence
+    except Exception:
+        return None, 0.0
+
+
+def _overlay_fresh(close, benchmark_close, *, max_age_days: int = MOMENTUM_FRESH_DAYS) -> bool:
+    """일봉 히스토리 최신성 가드. 주말은 허용하고 장기 지연만 차단."""
+    try:
+        c = getattr(close, "index", None)
+        b = getattr(benchmark_close, "index", None)
+        last_c = pd.Timestamp(c[-1]).normalize() if c is not None and len(c) else None
+        last_b = pd.Timestamp(b[-1]).normalize() if b is not None and len(b) else None
+        if last_c is None or last_b is None:
+            return False
+        today = pd.Timestamp(datetime.now(KST)).normalize()
+        return max((today - last_c).days, (today - last_b).days) <= max_age_days
+    except Exception:
+        return False
+
+
 # ── 선택 신호 (런타임·네트워크) ────────────────────────────────────────────────
 
 def compute_us_signals(universe: list[str] | None = None) -> list[dict]:
     """유니버스별 us_policy 점수 + 현재가 + 판단근거. ranker 는 best-effort(있으면 횡단정규화 주입)."""
     from ml import us_policy
+    params = us_policy.load_params()
     universe = universe or _universe()
     active_leverage_symbols = set(leverage_universe())
+    overlay_enabled = _bool_env("US_MOCK_MOMENTUM_OVERLAY_ENABLED", False)
+    overlay_regime, overlay_conf = _overlay_regime()
+    benchmark_close = None
+    overlay_reason_codes: list[str] = []
+    overlay_ready = overlay_enabled and overlay_regime is not None
+    if overlay_ready:
+        try:
+            benchmark_close = load_ohlc_close_series(MOMENTUM_BENCHMARK, periods=("2y", "1y"))
+        except Exception:
+            benchmark_close = None
+    if not overlay_enabled:
+        overlay_reason_codes = ["flag:off"]
+    elif overlay_regime is None:
+        overlay_reason_codes = ["gate:regime:missing"]
+    elif benchmark_close is None:
+        overlay_reason_codes = ["gate:benchmark"]
+    elif len(benchmark_close.dropna()) < 253:
+        overlay_reason_codes = ["gate:history"]
+        overlay_ready = False
     out = []
     for tk in universe:
         try:
@@ -309,6 +368,26 @@ def compute_us_signals(universe: list[str] | None = None) -> list[dict]:
                 "leverage": (lev_meta or {}).get("leverage"),
                 "inverse": bool((lev_meta or {}).get("inverse")),
             })
+            overlay_features = None
+            overlay_fresh = False
+            overlay_reasons = list(overlay_reason_codes)
+            if overlay_ready:
+                close = None
+                try:
+                    from providers.market_data import _history_cached
+                    h = _history_cached(tk, period="2y")
+                    close = h["Close"] if (h is not None and "Close" in getattr(h, "columns", [])) else None
+                except Exception:
+                    close = None
+                if close is not None:
+                    overlay_fresh = _overlay_fresh(close, benchmark_close)
+                    overlay_features = build_momentum_features(close, benchmark_close)
+                else:
+                    overlay_reasons = ["gate:history"]
+            s = out[-1]
+            s["overlay_features"] = overlay_features
+            s["overlay_fresh"] = overlay_fresh
+            s["overlay_reason_codes"] = overlay_reasons
         except Exception as e:
             logger.warning("US 신호 실패 %s: %s", tk, e)
 
@@ -326,9 +405,37 @@ def compute_us_signals(universe: list[str] | None = None) -> list[dict]:
     except Exception as e:
         logger.info("US ranker 주입 생략(폴백: 규칙 가중만): %s", e)
 
-    params = us_policy.load_params()
     for s in out:
-        s["policy_score"] = round(us_policy.score(s["features"], params), 6)
+        base_score = round(us_policy.score(s["features"], params), 6)
+        s["base_score"] = base_score
+        overlay_features = s.pop("overlay_features", None)
+        fresh = bool(s.pop("overlay_fresh", False))
+        overlay_reasons = s.pop("overlay_reason_codes", overlay_reason_codes)
+        if overlay_features is not None:
+            overlay = score_momentum_overlay(
+                base_score, overlay_features, market="us",
+                regime=overlay_regime, freshness_ok=fresh,
+            )
+            overlay["overlay_features"] = overlay_features
+        else:
+            overlay = inactive_momentum_overlay(
+                base_score, market="us", regime=overlay_regime,
+                reason_codes=overlay_reasons,
+            )
+        s["selection_score"] = overlay["selection_score"]
+        s["momentum_score"] = overlay["momentum_score"]
+        s["momentum_tilt"] = overlay["momentum_tilt"]
+        s["momentum_multiplier"] = overlay["momentum_multiplier"]
+        s["momentum_state"] = overlay["momentum_state"]
+        s["overlay_active"] = overlay["overlay_active"]
+        s["regime"] = overlay.get("regime")
+        s["market"] = overlay.get("market")
+        s["reason_codes"] = overlay.get("reason_codes")
+        s["momentum_reason_codes"] = overlay.get("momentum_reason_codes")
+        s["overlay_weight"] = overlay.get("overlay_weight")
+        if overlay.get("overlay_features") is not None:
+            s["overlay_features"] = overlay["overlay_features"]
+        s["policy_score"] = base_score
     return out
 
 
@@ -382,27 +489,32 @@ def _select_targets(ranked: list[dict], max_positions: int,
 
 def _target_values(buys: list[dict], budget_usd: float,
                    leverage_symbols: set[str] | None = None,
-                   leverage_budget_frac: float | None = None) -> dict[str, float]:
+                   leverage_budget_frac: float | None = None,
+                   target_multipliers: dict[str, float] | None = None) -> dict[str, float]:
     if not buys or budget_usd <= 0:
         return {}
     base = budget_usd / len(buys)
     out = {s["ticker"]: base for s in buys}
-    if not leverage_symbols or leverage_budget_frac is None:
-        return out
-    lev = [s["ticker"] for s in buys if s["ticker"] in leverage_symbols]
-    stock = [s["ticker"] for s in buys if s["ticker"] not in leverage_symbols]
-    if not lev:
-        return out
-    lev_cap = max(0.0, min(1.0, float(leverage_budget_frac))) * budget_usd
-    desired = base * len(lev)
-    if desired <= lev_cap:
-        return out
-    lev_per = lev_cap / len(lev) if lev else 0.0
-    stock_per = (budget_usd - lev_per * len(lev)) / len(stock) if stock else 0.0
-    for sym in lev:
-        out[sym] = lev_per
-    for sym in stock:
-        out[sym] = stock_per
+    if leverage_symbols and leverage_budget_frac is not None:
+        lev = [s["ticker"] for s in buys if s["ticker"] in leverage_symbols]
+        stock = [s["ticker"] for s in buys if s["ticker"] not in leverage_symbols]
+        if lev:
+            lev_cap = max(0.0, min(1.0, float(leverage_budget_frac))) * budget_usd
+            desired = base * len(lev)
+            if desired > lev_cap:
+                lev_per = lev_cap / len(lev) if lev else 0.0
+                stock_per = (budget_usd - lev_per * len(lev)) / len(stock) if stock else 0.0
+                for sym in lev:
+                    out[sym] = lev_per
+                for sym in stock:
+                    out[sym] = stock_per
+    if target_multipliers:
+        out = {sym: max(0.0, float(val) * max(0.0, float(target_multipliers.get(sym, 1.0))))
+               for sym, val in out.items()}
+        total = sum(out.values())
+        if budget_usd > 0 and total > budget_usd:
+            scale = budget_usd / total
+            out = {sym: val * scale for sym, val in out.items()}
     return out
 
 
@@ -414,7 +526,8 @@ def plan_rebalance(signals: list[dict], positions: dict, budget_usd: float,
                    leverage_symbols: set[str] | None = None,
                    leverage_max_positions: int | None = None,
                    leverage_budget_frac: float | None = None,
-                   min_cash_usd: float = 0.0) -> list[dict]:
+                   min_cash_usd: float = 0.0,
+                   target_multipliers: dict[str, float] | None = None) -> list[dict]:
     """목표 바스켓(policy_score 상위 N 균등) vs 보유 → 정수주 지정가 주문계획.
 
     반환: [{symbol, side('buy'|'sell'), qty, reason}]. 매도 먼저(현금확보)·예산0/음수면 매수생략·현금 러닝캡.
@@ -427,7 +540,11 @@ def plan_rebalance(signals: list[dict], positions: dict, budget_usd: float,
     """
     orders: list[dict] = []
     ranked = sorted([s for s in signals if s.get("price", 0) > 0],
-                    key=lambda s: -(s.get("policy_score") or 0))
+                    key=lambda s: -(
+                        s.get("selection_score")
+                        if s.get("selection_score") is not None
+                        else (s.get("policy_score") or 0)
+                    ))
     buys = _select_targets(ranked, max_positions, leverage_symbols, leverage_max_positions)
     # 히스테리시스: 매도는 top-(N+buffer) 밖 종목만 (경계 flip-flop 방지)
     keep_targets = _select_targets(
@@ -443,7 +560,9 @@ def plan_rebalance(signals: list[dict], positions: dict, budget_usd: float,
         if sh > 0 and sym not in keep:
             orders.append({"symbol": sym, "side": "sell", "qty": sh, "reason": "타깃이탈"})
 
-    target_values = _target_values(buys, budget_usd, leverage_symbols, leverage_budget_frac)
+    target_values = _target_values(
+        buys, budget_usd, leverage_symbols, leverage_budget_frac, target_multipliers=target_multipliers
+    )
     # cash_usd=0 은 "현금 없음"(캡=0)이지 "정보 없음"(캡 미적용)이 아니다 — is not None 만 검사
     # (2026-07-24: 예전엔 cash_usd>0 도 요구해서 실계좌 현금 정확히 0일 때 캡이 통째로 빠져
     # 예산 기준 풀사이즈 매수가 그대로 나가던 게 '주문가능금액 부족' 실패의 근본 원인이었음)
@@ -541,13 +660,17 @@ def main(argv: list[str] | None = None) -> int:
         if not (sleeve_mode == "paper" and s.get("ticker") == LEV_SLEEVE_SYMBOL)
     ]
     effective_cash_buffer = CASH_BUFFER_DERIVED if cash_derived else CASH_BUFFER
+    target_multipliers = {
+        s["ticker"]: float(s.get("momentum_multiplier", 1.0) or 1.0)
+        for s in trade_signals if s.get("ticker")
+    }
     plan = plan_rebalance(trade_signals, positions_stock, budget, MAX_POS, cash_usd=cash,
                           slippage=SLIPPAGE, quote_fn=_rt_best, cash_buffer=effective_cash_buffer,
                           rebal_band=REBAL_BAND, exit_buffer=EXIT_BUFFER,
                           leverage_symbols=leverage_symbols,
                           leverage_max_positions=LEV_ETF_MAX_POS,
                           leverage_budget_frac=LEV_ETF_MAX_WEIGHT,
-                          min_cash_usd=MIN_CASH_USD)
+                          min_cash_usd=MIN_CASH_USD, target_multipliers=target_multipliers)
     # ★분할매수/매도: 종목 주문을 회당 목표의 1/N 로 상한 (슬리브는 별도 — 제외)
     if TRANCHES > 1 and plan:
         from lib.tranche import plan_tranches
@@ -638,7 +761,17 @@ def _log_decision(ledger, sig, sym, kind, order_side, qty, ok, today):
     try:
         ledger.log_decision({
             "date": today, "ticker": sym, "side": kind, "order_side": order_side, "qty": qty,
-            "price": sig.get("price"), "policy_score": sig.get("policy_score"),
+            "price": sig.get("price"), "base_score": sig.get("base_score"),
+            "policy_score": sig.get("policy_score"),
+            "selection_score": sig.get("selection_score"),
+            "momentum_score": sig.get("momentum_score"),
+            "momentum_tilt": sig.get("momentum_tilt"),
+            "momentum_multiplier": sig.get("momentum_multiplier"),
+            "momentum_state": sig.get("momentum_state"),
+            "overlay_active": sig.get("overlay_active"),
+            "regime": sig.get("regime"),
+            "market": sig.get("market"),
+            "reason_codes": sig.get("reason_codes"),
             "rationale": sig.get("rationale"), "features": sig.get("features"), "ok": ok,
         })
         if kind in ("편입", "퇴출"):

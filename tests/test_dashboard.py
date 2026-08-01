@@ -1083,9 +1083,17 @@ def test_views_tier3_gate_status(monkeypatch, tmp_path):
 def test_views_join_decisions_carries_features():
     from dashboard import views
     decs = [{"id": "d:T", "date": "2026-06-02", "side": "편입", "ticker": "T",
+             "base_score": 0.81, "policy_score": 0.79, "selection_score": 0.88,
+             "momentum_score": 0.91, "momentum_tilt": 0.09, "momentum_multiplier": 1.12,
+             "momentum_state": "strong", "overlay_active": True, "regime": "risk_on",
+             "market": "us", "reason_codes": ["regime:risk_on", "state:strong"],
              "features": {"mom12": 0.7, "pead": 0.6}}]
     rows = views.join_decisions(decs, [])
-    assert rows[0]["features"] == {"mom12": 0.7, "pead": 0.6}
+    row = rows[0]
+    assert row["features"] == {"mom12": 0.7, "pead": 0.6}
+    assert row["base_score"] == 0.81 and row["selection_score"] == 0.88
+    assert row["momentum_state"] == "strong" and row["overlay_active"] is True
+    assert row["reason_codes"] == ["regime:risk_on", "state:strong"]
 
 
 # ── P3 사이드바 모의 레일 (초경량 글랜스 — store 스냅샷만) ────────────────────
