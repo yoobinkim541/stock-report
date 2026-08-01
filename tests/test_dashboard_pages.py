@@ -872,6 +872,7 @@ def test_ticker_page_per_band_and_peer_sections_are_visible():
     at = AppTest.from_string(script, default_timeout=30)
     at.run()
     assert not at.exception, str(at.exception)
+    assert any("기업 판단 요약" in str(s.value) for s in at.subheader)
     assert not any("자체 역사 PER 밴드" in str(e.label) for e in at.expander)
     assert not any("동종업계 비교" in str(e.label) for e in at.expander)
     labels = [m.label for m in at.metric]
@@ -1506,6 +1507,8 @@ ticker.render()
     at.run()
     assert not at.exception, str(at.exception)
     assert not any("한국 종목 심화 컨텍스트" in str(e.label) for e in at.expander)
+    assert any("한국 종목 심화 컨텍스트" in str(m.value) for m in at.markdown)
+    assert any("DART 키 설정 시 활성" in str(m.value) for m in at.markdown)
     info_body = " ".join(str(getattr(item, "value", "")) for item in at.info)
     assert "애널리스트 의견 데이터 없음" in info_body
     assert "목표가 팬 차트 표시 불가" in info_body
