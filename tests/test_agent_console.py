@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 
@@ -834,6 +835,76 @@ def test_build_wiki_context_section_included_in_curation_prompt(monkeypatch, tmp
     )
     assert "[현재 위키 상태]" in prompt
     assert "전체 페이지: 1" in prompt
+
+
+def test_wiki_capture_from_chat_retains_long_body(monkeypatch, tmp_path):
+    _isolate(monkeypatch, tmp_path)
+
+    from agent_console import wiki
+
+    answer = "규칙 설명 " + ("세부 내용 " * 1400) + "[LONG_BODY_TAIL]"
+
+    page = wiki.capture_from_chat(
+        "긴 위키 문서를 남겨줘",
+        answer,
+        surface="portfolio",
+        title="긴 본문 보존",
+        status="reviewed",
+        kind="playbook",
+    )
+
+    assert "[LONG_BODY_TAIL]" in page["body"]
+    assert len(page["body"]) > 6000
+
+
+def test_wiki_auto_curate_llm_prompt_and_saved_body_keep_long_content(monkeypatch, tmp_path):
+    _isolate(monkeypatch, tmp_path)
+
+    from agent_console import wiki
+
+    question = "LLM 위키 문서를 길게 만들어줘"
+    answer = "규칙과 예외를 자세히 정리합니다. " + ("본문 확장 " * 1200) + "[AUTO_CURATE_TAIL]"
+    observed: dict[str, str] = {}
+
+    def fake_llm(prompt: str) -> str:
+        observed["prompt"] = prompt
+        assert "[AUTO_CURATE_TAIL]" in prompt
+        assert "body는 요약문이 아니라 재사용 가능한 위키 문서여야 한다." in prompt
+        assert "체크리스트" in prompt
+        return json.dumps(
+            {
+                "action": "create",
+                "title": "긴 자동 위키",
+                "summary": "긴 자동 위키 요약",
+                "body": "섹션 1\n- 규칙\n- 예외\n\n섹션 2\n- 체크리스트\n- 복구 절차\n\n"
+                + ("본문 확장 " * 1200)
+                + "[AUTO_PLAN_TAIL]",
+                "kind": "playbook",
+                "status": "reviewed",
+                "tags": ["wiki", "long"],
+                "source_refs": [],
+                "links": [],
+                "target_id": "",
+                "confidence": 0.91,
+                "reason": "long body capture",
+                "page_feedback": {},
+            },
+            ensure_ascii=False,
+        )
+
+    result = wiki.auto_curate_from_chat(
+        question,
+        answer,
+        surface="portfolio",
+        llm=fake_llm,
+        pack={"focus": []},
+        history=[],
+    )
+
+    assert observed["prompt"]
+    assert result and result["ok"] is True
+    assert "[AUTO_PLAN_TAIL]" in result["page"]["body"]
+    assert len(result["page"]["body"]) > 6000
 
 
 def test_auto_curation_prompt_lists_all_chat_kind_options():

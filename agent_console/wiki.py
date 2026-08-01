@@ -21,6 +21,9 @@ WIKI_SURFACE = "wiki"
 VALID_STATUSES = ("draft", "reviewed", "stable", "archived")
 VALID_KINDS = ("note", "playbook", "decision", "risk", "concept", "source_digest")
 MAX_LINKS = 12
+WIKI_SUMMARY_LIMIT = 2400
+WIKI_BODY_LIMIT = 12000
+WIKI_CONTEXT_BODY_SNIPPET = 1600
 
 _CACHE: dict[str, tuple[float, Any]] = {}
 _CACHE_TTL = 30.0
@@ -210,7 +213,7 @@ def _apply_backlinks(pages: list[dict], records: list[dict]) -> list[dict]:
 
 def _record_to_page(record: dict) -> dict:
     tags = _dedupe_texts(record.get("tags") or [], limit=20, item_limit=60)
-    summary = _clean(record.get("summary") or "", 2400)
+    summary = _clean(record.get("summary") or "", WIKI_SUMMARY_LIMIT)
     decisions = _dedupe_texts(record.get("decisions") or [], limit=8, item_limit=280)
     open_questions = _dedupe_texts(record.get("openQuestions") or [], limit=8, item_limit=280)
     evidence_ids = _dedupe_texts(record.get("evidence_ids") or [], limit=100, item_limit=120)
@@ -221,7 +224,7 @@ def _record_to_page(record: dict) -> dict:
     messages = record.get("messages") or []
     source = record.get("source") or {}
     body_parts = []
-    body_text = _clean(record.get("body") or "", 6000)
+    body_text = _clean(record.get("body") or "", WIKI_BODY_LIMIT)
     if body_text:
         body_parts.append(body_text)
     elif summary:
@@ -743,8 +746,8 @@ def _build_wiki_record(page: dict, *, existing: dict | None = None) -> dict:
     return {
         "id": page_id,
         "title": title,
-        "summary": _clean(page.get("summary") or "", 2400),
-        "body": _clean(page.get("body") or "", 6000),
+        "summary": _clean(page.get("summary") or "", WIKI_SUMMARY_LIMIT),
+        "body": _clean(page.get("body") or "", WIKI_BODY_LIMIT),
         "tags": tags,
         "artifacts": source_refs,
         "links": links,
@@ -934,7 +937,7 @@ def _merge_pages(source_ids: list[str], target_id: str, llm_synthesis: str) -> d
         return None
 
     body_parts = [target.get("body") or "", *[page.get("body") or "" for page in sources]]
-    synthesis = _clean(llm_synthesis, 2400)
+    synthesis = _clean(llm_synthesis, WIKI_SUMMARY_LIMIT)
     if synthesis:
         body_parts.append(synthesis)
     merged_body = "\n\n".join(part for part in body_parts if part).strip()
@@ -990,7 +993,7 @@ def _split_page(source_id: str, new_titles: list[str], llm_bodies: list[str]) ->
 
     base_payloads = []
     for idx, title in enumerate(titles):
-        body = _clean(bodies[idx] if idx < len(bodies) else source.get("body") or "", 6000)
+        body = _clean(bodies[idx] if idx < len(bodies) else source.get("body") or "", WIKI_BODY_LIMIT)
         base_payloads.append({
             "title": title,
             "summary": body[:900],
@@ -1042,8 +1045,8 @@ def capture_from_chat(question: str, answer: str, *, surface: str = WIKI_SURFACE
     title = _clean(title or question or "대화 위키", 160)
     body = "\n\n".join(
         part for part in [
-            f"Q. {_clean(question, 2400)}" if question else "",
-            f"A. {_clean(answer, 6000)}" if answer else "",
+            f"Q. {_clean(question, WIKI_SUMMARY_LIMIT)}" if question else "",
+            f"A. {_clean(answer, WIKI_BODY_LIMIT)}" if answer else "",
         ]
         if part
     )
@@ -1054,7 +1057,7 @@ def capture_from_chat(question: str, answer: str, *, surface: str = WIKI_SURFACE
             "kind": kind if kind in VALID_KINDS else "playbook",
             "status": status if status in VALID_STATUSES else "draft",
             "tags": tags or ["conversation"],
-            "summary": _clean(answer or question or title, 2400),
+            "summary": _clean(answer or question or title, WIKI_SUMMARY_LIMIT),
             "body": body,
             "source_refs": source_refs or [],
             "confidence": confidence,
@@ -1101,7 +1104,7 @@ def build_context_section(*, query: str = "", surface: str = WIKI_SURFACE, limit
         if page.get("summary"):
             lines.append(f"- 요약: {page['summary']}")
         if page.get("body"):
-            lines.append(f"- 본문: {page['body'][:800]}")
+            lines.append(f"- 본문: {page['body'][:WIKI_CONTEXT_BODY_SNIPPET]}")
         if page.get("search_provider"):
             search_line = f"- 검색: {page.get('search_provider')}"
             if page.get("search_score") is not None:
@@ -1140,7 +1143,7 @@ def build_context_section(*, query: str = "", surface: str = WIKI_SURFACE, limit
 # try/except 로 감싸여 있어 사라진 동안 조용히 실패하고 있었다.
 
 AUTO_CURATE_MIN_LENGTH = 40
-AUTO_CURATE_MAX_LENGTH = 6000
+AUTO_CURATE_MAX_LENGTH = WIKI_BODY_LIMIT
 AUTO_CURATE_MIN_SCORE = 5
 _TRANSIENT_ACK_PATTERNS = (
     "진행해줘", "진행해봐", "진행해", "ㄱㄱ", "ok", "okay", "오케이", "좋아",
@@ -1277,7 +1280,7 @@ def auto_curate_from_chat(
     if action == "merge":
         target_id = _clean(plan.get("target_page_id") or "", 80)
         source_ids = [_clean(sid, 80) for sid in (plan.get("source_page_ids") or [])]
-        synthesis = _clean(plan.get("body") or plan.get("summary") or "", 2400)
+        synthesis = _clean(plan.get("body") or plan.get("summary") or "", WIKI_SUMMARY_LIMIT)
         merge_result = _merge_pages(source_ids, target_id, synthesis)
         if not merge_result:
             return None
@@ -1387,6 +1390,9 @@ def _build_auto_curation_prompt(
         "목표: 재사용 가능한 규칙, 결정, 저장/수집 원칙, 실패 교정만 하나의 위키 카드로 정리한다.",
         "짧은 진행 확인, 단발성 수다, 상태 보고, 확인 대답은 생성 금지다.",
         "반드시 JSON object만 출력한다. 마크다운, 설명문, 코드펜스는 금지한다.",
+        "body는 요약문이 아니라 재사용 가능한 위키 문서여야 한다.",
+        "본문은 가능하면 3~6개의 섹션 또는 불릿 묶음으로 구성하고, 규칙·예외·체크리스트·실패 조건·복구 절차를 포함한다.",
+        "질문이나 답변이 길면 body도 충분히 길게 유지하고, 핵심 내용을 억지로 한 문단으로 압축하지 않는다.",
         "가능한 action 값은 create, update, skip, delete, merge, split 이다.",
         "update 를 고를 때는 target_id 를 기존 후보 페이지 id 로 지정한다.",
         "확신이 낮으면 status 는 draft, 중간이면 reviewed, 이미 안정적인 운영 규칙이면 stable 이다.",
@@ -1450,7 +1456,7 @@ def _build_auto_curation_prompt(
 
 
 def _parse_curation_plan(text: str | None) -> dict | None:
-    text = _clean(text or "", 8000)
+    text = _clean(text or "", WIKI_BODY_LIMIT)
     if not text:
         return None
     candidates = [text]
@@ -1493,7 +1499,7 @@ def _heuristic_curation_plan(
         "action": "update" if target else "create",
         "title": title,
         "summary": _clean(answer[:900] or question[:900], 900),
-        "body": _clean(answer, 6000),
+        "body": _clean(answer, WIKI_BODY_LIMIT),
         "kind": kind,
         "status": status,
         "tags": _auto_tags(text, surface, kind),
@@ -1519,8 +1525,8 @@ def _plan_to_page_payload(
         return None
     target_id = _clean(plan.get("target_id") or (target.get("id") if target else ""), 80)
     title = _clean(plan.get("title") or _derive_title(question, answer), 160)
-    summary = _clean(plan.get("summary") or answer[:2400] or question[:2400], 2400)
-    body = _clean(plan.get("body") or answer or summary, 6000)
+    summary = _clean(plan.get("summary") or answer[:WIKI_SUMMARY_LIMIT] or question[:WIKI_SUMMARY_LIMIT], WIKI_SUMMARY_LIMIT)
+    body = _clean(plan.get("body") or answer or summary, WIKI_BODY_LIMIT)
     kind = _clean(plan.get("kind") or "note", 40).lower() or "note"
     if kind not in VALID_KINDS:
         kind = "note"
