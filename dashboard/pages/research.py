@@ -14,17 +14,20 @@ import streamlit as st
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 
-from dashboard import cached, charts, data
+from agent_console import context as agent_context
+from dashboard import cached, charts, data, strategy_studio
 
 _NOBAR = {"displayModeBar": False}
-_SECTIONS = ["종목 랭킹", "전략 백테스트", "정책 학습", "축 게이트"]
+_SECTIONS = ["종목 랭킹", "전략 스튜디오", "전략 백테스트", "정책 학습", "축 게이트"]
 
 
 def render():
     st.title("🔬 리서치")
     sec = st.segmented_control("섹션", _SECTIONS, default="종목 랭킹",
                                key="research_section", label_visibility="collapsed") or "종목 랭킹"
-    if sec == "전략 백테스트":
+    if sec == "전략 스튜디오":
+        _strategy_studio_section()
+    elif sec == "전략 백테스트":
         _backtest_section()
     elif sec == "정책 학습":
         _learning_section()
@@ -261,6 +264,17 @@ def _screener_detail(event, rows, feats, importance):
                          "값": st.column_config.TextColumn(width="small"),
                          "구분": st.column_config.TextColumn(width="small"),
                      })
+
+
+@st.fragment
+def _strategy_studio_section():
+    st.subheader("전략 스튜디오")
+    st.caption("어떤 전략이든 스펙으로 저장하고, AI 패치와 버전 관리로 발전시키는 범용 백테스트 공간입니다.")
+    try:
+        pack = agent_context.context_pack("lab", hours=int(st.session_state.get("agent_hours", 72)))
+    except Exception as exc:
+        pack = {"ok": False, "strategy_studio": {"error": str(exc), "spec_count": 0, "version_count": 0, "latest": None}}
+    strategy_studio.render_strategy_lab("research", pack, mode="research")
 
 
 @st.fragment

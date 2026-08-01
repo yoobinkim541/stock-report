@@ -5,7 +5,7 @@ from pathlib import Path
 
 from flask import Flask, jsonify, request, send_from_directory
 
-from . import agent, context, shared_memory, storage, wiki
+from . import agent, context, shared_memory, storage, strategy_studio, wiki
 
 
 STATIC_DIR = Path(__file__).resolve().parent / "static"
@@ -146,6 +146,52 @@ def create_app() -> Flask:
     def scenario_save():
         payload = request.get_json(force=True)
         return jsonify({"ok": True, "scenario": storage.save_scenario(payload)})
+
+    @app.get("/api/strategy-studio/specs")
+    def strategy_specs():
+        limit = int(request.args.get("limit", "50") or 50)
+        return jsonify({"ok": True, "specs": strategy_studio.list_strategy_specs(limit=limit)})
+
+    @app.post("/api/strategy-studio/specs")
+    def strategy_spec_save():
+        payload = request.get_json(force=True)
+        if not isinstance(payload, dict):
+            return jsonify({"ok": False, "error": "spec object required"}), 400
+        return jsonify({"ok": True, "spec": strategy_studio.save_strategy_spec(payload)})
+
+    @app.get("/api/strategy-studio/specs/<spec_id>")
+    def strategy_spec_get(spec_id: str):
+        version = request.args.get("version")
+        spec = strategy_studio.get_strategy_spec(spec_id, version=int(version) if version else None)
+        if not spec:
+            return jsonify({"ok": False, "error": "strategy spec not found"}), 404
+        return jsonify({"ok": True, "spec": spec})
+
+    @app.get("/api/strategy-studio/specs/<spec_id>/versions")
+    def strategy_spec_versions(spec_id: str):
+        limit = int(request.args.get("limit", "20") or 20)
+        return jsonify({"ok": True, "versions": strategy_studio.list_strategy_versions(spec_id, limit=limit)})
+
+    @app.post("/api/strategy-studio/specs/<spec_id>/preview")
+    def strategy_spec_preview(spec_id: str):
+        payload = request.get_json(silent=True) or {}
+        spec = strategy_studio.get_strategy_spec(spec_id, version=int(payload.get("version")) if payload.get("version") else None)
+        if not spec:
+            return jsonify({"ok": False, "error": "strategy spec not found"}), 404
+        benchmark = payload.get("benchmark") or payload.get("benchmark_symbol")
+        period = payload.get("period")
+        return jsonify(strategy_studio.preview_strategy_spec(spec.get("spec") or spec, benchmark=benchmark, period=period))
+
+    @app.post("/api/strategy-studio/specs/<spec_id>/patch-preview")
+    def strategy_spec_patch_preview(spec_id: str):
+        payload = request.get_json(silent=True) or {}
+        spec = strategy_studio.get_strategy_spec(spec_id)
+        if not spec:
+            return jsonify({"ok": False, "error": "strategy spec not found"}), 404
+        question = str(payload.get("question") or "").strip()
+        history = payload.get("history") if isinstance(payload.get("history"), list) else []
+        pack = payload.get("pack") if isinstance(payload.get("pack"), dict) else {}
+        return jsonify(strategy_studio.propose_strategy_patch(question, spec.get("spec") or spec, history=history, pack=pack))
 
     @app.get("/api/local-install-prompt")
     def local_install_prompt():

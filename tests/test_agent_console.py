@@ -2090,6 +2090,113 @@ def test_server_endpoints(monkeypatch, tmp_path):
     assert client.get("/api/portfolio-lab/scenarios").json["scenarios"][0]["name"] == "랩 테스트"
 
 
+def test_strategy_studio_version_store_round_trips(monkeypatch, tmp_path):
+    _isolate(monkeypatch, tmp_path)
+
+    from agent_console import storage
+
+    spec = {
+        "name": "EMA trend",
+        "market": "us",
+        "timeframe": "1d",
+        "base_symbol": "QQQ",
+        "universe": {"type": "list", "symbols": ["QQQ"]},
+        "indicators": [{"name": "ema_fast", "kind": "ema", "period": 20, "source": "close"}],
+        "rules": {"entry": [{"field": "close", "op": ">", "ref": "ema_fast"}], "exit": []},
+        "sizing": {"type": "fixed_pct", "position_pct": 1.0},
+        "costs": {"fees_bps": 5, "slippage_bps": 5, "spread_bps": 1},
+        "optimization": {"params": {}, "objective": "sharpe"},
+        "validation": {"mode": "single_pass", "min_trades": 1},
+    }
+
+    created = storage.save_strategy_spec(spec)
+    assert created["name"] == "EMA trend"
+    fetched = storage.get_strategy_spec(created["id"])
+    assert fetched["spec"]["name"] == "EMA trend"
+    assert storage.list_strategy_specs()[0]["id"] == created["id"]
+    versions = storage.list_strategy_versions(created["id"])
+    assert versions[0]["version"] == 1
+
+    updated = storage.save_strategy_version(created["id"], {**spec, "sizing": {"type": "fixed_pct", "position_pct": 0.5}})
+    assert updated["version"] == 2
+    assert storage.list_strategy_versions(created["id"])[0]["version"] == 2
+
+    reverted = storage.revert_strategy_version(created["id"], 1)
+    assert reverted["version"] == 3
+    assert storage.list_strategy_versions(created["id"])[0]["version"] == 3
+
+
+def test_strategy_studio_api_routes(monkeypatch, tmp_path):
+    _isolate(monkeypatch, tmp_path)
+
+    from agent_console import strategy_studio
+    from agent_console.server import create_app
+
+    monkeypatch.setattr(strategy_studio, "preview_strategy_spec", lambda *args, **kwargs: {
+        "ok": True,
+        "report": {"summary": {"name": "EMA trend", "trade_count": 4}},
+        "warnings": [],
+    })
+    monkeypatch.setattr(strategy_studio, "propose_strategy_patch", lambda *args, **kwargs: {
+        "ok": True,
+        "patch": {"rules": {"exit": [{"field": "close", "op": "<", "ref": "ema_fast"}]}},
+        "diff": [{"path": "rules.exit[0].field", "before": None, "after": "close"}],
+        "preview": {"ok": True},
+    })
+
+    app = create_app()
+    client = app.test_client()
+    spec = {
+        "name": "EMA trend",
+        "market": "us",
+        "timeframe": "1d",
+        "base_symbol": "QQQ",
+        "universe": {"type": "list", "symbols": ["QQQ"]},
+        "indicators": [{"name": "ema_fast", "kind": "ema", "period": 20, "source": "close"}],
+        "rules": {"entry": [{"field": "close", "op": ">", "ref": "ema_fast"}], "exit": []},
+        "sizing": {"type": "fixed_pct", "position_pct": 1.0},
+        "costs": {"fees_bps": 5, "slippage_bps": 5, "spread_bps": 1},
+        "optimization": {"params": {}, "objective": "sharpe"},
+        "validation": {"mode": "single_pass", "min_trades": 1},
+    }
+
+    saved = client.post("/api/strategy-studio/specs", json=spec).json["spec"]
+    assert saved["name"] == "EMA trend"
+    listing = client.get("/api/strategy-studio/specs").json["specs"]
+    assert listing[0]["name"] == "EMA trend"
+    preview = client.post(f"/api/strategy-studio/specs/{saved['id']}/preview", json={}).json
+    assert preview["ok"] is True
+    patch_preview = client.post(f"/api/strategy-studio/specs/{saved['id']}/patch-preview", json={"question": "손절을 ATR로 바꿔줘"}).json
+    assert patch_preview["ok"] is True
+    assert patch_preview["patch"]["rules"]["exit"][0]["op"] == "<"
+
+
+def test_context_pack_exposes_strategy_studio_state(monkeypatch, tmp_path):
+    _isolate(monkeypatch, tmp_path)
+
+    from agent_console import context, storage
+
+    storage.save_strategy_spec({
+        "name": "EMA trend",
+        "market": "us",
+        "timeframe": "1d",
+        "base_symbol": "QQQ",
+        "universe": {"type": "list", "symbols": ["QQQ"]},
+        "indicators": [{"name": "ema_fast", "kind": "ema", "period": 20, "source": "close"}],
+        "rules": {"entry": [{"field": "close", "op": ">", "ref": "ema_fast"}], "exit": []},
+        "sizing": {"type": "fixed_pct", "position_pct": 1.0},
+        "costs": {"fees_bps": 5, "slippage_bps": 5, "spread_bps": 1},
+        "optimization": {"params": {}, "objective": "sharpe"},
+        "validation": {"mode": "single_pass", "min_trades": 1},
+    })
+
+    pack = context.context_pack("lab")
+
+    assert pack["strategy_studio"]["ok"] is True
+    assert pack["strategy_studio"]["spec_count"] == 1
+    assert pack["strategy_studio"]["latest"]["name"] == "EMA trend"
+
+
 def test_ingest_arca_proxy(monkeypatch, tmp_path):
     _isolate(monkeypatch, tmp_path)
 

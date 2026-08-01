@@ -139,6 +139,22 @@ def strategy_experiment_state() -> dict:
     }
 
 
+def strategy_studio_state() -> dict:
+    try:
+        from . import storage
+
+        specs = storage.list_strategy_specs(limit=20)
+        version_total = sum(len(storage.list_strategy_versions(row["id"], limit=20)) for row in specs[:10])
+        return {
+            "ok": True,
+            "spec_count": len(specs),
+            "version_count": version_total,
+            "latest": specs[0] if specs else None,
+        }
+    except Exception as exc:
+        return {"ok": False, "error": str(exc), "spec_count": 0, "version_count": 0, "latest": None}
+
+
 def _as_float(value) -> float | None:
     try:
         if value in (None, ""):
@@ -438,6 +454,7 @@ def context_pack(surface: str = "market", *, hours: int = 72) -> dict:
         "portfolio": portfolio_state(),
         "paper": paper_state(),
         "strategy_experiments": strategy_experiment_state(),
+        "strategy_studio": strategy_studio_state(),
         "prediction_markets": prediction_market_state(events),
         "models": model_state(),
         "market_snapshot": realtime_market.build_market_snapshot(),

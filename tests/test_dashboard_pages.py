@@ -707,6 +707,58 @@ def test_research_shows_learning_curve():
     assert len(at.dataframe) >= 1                             # 채택 이력표
 
 
+def test_research_strategy_studio_section_renders():
+    """리서치 '전략 스튜디오' 섹션 — 범용 백테스트/패치 UI가 렌더되어야 한다."""
+    script = _STUBS + '''
+from agent_console import context as agent_context
+from dashboard import cached
+from dashboard.pages import research
+
+agent_context.context_pack = lambda surface, hours=72: {
+    "strategy_studio": {"ok": True, "spec_count": 1, "version_count": 2, "latest": {"name": "EMA trend"}},
+    "surface": surface,
+    "generated_at": "2026-08-01T00:00:00+00:00",
+}
+cached.strategy_studio_catalog = lambda: {
+    "ok": True,
+    "count": 1,
+    "latest": {"id": "spec-1", "name": "EMA trend", "version": 2, "spec": {"name": "EMA trend"}},
+    "specs": [{"id": "spec-1", "name": "EMA trend", "version": 2, "spec": {"name": "EMA trend"}}],
+    "version_total": 2,
+}
+cached.strategy_studio_preview = lambda *args, **kwargs: {
+    "ok": True,
+    "report": {
+        "summary": {"name": "EMA trend", "trade_count": 4, "cagr": 0.12, "max_drawdown": -0.08, "sharpe": 1.35},
+        "metrics": {"cagr": 0.12, "max_drawdown": -0.08, "sharpe": 1.35, "trade_count": 4},
+        "warnings": [],
+        "trades": [{"date": "2026-01-02", "action": "enter_long"}],
+        "equity": {"columns": ["nav"], "index": ["2026-01-01"], "rows": [{"nav": 100.0}]},
+        "weights": {"columns": ["QQQ"], "index": ["2026-01-01"], "rows": [{"QQQ": 1.0}]},
+    },
+    "metrics": {"cagr": 0.12, "max_drawdown": -0.08, "sharpe": 1.35, "trade_count": 4},
+    "benchmark": {"symbol": "QQQ", "available": True},
+    "warnings": ["stale quotes"],
+    "errors": [],
+    "trade_count": 4,
+}
+cached.strategy_studio_versions = lambda *args, **kwargs: [
+    {"id": "spec-1", "version": 2, "name": "EMA trend", "source": "ui", "created_at": "2026-08-01T00:00:00+00:00"},
+    {"id": "spec-1", "version": 1, "name": "EMA trend", "source": "create", "created_at": "2026-07-31T00:00:00+00:00"},
+]
+research.render()
+'''
+    at = AppTest.from_string(script,
+                             default_timeout=30)
+    at.session_state["research_section"] = "전략 스튜디오"
+    at.run()
+    assert not at.exception, str(at.exception)
+    body = " ".join(str(m.value) for m in at.markdown) + " ".join(str(c.value) for c in at.caption)
+    assert "전략 스튜디오" in body
+    assert "EMA trend" in body
+    assert "미리보기" in body
+
+
 def test_ticker_position_management_renders():
     """종목분석 하단 포지션 관리 — 입력·버튼 렌더(J3). 실제 write 없음(클릭 안 함)."""
     script = _STUBS + (

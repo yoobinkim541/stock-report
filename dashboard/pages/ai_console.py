@@ -13,7 +13,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspa
 
 from agent_console import agent, context, storage
 from agent_console import portfolio_matrix_dsl
-from dashboard import cached, chat_feedback, chat_references, data, wiki_browser
+from dashboard import cached, chat_feedback, chat_references, data, strategy_studio, wiki_browser
 
 
 _SURFACES = {
@@ -64,7 +64,7 @@ def render():
     with tab_wiki:
         _wiki_tab(surface, pack)
     with tab_lab:
-        _lab_tab(surface)
+        _lab_tab(surface, pack)
     with tab_connectors:
         _connectors_tab()
 
@@ -628,8 +628,10 @@ def _wiki_pipeline_health_panel():
         st.caption("즉시 조치가 필요한 항목이 없습니다.")
 
 
-def _lab_tab(surface: str):
-    st.markdown("##### 전략 캔버스")
+def _lab_tab(surface: str, pack: dict):
+    strategy_studio.render_strategy_lab("ai_console", pack, mode="lab")
+    st.divider()
+    st.markdown("##### 기존 전략 캔버스")
     st.caption("비중과 규칙을 저장해 챗봇/위키가 다시 읽는 전략 가설로 남깁니다.")
     default_text = _default_canvas_allocations()
     alloc_text = st.text_area("포트폴리오 비중", value=st.session_state.get("strategy_canvas_alloc_text", default_text), height=150, key="strategy_canvas_alloc_text")

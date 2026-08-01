@@ -150,6 +150,26 @@ def paper(surface):
     return views.paper_summary(surface)
 
 
+@st.cache_data(ttl=900, show_spinner=False)
+def strategy_studio_catalog():
+    return views.strategy_studio_catalog()
+
+
+@st.cache_data(ttl=900, show_spinner=False)
+def strategy_studio_spec(spec_id, version=None):
+    return views.strategy_studio_spec(spec_id, version=version)
+
+
+@st.cache_data(ttl=900, show_spinner=False)
+def strategy_studio_versions(spec_id, limit=20):
+    return views.strategy_studio_versions(spec_id, limit=limit)
+
+
+@st.cache_data(ttl=_TTL_HEAVY, show_spinner="전략 미리보기 중…")
+def strategy_studio_preview(spec, benchmark=None, period=None):
+    return views.strategy_studio_preview(spec, benchmark=benchmark, period=period)
+
+
 @st.cache_data(ttl=_TTL_SLOW, show_spinner="학습 이력 불러오는 중…")
 def learning_evolution(surface):
     """모의 자기개선 진화 (주간 학습 이력 + 라이브 verdict)."""

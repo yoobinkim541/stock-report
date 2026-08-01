@@ -7,8 +7,33 @@ from __future__ import annotations
 
 import os
 import re
+from typing import Any
 
 from ohlc_utils import normalize_ohlc_frame
+
+
+class _StrategyStudioProxy:
+    def __init__(self):
+        self._module = None
+
+    def _load(self):
+        if self._module is None:
+            from agent_console import strategy_studio as _strategy_studio
+
+            self._module = _strategy_studio
+        return self._module
+
+    def __getattr__(self, name):
+        return getattr(self._load(), name)
+
+    def __setattr__(self, name, value):
+        if name == "_module":
+            object.__setattr__(self, name, value)
+            return
+        setattr(self._load(), name, value)
+
+
+strategy_studio = _StrategyStudioProxy()
 
 
 def _strip_html(s: str) -> str:
@@ -64,6 +89,41 @@ def risk_summary(weights: dict) -> dict:
         return summ if isinstance(summ, dict) else {"error": "리스크 계산 데이터 부족"}
     except Exception as e:
         return {"error": str(e)}
+
+
+def strategy_studio_catalog(limit: int = 50) -> dict[str, Any]:
+    """전략 스튜디오 상태 + 카탈로그."""
+    try:
+        try:
+            return strategy_studio.strategy_lab_state(limit=limit)
+        except TypeError as exc:
+            if "unexpected keyword argument" in str(exc) or "positional argument" in str(exc):
+                return strategy_studio.strategy_lab_state()
+            raise
+    except Exception as e:
+        return {"ok": False, "error": str(e), "catalog": {"count": 0, "specs": []}, "presets": {}}
+
+
+def strategy_studio_spec(spec_id: str, version: int | None = None) -> dict[str, Any]:
+    try:
+        return strategy_studio.get_strategy_spec(spec_id, version=version) or {"ok": False, "error": "spec not found"}
+    except Exception as e:
+        return {"ok": False, "error": str(e)}
+
+
+def strategy_studio_preview(spec: dict[str, Any], *, benchmark: str | None = None,
+                            period: str | None = None) -> dict[str, Any]:
+    try:
+        return strategy_studio.preview_strategy_spec(spec, benchmark=benchmark, period=period)
+    except Exception as e:
+        return {"ok": False, "error": str(e), "report": {}, "metrics": {}, "benchmark": {}}
+
+
+def strategy_studio_versions(spec_id: str, limit: int = 20) -> list[dict[str, Any]]:
+    try:
+        return strategy_studio.list_strategy_versions(spec_id, limit=limit)
+    except Exception:
+        return []
 
 
 def institutional(ticker: str) -> dict:

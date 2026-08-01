@@ -7,7 +7,9 @@ import sqlite3
 from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Iterable
+from typing import Any, Iterable
+
+from ml.strategy_studio import StrategySpec, strategy_spec_hash
 
 
 def db_path() -> Path:
@@ -84,6 +86,35 @@ def ensure_schema(conn: sqlite3.Connection | None = None) -> None:
                 created_at  TEXT NOT NULL,
                 updated_at  TEXT NOT NULL
             );
+            CREATE TABLE IF NOT EXISTS strategy_specs (
+                id              TEXT PRIMARY KEY,
+                name            TEXT NOT NULL,
+                market          TEXT NOT NULL,
+                timeframe       TEXT NOT NULL,
+                base_symbol     TEXT NOT NULL,
+                description     TEXT NOT NULL,
+                spec_json       TEXT NOT NULL,
+                spec_hash       TEXT NOT NULL,
+                current_version INTEGER NOT NULL,
+                created_at      TEXT NOT NULL,
+                updated_at      TEXT NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS idx_strategy_specs_updated
+                ON strategy_specs(updated_at DESC);
+
+            CREATE TABLE IF NOT EXISTS strategy_spec_versions (
+                id          INTEGER PRIMARY KEY AUTOINCREMENT,
+                spec_id     TEXT NOT NULL,
+                version     INTEGER NOT NULL,
+                name        TEXT NOT NULL,
+                spec_json   TEXT NOT NULL,
+                patch_json  TEXT NOT NULL,
+                source      TEXT NOT NULL,
+                created_at  TEXT NOT NULL,
+                UNIQUE(spec_id, version)
+            );
+            CREATE INDEX IF NOT EXISTS idx_strategy_spec_versions_spec
+                ON strategy_spec_versions(spec_id, version DESC);
             """
         )
         conn.commit()
@@ -300,3 +331,198 @@ def list_scenarios(limit: int = 50) -> list[dict]:
         }
         for row in rows
     ]
+
+
+def _strategy_spec_payload(payload: dict[str, Any] | StrategySpec) -> dict[str, Any]:
+    spec = StrategySpec.from_dict(payload).to_dict()
+    spec.setdefault("id", None)
+    return spec
+
+
+def _strategy_spec_row(row: sqlite3.Row) -> dict[str, Any]:
+    spec = json.loads(row["spec_json"] or "{}")
+    return {
+        "id": row["id"],
+        "name": row["name"],
+        "market": row["market"],
+        "timeframe": row["timeframe"],
+        "base_symbol": row["base_symbol"],
+        "description": row["description"],
+        "version": row["current_version"],
+        "spec_hash": row["spec_hash"],
+        "spec": spec,
+        "created_at": row["created_at"],
+        "updated_at": row["updated_at"],
+    }
+
+
+def _strategy_version_row(row: sqlite3.Row) -> dict[str, Any]:
+    return {
+        "id": row["spec_id"],
+        "version_row_id": row["id"],
+        "spec_id": row["spec_id"],
+        "version": row["version"],
+        "name": row["name"],
+        "spec": json.loads(row["spec_json"] or "{}"),
+        "patch": json.loads(row["patch_json"] or "{}"),
+        "source": row["source"],
+        "created_at": row["created_at"],
+    }
+
+
+def strategy_spec_id(payload: dict[str, Any] | StrategySpec) -> str:
+    spec = _strategy_spec_payload(payload)
+    if spec.get("id"):
+        return str(spec["id"])
+    return strategy_spec_hash(spec)
+
+
+def save_strategy_spec(payload: dict[str, Any] | StrategySpec) -> dict[str, Any]:
+    spec = _strategy_spec_payload(payload)
+    spec_id = str(spec.get("id") or strategy_spec_hash(spec))
+    spec["id"] = spec_id
+    return save_strategy_version(spec_id, spec, source="create")
+
+
+def save_strategy_version(
+    spec_id: str,
+    spec: dict[str, Any] | StrategySpec,
+    *,
+    patch: dict[str, Any] | None = None,
+    source: str = "ui",
+) -> dict[str, Any]:
+    spec_obj = StrategySpec.from_dict({**_strategy_spec_payload(spec), "id": spec_id})
+    payload = spec_obj.to_dict()
+    payload["id"] = spec_id
+    version, now = _next_strategy_version(spec_id)
+    patch_json = _json(patch or {})
+    with connect() as conn:
+        with conn:
+            conn.execute(
+                """
+                INSERT INTO strategy_spec_versions
+                    (spec_id, version, name, spec_json, patch_json, source, created_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    spec_id,
+                    version,
+                    payload["name"],
+                    _json(payload),
+                    patch_json,
+                    source,
+                    now,
+                ),
+            )
+            conn.execute(
+                """
+                INSERT INTO strategy_specs
+                    (id, name, market, timeframe, base_symbol, description, spec_json,
+                     spec_hash, current_version, created_at, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(id) DO UPDATE SET
+                    name=excluded.name,
+                    market=excluded.market,
+                    timeframe=excluded.timeframe,
+                    base_symbol=excluded.base_symbol,
+                    description=excluded.description,
+                    spec_json=excluded.spec_json,
+                    spec_hash=excluded.spec_hash,
+                    current_version=excluded.current_version,
+                    updated_at=excluded.updated_at
+                """,
+                (
+                    spec_id,
+                    payload["name"],
+                    payload.get("market") or "us",
+                    payload.get("timeframe") or "1d",
+                    payload.get("base_symbol") or "",
+                    str(payload.get("metadata", {}).get("description") or payload.get("description") or ""),
+                    _json(payload),
+                    strategy_spec_hash(payload),
+                    version,
+                    now,
+                    now,
+                ),
+            )
+    return get_strategy_spec(spec_id) or {"id": spec_id, "version": version, "spec": payload}
+
+
+def _next_strategy_version(spec_id: str) -> tuple[int, str]:
+    with connect() as conn:
+        row = conn.execute(
+            "SELECT COALESCE(MAX(version), 0) AS version FROM strategy_spec_versions WHERE spec_id = ?",
+            (spec_id,),
+        ).fetchone()
+    return int(row["version"] or 0) + 1, _now()
+
+
+def list_strategy_specs(limit: int = 50) -> list[dict[str, Any]]:
+    limit = max(1, min(int(limit or 50), 200))
+    with connect() as conn:
+        rows = conn.execute(
+            "SELECT * FROM strategy_specs ORDER BY updated_at DESC LIMIT ?",
+            (limit,),
+        ).fetchall()
+    return [_strategy_spec_row(row) for row in rows]
+
+
+def get_strategy_spec(spec_id: str, version: int | None = None) -> dict[str, Any] | None:
+    spec_id = str(spec_id or "").strip()
+    if not spec_id:
+        return None
+    with connect() as conn:
+        if version is None:
+            row = conn.execute(
+                "SELECT * FROM strategy_specs WHERE id = ?",
+                (spec_id,),
+            ).fetchone()
+            return _strategy_spec_row(row) if row else None
+        row = conn.execute(
+            """
+            SELECT id, spec_id, version, name, spec_json, patch_json, source, created_at
+            FROM strategy_spec_versions
+            WHERE spec_id = ? AND version = ?
+            """,
+            (spec_id, int(version)),
+        ).fetchone()
+    return _strategy_version_row(row) if row else None
+
+
+def list_strategy_versions(spec_id: str, limit: int = 20) -> list[dict[str, Any]]:
+    spec_id = str(spec_id or "").strip()
+    if not spec_id:
+        return []
+    limit = max(1, min(int(limit or 20), 200))
+    with connect() as conn:
+        rows = conn.execute(
+            """
+            SELECT id, spec_id, version, name, spec_json, patch_json, source, created_at
+            FROM strategy_spec_versions
+            WHERE spec_id = ?
+            ORDER BY version DESC
+            LIMIT ?
+            """,
+            (spec_id, limit),
+        ).fetchall()
+    return [_strategy_version_row(row) for row in rows]
+
+
+def revert_strategy_version(spec_id: str, version: int) -> dict[str, Any]:
+    snapshot = get_strategy_spec(spec_id, version=version)
+    if not snapshot:
+        raise ValueError(f"strategy version not found: {spec_id}@{version}")
+    spec = snapshot.get("spec") or {}
+    return save_strategy_version(spec_id, spec, patch={"revert_from": version}, source="revert")
+
+
+def strategy_spec_catalog(limit: int = 50) -> dict[str, Any]:
+    specs = list_strategy_specs(limit=limit)
+    latest = specs[0] if specs else None
+    return {
+        "ok": True,
+        "count": len(specs),
+        "latest": latest,
+        "specs": specs,
+        "version_total": sum(len(list_strategy_versions(row["id"], limit=20)) for row in specs[:10]),
+    }
