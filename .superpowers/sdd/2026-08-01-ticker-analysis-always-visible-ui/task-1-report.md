@@ -33,4 +33,6 @@
 - Added a regression test that renders a KR ticker with empty consensus data and no usable price data, then asserts both fallback messages appear in the page info blocks.
 - Focused verification after the fix:
   - `./.venv/bin/python -m pytest tests/test_dashboard_pages.py -k "kr_core_context or ticker_llm_analysis_section" -q`
+    - `4 passed, 73 deselected`
   - `./.venv/bin/python -m pytest tests/test_dashboard_pages.py -k "ticker_analysis_context_collects_kr_deep_signals or kr_core_context or ticker_llm_analysis_section" -q`
+    - `4 passed, 73 deselected`
