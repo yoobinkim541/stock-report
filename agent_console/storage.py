@@ -166,6 +166,26 @@ def ensure_schema(conn: sqlite3.Connection | None = None) -> None:
             );
             CREATE INDEX IF NOT EXISTS idx_chart_drawing_snapshots_workspace
                 ON chart_drawing_snapshots(workspace_id, updated_at DESC);
+
+            CREATE TABLE IF NOT EXISTS chart_alert_rules (
+                id             TEXT PRIMARY KEY,
+                workspace_id   TEXT NOT NULL,
+                store_key      TEXT NOT NULL,
+                symbol         TEXT NOT NULL,
+                timeframe      TEXT NOT NULL,
+                name           TEXT NOT NULL,
+                condition_json TEXT NOT NULL,
+                message        TEXT NOT NULL,
+                frequency      TEXT NOT NULL,
+                enabled        INTEGER NOT NULL,
+                last_state_json TEXT NOT NULL,
+                created_at     TEXT NOT NULL,
+                updated_at     TEXT NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS idx_chart_alert_rules_workspace
+                ON chart_alert_rules(workspace_id, updated_at DESC);
+            CREATE INDEX IF NOT EXISTS idx_chart_alert_rules_symbol
+                ON chart_alert_rules(symbol, timeframe, enabled);
             """
         )
         conn.commit()
@@ -632,6 +652,24 @@ def _chart_drawing_snapshot_row(row: sqlite3.Row) -> dict[str, Any]:
     }
 
 
+def _chart_alert_rule_row(row: sqlite3.Row) -> dict[str, Any]:
+    return {
+        "id": row["id"],
+        "workspace_id": row["workspace_id"],
+        "store_key": row["store_key"],
+        "symbol": row["symbol"],
+        "timeframe": row["timeframe"],
+        "name": row["name"],
+        "condition": json.loads(row["condition_json"] or "{}"),
+        "message": row["message"],
+        "frequency": row["frequency"],
+        "enabled": bool(row["enabled"]),
+        "last_state": json.loads(row["last_state_json"] or "{}"),
+        "created_at": row["created_at"],
+        "updated_at": row["updated_at"],
+    }
+
+
 def _next_chart_workspace_version(workspace_id: str) -> tuple[int, str]:
     with connect() as conn:
         row = conn.execute(
@@ -866,6 +904,154 @@ def list_chart_drawing_snapshots(workspace_id: str, limit: int = 50) -> list[dic
             (workspace_id, limit),
         ).fetchall()
     return [_chart_drawing_snapshot_row(row) for row in rows]
+
+
+def save_chart_alert_rule(rule: dict[str, Any]) -> dict[str, Any]:
+    payload = dict(rule or {})
+    workspace_id = str(payload.get("workspace_id") or "").strip()
+    store_key = str(payload.get("store_key") or "").strip()
+    symbol = str(payload.get("symbol") or "").upper().strip()
+    timeframe = str(payload.get("timeframe") or "1d").strip().lower() or "1d"
+    condition = payload.get("condition") if isinstance(payload.get("condition"), dict) else {}
+    name = str(payload.get("name") or f"{symbol} alert").strip()
+    if not workspace_id:
+        raise ValueError("workspace_id is required")
+    if not store_key:
+        raise ValueError("store_key is required")
+    if not symbol:
+        raise ValueError("symbol is required")
+    if str(condition.get("type") or "").strip().lower() != "price":
+        raise ValueError("only price alert conditions are supported")
+    operator = str(condition.get("operator") or "").strip().lower()
+    if operator not in {"crossing", "crossing_up", "crossing_down", "greater_than", "less_than"}:
+        raise ValueError(f"unsupported alert operator: {operator}")
+    try:
+        float(condition.get("value"))
+    except (TypeError, ValueError):
+        raise ValueError("condition.value must be numeric") from None
+
+    now = _now()
+    rule_id = str(payload.get("id") or "").strip()
+    if not rule_id:
+        raw = _json({**payload, "created_at": now})
+        rule_id = hashlib.sha256(raw.encode("utf-8")).hexdigest()[:20]
+    with connect() as conn:
+        row = conn.execute("SELECT created_at FROM chart_alert_rules WHERE id = ?", (rule_id,)).fetchone()
+        created_at = row["created_at"] if row else now
+        with conn:
+            conn.execute(
+                """
+                INSERT INTO chart_alert_rules
+                    (id, workspace_id, store_key, symbol, timeframe, name, condition_json,
+                     message, frequency, enabled, last_state_json, created_at, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(id) DO UPDATE SET
+                    workspace_id=excluded.workspace_id,
+                    store_key=excluded.store_key,
+                    symbol=excluded.symbol,
+                    timeframe=excluded.timeframe,
+                    name=excluded.name,
+                    condition_json=excluded.condition_json,
+                    message=excluded.message,
+                    frequency=excluded.frequency,
+                    enabled=excluded.enabled,
+                    updated_at=excluded.updated_at
+                """,
+                (
+                    rule_id,
+                    workspace_id,
+                    store_key,
+                    symbol,
+                    timeframe,
+                    name,
+                    _json(condition),
+                    str(payload.get("message") or ""),
+                    str(payload.get("frequency") or "once").strip().lower() or "once",
+                    1 if bool(payload.get("enabled", True)) else 0,
+                    _json(payload.get("last_state") if isinstance(payload.get("last_state"), dict) else {}),
+                    created_at,
+                    now,
+                ),
+            )
+    saved = get_chart_alert_rule(rule_id)
+    if saved is None:
+        raise RuntimeError("chart alert rule was not saved")
+    return saved
+
+
+def get_chart_alert_rule(rule_id: str) -> dict[str, Any] | None:
+    rule_id = str(rule_id or "").strip()
+    if not rule_id:
+        return None
+    with connect() as conn:
+        row = conn.execute(
+            """
+            SELECT id, workspace_id, store_key, symbol, timeframe, name, condition_json,
+                   message, frequency, enabled, last_state_json, created_at, updated_at
+            FROM chart_alert_rules
+            WHERE id = ?
+            """,
+            (rule_id,),
+        ).fetchone()
+    return _chart_alert_rule_row(row) if row else None
+
+
+def list_chart_alert_rules(
+    *,
+    workspace_id: str | None = None,
+    symbol: str | None = None,
+    enabled: bool | None = None,
+    limit: int = 50,
+) -> list[dict[str, Any]]:
+    clauses = []
+    params: list[Any] = []
+    if workspace_id:
+        clauses.append("workspace_id = ?")
+        params.append(str(workspace_id).strip())
+    if symbol:
+        clauses.append("symbol = ?")
+        params.append(str(symbol).upper().strip())
+    if enabled is not None:
+        clauses.append("enabled = ?")
+        params.append(1 if enabled else 0)
+    where = " WHERE " + " AND ".join(clauses) if clauses else ""
+    limit = max(1, min(int(limit or 50), 200))
+    with connect() as conn:
+        rows = conn.execute(
+            f"""
+            SELECT id, workspace_id, store_key, symbol, timeframe, name, condition_json,
+                   message, frequency, enabled, last_state_json, created_at, updated_at
+            FROM chart_alert_rules
+            {where}
+            ORDER BY updated_at DESC, name ASC
+            LIMIT ?
+            """,
+            (*params, limit),
+        ).fetchall()
+    return [_chart_alert_rule_row(row) for row in rows]
+
+
+def update_chart_alert_state(rule_id: str, state: dict[str, Any]) -> dict[str, Any]:
+    rule_id = str(rule_id or "").strip()
+    if not rule_id:
+        raise ValueError("rule_id is required")
+    if not isinstance(state, dict):
+        raise ValueError("state must be an object")
+    now = _now()
+    with connect() as conn:
+        with conn:
+            conn.execute(
+                """
+                UPDATE chart_alert_rules
+                SET last_state_json = ?, updated_at = ?
+                WHERE id = ?
+                """,
+                (_json(state), now, rule_id),
+            )
+    saved = get_chart_alert_rule(rule_id)
+    if saved is None:
+        raise ValueError(f"chart alert rule not found: {rule_id}")
+    return saved
 
 
 def save_chart_template(template: dict[str, Any]) -> dict[str, Any]:

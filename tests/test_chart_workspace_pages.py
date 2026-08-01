@@ -60,6 +60,7 @@ finally:
     assert "분석 레일" in body
     assert "저장된 레이아웃" in body
     assert "Saved Layout" in body
+    assert "알림 매니저" in body
 
 
 def test_workspace_drawing_store_key_respects_sync_scope():

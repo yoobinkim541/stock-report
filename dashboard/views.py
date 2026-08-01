@@ -1930,6 +1930,19 @@ def chart_workspace_save(workspace: dict) -> dict:
     return storage.save_chart_workspace(workspace)
 
 
+def chart_alert_rules(workspace_id: str, limit: int = 50) -> list[dict]:
+    """차트 알림 룰 목록."""
+    try:
+        return storage.list_chart_alert_rules(workspace_id=workspace_id, limit=limit)
+    except Exception:
+        return []
+
+
+def chart_alert_rule_save(rule: dict) -> dict:
+    """차트 알림 룰 저장."""
+    return storage.save_chart_alert_rule(rule)
+
+
 def chart_workspace_patch_preview(
     workspace: dict,
     *,

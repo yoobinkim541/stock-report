@@ -5,7 +5,7 @@ from pathlib import Path
 
 from flask import Flask, jsonify, request, send_from_directory
 
-from . import agent, context, shared_memory, storage, strategy_studio, wiki
+from . import agent, chart_alerts, context, shared_memory, storage, strategy_studio, wiki
 
 
 STATIC_DIR = Path(__file__).resolve().parent / "static"
@@ -245,6 +245,57 @@ def create_app() -> Flask:
         except ValueError as exc:
             return jsonify({"ok": False, "error": str(exc)}), 400
         return jsonify({"ok": True, "snapshot": snapshot})
+
+    @app.get("/api/chart-alerts/rules")
+    def chart_alert_rules():
+        limit = int(request.args.get("limit", "50") or 50)
+        workspace_id = request.args.get("workspace_id")
+        symbol = request.args.get("symbol")
+        enabled_arg = request.args.get("enabled")
+        enabled = None
+        if enabled_arg is not None:
+            enabled = str(enabled_arg).strip().lower() not in {"0", "false", "no", "off"}
+        return jsonify({
+            "ok": True,
+            "rules": storage.list_chart_alert_rules(
+                workspace_id=workspace_id,
+                symbol=symbol,
+                enabled=enabled,
+                limit=limit,
+            ),
+        })
+
+    @app.post("/api/chart-alerts/rules")
+    def chart_alert_rule_save():
+        payload = request.get_json(silent=True) or {}
+        if not isinstance(payload, dict):
+            return jsonify({"ok": False, "error": "alert rule object required"}), 400
+        try:
+            rule = storage.save_chart_alert_rule(payload)
+        except ValueError as exc:
+            return jsonify({"ok": False, "error": str(exc)}), 400
+        return jsonify({"ok": True, "rule": rule})
+
+    @app.post("/api/chart-alerts/rules/<rule_id>/evaluate")
+    def chart_alert_rule_evaluate(rule_id: str):
+        payload = request.get_json(silent=True) or {}
+        rule = storage.get_chart_alert_rule(rule_id)
+        if not rule:
+            return jsonify({"ok": False, "error": "chart alert rule not found"}), 404
+        result = chart_alerts.evaluate_price_alert(
+            rule,
+            previous_price=payload.get("previous_price"),
+            current_price=payload.get("current_price"),
+            as_of=payload.get("as_of"),
+        )
+        if result.get("triggered"):
+            storage.update_chart_alert_state(rule_id, {
+                "triggered": True,
+                "event": result.get("event"),
+                "last_price": payload.get("current_price"),
+                "last_checked_at": payload.get("as_of"),
+            })
+        return jsonify({"ok": True, **result})
 
     @app.get("/api/local-install-prompt")
     def local_install_prompt():

@@ -2162,6 +2162,37 @@ def test_chart_drawing_snapshots_round_trip_latest_version(monkeypatch, tmp_path
     assert listed[0]["version"] == 2
 
 
+def test_chart_alert_rules_round_trip_and_filter(monkeypatch, tmp_path):
+    _isolate(monkeypatch, tmp_path)
+
+    from agent_console import storage
+
+    rule = storage.save_chart_alert_rule({
+        "workspace_id": "workspace-1",
+        "store_key": "cw:workspace-1:AAPL:1d:lin",
+        "symbol": "AAPL",
+        "timeframe": "1d",
+        "name": "AAPL breakout",
+        "condition": {"type": "price", "operator": "crossing_up", "value": 210.0},
+        "message": "AAPL crossed 210",
+        "frequency": "once",
+        "enabled": True,
+    })
+
+    assert rule["id"]
+    assert rule["workspace_id"] == "workspace-1"
+    assert rule["condition"]["operator"] == "crossing_up"
+    assert rule["enabled"] is True
+
+    updated = storage.update_chart_alert_state(rule["id"], {"triggered": True, "last_price": 211.0})
+    assert updated["last_state"]["triggered"] is True
+    assert storage.get_chart_alert_rule(rule["id"])["last_state"]["last_price"] == 211.0
+
+    listed = storage.list_chart_alert_rules(workspace_id="workspace-1")
+    assert [row["id"] for row in listed] == [rule["id"]]
+    assert storage.list_chart_alert_rules(workspace_id="other") == []
+
+
 def test_strategy_studio_api_routes(monkeypatch, tmp_path):
     _isolate(monkeypatch, tmp_path)
 
@@ -2268,6 +2299,42 @@ def test_agent_console_api_allows_configured_chart_embed_cors(monkeypatch, tmp_p
         },
     )
     assert "Access-Control-Allow-Origin" not in denied.headers
+
+
+def test_chart_alert_api_routes_round_trip(monkeypatch, tmp_path):
+    _isolate(monkeypatch, tmp_path)
+
+    from agent_console.server import create_app
+
+    app = create_app()
+    client = app.test_client()
+    payload = {
+        "workspace_id": "workspace-1",
+        "store_key": "cw:workspace-1:MSFT:1d:lin",
+        "symbol": "MSFT",
+        "timeframe": "1d",
+        "name": "MSFT support",
+        "condition": {"type": "price", "operator": "less_than", "value": 390.0},
+        "message": "support failed",
+        "frequency": "once",
+    }
+
+    saved = client.post("/api/chart-alerts/rules", json=payload)
+    assert saved.status_code == 200
+    assert saved.json["ok"] is True
+    rule = saved.json["rule"]
+
+    listing = client.get("/api/chart-alerts/rules", query_string={"workspace_id": "workspace-1"})
+    assert listing.status_code == 200
+    assert listing.json["rules"][0]["id"] == rule["id"]
+
+    evaluation = client.post(
+        f"/api/chart-alerts/rules/{rule['id']}/evaluate",
+        json={"previous_price": 391.0, "current_price": 389.0, "as_of": "2026-08-01T12:00:00Z"},
+    )
+    assert evaluation.status_code == 200
+    assert evaluation.json["triggered"] is True
+    assert evaluation.json["event"]["symbol"] == "MSFT"
 
 
 def test_context_pack_exposes_strategy_studio_state(monkeypatch, tmp_path):

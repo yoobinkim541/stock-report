@@ -232,10 +232,96 @@ def render_chart_workspace(
             if render_charts:
                 _render_panel_chart(ws, panel, height=390 if len(panels) > 1 else 760)
 
+    _render_alert_manager(ws, panels)
     _render_analysis_rail(ws, render_charts=render_charts)
 
     st.session_state["_cw_workspace"] = chart_workspace.normalize_workspace(ws)
     return st.session_state["_cw_workspace"]
+
+
+def _render_alert_manager(ws: dict[str, Any], panels: list[dict[str, Any]]) -> None:
+    workspace_id = str(ws.get("id") or "").strip()
+    active_id = str(ws.get("active_panel") or "p1")
+    active_panel = next((panel for panel in panels if str(panel.get("id")) == active_id), panels[0] if panels else None)
+    if not active_panel:
+        return
+    st.markdown("##### 알림 매니저")
+    st.caption("활성 패널 기준으로 가격 crossing 알림을 저장합니다. 서버 평가 API와 연결되어 웹훅/텔레그램 알림으로 확장할 수 있습니다.")
+    try:
+        rules = views.chart_alert_rules(workspace_id, limit=20) if workspace_id else []
+    except Exception:
+        rules = []
+
+    with st.expander("가격 알림 만들기", expanded=False):
+        c1, c2, c3, c4 = st.columns([1.0, 1.1, 0.9, 1.0], vertical_alignment="bottom")
+        symbol = str(active_panel.get("ticker") or "").upper().strip()
+        timeframe = str(active_panel.get("timeframe") or "1d").lower().strip()
+        operator = c1.selectbox(
+            "조건",
+            ["crossing", "crossing_up", "crossing_down", "greater_than", "less_than"],
+            format_func=_alert_operator_label,
+            key=f"_cw_alert_operator_{workspace_id}_{active_id}",
+        )
+        threshold = c2.number_input("가격", min_value=0.0, value=0.0, step=1.0, key=f"_cw_alert_value_{workspace_id}_{active_id}")
+        frequency = c3.selectbox("빈도", ["once", "per_bar"], format_func=lambda v: "한 번" if v == "once" else "봉마다", key=f"_cw_alert_freq_{workspace_id}_{active_id}")
+        name = c4.text_input("이름", value=f"{symbol} {_alert_operator_label(operator)}", key=f"_cw_alert_name_{workspace_id}_{active_id}")
+        message = st.text_input("메시지", value=f"{symbol} {operator} {threshold:g}", key=f"_cw_alert_msg_{workspace_id}_{active_id}")
+        store_key = _drawing_store_key(ws, active_panel, compare=bool(active_panel.get("compare")))
+        if st.button("알림 저장", key=f"_cw_alert_save_{workspace_id}_{active_id}", width="stretch", disabled=not bool(workspace_id and store_key and threshold > 0)):
+            try:
+                views.chart_alert_rule_save({
+                    "workspace_id": workspace_id,
+                    "store_key": store_key,
+                    "symbol": symbol,
+                    "timeframe": timeframe,
+                    "name": name,
+                    "condition": {"type": "price", "operator": operator, "value": float(threshold)},
+                    "message": message,
+                    "frequency": frequency,
+                    "enabled": True,
+                })
+                st.toast("차트 알림을 저장했습니다.")
+                st.rerun()
+            except Exception as exc:
+                st.error(f"알림 저장 실패: {exc}")
+
+    if rules:
+        st.dataframe(
+            pd.DataFrame([{
+                "이름": row.get("name"),
+                "종목": row.get("symbol"),
+                "봉": row.get("timeframe"),
+                "조건": _alert_rule_label(row),
+                "빈도": "한 번" if row.get("frequency") == "once" else row.get("frequency"),
+                "상태": "켜짐" if row.get("enabled") else "꺼짐",
+                "최근": (row.get("last_state") or {}).get("last_checked_at") or "—",
+            } for row in rules]),
+            hide_index=True,
+            width="stretch",
+            height=min(280, 44 + 32 * len(rules)),
+        )
+    else:
+        st.caption("저장된 차트 알림이 아직 없습니다.")
+
+
+def _alert_operator_label(operator: str) -> str:
+    return {
+        "crossing": "돌파/이탈",
+        "crossing_up": "상향 돌파",
+        "crossing_down": "하향 이탈",
+        "greater_than": "초과",
+        "less_than": "미만",
+    }.get(str(operator), str(operator))
+
+
+def _alert_rule_label(rule: dict[str, Any]) -> str:
+    condition = rule.get("condition") or {}
+    value = condition.get("value")
+    try:
+        value_text = f"{float(value):g}"
+    except (TypeError, ValueError):
+        value_text = str(value or "—")
+    return f"{_alert_operator_label(str(condition.get('operator') or ''))} {value_text}"
 
 
 def _render_workspace_library_bar(ws: dict[str, Any]) -> dict[str, Any]:
