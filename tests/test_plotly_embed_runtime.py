@@ -447,6 +447,99 @@ console.log("OK live");
 """
 
 
+# ── 멀티패널 크로스헤어 동기화 — mousemove 발행 + 원격 수신 렌더 ──────────────
+_XHAIR_HARNESS = r"""
+let gd = null;
+const els = {};
+const created = [];
+const winHandlers = {};
+const intervals = [];
+const plotBox = { left: 100, top: 50, right: 900, bottom: 450, width: 800, height: 400 };
+const chartBox = { left: 0, top: 0, right: 1000, bottom: 500, width: 1000, height: 500 };
+function makeEl(id) {
+  return {
+    id, style: {}, textContent: "", innerHTML: "", _h: {}, _t: {},
+    _s: new Set(id === "bt-mag" ? ["on"] : []),
+    classList: { toggle(c, on) { on ? this._s.add(c) : this._s.delete(c); } },
+    on(e, f) { this._h[e] = f; },
+    emit(e, p) { if (this._h[e]) this._h[e](p); },
+    addEventListener(e, f) { (this._t[e] = this._t[e] || []).push(f); },
+    fire(e, p) { (this._t[e] || []).forEach(f => f(p)); },
+    appendChild(child) { created.push(child); },
+    querySelector(sel) { return sel === ".nsewdrag" ? { getBoundingClientRect() { return plotBox; } } : null; },
+    getBoundingClientRect() { return id === "chart" ? chartBox : { top: 0, left: 0, right: 100, width: 100, height: 20 }; },
+  };
+}
+function el(id) {
+  if (!els[id]) els[id] = makeEl(id);
+  els[id].classList._s = els[id]._s;
+  if (id === "chart") gd = els[id];
+  return els[id];
+}
+global.document = {
+  getElementById: el,
+  createElement: () => ({ style: {}, textContent: "", innerHTML: "" }),
+};
+global.window = {
+  frameElement: null,
+  parent: { innerHeight: 900, addEventListener() {} },
+  addEventListener(t, f) { winHandlers[t] = f; },
+};
+global.performance = { now: () => 1 };
+global.requestAnimationFrame = (fn) => { fn(); return 1; };
+global.setInterval = (fn) => { intervals.push(fn); return 0; };
+global.setTimeout = (fn) => { fn(); return 0; };
+global.clearTimeout = () => {};
+const _ls = {};
+global.localStorage = {
+  getItem: (k) => (k in _ls ? _ls[k] : null),
+  setItem: (k, v) => { _ls[k] = String(v); },
+  removeItem: (k) => { delete _ls[k]; },
+};
+global.Plotly = {
+  newPlot(g, d, l, c) { g.data = d; g.layout = l; return { then(cb) { cb(); return this; } }; },
+  relayout(g, u) {
+    for (const k of Object.keys(u)) if (!k.includes(".") && !k.includes("[")) g.layout[k] = u[k];
+    if (u["xaxis.range"]) g.layout.xaxis = Object.assign(g.layout.xaxis || {}, {range: u["xaxis.range"]});
+    return { then(cb) { cb(); return this; } };
+  },
+  restyle() { return { then(cb) { cb(); return this; } }; },
+  addTraces() {},
+  deleteTraces() {},
+  Plots: { resize() {} },
+};
+__SCRIPT__
+function fail(m) { console.error("FAIL " + m); process.exit(1); }
+if (!winHandlers.storage) fail("no_storage_listener");
+if (!intervals.length) fail("no_poll_interval");
+gd.layout.xaxis = { range: ["2025-01-01T00:00:00.000Z", "2025-01-11T00:00:00.000Z"] };
+gd.layout.yaxis = { range: [100, 200] };
+
+// 1) 로컬 mousemove → 같은 레이아웃 키로 시간축 위치 publish
+gd.fire("mousemove", { clientX: 500, clientY: 250 });
+const key = "tnxh:cw:layout:xh";
+const sent = JSON.parse(_ls[key] || "null");
+if (!sent || !sent.ms || sent.frac < 0.49 || sent.frac > 0.51 || !sent.src) {
+  fail("publish_bad " + JSON.stringify(sent));
+}
+
+// 2) 원격 차트 payload 수신 → vertical crosshair 표시 + OHLC readout 갱신
+created[0].style.display = "none";
+const remote = { src: "remote-chart", ms: sent.ms, frac: sent.frac, ts: Date.now() };
+_ls[key] = JSON.stringify(remote);
+winHandlers.storage({ key });
+if (created[0].style.display !== "block") fail("remote_vertical_hidden");
+if (!/translateX\(/.test(created[0].style.transform || "")) fail("remote_transform");
+if (!els.ohlcbar.innerHTML && !els.ohlcbar.textContent) fail("remote_readout_missing");
+
+// 3) stale payload → 숨김
+_ls[key] = JSON.stringify({ src: "remote-chart", ms: sent.ms, frac: sent.frac, ts: Date.now() - 10000 });
+intervals.forEach(fn => fn());
+if (created[0].style.display !== "none") fail("stale_not_hidden");
+console.log("OK crosshair-sync");
+"""
+
+
 @pytest.mark.skipif(_NODE is None, reason="node 미설치 — 런타임 JS 검증 스킵")
 def test_live_realtime_client_patch(tmp_path):
     """⚡ live — 피더 push 로 마지막 봉·현재가선 in-place 패치, stale 값은 무시."""
@@ -465,6 +558,26 @@ def test_live_realtime_client_patch(tmp_path):
     r = subprocess.run([_NODE, str(runner)], capture_output=True, text=True, timeout=30)
     assert r.returncode == 0, f"live patch fail: {r.stdout}\n{r.stderr}"
     assert "OK live" in r.stdout
+
+
+@pytest.mark.skipif(_NODE is None, reason="node 미설치 — 런타임 JS 검증 스킵")
+def test_crosshair_sync_runtime(tmp_path):
+    """멀티패널 크로스헤어 — mousemove 발행·원격 수신·stale 숨김을 실제 JS로 검증."""
+    idx = pd.date_range("2025-01-01", periods=70, freq="D")
+    df = pd.DataFrame({"Open": range(100, 170), "High": range(101, 171),
+                       "Low": range(99, 169), "Close": range(100, 170),
+                       "Volume": [1e6] * 70}, index=idx)
+    fig = charts.price_chart(df, "TEST", kind="candle", show_volume=True, view_days=90)
+    html = plotly_embed.pannable_chart_html(fig, df, height=460, view_days=90,
+                                            vol_axis="yaxis2",
+                                            store_key="TEST:1d:lin",
+                                            crosshair_key="cw:layout:xh")
+    js = re.findall(r"<script>(.*?)</script>", html, re.S)[-1]
+    runner = tmp_path / "crosshair.js"
+    runner.write_text(_XHAIR_HARNESS.replace("__SCRIPT__", js), encoding="utf-8")
+    r = subprocess.run([_NODE, str(runner)], capture_output=True, text=True, timeout=30)
+    assert r.returncode == 0, f"crosshair sync fail: {r.stdout}\n{r.stderr}"
+    assert "OK crosshair-sync" in r.stdout
 
 
 # ── guard 창 도형완성 드롭 회귀 ("자석 가끔 안 먹음") ─────────────────────────
