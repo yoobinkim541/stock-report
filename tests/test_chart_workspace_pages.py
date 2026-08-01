@@ -18,6 +18,9 @@ import os, sys
 sys.path.insert(0, {ROOT!r})
 from dashboard import chart_workspace_ui
 
+_orig_catalog = chart_workspace_ui.cached.chart_workspace_catalog
+_orig_versions = chart_workspace_ui.cached.chart_workspace_versions
+
 workspace = {{
     "id": "w1",
     "name": "Main Workspace",
@@ -29,7 +32,21 @@ workspace = {{
         {{"id": "p2", "ticker": "QQQ", "timeframe": "1d", "period": "6mo", "chart_kind": "line", "top_indicators": ["이동평균선"], "bottom_indicators": ["RSI"], "compare": [], "log_scale": False}},
     ],
 }}
-chart_workspace_ui.render_chart_workspace(workspace, render_charts=False)
+try:
+    chart_workspace_ui.cached.chart_workspace_catalog = lambda: {{
+        "ok": True,
+        "count": 1,
+        "workspaces": [{{"id": "w1", "name": "Saved Layout", "layout": "2v", "version": 3}}],
+        "latest": {{"id": "w1", "name": "Saved Layout", "layout": "2v", "version": 3}},
+    }}
+    chart_workspace_ui.cached.chart_workspace_versions = lambda workspace_id: [
+        {{"id": workspace_id, "version": 3, "created_at": "2026-08-01T00:00:00+00:00"}},
+        {{"id": workspace_id, "version": 2, "created_at": "2026-07-31T00:00:00+00:00"}},
+    ]
+    chart_workspace_ui.render_chart_workspace(workspace, render_charts=False)
+finally:
+    chart_workspace_ui.cached.chart_workspace_catalog = _orig_catalog
+    chart_workspace_ui.cached.chart_workspace_versions = _orig_versions
 """
     at = AppTest.from_string(script, default_timeout=30)
     at.run()
@@ -41,3 +58,5 @@ chart_workspace_ui.render_chart_workspace(workspace, render_charts=False)
     assert "MSFT" in body
     assert "QQQ" in body
     assert "분석 레일" in body
+    assert "저장된 레이아웃" in body
+    assert "Saved Layout" in body

@@ -6,7 +6,7 @@ from typing import Any
 import pandas as pd
 import streamlit as st
 
-from dashboard import cached, chart_analysis, chart_workspace, charts, data, theme
+from dashboard import cached, chart_analysis, chart_workspace, charts, data, theme, views
 
 _PERIOD_DAYS = {"3mo": 90, "6mo": 180, "1y": 365, "5y": 1825, "전체": None}
 _TF_LABEL = {
@@ -170,6 +170,7 @@ def render_chart_workspace(
                 st.toast("차트 워크스페이스 패치를 적용했습니다.")
                 st.rerun()
     st.caption("동기화 설정은 워크스페이스에 저장됩니다. 크로스헤어 동기화는 브라우저 런타임 검증 전까지 설정값만 보관합니다.")
+    ws = _render_workspace_library_bar(ws)
 
     active = ws.get("active_panel") or "p1"
     panels = ws["panels"][: _panel_count(ws["layout"])]
@@ -191,6 +192,65 @@ def render_chart_workspace(
 
     st.session_state["_cw_workspace"] = chart_workspace.normalize_workspace(ws)
     return st.session_state["_cw_workspace"]
+
+
+def _render_workspace_library_bar(ws: dict[str, Any]) -> dict[str, Any]:
+    catalog = _safe_workspace_catalog()
+    workspaces = list(catalog.get("workspaces") or [])
+    saved_count = int(catalog.get("count") or len(workspaces) or 0)
+
+    st.markdown("##### 저장된 레이아웃")
+    st.caption(f"저장 {saved_count}개 · 레이아웃, 패널, 비교종목, 지표, AI 패치 결과를 버전으로 남깁니다.")
+    c1, c2, c3, c4, c5 = st.columns([1.2, 1.3, 0.8, 0.8, 0.9], vertical_alignment="bottom")
+    ws["name"] = c1.text_input("이름", value=str(ws.get("name") or "Workspace"), key=f"_cw_name_{ws.get('id', 'default')}")
+
+    picked_idx = None
+    if workspaces:
+        default_idx = _workspace_index(workspaces, str(ws.get("id") or ""))
+        picked_idx = c2.selectbox(
+            "레이아웃",
+            options=list(range(len(workspaces))),
+            index=default_idx,
+            key="_cw_catalog_index",
+            format_func=lambda i: _workspace_label(workspaces[i]),
+        )
+        c2.caption(_workspace_label(workspaces[int(picked_idx)]))
+    else:
+        c2.caption("저장된 레이아웃이 아직 없습니다.")
+
+    if c3.button("불러오기", key="_cw_load_workspace", width="stretch", disabled=picked_idx is None):
+        picked = workspaces[int(picked_idx)]
+        loaded = _load_workspace_record(str(picked.get("id") or ""))
+        if loaded:
+            st.session_state["_cw_workspace"] = loaded
+            st.toast("차트 레이아웃을 불러왔습니다.")
+            st.rerun()
+
+    if c4.button("저장", key="_cw_save_workspace", type="primary", width="stretch"):
+        saved = _save_workspace(ws)
+        if saved:
+            st.session_state["_cw_workspace"] = saved
+            st.toast("차트 레이아웃을 저장했습니다.")
+            st.rerun()
+
+    versions = _safe_workspace_versions(str(ws.get("id") or "")) if str(ws.get("id") or "") not in {"", "default"} else []
+    if versions:
+        vidx = c5.selectbox(
+            "버전",
+            options=list(range(len(versions))),
+            key="_cw_version_index",
+            format_func=lambda i: f"v{versions[i].get('version')} · {str(versions[i].get('created_at') or '')[:10]}",
+        )
+        if c5.button("버전 적용", key="_cw_load_version", width="stretch"):
+            loaded = _load_workspace_record(str(ws.get("id") or ""), version=int(versions[int(vidx)].get("version") or 0))
+            if loaded:
+                st.session_state["_cw_workspace"] = loaded
+                st.toast("선택한 버전을 불러왔습니다.")
+                st.rerun()
+    else:
+        c5.caption("버전 없음")
+
+    return chart_workspace.normalize_workspace(ws)
 
 
 def _render_analysis_rail(ws: dict[str, Any], *, render_charts: bool) -> None:
@@ -357,3 +417,83 @@ def _pattern_label(value: Any) -> str:
 
 def _direction_label(value: Any) -> str:
     return {"up": "상방", "down": "하방"}.get(str(value or ""), "—")
+
+
+def _safe_workspace_catalog() -> dict[str, Any]:
+    try:
+        return cached.chart_workspace_catalog()
+    except Exception as exc:
+        return {"ok": False, "error": str(exc), "count": 0, "workspaces": []}
+
+
+def _safe_workspace_versions(workspace_id: str) -> list[dict[str, Any]]:
+    if not workspace_id:
+        return []
+    try:
+        return cached.chart_workspace_versions(workspace_id)
+    except Exception:
+        try:
+            return views.chart_workspace_versions(workspace_id)
+        except Exception:
+            return []
+
+
+def _load_workspace_record(workspace_id: str, *, version: int | None = None) -> dict[str, Any] | None:
+    try:
+        row = cached.chart_workspace_detail(workspace_id, version=version)
+    except Exception:
+        try:
+            row = views.chart_workspace_detail(workspace_id, version=version)
+        except Exception as exc:
+            st.error(f"레이아웃 불러오기 실패: {exc}")
+            return None
+    workspace = row.get("workspace") if isinstance(row, dict) else None
+    if not isinstance(workspace, dict):
+        st.error("레이아웃 데이터가 올바르지 않습니다.")
+        return None
+    workspace = dict(workspace)
+    workspace["id"] = str(row.get("id") or row.get("workspace_id") or workspace.get("id") or workspace_id)
+    workspace["version"] = int(row.get("version") or workspace.get("version") or 1)
+    return chart_workspace.normalize_workspace(workspace)
+
+
+def _save_workspace(ws: dict[str, Any]) -> dict[str, Any] | None:
+    try:
+        saved = views.chart_workspace_save(ws)
+    except Exception as exc:
+        st.error(f"레이아웃 저장 실패: {exc}")
+        return None
+    _refresh_workspace_caches()
+    workspace = saved.get("workspace") if isinstance(saved, dict) else None
+    if not isinstance(workspace, dict):
+        st.error("저장 응답이 올바르지 않습니다.")
+        return None
+    workspace = dict(workspace)
+    workspace["id"] = str(saved.get("id") or workspace.get("id") or "")
+    workspace["version"] = int(saved.get("version") or workspace.get("version") or 1)
+    return chart_workspace.normalize_workspace(workspace)
+
+
+def _refresh_workspace_caches() -> None:
+    for cache in (
+        getattr(cached, "chart_workspace_catalog", None),
+        getattr(cached, "chart_workspace_detail", None),
+        getattr(cached, "chart_workspace_versions", None),
+    ):
+        try:
+            clear = getattr(cache, "clear", None)
+            if callable(clear):
+                clear()
+        except Exception:
+            pass
+
+
+def _workspace_index(rows: list[dict[str, Any]], workspace_id: str) -> int:
+    for idx, row in enumerate(rows):
+        if str(row.get("id") or "") == workspace_id:
+            return idx
+    return 0
+
+
+def _workspace_label(row: dict[str, Any]) -> str:
+    return f"{row.get('name') or 'Workspace'} · {row.get('layout') or '1'} · v{row.get('version') or 0}"
