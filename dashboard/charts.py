@@ -237,9 +237,10 @@ def _add_trade_markers(fig, hist, trades):
     if not trades:
         return
     go = _go()
-    for side, color, symbol, name in (
-        ("buy", _GREEN, "triangle-up", "Buy"),
-        ("sell", _RED, "triangle-down", "Sell"),
+    for side, color, symbol, name, label in (
+        ("buy", _GREEN, "triangle-up", "Buy", "매수"),
+        ("sell", _RED, "triangle-down", "Sell", "매도"),
+        ("alert", "#f59e0b", "diamond", "Alert", "알림"),
     ):
         rows = [t for t in trades if str(t.get("side", "")).lower() == side]
         if not rows:
@@ -253,7 +254,7 @@ def _add_trade_markers(fig, hist, trades):
             ys.append(px)
             custom.append([
                 t.get("event_id"),
-                "매수" if side == "buy" else "매도",
+                label,
                 t.get("qty"),
                 px,
                 t.get("avg_price"),
@@ -265,6 +266,18 @@ def _add_trade_markers(fig, hist, trades):
             ])
         if not xs:
             continue
+        hovertemplate = (
+            "<b>%{customdata[1]}</b> %{customdata[7]}<br>"
+            "%{customdata[6]}<br>"
+            "가격 %{customdata[3]:,.2f}<br>"
+            "%{customdata[8]}<extra></extra>"
+        ) if side == "alert" else (
+            "<b>%{customdata[1]}</b> %{customdata[7]}<br>"
+            "수량 %{customdata[2]:,.4g}주 · 체결 %{customdata[9]} %{customdata[3]:,.2f}<br>"
+            "평단 %{customdata[9]} %{customdata[4]:,.2f}<br>"
+            "%{customdata[5]} · %{customdata[6]}<br>"
+            "%{customdata[8]}<extra></extra>"
+        )
         fig.add_trace(go.Scatter(
             x=xs,
             y=ys,
@@ -274,13 +287,7 @@ def _add_trade_markers(fig, hist, trades):
             customdata=custom,
             marker=dict(symbol=symbol, size=13, color=color,
                         line=dict(color="#ffffff", width=0.8)),
-            hovertemplate=(
-                "<b>%{customdata[1]}</b> %{customdata[7]}<br>"
-                "수량 %{customdata[2]:,.4g}주 · 체결 %{customdata[9]} %{customdata[3]:,.2f}<br>"
-                "평단 %{customdata[9]} %{customdata[4]:,.2f}<br>"
-                "%{customdata[5]} · %{customdata[6]}<br>"
-                "%{customdata[8]}<extra></extra>"
-            ),
+            hovertemplate=hovertemplate,
         ))
 
 

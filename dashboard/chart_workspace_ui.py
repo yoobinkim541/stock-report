@@ -109,10 +109,16 @@ def _render_panel_chart(ws: dict[str, Any], panel: dict[str, Any], *, height: in
         kind = "candle"
     top = set(panel.get("top_indicators") or [])
     bottom = set(panel.get("bottom_indicators") or [])
+    try:
+        alert_runs = views.chart_alert_runs(str(ws.get("id") or "").strip(), limit=5) if ws.get("id") else []
+    except Exception:
+        alert_runs = []
+    alert_markers = _alert_event_markers_for_panel(alert_runs, panel)
     fig = charts.price_chart(
         hist,
         panel["ticker"],
         kind=kind,
+        trades=alert_markers,
         view_days=view_days,
         mas=(20, 60, 120, 200) if "이동평균선" in top else (),
         show_volume="거래량" in bottom,
@@ -390,6 +396,43 @@ def _alert_run_events(run: dict[str, Any]) -> list[dict[str, Any]]:
     result = run.get("result") if isinstance(run, dict) else {}
     events = result.get("events") if isinstance(result, dict) else []
     return [event for event in events or [] if isinstance(event, dict)]
+
+
+def _alert_event_markers_for_panel(runs: list[dict[str, Any]], panel: dict[str, Any]) -> list[dict[str, Any]]:
+    symbol = str((panel or {}).get("ticker") or "").upper().strip()
+    if not symbol:
+        return []
+    markers: list[dict[str, Any]] = []
+    for run in runs or []:
+        for event in _alert_run_events(run):
+            event_symbol = str(event.get("symbol") or "").upper().strip()
+            if event_symbol != symbol:
+                continue
+            timestamp = str(event.get("as_of") or event.get("timestamp") or "").strip()
+            if not timestamp:
+                continue
+            try:
+                price = float(event.get("current_price"))
+            except (TypeError, ValueError):
+                continue
+            conditions = ", ".join(str(item) for item in event.get("matched_conditions") or [] if str(item).strip())
+            message = str(event.get("message") or "").strip()
+            note = " · ".join(part for part in (conditions, message) if part)
+            markers.append({
+                "event_id": event.get("alert_id") or event.get("id"),
+                "date": timestamp,
+                "timestamp": timestamp,
+                "ticker": event_symbol,
+                "side": "alert",
+                "qty": None,
+                "price": price,
+                "avg_price": None,
+                "account": "chart-alerts",
+                "source": event.get("name") or "차트 알림",
+                "currency": "",
+                "note": note,
+            })
+    return markers[:50]
 
 
 def _render_workspace_library_bar(ws: dict[str, Any]) -> dict[str, Any]:

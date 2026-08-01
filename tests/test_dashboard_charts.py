@@ -114,6 +114,33 @@ def test_price_line_trade_markers_have_click_data():
     assert "customdata" in buy.hovertemplate
 
 
+def test_price_line_alert_markers_use_distinct_trace():
+    idx = pd.date_range("2025-01-01", periods=30, freq="D")
+    hist = pd.DataFrame({"Close": range(100, 130)}, index=idx)
+    trades = [
+        {
+            "event_id": "alert-1",
+            "date": "2025-01-10",
+            "timestamp": "2025-01-10T09:30:00",
+            "ticker": "NVDA",
+            "side": "alert",
+            "price": 109,
+            "source": "Breakout alert",
+            "note": "price:crossing_up",
+        },
+    ]
+
+    fig = charts.price_line(hist, "NVDA", trades=trades)
+    names = [tr.name for tr in fig.data]
+
+    assert "Alert" in names
+    alert = next(tr for tr in fig.data if tr.name == "Alert")
+    assert alert.marker.symbol == "diamond"
+    assert alert.customdata[0][0] == "alert-1"
+    assert alert.customdata[0][1] == "알림"
+    assert "price:crossing_up" in alert.customdata[0][8]
+
+
 # ── L2 캔들 차트 ──────────────────────────────────────────────────────
 def _ohlc(n=70, start=100):
     idx = pd.date_range("2025-01-01", periods=n, freq="D")

@@ -138,3 +138,52 @@ def test_workspace_crosshair_store_key_respects_sync_toggle():
 
     ws["sync"]["crosshair"] = False
     assert chart_workspace_ui._crosshair_store_key(ws) is None
+
+
+def test_alert_event_markers_follow_panel_symbol():
+    from dashboard import chart_workspace_ui
+
+    runs = [
+        {
+            "result": {
+                "events": [
+                    {
+                        "alert_id": "a1",
+                        "symbol": "MSFT",
+                        "name": "MSFT breakout",
+                        "as_of": "2026-08-01T00:04:00+00:00",
+                        "current_price": 321.25,
+                        "matched_conditions": ["price:crossing_up", "indicator:rsi_14:less_than"],
+                        "message": "MSFT crossed 320",
+                    },
+                    {
+                        "alert_id": "a2",
+                        "symbol": "QQQ",
+                        "name": "QQQ fade",
+                        "as_of": "2026-08-01T00:05:00+00:00",
+                        "current_price": 550.0,
+                        "matched_conditions": ["price:crossing_down"],
+                    },
+                ]
+            }
+        }
+    ]
+
+    markers = chart_workspace_ui._alert_event_markers_for_panel(runs, {"ticker": "msft"})
+
+    assert markers == [
+        {
+            "event_id": "a1",
+            "date": "2026-08-01T00:04:00+00:00",
+            "timestamp": "2026-08-01T00:04:00+00:00",
+            "ticker": "MSFT",
+            "side": "alert",
+            "qty": None,
+            "price": 321.25,
+            "avg_price": None,
+            "account": "chart-alerts",
+            "source": "MSFT breakout",
+            "currency": "",
+            "note": "price:crossing_up, indicator:rsi_14:less_than · MSFT crossed 320",
+        }
+    ]
