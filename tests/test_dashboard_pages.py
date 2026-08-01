@@ -752,7 +752,7 @@ def test_ticker_page_kr_bare_code_shows_company_name():
 
 
 def test_ticker_page_per_self_band_renders_on_valuation_tab():
-    """가치평가 탭 — 자체 역사 PER 밴드 (분기 실적 4개 이상일 때만 계산, 2026-07-29 보강)."""
+    """가치평가 탭 — 자체 역사 PER 밴드가 접힘 없이 본문에 바로 보인다."""
     script = _STUBS + (
         'st.session_state["ticker"] = "MSFT"\n'
         'cached.earnings_history_deep = lambda t, limit=12: [\n'
@@ -767,23 +767,26 @@ def test_ticker_page_per_self_band_renders_on_valuation_tab():
     at = AppTest.from_string(script, default_timeout=30)
     at.run()
     assert not at.exception, str(at.exception)
-    # 2026-07-29: 부가 분석은 접이식(expander)으로 이동 — 라벨은 markdown 이 아니라 expander 에 있음
-    assert any("자체 역사 PER 밴드" in str(e.label) for e in at.expander)
+    assert not any("자체 역사 PER 밴드" in str(e.label) for e in at.expander)
     labels = [m.label for m in at.metric]
-    assert "최저" in labels and "최고" in labels and "현재 PER" in labels
+    assert "최저" in labels and "중앙값" in labels and "최고" in labels and "현재 PER" in labels
+    caps = " ".join(str(c.value) for c in at.caption)
+    assert "최근 4개 분기 TTM-EPS 기준 역산" in caps
 
 
 def test_ticker_page_per_self_band_hidden_when_insufficient_history():
-    """실적 이력 부족(기본 stub — 1개뿐)이면 밴드 섹션(expander) 자체가 안 뜬다."""
+    """실적 이력 부족이면 밴드 섹션 자리에서 정직한 안내를 보여준다."""
     script = _STUBS + 'st.session_state["ticker"] = "MSFT"\nfrom dashboard.pages import ticker\nticker.render()\n'
     at = AppTest.from_string(script, default_timeout=30)
     at.run()
     assert not at.exception, str(at.exception)
     assert not any("자체 역사 PER 밴드" in str(e.label) for e in at.expander)
+    info_body = " ".join(str(getattr(item, "value", "")) for item in at.info)
+    assert "자체 역사 PER 밴드를 표시할 실적 이력이 부족합니다." in info_body
 
 
 def test_ticker_page_peer_comparables_renders_for_us():
-    """미국 종목은 DART 키 제약이 없어 섹터 피어 비교가 항상 뜬다(sp500_meta 정적 시드)."""
+    """미국 종목은 피어 비교가 접힘 없이 본문에 바로 보인다."""
     script = _STUBS + (
         'st.session_state["ticker"] = "MSFT"\n'
         'cached.valuation = lambda t: {"metrics":{"per":30.0,"pbr":10.0,"roe":0.4,"market_type":"us"},\n'
@@ -792,12 +795,16 @@ def test_ticker_page_peer_comparables_renders_for_us():
     at = AppTest.from_string(script, default_timeout=30)
     at.run()
     assert not at.exception, str(at.exception)
-    assert any("동종업계 비교" in str(e.label) for e in at.expander)
-    assert len(at.dataframe) >= 1
+    assert not any("동종업계 비교" in str(e.label) for e in at.expander)
+    caps = " ".join(str(c.value) for c in at.caption)
+    assert "같은 섹터 시총 상위 종목" in caps
+    comparison = next(item.value for item in at.dataframe if "ROE(%)" in item.value.columns)
+    assert "종목" in comparison.columns
+    assert comparison.iloc[0]["종목"]
 
 
 def test_ticker_page_peer_comparables_hidden_for_kr_without_dart_key():
-    """국내 DART_API_KEY 미설정(kr_yf_fallback)이면 이 종목 멀티플부터 신뢰 불가 — 피어비교 생략."""
+    """국내 DART fallback 이면 피어 비교 자리에 이유가 보이는 안내를 남긴다."""
     script = _STUBS + (
         'st.session_state["ticker"] = "005930.KS"\n'
         'cached.valuation = lambda t: {"metrics":{"per":None,"market_type":"kr","kr_yf_fallback":True},\n'
@@ -807,6 +814,34 @@ def test_ticker_page_peer_comparables_hidden_for_kr_without_dart_key():
     at.run()
     assert not at.exception, str(at.exception)
     assert not any("동종업계 비교" in str(e.label) for e in at.expander)
+    info_body = " ".join(str(getattr(item, "value", "")) for item in at.info)
+    assert "동종업계 비교는 DART 기반 국내 밸류에이션이 준비되면 표시됩니다." in info_body
+
+
+def test_ticker_page_per_band_and_peer_sections_are_visible():
+    script = _STUBS + (
+        'st.session_state["ticker"] = "MSFT"\n'
+        'cached.valuation = lambda t: {"metrics":{"per":30.0,"forward_pe":25.0,"eps_fwd":12.0,\n'
+        '    "pbr":10.0,"roe":0.4,"market_type":"us"}, "consensus":{"n_analysts":5}, "history":[]}\n'
+        'cached.earnings_history_deep = lambda t, limit=12: [\n'
+        '    {"date": "2026-04-01", "eps_actual": 1.0}, {"date": "2026-01-01", "eps_actual": 1.0},\n'
+        '    {"date": "2025-10-01", "eps_actual": 1.0}, {"date": "2025-07-01", "eps_actual": 1.0},\n'
+        '    {"date": "2025-04-01", "eps_actual": 1.0}, {"date": "2025-01-01", "eps_actual": 1.0},\n'
+        '    {"date": "2024-10-01", "eps_actual": 1.0}]\n'
+        'cached.ohlc = lambda t, period="6mo": pd.DataFrame(\n'
+        '    {"Close": [50.0, 55.0, 60.0, 64.0]},\n'
+        '    index=pd.DatetimeIndex(["2025-07-01", "2025-10-01", "2026-01-01", "2026-04-01"]))\n'
+        'from dashboard.pages import ticker\n'
+        'ticker.render()\n'
+    )
+    at = AppTest.from_string(script, default_timeout=30)
+    at.run()
+    assert not at.exception, str(at.exception)
+    assert not any("자체 역사 PER 밴드" in str(e.label) for e in at.expander)
+    assert not any("동종업계 비교" in str(e.label) for e in at.expander)
+    labels = [m.label for m in at.metric]
+    assert "현재 PER" in labels
+    assert "멀티플 기준가" in labels
 
 
 def test_paper_kpis_and_decisions():
