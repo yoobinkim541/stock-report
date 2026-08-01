@@ -202,6 +202,18 @@ def _page_card(page: dict):
     if page.get("body"):
         st.markdown("##### 본문")
         st.write(page["body"])
+    split_children = wiki.split_children_for_page(page)
+    if split_children:
+        st.markdown("##### 분할된 세부 문서")
+        for child in split_children[:6]:
+            with st.container(border=True):
+                st.markdown(f"**{child.get('title', '세부 문서')}**")
+                st.caption(f"{child.get('surface', 'wiki')} · {child.get('kind', 'note')} · {child.get('status', 'draft')}")
+                if child.get("summary"):
+                    st.caption(str(child["summary"])[:180])
+                if st.button("읽기", key=f"ai_wiki_split_child_{child.get('id')}", width="stretch"):
+                    st.session_state["wiki_selected_page_id"] = child.get("id")
+                    st.rerun()
     meta = pd.DataFrame([
         {"필드": "생성", "값": page.get("created_at", "")},
         {"필드": "수정", "값": page.get("updated_at", "")},

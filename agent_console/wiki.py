@@ -24,6 +24,7 @@ MAX_LINKS = 12
 WIKI_SUMMARY_LIMIT = 2400
 WIKI_BODY_LIMIT = 12000
 WIKI_CONTEXT_BODY_SNIPPET = 1600
+WIKI_SPLIT_TARGET = 9000
 
 _CACHE: dict[str, tuple[float, Any]] = {}
 _CACHE_TTL = 30.0
@@ -97,6 +98,193 @@ def _dedupe_texts(values: Iterable[object], *, limit: int = 12, item_limit: int 
 def _clean_links(values: Iterable[object], *, self_id: str = "", limit: int = MAX_LINKS) -> list[str]:
     filtered = [v for v in (values or []) if _clean(v, 80) != self_id]
     return _dedupe_texts(filtered, limit=limit, item_limit=80)
+
+
+def _raw_text(value: object) -> str:
+    return re.sub(r"\r\n?", "\n", str(value or "").replace("\x00", " ")).strip()
+
+
+def _split_blocks(text: str) -> list[str]:
+    body = _raw_text(text)
+    if not body:
+        return []
+    paragraphs = [block.strip() for block in re.split(r"\n{2,}", body) if block.strip()]
+    if not paragraphs:
+        return [body]
+    chunks: list[str] = []
+    current = ""
+    for block in paragraphs:
+        if len(block) > WIKI_SPLIT_TARGET:
+            if current:
+                chunks.append(current.strip())
+                current = ""
+            chunks.extend(_hard_split_text(block, WIKI_SPLIT_TARGET))
+            continue
+        candidate = block if not current else f"{current}\n\n{block}"
+        if len(candidate) <= WIKI_SPLIT_TARGET:
+            current = candidate
+            continue
+        if current:
+            chunks.append(current.strip())
+        current = block
+    if current:
+        chunks.append(current.strip())
+    return [chunk for chunk in chunks if chunk]
+
+
+def _hard_split_text(text: str, limit: int) -> list[str]:
+    text = _raw_text(text)
+    if not text:
+        return []
+    if len(text) <= limit:
+        return [text]
+    pieces: list[str] = []
+    start = 0
+    length = len(text)
+    while start < length:
+        end = min(length, start + limit)
+        if end < length:
+            pivot = text.rfind("\n\n", start, end)
+            if pivot <= start:
+                pivot = text.rfind("\n", start, end)
+            if pivot <= start:
+                pivot = text.rfind(" ", start, end)
+            if pivot > start + max(1200, limit // 2):
+                end = pivot
+        chunk = text[start:end].strip()
+        if chunk:
+            pieces.append(chunk)
+        start = end
+        while start < length and text[start] in "\n \t":
+            start += 1
+    return pieces or [text]
+
+
+def _chunk_title(parent_title: str, chunk: str, *, index: int, total: int, seen: set[str]) -> str:
+    lines = [line.strip() for line in _raw_text(chunk).splitlines() if line.strip()]
+    heading = ""
+    for line in lines:
+        match = re.match(r"^#{1,6}\s+(.+)$", line)
+        if match:
+            heading = match.group(1).strip()
+            break
+    if not heading and lines:
+        candidate = re.sub(r"^[-•*]\s*", "", lines[0])
+        candidate = re.sub(r"^\d+[\).\s]+", "", candidate).strip()
+        heading = candidate
+    parent = _clean(parent_title, 120)
+    if heading:
+        title = f"{parent} - {_clean(heading, 80)}"
+    else:
+        title = f"{parent} ({index}/{total})"
+    title = _clean(title, 160)
+    if title in seen:
+        title = _clean(f"{title} {index}", 160)
+    seen.add(title)
+    return title
+
+
+def _split_body_overview(parent_title: str, child_pages: list[dict[str, Any]], *, original_summary: str = "") -> str:
+    lines = [
+        f"이 문서는 길이가 길어 {len(child_pages)}개의 세부 문서로 분리되었습니다.",
+    ]
+    summary = _clean(original_summary, 900)
+    if summary:
+        lines += ["", f"원본 요약: {summary}"]
+    lines += ["", "세부 문서"]
+    for idx, page in enumerate(child_pages, start=1):
+        title = _clean(page.get("title") or f"{parent_title} ({idx})", 160)
+        excerpt = _clean(page.get("summary") or page.get("body") or "", 180)
+        lines.append(f"{idx}. [[{title}]]")
+        if excerpt:
+            lines.append(f"   - {excerpt}")
+    return "\n".join(lines).strip()
+
+
+def _save_wiki_page(page: dict, *, allow_split: bool = True) -> dict:
+    page = dict(page or {})
+    raw_body = _raw_text(page.get("body") or "")
+    if allow_split and len(raw_body) > WIKI_BODY_LIMIT:
+        split_result = _save_split_wiki_page(page)
+        if split_result:
+            return split_result
+    record = _build_wiki_record(page)
+    saved = shared_memory.upsert_record(record)
+    return _record_to_page(saved)
+
+
+def _save_split_wiki_page(page: dict) -> dict | None:
+    page = dict(page or {})
+    raw_body = _raw_text(page.get("body") or "")
+    if len(raw_body) <= WIKI_BODY_LIMIT:
+        return None
+
+    title = _clean(page.get("title") or "위키 페이지", 160)
+    surface = _clean(page.get("surface") or WIKI_SURFACE, 60).lower() or WIKI_SURFACE
+    kind = _clean(page.get("kind") or "note", 40).lower() or "note"
+    if kind not in VALID_KINDS:
+        kind = "note"
+    parent_id = _clean(page.get("id") or _page_id(title, surface, kind), 80)
+    chunks = _split_blocks(raw_body)
+    if len(chunks) <= 1:
+        return None
+
+    status = _clean(page.get("status") or "draft", 40).lower() or "draft"
+    if status not in VALID_STATUSES:
+        status = "draft"
+    source_refs = _dedupe_texts(page.get("source_refs") or [], limit=12, item_limit=120)
+    tags = _dedupe_texts(page.get("tags") or [], limit=20, item_limit=60)
+    links = _clean_links(page.get("links") or [], self_id=parent_id)
+    confidence = float(page.get("confidence") or 0.5)
+    original_summary = _clean(page.get("summary") or "", WIKI_SUMMARY_LIMIT)
+
+    child_payloads: list[dict[str, Any]] = []
+    seen_titles: set[str] = set()
+    for idx, chunk in enumerate(chunks, start=1):
+        child_title = _chunk_title(title, chunk, index=idx, total=len(chunks), seen=seen_titles)
+        child_payloads.append({
+            "title": child_title,
+            "summary": _clean(chunk.replace("\n", " "), 900),
+            "body": chunk,
+            "surface": surface,
+            "kind": kind,
+            "status": status,
+            "tags": _dedupe_texts([*tags, f"split_from:{parent_id}"], limit=20, item_limit=60),
+            "source_refs": source_refs,
+            "links": links + [parent_id],
+            "confidence": confidence,
+        })
+
+    child_records = [_build_wiki_record(payload, existing=get_page(payload.get("id") or "") or {}) for payload in child_payloads]
+    child_ids = [record["id"] for record in child_records]
+
+    for record, payload in zip(child_records, child_payloads):
+        payload["links"] = _clean_links([*(payload.get("links") or []), *[cid for cid in child_ids if cid != record["id"]]], self_id=record["id"])
+        record.update(_build_wiki_record(payload, existing=get_page(record["id"]) or {}))
+
+    parent_body = _split_body_overview(title, child_records, original_summary=original_summary)
+    parent_summary = original_summary or _clean(chunks[0], 900)
+    if len(child_records) > 1:
+        parent_summary = _clean(f"{parent_summary} · {len(child_records)}개 세부 문서", WIKI_SUMMARY_LIMIT)
+    parent_payload = {
+        "id": parent_id,
+        "title": title,
+        "summary": _clean(parent_summary, WIKI_SUMMARY_LIMIT),
+        "body": parent_body,
+        "surface": surface,
+        "kind": kind,
+        "status": status,
+        "tags": _dedupe_texts([*tags, *[f"split_into:{cid}" for cid in child_ids]], limit=20, item_limit=60),
+        "source_refs": source_refs,
+        "links": _clean_links([*links, *child_ids], self_id=parent_id),
+        "confidence": confidence,
+    }
+    parent_record = _build_wiki_record(parent_payload, existing=get_page(parent_id) or {})
+
+    shared_memory.batch_upsert_delete(upserts=[*child_records, parent_record], deletes=[])
+    _CACHE.clear()
+    _debounced_rebuild()
+    return _record_to_page(parent_record)
 
 
 def _page_id(title: str, surface: str, kind: str) -> str:
@@ -779,10 +967,32 @@ def _build_wiki_record(page: dict, *, existing: dict | None = None) -> dict:
 
 
 def upsert_page(page: dict) -> dict:
-    record = _build_wiki_record(page)
-    saved = shared_memory.upsert_record(record)
+    saved = _save_wiki_page(page)
     _CACHE.clear()
-    return _record_to_page(saved)
+    return saved
+
+
+def split_child_ids(page: dict | None) -> list[str]:
+    if not page:
+        return []
+    ids: list[str] = []
+    for tag in page.get("tags") or []:
+        clean = _clean(tag, 80).lower()
+        if not clean.startswith("split_into:"):
+            continue
+        child_id = _clean(clean.split(":", 1)[1], 80)
+        if child_id and child_id not in ids:
+            ids.append(child_id)
+    return ids
+
+
+def split_children_for_page(page: dict | None) -> list[dict]:
+    children = []
+    for child_id in split_child_ids(page):
+        child = get_page(child_id)
+        if child:
+            children.append(child)
+    return children
 
 
 def track_page_usage(page_id: str, query: str) -> None:

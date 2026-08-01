@@ -2426,6 +2426,46 @@ def test_split_page_creates_new_pages_and_archives_source(monkeypatch, tmp_path)
     assert first_id in second_page["links"]
 
 
+def test_wiki_upsert_page_auto_splits_overlong_body(monkeypatch, tmp_path):
+    _isolate(monkeypatch, tmp_path)
+
+    from agent_console import wiki
+
+    body = "\n\n".join([
+        "## 개요\n" + ("개요 문장 " * 900),
+        "## 리스크\n" + ("리스크 문장 " * 900),
+        "## 결론\n" + ("결론 문장 " * 900) + " [END_MARKER]",
+    ])
+
+    saved = wiki.upsert_page({
+        "title": "긴 위키 문서",
+        "summary": "길이가 긴 문서는 세부 문서로 분리합니다.",
+        "body": body,
+        "surface": "market",
+        "kind": "playbook",
+        "status": "reviewed",
+        "tags": ["wiki", "split"],
+        "source_refs": ["conversation:long"],
+    })
+
+    split_into = [tag.split(":", 1)[1] for tag in saved["tags"] if str(tag).startswith("split_into:")]
+    assert split_into, "긴 문서는 자식 문서가 생성되어야 합니다."
+    assert saved["links"] == split_into
+    assert "[END_MARKER]" not in saved["body"]
+    assert "세부 문서" in saved["body"] or "분리" in saved["body"]
+
+    child_bodies = []
+    for child_id in split_into:
+        child = wiki.get_page(child_id)
+        assert child is not None
+        assert f"split_from:{saved['id']}" in child["tags"]
+        assert saved["id"] in child["links"]
+        child_bodies.append(child["body"])
+
+    assert any("[END_MARKER]" in body_text for body_text in child_bodies)
+    assert sum(len(body_text) for body_text in child_bodies) >= len(body) - 200
+
+
 def test_wiki_auto_curate_llm_merge_action_merges_pages(monkeypatch, tmp_path):
     _isolate(monkeypatch, tmp_path)
 

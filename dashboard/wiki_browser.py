@@ -707,6 +707,22 @@ def render_wiki_tab(surface: str, pack: dict[str, Any] | None = None) -> None:
                     for page in related[:4]:
                         st.markdown(f"- {page.get('title', '위키')} · {page.get('status', 'draft')} · {page.get('surface', 'wiki')}")
 
+                split_children = wiki.split_children_for_page(preview_page)
+                if split_children:
+                    st.markdown("##### 분할된 세부 문서")
+                    for child in split_children[:6]:
+                        with st.container(border=True):
+                            st.markdown(f"**{child.get('title', '세부 문서')}**")
+                            st.caption(
+                                f"{child.get('surface', 'wiki')} · {child.get('kind', 'note')} · {child.get('status', 'draft')}"
+                            )
+                            if child.get("summary"):
+                                st.caption(str(child["summary"])[:180])
+                            if st.button("읽기", key=f"wiki_split_child_{child.get('id')}", width="stretch"):
+                                selected_page_id = str(child.get("id") or "")
+                                st.session_state["agent_wiki_selected_page_id"] = selected_page_id
+                                st.rerun()
+
     with right:
         st.markdown("##### 편집기")
         editor_page = wiki.get_page(st.session_state.get("agent_wiki_selected_page_id", ""))
