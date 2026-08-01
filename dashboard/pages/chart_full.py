@@ -13,7 +13,7 @@ import streamlit as st
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 
 import ticker_names
-from dashboard import cached, data, theme
+from dashboard import cached, chart_workspace_ui, data, theme
 from dashboard.pages import ticker as ticker_pg
 
 
@@ -24,6 +24,12 @@ def render():
       .stMainBlockContainer { padding: 0.6rem 1rem 0 !important; max-width: 100% !important; }
       .tn-tape { display: none !important; }
     </style>""", unsafe_allow_html=True)
+    workspace_mode = st.toggle("워크스페이스 모드", value=True, key="_chart_workspace_mode",
+                               help="저장형 멀티차트 작업공간으로 보기")
+    if workspace_mode:
+        chart_workspace_ui.render_chart_workspace(st.session_state.get("_cw_workspace"))
+        return
+
     t = st.session_state.get("ticker", "MSFT")
     hist = cached.ohlc(t, period="max")
     if hist is None or getattr(hist, "empty", True):
