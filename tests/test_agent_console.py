@@ -2438,6 +2438,43 @@ def test_chart_alert_run_history_api_routes(monkeypatch, tmp_path):
     assert payload["runs"][0]["notification"]["delivered"] == 1
 
 
+def test_chart_alert_manual_run_api_invokes_worker(monkeypatch, tmp_path):
+    _isolate(monkeypatch, tmp_path)
+
+    from agent_console import chart_alert_worker
+    from agent_console.server import create_app
+
+    calls: list[dict] = []
+    monkeypatch.setattr(chart_alert_worker, "run_chart_alert_cycle", lambda **kwargs: calls.append(kwargs) or {
+        "ok": True,
+        "workspace_id": "workspace-1",
+        "rule_count": 2,
+        "event_count": 1,
+        "events": [{"alert_id": "alert-1"}],
+        "missing_bars": [],
+        "notification": {"attempted": 1, "delivered": 1, "failed": 0, "failures": []},
+        "run_id": 9,
+        "created_at": "2026-08-01T00:05:00+00:00",
+    })
+
+    result = create_app().test_client().post("/api/chart-alerts/run", json={
+        "workspace_id": "workspace-1",
+        "symbols": ["AAPL"],
+        "notify": True,
+        "limit": 5,
+    })
+
+    assert result.status_code == 200
+    assert result.json["ok"] is True
+    assert result.json["run_id"] == 9
+    assert calls == [{
+        "workspace_id": "workspace-1",
+        "symbols": ["AAPL"],
+        "notify": True,
+        "limit": 5,
+    }]
+
+
 def test_strategy_studio_api_routes(monkeypatch, tmp_path):
     _isolate(monkeypatch, tmp_path)
 

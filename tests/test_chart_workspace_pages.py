@@ -21,6 +21,7 @@ from dashboard import chart_workspace_ui
 _orig_catalog = chart_workspace_ui.cached.chart_workspace_catalog
 _orig_versions = chart_workspace_ui.cached.chart_workspace_versions
 _orig_alert_runs = chart_workspace_ui.views.chart_alert_runs
+_orig_alert_run_once = chart_workspace_ui.views.chart_alert_run_once
 
 workspace = {{
     "id": "w1",
@@ -61,6 +62,7 @@ finally:
     chart_workspace_ui.cached.chart_workspace_catalog = _orig_catalog
     chart_workspace_ui.cached.chart_workspace_versions = _orig_versions
     chart_workspace_ui.views.chart_alert_runs = _orig_alert_runs
+    chart_workspace_ui.views.chart_alert_run_once = _orig_alert_run_once
 """
     at = AppTest.from_string(script, default_timeout=30)
     at.run()
@@ -77,6 +79,7 @@ finally:
     assert "알림 매니저" in body
     assert "최근 실행" in body
     assert "발송 1/1" in body
+    assert "수동 실행" in body
 
 
 def test_workspace_drawing_store_key_respects_sync_scope():

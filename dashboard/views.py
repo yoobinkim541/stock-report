@@ -1946,6 +1946,16 @@ def chart_alert_runs(workspace_id: str, limit: int = 5) -> list[dict]:
         return []
 
 
+def chart_alert_run_once(workspace_id: str, *, notify: bool = False, symbols: list[str] | None = None) -> dict:
+    """차트 알림 워커 수동 실행."""
+    from agent_console import chart_alert_worker
+    return chart_alert_worker.run_chart_alert_cycle(
+        workspace_id=workspace_id,
+        symbols=symbols or [],
+        notify=notify,
+    )
+
+
 def chart_alert_rule_save(rule: dict) -> dict:
     """차트 알림 룰 저장."""
     return storage.save_chart_alert_rule(rule)

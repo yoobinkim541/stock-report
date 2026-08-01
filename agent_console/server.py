@@ -5,7 +5,7 @@ from pathlib import Path
 
 from flask import Flask, jsonify, request, send_from_directory
 
-from . import agent, chart_alert_dispatcher, chart_alert_runner, chart_alerts, context, shared_memory, storage, strategy_studio, wiki
+from . import agent, chart_alert_dispatcher, chart_alert_runner, chart_alert_worker, chart_alerts, context, shared_memory, storage, strategy_studio, wiki
 
 
 STATIC_DIR = Path(__file__).resolve().parent / "static"
@@ -273,6 +273,18 @@ def create_app() -> Flask:
             "ok": True,
             "runs": storage.list_chart_alert_runs(workspace_id=workspace_id, limit=limit),
         })
+
+    @app.post("/api/chart-alerts/run")
+    def chart_alert_run_now():
+        payload = request.get_json(silent=True) or {}
+        symbols = payload.get("symbols") if isinstance(payload.get("symbols"), list) else []
+        result = chart_alert_worker.run_chart_alert_cycle(
+            workspace_id=str(payload.get("workspace_id") or "").strip() or None,
+            symbols=[str(symbol).upper().strip() for symbol in symbols if str(symbol).strip()],
+            notify=bool(payload.get("notify")),
+            limit=int(payload.get("limit") or 200),
+        )
+        return jsonify(result)
 
     @app.post("/api/chart-alerts/rules")
     def chart_alert_rule_save():

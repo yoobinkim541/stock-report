@@ -247,10 +247,21 @@ def _render_alert_manager(ws: dict[str, Any], panels: list[dict[str, Any]]) -> N
         return
     st.markdown("##### 알림 매니저")
     st.caption("활성 패널 기준으로 가격 crossing 알림을 저장합니다. 서버 평가 API는 가격·인디케이터·드로잉 라인·멀티컨디션 알림까지 처리할 수 있습니다.")
+    st.caption("수동 실행으로 저장된 알림을 즉시 평가하고 최근 실행 결과를 갱신할 수 있습니다.")
     try:
         rules = views.chart_alert_rules(workspace_id, limit=20) if workspace_id else []
     except Exception:
         rules = []
+
+    run_cols = st.columns([1.0, 1.0], vertical_alignment="bottom")
+    notify_now = run_cols[0].checkbox("발송 포함", value=False, key=f"_cw_alert_run_notify_{workspace_id}_{active_id}")
+    if run_cols[1].button("지금 평가", key=f"_cw_alert_run_now_{workspace_id}_{active_id}", width="stretch", disabled=not bool(workspace_id)):
+        try:
+            result = views.chart_alert_run_once(workspace_id, notify=notify_now)
+            st.toast(f"알림 평가 완료: 트리거 {result.get('event_count', 0)}건")
+            st.rerun()
+        except Exception as exc:
+            st.error(f"알림 평가 실패: {exc}")
 
     with st.expander("가격 알림 만들기", expanded=False):
         c1, c2, c3, c4 = st.columns([1.0, 1.1, 0.9, 1.0], vertical_alignment="bottom")
