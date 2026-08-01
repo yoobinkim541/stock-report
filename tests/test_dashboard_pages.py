@@ -849,8 +849,15 @@ def test_ticker_page_peer_comparables_hidden_for_kr_without_dart_key():
 def test_ticker_page_per_band_and_peer_sections_are_visible():
     script = _STUBS + (
         'st.session_state["ticker"] = "MSFT"\n'
+        'st.session_state["_bot_1d"] = ["거래량", "펀더멘털"]\n'
         'cached.valuation = lambda t: {"metrics":{"per":30.0,"forward_pe":25.0,"eps_fwd":12.0,\n'
         '    "pbr":10.0,"roe":0.4,"market_type":"us"}, "consensus":{"n_analysts":5}, "history":[]}\n'
+        'cached.chart_fundamentals = lambda t: {"quarterly": [\n'
+        '    {"date": "2025-06-30", "revenue": 5.0e10, "net_income": 1.2e10, "margin": 0.24},\n'
+        '    {"date": "2025-09-30", "revenue": 5.5e10, "net_income": 1.4e10, "margin": 0.25},\n'
+        '    {"date": "2025-12-31", "revenue": 6.0e10, "net_income": 1.6e10, "margin": 0.27},\n'
+        '    {"date": "2026-03-31", "revenue": 6.4e10, "net_income": 1.8e10, "margin": 0.28}],\n'
+        '    "annual": []}\n'
         'cached.earnings_history_deep = lambda t, limit=12: [\n'
         '    {"date": "2026-04-01", "eps_actual": 1.0}, {"date": "2026-01-01", "eps_actual": 1.0},\n'
         '    {"date": "2025-10-01", "eps_actual": 1.0}, {"date": "2025-07-01", "eps_actual": 1.0},\n'
@@ -874,6 +881,8 @@ def test_ticker_page_per_band_and_peer_sections_are_visible():
     assert "같은 섹터 시총 상위 종목" in caps
     comparison = next(item.value for item in at.dataframe if "ROE(%)" in item.value.columns)
     assert comparison.shape[0] >= 2
+    frames = [item.proto.srcdoc for item in at.get("iframe")]
+    assert frames and any('"매출"' in src for src in frames)
 
 
 def test_paper_kpis_and_decisions():
@@ -1416,6 +1425,12 @@ ticker.render()
 def test_ticker_page_kr_core_context_is_visible_without_expander():
     script = _STUBS + '''
 cached.realtime_quote = lambda t: None
+cached.chart_fundamentals = lambda t: {"quarterly": [
+    {"date": "2025-06-30", "revenue": 5.0e10, "net_income": 1.2e10, "margin": 0.24},
+    {"date": "2025-09-30", "revenue": 5.5e10, "net_income": 1.4e10, "margin": 0.25},
+    {"date": "2025-12-31", "revenue": 6.0e10, "net_income": 1.6e10, "margin": 0.27},
+    {"date": "2026-03-31", "revenue": 6.4e10, "net_income": 1.8e10, "margin": 0.28}],
+    "annual": []}
 cached.valuation = lambda t: {
     "metrics": {"market_type": "kr", "source": "DART+marcap", "fiscal_year": 2025,
                  "confidence": "high", "per": 12.0, "forward_pe": 9.5, "pbr": 1.1,
@@ -1445,6 +1460,7 @@ cached.earnings_history_deep = lambda t, limit=12: [
     {"date": "2025-07-01", "eps_actual": 1.0},
 ]
 st.session_state["ticker"] = "005930.KS"
+st.session_state["_bot_1d"] = ["거래량", "펀더멘털"]
 from dashboard.pages import ticker
 ticker.render()
 '''
@@ -1455,6 +1471,10 @@ ticker.render()
     body = " ".join(str(getattr(m, "value", "")) for m in at.markdown)
     assert "목표가 여력" in body
     assert "리비전 모멘텀" in body
+    labels = [m.label for m in at.metric]
+    assert "PER" in labels and "Fwd PE" in labels
+    frames = [item.proto.srcdoc for item in at.get("iframe")]
+    assert frames and any("bt-reg" in src for src in frames)
 
 
 def test_ticker_page_kr_core_context_shows_fallback_when_consensus_inputs_missing():
@@ -1464,7 +1484,7 @@ cached.ohlc = lambda t, period="max": pd.DataFrame()
 cached.valuation = lambda t: {
     "metrics": {"market_type": "kr", "source": "DART", "fiscal_year": 2025,
                  "confidence": "high", "per": 12.0, "forward_pe": 9.5, "pbr": 1.1,
-                 "roe": 0.18, "eps_ttm": 5000},
+                 "roe": 0.18, "eps_ttm": 5000, "kr_yf_fallback": True},
     "consensus": {},
     "history": [],
 }
@@ -1485,6 +1505,7 @@ ticker.render()
     at = AppTest.from_string(script, default_timeout=30)
     at.run()
     assert not at.exception, str(at.exception)
+    assert not any("한국 종목 심화 컨텍스트" in str(e.label) for e in at.expander)
     info_body = " ".join(str(getattr(item, "value", "")) for item in at.info)
     assert "애널리스트 의견 데이터 없음" in info_body
     assert "목표가 팬 차트 표시 불가" in info_body

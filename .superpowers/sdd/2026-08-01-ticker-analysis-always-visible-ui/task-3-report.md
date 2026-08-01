@@ -1,0 +1,34 @@
+## Task 3 Report
+
+### What I implemented
+- Updated the ticker dashboard smoke coverage in `tests/test_dashboard_pages.py` to assert the always-visible layout more directly.
+- Strengthened the combined valuation smoke to verify:
+  - self-PER and peer-comparison sections are no longer behind expanders
+  - visible valuation metrics are rendered
+  - chart output is present in the rendered iframe payload
+- Strengthened the KR ticker smoke to verify:
+  - the KR analysis rail labels are visible in page body markdown
+  - KR valuation metrics are visible in the metric rail
+  - chart output is present in the rendered iframe payload
+- Kept and tightened the missing-data fallback regression by exercising the `kr_yf_fallback` path and asserting the explicit placeholder/info copy still renders instead of leaving an empty gap.
+
+### What I tested and results
+- Ran `./.venv/bin/python -m pytest tests/test_dashboard_pages.py -q`
+  - Result: `79 passed in 14.76s`
+- Ran `./.venv/bin/python -m pytest -q`
+  - Result: suite did not complete cleanly; it surfaced unrelated failures outside this task and later stalled in a long-running tail before I interrupted it.
+- Ran `./.venv/bin/python -m pytest -q -x` to capture the first concrete full-suite failure
+  - Result: `tests/test_agent_console.py::test_agent_answer_async_postprocess_does_not_block_on_wiki` failed (`1 failed, 89 passed in 62.62s`)
+
+### Files changed
+- `tests/test_dashboard_pages.py`
+- `.superpowers/sdd/2026-08-01-ticker-analysis-always-visible-ui/task-3-report.md`
+
+### Self-review findings or concerns
+- The dashboard smoke changes are scoped to the requested file and match the current rendered widget surface.
+- I initially tried to assert `>= 2` iframe elements directly, but AppTest exposes the current ticker chart layers through a single iframe `srcdoc` in these scenarios. I adjusted the smoke checks to verify real chart payload content instead, which is stronger against render regressions than a brittle element count in this harness.
+- I did not change application code.
+
+### Unexpected items
+- The full suite is not green in the current workspace. The first reproducible failure is in `tests/test_agent_console.py`, outside the dashboard smoke scope for this task.
+- There was also an unrelated pre-existing modified file in the worktree: `.superpowers/sdd/2026-08-01-ticker-analysis-always-visible-ui/task-1-report.md`.
