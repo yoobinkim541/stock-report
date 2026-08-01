@@ -53,6 +53,20 @@ try:
             "event_count": 1,
             "missing_bars": [],
             "notification": {{"attempted": 1, "delivered": 1, "failed": 0, "failures": []}},
+            "result": {{
+                "events": [
+                    {{
+                        "alert_id": "alert-1",
+                        "symbol": "MSFT",
+                        "name": "MSFT breakout",
+                        "as_of": "2026-08-01T00:04:00+00:00",
+                        "current_price": 321.25,
+                        "previous_price": 319.0,
+                        "matched_conditions": ["price:crossing_up"],
+                        "message": "MSFT crossed 320",
+                    }}
+                ]
+            }},
             "status": "ok",
             "created_at": "2026-08-01T00:05:00+00:00",
         }}
@@ -80,6 +94,9 @@ finally:
     assert "최근 실행" in body
     assert "발송 1/1" in body
     assert "수동 실행" in body
+    assert "최근 이벤트" in body
+    assert "MSFT breakout" in body
+    assert "price:crossing_up" in body
 
 
 def test_workspace_drawing_store_key_respects_sync_scope():

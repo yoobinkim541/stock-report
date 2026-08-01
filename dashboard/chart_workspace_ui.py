@@ -342,6 +342,28 @@ def _render_alert_manager(ws: dict[str, Any], panels: list[dict[str, Any]]) -> N
                 width="stretch",
                 height=min(220, 44 + 32 * min(len(runs), 5)),
             )
+        latest_events = _alert_run_events(latest)
+        if latest_events:
+            st.markdown("##### 최근 이벤트")
+            first_event = latest_events[0]
+            st.caption(
+                f"{first_event.get('symbol', '—')} · {first_event.get('name', '—')} · "
+                f"{', '.join(str(item) for item in first_event.get('matched_conditions') or [])}"
+            )
+            st.dataframe(
+                pd.DataFrame([{
+                    "시각": event.get("as_of"),
+                    "종목": event.get("symbol"),
+                    "이름": event.get("name"),
+                    "현재가": event.get("current_price"),
+                    "이전": event.get("previous_price"),
+                    "조건": ", ".join(str(item) for item in event.get("matched_conditions") or []),
+                    "메시지": event.get("message"),
+                } for event in latest_events[:10]]),
+                hide_index=True,
+                width="stretch",
+                height=min(280, 44 + 32 * min(len(latest_events), 10)),
+            )
 
 
 def _alert_operator_label(operator: str) -> str:
@@ -362,6 +384,12 @@ def _alert_rule_label(rule: dict[str, Any]) -> str:
     except (TypeError, ValueError):
         value_text = str(value or "—")
     return f"{_alert_operator_label(str(condition.get('operator') or ''))} {value_text}"
+
+
+def _alert_run_events(run: dict[str, Any]) -> list[dict[str, Any]]:
+    result = run.get("result") if isinstance(run, dict) else {}
+    events = result.get("events") if isinstance(result, dict) else []
+    return [event for event in events or [] if isinstance(event, dict)]
 
 
 def _render_workspace_library_bar(ws: dict[str, Any]) -> dict[str, Any]:
