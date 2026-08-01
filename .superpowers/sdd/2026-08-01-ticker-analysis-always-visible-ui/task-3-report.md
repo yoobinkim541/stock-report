@@ -33,6 +33,15 @@
 - The full suite is not green in the current workspace. The first reproducible failure is in `tests/test_agent_console.py`, outside the dashboard smoke scope for this task.
 - There was also an unrelated pre-existing modified file in the worktree: `.superpowers/sdd/2026-08-01-ticker-analysis-always-visible-ui/task-1-report.md`.
 
+### Round 2 Fix Notes
+- Added an explicit US smoke assertion for the always-visible analysis rail by checking the first-load `기업 판단 요약` heading in `at.subheader`.
+- Strengthened the KR fallback regression so it now proves the visible `한국 종목 심화 컨텍스트` surface still renders, not just the `info` copy.
+- Kept the existing fallback-copy checks intact so the test still verifies the empty-consensus path stays honest instead of silently collapsing the section.
+
+### Round 2 Verification
+- Ran `./.venv/bin/python -m pytest tests/test_dashboard_pages.py -q`
+  - Result: `79 passed in 14.78s`
+
 ### Follow-up fix
 - Added a direct first-load visibility assertion for the US ticker smoke on the `기업 판단 요약` subheader.
 - Added direct KR fallback visibility assertions for the `한국 종목 심화 컨텍스트` heading and the `DART 키 설정 시 활성` placeholder copy, so the regression proves a visible surface remains on screen instead of only checking info text.
