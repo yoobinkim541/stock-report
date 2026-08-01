@@ -38,6 +38,7 @@ SURFACE_COLORS = {
 
 VALID_STATUSES = ("draft", "reviewed", "stable", "archived")
 WIKI_SURFACE = "wiki"
+WIKI_BODY_LIMIT = 12000
 
 
 @dataclass(frozen=True)
@@ -156,7 +157,7 @@ def _record_to_page(record: dict[str, Any]) -> dict[str, Any]:
     messages = record.get("messages") or []
     source = record.get("source") or {}
     body_parts = []
-    body_text = _clean(record.get("body") or "", 6000)
+    body_text = _clean(record.get("body") or "", WIKI_BODY_LIMIT)
     if body_text:
         body_parts.append(body_text)
     elif summary:
@@ -233,7 +234,7 @@ def _normalize_page(page: dict[str, Any] | WikiGraphNode) -> dict[str, Any]:
             "title": _clean(page.get("title") or "위키 페이지", 160),
             "slug": _slugify(page.get("title") or "위키 페이지"),
             "summary": _clean(page.get("summary") or "", 2400),
-            "body": _clean(page.get("body") or "", 6000),
+            "body": _clean(page.get("body") or "", WIKI_BODY_LIMIT),
             "tags": tags,
             "status": _clean(page.get("status") or _status_from_tags(tags), 40),
             "verification_status": _verification_status({**page, "source_refs": source_refs}),
@@ -743,7 +744,7 @@ def render_wiki_mesh(
         return ""
 
     stat_col.caption(f"{len(nodes)} nodes · {len(model.get('edges') or [])} links · surface {surface} · status {status}")
-    st.caption("그래프의 점을 클릭하면 해당 위키 페이지가 미리보기로 열립니다.")
+    st.caption("그래프의 점을 클릭하면 해당 위키 문서가 읽기 패널로 열립니다.")
 
     fig = _build_figure({**model, "selected_id": selected_page_id})
     event = st.plotly_chart(

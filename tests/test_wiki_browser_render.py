@@ -47,7 +47,7 @@ finally:
     body = " ".join(str(m.value) for m in at.markdown) + " ".join(str(c.value) for c in at.caption)
     assert "AI 위키" in body
     assert "문서 브라우저" in body
-    assert "페이지 미리보기" in body
+    assert "문서 읽기" in body
     assert "관련 문서" in body
 
 
@@ -126,7 +126,8 @@ try:
         {{"id": "p1", "title": "문서 A", "summary": "A 요약", "tags": ["wiki"], "status": "draft", "surface": "portfolio", "kind": "note", "source_refs": ["conversation:001"], "updated_at": "2026-07-13T01:00:00+00:00"}},
         {{"id": "p2", "title": "문서 B", "summary": "B 요약", "tags": ["wiki"], "status": "reviewed", "surface": "portfolio", "kind": "note", "source_refs": ["conversation:002"], "updated_at": "2026-07-13T02:00:00+00:00"}},
     ]
-    wiki.get_page = lambda page_id: {{"id": page_id, "title": "문서 B", "summary": "B 요약", "body": "B 전체 본문", "tags": ["wiki"], "status": "reviewed", "surface": "portfolio", "kind": "note", "source_refs": ["conversation:002"], "updated_at": "2026-07-13T02:00:00+00:00"}} if page_id == "p2" else {{"id": page_id, "title": "문서 A", "summary": "A 요약", "body": "A 전체 본문", "tags": ["wiki"], "status": "draft", "surface": "portfolio", "kind": "note", "source_refs": ["conversation:001"], "updated_at": "2026-07-13T01:00:00+00:00"}}
+    long_body = "B 전체 본문 " + ("세부 내용 " * 1400) + "[FULL_BODY_TAIL]"
+    wiki.get_page = lambda page_id: {{"id": page_id, "title": "문서 B", "summary": "B 요약", "body": long_body, "tags": ["wiki"], "status": "reviewed", "surface": "portfolio", "kind": "note", "source_refs": ["conversation:002"], "updated_at": "2026-07-13T02:00:00+00:00"}} if page_id == "p2" else {{"id": page_id, "title": "문서 A", "summary": "A 요약", "body": "A 전체 본문", "tags": ["wiki"], "status": "draft", "surface": "portfolio", "kind": "note", "source_refs": ["conversation:001"], "updated_at": "2026-07-13T01:00:00+00:00"}}
     wiki.build_context_section = lambda **kwargs: "[위키 지식]\\n- stub"
     wiki.delete_page = lambda page_id: True
     wiki.upsert_page = lambda payload: dict(payload, id=payload.get("id") or "p1")
@@ -144,4 +145,5 @@ finally:
         for collection in (at.markdown, at.caption, getattr(at, "text", []), getattr(at, "info", []), getattr(at, "warning", []))
         for item in collection
     )
-    assert "B 전체 본문" in body
+    assert "문서 읽기" in body
+    assert "[FULL_BODY_TAIL]" in body

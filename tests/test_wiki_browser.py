@@ -151,11 +151,31 @@ def test_build_selected_evidence_model_orders_judgment_evidence_and_prompt_previ
         context_section="[위키 지식]\n- preview",
     )
 
+    assert model["summary"] == "CAPEX는 수요와 비용을 같이 봅니다."
     assert model["judgment"] == "CAPEX는 수요와 비용을 같이 봅니다."
     assert model["evidence"] == ["source:saveticker:ai-capex"]
     assert model["verification_status"] == "source-backed"
     assert model["open_questions"] == ["전력비 영향은?"]
     assert "[위키 지식]" in model["prompt_preview"]
+
+
+def test_build_selected_evidence_model_keeps_full_body_text():
+    long_body = "본문 세부 " * 1400 + "[FULL_BODY_TAIL]"
+    model = wiki_browser.build_selected_evidence_model(
+        {
+            "title": "전체 본문 보존",
+            "summary": "요약",
+            "body": long_body,
+            "verification_status": "source-backed",
+            "source_refs": ["source:saveticker:full-body"],
+            "openQuestions": [],
+            "trust_warnings": [],
+        },
+        context_section="[위키 지식]\n- preview",
+    )
+
+    assert "[FULL_BODY_TAIL]" in model["body"]
+    assert len(model["body"]) > 6000
 
 
 def test_promotion_guardrail_blocks_promoted_conversation_only_pages():

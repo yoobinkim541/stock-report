@@ -10,6 +10,7 @@ from typing import Any
 
 WIKI_SURFACE = "wiki"
 VALID_STATUSES = ("draft", "reviewed", "stable", "archived")
+WIKI_BODY_LIMIT = 12000
 # surface / kind 선택 목록의 단일 진실원. 첫 항목 "all" 은 필터 전용이라
 # 편집 UI 는 [1:] 를 쓴다. dashboard/pages/ai_wiki.py 가 여기서 가져간다.
 SURFACE_OPTIONS = ["all", "market", "portfolio", "ticker", "paper", "lab", "wiki"]
@@ -167,6 +168,7 @@ def build_selected_evidence_model(page: dict[str, Any] | WikiPage | None, *, con
     return {
         "ok": True,
         "title": normalized.get("title") or "위키 페이지",
+        "summary": normalized.get("summary") or normalized.get("body") or "",
         "judgment": normalized.get("summary") or normalized.get("body") or "",
         "body": normalized.get("body") or "",
         "evidence": list(normalized.get("source_refs") or []),
@@ -239,7 +241,7 @@ def _record_to_page(record: dict[str, Any]) -> dict[str, Any]:
     messages = record.get("messages") or []
     source = record.get("source") or {}
     body_parts = []
-    body_text = _clean(record.get("body") or "", 6000)
+    body_text = _clean(record.get("body") or "", WIKI_BODY_LIMIT)
     if body_text:
         body_parts.append(body_text)
     elif summary:
@@ -293,7 +295,7 @@ def _normalize_page(page: dict[str, Any] | WikiPage) -> dict[str, Any]:
             "title": _clean(page.get("title") or "위키 페이지", 160),
             "slug": _slugify(page.get("title") or "위키 페이지"),
             "summary": _clean(page.get("summary") or "", 2400),
-            "body": _clean(page.get("body") or "", 6000),
+            "body": _clean(page.get("body") or "", WIKI_BODY_LIMIT),
             "tags": tags,
             "status": _clean(page.get("status") or _status_from_tags(tags), 40),
             "verification_status": _verification_status({**page, "source_refs": source_refs}),
@@ -645,7 +647,7 @@ def render_wiki_tab(surface: str, pack: dict[str, Any] | None = None) -> None:
             st.session_state["agent_wiki_selected_page_id"] = selected_page_id
 
     with center:
-        st.markdown("##### 페이지 미리보기")
+        st.markdown("##### 문서 읽기")
         browser_selected = browser.get("selected") or {}
         preview_page = wiki.get_page(selected_page_id) or browser_selected
         if not preview_page:
@@ -663,8 +665,14 @@ def render_wiki_tab(surface: str, pack: dict[str, Any] | None = None) -> None:
                     f"{preview_page.get('surface', 'wiki')} · {preview_page.get('kind', 'note')} · {preview_page.get('status', 'draft')}"
                 )
 
-                st.markdown("##### 판단")
-                st.write(evidence.get("judgment") or "요약된 판단이 아직 없습니다.")
+                st.markdown("##### 요약")
+                st.write(evidence.get("summary") or evidence.get("judgment") or "요약이 아직 없습니다.")
+
+                st.markdown("##### 본문 전체")
+                if evidence.get("body"):
+                    st.markdown(evidence["body"])
+                else:
+                    st.info("본문이 아직 없습니다.")
 
                 st.markdown("##### 근거")
                 refs = evidence.get("evidence") or []
@@ -684,13 +692,10 @@ def render_wiki_tab(surface: str, pack: dict[str, Any] | None = None) -> None:
                     for item in evidence["open_questions"][:6]:
                         st.markdown(f"- {item}")
 
-                if evidence.get("body"):
-                    st.markdown("##### 본문")
-                    st.write(evidence["body"])
                 if evidence.get("tags"):
                     st.caption("태그: " + " · ".join(evidence["tags"]))
 
-                with st.expander("프롬프트 주입 미리보기", expanded=False):
+                with st.expander("프롬프트 주입 참고", expanded=False):
                     if evidence.get("prompt_preview"):
                         st.code(evidence["prompt_preview"], language="text")
                     else:
