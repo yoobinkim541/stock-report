@@ -1991,3 +1991,47 @@ def test_heuristic_canvas_patch_no_match_returns_empty():
     patch = ai_console._heuristic_canvas_patch("오늘 시장 어때?", _canvas_state(), "")
 
     assert patch == {}
+
+
+def test_heuristic_canvas_patch_allocation_add():
+    from dashboard.pages import ai_console
+
+    current = _canvas_state(allocations=[{"symbol": "QQQ", "weight_pct": 100.0, "note": "core"}])
+    patch = ai_console._heuristic_canvas_patch("TLT 10%로 추가해줘", current, "")
+
+    assert patch["allocations"] == [
+        {"symbol": "QQQ", "weight_pct": 90.0, "note": "core"},
+        {"symbol": "TLT", "weight_pct": 10.0, "note": ""},
+    ]
+
+
+def test_heuristic_canvas_patch_allocation_remove():
+    from dashboard.pages import ai_console
+
+    current = _canvas_state(allocations=[
+        {"symbol": "QQQ", "weight_pct": 80.0, "note": "core"},
+        {"symbol": "TLT", "weight_pct": 20.0, "note": "hedge"},
+    ])
+    patch = ai_console._heuristic_canvas_patch("TLT 빼줘", current, "")
+
+    assert patch["allocations"] == [{"symbol": "QQQ", "weight_pct": 100.0, "note": "core"}]
+
+
+def test_heuristic_canvas_patch_allocation_unresolvable_name_is_skipped():
+    from dashboard.pages import ai_console
+
+    current = _canvas_state(allocations=[{"symbol": "QQQ", "weight_pct": 100.0, "note": "core"}])
+    patch = ai_console._heuristic_canvas_patch("아무개코인 10%로 추가해줘", current, "")
+
+    assert "allocations" not in patch
+
+
+def test_allocations_to_text_round_trips_through_parse_allocations():
+    from dashboard.pages import ai_console
+
+    rows = [{"symbol": "QQQ", "weight_pct": 90.0, "note": "core"}, {"symbol": "TLT", "weight_pct": 10.0, "note": ""}]
+    text = ai_console._allocations_to_text(rows)
+    parsed = ai_console._normalize_allocations(ai_console._parse_allocations(text))
+
+    assert [r["symbol"] for r in parsed] == ["QQQ", "TLT"]
+    assert [r["weight_pct"] for r in parsed] == [90.0, 10.0]

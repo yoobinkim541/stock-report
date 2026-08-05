@@ -12,6 +12,7 @@ import streamlit as st
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 
+import ticker_names
 from agent_console import agent, context, storage
 from agent_console import portfolio_matrix_dsl
 from dashboard import cached, chat_feedback, chat_references, data, strategy_studio, wiki_browser
@@ -46,6 +47,8 @@ _RSI_PAIR_RE = re.compile(r"rsi\D{0,6}(\d{1,2})\s*/\s*(\d{1,2})", re.IGNORECASE)
 _RSI_BUY_RE = re.compile(r"매수\s*rsi\D{0,10}?(\d{1,2})", re.IGNORECASE)
 _RSI_SELL_RE = re.compile(r"현금화\s*rsi\D{0,10}?(\d{1,2})", re.IGNORECASE)
 _MAX_LOSS_RE = re.compile(r"(?:손실|손절)\D{0,10}?(\d+(?:\.\d+)?)\s*(?:%|퍼센트)")
+_ALLOC_REMOVE_RE = re.compile(r"([가-힣A-Za-z0-9.]{1,20})\s*(?:빼줘|빼 줘|삭제|제거)")
+_ALLOC_UPSERT_RE = re.compile(r"([가-힣A-Za-z0-9.]{1,20})\s*(\d+(?:\.\d+)?)\s*%")
 
 
 def render():
@@ -746,7 +749,62 @@ def _heuristic_canvas_patch(question: str, current: dict, answer_text: str) -> d
         if summary:
             patch["hypothesis"] = summary
 
+    alloc_patch = _heuristic_allocation_patch(q, current.get("allocations") or [])
+    if alloc_patch is not None:
+        patch["allocations"] = alloc_patch
+
     return patch
+
+
+def _heuristic_allocation_patch(question: str, allocations: list[dict]) -> list[dict] | None:
+    rows = [dict(row) for row in allocations]
+    changed = False
+
+    remove_match = _ALLOC_REMOVE_RE.search(question)
+    if remove_match:
+        ticker = ticker_names.resolve(remove_match.group(1).strip(), allow_net=False)
+        if ticker:
+            before = len(rows)
+            rows = [row for row in rows if str(row.get("symbol") or "").upper() != ticker.upper()]
+            changed = changed or len(rows) != before
+
+    upsert_match = _ALLOC_UPSERT_RE.search(question)
+    if upsert_match:
+        ticker = ticker_names.resolve(upsert_match.group(1).strip(), allow_net=False)
+        target_weight = float(upsert_match.group(2))
+        if ticker and 0 < target_weight < 100:
+            ticker = ticker.upper()
+            others = [row for row in rows if str(row.get("symbol") or "").upper() != ticker]
+            others_total = sum(float(row.get("weight_pct") or 0) for row in others)
+            remaining = 100.0 - target_weight
+            if others_total > 0:
+                for row in others:
+                    row["weight_pct"] = float(row["weight_pct"]) / others_total * remaining
+            rows = others + [{"symbol": ticker, "weight_pct": target_weight, "note": ""}]
+            changed = True
+
+    if not changed:
+        return None
+
+    total = sum(float(row.get("weight_pct") or 0) for row in rows)
+    if total <= 0:
+        return None
+    return [{**row, "weight_pct": round(float(row["weight_pct"]) / total * 100.0, 2)} for row in rows]
+
+
+def _allocations_to_text(rows: list[dict]) -> str:
+    lines = []
+    for row in rows:
+        symbol = str(row.get("symbol") or "").upper().strip()
+        weight = row.get("weight_pct")
+        if not symbol or weight is None:
+            continue
+        note = str(row.get("note") or "").strip()
+        line = f"{symbol} {float(weight):.2f}"
+        if note:
+            line += f" {note}"
+        lines.append(line)
+    return "\n".join(lines)
 
 
 def _default_canvas_allocations() -> str:
