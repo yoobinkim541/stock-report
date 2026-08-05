@@ -77,6 +77,30 @@ strategy_studio.render_strategy_lab("lab", pack, mode="research", catalog=catalo
     assert "미리보기" in body
 
 
+def test_strategy_lab_period_options_are_valid_yfinance_periods():
+    """기간 드롭다운 값이 yfinance Ticker.history(period=...) 가 받는 값이어야 함.
+
+    yfinance 는 'Nd' 형태(임의 일수, 예: 60d/30d)는 허용하지만 'Nm'(1m/3m/6m) 은
+    단위 오기재로 거부한다 ('1 month' 는 '1mo' 여야 함) — 조용히 빈 값을 반환해
+    price panel is empty 로 이어진다.
+    """
+    script = f"""
+import os, sys
+sys.path.insert(0, {ROOT!r})
+from dashboard import strategy_studio
+
+pack = {{"strategy_studio": {{"ok": True, "spec_count": 0, "version_count": 0, "latest": None}}}}
+catalog = {{"ok": True, "count": 0, "latest": None, "specs": [], "version_total": 0}}
+strategy_studio.render_strategy_lab("lab", pack, mode="research", catalog=catalog)
+"""
+    at = AppTest.from_string(script, default_timeout=30)
+    at.run()
+    assert not at.exception, str(at.exception)
+
+    period_select = at.selectbox(key="strategy_studio::research::lab::period")
+    assert list(period_select.options) == ["1mo", "3mo", "6mo", "1y", "2y", "5y", "60d", "30d"]
+
+
 def test_strategy_lab_preview_button_does_not_raise_session_state_error(monkeypatch):
     from dashboard import cached
 

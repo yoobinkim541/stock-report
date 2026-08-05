@@ -148,7 +148,7 @@ def _render_editor_panel(
     ).strip()
     period = st.selectbox(
         "기간",
-        options=["1m", "3m", "6m", "1y", "2y", "5y", "60d", "30d"],
+        options=["1mo", "3mo", "6mo", "1y", "2y", "5y", "60d", "30d"],
         index=3,
         key=_state_key(prefix, "period"),
     )
