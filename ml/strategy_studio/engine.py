@@ -399,7 +399,16 @@ def _normalize_price_store(prices: pd.DataFrame) -> pd.DataFrame:
         if not flat:
             return pd.DataFrame(index=frame.index)
         return pd.DataFrame(flat).sort_index().ffill().dropna(how="all")
-    frame.columns = [str(col).upper().strip() for col in frame.columns]
+    new_columns = []
+    for col in frame.columns:
+        name = str(col).strip()
+        if "__" in name:
+            symbol, field = name.split("__", 1)
+            name = f"{symbol.upper().strip()}__{field.lower().strip().replace(' ', '_')}"
+        else:
+            name = name.upper()
+        new_columns.append(name)
+    frame.columns = new_columns
     return frame.sort_index().ffill().dropna(how="all")
 
 

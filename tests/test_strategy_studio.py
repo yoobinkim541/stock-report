@@ -11,6 +11,7 @@ from ml.strategy_studio import (
     apply_strategy_patch,
     build_strategy_report,
     builtin_strategy_presets,
+    compile_strategy,
     diff_strategy_specs,
     run_strategy_backtest,
 )
@@ -25,6 +26,25 @@ def _prices() -> pd.DataFrame:
         101, 99, 97, 96, 95, 94, 93, 94, 96, 98,
     ]
     return pd.DataFrame({"QQQ": values}, index=idx)
+
+
+def test_compile_strategy_reads_multi_field_symbol_columns():
+    """실제 _load_prices() 산출 형식(SYMBOL__field, 소문자 field) 재현 — price panel is empty 회귀."""
+    idx = pd.date_range("2026-01-01", periods=10, freq="D")
+    prices = pd.DataFrame({
+        "QQQ__open": range(100, 110),
+        "QQQ__high": range(101, 111),
+        "QQQ__low": range(99, 109),
+        "QQQ__close": [100.0 + i for i in range(10)],
+        "QQQ__volume": [1000] * 10,
+    }, index=idx)
+    spec = {"name": "test", "base_symbol": "QQQ", "universe": {"type": "list", "symbols": ["QQQ"]}, "indicators": [], "rules": {}}
+
+    compiled = compile_strategy(spec, prices)
+
+    assert compiled.errors == []
+    assert not compiled.prices.empty
+    assert list(compiled.prices["QQQ"]) == [100.0 + i for i in range(10)]
 
 
 def test_builtin_rsi_cash_preset_runs_and_reports_trades():
