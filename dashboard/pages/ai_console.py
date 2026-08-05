@@ -697,6 +697,14 @@ def _lab_tab(surface: str, pack: dict):
         })
         st.toast(f"{scenario.get('name', '시나리오')} 저장 완료")
 
+    _render_canvas_chat({
+        "buy_rsi": int(buy_rsi),
+        "sell_rsi": int(sell_rsi),
+        "max_loss": float(max_loss),
+        "hypothesis": hypothesis,
+        "allocations": allocs,
+    })
+
     scenarios = storage.list_scenarios(limit=8)
     if scenarios:
         st.markdown("##### 저장된 시나리오")
@@ -805,6 +813,82 @@ def _allocations_to_text(rows: list[dict]) -> str:
             line += f" {note}"
         lines.append(line)
     return "\n".join(lines)
+
+
+def _diff_canvas(current: dict, patch: dict) -> list[dict]:
+    rows = []
+    for field, new_value in patch.items():
+        old_value = current.get(field)
+        if field == "allocations":
+            old_display = ", ".join(f"{r['symbol']} {r['weight_pct']:.1f}%" for r in (old_value or []))
+            new_display = ", ".join(f"{r['symbol']} {r['weight_pct']:.1f}%" for r in (new_value or []))
+        else:
+            old_display = old_value
+            new_display = new_value
+        rows.append({"필드": _CANVAS_FIELD_LABELS.get(field, field), "현재": old_display, "제안": new_display})
+    return rows
+
+
+def _apply_canvas_patch(patch: dict) -> None:
+    if "buy_rsi" in patch:
+        st.session_state["strategy_canvas_buy_rsi_pending"] = int(patch["buy_rsi"])
+    if "sell_rsi" in patch:
+        st.session_state["strategy_canvas_sell_rsi_pending"] = int(patch["sell_rsi"])
+    if "max_loss" in patch:
+        st.session_state["strategy_canvas_max_loss_pending"] = float(patch["max_loss"])
+    if "hypothesis" in patch:
+        st.session_state["strategy_canvas_hypothesis_pending"] = str(patch["hypothesis"])
+    if "allocations" in patch:
+        st.session_state["strategy_canvas_alloc_text_pending"] = _allocations_to_text(patch["allocations"])
+
+
+def _render_canvas_chat(current: dict) -> None:
+    st.markdown("##### AI 대화")
+    history = st.session_state.setdefault("strategy_canvas_chat_history", [])
+    if not history:
+        st.caption("RSI·손실한도·가설·비중 변경을 요청하면 에이전트가 설명과 함께 제안을 계산합니다.")
+
+    for msg in history[-8:]:
+        role = "assistant" if str(msg.get("role", "")).lower() == "assistant" else "user"
+        with st.chat_message(role):
+            st.markdown(msg.get("content") or "")
+            if msg.get("meta"):
+                st.caption(msg.get("meta"))
+
+    prompt = st.chat_input("예: RSI를 25/75로, 손실한도 5%로 바꿔줘", key="strategy_canvas_chat_input")
+    if prompt:
+        history.append({"role": "user", "content": prompt})
+        try:
+            reply = agent.answer(prompt, "lab", async_postprocess=True)
+            answer_text = reply.get("answer", "") if reply.get("ok") else reply.get("error", "응답 실패")
+            meta = f"엔진 {reply.get('context', {}).get('engine', 'unknown')}"
+        except Exception as exc:
+            answer_text = f"AI 응답 실패: {exc}"
+            meta = "error"
+
+        patch = _heuristic_canvas_patch(prompt, current, answer_text)
+        if patch:
+            st.session_state["strategy_canvas_patch"] = {
+                "current": current,
+                "patch": patch,
+                "diff": _diff_canvas(current, patch),
+            }
+            meta += f" · 제안 {len(patch)}개"
+        else:
+            st.session_state.pop("strategy_canvas_patch", None)
+
+        history.append({"role": "assistant", "content": answer_text, "meta": meta})
+        st.rerun()
+
+    pending_patch = st.session_state.get("strategy_canvas_patch")
+    if pending_patch and pending_patch.get("diff"):
+        st.markdown("##### 제안된 변경")
+        st.dataframe(pd.DataFrame(pending_patch["diff"]), hide_index=True, width="stretch")
+        if st.button("적용", key="strategy_canvas_apply_patch", type="primary", width="stretch"):
+            _apply_canvas_patch(pending_patch["patch"])
+            st.session_state.pop("strategy_canvas_patch", None)
+            st.toast("변경을 반영했습니다.")
+            st.rerun()
 
 
 def _default_canvas_allocations() -> str:

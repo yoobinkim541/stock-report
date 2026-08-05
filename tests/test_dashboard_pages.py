@@ -1816,7 +1816,9 @@ watchlist.render()
     assert "Bridgewater" not in body
 
 
-def test_watchlist_page_clicks_through_to_ticker_detail():
+def test_watchlist_page_clicks_through_to_ticker_detail(monkeypatch):
+    import streamlit as _st
+    monkeypatch.setattr(_st, "dataframe", _st.dataframe)  # 스크립트 내부 st.dataframe 오버라이드를 테스트 종료 시 복원
     script = _STUBS + '''
 import streamlit as st
 from types import SimpleNamespace
@@ -2035,3 +2037,56 @@ def test_allocations_to_text_round_trips_through_parse_allocations():
 
     assert [r["symbol"] for r in parsed] == ["QQQ", "TLT"]
     assert [r["weight_pct"] for r in parsed] == [90.0, 10.0]
+
+
+def test_ai_console_canvas_chat_propose_and_apply(monkeypatch):
+    from agent_console import agent
+    from dashboard.pages import ai_console
+
+    monkeypatch.setattr(
+        agent,
+        "answer",
+        lambda *a, **k: {"ok": True, "answer": "RSI를 조정하면 진입이 더 보수적으로 바뀝니다.", "context": {"engine": "test"}},
+    )
+
+    script = _script("from dashboard.pages import ai_console", "ai_console.render()")
+    at = AppTest.from_string(script, default_timeout=30)
+    at.run()
+    assert not at.exception, str(at.exception)
+
+    chat = at.chat_input(key="strategy_canvas_chat_input")
+    chat.set_value("RSI를 25/75로 바꿔줘").run()
+    assert not at.exception, str(at.exception)
+
+    diff_frames = [df.value for df in at.dataframe if "필드" in df.value.columns]
+    assert diff_frames, "제안된 변경 표가 렌더되지 않음"
+    assert "매수 RSI" in diff_frames[0]["필드"].tolist()
+
+    apply_button = next(b for b in at.button if b.key == "strategy_canvas_apply_patch")
+    apply_button.click().run()
+    assert not at.exception, str(at.exception)
+
+    rsi_input = at.number_input(key="strategy_canvas_buy_rsi")
+    assert int(rsi_input.value) == 25
+
+
+def test_ai_console_canvas_chat_no_match_shows_no_diff(monkeypatch):
+    from agent_console import agent
+    from dashboard.pages import ai_console
+
+    monkeypatch.setattr(
+        agent,
+        "answer",
+        lambda *a, **k: {"ok": True, "answer": "오늘은 특별한 이벤트가 없습니다.", "context": {"engine": "test"}},
+    )
+
+    script = _script("from dashboard.pages import ai_console", "ai_console.render()")
+    at = AppTest.from_string(script, default_timeout=30)
+    at.run()
+
+    chat = at.chat_input(key="strategy_canvas_chat_input")
+    chat.set_value("오늘 시장 어때?").run()
+    assert not at.exception, str(at.exception)
+
+    apply_buttons = [b for b in at.button if b.key == "strategy_canvas_apply_patch"]
+    assert not apply_buttons, "패치가 없는데 적용 버튼이 렌더됨"
