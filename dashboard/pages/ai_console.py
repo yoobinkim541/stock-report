@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import html
 import os
+import re
 import sys
 from datetime import datetime, timezone
 
@@ -32,6 +33,19 @@ _AGENT_PROGRESS_LABELS = (
     "LLM 분석 요청 중",
     "답변 정리 중",
 )
+
+_CANVAS_FIELD_LABELS = {
+    "buy_rsi": "매수 RSI",
+    "sell_rsi": "현금화 RSI",
+    "max_loss": "최대 손실한도 %",
+    "hypothesis": "전략 가설",
+    "allocations": "포트폴리오 비중",
+}
+
+_RSI_PAIR_RE = re.compile(r"rsi\D{0,6}(\d{1,2})\s*/\s*(\d{1,2})", re.IGNORECASE)
+_RSI_BUY_RE = re.compile(r"매수\s*rsi\D{0,10}?(\d{1,2})", re.IGNORECASE)
+_RSI_SELL_RE = re.compile(r"현금화\s*rsi\D{0,10}?(\d{1,2})", re.IGNORECASE)
+_MAX_LOSS_RE = re.compile(r"(?:손실|손절)\D{0,10}?(\d+(?:\.\d+)?)\s*(?:%|퍼센트)")
 
 
 def render():
@@ -696,6 +710,43 @@ def _consume_canvas_pending() -> None:
         pending_key = f"{key}_pending"
         if pending_key in st.session_state:
             st.session_state[key] = st.session_state.pop(pending_key)
+
+
+def _heuristic_canvas_patch(question: str, current: dict, answer_text: str) -> dict:
+    q = str(question or "")
+    patch: dict = {}
+
+    pair = _RSI_PAIR_RE.search(q)
+    if pair:
+        buy, sell = int(pair.group(1)), int(pair.group(2))
+        if 1 <= buy <= 99:
+            patch["buy_rsi"] = buy
+        if 1 <= sell <= 99:
+            patch["sell_rsi"] = sell
+    else:
+        buy_match = _RSI_BUY_RE.search(q)
+        if buy_match:
+            buy = int(buy_match.group(1))
+            if 1 <= buy <= 99:
+                patch["buy_rsi"] = buy
+        sell_match = _RSI_SELL_RE.search(q)
+        if sell_match:
+            sell = int(sell_match.group(1))
+            if 1 <= sell <= 99:
+                patch["sell_rsi"] = sell
+
+    loss_match = _MAX_LOSS_RE.search(q)
+    if loss_match:
+        loss = float(loss_match.group(1))
+        if 0 <= loss <= 100:
+            patch["max_loss"] = loss
+
+    if "가설" in q and any(word in q for word in ("바꿔", "바꾸", "적어", "써줘", "써 줘", "수정")):
+        summary = str(answer_text or "").strip().split("\n")[0][:80]
+        if summary:
+            patch["hypothesis"] = summary
+
+    return patch
 
 
 def _default_canvas_allocations() -> str:

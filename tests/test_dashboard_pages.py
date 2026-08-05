@@ -1949,3 +1949,45 @@ def test_watchlist_page_empty_shows_message():
     body = " ".join(str(getattr(el, "value", "")) for el in at.info) + \
         " ".join(str(getattr(el, "value", "")) for el in at.markdown)
     assert "관심종목" in body
+
+
+def _canvas_state(**overrides):
+    base = {"buy_rsi": 30, "sell_rsi": 70, "max_loss": 8.0, "hypothesis": "", "allocations": []}
+    base.update(overrides)
+    return base
+
+
+def test_heuristic_canvas_patch_rsi_pair():
+    from dashboard.pages import ai_console
+
+    patch = ai_console._heuristic_canvas_patch("RSI를 25/75로 바꿔줘", _canvas_state(), "")
+
+    assert patch == {"buy_rsi": 25, "sell_rsi": 75}
+
+
+def test_heuristic_canvas_patch_max_loss():
+    from dashboard.pages import ai_console
+
+    patch = ai_console._heuristic_canvas_patch("손실한도를 5%로 낮춰줘", _canvas_state(), "")
+
+    assert patch == {"max_loss": 5.0}
+
+
+def test_heuristic_canvas_patch_hypothesis():
+    from dashboard.pages import ai_console
+
+    patch = ai_console._heuristic_canvas_patch(
+        "가설을 지금 답변대로 바꿔줘",
+        _canvas_state(),
+        "변동성 급등 구간에서 유리하고 금리 급락 시 꺼야 한다.",
+    )
+
+    assert patch == {"hypothesis": "변동성 급등 구간에서 유리하고 금리 급락 시 꺼야 한다."}
+
+
+def test_heuristic_canvas_patch_no_match_returns_empty():
+    from dashboard.pages import ai_console
+
+    patch = ai_console._heuristic_canvas_patch("오늘 시장 어때?", _canvas_state(), "")
+
+    assert patch == {}
