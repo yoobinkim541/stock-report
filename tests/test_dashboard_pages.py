@@ -2028,6 +2028,30 @@ def test_heuristic_canvas_patch_allocation_unresolvable_name_is_skipped():
     assert "allocations" not in patch
 
 
+def test_heuristic_canvas_patch_allocation_update_preserves_note():
+    from dashboard.pages import ai_console
+
+    current = _canvas_state(allocations=[
+        {"symbol": "QQQ", "weight_pct": 60.0, "note": "핵심 성장"},
+        {"symbol": "TLT", "weight_pct": 40.0, "note": "hedge"},
+    ])
+    patch = ai_console._heuristic_canvas_patch("QQQ 30%로 줄여줘", current, "")
+
+    assert patch["allocations"] == [
+        {"symbol": "TLT", "weight_pct": 70.0, "note": "hedge"},
+        {"symbol": "QQQ", "weight_pct": 30.0, "note": "핵심 성장"},
+    ]
+
+
+def test_heuristic_canvas_patch_allocation_generic_noun_is_skipped():
+    from dashboard.pages import ai_console
+
+    current = _canvas_state(allocations=[{"symbol": "QQQ", "weight_pct": 100.0, "note": "core"}])
+    patch = ai_console._heuristic_canvas_patch("현금 비중 20%로 늘려줘", current, "")
+
+    assert "allocations" not in patch
+
+
 def test_allocations_to_text_round_trips_through_parse_allocations():
     from dashboard.pages import ai_console
 

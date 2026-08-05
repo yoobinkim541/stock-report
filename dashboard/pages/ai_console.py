@@ -49,6 +49,8 @@ _RSI_SELL_RE = re.compile(r"현금화\s*rsi\D{0,10}?(\d{1,2})", re.IGNORECASE)
 _MAX_LOSS_RE = re.compile(r"(?:손실|손절)\D{0,10}?(\d+(?:\.\d+)?)\s*(?:%|퍼센트)")
 _ALLOC_REMOVE_RE = re.compile(r"([가-힣A-Za-z0-9.]{1,20})\s*(?:빼줘|빼 줘|삭제|제거)")
 _ALLOC_UPSERT_RE = re.compile(r"([가-힣A-Za-z0-9.]{1,20})\s*(\d+(?:\.\d+)?)\s*%")
+_ALLOC_STOPWORDS = frozenset({"비중", "포트폴리오", "주식", "채권", "현금", "손실", "한도", "가설", "수익률", "목표", "전체"})
+_ALLOC_PARTICLE_RE = re.compile(r"(를|을|은|는|이|가|의|도|로)$")
 
 
 def render():
@@ -723,7 +725,7 @@ def _consume_canvas_pending() -> None:
             st.session_state[key] = st.session_state.pop(pending_key)
 
 
-def _heuristic_canvas_patch(question: str, current: dict, answer_text: str) -> dict:
+def _heuristic_canvas_patch(question: str, current: dict, answer_text: str, *, llm_ok: bool = True) -> dict:
     q = str(question or "")
     patch: dict = {}
 
@@ -752,7 +754,7 @@ def _heuristic_canvas_patch(question: str, current: dict, answer_text: str) -> d
         if 0 <= loss <= 100:
             patch["max_loss"] = loss
 
-    if "가설" in q and any(word in q for word in ("바꿔", "바꾸", "적어", "써줘", "써 줘", "수정")):
+    if llm_ok and "가설" in q and any(word in q for word in ("바꿔", "바꾸", "적어", "써줘", "써 줘", "수정")):
         summary = str(answer_text or "").strip().split("\n")[0][:80]
         if summary:
             patch["hypothesis"] = summary
@@ -764,13 +766,20 @@ def _heuristic_canvas_patch(question: str, current: dict, answer_text: str) -> d
     return patch
 
 
+def _resolve_alloc_ticker(token: str) -> str | None:
+    token = _ALLOC_PARTICLE_RE.sub("", str(token or "").strip())
+    if not token or token in _ALLOC_STOPWORDS:
+        return None
+    return ticker_names.resolve(token, allow_net=False)
+
+
 def _heuristic_allocation_patch(question: str, allocations: list[dict]) -> list[dict] | None:
     rows = [dict(row) for row in allocations]
     changed = False
 
     remove_match = _ALLOC_REMOVE_RE.search(question)
     if remove_match:
-        ticker = ticker_names.resolve(remove_match.group(1).strip(), allow_net=False)
+        ticker = _resolve_alloc_ticker(remove_match.group(1))
         if ticker:
             before = len(rows)
             rows = [row for row in rows if str(row.get("symbol") or "").upper() != ticker.upper()]
@@ -778,17 +787,22 @@ def _heuristic_allocation_patch(question: str, allocations: list[dict]) -> list[
 
     upsert_match = _ALLOC_UPSERT_RE.search(question)
     if upsert_match:
-        ticker = ticker_names.resolve(upsert_match.group(1).strip(), allow_net=False)
+        ticker = _resolve_alloc_ticker(upsert_match.group(1))
         target_weight = float(upsert_match.group(2))
         if ticker and 0 < target_weight < 100:
             ticker = ticker.upper()
+            target_row = next((row for row in rows if str(row.get("symbol") or "").upper() == ticker), None)
             others = [row for row in rows if str(row.get("symbol") or "").upper() != ticker]
             others_total = sum(float(row.get("weight_pct") or 0) for row in others)
             remaining = 100.0 - target_weight
             if others_total > 0:
                 for row in others:
                     row["weight_pct"] = float(row["weight_pct"]) / others_total * remaining
-            rows = others + [{"symbol": ticker, "weight_pct": target_weight, "note": ""}]
+            if target_row is not None:
+                target_row["weight_pct"] = target_weight
+            else:
+                target_row = {"symbol": ticker, "weight_pct": target_weight, "note": ""}
+            rows = others + [target_row]
             changed = True
 
     if not changed:
@@ -862,11 +876,16 @@ def _render_canvas_chat(current: dict) -> None:
             reply = agent.answer(prompt, "lab", async_postprocess=True)
             answer_text = reply.get("answer", "") if reply.get("ok") else reply.get("error", "응답 실패")
             meta = f"엔진 {reply.get('context', {}).get('engine', 'unknown')}"
+            llm_ok = bool(reply.get("ok"))
         except Exception as exc:
             answer_text = f"AI 응답 실패: {exc}"
             meta = "error"
+            llm_ok = False
 
-        patch = _heuristic_canvas_patch(prompt, current, answer_text)
+        try:
+            patch = _heuristic_canvas_patch(prompt, current, answer_text, llm_ok=llm_ok)
+        except Exception:
+            patch = {}
         if patch:
             st.session_state["strategy_canvas_patch"] = {
                 "current": current,
