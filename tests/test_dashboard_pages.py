@@ -291,6 +291,20 @@ def test_ai_console_strategy_canvas_allocation_normalize():
     assert [r["symbol"] for r in rows] == ["QQQ", "CASH"]
 
 
+def test_ai_console_canvas_buy_rsi_persists_across_rerun():
+    script = _script("from dashboard.pages import ai_console", "ai_console.render()")
+    at = AppTest.from_string(script, default_timeout=30)
+    at.run()
+    assert not at.exception, str(at.exception)
+
+    rsi_input = at.number_input(key="strategy_canvas_buy_rsi")
+    rsi_input.set_value(45).run()
+    assert not at.exception, str(at.exception)
+
+    rsi_input = at.number_input(key="strategy_canvas_buy_rsi")
+    assert int(rsi_input.value) == 45
+
+
 def test_ai_console_quick_prompt_list_stays_small():
     from dashboard.pages import ai_console
 

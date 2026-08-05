@@ -629,6 +629,7 @@ def _wiki_pipeline_health_panel():
 
 
 def _lab_tab(surface: str, pack: dict):
+    _consume_canvas_pending()
     strategy_studio.render_strategy_lab("ai_console", pack, mode="lab")
     st.divider()
     st.markdown("##### 기존 전략 캔버스")
@@ -642,10 +643,27 @@ def _lab_tab(surface: str, pack: dict):
         st.info("한 줄에 `티커 비중 메모` 형식으로 입력해 주세요. 예: QQQ 45 핵심 성장")
 
     c1, c2, c3 = st.columns(3)
-    buy_rsi = c1.number_input("매수 RSI", min_value=1, max_value=99, value=30, step=1)
-    sell_rsi = c2.number_input("현금화 RSI", min_value=1, max_value=99, value=70, step=1)
-    max_loss = c3.number_input("최대 손실한도 %", min_value=0.0, max_value=100.0, value=8.0, step=0.5)
-    hypothesis = st.text_area("전략 가설", height=90, placeholder="어떤 시장에서 이 전략이 유리하고, 어떤 조건에서 꺼야 하는지 적어주세요.")
+    buy_rsi = c1.number_input(
+        "매수 RSI", min_value=1, max_value=99,
+        value=int(st.session_state.get("strategy_canvas_buy_rsi", 30)),
+        step=1, key="strategy_canvas_buy_rsi",
+    )
+    sell_rsi = c2.number_input(
+        "현금화 RSI", min_value=1, max_value=99,
+        value=int(st.session_state.get("strategy_canvas_sell_rsi", 70)),
+        step=1, key="strategy_canvas_sell_rsi",
+    )
+    max_loss = c3.number_input(
+        "최대 손실한도 %", min_value=0.0, max_value=100.0,
+        value=float(st.session_state.get("strategy_canvas_max_loss", 8.0)),
+        step=0.5, key="strategy_canvas_max_loss",
+    )
+    hypothesis = st.text_area(
+        "전략 가설", height=90,
+        value=st.session_state.get("strategy_canvas_hypothesis", ""),
+        placeholder="어떤 시장에서 이 전략이 유리하고, 어떤 조건에서 꺼야 하는지 적어주세요.",
+        key="strategy_canvas_hypothesis",
+    )
     if st.button("시나리오 저장", type="primary", width="stretch", disabled=not bool(allocs)):
         scenario = storage.save_scenario({
             "name": "AI 콘솔 전략 캔버스",
@@ -670,6 +688,14 @@ def _lab_tab(surface: str, pack: dict):
                 f"<div class='scenario-row'><b>{_esc(scenario.get('name', '시나리오'))}</b><span>{_esc(scenario.get('updated_at', ''))}</span></div>",
                 unsafe_allow_html=True,
             )
+
+
+def _consume_canvas_pending() -> None:
+    for field in ("buy_rsi", "sell_rsi", "max_loss", "hypothesis", "alloc_text"):
+        key = f"strategy_canvas_{field}"
+        pending_key = f"{key}_pending"
+        if pending_key in st.session_state:
+            st.session_state[key] = st.session_state.pop(pending_key)
 
 
 def _default_canvas_allocations() -> str:
