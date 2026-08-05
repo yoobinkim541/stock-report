@@ -77,6 +77,57 @@ strategy_studio.render_strategy_lab("lab", pack, mode="research", catalog=catalo
     assert "미리보기" in body
 
 
+def test_strategy_lab_preview_button_does_not_raise_session_state_error(monkeypatch):
+    from dashboard import cached
+
+    monkeypatch.setattr(
+        cached,
+        "strategy_studio_preview",
+        lambda *a, **k: {
+            "ok": True,
+            "report": {"summary": {"name": "EMA trend", "trade_count": 1}},
+            "metrics": {"trade_count": 1},
+            "trade_count": 1,
+        },
+    )
+
+    script = f"""
+import os, sys
+sys.path.insert(0, {ROOT!r})
+from dashboard import strategy_studio
+
+pack = {{"strategy_studio": {{"ok": True, "spec_count": 1, "version_count": 1, "latest": {{"name": "EMA trend"}}}}}}
+catalog = {{
+    "ok": True,
+    "count": 1,
+    "latest": {{"id": "spec-1", "name": "EMA trend", "version": 1}},
+    "specs": [{{"id": "spec-1", "name": "EMA trend", "version": 1, "spec": {{"name": "EMA trend"}}}}],
+    "version_total": 1,
+}}
+selected_spec = {{
+    "id": "spec-1",
+    "name": "EMA trend",
+    "version": 1,
+    "spec": {{
+        "name": "EMA trend",
+        "market": "us",
+        "timeframe": "1d",
+        "base_symbol": "QQQ",
+        "indicators": [{{"kind": "ema", "period": 20}}],
+    }},
+}}
+strategy_studio.render_strategy_lab("ai_console", pack, mode="lab", catalog=catalog, selected_spec=selected_spec)
+"""
+    at = AppTest.from_string(script, default_timeout=30)
+    at.run()
+    assert not at.exception, str(at.exception)
+
+    preview_button = next(b for b in at.button if "run_preview" in b.key)
+    preview_button.click().run()
+
+    assert not at.exception, str(at.exception)
+
+
 def test_strategy_studio_dashboard_wrappers_forward_data(monkeypatch):
     from dashboard import cached, views
 

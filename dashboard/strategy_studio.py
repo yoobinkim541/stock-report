@@ -123,6 +123,9 @@ def _render_editor_panel(
     mode: str,
 ) -> None:
     st.markdown("##### 전략 편집")
+    pending_key = _state_key(prefix, "draft_text_pending")
+    if pending_key in st.session_state:
+        st.session_state[_state_key(prefix, "draft_text")] = st.session_state.pop(pending_key)
     draft_text = st.session_state.get(_state_key(prefix, "draft_text"))
     if not draft_text:
         draft_text = _spec_to_text(_current_spec_payload(selected_record))
@@ -449,7 +452,7 @@ def _set_draft_record(prefix: str, record: dict[str, Any] | None) -> None:
     record = _normalize_record(record)
     spec = _current_spec_payload(record)
     st.session_state[_state_key(prefix, "selected_id")] = str(record.get("id") or spec.get("id") or "").strip()
-    st.session_state[_state_key(prefix, "draft_text")] = _spec_to_text(spec)
+    st.session_state[_state_key(prefix, "draft_text_pending")] = _spec_to_text(spec)
     st.session_state[_state_key(prefix, "draft_record")] = record
 
 
