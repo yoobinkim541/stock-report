@@ -7,6 +7,8 @@ kiwoom_sync/sync.log
 *.key
 *.pem
 secrets/
+stock_bot_debug_notes.md
+
 
 # ── 개인 금융 데이터 (버전 관리 제외) ────
 portfolio_snapshot.json
