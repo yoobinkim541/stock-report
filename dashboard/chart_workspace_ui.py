@@ -99,18 +99,32 @@ def _load_panel_hist(panel: dict[str, Any]):
     return cached.ohlc_tf(ticker, tf)
 
 
-def _render_panel_chart(ws: dict[str, Any], panel: dict[str, Any], *, height: int = 420) -> None:
+def _render_panel_chart(
+    ws: dict[str, Any],
+    panel: dict[str, Any],
+    *,
+    height: int = 420,
+    replay_until=None,
+) -> None:
     hist = _load_panel_hist(panel)
     if hist is None or getattr(hist, "empty", True):
         st.info(f"{panel['ticker']} 가격 데이터 없음")
         return
     view_days = _PERIOD_DAYS.get(panel.get("period") or "6mo")
     hist = charts.view_window(hist, view_days)
+    if replay_until is not None:
+        hist = hist[hist.index <= replay_until]
+    if hist is None or getattr(hist, "empty", True):
+        st.info(f"{panel['ticker']} replay 구간에 데이터가 없습니다.")
+        return
     compare = {}
     for ticker in panel.get("compare") or []:
         cmp_hist = cached.ohlc(ticker, "max") if panel["timeframe"] == "1d" else cached.ohlc_tf(ticker, panel["timeframe"])
         if cmp_hist is not None and not getattr(cmp_hist, "empty", True) and "Close" in cmp_hist.columns:
-            compare[ticker] = charts.view_window(cmp_hist["Close"], view_days)
+            series = charts.view_window(cmp_hist["Close"], view_days)
+            if replay_until is not None:
+                series = series[series.index <= replay_until]
+            compare[ticker] = series
     kind = "line" if panel.get("chart_kind") == "line" else "candle"
     if panel.get("chart_kind") == "heikin_ashi":
         hist = charts.heikin_ashi(hist)
@@ -121,7 +135,7 @@ def _render_panel_chart(ws: dict[str, Any], panel: dict[str, Any], *, height: in
         alert_runs = views.chart_alert_runs(str(ws.get("id") or "").strip(), limit=5) if ws.get("id") else []
     except Exception:
         alert_runs = []
-    alert_markers = _alert_event_markers_for_panel(alert_runs, panel)
+    alert_markers = _alert_event_markers_for_panel(alert_runs, panel, cutoff=replay_until)
     fig = charts.price_chart(
         hist,
         panel["ticker"],
@@ -229,8 +243,36 @@ def render_chart_workspace(
                 st.rerun()
     st.caption("동기화 설정은 워크스페이스에 저장됩니다. 크로스헤어 동기화는 브라우저 런타임 검증 전까지 설정값만 보관합니다.")
     ws = _render_workspace_library_bar(ws)
+    ws = _render_template_library_bar(ws)
 
-    active = ws.get("active_panel") or "p1"
+    active_panel = _active_panel(ws)
+    active = active_panel["id"] if active_panel else (ws.get("active_panel") or "p1")
+    replay_cutoff = None
+    if render_charts and active_panel:
+        st.markdown("##### Replay")
+        r1, r2, r3 = st.columns([0.9, 1.6, 0.8], vertical_alignment="bottom")
+        replay_on = r1.toggle("Replay", value=bool(st.session_state.get("_cw_replay_on", False)), key="_cw_replay_on")
+        if replay_on:
+            try:
+                active_hist = _load_panel_hist(active_panel)
+            except Exception:
+                active_hist = None
+            active_hist = charts.view_window(active_hist, _PERIOD_DAYS.get(active_panel.get("period") or "6mo")) if active_hist is not None else None
+            if active_hist is not None and not getattr(active_hist, "empty", True):
+                max_idx = max(0, len(active_hist) - 1)
+                current_idx = min(int(st.session_state.get("_cw_replay_idx", max_idx)), max_idx)
+                replay_idx = r2.slider("봉 위치", min_value=0, max_value=max_idx, value=current_idx, key="_cw_replay_idx")
+                replay_cutoff = active_hist.index[int(replay_idx)]
+                replay_text = replay_cutoff.strftime("%Y-%m-%d %H:%M") if hasattr(replay_cutoff, "strftime") else str(replay_cutoff)
+                r3.caption(replay_text)
+                if r3.button("실시간", key="_cw_replay_live", width="stretch"):
+                    st.session_state["_cw_replay_idx"] = max_idx
+                    st.rerun()
+            else:
+                r2.caption("리플레이용 데이터 없음")
+        else:
+            st.session_state.pop("_cw_replay_idx", None)
+
     panels = ws["panels"][: _panel_count(ws["layout"])]
     cols = _layout_columns(ws["layout"])
     for idx, panel in enumerate(panels):
@@ -244,13 +286,119 @@ def render_chart_workspace(
                 st.session_state["_cw_workspace"] = ws
                 st.rerun()
             if render_charts:
-                _render_panel_chart(ws, panel, height=390 if len(panels) > 1 else 760)
+                _render_panel_chart(ws, panel, height=390 if len(panels) > 1 else 760, replay_until=replay_cutoff)
 
     _render_alert_manager(ws, panels)
-    _render_analysis_rail(ws, render_charts=render_charts)
+    _render_analysis_rail(ws, render_charts=render_charts, replay_until=replay_cutoff)
 
     st.session_state["_cw_workspace"] = chart_workspace.normalize_workspace(ws)
     return st.session_state["_cw_workspace"]
+
+
+def _render_template_library_bar(ws: dict[str, Any]) -> dict[str, Any]:
+    active = _active_panel(ws)
+    if not active:
+        return ws
+
+    st.markdown("##### 템플릿 라이브러리")
+    st.caption(
+        f"현재 패널 {active['id']} · {active['ticker']} · {_TF_LABEL.get(active['timeframe'], active['timeframe'])} · "
+        f"{_KIND_LABEL.get(active['chart_kind'], active['chart_kind'])}"
+    )
+
+    save_kind, save_name, save_btn = st.columns([0.9, 1.4, 0.7], vertical_alignment="bottom")
+    template_kind_options = ["style", "indicators", "series"]
+    save_kind_choice = save_kind.selectbox(
+        "저장 종류",
+        template_kind_options,
+        format_func=chart_workspace.template_kind_label,
+        key=f"_cw_tpl_save_kind_{ws.get('id', 'default')}",
+    )
+    default_name = f"{active['ticker']} {chart_workspace.template_kind_label(save_kind_choice)}"
+    template_name = save_name.text_input(
+        "이름",
+        value=st.session_state.get(f"_cw_tpl_name_{save_kind_choice}", default_name),
+        key=f"_cw_tpl_name_{save_kind_choice}_{ws.get('id', 'default')}",
+        placeholder="예: Trend Clean / Volume Focus / NVDA 5m",
+    )
+    if save_btn.button("현재 저장", key=f"_cw_tpl_save_{save_kind_choice}_{ws.get('id', 'default')}", width="stretch"):
+        try:
+            record = chart_workspace.chart_template_payload(
+                ws,
+                kind=save_kind_choice,
+                name=template_name,
+                panel_id=active.get("id"),
+            )
+            saved = views.chart_template_save(record)
+            _refresh_template_caches()
+            st.session_state[f"_cw_tpl_name_{save_kind_choice}"] = template_name
+            st.toast(f"{chart_workspace.template_kind_label(save_kind_choice)} 템플릿을 저장했습니다.")
+            if saved:
+                st.session_state["_cw_last_template"] = saved.get("id")
+        except Exception as exc:
+            st.error(f"템플릿 저장 실패: {exc}")
+
+    apply_kind, apply_target, apply_btn = st.columns([0.9, 1.3, 0.8], vertical_alignment="bottom")
+    apply_kind_choice = apply_kind.selectbox(
+        "불러오기 종류",
+        template_kind_options,
+        format_func=chart_workspace.template_kind_label,
+        key=f"_cw_tpl_apply_kind_{ws.get('id', 'default')}",
+    )
+    templates = cached.chart_templates(kind=apply_kind_choice)
+    if templates:
+        picked_idx = apply_target.selectbox(
+            "템플릿",
+            options=list(range(len(templates))),
+            key=f"_cw_tpl_pick_{apply_kind_choice}_{ws.get('id', 'default')}",
+            format_func=lambda i: _template_label(templates[int(i)]),
+        )
+        apply_target.caption(
+            "불러오기 가능: "
+            + " · ".join(str(row.get("name") or row.get("id") or "템플릿") for row in templates[:3])
+            + (f" 외 {len(templates) - 3}개" if len(templates) > 3 else "")
+        )
+        apply_to_all = False
+        if apply_kind_choice != "series":
+            apply_to_all = st.checkbox(
+                "전체 패널에 적용",
+                value=True if apply_kind_choice == "indicators" else False,
+                key=f"_cw_tpl_apply_all_{apply_kind_choice}_{ws.get('id', 'default')}",
+                help="스타일/인디케이터 템플릿은 레이아웃 전체에 반영할 수 있습니다.",
+            )
+        else:
+            st.caption("시리즈 템플릿은 활성 패널에만 적용됩니다.")
+        if apply_btn.button("적용", key=f"_cw_tpl_apply_{apply_kind_choice}_{ws.get('id', 'default')}", width="stretch"):
+            try:
+                chosen = templates[int(picked_idx)]
+                ws = chart_workspace.apply_chart_template(
+                    ws,
+                    chosen.get("template") or chosen,
+                    panel_id=active.get("id"),
+                    apply_to_all=bool(apply_to_all),
+                )
+                st.session_state["_cw_workspace"] = ws
+                st.toast(f"{_template_label(chosen)} 적용 완료")
+                st.rerun()
+            except Exception as exc:
+                st.error(f"템플릿 적용 실패: {exc}")
+    else:
+        apply_target.caption("저장된 템플릿이 없습니다.")
+
+    if templates:
+        with st.expander("템플릿 미리보기", expanded=False):
+            rows = []
+            for row in templates[:8]:
+                tpl = row.get("template") or {}
+                payload = tpl.get("payload") if isinstance(tpl, dict) else {}
+                rows.append({
+                    "이름": row.get("name"),
+                    "ID": row.get("id"),
+                    "요약": _template_summary(row.get("kind"), payload),
+                    "수정": row.get("updated_at", "")[:10],
+                })
+            st.dataframe(pd.DataFrame(rows), hide_index=True, width="stretch", height=min(260, 44 + 32 * len(rows)))
+    return ws
 
 
 def _render_alert_manager(ws: dict[str, Any], panels: list[dict[str, Any]]) -> None:
@@ -570,7 +718,12 @@ def _render_workspace_library_bar(ws: dict[str, Any]) -> dict[str, Any]:
     return chart_workspace.normalize_workspace(ws)
 
 
-def _render_analysis_rail(ws: dict[str, Any], *, render_charts: bool) -> None:
+def _render_analysis_rail(
+    ws: dict[str, Any],
+    *,
+    render_charts: bool,
+    replay_until=None,
+) -> None:
     st.divider()
     st.markdown("##### 분석 레일")
     panel = _active_panel(ws)
@@ -592,17 +745,30 @@ def _render_analysis_rail(ws: dict[str, Any], *, render_charts: bool) -> None:
     if hist is None or getattr(hist, "empty", True):
         st.info(f"{panel['ticker']} 분석 데이터 없음")
         return
+    if replay_until is not None:
+        hist = hist[hist.index <= replay_until]
+        if hist is None or getattr(hist, "empty", True):
+            st.info(f"{panel['ticker']} replay 구간에 분석 데이터가 없습니다.")
+            return
 
     benchmark = _benchmark_ticker(panel)
     try:
         bench_hist = cached.ohlc(benchmark, period="max") if benchmark else None
     except Exception:
         bench_hist = None
+    if replay_until is not None and bench_hist is not None and not getattr(bench_hist, "empty", True):
+        bench_hist = bench_hist[bench_hist.index <= replay_until]
 
     rs = chart_analysis.relative_strength_summary(hist, bench_hist) if bench_hist is not None else {"ok": False}
     patterns = chart_analysis.pattern_candidates(hist)
     seasonality = chart_analysis.seasonality_summary(hist)
-    mtfa = chart_analysis.multi_timeframe_summary(_analysis_ohlc_loader, panel["ticker"])
+    def _replay_loader(ticker: str, tf: str):
+        df = _analysis_ohlc_loader(ticker, tf)
+        if replay_until is not None and df is not None and not getattr(df, "empty", True):
+            df = df[df.index <= replay_until]
+        return df
+
+    mtfa = chart_analysis.multi_timeframe_summary(_replay_loader, panel["ticker"])
 
     m1, m2, m3, m4 = st.columns(4)
     m1.metric("상대강도", _quadrant_label(rs.get("quadrant")) if rs.get("ok") else "데이터 부족")
@@ -814,3 +980,46 @@ def _workspace_index(rows: list[dict[str, Any]], workspace_id: str) -> int:
 
 def _workspace_label(row: dict[str, Any]) -> str:
     return f"{row.get('name') or 'Workspace'} · {row.get('layout') or '1'} · v{row.get('version') or 0}"
+
+
+def _template_label(row: dict[str, Any]) -> str:
+    kind = str(row.get("kind") or "").strip().lower()
+    tpl = row.get("template") if isinstance(row.get("template"), dict) else {}
+    payload = tpl.get("payload") if isinstance(tpl, dict) else {}
+    source = tpl.get("source") if isinstance(tpl, dict) else {}
+    source_ticker = str((source or {}).get("ticker") or "").strip().upper()
+    summary = _template_summary(kind, payload)
+    ticker_part = f" · {source_ticker}" if source_ticker else ""
+    return f"{chart_workspace.template_kind_label(kind)} · {row.get('name') or row.get('id')}{ticker_part} · {summary}"
+
+
+def _template_summary(kind: str, payload: dict[str, Any] | None) -> str:
+    payload = payload or {}
+    kind = str(kind or "").strip().lower()
+    if kind == "style":
+        return (
+            f"{_TF_LABEL.get(payload.get('timeframe'), payload.get('timeframe', ''))}"
+            f" · {_KIND_LABEL.get(payload.get('chart_kind'), payload.get('chart_kind', ''))}"
+            f" · {'로그' if payload.get('log_scale') else '선형'}"
+        ).strip(" ·")
+    if kind == "indicators":
+        top = len(payload.get("top_indicators") or [])
+        bottom = len(payload.get("bottom_indicators") or [])
+        return f"상단 {top} · 하단 {bottom}"
+    if kind == "series":
+        ticker = str(payload.get("ticker") or "").upper()
+        compare = len(payload.get("compare") or [])
+        return f"{ticker or '—'} · 비교 {compare}"
+    return "—"
+
+
+def _refresh_template_caches() -> None:
+    for cache in (
+        getattr(cached, "chart_templates", None),
+    ):
+        try:
+            clear = getattr(cache, "clear", None)
+            if callable(clear):
+                clear()
+        except Exception:
+            pass

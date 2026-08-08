@@ -18,6 +18,7 @@ LAYOUTS = {"1": 1, "2v": 2, "2h": 2, "2x2": 4, "3+1": 4, "2x3": 6}
 TIMEFRAMES = {"5m", "1h", "2h", "4h", "1d", "1wk", "1mo"}
 PERIODS = {"3mo", "6mo", "1y", "5y", "전체"}
 CHART_KINDS = {"line", "candle", "heikin_ashi"}
+TEMPLATE_KINDS = {"style", "indicators", "series"}
 DRAWING_SYNC = {"off", "layout_symbol", "global_symbol"}
 TOP_INDICATORS = {
     "이동평균선",
@@ -51,6 +52,7 @@ BOTTOM_INDICATORS = {
 }
 
 _PATCH_PATH_RE = re.compile(r"^panels\[(\d+)\]\.([A-Za-z_][A-Za-z0-9_]*)$")
+_TEMPLATE_SAFE_RE = re.compile(r"[^a-z0-9가-힣._-]+")
 
 
 def _now() -> str:
@@ -205,6 +207,129 @@ def workspace_id(workspace: dict) -> str:
         json.dumps(ws, sort_keys=True, ensure_ascii=False).encode("utf-8")
     ).hexdigest()[:8]
     return f"{raw[:48]}-{digest}"
+
+
+def chart_template_id(kind: str, name: str) -> str:
+    kind = str(kind or "").strip().lower()
+    name = str(name or "").strip().lower()
+    raw = _TEMPLATE_SAFE_RE.sub("-", name).strip("-") or "template"
+    prefix = kind if kind in TEMPLATE_KINDS else "template"
+    return f"{prefix}-{raw[:40]}"
+
+
+def template_kind_label(kind: str) -> str:
+    return {
+        "style": "스타일",
+        "indicators": "인디케이터",
+        "series": "시리즈",
+    }.get(str(kind or "").strip().lower(), str(kind or "템플릿"))
+
+
+def _panel_index(workspace: dict[str, Any], panel_id: str | None = None) -> int:
+    panels = list((workspace or {}).get("panels") or [])
+    if panel_id:
+        for idx, panel in enumerate(panels):
+            if str(panel.get("id") or "") == str(panel_id):
+                return idx
+    active = str((workspace or {}).get("active_panel") or "").strip()
+    for idx, panel in enumerate(panels):
+        if str(panel.get("id") or "") == active:
+            return idx
+    return 0
+
+
+def chart_template_payload(
+    workspace: dict | None,
+    *,
+    kind: str,
+    name: str,
+    panel_id: str | None = None,
+) -> dict[str, Any]:
+    ws = normalize_workspace(workspace)
+    panels = ws.get("panels") or []
+    if not panels:
+        raise ValueError("workspace has no panels")
+    idx = _panel_index(ws, panel_id)
+    panel = dict(panels[idx])
+    kind = str(kind or "").strip().lower()
+    if kind not in TEMPLATE_KINDS:
+        raise ValueError(f"unsupported chart template kind: {kind}")
+    if kind == "style":
+        payload = {
+            "chart_kind": panel.get("chart_kind"),
+            "timeframe": panel.get("timeframe"),
+            "period": panel.get("period"),
+            "log_scale": bool(panel.get("log_scale")),
+        }
+    elif kind == "indicators":
+        payload = {
+            "top_indicators": list(panel.get("top_indicators") or []),
+            "bottom_indicators": list(panel.get("bottom_indicators") or []),
+        }
+    else:
+        payload = {
+            "ticker": panel.get("ticker"),
+            "compare": list(panel.get("compare") or []),
+        }
+    return {
+        "id": chart_template_id(kind, name),
+        "kind": kind,
+        "name": str(name or "").strip() or template_kind_label(kind),
+        "payload": payload,
+        "source": {
+            "workspace_id": ws.get("id"),
+            "panel_id": panel.get("id"),
+            "ticker": panel.get("ticker"),
+            "timeframe": panel.get("timeframe"),
+            "period": panel.get("period"),
+            "chart_kind": panel.get("chart_kind"),
+        },
+    }
+
+
+def apply_chart_template(
+    workspace: dict,
+    template: dict,
+    *,
+    panel_id: str | None = None,
+    apply_to_all: bool = False,
+) -> dict[str, Any]:
+    out = normalize_workspace(workspace)
+    record = dict(template or {})
+    kind = str(record.get("kind") or "").strip().lower()
+    if kind not in TEMPLATE_KINDS:
+        raise ValueError(f"unsupported chart template kind: {kind}")
+    payload = record.get("payload") if isinstance(record.get("payload"), dict) else {}
+    target_ids: list[int]
+    if kind == "series":
+        target_ids = [_panel_index(out, panel_id)]
+    elif apply_to_all:
+        target_ids = list(range(len(out["panels"])))
+    else:
+        target_ids = [_panel_index(out, panel_id)]
+
+    for idx in target_ids:
+        panel = out["panels"][idx]
+        if kind == "style":
+            if payload.get("chart_kind") in CHART_KINDS:
+                panel["chart_kind"] = payload["chart_kind"]
+            if payload.get("timeframe") in TIMEFRAMES:
+                panel["timeframe"] = payload["timeframe"]
+            if payload.get("period") in PERIODS:
+                panel["period"] = payload["period"]
+            panel["log_scale"] = bool(payload.get("log_scale"))
+            panel["style_template_id"] = str(record.get("id") or panel.get("style_template_id") or "")
+        elif kind == "indicators":
+            panel["top_indicators"] = [x for x in (payload.get("top_indicators") or []) if x in TOP_INDICATORS]
+            panel["bottom_indicators"] = [x for x in (payload.get("bottom_indicators") or []) if x in BOTTOM_INDICATORS]
+            panel["indicator_template_id"] = str(record.get("id") or panel.get("indicator_template_id") or "")
+        else:
+            ticker = payload.get("ticker")
+            if ticker:
+                panel["ticker"] = _norm_ticker(ticker, panel.get("ticker") or "MSFT")
+            panel["compare"] = [_norm_ticker(x) for x in (payload.get("compare") or [])][:3]
+            panel["series_template_id"] = str(record.get("id") or panel.get("series_template_id") or "")
+    return normalize_workspace(out)
 
 
 def _validate_patch_value(field: str, value: Any) -> None:

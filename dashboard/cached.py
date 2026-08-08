@@ -444,3 +444,8 @@ def chart_workspace_detail(workspace_id=None, version=None):
 @st.cache_data(ttl=30, show_spinner=False)
 def chart_workspace_versions(workspace_id):
     return views.chart_workspace_versions(workspace_id)
+
+
+@st.cache_data(ttl=30, show_spinner=False)
+def chart_templates(kind=None, limit=50):
+    return views.chart_templates(kind=kind, limit=limit)

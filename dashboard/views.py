@@ -1930,6 +1930,19 @@ def chart_workspace_save(workspace: dict) -> dict:
     return storage.save_chart_workspace(workspace)
 
 
+def chart_templates(kind: str | None = None, limit: int = 50) -> list[dict]:
+    """차트 템플릿 목록."""
+    try:
+        return storage.list_chart_templates(kind=kind, limit=limit)
+    except Exception:
+        return []
+
+
+def chart_template_save(template: dict) -> dict:
+    """차트 템플릿 저장."""
+    return storage.save_chart_template(template)
+
+
 def chart_alert_rules(workspace_id: str, limit: int = 50) -> list[dict]:
     """차트 알림 룰 목록."""
     try:

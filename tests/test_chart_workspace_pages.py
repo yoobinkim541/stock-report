@@ -140,6 +140,55 @@ def test_workspace_crosshair_store_key_respects_sync_toggle():
     assert chart_workspace_ui._crosshair_store_key(ws) is None
 
 
+def test_chart_workspace_renderer_surfaces_template_library():
+    script = f"""
+import os, sys
+sys.path.insert(0, {ROOT!r})
+from dashboard import chart_workspace_ui
+
+workspace = {{
+    "id": "w1",
+    "name": "Template Workspace",
+    "layout": "1",
+    "active_panel": "p1",
+    "sync": {{"symbol": False, "interval": True, "range": True, "crosshair": True, "drawings": "layout_symbol"}},
+    "panels": [
+        {{"id": "p1", "ticker": "MSFT", "timeframe": "1d", "period": "6mo", "chart_kind": "candle", "top_indicators": ["이동평균선"], "bottom_indicators": ["거래량"], "compare": [], "log_scale": False}},
+    ],
+}}
+orig_templates = chart_workspace_ui.cached.chart_templates
+try:
+    chart_workspace_ui.cached.chart_templates = lambda kind=None, limit=50: [
+        {{
+            "id": "style-clean",
+            "kind": "style",
+            "name": "Clean Style",
+            "template": {{
+                "id": "style-clean",
+                "kind": "style",
+                "name": "Clean Style",
+                "payload": {{"chart_kind": "candle", "timeframe": "1d", "period": "6mo", "log_scale": False}},
+                "source": {{"ticker": "MSFT"}},
+            }},
+            "payload": {{"chart_kind": "candle", "timeframe": "1d", "period": "6mo", "log_scale": False}},
+            "created_at": "2026-08-01T00:00:00+00:00",
+            "updated_at": "2026-08-01T00:00:00+00:00",
+        }}
+    ] if kind == "style" else []
+    chart_workspace_ui.render_chart_workspace(workspace, render_charts=False)
+finally:
+    chart_workspace_ui.cached.chart_templates = orig_templates
+"""
+    at = AppTest.from_string(script, default_timeout=30)
+    at.run()
+    assert not at.exception, str(at.exception)
+    body = " ".join(str(m.value) for m in at.markdown)
+    body += " ".join(str(c.value) for c in at.caption)
+    assert "템플릿 라이브러리" in body
+    assert "현재 패널" in body
+    assert "Clean Style" in body
+
+
 def test_alert_event_markers_follow_panel_symbol():
     from dashboard import chart_workspace_ui
 

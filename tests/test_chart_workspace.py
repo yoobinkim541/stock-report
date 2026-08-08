@@ -88,6 +88,78 @@ def test_chart_template_storage_filters_kind(tmp_path, monkeypatch):
     ]
 
 
+def test_chart_template_payload_and_apply_across_scopes():
+    ws = cw.normalize_workspace({
+        "id": "w1",
+        "layout": "2v",
+        "active_panel": "p1",
+        "panels": [
+            {
+                "id": "p1",
+                "ticker": "NVDA",
+                "timeframe": "1h",
+                "period": "1y",
+                "chart_kind": "candle",
+                "top_indicators": ["이동평균선", "볼린저 밴드"],
+                "bottom_indicators": ["거래량", "RSI"],
+                "compare": ["AMD"],
+                "log_scale": True,
+            },
+            {
+                "id": "p2",
+                "ticker": "MSFT",
+                "timeframe": "1d",
+                "period": "6mo",
+                "chart_kind": "line",
+                "top_indicators": ["이동평균선"],
+                "bottom_indicators": ["MACD"],
+                "compare": [],
+                "log_scale": False,
+            },
+        ],
+    }, ticker="NVDA")
+
+    style_tpl = cw.chart_template_payload(ws, kind="style", name="Clean Style")
+    assert style_tpl["id"] == "style-clean-style"
+    assert style_tpl["payload"] == {
+        "chart_kind": "candle",
+        "timeframe": "1h",
+        "period": "1y",
+        "log_scale": True,
+    }
+
+    ind_tpl = cw.chart_template_payload(ws, kind="indicators", name="Momentum Pack")
+    assert ind_tpl["payload"] == {
+        "top_indicators": ["이동평균선", "볼린저 밴드"],
+        "bottom_indicators": ["거래량", "RSI"],
+    }
+
+    series_tpl = cw.chart_template_payload(ws, kind="series", name="NVDA Focus")
+    assert series_tpl["payload"] == {"ticker": "NVDA", "compare": ["AMD"]}
+
+    applied = cw.apply_chart_template(cw.default_workspace("AAPL"), style_tpl)
+    assert applied["panels"][0]["chart_kind"] == "candle"
+    assert applied["panels"][0]["timeframe"] == "1h"
+    assert applied["panels"][0]["period"] == "1y"
+    assert applied["panels"][0]["log_scale"] is True
+    assert applied["panels"][0]["style_template_id"] == "style-clean-style"
+
+    applied = cw.apply_chart_template(cw.default_workspace("AAPL"), ind_tpl)
+    assert applied["panels"][0]["top_indicators"] == ["이동평균선", "볼린저 밴드"]
+    assert applied["panels"][0]["bottom_indicators"] == ["거래량", "RSI"]
+    assert applied["panels"][0]["indicator_template_id"] == "indicators-momentum-pack"
+
+    applied = cw.apply_chart_template(cw.default_workspace("AAPL"), series_tpl)
+    assert applied["panels"][0]["ticker"] == "NVDA"
+    assert applied["panels"][0]["compare"] == ["AMD"]
+    assert applied["panels"][0]["series_template_id"] == "series-nvda-focus"
+
+    applied_all = cw.apply_chart_template(ws, style_tpl, apply_to_all=True)
+    assert applied_all["panels"][0]["timeframe"] == "1h"
+    assert applied_all["panels"][1]["timeframe"] == "1h"
+    assert applied_all["panels"][1]["chart_kind"] == "candle"
+
+
 def test_dashboard_workspace_wrappers_forward_storage(monkeypatch):
     from dashboard import cached, views
 

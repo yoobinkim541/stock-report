@@ -205,6 +205,7 @@ _TEMPLATE = r"""
   const fitVH = @@FIT_VH@@;                      // 풀뷰 — 부모 창 높이에 맞춰 리사이즈
   const pctMode = @@PCT_MODE@@;                  // 비교(%) 모드 — 가격 포맷 대신 %
   const yLog = @@Y_LOG@@;                        // 로그 스케일 — 도형 y 좌표는 log10 공간
+  const categoryX = @@CATEGORY_X@@;              // 캔들 category 축 — index↔timestamp 변환 필요
   const crosshairKey = @@CROSSHAIR_KEY@@;        // 멀티 iframe 크로스헤어 동기화 키
   const chartNonce = Math.random().toString(36).slice(2);
   if (@@DOCK@@) {
@@ -271,6 +272,33 @@ _TEMPLATE = r"""
 
   const toY = (v) => (yLog ? Math.log10(v) : v);        // 데이터값 → 축좌표
   const fromY = (v) => (yLog ? Math.pow(10, v) : v);    // 축좌표 → 데이터값
+
+  function isIndexLike(v) {                      // category 축의 숫자 range 인지 판별
+    return typeof v === "number" || (typeof v === "string" && /^-?\d+(?:\.\d+)?$/.test(v.trim()));
+  }
+
+  function rangeValueToMs(v) {                   // x축 range 값 → 실제 시각(ms)
+    if (v == null) return null;
+    if (categoryX && isIndexLike(v) && bounds.length) {
+      const n = Number(v);
+      if (Number.isFinite(n)) {
+        const i = Math.max(0, Math.min(bounds.length - 1, Math.round(n)));
+        return bounds[i][0];
+      }
+    }
+    const parsed = Date.parse(v);
+    if (Number.isFinite(parsed)) return parsed;
+    const n = Number(v);
+    return Number.isFinite(n) ? n : null;
+  }
+
+  function curXRangeMs() {                       // 현재 x축 range → [ms, ms]
+    const xr = gd.layout && gd.layout.xaxis && gd.layout.xaxis.range;
+    if (!xr || xr.length < 2) return null;
+    const x0 = rangeValueToMs(xr[0]);
+    const x1 = rangeValueToMs(xr[1]);
+    return (x0 == null || x1 == null) ? null : [x0, x1];
+  }
 
   let replayCut = null;                          // ⏪ 리플레이 컷(ms) — 이후 봉은 커튼+클램프
 
@@ -340,7 +368,8 @@ _TEMPLATE = r"""
     let r0 = e["xaxis.range[0]"], r1 = e["xaxis.range[1]"];
     if (e["xaxis.range"]) { r0 = e["xaxis.range"][0]; r1 = e["xaxis.range"][1]; }
     if (r0 == null || r1 == null) return null;
-    return [Date.parse(r0) || +r0, Date.parse(r1) || +r1];
+    const x0 = rangeValueToMs(r0), x1 = rangeValueToMs(r1);
+    return (x0 == null || x1 == null) ? null : [x0, x1];
   }
 
   const lastClose = @@LAST_CLOSE@@;
@@ -379,11 +408,12 @@ _TEMPLATE = r"""
   }
 
   function finishGesture() {                     // 제스처 끝 1회 — 콜아웃·hover 복원
-    const xr = gd.layout.xaxis.range;
+    const rawXr = gd.layout.xaxis.range;
+    const xr = curXRangeMs();
     if (!xr) return;
-    const x0 = Date.parse(xr[0]), x1 = Date.parse(xr[1]);
+    const x0 = xr[0], x1 = xr[1];
     setTarget(x0, x1);                           // y 는 lerp 루프가 수렴
-    saveView(xr);                                // 뷰 위치 유지(60s 규칙) — 원문 저장
+    saveView(rawXr);                             // 뷰 위치 유지(60s 규칙) — 원문 저장
     const upd = {};
     callouts(x0, x1, upd);                       // 무거운 주석 갱신은 여기서만
     if (hoverOff) { upd["hovermode"] = hoverMode; hoverOff = false; }
@@ -437,7 +467,7 @@ _TEMPLATE = r"""
   }
   function publishCrosshair(e, pr) {
     if (!crosshairKey) return;
-    const xr = curXRange();
+    const xr = curXRangeMs();
     if (!xr || !pr || !pr.width) return;
     const frac = Math.max(0, Math.min(1, (e.clientX - pr.left) / pr.width));
     const ms = xr[0] + (xr[1] - xr[0]) * frac;
@@ -451,7 +481,7 @@ _TEMPLATE = r"""
     if (!crosshairKey || !payload || payload.src === chartNonce) return;
     if (!payload.ms || Date.now() - (payload.ts || 0) > 5000) { xhHide(); return; }
     const rect = plotRect();
-    const xr = curXRange();
+    const xr = curXRangeMs();
     if (!rect || !xr || !rect.width) return;
     const frac = (Number(payload.ms) - xr[0]) / Math.max(1, xr[1] - xr[0]);
     if (frac < 0 || frac > 1) { xhHide(); return; }
@@ -503,14 +533,9 @@ _TEMPLATE = r"""
     const drag = gd.querySelector(".nsewdrag");
     return drag ? drag.getBoundingClientRect() : null;
   }
-  function curXRange() {
-    const xr = gd.layout && gd.layout.xaxis && gd.layout.xaxis.range;
-    if (!xr) return null;
-    return [Date.parse(xr[0]) || +xr[0], Date.parse(xr[1]) || +xr[1]];
-  }
   gd.addEventListener("touchstart", (e) => {
     if (!e.touches || e.touches.length !== 2) { pinch = null; return; }
-    const xr = curXRange(), rect = plotRect();
+    const xr = curXRangeMs(), rect = plotRect();
     if (!xr || !rect || !rect.width) return;
     const t0 = e.touches[0], t1 = e.touches[1];
     pinch = {dist: Math.hypot(t0.clientX - t1.clientX, t0.clientY - t1.clientY) || 1,
@@ -1495,9 +1520,9 @@ _TEMPLATE = r"""
                  fillcolor: "rgba(128,135,150,0.16)", opacity: 1, line: {width: 0}, layer: "above"});
     drawGuard++;
     Plotly.relayout(gd, {shapes: shapes}).then(() => { undraw(); });
-    const xr = gd.layout.xaxis.range;
+    const xr = curXRangeMs();
     if (xr) {
-      const w = Math.max(864e5, Date.parse(xr[1]) - Date.parse(xr[0]));
+      const w = Math.max(864e5, xr[1] - xr[0]);
       const x1 = replayCut + w * 0.10, x0 = x1 - w;
       guard++;
       Plotly.relayout(gd, {"xaxis.range": [toISO(x0), toISO(x1)]}).then(() => { unguard(); });
@@ -1621,10 +1646,9 @@ _TEMPLATE = r"""
       guard++;                                     // 카운터 규약 (boolean 대입 금지)
       Plotly.relayout(gd, upd).then(() => { unguard(); });
     }
-    const xr = gd.layout.xaxis && gd.layout.xaxis.range;
+    const xr = curXRangeMs();
     if (xr) {                                      // 마지막 봉이 보이면 y 부드럽게 재맞춤
-      const x1 = Date.parse(xr[1]) || +xr[1];
-      if (x1 >= b[0]) setTarget(Date.parse(xr[0]) || +xr[0], x1);
+      if (xr[1] >= b[0]) setTarget(xr[0], xr[1]);
     }
     ohlcReadout(b[0]);
   }
@@ -1741,6 +1765,7 @@ def pannable_chart_html(fig, hist, *, height: int = 460, view_days=None,
                         fit_viewport: bool = False,
                         pct_mode: bool = False,
                         y_log: bool = False,
+                        category_x: bool | None = None,
                         store_key: str | None = None,
                         drawing_sync_url: str | None = None,
                         crosshair_key: str | None = None,
@@ -1766,6 +1791,11 @@ def pannable_chart_html(fig, hist, *, height: int = 460, view_days=None,
     light — 부모 라이트 테마 동조: 도구바·크로스헤어·리드아웃을 라이트 색으로
             (#wrap.tn-light CSS 변수). 차트 배경은 투명이라 페이지 색을 그대로 따름.
     """
+    if category_x is None:
+        try:
+            category_x = getattr(getattr(fig.layout, "xaxis", None), "type", None) == "category"
+        except Exception:
+            category_x = False
     bounds = bounds_json if bounds_json is not None else price_bounds_json(hist)
     config = json.dumps({
         "scrollZoom": True, "displaylogo": False,   # 모드바 = hover 시만 (기본) — 상시 노출 제거
@@ -1784,6 +1814,7 @@ def pannable_chart_html(fig, hist, *, height: int = 460, view_days=None,
             .replace("@@FIT_VH@@", json.dumps(bool(fit_viewport)))
             .replace("@@PCT_MODE@@", json.dumps(bool(pct_mode)))
             .replace("@@Y_LOG@@", json.dumps(bool(y_log)))
+            .replace("@@CATEGORY_X@@", json.dumps(bool(category_x)))
             .replace("@@LIVE@@", json.dumps(bool(live)))
             .replace("@@LAST_CLOSE@@", json.dumps(last_close))
             .replace("@@STORE_KEY@@", json.dumps(store_key))

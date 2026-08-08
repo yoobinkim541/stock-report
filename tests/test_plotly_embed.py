@@ -28,6 +28,8 @@ def test_embed_html_contract():
     for token in ("plotly_relayout", "function yFit", "plotly_click", "drawline",
                   "cdn.plot.ly/plotly-", "candlestick", "eraseshape"):
         assert token in html, f"누락: {token}"
+    assert "const categoryX = true" in html
+    assert "function rangeValueToMs" in html and "function curXRangeMs" in html
     assert "${c[1]}" in html          # f-string 중괄호 이스케이프 무결(JS 템플릿 리터럴 보존)
 
 
@@ -80,6 +82,16 @@ def test_embed_log_and_pct_flags():
     # 비교(%) 모드 플래그
     pct = plotly_embed.pannable_chart_html(fig, hist, pct_mode=True)
     assert "const pctMode = true" in pct
+
+
+def test_embed_category_axis_mapping_contract():
+    hist = _hist()
+    fig = charts.price_chart(hist, "T", kind="candle")
+    html = plotly_embed.pannable_chart_html(fig, hist)
+    assert "const categoryX = true" in html
+    assert "function rangeValueToMs" in html
+    line_html = plotly_embed.pannable_chart_html(charts.price_chart(hist, "T"), hist)
+    assert "const categoryX = false" in line_html
 
 
 def test_embed_persistence_and_readout_contract():
@@ -152,7 +164,7 @@ def test_embed_view_position_contract():
         assert token in html, f"누락: {token}"
     # saveView 는 제스처 마무리(finishGesture)에서 **range 원문**으로 호출 —
     # Date 파싱-재직렬화 왕복은 KST 에서 −9h 밀림 (적대 리뷰 확정 버그의 회귀 방어)
-    assert html.index("function finishGesture") < html.index("saveView(xr)")
+    assert html.index("function finishGesture") < html.index("saveView(rawXr)")
     assert "new Date(freshView[0])" not in html          # 복원도 원문 그대로
 
 
