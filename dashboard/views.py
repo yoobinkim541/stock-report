@@ -1670,6 +1670,56 @@ def ohlc_tf(ticker: str, tf: str = "1d"):
         return None
 
 
+def chart_data_bundle(ticker: str, timeframe: str, session_policy: str = "regular") -> dict:
+    """Load requested bars with explicit session and provenance metadata.
+
+    This intentionally rejects a mismatched frame instead of substituting daily
+    bars for an unavailable intraday request.
+    """
+    from dashboard import chart_data_policy
+
+    requested = str(timeframe or "1d").lower().strip() or "1d"
+    market = "kr" if str(ticker or "").upper().endswith((".KS", ".KQ")) else "us"
+    timezone = "Asia/Seoul" if market == "kr" else "America/New_York"
+    hist = ohlc_tf(ticker, requested)
+    if hist is None or getattr(hist, "empty", True) or not _ohlc_tf_matches(hist, requested):
+        session = chart_data_policy.apply_session_policy(
+            None, market=market, timeframe=requested, policy=session_policy, timezone=timezone,
+        ).metadata
+        if hist is not None:
+            session = {**session, "decision": "timeframe_mismatch"}
+        source = chart_data_policy.chart_data_status(
+            None, requested_timeframe=requested, actual_timeframe=requested, source="ohlc_tf",
+        )
+        source.update({"market": market, "timezone": timezone})
+        return {
+            "frame": None,
+            "requested_timeframe": requested,
+            "actual_timeframe": requested,
+            "session": session,
+            "source": source,
+        }
+
+    prepared = hist.copy(deep=True)
+    prepared.attrs.update(getattr(hist, "attrs", {}) or {})
+    prepared.attrs.update({"market": market, "timezone": timezone})
+    session_result = chart_data_policy.apply_session_policy(
+        prepared, market=market, timeframe=requested, policy=session_policy, timezone=timezone,
+    )
+    frame = session_result.frame
+    frame.attrs.update(prepared.attrs)
+    source = chart_data_policy.chart_data_status(
+        frame, requested_timeframe=requested, actual_timeframe=requested, source="ohlc_tf",
+    )
+    return {
+        "frame": frame,
+        "requested_timeframe": requested,
+        "actual_timeframe": requested,
+        "session": session_result.metadata,
+        "source": source,
+    }
+
+
 # ── 코스피200·러셀2000 시장 맵 (sp500_heatmap 패턴 — 스냅샷 우선·라이브 self-heal) ──
 
 _KR200_SNAP = os.path.expanduser("~/reports/ml-cache/kr200_heatmap.json")

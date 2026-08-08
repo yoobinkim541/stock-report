@@ -291,6 +291,12 @@ def ohlc_tf(t, tf):
     return views.ohlc_tf(t, tf)
 
 
+@st.cache_data(ttl=_TTL, show_spinner="차트 데이터 불러오는 중…")
+def chart_data_bundle(t, timeframe, session_policy="regular"):
+    """Cached metadata bundle; legacy ohlc/ohlc_tf callers still receive DataFrames."""
+    return views.chart_data_bundle(t, timeframe, session_policy=session_policy)
+
+
 @st.cache_data(ttl=300, show_spinner="코스피200 맵 불러오는 중…")
 def kr200_heatmap():
     return views.kr200_heatmap()
