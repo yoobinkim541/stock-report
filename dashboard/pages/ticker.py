@@ -767,6 +767,7 @@ def _price_chart(ticker, hist, avg_cost, trades, fullscreen: bool = False,
                                    help="HA = 하이킨아시(평활 캔들·표시용 — 실체결가와 다름)")
     # 기간 = 초기 표시 창 — 데이터는 뷰의 5배 팬버퍼로 윈도잉(charts.view_window·"전체"=전량)
     tf = _TF[tf_label]
+    render_tf = tf
     period_key = f"_chart_period_{tf}"
     period_default = _PERIOD_DEFAULT_BY_TF.get(tf, "6mo")
     period = cper.radio("기간", _PERIODS, index=_PERIODS.index(period_default), horizontal=True,
@@ -795,7 +796,7 @@ def _price_chart(ticker, hist, avg_cost, trades, fullscreen: bool = False,
         emas = []
         if "지수이평(EMA)" in top:
             emas = st.multiselect("EMA 기간", _MA_OPTS, default=[20, 60], key=f"_ema_{tf}")
-        if "VWAP(세션)" in top and tf not in ("5m", "1h"):
+        if "VWAP(세션)" in top and render_tf not in ("5m", "1h"):
             st.caption("ℹ️ VWAP(세션)은 인트라데이(5분·1시간) 전용 — 일봉+ 는 앵커드 VWAP 사용")
         if "앵커드 VWAP" in top:
             st.caption("ℹ️ 앵커드 VWAP 앵커 = 기간(라디오) 시작 · 팬 시 고정")
@@ -834,7 +835,8 @@ def _price_chart(ticker, hist, avg_cost, trades, fullscreen: bool = False,
         df = cached.ohlc_tf(ticker, tf)
         if df is None or getattr(df, "empty", True):
             st.caption(f"⚠️ {tf_label}봉 데이터 없음 — 일봉으로 표시")
-            df, tf = hist, "1d"
+            df = hist
+            render_tf = "1d"
         elif tf in _TF_SPAN:
             st.caption(f"ℹ️ {tf_label}봉은 {_TF_SPAN[tf]}까지 제공 (yfinance 보존 한계) · 주/월/일봉은 전체 이력")
     label = ticker_names.label(ticker)
@@ -849,11 +851,11 @@ def _price_chart(ticker, hist, avg_cost, trades, fullscreen: bool = False,
     tls = []
     if want_lines or want_short or want_long:
         ch_key = tuple(k for k, w in (("short", want_short), ("long", want_long)) if w)
-        tls = cached.trendlines_for(ticker, tf, want_lines, ch_key)
+        tls = cached.trendlines_for(ticker, render_tf, want_lines, ch_key)
     show_vol = "거래량" in bottom and "Volume" in getattr(df, "columns", [])
     # 비교 종목 데이터 — 메인과 동일 봉 단위 파이프라인 (결측은 정직 스킵).
     # PR 토글(일봉·비교 모드): 시리즈를 raw Close(분배 제외)로 치환 — 실패 시 TR 유지.
-    _use_pr = pr_mode and tf == "1d"
+    _use_pr = pr_mode and render_tf == "1d"
     compare = {}
     for _ct in cmp_tickers:
         series = None
@@ -861,7 +863,7 @@ def _price_chart(ticker, hist, avg_cost, trades, fullscreen: bool = False,
             _d = cached.tr_pr(_ct)
             series = _d["pr"] if _d else None
         if series is None:
-            _cdf = cached.ohlc(_ct, "max") if tf == "1d" else cached.ohlc_tf(_ct, tf)
+            _cdf = cached.ohlc(_ct, "max") if render_tf == "1d" else cached.ohlc_tf(_ct, render_tf)
             if _cdf is not None and not getattr(_cdf, "empty", True) and "Close" in _cdf.columns:
                 series = _cdf["Close"]
         if series is not None:
@@ -950,7 +952,7 @@ def _price_chart(ticker, hist, avg_cost, trades, fullscreen: bool = False,
         supertrend="슈퍼트렌드" in top, envelope="엔벨로프" in top,
         fractals="프랙탈" in top, vol_profile="매물대" in top,
         emas=emas, psar="파라볼릭 SAR" in top, donchian_on="프라이스 채널" in top,
-        vwap=("VWAP(세션)" in top and tf in ("5m", "1h")), avwap="앵커드 VWAP" in top,
+        vwap=("VWAP(세션)" in top and render_tf in ("5m", "1h")), avwap="앵커드 VWAP" in top,
         compare=compare, show_macd=show_macd, show_stoch=show_stoch, log_scale=use_log,
         keltner="켈트너 채널" in top, kama="KAMA" in top,
         chandelier="샹들리에 엑시트" in top,
@@ -978,7 +980,7 @@ def _price_chart(ticker, hist, avg_cost, trades, fullscreen: bool = False,
                if compare else None)                   # 비교 모드 — % 프레임으로 y 맞춤
         # 드로잉 영속화 키 — 좌표계가 다른 조합(스케일·HA)은 분리 버킷
         _scale = "pct" if compare else ("log" if use_log else "lin")
-        _sk = f"{ticker}:{tf}:{_scale}" + (":ha" if use_ha else "")
+        _sk = f"{ticker}:{render_tf}:{_scale}" + (":ha" if use_ha else "")
         st.components.v1.html(
             plotly_embed.pannable_chart_html(
                 fig, df, height=h, view_days=view_days,

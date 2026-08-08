@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import os
 import re
+from datetime import timedelta
 from typing import Any
 
 from agent_console import storage
@@ -1489,6 +1490,47 @@ def _ohlc_cache_candidates(tf: str, *, include_base: bool = False) -> tuple[str,
     return (tf,)
 
 
+_TF_MEDIAN_DELTA_BOUNDS = {
+    "1d": (timedelta(hours=18), timedelta(days=4)),
+    "1wk": (timedelta(days=4), timedelta(days=10)),
+    "1mo": (timedelta(days=24), timedelta(days=40)),
+    "5m": (timedelta(minutes=2), timedelta(minutes=15)),
+    "1h": (timedelta(minutes=30), timedelta(hours=3)),
+    "2h": (timedelta(minutes=75), timedelta(hours=5)),
+    "4h": (timedelta(hours=2), timedelta(hours=9)),
+}
+
+
+def _ohlc_median_delta(hist):
+    import pandas as pd
+
+    try:
+        idx = pd.DatetimeIndex(hist.index).dropna().sort_values()
+    except Exception:
+        return None
+    if len(idx) < 2:
+        return None
+    try:
+        return idx.to_series().diff().median()
+    except Exception:
+        return None
+
+
+def _ohlc_tf_matches(hist, tf: str) -> bool:
+    tf = str(tf or "1d").lower().strip() or "1d"
+    bounds = _TF_MEDIAN_DELTA_BOUNDS.get(tf)
+    if bounds is None:
+        return True
+    med = _ohlc_median_delta(hist)
+    if med is None:
+        # 짧은 구간(예: 1개월 미만)에서 주·월봉은 봉 1개만 남을 수 있다.
+        # 이 경우까지 거절하면 정상 리샘플을 잘못 버리게 되므로, 장기 주기만
+        # 최소 1개 이상이면 허용하고 인트라데이는 최소 간격 확인을 유지한다.
+        return tf in {"1d", "1wk", "1mo"} and len(getattr(hist, "index", [])) > 0
+    lo, hi = bounds
+    return lo <= med <= hi
+
+
 def _load_cached_ohlc_tf(ticker: str, tf: str, *, include_base: bool = False):
     """디스크 OHLC 캐시를 먼저 읽는다."""
     try:
@@ -1500,7 +1542,7 @@ def _load_cached_ohlc_tf(ticker: str, tf: str, *, include_base: bool = False):
             hist = normalize_ohlc_frame(market_data.load_cached_ohlc(ticker, period))
         except Exception:
             hist = None
-        if hist is not None and not getattr(hist, "empty", True):
+        if hist is not None and not getattr(hist, "empty", True) and _ohlc_tf_matches(hist, tf):
             return hist
     return None
 
@@ -1577,17 +1619,18 @@ def ohlc_tf(ticker: str, tf: str = "1d"):
         from providers.market_data import _history_cached
         if tf == "1d":
             cached = _load_cached_ohlc_tf(ticker, tf, include_base=True)
-            if cached is not None:
+            if cached is not None and _ohlc_tf_matches(cached, tf):
                 return cached
             d = normalize_ohlc_frame(_history_cached(ticker, period="max"))
-            if d is not None and not getattr(d, "empty", True):
+            if d is not None and not getattr(d, "empty", True) and _ohlc_tf_matches(d, tf):
                 _save_cached_ohlc_tf(ticker, "max", d)
                 _save_cached_ohlc_tf(ticker, "1d", d)
-            return d
+                return d
+            return None
 
         if tf in ("1wk", "1mo"):
             cached = _load_cached_ohlc_tf(ticker, tf)
-            if cached is not None:
+            if cached is not None and _ohlc_tf_matches(cached, tf):
                 return cached
             base = _load_cached_ohlc_tf(ticker, "1d", include_base=True)
             if base is None or getattr(base, "empty", True):
@@ -1596,15 +1639,17 @@ def ohlc_tf(ticker: str, tf: str = "1d"):
                 return None
             rule = "W-FRI" if tf == "1wk" else "ME"
             resampled = _resample_ohlc_frame(base, rule)
-            if resampled is not None and not getattr(resampled, "empty", True):
+            if (resampled is not None and not getattr(resampled, "empty", True)
+                    and _ohlc_tf_matches(resampled, tf)):
                 _save_cached_ohlc_tf(ticker, tf, resampled)
-            return resampled if resampled is not None and not getattr(resampled, "empty", True) else None
+                return resampled
+            return None
 
         cached = _load_cached_ohlc_tf(ticker, tf)
-        if cached is not None:
+        if cached is not None and _ohlc_tf_matches(cached, tf):
             return cached
         hist = _load_intraday_store_tf(ticker, tf)
-        if hist is not None and not getattr(hist, "empty", True):
+        if hist is not None and not getattr(hist, "empty", True) and _ohlc_tf_matches(hist, tf):
             _save_cached_ohlc_tf(ticker, tf, hist)
             return hist
 
@@ -1617,7 +1662,7 @@ def ohlc_tf(ticker: str, tf: str = "1d"):
             return None
         if resample_rule:
             df = _resample_ohlc_frame(df, resample_rule)
-        if df is not None and not getattr(df, "empty", True):
+        if df is not None and not getattr(df, "empty", True) and _ohlc_tf_matches(df, tf):
             _save_cached_ohlc_tf(ticker, tf, df)
             return df
         return None

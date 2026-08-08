@@ -1276,6 +1276,42 @@ def test_ohlc_tf_prefers_cached_daily_for_weekly_monthly(monkeypatch, tmp_path):
     assert any(p == "1mo" for p, _ in save_calls)
 
 
+def test_ohlc_tf_discards_mismatched_cached_timeframes(monkeypatch):
+    """봉 주기가 맞지 않는 디스크 캐시는 무시하고 다시 만들어야 한다."""
+    import pandas as pd
+    from dashboard import views
+    import providers.market_data as md
+
+    daily_idx = pd.date_range("2026-01-05", periods=10, freq="B")
+    daily = pd.DataFrame({"Open": range(10, 20), "High": range(20, 30),
+                          "Low": range(1, 11), "Close": range(15, 25),
+                          "Volume": [100.0] * 10}, index=daily_idx)
+    intraday_idx = pd.date_range("2026-02-02 09:30", periods=24, freq="5min")
+    intraday = pd.DataFrame({"Open": range(24), "High": range(24), "Low": range(24),
+                             "Close": range(24), "Volume": [1.0] * 24}, index=intraday_idx)
+
+    def fake_load(symbol, period="1y"):
+        if period in {"1d", "max"}:
+            return daily
+        if period == "1wk":
+            return daily
+        if period == "5m":
+            return daily
+        return None
+
+    monkeypatch.setattr(md, "load_cached_ohlc", fake_load)
+    monkeypatch.setattr(md, "_history_cached",
+                        lambda *a, **k: (_ for _ in ()).throw(AssertionError("network fallback called")))
+    monkeypatch.setattr(views, "_load_intraday_store_tf",
+                        lambda ticker, tf: intraday if tf == "5m" else None)
+
+    wk = views.ohlc_tf("TST", "1wk")
+    intraday_out = views.ohlc_tf("TST", "5m")
+
+    assert len(wk) == 2                    # 주봉은 일봉을 다시 읽어 리샘플
+    assert len(intraday_out) == len(intraday)  # 5분봉은 잘못된 일봉 캐시를 버리고 store 사용
+
+
 def test_ohlc_tf_collapses_duplicate_daily_rows(monkeypatch):
     """일봉 원본에도 중복 시점이 섞이면 하나의 봉으로 병합해야 한다."""
     import pandas as pd
