@@ -43,6 +43,7 @@ env/
 # ── Claude 로컬 설정 ─────────────────────
 .claude/
 .superpowers/
+claude.md
 
 # ── 임시/작업 파일 ────────────────────────
 .worktrees/
