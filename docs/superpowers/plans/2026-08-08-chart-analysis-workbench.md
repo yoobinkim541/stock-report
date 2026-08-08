@@ -590,7 +590,7 @@ Commit with title `add) 다중 종목 차트 알림 실행기와 평가 추적 �
 - Modify: `dashboard/chart_workspace_ui.py:94-191,191-295,404-617,739-920`
 - Test: `tests/test_chart_workbench.py`
 - Test: `tests/test_dashboard_pages.py`
-- Test: `tests/test_chart_workspace_ui.py`
+- Test: `tests/test_chart_workspace_pages.py`
 
 **Interfaces:**
 - Produces: `build_analysis_snapshot(document, hist, *, ohlc_loader, fundamental_loader, alert_loader) -> dict[str, Any]`
@@ -645,7 +645,7 @@ Assert chart type and session controls render, selected Renko parameters persist
 Run:
 
 ```bash
-./.venv/bin/pytest -q tests/test_chart_workbench.py tests/test_dashboard_pages.py tests/test_chart_workspace_ui.py tests/test_dashboard_charts.py tests/test_plotly_embed.py
+./.venv/bin/pytest -q tests/test_chart_workbench.py tests/test_dashboard_pages.py tests/test_chart_workspace_pages.py tests/test_dashboard_charts.py tests/test_plotly_embed.py
 ```
 
 Commit with title `add) 종목 차트 분석 워크벤치 UI 통합` and a body describing the shared ticker/fullscreen/workspace flow and the trade-off of a denser operational layout.
@@ -672,7 +672,7 @@ Run:
 
 ```bash
 ./.venv/bin/pytest -q tests/test_chart_document.py tests/test_chart_transforms.py tests/test_chart_data_policy.py tests/test_chart_series.py tests/test_chart_studies.py tests/test_chart_conditions.py tests/test_chart_workbench.py
-./.venv/bin/pytest -q tests/test_dashboard_charts.py tests/test_dashboard_pages.py tests/test_chart_workspace.py tests/test_chart_workspace_ui.py tests/test_chart_alerts.py tests/test_chart_alert_runner.py tests/test_chart_alert_worker.py tests/test_plotly_embed.py tests/test_plotly_embed_runtime.py
+./.venv/bin/pytest -q tests/test_dashboard_charts.py tests/test_dashboard_pages.py tests/test_chart_workspace.py tests/test_chart_workspace_pages.py tests/test_chart_alerts.py tests/test_chart_alert_runner.py tests/test_chart_alert_worker.py tests/test_plotly_embed.py tests/test_plotly_embed_runtime.py
 ```
 
 Expected: all pass with no skipped Packet 1 contract tests.
