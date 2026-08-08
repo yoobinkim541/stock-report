@@ -137,6 +137,35 @@ def test_just_below_tiny_boundary_does_not_emit_synthetic_element(chart_type, pa
     assert out.frame.empty, f"{chart_type} emitted a {direction} element before its boundary"
 
 
+@pytest.mark.parametrize(
+    ("chart_type", "parameter"),
+    [("renko", "box_size"), ("range", "range_size")],
+)
+@pytest.mark.parametrize(
+    ("close", "expected_closes"),
+    [
+        (0.3, [0.1, 0.2, 0.3]),
+        (-0.3, [-0.1, -0.2, -0.3]),
+    ],
+)
+def test_exact_fractional_boundary_emits_every_element(chart_type, parameter, close, expected_closes):
+    index = pd.date_range("2026-01-02", periods=2, freq="D")
+    hist = pd.DataFrame(
+        {
+            "Open": [0.0, 0.0],
+            "High": [0.0, max(0.0, close)],
+            "Low": [0.0, min(0.0, close)],
+            "Close": [0.0, close],
+        },
+        index=index,
+    )
+
+    out = transforms.transform_chart(hist, chart_type, {parameter: 0.1})
+
+    assert out.frame["Close"].tolist() == pytest.approx(expected_closes)
+    assert out.frame["SourceTimestamp"].tolist() == [index[1]] * 3
+
+
 def test_kagi_reverses_only_after_configured_amount(ohlc):
     out = transforms.transform_chart(ohlc, "kagi", {"reversal": 3.0})
     assert out.render_kind == "line"

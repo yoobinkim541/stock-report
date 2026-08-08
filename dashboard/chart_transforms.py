@@ -8,6 +8,7 @@ from __future__ import annotations
 
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
+from decimal import Decimal, InvalidOperation
 import math
 from numbers import Integral, Real
 from typing import Any
@@ -52,6 +53,44 @@ def _close_observations(frame: pd.DataFrame) -> list[tuple[Any, float]]:
         if math.isfinite(close):
             observations.append((timestamp, close))
     return observations
+
+
+def _decimal_close_observations(frame: pd.DataFrame) -> list[tuple[Any, Decimal]]:
+    _require_columns(frame, {"Close"})
+    observations: list[tuple[Any, Decimal]] = []
+    for timestamp, value in frame["Close"].items():
+        try:
+            close = Decimal(str(value))
+        except (InvalidOperation, TypeError, ValueError):
+            continue
+        if close.is_finite():
+            observations.append((timestamp, close))
+    return observations
+
+
+def _fixed_step_records(observations: list[tuple[Any, Decimal]], size: Decimal) -> list[dict[str, Any]]:
+    """Emit fixed-price elements without binary float accumulation."""
+    records: list[dict[str, Any]] = []
+    if not observations:
+        return records
+
+    level = observations[0][1]
+    for timestamp, close in observations[1:]:
+        while close >= level + size:
+            open_ = level
+            level += size
+            records.append({
+                "Open": float(open_), "High": float(level), "Low": float(open_),
+                "Close": float(level), "SourceTimestamp": timestamp,
+            })
+        while close <= level - size:
+            open_ = level
+            level -= size
+            records.append({
+                "Open": float(open_), "High": float(open_), "Low": float(level),
+                "Close": float(level), "SourceTimestamp": timestamp,
+            })
+    return records
 
 
 def _sequence_frame(records: list[dict[str, Any]], columns: list[str]) -> pd.DataFrame:
@@ -140,19 +179,7 @@ def _heikin_ashi(frame: pd.DataFrame, chart_type: str, _params: Mapping[str, Any
 
 def _renko(frame: pd.DataFrame, chart_type: str, params: Mapping[str, Any]) -> ChartTransformResult:
     box_size = _positive_float(params, "box_size", _atr_default(frame))
-    observations = _close_observations(frame)
-    records: list[dict[str, Any]] = []
-    if observations:
-        level = observations[0][1]
-        for timestamp, close in observations[1:]:
-            while close >= level + box_size:
-                open_ = level
-                level += box_size
-                records.append({"Open": open_, "High": level, "Low": open_, "Close": level, "SourceTimestamp": timestamp})
-            while close <= level - box_size:
-                open_ = level
-                level -= box_size
-                records.append({"Open": open_, "High": open_, "Low": level, "Close": level, "SourceTimestamp": timestamp})
+    records = _fixed_step_records(_decimal_close_observations(frame), Decimal(str(box_size)))
     out = _sequence_frame(records, ["Open", "High", "Low", "Close", "SourceTimestamp"])
     return ChartTransformResult(
         out, "candlestick", "sequence", True,
@@ -242,19 +269,7 @@ def _line_break(frame: pd.DataFrame, chart_type: str, params: Mapping[str, Any])
 
 def _range_bars(frame: pd.DataFrame, chart_type: str, params: Mapping[str, Any]) -> ChartTransformResult:
     range_size = _positive_float(params, "range_size", _atr_default(frame))
-    observations = _close_observations(frame)
-    records: list[dict[str, Any]] = []
-    if observations:
-        level = observations[0][1]
-        for timestamp, close in observations[1:]:
-            while close >= level + range_size:
-                open_ = level
-                level += range_size
-                records.append({"Open": open_, "High": level, "Low": open_, "Close": level, "SourceTimestamp": timestamp})
-            while close <= level - range_size:
-                open_ = level
-                level -= range_size
-                records.append({"Open": open_, "High": open_, "Low": level, "Close": level, "SourceTimestamp": timestamp})
+    records = _fixed_step_records(_decimal_close_observations(frame), Decimal(str(range_size)))
     out = _sequence_frame(records, ["Open", "High", "Low", "Close", "SourceTimestamp"])
     return ChartTransformResult(
         out, "candlestick", "sequence", True,
