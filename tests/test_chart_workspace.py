@@ -14,6 +14,34 @@ def test_default_workspace_has_one_valid_panel():
     assert ws["layout"] == "1"
 
 
+def test_workspace_migrates_legacy_candle_and_round_trips_chart_types():
+    legacy = cw.normalize_workspace({"panels": [{"chart_kind": "candle"}]})
+    assert legacy["panels"][0]["chart_kind"] == "candlestick"
+
+    for chart_kind in cw.CHART_KINDS:
+        workspace = cw.normalize_workspace({"panels": [{"chart_kind": chart_kind}]})
+        assert workspace["panels"][0]["chart_kind"] == chart_kind
+        assert workspace["panels"][0]["document"]["chart"]["type"] == chart_kind
+        saved = cw.normalize_workspace(workspace)
+        assert saved["panels"][0]["chart_kind"] == chart_kind
+
+
+def test_legacy_candle_style_template_applies_as_candlestick():
+    workspace = cw.normalize_workspace({"panels": [{"chart_kind": "line"}]})
+    applied = cw.apply_chart_template(
+        workspace,
+        {"id": "legacy", "kind": "style", "payload": {"chart_kind": "candle"}},
+    )
+    assert applied["panels"][0]["chart_kind"] == "candlestick"
+
+
+def test_workspace_document_validation_errors_are_panel_prefixed():
+    errors, _warnings = cw.validate_workspace({
+        "panels": [{"document": {"timeframe": "13m"}}],
+    })
+    assert "panel[0].document: unsupported timeframe: 13m" in errors
+
+
 def test_patch_updates_nested_panel_without_clobbering_other_fields():
     ws = cw.default_workspace("MSFT")
     after = cw.apply_workspace_patch(
@@ -122,7 +150,7 @@ def test_chart_template_payload_and_apply_across_scopes():
     style_tpl = cw.chart_template_payload(ws, kind="style", name="Clean Style")
     assert style_tpl["id"] == "style-clean-style"
     assert style_tpl["payload"] == {
-        "chart_kind": "candle",
+        "chart_kind": "candlestick",
         "timeframe": "1h",
         "period": "1y",
         "log_scale": True,
@@ -138,7 +166,7 @@ def test_chart_template_payload_and_apply_across_scopes():
     assert series_tpl["payload"] == {"ticker": "NVDA", "compare": ["AMD"]}
 
     applied = cw.apply_chart_template(cw.default_workspace("AAPL"), style_tpl)
-    assert applied["panels"][0]["chart_kind"] == "candle"
+    assert applied["panels"][0]["chart_kind"] == "candlestick"
     assert applied["panels"][0]["timeframe"] == "1h"
     assert applied["panels"][0]["period"] == "1y"
     assert applied["panels"][0]["log_scale"] is True
@@ -157,7 +185,7 @@ def test_chart_template_payload_and_apply_across_scopes():
     applied_all = cw.apply_chart_template(ws, style_tpl, apply_to_all=True)
     assert applied_all["panels"][0]["timeframe"] == "1h"
     assert applied_all["panels"][1]["timeframe"] == "1h"
-    assert applied_all["panels"][1]["chart_kind"] == "candle"
+    assert applied_all["panels"][1]["chart_kind"] == "candlestick"
 
 
 def test_dashboard_workspace_wrappers_forward_storage(monkeypatch):

@@ -13,11 +13,12 @@ from datetime import datetime, timezone
 from typing import Any
 
 import ticker_names
+from dashboard import chart_document
 
 LAYOUTS = {"1": 1, "2v": 2, "2h": 2, "2x2": 4, "3+1": 4, "2x3": 6}
 TIMEFRAMES = {"5m", "1h", "2h", "4h", "1d", "1wk", "1mo"}
 PERIODS = {"3mo", "6mo", "1y", "5y", "전체"}
-CHART_KINDS = {"line", "candle", "heikin_ashi"}
+CHART_KINDS = chart_document.CHART_TYPES
 TEMPLATE_KINDS = {"style", "indicators", "series"}
 DRAWING_SYNC = {"off", "layout_symbol", "global_symbol"}
 TOP_INDICATORS = {
@@ -65,12 +66,12 @@ def _norm_ticker(value: Any, fallback: str = "MSFT") -> str:
 
 
 def _panel(panel_id: str, ticker: str) -> dict[str, Any]:
-    return {
+    panel = {
         "id": panel_id,
         "ticker": _norm_ticker(ticker),
         "timeframe": "1d",
         "period": "6mo",
-        "chart_kind": "candle",
+        "chart_kind": "candlestick",
         "top_indicators": ["이동평균선"],
         "bottom_indicators": ["거래량", "RSI"],
         "compare": [],
@@ -79,6 +80,26 @@ def _panel(panel_id: str, ticker: str) -> dict[str, Any]:
         "indicator_template_id": None,
         "series_template_id": None,
     }
+    panel["document"] = chart_document.document_from_panel(panel)
+    return panel
+
+
+def _sync_panel_document(panel: dict[str, Any], workspace_id: str) -> None:
+    """Keep persisted compatibility fields and the canonical document aligned."""
+    legacy = chart_document.document_from_panel(panel, workspace_id=workspace_id)
+    current = panel.get("document")
+    if not isinstance(current, dict):
+        panel["document"] = legacy
+        return
+    document = chart_document.normalize_chart_document(current, ticker=panel.get("ticker") or "MSFT")
+    document["symbol"] = legacy["symbol"]
+    document["timeframe"] = legacy["timeframe"]
+    document["period"] = legacy["period"]
+    document["chart"]["type"] = legacy["chart"]["type"]
+    document["scale"]["type"] = legacy["scale"]["type"]
+    document["series"] = legacy["series"]
+    document["studies"] = legacy["studies"]
+    panel["document"] = chart_document.normalize_chart_document(document, ticker=legacy["symbol"])
 
 
 def allowed_indicator_names() -> set[str]:
@@ -130,7 +151,7 @@ def normalize_workspace(workspace: dict | None, *, ticker: str = "MSFT") -> dict
         p["ticker"] = _norm_ticker(p.get("ticker"), ticker)
         p["timeframe"] = str(p.get("timeframe") or "1d")
         p["period"] = str(p.get("period") or "6mo")
-        p["chart_kind"] = str(p.get("chart_kind") or "candle")
+        p["chart_kind"] = str(p.get("chart_kind") or "candlestick")
         p["top_indicators"] = [
             x for x in (p.get("top_indicators") or []) if x in TOP_INDICATORS
         ]
@@ -139,6 +160,14 @@ def normalize_workspace(workspace: dict | None, *, ticker: str = "MSFT") -> dict
         ]
         p["compare"] = [_norm_ticker(x) for x in (p.get("compare") or [])][:3]
         p["log_scale"] = bool(p.get("log_scale"))
+        raw_document = src.get("document")
+        p["document"] = chart_document.normalize_chart_document(
+            raw_document if isinstance(raw_document, dict) else chart_document.document_from_panel(
+                p, workspace_id=str(out.get("id") or "")
+            ),
+            ticker=p["ticker"],
+        )
+        p.update(chart_document.panel_from_document(p["document"], p))
         merged.append(p)
 
     out["panels"] = merged
@@ -182,6 +211,8 @@ def validate_workspace(workspace: dict) -> tuple[list[str], list[str]]:
         timeframe = str(raw_panel.get("timeframe") or panel["timeframe"])
         period = str(raw_panel.get("period") or panel["period"])
         chart_kind = str(raw_panel.get("chart_kind") or panel["chart_kind"])
+        if chart_kind == "candle":
+            chart_kind = "candlestick"
         if timeframe not in TIMEFRAMES:
             errors.append(f"panel[{idx}] unsupported timeframe: {timeframe}")
         if period not in PERIODS:
@@ -196,6 +227,13 @@ def validate_workspace(workspace: dict) -> tuple[list[str], list[str]]:
                 errors.append(f"unknown indicator: {name}")
         if len(raw_panel.get("compare") or []) > 3:
             warnings.append(f"panel[{idx}] compare symbols capped at 3")
+        raw_document = raw_panel.get("document")
+        if raw_document is not None and not isinstance(raw_document, dict):
+            errors.append(f"panel[{idx}].document: document must be an object")
+        else:
+            document_errors, document_warnings = chart_document.validate_chart_document(panel["document"])
+            errors.extend(f"panel[{idx}].document: {error}" for error in document_errors)
+            warnings.extend(f"panel[{idx}].document: {warning}" for warning in document_warnings)
     return errors, warnings
 
 
@@ -311,8 +349,11 @@ def apply_chart_template(
     for idx in target_ids:
         panel = out["panels"][idx]
         if kind == "style":
-            if payload.get("chart_kind") in CHART_KINDS:
-                panel["chart_kind"] = payload["chart_kind"]
+            chart_kind = payload.get("chart_kind")
+            if chart_kind == "candle":
+                chart_kind = "candlestick"
+            if chart_kind in CHART_KINDS:
+                panel["chart_kind"] = chart_kind
             if payload.get("timeframe") in TIMEFRAMES:
                 panel["timeframe"] = payload["timeframe"]
             if payload.get("period") in PERIODS:
@@ -329,6 +370,7 @@ def apply_chart_template(
                 panel["ticker"] = _norm_ticker(ticker, panel.get("ticker") or "MSFT")
             panel["compare"] = [_norm_ticker(x) for x in (payload.get("compare") or [])][:3]
             panel["series_template_id"] = str(record.get("id") or panel.get("series_template_id") or "")
+        _sync_panel_document(panel, str(out.get("id") or ""))
     return normalize_workspace(out)
 
 
@@ -345,7 +387,7 @@ def _validate_patch_value(field: str, value: Any) -> None:
         raise ValueError(f"unsupported timeframe: {value}")
     if field == "period" and str(value) not in PERIODS:
         raise ValueError(f"unsupported period: {value}")
-    if field == "chart_kind" and str(value) not in CHART_KINDS:
+    if field == "chart_kind" and str(value) not in CHART_KINDS | {"candle"}:
         raise ValueError(f"unsupported chart_kind: {value}")
 
 
@@ -371,7 +413,10 @@ def apply_workspace_patch(workspace: dict, patch: dict) -> dict[str, Any]:
         if idx >= len(out["panels"]):
             raise ValueError(f"panel index out of range: {idx}")
         _validate_patch_value(field, value)
+        if field == "chart_kind" and value == "candle":
+            value = "candlestick"
         out["panels"][idx][field] = value
+        _sync_panel_document(out["panels"][idx], str(out.get("id") or ""))
         out = normalize_workspace(out)
 
     errors, _warnings = validate_workspace(out)
