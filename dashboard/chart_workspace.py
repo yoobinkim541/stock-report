@@ -84,21 +84,105 @@ def _panel(panel_id: str, ticker: str) -> dict[str, Any]:
     return panel
 
 
-def _sync_panel_document(panel: dict[str, Any], workspace_id: str) -> None:
-    """Keep persisted compatibility fields and the canonical document aligned."""
+def _merge_panel_studies(
+    current: Any,
+    legacy: list[Any],
+    fields: set[str],
+) -> list[Any]:
+    panes = {
+        pane
+        for pane, field in (("top", "top_indicators"), ("bottom", "bottom_indicators"))
+        if field in fields
+    }
+    if not panes:
+        return copy.deepcopy(current) if isinstance(current, list) else []
+    wanted = [
+        study for study in legacy
+        if isinstance(study, dict) and study.get("pane") in panes
+    ]
+    existing = current if isinstance(current, list) else []
+    wanted_keys = {(study.get("pane"), study.get("name")) for study in wanted}
+    remaining = []
+    for study in existing:
+        if not isinstance(study, dict) or study.get("pane") not in panes:
+            remaining.append(copy.deepcopy(study))
+            continue
+        key = (study.get("pane"), study.get("name"))
+        if key in wanted_keys:
+            remaining.append(copy.deepcopy(study))
+            wanted_keys.remove(key)
+    for study in wanted:
+        if (study.get("pane"), study.get("name")) in wanted_keys:
+            remaining.append(copy.deepcopy(study))
+    return remaining
+
+
+def _merge_panel_series(
+    current: Any,
+    legacy: list[Any],
+    fields: set[str],
+) -> list[Any]:
+    existing = current if isinstance(current, list) else []
+    if not ({"ticker", "compare"} & fields):
+        return copy.deepcopy(existing)
+
+    primary = next(
+        (copy.deepcopy(series) for series in existing if isinstance(series, dict) and series.get("id") == "primary"),
+        copy.deepcopy(legacy[0]),
+    )
+    if "ticker" in fields:
+        primary["symbol"] = legacy[0]["symbol"]
+    if "compare" not in fields:
+        return [primary] + [
+            copy.deepcopy(series)
+            for series in existing
+            if not (isinstance(series, dict) and series.get("id") == "primary")
+        ]
+
+    current_comparisons = {
+        series.get("symbol"): series
+        for series in existing
+        if isinstance(series, dict) and series.get("kind") in {"benchmark", "peer"}
+    }
+    comparisons = [
+        copy.deepcopy(current_comparisons.get(series["symbol"], series))
+        for series in legacy[1:]
+    ]
+    document_owned = [
+        copy.deepcopy(series)
+        for series in existing
+        if isinstance(series, dict)
+        and series.get("id") != "primary"
+        and series.get("kind") not in {"benchmark", "peer"}
+    ]
+    return [primary] + comparisons + document_owned
+
+
+def _sync_panel_document(
+    panel: dict[str, Any],
+    workspace_id: str,
+    *,
+    fields: set[str],
+) -> None:
+    """Sync only legacy-owned fields without replacing document-owned content."""
     legacy = chart_document.document_from_panel(panel, workspace_id=workspace_id)
     current = panel.get("document")
     if not isinstance(current, dict):
         panel["document"] = legacy
         return
     document = chart_document.normalize_chart_document(current, ticker=panel.get("ticker") or "MSFT")
-    document["symbol"] = legacy["symbol"]
-    document["timeframe"] = legacy["timeframe"]
-    document["period"] = legacy["period"]
-    document["chart"]["type"] = legacy["chart"]["type"]
-    document["scale"]["type"] = legacy["scale"]["type"]
-    document["series"] = legacy["series"]
-    document["studies"] = legacy["studies"]
+    if "ticker" in fields:
+        document["symbol"] = legacy["symbol"]
+    if "timeframe" in fields:
+        document["timeframe"] = legacy["timeframe"]
+    if "period" in fields:
+        document["period"] = legacy["period"]
+    if "chart_kind" in fields:
+        document["chart"]["type"] = legacy["chart"]["type"]
+    if "log_scale" in fields:
+        document["scale"]["type"] = legacy["scale"]["type"]
+    document["series"] = _merge_panel_series(document.get("series"), legacy["series"], fields)
+    document["studies"] = _merge_panel_studies(document.get("studies"), legacy["studies"], fields)
     panel["document"] = chart_document.normalize_chart_document(document, ticker=legacy["symbol"])
 
 
@@ -349,6 +433,7 @@ def apply_chart_template(
     for idx in target_ids:
         panel = out["panels"][idx]
         if kind == "style":
+            sync_fields = {"chart_kind", "timeframe", "period", "log_scale"}
             chart_kind = payload.get("chart_kind")
             if chart_kind == "candle":
                 chart_kind = "candlestick"
@@ -361,16 +446,18 @@ def apply_chart_template(
             panel["log_scale"] = bool(payload.get("log_scale"))
             panel["style_template_id"] = str(record.get("id") or panel.get("style_template_id") or "")
         elif kind == "indicators":
+            sync_fields = {"top_indicators", "bottom_indicators"}
             panel["top_indicators"] = [x for x in (payload.get("top_indicators") or []) if x in TOP_INDICATORS]
             panel["bottom_indicators"] = [x for x in (payload.get("bottom_indicators") or []) if x in BOTTOM_INDICATORS]
             panel["indicator_template_id"] = str(record.get("id") or panel.get("indicator_template_id") or "")
         else:
+            sync_fields = {"ticker", "compare"}
             ticker = payload.get("ticker")
             if ticker:
                 panel["ticker"] = _norm_ticker(ticker, panel.get("ticker") or "MSFT")
             panel["compare"] = [_norm_ticker(x) for x in (payload.get("compare") or [])][:3]
             panel["series_template_id"] = str(record.get("id") or panel.get("series_template_id") or "")
-        _sync_panel_document(panel, str(out.get("id") or ""))
+        _sync_panel_document(panel, str(out.get("id") or ""), fields=sync_fields)
     return normalize_workspace(out)
 
 
@@ -416,7 +503,11 @@ def apply_workspace_patch(workspace: dict, patch: dict) -> dict[str, Any]:
         if field == "chart_kind" and value == "candle":
             value = "candlestick"
         out["panels"][idx][field] = value
-        _sync_panel_document(out["panels"][idx], str(out.get("id") or ""))
+        _sync_panel_document(
+            out["panels"][idx],
+            str(out.get("id") or ""),
+            fields={field},
+        )
         out = normalize_workspace(out)
 
     errors, _warnings = validate_workspace(out)
@@ -448,6 +539,21 @@ def diff_workspaces(before: dict, after: dict) -> list[dict[str, Any]]:
     return rows
 
 
+def _apply_document_patch_to_panel(
+    workspace: dict,
+    patch: dict[str, Any],
+    *,
+    panel_index: int = 0,
+) -> dict[str, Any]:
+    out = normalize_workspace(workspace)
+    if panel_index >= len(out["panels"]):
+        raise ValueError(f"panel index out of range: {panel_index}")
+    panel = out["panels"][panel_index]
+    panel["document"] = chart_document.apply_chart_document_patch(panel["document"], patch)
+    panel.update(chart_document.panel_from_document(panel["document"], panel))
+    return normalize_workspace(out)
+
+
 def propose_workspace_patch(prompt: str, workspace: dict) -> dict[str, Any]:
     """Convert a natural-language chart request into a safe workspace patch.
 
@@ -461,41 +567,64 @@ def propose_workspace_patch(prompt: str, workspace: dict) -> dict[str, Any]:
     top = list(panel.get("top_indicators") or [])
     bottom = list(panel.get("bottom_indicators") or [])
     warnings: list[str] = []
+    studies_changed = False
+    remove_comparisons = False
 
     if any(token in text for token in ("5분", "5m", "분봉", "intraday", "장중")):
-        patch["panels[0].timeframe"] = "5m"
+        patch["timeframe"] = "5m"
         if "VWAP(세션)" not in top:
             top.append("VWAP(세션)")
+            studies_changed = True
         if "거래량" not in bottom:
             bottom.append("거래량")
+            studies_changed = True
         warnings.append("5분봉 데이터는 provider 보존 기간과 장중 수집 상태에 따라 제한될 수 있습니다.")
     if any(token in text for token in ("1시간", "1h")):
-        patch["panels[0].timeframe"] = "1h"
+        patch["timeframe"] = "1h"
     if any(token in text for token in ("일봉", "1d")):
-        patch["panels[0].timeframe"] = "1d"
+        patch["timeframe"] = "1d"
     if any(token in text for token in ("추세", "trend", "모멘텀")):
         for name in ("이동평균선", "자동 추세선·채널", "지수이평(EMA)"):
             if name not in top:
                 top.append(name)
+                studies_changed = True
     if any(token in text for token in ("변동성", "volatility", "밴드", "압축", "스퀴즈")):
         for name in ("볼린저 밴드", "켈트너 채널"):
             if name not in top:
                 top.append(name)
+                studies_changed = True
     if any(token in text for token in ("매물대", "volume profile", "볼륨프로필")) and "매물대" not in top:
         top.append("매물대")
+        studies_changed = True
     if "macd" in text and "MACD" not in bottom:
         bottom.append("MACD")
+        studies_changed = True
     if "rsi" in text and "RSI" not in bottom:
         bottom.append("RSI")
+        studies_changed = True
     if any(token in text for token in ("비교 제거", "비교 빼", "비교 없")):
-        patch["panels[0].compare"] = []
+        remove_comparisons = True
 
-    if top:
-        patch["panels[0].top_indicators"] = top[:8]
-    if bottom:
-        patch["panels[0].bottom_indicators"] = bottom[:6]
+    if studies_changed:
+        legacy = chart_document.document_from_panel({
+            **panel,
+            "top_indicators": top[:8],
+            "bottom_indicators": bottom[:6],
+        })
+        patch["studies"] = _merge_panel_studies(
+            panel["document"].get("studies"),
+            legacy["studies"],
+            {"top_indicators", "bottom_indicators"},
+        )
+    if remove_comparisons:
+        legacy = chart_document.document_from_panel({**panel, "compare": []})
+        patch["series"] = _merge_panel_series(
+            panel["document"].get("series"),
+            legacy["series"],
+            {"compare"},
+        )
 
-    after = apply_workspace_patch(before, patch) if patch else before
+    after = _apply_document_patch_to_panel(before, patch) if patch else before
     return {
         "ok": True,
         "summary": "차트 요청을 워크스페이스 패치로 변환했습니다.",

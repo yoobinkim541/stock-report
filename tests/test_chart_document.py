@@ -65,3 +65,15 @@ def test_validation_rejects_duplicate_series_ids():
     })
     errors, _warnings = cd.validate_chart_document(doc)
     assert "duplicate series id: primary" in errors
+
+
+def test_panel_adapter_excludes_document_owned_series_from_legacy_compare():
+    doc = cd.default_chart_document("MSFT")
+    doc["series"].extend([
+        {"id": "portfolio", "kind": "portfolio", "symbol": "PORT", "axis": "primary", "normalization": "raw", "visible": True},
+        {"id": "fundamentals", "kind": "fundamental", "symbol": "MSFT", "axis": "primary", "normalization": "raw", "visible": True},
+        {"id": "analysts", "kind": "analyst", "symbol": "MSFT", "axis": "primary", "normalization": "raw", "visible": True},
+        {"id": "compare-1", "kind": "benchmark", "symbol": "QQQ", "axis": "primary", "normalization": "raw", "visible": True},
+    ])
+    panel = cd.panel_from_document(doc)
+    assert panel["compare"] == ["QQQ"]

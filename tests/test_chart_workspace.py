@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import pytest
 
+from dashboard import chart_document as cd
 from dashboard import chart_workspace as cw
 
 
@@ -40,6 +41,29 @@ def test_workspace_document_validation_errors_are_panel_prefixed():
         "panels": [{"document": {"timeframe": "13m"}}],
     })
     assert "panel[0].document: unsupported timeframe: 13m" in errors
+
+
+def test_style_and_legacy_patches_preserve_document_owned_content():
+    document = cd.default_chart_document("MSFT")
+    document["series"].extend([
+        {"id": "portfolio", "kind": "portfolio", "symbol": "PORT", "axis": "primary", "normalization": "raw", "visible": True, "weight": 0.4},
+        {"id": "fundamentals", "kind": "fundamental", "symbol": "MSFT", "axis": "primary", "normalization": "raw", "visible": True, "metric": "pe"},
+        {"id": "analysts", "kind": "analyst", "symbol": "MSFT", "axis": "primary", "normalization": "raw", "visible": True, "provider": "consensus"},
+    ])
+    document["studies"].append({"id": "custom-study", "kind": "custom", "pane": "overlay", "config": {"window": 20}})
+    workspace = cw.normalize_workspace({"panels": [{"document": document}]})
+
+    styled = cw.apply_chart_template(
+        workspace,
+        {"id": "intraday", "kind": "style", "payload": {"timeframe": "1h"}},
+    )
+    patched = cw.apply_workspace_patch(styled, {"panels[0].period": "1y"})
+    restored = patched["panels"][0]["document"]
+
+    assert restored["series"][1:] == document["series"][1:]
+    assert {study["id"] for study in restored["studies"]} == {"custom-study"}
+    assert restored["timeframe"] == "1h"
+    assert restored["period"] == "1y"
 
 
 def test_patch_updates_nested_panel_without_clobbering_other_fields():
@@ -220,6 +244,7 @@ def test_workspace_ai_patch_heuristic_handles_intraday_vwap():
     ws = cw.default_workspace("NVDA")
     proposal = cw.propose_workspace_patch("5분봉으로 바꾸고 VWAP랑 거래량을 봐줘", ws)
     assert proposal["ok"] is True
-    assert proposal["patch"]["panels[0].timeframe"] == "5m"
-    assert "VWAP(세션)" in proposal["patch"]["panels[0].top_indicators"]
+    assert proposal["patch"]["timeframe"] == "5m"
+    assert all(not path.startswith("panels[") for path in proposal["patch"])
+    assert any(study["name"] == "VWAP(세션)" for study in proposal["patch"]["studies"])
     assert "거래량" in proposal["after"]["panels"][0]["bottom_indicators"]

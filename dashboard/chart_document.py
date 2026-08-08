@@ -328,7 +328,11 @@ def panel_from_document(document: Mapping[str, Any], panel: Mapping[str, Any] | 
 
     compare: list[str] = []
     for series in doc.get("series") if isinstance(doc.get("series"), list) else []:
-        if not isinstance(series, Mapping) or series.get("id") == "primary":
+        if (
+            not isinstance(series, Mapping)
+            or series.get("id") == "primary"
+            or series.get("kind") not in {"benchmark", "peer"}
+        ):
             continue
         symbol = series.get("symbol")
         if isinstance(symbol, str) and symbol:
