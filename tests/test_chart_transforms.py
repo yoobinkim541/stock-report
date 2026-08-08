@@ -109,6 +109,34 @@ def test_close_crossing_multiple_boundaries_emits_each_synthetic_element(chart_t
     assert out.frame["Close"].iloc[-1] == pytest.approx(100.0 + expected * size)
 
 
+@pytest.mark.parametrize(
+    ("chart_type", "parameter"),
+    [("renko", "box_size"), ("range", "range_size")],
+)
+@pytest.mark.parametrize(
+    ("close", "direction"),
+    [
+        (math.nextafter(1e-15, 0.0), "up"),
+        (math.nextafter(-1e-15, 0.0), "down"),
+    ],
+)
+def test_just_below_tiny_boundary_does_not_emit_synthetic_element(chart_type, parameter, close, direction):
+    index = pd.date_range("2026-01-02", periods=2, freq="D")
+    hist = pd.DataFrame(
+        {
+            "Open": [0.0, 0.0],
+            "High": [0.0, max(0.0, close)],
+            "Low": [0.0, min(0.0, close)],
+            "Close": [0.0, close],
+        },
+        index=index,
+    )
+
+    out = transforms.transform_chart(hist, chart_type, {parameter: 1e-15})
+
+    assert out.frame.empty, f"{chart_type} emitted a {direction} element before its boundary"
+
+
 def test_kagi_reverses_only_after_configured_amount(ohlc):
     out = transforms.transform_chart(ohlc, "kagi", {"reversal": 3.0})
     assert out.render_kind == "line"

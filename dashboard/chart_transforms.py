@@ -145,11 +145,11 @@ def _renko(frame: pd.DataFrame, chart_type: str, params: Mapping[str, Any]) -> C
     if observations:
         level = observations[0][1]
         for timestamp, close in observations[1:]:
-            while close >= level + box_size - 1e-12:
+            while close >= level + box_size:
                 open_ = level
                 level += box_size
                 records.append({"Open": open_, "High": level, "Low": open_, "Close": level, "SourceTimestamp": timestamp})
-            while close <= level - box_size + 1e-12:
+            while close <= level - box_size:
                 open_ = level
                 level -= box_size
                 records.append({"Open": open_, "High": open_, "Low": level, "Close": level, "SourceTimestamp": timestamp})
@@ -247,11 +247,11 @@ def _range_bars(frame: pd.DataFrame, chart_type: str, params: Mapping[str, Any])
     if observations:
         level = observations[0][1]
         for timestamp, close in observations[1:]:
-            while close >= level + range_size - 1e-12:
+            while close >= level + range_size:
                 open_ = level
                 level += range_size
                 records.append({"Open": open_, "High": level, "Low": open_, "Close": level, "SourceTimestamp": timestamp})
-            while close <= level - range_size + 1e-12:
+            while close <= level - range_size:
                 open_ = level
                 level -= range_size
                 records.append({"Open": open_, "High": open_, "Low": level, "Close": level, "SourceTimestamp": timestamp})
