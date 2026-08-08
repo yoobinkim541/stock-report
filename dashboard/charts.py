@@ -93,6 +93,62 @@ def _trading_rangebreaks(index, ticker: str = "") -> list[dict]:
     return breaks
 
 
+def _use_even_candle_axis(fig, index):
+    """캔들 전용 x축 — 실제 시간 간격 대신 봉 순서로 균등 배치한다.
+
+    Plotly datetime 축에 rangebreaks 를 섞으면 5분/시간봉이나 장기 월봉에서 캔들 폭이
+    과대 계산되어 봉이 겹치는 경우가 있다. 캔들은 TradingView처럼 "n번째 봉" 기준으로
+    읽는 편이 자연스러우므로 category 축으로 고정하고, 원본 timestamp 는 그대로 x 값에 둔다.
+    """
+    fig.update_xaxes(type="category", categoryorder="array",
+                     categoryarray=list(index), rangebreaks=[])
+    return fig
+
+
+def _category_view_range(hist, view_days):
+    """category x축용 초기 표시 범위 — 날짜 창을 봉 번호 창으로 변환."""
+    if not view_days or hist is None or getattr(hist, "empty", True):
+        return None
+    import pandas as pd
+    try:
+        end = hist.index[-1]
+        start = end - pd.Timedelta(days=int(view_days))
+        if start <= hist.index[0]:
+            return None
+        left = int(hist.index.searchsorted(start, side="left"))
+        right = len(hist) - 1
+    except Exception:
+        return None
+    if right - left < 1:
+        return None
+    pad = max((right - left) * 0.02, 0.5)
+    return [max(left - 0.5, 0), right + pad]
+
+
+def _snap_x_to_index(index, value, *, side: str = "nearest"):
+    """임의 날짜/문자열을 실제 차트 봉 x값으로 스냅한다."""
+    import pandas as pd
+    try:
+        idx = pd.DatetimeIndex(index).dropna()
+        if len(idx) == 0:
+            return value
+        ts = pd.Timestamp(value)
+        idx_tz = getattr(idx, "tz", None)
+        if ts.tzinfo is None and idx_tz is not None:
+            ts = ts.tz_localize(idx_tz)
+        elif ts.tzinfo is not None and idx_tz is None:
+            ts = ts.tz_localize(None)
+        if side == "previous":
+            loc = idx.searchsorted(ts, side="right") - 1
+            if loc < 0:
+                return None
+            return idx[int(loc)]
+        loc = idx.get_indexer([ts], method="nearest")[0]
+        return idx[int(loc)] if loc >= 0 else value
+    except Exception:
+        return value
+
+
 def _logr(lo, hi):
     """선형 y범위 → 로그축(plotly type='log' 는 range 를 log10 으로 해석)."""
     import math
@@ -134,7 +190,7 @@ def _log_fixup_price_shapes(fig) -> None:
 
 
 def _initial_view(fig, hist, view_days, *, lo_col="Low", hi_col="High", y_override=None,
-                  log_scale: bool = False):
+                  log_scale: bool = False, category_x: bool = False):
     """전체 히스토리 로드 상태에서 초기 화면만 최근 view_days 로 — 과거는 드래그/미니차트 탐색.
 
     x·y 초기 범위를 창에 맞춤(plotly 는 x창 추종 y 자동스케일이 없어 창 기준으로 시작 —
@@ -155,17 +211,19 @@ def _initial_view(fig, hist, view_days, *, lo_col="Low", hi_col="High", y_overri
     win = hist[hist.index >= start]
     if len(win) < 2:
         return fig
+    x_range = _category_view_range(hist, view_days) if category_x else [
+        start, end + (end - start) * 0.02
+    ]
     if y_override:
         lo, hi = y_override
-        fig.update_layout(xaxis_range=[start, end + (end - start) * 0.02],
-                          yaxis_range=[lo, hi])
+        fig.update_layout(xaxis_range=x_range, yaxis_range=[lo, hi])
         return fig
     cols = set(getattr(hist, "columns", []))
     lo = float(win[lo_col].min()) if lo_col in cols else float(win["Close"].min())
     hi = float(win[hi_col].max()) if hi_col in cols else float(win["Close"].max())
     pad = max((hi - lo) * 0.06, hi * 0.002)
     yr = _logr(lo - pad, hi + pad) if log_scale else [lo - pad, hi + pad]
-    fig.update_layout(xaxis_range=[start, end + (end - start) * 0.02], yaxis_range=yr)
+    fig.update_layout(xaxis_range=x_range, yaxis_range=yr)
     return fig
 
 
@@ -250,7 +308,8 @@ def _add_trade_markers(fig, hist, trades):
             px = _trade_price(hist, t)
             if px is None:
                 continue
-            xs.append(t.get("timestamp") or t.get("date"))
+            raw_x = t.get("timestamp") or t.get("date")
+            xs.append(_snap_x_to_index(hist.index, raw_x))
             ys.append(px)
             custom.append([
                 t.get("event_id"),
@@ -260,7 +319,7 @@ def _add_trade_markers(fig, hist, trades):
                 t.get("avg_price"),
                 t.get("account"),
                 t.get("source"),
-                t.get("timestamp") or t.get("date"),
+                raw_x,
                 t.get("note"),
                 t.get("currency") or "USD",
             ])
@@ -360,8 +419,9 @@ def price_candle(hist, ticker: str = "", avg_cost=None, trades=None, view_days=N
     fig.update_layout(margin=dict(t=10, b=10, l=10, r=10),
                       legend=dict(orientation="h", y=1.1),
                       hovermode="x unified")
-    return _initial_view(_pannable(_t(fig), rangebreaks=_trading_rangebreaks(hist.index, ticker)),
-                         hist, view_days)
+    fig = _pannable(_t(fig))
+    _use_even_candle_axis(fig, hist.index)
+    return _initial_view(fig, hist, view_days, category_x=True)
 
 
 def market_treemap(rows: list[dict], height: int = 560):
@@ -603,7 +663,8 @@ def intraday_candle(hist, ticker: str = "", trades=None, vwap=None,
     _add_trade_markers(fig, hist, trades or [])
     fig.update_layout(margin=dict(t=10, b=10, l=10, r=10),
                       legend=dict(orientation="h", y=1.1), hovermode="x unified")
-    return _pannable(_t(fig), height=400, rangebreaks=_trading_rangebreaks(hist.index, ticker))
+    fig = _pannable(_t(fig), height=400)
+    return _use_even_candle_axis(fig, hist.index)
 
 
 def analyst_ratings(dist: dict):
@@ -778,16 +839,19 @@ def _add_event_markers(fig, hist, events, panes) -> None:
             ts = ts.tz_localize(idx_tz)
         elif ts.tzinfo is not None and idx_tz is None:
             ts = ts.tz_localize(None)
+        snap_x = _snap_x_to_index(low.index, ts, side="previous")
+        if snap_x is None:
+            continue
         try:
-            base = low.asof(ts)                     # 해당 시점(이전 최근접) 봉 저가
+            base = low.loc[snap_x]                  # 해당 시점(이전 최근접) 봉 저가
         except Exception:
             continue
-        if base != base or ts < low.index[0]:       # NaN·범위 밖 스킵
+        if base != base:                            # NaN 스킵
             continue
         g = groups.setdefault((str(ev.get("marker", "•"))[:1],
                                ev.get("color") or theme.AXIS_TEXT),
                               {"x": [], "y": [], "hover": []})
-        g["x"].append(ts)
+        g["x"].append(snap_x)
         g["y"].append(float(base) * 0.985)
         g["hover"].append(str(ev.get("hover") or ""))
     for (letter, color), g in groups.items():
@@ -971,7 +1035,8 @@ def price_chart(hist, ticker: str = "", *, kind: str = "line", avg_cost=None,
     show_stoch = show_stoch and has_ohlc                # 스토캐스틱은 High/Low 필요
     show_aroon = show_aroon and has_ohlc                # Aroon 은 High/Low 필요
     show_pvt = show_pvt and "Volume" in cols            # PVT 는 거래량 필요
-    rangebreaks = _trading_rangebreaks(hist.index, ticker)
+    even_candle_axis = (kind == "candle" and has_ohlc and not cmp_mode)
+    rangebreaks = [] if even_candle_axis else _trading_rangebreaks(hist.index, ticker)
 
     # 하단 서브패널 — 순서 고정(거래량→RSI→MACD→스토→Aroon→%b→PVT→EPS→펀더멘털).
     # 분기 EPS — 유효 행(발표일+실제 EPS)만. 비교(%) 모드는 아래 cmp_mode 절이 차단.
@@ -1255,6 +1320,13 @@ def price_chart(hist, ticker: str = "", *, kind: str = "line", avg_cost=None,
         idx_tz = getattr(hist.index, "tz", None)
         if idx_tz is not None:
             xs = [x.tz_localize(idx_tz) if x.tzinfo is None else x for x in xs]
+        if even_candle_axis:
+            xs = [_snap_x_to_index(hist.index, x, side="previous") for x in xs]
+            pairs = [(x, r) for x, r in zip(xs, rows) if x is not None]
+            xs = [x for x, _ in pairs]
+            rows = [r for _, r in pairs]
+            if not rows:
+                xs = []
         act = [float(r["eps_actual"]) for r in rows]
         est = [r.get("eps_est") for r in rows]
         colors = [(_GREEN if (r.get("surprise_pct") or 0) >= 0 else _RED) for r in rows]
@@ -1284,6 +1356,11 @@ def price_chart(hist, ticker: str = "", *, kind: str = "line", avg_cost=None,
     if fund_row:
         import pandas as pd
         f_xs = [pd.Timestamp(r["date"]) for r in fund_rows]
+        if even_candle_axis:
+            f_xs = [_snap_x_to_index(hist.index, x, side="previous") for x in f_xs]
+            pairs = [(x, r) for x, r in zip(f_xs, fund_rows) if x is not None]
+            f_xs = [x for x, _ in pairs]
+            fund_rows = [r for _, r in pairs]
         f_rev = [r.get("revenue") for r in fund_rows]
         f_ni = [r.get("net_income") for r in fund_rows]
         f_hover = []
@@ -1335,18 +1412,22 @@ def price_chart(hist, ticker: str = "", *, kind: str = "line", avg_cost=None,
                          col=1 if panes > 1 else None)
         _log_fixup_price_shapes(fig)       # 가격축 도형·주석 y → log10 (plotly 규약)
     _t(fig)
+    if even_candle_axis:
+        _use_even_candle_axis(fig, hist.index)
     if rangebreaks:
         fig.update_xaxes(rangebreaks=rangebreaks)
     if panes > 1:
         fig.update_xaxes(rangeslider_visible=False)   # 서브플롯 제약 — 팬/줌으로 탐색
         return _initial_view_sub(fig, hist, view_days,
                                   y_override=(cmp_initial_yrange(close, compare, view_days)
-                                              if cmp_mode else None), log_scale=log_scale)
+                                              if cmp_mode else None), log_scale=log_scale,
+                                  category_x=even_candle_axis)
     fig.update_layout(xaxis=dict(rangeslider=dict(visible=True, thickness=0.08),
                                  rangebreaks=rangebreaks))
     return _initial_view(fig, hist, view_days,
                          y_override=(cmp_initial_yrange(close, compare, view_days)
-                                     if cmp_mode else None), log_scale=log_scale)
+                                     if cmp_mode else None), log_scale=log_scale,
+                         category_x=even_candle_axis)
 
 
 def _add_extremes_and_last(fig, hist, view_days, panes) -> None:
@@ -1388,7 +1469,8 @@ def _add_extremes_and_last(fig, hist, view_days, panes) -> None:
                        bgcolor=chip, borderpad=2, **({"row": 1, "col": 1} if panes > 1 else {}))
 
 
-def _initial_view_sub(fig, hist, view_days, y_override=None, log_scale: bool = False):
+def _initial_view_sub(fig, hist, view_days, y_override=None, log_scale: bool = False,
+                      category_x: bool = False):
     """RSI 서브플롯용 초기 표시창 — x 공유축 범위만 (y 는 가격 창 기준).
 
     y_override=(lo, hi) — 비교(%) 모드에서 가격 창 대신 % 프레임 주입.
@@ -1407,7 +1489,10 @@ def _initial_view_sub(fig, hist, view_days, y_override=None, log_scale: bool = F
     win = hist[hist.index >= start]
     if len(win) < 2:
         return fig
-    fig.update_xaxes(range=[start, end + (end - start) * 0.02])
+    x_range = _category_view_range(hist, view_days) if category_x else [
+        start, end + (end - start) * 0.02
+    ]
+    fig.update_xaxes(range=x_range)
     if y_override:
         fig.update_yaxes(range=list(y_override), row=1, col=1)
         return fig

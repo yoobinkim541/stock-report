@@ -158,6 +158,38 @@ def test_price_candle_ohlc_and_ma():
     assert fig.layout.xaxis.rangeslider.visible is True         # 과거 탐색 레인지슬라이더 (내비 개편)
 
 
+def test_price_chart_candles_use_category_axis_to_avoid_overlap_with_gaps():
+    idx = pd.date_range("2026-08-03 09:30", periods=30, freq="5min", tz="America/New_York")
+    hist = pd.DataFrame({
+        "Open": [100.0 + i * 0.1 for i in range(len(idx))],
+        "High": [100.5 + i * 0.1 for i in range(len(idx))],
+        "Low": [99.5 + i * 0.1 for i in range(len(idx))],
+        "Close": [100.2 + i * 0.1 for i in range(len(idx))],
+        "Volume": [1000.0 + i for i in range(len(idx))],
+    }, index=idx)
+
+    fig = charts.price_chart(hist, "AAPL", kind="candle", show_volume=True)
+    candle = next(tr for tr in fig.data if getattr(tr, "type", "") == "candlestick")
+
+    assert len(candle.x) == len(hist)
+    assert fig.layout.xaxis.type == "category"
+    assert not (fig.layout.xaxis.rangebreaks or ())
+
+
+def test_price_chart_weekly_monthly_candles_are_visible():
+    weekly = _ohlc(12)
+    weekly.index = pd.date_range("2026-01-02", periods=12, freq="W-FRI")
+    monthly = _ohlc(8)
+    monthly.index = pd.date_range("2026-01-31", periods=8, freq="ME")
+
+    for hist in (weekly, monthly):
+        fig = charts.price_chart(hist, "AAPL", kind="candle")
+        candle = next(tr for tr in fig.data if getattr(tr, "type", "") == "candlestick")
+        assert len(candle.x) == len(hist)
+        assert fig.layout.xaxis.type == "category"
+        assert not (fig.layout.xaxis.rangebreaks or ())
+
+
 def test_price_candle_collapses_duplicate_timestamps():
     idx = pd.to_datetime(["2025-01-01 09:30", "2025-01-01 09:30", "2025-01-02 09:30"])
     hist = pd.DataFrame({"Open": [100.0, 101.0, 103.0],
@@ -189,6 +221,27 @@ def test_price_candle_trade_marker_falls_back_to_close():
     assert list(buy.y)[0] == 104  # close on 2025-01-05 from _ohlc start=100
 
 
+def test_price_chart_candle_trade_markers_snap_to_existing_bars():
+    hist = _ohlc(10)
+    fig = charts.price_chart(hist, "NVDA", kind="candle", trades=[
+        {"event_id": "e4", "timestamp": "2025-01-05T12:34:56", "ticker": "NVDA",
+         "side": "buy", "qty": 1, "price": None, "avg_price": 104}
+    ])
+    candle = next(tr for tr in fig.data if getattr(tr, "type", "") == "candlestick")
+    buy = next(tr for tr in fig.data if tr.name == "Buy")
+    assert list(buy.x)[0] in set(candle.x)
+
+
+def test_price_chart_candle_events_snap_to_existing_bars():
+    hist = _ohlc(10)
+    fig = charts.price_chart(hist, "NVDA", kind="candle", events=[
+        {"date": "2025-01-05T12:34:56", "marker": "N", "color": "#26a69a", "hover": "news"}
+    ])
+    candle = next(tr for tr in fig.data if getattr(tr, "type", "") == "candlestick")
+    ev = next(tr for tr in fig.data if tr.name == "이벤트 N")
+    assert list(ev.x)[0] in set(candle.x)
+
+
 def test_price_candle_handles_missing_ohlc():
     # OHLC 불완전(Close만)·None·빈 → 빈 Figure(예외 없이)
     assert _is_fig(charts.price_candle(pd.DataFrame({"Close": [1, 2, 3]})))
@@ -196,18 +249,18 @@ def test_price_candle_handles_missing_ohlc():
     assert _is_fig(charts.price_candle(pd.DataFrame()))
 
 
-def test_price_candle_compresses_weekend_gaps():
+def test_price_candle_uses_category_axis_instead_of_weekend_rangebreaks():
     idx = pd.to_datetime(["2024-01-05", "2024-01-08", "2024-01-09"])
     hist = pd.DataFrame({"Open": [100.0, 101.0, 102.0],
                          "High": [101.0, 102.0, 103.0],
                          "Low": [99.0, 100.0, 101.0],
                          "Close": [100.5, 101.5, 102.5]}, index=idx)
     fig = charts.price_candle(hist, "AAPL")
-    rbounds = [tuple(getattr(rb, "bounds", ()) or ()) for rb in (fig.layout.xaxis.rangebreaks or [])]
-    assert ("sat", "mon") in rbounds
+    assert fig.layout.xaxis.type == "category"
+    assert not (fig.layout.xaxis.rangebreaks or ())
 
 
-def test_intraday_candle_smooth_mode_hides_off_session():
+def test_intraday_candle_smooth_mode_uses_even_bar_spacing():
     idx = pd.date_range("2024-01-02 09:30", periods=24, freq="5min")
     hist = pd.DataFrame({
         "Open": [100.0 + i * 0.3 for i in range(len(idx))],
@@ -217,8 +270,8 @@ def test_intraday_candle_smooth_mode_hides_off_session():
         "Volume": [100.0 + i for i in range(len(idx))],
     }, index=idx)
     fig = charts.intraday_candle(hist, "AAPL", smooth=True)
-    patterns = [getattr(rb, "pattern", None) for rb in (fig.layout.xaxis.rangebreaks or [])]
-    assert "hour" in patterns
+    assert fig.layout.xaxis.type == "category"
+    assert not (fig.layout.xaxis.rangebreaks or ())
     assert any(getattr(tr, "type", "") == "candlestick" for tr in fig.data)
 
 
@@ -436,8 +489,9 @@ def test_initial_view_window_full_history():
     fig = charts.price_candle(hist, "T", view_days=180)
     assert len(fig.data[0].x) == 2500                            # 데이터는 전체 보존
     x0, x1 = fig.layout.xaxis.range
-    assert pd.Timestamp(x0) >= idx[0] and pd.Timestamp(x1) >= idx[-1]
-    assert (pd.Timestamp(x1) - pd.Timestamp(x0)).days <= 200     # 초기 창 ≈ 6개월
+    assert fig.layout.xaxis.type == "category"
+    assert x0 >= 0 and x1 >= len(hist) - 1
+    assert (x1 - x0) <= 220                                      # 초기 창 ≈ 6개월
     assert fig.layout.yaxis.range[1] < 150                       # y 는 창 데이터(110) 기준 — 과거 고점(200) 아님
     # view_days 없으면 전체 표시(범위 미설정) · 창보다 짧은 이력도 전체
     assert charts.price_line(hist, "T").layout.xaxis.range is None
