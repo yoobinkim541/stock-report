@@ -131,6 +131,9 @@ _TF = {"5분": "5m", "1시간": "1h", "2시간": "2h", "4시간": "4h",
        "1일": "1d", "주": "1wk", "월": "1mo"}
 # yfinance 인트라데이 보존 한계 (정직 표기) — 2h/4h 는 1h 리샘플이라 같은 한계
 _TF_SPAN = {"5m": "최근 60일", "1h": "최근 2년", "2h": "최근 2년", "4h": "최근 2년"}
+_PERIODS = ["3mo", "6mo", "1y", "5y", "전체"]
+_PERIOD_DEFAULT_BY_TF = {"5m": "3mo", "1h": "6mo", "2h": "1y", "4h": "1y",
+                         "1d": "6mo", "1wk": "5y", "1mo": "5y"}
 _MA_OPTS = [5, 10, 20, 60, 120, 200]
 _MA_DEFAULT = {"1d": [60, 120, 200], "1wk": [60, 120, 200],   # 요청 기본값
                "1mo": [5, 10, 20, 60, 120, 200], "5m": [20, 60], "1h": [20, 60]}
@@ -763,10 +766,12 @@ def _price_chart(ticker, hist, avg_cost, trades, fullscreen: bool = False,
                                    label_visibility="collapsed", key="_chart_kind",
                                    help="HA = 하이킨아시(평활 캔들·표시용 — 실체결가와 다름)")
     # 기간 = 초기 표시 창 — 데이터는 뷰의 5배 팬버퍼로 윈도잉(charts.view_window·"전체"=전량)
-    period = cper.radio("기간", ["3mo", "6mo", "1y", "5y", "전체"], index=1, horizontal=True,
-                        label_visibility="collapsed", key="_chart_period")
-    view_days = {"3mo": 90, "6mo": 180, "1y": 365, "5y": 1825, "전체": None}[period]
     tf = _TF[tf_label]
+    period_key = f"_chart_period_{tf}"
+    period_default = _PERIOD_DEFAULT_BY_TF.get(tf, "6mo")
+    period = cper.radio("기간", _PERIODS, index=_PERIODS.index(period_default), horizontal=True,
+                        label_visibility="collapsed", key=period_key)
+    view_days = {"3mo": 90, "6mo": 180, "1y": 365, "5y": 1825, "전체": None}[period]
     cmp_active = _compare_state(ticker)
     cmp_label = f"⇄ 비교 {len(cmp_active)}" if cmp_active else "⇄ 비교"
     if c4.button(cmp_label, key="_cmp_toggle", width="stretch",

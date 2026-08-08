@@ -24,7 +24,7 @@ def render():
       .stMainBlockContainer { padding: 0.6rem 1rem 0 !important; max-width: 100% !important; }
       .tn-tape { display: none !important; }
     </style>""", unsafe_allow_html=True)
-    workspace_mode = st.toggle("워크스페이스 모드", value=True, key="_chart_workspace_mode",
+    workspace_mode = st.toggle("워크스페이스 모드", value=False, key="_chart_workspace_mode",
                                help="저장형 멀티차트 작업공간으로 보기")
     if workspace_mode:
         chart_workspace_ui.render_chart_workspace(st.session_state.get("_cw_workspace"))

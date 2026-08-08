@@ -135,6 +135,23 @@ def load_cached_ohlc(symbol: str, period: str = "1y"):
     return None
 
 
+def save_cached_ohlc(symbol: str, period: str, df) -> bool:
+    """OHLC parquet 캐시를 저장한다.
+
+    dashboard.views·dashboard.cached 가 같은 디스크 경로를 공유하도록 공용 헬퍼로 둔다.
+    저장 성공 시 True, 실패 시 False.
+    """
+    try:
+        if df is None or getattr(df, "empty", True):
+            return False
+        p = _ohlc_disk_path(symbol, period)
+        p.parent.mkdir(parents=True, exist_ok=True)
+        normalize_ohlc_frame(df).to_parquet(p)
+        return True
+    except Exception:
+        return False
+
+
 def _cached_price_paths(symbol: str) -> list[Path]:
     """ml/data_pipeline 가 남긴 price_*.pkl 캐시 후보를 최근 길이 순으로 반환."""
     cache_dir = Path.home() / "reports" / "ml-cache"

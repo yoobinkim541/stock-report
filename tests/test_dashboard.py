@@ -791,6 +791,8 @@ def test_views_ohlc_tf_2h_4h_resample(monkeypatch):
     import pandas as pd
     import yfinance as yf
     from dashboard import views
+    import providers.intraday_bars as ib
+    import providers.market_data as md
     idx = pd.date_range("2026-07-06 08:00", periods=8, freq="h")   # 2h 버킷 경계 정렬
     hourly = pd.DataFrame({"Open": range(100, 108), "High": range(101, 109),
                            "Low": range(99, 107), "Close": range(100, 108),
@@ -805,6 +807,9 @@ def test_views_ohlc_tf_2h_4h_resample(monkeypatch):
             seen["interval"] = interval
             return hourly
 
+    monkeypatch.setattr(md, "load_cached_ohlc", lambda *a, **k: None)
+    monkeypatch.setattr(ib, "available_dates", lambda base_dir=None: [])
+    monkeypatch.setattr(ib, "load_bars", lambda *a, **k: pd.DataFrame())
     monkeypatch.setattr(yf, "Ticker", _T)
     d2 = views.ohlc_tf("NVDA", "2h")
     assert seen["interval"] == "1h"                       # 2h 는 yf 미지원 → 1h 조회
@@ -1244,6 +1249,33 @@ def test_ohlc_tf_resamples_weekly_monthly(monkeypatch):
     assert views.ohlc_tf("TST", "1d") is daily                      # 일봉 = 원본 passthrough
 
 
+def test_ohlc_tf_prefers_cached_daily_for_weekly_monthly(monkeypatch, tmp_path):
+    """주·월봉은 디스크 일봉 캐시를 먼저 읽고 네트워크 없이 리샘플해야 한다."""
+    import pandas as pd
+    from dashboard import views
+    import providers.market_data as md
+
+    idx = pd.date_range("2026-02-02", periods=8, freq="B")
+    daily = pd.DataFrame({"Open": range(10, 18), "High": range(20, 28),
+                          "Low": range(1, 9), "Close": range(15, 23),
+                          "Volume": [100.0] * 8}, index=idx)
+    save_calls = []
+
+    monkeypatch.setattr(md, "load_cached_ohlc",
+                        lambda symbol, period="1y": daily if period in {"1d", "max"} else None)
+    monkeypatch.setattr(md, "save_cached_ohlc",
+                        lambda symbol, period, df: save_calls.append((period, len(df))) or True)
+    monkeypatch.setattr(md, "_history_cached",
+                        lambda *a, **k: (_ for _ in ()).throw(AssertionError("network fallback called")))
+
+    wk = views.ohlc_tf("TST", "1wk")
+    mo = views.ohlc_tf("TST", "1mo")
+
+    assert len(wk) == 2 and len(mo) == 1
+    assert any(p == "1wk" for p, _ in save_calls)
+    assert any(p == "1mo" for p, _ in save_calls)
+
+
 def test_ohlc_tf_collapses_duplicate_daily_rows(monkeypatch):
     """일봉 원본에도 중복 시점이 섞이면 하나의 봉으로 병합해야 한다."""
     import pandas as pd
@@ -1266,6 +1298,53 @@ def test_ohlc_tf_collapses_duplicate_daily_rows(monkeypatch):
     assert list(out["Close"]) == [13.0, 14.5]
     assert list(out["Volume"]) == [300.0, 300.0]
     assert out.index.is_monotonic_increasing and out.index.is_unique
+
+
+def test_ohlc_tf_uses_intraday_store_before_yfinance(monkeypatch):
+    """5m/1h/2h/4h 는 로컬 분봉 스토어를 우선해 time frame 별로 다르게 복원해야 한다."""
+    import pandas as pd
+    import yfinance as yf
+    from dashboard import views
+    import providers.intraday_bars as ib
+    import providers.market_data as md
+
+    idx1 = pd.date_range("2026-07-07 09:30", periods=12, freq="min", tz="America/New_York")
+    idx2 = pd.date_range("2026-07-08 09:30", periods=12, freq="min", tz="America/New_York")
+    day1 = pd.DataFrame({"Open": range(100, 112), "High": range(101, 113),
+                         "Low": range(99, 111), "Close": range(100, 112),
+                         "Volume": [10.0] * 12}, index=idx1)
+    day2 = pd.DataFrame({"Open": range(200, 212), "High": range(201, 213),
+                         "Low": range(199, 211), "Close": range(200, 212),
+                         "Volume": [20.0] * 12}, index=idx2)
+    saved = {}
+
+    monkeypatch.setattr(ib, "available_dates", lambda base_dir=None: ["2026-07-07", "2026-07-08"])
+    monkeypatch.setattr(ib, "load_bars",
+                        lambda symbol, date_utc=None, *, interval="1m", base_dir=None:
+                        day1 if date_utc == "2026-07-07" else day2 if date_utc == "2026-07-08"
+                        else pd.DataFrame())
+    monkeypatch.setattr(ib, "market_of", lambda ticker: "US")
+    monkeypatch.setattr(md, "load_cached_ohlc", lambda *a, **k: None)
+    def _save(symbol, period, df):
+        saved[period] = df.copy()
+        return True
+    monkeypatch.setattr(md, "save_cached_ohlc", _save)
+
+    class _BadTicker:
+        def __init__(self, ticker):
+            raise AssertionError("yfinance should not be used when local store exists")
+
+    monkeypatch.setattr(yf, "Ticker", _BadTicker)
+
+    out5 = views.ohlc_tf("AAPL", "5m")
+    out1h = views.ohlc_tf("AAPL", "1h")
+    out2h = views.ohlc_tf("AAPL", "2h")
+    out4h = views.ohlc_tf("AAPL", "4h")
+
+    assert not out5.empty and not out1h.empty and not out2h.empty and not out4h.empty
+    assert len(out1h) < len(out5) and len(out2h) <= len(out1h) and len(out4h) <= len(out2h)
+    assert out5.index.is_monotonic_increasing and out5.index.is_unique
+    assert all(k in saved for k in ("5m", "1h", "2h", "4h"))
 
 
 # ── 가치평가 종합 점수 (게이지용 · 순수) ──────────────────────────────────────

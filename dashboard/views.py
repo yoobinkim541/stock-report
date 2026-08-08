@@ -1480,21 +1480,134 @@ def world_timeline(ticker: str, limit: int = 10) -> dict:
         return {"issues": [], "chain": [], "error": str(e)}
 
 
+def _ohlc_cache_candidates(tf: str, *, include_base: bool = False) -> tuple[str, ...]:
+    tf = str(tf or "1d").lower().strip() or "1d"
+    if tf == "1d":
+        return ("1d", "max") if include_base else ("1d",)
+    if tf in ("1wk", "1mo"):
+        return (tf, "max", "1d") if include_base else (tf,)
+    return (tf,)
+
+
+def _load_cached_ohlc_tf(ticker: str, tf: str, *, include_base: bool = False):
+    """디스크 OHLC 캐시를 먼저 읽는다."""
+    try:
+        from providers import market_data
+    except Exception:
+        return None
+    for period in _ohlc_cache_candidates(tf, include_base=include_base):
+        try:
+            hist = normalize_ohlc_frame(market_data.load_cached_ohlc(ticker, period))
+        except Exception:
+            hist = None
+        if hist is not None and not getattr(hist, "empty", True):
+            return hist
+    return None
+
+
+def _save_cached_ohlc_tf(ticker: str, period: str, hist) -> None:
+    try:
+        from providers import market_data
+        market_data.save_cached_ohlc(ticker, period, hist)
+    except Exception:
+        pass
+
+
+def _resample_ohlc_frame(hist, rule: str, *, market: str | None = None,
+                         session_aligned: bool = False):
+    import pandas as pd
+
+    hist = normalize_ohlc_frame(hist)
+    if hist is None or getattr(hist, "empty", True):
+        return hist
+    agg = {"Open": "first", "High": "max", "Low": "min", "Close": "last"}
+    if "Volume" in getattr(hist, "columns", []):
+        agg["Volume"] = "sum"
+    kwargs = {}
+    if session_aligned:
+        offset_min = 9 * 60 if market == "KR" else 9 * 60 + 30
+        kwargs["origin"] = "start_day"
+        kwargs["offset"] = pd.Timedelta(minutes=offset_min)
+    try:
+        out = hist.resample(rule, **kwargs).agg(agg).dropna(subset=["Open"])
+    except Exception:
+        return hist
+    return normalize_ohlc_frame(out)
+
+
+def _load_intraday_store_tf(ticker: str, tf: str):
+    """로컬 1m bar store 를 이어 붙여 5m/1h/2h/4h 를 만든다."""
+    import pandas as pd
+
+    try:
+        from providers import intraday_bars
+    except Exception:
+        return None
+
+    dates = intraday_bars.available_dates()
+    if not dates:
+        return None
+
+    session_limits = {"5m": 90, "1h": 180, "2h": 180, "4h": 180}
+    limit = session_limits.get(tf, 90)
+    frames = []
+    for date in dates[-limit:]:
+        frame = intraday_bars.load_bars(ticker, date, interval="1m")
+        if frame is None or getattr(frame, "empty", True):
+            frame = intraday_bars.load_bars(ticker, date, interval="5m")
+        if frame is not None and not getattr(frame, "empty", True):
+            frames.append(frame)
+    if not frames:
+        return None
+
+    hist = normalize_ohlc_frame(pd.concat(frames))
+    if hist is None or getattr(hist, "empty", True):
+        return None
+    market = intraday_bars.market_of(ticker)
+    rule = {"5m": "5min", "1h": "1h", "2h": "2h", "4h": "4h"}.get(tf, tf)
+    return _resample_ohlc_frame(hist, rule, market=market, session_aligned=True)
+
+
 def ohlc_tf(ticker: str, tf: str = "1d"):
     """타임프레임별 OHLCV — 1d/1wk/1mo 는 전체(주·월봉은 일봉 리샘플·무추가호출),
     5m 은 최근 60일·1h 는 최근 2년 (yfinance 인트라데이 보존 한계).
     2h/4h 는 yfinance 미지원 → 1h 를 리샘플(같은 2년 한계). 실패 None."""
     try:
+        tf = str(tf or "1d").lower().strip() or "1d"
         from providers.market_data import _history_cached
-        agg = {"Open": "first", "High": "max", "Low": "min", "Close": "last"}
-        if tf in ("1d", "1wk", "1mo"):
+        if tf == "1d":
+            cached = _load_cached_ohlc_tf(ticker, tf, include_base=True)
+            if cached is not None:
+                return cached
             d = normalize_ohlc_frame(_history_cached(ticker, period="max"))
-            if d is None or getattr(d, "empty", True) or tf == "1d":
-                return d
-            rule = "W" if tf == "1wk" else "ME"
-            if "Volume" in d.columns:
-                agg["Volume"] = "sum"
-            return normalize_ohlc_frame(d.resample(rule).agg(agg).dropna(subset=["Open"]))
+            if d is not None and not getattr(d, "empty", True):
+                _save_cached_ohlc_tf(ticker, "max", d)
+                _save_cached_ohlc_tf(ticker, "1d", d)
+            return d
+
+        if tf in ("1wk", "1mo"):
+            cached = _load_cached_ohlc_tf(ticker, tf)
+            if cached is not None:
+                return cached
+            base = _load_cached_ohlc_tf(ticker, "1d", include_base=True)
+            if base is None or getattr(base, "empty", True):
+                base = normalize_ohlc_frame(_history_cached(ticker, period="max"))
+            if base is None or getattr(base, "empty", True):
+                return None
+            rule = "W-FRI" if tf == "1wk" else "ME"
+            resampled = _resample_ohlc_frame(base, rule)
+            if resampled is not None and not getattr(resampled, "empty", True):
+                _save_cached_ohlc_tf(ticker, tf, resampled)
+            return resampled if resampled is not None and not getattr(resampled, "empty", True) else None
+
+        cached = _load_cached_ohlc_tf(ticker, tf)
+        if cached is not None:
+            return cached
+        hist = _load_intraday_store_tf(ticker, tf)
+        if hist is not None and not getattr(hist, "empty", True):
+            _save_cached_ohlc_tf(ticker, tf, hist)
+            return hist
+
         import yfinance as yf
         resample_rule = {"2h": "2h", "4h": "4h"}.get(tf)
         interval = "1h" if resample_rule else tf
@@ -1503,10 +1616,11 @@ def ohlc_tf(ticker: str, tf: str = "1d"):
         if df is None or df.empty:
             return None
         if resample_rule:
-            if "Volume" in df.columns:
-                agg["Volume"] = "sum"
-            df = normalize_ohlc_frame(df.resample(resample_rule).agg(agg).dropna(subset=["Open"]))
-        return df if not df.empty else None
+            df = _resample_ohlc_frame(df, resample_rule)
+        if df is not None and not getattr(df, "empty", True):
+            _save_cached_ohlc_tf(ticker, tf, df)
+            return df
+        return None
     except Exception:
         return None
 

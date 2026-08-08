@@ -622,11 +622,22 @@ def _alert_run_events(run: dict[str, Any]) -> list[dict[str, Any]]:
     return [event for event in events or [] if isinstance(event, dict)]
 
 
-def _alert_event_markers_for_panel(runs: list[dict[str, Any]], panel: dict[str, Any]) -> list[dict[str, Any]]:
+def _alert_event_markers_for_panel(
+    runs: list[dict[str, Any]],
+    panel: dict[str, Any],
+    *,
+    cutoff=None,
+) -> list[dict[str, Any]]:
     symbol = str((panel or {}).get("ticker") or "").upper().strip()
     if not symbol:
         return []
     markers: list[dict[str, Any]] = []
+    cutoff_ts = None
+    if cutoff is not None:
+        try:
+            cutoff_ts = pd.Timestamp(cutoff)
+        except Exception:
+            cutoff_ts = None
     for run in runs or []:
         for event in _alert_run_events(run):
             event_symbol = str(event.get("symbol") or "").upper().strip()
@@ -635,6 +646,13 @@ def _alert_event_markers_for_panel(runs: list[dict[str, Any]], panel: dict[str, 
             timestamp = str(event.get("as_of") or event.get("timestamp") or "").strip()
             if not timestamp:
                 continue
+            if cutoff_ts is not None:
+                try:
+                    event_ts = pd.Timestamp(timestamp)
+                    if event_ts > cutoff_ts:
+                        continue
+                except Exception:
+                    pass
             try:
                 price = float(event.get("current_price"))
             except (TypeError, ValueError):
