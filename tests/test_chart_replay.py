@@ -168,6 +168,59 @@ def test_order_price_patch_rejects_drawings_market_orders_and_invalid_brackets()
         chart_replay.preview_order_price_patch(bracket, "entry:stop", 111)
 
 
+def test_pending_order_can_be_cancelled_and_settings_changes_are_audited():
+    session = chart_replay.submit_order(
+        _session(), {"id": "waiting", "type": "limit", "side": "buy", "qty": 1, "price": 90},
+    )
+    cancelled = chart_replay.cancel_order(session, "waiting")
+    assert cancelled["orders"][0]["status"] == "cancelled"
+    assert cancelled["events"][-1]["type"] == "order_cancelled"
+    with pytest.raises(ValueError, match="pending"):
+        chart_replay.cancel_order(cancelled, "waiting")
+
+    changed = chart_replay.update_settings(cancelled, {
+        "fees_bps": 2, "slippage_bps": 3, "max_leverage": 1.5, "maintenance_margin": 0.3,
+    })
+    assert changed["settings"] == {
+        "fees_bps": 2.0, "slippage_bps": 3.0, "max_leverage": 1.5,
+        "maintenance_margin": 0.3,
+    }
+    assert changed["events"][-1]["type"] == "settings_updated"
+
+
+def test_advance_records_cursor_timestamp_for_stable_restore():
+    session = chart_replay.advance(_session(), _bars(), steps=2)
+    assert session["cursor_timestamp"] == _bars().index[2].isoformat()
+
+
+def test_maintenance_margin_forces_audited_full_liquidation():
+    bars = _bars().iloc[:3].copy()
+    bars.loc[:, "Open"] = [100, 100, 45]
+    bars.loc[:, "High"] = [101, 101, 50]
+    bars.loc[:, "Low"] = [99, 99, 39]
+    bars.loc[:, "Close"] = [100, 100, 40]
+    session = _session(max_leverage=2, maintenance_margin=0.4)
+    session = chart_replay.submit_order(
+        session, {"id": "levered", "type": "market", "side": "buy", "qty": 180},
+    )
+    session = chart_replay.advance(session, bars, steps=1)
+    assert session["positions"]["MSFT"]["qty"] == 180
+
+    liquidated = chart_replay.advance(session, bars, steps=1)
+
+    assert liquidated["positions"] == {}
+    assert liquidated["fills"][-1]["side"] == "sell"
+    assert liquidated["fills"][-1]["price"] == pytest.approx(40)
+    assert any(event["type"] == "margin_liquidation" for event in liquidated["events"])
+
+
+def test_advance_migrates_legacy_settings_without_maintenance_margin():
+    session = _session()
+    session["settings"].pop("maintenance_margin")
+    advanced = chart_replay.advance(session, _bars(), steps=1)
+    assert advanced["settings"]["maintenance_margin"] == pytest.approx(0.25)
+
+
 def test_fees_slippage_leverage_nav_and_drawdown_are_explicit():
     session = _session(fees_bps=10, slippage_bps=20, max_leverage=2)
     session = chart_replay.submit_order(session, {"id": "lev", "type": "market", "side": "buy", "qty": 150})

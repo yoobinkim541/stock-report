@@ -11,6 +11,7 @@ from dashboard import (
     cached,
     chart_document,
     chart_renderer,
+    chart_replay_ui,
     chart_workbench,
     chart_workbench_ui,
     chart_workspace,
@@ -120,6 +121,7 @@ def _render_panel_chart(
     *,
     height: int = 420,
     replay_until=None,
+    replay_context: dict[str, Any] | None = None,
 ) -> None:
     hist = _load_panel_hist(panel)
     if hist is None or getattr(hist, "empty", True):
@@ -156,6 +158,11 @@ def _render_panel_chart(
         "freshness": "provider-dependent",
         "quality": "indicative",
     })
+    panel_replay = None
+    if replay_context and replay_context.get("active"):
+        session = replay_context.get("session") or {}
+        if session.get("symbol") == panel["ticker"] and session.get("timeframe") == panel["timeframe"]:
+            panel_replay = session
     rendered = chart_renderer.render_plotly_chart(
         document,
         hist,
@@ -185,6 +192,7 @@ def _render_panel_chart(
         show_pvt="PVT" in bottom,
         log_scale=bool(panel.get("log_scale")) and not compare,
         compare=compare,
+        replay_session=panel_replay,
         ),
     )
     fig = rendered.figure
@@ -205,6 +213,8 @@ def _render_panel_chart(
             pct_mode=bool(compare),
             store_key=store_key,
             drawing_sync_url=_drawing_sync_url(ws, store_key),
+            order_patch_url=(replay_context.get("order_patch_url") if panel_replay else None),
+            replay_revision=(replay_context.get("revision") if panel_replay else None),
             crosshair_key=_crosshair_store_key(ws),
             light=theme.is_light(),
         ),
@@ -279,30 +289,23 @@ def render_chart_workspace(
         active_panel.update(chart_document.panel_from_document(active_panel["document"], active_panel))
         st.session_state["_cw_workspace"] = ws
     replay_cutoff = None
+    replay_context: dict[str, Any] = {"active": False}
     if render_charts and active_panel:
-        st.markdown("##### Replay")
-        r1, r2, r3 = st.columns([0.9, 1.6, 0.8], vertical_alignment="bottom")
-        replay_on = r1.toggle("Replay", value=bool(st.session_state.get("_cw_replay_on", False)), key="_cw_replay_on")
-        if replay_on:
-            try:
-                active_hist = _load_panel_hist(active_panel)
-            except Exception:
-                active_hist = None
-            active_hist = charts.view_window(active_hist, _PERIOD_DAYS.get(active_panel.get("period") or "6mo")) if active_hist is not None else None
-            if active_hist is not None and not getattr(active_hist, "empty", True):
-                max_idx = max(0, len(active_hist) - 1)
-                current_idx = min(int(st.session_state.get("_cw_replay_idx", max_idx)), max_idx)
-                replay_idx = r2.slider("봉 위치", min_value=0, max_value=max_idx, value=current_idx, key="_cw_replay_idx")
-                replay_cutoff = active_hist.index[int(replay_idx)]
-                replay_text = replay_cutoff.strftime("%Y-%m-%d %H:%M") if hasattr(replay_cutoff, "strftime") else str(replay_cutoff)
-                r3.caption(replay_text)
-                if r3.button("실시간", key="_cw_replay_live", width="stretch"):
-                    st.session_state["_cw_replay_idx"] = max_idx
-                    st.rerun()
-            else:
-                r2.caption("리플레이용 데이터 없음")
-        else:
-            st.session_state.pop("_cw_replay_idx", None)
+        try:
+            active_hist = _load_panel_hist(active_panel)
+        except Exception:
+            active_hist = None
+        active_hist = charts.view_window(
+            active_hist, _PERIOD_DAYS.get(active_panel.get("period") or "6mo"),
+        ) if active_hist is not None else None
+        replay_context = chart_replay_ui.prepare_replay(
+            active_hist,
+            symbol=active_panel["ticker"],
+            timeframe=active_panel["timeframe"],
+            key_prefix=f"workspace_{ws.get('id', 'default')}_{active_panel['id']}",
+            workspace_id=str(ws.get("id") or "workspace-default"),
+        )
+        replay_cutoff = replay_context.get("as_of") if replay_context.get("active") else None
 
     panels = ws["panels"][: _panel_count(ws["layout"])]
     cols = _layout_columns(ws["layout"])
@@ -317,7 +320,12 @@ def render_chart_workspace(
                 st.session_state["_cw_workspace"] = ws
                 st.rerun()
             if render_charts:
-                _render_panel_chart(ws, panel, height=390 if len(panels) > 1 else 760, replay_until=replay_cutoff)
+                _render_panel_chart(
+                    ws, panel, height=390 if len(panels) > 1 else 760,
+                    replay_until=replay_cutoff, replay_context=replay_context,
+                )
+
+    chart_replay_ui.render_terminal(replay_context)
 
     _render_alert_manager(ws, panels)
     _render_analysis_rail(ws, render_charts=render_charts, replay_until=replay_cutoff)

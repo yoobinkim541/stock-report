@@ -32,9 +32,12 @@ def _settings(raw: Mapping[str, Any] | None) -> dict[str, float]:
         "fees_bps": _finite(value.get("fees_bps", 0)),
         "slippage_bps": _finite(value.get("slippage_bps", 0)),
         "max_leverage": _finite(value.get("max_leverage", 1), positive=True),
+        "maintenance_margin": _finite(value.get("maintenance_margin", 0.25), positive=True),
     }
     if out["fees_bps"] < 0 or out["slippage_bps"] < 0:
         raise ValueError("cost settings cannot be negative")
+    if out["maintenance_margin"] > 1:
+        raise ValueError("maintenance_margin cannot exceed 1")
     return out
 
 
@@ -111,6 +114,34 @@ def submit_order(session: Mapping[str, Any], order: Mapping[str, Any]) -> dict[s
         raise ValueError(f"duplicate order id: {normalized['id']}")
     out["orders"].append(normalized)
     out["events"].append({"type": "order_submitted", "order_id": normalized["id"], "cursor": out["cursor"]})
+    return out
+
+
+def cancel_order(session: Mapping[str, Any], order_id: str) -> dict[str, Any]:
+    out = copy.deepcopy(dict(session))
+    order_id = str(order_id or "").strip()
+    order = next((row for row in out.get("orders") or [] if str(row.get("id")) == order_id), None)
+    if order is None:
+        raise ValueError("order not found")
+    if order.get("status") != "pending":
+        raise ValueError("only pending orders can be cancelled")
+    cursor = int(out.get("cursor") or 0)
+    order.update({"status": "cancelled", "reason": "user", "resolved_cursor": cursor})
+    out["events"].append({
+        "type": "order_cancelled", "order_id": order_id, "reason": "user", "cursor": cursor,
+    })
+    return out
+
+
+def update_settings(session: Mapping[str, Any], settings: Mapping[str, Any]) -> dict[str, Any]:
+    out = copy.deepcopy(dict(session))
+    before = copy.deepcopy(out.get("settings") or {})
+    merged = {**before, **dict(settings or {})}
+    out["settings"] = _settings(merged)
+    out["events"].append({
+        "type": "settings_updated", "cursor": int(out.get("cursor") or 0),
+        "before": before, "after": copy.deepcopy(out["settings"]),
+    })
     return out
 
 
@@ -296,8 +327,49 @@ def _mark_metrics(session: dict[str, Any], close: float) -> None:
     }
 
 
+def _apply_maintenance_margin(
+    session: dict[str, Any],
+    *,
+    close: float,
+    timestamp: Any,
+    cursor: int,
+) -> None:
+    metrics = session.get("metrics") or {}
+    exposure = float(metrics.get("gross_exposure") or 0.0)
+    nav = float(metrics.get("nav") or 0.0)
+    if exposure <= 0 or nav / exposure >= float(session["settings"]["maintenance_margin"]):
+        return
+    for order in session.get("orders") or []:
+        if order.get("status") == "pending":
+            order.update({"status": "cancelled", "reason": "margin", "resolved_cursor": cursor})
+            session["events"].append({
+                "type": "order_cancelled", "order_id": order["id"],
+                "reason": "margin", "cursor": cursor,
+            })
+    session["events"].append({
+        "type": "margin_liquidation", "cursor": cursor,
+        "nav": nav, "gross_exposure": exposure,
+        "maintenance_margin": float(session["settings"]["maintenance_margin"]),
+    })
+    for symbol, position in list(session["positions"].items()):
+        order = _normalized_order(
+            {
+                "id": f"margin-{cursor}-{symbol}-{uuid.uuid4().hex[:8]}",
+                "type": "market", "side": "sell", "qty": int(position["qty"]), "symbol": symbol,
+            },
+            cursor=max(0, cursor - 1),
+            symbol=symbol,
+        )
+        order["reason"] = "margin"
+        session["orders"].append(order)
+        price = close * (1.0 - float(session["settings"]["slippage_bps"]) / 10_000.0)
+        _execute(session, order, price, timestamp, cursor, close)
+    _mark_metrics(session, close)
+
+
 def advance(session: Mapping[str, Any], bars, *, steps: int = 1) -> dict[str, Any]:
     out = copy.deepcopy(dict(session))
+    out["settings"] = _settings(out.get("settings"))
     frame = normalize_ohlc_frame(bars)
     if frame is None or frame.empty:
         return out
@@ -320,7 +392,11 @@ def advance(session: Mapping[str, Any], bars, *, steps: int = 1) -> dict[str, An
             if price is not None:
                 _execute(out, order, price, frame.index[cursor], cursor, float(row["Close"]))
         out["cursor"] = cursor
+        out["cursor_timestamp"] = pd.Timestamp(frame.index[cursor]).isoformat()
         _mark_metrics(out, float(row["Close"]))
+        _apply_maintenance_margin(
+            out, close=float(row["Close"]), timestamp=frame.index[cursor], cursor=cursor,
+        )
         out["events"].append({"type": "cursor_advanced", "cursor": cursor, "timestamp": pd.Timestamp(frame.index[cursor]).isoformat()})
     return out
 

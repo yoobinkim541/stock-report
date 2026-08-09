@@ -14,6 +14,7 @@ from dashboard import (
     cached,
     chart_document,
     chart_renderer,
+    chart_replay_ui,
     chart_workbench,
     chart_workbench_ui,
     charts,
@@ -50,7 +51,8 @@ def render():
         # ⚡자동 갱신 토글은 fragment **밖** — 켜고 끄기가 래퍼(주기 재실행)를 전환해야 함
         live = st.toggle("⚡ 자동 갱신 (8초)", key="_chart_live",
                          help="실시간가로 마지막 봉·현재가 갱신 — 보던 위치·드로잉 유지")
-        _chart = _price_chart_live if live else _price_chart_frag
+        _chart = (_price_chart_replay if st.session_state.get("_chart_replay_playing")
+                  else (_price_chart_live if live else _price_chart_frag))
         _chart(ticker, hist, pos.get("avg_price_usd") if pos else None,
                data.trade_events(ticker))
     else:
@@ -216,6 +218,12 @@ def _price_chart_frag(ticker, hist, avg_cost, trades, fullscreen: bool = False):
     비프래그먼트로 render 에 인라인이면 컨트롤 하나 바꿀 때마다 페이지 전체(히어로·호가·
     진입레벨·분석 섹션)가 재실행돼 체감 버벅임의 주원인이 된다 (H-series UX 모델 복원).
     """
+    _price_chart(ticker, hist, avg_cost, trades, fullscreen)
+
+
+@st.fragment(run_every=1)
+def _price_chart_replay(ticker, hist, avg_cost, trades, fullscreen: bool = False):
+    """Replay wrapper; the terminal advances by its configured speed each tick."""
     _price_chart(ticker, hist, avg_cost, trades, fullscreen)
 
 
@@ -962,6 +970,21 @@ def _price_chart(ticker, hist, avg_cost, trades, fullscreen: bool = False,
                 df.loc[_il, "High"] = max(float(df.loc[_il, "High"]), float(_rt))
             if "Low" in df.columns:
                 df.loc[_il, "Low"] = min(float(df.loc[_il, "Low"]), float(_rt))
+    replay_context = chart_replay_ui.prepare_replay(
+        df,
+        symbol=ticker,
+        timeframe=render_tf,
+        key_prefix=f"ticker_{ticker}_{render_tf}",
+        workspace_id=f"ticker:{ticker}:{render_tf}",
+    )
+    if replay_context["active"]:
+        df = replay_context["frame"]
+        compare = {
+            name: chart_replay_ui.slice_until(series, replay_context["as_of"])
+            for name, series in compare.items()
+        }
+        trades = chart_replay_ui.records_until(trades or [], replay_context["as_of"])
+        _client_rt = False
     # 로그 스케일은 비교(%) 모드와 공존 불가 — 비교 시 자동 비활성
     use_log = bool(log_scale) and not compare
     _df_events = df   # 이벤트 조립용 원본 참조 — HA 변환은 Dividends 열을 보존 안 함
@@ -985,9 +1008,11 @@ def _price_chart(ticker, hist, avg_cost, trades, fullscreen: bool = False,
     events, zones = _chart_events(ticker, _df_events, ev_sel) if not compare else ([], [])
     if "진입존 🎯" in ev_sel and not compare:
         try:
-            zones = _chart_entry_zones(ticker, hist, float(hist["Close"].iloc[-1]))
+            zones = _chart_entry_zones(ticker, _df_events, float(_df_events["Close"].iloc[-1]))
         except Exception:
             zones = []
+    if replay_context["active"]:
+        events = chart_replay_ui.records_until(events, replay_context["as_of"])
     document = chart_document.default_chart_document(ticker)
     document["timeframe"] = render_tf
     document["period"] = period
@@ -1028,7 +1053,8 @@ def _price_chart(ticker, hist, avg_cost, trades, fullscreen: bool = False,
                   if "분기 EPS" in bottom and not compare
                   and not ticker_names.is_macro(ticker) else None),
         fundamentals=fund_rows,
-        events=events, zones=zones),
+        events=events, zones=zones,
+        replay_session=replay_context["session"] if replay_context["active"] else None),
     )
     fig = rendered.figure
     for warning in rendered.warnings:
@@ -1059,6 +1085,8 @@ def _price_chart(ticker, hist, avg_cost, trades, fullscreen: bool = False,
                 vol_axis="yaxis2" if show_vol else None, bounds_json=_bj,
                 fit_viewport=fullscreen, pct_mode=bool(compare), y_log=use_log,
                 store_key=_sk, dock=fullscreen, live=_client_rt,
+                order_patch_url=replay_context["order_patch_url"],
+                replay_revision=replay_context["revision"],
                 light=theme.is_light()),
             height=h + 164)
         if _client_rt:
@@ -1076,6 +1104,7 @@ def _price_chart(ticker, hist, avg_cost, trades, fullscreen: bool = False,
         _trade_detail(selected)
     elif trades:
         st.caption("차트의 ▲/▼ 거래 마커 클릭 = 상세 · 전체 이력·되돌리기는 하단 ⚙️ 내 포지션 관리")
+    chart_replay_ui.render_terminal(replay_context)
     def _analysis_loader(symbol, timeframe):
         if timeframe == "1d":
             return cached.ohlc(symbol, period="max")
