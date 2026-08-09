@@ -10,7 +10,16 @@ import streamlit as st
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 
 import ticker_names
-from dashboard import cached, charts, data, theme
+from dashboard import (
+    cached,
+    chart_document,
+    chart_renderer,
+    chart_workbench,
+    chart_workbench_ui,
+    charts,
+    data,
+    theme,
+)
 
 _NOBAR = {"displayModeBar": False}
 
@@ -761,10 +770,18 @@ def _price_chart(ticker, hist, avg_cost, trades, fullscreen: bool = False,
                 st.switch_page(pg)
     tf_label = ctf.segmented_control("봉", list(_TF), default="1일",
                                      label_visibility="collapsed", key="_chart_tf") or "1일"
-    kind_default = "🟩 HA" if tf_label == "5분" else "📈 라인"
-    kind = ckind.segmented_control("차트 종류", ["📈 라인", "🕯️ 캔들", "🟩 HA"], default=kind_default,
-                                   label_visibility="collapsed", key="_chart_kind",
-                                   help="HA = 하이킨아시(평활 캔들·표시용 — 실체결가와 다름)")
+    chart_types = [item for values in chart_workbench_ui.CHART_TYPE_GROUPS.values() for item in values]
+    kind_default = "heikin_ashi" if tf_label == "5분" else "line"
+    kind = ckind.selectbox(
+        "차트 종류",
+        chart_types,
+        index=chart_types.index(st.session_state.get("_chart_kind_value", kind_default))
+        if st.session_state.get("_chart_kind_value", kind_default) in chart_types else chart_types.index(kind_default),
+        format_func=lambda value: chart_workbench_ui.CHART_TYPE_LABELS[value],
+        label_visibility="collapsed",
+        key="_chart_kind_value",
+        help="가격 기반 변환 차트는 OHLCV 봉으로 재구성된 표시값이며 실체결 틱이 아닙니다.",
+    )
     # 기간 = 초기 표시 창 — 데이터는 뷰의 5배 팬버퍼로 윈도잉(charts.view_window·"전체"=전량)
     tf = _TF[tf_label]
     render_tf = tf
@@ -773,6 +790,28 @@ def _price_chart(ticker, hist, avg_cost, trades, fullscreen: bool = False,
     period = cper.radio("기간", _PERIODS, index=_PERIODS.index(period_default), horizontal=True,
                         label_visibility="collapsed", key=period_key)
     view_days = {"3mo": 90, "6mo": 180, "1y": 365, "5y": 1825, "전체": None}[period]
+    chart_params = {}
+    if kind in {"renko", "kagi"}:
+        auto_size = st.toggle("ATR 자동 크기", value=True, key=f"_chart_auto_size_{kind}_{tf}")
+        size = st.number_input(
+            "박스 크기" if kind == "renko" else "반전 크기",
+            min_value=0.000001, value=1.0, key=f"_chart_box_size_{kind}_{tf}",
+            disabled=auto_size,
+        )
+        if not auto_size:
+            chart_params["box_size" if kind == "renko" else "reversal"] = size
+    elif kind == "line_break":
+        chart_params["lines"] = st.number_input(
+            "반전 라인 수", min_value=1, max_value=20, value=3, key=f"_chart_lines_{tf}",
+        )
+    elif kind == "range":
+        auto_size = st.toggle("ATR 자동 크기", value=True, key=f"_chart_auto_size_range_{tf}")
+        range_size = st.number_input(
+            "레인지 크기", min_value=0.000001, value=1.0,
+            key=f"_chart_range_size_{tf}", disabled=auto_size,
+        )
+        if not auto_size:
+            chart_params["range_size"] = range_size
     cmp_active = _compare_state(ticker)
     cmp_label = f"⇄ 비교 {len(cmp_active)}" if cmp_active else "⇄ 비교"
     if c4.button(cmp_label, key="_cmp_toggle", width="stretch",
@@ -827,18 +866,29 @@ def _price_chart(ticker, hist, avg_cost, trades, fullscreen: bool = False,
         log_scale = st.toggle("로그 스케일", key=f"_logscale_{tf}",
                               help="가격축을 로그로 — 장기·급등 종목의 % 변화 비교에 유리 "
                                    "(비교 모드·서브패널 제외)")
+        session_policy = st.selectbox(
+            "거래 세션",
+            ["regular", "extended", "all"],
+            index=1 if tf in {"5m", "1h", "2h", "4h"} else 0,
+            format_func=lambda value: {"regular": "정규장", "extended": "정규+시간외", "all": "전체 세션"}[value],
+            key=f"_chart_session_{tf}",
+        )
         legacy = st.toggle("구형 렌더러", key="_legacy_chart",
                            help="plotly.js CDN 불가 환경 폴백 — 팬 시 y 자동맞춤·인차트 상세 없음")
         st.caption("봉 단위별로 설정이 기억됩니다 · 범례 클릭으로도 개별 토글")
-    df = hist
-    if tf != "1d":
-        df = cached.ohlc_tf(ticker, tf)
-        if df is None or getattr(df, "empty", True):
-            st.caption(f"⚠️ {tf_label}봉 데이터 없음 — 일봉으로 표시")
-            df = hist
-            render_tf = "1d"
-        elif tf in _TF_SPAN:
-            st.caption(f"ℹ️ {tf_label}봉은 {_TF_SPAN[tf]}까지 제공 (yfinance 보존 한계) · 주/월/일봉은 전체 이력")
+    bundle = cached.chart_data_bundle(ticker, tf, session_policy=session_policy)
+    df = (bundle or {}).get("frame")
+    source_status = (bundle or {}).get("source") or {}
+    session_status = (bundle or {}).get("session") or {}
+    if df is None or getattr(df, "empty", True):
+        actual = (bundle or {}).get("actual_timeframe") or "없음"
+        st.warning(f"{tf_label}봉 데이터가 없습니다. 다른 봉으로 대체하지 않았습니다. 실제 감지: {actual}")
+        if session_status.get("decision") == "timeframe_mismatch":
+            st.caption("데이터 공급자가 요청 봉과 다른 간격을 반환해 표시를 중단했습니다.")
+        return
+    if tf in _TF_SPAN:
+        session_label = {"regular": "정규장", "extended": "정규+시간외", "all": "전체 세션"}[session_policy]
+        st.caption(f"{tf_label}봉은 {_TF_SPAN[tf]}까지 제공 · 세션 {session_label}")
     label = ticker_names.label(ticker)
     show_rsi = "RSI" in bottom
     show_rsi_div = show_rsi and "RSI 다이버전스" in bottom
@@ -894,7 +944,8 @@ def _price_chart(ticker, hist, avg_cost, trades, fullscreen: bool = False,
     # plotly_embed patchLast). 서버 bake 를 하면 8초마다 srcdoc 이 바뀌어 iframe
     # 재마운트(그리던 드로잉 리셋 + 대형 재전송)가 일어나므로 live 땐 생략해 html 을
     # 바이트 안정으로 유지. HA·비교·구형 렌더러는 클라 패치 미지원 → 종전 bake 유지.
-    _client_rt = (bool(live) and not compare and not legacy and kind != "🟩 HA"
+    _client_rt = (bool(live) and not compare and not legacy and kind not in {
+                  "heikin_ashi", "renko", "kagi", "line_break", "range"}
                   and df is not None and not getattr(df, "empty", True))
     # ⚡ 실시간 — 마지막 봉을 KIS 실시간가로 패치 (fresh 시·비교 모드 제외).
     # 캐시된 df 원본 오염 금지 → copy 후 수정. HA 변환 앞이라 HA 도 최신가 반영.
@@ -914,17 +965,10 @@ def _price_chart(ticker, hist, avg_cost, trades, fullscreen: bool = False,
     # 로그 스케일은 비교(%) 모드와 공존 불가 — 비교 시 자동 비활성
     use_log = bool(log_scale) and not compare
     _df_events = df   # 이벤트 조립용 원본 참조 — HA 변환은 Dividends 열을 보존 안 함
-    # 하이킨아시 — 표시용 평활 변형(OHLC 재계산·거래량 보존). OHLC 없으면 라인 폴백.
-    use_ha = kind == "🟩 HA" and not compare
+    # 하이킨아시와 가격 변환 차트는 공용 렌더러가 한 번만 변환한다.
+    use_ha = kind == "heikin_ashi" and not compare
     if use_ha:
-        _ha = charts.heikin_ashi(df)
-        if _ha is not df:
-            df = _ha
-            st.caption("🟩 하이킨아시 — 평활 캔들(표시용) · 시고저종은 HA 재계산값 — "
-                       "실제 체결가·평단 비교는 근사")
-        else:
-            use_ha = False
-            st.caption("⚠️ 하이킨아시는 OHLC 필요 — 라인으로 표시")
+        st.caption("하이킨아시 — 평활 캔들 표시값이며 실제 체결 OHLC와 다릅니다.")
     # 📊 펀더멘털 패널 데이터 — 분기 우선·부족하면 연간 (ETF·매크로는 빈 rows → 생략)
     fund_rows = None
     if show_fund and not compare:
@@ -944,8 +988,31 @@ def _price_chart(ticker, hist, avg_cost, trades, fullscreen: bool = False,
             zones = _chart_entry_zones(ticker, hist, float(hist["Close"].iloc[-1]))
         except Exception:
             zones = []
-    fig = charts.price_chart(
-        df, label, kind=("candle" if (kind == "🕯️ 캔들" or use_ha) else "line"),
+    document = chart_document.default_chart_document(ticker)
+    document["timeframe"] = render_tf
+    document["period"] = period
+    document["chart"] = {"type": kind, "params": chart_params}
+    document["session"]["policy"] = session_policy
+    document["scale"]["type"] = "log" if use_log else "linear"
+    document["source"].update({
+        "name": str(source_status.get("name") or source_status.get("source") or "market-data"),
+        "as_of": source_status.get("as_of") or (str(df.index[-1]) if len(df.index) else None),
+        "freshness": str(source_status.get("freshness") or "unknown"),
+        "quality": "indicative",
+    })
+    for index, compare_symbol in enumerate(cmp_tickers, 1):
+        document["series"].append({
+            "id": f"compare-{index}",
+            "kind": "benchmark",
+            "symbol": compare_symbol,
+            "axis": "primary",
+            "normalization": "visible_start",
+            "visible": True,
+        })
+    rendered = chart_renderer.render_plotly_chart(
+        document,
+        df,
+        chart_kwargs=dict(
         avg_cost=avg_cost, trades=trades, view_days=view_days, mas=mas,
         show_rsi=show_rsi, show_rsi_div=show_rsi_div, bollinger="볼린저 밴드" in top,
         ichimoku="일목균형표" in top, trend_lines=tls, show_volume=show_vol,
@@ -961,11 +1028,16 @@ def _price_chart(ticker, hist, avg_cost, trades, fullscreen: bool = False,
                   if "분기 EPS" in bottom and not compare
                   and not ticker_names.is_macro(ticker) else None),
         fundamentals=fund_rows,
-        events=events, zones=zones)
+        events=events, zones=zones),
+    )
+    fig = rendered.figure
+    for warning in rendered.warnings:
+        st.caption(warning)
     if fullscreen:                                  # ⛶ 풀뷰 — 뷰포트 거의 채우는 높이
         fig.update_layout(height=840)
     event = None
-    if legacy:
+    sequence_chart = rendered.transform.x_mode == "sequence"
+    if legacy or sequence_chart:
         try:
             event = st.plotly_chart(
                 fig, width="stretch", config=charts.PAN_DRAW_CFG,
@@ -980,7 +1052,7 @@ def _price_chart(ticker, hist, avg_cost, trades, fullscreen: bool = False,
                if compare else None)                   # 비교 모드 — % 프레임으로 y 맞춤
         # 드로잉 영속화 키 — 좌표계가 다른 조합(스케일·HA)은 분리 버킷
         _scale = "pct" if compare else ("log" if use_log else "lin")
-        _sk = f"{ticker}:{render_tf}:{_scale}" + (":ha" if use_ha else "")
+        _sk = f"{ticker}:{render_tf}:{_scale}:{kind}"
         st.components.v1.html(
             plotly_embed.pannable_chart_html(
                 fig, df, height=h, view_days=view_days,
@@ -1004,6 +1076,37 @@ def _price_chart(ticker, hist, avg_cost, trades, fullscreen: bool = False,
         _trade_detail(selected)
     elif trades:
         st.caption("차트의 ▲/▼ 거래 마커 클릭 = 상세 · 전체 이력·되돌리기는 하단 ⚙️ 내 포지션 관리")
+    def _analysis_loader(symbol, timeframe):
+        if timeframe == "1d":
+            return cached.ohlc(symbol, period="max")
+        return cached.ohlc_tf(symbol, timeframe)
+
+    snapshot = chart_workbench.build_analysis_snapshot(
+        document,
+        df,
+        ohlc_loader=_analysis_loader,
+        fundamental_loader=lambda symbol: cached.valuation(symbol) or {},
+        alert_loader=lambda symbol: data.ticker_alerts(symbol) or [],
+    )
+    chart_workbench_ui.render_analysis_rail(snapshot)
+    with st.expander("시리즈·조건·내보내기", expanded=False):
+        managed_document = chart_workbench_ui.render_series_manager(
+            document, key_prefix=f"ticker_{ticker}_{tf}",
+        )
+        managed_compare = [
+            str(item.get("symbol") or "")
+            for item in managed_document.get("series") or []
+            if item.get("id") != "primary" and item.get("kind") in {"benchmark", "peer"}
+            and bool(item.get("visible", True))
+        ][:3]
+        if managed_compare != cmp_tickers:
+            st.session_state["_cmp_active"] = managed_compare
+            _rerun_chart_fragment()
+        document = managed_document
+        condition = chart_workbench_ui.render_condition_builder(document, key_prefix=f"ticker_{ticker}_{tf}")
+        if condition is not None:
+            st.session_state[f"_chart_condition_{ticker}_{tf}"] = condition
+        chart_workbench_ui.render_exports(document, df, snapshot, key_prefix=f"ticker_{ticker}_{tf}")
     _alert_section(ticker, hist)
 
 

@@ -332,20 +332,24 @@ def create_app() -> Flask:
             enabled=True,
             limit=int(payload.get("limit") or 200),
         )
-        events = chart_alert_runner.evaluate_alert_rules(rules, bars, as_of=payload.get("as_of"))
-        for event in events:
-            alert_id = str(event.get("alert_id") or "").strip()
+        evaluations: list[dict] = []
+        events = chart_alert_runner.evaluate_alert_rules(
+            rules, bars, as_of=payload.get("as_of"), state_sink=evaluations,
+        )
+        for state in evaluations:
+            alert_id = str(state.get("rule_id") or "").strip()
             if alert_id:
-                storage.update_chart_alert_state(alert_id, {
-                    "triggered": True,
-                    "event": event,
-                    "last_price": event.get("current_price"),
-                    "last_checked_at": event.get("as_of") or payload.get("as_of"),
-                })
+                storage.update_chart_alert_state(alert_id, state)
         notification = {"attempted": 0, "delivered": 0, "failed": 0, "failures": []}
         if bool(payload.get("notify")) and events:
             notification = chart_alert_dispatcher.dispatch_alert_events(events)
-        return jsonify({"ok": True, "event_count": len(events), "events": events, "notification": notification})
+        return jsonify({
+            "ok": True,
+            "event_count": len(events),
+            "events": events,
+            "evaluations": evaluations,
+            "notification": notification,
+        })
 
     @app.get("/api/local-install-prompt")
     def local_install_prompt():

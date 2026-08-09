@@ -173,21 +173,21 @@ def test_chart_template_payload_and_apply_across_scopes():
 
     style_tpl = cw.chart_template_payload(ws, kind="style", name="Clean Style")
     assert style_tpl["id"] == "style-clean-style"
-    assert style_tpl["payload"] == {
-        "chart_kind": "candlestick",
-        "timeframe": "1h",
-        "period": "1y",
-        "log_scale": True,
-    }
+    assert style_tpl["payload"]["chart_kind"] == "candlestick"
+    assert style_tpl["payload"]["timeframe"] == "1h"
+    assert style_tpl["payload"]["period"] == "1y"
+    assert style_tpl["payload"]["log_scale"] is True
+    assert style_tpl["payload"]["document_style"]["chart"]["type"] == "candlestick"
 
     ind_tpl = cw.chart_template_payload(ws, kind="indicators", name="Momentum Pack")
-    assert ind_tpl["payload"] == {
-        "top_indicators": ["이동평균선", "볼린저 밴드"],
-        "bottom_indicators": ["거래량", "RSI"],
-    }
+    assert ind_tpl["payload"]["top_indicators"] == ["이동평균선", "볼린저 밴드"]
+    assert ind_tpl["payload"]["bottom_indicators"] == ["거래량", "RSI"]
+    assert ind_tpl["payload"]["studies"]
 
     series_tpl = cw.chart_template_payload(ws, kind="series", name="NVDA Focus")
-    assert series_tpl["payload"] == {"ticker": "NVDA", "compare": ["AMD"]}
+    assert series_tpl["payload"]["ticker"] == "NVDA"
+    assert series_tpl["payload"]["compare"] == ["AMD"]
+    assert [series["symbol"] for series in series_tpl["payload"]["series"]] == ["NVDA", "AMD"]
 
     applied = cw.apply_chart_template(cw.default_workspace("AAPL"), style_tpl)
     assert applied["panels"][0]["chart_kind"] == "candlestick"
@@ -210,6 +210,35 @@ def test_chart_template_payload_and_apply_across_scopes():
     assert applied_all["panels"][0]["timeframe"] == "1h"
     assert applied_all["panels"][1]["timeframe"] == "1h"
     assert applied_all["panels"][1]["chart_kind"] == "candlestick"
+
+
+def test_document_backed_templates_round_trip_custom_series_studies_and_style():
+    document = cd.default_chart_document("MSFT")
+    document["chart"] = {"type": "renko", "params": {"box_size": 2.5}}
+    document["session"]["policy"] = "extended"
+    document["studies"].append({
+        "id": "sma-fast", "kind": "registered", "name": "sma", "pane": "top",
+        "visible": True, "params": {"period": 10},
+    })
+    document["series"].append({
+        "id": "paper-nav", "kind": "portfolio", "symbol": "PAPER", "axis": "secondary",
+        "normalization": "visible_start", "visible": True,
+    })
+    source = cw.normalize_workspace({"panels": [{"document": document}]})
+
+    style = cw.chart_template_payload(source, kind="style", name="Renko")
+    indicators = cw.chart_template_payload(source, kind="indicators", name="Studies")
+    series = cw.chart_template_payload(source, kind="series", name="Series")
+    target = cw.default_workspace("AAPL")
+    target = cw.apply_chart_template(target, style)
+    target = cw.apply_chart_template(target, indicators)
+    target = cw.apply_chart_template(target, series)
+    restored = target["panels"][0]["document"]
+
+    assert restored["chart"]["params"] == {"box_size": 2.5}
+    assert restored["session"]["policy"] == "extended"
+    assert any(study.get("id") == "sma-fast" for study in restored["studies"])
+    assert any(item.get("id") == "paper-nav" for item in restored["series"])
 
 
 def test_dashboard_workspace_wrappers_forward_storage(monkeypatch):

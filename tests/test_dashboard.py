@@ -1409,6 +1409,43 @@ def test_chart_data_bundle_applies_session_policy_without_changing_ohlc_tf_contr
     assert views.ohlc_tf("AAPL", "5m") is hist
 
 
+def test_chart_data_bundle_keeps_provider_timezone_separate_from_exchange_timezone(monkeypatch):
+    import pandas as pd
+    from dashboard import views
+
+    hist = pd.DataFrame(
+        {"Open": [100, 101, 102, 103], "High": [101, 102, 103, 104],
+         "Low": [99, 100, 101, 102], "Close": [100, 101, 102, 103], "Volume": [10] * 4},
+        index=pd.date_range("2024-03-11 13:25", periods=4, freq="5min"),
+    )
+    hist.attrs["timezone"] = "UTC"
+    monkeypatch.setattr(views, "ohlc_tf", lambda ticker, timeframe: hist)
+
+    bundle = views.chart_data_bundle("AAPL", "5m")
+
+    assert list(bundle["frame"].index.strftime("%H:%M")) == ["09:30", "09:35", "09:40"]
+    assert bundle["session"]["provider_timezone"] == "UTC"
+    assert bundle["session"]["timezone"] == "America/New_York"
+    assert bundle["session"]["timezone_assumption"] is False
+
+
+def test_chart_data_bundle_marks_naive_timestamps_uncertain_without_provider_timezone(monkeypatch):
+    import pandas as pd
+    from dashboard import views
+
+    hist = pd.DataFrame(
+        {"Open": [100, 101, 102, 103], "High": [101, 102, 103, 104],
+         "Low": [99, 100, 101, 102], "Close": [100, 101, 102, 103], "Volume": [10] * 4},
+        index=pd.date_range("2024-03-11 09:25", periods=4, freq="5min"),
+    )
+    monkeypatch.setattr(views, "ohlc_tf", lambda ticker, timeframe: hist)
+
+    bundle = views.chart_data_bundle("AAPL", "5m")
+
+    assert bundle["session"]["timezone_assumption"] is True
+    assert bundle["session"]["provider_timezone"] is None
+
+
 def test_chart_data_bundle_does_not_substitute_daily_bars_for_missing_intraday(monkeypatch):
     from dashboard import views
 
@@ -1419,6 +1456,57 @@ def test_chart_data_bundle_does_not_substitute_daily_bars_for_missing_intraday(m
     assert bundle["frame"] is None
     assert bundle["requested_timeframe"] == bundle["actual_timeframe"] == "5m"
     assert bundle["source"]["freshness"] == "unknown"
+
+
+def test_chart_data_bundle_rejects_daily_returned_for_5m_with_detected_actual_timeframe(monkeypatch):
+    import pandas as pd
+    from dashboard import views
+
+    hist = pd.DataFrame(
+        {"Open": range(5), "High": range(1, 6), "Low": range(5), "Close": range(5), "Volume": [10] * 5},
+        index=pd.date_range("2024-03-04", periods=5, freq="B"),
+    )
+    monkeypatch.setattr(views, "ohlc_tf", lambda ticker, timeframe: hist)
+
+    bundle = views.chart_data_bundle("AAPL", "5m")
+
+    assert bundle["frame"] is None
+    assert bundle["requested_timeframe"] == "5m"
+    assert bundle["actual_timeframe"] == "1d"
+    assert bundle["source"]["actual_timeframe"] == "1d"
+    assert bundle["source"]["timeframe_mismatch"] is True
+
+
+def test_chart_data_bundle_keeps_single_daily_bar_that_matches_the_request(monkeypatch):
+    import pandas as pd
+    from dashboard import views
+
+    hist = pd.DataFrame(
+        {"Open": [100], "High": [101], "Low": [99], "Close": [100], "Volume": [10]},
+        index=pd.DatetimeIndex(["2024-03-04"]),
+    )
+    monkeypatch.setattr(views, "ohlc_tf", lambda ticker, timeframe: hist)
+
+    bundle = views.chart_data_bundle("AAPL", "1d")
+
+    assert bundle["frame"] is not None
+    assert bundle["actual_timeframe"] == "1d"
+
+
+@pytest.mark.parametrize(
+    ("frequency", "expected"),
+    [("1h", "1h"), ("2h", "2h"), ("4h", "4h"), ("7D", "1wk"), ("30D", "1mo")],
+)
+def test_detected_ohlc_timeframe_prefers_nearest_cadence_when_bounds_overlap(frequency, expected):
+    import pandas as pd
+    from dashboard import views
+
+    hist = pd.DataFrame(
+        {"Close": [100, 101, 102]},
+        index=pd.date_range("2024-01-01", periods=3, freq=frequency),
+    )
+
+    assert views._detected_ohlc_timeframe(hist) == expected
 
 
 # ── 가치평가 종합 점수 (게이지용 · 순수) ──────────────────────────────────────

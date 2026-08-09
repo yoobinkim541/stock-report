@@ -1,15 +1,17 @@
 from __future__ import annotations
 
 import argparse
+import inspect
 import json
 from typing import Any, Callable
 
 import pandas as pd
 
 from . import chart_alert_dispatcher, chart_alert_runner, storage
+from dashboard import chart_conditions
 
 
-LoadBarsFn = Callable[[str, str], Any]
+LoadBarsFn = Callable[..., Any]
 
 
 def run_chart_alert_cycle(
@@ -32,29 +34,39 @@ def run_chart_alert_cycle(
         rules = [rule for rule in rules if str(rule.get("symbol") or "").upper().strip() in symbol_filter]
 
     loader = load_bars_fn or load_chart_alert_bars
-    events: list[dict[str, Any]] = []
-    missing_bars: list[dict[str, str]] = []
-    for timeframe, tf_rules in _rules_by_timeframe(rules).items():
-        bars_by_symbol: dict[str, Any] = {}
-        for symbol in _symbols_for_rules(tf_rules):
-            bars = loader(symbol, timeframe)
-            if _bars_available(bars):
-                bars_by_symbol[symbol] = bars
-            else:
-                missing_bars.append({"symbol": symbol, "timeframe": timeframe})
-        if bars_by_symbol:
-            events.extend(chart_alert_runner.evaluate_alert_rules(tf_rules, bars_by_symbol))
+    requirements: set[tuple[str, str]] = set()
+    for rule in rules:
+        symbol = str(rule.get("symbol") or "").upper().strip()
+        timeframe = str(rule.get("timeframe") or "1d").lower().strip() or "1d"
+        try:
+            requirements.update(chart_conditions.condition_requirements(
+                rule.get("condition") or {}, default_symbol=symbol, default_timeframe=timeframe,
+            ))
+        except ValueError:
+            requirements.add((symbol, timeframe))
 
-    for event in events:
-        alert_id = str(event.get("alert_id") or "").strip()
-        if not alert_id:
+    bars_by_key: dict[tuple[str, str], Any] = {}
+    missing_bars: list[dict[str, str]] = []
+    for symbol, timeframe in sorted(requirements):
+        if not symbol:
             continue
-        storage.update_chart_alert_state(alert_id, {
-            "triggered": True,
-            "event": event,
-            "last_price": event.get("current_price"),
-            "last_checked_at": event.get("as_of"),
-        })
+        try:
+            bars = _call_loader(loader, symbol, timeframe)
+        except Exception:
+            bars = None
+        if _bars_available(bars):
+            bars_by_key[(symbol, timeframe)] = bars
+        else:
+            missing_bars.append({"symbol": symbol, "timeframe": timeframe})
+
+    evaluations: list[dict[str, Any]] = []
+    events = chart_alert_runner.evaluate_alert_rules(
+        rules, bars_by_key, state_sink=evaluations,
+    )
+    for state in evaluations:
+        rule_id = str(state.get("rule_id") or "").strip()
+        if rule_id:
+            storage.update_chart_alert_state(rule_id, state)
 
     notification = {"attempted": 0, "delivered": 0, "failed": 0, "failures": []}
     if notify and events:
@@ -66,6 +78,7 @@ def run_chart_alert_cycle(
         "rule_count": len(rules),
         "event_count": len(events),
         "events": events,
+        "evaluations": evaluations,
         "missing_bars": missing_bars,
         "notification": notification,
     }
@@ -81,6 +94,24 @@ def run_chart_alert_cycle(
     result["run_id"] = saved_run["id"]
     result["created_at"] = saved_run["created_at"]
     return result
+
+
+def _call_loader(loader: LoadBarsFn, symbol: str, timeframe: str):
+    """Use one-argument loaders only in the explicit legacy compatibility path."""
+    try:
+        signature = inspect.signature(loader)
+        positional = [
+            parameter for parameter in signature.parameters.values()
+            if parameter.kind in {parameter.POSITIONAL_ONLY, parameter.POSITIONAL_OR_KEYWORD}
+        ]
+        variadic = any(
+            parameter.kind == parameter.VAR_POSITIONAL
+            for parameter in signature.parameters.values()
+        )
+        one_argument = not variadic and len(positional) == 1
+    except (TypeError, ValueError):
+        one_argument = False
+    return loader(symbol) if one_argument else loader(symbol, timeframe)
 
 
 def load_chart_alert_bars(symbol: str, timeframe: str) -> pd.DataFrame | None:

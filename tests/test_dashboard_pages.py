@@ -173,6 +173,13 @@ cached.institution_watch = lambda keys=None: {
 }
 cached.ohlc = lambda t, period="6mo": pd.DataFrame(
     {"Open":range(100,170),"High":range(101,171),"Low":range(99,169),"Close":range(100,170)}, index=_IDX)
+cached.ohlc_tf = lambda t, tf: cached.ohlc(t, period="max")
+cached.chart_data_bundle = lambda t, tf, session_policy="regular": {
+    "frame": cached.ohlc_tf(t, tf), "requested_timeframe": tf, "actual_timeframe": tf,
+    "session": {"policy": session_policy, "decision": "provider_bars_retained"},
+    "source": {"name": "test-bars", "source": "test-bars", "as_of": str(_IDX[-1]),
+               "freshness": "delayed", "market": "us", "timezone": "America/New_York"},
+}
 cached.screener = lambda n: {"rows": [{"rank": 1, "ticker": "NVDA", "name": "NVIDIA",
     "score": 2.54, "price": 196.9, "tech_rating": "매수", "surv_flag": False,
     "reason": "52주 고점 근접 · 6M 모멘텀 +42%%", "rsi_14": 62.0,
@@ -1445,6 +1452,38 @@ ticker.render()
     frames = [i.proto.srcdoc for i in at.get("iframe")]
     main = [s for s in frames if "const pctMode = true" in s]
     assert main, "비교 선택 시 % 상대수익 차트로 렌더되어야 함"
+
+
+def test_ticker_chart_renko_uses_shared_renderer_without_iframe_assumptions():
+    script = _STUBS + '''
+cached.realtime_quote = lambda t: None
+st.session_state["_chart_kind_value"] = "renko"
+from dashboard.pages import ticker
+ticker.render()
+'''
+    at = AppTest.from_string(script, default_timeout=30)
+    at.run()
+    assert not at.exception, str(at.exception)
+    assert at.get("plotly_chart"), "가격 변환 차트는 공용 Plotly 렌더러로 표시되어야 함"
+
+
+def test_ticker_chart_rejects_intraday_daily_substitution():
+    script = _STUBS + '''
+cached.realtime_quote = lambda t: None
+st.session_state["_chart_tf"] = "5분"
+cached.chart_data_bundle = lambda t, tf, session_policy="regular": {
+    "frame": None, "requested_timeframe": tf, "actual_timeframe": "1d",
+    "session": {"policy": session_policy, "decision": "timeframe_mismatch"},
+    "source": {"name": "test-bars", "freshness": "unknown"},
+}
+from dashboard.pages import ticker
+ticker.render()
+'''
+    at = AppTest.from_string(script, default_timeout=30)
+    at.run()
+    assert not at.exception, str(at.exception)
+    warnings = " ".join(str(item.value) for item in at.warning)
+    assert "다른 봉으로 대체하지 않았습니다" in warnings
 
 
 def test_compare_window_aligns_to_shared_start():

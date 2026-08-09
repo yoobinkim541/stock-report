@@ -9,7 +9,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Iterable
 
-from dashboard import chart_workspace
+from dashboard import chart_conditions, chart_workspace
 from ml.strategy_studio import StrategySpec, strategy_spec_hash
 
 
@@ -1003,29 +1003,9 @@ def save_chart_alert_rule(rule: dict[str, Any]) -> dict[str, Any]:
 def _validate_chart_alert_condition(condition: dict[str, Any]) -> None:
     if not isinstance(condition, dict) or not condition:
         raise ValueError("condition object is required")
-    leaves = condition.get("all") if isinstance(condition.get("all"), list) else [condition]
-    if not leaves:
-        raise ValueError("condition.all must not be empty")
-    for item in leaves:
-        if not isinstance(item, dict):
-            raise ValueError("condition entries must be objects")
-        ctype = str(item.get("type") or "price").strip().lower()
-        operator = str(item.get("operator") or "").strip().lower()
-        if operator not in {"crossing", "crossing_up", "crossing_down", "greater_than", "less_than"}:
-            raise ValueError(f"unsupported alert operator: {operator}")
-        if ctype in {"price", "indicator"}:
-            if ctype == "indicator" and not str(item.get("field") or "").strip():
-                raise ValueError("indicator condition.field is required")
-            try:
-                float(item.get("value"))
-            except (TypeError, ValueError):
-                raise ValueError("condition.value must be numeric") from None
-        elif ctype == "drawing_line":
-            for key in ("x0", "y0", "x1", "y1"):
-                if item.get(key) in (None, ""):
-                    raise ValueError(f"drawing_line condition.{key} is required")
-        else:
-            raise ValueError(f"unsupported alert condition type: {ctype}")
+    errors = chart_conditions.validate_condition(condition)
+    if errors:
+        raise ValueError(errors[0])
 
 
 def get_chart_alert_rule(rule_id: str) -> dict[str, Any] | None:

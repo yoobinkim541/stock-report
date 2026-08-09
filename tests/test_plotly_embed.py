@@ -91,7 +91,10 @@ def test_embed_category_axis_mapping_contract():
     assert "const categoryX = true" in html
     assert "function rangeValueToMs" in html
     line_html = plotly_embed.pannable_chart_html(charts.price_chart(hist, "T"), hist)
-    assert "const categoryX = false" in line_html
+    assert "const categoryX = true" in line_html
+    compare_fig = charts.price_chart(hist, "T", compare={"QQQ": hist["Close"]})
+    compare_html = plotly_embed.pannable_chart_html(compare_fig, hist, pct_mode=True)
+    assert "const categoryX = false" in compare_html
 
 
 def test_embed_persistence_and_readout_contract():

@@ -74,6 +74,17 @@ def test_daily_or_higher_bypasses_session_time_filtering(timeframe):
     assert out.metadata["excluded_bars"] == 0
 
 
+def test_daily_naive_timestamps_keep_provenance_uncertainty_without_time_filtering():
+    hist = _bars(pd.DatetimeIndex(["2024-03-09", "2024-03-10", "2024-03-11"]))
+
+    out = policy.apply_session_policy(hist, market="us", timeframe="1d", policy="regular")
+
+    assert out.frame.equals(hist)
+    assert out.metadata["decision"] == "timeframe_bypass"
+    assert out.metadata["timezone_assumption"] is True
+    assert out.metadata["provider_timezone"] is None
+
+
 def test_naive_provider_timestamps_are_marked_uncertain_without_timezone_metadata():
     hist = _bars(pd.date_range("2024-03-11 09:25", periods=2, freq="5min"))
 
@@ -121,6 +132,20 @@ def test_chart_data_status_classifies_intraday_freshness_and_market_close():
     )
     assert closed["freshness"] == "realtime"
     assert closed["market_closed"] is True
+
+
+def test_chart_data_status_recognizes_direct_kst_fixed_offset_frames_as_korean():
+    hist = _bars(pd.DatetimeIndex(["2024-01-08 13:05:00+09:00"]))
+
+    status = policy.chart_data_status(
+        hist, requested_timeframe="5m", actual_timeframe="5m", source="yfinance",
+        now=datetime.fromisoformat("2024-01-08T13:10:00+09:00"),
+    )
+
+    assert status["market"] == "kr"
+    assert status["timezone"] == "Asia/Seoul"
+    assert status["market_closed"] is False
+    assert status["freshness"] == "delayed"
 
 
 def test_chart_data_status_marks_naive_timestamps_unknown_and_daily_is_stale_after_four_days():

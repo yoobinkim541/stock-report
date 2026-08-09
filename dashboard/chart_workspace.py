@@ -373,6 +373,9 @@ def chart_template_payload(
         raise ValueError("workspace has no panels")
     idx = _panel_index(ws, panel_id)
     panel = dict(panels[idx])
+    document = chart_document.normalize_chart_document(
+        panel.get("document"), ticker=panel.get("ticker") or "MSFT"
+    )
     kind = str(kind or "").strip().lower()
     if kind not in TEMPLATE_KINDS:
         raise ValueError(f"unsupported chart template kind: {kind}")
@@ -382,16 +385,24 @@ def chart_template_payload(
             "timeframe": panel.get("timeframe"),
             "period": panel.get("period"),
             "log_scale": bool(panel.get("log_scale")),
+            "document_style": {
+                "chart": copy.deepcopy(document.get("chart") or {}),
+                "session": copy.deepcopy(document.get("session") or {}),
+                "scale": copy.deepcopy(document.get("scale") or {}),
+                "renderer": copy.deepcopy(document.get("renderer") or {}),
+            },
         }
     elif kind == "indicators":
         payload = {
             "top_indicators": list(panel.get("top_indicators") or []),
             "bottom_indicators": list(panel.get("bottom_indicators") or []),
+            "studies": copy.deepcopy(document.get("studies") or []),
         }
     else:
         payload = {
             "ticker": panel.get("ticker"),
             "compare": list(panel.get("compare") or []),
+            "series": copy.deepcopy(document.get("series") or []),
         }
     return {
         "id": chart_template_id(kind, name),
@@ -458,6 +469,22 @@ def apply_chart_template(
             panel["compare"] = [_norm_ticker(x) for x in (payload.get("compare") or [])][:3]
             panel["series_template_id"] = str(record.get("id") or panel.get("series_template_id") or "")
         _sync_panel_document(panel, str(out.get("id") or ""), fields=sync_fields)
+        document = chart_document.normalize_chart_document(
+            panel.get("document"), ticker=panel.get("ticker") or "MSFT"
+        )
+        if kind == "style" and isinstance(payload.get("document_style"), dict):
+            style = payload["document_style"]
+            for key in ("chart", "session", "scale", "renderer"):
+                if isinstance(style.get(key), dict):
+                    document[key] = copy.deepcopy(style[key])
+        elif kind == "indicators" and isinstance(payload.get("studies"), list):
+            document["studies"] = copy.deepcopy(payload["studies"])
+        elif kind == "series" and isinstance(payload.get("series"), list):
+            document["series"] = copy.deepcopy(payload["series"])
+        panel["document"] = chart_document.normalize_chart_document(
+            document, ticker=panel.get("ticker") or "MSFT"
+        )
+        panel.update(chart_document.panel_from_document(panel["document"], panel))
     return normalize_workspace(out)
 
 

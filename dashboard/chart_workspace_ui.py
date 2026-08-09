@@ -7,7 +7,18 @@ from typing import Any
 import pandas as pd
 import streamlit as st
 
-from dashboard import cached, chart_analysis, chart_workspace, charts, data, theme, views
+from dashboard import (
+    cached,
+    chart_document,
+    chart_renderer,
+    chart_workbench,
+    chart_workbench_ui,
+    chart_workspace,
+    charts,
+    data,
+    theme,
+    views,
+)
 
 _PERIOD_DAYS = {"3mo": 90, "6mo": 180, "1y": 365, "5y": 1825, "전체": None}
 _TF_LABEL = {
@@ -94,9 +105,13 @@ def _drawing_sync_url(ws: dict[str, Any], store_key: str | None) -> str | None:
 def _load_panel_hist(panel: dict[str, Any]):
     ticker = panel["ticker"]
     tf = panel["timeframe"]
-    if tf == "1d":
-        return cached.ohlc(ticker, period="max")
-    return cached.ohlc_tf(ticker, tf)
+    document = chart_document.normalize_chart_document(
+        panel.get("document") or chart_document.document_from_panel(panel), ticker=ticker,
+    )
+    bundle = cached.chart_data_bundle(
+        ticker, tf, session_policy=document["session"]["policy"],
+    )
+    return (bundle or {}).get("frame")
 
 
 def _render_panel_chart(
@@ -125,10 +140,6 @@ def _render_panel_chart(
             if replay_until is not None:
                 series = series[series.index <= replay_until]
             compare[ticker] = series
-    kind = "line" if panel.get("chart_kind") == "line" else "candle"
-    if panel.get("chart_kind") == "heikin_ashi":
-        hist = charts.heikin_ashi(hist)
-        kind = "candle"
     top = set(panel.get("top_indicators") or [])
     bottom = set(panel.get("bottom_indicators") or [])
     try:
@@ -136,10 +147,19 @@ def _render_panel_chart(
     except Exception:
         alert_runs = []
     alert_markers = _alert_event_markers_for_panel(alert_runs, panel, cutoff=replay_until)
-    fig = charts.price_chart(
+    document = chart_document.normalize_chart_document(
+        panel.get("document"), ticker=panel["ticker"],
+    )
+    document["source"].update({
+        "name": "market-data",
+        "as_of": str(hist.index[-1]) if len(hist.index) else None,
+        "freshness": "provider-dependent",
+        "quality": "indicative",
+    })
+    rendered = chart_renderer.render_plotly_chart(
+        document,
         hist,
-        panel["ticker"],
-        kind=kind,
+        chart_kwargs=dict(
         trades=alert_markers,
         view_days=view_days,
         mas=(20, 60, 120, 200) if "이동평균선" in top else (),
@@ -165,7 +185,11 @@ def _render_panel_chart(
         show_pvt="PVT" in bottom,
         log_scale=bool(panel.get("log_scale")) and not compare,
         compare=compare,
+        ),
     )
+    fig = rendered.figure
+    for warning in rendered.warnings:
+        st.caption(warning)
     fig.update_layout(height=height)
     from dashboard import plotly_embed
 
@@ -247,6 +271,13 @@ def render_chart_workspace(
 
     active_panel = _active_panel(ws)
     active = active_panel["id"] if active_panel else (ws.get("active_panel") or "p1")
+    if active_panel:
+        active_panel["document"] = chart_workbench_ui.render_chart_toolbar(
+            active_panel.get("document") or chart_document.document_from_panel(active_panel),
+            key_prefix=f"cw_{ws.get('id', 'default')}_{active_panel['id']}",
+        )
+        active_panel.update(chart_document.panel_from_document(active_panel["document"], active_panel))
+        st.session_state["_cw_workspace"] = ws
     replay_cutoff = None
     if render_charts and active_panel:
         st.markdown("##### Replay")
@@ -743,15 +774,13 @@ def _render_analysis_rail(
     replay_until=None,
 ) -> None:
     st.divider()
-    st.markdown("##### 분석 레일")
     panel = _active_panel(ws)
     if not panel:
+        st.markdown("##### 분석 레일")
         st.caption("활성 패널을 선택하면 분석 레일이 표시됩니다.")
         return
-    st.caption(
-        f"{panel['ticker']} 활성 패널 기준 · 상대강도, 멀티타임프레임, 계절성, 자동 패턴 후보"
-    )
     if not render_charts:
+        st.markdown("##### 분석 레일")
         st.caption("차트 렌더링이 꺼진 모드에서는 데이터 조회 없이 분석 레일 구조만 표시합니다.")
         return
 
@@ -769,37 +798,40 @@ def _render_analysis_rail(
             st.info(f"{panel['ticker']} replay 구간에 분석 데이터가 없습니다.")
             return
 
-    benchmark = _benchmark_ticker(panel)
-    try:
-        bench_hist = cached.ohlc(benchmark, period="max") if benchmark else None
-    except Exception:
-        bench_hist = None
-    if replay_until is not None and bench_hist is not None and not getattr(bench_hist, "empty", True):
-        bench_hist = bench_hist[bench_hist.index <= replay_until]
-
-    rs = chart_analysis.relative_strength_summary(hist, bench_hist) if bench_hist is not None else {"ok": False}
-    patterns = chart_analysis.pattern_candidates(hist)
-    seasonality = chart_analysis.seasonality_summary(hist)
     def _replay_loader(ticker: str, tf: str):
         df = _analysis_ohlc_loader(ticker, tf)
         if replay_until is not None and df is not None and not getattr(df, "empty", True):
             df = df[df.index <= replay_until]
         return df
 
-    mtfa = chart_analysis.multi_timeframe_summary(_replay_loader, panel["ticker"])
-
-    m1, m2, m3, m4 = st.columns(4)
-    m1.metric("상대강도", _quadrant_label(rs.get("quadrant")) if rs.get("ok") else "데이터 부족")
-    m2.metric("60일 RS", _pct(rs.get("relative_strength_60d")) if rs.get("ok") else "—")
-    m3.metric("20일 모멘텀", _pct(rs.get("relative_momentum_20d")) if rs.get("ok") else "—")
-    m4.metric("패턴 후보", str(len(patterns)))
-
-    left, right = st.columns([1.05, 1.0], gap="large")
-    with left:
-        _render_mtfa_table(mtfa)
-        _render_pattern_table(patterns)
-    with right:
-        _render_seasonality_table(seasonality)
+    document = chart_document.normalize_chart_document(
+        panel.get("document") or chart_document.document_from_panel(panel),
+        ticker=panel["ticker"],
+    )
+    document["source"].update({
+        "name": "market-data",
+        "as_of": str(hist.index[-1]) if len(hist.index) else None,
+        "freshness": "provider-dependent",
+        "quality": "indicative",
+    })
+    snapshot = chart_workbench.build_analysis_snapshot(
+        document,
+        hist,
+        ohlc_loader=_replay_loader,
+        fundamental_loader=lambda symbol: cached.valuation(symbol) or {},
+        alert_loader=lambda _symbol: list(document.get("alerts") or []),
+    )
+    chart_workbench_ui.render_analysis_rail(snapshot)
+    tools_key = f"cw_{ws.get('id', 'default')}_{panel['id']}"
+    with st.expander("시리즈·인디케이터·조건", expanded=False):
+        document = chart_workbench_ui.render_series_manager(document, key_prefix=tools_key)
+        document = chart_workbench_ui.render_study_manager(document, key_prefix=tools_key)
+        condition = chart_workbench_ui.render_condition_builder(document, key_prefix=tools_key)
+        if condition is not None:
+            st.session_state[f"{tools_key}_condition_draft"] = condition
+        chart_workbench_ui.render_exports(document, hist, snapshot, key_prefix=tools_key)
+    panel["document"] = document
+    panel.update(chart_document.panel_from_document(document, panel))
 
 
 def _active_panel(ws: dict[str, Any]) -> dict[str, Any] | None:
@@ -822,9 +854,7 @@ def _benchmark_ticker(panel: dict[str, Any]) -> str:
 
 
 def _analysis_ohlc_loader(ticker: str, tf: str):
-    if tf == "1d":
-        return cached.ohlc(ticker, period="max")
-    return cached.ohlc_tf(ticker, tf)
+    return (cached.chart_data_bundle(ticker, tf, session_policy="regular") or {}).get("frame")
 
 
 def _render_mtfa_table(mtfa: dict[str, Any]) -> None:

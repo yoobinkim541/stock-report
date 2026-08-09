@@ -4,7 +4,7 @@ from __future__ import annotations
 import copy
 import re
 from dataclasses import dataclass
-from datetime import datetime, time, timezone
+from datetime import datetime, time, timedelta, timezone
 from collections.abc import Mapping
 from typing import Any
 from zoneinfo import ZoneInfo
@@ -119,10 +119,11 @@ def apply_session_policy(hist, *, market: str, timeframe: str, policy: str,
     frame = frame.copy(deep=True)
     input_bars = len(frame)
     if not _is_intraday(timeframe):
+        _index, timezone_assumption, provider_timezone = _localized_index(frame, exchange_timezone)
         return SessionResult(frame, _session_metadata(
             market=market, timeframe=timeframe, policy=policy, timezone_value=exchange_timezone,
-            input_bars=input_bars, excluded_bars=0, timezone_assumption=False,
-            decision="timeframe_bypass", provider_timezone=None,
+            input_bars=input_bars, excluded_bars=0, timezone_assumption=timezone_assumption,
+            decision="timeframe_bypass", provider_timezone=provider_timezone,
         ))
 
     index, timezone_assumption, provider_timezone = _localized_index(frame, exchange_timezone)
@@ -179,10 +180,11 @@ def _source_details(source: str | Mapping[str, Any]) -> tuple[str, str]:
 def _market_from_frame(hist: pd.DataFrame, timestamp: pd.Timestamp | None) -> tuple[str, ZoneInfo]:
     attrs = getattr(hist, "attrs", {}) or {}
     market = str(attrs.get("market") or "").lower().strip()
-    timezone_value = attrs.get("timezone") or attrs.get("exchange_timezone")
+    timezone_value = attrs.get("exchange_timezone")
     if market not in _MARKET_DEFAULTS:
         zone_name = getattr(getattr(timestamp, "tz", None), "key", "") if timestamp is not None else ""
-        market = "kr" if zone_name == "Asia/Seoul" else "us"
+        offset = timestamp.utcoffset() if timestamp is not None else None
+        market = "kr" if zone_name == "Asia/Seoul" or offset == timedelta(hours=9) else "us"
     return market, _exchange_timezone(market, str(timezone_value) if timezone_value else None)
 
 
