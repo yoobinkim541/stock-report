@@ -10,7 +10,7 @@ import pandas as pd
 import streamlit as st
 
 from agent_console import storage
-from dashboard import chart_replay
+from dashboard import chart_replay, chart_replay_rules
 from ohlc_utils import normalize_ohlc_frame
 
 
@@ -99,6 +99,17 @@ def _save(record: Mapping[str, Any], session: dict[str, Any], operation: str) ->
     )
 
 
+def advance_with_rules(session: Mapping[str, Any], frame: pd.DataFrame, *, steps: int) -> dict[str, Any]:
+    out = dict(session)
+    for _ in range(max(0, int(steps))):
+        previous_cursor = int(out.get("cursor") or 0)
+        out = chart_replay.advance(out, frame, steps=1)
+        if int(out.get("cursor") or 0) == previous_cursor:
+            break
+        out = chart_replay_rules.evaluate_and_apply(out, frame)
+    return out
+
+
 def prepare_replay(
     hist,
     *,
@@ -146,19 +157,19 @@ def prepare_replay(
         st.session_state["_chart_replay_playing"] = not playing
         st.rerun()
     if controls[3].button("한 봉", key=f"{key_prefix}_replay_step", width="stretch"):
-        record = _save(record, chart_replay.advance(session, frame, steps=1), "step")
+        record = _save(record, advance_with_rules(session, frame, steps=1), "step")
         st.rerun()
     if controls[4].button(f"{speed}봉 진행", key=f"{key_prefix}_replay_batch", width="stretch"):
-        record = _save(record, chart_replay.advance(session, frame, steps=int(speed)), "advance")
+        record = _save(record, advance_with_rules(session, frame, steps=int(speed)), "advance")
         st.rerun()
     if controls[5].button("최신 봉으로", key=f"{key_prefix}_replay_live", width="stretch"):
-        record = _save(record, chart_replay.advance(session, frame, steps=len(frame)), "jump-live")
+        record = _save(record, advance_with_rules(session, frame, steps=len(frame)), "jump-live")
         st.session_state[playing_key] = False
         st.session_state["_chart_replay_playing"] = False
         st.rerun()
 
     if playing and int(session["cursor"]) < len(frame) - 1:
-        record = _save(record, chart_replay.advance(session, frame, steps=int(speed)), "play")
+        record = _save(record, advance_with_rules(session, frame, steps=int(speed)), "play")
         session = record["session"]
     else:
         session = _restore_cursor(record["session"], frame)
@@ -176,6 +187,7 @@ def prepare_replay(
         "order_patch_url": order_patch_url(record["id"]),
         "revision": int(record["revision"]),
         "key_prefix": key_prefix,
+        "shared_condition": st.session_state.get(f"_chart_condition_{symbol}_{timeframe}"),
     }
 
 
@@ -263,11 +275,43 @@ def render_terminal(context: Mapping[str, Any]) -> None:
             st.caption("보유 포지션 없음")
 
     with strategy_tab:
-        result = st.session_state.get("_strategy_last_result")
-        if isinstance(result, Mapping):
-            st.json(dict(result), expanded=False)
-        else:
-            st.caption("연결된 전략 실행 결과 없음")
+        attached = session.get("rule_packet")
+        handoff = st.session_state.get("_chart_replay_handoff")
+        shared_condition = context.get("shared_condition")
+        if isinstance(attached, Mapping):
+            st.caption(f"연결됨 · {attached.get('name')} · {attached.get('kind')}")
+            if st.button("규칙 연결 해제", key=f"{prefix}_rule_detach"):
+                _save(record, chart_replay_rules.detach_rule_packet(session), "detach-rule")
+                st.rerun()
+        elif isinstance(handoff, Mapping) and isinstance(handoff.get("packet"), Mapping):
+            packet = handoff["packet"]
+            st.caption(f"전략 스튜디오 · {packet.get('name')} · {packet.get('symbol')} {packet.get('timeframe')}")
+            if st.button("전략 규칙 연결", key=f"{prefix}_rule_attach_strategy", width="stretch"):
+                try:
+                    attached_session = chart_replay_rules.attach_rule_packet(session, packet)
+                    attached_session = chart_replay_rules.evaluate_and_apply(attached_session, frame)
+                    _save(record, attached_session, "attach-strategy")
+                    st.rerun()
+                except ValueError as exc:
+                    st.error(str(exc))
+        if not attached and isinstance(shared_condition, Mapping):
+            st.caption("현재 차트 조건 빌더의 검증된 조건을 연결할 수 있습니다.")
+            if st.button("차트 조건 연결", key=f"{prefix}_rule_attach_condition", width="stretch"):
+                try:
+                    packet = chart_replay_rules.condition_packet(
+                        shared_condition, symbol=session["symbol"], timeframe=session["timeframe"],
+                    )
+                    attached_session = chart_replay_rules.attach_rule_packet(session, packet)
+                    attached_session = chart_replay_rules.evaluate_and_apply(attached_session, frame)
+                    _save(record, attached_session, "attach-condition")
+                    st.rerun()
+                except ValueError as exc:
+                    st.error(str(exc))
+        decisions = [event for event in session.get("events") or [] if event.get("type") == "rule_decision"]
+        if decisions:
+            st.json(decisions[-1], expanded=False)
+        elif not attached and not handoff and not shared_condition:
+            st.caption("연결 가능한 전략 또는 차트 조건 없음")
 
     with events_tab:
         rows = list(reversed(session.get("events") or []))

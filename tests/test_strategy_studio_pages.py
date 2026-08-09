@@ -75,6 +75,7 @@ strategy_studio.render_strategy_lab("lab", pack, mode="research", catalog=catalo
     assert "버전" in body
     assert "패치" in body
     assert "미리보기" in body
+    assert any(button.label == "차트 리플레이로 보내기" for button in at.button)
 
 
 def test_strategy_lab_period_options_are_valid_yfinance_periods():

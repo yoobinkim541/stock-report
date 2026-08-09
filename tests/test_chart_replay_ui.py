@@ -3,7 +3,7 @@ from __future__ import annotations
 import pandas as pd
 from streamlit.testing.v1 import AppTest
 
-from dashboard import chart_replay, chart_replay_ui
+from dashboard import chart_replay, chart_replay_rules, chart_replay_ui
 
 
 def _frame():
@@ -79,3 +79,23 @@ chart_replay_ui.render_terminal(context)
         "Replay", "Orders", "Positions", "Strategy", "Events", "Diagnostics",
     ]
     assert any(button.label == "주문 제출" for button in at.button)
+
+
+def test_batch_advance_evaluates_rules_at_every_intermediate_bar():
+    frame = _frame()
+    frame.loc[:, "Close"] = [100, 101, 102, 97, 96]
+    session = chart_replay.new_session(
+        symbol="MSFT", timeframe="5m", cursor=0, initial_cash=10_000, session_id="batch",
+    )
+    packet = chart_replay_rules.condition_packet(
+        {"type": "price", "field": "close", "operator": "less_than", "value": 98,
+         "symbol": "MSFT", "timeframe": "5m"},
+        symbol="MSFT", timeframe="5m", position_pct=0.5,
+    )
+    session = chart_replay_rules.attach_rule_packet(session, packet)
+
+    advanced = chart_replay_ui.advance_with_rules(session, frame, steps=4)
+
+    decisions = [event for event in advanced["events"] if event.get("type") == "rule_decision"]
+    assert [event["cursor"] for event in decisions] == [1, 2, 3, 4]
+    assert advanced["orders"][-1]["submitted_cursor"] == 3
