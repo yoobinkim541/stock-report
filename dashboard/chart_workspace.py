@@ -15,12 +15,34 @@ from typing import Any
 import ticker_names
 from dashboard import chart_document
 
-LAYOUTS = {"1": 1, "2v": 2, "2h": 2, "2x2": 4, "3+1": 4, "2x3": 6}
+LAYOUTS = {
+    "1": 1,
+    "2v": 2,
+    "2h": 2,
+    "2x2": 4,
+    "3+1": 4,
+    "2x3": 6,
+    "3x3": 9,
+    "4x3": 12,
+    "4x4": 16,
+}
 TIMEFRAMES = {"5m", "1h", "2h", "4h", "1d", "1wk", "1mo"}
 PERIODS = {"3mo", "6mo", "1y", "5y", "전체"}
 CHART_KINDS = chart_document.CHART_TYPES
 TEMPLATE_KINDS = {"style", "indicators", "series"}
 DRAWING_SYNC = {"off", "layout_symbol", "global_symbol"}
+LINK_GROUPS = {"", "red", "orange", "yellow", "green", "blue", "purple", "gray"}
+MUTABLE_PANEL_FIELDS = {
+    "ticker",
+    "timeframe",
+    "period",
+    "chart_kind",
+    "top_indicators",
+    "bottom_indicators",
+    "compare",
+    "log_scale",
+    "link_group",
+}
 TOP_INDICATORS = {
     "이동평균선",
     "자동 추세선·채널",
@@ -79,6 +101,7 @@ def _panel(panel_id: str, ticker: str) -> dict[str, Any]:
         "style_template_id": None,
         "indicator_template_id": None,
         "series_template_id": None,
+        "link_group": "",
     }
     panel["document"] = chart_document.document_from_panel(panel)
     return panel
@@ -197,6 +220,7 @@ def default_workspace(ticker: str = "MSFT") -> dict[str, Any]:
         "name": "Default Workspace",
         "layout": "1",
         "active_panel": "p1",
+        "maximized_panel": None,
         "sync": {
             "symbol": False,
             "interval": True,
@@ -205,6 +229,7 @@ def default_workspace(ticker: str = "MSFT") -> dict[str, Any]:
             "drawings": "layout_symbol",
         },
         "panels": [_panel("p1", tk)],
+        "parked_panels": [],
         "metadata": {"created_at": _now(), "updated_at": _now()},
     }
 
@@ -219,16 +244,41 @@ def normalize_workspace(workspace: dict | None, *, ticker: str = "MSFT") -> dict
         {
             k: copy.deepcopy(v)
             for k, v in workspace.items()
-            if k not in {"sync", "panels", "metadata"}
+            if k not in {"sync", "panels", "parked_panels", "metadata"}
         }
     )
     out["layout"] = str(out.get("layout") or "1")
     count = LAYOUTS.get(out["layout"], 1)
     panels = [p for p in workspace.get("panels", []) if isinstance(p, dict)]
+    parked = [p for p in workspace.get("parked_panels", []) if isinstance(p, dict)]
+    candidates: list[dict[str, Any]] = []
+    seen_ids: set[str] = set()
+    for idx, panel in enumerate([*panels, *parked]):
+        panel_id = str(panel.get("id") or f"p{idx + 1}")
+        if panel_id in seen_ids:
+            continue
+        seen_ids.add(panel_id)
+        candidates.append(copy.deepcopy(panel))
+        if len(candidates) >= max(LAYOUTS.values()):
+            break
 
-    merged = []
-    for idx in range(count):
-        src = copy.deepcopy(panels[idx]) if idx < len(panels) else {}
+    by_id = {str(panel.get("id") or ""): panel for panel in candidates}
+    used_ids: set[str] = set()
+
+    def source_for_slot(idx: int) -> dict[str, Any]:
+        expected = f"p{idx + 1}"
+        exact = by_id.get(expected)
+        if exact is not None and expected not in used_ids:
+            used_ids.add(expected)
+            return copy.deepcopy(exact)
+        for candidate in candidates:
+            candidate_id = str(candidate.get("id") or "")
+            if candidate_id not in used_ids:
+                used_ids.add(candidate_id)
+                return copy.deepcopy(candidate)
+        return {}
+
+    def normalize_panel(src: dict[str, Any], idx: int) -> dict[str, Any]:
         p = _panel(f"p{idx + 1}", src.get("ticker") or ticker)
         p.update(src)
         p["id"] = str(p.get("id") or f"p{idx + 1}")
@@ -244,6 +294,9 @@ def normalize_workspace(workspace: dict | None, *, ticker: str = "MSFT") -> dict
         ]
         p["compare"] = [_norm_ticker(x) for x in (p.get("compare") or [])][:3]
         p["log_scale"] = bool(p.get("log_scale"))
+        p["link_group"] = str(p.get("link_group") or "")
+        if p["link_group"] not in LINK_GROUPS:
+            p["link_group"] = ""
         raw_document = src.get("document")
         p["document"] = chart_document.normalize_chart_document(
             raw_document if isinstance(raw_document, dict) else chart_document.document_from_panel(
@@ -252,9 +305,18 @@ def normalize_workspace(workspace: dict | None, *, ticker: str = "MSFT") -> dict
             ticker=p["ticker"],
         )
         p.update(chart_document.panel_from_document(p["document"], p))
-        merged.append(p)
+        return p
+
+    merged = []
+    for idx in range(count):
+        merged.append(normalize_panel(source_for_slot(idx), idx))
 
     out["panels"] = merged
+    out["parked_panels"] = [
+        normalize_panel(candidate, idx + count)
+        for idx, candidate in enumerate(candidates)
+        if str(candidate.get("id") or "") not in used_ids
+    ]
     sync = dict(base["sync"])
     incoming_sync = workspace.get("sync") if isinstance(workspace.get("sync"), dict) else {}
     sync.update(incoming_sync)
@@ -271,6 +333,13 @@ def normalize_workspace(workspace: dict | None, *, ticker: str = "MSFT") -> dict
         if any(p["id"] == out.get("active_panel") for p in merged)
         else merged[0]["id"]
     )
+    out["maximized_panel"] = (
+        out.get("maximized_panel")
+        if any(p["id"] == out.get("maximized_panel") for p in merged)
+        else None
+    )
+    if out["maximized_panel"]:
+        out["active_panel"] = out["maximized_panel"]
     meta = dict(workspace.get("metadata") or {})
     meta.setdefault("created_at", base["metadata"]["created_at"])
     meta["updated_at"] = _now()
@@ -311,6 +380,9 @@ def validate_workspace(workspace: dict) -> tuple[list[str], list[str]]:
                 errors.append(f"unknown indicator: {name}")
         if len(raw_panel.get("compare") or []) > 3:
             warnings.append(f"panel[{idx}] compare symbols capped at 3")
+        link_group = str(raw_panel.get("link_group") or panel.get("link_group") or "")
+        if link_group not in LINK_GROUPS:
+            errors.append(f"panel[{idx}] unsupported link_group: {link_group}")
         raw_document = raw_panel.get("document")
         if raw_document is not None and not isinstance(raw_document, dict):
             errors.append(f"panel[{idx}].document: document must be an object")
@@ -319,6 +391,99 @@ def validate_workspace(workspace: dict) -> tuple[list[str], list[str]]:
             errors.extend(f"panel[{idx}].document: {error}" for error in document_errors)
             warnings.extend(f"panel[{idx}].document: {warning}" for warning in document_warnings)
     return errors, warnings
+
+
+def mutate_panel(
+    workspace: dict[str, Any],
+    panel_id: str,
+    changes: dict[str, Any],
+) -> dict[str, Any]:
+    """Apply a typed panel mutation and propagate enabled synchronized fields."""
+    if not isinstance(changes, dict):
+        raise ValueError("panel changes must be an object")
+    unknown = set(changes) - MUTABLE_PANEL_FIELDS
+    if unknown:
+        raise ValueError(f"unsupported panel field: {sorted(unknown)[0]}")
+
+    ws = normalize_workspace(workspace)
+    source = next((panel for panel in ws["panels"] if panel["id"] == panel_id), None)
+    if source is None:
+        raise ValueError(f"unknown panel: {panel_id}")
+
+    normalized: dict[str, Any] = {}
+    for field, value in changes.items():
+        if field == "ticker":
+            normalized[field] = _norm_ticker(value, source["ticker"])
+        elif field == "timeframe":
+            value = str(value or "")
+            if value not in TIMEFRAMES:
+                raise ValueError(f"unsupported timeframe: {value}")
+            normalized[field] = value
+        elif field == "period":
+            value = str(value or "")
+            if value not in PERIODS:
+                raise ValueError(f"unsupported period: {value}")
+            normalized[field] = value
+        elif field == "chart_kind":
+            value = "candlestick" if str(value) == "candle" else str(value or "")
+            if value not in CHART_KINDS:
+                raise ValueError(f"unsupported chart_kind: {value}")
+            normalized[field] = value
+        elif field == "top_indicators":
+            values = list(value or [])
+            unknown_indicators = set(values) - TOP_INDICATORS
+            if unknown_indicators:
+                raise ValueError(f"unknown indicator: {sorted(unknown_indicators)[0]}")
+            normalized[field] = values
+        elif field == "bottom_indicators":
+            values = list(value or [])
+            unknown_indicators = set(values) - BOTTOM_INDICATORS
+            if unknown_indicators:
+                raise ValueError(f"unknown indicator: {sorted(unknown_indicators)[0]}")
+            normalized[field] = values
+        elif field == "compare":
+            normalized[field] = [_norm_ticker(item) for item in list(value or [])][:3]
+        elif field == "log_scale":
+            normalized[field] = bool(value)
+        elif field == "link_group":
+            value = str(value or "")
+            if value not in LINK_GROUPS:
+                raise ValueError(f"unsupported link group: {value}")
+            normalized[field] = value
+
+    source_group = normalized.get("link_group", source.get("link_group") or "")
+    sync_field = {"ticker": "symbol", "timeframe": "interval", "period": "range"}
+    trace: list[dict[str, Any]] = []
+
+    for field, value in normalized.items():
+        sync_key = sync_field.get(field)
+        if sync_key and ws["sync"].get(sync_key):
+            targets = [
+                panel for panel in ws["panels"]
+                if not source_group or panel.get("link_group") == source_group
+            ]
+        else:
+            targets = [source]
+        if source not in targets:
+            targets.insert(0, source)
+
+        for panel in targets:
+            before = copy.deepcopy(panel.get(field))
+            if before == value:
+                continue
+            panel[field] = copy.deepcopy(value)
+            if field != "link_group":
+                _sync_panel_document(panel, str(ws.get("id") or ""), fields={field})
+            trace.append({
+                "panel_id": panel["id"],
+                "field": field,
+                "before": before,
+                "after": copy.deepcopy(value),
+                "source_panel_id": panel_id,
+            })
+
+    after = normalize_workspace(ws)
+    return {"workspace": after, "trace": trace}
 
 
 def workspace_id(workspace: dict) -> str:

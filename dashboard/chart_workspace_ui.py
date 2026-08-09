@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import os
 from typing import Any
+from urllib.parse import urlparse
 
 import pandas as pd
 import streamlit as st
@@ -40,15 +41,45 @@ _ALERT_INDICATOR_LABELS = {
     "vwap": "VWAP",
     "volume_zscore_20": "거래량 z-score(20)",
 }
+_LAYOUT_LABELS = {
+    "1": "1개",
+    "2v": "2열",
+    "2h": "2행",
+    "2x2": "2x2",
+    "3+1": "3+1",
+    "2x3": "3x2",
+    "3x3": "3x3",
+    "4x3": "4x3",
+    "4x4": "4x4",
+}
+_LINK_GROUP_LABELS = {
+    "": "전체",
+    "red": "빨강",
+    "orange": "주황",
+    "yellow": "노랑",
+    "green": "초록",
+    "blue": "파랑",
+    "purple": "보라",
+    "gray": "회색",
+}
 
 
 def _layout_columns(layout: str):
-    if layout in {"2v", "2h"}:
+    if layout == "2v":
         return st.columns(2, gap="small")
-    if layout in {"2x2", "3+1"}:
+    if layout == "2h":
+        return [st.container()]
+    if layout == "2x2":
         return st.columns(2, gap="small")
+    if layout == "3+1":
+        narrow, wide = st.columns([1, 2], gap="small")
+        return [narrow, narrow, narrow, wide]
     if layout == "2x3":
         return st.columns(3, gap="small")
+    if layout == "3x3":
+        return st.columns(3, gap="small")
+    if layout in {"4x3", "4x4"}:
+        return st.columns(4, gap="small")
     return [st.container()]
 
 
@@ -87,6 +118,33 @@ def _crosshair_store_key(ws: dict[str, Any]) -> str | None:
     return f"cw:{safe_scope}:xh"
 
 
+def _range_sync_store_key(ws: dict[str, Any], panel: dict[str, Any]) -> str | None:
+    if not bool(((ws or {}).get("sync") or {}).get("range")):
+        return None
+    scope = str((ws or {}).get("id") or "default").strip() or "default"
+    group = str((panel or {}).get("link_group") or "all").strip() or "all"
+    safe_scope = "".join(ch if ch.isalnum() or ch in ".-_" else "_" for ch in scope)
+    safe_group = "".join(ch if ch.isalnum() or ch in ".-_" else "_" for ch in group)
+    return f"cw:{safe_scope}:range:{safe_group}"
+
+
+def _panel_render_profile(ws: dict[str, Any], panel: dict[str, Any]) -> dict[str, Any]:
+    panel_id = str((panel or {}).get("id") or "")
+    maximized = str((ws or {}).get("maximized_panel") or "")
+    if maximized:
+        return {
+            "visible": panel_id == maximized,
+            "compact": False,
+            "height": 760,
+        }
+    count = _panel_count(str((ws or {}).get("layout") or "1"))
+    if count == 1:
+        return {"visible": True, "compact": False, "height": 760}
+    if count > 6:
+        return {"visible": True, "compact": True, "height": 260}
+    return {"visible": True, "compact": False, "height": 390}
+
+
 def _drawing_sync_url(ws: dict[str, Any], store_key: str | None) -> str | None:
     if not store_key:
         return None
@@ -96,10 +154,14 @@ def _drawing_sync_url(ws: dict[str, Any], store_key: str | None) -> str | None:
     if str(store_key).startswith("cw:global:"):
         return None
     safe_workspace = "".join(ch if ch.isalnum() or ch in ".-_" else "_" for ch in workspace_id)
-    base = str(os.getenv("AGENT_CONSOLE_URL") or "").strip()
+    public_base = str(os.getenv("AGENT_CONSOLE_PUBLIC_URL") or "").strip()
+    base = public_base or str(os.getenv("AGENT_CONSOLE_URL") or "").strip()
     if not base:
-        port = str(os.getenv("AGENT_CONSOLE_PORT") or "8797").strip() or "8797"
-        base = f"http://127.0.0.1:{port}"
+        return None
+    if not public_base and (urlparse(base).hostname or "").lower() in {
+        "127.0.0.1", "localhost", "::1",
+    }:
+        return None
     return f"{base.rstrip('/')}/api/chart-workspaces/{safe_workspace}/drawings"
 
 
@@ -120,6 +182,7 @@ def _render_panel_chart(
     panel: dict[str, Any],
     *,
     height: int = 420,
+    compact: bool = False,
     replay_until=None,
     replay_context: dict[str, Any] | None = None,
 ) -> None:
@@ -135,17 +198,21 @@ def _render_panel_chart(
         st.info(f"{panel['ticker']} replay 구간에 데이터가 없습니다.")
         return
     compare = {}
-    for ticker in panel.get("compare") or []:
-        cmp_hist = cached.ohlc(ticker, "max") if panel["timeframe"] == "1d" else cached.ohlc_tf(ticker, panel["timeframe"])
-        if cmp_hist is not None and not getattr(cmp_hist, "empty", True) and "Close" in cmp_hist.columns:
-            series = charts.view_window(cmp_hist["Close"], view_days)
-            if replay_until is not None:
-                series = series[series.index <= replay_until]
-            compare[ticker] = series
+    if not compact:
+        for ticker in panel.get("compare") or []:
+            cmp_hist = cached.ohlc(ticker, "max") if panel["timeframe"] == "1d" else cached.ohlc_tf(ticker, panel["timeframe"])
+            if cmp_hist is not None and not getattr(cmp_hist, "empty", True) and "Close" in cmp_hist.columns:
+                series = charts.view_window(cmp_hist["Close"], view_days)
+                if replay_until is not None:
+                    series = series[series.index <= replay_until]
+                compare[ticker] = series
     top = set(panel.get("top_indicators") or [])
     bottom = set(panel.get("bottom_indicators") or [])
+    if compact:
+        top &= {"이동평균선"}
+        bottom = set()
     try:
-        alert_runs = views.chart_alert_runs(str(ws.get("id") or "").strip(), limit=5) if ws.get("id") else []
+        alert_runs = views.chart_alert_runs(str(ws.get("id") or "").strip(), limit=5) if ws.get("id") and not compact else []
     except Exception:
         alert_runs = []
     alert_markers = _alert_event_markers_for_panel(alert_runs, panel, cutoff=replay_until)
@@ -198,11 +265,20 @@ def _render_panel_chart(
     fig = rendered.figure
     for warning in rendered.warnings:
         st.caption(warning)
-    fig.update_layout(height=height)
+    fig.update_layout(
+        height=height,
+        showlegend=not compact,
+        margin=dict(l=34, r=36, t=28 if compact else 46, b=28 if compact else 38),
+    )
     from dashboard import plotly_embed
 
     bounds = plotly_embed.compare_bounds_json(hist, compare, view_days) if compare else None
-    store_key = _drawing_store_key(ws, panel, compare=bool(compare))
+    store_key = None if compact else _drawing_store_key(ws, panel, compare=bool(compare))
+    range_sync_key = (
+        _range_sync_store_key(ws, panel)
+        if rendered.transform.x_mode == "time"
+        else None
+    )
     st.components.v1.html(
         plotly_embed.pannable_chart_html(
             fig,
@@ -216,9 +292,11 @@ def _render_panel_chart(
             order_patch_url=(replay_context.get("order_patch_url") if panel_replay else None),
             replay_revision=(replay_context.get("revision") if panel_replay else None),
             crosshair_key=_crosshair_store_key(ws),
+            range_sync_key=range_sync_key,
+            compact=compact,
             light=theme.is_light(),
         ),
-        height=height + 150,
+        height=height + (20 if compact else 150),
     )
 
 
@@ -233,27 +311,35 @@ def render_chart_workspace(
         ticker=st.session_state.get("ticker", "MSFT"),
     )
     st.session_state["_cw_workspace"] = ws
+    workspace_widget_scope = str(ws.get("id") or "default")
 
     st.markdown(f"#### {ws['name']}")
-    c1, c2, c3, c4, c5, c6 = st.columns([1.1, 0.9, 0.9, 0.9, 1.2, 0.55], vertical_alignment="center")
-    layout = c1.segmented_control(
+    c1, c2, c3, c4, c5, c6, c7 = st.columns(
+        [1.0, 0.72, 0.72, 0.72, 0.72, 1.05, 0.5], vertical_alignment="center",
+    )
+    layout_options = list(chart_workspace.LAYOUTS)
+    layout = c1.selectbox(
         "레이아웃",
-        ["1", "2v", "2h", "2x2", "3+1", "2x3"],
-        default=ws["layout"],
-        key="_cw_layout",
-    ) or ws["layout"]
+        layout_options,
+        index=layout_options.index(ws["layout"]),
+        format_func=lambda value: _LAYOUT_LABELS.get(value, value),
+        key=f"_cw_layout_{workspace_widget_scope}",
+    )
     ws["layout"] = layout
     ws = chart_workspace.normalize_workspace(ws)
-    ws["sync"]["symbol"] = c2.toggle("심볼 동기화", value=bool(ws["sync"].get("symbol")), key="_cw_sync_symbol")
-    ws["sync"]["interval"] = c3.toggle("봉 동기화", value=bool(ws["sync"].get("interval")), key="_cw_sync_interval")
-    ws["sync"]["range"] = c4.toggle("기간 동기화", value=bool(ws["sync"].get("range")), key="_cw_sync_range")
-    ws["sync"]["drawings"] = c5.selectbox(
+    ws["sync"]["symbol"] = c2.toggle("심볼 동기화", value=bool(ws["sync"].get("symbol")), key=f"_cw_sync_symbol_{workspace_widget_scope}")
+    ws["sync"]["interval"] = c3.toggle("봉 동기화", value=bool(ws["sync"].get("interval")), key=f"_cw_sync_interval_{workspace_widget_scope}")
+    ws["sync"]["range"] = c4.toggle("기간 동기화", value=bool(ws["sync"].get("range")), key=f"_cw_sync_range_{workspace_widget_scope}")
+    ws["sync"]["crosshair"] = c5.toggle(
+        "십자선", value=bool(ws["sync"].get("crosshair")), key=f"_cw_sync_crosshair_{workspace_widget_scope}",
+    )
+    ws["sync"]["drawings"] = c6.selectbox(
         "드로잉",
         ["off", "layout_symbol", "global_symbol"],
         index=["off", "layout_symbol", "global_symbol"].index(ws["sync"].get("drawings", "layout_symbol")),
-        key="_cw_sync_drawings",
+        key=f"_cw_sync_drawings_{workspace_widget_scope}",
     )
-    with c6.popover("AI"):
+    with c7.popover("AI"):
         prompt = st.text_area(
             "요청",
             key="_cw_ai_prompt",
@@ -275,18 +361,35 @@ def render_chart_workspace(
                 st.session_state.pop("_cw_patch_preview", None)
                 st.toast("차트 워크스페이스 패치를 적용했습니다.")
                 st.rerun()
-    st.caption("동기화 설정은 워크스페이스에 저장됩니다. 크로스헤어 동기화는 브라우저 런타임 검증 전까지 설정값만 보관합니다.")
+    st.caption("심볼·봉·기간은 전체 또는 같은 링크 그룹에 전파됩니다. 십자선과 보이는 시간 범위는 브라우저에서 즉시 동기화됩니다.")
     ws = _render_workspace_library_bar(ws)
     ws = _render_template_library_bar(ws)
 
     active_panel = _active_panel(ws)
     active = active_panel["id"] if active_panel else (ws.get("active_panel") or "p1")
     if active_panel:
-        active_panel["document"] = chart_workbench_ui.render_chart_toolbar(
+        edited_document = chart_workbench_ui.render_chart_toolbar(
             active_panel.get("document") or chart_document.document_from_panel(active_panel),
             key_prefix=f"cw_{ws.get('id', 'default')}_{active_panel['id']}",
         )
-        active_panel.update(chart_document.panel_from_document(active_panel["document"], active_panel))
+        edited_panel = chart_document.panel_from_document(edited_document, active_panel)
+        legacy_fields = {
+            "ticker", "timeframe", "period", "chart_kind", "top_indicators",
+            "bottom_indicators", "compare", "log_scale",
+        }
+        changes = {
+            field: edited_panel[field]
+            for field in legacy_fields
+            if edited_panel.get(field) != active_panel.get(field)
+        }
+        active_panel["document"] = edited_document
+        active_panel.update(edited_panel)
+        if changes:
+            mutation = chart_workspace.mutate_panel(ws, active_panel["id"], changes)
+            ws = mutation["workspace"]
+            st.session_state["_cw_last_sync_trace"] = mutation["trace"]
+            active_panel = _active_panel(ws)
+            active = active_panel["id"] if active_panel else active
         st.session_state["_cw_workspace"] = ws
     replay_cutoff = None
     replay_context: dict[str, Any] = {"active": False}
@@ -308,20 +411,49 @@ def render_chart_workspace(
         replay_cutoff = replay_context.get("as_of") if replay_context.get("active") else None
 
     panels = ws["panels"][: _panel_count(ws["layout"])]
-    cols = _layout_columns(ws["layout"])
-    for idx, panel in enumerate(panels):
+    visible_panels = [panel for panel in panels if _panel_render_profile(ws, panel)["visible"]]
+    cols = [st.container()] if ws.get("maximized_panel") else _layout_columns(ws["layout"])
+    for idx, panel in enumerate(visible_panels):
         with cols[idx % len(cols)]:
             is_active = panel["id"] == active
-            border = f"border:1px solid {'#2f81f7' if is_active else 'rgba(148,163,184,.18)'};border-radius:8px;padding:8px;margin-bottom:8px;"
-            st.markdown(f"<div style='{border}'><b>{panel['ticker']}</b> · {panel['id']}</div>", unsafe_allow_html=True)
-            st.caption(_caption_panel(panel))
-            if st.button("활성", key=f"_cw_active_{panel['id']}", width="stretch"):
+            profile = _panel_render_profile(ws, panel)
+            h1, h2, h3 = st.columns([1.45, 0.95, 0.62], vertical_alignment="center")
+            if h1.button(
+                f"{panel['ticker']} · {_TF_LABEL.get(panel['timeframe'], panel['timeframe'])}",
+                key=f"_cw_active_{panel['id']}",
+                type="primary" if is_active else "secondary",
+                width="stretch",
+            ):
                 ws["active_panel"] = panel["id"]
                 st.session_state["_cw_workspace"] = ws
                 st.rerun()
+            group_options = list(_LINK_GROUP_LABELS)
+            selected_group = h2.selectbox(
+                "링크 그룹",
+                group_options,
+                index=group_options.index(panel.get("link_group") or ""),
+                format_func=lambda value: _LINK_GROUP_LABELS[value],
+                key=f"_cw_link_group_{workspace_widget_scope}_{panel['id']}",
+                label_visibility="collapsed",
+            )
+            if selected_group != (panel.get("link_group") or ""):
+                ws = chart_workspace.mutate_panel(
+                    ws, panel["id"], {"link_group": selected_group},
+                )["workspace"]
+                st.session_state["_cw_workspace"] = ws
+                st.rerun()
+            maximize_label = "복원" if ws.get("maximized_panel") == panel["id"] else "확대"
+            if h3.button(maximize_label, key=f"_cw_maximize_{panel['id']}", width="stretch"):
+                ws["active_panel"] = panel["id"]
+                ws["maximized_panel"] = None if ws.get("maximized_panel") == panel["id"] else panel["id"]
+                st.session_state["_cw_workspace"] = chart_workspace.normalize_workspace(ws)
+                st.rerun()
+            st.caption(
+                f"{panel['id']} · 링크 {_LINK_GROUP_LABELS.get(panel.get('link_group') or '', '전체')} · {_caption_panel(panel)}"
+            )
             if render_charts:
                 _render_panel_chart(
-                    ws, panel, height=390 if len(panels) > 1 else 760,
+                    ws, panel, height=profile["height"], compact=profile["compact"],
                     replay_until=replay_cutoff, replay_context=replay_context,
                 )
 

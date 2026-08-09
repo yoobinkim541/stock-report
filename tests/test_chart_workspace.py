@@ -15,6 +15,99 @@ def test_default_workspace_has_one_valid_panel():
     assert ws["layout"] == "1"
 
 
+def test_workspace_supports_four_by_four_and_preserves_parked_panels():
+    expanded = cw.normalize_workspace({"layout": "4x4", "panels": []}, ticker="MSFT")
+    assert len(expanded["panels"]) == 16
+    assert [panel["id"] for panel in expanded["panels"]] == [f"p{i}" for i in range(1, 17)]
+
+    expanded = cw.mutate_panel(
+        expanded, "p8", {"ticker": "NVDA", "link_group": "blue"},
+    )["workspace"]
+    collapsed = cw.normalize_workspace({**expanded, "layout": "1"})
+    assert len(collapsed["panels"]) == 1
+    assert any(panel["id"] == "p8" for panel in collapsed["parked_panels"])
+
+    restored = cw.normalize_workspace({**collapsed, "layout": "4x4"})
+    assert restored["panels"][7]["id"] == "p8"
+    assert restored["panels"][7]["ticker"] == "NVDA"
+    assert restored["panels"][7]["link_group"] == "blue"
+
+
+def test_panel_mutation_syncs_only_matching_link_group():
+    ws = cw.normalize_workspace({
+        "layout": "2x2",
+        "sync": {"symbol": True, "interval": True, "range": True},
+        "panels": [
+            {"id": "p1", "ticker": "MSFT", "link_group": "red"},
+            {"id": "p2", "ticker": "AAPL", "link_group": "red"},
+            {"id": "p3", "ticker": "NVDA", "link_group": "blue"},
+            {"id": "p4", "ticker": "AMD", "link_group": "blue"},
+        ],
+    })
+
+    result = cw.mutate_panel(ws, "p1", {
+        "ticker": "GOOGL",
+        "timeframe": "1h",
+        "period": "1y",
+        "chart_kind": "line",
+    })
+    after = result["workspace"]
+
+    assert [(p["ticker"], p["timeframe"], p["period"]) for p in after["panels"]] == [
+        ("GOOGL", "1h", "1y"),
+        ("GOOGL", "1h", "1y"),
+        ("NVDA", "1d", "6mo"),
+        ("AMD", "1d", "6mo"),
+    ]
+    assert after["panels"][0]["chart_kind"] == "line"
+    assert after["panels"][1]["chart_kind"] == "candlestick"
+    assert after["panels"][1]["document"]["symbol"] == "GOOGL"
+    assert after["panels"][1]["document"]["timeframe"] == "1h"
+    assert {row["panel_id"] for row in result["trace"] if row["field"] == "ticker"} == {"p1", "p2"}
+
+
+def test_ungrouped_panel_syncs_globally_and_disabled_fields_stay_local():
+    ws = cw.normalize_workspace({
+        "layout": "2x2",
+        "sync": {"symbol": True, "interval": False, "range": False},
+        "panels": [
+            {"id": "p1", "ticker": "MSFT"},
+            {"id": "p2", "ticker": "AAPL", "link_group": "red"},
+            {"id": "p3", "ticker": "NVDA", "link_group": "blue"},
+            {"id": "p4", "ticker": "AMD"},
+        ],
+    })
+
+    after = cw.mutate_panel(ws, "p1", {
+        "ticker": "TSLA", "timeframe": "4h", "period": "5y",
+    })["workspace"]
+
+    assert {panel["ticker"] for panel in after["panels"]} == {"TSLA"}
+    assert after["panels"][0]["timeframe"] == "4h"
+    assert all(panel["timeframe"] == "1d" for panel in after["panels"][1:])
+    assert after["panels"][0]["period"] == "5y"
+    assert all(panel["period"] == "6mo" for panel in after["panels"][1:])
+
+
+def test_panel_mutation_rejects_unknown_field_and_group():
+    ws = cw.default_workspace("MSFT")
+    with pytest.raises(ValueError, match="unsupported panel field"):
+        cw.mutate_panel(ws, "p1", {"python": "eval"})
+    with pytest.raises(ValueError, match="unsupported link group"):
+        cw.mutate_panel(ws, "p1", {"link_group": "invisible"})
+
+
+def test_maximized_panel_becomes_active_and_invalid_target_is_cleared():
+    ws = cw.normalize_workspace({
+        "layout": "2v", "active_panel": "p1", "maximized_panel": "p2",
+    })
+    assert ws["active_panel"] == "p2"
+    assert ws["maximized_panel"] == "p2"
+
+    restored = cw.normalize_workspace({**ws, "maximized_panel": "missing"})
+    assert restored["maximized_panel"] is None
+
+
 def test_workspace_migrates_legacy_candle_and_round_trips_chart_types():
     legacy = cw.normalize_workspace({"panels": [{"chart_kind": "candle"}]})
     assert legacy["panels"][0]["chart_kind"] == "candlestick"

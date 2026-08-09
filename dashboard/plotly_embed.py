@@ -130,6 +130,7 @@ _TEMPLATE = r"""
   #wrap.dock.cmp #ohlcbar { order:99; margin-left:auto; margin-bottom:0; white-space:normal; }
   #wrap.dock.cmp #chartcol { grid-column:1; min-width:0; width:100%; overflow:hidden; }
   #wrap.dock.cmp #bt-avwap, #wrap.dock.cmp #bt-vprof { display:none; }
+  #wrap.compact #tools, #wrap.compact #replaybar, #wrap.compact #detail { display:none !important; }
   @media (max-width: 760px) {
     #wrap.dock { display:block; overflow:visible; }
     #wrap.dock #tools { width:auto; max-width:none; max-height:none; flex-direction:row;
@@ -207,7 +208,9 @@ _TEMPLATE = r"""
   const yLog = @@Y_LOG@@;                        // 로그 스케일 — 도형 y 좌표는 log10 공간
   const categoryX = @@CATEGORY_X@@;              // 캔들 category 축 — index↔timestamp 변환 필요
   const crosshairKey = @@CROSSHAIR_KEY@@;        // 멀티 iframe 크로스헤어 동기화 키
+  const rangeSyncKey = @@RANGE_SYNC_KEY@@;       // 멀티 iframe 보이는 시간 범위 동기화 키
   const chartNonce = Math.random().toString(36).slice(2);
+  if (@@COMPACT@@) document.getElementById("wrap").classList.add("compact");
   if (@@DOCK@@) {
     const wrap = document.getElementById("wrap");
     wrap.classList.add("dock");   // 풀뷰 도구 독
@@ -298,6 +301,42 @@ _TEMPLATE = r"""
     const x0 = rangeValueToMs(xr[0]);
     const x1 = rangeValueToMs(xr[1]);
     return (x0 == null || x1 == null) ? null : [x0, x1];
+  }
+
+  function rangeMsToAxis(ms) {                   // 원격 timestamp → 현재 축 좌표
+    if (!categoryX) return new Date(ms).toISOString();
+    if (!bounds.length) return null;
+    let idx = lowerBound(ms);
+    if (idx >= bounds.length) idx = bounds.length - 1;
+    if (idx > 0 && Math.abs(bounds[idx - 1][0] - ms) <= Math.abs(bounds[idx][0] - ms)) idx--;
+    return idx;
+  }
+
+  function publishVisibleRange(xr) {
+    if (!rangeSyncKey || !xr || !(xr[1] > xr[0])) return;
+    try {
+      localStorage.setItem("tnrange:" + rangeSyncKey, JSON.stringify({
+        src: chartNonce, x0: xr[0], x1: xr[1], ts: Date.now()
+      }));
+    } catch (err) {}
+  }
+
+  function applyRemoteRange() {
+    if (!rangeSyncKey) return;
+    let payload = null;
+    try {
+      payload = JSON.parse(localStorage.getItem("tnrange:" + rangeSyncKey) || "null");
+    } catch (err) {}
+    if (!payload || payload.src === chartNonce || Date.now() - (payload.ts || 0) > 5000) return;
+    const x0 = Number(payload.x0), x1 = Number(payload.x1);
+    if (!Number.isFinite(x0) || !Number.isFinite(x1) || !(x1 > x0)) return;
+    const a0 = rangeMsToAxis(x0), a1 = rangeMsToAxis(x1);
+    if (a0 == null || a1 == null) return;
+    guard++;
+    Plotly.relayout(gd, {"xaxis.range": [a0, a1]}).then(() => {
+      unguard();
+      setTarget(x0, x1);
+    });
   }
 
   let replayCut = null;                          // ⏪ 리플레이 컷(ms) — 이후 봉은 커튼+클램프
@@ -501,13 +540,19 @@ _TEMPLATE = r"""
       renderRemoteCrosshair(JSON.parse(localStorage.getItem("tnxh:" + crosshairKey) || "null"));
     } catch (err) {}
   }
-  if (crosshairKey) {
+  if (crosshairKey || rangeSyncKey) {
     try {
       window.addEventListener("storage", (ev) => {
-        if (ev && ev.key === "tnxh:" + crosshairKey) applyRemoteCrosshair();
+        if (crosshairKey && ev && ev.key === "tnxh:" + crosshairKey) applyRemoteCrosshair();
+        if (rangeSyncKey && ev && ev.key === "tnrange:" + rangeSyncKey) applyRemoteRange();
       });
     } catch (err) {}
+  }
+  if (crosshairKey) {
     setInterval(applyRemoteCrosshair, 350);
+  }
+  if (rangeSyncKey) {
+    setInterval(applyRemoteRange, 700);
   }
   gd.addEventListener("mousemove", (e) => {
     xhEvt = e;
@@ -1784,7 +1829,10 @@ _TEMPLATE = r"""
       if (keys.some(k => k.startsWith("xaxis.range")) || e["xaxis.autorange"]) {
         muteHover();
         const xr = evXRange(e);
-        if (xr) setTarget(xr[0], xr[1]);
+        if (xr) {
+          setTarget(xr[0], xr[1]);
+          publishVisibleRange(xr);
+        }
         clearTimeout(gestureTimer);
         gestureTimer = setTimeout(finishGesture, 160);
       }
@@ -1827,6 +1875,8 @@ def pannable_chart_html(fig, hist, *, height: int = 460, view_days=None,
                         order_patch_url: str | None = None,
                         replay_revision: int | None = None,
                         crosshair_key: str | None = None,
+                        range_sync_key: str | None = None,
+                        compact: bool = False,
                         dock: bool = False,
                         live: bool = False,
                         light: bool = False) -> str:
@@ -1844,6 +1894,9 @@ def pannable_chart_html(fig, hist, *, height: int = 460, view_days=None,
                       typed preview/apply 요청하며 일반 드로잉은 주문으로 해석하지 않는다.
     crosshair_key — 멀티 iframe 크로스헤어 동기화 키. 같은 키를 공유하는 차트들이
                     localStorage 브리지로 현재 시간축 위치를 따라간다. None=비동기.
+    range_sync_key — 멀티 iframe 보이는 시간 범위 동기화 키. timestamp 범위만 공유하고
+                     각 차트의 category/date 축으로 다시 매핑한다. None=비동기.
+    compact — 다중 차트 배경 패널에서 도구바와 리플레이 바를 숨기는 밀도 모드.
     dock — True 면 도구바를 좌측 세로 독으로 (풀뷰 — TradingView 배치).
     live — ⚡자동갱신: realtime_feed_html 피더의 localStorage push(tnrt:티커)를 받아
            마지막 봉·현재가선을 in-place 패치. 호출부는 live 시 서버측 실시간 bake 를
@@ -1882,6 +1935,8 @@ def pannable_chart_html(fig, hist, *, height: int = 460, view_days=None,
             .replace("@@ORDER_PATCH_URL@@", json.dumps(order_patch_url))
             .replace("@@REPLAY_REVISION@@", json.dumps(int(replay_revision or 0)))
             .replace("@@CROSSHAIR_KEY@@", json.dumps(crosshair_key))
+            .replace("@@RANGE_SYNC_KEY@@", json.dumps(range_sync_key))
+            .replace("@@COMPACT@@", json.dumps(bool(compact)))
             .replace("@@DOCK@@", json.dumps(bool(dock)))
             .replace("@@LIGHTMODE@@", json.dumps(bool(light)))
             .replace("@@CONFIG@@", config)
