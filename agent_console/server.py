@@ -5,6 +5,8 @@ from pathlib import Path
 
 from flask import Flask, jsonify, request, send_from_directory
 
+from dashboard import chart_replay
+
 from . import agent, chart_alert_dispatcher, chart_alert_runner, chart_alert_worker, chart_alerts, context, shared_memory, storage, strategy_studio, wiki
 
 
@@ -406,6 +408,40 @@ def create_app() -> Flask:
     def chart_replay_session_delete(session_id: str):
         deleted = storage.delete_chart_replay_session(session_id)
         return jsonify({"ok": True, "deleted": deleted})
+
+    @app.post("/api/chart-replay/sessions/<session_id>/orders/<order_id>/price")
+    def chart_replay_order_price_patch(session_id: str, order_id: str):
+        payload = request.get_json(silent=True) or {}
+        replay = storage.get_chart_replay_session(session_id)
+        if replay is None:
+            return jsonify({"ok": False, "error": "replay session not found"}), 404
+        try:
+            preview = chart_replay.preview_order_price_patch(
+                replay["session"], order_id, payload.get("price"),
+            )
+            if bool(payload.get("preview_only")):
+                return jsonify({"ok": True, "preview": preview, "revision": replay["revision"]})
+            if payload.get("expected_revision") is None:
+                return jsonify({"ok": False, "error": "expected_revision is required"}), 400
+            patched = chart_replay.apply_order_price_patch(
+                replay["session"], order_id, payload.get("price"),
+            )
+            saved = storage.save_chart_replay_session(
+                patched,
+                workspace_id=replay["workspace_id"],
+                expected_revision=int(payload["expected_revision"]),
+                request_id=payload.get("request_id"),
+                request_fingerprint={
+                    "operation": "order_price_patch",
+                    "order_id": order_id,
+                    "price": preview["after"],
+                },
+            )
+        except storage.ReplayRevisionConflict as exc:
+            return jsonify({"ok": False, "error": str(exc)}), 409
+        except (TypeError, ValueError) as exc:
+            return jsonify({"ok": False, "error": str(exc)}), 400
+        return jsonify({"ok": True, "preview": preview, "replay": saved})
 
     @app.get("/api/local-install-prompt")
     def local_install_prompt():

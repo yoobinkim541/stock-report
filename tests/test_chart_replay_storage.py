@@ -112,3 +112,47 @@ def test_replay_session_api_crud_conflict_and_branch(monkeypatch, tmp_path):
     deleted = client.delete("/api/chart-replay/sessions/api-branch")
     assert deleted.status_code == 200
     assert deleted.json["deleted"] is True
+
+
+def test_replay_order_price_api_previews_then_applies_with_revision(monkeypatch, tmp_path):
+    _isolate(monkeypatch, tmp_path)
+    from agent_console.server import create_app
+
+    session = chart_replay.submit_order(
+        _session("risk-api"),
+        {"id": "risk", "type": "stop", "side": "buy", "qty": 1, "price": 105},
+    )
+    saved = storage.save_chart_replay_session(session)
+    client = create_app().test_client()
+    url = "/api/chart-replay/sessions/risk-api/orders/risk/price"
+
+    preview = client.post(url, json={
+        "price": 106, "expected_revision": saved["revision"], "preview_only": True,
+    })
+    assert preview.status_code == 200
+    assert preview.json["preview"]["after"] == 106
+    assert storage.get_chart_replay_session("risk-api")["revision"] == 1
+
+    applied = client.post(url, json={
+        "price": 106, "expected_revision": saved["revision"], "request_id": "drag-1",
+    })
+    assert applied.status_code == 200
+    assert applied.json["replay"]["revision"] == 2
+    assert applied.json["preview"]["order_id"] == "risk"
+
+    repeated = client.post(url, json={
+        "price": 106, "expected_revision": saved["revision"], "request_id": "drag-1",
+    })
+    assert repeated.status_code == 200
+    assert repeated.json["replay"]["revision"] == 2
+
+    reused = client.post(url, json={
+        "price": 108, "expected_revision": 2, "request_id": "drag-1",
+    })
+    assert reused.status_code == 400
+    assert "request_id" in reused.json["error"]
+
+    stale = client.post(url, json={
+        "price": 107, "expected_revision": 1, "request_id": "drag-stale",
+    })
+    assert stale.status_code == 409

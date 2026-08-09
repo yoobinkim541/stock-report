@@ -606,6 +606,8 @@ _TEMPLATE = r"""
   // ── 드로잉 영속화 — localStorage (키=티커:봉:스케일 · 서버 도형 이후만 저장) ──
   const storeKey = @@STORE_KEY@@;                // null 이면 영속화 없음 (구형/테스트)
   const drawingSyncUrl = @@DRAWING_SYNC_URL@@;    // 선택: Agent Console 서버 스냅샷 API
+  const orderPatchUrl = @@ORDER_PATCH_URL@@;       // replay session orders base endpoint
+  let replayRevision = @@REPLAY_REVISION@@;        // optimistic revision for typed price patches
   let saveTimer = null;
   function normalizeDrawingDoc(d) {
     if (!d || d.v !== 1 || !Array.isArray(d.shapes) || !Array.isArray(d.anns)) return null;
@@ -688,6 +690,59 @@ _TEMPLATE = r"""
   // 서버 오버레이(평단선·현재가선·RSI 밴드)는 사용자 도형과 구분 불가(둘 다 무명 shape) →
   // 개수가 아닌 **깊은 복사본**을 보존 기준으로 삼는다(지우개로 인덱스가 밀려도 안전).
   const baseShapes = JSON.parse(JSON.stringify(fig.layout.shapes || []));
+  const replayOrderPrices = {};
+  for (const shape of baseShapes) {
+    const name = String((shape && shape.name) || "");
+    if (name.startsWith("replay-order:")) replayOrderPrices[name.slice(13)] = Number(shape.y0);
+  }
+
+  function replayOrderShapePatch(e) {
+    if (!orderPatchUrl || !e) return false;
+    const key = Object.keys(e).find((item) => /^shapes\[\d+\]\.y[01]$/.test(item));
+    if (!key) return false;
+    const match = key.match(/^shapes\[(\d+)\]/);
+    const idx = match ? Number(match[1]) : -1;
+    const shape = idx >= 0 && gd.layout.shapes ? gd.layout.shapes[idx] : null;
+    const name = String((shape && shape.name) || "");
+    if (!name.startsWith("replay-order:")) return false;
+    const orderId = name.slice(13);
+    const before = replayOrderPrices[orderId];
+    const price = Number(e[`shapes[${idx}].y0`] ?? e[`shapes[${idx}].y1`] ?? shape.y0);
+    const restore = () => {
+      if (!Number.isFinite(before)) return;
+      drawGuard++;
+      Plotly.relayout(gd, {[`shapes[${idx}].y0`]: before, [`shapes[${idx}].y1`]: before})
+        .finally(undraw);
+    };
+    if (!(price > 0)) { restore(); return true; }
+    const endpoint = orderPatchUrl.replace(/\/$/, "") + "/" + encodeURIComponent(orderId) + "/price";
+    const post = (body) => fetch(endpoint, {
+      method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify(body),
+    }).then(async (response) => {
+      const payload = await response.json().catch(() => ({}));
+      if (!response.ok || !payload.ok) throw new Error(payload.error || `HTTP ${response.status}`);
+      return payload;
+    });
+    (async () => {
+      try {
+        const preview = await post({"price": price, "expected_revision": replayRevision, "preview_only": true});
+        const detail = preview.preview || {};
+        if (!window.confirm(`주문 가격을 ${Number(detail.before).toLocaleString()}에서 ${Number(detail.after).toLocaleString()}(으)로 변경할까요?`)) {
+          restore(); return;
+        }
+        const applied = await post({
+          "price": price, "expected_revision": replayRevision, "preview_only": false,
+          "request_id": `shape-${orderId}-${Date.now()}`,
+        });
+        replayRevision = Number(applied.replay && applied.replay.revision) || replayRevision;
+        replayOrderPrices[orderId] = price;
+      } catch (error) {
+        restore();
+        window.alert(`주문 가격 변경 실패: ${error.message || error}`);
+      }
+    })();
+    return true;
+  }
   const baseShapeCount = baseShapes.length;      // 앞쪽 N개 = 서버 도형 → 스냅/편집 금지
 
   function clearVwapTraces() {
@@ -1719,6 +1774,7 @@ _TEMPLATE = r"""
       if (hasShapes) {
         if (drawGuard > 0) return;               // applyDraw/복원 자기 메아리
         dragging = false;
+        if (replayOrderShapePatch(e)) return;     // typed server order only; never infer from drawings
         if (handleShapes(e)) scheduleSave();     // 드로잉 도구·🧲 자석 경로 + 영속화
         return;
       }
@@ -1768,6 +1824,8 @@ def pannable_chart_html(fig, hist, *, height: int = 460, view_days=None,
                         category_x: bool | None = None,
                         store_key: str | None = None,
                         drawing_sync_url: str | None = None,
+                        order_patch_url: str | None = None,
+                        replay_revision: int | None = None,
                         crosshair_key: str | None = None,
                         dock: bool = False,
                         live: bool = False,
@@ -1782,6 +1840,8 @@ def pannable_chart_html(fig, hist, *, height: int = 460, view_days=None,
     drawing_sync_url — 선택 Agent Console 드로잉 스냅샷 API endpoint. 지정하면
                        localStorage 복원 뒤 서버 최신 스냅샷을 받아 교체하고, 저장 때
                        같은 endpoint 로 POST 해 기기 간 복원 기반을 만든다.
+    order_patch_url — 리플레이 주문 base endpoint. 서버가 만든 replay-order shape만
+                      typed preview/apply 요청하며 일반 드로잉은 주문으로 해석하지 않는다.
     crosshair_key — 멀티 iframe 크로스헤어 동기화 키. 같은 키를 공유하는 차트들이
                     localStorage 브리지로 현재 시간축 위치를 따라간다. None=비동기.
     dock — True 면 도구바를 좌측 세로 독으로 (풀뷰 — TradingView 배치).
@@ -1819,6 +1879,8 @@ def pannable_chart_html(fig, hist, *, height: int = 460, view_days=None,
             .replace("@@LAST_CLOSE@@", json.dumps(last_close))
             .replace("@@STORE_KEY@@", json.dumps(store_key))
             .replace("@@DRAWING_SYNC_URL@@", json.dumps(drawing_sync_url))
+            .replace("@@ORDER_PATCH_URL@@", json.dumps(order_patch_url))
+            .replace("@@REPLAY_REVISION@@", json.dumps(int(replay_revision or 0)))
             .replace("@@CROSSHAIR_KEY@@", json.dumps(crosshair_key))
             .replace("@@DOCK@@", json.dumps(bool(dock)))
             .replace("@@LIGHTMODE@@", json.dumps(bool(light)))

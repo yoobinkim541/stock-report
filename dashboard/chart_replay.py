@@ -114,6 +114,57 @@ def submit_order(session: Mapping[str, Any], order: Mapping[str, Any]) -> dict[s
     return out
 
 
+def preview_order_price_patch(
+    session: Mapping[str, Any],
+    order_id: str,
+    price: Any,
+) -> dict[str, Any]:
+    order_id = str(order_id or "").strip()
+    order = next((row for row in session.get("orders") or [] if str(row.get("id")) == order_id), None)
+    if order is None:
+        raise ValueError("order not found")
+    if order.get("status") != "pending" or order.get("type") not in {"limit", "stop"}:
+        raise ValueError("order price is not editable")
+    after = _finite(price, positive=True)
+    before = _finite(order.get("price"), positive=True)
+    parent_id = order.get("parent_id")
+    siblings = [
+        row for row in session.get("orders") or []
+        if row.get("parent_id") == parent_id and row.get("status") == "pending"
+    ] if parent_id else []
+    if order.get("role") == "stop":
+        target = next((row for row in siblings if row.get("role") == "target"), None)
+        if target and after >= float(target["price"]):
+            raise ValueError("bracket stop must remain below target")
+    elif order.get("role") == "target":
+        stop = next((row for row in siblings if row.get("role") == "stop"), None)
+        if stop and after <= float(stop["price"]):
+            raise ValueError("bracket target must remain above stop")
+    return {
+        "order_id": order_id,
+        "role": order.get("role"),
+        "before": before,
+        "after": after,
+    }
+
+
+def apply_order_price_patch(
+    session: Mapping[str, Any],
+    order_id: str,
+    price: Any,
+) -> dict[str, Any]:
+    preview = preview_order_price_patch(session, order_id, price)
+    out = copy.deepcopy(dict(session))
+    order = next(row for row in out["orders"] if str(row.get("id")) == preview["order_id"])
+    order["price"] = preview["after"]
+    out["events"].append({
+        "type": "order_price_patched",
+        "cursor": int(out.get("cursor") or 0),
+        **preview,
+    })
+    return out
+
+
 def _order_price(order: Mapping[str, Any], row: Mapping[str, Any], *, slippage_bps: float) -> float | None:
     order_type, side = order["type"], order["side"]
     opening, high, low = (float(row[key]) for key in ("Open", "High", "Low"))

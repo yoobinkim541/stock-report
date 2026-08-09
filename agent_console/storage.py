@@ -756,6 +756,7 @@ def save_chart_replay_session(
     workspace_id: str = "",
     expected_revision: int | None = None,
     request_id: str | None = None,
+    request_fingerprint: Any = None,
 ) -> dict[str, Any]:
     if not isinstance(session, dict):
         raise ValueError("session must be an object")
@@ -773,9 +774,12 @@ def save_chart_replay_session(
         raise ValueError("session cursor must be nonnegative")
     workspace_id = str(workspace_id or "").strip()
     request_id = str(request_id or "").strip() or None
-    payload_hash = hashlib.sha256(_json({
-        "session": payload, "workspace_id": workspace_id,
-    }).encode("utf-8")).hexdigest()
+    fingerprint = (
+        request_fingerprint
+        if request_fingerprint is not None
+        else {"session": payload, "workspace_id": workspace_id}
+    )
+    payload_hash = hashlib.sha256(_json(fingerprint).encode("utf-8")).hexdigest()
     now = _now()
 
     with connect() as conn:

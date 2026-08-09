@@ -273,6 +273,37 @@ def test_renderer_snaps_synthetic_trade_and_event_markers_to_source_timestamp():
     assert event.customdata[0]["source_timestamp"] is not None
 
 
+def test_renderer_adds_typed_replay_orders_positions_and_fill_markers():
+    from dashboard import chart_document, chart_renderer
+
+    hist = _ohlc(12)
+    session = {
+        "orders": [
+            {"id": "stop-1", "symbol": "NVDA", "type": "stop", "side": "sell", "qty": 3,
+             "price": 97, "status": "pending", "role": "stop"},
+            {"id": "filled-1", "symbol": "NVDA", "type": "market", "side": "buy", "qty": 3,
+             "price": None, "status": "filled"},
+        ],
+        "fills": [{"order_id": "filled-1", "symbol": "NVDA", "side": "buy", "qty": 3,
+                   "price": 104, "timestamp": hist.index[4].isoformat()}],
+        "positions": {"NVDA": {"qty": 3, "avg_price": 104}},
+    }
+
+    rendered = chart_renderer.render_plotly_chart(
+        chart_document.default_chart_document("NVDA"), hist,
+        chart_kwargs={"replay_session": session},
+    )
+
+    shape_names = {shape.name for shape in rendered.figure.layout.shapes or []}
+    assert "replay-order:stop-1" in shape_names
+    assert "replay-position:NVDA" in shape_names
+    stop = next(shape for shape in rendered.figure.layout.shapes if shape.name == "replay-order:stop-1")
+    assert stop.editable is True
+    assert stop.y0 == stop.y1 == 97
+    buy = next(trace for trace in rendered.figure.data if trace.name == "Buy")
+    assert buy.customdata[0][0] == "filled-1"
+
+
 def test_renderer_compare_mode_falls_back_from_synthetic_without_mutating_document():
     from dashboard import chart_renderer
 

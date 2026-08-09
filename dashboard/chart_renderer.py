@@ -37,6 +37,73 @@ _PLOTLY_KIND = {
 _PRICE_SEQUENCE_TYPES = frozenset({"renko", "kagi", "line_break", "range"})
 
 
+def _replay_trade_records(session: Mapping[str, Any], symbol: str) -> list[dict[str, Any]]:
+    records: list[dict[str, Any]] = []
+    for fill in session.get("fills") or []:
+        if str(fill.get("symbol") or "").upper() != symbol:
+            continue
+        records.append({
+            "event_id": fill.get("order_id"),
+            "side": fill.get("side"),
+            "qty": fill.get("qty"),
+            "price": fill.get("price"),
+            "timestamp": fill.get("timestamp"),
+            "avg_price": fill.get("price"),
+            "account": "Replay",
+            "source": "chart_replay",
+            "note": f"cursor {fill.get('cursor')}",
+            "currency": "USD",
+        })
+    return records
+
+
+def _add_replay_price_lines(figure, session: Mapping[str, Any], symbol: str) -> None:
+    definitions = {
+        "stop": (charts._RED, "손절"),
+        "target": (charts._GREEN, "목표"),
+        None: ("#2f81f7", "주문"),
+    }
+    for order in session.get("orders") or []:
+        if (
+            str(order.get("symbol") or "").upper() != symbol
+            or order.get("status") != "pending"
+            or order.get("type") not in {"limit", "stop"}
+        ):
+            continue
+        price = _positive_price(order.get("price"))
+        if price is None:
+            continue
+        color, label = definitions.get(order.get("role"), definitions[None])
+        figure.add_shape(
+            type="line", name=f"replay-order:{order['id']}",
+            xref="x domain", x0=0, x1=1, yref="y", y0=price, y1=price,
+            editable=True, layer="above",
+            line=dict(color=color, width=1.4, dash="dash"),
+        )
+        figure.add_annotation(
+            name=f"replay-order-label:{order['id']}",
+            xref="x domain", x=1, xanchor="left", yref="y", y=price,
+            showarrow=False, text=f"{label} {price:,.2f} · {int(order['qty'])}주",
+            font=dict(color=color, size=10), bgcolor="rgba(19,23,34,.82)", borderpad=3,
+        )
+    position = (session.get("positions") or {}).get(symbol)
+    if isinstance(position, Mapping) and int(position.get("qty") or 0) > 0:
+        avg_price = _positive_price(position.get("avg_price"))
+        if avg_price is not None:
+            figure.add_shape(
+                type="line", name=f"replay-position:{symbol}",
+                xref="x domain", x0=0, x1=1, yref="y", y0=avg_price, y1=avg_price,
+                editable=False, layer="below",
+                line=dict(color=theme.AXIS_TEXT, width=1.2, dash="dot"),
+            )
+            figure.add_annotation(
+                name=f"replay-position-label:{symbol}",
+                xref="x domain", x=0, xanchor="left", yref="y", y=avg_price,
+                showarrow=False, text=f"포지션 {int(position['qty'])}주 · {avg_price:,.2f}",
+                font=dict(color=theme.AXIS_TEXT, size=10), bgcolor="rgba(19,23,34,.72)", borderpad=3,
+            )
+
+
 def _positive_price(value: Any) -> float | None:
     try:
         result = float(value)
@@ -172,6 +239,9 @@ def render_plotly_chart(document, hist, *, chart_kwargs: Mapping[str, Any] | Non
     params = normalized["chart"].get("params") or {}
     kwargs = copy.deepcopy(dict(chart_kwargs or {}))
     compare = kwargs.get("compare") or {}
+    replay_session = kwargs.pop("replay_session", None)
+    if replay_session is not None and not isinstance(replay_session, Mapping):
+        raise ValueError("replay_session must be a mapping")
     warnings = list(document_warnings)
     render_type = requested_type
     render_params = params
@@ -181,6 +251,14 @@ def render_plotly_chart(document, hist, *, chart_kwargs: Mapping[str, Any] | Non
         warnings.append(
             "Compare mode does not support sequence-based synthetic prices; normalized line comparison was used.",
         )
+    if compare and replay_session:
+        warnings.append("Replay order and position overlays are hidden in normalized compare mode.")
+        replay_session = None
+    if replay_session:
+        kwargs["trades"] = [
+            *(kwargs.get("trades") or []),
+            *_replay_trade_records(replay_session, str(normalized["symbol"])),
+        ]
 
     transform = chart_transforms.transform_chart(hist, render_type, render_params)
     frame = transform.frame.copy(deep=True)
@@ -196,6 +274,9 @@ def render_plotly_chart(document, hist, *, chart_kwargs: Mapping[str, Any] | Non
         close = pd.to_numeric(frame.get("Close"), errors="coerce").dropna()
         kwargs["baseline"] = float(close.iloc[0]) if not close.empty else None
     figure = charts.price_chart(render_frame, normalized["symbol"], **kwargs)
+
+    if replay_session:
+        _add_replay_price_lines(figure, replay_session, str(normalized["symbol"]))
 
     if sequence:
         figure.update_xaxes(

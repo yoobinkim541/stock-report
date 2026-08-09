@@ -138,6 +138,28 @@ def test_embed_server_drawing_sync_contract():
     assert "const drawingSyncUrl = null" in norm
 
 
+def test_embed_replay_order_drag_uses_typed_preview_and_apply_endpoint():
+    hist = _hist()
+    fig = charts.price_chart(hist, "T", kind="candle")
+    fig.add_hline(y=99, name="replay-order:stop-1", editable=True)
+    html = plotly_embed.pannable_chart_html(
+        fig,
+        hist,
+        order_patch_url="http://127.0.0.1:8797/api/chart-replay/sessions/s1/orders",
+        replay_revision=3,
+    )
+
+    for token in (
+        'const orderPatchUrl = "http://127.0.0.1:8797/api/chart-replay/sessions/s1/orders"',
+        "function replayOrderShapePatch",
+        'name.startsWith("replay-order:")',
+        '"preview_only": true',
+        '"expected_revision": replayRevision',
+        'encodeURIComponent(orderId) + "/price"',
+    ):
+        assert token in html, f"누락: {token}"
+
+
 def test_embed_crosshair_sync_contract():
     """멀티 iframe 크로스헤어 동기화 — localStorage 브리지와 키 주입 계약."""
     hist = _hist()

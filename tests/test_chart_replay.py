@@ -131,6 +131,43 @@ def test_market_order_at_final_bar_remains_pending_without_a_future_open():
     assert unchanged["orders"][-1]["status"] == "pending"
 
 
+def test_pending_risk_order_price_patch_is_previewed_then_applied_as_an_event():
+    session = chart_replay.submit_order(
+        _session(),
+        {"id": "entry", "type": "market", "side": "buy", "qty": 10,
+         "bracket": {"stop": 95, "target": 110}},
+    )
+    session = chart_replay.advance(session, _bars(), steps=1)
+
+    preview = chart_replay.preview_order_price_patch(session, "entry:stop", 97)
+    assert preview == {
+        "order_id": "entry:stop", "role": "stop", "before": 95.0, "after": 97.0,
+    }
+    assert next(row for row in session["orders"] if row["id"] == "entry:stop")["price"] == 95
+
+    patched = chart_replay.apply_order_price_patch(session, "entry:stop", 97)
+    assert next(row for row in patched["orders"] if row["id"] == "entry:stop")["price"] == 97
+    assert patched["events"][-1]["type"] == "order_price_patched"
+    assert patched["events"][-1]["before"] == 95
+
+
+def test_order_price_patch_rejects_drawings_market_orders_and_invalid_brackets():
+    session = chart_replay.submit_order(_session(), {"id": "market", "type": "market", "side": "buy", "qty": 1})
+    with pytest.raises(ValueError, match="editable"):
+        chart_replay.preview_order_price_patch(session, "market", 99)
+    with pytest.raises(ValueError, match="not found"):
+        chart_replay.preview_order_price_patch(session, "drawing-17", 99)
+
+    bracket = chart_replay.submit_order(
+        _session(),
+        {"id": "entry", "type": "market", "side": "buy", "qty": 1,
+         "bracket": {"stop": 95, "target": 110}},
+    )
+    bracket = chart_replay.advance(bracket, _bars(), steps=1)
+    with pytest.raises(ValueError, match="below target"):
+        chart_replay.preview_order_price_patch(bracket, "entry:stop", 111)
+
+
 def test_fees_slippage_leverage_nav_and_drawdown_are_explicit():
     session = _session(fees_bps=10, slippage_bps=20, max_leverage=2)
     session = chart_replay.submit_order(session, {"id": "lev", "type": "market", "side": "buy", "qty": 150})
