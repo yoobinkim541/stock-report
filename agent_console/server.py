@@ -351,6 +351,62 @@ def create_app() -> Flask:
             "notification": notification,
         })
 
+    @app.get("/api/chart-replay/sessions")
+    def chart_replay_session_list():
+        return jsonify({
+            "ok": True,
+            "sessions": storage.list_chart_replay_sessions(
+                workspace_id=request.args.get("workspace_id"),
+                limit=int(request.args.get("limit", "50") or 50),
+            ),
+        })
+
+    @app.get("/api/chart-replay/sessions/<session_id>")
+    def chart_replay_session_get(session_id: str):
+        replay = storage.get_chart_replay_session(session_id)
+        if replay is None:
+            return jsonify({"ok": False, "error": "replay session not found"}), 404
+        return jsonify({"ok": True, "replay": replay})
+
+    @app.post("/api/chart-replay/sessions")
+    def chart_replay_session_save():
+        payload = request.get_json(silent=True) or {}
+        session = payload.get("session")
+        if not isinstance(session, dict):
+            return jsonify({"ok": False, "error": "session object required"}), 400
+        try:
+            replay = storage.save_chart_replay_session(
+                session,
+                workspace_id=str(payload.get("workspace_id") or ""),
+                expected_revision=payload.get("expected_revision"),
+                request_id=payload.get("request_id"),
+            )
+        except storage.ReplayRevisionConflict as exc:
+            return jsonify({"ok": False, "error": str(exc)}), 409
+        except (TypeError, ValueError) as exc:
+            return jsonify({"ok": False, "error": str(exc)}), 400
+        return jsonify({"ok": True, "replay": replay})
+
+    @app.post("/api/chart-replay/sessions/<session_id>/branch")
+    def chart_replay_session_branch(session_id: str):
+        payload = request.get_json(silent=True) or {}
+        try:
+            replay = storage.branch_chart_replay_session(
+                session_id,
+                cursor=int(payload.get("cursor", -1)),
+                session_id=str(payload.get("session_id") or "").strip() or None,
+            )
+        except KeyError as exc:
+            return jsonify({"ok": False, "error": str(exc)}), 404
+        except (TypeError, ValueError) as exc:
+            return jsonify({"ok": False, "error": str(exc)}), 400
+        return jsonify({"ok": True, "replay": replay})
+
+    @app.delete("/api/chart-replay/sessions/<session_id>")
+    def chart_replay_session_delete(session_id: str):
+        deleted = storage.delete_chart_replay_session(session_id)
+        return jsonify({"ok": True, "deleted": deleted})
+
     @app.get("/api/local-install-prompt")
     def local_install_prompt():
         path = Path(__file__).resolve().parent.parent / "docs" / "local-agent-console-install-prompt.md"

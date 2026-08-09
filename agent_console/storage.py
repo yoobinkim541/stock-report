@@ -9,8 +9,12 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Iterable
 
-from dashboard import chart_conditions, chart_workspace
+from dashboard import chart_conditions, chart_replay, chart_workspace
 from ml.strategy_studio import StrategySpec, strategy_spec_hash
+
+
+class ReplayRevisionConflict(ValueError):
+    """Raised when a replay snapshot is saved from a stale revision."""
 
 
 def db_path() -> Path:
@@ -200,6 +204,38 @@ def ensure_schema(conn: sqlite3.Connection | None = None) -> None:
             );
             CREATE INDEX IF NOT EXISTS idx_chart_alert_runs_workspace
                 ON chart_alert_runs(workspace_id, created_at DESC);
+
+            CREATE TABLE IF NOT EXISTS chart_replay_sessions (
+                id            TEXT PRIMARY KEY,
+                workspace_id  TEXT NOT NULL,
+                parent_id     TEXT,
+                symbol        TEXT NOT NULL,
+                timeframe     TEXT NOT NULL,
+                cursor        INTEGER NOT NULL,
+                revision      INTEGER NOT NULL,
+                snapshot_json TEXT NOT NULL,
+                created_at    TEXT NOT NULL,
+                updated_at    TEXT NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS idx_chart_replay_sessions_workspace
+                ON chart_replay_sessions(workspace_id, updated_at DESC);
+
+            CREATE TABLE IF NOT EXISTS chart_replay_events (
+                session_id TEXT NOT NULL,
+                sequence   INTEGER NOT NULL,
+                event_json TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                PRIMARY KEY(session_id, sequence)
+            );
+
+            CREATE TABLE IF NOT EXISTS chart_replay_requests (
+                session_id   TEXT NOT NULL,
+                request_id   TEXT NOT NULL,
+                payload_hash TEXT NOT NULL,
+                result_json  TEXT NOT NULL,
+                created_at   TEXT NOT NULL,
+                PRIMARY KEY(session_id, request_id)
+            );
             """
         )
         conn.commit()
@@ -697,6 +733,195 @@ def _chart_alert_run_row(row: sqlite3.Row) -> dict[str, Any]:
         "result": result,
         "created_at": row["created_at"],
     }
+
+
+def _chart_replay_row(row: sqlite3.Row) -> dict[str, Any]:
+    return {
+        "id": row["id"],
+        "workspace_id": row["workspace_id"],
+        "parent_id": row["parent_id"],
+        "symbol": row["symbol"],
+        "timeframe": row["timeframe"],
+        "cursor": int(row["cursor"]),
+        "revision": int(row["revision"]),
+        "session": json.loads(row["snapshot_json"] or "{}"),
+        "created_at": row["created_at"],
+        "updated_at": row["updated_at"],
+    }
+
+
+def save_chart_replay_session(
+    session: dict[str, Any],
+    *,
+    workspace_id: str = "",
+    expected_revision: int | None = None,
+    request_id: str | None = None,
+) -> dict[str, Any]:
+    if not isinstance(session, dict):
+        raise ValueError("session must be an object")
+    payload = json.loads(_json(session))
+    session_id = str(payload.get("id") or "").strip()
+    symbol = str(payload.get("symbol") or "").strip().upper()
+    timeframe = str(payload.get("timeframe") or "").strip().lower()
+    if not session_id or not symbol or not timeframe:
+        raise ValueError("session id, symbol, and timeframe are required")
+    events = payload.get("events")
+    if not isinstance(events, list) or any(not isinstance(event, dict) for event in events):
+        raise ValueError("session events must be a list of objects")
+    cursor = int(payload.get("cursor") or 0)
+    if cursor < 0:
+        raise ValueError("session cursor must be nonnegative")
+    workspace_id = str(workspace_id or "").strip()
+    request_id = str(request_id or "").strip() or None
+    payload_hash = hashlib.sha256(_json({
+        "session": payload, "workspace_id": workspace_id,
+    }).encode("utf-8")).hexdigest()
+    now = _now()
+
+    with connect() as conn:
+        # Serialize revision reads with their writes; a deferred transaction can
+        # let concurrent writers both validate the same stale revision.
+        conn.execute("BEGIN IMMEDIATE")
+        with conn:
+            if request_id:
+                prior = conn.execute(
+                    "SELECT payload_hash, result_json FROM chart_replay_requests WHERE session_id = ? AND request_id = ?",
+                    (session_id, request_id),
+                ).fetchone()
+                if prior:
+                    if prior["payload_hash"] != payload_hash:
+                        raise ValueError("request_id was already used with a different payload")
+                    return json.loads(prior["result_json"])
+
+            current = conn.execute(
+                "SELECT * FROM chart_replay_sessions WHERE id = ?",
+                (session_id,),
+            ).fetchone()
+            current_revision = int(current["revision"]) if current else 0
+            if expected_revision is not None and int(expected_revision) != current_revision:
+                raise ReplayRevisionConflict(
+                    f"expected revision {int(expected_revision)}, current revision is {current_revision}"
+                )
+
+            stored_events = conn.execute(
+                "SELECT sequence, event_json FROM chart_replay_events WHERE session_id = ? ORDER BY sequence",
+                (session_id,),
+            ).fetchall()
+            if len(events) < len(stored_events):
+                raise ValueError("event history cannot be truncated")
+            for row in stored_events:
+                sequence = int(row["sequence"])
+                if sequence >= len(events) or _json(events[sequence]) != row["event_json"]:
+                    raise ValueError("event history cannot be rewritten")
+            for sequence in range(len(stored_events), len(events)):
+                conn.execute(
+                    "INSERT INTO chart_replay_events (session_id, sequence, event_json, created_at) VALUES (?, ?, ?, ?)",
+                    (session_id, sequence, _json(events[sequence]), now),
+                )
+
+            revision = current_revision + 1
+            created_at = current["created_at"] if current else now
+            effective_workspace = workspace_id or (str(current["workspace_id"]) if current else "")
+            conn.execute(
+                """
+                INSERT INTO chart_replay_sessions
+                    (id, workspace_id, parent_id, symbol, timeframe, cursor, revision, snapshot_json, created_at, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(id) DO UPDATE SET
+                    workspace_id=excluded.workspace_id,
+                    parent_id=excluded.parent_id,
+                    symbol=excluded.symbol,
+                    timeframe=excluded.timeframe,
+                    cursor=excluded.cursor,
+                    revision=excluded.revision,
+                    snapshot_json=excluded.snapshot_json,
+                    updated_at=excluded.updated_at
+                """,
+                (
+                    session_id, effective_workspace, payload.get("parent_id"), symbol, timeframe,
+                    cursor, revision, _json(payload), created_at, now,
+                ),
+            )
+            result = {
+                "id": session_id,
+                "workspace_id": effective_workspace,
+                "parent_id": payload.get("parent_id"),
+                "symbol": symbol,
+                "timeframe": timeframe,
+                "cursor": cursor,
+                "revision": revision,
+                "session": payload,
+                "created_at": created_at,
+                "updated_at": now,
+            }
+            if request_id:
+                conn.execute(
+                    """
+                    INSERT INTO chart_replay_requests
+                        (session_id, request_id, payload_hash, result_json, created_at)
+                    VALUES (?, ?, ?, ?, ?)
+                    """,
+                    (session_id, request_id, payload_hash, _json(result), now),
+                )
+    return result
+
+
+def get_chart_replay_session(session_id: str) -> dict[str, Any] | None:
+    session_id = str(session_id or "").strip()
+    if not session_id:
+        return None
+    with connect() as conn:
+        row = conn.execute(
+            "SELECT * FROM chart_replay_sessions WHERE id = ?",
+            (session_id,),
+        ).fetchone()
+    return _chart_replay_row(row) if row else None
+
+
+def list_chart_replay_sessions(*, workspace_id: str | None = None, limit: int = 50) -> list[dict[str, Any]]:
+    limit = max(1, min(int(limit or 50), 200))
+    workspace_id = str(workspace_id or "").strip() or None
+    with connect() as conn:
+        if workspace_id:
+            rows = conn.execute(
+                "SELECT * FROM chart_replay_sessions WHERE workspace_id = ? ORDER BY updated_at DESC LIMIT ?",
+                (workspace_id, limit),
+            ).fetchall()
+        else:
+            rows = conn.execute(
+                "SELECT * FROM chart_replay_sessions ORDER BY updated_at DESC LIMIT ?",
+                (limit,),
+            ).fetchall()
+    return [_chart_replay_row(row) for row in rows]
+
+
+def branch_chart_replay_session(
+    parent_id: str,
+    *,
+    cursor: int,
+    session_id: str | None = None,
+) -> dict[str, Any]:
+    parent = get_chart_replay_session(parent_id)
+    if parent is None:
+        raise KeyError("replay session not found")
+    branch = chart_replay.branch_session(
+        parent["session"], cursor=int(cursor), session_id=session_id,
+    )
+    return save_chart_replay_session(
+        branch, workspace_id=parent["workspace_id"], expected_revision=0,
+    )
+
+
+def delete_chart_replay_session(session_id: str) -> bool:
+    session_id = str(session_id or "").strip()
+    if not session_id:
+        return False
+    with connect() as conn:
+        with conn:
+            conn.execute("DELETE FROM chart_replay_requests WHERE session_id = ?", (session_id,))
+            conn.execute("DELETE FROM chart_replay_events WHERE session_id = ?", (session_id,))
+            cursor = conn.execute("DELETE FROM chart_replay_sessions WHERE id = ?", (session_id,))
+    return bool(cursor.rowcount)
 
 
 def _next_chart_workspace_version(workspace_id: str) -> tuple[int, str]:
