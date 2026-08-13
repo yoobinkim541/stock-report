@@ -117,8 +117,8 @@ def password_gate() -> bool:
             st.session_state["_authed"] = True
             # 서명 토큰 쿠키 발급 — 이후 네비게이션/리로드는 무입력 재인증
             try:
-                st.components.v1.html(
-                    _set_cookie_html(issue_token(secret, _server_salt())), height=0)
+                st.iframe(
+                    _set_cookie_html(issue_token(secret, _server_salt())), height=1)
             except Exception:
                 pass                             # 쿠키 실패해도 이번 세션은 인증됨
             return True
@@ -128,7 +128,7 @@ def password_gate() -> bool:
 
 
 def reconnect_watchdog_html(interval_ms: int = 3000) -> str:
-    """서버 재기동 감지 → 자동 새로고침 스크립트 (순수 HTML — components.html 로 주입).
+    """서버 재기동 감지 → 자동 새로고침 스크립트 (순수 HTML — st.iframe 으로 주입).
 
     health 폴링이 '실패 → 회복' 전이를 보면 부모 창을 리로드한다. 쿠키 세션 도입으로
     리로드 후에도 서명 토큰이 유효하면 무입력 재인증(비번 화면으로 안 튕김).

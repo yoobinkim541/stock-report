@@ -299,9 +299,9 @@ def _render_panel_chart(
     )
     st.caption(prepared.decision.status if not compact else prepared.decision.backend.upper())
     if prepared.decision.backend == "canvas":
-        st.components.v1.html(prepared.html, height=prepared.component_height)
+        st.iframe(prepared.html, height=prepared.component_height)
     else:
-        st.components.v1.html(
+        st.iframe(
             plotly_embed.pannable_chart_html(
                 fig,
                 hist,

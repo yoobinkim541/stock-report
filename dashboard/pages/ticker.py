@@ -1100,10 +1100,10 @@ def _price_chart(ticker, hist, avg_cost, trades, fullscreen: bool = False,
     )
     st.caption(prepared.decision.status)
     if prepared.decision.backend == "canvas":
-        st.components.v1.html(prepared.html, height=prepared.component_height)
+        st.iframe(prepared.html, height=prepared.component_height)
         if _client_rt:
             _rtp = (cached.realtime_quote(ticker) or {}).get("price")
-            st.components.v1.html(plotly_embed.realtime_feed_html(_sk, _rtp), height=0)
+            st.iframe(plotly_embed.realtime_feed_html(_sk, _rtp), height=1)
     elif legacy or sequence_chart:
         try:
             event = st.plotly_chart(
@@ -1117,7 +1117,7 @@ def _price_chart(ticker, hist, avg_cost, trades, fullscreen: bool = False,
         _bj = (plotly_embed.compare_bounds_json(df, compare, view_days)
                if compare else None)                   # 비교 모드 — % 프레임으로 y 맞춤
         # 드로잉 영속화 키 — 좌표계가 다른 조합(스케일·HA)은 분리 버킷
-        st.components.v1.html(
+        st.iframe(
             plotly_embed.pannable_chart_html(
                 fig, df, height=h, view_days=view_days,
                 vol_axis="yaxis2" if show_vol else None, bounds_json=_bj,
@@ -1131,7 +1131,7 @@ def _price_chart(ticker, hist, avg_cost, trades, fullscreen: bool = False,
             # ⚡ 피더 — <1KB 컴포넌트만 8초 재실행마다 재마운트(가격+신선도 push).
             # 메인 차트 html 은 위에서 바이트 안정 → 드로잉·뷰·플롯 상태 유지.
             _rtp = (cached.realtime_quote(ticker) or {}).get("price")
-            st.components.v1.html(plotly_embed.realtime_feed_html(_sk, _rtp), height=0)
+            st.iframe(plotly_embed.realtime_feed_html(_sk, _rtp), height=1)
     if prepared.decision.backend == "canvas":
         st.caption("드래그=이동 · 휠/핀치=확대·축소 · 크로스헤어=OHLC · 드로잉과 주문선 편집은 렌더러 ‘분석’에서 사용")
     else:

@@ -49,13 +49,13 @@ if not getattr(st, "_tn_df_patched", False):
     st.dataframe = _themed_dataframe
     st._tn_df_patched = True
 # 선택 지속 — 매 런 쿠키를 현재 모드로 동기화 (다음 전체 새로고침에서 무플래시 복원 근접)
-st.components.v1.html(
+st.iframe(
     "<script>parent.document.cookie='tn_theme="
     + ("light" if st.session_state["tn_light"] else "dark")
-    + "; path=/; max-age=31536000; SameSite=Lax'</script>", height=0)
+    + "; path=/; max-age=31536000; SameSite=Lax'</script>", height=1)
 
 # 서버 재기동 감지 워치독 — 배포/재시작 후 좀비 탭이 자동 새로고침 → 로그인 게이트
-st.components.v1.html(auth.reconnect_watchdog_html(), height=0)
+st.iframe(auth.reconnect_watchdog_html(), height=1)
 
 if not auth.password_gate():
     st.stop()

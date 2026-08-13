@@ -1,7 +1,7 @@
 """dashboard/plotly_embed.py — 커스텀 plotly 임베드 (팬 시 부드러운 y축 자동 리스케일 + 드로잉 도구).
 
 st.plotly_chart 는 팬/줌(relayout)을 서버에 안 알려줘 y 자동맞춤이 불가 — 이 모듈은
-차트를 st.components.v1.html 로 임베드하고 브라우저 JS 가 `plotly_relayout` 을 받아
+차트를 st.iframe 으로 임베드하고 브라우저 JS 가 `plotly_relayout` 을 받아
 보이는 x구간의 고저(High/Low)로 y축을 즉시(디바운스 50ms·재진입 가드) 재설정한다
 (TradingView 방식). 마커 클릭 상세는 iframe 이 서버 콜백 불가라 인차트 박스로 렌더.
 
