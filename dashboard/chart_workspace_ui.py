@@ -11,6 +11,7 @@ import streamlit as st
 from dashboard import (
     cached,
     chart_document,
+    chart_orderflow,
     chart_renderer,
     chart_replay_ui,
     chart_workbench,
@@ -907,6 +908,12 @@ def _render_workspace_library_bar(ws: dict[str, Any]) -> dict[str, Any]:
     return chart_workspace.normalize_workspace(ws)
 
 
+def _analysis_orderflow_loader(replay_until):
+    if replay_until is None:
+        return chart_orderflow.load_snapshot
+    return lambda _symbol: {"ok": False, "reason": "replay_isolated"}
+
+
 def _render_analysis_rail(
     ws: dict[str, Any],
     *,
@@ -960,6 +967,7 @@ def _render_analysis_rail(
         ohlc_loader=_replay_loader,
         fundamental_loader=lambda symbol: cached.valuation(symbol) or {},
         alert_loader=lambda _symbol: list(document.get("alerts") or []),
+        orderflow_loader=_analysis_orderflow_loader(replay_until),
     )
     chart_workbench_ui.render_analysis_rail(snapshot)
     tools_key = f"cw_{ws.get('id', 'default')}_{panel['id']}"

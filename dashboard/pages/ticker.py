@@ -13,6 +13,7 @@ import ticker_names
 from dashboard import (
     cached,
     chart_document,
+    chart_orderflow,
     chart_renderer,
     chart_replay_ui,
     chart_workbench,
@@ -1116,6 +1117,7 @@ def _price_chart(ticker, hist, avg_cost, trades, fullscreen: bool = False,
         ohlc_loader=_analysis_loader,
         fundamental_loader=lambda symbol: cached.valuation(symbol) or {},
         alert_loader=lambda symbol: data.ticker_alerts(symbol) or [],
+        orderflow_loader=chart_orderflow.load_snapshot,
     )
     chart_workbench_ui.render_analysis_rail(snapshot)
     with st.expander("시리즈·조건·내보내기", expanded=False):

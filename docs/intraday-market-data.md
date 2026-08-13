@@ -42,9 +42,16 @@ KR_MARKET_MICROSTRUCTURE_ENABLED=true .venv/bin/python crons/kr_microstructure_s
 - `AGENT_CONSOLE_TOSS_FX_ENABLED=true`: Toss API 환율 fallback 활성화
 - `QUOTES_POLL_ENABLED=true`: US/KR REST quote poller 활성화
 - `REALTIME_US_ENABLED=true`: KIS US WebSocket quote stream 활성화
+- `ORDERFLOW_CAPTURE_ENABLED=true`: KIS WS의 개별 체결과 호가 스냅샷을 `~/reports/ml-data/orderflow/{세션 날짜}/{SYMBOL}.jsonl`에 저장
+- `ORDERFLOW_BOOK_SAMPLE_SECS=1.0`: 심볼별 호가 보존 간격. 낮출수록 큐 변화는 촘촘하지만 저장량이 증가
+- `ORDERFLOW_CAPTURE_MAX_BYTES=268435456`: 거래소 현지 세션 날짜별 캡처 상한. 상한 이후 이벤트는 시세 캐시에 영향 없이 드롭하고 상태에 유실 수 기록
+- `ORDERFLOW_PENDING_MAX=100000`: 디스크 flush 사이 메모리 큐 상한. 장애 중 무제한 메모리 증가를 차단
+- `ORDERFLOW_RETENTION_DAYS=14`: 세션 날짜 파티션 보존 기간. 기본 설정의 총 JSONL 상한은 약 3.5 GiB
 - `REALTIME_REST_REDIS_KEY=quotes:rest`: REST quote cache Redis key
 - `REALTIME_WS_REDIS_KEY=quotes:ws`: KIS WebSocket quote cache Redis key
 - `REALTIME_REDIS_TTL_S=180`: quote cache Redis TTL
+
+오더플로 계약은 거래소 시각과 앱 수신시각을 분리하고, KIS 개별 체결량을 우선 사용한다. 미국 장후장이 UTC 자정을 지나도 거래소 현지 세션 날짜에 보존한다. 국내 호가는 최대 10단계, 미국 무료 실시간 호가는 1단계다. 차트 reader는 최근 10,000건·최대 8MiB만 뒤에서 읽고 `truncated`와 캡처 유실 상태를 함께 표시한다. 쓰기 예외는 bounded 큐에서 재시도하며, 구독 심볼 외 이벤트는 저장하지 않는다. 리플레이 중에는 미래 정보 누출을 막기 위해 라이브 오더플로를 비활성화한다. 원천에 매수/매도 주도 체결 필드가 없으므로 풋프린트와 bid/ask delta는 OHLCV나 호가로 추정하지 않으며 UI에서 비활성 상태로 표시한다.
 
 ## Built-in Sources
 

@@ -76,7 +76,7 @@ Normal sidebar navigation produced no console errors. Directly opening `/chart` 
 | Fullscreen continuity | implemented | Fullscreen reuses ticker chart state and renderer |
 | Workspace continuity | implemented | Persisted document migration and shared renderer/rail |
 | 5,000-bar p95 below 50ms | intentionally different | Plotly p95 258.4ms; Canvas migration trigger |
-| Footprint/TPO/bid-ask imbalance | data-blocked | No authoritative tick plus bid/ask/aggressor data in the generic OHLCV path |
+| Order flow / footprint | partially implemented | Packet 4 adds KIS trade-size volume-at-price and evidence-backed DOM imbalance. True footprint and bid/ask delta stay blocked unless the provider supplies authoritative aggressor side. |
 
 No Packet 1 functional capability is marked `failed`. Packet 2 starts from `ChartDocument` v1, the shared condition DSL, strict data bundle, and Plotly renderer adapter documented here.
 

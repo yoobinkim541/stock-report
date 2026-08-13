@@ -9,7 +9,7 @@ from typing import Any
 import pandas as pd
 import streamlit as st
 
-from dashboard import chart_conditions, chart_document, chart_studies
+from dashboard import chart_conditions, chart_document, chart_orderflow, chart_studies
 
 
 CHART_TYPE_GROUPS = {
@@ -17,6 +17,18 @@ CHART_TYPE_GROUPS = {
     "평활": ("line", "area", "baseline", "heikin_ashi"),
     "가격 변환": ("renko", "kagi", "line_break", "range"),
 }
+
+
+def _orderflow_empty_message(reason: str) -> str:
+    messages = {
+        "capture_not_configured": "오더플로 수집 미설정 · ORDERFLOW_CAPTURE_ENABLED=true 필요",
+        "capture_disabled": "오더플로 수집 비활성 · ORDERFLOW_CAPTURE_ENABLED=true 필요",
+        "replay_isolated": "리플레이 시점 보호 · 라이브 오더플로를 표시하지 않음",
+        "provider_unavailable": "오더플로 공급자 연결 실패 · 데이터 진단에서 오류 확인",
+        "invalid_provider_payload": "오더플로 응답 형식 오류 · 데이터 진단에서 오류 확인",
+        "capture_empty": "현재 세션에 저장된 원천 이벤트 없음 · 장 상태·구독·수집 상태 확인",
+    }
+    return messages.get(reason, f"오더플로 원천 이벤트 없음 · {reason}")
 CHART_TYPE_LABELS = {
     "candlestick": "캔들",
     "hollow_candle": "할로우 캔들",
@@ -257,7 +269,7 @@ def render_analysis_rail(snapshot: Mapping[str, Any]) -> None:
         f"{snapshot.get('symbol')} · 기준 {snapshot.get('benchmark')} · "
         f"{quality.get('source', 'unknown')} · {quality.get('freshness', 'unknown')} · {quality.get('as_of') or '시각 미상'}"
     )
-    tabs = st.tabs(["추세", "패턴", "멀티봉", "계절성", "상대강도", "펀더멘털", "알림", "데이터"])
+    tabs = st.tabs(["추세", "패턴", "멀티봉", "계절성", "상대강도", "오더플로", "펀더멘털", "알림", "데이터"])
     trend = snapshot.get("trend") or {}
     with tabs[0]:
         by_kind = trend.get("by_kind") or {}
@@ -284,12 +296,62 @@ def render_analysis_rail(snapshot: Mapping[str, Any]) -> None:
         cols[1].metric("60일 RS", f"{float(rs.get('relative_strength_60d', 0)) * 100:.1f}%" if rs.get("ok") else "—")
         cols[2].metric("20일 모멘텀", f"{float(rs.get('relative_momentum_20d', 0)) * 100:.1f}%" if rs.get("ok") else "—")
     with tabs[5]:
+        st.markdown("##### 오더플로")
+        orderflow = snapshot.get("orderflow") or {}
+        coverage = orderflow.get("coverage") or {}
+        book = orderflow.get("book") or {}
+        if not orderflow.get("ok"):
+            reason = orderflow.get("reason") or "capture_empty"
+            st.caption(_orderflow_empty_message(reason))
+        else:
+            metrics = st.columns(4)
+            spread = book.get("spread")
+            imbalance = book.get("imbalance")
+            metrics[0].metric("스프레드", f"{float(spread):,.4g}" if spread is not None else "—")
+            metrics[1].metric("호가 불균형", f"{float(imbalance) * 100:+.1f}%" if imbalance is not None else "—")
+            metrics[2].metric("체결 이벤트", int(coverage.get("trade_events") or 0))
+            metrics[3].metric("호가 깊이", int(coverage.get("max_depth") or 0))
+            st.caption(
+                f"KIS WS 수신시각 기준 · 호가 {int(coverage.get('book_events') or 0)}개 · "
+                f"최신 스냅샷 {float(book.get('age_seconds')):.1f}초 전"
+                if book.get("age_seconds") is not None
+                else "KIS WS 수신시각 기준"
+            )
+            storage_window = coverage.get("storage_window") or {}
+            if storage_window:
+                scope = "일부만 표시" if storage_window.get("truncated") else "당일 파일 범위"
+                st.caption(
+                    f"최근 {int(storage_window.get('returned_events') or 0):,}건 창 · {scope} · "
+                    f"{int(storage_window.get('scanned_bytes') or 0):,} / "
+                    f"{int(storage_window.get('file_bytes') or 0):,} bytes 읽음"
+                )
+                capture_status = storage_window.get("capture_status") or {}
+                quality_notes = []
+                dropped = int(
+                    capture_status.get("session_dropped_events", capture_status.get("dropped_events")) or 0
+                )
+                failures = int(capture_status.get("write_failures") or 0)
+                if dropped:
+                    quality_notes.append(f"캡처 {dropped:,}건 유실")
+                if failures:
+                    quality_notes.append(f"쓰기 재시도 {failures:,}회")
+                if quality_notes:
+                    st.caption("수집 품질 · " + " · ".join(quality_notes))
+            figures = st.columns(2)
+            if book:
+                figures[0].plotly_chart(chart_orderflow.depth_figure(orderflow), width="stretch", config={"displayModeBar": False})
+            if orderflow.get("volume_profile"):
+                figures[1].plotly_chart(chart_orderflow.volume_profile_figure(orderflow), width="stretch", config={"displayModeBar": False})
+            capabilities = coverage.get("capabilities") or {}
+            if not capabilities.get("footprint"):
+                st.caption("풋프린트·매수/매도 체결 델타: 원천 aggressor side가 없어 비활성화됨")
+    with tabs[6]:
         fundamentals = snapshot.get("fundamentals") or {}
         st.json(fundamentals) if fundamentals else st.caption("펀더멘털 데이터 없음")
-    with tabs[6]:
+    with tabs[7]:
         alerts = snapshot.get("alerts") or []
         st.dataframe(pd.DataFrame(alerts), hide_index=True, width="stretch") if alerts else st.caption("등록된 조건 알림 없음")
-    with tabs[7]:
+    with tabs[8]:
         st.json({"quality": quality, "errors": snapshot.get("errors") or {}})
 
 

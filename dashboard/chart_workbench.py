@@ -57,6 +57,7 @@ def build_analysis_snapshot(
     ohlc_loader: Callable[[str, str], Any],
     fundamental_loader: Callable[[str], Any],
     alert_loader: Callable[[str], Any],
+    orderflow_loader: Callable[[str], Any] | None = None,
 ) -> dict[str, Any]:
     """Build one failure-isolated, renderer-neutral analysis payload.
 
@@ -96,12 +97,21 @@ def build_analysis_snapshot(
     multi_timeframe = chart_analysis.multi_timeframe_summary(ohlc_loader, symbol)
     fundamentals = _optional("fundamentals", fundamental_loader, symbol, {}, errors)
     alerts = _optional("alerts", alert_loader, symbol, [], errors)
+    orderflow = (
+        _optional("orderflow", orderflow_loader, symbol,
+                  {"ok": False, "reason": "provider_unavailable"}, errors)
+        if orderflow_loader is not None
+        else {"ok": False, "reason": "capture_not_configured"}
+    )
     if not isinstance(fundamentals, Mapping):
         errors["fundamentals"] = "provider returned a non-object payload"
         fundamentals = {}
     if not isinstance(alerts, list):
         errors["alerts"] = "provider returned a non-list payload"
         alerts = []
+    if not isinstance(orderflow, Mapping):
+        errors["orderflow"] = "provider returned a non-object payload"
+        orderflow = {"ok": False, "reason": "invalid_provider_payload"}
 
     source = normalized.get("source") or {}
     data_quality = {
@@ -121,6 +131,7 @@ def build_analysis_snapshot(
         "relative_strength": relative_strength,
         "fundamentals": dict(fundamentals),
         "alerts": alerts,
+        "orderflow": dict(orderflow),
         "data_quality": data_quality,
         "errors": errors,
     }

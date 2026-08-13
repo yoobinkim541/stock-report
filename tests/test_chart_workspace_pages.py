@@ -118,6 +118,16 @@ def test_workspace_drawing_store_key_respects_sync_scope():
     assert chart_workspace_ui._drawing_store_key(ws, panel, compare=False) is None
 
 
+def test_replay_analysis_disables_live_orderflow_loader():
+    from dashboard import chart_orderflow, chart_workspace_ui
+
+    live_loader = chart_workspace_ui._analysis_orderflow_loader(None)
+    replay_loader = chart_workspace_ui._analysis_orderflow_loader("2026-01-02T15:00:00Z")
+
+    assert live_loader is chart_orderflow.load_snapshot
+    assert replay_loader("AAPL") == {"ok": False, "reason": "replay_isolated"}
+
+
 def test_workspace_drawing_sync_url_targets_agent_console(monkeypatch):
     from dashboard import chart_workspace_ui
 

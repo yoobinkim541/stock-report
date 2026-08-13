@@ -4,6 +4,7 @@ import os
 import sys
 
 import pandas as pd
+import pytest
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, ROOT)
@@ -46,6 +47,7 @@ def test_analysis_snapshot_combines_all_analysis_sections():
         ohlc_loader=load_ohlc,
         fundamental_loader=lambda symbol: {"symbol": symbol, "metrics": {"per": 31.2}},
         alert_loader=lambda symbol: [{"id": "a1", "symbol": symbol, "matched": False}],
+        orderflow_loader=lambda symbol: {"ok": True, "symbol": symbol, "coverage": {"trade_events": 3}},
     )
 
     assert out["symbol"] == "MSFT"
@@ -59,6 +61,7 @@ def test_analysis_snapshot_combines_all_analysis_sections():
     assert {"support", "resistance", "channel"} <= set(out["trend"]["by_kind"])
     assert out["fundamentals"]["metrics"]["per"] == 31.2
     assert out["alerts"][0]["id"] == "a1"
+    assert out["orderflow"]["coverage"]["trade_events"] == 3
     assert out["data_quality"]["source"] == "yfinance"
     assert out["errors"] == {}
 
@@ -83,6 +86,7 @@ def test_analysis_snapshot_uses_kr_benchmark_and_survives_optional_failures():
         ohlc_loader=load_ohlc,
         fundamental_loader=fail,
         alert_loader=fail,
+        orderflow_loader=fail,
     )
 
     assert out["benchmark"] == "^KS11"
@@ -93,7 +97,8 @@ def test_analysis_snapshot_uses_kr_benchmark_and_survives_optional_failures():
     assert rows["1d"]["ok"] is True
     assert out["fundamentals"] == {}
     assert out["alerts"] == []
-    assert set(out["errors"]) == {"fundamentals", "alerts"}
+    assert out["orderflow"] == {"ok": False, "reason": "provider_unavailable"}
+    assert set(out["errors"]) == {"fundamentals", "alerts", "orderflow"}
 
 
 def test_analysis_snapshot_prefers_explicit_benchmark_series():
@@ -121,6 +126,7 @@ def test_analysis_snapshot_prefers_explicit_benchmark_series():
         ohlc_loader=load_ohlc,
         fundamental_loader=lambda _symbol: {},
         alert_loader=lambda _symbol: [],
+        orderflow_loader=lambda _symbol: {"ok": False, "reason": "capture_empty"},
     )
 
     assert out["benchmark"] == "AAPL"
@@ -176,3 +182,61 @@ def test_condition_draft_supports_non_price_operands():
 
     assert condition["children"][0]["type"] == "fundamental"
     assert condition["children"][0]["field"] == "forward_pe"
+
+
+def test_analysis_rail_renders_orderflow_evidence_and_blocked_capabilities():
+    pytest.importorskip("streamlit")
+    from streamlit.testing.v1 import AppTest
+
+    script = f"""
+import sys
+sys.path.insert(0, {ROOT!r})
+from dashboard import chart_workbench_ui
+
+chart_workbench_ui.render_analysis_rail({{
+    "symbol": "005930.KS", "benchmark": "^KS11",
+    "trend": {{}}, "patterns": [], "multi_timeframe": {{}}, "seasonality": {{}},
+    "relative_strength": {{}}, "fundamentals": {{}}, "alerts": [], "errors": {{}},
+    "data_quality": {{"source": "kis_ws", "freshness": "realtime", "as_of": "now"}},
+    "orderflow": {{
+        "ok": True,
+        "coverage": {{"trade_events": 2, "book_events": 1, "max_depth": 2,
+                     "storage_window": {{"returned_events": 3, "truncated": True,
+                                         "scanned_bytes": 512, "file_bytes": 1024,
+                                         "capture_complete": False,
+                                         "capture_status": {{"dropped_events": 3,
+                                                             "write_failures": 1}}}},
+                     "capabilities": {{"footprint": False, "bid_ask_delta": False}}}},
+        "book": {{"bids": [[71000, 80]], "asks": [[71100, 20]], "spread": 100,
+                 "imbalance": 0.6, "age_seconds": 1}},
+        "volume_profile": [{{"price": 71000, "volume": 25}}],
+        "blocked": {{"footprint": "authoritative_aggressor_side_unavailable"}},
+    }},
+}})
+"""
+    at = AppTest.from_string(script, default_timeout=30).run()
+
+    assert not at.exception, str(at.exception)
+    body = " ".join(str(item.value) for item in at.markdown)
+    body += " " + " ".join(str(item.value) for item in at.caption)
+    body += " " + " ".join(str(item.label) for item in at.metric)
+    assert "오더플로" in body
+    assert "풋프린트" in body
+    assert "최근 3건 창" in body
+    assert "일부만 표시" in body
+    assert "캡처 3건 유실" in body
+    assert "쓰기 재시도 1회" in body
+    assert len(at.get("plotly_chart")) == 2
+    assert any("kis_ws" in str(item.value) for item in at.json)
+
+
+def test_orderflow_empty_state_message_is_reason_specific():
+    from dashboard import chart_workbench_ui
+
+    assert "ORDERFLOW_CAPTURE_ENABLED=true" in chart_workbench_ui._orderflow_empty_message(
+        "capture_not_configured"
+    )
+    assert "ORDERFLOW_CAPTURE_ENABLED=true" not in chart_workbench_ui._orderflow_empty_message(
+        "capture_empty"
+    )
+    assert "리플레이" in chart_workbench_ui._orderflow_empty_message("replay_isolated")
