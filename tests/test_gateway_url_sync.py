@@ -39,7 +39,10 @@ def test_sed_actually_replaces_url(tmp_path):
 
 
 def test_gateway_url_is_single_source():
-    """page.tsx / bridge/page.tsx 에 URL 리터럴이 남아 있으면 안 된다."""
-    for rel in ("src/app/page.tsx", "src/app/bridge/page.tsx"):
-        body = (ROOT / rel).read_text(encoding="utf-8")
+    """현재 존재하는 모든 Next 페이지에 URL 리터럴이 남아 있으면 안 된다."""
+    pages = sorted((ROOT / "src" / "app").rglob("page.tsx"))
+    assert pages
+    for page in pages:
+        body = page.read_text(encoding="utf-8")
+        rel = page.relative_to(ROOT)
         assert not TUNNEL_RE.search(body), f"{rel} 에 터널 URL 리터럴이 남아 있음"

@@ -389,7 +389,9 @@ def test_fetch_saveticker_events_normalizes_dict_tickers(monkeypatch, tmp_path):
     assert Path(event["manifest_path"]).exists()
     manifest = json.loads(Path(event["manifest_path"]).read_text(encoding="utf-8"))
     assert manifest["ttl_days"] == 60
-    assert manifest["expires_at"].startswith("2026-09-")
+    fetched_at = datetime.fromisoformat(manifest["fetched_at"])
+    expires_at = datetime.fromisoformat(manifest["expires_at"])
+    assert expires_at - fetched_at == timedelta(days=60)
     assert Path(event["text_path"]).read_text(encoding="utf-8") == event["body_raw"]
 
 

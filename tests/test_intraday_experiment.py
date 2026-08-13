@@ -250,11 +250,15 @@ def test_label_lifecycle_decision_records_partial_target_then_full_target():
         cost_estimate=0.0,
     )
 
-    label = label_lifecycle_decision(decision, [
-        {"minute": 0, "price": 100.0},
-        {"minute": 1, "high": 102.2, "low": 100.5, "price": 101.8},
-        {"minute": 2, "high": 104.5, "low": 101.5, "price": 104.0},
-    ])
+    label = label_lifecycle_decision(
+        decision,
+        [
+            {"minute": 0, "price": 100.0},
+            {"minute": 1, "high": 102.2, "low": 100.5, "price": 101.8},
+            {"minute": 2, "high": 104.5, "low": 101.5, "price": 104.0},
+        ],
+        cfg={"partial_exit_min_hold_min": 0},
+    )
 
     assert label.partial_target_hit is True
     assert label.full_target_hit is True

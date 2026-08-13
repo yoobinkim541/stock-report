@@ -96,6 +96,7 @@ def test_entry_samples_sorted_by_triggered_at(monkeypatch):
         {"score": 0.8, "r_multiple": 3.0},   # 타임스탬프 없음 → 맨 뒤
     ]
     monkeypatch.setattr("store.all", lambda coll: list(rows))
+    monkeypatch.setattr("ml.entry_feedback.training_rows", lambda **kwargs: [])
     out = e._samples()
     assert [rm for _, rm in out] == [-1.0, 1.0, 2.0, 3.0]   # 1월→2월→3월→무타임스탬프
 
