@@ -12,14 +12,17 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspa
 import ticker_names
 from dashboard import (
     cached,
+    chart_backend,
     chart_document,
     chart_orderflow,
     chart_renderer,
     chart_replay_ui,
     chart_workbench,
     chart_workbench_ui,
+    chart_surface,
     charts,
     data,
+    plotly_embed,
     theme,
 )
 
@@ -765,8 +768,9 @@ def _price_chart(ticker, hist, avg_cost, trades, fullscreen: bool = False,
     패치 (html 바이트 안정 = 8초 재실행이 iframe 을 재마운트하지 않음).
     """
     # 컨트롤 한 줄 — 봉 | 라인/캔들 | 지표 | 비교 | 기간 | ⛶ (좁은 화면은 자동 줄바꿈)
-    ctf, ckind, c3, c4, cper, cfull = st.columns([1.45, 0.72, 0.34, 0.64, 1.25, 0.35],
-                                                 vertical_alignment="center")
+    ctf, ckind, crender, c3, c4, cper, cfull = st.columns(
+        [1.45, 0.78, 1.16, 0.34, 0.64, 1.25, 0.35], vertical_alignment="center",
+    )
     if fullscreen:
         if cfull.button("↙", key="_chart_back", help="종목 분석으로 복귀"):
             pg = st.session_state.get("_ticker_page")
@@ -791,6 +795,15 @@ def _price_chart(ticker, hist, avg_cost, trades, fullscreen: bool = False,
         key="_chart_kind_value",
         help="가격 기반 변환 차트는 OHLCV 봉으로 재구성된 표시값이며 실체결 틱이 아닙니다.",
     )
+    renderer_preference = crender.segmented_control(
+        "렌더러",
+        ["auto", "canvas", "plotly"],
+        default=st.session_state.get("_chart_renderer_value", "auto"),
+        format_func={"auto": "자동", "canvas": "고성능", "plotly": "분석"}.get,
+        label_visibility="collapsed",
+        key="_chart_renderer_value",
+        help="자동은 고밀도 호환 차트에 Canvas를 사용합니다. 분석은 드로잉·고급 지표를 모두 유지합니다.",
+    ) or "auto"
     # 기간 = 초기 표시 창 — 데이터는 뷰의 5배 팬버퍼로 윈도잉(charts.view_window·"전체"=전량)
     tf = _TF[tf_label]
     render_tf = tf
@@ -1020,6 +1033,7 @@ def _price_chart(ticker, hist, avg_cost, trades, fullscreen: bool = False,
     document["chart"] = {"type": kind, "params": chart_params}
     document["session"]["policy"] = session_policy
     document["scale"]["type"] = "log" if use_log else "linear"
+    document["renderer"]["preferred"] = renderer_preference
     document["source"].update({
         "name": str(source_status.get("name") or source_status.get("source") or "market-data"),
         "as_of": source_status.get("as_of") or (str(df.index[-1]) if len(df.index) else None),
@@ -1064,7 +1078,33 @@ def _price_chart(ticker, hist, avg_cost, trades, fullscreen: bool = False,
         fig.update_layout(height=840)
     event = None
     sequence_chart = rendered.transform.x_mode == "sequence"
-    if legacy or sequence_chart:
+    h = int(fig.layout.height or 420)
+    _scale = "pct" if compare else ("log" if use_log else "lin")
+    _sk = f"{ticker}:{render_tf}:{_scale}:{kind}"
+    _advanced_overlays = bool(
+        set(top) & {"매물대", "자동 추세선·채널", "프랙탈", "파라볼릭 SAR", "일목균형표"}
+    ) or bool(zones)
+    prepared = chart_surface.prepare_chart_surface(
+        rendered,
+        compare=bool(compare),
+        lower_panes=any(name != "거래량" for name in bottom),
+        editable_orders=chart_backend.requires_editable_orders(
+            replay_context["session"] if replay_context["active"] else None,
+        ),
+        advanced_overlays=_advanced_overlays,
+        height=h,
+        store_key=_sk,
+        live=_client_rt,
+        light=theme.is_light(),
+        force_plotly=bool(legacy),
+    )
+    st.caption(prepared.decision.status)
+    if prepared.decision.backend == "canvas":
+        st.components.v1.html(prepared.html, height=prepared.component_height)
+        if _client_rt:
+            _rtp = (cached.realtime_quote(ticker) or {}).get("price")
+            st.components.v1.html(plotly_embed.realtime_feed_html(_sk, _rtp), height=0)
+    elif legacy or sequence_chart:
         try:
             event = st.plotly_chart(
                 fig, width="stretch", config=charts.PAN_DRAW_CFG,
@@ -1074,12 +1114,9 @@ def _price_chart(ticker, hist, avg_cost, trades, fullscreen: bool = False,
     else:
         # 커스텀 임베드 — 팬 시 보이는 구간에 y축(가격·거래량) 부드러운 자동 맞춤
         from dashboard import plotly_embed
-        h = int(fig.layout.height or 420)
         _bj = (plotly_embed.compare_bounds_json(df, compare, view_days)
                if compare else None)                   # 비교 모드 — % 프레임으로 y 맞춤
         # 드로잉 영속화 키 — 좌표계가 다른 조합(스케일·HA)은 분리 버킷
-        _scale = "pct" if compare else ("log" if use_log else "lin")
-        _sk = f"{ticker}:{render_tf}:{_scale}:{kind}"
         st.components.v1.html(
             plotly_embed.pannable_chart_html(
                 fig, df, height=h, view_days=view_days,
@@ -1095,11 +1132,14 @@ def _price_chart(ticker, hist, avg_cost, trades, fullscreen: bool = False,
             # 메인 차트 html 은 위에서 바이트 안정 → 드로잉·뷰·플롯 상태 유지.
             _rtp = (cached.realtime_quote(ticker) or {}).get("price")
             st.components.v1.html(plotly_embed.realtime_feed_html(_sk, _rtp), height=0)
-    st.caption("🖱️ 드래그=이동(y축 자동 맞춤) · 휠=확대/축소 · 더블클릭=원위치 · "
-               "✏️ 모드바 직접 그리기(선·자유곡선·박스)·지우개 + 차트 위 도구바: "
-               "🧲 자석(봉 OHLC 스냅)·─ 수평선·🔱 피보나치·📏 측정·📐 회귀추세(±2σ)·"
-               "⚓ 고정VWAP·📊 볼륨프로필(POC)·🗑 지우기 · "
-               "드로잉은 이 브라우저에 종목·봉·스케일별 자동 저장")
+    if prepared.decision.backend == "canvas":
+        st.caption("드래그=이동 · 휠/핀치=확대·축소 · 크로스헤어=OHLC · 드로잉과 주문선 편집은 렌더러 ‘분석’에서 사용")
+    else:
+        st.caption("🖱️ 드래그=이동(y축 자동 맞춤) · 휠=확대/축소 · 더블클릭=원위치 · "
+                   "✏️ 모드바 직접 그리기(선·자유곡선·박스)·지우개 + 차트 위 도구바: "
+                   "🧲 자석(봉 OHLC 스냅)·─ 수평선·🔱 피보나치·📏 측정·📐 회귀추세(±2σ)·"
+                   "⚓ 고정VWAP·📊 볼륨프로필(POC)·🗑 지우기 · "
+                   "드로잉은 이 브라우저에 종목·봉·스케일별 자동 저장")
     selected = _selected_trade(event, trades or []) if legacy else None
     if selected:
         _trade_detail(selected)

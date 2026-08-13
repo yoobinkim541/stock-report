@@ -55,6 +55,7 @@ def test_explicit_canvas_bypasses_threshold():
         ({"x_mode": "sequence"}, "sequence_chart"),
         ({"lower_panes": True}, "lower_panes"),
         ({"editable_orders": True}, "editable_orders"),
+        ({"advanced_overlays": True}, "advanced_overlays"),
     ],
 )
 def test_canvas_request_falls_back_for_unsupported_capability(kwargs, reason):
@@ -87,3 +88,17 @@ def test_empty_frame_never_selects_canvas():
 
     assert decision.backend == "plotly"
     assert decision.reasons == ("empty_frame",)
+
+
+def test_pending_limit_or_stop_orders_require_editable_plotly_lines():
+    session = {
+        "orders": [
+            {"status": "filled", "type": "limit"},
+            {"status": "pending", "type": "market"},
+            {"status": "pending", "type": "stop"},
+        ],
+    }
+
+    assert chart_backend.requires_editable_orders(session) is True
+    assert chart_backend.requires_editable_orders({"orders": session["orders"][:2]}) is False
+    assert chart_backend.requires_editable_orders(None) is False

@@ -20,6 +20,7 @@ _REASON_LABELS = {
     "sequence_chart": "가격 변환 차트",
     "lower_panes": "하단 분석 패널",
     "editable_orders": "편집 가능한 주문선",
+    "advanced_overlays": "고급 오버레이",
     "unsupported_chart_type": "미지원 차트 유형",
     "below_auto_threshold": "고밀도 기준 미만",
 }
@@ -41,6 +42,18 @@ def _frame_size(frame: Any) -> int:
         return 0
 
 
+def requires_editable_orders(session: Mapping[str, Any] | None) -> bool:
+    """Return whether replay state contains a draggable pending price order."""
+    if not isinstance(session, Mapping):
+        return False
+    return any(
+        isinstance(order, Mapping)
+        and order.get("status") == "pending"
+        and order.get("type") in {"limit", "stop"}
+        for order in session.get("orders") or []
+    )
+
+
 def select_renderer(
     document: Mapping[str, Any],
     frame: Any,
@@ -49,6 +62,7 @@ def select_renderer(
     compact: bool = False,
     lower_panes: bool = False,
     editable_orders: bool = False,
+    advanced_overlays: bool = False,
     x_mode: str = "time",
 ) -> RendererDecision:
     """Choose Canvas only when every requested capability has a supported path."""
@@ -70,6 +84,8 @@ def select_renderer(
         reasons.append("lower_panes")
     if editable_orders:
         reasons.append("editable_orders")
+    if advanced_overlays:
+        reasons.append("advanced_overlays")
     if chart_type not in CANVAS_CHART_TYPES:
         reasons.append("unsupported_chart_type")
     if reasons:

@@ -10,12 +10,14 @@ import streamlit as st
 
 from dashboard import (
     cached,
+    chart_backend,
     chart_document,
     chart_orderflow,
     chart_renderer,
     chart_replay_ui,
     chart_workbench,
     chart_workbench_ui,
+    chart_surface,
     chart_workspace,
     charts,
     data,
@@ -280,25 +282,44 @@ def _render_panel_chart(
         if rendered.transform.x_mode == "time"
         else None
     )
-    st.components.v1.html(
-        plotly_embed.pannable_chart_html(
-            fig,
-            hist,
-            height=height,
-            view_days=view_days,
-            bounds_json=bounds,
-            pct_mode=bool(compare),
-            store_key=store_key,
-            drawing_sync_url=_drawing_sync_url(ws, store_key),
-            order_patch_url=(replay_context.get("order_patch_url") if panel_replay else None),
-            replay_revision=(replay_context.get("revision") if panel_replay else None),
-            crosshair_key=_crosshair_store_key(ws),
-            range_sync_key=range_sync_key,
-            compact=compact,
-            light=theme.is_light(),
-        ),
-        height=height + (20 if compact else 150),
+    advanced_overlays = bool(
+        top & {"매물대", "자동 추세선·채널", "프랙탈", "파라볼릭 SAR", "일목균형표"}
     )
+    prepared = chart_surface.prepare_chart_surface(
+        rendered,
+        compare=bool(compare),
+        compact=compact,
+        lower_panes=any(name != "거래량" for name in bottom),
+        editable_orders=chart_backend.requires_editable_orders(panel_replay),
+        advanced_overlays=advanced_overlays,
+        height=height,
+        store_key=store_key,
+        range_sync_key=range_sync_key,
+        light=theme.is_light(),
+    )
+    st.caption(prepared.decision.status if not compact else prepared.decision.backend.upper())
+    if prepared.decision.backend == "canvas":
+        st.components.v1.html(prepared.html, height=prepared.component_height)
+    else:
+        st.components.v1.html(
+            plotly_embed.pannable_chart_html(
+                fig,
+                hist,
+                height=height,
+                view_days=view_days,
+                bounds_json=bounds,
+                pct_mode=bool(compare),
+                store_key=store_key,
+                drawing_sync_url=_drawing_sync_url(ws, store_key),
+                order_patch_url=(replay_context.get("order_patch_url") if panel_replay else None),
+                replay_revision=(replay_context.get("revision") if panel_replay else None),
+                crosshair_key=_crosshair_store_key(ws),
+                range_sync_key=range_sync_key,
+                compact=compact,
+                light=theme.is_light(),
+            ),
+            height=height + (20 if compact else 150),
+        )
 
 
 def render_chart_workspace(
