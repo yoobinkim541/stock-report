@@ -213,6 +213,25 @@ def test_flush_orderflow_drains_pending_after_bounded_append(monkeypatch):
     assert list(pending) == []
 
 
+def test_initialize_orderflow_status_before_first_market_event(monkeypatch):
+    written = []
+    pruned = []
+    status = {**ks._new_orderflow_status(), "capture_enabled": True}
+    monkeypatch.setattr(ks, "_ORDERFLOW_STATUS", status)
+    monkeypatch.setattr(ks, "ORDERFLOW_ENABLED", True)
+    monkeypatch.setattr(ks, "ORDERFLOW_RETENTION_DAYS", 14)
+    monkeypatch.setattr(ks._orderflow, "write_capture_status", lambda value: written.append(dict(value)))
+    monkeypatch.setattr(
+        ks._orderflow, "prune_partitions",
+        lambda **kwargs: pruned.append(kwargs) or {"removed": []},
+    )
+
+    ks._initialize_orderflow_capture()
+
+    assert written == [status]
+    assert pruned == [{"retention_days": 14}]
+
+
 def test_orderflow_capture_rejects_symbols_outside_subscription(monkeypatch):
     recorder = __import__("providers.orderflow_store", fromlist=["OrderFlowRecorder"]).OrderFlowRecorder()
     pending = deque(maxlen=10)

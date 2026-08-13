@@ -89,6 +89,16 @@ def _new_orderflow_status() -> dict:
 _ORDERFLOW_STATUS = _new_orderflow_status()
 
 
+def _initialize_orderflow_capture() -> None:
+    """Publish capture configuration before the first market event arrives."""
+    try:
+        _orderflow.write_capture_status(_ORDERFLOW_STATUS)
+        if ORDERFLOW_ENABLED:
+            _orderflow.prune_partitions(retention_days=ORDERFLOW_RETENTION_DAYS)
+    except Exception as exc:
+        logger.warning("order-flow 초기 상태 기록 실패(시세 스트림 계속): %s", exc)
+
+
 def _count_orderflow_drop(event: dict) -> None:
     _ORDERFLOW_STATUS["dropped_events"] += 1
     session_date = str(event.get("session_date") or "unknown")
@@ -699,6 +709,7 @@ def main() -> int:
     with open(_PID_FILE, "w") as f:
         f.write(str(os.getpid()))
     logger.info("=== kis_stream 시작 (PID %d) ===", os.getpid())
+    _initialize_orderflow_capture()
     try:
         asyncio.run(main_async())
     except KeyboardInterrupt:
