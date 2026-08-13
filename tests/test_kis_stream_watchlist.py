@@ -54,5 +54,34 @@ def test_compute_watchlist_streams_core_qqq():
     assert "QQQ" in sel["US"]                        # 코어는 캡 안에서 항상 생존(최우선)
 
 
+def test_prioritized_watchlist_reserves_active_chart_before_background_sources():
+    """포화 상태에서도 현재 보는 차트는 보유·알림보다 먼저 실시간 슬롯을 얻는다."""
+    sel, dropped = ks.select_prioritized_watchlist(
+        core=["QQQ"],
+        active=["TSLA", "005930.KS"],
+        intraday=["AAPL", "NVDA", "000660.KS"],
+        holdings=["MSFT", "035720.KS"],
+        alerts=["META"],
+        kr_max=2,
+        us_max=4,
+    )
+
+    assert sel == {
+        "KR": ["005930", "000660"],
+        "US": ["QQQ", "TSLA", "AAPL", "NVDA"],
+    }
+    assert dropped == {"KR": ["035720"], "US": ["MSFT", "META"]}
+
+
+def test_prioritized_watchlist_deduplicates_across_priority_tiers():
+    sel, dropped = ks.select_prioritized_watchlist(
+        core=["QQQ"], active=["AAPL"], intraday=["AAPL", "MSFT"],
+        holdings=["QQQ", "MSFT"], alerts=["AAPL"], kr_max=2, us_max=4,
+    )
+
+    assert sel["US"] == ["QQQ", "AAPL", "MSFT"]
+    assert dropped["US"] == []
+
+
 if __name__ == "__main__":
     sys.exit(pytest.main([__file__, "-v"]))

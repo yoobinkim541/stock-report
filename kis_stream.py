@@ -394,35 +394,56 @@ def _classify(ticker: str, kr: list, us: list) -> None:
         us.append(t)
 
 
+def select_prioritized_watchlist(
+    *,
+    core: list[str],
+    active: list[str],
+    intraday: list[str],
+    holdings: list[str],
+    alerts: list[str],
+    kr_max: int = KR_MAX,
+    us_max: int = US_MAX,
+) -> tuple[dict, dict]:
+    """시장별 슬롯을 코어·활성 차트·단기·보유·알림 순서로 배정한다."""
+    kr: list[str] = []
+    us: list[str] = []
+    for tier in (core, active, intraday, holdings, alerts):
+        for ticker in tier or []:
+            _classify(ticker, kr, us)
+    return select_watchlist(kr, us, kr_max=kr_max, us_max=us_max)
+
+
 def compute_watchlist() -> tuple[dict, dict]:
-    """벤치마크 코어 ∪ 보유(국내+해외) ∪ 활성 가격알림 → select_watchlist. 단일진실원 재사용."""
-    kr, us = [], list(_CORE_US)     # QQQ 등 벤치마크 최우선(대시보드 실시간가)
+    """활성 차트 슬롯을 보장한 뒤 백그라운드 소스에 남은 슬롯을 배정한다."""
+    active: list[str] = []
+    intraday: list[str] = []
+    holdings: list[str] = []
+    alerts: list[str] = []
+    try:                                     # 대시보드 '지금 보는 종목' (10분 TTL·최대 3)
+        from lib import viewer_interest
+        active = viewer_interest.recent()
+    except Exception as e:
+        logger.debug("viewer interest 로드 실패(무시): %s", e)
     try:                                     # 단기 유니버스 — 보유보다 앞. bar 는 스트림 없으면
         from providers import intraday_universe   # 대체 불가(단기 엔진 기능 정지)·보유 ⚡표시는
         for t in intraday_universe.watchlist_symbols():   # yfinance 폴백 존재(지연 표시뿐).
-            _classify(t, kr, us)             # 라이브 실증(2026-07-09): 보유 11종이 US 캡 선점 →
+            intraday.append(t)               # 라이브 실증(2026-07-09): 보유 11종이 US 캡 선점 →
     except Exception as e:                   # 무버 3종 드롭 → US bar 0 → US 단기 진입 영구 불가
         logger.warning("단기 유니버스 로드 실패: %s", e)
     try:
         import portfolio_universe
-        for t in portfolio_universe.load_portfolio_tickers():
-            _classify(t, kr, us)
+        holdings = portfolio_universe.load_portfolio_tickers()
     except Exception as e:
         logger.warning("보유 티커 로드 실패: %s", e)
     try:
         from bot import price_alerts
-        for a in price_alerts.load_alerts():
-            if not a.get("triggered"):
-                _classify(a.get("ticker"), kr, us)
+        alerts = [a.get("ticker") for a in price_alerts.load_alerts() if not a.get("triggered")]
     except Exception as e:
         logger.warning("알림 티커 로드 실패: %s", e)
-    try:                                     # 대시보드 '지금 보는 종목' (최후미 — 잔여 슬롯만)
-        from lib import viewer_interest
-        for t in viewer_interest.recent():
-            _classify(t, kr, us)
-    except Exception as e:
-        logger.debug("viewer interest 로드 실패(무시): %s", e)
-    return select_watchlist(kr, us)
+    return select_prioritized_watchlist(
+        core=list(_CORE_US), active=active, intraday=intraday,
+        holdings=holdings, alerts=alerts,
+    )
 
 
 # ── 인증 / 캐시 (네트워크·IO) ─────────────────────────────────────────────────
