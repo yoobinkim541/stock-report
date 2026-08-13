@@ -724,7 +724,7 @@ _TICKER_NAME: dict[str, str] = {
     "QLD":  "QLD(2×QQQ)",  "TQQQ": "TQQQ(3×QQQ)", "UPRO": "UPRO(3×SPY)",
     # 미국 주요 종목
     "AAPL": "Apple",    "AMZN": "Amazon",   "META": "Meta",    "TSLA": "Tesla",
-    "AVGO": "Broadcom", "TSM":  "TSMC",     "QCOM": "Qualcomm","AMD":  "AMD",
+    "AVGO": "Broadcom", "TSM":  "TSMC",     "QCOM": "Qualcomm","AMD":  "AMD",  # ticker-ok 종목명 표시 사전
     "LLY":  "Eli Lilly","JPM":  "JPMorgan", "V":    "Visa",    "MA":   "Mastercard",
     "WMT":  "Walmart",  "COST": "Costco",   "HD":   "Home Depot",
     "XOM":  "Exxon",    "CVX":  "Chevron",  "NFLX": "Netflix", "ADBE": "Adobe",

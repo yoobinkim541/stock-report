@@ -92,7 +92,7 @@ MANUAL_SCORES = {}
 NASDAQ_100 = [
     "ADBE", "AMD", "ABNB", "ALNY", "GOOGL", "GOOG", "AMZN", "AEP",
     "AMGN", "ADI", "AAPL", "AMAT", "APP", "ARM", "ASML", "ADSK",
-    "ADP", "AXON", "BKR", "BKNG", "AVGO", "CDNS", "CHTR", "CTAS",
+    "ADP", "AXON", "BKR", "BKNG", "AVGO", "CDNS", "CHTR", "CTAS",  # ticker-ok NASDAQ100 시장 유니버스
     "CSCO", "CCEP", "CTSH", "CMCSA", "CEG", "CPRT", "COST", "CRWD",
     "CSX", "DDOG", "DXCM", "FANG", "DASH", "EA", "EXC", "FAST",
     "FER", "FTNT", "GEHC", "GILD", "HON", "IDXX", "INSM", "INTC",

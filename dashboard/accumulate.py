@@ -216,7 +216,7 @@ def _manage_dialog():
                 value=round(w * 100, 1), step=1.0, key=f"_accw_{t}")
         nc1, nc2 = st.columns([1, 1])
         new_t = nc1.text_input("신규 티커 추가", key="_accw_new",
-                               placeholder="예: AVGO").strip().upper()
+                               placeholder="예: AVGO").strip().upper()  # ticker-ok 사용자 입력 예시
         new_w = nc2.number_input("신규 비중 %", min_value=0.0, max_value=100.0,
                                  value=0.0, step=1.0, key="_accw_neww")
         if st.button("💾 비중 저장 (합계 자동 정규화 · 0% = 제외)", key="_accw_save"):

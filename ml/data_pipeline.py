@@ -210,7 +210,7 @@ def _fetch_nasdaq100() -> list[str]:
         logger.warning("NASDAQ100 유니버스 로드 실패: %s", e)
 
     # fallback: 핵심 30종목
-    return ["AAPL","MSFT","NVDA","GOOGL","META","AMZN","TSLA","AVGO","COST",
+    return ["AAPL","MSFT","NVDA","GOOGL","META","AMZN","TSLA","AVGO","COST",  # ticker-ok NASDAQ100 시장 유니버스
             "NFLX","ASML","AMD","QCOM","INTC","INTU","AMAT","MU","LRCX","MRVL",
             "PANW","CDNS","SNPS","FTNT","KLAC","MCHP","ADI","ON","MPWR","TEAM","ZM"]
 

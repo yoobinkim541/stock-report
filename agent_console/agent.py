@@ -599,7 +599,7 @@ def _rank_reduce_candidates(rows: list[dict]) -> list[dict]:
         if row["ticker"] in {"TQQQ", "SOXL", "SQQQ", "SOXS", "QLD", "SSO"}:
             score += 3
             reasons.append("레버리지/고변동")
-        if row["ticker"] in {"NVDA", "MU", "SMH", "SOXX", "TSM", "AVGO", "AMD", "INTC", "QCOM"}:
+        if row["ticker"] in {"NVDA", "MU", "SMH", "SOXX", "TSM", "AVGO", "AMD", "INTC", "QCOM"}:  # ticker-ok 보유 편입 시 위험 분류
             score += 1.5
             reasons.append("반도체/AI 베타")
         candidates.append({**row, "score": score, "reasons": reasons or ["비중 점검"]})
@@ -658,7 +658,7 @@ def _portfolio_loss_scenario_answer(question: str, pack: dict, risk: dict, limit
     current_high_beta = sum(
         row["weight"]
         for row in holdings
-        if row["ticker"] in {"TQQQ", "SOXL", "QLD", "SSO", "NVDA", "MU", "SMH", "SOXX", "AMD", "TSM", "AVGO"}
+        if row["ticker"] in {"TQQQ", "SOXL", "QLD", "SSO", "NVDA", "MU", "SMH", "SOXX", "AMD", "TSM", "AVGO"}  # ticker-ok 보유 편입 시 위험 분류
     )
     lines = ["### 최대 손실한도 시나리오", ""]
     lines.append(f"`{_format_kst(pack.get('generated_at'))}` · **계좌 손실한도 {limit_pct:.1f}% 기준**")
