@@ -222,6 +222,20 @@ def _render_preview_panel(
             f"기준 {summary.get('base_symbol') or '—'}"
         )
 
+    if selected_preview.get("ok"):
+        if st.button("차트 리플레이로 보내기", key=_state_key(prefix, "send_to_replay"), width="stretch"):
+            try:
+                from dashboard import chart_replay_rules
+                packet = chart_replay_rules.strategy_packet(selected_preview.get("spec") or spec_payload)
+                st.session_state["_chart_replay_handoff"] = {
+                    "packet": packet,
+                    "summary": dict(summary),
+                    "metrics": dict(metrics),
+                }
+                st.toast("전략 규칙을 차트 리플레이에 준비했습니다.")
+            except Exception as exc:
+                st.error(str(exc))
+
     warnings = list(selected_preview.get("warnings") or [])
     errors = list(selected_preview.get("errors") or [])
     if warnings:

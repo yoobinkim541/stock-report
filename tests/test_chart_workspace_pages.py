@@ -83,6 +83,7 @@ finally:
     assert not at.exception, str(at.exception)
     body = " ".join(str(m.value) for m in at.markdown)
     body += " ".join(str(c.value) for c in at.caption)
+    body += " ".join(str(button.label) for button in at.button)
     assert "Main Workspace" in body
     assert "동기화" in body
     assert "MSFT" in body
@@ -117,6 +118,16 @@ def test_workspace_drawing_store_key_respects_sync_scope():
     assert chart_workspace_ui._drawing_store_key(ws, panel, compare=False) is None
 
 
+def test_replay_analysis_disables_live_orderflow_loader():
+    from dashboard import chart_orderflow, chart_workspace_ui
+
+    live_loader = chart_workspace_ui._analysis_orderflow_loader(None)
+    replay_loader = chart_workspace_ui._analysis_orderflow_loader("2026-01-02T15:00:00Z")
+
+    assert live_loader is chart_orderflow.load_snapshot
+    assert replay_loader("AAPL") == {"ok": False, "reason": "replay_isolated"}
+
+
 def test_workspace_drawing_sync_url_targets_agent_console(monkeypatch):
     from dashboard import chart_workspace_ui
 
@@ -130,6 +141,23 @@ def test_workspace_drawing_sync_url_targets_agent_console(monkeypatch):
     assert chart_workspace_ui._drawing_sync_url({"id": "layout 1"}, "cw:global:MSFT:1d:lin") is None
 
 
+def test_workspace_drawing_sync_url_requires_explicit_browser_reachable_base(monkeypatch):
+    from dashboard import chart_workspace_ui
+
+    monkeypatch.delenv("AGENT_CONSOLE_PUBLIC_URL", raising=False)
+    monkeypatch.delenv("AGENT_CONSOLE_URL", raising=False)
+    monkeypatch.setenv("AGENT_CONSOLE_PORT", "8797")
+
+    assert chart_workspace_ui._drawing_sync_url(
+        {"id": "layout-1"}, "cw:layout-1:MSFT:1d:lin",
+    ) is None
+
+    monkeypatch.setenv("AGENT_CONSOLE_URL", "http://127.0.0.1:8797")
+    assert chart_workspace_ui._drawing_sync_url(
+        {"id": "layout-1"}, "cw:layout-1:MSFT:1d:lin",
+    ) is None
+
+
 def test_workspace_crosshair_store_key_respects_sync_toggle():
     from dashboard import chart_workspace_ui
 
@@ -138,6 +166,35 @@ def test_workspace_crosshair_store_key_respects_sync_toggle():
 
     ws["sync"]["crosshair"] = False
     assert chart_workspace_ui._crosshair_store_key(ws) is None
+
+
+def test_workspace_range_store_key_respects_group_and_sync_toggle():
+    from dashboard import chart_workspace_ui
+
+    ws = {"id": "layout-1", "sync": {"range": True}}
+    assert chart_workspace_ui._range_sync_store_key(ws, {"link_group": "red"}) == "cw:layout-1:range:red"
+    assert chart_workspace_ui._range_sync_store_key(ws, {"link_group": ""}) == "cw:layout-1:range:all"
+
+    ws["sync"]["range"] = False
+    assert chart_workspace_ui._range_sync_store_key(ws, {"link_group": "red"}) is None
+
+
+def test_dense_workspace_uses_compact_background_and_maximize_visibility():
+    from dashboard import chart_workspace, chart_workspace_ui
+
+    ws = chart_workspace.normalize_workspace({"layout": "4x4", "active_panel": "p1"})
+    assert chart_workspace_ui._panel_render_profile(ws, ws["panels"][0]) == {
+        "visible": True, "compact": True, "height": 260,
+    }
+    assert chart_workspace_ui._panel_render_profile(ws, ws["panels"][1]) == {
+        "visible": True, "compact": True, "height": 260,
+    }
+
+    ws["maximized_panel"] = "p2"
+    assert chart_workspace_ui._panel_render_profile(ws, ws["panels"][0])["visible"] is False
+    assert chart_workspace_ui._panel_render_profile(ws, ws["panels"][1]) == {
+        "visible": True, "compact": False, "height": 760,
+    }
 
 
 def test_chart_workspace_renderer_surfaces_template_library():
@@ -187,6 +244,41 @@ finally:
     assert "템플릿 라이브러리" in body
     assert "현재 패널" in body
     assert "Clean Style" in body
+
+
+def test_four_by_four_workspace_renders_sixteen_unique_panel_controls():
+    script = f"""
+import os, sys
+sys.path.insert(0, {ROOT!r})
+from dashboard import chart_workspace, chart_workspace_ui
+
+workspace = chart_workspace.normalize_workspace({{"id": "grid-16", "layout": "4x4"}})
+orig_catalog = chart_workspace_ui.cached.chart_workspace_catalog
+orig_versions = chart_workspace_ui.cached.chart_workspace_versions
+orig_templates = chart_workspace_ui.cached.chart_templates
+orig_rules = chart_workspace_ui.views.chart_alert_rules
+orig_runs = chart_workspace_ui.views.chart_alert_runs
+try:
+    chart_workspace_ui.cached.chart_workspace_catalog = lambda: {{"ok": True, "count": 0, "workspaces": []}}
+    chart_workspace_ui.cached.chart_workspace_versions = lambda workspace_id: []
+    chart_workspace_ui.cached.chart_templates = lambda kind=None, limit=50: []
+    chart_workspace_ui.views.chart_alert_rules = lambda workspace_id, limit=20: []
+    chart_workspace_ui.views.chart_alert_runs = lambda workspace_id, limit=5: []
+    chart_workspace_ui.render_chart_workspace(workspace, render_charts=False)
+finally:
+    chart_workspace_ui.cached.chart_workspace_catalog = orig_catalog
+    chart_workspace_ui.cached.chart_workspace_versions = orig_versions
+    chart_workspace_ui.cached.chart_templates = orig_templates
+    chart_workspace_ui.views.chart_alert_rules = orig_rules
+    chart_workspace_ui.views.chart_alert_runs = orig_runs
+"""
+    at = AppTest.from_string(script, default_timeout=30)
+    at.run()
+    assert not at.exception, str(at.exception)
+    panel_buttons = [button for button in at.button if str(button.label).startswith("MSFT ·")]
+    assert len(panel_buttons) == 16
+    link_groups = [box for box in at.selectbox if box.label == "링크 그룹"]
+    assert len(link_groups) == 16
 
 
 def test_alert_event_markers_follow_panel_symbol():

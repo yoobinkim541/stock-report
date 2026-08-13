@@ -580,6 +580,70 @@ def test_crosshair_sync_runtime(tmp_path):
     assert "OK crosshair-sync" in r.stdout
 
 
+@pytest.mark.skipif(_NODE is None, reason="node 미설치 — 런타임 JS 검증 스킵")
+def test_visible_range_sync_runtime_has_no_echo_loop(tmp_path):
+    """멀티패널 시간 범위는 원격 적용 후 자기 발행 없이 한 번만 이동한다."""
+    idx = pd.date_range("2025-01-01", periods=70, freq="D")
+    df = pd.DataFrame({"Open": range(100, 170), "High": range(101, 171),
+                       "Low": range(99, 169), "Close": range(100, 170),
+                       "Volume": [1e6] * 70}, index=idx)
+    fig = charts.price_chart(df, "TEST", kind="candle", show_volume=True, view_days=90)
+    html = plotly_embed.pannable_chart_html(
+        fig, df, height=460, view_days=90, vol_axis="yaxis2",
+        store_key="TEST:1d:lin", crosshair_key="cw:layout:xh",
+        range_sync_key="cw:layout:range",
+    )
+    js = re.findall(r"<script>(.*?)</script>", html, re.S)[-1]
+    checks = r"""
+// 4) 로컬 최종 범위 변경은 실제 timestamp 범위로 한 번 publish
+const rangeKey = "tnrange:cw:layout:range";
+let rangePublishes = 0;
+const originalSetItem = localStorage.setItem;
+localStorage.setItem = (key, value) => {
+  if (key === rangeKey) rangePublishes++;
+  originalSetItem(key, value);
+};
+gd.emit("plotly_relayout", {"xaxis.range": [
+  "2025-01-10T00:00:00.000Z", "2025-01-20T00:00:00.000Z"
+]});
+const localRange = JSON.parse(_ls[rangeKey] || "null");
+if (!localRange || !localRange.src || !(localRange.x1 > localRange.x0)) {
+  fail("range_publish_bad " + JSON.stringify(localRange));
+}
+if (rangePublishes !== 1) fail("local_range_publish_count " + rangePublishes);
+
+// 5) 다른 차트의 범위는 적용되지만 원격 relayout 메아리는 재발행하지 않음
+const beforePayload = _ls[rangeKey];
+const originalRelayout = Plotly.relayout;
+Plotly.relayout = (g, update) => {
+  const result = originalRelayout(g, update);
+  if (update["xaxis.range"]) g.emit("plotly_relayout", {"xaxis.range": update["xaxis.range"]});
+  return result;
+};
+_ls[rangeKey] = JSON.stringify({
+  src: "remote-chart", x0: Date.parse("2025-02-01"),
+  x1: Date.parse("2025-02-12"), ts: Date.now()
+});
+winHandlers.storage({ key: rangeKey });
+const remoteStart = gd.layout.xaxis.range[0];
+if (!(String(remoteStart).includes("2025-02-01") || Number(remoteStart) === 31)) {
+  fail("remote_range_not_applied " + JSON.stringify(gd.layout.xaxis.range));
+}
+if (_ls[rangeKey] === beforePayload) fail("test_payload_not_installed");
+if (rangePublishes !== 1) fail("remote_range_echoed " + rangePublishes);
+console.log("OK range-sync");
+"""
+    harness = _XHAIR_HARNESS.replace(
+        'console.log("OK crosshair-sync");',
+        'console.log("OK crosshair-sync");\n' + checks,
+    )
+    runner = tmp_path / "range-sync.js"
+    runner.write_text(harness.replace("__SCRIPT__", js), encoding="utf-8")
+    r = subprocess.run([_NODE, str(runner)], capture_output=True, text=True, timeout=30)
+    assert r.returncode == 0, f"range sync fail: {r.stdout}\n{r.stderr}"
+    assert "OK range-sync" in r.stdout
+
+
 # ── guard 창 도형완성 드롭 회귀 ("자석 가끔 안 먹음") ─────────────────────────
 # animStep y-lerp·muteHover·setTool 등 프로그램 relayout 이 in-flight(guard=true)인
 # 순간 사용자의 도형완성 relayout 이 도착하면 통째로 드롭되던 버그 — 도형 이벤트는

@@ -5,6 +5,8 @@ from pathlib import Path
 
 from flask import Flask, jsonify, request, send_from_directory
 
+from dashboard import chart_replay
+
 from . import agent, chart_alert_dispatcher, chart_alert_runner, chart_alert_worker, chart_alerts, context, shared_memory, storage, strategy_studio, wiki
 
 
@@ -332,20 +334,114 @@ def create_app() -> Flask:
             enabled=True,
             limit=int(payload.get("limit") or 200),
         )
-        events = chart_alert_runner.evaluate_alert_rules(rules, bars, as_of=payload.get("as_of"))
-        for event in events:
-            alert_id = str(event.get("alert_id") or "").strip()
+        evaluations: list[dict] = []
+        events = chart_alert_runner.evaluate_alert_rules(
+            rules, bars, as_of=payload.get("as_of"), state_sink=evaluations,
+        )
+        for state in evaluations:
+            alert_id = str(state.get("rule_id") or "").strip()
             if alert_id:
-                storage.update_chart_alert_state(alert_id, {
-                    "triggered": True,
-                    "event": event,
-                    "last_price": event.get("current_price"),
-                    "last_checked_at": event.get("as_of") or payload.get("as_of"),
-                })
+                storage.update_chart_alert_state(alert_id, state)
         notification = {"attempted": 0, "delivered": 0, "failed": 0, "failures": []}
         if bool(payload.get("notify")) and events:
             notification = chart_alert_dispatcher.dispatch_alert_events(events)
-        return jsonify({"ok": True, "event_count": len(events), "events": events, "notification": notification})
+        return jsonify({
+            "ok": True,
+            "event_count": len(events),
+            "events": events,
+            "evaluations": evaluations,
+            "notification": notification,
+        })
+
+    @app.get("/api/chart-replay/sessions")
+    def chart_replay_session_list():
+        return jsonify({
+            "ok": True,
+            "sessions": storage.list_chart_replay_sessions(
+                workspace_id=request.args.get("workspace_id"),
+                limit=int(request.args.get("limit", "50") or 50),
+            ),
+        })
+
+    @app.get("/api/chart-replay/sessions/<session_id>")
+    def chart_replay_session_get(session_id: str):
+        replay = storage.get_chart_replay_session(session_id)
+        if replay is None:
+            return jsonify({"ok": False, "error": "replay session not found"}), 404
+        return jsonify({"ok": True, "replay": replay})
+
+    @app.post("/api/chart-replay/sessions")
+    def chart_replay_session_save():
+        payload = request.get_json(silent=True) or {}
+        session = payload.get("session")
+        if not isinstance(session, dict):
+            return jsonify({"ok": False, "error": "session object required"}), 400
+        try:
+            replay = storage.save_chart_replay_session(
+                session,
+                workspace_id=str(payload.get("workspace_id") or ""),
+                expected_revision=payload.get("expected_revision"),
+                request_id=payload.get("request_id"),
+            )
+        except storage.ReplayRevisionConflict as exc:
+            return jsonify({"ok": False, "error": str(exc)}), 409
+        except (TypeError, ValueError) as exc:
+            return jsonify({"ok": False, "error": str(exc)}), 400
+        return jsonify({"ok": True, "replay": replay})
+
+    @app.post("/api/chart-replay/sessions/<session_id>/branch")
+    def chart_replay_session_branch(session_id: str):
+        payload = request.get_json(silent=True) or {}
+        try:
+            replay = storage.branch_chart_replay_session(
+                session_id,
+                cursor=int(payload.get("cursor", -1)),
+                session_id=str(payload.get("session_id") or "").strip() or None,
+            )
+        except KeyError as exc:
+            return jsonify({"ok": False, "error": str(exc)}), 404
+        except (TypeError, ValueError) as exc:
+            return jsonify({"ok": False, "error": str(exc)}), 400
+        return jsonify({"ok": True, "replay": replay})
+
+    @app.delete("/api/chart-replay/sessions/<session_id>")
+    def chart_replay_session_delete(session_id: str):
+        deleted = storage.delete_chart_replay_session(session_id)
+        return jsonify({"ok": True, "deleted": deleted})
+
+    @app.post("/api/chart-replay/sessions/<session_id>/orders/<order_id>/price")
+    def chart_replay_order_price_patch(session_id: str, order_id: str):
+        payload = request.get_json(silent=True) or {}
+        replay = storage.get_chart_replay_session(session_id)
+        if replay is None:
+            return jsonify({"ok": False, "error": "replay session not found"}), 404
+        try:
+            preview = chart_replay.preview_order_price_patch(
+                replay["session"], order_id, payload.get("price"),
+            )
+            if bool(payload.get("preview_only")):
+                return jsonify({"ok": True, "preview": preview, "revision": replay["revision"]})
+            if payload.get("expected_revision") is None:
+                return jsonify({"ok": False, "error": "expected_revision is required"}), 400
+            patched = chart_replay.apply_order_price_patch(
+                replay["session"], order_id, payload.get("price"),
+            )
+            saved = storage.save_chart_replay_session(
+                patched,
+                workspace_id=replay["workspace_id"],
+                expected_revision=int(payload["expected_revision"]),
+                request_id=payload.get("request_id"),
+                request_fingerprint={
+                    "operation": "order_price_patch",
+                    "order_id": order_id,
+                    "price": preview["after"],
+                },
+            )
+        except storage.ReplayRevisionConflict as exc:
+            return jsonify({"ok": False, "error": str(exc)}), 409
+        except (TypeError, ValueError) as exc:
+            return jsonify({"ok": False, "error": str(exc)}), 400
+        return jsonify({"ok": True, "preview": preview, "replay": saved})
 
     @app.get("/api/local-install-prompt")
     def local_install_prompt():

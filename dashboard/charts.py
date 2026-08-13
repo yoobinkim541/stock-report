@@ -880,6 +880,38 @@ def _add_entry_zones(fig, zones, panes) -> None:
                            **({"row": 1, "col": 1} if panes > 1 else {}))
 
 
+def _add_hollow_candles(fig, hist, name: str) -> None:
+    """Render hollow candles using previous-close color and body-direction fill."""
+    close = hist["Close"]
+    previous = close.shift(1).fillna(hist["Open"])
+    color_up = close >= previous
+    hollow_body = close >= hist["Open"]
+    first = True
+    for rising, hollow in ((True, True), (True, False), (False, True), (False, False)):
+        mask = (color_up == rising) & (hollow_body == hollow)
+        if not bool(mask.any()):
+            continue
+        color = _GREEN if rising else _RED
+        fill = "rgba(0,0,0,0)" if hollow else color
+        rows = hist.loc[mask]
+        fig.add_trace(_go().Candlestick(
+            x=rows.index,
+            open=rows["Open"],
+            high=rows["High"],
+            low=rows["Low"],
+            close=rows["Close"],
+            name=name if first else f"{name} · style",
+            showlegend=first,
+            increasing_line_color=color,
+            decreasing_line_color=color,
+            increasing_fillcolor=fill,
+            decreasing_fillcolor=fill,
+            line=dict(width=1),
+            meta={"color_basis": "previous_close", "fill_basis": "open_close"},
+        ))
+        first = False
+
+
 def _add_rsi_divergence(fig, hist, rsi_series, rsi_row) -> None:
     """RSI 다이버전스 — 가격·RSI 피봇쌍을 잇는 점선+마커 (표시·참고용, 무엣지).
 
@@ -1001,7 +1033,8 @@ def price_chart(hist, ticker: str = "", *, kind: str = "line", avg_cost=None,
                 show_macd: bool = False, show_stoch: bool = False, log_scale: bool = False,
                 keltner: bool = False, kama: bool = False, chandelier: bool = False,
                 show_aroon: bool = False, show_bbpct: bool = False, show_pvt: bool = False,
-                fundamentals=None, events=None, zones=None, fund_eps=None):
+                fundamentals=None, events=None, zones=None, fund_eps=None,
+                line_fill=None, baseline=None, hollow: bool = False):
     """가격 차트 + 기술적 분석 도구 (TradingView 풍 멀티패널).
 
     패널: 가격(+MA·BB·일목·추세선·평단·기간 최고/최저·현재가 라벨) / 거래량(방향색 바+MA20)
@@ -1013,7 +1046,12 @@ def price_chart(hist, ticker: str = "", *, kind: str = "line", avg_cost=None,
     최고/최저 콜아웃)는 자동 비활성 — RSI·거래량 서브패널은 메인 종목 기준 유지.
     """
     go = _go()
-    hist = normalize_ohlc_frame(hist)
+    try:
+        import pandas as pd
+        sequence_index = isinstance(getattr(hist, "index", None), pd.RangeIndex)
+    except Exception:
+        sequence_index = False
+    hist = hist.copy(deep=True) if sequence_index else normalize_ohlc_frame(hist)
     cols = set(getattr(hist, "columns", []))
     if hist is None or getattr(hist, "empty", True) or "Close" not in cols:
         return _t(go.Figure())
@@ -1035,7 +1073,10 @@ def price_chart(hist, ticker: str = "", *, kind: str = "line", avg_cost=None,
     show_stoch = show_stoch and has_ohlc                # 스토캐스틱은 High/Low 필요
     show_aroon = show_aroon and has_ohlc                # Aroon 은 High/Low 필요
     show_pvt = show_pvt and "Volume" in cols            # PVT 는 거래량 필요
-    even_candle_axis = (kind == "candle" and has_ohlc and not cmp_mode)
+    # 단일 종목은 모든 시간 기반 가격 차트를 봉 순번 축으로 표시한다. 주말·휴장일을
+    # 실제 빈 공간으로 남기지 않고, 장기 날짜축 rangebreaks 재계산 비용도 피한다.
+    # 비교 모드는 서로 다른 거래 캘린더를 합쳐야 하므로 datetime 축을 유지한다.
+    even_candle_axis = not cmp_mode
     rangebreaks = [] if even_candle_axis else _trading_rangebreaks(hist.index, ticker)
 
     # 하단 서브패널 — 순서 고정(거래량→RSI→MACD→스토→Aroon→%b→PVT→EPS→펀더멘털).
@@ -1093,14 +1134,34 @@ def price_chart(hist, ticker: str = "", *, kind: str = "line", avg_cost=None,
         fig.add_hline(y=0, line=dict(color=theme.AXIS_TEXT, dash="dot", width=0.8),
                       row=1 if panes > 1 else None, col=1 if panes > 1 else None)
     elif kind == "candle" and has_ohlc:
-        fig.add_trace(go.Candlestick(
+        if hollow:
+            _add_hollow_candles(fig, hist, ticker or "OHLC")
+        else:
+            fig.add_trace(go.Candlestick(
+                x=hist.index, open=hist["Open"], high=hist["High"], low=hist["Low"],
+                close=close, name=ticker or "OHLC",
+                increasing_line_color=_GREEN, decreasing_line_color=_RED,
+                increasing_fillcolor=_GREEN, decreasing_fillcolor=_RED, line=dict(width=1)))
+    elif kind == "ohlc" and has_ohlc:
+        fig.add_trace(go.Ohlc(
             x=hist.index, open=hist["Open"], high=hist["High"], low=hist["Low"],
             close=close, name=ticker or "OHLC",
             increasing_line_color=_GREEN, decreasing_line_color=_RED,
-            increasing_fillcolor=_GREEN, decreasing_fillcolor=_RED, line=dict(width=1)))
+            line=dict(width=1)))
     else:
-        fig.add_trace(_SC(x=hist.index, y=close, name=ticker or "종가",
-                          line=dict(color=_BLUE, width=2)))
+        marker = None
+        mode = "lines"
+        if baseline is not None:
+            base = float(baseline)
+            marker = dict(
+                size=5,
+                color=[_GREEN if float(value) >= base else _RED for value in close],
+            )
+            mode = "lines+markers"
+        fig.add_trace(_SC(
+            x=hist.index, y=close, name=ticker or "종가", mode=mode,
+            line=dict(color=_BLUE, width=2), marker=marker, fill=line_fill,
+        ))
 
     # ── 일목균형표 (구름은 MA 아래 깔리게 먼저) — 대용량은 WebGL(_SC) ──
     if ichimoku and has_ohlc and len(close) >= 52:

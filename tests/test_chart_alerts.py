@@ -114,6 +114,56 @@ def test_drawing_line_alert_interpolates_threshold_at_current_time():
     assert result["event"]["operator"] == "crossing_up"
 
 
+def test_nested_any_and_none_alerts_delegate_to_shared_dsl():
+    rule = {
+        "id": "alert-nested",
+        "symbol": "AAPL",
+        "timeframe": "1d",
+        "condition": {
+            "op": "all",
+            "children": [
+                {"type": "price", "operator": "crossing_up", "value": 100},
+                {"op": "none", "children": [
+                    {"type": "indicator", "field": "rsi_14", "operator": "greater_than", "value": 80},
+                ]},
+            ],
+        },
+    }
+
+    result = evaluate_chart_alert(
+        rule,
+        previous_price=99,
+        current_price=101,
+        previous_values={"rsi_14": 60},
+        current_values={"rsi_14": 65},
+        as_of="2026-08-08T12:00:00Z",
+    )
+
+    assert result["triggered"] is True
+    assert result["event"]["condition_count"] == 2
+    assert result["event"]["evaluation_trace"]
+
+
+def test_missing_indicator_inside_none_does_not_trigger_alert():
+    rule = {
+        "id": "alert-unknown-none",
+        "symbol": "AAPL",
+        "condition": {
+            "op": "none",
+            "children": [
+                {"type": "indicator", "field": "missing", "operator": "greater_than", "value": 1},
+            ],
+        },
+    }
+
+    result = evaluate_chart_alert(
+        rule, previous_price=99, current_price=101, previous_values={}, current_values={},
+    )
+
+    assert result["triggered"] is False
+    assert result["reason"] == "missing_price"
+
+
 def test_alert_runner_computes_rsi_and_evaluates_saved_rules_from_bars():
     from agent_console.chart_alert_runner import evaluate_alert_rules
 

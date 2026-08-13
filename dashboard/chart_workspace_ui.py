@@ -3,11 +3,25 @@ from __future__ import annotations
 
 import os
 from typing import Any
+from urllib.parse import urlparse
 
 import pandas as pd
 import streamlit as st
 
-from dashboard import cached, chart_analysis, chart_workspace, charts, data, theme, views
+from dashboard import (
+    cached,
+    chart_document,
+    chart_orderflow,
+    chart_renderer,
+    chart_replay_ui,
+    chart_workbench,
+    chart_workbench_ui,
+    chart_workspace,
+    charts,
+    data,
+    theme,
+    views,
+)
 
 _PERIOD_DAYS = {"3mo": 90, "6mo": 180, "1y": 365, "5y": 1825, "전체": None}
 _TF_LABEL = {
@@ -28,15 +42,45 @@ _ALERT_INDICATOR_LABELS = {
     "vwap": "VWAP",
     "volume_zscore_20": "거래량 z-score(20)",
 }
+_LAYOUT_LABELS = {
+    "1": "1개",
+    "2v": "2열",
+    "2h": "2행",
+    "2x2": "2x2",
+    "3+1": "3+1",
+    "2x3": "3x2",
+    "3x3": "3x3",
+    "4x3": "4x3",
+    "4x4": "4x4",
+}
+_LINK_GROUP_LABELS = {
+    "": "전체",
+    "red": "빨강",
+    "orange": "주황",
+    "yellow": "노랑",
+    "green": "초록",
+    "blue": "파랑",
+    "purple": "보라",
+    "gray": "회색",
+}
 
 
 def _layout_columns(layout: str):
-    if layout in {"2v", "2h"}:
+    if layout == "2v":
         return st.columns(2, gap="small")
-    if layout in {"2x2", "3+1"}:
+    if layout == "2h":
+        return [st.container()]
+    if layout == "2x2":
         return st.columns(2, gap="small")
+    if layout == "3+1":
+        narrow, wide = st.columns([1, 2], gap="small")
+        return [narrow, narrow, narrow, wide]
     if layout == "2x3":
         return st.columns(3, gap="small")
+    if layout == "3x3":
+        return st.columns(3, gap="small")
+    if layout in {"4x3", "4x4"}:
+        return st.columns(4, gap="small")
     return [st.container()]
 
 
@@ -75,6 +119,33 @@ def _crosshair_store_key(ws: dict[str, Any]) -> str | None:
     return f"cw:{safe_scope}:xh"
 
 
+def _range_sync_store_key(ws: dict[str, Any], panel: dict[str, Any]) -> str | None:
+    if not bool(((ws or {}).get("sync") or {}).get("range")):
+        return None
+    scope = str((ws or {}).get("id") or "default").strip() or "default"
+    group = str((panel or {}).get("link_group") or "all").strip() or "all"
+    safe_scope = "".join(ch if ch.isalnum() or ch in ".-_" else "_" for ch in scope)
+    safe_group = "".join(ch if ch.isalnum() or ch in ".-_" else "_" for ch in group)
+    return f"cw:{safe_scope}:range:{safe_group}"
+
+
+def _panel_render_profile(ws: dict[str, Any], panel: dict[str, Any]) -> dict[str, Any]:
+    panel_id = str((panel or {}).get("id") or "")
+    maximized = str((ws or {}).get("maximized_panel") or "")
+    if maximized:
+        return {
+            "visible": panel_id == maximized,
+            "compact": False,
+            "height": 760,
+        }
+    count = _panel_count(str((ws or {}).get("layout") or "1"))
+    if count == 1:
+        return {"visible": True, "compact": False, "height": 760}
+    if count > 6:
+        return {"visible": True, "compact": True, "height": 260}
+    return {"visible": True, "compact": False, "height": 390}
+
+
 def _drawing_sync_url(ws: dict[str, Any], store_key: str | None) -> str | None:
     if not store_key:
         return None
@@ -84,19 +155,27 @@ def _drawing_sync_url(ws: dict[str, Any], store_key: str | None) -> str | None:
     if str(store_key).startswith("cw:global:"):
         return None
     safe_workspace = "".join(ch if ch.isalnum() or ch in ".-_" else "_" for ch in workspace_id)
-    base = str(os.getenv("AGENT_CONSOLE_URL") or "").strip()
+    public_base = str(os.getenv("AGENT_CONSOLE_PUBLIC_URL") or "").strip()
+    base = public_base or str(os.getenv("AGENT_CONSOLE_URL") or "").strip()
     if not base:
-        port = str(os.getenv("AGENT_CONSOLE_PORT") or "8797").strip() or "8797"
-        base = f"http://127.0.0.1:{port}"
+        return None
+    if not public_base and (urlparse(base).hostname or "").lower() in {
+        "127.0.0.1", "localhost", "::1",
+    }:
+        return None
     return f"{base.rstrip('/')}/api/chart-workspaces/{safe_workspace}/drawings"
 
 
 def _load_panel_hist(panel: dict[str, Any]):
     ticker = panel["ticker"]
     tf = panel["timeframe"]
-    if tf == "1d":
-        return cached.ohlc(ticker, period="max")
-    return cached.ohlc_tf(ticker, tf)
+    document = chart_document.normalize_chart_document(
+        panel.get("document") or chart_document.document_from_panel(panel), ticker=ticker,
+    )
+    bundle = cached.chart_data_bundle(
+        ticker, tf, session_policy=document["session"]["policy"],
+    )
+    return (bundle or {}).get("frame")
 
 
 def _render_panel_chart(
@@ -104,7 +183,9 @@ def _render_panel_chart(
     panel: dict[str, Any],
     *,
     height: int = 420,
+    compact: bool = False,
     replay_until=None,
+    replay_context: dict[str, Any] | None = None,
 ) -> None:
     hist = _load_panel_hist(panel)
     if hist is None or getattr(hist, "empty", True):
@@ -118,28 +199,42 @@ def _render_panel_chart(
         st.info(f"{panel['ticker']} replay 구간에 데이터가 없습니다.")
         return
     compare = {}
-    for ticker in panel.get("compare") or []:
-        cmp_hist = cached.ohlc(ticker, "max") if panel["timeframe"] == "1d" else cached.ohlc_tf(ticker, panel["timeframe"])
-        if cmp_hist is not None and not getattr(cmp_hist, "empty", True) and "Close" in cmp_hist.columns:
-            series = charts.view_window(cmp_hist["Close"], view_days)
-            if replay_until is not None:
-                series = series[series.index <= replay_until]
-            compare[ticker] = series
-    kind = "line" if panel.get("chart_kind") == "line" else "candle"
-    if panel.get("chart_kind") == "heikin_ashi":
-        hist = charts.heikin_ashi(hist)
-        kind = "candle"
+    if not compact:
+        for ticker in panel.get("compare") or []:
+            cmp_hist = cached.ohlc(ticker, "max") if panel["timeframe"] == "1d" else cached.ohlc_tf(ticker, panel["timeframe"])
+            if cmp_hist is not None and not getattr(cmp_hist, "empty", True) and "Close" in cmp_hist.columns:
+                series = charts.view_window(cmp_hist["Close"], view_days)
+                if replay_until is not None:
+                    series = series[series.index <= replay_until]
+                compare[ticker] = series
     top = set(panel.get("top_indicators") or [])
     bottom = set(panel.get("bottom_indicators") or [])
+    if compact:
+        top &= {"이동평균선"}
+        bottom = set()
     try:
-        alert_runs = views.chart_alert_runs(str(ws.get("id") or "").strip(), limit=5) if ws.get("id") else []
+        alert_runs = views.chart_alert_runs(str(ws.get("id") or "").strip(), limit=5) if ws.get("id") and not compact else []
     except Exception:
         alert_runs = []
     alert_markers = _alert_event_markers_for_panel(alert_runs, panel, cutoff=replay_until)
-    fig = charts.price_chart(
+    document = chart_document.normalize_chart_document(
+        panel.get("document"), ticker=panel["ticker"],
+    )
+    document["source"].update({
+        "name": "market-data",
+        "as_of": str(hist.index[-1]) if len(hist.index) else None,
+        "freshness": "provider-dependent",
+        "quality": "indicative",
+    })
+    panel_replay = None
+    if replay_context and replay_context.get("active"):
+        session = replay_context.get("session") or {}
+        if session.get("symbol") == panel["ticker"] and session.get("timeframe") == panel["timeframe"]:
+            panel_replay = session
+    rendered = chart_renderer.render_plotly_chart(
+        document,
         hist,
-        panel["ticker"],
-        kind=kind,
+        chart_kwargs=dict(
         trades=alert_markers,
         view_days=view_days,
         mas=(20, 60, 120, 200) if "이동평균선" in top else (),
@@ -165,12 +260,26 @@ def _render_panel_chart(
         show_pvt="PVT" in bottom,
         log_scale=bool(panel.get("log_scale")) and not compare,
         compare=compare,
+        replay_session=panel_replay,
+        ),
     )
-    fig.update_layout(height=height)
+    fig = rendered.figure
+    for warning in rendered.warnings:
+        st.caption(warning)
+    fig.update_layout(
+        height=height,
+        showlegend=not compact,
+        margin=dict(l=34, r=36, t=28 if compact else 46, b=28 if compact else 38),
+    )
     from dashboard import plotly_embed
 
     bounds = plotly_embed.compare_bounds_json(hist, compare, view_days) if compare else None
-    store_key = _drawing_store_key(ws, panel, compare=bool(compare))
+    store_key = None if compact else _drawing_store_key(ws, panel, compare=bool(compare))
+    range_sync_key = (
+        _range_sync_store_key(ws, panel)
+        if rendered.transform.x_mode == "time"
+        else None
+    )
     st.components.v1.html(
         plotly_embed.pannable_chart_html(
             fig,
@@ -181,10 +290,14 @@ def _render_panel_chart(
             pct_mode=bool(compare),
             store_key=store_key,
             drawing_sync_url=_drawing_sync_url(ws, store_key),
+            order_patch_url=(replay_context.get("order_patch_url") if panel_replay else None),
+            replay_revision=(replay_context.get("revision") if panel_replay else None),
             crosshair_key=_crosshair_store_key(ws),
+            range_sync_key=range_sync_key,
+            compact=compact,
             light=theme.is_light(),
         ),
-        height=height + 150,
+        height=height + (20 if compact else 150),
     )
 
 
@@ -199,27 +312,35 @@ def render_chart_workspace(
         ticker=st.session_state.get("ticker", "MSFT"),
     )
     st.session_state["_cw_workspace"] = ws
+    workspace_widget_scope = str(ws.get("id") or "default")
 
     st.markdown(f"#### {ws['name']}")
-    c1, c2, c3, c4, c5, c6 = st.columns([1.1, 0.9, 0.9, 0.9, 1.2, 0.55], vertical_alignment="center")
-    layout = c1.segmented_control(
+    c1, c2, c3, c4, c5, c6, c7 = st.columns(
+        [1.0, 0.72, 0.72, 0.72, 0.72, 1.05, 0.5], vertical_alignment="center",
+    )
+    layout_options = list(chart_workspace.LAYOUTS)
+    layout = c1.selectbox(
         "레이아웃",
-        ["1", "2v", "2h", "2x2", "3+1", "2x3"],
-        default=ws["layout"],
-        key="_cw_layout",
-    ) or ws["layout"]
+        layout_options,
+        index=layout_options.index(ws["layout"]),
+        format_func=lambda value: _LAYOUT_LABELS.get(value, value),
+        key=f"_cw_layout_{workspace_widget_scope}",
+    )
     ws["layout"] = layout
     ws = chart_workspace.normalize_workspace(ws)
-    ws["sync"]["symbol"] = c2.toggle("심볼 동기화", value=bool(ws["sync"].get("symbol")), key="_cw_sync_symbol")
-    ws["sync"]["interval"] = c3.toggle("봉 동기화", value=bool(ws["sync"].get("interval")), key="_cw_sync_interval")
-    ws["sync"]["range"] = c4.toggle("기간 동기화", value=bool(ws["sync"].get("range")), key="_cw_sync_range")
-    ws["sync"]["drawings"] = c5.selectbox(
+    ws["sync"]["symbol"] = c2.toggle("심볼 동기화", value=bool(ws["sync"].get("symbol")), key=f"_cw_sync_symbol_{workspace_widget_scope}")
+    ws["sync"]["interval"] = c3.toggle("봉 동기화", value=bool(ws["sync"].get("interval")), key=f"_cw_sync_interval_{workspace_widget_scope}")
+    ws["sync"]["range"] = c4.toggle("기간 동기화", value=bool(ws["sync"].get("range")), key=f"_cw_sync_range_{workspace_widget_scope}")
+    ws["sync"]["crosshair"] = c5.toggle(
+        "십자선", value=bool(ws["sync"].get("crosshair")), key=f"_cw_sync_crosshair_{workspace_widget_scope}",
+    )
+    ws["sync"]["drawings"] = c6.selectbox(
         "드로잉",
         ["off", "layout_symbol", "global_symbol"],
         index=["off", "layout_symbol", "global_symbol"].index(ws["sync"].get("drawings", "layout_symbol")),
-        key="_cw_sync_drawings",
+        key=f"_cw_sync_drawings_{workspace_widget_scope}",
     )
-    with c6.popover("AI"):
+    with c7.popover("AI"):
         prompt = st.text_area(
             "요청",
             key="_cw_ai_prompt",
@@ -241,52 +362,103 @@ def render_chart_workspace(
                 st.session_state.pop("_cw_patch_preview", None)
                 st.toast("차트 워크스페이스 패치를 적용했습니다.")
                 st.rerun()
-    st.caption("동기화 설정은 워크스페이스에 저장됩니다. 크로스헤어 동기화는 브라우저 런타임 검증 전까지 설정값만 보관합니다.")
+    st.caption("심볼·봉·기간은 전체 또는 같은 링크 그룹에 전파됩니다. 십자선과 보이는 시간 범위는 브라우저에서 즉시 동기화됩니다.")
     ws = _render_workspace_library_bar(ws)
     ws = _render_template_library_bar(ws)
 
     active_panel = _active_panel(ws)
     active = active_panel["id"] if active_panel else (ws.get("active_panel") or "p1")
+    if active_panel:
+        edited_document = chart_workbench_ui.render_chart_toolbar(
+            active_panel.get("document") or chart_document.document_from_panel(active_panel),
+            key_prefix=f"cw_{ws.get('id', 'default')}_{active_panel['id']}",
+        )
+        edited_panel = chart_document.panel_from_document(edited_document, active_panel)
+        legacy_fields = {
+            "ticker", "timeframe", "period", "chart_kind", "top_indicators",
+            "bottom_indicators", "compare", "log_scale",
+        }
+        changes = {
+            field: edited_panel[field]
+            for field in legacy_fields
+            if edited_panel.get(field) != active_panel.get(field)
+        }
+        active_panel["document"] = edited_document
+        active_panel.update(edited_panel)
+        if changes:
+            mutation = chart_workspace.mutate_panel(ws, active_panel["id"], changes)
+            ws = mutation["workspace"]
+            st.session_state["_cw_last_sync_trace"] = mutation["trace"]
+            active_panel = _active_panel(ws)
+            active = active_panel["id"] if active_panel else active
+        st.session_state["_cw_workspace"] = ws
     replay_cutoff = None
+    replay_context: dict[str, Any] = {"active": False}
     if render_charts and active_panel:
-        st.markdown("##### Replay")
-        r1, r2, r3 = st.columns([0.9, 1.6, 0.8], vertical_alignment="bottom")
-        replay_on = r1.toggle("Replay", value=bool(st.session_state.get("_cw_replay_on", False)), key="_cw_replay_on")
-        if replay_on:
-            try:
-                active_hist = _load_panel_hist(active_panel)
-            except Exception:
-                active_hist = None
-            active_hist = charts.view_window(active_hist, _PERIOD_DAYS.get(active_panel.get("period") or "6mo")) if active_hist is not None else None
-            if active_hist is not None and not getattr(active_hist, "empty", True):
-                max_idx = max(0, len(active_hist) - 1)
-                current_idx = min(int(st.session_state.get("_cw_replay_idx", max_idx)), max_idx)
-                replay_idx = r2.slider("봉 위치", min_value=0, max_value=max_idx, value=current_idx, key="_cw_replay_idx")
-                replay_cutoff = active_hist.index[int(replay_idx)]
-                replay_text = replay_cutoff.strftime("%Y-%m-%d %H:%M") if hasattr(replay_cutoff, "strftime") else str(replay_cutoff)
-                r3.caption(replay_text)
-                if r3.button("실시간", key="_cw_replay_live", width="stretch"):
-                    st.session_state["_cw_replay_idx"] = max_idx
-                    st.rerun()
-            else:
-                r2.caption("리플레이용 데이터 없음")
-        else:
-            st.session_state.pop("_cw_replay_idx", None)
+        try:
+            active_hist = _load_panel_hist(active_panel)
+        except Exception:
+            active_hist = None
+        active_hist = charts.view_window(
+            active_hist, _PERIOD_DAYS.get(active_panel.get("period") or "6mo"),
+        ) if active_hist is not None else None
+        replay_context = chart_replay_ui.prepare_replay(
+            active_hist,
+            symbol=active_panel["ticker"],
+            timeframe=active_panel["timeframe"],
+            key_prefix=f"workspace_{ws.get('id', 'default')}_{active_panel['id']}",
+            workspace_id=str(ws.get("id") or "workspace-default"),
+        )
+        replay_cutoff = replay_context.get("as_of") if replay_context.get("active") else None
 
     panels = ws["panels"][: _panel_count(ws["layout"])]
-    cols = _layout_columns(ws["layout"])
-    for idx, panel in enumerate(panels):
+    visible_panels = [panel for panel in panels if _panel_render_profile(ws, panel)["visible"]]
+    cols = [st.container()] if ws.get("maximized_panel") else _layout_columns(ws["layout"])
+    for idx, panel in enumerate(visible_panels):
         with cols[idx % len(cols)]:
             is_active = panel["id"] == active
-            border = f"border:1px solid {'#2f81f7' if is_active else 'rgba(148,163,184,.18)'};border-radius:8px;padding:8px;margin-bottom:8px;"
-            st.markdown(f"<div style='{border}'><b>{panel['ticker']}</b> · {panel['id']}</div>", unsafe_allow_html=True)
-            st.caption(_caption_panel(panel))
-            if st.button("활성", key=f"_cw_active_{panel['id']}", width="stretch"):
+            profile = _panel_render_profile(ws, panel)
+            h1, h2, h3 = st.columns([1.45, 0.95, 0.62], vertical_alignment="center")
+            if h1.button(
+                f"{panel['ticker']} · {_TF_LABEL.get(panel['timeframe'], panel['timeframe'])}",
+                key=f"_cw_active_{panel['id']}",
+                type="primary" if is_active else "secondary",
+                width="stretch",
+            ):
                 ws["active_panel"] = panel["id"]
                 st.session_state["_cw_workspace"] = ws
                 st.rerun()
+            group_options = list(_LINK_GROUP_LABELS)
+            selected_group = h2.selectbox(
+                "링크 그룹",
+                group_options,
+                index=group_options.index(panel.get("link_group") or ""),
+                format_func=lambda value: _LINK_GROUP_LABELS[value],
+                key=f"_cw_link_group_{workspace_widget_scope}_{panel['id']}",
+                label_visibility="collapsed",
+            )
+            if selected_group != (panel.get("link_group") or ""):
+                ws = chart_workspace.mutate_panel(
+                    ws, panel["id"], {"link_group": selected_group},
+                )["workspace"]
+                st.session_state["_cw_workspace"] = ws
+                st.rerun()
+            maximize_label = "복원" if ws.get("maximized_panel") == panel["id"] else "확대"
+            if h3.button(maximize_label, key=f"_cw_maximize_{panel['id']}", width="stretch"):
+                ws["active_panel"] = panel["id"]
+                ws["maximized_panel"] = None if ws.get("maximized_panel") == panel["id"] else panel["id"]
+                st.session_state["_cw_workspace"] = chart_workspace.normalize_workspace(ws)
+                st.rerun()
+            st.caption(
+                f"{panel['id']} · 링크 {_LINK_GROUP_LABELS.get(panel.get('link_group') or '', '전체')} · {_caption_panel(panel)}"
+            )
             if render_charts:
-                _render_panel_chart(ws, panel, height=390 if len(panels) > 1 else 760, replay_until=replay_cutoff)
+                _render_panel_chart(
+                    ws, panel, height=profile["height"], compact=profile["compact"],
+                    replay_until=replay_cutoff, replay_context=replay_context,
+                )
+
+    chart_replay_ui.render_terminal(replay_context)
 
     _render_alert_manager(ws, panels)
     _render_analysis_rail(ws, render_charts=render_charts, replay_until=replay_cutoff)
@@ -736,6 +908,12 @@ def _render_workspace_library_bar(ws: dict[str, Any]) -> dict[str, Any]:
     return chart_workspace.normalize_workspace(ws)
 
 
+def _analysis_orderflow_loader(replay_until):
+    if replay_until is None:
+        return chart_orderflow.load_snapshot
+    return lambda _symbol: {"ok": False, "reason": "replay_isolated"}
+
+
 def _render_analysis_rail(
     ws: dict[str, Any],
     *,
@@ -743,15 +921,13 @@ def _render_analysis_rail(
     replay_until=None,
 ) -> None:
     st.divider()
-    st.markdown("##### 분석 레일")
     panel = _active_panel(ws)
     if not panel:
+        st.markdown("##### 분석 레일")
         st.caption("활성 패널을 선택하면 분석 레일이 표시됩니다.")
         return
-    st.caption(
-        f"{panel['ticker']} 활성 패널 기준 · 상대강도, 멀티타임프레임, 계절성, 자동 패턴 후보"
-    )
     if not render_charts:
+        st.markdown("##### 분석 레일")
         st.caption("차트 렌더링이 꺼진 모드에서는 데이터 조회 없이 분석 레일 구조만 표시합니다.")
         return
 
@@ -769,37 +945,41 @@ def _render_analysis_rail(
             st.info(f"{panel['ticker']} replay 구간에 분석 데이터가 없습니다.")
             return
 
-    benchmark = _benchmark_ticker(panel)
-    try:
-        bench_hist = cached.ohlc(benchmark, period="max") if benchmark else None
-    except Exception:
-        bench_hist = None
-    if replay_until is not None and bench_hist is not None and not getattr(bench_hist, "empty", True):
-        bench_hist = bench_hist[bench_hist.index <= replay_until]
-
-    rs = chart_analysis.relative_strength_summary(hist, bench_hist) if bench_hist is not None else {"ok": False}
-    patterns = chart_analysis.pattern_candidates(hist)
-    seasonality = chart_analysis.seasonality_summary(hist)
     def _replay_loader(ticker: str, tf: str):
         df = _analysis_ohlc_loader(ticker, tf)
         if replay_until is not None and df is not None and not getattr(df, "empty", True):
             df = df[df.index <= replay_until]
         return df
 
-    mtfa = chart_analysis.multi_timeframe_summary(_replay_loader, panel["ticker"])
-
-    m1, m2, m3, m4 = st.columns(4)
-    m1.metric("상대강도", _quadrant_label(rs.get("quadrant")) if rs.get("ok") else "데이터 부족")
-    m2.metric("60일 RS", _pct(rs.get("relative_strength_60d")) if rs.get("ok") else "—")
-    m3.metric("20일 모멘텀", _pct(rs.get("relative_momentum_20d")) if rs.get("ok") else "—")
-    m4.metric("패턴 후보", str(len(patterns)))
-
-    left, right = st.columns([1.05, 1.0], gap="large")
-    with left:
-        _render_mtfa_table(mtfa)
-        _render_pattern_table(patterns)
-    with right:
-        _render_seasonality_table(seasonality)
+    document = chart_document.normalize_chart_document(
+        panel.get("document") or chart_document.document_from_panel(panel),
+        ticker=panel["ticker"],
+    )
+    document["source"].update({
+        "name": "market-data",
+        "as_of": str(hist.index[-1]) if len(hist.index) else None,
+        "freshness": "provider-dependent",
+        "quality": "indicative",
+    })
+    snapshot = chart_workbench.build_analysis_snapshot(
+        document,
+        hist,
+        ohlc_loader=_replay_loader,
+        fundamental_loader=lambda symbol: cached.valuation(symbol) or {},
+        alert_loader=lambda _symbol: list(document.get("alerts") or []),
+        orderflow_loader=_analysis_orderflow_loader(replay_until),
+    )
+    chart_workbench_ui.render_analysis_rail(snapshot)
+    tools_key = f"cw_{ws.get('id', 'default')}_{panel['id']}"
+    with st.expander("시리즈·인디케이터·조건", expanded=False):
+        document = chart_workbench_ui.render_series_manager(document, key_prefix=tools_key)
+        document = chart_workbench_ui.render_study_manager(document, key_prefix=tools_key)
+        condition = chart_workbench_ui.render_condition_builder(document, key_prefix=tools_key)
+        if condition is not None:
+            st.session_state[f"{tools_key}_condition_draft"] = condition
+        chart_workbench_ui.render_exports(document, hist, snapshot, key_prefix=tools_key)
+    panel["document"] = document
+    panel.update(chart_document.panel_from_document(document, panel))
 
 
 def _active_panel(ws: dict[str, Any]) -> dict[str, Any] | None:
@@ -822,9 +1002,7 @@ def _benchmark_ticker(panel: dict[str, Any]) -> str:
 
 
 def _analysis_ohlc_loader(ticker: str, tf: str):
-    if tf == "1d":
-        return cached.ohlc(ticker, period="max")
-    return cached.ohlc_tf(ticker, tf)
+    return (cached.chart_data_bundle(ticker, tf, session_policy="regular") or {}).get("frame")
 
 
 def _render_mtfa_table(mtfa: dict[str, Any]) -> None:

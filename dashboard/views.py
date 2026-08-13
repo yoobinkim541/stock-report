@@ -1500,6 +1500,16 @@ _TF_MEDIAN_DELTA_BOUNDS = {
     "4h": (timedelta(hours=2), timedelta(hours=9)),
 }
 
+_TF_EXPECTED_DELTA = {
+    "1d": timedelta(days=1),
+    "1wk": timedelta(days=7),
+    "1mo": timedelta(days=30),
+    "5m": timedelta(minutes=5),
+    "1h": timedelta(hours=1),
+    "2h": timedelta(hours=2),
+    "4h": timedelta(hours=4),
+}
+
 
 def _ohlc_median_delta(hist):
     import pandas as pd
@@ -1529,6 +1539,27 @@ def _ohlc_tf_matches(hist, tf: str) -> bool:
         return tf in {"1d", "1wk", "1mo"} and len(getattr(hist, "index", [])) > 0
     lo, hi = bounds
     return lo <= med <= hi
+
+
+def _detected_ohlc_timeframe(hist) -> str | None:
+    """Identify a loaded frame's cadence for explicit mismatch metadata."""
+    med = _ohlc_median_delta(hist)
+    if med is None:
+        return None
+    candidates = [
+        timeframe
+        for timeframe, (lower, upper) in _TF_MEDIAN_DELTA_BOUNDS.items()
+        if lower <= med <= upper
+    ]
+    if not candidates:
+        return None
+
+    def cadence_ratio(timeframe: str) -> float:
+        expected = _TF_EXPECTED_DELTA[timeframe]
+        ratio = med / expected
+        return max(float(ratio), 1.0 / float(ratio))
+
+    return min(candidates, key=cadence_ratio)
 
 
 def _load_cached_ohlc_tf(ticker: str, tf: str, *, include_base: bool = False):
@@ -1668,6 +1699,78 @@ def ohlc_tf(ticker: str, tf: str = "1d"):
         return None
     except Exception:
         return None
+
+
+def chart_data_bundle(ticker: str, timeframe: str, session_policy: str = "regular") -> dict:
+    """Load requested bars with explicit session and provenance metadata.
+
+    This intentionally rejects a mismatched frame instead of substituting daily
+    bars for an unavailable intraday request.
+    """
+    from dashboard import chart_data_policy
+
+    requested = str(timeframe or "1d").lower().strip() or "1d"
+    market = "kr" if str(ticker or "").upper().endswith((".KS", ".KQ")) else "us"
+    exchange_timezone = "Asia/Seoul" if market == "kr" else "America/New_York"
+    hist = ohlc_tf(ticker, requested)
+    prepared = None
+    actual = requested
+    if hist is not None and not getattr(hist, "empty", True):
+        prepared = hist.copy(deep=True)
+        prepared.attrs.update(getattr(hist, "attrs", {}) or {})
+        provider_timezone = (prepared.attrs.get("provider_timezone")
+                             or prepared.attrs.get("source_timezone")
+                             or prepared.attrs.get("timezone"))
+        if provider_timezone:
+            prepared.attrs["provider_timezone"] = provider_timezone
+        prepared.attrs.pop("timezone", None)
+        prepared.attrs.update({"market": market, "exchange_timezone": exchange_timezone})
+        actual = _detected_ohlc_timeframe(prepared)
+        if actual is None:
+            actual = requested if _ohlc_tf_matches(prepared, requested) else "unknown"
+
+    if prepared is None or actual != requested:
+        if prepared is None:
+            session = chart_data_policy.apply_session_policy(
+                None, market=market, timeframe=requested, policy=session_policy, timezone=exchange_timezone,
+            ).metadata
+            source = chart_data_policy.chart_data_status(
+                None, requested_timeframe=requested, actual_timeframe=requested, source="ohlc_tf",
+            )
+        else:
+            session = chart_data_policy.apply_session_policy(
+                prepared, market=market, timeframe=actual, policy=session_policy, timezone=exchange_timezone,
+            ).metadata
+            source = chart_data_policy.chart_data_status(
+                prepared, requested_timeframe=actual, actual_timeframe=actual, source="ohlc_tf",
+            )
+            session = {**session, "decision": "timeframe_mismatch", "actual_timeframe": actual}
+            source.update({"requested_timeframe": requested, "actual_timeframe": actual,
+                           "timeframe_mismatch": True})
+        source.update({"market": market, "timezone": exchange_timezone})
+        return {
+            "frame": None,
+            "requested_timeframe": requested,
+            "actual_timeframe": actual,
+            "session": session,
+            "source": source,
+        }
+
+    session_result = chart_data_policy.apply_session_policy(
+        prepared, market=market, timeframe=requested, policy=session_policy, timezone=exchange_timezone,
+    )
+    frame = session_result.frame
+    frame.attrs.update(prepared.attrs)
+    source = chart_data_policy.chart_data_status(
+        frame, requested_timeframe=requested, actual_timeframe=requested, source="ohlc_tf",
+    )
+    return {
+        "frame": frame,
+        "requested_timeframe": requested,
+        "actual_timeframe": requested,
+        "session": session_result.metadata,
+        "source": source,
+    }
 
 
 # ── 코스피200·러셀2000 시장 맵 (sp500_heatmap 패턴 — 스냅샷 우선·라이브 self-heal) ──

@@ -4,6 +4,7 @@ charts 는 순수 함수라 from_root cwd 무관. plotly 미설치면 스킵.
 """
 import os
 import sys
+import copy
 
 import pytest
 
@@ -149,6 +150,179 @@ def _ohlc(n=70, start=100):
                         index=idx)
 
 
+def _renderer_document(chart_type):
+    from dashboard import chart_document
+
+    document = chart_document.default_chart_document("AAPL")
+    document["chart"]["type"] = chart_type
+    document["chart"]["params"] = {
+        "renko": {"box_size": 2.0},
+        "kagi": {"reversal": 2.0},
+        "line_break": {"lines": 3},
+        "range": {"range_size": 2.0},
+    }.get(chart_type, {})
+    return document
+
+
+@pytest.mark.parametrize(
+    "chart_type",
+    [
+        "line", "area", "baseline", "candlestick", "hollow_candle",
+        "heikin_ashi", "bars", "high_low", "renko", "kagi", "line_break", "range",
+    ],
+)
+def test_renderer_returns_nonempty_plotly_figure_for_every_chart_type(chart_type):
+    from dashboard import chart_renderer
+
+    rendered = chart_renderer.render_plotly_chart(
+        _renderer_document(chart_type), _ohlc(40), chart_kwargs={"mas": ()},
+    )
+
+    assert _is_fig(rendered.figure)
+    assert rendered.figure.data
+    assert not rendered.frame.empty
+    assert rendered.document["chart"]["type"] == chart_type
+
+
+def test_renderer_applies_area_and_baseline_styles():
+    from dashboard import chart_renderer
+
+    hist = _ohlc(5, start=98)
+    hist["Close"] = [98.0, 101.0, 99.0, 103.0, 97.0]
+    area = chart_renderer.render_plotly_chart(_renderer_document("area"), hist)
+    baseline = chart_renderer.render_plotly_chart(
+        _renderer_document("baseline"), hist, chart_kwargs={"baseline": 100.0},
+    )
+
+    assert area.figure.data[0].fill == "tozeroy"
+    marker_colors = list(baseline.figure.data[0].marker.color)
+    assert charts._GREEN in marker_colors
+    assert charts._RED in marker_colors
+
+
+def test_renderer_hollow_candles_encode_previous_close_and_body_direction():
+    from dashboard import chart_renderer
+
+    hist = _ohlc(5)
+    hist["Open"] = [100.0, 103.0, 100.0, 105.0, 102.0]
+    hist["Close"] = [102.0, 101.0, 104.0, 103.0, 106.0]
+    hist["High"] = hist[["Open", "Close"]].max(axis=1) + 1
+    hist["Low"] = hist[["Open", "Close"]].min(axis=1) - 1
+
+    rendered = chart_renderer.render_plotly_chart(_renderer_document("hollow_candle"), hist)
+    candles = [trace for trace in rendered.figure.data if trace.type == "candlestick"]
+
+    assert len(candles) >= 2
+    fills = {trace.increasing.fillcolor for trace in candles} | {
+        trace.decreasing.fillcolor for trace in candles
+    }
+    line_colors = {trace.increasing.line.color for trace in candles} | {
+        trace.decreasing.line.color for trace in candles
+    }
+    assert "rgba(0,0,0,0)" in fills
+    assert charts._GREEN in line_colors and charts._RED in line_colors
+    assert all(trace.meta["color_basis"] == "previous_close" for trace in candles)
+    assert all(trace.meta["fill_basis"] == "open_close" for trace in candles)
+
+
+@pytest.mark.parametrize("chart_type", ["bars", "high_low"])
+def test_renderer_bar_modes_use_plotly_ohlc_trace(chart_type):
+    import plotly.graph_objects as go
+    from dashboard import chart_renderer
+
+    rendered = chart_renderer.render_plotly_chart(_renderer_document(chart_type), _ohlc(10))
+
+    assert any(isinstance(trace, go.Ohlc) for trace in rendered.figure.data)
+
+
+@pytest.mark.parametrize("chart_type", ["renko", "kagi", "line_break", "range"])
+def test_renderer_synthetic_price_charts_expose_precision_warning(chart_type):
+    from dashboard import chart_renderer
+
+    rendered = chart_renderer.render_plotly_chart(_renderer_document(chart_type), _ohlc(20))
+
+    assert "SourceTimestamp" in rendered.transform.frame.columns
+    assert any("OHLCV close path" in warning for warning in rendered.warnings)
+    assert rendered.figure.layout.xaxis.type == "category"
+
+
+def test_renderer_snaps_synthetic_trade_and_event_markers_to_source_timestamp():
+    from dashboard import chart_renderer
+
+    hist = _ohlc(2)
+    hist["Open"] = [100.0, 100.0]
+    hist["High"] = [101.0, 107.0]
+    hist["Low"] = [99.0, 99.0]
+    hist["Close"] = [100.0, 106.0]
+    rendered = chart_renderer.render_plotly_chart(
+        _renderer_document("renko"),
+        hist,
+        chart_kwargs={
+            "trades": [{"side": "buy", "timestamp": hist.index[1], "price": None}],
+            "events": [{"date": hist.index[1], "marker": "E", "hover": "earnings"}],
+        },
+    )
+    buy = next(trace for trace in rendered.figure.data if trace.name == "Buy")
+    event = next(trace for trace in rendered.figure.data if trace.name == "이벤트 E")
+    valid_x = {str(value) for value in rendered.transform.frame.index}
+
+    assert str(buy.x[0]) in valid_x
+    assert str(event.x[0]) in valid_x
+    assert buy.x[0] == event.x[0] == rendered.transform.frame.index[-1]
+    assert buy.customdata[0]["source_timestamp"] is not None
+    assert event.customdata[0]["source_timestamp"] is not None
+
+
+def test_renderer_adds_typed_replay_orders_positions_and_fill_markers():
+    from dashboard import chart_document, chart_renderer
+
+    hist = _ohlc(12)
+    session = {
+        "orders": [
+            {"id": "stop-1", "symbol": "NVDA", "type": "stop", "side": "sell", "qty": 3,
+             "price": 97, "status": "pending", "role": "stop"},
+            {"id": "filled-1", "symbol": "NVDA", "type": "market", "side": "buy", "qty": 3,
+             "price": None, "status": "filled"},
+        ],
+        "fills": [{"order_id": "filled-1", "symbol": "NVDA", "side": "buy", "qty": 3,
+                   "price": 104, "timestamp": hist.index[4].isoformat()}],
+        "positions": {"NVDA": {"qty": 3, "avg_price": 104}},
+    }
+
+    rendered = chart_renderer.render_plotly_chart(
+        chart_document.default_chart_document("NVDA"), hist,
+        chart_kwargs={"replay_session": session},
+    )
+
+    shape_names = {shape.name for shape in rendered.figure.layout.shapes or []}
+    assert "replay-order:stop-1" in shape_names
+    assert "replay-position:NVDA" in shape_names
+    stop = next(shape for shape in rendered.figure.layout.shapes if shape.name == "replay-order:stop-1")
+    assert stop.editable is True
+    assert stop.y0 == stop.y1 == 97
+    buy = next(trace for trace in rendered.figure.data if trace.name == "Buy")
+    assert buy.customdata[0][0] == "filled-1"
+
+
+def test_renderer_compare_mode_falls_back_from_synthetic_without_mutating_document():
+    from dashboard import chart_renderer
+
+    document = _renderer_document("renko")
+    original = copy.deepcopy(document)
+    hist = _ohlc(10)
+    compare = {"QQQ": hist["Close"] * 1.1}
+
+    rendered = chart_renderer.render_plotly_chart(
+        document, hist, chart_kwargs={"compare": compare},
+    )
+
+    assert document == original
+    assert rendered.document["chart"]["type"] == "renko"
+    assert rendered.transform.metadata["chart_type"] == "line"
+    assert any("Compare mode" in warning for warning in rendered.warnings)
+    assert rendered.figure.data[0].y[0] == pytest.approx(0.0)
+
+
 def test_price_candle_ohlc_and_ma():
     import plotly.graph_objects as go
     fig = charts.price_candle(_ohlc(), "TST")
@@ -173,6 +347,16 @@ def test_price_chart_candles_use_category_axis_to_avoid_overlap_with_gaps():
 
     assert len(candle.x) == len(hist)
     assert fig.layout.xaxis.type == "category"
+    assert not (fig.layout.xaxis.rangebreaks or ())
+
+
+def test_single_symbol_line_uses_category_axis_to_compress_market_closures():
+    hist = _ohlc(90)
+
+    fig = charts.price_chart(hist, "AAPL", kind="line", mas=(20, 60))
+
+    assert fig.layout.xaxis.type == "category"
+    assert list(fig.layout.xaxis.categoryarray) == list(hist.index)
     assert not (fig.layout.xaxis.rangebreaks or ())
 
 

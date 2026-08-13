@@ -12,6 +12,7 @@
 
 env: REALTIME_ENABLED·REALTIME_US_ENABLED·REALTIME_KR_MAX(10)·REALTIME_US_MAX(10)·REALTIME_FLUSH_SECS(1.0)
      INTRADAY_BARS_ENABLED(false) — 틱→1분봉 집계 sink (providers/intraday_bars, 단기 모의용)
+     ORDERFLOW_CAPTURE_ENABLED(false) — 버전형 체결·호가 JSONL (기본 1초 호가 샘플·일 256MiB 상한)
 크론(watchdog): * * * * * scripts/kis_stream_watchdog.sh
 """
 from __future__ import annotations
@@ -24,6 +25,7 @@ import os
 import sys
 import time
 from base64 import b64decode
+from collections import deque
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
@@ -33,6 +35,7 @@ load_dotenv()
 import requests
 
 from providers import kis_quote, realtime_quotes
+from providers import orderflow_store as _orderflow
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 logger = logging.getLogger(__name__)
@@ -56,19 +59,58 @@ BARS_ENABLED = os.getenv("INTRADAY_BARS_ENABLED", "false").lower() == "true"
 # 틱→1분봉 sink (단기 모의 데이터층). 집계 실패가 시세 캐시를 깨지 않게 전 경로 격리.
 from providers import intraday_bars as _ib
 _BAR_AGG = _ib.BarAggregator() if BARS_ENABLED else None
+ORDERFLOW_ENABLED = os.getenv("ORDERFLOW_CAPTURE_ENABLED", "false").lower() == "true"
+ORDERFLOW_BOOK_SAMPLE_SECS = float(os.getenv("ORDERFLOW_BOOK_SAMPLE_SECS", "1.0"))
+ORDERFLOW_MAX_BYTES = int(os.getenv("ORDERFLOW_CAPTURE_MAX_BYTES", str(_orderflow.DEFAULT_MAX_BYTES)))
+ORDERFLOW_PENDING_MAX = int(os.getenv("ORDERFLOW_PENDING_MAX", "100000"))
+ORDERFLOW_RETENTION_DAYS = int(os.getenv("ORDERFLOW_RETENTION_DAYS", str(_orderflow.DEFAULT_RETENTION_DAYS)))
+_ORDERFLOW_RECORDER = (
+    _orderflow.OrderFlowRecorder(book_sample_seconds=ORDERFLOW_BOOK_SAMPLE_SECS)
+    if ORDERFLOW_ENABLED else None
+)
+_ORDERFLOW_PENDING: deque[dict] = deque(maxlen=max(1, ORDERFLOW_PENDING_MAX))
+_ORDERFLOW_ALLOWED: set[str] | None = None
+_ORDERFLOW_LAST_MAINTENANCE_DATE: str | None = None
+
+
+def _new_orderflow_status() -> dict:
+    return {
+        "capture_enabled": bool(ORDERFLOW_ENABLED),
+        "dropped_events": 0,
+        "dropped_by_session": {},
+        "queue_overflow_events": 0,
+        "byte_limit_events": 0,
+        "write_failures": 0,
+        "last_error": None,
+        "last_success_at": None,
+    }
+
+
+_ORDERFLOW_STATUS = _new_orderflow_status()
+
+
+def _count_orderflow_drop(event: dict) -> None:
+    _ORDERFLOW_STATUS["dropped_events"] += 1
+    session_date = str(event.get("session_date") or "unknown")
+    by_session = _ORDERFLOW_STATUS.setdefault("dropped_by_session", {})
+    by_session[session_date] = int(by_session.get(session_date) or 0) + 1
 WATCHLIST_REFRESH_SECS = int(os.getenv("REALTIME_WATCHLIST_REFRESH_SECS", "90"))
 # 벤치마크 코어 — 보유 아니어도 상시 스트림(대시보드 /status·/phase 실시간 QQQ). ticker-ok
 _CORE_US = [t.strip().upper() for t in os.getenv("REALTIME_CORE_US", "QQQ").split(",") if t.strip()]
 
 # 필드 인덱스 표 (KR=문서순·확정대상은 라이브 스모크). _ff 로 안전 캐스팅.
-_KR_TRADE_PRICE_IDX, _KR_TRADE_VOL_IDX = 2, 13
+_KR_TRADE_TIME_IDX, _KR_TRADE_PRICE_IDX = 1, 2
+_KR_TRADE_SIZE_IDX, _KR_TRADE_VOL_IDX = 12, 13
+_KR_ASK_TIME_IDX = 1
 _KR_ASK_BASE = {"ask1": 3, "bid1": 13, "askq1": 23, "bidq1": 33}  # 10단계 연속
 # 美 (공식 컬럼 확정 — koreainvestment/open-trading-api):
-#   HDFSCNT0 체결: SYMB[0]·LAST[10](현재가)·TVOL[19](누적거래량)
+#   HDFSCNT0 체결: XYMD[3]·XHMS[4]·LAST[10]·EVOL[18](개별)·TVOL[19](누적)
 #   HDFSASP0 호가: PBID1[10]·PASK1[11]·VBID1[12]·VASK1[13] (미국 무료 실시간 1호가)
-_US_TRADE_PRICE_IDX, _US_TRADE_VOL_IDX = 10, 19
+_US_TRADE_DATE_IDX, _US_TRADE_TIME_IDX = 3, 4
+_US_TRADE_PRICE_IDX, _US_TRADE_SIZE_IDX, _US_TRADE_VOL_IDX = 10, 18, 19
 _US_ASK_BID_IDX, _US_ASK_ASK_IDX = 10, 11
 _US_ASK_BIDQ_IDX, _US_ASK_ASKQ_IDX = 12, 13
+_US_ASK_DATE_IDX, _US_ASK_TIME_IDX = 2, 3
 
 # ── 체결통보 (T7·실계좌 실시간 체결 알림 — read-only) ──────────────────────────
 # 활성: REALTIME_FILLS_ENABLED=true + REALTIME_HTS_ID(체결통보 tr_key=HTS ID). 실거래 체결만 알림(포트폴리오 미수정).
@@ -100,6 +142,14 @@ def _ff(rec: list, idx: int) -> float:
         return float(str(rec[idx]).replace(",", "").strip() or "0")
     except (IndexError, ValueError, TypeError):
         return 0.0
+
+
+def _field_text(rec: list, idx: int) -> str | None:
+    try:
+        value = str(rec[idx]).strip()
+    except (IndexError, TypeError):
+        return None
+    return value if value and set(value) != {"0"} else None
 
 
 # ── 순수 함수 (폐형해 테스트 대상) ────────────────────────────────────────────
@@ -221,7 +271,10 @@ def _handle_fill_frame(raw: str, aes_keys: dict) -> None:
 
 def _extract_kr_trade(f: list) -> dict:
     return {"symbol": f[0], "kind": "trade",
-            "price": _ff(f, _KR_TRADE_PRICE_IDX) or None, "volume": _ff(f, _KR_TRADE_VOL_IDX)}
+            "price": _ff(f, _KR_TRADE_PRICE_IDX) or None,
+            "trade_size": _ff(f, _KR_TRADE_SIZE_IDX),
+            "volume": _ff(f, _KR_TRADE_VOL_IDX),
+            "exchange_time": _field_text(f, _KR_TRADE_TIME_IDX)}
 
 
 def _extract_kr_ask(f: list, depth: int = 10) -> dict:
@@ -235,7 +288,8 @@ def _extract_kr_ask(f: list, depth: int = 10) -> dict:
         if bp > 0:
             bids.append((bp, bq))
     return {"symbol": f[0], "kind": "ask", "asks": asks, "bids": bids,
-            "best_ask": asks[0][0] if asks else None, "best_bid": bids[0][0] if bids else None}
+            "best_ask": asks[0][0] if asks else None, "best_bid": bids[0][0] if bids else None,
+            "exchange_time": _field_text(f, _KR_ASK_TIME_IDX)}
 
 
 def _norm_us_symbol(raw: str) -> str:
@@ -254,7 +308,11 @@ def _us_ws_key(symbol: str) -> str:
 
 def _extract_us_trade(f: list) -> dict:
     return {"symbol": _norm_us_symbol(f[0]), "kind": "trade",
-            "price": _ff(f, _US_TRADE_PRICE_IDX) or None, "volume": _ff(f, _US_TRADE_VOL_IDX)}
+            "price": _ff(f, _US_TRADE_PRICE_IDX) or None,
+            "trade_size": _ff(f, _US_TRADE_SIZE_IDX),
+            "volume": _ff(f, _US_TRADE_VOL_IDX),
+            "exchange_date": _field_text(f, _US_TRADE_DATE_IDX),
+            "exchange_time": _field_text(f, _US_TRADE_TIME_IDX)}
 
 
 def _extract_us_ask(f: list) -> dict:
@@ -262,7 +320,9 @@ def _extract_us_ask(f: list) -> dict:
     bq, aq = _ff(f, _US_ASK_BIDQ_IDX), _ff(f, _US_ASK_ASKQ_IDX)
     return {"symbol": _norm_us_symbol(f[0]), "kind": "ask",
             "asks": [(ask, aq)] if ask > 0 else [], "bids": [(bid, bq)] if bid > 0 else [],
-            "best_ask": ask or None, "best_bid": bid or None}
+            "best_ask": ask or None, "best_bid": bid or None,
+            "exchange_date": _field_text(f, _US_ASK_DATE_IDX),
+            "exchange_time": _field_text(f, _US_ASK_TIME_IDX)}
 
 
 _EXTRACTORS = {
@@ -407,6 +467,87 @@ def _flush_bars(now: float) -> None:
         logger.debug("bar sink flush 실패(무시): %s", e)
 
 
+def _flush_orderflow() -> None:
+    """Append captured events once per quote flush; drop the batch at the byte ceiling."""
+    if _ORDERFLOW_RECORDER is None or not _ORDERFLOW_PENDING:
+        return
+    batch = list(_ORDERFLOW_PENDING)
+    try:
+        written = _orderflow.append_events(batch, max_bytes=ORDERFLOW_MAX_BYTES)
+    except Exception as e:
+        _ORDERFLOW_STATUS["write_failures"] += 1
+        _ORDERFLOW_STATUS["last_error"] = str(e)[:240]
+        try:
+            _orderflow.write_capture_status(_ORDERFLOW_STATUS)
+        except Exception:
+            pass
+        logger.debug("order-flow sink flush 실패(무시): %s", e)
+        return
+    for _ in range(min(max(0, int(written)), len(batch))):
+        if hasattr(_ORDERFLOW_PENDING, "popleft"):
+            _ORDERFLOW_PENDING.popleft()
+        else:
+            _ORDERFLOW_PENDING.pop(0)
+    if written < len(batch):
+        dropped_events = batch[max(0, int(written)):]
+        dropped = len(dropped_events)
+        for _ in range(min(dropped, len(_ORDERFLOW_PENDING))):
+            if hasattr(_ORDERFLOW_PENDING, "popleft"):
+                _ORDERFLOW_PENDING.popleft()
+            else:
+                _ORDERFLOW_PENDING.pop(0)
+        for event in dropped_events:
+            _count_orderflow_drop(event)
+        _ORDERFLOW_STATUS["byte_limit_events"] += dropped
+        logger.warning("order-flow 일일 저장 한도 도달 — %d건 드롭", dropped)
+    else:
+        _ORDERFLOW_STATUS["last_success_at"] = time.time()
+        _ORDERFLOW_STATUS["last_error"] = None
+    try:
+        _orderflow.write_capture_status(_ORDERFLOW_STATUS)
+    except Exception:
+        pass
+
+
+def _maintain_orderflow(as_of_date: str) -> None:
+    global _ORDERFLOW_LAST_MAINTENANCE_DATE
+    if _ORDERFLOW_LAST_MAINTENANCE_DATE == as_of_date:
+        return
+    try:
+        result = _orderflow.prune_partitions(
+            retention_days=ORDERFLOW_RETENTION_DAYS,
+            as_of_date=as_of_date,
+        )
+        _ORDERFLOW_LAST_MAINTENANCE_DATE = as_of_date
+        if result.get("deleted_partitions"):
+            logger.info("order-flow 보존 정리: %s", result)
+    except Exception as e:
+        logger.debug("order-flow 보존 정리 실패(무시): %s", e)
+
+
+def _capture_orderflow(rec: dict, received_at: float, *, delayed: bool) -> None:
+    if _ORDERFLOW_RECORDER is None:
+        return
+    symbol = _ib.base_symbol(str(rec.get("symbol") or ""))
+    if _ORDERFLOW_ALLOWED is not None and symbol not in _ORDERFLOW_ALLOWED:
+        return
+    try:
+        event = _ORDERFLOW_RECORDER.capture(
+            rec,
+            received_at=received_at,
+            market=_ib.market_of(str(rec.get("symbol") or "")),
+            delayed=delayed,
+        )
+        if event is not None:
+            maxlen = getattr(_ORDERFLOW_PENDING, "maxlen", None)
+            if maxlen is not None and len(_ORDERFLOW_PENDING) >= maxlen:
+                _ORDERFLOW_STATUS["queue_overflow_events"] += 1
+                _count_orderflow_drop(_ORDERFLOW_PENDING[0])
+            _ORDERFLOW_PENDING.append(event)
+    except Exception:
+        pass
+
+
 def _apply(latest: dict, rec: dict, *, delayed: bool) -> None:
     sym = rec.get("symbol")
     if not sym:
@@ -414,6 +555,7 @@ def _apply(latest: dict, rec: dict, *, delayed: bool) -> None:
     e = latest.setdefault(sym, {"src": "kis_ws"})
     e["ts"] = time.time()
     e["delayed"] = delayed
+    _capture_orderflow(rec, e["ts"], delayed=delayed)
     if rec["kind"] == "trade":
         if rec.get("price"):
             e["price"] = rec["price"]
@@ -435,13 +577,16 @@ def _apply(latest: dict, rec: dict, *, delayed: bool) -> None:
 # ── 비동기 루프 (라이브·MH 검증) ─────────────────────────────────────────────
 
 async def _session(approval_key: str) -> None:
+    global _ORDERFLOW_ALLOWED
     import websockets
     _assert_ws_url(_WS_REAL)
     sel, dropped = compute_watchlist()
     if dropped["KR"] or dropped["US"]:
         logger.warning("워치리스트 캡 초과 드롭: %s", dropped)
+    allowed = set(sel["KR"]) | set(sel["US"])
     if _BAR_AGG is not None:
-        _BAR_AGG.set_allowed(set(sel["KR"]) | set(sel["US"]))   # 구독 심볼만 bar 집계 (오염 차단)
+        _BAR_AGG.set_allowed(allowed)   # 구독 심볼만 bar 집계 (오염 차단)
+    _ORDERFLOW_ALLOWED = allowed
     latest: dict = {}
     async with websockets.connect(_WS_REAL, ping_interval=None, max_size=None) as ws:
         # 등록: KR 체결+호가, (US 활성 시) 해외 체결+호가
@@ -480,6 +625,8 @@ async def _session(approval_key: str) -> None:
             if now - last_flush >= FLUSH_SECS:
                 _flush(latest, market="KR/US" if us_enabled() else "KR", connected=True)
                 _flush_bars(now)
+                _maintain_orderflow(time.strftime("%Y-%m-%d", time.gmtime(now)))
+                _flush_orderflow()
                 last_flush = now
             if now - last_refresh >= WATCHLIST_REFRESH_SECS:
                 new_sel, _ = compute_watchlist()
