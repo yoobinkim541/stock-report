@@ -44,16 +44,16 @@ def test_payload_contains_candles_volume_overlay_markers_and_price_lines():
     rendered = _rendered()
     payload = lightweight_embed.build_payload(rendered)
 
-    assert payload["version"] == 1
+    assert payload["version"] == 2
     assert payload["symbol"] == "AAPL"
     assert payload["series_type"] == "candlestick"
-    assert len(payload["bars"]) == 40
-    assert payload["bars"][0] == {
+    assert len(payload["bars"]["time"]) == 40
+    assert {key: payload["bars"][key][0] for key in ("time", "open", "high", "low", "close")} == {
         "time": int(_hist().index[0].timestamp()),
         "open": 99.5, "high": 101.0, "low": 99.0, "close": 100.0,
     }
-    assert len(payload["volume"]) == 40
-    assert payload["volume"][0]["value"] == 1000.0
+    assert len(payload["volume"]["time"]) == 40
+    assert payload["volume"]["value"][0] == 1000.0
     assert any(row["name"] == "MA5" for row in payload["overlays"])
     assert payload["markers"][0]["id"] == "buy-1"
     assert payload["markers"][0]["shape"] == "arrowUp"
@@ -95,13 +95,13 @@ def test_payload_sorts_deduplicates_filters_nonfinite_and_bounds_tail():
     )
 
     payload = lightweight_embed.build_payload(rendered)
-    times = [row["time"] for row in payload["bars"]]
+    times = payload["bars"]["time"]
 
     assert len(times) == 20_000
     assert times == sorted(set(times))
     assert payload["truncated"] is True
     assert payload["source_bar_count"] == 20_011
-    assert payload["bars"][-1]["close"] == 20109.0
+    assert payload["bars"]["close"][-1] == 20109.0
     json.dumps(payload, allow_nan=False)
 
 
@@ -133,6 +133,7 @@ def test_html_pins_library_and_contains_canvas_runtime_contract():
         "LightweightCharts.CandlestickSeries",
         "LightweightCharts.createSeriesMarkers",
         "attributionLogo: true",
+        'localization: {locale:"en-US"}',
         "new ResizeObserver",
         "series.update",
         "subscribeVisibleLogicalRangeChange",

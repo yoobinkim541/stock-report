@@ -4,12 +4,14 @@ from __future__ import annotations
 import json
 import math
 from collections.abc import Mapping, Sequence
+from dataclasses import dataclass
 from typing import Any
 
+import numpy as np
 import pandas as pd
 
 
-PAYLOAD_VERSION = 1
+PAYLOAD_VERSION = 2
 MAX_INITIAL_BARS = 20_000
 LIGHTWEIGHT_CHARTS_VERSION = "5.1.0"
 LIGHTWEIGHT_CHARTS_URL = (
@@ -52,29 +54,49 @@ def _epoch_seconds(value: Any) -> int | None:
     return int(timestamp.timestamp())
 
 
-def _clean_frame(frame: pd.DataFrame, max_bars: int) -> tuple[pd.DataFrame, int, bool]:
+@dataclass(frozen=True)
+class _CleanBars:
+    times: np.ndarray
+    ohlc: np.ndarray
+    volume: np.ndarray | None
+    source_bar_count: int
+    truncated: bool
+
+
+def _clean_frame(frame: pd.DataFrame, max_bars: int) -> _CleanBars:
     if not isinstance(frame, pd.DataFrame) or frame.empty:
         raise ValueError("no finite bars for Canvas renderer")
     required = ["Open", "High", "Low", "Close"]
     if any(column not in frame for column in required):
         raise ValueError("Canvas renderer requires OHLC columns")
-    cleaned = frame.copy(deep=False)
-    cleaned = cleaned.assign(CanvasTime=[_epoch_seconds(value) for value in cleaned.index])
-    for column in required:
-        cleaned[column] = pd.to_numeric(cleaned[column], errors="coerce")
-    finite = cleaned[required].apply(
-        lambda column: column.map(lambda value: math.isfinite(float(value)) if pd.notna(value) else False),
-    ).all(axis=1)
-    cleaned = cleaned[cleaned["CanvasTime"].notna() & finite]
-    source_bar_count = len(cleaned)
-    if cleaned.empty:
+    numeric = frame[required].apply(pd.to_numeric, errors="coerce")
+    ohlc = numeric.to_numpy(dtype="float64", copy=False)
+    timestamps = pd.to_datetime(frame.index, errors="coerce", utc=True)
+    nanos = timestamps.asi8
+    valid = (nanos != np.iinfo("int64").min) & np.isfinite(ohlc).all(axis=1)
+    source_bar_count = int(valid.sum())
+    if source_bar_count == 0:
         raise ValueError("no finite bars for Canvas renderer")
-    cleaned = cleaned.sort_values("CanvasTime", kind="stable").drop_duplicates("CanvasTime", keep="last")
+    times = (nanos[valid] // 1_000_000_000).astype("int64", copy=False)
+    ohlc = ohlc[valid]
+    volume = None
+    if "Volume" in frame:
+        volume = pd.to_numeric(frame["Volume"], errors="coerce").to_numpy(dtype="float64", copy=False)[valid]
+    order = np.argsort(times, kind="stable")
+    times, ohlc = times[order], ohlc[order]
+    if volume is not None:
+        volume = volume[order]
+    keep = np.r_[times[1:] != times[:-1], True]
+    times, ohlc = times[keep], ohlc[keep]
+    if volume is not None:
+        volume = volume[keep]
     limit = max(1, min(int(max_bars), MAX_INITIAL_BARS))
-    truncated = len(cleaned) > limit
+    truncated = len(times) > limit
     if truncated:
-        cleaned = cleaned.tail(limit)
-    return cleaned, source_bar_count, truncated
+        times, ohlc = times[-limit:], ohlc[-limit:]
+        if volume is not None:
+            volume = volume[-limit:]
+    return _CleanBars(times, ohlc, volume, source_bar_count, truncated)
 
 
 def _color(value: Any, fallback: str) -> str:
@@ -200,25 +222,25 @@ def build_payload(rendered: Any, *, compact: bool = False, max_bars: int = MAX_I
     chart_type = str((document.get("chart") or {}).get("type") or "")
     if chart_type not in _SERIES_TYPES:
         raise ValueError(f"unsupported Canvas chart type: {chart_type}")
-    frame, source_bar_count, truncated = _clean_frame(getattr(rendered, "frame", None), max_bars)
-    valid_times = {int(value) for value in frame["CanvasTime"]}
-    bars = [{
-        "time": int(row.CanvasTime),
-        "open": float(row.Open),
-        "high": float(row.High),
-        "low": float(row.Low),
-        "close": float(row.Close),
-    } for row in frame.itertuples()]
-    volume: list[dict[str, Any]] = []
-    if "Volume" in frame:
-        for row in frame.itertuples():
-            value = _finite(getattr(row, "Volume", None))
+    cleaned = _clean_frame(getattr(rendered, "frame", None), max_bars)
+    valid_times = {int(value) for value in cleaned.times}
+    bars = {
+        "time": cleaned.times.tolist(),
+        "open": cleaned.ohlc[:, 0].tolist(),
+        "high": cleaned.ohlc[:, 1].tolist(),
+        "low": cleaned.ohlc[:, 2].tolist(),
+        "close": cleaned.ohlc[:, 3].tolist(),
+    }
+    volume: dict[str, list[Any]] = {"time": [], "value": [], "color": []}
+    if cleaned.volume is not None:
+        for timestamp, values, raw_volume in zip(cleaned.times, cleaned.ohlc, cleaned.volume):
+            value = _finite(raw_volume)
             if value is not None and value >= 0:
-                volume.append({
-                    "time": int(row.CanvasTime),
-                    "value": value,
-                    "color": "rgba(38,166,154,.38)" if row.Close >= row.Open else "rgba(239,83,80,.38)",
-                })
+                volume["time"].append(int(timestamp))
+                volume["value"].append(value)
+                volume["color"].append(
+                    "rgba(38,166,154,.38)" if values[3] >= values[0] else "rgba(239,83,80,.38)"
+                )
     figure = getattr(rendered, "figure", None)
     payload = {
         "version": PAYLOAD_VERSION,
@@ -232,11 +254,10 @@ def build_payload(rendered: Any, *, compact: bool = False, max_bars: int = MAX_I
         "overlays": _line_overlays(figure, valid_times),
         "markers": _markers(figure, valid_times, compact=compact),
         "price_lines": _price_lines(figure),
-        "source_bar_count": source_bar_count,
-        "truncated": truncated,
+        "source_bar_count": cleaned.source_bar_count,
+        "truncated": cleaned.truncated,
         "compact": bool(compact),
     }
-    json.dumps(payload, allow_nan=False)
     return payload
 
 
@@ -282,9 +303,18 @@ button{border:1px solid @@GRID@@;background:@@PANEL@@;color:@@TEXT@@;padding:7px
   clearTimeout(loadTimer);
   try {
     const LC = window.LightweightCharts;
+    const bars = payload.bars.time.map((time, index) => ({
+      time,
+      open:payload.bars.open[index], high:payload.bars.high[index],
+      low:payload.bars.low[index], close:payload.bars.close[index],
+    }));
+    const volumeBars = payload.volume.time.map((time, index) => ({
+      time, value:payload.volume.value[index], color:payload.volume.color[index],
+    }));
     const chart = LightweightCharts.createChart(chartEl, {
       width: Math.max(1, chartEl.clientWidth), height: Math.max(1, chartEl.clientHeight),
       attributionLogo: true,
+      localization: {locale:"en-US"},
       layout: {background:{type:"solid",color:"transparent"},textColor:@@TEXT_JSON@@},
       grid: {vertLines:{color:@@GRID_JSON@@},horzLines:{color:@@GRID_JSON@@}},
       rightPriceScale: {borderColor:@@GRID_JSON@@,mode:payload.log_scale ? 1 : 0},
@@ -296,24 +326,24 @@ button{border:1px solid @@GRID@@;background:@@PANEL@@;color:@@TEXT@@;padding:7px
     let series;
     if (payload.series_type === "line") {
       series = chart.addSeries(LightweightCharts.LineSeries, {...options,color:"#2f81f7",lineWidth:2});
-      series.setData(payload.bars.map(b => ({time:b.time,value:b.close})));
+      series.setData(bars.map(b => ({time:b.time,value:b.close})));
     } else if (payload.series_type === "area") {
       series = chart.addSeries(LightweightCharts.AreaSeries, {...options,lineColor:"#2f81f7",topColor:"rgba(47,129,247,.30)",bottomColor:"rgba(47,129,247,.02)"});
-      series.setData(payload.bars.map(b => ({time:b.time,value:b.close})));
+      series.setData(bars.map(b => ({time:b.time,value:b.close})));
     } else if (payload.series_type === "baseline") {
-      series = chart.addSeries(LightweightCharts.BaselineSeries, {...options,baseValue:{type:"price",price:payload.bars[0].close}});
-      series.setData(payload.bars.map(b => ({time:b.time,value:b.close})));
+      series = chart.addSeries(LightweightCharts.BaselineSeries, {...options,baseValue:{type:"price",price:bars[0].close}});
+      series.setData(bars.map(b => ({time:b.time,value:b.close})));
     } else if (payload.series_type === "bar") {
       series = chart.addSeries(LightweightCharts.BarSeries, {...options,upColor:"#26a69a",downColor:"#ef5350"});
-      series.setData(payload.bars);
+      series.setData(bars);
     } else {
       series = chart.addSeries(LightweightCharts.CandlestickSeries, {...options,upColor:"#26a69a",downColor:"#ef5350",borderVisible:false,wickUpColor:"#26a69a",wickDownColor:"#ef5350"});
-      series.setData(payload.bars);
+      series.setData(bars);
     }
-    if (payload.volume.length) {
+    if (volumeBars.length) {
       const volume = chart.addSeries(LightweightCharts.HistogramSeries, {priceScaleId:"volume",priceFormat:{type:"volume"},lastValueVisible:false,priceLineVisible:false});
       volume.priceScale().applyOptions({scaleMargins:{top:.80,bottom:0}});
-      volume.setData(payload.volume);
+      volume.setData(volumeBars);
     }
     for (const overlay of payload.overlays) {
       const item = chart.addSeries(LightweightCharts.LineSeries, {color:overlay.color,lineWidth:Math.max(1,Math.min(4,overlay.width)),priceLineVisible:false,lastValueVisible:false});
@@ -326,12 +356,12 @@ button{border:1px solid @@GRID@@;background:@@PANEL@@;color:@@TEXT@@;padding:7px
     for (const line of payload.price_lines) {
       series.createPriceLine({price:line.price,color:line.color,lineWidth:Math.max(1,Math.min(4,line.width)),lineStyle:lineStyles[line.style] || 0,axisLabelVisible:true,title:line.id === "tn-last" ? "" : line.id});
     }
-    const byTime = new Map(payload.bars.map(b => [b.time,b]));
+    const byTime = new Map(bars.map(b => [b.time,b]));
     function showBar(bar) {
       if (!bar) return;
       readout.textContent = `${payload.symbol}  O ${bar.open.toLocaleString()}  H ${bar.high.toLocaleString()}  L ${bar.low.toLocaleString()}  C ${bar.close.toLocaleString()}`;
     }
-    showBar(payload.bars[payload.bars.length - 1]);
+    showBar(bars[bars.length - 1]);
     chart.subscribeCrosshairMove(param => showBar(byTime.get(Number(param.time))));
     const resize = new ResizeObserver(entries => {
       const box = entries[0] && entries[0].contentRect;
@@ -358,7 +388,7 @@ button{border:1px solid @@GRID@@;background:@@PANEL@@;color:@@TEXT@@;padding:7px
       } catch (_) {}
     }
     const liveKey = "tnrt:" + payload.symbol.split(":")[0];
-    let lastBar = {...payload.bars[payload.bars.length - 1]};
+    let lastBar = {...bars[bars.length - 1]};
     function applyLive(raw) {
       if (!live || !raw) return;
       try {
@@ -375,7 +405,7 @@ button{border:1px solid @@GRID@@;background:@@PANEL@@;color:@@TEXT@@;padding:7px
       if (event.key === liveKey) applyLive(event.newValue);
     });
     if (live) { try { applyLive(localStorage.getItem(liveKey)); } catch (_) {} }
-    window.__tnCanvasChart = {chart,series,payload,applyLive,applyRemoteRange};
+    window.__tnCanvasChart = {chart,series,payload,bars,applyLive,applyRemoteRange};
   } catch (err) {
     fail("Canvas 차트 초기화 실패: " + String(err && err.message || err));
   }
@@ -395,7 +425,8 @@ def lightweight_chart_html(
     """Return a self-contained component document for a validated payload."""
     if not isinstance(payload, Mapping) or payload.get("version") != PAYLOAD_VERSION:
         raise ValueError("invalid Canvas payload")
-    if not payload.get("bars"):
+    bars = payload.get("bars")
+    if not isinstance(bars, Mapping) or not bars.get("time"):
         raise ValueError("Canvas payload contains no bars")
     encoded = json.dumps(dict(payload), ensure_ascii=False, separators=(",", ":"), allow_nan=False)
     encoded = encoded.replace("</", "<\\/")
