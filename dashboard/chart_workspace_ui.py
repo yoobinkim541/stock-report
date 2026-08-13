@@ -297,7 +297,7 @@ def _render_panel_chart(
         range_sync_key=range_sync_key,
         light=theme.is_light(),
     )
-    st.caption(prepared.decision.status if not compact else prepared.decision.backend.upper())
+    st.caption(prepared.status if not compact else prepared.decision.backend.upper())
     if prepared.decision.backend == "canvas":
         st.iframe(prepared.html, height=prepared.component_height)
     else:

@@ -139,6 +139,11 @@ def test_html_pins_library_and_contains_canvas_runtime_contract():
         "subscribeVisibleLogicalRangeChange",
         "Plotly로 다시 열기",
         "tnrenderer:AAPL:1h:lin:candlestick",
+        "tn-chart-telemetry-v1",
+        "canvas_init_success",
+        "cdn_load_failure",
+        "canvas_init_failure",
+        "manual_plotly_fallback",
     ):
         assert token in html
     assert "@@" not in html

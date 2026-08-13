@@ -1098,7 +1098,7 @@ def _price_chart(ticker, hist, avg_cost, trades, fullscreen: bool = False,
         light=theme.is_light(),
         force_plotly=bool(legacy),
     )
-    st.caption(prepared.decision.status)
+    st.caption(prepared.status)
     if prepared.decision.backend == "canvas":
         st.iframe(prepared.html, height=prepared.component_height)
         if _client_rt:

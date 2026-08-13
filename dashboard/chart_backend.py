@@ -23,6 +23,7 @@ _REASON_LABELS = {
     "advanced_overlays": "고급 오버레이",
     "unsupported_chart_type": "미지원 차트 유형",
     "below_auto_threshold": "고밀도 기준 미만",
+    "canvas_prepare_error": "Canvas 준비 실패",
 }
 
 
@@ -33,6 +34,18 @@ class RendererDecision:
     automatic: bool
     reasons: tuple[str, ...]
     status: str
+
+
+def canvas_error_fallback(decision: RendererDecision, message: str = "") -> RendererDecision:
+    """Convert a selected Canvas backend into a typed, user-visible Plotly fallback."""
+    detail = f" ({str(message)[:60]})" if message else ""
+    return RendererDecision(
+        "plotly",
+        decision.requested,
+        decision.automatic,
+        ("canvas_prepare_error",),
+        f"분석 Plotly · Canvas 준비 실패{detail}",
+    )
 
 
 def _frame_size(frame: Any) -> int:

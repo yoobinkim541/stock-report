@@ -281,23 +281,45 @@ button{border:1px solid @@GRID@@;background:@@PANEL@@;color:@@TEXT@@;padding:7px
   const rangeSyncKey = @@RANGE_SYNC_KEY@@;
   const live = @@LIVE@@;
   const compact = @@COMPACT@@;
+  const runtimeStarted = performance.now();
+  const telemetryKey = "tn-chart-telemetry-v1";
   const root = document.getElementById("wrap");
   const chartEl = document.getElementById("chart");
   const readout = document.getElementById("readout");
   const error = document.getElementById("error");
   const errorText = document.getElementById("error-text");
   if (compact) root.classList.add("compact");
-  function fail(message) {
+  function markRuntime(kind, detail, elapsedMs) {
+    try {
+      const state = JSON.parse(localStorage.getItem(telemetryKey) || "{}") || {};
+      state.version = 1;
+      state.counts = state.counts || {};
+      state.counts[kind] = Number(state.counts[kind] || 0) + 1;
+      state.updated_at = new Date().toISOString();
+      if (Number.isFinite(elapsedMs)) {
+        state.init_ms_recent = [...(state.init_ms_recent || []), Math.max(0, elapsedMs)].slice(-50);
+      }
+      if (detail) {
+        state.recent_failures = [...(state.recent_failures || []), {
+          kind, detail:String(detail).slice(0,160), at:state.updated_at,
+        }].slice(-20);
+      }
+      localStorage.setItem(telemetryKey, JSON.stringify(state));
+    } catch (_) {}
+  }
+  function fail(message, kind="canvas_init_failure") {
+    markRuntime(kind, message, performance.now() - runtimeStarted);
     chartEl.style.display = "none";
     error.style.display = "block";
     errorText.textContent = message || "고성능 차트를 불러오지 못했습니다.";
   }
   document.getElementById("fallback").addEventListener("click", () => {
+    markRuntime("manual_plotly_fallback", null, null);
     try { localStorage.setItem(rendererKey, "plotly"); } catch (_) {}
     window.parent.postMessage({type:"tn-renderer-fallback", renderer:"plotly", key:storeKey}, "*");
   });
   const loadTimer = setTimeout(() => {
-    if (!window.LightweightCharts) fail("Canvas 라이브러리 로드 실패");
+    if (!window.LightweightCharts) fail("Canvas 라이브러리 로드 실패", "cdn_load_failure");
   }, 5000);
   if (!window.LightweightCharts) return;
   clearTimeout(loadTimer);
@@ -406,8 +428,9 @@ button{border:1px solid @@GRID@@;background:@@PANEL@@;color:@@TEXT@@;padding:7px
     });
     if (live) { try { applyLive(localStorage.getItem(liveKey)); } catch (_) {} }
     window.__tnCanvasChart = {chart,series,payload,bars,applyLive,applyRemoteRange};
+    markRuntime("canvas_init_success", null, performance.now() - runtimeStarted);
   } catch (err) {
-    fail("Canvas 차트 초기화 실패: " + String(err && err.message || err));
+    fail("Canvas 차트 초기화 실패: " + String(err && err.message || err), "canvas_init_failure");
   }
 })();
 </script></body></html>"""
