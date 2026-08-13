@@ -20,7 +20,7 @@
 - [x] Add failing tests for depth/volume-profile calculations and unavailable aggressor-side capabilities.
 - [x] Implement `dashboard/chart_orderflow.py` and add an always-visible order-flow tab to the analysis rail.
 - [x] Wire ticker and workspace analysis snapshots to the local order-flow reader.
-- [ ] Run focused and full chart regression tests, document evidence, commit, and push.
+- [x] Run focused and full chart regression tests, document evidence, commit, and push.
 
 ## Trade-Offs
 
