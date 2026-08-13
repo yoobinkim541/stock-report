@@ -18,11 +18,13 @@ SESSION_POLICIES = frozenset({"regular", "extended", "all"})
 SERIES_KINDS = frozenset({"price", "benchmark", "peer", "portfolio", "fundamental", "analyst"})
 TIMEFRAMES = frozenset({"5m", "1h", "2h", "4h", "1d", "1wk", "1mo"})
 PERIODS = frozenset({"3mo", "6mo", "1y", "5y", "전체"})
+RENDERER_PREFERENCES = frozenset({"auto", "canvas", "plotly"})
 _PATCH_PATHS = {
     "symbol", "timeframe", "period", "chart.type", "chart.params",
     "chart.params.box_size", "chart.params.reversal", "chart.params.lines",
     "chart.params.range_size", "session.policy", "scale.type", "series",
     "studies", "events", "analysis.visible", "analysis.sections",
+    "renderer.preferred",
 }
 _CHART_PARAM_NAMES = frozenset({"box_size", "reversal", "lines", "range_size"})
 _SCALE_TYPES = frozenset({"linear", "log"})
@@ -61,7 +63,7 @@ def default_chart_document(ticker: str = "MSFT") -> dict[str, Any]:
         "replay": {"active": False, "cursor": None},
         "scale": {"type": "linear"},
         "view": {"start": None, "end": None},
-        "renderer": {"preferred": "plotly"},
+        "renderer": {"preferred": "auto"},
     }
 
 
@@ -183,6 +185,10 @@ def validate_chart_document(document: Mapping[str, Any]) -> tuple[list[str], lis
     scale = document.get("scale")
     if not isinstance(scale, Mapping) or scale.get("type") not in _SCALE_TYPES:
         errors.append(f"unsupported scale type: {scale.get('type') if isinstance(scale, Mapping) else None}")
+    renderer = document.get("renderer")
+    renderer_preference = renderer.get("preferred") if isinstance(renderer, Mapping) else None
+    if renderer_preference not in RENDERER_PREFERENCES:
+        errors.append(f"unsupported renderer preference: {renderer_preference}")
 
     series = document.get("series")
     if not isinstance(series, list) or not series:
@@ -219,7 +225,7 @@ def validate_chart_document(document: Mapping[str, Any]) -> tuple[list[str], lis
 def _validate_patch_value(path: str, value: Any) -> None:
     if not _is_json_value(value):
         raise ValueError(f"patch value for {path} must be JSON data")
-    if path in {"symbol", "timeframe", "period", "chart.type", "session.policy", "scale.type"} and not isinstance(value, str):
+    if path in {"symbol", "timeframe", "period", "chart.type", "session.policy", "scale.type", "renderer.preferred"} and not isinstance(value, str):
         raise ValueError(f"patch value for {path} must be a string")
     if path == "chart.params" and not isinstance(value, Mapping):
         raise ValueError("patch value for chart.params must be an object")
@@ -258,6 +264,8 @@ def apply_chart_document_patch(document: Mapping[str, Any], patch: Mapping[str, 
             out["session"]["policy"] = value
         elif path == "scale.type":
             out["scale"]["type"] = value
+        elif path == "renderer.preferred":
+            out["renderer"]["preferred"] = value
         elif path in {"series", "studies", "events"}:
             out[path] = value
         elif path == "analysis.visible":

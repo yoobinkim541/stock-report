@@ -60,7 +60,9 @@ def _chart_group(chart_type: str) -> str:
 def render_chart_toolbar(document, *, key_prefix: str = "chart") -> dict[str, Any]:
     """Render compact chart controls and return a normalized document copy."""
     doc = chart_document.normalize_chart_document(document)
-    c1, c2, c3, c4, c5 = st.columns([1.0, 1.35, 1.0, 1.2, 0.75], vertical_alignment="bottom")
+    c1, c2, c3, c4, c5, c6 = st.columns(
+        [1.0, 1.35, 1.0, 1.2, 0.75, 1.25], vertical_alignment="bottom",
+    )
     group = c1.selectbox(
         "차트 계열",
         list(CHART_TYPE_GROUPS),
@@ -97,11 +99,19 @@ def render_chart_toolbar(document, *, key_prefix: str = "chart") -> dict[str, An
         format_func=lambda value: "선형" if value == "linear" else "로그",
         key=f"{key_prefix}_scale",
     ) or doc["scale"]["type"]
+    renderer = c6.segmented_control(
+        "렌더러",
+        ["auto", "canvas", "plotly"],
+        default=doc["renderer"]["preferred"],
+        format_func={"auto": "자동", "canvas": "고성능", "plotly": "분석"}.get,
+        key=f"{key_prefix}_renderer",
+    ) or doc["renderer"]["preferred"]
 
     doc["chart"]["type"] = chart_type
     doc["timeframe"] = timeframe
     doc["session"]["policy"] = session
     doc["scale"]["type"] = scale
+    doc["renderer"]["preferred"] = renderer
 
     params: dict[str, Any] = {}
     if chart_type in {"renko", "kagi"}:

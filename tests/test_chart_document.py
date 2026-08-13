@@ -14,7 +14,25 @@ def test_default_document_is_valid_and_renderer_neutral():
     assert doc["symbol"] == "AAPL"
     assert doc["chart"]["type"] == "candlestick"
     assert doc["session"]["policy"] == "regular"
-    assert doc["renderer"] == {"preferred": "plotly"}
+    assert doc["renderer"] == {"preferred": "auto"}
+
+
+@pytest.mark.parametrize("preferred", ["auto", "canvas", "plotly"])
+def test_renderer_preference_round_trips_and_validates(preferred):
+    doc = cd.default_chart_document("AAPL")
+    patched = cd.apply_chart_document_patch(doc, {"renderer.preferred": preferred})
+
+    assert patched["renderer"]["preferred"] == preferred
+    assert cd.validate_chart_document(patched)[0] == []
+
+
+def test_invalid_renderer_preference_is_rejected():
+    doc = cd.default_chart_document("AAPL")
+    doc["renderer"]["preferred"] = "webgl"
+
+    errors, _warnings = cd.validate_chart_document(doc)
+
+    assert "unsupported renderer preference: webgl" in errors
 
 
 def test_old_workspace_panel_migrates_without_dropping_settings():
