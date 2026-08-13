@@ -13,5 +13,5 @@ def test_ticker_and_workspace_use_shared_chart_surface():
     for source in (ticker, workspace):
         assert "chart_surface.prepare_chart_surface(" in source
         assert "prepared.decision.backend == \"canvas\"" in source
-        assert "prepared.decision.status" in source
+        assert "prepared.status" in source
         assert "prepared.html" in source
