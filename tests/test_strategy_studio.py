@@ -47,6 +47,26 @@ def test_compile_strategy_reads_multi_field_symbol_columns():
     assert list(compiled.prices["QQQ"]) == [100.0 + i for i in range(10)]
 
 
+def test_compile_strategy_reads_single_underscore_field_symbol_columns():
+    """단일 밑줄(SYMBOL_Field) 컬럼 형식 재현 — _close_panel_from_store 대소문자
+    불일치(lower() 결과를 대문자 집합과 비교)로 심볼 추출이 항상 실패하던 회귀."""
+    idx = pd.date_range("2026-01-01", periods=10, freq="D")
+    prices = pd.DataFrame({
+        "AAPL_Open": range(100, 110),
+        "AAPL_High": range(101, 111),
+        "AAPL_Low": range(99, 109),
+        "AAPL_Close": [100.0 + i for i in range(10)],
+        "AAPL_Volume": [1000] * 10,
+    }, index=idx)
+    spec = {"name": "test", "base_symbol": "AAPL", "universe": {"type": "list", "symbols": ["AAPL"]}, "indicators": [], "rules": {}}
+
+    compiled = compile_strategy(spec, prices)
+
+    assert compiled.errors == []
+    assert not compiled.prices.empty
+    assert list(compiled.prices["AAPL"]) == [100.0 + i for i in range(10)]
+
+
 def test_builtin_rsi_cash_preset_runs_and_reports_trades():
     spec = builtin_strategy_presets()["rsi_cash"]
     run = run_strategy_backtest(spec, _prices(), benchmark="QQQ")

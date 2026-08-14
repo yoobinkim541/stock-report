@@ -14,6 +14,7 @@ from .spec import StrategySpec
 
 
 _CLOSE_LIKE_FIELDS = {"close", "price", "adj close", "adjclose", "adj_close"}
+_PRICE_FIELD_SUFFIXES = {"OPEN", "HIGH", "LOW", "CLOSE", "ADJ CLOSE", "ADJCLOSE", "ADJ_CLOSE", "VOLUME"}
 _SUPPORTED_ACTIONS = {
     "enter_long",
     "enter",
@@ -405,6 +406,9 @@ def _normalize_price_store(prices: pd.DataFrame) -> pd.DataFrame:
         if "__" in name:
             symbol, field = name.split("__", 1)
             name = f"{symbol.upper().strip()}__{field.lower().strip().replace(' ', '_')}"
+        elif "_" in name and name.split("_", 1)[1].upper().strip() in _PRICE_FIELD_SUFFIXES:
+            symbol, field = name.split("_", 1)
+            name = f"{symbol.upper().strip()}_{field.lower().strip().replace(' ', '_')}"
         else:
             name = name.upper()
         new_columns.append(name)
@@ -422,7 +426,7 @@ def _close_panel_from_store(store: pd.DataFrame) -> pd.DataFrame:
             sym = name.split("__", 1)[0]
         elif "." in name:
             sym = name.split(".", 1)[0]
-        elif "_" in name and name.split("_", 1)[1].lower() in {"OPEN", "HIGH", "LOW", "CLOSE", "ADJ CLOSE", "ADJCLOSE", "ADJ_CLOSE", "VOLUME"}:
+        elif "_" in name and name.split("_", 1)[1] in _PRICE_FIELD_SUFFIXES:
             sym = name.split("_", 1)[0]
         else:
             sym = name
