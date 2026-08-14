@@ -32,6 +32,7 @@ import logging
 import os
 import re
 import sys
+import time
 
 import numpy as np
 import pandas as pd
@@ -296,7 +297,8 @@ def _institutional_adjustment(inst: dict | None) -> float:
 # ── 유니버스 랭킹 ─────────────────────────────────────────────────────────────
 def rank_accumulation(tickers, *, days: int = 160, enrich_top: int = 10,
                       limit: int = 12, min_score: float = VERDICT_ACCUM,
-                      enrich: bool = True, price_fetcher=None) -> list[dict]:
+                      enrich: bool = True, price_fetcher=None,
+                      enrich_budget_s: float | None = None) -> list[dict]:
     """티커 유니버스 → 매집 강도 내림차순 랭킹.
 
     1) 전 종목 기술적 매집 점수 산출 (가격은 fetch_prices 배치 캐시 재사용)
@@ -307,6 +309,11 @@ def rank_accumulation(tickers, *, days: int = 160, enrich_top: int = 10,
         price_fetcher: {ticker: OHLCV DataFrame} 반환 함수 (테스트 주입용).
                        기본값은 ml.data_pipeline.fetch_prices.
         enrich: False 면 13F 호출 생략 (무네트워크 테스트/빠른 경로).
+        enrich_budget_s: 13F 교차검증 전체 시간 예산(초). fetch_13f(yfinance) 는
+                        건별 타임아웃이 없어, 종목 수(enrich_top)만 제한해선 개별
+                        호출이 느려지면(hang 포함) 전체 리포트/봇 명령이 무한정
+                        느려질 수 있다 — 예산 초과 시 나머지는 스킵. 기본
+                        INSTITUTIONAL_13F_BUDGET_S 환경변수(기본 20초).
     """
     tickers = [t for t in dict.fromkeys(tickers) if t]   # 중복 제거, 순서 유지
     if not tickers:
@@ -333,9 +340,15 @@ def rank_accumulation(tickers, *, days: int = 160, enrich_top: int = 10,
 
     scored.sort(key=lambda x: x["accum_score"], reverse=True)
 
-    # 상위 픽만 13F 교차검증 (네트워크 비용 제한)
+    # 상위 픽만 13F 교차검증 (네트워크 비용 제한 — 종목 수 + 전체 시간 예산)
     if enrich:
+        if enrich_budget_s is None:
+            enrich_budget_s = float(os.getenv("INSTITUTIONAL_13F_BUDGET_S", "20") or 20)
+        deadline = time.monotonic() + enrich_budget_s
         for m in scored[:enrich_top]:
+            if time.monotonic() >= deadline:
+                logger.debug("13F 교차검증 시간 예산(%.0fs) 초과 — 나머지 스킵", enrich_budget_s)
+                break
             if m["ticker"].endswith(".KS"):
                 continue
             try:
