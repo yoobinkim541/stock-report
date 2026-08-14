@@ -298,6 +298,7 @@ def _latest_chart_png() -> str | None:
 # child_database 를 보존하므로 일일 재빌드에도 DB·뷰·정렬이 유지된다.
 
 HOLDINGS_DB_CACHE = os.path.expanduser("~/.cache/notion_holdings_db.json")
+_HOLDINGS_PAGE_CACHE = os.path.expanduser("~/.cache/notion_holdings_pages.json")
 
 _HOLDINGS_SCHEMA = {
     "Ticker":  {"title": {}},
@@ -405,8 +406,30 @@ def _ensure_holdings_db(parent_page_id: str) -> str | None:
     return did
 
 
+def _load_holdings_page_cache() -> dict:
+    try:
+        with open(_HOLDINGS_PAGE_CACHE, encoding="utf-8") as f:
+            return json.load(f)
+    except Exception:
+        return {}
+
+
+def _save_holdings_page_cache(cache: dict) -> None:
+    try:
+        import safe_io
+        os.makedirs(os.path.dirname(_HOLDINGS_PAGE_CACHE), exist_ok=True)
+        safe_io.atomic_write_json(_HOLDINGS_PAGE_CACHE, cache)
+    except Exception:
+        pass
+
+
 def _sync_holdings_db(parent_page_id: str) -> None:
-    """보유 종목 행 upsert (티커 매칭 update·신규 create·매도 archive). best-effort."""
+    """보유 종목 행 upsert (티커 매칭 update·신규 create·매도 archive). best-effort.
+
+    Notion 데이터베이스 query 는 archived 페이지를 반환하지 않으므로, 매도 후
+    재매수 시 이번 조회의 existing 만 보면 신규 페이지가 또 생겨 중복 행이 남는다.
+    티커→page_id 를 별도로 영속 캐싱해 archive 이후에도 같은 페이지를 재사용한다.
+    """
     import requests
     rows = _load_holdings()
     if not rows:
@@ -438,22 +461,29 @@ def _sync_holdings_db(parent_page_id: str) -> None:
             break
         cursor = j.get("next_cursor")
 
+    page_cache = _load_holdings_page_cache()
     seen = set()
     for row in rows:
         seen.add(row["ticker"])
         props = _db_props(row)
-        pid = existing.get(row["ticker"])
+        pid = existing.get(row["ticker"]) or page_cache.get(row["ticker"])
         if pid:
             requests.patch(f"https://api.notion.com/v1/pages/{pid}",
-                           headers=headers, json={"properties": props}, timeout=15)
+                           headers=headers, json={"properties": props, "archived": False}, timeout=15)
         else:
-            requests.post("https://api.notion.com/v1/pages", headers=headers,
-                          json={"parent": {"database_id": did}, "properties": props}, timeout=15)
-    # 더 이상 보유하지 않는 종목 → 아카이브
+            r = requests.post("https://api.notion.com/v1/pages", headers=headers,
+                              json={"parent": {"database_id": did}, "properties": props}, timeout=15)
+            if r.ok:
+                pid = r.json().get("id")
+        if pid:
+            page_cache[row["ticker"]] = pid
+    # 더 이상 보유하지 않는 종목 → 아카이브 (page_cache 는 재매수 대비 보존)
     for tk, pid in existing.items():
         if tk not in seen:
             requests.patch(f"https://api.notion.com/v1/pages/{pid}",
                            headers=headers, json={"archived": True}, timeout=15)
+            page_cache[tk] = pid
+    _save_holdings_page_cache(page_cache)
     logger.info("보유종목 DB 동기화: %d행 (신규/갱신) · %d행 아카이브",
                 len(rows), len(set(existing) - seen))
 
