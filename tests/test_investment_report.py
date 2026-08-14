@@ -1,11 +1,15 @@
 import math
 import os
 import sys
+from datetime import datetime
 from types import SimpleNamespace
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
 
+import investment_report
 from investment_report import (
+    KST,
+    _build_json_data,
     _build_llm_analysis_payload,
     _build_llm_overlay_prompt,
     _build_mobile_summary,
@@ -28,6 +32,28 @@ from investment_report import (
     _validate_llm_overlay,
     _judgment,
 )
+
+
+def test_build_json_data_generated_at_uses_kst_matching_today_str(monkeypatch):
+    """today_str 은 KST 날짜인데 generated_at 은 naive datetime.now() (서버 로컬,
+    보통 UTC) 라 자정 근처엔 날짜가 하루 어긋나던 회귀 — 감사 #14."""
+
+    class _FakeDatetime(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            if tz is not None:
+                return cls(2026, 8, 15, 0, 30, 0, tzinfo=tz)   # KST 자정 직후
+            return cls(2026, 8, 14, 15, 30, 0)                  # naive UTC (버그 시나리오)
+
+    monkeypatch.setattr(investment_report, "datetime", _FakeDatetime)
+
+    today_str = "2026-08-15"   # 호출측이 datetime.now(KST) 로 이미 계산해 넘긴 값
+    json_data = _build_json_data(
+        today_str, {}, [], [], [], [], [], [], [], lambda t: t, [],
+    )
+
+    assert json_data["generated_at"].startswith("2026-08-15")
+    assert "+09:00" in json_data["generated_at"]
 from llm_decision import (
     build_context_decision,
     merge_llm_decision,

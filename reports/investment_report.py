@@ -1696,7 +1696,7 @@ def _build_json_data(today_str, market, ndx_results, top_buy_candidates,
     """investment-data-{date}.json 원본 데이터 dict 조립 (순수 — 부수효과 없음)."""
     json_data = {
         "date": today_str,
-        "generated_at": datetime.now().isoformat(),
+        "generated_at": datetime.now(KST).isoformat(),
         "market": market,
         "portfolio": [],
         "nasdaq_100_scan": {
@@ -2454,7 +2454,7 @@ def generate_report():
     lines = []
     lines.append(f"# 일일 투자 자동화 레포트")
     lines.append(f"날짜: {today_str}")
-    lines.append(f"생성 시간: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+    lines.append(f"생성 시간: {datetime.now(KST).strftime('%Y-%m-%d %H:%M:%S')} KST")
     lines.append(f"")
     lines.append(f"---")
     lines.append(f"")
