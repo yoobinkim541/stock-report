@@ -153,6 +153,32 @@ strategy_studio.render_strategy_lab("ai_console", pack, mode="lab", catalog=cata
     assert not at.exception, str(at.exception)
 
 
+def test_patch_panel_shows_real_error_when_propose_patch_raises():
+    """감사 #32 — propose_strategy_patch() 가 예외를 던지면 patch_result["preview"]
+    는 빈 dict {} 로 만들어지고, 렌더러는 preview 안쪽만 보고 항상 일반 메시지
+    "패치 미리보기 실패" 로 대체해 실제 원인(current_patch["error"])이 사라졌음."""
+    script = f"""
+import os, sys
+sys.path.insert(0, {ROOT!r})
+from dashboard import strategy_studio
+
+patch_preview = {{
+    "ok": False,
+    "error": "지표 파라미터 'period' 는 1 이상이어야 합니다",
+    "patch": {{}},
+    "diff": [],
+    "preview": {{}},
+}}
+strategy_studio._render_patch_panel("lab", None, patch_preview)
+"""
+    at = AppTest.from_string(script, default_timeout=30)
+    at.run()
+    assert not at.exception, str(at.exception)
+    warnings = " ".join(str(w.value) for w in at.warning)
+    assert "지표 파라미터 'period' 는 1 이상이어야 합니다" in warnings
+    assert "패치 미리보기 실패" not in warnings
+
+
 def test_strategy_studio_dashboard_wrappers_forward_data(monkeypatch):
     from dashboard import cached, views
 

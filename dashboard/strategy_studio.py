@@ -333,7 +333,10 @@ def _render_patch_panel(prefix: str, selected_record: dict[str, Any] | None, pat
             f"패치 미리보기 · {summary.get('name', '—')} · 거래 {summary.get('trade_count', preview.get('trade_count', 0))}"
         )
     else:
-        st.warning(preview.get("error") or "패치 미리보기 실패")
+        # propose_strategy_patch() 가 예외를 던지면 preview 는 빈 dict {} 이고
+        # 실제 오류 메시지는 current_patch["error"] (최상위)에 있음 — preview
+        # 안쪽만 보면 항상 일반 메시지로 대체돼 원인이 사라짐(감사 #32).
+        st.warning(preview.get("error") or current_patch.get("error") or "패치 미리보기 실패")
 
     patch = current_patch.get("patch") or {}
     if patch:
