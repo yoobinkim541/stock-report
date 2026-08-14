@@ -19,18 +19,20 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(mess
 logger = logging.getLogger(__name__)
 
 KST = timezone(timedelta(hours=9))
-DEFAULT_TTL_DAYS = int(os.getenv("SAVE_TICKER_RAW_TTL_DAYS", "30"))
 
 
 def main() -> int:
+    # 보존기간은 아티팩트 저장 시점에 소스별 정책(resolve_raw_ttl_days)으로 이미
+    # 결정돼 각 매니페스트의 expires_at 에 기록됨 — 여기서 전역 override 는 없다
+    # (과거 SAVE_TICKER_RAW_TTL_DAYS 는 실제로 아무 데도 안 쓰이던 죽은 설정이었음
+    # — 감사 #34).
     now = datetime.now(KST)
-    result = cleanup_expired_raw_artifacts(now=now, ttl_days=DEFAULT_TTL_DAYS)
+    result = cleanup_expired_raw_artifacts(now=now)
     logger.info(
-        "SaveTicker 원본 청소 완료: raw=%d manifests=%d scanned=%d ttl=%d",
+        "SaveTicker 원본 청소 완료: raw=%d manifests=%d scanned=%d",
         result.get("deleted_raw", 0),
         result.get("deleted_manifests", 0),
         result.get("scanned", 0),
-        result.get("ttl_days", DEFAULT_TTL_DAYS),
     )
     return 0
 

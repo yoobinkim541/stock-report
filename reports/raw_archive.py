@@ -217,7 +217,12 @@ def save_dedupe_index(index: dict[str, str], *, now: datetime | None = None, kee
     _dedupe_index_path().write_text(json.dumps(pruned, ensure_ascii=False), encoding="utf-8")
 
 
-def cleanup_expired_raw_artifacts(now: datetime | None = None, ttl_days: int = 30) -> dict:
+def cleanup_expired_raw_artifacts(now: datetime | None = None) -> dict:
+    """만료된 원본 아카이브 정리 — 각 아티팩트가 기록 시점에 저장한 자기 자신의
+    expires_at(소스별 정책, resolve_raw_ttl_days) 기준으로만 판단한다. 소스마다
+    보존기간이 달라 전역 ttl_days 매개변수로 일괄 override 하는 개념이 없다
+    (과거엔 매개변수가 있었지만 실제로는 아무 데도 쓰이지 않던 죽은 파라미터 —
+    감사 #34)."""
     now = _ensure_tz(now or datetime.now(KST))
     deleted_raw = 0
     deleted_manifests = 0
@@ -248,5 +253,4 @@ def cleanup_expired_raw_artifacts(now: datetime | None = None, ttl_days: int = 3
         "scanned": scanned,
         "deleted_raw": deleted_raw,
         "deleted_manifests": deleted_manifests,
-        "ttl_days": ttl_days,
     }

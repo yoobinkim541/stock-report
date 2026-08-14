@@ -87,7 +87,6 @@ def test_cleanup_expired_raw_artifacts_keeps_text_sidecar(tmp_path, monkeypatch)
 
     cleanup = ra.cleanup_expired_raw_artifacts(
         now=datetime(2026, 8, 25, 9, 0, tzinfo=timezone.utc),
-        ttl_days=30,
     )
 
     assert cleanup["deleted_raw"] >= 1
