@@ -793,6 +793,26 @@ def _record_snapshot(nav, cash, positions):
         logger.warning("US 모의 스냅샷 기록 실패: %s", e)
 
 
+# 개별 주문이 아니라 '전 주문이 동일하게 막히는' 계좌/시장 레벨 상황 신호 — KR
+# (kiwoom_mock_track.py _order_blocker) 와 동일 패턴, KIS 해외 모의 메시지에 맞춤.
+_ACCOUNT_SIGNS = ("계좌# 미설정", "토큰 없음")
+_MARKET_SIGNS = ("장운영시간", "장 운영시간", "휴장", "거래정지")
+
+
+def _order_blocker(msg) -> str | None:
+    """주문 실패 사유가 '전 주문 공통 차단'인지 분류 — 개별 주문 문제(수량·가격 등)와 구분.
+
+    'account' = 계좌 미설정/토큰 없음 → 설정 확인 필요 · 'market' = 장 운영시간 아님 →
+    장중 재시도 · None = 개별.
+    """
+    m = str(msg or "")
+    if any(s in m for s in _ACCOUNT_SIGNS):
+        return "account"
+    if any(s in m for s in _MARKET_SIGNS):
+        return "market"
+    return None
+
+
 def _notify(nav, results):
     _ICON = {"편입": "📥", "증액": "➕", "퇴출": "📤", "감액": "➖", "레버슬리브": "🏗️"}
     lines = ["🧪 [모의] 미국 페이퍼트레이딩 (KIS 해외)", "━━━━━━━━━━━━━━"]
@@ -800,12 +820,23 @@ def _notify(nav, results):
         lines.append(f"  NAV  ${nav:,.0f}")
     if not results:
         lines.append("  주문 없음 (목표 = 보유)")
-    for r in results:
-        mark = "✅" if r.get("ok") else "❌"
-        lines.append(f"  {mark} {_ICON.get(r.get('kind'), '')}{r.get('kind')} {r['symbol']} {r['qty']}주")
-        if not r.get("ok") and r.get("msg"):
-            lines.append(f"     ↳ {r['msg']}")
-    lines.append(f"  집행 {sum(1 for r in results if r.get('ok'))} · 실패 {sum(1 for r in results if not r.get('ok'))}")
+
+    # 계좌/시장 레벨 차단이면 개별 실패 도배 대신 명확 안내 1건
+    blocker = next((_order_blocker(r.get("msg")) for r in results
+                    if not r.get("ok") and _order_blocker(r.get("msg"))), None)
+    if blocker == "account":
+        emsg = next(r.get("msg") for r in results if _order_blocker(r.get("msg")) == "account")
+        lines += ["  ⚠️ KIS 해외 모의계좌 문제 — 주문 중단", f"     ↳ {emsg}",
+                  "  👉 계좌#·토큰 설정 확인 필요"]
+    elif blocker == "market":
+        lines += ["  ⚠️ 장 운영시간 아님 — 주문 보류 (다음 개장 시 자동 재시도)"]
+    else:
+        for r in results:
+            mark = "✅" if r.get("ok") else "❌"
+            lines.append(f"  {mark} {_ICON.get(r.get('kind'), '')}{r.get('kind')} {r['symbol']} {r['qty']}주")
+            if not r.get("ok") and r.get("msg"):
+                lines.append(f"     ↳ {r['msg']}")
+        lines.append(f"  집행 {sum(1 for r in results if r.get('ok'))} · 실패 {sum(1 for r in results if not r.get('ok'))}")
     lines.append("  ⚠️ 모의투자 — 실거래 아님")
     try:
         import notify

@@ -322,3 +322,37 @@ def test_leverage_sleeve_mode_accepts_off_shadow_paper(monkeypatch):
 
     monkeypatch.setenv("US_MOCK_LEV_SLEEVE_MODE", "bad-value")
     assert T.leverage_sleeve_mode() == "shadow"
+
+
+def test_order_blocker_classifies():
+    """감사 #27 — KR(kiwoom_mock_track._order_blocker)엔 있던 계좌/시장 레벨
+    실패 분류가 US 미러엔 없어, 전 주문 공통 차단인지 개별 문제인지 구분이
+    안 됐던 문제."""
+    assert T._order_blocker("계좌# 미설정(fail-closed)") == "account"
+    assert T._order_blocker("토큰 없음") == "account"
+    assert T._order_blocker("장운영시간이 아닙니다") == "market"
+    assert T._order_blocker("수량 0 이하") is None            # 개별 주문 문제 → 중단 안 함
+    assert T._order_blocker("지정가 필요(해외 정수주)") is None
+    assert T._order_blocker(None) is None
+
+
+def test_notify_shows_single_account_blocker_message_instead_of_spamming(monkeypatch):
+    """계좌 레벨 차단이면 개별 실패를 나열하지 않고 명확 안내 1건만 보내야 한다."""
+    sent = {}
+
+    class _FakeNotify:
+        @staticmethod
+        def send_telegram(text, **kwargs):
+            sent["text"] = text
+
+    monkeypatch.setitem(sys.modules, "notify", _FakeNotify)
+
+    results = [
+        {"symbol": "MSFT", "qty": 1, "kind": "편입", "ok": False, "msg": "계좌# 미설정(fail-closed)"},
+        {"symbol": "NVDA", "qty": 1, "kind": "편입", "ok": False, "msg": "계좌# 미설정(fail-closed)"},
+    ]
+    T._notify(1000.0, results)
+
+    text = sent["text"]
+    assert "계좌 문제" in text or "계좌#" in text
+    assert "MSFT" not in text and "NVDA" not in text
