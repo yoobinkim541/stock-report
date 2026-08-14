@@ -91,6 +91,10 @@ def build_indicators(ticker: str) -> str:
     out = _build_indicators_raw(ticker)
     if key:
         _IND_CACHE[key] = (now, out)
+        # 서로 다른 티커가 계속 쌓이면 무제한 커지므로 만료 엔트리 정리(감사 #26)
+        # — 봇은 장기 실행 프로세스.
+        for stale_key in [k for k, (ts, _) in _IND_CACHE.items() if now - ts >= _IND_TTL]:
+            del _IND_CACHE[stale_key]
     return out
 
 

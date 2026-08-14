@@ -27,6 +27,10 @@ def _cached_rank(universe, limit, min_score):
         return hit[1]
     picks = rank_accumulation(list(universe), limit=limit, min_score=min_score)
     _ACCUM_CACHE[key] = (now, picks)
+    # 서로 다른 universe/limit/min_score 조합이 계속 쌓이면 무제한 커지므로
+    # 만료된 엔트리를 정리(감사 #26) — 봇은 장기 실행 프로세스.
+    for stale_key in [k for k, (ts, _) in _ACCUM_CACHE.items() if now - ts >= _ACCUM_TTL]:
+        del _ACCUM_CACHE[stale_key]
     return picks
 
 
