@@ -26,6 +26,8 @@ load_dotenv()
 
 import numpy as np
 
+import safe_io
+
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 logger = logging.getLogger(__name__)
 
@@ -33,6 +35,7 @@ KST        = timezone(timedelta(hours=9))
 TRACK_PATH = Path.home() / ".local" / "share" / "stock-report" / "paper_track.json"
 STATE_PATH = Path.home() / ".cache" / "barbell_state.json"
 MIN_SUMMARY_ENTRIES = 30
+_LOCK_TARGET = os.path.expanduser("~/.cache/stock-report/paper_track")
 
 
 def _load_track() -> dict:
@@ -259,6 +262,17 @@ from lib.cron_common import send_cron_telegram
 
 def main() -> int:
     logger.info("=== paper_track 시작 ===")
+    # 겹쳐 도는 두 실행이 같은 track 을 각자 read-modify-write 하면 늦게 쓴 쪽이
+    # 앞선 실행의 기록을 덮어써 유실될 수 있다 — 비차단 락으로 겹치면 스킵.
+    try:
+        with safe_io.file_write_lock(_LOCK_TARGET, timeout=0):
+            return _run()
+    except safe_io.LockTimeout:
+        logger.info("이전 실행이 아직 진행 중 — 이번 실행 스킵")
+        return 0
+
+
+def _run() -> int:
     track = _load_track()
     try:
         record_today(track)
