@@ -82,3 +82,22 @@ def test_section_8_major_investors_is_appendix_reference():
     assert "부록 A" in text
     assert "당일 신호가 아니라" in text
     assert "최근 동향" not in text
+
+
+def test_refresh_today_context_recomputes_date_not_frozen_at_import(monkeypatch):
+    """감사 #20 — TODAY_STR/REPORT_FILE 등이 모듈 import 시점에 한 번만 계산돼,
+    import 와 실제 리포트 생성 사이에 자정을 넘기면 날짜가 어긋나던 문제.
+    _refresh_today_context() 가 호출 시점 기준으로 다시 계산해야 한다."""
+    class _FakeDatetime(mr.datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return cls(2026, 3, 2, 0, 5, 0, tzinfo=tz)
+
+    monkeypatch.setattr(mr, "datetime", _FakeDatetime)
+
+    mr._refresh_today_context()
+
+    assert mr.TODAY_STR == "2026-03-02"
+    assert mr.WEEKDAY == 0  # 2026-03-02 는 월요일
+    assert "daily-report-2026-03-02.md" in mr.REPORT_FILE
+    assert "daily-summary-2026-03-02.txt" in mr.SUMMARY_FILE

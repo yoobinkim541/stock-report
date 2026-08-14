@@ -26,13 +26,25 @@ except Exception:
 # Configuration
 # ─────────────────────────────────────────────
 KST = timezone(timedelta(hours=9))
-KST_NOW = datetime.now(KST)
-TODAY_STR = KST_NOW.strftime("%Y-%m-%d")
-TODAY_STR_SHORT = KST_NOW.strftime("%Y-%m-%d")
-WEEKDAY = KST_NOW.weekday()  # 0=Monday .. 6=Sunday
 
-REPORT_FILE = os.path.expanduser(f"~/reports/daily-report-{TODAY_STR}.md")
-SUMMARY_FILE = os.path.expanduser(f"~/reports/daily-summary-{TODAY_STR}.txt")
+
+def _refresh_today_context() -> None:
+    """오늘 날짜 관련 전역을 현재 시각 기준으로 재계산.
+
+    모듈 import 시점(프로세스 시작 직후)에 한 번만 계산해두면, import 와 실제
+    리포트 생성 사이에 자정을 넘길 경우 날짜가 어긋난다 — main() 시작 시 다시
+    호출해 실제 생성 시점 기준으로 갱신한다.
+    """
+    global KST_NOW, TODAY_STR, TODAY_STR_SHORT, WEEKDAY, REPORT_FILE, SUMMARY_FILE
+    KST_NOW = datetime.now(KST)
+    TODAY_STR = KST_NOW.strftime("%Y-%m-%d")
+    TODAY_STR_SHORT = KST_NOW.strftime("%Y-%m-%d")
+    WEEKDAY = KST_NOW.weekday()  # 0=Monday .. 6=Sunday
+    REPORT_FILE = os.path.expanduser(f"~/reports/daily-report-{TODAY_STR}.md")
+    SUMMARY_FILE = os.path.expanduser(f"~/reports/daily-summary-{TODAY_STR}.txt")
+
+
+_refresh_today_context()
 
 USER_AGENT = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
@@ -1367,6 +1379,7 @@ def build_report() -> str:
 
 def main():
     """Main entry point."""
+    _refresh_today_context()
     print(f"📊 주식시장 일일 리포트 생성 중... ({TODAY_STR})")
     print("=" * 60)
 
