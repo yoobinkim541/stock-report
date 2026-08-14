@@ -167,12 +167,14 @@ def _classify_news_item(item):
         return "neutral"
 
 
-def detect_signals(ticker_symbol: str) -> dict:
+def detect_signals(ticker_symbol: str, *, ticker_obj=None) -> dict:
     """
     Detect daily signals for a given ticker.
 
     Args:
         ticker_symbol: Stock ticker symbol
+        ticker_obj: 이미 만든 yf.Ticker 를 재사용(선택) — 같은 티커를 score_ticker 와
+            함께 호출하는 경우 .info 중복 네트워크 조회를 피할 수 있다.
 
     Returns:
         dict with keys:
@@ -200,7 +202,7 @@ def detect_signals(ticker_symbol: str) -> dict:
     }
 
     try:
-        ticker = yf.Ticker(ticker_symbol)
+        ticker = ticker_obj or yf.Ticker(ticker_symbol)
         info = ticker.info
     except Exception as e:
         logger.error(f"Failed to fetch ticker {ticker_symbol}: {e}")

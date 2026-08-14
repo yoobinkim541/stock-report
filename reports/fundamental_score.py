@@ -606,12 +606,14 @@ def _grade(total_score):
 
 # ── public API ──────────────────────────────────────────────────────────
 
-def score_ticker(ticker_symbol: str) -> dict:
+def score_ticker(ticker_symbol: str, *, ticker_obj=None) -> dict:
     """
     Evaluate a single ticker's fundamental health score (0–100).
 
     Args:
         ticker_symbol: Stock ticker symbol (e.g. 'MSFT', 'AAPL')
+        ticker_obj: 이미 만든 yf.Ticker 를 재사용(선택) — 같은 티커를 detect_signals
+            와 함께 호출하는 경우 .info 중복 네트워크 조회를 피할 수 있다.
 
     Returns:
         dict with keys:
@@ -622,7 +624,7 @@ def score_ticker(ticker_symbol: str) -> dict:
           - notes: list[str] of warnings/missing data
     """
     try:
-        ticker = yf.Ticker(ticker_symbol)
+        ticker = ticker_obj or yf.Ticker(ticker_symbol)
         info = ticker.info
     except Exception as e:
         logger.error(f"Failed to fetch ticker {ticker_symbol}: {e}")

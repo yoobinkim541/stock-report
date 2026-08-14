@@ -53,14 +53,14 @@ def test_generate_report_writes_expected_files_without_network():
             ir.KOSPI_TOP30 = ["005930.KS"]
             ir.datetime = FixedDateTime
             ir.MANUAL_SCORES = {}
-            ir.score_ticker = lambda ticker: {
+            ir.score_ticker = lambda ticker, ticker_obj=None: {
                 "ticker": ticker,
                 "total_score": 80,
                 "grade": "A",
                 "sections": {},
                 "notes": ["우수"],
             }
-            ir.detect_signals = lambda ticker: {
+            ir.detect_signals = lambda ticker, ticker_obj=None: {
                 "overall_signal": "Positive",
                 "signals_found": ["모멘텀 강세"],
                 "warnings": [],
@@ -120,4 +120,92 @@ def test_generate_report_writes_expected_files_without_network():
             ir._fetch_arca_posts = old_arca_posts
             ir._company_name = old_company_name
             ir.MANUAL_SCORES = old_manual_scores
+
+
+def test_generate_report_fetches_ticker_info_once_per_ticker_not_twice():
+    """감사 #21 — score_ticker/detect_signals 가 같은 티커에 대해 각자
+    yf.Ticker(...).info 를 따로 조회해 티커당 네트워크 조회가 2배였던 문제.
+    루프가 yf.Ticker 를 한 번만 만들어 양쪽에 공유해야 한다."""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        old_reports_dir = ir.REPORTS_DIR
+        old_portfolio = ir.PORTFOLIO_TICKERS
+        old_nasdaq = ir.NASDAQ_100
+        old_kospi = ir.KOSPI_TOP30
+        old_datetime = ir.datetime
+        old_score_ticker = ir.score_ticker
+        old_detect_signals = ir.detect_signals
+        old_market_summary = ir._market_summary
+        old_korea_indices = ir._fetch_korea_indices
+        old_arca_posts = ir._fetch_arca_posts
+        old_company_name = ir._company_name
+        old_manual_scores = ir.MANUAL_SCORES
+        old_source_digest = ir.load_cached_source_digest
+        old_yf_ticker = ir.yf.Ticker
+
+        ticker_calls: list[str] = []
+        received_objs: dict[str, list] = {}
+
+        class _FakeTickerObj:
+            def __init__(self, symbol):
+                self.symbol = symbol
+
+        def fake_yf_ticker(symbol):
+            ticker_calls.append(symbol)
+            return _FakeTickerObj(symbol)
+
+        try:
+            ir.REPORTS_DIR = tmpdir
+            ir.PORTFOLIO_TICKERS = ["MSFT"]
+            ir.NASDAQ_100 = []  # 포트폴리오 루프 안의 중복만 검증 — 다른 스캔 루프와는 겹치지 않게
+            ir.KOSPI_TOP30 = []
+            ir.datetime = FixedDateTime
+            ir.MANUAL_SCORES = {}
+            ir.yf.Ticker = fake_yf_ticker
+
+            def fake_score_ticker(ticker, ticker_obj=None):
+                received_objs.setdefault(ticker, []).append(ticker_obj)
+                return {"ticker": ticker, "total_score": 80, "grade": "A", "sections": {}, "notes": []}
+
+            def fake_detect_signals(ticker, ticker_obj=None):
+                received_objs.setdefault(ticker, []).append(ticker_obj)
+                return {
+                    "overall_signal": "Positive", "signals_found": [], "warnings": [], "critical": [],
+                    "price_info": {"1d_change_pct": 0, "1mo_change_pct": 0, "current_price": 100.0},
+                    "volume_info": {"ratio": 1.0},
+                }
+
+            ir.score_ticker = fake_score_ticker
+            ir.detect_signals = fake_detect_signals
+            ir._market_summary = lambda: {
+                "spy_price": 500.0, "spy_change": 1.2, "spy_name": "SPY",
+                "qqq_price": 600.0, "qqq_change": 0.8, "qqq_name": "QQQ",
+            }
+            ir._fetch_korea_indices = lambda: ("2,500.00", "850.00", "1,300.00")
+            ir._fetch_arca_posts = lambda: []
+            ir._company_name = lambda ticker: f"{ticker} Corporation"
+            ir.load_cached_source_digest = lambda: ""
+
+            ir.generate_report()
+
+            # score_ticker/detect_signals 가 같은 루프 반복 안에서 같은 yf.Ticker
+            # 객체를 공유하는지가 핵심 — 다른 코드 경로(기관매집 랭킹 등)가 별도
+            # 목적으로 자체 yf.Ticker 를 만드는 것은 이 수정의 대상이 아님.
+            objs = received_objs["MSFT"]
+            assert len(objs) == 2  # score_ticker + detect_signals
+            assert objs[0] is not None and objs[1] is not None
+            assert objs[0] is objs[1], "score_ticker 와 detect_signals 가 서로 다른 yf.Ticker 객체를 받음(중복 조회)"
+        finally:
+            ir.REPORTS_DIR = old_reports_dir
+            ir.PORTFOLIO_TICKERS = old_portfolio
+            ir.NASDAQ_100 = old_nasdaq
+            ir.KOSPI_TOP30 = old_kospi
+            ir.datetime = old_datetime
+            ir.score_ticker = old_score_ticker
+            ir.detect_signals = old_detect_signals
+            ir._market_summary = old_market_summary
+            ir._fetch_korea_indices = old_korea_indices
+            ir._fetch_arca_posts = old_arca_posts
+            ir._company_name = old_company_name
+            ir.MANUAL_SCORES = old_manual_scores
+            ir.yf.Ticker = old_yf_ticker
             ir.load_cached_source_digest = old_source_digest

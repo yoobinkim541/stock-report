@@ -2314,8 +2314,9 @@ def generate_report():
     for i, ticker in enumerate(PORTFOLIO_TICKERS):
         print(f"   [{i+1}/{len(PORTFOLIO_TICKERS)}] {ticker}...", end=" ", flush=True)
         try:
-            fund = MANUAL_SCORES.get(ticker) or score_ticker(ticker)
-            sig = detect_signals(ticker)
+            ticker_obj = yf.Ticker(ticker)
+            fund = MANUAL_SCORES.get(ticker) or score_ticker(ticker, ticker_obj=ticker_obj)
+            sig = detect_signals(ticker, ticker_obj=ticker_obj)
             judgment, reasons, risks = _judgment(fund, sig, fund.get("grade", "N/A"))
             decision = _decision_v2(fund, sig, fund.get("grade", "N/A"), ticker=ticker)
             etf_comparison = None
@@ -2364,8 +2365,9 @@ def generate_report():
         scan_count += 1
         print(f"   [{scan_count}/{min(max_scan, len(NASDAQ_100))}] {ticker}...", end=" ", flush=True)
         try:
-            fund = MANUAL_SCORES.get(ticker) or score_ticker(ticker)
-            sig = detect_signals(ticker)
+            ticker_obj = yf.Ticker(ticker)
+            fund = MANUAL_SCORES.get(ticker) or score_ticker(ticker, ticker_obj=ticker_obj)
+            sig = detect_signals(ticker, ticker_obj=ticker_obj)
             ndx_results.append({
                 "ticker": ticker,
                 "total_score": fund["total_score"],
@@ -2394,8 +2396,9 @@ def generate_report():
     for i, ticker in enumerate(kospi_scan_list):
         print(f"   [{i+1}/{len(kospi_scan_list)}] {ticker}...", end=" ", flush=True)
         try:
-            fund = MANUAL_SCORES.get(ticker) or score_ticker(ticker)
-            sig = detect_signals(ticker)
+            ticker_obj = yf.Ticker(ticker)
+            fund = MANUAL_SCORES.get(ticker) or score_ticker(ticker, ticker_obj=ticker_obj)
+            sig = detect_signals(ticker, ticker_obj=ticker_obj)
             kospi_results.append({
                 "ticker": ticker,
                 "total_score": fund["total_score"],
