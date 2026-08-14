@@ -1,4 +1,5 @@
 """tests/test_insider_dart.py — QT2b 내부자(Form4)·DART 파싱·graceful (무네트워크)."""
+import json
 import os
 import sys
 
@@ -185,4 +186,30 @@ def test_dart_financial_accounts_caches_to_disk_and_skips_repeat_requests(monkey
 
     assert len(calls) == 1, "두 번째 호출이 캐시를 안 쓰고 네트워크를 다시 침"
     assert second["list"][0]["account_nm"] == "매출액"
+    assert second == first
+
+
+def test_insider_submissions_caches_and_is_shared_across_recent_insider_and_filings(monkeypatch, tmp_path):
+    """감사 #24 — recent_insider·recent_filings 가 같은 CIK 의 SEC submissions
+    JSON 을 각자 캐시 없이 조회해 중복 네트워크 호출이 나던 문제."""
+    monkeypatch.setattr(insider, "_CACHE_DIR", tmp_path / "edgar")
+    monkeypatch.setattr(insider, "_cik", lambda ticker: "0000320193")
+
+    calls = []
+    payload = json.dumps({"filings": {"recent": {
+        "form": [], "accessionNumber": [], "primaryDocument": [], "filingDate": [],
+    }}}).encode("utf-8")
+
+    from providers import edgar
+
+    def fake_get(url):
+        calls.append(url)
+        return payload
+
+    monkeypatch.setattr(edgar, "_get", fake_get)
+
+    first = insider._submissions("0000320193")
+    second = insider._submissions("0000320193")
+
+    assert len(calls) == 1, "두 번째 호출이 캐시를 안 쓰고 네트워크를 다시 침"
     assert second == first

@@ -6,8 +6,13 @@ edgar._get(SEC 준수 UA)·_cik_map 재사용. submissions JSON 에서 Form 4 �
 from __future__ import annotations
 
 import json
+import os
 import time
+from pathlib import Path
 from xml.etree import ElementTree as ET
+
+_CACHE_DIR = Path(os.path.expanduser("~/reports/ml-cache/edgar"))
+_SUBMISSIONS_TTL_H = 6  # 당일 신규 공시 반영 위해 짧게 — recent_insider·recent_filings 가 같은 CIK 를 공유
 
 
 def _num(s) -> float:
@@ -51,8 +56,16 @@ def _cik(ticker: str) -> str | None:
 
 
 def _submissions(cik: str) -> dict:
+    """SEC submissions JSON — recent_insider/recent_filings 가 같은 CIK 를 함께 호출하면
+    중복 네트워크 조회가 나던 문제(감사 #24) 방지 위해 짧은 TTL 로 디스크 캐시."""
     from providers import edgar
-    return json.loads(edgar._get(f"https://data.sec.gov/submissions/CIK{cik}.json"))
+    from lib.file_cache import is_fresh
+    _CACHE_DIR.mkdir(parents=True, exist_ok=True)
+    p = _CACHE_DIR / f"submissions_{cik}.json"
+    if not is_fresh(p, _SUBMISSIONS_TTL_H):
+        raw = edgar._get(f"https://data.sec.gov/submissions/CIK{cik}.json")
+        p.write_bytes(raw)
+    return json.loads(p.read_text(encoding="utf-8"))
 
 
 def _raw_form4_url(cik: str, acc_nodash: str, primary_doc: str) -> str:
