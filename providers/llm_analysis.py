@@ -237,6 +237,12 @@ def _analysis_fallback_payload(ticker: str, name: str, facts: dict) -> dict:
     psr = _to_float(val.get("psr"))
     roe = _to_float(val.get("roe"))
     div_yield = _to_float(val.get("div_yield"))
+    # valuation_metrics() 계약: roe/div_yield 는 소수(0.34=34%) — 아래 표시·임계값은
+    # 전부 퍼센트 스케일을 가정하므로 여기서 한 번만 변환해 이후 전부 일관되게 씀.
+    if roe is not None:
+        roe *= 100.0
+    if div_yield is not None:
+        div_yield *= 100.0
 
     if per is not None:
         if per >= 30:

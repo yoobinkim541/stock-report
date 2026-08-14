@@ -154,6 +154,17 @@ def test_portfolio_brief_gate_cache(monkeypatch, tmp_path):
                               force=True)[1].startswith("call failed")
 
 
+def test_analysis_fallback_payload_uses_percent_scale_roe_and_div_yield():
+    """valuation_metrics() 의 roe/div_yield 는 소수(0.34=34%) — 퍼센트로 오인하면
+    우량주(ROE 34%)가 매번 '자본효율이 높지 않다'로 잘못 분류되고 표시값도 0.3%가 된다."""
+    facts = {"현재가": 100.0, "밸류에이션": {"roe": 0.34, "div_yield": 0.02}}
+    payload = la._analysis_fallback_payload("KO", "Coca-Cola", facts)
+    assert any("ROE 34.0%" in b for b in payload["bulls"])
+    assert not any("ROE" in b for b in payload["bears"])
+    assert any("배당수익률 2.0%" in b for b in payload["bulls"])
+    assert "ROE 34.0%" in payload["valuation"]
+
+
 def test_briefing_cron_pure_parts():
     """크론 순수부 — 메시지 빌더(정직 라벨·4000자)·포트 facts 조립."""
     from crons import daily_ai_briefing as dab
