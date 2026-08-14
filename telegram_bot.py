@@ -30,6 +30,8 @@ import threading
 from pathlib import Path
 from datetime import datetime
 
+import safe_io
+
 import requests
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -152,6 +154,32 @@ def _pid_file_path() -> str:
     path = Path.home() / ".local" / "state" / "stock-report" / "barbell_bot.pid"
     path.parent.mkdir(parents=True, exist_ok=True)
     return str(path)
+
+
+def _offset_file_path() -> str:
+    path = Path.home() / ".local" / "state" / "stock-report" / "telegram_offset.txt"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    return str(path)
+
+
+def _load_persisted_offset() -> int | None:
+    """직전 실행이 마지막으로 처리한 update_id+1 을 디스크에서 복원.
+
+    없으면(최초 실행) None — Telegram 기본 동작(대기 중인 가장 오래된 업데이트부터).
+    """
+    try:
+        return int(Path(_offset_file_path()).read_text().strip())
+    except Exception:
+        return None
+
+
+def _persist_offset(offset: int) -> None:
+    """offset 을 디스크에 영속화 — 크래시 재시작 시 이미 처리한 업데이트의 재전달로
+    인한 상태변경 명령(홀딩 매수 등) 중복 실행을 막는다. 실패해도 폴링은 계속돼야."""
+    try:
+        safe_io.atomic_write_text(_offset_file_path(), str(offset))
+    except Exception:
+        logger.exception("offset 영속화 실패 (offset=%s)", offset)
 
 
 PID_FILE           = _pid_file_path()
@@ -2181,7 +2209,7 @@ def run():
     if STARTUP_NOTIFY_ENABLED:
         send(ALLOWED_CHAT_ID, "🤖 Barbell Bot 온라인 ✅\n/help 로 명령어 확인")
 
-    offset: int | None  = None
+    offset: int | None  = _load_persisted_offset()   # 크래시 재시작 시 이미 처리한 업데이트 재전달 방지
     last_alert_check    = 0.0
     last_phase_check    = 0.0
     last_entry_check    = 0.0
@@ -2214,6 +2242,7 @@ def run():
             consecutive_409 = 0
             for upd in updates:
                 offset  = upd["update_id"] + 1
+                _persist_offset(offset)
                 msg     = upd.get("message", {})
                 chat_id = str(msg.get("chat", {}).get("id", ""))
                 text    = msg.get("text", "")

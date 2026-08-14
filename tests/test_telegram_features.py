@@ -727,6 +727,22 @@ def test_dispatch_worker_offloads_and_survives_errors(monkeypatch):
     assert any("오류" in m for _, m in errs)          # 예외 시 오류 안내 전송
 
 
+def test_offset_persists_to_disk_and_survives_restart(monkeypatch, tmp_path):
+    """offset 이 메모리에만 있으면 봇 크래시 재시작 시 Telegram 이 이미 처리한
+    업데이트를 재전달해 /holding buy 같은 상태변경 명령이 중복 실행될 수 있다."""
+    import telegram_bot as tb
+
+    offset_file = str(tmp_path / "telegram_offset.txt")
+    monkeypatch.setattr(tb, "_offset_file_path", lambda: offset_file)
+
+    assert tb._load_persisted_offset() is None       # 최초 실행 — 파일 없음
+    tb._persist_offset(12345)
+    assert tb._load_persisted_offset() == 12345      # "재시작" 후에도 값이 복원돼야
+
+    tb._persist_offset(12399)                        # 다음 업데이트 처리 후 갱신
+    assert tb._load_persisted_offset() == 12399
+
+
 def test_attachment_worker_offloads_and_survives_errors(monkeypatch):
     """OCR/PDF 첨부 처리도 dispatch 워커와 동일하게 전용 큐로 오프로드돼야 메인
     폴링 루프(getUpdates·주기알림)를 막지 않는다. 예외에도 워커가 죽지 않아야 함."""
