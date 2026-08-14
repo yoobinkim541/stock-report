@@ -8,9 +8,11 @@ yfinance 데이터를 기반으로 포트폴리오 종목의 일일 변화 및 �
 import yfinance as yf
 import numpy as np
 import logging
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 
 logger = logging.getLogger(__name__)
+
+KST = timezone(timedelta(hours=9))
 
 
 def _safe_float(val, default=None):
@@ -198,7 +200,7 @@ def detect_signals(ticker_symbol: str, *, ticker_obj=None) -> dict:
         "signals_found": [],
         "warnings": [],
         "critical": [],
-        "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        "timestamp": datetime.now(KST).strftime("%Y-%m-%d %H:%M:%S"),
     }
 
     try:
