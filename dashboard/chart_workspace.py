@@ -755,7 +755,8 @@ def propose_workspace_patch(prompt: str, workspace: dict) -> dict[str, Any]:
     text = str(prompt or "").lower()
     before = normalize_workspace(workspace)
     patch: dict[str, Any] = {}
-    panel = before["panels"][0]
+    panel_idx = _panel_index(before)
+    panel = before["panels"][panel_idx]
     top = list(panel.get("top_indicators") or [])
     bottom = list(panel.get("bottom_indicators") or [])
     warnings: list[str] = []
@@ -816,7 +817,7 @@ def propose_workspace_patch(prompt: str, workspace: dict) -> dict[str, Any]:
             {"compare"},
         )
 
-    after = _apply_document_patch_to_panel(before, patch) if patch else before
+    after = _apply_document_patch_to_panel(before, patch, panel_index=panel_idx) if patch else before
     return {
         "ok": True,
         "summary": "차트 요청을 워크스페이스 패치로 변환했습니다.",

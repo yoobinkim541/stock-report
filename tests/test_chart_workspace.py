@@ -370,3 +370,26 @@ def test_workspace_ai_patch_heuristic_handles_intraday_vwap():
     assert all(not path.startswith("panels[") for path in proposal["patch"])
     assert any(study["name"] == "VWAP(세션)" for study in proposal["patch"]["studies"])
     assert "거래량" in proposal["after"]["panels"][0]["bottom_indicators"]
+
+
+def test_workspace_ai_patch_targets_active_panel_not_always_first():
+    """감사 #18 — AI 채팅 패치가 항상 panels[0] 만 편집해, 다중 패널
+    워크스페이스에서 사용자가 보고 있는(active_panel) 패널이 아닌 다른
+    종목 패널이 조용히 수정되던 문제."""
+    ws = cw.normalize_workspace({
+        "layout": "2x2",
+        "active_panel": "p3",
+        "panels": [
+            {"id": "p1", "ticker": "MSFT"},
+            {"id": "p2", "ticker": "AAPL"},
+            {"id": "p3", "ticker": "NVDA"},
+            {"id": "p4", "ticker": "AMD"},
+        ],
+    })
+
+    proposal = cw.propose_workspace_patch("macd 추가해줘", ws)
+
+    assert proposal["ok"] is True
+    assert proposal["after"]["panels"][2]["ticker"] == "NVDA"
+    assert "MACD" in proposal["after"]["panels"][2]["bottom_indicators"]
+    assert "MACD" not in (proposal["after"]["panels"][0].get("bottom_indicators") or [])
