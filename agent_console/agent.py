@@ -716,6 +716,19 @@ def _is_portfolio_preference_question(question: str, pack: dict | None = None,
     return any(word in previous for word in ("비중", "리스크", "손실", "줄여", "시나리오"))
 
 
+def _contains_word(haystack: str, needle: str) -> bool:
+    """`needle` 이 `haystack` 안에 다른 영숫자에 묻히지 않고 독립 토큰으로 등장하는지.
+
+    "so" 가 "person" 안에 우연히 포함된 것처럼 짧은 티커/이름이 단순 substring
+    매칭으로 다른 단어 안에서 오탐되던 문제(감사 #15) 방지 — 한글 조사 등 비영숫자가
+    바로 붙는 건 허용(예: "TSLA는").
+    """
+    if not needle:
+        return False
+    pattern = rf"(?<![A-Za-z0-9]){re.escape(needle)}(?![A-Za-z0-9])"
+    return re.search(pattern, haystack) is not None
+
+
 def _resolve_portfolio_symbol(question: str, holdings: list[dict]) -> str | None:
     q = str(question or "")
     ql = q.lower()
@@ -730,9 +743,9 @@ def _resolve_portfolio_symbol(question: str, holdings: list[dict]) -> str | None
     for row in holdings:
         ticker = str(row.get("ticker") or row.get("symbol") or "").upper().strip()
         name = str(row.get("name") or "").strip()
-        if ticker and ticker.lower() in ql:
+        if ticker and _contains_word(ql, ticker.lower()):
             return ticker
-        if name and name.lower() in ql:
+        if name and _contains_word(ql, name.lower()):
             return ticker
 
     try:
