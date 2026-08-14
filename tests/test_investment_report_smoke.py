@@ -107,6 +107,10 @@ def test_generate_report_writes_expected_files_without_network():
             assert "NASDAQ ▲0.8%" in summary_text
             assert "KOSPI 2,500.00" in summary_text
             assert "KOSPI 상위" in summary_text
+            # 감사 #22 — 등가중(종목 단순평균) P&L 을 실제 비중반영 포트폴리오
+            # 수익률처럼 오인하지 않도록 "비중 미반영" 명시 라벨이 붙어야 한다.
+            assert "포트폴리오(종목 단순평균, 비중 미반영)" in report_text
+            assert "포트폴리오 등락(종목 단순평균, 비중 미반영)" in report_text
         finally:
             ir.REPORTS_DIR = old_reports_dir
             ir.PORTFOLIO_TICKERS = old_portfolio

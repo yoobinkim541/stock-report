@@ -2475,7 +2475,7 @@ def generate_report():
         _e, _l, _dca, _dd = _ph
         lines.append(f"- **{_e} {_l}** · QQQ {fmt.pct(_dd) if _dd is not None else '—'} · DCA {_dca}")
     if _pnl1d is not None:
-        lines.append(f"- **포트폴리오:** 오늘 {fmt.pct(_pnl1d)} · 1개월 "
+        lines.append(f"- **포트폴리오(종목 단순평균, 비중 미반영):** 오늘 {fmt.pct(_pnl1d)} · 1개월 "
                      f"{fmt.pct(_pnl1mo) if _pnl1mo is not None else '—'}")
     lines.append(f"- **신호 분포:** 🟢{_pos} ⚪{_neu} 🟡{_warn} 🔴{_crit}")
     lines.append(f"- **오늘 할 일:** {_action_plan_headline(_action_plan)}")
@@ -2511,7 +2511,7 @@ def generate_report():
     pnl_1d, pnl_1mo = _calc_portfolio_pnl(portfolio_results)
     pnl_1d_str = _fmt_pct(pnl_1d, force_sign=True) if pnl_1d is not None else "N/A"
     pnl_1mo_str = _fmt_pct(pnl_1mo, force_sign=True) if pnl_1mo is not None else "N/A"
-    lines.append(f"**포트폴리오 등락:** 오늘 {pnl_1d_str} | 1개월 {pnl_1mo_str}")
+    lines.append(f"**포트폴리오 등락(종목 단순평균, 비중 미반영):** 오늘 {pnl_1d_str} | 1개월 {pnl_1mo_str}")
 
     # Korea indices
     kospi_str, kosdaq_str, fx_str = _fetch_korea_indices()
