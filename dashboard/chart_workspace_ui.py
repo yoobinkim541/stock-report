@@ -529,7 +529,7 @@ def _render_template_library_bar(ws: dict[str, Any]) -> dict[str, Any]:
     default_name = f"{active['ticker']} {chart_workspace.template_kind_label(save_kind_choice)}"
     template_name = save_name.text_input(
         "이름",
-        value=st.session_state.get(f"_cw_tpl_name_{save_kind_choice}", default_name),
+        value=default_name,
         key=f"_cw_tpl_name_{save_kind_choice}_{ws.get('id', 'default')}",
         placeholder="예: Trend Clean / Volume Focus / NVDA 5m",
     )
@@ -543,7 +543,6 @@ def _render_template_library_bar(ws: dict[str, Any]) -> dict[str, Any]:
             )
             saved = views.chart_template_save(record)
             _refresh_template_caches()
-            st.session_state[f"_cw_tpl_name_{save_kind_choice}"] = template_name
             st.toast(f"{chart_workspace.template_kind_label(save_kind_choice)} 템플릿을 저장했습니다.")
             if saved:
                 st.session_state["_cw_last_template"] = saved.get("id")
