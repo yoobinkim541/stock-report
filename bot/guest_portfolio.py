@@ -41,6 +41,8 @@ def add_holding(user: str, ticker: str, shares: float, price: float) -> dict:
     ticker = ticker.upper()
     shares = float(shares)
     price  = float(price)
+    if shares <= 0 or price <= 0:
+        raise ValueError("shares/price must be positive")
     cur = data.get(ticker)
     if cur:
         old_sh  = float(cur.get("shares", 0))
