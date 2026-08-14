@@ -3,15 +3,19 @@ from __future__ import annotations
 import argparse
 import inspect
 import json
+import os
 from typing import Any, Callable
 
 import pandas as pd
 
+import safe_io
 from . import chart_alert_dispatcher, chart_alert_runner, storage
 from dashboard import chart_conditions
 
 
 LoadBarsFn = Callable[..., Any]
+
+_LOCK_TARGET = os.path.expanduser("~/.cache/stock-report/chart_alert_worker")
 
 
 def run_chart_alert_cycle(
@@ -23,7 +27,41 @@ def run_chart_alert_cycle(
     send_fn: chart_alert_dispatcher.SendFn | None = None,
     limit: int = 200,
 ) -> dict[str, Any]:
-    """Load market bars for enabled chart alert rules, evaluate them, and optionally notify."""
+    """Load market bars for enabled chart alert rules, evaluate them, and optionally notify.
+
+    겹쳐 도는 두 사이클이 "once" 룰의 last_state 를 동시에 미체결로 읽고 둘 다
+    dispatch 해 중복 알림을 보내는 race(감사 #16) 방지 — 비차단 락으로 겹치면
+    이번 호출은 통째로 스킵(룰 조회도 시작 안 함).
+    """
+    try:
+        with safe_io.file_write_lock(_LOCK_TARGET, timeout=0):
+            return _run_chart_alert_cycle_locked(
+                workspace_id=workspace_id, symbols=symbols, notify=notify,
+                load_bars_fn=load_bars_fn, send_fn=send_fn, limit=limit,
+            )
+    except safe_io.LockTimeout:
+        return {
+            "ok": False,
+            "workspace_id": str(workspace_id).strip() if workspace_id else "",
+            "rule_count": 0,
+            "event_count": 0,
+            "events": [],
+            "evaluations": [],
+            "missing_bars": [],
+            "notification": {"attempted": 0, "delivered": 0, "failed": 0, "failures": []},
+            "reason": "already_running",
+        }
+
+
+def _run_chart_alert_cycle_locked(
+    *,
+    workspace_id: str | None,
+    symbols: list[str] | None,
+    notify: bool,
+    load_bars_fn: LoadBarsFn | None,
+    send_fn: chart_alert_dispatcher.SendFn | None,
+    limit: int,
+) -> dict[str, Any]:
     rules = storage.list_chart_alert_rules(
         workspace_id=str(workspace_id).strip() if workspace_id else None,
         enabled=True,

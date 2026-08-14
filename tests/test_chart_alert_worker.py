@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import pandas as pd
 
+import safe_io
 from agent_console import chart_alert_worker
 
 
@@ -48,6 +49,24 @@ def test_worker_deduplicates_requirement_loads_and_persists_every_evaluation(mon
     assert [rule_id for rule_id, _state in states] == ["r1", "r2"]
     assert all(state["trace"] for _rule_id, state in states)
     assert len(result["evaluations"]) == 2
+
+
+def test_run_chart_alert_cycle_skips_entirely_when_another_run_holds_the_lock(monkeypatch, tmp_path):
+    """감사 #16 — 겹쳐 도는 두 사이클이 같은 "once" 룰을 동시에 미체결로 읽고
+    둘 다 dispatch 해 중복 알림을 보내던 race. 락으로 겹치면 완전히 스킵해야 한다."""
+    monkeypatch.setattr(chart_alert_worker, "_LOCK_TARGET", str(tmp_path / "chart_alert_worker"))
+    calls = {"n": 0}
+
+    def fake_list_rules(**kwargs):
+        calls["n"] += 1
+        return [_rule("r1")]
+    monkeypatch.setattr(chart_alert_worker.storage, "list_chart_alert_rules", fake_list_rules)
+
+    with safe_io.file_write_lock(chart_alert_worker._LOCK_TARGET, timeout=0):
+        result = chart_alert_worker.run_chart_alert_cycle(load_bars_fn=lambda *a, **k: None)
+
+    assert result["ok"] is False
+    assert calls["n"] == 0, "락을 못 잡으면 룰 조회/평가/dispatch 를 아예 시작하면 안 됨"
 
 
 def test_worker_supports_legacy_one_argument_loader_and_records_missing(monkeypatch):
