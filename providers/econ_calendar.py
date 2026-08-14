@@ -7,9 +7,10 @@ saveticker 공개 API(키 불요·한국어·기존 통합)에서 연준·경제
 from __future__ import annotations
 
 import os
-from datetime import date, datetime, timedelta
+from datetime import date, datetime, timedelta, timezone
 
 _BASE = "https://saveticker.com/api"
+KST = timezone(timedelta(hours=9))
 
 # saveticker color → 중요도 (관찰: #EF4444=고위험/중요)
 _IMPORTANCE = {
@@ -56,7 +57,14 @@ def _parse(events: list[dict]) -> list[dict]:
         raw = ev.get("event_date")
         if raw:
             try:
-                when = datetime.fromisoformat(str(raw).replace("Z", ""))
+                text = str(raw).strip()
+                if text.endswith("Z"):
+                    when = datetime.fromisoformat(text[:-1]).replace(tzinfo=timezone.utc)
+                else:
+                    when = datetime.fromisoformat(text)
+                    if when.tzinfo is None:
+                        when = when.replace(tzinfo=timezone.utc)
+                when = when.astimezone(KST)
             except (ValueError, TypeError):
                 when = None
         imp, marker = _importance(ev.get("color"))

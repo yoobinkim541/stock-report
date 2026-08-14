@@ -73,6 +73,18 @@ def test_econ_importance():
     assert econ_calendar._importance(None)[0] == "info"
 
 
+def test_econ_parse_converts_utc_z_suffix_to_kst():
+    """saveticker API 는 UTC(Z 접미) 로 이벤트 시각을 준다 — KST 로 변환 없이 naive
+    로 그대로 쓰면 '오늘' 필터링·표시 시각이 최대 하루/9시간 어긋난다."""
+    sample = [{"title": "FOMC", "event_date": "2026-07-11T23:00:00Z", "color": "#EF4444"}]
+    out = econ_calendar._parse(sample)
+    when = out[0]["when"]
+    assert when is not None
+    assert when.utcoffset().total_seconds() == 9 * 3600          # KST = UTC+9
+    assert (when.year, when.month, when.day, when.hour) == (2026, 7, 12, 8)  # 다음날 08:00 KST
+    assert out[0]["date_str"] == "07/12 08:00"
+
+
 def test_econ_parse_sort_and_marker():
     sample = [
         {"title": "  CPI  ", "event_date": "2026-07-11T21:30:00", "color": "#EF4444"},
