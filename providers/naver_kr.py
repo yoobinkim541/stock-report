@@ -97,15 +97,26 @@ def investor_flow_features(code: str) -> dict:
 
 
 def kospi200_members() -> list[str]:
-    """현재 KOSPI200 구성 종목코드(6자리). EUC-KR 페이지 1~20 순회. 실패 시 []."""
+    """현재 KOSPI200 구성 종목코드(6자리). EUC-KR 페이지 1~20 순회. 실패 시 [].
+
+    한 페이지의 예외/빈 응답(네트워크 글리치)을 목록 끝으로 오판하면 이후 페이지
+    종목이 통째로 누락된다 — 페이지별로 실패를 흡수하고, 2연속 빈 페이지일 때만
+    진짜 끝으로 보고 종료한다.
+    """
     codes: set = set()
-    try:
-        for page in range(1, 21):
+    consecutive_empty = 0
+    for page in range(1, 21):
+        try:
             html = _get(f"https://finance.naver.com/sise/entryJongmok.naver?type=KPI200&page={page}").decode("euc-kr", errors="replace")
             found = re.findall(r"code=(\d{6})", html)
-            if not found:
+        except Exception as e:
+            logger.warning("naver KOSPI200 page=%d 실패: %s", page, e)
+            found = []
+        if not found:
+            consecutive_empty += 1
+            if consecutive_empty >= 2:
                 break
-            codes |= set(found)
-    except Exception as e:
-        logger.warning("naver KOSPI200 실패: %s", e)
+            continue
+        consecutive_empty = 0
+        codes |= set(found)
     return sorted(codes)
