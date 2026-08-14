@@ -149,7 +149,13 @@ def multi_timeframe_summary(load_ohlc: Callable[[str, str], object], ticker: str
         ma20 = close.rolling(20).mean()
         ma60 = close.rolling(60).mean() if len(close) >= 60 else ma20
         last = float(close.iloc[-1])
-        trend = "up" if last >= float(ma20.iloc[-1]) >= float(ma60.iloc[-1]) else "down" if last < float(ma20.iloc[-1]) else "mixed"
+        ma20_last, ma60_last = float(ma20.iloc[-1]), float(ma60.iloc[-1])
+        if last >= ma20_last >= ma60_last:
+            trend = "up"
+        elif last <= ma20_last <= ma60_last:
+            trend = "down"
+        else:
+            trend = "mixed"
         rsi = _rsi(close).dropna()
         rsi_zone = "neutral"
         if len(rsi):
