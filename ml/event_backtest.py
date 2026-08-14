@@ -62,7 +62,7 @@ def _next_open(prices: pd.DataFrame, ts) -> tuple[Any, float] | None:
         return None
     row = later.iloc[0]
     px = float(row["Open"])
-    return later.index[0], px if px > 0 else None
+    return (later.index[0], px) if px > 0 else None
 
 
 def _mark_price(prices: pd.DataFrame, symbol: str) -> float:
