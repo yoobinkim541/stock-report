@@ -725,3 +725,29 @@ def test_dispatch_worker_offloads_and_survives_errors(monkeypatch):
     assert ("/status", "c1", "owner") in seen
     assert ("/help", "c3", "owner") in seen          # 예외 후에도 계속 처리(워커 생존)
     assert any("오류" in m for _, m in errs)          # 예외 시 오류 안내 전송
+
+
+def test_attachment_worker_offloads_and_survives_errors(monkeypatch):
+    """OCR/PDF 첨부 처리도 dispatch 워커와 동일하게 전용 큐로 오프로드돼야 메인
+    폴링 루프(getUpdates·주기알림)를 막지 않는다. 예외에도 워커가 죽지 않아야 함."""
+    import threading
+    import telegram_bot as tb
+    seen = []
+
+    def _fake_handle_attachment(msg, chat_id):
+        if chat_id == "boom":
+            raise RuntimeError("ocr crash")
+        seen.append((msg, chat_id))
+    monkeypatch.setattr(tb, "handle_attachment", _fake_handle_attachment)
+    errs = []
+    monkeypatch.setattr(tb, "send", lambda cid, m: errs.append((cid, m)))
+
+    threading.Thread(target=tb._attachment_worker, daemon=True).start()
+    tb._ATTACHMENT_Q.put(({"document": {"file_id": "d1"}}, "c1"))
+    tb._ATTACHMENT_Q.put(({"photo": [{"file_id": "p1"}]}, "boom"))   # 예외 → 워커 생존해야
+    tb._ATTACHMENT_Q.put(({"document": {"file_id": "d2"}}, "c3"))
+    tb._ATTACHMENT_Q.join()                            # 3건 모두 처리될 때까지 대기
+
+    assert ({"document": {"file_id": "d1"}}, "c1") in seen
+    assert ({"document": {"file_id": "d2"}}, "c3") in seen   # 예외 후에도 계속 처리(워커 생존)
+    assert any("오류" in m for _, m in errs)

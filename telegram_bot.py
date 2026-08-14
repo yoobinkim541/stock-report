@@ -2128,6 +2128,10 @@ def _run_periodic(name: str, fn) -> None:
 # 여전히 1건씩 순차 처리(새 동시성 없음·현행 의미 보존). 주기 데몬과의 동시성은 기존 수준 그대로.
 _DISPATCH_Q: "queue.Queue" = queue.Queue()
 
+# 첨부(OCR/PDF) 처리 전용 워커 — tesseract OCR 은 페이지당 최대 60초까지 걸릴 수 있어
+# dispatch 큐와 별도로 분리(느린 첨부 처리 중에도 일반 명령이 밀리지 않게).
+_ATTACHMENT_Q: "queue.Queue" = queue.Queue()
+
 
 def _dispatch_worker():
     while True:
@@ -2143,6 +2147,22 @@ def _dispatch_worker():
                 pass
         finally:
             _DISPATCH_Q.task_done()
+
+
+def _attachment_worker():
+    while True:
+        item = _ATTACHMENT_Q.get()
+        try:
+            msg, chat_id = item
+            handle_attachment(msg, chat_id)
+        except Exception:
+            logger.exception("첨부 처리 워커 오류: %r", item)
+            try:
+                send(item[1], "⚠️ 첨부 처리 중 오류가 발생했습니다.")
+            except Exception:
+                pass
+        finally:
+            _ATTACHMENT_Q.task_done()
 
 
 def run():
@@ -2170,6 +2190,7 @@ def run():
 
     # dispatch 오프로드 워커 기동 (무거운 명령이 폴링·주기알림을 막지 않게)
     threading.Thread(target=_dispatch_worker, daemon=True, name="dispatch-worker").start()
+    threading.Thread(target=_attachment_worker, daemon=True, name="attachment-worker").start()
 
     while True:
         try:
@@ -2213,7 +2234,7 @@ def run():
                         continue
                     kind = "photo" if "photo" in msg else "document"
                     logger.info(f"첨부 수신: {kind}")
-                    handle_attachment(msg, chat_id)
+                    _ATTACHMENT_Q.put((msg, chat_id))   # 워커 스레드로 오프로드(OCR 최대 60초·폴링 비차단)
                     continue
 
                 # 일반 텍스트(스냅샷/매도내역) 처리는 포트폴리오 수정 → 소유자 전용
