@@ -118,6 +118,24 @@ def test_workspace_drawing_store_key_respects_sync_scope():
     assert chart_workspace_ui._drawing_store_key(ws, panel, compare=False) is None
 
 
+def test_panel_chart_render_is_isolated_in_its_own_fragment():
+    """감사 #19 — 패널 차트 렌더가 프래그먼트로 격리되지 않아, 한 패널 안의
+    위젯(드로잉·리플레이 등) 조작이 전체 rerun 을 유발해 다른 모든 패널의
+    무거운 차트까지 함께 재조회/재렌더되던 문제. 루프에서 실제로 호출하는
+    함수가 st.fragment 로 감싸져 있고, 감싼 대상이 진짜 렌더러인지 확인."""
+    import inspect
+
+    from dashboard import chart_workspace_ui
+
+    assert hasattr(chart_workspace_ui._render_panel_chart_fragment, "__wrapped__")
+    source = inspect.getsource(chart_workspace_ui._render_panel_chart_fragment.__wrapped__)
+    assert "_render_panel_chart(" in source
+
+    render_loop_source = inspect.getsource(chart_workspace_ui.render_chart_workspace)
+    assert "_render_panel_chart_fragment(" in render_loop_source
+    assert "_render_panel_chart(" not in render_loop_source.replace("_render_panel_chart_fragment(", "")
+
+
 def test_replay_analysis_disables_live_orderflow_loader():
     from dashboard import chart_orderflow, chart_workspace_ui
 

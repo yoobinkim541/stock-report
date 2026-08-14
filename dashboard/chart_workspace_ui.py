@@ -180,6 +180,25 @@ def _load_panel_hist(panel: dict[str, Any]):
     return (bundle or {}).get("frame")
 
 
+@st.fragment
+def _render_panel_chart_fragment(
+    ws: dict[str, Any],
+    panel: dict[str, Any],
+    *,
+    height: int = 420,
+    compact: bool = False,
+    replay_until=None,
+    replay_context: dict[str, Any] | None = None,
+) -> None:
+    """패널 차트 렌더를 프래그먼트로 격리 — 이 패널 안의 위젯(드로잉·리플레이 등)
+    조작이 전체 스크립트 rerun 을 유발해 다른 모든 패널의 무거운 차트 재조회/재렌더
+    까지 함께 일으키던 문제(감사 #19) 방지."""
+    _render_panel_chart(
+        ws, panel, height=height, compact=compact,
+        replay_until=replay_until, replay_context=replay_context,
+    )
+
+
 def _render_panel_chart(
     ws: dict[str, Any],
     panel: dict[str, Any],
@@ -474,7 +493,7 @@ def render_chart_workspace(
                 f"{panel['id']} · 링크 {_LINK_GROUP_LABELS.get(panel.get('link_group') or '', '전체')} · {_caption_panel(panel)}"
             )
             if render_charts:
-                _render_panel_chart(
+                _render_panel_chart_fragment(
                     ws, panel, height=profile["height"], compact=profile["compact"],
                     replay_until=replay_cutoff, replay_context=replay_context,
                 )
