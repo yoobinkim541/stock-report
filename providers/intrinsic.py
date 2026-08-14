@@ -60,8 +60,8 @@ def intrinsic(ticker: str, *, price: float | None = None,
     out: dict = {"ticker": ticker, "price": price, "g": g, "r_band": r_band,
                  "payout": m.get("payout")}
 
-    div_yield = m.get("div_yield")          # 이미 퍼센트 (0.98 = 0.98%)
-    d0 = (div_yield / 100.0) * price if (div_yield and price) else 0.0
+    div_yield = m.get("div_yield")          # 이미 소수 (0.0098 = 0.98%) — earnings_data.valuation_metrics 계약
+    d0 = (div_yield * price) if (div_yield and price) else 0.0
     out["ddm"] = _band(lambda r: ddm_value(d0, g, r), r_band) if d0 > 0 else None
     payout = m.get("payout")
     out["ddm_reliable"] = bool(payout is not None and payout >= 0.4)

@@ -25,7 +25,7 @@ def test_rim_value_closed_form():
 def test_intrinsic_low_payout_flags_ddm(monkeypatch):
     from providers import earnings_data
     monkeypatch.setattr(earnings_data, "valuation_metrics",
-                        lambda t: {"div_yield": 0.98, "payout": 0.2, "pbr": 6.69, "roe": 0.34})
+                        lambda t: {"div_yield": 0.0098, "payout": 0.2, "pbr": 6.69, "roe": 0.34})
     monkeypatch.setattr(intrinsic, "_spot_price", lambda t: 417.0)
     out = intrinsic.intrinsic("MSFT")
     assert out["rim"] and out["rim"]["mid"] > 0
@@ -37,11 +37,25 @@ def test_intrinsic_low_payout_flags_ddm(monkeypatch):
 def test_intrinsic_high_payout_reliable(monkeypatch):
     from providers import earnings_data
     monkeypatch.setattr(earnings_data, "valuation_metrics",
-                        lambda t: {"div_yield": 4.0, "payout": 0.7, "pbr": 2.0, "roe": 0.15})
+                        lambda t: {"div_yield": 0.04, "payout": 0.7, "pbr": 2.0, "roe": 0.15})
     monkeypatch.setattr(intrinsic, "_spot_price", lambda t: 100.0)
     out = intrinsic.intrinsic("KO")
     assert out["ddm_reliable"] is True
     assert out["ddm"] is not None
+
+
+def test_intrinsic_ddm_uses_fraction_scale_div_yield_correctly(monkeypatch):
+    """earnings_data.valuation_metrics()의 div_yield 는 소수(0.04=4%) — intrinsic.py 가
+    이를 퍼센트로 오인해 다시 /100 하면 DDM 적정가가 실제값의 약 1/100로 나온다."""
+    from providers import earnings_data
+    monkeypatch.setattr(earnings_data, "valuation_metrics",
+                        lambda t: {"div_yield": 0.04, "payout": 0.7, "pbr": None, "roe": None})
+    monkeypatch.setattr(intrinsic, "_spot_price", lambda t: 100.0)
+    out = intrinsic.intrinsic("KO")
+    assert out["ddm"] is not None
+    # d0 = div_yield * price = $4/주. 기본 g=0.04, r_band mid=0.095:
+    # ddm = 4*1.04/(0.095-0.04) ≈ 75.64. 버그 상태면 d0=$0.04 → mid ≈ 0.756 (100배 축소).
+    assert 70 < out["ddm"]["mid"] < 80
 
 
 def test_intrinsic_missing_inputs_graceful(monkeypatch):
