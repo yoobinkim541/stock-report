@@ -71,6 +71,40 @@ def test_parse_kr_top_holdings():
     assert out[0]["amount"] == 70_000_000
 
 
+def test_pykrx_reachable_probes_once_and_caches(monkeypatch):
+    """이 서버는 KRX 도달 불가(문서화된 환경 사실) — 캐싱 없이는 ETF 캐시 미스마다
+    최대 10회의 순차 doomed pykrx 호출이 반복된다. 프로세스당 1회만 프로브해야 한다."""
+    import pykrx.stock as pykrx_stock
+    monkeypatch.setattr(E, "_PYKRX_REACHABLE", None)
+    calls = []
+
+    def _fail(*a, **k):
+        calls.append(1)
+        raise RuntimeError("KRX unreachable")
+
+    monkeypatch.setattr(pykrx_stock, "get_etf_ticker_name", _fail)
+
+    assert E._pykrx_reachable() is False
+    assert E._pykrx_reachable() is False
+    assert len(calls) == 1                            # 두 번째 호출은 캐시만 읽음
+
+
+def test_kr_pykrx_overlay_skips_entirely_when_unreachable(monkeypatch):
+    """도달 불가로 확인되면 top_holdings/가격괴리율 등 어떤 pykrx 함수도 호출하지 않아야 한다."""
+    import pykrx.stock as pykrx_stock
+    monkeypatch.setattr(E, "_pykrx_reachable", lambda: False)
+
+    def _boom(*a, **k):
+        raise AssertionError("pykrx.stock 함수가 호출되면 안 됨 — 도달 불가 상태")
+
+    monkeypatch.setattr(pykrx_stock, "get_etf_ticker_name", _boom)
+    monkeypatch.setattr(pykrx_stock, "get_etf_portfolio_deposit_file", _boom)
+
+    out = {"stock_code": "069500"}
+    E._kr_pykrx_overlay(out)                           # 예외 없이 조용히 스킵돼야 함
+    assert "top_holdings" not in out
+
+
 def test_kr_seed_etf_codes_are_recognized(monkeypatch):
     assert E.is_etf("0167A0.KS") is True
 

@@ -379,9 +379,29 @@ def _kr_yfinance_overlay(out: dict) -> None:
         pass
 
 
+_PYKRX_REACHABLE: bool | None = None
+
+
+def _pykrx_reachable() -> bool:
+    """pykrx 가 이 서버에서 실제로 KRX 에 도달 가능한지 프로세스당 1회만 확인해 캐싱.
+
+    이 서버는 KRX 접근이 막혀 있다는 게 문서화된 환경 사실(kr_market_data.py) — 캐싱
+    없이는 KR ETF 캐시 미스마다 최대 10회의 순차 doomed pykrx 호출이 매번 반복된다.
+    """
+    global _PYKRX_REACHABLE
+    if _PYKRX_REACHABLE is not None:
+        return _PYKRX_REACHABLE
+    try:
+        from pykrx import stock
+        _PYKRX_REACHABLE = bool(stock.get_etf_ticker_name("069500"))
+    except Exception:
+        _PYKRX_REACHABLE = False
+    return _PYKRX_REACHABLE
+
+
 def _kr_pykrx_overlay(out: dict) -> None:
     code = out.get("stock_code")
-    if not code:
+    if not code or not _pykrx_reachable():
         return
     try:
         from pykrx import stock
