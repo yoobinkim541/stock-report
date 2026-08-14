@@ -111,6 +111,48 @@ def _validate_file(fname: str, text: str) -> str | None:
     return None
 
 
+# ── 편집 허용 5개 파일 밖의 변경 탐지 (방어심층) ──
+# advisor 는 --toolsets file 로 PROJECT_DIR 전체에 파일 편집 툴을 갖고 실행되는데,
+# 그 툴셋이 실제로 EDITABLE_FILES 로 하드 제한되는지는 이 레포 밖(hermes 설정)이라
+# 확인할 수 없다. _guard_editable_files 는 5개 파일만 보므로, 프롬프트 인젝션 등으로
+# 그 밖(크론·봇 코드·.env)이 조용히 바뀌어도 탐지하지 못한다 — 내용을 읽지 않는
+# mtime+size 지문으로 실행코드/자격증명 경로의 변경만 빠르게 스캔해 알린다.
+# (임의 코드 파일을 무검증 자동 롤백하는 건 그 자체로 위험할 수 있어 탐지·알림까지만.)
+_SENSITIVE_DIRS = ("crons", "bot", "agent_console", "providers", "ml", "dashboard", "lib")
+_SENSITIVE_EXTRA_FILES = (".env",)
+
+
+def _sensitive_fingerprint() -> dict:
+    """민감 경로(실행코드·자격증명)의 mtime+size 스냅샷 — 내용을 읽지 않는 빠른 지문."""
+    out = {}
+    for extra in _SENSITIVE_EXTRA_FILES:
+        p = PROJECT_DIR / extra
+        try:
+            if p.exists():
+                st = p.stat()
+                out[extra] = (st.st_mtime, st.st_size)
+        except Exception:
+            pass
+    for d in _SENSITIVE_DIRS:
+        base = PROJECT_DIR / d
+        if not base.is_dir():
+            continue
+        for p in base.rglob("*.py"):
+            try:
+                st = p.stat()
+                out[str(p.relative_to(PROJECT_DIR))] = (st.st_mtime, st.st_size)
+            except Exception:
+                pass
+    return out
+
+
+def _sensitive_path_violations(before: dict, after: dict) -> list[str]:
+    """before/after 지문 비교 — 변경·신규·삭제된 경로 목록 (사람이 읽을 표시 문자열)."""
+    changed = [path for path, stat_after in after.items() if before.get(path) != stat_after]
+    changed += [f"{path} (삭제됨)" for path in before if path not in after]
+    return changed
+
+
 def _guard_editable_files(backups: dict) -> list[str]:
     """advisor 실행 후 검증 — 위반 파일은 실행 전 스냅샷으로 롤백. 위반 목록 반환."""
     violations = []
@@ -430,6 +472,7 @@ def ask_portfolio_advisor(question: str, market: dict, runner=subprocess.run) ->
     ]
 
     backups = _snapshot_editable_files()
+    sensitive_before = _sensitive_fingerprint()
     violations: list[str] = []
     try:
         result = runner(cmd, capture_output=True, text=True, timeout=120, cwd=PROJECT_DIR)
@@ -439,6 +482,10 @@ def ask_portfolio_advisor(question: str, market: dict, runner=subprocess.run) ->
         # advisor가 파일 도구로 설정 파일을 편집했을 수 있음 →
         # 1) 범위/구조 가드 (위반 파일은 실행 전 스냅샷 롤백) → 2) store 권위로 재동기화
         violations = _guard_editable_files(backups)
+        sensitive_changed = _sensitive_path_violations(sensitive_before, _sensitive_fingerprint())
+        if sensitive_changed:
+            logger.critical("advisor 가 편집 허용 범위 밖 파일을 변경함: %s", sensitive_changed)
+            violations.append("허용 범위 밖 파일 변경 감지: " + ", ".join(sensitive_changed[:5]))
         _sync_editable_to_store()
 
     if getattr(result, "returncode", 1) != 0:

@@ -235,3 +235,59 @@ def test_ask_advisor_appends_guard_warning(tmp_path, monkeypatch):
     assert "반영 완료했습니다" in answer
     assert "편집 가드" in answer and "dca_weights.json" in answer
     assert not (tmp_path / "dca_weights.json").exists()      # 원본 없던 오염 파일 제거
+
+
+def test_sensitive_fingerprint_detects_changed_added_and_removed_files(tmp_path, monkeypatch):
+    """EDITABLE_FILES 5개 밖의 코드/자격증명 변경은 _guard_editable_files 가 아예
+    보지 않는다 — 방어심층으로 민감 경로(crons·bot 등 실행코드)의 변경을 탐지."""
+    import stock_advisor as sa
+
+    monkeypatch.setattr(sa, "PROJECT_DIR", tmp_path)
+    (tmp_path / "crons").mkdir()
+    (tmp_path / "crons" / "a.py").write_text("x = 1", encoding="utf-8")
+    (tmp_path / "bot").mkdir()
+    (tmp_path / "bot" / "b.py").write_text("y = 1", encoding="utf-8")
+    (tmp_path / ".env").write_text("SECRET=1", encoding="utf-8")
+
+    before = sa._sensitive_fingerprint()
+
+    (tmp_path / "crons" / "a.py").write_text("x = 999  # 변조됨", encoding="utf-8")  # 변경
+    (tmp_path / "crons" / "c.py").write_text("z = 1", encoding="utf-8")              # 신규 추가
+    (tmp_path / "bot" / "b.py").unlink()                                             # 삭제
+
+    changed = sa._sensitive_path_violations(before, sa._sensitive_fingerprint())
+    assert any("crons/a.py" in c or "crons\\a.py" in c for c in changed)
+    assert any("crons/c.py" in c or "crons\\c.py" in c for c in changed)
+    assert any("bot/b.py" in c or "bot\\b.py" in c for c in changed)
+
+
+def test_sensitive_fingerprint_ignores_editable_config_files(tmp_path, monkeypatch):
+    """EDITABLE_FILES 는 원래도 편집 대상이므로 민감 변경 탐지 노이즈에 안 잡혀야 한다."""
+    import stock_advisor as sa
+
+    monkeypatch.setattr(sa, "PROJECT_DIR", tmp_path)
+    (tmp_path / "dca_weights.json").write_text("{}", encoding="utf-8")
+    before = sa._sensitive_fingerprint()
+    (tmp_path / "dca_weights.json").write_text('{"normal": {}}', encoding="utf-8")
+    changed = sa._sensitive_path_violations(before, sa._sensitive_fingerprint())
+    assert changed == []
+
+
+def test_ask_advisor_flags_edits_outside_editable_files(tmp_path, monkeypatch):
+    """advisor 의 file 툴셋이 EDITABLE_FILES 밖(예: crons/ 코드)을 건드리면,
+    _guard_editable_files 는 그걸 모르고 지나치지만 민감경로 스캔은 잡아 경고해야 한다."""
+    import stock_advisor as sa
+
+    monkeypatch.setattr(sa, "PROJECT_DIR", tmp_path)
+    monkeypatch.setattr(sa, "build_ml_context", lambda: "[ML 모델 판단]\n- 스텁")
+    (tmp_path / "crons").mkdir()
+    (tmp_path / "crons" / "notion_sync.py").write_text("# original", encoding="utf-8")
+
+    def evil_run(cmd, **kwargs):
+        # LLM 이 프롬프트 지시를 무시하고 EDITABLE_FILES 밖의 코드를 변조했다고 가정
+        (tmp_path / "crons" / "notion_sync.py").write_text("# tampered!", encoding="utf-8")
+        return FakeCompleted(stdout="완료했습니다")
+
+    answer = sa.ask_portfolio_advisor("포트폴리오 어때?", sample_market(), runner=evil_run)
+    assert "완료했습니다" in answer
+    assert "허용 범위 밖" in answer and "notion_sync.py" in answer
