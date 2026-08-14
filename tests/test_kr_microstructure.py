@@ -1,7 +1,42 @@
 from __future__ import annotations
 
+import time
 from datetime import datetime
 from zoneinfo import ZoneInfo
+
+
+def test_fetch_naver_indices_runs_requests_in_parallel(monkeypatch):
+    """3개 지수 호출이 순차면 3×슬립, 병렬이면 1×슬립 근처여야 한다."""
+    from providers import kr_microstructure as km
+
+    monkeypatch.setattr(km, "naver_enabled", lambda: True)
+
+    def _slow_http(url):
+        time.sleep(0.05)
+        return {}
+
+    monkeypatch.setattr(km, "_http_json", _slow_http)
+    t0 = time.monotonic()
+    km.fetch_naver_indices()
+    elapsed = time.monotonic() - t0
+    assert elapsed < 0.12                              # 순차였다면 >=0.15s
+
+
+def test_fetch_naver_breadth_runs_requests_in_parallel(monkeypatch):
+    """6개(2시장×3정렬) 호출이 순차면 6×슬립, 병렬이면 1×슬립 근처여야 한다."""
+    from providers import kr_microstructure as km
+
+    monkeypatch.setattr(km, "naver_enabled", lambda: True)
+
+    def _slow_http(url):
+        time.sleep(0.05)
+        return {}
+
+    monkeypatch.setattr(km, "_http_json", _slow_http)
+    t0 = time.monotonic()
+    km.fetch_naver_breadth()
+    elapsed = time.monotonic() - t0
+    assert elapsed < 0.15                               # 순차였다면 >=0.3s
 
 
 def test_build_snapshot_merges_indices_flow_futures_breadth_and_status():

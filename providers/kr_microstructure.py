@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import os
 import time
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
 from pathlib import Path
 from zoneinfo import ZoneInfo
@@ -232,9 +233,11 @@ def parse_naver_index_payload(payload: dict) -> dict:
 def fetch_naver_indices() -> dict:
     if not naver_enabled():
         return {}
+    codes = list(NAVER_INDEX_CODES)
+    with ThreadPoolExecutor(max_workers=len(codes)) as ex:
+        payloads = ex.map(lambda code: _http_json(f"https://polling.finance.naver.com/api/realtime/domestic/index/{code}"), codes)
     out = {}
-    for code in NAVER_INDEX_CODES:
-        payload = _http_json(f"https://polling.finance.naver.com/api/realtime/domestic/index/{code}")
+    for payload in payloads:
         out.update(parse_naver_index_payload(payload))
     return out
 
@@ -277,10 +280,10 @@ def parse_naver_breadth_payloads(payloads: dict) -> dict | None:
 def fetch_naver_breadth() -> dict | None:
     if not naver_enabled():
         return None
-    payloads = {}
-    for market in NAVER_MARKETS:
-        for sort in NAVER_BREADTH_SORTS:
-            payloads[(market, sort)] = _http_json(f"https://m.stock.naver.com/api/stocks/{sort}/{market}?page=1&pageSize=1")
+    keys = [(market, sort) for market in NAVER_MARKETS for sort in NAVER_BREADTH_SORTS]
+    with ThreadPoolExecutor(max_workers=len(keys)) as ex:
+        results = ex.map(lambda k: _http_json(f"https://m.stock.naver.com/api/stocks/{k[1]}/{k[0]}?page=1&pageSize=1"), keys)
+    payloads = dict(zip(keys, results))
     return parse_naver_breadth_payloads(payloads)
 
 
