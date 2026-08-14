@@ -120,9 +120,10 @@ def test_dart_financial_accounts_graceful_without_key(monkeypatch):
     assert out["list"] == [] and "미설정" in out["error"]
 
 
-def test_dart_financial_accounts_request(monkeypatch):
+def test_dart_financial_accounts_request(monkeypatch, tmp_path):
     monkeypatch.setenv("DART_API_KEY", "dummy")
     monkeypatch.setattr(dart, "corp_code_map", lambda refresh=False: {"005930": "00126380"})
+    monkeypatch.setattr(dart, "_FINANCIALS_CACHE_DIR", tmp_path / "dart_financials")
     calls = []
 
     class FakeResp:
@@ -151,3 +152,37 @@ def test_dart_financial_accounts_request(monkeypatch):
     assert out["list"][0]["thstrm_amount"] == 1000.0
     assert calls[0][2]["bsns_year"] == "2025"
     assert calls[0][2]["reprt_code"] == dart.ANNUAL_REPORT
+
+
+def test_dart_financial_accounts_caches_to_disk_and_skips_repeat_requests(monkeypatch, tmp_path):
+    """감사 #23 — 연도별 재무제표(불변 데이터)를 매번 순차 네트워크 재조회하던 문제.
+    같은 corp/year/reprt_code 는 두 번째 호출부터 디스크 캐시에서 읽어야 한다."""
+    monkeypatch.setenv("DART_API_KEY", "dummy")
+    monkeypatch.setattr(dart, "corp_code_map", lambda refresh=False: {"005930": "00126380"})
+    monkeypatch.setattr(dart, "_FINANCIALS_CACHE_DIR", tmp_path / "dart_financials")
+    calls = []
+
+    class FakeResp:
+        def json(self):
+            return {
+                "status": "000",
+                "list": [
+                    {"account_nm": "매출액", "fs_div": "CFS", "fs_nm": "연결재무제표",
+                     "sj_div": "IS", "thstrm_amount": "1,000", "currency": "KRW"},
+                ],
+            }
+
+    class FakeRequests:
+        @staticmethod
+        def get(url, timeout, params):
+            calls.append((url, timeout, params))
+            return FakeResp()
+
+    monkeypatch.setitem(sys.modules, "requests", FakeRequests)
+
+    first = dart.financial_accounts("005930.KS", year=2025)
+    second = dart.financial_accounts("005930.KS", year=2025)
+
+    assert len(calls) == 1, "두 번째 호출이 캐시를 안 쓰고 네트워크를 다시 침"
+    assert second["list"][0]["account_nm"] == "매출액"
+    assert second == first

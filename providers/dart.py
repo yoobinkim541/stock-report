@@ -7,6 +7,7 @@ list.json 으로 최근 공시 목록. fnlttSinglAcnt.json 으로 주요 재무�
 from __future__ import annotations
 
 import io
+import json
 import os
 import zipfile
 from datetime import date, timedelta
@@ -18,6 +19,9 @@ from dotenv import load_dotenv
 _BASE = "https://opendart.fss.or.kr/api"
 _CACHE = Path(os.path.expanduser("~/reports/ml-cache/dart_corpcode.xml"))
 _DOTENV_PATH = Path(__file__).resolve().parent.parent / ".env"
+# 연도별 재무제표는 한 번 공시되면 불변 — corp/year/reprt_code 조합으로 디스크에
+# 영구 캐시해 매번 순차 재조회(감사 #23)하던 것 방지.
+_FINANCIALS_CACHE_DIR = Path(os.path.expanduser("~/reports/ml-cache/dart_financials"))
 
 
 def _load_env() -> None:
@@ -236,6 +240,12 @@ def financial_accounts(ticker: str, year: int | None = None, reprt_code: str = A
         return {"error": f"corp_code 매핑 없음 ({sc})", "list": []}
     if year is None:
         year = date.today().year - 1
+    cache_path = _FINANCIALS_CACHE_DIR / f"{corp}_{year}_{reprt_code}.json"
+    try:
+        if cache_path.exists():
+            return json.loads(cache_path.read_text(encoding="utf-8"))
+    except Exception:
+        pass
     import requests
     try:
         r = requests.get(f"{_BASE}/fnlttSinglAcnt.json", timeout=20, params={
@@ -245,8 +255,15 @@ def financial_accounts(ticker: str, year: int | None = None, reprt_code: str = A
             return {"error": d.get("message", "조회 실패"), "list": [], "status": d.get("status"),
                     "year": year, "reprt_code": reprt_code}
         rows = [_normalize_account_row(x) for x in d.get("list", [])]
-        return {"ticker": ticker, "stock_code": sc, "corp_code": corp, "year": year,
-                "reprt_code": reprt_code, "list": rows, "source": "DART"}
+        result = {"ticker": ticker, "stock_code": sc, "corp_code": corp, "year": year,
+                  "reprt_code": reprt_code, "list": rows, "source": "DART"}
+        try:
+            import safe_io
+            _FINANCIALS_CACHE_DIR.mkdir(parents=True, exist_ok=True)
+            safe_io.atomic_write_json(str(cache_path), result)
+        except Exception:
+            pass
+        return result
     except Exception as ex:
         return {"error": str(ex), "list": [], "year": year, "reprt_code": reprt_code}
 
