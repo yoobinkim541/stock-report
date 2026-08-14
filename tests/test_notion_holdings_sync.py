@@ -81,3 +81,39 @@ def test_rebuy_after_sell_reuses_archived_page_instead_of_duplicating(monkeypatc
     assert creates3 == [], "재매수 시 신규 페이지를 또 만들면 안 됨(중복 행)"
     assert len(aapl_patch) == 1
     assert aapl_patch[0][2].get("archived") is False
+
+
+def test_ensure_holdings_db_writes_cache_atomically(monkeypatch, tmp_path):
+    """감사 #28 — DB id 캐시가 open(...,'w')+json.dump 직접 쓰기라, 프로세스가
+    쓰기 도중 죽으면 캐시 파일이 잘린/손상된 채 남을 수 있었음.
+    safe_io.atomic_write_json 경유(임시파일→os.replace)로 써야 한다."""
+    import json
+    import safe_io
+
+    cache_path = tmp_path / "notion_holdings_db.json"
+    monkeypatch.setattr(ns, "HOLDINGS_DB_CACHE", str(cache_path))
+
+    atomic_calls = []
+    orig_atomic_write = safe_io.atomic_write_json
+
+    def spy_atomic_write(path, obj, **kwargs):
+        atomic_calls.append((path, obj))
+        return orig_atomic_write(path, obj, **kwargs)
+
+    monkeypatch.setattr(safe_io, "atomic_write_json", spy_atomic_write)
+
+    def fake_get(url, headers=None, timeout=None):
+        return _FakeResponse(False)  # 캐시 미스 → 신규 생성 경로
+
+    def fake_post(url, headers=None, json=None, timeout=None):
+        return _FakeResponse(True, {"id": "db-new-1"})
+
+    monkeypatch.setattr("requests.get", fake_get)
+    monkeypatch.setattr("requests.post", fake_post)
+
+    did = ns._ensure_holdings_db("parent-1")
+
+    assert did == "db-new-1"
+    assert len(atomic_calls) == 1, "raw open(w)+json.dump 를 계속 쓰면 spy 가 호출 안 됨"
+    assert atomic_calls[0][0] == str(cache_path)
+    assert json.loads(cache_path.read_text(encoding="utf-8"))["database_id"] == "db-new-1"

@@ -397,9 +397,9 @@ def _ensure_holdings_db(parent_page_id: str) -> str | None:
         return None
     did = r.json()["id"]
     try:
+        import safe_io
         os.makedirs(os.path.dirname(HOLDINGS_DB_CACHE), exist_ok=True)
-        with open(HOLDINGS_DB_CACHE, "w") as f:
-            json.dump({"database_id": did}, f)
+        safe_io.atomic_write_json(HOLDINGS_DB_CACHE, {"database_id": did})
     except Exception:
         pass
     logger.info("보유종목 DB 생성: %s", did)
