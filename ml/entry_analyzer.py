@@ -36,9 +36,29 @@ KST = timezone(timedelta(hours=9))
 
 # ── 대상 종목 ─────────────────────────────────────────────────────────────────
 
-PORTFOLIO_STOCKS    = ["MSFT", "NVDA", "GOOGL", "ORCL", "SAP", "UNH", "SPMO", "QQQI"]
+DEFAULT_PORTFOLIO_STOCKS = ["MSFT", "NVDA", "GOOGL", "ORCL", "SAP", "UNH", "SPMO", "QQQI"]
 LEVERAGE_ETFS       = ["QLD", "TQQQ", "UPRO"]
 LEVERAGE_UNDERLYING = {"QLD": "QQQ", "TQQQ": "QQQ", "UPRO": "SPY"}
+
+
+def portfolio_stocks() -> list[str]:
+    """portfolio_snapshot.json 해외(USD) 보유 종목 티커 — 실제 보유와 어긋나던
+    하드코딩 리스트(감사 #13) 대신 매 호출마다 라이브 스냅샷에서 읽는다.
+    스냅샷 없음/파싱 실패/보유 없음 시 DEFAULT_PORTFOLIO_STOCKS 폴백."""
+    repo = os.getenv("STOCK_REPORT_PROJECT_DIR") or os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    path = os.path.join(repo, "portfolio_snapshot.json")
+    try:
+        with open(path, encoding="utf-8") as f:
+            snap = json.load(f)
+    except Exception:
+        return list(DEFAULT_PORTFOLIO_STOCKS)
+    tickers: list[str] = []
+    for sec in ("overseas_general", "overseas_fractional"):
+        for h in snap.get(sec, {}).get("holdings_usd", []) or []:
+            t = str(h.get("ticker") or "").strip().upper()
+            if t and t not in tickers:
+                tickers.append(t)
+    return tickers or list(DEFAULT_PORTFOLIO_STOCKS)
 
 ALERT_STATE_PATH = Path(os.path.expanduser("~/.cache/entry_alert_state.json"))
 ALERT_COOLDOWN_H = 12     # 동일 종목 재알림 최소 간격 (시간)
@@ -583,7 +603,7 @@ def analyze_all_entries(
 
     # 대상 티커 결정
     if universe == "portfolio":
-        stock_tickers = list(PORTFOLIO_STOCKS)
+        stock_tickers = portfolio_stocks()
         lev_tickers   = list(LEVERAGE_ETFS)
     elif universe == "us_top50":
         stock_tickers = list(US_TOP50)
@@ -596,11 +616,11 @@ def analyze_all_entries(
         lev_tickers   = list(LEVERAGE_ETFS)
     elif universe == "watch":
         stock_tickers = list(dict.fromkeys(
-            list(PORTFOLIO_STOCKS) + list(US_TOP50) + list(KR_TOP10)
+            portfolio_stocks() + list(US_TOP50) + list(KR_TOP10)
         ))
         lev_tickers   = list(LEVERAGE_ETFS)
     else:
-        stock_tickers = list(PORTFOLIO_STOCKS)
+        stock_tickers = portfolio_stocks()
         lev_tickers   = list(LEVERAGE_ETFS)
 
     if extra_tickers:

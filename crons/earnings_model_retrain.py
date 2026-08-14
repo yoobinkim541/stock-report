@@ -32,11 +32,11 @@ from lib.cron_common import send_cron_telegram
 def main() -> int:
     logger.info("=== earnings_model_retrain 시작 [%s] ===", datetime.now(KST).strftime("%Y-%m-%d %H:%M"))
     from ml.data_pipeline import US_TOP50
-    from ml.entry_analyzer import PORTFOLIO_STOCKS
+    from ml.entry_analyzer import portfolio_stocks
     from ml import earnings_predictor as g3
     from ml import earnings_move_predictor as g4
 
-    tickers = list(dict.fromkeys(list(PORTFOLIO_STOCKS) + list(US_TOP50)))
+    tickers = list(dict.fromkeys(portfolio_stocks() + list(US_TOP50)))
     lines = ["📈 어닝 예측 모델 재학습 (Phase C)", "━━━━━━━━━━━━━━"]
 
     # 품질 게이트: 엣지 없는 모델은 캐시 안 함(/earnings 가 무근거 예측 노출 방지).

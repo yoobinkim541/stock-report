@@ -34,12 +34,12 @@ SNAP_PATH = Path.home() / "reports" / "ml-cache" / "fundamental_snapshots.jsonl"
 def main() -> int:
     logger.info("=== fundamental_snapshot 시작 ===")
     from ml.data_pipeline import US_TOP50
-    from ml.entry_analyzer import PORTFOLIO_STOCKS
+    from ml.entry_analyzer import portfolio_stocks
     from reports.fundamental_score import score_ticker
 
     import yfinance as yf
 
-    tickers = list(dict.fromkeys(list(PORTFOLIO_STOCKS) + list(US_TOP50)))
+    tickers = list(dict.fromkeys(portfolio_stocks() + list(US_TOP50)))
     today   = datetime.now(KST).strftime("%Y-%m-%d")
 
     # 같은 날짜 중복 적재 방지

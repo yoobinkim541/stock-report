@@ -5,7 +5,36 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from ml.entry_analyzer import EntryScore, KST, check_alert_signals, format_alert_message
+from ml.entry_analyzer import (
+    DEFAULT_PORTFOLIO_STOCKS, EntryScore, KST, check_alert_signals,
+    format_alert_message, portfolio_stocks,
+)
+
+
+def test_portfolio_stocks_reads_live_snapshot_not_hardcoded_list(tmp_path, monkeypatch):
+    """감사 #13 — PORTFOLIO_STOCKS 가 실제 보유와 무관한 하드코딩 리스트였던 문제.
+    portfolio_snapshot.json 의 해외(USD) 보유 티커를 라이브로 읽어야 한다."""
+    snap = {
+        "overseas_general": {"holdings_usd": [
+            {"ticker": "AAPL", "name": "애플", "shares": 10, "value_usd": 1000.0},
+        ]},
+        "overseas_fractional": {"holdings_usd": [
+            {"ticker": "TSLA", "name": "테슬라", "shares": 0.5, "value_usd": 100.0},
+        ]},
+    }
+    (tmp_path / "portfolio_snapshot.json").write_text(json.dumps(snap), encoding="utf-8")
+    monkeypatch.setenv("STOCK_REPORT_PROJECT_DIR", str(tmp_path))
+
+    result = portfolio_stocks()
+
+    assert result == ["AAPL", "TSLA"]
+    assert "MSFT" not in result, "하드코딩된 기본값이 라이브 스냅샷을 덮어쓰면 안 됨"
+
+
+def test_portfolio_stocks_falls_back_to_default_when_snapshot_missing(tmp_path, monkeypatch):
+    monkeypatch.setenv("STOCK_REPORT_PROJECT_DIR", str(tmp_path))  # portfolio_snapshot.json 없음
+
+    assert portfolio_stocks() == list(DEFAULT_PORTFOLIO_STOCKS)
 
 
 def _entry_score(**overrides):

@@ -30,7 +30,7 @@ import numpy as np
 import pandas as pd
 
 from ml.entry_analyzer import (
-    DEFAULT_SCORE_PARAMS, LEVERAGE_ETFS, LEVERAGE_UNDERLYING, PORTFOLIO_STOCKS,
+    DEFAULT_SCORE_PARAMS, LEVERAGE_ETFS, LEVERAGE_UNDERLYING, portfolio_stocks,
     SCORE_PARAMS_PATH, _compute_ticker_features, _find_similar,
     _weighted_quantile, compute_entry_score,
 )
@@ -48,7 +48,7 @@ def build_samples(days: int = 1260) -> pd.DataFrame:
     """전 종목 × 평가일 점수 구성요소 + 실제 20일 선행수익 테이블 생성."""
     from ml.data_pipeline import US_TOP50, KR_TOP10, fetch_prices
 
-    stock_tickers = list(dict.fromkeys(list(PORTFOLIO_STOCKS) + list(US_TOP50) + list(KR_TOP10)))
+    stock_tickers = list(dict.fromkeys(portfolio_stocks() + list(US_TOP50) + list(KR_TOP10)))
     all_tickers   = list(set(stock_tickers + LEVERAGE_ETFS + ["QQQ", "SPY", "^VIX"]))
     prices        = fetch_prices(all_tickers, days=days)
 

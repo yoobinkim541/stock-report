@@ -34,8 +34,8 @@ SNAP_PATH = Path.home() / "reports" / "ml-cache" / "earnings_snapshots.jsonl"
 def _universe() -> list[str]:
     """포트폴리오 + 美 주요기업 + 韓 대형주(열화모드). 중복 제거."""
     from ml.data_pipeline import US_TOP50, KR_TOP10_META
-    from ml.entry_analyzer import PORTFOLIO_STOCKS
-    return list(dict.fromkeys(list(PORTFOLIO_STOCKS) + list(US_TOP50) + list(KR_TOP10_META.keys())))
+    from ml.entry_analyzer import portfolio_stocks
+    return list(dict.fromkeys(portfolio_stocks() + list(US_TOP50) + list(KR_TOP10_META.keys())))
 
 
 def _row(ticker: str, today: str) -> dict:

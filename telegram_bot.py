@@ -1922,7 +1922,7 @@ def cmd_intraday(chat_id: str, args: list, send_fn=None) -> None:
             format_intraday_alert, format_intraday_summary,
             market_status,
         )
-        from ml.entry_analyzer import LEVERAGE_ETFS, KR_META, PORTFOLIO_STOCKS
+        from ml.entry_analyzer import LEVERAGE_ETFS, KR_META, portfolio_stocks
         from ml.data_pipeline import KR_TOP10
 
         # 장 상태 표시
@@ -1935,7 +1935,7 @@ def cmd_intraday(chat_id: str, args: list, send_fn=None) -> None:
         if not args_u:
             # 기본: 관심 종목 전체 스캔
             _send(chat_id, f"⏳ 관심 종목 단기 신호 스캔 중... ({interval}봉)\n{status_line}")
-            watch = list(LEVERAGE_ETFS) + list(PORTFOLIO_STOCKS)
+            watch = list(LEVERAGE_ETFS) + portfolio_stocks()
             movers = check_intraday_movers(watch, interval=interval, min_score=0.20)
             _send(chat_id, format_intraday_summary(movers))
             return
