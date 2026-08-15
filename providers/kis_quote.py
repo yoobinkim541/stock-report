@@ -167,15 +167,19 @@ def parse_futureoption_price(output: dict) -> dict:
 def parse_etf_snapshot(output1: dict) -> dict:
     """ETF 구성종목시세 output1 → NAV·괴리율·순자산총액 (라이브 확인 필드명).
 
-    stck_prpr=현재가·nav=NAV·etf_ntas_ttam=순자산총액·etf_cnfg_issu_cnt=구성종목수.
+    stck_prpr=현재가·nav=NAV·etf_ntas_ttam=순자산총액(**억원 단위** — KODEX200
+    라이브값 254325 를 네이버 totalNav "25조 4,325억"과 대조해 확인. ×1e8 해서
+    원 단위로 정규화 — 원 단위를 기대하는 소비자(_f_krw_large 등)와 맞춤)·
+    etf_cnfg_issu_cnt=구성종목수.
     괴리율(premium_pct) = (시장가-NAV)/NAV*100 — KIS 응답엔 괴리율 필드가 직접 없어 계산.
     """
     price = _maybe_f(output1, "stck_prpr")
     nav = _maybe_f(output1, "nav")
+    total_assets_eok = _maybe_f(output1, "etf_ntas_ttam")
     out = {
         "price": price,
         "nav": nav,
-        "total_assets": _maybe_f(output1, "etf_ntas_ttam"),
+        "total_assets": total_assets_eok * 1e8 if total_assets_eok is not None else None,
         "component_count": _maybe_f(output1, "etf_cnfg_issu_cnt"),
     }
     if price is not None and nav:

@@ -177,8 +177,10 @@ def test_kr_kis_overlay_fills_nav_premium_holdings_from_live_snapshot(monkeypatc
     def fake_snapshot(symbol):
         assert symbol == "069500"
         return {
+            # kis_quote.get_etf_snapshot()는 이미 원 단위로 정규화해 반환(라이브 확인) —
+            # 25조 4,325억 (네이버 totalNav 대조 확인값).
             "price": 110060.0, "nav": 110362.62, "premium_pct": -0.2742,
-            "total_assets": 254325.0,
+            "total_assets": 25_432_500_000_000.0,
             "holdings": [
                 {"code": "005930", "name": "삼성전자", "weight_pct": 34.47, "price": 274500.0, "chg_pct": 2.43},
                 {"code": "000660", "name": "SK하이닉스", "weight_pct": 25.15, "price": 1645000.0, "chg_pct": 3.26},
@@ -192,7 +194,7 @@ def test_kr_kis_overlay_fills_nav_premium_holdings_from_live_snapshot(monkeypatc
     assert out["nav"] == 110362.62
     assert out["price"] == 110060.0
     assert out["premium_pct"] == -0.2742
-    assert out["total_assets"] == 254325.0
+    assert out["total_assets"] == 25_432_500_000_000.0
     assert out["top_holdings_source"] == "KIS"
     assert out["top_holdings"][0] == {"symbol": "005930", "name": "삼성전자", "pct": 34.47,
                                        "shares": None, "amount": None}

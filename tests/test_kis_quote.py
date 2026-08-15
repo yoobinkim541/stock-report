@@ -173,14 +173,18 @@ def test_parse_futureoption_price_omits_missing_optional_fields():
 # ── ETF NAV·괴리율·구성종목 (라이브 스모크로 확인된 실제 필드명 기반) ────────────
 
 def test_parse_etf_snapshot_computes_premium_pct():
-    """KODEX200(069500) 라이브 응답 기반 — KIS 는 괴리율 필드를 직접 안 줘서 계산."""
+    """KODEX200(069500) 라이브 응답 기반 — KIS 는 괴리율 필드를 직접 안 줘서 계산.
+
+    etf_ntas_ttam=254325 는 **억원 단위**(네이버 totalNav "25조 4,325억"과
+    대조해 확인 — 254325*1e8 = 25,432,500,000,000 = 25조 4,325억, 정확히 일치).
+    """
     got = kq.parse_etf_snapshot({
         "stck_prpr": "110060", "nav": "110362.62",
         "etf_ntas_ttam": "254325", "etf_cnfg_issu_cnt": "200",
     })
     assert got["price"] == 110060.0
     assert got["nav"] == 110362.62
-    assert got["total_assets"] == 254325.0
+    assert got["total_assets"] == pytest.approx(25_432_500_000_000.0)
     assert got["component_count"] == 200.0
     assert got["premium_pct"] == pytest.approx(-0.2742, abs=1e-3)
 
