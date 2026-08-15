@@ -1755,7 +1755,12 @@ def test_watchlist_page_renders_rows_and_navigates_on_click():
 
 def test_watchlist_page_renders_institution_hub_and_rows():
     script = _STUBS + '''
-cached.institution_watch = lambda keys=None: {
+import streamlit as st
+st.session_state["_watch_show_hub"] = True
+st.session_state["_watch_llm_requested"] = True
+cached.institution_screener = lambda keys: {"new_buys": [], "increased": [], "decreased": []}
+cached.congress_top_traded = lambda days=90: {"bought": [], "sold": []}
+cached.institution_watch = lambda keys=None, with_llm_summary=False: {
     "institutions": [
         {"key": "berkshire", "display_name": "Berkshire Hathaway", "source_kind": "13f",
          "category": "holding_company", "freshness": "fresh", "holdings_count": 27,
@@ -1805,8 +1810,11 @@ watchlist.render()
 def test_watchlist_page_filters_selected_institutions():
     script = _STUBS + '''
 import streamlit as st
+st.session_state["_watch_show_hub"] = True
 st.session_state["_institution_watch_keys"] = ["berkshire"]
 st.session_state["_inst_calls"] = []
+cached.institution_screener = lambda keys: {"new_buys": [], "increased": [], "decreased": []}
+cached.congress_top_traded = lambda days=90: {"bought": [], "sold": []}
 
 def _hub(keys=None):
     st.session_state["_inst_calls"].append(keys)
@@ -1895,6 +1903,10 @@ watchlist.render()
 
 def test_watchlist_page_uses_generic_label_for_fallback_analysis():
     script = _STUBS + '''
+import streamlit as st
+st.session_state["_watch_show_hub"] = True
+cached.institution_screener = lambda keys: {"new_buys": [], "increased": [], "decreased": []}
+cached.congress_top_traded = lambda days=90: {"bought": [], "sold": []}
 cached.institution_watch = lambda keys=None: {
     "institutions": [],
     "comparison": {"rows": [], "selected_keys": []},
@@ -1955,7 +1967,7 @@ def test_institution_watch_summary_uses_llm_prompt(monkeypatch):
         '"divergences":["옵션 사용 여부 차이"],"confidence":0.73}'
     ))
 
-    result = views.institution_watch_summary()
+    result = views.institution_watch_summary(with_llm_summary=True)
 
     assert result["selected_keys"] == ["berkshire", "bridgewater"]
     assert result["analysis"]["summary"] == "LLM 공통 패턴 요약"
@@ -1966,6 +1978,10 @@ def test_institution_watch_summary_uses_llm_prompt(monkeypatch):
 
 def test_watchlist_page_handles_empty_institution_hub_gracefully():
     script = _STUBS + '''
+import streamlit as st
+st.session_state["_watch_show_hub"] = True
+cached.institution_screener = lambda keys: {"new_buys": [], "increased": [], "decreased": []}
+cached.congress_top_traded = lambda days=90: {"bought": [], "sold": []}
 cached.institution_watch = lambda keys=None: {
     "institutions": [],
     "comparison": {"rows": [], "selected_keys": []},
