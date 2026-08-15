@@ -297,6 +297,68 @@ def screen_position_changes(institution_keys: list[str]) -> dict:
     return out
 
 
+def _try_llm_prompt_for_screen(prompt: str) -> str | None:
+    """explain_screen 전용 LLM 호출 seam (테스트 monkeypatch 지점)."""
+    try:
+        from agent_console.agent import _try_llm_prompt
+        return _try_llm_prompt(prompt, max_timeout=20)
+    except Exception:
+        return None
+
+
+def _screen_fallback_summary(screen: dict, congress: dict) -> str:
+    parts = []
+    for r in (screen.get("new_buys") or [])[:3]:
+        parts.append(f"{r.get('count')}개 기관이 {r.get('name') or r.get('ticker')} 신규편입")
+    for r in (screen.get("increased") or [])[:3]:
+        parts.append(f"{r.get('count')}개 기관이 {r.get('name') or r.get('ticker')} 비중 확대")
+    for r in (congress.get("bought") or [])[:3]:
+        parts.append(f"하원의원 {r.get('member_count')}명이 {r.get('ticker')} 매수 공시")
+    if not parts:
+        return "표시할 만한 공통 움직임이 아직 없습니다."
+    return " · ".join(parts)
+
+
+def explain_screen(screen: dict, congress: dict) -> dict:
+    """교차기관 스크리닝 + 정치인 매매를 LLM 이 해설(왜 이런 흐름일 수 있는지).
+
+    LLM 실패/미가용 시 추측 없이 사실 나열로 대체(build_common_moves_analysis 와
+    같은 원칙) — 버튼 클릭 시에만 호출되도록 UI 레이어에서 게이팅한다.
+    유빈님 요청(감사 후속, 2026-08-15)."""
+    fallback = {"summary": _screen_fallback_summary(screen, congress),
+               "confidence": 0.3, "mode": "heuristic"}
+    has_data = any(screen.get(k) for k in ("new_buys", "increased", "decreased")) or \
+        any(congress.get(k) for k in ("bought", "sold"))
+    if not has_data:
+        return fallback
+
+    prompt = "\n".join([
+        "너는 기관투자자·정치인 매매 스크리닝 결과 해설자다.",
+        "아래 JSON(여러 13F 기관의 신규편입/비중증가/비중감소 종목, 하원의원 90일 매수·매도",
+        "상위 종목)만 보고, 왜 이런 흐름이 나타날 수 있는지 간결하게(2~4문장) 추정해라.",
+        "확정적으로 단언하지 말고 '~일 가능성' 식으로 표현해라. 데이터에 없는 사실은 지어내지 마라.",
+        "출력은 JSON object만 허용. 키는 summary(string), confidence(number 0.0~1.0).",
+        "",
+        json.dumps({"screen": screen, "congress": congress}, ensure_ascii=False, default=str),
+    ])
+    text = _try_llm_prompt_for_screen(prompt)
+    if not text:
+        return fallback
+    try:
+        parsed = json.loads(text)
+    except Exception:
+        match = re.search(r"\{.*\}", text, re.S)
+        parsed = json.loads(match.group(0)) if match else None
+    if not isinstance(parsed, dict) or not parsed.get("summary"):
+        return fallback
+    try:
+        confidence = min(max(float(parsed.get("confidence")), 0.0), 1.0)
+    except Exception:
+        confidence = 0.5
+    return {"summary": str(parsed["summary"]).strip(), "confidence": round(confidence, 2),
+           "mode": "llm"}
+
+
 def _normalize_13f_snapshot(meta: dict, raw: dict, *, prior: dict | None = None) -> dict:
     holdings = raw.get("holdings") or []
     concentration = None

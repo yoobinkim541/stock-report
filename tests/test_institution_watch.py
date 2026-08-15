@@ -253,6 +253,52 @@ def test_screen_position_changes_caps_each_bucket_at_ten(monkeypatch):
     assert len(out["new_buys"]) == 10
 
 
+def test_explain_screen_uses_llm_when_available(monkeypatch):
+    """감사 후속 — 스크리닝 결과를 LLM이 '왜 이럴 수 있는지' 해설(버튼 게이팅용)."""
+    from reports import institution_watch as iw
+
+    monkeypatch.setattr(iw, "_try_llm_prompt_for_screen",
+                        lambda prompt: '{"summary": "AI 랠리 지속 베팅", "confidence": 0.7}')
+
+    screen = {"new_buys": [{"ticker": "SMCI", "count": 3}], "increased": [], "decreased": []}
+    congress = {"bought": [{"ticker": "NVDA", "member_count": 5}], "sold": []}
+
+    out = iw.explain_screen(screen, congress)
+
+    assert out["mode"] == "llm"
+    assert out["summary"] == "AI 랠리 지속 베팅"
+    assert out["confidence"] == 0.7
+
+
+def test_explain_screen_falls_back_to_facts_when_llm_unavailable(monkeypatch):
+    from reports import institution_watch as iw
+
+    monkeypatch.setattr(iw, "_try_llm_prompt_for_screen", lambda prompt: None)
+
+    screen = {"new_buys": [{"ticker": "SMCI", "count": 3, "name": "Super Micro",
+                            "institutions": ["berkshire"]}],
+             "increased": [], "decreased": []}
+    congress = {"bought": [], "sold": []}
+
+    out = iw.explain_screen(screen, congress)
+
+    assert out["mode"] == "heuristic"
+    assert "SMCI" in out["summary"] or "Super Micro" in out["summary"]
+
+
+def test_explain_screen_empty_inputs_stay_heuristic(monkeypatch):
+    from reports import institution_watch as iw
+
+    def _boom(prompt):
+        raise AssertionError("빈 입력인데 LLM 호출됨")
+    monkeypatch.setattr(iw, "_try_llm_prompt_for_screen", _boom)
+
+    out = iw.explain_screen({"new_buys": [], "increased": [], "decreased": []},
+                            {"bought": [], "sold": []})
+
+    assert out["mode"] == "heuristic"
+
+
 def test_latest_snapshot_fetches_prior_quarter_for_return_proxy(monkeypatch):
     """latest_snapshot 이 13F 필러에 대해 직전 분기(skip=1)도 함께 가져와 return_proxy 계산."""
     from reports import institution_watch as iw
