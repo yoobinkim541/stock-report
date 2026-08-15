@@ -154,6 +154,105 @@ def test_normalize_13f_snapshot_return_proxy_none_without_prior():
     assert snap["availability_flags"]["return_proxy"] == "unavailable"
 
 
+def test_screen_position_changes_classifies_new_increased_decreased(monkeypatch):
+    """감사 후속 — 유빈님 요청: 여러 기관이 공통으로 신규편입/증가/감소한 종목 교차 스크리닝."""
+    from reports import institution_watch as iw
+
+    def fake_latest_holdings(key, skip=0):
+        data = {
+            "alpha": {
+                0: [{"cusip": "NVDA1", "ticker": "NVDA", "issuer": "NVIDIA",
+                     "value_usd": 150.0, "shares": 10.0, "weight_pct": 15.0},
+                    {"cusip": "AAPL1", "ticker": "AAPL", "issuer": "APPLE",
+                     "value_usd": 50.0, "shares": 5.0, "weight_pct": 5.0}],
+                1: [{"cusip": "NVDA1", "ticker": "NVDA", "issuer": "NVIDIA",
+                     "value_usd": 100.0, "shares": 10.0, "weight_pct": 10.0},
+                    {"cusip": "AAPL1", "ticker": "AAPL", "issuer": "APPLE",
+                     "value_usd": 100.0, "shares": 10.0, "weight_pct": 10.0}],
+            },
+            "beta": {
+                0: [{"cusip": "NVDA1", "ticker": "NVDA", "issuer": "NVIDIA",
+                     "value_usd": 200.0, "shares": 20.0, "weight_pct": 20.0},
+                    {"cusip": "TSLA1", "ticker": "TSLA", "issuer": "TESLA",
+                     "value_usd": 50.0, "shares": 5.0, "weight_pct": 5.0}],
+                1: [{"cusip": "NVDA1", "ticker": "NVDA", "issuer": "NVIDIA",
+                     "value_usd": 140.0, "shares": 20.0, "weight_pct": 14.0}],
+            },
+        }
+        return {"holdings": data[key][skip]}
+
+    monkeypatch.setattr(iw.thirteenf, "latest_holdings", fake_latest_holdings)
+
+    out = iw.screen_position_changes(["alpha", "beta"])
+
+    new_tickers = {r["ticker"] for r in out["new_buys"]}
+    inc_tickers = {r["ticker"] for r in out["increased"]}
+    dec_tickers = {r["ticker"] for r in out["decreased"]}
+    assert new_tickers == {"TSLA"}
+    assert inc_tickers == {"NVDA"}
+    assert dec_tickers == {"AAPL"}
+
+    nvda = next(r for r in out["increased"] if r["ticker"] == "NVDA")
+    assert nvda["count"] == 2
+    assert set(nvda["institutions"]) == {"alpha", "beta"}
+    assert nvda["avg_delta_pct"] > 0
+
+
+def test_screen_position_changes_ignores_small_moves_below_threshold(monkeypatch):
+    from reports import institution_watch as iw
+
+    def fake_latest_holdings(key, skip=0):
+        rows = {
+            0: [{"cusip": "X1", "ticker": "X", "issuer": "X CORP",
+                 "value_usd": 100.3, "shares": 10.0, "weight_pct": 10.03}],
+            1: [{"cusip": "X1", "ticker": "X", "issuer": "X CORP",
+                 "value_usd": 100.0, "shares": 10.0, "weight_pct": 10.0}],
+        }
+        return {"holdings": rows[skip]}
+
+    monkeypatch.setattr(iw.thirteenf, "latest_holdings", fake_latest_holdings)
+
+    out = iw.screen_position_changes(["alpha"])
+
+    assert out["increased"] == []
+    assert out["decreased"] == []
+    assert out["new_buys"] == []
+
+
+def test_screen_position_changes_skips_institution_with_no_data(monkeypatch):
+    from reports import institution_watch as iw
+
+    def fake_latest_holdings(key, skip=0):
+        if key == "broken":
+            return None
+        return {"holdings": [{"cusip": "A1", "ticker": "A", "issuer": "A CORP",
+                              "value_usd": 100.0, "shares": 10.0, "weight_pct": 100.0}]}
+
+    monkeypatch.setattr(iw.thirteenf, "latest_holdings", fake_latest_holdings)
+
+    out = iw.screen_position_changes(["broken", "alpha"])
+
+    assert out == {"new_buys": [], "increased": [], "decreased": []}
+
+
+def test_screen_position_changes_caps_each_bucket_at_ten(monkeypatch):
+    from reports import institution_watch as iw
+
+    def fake_latest_holdings(key, skip=0):
+        if skip == 1:
+            return {"holdings": []}
+        rows = [{"cusip": f"C{i}", "ticker": f"T{i}", "issuer": f"CO{i}",
+                 "value_usd": 100.0, "shares": 10.0, "weight_pct": 100.0 / 15}
+                for i in range(15)]
+        return {"holdings": rows}
+
+    monkeypatch.setattr(iw.thirteenf, "latest_holdings", fake_latest_holdings)
+
+    out = iw.screen_position_changes(["alpha"])
+
+    assert len(out["new_buys"]) == 10
+
+
 def test_latest_snapshot_fetches_prior_quarter_for_return_proxy(monkeypatch):
     """latest_snapshot 이 13F 필러에 대해 직전 분기(skip=1)도 함께 가져와 return_proxy 계산."""
     from reports import institution_watch as iw

@@ -234,6 +234,69 @@ def _compute_return_proxy(current: list[dict] | None, prior: list[dict] | None) 
     return round(weighted_sum / weight_total, 4)
 
 
+_SCREEN_DELTA_THRESHOLD = 0.005   # 0.5%p (분수 단위, weight_pct/100 스케일)
+
+
+def screen_position_changes(institution_keys: list[str]) -> dict:
+    """13F 기관들의 직전분기 대비 종목별 비중 변화를 교차 집계 — 신규편입/증가/감소.
+
+    각 기관 current/prior 보유를 CUSIP 매칭해 delta_pct(분수)를 구하고, 같은 티커를
+    여러 기관이 어떻게 움직였는지 모아 기관수 내림차순→|평균변화폭| 내림차순 정렬,
+    각 버킷 상위 10개. return_proxy 와 같은 raw value_usd/shares 기반(외부가격 불요).
+    유빈님 요청(감사 후속, 2026-08-15)."""
+    buckets: dict[str, dict[str, dict]] = {"new_buys": {}, "increased": {}, "decreased": {}}
+
+    for key in institution_keys:
+        try:
+            current = thirteenf.latest_holdings(key)
+            prior = thirteenf.latest_holdings(key, skip=1)
+        except Exception:
+            continue
+        if not current or not prior:
+            continue
+        cur_rows = current.get("holdings") or []
+        prior_by_cusip = {p["cusip"]: p for p in (prior.get("holdings") or []) if p.get("cusip")}
+
+        for row in cur_rows:
+            cusip = row.get("cusip")
+            if not cusip:
+                continue
+            ticker = row.get("ticker")
+            name = row.get("issuer") or ticker or cusip
+            now_w = float(row.get("weight_pct") or 0.0) / 100.0
+            prior_row = prior_by_cusip.get(cusip)
+            prior_w = float(prior_row.get("weight_pct") or 0.0) / 100.0 if prior_row else 0.0
+            delta = now_w - prior_w
+
+            if prior_row is None:
+                bucket_name = "new_buys"
+            elif delta >= _SCREEN_DELTA_THRESHOLD:
+                bucket_name = "increased"
+            elif delta <= -_SCREEN_DELTA_THRESHOLD:
+                bucket_name = "decreased"
+            else:
+                continue
+
+            entry = buckets[bucket_name].setdefault(
+                cusip, {"ticker": ticker, "name": name, "institutions": [], "deltas": []})
+            entry["institutions"].append(key)
+            entry["deltas"].append(delta)
+
+    out: dict = {}
+    for bucket_name, entries in buckets.items():
+        rows = []
+        for entry in entries.values():
+            deltas = entry.pop("deltas")
+            rows.append({
+                **entry,
+                "count": len(entry["institutions"]),
+                "avg_delta_pct": round(sum(deltas) / len(deltas), 4),
+            })
+        rows.sort(key=lambda r: (r["count"], abs(r["avg_delta_pct"])), reverse=True)
+        out[bucket_name] = rows[:10]
+    return out
+
+
 def _normalize_13f_snapshot(meta: dict, raw: dict, *, prior: dict | None = None) -> dict:
     holdings = raw.get("holdings") or []
     concentration = None
