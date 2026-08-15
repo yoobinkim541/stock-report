@@ -29,6 +29,17 @@ from dashboard import (
 _NOBAR = {"displayModeBar": False}
 
 
+def _star_button(ticker: str) -> None:
+    """⭐ 관심종목 토글 — 없으면 '미분류' 폴더로 추가, 있으면 제거(감사 후속)."""
+    starred = data.is_in_watchlist(ticker)
+    label = "⭐ 관심종목에서 제거" if starred else "☆ 관심종목 추가"
+    if st.button(label, key="_ticker_star_btn"):
+        name = ticker_names.display_name(ticker, allow_net=False)
+        now_starred = data.toggle_watchlist_star(ticker, name)
+        st.toast("⭐ 관심종목에 추가됨 (미분류)" if now_starred else "관심종목에서 제거됨")
+        st.rerun()
+
+
 def render():
     ticker = st.session_state.get("ticker", "MSFT")
     # 접미사 없는 6자리 KR 코드(예: "005930")는 yfinance 가 빈 데이터를 줘 차트·밸류가
@@ -36,6 +47,7 @@ def render():
     # 건드리지 않음(_tsel 리셋 함정 회피) — 로컬 정규화만.
     if ticker and ticker.isdigit() and len(ticker) == 6:
         ticker = ticker + ".KS"
+    _star_button(ticker)
     hist = cached.ohlc(ticker, period="max")
     yf_price = prev = None
     if hist is not None and not getattr(hist, "empty", True) and "Close" in getattr(hist, "columns", []):
