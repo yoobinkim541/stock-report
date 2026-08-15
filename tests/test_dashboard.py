@@ -512,6 +512,98 @@ def test_views_congress_trading_graceful_on_exception(monkeypatch):
     assert views.congress_trading("Pelosi") is None
 
 
+def test_views_institution_screener_delegates(monkeypatch):
+    from dashboard import views
+    from reports import institution_watch as iw
+
+    monkeypatch.setattr(iw, "screen_position_changes",
+                        lambda keys: {"new_buys": [{"ticker": "X"}], "increased": [], "decreased": []})
+
+    out = views.institution_screener(("berkshire",))
+
+    assert out["new_buys"][0]["ticker"] == "X"
+
+
+def test_views_institution_screener_graceful_on_exception(monkeypatch):
+    from dashboard import views
+    from reports import institution_watch as iw
+
+    def _boom(keys):
+        raise RuntimeError("boom")
+    monkeypatch.setattr(iw, "screen_position_changes", _boom)
+
+    assert views.institution_screener(("berkshire",)) == {"new_buys": [], "increased": [], "decreased": []}
+
+
+def test_views_congress_top_traded_delegates(monkeypatch):
+    from dashboard import views
+    from providers import congress_trading as ct
+
+    monkeypatch.setattr(ct, "top_traded", lambda days=90: {"bought": [{"ticker": "NVDA"}], "sold": []})
+
+    out = views.congress_top_traded(90)
+
+    assert out["bought"][0]["ticker"] == "NVDA"
+
+
+def test_views_congress_top_traded_graceful_on_exception(monkeypatch):
+    from dashboard import views
+    from providers import congress_trading as ct
+
+    def _boom(days=90):
+        raise RuntimeError("boom")
+    monkeypatch.setattr(ct, "top_traded", _boom)
+
+    assert views.congress_top_traded(90) == {"bought": [], "sold": []}
+
+
+def test_views_institution_screen_explain_delegates(monkeypatch):
+    from dashboard import views
+    from reports import institution_watch as iw
+
+    monkeypatch.setattr(iw, "explain_screen",
+                        lambda screen, congress: {"summary": "test", "confidence": 0.5, "mode": "llm"})
+
+    out = views.institution_screen_explain({}, {})
+
+    assert out["summary"] == "test"
+
+
+def test_views_institution_screen_explain_graceful_on_exception(monkeypatch):
+    from dashboard import views
+    from reports import institution_watch as iw
+
+    def _boom(screen, congress):
+        raise RuntimeError("boom")
+    monkeypatch.setattr(iw, "explain_screen", _boom)
+
+    out = views.institution_screen_explain({}, {})
+    assert out["mode"] == "heuristic"
+
+
+def test_institution_watch_summary_carries_total_value_usd(monkeypatch):
+    from dashboard import views
+    from reports import institution_watch as iw
+
+    monkeypatch.setattr(iw, "list_institutions",
+                        lambda: [{"key": "berkshire", "source_kind": "13f",
+                                  "category": "holding_company", "display_name": "버크셔"}])
+    monkeypatch.setattr(iw, "latest_snapshot",
+                        lambda key: {"institution_key": key, "display_name": "버크셔",
+                                     "source_kind": "13f", "freshness": "fresh",
+                                     "holdings_count": 1, "availability_flags": {},
+                                     "top_holdings": [{"ticker": "AAPL", "issuer": "APPLE",
+                                                       "value_usd": 100.0}],
+                                     "notes": [], "primary_sources": [], "metric_capabilities": [],
+                                     "refresh_policy": "quarterly", "confidence": 0.9,
+                                     "total_value_usd": 1000.0})
+    monkeypatch.setattr(iw, "compare_institutions", lambda keys, snapshots=None: {"rows": []})
+
+    out = views.institution_watch_summary()
+
+    assert out["institutions"][0]["total_value_usd"] == 1000.0
+
+
 def test_institution_watch_summary_skips_llm_by_default(monkeypatch):
     """감사 후속 — 관심종목 페이지 초기 렌더가 LLM(최대 20초) 대기로 막히던 문제.
 

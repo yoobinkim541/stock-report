@@ -1357,6 +1357,33 @@ def congress_trading(name: str) -> list[dict] | None:
         return None
 
 
+def institution_screener(keys) -> dict:
+    """13F 교차기관 종목 스크리닝 위임. graceful 빈 버킷."""
+    try:
+        from reports import institution_watch as iw
+        return iw.screen_position_changes(list(keys))
+    except Exception:
+        return {"new_buys": [], "increased": [], "decreased": []}
+
+
+def congress_top_traded(days: int = 90) -> dict:
+    """하원의원 매수·매도 상위 위임. graceful 빈 버킷."""
+    try:
+        from providers import congress_trading as ct
+        return ct.top_traded(days=days)
+    except Exception:
+        return {"bought": [], "sold": []}
+
+
+def institution_screen_explain(screen: dict, congress: dict) -> dict:
+    """스크리닝 결과 LLM 해설 위임. graceful heuristic 형태."""
+    try:
+        from reports import institution_watch as iw
+        return iw.explain_screen(screen, congress)
+    except Exception:
+        return {"summary": "", "confidence": 0.0, "mode": "heuristic"}
+
+
 def institution_watch_summary(keys=None, *, with_llm_summary: bool = False) -> dict:
     """기관투자자 허브용 비교 스냅샷 (watchlist UI 전용).
 
@@ -1386,6 +1413,7 @@ def institution_watch_summary(keys=None, *, with_llm_summary: bool = False) -> d
                 "holdings_count": snapshot.get("holdings_count", 0),
                 "availability_flags": dict(snapshot.get("availability_flags") or {}),
                 "top_holdings": list(snapshot.get("top_holdings") or []),
+                "total_value_usd": snapshot.get("total_value_usd"),
                 "notes": list(snapshot.get("notes") or []),
                 "primary_sources": list(snapshot.get("primary_sources") or []),
                 "metric_capabilities": list(snapshot.get("metric_capabilities") or []),

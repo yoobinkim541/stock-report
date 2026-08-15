@@ -75,6 +75,21 @@ def congress_trading(name):
     return views.congress_trading(name)
 
 
+@st.cache_data(ttl=3600, show_spinner=False)
+def institution_screener(keys):
+    return views.institution_screener(keys)
+
+
+@st.cache_data(ttl=3600, show_spinner=False)
+def congress_top_traded(days=90):
+    return views.congress_top_traded(days)
+
+
+@st.cache_data(ttl=3600, show_spinner=False)
+def institution_screen_explain(screen, congress):
+    return views.institution_screen_explain(screen, congress)
+
+
 @st.cache_data(ttl=900, show_spinner=False)
 def world_timeline(t):
     return views.world_timeline(t)
