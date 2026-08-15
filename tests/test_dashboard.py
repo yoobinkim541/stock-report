@@ -402,6 +402,69 @@ def test_views_institutional_routes_us_to_13f(monkeypatch):
     assert "kr_flow" not in out
 
 
+def test_views_institutional_adds_kis_fundamentals_for_kr(monkeypatch):
+    """감사 후속 — KR 종목은 증권사별 투자의견·신용잔고·공매도도 KIS 실계좌 API 로 채운다."""
+    from dashboard import views
+    from providers import kis_fundamentals, naver_kr
+    from reports import institutional_flow
+
+    monkeypatch.setattr(naver_kr, "investor_flow_features", lambda code: {"n": 20})
+    monkeypatch.setattr(institutional_flow, "rank_accumulation", lambda tickers, enrich_top=1: [])
+    monkeypatch.setattr(kis_fundamentals, "broker_opinions",
+                        lambda code, **kw: [{"broker": "키움", "opinion": "BUY"}])
+    monkeypatch.setattr(kis_fundamentals, "credit_balance_trend",
+                        lambda code, **kw: [{"date": "20260815", "loan_balance_rate_pct": 0.39}])
+    monkeypatch.setattr(kis_fundamentals, "short_sale_trend",
+                        lambda code, **kw: [{"date": "20260815", "short_ratio_pct": 5.88}])
+
+    out = views.institutional("005930.KS")
+
+    assert out["broker_opinions"] == [{"broker": "키움", "opinion": "BUY"}]
+    assert out["credit_balance"][0]["loan_balance_rate_pct"] == 0.39
+    assert out["short_sale"][0]["short_ratio_pct"] == 5.88
+
+
+def test_views_institutional_skips_kis_fundamentals_for_us(monkeypatch):
+    from dashboard import views
+    from providers import kis_fundamentals
+    from reports import institutional_flow
+
+    monkeypatch.setattr(institutional_flow, "fetch_13f", lambda t: {"n_holders": 3})
+    monkeypatch.setattr(institutional_flow, "rank_accumulation", lambda tickers, enrich_top=1: [])
+    monkeypatch.setattr(kis_fundamentals, "broker_opinions",
+                        lambda code, **kw: (_ for _ in ()).throw(AssertionError("US 티커엔 호출되면 안 됨")))
+
+    out = views.institutional("MSFT")
+
+    assert "broker_opinions" not in out
+
+
+def test_views_financials_adds_kis_ratios_for_kr(monkeypatch):
+    """감사 후속 — KR 재무제표 탭에 KIS 재무비율(성장성/ROE/유보율 등) 추가."""
+    from dashboard import views
+    from providers import kis_fundamentals, kr_fundamentals
+
+    monkeypatch.setattr(kr_fundamentals, "financial_trends", lambda t: {"rows": []})
+    monkeypatch.setattr(kis_fundamentals, "financial_ratios",
+                        lambda code: [{"period": "202603", "roe_pct": 19.16}])
+
+    out = views.financials("005930.KS")
+
+    assert out["kis_ratios"] == [{"period": "202603", "roe_pct": 19.16}]
+    assert out["rows"] == []
+
+
+def test_views_financials_skips_kis_ratios_for_us(monkeypatch):
+    from dashboard import views
+    from providers import edgar
+
+    monkeypatch.setattr(edgar, "fundamental_trends", lambda t: [])
+
+    out = views.financials("MSFT")
+
+    assert "kis_ratios" not in out
+
+
 def test_views_risk_no_weights():
     from dashboard import views
     assert "보유 데이터 없음" in views.risk_report_text({})

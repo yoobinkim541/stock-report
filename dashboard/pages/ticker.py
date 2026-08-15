@@ -2110,6 +2110,21 @@ def _financials(ticker):
                 "부채": _f_krw_large(r.get("liabilities")),
             } for r in reversed(rows[-4:])]
             st.dataframe(pd.DataFrame(table), hide_index=True, width="stretch")
+        kis_ratios = f.get("kis_ratios") or []
+        if is_kr and kis_ratios:
+            st.markdown("##### 📐 재무비율 세분화 (KIS)")
+            ratio_table = [{
+                "결산연월": r.get("period"),
+                "매출증가율": f"{r['revenue_growth_pct']:+.1f}%" if r.get("revenue_growth_pct") is not None else "—",
+                "영업이익증가율": f"{r['op_income_growth_pct']:+.1f}%" if r.get("op_income_growth_pct") is not None else "—",
+                "ROE": f"{r['roe_pct']:.1f}%" if r.get("roe_pct") is not None else "—",
+                "EPS": f"{r['eps']:,.0f}" if r.get("eps") is not None else "—",
+                "BPS": f"{r['bps']:,.0f}" if r.get("bps") is not None else "—",
+                "유보율": f"{r['reserve_ratio_pct']:,.0f}%" if r.get("reserve_ratio_pct") is not None else "—",
+                "부채비율": f"{r['debt_ratio_pct']:.1f}%" if r.get("debt_ratio_pct") is not None else "—",
+            } for r in kis_ratios[:4]]
+            st.dataframe(pd.DataFrame(ratio_table), hide_index=True, width="stretch")
+            st.caption("출처: KIS 재무비율 — DART 와 별개 소스(교차검증용)")
         if is_kr:
             bits = ["출처: DART 단일회사 주요계정"]
             if f.get("fiscal_year"):
@@ -2146,6 +2161,40 @@ def _kr_flow_section(flow: dict) -> None:
     st.caption("정보·표시용 — 수급은 후행지표, 단독 매매 신호로 쓰지 않음")
 
 
+def _kr_broker_opinions_section(rows: list[dict] | None) -> None:
+    """국내 증권사별 투자의견·목표주가 (KIS 실계좌 API, 감사 후속). 최근 10건."""
+    if not rows:
+        return
+    st.markdown("##### 🏦 증권사별 투자의견 (KIS)")
+    table = [{
+        "일자": r.get("date"), "증권사": r.get("broker"), "의견": r.get("opinion"),
+        "목표주가": f"{r['target_price']:,.0f}" if r.get("target_price") else "—",
+        "제시 당시가": f"{r['price_at_opinion']:,.0f}" if r.get("price_at_opinion") else "—",
+        "현재가 대비 괴리": f"{r['deviation_pct']:+.1f}%" if r.get("deviation_pct") is not None else "—",
+    } for r in rows[:10]]
+    st.dataframe(pd.DataFrame(table), hide_index=True, width="stretch")
+    st.caption("괴리율 = (목표주가 제시 당시가 대비 현재가) — 목표주가 자체의 정확도가 아님. 정보·표시용")
+
+
+def _kr_credit_short_section(credit: list[dict] | None, short: list[dict] | None) -> None:
+    """국내 신용잔고·공매도 추이 (KIS 실계좌 API, 감사 후속) — YF 엔 없는 KR 전용 지표."""
+    if not credit and not short:
+        return
+    st.markdown("##### 📉 신용잔고·공매도")
+    g = st.columns(2)
+    if credit:
+        latest = credit[0]
+        g[0].metric("신용잔고 비율", f"{latest['loan_balance_rate_pct']:.2f}%"
+                    if latest.get("loan_balance_rate_pct") is not None else "—",
+                    help=f"{latest.get('date', '')} 기준 — 상장주식 대비 신용융자 잔고 비율")
+    if short:
+        latest = short[0]
+        g[1].metric("공매도 비중(당일)", f"{latest['short_ratio_pct']:.2f}%"
+                    if latest.get("short_ratio_pct") is not None else "—",
+                    help=f"{latest.get('date', '')} 기준 — 거래량 대비 당일 공매도 비중")
+    st.caption("정보·표시용 — 단독 매매 신호로 쓰지 않음")
+
+
 def _institutional(ticker):
     i = cached.institutional(ticker)
     is_kr = i.get("is_kr", False)
@@ -2169,6 +2218,8 @@ def _institutional(ticker):
 
     if is_kr:
         _kr_flow_section(i.get("kr_flow"))
+        _kr_credit_short_section(i.get("credit_balance"), i.get("short_sale"))
+        _kr_broker_opinions_section(i.get("broker_opinions"))
         return   # 13F·SEC Form4 는 미국 종목 전용 — 국내는 여기서 끝
 
     ins = cached.insider(ticker)

@@ -59,11 +59,19 @@ def valuation(ticker: str) -> dict:
 
 
 def financials(ticker: str) -> dict:
-    """펀더멘털 추세 (美 SEC EDGAR / 韓 DART)."""
+    """펀더멘털 추세 (美 SEC EDGAR / 韓 DART) + 韓 KIS 재무비율(성장성/ROE/유보율 등, 감사 후속)."""
     try:
         if str(ticker or "").upper().endswith((".KS", ".KQ")):
-            from providers import kr_fundamentals
-            return kr_fundamentals.financial_trends(ticker)
+            from providers import kr_fundamentals, kr_market_data
+            out = kr_fundamentals.financial_trends(ticker)
+            try:
+                from providers import kis_fundamentals
+                code = kr_market_data.norm_code(ticker)
+                if code:
+                    out["kis_ratios"] = kis_fundamentals.financial_ratios(code)
+            except Exception as e:
+                out["error_kis_ratios"] = str(e)
+            return out
         from providers import edgar
         return {"trends": edgar.fundamental_trends(ticker)}
     except Exception as e:
@@ -142,9 +150,29 @@ def institutional(ticker: str) -> dict:
     if is_kr:
         try:
             from providers import kr_market_data, naver_kr
-            out["kr_flow"] = naver_kr.investor_flow_features(kr_market_data.norm_code(ticker))
+            code = kr_market_data.norm_code(ticker)
+            out["kr_flow"] = naver_kr.investor_flow_features(code)
         except Exception as e:
             out["error_kr_flow"] = str(e)
+            code = None
+        # KIS 실계좌 종목정보 — 증권사별 투자의견·신용잔고·공매도 (yfinance 엔 없는
+        # KR 전용 데이터, 감사 후속). REALTIME_ENABLED 아니면 조용히 빈 결과.
+        if code:
+            from datetime import datetime, timedelta, timezone
+            kst = timezone(timedelta(hours=9))
+            today = datetime.now(kst)
+            try:
+                from providers import kis_fundamentals
+                out["broker_opinions"] = kis_fundamentals.broker_opinions(
+                    code, date_from=(today - timedelta(days=90)).strftime("%Y%m%d"),
+                    date_to=today.strftime("%Y%m%d"))
+                out["credit_balance"] = kis_fundamentals.credit_balance_trend(
+                    code, date=today.strftime("%Y%m%d"))
+                out["short_sale"] = kis_fundamentals.short_sale_trend(
+                    code, date_from=(today - timedelta(days=30)).strftime("%Y%m%d"),
+                    date_to=today.strftime("%Y%m%d"))
+            except Exception as e:
+                out["error_kis_fundamentals"] = str(e)
     else:
         try:
             out["inst13f"] = institutional_flow.fetch_13f(ticker)
