@@ -999,8 +999,55 @@ def load_watchlist() -> list[dict]:
             "ticker": tk, "name": nm or tk,
             "reason": e.get("reason", ""), "source": e.get("source", ""),
             "note": e.get("note"), "added_at": e.get("added_at", ""),
+            "folder": e.get("folder") or "미분류",
         })
     return rows
+
+
+def is_in_watchlist(ticker: str) -> bool:
+    """관심종목 등록 여부(종목 분석페이지 ⭐ 상태 표시용). graceful False."""
+    try:
+        from lib import watchlist as _wl
+        tk = (ticker or "").strip().upper()
+        return any(e.get("ticker") == tk for e in _wl.list_watchlist())
+    except Exception:
+        return False
+
+
+def toggle_watchlist_star(ticker: str, name: str | None = None) -> bool:
+    """종목 분석페이지 ⭐ — 없으면 추가(미분류 폴더)·있으면 제거. 반환값 = 토글 후 등록 상태.
+
+    graceful: 실패해도 예외 전파 안 함(현재 등록 상태 재확인해서 반환)."""
+    try:
+        from lib import watchlist as _wl
+        tk = (ticker or "").strip().upper()
+        if not tk:
+            return False
+        if is_in_watchlist(tk):
+            _wl.remove_ticker(tk)
+            return False
+        _wl.add_ticker(tk, reason="종목 분석페이지에서 추가", source="dashboard_star", note=name)
+        return True
+    except Exception:
+        return is_in_watchlist(ticker)
+
+
+def watchlist_folders() -> list[str]:
+    """존재하는 관심종목 폴더 목록. graceful ['미분류']."""
+    try:
+        from lib import watchlist as _wl
+        return _wl.list_folders()
+    except Exception:
+        return ["미분류"]
+
+
+def move_watchlist_folder(ticker: str, folder: str) -> bool:
+    """관심종목을 다른 폴더로 이동. graceful False."""
+    try:
+        from lib import watchlist as _wl
+        return _wl.set_folder(ticker, folder)
+    except Exception:
+        return False
 
 
 # ── 가격 알림 (bot/price_alerts store 재사용 — 차트→알림 연동) ─────────────────

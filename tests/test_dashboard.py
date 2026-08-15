@@ -2136,6 +2136,88 @@ def test_load_watchlist_empty_returns_empty_list(monkeypatch):
     assert data.load_watchlist() == []
 
 
+def test_load_watchlist_includes_folder_defaulting_to_unsorted(monkeypatch):
+    """감사 후속 — 관심종목 폴더 분류. 필드 없는 옛 항목도 '미분류'로 정직 표시."""
+    from lib import watchlist as _wl
+
+    monkeypatch.setattr(_wl, "list_watchlist", lambda: [
+        {"ticker": "AAPL", "reason": "사유", "source": "manual", "note": None,
+         "added_at": "2026-05-16T00:00:00+00:00", "folder": "반도체"},
+        {"ticker": "KO", "reason": "사유", "source": "manual", "note": None,
+         "added_at": "2026-05-16T00:00:00+00:00"},   # 폴더 필드 없는 옛 항목
+    ])
+    import ticker_names
+    monkeypatch.setattr(ticker_names, "display_name", lambda t, allow_net=False: t)
+
+    rows = data.load_watchlist()
+
+    by_ticker = {r["ticker"]: r for r in rows}
+    assert by_ticker["AAPL"]["folder"] == "반도체"
+    assert by_ticker["KO"]["folder"] == "미분류"
+
+
+def test_is_in_watchlist_true_when_present(monkeypatch):
+    from lib import watchlist as _wl
+    monkeypatch.setattr(_wl, "list_watchlist", lambda: [
+        {"ticker": "AAPL", "reason": "", "source": "manual", "note": None, "added_at": "", "folder": "미분류"}])
+
+    assert data.is_in_watchlist("aapl") is True
+    assert data.is_in_watchlist("NVDA") is False
+
+
+def test_toggle_watchlist_star_adds_when_absent(monkeypatch):
+    from lib import watchlist as _wl
+
+    calls = []
+    monkeypatch.setattr(_wl, "list_watchlist", lambda: [])
+    monkeypatch.setattr(_wl, "add_ticker", lambda ticker, reason, source, note=None, folder=None:
+                        calls.append((ticker, source, folder)) or {"ticker": ticker})
+
+    out = data.toggle_watchlist_star("aapl", "Apple Inc")
+
+    assert out is True
+    assert calls == [("AAPL", "dashboard_star", None)]
+
+
+def test_toggle_watchlist_star_removes_when_present(monkeypatch):
+    from lib import watchlist as _wl
+
+    monkeypatch.setattr(_wl, "list_watchlist", lambda: [
+        {"ticker": "AAPL", "reason": "", "source": "manual", "note": None, "added_at": "", "folder": "미분류"}])
+    calls = []
+    monkeypatch.setattr(_wl, "remove_ticker", lambda ticker: calls.append(ticker) or True)
+
+    out = data.toggle_watchlist_star("aapl")
+
+    assert out is False
+    assert calls == ["AAPL"]
+
+
+def test_watchlist_folders_delegates(monkeypatch):
+    from lib import watchlist as _wl
+    monkeypatch.setattr(_wl, "list_folders", lambda: ["미분류", "반도체"])
+
+    assert data.watchlist_folders() == ["미분류", "반도체"]
+
+
+def test_watchlist_folders_graceful_on_exception(monkeypatch):
+    from lib import watchlist as _wl
+
+    def _boom():
+        raise RuntimeError("boom")
+    monkeypatch.setattr(_wl, "list_folders", _boom)
+
+    assert data.watchlist_folders() == ["미분류"]
+
+
+def test_move_watchlist_folder_delegates(monkeypatch):
+    from lib import watchlist as _wl
+    monkeypatch.setattr(_wl, "set_folder", lambda ticker, folder: (ticker, folder) == ("AAPL", "성장주"))
+
+    assert data.move_watchlist_folder("AAPL", "성장주") is True
+    assert data.move_watchlist_folder("AAPL", "다른폴더") is False
+
+
 def test_backtest_persist_roundtrip(tmp_path, monkeypatch):
     """백테스트 결과 디스크 영속 — equity DataFrame 직렬화 왕복."""
     import pandas as pd
