@@ -780,8 +780,8 @@ def _price_chart(ticker, hist, avg_cost, trades, fullscreen: bool = False,
     패치 (html 바이트 안정 = 8초 재실행이 iframe 을 재마운트하지 않음).
     """
     # 컨트롤 한 줄 — 봉 | 라인/캔들 | 지표 | 비교 | 기간 | ⛶ (좁은 화면은 자동 줄바꿈)
-    ctf, ckind, crender, c3, c4, cper, cfull = st.columns(
-        [1.45, 0.78, 1.16, 0.34, 0.64, 1.25, 0.35], vertical_alignment="center",
+    ctf, ckind, c3, c4, cper, cfull = st.columns(
+        [1.45, 0.78, 0.34, 0.64, 1.25, 0.35], vertical_alignment="center",
     )
     if fullscreen:
         if cfull.button("↙", key="_chart_back", help="종목 분석으로 복귀"):
@@ -807,15 +807,9 @@ def _price_chart(ticker, hist, avg_cost, trades, fullscreen: bool = False,
         key="_chart_kind_value",
         help="가격 기반 변환 차트는 OHLCV 봉으로 재구성된 표시값이며 실체결 틱이 아닙니다.",
     )
-    renderer_preference = crender.segmented_control(
-        "렌더러",
-        ["auto", "canvas", "plotly"],
-        default=st.session_state.get("_chart_renderer_value", "auto"),
-        format_func={"auto": "자동", "canvas": "고성능", "plotly": "분석"}.get,
-        label_visibility="collapsed",
-        key="_chart_renderer_value",
-        help="자동은 고밀도 호환 차트에 Canvas를 사용합니다. 분석은 드로잉·고급 지표를 모두 유지합니다.",
-    ) or "auto"
+    # 렌더러 수동 선택 UI 제거(감사 후속) — auto 가 항상 "고밀도+고급기능 미사용" 조건에서만
+    # Canvas 를 골라 어차피 최선의 선택을 자동으로 하고 있어 수동 오버라이드가 불필요했다.
+    renderer_preference = "auto"
     # 기간 = 초기 표시 창 — 데이터는 뷰의 5배 팬버퍼로 윈도잉(charts.view_window·"전체"=전량)
     tf = _TF[tf_label]
     render_tf = tf

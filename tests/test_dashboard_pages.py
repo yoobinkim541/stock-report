@@ -832,6 +832,42 @@ def test_ticker_page_kr_bare_code_shows_company_name():
     assert "삼성전자" in body
 
 
+def test_ticker_page_first_load_defaults_to_candle_and_1y():
+    """감사 후속 — 새 세션(위젯 session_state 없음) 첫 렌더에서 실제로 캔들·1년이
+    기본값으로 잡히는지 검증(유빈님이 프로덕션에서 안 먹는 것 같다고 확인 요청)."""
+    script = _STUBS + (
+        'st.session_state["ticker"] = "MSFT"\n'
+        'cached.ohlc = lambda t, period="1y": pd.DataFrame(\n'
+        '    {"Open": [50.0, 55.0, 60.0, 64.0], "High": [51.0, 56.0, 61.0, 65.0],\n'
+        '     "Low": [49.0, 54.0, 59.0, 63.0], "Close": [50.5, 55.5, 60.5, 64.5]},\n'
+        '    index=pd.DatetimeIndex(["2025-07-01", "2025-10-01", "2026-01-01", "2026-04-01"]))\n'
+        'from dashboard.pages import ticker\nticker.render()\n')
+    at = AppTest.from_string(script, default_timeout=30)
+    at.run()
+    assert not at.exception, str(at.exception)
+    assert at.selectbox(key="_chart_kind_value").value == "candlestick"
+    assert at.radio(key="_chart_period_1d").value == "1y"
+
+
+def test_ticker_page_renderer_selector_hidden_and_stays_auto():
+    """감사 후속 — 자동/고성능/분석 3버튼 수동 선택기는 UI 에서 제거하고, 항상 auto 로
+    적응형 선택(select_renderer)이 계속 동작하게 한다(기능·성능 손실 없이 화면만 단순화).
+    """
+    script = _STUBS + (
+        'st.session_state["ticker"] = "MSFT"\n'
+        'st.session_state["_chart_renderer_value"] = "canvas"\n'   # 남아있던 옛 선택도 무시돼야 함
+        'cached.ohlc = lambda t, period="1y": pd.DataFrame(\n'
+        '    {"Open": [50.0, 55.0, 60.0, 64.0], "High": [51.0, 56.0, 61.0, 65.0],\n'
+        '     "Low": [49.0, 54.0, 59.0, 63.0], "Close": [50.5, 55.5, 60.5, 64.5]},\n'
+        '    index=pd.DatetimeIndex(["2025-07-01", "2025-10-01", "2026-01-01", "2026-04-01"]))\n'
+        'from dashboard.pages import ticker\nticker.render()\n')
+    at = AppTest.from_string(script, default_timeout=30)
+    at.run()
+    assert not at.exception, str(at.exception)
+    with pytest.raises(KeyError):
+        at.segmented_control(key="_chart_renderer_value")
+
+
 def test_ticker_page_per_self_band_renders_on_valuation_tab():
     """가치평가 탭 — 자체 역사 PER 밴드가 접힘 없이 본문에 바로 보인다."""
     script = _STUBS + (
