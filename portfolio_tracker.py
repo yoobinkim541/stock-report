@@ -60,6 +60,20 @@ def save_history(records: list):
     store.replace_all(_HISTORY_COLLECTION, records)
 
 
+def _suspicious_jump_pct(prev_usd: float | None, new_usd: float | None,
+                          threshold: float = 0.25) -> float | None:
+    """전일 대비 총액 급변 감지 — |변화율| > threshold(기본 25%) 면 %(부호 포함) 반환.
+
+    2026-06-03~05 사이 미기록 현금 입출금(브로커 동기화 오류로 추정)이 TWR 그래프를
+    영구 왜곡시킨 사고 재발 방지용 — portfolio_flows() 는 주식 매수/매도만 추적해
+    이런 급변을 못 잡는다. 정상적인 일일 변동은 이 데이터셋 기준 10% 를 넘지 않았다.
+    """
+    if not prev_usd or prev_usd <= 0 or new_usd is None:
+        return None
+    pct = (new_usd / prev_usd - 1) * 100
+    return pct if abs(pct) > threshold * 100 else None
+
+
 def record_daily(dry_run: bool = False) -> dict:
     """오늘 포트폴리오 가치를 히스토리에 기록. dry_run=True면 저장 생략."""
     today = datetime.now().strftime("%Y-%m-%d")
@@ -67,6 +81,7 @@ def record_daily(dry_run: bool = False) -> dict:
 
     # 오늘 이미 기록됐으면 덮어쓰기 (하루 1회만 유효)
     records = [r for r in records if r.get("date") != today]
+    prior = records[-1] if records else None
 
     port = fetch_portfolio_value()
     fx   = fetch_exchange_rate()
@@ -89,6 +104,16 @@ def record_daily(dry_run: bool = False) -> dict:
         "phase":          str(pk),
         "market_type":    mt,
     }
+
+    jump = _suspicious_jump_pct((prior or {}).get("total_usd"), entry["total_usd"])
+    if jump is not None:
+        logger.warning(f"포트폴리오 총액 급변 감지: {jump:+.1f}% (전일 대비) — 데이터 오류 가능성")
+        try:
+            send_telegram(
+                f"⚠️ 포트폴리오 총액이 전일 대비 {jump:+.1f}% 급변했습니다.\n"
+                f"기록된 매수/매도로 설명 안 되면 브로커 동기화 오류일 수 있으니 확인해주세요.")
+        except Exception:
+            logger.warning("급변 알림 텔레그램 발송 실패 (기록은 계속 진행)")
 
     if not dry_run:
         records.append(entry)
