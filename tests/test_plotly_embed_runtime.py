@@ -984,3 +984,69 @@ def test_pinch_zoom_runtime(tmp_path):
     r = subprocess.run([_NODE, str(runner)], capture_output=True, text=True, timeout=30)
     assert r.returncode == 0, f"pinch fail: {r.stdout}\n{r.stderr}"
     assert "OK pinch" in r.stdout
+
+
+# ── 초기 로드 y축 맞춤 — 뷰 구간이 보유 데이터 전체를 덮는 경우(감사 후속) ────────
+# 유빈님이 프로덕션에서 "고가/저가가 캔들과 안 맞는다"→"차트가 아예 비어 보인다"로
+# 재보고. 조사 결과 기간(뷰) 구간이 보유(팬버퍼) 데이터 전체를 덮으면(x0<=first)
+# xaxis.range 를 안 건드려 relayout 이벤트가 안 뜨고, 그래서 y축 맞춤(setTarget→yFit)이
+# 페이지 로드시 단 한 번도 안 불리던 코드 경로. fixedrange:true 인 y축이 네이티브
+# autorange 에만 의존하면 category 축 조합에서 빈 화면으로 남을 수 있어 명시적으로 고정.
+_INIT_YFIT_HARNESS = r"""
+const relayoutCalls = [];
+let rafCalls = 0;
+let gd = null;
+const els = {};
+function el(id) {
+  if (!els[id]) els[id] = { id, style: {}, innerHTML: "", textContent: "", _h: {},
+    _s: new Set(id === "bt-mag" ? ["on"] : []),
+    classList: { toggle(c, on) { on ? this._s.add(c) : this._s.delete(c); } },
+    on(e, f) { this._h[e] = f; }, emit(e, p) { if (this._h[e]) this._h[e](p); },
+    appendChild() {}, addEventListener() {}, querySelector() { return null; },
+    getBoundingClientRect() { return { top: 0 }; } };
+  els[id].classList._s = els[id]._s;
+  if (id === "chart") gd = els[id];
+  return els[id];
+}
+global.document = { getElementById: el,
+                    createElement: () => ({ style: {}, textContent: "" }) };
+global.window = { frameElement: null, parent: { innerHeight: 900, addEventListener() {} } };
+global.performance = { now: () => 1 };
+global.requestAnimationFrame = () => { rafCalls++; return null; };   // 스케줄만 카운트(애니메이션 진행 X)
+global.Plotly = {
+  newPlot(g, d, l, c) { g.data = d; g.layout = l; return { then(cb) { cb(); return this; } }; },
+  relayout(g, u) { relayoutCalls.push(u);
+    for (const k of Object.keys(u)) if (!k.includes(".") && !k.includes("[")) g.layout[k] = u[k];
+    return { then(cb) { cb(); return this; } }; },
+};
+const _ls = {};
+global.localStorage = { getItem: (k) => (k in _ls ? _ls[k] : null),
+                        setItem: (k, v) => { _ls[k] = String(v); },
+                        removeItem: (k) => { delete _ls[k]; } };
+global.setTimeout = (fn) => { fn(); return 0; };
+global.clearTimeout = () => {};
+__SCRIPT__
+function fail(m) { console.error("FAIL " + m); process.exit(1); }
+// 페이지 로드만으로(사용자 상호작용 전) y축 맞춤이 스케줄돼야 한다.
+if (rafCalls < 1) fail("no_initial_yfit_on_load_rafCalls=" + rafCalls);
+console.log("OK init-yfit");
+"""
+
+
+@pytest.mark.skipif(_NODE is None, reason="node 미설치 — 런타임 JS 검증 스킵")
+def test_initial_view_fits_y_axis_when_view_spans_all_available_data(tmp_path):
+    """뷰 구간(기간 라디오)이 보유 데이터 전체를 덮을 때도(x0<=first) 페이지 로드 시
+    y축 맞춤이 최소 한 번은 스케줄돼야 한다 — 감사 후속(캔들 빈 화면 재보고)."""
+    idx = pd.date_range("2025-01-01", periods=70, freq="D")   # 70일 데이터
+    df = pd.DataFrame({"Open": range(100, 170), "High": range(101, 171),
+                       "Low": range(99, 169), "Close": range(100, 170),
+                       "Volume": [1e6] * 70}, index=idx)
+    fig = charts.price_chart(df, "TEST", kind="candle", show_volume=True, view_days=365)
+    html = plotly_embed.pannable_chart_html(fig, df, height=460, view_days=365,   # 뷰(1y) > 보유(70일)
+                                            vol_axis="yaxis2", store_key="TEST:1d:lin")
+    js = re.findall(r"<script>(.*?)</script>", html, re.S)[-1]
+    runner = tmp_path / "init_yfit.js"
+    runner.write_text(_INIT_YFIT_HARNESS.replace("__SCRIPT__", js), encoding="utf-8")
+    r = subprocess.run([_NODE, str(runner)], capture_output=True, text=True, timeout=30)
+    assert r.returncode == 0, f"init yfit fail: {r.stdout}\n{r.stderr}"
+    assert "OK init-yfit" in r.stdout

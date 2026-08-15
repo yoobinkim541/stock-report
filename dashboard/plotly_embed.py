@@ -1797,7 +1797,15 @@ _TEMPLATE = r"""
         Plotly.relayout(gd, {"xaxis.range": [new Date(x0).toISOString(),
                                              new Date(last + @@VIEW_MS@@ * 0.02).toISOString()]})
           .then(() => { unguard(); rescale(); });
+      } else {
+        // 뷰 구간(기간 라디오)이 보유 데이터 전체를 덮으면(x0<=first) xaxis.range 를
+        // 안 건드리므로 relayout 이벤트가 안 떠 y축 맞춤(setTarget)이 한 번도 안 불림 —
+        // fixedrange:true 인 y축이 Plotly 네이티브 autorange 에만 기대면 카테고리축
+        // 조합에서 가끔 빈 화면으로 남는 사례가 있어 명시적으로 한 번 맞춰준다.
+        setTarget(first, last);
       }
+    } else if (last) {
+      setTarget(bounds[0][0], last);   // 기간 정보 없음("전체") — 보유 구간 전체로 y 맞춤
     }
     let gestureTimer = null;
     gd.on("plotly_relayouting", (e) => {         // 드래그 **중** — y 가 실시간 따라옴 (스냅 제거)
