@@ -11,6 +11,8 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspa
 
 from dashboard import cached, data
 
+_SCREEN_13F_KEYS = ("berkshire", "bridgewater", "scion", "citadel", "duquesne",
+                    "pershing_square", "point72", "third_point", "tudor", "nps")
 
 _FRESHNESS_LABELS = {
     "fresh": "최신",
@@ -81,6 +83,20 @@ def _render_institution_cards(rows: list[dict]):
                     f"- 주요 출처: {_fmt_sources(row.get('primary_sources'))}",
                 ])
             )
+            top = list(row.get("top_holdings") or [])
+            total = row.get("total_value_usd")
+            if top:
+                donut_rows = [{"ticker": h.get("ticker") or h.get("issuer") or "?",
+                              "value": h.get("value_usd") or 0,
+                              "name": h.get("issuer") or h.get("ticker")} for h in top]
+                if total:
+                    top_sum = sum(d["value"] for d in donut_rows)
+                    other = total - top_sum
+                    if other > 0:
+                        donut_rows.append({"ticker": "기타", "value": other, "name": "기타(상위10 외)"})
+                from dashboard import charts
+                st.plotly_chart(charts.allocation_donut(donut_rows), width="stretch",
+                                config={"displayModeBar": False})
 
 
 def _render_comparison_table(comparison: dict):
@@ -206,6 +222,65 @@ def _congress_trading_section() -> None:
               "· 정보·표시용 — 매매 신호 아님")
 
 
+def _bucket_table(col, title: str, rows: list[dict]) -> None:
+    with col:
+        st.caption(title)
+        if not rows:
+            st.caption("해당 없음")
+            return
+        df = pd.DataFrame([{
+            "티커": r.get("ticker") or "—", "종목": r.get("name"),
+            "기관수": r.get("count"), "평균변화": f"{r.get('avg_delta_pct', 0) * 100:+.1f}%p",
+        } for r in rows])
+        st.dataframe(df, hide_index=True, width="stretch")
+
+
+def _congress_table(rows: list[dict]) -> None:
+    if not rows:
+        st.caption("해당 없음")
+        return
+    df = pd.DataFrame([{
+        "티커": r.get("ticker"), "거래 의원수": r.get("member_count"),
+        "추정금액(합)": f"${r.get('total_amount_mid', 0):,.0f}",
+    } for r in rows])
+    st.dataframe(df, hide_index=True, width="stretch")
+
+
+def _screening_section() -> None:
+    screen = cached.institution_screener(_SCREEN_13F_KEYS)
+    congress = cached.congress_top_traded(90)
+
+    st.markdown("### 🔄 여러 기관 공통 움직임 (직전 분기 대비)")
+    cols = st.columns(3)
+    _bucket_table(cols[0], "🆕 신규편입", screen.get("new_buys") or [])
+    _bucket_table(cols[1], "📈 비중 증가", screen.get("increased") or [])
+    _bucket_table(cols[2], "📉 비중 감소", screen.get("decreased") or [])
+    st.caption("직전 분기 13F 대비, 여러 기관이 같은 방향으로 움직인 종목만 표시 · 정보용")
+
+    st.markdown("### 🏛️ 정치인 매수·매도 상위 (최근 90일, 하원)")
+    ccols = st.columns(2)
+    with ccols[0]:
+        st.caption("많이 산 종목")
+        _congress_table(congress.get("bought") or [])
+    with ccols[1]:
+        st.caption("많이 판 종목")
+        _congress_table(congress.get("sold") or [])
+    st.caption("금액은 신고 구간 중간값 추정 합계 · 매매 신호 아님")
+
+    st.markdown("### 🧠 왜 이런 움직임일까? (LLM 분석)")
+    if st.button("🧠 스크리닝 해설 생성", key="_watch_screen_explain_btn"):
+        st.session_state["_watch_screen_explain_requested"] = True
+    if st.session_state.get("_watch_screen_explain_requested"):
+        with st.spinner("분석 중…"):
+            explain = cached.institution_screen_explain(screen, congress)
+        st.markdown(explain.get("summary") or "표시할 해설이 없습니다.")
+        st.caption(f"신뢰도 {explain.get('confidence', 0.0):.2f} · "
+                  f"{'LLM 추정' if explain.get('mode') == 'llm' else '사실 나열(LLM 미가용)'}"
+                  " — 투자 조언 아님")
+    else:
+        st.caption("버튼을 누르면 위 스크리닝 결과를 LLM이 해설합니다 (자동 실행 안 함).")
+
+
 def _institution_hub_section() -> None:
     hub_all = cached.institution_watch()
     all_rows = list(hub_all.get("institutions") or [])
@@ -234,6 +309,8 @@ def _institution_hub_section() -> None:
             key="_institution_watch_keys",
         )
         st.caption(f"선택 {len(selected_keys)} / 전체 {len(all_keys)}")
+    _screening_section()
+    st.divider()
     all_selected = len(selected_keys) == len(all_keys)
     hub = hub_all if all_selected else cached.institution_watch(tuple(selected_keys))
     _render_institution_cards(list(hub.get("institutions") or []))
