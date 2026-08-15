@@ -71,3 +71,71 @@ def test_list_watchlist_empty_by_default(monkeypatch, tmp_path):
     _isolate(monkeypatch, tmp_path)
 
     assert watchlist.list_watchlist() == []
+
+
+def test_add_ticker_defaults_to_unsorted_folder(monkeypatch, tmp_path):
+    """감사 후속 — 종목 분석페이지 ⭐ 추가 요청: 폴더 미지정 시 '미분류'."""
+    _isolate(monkeypatch, tmp_path)
+
+    entry = watchlist.add_ticker("AAPL", reason="사유", source="manual")
+
+    assert entry["folder"] == "미분류"
+
+
+def test_add_ticker_accepts_explicit_folder(monkeypatch, tmp_path):
+    _isolate(monkeypatch, tmp_path)
+
+    entry = watchlist.add_ticker("AAPL", reason="사유", source="manual", folder="반도체")
+
+    assert entry["folder"] == "반도체"
+
+
+def test_add_ticker_upsert_keeps_folder_when_not_specified(monkeypatch, tmp_path):
+    _isolate(monkeypatch, tmp_path)
+    watchlist.add_ticker("AAPL", reason="첫 사유", source="manual", folder="반도체")
+
+    second = watchlist.add_ticker("AAPL", reason="갱신 사유", source="manual")
+
+    assert second["folder"] == "반도체"
+
+
+def test_set_folder_moves_existing_ticker(monkeypatch, tmp_path):
+    _isolate(monkeypatch, tmp_path)
+    watchlist.add_ticker("AAPL", reason="사유", source="manual")
+
+    ok = watchlist.set_folder("aapl", "성장주")
+
+    assert ok is True
+    entry = next(e for e in watchlist.list_watchlist() if e["ticker"] == "AAPL")
+    assert entry["folder"] == "성장주"
+
+
+def test_set_folder_missing_ticker_returns_false(monkeypatch, tmp_path):
+    _isolate(monkeypatch, tmp_path)
+
+    assert watchlist.set_folder("ZZZZ", "성장주") is False
+
+
+def test_set_folder_blank_falls_back_to_unsorted(monkeypatch, tmp_path):
+    _isolate(monkeypatch, tmp_path)
+    watchlist.add_ticker("AAPL", reason="사유", source="manual", folder="반도체")
+
+    watchlist.set_folder("AAPL", "  ")
+
+    entry = next(e for e in watchlist.list_watchlist() if e["ticker"] == "AAPL")
+    assert entry["folder"] == "미분류"
+
+
+def test_list_folders_includes_unsorted_and_dedupes(monkeypatch, tmp_path):
+    _isolate(monkeypatch, tmp_path)
+    watchlist.add_ticker("AAPL", reason="사유", source="manual", folder="반도체")
+    watchlist.add_ticker("NVDA", reason="사유", source="manual", folder="반도체")
+    watchlist.add_ticker("KO", reason="사유", source="manual")
+
+    assert watchlist.list_folders() == ["미분류", "반도체"]
+
+
+def test_list_folders_empty_watchlist_still_has_unsorted(monkeypatch, tmp_path):
+    _isolate(monkeypatch, tmp_path)
+
+    assert watchlist.list_folders() == ["미분류"]

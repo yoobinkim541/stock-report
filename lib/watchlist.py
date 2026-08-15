@@ -9,25 +9,32 @@ from __future__ import annotations
 from datetime import datetime, timezone
 
 _COLLECTION = "watchlist"
+_DEFAULT_FOLDER = "미분류"
 
 
 def _now() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="seconds")
 
 
-def add_ticker(ticker: str, reason: str, source: str, *, note: str | None = None) -> dict:
-    """관심종목에 추가. 이미 있으면 upsert(added_at 은 최초값 유지, 나머지는 갱신)."""
+def add_ticker(ticker: str, reason: str, source: str, *, note: str | None = None,
+               folder: str | None = None) -> dict:
+    """관심종목에 추가. 이미 있으면 upsert(added_at 은 최초값 유지, 나머지는 갱신).
+
+    folder 미지정 시: 기존 항목이면 기존 폴더 유지, 신규면 '미분류'(감사 후속 —
+    종목 분석페이지 ⭐ 추가·폴더 분류 기능)."""
     import store
 
     tk = (ticker or "").strip().upper()
     entries = store.all(_COLLECTION)
     existing = next((e for e in entries if e.get("ticker") == tk), None)
     now = _now()
+    fd = (folder or "").strip() or (existing.get("folder") if existing else "") or _DEFAULT_FOLDER
     entry = {
         "ticker": tk,
         "reason": reason,
         "source": source,
         "note": note,
+        "folder": fd,
         "added_at": existing["added_at"] if existing else now,
         "updated_at": now,
     }
@@ -37,6 +44,35 @@ def add_ticker(ticker: str, reason: str, source: str, *, note: str | None = None
         entries.append(entry)
     store.replace_all(_COLLECTION, entries)
     return entry
+
+
+def set_folder(ticker: str, folder: str) -> bool:
+    """관심종목을 다른 폴더로 이동. 존재해서 옮겼으면 True. 빈 폴더명은 '미분류'로."""
+    import store
+
+    tk = (ticker or "").strip().upper()
+    fd = (folder or "").strip() or _DEFAULT_FOLDER
+    entries = store.all(_COLLECTION)
+    found = False
+    updated = []
+    for e in entries:
+        if e.get("ticker") == tk:
+            e = {**e, "folder": fd, "updated_at": _now()}
+            found = True
+        updated.append(e)
+    if found:
+        store.replace_all(_COLLECTION, updated)
+    return found
+
+
+def list_folders() -> list[str]:
+    """존재하는 폴더 목록(가나다순, 중복제거) — '미분류'는 항상 포함(빈 관심종목도)."""
+    import store
+
+    entries = store.all(_COLLECTION)
+    names = {e.get("folder") or _DEFAULT_FOLDER for e in entries}
+    names.add(_DEFAULT_FOLDER)
+    return sorted(names)
 
 
 def remove_ticker(ticker: str) -> bool:
