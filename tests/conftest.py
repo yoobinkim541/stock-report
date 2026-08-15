@@ -36,6 +36,11 @@ os.environ.setdefault("AGENT_CONSOLE_SHARED_MEMORY_DIR", os.path.join(_TMPDIR, "
 # ~/reports/ml-cache/ohlc_cache/ 를 공유해 테스트끼리(같은 티커) 캐시가 새어
 # 다른 테스트의 monkeypatch 를 무시하고 stale parquet 를 읽는 순서 의존 실패가 났음.
 os.environ.setdefault("STOCK_REPORT_OHLC_CACHE_DIR", os.path.join(_TMPDIR, "ohlc_cache"))
+# portfolio_tracker 의 레거시 마이그레이션 원본(qqqi_dividends.json 등)도 tmp
+# 격리 — 이전엔 실제 ~/.local/share/stock-report/ 를 가리켜, store DB 는 tmp 로
+# 격리돼도 첫 조회 시 legacy 파일에서 실제 배당 기록이 자동 마이그레이션돼
+# 스모크 테스트의 "레코드 1건" 가정이 실제 데이터 유무에 따라 깨졌음.
+os.environ.setdefault("STOCK_REPORT_DATA_DIR", os.path.join(_TMPDIR, "legacy-data"))
 
 
 @pytest.fixture(autouse=True)

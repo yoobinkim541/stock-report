@@ -37,7 +37,7 @@ logger = logging.getLogger(__name__)
 logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
 
 # ── 파일 경로 (레거시 — store 마이그레이션 원본) ──────────────────────
-DATA_DIR      = Path.home() / ".local" / "share" / "stock-report"
+DATA_DIR      = Path(os.getenv("STOCK_REPORT_DATA_DIR") or (Path.home() / ".local" / "share" / "stock-report"))
 HISTORY_FILE  = DATA_DIR / "portfolio_history.json"
 DIVIDEND_FILE = DATA_DIR / "qqqi_dividends.json"
 

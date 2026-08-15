@@ -27,6 +27,10 @@ def check(cond: bool, label: str):
 def main() -> int:
     tmp = tempfile.mkdtemp(prefix="store_test_")
     os.environ["STOCK_REPORT_DB"] = os.path.join(tmp, "test.db")
+    # portfolio_tracker 의 레거시 마이그레이션 원본(qqqi_dividends.json 등)도 격리 —
+    # 안 하면 store DB 는 격리돼도 실제 홈 디렉터리의 진짜 배당 기록이 첫 조회 시
+    # 자동 마이그레이션돼 "레코드 1건" 가정이 실제 데이터 유무에 따라 깨진다.
+    os.environ["STOCK_REPORT_DATA_DIR"] = os.path.join(tmp, "legacy-data")
 
     # store는 환경변수 설정 후 import (db_path 평가 시점 무관하지만 명시적으로)
     import importlib
