@@ -15,6 +15,27 @@ from providers import thirteenf  # noqa: E402
 _NS = "http://www.sec.gov/edgar/document/thirteenf/informationtable"
 
 
+def test_filers_registry_includes_expanded_named_investors():
+    """감사 후속 — 관심종목 기관허브에 이름만 있고 데이터 없던 8곳 중 7곳을 실 13F CIK로 연결.
+
+    CIK 는 SEC EDGAR company search(data.sec.gov/submissions/CIK{cik}.json 의
+    name 필드)로 실측 확인한 값 — founders_fund 는 펀드 빈티지별로 8개 별도
+    필러(Growth/II~VII)라 단일 CIK 대표가 불가해 seed 로 남겨둠(2026-08-15)."""
+    expected = {
+        "citadel": "0001423053",
+        "duquesne": "0001536411",
+        "pershing_square": "0001336528",
+        "point72": "0001603466",
+        "third_point": "0001040273",
+        "tudor": "0000923093",
+        "nps": "0001608046",
+    }
+    for key, cik in expected.items():
+        assert key in thirteenf.FILERS, f"{key} 가 FILERS 에 없음"
+        assert thirteenf.FILERS[key]["cik"] == cik, f"{key} CIK 불일치"
+    assert "founders_fund" not in thirteenf.FILERS
+
+
 def _info_table_xml(rows: list[dict]) -> bytes:
     entries = []
     for r in rows:

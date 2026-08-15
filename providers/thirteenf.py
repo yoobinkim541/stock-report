@@ -30,10 +30,21 @@ _FILING_LIST_TTL_H = 24
 _HOLDINGS_TTL_H = 24 * 3   # 13F는 분기 1회라 캐시 오래 둬도 무방 — 재조회 부담만 줄임
 
 # 필러 레지스트리 — 필요 시 추가만 하면 됨(CIK 10자리)
+# CIK 는 SEC EDGAR company search(data.sec.gov/submissions/CIK{cik}.json 의 name 필드로
+# 실측 확인)로 조회한 값(2026-08-15). Founders Fund 는 펀드 빈티지별로 별도 필러(Growth
+# II~VII 등 8개)가 갈려 있어 단일 CIK 대표가 안 되므로 여기 넣지 않고 seed 로 남겨둠
+# (data/institution_watch_seed.json).
 FILERS: dict[str, dict] = {
     "berkshire": {"cik": "0001067983", "name": "Berkshire Hathaway (Warren Buffett)"},
     "bridgewater": {"cik": "0001350694", "name": "Bridgewater Associates"},
     "scion": {"cik": "0001649339", "name": "Scion Asset Management (Michael Burry)"},
+    "citadel": {"cik": "0001423053", "name": "Citadel Advisors (Ken Griffin)"},
+    "duquesne": {"cik": "0001536411", "name": "Duquesne Family Office (Stanley Druckenmiller)"},
+    "pershing_square": {"cik": "0001336528", "name": "Pershing Square Capital Management (Bill Ackman)"},
+    "point72": {"cik": "0001603466", "name": "Point72 Asset Management (Steve Cohen)"},
+    "third_point": {"cik": "0001040273", "name": "Third Point LLC (Dan Loeb)"},
+    "tudor": {"cik": "0000923093", "name": "Tudor Investment Corp. (Paul Tudor Jones)"},
+    "nps": {"cik": "0001608046", "name": "National Pension Service"},
 }
 
 

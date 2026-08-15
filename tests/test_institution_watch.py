@@ -23,6 +23,20 @@ def test_registry_expands_to_more_named_proxy_institutions():
     assert rows["nps"]["category"] == "pension"
 
 
+def test_registry_expanded_investors_are_real_13f_not_seed_placeholders():
+    """감사 후속 — citadel 등 7곳은 실 13F CIK 연결로 source_kind='13f' 가 됨.
+
+    founders_fund 만 펀드 빈티지별 8개 별도 필러라 단일 대표 불가해 여전히 seed."""
+    from reports import institution_watch as iw
+
+    rows = {row["key"]: row for row in iw.list_institutions()}
+    for key in ("citadel", "duquesne", "pershing_square", "point72", "third_point", "tudor", "nps"):
+        assert rows[key]["source_kind"] == "13f", f"{key} 가 아직 seed 임 — FILERS 배선 안 됨"
+        assert rows[key]["freshness"] == "fresh"
+    assert rows["founders_fund"]["source_kind"] == "seed"
+    assert rows["duquesne"]["category"] == "family_office"
+
+
 def test_latest_snapshot_marks_unavailable_metrics(monkeypatch):
     from reports import institution_watch as iw
 
@@ -109,11 +123,13 @@ def test_compare_institutions_keeps_missing_metrics_explicit():
 
 
 def test_latest_snapshot_real_seed_path_keeps_null_metrics_unavailable():
+    """nps 는 감사 후속으로 실 13F 연결됨 — founders_fund 가 남은 seed 대표 사례
+    (펀드 빈티지별 8개 별도 필러라 단일 CIK 대표 불가, 2026-08-15)."""
     from reports import institution_watch as iw
 
-    snapshot = iw.latest_snapshot("nps")
+    snapshot = iw.latest_snapshot("founders_fund")
 
-    assert snapshot["institution_key"] == "nps"
+    assert snapshot["institution_key"] == "founders_fund"
     assert snapshot["source_kind"] == "seed"
     assert snapshot["freshness"] == "proxy"
     assert snapshot["cash_ratio"] is None
@@ -127,7 +143,7 @@ def test_latest_snapshot_real_seed_path_keeps_null_metrics_unavailable():
 def test_build_snapshot_digest_keeps_unverified_seed_pages_as_draft():
     from reports import institution_watch as iw
 
-    snapshot = iw.latest_snapshot("nps")
+    snapshot = iw.latest_snapshot("founders_fund")
     page = iw.build_snapshot_digest(snapshot, {"new": [], "exited": []})
 
     assert page["kind"] == "note"
