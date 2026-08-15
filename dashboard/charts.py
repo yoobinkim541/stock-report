@@ -99,9 +99,21 @@ def _use_even_candle_axis(fig, index):
     Plotly datetime 축에 rangebreaks 를 섞으면 5분/시간봉이나 장기 월봉에서 캔들 폭이
     과대 계산되어 봉이 겹치는 경우가 있다. 캔들은 TradingView처럼 "n번째 봉" 기준으로
     읽는 편이 자연스러우므로 category 축으로 고정하고, 원본 timestamp 는 그대로 x 값에 둔다.
+
+    추세선(dashboard.trendlines) 은 마지막 봉에서 PROJ_BARS 만큼 미래로 투영한 x1 을
+    쓰는데, category 축은 categoryarray 에 없는 x 값을 인식 못해 그 지점이 안 그려지거나
+    엉뚱한 위치로 밀려 "고가·저가 라인이 캔들과 안 맞아 보이는" 버그가 됐다(감사 후속) —
+    같은 간격(중앙값)으로 미래 카테고리를 미리 채워 넣어 투영 x1 이 정확히 매칭되게 한다.
     """
+    import pandas as pd
+    from dashboard.trendlines import PROJ_BARS
+
+    cats = list(index)
+    if len(index) >= 2:
+        step = pd.Series(index).diff().median()
+        cats = cats + [index[-1] + step * i for i in range(1, PROJ_BARS + 1)]
     fig.update_xaxes(type="category", categoryorder="array",
-                     categoryarray=list(index), rangebreaks=[])
+                     categoryarray=cats, rangebreaks=[])
     return fig
 
 

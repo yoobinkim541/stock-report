@@ -351,13 +351,42 @@ def test_price_chart_candles_use_category_axis_to_avoid_overlap_with_gaps():
 
 
 def test_single_symbol_line_uses_category_axis_to_compress_market_closures():
+    from dashboard import trendlines
+
     hist = _ohlc(90)
 
     fig = charts.price_chart(hist, "AAPL", kind="line", mas=(20, 60))
 
     assert fig.layout.xaxis.type == "category"
-    assert list(fig.layout.xaxis.categoryarray) == list(hist.index)
+    cats = list(fig.layout.xaxis.categoryarray)
+    assert cats[:len(hist)] == list(hist.index)
+    assert len(cats) == len(hist) + trendlines.PROJ_BARS   # 추세선 투영 구간 포함(감사 후속)
     assert not (fig.layout.xaxis.rangebreaks or ())
+
+
+def test_candle_axis_extends_categoryarray_for_trendline_projection():
+    """감사 후속 — 추세선 투영 x1(마지막 봉 + PROJ_BARS×중앙값 간격)이 카테고리축
+    categoryarray 밖이라 안 그려지거나 엉뚱한 위치에 그려지던 버그(고가·저가 라인이
+    캔들과 안 맞아 보임). categoryarray 에 투영 구간을 미리 채워 정확히 맞춘다."""
+    from dashboard import trendlines
+
+    hist = _ohlc(90)
+
+    fig = charts.price_chart(hist, "AAPL", kind="candle")
+
+    cats = list(fig.layout.xaxis.categoryarray)
+    assert cats[:len(hist)] == list(hist.index)
+    step = pd.Series(hist.index).diff().median()
+    expected_future = [hist.index[-1] + step * i for i in range(1, trendlines.PROJ_BARS + 1)]
+    assert cats[len(hist):] == expected_future
+
+
+def test_candle_axis_handles_short_history_without_crashing():
+    hist = _ohlc(1)
+
+    fig = charts.price_chart(hist, "AAPL", kind="candle")
+
+    assert list(fig.layout.xaxis.categoryarray) == list(hist.index)
 
 
 def test_price_chart_weekly_monthly_candles_are_visible():
