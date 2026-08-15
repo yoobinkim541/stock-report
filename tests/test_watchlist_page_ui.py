@@ -291,3 +291,47 @@ def test_screen_explain_button_gates_llm_call(monkeypatch):
     assert calls == [1]
     body = " ".join(str(m.value) for m in at.markdown)
     assert "설명" in body
+
+
+_ROWS_WITH_FOLDERS = [
+    {"ticker": "PLTR", "name": "Palantir", "reason": "AI 테마", "source": "manual",
+     "note": None, "added_at": "2026-08-01T00:00:00", "folder": "반도체"},
+    {"ticker": "NVDA", "name": "엔비디아", "reason": "GPU 수요", "source": "manual",
+     "note": None, "added_at": "2026-07-15T00:00:00", "folder": "미분류"},
+]
+
+
+def test_folder_filter_shows_only_matching_rows(monkeypatch):
+    """감사 후속 — 폴더별로 관심종목을 분리해서 볼 수 있어야 한다."""
+    monkeypatch.setattr(data, "load_watchlist", lambda: _ROWS_WITH_FOLDERS)
+    monkeypatch.setattr(cached, "watchlist_quotes", lambda tickers: {})
+    monkeypatch.setattr(data, "watchlist_folders", lambda: ["미분류", "반도체"])
+
+    at = AppTest.from_string(_RUN_SCRIPT, default_timeout=30)
+    at.run()
+    assert len(at.dataframe[0].value) == 2
+
+    at.selectbox(key="_watchlist_folder_filter").set_value("반도체").run()
+
+    assert not at.exception, str(at.exception)
+    df = at.dataframe[0].value
+    assert list(df["티커"]) == ["PLTR"]
+
+
+def test_folder_move_button_calls_move_watchlist_folder(monkeypatch):
+    monkeypatch.setattr(data, "load_watchlist", lambda: _ROWS_WITH_FOLDERS)
+    monkeypatch.setattr(cached, "watchlist_quotes", lambda tickers: {})
+    monkeypatch.setattr(data, "watchlist_folders", lambda: ["미분류", "반도체"])
+
+    calls = []
+    monkeypatch.setattr(data, "move_watchlist_folder",
+                        lambda ticker, folder: calls.append((ticker, folder)) or True)
+
+    at = AppTest.from_string(_RUN_SCRIPT, default_timeout=30)
+    at.run()
+    at.selectbox(key="_watchlist_move_ticker").set_value("NVDA").run()
+    at.selectbox(key="_watchlist_move_folder_pick").set_value("반도체").run()
+    at.button(key="_watchlist_move_btn").click().run()
+
+    assert not at.exception, str(at.exception)
+    assert calls == [("NVDA", "반도체")]

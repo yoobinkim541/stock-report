@@ -147,21 +147,46 @@ def _fmt_chg(q: dict | None) -> str:
     return f"{q['chg_pct']:+.2f}%"
 
 
+def _folder_move_section(rows: list[dict], folders: list[str]) -> None:
+    with st.expander("📁 폴더 이동"):
+        tickers = [r["ticker"] for r in rows]
+        pick_ticker = st.selectbox("종목", options=tickers, key="_watchlist_move_ticker")
+        col1, col2 = st.columns([2, 1])
+        with col1:
+            target = st.selectbox("이동할 폴더", options=folders + ["+ 새 폴더"],
+                                  key="_watchlist_move_folder_pick")
+            if target == "+ 새 폴더":
+                target = st.text_input("새 폴더 이름", key="_watchlist_move_folder_new").strip()
+        with col2:
+            st.write("")
+            st.write("")
+            if st.button("이동", key="_watchlist_move_btn") and target:
+                if data.move_watchlist_folder(pick_ticker, target):
+                    st.toast(f"{pick_ticker} → {target} 이동 완료")
+                    st.rerun()
+
+
 def _watchlist_section(rows: list[dict]) -> None:
     st.markdown("### ⭐ 내 관심종목")
     if not rows:
-        st.info("관심종목이 비어 있습니다 — 봇에서 `/watch add TICKER 메모` 로 추가하거나 "
-                "버핏 13F 신규편입 크론(매주 월요일)을 기다리세요.")
+        st.info("관심종목이 비어 있습니다 — 종목 분석페이지에서 ⭐ 를 누르거나 "
+                "봇에서 `/watch add TICKER 메모` 로 추가하세요.")
         return
+
+    folders = data.watchlist_folders()
+    folder_pick = st.selectbox("폴더", options=["전체"] + folders, key="_watchlist_folder_filter")
+    folder_rows = rows if folder_pick == "전체" else [r for r in rows if r.get("folder") == folder_pick]
 
     query = st.text_input("🔍 검색 (티커·종목명·사유)", key="_watchlist_search",
                           placeholder="예: PLTR, 반도체").strip().lower()
-    filtered = rows
+    filtered = folder_rows
     if query:
-        filtered = [r for r in rows if query in r["ticker"].lower()
+        filtered = [r for r in folder_rows if query in r["ticker"].lower()
                    or query in (r["name"] or "").lower() or query in (r["reason"] or "").lower()]
     if not filtered:
-        st.caption(f"'{query}' 검색 결과 없음 (전체 {len(rows)}개)")
+        st.caption(f"'{query}' 검색 결과 없음 ({len(folder_rows)}개 중)" if query
+                  else f"'{folder_pick}' 폴더에 종목이 없습니다.")
+        _folder_move_section(rows, folders)
         return
 
     tickers = tuple(sorted({r["ticker"] for r in filtered}))
@@ -171,7 +196,7 @@ def _watchlist_section(rows: list[dict]) -> None:
         quotes = {}
 
     df = pd.DataFrame([{
-        "티커": r["ticker"], "종목": r["name"],
+        "티커": r["ticker"], "종목": r["name"], "폴더": r.get("folder") or "미분류",
         "현재가": _fmt_price(quotes.get(r["ticker"])),
         "등락률": _fmt_chg(quotes.get(r["ticker"])),
         "추가 사유": r["reason"], "추가일": r["added_at"][:10] if r["added_at"] else "",
@@ -196,6 +221,8 @@ def _watchlist_section(rows: list[dict]) -> None:
                 st.switch_page(pg)
             else:
                 st.rerun()
+
+    _folder_move_section(rows, folders)
 
 
 _TX_TYPE_LABELS = {"Purchase": "매수", "Sale": "매도", "Exchange": "교환"}
