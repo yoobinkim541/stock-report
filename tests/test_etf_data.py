@@ -112,6 +112,7 @@ def test_kr_seed_etf_codes_are_recognized(monkeypatch):
     monkeypatch.setattr(E, "_kr_yfinance_overlay", lambda out: None)
     monkeypatch.setattr(E, "_kr_pykrx_overlay", lambda out: None)
     monkeypatch.setattr(E, "_kr_kis_overlay", lambda out: None)
+    monkeypatch.setattr(E, "_kr_naver_overlay", lambda out: None)
 
     out = E.kr_etf_summary("0167A0.KS")
     assert out["is_etf"] is True
@@ -139,6 +140,7 @@ def test_kr_etf_summary_fallback_shape(monkeypatch):
     monkeypatch.setattr(E, "_kr_yfinance_overlay", lambda out: None)
     monkeypatch.setattr(E, "_kr_pykrx_overlay", lambda out: None)
     monkeypatch.setattr(E, "_kr_kis_overlay", lambda out: None)
+    monkeypatch.setattr(E, "_kr_naver_overlay", lambda out: None)
 
     out = E.kr_etf_summary("A069500")
 
@@ -253,3 +255,60 @@ def test_etf_summary_keeps_cache_with_real_holdings(monkeypatch):
     monkeypatch.setattr(E, "_load_cache", lambda tk: good)
 
     assert E.etf_summary("069500.KS") == good
+
+
+def test_kr_naver_overlay_fills_expense_ratio(monkeypatch):
+    """감사 후속 — KIS 실계좌 시세 API 엔 총보수 필드가 없어 네이버로 보강."""
+    from providers import naver_consensus
+
+    def fake_summary(ticker):
+        assert ticker == "069500.KS"
+        return {"etf": {"expense_ratio": 0.0015, "issuer": "삼성자산운용",
+                        "nav": 110362.62, "premium_pct": -0.2742,
+                        "total_assets": 25_432_500_000_000.0}}
+    monkeypatch.setattr(naver_consensus, "summary", fake_summary)
+
+    out = {"stock_code": "069500"}
+    E._kr_naver_overlay(out)
+
+    assert out["expense_ratio"] == 0.0015
+    assert out["family"] == "삼성자산운용"
+    assert out["nav"] == 110362.62
+    assert out["premium_pct"] == -0.2742
+    assert out["total_assets"] == 25_432_500_000_000.0
+
+
+def test_kr_naver_overlay_does_not_override_kis_values(monkeypatch):
+    """KIS 가 이미 nav/premium_pct/total_assets/family 를 채웠으면 네이버로 덮지 않는다
+    — 총보수만 KIS 공백이라 보강한다."""
+    from providers import naver_consensus
+    monkeypatch.setattr(naver_consensus, "summary", lambda ticker: {"etf": {
+        "expense_ratio": 0.0015, "issuer": "무시돼야함",
+        "nav": 1.0, "premium_pct": 99.0, "total_assets": 1.0,
+    }})
+
+    out = {"stock_code": "069500", "nav": 110362.62, "premium_pct": -0.2742,
+           "total_assets": 25_432_500_000_000.0, "family": "삼성자산운용"}
+    E._kr_naver_overlay(out)
+
+    assert out["expense_ratio"] == 0.0015     # 이건 KIS 에 없던 값이라 채워짐
+    assert out["nav"] == 110362.62            # KIS 값 유지
+    assert out["premium_pct"] == -0.2742
+    assert out["total_assets"] == 25_432_500_000_000.0
+    assert out["family"] == "삼성자산운용"
+
+
+def test_kr_naver_overlay_noop_when_no_etf_indicator(monkeypatch):
+    from providers import naver_consensus
+    monkeypatch.setattr(naver_consensus, "summary", lambda ticker: {"target_mean": 100.0})
+
+    out = {"stock_code": "069500"}
+    E._kr_naver_overlay(out)
+
+    assert out == {"stock_code": "069500"}
+
+
+def test_kr_naver_overlay_noop_without_stock_code():
+    out = {}
+    E._kr_naver_overlay(out)
+    assert out == {}

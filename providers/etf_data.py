@@ -480,6 +480,34 @@ def _kr_kis_overlay(out: dict) -> None:
         out["top_holdings_source"] = "KIS"
 
 
+def _kr_naver_overlay(out: dict) -> None:
+    """네이버 ETF 핵심지표로 총보수(expense_ratio) 보강 — KIS 실계좌 시세 API 엔
+    총보수 필드가 없음(라이브 확인, 감사 후속). NAV/괴리율/순자산총액/운용사는
+    KIS 가 이미 채웠으면 덮지 않고, 비어있을 때만 폴백으로 채운다.
+    """
+    code = out.get("stock_code")
+    if not code:
+        return
+    try:
+        from providers import naver_consensus
+        summary = naver_consensus.summary(f"{code}.KS")
+        indicator = (summary or {}).get("etf") or {}
+    except Exception:
+        indicator = {}
+    if not indicator:
+        return
+    if indicator.get("expense_ratio") is not None:
+        out["expense_ratio"] = indicator["expense_ratio"]
+    if not out.get("family") and indicator.get("issuer"):
+        out["family"] = indicator["issuer"]
+    if out.get("nav") is None and indicator.get("nav") is not None:
+        out["nav"] = indicator["nav"]
+    if out.get("premium_pct") is None and indicator.get("premium_pct") is not None:
+        out["premium_pct"] = indicator["premium_pct"]
+    if out.get("total_assets") is None and indicator.get("total_assets") is not None:
+        out["total_assets"] = indicator["total_assets"]
+
+
 def kr_etf_summary(ticker: str) -> dict:
     out = _kr_etf_base(ticker)
     if not out["is_etf"]:
@@ -493,6 +521,7 @@ def kr_etf_summary(ticker: str) -> dict:
     _kr_yfinance_overlay(out)
     _kr_pykrx_overlay(out)
     _kr_kis_overlay(out)
+    _kr_naver_overlay(out)
     return out
 
 

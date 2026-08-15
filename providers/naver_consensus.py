@@ -1,4 +1,4 @@
-"""providers/naver_consensus.py — KR 애널리스트 컨센서스 (Naver 모바일 JSON API).
+"""providers/naver_consensus.py — KR 애널리스트 컨센서스 + ETF 핵심지표 (Naver 모바일 JSON API).
 
 yfinance 의 .KS forward/target 은 실제와 크게 어긋나 신뢰불가 → Naver 는 국내 증권사
 컨센서스를 그대로 노출: ① integration API 의 목표주가 평균·투자의견,
@@ -8,12 +8,18 @@ yfinance 의 .KS forward/target 은 실제와 크게 어긋나 신뢰불가 → 
 (예: SK하이닉스 2026E EPS 컨센서스 fwd PER ~6.6)가 잔여이익 영구모델의 "고평가"
 편향으로 오도되던 한계 해소.
 
+같은 integration 응답의 etfKeyIndicator 로 국내 ETF 총보수(expense_ratio)도 함께
+채운다 — KIS 실계좌 시세 API(providers.kis_quote.get_etf_snapshot)엔 총보수 필드가
+없어(라이브 확인) 네이버로 보강(감사 후속). 추가 네트워크 호출 없이 기존 integration
+호출에 얹는다.
+
 JSON API(UTF-8) — Naver HTML EUC-KR 함정 해당 없음. 실패 시 None/{} (graceful).
 12h 디스크 캐시: ~/reports/ml-cache/naver_consensus/{code}.json
 """
 from __future__ import annotations
 
 import logging
+import re
 from pathlib import Path
 
 logger = logging.getLogger(__name__)
@@ -52,6 +58,65 @@ def parse_integration(d: dict) -> dict:
            "recomm_mean": _num(ci.get("recommMean")),
            "asof": ci.get("createDate")}
     return out if out["target_mean"] is not None else {}
+
+
+def _parse_korean_won(s) -> float | None:
+    """'25조 4,325억' 같은 네이버 조/억 표기 → 원 단위 float. 순수 숫자 문자열도 허용.
+
+    KODEX200 라이브 확인: "25조 4,325억" = 25*1e12 + 4325*1e8 = 25,432,500,000,000
+    (KIS etf_ntas_ttam 억원 단위 대조값과 정확히 일치).
+    """
+    if s is None:
+        return None
+    text = str(s).replace(",", "").strip()
+    if not text:
+        return None
+    total = 0.0
+    matched = False
+    m = re.search(r"(-?\d+(?:\.\d+)?)\s*조", text)
+    if m:
+        total += float(m.group(1)) * 1e12
+        matched = True
+    m = re.search(r"(-?\d+(?:\.\d+)?)\s*억", text)
+    if m:
+        total += float(m.group(1)) * 1e8
+        matched = True
+    if matched:
+        return total
+    try:
+        return float(text)
+    except ValueError:
+        return None
+
+
+def parse_etf_indicator(d: dict) -> dict:
+    """integration 응답의 etfKeyIndicator → {expense_ratio, issuer, total_assets,
+    nav, premium_pct}. 결측/비ETF {}.
+
+    totalFee 는 퍼센트 단위(0.15=0.15%) → 분수(0.0015)로 정규화(providers.etf_data.
+    norm_expense_ratio 와 동일 관례). deviationRate/-Sign 조합이 괴리율(부호 포함).
+    """
+    ek = (d or {}).get("etfKeyIndicator") or {}
+    if not ek:
+        return {}
+    out: dict = {}
+    fee = _num(ek.get("totalFee"))
+    if fee is not None and fee > 0:
+        out["expense_ratio"] = fee / 100.0
+    issuer = re.sub(r"\s*\(ETF\)\s*$", "", str(ek.get("issuerName") or "").strip())
+    if issuer:
+        out["issuer"] = issuer
+    nav = _num(ek.get("nav"))
+    if nav is not None:
+        out["nav"] = nav
+    deviation = _num(ek.get("deviationRate"))
+    if deviation is not None:
+        sign = -1 if str(ek.get("deviationSign") or "").strip() == "-" else 1
+        out["premium_pct"] = round(deviation * sign, 4)
+    total_assets = _parse_korean_won(ek.get("totalNav"))
+    if total_assets is not None:
+        out["total_assets"] = total_assets
+    return out
 
 
 def parse_annual(d: dict) -> dict:
@@ -117,9 +182,15 @@ def summary(ticker: str) -> dict:
             return hit
     out: dict = {}
     try:
-        out.update(parse_integration(_fetch_json(f"{_BASE}/{code}/integration")))
+        integration = _fetch_json(f"{_BASE}/{code}/integration")
     except Exception as e:
         logger.debug("naver integration 실패 %s: %s", code, e)
+        integration = None
+    if integration is not None:
+        out.update(parse_integration(integration))
+        etf = parse_etf_indicator(integration)
+        if etf:
+            out["etf"] = etf
     try:
         out.update(parse_annual(_fetch_json(f"{_BASE}/{code}/finance/annual")))
     except Exception as e:
