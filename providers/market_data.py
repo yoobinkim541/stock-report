@@ -616,6 +616,49 @@ def freshness_note(fetched_ts, *, now: float | None = None) -> str:
     return f"🕒 {when} KST ({age_str}) · 시세 {src}"
 
 
+def batch_quote_change(tickers: list[str]) -> dict:
+    """티커 목록 → {ticker: {"price", "chg_pct"}} 배치 조회 (직전 2 거래일 종가 비교).
+
+    관심종목처럼 실시간 스트림 구독 밖의 티커에 쓰는 가벼운 폴백(fetch_portfolio_value
+    와 동일한 yf.download 배치 패턴). 네트워크/개별종목 실패는 조용히 생략.
+    """
+    out: dict = {}
+    tks = [str(t).strip() for t in (tickers or []) if str(t).strip()]
+    if not tks:
+        return out
+    try:
+        data = yf.download(tks, period="2d", auto_adjust=True, progress=False)
+        if data.empty or "Close" not in data.columns:
+            return out
+        close = data["Close"]
+        if hasattr(close, "columns"):               # DataFrame (복수 종목)
+            for t in tks:
+                if t not in close.columns:
+                    continue
+                s = close[t].dropna()
+                if s.empty:
+                    continue
+                price = _safe_float(s.iloc[-1])
+                if price <= 0:
+                    continue
+                chg_pct = None
+                if len(s) >= 2 and _safe_float(s.iloc[-2]) > 0:
+                    chg_pct = (price / _safe_float(s.iloc[-2]) - 1) * 100
+                out[t] = {"price": price, "chg_pct": chg_pct}
+        else:                                        # Series (단일 종목)
+            s = close.dropna()
+            if not s.empty:
+                price = _safe_float(s.iloc[-1])
+                if price > 0:
+                    chg_pct = None
+                    if len(s) >= 2 and _safe_float(s.iloc[-2]) > 0:
+                        chg_pct = (price / _safe_float(s.iloc[-2]) - 1) * 100
+                    out[tks[0]] = {"price": price, "chg_pct": chg_pct}
+    except Exception as e:
+        logger.warning(f"batch_quote_change 실패: {e}")
+    return out
+
+
 def fetch_portfolio_value() -> dict:
     """
     portfolio_snapshot.json 보유 수량 × 실시간 가격(실시간 캐시 우선·yfinance 폴백) → 포트폴리오 총액.

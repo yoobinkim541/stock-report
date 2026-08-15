@@ -465,6 +465,84 @@ def test_views_financials_skips_kis_ratios_for_us(monkeypatch):
     assert "kis_ratios" not in out
 
 
+def test_views_watchlist_quotes_delegates_to_market_data(monkeypatch):
+    """감사 후속 — 관심종목 시세 오버레이는 market_data.batch_quote_change 위임."""
+    from dashboard import views
+    from providers import market_data
+
+    monkeypatch.setattr(market_data, "batch_quote_change",
+                        lambda tickers: {"PLTR": {"price": 30.0, "chg_pct": 5.0}})
+
+    out = views.watchlist_quotes(("PLTR",))
+
+    assert out["PLTR"]["price"] == 30.0
+
+
+def test_views_watchlist_quotes_graceful_on_exception(monkeypatch):
+    from dashboard import views
+    from providers import market_data
+
+    def _boom(tickers):
+        raise RuntimeError("network down")
+    monkeypatch.setattr(market_data, "batch_quote_change", _boom)
+
+    assert views.watchlist_quotes(("PLTR",)) == {}
+
+
+def test_institution_watch_summary_skips_llm_by_default(monkeypatch):
+    """감사 후속 — 관심종목 페이지 초기 렌더가 LLM(최대 20초) 대기로 막히던 문제.
+
+    with_llm_summary=False(기본)면 heuristic 요약만 쓰고 _try_llm_prompt 는 호출되지 않는다."""
+    from dashboard import views
+    from reports import institution_watch
+
+    monkeypatch.setattr(institution_watch, "list_institutions",
+                        lambda: [{"key": "buffett", "source_kind": "13f", "category": "asset_manager",
+                                  "display_name": "버크셔"}])
+    monkeypatch.setattr(institution_watch, "latest_snapshot",
+                        lambda key: {"institution_key": key, "display_name": "버크셔", "source_kind": "13f",
+                                     "freshness": "fresh", "holdings_count": 3,
+                                     "availability_flags": {}, "top_holdings": [], "notes": [],
+                                     "primary_sources": [], "metric_capabilities": [], "refresh_policy": "",
+                                     "confidence": 0.9})
+    monkeypatch.setattr(institution_watch, "compare_institutions", lambda keys, snapshots=None: {"rows": []})
+
+    calls = []
+    monkeypatch.setattr(institution_watch, "build_common_moves_analysis",
+                        lambda snapshots, comparison: calls.append(1) or {"summary": "x", "shared_moves": [],
+                                                                            "divergences": [], "confidence": 0.5,
+                                                                            "mode": "llm"})
+
+    out = views.institution_watch_summary()
+
+    assert calls == [], "with_llm_summary=False 인데 LLM 경로가 호출됨 — 지연 로딩 위반"
+    assert out["analysis"]["mode"] == "heuristic"
+
+
+def test_institution_watch_summary_calls_llm_when_requested(monkeypatch):
+    from dashboard import views
+    from reports import institution_watch
+
+    monkeypatch.setattr(institution_watch, "list_institutions",
+                        lambda: [{"key": "buffett", "source_kind": "13f", "category": "asset_manager",
+                                  "display_name": "버크셔"}])
+    monkeypatch.setattr(institution_watch, "latest_snapshot",
+                        lambda key: {"institution_key": key, "display_name": "버크셔", "source_kind": "13f",
+                                     "freshness": "fresh", "holdings_count": 3,
+                                     "availability_flags": {}, "top_holdings": [], "notes": [],
+                                     "primary_sources": [], "metric_capabilities": [], "refresh_policy": "",
+                                     "confidence": 0.9})
+    monkeypatch.setattr(institution_watch, "compare_institutions", lambda keys, snapshots=None: {"rows": []})
+    monkeypatch.setattr(institution_watch, "build_common_moves_analysis",
+                        lambda snapshots, comparison: {"summary": "LLM 요약", "shared_moves": [],
+                                                        "divergences": [], "confidence": 0.7, "mode": "llm"})
+
+    out = views.institution_watch_summary(with_llm_summary=True)
+
+    assert out["analysis"]["mode"] == "llm"
+    assert out["analysis"]["summary"] == "LLM 요약"
+
+
 def test_views_risk_no_weights():
     from dashboard import views
     assert "보유 데이터 없음" in views.risk_report_text({})

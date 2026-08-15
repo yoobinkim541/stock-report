@@ -61,8 +61,13 @@ def social_sentiment():
 
 
 @st.cache_data(ttl=_TTL, show_spinner=False)
-def institution_watch(keys=None):
-    return views.institution_watch_summary(keys)
+def institution_watch(keys=None, with_llm_summary=False):
+    return views.institution_watch_summary(keys, with_llm_summary=with_llm_summary)
+
+
+@st.cache_data(ttl=300, show_spinner=False)
+def watchlist_quotes(tickers):
+    return views.watchlist_quotes(tickers)
 
 
 @st.cache_data(ttl=900, show_spinner=False)

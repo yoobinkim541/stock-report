@@ -1319,10 +1319,13 @@ def wiki_pipeline_health_summary() -> dict:
         }
 
 
-def _institution_analysis(snapshots: list[dict], comparison: dict) -> dict:
+def _institution_analysis(snapshots: list[dict], comparison: dict, *, with_llm_summary: bool = True) -> dict:
     try:
         from reports import institution_watch
-        analysis = institution_watch.build_common_moves_analysis(snapshots, comparison)
+        if with_llm_summary:
+            analysis = institution_watch.build_common_moves_analysis(snapshots, comparison)
+        else:
+            analysis = institution_watch._common_moves_fallback(snapshots, comparison)
         if isinstance(analysis, dict):
             return analysis
     except Exception:
@@ -1336,8 +1339,20 @@ def _institution_analysis(snapshots: list[dict], comparison: dict) -> dict:
     }
 
 
-def institution_watch_summary(keys=None) -> dict:
-    """기관투자자 허브용 비교 스냅샷 (watchlist UI 전용)."""
+def watchlist_quotes(tickers) -> dict:
+    """관심종목 시세 오버레이(가격·등락률) — market_data 배치 조회. graceful {}."""
+    try:
+        from providers import market_data
+        return market_data.batch_quote_change(list(tickers))
+    except Exception:
+        return {}
+
+
+def institution_watch_summary(keys=None, *, with_llm_summary: bool = False) -> dict:
+    """기관투자자 허브용 비교 스냅샷 (watchlist UI 전용).
+
+    with_llm_summary=False(기본) — LLM 요약(최대 20초)은 관심종목 페이지 초기
+    렌더를 막던 원인이라 기본 비활성. 버튼으로 명시 요청 시(True)만 호출(감사 후속)."""
     try:
         from reports import institution_watch
 
@@ -1369,7 +1384,7 @@ def institution_watch_summary(keys=None) -> dict:
                 "confidence": snapshot.get("confidence"),
             })
         comparison = institution_watch.compare_institutions(selected_keys, snapshots=snapshots)
-        analysis = _institution_analysis(list(snapshots.values()), comparison)
+        analysis = _institution_analysis(list(snapshots.values()), comparison, with_llm_summary=with_llm_summary)
         return {
             "institutions": institutions,
             "comparison": comparison,

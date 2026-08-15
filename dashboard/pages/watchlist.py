@@ -119,11 +119,70 @@ def _render_common_moves(analysis: dict):
         st.markdown("\n".join(["**차이점**", *[f"- {item}" for item in divergences]]))
 
 
-def render():
-    st.title("⭐ 관심종목")
-    st.caption("유명 기관투자자 스냅샷과 직접 추가한 종목을 함께 보는 허브 "
-              "· 표시 전용 · 삭제는 텔레그램 봇 /watch remove")
+def _fmt_price(q: dict | None) -> str:
+    if not q or q.get("price") is None:
+        return "—"
+    return f"${q['price']:,.2f}"
 
+
+def _fmt_chg(q: dict | None) -> str:
+    if not q or q.get("chg_pct") is None:
+        return "—"
+    return f"{q['chg_pct']:+.2f}%"
+
+
+def _watchlist_section(rows: list[dict]) -> None:
+    st.markdown("### ⭐ 내 관심종목")
+    if not rows:
+        st.info("관심종목이 비어 있습니다 — 봇에서 `/watch add TICKER 메모` 로 추가하거나 "
+                "버핏 13F 신규편입 크론(매주 월요일)을 기다리세요.")
+        return
+
+    query = st.text_input("🔍 검색 (티커·종목명·사유)", key="_watchlist_search",
+                          placeholder="예: PLTR, 반도체").strip().lower()
+    filtered = rows
+    if query:
+        filtered = [r for r in rows if query in r["ticker"].lower()
+                   or query in (r["name"] or "").lower() or query in (r["reason"] or "").lower()]
+    if not filtered:
+        st.caption(f"'{query}' 검색 결과 없음 (전체 {len(rows)}개)")
+        return
+
+    tickers = tuple(sorted({r["ticker"] for r in filtered}))
+    try:
+        quotes = cached.watchlist_quotes(tickers)
+    except Exception:
+        quotes = {}
+
+    df = pd.DataFrame([{
+        "티커": r["ticker"], "종목": r["name"],
+        "현재가": _fmt_price(quotes.get(r["ticker"])),
+        "등락률": _fmt_chg(quotes.get(r["ticker"])),
+        "추가 사유": r["reason"], "추가일": r["added_at"][:10] if r["added_at"] else "",
+    } for r in filtered])
+
+    st.caption(f"{len(filtered)}개 · 🔍 **행을 클릭**하면 해당 종목 상세 분석으로 이동 "
+              "· 가격은 최근 종가 기준(최대 5분 지연, 국내 티커는 미지원)")
+    event = st.dataframe(
+        df, hide_index=True, width="stretch", on_select="rerun", selection_mode="single-row",
+    )
+    try:
+        sel = event.selection.rows
+    except Exception:
+        sel = []
+    if sel and sel[0] < len(filtered):
+        picked = filtered[sel[0]]["ticker"]
+        if picked and picked != st.session_state.get("ticker"):
+            st.session_state["ticker"] = picked
+            st.toast(f"종목 분석 → {picked}")
+            pg = st.session_state.get("_ticker_page")
+            if pg:
+                st.switch_page(pg)
+            else:
+                st.rerun()
+
+
+def _institution_hub_section() -> None:
     hub_all = cached.institution_watch()
     all_rows = list(hub_all.get("institutions") or [])
     all_keys = [row.get("key") for row in all_rows if row.get("key")]
@@ -136,7 +195,6 @@ def render():
         )
         for row in all_rows
     }
-    st.markdown("### 기관투자자 허브")
     if hub_all.get("error"):
         st.warning(f"기관 허브 로드 실패: {hub_all['error']}")
     selected_keys = []
@@ -152,38 +210,35 @@ def render():
             key="_institution_watch_keys",
         )
         st.caption(f"선택 {len(selected_keys)} / 전체 {len(all_keys)}")
-    hub = hub_all if len(selected_keys) == len(all_keys) else cached.institution_watch(tuple(selected_keys))
+    all_selected = len(selected_keys) == len(all_keys)
+    hub = hub_all if all_selected else cached.institution_watch(tuple(selected_keys))
     _render_institution_cards(list(hub.get("institutions") or []))
     st.markdown("### 비교 테이블")
     _render_comparison_table(hub.get("comparison") or {})
-    _render_common_moves(hub.get("analysis") or {})
+
+    st.markdown("### 공통 패턴 요약")
+    if st.button("🧠 LLM 요약 생성 (최대 20초 소요)", key="_watch_llm_btn"):
+        st.session_state["_watch_llm_requested"] = True
+    if st.session_state.get("_watch_llm_requested"):
+        with st.spinner("LLM 요약 생성 중…"):
+            keys_arg = None if all_selected else tuple(selected_keys)
+            hub_llm = cached.institution_watch(keys_arg, with_llm_summary=True)
+        _render_common_moves(hub_llm.get("analysis") or {})
+    else:
+        st.caption("버튼을 누르면 기관별 공통 패턴·차이를 LLM이 요약합니다 (자동 실행 안 함).")
+
+
+def render():
+    st.title("⭐ 관심종목")
+    st.caption("직접 추가한 종목을 보여주는 페이지 · 표시 전용 · "
+              "추가/삭제는 텔레그램 봇 `/watch add|remove`")
 
     rows = data.load_watchlist()
-    if not rows:
-        st.info("관심종목이 비어 있습니다 — 봇에서 `/watch add TICKER 메모` 로 추가하거나 "
-                "기관 스냅샷 업데이트 또는 버핏 13F 신규편입 크론(매주 월요일)을 기다리세요.")
-        return
+    _watchlist_section(rows)
 
-    df = pd.DataFrame([{
-        "티커": r["ticker"], "종목": r["name"],
-        "추가 사유": r["reason"], "추가일": r["added_at"][:10] if r["added_at"] else "",
-    } for r in rows])
-
-    st.caption("🔍 **행을 클릭**하면 해당 종목 상세 분석으로 이동")
-    event = st.dataframe(
-        df, hide_index=True, width="stretch", on_select="rerun", selection_mode="single-row",
-    )
-    try:
-        sel = event.selection.rows
-    except Exception:
-        sel = []
-    if sel and sel[0] < len(rows):
-        picked = rows[sel[0]]["ticker"]
-        if picked and picked != st.session_state.get("ticker"):
-            st.session_state["ticker"] = picked
-            st.toast(f"종목 분석 → {picked}")
-            pg = st.session_state.get("_ticker_page")
-            if pg:
-                st.switch_page(pg)
-            else:
-                st.rerun()
+    st.divider()
+    show_hub = st.toggle("🏦 유명 투자자 비교 보기 (13F 스냅샷 — 펼치면 로드)",
+                         value=st.session_state.get("_watch_show_hub", False),
+                         key="_watch_show_hub")
+    if show_hub:
+        _institution_hub_section()
