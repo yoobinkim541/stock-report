@@ -87,3 +87,47 @@ def member_transactions(name: str | None, *, limit: int = 20) -> list[dict] | No
         "owner": r.get("owner"),
         "source_url": r.get("source_url"),
     } for r in matched[:limit]]
+
+
+def top_traded(days: int = 90, limit: int = 10) -> dict:
+    """최근 days 일 하원 공시 거래를 티커별로 묶어 매수/매도 상위 — 거래한 의원 수
+    내림차순(같으면 추정금액 합 내림차순). Exchange·티커 미상('--' 등)은 제외.
+    유빈님 요청(감사 후속, 2026-08-15)."""
+    from datetime import datetime, timedelta
+
+    cutoff = datetime.now() - timedelta(days=days)
+    rows = _load_all()
+
+    def _parse(d):
+        try:
+            return datetime.strptime(d or "", "%m/%d/%Y")
+        except ValueError:
+            return None
+
+    buckets = {"Purchase": {}, "Sale": {}}
+    for r in rows:
+        ticker = (r.get("ticker") or "").strip()
+        if not ticker or ticker == "--":
+            continue
+        tx_type = r.get("type")
+        if tx_type not in buckets:
+            continue
+        dt = _parse(r.get("transaction_date"))
+        if dt is None or dt < cutoff:
+            continue
+        entry = buckets[tx_type].setdefault(
+            ticker, {"ticker": ticker, "members": set(), "total_amount_mid": 0.0})
+        entry["members"].add(r.get("representative") or "?")
+        entry["total_amount_mid"] += float(r.get("amount_mid") or 0)
+
+    def _finalize(bucket: dict) -> list[dict]:
+        rows_out = [{
+            "ticker": e["ticker"],
+            "member_count": len(e["members"]),
+            "members": sorted(e["members"]),
+            "total_amount_mid": e["total_amount_mid"],
+        } for e in bucket.values()]
+        rows_out.sort(key=lambda r: (r["member_count"], r["total_amount_mid"]), reverse=True)
+        return rows_out[:limit]
+
+    return {"bought": _finalize(buckets["Purchase"]), "sold": _finalize(buckets["Sale"])}

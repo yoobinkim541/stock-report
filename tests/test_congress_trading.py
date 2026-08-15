@@ -91,6 +91,63 @@ def test_load_all_caches_to_disk_and_reuses_fresh_cache(monkeypatch, tmp_path):
     assert len(out) == len(_FIXTURE)
 
 
+def test_top_traded_groups_by_ticker_and_ranks_by_member_count(monkeypatch):
+    """감사 후속 — 유빈님 요청: 정치인들이 많이 매수·매도한 종목 리스트업."""
+    from datetime import datetime, timedelta
+    today = datetime.now()
+    recent = (today - timedelta(days=10)).strftime("%m/%d/%Y")
+    old = (today - timedelta(days=200)).strftime("%m/%d/%Y")
+
+    rows = [
+        {"representative": "Nancy Pelosi", "transaction_date": recent, "ticker": "NVDA",
+         "type": "Purchase", "amount_mid": 100000},
+        {"representative": "Mike Kelly", "transaction_date": recent, "ticker": "NVDA",
+         "type": "Purchase", "amount_mid": 20000},
+        {"representative": "Nancy Pelosi", "transaction_date": recent, "ticker": "GOOGL",
+         "type": "Purchase", "amount_mid": 50000},
+        {"representative": "Nancy Pelosi", "transaction_date": old, "ticker": "AMZN",
+         "type": "Purchase", "amount_mid": 999999},   # 기간 밖 — 제외
+        {"representative": "Mike Kelly", "transaction_date": recent, "ticker": "ABT",
+         "type": "Sale", "amount_mid": 8000},
+        {"representative": "Nancy Pelosi", "transaction_date": recent, "ticker": "--",
+         "type": "Purchase", "amount_mid": 1000},   # 티커 없음 — 제외
+        {"representative": "Nancy Pelosi", "transaction_date": recent, "ticker": "VSNT",
+         "type": "Exchange", "amount_mid": 15},   # 교환 — 제외
+    ]
+    monkeypatch.setattr(ct, "_load_all", lambda: rows)
+
+    out = ct.top_traded(days=90)
+
+    bought_tickers = [r["ticker"] for r in out["bought"]]
+    assert bought_tickers[0] == "NVDA"
+    nvda = out["bought"][0]
+    assert nvda["member_count"] == 2
+    assert set(nvda["members"]) == {"Nancy Pelosi", "Mike Kelly"}
+    assert "AMZN" not in bought_tickers
+    assert "--" not in bought_tickers
+
+    sold_tickers = [r["ticker"] for r in out["sold"]]
+    assert sold_tickers == ["ABT"]
+
+
+def test_top_traded_respects_limit(monkeypatch):
+    from datetime import datetime, timedelta
+    recent = (datetime.now() - timedelta(days=5)).strftime("%m/%d/%Y")
+    rows = [{"representative": f"Member {i}", "transaction_date": recent, "ticker": f"T{i}",
+            "type": "Purchase", "amount_mid": 1000} for i in range(15)]
+    monkeypatch.setattr(ct, "_load_all", lambda: rows)
+
+    out = ct.top_traded(days=90, limit=3)
+
+    assert len(out["bought"]) == 3
+
+
+def test_top_traded_empty_when_source_unavailable(monkeypatch):
+    monkeypatch.setattr(ct, "_load_all", lambda: [])
+    out = ct.top_traded(days=90)
+    assert out == {"bought": [], "sold": []}
+
+
 def test_load_all_graceful_on_network_failure(monkeypatch, tmp_path):
     monkeypatch.setattr(ct, "_CACHE_DIR", tmp_path)
 
