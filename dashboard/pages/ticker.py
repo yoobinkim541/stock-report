@@ -160,7 +160,7 @@ _TF = {"5분": "5m", "1시간": "1h", "2시간": "2h", "4시간": "4h",
 _TF_SPAN = {"5m": "최근 60일", "1h": "최근 2년", "2h": "최근 2년", "4h": "최근 2년"}
 _PERIODS = ["3mo", "6mo", "1y", "5y", "전체"]
 _PERIOD_DEFAULT_BY_TF = {"5m": "3mo", "1h": "6mo", "2h": "1y", "4h": "1y",
-                         "1d": "6mo", "1wk": "5y", "1mo": "5y"}
+                         "1d": "1y", "1wk": "5y", "1mo": "5y"}
 _MA_OPTS = [5, 10, 20, 60, 120, 200]
 _MA_DEFAULT = {"1d": [60, 120, 200], "1wk": [60, 120, 200],   # 요청 기본값
                "1mo": [5, 10, 20, 60, 120, 200], "5m": [20, 60], "1h": [20, 60]}
@@ -796,7 +796,7 @@ def _price_chart(ticker, hist, avg_cost, trades, fullscreen: bool = False,
     tf_label = ctf.segmented_control("봉", list(_TF), default="1일",
                                      label_visibility="collapsed", key="_chart_tf") or "1일"
     chart_types = [item for values in chart_workbench_ui.CHART_TYPE_GROUPS.values() for item in values]
-    kind_default = "heikin_ashi" if tf_label == "5분" else "line"
+    kind_default = "heikin_ashi" if tf_label == "5분" else "candlestick"
     kind = ckind.selectbox(
         "차트 종류",
         chart_types,
@@ -820,7 +820,7 @@ def _price_chart(ticker, hist, avg_cost, trades, fullscreen: bool = False,
     tf = _TF[tf_label]
     render_tf = tf
     period_key = f"_chart_period_{tf}"
-    period_default = _PERIOD_DEFAULT_BY_TF.get(tf, "6mo")
+    period_default = _PERIOD_DEFAULT_BY_TF.get(tf, "1y")
     period = cper.radio("기간", _PERIODS, index=_PERIODS.index(period_default), horizontal=True,
                         label_visibility="collapsed", key=period_key)
     view_days = {"3mo": 90, "6mo": 180, "1y": 365, "5y": 1825, "전체": None}[period]
