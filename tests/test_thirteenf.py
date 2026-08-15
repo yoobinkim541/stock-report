@@ -4,6 +4,7 @@ test_thirteenf.py — providers/thirteenf.py 13F 정보테이블 파싱 (무네�
 실측(2026-07): SEC 기술규격상 value 단위는 "천달러"지만 버크셔 실필링은 이미 달러
 단위로 신고돼 있었다 — 파서는 배율 변환 없이 raw 값을 그대로 쓴다(회귀 방지 포인트).
 """
+import json
 import os
 import sys
 
@@ -34,6 +35,26 @@ def test_filers_registry_includes_expanded_named_investors():
         assert key in thirteenf.FILERS, f"{key} 가 FILERS 에 없음"
         assert thirteenf.FILERS[key]["cik"] == cik, f"{key} CIK 불일치"
     assert "founders_fund" not in thirteenf.FILERS
+
+
+def test_latest_filing_meta_skip_walks_back_to_earlier_quarters(monkeypatch, tmp_path):
+    """감사 후속 — return_proxy(보유종목 변동 기반 수익률 추정) 계산에 직전 분기 필링이
+    필요해 latest_filing_meta 에 skip 파라미터 추가. 10-K 등 비13F 필링은 건너뛴다."""
+    monkeypatch.setattr(thirteenf, "_CACHE_DIR", tmp_path)
+    submissions = {
+        "filings": {"recent": {
+            "form": ["13F-HR", "10-K", "13F-HR", "13F-HR"],
+            "accessionNumber": ["acc-q3", "acc-10k", "acc-q2", "acc-q1"],
+            "filingDate": ["2026-08-14", "2026-07-01", "2026-05-15", "2026-02-14"],
+            "primaryDocument": ["doc3.xml", "doc10k.xml", "doc2.xml", "doc1.xml"],
+        }}
+    }
+    monkeypatch.setattr(thirteenf, "_get", lambda url: json.dumps(submissions).encode())
+
+    assert thirteenf.latest_filing_meta("berkshire")["accession"] == "acc-q3"
+    assert thirteenf.latest_filing_meta("berkshire", skip=1)["accession"] == "acc-q2"
+    assert thirteenf.latest_filing_meta("berkshire", skip=2)["accession"] == "acc-q1"
+    assert thirteenf.latest_filing_meta("berkshire", skip=3) is None
 
 
 def _info_table_xml(rows: list[dict]) -> bytes:

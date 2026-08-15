@@ -65,8 +65,11 @@ def _cached_json(path: Path, ttl_h: float, url: str) -> dict | None:
         return None
 
 
-def latest_filing_meta(filer_key: str) -> dict | None:
-    """가장 최근 13F-HR 필링 메타 {cik, accession, filing_date, primary_doc}. 실패 시 None."""
+def latest_filing_meta(filer_key: str, *, skip: int = 0) -> dict | None:
+    """13F-HR 필링 메타 {cik, accession, filing_date, primary_doc}. 실패 시 None.
+
+    skip=0 이 최신, skip=1 이 그 직전 분기(return_proxy 계산용) — 13F-HR 이 아닌
+    필링(10-K 등)은 건너뛰고 세도록 카운트."""
     filer = FILERS.get(filer_key)
     if not filer:
         return None
@@ -79,14 +82,19 @@ def latest_filing_meta(filer_key: str) -> dict | None:
         return None
     recent = (sub.get("filings") or {}).get("recent") or {}
     forms = recent.get("form") or []
+    seen = 0
     for i, form in enumerate(forms):
-        if form == "13F-HR":
-            return {
-                "cik": cik,
-                "accession": recent["accessionNumber"][i],
-                "filing_date": recent["filingDate"][i],
-                "primary_doc": recent["primaryDocument"][i],
-            }
+        if form != "13F-HR":
+            continue
+        if seen < skip:
+            seen += 1
+            continue
+        return {
+            "cik": cik,
+            "accession": recent["accessionNumber"][i],
+            "filing_date": recent["filingDate"][i],
+            "primary_doc": recent["primaryDocument"][i],
+        }
     return None
 
 
@@ -198,9 +206,11 @@ def _resolve_tickers_by_cusip(cusips: list[str]) -> dict[str, str | None]:
     return {c: cache.get(c) for c in cusips}
 
 
-def latest_holdings(filer_key: str) -> dict | None:
-    """필러의 최신 13F 보유 스냅샷. {filer, cik, filing_date, accession, holdings:[...]}. 실패 시 None."""
-    meta = latest_filing_meta(filer_key)
+def latest_holdings(filer_key: str, *, skip: int = 0) -> dict | None:
+    """필러의 13F 보유 스냅샷. {filer, cik, filing_date, accession, holdings:[...]}. 실패 시 None.
+
+    skip=1 이면 직전 분기(return_proxy 계산용 — reports/institution_watch.py)."""
+    meta = latest_filing_meta(filer_key, skip=skip)
     if not meta:
         return None
     url = _info_table_url(meta["cik"], meta["accession"], meta["primary_doc"])

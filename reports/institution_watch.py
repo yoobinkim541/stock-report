@@ -193,16 +193,64 @@ def _normalize_seed_snapshot(meta: dict, row: dict) -> dict:
     return snapshot
 
 
-def _normalize_13f_snapshot(meta: dict, raw: dict) -> dict:
+_RETURN_PROXY_MIN_COVERAGE = 0.20   # 연속보유 비중이 이보다 얇으면 대부분 물갈이라 신뢰 불가
+
+
+def _compute_return_proxy(current: list[dict] | None, prior: list[dict] | None) -> float | None:
+    """연속 보유 종목만의 가중평균 가격변동(분수, 0.0801=+8.01%) — 13F 자체 value_usd/shares 로
+    주당가를 역산해 산출(외부 가격 API 불필요). 신규 편입·전량 청산은 제외(매매를 수익으로
+    오인하는 함정 방지 — 포트폴리오 TWR 미기록 현금흐름 버그와 같은 계열). 유빈님 아이디어(감사 후속).
+
+    분수 단위로 반환 — portfolio_concentration 등 다른 _fmt_pct 렌더 필드와 동일 관례
+    (dashboard/pages/watchlist.py::_fmt_pct 가 ×100 해서 표시. 퍼센트로 반환하면 100배 부풀어 표시됨).
+
+    가중치는 직전 분기 포트폴리오 내 비중, 연속보유 부분집합으로 재정규화한다(포트 전체가
+    아니라 "그때 그 종목들만" 얼마나 움직였는지). 연속보유 비중이 _RETURN_PROXY_MIN_COVERAGE
+    미만이면(대부분 리밸런싱) 표본이 너무 얇아 None.
+    """
+    prior_by_cusip = {p["cusip"]: p for p in (prior or []) if p.get("cusip")}
+    prior_total = sum(float(p.get("value_usd") or 0) for p in (prior or []))
+    if not prior_by_cusip or prior_total <= 0:
+        return None
+    weighted_sum = 0.0
+    weight_total = 0.0
+    for c in (current or []):
+        p = prior_by_cusip.get(c.get("cusip"))
+        if not p:
+            continue
+        p_shares, c_shares = float(p.get("shares") or 0), float(c.get("shares") or 0)
+        p_value, c_value = float(p.get("value_usd") or 0), float(c.get("value_usd") or 0)
+        if p_shares <= 0 or c_shares <= 0 or p_value <= 0:
+            continue
+        prior_per_share = p_value / p_shares
+        if prior_per_share <= 0:
+            continue
+        current_per_share = c_value / c_shares
+        w = p_value / prior_total
+        weighted_sum += (current_per_share / prior_per_share - 1) * w
+        weight_total += w
+    if weight_total < _RETURN_PROXY_MIN_COVERAGE:
+        return None
+    return round(weighted_sum / weight_total, 4)
+
+
+def _normalize_13f_snapshot(meta: dict, raw: dict, *, prior: dict | None = None) -> dict:
     holdings = raw.get("holdings") or []
     concentration = None
     if holdings:
         top_weights = [float(h.get("weight_pct") or 0.0) for h in holdings[:5]]
         concentration = round(sum(top_weights) / 100.0, 4)
+    return_proxy = _compute_return_proxy(holdings, (prior or {}).get("holdings"))
     notes = [
         f"Latest 13F filing date: {raw.get('filing_date')}" if raw.get("filing_date") else "Latest 13F snapshot.",
         "13F data is delayed and does not disclose cash or complete derivatives exposure.",
     ]
+    if return_proxy is not None:
+        notes.append(
+            "Return proxy = weighted price return of positions held in both the latest and prior "
+            "13F snapshot (price inferred from each filing's own value/shares, no external price feed). "
+            "Excludes new buys, full exits, cash, shorts, and intra-quarter trading — an approximation, "
+            "not an audited return.")
     snapshot = {
         "institution_key": meta["key"],
         "display_name": raw.get("filer_name") or meta["display_name"],
@@ -215,7 +263,7 @@ def _normalize_13f_snapshot(meta: dict, raw: dict) -> dict:
         "cash_ratio": None,
         "options_exposure": None,
         "reported_return": None,
-        "return_proxy": None,
+        "return_proxy": return_proxy,
         "primary_sources": list(meta.get("primary_sources") or ["13f"]),
         "metric_capabilities": list(meta.get("metric_capabilities")
                                      or ["holdings", "concentration", "source_refs"]),
@@ -233,7 +281,7 @@ def _normalize_13f_snapshot(meta: dict, raw: dict) -> dict:
         "cash_ratio": "unavailable",
         "options_exposure": "unavailable",
         "reported_return": "unavailable",
-        "return_proxy": "unavailable",
+        "return_proxy": "proxy" if return_proxy is not None else "unavailable",
     }
     return snapshot
 
@@ -256,7 +304,8 @@ def latest_snapshot(institution_key: str) -> dict | None:
         raw = thirteenf.latest_holdings(institution_key)
         if not raw:
             return None
-        return _normalize_13f_snapshot(meta, raw)
+        prior = thirteenf.latest_holdings(institution_key, skip=1)
+        return _normalize_13f_snapshot(meta, raw, prior=prior)
     for row in _load_seed_rows():
         if row.get("key") == institution_key:
             return _normalize_seed_snapshot(meta, row)

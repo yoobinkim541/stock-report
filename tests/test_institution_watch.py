@@ -1,6 +1,8 @@
 import os
 import sys
 
+import pytest
+
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, ROOT)
 
@@ -40,7 +42,7 @@ def test_registry_expanded_investors_are_real_13f_not_seed_placeholders():
 def test_latest_snapshot_marks_unavailable_metrics(monkeypatch):
     from reports import institution_watch as iw
 
-    monkeypatch.setattr(iw.thirteenf, "latest_holdings", lambda key: {
+    monkeypatch.setattr(iw.thirteenf, "latest_holdings", lambda key, skip=0: {
         "filer": "berkshire",
         "filer_name": "Berkshire Hathaway (Warren Buffett)",
         "cik": "0001067983",
@@ -64,6 +66,114 @@ def test_latest_snapshot_marks_unavailable_metrics(monkeypatch):
     assert snapshot["availability_flags"]["options_exposure"] == "unavailable"
     assert snapshot["cash_ratio"] is None
     assert snapshot["options_exposure"] is None
+
+
+def test_compute_return_proxy_weights_continuously_held_price_return():
+    """감사 후속 — 유빈님 아이디어: 보유종목 변동으로 수익률 추정.
+
+    13F 자체의 value/shares 로 주당가를 역산해 연속 보유 종목만 가중평균(외부 가격
+    API 불필요). 신규편입(CCC)은 수익으로 오인하지 않도록 제외."""
+    from reports import institution_watch as iw
+
+    prior = [
+        {"cusip": "AAA", "value_usd": 100.0, "shares": 10.0},   # 주당 10
+        {"cusip": "BBB", "value_usd": 50.0, "shares": 5.0},     # 주당 10
+    ]
+    current = [
+        {"cusip": "AAA", "value_usd": 120.0, "shares": 10.0},   # 주당 12 (+20%)
+        {"cusip": "BBB", "value_usd": 45.0, "shares": 5.0},     # 주당 9  (-10%)
+        {"cusip": "CCC", "value_usd": 30.0, "shares": 3.0},     # 신규편입 — 제외
+    ]
+    # 가중치: AAA 100/150=2/3, BBB 50/150=1/3 → 2/3*0.20 + 1/3*(-0.10) = 0.10 (분수 단위)
+    out = iw._compute_return_proxy(current, prior)
+    assert out == pytest.approx(0.10, abs=0.0001)
+
+
+def test_compute_return_proxy_none_when_no_cusip_overlap():
+    from reports import institution_watch as iw
+
+    prior = [{"cusip": "AAA", "value_usd": 100.0, "shares": 10.0}]
+    current = [{"cusip": "ZZZ", "value_usd": 50.0, "shares": 5.0}]
+    assert iw._compute_return_proxy(current, prior) is None
+
+
+def test_compute_return_proxy_none_when_prior_missing():
+    from reports import institution_watch as iw
+
+    assert iw._compute_return_proxy([{"cusip": "AAA", "value_usd": 1.0, "shares": 1.0}], []) is None
+    assert iw._compute_return_proxy([], None) is None
+    assert iw._compute_return_proxy(None, None) is None
+
+
+def test_compute_return_proxy_none_when_coverage_too_thin():
+    """연속보유 비중이 대부분 물갈이(20% 미만)면 근사치를 신뢰할 수 없어 None."""
+    from reports import institution_watch as iw
+
+    prior = [
+        {"cusip": "AAA", "value_usd": 10.0, "shares": 1.0},
+        {"cusip": "BBB", "value_usd": 90.0, "shares": 9.0},
+    ]
+    current = [
+        {"cusip": "AAA", "value_usd": 11.0, "shares": 1.0},    # prior 의 10%만 연속보유
+        {"cusip": "CCC", "value_usd": 200.0, "shares": 20.0},  # BBB 전량청산, CCC 신규
+    ]
+    assert iw._compute_return_proxy(current, prior) is None
+
+
+def test_normalize_13f_snapshot_populates_return_proxy_when_prior_given():
+    from reports import institution_watch as iw
+
+    meta = {"key": "berkshire", "display_name": "Berkshire", "category": "holding_company",
+            "freshness": "fresh", "primary_sources": ["13f"],
+            "metric_capabilities": ["holdings"], "refresh_policy": "quarterly", "confidence": 0.95}
+    raw = {"filer_name": "Berkshire", "filing_date": "2026-08-14", "accession": "acc-2", "cik": "0001067983",
+          "total_value_usd": 120.0,
+          "holdings": [{"issuer": "APPLE", "cusip": "AAA", "ticker": "AAPL",
+                        "value_usd": 120.0, "shares": 10.0, "weight_pct": 100.0}]}
+    prior = {"holdings": [{"issuer": "APPLE", "cusip": "AAA", "value_usd": 100.0, "shares": 10.0}]}
+
+    snap = iw._normalize_13f_snapshot(meta, raw, prior=prior)
+
+    assert snap["return_proxy"] == pytest.approx(0.20)
+    assert snap["availability_flags"]["return_proxy"] == "proxy"
+    assert any("Return proxy" in n for n in snap["notes"])
+
+
+def test_normalize_13f_snapshot_return_proxy_none_without_prior():
+    from reports import institution_watch as iw
+
+    meta = {"key": "berkshire", "display_name": "Berkshire", "category": "holding_company",
+            "freshness": "fresh", "primary_sources": ["13f"],
+            "metric_capabilities": ["holdings"], "refresh_policy": "quarterly", "confidence": 0.95}
+    raw = {"filer_name": "Berkshire", "filing_date": "2026-08-14",
+          "holdings": [{"issuer": "APPLE", "cusip": "AAA", "value_usd": 120.0, "shares": 10.0, "weight_pct": 100.0}]}
+
+    snap = iw._normalize_13f_snapshot(meta, raw)
+
+    assert snap["return_proxy"] is None
+    assert snap["availability_flags"]["return_proxy"] == "unavailable"
+
+
+def test_latest_snapshot_fetches_prior_quarter_for_return_proxy(monkeypatch):
+    """latest_snapshot 이 13F 필러에 대해 직전 분기(skip=1)도 함께 가져와 return_proxy 계산."""
+    from reports import institution_watch as iw
+
+    calls = []
+
+    def fake_latest_holdings(key, skip=0):
+        calls.append(skip)
+        if skip == 0:
+            return {"filer_name": "Berkshire", "filing_date": "2026-08-14",
+                    "holdings": [{"cusip": "AAA", "value_usd": 120.0, "shares": 10.0, "weight_pct": 100.0}]}
+        return {"filer_name": "Berkshire", "filing_date": "2026-05-15",
+                "holdings": [{"cusip": "AAA", "value_usd": 100.0, "shares": 10.0, "weight_pct": 100.0}]}
+
+    monkeypatch.setattr(iw.thirteenf, "latest_holdings", fake_latest_holdings)
+
+    snapshot = iw.latest_snapshot("berkshire")
+
+    assert sorted(calls) == [0, 1]
+    assert snapshot["return_proxy"] == pytest.approx(0.20)
 
 
 def test_compare_institutions_keeps_missing_metrics_explicit():
@@ -155,7 +265,7 @@ def test_build_snapshot_digest_keeps_unverified_seed_pages_as_draft():
 def test_build_snapshot_digest_attaches_sec_provenance_for_13f(monkeypatch):
     from reports import institution_watch as iw
 
-    monkeypatch.setattr(iw.thirteenf, "latest_holdings", lambda key: {
+    monkeypatch.setattr(iw.thirteenf, "latest_holdings", lambda key, skip=0: {
         "filer": "berkshire",
         "filer_name": "Berkshire Hathaway (Warren Buffett)",
         "cik": "0001067983",
