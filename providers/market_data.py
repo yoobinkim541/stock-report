@@ -116,9 +116,16 @@ _HIST_CACHE: dict[tuple, tuple[float, "object"]] = {}
 _HIST_CACHE_TTL_S = 300
 
 
+def _ohlc_cache_root() -> Path:
+    override = os.getenv("STOCK_REPORT_OHLC_CACHE_DIR")
+    if override:
+        return Path(override)
+    return Path.home() / "reports" / "ml-cache" / "ohlc_cache"
+
+
 def _ohlc_disk_path(symbol: str, period: str) -> Path:
     safe = "".join(c if (c.isalnum() or c in ".-_") else "_" for c in str(symbol))
-    return Path.home() / "reports" / "ml-cache" / "ohlc_cache" / f"{safe}__{period}.parquet"
+    return _ohlc_cache_root() / f"{safe}__{period}.parquet"
 
 
 def load_cached_ohlc(symbol: str, period: str = "1y"):

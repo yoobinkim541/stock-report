@@ -13,7 +13,10 @@ pytest는 테스트 모듈 수집(import)보다 conftest를 먼저 import하므�
 가리킨다. (세션 픽스처는 수집 이후 실행되어 import-time 접근을 놓침.)
 """
 import os
+import shutil
 import tempfile
+
+import pytest
 
 # ── import 시점에 즉시 격리 (테스트 모듈 수집 전) ────────────────────────
 _TMPDIR = tempfile.mkdtemp(prefix="stock_report_test_db_")
@@ -29,3 +32,21 @@ os.environ.setdefault("AGENT_CONSOLE_REPORTS_DIR", os.path.join(_TMPDIR, "report
 os.environ.setdefault("AGENT_CONSOLE_SOURCE_CACHE_DIR", os.path.join(_TMPDIR, "reports", "source-cache"))
 os.environ.setdefault("AGENT_CONSOLE_ML_DATA_DIR", os.path.join(_TMPDIR, "reports", "ml-data"))
 os.environ.setdefault("AGENT_CONSOLE_SHARED_MEMORY_DIR", os.path.join(_TMPDIR, "shared-memory"))
+# OHLC 디스크 캐시(providers.market_data)도 tmp 격리 — 이전엔 실제
+# ~/reports/ml-cache/ohlc_cache/ 를 공유해 테스트끼리(같은 티커) 캐시가 새어
+# 다른 테스트의 monkeypatch 를 무시하고 stale parquet 를 읽는 순서 의존 실패가 났음.
+os.environ.setdefault("STOCK_REPORT_OHLC_CACHE_DIR", os.path.join(_TMPDIR, "ohlc_cache"))
+
+
+@pytest.fixture(autouse=True)
+def _isolate_ohlc_cache():
+    """매 테스트 전에 OHLC 디스크 캐시를 비운다.
+
+    여러 테스트가 같은 자리표시 티커("TST" 등)를 재사용하는 경우, 위 tmp
+    격리(세션 전체 공유)만으로는 한 테스트가 쓴 parquet 를 다음 테스트가
+    그대로 읽어 monkeypatch 를 무시해버리는 테스트 간 누수를 막지 못한다.
+    """
+    ohlc_dir = os.environ.get("STOCK_REPORT_OHLC_CACHE_DIR")
+    if ohlc_dir and os.path.isdir(ohlc_dir):
+        shutil.rmtree(ohlc_dir, ignore_errors=True)
+    yield
