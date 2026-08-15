@@ -14,6 +14,7 @@ from __future__ import annotations
 import os
 import sys
 
+import pandas as pd
 import pytest
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -132,3 +133,64 @@ def test_toggling_hub_on_loads_institutions_without_llm_call(monkeypatch):
     caption_body = " ".join(str(c.value) for c in at.caption)
     assert "버튼을 누르면" in caption_body, "LLM 버튼 안 눌렀는데 요약이 이미 뜸 — 지연 로딩 위반"
     assert True not in calls, "with_llm_summary=True 로 호출됨 — 버튼 안 눌렀는데 LLM 요청됨"
+
+
+def test_congress_section_hidden_until_hub_toggle_on(monkeypatch):
+    """정치인 거래 섹션도 기관허브와 같은 토글 뒤에 있어 첫 렌더에 실행되면 안 된다."""
+    from dashboard import cached as _cached
+
+    monkeypatch.setattr(data, "load_watchlist", lambda: _ROWS)
+    monkeypatch.setattr(cached, "watchlist_quotes", lambda tickers: {})
+
+    def _boom(*a, **k):
+        raise AssertionError("congress_trading 호출됨 — 허브 토글 꺼진 상태에서 호출되면 안 됨")
+    monkeypatch.setattr(_cached, "congress_trading", _boom)
+
+    at = AppTest.from_string(_RUN_SCRIPT, default_timeout=30)
+    at.run()
+    assert not at.exception, str(at.exception)
+
+
+def test_congress_section_shows_transactions_for_searched_member(monkeypatch):
+    from dashboard import cached as _cached
+
+    monkeypatch.setattr(data, "load_watchlist", lambda: _ROWS)
+    monkeypatch.setattr(cached, "watchlist_quotes", lambda tickers: {})
+    monkeypatch.setattr(cached, "institution_watch",
+                        lambda *a, **k: {"institutions": [], "comparison": {}, "analysis": {}})
+
+    def _fake_congress_trading(name):
+        assert name == "Pelosi"
+        return [{"date": "01/16/2026", "ticker": "GOOGL", "asset": "Alphabet Inc.",
+                 "type": "Purchase", "amount": "$500,001 - $1,000,000", "owner": "Spouse"}]
+    monkeypatch.setattr(_cached, "congress_trading", _fake_congress_trading)
+
+    at = AppTest.from_string(_RUN_SCRIPT, default_timeout=30)
+    at.run()
+    at.toggle(key="_watch_show_hub").set_value(True).run()
+    at.text_input(key="_congress_member_search").set_value("Pelosi").run()
+
+    assert not at.exception, str(at.exception)
+    dataframes = [df.value for df in at.dataframe]
+    assert any("GOOGL" in df.get("티커", pd.Series(dtype=object)).tolist() for df in dataframes)
+
+
+def test_congress_section_no_op_caption_when_search_blank(monkeypatch):
+    from dashboard import cached as _cached
+
+    monkeypatch.setattr(data, "load_watchlist", lambda: _ROWS)
+    monkeypatch.setattr(cached, "watchlist_quotes", lambda tickers: {})
+    monkeypatch.setattr(cached, "institution_watch",
+                        lambda *a, **k: {"institutions": [], "comparison": {}, "analysis": {}})
+
+    def _boom(*a, **k):
+        raise AssertionError("검색어 없는데 congress_trading 호출됨")
+    monkeypatch.setattr(_cached, "congress_trading", _boom)
+
+    at = AppTest.from_string(_RUN_SCRIPT, default_timeout=30)
+    at.run()
+    at.toggle(key="_watch_show_hub").set_value(True).run()
+
+    assert not at.exception, str(at.exception)
+    caption_body = " ".join(str(c.value) for c in at.caption)
+    assert "의원 이름을 입력하면" in caption_body

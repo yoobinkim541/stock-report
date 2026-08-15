@@ -489,6 +489,29 @@ def test_views_watchlist_quotes_graceful_on_exception(monkeypatch):
     assert views.watchlist_quotes(("PLTR",)) == {}
 
 
+def test_views_congress_trading_delegates_to_provider(monkeypatch):
+    from dashboard import views
+    from providers import congress_trading as ct
+
+    monkeypatch.setattr(ct, "member_transactions",
+                        lambda name: [{"ticker": "GOOGL", "date": "01/16/2026", "type": "Purchase"}])
+
+    out = views.congress_trading("Pelosi")
+
+    assert out[0]["ticker"] == "GOOGL"
+
+
+def test_views_congress_trading_graceful_on_exception(monkeypatch):
+    from dashboard import views
+    from providers import congress_trading as ct
+
+    def _boom(name):
+        raise RuntimeError("network down")
+    monkeypatch.setattr(ct, "member_transactions", _boom)
+
+    assert views.congress_trading("Pelosi") is None
+
+
 def test_institution_watch_summary_skips_llm_by_default(monkeypatch):
     """감사 후속 — 관심종목 페이지 초기 렌더가 LLM(최대 20초) 대기로 막히던 문제.
 

@@ -70,6 +70,11 @@ def watchlist_quotes(tickers):
     return views.watchlist_quotes(tickers)
 
 
+@st.cache_data(ttl=1800, show_spinner=False)
+def congress_trading(name):
+    return views.congress_trading(name)
+
+
 @st.cache_data(ttl=900, show_spinner=False)
 def world_timeline(t):
     return views.world_timeline(t)

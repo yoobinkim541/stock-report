@@ -182,6 +182,30 @@ def _watchlist_section(rows: list[dict]) -> None:
                 st.rerun()
 
 
+_TX_TYPE_LABELS = {"Purchase": "매수", "Sale": "매도", "Exchange": "교환"}
+
+
+def _congress_trading_section() -> None:
+    st.markdown("### 🏛️ 정치인 최근 거래 (미 하원, STOCK Act 공시)")
+    name = st.text_input("의원 이름 검색 (영문)", key="_congress_member_search",
+                         placeholder="예: Pelosi")
+    if not name.strip():
+        st.caption("의원 이름을 입력하면 최근 공시 거래를 보여줍니다 · 상원은 아직 미지원")
+        return
+    rows = cached.congress_trading(name.strip())
+    if not rows:
+        st.caption(f"'{name}' 에 해당하는 하원의원 공시 거래를 찾지 못했습니다.")
+        return
+    table = pd.DataFrame([{
+        "일자": r.get("date"), "티커": r.get("ticker") or "—", "종목": r.get("asset"),
+        "구분": _TX_TYPE_LABELS.get(r.get("type"), r.get("type")),
+        "금액(구간)": r.get("amount"), "명의": r.get("owner"),
+    } for r in rows])
+    st.dataframe(table, hide_index=True, width="stretch")
+    st.caption("금액은 정확한 액수가 아니라 신고 구간(bracket) · 공시 지연(최대 45일) 반영 "
+              "· 정보·표시용 — 매매 신호 아님")
+
+
 def _institution_hub_section() -> None:
     hub_all = cached.institution_watch()
     all_rows = list(hub_all.get("institutions") or [])
@@ -242,3 +266,5 @@ def render():
                          key="_watch_show_hub")
     if show_hub:
         _institution_hub_section()
+        st.divider()
+        _congress_trading_section()

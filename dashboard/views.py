@@ -1348,6 +1348,15 @@ def watchlist_quotes(tickers) -> dict:
         return {}
 
 
+def congress_trading(name: str) -> list[dict] | None:
+    """하원의원 이름(부분일치) 최근 공시 거래 — providers.congress_trading 위임. graceful None."""
+    try:
+        from providers import congress_trading as ct
+        return ct.member_transactions(name)
+    except Exception:
+        return None
+
+
 def institution_watch_summary(keys=None, *, with_llm_summary: bool = False) -> dict:
     """기관투자자 허브용 비교 스냅샷 (watchlist UI 전용).
 
