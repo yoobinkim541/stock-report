@@ -111,6 +111,7 @@ def test_kr_seed_etf_codes_are_recognized(monkeypatch):
     monkeypatch.setattr(E, "_latest_kr_market_row", lambda code: {})
     monkeypatch.setattr(E, "_kr_yfinance_overlay", lambda out: None)
     monkeypatch.setattr(E, "_kr_pykrx_overlay", lambda out: None)
+    monkeypatch.setattr(E, "_kr_kis_overlay", lambda out: None)
 
     out = E.kr_etf_summary("0167A0.KS")
     assert out["is_etf"] is True
@@ -137,6 +138,7 @@ def test_kr_etf_summary_fallback_shape(monkeypatch):
     })
     monkeypatch.setattr(E, "_kr_yfinance_overlay", lambda out: None)
     monkeypatch.setattr(E, "_kr_pykrx_overlay", lambda out: None)
+    monkeypatch.setattr(E, "_kr_kis_overlay", lambda out: None)
 
     out = E.kr_etf_summary("A069500")
 
@@ -165,3 +167,87 @@ def test_apply_kr_etf_metric_table_merges_nav_deviation_and_tracking_error():
     assert out["premium_pct"] == -0.13
     assert out["tracking_error_pct"] == 0.08
     assert out["total_assets"] == 7_800_000_000_000
+
+
+def test_kr_kis_overlay_fills_nav_premium_holdings_from_live_snapshot(monkeypatch):
+    """감사 후속 — 이 서버에서 pykrx(_kr_pykrx_overlay)가 KRX 403으로 죽어있어,
+    KIS 실계좌 시세(kis_quote.get_etf_snapshot)로 NAV·괴리율·구성종목을 대신 채운다."""
+    from providers import kis_quote
+
+    def fake_snapshot(symbol):
+        assert symbol == "069500"
+        return {
+            "price": 110060.0, "nav": 110362.62, "premium_pct": -0.2742,
+            "total_assets": 254325.0,
+            "holdings": [
+                {"code": "005930", "name": "삼성전자", "weight_pct": 34.47, "price": 274500.0, "chg_pct": 2.43},
+                {"code": "000660", "name": "SK하이닉스", "weight_pct": 25.15, "price": 1645000.0, "chg_pct": 3.26},
+            ],
+        }
+    monkeypatch.setattr(kis_quote, "get_etf_snapshot", fake_snapshot)
+
+    out = {"stock_code": "069500"}
+    E._kr_kis_overlay(out)
+
+    assert out["nav"] == 110362.62
+    assert out["price"] == 110060.0
+    assert out["premium_pct"] == -0.2742
+    assert out["total_assets"] == 254325.0
+    assert out["top_holdings_source"] == "KIS"
+    assert out["top_holdings"][0] == {"symbol": "005930", "name": "삼성전자", "pct": 34.47,
+                                       "shares": None, "amount": None}
+
+
+def test_kr_kis_overlay_does_not_override_existing_top_holdings(monkeypatch):
+    """pykrx 가 먼저 top_holdings 를 채웠다면(다른 배포 환경) KIS 로 덮어쓰지 않는다."""
+    from providers import kis_quote
+    monkeypatch.setattr(kis_quote, "get_etf_snapshot", lambda symbol: {
+        "price": 1.0, "nav": 1.0, "premium_pct": 0.0, "total_assets": 1.0,
+        "holdings": [{"code": "999999", "name": "무시돼야함", "weight_pct": 1.0}],
+    })
+
+    out = {"stock_code": "069500", "top_holdings": [{"symbol": "005930", "name": "기존값"}]}
+    E._kr_kis_overlay(out)
+
+    assert out["top_holdings"] == [{"symbol": "005930", "name": "기존값"}]
+
+
+def test_kr_kis_overlay_noop_when_snapshot_unavailable(monkeypatch):
+    from providers import kis_quote
+    monkeypatch.setattr(kis_quote, "get_etf_snapshot", lambda symbol: None)
+
+    out = {"stock_code": "069500"}
+    E._kr_kis_overlay(out)
+
+    assert out == {"stock_code": "069500"}
+
+
+def test_kr_kis_overlay_noop_without_stock_code():
+    out = {}
+    E._kr_kis_overlay(out)
+    assert out == {}
+
+
+def test_etf_summary_self_heals_stale_empty_kr_etf_cache(monkeypatch):
+    """감사 후속 — KIS 오버레이 도입 전(pykrx 죽어서 top_holdings/premium_pct 둘 다
+    빈) 12h 캐시가 남아있으면, 배포 후에도 새 데이터가 안 보이는 것을 방지해야 한다."""
+    stale = {"ticker": "069500.KS", "is_etf": True, "stock_code": "069500",
+             "top_holdings": [], "premium_pct": None}
+    monkeypatch.setattr(E, "_load_cache", lambda tk: stale)
+    monkeypatch.setattr(E, "_kr_etf_key", lambda tk: "069500.KS")
+    monkeypatch.setattr(E, "is_etf", lambda tk: True)
+    fresh = {"ticker": "069500.KS", "is_etf": True, "stock_code": "069500",
+             "top_holdings": [{"symbol": "005930", "name": "삼성전자"}], "premium_pct": -0.27}
+    monkeypatch.setattr(E, "kr_etf_summary", lambda tk: fresh)
+    monkeypatch.setattr(E, "_save_cache", lambda tk, data: None)
+
+    assert E.etf_summary("069500.KS") == fresh
+
+
+def test_etf_summary_keeps_cache_with_real_holdings(monkeypatch):
+    """이미 채워진(top_holdings 있음) 정상 캐시는 self-heal 대상이 아니어야 한다."""
+    good = {"ticker": "069500.KS", "is_etf": True, "stock_code": "069500",
+            "top_holdings": [{"symbol": "005930"}], "premium_pct": -0.27}
+    monkeypatch.setattr(E, "_load_cache", lambda tk: good)
+
+    assert E.etf_summary("069500.KS") == good

@@ -35,6 +35,7 @@ _OVRS_PRICE_URL = "/uapi/overseas-price/v1/quotations/price"
 _KR_VOLRANK_URL = "/uapi/domestic-stock/v1/quotations/volume-rank"
 _K200_FUTURES_PRICE_URL = "/uapi/domestic-futureoption/v1/quotations/inquire-price"
 _K200_FUTURES_BOARD_URL = "/uapi/domestic-futureoption/v1/quotations/display-board-futures"
+_ETF_COMPONENT_URL = "/uapi/etfetn/v1/quotations/inquire-component-stock-price"
 
 # 시세 조회 TR (읽기전용). 응답 필드명은 라이브 스모크 전 확정 금지.
 _TR_KR_PRICE = "FHKST01010100"    # 국내 현재가
@@ -43,6 +44,7 @@ _TR_OVRS_PRICE = "HHDFS00000300"  # 해외 현재가 (S6서 동작 확인된 TR)
 _TR_KR_VOLRANK = "FHPST01710000"  # 국내 거래량/거래대금 순위 (단기 스캐너용 — 조회 전용)
 _TR_FUTURES_PRICE = "FHMIF10000000"  # 국내 선물옵션 현재가
 _TR_FUTURES_BOARD = "FHPIF05030200"  # 국내옵션전광판_선물
+_TR_ETF_COMPONENT = "FHKST121600C0"  # ETF 구성종목시세 (NAV·괴리율·구성종목 통합, 라이브 확인됨)
 
 _TOKEN_FILE = os.path.expanduser("~/.cache/kis_quote_token.json")
 _token_cache: dict = {"token": None, "exp": 0.0}
@@ -160,6 +162,46 @@ def parse_futureoption_price(output: dict) -> dict:
         "volume": _maybe_f(output, "acml_vol"),
     }
     return {k: v for k, v in out.items() if v is not None}
+
+
+def parse_etf_snapshot(output1: dict) -> dict:
+    """ETF 구성종목시세 output1 → NAV·괴리율·순자산총액 (라이브 확인 필드명).
+
+    stck_prpr=현재가·nav=NAV·etf_ntas_ttam=순자산총액·etf_cnfg_issu_cnt=구성종목수.
+    괴리율(premium_pct) = (시장가-NAV)/NAV*100 — KIS 응답엔 괴리율 필드가 직접 없어 계산.
+    """
+    price = _maybe_f(output1, "stck_prpr")
+    nav = _maybe_f(output1, "nav")
+    out = {
+        "price": price,
+        "nav": nav,
+        "total_assets": _maybe_f(output1, "etf_ntas_ttam"),
+        "component_count": _maybe_f(output1, "etf_cnfg_issu_cnt"),
+    }
+    if price is not None and nav:
+        out["premium_pct"] = round((price - nav) / nav * 100.0, 4)
+    return out
+
+
+def parse_etf_components(rows: list[dict], *, limit: int = 10) -> list[dict]:
+    """ETF 구성종목시세 output2 → 비중 상위 N (라이브 확인 필드명).
+
+    stck_shrn_iscd=종목코드·hts_kor_isnm=종목명·etf_cnfg_issu_rlim=구성비중%.
+    """
+    parsed = []
+    for r in rows or []:
+        code = str(r.get("stck_shrn_iscd") or "").strip()
+        if not code:
+            continue
+        parsed.append({
+            "code": code,
+            "name": str(r.get("hts_kor_isnm") or "").strip(),
+            "weight_pct": _maybe_f(r, "etf_cnfg_issu_rlim"),
+            "price": _maybe_f(r, "stck_prpr"),
+            "chg_pct": _maybe_f(r, "prdy_ctrt"),
+        })
+    parsed.sort(key=lambda x: x["weight_pct"] or 0, reverse=True)
+    return parsed[:limit]
 
 
 def select_k200_futures_code(rows: list[dict]) -> str | None:
@@ -390,3 +432,27 @@ def get_k200_futures() -> dict | None:
     if not parsed.get("price"):
         return None
     return {**parsed, "symbol": code, "ts": time.time(), "source": "kis_futureoption"}
+
+
+def get_etf_snapshot(symbol: str) -> dict | None:
+    """국내 ETF NAV·괴리율·구성종목 Top10 통합 조회 (죽은 pykrx 오버레이 대체).
+
+    반환 {price, nav, premium_pct, total_assets, component_count, holdings, ts, source}
+    또는 None(비활성/실패). holdings 는 비중(weight_pct) 내림차순 최대 10개.
+    """
+    if not is_enabled():
+        return None
+    h = _headers(_TR_ETF_COMPONENT)
+    if not h:
+        return None
+    j = _http_get(_QUOTE_BASE + _ETF_COMPONENT_URL, h, {
+        "FID_COND_MRKT_DIV_CODE": "J", "FID_COND_SCR_DIV_CODE": "11216",
+        "FID_INPUT_ISCD": symbol,
+    })
+    if not j:
+        return None
+    snap = parse_etf_snapshot(j.get("output1") or {})
+    if snap.get("nav") is None:
+        return None
+    snap["holdings"] = parse_etf_components(j.get("output2") or [])
+    return {**snap, "ts": time.time(), "source": "kis_rest"}

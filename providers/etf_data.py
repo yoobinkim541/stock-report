@@ -443,6 +443,43 @@ def _kr_pykrx_overlay(out: dict) -> None:
                 continue
 
 
+def _kr_kis_overlay(out: dict) -> None:
+    """KIS 실계좌 시세 API(NAV·괴리율·구성종목)로 보강 — 이 서버에서 pykrx
+    (_kr_pykrx_overlay)가 KRX 403으로 죽어있어 대신 사용 (감사 후속, 라이브 확인됨).
+
+    REALTIME_ENABLED=false 이거나 키가 없으면 kis_quote.get_etf_snapshot 이 그냥
+    None 을 반환해 무동작(graceful) — 이 함수 자체엔 별도 게이트 불필요.
+    tracking_error_pct 는 스냅샷 1건으론 계산 불가(추적오차는 시계열 통계) — 채우지
+    않는다. 총보수(expense_ratio)도 KIS 시세 API엔 없음 — 네이버 보강 대상.
+    """
+    code = out.get("stock_code")
+    if not code:
+        return
+    try:
+        from providers import kis_quote
+        snap = kis_quote.get_etf_snapshot(code)
+    except Exception:
+        snap = None
+    if not snap:
+        return
+    if snap.get("nav") is not None:
+        out["nav"] = snap["nav"]
+    if snap.get("price") is not None:
+        out["price"] = snap["price"]
+    if snap.get("premium_pct") is not None:
+        out["premium_pct"] = snap["premium_pct"]
+    if snap.get("total_assets") is not None:
+        out["total_assets"] = snap["total_assets"]
+    holdings = snap.get("holdings") or []
+    if holdings and not out.get("top_holdings"):
+        out["top_holdings"] = [
+            {"symbol": h["code"], "name": h["name"], "pct": h.get("weight_pct"),
+             "shares": None, "amount": None}
+            for h in holdings
+        ]
+        out["top_holdings_source"] = "KIS"
+
+
 def kr_etf_summary(ticker: str) -> dict:
     out = _kr_etf_base(ticker)
     if not out["is_etf"]:
@@ -455,6 +492,7 @@ def kr_etf_summary(ticker: str) -> dict:
         out["asof"] = str(row.get("Date"))[:10] if row.get("Date") is not None else None
     _kr_yfinance_overlay(out)
     _kr_pykrx_overlay(out)
+    _kr_kis_overlay(out)
     return out
 
 
@@ -469,6 +507,12 @@ def etf_summary(ticker: str) -> dict:
         # 구 캐시의 퍼센트 단위 TER(QQQI 68% 표시 버그) self-heal — 정규화는 멱등
         if cached.get("expense_ratio") is not None:
             cached["expense_ratio"] = norm_expense_ratio(cached["expense_ratio"])
+        # KIS 오버레이 도입 전 캐시(pykrx 죽어서 top_holdings/premium_pct 둘 다 빈
+        # KR ETF)는 12h 캐시에 그대로 남아있으면 새 데이터가 배포 후에도 안 보임 —
+        # 강제 재조회로 self-heal (감사 후속).
+        if cached.get("is_etf") and _kr_etf_key(tk) and not cached.get("top_holdings") and cached.get("premium_pct") is None:
+            cached = None
+    if cached is not None:
         return cached
 
     out: dict = {"ticker": tk, "is_etf": is_etf(tk)}

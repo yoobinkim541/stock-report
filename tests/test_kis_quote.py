@@ -168,3 +168,60 @@ def test_parse_futureoption_price_omits_missing_optional_fields():
 
     assert got["price"] == 425.5
     assert "kospi200_index" not in got
+
+
+# ── ETF NAV·괴리율·구성종목 (라이브 스모크로 확인된 실제 필드명 기반) ────────────
+
+def test_parse_etf_snapshot_computes_premium_pct():
+    """KODEX200(069500) 라이브 응답 기반 — KIS 는 괴리율 필드를 직접 안 줘서 계산."""
+    got = kq.parse_etf_snapshot({
+        "stck_prpr": "110060", "nav": "110362.62",
+        "etf_ntas_ttam": "254325", "etf_cnfg_issu_cnt": "200",
+    })
+    assert got["price"] == 110060.0
+    assert got["nav"] == 110362.62
+    assert got["total_assets"] == 254325.0
+    assert got["component_count"] == 200.0
+    assert got["premium_pct"] == pytest.approx(-0.2742, abs=1e-3)
+
+
+def test_parse_etf_snapshot_omits_premium_when_nav_missing():
+    got = kq.parse_etf_snapshot({"stck_prpr": "110060"})
+    assert got["nav"] is None
+    assert "premium_pct" not in got
+
+
+def test_parse_etf_components_sorts_by_weight_and_limits():
+    rows = [
+        {"stck_shrn_iscd": "402340", "hts_kor_isnm": "SK스퀘어", "stck_prpr": "1154000",
+         "prdy_ctrt": "3.31", "etf_cnfg_issu_rlim": "5.00"},
+        {"stck_shrn_iscd": "005930", "hts_kor_isnm": "삼성전자", "stck_prpr": "274500",
+         "prdy_ctrt": "2.43", "etf_cnfg_issu_rlim": "34.47"},
+        {"stck_shrn_iscd": "000660", "hts_kor_isnm": "SK하이닉스", "stck_prpr": "1645000",
+         "prdy_ctrt": "3.26", "etf_cnfg_issu_rlim": "25.15"},
+    ]
+    got = kq.parse_etf_components(rows, limit=2)
+    assert [r["code"] for r in got] == ["005930", "000660"]
+    assert got[0]["name"] == "삼성전자" and got[0]["weight_pct"] == 34.47
+
+
+def test_parse_etf_components_skips_rows_without_code():
+    assert kq.parse_etf_components([{"hts_kor_isnm": "누락"}]) == []
+
+
+def test_get_etf_snapshot_disabled_or_no_key_returns_none(monkeypatch, tmp_path):
+    monkeypatch.delenv("REALTIME_ENABLED", raising=False)
+    assert kq.get_etf_snapshot("069500") is None
+
+    monkeypatch.setenv("REALTIME_ENABLED", "true")
+    monkeypatch.delenv("KOREA_API_KEY", raising=False)
+    monkeypatch.delenv("KOREA_API_SECRET", raising=False)
+    monkeypatch.setattr(kq, "_TOKEN_FILE", str(tmp_path / "none.json"))
+    monkeypatch.setattr(kq, "_token_cache", {"token": None, "exp": 0.0})
+
+    def _boom(*a, **k):
+        raise AssertionError("네트워크 호출 발생 — fail-closed 위반")
+    monkeypatch.setattr(kq.requests, "get", _boom)
+    monkeypatch.setattr(kq.requests, "post", _boom)
+
+    assert kq.get_etf_snapshot("069500") is None
