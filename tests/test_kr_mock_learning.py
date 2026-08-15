@@ -135,6 +135,10 @@ def test_backfill_excludes_unfilled_decisions(tmp_path):
 def test_default_price_fn_uses_cached_ohlc_when_yfinance_unavailable(tmp_path, monkeypatch):
     """학습 크론은 로컬 OHLC 캐시를 먼저 사용해야 네트워크 없이도 outcome 이 성숙한다."""
     monkeypatch.setenv("HOME", str(tmp_path))
+    # providers.market_data 의 OHLC 캐시는 STOCK_REPORT_OHLC_CACHE_DIR 를 HOME 보다
+    # 우선하므로(테스트 간 격리용, 감사 후속 #36), 이 테스트가 쓰는 캐시 경로도
+    # 같은 env var 로 맞춰야 _default_price_fn 이 실제로 읽어간다.
+    monkeypatch.setenv("STOCK_REPORT_OHLC_CACHE_DIR", str(tmp_path / "reports" / "ml-cache" / "ohlc_cache"))
     _write_cached_ohlc(tmp_path, "005930.KS", [100, 101, 102, 103, 104])
     _write_cached_ohlc(tmp_path, "^KS11", [200, 200, 200, 200, 200])
 
