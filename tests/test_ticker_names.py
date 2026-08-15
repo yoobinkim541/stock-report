@@ -33,6 +33,16 @@ def test_resolve_alias_and_kr():
     assert ticker_names.resolve("005930.KS") == "005930.KS"
 
 
+def test_resolve_spacex():
+    """감사 후속 — SpaceX 2026-06-12 나스닥 상장(SPCX). 큐레이트 시드에 없어 이름 검색이
+    안 되던 문제(티커 직접 입력만 통과)."""
+    assert ticker_names.resolve("스페이스엑스") == "SPCX"
+    assert ticker_names.resolve("spacex") == "SPCX"
+    assert ticker_names.resolve("SPCX") == "SPCX"
+    assert ("SPCX", "SpaceX") in ticker_names.search("스페이스엑스") or \
+        any(tk == "SPCX" for tk, _ in ticker_names.search("스페이스엑스"))
+
+
 def test_resolve_unknown_returns_none():
     assert ticker_names.resolve("존재하지않는종목") is None
     assert ticker_names.resolve("") is None

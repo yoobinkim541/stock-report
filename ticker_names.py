@@ -61,7 +61,7 @@ EN: dict[str, str] = {
     # ── 산업·에너지 ──
     "XOM": "Exxon Mobil", "CVX": "Chevron", "CAT": "Caterpillar", "BA": "Boeing",
     "GE": "GE Aerospace", "HON": "Honeywell", "UPS": "UPS", "RTX": "RTX",
-    "LMT": "Lockheed Martin",
+    "LMT": "Lockheed Martin", "SPCX": "SpaceX",  # 2026-06-12 나스닥 상장
     # ── 테크·통신 ──
     "IBM": "IBM", "UBER": "Uber", "ABNB": "Airbnb", "PYPL": "PayPal",
     "COIN": "Coinbase", "RIVN": "Rivian", "F": "Ford", "GM": "General Motors",
@@ -181,6 +181,7 @@ KO: dict[str, tuple[str, ...]] = {
     "UPS": ("유피에스", "UPS"),
     "RTX": ("레이시온", "RAYTHEON"),
     "LMT": ("록히드마틴", "록히드", "LOCKHEED"),
+    "SPCX": ("스페이스엑스", "스페이스 엑스", "SPACEX"),
     # ── 테크·통신 ──
     "IBM": ("아이비엠",),
     "UBER": ("우버",),
