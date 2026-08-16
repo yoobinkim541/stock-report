@@ -312,6 +312,13 @@ _TEMPLATE = r"""
     return idx;
   }
 
+  function storedRangeToAxis(range) {             // 저장 범위 → 현재 축 좌표
+    if (!range || range.length < 2 || !categoryX) return range;
+    const x0 = rangeValueToMs(range[0]), x1 = rangeValueToMs(range[1]);
+    if (x0 == null || x1 == null) return null;
+    return [rangeMsToAxis(x0), rangeMsToAxis(x1)];
+  }
+
   function publishVisibleRange(xr) {
     if (!rangeSyncKey || !xr || !(xr[1] > xr[0])) return;
     try {
@@ -1786,16 +1793,17 @@ _TEMPLATE = r"""
     const last = bounds.length ? bounds[bounds.length - 1][0] : null;
     const freshView = loadFreshView();           // ⚡자동갱신·설정변경 직후 = 보던 위치 복원
     if (freshView) {
-      guard++;                              // 저장된 원문 그대로 — 재직렬화 왕복 금지
-      Plotly.relayout(gd, {"xaxis.range": [freshView[0], freshView[1]]})
+      const axisView = storedRangeToAxis(freshView) || freshView;
+      guard++;                              // datetime 원문 유지 · category 는 봉 인덱스로 변환
+      Plotly.relayout(gd, {"xaxis.range": axisView})
         .then(() => { unguard(); rescale(); });
     } else if (last && @@VIEW_MS@@) {            // 초기 표시창 (기간 라디오)
       const x0 = last - @@VIEW_MS@@;
       const first = bounds[0][0];
       if (x0 > first) {
         guard++;
-        Plotly.relayout(gd, {"xaxis.range": [new Date(x0).toISOString(),
-                                             new Date(last + @@VIEW_MS@@ * 0.02).toISOString()]})
+        Plotly.relayout(gd, {"xaxis.range": [rangeMsToAxis(x0),
+                                             rangeMsToAxis(last + @@VIEW_MS@@ * 0.02)]})
           .then(() => { unguard(); rescale(); });
       } else {
         // 뷰 구간(기간 라디오)이 보유 데이터 전체를 덮으면(x0<=first) xaxis.range 를

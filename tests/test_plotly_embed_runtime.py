@@ -155,7 +155,7 @@ const savedKeys = Object.keys(_ls);
 if (savedKeys.length !== 1 || !savedKeys[0].startsWith("tndraw:")) fail("persist_save " + savedKeys);
 const savedDoc = JSON.parse(_ls[savedKeys[0]]);
 if (savedDoc.v !== 1 || savedDoc.shapes.length !== 1) fail("persist_doc");
-// 뷰 위치 복원 — plotly 원문(naive 문자열) 그대로 왕복해야 함 (Date 재직렬화 = KST −9h 밀림)
+// category 축 뷰 위치 복원 — 저장된 날짜를 실제 봉 인덱스로 바꿔야 첫 봉으로 튀지 않음.
 const NAIVE = ["2025-02-01 12:00:00", "2025-03-01 12:00:00"];
 _ls["tnview:TEST:1d:lin"] = JSON.stringify({view: NAIVE, ts: Date.now(), vm: 90 * 864e5});
 relayoutCalls.length = 0;
@@ -165,8 +165,10 @@ __SCRIPT__
 if (!gd || !gd.layout) fail("reload_gd");
 const vr = relayoutCalls.find((u) => u["xaxis.range"]);
 if (!vr) fail("view_restore_missing");
-if (vr["xaxis.range"][0] !== NAIVE[0] || vr["xaxis.range"][1] !== NAIVE[1])
-  fail("view_restore_reserialized " + JSON.stringify(vr["xaxis.range"]));
+if (typeof vr["xaxis.range"][0] !== "number" || typeof vr["xaxis.range"][1] !== "number")
+  fail("view_restore_not_category_indexes " + JSON.stringify(vr["xaxis.range"]));
+if (vr["xaxis.range"][0] !== 31 || vr["xaxis.range"][1] !== 59)
+  fail("view_restore_wrong_category_window " + JSON.stringify(vr["xaxis.range"]));
 const nRestored = (gd.layout.shapes || []).length - BASE.length;
 if (nRestored !== 1) fail("persist_restore n=" + nRestored);
 const rs = gd.layout.shapes[gd.layout.shapes.length - 1];
@@ -1050,3 +1052,81 @@ def test_initial_view_fits_y_axis_when_view_spans_all_available_data(tmp_path):
     r = subprocess.run([_NODE, str(runner)], capture_output=True, text=True, timeout=30)
     assert r.returncode == 0, f"init yfit fail: {r.stdout}\n{r.stderr}"
     assert "OK init-yfit" in r.stdout
+
+
+@pytest.mark.skipif(_NODE is None, reason="node 미설치 — 런타임 JS 검증 스킵")
+def test_category_axis_initial_view_uses_bar_indexes(tmp_path):
+    """장기 팬버퍼의 category 축에 날짜 문자열 range를 넣으면 Plotly가 첫 7봉을 표시한다.
+
+    기간은 timestamp로 계산하되 relayout 직전에는 category 봉 인덱스로 변환해야 한다.
+    """
+    idx = pd.bdate_range("2020-08-11", periods=1510, tz="America/New_York")
+    df = pd.DataFrame({
+        "Open": range(100, 1610), "High": range(101, 1611),
+        "Low": range(99, 1609), "Close": range(100, 1610),
+        "Volume": [1e6] * 1510,
+    }, index=idx)
+    fig = charts.price_chart(df, "CRM", kind="candlestick", show_volume=True,
+                             show_rsi=True, view_days=365)
+    html = plotly_embed.pannable_chart_html(
+        fig, df, height=680, view_days=365, vol_axis="yaxis2",
+        store_key="CRM:1d:lin:candlestick",
+    )
+    js = re.findall(r"<script>(.*?)</script>", html, re.S)[-1]
+    assertion = r"""
+const initRange = relayoutCalls.find(u => Array.isArray(u["xaxis.range"]));
+if (!initRange) fail("missing_initial_x_range");
+const xr = initRange["xaxis.range"];
+if (typeof xr[0] !== "number" || typeof xr[1] !== "number")
+  fail("category_range_not_indexes " + JSON.stringify(xr));
+if (!(xr[0] > 1000 && xr[1] >= 1509))
+  fail("category_range_wrong_window " + JSON.stringify(xr));
+console.log("OK category-initial-range");
+"""
+    runner = tmp_path / "category_initial_range.js"
+    runner.write_text(_INIT_YFIT_HARNESS.replace("__SCRIPT__", js) + assertion,
+                      encoding="utf-8")
+    r = subprocess.run([_NODE, str(runner)], capture_output=True, text=True, timeout=30)
+    assert r.returncode == 0, f"category initial range fail: {r.stdout}\n{r.stderr}"
+    assert "OK category-initial-range" in r.stdout
+
+
+@pytest.mark.skipif(_NODE is None, reason="node 미설치 — 런타임 JS 검증 스킵")
+def test_datetime_axis_fresh_view_preserves_raw_strings(tmp_path):
+    """비교 차트 datetime 축은 naive 문자열을 재직렬화하지 않아야 시간대가 밀리지 않는다."""
+    idx = pd.date_range("2025-01-01", periods=70, freq="D")
+    df = pd.DataFrame({
+        "Open": range(100, 170), "High": range(101, 171),
+        "Low": range(99, 169), "Close": range(100, 170),
+        "Volume": [1e6] * 70,
+    }, index=idx)
+    fig = charts.price_chart(
+        df, "TEST", kind="line", compare={"PEER": df["Close"] * 1.01}, view_days=90,
+    )
+    html = plotly_embed.pannable_chart_html(
+        fig, df, height=460, view_days=90, store_key="TEST:1d:pct:line",
+        category_x=False,
+    )
+    js = re.findall(r"<script>(.*?)</script>", html, re.S)[-1]
+    seeded = (
+        'const _ls = {"tnview:TEST:1d:pct:line": JSON.stringify({'
+        'view: ["2025-02-01 12:00:00", "2025-03-01 12:00:00"], '
+        'ts: Date.now(), vm: 90 * 864e5})};'
+    )
+    harness = (_INIT_YFIT_HARNESS
+               .replace("const _ls = {};", seeded)
+               .replace("if (rafCalls < 1) fail", "if (false && rafCalls < 1) fail")
+               .replace("__SCRIPT__", js))
+    harness += r"""
+const restored = relayoutCalls.find(u => Array.isArray(u["xaxis.range"]));
+if (!restored) fail("datetime_restore_missing");
+const dx = restored["xaxis.range"];
+if (dx[0] !== "2025-02-01 12:00:00" || dx[1] !== "2025-03-01 12:00:00")
+  fail("datetime_restore_reserialized " + JSON.stringify(dx));
+console.log("OK datetime-raw-restore");
+"""
+    runner = tmp_path / "datetime_fresh_view.js"
+    runner.write_text(harness, encoding="utf-8")
+    r = subprocess.run([_NODE, str(runner)], capture_output=True, text=True, timeout=30)
+    assert r.returncode == 0, f"datetime fresh view fail: {r.stdout}\n{r.stderr}"
+    assert "OK datetime-raw-restore" in r.stdout
