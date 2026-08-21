@@ -99,21 +99,22 @@ def eval_policy(oos_rows: list[dict], params: dict, max_positions: int = 5) -> d
 def _default_price_fn(ticker: str, start_date: str, horizon: int):
     """보유기간 (종목수익, QQQ수익, 종목MDD, QQQ MDD). 미성숙/실패 → None. 공통 거래일 정렬."""
     try:
-        import pandas as pd
         from providers import market_data
         from ml.adaptive import reward as _reward
-        start = pd.Timestamp(start_date)
-        s = market_data.load_ohlc_close_series(ticker)
-        b = market_data.load_ohlc_close_series(BENCHMARK)
+        from ohlc_utils import align_common_index
+        # 성숙 판정에 필요한 마지막 거래일(≈ 결정일 + horizon 거래일, 주말 여유 포함)
+        import pandas as _pd
+        _need = _pd.Timestamp(start_date) + _pd.Timedelta(days=int(horizon * 1.6) + 5)
+        s = market_data.load_close_series_upto(ticker, _need)
+        b = market_data.load_close_series_upto(BENCHMARK, _need)
         if s is None or b is None:
             return None
-        common = s.index.intersection(b.index)
-        try:
-            common = common[common >= start]
-        except Exception:
-            pass
-        s, b = s.reindex(common), b.reindex(common)
-        if len(common) <= horizon:
+        # tz-aware/naive 혼재 흡수 — 예전엔 intersection 이 0건이 돼 20거래일이 훌쩍
+        # 지난 결정도 영원히 미성숙으로 남았다(감사 2026-08-21·양 시장 실측).
+        s, b = align_common_index(s, b, start=start_date)
+        if s is None or b is None:
+            return None
+        if len(s) <= horizon:
             return None
         sw, bw = s.iloc[:horizon + 1], b.iloc[:horizon + 1]
         return (float(sw.iloc[-1]) / float(sw.iloc[0]) - 1.0,

@@ -88,3 +88,71 @@ def normalize_time_series(series):
     if not out.index.is_monotonic_increasing:
         out = out.sort_index(kind="mergesort")
     return out
+
+
+def to_naive_days(series):
+    """DatetimeIndex 를 **tz 제거 + 날짜 정규화**한 시계열 (거래일 단위 비교용).
+
+    tz-aware/naive 가 섞이면 pandas 의 index 연산(intersection 등)이 조용히 빈 결과를
+    내므로, 거래일 기준으로 비교하기 전 한쪽 표준(naive 자정)으로 통일한다.
+    """
+    try:
+        import pandas as pd
+    except Exception:
+        return series
+    if series is None or getattr(series, "empty", True):
+        return series
+    out = normalize_time_series(series)
+    try:
+        idx = pd.DatetimeIndex(out.index)
+        if idx.tz is not None:
+            # tz_convert(None) 은 UTC 로 옮긴 뒤 tz 를 떼서 **날짜가 하루 밀린다**
+            # (서울 06-01 00:00+09 → UTC 05-31 15:00). 거래일 비교가 목적이므로
+            # 벽시계 시각을 보존하는 tz_localize(None) 을 쓴다.
+            idx = idx.tz_localize(None)
+    except Exception:
+        return out
+    try:
+        idx = idx.normalize()          # 자정으로 — 시각 차이로 인한 교집합 유실 방지
+    except Exception:
+        pass
+    out = out.copy()
+    out.index = idx
+    return out
+
+
+def align_common_index(a, b, start=None):
+    """두 시계열을 **공통 거래일**로 정렬해 (a', b') 반환. 정렬 불가 시 (None, None).
+
+    tz-aware/naive 혼재를 흡수한다 — 실측(2026-08): 모의 보상 백필에서 종목은
+    tz-naive, 벤치마크는 tz-aware 로 캐시돼 `index.intersection()` 이 **0건**을
+    반환, 결정이 20거래일을 훌쩍 넘겨도 영원히 미성숙으로 남던 버그의 근본 원인.
+    캐시 재작성 타이밍에 따라 tz 유무가 갈려 비결정적으로 일부만 성숙했다.
+
+    start: 지정 시 그 이후 구간만.
+    """
+    try:
+        import pandas as pd
+    except Exception:
+        return None, None
+    if a is None or b is None:
+        return None, None
+    x, y = to_naive_days(a), to_naive_days(b)
+    if x is None or y is None or getattr(x, "empty", True) or getattr(y, "empty", True):
+        return None, None
+    try:
+        common = x.index.intersection(y.index)
+        if start is not None:
+            try:
+                s0 = pd.Timestamp(start)
+                if s0.tzinfo is not None:
+                    s0 = s0.tz_convert(None) if s0.tz is not None else s0
+                s0 = s0.normalize()
+                common = common[common >= s0]
+            except Exception:
+                pass
+        if len(common) == 0:
+            return None, None
+        return x.reindex(common), y.reindex(common)
+    except Exception:
+        return None, None

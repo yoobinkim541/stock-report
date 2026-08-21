@@ -118,22 +118,23 @@ def _default_price_fn(ticker: str, start_date: str, horizon: int):
     MDD = 보유 horizon 구간의 peak-to-trough 낙폭(양수) → 지수 MDD 와 동일 단위로 비교 가능.
     """
     try:
-        import pandas as pd
         from providers import market_data
         from ml.data_pipeline import KR_BENCHMARK
         from ml.adaptive import reward as _reward
-        start = pd.Timestamp(start_date)
-        s = market_data.load_ohlc_close_series(ticker)
-        k = market_data.load_ohlc_close_series(KR_BENCHMARK)
+        from ohlc_utils import align_common_index
+        # 성숙 판정에 필요한 마지막 거래일(≈ 결정일 + horizon 거래일, 주말 여유 포함)
+        import pandas as _pd
+        _need = _pd.Timestamp(start_date) + _pd.Timedelta(days=int(horizon * 1.6) + 5)
+        s = market_data.load_close_series_upto(ticker, _need)
+        k = market_data.load_close_series_upto(KR_BENCHMARK, _need)
         if s is None or k is None:
             return None
-        common = s.index.intersection(k.index)          # 공통 거래일로 정렬
-        try:
-            common = common[common >= start]
-        except Exception:
-            pass
-        s, k = s.reindex(common), k.reindex(common)
-        if len(common) <= horizon:
+        # 공통 거래일 정렬 — tz-aware/naive 혼재 흡수(종목 naive vs ^KS11 Asia/Seoul).
+        # 예전엔 intersection 이 0건이 돼 성숙이 무기한 지연됐다(감사 2026-08-21).
+        s, k = align_common_index(s, k, start=start_date)
+        if s is None or k is None:
+            return None
+        if len(s) <= horizon:
             return None                                   # 미성숙
         s_win, k_win = s.iloc[:horizon + 1], k.iloc[:horizon + 1]
         stock_ret = float(s_win.iloc[-1]) / float(s_win.iloc[0]) - 1.0

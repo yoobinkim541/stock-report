@@ -197,6 +197,72 @@ def load_cached_price_ohlc(symbol: str):
     return None
 
 
+def _fetch_close_series_live(symbol: str, period: str = "6mo"):
+    """yfinance 직접 조회 Close 시계열 (디스크 캐시 우회). 실패/미설치 시 None."""
+    if yf is None:
+        return None
+    try:
+        hist = yf.Ticker(symbol).history(period=period)
+    except Exception as e:
+        logger.warning("라이브 시세 조회 실패 %s: %s", symbol, e)
+        return None
+    if hist is None or getattr(hist, "empty", True) or "Close" not in getattr(hist, "columns", []):
+        return None
+    close = normalize_ohlc_frame(hist)["Close"].dropna()
+    return close if len(close) else None
+
+
+def load_close_series_upto(symbol: str, need_last, fetch_fn=None):
+    """캐시 Close 시계열 — **목표일(need_last)까지 못 미치면 라이브로 재조회**.
+
+    디스크 parquet 캐시(load_cached_ohlc)는 나이 검사가 없어 오래된 스냅샷을 무기한
+    서빙한다. 대시보드 조회용으로는 무해하지만, **보상 백필**에는 치명적이다 —
+    실측(2026-08-21): US 종목 캐시가 7/31 에서 멈춰 벤치(QQQ, 8/14)와의 공통 거래일이
+    18개(<20)가 돼, 7/8 이후 결정이 20거래일을 넘겨도 영원히 미성숙으로 남았다.
+    성숙 판정은 "데이터가 아직 없음"과 "캐시가 낡음"을 구분해야 하므로 여기서 흡수한다.
+
+    실패해도 예외를 올리지 않고 가진 것(캐시)이라도 반환한다.
+    """
+    s = load_ohlc_close_series(symbol)
+    try:
+        if s is not None and len(s) and need_last is not None:
+            from ohlc_utils import to_naive_days
+            import pandas as pd
+            have = to_naive_days(s).index[-1]
+            want = pd.Timestamp(need_last)
+            if want.tzinfo is not None:
+                want = want.tz_localize(None)
+            want = want.normalize()
+            if have >= want:
+                return s
+    except Exception:
+        return s
+    fetcher = fetch_fn or _fetch_close_series_live
+    try:
+        fresh = fetcher(symbol)
+    except Exception as e:
+        logger.warning("캐시 갱신 실패(캐시 유지) %s: %s", symbol, e)
+        return s
+    if fresh is None or getattr(fresh, "empty", True):
+        return s
+    if s is None or getattr(s, "empty", True):
+        return fresh
+    try:
+        # 라이브 응답은 보통 짧은 기간(6mo)이라 과거 이력이 잘린다 → 캐시와 병합.
+        # ⚠️ 캐시는 tz-naive·라이브는 tz-aware 인 경우가 흔해, 정규화 없이 concat 하면
+        # 인덱스가 object 로 섞여 groupby 가 깨진다(실측: 병합이 조용히 실패해 낡은
+        # 캐시가 그대로 반환 → 성숙 지연이 안 풀림). 양쪽을 naive 일자로 통일 후 병합.
+        import pandas as pd
+        from ohlc_utils import to_naive_days
+        a, b = to_naive_days(s), to_naive_days(fresh)
+        merged = pd.concat([a, b])
+        merged = merged[~merged.index.duplicated(keep="last")].sort_index()
+        return merged
+    except Exception as e:
+        logger.warning("캐시·라이브 병합 실패(라이브 우선) %s: %s", symbol, e)
+        return fresh
+
+
 def load_ohlc_close_series(symbol: str, periods: tuple[str, ...] = ("1y", "2y", "5y", "max")):
     """로컬 OHLC 캐시 우선, 그 다음 price_*.pkl 캐시, 마지막으로 yfinance.
 
