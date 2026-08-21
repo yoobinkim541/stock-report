@@ -190,3 +190,21 @@ def test_new_axis_stability_gate():
     assert robust_axis_weight(flip, min_pairs=20, stability=True) == 0.0       # 부호 불일치 → 0
     # 기존 축은 완화 게이트(5쌍·안정성 미요구) 유지
     assert robust_axis_weight(up[:6], min_pairs=5, stability=False) > 0.9
+
+
+def test_backfill_supports_shadow_observation_side(tmp_path):
+    """랭킹 섀도(side='관측')도 성숙시켜야 IC 측정이 된다 — 기본 sides 엔 미포함(라이브 불변)."""
+    lg = Ledger("kr_mock_shadow", base_dir=tmp_path)
+    lg.log_decision({"date": "2026-05-01", "ticker": "005930.KS", "code": "005930",
+                     "side": "관측", "shadow": True, "ok": True, "policy_score": 0.8})
+
+    def fake_price(ticker, date, horizon):
+        return (0.12, 0.04, 0.06, 0.03)
+
+    # 기본 호출은 '관측'을 무시(라이브 규칙 그대로)
+    assert L.backfill_outcomes(lg, price_fn=fake_price) == 0
+    # 섀도 전용 호출만 성숙
+    added = L.backfill_outcomes(lg, price_fn=fake_price, sides=("관측",))
+    assert added == 1
+    outs = lg.read_outcomes()
+    assert len(outs) == 1 and outs[0]["decision_id"] == "2026-05-01:005930.KS"

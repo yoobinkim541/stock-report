@@ -146,13 +146,18 @@ def _default_price_fn(ticker: str, start_date: str, horizon: int):
         return None
 
 
-def backfill_outcomes(ledger, *, horizon: int = HORIZON, price_fn=None) -> int:
-    """미성숙 결정의 실현 초과수익 + 보유기간 MDD 를 outcomes 에 추가. 추가 건수 반환."""
+def backfill_outcomes(ledger, *, horizon: int = HORIZON, price_fn=None,
+                      sides: tuple[str, ...] = ("편입", "증액")) -> int:
+    """미성숙 결정의 실현 초과수익 + 보유기간 MDD 를 outcomes 에 추가. 추가 건수 반환.
+
+    sides: 평가 대상 side. 기본은 라이브 매수(편입/증액). 랭킹 섀도 표면은 ("관측",) 로
+    호출한다(선택편향 없는 IC 측정용 — lib/rank_shadow.py).
+    """
     price_fn = price_fn or _default_price_fn
     added = 0
     for d in ledger.pending():
-        # 편입/증액(매수) 결정만 보상 평가 대상(선택 정책 학습 신호)
-        if d.get("side") not in ("편입", "증액"):
+        # 매수(또는 섀도 관측) 결정만 보상 평가 대상(선택 정책 학습 신호)
+        if d.get("side") not in sides:
             continue
         if d.get("ok") is False:   # ★미집행(주문실패) 결정 제외 — 팬텀 트레이드 오염 방지(US S6 미러·감사 확정)
             continue
@@ -193,6 +198,19 @@ def main() -> int:
 
     added = backfill_outcomes(ledger)
     logger.info("보상 백필: %d건 성숙", added)
+    # ★랭킹 섀도 — 주문 안 된 후보 포함 전 구간 성숙(선택편향 없는 IC 측정용).
+    # 라이브 원장·정책 채택 게이트와 완전 분리 — 측정 전용.
+    try:
+        from ml.adaptive import evolution as _evo
+        shadow_ledger = Ledger("kr_mock_shadow")
+        shadow_added = backfill_outcomes(shadow_ledger, sides=("관측",))
+        shadow_snap = _evo.snapshot(shadow_ledger.training_set())
+        logger.info("랭킹 섀도 백필: %d건 성숙 · n=%s IC=%s CI=%s",
+                    shadow_added, shadow_snap.get("n"), shadow_snap.get("realized_ic"),
+                    shadow_snap.get("ic_ci"))
+    except Exception as e:
+        shadow_added, shadow_snap = 0, {}
+        logger.warning("랭킹 섀도 백필 실패(무시): %s", e)
     llm_ledger = Ledger("kr_mock_llm_shadow")
     llm_added = llm_exec.backfill_shadow_outcomes(
         llm_ledger, market="KR", horizons_=llm_exec.horizons(), price_fn=_default_price_fn)
@@ -211,6 +229,10 @@ def main() -> int:
             "llm_shadow_n": llm_summary.get("n"),
             "llm_shadow_hit_rate": llm_summary.get("hit_rate"),
             "llm_shadow_avg_delta": llm_summary.get("avg_delta"),
+            "rank_shadow_added": shadow_added,
+            "rank_shadow_n": shadow_snap.get("n"),
+            "rank_shadow_ic": shadow_snap.get("realized_ic"),
+            "rank_shadow_ic_ci": shadow_snap.get("ic_ci"),
             **snap})
         msg = (
             f"🇰🇷 KR 정책 학습 — 표본 {len(rows)}/{MIN_SAMPLES} 미달, 콜드스타트 유지(보류)\n"
@@ -250,6 +272,10 @@ def main() -> int:
         "llm_shadow_n": llm_summary.get("n"),
         "llm_shadow_hit_rate": llm_summary.get("hit_rate"),
         "llm_shadow_avg_delta": llm_summary.get("avg_delta"),
+        "rank_shadow_added": shadow_added,
+        "rank_shadow_n": shadow_snap.get("n"),
+        "rank_shadow_ic": shadow_snap.get("realized_ic"),
+        "rank_shadow_ic_ci": shadow_snap.get("ic_ci"),
         **snap})
     send_cron_telegram(
         f"🇰🇷 KR 정책 강화 (표본 {len(rows)})\n{out['reason']}\n"

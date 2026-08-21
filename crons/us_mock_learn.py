@@ -35,7 +35,7 @@ MIN_SAMPLES = 40
 MAX_POS = int(os.getenv("US_MOCK_MAX_POS", "5"))
 BENCHMARK = "QQQ"
 _FEATS = ["ranker", "value", "quality", "mom", "conf", "mom12", "hi52", "lowvol", "pead", "news"]
-_BUY = ("편입", "증액")
+_BUY = ("편입", "증액", "관측")   # 관측 = 랭킹 섀도(lib/rank_shadow) — 편입 계열로 평가(net·정부호)
 
 
 def _pearson(xs, ys) -> float:
@@ -125,13 +125,18 @@ def _default_price_fn(ticker: str, start_date: str, horizon: int):
         return None
 
 
-def backfill_outcomes(ledger, *, horizon: int = HORIZON, price_fn=None) -> int:
-    """미성숙 결정의 실현 초과수익 + side-aware 정답 플래그를 outcomes 에 추가. 추가 건수 반환."""
+def backfill_outcomes(ledger, *, horizon: int = HORIZON, price_fn=None,
+                      sides: tuple[str, ...] = ("편입", "증액", "퇴출", "감액")) -> int:
+    """미성숙 결정의 실현 초과수익 + side-aware 정답 플래그를 outcomes 에 추가. 추가 건수 반환.
+
+    sides: 평가 대상 side. 기본은 라이브 매매. 랭킹 섀도 표면은 ("관측",) 로 호출
+    (선택편향 없는 IC 측정용 — lib/rank_shadow.py).
+    """
     price_fn = price_fn or _default_price_fn
     added = 0
     for d in ledger.pending():
         side = d.get("side")
-        if side not in ("편입", "증액", "퇴출", "감액"):
+        if side not in sides:
             continue
         if d.get("ok") is False:   # ★미집행(주문실패) 결정은 학습 제외 — 팬텀 트레이드 오염 방지(S6)
             continue
@@ -171,6 +176,19 @@ def main() -> int:
 
     added = backfill_outcomes(ledger)
     logger.info("보상 백필: %d건 성숙", added)
+    # ★랭킹 섀도 — 주문 안 된 후보 포함 전 구간 성숙(선택편향 없는 IC 측정용).
+    # 라이브 원장·정책 채택 게이트와 완전 분리 — 측정 전용.
+    try:
+        from ml.adaptive import evolution as _evo
+        shadow_ledger = Ledger("us_mock_shadow")
+        shadow_added = backfill_outcomes(shadow_ledger, sides=("관측",))
+        shadow_snap = _evo.snapshot(shadow_ledger.training_set())
+        logger.info("랭킹 섀도 백필: %d건 성숙 · n=%s IC=%s CI=%s",
+                    shadow_added, shadow_snap.get("n"), shadow_snap.get("realized_ic"),
+                    shadow_snap.get("ic_ci"))
+    except Exception as e:
+        shadow_added, shadow_snap = 0, {}
+        logger.warning("랭킹 섀도 백필 실패(무시): %s", e)
     llm_ledger = Ledger("us_mock_llm_shadow")
     llm_added = llm_exec.backfill_shadow_outcomes(
         llm_ledger, market="US", horizons_=llm_exec.horizons(), price_fn=_default_price_fn)
@@ -189,6 +207,10 @@ def main() -> int:
             "llm_shadow_n": llm_summary.get("n"),
             "llm_shadow_hit_rate": llm_summary.get("hit_rate"),
             "llm_shadow_avg_delta": llm_summary.get("avg_delta"),
+            "rank_shadow_added": shadow_added,
+            "rank_shadow_n": shadow_snap.get("n"),
+            "rank_shadow_ic": shadow_snap.get("realized_ic"),
+            "rank_shadow_ic_ci": shadow_snap.get("ic_ci"),
             **snap})
         msg = (
             f"🇺🇸 US 정책 학습 — 편입표본 {len(buy)}/{MIN_SAMPLES} 미달, 콜드스타트 유지(보류)\n"
@@ -221,6 +243,10 @@ def main() -> int:
         "llm_shadow_n": llm_summary.get("n"),
         "llm_shadow_hit_rate": llm_summary.get("hit_rate"),
         "llm_shadow_avg_delta": llm_summary.get("avg_delta"),
+        "rank_shadow_added": shadow_added,
+        "rank_shadow_n": shadow_snap.get("n"),
+        "rank_shadow_ic": shadow_snap.get("realized_ic"),
+        "rank_shadow_ic_ci": shadow_snap.get("ic_ci"),
         **snap})
     send_cron_telegram(
         f"🇺🇸 US 정책 강화 (편입표본 {len(buy)})\n{out['reason']}\n"

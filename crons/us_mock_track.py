@@ -699,6 +699,14 @@ def main(argv: list[str] | None = None) -> int:
     sig_by = {s["ticker"]: s for s in signals}
     today = datetime.now(KST).strftime("%Y-%m-%d")
 
+    # ★랭킹 섀도 — KR 미러(kiwoom_mock_track). 주문된 상위 N 만 원장에 남기면 점수 분산이
+    # 잘려 IC 가 구조적으로 감쇠(구간 제한)하므로, 점수화된 전 후보를 별도 표면에 적재해
+    # 선택편향 없는 전 구간 IC 를 측정한다. 주문·회전율·비용 무영향.
+    from lib import rank_shadow
+    _shadow_n = rank_shadow.log_ranked_candidates(
+        Ledger("us_mock_shadow"), signals, today=today, market="US")
+    logger.info("랭킹 섀도 적재: %d건 (유니버스 %d)", _shadow_n, len(signals))
+
     llm_payload = llm_exec.build_order_review_payload(
         market="US", nav=nav, cash=cash, budget=budget, max_positions=MAX_POS,
         orders=plan, positions=positions, signals=signals)

@@ -176,5 +176,25 @@ def test_eval_policy_basket_excess():
     assert out["n"] == 3
 
 
+def test_backfill_shadow_observation_is_treated_as_entry_side():
+    """섀도 '관측'은 편입 계열 — net(왕복비용 차감)·correct=net>0 이어야 부호가 안 뒤집힌다."""
+    pending = [{"id": 9, "ticker": "AAPL", "date": "2026-05-01", "side": "관측",
+                "shadow": True, "ok": True, "policy_score": 0.7}]
+
+    # 기본 sides 엔 '관측' 미포함 — 라이브 규칙 불변
+    assert L.backfill_outcomes(_FakeLedger(list(pending)),
+                               price_fn=lambda t, d, h: (0.10, 0.02, 0.03, 0.02)) == 0
+
+    led = _FakeLedger(list(pending))
+    added = L.backfill_outcomes(led, price_fn=lambda t, d, h: (0.10, 0.02, 0.03, 0.02),
+                                sides=("관측",))
+    assert added == 1
+    from ml.adaptive import costs
+    o = led.outcomes[0]
+    assert o["gross_excess"] == pytest.approx(0.08)
+    assert o["fwd_excess"] == pytest.approx(0.08 - costs.round_trip_frac("US"))   # 편입처럼 net
+    assert o["correct"] is True                                                   # 부호 정상(반전 아님)
+
+
 if __name__ == "__main__":
     sys.exit(pytest.main([__file__, "-v"]))

@@ -159,3 +159,11 @@ def test_evolution_summary_without_decisions_keeps_cold(tmp_path):
     out = evolution.evolution_summary("kr_mock", _buys(14, cum=0.01), base_dir=str(tmp_path))
     assert out["stall_days"] is None
     assert out["verdict"]["code"] == "cold"
+
+
+def test_snapshot_counts_shadow_observations():
+    """랭킹 섀도(side='관측')도 IC 산출 대상 — 선택편향 없는 전 구간 측정용."""
+    rows = [{"side": "관측", "policy_score": i / 10, "fwd_excess": (i - 5) * 0.01, "correct": i > 5}
+            for i in range(10)]
+    s = evolution.snapshot(rows)
+    assert s["n"] == 10 and s["realized_ic"] is not None and s["realized_ic"] > 0.9
