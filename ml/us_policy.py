@@ -86,8 +86,14 @@ def extract_features(fund: dict | None, earnings: dict | None, sig: dict | None)
         value = _clamp01(0.5 * v_per + 0.5 * v_pbr)
     else:
         value = 0.5
-    roe = float(earnings.get("roe", 0) or 0)               # ROE 0~30% → 0~1
-    quality = _clamp01(roe / 30.0) if roe else 0.5
+    # ⚠️ 단위: providers/earnings_data 는 yfinance returnOnEquity 를 **분수**로 넘긴다
+    # (0.34 = 34%). 예전 코드는 `roe / 30.0` 로 퍼센트를 가정해 100배 축소됐고, 그 결과
+    # 모든 실제 종목의 quality 가 0.01~0.05 로 눌려 가중치 0.20 이 무력화됐다.
+    # 게다가 레버리지 ETF 는 earnings={} 라 기본값 0.5 를 받아 **데이터 없는 쪽이 이기는**
+    # 역전까지 발생(감사 2026-08-21: 섀도 첫날 상위 10 전부 레버리지 ETF).
+    # 0~60% 를 0~1 로 매핑 — 우량주 ROE 대역을 넓게 담되 상한에 뭉치지 않게.
+    roe = float(earnings.get("roe", 0) or 0)               # 분수 표기(0.30 = 30%)
+    quality = _clamp01(roe / 0.60) if roe else 0.5
     mom_pct = float((sig.get("price_info") or {}).get("1mo_change_pct", 0) or 0)
     mom = _clamp01(0.5 + mom_pct / 40.0)                   # ±20% → 0~1
     conf = _clamp01(float(fund.get("confidence", 50) or 50) / 100.0)
