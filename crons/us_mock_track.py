@@ -391,10 +391,16 @@ def compute_us_signals(universe: list[str] | None = None) -> list[dict]:
         except Exception as e:
             logger.warning("US 신호 실패 %s: %s", tk, e)
 
-    # US ranker(가치모델) best-effort → 횡단면 정규화 주입
+    # US ranker(가치모델) best-effort → 횡단면 정규화 주입.
+    # ⚠️ 예전엔 `hasattr(ranker,"scores_by_ticker") else {}` 로 감싸져 있어, 그 함수가
+    # 없던 기간 내내 **최대 가중치 축(w_ranker=0.40)이 예외·로그 없이 조용히 미주입**
+    # 상태였다(감사 2026-08-21: 섀도 37종목 전부 ranker 부재 → 상위 4개 동점).
+    # 이제는 없으면 즉시 시끄럽게 경고한다 — 조용한 실패 금지.
     try:
         from ml import ranker
-        raw = ranker.scores_by_ticker([s["ticker"] for s in out]) if hasattr(ranker, "scores_by_ticker") else {}
+        if not hasattr(ranker, "scores_by_ticker"):
+            raise AttributeError("ml.ranker.scores_by_ticker 부재 — 랭커 축 미주입")
+        raw = ranker.scores_by_ticker([s["ticker"] for s in out])
         vals = [raw[s["ticker"]] for s in out if s["ticker"] in raw]
         if vals:
             lo, hi = min(vals), max(vals)
@@ -402,8 +408,13 @@ def compute_us_signals(universe: list[str] | None = None) -> list[dict]:
             for s in out:
                 if s["ticker"] in raw:
                     s["features"]["ranker"] = round((raw[s["ticker"]] - lo) / rng, 4)
+        cov = sum(1 for s in out if s["features"].get("ranker") is not None)
+        if cov == 0:
+            logger.warning("US ranker 커버리지 0/%d — 최대 가중치 축(0.40) 미반영 상태", len(out))
+        else:
+            logger.info("US ranker 주입: %d/%d 종목", cov, len(out))
     except Exception as e:
-        logger.info("US ranker 주입 생략(폴백: 규칙 가중만): %s", e)
+        logger.warning("US ranker 주입 실패(폴백: 규칙 가중만 — 가중치 0.40 손실): %s", e)
 
     for s in out:
         base_score = round(us_policy.score(s["features"], params), 6)

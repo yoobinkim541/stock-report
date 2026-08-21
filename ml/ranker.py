@@ -667,6 +667,38 @@ def rank_today(
     return ranking.head(top_n)
 
 
+def scores_by_ticker(tickers: list[str] | None = None, *, mode: str = "nasdaq100",
+                     benchmark_ticker: str = "QQQ") -> dict[str, float]:
+    """티커→모델점수 매핑 (US 선택정책 `ranker` 축 주입용). 실패 시 빈 dict.
+
+    ml/kr_ranker.kr_scores_by_ticker 의 미국판. crons/us_mock_track.py 가
+    `hasattr(ranker, "scores_by_ticker")` 로 찾는 **정확한 이름** — 이 함수가 없던
+    동안(감사 2026-08-21 발견) US 정책의 최대 가중치 축(w_ranker=0.40)이 단 한 번도
+    주입되지 않았고, hasattr 가드라 예외·로그조차 없이 조용히 죽어 있었다.
+
+    tickers 를 주면 그 티커만 필터링해 반환(랭킹은 충분히 넉넉하게 요청).
+    """
+    try:
+        want = [str(t) for t in (tickers or []) if t]
+        top_n = max(len(want) * 2, 50) if want else 50
+        df = rank_today(mode=mode, top_n=top_n, benchmark_ticker=benchmark_ticker)
+        if df is None or getattr(df, "empty", True):
+            return {}
+        out: dict[str, float] = {}
+        for _, r in df.iterrows():
+            t, sc = r.get("ticker"), r.get("score")
+            if t is None or sc is None or (isinstance(sc, float) and sc != sc):
+                continue
+            out[str(t)] = float(sc)
+        if want:
+            keep = set(want)
+            out = {k: v for k, v in out.items() if k in keep}
+        return out
+    except Exception as e:
+        logger.warning("US 랭킹 점수 산출 실패: %s", e)
+        return {}
+
+
 FUND_CACHE = Path.home() / "reports" / "ml-cache" / "fundamental_scores.json"
 
 
