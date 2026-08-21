@@ -946,12 +946,21 @@ def build_blocks() -> list[dict]:
         for r in reasons:
             blocks.append(_bullet(r))
 
+        # ⚠️ 벤치마크는 **ML 과 같은 OOS 구간**으로 맞춘 값을 쓴다. 전체기간 CAGR 과
+        # 나란히 놓으면 기간이 달라 비교가 성립하지 않는다(감사 2026-08-21 실측:
+        # ML 126일 5.2% vs 표시되던 QQQ 756일 26.5%, 그러나 같은 126일 QQQ 는 42.9%).
+        qqq_cmp = getattr(sweet, "qqq_oos_result", None) or qqq
+        aligned = getattr(sweet, "qqq_oos_result", None) is not None
+        bench_note = f"벤치마크 · 동일 OOS {qqq_cmp.n_days}일" if aligned else "벤치마크 · ⚠️전체기간"
         blocks.append(_table([
             ["전략", "CAGR", "Sharpe", "MDD", "비고"],
             ["ML (nested OOS)", f"{(ml.cagr or 0):.1%}", f"{(ml.sharpe or 0):.2f}", f"{ml.max_drawdown:.1%}", f"{ml.n_days}일"],
             ["리스크오버레이", f"{(ov.cagr or 0):.1%}", f"{(ov.sharpe or 0):.2f}", f"{ov.max_drawdown:.1%}", "200MA+ML크기"],
-            ["QQQ 매수보유", f"{(qqq.cagr or 0):.1%}", f"{(qqq.sharpe or 0):.2f}", f"{qqq.max_drawdown:.1%}", "벤치마크"],
+            ["QQQ 보유", f"{(qqq_cmp.cagr or 0):.1%}", f"{(qqq_cmp.sharpe or 0):.2f}", f"{qqq_cmp.max_drawdown:.1%}", bench_note],
         ]))
+        blocks.append(_quote(
+            "※ 거래비용·슬리피지 미반영(총수익 기준). ML 회전율이 높아 실거래 시 성과는 더 낮다."
+        ))
 
         # WF 요약
         blocks.append(_quote(

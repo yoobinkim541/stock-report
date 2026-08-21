@@ -44,6 +44,10 @@ class SweetSpotResult:
     equity: pd.DataFrame              # columns: ML_model, overlay, threshold, SPY, QQQ
     weights: pd.Series
     wf_summary: dict
+    # ML 이 실제 평가된 OOS 구간으로 맞춘 벤치마크 — 전체기간 수치와 나란히 놓으면
+    # 기간이 달라 비교가 성립하지 않는다(감사 2026-08-21). 표시용 소비자는 이쪽을 쓸 것.
+    qqq_oos_result: BacktestResult | None = None
+    spy_oos_result: BacktestResult | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -416,6 +420,36 @@ def _run_proper_walk_forward(
 # Sweet-spot optimizer
 # ---------------------------------------------------------------------------
 
+def oos_aligned_benchmarks(equity) -> dict:
+    """ML 이 평가된 구간과 **동일한 창**으로 계산한 벤치마크 {name: BacktestResult}.
+
+    ML 은 학습분을 뺀 OOS 구간에서만 평가되는데, 벤치마크를 전체 기간 CAGR 로 두면
+    서로 다른 기간을 비교하게 된다(실측 2026-08-21: ML 126일 5.20% vs 표시된 QQQ
+    756일 26.46%, 그러나 같은 126일 QQQ 는 42.86% — 표시값이 ML 을 실제보다 좋아
+    보이게 했다). equity 의 ML_model 유효 구간으로 잘라 재계산한다.
+    """
+    from ml.backtest import buy_and_hold
+
+    if equity is None or getattr(equity, "empty", True):
+        return {}
+    cols = set(getattr(equity, "columns", []))
+    if "ML_model" not in cols:
+        return {}
+    ml_valid = equity["ML_model"].dropna()
+    if ml_valid.empty:
+        return {}
+    window = equity.loc[ml_valid.index[0]:ml_valid.index[-1]]
+    out: dict = {}
+    for name in ("QQQ", "SPY"):
+        if name not in cols:
+            continue
+        series = window[name].dropna()
+        if len(series) < 2:
+            continue
+        out[name] = buy_and_hold(series, name=f"{name}(OOS 정합)")
+    return out
+
+
 def optimize_sweet_spot(
     data: Optional[dict] = None,
     param_grid: Optional[dict] = None,
@@ -553,6 +587,9 @@ def optimize_sweet_spot(
         "QQQ":       qqq_eq,
     }).dropna()
 
+    # ML OOS 구간에 맞춘 벤치마크 (표시용 — 기간 불일치 비교 방지)
+    _aligned = oos_aligned_benchmarks(equity_df)
+
     # Proper walk-forward: per-fold optimization → true OOS evaluation (no leakage)
     wf_summary = _run_proper_walk_forward(data, param_grid)
 
@@ -567,6 +604,8 @@ def optimize_sweet_spot(
         baseline_result=baseline_result,
         qqq_result=qqq_result,
         spy_result=spy_result,
+        qqq_oos_result=_aligned.get("QQQ"),
+        spy_oos_result=_aligned.get("SPY"),
         trials=trials,
         equity=equity_df,
         weights=weights,
