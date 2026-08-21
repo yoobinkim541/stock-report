@@ -138,3 +138,49 @@ def test_db_props_shape():
 
 
 _HOLDINGS_KEYS = ("Ticker", "종목명", "통화", "수량", "평단가", "현재가", "평가액", "손익률", "비중")
+
+
+# ── 낡은 차트 무언 업로드 회귀 (감사 2026-08-21) ────────────────────────────────
+# _latest_chart_png() 는 오늘자 PNG 가 없으면 "가장 최신 파일" 로 조용히 폴백한다.
+# 차트 생성이 2026-07-01 부터 죽어 있었는데(시스템 python3 에 matplotlib 부재),
+# 이 폴백 때문에 **2026-06-30 차트가 7주간 매일 노션에 업로드**되며 아무도 몰랐다.
+# → 폴백 자체는 유지하되(그림 없는 것보다 낫다), 며칠 이상 낡으면 경고를 남긴다.
+
+def test_latest_chart_png_warns_when_stale(tmp_path, monkeypatch, caplog):
+    import logging
+
+    monkeypatch.setattr(ns.os.path, "expanduser",
+                        lambda p: str(tmp_path / p.replace("~/", "")))
+    reports = tmp_path / "reports"
+    reports.mkdir(parents=True, exist_ok=True)
+    (reports / "investment-chart-2026-06-30.png").write_bytes(b"old")
+
+    with caplog.at_level(logging.WARNING):
+        got = ns._latest_chart_png(today="2026-08-21")
+
+    assert got is not None and got.endswith("investment-chart-2026-06-30.png")   # 폴백 유지
+    assert any("낡" in r.message or "stale" in r.message.lower() for r in caplog.records), \
+        "낡은 차트를 조용히 올리면 안 된다"
+
+
+def test_latest_chart_png_no_warning_when_fresh(tmp_path, monkeypatch, caplog):
+    import logging
+
+    monkeypatch.setattr(ns.os.path, "expanduser",
+                        lambda p: str(tmp_path / p.replace("~/", "")))
+    reports = tmp_path / "reports"
+    reports.mkdir(parents=True, exist_ok=True)
+    (reports / "investment-chart-2026-08-21.png").write_bytes(b"new")
+
+    with caplog.at_level(logging.WARNING):
+        got = ns._latest_chart_png(today="2026-08-21")
+
+    assert got.endswith("investment-chart-2026-08-21.png")
+    assert not [r for r in caplog.records if "낡" in r.message]
+
+
+def test_latest_chart_png_none_when_no_files(tmp_path, monkeypatch):
+    monkeypatch.setattr(ns.os.path, "expanduser",
+                        lambda p: str(tmp_path / p.replace("~/", "")))
+    (tmp_path / "reports").mkdir(parents=True, exist_ok=True)
+    assert ns._latest_chart_png(today="2026-08-21") is None

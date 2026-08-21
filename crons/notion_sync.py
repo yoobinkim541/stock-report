@@ -282,15 +282,40 @@ def _upload_file_to_notion(path: str) -> str | None:
         return None
 
 
-def _latest_chart_png() -> str | None:
-    """오늘(없으면 최근) 포트폴리오 대시보드 PNG 경로."""
+_CHART_STALE_WARN_DAYS = 3          # 주말·공휴일 여유
+
+
+def _latest_chart_png(today: str | None = None) -> str | None:
+    """오늘(없으면 최근) 포트폴리오 대시보드 PNG 경로.
+
+    ⚠️ 최신 파일 폴백은 유지하되(그림 없는 것보다 낫다), 며칠 이상 낡으면 **경고**한다.
+    실제로 차트 생성이 죽은 동안(시스템 python3 에 matplotlib 부재) 이 폴백이
+    2026-06-30 차트를 7주간 매일 조용히 업로드했다 — 무증상 노후화 재발 방지.
+    """
     import glob
-    today = datetime.now(KST).strftime("%Y-%m-%d")
+    import re as _re
+    today = today or datetime.now(KST).strftime("%Y-%m-%d")
     p = os.path.expanduser(f"~/reports/investment-chart-{today}.png")
     if os.path.exists(p):
         return p
     cands = sorted(glob.glob(os.path.expanduser("~/reports/investment-chart-*.png")))
-    return cands[-1] if cands else None
+    if not cands:
+        logger.warning("대시보드 차트 PNG 가 하나도 없음 — 차트 생성 파이프라인 확인 필요")
+        return None
+    latest = cands[-1]
+    m = _re.search(r"investment-chart-(\d{4}-\d{2}-\d{2})\.png$", latest)
+    if m:
+        try:
+            age = (datetime.strptime(today, "%Y-%m-%d")
+                   - datetime.strptime(m.group(1), "%Y-%m-%d")).days
+            if age > _CHART_STALE_WARN_DAYS:
+                logger.warning(
+                    "대시보드 차트가 %d일 낡음(%s) — 오늘자 PNG 미생성. "
+                    "차트 생성 파이프라인(matplotlib 보유 인터프리터) 확인 필요",
+                    age, m.group(1))
+        except ValueError:
+            pass
+    return latest
 
 
 # ── 보유 종목 데이터베이스 (N3) ─────────────────────────────────────────────────

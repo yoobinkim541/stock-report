@@ -15,7 +15,18 @@ fi
 STOCK_BOT_CHAT_ID=5771238245
 START_TIME=$(date +%s)
 
-PYTHON_BIN="${PYTHON_BIN:-python3}"
+# 인터프리터 — 프로젝트 .venv 우선. 맨 `python3`(시스템) 는 matplotlib/lightgbm 이 없어
+# 차트 생성 블록이 ModuleNotFoundError 로 조용히 죽는다(try/except 격리 + 노이즈 많은
+# stdout 이라 무증상). 실제로 2026-07-01 이후 PNG 가 한 장도 안 만들어졌고, 노션은
+# _latest_chart_png() 폴백으로 6/30 차트를 7주간 매일 올렸다(감사 2026-08-21).
+# 다른 크론 52개와 동일하게 프로젝트 인터프리터를 쓴다.
+if [ -z "${PYTHON_BIN:-}" ]; then
+    if [ -x "$PROJECT_DIR/.venv/bin/python3" ]; then
+        PYTHON_BIN="$PROJECT_DIR/.venv/bin/python3"
+    else
+        PYTHON_BIN="python3"
+    fi
+fi
 
 # User-requested full scan sizes. Override env vars can still lower these if needed.
 export INVESTMENT_REPORT_MAX_NASDAQ_SCAN="${INVESTMENT_REPORT_MAX_NASDAQ_SCAN:-100}"
