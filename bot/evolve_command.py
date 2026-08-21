@@ -38,6 +38,24 @@ def _surface_block(surface: str, flag: str, name: str, html: bool) -> list[str]:
         bits.append(f"누적 {snap['cum_net_excess'] * 100:+.2f}%")
     lines.append("  " + " · ".join(bits))
 
+    # 랭킹 섀도 — 주문된 상위 N 만 보면 점수 분산이 잘려(구간제한 ~9배) IC 가 0 으로 감쇠한다.
+    # 섀도는 점수화된 전 후보를 담아 선택편향 없는 IC 를 준다(lib/rank_shadow.py). 없으면 생략.
+    if surface in ("kr_mock", "us_mock"):
+        try:
+            _sl = Ledger(f"{surface}_shadow")
+            ssnap = evolution.snapshot(_sl.training_set())
+            if ssnap.get("n"):
+                sbits = [f"섀도(전 후보) {ssnap['n']}건"]
+                if ssnap.get("realized_ic") is not None:
+                    sbits.append(f"IC {ssnap['realized_ic']:+.3f}")
+                if ssnap.get("ic_ci"):
+                    sbits.append(f"95%CI [{ssnap['ic_ci'][0]:+.2f},{ssnap['ic_ci'][1]:+.2f}]")
+                lines.append("  🔬 " + " · ".join(sbits))
+            elif _sl.read_decisions():
+                lines.append(f"  🔬 섀도 적재 {len(_sl.read_decisions())}건 (성숙 대기 — 20거래일)")
+        except Exception:
+            pass
+
     series = [s for s in ev["series"] if s.get("excess") is not None]
     if len(series) >= 2:
         lines.append(f"  추세 {fmt.spark([s['excess'] for s in series])} ({len(series)}주 OOS)")
