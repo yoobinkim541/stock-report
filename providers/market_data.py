@@ -225,15 +225,18 @@ def load_close_series_upto(symbol: str, need_last, fetch_fn=None):
     """
     s = load_ohlc_close_series(symbol)
     try:
-        if s is not None and len(s) and need_last is not None:
-            from ohlc_utils import to_naive_days
-            import pandas as pd
-            have = to_naive_days(s).index[-1]
-            want = pd.Timestamp(need_last)
+        import pandas as pd
+        from ohlc_utils import to_naive_days
+        want = pd.Timestamp(need_last) if need_last is not None else None
+        if want is not None:
             if want.tzinfo is not None:
                 want = want.tz_localize(None)
             want = want.normalize()
-            if have >= want:
+            # 목표일이 아직 미래면 재조회해도 못 채운다(진짜 미성숙) — 무의미한 호출 차단.
+            if want > pd.Timestamp.now().normalize():
+                return s
+        if s is not None and len(s) and want is not None:
+            if to_naive_days(s).index[-1] >= want:
                 return s
     except Exception:
         return s

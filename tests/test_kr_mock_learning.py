@@ -144,6 +144,11 @@ def test_default_price_fn_uses_cached_ohlc_when_yfinance_unavailable(tmp_path, m
 
     import yfinance as yf
     monkeypatch.setattr(yf, "download", lambda *a, **k: (_ for _ in ()).throw(RuntimeError("offline")))
+    # 캐시가 목표일에 못 미치면 라이브 재조회를 시도하므로(감사 2026-08-21 staleness 수정),
+    # yf.download 뿐 아니라 그 경로(_fetch_close_series_live)도 오프라인으로 막아야
+    # 이 테스트가 "캐시만으로 동작" 을 실제로 검증한다(안 막으면 네트워크로 새어 실패).
+    from providers import market_data as _md
+    monkeypatch.setattr(_md, "_fetch_close_series_live", lambda *a, **k: None)
 
     out = L._default_price_fn("005930.KS", "2026-05-01", 3)
     assert out is not None
@@ -166,6 +171,11 @@ def test_default_price_fn_uses_price_cache_when_ohlc_cache_missing(tmp_path, mon
 
     import yfinance as yf
     monkeypatch.setattr(yf, "download", lambda *a, **k: (_ for _ in ()).throw(RuntimeError("offline")))
+    # 캐시가 목표일에 못 미치면 라이브 재조회를 시도하므로(감사 2026-08-21 staleness 수정),
+    # yf.download 뿐 아니라 그 경로(_fetch_close_series_live)도 오프라인으로 막아야
+    # 이 테스트가 "캐시만으로 동작" 을 실제로 검증한다(안 막으면 네트워크로 새어 실패).
+    from providers import market_data as _md
+    monkeypatch.setattr(_md, "_fetch_close_series_live", lambda *a, **k: None)
 
     out = L._default_price_fn("005930.KS", "2026-05-01", 3)
     assert out is not None
