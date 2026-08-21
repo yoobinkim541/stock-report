@@ -6,6 +6,42 @@
 """
 from __future__ import annotations
 
+import os
+
+# 오프라인 정밀 백테스트(20~25년·DSR/PBO) 결과 위치 — backtest/{kr,us}_policy_backtest.py 산출.
+_BACKTEST_DIR = os.path.expanduser("~/reports/ml-cache")
+
+
+def _offline_verdict_line(surface: str) -> str | None:
+    """오프라인 25년 백테스트 판정 한 줄. 없으면 None.
+
+    라이브 콜드스타트를 단독으로 보면 "아직 모른다" 로 읽히지만, 같은 선택 로직의
+    가격축은 이미 20~25년 OOS 로 검증돼 있다(KR OBSERVE·US NO-GO) — 병기해서
+    '기다리면 좋아질 것'이라는 낙관 편향을 막는다.
+    """
+    market = "kr" if surface.startswith("kr") else "us"
+    path = os.path.join(_BACKTEST_DIR, f"{market}_policy_backtest.json")
+    try:
+        import json
+        with open(path, encoding="utf-8") as f:
+            d = json.load(f)
+    except Exception:
+        return None
+    v = (d or {}).get("verdict") or {}
+    code = v.get("code")
+    if not code:
+        return None
+    bits = [f"🧪 오프라인({d.get('period', '?')}) {code}"]
+    if v.get("net_excess_cagr") is not None:
+        bits.append(f"순초과 {v['net_excess_cagr'] * 100:+.2f}%/yr")
+    if v.get("dsr") is not None:
+        bits.append(f"DSR {v['dsr']:.3f}")
+    if v.get("pbo") is not None:
+        bits.append(f"PBO {v['pbo'] * 100:.1f}%")
+    if v.get("mdd_ok") is False:
+        bits.append("MDD 위반")
+    return "  " + " · ".join(bits)
+
 
 def _surface_block(surface: str, flag: str, name: str, html: bool) -> list[str]:
     import fmt
@@ -51,10 +87,26 @@ def _surface_block(surface: str, flag: str, name: str, html: bool) -> list[str]:
                 if ssnap.get("ic_ci"):
                     sbits.append(f"95%CI [{ssnap['ic_ci'][0]:+.2f},{ssnap['ic_ci'][1]:+.2f}]")
                 lines.append("  🔬 " + " · ".join(sbits))
+                # 축별 IC — 미검증 축(ranker/fund/signal/conf = 가중치 0.65)이 실제로
+                # 예측력이 있는지 직접 측정. 유의(CI 가 0 미포함)한 축만 표기.
+                axes = evolution.axis_ic(_sl.training_set())
+                sig_axes = [(k, a) for k, a in axes.items()
+                            if a.get("ci") and not (a["ci"][0] <= 0 <= a["ci"][1])]
+                sig_axes.sort(key=lambda kv: -abs(kv[1]["ic"]))
+                if sig_axes:
+                    lines.append("  📐 유의 축: " + " · ".join(
+                        f"{k} {a['ic']:+.2f}" for k, a in sig_axes[:4]))
+                elif axes:
+                    lines.append(f"  📐 유의 축 없음 ({len(axes)}축 측정 — 전부 CI 에 0 포함)")
             elif _sl.read_decisions():
                 lines.append(f"  🔬 섀도 적재 {len(_sl.read_decisions())}건 (성숙 대기 — 20거래일)")
         except Exception:
             pass
+
+    if surface in ("kr_mock", "us_mock"):
+        _ol = _offline_verdict_line(surface)
+        if _ol:
+            lines.append(_ol)
 
     series = [s for s in ev["series"] if s.get("excess") is not None]
     if len(series) >= 2:

@@ -129,6 +129,39 @@ def snapshot(training_rows: list[dict]) -> dict:
             "ic_ci": ic_ci(ic, len(pairs))}
 
 
+def axis_ic(training_rows: list[dict], min_pairs: int = 5) -> dict:
+    """피처 축별 IC — 어느 축이 실제로 편입/편출 결과를 예측하나. 순수.
+
+    반환 {axis: {ic, ci, n}} (표본 min_pairs 미만 축은 제외).
+
+    배경: 국내 정책 가중치의 0.65(ranker .30 + fund .15 + signal .15 + conf .05)는
+    25년 정밀 백테스트(backtest/kr_policy_backtest.py) 검증 대상에 아예 없었다 —
+    그 백테스트는 가격 축(mom12·hi52·vol_inv 등)만 다루기 때문. 손으로 정한 가중치가
+    실제로 예측력이 있는지는 미검증 상태였고, 랭킹 섀도가 쌓이면 여기서 직접 측정된다.
+    """
+    buys = [r for r in (training_rows or [])
+            if r.get("side") in _BUY and r.get("fwd_excess") is not None
+            and isinstance(r.get("features"), dict)]
+    axes: dict[str, list] = {}
+    for r in buys:
+        for k, v in (r.get("features") or {}).items():
+            if v is None:
+                continue
+            try:
+                axes.setdefault(k, []).append((float(v), float(r["fwd_excess"])))
+            except (TypeError, ValueError):
+                continue
+    out: dict[str, dict] = {}
+    for k, pairs in axes.items():
+        if len(pairs) < max(3, min_pairs):
+            continue
+        ic = _pearson([a for a, _ in pairs], [b for _, b in pairs])
+        if ic is None:
+            continue
+        out[k] = {"ic": ic, "ci": ic_ci(ic, len(pairs)), "n": len(pairs)}
+    return out
+
+
 def verdict(snap: dict, history: list[dict] | None = None,
             stall_days: int | None = None) -> dict:
     """정직 분류 — 콜드스타트/정체/관찰중/약한엣지/무엣지. 과대 엣지 주장 방지.

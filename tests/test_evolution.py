@@ -167,3 +167,46 @@ def test_snapshot_counts_shadow_observations():
             for i in range(10)]
     s = evolution.snapshot(rows)
     assert s["n"] == 10 and s["realized_ic"] is not None and s["realized_ic"] > 0.9
+
+
+# ── 축별 IC — 어느 피처가 실제로 편입/편출을 예측하나 (C) ──────────────────────
+# 국내 가중치 0.65(ranker .30 + fund .15 + signal .15 + conf .05)는 25년 백테스트
+# 검증 대상에 아예 없었다(가격축만 검증됨). 섀도 원장이 쌓이면 축별로 직접 측정한다.
+
+def _axis_rows(n=60):
+    """good 축은 결과와 상관 有, bad 축은 무관(노이즈)."""
+    rows = []
+    for i in range(n):
+        v = i / n
+        rows.append({"side": "관측", "policy_score": v, "fwd_excess": (v - 0.5) * 0.2,
+                     "features": {"good": v, "bad": (i * 7919 % 97) / 97.0}})
+    return rows
+
+
+def test_axis_ic_ranks_predictive_axis_above_noise():
+    out = evolution.axis_ic(_axis_rows())
+    assert out["good"]["ic"] > 0.9
+    assert abs(out["bad"]["ic"]) < 0.4
+    assert out["good"]["n"] == 60
+
+
+def test_axis_ic_includes_confidence_interval():
+    out = evolution.axis_ic(_axis_rows())
+    assert out["good"]["ci"] is not None and len(out["good"]["ci"]) == 2
+    assert out["good"]["ci"][0] > 0            # 유의하게 양수
+
+
+def test_axis_ic_skips_axes_below_min_pairs():
+    rows = [{"side": "관측", "fwd_excess": 0.01, "features": {"rare": 0.5}} for _ in range(2)]
+    assert evolution.axis_ic(rows, min_pairs=5) == {}
+
+
+def test_axis_ic_ignores_non_buy_and_immature():
+    rows = [{"side": "퇴출", "fwd_excess": 0.1, "features": {"x": 0.9}},
+            {"side": "관측", "fwd_excess": None, "features": {"x": 0.5}}]
+    assert evolution.axis_ic(rows) == {}
+
+
+def test_axis_ic_handles_missing_features_gracefully():
+    rows = [{"side": "관측", "fwd_excess": 0.01} for _ in range(10)]
+    assert evolution.axis_ic(rows) == {}
