@@ -12,10 +12,12 @@ def _surface_block(surface: str, flag: str, name: str, html: bool) -> list[str]:
     from ml.adaptive import Ledger, evolution
     _B = fmt.b if html else (lambda x: x)
     try:
-        rows = Ledger(surface).training_set()
+        _ledger = Ledger(surface)
+        rows = _ledger.training_set()
+        decisions = _ledger.read_decisions()      # 원시 결정 — 정체(stall) 판정용
     except Exception:
-        rows = []
-    ev = evolution.evolution_summary(surface, rows)
+        rows, decisions = [], None
+    ev = evolution.evolution_summary(surface, rows, decisions=decisions)
     snap, v = ev["snapshot"], ev["verdict"]
 
     lines = [f"{flag} {_B(name)} — {v['emoji']} {_B(v['label'])}", f"  {v['note']}"]

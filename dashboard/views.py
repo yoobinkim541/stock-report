@@ -788,11 +788,13 @@ def learning_evolution(surface: str = "kr_mock") -> dict:
     """모의 자기개선 진화 — 주간 학습 이력 + 라이브 스냅샷 verdict. read-only·graceful."""
     from ml.adaptive import Ledger, evolution
     try:
-        rows = Ledger(surface).training_set()
+        _ledger = Ledger(surface)
+        rows = _ledger.training_set()
+        decisions = _ledger.read_decisions()      # 원시 결정 — 정체(stall) 판정용
     except Exception:
-        rows = []
+        rows, decisions = [], None
     try:
-        return evolution.evolution_summary(surface, rows)
+        return evolution.evolution_summary(surface, rows, decisions=decisions)
     except Exception as e:
         return {"error": str(e), "snapshot": {}, "verdict": {}, "series": [], "adoptions": [], "n_runs": 0}
 
