@@ -1621,4 +1621,17 @@ def main() -> int:
 
 
 if __name__ == "__main__":
-    raise SystemExit(main())
+    # ⚠️ 같은 파일이 스크립트(`__main__`)와 패키지 모듈(`reports.source_collector`)로
+    # **이중 로드**되면 두 사본의 전역이 갈린다. 그러면 이 사본의 fetch 가 채운
+    # `_SOURCE_AVAILABILITY`(예: polymarket HTTP 451 → blocked)를 집계 코드
+    # (`reports/source_pipeline.py` 가 패키지 사본을 읽음)가 보지 못해
+    # availability=available 로 기록되고, stale_sources() 의 blocked 스킵이 무력화돼
+    # "polymarket 61h 공백" 오경보가 영구히 반복된다(감사 2026-08-22 실측).
+    # → 패키지 사본으로 위임해 전역을 하나로 유지한다.
+    import os as _os
+    import sys as _sys
+
+    _sys.path.insert(0, _os.path.dirname(_os.path.dirname(_os.path.abspath(__file__))))
+    from reports.source_collector import main as _pkg_main
+
+    raise SystemExit(_pkg_main())
