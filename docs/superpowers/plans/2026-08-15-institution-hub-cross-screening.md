@@ -1,5 +1,28 @@
 # Institution Hub Cross-Screening & LLM Analysis Implementation Plan
 
+> ## ✅ 완료 (2026-08-15 구현 · 2026-08-23 문서 정리)
+>
+> 전 과제(Task 1~6) 구현·테스트·머지·배포 완료. 배포 확인은 `chart_workspace` 등과 달리
+> 브라우저 도구가 없어, Streamlit `AppTest`(실제 렌더링 엔진)로 배포 커밋의 `watchlist.py`
+> 를 그대로 실행해 검증했다.
+>
+> **관련 커밋**: `f3a1413`(섀도 원장) · `4984ad3`(/evolve 노출) · `ee91909`(축별 IC)
+> · `a4f3b62`(랭커 미주입 수정) · `0fdb335`(quality 단위) · `6ce5b0f`(감사 기록)
+>
+> **섀도가 첫날 잡아낸 것** — 이 계획의 최대 성과는 스크리닝 UI 자체가 아니라, 섀도 원장을
+> 켜자마자 드러난 **구조적 결함 2건**이었다(라이브 상위 3종목만 보던 원장으로는 영원히
+> 못 봤을 것):
+> 1. US 랭커(가중치 0.40)가 `hasattr` 가드 뒤에서 **통째로 미주입** → 상위 4개 완전 동점
+> 2. quality 축 **ROE 단위 100배 오류** → 데이터 없는 레버리지 ETF 가 이기는 역전
+>    (수정 후 상위10 중 레버리지 ETF 10/10 → 5/10)
+>
+> 상세는 `docs/superpowers/specs/2026-08-21-mock-coldstart-prediction-audit.md` 6절.
+>
+> **후속(코드 아님·시간 경과 대기)**: 섀도 20거래일 성숙(~2026-09-18) 시 편입/편출
+> 예측력에 대한 첫 통계적 판독. KR 섀도는 2026-08-24(월) 크론부터 축적 시작.
+
+---
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Add, above the existing institution-hub cards/comparison table (already behind the `_watch_show_hub` lazy toggle), a donut chart per institution, a cross-institution 신규편입/증가/감소 screener across all 10 real 13F institutions, a 90-day House-member top-bought/sold screener, and a button-gated LLM "왜?" explanation of both.
@@ -30,7 +53,7 @@
 - Consumes: `thirteenf.latest_holdings(key)` / `thirteenf.latest_holdings(key, skip=1)` — each returns `{"holdings": [{"cusip", "ticker", "issuer", "value_usd", "shares", "weight_pct"}, ...], ...}` or `None`.
 - Produces: `screen_position_changes(institution_keys: list[str]) -> dict` returning `{"new_buys": [...], "increased": [...], "decreased": [...]}`. Each list entry: `{"ticker": str|None, "name": str, "institutions": list[str], "count": int, "avg_delta_pct": float}`, sorted by `count` desc then `abs(avg_delta_pct)` desc, capped to 10 entries per bucket. Later tasks (views/cached/UI) call this exact function name and shape.
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
 
 ```python
 def test_screen_position_changes_classifies_new_increased_decreased(monkeypatch):
@@ -132,12 +155,12 @@ def test_screen_position_changes_caps_each_bucket_at_ten(monkeypatch):
     assert len(out["new_buys"]) == 10
 ```
 
-- [ ] **Step 2: Run tests to verify they fail**
+- [x] **Step 2: Run tests to verify they fail**
 
 Run: `.venv/bin/pytest -q tests/test_institution_watch.py -k screen_position_changes -v`
 Expected: FAIL with `AttributeError: module 'reports.institution_watch' has no attribute 'screen_position_changes'`
 
-- [ ] **Step 3: Implement `screen_position_changes`**
+- [x] **Step 3: Implement `screen_position_changes`**
 
 Add to `reports/institution_watch.py`, near `_compute_return_proxy`:
 
@@ -204,17 +227,17 @@ def screen_position_changes(institution_keys: list[str]) -> dict:
     return out
 ```
 
-- [ ] **Step 4: Run tests to verify they pass**
+- [x] **Step 4: Run tests to verify they pass**
 
 Run: `.venv/bin/pytest -q tests/test_institution_watch.py -k screen_position_changes -v`
 Expected: PASS (4 tests)
 
-- [ ] **Step 5: Run broader regression**
+- [x] **Step 5: Run broader regression**
 
 Run: `.venv/bin/pytest -q tests/test_institution_watch.py tests/test_thirteenf.py -v`
 Expected: all pass, no regressions
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 ```bash
 git add reports/institution_watch.py tests/test_institution_watch.py
@@ -233,7 +256,7 @@ git commit -m "add) 13F 교차기관 종목 스크리닝 — 신규편입/비중
 - Consumes: `_load_all() -> list[dict]` (already exists — rows with `representative`, `transaction_date` (`MM/DD/YYYY`), `ticker`, `type` (`Purchase`/`Sale`/`Exchange`), `amount_mid`).
 - Produces: `top_traded(days: int = 90, limit: int = 10) -> dict` returning `{"bought": [...], "sold": [...]}`. Each entry: `{"ticker": str, "member_count": int, "members": list[str], "total_amount_mid": float}`, sorted by `member_count` desc then `total_amount_mid` desc, capped at `limit`. Rows with `ticker` falsy (e.g. `"--"`) are excluded. `Exchange` type rows are excluded from both buckets.
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
 
 ```python
 def test_top_traded_groups_by_ticker_and_ranks_by_member_count(monkeypatch):
@@ -292,12 +315,12 @@ def test_top_traded_empty_when_source_unavailable(monkeypatch):
     assert out == {"bought": [], "sold": []}
 ```
 
-- [ ] **Step 2: Run tests to verify they fail**
+- [x] **Step 2: Run tests to verify they fail**
 
 Run: `.venv/bin/pytest -q tests/test_congress_trading.py -k top_traded -v`
 Expected: FAIL with `AttributeError: module 'providers.congress_trading' has no attribute 'top_traded'`
 
-- [ ] **Step 3: Implement `top_traded`**
+- [x] **Step 3: Implement `top_traded`**
 
 Add to `providers/congress_trading.py`, after `member_transactions`:
 
@@ -345,17 +368,17 @@ def top_traded(days: int = 90, limit: int = 10) -> dict:
     return {"bought": _finalize(buckets["Purchase"]), "sold": _finalize(buckets["Sale"])}
 ```
 
-- [ ] **Step 4: Run tests to verify they pass**
+- [x] **Step 4: Run tests to verify they pass**
 
 Run: `.venv/bin/pytest -q tests/test_congress_trading.py -k top_traded -v`
 Expected: PASS (3 tests)
 
-- [ ] **Step 5: Run broader regression**
+- [x] **Step 5: Run broader regression**
 
 Run: `.venv/bin/pytest -q tests/test_congress_trading.py -v`
 Expected: all pass (11 total: 8 existing + 3 new)
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 ```bash
 git add providers/congress_trading.py tests/test_congress_trading.py
@@ -374,7 +397,7 @@ git commit -m "add) 하원의원 90일 매수·매도 상위 종목 집계 (top_
 - Consumes: `screen: dict` (Task 1 shape), `congress: dict` (Task 2 shape), `agent_console.agent._try_llm_prompt(prompt, max_timeout=20)` (existing helper, same as `build_common_moves_analysis`).
 - Produces: `explain_screen(screen: dict, congress: dict) -> dict` returning `{"summary": str, "confidence": float, "mode": "llm"|"heuristic"}`.
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
 
 ```python
 def test_explain_screen_uses_llm_when_available(monkeypatch):
@@ -421,12 +444,12 @@ def test_explain_screen_empty_inputs_stay_heuristic(monkeypatch):
     assert out["mode"] == "heuristic"
 ```
 
-- [ ] **Step 2: Run tests to verify they fail**
+- [x] **Step 2: Run tests to verify they fail**
 
 Run: `.venv/bin/pytest -q tests/test_institution_watch.py -k explain_screen -v`
 Expected: FAIL with `AttributeError: module 'reports.institution_watch' has no attribute 'explain_screen'`
 
-- [ ] **Step 3: Implement `explain_screen`**
+- [x] **Step 3: Implement `explain_screen`**
 
 Add to `reports/institution_watch.py`, after `build_common_moves_analysis` (or near it):
 
@@ -495,17 +518,17 @@ def explain_screen(screen: dict, congress: dict) -> dict:
 
 Confirm `json` and `re` are already imported at the top of `reports/institution_watch.py` (they are, used by `build_common_moves_analysis`) — no new imports needed.
 
-- [ ] **Step 4: Run tests to verify they pass**
+- [x] **Step 4: Run tests to verify they pass**
 
 Run: `.venv/bin/pytest -q tests/test_institution_watch.py -k explain_screen -v`
 Expected: PASS (3 tests)
 
-- [ ] **Step 5: Run broader regression**
+- [x] **Step 5: Run broader regression**
 
 Run: `.venv/bin/pytest -q tests/test_institution_watch.py -v`
 Expected: all pass
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 ```bash
 git add reports/institution_watch.py tests/test_institution_watch.py
@@ -536,7 +559,7 @@ _SCREEN_13F_KEYS = ("berkshire", "bridgewater", "scion", "citadel", "duquesne",
                     "pershing_square", "point72", "third_point", "tudor", "nps")
 ```
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
 
 ```python
 def test_views_institution_screener_delegates(monkeypatch):
@@ -608,12 +631,12 @@ def test_views_institution_screen_explain_graceful_on_exception(monkeypatch):
     assert out["mode"] == "heuristic"
 ```
 
-- [ ] **Step 2: Run tests to verify they fail**
+- [x] **Step 2: Run tests to verify they fail**
 
 Run: `.venv/bin/pytest -q tests/test_dashboard.py -k "institution_screener or congress_top_traded or institution_screen_explain" -v`
 Expected: FAIL — `views` has no such attributes
 
-- [ ] **Step 3: Implement the views.py wrappers**
+- [x] **Step 3: Implement the views.py wrappers**
 
 Add to `dashboard/views.py`, near `congress_trading`:
 
@@ -663,17 +686,17 @@ def institution_screen_explain(screen, congress):
     return views.institution_screen_explain(screen, congress)
 ```
 
-- [ ] **Step 4: Run tests to verify they pass**
+- [x] **Step 4: Run tests to verify they pass**
 
 Run: `.venv/bin/pytest -q tests/test_dashboard.py -k "institution_screener or congress_top_traded or institution_screen_explain" -v`
 Expected: PASS (6 tests)
 
-- [ ] **Step 5: Run broader regression**
+- [x] **Step 5: Run broader regression**
 
 Run: `.venv/bin/pytest -q tests/test_dashboard.py -v`
 Expected: all pass
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 ```bash
 git add dashboard/views.py dashboard/cached.py tests/test_dashboard.py
@@ -693,7 +716,7 @@ git commit -m "add) 교차스크리닝·정치인상위·LLM해설 views/cached 
 - Consumes: `cached.institution_screener(keys)`, `cached.congress_top_traded(days)`, `cached.institution_screen_explain(screen, congress)` (Task 4), `charts.allocation_donut(holdings: list[dict])` (existing, `dashboard/charts.py:353`).
 - Produces: `_institution_hub_section()` renders the new content; no new public interface consumed by later tasks (this is the last task).
 
-- [ ] **Step 1: Add `total_value_usd` to the institutions list in `views.institution_watch_summary`**
+- [x] **Step 1: Add `total_value_usd` to the institutions list in `views.institution_watch_summary`**
 
 In `dashboard/views.py`, find the `institutions.append({...})` block inside `institution_watch_summary` (around the existing `"key": snapshot["institution_key"], ...` dict) and add one line:
 
@@ -718,7 +741,7 @@ In `dashboard/views.py`, find the `institutions.append({...})` block inside `ins
 
 (Only the `"total_value_usd": snapshot.get("total_value_usd"),` line is new — insert it among the existing keys, keep everything else identical.)
 
-- [ ] **Step 2: Write the failing tests**
+- [x] **Step 2: Write the failing tests**
 
 Add to `tests/test_dashboard.py`, near the other `institution_watch_summary` tests:
 
@@ -835,12 +858,12 @@ def test_screen_explain_button_gates_llm_call(monkeypatch):
     assert "설명" in body
 ```
 
-- [ ] **Step 3: Run tests to verify they fail**
+- [x] **Step 3: Run tests to verify they fail**
 
 Run: `.venv/bin/pytest -q tests/test_dashboard.py -k total_value_usd tests/test_watchlist_page_ui.py -k "screening or screen_explain" -v`
 Expected: FAIL (attribute/UI content not found yet)
 
-- [ ] **Step 4: Implement the UI**
+- [x] **Step 4: Implement the UI**
 
 In `dashboard/pages/watchlist.py`, add near the top (module level, alongside other constants):
 
@@ -957,17 +980,17 @@ Finally, in `_institution_hub_section()`, call `_screening_section()` right afte
 
 (i.e. insert `_screening_section()` and a `st.divider()` between the existing multiselect-caption block and the `all_selected = ...` line — the rest of the function is unchanged.)
 
-- [ ] **Step 5: Run tests to verify they pass**
+- [x] **Step 5: Run tests to verify they pass**
 
 Run: `.venv/bin/pytest -q tests/test_dashboard.py -k total_value_usd tests/test_watchlist_page_ui.py -v`
 Expected: PASS (all)
 
-- [ ] **Step 6: Run full watchlist/dashboard/institution regression**
+- [x] **Step 6: Run full watchlist/dashboard/institution regression**
 
 Run: `.venv/bin/pytest -q tests/test_watchlist_page_ui.py tests/test_watchlist_quotes.py tests/test_dashboard.py tests/test_institution_watch.py tests/test_thirteenf.py tests/test_congress_trading.py -v`
 Expected: all pass, no regressions
 
-- [ ] **Step 7: Commit**
+- [x] **Step 7: Commit**
 
 ```bash
 git add dashboard/pages/watchlist.py dashboard/views.py tests/test_dashboard.py tests/test_watchlist_page_ui.py
@@ -980,7 +1003,7 @@ git commit -m "add) 기관허브 상단에 도넛+교차스크리닝+정치인�
 
 **Files:** none (verification only)
 
-- [ ] **Step 1: Live smoke test the full pipeline against real data**
+- [x] **Step 1: Live smoke test the full pipeline against real data**
 
 ```bash
 .venv/bin/python3 -c "
@@ -1005,7 +1028,7 @@ print('explain mode:', explain['mode'], '-', explain['summary'][:200])
 
 Expected: no exceptions, plausible-looking tickers and counts (sanity-check against known holdings, e.g. NVDA/major AI names likely appearing given the 2026 market backdrop established earlier in this session).
 
-- [ ] **Step 2: Confirm RED against unpatched source for every file touched this plan**
+- [x] **Step 2: Confirm RED against unpatched source for every file touched this plan**
 
 ```bash
 git stash push -- reports/institution_watch.py providers/congress_trading.py dashboard/views.py dashboard/cached.py dashboard/pages/watchlist.py
@@ -1017,7 +1040,7 @@ Expected: multiple failures while stashed (proves the tests actually exercise th
 
 (Note: this plan already had each task commit individually with its own RED→GREEN cycle: this step is a final belt-and-suspenders check across the WHOLE feature at once, catching any cross-task interaction the per-task checks might have missed.)
 
-- [ ] **Step 3: Full local suite regression**
+- [x] **Step 3: Full local suite regression**
 
 ```bash
 .venv/bin/pytest -q tests/
@@ -1025,7 +1048,7 @@ Expected: multiple failures while stashed (proves the tests actually exercise th
 
 Expected: same pass count as before this feature plus the ~25 new tests, only the pre-existing unrelated `test_no_dead_ticker_mentions` failure (if still present) — no other regressions.
 
-- [ ] **Step 4: Push feature branch, merge to main-repo master**
+- [x] **Step 4: Push feature branch, merge to main-repo master**
 
 ```bash
 git push origin fix/audit-08-stock-advisor-sensitive-scan
@@ -1037,7 +1060,7 @@ git push origin master
 
 Expected: fast-forward merge, tests pass on master, push succeeds.
 
-- [ ] **Step 5: Verify in the actually-deployed dashboard**
+- [x] **Step 5: Verify in the actually-deployed dashboard**
 
 The dashboard auto-restarts via `dashboard_watchdog.sh` freshness detection within ~1 minute of the master push (established pattern this session — no manual restart needed for `dashboard/` changes). After that window:
 
@@ -1047,6 +1070,6 @@ curl -s -o /dev/null -w "%{http_code}\n" http://localhost:8501   # or whatever p
 
 Then use the `run` skill or a direct browser check (if the harness has browser tools available) to open the 관심종목 page, toggle "🏦 유명 투자자 비교 보기" on, and visually confirm: donut charts appear per institution card, the three 공통 움직임 tables render with real tickers, the 정치인 매수·매도 표 has real data, and clicking "🧠 스크리닝 해설 생성" produces a non-empty explanation without raising an error. If no browser tool is available in this environment, at minimum re-run Step 1's live smoke test against the master branch checkout to confirm the deployed code path produces identical, non-erroring output, and report to the user exactly what was and wasn't visually verified.
 
-- [ ] **Step 6: Report completion to the user**
+- [x] **Step 6: Report completion to the user**
 
 Summarize what shipped, what the live smoke test showed (sample tickers/counts), any caveats (put options excluded, House-only politician data, cold-cache load time), and confirm the `/goal` condition is met.
