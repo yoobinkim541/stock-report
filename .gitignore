@@ -62,14 +62,12 @@ tasks-telegram-bot.md
 *.log
 uv.lock
 
-# ── 생성된 리포트 (로컬 저장) ─────────────
-reports/*
-!reports/llm_decision.py
-!reports/combined_daily_report.py
-!reports/market_risk_report.py
-!reports/wiki_health_check.py
-!reports/wiki_distillation.py
-!reports/notable_investors_wiki.py
+# 실제 생성 리포트 출력물은 레포 밖 ~/reports/ 로 나간다(REPORTS_DIR).
+# 레포의 reports/ 는 순수 파이썬 소스 패키지 — 예전엔 여길 통째로 무시하고
+# 파일별로 !허용 예외를 눌러 추가하는 방식이었는데, 신규 모듈을 예외에 안 넣으면
+# `git add -A` 로도 조용히 안 실려서 실제로 프로덕션에 도는 모듈 6개(source_pipeline.py
+# 등)가 커밋 이력에 아예 없는 상태로 몇 시간 살아있었다(감사 2026-08-23). 소스는
+# 전부 추적하는 쪽이 안전.
 ~/reports/
 data/shared-memory/*
 !data/shared-memory/.gitkeep

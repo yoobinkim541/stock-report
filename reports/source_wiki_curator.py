@@ -12,6 +12,9 @@ from collections.abc import Callable
 from datetime import datetime, timedelta, timezone
 from typing import Iterable
 
+from dotenv import load_dotenv          # crons/*.py 관례 — uv run 은 .env 를 자동 주입 안 함
+load_dotenv()
+
 from reports.evidence_cards import cards_to_source_refs, event_to_evidence_card
 
 KST = timezone(timedelta(hours=9))
