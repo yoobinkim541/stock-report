@@ -10,8 +10,19 @@ import pandas as pd
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 
+def _fixture_now(tz: str = "America/New_York"):
+    """봉 픽스처 기준 시각 — **자정 넘김 방지**로 장중 시각에 고정.
+
+    예전엔 `datetime.now()` 를 그대로 썼는데, ET 자정 직후(00:00~00:34)에 실행되면
+    35분 봉이 전날 23:5x 로 넘어가 `_OPEN_MIN`(=1432분) > `_CLOSE_MIN`(=206분) 이 되어
+    진입 창 비교가 뒤집히고 테스트가 실패했다(하루 34분 구간에서만 실패하는 플래키).
+    실측 2026-08-23 00:26 ET 에서 재현. 날짜는 오늘로 두되 시각만 장중으로 고정한다.
+    """
+    return datetime.now(ZoneInfo(tz)).replace(hour=10, minute=30, second=0, microsecond=0)
+
+
 def _bars(symbol: str, *, price: float = 100.0, tz: str = "America/New_York"):
-    now = datetime.now(ZoneInfo(tz)).replace(second=0, microsecond=0)
+    now = _fixture_now(tz)
     idx = pd.date_range(now - timedelta(minutes=34), periods=35, freq="min")
     px = price
     rows = []
@@ -225,6 +236,8 @@ def test_intraday_us_signal_executes_leveraged_etf_with_loss_budget(monkeypatch,
 
     monkeypatch.setattr(eng, "_LEDGER_BASE", str(tmp_path / "ledger"))
     monkeypatch.setattr(eng, "_market_open", lambda mk: mk == "US")
+    # run_market 의 now_min 도 픽스처와 같은 시각으로 고정 — 벽시계 의존 제거(플래키 방지)
+    monkeypatch.setattr(eng, "_now_local", lambda mk: _fixture_now())
     monkeypatch.setattr(eng, "_news_events", lambda now_epoch: [])
     monkeypatch.setattr(eng, "_record_event", lambda *a, **k: events.append({"sym": a[0], "side": a[2], **k}))
     monkeypatch.setattr(iu, "refresh", lambda mk, keep=None, **k: ["QQQ"])
