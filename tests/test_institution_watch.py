@@ -654,3 +654,150 @@ def test_main_routes_cron_to_source_backed_analysis_subset(monkeypatch):
     assert captured["keys"] == ["berkshire", "bridgewater", "nps"]
     assert captured["dry_run"] is True
     assert captured["analysis_keys"] == ["berkshire", "bridgewater"]
+
+
+# ── 신규 편입 텔레그램 알림 (crontab 교체 전 기능 동등성 확보) ────────────────
+# notable_investors_wiki.py 는 신규 편입 감지 시 텔레그램으로 즉시 알렸는데,
+# institution_watch.main() 은 관심종목 자동추가(watchlist)는 승계했지만 알림은
+# 없었다. notable_investors_wiki→institution_watch 로 크론을 교체하면 이 알림이
+# 조용히 사라지므로, 스왑 전에 institution_watch 에도 알림을 이식한다.
+
+def test_build_new_position_alert_formats_updated_institutions():
+    from reports import institution_watch as iw
+
+    result = {
+        "updated": [
+            {"institution_key": "berkshire",
+             "new": [{"issuer": "APPLE INC", "ticker": "AAPL", "weight_pct": 5.2, "value_usd": 3e9}],
+             "exited": []},
+        ],
+        "snapshots_by_key": {
+            "berkshire": {"display_name": "Berkshire Hathaway", "filing_date": "2026-08-14"},
+        },
+    }
+    text = iw._build_new_position_alert(result)
+    assert text is not None
+    assert "Berkshire Hathaway" in text
+    assert "AAPL" in text
+    assert "🆕" in text
+
+
+def test_build_new_position_alert_includes_exits():
+    from reports import institution_watch as iw
+
+    result = {
+        "updated": [
+            {"institution_key": "scion",
+             "new": [],
+             "exited": [{"issuer": "TESLA INC", "ticker": "TSLA", "weight_pct": 3.0, "value_usd": 1e9}]},
+        ],
+        "snapshots_by_key": {
+            "scion": {"display_name": "Scion Asset Management", "filing_date": "2026-08-14"},
+        },
+    }
+    text = iw._build_new_position_alert(result)
+    assert text is not None
+    assert "TSLA" in text
+    assert "📤" in text
+
+
+def test_build_new_position_alert_none_when_nothing_new():
+    from reports import institution_watch as iw
+
+    result = {
+        "updated": [{"institution_key": "berkshire", "new": [], "exited": []}],
+        "snapshots_by_key": {"berkshire": {"display_name": "Berkshire Hathaway"}},
+    }
+    assert iw._build_new_position_alert(result) is None
+
+
+def test_build_new_position_alert_none_when_no_updates():
+    from reports import institution_watch as iw
+    assert iw._build_new_position_alert({"updated": [], "snapshots_by_key": {}}) is None
+
+
+def test_main_sends_telegram_when_new_positions_detected(monkeypatch, tmp_path):
+    from reports import institution_watch as iw
+
+    sent = {}
+
+    def _fake_send_telegram(text, **kw):
+        sent["text"] = text
+        return {"ok": True}
+
+    monkeypatch.setattr(iw, "run", lambda *a, **k: {
+        "selected_keys": ["berkshire"], "updated": [
+            {"institution_key": "berkshire",
+             "new": [{"issuer": "APPLE INC", "ticker": "AAPL", "weight_pct": 5.2, "value_usd": 3e9}],
+             "exited": []},
+        ],
+        "unchanged": [], "failed": [], "pages": [],
+        "snapshots_by_key": {"berkshire": {"display_name": "Berkshire Hathaway", "filing_date": "2026-08-14"}},
+    })
+    monkeypatch.setattr(iw, "_default_run_keys", lambda: ["berkshire"])
+    import notify
+    monkeypatch.setattr(notify, "send_telegram", _fake_send_telegram)
+
+    rc = iw.main([])
+    assert rc == 0
+    assert "AAPL" in sent.get("text", "")
+
+
+def test_main_skips_telegram_in_dry_run(monkeypatch):
+    from reports import institution_watch as iw
+
+    called = []
+    import notify
+    monkeypatch.setattr(notify, "send_telegram", lambda *a, **k: called.append(1))
+    monkeypatch.setattr(iw, "run", lambda *a, **k: {
+        "selected_keys": ["berkshire"], "updated": [
+            {"institution_key": "berkshire",
+             "new": [{"issuer": "APPLE INC", "ticker": "AAPL", "weight_pct": 5.2, "value_usd": 3e9}],
+             "exited": []},
+        ],
+        "unchanged": [], "failed": [], "pages": [],
+        "snapshots_by_key": {"berkshire": {"display_name": "Berkshire Hathaway"}},
+    })
+    monkeypatch.setattr(iw, "_default_run_keys", lambda: ["berkshire"])
+
+    iw.main(["--dry-run"])
+    assert called == []
+
+
+def test_main_skips_telegram_when_nothing_new(monkeypatch):
+    from reports import institution_watch as iw
+
+    called = []
+    import notify
+    monkeypatch.setattr(notify, "send_telegram", lambda *a, **k: called.append(1))
+    monkeypatch.setattr(iw, "run", lambda *a, **k: {
+        "selected_keys": ["berkshire"], "updated": [],
+        "unchanged": [{"institution_key": "berkshire"}], "failed": [], "pages": [],
+        "snapshots_by_key": {},
+    })
+    monkeypatch.setattr(iw, "_default_run_keys", lambda: ["berkshire"])
+
+    iw.main([])
+    assert called == []
+
+
+def test_main_telegram_failure_does_not_crash(monkeypatch):
+    from reports import institution_watch as iw
+
+    import notify
+    def _boom(*a, **k):
+        raise RuntimeError("network down")
+    monkeypatch.setattr(notify, "send_telegram", _boom)
+    monkeypatch.setattr(iw, "run", lambda *a, **k: {
+        "selected_keys": ["berkshire"], "updated": [
+            {"institution_key": "berkshire",
+             "new": [{"issuer": "APPLE INC", "ticker": "AAPL", "weight_pct": 5.2, "value_usd": 3e9}],
+             "exited": []},
+        ],
+        "unchanged": [], "failed": [], "pages": [],
+        "snapshots_by_key": {"berkshire": {"display_name": "Berkshire Hathaway"}},
+    })
+    monkeypatch.setattr(iw, "_default_run_keys", lambda: ["berkshire"])
+
+    rc = iw.main([])
+    assert rc == 0          # 알림 실패해도 크론 자체는 성공 취급(무시)

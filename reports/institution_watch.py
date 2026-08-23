@@ -1090,6 +1090,34 @@ def _default_run_keys() -> list[str]:
     return [row["key"] for row in list_institutions()]
 
 
+def _build_new_position_alert(result: dict) -> str | None:
+    """run() 결과에서 신규편입/청산이 있으면 텔레그램 알림 텍스트, 없으면 None.
+
+    notable_investors_wiki.py(레거시)의 즉시 알림 기능을 승계 — crontab 을
+    notable_investors_wiki→institution_watch 로 교체하면서 이 알림이 조용히
+    사라지는 걸 막기 위해 이식(감사 2026-08-23).
+    """
+    snaps = result.get("snapshots_by_key") or {}
+    lines: list[str] = []
+    for item in result.get("updated") or []:
+        key = item.get("institution_key")
+        new = item.get("new") or []
+        exited = item.get("exited") or []
+        if not new and not exited:
+            continue
+        snap = snaps.get(key) or {}
+        name = snap.get("display_name") or key
+        if new:
+            names = ", ".join(_legacy_fmt_holding(h) for h in new[:5])
+            lines.append(f"🆕 {name} 신규 편입: {names}")
+        if exited:
+            names = ", ".join(_legacy_fmt_holding(h) for h in exited[:5])
+            lines.append(f"📤 {name} 청산: {names}")
+    if not lines:
+        return None
+    return "🏛️ 기관 포트폴리오 변경 감지\n" + "\n".join(lines)
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--dry-run", action="store_true")
@@ -1110,6 +1138,17 @@ def main(argv: list[str] | None = None) -> int:
     keys = args.keys if args.keys else _default_run_keys()
     analysis_keys = args.analysis_keys if args.analysis_keys else source_backed_institution_keys()
     result = run(keys, dry_run=args.dry_run, analysis_keys=analysis_keys or None)
+
+    if not args.dry_run:
+        alert = _build_new_position_alert(result)
+        if alert:
+            try:
+                import notify
+                notify.send_telegram(alert, token=os.getenv("STOCK_BOT_TOKEN"),
+                                     chat_id=os.getenv("STOCK_BOT_CHAT_ID"), timeout=15)
+            except Exception as e:
+                logger.warning("텔레그램 발송 실패(무시): %s", e)
+
     logger.info(
         "기관 watch 완료: 선택 %d개 · 갱신 %d · 변동 없음 %d · 실패 %d · 패턴 %d",
         len(result.get("selected_keys") or []),
