@@ -1,5 +1,18 @@
 # Knowledge Utilization Hardening Implementation Plan
 
+> ## ⏳ Task 1~5 완료 · Task 6 미착수 (2026-08-23 확인)
+>
+> **Task 1~5**: 다른 세션이 구현·워크트리에 미커밋 상태로 남겨둔 것을 검증 후 대신
+> 커밋(`3c314a8`). 선언된 파일 전부 존재 확인 + 관련 테스트 167건 통과.
+>
+> **Task 6(End-To-End Evidence Trace)**: `scripts/trace_source_evidence.py`,
+> `tests/test_source_evidence_trace.py` 둘 다 존재하지 않는다 — 구현되지 않은 신규
+> 기능이라 "미커밋 작업 마무리"의 범위가 아니라고 판단해 임의로 만들지 않았다.
+> 6단계 파이프라인 트레이스(collected→persisted→wiki_saved→qmd_exported→
+> qmd_retrieved→context_used) + CLI 종료코드 계약 + 헬스체크 연동을 요구하는
+> 별도 기능 규모라, 진행 여부는 확인 후 결정 바람.
+
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Ensure collected evidence is exported, indexed, retrieved, and visibly used by the AI console, while exposing heuristic fallbacks and unused knowledge.
@@ -32,25 +45,25 @@
 - Produces on every label: `label_method`, `label_provider`, `label_model`, `label_error`, `labeled_at`
 - Produces: `label_health(labels: list[dict], *, hours: int = 24) -> dict`
 
-- [ ] **Step 1: Write failing provenance tests**
+- [x] **Step 1: Write failing provenance tests**
 
 Assert valid LLM output is tagged `llm`, command failure fallback is tagged `heuristic` with a nonempty reason, parser-invalid output is tagged heuristic, and health computes fallback ratio.
 
-- [ ] **Step 2: Run tests and verify RED**
+- [x] **Step 2: Run tests and verify RED**
 
 Run: `.venv/bin/pytest tests/test_news_labels.py -q`
 
 Expected: FAIL because labels have no generation provenance.
 
-- [ ] **Step 3: Implement provenance without changing fact guards**
+- [x] **Step 3: Implement provenance without changing fact guards**
 
 Keep ticker/event/direction/strength validation. Attach provenance after parsing trusted event-derived fields so an LLM cannot invent it.
 
-- [ ] **Step 4: Expose cron summary**
+- [x] **Step 4: Expose cron summary**
 
 Log `llm_count`, `heuristic_count`, fallback ratio, provider/model, and first failure reason per run.
 
-- [ ] **Step 5: Run tests and verify GREEN**
+- [x] **Step 5: Run tests and verify GREEN**
 
 Run: `.venv/bin/pytest tests/test_news_labels.py -q`
 
@@ -67,25 +80,25 @@ Expected: PASS.
 - Preserves: `all_records() -> list[dict]`
 - Produces: `inspect_records() -> list[dict]` that never calls `ensure_store()` or writes files
 
-- [ ] **Step 1: Write failing read-only tests**
+- [x] **Step 1: Write failing read-only tests**
 
 Create an existing events file under a read-only directory and assert wiki listing/stats can read it without touching index or summary files. Assert missing stores return empty rows.
 
-- [ ] **Step 2: Run tests and verify RED**
+- [x] **Step 2: Run tests and verify RED**
 
 Run: `.venv/bin/pytest tests/test_agent_console.py -q -k read_only_shared_memory`
 
 Expected: FAIL because current reads call `ensure_store()`.
 
-- [ ] **Step 3: Implement side-effect-free inspection**
+- [x] **Step 3: Implement side-effect-free inspection**
 
 Use the existing bounded JSONL parser directly. Keep mutating APIs responsible for `ensure_store()`.
 
-- [ ] **Step 4: Stop swallowing inspection failures as empty healthy state**
+- [x] **Step 4: Stop swallowing inspection failures as empty healthy state**
 
 Wiki health returns an explicit `read_error` while normal list APIs may still return an empty list for UI resilience.
 
-- [ ] **Step 5: Run tests and verify GREEN**
+- [x] **Step 5: Run tests and verify GREEN**
 
 Run: `.venv/bin/pytest tests/test_agent_console.py -q -k 'read_only_shared_memory or wiki_search_health'`
 
@@ -104,25 +117,25 @@ Expected: PASS.
 - Produces: `sync_pages(pages: list[dict], *, runner=subprocess.run) -> dict`
 - Extends: `health(*, probe_query: str = "시장") -> dict` with `query_ok`, `index_fresh`, `latest_page_at`, `latest_export_at`, `error`
 
-- [ ] **Step 1: Write failing synchronization tests**
+- [x] **Step 1: Write failing synchronization tests**
 
 Assert batch curator save exports every saved page, invokes QMD update once per batch, health fails when export is older than shared-memory update, and a failed query marks `query_ok=false` even when the binary exists.
 
-- [ ] **Step 2: Run tests and verify RED**
+- [x] **Step 2: Run tests and verify RED**
 
 Run: `.venv/bin/pytest tests/test_qmd_search.py tests/test_source_wiki_curator.py -q -k 'sync or health or export'`
 
 Expected: FAIL on missing synchronization contract.
 
-- [ ] **Step 3: Implement batch sync**
+- [x] **Step 3: Implement batch sync**
 
 Write markdown files, remove derived files for deleted wiki ids, then call the configured QMD update command once. Return counts and errors without hiding failures.
 
-- [ ] **Step 4: Wire sync after successful wiki batches**
+- [x] **Step 4: Wire sync after successful wiki batches**
 
 Source curator and merge/split batch paths call `sync_pages` after shared-memory commit. A QMD failure does not roll back source-of-truth data but is recorded as degraded health.
 
-- [ ] **Step 5: Run tests and verify GREEN**
+- [x] **Step 5: Run tests and verify GREEN**
 
 Run: `.venv/bin/pytest tests/test_qmd_search.py tests/test_source_wiki_curator.py -q`
 
@@ -140,25 +153,25 @@ Expected: PASS.
 - Extends curator result with: `candidate_count`, `saved_count`, `unchanged_count`, `failed_count`, `qmd_exported_count`, `duration_ms`
 - Produces: `evidence_fingerprint(events: list[dict]) -> str`
 
-- [ ] **Step 1: Write failing delta tests**
+- [x] **Step 1: Write failing delta tests**
 
 Assert an unchanged evidence fingerprint skips the write/enrichment path, a new observation changes the fingerprint, all eligible candidates save when limit is zero, and per-page failures do not hide successful pages.
 
-- [ ] **Step 2: Run tests and verify RED**
+- [x] **Step 2: Run tests and verify RED**
 
 Run: `.venv/bin/pytest tests/test_source_wiki_curator.py -q -k 'fingerprint or metrics or limit_zero'`
 
 Expected: FAIL on missing fingerprint/stage metrics.
 
-- [ ] **Step 3: Implement deterministic delta curation**
+- [x] **Step 3: Implement deterministic delta curation**
 
 Fingerprint sorted evidence ids plus mutable observation values. Preserve existing page usage/feedback metadata when content updates.
 
-- [ ] **Step 4: Add stage metrics to pipeline health**
+- [x] **Step 4: Add stage metrics to pipeline health**
 
 Flag candidate-to-saved gaps, failed QMD export, and repeated unchanged broad pages. Do not treat zero new evidence as a collection failure.
 
-- [ ] **Step 5: Run tests and verify GREEN**
+- [x] **Step 5: Run tests and verify GREEN**
 
 Run: `.venv/bin/pytest tests/test_source_wiki_curator.py tests/test_wiki_pipeline_health.py -q`
 
@@ -179,25 +192,25 @@ Expected: PASS.
 - Produces: `record_context_use(query_id: str, evidence_ids: list[str]) -> None`
 - Produces: `usage_summary(*, hours: int = 24) -> dict`
 
-- [ ] **Step 1: Write failing telemetry tests**
+- [x] **Step 1: Write failing telemetry tests**
 
 Assert retrieval hits/fallbacks are append-only, context use references only returned page/evidence ids, repeated query ids are idempotent, and health reports unused-page and retrieval-to-context conversion counts.
 
-- [ ] **Step 2: Run tests and verify RED**
+- [x] **Step 2: Run tests and verify RED**
 
 Run: `.venv/bin/pytest tests/test_evidence_usage.py -q`
 
 Expected: FAIL because telemetry storage does not exist.
 
-- [ ] **Step 3: Implement lightweight telemetry**
+- [x] **Step 3: Implement lightweight telemetry**
 
 Use a locked JSONL file under the existing shared-memory directory. Never include full user questions; store a hash/query id, ids, timestamps, provider, and fallback flag.
 
-- [ ] **Step 4: Wire retrieval and prompt-context use**
+- [x] **Step 4: Wire retrieval and prompt-context use**
 
 Record after QMD/fallback ranking and after final context assembly. Failures are nonblocking but visible in health.
 
-- [ ] **Step 5: Run tests and verify GREEN**
+- [x] **Step 5: Run tests and verify GREEN**
 
 Run: `.venv/bin/pytest tests/test_evidence_usage.py tests/test_agent_console.py -q -k 'evidence_usage or wiki'`
 

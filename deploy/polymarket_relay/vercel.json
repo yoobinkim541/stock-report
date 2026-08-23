@@ -1,0 +1,14 @@
+{
+  "$schema": "https://openapi.vercel.sh/vercel.json",
+  "framework": null,
+  "functions": {
+    "api/index.py": {
+      "regions": ["dub1"],
+      "maxDuration": 30
+    }
+  },
+  "rewrites": [
+    { "source": "/api/events", "destination": "/api/index" },
+    { "source": "/health", "destination": "/api/index" }
+  ]
+}
