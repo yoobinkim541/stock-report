@@ -9,7 +9,7 @@ from collections import Counter, defaultdict
 from datetime import datetime, timezone
 from typing import Any
 
-from agent_console import wiki
+from agent_console import evidence_usage, wiki
 from reports import source_collector
 
 STALE_WIKI_AGE_DAYS = 14
@@ -109,6 +109,9 @@ def _build_source_rows(
         last_count = int(record.get("last_count") or 0)
         last_success = _clean(record.get("last_success") or "", 80)
         zero_event_streak = 0 if last_count > 0 else (1 if last_success else None)
+        availability = _clean(record.get("availability") or "available", 40).lower()
+        fetched_count = int(record.get("last_fetched_count") if record.get("last_fetched_count") is not None else last_count)
+        persisted_count = int(record.get("last_persisted_count") if record.get("last_persisted_count") is not None else last_count)
         rows.append({
             "source": source,
             "observed": source in source_health,
@@ -121,13 +124,19 @@ def _build_source_rows(
             "last_count": last_count,
             "last_success": last_success,
             "last_success_count": int(record.get("last_success_count") or 0),
+            "last_fetched_count": fetched_count,
+            "last_persisted_count": persisted_count,
+            "last_duration_ms": int(record.get("last_duration_ms") or 0),
+            "zero_persist_streak": int(record.get("zero_persist_streak") or 0),
+            "availability": availability,
+            "availability_reason": _clean(record.get("availability_reason") or "", 200),
             "last_error": _clean(record.get("last_error") or stale.get("error") or "", 200) if stale else _clean(record.get("last_error") or "", 200),
             "is_stale": bool(stale),
             "stale_hours": stale.get("hours") if stale else None,
             "stale_threshold": stale.get("threshold") if stale else None,
             "zero_event_streak": zero_event_streak,
             "recent_event_count": int(recent_counts.get(source, 0)),
-            "raw_artifacts_visible": bool(last_count or recent_counts.get(source, 0)),
+            "raw_artifacts_visible": bool(persisted_count or recent_counts.get(source, 0)),
             "has_success": bool(last_success),
         })
     return rows
@@ -142,9 +151,17 @@ def _summarize_source_health(
     stale_sources = [row for row in rows if row["is_stale"]]
     missing_success = [row for row in rows if row["observed"] and not row["has_success"]]
     zero_event = [row for row in rows if row["observed"] and row["last_count"] == 0]
+    blocked = [row for row in rows if row["availability"] in {"blocked", "disabled"}]
+    failed = [row for row in rows if row["availability"] == "error"]
+    zero_persist = [
+        row for row in rows
+        if row["observed"] and row["last_fetched_count"] > 0 and row["last_persisted_count"] == 0
+        and row["zero_persist_streak"] > 0
+    ]
     healthy = [
         row for row in rows
         if row["observed"] and not row["is_stale"] and row["has_success"] and row["last_count"] > 0
+        and row["availability"] == "available"
     ]
     recent_counts = Counter(_clean(event.get("source") or "unknown", 120) for event in recent_events or [])
     return {
@@ -155,6 +172,9 @@ def _summarize_source_health(
             "stale_sources": len(stale_sources),
             "missing_success_sources": len(missing_success),
             "zero_event_sources": len(zero_event),
+            "blocked_sources": len(blocked),
+            "failed_sources": len(failed),
+            "zero_persist_sources": len(zero_persist),
             "recent_event_total": len(recent_events or []),
             "recent_source_total": len([source for source, count in recent_counts.items() if count]),
         },
@@ -328,12 +348,17 @@ def build_pipeline_health_report(*, dry_run: bool = False) -> dict[str, Any]:
     wiki_section = _summarize_wiki_health(pages, stats_data, lint_data, stale_pages, unused_pages)
     curation_section = _summarize_curation_health(pages)
     recommendations = _recommendations(source_section, wiki_section, curation_section)
+    try:
+        usage = evidence_usage.usage_summary(hours=24)
+    except Exception as exc:
+        usage = {"error": _clean(exc, 240)}
     return {
         "dry_run": dry_run,
         "generated_at": _now_iso(),
         "source_health": source_section,
         "wiki_health": wiki_section,
         "curation_health": curation_section,
+        "evidence_usage": usage,
         "recommendations": recommendations,
     }
 
@@ -375,4 +400,3 @@ def format_pipeline_health_report(report: dict[str, Any]) -> str:
             f"- [{rec.get('category', 'unknown')}] {rec.get('title', '—')} — {rec.get('detail', '—')}"
         )
     return "\n".join(lines).strip() + "\n"
-

@@ -1,6 +1,6 @@
 # 데이터 수집 · World Memory · 위키 파이프라인
 
-> 최종 확인: 2026-07-31 (라이브 크론탭 `deploy/crontab.stock-report` + 코드 직접 확인 기준)
+> 최종 확인: 2026-08-21 (코드·운영 캐시·QMD 실제 질의 점검 기준)
 
 이 문서는 "뭐가 얼마나 자주 도는지 · 어디서 원본이 얼마나 보존되는지 · LLM이 어디를 언제 건드리는지"를 한 곳에 모은 운영 참조다. 각 컴포넌트의 세부 계약(디렉토리 구조, 신뢰 등급, 쓰기 규약)은 중복 설명하지 않고 [`agent-console.md`](agent-console.md), [`shared-agent-memory.md`](shared-agent-memory.md)를 참조한다 — 이 문서는 **빈도·경로·최근 변경**에 집중한다.
 
@@ -8,7 +8,11 @@
 
 | 스크립트 | 빈도 | 대상 | 비고 |
 |---|---|---|---|
-| `reports/source_collector.py` | **30분마다** (`5,35 * * * *`) | saveticker·telegram·arca·yahoo_finance·fred·worldgovernmentbonds 전체 | 일반 수집. `_classify_event()`가 모든 소스 공통으로 `body`/`body_raw`를 1차로 자름(현재 4000자) |
+| `reports/source_pipeline.py --group news` | **30분마다** (`5,35`) | saveticker·telegram·arca | 제공자별 동시 실행·실패 격리 |
+| `reports/source_pipeline.py --group market` | **30분마다** (`7,37`) | yahoo_finance | 전 종목 batch 다운로드 후 누락 티커만 fallback |
+| `reports/source_pipeline.py --group prediction` | **30분마다** (`9,39`) | Polymarket·Kalshi | 확률을 공급자별로 분리 저장. 한 곳만 정상이면 degraded 성공 |
+| `reports/source_pipeline.py --group calendar` | **매시간** (`11`) | saveticker 경제 캘린더 | 향후 14일 일정·중요도 정규화 |
+| `reports/source_pipeline.py --group macro` | **6시간마다** (`15 0,6,12,18`) | FRED·worldgovernmentbonds | 저빈도 거시 스냅샷 |
 | `crons/news_spike_detector.py` | **매 1분** (`* * * * *`) | saveticker만 (`fetch_saveticker_events()` 직접 호출 — source_collector와 같은 함수 공유) | 속보(`속보` 태그) 감지·중요도 채점·텔레그램 발송 전용. §3 참고 |
 
 두 크론이 **같은 `fetch_saveticker_events()` 함수를 공유**하기 때문에 saveticker API는 사실상 최대 1분 간격으로 폴링된다.
@@ -33,7 +37,9 @@
 
 ### 알려진 이슈
 
-- **arca 소스가 현재 403으로 수집 실패 중** (2026-07-24 로그 기준, `arca p1/p2 직접 폴백도 실패`) — 미해결.
+- **Polymarket Gamma는 현재 서버 리전에서 HTTP 451**이다. 고정 upstream·read-only relay는 `deploy/polymarket_relay`에 있으며, `POLYMARKET_RELAY_URL/TOKEN`을 설정해야 활성화된다. relay도 451이면 blocked 상태를 유지하고 Kalshi만 사용한다.
+- **Arca 직접 fallback은 간헐적으로 403**이다. 다른 뉴스 수집을 막지는 않으며 source health에 별도 표시한다.
+- Kalshi 전체 시장 피드에서 관련 시장이 0건이면 `/series`의 카테고리·태그·거래량으로 관련 series를 찾고, 최대 12개 series를 동시성 4로 조회한다.
 
 ## 2. World Memory 적재 경로
 
@@ -68,6 +74,7 @@ World Memory UI(대시보드 "시장 기억" 탭)는 검색(제목·본문·티�
 - 출력 라벨(`{티커, 이벤트유형, 방향, 강도}`)은 `{us,kr}_mock_track`의 `news_axis` 피처가 되며, 기본 가중치 0(관찰 전용) — 주간 학습의 신규 축 게이트(최소 20쌍+안정성)를 통과해야 실제 가중치가 붙는다
 - `issue_date`는 **기사의 실제 `published_at` 기준**(point-in-time, look-ahead 방지) — 라벨링이 늦게 일어나도 World Memory엔 원래 발행일로 귀속됨. 그래서 "이번 라벨링 배치 결과"가 꼭 "방금 발행된 기사"는 아님.
 - 속보(`news_spike`, §2)와는 완전히 다른 경로 — 이쪽은 즉시성보다 구조화 품질/비용 통제가 목적
+- 2026-08-21 이후 라벨은 `label_method=llm|heuristic`, provider/model, 실패 이유, 생성 시각을 기록한다. 이전 1,192건은 provenance가 없어 `legacy-untracked`이며 소급 추정하지 않는다.
 
 ## 4. 위키 LLM 로직
 
@@ -75,8 +82,8 @@ World Memory UI(대시보드 "시장 기억" 탭)는 검색(제목·본문·티�
 
 | 무엇을 | 스크립트/함수 | 빈도 | LLM 사용 |
 |---|---|---|---|
-| 페이지 신규 생성/갱신 | `reports/source_wiki_curator.py` | **30분마다** (`8,38 * * * *`, `--limit 0`=무제한) | O — 이벤트 3개+ 그룹이면 LLM이 제목/요약/태그 생성 (`SOURCE_WIKI_LLM_ENABLED`, 기본 켜짐) |
-| 스테일 페이지 아카이브 | `agent_console.wiki.archive_stale_pages()` | 30분마다 (`8,38 * * * *`) | X — 규칙(30일 이상 미사용 시 자동 아카이브) |
+| 페이지 신규 생성/갱신 + QMD 전체 동기화 | `reports/source_wiki_curator.py` | **30분마다** (`12,42 * * * *`, `--limit 0`=무제한) | O — 저장 후 전체 위키 Markdown export와 `qmd update` 1회 실행 |
+| 스테일 페이지 아카이브 | `agent_console.wiki.archive_stale_pages()` | 30분마다 (`14,44 * * * *`) | X — 규칙(30일 이상 미사용 시 자동 아카이브) |
 | 헬스체크 기반 archive/delete/reactivate | `reports/wiki_health_check.py` | **2시간마다** (`15 */2 * * *`) | O — `reports/wiki_pipeline_health.py` 구조화 리포트를 바탕으로 `run_llm_health_review()`가 판단 |
 | 대화 중 merge/split/delete/create | `agent_console/wiki.py: auto_curate_from_chat()` | **크론 아님 — AI 콘솔 채팅마다 즉시** | O |
 
@@ -90,12 +97,18 @@ World Memory UI(대시보드 "시장 기억" 탭)는 검색(제목·본문·티�
 > 섹션을 늘려 지식 자산화 밀도를 높이고, `wiki_distillation` 주기를 6시간마다로 올려
 > 판단 카드 승격을 하루 4회 이상 시도하도록 바꿨다.
 
+### QMD 및 활용 헬스
+
+- QMD 헬스는 설치 여부가 아니라 실제 검색 명령 성공(`query_ok`)과 최신 위키 대비 Markdown 시각(`index_fresh`)을 검사한다.
+- 2026-08-21 점검 당시 공유 위키 최신 갱신은 8월 21일, QMD export는 8월 5일로 멈춰 있었다. 새 동기화 경로는 이를 장애로 표시하고 다음 성공한 curator 실행에서 전체 재생성한다.
+- 위키 검색과 프롬프트 포함은 질문 원문 없이 해시 query id와 page id만 `evidence_usage.jsonl`에 기록한다. `retrieval_to_context_ratio`와 fallback 비율로 실제 사용 여부를 확인한다.
+
 ## 5. 전체 크론 빈도 한눈에
 
 빈도가 짧은 순:
 
 1. **매 1분** — `news_spike_detector.py`(saveticker 속보), (참고: 시세 폴러/워치독류는 이 문서 범위 밖)
-2. **30분마다** — `source_collector.py`(전 소스 원본 수집), `source_wiki_curator.py`(위키 생성/갱신), `archive_stale_pages`(위키 스테일 정리)
+2. **30분마다** — news/market/prediction 독립 수집, `source_wiki_curator.py`, `archive_stale_pages`
 3. **6시간마다** — `wiki_distillation.py`(source_digest → playbook/risk/concept 판단카드)
 4. **시간당(평일)** — `news_llm_snapshot.py`(뉴스 구조화 라벨링, 2026-07-24부터 하루 2번에서 변경)
 5. **2시간마다** — `wiki_health_check.py`(LLM 헬스 리뷰 · 구조화된 파이프라인 헬스 리포트 사용)
@@ -103,6 +116,8 @@ World Memory UI(대시보드 "시장 기억" 탭)는 검색(제목·본문·티�
 7. **트리거 기반(스케줄 없음)** — `auto_curate_from_chat()`(채팅마다), `ingest_recent_memory`(버튼/API 수동 호출)
 
 전체 크론 단일 진실원은 `deploy/crontab.stock-report`(적용은 `crontab deploy/crontab.stock-report`) — 이 문서의 빈도는 그 파일에서 파생된 것이니, 크론탭이 바뀌면 이 표도 같이 바뀌어야 한다.
+
+운영 반영 후 `.venv/bin/python scripts/check_crontab_drift.py`로 설치 크론과 저장소 파일의 차이를 확인하고, `.venv/bin/python scripts/probe_prediction_sources.py`로 공급자별 availability/count/transport를 확인한다.
 
 ## 유지보수
 

@@ -111,3 +111,34 @@ def test_pipeline_health_report_merges_source_wiki_and_curation(monkeypatch):
     assert report["wiki_health"]["unverified_count"] == 1
     assert report["curation_health"]["source_digest_unlinked_count"] == 1
     assert report["recommendations"][0]["category"] == "collection"
+
+
+def test_source_health_summary_exposes_blocked_and_zero_persistence():
+    from reports.wiki_pipeline_health import _summarize_source_health
+
+    section = _summarize_source_health({
+        "polymarket": {
+            "last_run": "2026-08-21T00:00:00+00:00",
+            "last_count": 0,
+            "availability": "blocked",
+            "availability_reason": "HTTP 451",
+            "last_fetched_count": 0,
+            "last_persisted_count": 0,
+            "last_duration_ms": 31,
+        },
+        "saveticker": {
+            "last_run": "2026-08-21T00:00:00+00:00",
+            "last_count": 114,
+            "last_success": "2026-08-21T00:00:00+00:00",
+            "last_fetched_count": 114,
+            "last_persisted_count": 0,
+            "zero_persist_streak": 3,
+            "last_duration_ms": 1200,
+        },
+    }, [], [])
+
+    by_source = {row["source"]: row for row in section["sources"]}
+    assert by_source["polymarket"]["availability"] == "blocked"
+    assert by_source["saveticker"]["zero_persist_streak"] == 3
+    assert section["overall"]["blocked_sources"] == 1
+    assert section["overall"]["zero_persist_sources"] == 1

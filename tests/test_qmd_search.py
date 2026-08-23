@@ -125,3 +125,84 @@ def test_qmd_health_reports_installation_and_wiki_file_count(monkeypatch, tmp_pa
     assert health["installed"] is True
     assert health["file_count"] == 2
     assert health["fallback_available"] is True
+
+
+def test_qmd_sync_exports_pages_and_updates_index_once(monkeypatch, tmp_path):
+    wiki_dir = tmp_path / "wiki-md"
+    monkeypatch.setenv("AGENT_CONSOLE_QMD_ENABLED", "1")
+    monkeypatch.setenv("AGENT_CONSOLE_QMD_BIN", "qmd")
+    monkeypatch.setenv("AGENT_CONSOLE_QMD_WIKI_DIR", str(wiki_dir))
+    calls = []
+
+    def fake_runner(cmd, capture_output, text, timeout):
+        calls.append(cmd)
+        return _Result("updated")
+
+    from agent_console import qmd_search
+
+    wiki_dir.mkdir(parents=True)
+    (wiki_dir / "deleted.md").write_text("old", encoding="utf-8")
+
+    result = qmd_search.sync_pages([
+        {"id": "one", "title": "One", "body": "first"},
+        {"id": "two", "title": "Two", "body": "second"},
+    ], runner=fake_runner)
+
+    assert result["ok"] is True
+    assert result["exported_count"] == 2
+    assert result["removed_count"] == 1
+    assert not (wiki_dir / "deleted.md").exists()
+    assert calls == [["qmd", "update"]]
+
+
+def test_qmd_sync_rejects_empty_snapshot_without_deleting_existing_docs(monkeypatch, tmp_path):
+    wiki_dir = tmp_path / "wiki-md"
+    wiki_dir.mkdir()
+    existing = wiki_dir / "existing.md"
+    existing.write_text("keep", encoding="utf-8")
+    monkeypatch.setenv("AGENT_CONSOLE_QMD_WIKI_DIR", str(wiki_dir))
+    from agent_console import qmd_search
+
+    result = qmd_search.sync_pages([], runner=lambda *args, **kwargs: _Result("updated"))
+
+    assert result["ok"] is False
+    assert result["skipped"] == "empty_snapshot"
+    assert existing.exists()
+
+
+def test_qmd_health_executes_query_probe_and_detects_stale_export(monkeypatch, tmp_path):
+    wiki_dir = tmp_path / "wiki-md"
+    wiki_dir.mkdir()
+    doc = wiki_dir / "old.md"
+    doc.write_text("# Old", encoding="utf-8")
+    monkeypatch.setenv("AGENT_CONSOLE_QMD_ENABLED", "1")
+    monkeypatch.setenv("AGENT_CONSOLE_QMD_BIN", "qmd")
+    monkeypatch.setenv("AGENT_CONSOLE_QMD_WIKI_DIR", str(wiki_dir))
+
+    from agent_console import qmd_search
+
+    monkeypatch.setattr(qmd_search.shutil, "which", lambda _binary: "/usr/bin/qmd")
+    monkeypatch.setattr(
+        qmd_search.shared_memory,
+        "inspect_records",
+        lambda: [{"tags": ["wiki"], "updatedAt": "2099-01-01T00:00:00+00:00"}],
+        raising=False,
+    )
+
+    health = qmd_search.health(runner=lambda *args, **kwargs: _Result("[]"))
+
+    assert health["query_ok"] is True
+    assert health["index_fresh"] is False
+    assert health["latest_page_at"] == "2099-01-01T00:00:00+00:00"
+
+
+def test_qmd_health_marks_failed_query_even_when_binary_exists(monkeypatch, tmp_path):
+    monkeypatch.setenv("AGENT_CONSOLE_QMD_ENABLED", "1")
+    monkeypatch.setenv("AGENT_CONSOLE_QMD_WIKI_DIR", str(tmp_path / "wiki-md"))
+    from agent_console import qmd_search
+
+    monkeypatch.setattr(qmd_search.shutil, "which", lambda _binary: "/usr/bin/qmd")
+    health = qmd_search.health(runner=lambda *args, **kwargs: _Result("", returncode=2))
+
+    assert health["query_ok"] is False
+    assert health["error"]

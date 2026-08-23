@@ -13,7 +13,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Iterable
 
-from . import qmd_search, shared_memory, storage
+from . import evidence_usage, qmd_search, shared_memory, storage
 
 
 WIKI_TAG = "wiki"
@@ -520,7 +520,9 @@ def list_pages(*, query: str = "", surface: str = "all", status: str = "all", li
     fallback = _fallback_ranked_pages(records, query=query, surface=surface, status=status, limit=limit)
     qmd_pages = _qmd_ranked_pages(records, query=query, surface=surface, status=status, limit=limit)
     if not qmd_pages:
-        return _apply_backlinks(fallback, records)
+        pages = _apply_backlinks(fallback, records)
+        _record_retrieval_usage(query, surface, status, pages, provider="fallback")
+        return pages
     merged: list[dict] = []
     seen: set[str] = set()
     for page in [*qmd_pages, *fallback]:
@@ -532,7 +534,29 @@ def list_pages(*, query: str = "", surface: str = "all", status: str = "all", li
         merged.append(page)
         if len(merged) >= limit:
             break
-    return _apply_backlinks(merged, records)
+    pages = _apply_backlinks(merged, records)
+    _record_retrieval_usage(query, surface, status, pages, provider="qmd")
+    return pages
+
+
+def _usage_query_id(query: str, surface: str, status: str = "all") -> str:
+    text = f"{_clean(surface, 60).lower()}|{_clean(status, 40).lower()}|{_clean(query, 600).lower()}"
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()[:24] if query else ""
+
+
+def _record_retrieval_usage(query: str, surface: str, status: str, pages: list[dict], *, provider: str) -> None:
+    query_id = _usage_query_id(query, surface, status)
+    if not query_id:
+        return
+    try:
+        evidence_usage.record_retrieval(
+            query_id,
+            [str(page.get("id") or "") for page in pages],
+            provider,
+            provider != "qmd",
+        )
+    except Exception:
+        pass
 
 
 def _fallback_ranked_pages(records: list[dict], *, query: str, surface: str, status: str, limit: int) -> list[dict]:
@@ -561,10 +585,6 @@ def _qmd_ranked_pages(records: list[dict], *, query: str, surface: str, status: 
     except Exception:
         return []
     source_pages = [_record_to_page(row) for row in records]
-    try:
-        qmd_search.export_pages(source_pages)
-    except Exception:
-        pass
     try:
         hits = qmd_search.search(query, limit=limit, surface=surface, status=status)
     except Exception:
@@ -1346,6 +1366,13 @@ def build_context_section(*, query: str = "", surface: str = WIKI_SURFACE, limit
             lines.append(f"- 관련: {', '.join(f'[[{t}]]' for t in related_titles)}")
         if page.get("tags"):
             lines.append(f"- 태그: {', '.join(page['tags'][:8])}")
+    try:
+        evidence_usage.record_context_use(
+            _usage_query_id(query, surface, status),
+            [str(page.get("id") or "") for page in pages],
+        )
+    except Exception:
+        pass
     return "\n".join(lines).strip()
 
 # ── 아래 함수들은 652d61d 잘림 사고로 유실됐다가 복구된 것들이다.

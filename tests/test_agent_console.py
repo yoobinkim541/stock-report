@@ -114,6 +114,98 @@ def test_context_pack_exposes_prediction_market_summary(monkeypatch, tmp_path):
     assert item["source"] == "polymarket"
 
 
+def test_prediction_market_context_hides_cached_rows_when_source_is_blocked(monkeypatch, tmp_path):
+    _isolate(monkeypatch, tmp_path)
+
+    from agent_console import context
+
+    monkeypatch.setattr(context, "_source_availability", lambda source: {
+        "availability": "blocked",
+        "availability_reason": "HTTP 451: regional legal restriction",
+    } if source == "polymarket" else {})
+    state = context.prediction_market_state([{
+        "source": "polymarket",
+        "title": "Cached probability",
+        "collected_at": "2026-08-20T11:00:00+09:00",
+        "metrics": {"yes_probability": 0.63},
+    }])
+
+    assert state["ok"] is False
+    assert state["availability"] == "blocked"
+    assert "HTTP 451" in state["error"]
+    assert state["count"] == 0
+    assert state["items"] == []
+
+
+def test_prediction_market_context_hides_cached_rows_when_source_is_stale(monkeypatch, tmp_path):
+    _isolate(monkeypatch, tmp_path)
+    from agent_console import context
+
+    monkeypatch.setattr(context, "_source_availability", lambda source: {
+        "availability": "stale",
+        "availability_reason": "40h old",
+    } if source == "polymarket" else {})
+    state = context.prediction_market_state([{
+        "source": "polymarket",
+        "title": "Old cached probability",
+        "metrics": {"yes_probability": 0.9, "volume": 100000},
+    }])
+
+    assert state["providers"]["polymarket"]["availability"] == "stale"
+    assert state["providers"]["polymarket"]["count"] == 0
+    assert state["availability"] == "unavailable"
+
+
+def test_prediction_market_context_keeps_kalshi_when_polymarket_is_blocked(monkeypatch, tmp_path):
+    _isolate(monkeypatch, tmp_path)
+
+    from agent_console import context
+
+    monkeypatch.setattr(context, "_source_availability", lambda source: {
+        "availability": "blocked",
+        "availability_reason": "HTTP 451: regional legal restriction",
+    } if source == "polymarket" else {"last_success": "2026-08-21T14:00:00+00:00"})
+    events = [
+        {
+            "source": "polymarket",
+            "title": "Cached Polymarket probability",
+            "metrics": {"yes_probability": 0.63},
+        },
+        {
+            "source": "kalshi",
+            "title": "Fresh Kalshi probability",
+            "observed_at": "2026-08-21T14:00:00+00:00",
+            "metrics": {"yes_probability": 0.57, "market_ticker": "KXFED-CUT", "volume": 100000},
+        },
+    ]
+
+    state = context.prediction_market_state(events)
+
+    assert state["ok"] is True
+    assert state["availability"] == "degraded"
+    assert state["count"] == 1
+    assert state["items"][0]["source"] == "kalshi"
+    assert state["providers"]["polymarket"]["availability"] == "blocked"
+    assert state["providers"]["kalshi"]["count"] == 1
+
+
+def test_prediction_market_context_keeps_provider_probabilities_separate(monkeypatch, tmp_path):
+    _isolate(monkeypatch, tmp_path)
+
+    from agent_console import context
+
+    monkeypatch.setattr(context, "_source_availability", lambda _source: {})
+    state = context.prediction_market_state([
+        {"source": "polymarket", "title": "Fed cut PM", "metrics": {"yes_probability": 0.63, "volume": 200}},
+        {"source": "kalshi", "title": "Fed cut Kalshi", "metrics": {"yes_probability": 0.51, "volume": 100}},
+    ])
+
+    assert set(state["providers"]) == {"polymarket", "kalshi"}
+    assert [item["yes_probability"] for item in state["items"]] == [0.63, 0.51]
+    assert "yes_probability" not in state
+    assert "average_probability" not in state
+
+
 def test_context_paper_state_defaults_to_offline(monkeypatch, tmp_path):
     _isolate(monkeypatch, tmp_path)
     monkeypatch.delenv("AGENT_CONSOLE_LIVE_PAPER", raising=False)
@@ -496,6 +588,24 @@ def test_wiki_search_health_reports_qmd_or_fallback(monkeypatch, tmp_path):
     assert health["fallback_available"] is True
 
 
+def test_read_only_shared_memory_inspection_does_not_initialize_store(monkeypatch, tmp_path):
+    _isolate(monkeypatch, tmp_path)
+    from agent_console import shared_memory
+
+    shared_memory.ensure_store()
+    shared_memory._paths()["events"].write_text(
+        '{"id":"wiki-read","createdAt":"2026-08-21T00:00:00+00:00","tags":["wiki"]}\n',
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(shared_memory, "ensure_store", lambda: (_ for _ in ()).throw(AssertionError("write attempted")))
+
+    rows = shared_memory.inspect_records()
+    all_rows = shared_memory.all_records()
+
+    assert rows[0]["id"] == "wiki-read"
+    assert all_rows[0]["id"] == "wiki-read"
+
+
 def test_wiki_context_section_includes_search_and_trust_metadata(monkeypatch, tmp_path):
     _isolate(monkeypatch, tmp_path)
 
@@ -629,11 +739,6 @@ def test_wiki_list_pages_prefers_qmd_search_when_available(monkeypatch, tmp_path
 
     class FakeQmd:
         @staticmethod
-        def export_pages(pages):
-            calls.append(("export", len(pages)))
-            return {"ok": True, "files": []}
-
-        @staticmethod
         def search(query, *, limit=10, surface="all", status="all"):
             calls.append(("search", query, limit, surface, status))
             return [
@@ -654,7 +759,7 @@ def test_wiki_list_pages_prefers_qmd_search_when_available(monkeypatch, tmp_path
     assert pages[0]["id"] == qmd_target["id"]
     assert pages[0]["search_provider"] == "qmd"
     assert fallback["id"] in {page["id"] for page in pages}
-    assert ("export", 2) in calls
+    assert not any(call[0] == "export" for call in calls)
     assert "[위키 지식]" in section
     assert "qmd 우선 후보" in section
 

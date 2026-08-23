@@ -76,6 +76,16 @@ def main() -> int:
     n = news_labels.append_labels(labels)
     logger.info("라벨 적재 %d/%d건 → %s (검증 폐기 %d건)",
                 n, len(targets), news_labels.LABELS_PATH, len(targets) - n)
+    health = news_labels.label_health(labels)
+    logger.info(
+        "라벨 생성 provenance: llm=%d heuristic=%d fallback=%.1f%% provider=%s model=%s error=%s",
+        health["llm_count"],
+        health["heuristic_count"],
+        health["fallback_ratio"] * 100,
+        news_labels.NEWS_LLM_PROVIDER,
+        news_labels.NEWS_LLM_MODEL,
+        health["first_failure_reason"][:200] or "-",
+    )
 
     # 월드 메모리 이슈 적재 (영구 축적 — dedupe 멱등·실패 무시)
     try:

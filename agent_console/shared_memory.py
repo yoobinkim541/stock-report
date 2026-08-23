@@ -278,7 +278,11 @@ def all_records() -> list[dict]:
     위키 같은 지식층은 '전수'가 필요하므로 이 함수를 쓴다. _read_jsonl 이 어차피
     파일 전체를 읽으므로 추가 I/O 비용은 없다.
     """
-    ensure_store()
+    return inspect_records()
+
+
+def inspect_records() -> list[dict]:
+    """Read every existing record without initializing or mutating the store."""
     rows = _read_jsonl(_paths()["events"])
     rows.sort(key=lambda row: row.get("createdAt") or "", reverse=True)
     return rows

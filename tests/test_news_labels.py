@@ -175,6 +175,39 @@ def test_label_events_heuristic_fallback(monkeypatch):
     assert labels[0]["direction"] == 1
     assert labels[1]["id"] == "e2" and labels[1]["event_type"] == "규제"
     assert labels[1]["direction"] == -1
+    assert all(label["label_method"] == "heuristic" for label in labels)
+    assert all(label["label_error"] for label in labels)
+    assert all(label["labeled_at"] for label in labels)
+
+
+def test_label_events_marks_valid_model_output_with_provenance():
+    output = '\n'.join([
+        '{"id":"e1","tickers":["NVDA"],"event_type":"실적","direction":1,"strength":4}',
+        '{"id":"e2","tickers":["MSFT"],"event_type":"규제","direction":-1,"strength":3}',
+    ])
+
+    labels = NL.label_events(_events(), runner=lambda *args, **kwargs: FakeCompleted(stdout=output))
+
+    assert len(labels) == 2
+    assert all(label["label_method"] == "llm" for label in labels)
+    assert all(label["label_provider"] == NL.NEWS_LLM_PROVIDER for label in labels)
+    assert all(label["label_model"] == NL.NEWS_LLM_MODEL for label in labels)
+    assert all(label["label_error"] == "" for label in labels)
+
+
+def test_label_health_reports_heuristic_fallback_ratio():
+    now = datetime.now(NL.KST).isoformat()
+    health = NL.label_health([
+        {"label_method": "llm", "labeled_at": now},
+        {"label_method": "heuristic", "labeled_at": now, "label_error": "invalid output"},
+        {"label_method": "heuristic", "labeled_at": now, "label_error": "timeout"},
+    ])
+
+    assert health["total"] == 3
+    assert health["llm_count"] == 1
+    assert health["heuristic_count"] == 2
+    assert health["fallback_ratio"] == 2 / 3
+    assert health["first_failure_reason"] == "invalid output"
 
 
 def test_pick_events_filters_and_caps():

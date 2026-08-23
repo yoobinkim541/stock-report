@@ -122,6 +122,8 @@ SOURCE_CLASSIFICATION = {
     "arca": {"family": "community", "kind": "community_signal", "trust": "C", "horizon": "intraday"},
     "telegram": {"family": "community", "kind": "community_signal", "trust": "C", "horizon": "intraday"},
     "polymarket": {"family": "prediction_market", "kind": "prediction_market", "trust": "B", "horizon": "intraday"},
+    "kalshi": {"family": "prediction_market", "kind": "prediction_market", "trust": "B", "horizon": "intraday"},
+    "economic_calendar": {"family": "macro_data", "kind": "economic_calendar", "trust": "B", "horizon": "1w"},
     "yahoo_finance": {"family": "market_data", "kind": "snapshot", "trust": "A", "horizon": "intraday"},
     "fred": {"family": "macro_data", "kind": "macro_snapshot", "trust": "A", "horizon": "1d"},
     "worldgovernmentbonds": {"family": "macro_data", "kind": "macro_snapshot", "trust": "A", "horizon": "1d"},
@@ -134,6 +136,13 @@ POLYMARKET_DEFAULT_KEYWORDS = [
     "trump", "oil", "bitcoin", "btc", "ethereum", "nvidia", "ai", "semiconductor",
     "china", "taiwan", "russia", "ukraine", "israel", "iran",
 ]
+
+
+class PolymarketUnavailable(RuntimeError):
+    def __init__(self, reason: str, *, availability: str = "error", status_code: int | None = None):
+        super().__init__(reason)
+        self.availability = availability
+        self.status_code = status_code
 
 
 def _source_root(source: str) -> str:
@@ -279,6 +288,9 @@ class _BoundedResponse:
 
 # 소스별 마지막 오류 (update_source_health 가 헬스 파일에 기록 → 경보에 원인 표시)
 _LAST_ERRORS: dict[str, str] = {}
+# 재시도로 해결되지 않는 운영 상태. 일반 수집 오류와 분리해 헬스 경보가
+# 법적 지역 제한을 장애로 반복 보고하지 않게 한다.
+_SOURCE_AVAILABILITY: dict[str, dict[str, str]] = {}
 
 
 def _note_error(source: str, err) -> None:
@@ -398,8 +410,9 @@ def _is_cloudflare_challenge(text: str) -> bool:
 
 
 def event_id(event: dict) -> str:
-    key = event.get("url") or f"{event.get('source', '')}:{event.get('title', '')}"
-    return hashlib.sha256(str(key).strip().lower().encode("utf-8")).hexdigest()[:16]
+    from reports.source_identity import legacy_content_id
+
+    return legacy_content_id(event)
 
 
 def _event_file(cache_dir: Path, dt: datetime) -> Path:
@@ -412,31 +425,35 @@ def append_events(events: Iterable[dict], cache_dir: Path | str = DEFAULT_CACHE_
     cache_dir.mkdir(parents=True, exist_ok=True)
     path = _event_file(cache_dir, now)
 
-    seen = set()
-    if path.exists():
-        for line in path.read_text(encoding="utf-8").splitlines():
-            try:
-                seen.add(json.loads(line).get("id"))
-            except json.JSONDecodeError:
+    import safe_io
+    from reports.source_identity import normalize_event_identity
+
+    with safe_io.file_write_lock(str(path)):
+        seen = set()
+        if path.exists():
+            for line in path.read_text(encoding="utf-8").splitlines():
+                try:
+                    seen.add(json.loads(line).get("id"))
+                except json.JSONDecodeError:
+                    continue
+
+        rows = []
+        for event in events:
+            row = dict(event)
+            row.setdefault("source", "unknown")
+            row.setdefault("title", "")
+            row["collected_at"] = now.astimezone(KST).isoformat(timespec="seconds")
+            row = normalize_event_identity(row, now)
+            if row["id"] in seen:
                 continue
+            seen.add(row["id"])
+            rows.append(row)
 
-    rows = []
-    for event in events:
-        row = dict(event)
-        row.setdefault("source", "unknown")
-        row.setdefault("title", "")
-        row["id"] = event_id(row)
-        if row["id"] in seen:
-            continue
-        row["collected_at"] = now.astimezone(KST).isoformat(timespec="seconds")
-        seen.add(row["id"])
-        rows.append(row)
-
-    if rows:
-        with path.open("a", encoding="utf-8") as f:
-            for row in rows:
-                f.write(json.dumps(row, ensure_ascii=False, sort_keys=True) + "\n")
-    return len(rows)
+        if rows:
+            with path.open("a", encoding="utf-8") as f:
+                for row in rows:
+                    f.write(json.dumps(row, ensure_ascii=False, sort_keys=True) + "\n")
+        return len(rows)
 
 
 def load_recent_events(cache_dir: Path | str = DEFAULT_CACHE_DIR, now: datetime | None = None, hours: int = 24) -> list[dict]:
@@ -1053,6 +1070,26 @@ def _fmt_pct(value: float | None) -> str:
     return "N/A" if value is None else f"{value:+.2f}%"
 
 
+def _batch_close_series(frame, ticker: str, ticker_count: int):
+    if frame is None or getattr(frame, "empty", True):
+        return None
+    columns = getattr(frame, "columns", None)
+    nlevels = int(getattr(columns, "nlevels", 1) or 1)
+    try:
+        if nlevels > 1:
+            for key in (("Close", ticker), (ticker, "Close"), ("Adj Close", ticker), (ticker, "Adj Close")):
+                if key in columns:
+                    return frame[key].dropna()
+            return None
+        if ticker_count == 1:
+            for key in ("Close", "Adj Close"):
+                if key in columns:
+                    return frame[key].dropna()
+    except Exception:
+        return None
+    return None
+
+
 def fetch_market_snapshot_events(yf_module=None) -> list[dict]:
     """Collect compact Yahoo Finance market snapshots for low-token advisor grounding."""
     if yf_module is None:
@@ -1061,13 +1098,31 @@ def fetch_market_snapshot_events(yf_module=None) -> list[dict]:
         except Exception:
             return []
 
+    tickers = list(MARKET_TICKERS)
+    batch = None
+    if hasattr(yf_module, "download"):
+        try:
+            batch = yf_module.download(
+                tickers,
+                period="1y",
+                auto_adjust=True,
+                progress=False,
+                group_by="column",
+                threads=True,
+            )
+        except Exception as exc:
+            logger.warning("Yahoo market snapshot batch failed; using symbol fallback: %s", exc)
+
+    observed_at = datetime.now(timezone.utc).isoformat(timespec="seconds")
     events = []
     for ticker, label in MARKET_TICKERS.items():
+        close = _batch_close_series(batch, ticker, len(tickers))
         try:
-            hist = yf_module.Ticker(ticker).history(period="1y", auto_adjust=True)
-            if hist.empty:
-                continue
-            close = hist["Close"].dropna()
+            if close is None or close.empty:
+                hist = yf_module.Ticker(ticker).history(period="1y", auto_adjust=True)
+                if hist.empty:
+                    continue
+                close = hist["Close"].dropna()
             if close.empty:
                 continue
             current = float(close.iloc[-1])
@@ -1089,10 +1144,15 @@ def fetch_market_snapshot_events(yf_module=None) -> list[dict]:
             "source": "yahoo_finance",
             "source_url": "https://finance.yahoo.com",
             "type": "market_snapshot",
+            "record_kind": "observation",
+            "entity_id": f"yahoo_finance:{ticker}",
+            "observed_at": observed_at,
+            "transport": "batch" if _batch_close_series(batch, ticker, len(tickers)) is not None else "fallback",
             "title": title,
             "url": f"https://finance.yahoo.com/quote/{ticker}",
             "tickers": [ticker] if ticker.isalpha() else [],
             "metrics": {
+                "ticker": ticker,
                 "current": round(current, 4),
                 "return_1d_pct": _pct(current, day_base),
                 "return_5d_pct": _pct(current, week_base),
@@ -1345,32 +1405,124 @@ def _polymarket_default_keywords() -> list[str]:
     return [item.strip() for item in raw.split(",") if item.strip()]
 
 
+def _polymarket_request_params(request_limit: int) -> dict:
+    return {
+        "active": True,
+        "closed": False,
+        "archived": False,
+        "limit": min(200, max(1, int(request_limit))),
+        "order": "volume",
+        "ascending": False,
+    }
+
+
+def fetch_polymarket_payload(*, request_limit: int, get=None) -> tuple[list[dict], dict]:
+    """Fetch Gamma directly, using the fixed-upstream relay only after HTTP 451."""
+    get = get or requests.get
+    direct_url = f"{POLYMARKET_API_BASE}/events"
+    params = _polymarket_request_params(request_limit)
+    retrieved_at = datetime.now(timezone.utc).isoformat(timespec="seconds")
+    try:
+        response = get(
+            direct_url,
+            headers=PLAIN_HEADERS,
+            params=params,
+            timeout=15,
+        )
+        response.raise_for_status()
+        payload = response.json()
+        if not isinstance(payload, list):
+            raise PolymarketUnavailable("invalid direct Polymarket payload")
+        return payload, {
+            "transport": "direct",
+            "source_url": POLYMARKET_API_BASE,
+            "retrieved_at": retrieved_at,
+        }
+    except requests.HTTPError as exc:
+        status_code = getattr(getattr(exc, "response", None), "status_code", None)
+        if status_code != 451:
+            raise PolymarketUnavailable(
+                f"HTTP {status_code or 'error'} from Polymarket",
+                status_code=status_code,
+            ) from exc
+    except PolymarketUnavailable:
+        raise
+    except requests.RequestException as exc:
+        raise PolymarketUnavailable(str(exc)[:240]) from exc
+
+    relay_url = (os.getenv("POLYMARKET_RELAY_URL") or "").strip()
+    relay_token = (os.getenv("POLYMARKET_RELAY_TOKEN") or "").strip()
+    parsed_relay = urlparse(relay_url) if relay_url else None
+    if not relay_url or not relay_token or parsed_relay.scheme != "https" or not parsed_relay.netloc:
+        raise PolymarketUnavailable(
+            "HTTP 451: Polymarket unavailable from this server region; relay is not configured",
+            availability="blocked",
+            status_code=451,
+        )
+
+    try:
+        response = get(
+            relay_url,
+            headers={"Authorization": f"Bearer {relay_token}", **PLAIN_HEADERS},
+            params={"limit": params["limit"]},
+            timeout=20,
+        )
+        response.raise_for_status()
+        envelope = response.json()
+        if not isinstance(envelope, dict) or envelope.get("ok") is not True:
+            availability = str((envelope or {}).get("availability") or "error") if isinstance(envelope, dict) else "error"
+            raise PolymarketUnavailable(
+                "invalid or unsuccessful Polymarket relay payload",
+                availability=availability if availability in {"blocked", "error"} else "error",
+                status_code=(envelope or {}).get("upstream_status") if isinstance(envelope, dict) else None,
+            )
+        payload = envelope.get("events")
+        source_url = str(envelope.get("source_url") or "")
+        if not isinstance(payload, list) or not source_url.startswith(f"{POLYMARKET_API_BASE}/"):
+            raise PolymarketUnavailable("Polymarket relay returned an invalid source envelope")
+        return payload, {
+            "transport": "relay",
+            "source_url": POLYMARKET_API_BASE,
+            "relay_url": relay_url,
+            "retrieved_at": str(envelope.get("retrieved_at") or retrieved_at),
+        }
+    except requests.HTTPError as exc:
+        status_code = getattr(getattr(exc, "response", None), "status_code", None)
+        blocked = status_code == 451
+        raise PolymarketUnavailable(
+            "HTTP 451: Polymarket relay region is also blocked" if blocked else f"Polymarket relay HTTP {status_code or 'error'}",
+            availability="blocked" if blocked else "error",
+            status_code=status_code,
+        ) from exc
+    except PolymarketUnavailable:
+        raise
+    except requests.RequestException as exc:
+        raise PolymarketUnavailable(f"Polymarket relay failed: {str(exc)[:200]}") from exc
+
+
 def fetch_polymarket_events(limit: int | None = None, *, min_volume: float | None = None,
                             keywords: list[str] | None = None) -> list[dict]:
     """Collect public Polymarket probabilities as auxiliary market-risk signals."""
+    _SOURCE_AVAILABILITY.pop("polymarket", None)
     limit = limit if limit is not None else int(os.getenv("STOCK_COLLECTOR_POLYMARKET_LIMIT", "80"))
     min_volume = min_volume if min_volume is not None else float(os.getenv("STOCK_COLLECTOR_POLYMARKET_MIN_VOLUME", "10000"))
     keywords = _polymarket_default_keywords() if keywords is None else keywords
     request_limit = min(200, max(50, int(limit) * 4))
     try:
-        resp = requests.get(
-            f"{POLYMARKET_API_BASE}/events",
-            headers=PLAIN_HEADERS,
-            params={
-                "active": True,
-                "closed": False,
-                "archived": False,
-                "limit": request_limit,
-                "order": "volume",
-                "ascending": False,
-            },
-            timeout=15,
-        )
-        resp.raise_for_status()
-        payload = resp.json()
-    except Exception as exc:
+        payload, transport_meta = fetch_polymarket_payload(request_limit=request_limit)
+        _LAST_ERRORS.pop("polymarket", None)
+    except PolymarketUnavailable as exc:
         logger.warning("polymarket 수집 실패: %s", exc)
-        _note_error("polymarket", exc)
+        if exc.availability == "blocked":
+            reason = str(exc)
+            _SOURCE_AVAILABILITY["polymarket"] = {
+                "availability": "blocked",
+                "availability_reason": reason,
+                "status_code": exc.status_code,
+            }
+            _note_error("polymarket", reason)
+        else:
+            _note_error("polymarket", exc)
         return []
 
     events: list[dict] = []
@@ -1413,6 +1565,9 @@ def fetch_polymarket_events(limit: int | None = None, *, min_volume: float | Non
                 "source": "polymarket",
                 "source_url": POLYMARKET_API_BASE,
                 "type": "prediction_market",
+                "record_kind": "observation",
+                "observed_at": transport_meta.get("retrieved_at"),
+                "transport": transport_meta.get("transport"),
                 "title": title,
                 "url": url,
                 "published_at": event.get("published_at") or event.get("publishedAt") or event.get("startDate") or "",
@@ -1430,6 +1585,7 @@ def fetch_polymarket_events(limit: int | None = None, *, min_volume: float | Non
                     "liquidity": None if liquidity is None else float(liquidity),
                     "open_interest": None if open_interest is None else float(open_interest),
                     "end_date": end_date,
+                    "transport": transport_meta.get("transport"),
                 },
                 "raw_payload": {
                     "event_id": str(event.get("id") or ""),
@@ -1442,6 +1598,25 @@ def fetch_polymarket_events(limit: int | None = None, *, min_volume: float | Non
         _LAST_ERRORS.pop("polymarket", None)
     events.sort(key=lambda row: ((row.get("metrics") or {}).get("volume") or 0.0), reverse=True)
     return [_classify_event(event) for event in events[: max(1, int(limit))]]
+
+
+def fetch_kalshi_events() -> list[dict]:
+    from reports.prediction_markets import fetch_kalshi_events as fetch
+
+    try:
+        events = fetch()
+        _LAST_ERRORS.pop("kalshi", None)
+        return events
+    except Exception as exc:
+        logger.warning("kalshi 수집 실패: %s", exc)
+        _note_error("kalshi", exc)
+        return []
+
+
+def fetch_economic_calendar_events() -> list[dict]:
+    from reports.operational_events import fetch_economic_calendar_events as fetch
+
+    return fetch(days=int(os.getenv("STOCK_COLLECTOR_CALENDAR_DAYS", "14")))
 
 
 # ── 소스별 수집 헬스 (수집 공백 가시화 — 조용한 실패 차단) ────────────────────
@@ -1457,6 +1632,8 @@ SOURCE_STALE_HOURS = {
     "fred": 72,
     "worldgovernmentbonds": 72,
     "polymarket": 12,
+    "kalshi": 12,
+    "economic_calendar": 6,
 }
 
 
@@ -1464,11 +1641,13 @@ def expected_sources() -> list[str]:
     """수집기가 시도해야 하는 소스 전체 (텔레그램은 채널별 분리 — 채널 단위 공백 감지)."""
     return (["saveticker", "arca"]
             + [f"telegram:{c}" for c in TELEGRAM_NEWS_CHANNELS]
-            + ["yahoo_finance", "fred", "worldgovernmentbonds", "polymarket"])
+            + ["yahoo_finance", "fred", "worldgovernmentbonds", "polymarket", "kalshi", "economic_calendar"])
 
 
 def update_source_health(events: list[dict], cache_dir: Path | str = DEFAULT_CACHE_DIR,
-                         now: datetime | None = None) -> dict:
+                         now: datetime | None = None,
+                         attempted_sources: Iterable[str] | None = None,
+                         run_stats: dict[str, dict] | None = None) -> dict:
     """이번 수집 결과를 소스별 헬스 파일에 반영 — {source: {last_run, last_count, last_success, ...}}.
 
     count>0 이면 last_success 갱신. 0 이면 last_success 는 보존(공백 기간 측정의 기준점).
@@ -1477,32 +1656,65 @@ def update_source_health(events: list[dict], cache_dir: Path | str = DEFAULT_CAC
     cache_dir = Path(cache_dir)
     cache_dir.mkdir(parents=True, exist_ok=True)
     path = cache_dir / HEALTH_FILE
-    health: dict = {}
-    if path.exists():
-        try:
-            health = json.loads(path.read_text(encoding="utf-8"))
-        except Exception:
-            health = {}
+    import safe_io
+
     counts = Counter(str(e.get("source") or "") for e in events)
-    for src in expected_sources():
-        rec = health.get(src) or {}
-        n = int(counts.get(src, 0))
-        rec.setdefault("first_run", now.isoformat())   # 무성공 grace 기준점
-        rec["last_run"] = now.isoformat()
-        rec["last_count"] = n
-        if n > 0:
-            rec["last_success"] = now.isoformat()
-            rec["last_success_count"] = n
-            rec.pop("last_error", None)
-        else:
-            err = _LAST_ERRORS.get(src) or _LAST_ERRORS.get(src.split(":")[0])
-            if err:
-                rec["last_error"] = err
-        health[src] = rec
-    tmp = path.with_suffix(".tmp")
-    tmp.write_text(json.dumps(health, ensure_ascii=False, indent=2), encoding="utf-8")
-    os.replace(tmp, path)
-    return health
+    attempted = list(attempted_sources) if attempted_sources is not None else expected_sources()
+    stats_by_source = run_stats or {}
+    with safe_io.file_write_lock(str(path)):
+        health: dict = {}
+        if path.exists():
+            try:
+                health = json.loads(path.read_text(encoding="utf-8"))
+            except Exception:
+                health = {}
+        for src in attempted:
+            rec = health.get(src) or {}
+            n = int(counts.get(src, 0))
+            stats = stats_by_source.get(src) or stats_by_source.get(src.split(":", 1)[0]) or {}
+            fetched = int(stats.get("fetched", n) or 0)
+            persisted = int(stats.get("persisted", n) or 0)
+            availability = (_SOURCE_AVAILABILITY.get(src)
+                            or _SOURCE_AVAILABILITY.get(src.split(":", 1)[0]))
+            stats_availability = str(stats.get("availability") or "")
+            if not availability and stats_availability in {"blocked", "disabled"}:
+                availability = {
+                    "availability": stats_availability,
+                    "availability_reason": str(stats.get("availability_reason") or stats.get("error") or ""),
+                }
+            rec.setdefault("first_run", now.isoformat())
+            rec["last_run"] = now.isoformat()
+            rec["last_count"] = n
+            rec["last_fetched_count"] = fetched
+            rec["last_persisted_count"] = persisted
+            rec["last_duration_ms"] = max(0, int(stats.get("duration_ms") or 0))
+            if stats.get("transport"):
+                rec["last_transport"] = str(stats["transport"])
+            if fetched > 0 and persisted == 0:
+                rec["zero_persist_streak"] = int(rec.get("zero_persist_streak") or 0) + 1
+            elif persisted > 0:
+                rec["zero_persist_streak"] = 0
+                rec["last_persist_success"] = now.isoformat()
+            else:
+                rec.setdefault("zero_persist_streak", 0)
+            if availability:
+                rec.update(availability)
+            else:
+                rec.pop("availability", None)
+                rec.pop("availability_reason", None)
+            if n > 0:
+                rec["last_success"] = now.isoformat()
+                rec["last_success_count"] = n
+                rec.pop("last_error", None)
+            else:
+                err = stats.get("error") or _LAST_ERRORS.get(src) or _LAST_ERRORS.get(src.split(":")[0])
+                if err:
+                    rec["last_error"] = str(err)[:500]
+                else:
+                    rec.pop("last_error", None)
+            health[src] = rec
+        safe_io.atomic_write_json(str(path), health)
+        return health
 
 
 def load_source_health(cache_dir: Path | str = DEFAULT_CACHE_DIR) -> dict:
@@ -1539,6 +1751,8 @@ def stale_sources(health: dict | None = None, now: datetime | None = None,
 
     out = []
     for src, rec in sorted(health.items()):
+        if rec.get("availability") in {"blocked", "disabled"}:
+            continue
         limit = th.get(src) or th.get(f"{src.split(':')[0]}:*") or th.get(src.split(":")[0]) or 24
         last_ok = rec.get("last_success")
         hours = _hours_since(last_ok) if last_ok else None
@@ -1556,28 +1770,41 @@ def stale_sources(health: dict | None = None, now: datetime | None = None,
 
 
 def collect_once(cache_dir: Path | str = DEFAULT_CACHE_DIR, now: datetime | None = None) -> tuple[int, int]:
-    fetchers = [
-        ("saveticker", fetch_saveticker_events),
-        ("arca", lambda: fetch_arca_events(max_pages=int(os.getenv("STOCK_COLLECTOR_ARCA_PAGES", "2")))),
-        ("telegram", fetch_telegram_channel_events),
-        ("yahoo_finance", fetch_market_snapshot_events),
-        ("fred", fetch_fred_macro_events),
-        ("worldgovernmentbonds", fetch_world_gov_bond_events),
-        ("polymarket", fetch_polymarket_events),
+    from reports.source_pipeline import ProviderSpec, run_providers
+
+    registry = [
+        ProviderSpec("saveticker", ("saveticker",), "news", fetch_saveticker_events, retries=1),
+        ProviderSpec(
+            "arca",
+            ("arca",),
+            "news",
+            lambda: fetch_arca_events(max_pages=int(os.getenv("STOCK_COLLECTOR_ARCA_PAGES", "2"))),
+            retries=1,
+        ),
+        ProviderSpec(
+            "telegram",
+            tuple(f"telegram:{channel}" for channel in TELEGRAM_NEWS_CHANNELS),
+            "news",
+            fetch_telegram_channel_events,
+            retries=1,
+        ),
+        ProviderSpec("yahoo_finance", ("yahoo_finance",), "market", fetch_market_snapshot_events, retries=1, mutable=True),
+        ProviderSpec("fred", ("fred",), "macro", fetch_fred_macro_events, retries=1, mutable=True),
+        ProviderSpec("worldgovernmentbonds", ("worldgovernmentbonds",), "macro", fetch_world_gov_bond_events, retries=1, mutable=True),
+        ProviderSpec("polymarket", ("polymarket",), "prediction", fetch_polymarket_events, mutable=True),
+        ProviderSpec("kalshi", ("kalshi",), "prediction", fetch_kalshi_events, retries=1, mutable=True),
     ]
-    events: list[dict] = []
-    for name, fn in fetchers:
-        try:
-            got = fn()
-            events.extend(got)
-            logger.info("수집 %s: %d건", name, len(got))
-        except Exception as e:                      # 한 소스 크래시가 전체 수집을 죽이지 않게
-            logger.warning("수집 %s 실패(격리): %s", name, e)
-    try:
-        update_source_health(events, cache_dir=cache_dir, now=now)
-    except Exception as e:
-        logger.warning("소스 헬스 기록 실패(무시): %s", e)
-    return len(events), append_events(events, cache_dir=cache_dir, now=now)
+    result = run_providers(registry=registry, cache_dir=cache_dir, now=now)
+    for name, stats in result["providers"].items():
+        logger.info(
+            "수집 %s: fetched=%d persisted=%d duration=%dms availability=%s",
+            name,
+            stats["fetched"],
+            stats["persisted"],
+            stats["duration_ms"],
+            stats["availability"],
+        )
+    return int(result["fetched"]), int(result["persisted"])
 
 
 def prune_old(cache_dir: Path | str = DEFAULT_CACHE_DIR, days: int = 14, now: datetime | None = None) -> int:

@@ -40,6 +40,27 @@ def test_load_recent_events_reads_multiple_days_and_dedupes(tmp_path):
     assert [e["title"] for e in events] == ["fresh"]
 
 
+def test_append_events_preserves_mutable_observations_across_time_buckets(tmp_path):
+    cache_dir = tmp_path / "cache"
+    first_at = datetime(2026, 8, 21, 10, 5, tzinfo=KST)
+    event = {
+        "source": "yahoo_finance",
+        "type": "market_snapshot",
+        "title": "QQQ snapshot",
+        "url": "https://finance.yahoo.com/quote/QQQ",
+        "metrics": {"ticker": "QQQ", "current": 600.0},
+    }
+
+    assert sc.append_events([event], cache_dir=cache_dir, now=first_at) == 1
+    assert sc.append_events([event], cache_dir=cache_dir, now=first_at + timedelta(minutes=20)) == 0
+    assert sc.append_events([event], cache_dir=cache_dir, now=first_at + timedelta(minutes=30)) == 1
+
+    rows = sc.load_recent_events(cache_dir=cache_dir, now=first_at + timedelta(minutes=35), hours=2)
+    assert len(rows) == 2
+    assert rows[0]["entity_id"] == rows[1]["entity_id"] == "yahoo_finance:QQQ"
+    assert rows[0]["id"] != rows[1]["id"]
+
+
 def test_build_digest_groups_by_source_and_limits_items():
     events = [
         {"source": "saveticker", "source_url": "https://saveticker.com/api", "title": "AI chip demand", "url": "https://e/1", "tickers": ["NVDA"], "classification": {"kind": "article", "topic": "기술/AI", "trust": "B"}},
@@ -103,6 +124,69 @@ def test_fetch_market_snapshot_events_includes_common_market_and_portfolio_data(
     assert "HYG High-yield bond ETF" in titles
     assert "MSFT Portfolio holding MSFT" in titles
     assert all(e["source"] == "yahoo_finance" for e in events)
+
+
+def test_fetch_market_snapshot_events_uses_one_batch_download(monkeypatch):
+    import pandas as pd
+
+    monkeypatch.setattr(sc, "MARKET_TICKERS", {"QQQ": "Nasdaq 100 ETF", "SPY": "S&P 500 ETF"})
+    dates = pd.date_range("2026-07-01", periods=30, freq="D")
+    frame = pd.DataFrame(
+        {
+            ("Close", "QQQ"): [100 + i for i in range(30)],
+            ("Close", "SPY"): [200 + i for i in range(30)],
+        },
+        index=dates,
+    )
+    frame.columns = pd.MultiIndex.from_tuples(frame.columns)
+
+    class FakeYF:
+        calls = []
+
+        @classmethod
+        def download(cls, tickers, **kwargs):
+            cls.calls.append((tickers, kwargs))
+            return frame
+
+        class Ticker:
+            def __init__(self, _ticker):
+                raise AssertionError("complete batch response must not use per-ticker fallback")
+
+    events = sc.fetch_market_snapshot_events(yf_module=FakeYF)
+
+    assert len(events) == 2
+    assert len(FakeYF.calls) == 1
+    assert FakeYF.calls[0][0] == ["QQQ", "SPY"]
+    assert FakeYF.calls[0][1]["period"] == "1y"
+    assert {event["metrics"]["ticker"] for event in events} == {"QQQ", "SPY"}
+    assert all(event["record_kind"] == "observation" for event in events)
+
+
+def test_fetch_market_snapshot_events_falls_back_only_for_missing_batch_symbol(monkeypatch):
+    import pandas as pd
+
+    monkeypatch.setattr(sc, "MARKET_TICKERS", {"QQQ": "Nasdaq 100 ETF", "SPY": "S&P 500 ETF"})
+    frame = pd.DataFrame({("Close", "QQQ"): [100 + i for i in range(30)]})
+    frame.columns = pd.MultiIndex.from_tuples(frame.columns)
+    fallbacks = []
+
+    class FakeYF:
+        @staticmethod
+        def download(_tickers, **_kwargs):
+            return frame
+
+        class Ticker:
+            def __init__(self, ticker):
+                fallbacks.append(ticker)
+
+            def history(self, period, auto_adjust=True):
+                assert period == "1y"
+                return pd.DataFrame({"Close": [200 + i for i in range(30)]})
+
+    events = sc.fetch_market_snapshot_events(yf_module=FakeYF)
+
+    assert len(events) == 2
+    assert fallbacks == ["SPY"]
 
 
 def test_fetch_fred_macro_events_parses_public_csv(monkeypatch):
@@ -259,8 +343,197 @@ def test_fetch_polymarket_events_normalizes_gamma_markets(monkeypatch):
     assert event["raw_payload"]["event_id"] == "100"
 
 
+def test_polymarket_451_is_recorded_as_region_blocked_not_stale(monkeypatch, tmp_path):
+    class BlockedResponse:
+        status_code = 451
+
+        def raise_for_status(self):
+            error = sc.requests.HTTPError("451 Client Error: Unavailable For Legal Reasons")
+            error.response = self
+            raise error
+
+    monkeypatch.setattr(sc, "_SOURCE_AVAILABILITY", {})
+    monkeypatch.setattr(sc, "_LAST_ERRORS", {})
+    monkeypatch.setattr(sc.requests, "get", lambda *args, **kwargs: BlockedResponse())
+
+    now = datetime(2026, 8, 21, 11, 0, tzinfo=KST)
+    assert sc.fetch_polymarket_events() == []
+    health = sc.update_source_health([], cache_dir=tmp_path / "cache", now=now)
+
+    assert health["polymarket"]["availability"] == "blocked"
+    assert "HTTP 451" in health["polymarket"]["availability_reason"]
+    stale = sc.stale_sources(health, now=now + timedelta(hours=24))
+    assert "polymarket" not in {row["source"] for row in stale}
+
+
+def test_polymarket_payload_direct_success_does_not_call_relay(monkeypatch):
+    class DirectResponse:
+        status_code = 200
+
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return [{"id": "direct-1"}]
+
+    calls = []
+
+    def fake_get(url, **kwargs):
+        calls.append((url, kwargs))
+        return DirectResponse()
+
+    monkeypatch.setenv("POLYMARKET_RELAY_URL", "https://relay.example/api/events")
+    monkeypatch.setenv("POLYMARKET_RELAY_TOKEN", "relay-token")
+
+    payload, meta = sc.fetch_polymarket_payload(request_limit=80, get=fake_get)
+
+    assert payload == [{"id": "direct-1"}]
+    assert meta["transport"] == "direct"
+    assert meta["source_url"] == "https://gamma-api.polymarket.com"
+    assert [call[0] for call in calls] == ["https://gamma-api.polymarket.com/events"]
+
+
+def test_polymarket_payload_uses_authenticated_relay_only_after_direct_451(monkeypatch):
+    class Response:
+        def __init__(self, payload=None, status_code=200):
+            self._payload = payload
+            self.status_code = status_code
+
+        def raise_for_status(self):
+            if self.status_code >= 400:
+                error = sc.requests.HTTPError(f"{self.status_code} upstream")
+                error.response = self
+                raise error
+
+        def json(self):
+            return self._payload
+
+    calls = []
+
+    def fake_get(url, **kwargs):
+        calls.append((url, kwargs))
+        if url == "https://gamma-api.polymarket.com/events":
+            return Response(status_code=451)
+        return Response({
+            "ok": True,
+            "transport": "polymarket-relay",
+            "source_url": "https://gamma-api.polymarket.com/events",
+            "retrieved_at": "2026-08-21T14:00:00+00:00",
+            "events": [{"id": "relay-1"}],
+        })
+
+    monkeypatch.setenv("POLYMARKET_RELAY_URL", "https://relay.example/api/events")
+    monkeypatch.setenv("POLYMARKET_RELAY_TOKEN", "relay-token")
+
+    payload, meta = sc.fetch_polymarket_payload(request_limit=80, get=fake_get)
+
+    assert payload == [{"id": "relay-1"}]
+    assert meta["transport"] == "relay"
+    assert meta["retrieved_at"] == "2026-08-21T14:00:00+00:00"
+    assert calls[1][0] == "https://relay.example/api/events"
+    assert calls[1][1]["headers"]["Authorization"] == "Bearer relay-token"
+
+
+def test_polymarket_payload_relay_451_remains_explicitly_blocked(monkeypatch):
+    class BlockedResponse:
+        status_code = 451
+
+        def raise_for_status(self):
+            error = sc.requests.HTTPError("451 upstream")
+            error.response = self
+            raise error
+
+        def json(self):
+            return {
+                "ok": False,
+                "availability": "blocked",
+                "upstream_status": 451,
+                "events": [],
+            }
+
+    monkeypatch.setenv("POLYMARKET_RELAY_URL", "https://relay.example/api/events")
+    monkeypatch.setenv("POLYMARKET_RELAY_TOKEN", "relay-token")
+    monkeypatch.setattr(sc, "_SOURCE_AVAILABILITY", {})
+    monkeypatch.setattr(sc, "_LAST_ERRORS", {})
+
+    try:
+        sc.fetch_polymarket_payload(request_limit=80, get=lambda *_args, **_kwargs: BlockedResponse())
+    except sc.PolymarketUnavailable as exc:
+        assert exc.availability == "blocked"
+        assert exc.status_code == 451
+    else:
+        raise AssertionError("relay 451 must raise PolymarketUnavailable")
+
+
+def test_polymarket_payload_does_not_relay_transient_direct_error(monkeypatch):
+    class ErrorResponse:
+        status_code = 503
+
+        def raise_for_status(self):
+            error = sc.requests.HTTPError("503 upstream")
+            error.response = self
+            raise error
+
+    calls = []
+
+    def fake_get(url, **kwargs):
+        calls.append(url)
+        return ErrorResponse()
+
+    monkeypatch.setenv("POLYMARKET_RELAY_URL", "https://relay.example/api/events")
+    monkeypatch.setenv("POLYMARKET_RELAY_TOKEN", "relay-token")
+
+    try:
+        sc.fetch_polymarket_payload(request_limit=80, get=fake_get)
+    except sc.PolymarketUnavailable as exc:
+        assert exc.availability == "error"
+        assert exc.status_code == 503
+    else:
+        raise AssertionError("direct 503 must raise PolymarketUnavailable")
+    assert calls == ["https://gamma-api.polymarket.com/events"]
+
+
+def test_polymarket_success_clears_region_blocked_state(monkeypatch, tmp_path):
+    class EmptyResponse:
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return []
+
+    monkeypatch.setattr(sc, "_SOURCE_AVAILABILITY", {
+        "polymarket": {
+            "availability": "blocked",
+            "availability_reason": "HTTP 451",
+        }
+    })
+    monkeypatch.setattr(sc, "_LAST_ERRORS", {"polymarket": "HTTP 451"})
+    monkeypatch.setattr(sc.requests, "get", lambda *args, **kwargs: EmptyResponse())
+    cache = tmp_path / "cache"
+    cache.mkdir()
+    (cache / sc.HEALTH_FILE).write_text(json.dumps({
+        "polymarket": {
+            "first_run": "2026-08-20T11:00:00+09:00",
+            "availability": "blocked",
+            "availability_reason": "HTTP 451",
+            "last_error": "HTTP 451",
+        }
+    }), encoding="utf-8")
+
+    assert sc.fetch_polymarket_events() == []
+    health = sc.update_source_health([], cache_dir=cache)
+    assert "polymarket" not in sc._SOURCE_AVAILABILITY
+    assert "availability" not in health["polymarket"]
+    assert "availability_reason" not in health["polymarket"]
+    assert "last_error" not in health["polymarket"]
+
+
 def test_expected_sources_include_polymarket():
     assert "polymarket" in sc.expected_sources()
+
+
+def test_expected_sources_include_kalshi():
+    assert "kalshi" in sc.expected_sources()
 
 
 def test_polymarket_keyword_matching_uses_word_boundaries():
@@ -735,6 +1008,7 @@ def test_collect_once_isolates_source_crash(tmp_path, monkeypatch):
     monkeypatch.setattr(sc, "fetch_fred_macro_events", lambda: [])
     monkeypatch.setattr(sc, "fetch_world_gov_bond_events", lambda: [])
     monkeypatch.setattr(sc, "fetch_polymarket_events", lambda: [])
+    monkeypatch.setattr(sc, "fetch_kalshi_events", lambda: [])
     fetched, written = sc.collect_once(cache_dir=tmp_path / "cache")
     assert fetched == 1 and written == 1
     h = sc.load_source_health(tmp_path / "cache")
@@ -751,12 +1025,61 @@ def test_collect_once_includes_polymarket(tmp_path, monkeypatch):
     monkeypatch.setattr(sc, "fetch_world_gov_bond_events", lambda: [])
     monkeypatch.setattr(sc, "fetch_polymarket_events",
                         lambda: [{"source": "polymarket", "title": "Fed cut odds", "url": "https://polymarket.com/event/fed"}])
+    monkeypatch.setattr(sc, "fetch_kalshi_events", lambda: [])
 
     fetched, written = sc.collect_once(cache_dir=tmp_path / "cache")
 
     assert fetched == 1 and written == 1
     h = sc.load_source_health(tmp_path / "cache")
     assert h["polymarket"]["last_count"] == 1
+
+
+def test_collect_once_includes_kalshi(tmp_path, monkeypatch):
+    monkeypatch.setattr(sc, "fetch_saveticker_events", lambda: [])
+    monkeypatch.setattr(sc, "fetch_arca_events", lambda max_pages=2: [])
+    monkeypatch.setattr(sc, "fetch_telegram_channel_events", lambda: [])
+    monkeypatch.setattr(sc, "fetch_market_snapshot_events", lambda: [])
+    monkeypatch.setattr(sc, "fetch_fred_macro_events", lambda: [])
+    monkeypatch.setattr(sc, "fetch_world_gov_bond_events", lambda: [])
+    monkeypatch.setattr(sc, "fetch_polymarket_events", lambda: [])
+    monkeypatch.setattr(
+        sc,
+        "fetch_kalshi_events",
+        lambda: [{"source": "kalshi", "title": "Fed cut odds", "url": "https://kalshi.com/markets/fed"}],
+    )
+
+    fetched, written = sc.collect_once(cache_dir=tmp_path / "cache")
+
+    assert fetched == 1 and written == 1
+    health = sc.load_source_health(tmp_path / "cache")
+    assert health["kalshi"]["last_count"] == 1
+
+
+def test_collect_once_uses_provider_runner_and_writes_manifests(tmp_path, monkeypatch):
+    monkeypatch.setattr(sc, "fetch_saveticker_events", lambda: [])
+    monkeypatch.setattr(sc, "fetch_arca_events", lambda max_pages=2: [])
+    monkeypatch.setattr(sc, "fetch_telegram_channel_events", lambda: [])
+    monkeypatch.setattr(sc, "fetch_market_snapshot_events", lambda: [])
+    monkeypatch.setattr(sc, "fetch_fred_macro_events", lambda: [])
+    monkeypatch.setattr(sc, "fetch_world_gov_bond_events", lambda: [])
+    monkeypatch.setattr(sc, "fetch_polymarket_events", lambda: [])
+    monkeypatch.setattr(sc, "fetch_kalshi_events", lambda: [])
+
+    sc.collect_once(cache_dir=tmp_path / "cache")
+
+    from reports.source_runs import load_source_runs
+
+    runs = load_source_runs(tmp_path / "cache", hours=1)
+    assert {row["provider"] for row in runs} == {
+        "saveticker",
+        "arca",
+        "telegram",
+        "yahoo_finance",
+        "fred",
+        "worldgovernmentbonds",
+        "polymarket",
+        "kalshi",
+    }
 
 
 # ── 죽은 출처 복구 — 직접 폴백·FRED API·오류 원인 기록 ───────────────────────

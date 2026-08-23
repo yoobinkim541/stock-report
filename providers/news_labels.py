@@ -211,27 +211,54 @@ def label_events(events: list[dict], runner=None) -> list[dict]:
     cmd = ["hermes", "chat", "-q", prompt,
            "--provider", NEWS_LLM_PROVIDER, "--model", NEWS_LLM_MODEL, "-Q"]
     text = None
+    failure_reason = ""
+    final_provider = NEWS_LLM_PROVIDER
+    final_model = NEWS_LLM_MODEL
     try:
         result = run(cmd, capture_output=True, text=True, timeout=NEWS_LLM_TIMEOUT)
         if getattr(result, "returncode", 1) == 0:
             text = getattr(result, "stdout", "") or ""
         else:
+            failure_reason = f"primary exit {getattr(result, 'returncode', 1)}: {str(getattr(result, 'stderr', ''))[:200]}".strip()
             logger.warning("뉴스 라벨 LLM 비정상 종료: %s",
                            str(getattr(result, "stderr", ""))[:200])
     except Exception as e:
+        failure_reason = f"primary call failed: {str(e)[:200]}"
         logger.warning("뉴스 라벨 LLM 호출 실패: %s", e)
     if text is None:
         try:
             from lib.llm_cli import backup_chat
             text, _note = backup_chat(prompt, timeout=NEWS_LLM_TIMEOUT, runner=runner)
-        except Exception:
+            if text is not None:
+                final_provider = "backup-cli"
+                final_model = ""
+        except Exception as exc:
+            failure_reason = f"{failure_reason}; backup failed: {str(exc)[:200]}".strip("; ")
             text = None
     labels = parse_labels(text, events) if text is not None else []
     if labels:
-        return labels
+        labeled_at = datetime.now(KST).isoformat()
+        return [{
+            **label,
+            "label_method": "llm",
+            "label_provider": final_provider,
+            "label_model": final_model,
+            "label_error": "",
+            "labeled_at": labeled_at,
+        } for label in labels]
+    if text is not None and not failure_reason:
+        failure_reason = "LLM output contained no valid labels"
     logger.warning("뉴스 라벨 LLM 실패/무효 — 휴리스틱 폴백 사용")
     fallback_text = "\n".join(json.dumps(lb, ensure_ascii=False) for lb in heuristic_labels(events))
-    return parse_labels(fallback_text, events)
+    labeled_at = datetime.now(KST).isoformat()
+    return [{
+        **label,
+        "label_method": "heuristic",
+        "label_provider": "local-rules",
+        "label_model": "",
+        "label_error": failure_reason or "LLM unavailable",
+        "labeled_at": labeled_at,
+    } for label in parse_labels(fallback_text, events)]
 
 
 def append_labels(labels: list[dict], path: Path | None = None) -> int:
@@ -243,7 +270,7 @@ def append_labels(labels: list[dict], path: Path | None = None) -> int:
     now = datetime.now(KST).isoformat()
     with open(p, "a", encoding="utf-8") as f:
         for lb in labels:
-            f.write(json.dumps({**lb, "labeled_at": now}, ensure_ascii=False) + "\n")
+            f.write(json.dumps({**lb, "labeled_at": lb.get("labeled_at") or now}, ensure_ascii=False) + "\n")
     return len(labels)
 
 
@@ -267,6 +294,31 @@ def load_labels(path: Path | None = None, max_rows: int = 20000) -> list[dict]:
 
 def labeled_ids(path: Path | None = None) -> set[str]:
     return {str(r.get("id")) for r in load_labels(path) if r.get("id")}
+
+
+def label_health(labels: list[dict], *, hours: int = 24, now: datetime | None = None) -> dict:
+    current = now or datetime.now(KST)
+    if current.tzinfo is None:
+        current = current.replace(tzinfo=KST)
+    cutoff = current - timedelta(hours=max(1, int(hours or 24)))
+    recent = []
+    for label in labels or []:
+        labeled_at = _parse_ts(label.get("labeled_at", ""))
+        if labeled_at and labeled_at >= cutoff:
+            recent.append(label)
+    llm_count = sum(str(label.get("label_method") or "") == "llm" for label in recent)
+    heuristic_count = sum(str(label.get("label_method") or "") == "heuristic" for label in recent)
+    failures = [str(label.get("label_error") or "") for label in recent if label.get("label_error")]
+    total = len(recent)
+    return {
+        "ok": bool(total) and llm_count > 0,
+        "hours": max(1, int(hours or 24)),
+        "total": total,
+        "llm_count": llm_count,
+        "heuristic_count": heuristic_count,
+        "fallback_ratio": heuristic_count / total if total else 0.0,
+        "first_failure_reason": failures[0] if failures else "",
+    }
 
 
 def _parse_ts(s: str):

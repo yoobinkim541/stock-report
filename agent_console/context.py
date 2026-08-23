@@ -164,39 +164,108 @@ def _as_float(value) -> float | None:
         return None
 
 
+def _source_availability(source: str) -> dict:
+    try:
+        from reports.source_collector import load_source_health, stale_sources
+
+        health = load_source_health(cache_dir=source_cache_dir())
+    except Exception:
+        return {}
+    record = dict((health or {}).get(source) or {})
+    if record and not record.get("availability"):
+        stale = stale_sources({source: record}, cache_dir=source_cache_dir())
+        if stale:
+            hours = stale[0].get("hours")
+            record["availability"] = "stale"
+            record["availability_reason"] = f"last successful observation is {hours}h old" if hours is not None else "no successful observation"
+    return record
+
+
 def prediction_market_state(events: list[dict] | None = None, limit: int = 8) -> dict:
     rows = events if events is not None else recent_source_events(hours=72, limit=120)
-    items = []
-    for row in rows or []:
-        if str(row.get("source") or "").split(":", 1)[0] != "polymarket":
-            continue
-        metrics = row.get("metrics") or {}
-        yes_probability = _as_float(metrics.get("yes_probability"))
-        if yes_probability is None:
-            continue
-        items.append({
-            "source": "polymarket",
-            "title": str(row.get("title") or "")[:220],
-            "url": row.get("url") or "",
-            "topic": (row.get("classification") or {}).get("topic") or row.get("topic") or "예측시장",
-            "yes_probability": round(yes_probability, 4),
-            "volume": _as_float(metrics.get("volume")),
-            "liquidity": _as_float(metrics.get("liquidity")),
-            "open_interest": _as_float(metrics.get("open_interest")),
-            "end_date": metrics.get("end_date") or "",
-            "collected_at": row.get("collected_at") or row.get("published_at") or "",
-        })
+    provider_states: dict[str, dict] = {}
+    items: list[dict] = []
+    for provider in ("polymarket", "kalshi"):
+        health = _source_availability(provider)
+        availability = str(health.get("availability") or "available")
+        reason = str(health.get("availability_reason") or health.get("last_error") or "")
+        provider_items: list[dict] = []
+        if availability not in {"blocked", "disabled", "stale"}:
+            for row in rows or []:
+                if str(row.get("source") or "").split(":", 1)[0] != provider:
+                    continue
+                metrics = row.get("metrics") or {}
+                yes_probability = _as_float(metrics.get("yes_probability"))
+                if yes_probability is None:
+                    continue
+                provider_items.append({
+                    "source": provider,
+                    "title": str(row.get("title") or "")[:220],
+                    "url": row.get("url") or "",
+                    "topic": (row.get("classification") or {}).get("topic") or row.get("topic") or "예측시장",
+                    "yes_probability": round(yes_probability, 4),
+                    "volume": _as_float(metrics.get("volume")),
+                    "liquidity": _as_float(metrics.get("liquidity")),
+                    "open_interest": _as_float(metrics.get("open_interest")),
+                    "end_date": metrics.get("end_date") or metrics.get("close_time") or "",
+                    "observed_at": row.get("observed_at") or row.get("collected_at") or row.get("published_at") or "",
+                    "collected_at": row.get("collected_at") or row.get("observed_at") or row.get("published_at") or "",
+                })
+        provider_states[provider] = {
+            "ok": bool(provider_items),
+            "availability": availability,
+            "error": reason,
+            "count": len(provider_items),
+            "items": provider_items[:limit],
+        }
+        items.extend(provider_items)
     items.sort(key=lambda item: (
         item.get("volume") or 0.0,
         item.get("liquidity") or 0.0,
         item.get("collected_at") or "",
     ), reverse=True)
+    degraded_providers = [
+        name for name, state in provider_states.items()
+        if state["availability"] in {"blocked", "disabled", "stale", "error"}
+    ]
+    available_items = bool(items)
+    if available_items and degraded_providers:
+        overall_availability = "degraded"
+    elif available_items:
+        overall_availability = "available"
+    elif degraded_providers:
+        statuses = {provider_states[name]["availability"] for name in degraded_providers}
+        overall_availability = "blocked" if statuses <= {"blocked", "disabled"} else "unavailable"
+    else:
+        overall_availability = "unavailable"
+    errors = [state["error"] for state in provider_states.values() if state["error"]]
     return {
-        "ok": True,
+        "ok": available_items,
+        "availability": overall_availability,
+        "error": "; ".join(errors),
         "count": len(items),
         "items": items[:limit],
+        "providers": provider_states,
         "caveat": "Prediction-market prices are crowd-implied probabilities, not verified facts.",
     }
+
+
+def economic_calendar_state(events: list[dict] | None = None, limit: int = 8) -> dict:
+    rows = events if events is not None else recent_source_events(hours=24 * 14, limit=240)
+    items = []
+    for row in rows or []:
+        if str(row.get("source") or "").split(":", 1)[0] != "economic_calendar":
+            continue
+        metrics = row.get("metrics") or {}
+        scheduled_at = str(metrics.get("scheduled_at") or row.get("scheduled_at") or row.get("published_at") or "")
+        items.append({
+            "title": str(row.get("title") or "")[:220],
+            "url": row.get("url") or row.get("source_url") or "",
+            "importance": str(metrics.get("importance") or "info"),
+            "scheduled_at": scheduled_at,
+        })
+    items.sort(key=lambda item: item["scheduled_at"])
+    return {"ok": bool(items), "count": len(items), "items": items[:limit]}
 
 
 def paper_state() -> dict:
@@ -456,6 +525,7 @@ def context_pack(surface: str = "market", *, hours: int = 72) -> dict:
         "strategy_experiments": strategy_experiment_state(),
         "strategy_studio": strategy_studio_state(),
         "prediction_markets": prediction_market_state(events),
+        "economic_calendar": economic_calendar_state(events),
         "models": model_state(),
         "market_snapshot": realtime_market.build_market_snapshot(),
         "memory": memory,

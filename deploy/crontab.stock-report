@@ -83,10 +83,14 @@ PATH=/home/ubuntu/.local/bin:/usr/local/bin:/usr/bin:/bin
 * * * * * cd /home/ubuntu/projects/stock-report && bash scripts/cloudflared_watchdog.sh >> /tmp/cloudflared_watchdog.log 2>&1   # 매 1분 (꺼져있으면 no-op)
 # S&P500 시장 맵 스냅샷 (대시보드 홈 트리맵 콜드로드 ~60초 → 즉시 로드용·표시데이터)
 */20 * * * * cd /home/ubuntu/projects/stock-report && flock -n /tmp/sp500_heatmap_snapshot.lock uv run python crons/sp500_heatmap_snapshot.py >> /tmp/sp500_heatmap_snapshot.log 2>&1   # 매 20분
-# 전체 소스 수집 (텔레그램 채널·FRED·국채·시장 스냅샷) → JSONL 캐시
-5,35 * * * * cd /home/ubuntu/projects/stock-report && uv run python reports/source_collector.py >> /tmp/source_collector.log 2>&1     # 매 30분 (:05/:35)
-8,38 * * * * cd /home/ubuntu/projects/stock-report && uv run python -m reports.source_wiki_curator --hours 48 --limit 0 >> /tmp/source_wiki_curator.log 2>&1   # source-cache -> LLM wiki 자동 갱신(무제한 저장)
-8,38 * * * * cd /home/ubuntu/projects/stock-report && uv run python -c "from agent_console.wiki import archive_stale_pages; from agent_console.shared_memory import ensure_store; ensure_store(); archive_stale_pages(max_age_days=30)" >> /tmp/wiki_archive.log 2>&1   # 위키 스테일 페이지 자동 아카이브/만료 삭제
+# 소스 그룹별 독립 수집 → 한 출처 지연/실패가 다른 그룹을 막지 않음
+5,35 * * * * cd /home/ubuntu/projects/stock-report && flock -n /tmp/source_news.lock uv run python -m reports.source_pipeline --group news >> /tmp/source_news.log 2>&1     # 뉴스·커뮤니티 매 30분
+7,37 * * * * cd /home/ubuntu/projects/stock-report && flock -n /tmp/source_market.lock uv run python -m reports.source_pipeline --group market >> /tmp/source_market.log 2>&1   # Yahoo 시장 스냅샷 매 30분
+9,39 * * * * cd /home/ubuntu/projects/stock-report && flock -n /tmp/source_prediction.lock uv run python -m reports.source_pipeline --group prediction >> /tmp/source_prediction.log 2>&1   # Polymarket·Kalshi 매 30분
+11 * * * * cd /home/ubuntu/projects/stock-report && flock -n /tmp/source_calendar.lock uv run python -m reports.source_pipeline --group calendar >> /tmp/source_calendar.log 2>&1   # 경제 캘린더 매시간
+15 0,6,12,18 * * * cd /home/ubuntu/projects/stock-report && flock -n /tmp/source_macro.lock uv run python -m reports.source_pipeline --group macro >> /tmp/source_macro.log 2>&1   # FRED·국채 6시간마다
+12,42 * * * * cd /home/ubuntu/projects/stock-report && flock -n /tmp/source_wiki_curator.lock uv run python -m reports.source_wiki_curator --hours 48 --limit 0 >> /tmp/source_wiki_curator.log 2>&1   # source-cache -> LLM wiki 자동 갱신(무제한 저장)+QMD 동기화
+14,44 * * * * cd /home/ubuntu/projects/stock-report && uv run python -c "from agent_console.wiki import archive_stale_pages; from agent_console.shared_memory import ensure_store; ensure_store(); archive_stale_pages(max_age_days=30)" >> /tmp/wiki_archive.log 2>&1   # 위키 스테일 페이지 자동 아카이브/만료 삭제
 15 */2 * * * cd /home/ubuntu/projects/stock-report && uv run python -m reports.wiki_health_check >> /tmp/wiki_health_check.log 2>&1   # 위키 헬스 체크(통계·린트·스테일·미사용) — 2시간마다
 0 */6 * * * cd /home/ubuntu/projects/stock-report && uv run python -m reports.wiki_distillation >> /tmp/wiki_distillation.log 2>&1   # 6시간마다 — source_digest 를 playbook/risk/concept 판단카드로 증류
 30 2 * * 1 cd /home/ubuntu/projects/stock-report && uv run python -m reports.institution_watch >> /tmp/institution_watch.log 2>&1   # 월요일 02:30 UTC — 다기관 위키 갱신 + 공통 패턴 digest 축적

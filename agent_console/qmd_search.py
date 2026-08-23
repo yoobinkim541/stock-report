@@ -7,6 +7,7 @@ from pathlib import Path
 import re
 import shutil
 import subprocess
+from datetime import datetime, timezone
 from typing import Any, Callable
 
 from . import shared_memory
@@ -28,6 +29,14 @@ def timeout_seconds() -> float:
         return max(0.2, min(float(raw), 30.0))
     except ValueError:
         return 3.0
+
+
+def update_timeout_seconds() -> float:
+    raw = os.getenv("AGENT_CONSOLE_QMD_UPDATE_TIMEOUT_SEC", "120").strip()
+    try:
+        return max(10.0, min(float(raw), 600.0))
+    except ValueError:
+        return 120.0
 
 
 def collections() -> list[str]:
@@ -59,17 +68,69 @@ def status() -> dict:
     }
 
 
-def health() -> dict:
+def _parse_time(value: object) -> datetime | None:
+    try:
+        parsed = datetime.fromisoformat(str(value or "").replace("Z", "+00:00"))
+    except (TypeError, ValueError):
+        return None
+    return parsed if parsed.tzinfo else parsed.replace(tzinfo=timezone.utc)
+
+
+def health(*, probe_query: str = "시장", runner: Callable[..., Any] = subprocess.run) -> dict:
     base = status()
     docs_dir = wiki_docs_dir()
+    markdown_files: list[Path] = []
     try:
-        file_count = sum(1 for path in docs_dir.glob("*.md") if path.is_file())
+        markdown_files = [path for path in docs_dir.glob("*.md") if path.is_file()]
+        file_count = len(markdown_files)
     except Exception:
         file_count = 0
+    latest_export = max((path.stat().st_mtime for path in markdown_files), default=0.0)
+    latest_export_at = (
+        datetime.fromtimestamp(latest_export, timezone.utc).isoformat(timespec="seconds")
+        if latest_export else ""
+    )
+    try:
+        records = shared_memory.inspect_records()
+    except Exception:
+        records = []
+    page_times = [
+        str(row.get("updatedAt") or row.get("updated_at") or row.get("createdAt") or "")
+        for row in records
+        if "wiki" in {str(tag).lower() for tag in row.get("tags") or []}
+    ]
+    latest_page_at = max((value for value in page_times if _parse_time(value)), default="")
+    page_time = _parse_time(latest_page_at)
+    export_time = _parse_time(latest_export_at)
+    index_fresh = not page_time or bool(export_time and export_time >= page_time)
+    query_ok = False
+    error = ""
+    if not base["enabled"]:
+        error = "qmd disabled"
+    elif not base["installed"]:
+        error = f"qmd binary not found: {base['bin']}"
+    else:
+        cmd = [qmd_bin(), search_command(), _clean(probe_query, 120), "--format", "json", "-n", "1"]
+        for collection in collections():
+            cmd.extend(["-c", collection])
+        try:
+            result = runner(cmd, capture_output=True, text=True, timeout=timeout_seconds())
+            query_ok = getattr(result, "returncode", 1) == 0
+            if not query_ok:
+                error = _clean(getattr(result, "stderr", "") or f"qmd probe exited {getattr(result, 'returncode', 1)}", 500)
+        except (FileNotFoundError, subprocess.TimeoutExpired, OSError) as exc:
+            error = _clean(exc, 500)
+    if not index_fresh and not error:
+        error = "qmd markdown export is older than the latest wiki page"
     return {
         "provider": "qmd",
         **base,
         "file_count": file_count,
+        "query_ok": query_ok,
+        "index_fresh": index_fresh,
+        "latest_page_at": latest_page_at,
+        "latest_export_at": latest_export_at,
+        "error": error,
         "fallback_available": True,
     }
 
@@ -86,6 +147,63 @@ def export_pages(pages: list[dict]) -> dict:
         path.write_text(_page_markdown(page, page_id), encoding="utf-8")
         files.append(str(path))
     return {"ok": True, "dir": str(out_dir), "files": files, "count": len(files)}
+
+
+def sync_pages(pages: list[dict], *, runner: Callable[..., Any] = subprocess.run) -> dict:
+    if not pages:
+        return {
+            "ok": False,
+            "enabled": enabled(),
+            "exported_count": 0,
+            "removed_count": 0,
+            "files": [],
+            "error": "refusing to replace the QMD mirror with an empty snapshot",
+            "skipped": "empty_snapshot",
+        }
+    exported = export_pages(pages)
+    expected = {Path(path).name for path in exported.get("files") or []}
+    removed = []
+    try:
+        for path in wiki_docs_dir().glob("*.md"):
+            if path.name not in expected:
+                path.unlink()
+                removed.append(str(path))
+    except OSError as exc:
+        return {
+            "ok": False,
+            "enabled": enabled(),
+            "exported_count": int(exported.get("count") or 0),
+            "removed_count": len(removed),
+            "files": exported.get("files") or [],
+            "error": _clean(exc, 500),
+        }
+    result = {
+        "ok": True,
+        "enabled": enabled(),
+        "exported_count": int(exported.get("count") or 0),
+        "removed_count": len(removed),
+        "files": exported.get("files") or [],
+        "error": "",
+    }
+    if not enabled():
+        result["skipped"] = "disabled"
+        return result
+    try:
+        completed = runner(
+            [qmd_bin(), "update"],
+            capture_output=True,
+            text=True,
+            timeout=update_timeout_seconds(),
+        )
+    except (FileNotFoundError, subprocess.TimeoutExpired, OSError) as exc:
+        result.update(ok=False, error=_clean(exc, 500))
+        return result
+    if getattr(completed, "returncode", 1) != 0:
+        result.update(
+            ok=False,
+            error=_clean(getattr(completed, "stderr", "") or f"qmd update exited {getattr(completed, 'returncode', 1)}", 500),
+        )
+    return result
 
 
 def search(

@@ -234,13 +234,26 @@ def test_curate_recent_source_wiki_limit_zero_saves_all_groups(monkeypatch):
     monkeypatch.setattr(source_collector, "load_recent_events", lambda hours: events)
     saved_ids = []
     monkeypatch.setattr(wiki, "upsert_page", lambda page: saved_ids.append(page["id"]) or page)
+    monkeypatch.setattr(
+        wiki,
+        "list_pages",
+        lambda **_kwargs: [{"id": page_id, "title": page_id} for page_id in saved_ids],
+    )
+    sync_calls = []
+    monkeypatch.setattr(wiki.qmd_search, "sync_pages", lambda pages: sync_calls.append(list(pages)) or {
+        "ok": True, "exported_count": len(pages), "error": "",
+    })
 
     result = swc.curate_recent_source_wiki(hours=48, limit=0)
     assert result["pages"] == 5
     assert result["saved"] == 5
     assert len(saved_ids) == 5
+    assert len(sync_calls) == 1
+    assert len(sync_calls[0]) == 5
+    assert result["qmd_exported_count"] == 5
 
     saved_ids.clear()
     result = swc.curate_recent_source_wiki(hours=48, limit=2)
     assert result["saved"] == 2
     assert len(saved_ids) == 2
+    assert len(sync_calls) == 2

@@ -389,7 +389,21 @@ def curate_recent_source_wiki(hours: int = 48, limit: int = 0) -> dict:
     limit = int(limit)
     rows = pages if limit <= 0 else pages[:max(1, limit)]
     saved = [wiki.upsert_page(page) for page in rows]
-    return {"ok": True, "events": len(events), "pages": len(pages), "saved": len(saved), "page_ids": [p.get("id") for p in saved]}
+    try:
+        all_wiki_pages = wiki.list_pages(status="all", surface="all", limit=400)
+        qmd = wiki.qmd_search.sync_pages(all_wiki_pages or saved)
+    except Exception as exc:
+        qmd = {"ok": False, "exported_count": 0, "error": str(exc)[:500]}
+    return {
+        "ok": True,
+        "events": len(events),
+        "pages": len(pages),
+        "saved": len(saved),
+        "page_ids": [p.get("id") for p in saved],
+        "qmd_ok": bool(qmd.get("ok")),
+        "qmd_exported_count": int(qmd.get("exported_count") or 0),
+        "qmd_error": str(qmd.get("error") or ""),
+    }
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -398,7 +412,12 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--limit", type=int, default=0, help="0 = 무제한(전체 저장)")
     args = parser.parse_args(argv)
     result = curate_recent_source_wiki(hours=args.hours, limit=args.limit)
-    print(f"source wiki curator: events={result['events']} pages={result['pages']} saved={result['saved']}")
+    print(
+        f"source wiki curator: events={result['events']} pages={result['pages']} saved={result['saved']} "
+        f"qmd_ok={result.get('qmd_ok')} qmd_exported={result.get('qmd_exported_count', 0)}"
+    )
+    if result.get("qmd_error"):
+        print(f"qmd warning: {result['qmd_error']}")
     for page_id in result.get("page_ids") or []:
         print(f"- {page_id}")
     return 0
