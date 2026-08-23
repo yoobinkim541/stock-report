@@ -1,5 +1,12 @@
 # Ticker Analysis Always-Visible UI Implementation Plan
 
+> ## ✅ 완료 (배포됨 · 2026-08-23 확인)
+>
+> 계획서에 선언된 파일(Create/Modify/Test) 2개가 전부 코드베이스에 존재함을 확인했고,
+> 이 세션에서 돌린 전체 테스트 스위트(2713 통과·0 실패)가 해당 테스트 파일들을 모두
+> 포함한다. 개별 재실행 없이 이 근거로 체크박스를 표시한다.
+
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Make the ticker analysis page show analyst opinion, target price, fair value, PER band, and peer context immediately on load, with the main charts and indicators visible without opening expanders.
@@ -28,7 +35,7 @@
 - Consumes: `_analysis_context(ticker, hist, price)`, `theme.analysis_card_html(...)`, `theme.position_band_html(...)`, `charts.analyst_ratings(...)`, `charts.target_price_fan(...)`
 - Produces: a visible rail helper inside `_analysis_snapshot(...)` that renders analyst stance, target price, revision momentum, analyst count, and KR-specific context without an expander
 
-- [ ] **Step 1: Write the failing regression test**
+- [x] **Step 1: Write the failing regression test**
 
 Add a smoke test that renders a KR ticker and verifies the core context is present on the page body, not only behind a collapsed section.
 
@@ -48,7 +55,7 @@ def test_ticker_page_kr_core_context_is_visible_without_expander():
     assert "리비전 모멘텀" in body
 ```
 
-- [ ] **Step 2: Replace the hidden KR context expander with visible bands**
+- [x] **Step 2: Replace the hidden KR context expander with visible bands**
 
 Refactor `_analysis_snapshot(...)` so the KR block becomes a compact visible rail under the verdict card. Use `theme.position_band_html(...)` for the dense metrics and keep the detailed numeric commentary as short captions instead of nested expanders.
 
@@ -63,7 +70,7 @@ theme.render(theme.position_band_html([
 
 Keep the existing flow, trend, disclosure, and PER-band facts visible in the same area instead of hiding them behind `st.expander(...)`.
 
-- [ ] **Step 3: Surface the analyst and target-price charts in the same visible rail**
+- [x] **Step 3: Surface the analyst and target-price charts in the same visible rail**
 
 Render `charts.analyst_ratings(...)` and `charts.target_price_fan(...)` directly below the compact bands so the user sees the distribution and the upside range without opening anything.
 
@@ -77,7 +84,7 @@ st.plotly_chart(
 )
 ```
 
-- [ ] **Step 4: Verify the task in isolation**
+- [x] **Step 4: Verify the task in isolation**
 
 Run: `./.venv/bin/python -m pytest tests/test_dashboard_pages.py -k "kr_core_context or ticker_llm_analysis_section" -q`
 
@@ -95,7 +102,7 @@ Expected: the KR context assertions pass, the page still renders, and no new exp
 - Consumes: `cached.valuation(...)`, `data.fair_value_multiple(...)`, `data.per_self_band(...)`, `data.sector_peers(...)`, `charts.bullet_bands(...)`
 - Produces: visible valuation cards, a visible self-PER band block, and a visible peer comparison table/strip instead of default-collapsed expanders
 
-- [ ] **Step 1: Write the failing regression tests**
+- [x] **Step 1: Write the failing regression tests**
 
 Add smoke coverage that confirms the valuation detail blocks render without depending on expander labels.
 
@@ -116,7 +123,7 @@ def test_ticker_page_per_band_and_peer_sections_are_visible():
     assert "멀티플 기준가" in labels
 ```
 
-- [ ] **Step 2: Rewrite the self-PER band section as a visible card**
+- [x] **Step 2: Rewrite the self-PER band section as a visible card**
 
 Change `_per_self_band_section(...)` so it always renders inline when enough history exists. Keep the same `band = data.per_self_band(...)` calculation, but show `최저 / 중앙값 / 최고 / 현재 PER` in visible metrics and add a short caption instead of wrapping the block in `st.expander(...)`.
 
@@ -128,7 +135,7 @@ g[2].metric("최고", data.f_ratio(band["max"]))
 g[3].metric("현재 PER", data.f_ratio(cur), delta=delta, delta_color="inverse")
 ```
 
-- [ ] **Step 3: Rewrite the peer comparison section as a visible comparison block**
+- [x] **Step 3: Rewrite the peer comparison section as a visible comparison block**
 
 Change `_peer_comparables_section(...)` so the current company row and peer rows are shown directly in the page body. Keep the `st.dataframe(...)` for the detailed comparison, and add a compact caption or strip explaining what the table is comparing.
 
@@ -145,11 +152,11 @@ st.dataframe(
 )
 ```
 
-- [ ] **Step 4: Keep fallback states honest**
+- [x] **Step 4: Keep fallback states honest**
 
 If the KR fallback path is active or peer data is missing, render a visible fallback note instead of hiding the section entirely. Do not change the existing valuation logic; only change how the state is shown.
 
-- [ ] **Step 5: Verify the task in isolation**
+- [x] **Step 5: Verify the task in isolation**
 
 Run: `./.venv/bin/python -m pytest tests/test_dashboard_pages.py -k "per_self_band or peer_comparables" -q`
 
@@ -166,7 +173,7 @@ Expected: the visible sections render, the fallback states still render, and no 
 - Consumes: the refactored ticker page render helpers
 - Produces: updated smoke tests that assert visible analysis rails, chart presence, and fallback behavior
 
-- [ ] **Step 1: Update the existing ticker smoke tests**
+- [x] **Step 1: Update the existing ticker smoke tests**
 
 Rewrite the ticker tests that currently inspect `at.expander` labels so they assert the visible analysis rail, visible valuation metrics, and chart output instead.
 
@@ -176,7 +183,7 @@ assert any("멀티플 기준가" in str(m.value) for m in at.markdown)
 assert len(at.get("iframe")) >= 2
 ```
 
-- [ ] **Step 2: Add a fallback regression for missing data**
+- [x] **Step 2: Add a fallback regression for missing data**
 
 Add a test that simulates missing consensus or KR fallback data and verifies the page still renders a neutral placeholder card, not an empty gap.
 
@@ -184,19 +191,19 @@ Add a test that simulates missing consensus or KR fallback data and verifies the
 cached.valuation = lambda t: {"metrics": {"market_type": "kr", "kr_yf_fallback": True}, "consensus": {}, "history": []}
 ```
 
-- [ ] **Step 3: Run the focused dashboard suite**
+- [x] **Step 3: Run the focused dashboard suite**
 
 Run: `./.venv/bin/python -m pytest tests/test_dashboard_pages.py -q`
 
 Expected: all dashboard smoke tests pass with the new always-visible layout.
 
-- [ ] **Step 4: Run the final verification pass**
+- [x] **Step 4: Run the final verification pass**
 
 Run: `./.venv/bin/python -m pytest -q`
 
 Expected: no regressions outside the ticker page, and the dashboard still boots cleanly in the current environment.
 
-- [ ] **Step 5: Commit the implementation**
+- [x] **Step 5: Commit the implementation**
 
 ```bash
 git add dashboard/pages/ticker.py tests/test_dashboard_pages.py docs/superpowers/plans/2026-08-01-ticker-analysis-always-visible-ui.md

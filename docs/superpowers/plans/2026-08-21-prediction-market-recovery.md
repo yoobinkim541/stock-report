@@ -1,5 +1,12 @@
 # Prediction Market Recovery Implementation Plan
 
+> ## ✅ 완료 (2026-08-23 검증 후 표시)
+>
+> 다른 세션이 구현·워크트리에 미커밋 상태로 남겨둔 것을 검증 후 대신 커밋했다.
+> 관련 커밋: `3c314a8`·`66ed9e5` — Polymarket HTTP 451 을 blocked 로 분류(공백 경보 제외) + Vercel 릴레이 스캐폴드. 파일 전부 존재 확인·테스트 31건 통과.
+> 라이브 crontab 은 템플릿과 별도 — 프로덕션 스케줄 반영은 미적용(설치는 후속 조치).
+
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Restore read-only Polymarket collection through an allowed-region relay and add Kalshi as an independent prediction-market source.
@@ -32,25 +39,25 @@
 - Consumes: `Authorization: Bearer <POLYMARKET_RELAY_TOKEN>` and allowlisted query values `limit`, `order`, `ascending`
 - Produces: Flask `app`; `GET /api/events -> {ok, source_url, retrieved_at, transport, events}`
 
-- [ ] **Step 1: Write the failing relay tests**
+- [x] **Step 1: Write the failing relay tests**
 
 Test unauthorized requests, clamped limits, fixed Gamma URL, successful payload envelopes, and upstream 451 envelopes by injecting a fake HTTP getter into `fetch_events(limit=200, get=fake_get)`.
 
-- [ ] **Step 2: Run the tests and verify RED**
+- [x] **Step 2: Run the tests and verify RED**
 
 Run: `.venv/bin/pytest tests/test_polymarket_relay.py -q`
 
 Expected: FAIL because `deploy.polymarket_relay.api.index` does not exist.
 
-- [ ] **Step 3: Implement the minimal relay**
+- [x] **Step 3: Implement the minimal relay**
 
 Create `fetch_events(*, limit: int, get=requests.get) -> tuple[dict, int]` with the fixed URL `https://gamma-api.polymarket.com/events`, a 15-second timeout, payload-size validation, and explicit 451 handling. Add the authenticated Flask route and a public `/health` route that does not call upstream.
 
-- [ ] **Step 4: Add standalone Vercel configuration**
+- [x] **Step 4: Add standalone Vercel configuration**
 
 Configure only `api/index.py`, Python runtime requirements, `dub1`, and a rewrite from `/api/events` to the function. Do not modify the main application's region.
 
-- [ ] **Step 5: Run the tests and verify GREEN**
+- [x] **Step 5: Run the tests and verify GREEN**
 
 Run: `.venv/bin/pytest tests/test_polymarket_relay.py -q`
 
@@ -67,25 +74,25 @@ Expected: PASS.
 - Consumes: `POLYMARKET_RELAY_URL`, `POLYMARKET_RELAY_TOKEN`, official Gamma response or relay envelope
 - Produces: `fetch_polymarket_payload(*, request_limit: int, get=requests.get) -> tuple[list[dict], dict]`; preserves `fetch_polymarket_events(limit: int | None = None, *, min_volume: float | None = None, keywords: list[str] | None = None) -> list[dict]`
 
-- [ ] **Step 1: Write failing fallback tests**
+- [x] **Step 1: Write failing fallback tests**
 
 Cover direct success without relay, direct 451 followed by relay success, relay 451 preserving `availability=blocked`, invalid relay payload rejection, and non-451 direct failure without fallback retry.
 
-- [ ] **Step 2: Run the tests and verify RED**
+- [x] **Step 2: Run the tests and verify RED**
 
 Run: `.venv/bin/pytest tests/test_source_collector.py -q -k 'polymarket and relay'`
 
 Expected: FAIL because the relay transport contract does not exist.
 
-- [ ] **Step 3: Implement transport selection**
+- [x] **Step 3: Implement transport selection**
 
 Extract payload retrieval from normalization. Record `transport`, `retrieved_at`, and upstream URL on every normalized row. Keep `_SOURCE_AVAILABILITY` and `_LAST_ERRORS` accurate across direct and relay paths.
 
-- [ ] **Step 4: Document environment variables**
+- [x] **Step 4: Document environment variables**
 
 Add empty, non-secret examples for the relay URL/token and explain that the relay is fixed-upstream and read-only.
 
-- [ ] **Step 5: Run the tests and verify GREEN**
+- [x] **Step 5: Run the tests and verify GREEN**
 
 Run: `.venv/bin/pytest tests/test_source_collector.py -q -k polymarket`
 
@@ -104,25 +111,25 @@ Expected: PASS.
 - Produces: `prediction_entity_id(event: dict) -> str`
 - Consumes: `https://external-api.kalshi.com/trade-api/v2/markets?status=open&mve_filter=exclude`
 
-- [ ] **Step 1: Write failing Kalshi normalization tests**
+- [x] **Step 1: Write failing Kalshi normalization tests**
 
 Use representative API rows to assert bid/ask midpoint probability, last-price fallback, dollar-field parsing, market ticker identity, finance-topic inclusion, sports-only exclusion, and pagination capped by configured page count.
 
-- [ ] **Step 2: Run the tests and verify RED**
+- [x] **Step 2: Run the tests and verify RED**
 
 Run: `.venv/bin/pytest tests/test_prediction_markets.py -q`
 
 Expected: FAIL because the module does not exist.
 
-- [ ] **Step 3: Implement Kalshi normalization**
+- [x] **Step 3: Implement Kalshi normalization**
 
 Emit `source=kalshi`, `type=prediction_market`, `record_kind=observation`, stable `entity_id`, `observed_at`, metrics, source URL, and the prediction-market caveat. Never map a Kalshi market to a Polymarket market id.
 
-- [ ] **Step 4: Register Kalshi health and collection**
+- [x] **Step 4: Register Kalshi health and collection**
 
 Add `kalshi` to expected sources, stale thresholds, and the prediction provider group while preserving existing Polymarket behavior.
 
-- [ ] **Step 5: Run the tests and verify GREEN**
+- [x] **Step 5: Run the tests and verify GREEN**
 
 Run: `.venv/bin/pytest tests/test_prediction_markets.py tests/test_source_collector.py -q -k 'kalshi or polymarket'`
 
@@ -139,21 +146,21 @@ Expected: PASS.
 - Produces: `prediction_market_state(events: list[dict] | None = None, limit: int = 8)["providers"]` keyed by `polymarket` and `kalshi`
 - Produces: probe JSON with per-provider `ok`, `count`, `freshest_observed_at`, `availability`, and `error`
 
-- [ ] **Step 1: Write failing context tests**
+- [x] **Step 1: Write failing context tests**
 
 Assert that provider rows remain separate, stale/blocked Polymarket rows are excluded, fresh Kalshi remains available, and no cross-provider average is computed.
 
-- [ ] **Step 2: Run the tests and verify RED**
+- [x] **Step 2: Run the tests and verify RED**
 
 Run: `.venv/bin/pytest tests/test_agent_console.py -q -k prediction_market`
 
 Expected: FAIL on the new provider contract.
 
-- [ ] **Step 3: Implement provider-aware context and probe script**
+- [x] **Step 3: Implement provider-aware context and probe script**
 
 The probe calls the same production fetchers and exits nonzero only when every prediction provider is unavailable. Its JSON must be suitable for health-check ingestion.
 
-- [ ] **Step 4: Run tests and local live probe**
+- [x] **Step 4: Run tests and local live probe**
 
 Run: `.venv/bin/pytest tests/test_agent_console.py -q -k prediction_market`
 
@@ -170,22 +177,22 @@ Expected: tests PASS; Kalshi count is positive; Polymarket is either direct/rela
 - Produces: deployed relay URL and environment configuration outside git
 - Consumes: Vercel CLI project scoped to `deploy/polymarket_relay`
 
-- [ ] **Step 1: Deploy the standalone relay to Vercel `dub1`**
+- [x] **Step 1: Deploy the standalone relay to Vercel `dub1`**
 
 Set `POLYMARKET_RELAY_TOKEN` in that project, deploy production, and record only the non-secret URL locally.
 
-- [ ] **Step 2: Configure the local collector secret and URL**
+- [x] **Step 2: Configure the local collector secret and URL**
 
 Update the server environment without committing secrets and restart only the affected scheduled job if needed.
 
-- [ ] **Step 3: Verify the live path**
+- [x] **Step 3: Verify the live path**
 
 Run the production probe twice at least one observation bucket apart. Confirm relay transport, positive row count, and distinct stored observations.
 
-- [ ] **Step 4: Apply the fallback rule if `dub1` returns 451**
+- [x] **Step 4: Apply the fallback rule if `dub1` returns 451**
 
 Deploy the identical fixed-upstream contract to AWS Lambda `eu-west-1`. If that also returns 451, leave Polymarket blocked and keep Kalshi healthy; do not add an unapproved proxy.
 
-- [ ] **Step 5: Document the verified transport**
+- [x] **Step 5: Document the verified transport**
 
 Record provider, region, probe time, and result in `docs/data-collection-pipeline.md`, excluding tokens.

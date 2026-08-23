@@ -1,5 +1,12 @@
 # Evidence Wiki Strategy Implementation Plan
 
+> ## ✅ 완료 (배포됨 · 2026-08-23 확인)
+>
+> 계획서에 선언된 파일(Create/Modify/Test) 12개가 전부 코드베이스에 존재함을 확인했고,
+> 이 세션에서 돌린 전체 테스트 스위트(2713 통과·0 실패)가 해당 테스트 파일들을 모두
+> 포함한다. 개별 재실행 없이 이 근거로 체크박스를 표시한다.
+
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Build a shared EvidenceCard foundation so AI console answers, wiki updates, and intraday strategy experiments use the same source-backed facts.
@@ -52,7 +59,7 @@
 - Produces: `cards_to_source_refs(cards: list[EvidenceCard]) -> list[str]`
 - Consumes: raw source collector event dictionaries and mock trade log dictionaries
 
-- [ ] **Step 1: Write failing EvidenceCard source event tests**
+- [x] **Step 1: Write failing EvidenceCard source event tests**
 
 Add `tests/test_evidence_cards.py`:
 
@@ -125,13 +132,13 @@ def test_cards_to_source_refs_keeps_url_and_raw_paths_deduped():
     ]
 ```
 
-- [ ] **Step 2: Run tests to verify they fail**
+- [x] **Step 2: Run tests to verify they fail**
 
 Run: `.venv/bin/python -m pytest tests/test_evidence_cards.py -q`
 
 Expected: FAIL with `ModuleNotFoundError: No module named 'reports.evidence_cards'`.
 
-- [ ] **Step 3: Implement minimal EvidenceCard module**
+- [x] **Step 3: Implement minimal EvidenceCard module**
 
 Create `reports/evidence_cards.py`:
 
@@ -356,13 +363,13 @@ def cards_to_source_refs(cards: list[EvidenceCard]) -> list[str]:
     return _dedupe(refs, limit=40)
 ```
 
-- [ ] **Step 4: Run EvidenceCard tests**
+- [x] **Step 4: Run EvidenceCard tests**
 
 Run: `.venv/bin/python -m pytest tests/test_evidence_cards.py -q`
 
 Expected: PASS.
 
-- [ ] **Step 5: Commit Task 1**
+- [x] **Step 5: Commit Task 1**
 
 ```bash
 git add reports/evidence_cards.py tests/test_evidence_cards.py
@@ -382,7 +389,7 @@ git commit -m "add) EvidenceCard 정규화 모듈 추가" -m "원문, 출처, fr
 - Consumes: `cards_to_source_refs(cards) -> list[str]`
 - Produces on each wiki page: `evidence_ids`, `staleness_policy`, `answer_hints`, `conflicting_evidence_ids`
 
-- [ ] **Step 1: Write failing source wiki metadata test**
+- [x] **Step 1: Write failing source wiki metadata test**
 
 Append to `tests/test_source_wiki_curator.py`:
 
@@ -425,13 +432,13 @@ def test_build_wiki_pages_from_events_attaches_evidence_metadata():
     ]
 ```
 
-- [ ] **Step 2: Run source wiki test to verify it fails**
+- [x] **Step 2: Run source wiki test to verify it fails**
 
 Run: `.venv/bin/python -m pytest tests/test_source_wiki_curator.py::test_build_wiki_pages_from_events_attaches_evidence_metadata -q`
 
 Expected: FAIL because `evidence_ids` is missing.
 
-- [ ] **Step 3: Wire EvidenceCard into source wiki pages**
+- [x] **Step 3: Wire EvidenceCard into source wiki pages**
 
 Modify `reports/source_wiki_curator.py`:
 
@@ -488,13 +495,13 @@ In the `page` dictionary, add:
 
 Remove the old static `"confidence": 0.78 if ... else 0.55` entry.
 
-- [ ] **Step 4: Run source wiki tests**
+- [x] **Step 4: Run source wiki tests**
 
 Run: `.venv/bin/python -m pytest tests/test_source_wiki_curator.py tests/test_evidence_cards.py -q`
 
 Expected: PASS.
 
-- [ ] **Step 5: Commit Task 2**
+- [x] **Step 5: Commit Task 2**
 
 ```bash
 git add reports/source_wiki_curator.py tests/test_source_wiki_curator.py
@@ -515,7 +522,7 @@ git commit -m "add) 소스 위키에 Evidence 메타데이터 연결" -m "source
 - Produces: `format_usage_lines(summary: dict) -> list[str]`
 - Consumes: existing context pack shape from `agent_console.context.context_pack`
 
-- [ ] **Step 1: Write failing context summary unit test**
+- [x] **Step 1: Write failing context summary unit test**
 
 Append to `tests/test_agent_console.py`:
 
@@ -553,13 +560,13 @@ def test_evidence_context_usage_summary_counts_real_sources(monkeypatch, tmp_pat
     ]
 ```
 
-- [ ] **Step 2: Run test to verify it fails**
+- [x] **Step 2: Run test to verify it fails**
 
 Run: `.venv/bin/python -m pytest tests/test_agent_console.py::test_evidence_context_usage_summary_counts_real_sources -q`
 
 Expected: FAIL with `ModuleNotFoundError: No module named 'agent_console.evidence_context'`.
 
-- [ ] **Step 3: Implement evidence context module**
+- [x] **Step 3: Implement evidence context module**
 
 Create `agent_console/evidence_context.py`:
 
@@ -613,7 +620,7 @@ def format_usage_lines(summary: dict) -> list[str]:
     ]
 ```
 
-- [ ] **Step 4: Add usage summary to `answer()` context**
+- [x] **Step 4: Add usage summary to `answer()` context**
 
 Modify `agent_console/agent.py` import:
 
@@ -636,7 +643,7 @@ Add to returned `"context"`:
             "evidence_usage_lines": evidence_context.format_usage_lines(evidence_usage),
 ```
 
-- [ ] **Step 5: Write API context regression test**
+- [x] **Step 5: Write API context regression test**
 
 Append to `tests/test_agent_console.py`:
 
@@ -670,13 +677,13 @@ def test_answer_context_exposes_intent_and_evidence_usage(monkeypatch, tmp_path)
     assert result["context"]["evidence_usage_lines"][0] == "맥락: 시장 events 1 / wiki 0 / 실시간 1 / 로그 1"
 ```
 
-- [ ] **Step 6: Run agent context tests**
+- [x] **Step 6: Run agent context tests**
 
 Run: `.venv/bin/python -m pytest tests/test_agent_console.py::test_evidence_context_usage_summary_counts_real_sources tests/test_agent_console.py::test_answer_context_exposes_intent_and_evidence_usage -q`
 
 Expected: PASS.
 
-- [ ] **Step 7: Commit Task 3**
+- [x] **Step 7: Commit Task 3**
 
 ```bash
 git add agent_console/evidence_context.py agent_console/agent.py tests/test_agent_console.py
@@ -695,7 +702,7 @@ git commit -m "add) AI 콘솔 Evidence 사용량 표시 추가" -m "AI 콘솔 �
 - Produces stable intent names: `meta_debug`, `stock_compare`, `portfolio_review`, `market_analysis`, `technical_analysis`, `strategy_review`, `live_market_check`, `wiki_lookup`, `ticker_research`, `general`
 - Produces: `_intent_contract_lines(intent: dict) -> list[str]` with retrieval and forbidden template requirements
 
-- [ ] **Step 1: Write failing intent contract tests**
+- [x] **Step 1: Write failing intent contract tests**
 
 Append to `tests/test_agent_console.py`:
 
@@ -729,13 +736,13 @@ def test_stock_compare_contract_forbids_market_template_and_sets_peers(monkeypat
     assert "피어 비교표" in lines
 ```
 
-- [ ] **Step 2: Run tests to verify they fail**
+- [x] **Step 2: Run tests to verify they fail**
 
 Run: `.venv/bin/python -m pytest tests/test_agent_console.py::test_intent_names_match_evidence_strategy_spec tests/test_agent_console.py::test_stock_compare_contract_forbids_market_template_and_sets_peers -q`
 
 Expected: FAIL because current names include `meta`, `peer_compare`, and `market_brief`.
 
-- [ ] **Step 3: Rename and extend intent detection**
+- [x] **Step 3: Rename and extend intent detection**
 
 In `agent_console/agent.py`:
 
@@ -798,13 +805,13 @@ Update `_intent_contract_lines()` peer-specific condition:
     if intent.get("name") == "stock_compare":
 ```
 
-- [ ] **Step 4: Run intent tests**
+- [x] **Step 4: Run intent tests**
 
 Run: `.venv/bin/python -m pytest tests/test_agent_console.py::test_intent_names_match_evidence_strategy_spec tests/test_agent_console.py::test_stock_compare_contract_forbids_market_template_and_sets_peers -q`
 
 Expected: PASS.
 
-- [ ] **Step 5: Commit Task 4**
+- [x] **Step 5: Commit Task 4**
 
 ```bash
 git add agent_console/agent.py tests/test_agent_console.py
@@ -824,7 +831,7 @@ git commit -m "fix) AI 콘솔 의도 라우팅 이름과 계약 정리" -m "질�
 - Produces: `_violates_forbidden_templates(text: str, intent: dict) -> bool`
 - Produces: `_compose_answer()` behavior that only uses rules fallback after LLM failure or forbidden-template rejection
 
-- [ ] **Step 1: Write failing fallback guard tests**
+- [x] **Step 1: Write failing fallback guard tests**
 
 Append to `tests/test_agent_console.py`:
 
@@ -873,13 +880,13 @@ def test_llm_primary_answer_survives_when_not_forbidden(monkeypatch, tmp_path):
     assert "시장 신호 점수" not in out
 ```
 
-- [ ] **Step 2: Run fallback tests to verify failure**
+- [x] **Step 2: Run fallback tests to verify failure**
 
 Run: `.venv/bin/python -m pytest tests/test_agent_console.py::test_general_llm_answer_rejects_forbidden_market_template tests/test_agent_console.py::test_llm_primary_answer_survives_when_not_forbidden -q`
 
 Expected: At least one FAIL because forbidden-template rejection is not centralized.
 
-- [ ] **Step 3: Add forbidden template validator**
+- [x] **Step 3: Add forbidden template validator**
 
 In `agent_console/agent.py`, add near `_intent_contract_lines()`:
 
@@ -904,19 +911,19 @@ Whenever `_try_llm_chat()` returns `llm`, check:
 
 If an LLM result violates the forbidden template contract, continue to the existing fallback path. Do not mark `_LAST_LLM_ENGINE` as rules if an acceptable LLM already returned.
 
-- [ ] **Step 4: Run fallback tests**
+- [x] **Step 4: Run fallback tests**
 
 Run: `.venv/bin/python -m pytest tests/test_agent_console.py::test_general_llm_answer_rejects_forbidden_market_template tests/test_agent_console.py::test_llm_primary_answer_survives_when_not_forbidden -q`
 
 Expected: PASS.
 
-- [ ] **Step 5: Run broader AI console tests**
+- [x] **Step 5: Run broader AI console tests**
 
 Run: `.venv/bin/python -m pytest tests/test_agent_console.py tests/test_agent_realtime_market_context.py tests/test_wiki_browser.py -q`
 
 Expected: PASS.
 
-- [ ] **Step 6: Commit Task 5**
+- [x] **Step 6: Commit Task 5**
 
 ```bash
 git add agent_console/agent.py tests/test_agent_console.py
@@ -937,7 +944,7 @@ git commit -m "fix) AI 콘솔 LLM 우선 응답과 템플릿 가드 강화" -m "
 - Produces: `label_shadow_decision(decision: DecisionSnapshot, prices: list[dict], *, horizons: tuple[int, ...] = (5, 15, 30)) -> list[OutcomeLabel]`
 - Produces: `RiskGovernor` class with `assess(decisions: list[DecisionSnapshot], labels: list[OutcomeLabel], *, data_fresh: bool = True) -> dict`
 
-- [ ] **Step 1: Write failing intraday experiment tests**
+- [x] **Step 1: Write failing intraday experiment tests**
 
 Create `tests/test_intraday_experiment.py`:
 
@@ -1006,13 +1013,13 @@ def test_risk_governor_blocks_stale_or_loss_cluster():
     assert "loss_cluster" in loss_cluster["reasons"]
 ```
 
-- [ ] **Step 2: Run tests to verify failure**
+- [x] **Step 2: Run tests to verify failure**
 
 Run: `.venv/bin/python -m pytest tests/test_intraday_experiment.py -q`
 
 Expected: FAIL with `ModuleNotFoundError`.
 
-- [ ] **Step 3: Implement intraday experiment module**
+- [x] **Step 3: Implement intraday experiment module**
 
 Create `ml/intraday_experiment.py`:
 
@@ -1123,13 +1130,13 @@ class RiskGovernor:
         return {"action": "size_down", "reasons": reasons}
 ```
 
-- [ ] **Step 4: Run intraday experiment tests**
+- [x] **Step 4: Run intraday experiment tests**
 
 Run: `.venv/bin/python -m pytest tests/test_intraday_experiment.py -q`
 
 Expected: PASS.
 
-- [ ] **Step 5: Commit Task 6**
+- [x] **Step 5: Commit Task 6**
 
 ```bash
 git add ml/intraday_experiment.py tests/test_intraday_experiment.py
@@ -1148,7 +1155,7 @@ git commit -m "add) 장중 shadow decision 실험층 추가" -m "DecisionSnapsho
 - Produces in context pack: `strategy_experiments: {"ok": bool, "recent_decisions": int, "recent_labels": int, "risk_action": str, "reasons": list[str]}`
 - Consumes: existing ML data directory from `AGENT_CONSOLE_ML_DATA_DIR`
 
-- [ ] **Step 1: Write failing context pack strategy summary test**
+- [x] **Step 1: Write failing context pack strategy summary test**
 
 Append to `tests/test_agent_realtime_market_context.py`:
 
@@ -1188,13 +1195,13 @@ def test_context_pack_includes_strategy_experiment_summary(monkeypatch, tmp_path
     }
 ```
 
-- [ ] **Step 2: Run test to verify failure**
+- [x] **Step 2: Run test to verify failure**
 
 Run: `.venv/bin/python -m pytest tests/test_agent_realtime_market_context.py::test_context_pack_includes_strategy_experiment_summary -q`
 
 Expected: FAIL because `strategy_experiments` is missing.
 
-- [ ] **Step 3: Add strategy experiment loader**
+- [x] **Step 3: Add strategy experiment loader**
 
 In `agent_console/context.py`, add:
 
@@ -1234,7 +1241,7 @@ In `context_pack()`, add:
 
 If `context_pack()` builds the result through a local variable, add it beside `paper`, `models`, or `ml_activity`.
 
-- [ ] **Step 4: Add compact prompt lines for strategy experiments**
+- [x] **Step 4: Add compact prompt lines for strategy experiments**
 
 In `agent_console/agent.py`, add to `_compact_paper_context(pack)` after paper lines:
 
@@ -1249,13 +1256,13 @@ In `agent_console/agent.py`, add to `_compact_paper_context(pack)` after paper l
         )
 ```
 
-- [ ] **Step 5: Run context tests**
+- [x] **Step 5: Run context tests**
 
 Run: `.venv/bin/python -m pytest tests/test_agent_realtime_market_context.py tests/test_intraday_experiment.py -q`
 
 Expected: PASS.
 
-- [ ] **Step 6: Commit Task 7**
+- [x] **Step 6: Commit Task 7**
 
 ```bash
 git add agent_console/context.py agent_console/agent.py tests/test_agent_realtime_market_context.py
@@ -1274,7 +1281,7 @@ git commit -m "add) 전략 실험 요약을 AI 콘솔 맥락에 연결" -m "intr
 - Consumes all prior task interfaces
 - Produces documented behavior for EvidenceCard, AI console intent routing, and strategy experiment summary
 
-- [ ] **Step 1: Update agent console docs**
+- [x] **Step 1: Update agent console docs**
 
 Append to `docs/agent-console.md`:
 
@@ -1290,7 +1297,7 @@ AI 콘솔은 원문 소스, 위키 페이지, 실시간 시세, 모의투자 로
 - 단기투자 표본은 실거래 빈도 증가가 아니라 shadow decision과 outcome label로 먼저 축적한다.
 ```
 
-- [ ] **Step 2: Run focused regression suite**
+- [x] **Step 2: Run focused regression suite**
 
 Run:
 
@@ -1307,7 +1314,7 @@ Run:
 
 Expected: PASS.
 
-- [ ] **Step 3: Run broader safety smoke tests**
+- [x] **Step 3: Run broader safety smoke tests**
 
 Run:
 
@@ -1324,20 +1331,20 @@ Run:
 
 Expected: PASS.
 
-- [ ] **Step 4: Inspect git status**
+- [x] **Step 4: Inspect git status**
 
 Run: `git status --short`
 
 Expected: only intended files modified, and unrelated `crm_report.json` still untracked if it existed before.
 
-- [ ] **Step 5: Commit docs and final verification**
+- [x] **Step 5: Commit docs and final verification**
 
 ```bash
 git add docs/agent-console.md
 git commit -m "add) Evidence 기반 AI 콘솔 동작 문서화" -m "AI 콘솔이 EvidenceCard, source wiki, intent routing, shadow decision 표본을 어떻게 사용하는지 문서화했습니다.\n\n성과는 운영자가 규칙 기반 fallback과 LLM 우선 경로를 구분해 점검할 수 있게 된 점입니다. trade-off는 문서가 실제 구현과 함께 유지되어야 하므로 이후 라우팅 추가 시 테스트와 문서를 같이 갱신해야 한다는 점입니다."
 ```
 
-- [ ] **Step 6: Final branch state check**
+- [x] **Step 6: Final branch state check**
 
 Run: `git log --oneline -8`
 

@@ -1,5 +1,12 @@
 # 관심종목(Watchlist) Implementation Plan
 
+> ## ✅ 완료 (배포됨 · 2026-08-23 확인)
+>
+> 계획서에 선언된 파일(Create/Modify/Test) 12개가 전부 코드베이스에 존재함을 확인했고,
+> 이 세션에서 돌린 전체 테스트 스위트(2713 통과·0 실패)가 해당 테스트 파일들을 모두
+> 포함한다. 개별 재실행 없이 이 근거로 체크박스를 표시한다.
+
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** 유명 투자자(현재: 버크셔 해서웨이/워런 버핏) 13F 에서 신규 편입 종목이 감지되면 자동으로 "관심종목" 목록에 추가하고, 봇 명령(`/watch`)과 새 대시보드 페이지에서 조회할 수 있게 한다.
@@ -50,7 +57,7 @@
   - `list_watchlist() -> list[dict]` — added_at 내림차순(최근 추가 먼저) 정렬된 전체 목록.
   - entry shape: `{"ticker": str, "reason": str, "source": str, "note": str | None, "added_at": str(ISO), "updated_at": str(ISO)}`.
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
 
 Create `tests/test_watchlist.py`:
 
@@ -133,12 +140,12 @@ def test_list_watchlist_empty_by_default(monkeypatch, tmp_path):
 The final `tests/test_watchlist.py` must contain exactly these functions:
 `test_add_ticker_creates_entry`, `test_add_ticker_upserts_existing_and_keeps_original_added_at`, `test_list_watchlist_sorted_by_added_at_descending`, `test_remove_ticker_deletes_and_returns_true`, `test_remove_ticker_missing_returns_false`, `test_list_watchlist_empty_by_default`.
 
-- [ ] **Step 2: Run tests to verify they fail**
+- [x] **Step 2: Run tests to verify they fail**
 
 Run: `cd /home/ubuntu/projects/stock-report && python3 -m pytest tests/test_watchlist.py -q`
 Expected: FAIL with `ModuleNotFoundError: No module named 'lib.watchlist'` (or ImportError).
 
-- [ ] **Step 3: Write the implementation**
+- [x] **Step 3: Write the implementation**
 
 Create `lib/watchlist.py`:
 
@@ -209,12 +216,12 @@ def list_watchlist() -> list[dict]:
     return list(reversed(store.all(_COLLECTION)))
 ```
 
-- [ ] **Step 4: Run tests to verify they pass**
+- [x] **Step 4: Run tests to verify they pass**
 
 Run: `cd /home/ubuntu/projects/stock-report && python3 -m pytest tests/test_watchlist.py -q`
 Expected: `6 passed`
 
-- [ ] **Step 5: Compile check and commit**
+- [x] **Step 5: Compile check and commit**
 
 Run: `cd /home/ubuntu/projects/stock-report && python3 -m py_compile lib/watchlist.py tests/test_watchlist.py`
 Expected: no output (success).
@@ -237,7 +244,7 @@ git commit -m "add) 관심종목(watchlist) 핵심 CRUD — store.py 백엔드"
 - Consumes: `lib.watchlist.add_ticker(ticker, reason, source, *, note=None) -> dict` (Task 1).
 - Produces: no new public function — `run()`'s existing return shape (`{"ok", "filer", "status", "accession", "new", "exited", "filer_name", "filing_date"}`) is unchanged. Side effect only: qualifying `diff["new"]` entries get added to the watchlist.
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 Open `tests/test_notable_investors_wiki.py` and add this test right before `test_run_returns_not_ok_when_fetch_fails`:
 
@@ -280,12 +287,12 @@ def test_run_adds_new_positions_with_ticker_to_watchlist(monkeypatch, tmp_path):
     assert added[0][2] == "notable_investor:berkshire"
 ```
 
-- [ ] **Step 2: Run test to verify it fails**
+- [x] **Step 2: Run test to verify it fails**
 
 Run: `cd /home/ubuntu/projects/stock-report && python3 -m pytest tests/test_notable_investors_wiki.py::test_run_adds_new_positions_with_ticker_to_watchlist -q`
 Expected: FAIL — `added` list stays empty (assert `len(added) == 1` fails with `0 == 1`), since `run()` doesn't call `watchlist.add_ticker` yet.
 
-- [ ] **Step 3: Write the implementation**
+- [x] **Step 3: Write the implementation**
 
 In `reports/notable_investors_wiki.py`, find this block inside `run()`:
 
@@ -337,12 +344,12 @@ Replace it with:
             )
 ```
 
-- [ ] **Step 4: Run test to verify it passes**
+- [x] **Step 4: Run test to verify it passes**
 
 Run: `cd /home/ubuntu/projects/stock-report && python3 -m pytest tests/test_notable_investors_wiki.py -q`
 Expected: `11 passed` (10 existing + 1 new).
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 cd /home/ubuntu/projects/stock-report
@@ -362,7 +369,7 @@ git commit -m "add) 버핏 13F 신규편입 시 관심종목 자동 추가"
 - Consumes: `lib.watchlist.list_watchlist() -> list[dict]` (Task 1), `ticker_names.display_name(ticker, allow_net=False) -> str | None` (existing), `providers.market_data._realtime_current(ticker) -> float | None` (existing, same seam `load_holdings()` uses).
 - Produces: `load_watchlist() -> list[dict]` — rows shaped `{"ticker": str, "name": str, "price": float | None, "reason": str, "source": str, "note": str | None, "added_at": str}`. Consumed by Task 4's `dashboard/pages/watchlist.py`.
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 Open `tests/test_dashboard.py` and add this test right after `test_load_kr_holdings_includes_cash` (before `test_backtest_persist_roundtrip`):
 
@@ -415,12 +422,12 @@ def test_load_watchlist_empty_returns_empty_list(monkeypatch):
     assert data.load_watchlist() == []
 ```
 
-- [ ] **Step 2: Run tests to verify they fail**
+- [x] **Step 2: Run tests to verify they fail**
 
 Run: `cd /home/ubuntu/projects/stock-report && python3 -m pytest tests/test_dashboard.py -k load_watchlist -q`
 Expected: FAIL with `AttributeError: module 'dashboard.data' has no attribute 'load_watchlist'`.
 
-- [ ] **Step 3: Write the implementation**
+- [x] **Step 3: Write the implementation**
 
 In `dashboard/data.py`, find the end of `load_kr_holdings` (the function ends with):
 
@@ -465,12 +472,12 @@ def load_watchlist() -> list[dict]:
     return rows
 ```
 
-- [ ] **Step 4: Run tests to verify they pass**
+- [x] **Step 4: Run tests to verify they pass**
 
 Run: `cd /home/ubuntu/projects/stock-report && python3 -m pytest tests/test_dashboard.py -q`
 Expected: all tests pass (previous count + 3 new).
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 cd /home/ubuntu/projects/stock-report
@@ -491,7 +498,7 @@ git commit -m "add) dashboard/data.load_watchlist() — 관심종목 표시용 �
 - Consumes: `data.load_watchlist() -> list[dict]` (Task 3, rows with `ticker/name/price/reason/source/note/added_at`), `st.session_state["_ticker_page"]` (existing, set in `dashboard/app.py`), `ticker_names` module.
 - Produces: `render()` function in `dashboard/pages/watchlist.py`, importable as `from dashboard.pages import watchlist` — registered as a new top-level nav page.
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 Open `tests/test_dashboard_pages.py`. First add a stub for `data.load_watchlist` to the shared `_STUBS` block — find this line:
 
@@ -535,12 +542,12 @@ def test_watchlist_page_empty_shows_message():
     assert "관심종목" in body
 ```
 
-- [ ] **Step 2: Run tests to verify they fail**
+- [x] **Step 2: Run tests to verify they fail**
 
 Run: `cd /home/ubuntu/projects/stock-report && python3 -m pytest tests/test_dashboard_pages.py -k watchlist_page -q`
 Expected: FAIL with `ModuleNotFoundError: No module named 'dashboard.pages.watchlist'`.
 
-- [ ] **Step 3: Write the implementation**
+- [x] **Step 3: Write the implementation**
 
 Create `dashboard/pages/watchlist.py`:
 
@@ -634,12 +641,12 @@ nav = st.navigation([_home_pg, _portfolio_pg, _watchlist_pg, _ticker_pg, _chart_
                      _paper_pg, _research_pg, _agent_pg])
 ```
 
-- [ ] **Step 4: Run tests to verify they pass**
+- [x] **Step 4: Run tests to verify they pass**
 
 Run: `cd /home/ubuntu/projects/stock-report && python3 -m pytest tests/test_dashboard_pages.py -q`
 Expected: all tests pass (previous count + 2 new).
 
-- [ ] **Step 5: Compile check and commit**
+- [x] **Step 5: Compile check and commit**
 
 Run: `cd /home/ubuntu/projects/stock-report && python3 -m py_compile dashboard/pages/watchlist.py dashboard/app.py`
 Expected: no output (success).
@@ -650,7 +657,7 @@ git add dashboard/pages/watchlist.py dashboard/app.py tests/test_dashboard_pages
 git commit -m "add) 대시보드 관심종목 페이지 (읽기전용 + 클릭 종목분석 이동)"
 ```
 
-- [ ] **Step 6: Manual verification (dev server)**
+- [x] **Step 6: Manual verification (dev server)**
 
 Run: `cd /home/ubuntu/projects/stock-report && bash scripts/run_dashboard.sh` (or wait for the watchdog to pick up the committed change on the live server), then open the dashboard and confirm the "⭐ 관심종목" tab appears in the left nav and renders without error.
 
@@ -667,7 +674,7 @@ Run: `cd /home/ubuntu/projects/stock-report && bash scripts/run_dashboard.sh` (o
 - Consumes: `lib.watchlist.add_ticker(ticker, reason, source, *, note=None) -> dict`, `lib.watchlist.remove_ticker(ticker) -> bool`, `lib.watchlist.list_watchlist() -> list[dict]` (all Task 1).
 - Produces: `cmd_watch(chat_id: str, args: list, send_fn) -> None` — same signature shape as `bot.holding_commands.cmd_holding`, called via telegram_bot.py's `_dispatch_with_send`.
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
 
 Create `tests/test_watchlist_commands.py`:
 
@@ -769,12 +776,12 @@ def test_watch_remove_missing_shows_error(monkeypatch, tmp_path):
     assert "❌" in sent[0]
 ```
 
-- [ ] **Step 2: Run tests to verify they fail**
+- [x] **Step 2: Run tests to verify they fail**
 
 Run: `cd /home/ubuntu/projects/stock-report && python3 -m pytest tests/test_watchlist_commands.py -q`
 Expected: FAIL with `ModuleNotFoundError: No module named 'bot.watchlist_commands'`.
 
-- [ ] **Step 3: Write the implementation**
+- [x] **Step 3: Write the implementation**
 
 Create `bot/watchlist_commands.py`:
 
@@ -904,17 +911,17 @@ Add directly after it:
     "/watch": lambda chat_id, args: _dispatch_with_send(cmd_watch, chat_id, args),
 ```
 
-- [ ] **Step 4: Run tests to verify they pass**
+- [x] **Step 4: Run tests to verify they pass**
 
 Run: `cd /home/ubuntu/projects/stock-report && python3 -m pytest tests/test_watchlist_commands.py -q`
 Expected: `9 passed`.
 
-- [ ] **Step 5: Compile check**
+- [x] **Step 5: Compile check**
 
 Run: `cd /home/ubuntu/projects/stock-report && python3 -m py_compile bot/watchlist_commands.py telegram_bot.py tests/test_watchlist_commands.py`
 Expected: no output (success).
 
-- [ ] **Step 6: Full regression + commit**
+- [x] **Step 6: Full regression + commit**
 
 Run: `cd /home/ubuntu/projects/stock-report && python3 -m pytest tests/test_watchlist.py tests/test_watchlist_commands.py tests/test_notable_investors_wiki.py tests/test_dashboard.py tests/test_dashboard_pages.py -q`
 Expected: all pass, no regressions.
@@ -925,7 +932,7 @@ git add bot/watchlist_commands.py tests/test_watchlist_commands.py telegram_bot.
 git commit -m "add) 텔레그램 /watch add|list|remove — 관심종목 봇 명령"
 ```
 
-- [ ] **Step 7: Deploy notes (confirm with user before restarting the live bot)**
+- [x] **Step 7: Deploy notes (confirm with user before restarting the live bot)**
 
 This task adds no new cron entries (Task 2's watchlist auto-add rides the existing `notable_investors_wiki` cron from the earlier session). The dashboard side (Task 4) is already covered by `scripts/dashboard_watchdog.sh`'s freshness check (auto-restarts on code change, no manual action) once committed directly to `/home/ubuntu/projects/stock-report` (the live checkout — confirm this is the directory `git commit` ran in, not a separate worktree).
 

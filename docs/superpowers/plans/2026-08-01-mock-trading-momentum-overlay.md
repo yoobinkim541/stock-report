@@ -1,5 +1,12 @@
 # Daily Mock Trading Momentum Overlay Implementation Plan
 
+> ## ✅ 완료 (배포됨 · 2026-08-23 확인)
+>
+> 계획서에 선언된 파일(Create/Modify/Test) 10개가 전부 코드베이스에 존재함을 확인했고,
+> 이 세션에서 돌린 전체 테스트 스위트(2713 통과·0 실패)가 해당 테스트 파일들을 모두
+> 포함한다. 개별 재실행 없이 이 근거로 체크박스를 표시한다.
+
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Add a shared momentum-following overlay to the daily KR and US mock trading engines so strong trends can tilt ranking and sizing without replacing the current base policy.
@@ -28,7 +35,7 @@
 - Consumes: daily close series for candidate and benchmark, optional volume series, market label, regime label, freshness flag
 - Produces: `build_momentum_features(...)`, `score_momentum_overlay(...)` returning `base_score`, `momentum_score`, `selection_score`, `momentum_multiplier`, `overlay_active`, `momentum_state`, `reason_codes`
 
-- [ ] **Step 1: Write the failing tests first**
+- [x] **Step 1: Write the failing tests first**
 
 ```python
 def test_strong_trend_in_risk_on_raises_selection_score():
@@ -53,7 +60,7 @@ def test_mean_reverting_series_falls_back_to_base_score():
     assert out["reason_codes"]
 ```
 
-- [ ] **Step 2: Make the helper pure and bounded**
+- [x] **Step 2: Make the helper pure and bounded**
 
 Implement the helper so it derives a compact feature set and clamps the overlay:
 
@@ -76,7 +83,7 @@ Keep the feature list compact and explainable:
 - `accel20`
 - `volume_confirmation`
 
-- [ ] **Step 3: Verify the helper in isolation**
+- [x] **Step 3: Verify the helper in isolation**
 
 Run: `./.venv/bin/python -m pytest tests/test_mock_momentum_overlay.py -q`
 
@@ -97,7 +104,7 @@ Expected: strong-trend, weak-trend, and fallback cases all pass; the overlay sta
 - Produces: enriched signal rows with `base_score`, `momentum_score`, `selection_score`, `momentum_multiplier`, `momentum_state`, `overlay_active`
 - Produces: rebalance plans that sort by `selection_score` when overlay is enabled and scale target values by `momentum_multiplier`
 
-- [ ] **Step 1: Write the failing integration tests**
+- [x] **Step 1: Write the failing integration tests**
 
 ```python
 def test_kr_signals_attach_overlay_fields(monkeypatch):
@@ -127,7 +134,7 @@ def test_us_plan_rebalance_uses_momentum_multiplier_for_partial_trim():
     assert any(o["symbol"] == "A" and o["side"] == "buy" for o in plan)
 ```
 
-- [ ] **Step 2: Make ranking and sizing overlay-aware**
+- [x] **Step 2: Make ranking and sizing overlay-aware**
 
 In both cron paths:
 
@@ -145,11 +152,11 @@ plan = plan_rebalance(..., target_multipliers=target_multipliers)
 
 Update the rebalance math so a lower `momentum_multiplier` naturally turns into a smaller target and can produce a partial trim or full exit when the overlay is weak or broken.
 
-- [ ] **Step 3: Keep the feature flag behavior conservative**
+- [x] **Step 3: Keep the feature flag behavior conservative**
 
 When `KR_MOCK_MOMENTUM_OVERLAY_ENABLED` or `US_MOCK_MOMENTUM_OVERLAY_ENABLED` is off, the cron paths must keep today’s exact base-policy behavior and only populate overlay fields as inactive metadata.
 
-- [ ] **Step 4: Verify the cron paths in isolation**
+- [x] **Step 4: Verify the cron paths in isolation**
 
 Run:
 
@@ -171,7 +178,7 @@ Expected: the new overlay assertions pass, the old rebalance behavior stays inta
 - Consumes: decision rows from `ml.adaptive.Ledger`, enriched with the new overlay fields
 - Produces: paper-page rows and captions that show `base_score`, `momentum_score`, `selection_score`, `momentum_tilt`, `momentum_multiplier`, `momentum_state`, `regime`, `overlay_active`
 
-- [ ] **Step 1: Write the failing dashboard regression**
+- [x] **Step 1: Write the failing dashboard regression**
 
 ```python
 def test_paper_decisions_show_momentum_overlay_columns():
@@ -185,7 +192,7 @@ def test_paper_decisions_show_momentum_overlay_columns():
         assert col in df.columns
 ```
 
-- [ ] **Step 2: Propagate the overlay metadata into the ledger join**
+- [x] **Step 2: Propagate the overlay metadata into the ledger join**
 
 Extend `join_decisions(...)` so it passes through the overlay fields from each decision row without renaming or dropping them.
 
@@ -200,7 +207,7 @@ row["regime"] = d.get("regime")
 row["overlay_active"] = d.get("overlay_active")
 ```
 
-- [ ] **Step 3: Render the overlay columns in the paper table**
+- [x] **Step 3: Render the overlay columns in the paper table**
 
 Update `_decisions_section(...)` so the table makes the overlay visible immediately. Keep the existing `축 피처 보기` toggle for the current momentum axes, but do not hide the new overlay state behind a second expander.
 
@@ -215,11 +222,11 @@ base = {
 }
 ```
 
-- [ ] **Step 4: Keep empty states honest**
+- [x] **Step 4: Keep empty states honest**
 
 If overlay fields are missing because the feature flag is off or the data is stale, render `inactive` / `—` rather than hiding the column or collapsing the row.
 
-- [ ] **Step 5: Verify the dashboard surface**
+- [x] **Step 5: Verify the dashboard surface**
 
 Run: `./.venv/bin/python -m pytest tests/test_dashboard_pages.py -q`
 
@@ -236,7 +243,7 @@ Expected: the paper page still boots, the decision table shows the overlay colum
 - Consumes: the new overlay helper, the KR/US cron integrations, and the paper-page ledger fields
 - Produces: a clean branch with focused verification evidence and a single implementation commit
 
-- [ ] **Step 1: Run the focused helper, cron, and dashboard tests**
+- [x] **Step 1: Run the focused helper, cron, and dashboard tests**
 
 Run:
 
@@ -247,13 +254,13 @@ Run:
 
 Expected: all focused suites pass with the overlay enabled in the test harness and with the feature flag disabled for the base-policy regression checks.
 
-- [ ] **Step 2: Run a broader smoke pass**
+- [x] **Step 2: Run a broader smoke pass**
 
 Run: `./.venv/bin/python -m pytest -q`
 
 Expected: no regressions outside the mock-trading surfaces, or if the suite is still blocked elsewhere, capture the first unrelated failure and keep the overlay changes scoped and green.
 
-- [ ] **Step 3: Commit the implementation**
+- [x] **Step 3: Commit the implementation**
 
 ```bash
 git add ml/mock_momentum_overlay.py \

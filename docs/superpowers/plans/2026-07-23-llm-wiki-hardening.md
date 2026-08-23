@@ -1,5 +1,12 @@
 # LLM Wiki Hardening Implementation Plan
 
+> ## ✅ 완료 (배포됨 · 2026-08-23 확인)
+>
+> 계획서에 선언된 파일(Create/Modify/Test) 6개가 전부 코드베이스에 존재함을 확인했고,
+> 이 세션에서 돌린 전체 테스트 스위트(2713 통과·0 실패)가 해당 테스트 파일들을 모두
+> 포함한다. 개별 재실행 없이 이 근거로 체크박스를 표시한다.
+
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Make the stock-report LLM wiki closer to Karpathy-style LLM Wiki by adding source verification, explicit promotion rules, generated index/log/lint artifacts, qmd health metadata, and prompt-visible citation state.
@@ -31,20 +38,20 @@
 - Produces: `wiki.normalize_trust_status(status: str, source_refs: list[str]) -> str`
 - Produces: pages include `verification_status`, `source_refs`, `trust_warnings`
 
-- [ ] **Step 1: Write failing tests**
+- [x] **Step 1: Write failing tests**
 
 Add tests asserting conversation-only auto curation remains draft/unverified even when keywords say reviewed, and source-backed pages can be reviewed.
 
-- [ ] **Step 2: Run tests to verify they fail**
+- [x] **Step 2: Run tests to verify they fail**
 
 Run: `/home/ubuntu/projects/stock-report/.venv/bin/python -m pytest tests/test_agent_console.py -q -k "wiki_conversation_only_pages or source_backed_wiki_page"`
 Expected: FAIL because trust fields/functions do not exist or reviewed is still allowed.
 
-- [ ] **Step 3: Implement minimal trust normalization**
+- [x] **Step 3: Implement minimal trust normalization**
 
 Add helper functions and call them from `upsert_page`, `_plan_to_page_payload`, and `build_context_section`.
 
-- [ ] **Step 4: Run tests to verify pass**
+- [x] **Step 4: Run tests to verify pass**
 
 Run the same focused pytest command.
 
@@ -60,20 +67,20 @@ Run the same focused pytest command.
 - Produces: `wiki.rebuild_artifacts() -> dict`
 - Produces: `wiki.lint_pages(pages: list[dict] | None = None) -> dict`
 
-- [ ] **Step 1: Write failing tests**
+- [x] **Step 1: Write failing tests**
 
 Assert `rebuild_artifacts()` writes `index.md`, `log.md`, `open-questions.md`, and `lint.md`; assert lint flags source-less reviewed/stable pages and open questions.
 
-- [ ] **Step 2: Run tests to verify they fail**
+- [x] **Step 2: Run tests to verify they fail**
 
 Run: `/home/ubuntu/projects/stock-report/.venv/bin/python -m pytest tests/test_agent_console.py -q -k "wiki_rebuild_artifacts or wiki_lint_flags"`
 Expected: FAIL because functions do not exist.
 
-- [ ] **Step 3: Implement deterministic artifact generation**
+- [x] **Step 3: Implement deterministic artifact generation**
 
 Build markdown from `list_pages(limit=400, status="all")`. Artifacts must be compact, deterministic, and avoid raw absolute local paths.
 
-- [ ] **Step 4: Run tests to verify pass**
+- [x] **Step 4: Run tests to verify pass**
 
 Run the same focused pytest command.
 
@@ -89,20 +96,20 @@ Run the same focused pytest command.
 - Produces: `wiki.search_health() -> dict`
 - `wiki.build_context_section()` includes search provider, score, updated date, trust warnings when present.
 
-- [ ] **Step 1: Write failing tests**
+- [x] **Step 1: Write failing tests**
 
 Assert qmd health reports enabled/bin/installed/wiki_dir/file_count and wiki search health includes fallback provider when qmd is unavailable.
 
-- [ ] **Step 2: Run tests to verify they fail**
+- [x] **Step 2: Run tests to verify they fail**
 
 Run: `/home/ubuntu/projects/stock-report/.venv/bin/python -m pytest tests/test_qmd_search.py tests/test_agent_console.py -q -k "qmd_health or wiki_search_health or context_section_includes_trust"`
 Expected: FAIL because health functions/context metadata are incomplete.
 
-- [ ] **Step 3: Implement minimal health and context metadata**
+- [x] **Step 3: Implement minimal health and context metadata**
 
 Add file_count/collection info without invoking network. Preserve existing qmd failure fallback.
 
-- [ ] **Step 4: Run tests to verify pass**
+- [x] **Step 4: Run tests to verify pass**
 
 Run the same focused pytest command.
 
@@ -117,20 +124,20 @@ Run the same focused pytest command.
 - Prompt tells LLM that wiki context may be unverified and must cite/qualify it.
 - Docs describe source verification, artifacts, qmd health, and lint workflow.
 
-- [ ] **Step 1: Write failing tests**
+- [x] **Step 1: Write failing tests**
 
 Assert `agent._build_general_chat_prompt()` contains wiki trust guidance and source-backed citation wording.
 
-- [ ] **Step 2: Run tests to verify they fail**
+- [x] **Step 2: Run tests to verify they fail**
 
 Run: `/home/ubuntu/projects/stock-report/.venv/bin/python -m pytest tests/test_agent_console.py -q -k "agent_prompt_mentions_wiki_trust"`
 Expected: FAIL because prompt lacks explicit trust guidance.
 
-- [ ] **Step 3: Implement prompt/docs update**
+- [x] **Step 3: Implement prompt/docs update**
 
 Add concise prompt instructions and docs section. Keep prompt short.
 
-- [ ] **Step 4: Run tests to verify pass**
+- [x] **Step 4: Run tests to verify pass**
 
 Run focused tests and then related full set:
 `/home/ubuntu/projects/stock-report/.venv/bin/python -m pytest tests/test_agent_console.py tests/test_qmd_search.py tests/test_wiki_storage_window.py -q`

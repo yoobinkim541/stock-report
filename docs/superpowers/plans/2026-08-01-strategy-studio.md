@@ -1,5 +1,12 @@
 # Strategy Studio Implementation Plan
 
+> ## ✅ 완료 (배포됨 · 2026-08-23 확인)
+>
+> 계획서에 선언된 파일(Create/Modify/Test) 19개가 전부 코드베이스에 존재함을 확인했고,
+> 이 세션에서 돌린 전체 테스트 스위트(2713 통과·0 실패)가 해당 테스트 파일들을 모두
+> 포함한다. 개별 재실행 없이 이 근거로 체크박스를 표시한다.
+
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** 리서치와 AI 콘솔에서 공통으로 쓰는 DSL 기반 전략 스튜디오를 만들고, AI 대화로 전략을 수정·버전업·재백테스트할 수 있게 한다.
@@ -78,7 +85,7 @@
   - `ml.optimization.grid_search_parameters`
   - `ml.walk_forward.walk_forward_splits`
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
 
 ```python
 def test_builtin_rsi_cash_preset_runs_and_reports_trades():
@@ -108,7 +115,7 @@ def test_unsupported_indicator_is_rejected():
         StrategySpec.from_dict(spec).validate()
 ```
 
-- [ ] **Step 2: Run the tests and confirm they fail**
+- [x] **Step 2: Run the tests and confirm they fail**
 
 Run:
 
@@ -118,7 +125,7 @@ pytest tests/test_strategy_studio.py -q
 
 Expected: fail on missing `ml.strategy_studio` symbols and unimplemented DSL validation / engine behavior.
 
-- [ ] **Step 3: Implement the minimum usable DSL and engine**
+- [x] **Step 3: Implement the minimum usable DSL and engine**
 
 Implement:
 
@@ -142,7 +149,7 @@ class StrategyRun:
 
 Use a small, bounded indicator registry (`rsi`, `ema`, `sma`, `atr`, `macd`, `bollinger`, `vwap`, `volume_zscore`, `rolling`, `drawdown`) and a rule evaluator that supports `all` / `any` / `cross_above` / `cross_below` / threshold comparisons / `trim_half` / `exit_all` / `time_stop`. Wrap the existing RSI cash flow as a preset so the current behavior remains available.
 
-- [ ] **Step 4: Re-run the core tests**
+- [x] **Step 4: Re-run the core tests**
 
 Run:
 
@@ -153,7 +160,7 @@ pytest tests/test_ml_backtest.py tests/test_event_backtest.py -q
 
 Expected: the new strategy tests pass and the existing backtest primitives remain green.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add ml/strategy_studio tests/test_strategy_studio.py
@@ -188,7 +195,7 @@ git commit -m "add) 범용 전략 DSL과 백테스트 엔진 추가"
   - `ml.strategy_studio.run_strategy_backtest`
   - `agent_console.agent._try_llm_chat` or a small public wrapper for patch generation
 
-- [ ] **Step 1: Write the failing storage/API tests**
+- [x] **Step 1: Write the failing storage/API tests**
 
 ```python
 def test_strategy_spec_versioning_round_trips(monkeypatch, tmp_path):
@@ -221,7 +228,7 @@ def test_strategy_patch_rejects_unsafe_code():
         apply_strategy_patch(base, patch)
 ```
 
-- [ ] **Step 2: Run the tests and confirm they fail**
+- [x] **Step 2: Run the tests and confirm they fail**
 
 Run:
 
@@ -231,7 +238,7 @@ pytest tests/test_agent_console.py -k "strategy_spec or strategy_patch or strate
 
 Expected: schema, route, and patch helpers are still missing.
 
-- [ ] **Step 3: Add SQLite tables and version append logic**
+- [x] **Step 3: Add SQLite tables and version append logic**
 
 Create two tables in `agent_console/storage.py`:
 
@@ -242,7 +249,7 @@ CREATE TABLE IF NOT EXISTS strategy_spec_versions (...);
 
 Store the current head row plus append-only version rows. Keep the older `portfolio_scenarios` table intact for compatibility; do not migrate it away in this task.
 
-- [ ] **Step 4: Add Flask routes and context exposure**
+- [x] **Step 4: Add Flask routes and context exposure**
 
 Expose routes such as:
 
@@ -257,7 +264,7 @@ Expose routes such as:
 
 Also extend `context.strategy_experiment_state()` or add a sibling helper so the AI console can show saved strategy counts, latest version, and latest preview status in the context rail.
 
-- [ ] **Step 5: Re-run the storage/API tests**
+- [x] **Step 5: Re-run the storage/API tests**
 
 Run:
 
@@ -267,7 +274,7 @@ pytest tests/test_agent_console.py -k "strategy_spec or strategy_patch or strate
 
 Expected: storage round-trips, version history, and unsafe patch rejection all pass.
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 ```bash
 git add agent_console/storage.py agent_console/server.py agent_console/context.py agent_console/strategy_studio.py tests/test_agent_console.py
@@ -299,7 +306,7 @@ git commit -m "add) 전략 스펙 버전 저장과 패치 API 추가"
   - `ml.strategy_studio.build_strategy_report`
   - `plotly` equity and trade-marker charts
 
-- [ ] **Step 1: Write the failing UI smoke tests**
+- [x] **Step 1: Write the failing UI smoke tests**
 
 ```python
 def test_strategy_lab_renders_summary_and_preview_first(monkeypatch, tmp_path):
@@ -320,7 +327,7 @@ def test_strategy_patch_preview_shows_diff_and_trade_markers(monkeypatch, tmp_pa
     assert "버전" in body
 ```
 
-- [ ] **Step 2: Run the tests and confirm they fail**
+- [x] **Step 2: Run the tests and confirm they fail**
 
 Run:
 
@@ -330,7 +337,7 @@ pytest tests/test_strategy_studio_pages.py -q
 
 Expected: the shared dashboard helper module and cached wrappers do not exist yet.
 
-- [ ] **Step 3: Implement the shared dashboard helpers**
+- [x] **Step 3: Implement the shared dashboard helpers**
 
 Add a compact render module that:
 
@@ -342,7 +349,7 @@ Add a compact render module that:
 
 Use `dashboard/views.py` for data access and `dashboard/cached.py` for `st.cache_data` wrappers so the heavy preview run is shared across pages.
 
-- [ ] **Step 4: Re-run the UI smoke tests**
+- [x] **Step 4: Re-run the UI smoke tests**
 
 Run:
 
@@ -352,7 +359,7 @@ pytest tests/test_strategy_studio_pages.py -q
 
 Expected: the render helpers load, summary cards appear, and the preview is visible before any raw JSON.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add dashboard/views.py dashboard/cached.py dashboard/strategy_studio.py tests/test_strategy_studio_pages.py
@@ -373,7 +380,7 @@ git commit -m "add) 전략 스튜디오 공용 UI와 캐시 래퍼 추가"
   - `dashboard.cached.strategy_studio_catalog`
   - `dashboard.cached.strategy_studio_preview`
 
-- [ ] **Step 1: Write the failing research-page smoke test**
+- [x] **Step 1: Write the failing research-page smoke test**
 
 ```python
 def test_research_strategy_lab_keeps_ml_preset_and_accepts_custom_spec(monkeypatch):
@@ -386,7 +393,7 @@ def test_research_strategy_lab_keeps_ml_preset_and_accepts_custom_spec(monkeypat
     assert "전략 캔버스" in body
 ```
 
-- [ ] **Step 2: Run the test and confirm it fails**
+- [x] **Step 2: Run the test and confirm it fails**
 
 Run:
 
@@ -396,7 +403,7 @@ pytest tests/test_strategy_studio_pages.py -q
 
 Expected: the research page still points at the old fixed ML-only path.
 
-- [ ] **Step 3: Replace the fixed backtest block with the strategy studio**
+- [x] **Step 3: Replace the fixed backtest block with the strategy studio**
 
 Keep the existing ML workflow as one preset in the catalog, but let the user:
 
@@ -409,7 +416,7 @@ Keep the existing ML workflow as one preset in the catalog, but let the user:
 
 The page should still render if no custom strategy is saved.
 
-- [ ] **Step 4: Re-run the research smoke test**
+- [x] **Step 4: Re-run the research smoke test**
 
 Run:
 
@@ -419,7 +426,7 @@ pytest tests/test_strategy_studio_pages.py -q
 
 Expected: the page shows the generic strategy lab, not only the old ML backtest summary.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add dashboard/pages/research.py tests/test_strategy_studio_pages.py
@@ -447,7 +454,7 @@ git commit -m "add) 리서치 페이지에 범용 전략 백테스트 연결"
   - `agent_console.strategy_studio.save_strategy_version`
   - the shared dashboard render helpers from Task 3
 
-- [ ] **Step 1: Write the failing agent-console tests**
+- [x] **Step 1: Write the failing agent-console tests**
 
 ```python
 def test_strategy_studio_intent_prefers_patch_preview_over_market_template(monkeypatch, tmp_path):
@@ -464,7 +471,7 @@ def test_strategy_patch_preview_is_saved_as_new_version_only_after_success(monke
     assert result["context"]["strategy_patch"]["version_action"] == "saved"
 ```
 
-- [ ] **Step 2: Run the tests and confirm they fail**
+- [x] **Step 2: Run the tests and confirm they fail**
 
 Run:
 
@@ -474,7 +481,7 @@ pytest tests/test_agent_console.py -k "strategy_studio or strategy_patch" -q
 
 Expected: the new strategy edit intent and patch metadata do not exist yet.
 
-- [ ] **Step 3: Implement the new strategy conversation path**
+- [x] **Step 3: Implement the new strategy conversation path**
 
 Add a dedicated strategy editing route in `agent_console/agent.py` that:
 
@@ -486,7 +493,7 @@ Add a dedicated strategy editing route in `agent_console/agent.py` that:
 
 The AI console page should show the current spec, the proposed patch, the preview result, and the version history in one visible layout.
 
-- [ ] **Step 4: Verify accept / reject / save behavior**
+- [x] **Step 4: Verify accept / reject / save behavior**
 
 The acceptance flow must:
 
@@ -495,7 +502,7 @@ The acceptance flow must:
 3. preserve the old RSI preset as a selectable template,
 4. keep the response useful even if the LLM is unavailable by falling back to the structured local explanation.
 
-- [ ] **Step 5: Re-run the agent tests**
+- [x] **Step 5: Re-run the agent tests**
 
 Run:
 
@@ -505,7 +512,7 @@ pytest tests/test_agent_console.py -k "strategy_studio or strategy_patch" -q
 
 Expected: the agent now routes strategy-editing questions to the new patch loop, and version history survives updates.
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 ```bash
 git add dashboard/pages/ai_console.py agent_console/agent.py agent_console/context.py tests/test_agent_console.py
@@ -524,7 +531,7 @@ git commit -m "add) AI 콘솔 전략 대화형 패치 루프 추가"
   - one verified strategy catalog path shared by research and AI console
   - one verified patch loop that cannot silently save a failed preview
 
-- [ ] **Step 1: Run the narrow feature suite**
+- [x] **Step 1: Run the narrow feature suite**
 
 Run:
 
@@ -532,7 +539,7 @@ Run:
 pytest tests/test_strategy_studio.py tests/test_strategy_studio_pages.py tests/test_agent_console.py -q
 ```
 
-- [ ] **Step 2: Run the existing dashboard smoke suite**
+- [x] **Step 2: Run the existing dashboard smoke suite**
 
 Run:
 
@@ -542,7 +549,7 @@ pytest tests/test_dashboard_pages.py -q
 
 Expected: the new strategy studio does not break the rest of the Streamlit app.
 
-- [ ] **Step 3: Smoke the local app**
+- [x] **Step 3: Smoke the local app**
 
 Start the dashboard or Flask side locally and verify the following by hand:
 
@@ -551,11 +558,11 @@ Start the dashboard or Flask side locally and verify the following by hand:
 3. a saved strategy can be reopened from version history,
 4. a failed preview does not mutate the saved version.
 
-- [ ] **Step 4: Apply any final polish fix**
+- [x] **Step 4: Apply any final polish fix**
 
 If any edge-case regression appears, fix only the smallest failing slice, rerun the narrow test set, and keep the change scoped to the feature files above.
 
-- [ ] **Step 5: Final commit and push**
+- [x] **Step 5: Final commit and push**
 
 ```bash
 git add .

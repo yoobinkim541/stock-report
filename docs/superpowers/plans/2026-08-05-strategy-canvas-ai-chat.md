@@ -1,5 +1,12 @@
 # Strategy Canvas AI Chat Implementation Plan
 
+> ## ✅ 완료 (배포됨 · 2026-08-23 확인)
+>
+> 계획서에 선언된 파일(Create/Modify/Test) 2개가 전부 코드베이스에 존재함을 확인했고,
+> 이 세션에서 돌린 전체 테스트 스위트(2713 통과·0 실패)가 해당 테스트 파일들을 모두
+> 포함한다. 개별 재실행 없이 이 근거로 체크박스를 표시한다.
+
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Add an "AI 대화" chat panel to the "기존 전략 캔버스" section in `dashboard/pages/ai_console.py::_lab_tab()`, where the agent proposes edits to RSI thresholds / max-loss cap / hypothesis text / portfolio allocations, shown as a diff the user must click "적용" to accept.
@@ -42,7 +49,7 @@ No other files change.
 - Produces: `_consume_canvas_pending() -> None` — pops `strategy_canvas_{buy_rsi,sell_rsi,max_loss,hypothesis,alloc_text}_pending` from `st.session_state` into the corresponding non-`_pending` key, if present. Later tasks write to the `_pending` keys to update these widgets.
 - Produces: session-state keys `strategy_canvas_buy_rsi`, `strategy_canvas_sell_rsi`, `strategy_canvas_max_loss`, `strategy_canvas_hypothesis` now persist the widgets' current values (previously untracked).
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 Add to `tests/test_dashboard_pages.py`, near `test_ai_console_strategy_canvas_allocation_normalize`:
 
@@ -61,12 +68,12 @@ def test_ai_console_canvas_buy_rsi_persists_across_rerun():
     assert int(rsi_input.value) == 45
 ```
 
-- [ ] **Step 2: Run test to verify it fails**
+- [x] **Step 2: Run test to verify it fails**
 
 Run: `.venv/bin/python -m pytest tests/test_dashboard_pages.py::test_ai_console_canvas_buy_rsi_persists_across_rerun -v`
 Expected: FAIL with `KeyError: 'strategy_canvas_buy_rsi'` (the widget has no `key=` yet, so `at.number_input(key=...)` can't find it).
 
-- [ ] **Step 3: Write minimal implementation**
+- [x] **Step 3: Write minimal implementation**
 
 In `dashboard/pages/ai_console.py`, replace the `_lab_tab` opening line and the four widget definitions.
 
@@ -143,17 +150,17 @@ def _consume_canvas_pending() -> None:
             st.session_state[key] = st.session_state.pop(pending_key)
 ```
 
-- [ ] **Step 4: Run test to verify it passes**
+- [x] **Step 4: Run test to verify it passes**
 
 Run: `.venv/bin/python -m pytest tests/test_dashboard_pages.py::test_ai_console_canvas_buy_rsi_persists_across_rerun -v`
 Expected: PASS
 
-- [ ] **Step 5: Run the full existing dashboard page test to check for regressions**
+- [x] **Step 5: Run the full existing dashboard page test to check for regressions**
 
 Run: `.venv/bin/python -m pytest tests/test_dashboard_pages.py -k "ai_console or page_renders" -v`
 Expected: all PASS (in particular `test_page_renders_without_exception[from dashboard.pages import ai_console-ai_console.render()]`)
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 ```bash
 git add dashboard/pages/ai_console.py tests/test_dashboard_pages.py
@@ -172,7 +179,7 @@ git commit -m "feat) 전략 캔버스 RSI·손실한도·가설 위젯 세션 �
 - Consumes: nothing from Task 1 directly (pure function, no Streamlit state).
 - Produces: `_heuristic_canvas_patch(question: str, current: dict, answer_text: str) -> dict`. `current` has keys `buy_rsi: int, sell_rsi: int, max_loss: float, hypothesis: str, allocations: list[dict]`. Returns a dict containing only the changed keys among `buy_rsi/sell_rsi/max_loss/hypothesis` in this task (Task 3 adds the `allocations` key to this same function). Empty dict `{}` when nothing matches.
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
 
 Add to `tests/test_dashboard_pages.py`:
 
@@ -219,12 +226,12 @@ def test_heuristic_canvas_patch_no_match_returns_empty():
     assert patch == {}
 ```
 
-- [ ] **Step 2: Run tests to verify they fail**
+- [x] **Step 2: Run tests to verify they fail**
 
 Run: `.venv/bin/python -m pytest tests/test_dashboard_pages.py -k heuristic_canvas_patch -v`
 Expected: FAIL with `AttributeError: module 'dashboard.pages.ai_console' has no attribute '_heuristic_canvas_patch'`
 
-- [ ] **Step 3: Write minimal implementation**
+- [x] **Step 3: Write minimal implementation**
 
 In `dashboard/pages/ai_console.py`, change the top-of-file imports from:
 
@@ -302,12 +309,12 @@ def _heuristic_canvas_patch(question: str, current: dict, answer_text: str) -> d
     return patch
 ```
 
-- [ ] **Step 4: Run tests to verify they pass**
+- [x] **Step 4: Run tests to verify they pass**
 
 Run: `.venv/bin/python -m pytest tests/test_dashboard_pages.py -k heuristic_canvas_patch -v`
 Expected: PASS (all 4)
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add dashboard/pages/ai_console.py tests/test_dashboard_pages.py
@@ -327,7 +334,7 @@ git commit -m "feat) 전략 캔버스 RSI·손실한도·가설 휴리스틱 패
 - Produces: `_heuristic_allocation_patch(question: str, allocations: list[dict]) -> list[dict] | None` — returns `None` when nothing matched, otherwise a full replacement list of `{symbol, weight_pct, note}` rows summing to 100 (rounded to 2 decimals).
 - Produces: `_allocations_to_text(rows: list[dict]) -> str` — serializes `[{symbol, weight_pct, note}]` back to the `"TICKER WEIGHT note"` line format that `_parse_allocations` reads. Task 4 uses this when applying an allocation patch.
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
 
 Add to `tests/test_dashboard_pages.py`:
 
@@ -376,12 +383,12 @@ def test_allocations_to_text_round_trips_through_parse_allocations():
     assert [r["weight_pct"] for r in parsed] == [90.0, 10.0]
 ```
 
-- [ ] **Step 2: Run tests to verify they fail**
+- [x] **Step 2: Run tests to verify they fail**
 
 Run: `.venv/bin/python -m pytest tests/test_dashboard_pages.py -k "allocation_add or allocation_remove or allocation_unresolvable or allocations_to_text" -v`
 Expected: FAIL — `test_heuristic_canvas_patch_allocation_add`/`_remove` fail on `assert "allocations" not in patch` style mismatch (patch has no `"allocations"` key at all yet since `_heuristic_canvas_patch` doesn't compute it), and `test_allocations_to_text_round_trips_through_parse_allocations` fails with `AttributeError: ... has no attribute '_allocations_to_text'`.
 
-- [ ] **Step 3: Write minimal implementation**
+- [x] **Step 3: Write minimal implementation**
 
 In `dashboard/pages/ai_console.py`, find this existing line (unchanged since before Task 1):
 
@@ -487,12 +494,12 @@ to:
     return patch
 ```
 
-- [ ] **Step 4: Run tests to verify they pass**
+- [x] **Step 4: Run tests to verify they pass**
 
 Run: `.venv/bin/python -m pytest tests/test_dashboard_pages.py -k "heuristic_canvas_patch or allocations_to_text" -v`
 Expected: PASS (all, including Task 2's tests — confirms the extension didn't break RSI/max-loss/hypothesis matching)
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add dashboard/pages/ai_console.py tests/test_dashboard_pages.py
@@ -513,7 +520,7 @@ git commit -m "feat) 전략 캔버스 포트폴리오 비중 휴리스틱 패치
 - Produces: `_apply_canvas_patch(patch: dict) -> None` — writes `strategy_canvas_{field}_pending` for each key present in `patch`, for `_consume_canvas_pending` (Task 1) to pick up on the next rerun.
 - Produces: `_diff_canvas(current: dict, patch: dict) -> list[dict]` — rows of `{"필드", "현재", "제안"}` for the diff table.
 
-- [ ] **Step 1: Write the failing end-to-end test**
+- [x] **Step 1: Write the failing end-to-end test**
 
 Add to `tests/test_dashboard_pages.py`:
 
@@ -571,12 +578,12 @@ def test_ai_console_canvas_chat_no_match_shows_no_diff(monkeypatch):
     assert not apply_buttons, "패치가 없는데 적용 버튼이 렌더됨"
 ```
 
-- [ ] **Step 2: Run tests to verify they fail**
+- [x] **Step 2: Run tests to verify they fail**
 
 Run: `.venv/bin/python -m pytest tests/test_dashboard_pages.py -k "canvas_chat_propose_and_apply or canvas_chat_no_match" -v`
 Expected: FAIL — `test_ai_console_canvas_chat_propose_and_apply` fails with `KeyError: 'strategy_canvas_chat_input'` (chat_input doesn't exist yet); `test_ai_console_canvas_chat_no_match_shows_no_diff` fails the same way.
 
-- [ ] **Step 3: Write minimal implementation**
+- [x] **Step 3: Write minimal implementation**
 
 Add these three functions after `_allocations_to_text` (from Task 3):
 
@@ -681,17 +688,17 @@ to:
     scenarios = storage.list_scenarios(limit=8)
 ```
 
-- [ ] **Step 4: Run tests to verify they pass**
+- [x] **Step 4: Run tests to verify they pass**
 
 Run: `.venv/bin/python -m pytest tests/test_dashboard_pages.py -k "canvas_chat_propose_and_apply or canvas_chat_no_match" -v`
 Expected: PASS (both)
 
-- [ ] **Step 5: Run the full dashboard + strategy_studio test files to check for regressions**
+- [x] **Step 5: Run the full dashboard + strategy_studio test files to check for regressions**
 
 Run: `.venv/bin/python -m pytest tests/test_dashboard_pages.py tests/test_strategy_studio_pages.py tests/test_strategy_studio.py -v`
 Expected: all PASS
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 ```bash
 git add dashboard/pages/ai_console.py tests/test_dashboard_pages.py

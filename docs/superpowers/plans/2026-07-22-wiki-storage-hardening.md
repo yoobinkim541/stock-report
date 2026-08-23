@@ -1,5 +1,12 @@
 # 위키 저장 계층 강화 Implementation Plan
 
+> ## ✅ 완료 (배포됨 · 2026-08-23 확인)
+>
+> 계획서에 선언된 파일(Create/Modify/Test) 9개가 전부 코드베이스에 존재함을 확인했고,
+> 이 세션에서 돌린 전체 테스트 스위트(2713 통과·0 실패)가 해당 테스트 파일들을 모두
+> 포함한다. 개별 재실행 없이 이 근거로 체크박스를 표시한다.
+
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** 위키가 레코드 수와 무관하게 전체 페이지를 조회·갱신하게 만들고, `events.jsonl`·`index.json` 쓰기를 원자적으로 만들어 두 writer 를 직렬화한다.
@@ -31,7 +38,7 @@
 - Consumes: 없음
 - Produces: `safe_io.atomic_write_text(path: str, text: str) -> None`
 
-- [ ] **Step 1: 실패하는 테스트 작성**
+- [x] **Step 1: 실패하는 테스트 작성**
 
 `tests/test_safe_io_text.py`:
 
@@ -75,12 +82,12 @@ def test_atomic_write_text_leaves_original_on_failure(tmp_path, monkeypatch):
     assert list(tmp_path.glob("*.tmp")) == []
 ```
 
-- [ ] **Step 2: 테스트 실패 확인**
+- [x] **Step 2: 테스트 실패 확인**
 
 Run: `./.venv/bin/pytest tests/test_safe_io_text.py -q`
 Expected: FAIL — `AttributeError: module 'safe_io' has no attribute 'atomic_write_text'`
 
-- [ ] **Step 3: 구현 추가**
+- [x] **Step 3: 구현 추가**
 
 `safe_io.py` 의 `atomic_write_json` 함수 바로 아래에 삽입:
 
@@ -107,12 +114,12 @@ def atomic_write_text(path: str, text: str) -> None:
         raise
 ```
 
-- [ ] **Step 4: 테스트 통과 확인**
+- [x] **Step 4: 테스트 통과 확인**
 
 Run: `./.venv/bin/pytest tests/test_safe_io_text.py -q`
 Expected: PASS (3 passed)
 
-- [ ] **Step 5: 커밋**
+- [x] **Step 5: 커밋**
 
 ```bash
 git add safe_io.py tests/test_safe_io_text.py
@@ -132,7 +139,7 @@ git commit -m "add) JSONL 전체 재작성을 위한 원자적 텍스트 쓰기 
 - Consumes: 없음
 - Produces: `shared_memory.all_records() -> list[dict]` (createdAt 내림차순, 클램프 없음)
 
-- [ ] **Step 1: 실패하는 테스트 작성**
+- [x] **Step 1: 실패하는 테스트 작성**
 
 `tests/test_wiki_storage_window.py`:
 
@@ -220,12 +227,12 @@ def test_upsert_old_page_does_not_duplicate_id(monkeypatch, tmp_path):
     assert matching[0]["summary"] == "v2"
 ```
 
-- [ ] **Step 2: 테스트 실패 확인**
+- [x] **Step 2: 테스트 실패 확인**
 
 Run: `./.venv/bin/pytest tests/test_wiki_storage_window.py -q`
 Expected: FAIL — 첫 테스트는 `get_page 가 오래된 페이지를 못 찾음`, 둘째는 중복 id 로 실패.
 
-- [ ] **Step 3: `all_records` 추가**
+- [x] **Step 3: `all_records` 추가**
 
 `agent_console/shared_memory.py` 의 `list_records` 정의 **바로 아래**에 삽입:
 
@@ -243,7 +250,7 @@ def all_records() -> list[dict]:
     return rows
 ```
 
-- [ ] **Step 4: 위키 조회 경로 3곳 교체**
+- [x] **Step 4: 위키 조회 경로 3곳 교체**
 
 `agent_console/wiki.py:193` (`list_pages` 안):
 
@@ -263,12 +270,12 @@ def all_records() -> list[dict]:
     rows = [row for row in shared_memory.all_records() if _is_wiki_record(row)]
 ```
 
-- [ ] **Step 5: 테스트 통과 확인**
+- [x] **Step 5: 테스트 통과 확인**
 
 Run: `./.venv/bin/pytest tests/test_wiki_storage_window.py -q`
 Expected: PASS (2 passed)
 
-- [ ] **Step 6: 커밋**
+- [x] **Step 6: 커밋**
 
 ```bash
 git add agent_console/shared_memory.py agent_console/wiki.py tests/test_wiki_storage_window.py
@@ -291,7 +298,7 @@ git commit -m "fix) 위키가 최근 100 레코드 창에 갇히던 문제 해�
   - `shared_memory._events_lock()` — context manager
   - `shared_memory._write_index_locked() -> None` — **락 보유 중에만 호출**
 
-- [ ] **Step 1: 실패하는 테스트 작성**
+- [x] **Step 1: 실패하는 테스트 작성**
 
 `tests/test_shared_memory_atomic.py`:
 
@@ -360,12 +367,12 @@ def test_index_written_atomically(monkeypatch, tmp_path):
     assert list(tmp_path.rglob("*.tmp")) == []
 ```
 
-- [ ] **Step 2: 테스트 실패 확인**
+- [x] **Step 2: 테스트 실패 확인**
 
 Run: `./.venv/bin/pytest tests/test_shared_memory_atomic.py -q`
 Expected: FAIL — `AttributeError: module 'agent_console.shared_memory' has no attribute 'upsert_record'` (2건). 나머지 2건은 현재도 통과할 수 있다.
 
-- [ ] **Step 3: import 와 락 헬퍼 추가**
+- [x] **Step 3: import 와 락 헬퍼 추가**
 
 `agent_console/shared_memory.py` 상단 import 블록에 추가:
 
@@ -393,7 +400,7 @@ def _write_jsonl_locked(rows: list[dict]) -> None:
     safe_io.atomic_write_text(str(_paths()["events"]), text)
 ```
 
-- [ ] **Step 4: `_write_index` 를 락 비획득 버전으로 전환**
+- [x] **Step 4: `_write_index` 를 락 비획득 버전으로 전환**
 
 `agent_console/shared_memory.py:272` 의 `def _write_index() -> None:` 을 다음으로 교체한다. 이름이 바뀌므로 호출부(144행·267행)도 Step 5·6 에서 함께 바꾼다.
 
@@ -425,7 +432,7 @@ def _write_index_locked() -> None:
     safe_io.atomic_write_json(str(paths["index"]), existing)
 ```
 
-- [ ] **Step 5: `append_record` 를 락 안으로**
+- [x] **Step 5: `append_record` 를 락 안으로**
 
 `agent_console/shared_memory.py:139-147` 의 `append_record` 본문을 교체:
 
@@ -441,7 +448,7 @@ def append_record(payload: dict) -> dict:
     return record
 ```
 
-- [ ] **Step 6: `delete_record` 를 원자적 재작성으로**
+- [x] **Step 6: `delete_record` 를 원자적 재작성으로**
 
 `agent_console/shared_memory.py:254-270` 의 `delete_record` 본문을 교체:
 
@@ -462,7 +469,7 @@ def delete_record(record_id: str) -> bool:
     return True
 ```
 
-- [ ] **Step 7: `upsert_record` 추가**
+- [x] **Step 7: `upsert_record` 추가**
 
 `delete_record` 정의 **아래**에 삽입:
 
@@ -488,7 +495,7 @@ def upsert_record(record: dict) -> dict:
     return normalized
 ```
 
-- [ ] **Step 8: `wiki.upsert_page` 를 `upsert_record` 로**
+- [x] **Step 8: `wiki.upsert_page` 를 `upsert_record` 로**
 
 `agent_console/wiki.py:287-290` 의 아래 블록을
 
@@ -506,12 +513,12 @@ def upsert_record(record: dict) -> dict:
     return _record_to_page(saved)
 ```
 
-- [ ] **Step 9: 테스트 통과 확인**
+- [x] **Step 9: 테스트 통과 확인**
 
 Run: `./.venv/bin/pytest tests/test_shared_memory_atomic.py tests/test_wiki_storage_window.py -q`
 Expected: PASS (6 passed)
 
-- [ ] **Step 10: 커밋**
+- [x] **Step 10: 커밋**
 
 ```bash
 git add agent_console/shared_memory.py agent_console/wiki.py tests/test_shared_memory_atomic.py
@@ -530,7 +537,7 @@ git commit -m "fix) 공유 메모리 쓰기를 락·원자적 재작성으로 �
 - Consumes: `safe_io.file_write_lock`, `safe_io.atomic_write_text` (Task 1), `shared_memory.append_record` / `delete_record` (Task 3)
 - Produces: 없음
 
-- [ ] **Step 1: 실패하는 동시성 테스트 작성**
+- [x] **Step 1: 실패하는 동시성 테스트 작성**
 
 `tests/test_shared_memory_concurrency.py`:
 
@@ -630,12 +637,12 @@ def test_index_keeps_both_writer_schemas(tmp_path, monkeypatch):
     assert payload.get("count") == 1, "agent_memory 키가 사라짐"
 ```
 
-- [ ] **Step 2: 테스트 실패 확인**
+- [x] **Step 2: 테스트 실패 확인**
 
 Run: `./.venv/bin/pytest tests/test_shared_memory_concurrency.py -q`
 Expected: 첫 테스트가 `레코드 유실/중복` 으로 FAIL (락 없이 append 와 전체 재작성이 겹침). 둘째는 `agent_memory 키가 사라짐` 으로 FAIL.
 
-- [ ] **Step 3: `_write_text_atomic` 을 safe_io 로 위임**
+- [x] **Step 3: `_write_text_atomic` 을 safe_io 로 위임**
 
 `lib/agent_memory.py:87-91` 을 교체:
 
@@ -648,7 +655,7 @@ def _write_text_atomic(path: Path, text: str) -> None:
     safe_io.atomic_write_text(str(path), text)
 ```
 
-- [ ] **Step 4: `_append_event` 를 공유 락 안으로**
+- [x] **Step 4: `_append_event` 를 공유 락 안으로**
 
 `lib/agent_memory.py:414-427` 의 `_append_event` 본문을 교체:
 
@@ -673,17 +680,17 @@ def _append_event(payload: dict, now: datetime | None = None) -> None:
         logger.warning("이벤트 기록 실패(무시): %s", e)
 ```
 
-- [ ] **Step 5: 테스트 통과 확인**
+- [x] **Step 5: 테스트 통과 확인**
 
 Run: `./.venv/bin/pytest tests/test_shared_memory_concurrency.py -q`
 Expected: PASS (2 passed)
 
-- [ ] **Step 6: 기존 agent_memory 테스트 회귀 확인**
+- [x] **Step 6: 기존 agent_memory 테스트 회귀 확인**
 
 Run: `./.venv/bin/pytest tests/test_agent_memory.py -q`
 Expected: 전부 PASS (특히 `index.json["count"] == 3` 단언)
 
-- [ ] **Step 7: 커밋**
+- [x] **Step 7: 커밋**
 
 ```bash
 git add lib/agent_memory.py tests/test_shared_memory_concurrency.py
@@ -701,7 +708,7 @@ git commit -m "fix) lib/agent_memory 를 공유 쓰기 락에 편입하고 원�
 - Consumes: Task 1~4 전체
 - Produces: 없음
 
-- [ ] **Step 1: 변경 전 실패 목록 확보 (베이스라인)**
+- [x] **Step 1: 변경 전 실패 목록 확보 (베이스라인)**
 
 Run:
 ```bash
@@ -713,7 +720,7 @@ wc -l /tmp/before.txt
 ```
 Expected: 작업 시작 커밋(`d37388f`) 기준 실패 목록이 `/tmp/before.txt` 에 저장됨.
 
-- [ ] **Step 2: 현재 실패 목록과 대조**
+- [x] **Step 2: 현재 실패 목록과 대조**
 
 Run:
 ```bash
@@ -723,7 +730,7 @@ echo "--- 해결된 실패 ---"; comm -23 /tmp/before.txt /tmp/after.txt
 ```
 Expected: **신규 실패 0건**. 신규 실패가 있으면 멈추고 원인을 고친다.
 
-- [ ] **Step 3: 위키 실제 렌더 확인**
+- [x] **Step 3: 위키 실제 렌더 확인**
 
 Run:
 ```bash
@@ -740,7 +747,7 @@ for e in at.exception: print('EXC:', e.value)
 ```
 Expected: `exceptions: 0`
 
-- [ ] **Step 4: 문서 갱신**
+- [x] **Step 4: 문서 갱신**
 
 `docs/shared-agent-memory.md` 의 `index.json` 설명(18행)을 교체:
 
@@ -772,7 +779,7 @@ Expected: `exceptions: 0`
 현재 규모(수십~수백 건)에서는 무해하나, 레코드가 수천 건이 되면 디바운스가 필요하다.
 ```
 
-- [ ] **Step 5: 커밋**
+- [x] **Step 5: 커밋**
 
 ```bash
 git add docs/shared-agent-memory.md

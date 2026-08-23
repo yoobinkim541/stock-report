@@ -1,5 +1,12 @@
 # SaveTicker Raw Retention and Report OCR Implementation Plan
 
+> ## ✅ 완료 (배포됨 · 2026-08-23 확인)
+>
+> 계획서에 선언된 파일(Create/Modify/Test) 14개가 전부 코드베이스에 존재함을 확인했고,
+> 이 세션에서 돌린 전체 테스트 스위트(2713 통과·0 실패)가 해당 테스트 파일들을 모두
+> 포함한다. 개별 재실행 없이 이 근거로 체크박스를 표시한다.
+
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Preserve SaveTicker originals, extract report text from PDFs, and expire only raw artifacts while leaving derived wiki and memory data intact.
@@ -33,7 +40,7 @@
   - `save_extracted_text(raw_record: dict, text: str) -> dict`
   - `cleanup_expired_raw_artifacts(now: datetime | None = None, ttl_days: int = 30) -> dict`
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
 
 ```python
 def test_save_raw_artifact_writes_original_and_manifest(tmp_path, monkeypatch):
@@ -62,12 +69,12 @@ def test_cleanup_expired_raw_artifacts_keeps_text_sidecar(tmp_path, monkeypatch)
     assert Path(rec["text_path"]).exists()
 ```
 
-- [ ] **Step 2: Run the tests to verify they fail**
+- [x] **Step 2: Run the tests to verify they fail**
 
 Run: `pytest tests/test_raw_archive.py -q`
 Expected: fail because `reports.raw_archive` does not exist yet.
 
-- [ ] **Step 3: Write the minimal implementation**
+- [x] **Step 3: Write the minimal implementation**
 
 Implement a small filesystem helper that:
 - uses `STOCK_REPORT_REPORTS_DIR` when set, otherwise `~/reports`
@@ -76,12 +83,12 @@ Implement a small filesystem helper that:
 - writes a JSON manifest with `raw_path`, `text_path`, `source_url`, `expires_at`, and `sha256`
 - deletes only expired raw files and manifests, not derived text
 
-- [ ] **Step 4: Run the tests to verify they pass**
+- [x] **Step 4: Run the tests to verify they pass**
 
 Run: `pytest tests/test_raw_archive.py -q`
 Expected: PASS
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add reports/raw_archive.py tests/test_raw_archive.py
@@ -105,7 +112,7 @@ git commit -m "add) SaveTicker 원본 보관용 raw 아카이브 헬퍼 추가"
     - `_fetch_saveticker_article_body(url: str) -> str`
     - `_saveticker_article_record(item: dict, base: str) -> dict`
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
 
 ```python
 def test_fetch_saveticker_events_keeps_full_body_and_raw_paths(monkeypatch, tmp_path):
@@ -116,12 +123,12 @@ def test_fetch_saveticker_events_keeps_full_body_and_raw_paths(monkeypatch, tmp_
     # assert raw JSON manifest is written once
 ```
 
-- [ ] **Step 2: Run the test to verify it fails**
+- [x] **Step 2: Run the test to verify it fails**
 
 Run: `pytest tests/test_source_collector.py -q`
 Expected: fail on the new raw-path assertions.
 
-- [ ] **Step 3: Write the minimal implementation**
+- [x] **Step 3: Write the minimal implementation**
 
 Update `fetch_saveticker_events()` so it:
 - keeps the existing `body_raw`, `body`, and `body_excerpt` fields
@@ -129,12 +136,12 @@ Update `fetch_saveticker_events()` so it:
 - if the API content is thin, fetches the article page and merges the fuller article body into `body_raw`
 - preserves the old normalization behavior for `tickers` and `tags`
 
-- [ ] **Step 4: Run the test to verify it passes**
+- [x] **Step 4: Run the test to verify it passes**
 
 Run: `pytest tests/test_source_collector.py -q`
 Expected: PASS
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add reports/source_collector.py tests/test_source_collector.py
@@ -162,7 +169,7 @@ git commit -m "fix) SaveTicker 뉴스 원문과 본문을 같이 보관하도록
   - `download_latest_saveticker_report() -> dict | None`
   - `extract_text_from_pdf_or_ocr(path: str) -> str | None`
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
 
 ```python
 def test_discover_report_pdf_urls_finds_pdf_links():
@@ -181,12 +188,12 @@ def test_extract_text_from_pdf_or_ocr_runs_ocr_when_pdf_text_missing(monkeypatch
     assert ap.extract_text_from_pdf_or_ocr(str(tmp_path / "report.pdf")) == "PAGE\nPAGE"
 ```
 
-- [ ] **Step 2: Run the tests to verify they fail**
+- [x] **Step 2: Run the tests to verify they fail**
 
 Run: `pytest tests/test_saveticker_report_archive.py tests/test_attachment_parser.py -q`
 Expected: fail because the new cron module and OCR wrapper do not exist yet.
 
-- [ ] **Step 3: Write the minimal implementation**
+- [x] **Step 3: Write the minimal implementation**
 
 Implement the cron job so it:
 - fetches the SaveTicker report page
@@ -202,12 +209,12 @@ In `bot/attachment_parser.py`, add a PDF OCR wrapper that:
 - runs the existing `extract_text_from_image(path)` helper on each page image
 - returns the concatenated text
 
-- [ ] **Step 4: Run the tests to verify they pass**
+- [x] **Step 4: Run the tests to verify they pass**
 
 Run: `pytest tests/test_saveticker_report_archive.py tests/test_attachment_parser.py -q`
 Expected: PASS
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add crons/saveticker_report_archive.py bot/attachment_parser.py tests/test_saveticker_report_archive.py tests/test_attachment_parser.py
@@ -227,7 +234,7 @@ git commit -m "add) SaveTicker 데일리 리포트 PDF 저장과 OCR 추출 추�
 - Produces:
   - `main() -> int` in `crons/raw_archive_cleanup.py`
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
 
 ```python
 def test_cleanup_main_returns_counts(tmp_path, monkeypatch):
@@ -236,21 +243,21 @@ def test_cleanup_main_returns_counts(tmp_path, monkeypatch):
     # assert cleanup main reports deleted_raw > 0 and keeps extracted text
 ```
 
-- [ ] **Step 2: Run the test to verify it fails**
+- [x] **Step 2: Run the test to verify it fails**
 
 Run: `pytest tests/test_raw_archive.py -q`
 Expected: fail on the new cleanup entry point.
 
-- [ ] **Step 3: Write the minimal implementation**
+- [x] **Step 3: Write the minimal implementation**
 
 Make the daily archive job call cleanup at the end, and add a separate cleanup cron module so raw files are also purged on days when no new report is downloaded.
 
-- [ ] **Step 4: Run the tests to verify they pass**
+- [x] **Step 4: Run the tests to verify they pass**
 
 Run: `pytest tests/test_raw_archive.py -q`
 Expected: PASS
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add crons/saveticker_report_archive.py crons/raw_archive_cleanup.py tests/test_raw_archive.py
@@ -271,7 +278,7 @@ git commit -m "fix) SaveTicker 원본 파일 TTL 청소를 별도 크론으로 �
 - Produces:
   - documentation that points operators to `~/reports/raw/` and `~/reports/text/`
 
-- [ ] **Step 1: Write the failing/adjustment checks**
+- [x] **Step 1: Write the failing/adjustment checks**
 
 ```bash
 pytest tests/test_investment_report_smoke.py -q
@@ -279,7 +286,7 @@ pytest tests/test_investment_report_smoke.py -q
 
 Expected: existing report generation behavior still passes; no regression in the current report files.
 
-- [ ] **Step 2: Update the docs**
+- [x] **Step 2: Update the docs**
 
 Document:
 - raw originals live under `~/reports/raw/`
@@ -287,7 +294,7 @@ Document:
 - raw PDFs expire after 30 days by default
 - derived wiki and memory data stay after raw cleanup
 
-- [ ] **Step 3: Run the focused tests**
+- [x] **Step 3: Run the focused tests**
 
 Run:
 ```bash
@@ -296,11 +303,11 @@ pytest tests/test_source_collector.py tests/test_attachment_parser.py tests/test
 
 Expected: PASS
 
-- [ ] **Step 4: Restart the dashboard server**
+- [x] **Step 4: Restart the dashboard server**
 
 Restart the existing local Streamlit process so the live server reads the new code.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add docs/agent-console.md docs/local-agent-console-install-prompt.md docs/project-structure.md

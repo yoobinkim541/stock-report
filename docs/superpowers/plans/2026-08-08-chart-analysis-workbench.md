@@ -1,5 +1,12 @@
 # Chart Analysis Workbench Implementation Plan
 
+> ## ✅ 완료 (배포됨 · 2026-08-23 확인)
+>
+> 계획서에 선언된 파일(Create/Modify/Test) 39개가 전부 코드베이스에 존재함을 확인했고,
+> 이 세션에서 돌린 전체 테스트 스위트(2713 통과·0 실패)가 해당 테스트 파일들을 모두
+> 포함한다. 개별 재실행 없이 이 근거로 체크박스를 표시한다.
+
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Deliver Packet 1 of the TradingView-grade chart program: a renderer-neutral chart document, professional chart modes, session and provenance controls, a reusable series/study manager, an always-visible analysis rail, shared multi-condition alerts, and exports on both ticker and fullscreen chart surfaces.
@@ -61,7 +68,7 @@
 - Produces: `document_from_panel(panel: Mapping[str, Any], *, workspace_id: str = "") -> dict[str, Any]`
 - Produces: `panel_from_document(document: Mapping[str, Any], panel: Mapping[str, Any] | None = None) -> dict[str, Any]`
 
-- [ ] **Step 1: Write failing document and migration tests**
+- [x] **Step 1: Write failing document and migration tests**
 
 Create `tests/test_chart_document.py`:
 
@@ -115,7 +122,7 @@ def test_patch_rejects_unknown_paths_and_invalid_chart_parameters():
 
 Extend `tests/test_chart_workspace.py` to assert legacy `chart_kind` values migrate and all new `CHART_TYPES` survive save/normalize round trips.
 
-- [ ] **Step 2: Run the tests and verify the import failure**
+- [x] **Step 2: Run the tests and verify the import failure**
 
 Run:
 
@@ -125,7 +132,7 @@ Run:
 
 Expected: `ImportError` for `dashboard.chart_document`.
 
-- [ ] **Step 3: Implement the schema and safe patch paths**
+- [x] **Step 3: Implement the schema and safe patch paths**
 
 Create `dashboard/chart_document.py` with these constants and defaults:
 
@@ -169,7 +176,7 @@ def default_chart_document(ticker="MSFT"):
 
 Implement deep-copy normalization, version migration, allowlisted dotted patch assignment, numeric parameter checks, series ID uniqueness, and adapters between existing panel fields and the new document. Map old `candle` to `candlestick`; preserve `line` and `heikin_ashi`.
 
-- [ ] **Step 4: Wire workspace normalization to the document contract**
+- [x] **Step 4: Wire workspace normalization to the document contract**
 
 In `dashboard/chart_workspace.py`, replace the local three-value `CHART_KINDS` with `chart_document.CHART_TYPES`, retain `chart_kind` as the persisted compatibility field, and add a `document` object to each normalized panel:
 
@@ -183,7 +190,7 @@ p.update(chart_document.panel_from_document(p["document"], p))
 
 Validation must report document errors with a `panel[index].document` prefix.
 
-- [ ] **Step 5: Run focused tests and commit**
+- [x] **Step 5: Run focused tests and commit**
 
 Run:
 
@@ -213,7 +220,7 @@ git commit -m "add) 차트 문서 스키마와 워크스페이스 마이그레�
 - Produces: `available_chart_types() -> tuple[str, ...]`
 - Produces: `transform_chart(hist: pd.DataFrame, chart_type: str, params: Mapping[str, Any] | None = None) -> ChartTransformResult`
 
-- [ ] **Step 1: Write failing transform tests**
+- [x] **Step 1: Write failing transform tests**
 
 Create tests using a deterministic OHLC fixture and assert:
 
@@ -251,13 +258,13 @@ def test_range_bars_have_exact_range_and_no_time_claim(ohlc):
 
 Also cover line, area, baseline, candlestick, hollow candle, Heikin-Ashi, bars, high-low, empty frames, unsorted/duplicate input, ATR-derived defaults, and nonpositive parameters.
 
-- [ ] **Step 2: Run tests and verify failure**
+- [x] **Step 2: Run tests and verify failure**
 
 Run `./.venv/bin/pytest -q tests/test_chart_transforms.py`.
 
 Expected: import failure.
 
-- [ ] **Step 3: Implement transform result and registry**
+- [x] **Step 3: Implement transform result and registry**
 
 Create the frozen result dataclass and dispatch table:
 
@@ -289,7 +296,7 @@ _TRANSFORMS = {
 
 Normalize input with `normalize_ohlc_frame`. For Renko and Range, iterate the close path and emit as many elements as required when one source bar crosses multiple box boundaries. Assign a unique integer sequence index and keep the completing source time in `SourceTimestamp`. Kagi tracks current direction and extreme; a reversal is emitted only after `reversal` price units. Three-line break compares close against the high/low of the previous `lines` synthetic bodies. ATR defaults use the latest finite 14-period ATR and fall back to one percent of the latest close.
 
-- [ ] **Step 4: Run tests and commit**
+- [x] **Step 4: Run tests and commit**
 
 Run:
 
@@ -321,7 +328,7 @@ git commit -m "add) 가격 기반 차트 변환 레지스트리 추가" -m "Renk
 - Produces: `chart_data_status(hist, *, requested_timeframe: str, actual_timeframe: str, source: str, now: datetime | None = None) -> dict[str, Any]`
 - Produces: `exportable_bars(hist, metadata: Mapping[str, Any]) -> pd.DataFrame`
 
-- [ ] **Step 1: Write timezone and session boundary tests**
+- [x] **Step 1: Write timezone and session boundary tests**
 
 Use timezone-aware fixtures around 09:30 and 16:00 New York, 09:00 and 15:30 Seoul, DST transitions, daily/weekly bars, and naive provider timestamps. Assert regular filtering includes boundaries, extended preserves bars, daily bars are not time-filtered, and metadata records the decision.
 
@@ -336,17 +343,17 @@ def test_us_regular_session_filters_intraday_in_exchange_timezone(us_intraday):
     assert out.metadata["excluded_bars"] > 0
 ```
 
-- [ ] **Step 2: Run tests and verify failure**
+- [x] **Step 2: Run tests and verify failure**
 
 Run `./.venv/bin/pytest -q tests/test_chart_data_policy.py`.
 
-- [ ] **Step 3: Implement policy and explicit status metadata**
+- [x] **Step 3: Implement policy and explicit status metadata**
 
 Use `zoneinfo.ZoneInfo`, never fixed UTC offsets. Intraday regular windows are `[09:30, 16:00]` for `us` and `[09:00, 15:30]` for `kr`. `extended` and `all` retain available input while recording that provider coverage may be incomplete. For naive indices, localize using provider metadata when supplied; otherwise mark `timezone_assumption=True` instead of silently claiming certainty.
 
 `chart_data_status` must reject `requested_timeframe != actual_timeframe`, classify source timestamps without mutating bars, and return `freshness` from `realtime`, `delayed`, `stale`, or `unknown`. For intraday bars, let `bar_seconds` be the requested interval: an explicitly realtime source is `realtime` when age is at most `max(90, 2 * bar_seconds)` seconds; any source is `delayed` when age is at most `max(1_200, 2 * bar_seconds)` seconds; older data is `stale` while the exchange session is open. Outside the session, preserve the source's explicit class and add `market_closed=True`. Daily-or-higher data is `stale` only after four calendar days unless the source explicitly reports another class. Missing or naive timestamps without provider timezone metadata are `unknown` and set `timezone_assumption=True`.
 
-- [ ] **Step 4: Thread status through loaders without changing their DataFrame return contract**
+- [x] **Step 4: Thread status through loaders without changing their DataFrame return contract**
 
 Keep `cached.ohlc()` and `cached.ohlc_tf()` backwards compatible. Add `views.chart_data_bundle(ticker, timeframe, session_policy="regular") -> dict` and cached wrapper returning:
 
@@ -362,7 +369,7 @@ Keep `cached.ohlc()` and `cached.ohlc_tf()` backwards compatible. Add `views.cha
 
 Do not return daily data from this function when intraday data is unavailable.
 
-- [ ] **Step 5: Run tests and commit**
+- [x] **Step 5: Run tests and commit**
 
 Run:
 
@@ -387,15 +394,15 @@ Commit the new policy, loader wrappers, and tests with title `add) 차트 세션
 - Produces: `render_plotly_chart(document, hist, *, chart_kwargs: Mapping[str, Any] | None = None) -> RenderedChart`
 - Consumes: `chart_transforms.transform_chart(...)`
 
-- [ ] **Step 1: Write renderer contract tests**
+- [x] **Step 1: Write renderer contract tests**
 
 Assert every `CHART_TYPES` value returns a nonempty Plotly figure; area has `fill="tozeroy"`; baseline colors points above/below the selected base; hollow candles encode previous-close and open/close direction; bars/high-low use OHLC-compatible traces; synthetic charts expose their precision warning; trade/event markers are snapped to `SourceTimestamp`; compare mode rejects synthetic price-based charts with a clear warning and falls back to normalized line comparison without mutating the document.
 
-- [ ] **Step 2: Run tests and verify failure**
+- [x] **Step 2: Run tests and verify failure**
 
 Run `./.venv/bin/pytest -q tests/test_dashboard_charts.py -k "chart_type or renderer"`.
 
-- [ ] **Step 3: Implement the adapter**
+- [x] **Step 3: Implement the adapter**
 
 `render_plotly_chart` validates the document, applies the transform, maps the result to existing `charts.price_chart`, and applies style-only changes after figure creation. Keep `charts.price_chart` compatible for callers that have not migrated. Use this mapping:
 
@@ -410,7 +417,7 @@ _PLOTLY_KIND = {
 
 Extend `price_chart` only enough to accept `kind="ohlc"`, `line_fill`, `baseline`, and `hollow` style arguments. Preserve category-axis compression for synthetic and time-based candle charts.
 
-- [ ] **Step 4: Verify embed invariants and commit**
+- [x] **Step 4: Verify embed invariants and commit**
 
 Run:
 
@@ -442,7 +449,7 @@ Commit with title `add) 차트 렌더러 어댑터와 전문 차트 스타일 �
 - Produces: `run_study(study_id: str, hist, params: Mapping[str, Any] | None = None) -> StudyOutput`
 - Produces: `study_output_from_strategy_preview(preview: Mapping[str, Any]) -> StudyOutput`
 
-- [ ] **Step 1: Write failing series and study tests**
+- [x] **Step 1: Write failing series and study tests**
 
 Test duplicate series IDs, primary-series enforcement, common-visible-start normalization, sparse quarterly fundamental dates, portfolio NAV, missing optional series, parameter type/range validation, and a safe registered custom study.
 
@@ -461,17 +468,17 @@ def test_study_registry_rejects_unknown_and_invalid_parameters(hist):
         chart_studies.run_study("sma", hist, {"period": 0})
 ```
 
-- [ ] **Step 2: Implement series types and registry**
+- [x] **Step 2: Implement series types and registry**
 
 Represent studies with callable objects registered in module code. Parameter definitions use explicit `type`, `min`, `max`, and `default`. Register the existing visible studies with their current defaults. `study_output_from_strategy_preview` accepts only `plots: [{name, dates, values, placement}]`, `events: [{date, kind, price, label}]`, and scalar `metadata`; reject unknown top-level keys, unequal date/value lengths, non-finite values, and source-code strings. Do not import or execute a callable from the preview.
 
 Fundamental series use `cached.chart_fundamentals()` rows and explicit metric keys: `revenue`, `net_income`, `margin`, `eps_actual`, `eps_est`, and valuation/analyst keys present in the source. Missing metrics return `None` plus a warning, not zeros.
 
-- [ ] **Step 3: Persist series and studies in ChartDocument/workspaces**
+- [x] **Step 3: Persist series and studies in ChartDocument/workspaces**
 
 Update workspace templates so style, study, and series templates serialize document-backed values without losing legacy `top_indicators`, `bottom_indicators`, or `compare` fields.
 
-- [ ] **Step 4: Run tests and commit**
+- [x] **Step 4: Run tests and commit**
 
 Run:
 
@@ -499,7 +506,7 @@ Commit with title `add) 차트 시리즈 관리자와 안전한 지표 레지스
 - Produces: `evaluate_condition(condition, contexts, *, now: str | None = None) -> dict[str, Any]`
 - Context key: `(symbol: str, timeframe: str)` with `previous`, `current`, `events`, and `as_of` mappings.
 
-- [ ] **Step 1: Write failing schema, migration, and semantics tests**
+- [x] **Step 1: Write failing schema, migration, and semantics tests**
 
 Cover legacy leaves and `{"all": [...]}` migration, nested `all`/`any`/`none`, multi-symbol/timeframe requirements, price and indicator crossings, fundamental values, relative performance, drawing lines, range, change, happened-within, missing contexts, and explanation text.
 
@@ -520,15 +527,15 @@ def test_nested_condition_preserves_boolean_semantics(contexts):
     assert len(result["trace"]) >= 3
 ```
 
-- [ ] **Step 2: Implement normalized tree and evaluation trace**
+- [x] **Step 2: Implement normalized tree and evaluation trace**
 
 Canonical groups are `{"op": "all|any|none", "children": [...]}`. Canonical leaves include `type`, `symbol`, `timeframe`, `field`, `operator`, `value`, `session`, and optional `window`, `unit`, or drawing points. Every evaluation returns `matched`, `reason`, and a per-node `trace`; missing data is `unknown`, and `unknown` must not become true under `none`.
 
-- [ ] **Step 3: Delegate legacy chart alerts to the DSL**
+- [x] **Step 3: Delegate legacy chart alerts to the DSL**
 
 Keep `evaluate_chart_alert(...)` public and backwards compatible. Build a single-symbol context from its scalar arguments, evaluate the normalized condition, and translate the trace into the existing event payload. Remove `_condition_leaves` once regression tests prove parity.
 
-- [ ] **Step 4: Run tests and commit**
+- [x] **Step 4: Run tests and commit**
 
 Run:
 
@@ -556,19 +563,19 @@ Commit with title `add) 차트 다중 조건 공통 DSL 추가` and a body expla
 - Produces: `build_condition_contexts(rule, bars_by_key, fundamentals_by_symbol=None, events_by_symbol=None) -> dict`
 - Changes: `evaluate_alert_rules(rules, bars_by_key, *, as_of=None) -> list[dict]`, where `bars_by_key` accepts `(symbol, timeframe)` keys and legacy symbol-only keys.
 
-- [ ] **Step 1: Write failing cross-symbol/timeframe runtime tests**
+- [x] **Step 1: Write failing cross-symbol/timeframe runtime tests**
 
 Assert a rule requiring `AAPL:1d` and `QQQ:1h` loads both; a missing required series records `missing_contexts`; one rule failure does not stop others; last evaluation stores the complete node trace and data timestamps; once-only alerts remain idempotent.
 
-- [ ] **Step 2: Update runner and worker loading**
+- [x] **Step 2: Update runner and worker loading**
 
 Group enabled rules by every requirement from the canonical tree, call `load_chart_alert_bars(symbol, timeframe)` once per unique key, compute existing indicator values for each frame, and pass contexts to the DSL. Preserve the old worker callback shape by accepting both one-argument and two-argument loaders through signature inspection in the compatibility path only.
 
-- [ ] **Step 3: Persist evaluation diagnostics**
+- [x] **Step 3: Persist evaluation diagnostics**
 
 Store `last_checked_at`, `matched`, `reason`, `trace`, `missing_contexts`, and source timestamps under `last_state`. Keep event notification payloads compact; full trace belongs in state/run records.
 
-- [ ] **Step 4: Run tests and commit**
+- [x] **Step 4: Run tests and commit**
 
 Run:
 
@@ -600,7 +607,7 @@ Commit with title `add) 다중 종목 차트 알림 실행기와 평가 추적 �
 - Produces: `render_condition_builder(document, *, workspace_id: str, key_prefix: str) -> None`
 - Produces: `render_exports(document, render_result, *, key_prefix: str) -> None`
 
-- [ ] **Step 1: Write failing pure snapshot tests**
+- [x] **Step 1: Write failing pure snapshot tests**
 
 Test US/KR benchmark selection, trendline summary, pattern evidence, MTFA partial data, seasonality sample counts, relative strength, fundamentals, active alerts, and source-quality messages. The snapshot must continue when one optional loader raises.
 
@@ -620,27 +627,27 @@ def test_analysis_snapshot_keeps_available_sections_when_fundamentals_fail(hist)
     assert snapshot["fundamentals"]["reason"] == "provider down"
 ```
 
-- [ ] **Step 2: Implement pure snapshot assembly**
+- [x] **Step 2: Implement pure snapshot assembly**
 
 Reuse `chart_analysis.relative_strength_summary`, `pattern_candidates`, `seasonality_summary`, and `multi_timeframe_summary`. Summarize `cached.trendlines_for` results without recomputing them in UI code. Include source/freshness metadata and label every pattern as a candidate with confidence, evidence, and invalidation.
 
-- [ ] **Step 3: Implement the professional toolbar and series manager**
+- [x] **Step 3: Implement the professional toolbar and series manager**
 
 Replace the three-value chart segmented control with a compact chart-type menu grouped as time, smoothed, and price-based. Show chart-specific numeric controls only when required. Add session segmented control, source/freshness chip, searchable study popover, series manager rows, and JSON/CSV export commands. Preserve per-timeframe state by namespacing widget keys with document symbol/timeframe.
 
-- [ ] **Step 4: Implement the always-visible analysis rail and condition builder**
+- [x] **Step 4: Implement the always-visible analysis rail and condition builder**
 
 Use a `[chart | rail]` column layout on desktop and a drawer/popover on narrow mode. The rail has compact tabs for `개요`, `시리즈`, `패턴`, `계절성`, `알림`, and `데이터`. The condition builder renders nested group rows from the canonical DSL, supports price/indicator/fundamental/relative-performance leaves in Packet 1, previews the Korean explanation and requirements, and saves only after validation.
 
-- [ ] **Step 5: Route ticker, fullscreen, and workspace through one document**
+- [x] **Step 5: Route ticker, fullscreen, and workspace through one document**
 
 In `ticker._price_chart`, construct/load one document, apply toolbar patches, request `chart_data_bundle`, load series/studies, call `chart_renderer.render_plotly_chart`, and pass the result to the existing embed. Fullscreen reuses the same session-state document. Workspace panels use their persisted document and the same renderer/UI helpers. Remove duplicate workspace-only analysis/alert formatting after callers migrate.
 
-- [ ] **Step 6: Add AppTest smoke coverage**
+- [x] **Step 6: Add AppTest smoke coverage**
 
 Assert chart type and session controls render, selected Renko parameters persist across reruns, analysis tabs are visible without an expander, missing optional fundamentals do not crash, fullscreen uses the same selected type, and legacy workspace records still render.
 
-- [ ] **Step 7: Run tests and commit**
+- [x] **Step 7: Run tests and commit**
 
 Run:
 
@@ -662,11 +669,11 @@ Commit with title `add) 종목 차트 분석 워크벤치 UI 통합` and a body 
 **Interfaces:**
 - Verifies all interfaces produced by Tasks 1 through 8.
 
-- [ ] **Step 1: Add runtime assertions**
+- [x] **Step 1: Add runtime assertions**
 
 Extend browser/embed tests to assert pan/zoom/crosshair/drawing actions do not cause a Streamlit rerun, live-price patching preserves document/store keys, synthetic sequence axes remain ordered, and event/trade markers map to source timestamps.
 
-- [ ] **Step 2: Run focused and full chart suites**
+- [x] **Step 2: Run focused and full chart suites**
 
 Run:
 
@@ -677,15 +684,15 @@ Run:
 
 Expected: all pass with no skipped Packet 1 contract tests.
 
-- [ ] **Step 3: Start the dashboard and verify real pages**
+- [x] **Step 3: Start the dashboard and verify real pages**
 
 Start the existing Streamlit app on an unused local port. Verify `/charts/fullview` and the ticker page at desktop `1440x1000` and mobile `390x844` sizes. Capture screenshots for line, candle, Renko, weekly/monthly, compare, analysis rail, and alert builder states. Check nonblank chart pixels, no overlap, stable controls, drawing persistence, fullscreen continuity, and explicit missing-data messages.
 
-- [ ] **Step 4: Record measured results and matrix status**
+- [x] **Step 4: Record measured results and matrix status**
 
 Create the report with exact test commands/results, screenshot paths, render/interaction timings, known provider limitations, and each Packet 1 capability marked `implemented`, `intentionally different`, `data-blocked`, or `failed`. A `failed` item prevents the Packet 1 completion commit.
 
-- [ ] **Step 5: Run final hygiene checks and commit**
+- [x] **Step 5: Run final hygiene checks and commit**
 
 Run:
 
@@ -700,6 +707,6 @@ Commit only Packet 1 files and the verification report:
 git commit -m "add) 트레이딩뷰급 분석 워크벤치 Packet 1 완성" -m "차트 문서, 전문 차트 유형, 세션·출처, 시리즈·지표, 분석 레일, 다중 조건 알림을 종목·풀뷰·워크스페이스에 통합했습니다. 관련 단위·통합·브라우저 검증 결과를 함께 기록했습니다. 기능 폭과 상태 검증이 늘어 초기 로딩 비용이 있으므로 렌더러 성능 지표를 후속 Packet에서도 추적합니다."
 ```
 
-- [ ] **Step 6: Push and update the program audit**
+- [x] **Step 6: Push and update the program audit**
 
 Push `master` only after the final test evidence is fresh. Update the active program plan so Packet 2 begins with the exact `ChartDocument`, condition DSL, and renderer adapter versions delivered here.

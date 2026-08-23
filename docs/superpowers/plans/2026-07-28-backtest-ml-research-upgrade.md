@@ -1,5 +1,12 @@
 # Backtest ML Research Upgrade Implementation Plan
 
+> ## ✅ 완료 (배포됨 · 2026-08-23 확인)
+>
+> 계획서에 선언된 파일(Create/Modify/Test) 6개가 전부 코드베이스에 존재함을 확인했고,
+> 이 세션에서 돌린 전체 테스트 스위트(2713 통과·0 실패)가 해당 테스트 파일들을 모두
+> 포함한다. 개별 재실행 없이 이 근거로 체크박스를 표시한다.
+
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Build the first production-ready slice of the quant reference upgrade: event-driven backtest primitives, lifecycle-aware intraday labels, and a common validation gate.
@@ -28,7 +35,7 @@
 - Produces: `Order`, `Fill`, `PortfolioState`, `BacktestSummary`
 - Produces: `simulate_orders(prices: pandas.DataFrame, orders: list[Order], *, initial_cash: float, market: str = "US", fill_mode: str = "next_open") -> BacktestSummary`
 
-- [ ] **Step 1: Write failing tests**
+- [x] **Step 1: Write failing tests**
 
 ```python
 def test_simulate_orders_fills_on_next_open_and_applies_costs():
@@ -42,19 +49,19 @@ def test_simulate_orders_fills_on_next_open_and_applies_costs():
     assert summary.cost_paid > 0
 ```
 
-- [ ] **Step 2: Run test and verify missing module/function failure**
+- [x] **Step 2: Run test and verify missing module/function failure**
 
 Run: `.venv/bin/python -m pytest tests/test_event_backtest.py -q`
 
-- [ ] **Step 3: Implement minimal event backtester**
+- [x] **Step 3: Implement minimal event backtester**
 
 Use dataclasses. For `next_open`, find the first row strictly after `order.ts` and fill at `Open`. Apply `ml.adaptive.costs.order_cost(abs(notional), side, market)`. Maintain cash, integer shares, NAV curve, total turnover, fills.
 
-- [ ] **Step 4: Add conservative same-bar rejection test**
+- [x] **Step 4: Add conservative same-bar rejection test**
 
 Orders at the final bar should be rejected with no fill because there is no next bar.
 
-- [ ] **Step 5: Run tests**
+- [x] **Step 5: Run tests**
 
 Run: `.venv/bin/python -m pytest tests/test_event_backtest.py -q`
 
@@ -70,7 +77,7 @@ Run: `.venv/bin/python -m pytest tests/test_event_backtest.py -q`
 - Produces: `LifecycleOutcomeLabel`
 - Produces: `label_lifecycle_decision(decision: DecisionSnapshot, prices: list[dict], *, cfg: dict | None = None) -> LifecycleOutcomeLabel`
 
-- [ ] **Step 1: Write failing lifecycle label tests**
+- [x] **Step 1: Write failing lifecycle label tests**
 
 ```python
 def test_label_lifecycle_decision_records_partial_target_then_full_target():
@@ -81,19 +88,19 @@ def test_label_lifecycle_decision_records_partial_target_then_full_target():
     assert label.quality_label == "good"
 ```
 
-- [ ] **Step 2: Run test and verify missing function failure**
+- [x] **Step 2: Run test and verify missing function failure**
 
 Run: `.venv/bin/python -m pytest tests/test_intraday_experiment.py -q`
 
-- [ ] **Step 3: Implement lifecycle labeler**
+- [x] **Step 3: Implement lifecycle labeler**
 
 Reuse `ml.intraday_lifecycle.initialize_lifecycle`, `evaluate_exit_plan`, and `apply_filled_leg`. Convert price rows into bars with `h/l/c`, compute net R from filled legs, and return pending when entry price or path bars are missing.
 
-- [ ] **Step 4: Add stop-first regression test**
+- [x] **Step 4: Add stop-first regression test**
 
 If a bar hits full stop and full target together, `full_stop_hit` must be true and `quality_label == "bad"`.
 
-- [ ] **Step 5: Run tests**
+- [x] **Step 5: Run tests**
 
 Run: `.venv/bin/python -m pytest tests/test_intraday_experiment.py tests/test_intraday_lifecycle.py -q`
 
@@ -108,26 +115,26 @@ Run: `.venv/bin/python -m pytest tests/test_intraday_experiment.py tests/test_in
 **Interfaces:**
 - Produces: `strategy_gate(returns, benchmark_returns=None, *, n_trials: int = 1, min_samples: int = 60) -> dict`
 
-- [ ] **Step 1: Write failing gate tests**
+- [x] **Step 1: Write failing gate tests**
 
 ```python
 def test_strategy_gate_rejects_small_samples():
     assert strategy_gate([0.01] * 10)["verdict"] == "NO-GO"
 ```
 
-- [ ] **Step 2: Run test and verify missing module/function failure**
+- [x] **Step 2: Run test and verify missing module/function failure**
 
 Run: `.venv/bin/python -m pytest tests/test_strategy_gate.py -q`
 
-- [ ] **Step 3: Implement minimal gate**
+- [x] **Step 3: Implement minimal gate**
 
 Use `ml.validation.sharpe_ratio`, `deflated_sharpe_ratio`, and `ml.adaptive.reward.max_drawdown`. Return `GO` only when sample count passes, cumulative excess is positive, DSR is either unavailable for `n_trials <= 1` or at least 0.50, and strategy MDD is no worse than `1.1x` benchmark MDD if benchmark is provided.
 
-- [ ] **Step 4: Add benchmark drawdown regression test**
+- [x] **Step 4: Add benchmark drawdown regression test**
 
 A strategy that outperforms but has much worse drawdown should return `OBSERVE`, not `GO`.
 
-- [ ] **Step 5: Run tests**
+- [x] **Step 5: Run tests**
 
 Run: `.venv/bin/python -m pytest tests/test_strategy_gate.py -q`
 
@@ -138,14 +145,14 @@ Run: `.venv/bin/python -m pytest tests/test_strategy_gate.py -q`
 **Files:**
 - Test: affected test suite
 
-- [ ] **Step 1: Run focused tests**
+- [x] **Step 1: Run focused tests**
 
 Run: `.venv/bin/python -m pytest tests/test_event_backtest.py tests/test_intraday_experiment.py tests/test_strategy_gate.py tests/test_intraday_lifecycle.py -q`
 
-- [ ] **Step 2: Run full test suite**
+- [x] **Step 2: Run full test suite**
 
 Run: `.venv/bin/python -m pytest -q`
 
-- [ ] **Step 3: Report remaining trade-offs**
+- [x] **Step 3: Report remaining trade-offs**
 
 Document that this slice creates shared primitives and labels, while migration of all existing `backtest/*` scripts to the event engine remains a follow-up.

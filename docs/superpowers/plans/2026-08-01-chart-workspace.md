@@ -1,5 +1,12 @@
 # Chart Workspace Implementation Plan
 
+> ## ✅ 완료 (배포됨 · 2026-08-23 확인)
+>
+> 계획서에 선언된 파일(Create/Modify/Test) 10개가 전부 코드베이스에 존재함을 확인했고,
+> 이 세션에서 돌린 전체 테스트 스위트(2713 통과·0 실패)가 해당 테스트 파일들을 모두
+> 포함한다. 개별 재실행 없이 이 근거로 체크박스를 표시한다.
+
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Build a TradingView-grade chart workspace layer with saved layouts, templates, multi-chart fullview, AI patch previews, and deterministic analysis panels while preserving the current Plotly chart runtime.
@@ -34,7 +41,7 @@
 - Produces: `diff_workspaces(before: dict, after: dict) -> list[dict]`
 - Produces: `allowed_indicator_names() -> set[str]`
 
-- [ ] **Step 1: Write failing tests**
+- [x] **Step 1: Write failing tests**
 
 Add this to `tests/test_chart_workspace.py`:
 
@@ -76,7 +83,7 @@ def test_patch_rejects_unknown_indicator_and_panel():
         cw.apply_workspace_patch(ws, {"panels[5].ticker": "AAPL"})
 ```
 
-- [ ] **Step 2: Run tests to verify failure**
+- [x] **Step 2: Run tests to verify failure**
 
 Run:
 
@@ -86,7 +93,7 @@ Run:
 
 Expected: import failure because `dashboard.chart_workspace` does not exist.
 
-- [ ] **Step 3: Implement the pure model**
+- [x] **Step 3: Implement the pure model**
 
 Create `dashboard/chart_workspace.py` with:
 
@@ -302,7 +309,7 @@ def diff_workspaces(before: dict, after: dict) -> list[dict]:
     return rows
 ```
 
-- [ ] **Step 4: Run tests to verify pass**
+- [x] **Step 4: Run tests to verify pass**
 
 Run:
 
@@ -312,7 +319,7 @@ Run:
 
 Expected: all tests pass.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add dashboard/chart_workspace.py tests/test_chart_workspace.py
@@ -331,7 +338,7 @@ git commit -m "add) 차트 워크스페이스 모델 추가"
 - Consumes: `dashboard.chart_workspace.normalize_workspace`, `workspace_id`
 - Produces: `save_chart_workspace`, `save_chart_workspace_version`, `list_chart_workspaces`, `get_chart_workspace`, `list_chart_workspace_versions`, `save_chart_template`, `list_chart_templates`
 
-- [ ] **Step 1: Write failing storage tests**
+- [x] **Step 1: Write failing storage tests**
 
 Append:
 
@@ -366,7 +373,7 @@ def test_chart_template_storage_filters_kind(tmp_path, monkeypatch):
     assert [r["id"] for r in storage.list_chart_templates(kind="indicators")] == ["trend"]
 ```
 
-- [ ] **Step 2: Run tests to verify failure**
+- [x] **Step 2: Run tests to verify failure**
 
 Run:
 
@@ -376,7 +383,7 @@ Run:
 
 Expected: `AttributeError` for missing storage functions.
 
-- [ ] **Step 3: Add tables in `_init_db`**
+- [x] **Step 3: Add tables in `_init_db`**
 
 Add SQL near strategy studio tables:
 
@@ -413,7 +420,7 @@ CREATE TABLE IF NOT EXISTS chart_templates (
 );
 ```
 
-- [ ] **Step 4: Add row helpers and CRUD functions**
+- [x] **Step 4: Add row helpers and CRUD functions**
 
 Implementation pattern:
 
@@ -435,7 +442,7 @@ Use `dashboard.chart_workspace.normalize_workspace` before writing. `save_chart_
 
 Template rows should store normalized `id`, `kind`, `name`, and full template payload as JSON.
 
-- [ ] **Step 5: Run storage tests**
+- [x] **Step 5: Run storage tests**
 
 Run:
 
@@ -445,7 +452,7 @@ Run:
 
 Expected: all tests pass.
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 ```bash
 git add agent_console/storage.py tests/test_chart_workspace.py
@@ -469,7 +476,7 @@ git commit -m "add) 차트 워크스페이스 저장소 추가"
 - Produces: `views.chart_workspace_patch_preview(workspace: dict, prompt: str | None = None, patch: dict | None = None)`
 - Produces matching cached wrappers for read-only functions.
 
-- [ ] **Step 1: Write failing wrapper tests**
+- [x] **Step 1: Write failing wrapper tests**
 
 Append:
 
@@ -487,7 +494,7 @@ def test_dashboard_workspace_wrappers_forward_storage(monkeypatch):
     assert cached.chart_workspace_catalog()["workspaces"][0]["id"] == "w1"
 ```
 
-- [ ] **Step 2: Run test to verify failure**
+- [x] **Step 2: Run test to verify failure**
 
 Run:
 
@@ -497,7 +504,7 @@ Run:
 
 Expected: missing wrapper function failure.
 
-- [ ] **Step 3: Implement wrappers**
+- [x] **Step 3: Implement wrappers**
 
 Add to `dashboard/views.py`:
 
@@ -521,7 +528,7 @@ def chart_workspace_catalog():
     return views.chart_workspace_catalog()
 ```
 
-- [ ] **Step 4: Run tests**
+- [x] **Step 4: Run tests**
 
 Run:
 
@@ -531,7 +538,7 @@ Run:
 
 Expected: all tests pass.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add dashboard/views.py dashboard/cached.py tests/test_chart_workspace.py
@@ -552,7 +559,7 @@ git commit -m "add) 차트 워크스페이스 대시보드 래퍼 추가"
 - Consumes: `dashboard.pages.ticker._price_chart_frag`
 - Produces: `render_chart_workspace(workspace: dict | None = None, *, data_loader: callable | None = None) -> dict`
 
-- [ ] **Step 1: Write failing AppTest smoke**
+- [x] **Step 1: Write failing AppTest smoke**
 
 Create `tests/test_chart_workspace_pages.py`:
 
@@ -600,7 +607,7 @@ chart_workspace_ui.render_chart_workspace(workspace, render_charts=False)
     assert "QQQ" in body
 ```
 
-- [ ] **Step 2: Run test to verify failure**
+- [x] **Step 2: Run test to verify failure**
 
 Run:
 
@@ -610,7 +617,7 @@ Run:
 
 Expected: import failure for `dashboard.chart_workspace_ui`.
 
-- [ ] **Step 3: Implement renderer shell**
+- [x] **Step 3: Implement renderer shell**
 
 Create `dashboard/chart_workspace_ui.py`:
 
@@ -656,7 +663,7 @@ def render_chart_workspace(workspace=None, *, render_charts: bool = True) -> dic
 
 Update `dashboard/pages/chart_full.py` to call this renderer above the legacy single-chart fallback. Keep a session toggle `워크스페이스 모드` default `True`.
 
-- [ ] **Step 4: Run page test**
+- [x] **Step 4: Run page test**
 
 Run:
 
@@ -666,7 +673,7 @@ Run:
 
 Expected: pass.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add dashboard/chart_workspace_ui.py dashboard/pages/chart_full.py tests/test_chart_workspace_pages.py
@@ -686,7 +693,7 @@ git commit -m "add) 멀티차트 워크스페이스 화면 추가"
 **Interfaces:**
 - Produces: `propose_workspace_patch(prompt: str, workspace: dict) -> dict`
 
-- [ ] **Step 1: Add heuristic patch tests**
+- [x] **Step 1: Add heuristic patch tests**
 
 Append:
 
@@ -699,7 +706,7 @@ def test_workspace_ai_patch_heuristic_handles_intraday_vwap():
     assert "VWAP(세션)" in proposal["patch"]["panels[0].top_indicators"]
 ```
 
-- [ ] **Step 2: Run test to verify failure**
+- [x] **Step 2: Run test to verify failure**
 
 Run:
 
@@ -709,7 +716,7 @@ Run:
 
 Expected: missing `propose_workspace_patch`.
 
-- [ ] **Step 3: Implement heuristic patcher**
+- [x] **Step 3: Implement heuristic patcher**
 
 Add:
 
@@ -742,7 +749,7 @@ def propose_workspace_patch(prompt: str, workspace: dict) -> dict:
     return {"ok": True, "summary": "차트 요청을 워크스페이스 패치로 변환했습니다.", "patch": patch, "after": after, "diff": diff_workspaces(ws, after), "warnings": []}
 ```
 
-- [ ] **Step 4: Add UI preview/apply**
+- [x] **Step 4: Add UI preview/apply**
 
 In `dashboard/chart_workspace_ui.py`, add a popover:
 
@@ -760,7 +767,7 @@ with st.popover("AI"):
             st.rerun()
 ```
 
-- [ ] **Step 5: Run tests**
+- [x] **Step 5: Run tests**
 
 Run:
 
@@ -770,7 +777,7 @@ Run:
 
 Expected: all tests pass.
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 ```bash
 git add dashboard/chart_workspace.py dashboard/chart_workspace_ui.py tests/test_chart_workspace.py tests/test_chart_workspace_pages.py
@@ -792,7 +799,7 @@ git commit -m "add) AI 차트 워크스페이스 패치 UI 추가"
 - Produces: `seasonality_summary(hist) -> dict`
 - Produces: `relative_strength_summary(hist, benchmark) -> dict`
 
-- [ ] **Step 1: Write failing analysis tests**
+- [x] **Step 1: Write failing analysis tests**
 
 Create `tests/test_chart_analysis.py`:
 
@@ -841,7 +848,7 @@ def test_pattern_candidates_handles_short_data():
     assert ca.pattern_candidates(_hist(20)) == []
 ```
 
-- [ ] **Step 2: Run test to verify failure**
+- [x] **Step 2: Run test to verify failure**
 
 Run:
 
@@ -851,7 +858,7 @@ Run:
 
 Expected: import failure.
 
-- [ ] **Step 3: Implement analysis helpers**
+- [x] **Step 3: Implement analysis helpers**
 
 Create `dashboard/chart_analysis.py` with deterministic pandas/numpy functions:
 - `seasonality_summary`: monthly close-to-close returns grouped by calendar month
@@ -861,7 +868,7 @@ Create `dashboard/chart_analysis.py` with deterministic pandas/numpy functions:
 
 Use no network calls inside these helpers.
 
-- [ ] **Step 4: Render analysis rail**
+- [x] **Step 4: Render analysis rail**
 
 In `dashboard/chart_workspace_ui.py`, add a right rail under the AI patch popover:
 
@@ -877,7 +884,7 @@ if hist is not None and bench is not None:
 
 For production polish, convert `st.json` to compact markdown metrics after tests pass.
 
-- [ ] **Step 5: Run tests**
+- [x] **Step 5: Run tests**
 
 Run:
 
@@ -887,7 +894,7 @@ Run:
 
 Expected: all tests pass.
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 ```bash
 git add dashboard/chart_analysis.py dashboard/chart_workspace_ui.py tests/test_chart_analysis.py
@@ -901,7 +908,7 @@ git commit -m "add) 차트 워크스페이스 분석 레일 추가"
 **Files:**
 - Verify all touched files.
 
-- [ ] **Step 1: Run focused regression suite**
+- [x] **Step 1: Run focused regression suite**
 
 Run:
 
@@ -911,7 +918,7 @@ Run:
 
 Expected: all tests pass.
 
-- [ ] **Step 2: Run runtime embed tests if Node dependencies are available**
+- [x] **Step 2: Run runtime embed tests if Node dependencies are available**
 
 Run:
 
@@ -921,7 +928,7 @@ Run:
 
 Expected: pass or explicitly document missing local runtime dependencies.
 
-- [ ] **Step 3: Compile touched Python files**
+- [x] **Step 3: Compile touched Python files**
 
 Run:
 
@@ -931,7 +938,7 @@ Run:
 
 Expected: exit code 0.
 
-- [ ] **Step 4: Commit remaining files**
+- [x] **Step 4: Commit remaining files**
 
 If any implementation files remain uncommitted:
 
@@ -941,7 +948,7 @@ git add dashboard/chart_workspace.py dashboard/chart_workspace_ui.py dashboard/c
 git commit -m "add) 차트 워크스페이스 고도화 마무리"
 ```
 
-- [ ] **Step 5: Push branch**
+- [x] **Step 5: Push branch**
 
 Run:
 
