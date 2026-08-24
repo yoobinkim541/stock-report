@@ -89,6 +89,9 @@ flowchart TD
 - **일일 리포트 (크론 23:00 UTC = KST 08:00)** — `scripts/deliver_investment_report.sh` → `reports/investment_report` 가 `providers/market_data`(가격) · `reports/*`(펀더멘털·신호·매집·차트) · `ml/*`(랭킹)을 호출 → `~/reports/` 에 `.md/.json/.txt/.png` 산출 → `notify` 로 문서·이미지 발송.
 - **전략 판정 (봇 5분 주기 + 크론)** — `barbell_strategy.run()` → `market_data.fetch_qqq_data()`(**stale 서킷브레이커**) → `classify_market()`(히스테리시스 + 낙폭 앵커) → `calculate_dca()`(+ **leverage_dca_guard**: 변동성 캡·낙폭 정지) → `build_report()` → `notify`.
 
+**특정 기능이 어느 파일에 있는지 찾는다면** → [`docs/project-structure.md`](docs/project-structure.md)
+(폴더 지도 + 기능별 파일 인덱스 + 새 파일을 어디에 둘지 가이드).
+
 ---
 
 ## 🔧 엔지니어링 하이라이트
