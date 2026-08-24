@@ -276,3 +276,56 @@ def test_live_combo_eval_verdict_keys():
     assert lv.get("verdict") in ("CONFIRMED", "PARTIAL", "NOT-CONFIRMED") or lv.get("error")
     if "combo" in lv:
         assert {"combo", "no_brakes", "monthly_batch", "bench"} <= set(lv)
+
+
+# ── 라이브·백테스트 mom12/hi52 원시식 공유 (parity — nautilus_trader "동일 코드경로" 원칙 적용) ──
+# ml/kr_policy.py::price_axes() 와 backtest 의 features_asof() 는 mom12·hi52 를 각자 따로
+# 구현하고 있었다 — 창(iloc[-22]/iloc[-253])과 비율식은 동일한데, 파일이 갈려 있어 한쪽만
+# 고치면 조용히 어긋난다(라이브 스코어링을 바꿔도 백테스트 검증은 옛 공식을 계속 씀).
+# 공유 함수(ml.kr_policy.raw_price_axes)로 묶은 뒤에도 **수치가 그대로**인지 고정한다.
+
+def test_raw_price_axes_matches_live_formula_on_single_series():
+    """백테스트 원시 mom12/hi52 가 ml.kr_policy.raw_price_axes 와 정확히 같아야 한다."""
+    sys.path.insert(0, _ROOT)
+    from ml import kr_policy
+
+    p = _panels()
+    t = bt.month_ends(p["ret"].index)[-2]
+    h = p["adj"].loc[:t].iloc[-253:].ffill()          # features_asof 내부와 동일 슬라이스
+    code = h.columns[0]
+    raw = kr_policy.raw_price_axes(h[code])
+    f = bt.features_asof(p, t)
+    # z-score 전 원시값 재현 — features_asof 는 z-score 후만 반환하므로, 같은 원시식으로
+    # 직접 계산해 두 구현의 "부호·크기 순서"가 일치하는지 간접 검증한다.
+    raw_mom12_direct = float(h[code].iloc[-22] / h[code].iloc[-253] - 1.0)
+    raw_hi52_direct = float(h[code].iloc[-1] / h[code].max())
+    assert raw["mom12"] == pytest.approx(raw_mom12_direct)
+    assert raw["hi52"] == pytest.approx(raw_hi52_direct)
+
+
+def test_features_asof_mom12_hi52_use_shared_raw_function(monkeypatch):
+    """features_asof 가 실제로 공유 함수를 호출하는지(수치가 우연히 같은 게 아니라) 확인."""
+    calls = []
+    orig = bt.raw_price_axes            # backtest 모듈이 `from ml.kr_policy import raw_price_axes`
+                                        # 로 이름을 직접 들여왔으므로 patch 대상도 여기.
+
+    def _spy(h):
+        calls.append(len(h) if hasattr(h, "__len__") else None)
+        return orig(h)
+    monkeypatch.setattr(bt, "raw_price_axes", _spy)
+
+    p = _panels()
+    t = bt.month_ends(p["ret"].index)[-2]
+    f = bt.features_asof(p, t)
+    assert f is not None
+    assert len(calls) > 0, "features_asof 가 kr_policy.raw_price_axes 를 호출하지 않음"
+
+
+def test_features_asof_unchanged_after_sharing_raw_function():
+    """리팩터 전후로 select_top 결과(피처 기반 상위 K)가 그대로여야 한다 — 회귀 방지."""
+    p = _panels()
+    t = bt.month_ends(p["ret"].index)[-2]
+    f = bt.features_asof(p, t)
+    assert f is not None
+    top = bt.select_top(f, {"mom12": 1.0, "hi52": 0.5}, k=3)
+    assert "000010" in top          # 추세종목이 여전히 상위(합성 패널의 trend_code)

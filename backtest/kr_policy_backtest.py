@@ -54,6 +54,8 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import numpy as np
 import pandas as pd
 
+from ml.kr_policy import raw_price_axes   # mom12·hi52 원시식 — 라이브와 공유(감사 2026-08-24)
+
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 logger = logging.getLogger(__name__)
 
@@ -164,14 +166,15 @@ def features_asof(panels: dict, t: pd.Timestamp, universe_n: int = UNIVERSE_N) -
         return None
     h = adj.loc[:t, uni].iloc[-253:].ffill()
     px, px_21, px_252 = h.iloc[-1], h.iloc[-22], h.iloc[0]
+    raw = raw_price_axes(h)                              # mom12·hi52 원시식 — 라이브와 공유
     f = pd.DataFrame(index=uni)
-    f["mom12"] = (px_21 / px_252 - 1.0)
+    f["mom12"] = raw.get("mom12", px_21 / px_252 - 1.0)
     f["rev1"] = (px / px_21 - 1.0)
     f["vol_inv"] = -win[uni].iloc[-60:].std()
     amt60 = amount.loc[:t, uni].iloc[-60:].mean()
     f["liq"] = (amt60 / mc_row.reindex(uni)).replace([np.inf, -np.inf], np.nan)
     f["size"] = -np.log(mc_row.reindex(uni).astype(float))
-    f["hi52"] = (px / h.max())
+    f["hi52"] = raw.get("hi52", px / h.max())
     f = f.dropna(subset=["mom12", "rev1", "vol_inv"])
     if len(f) < TOP_K * 4:
         return None

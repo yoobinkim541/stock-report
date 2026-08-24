@@ -98,6 +98,27 @@ def extract_features(fund: dict | None, sig: dict | None, decision: dict | None)
             "conf": round(conf, 4), "mom": round(mom, 4)}
 
 
+def raw_price_axes(h) -> dict:
+    """mom12·hi52 원시값(정규화 전) — h 는 253행+ 종가(Series 또는 DataFrame, 최신이 끝).
+
+    live(price_axes, [0,1] 클램프해 정책 블렌드에 씀)와
+    backtest/kr_policy_backtest.py(횡단면 z-score 해 랭킹에 씀)가 **같은 원시식**을 공유한다 —
+    예전엔 각자 따로 구현돼 있어 한쪽 창·공식을 바꿔도 다른 쪽이 조용히 안 따라가는 드리프트
+    위험이 있었다(감사 2026-08-24). NaN 처리(dropna/ffill)는 그대로 호출부 책임 — 여기선
+    순수 비율식만 계산한다.
+
+        mom12 = 종가[-22]/종가[-253] - 1        (12개월 모멘텀, 최근 1개월 제외)
+        hi52  = 종가[-1] / 최근 253영업일 최고가
+    """
+    out: dict = {}
+    if len(h) >= 253:
+        out["mom12"] = h.iloc[-22] / h.iloc[-253] - 1.0
+    if len(h) >= 1:
+        window = h.iloc[-min(len(h), 253):]
+        out["hi52"] = h.iloc[-1] / window.max()
+    return out
+
+
 def price_axes(close) -> dict:
     """12M 종가 시계열(pandas Series·최신이 끝) → 가격 축 3종 [0,1]. 이력 부족 시 {} (graceful).
 
@@ -112,12 +133,12 @@ def price_axes(close) -> dict:
         if len(c) < 130:                                   # 최소 ~6개월 (mom12 는 252 요건)
             return {}
         out = {}
-        if len(c) >= 253:
-            m12 = float(c.iloc[-22] / c.iloc[-253] - 1.0)
-            out["mom12"] = round(_clamp01(0.5 + m12 / 0.8), 4)
-        hi = float(c.iloc[-min(len(c), 253):].max())
-        if hi > 0:
-            out["hi52"] = round(_clamp01(float(c.iloc[-1]) / hi), 4)
+        raw = raw_price_axes(c)
+        if "mom12" in raw:
+            out["mom12"] = round(_clamp01(0.5 + float(raw["mom12"]) / 0.8), 4)
+        window_max = float(c.iloc[-min(len(c), 253):].max())
+        if window_max > 0 and "hi52" in raw:
+            out["hi52"] = round(_clamp01(float(raw["hi52"])), 4)
         r = c.pct_change().dropna().iloc[-60:]
         if len(r) >= 30:
             vol_ann = float(r.std()) * (252 ** 0.5)
