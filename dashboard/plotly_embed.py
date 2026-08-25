@@ -435,12 +435,16 @@ _TEMPLATE = r"""
     const pct = (v) => ((lastClose / v - 1) * 100).toFixed(1);
     for (let i = 0; i < anns.length; i++) {
       if (anns[i].name === "tn-hi") {
-        upd[`annotations[${i}].x`] = new Date(hiT).toISOString();
+        // ⚠️ category 축에서 new Date(t).toISOString() 은 UTC "Z" 접미사를 쓰는데
+        // 서버가 만든 categoryarray 는 지역 타임존 오프셋 문자열이라 포맷이 안 맞아
+        // Plotly 가 못 찾고 화살표가 엉뚱한 위치로 튄다(감사 2026-08-25). rangeMsToAxis
+        // 가 category 축이면 정수 봉 인덱스·아니면 기존 ISOString 을 주므로 그대로 재사용.
+        upd[`annotations[${i}].x`] = rangeMsToAxis(hiT);
         upd[`annotations[${i}].y`] = toY(hi);
         upd[`annotations[${i}].text`] = `${fmt(hi)} (${pct(hi) > 0 ? "+" : ""}${pct(hi)}%)`;
       }
       if (anns[i].name === "tn-lo") {
-        upd[`annotations[${i}].x`] = new Date(loT).toISOString();
+        upd[`annotations[${i}].x`] = rangeMsToAxis(loT);
         upd[`annotations[${i}].y`] = toY(lo);
         upd[`annotations[${i}].text`] = `${fmt(lo)} (+${pct(lo)}%)`.replace("(+-", "(-");
       }

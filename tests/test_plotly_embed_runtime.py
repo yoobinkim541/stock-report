@@ -1130,3 +1130,127 @@ console.log("OK datetime-raw-restore");
     r = subprocess.run([_NODE, str(runner)], capture_output=True, text=True, timeout=30)
     assert r.returncode == 0, f"datetime fresh view fail: {r.stdout}\n{r.stderr}"
     assert "OK datetime-raw-restore" in r.stdout
+
+
+# ── 팬 후 고가/저가 화살표(tn-hi/tn-lo) 위치 어긋남 — callouts() 포맷 불일치 ──────────
+# 감사(2026-08-25): 서버가 만드는 초기 fig JSON 은 정상(annotation.x 가 categoryarray
+# 문자열과 정확히 일치)인데, 사용자가 팬/줌하면 finishGesture()→callouts() 가 화살표를
+# 다시 계산해 `new Date(hiT).toISOString()`(UTC, "Z" 접미사)로 x 를 새로 쓴다. 그런데
+# category 축의 categoryarray 는 서버가 "-04:00" 같은 지역 타임존 오프셋 문자열로
+# 만들어둔 것이라 포맷이 전혀 안 맞는다 — Plotly 가 categoryarray 에서 못 찾아 화살표가
+# 엉뚱한 위치로 튄다. 초기 로드에선 재현이 안 되고(서버가 만든 그대로라 정상) 팬 이후에만
+# 나타나는 이유가 이것. 기존 rangeMsToAxis(ms) 가 category 축이면 정수 봉 인덱스,
+# 아니면 기존 ISOString 을 반환하므로 이걸 재사용하면 된다.
+_CALLOUT_HARNESS = r"""
+const relayoutCalls = [];
+let gd = null;
+const els = {};
+function el(id) {
+  if (!els[id]) els[id] = { id, style: {}, innerHTML: "", textContent: "", _h: {},
+    _s: new Set(id === "bt-mag" ? ["on"] : []),
+    classList: { toggle(c, on) { on ? this._s.add(c) : this._s.delete(c); } },
+    on(e, f) { this._h[e] = f; }, emit(e, p) { if (this._h[e]) this._h[e](p); },
+    appendChild() {}, addEventListener() {}, querySelector() { return null; },
+    getBoundingClientRect() { return { top: 0 }; } };
+  els[id].classList._s = els[id]._s;
+  if (id === "chart") gd = els[id];
+  return els[id];
+}
+global.document = { getElementById: el, createElement: () => ({ style: {}, textContent: "" }) };
+global.window = { frameElement: null, parent: { innerHeight: 900, addEventListener() {} } };
+global.performance = { now: () => 1 };
+global.requestAnimationFrame = () => null;
+global.Plotly = {
+  newPlot(g, d, l, c) { g.data = d; g.layout = l; return { then(cb) { cb(); return this; } }; },
+  relayout(g, u) { relayoutCalls.push(u);
+    for (const k of Object.keys(u)) if (!k.includes(".") && !k.includes("[")) g.layout[k] = u[k];
+    return { then(cb) { cb(); return this; } }; },
+};
+const _ls = {};
+global.localStorage = { getItem: (k) => (k in _ls ? _ls[k] : null),
+                        setItem: (k, v) => { _ls[k] = String(v); },
+                        removeItem: (k) => { delete _ls[k]; } };
+global.setTimeout = (fn) => { fn(); return 0; };
+global.clearTimeout = () => {};
+__SCRIPT__
+function fail(m) { console.error("FAIL " + m); process.exit(1); }
+if (!gd || !gd.layout) fail("no_gd");
+const anns = gd.layout.annotations || [];
+const hiIdx = anns.findIndex(a => a.name === "tn-hi");
+if (hiIdx < 0) fail("no_tn_hi_annotation");
+
+// 팬 시뮬레이션 — 카테고리 인덱스로 새 표시구간 지정(사용자가 화면을 옮긴 상황).
+// 실제 Plotly 는 이벤트 발생 전에 gd.layout 을 이미 갱신해두므로 하니스도 맞춰준다.
+relayoutCalls.length = 0;
+gd.layout.xaxis = Object.assign({}, gd.layout.xaxis, { range: [50, 150] });
+gd.emit("plotly_relayout", {"xaxis.range": [50, 150]});
+
+const xUpd = relayoutCalls.map(u => u[`annotations[${hiIdx}].x`]).find(v => v !== undefined);
+if (xUpd === undefined) fail("callouts_did_not_fire");
+if (typeof xUpd !== "number") {
+  fail("tn_hi_x_not_category_index — got " + JSON.stringify(xUpd) +
+       " (category 축인데 문자열이면 categoryarray 와 포맷이 안 맞아 화살표가 엉뚱한 위치로 튄다)");
+}
+console.log("OK callout-index " + xUpd);
+"""
+
+
+@pytest.mark.skipif(_NODE is None, reason="node 미설치 — 런타임 JS 검증 스킵")
+def test_pan_updates_hi_lo_callout_to_category_index_not_iso_string(tmp_path):
+    """팬 후 tn-hi/tn-lo 화살표 x 가 category 축에선 정수 봉 인덱스여야 한다.
+
+    실측(수정 전): new Date(ms).toISOString() 을 그대로 써서 문자열(UTC "Z" 접미사)이
+    나오고, 서버가 만든 categoryarray("-04:00" 지역 오프셋 문자열)와 포맷이 달라
+    Plotly 가 매칭 못 해 화살표가 실제 고가/저가 봉과 다른 위치에 그려진다.
+    """
+    idx = pd.date_range("2025-01-01", periods=300, freq="D")
+    close = [100 + (i % 40) + (5 if i == 200 else 0) - (5 if i == 60 else 0) for i in range(300)]
+    df = pd.DataFrame({"Open": close, "High": [c + 2 for c in close],
+                       "Low": [c - 2 for c in close], "Close": close,
+                       "Volume": [1e6] * 300}, index=idx)
+    fig = charts.price_chart(df, "TEST", kind="candle", show_volume=True, view_days=365)
+    html = plotly_embed.pannable_chart_html(fig, df, height=460, view_days=365,
+                                            vol_axis="yaxis2", store_key="TEST:1d:lin")
+    js = re.findall(r"<script>(.*?)</script>", html, re.S)[-1]
+    runner = tmp_path / "callout.js"
+    runner.write_text(_CALLOUT_HARNESS.replace("__SCRIPT__", js), encoding="utf-8")
+    r = subprocess.run([_NODE, str(runner)], capture_output=True, text=True, timeout=30)
+    assert r.returncode == 0, f"콜아웃 인덱스 불일치: {r.stdout}\n{r.stderr}"
+    assert "OK callout-index" in r.stdout
+
+
+@pytest.mark.skipif(_NODE is None, reason="node 미설치 — 런타임 JS 검증 스킵")
+def test_pan_updates_hi_lo_callout_to_iso_string_on_datetime_axis(tmp_path):
+    """일반 datetime 축(비교 모드 등)에서는 기존 동작(ISOString)이 그대로 유지돼야 한다."""
+    idx = pd.date_range("2025-01-01", periods=70, freq="D")
+    df = pd.DataFrame({"Open": range(100, 170), "High": range(101, 171),
+                       "Low": range(99, 169), "Close": range(100, 170),
+                       "Volume": [1e6] * 70}, index=idx)
+    fig = charts.price_chart(df, "TEST", kind="line", compare={"PEER": df["Close"] * 1.01},
+                             view_days=90)
+    html = plotly_embed.pannable_chart_html(fig, df, height=460, view_days=90,
+                                            store_key="TEST:1d:pct:line", category_x=False)
+    js = re.findall(r"<script>(.*?)</script>", html, re.S)[-1]
+    assertion = r"""
+if (!gd || !gd.layout) fail("no_gd");
+const anns = gd.layout.annotations || [];
+const hiIdx = anns.findIndex(a => a.name === "tn-hi");
+if (hiIdx < 0) { console.log("OK no-hi-lo-in-compare-mode"); process.exit(0); }
+relayoutCalls.length = 0;
+const X0 = Date.parse("2025-01-10"), X1 = Date.parse("2025-02-10");
+gd.layout.xaxis = Object.assign({}, gd.layout.xaxis,
+  { range: [new Date(X0).toISOString(), new Date(X1).toISOString()] });
+gd.emit("plotly_relayout", {"xaxis.range": [new Date(X0).toISOString(), new Date(X1).toISOString()]});
+const xUpd = relayoutCalls.map(u => u[`annotations[${hiIdx}].x`]).find(v => v !== undefined);
+if (xUpd === undefined) fail("callouts_did_not_fire");
+if (typeof xUpd !== "string" || !xUpd.endsWith("Z")) fail("datetime_axis_should_stay_iso_string got " + JSON.stringify(xUpd));
+console.log("OK datetime-axis-iso " + xUpd);
+"""
+    runner = tmp_path / "callout_datetime.js"
+    runner.write_text(_CALLOUT_HARNESS.replace("__SCRIPT__", js).replace(
+        'function fail(m) { console.error("FAIL " + m); process.exit(1); }\nif (!gd || !gd.layout) fail("no_gd");\nconst anns = gd.layout.annotations || [];\nconst hiIdx = anns.findIndex(a => a.name === "tn-hi");\nif (hiIdx < 0) fail("no_tn_hi_annotation");\n\n// 팬 시뮬레이션 — 카테고리 인덱스로 새 표시구간 지정(사용자가 화면을 옮긴 상황).\n// 실제 Plotly 는 이벤트 발생 전에 gd.layout 을 이미 갱신해두므로 하니스도 맞춰준다.\nrelayoutCalls.length = 0;\ngd.layout.xaxis = Object.assign({}, gd.layout.xaxis, { range: [50, 150] });\ngd.emit("plotly_relayout", {"xaxis.range": [50, 150]});\n\nconst xUpd = relayoutCalls.map(u => u[`annotations[${hiIdx}].x`]).find(v => v !== undefined);\nif (xUpd === undefined) fail("callouts_did_not_fire");\nif (typeof xUpd !== "number") {\n  fail("tn_hi_x_not_category_index — got " + JSON.stringify(xUpd) +\n       " (category 축인데 문자열이면 categoryarray 와 포맷이 안 맞아 화살표가 엉뚱한 위치로 튄다)");\n}\nconsole.log("OK callout-index " + xUpd);\n',
+        'function fail(m) { console.error("FAIL " + m); process.exit(1); }\n' + assertion),
+        encoding="utf-8")
+    r = subprocess.run([_NODE, str(runner)], capture_output=True, text=True, timeout=30)
+    assert r.returncode == 0, f"datetime 축 회귀: {r.stdout}\n{r.stderr}"
+    assert "OK" in r.stdout
