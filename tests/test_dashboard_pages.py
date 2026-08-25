@@ -2208,3 +2208,66 @@ def test_ai_console_canvas_chat_no_match_shows_no_diff(monkeypatch):
 
     apply_buttons = [b for b in at.button if b.key == "strategy_canvas_apply_patch"]
     assert not apply_buttons, "패치가 없는데 적용 버튼이 렌더됨"
+
+
+# ── ⚡ 자동 갱신 토글이 히어로·호가창도 함께 전환하는지 (감사 2026-08-25 버벅임 수정) ──
+# 예전엔 이 토글이 차트(8s bake)만 껐고, 히어로(_live_top, 8s)·호가창(_orderbook_section,
+# 1.5s)은 토글과 무관하게 항상 자동 재실행돼 "자동 갱신 꺼도 드래그 중 덜컹거림" 버그로
+# 이어졌다. run_every 자체는 AppTest 로 재현 불가(단발 스크립트 실행)이므로, 토글 상태에
+# 따라 실제로 어느 fragment 변형(주기 재실행 有/無)이 호출되는지를 스파이로 확인한다.
+
+def test_toggle_off_uses_static_live_top_and_orderbook_no_periodic_rerun():
+    """⚡ 꺼짐 → _live_top_static·_orderbook_section_static (run_every 없는 정적 fragment)."""
+    script = _STUBS + '''
+from dashboard.pages import ticker
+calls = []
+ticker._live_top_live = lambda *a, **k: calls.append("live_top_live")
+ticker._live_top_static = lambda *a, **k: calls.append("live_top_static")
+ticker._orderbook_section_live = lambda *a, **k: calls.append("ob_live")
+ticker._orderbook_section_static = lambda *a, **k: calls.append("ob_static")
+st.session_state["_chart_live"] = False
+ticker.render()
+st.session_state["_spy_calls"] = calls
+'''
+    at = AppTest.from_string(script, default_timeout=30)
+    at.run()
+    assert not at.exception, str(at.exception)
+    calls = at.session_state["_spy_calls"]
+    assert "live_top_static" in calls and "live_top_live" not in calls
+    assert "ob_static" in calls and "ob_live" not in calls
+
+
+def test_toggle_on_uses_live_variants_for_top_and_orderbook():
+    """⚡ 켜짐 → _live_top_live·_orderbook_section_live (주기 재실행 fragment)."""
+    script = _STUBS + '''
+from dashboard.pages import ticker
+calls = []
+ticker._live_top_live = lambda *a, **k: calls.append("live_top_live")
+ticker._live_top_static = lambda *a, **k: calls.append("live_top_static")
+ticker._orderbook_section_live = lambda *a, **k: calls.append("ob_live")
+ticker._orderbook_section_static = lambda *a, **k: calls.append("ob_static")
+st.session_state["_chart_live"] = True
+ticker.render()
+st.session_state["_spy_calls"] = calls
+'''
+    at = AppTest.from_string(script, default_timeout=30)
+    at.run()
+    assert not at.exception, str(at.exception)
+    calls = at.session_state["_spy_calls"]
+    assert "live_top_live" in calls and "live_top_static" not in calls
+    assert "ob_live" in calls and "ob_static" not in calls
+
+
+def test_live_top_static_renders_without_exception_both_toggle_states():
+    """정적/라이브 분기 둘 다 예외 없이 렌더돼야 한다(리팩터가 화면을 안 깨뜨렸는지)."""
+    def _script_toggle(live):
+        return _STUBS + f'''
+st.session_state["_chart_live"] = {live}
+from dashboard.pages import ticker
+ticker.render()
+'''
+    for live in (False, True):
+        at = AppTest.from_string(_script_toggle(live), default_timeout=30)
+        at.run()
+        assert not at.exception, f"live={live}: {at.exception}"
+        assert len(at.markdown) > 0, f"live={live}: 페이지가 비어 렌더됨"

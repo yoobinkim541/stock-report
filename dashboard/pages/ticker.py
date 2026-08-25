@@ -59,14 +59,23 @@ def render():
     _rq0 = cached.realtime_quote(ticker)
     cur = (_rq0.get("price") if _rq0 else None) or yf_price or 0.0   # 현재가(실시간 우선)
 
+    # ⚡자동 갱신 토글 — 차트뿐 아니라 히어로·호가창도 함께 전환한다. 예전엔 이 토글이
+    # 차트(8s bake)만 끄고 히어로(8s)·호가창(1.5s)은 토글과 무관하게 계속 자동 재실행돼,
+    # "자동 갱신을 껐는데도 드래그 중 덜컹거린다"는 버그로 이어졌다(감사 2026-08-25) —
+    # Streamlit 세션은 스크립트 실행이 순차적이라, 1.5초마다 오는 fragment 리렌더(DOM
+    # 리플로우)가 사용자가 차트를 드래그하는 타이밍과 자주 겹쳐 체감 버벅임을 유발했다.
+    # 위젯 인스턴스화(아래 st.toggle) 이전에도 session_state 는 직전 값(또는 방금
+    # 클릭으로 갱신된 값)을 이미 담고 있어 안전하게 먼저 읽을 수 있다.
+    _live_on = bool(st.session_state.get("_chart_live", False))
+
     # 실시간 밴드(8s 자동갱신) — 히어로 ⚡가격·게이지·내 포지션 (호가는 차트 아래 접이식)
-    _live_top(ticker, hist, yf_price, prev, pos)
+    (_live_top_live if _live_on else _live_top_static)(ticker, hist, yf_price, prev, pos)
 
     # 가격 차트 — 풀폭 · 봉/기간/차트종류/지표 컨트롤 (+ 보유 시 평단 수평선)
     if yf_price is not None:
         # ⚡자동 갱신 토글은 fragment **밖** — 켜고 끄기가 래퍼(주기 재실행)를 전환해야 함
         live = st.toggle("⚡ 자동 갱신 (8초)", key="_chart_live",
-                         help="실시간가로 마지막 봉·현재가 갱신 — 보던 위치·드로잉 유지")
+                         help="실시간가로 마지막 봉·현재가 갱신 — 보던 위치·드로잉 유지 (호가·히어로도 함께 전환)")
         _chart = (_price_chart_replay if st.session_state.get("_chart_replay_playing")
                   else (_price_chart_live if live else _price_chart_frag))
         _chart(ticker, hist, pos.get("avg_price_usd") if pos else None,
@@ -80,8 +89,9 @@ def render():
         _llm_related_section(ticker)
         return
 
-    # 실시간 호가 — 접이식(기본 접힘)·8초 자동갱신 (차트 우선 레이아웃)
-    _orderbook_section(ticker, hist, prev)
+    # 실시간 호가 — 접이식(기본 접힘)·1.5초 자동갱신 (⚡토글로 켜짐 — 차트 우선 레이아웃)
+    (_orderbook_section_live if bool(st.session_state.get("_chart_live", False))
+     else _orderbook_section_static)(ticker, hist, prev)
 
     # 🎯 진입 레벨 가이드 — 기술 지지/저항 × 밸류 기준가 (표시·참고용)
     if yf_price is not None:
@@ -1238,8 +1248,19 @@ def _alert_section(ticker, hist):
 
 
 @st.fragment(run_every=8)
-def _live_top(ticker, hist, yf_price, prev, pos):
-    """히어로 ⚡실시간가 + 게이지 + 내 포지션(평단·손익) + 호가 — 8초 자동갱신."""
+def _live_top_live(ticker, hist, yf_price, prev, pos):
+    """⚡ 자동 갱신 ON — 8초마다 재실행."""
+    _live_top_body(ticker, hist, yf_price, prev, pos)
+
+
+@st.fragment
+def _live_top_static(ticker, hist, yf_price, prev, pos):
+    """⚡ 자동 갱신 OFF — 최초 1회만 렌더, 이후 재실행 없음(감사 2026-08-25 버벅임 수정)."""
+    _live_top_body(ticker, hist, yf_price, prev, pos)
+
+
+def _live_top_body(ticker, hist, yf_price, prev, pos):
+    """히어로 ⚡실시간가 + 게이지 + 내 포지션(평단·손익) + 호가."""
     rq = cached.realtime_quote(ticker)
     rt = rq.get("price") if rq else None
     price = rt if (rt and rt > 0) else yf_price
@@ -1305,8 +1326,19 @@ def _live_top(ticker, hist, yf_price, prev, pos):
 
 
 @st.fragment(run_every=1.5)
-def _orderbook_section(ticker, hist, prev):
-    """실시간 호가 — 차트 아래 접이식, 1.5초 자동갱신.
+def _orderbook_section_live(ticker, hist, prev):
+    """⚡ 자동 갱신 ON — 1.5초마다 재실행."""
+    _orderbook_section_body(ticker, hist, prev)
+
+
+@st.fragment
+def _orderbook_section_static(ticker, hist, prev):
+    """⚡ 자동 갱신 OFF — 최초 1회만 렌더, 이후 재실행 없음(감사 2026-08-25 버벅임 수정)."""
+    _orderbook_section_body(ticker, hist, prev)
+
+
+def _orderbook_section_body(ticker, hist, prev):
+    """실시간 호가 — 차트 아래 접이식.
 
     WS 실시간 캐시(1초 스트림) **직독**(st.cache 우회 — 로컬 파일 읽기라 저렴) → REST 폴백.
     조회 종목은 viewer_interest 기록 → kis_stream 이 ~1.5분 내 스트림에 자동 편입(잔여 슬롯).
