@@ -334,10 +334,16 @@ def build_wiki_pages_from_events(events: list[dict], now: datetime | None = None
             *(f"ticker:{ticker}" for ticker, _count in ticker_counts.most_common(8)),
         ], limit=20)
         page_id = f"source-{group_type}-{_slug(label)}"
+        # ⚠️ 전 페이지가 surface="market" 으로 고정돼 있어 위키 그래프 노드가 전부
+        # 한 카테고리에만 몰렸다(감사 2026-08-25 — 실측 400건 전부 market, 그중 340건
+        # 은 이미 group_type="ticker" 로 종목별 분류가 돼 있었는데도 안 씀). SURFACE_ORDER
+        # 에 이미 "ticker" 가 정의돼 있으므로 그대로 매핑 — topic/type 은 시장 전반
+        # 주제라 market 유지가 맞다.
+        surface = "ticker" if group_type == "ticker" else "market"
         page = {
             "id": page_id,
             "title": f"수집 소스 위키: {display}",
-            "surface": "market",
+            "surface": surface,
             "kind": "source_digest",
             "status": _status_for(rows, refs),
             "tags": tags,

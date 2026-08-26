@@ -41,7 +41,9 @@ def test_build_wiki_pages_from_events_groups_source_backed_topic():
 
     assert {page["id"] for page in pages} == {"source-topic-기술-ai", "source-ticker-nvda"}
     page = next(page for page in pages if page["id"] == "source-topic-기술-ai")
-    assert page["surface"] == "market"
+    assert page["surface"] == "market"           # topic 그룹 — 시장 전반 주제
+    ticker_page = next(page for page in pages if page["id"] == "source-ticker-nvda")
+    assert ticker_page["surface"] == "ticker"     # ticker 그룹 — 개별 종목(위키 그래프 분산)
     assert page["kind"] == "source_digest"
     assert page["status"] == "reviewed"
     assert "기술/AI" in page["title"]
