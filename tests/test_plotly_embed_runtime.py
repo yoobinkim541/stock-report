@@ -972,14 +972,22 @@ console.log("OK pinch");
 @pytest.mark.skipif(_NODE is None, reason="node 미설치 — 런타임 JS 검증 스킵")
 def test_pinch_zoom_runtime(tmp_path):
     """📱 핀치 줌 — 2손가락 벌리기=확대(앵커 고정·폭 절반)·오므리기=축소(클램프)·
-    1손가락 무시·페이지 줌 차단(preventDefault)·touchend 종료."""
+    1손가락 무시·페이지 줌 차단(preventDefault)·touchend 종료.
+
+    category_x=False(datetime 축)로 고정 — 여기선 줌 산수(폭·앵커·클램프)만 ISOString
+    문자열 기준으로 검증한다. category 축 포맷 정합성은 별도
+    test_pinch_zoom_uses_category_index_not_iso_string_on_category_axis 가 검증한다
+    (2026-08-26 감사 이전엔 이 테스트가 category 축 차트에서 실제로 안 맞는 ISOString
+    출력을 Date.parse 상대 산수로만 검증해 포맷 버그를 놓치고 있었다).
+    """
     idx = pd.date_range("2025-01-01", periods=70, freq="D")
     df = pd.DataFrame({"Open": range(100, 170), "High": range(101, 171),
                        "Low": range(99, 169), "Close": range(100, 170),
                        "Volume": [1e6] * 70}, index=idx)
     fig = charts.price_chart(df, "TEST", kind="candle", show_volume=True, view_days=90)
     html = plotly_embed.pannable_chart_html(fig, df, height=460, view_days=90,
-                                            vol_axis="yaxis2", store_key="TEST:1d:lin")
+                                            vol_axis="yaxis2", store_key="TEST:1d:lin",
+                                            category_x=False)
     js = re.findall(r"<script>(.*?)</script>", html, re.S)[-1]
     runner = tmp_path / "pinch.js"
     runner.write_text(_PINCH_HARNESS.replace("__SCRIPT__", js), encoding="utf-8")
@@ -1382,3 +1390,222 @@ def test_light_chart_keeps_live_y_follow_while_dragging(tmp_path):
     assert m, r.stdout
     during_drag = int(m.group(1))
     assert during_drag == 8, f"가벼운 차트인데 드래그 중 y 추종이 억제됨(during={during_drag})"
+
+
+# ── 📱 모바일 핀치 줌 — category 축에서 ISOString 을 써 categoryarray 와 안 맞던 버그 ──
+# (사용자 리포트 2026-08-26: "모바일에서 두 손가락 제스처로 축소 확대할 수 있게 해줘")
+# 코드 자체는 이미 있었다(touchstart/touchmove 핀치 핸들러) — 콜아웃 화살표와 똑같은
+# 근본원인으로 category 축에서 안 먹었을 뿐. new Date(ms).toISOString() 대신
+# rangeMsToAxis() 재사용(category 면 정수 봉 인덱스·아니면 기존 ISOString).
+_PINCH_CATEGORY_HARNESS = r"""
+const relayoutCalls = [];
+let gd = null;
+const els = {};
+const NSEW = { getBoundingClientRect() { return { left: 0, top: 0, right: 1000, bottom: 400,
+                                                  width: 1000, height: 400 }; } };
+function el(id) {
+  if (!els[id]) els[id] = { id, style: {}, innerHTML: "", textContent: "", _h: {}, _t: {},
+    _s: new Set(id === "bt-mag" ? ["on"] : []),
+    classList: { toggle(c, on) { on ? this._s.add(c) : this._s.delete(c); } },
+    on(e, f) { this._h[e] = f; }, emit(e, p) { if (this._h[e]) this._h[e](p); },
+    addEventListener(e, f) { (this._t[e] = this._t[e] || []).push(f); },
+    fire(e, p) { (this._t[e] || []).forEach(f => f(p)); },
+    appendChild() {}, querySelector(sel) { return sel === ".nsewdrag" ? NSEW : null; },
+    getBoundingClientRect() { return { top: 0, left: 0, width: 1000, height: 400 }; } };
+  els[id].classList._s = els[id]._s;
+  if (id === "chart") gd = els[id];
+  return els[id];
+}
+global.document = { getElementById: el, createElement: () => ({ style: {}, textContent: "" }) };
+global.window = { frameElement: null, parent: { innerHeight: 900, addEventListener() {} },
+                  addEventListener() {} };
+global.performance = { now: () => 1 };
+global.requestAnimationFrame = () => null;
+global.Plotly = {
+  newPlot(g, d, l) { g.data = d; g.layout = l; return { then(cb) { cb(); return this; } }; },
+  relayout(g, u) { relayoutCalls.push(u);
+    for (const k of Object.keys(u)) if (!k.includes(".") && !k.includes("[")) g.layout[k] = u[k];
+    if (u["xaxis.range"]) g.layout.xaxis = Object.assign({}, g.layout.xaxis, {range: u["xaxis.range"]});
+    return { then(cb) { cb(); return this; } }; },
+  addTraces() {}, deleteTraces() {}, Plots: { resize() {} },
+};
+const _ls = {};
+global.localStorage = { getItem: (k) => (k in _ls ? _ls[k] : null),
+                        setItem: (k, v) => { _ls[k] = String(v); }, removeItem: (k) => { delete _ls[k]; } };
+global.setTimeout = (fn) => { fn(); return 0; };
+global.clearTimeout = () => {};
+global.setInterval = () => 0;
+__SCRIPT__
+function fail(m) { console.error("FAIL " + m); process.exit(1); }
+if (!gd || !gd.layout) fail("no_gd");
+
+// 팬 테스트와 동일한 관례 — 초기 로드 분기와 무관하게 확실한 category 인덱스 범위를 직접 세팅.
+gd.layout.xaxis = Object.assign({}, gd.layout.xaxis, { range: [100, 200] });
+
+const T = (cx) => ({ clientX: cx, clientY: 200, preventDefault() {} });
+function touch(name, xs) {
+  const ev = { touches: xs.map(T), preventDefault() {} };
+  gd.fire(name, ev);
+  return ev;
+}
+relayoutCalls.length = 0;
+touch("touchstart", [400, 600]);          // 2손가락 시작
+touch("touchmove", [300, 700]);           // 벌리기 = 확대
+const zi = relayoutCalls.filter(u => Array.isArray(u["xaxis.range"])).pop();
+if (!zi) fail("no_pinch_zoom_relayout");
+const [a, b] = zi["xaxis.range"];
+if (typeof a !== "number" || typeof b !== "number") {
+  fail("pinch_range_not_category_index — got " + JSON.stringify(zi["xaxis.range"]) +
+       " (category 축인데 문자열이면 categoryarray 와 안 맞아 핀치 줌이 안 먹거나 엉뚱한 구간으로 튄다)");
+}
+console.log("OK pinch-category " + a + " " + b);
+"""
+
+
+@pytest.mark.skipif(_NODE is None, reason="node 미설치 — 런타임 JS 검증 스킵")
+def test_pinch_zoom_uses_category_index_not_iso_string_on_category_axis(tmp_path):
+    """핀치 줌이 category 축(기본 캔들차트)에서 정수 봉 인덱스를 써야 한다.
+
+    실측(수정 전): new Date(ms).toISOString() 을 그대로 써서 서버가 만든
+    categoryarray(지역 타임존 오프셋 문자열)와 포맷이 달라 Plotly 가 못 찾는다 —
+    핀치해도 화면이 안 움직이거나 엉뚱한 구간으로 튄다.
+    """
+    idx = pd.date_range("2025-01-01", periods=300, freq="D")
+    close = [100 + (i % 40) + (5 if i == 200 else 0) - (5 if i == 60 else 0) for i in range(300)]
+    df = pd.DataFrame({"Open": close, "High": [c + 2 for c in close],
+                       "Low": [c - 2 for c in close], "Close": close,
+                       "Volume": [1e6] * 300}, index=idx)
+    fig = charts.price_chart(df, "TEST", kind="candle", show_volume=True, view_days=365)
+    html = plotly_embed.pannable_chart_html(fig, df, height=460, view_days=365,
+                                            vol_axis="yaxis2", store_key="TEST:1d:lin")
+    js = re.findall(r"<script>(.*?)</script>", html, re.S)[-1]
+    runner = tmp_path / "pinch_category.js"
+    runner.write_text(_PINCH_CATEGORY_HARNESS.replace("__SCRIPT__", js), encoding="utf-8")
+    r = subprocess.run([_NODE, str(runner)], capture_output=True, text=True, timeout=30)
+    assert r.returncode == 0, f"핀치 category 인덱스 불일치: {r.stdout}\n{r.stderr}"
+    assert "OK pinch-category" in r.stdout
+
+
+# ── 휠 줌 연속 틱 중 무거운 차트의 y 추종 억제 — 팬과 동일한 heavy-skip, zooming 플래그 ──
+# (사용자 리포트 2026-08-26: "스크롤로 축소 확대하는데 빠르게 안 따라붙는거 같아")
+# 휠 줌은 plotly_relayouting 없이 plotly_relayout 만 틱마다 연속 발생 — 기존 dragging
+# 기반 heavy-skip(팬용)이 전혀 안 걸렸다. clock 을 매 틱 200ms 씩 강제 전진시켜 기존
+# minGap 스로틀로는 절대 안 걸릴 만큼 여유를 주므로, 관측되는 억제는 zooming 플래그 때문이다.
+_WHEEL_ZOOM_HARNESS = r"""
+let clock = 1000;
+const relayoutCalls = [];
+let rafQueue = [];
+let pendingTimer = null;
+let gd = null;
+const els = {};
+function el(id) {
+  if (!els[id]) els[id] = { id, style: {}, innerHTML: "", textContent: "", _h: {},
+    _s: new Set(id === "bt-mag" ? ["on"] : []),
+    classList: { toggle(c, on) { on ? this._s.add(c) : this._s.delete(c); } },
+    on(e, f) { this._h[e] = f; }, emit(e, p) { if (this._h[e]) this._h[e](p); },
+    appendChild() {}, addEventListener() {}, querySelector() { return null; },
+    getBoundingClientRect() { return { top: 0 }; } };
+  els[id].classList._s = els[id]._s;
+  if (id === "chart") gd = els[id];
+  return els[id];
+}
+global.document = { getElementById: el, createElement: () => ({ style: {}, textContent: "" }) };
+global.window = { frameElement: null, parent: { innerHeight: 900, addEventListener() {} } };
+global.performance = { now: () => clock };
+global.requestAnimationFrame = (cb) => { rafQueue.push(cb); return rafQueue.length; };
+const REDRAW_COST_MS = __REDRAW_COST__;
+global.Plotly = {
+  newPlot(g, d, l, c) { g.data = d; g.layout = l; return { then(cb) { cb(); return this; } }; },
+  relayout(g, u) { relayoutCalls.push(u);
+    for (const k of Object.keys(u)) if (!k.includes(".") && !k.includes("[")) g.layout[k] = u[k];
+    clock += REDRAW_COST_MS;
+    return { then(cb) { cb(); return this; } }; },
+};
+const _ls = {};
+global.localStorage = { getItem: (k) => (k in _ls ? _ls[k] : null),
+                        setItem: (k, v) => { _ls[k] = String(v); },
+                        removeItem: (k) => { delete _ls[k]; } };
+// 실제 gestureTimer 디바운스(160ms)를 흉내 — 마지막 틱의 타이머만 살아남고, 테스트가
+// 명시적으로 "advance" 할 때만 발동한다(매 틱 즉시 실행되면 zooming 이 절대 안 유지됨).
+global.setTimeout = (fn) => { pendingTimer = fn; return 1; };
+global.clearTimeout = () => { pendingTimer = null; };
+__SCRIPT__
+function fail(m) { console.error("FAIL " + m); process.exit(1); }
+if (!gd || !gd.layout) fail("no_gd");
+function pump(n) {
+  for (let i = 0; i < n && rafQueue.length; i++) {
+    const cb = rafQueue.shift();
+    clock += 200;
+    cb();
+  }
+}
+pump(20);
+relayoutCalls.length = 0;
+
+// 휠 줌 버스트 — plotly_relayouting 없이 plotly_relayout 만 8틱 연속(실제 휠 줌 동작).
+for (let i = 0; i < 8; i++) {
+  const a = 50 - i * 5, b = 150 + i * 5;
+  gd.layout.xaxis = Object.assign({}, gd.layout.xaxis, { range: [a, b] });
+  gd.emit("plotly_relayout", { "xaxis.range": [a, b] });
+  pump(1);
+}
+const duringZoom = relayoutCalls.filter(u => Array.isArray(u["yaxis.range"])).length;
+
+// 버스트 종료 — 마지막 디바운스 타이머가 실제로 발동(160ms 경과 흉내).
+if (pendingTimer) { const fn = pendingTimer; pendingTimer = null; fn(); }
+pump(3);
+const afterEnd = relayoutCalls.filter(u => Array.isArray(u["yaxis.range"])).length;
+
+console.log("RESULT " + duringZoom + " " + afterEnd);
+"""
+
+
+@pytest.mark.skipif(_NODE is None, reason="node 미설치 — 런타임 JS 검증 스킵")
+def test_heavy_chart_skips_live_y_follow_during_wheel_zoom_burst_then_catches_up(tmp_path):
+    """무거운 차트는 연속 휠 줌 틱 "중" y relayout 을 생략해 네이티브 줌과 안 겹치고,
+    틱이 멈추면(디바운스 경과) 즉시 캐치업해야 한다 — 드래그용 heavy-skip과 동일 원리를
+    dragging 이 전혀 안 걸리는 휠 줌에도 적용."""
+    idx = pd.date_range("2025-01-01", periods=300, freq="D")
+    close = [100 + (i % 40) + (5 if i == 200 else 0) - (5 if i == 60 else 0) for i in range(300)]
+    df = pd.DataFrame({"Open": close, "High": [c + 2 for c in close],
+                       "Low": [c - 2 for c in close], "Close": close,
+                       "Volume": [1e6] * 300}, index=idx)
+    fig = charts.price_chart(df, "TEST", kind="candle", show_volume=True, view_days=365)
+    html = plotly_embed.pannable_chart_html(fig, df, height=460, view_days=365,
+                                            vol_axis="yaxis2", store_key="TEST:1d:lin")
+    js = re.findall(r"<script>(.*?)</script>", html, re.S)[-1]
+    harness = _WHEEL_ZOOM_HARNESS.replace("__REDRAW_COST__", "60").replace("__SCRIPT__", js)
+    runner = tmp_path / "wheel_zoom_heavy.js"
+    runner.write_text(harness, encoding="utf-8")
+    r = subprocess.run([_NODE, str(runner)], capture_output=True, text=True, timeout=30)
+    assert r.returncode == 0, f"heavy wheel zoom fail: {r.stdout}\n{r.stderr}"
+    m = re.search(r"RESULT (\d+) (\d+)", r.stdout)
+    assert m, r.stdout
+    during_zoom, after_end = int(m.group(1)), int(m.group(2))
+    assert during_zoom < 8, f"heavy 차트인데 8틱 내내 줌 중 y relayout 이 계속됨(during={during_zoom})"
+    assert after_end > during_zoom, (
+        f"줌 종료 후 캐치업 relayout 이 안 일어남(during={during_zoom}, after={after_end})"
+    )
+
+
+@pytest.mark.skipif(_NODE is None, reason="node 미설치 — 런타임 JS 검증 스킵")
+def test_light_chart_keeps_live_y_follow_during_wheel_zoom_burst(tmp_path):
+    """가벼운 차트는 휠 줌 버스트 중에도 기존처럼 매 틱 y축이 실시간으로 따라와야 한다."""
+    idx = pd.date_range("2025-01-01", periods=300, freq="D")
+    close = [100 + (i % 40) + (5 if i == 200 else 0) - (5 if i == 60 else 0) for i in range(300)]
+    df = pd.DataFrame({"Open": close, "High": [c + 2 for c in close],
+                       "Low": [c - 2 for c in close], "Close": close,
+                       "Volume": [1e6] * 300}, index=idx)
+    fig = charts.price_chart(df, "TEST", kind="candle", show_volume=True, view_days=365)
+    html = plotly_embed.pannable_chart_html(fig, df, height=460, view_days=365,
+                                            vol_axis="yaxis2", store_key="TEST:1d:lin")
+    js = re.findall(r"<script>(.*?)</script>", html, re.S)[-1]
+    harness = _WHEEL_ZOOM_HARNESS.replace("__REDRAW_COST__", "2").replace("__SCRIPT__", js)
+    runner = tmp_path / "wheel_zoom_light.js"
+    runner.write_text(harness, encoding="utf-8")
+    r = subprocess.run([_NODE, str(runner)], capture_output=True, text=True, timeout=30)
+    assert r.returncode == 0, f"light wheel zoom fail: {r.stdout}\n{r.stderr}"
+    m = re.search(r"RESULT (\d+) (\d+)", r.stdout)
+    assert m, r.stdout
+    during_zoom = int(m.group(1))
+    assert during_zoom == 8, f"가벼운 차트인데 줌 중 y 추종이 억제됨(during={during_zoom})"

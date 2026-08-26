@@ -247,7 +247,7 @@ _TEMPLATE = r"""
   // (emit 은 항상 해당 호출의 .then 보다 앞 — plotly.js 3.6 소스 확정) 여러 relayout 이
   // 겹치면 boolean 은 다른 호출의 .then 이 조기 해제 → 메아리가 새어 무한 루프(탭 프리즈).
   // 카운터는 전 in-flight 가 끝나야 0 — 자기 메아리는 항상 guard>0 구간에 도착한다.
-  let guard = 0, dragging = false, hoverOff = false;
+  let guard = 0, dragging = false, hoverOff = false, zooming = false;
   const unguard = () => { guard = Math.max(0, guard - 1); };
   let drawGuard = 0;                             // 도형/주석 자기 relayout 전용 카운터
   const undraw = () => { drawGuard = Math.max(0, drawGuard - 1); };
@@ -369,9 +369,9 @@ _TEMPLATE = r"""
   let target = null, curY = null, raf = null, busy = false;
   let costMs = 8, lastApply = 0, lastStep = 0;
   const HEAVY_REDRAW_MS = 24;   // relayout 1회가 이보다 비싸면(지표 많은 무거운 차트)
-                                 // 드래그·핀치 "중"엔 y 적용을 생략 — X축 팬과 경합 방지.
-                                 // curY 는 계속 target 을 lerp 로 쫓아가고, 제스처가
-                                 // 끝나 dragging=false 가 되는 즉시 다음 틱에서 캐치업한다.
+                                 // 드래그·핀치·휠줌 "중"엔 y 적용을 생략 — 네이티브 팬/줌과
+                                 // 경합 방지. curY 는 계속 target 을 lerp 로 쫓아가고, 제스처가
+                                 // 끝나 dragging/zooming 이 false 가 되는 즉시 캐치업한다.
 
   function animStep() {
     raf = null;
@@ -393,7 +393,7 @@ _TEMPLATE = r"""
     const applied = gd.layout.yaxis.range || [];
     const visDelta = Math.abs((applied[0] ?? 1e18) - curY.price[0])
                    + Math.abs((applied[1] ?? 1e18) - curY.price[1]);
-    const heavyWhileGesturing = dragging && costMs > HEAVY_REDRAW_MS;
+    const heavyWhileGesturing = (dragging || zooming) && costMs > HEAVY_REDRAW_MS;
     if (!heavyWhileGesturing && !busy && now - lastApply >= minGap && visDelta > span * 0.004) {
       busy = true; guard++; lastApply = now;
       const t0 = performance.now();
@@ -404,7 +404,7 @@ _TEMPLATE = r"""
         busy = false; unguard();
       });
     }
-    if (!done || dragging) raf = requestAnimationFrame(animStep);
+    if (!done || dragging || zooming) raf = requestAnimationFrame(animStep);
   }
 
   function setTarget(x0, x1) {
@@ -463,6 +463,7 @@ _TEMPLATE = r"""
   }
 
   function finishGesture() {                     // 제스처 끝 1회 — 콜아웃·hover 복원
+    zooming = false;                              // 마지막 줌 틱 후 160ms 지나 진짜 끝남
     const rawXr = gd.layout.xaxis.range;
     const xr = curXRangeMs();
     if (!xr) return;
@@ -622,8 +623,10 @@ _TEMPLATE = r"""
       if (n1 > hi) { n1 = hi; n0 = hi - span; }
     }
     guard++;
-    Plotly.relayout(gd, {"xaxis.range": [new Date(n0).toISOString(),
-                                         new Date(n1).toISOString()]})
+    // ⚠️ category 축에선 ISOString 이 categoryarray(지역 타임존 오프셋 문자열)와 안 맞아
+    // Plotly 가 못 찾는다(감사 2026-08-26, 팬 화살표 버그와 동일 근본원인) — rangeMsToAxis
+    // 재사용(category 면 정수 봉 인덱스·아니면 기존 ISOString).
+    Plotly.relayout(gd, {"xaxis.range": [rangeMsToAxis(n0), rangeMsToAxis(n1)]})
       .then(() => { unguard(); });
     setTarget(n0, n1);                            // y 자동 맞춤 (lerp 루프)
   }, {passive: false, capture: true});
@@ -1852,6 +1855,11 @@ _TEMPLATE = r"""
       dragging = false;
       const keys = Object.keys(e || {});
       if (keys.some(k => k.startsWith("xaxis.range")) || e["xaxis.autorange"]) {
+        // 휠 줌은 plotly_relayouting 없이 틱마다 이 relayout 만 연속 발생 — dragging 은
+        // 매 틱 false 로 리셋돼 팬용 heavy-skip(animStep) 이 안 걸렸다. zooming 을 별도로
+        // 켜서 연속 줌 틱 동안에도(마지막 틱 후 160ms 까지) 무거운 차트의 y 관성갱신을
+        // 생략 — 네이티브 줌 리드로우와 경합 안 하게(감사 2026-08-26, 팬 개선과 동일 원리).
+        zooming = true;
         muteHover();
         const xr = evXRange(e);
         if (xr) {
