@@ -417,11 +417,18 @@ def _record_to_page(record: dict) -> dict:
         body_parts.append(body_text)
     elif summary:
         body_parts.append(summary)
-    if decisions:
+    # ⚠️ 멱등 가드 — 이 함수는 저장된 raw body 에 decisions/openQuestions/messages 를
+    # "섹션\n- ..." 형태로 매번 파생해 붙이는 **뷰**다. 호출부가 이 파생 결과(get_page
+    # 반환값)를 그대로 다시 upsert_page() 에 넣으면(reports/wiki_health_check.py 의
+    # reactivate 처럼 status 만 바꾸려다 실수로 왕복) raw body 안에 이미 섹션이 박혀
+    # 있는데 또 얹어 무한 누적된다(실측 2026-08-26 감사: 33개 페이지가 "열린 질문"
+    # 2회 중복 — 2시간마다 도는 헬스체크 크론이 반복 발동한 흔적). body_text 안에
+    # 이미 같은 섹션 헤더가 있으면 다시 붙이지 않는다.
+    if decisions and "핵심 정리" not in body_text:
         body_parts.append("핵심 정리\n- " + "\n- ".join(decisions))
-    if open_questions:
+    if open_questions and "열린 질문" not in body_text:
         body_parts.append("열린 질문\n- " + "\n- ".join(open_questions))
-    if messages:
+    if messages and "대화 발췌" not in body_text:
         msg_lines = []
         for msg in messages[:4]:
             role = _clean((msg or {}).get("role") or "", 32)

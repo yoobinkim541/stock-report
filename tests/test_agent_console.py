@@ -3767,3 +3767,85 @@ def test_llm_primary_answer_survives_when_not_forbidden(monkeypatch, tmp_path):
     out = agent._compose_answer("JP모건 다른 IB랑 비교해줘", pack, history=[])
 
     assert out == expected
+
+
+# ── 위키 body 파생 섹션 재저장 시 중복 누적 방지 (감사 2026-08-26) ────────────────
+# get_page()/list_pages() 가 반환하는 body 는 openQuestions/decisions/messages 를
+# "열린 질문\n- ..." 식으로 매번 파생해 append 하는 **뷰**다. 이 뷰 결과를 그대로
+# upsert_page() 에 다시 넣으면(reports/wiki_health_check.py 의 reactivate 액션이
+# status 만 바꾸려다 이 함정에 빠짐) raw body 안에 이미 그 섹션이 박히고, 다음 조회
+# 때 뷰가 또 하나 얹어 "열린 질문" 이 무한 누적된다(실측: 2026-08-24~08-25 사이 33개
+# 페이지가 정확히 2회 중복 — reactivate 가 2시간마다 도는 헬스체크 크론에서 반복
+# 발동한 흔적).
+
+def test_reading_then_resaving_page_does_not_duplicate_open_questions(monkeypatch, tmp_path):
+    """get_page() 결과를 그대로 upsert_page() 에 왕복해도 '열린 질문' 이 누적되면 안 된다."""
+    _isolate(monkeypatch, tmp_path)
+    from agent_console import wiki
+
+    wiki.upsert_page({
+        "id": "roundtrip-test",
+        "title": "왕복 테스트",
+        "body": "원본 본문",
+        "surface": "market",
+        "kind": "playbook",
+        "status": "reviewed",
+        "openQuestions": ["질문 A?", "질문 B?"],
+    })
+
+    for _ in range(3):                          # reactivate 를 3번 맞아도 안전해야 함
+        page = wiki.get_page("roundtrip-test")
+        page["status"] = "active"
+        wiki.upsert_page(page)
+
+    final = wiki.get_page("roundtrip-test")
+    assert final["body"].count("열린 질문") == 1, (
+        f"왕복 저장으로 '열린 질문' 섹션이 누적됨: {final['body']!r}"
+    )
+    assert "질문 A?" in final["body"] and "질문 B?" in final["body"]
+
+
+def test_reading_then_resaving_page_does_not_duplicate_decisions(monkeypatch, tmp_path):
+    """같은 함정이 '핵심 정리'(decisions) 섹션에도 적용되는지."""
+    _isolate(monkeypatch, tmp_path)
+    from agent_console import wiki
+
+    wiki.upsert_page({
+        "id": "roundtrip-decisions",
+        "title": "왕복 테스트2",
+        "body": "원본 본문",
+        "surface": "market",
+        "kind": "playbook",
+        "status": "reviewed",
+        "decisions": ["결정 사항 X"],
+    })
+    for _ in range(2):
+        page = wiki.get_page("roundtrip-decisions")
+        wiki.upsert_page(page)
+    final = wiki.get_page("roundtrip-decisions")
+    assert final["body"].count("핵심 정리") == 1
+
+
+def test_wiki_health_check_reactivate_does_not_bloat_body(monkeypatch, tmp_path):
+    """wiki_health_check.py 의 reactivate 경로 자체(실제 운영 코드)를 반복 호출해도 안전해야 한다."""
+    _isolate(monkeypatch, tmp_path)
+    from agent_console import wiki
+
+    wiki.upsert_page({
+        "id": "health-reactivate-test",
+        "title": "헬스체크 재활성 테스트",
+        "body": "원본 본문",
+        "surface": "market",
+        "kind": "source_digest",
+        "status": "archived",
+        "openQuestions": ["신호가 유효한가?"],
+    })
+
+    for _ in range(2):        # 2시간마다 도는 크론이 같은 페이지를 두 번 reactivate 대상으로 판단한 상황
+        page = wiki.get_page("health-reactivate-test")
+        if page:
+            page["status"] = "active"
+            wiki.upsert_page(page)
+
+    final = wiki.get_page("health-reactivate-test")
+    assert final["body"].count("열린 질문") == 1     # 핵심 — status 값 자체(tags 유도)는 별개 사안
