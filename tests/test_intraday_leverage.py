@@ -238,6 +238,12 @@ def test_intraday_us_signal_executes_leveraged_etf_with_loss_budget(monkeypatch,
     monkeypatch.setattr(eng, "_market_open", lambda mk: mk == "US")
     # run_market 의 now_min 도 픽스처와 같은 시각으로 고정 — 벽시계 의존 제거(플래키 방지)
     monkeypatch.setattr(eng, "_now_local", lambda mk: _fixture_now())
+    # ⚠️ bars_stale 체크(같은 파일, "전 심볼 bar 정체" 판정)는 _now_local 이 아니라
+    # `time.time()` 을 **직접** 호출해 봉 최신성을 잰다 — _now_local 만 고정하면
+    # 테스트를 미장 마감 후(예: ET 저녁)에 돌릴 때 실제 지금과 픽스처 봉 시각의 차이가
+    # stale_flat_min 을 넘어 "bars_stale" 로 스킵되며 실패한다(감사 2026-08-26 재발견 —
+    # 자정 넘김과는 다른 벽시계 의존 지점). time.time 도 같은 고정 시각으로 통일한다.
+    monkeypatch.setattr(eng.time, "time", lambda: _fixture_now().timestamp())
     monkeypatch.setattr(eng, "_news_events", lambda now_epoch: [])
     monkeypatch.setattr(eng, "_record_event", lambda *a, **k: events.append({"sym": a[0], "side": a[2], **k}))
     monkeypatch.setattr(iu, "refresh", lambda mk, keep=None, **k: ["QQQ"])
