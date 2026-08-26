@@ -1254,3 +1254,131 @@ console.log("OK datetime-axis-iso " + xUpd);
     r = subprocess.run([_NODE, str(runner)], capture_output=True, text=True, timeout=30)
     assert r.returncode == 0, f"datetime 축 회귀: {r.stdout}\n{r.stderr}"
     assert "OK" in r.stdout
+
+
+# ── 팬/줌 "중" y축 자동맞춤이 X축 네이티브 팬과 경합해 버벅이는 문제 ──────────────
+# (사용자 리포트 2026-08-26: "축소 확대 그리고 이동할 때 더 부드럽게 안되나")
+# animStep() 이 드래그 매 틱마다 Plotly.relayout(yaxis.range) 을 호출하는데, relayout
+# 은 무거운 전체 리드로우(지표 오버레이 많을수록 costMs↑)라 X축 네이티브 팬 렌더링과
+# 매 프레임 경합한다. 지표가 많아 costMs 가 HEAVY_REDRAW_MS 를 넘으면 드래그 "중"엔
+# y 적용을 생략(target 은 계속 lerp 로 추종)하고, 제스처가 끝나 dragging=false 가 되는
+# 즉시 캐치업하도록 했다 — 가벼운 차트는 기존처럼 실시간 추종 유지.
+# clock 을 매 틱 200ms 씩 강제 전진시켜 기존 minGap 스로틀(비용 비례)로는 절대
+# 안 걸릴 만큼 여유를 주므로, 관측되는 억제는 오직 신설 heavy-skip 로직 때문이다.
+_HEAVY_DRAG_HARNESS = r"""
+let clock = 1000;
+const relayoutCalls = [];
+let rafQueue = [];
+let gd = null;
+const els = {};
+function el(id) {
+  if (!els[id]) els[id] = { id, style: {}, innerHTML: "", textContent: "", _h: {},
+    _s: new Set(id === "bt-mag" ? ["on"] : []),
+    classList: { toggle(c, on) { on ? this._s.add(c) : this._s.delete(c); } },
+    on(e, f) { this._h[e] = f; }, emit(e, p) { if (this._h[e]) this._h[e](p); },
+    appendChild() {}, addEventListener() {}, querySelector() { return null; },
+    getBoundingClientRect() { return { top: 0 }; } };
+  els[id].classList._s = els[id]._s;
+  if (id === "chart") gd = els[id];
+  return els[id];
+}
+global.document = { getElementById: el, createElement: () => ({ style: {}, textContent: "" }) };
+global.window = { frameElement: null, parent: { innerHeight: 900, addEventListener() {} } };
+global.performance = { now: () => clock };
+global.requestAnimationFrame = (cb) => { rafQueue.push(cb); return rafQueue.length; };
+const REDRAW_COST_MS = __REDRAW_COST__;
+global.Plotly = {
+  newPlot(g, d, l, c) { g.data = d; g.layout = l; return { then(cb) { cb(); return this; } }; },
+  relayout(g, u) { relayoutCalls.push(u);
+    for (const k of Object.keys(u)) if (!k.includes(".") && !k.includes("[")) g.layout[k] = u[k];
+    clock += REDRAW_COST_MS;   // 이 relayout 의 리드로우 비용을 시뮬레이션
+    return { then(cb) { cb(); return this; } }; },
+};
+const _ls = {};
+global.localStorage = { getItem: (k) => (k in _ls ? _ls[k] : null),
+                        setItem: (k, v) => { _ls[k] = String(v); },
+                        removeItem: (k) => { delete _ls[k]; } };
+global.setTimeout = (fn) => { fn(); return 0; };
+global.clearTimeout = () => {};
+__SCRIPT__
+function fail(m) { console.error("FAIL " + m); process.exit(1); }
+if (!gd || !gd.layout) fail("no_gd");
+function pump(n) {                              // 큐잉된 animStep 프레임 n 개 실행
+  for (let i = 0; i < n && rafQueue.length; i++) {
+    const cb = rafQueue.shift();
+    clock += 200;                                // minGap 은 절대 병목이 안 되게 크게 전진
+    cb();
+  }
+}
+// 페이지 로드가 이미 예약해둔 초기 y핏 프레임을 실제로 실행해 소진시켜야
+// 클로저 내부의 raf 변수가 null 로 돌아온다(단순히 rafQueue 배열만 비우면
+// 내부 raf 는 여전히 "예약됨" 상태로 남아 이후 setTarget() 이 재예약을 안 한다).
+pump(20);
+relayoutCalls.length = 0;
+
+// 드래그 시작 + 8틱 동안 계속 구간을 옮기며(실제 연속 드래그 흉내) 매 틱 pump.
+for (let i = 0; i < 8; i++) {
+  gd.emit("plotly_relayouting", {"xaxis.range": [50 - i * 5, 150 + i * 5]});
+  pump(1);
+}
+const duringDrag = relayoutCalls.filter(u => Array.isArray(u["yaxis.range"])).length;
+
+// 제스처 종료 — dragging=false 전환 직후 캐치업이 일어나야 한다.
+gd.layout.xaxis = Object.assign({}, gd.layout.xaxis, { range: [-10, 250] });
+gd.emit("plotly_relayout", {"xaxis.range": [-10, 250]});
+pump(3);
+const afterEnd = relayoutCalls.filter(u => Array.isArray(u["yaxis.range"])).length;
+
+console.log("RESULT " + duringDrag + " " + afterEnd);
+"""
+
+
+@pytest.mark.skipif(_NODE is None, reason="node 미설치 — 런타임 JS 검증 스킵")
+def test_heavy_chart_skips_live_y_follow_while_dragging_then_catches_up(tmp_path):
+    """지표 많은 무거운 차트는 드래그 "중" y축 relayout 을 생략해 X축 팬과 안 겹치고,
+    제스처가 끝나면 즉시 캐치업해야 한다."""
+    idx = pd.date_range("2025-01-01", periods=300, freq="D")
+    close = [100 + (i % 40) + (5 if i == 200 else 0) - (5 if i == 60 else 0) for i in range(300)]
+    df = pd.DataFrame({"Open": close, "High": [c + 2 for c in close],
+                       "Low": [c - 2 for c in close], "Close": close,
+                       "Volume": [1e6] * 300}, index=idx)
+    fig = charts.price_chart(df, "TEST", kind="candle", show_volume=True, view_days=365)
+    html = plotly_embed.pannable_chart_html(fig, df, height=460, view_days=365,
+                                            vol_axis="yaxis2", store_key="TEST:1d:lin")
+    js = re.findall(r"<script>(.*?)</script>", html, re.S)[-1]
+    harness = _HEAVY_DRAG_HARNESS.replace("__REDRAW_COST__", "60").replace("__SCRIPT__", js)
+    runner = tmp_path / "heavy_drag.js"
+    runner.write_text(harness, encoding="utf-8")
+    r = subprocess.run([_NODE, str(runner)], capture_output=True, text=True, timeout=30)
+    assert r.returncode == 0, f"heavy drag fail: {r.stdout}\n{r.stderr}"
+    m = re.search(r"RESULT (\d+) (\d+)", r.stdout)
+    assert m, r.stdout
+    during_drag, after_end = int(m.group(1)), int(m.group(2))
+    assert during_drag < 8, f"heavy 차트인데 8틱 내내 y relayout 이 계속됨(during={during_drag})"
+    assert after_end > during_drag, (
+        f"제스처 종료 후 캐치업 relayout 이 안 일어남(during={during_drag}, after={after_end})"
+    )
+
+
+@pytest.mark.skipif(_NODE is None, reason="node 미설치 — 런타임 JS 검증 스킵")
+def test_light_chart_keeps_live_y_follow_while_dragging(tmp_path):
+    """가벼운 차트는 기존처럼 드래그 "중"에도 매 틱 y축이 실시간으로 따라와야 한다
+    (heavy-skip 로직이 가벼운 차트의 기존 동작을 회귀시키면 안 됨)."""
+    idx = pd.date_range("2025-01-01", periods=300, freq="D")
+    close = [100 + (i % 40) + (5 if i == 200 else 0) - (5 if i == 60 else 0) for i in range(300)]
+    df = pd.DataFrame({"Open": close, "High": [c + 2 for c in close],
+                       "Low": [c - 2 for c in close], "Close": close,
+                       "Volume": [1e6] * 300}, index=idx)
+    fig = charts.price_chart(df, "TEST", kind="candle", show_volume=True, view_days=365)
+    html = plotly_embed.pannable_chart_html(fig, df, height=460, view_days=365,
+                                            vol_axis="yaxis2", store_key="TEST:1d:lin")
+    js = re.findall(r"<script>(.*?)</script>", html, re.S)[-1]
+    harness = _HEAVY_DRAG_HARNESS.replace("__REDRAW_COST__", "2").replace("__SCRIPT__", js)
+    runner = tmp_path / "light_drag.js"
+    runner.write_text(harness, encoding="utf-8")
+    r = subprocess.run([_NODE, str(runner)], capture_output=True, text=True, timeout=30)
+    assert r.returncode == 0, f"light drag fail: {r.stdout}\n{r.stderr}"
+    m = re.search(r"RESULT (\d+) (\d+)", r.stdout)
+    assert m, r.stdout
+    during_drag = int(m.group(1))
+    assert during_drag == 8, f"가벼운 차트인데 드래그 중 y 추종이 억제됨(during={during_drag})"

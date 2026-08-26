@@ -368,6 +368,10 @@ _TEMPLATE = r"""
   // 목표와 차이가 시각적으로 무의미하면(데드밴드) relayout 자체를 생략한다.
   let target = null, curY = null, raf = null, busy = false;
   let costMs = 8, lastApply = 0, lastStep = 0;
+  const HEAVY_REDRAW_MS = 24;   // relayout 1회가 이보다 비싸면(지표 많은 무거운 차트)
+                                 // 드래그·핀치 "중"엔 y 적용을 생략 — X축 팬과 경합 방지.
+                                 // curY 는 계속 target 을 lerp 로 쫓아가고, 제스처가
+                                 // 끝나 dragging=false 가 되는 즉시 다음 틱에서 캐치업한다.
 
   function animStep() {
     raf = null;
@@ -389,7 +393,8 @@ _TEMPLATE = r"""
     const applied = gd.layout.yaxis.range || [];
     const visDelta = Math.abs((applied[0] ?? 1e18) - curY.price[0])
                    + Math.abs((applied[1] ?? 1e18) - curY.price[1]);
-    if (!busy && now - lastApply >= minGap && visDelta > span * 0.004) {
+    const heavyWhileGesturing = dragging && costMs > HEAVY_REDRAW_MS;
+    if (!heavyWhileGesturing && !busy && now - lastApply >= minGap && visDelta > span * 0.004) {
       busy = true; guard++; lastApply = now;
       const t0 = performance.now();
       const upd = {"yaxis.range": curY.price.slice()};
