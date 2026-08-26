@@ -280,11 +280,34 @@ def _script(mod, call):
     ("from dashboard.pages import research", "research.render()"),
     ("from dashboard.pages import kr_etf", "kr_etf.render()"),
     ("from dashboard.pages import ai_console", "ai_console.render()"),
+    ("from dashboard.pages import ai_wiki", "ai_wiki.render()"),
 ])
 def test_page_renders_without_exception(mod, call):
     at = AppTest.from_string(_script(mod, call), default_timeout=30)
     at.run()
     assert not at.exception, f"{mod}: {at.exception}"
+
+
+def test_ai_wiki_page_has_no_dead_save_trigger_button(monkeypatch, tmp_path):
+    """'현재 편집값으로 저장' 버튼은 session_state["wiki_save_trigger"] 만 세팅하고
+    아무도 그 키를 읽지 않아 클릭해도 아무 일도 안 일어나던 죽은 버튼(2026-08-26 감사).
+    폼 안의 '위키 저장' 버튼이 실제 저장 경로이므로 죽은 버튼은 제거했다."""
+    monkeypatch.setenv("AGENT_CONSOLE_SHARED_MEMORY_DIR", str(tmp_path / "shared-memory"))
+
+    from agent_console import wiki
+    wiki.upsert_page({
+        "title": "스모크용 페이지", "summary": "요약", "body": "본문",
+        "surface": "market", "kind": "note", "status": "draft", "source_refs": [],
+    })
+
+    at = AppTest.from_string(_script("from dashboard.pages import ai_wiki", "ai_wiki.render()"),
+                             default_timeout=30)
+    at.run()
+
+    assert not at.exception
+    labels = [b.label for b in at.button]
+    assert "현재 편집값으로 저장" not in labels
+    assert "삭제" in labels
 
 
 def test_ai_console_strategy_canvas_allocation_normalize():

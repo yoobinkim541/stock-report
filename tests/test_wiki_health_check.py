@@ -211,6 +211,68 @@ def test_run_llm_health_review_failure_graceful(monkeypatch):
     assert actions == []
 
 
+def test_main_archive_action_targets_only_recommended_page(monkeypatch, tmp_path):
+    """LLM 이 특정 page_id 만 archive 하라고 했는데, 실제로는 wiki.archive_stale_pages(
+    max_age_days=0) 를 호출해 신선한 페이지까지 전부 archive 되던 버그(2026-08-26 감사) —
+    live 위키에서 헬스체크 크론(2시간 주기) 발동 시각마다 십수~수십 개 페이지가 한꺼번에
+    archived 되는 패턴으로 실제 발생 확인됨."""
+    _isolate(monkeypatch, tmp_path)
+
+    import sys
+
+    from agent_console import wiki
+    from reports import wiki_health_check
+
+    target = wiki.upsert_page({
+        "title": "LLM 이 archive 하라고 지목한 페이지", "summary": "요약", "body": "본문",
+        "surface": "market", "kind": "note", "status": "reviewed", "source_refs": [],
+    })
+    untouched = wiki.upsert_page({
+        "title": "방금 갱신된 무관한 신선 페이지", "summary": "요약", "body": "본문",
+        "surface": "market", "kind": "note", "status": "reviewed", "source_refs": [],
+    })
+
+    monkeypatch.setattr(
+        wiki_health_check, "run_llm_health_review",
+        lambda report: [{"page_id": target["id"], "action": "archive", "reason": "stale"}],
+    )
+    monkeypatch.setattr(sys, "argv", ["wiki_health_check"])
+
+    exit_code = wiki_health_check.main()
+
+    assert exit_code == 0
+    assert wiki.get_page(target["id"])["status"] == "archived"
+    assert wiki.get_page(untouched["id"])["status"] != "archived"
+
+
+def test_main_reactivate_action_sets_valid_status_not_active(monkeypatch, tmp_path):
+    """"active" 는 VALID_STATUSES 에 없어 normalize_trust_status() 가 조용히
+    "draft" 로 깎아내리던 버그(2026-08-26 감사) — reactivate 는 reviewed 로 복귀해야 한다."""
+    _isolate(monkeypatch, tmp_path)
+
+    import sys
+
+    from agent_console import wiki
+    from reports import wiki_health_check
+
+    archived = wiki.upsert_page({
+        "title": "재활성화 대상 페이지", "summary": "요약", "body": "본문",
+        "surface": "market", "kind": "note", "status": "archived",
+        "source_refs": ["https://example.com/evidence"],
+    })
+
+    monkeypatch.setattr(
+        wiki_health_check, "run_llm_health_review",
+        lambda report: [{"page_id": archived["id"], "action": "reactivate", "reason": "복귀"}],
+    )
+    monkeypatch.setattr(sys, "argv", ["wiki_health_check"])
+
+    exit_code = wiki_health_check.main()
+
+    assert exit_code == 0
+    assert wiki.get_page(archived["id"])["status"] == "reviewed"
+
+
 def test_main_with_llm_gate_skips_llm_on_dry_run(monkeypatch, tmp_path):
     _isolate(monkeypatch, tmp_path)
 

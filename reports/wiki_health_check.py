@@ -173,13 +173,18 @@ def main() -> int:
             act = action.get("action")
             page_id = action.get("page_id")
             if act == "archive":
-                wiki.archive_stale_pages(max_age_days=0)
+                page = wiki.get_page(page_id)
+                if page:
+                    page["status"] = "archived"
+                    wiki.upsert_page(page)
             elif act == "delete":
                 wiki.delete_page(page_id)
             elif act == "reactivate":
                 page = wiki.get_page(page_id)
                 if page:
-                    page["status"] = "active"
+                    # "active" 는 VALID_STATUSES 에 없어 normalize_trust_status() 가
+                    # 조용히 "draft" 로 깎아내렸다(감사 2026-08-26) — reviewed 로 복귀.
+                    page["status"] = "reviewed"
                     wiki.upsert_page(page)
 
     print(format_report(report))

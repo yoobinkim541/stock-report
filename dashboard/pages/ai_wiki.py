@@ -122,10 +122,7 @@ def render():
             if selected:
                 st.session_state["wiki_selected_page_id"] = selected["id"]
                 _page_card(selected)
-                c1, c2 = st.columns(2)
-                if c1.button("현재 편집값으로 저장", type="primary", width="stretch"):
-                    st.session_state["wiki_save_trigger"] = selected["id"]
-                if c2.button("삭제", width="stretch"):
+                if st.button("삭제", width="stretch"):
                     if wiki.delete_page(selected["id"]):
                         st.toast("위키 페이지 삭제 완료")
                         st.rerun()
