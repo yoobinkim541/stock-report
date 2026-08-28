@@ -2,9 +2,13 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 from dataclasses import dataclass
+import hashlib
 import json
 from math import isfinite
 import re
+import secrets
+import time
+from threading import RLock
 from typing import Any
 
 import pandas as pd
@@ -18,12 +22,14 @@ from ml.strategy_studio import (
     build_strategy_report,
     diff_strategy_specs,
     evaluate_validation_folds,
+    get_signal_provider,
     run_strategy_backtest,
     make_cpcv_splits,
     make_purged_walk_forward_splits,
     promotion_gate,
     strategy_spec_hash,
 )
+from ml.strategy_studio.spec import _SUPPORTED_INDICATORS, _SUPPORTED_PLUGIN_NAMES, SUPPORTED_SIGNAL_TYPES
 from ml.strategy_studio.validation import _activation_provenance_check_ok as _strict_activation_provenance_check_ok
 
 from . import agent, storage
@@ -93,6 +99,7 @@ _FORBIDDEN_PATCH_TOKENS = re.compile(
     flags=re.IGNORECASE,
 )
 _TRAVERSAL_VALUE = re.compile(r"(?:^|[/\\])\.\.(?:[/\\]|$)|^(?:[/\\]{2}|/|[A-Za-z]:[/\\])|^~[/\\]")
+_PATH_LIKE_VALUE = re.compile(r"[/\\]|\.\.")
 _PROVIDER_FIELDS = {
     "features": frozenset({"plugin", "type", "name", "kind", "lookback", "lookbacks", "window", "period", "source", "output", "enabled", "version"}),
     "indicators": frozenset({"plugin", "type", "name", "kind", "lookback", "lookbacks", "window", "period", "source", "output", "method", "std_mult", "signal", "enabled", "version"}),
@@ -100,15 +107,106 @@ _PROVIDER_FIELDS = {
 }
 
 
-@dataclass(frozen=True, slots=True)
-class _ValidatedActivationToken:
-    """Opaque capability issued only by a successful full validation run."""
+_ACTIVATION_CAPABILITY_TTL_SECONDS = 300.0
 
+
+class _ValidatedActivationToken:
+    """Opaque handle for one server-issued, one-time activation capability."""
+
+    __slots__ = ("__nonce",)
+
+    def __init__(self) -> None:
+        self.__nonce = secrets.token_urlsafe(32)
+
+    def _nonce(self) -> str:
+        return self.__nonce
+
+
+@dataclass(frozen=True, slots=True)
+class _ActivationCapabilityRecord:
+    capability: _ValidatedActivationToken
+    nonce: str
     spec_id: str
     spec_hash: str
+    validation_digest: str
+    validation_result: dict[str, object]
     run_id: str
     environment: str
     validation_mode: str
+    expires_at: float
+
+
+_ACTIVATION_CAPABILITIES: dict[int, _ActivationCapabilityRecord] = {}
+_ACTIVATION_CAPABILITY_LOCK = RLock()
+
+
+def _issue_activation_capability(
+    *,
+    spec_id: str,
+    spec_hash: str,
+    validation_digest: str,
+    validation_result: Mapping[str, object],
+    run_id: str,
+    environment: str,
+    validation_mode: str,
+) -> _ValidatedActivationToken:
+    capability = _ValidatedActivationToken()
+    record = _ActivationCapabilityRecord(
+        capability=capability,
+        nonce=capability._nonce(),
+        spec_id=spec_id,
+        spec_hash=spec_hash,
+        validation_digest=validation_digest,
+        validation_result=dict(validation_result),
+        run_id=run_id,
+        environment=environment,
+        validation_mode=validation_mode,
+        expires_at=time.monotonic() + _ACTIVATION_CAPABILITY_TTL_SECONDS,
+    )
+    with _ACTIVATION_CAPABILITY_LOCK:
+        _prune_activation_capabilities_locked()
+        _ACTIVATION_CAPABILITIES[id(capability)] = record
+    return capability
+
+
+def _prune_activation_capabilities_locked() -> None:
+    now = time.monotonic()
+    expired = [
+        key for key, record in _ACTIVATION_CAPABILITIES.items()
+        if record.expires_at <= now
+    ]
+    for key in expired:
+        _ACTIVATION_CAPABILITIES.pop(key, None)
+
+
+def _consume_activation_capability(
+    token: object,
+    *,
+    spec_id: str,
+    strategy: StrategySpec,
+) -> None:
+    if not isinstance(token, _ValidatedActivationToken):
+        raise ValueError("live state requires a validated activation token")
+    with _ACTIVATION_CAPABILITY_LOCK:
+        _prune_activation_capabilities_locked()
+        record = _ACTIVATION_CAPABILITIES.get(id(token))
+        if record is None or record.capability is not token:
+            raise ValueError("validated activation token is not a server-issued capability")
+        if record.nonce != token._nonce():
+            raise ValueError("validated activation token is invalid")
+        if record.environment != "live":
+            raise ValueError("validated activation token environment mismatch")
+        if record.spec_id and record.spec_id != str(spec_id or ""):
+            raise ValueError("validated activation token strategy mismatch")
+        if record.validation_mode not in {"purged_walk_forward", "cpcv"}:
+            raise ValueError("validated activation token mode is not activation-safe")
+        if record.spec_hash != strategy_spec_hash(strategy):
+            raise ValueError("validated activation token does not match the saved strategy")
+        if record.validation_digest != _full_validation_digest(record.validation_result):
+            raise ValueError("validated activation token validation evidence is invalid")
+        if _activation_gate_errors(record.validation_result):
+            raise ValueError("validated activation token validation gates are no longer satisfied")
+        _ACTIVATION_CAPABILITIES.pop(id(token), None)
 
 
 def run_strategy_spec(
@@ -149,17 +247,15 @@ def _run_strategy_spec_internal(
             benchmark=strategy.base_symbol or None,
             period=requested_period,
         )
+        activation_token = None
     else:
-        raw = _run_full_validation(
+        raw, activation_token = _run_full_validation(
             strategy,
             period=requested_period,
             validation_mode=mode,
             spec_id=spec_id,
             activation_environment=activation_environment,
         )
-    activation_token = raw.pop("_activation_token", None)
-    if not isinstance(activation_token, _ValidatedActivationToken):
-        activation_token = None
     report = _json_safe(raw.get("report") or {})
     validation = _mapping_copy(raw.get("validation")) or _mapping_copy(report.get("validation")) or {}
     promotion = _mapping_copy(raw.get("promotion")) or _mapping_copy(report.get("promotion")) or {}
@@ -221,7 +317,7 @@ def _run_full_validation(
     validation_mode: str,
     spec_id: str | None,
     activation_environment: str | None,
-) -> dict[str, Any]:
+) -> tuple[dict[str, Any], _ValidatedActivationToken | None]:
     """Run every requested out-of-sample fold through the shared engine."""
 
     prices = _load_prices(strategy, period=period)
@@ -301,6 +397,7 @@ def _run_full_validation(
     decision = promotion_gate(validation_report, gate_config)
     validation_report.promotion_eligible = bool(decision.accepted)
     validation_payload = validation_report.to_dict()
+    _bind_validation_provenance_checks(validation_payload)
     promotion_payload = decision.to_dict()
     warnings = list(dict.fromkeys(
         [*split_warnings]
@@ -336,24 +433,11 @@ def _run_full_validation(
             "ok": False,
         }
 
-    token = None
-    if (
-        activation_environment in {"paper", "live"}
-        and decision.accepted
-        and decision.activation_safe
-        and ok
-        and _activation_data_quality_ok(data_quality)
-    ):
-        token = _ValidatedActivationToken(
-            spec_id=str(spec_id or strategy.id or ""),
-            spec_hash=strategy_spec_hash(strategy),
-            run_id=f"validation-{strategy_spec_hash(strategy)}-{validation_mode}",
-            environment=str(activation_environment),
-            validation_mode=validation_mode,
-        )
-    return _json_safe({
+    run_id = f"validation-{strategy_spec_hash(strategy)}-{validation_mode}"
+    result_payload = {
         "ok": ok,
-        "run_id": f"validation-{strategy_spec_hash(strategy)}-{validation_mode}",
+        "run_id": run_id,
+        "validation_mode": validation_mode,
         "spec": strategy.to_dict(),
         "report": report,
         "metrics": validation_payload.get("aggregate") or {},
@@ -366,8 +450,66 @@ def _run_full_validation(
         "errors": errors,
         "folds": validation_payload.get("folds") or [],
         "trade_count": int((validation_payload.get("aggregate") or {}).get("trade_count") or 0),
-        "_activation_token": token,
-    })
+    }
+    token = None
+    if (
+        activation_environment == "live"
+        and decision.accepted
+        and decision.activation_safe
+        and ok
+        and _activation_data_quality_ok(data_quality)
+    ):
+        spec_hash = strategy_spec_hash(strategy)
+        validation_digest = _full_validation_digest(result_payload)
+        token = _issue_activation_capability(
+            spec_id=str(spec_id or strategy.id or ""),
+            spec_hash=spec_hash,
+            validation_digest=validation_digest,
+            validation_result=_json_safe(result_payload),
+            run_id=run_id,
+            environment="live",
+            validation_mode=validation_mode,
+        )
+    return _json_safe(result_payload), token
+
+
+def _full_validation_digest(result: Mapping[str, object]) -> str:
+    """Bind a capability to the complete, server-produced validation result."""
+
+    canonical = json.dumps(
+        _json_safe(dict(result)),
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+
+def _bind_validation_provenance_checks(validation_payload: dict[str, Any]) -> None:
+    """Attach each evaluator provenance result to its exact validation fold."""
+
+    provenance_value = validation_payload.get("provenance")
+    if not isinstance(provenance_value, Mapping):
+        return
+    checks = provenance_value.get("checks")
+    folds = validation_payload.get("folds")
+    if not isinstance(checks, list) or not isinstance(folds, list):
+        return
+    bound: list[object] = []
+    for fold, check in zip(folds, checks):
+        if not isinstance(check, Mapping):
+            bound.append(check)
+            continue
+        item = dict(check)
+        if not any(key in item for key in ("fold", "path_id", "fold_id")) and isinstance(fold, Mapping):
+            fold_id, aliases_agree = _consistent_alias(fold, ("path_id", "fold_id", "fold"))
+            if aliases_agree:
+                item["fold"] = fold_id
+        bound.append(item)
+    if len(bound) == len(checks):
+        provenance = dict(provenance_value)
+        provenance["checks"] = bound
+        validation_payload["provenance"] = provenance
 
 
 def _build_validation_splits(
@@ -869,7 +1011,10 @@ def _scan_patch_forbidden_values(value: object, path: str, errors: list[str]) ->
                 errors.append(f"forbidden patch field: {child_path}")
             if key == "environment" and str(child or "").strip().lower() == "live":
                 errors.append("live activation is not a patchable operation")
-            if isinstance(child, str) and _TRAVERSAL_VALUE.search(child.strip()):
+            if isinstance(child, str) and (
+                _TRAVERSAL_VALUE.search(child.strip())
+                or _PATH_LIKE_VALUE.search(child.strip())
+            ):
                 errors.append(f"path-like patch value is forbidden at {child_path}")
             _scan_patch_forbidden_values(child, child_path, errors)
         return
@@ -1007,8 +1152,38 @@ def _validate_provider_mapping(
             elif isinstance(child, Mapping):
                 _validate_provider_mapping(child, "signal", child_path, errors)
             continue
+        if key in {"plugin", "type", "provider", "kind"}:
+            _validate_supported_provider_value(child, target, key, child_path, errors)
+            continue
         if not isinstance(child, str) or not child.strip():
             errors.append(f"{child_path} must be a non-empty string")
+
+
+def _validate_supported_provider_value(
+    value: object,
+    target: str,
+    key: str,
+    path: str,
+    errors: list[str],
+) -> None:
+    if not isinstance(value, str) or not value.strip():
+        errors.append(f"{path} must be a supported non-empty string")
+        return
+    normalized = value.strip().lower()
+    if target == "signal" and key == "type":
+        allowed = SUPPORTED_SIGNAL_TYPES
+    elif target == "signal":
+        try:
+            get_signal_provider(normalized)
+        except (LookupError, TypeError, ValueError):
+            errors.append(f"unsupported provider {key} at {path}: {normalized}")
+        return
+    elif target == "indicators" and key == "kind":
+        allowed = _SUPPORTED_INDICATORS
+    else:
+        allowed = _SUPPORTED_PLUGIN_NAMES
+    if normalized not in allowed:
+        errors.append(f"unsupported provider {key} at {path}: {normalized}")
 
 
 def _finite_provider_number(value: object) -> bool:
@@ -1421,16 +1596,11 @@ def _reject_unapproved_live_state(
         return
     if str(source or "").strip().lower() != "live_activation":
         raise ValueError("live state requires the explicit activation endpoint")
-    if not isinstance(activation_token, _ValidatedActivationToken):
-        raise ValueError("live state requires a validated activation token")
-    if activation_token.environment != "live":
-        raise ValueError("validated activation token environment mismatch")
-    if activation_token.spec_id and activation_token.spec_id != str(spec_id or ""):
-        raise ValueError("validated activation token strategy mismatch")
-    if activation_token.validation_mode not in {"purged_walk_forward", "cpcv"}:
-        raise ValueError("validated activation token mode is not activation-safe")
-    if activation_token.spec_hash != strategy_spec_hash(strategy):
-        raise ValueError("validated activation token does not match the saved strategy")
+    _consume_activation_capability(
+        activation_token,
+        spec_id=str(spec_id or ""),
+        strategy=strategy,
+    )
 
 
 def preview_strategy_spec(

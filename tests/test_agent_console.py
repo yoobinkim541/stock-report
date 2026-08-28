@@ -4062,87 +4062,128 @@ def test_live_activation_saves_a_separate_explicit_version_after_all_gates(monke
     _isolate(monkeypatch, tmp_path)
     from agent_console import strategy_studio
     from agent_console.server import create_app
+    from ml.strategy_studio import StrategyRun
+    import numpy as np
 
-    monkeypatch.setattr(strategy_studio, "get_strategy_spec", lambda *args, **kwargs: {
-        "id": "spec-1", "version": 1, "spec": {"name": "test", "base_symbol": "AAPL"},
-    })
-    def validated_run(spec, **kwargs):
-        strategy = strategy_studio.StrategySpec.from_dict(spec)
-        check = {
-            "fold": "fold-0",
-            "ok": True,
-            "provenance_ok": True,
-            "age_limits_configured": True,
-            "evaluation_at": "2026-01-10T00:00:00Z",
-            "data": {
-                "source": "test-feed",
-                "version": "2026-01-09",
-                "as_of": "2026-01-09T00:00:00Z",
-                "status": "complete",
+    provenance = {
+        "data": {
+            "source": "test-feed",
+            "version": "2026-01-01",
+            "as_of": "2026-01-01T00:00:00Z",
+            "status": "complete",
+        },
+        "model": {
+            "model_id": "model-1",
+            "feature_version": "features-1",
+            "model_version": "model-1",
+            "code_commit": "commit-1",
+            "feature_names": ["close"],
+            "metrics": {"score": 1.0},
+            "train_start": "2025-12-01T00:00:00Z",
+            "train_end": "2025-12-31T00:00:00Z",
+            "as_of": "2026-01-01T00:00:00Z",
+            "status": "complete",
+            "provenance_status": "complete",
+            "seed": 1,
+        },
+    }
+    prices = pd.DataFrame(
+        {"AAPL__close": np.linspace(100.0, 110.0, 80)},
+        index=pd.date_range("2026-01-01", periods=80, freq="D", tz="UTC"),
+    )
+    prices.attrs["provenance"] = provenance
+    prices.attrs["data_quality"] = {"status": "complete", "ok": True}
+    monkeypatch.setattr(strategy_studio, "_load_prices", lambda *args, **kwargs: prices)
+    monkeypatch.setattr(
+        strategy_studio,
+        "preview_strategy_spec",
+        lambda *args, **kwargs: pytest.fail("live activation must use full validation"),
+    )
+
+    def validated_fold(spec, fold_prices, **kwargs):
+        offset = validated_fold.calls * 50
+        validated_fold.calls += 1
+        index = pd.date_range("2026-03-01", periods=40, freq="D", tz="UTC") + pd.Timedelta(days=offset)
+        returns = 0.001 + (np.arange(40) % 5) * 0.0001
+        equity = pd.DataFrame(
+            {
+                "net_return": returns,
+                "gross_return": returns + 0.0001,
+                "cost_drag": [0.0001] * 40,
+                "turnover": [0.01] * 40,
             },
-            "model": {
-                "model_id": "model-1",
-                "feature_version": "features-1",
-                "model_version": "model-1",
-                "code_commit": "commit-1",
-                "feature_names": ["close"],
-                "metrics": {"score": 1.0},
-                "train_start": "2026-01-01T00:00:00Z",
-                "train_end": "2026-01-08T00:00:00Z",
-                "as_of": "2026-01-09T00:00:00Z",
-                "status": "complete",
-                "provenance_status": "complete",
-                "seed": 1,
-            },
-        }
-        validation = {
-            "validation_mode": "purged_walk_forward",
-            "promotion_eligible": True,
-            "aggregate": {"provenance_ok": True, "fold_count": 1},
-            "provenance": {"ok": True, "checks": [check]},
-            "folds": [{"path_id": "fold-0"}],
-        }
-        result = {
-            "ok": True,
-            "spec": strategy.to_dict(),
-            "validation_mode": "purged_walk_forward",
-            "validation": validation,
-            "provenance": {"ok": True, "checks": [check]},
-            "data_quality": {"status": "complete", "ok": True},
-            "promotion": {
-                "accepted": True,
-                "activation_safe": True,
-                "preview": False,
-                "environment": "live",
-                "failed_checks": [],
-            },
-        }
-        token = strategy_studio._ValidatedActivationToken(
-            spec_id=str(kwargs["spec_id"]),
-            spec_hash=strategy_studio.strategy_spec_hash(strategy),
-            run_id="run-1",
-            environment="live",
-            validation_mode="purged_walk_forward",
+            index=index,
         )
-        return result, token
+        return StrategyRun(
+            ok=True,
+            spec=dict(spec),
+            metrics={
+                "trade_count": 20,
+                "turnover": 0.01,
+                "cost_drag": 0.001,
+                "regime_concentration": 0.2,
+                "tested_configurations": 2,
+                "configuration_returns": np.column_stack((returns, returns * 0.9)),
+            },
+            trades=[{"pnl": 0.01}] * 20,
+            equity=equity,
+            benchmark={"symbol": "AAPL", "available": True, "metrics": {"net_cagr": 0.0}},
+            signals={"provenance": provenance},
+        )
 
-    monkeypatch.setattr(strategy_studio, "_run_strategy_spec_internal", validated_run)
-    saved = {}
+    validated_fold.calls = 0
+    monkeypatch.setattr(strategy_studio, "run_strategy_backtest", validated_fold)
 
-    def save_version(*args, **kwargs):
-        saved.update({"args": args, "kwargs": kwargs})
-        return {"id": "spec-1", "version": 2, "source": kwargs.get("source")}
-
-    monkeypatch.setattr(strategy_studio, "save_strategy_version", save_version)
+    draft = strategy_studio.save_strategy_spec({
+        "name": "test",
+        "base_symbol": "AAPL",
+        "universe": {"type": "list", "symbols": ["AAPL"]},
+        "validation": {
+            "mode": "purged_walk_forward",
+            "label_horizon": 0,
+            "train_bars": 20,
+            "test_bars": 10,
+            "step_bars": 10,
+            "embargo_bars": 0,
+            "min_trades": 1,
+            "min_test_periods": 1,
+            "min_observations": 30,
+            "max_drawdown": 0.25,
+            "max_turnover": 1.0,
+            "max_pbo": 1.0,
+            "min_dsr": 0.0,
+            "max_regime_concentration": 0.75,
+            "max_data_age_seconds": 31536000,
+            "max_model_age_seconds": 31536000,
+        },
+    })
+    spec_id = draft["id"]
 
     response = create_app().test_client().post(
-        "/api/strategy-studio/specs/spec-1/activate",
+        f"/api/strategy-studio/specs/{spec_id}/activate",
         json={"environment": "live", "confirm_live": True},
     )
 
     assert response.status_code == 200
     assert response.get_json()["activation"]["activated"] is True
-    assert saved["kwargs"]["source"] == "live_activation"
+    assert any(
+        version["source"] == "live_activation"
+        for version in strategy_studio.list_strategy_versions(spec_id)
+    )
+
+
+def test_forged_activation_token_cannot_authorize_live_save(monkeypatch, tmp_path):
+    _isolate(monkeypatch, tmp_path)
+    from agent_console import strategy_studio
+
+    forged = strategy_studio._ValidatedActivationToken()
+    with pytest.raises(ValueError, match="server-issued capability"):
+        strategy_studio.save_strategy_version(
+            "spec-1",
+            {"name": "live", "base_symbol": "AAPL", "promotion": {"environment": "live"}},
+            source="live_activation",
+            activation_token=forged,
+        )
 
 
 def test_draft_save_cannot_persist_live_environment(monkeypatch, tmp_path):
@@ -4258,6 +4299,7 @@ def test_full_validation_routes_use_real_folds_and_keep_preview_single_pass_only
         assert body["validation_mode"] == "purged_walk_forward"
         assert len(body["validation"]["folds"]) == body["validation"]["aggregate"]["fold_count"]
         assert body["validation"]["provenance"]["checks"]
+        assert "_activation_token" not in body
         json.dumps(body)
 
 
@@ -4270,6 +4312,10 @@ def test_provider_patch_schema_rejects_malformed_unknown_and_path_values():
         {"providers": {"features": [{"plugin": "momentum", "unknown": True}]}},
         {"providers": {"signal": {"type": "ensemble", "members": "not-a-list"}}},
         {"providers": {"indicators": [{"name": "ema", "period": "14"}]}},
+        {"providers": {"features": [{"plugin": "not-registered"}]}},
+        {"providers": {"signal": {"type": "not-a-signal"}}},
+        {"providers": {"signal": {"plugin": "not-registered"}}},
+        {"providers": {"indicators": [{"kind": "not-an-indicator"}]}},
         {"providers": {"features": [{"plugin": "momentum", "path": "../../secret"}]}},
         {"providers": {"features": [{"plugin": "momentum", "python_path": "safe"}]}},
         {"providers": {"features": [{"plugin": "momentum", "source": "exec('/tmp/x')"}]}},
