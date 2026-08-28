@@ -243,7 +243,7 @@ def predict_with_metadata(
     provenance = _model_provenance(metadata)
     provenance_required = bool(metadata.get("require_provenance", False))
     if provenance_required and provenance is None:
-        missing_provenance = _missing_model_provenance_fields(metadata)
+        missing_provenance = _missing_model_provenance_fields(metadata) or ["invalid"]
         raise ValueError(f"model provenance missing: {', '.join(missing_provenance)}")
 
     expected = metadata.get("feature_names") if _has_metadata_value(metadata.get("feature_names")) else metadata.get("feature_columns")
@@ -279,6 +279,12 @@ def predict_with_metadata(
         raise ValueError(f"prediction metadata missing: {', '.join(missing_output)}")
 
     warnings: list[str] = []
+    provenance_fields = _missing_model_provenance_fields(metadata)
+    if provenance_fields:
+        warnings.extend(f"model_provenance_missing:{name}" for name in provenance_fields)
+    elif provenance is None:
+        warnings.append("model_provenance_invalid")
+    warnings.extend(_prediction_as_of_warnings(as_of, features))
     freshness = _data_freshness(
         features,
         metadata,
@@ -337,6 +343,9 @@ def _model_provenance(metadata: Mapping[str, object]) -> ModelProvenance | None:
 
 
 def _missing_model_provenance_fields(metadata: Mapping[str, object]) -> list[str]:
+    nested = metadata.get("provenance")
+    if isinstance(nested, Mapping):
+        metadata = {**dict(nested), **dict(metadata)}
     required = ("model_id", "feature_version", "model_version", "feature_names", "train_start", "train_end", "code_commit", "seed")
     missing: list[str] = []
     for name in required:
@@ -355,16 +364,20 @@ def _data_freshness(
     evaluation_at: object | None,
     max_data_age_seconds: float | None,
 ) -> dict[str, object]:
-    snapshot = features.attrs.get("data_snapshot") if isinstance(features.attrs, Mapping) else None
-    snapshot = snapshot if isinstance(snapshot, DataSnapshot) else DataSnapshot.from_dict(snapshot) if isinstance(snapshot, Mapping) and "data_stamps" in snapshot else None
+    snapshots, snapshot_warnings = _data_snapshots(features, metadata)
     source_metadata = metadata.get("data") if isinstance(metadata.get("data"), Mapping) else {}
-    data_as_of = (
-        metadata.get("data_available_at") or metadata.get("data_received_at") or metadata.get("data_as_of")
-        or source_metadata.get("available_at") or source_metadata.get("received_at") or source_metadata.get("as_of")
+    explicit_data_as_of = (
+        metadata.get("data_available_at")
+        or metadata.get("data_received_at")
+        or source_metadata.get("available_at")
+        or source_metadata.get("received_at")
     )
-    if data_as_of is None and snapshot is not None:
-        data_as_of = snapshot.latest_transport_at
-    evaluated = evaluation_at or metadata.get("evaluation_at")
+    # ``data_as_of`` is retained as an explicit legacy scalar only when no
+    # snapshot exists.  A source event/as-of timestamp is never transport
+    # freshness evidence.
+    if not snapshots and explicit_data_as_of is None:
+        explicit_data_as_of = metadata.get("data_as_of")
+    evaluated = evaluation_at if evaluation_at is not None else metadata.get("evaluation_at")
     limit_value = max_data_age_seconds
     if limit_value is None:
         for key in ("max_data_age_seconds", "freshness_limit_seconds", "data_max_age_seconds", "profile_freshness_seconds"):
@@ -377,11 +390,8 @@ def _data_freshness(
             limit_value = profile.get("freshness_seconds") or profile.get("max_data_age_seconds")
         elif profile:
             limit_value = _PROFILE_FRESHNESS_SECONDS.get(str(profile).strip().lower())
-    warnings: list[str] = []
-    data_timestamp = _metadata_timestamp(data_as_of)
+    warnings: list[str] = list(snapshot_warnings)
     evaluation_timestamp = _metadata_timestamp(evaluated)
-    if snapshot is not None:
-        warnings.extend(snapshot.warnings or [])
     try:
         limit = None if limit_value is None else float(limit_value)
     except (TypeError, ValueError):
@@ -390,12 +400,121 @@ def _data_freshness(
     if limit is not None and (not np.isfinite(limit) or limit < 0):
         limit = None
         warnings.append("freshness_limit_invalid")
+    if snapshots:
+        snapshot_results = [
+            _snapshot_freshness(snapshot, evaluation_timestamp, limit)
+            for snapshot in snapshots
+        ]
+        for result in snapshot_results:
+            warnings.extend(result["warnings"])
+        statuses = [str(result["status"]) for result in snapshot_results]
+        status = next((value for value in ("invalid", "stale", "unknown", "fresh") if value in statuses), "unknown")
+        timestamps = [
+            _metadata_timestamp(result["data_as_of"])
+            for result in snapshot_results
+            if result["data_as_of"] is not None
+        ]
+        ages = [result["age_seconds"] for result in snapshot_results if result["age_seconds"] is not None]
+        data_timestamp = min(timestamps) if timestamps else None
+        age = max(ages) if ages else None
+    else:
+        data_timestamp = _metadata_timestamp(explicit_data_as_of)
+        if data_timestamp is None:
+            warnings.append("freshness_timestamp_missing")
+            status = "unknown"
+            age = None
+        elif evaluation_timestamp is None:
+            warnings.append("freshness_evaluation_missing")
+            status = "unknown"
+            age = None
+        else:
+            age = (evaluation_timestamp - data_timestamp).total_seconds()
+            if age < 0:
+                warnings.append("future_timestamp")
+                status = "invalid"
+            elif limit is None:
+                warnings.append("freshness_limit_missing")
+                status = "unknown"
+            elif age > limit:
+                warnings.append("data_stale")
+                status = "stale"
+            else:
+                status = "fresh"
+        snapshot_results = []
+    if snapshots and evaluation_timestamp is None:
+        warnings.append("freshness_evaluation_missing")
+    return {
+        "status": status,
+        "data_as_of": data_timestamp.isoformat() if data_timestamp is not None else None,
+        "evaluation_at": evaluation_timestamp.isoformat() if evaluation_timestamp is not None else None,
+        "age_seconds": age,
+        "max_age_seconds": limit,
+        "warnings": list(dict.fromkeys(warnings)),
+        "snapshots": snapshot_results,
+    }
+
+
+def _data_snapshots(
+    features: pd.DataFrame,
+    metadata: Mapping[str, object],
+) -> tuple[list[DataSnapshot], list[str]]:
+    """Read singular and plural snapshot contracts without silently dropping errors."""
+
+    containers: list[object] = []
+    if isinstance(features.attrs, Mapping):
+        containers.extend(features.attrs.get(name) for name in ("data_snapshot", "data_snapshots"))
+    containers.extend(metadata.get(name) for name in ("data_snapshot", "data_snapshots"))
+    source_metadata = metadata.get("data")
+    if isinstance(source_metadata, Mapping):
+        containers.extend(source_metadata.get(name) for name in ("data_snapshot", "data_snapshots", "snapshots"))
+    snapshots: list[DataSnapshot] = []
+    warnings: list[str] = []
+    seen: set[str] = set()
+    for container in containers:
+        if container is None:
+            continue
+        payloads: list[object]
+        if isinstance(container, DataSnapshot):
+            payloads = [container]
+        elif isinstance(container, Mapping) and "data_stamps" in container:
+            payloads = [container]
+        elif isinstance(container, Mapping):
+            payloads = [container[key] for key in sorted(container, key=str)]
+        elif isinstance(container, (list, tuple)):
+            payloads = list(container)
+        else:
+            warnings.append("data_snapshot_invalid")
+            continue
+        for payload in payloads:
+            try:
+                snapshot = payload if isinstance(payload, DataSnapshot) else DataSnapshot.from_dict(payload)  # type: ignore[arg-type]
+            except (TypeError, ValueError):
+                warnings.append("data_snapshot_invalid")
+                continue
+            if snapshot.snapshot_id in seen:
+                continue
+            seen.add(snapshot.snapshot_id)
+            snapshots.append(snapshot)
+    snapshots.sort(key=lambda snapshot: (snapshot.snapshot_id or "", snapshot.event_start or ""))
+    return snapshots, list(dict.fromkeys(warnings))
+
+
+def _snapshot_freshness(
+    snapshot: DataSnapshot,
+    evaluation_timestamp: pd.Timestamp | None,
+    limit: float | None,
+) -> dict[str, object]:
+    warnings = list(snapshot.warnings or [])
+    if any(stamp.received_at is None for stamp in snapshot.data_stamps):
+        warnings.append("received_at_missing")
+    if any(stamp.available_at is None for stamp in snapshot.data_stamps):
+        warnings.append("available_at_missing")
+    data_timestamp = _metadata_timestamp(snapshot.latest_transport_at)
     if data_timestamp is None:
         warnings.append("freshness_timestamp_missing")
         status = "unknown"
         age = None
     elif evaluation_timestamp is None:
-        warnings.append("freshness_evaluation_missing")
         status = "unknown"
         age = None
     else:
@@ -411,23 +530,55 @@ def _data_freshness(
             status = "stale"
         else:
             status = "fresh"
-    snapshot_status = (
-        (snapshot.freshness or {}).get("status") if snapshot is not None else None
-    ) or (snapshot.quality if snapshot is not None else "")
+    snapshot_status = (snapshot.freshness or {}).get("status") or snapshot.quality
     if snapshot_status in {"stale", "expired"}:
         warnings.append("data_stale")
-        status = "stale"
+        status = "stale" if status == "fresh" else status
     elif snapshot_status in {"invalid", "missing"}:
         warnings.append(f"data_quality_{snapshot_status}")
         status = "invalid" if snapshot_status == "invalid" else "unknown"
     return {
+        "snapshot_id": snapshot.snapshot_id,
         "status": status,
         "data_as_of": data_timestamp.isoformat() if data_timestamp is not None else None,
         "evaluation_at": evaluation_timestamp.isoformat() if evaluation_timestamp is not None else None,
         "age_seconds": age,
         "max_age_seconds": limit,
-        "warnings": list(dict.fromkeys(warnings)),
+        "warnings": list(dict.fromkeys(str(value) for value in warnings)),
     }
+
+
+def _prediction_as_of_warnings(as_of: object, features: pd.DataFrame) -> list[str]:
+    """Report prediction rows whose declared training as-of is in the future."""
+
+    if not isinstance(features.index, (pd.DatetimeIndex, pd.MultiIndex)):
+        return []
+    if isinstance(features.index, pd.MultiIndex):
+        level = "timestamp" if "timestamp" in features.index.names else 0
+        prediction_times = list(features.index.get_level_values(level))
+    else:
+        prediction_times = list(features.index)
+    if isinstance(as_of, pd.Series):
+        values = list(as_of.reindex(features.index)) if as_of.index.equals(features.index) else list(as_of)
+    elif isinstance(as_of, pd.DataFrame):
+        values = list(as_of.reindex(features.index).iloc[:, 0]) if as_of.index.equals(features.index) else list(as_of.iloc[:, 0])
+    elif isinstance(as_of, (list, tuple, np.ndarray, pd.Index)):
+        values = list(as_of)
+    else:
+        values = [as_of] * len(prediction_times)
+    if len(values) == 1 and len(prediction_times) > 1:
+        values *= len(prediction_times)
+    if len(values) != len(prediction_times):
+        return ["prediction_as_of_invalid"]
+    warnings: list[str] = []
+    for prediction_time, training_time in zip(prediction_times, values):
+        prediction = _metadata_timestamp(prediction_time)
+        training = _metadata_timestamp(training_time)
+        if prediction is None or training is None:
+            warnings.append("prediction_as_of_invalid")
+        elif training > prediction:
+            warnings.append("prediction_as_of_after_timestamp")
+    return list(dict.fromkeys(warnings))
 
 
 def _metadata_timestamp(value: object) -> pd.Timestamp | None:

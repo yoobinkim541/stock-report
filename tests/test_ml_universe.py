@@ -58,6 +58,21 @@ def test_point_in_time_universe_does_not_open_invalid_expiry_dates():
     assert point_in_time_universe(membership, pd.Timestamp("2026-08-28")) == ["B"]
 
 
+def test_point_in_time_universe_exposes_invalid_rows_as_diagnostics():
+    membership = pd.DataFrame([
+        {"symbol": "A", "effective_from": "2026-01-01", "effective_to": "not-a-date"},
+        {"symbol": "B", "effective_from": "2026-01-01", "effective_to": None},
+    ])
+
+    result = point_in_time_universe(membership, pd.Timestamp("2026-08-28"))
+
+    assert result == ["B"]
+    assert result.status == "warning"
+    assert result.invalid_rows
+    assert any(item["reason"] == "effective_to_invalid" for item in result.diagnostics)
+    json.dumps(result.to_dict(), allow_nan=False)
+
+
 def test_seeds_are_uppercase():
     for t in nasdaq100_seed():
         assert t == t.upper(), f"Not uppercase: {t}"

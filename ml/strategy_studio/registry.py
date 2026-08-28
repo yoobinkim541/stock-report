@@ -50,7 +50,11 @@ class RegisteredModel:
         missing = model_provenance_missing_fields(
             {**self.metadata, "model_id": self.model_id}, model=self.model
         )
-        return [f"model provenance missing: {name}" for name in missing]
+        if missing:
+            return [f"model provenance missing: {name}" for name in missing]
+        if build_model_provenance(self.model_id, self.metadata, model=self.model) is None:
+            return ["model provenance invalid"]
+        return []
 
     def to_dict(self) -> dict[str, object]:
         payload: dict[str, object] = {

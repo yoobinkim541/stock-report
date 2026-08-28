@@ -57,7 +57,9 @@ def compile_strategy(spec: dict[str, Any] | StrategySpec, prices: pd.DataFrame) 
     strategy = StrategySpec.from_dict(spec)
     warnings = list(strategy.validate())
     price_store = _normalize_price_store(prices)
+    _copy_data_provenance_attrs(price_store, prices)
     close_panel = _close_panel_from_store(price_store)
+    _copy_data_provenance_attrs(close_panel, price_store)
     if close_panel.empty:
         return CompiledStrategy(strategy, close_panel, price_store, {}, warnings=warnings, errors=["price panel is empty"])
 
@@ -648,6 +650,16 @@ def _normalize_price_store(prices: pd.DataFrame) -> pd.DataFrame:
         new_columns.append(name)
     frame.columns = new_columns
     return frame.sort_index().ffill().dropna(how="all")
+
+
+def _copy_data_provenance_attrs(target: pd.DataFrame, source: object) -> None:
+    """Keep data snapshot attrs across price-store normalization copies."""
+
+    if not isinstance(target, pd.DataFrame) or not isinstance(getattr(source, "attrs", None), dict):
+        return
+    for key in ("data_snapshot", "data_snapshots", "source_coverage", "provenance"):
+        if key in source.attrs:
+            target.attrs[key] = source.attrs[key]
 
 
 def _close_panel_from_store(store: pd.DataFrame) -> pd.DataFrame:

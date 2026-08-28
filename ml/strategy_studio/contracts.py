@@ -220,11 +220,13 @@ class DataSnapshot:
 
     @property
     def latest_transport_at(self) -> str | None:
-        """Return the newest observed availability/receipt/event boundary."""
+        """Return the newest observed availability or receipt boundary."""
 
         values = [
-            stamp.available_at or stamp.received_at or stamp.timestamp
+            value
             for stamp in self.data_stamps
+            for value in (stamp.available_at, stamp.received_at)
+            if value is not None
         ]
         return max(values, key=_timestamp_sort_key) if values else None
 
@@ -238,7 +240,7 @@ class DataSnapshot:
                 "version": self.snapshot_id,
                 "as_of": self.event_end,
                 "status": self.quality,
-                "freshness": (self.freshness or {}).get("status") or self.quality,
+                "freshness": (self.freshness or {}).get("status"),
                 "received_at": self.latest_received_at,
                 "available_at": self.latest_available_at,
                 "raw_ref": self.raw_ref,

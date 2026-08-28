@@ -21,9 +21,9 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 from ml import data_pipeline
 
 
-def _fake_ohlcv(tickers, rows: int = 60) -> pd.DataFrame:
+def _fake_ohlcv(tickers, rows: int = 60, tz: str | None = None) -> pd.DataFrame:
     """yf.download 멀티인덱스 응답 모사 (컬럼: (field, ticker))."""
-    idx = pd.date_range("2024-01-01", periods=rows, freq="B")
+    idx = pd.date_range("2024-01-01", periods=rows, freq="B", tz=tz)
     fields = ["Open", "High", "Low", "Close", "Volume"]
     cols = pd.MultiIndex.from_product([fields, tickers])
     data = np.arange(rows * len(fields) * len(tickers), dtype=float).reshape(rows, -1) + 1.0
@@ -120,6 +120,22 @@ def test_cache_first_skips_download(monkeypatch):
     assert called["n"] == 0
     assert "CACHED" in out
     assert len(out["CACHED"]) == 60
+
+
+def test_collector_preserves_timezone_aware_event_index_and_snapshot(monkeypatch):
+    def aware_download(batch, **kwargs):
+        return _fake_ohlcv(list(batch), tz="Asia/Seoul")
+
+    _install_fake_yf(monkeypatch, aware_download)
+
+    out = data_pipeline.fetch_prices(["AWARE"], days=120, batch_size=20)
+
+    frame = out["AWARE"]
+    snapshot = frame.attrs["data_snapshot"]
+    assert str(frame.index.tz) == "Asia/Seoul"
+    assert snapshot.data_stamps[0].timestamp.endswith("+09:00")
+    assert pd.Timestamp(snapshot.data_stamps[0].timestamp).tz_convert("UTC") == frame.index[0].tz_convert("UTC")
+    assert snapshot.data_stamps[0].received_at is not None
 
 
 if __name__ == "__main__":

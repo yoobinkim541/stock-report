@@ -9,11 +9,12 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from ml import data_sources
 from ml.data_pipeline import (
+    build_ml_dataset,
     normalize_data_snapshot,
     source_coverage,
     source_freshness,
 )
-from ml.strategy_studio.contracts import DataStamp, ModelProvenance, serialize_event
+from ml.strategy_studio.contracts import DataSnapshot, DataStamp, ModelProvenance, serialize_event
 from ml.strategy_studio.contracts import deserialize_event
 
 
@@ -128,6 +129,50 @@ def test_snapshot_marks_missing_event_and_availability_metadata_without_fabricat
     assert snapshot.data_stamps[0].available_at is None
 
 
+def test_missing_transport_timestamps_remain_unknown_and_do_not_use_event_time():
+    frame = pd.DataFrame(
+        {"close": [100.0]},
+        index=pd.to_datetime(["2026-08-28T10:00:00Z"]),
+    )
+
+    snapshot = normalize_data_snapshot(
+        frame,
+        symbol="A",
+        source="kis",
+        timeframe="5m",
+        session="regular",
+        adjustment="raw",
+    )
+
+    assert snapshot.data_stamps[0].received_at is None
+    assert snapshot.data_stamps[0].available_at is None
+    assert snapshot.latest_transport_at is None
+    assert source_freshness(
+        snapshot,
+        evaluation_at="2026-08-28T10:01:00Z",
+        max_age_seconds=60,
+    )["status"] == "unknown"
+    assert snapshot.to_provenance()["data"]["freshness"] is None
+
+
+def test_malformed_transport_timestamp_is_rejected_without_event_fallback():
+    frame = pd.DataFrame(
+        {"close": [100.0]},
+        index=pd.to_datetime(["2026-08-28T10:00:00Z"]),
+    )
+    frame.attrs["received_at"] = "not-a-timestamp"
+
+    with pytest.raises(ValueError, match="received_at"):
+        normalize_data_snapshot(
+            frame,
+            symbol="A",
+            source="kis",
+            timeframe="5m",
+            session="regular",
+            adjustment="raw",
+        )
+
+
 def test_stale_snapshot_is_visible_in_freshness_and_coverage_diagnostics():
     frame = pd.DataFrame({"close": [100.0]}, index=pd.to_datetime(["2026-08-28T09:00:00Z"]))
     frame.attrs["received_at"] = "2026-08-28T09:00:02Z"
@@ -146,6 +191,7 @@ def test_stale_snapshot_is_visible_in_freshness_and_coverage_diagnostics():
     assert coverage["coverage_ratio"] == pytest.approx(0.5)
     assert "B" in coverage["missing_symbols"]
     assert any("data_stale" in warning for warning in coverage["warnings"])
+    assert coverage["ok"] is False
 
 
 def test_explicit_stale_quality_remains_stale_even_with_recent_transport_time():
@@ -181,6 +227,98 @@ def test_source_coverage_merges_symbols_from_same_source():
     assert coverage["sources"]["kis"]["symbols"] == ["A", "B"]
     assert coverage["sources"]["kis"]["observations"] == 2
     assert coverage["sources"]["kis"]["freshness"]["status"] == "fresh"
+
+
+def test_source_coverage_is_not_ok_when_freshness_is_unknown_and_is_json_safe():
+    snapshot = DataSnapshot(
+        [DataStamp("A", "2026-08-28T10:00:00Z", "kis", "5m", "complete")],
+        raw_ref=None,
+        quality="complete",
+    )
+
+    coverage = source_coverage(
+        [snapshot],
+        expected_symbols=["A"],
+        evaluation_at="2026-08-28T10:01:00Z",
+        max_age_seconds=60,
+    )
+
+    assert coverage["sources"]["kis"]["freshness"]["status"] == "unknown"
+    assert coverage["ok"] is False
+    json.dumps(coverage, allow_nan=False)
+
+
+def test_snapshot_provenance_does_not_derive_freshness_from_quality():
+    snapshot = DataSnapshot(
+        [DataStamp("A", "2026-08-28T10:00:00Z", "kis", "5m", "complete")],
+        raw_ref=None,
+        quality="complete",
+    )
+
+    assert snapshot.to_provenance()["data"]["status"] == "complete"
+    assert snapshot.to_provenance()["data"]["freshness"] is None
+
+
+def test_build_ml_dataset_uses_pit_membership_and_downgrades_malformed_fallback(monkeypatch):
+    from providers import index_membership
+    from ml import data_pipeline
+
+    today = pd.Timestamp.now(tz="UTC").normalize()
+    index = pd.date_range(today - pd.Timedelta(days=150), periods=130, freq="B", tz="UTC")
+    all_tickers = ["A", "QQQ", "SPY", "^VIX", "HYG", "LQD", "IEF", "TLT"]
+    prices = {}
+    for ticker in all_tickers:
+        frame = pd.DataFrame({"Close": range(100, 230)}, index=index)
+        frame.attrs["data_snapshot"] = normalize_data_snapshot(
+            frame,
+            symbol=ticker,
+            source="test-source",
+            timeframe="1d",
+            session="regular",
+            adjustment="raw",
+            received_at=(today + pd.Timedelta(days=1)).isoformat(),
+            available_at=(today + pd.Timedelta(days=1)).isoformat(),
+        )
+        prices[ticker] = frame
+
+    monkeypatch.setattr(data_pipeline, "fetch_universe", lambda mode: ["A"])
+    monkeypatch.setattr(data_pipeline, "fetch_prices", lambda tickers, days: prices)
+    monkeypatch.setattr(data_pipeline, "build_fear_greed_proxy", lambda days: pd.Series(50.0, index=index))
+    monkeypatch.setattr(data_pipeline, "_get_sector_map", lambda tickers: {ticker: 0 for ticker in tickers})
+    monkeypatch.setattr(data_pipeline, "index_multitf_rsi", lambda close: pd.DataFrame(index=close.index))
+    monkeypatch.setattr(
+        data_pipeline,
+        "build_stock_features",
+        lambda ticker, frame, market, qqq_close=None, sector_id=0: pd.DataFrame({"feature": 1.0}, index=frame.index),
+    )
+    monkeypatch.setattr(index_membership, "members_in_window", lambda market, start_date: ["A"])
+
+    end_date = (today - pd.Timedelta(days=5)).date().isoformat()
+    monkeypatch.setattr(
+        index_membership,
+        "membership_intervals",
+        lambda market="sp500": {"A": [("2000-01-01", end_date)]},
+    )
+    applied = build_ml_dataset(mode="sp500", days=100, forward_days=5, survivorship_free=True)
+    assert applied["meta"]["survivorship_free"] is True
+    assert applied["meta"]["survivorship_status"] == "applied"
+    assert applied["features"].index.get_level_values("date").max() <= pd.Timestamp(end_date, tz="UTC")
+
+    monkeypatch.setattr(
+        index_membership,
+        "membership_intervals",
+        lambda market="sp500": {"A": [("2000-01-01", "not-a-date")]},
+    )
+    fallback = build_ml_dataset(mode="sp500", days=100, forward_days=5, survivorship_free=True)
+    assert fallback["meta"]["survivorship_free"] is False
+    assert fallback["meta"]["survivorship_status"] == "unknown"
+    assert "membership_metadata_invalid" in fallback["meta"]["survivorship_warnings"]
+
+    monkeypatch.setattr(index_membership, "membership_intervals", lambda market="sp500": (_ for _ in ()).throw(RuntimeError("provider unavailable")))
+    failed = build_ml_dataset(mode="sp500", days=100, forward_days=5, survivorship_free=True)
+    assert failed["meta"]["survivorship_free"] is False
+    assert failed["meta"]["survivorship_status"] == "unknown"
+    assert "membership_fallback_current_universe" in failed["meta"]["survivorship_warnings"]
 
 
 def test_snapshot_and_model_provenance_are_json_safe():

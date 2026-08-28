@@ -362,6 +362,7 @@ def _model_provider(strategy: Any, compiled: Any) -> SignalPanel:
     confidence = confidence.reindex(index=index, columns=symbols)
     as_of = _metadata_to_panel(output["as_of"], score, default=None).reindex(index=index, columns=symbols)
     diagnostics: list[str] = []
+    diagnostics.extend(str(value) for value in output.get("diagnostics", []) if str(value).strip())
     valid_score = score.notna() & np.isfinite(score)
     valid_confidence = confidence.notna() & np.isfinite(confidence)
     valid_confidence &= (confidence >= 0) & (confidence <= 1)
@@ -478,6 +479,16 @@ def _feature_frame(strategy: Any, compiled: Any) -> pd.DataFrame:
             rows.append(row)
     frame = pd.DataFrame(rows).set_index(["__timestamp", "__symbol"])
     frame.index.names = ["timestamp", "symbol"]
+    source_attrs = getattr(compiled.store, "attrs", {})
+    if not isinstance(source_attrs, dict):
+        source_attrs = {}
+    close_attrs = getattr(compiled.prices, "attrs", {})
+    if not isinstance(close_attrs, dict):
+        close_attrs = {}
+    for key in ("data_snapshot", "data_snapshots", "source_coverage", "provenance"):
+        value = source_attrs.get(key, close_attrs.get(key))
+        if value is not None:
+            frame.attrs[key] = value
     return frame
 
 

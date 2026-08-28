@@ -153,11 +153,10 @@ def normalize_data_snapshot(
 ) -> DataSnapshot:
     """Normalize a price frame into deterministic, point-in-time metadata.
 
-    The market index is the event time.  Receipt defaults to the instant this
-    normalizer receives the frame, while availability is only populated when a
-    collector explicitly supplies it; no event time is reused as a transport
-    timestamp.  A supplied ``frame.attrs`` value is retained as-is after ISO
-    normalization.
+    The market index is the event time.  Receipt and availability remain
+    missing unless the collector or source explicitly supplies them; no event
+    time or wall-clock value is fabricated as transport metadata.  A supplied
+    ``frame.attrs`` value is retained after ISO normalization.
     """
 
     if not isinstance(frame, pd.DataFrame):
@@ -182,12 +181,7 @@ def normalize_data_snapshot(
         raise ValueError("adjustment is required")
 
     supplied_received = received_at if received_at is not None else _metadata_value(frame, "received_at", "retrieved_at", "fetched_at")
-    # Normalization is the collector boundary, so this is an observed receipt
-    # time rather than a fabricated market timestamp.  Callers can provide a
-    # fixed value for replay and tests.
-    if supplied_received is None:
-        supplied_received = datetime.now(timezone.utc)
-    received_text = _timestamp_text(supplied_received, "received_at")
+    received_text = _timestamp_text(supplied_received, "received_at") if supplied_received is not None else None
     supplied_available = available_at if available_at is not None else _metadata_value(frame, "available_at")
     available_text = _timestamp_text(supplied_available, "available_at") if supplied_available is not None else None
     raw_reference = raw_ref if raw_ref is not None else _metadata_value(frame, "raw_ref", "raw_path", "source_ref")
@@ -283,7 +277,9 @@ def normalize_data_snapshot(
         "complete"
     )
     snapshot_quality = _merge_snapshot_quality(explicit_quality, observed_quality)
-    if not frame.empty and supplied_available is None:
+    if stamps and any(stamp.received_at is None for stamp in stamps):
+        warnings.append("received_at_missing")
+    if stamps and any(stamp.available_at is None for stamp in stamps):
         warnings.append("available_at_missing")
     snapshot = DataSnapshot(
         data_stamps=stamps,
@@ -432,12 +428,16 @@ def source_coverage(
         missing = sorted(set(source_expected) - set(source_symbols))
         ratio = len(set(source_symbols) & set(source_expected)) / len(source_expected) if source_expected else 1.0
         source_info = {
+            "source": source,
             "symbols": source_symbols,
             "symbol_count": len(source_symbols),
             "observations": len(source_stamps),
             "coverage_ratio": ratio,
             "missing_symbols": missing,
             "quality": source_snapshot.quality,
+            "raw_ref": source_snapshot.raw_ref,
+            "received_at": source_snapshot.latest_received_at,
+            "available_at": source_snapshot.latest_available_at,
             "freshness": freshness,
             "event_start": source_snapshot.event_start,
             "event_end": source_snapshot.event_end,
@@ -453,6 +453,20 @@ def source_coverage(
         warnings.append("source_snapshot_missing")
     unhealthy_qualities = {"invalid", "incomplete", "missing", "stale", "expired", "unknown"}
     unhealthy_sources = any(info["quality"] in unhealthy_qualities for info in sources.values())
+    unhealthy_freshness = any(info["freshness"]["status"] != "fresh" for info in sources.values())
+    missing_required_metadata = any(
+        warning.rsplit(":", 1)[-1] in {"received_at_missing", "available_at_missing"}
+        for warning in warnings
+    )
+    ok = bool(values) and bool(sources) and not missing_symbols and not unhealthy_sources and not unhealthy_freshness and not missing_required_metadata
+    freshness_statuses = [str(info["freshness"]["status"]) for info in sources.values()]
+    freshness_status = next(
+        (value for value in ("invalid", "stale", "unknown", "fresh") if value in freshness_statuses),
+        "unknown",
+    )
+    status = "ok" if ok else "unknown" if any(
+        info["freshness"]["status"] == "unknown" for info in sources.values()
+    ) or not sources else "incomplete"
     return {
         "expected_symbols": expected,
         "observed_symbols": sorted(observed),
@@ -461,7 +475,9 @@ def source_coverage(
         "source_count": len(sources),
         "sources": sources,
         "warnings": list(dict.fromkeys(warnings)),
-        "ok": bool(values) and not missing_symbols and not unhealthy_sources and not any("data_stale" in warning for warning in warnings),
+        "freshness_status": freshness_status,
+        "status": status,
+        "ok": ok,
     }
 
 
@@ -475,8 +491,42 @@ def _aggregate_snapshot_quality(qualities: Iterable[str]) -> str:
     return "unknown"
 
 
-def point_in_time_universe(symbols: pd.DataFrame, as_of: pd.Timestamp) -> list[str]:
-    """Return members whose inclusive effective interval contains ``as_of``."""
+class PITUniverseResult(list[str]):
+    """List-compatible point-in-time membership result with visible diagnostics."""
+
+    __slots__ = ("status", "warnings", "diagnostics", "invalid_rows")
+
+    def __init__(
+        self,
+        members: Iterable[str],
+        *,
+        status: str,
+        warnings: Iterable[str] = (),
+        diagnostics: Iterable[Mapping[str, Any]] = (),
+        invalid_rows: Iterable[Mapping[str, Any]] = (),
+    ) -> None:
+        super().__init__(members)
+        self.status = str(status)
+        self.warnings = list(dict.fromkeys(str(value) for value in warnings))
+        self.diagnostics = [dict(value) for value in diagnostics]
+        self.invalid_rows = [dict(value) for value in invalid_rows]
+
+    @property
+    def members(self) -> list[str]:
+        return list(self)
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "members": list(self),
+            "status": self.status,
+            "warnings": list(self.warnings),
+            "diagnostics": [dict(value) for value in self.diagnostics],
+            "invalid_rows": [dict(value) for value in self.invalid_rows],
+        }
+
+
+def point_in_time_universe(symbols: pd.DataFrame, as_of: pd.Timestamp) -> PITUniverseResult:
+    """Return members and diagnostics for inclusive effective intervals."""
 
     if not isinstance(symbols, pd.DataFrame):
         raise TypeError("symbols must be a pandas DataFrame")
@@ -488,21 +538,44 @@ def point_in_time_universe(symbols: pd.DataFrame, as_of: pd.Timestamp) -> list[s
     if cutoff is None:
         raise ValueError("as_of must be a valid timestamp")
     members: set[str] = set()
-    for _, row in symbols.iterrows():
+    diagnostics: list[dict[str, Any]] = []
+    for position, (_, row) in enumerate(symbols.iterrows()):
         raw_symbol = row.get("symbol")
         if _is_missing_value(raw_symbol):
+            diagnostics.append({"row": position, "symbol": None, "reason": "symbol_missing"})
             continue
         symbol = str(raw_symbol).strip().upper()
-        start = _membership_boundary(row.get("effective_from"))
-        has_end = "effective_to" in symbols.columns and not _is_missing_value(row.get("effective_to"))
-        end = _membership_boundary(row.get("effective_to"), end=True) if has_end else None
-        if not symbol or start is None:
+        if not symbol:
+            diagnostics.append({"row": position, "symbol": None, "reason": "symbol_missing"})
             continue
+        raw_start = row.get("effective_from")
+        start = _membership_boundary(row.get("effective_from"))
+        if _is_missing_value(raw_start):
+            diagnostics.append({"row": position, "symbol": symbol, "reason": "effective_from_missing"})
+            continue
+        if start is None:
+            diagnostics.append({"row": position, "symbol": symbol, "reason": "effective_from_invalid"})
+            continue
+        has_end = "effective_to" in symbols.columns and not _is_missing_value(row.get("effective_to"))
+        raw_end = row.get("effective_to") if "effective_to" in symbols.columns else None
+        end = _membership_boundary(raw_end, end=True) if has_end else None
         if has_end and end is None:
+            diagnostics.append({"row": position, "symbol": symbol, "reason": "effective_to_invalid"})
+            continue
+        if end is not None and end < start:
+            diagnostics.append({"row": position, "symbol": symbol, "reason": "effective_interval_reversed"})
             continue
         if start <= cutoff and (end is None or cutoff <= end):
             members.add(symbol)
-    return sorted(members)
+    diagnostic_warnings = [str(value["reason"]) for value in diagnostics]
+    status = "ok" if not diagnostics else "warning" if members else "unknown"
+    return PITUniverseResult(
+        sorted(members),
+        status=status,
+        warnings=diagnostic_warnings,
+        diagnostics=diagnostics,
+        invalid_rows=diagnostics,
+    )
 
 
 def _membership_boundary(value: object, *, end: bool = False) -> pd.Timestamp | None:
@@ -524,6 +597,8 @@ def _attach_snapshot_metadata(
     timeframe: str,
     session: str,
     adjustment: str,
+    received_at: object | None = None,
+    available_at: object | None = None,
 ) -> pd.DataFrame:
     """Attach provenance while returning the collector's original frame."""
 
@@ -534,6 +609,8 @@ def _attach_snapshot_metadata(
         timeframe=timeframe,
         session=session,
         adjustment=adjustment,
+        received_at=received_at,
+        available_at=available_at,
     )
     frame.attrs["data_snapshot"] = snapshot
     frame.attrs["provenance"] = snapshot.to_provenance().get("data", {})
@@ -743,15 +820,16 @@ def _store_batch_result(
     """
     if raw is None or len(raw) == 0:
         return
+    received_at = datetime.now(timezone.utc)
     if isinstance(raw.columns, pd.MultiIndex):
         for ticker in batch:
             try:
                 df = raw.xs(ticker, axis=1, level=1).dropna(how="all").copy()
-                df.index = pd.to_datetime(df.index).tz_localize(None)
+                df.index = pd.to_datetime(df.index)
                 if len(df) > 10:
                     _attach_snapshot_metadata(
                         df, symbol=ticker, source="yfinance", timeframe="1d",
-                        session="regular", adjustment="adjusted",
+                        session="regular", adjustment="adjusted", received_at=received_at,
                     )
                     result[ticker] = df
                     _save_cache(f"price_{ticker}_{days}d", df)
@@ -762,11 +840,11 @@ def _store_batch_result(
         ticker = batch[0]
         try:
             df = raw.dropna(how="all").copy()
-            df.index = pd.to_datetime(df.index).tz_localize(None)
+            df.index = pd.to_datetime(df.index)
             if len(df) > 10:
                 _attach_snapshot_metadata(
                     df, symbol=ticker, source="yfinance", timeframe="1d",
-                    session="regular", adjustment="adjusted",
+                    session="regular", adjustment="adjusted", received_at=received_at,
                 )
                 result[ticker] = df
                 _save_cache(f"price_{ticker}_{days}d", df)
@@ -1088,6 +1166,40 @@ def _get_sector_map(tickers: list[str]) -> dict[str, int]:
 
 # ── 메인 데이터셋 빌더 ────────────────────────────────────────────────────────
 
+def _membership_frame_from_intervals(intervals: object) -> pd.DataFrame:
+    """Convert provider intervals to the PIT helper's explicit row contract."""
+
+    if intervals is None:
+        return pd.DataFrame(columns=["symbol", "effective_from", "effective_to"])
+    if not isinstance(intervals, Mapping):
+        raise TypeError("membership intervals must be a mapping")
+    records: list[dict[str, object]] = []
+    for raw_symbol, raw_entries in sorted(intervals.items(), key=lambda item: str(item[0]).upper()):
+        if raw_entries is None:
+            continue
+        if isinstance(raw_entries, Mapping):
+            entries = [raw_entries]
+        elif isinstance(raw_entries, tuple) and len(raw_entries) == 2 and not isinstance(raw_entries[0], (list, tuple, Mapping)):
+            entries = [raw_entries]
+        elif isinstance(raw_entries, (list, tuple)):
+            entries = list(raw_entries)
+        else:
+            raise TypeError(f"membership intervals for {raw_symbol!r} must be a list")
+        for entry in entries:
+            if isinstance(entry, Mapping):
+                start = entry.get("effective_from", entry.get("start"))
+                end = entry.get("effective_to", entry.get("end"))
+            elif isinstance(entry, (list, tuple)) and len(entry) == 2:
+                start, end = entry
+            else:
+                raise ValueError(f"membership interval for {raw_symbol!r} must contain start and end")
+            records.append({
+                "symbol": raw_symbol,
+                "effective_from": start,
+                "effective_to": end,
+            })
+    return pd.DataFrame(records, columns=["symbol", "effective_from", "effective_to"])
+
 def index_multitf_rsi(close: "pd.Series") -> "pd.DataFrame":
     """지수(벤치마크) 일봉/주봉/월봉 RSI(14) — 일별 인덱스로 정렬.
 
@@ -1129,17 +1241,34 @@ def build_ml_dataset(
                 mode, days, forward_days, benchmark_ticker)
 
     # 생존편향 제거: 현재 구성종목 대신 시점별 멤버십(편출·상폐분 포함). 美 S&P500 = fja05680.
-    membership_intervals = None
-    if survivorship_free and mode in ("sp500", "all"):
+    membership_frame: pd.DataFrame | None = None
+    membership_requested = bool(survivorship_free and mode in ("sp500", "all"))
+    membership_warnings: list[str] = []
+    membership_diagnostics: list[dict[str, Any]] = []
+    membership_runtime_error = False
+    membership_used = False
+    if membership_requested:
         try:
             from providers import index_membership as _im
             from datetime import date as _date, timedelta as _td
             _start = (_date.today() - _td(days=int(days * 1.6))).isoformat()
+            raw_intervals = _im.membership_intervals("sp500")
+            membership_frame = _membership_frame_from_intervals(raw_intervals)
+            if membership_frame.empty:
+                raise ValueError("membership intervals are empty")
+            validation = point_in_time_universe(membership_frame, pd.Timestamp(_start, tz="UTC"))
+            membership_diagnostics.extend(validation.diagnostics)
+            if validation.diagnostics or validation.status != "ok":
+                membership_warnings.append("membership_metadata_invalid")
+                raise ValueError("membership intervals contain invalid rows")
             universe = _im.members_in_window("sp500", _start)
-            membership_intervals = _im.membership_intervals("sp500")
+            if not universe:
+                raise ValueError("membership universe is empty")
             logger.info("생존편향 제거 유니버스(시점별 멤버십): %d종목 (현재구성 아님)", len(universe))
         except Exception as e:
             logger.warning("멤버십 유니버스 실패 — 현재구성 폴백: %s", e)
+            membership_frame = None
+            membership_warnings.append("membership_fallback_current_universe")
             universe = fetch_universe(mode)
     else:
         universe = fetch_universe(mode)
@@ -1199,15 +1328,24 @@ def build_ml_dataset(
             continue
 
         # 생존편향 제거: 이 종목이 실제 지수 멤버였던 날짜 표본만(편입 전·편출 후 제외 = point-in-time)
-        if membership_intervals is not None:
-            ivs = membership_intervals.get(ticker, [])
-            if not ivs:
-                continue
-            ds = feat.index.strftime("%Y-%m-%d")
-            keep = [any(s <= d and (e is None or d <= e) for s, e in ivs) for d in ds]
-            feat = feat[keep]
-            if feat.empty:
-                continue
+        if membership_frame is not None:
+            membership_used = True
+            try:
+                keep: list[bool] = []
+                for value in feat.index:
+                    pit = point_in_time_universe(membership_frame, pd.Timestamp(value))
+                    membership_diagnostics.extend(pit.diagnostics)
+                    if pit.status != "ok":
+                        raise ValueError("membership PIT result is not ok")
+                    keep.append(ticker in pit)
+                feat = feat[keep]
+                if feat.empty:
+                    continue
+            except Exception as exc:
+                membership_runtime_error = True
+                membership_warnings.append("membership_filter_failed")
+                logger.warning("PIT 멤버십 필터 실패 — 해당 표본은 폴백: %s", exc)
+                membership_frame = None
 
         # forward 수익은 갭 없는 원 가격 인덱스에서 계산한 뒤 feat.index 로 정렬 —
         # survivorship_free 로 멤버십 구간을 필터하면 feat.index 에 공백이 생겨 위치기반 pct_change 가
@@ -1234,10 +1372,19 @@ def build_ml_dataset(
 
     if not all_features:
         logger.warning("유효 종목 없음 — 빈 데이터셋 반환")
+        survivorship_state = _survivorship_state(
+            membership_requested,
+            membership_frame,
+            membership_used,
+            membership_runtime_error,
+            membership_diagnostics,
+            membership_warnings,
+        )
         return {"features": pd.DataFrame(), "returns": pd.Series(), "excess": pd.Series(),
                 "universe": [], "fg_score": fg, "meta": {
                     "source_coverage": coverage,
                     "data_snapshots": {ticker: snapshot.to_dict() for ticker, snapshot in price_snapshots.items()},
+                    **survivorship_state,
                 }}
 
     features = pd.concat(all_features)
@@ -1247,6 +1394,15 @@ def build_ml_dataset(
     features.attrs["data_snapshots"] = {
         ticker: snapshot.to_dict() for ticker, snapshot in price_snapshots.items()
     }
+
+    survivorship_state = _survivorship_state(
+        membership_requested,
+        membership_frame,
+        membership_used,
+        membership_runtime_error,
+        membership_diagnostics,
+        membership_warnings,
+    )
 
     logger.info(
         "데이터셋 완성: %d행 × %d피처 | 종목 %d개",
@@ -1265,14 +1421,52 @@ def build_ml_dataset(
             "days": days,
             "forward_days": forward_days,
             "benchmark": benchmark_ticker,
-            "survivorship_free": bool(membership_intervals is not None),
-            "bias_warning": ("시점별 멤버십 적용 — survivorship bias 제거(美 상폐주 가격은 무료 공백으로 부분)"
-                             if membership_intervals is not None else
-                             "현재 구성종목 기준 — survivorship bias 있음"),
+            **survivorship_state,
             "built_at": datetime.now(timezone.utc).isoformat(),
             "source_coverage": coverage,
             "data_snapshots": {ticker: snapshot.to_dict() for ticker, snapshot in price_snapshots.items()},
         },
+    }
+
+
+def _survivorship_state(
+    requested: bool,
+    membership_frame: pd.DataFrame | None,
+    used: bool,
+    runtime_error: bool,
+    diagnostics: Iterable[Mapping[str, Any]],
+    warnings: Iterable[str],
+) -> dict[str, Any]:
+    """Build explicit survivorship metadata for both normal and fallback paths."""
+
+    diagnostic_rows = [dict(row) for row in diagnostics]
+    if not requested:
+        return {
+            "survivorship_free": False,
+            "survivorship_status": "not_requested",
+            "survivorship_warnings": [],
+            "survivorship_diagnostics": [],
+            "bias_warning": "현재 구성종목 기준 — survivorship bias 있음",
+        }
+    if membership_frame is not None and used and not runtime_error and not diagnostic_rows:
+        return {
+            "survivorship_free": True,
+            "survivorship_status": "applied",
+            "survivorship_warnings": [],
+            "survivorship_diagnostics": [],
+            "bias_warning": "시점별 멤버십 적용 — survivorship bias 제거(美 상폐주 가격은 무료 공백으로 부분)",
+        }
+    warning_values = list(dict.fromkeys([
+        *[str(value) for value in warnings],
+        "survivorship_free_unknown",
+        "membership_metadata_incomplete",
+    ]))
+    return {
+        "survivorship_free": False,
+        "survivorship_status": "unknown",
+        "survivorship_warnings": warning_values,
+        "survivorship_diagnostics": diagnostic_rows,
+        "bias_warning": "시점별 멤버십 메타데이터 불명확 — survivorship bias 제거 여부 알 수 없음; 현재 구성종목 폴백",
     }
 
 

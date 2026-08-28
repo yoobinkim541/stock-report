@@ -12,6 +12,7 @@ from ml.strategy_studio import (
     run_strategy_backtest,
 )
 from ml.strategy_studio.registry import register_model
+from ml.data_pipeline import normalize_data_snapshot
 
 
 def test_momentum_provider_uses_only_prior_bars_for_score():
@@ -157,6 +158,61 @@ def test_model_provider_broadcasts_registered_confidence_and_preserves_versions(
     assert panel.confidence["AAPL"].tolist() == [0.7, 0.7]
     assert panel.feature_version["AAPL"].iloc[0] == "features-2026-08-28"
     assert panel.model_version["AAPL"].iloc[0] == "fixed-model-v1"
+
+
+def test_model_provider_consumes_plural_snapshots_and_reports_stale_freshness():
+    class FixedModel:
+        feature_names_ = ["close"]
+
+        def predict(self, features):
+            return [0.25] * len(features)
+
+    snapshots = {}
+    for symbol, received_at in (("AAPL", "2026-01-02T00:00:00Z"), ("MSFT", "2026-01-02T00:00:00Z")):
+        frame = pd.DataFrame(
+            {"close": [100.0, 101.0]},
+            index=pd.date_range("2026-01-01", periods=2, tz="UTC"),
+        )
+        snapshots[symbol] = normalize_data_snapshot(
+            frame,
+            symbol=symbol,
+            source="test-source",
+            timeframe="1d",
+            session="regular",
+            adjustment="raw",
+            received_at=received_at,
+            available_at=received_at,
+        ).to_dict()
+
+    prices = pd.DataFrame(
+        {"AAPL": [100.0, 101.0]},
+        index=pd.date_range("2026-01-01", periods=2, tz="UTC"),
+    )
+    prices.attrs["data_snapshots"] = snapshots
+    register_model(
+        "plural-snapshot-model",
+        FixedModel(),
+        {
+            "model_id": "plural-snapshot-model",
+            "feature_version": "features-v1",
+            "model_version": "model-v1",
+            "as_of": "2025-12-31T00:00:00Z",
+            "confidence": 0.7,
+            "feature_names": ["close"],
+            "evaluation_at": "2026-01-03T00:00:00Z",
+            "max_data_age_seconds": 60,
+        },
+    )
+    spec = StrategySpec.from_dict({
+        "name": "model", "base_symbol": "AAPL",
+        "universe": {"type": "list", "symbols": ["AAPL"]},
+        "signal": {"type": "model", "ref": "plural-snapshot-model"},
+    })
+
+    panel = build_signal_panel(spec, compile_strategy(spec, prices))
+
+    assert panel.confidence["AAPL"].tolist() == [0.0, 0.0]
+    assert any("data_stale" in diagnostic for diagnostic in panel.diagnostics)
 
 
 def test_model_provider_rejects_a_feature_schema_mismatch_with_diagnostic():
