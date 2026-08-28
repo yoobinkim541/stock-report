@@ -342,12 +342,14 @@ class ModelProvenance:
         return payload
 
     def to_provenance(self, *, status: str = "complete") -> dict[str, Any]:
+        status_text = _required_text(status, "status")
         return {
             "model": {
                 **self.to_dict(),
                 "as_of": self.train_end,
-                "status": _required_text(status, "status"),
-                "freshness": _required_text(status, "status"),
+                "status": status_text,
+                "freshness": status_text,
+                "provenance_status": "complete",
             }
         }
 

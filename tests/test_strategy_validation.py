@@ -68,7 +68,13 @@ def _activation_provenance_evidence(count: int = 4) -> dict[str, object]:
         },
         "model": {
             "model_id": "model-v1",
+            "feature_version": "features-v1",
             "model_version": "model-v1",
+            "feature_names": ["close"],
+            "train_start": "2024-01-01T00:00:00Z",
+            "train_end": "2024-02-08T00:00:00Z",
+            "code_commit": "abc123",
+            "seed": 42,
             "as_of": "2024-02-09T00:00:00Z",
             "status": "fresh",
             "provenance_status": "complete",
@@ -698,18 +704,88 @@ def test_nat_provenance_timestamp_is_missing_and_not_freshness_safe():
     assert any("data provenance timestamp is missing" in warning for warning in result["warnings"])
 
 
+def test_strict_provenance_rejects_blank_model_provenance_status():
+    result = check_data_model_provenance(
+        {
+            "data": {"source": "prices", "version": "v1", "as_of": "2024-02-09T00:00:00Z", "status": "fresh"},
+            "model": {
+                "model_id": "m1",
+                "feature_version": "features-v1",
+                "model_version": "model-v1",
+                "feature_names": ["close"],
+                "train_start": "2024-01-01T00:00:00Z",
+                "train_end": "2024-02-08T00:00:00Z",
+                "code_commit": "abc123",
+                "seed": 42,
+                "as_of": "2024-02-09T00:00:00Z",
+                "status": "fresh",
+                "provenance_status": " ",
+            },
+        },
+        evaluation_at="2024-02-10T00:00:00Z",
+        max_data_age_seconds=86400,
+        max_model_age_seconds=86400,
+    )
+
+    assert result["ok"] is False
+    assert any("provenance status" in warning for warning in result["warnings"])
+
+
 def test_evaluator_enforces_configured_data_and_model_age_limits():
     run = _run([0.001, -0.001] * 20)
     run.spec["validation"].update({"max_data_age_seconds": 86400, "max_model_age_seconds": 86400})
     run.signals["provenance"] = {
         "data": {"source": "prices", "version": "v1", "as_of": "2024-02-09T00:00:00Z", "freshness": "fresh"},
-        "model": {"model_id": "m1", "model_version": "v1", "trained_until": "2024-02-09T00:00:00Z", "freshness": "fresh"},
+        "model": {
+            "model_id": "m1",
+            "feature_version": "features-v1",
+            "model_version": "v1",
+            "feature_names": ["close"],
+            "train_start": "2024-01-01T00:00:00Z",
+            "train_end": "2024-02-09T00:00:00Z",
+            "code_commit": "abc123",
+            "seed": 42,
+            "as_of": "2024-02-09T00:00:00Z",
+            "freshness": "fresh",
+            "provenance_status": "complete",
+        },
     }
 
     report = evaluate_validation_folds([run], {})
 
     assert report.aggregate["provenance_ok"] is True
     assert report.provenance["checks"][0]["age_limits_configured"] is True
+
+
+def test_activation_rejects_falsely_complete_payload_missing_required_model_fields():
+    evidence = _activation_provenance_evidence(count=1)
+    del evidence["checks"][0]["model"]["code_commit"]
+    report = ValidationReport.from_dict({
+        "validation_mode": "purged_walk_forward",
+        "provenance": evidence,
+        "aggregate": {
+            "net_cagr": 0.12,
+            "benchmark_excess_cagr": 0.04,
+            "max_drawdown": -0.1,
+            "trade_count": 200,
+            "test_periods": 120,
+            "fold_count": 1,
+            "n_observations": 120,
+            "turnover": 0.3,
+            "dsr": 0.99,
+            "pbo": 0.1,
+            "regime_concentration": 0.2,
+            "provenance_ok": True,
+            "dsr_evidence": {"tested_configurations": 4, "method": "dsr"},
+            "pbo_evidence": {"tested_configurations": 4, "matrix_shape": [120, 4]},
+        },
+        "folds": [{"net_cagr": 0.1, "trade_count": 50}],
+    })
+
+    decision = promotion_gate(report, {"environment": "pilot"})
+
+    assert decision.accepted is False
+    assert "provenance" in decision.failed_checks
 
 
 def test_numeric_only_dsr_pbo_report_is_rejected_and_complete_evidence_passes():

@@ -116,6 +116,7 @@ def test_model_registry_exposes_complete_provenance_for_validation():
     assert provenance is not None
     assert provenance.train_end == "2026-08-27T00:00:00+00:00"
     assert provenance.to_provenance()["model"]["model_version"] == "model-v1"
+    assert provenance.to_provenance()["model"]["provenance_status"] == "complete"
 
 
 def test_model_registry_surfaces_malformed_provenance_without_claiming_complete():

@@ -847,6 +847,177 @@ def _provenance_section(payload: Mapping[str, Any], name: str) -> Mapping[str, A
     return {}
 
 
+def _strict_provenance_timestamp(value: object) -> pd.Timestamp | None:
+    if not _is_timestamp_like(value) or _is_missing_scalar(value):
+        return None
+    try:
+        parsed = _canonical_timestamp(value)
+    except (TypeError, ValueError):
+        return None
+    return parsed if not pd.isna(parsed) else None
+
+
+def _strict_data_provenance_diagnostics(
+    data: Mapping[str, Any],
+    *,
+    as_of: object,
+    evaluation: pd.Timestamp | None,
+) -> tuple[list[str], dict[str, object]]:
+    """Validate the source-side fields paired with model provenance."""
+
+    issues: list[str] = []
+    normalized: dict[str, object] = {}
+    for field_name, value in (
+        ("source", data.get("source", data.get("data_source"))),
+        ("version", data.get("version", data.get("data_version"))),
+    ):
+        if not isinstance(value, str):
+            issues.append(f"data provenance field invalid: {field_name}")
+        elif not value.strip():
+            issues.append(f"data provenance field missing: {field_name}")
+        else:
+            normalized[field_name] = value.strip()
+
+    status = data.get("freshness", data.get("status"))
+    if not isinstance(status, str):
+        issues.append("data provenance status is invalid")
+    elif not status.strip():
+        issues.append("data provenance status is missing")
+    else:
+        normalized["status"] = status.strip().lower()
+        if normalized["status"] in {"stale", "expired", "missing", "unknown"}:
+            issues.append(f"data provenance is stale: {normalized['status']}")
+
+    parsed_as_of = _strict_provenance_timestamp(as_of)
+    if parsed_as_of is None:
+        issues.append("data provenance timestamp is invalid")
+    else:
+        normalized["as_of"] = parsed_as_of.isoformat()
+        if evaluation is not None and parsed_as_of > evaluation:
+            issues.append("data timestamp is later than evaluation timestamp")
+    return list(dict.fromkeys(issues)), normalized
+
+
+def _strict_model_provenance_diagnostics(
+    model: Mapping[str, Any],
+    *,
+    evaluation: pd.Timestamp | None,
+) -> tuple[list[str], dict[str, object]]:
+    """Validate the complete model artifact contract used for activation."""
+
+    issues: list[str] = []
+    normalized: dict[str, object] = {}
+
+    for field_name in ("model_id", "feature_version", "model_version", "code_commit"):
+        value = model.get(field_name)
+        if not isinstance(value, str):
+            issues.append(f"model provenance field invalid: {field_name}")
+        elif not value.strip():
+            issues.append(f"model provenance field missing: {field_name}")
+        else:
+            normalized[field_name] = value.strip()
+
+    feature_names = model.get("feature_names")
+    if feature_names is None:
+        feature_names = model.get("feature_columns")
+    if isinstance(feature_names, (str, bytes)) or not isinstance(feature_names, Sequence):
+        issues.append("model provenance field invalid: feature_names")
+    else:
+        names = list(feature_names)
+        if not names or any(not isinstance(name, str) or not name.strip() for name in names):
+            issues.append("model provenance field invalid: feature_names")
+        else:
+            normalized["feature_names"] = [name.strip() for name in names]
+
+    timestamps: dict[str, pd.Timestamp] = {}
+    for field_name in ("train_start", "train_end", "as_of"):
+        if field_name not in model or not _has_metadata_value(model.get(field_name)):
+            issues.append(f"model provenance field missing: {field_name}")
+            continue
+        parsed = _strict_provenance_timestamp(model.get(field_name))
+        if parsed is None:
+            issues.append(f"model provenance field invalid: {field_name}")
+            continue
+        timestamps[field_name] = parsed
+        normalized[field_name] = parsed.isoformat()
+
+    aliases: dict[str, pd.Timestamp] = {}
+    for alias in ("as_of", "trained_until", "model_as_of"):
+        if alias not in model:
+            continue
+        parsed = _strict_provenance_timestamp(model.get(alias))
+        if parsed is None:
+            issues.append(f"model provenance field invalid: {alias}")
+            continue
+        aliases[alias] = parsed
+    if aliases:
+        _, first_timestamp = next(iter(aliases.items()))
+        if any(timestamp != first_timestamp for timestamp in aliases.values()):
+            issues.append("model provenance timestamps are contradictory")
+        if "as_of" in aliases:
+            timestamps["as_of"] = aliases["as_of"]
+            normalized["as_of"] = aliases["as_of"].isoformat()
+
+    seed = model.get("seed")
+    if isinstance(seed, bool) or not isinstance(seed, (int, np.integer)) or int(seed) < 0:
+        issues.append("model provenance field invalid: seed")
+    else:
+        normalized["seed"] = int(seed)
+
+    status = model.get("status", model.get("freshness"))
+    if not isinstance(status, str):
+        issues.append("model provenance status is invalid")
+    elif not status.strip():
+        issues.append("model provenance status is missing")
+    else:
+        normalized["status"] = status.strip().lower()
+        if normalized["status"] not in {"fresh", "complete"}:
+            issues.append(f"model provenance status is invalid: {normalized['status']}")
+    if "status" in model and "freshness" in model:
+        freshness = model["freshness"]
+        if not isinstance(freshness, str) or not freshness.strip():
+            issues.append("model provenance freshness metadata is invalid")
+        elif isinstance(status, str) and status.strip().lower() != freshness.strip().lower():
+            issues.append("model provenance status and freshness are contradictory")
+
+    if "provenance_status" not in model:
+        issues.append("model provenance status is missing")
+    else:
+        provenance_status = model.get("provenance_status")
+        if not isinstance(provenance_status, str):
+            issues.append("model provenance status is invalid")
+        elif not provenance_status.strip():
+            issues.append("model provenance status is missing")
+        elif provenance_status.strip().lower() != "complete":
+            issues.append("model provenance status is not complete")
+        else:
+            normalized["provenance_status"] = "complete"
+    if "provenance_state" in model:
+        provenance_state = model.get("provenance_state")
+        if not isinstance(provenance_state, str) or not provenance_state.strip():
+            issues.append("model provenance state is invalid")
+        elif provenance_state.strip().lower() != "complete":
+            issues.append("model provenance status and state are contradictory")
+
+    train_start = timestamps.get("train_start")
+    train_end = timestamps.get("train_end")
+    model_as_of = timestamps.get("as_of")
+    if train_start is not None and train_end is not None and train_start > train_end:
+        issues.append("model training range is contradictory")
+    if train_end is not None and model_as_of is not None and train_end > model_as_of:
+        issues.append("model training end is later than model as_of")
+    if evaluation is not None:
+        for field_name, timestamp in (
+            ("train_start", train_start),
+            ("train_end", train_end),
+            ("as_of", model_as_of),
+        ):
+            if timestamp is not None and timestamp > evaluation:
+                issues.append(f"model {field_name} is later than evaluation timestamp")
+
+    return list(dict.fromkeys(issues)), normalized
+
+
 def check_data_model_provenance(
     provenance: Mapping[str, Any] | None,
     *,
@@ -888,6 +1059,12 @@ def check_data_model_provenance(
     data_as_of = data.get("as_of", data.get("timestamp", data.get("data_as_of")))
     data_status_value = data.get("freshness", data.get("status", ""))
     data_status = str(data_status_value).strip().lower() if _has_metadata_value(data_status_value) else ""
+    data_diagnostics, normalized_data = _strict_data_provenance_diagnostics(
+        data,
+        as_of=data_as_of,
+        evaluation=evaluation,
+    )
+    warnings.extend(data_diagnostics)
     if not _has_metadata_value(data_source) or not _has_metadata_value(data_version):
         warnings.append("data provenance is incomplete")
     if not data_status:
@@ -913,14 +1090,21 @@ def check_data_model_provenance(
     model_as_of = model.get("as_of", model.get("trained_until", model.get("model_as_of")))
     model_status_value = model.get("freshness", model.get("status", ""))
     model_status = str(model_status_value).strip().lower() if _has_metadata_value(model_status_value) else ""
-    model_provenance_status_value = model.get("provenance_status", model.get("provenance_state", ""))
+    model_provenance_status_value = model.get("provenance_status", "")
     model_provenance_status = (
         str(model_provenance_status_value).strip().lower()
         if _has_metadata_value(model_provenance_status_value) else ""
     )
+    model_diagnostics, normalized_model = _strict_model_provenance_diagnostics(
+        model,
+        evaluation=evaluation,
+    )
+    warnings.extend(model_diagnostics)
     if not _has_metadata_value(model_id) or not _has_metadata_value(model_version):
         warnings.append("model provenance is incomplete")
-    if model_provenance_status and model_provenance_status != "complete":
+    if not model_provenance_status:
+        warnings.append("model provenance status is missing")
+    elif model_provenance_status != "complete":
         warnings.append("model provenance is incomplete")
     if not model_status:
         warnings.append("model provenance freshness metadata is missing")
@@ -946,9 +1130,10 @@ def check_data_model_provenance(
         _has_metadata_value(data_source) and _has_metadata_value(data_version) and _has_metadata_value(data_as_of)
         and data_status and _has_metadata_value(model_id) and _has_metadata_value(model_version)
         and _has_metadata_value(model_as_of)
+        and not data_diagnostics
         and model_status not in {"incomplete", "invalid", "missing", "unknown"}
         and model_status
-        and model_provenance_status in {"", "complete"}
+        and not model_diagnostics
         and evaluation is not None
     )
     ok = bool(complete and age_limits_configured and not errors and not any("stale" in warning for warning in warnings))
@@ -959,13 +1144,24 @@ def check_data_model_provenance(
         "evaluation_at": evaluation,
         "errors": errors,
         "warnings": warnings,
-        "data": {"source": data_source, "version": data_version, "as_of": data_as_of, "status": data_status or None},
+        "data": {
+            "source": normalized_data.get("source", data_source),
+            "version": normalized_data.get("version", data_version),
+            "as_of": normalized_data.get("as_of", data_as_of),
+            "status": normalized_data.get("status", data_status or None),
+        },
         "model": {
-            "model_id": model_id,
-            "model_version": model_version,
-            "as_of": model_as_of,
-            "status": model_status or None,
-            "provenance_status": model_provenance_status or None,
+            "model_id": normalized_model.get("model_id", model_id),
+            "feature_version": normalized_model.get("feature_version", model.get("feature_version")),
+            "model_version": normalized_model.get("model_version", model_version),
+            "feature_names": normalized_model.get("feature_names", model.get("feature_names", model.get("feature_columns"))),
+            "train_start": normalized_model.get("train_start", model.get("train_start")),
+            "train_end": normalized_model.get("train_end", model.get("train_end")),
+            "code_commit": normalized_model.get("code_commit", model.get("code_commit")),
+            "seed": normalized_model.get("seed", model.get("seed")),
+            "as_of": normalized_model.get("as_of", model_as_of),
+            "status": normalized_model.get("status", model_status or None),
+            "provenance_status": normalized_model.get("provenance_status", model_provenance_status or None),
         },
     })
 
@@ -1618,21 +1814,6 @@ def _activation_provenance_check_ok(check: object) -> bool:
         return False
     if not _has_metadata_value(evaluation_at):
         return False
-    if not all(
-        _has_metadata_value(data.get(key))
-        for key in ("source", "version", "as_of", "status")
-    ):
-        return False
-    if not all(
-        _has_metadata_value(model.get(key))
-        for key in ("model_id", "model_version", "as_of", "status")
-    ):
-        return False
-    declared_status = str(model.get("provenance_status") or "").strip().lower()
-    if declared_status and declared_status != "complete":
-        return False
-    if not declared_status and str(model.get("status") or "").strip().lower() not in {"complete", "fresh"}:
-        return False
     try:
         evaluation = _canonical_timestamp(evaluation_at)
         data_as_of = _canonical_timestamp(data["as_of"])
@@ -1640,6 +1821,16 @@ def _activation_provenance_check_ok(check: object) -> bool:
     except (KeyError, TypeError, ValueError):
         return False
     if evaluation is None or data_as_of is None or model_as_of is None:
+        return False
+    data_diagnostics, _ = _strict_data_provenance_diagnostics(
+        data,
+        as_of=data["as_of"],
+        evaluation=evaluation,
+    )
+    if data_diagnostics:
+        return False
+    model_diagnostics, _ = _strict_model_provenance_diagnostics(model, evaluation=evaluation)
+    if model_diagnostics:
         return False
     return data_as_of <= evaluation and model_as_of <= evaluation
 

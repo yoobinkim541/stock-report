@@ -2,7 +2,7 @@
 
 ## Status
 
-Task 6 fix round 2 is implemented in `/home/ubuntu/projects/stock-report`.
+Task 6 fix round 3 is implemented in `/home/ubuntu/projects/stock-report`.
 The provenance layer remains additive: existing price collectors continue to
 return the same `DataFrame` shapes, with normalized snapshots attached through
 `.attrs`.
@@ -56,17 +56,28 @@ return the same `DataFrame` shapes, with normalized snapshots attached through
   Explicit invalid provenance states can no longer be masked by complete
   top-level metadata fields.
 - Strict promotion now requires explicit per-fold provenance checks with data
-  source/version/as-of, model identity/version/as-of, configured age limits,
-  complete model provenance status, and evaluation chronology. An aggregate
-  `provenance_ok=True` claim or `require_provenance=False` compatibility flag
-  cannot authorize activation.
+- Strict validation and promotion now require typed, non-empty source/model
+  identity, feature version, model version, feature names, training start/end,
+  as-of, code commit, seed, freshness status, and explicit
+  `provenance_status="complete"`. Training chronology must satisfy
+  `train_start <= train_end <= as_of <= evaluation_at`; contradictory aliases,
+  malformed values, blank status, and future training metadata are rejected.
+  Generated complete model provenance now carries the explicit status field.
+- Activation revalidates the complete per-fold model and data payload instead of
+  inferring completeness from `model.status` or `freshness`. Legacy prediction
+  calls remain compatible and diagnostic-rich when `require_provenance=False`,
+  but that compatibility path cannot authorize activation.
 
 ## Verification
 
 - `./.venv/bin/pytest tests/test_ml_data_sources.py tests/test_ml_universe.py tests/test_data_pipeline_resilience.py tests/test_strategy_registry.py tests/test_strategy_signals.py -q`
   - `69 passed`
+- `./.venv/bin/pytest tests/test_ml_data_sources.py tests/test_ml_universe.py tests/test_data_pipeline_resilience.py tests/test_strategy_registry.py tests/test_strategy_signals.py tests/test_strategy_validation.py -q`
+  - `109 passed, 2 warnings`
 - `./.venv/bin/pytest tests/test_ml_data_sources.py tests/test_ml_universe.py tests/test_data_pipeline_resilience.py tests/test_strategy_registry.py tests/test_strategy_signals.py tests/test_strategy_contracts.py tests/test_ml_models.py tests/test_strategy_validation.py -q`
-  - `134 passed, 13 warnings`
+  - `136 passed, 13 warnings`
+- `./.venv/bin/pytest tests/test_strategy_validation.py::test_strict_provenance_rejects_blank_model_provenance_status tests/test_strategy_validation.py::test_activation_rejects_falsely_complete_payload_missing_required_model_fields tests/test_strategy_registry.py::test_model_registry_exposes_complete_provenance_for_validation -q`
+  - `3 passed`
 - `./.venv/bin/pytest tests/test_strategy_validation.py::test_default_compatible_prediction_provenance_cannot_activate_task5 tests/test_strategy_validation.py::test_activation_rejects_aggregate_only_provenance_claim_without_fold_checks tests/test_strategy_registry.py::test_default_prediction_does_not_mask_explicit_incomplete_provenance_status -q`
   - `3 passed`
 - `./.venv/bin/python -m compileall -q ml/strategy_studio ml/data_pipeline.py ml/models.py`
@@ -84,8 +95,9 @@ return the same `DataFrame` shapes, with normalized snapshots attached through
 - Legacy registry metadata remains accepted to preserve Task 2 behavior.
   Such registrations expose missing-provenance warnings and cannot satisfy a
   strict provenance-required prediction or Task 5 promotion check. Strict
-  promotion reports must now carry explicit per-fold provenance evidence;
-  aggregate-only hand-authored reports are intentionally rejected.
+  promotion reports must now carry explicit per-fold provenance evidence with
+  all required typed model fields; aggregate-only hand-authored reports are
+  intentionally rejected.
 - The point-in-time helper remains list-compatible, but callers that need
   completeness must inspect its status/diagnostics. Invalid rows are excluded
   from membership and exposed, which can reduce coverage rather than treating
