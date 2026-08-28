@@ -917,8 +917,9 @@ def _strict_model_provenance_diagnostics(
         else:
             normalized[field_name] = value.strip()
 
-    feature_names = model.get("feature_names")
-    if feature_names is None:
+    if "feature_names" in model:
+        feature_names = model["feature_names"]
+    else:
         feature_names = model.get("feature_columns")
     if isinstance(feature_names, (str, bytes)) or not isinstance(feature_names, Sequence):
         issues.append("model provenance field invalid: feature_names")
@@ -928,6 +929,35 @@ def _strict_model_provenance_diagnostics(
             issues.append("model provenance field invalid: feature_names")
         else:
             normalized["feature_names"] = [name.strip() for name in names]
+
+    if "metrics" not in model:
+        issues.append("model provenance field missing: metrics")
+    else:
+        metrics = model["metrics"]
+        if not isinstance(metrics, Mapping):
+            issues.append("model provenance field invalid: metrics")
+        else:
+            normalized_metrics: dict[str, float | None] = {}
+            for name, value in metrics.items():
+                if not isinstance(name, str) or not name.strip():
+                    issues.append("model provenance field invalid: metrics")
+                    continue
+                if value is None:
+                    normalized_metrics[name.strip()] = None
+                    continue
+                if isinstance(value, bool):
+                    issues.append("model provenance field invalid: metrics")
+                    continue
+                try:
+                    number = float(value)
+                except (TypeError, ValueError):
+                    issues.append("model provenance field invalid: metrics")
+                    continue
+                if not isfinite(number):
+                    issues.append("model provenance field invalid: metrics")
+                    continue
+                normalized_metrics[name.strip()] = number
+            normalized["metrics"] = dict(sorted(normalized_metrics.items()))
 
     timestamps: dict[str, pd.Timestamp] = {}
     for field_name in ("train_start", "train_end", "as_of"):
@@ -1155,6 +1185,7 @@ def check_data_model_provenance(
             "feature_version": normalized_model.get("feature_version", model.get("feature_version")),
             "model_version": normalized_model.get("model_version", model_version),
             "feature_names": normalized_model.get("feature_names", model.get("feature_names", model.get("feature_columns"))),
+            "metrics": normalized_model.get("metrics", model.get("metrics")),
             "train_start": normalized_model.get("train_start", model.get("train_start")),
             "train_end": normalized_model.get("train_end", model.get("train_end")),
             "code_commit": normalized_model.get("code_commit", model.get("code_commit")),

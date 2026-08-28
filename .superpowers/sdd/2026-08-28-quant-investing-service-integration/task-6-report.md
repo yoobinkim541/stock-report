@@ -124,3 +124,43 @@ return the same `DataFrame` shapes, with normalized snapshots attached through
 - `tests/test_strategy_registry.py`
 - `tests/test_strategy_signals.py`
 - `.superpowers/sdd/2026-08-28-quant-investing-service-integration/task-6-report.md`
+
+## Fix Round 4
+
+Addressed the remaining strict activation validation findings:
+
+- Strict model provenance now requires a `metrics` mapping and validates every
+  metric name/value as a non-empty string and a finite number or `None`.
+  Normalized metrics are retained in the validation output instead of being
+  dropped, and missing or malformed metrics invalidate activation evidence.
+- Canonical `feature_names` now uses presence semantics. The legacy
+  `feature_columns` fallback is used only when the `feature_names` key is
+  absent; explicit `None` or another invalid value fails strict validation.
+- Added focused activation regressions for missing/malformed metrics and
+  explicit-null feature names, plus an assertion that valid metrics survive
+  validation serialization.
+- Task 5 behavior remains unchanged, including the parked chronology-proof
+  alias blocker. Legacy prediction compatibility and the existing Task 6
+  timestamp, PIT universe, freshness, coverage, and plural snapshot behavior
+  remain covered by the regression suites.
+
+### Fix Round 4 Verification
+
+- `./.venv/bin/pytest tests/test_strategy_validation.py -q`
+  - `43 passed, 2 warnings`
+- `./.venv/bin/pytest tests/test_ml_data_sources.py tests/test_ml_universe.py tests/test_data_pipeline_resilience.py tests/test_strategy_registry.py tests/test_strategy_signals.py tests/test_strategy_validation.py -q`
+  - `112 passed, 2 warnings`
+- `./.venv/bin/pytest tests/test_strategy_contracts.py tests/test_ml_models.py -q`
+  - `27 passed, 11 warnings`
+- `./.venv/bin/python -m compileall -q ml/strategy_studio ml/data_pipeline.py ml/models.py`
+  - passed
+- `git diff --check`
+  - passed
+
+### Fix Round 4 Risks and Trade-offs
+
+- Strict activation now requires model metric evidence, so hand-built or older
+  activation payloads without `metrics` remain diagnostic-only until upgraded.
+- Empty metric mappings are accepted because the contract permits a typed
+  `dict[str, float | None]`; unavailable individual metrics should be
+  represented as `None`.

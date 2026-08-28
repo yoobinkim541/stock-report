@@ -71,6 +71,7 @@ def _activation_provenance_evidence(count: int = 4) -> dict[str, object]:
             "feature_version": "features-v1",
             "model_version": "model-v1",
             "feature_names": ["close"],
+            "metrics": {"sharpe": 1.0},
             "train_start": "2024-01-01T00:00:00Z",
             "train_end": "2024-02-08T00:00:00Z",
             "code_commit": "abc123",
@@ -741,6 +742,7 @@ def test_evaluator_enforces_configured_data_and_model_age_limits():
             "feature_version": "features-v1",
             "model_version": "v1",
             "feature_names": ["close"],
+            "metrics": {"sharpe": 1.2},
             "train_start": "2024-01-01T00:00:00Z",
             "train_end": "2024-02-09T00:00:00Z",
             "code_commit": "abc123",
@@ -755,6 +757,7 @@ def test_evaluator_enforces_configured_data_and_model_age_limits():
 
     assert report.aggregate["provenance_ok"] is True
     assert report.provenance["checks"][0]["age_limits_configured"] is True
+    assert report.provenance["checks"][0]["model"]["metrics"] == {"sharpe": 1.2}
 
 
 def test_activation_rejects_falsely_complete_payload_missing_required_model_fields():
@@ -783,6 +786,100 @@ def test_activation_rejects_falsely_complete_payload_missing_required_model_fiel
     })
 
     decision = promotion_gate(report, {"environment": "pilot"})
+
+    assert decision.accepted is False
+    assert "provenance" in decision.failed_checks
+
+
+def test_activation_rejects_model_provenance_with_missing_metrics():
+    evidence = _activation_provenance_evidence(count=1)
+    del evidence["checks"][0]["model"]["metrics"]
+    report = ValidationReport.from_dict({
+        "validation_mode": "purged_walk_forward",
+        "provenance": evidence,
+        "aggregate": {
+            "net_cagr": 0.12,
+            "benchmark_excess_cagr": 0.04,
+            "max_drawdown": -0.1,
+            "trade_count": 200,
+            "test_periods": 120,
+            "fold_count": 1,
+            "n_observations": 120,
+            "turnover": 0.3,
+            "dsr": 0.99,
+            "pbo": 0.1,
+            "regime_concentration": 0.2,
+            "provenance_ok": True,
+            "dsr_evidence": {"tested_configurations": 4, "method": "dsr"},
+            "pbo_evidence": {"tested_configurations": 4, "matrix_shape": [120, 4]},
+        },
+        "folds": [{"net_cagr": 0.1, "trade_count": 50}],
+    })
+
+    decision = promotion_gate(report, {"environment": "pilot", "min_test_periods": 1})
+
+    assert decision.accepted is False
+    assert "provenance" in decision.failed_checks
+
+
+def test_activation_rejects_malformed_model_provenance_metrics():
+    evidence = _activation_provenance_evidence(count=1)
+    evidence["checks"][0]["model"]["metrics"] = {"sharpe": "not-a-number"}
+    report = ValidationReport.from_dict({
+        "validation_mode": "purged_walk_forward",
+        "provenance": evidence,
+        "aggregate": {
+            "net_cagr": 0.12,
+            "benchmark_excess_cagr": 0.04,
+            "max_drawdown": -0.1,
+            "trade_count": 200,
+            "test_periods": 120,
+            "fold_count": 1,
+            "n_observations": 120,
+            "turnover": 0.3,
+            "dsr": 0.99,
+            "pbo": 0.1,
+            "regime_concentration": 0.2,
+            "provenance_ok": True,
+            "dsr_evidence": {"tested_configurations": 4, "method": "dsr"},
+            "pbo_evidence": {"tested_configurations": 4, "matrix_shape": [120, 4]},
+        },
+        "folds": [{"net_cagr": 0.1, "trade_count": 50}],
+    })
+
+    decision = promotion_gate(report, {"environment": "pilot", "min_test_periods": 1})
+
+    assert decision.accepted is False
+    assert "provenance" in decision.failed_checks
+
+
+def test_activation_rejects_explicit_null_feature_names_instead_of_using_feature_columns():
+    evidence = _activation_provenance_evidence(count=1)
+    evidence["checks"][0]["model"]["feature_names"] = None
+    evidence["checks"][0]["model"]["feature_columns"] = ["close"]
+    report = ValidationReport.from_dict({
+        "validation_mode": "purged_walk_forward",
+        "provenance": evidence,
+        "aggregate": {
+            "net_cagr": 0.12,
+            "benchmark_excess_cagr": 0.04,
+            "max_drawdown": -0.1,
+            "trade_count": 200,
+            "test_periods": 120,
+            "fold_count": 1,
+            "n_observations": 120,
+            "turnover": 0.3,
+            "dsr": 0.99,
+            "pbo": 0.1,
+            "regime_concentration": 0.2,
+            "provenance_ok": True,
+            "dsr_evidence": {"tested_configurations": 4, "method": "dsr"},
+            "pbo_evidence": {"tested_configurations": 4, "matrix_shape": [120, 4]},
+        },
+        "folds": [{"net_cagr": 0.1, "trade_count": 50}],
+    })
+
+    decision = promotion_gate(report, {"environment": "pilot", "min_test_periods": 1})
 
     assert decision.accepted is False
     assert "provenance" in decision.failed_checks
