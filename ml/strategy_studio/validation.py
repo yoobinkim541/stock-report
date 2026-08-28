@@ -91,6 +91,8 @@ class ValidationSplit:
     path_id: str = "path-0"
     embargo_bars: int = 0
     blocked: pd.Index = field(default_factory=pd.Index, repr=False, compare=False)
+    future_training: bool = False
+    strictly_chronological: bool = False
 
     def __post_init__(self) -> None:
         train = _normalise_index(self.train, "train")
@@ -106,6 +108,8 @@ class ValidationSplit:
         object.__setattr__(self, "blocked", blocked)
         object.__setattr__(self, "embargo_bars", embargo)
         object.__setattr__(self, "path_id", str(self.path_id))
+        object.__setattr__(self, "future_training", bool(self.future_training))
+        object.__setattr__(self, "strictly_chronological", bool(self.strictly_chronological))
 
     def to_dict(self) -> dict[str, Any]:
         return to_jsonable({
@@ -114,6 +118,8 @@ class ValidationSplit:
             "path_id": self.path_id,
             "embargo_bars": self.embargo_bars,
             "blocked": self.blocked,
+            "future_training": self.future_training,
+            "strictly_chronological": self.strictly_chronological,
         })
 
 
@@ -157,6 +163,9 @@ def check_split_leakage(
             test_start = split.test[0]
             test_end = split.test[-1]
             for start, end in zip(split.train, ends):
+                if end is None or (isinstance(end, float) and np.isnan(end)):
+                    issues.append("label_end_missing")
+                    break
                 if end >= test_start and start <= test_end:
                     issues.append("label_end_overlaps_test")
                     break
@@ -166,9 +175,11 @@ def check_split_leakage(
 def _label_end_values(
     index: pd.Index,
     label_end: pd.Series | Sequence[object] | None,
-    label_horizon: int,
+    label_horizon: int | None,
 ) -> list[object] | None:
     if label_end is None:
+        if label_horizon is None:
+            raise ValueError("label horizon metadata is required for purged validation")
         if label_horizon <= 0:
             return None
         return [index[min(position + label_horizon, len(index) - 1)] for position in range(len(index))]
@@ -177,9 +188,11 @@ def _label_end_values(
         raise ValueError("label_end must have one value per index row")
     if isinstance(index, pd.DatetimeIndex):
         try:
-            parsed = pd.to_datetime(values, errors="raise")
+            parsed = pd.DatetimeIndex(pd.to_datetime(values, errors="raise"))
             if getattr(index, "tz", None) is not None:
-                parsed = pd.to_datetime(parsed, utc=True)
+                parsed = pd.DatetimeIndex(pd.to_datetime(parsed, utc=True))
+            elif parsed.tz is not None:
+                parsed = parsed.tz_convert(None)
             return list(parsed)
         except (TypeError, ValueError) as exc:
             raise ValueError("label_end contains invalid timestamps") from exc
@@ -212,7 +225,7 @@ def make_purged_walk_forward_splits(
     step_bars: int,
     embargo_bars: int,
     *,
-    label_horizon: int = 0,
+    label_horizon: int | None = None,
     label_end: pd.Series | Sequence[object] | None = None,
 ) -> list[ValidationSplit]:
     """Create deterministic fixed-window purged walk-forward splits.
@@ -228,7 +241,7 @@ def make_purged_walk_forward_splits(
     test_size = _non_negative_int(test_bars, "test_bars")
     step = _non_negative_int(step_bars, "step_bars")
     embargo = _non_negative_int(embargo_bars, "embargo_bars")
-    horizon = _non_negative_int(label_horizon, "label_horizon")
+    horizon = _non_negative_int(label_horizon, "label_horizon") if label_horizon is not None else None
     if train_size == 0 or test_size == 0 or step == 0:
         _warn("purged walk-forward windows require positive train, test, and step sizes")
         return []
@@ -236,7 +249,11 @@ def make_purged_walk_forward_splits(
         _warn("purged walk-forward windows do not fit the supplied index")
         return []
 
-    ends = _label_end_values(values, label_end, horizon)
+    try:
+        ends = _label_end_values(values, label_end, horizon)
+    except ValueError as exc:
+        _warn(str(exc))
+        return []
     splits: list[ValidationSplit] = []
     start = 0
     path = 0
@@ -245,6 +262,8 @@ def make_purged_walk_forward_splits(
         test_start = start + train_size + embargo
         test_positions = list(range(test_start, test_start + test_size))
         blocked_positions = set(range(start + train_size, test_start))
+        post_test_end = min(len(values), test_positions[-1] + embargo + (horizon or 0) + 1)
+        blocked_positions.update(range(test_positions[-1] + 1, post_test_end))
         purged = _overlapping_label_positions(values, train_positions, test_positions, ends)
         train_positions = [position for position in train_positions if position not in purged]
         blocked_positions.update(purged)
@@ -274,8 +293,9 @@ def make_cpcv_splits(
     test_groups: int,
     embargo_bars: int,
     *,
-    label_horizon: int = 0,
+    label_horizon: int | None = None,
     label_end: pd.Series | Sequence[object] | None = None,
+    strictly_chronological: bool = False,
 ) -> list[ValidationSplit]:
     """Enumerate chronological CPCV paths with purge and embargo blackout rows."""
 
@@ -283,7 +303,7 @@ def make_cpcv_splits(
     group_count = _non_negative_int(groups, "groups")
     selected_count = _non_negative_int(test_groups, "test_groups")
     embargo = _non_negative_int(embargo_bars, "embargo_bars")
-    horizon = _non_negative_int(label_horizon, "label_horizon")
+    horizon = _non_negative_int(label_horizon, "label_horizon") if label_horizon is not None else None
     if group_count < 2 or selected_count == 0 or selected_count >= group_count:
         _warn("CPCV requires at least two groups and fewer test groups than total groups")
         return []
@@ -292,18 +312,26 @@ def make_cpcv_splits(
         return []
 
     group_positions = [list(part) for part in np.array_split(np.arange(len(values)), group_count)]
-    ends = _label_end_values(values, label_end, horizon)
+    try:
+        ends = _label_end_values(values, label_end, horizon)
+    except ValueError as exc:
+        _warn(str(exc))
+        return []
     splits: list[ValidationSplit] = []
     for combo in combinations(range(group_count), selected_count):
         test_positions = sorted(position for group in combo for position in group_positions[group])
         test_set = set(test_positions)
         blocked: set[int] = set()
         for position in test_positions:
-            left = max(0, position - embargo)
-            right = min(len(values), position + embargo + 1)
+            left = max(0, position - embargo - (horizon or 0))
+            right = min(len(values), position + embargo + (horizon or 0) + 1)
             blocked.update(range(left, right))
         blocked.difference_update(test_set)
-        candidates = [position for position in range(len(values)) if position not in test_set and position not in blocked]
+        if strictly_chronological:
+            candidate_positions = range(min(test_positions))
+        else:
+            candidate_positions = range(len(values))
+        candidates = [position for position in candidate_positions if position not in test_set and position not in blocked]
         purged = _overlapping_label_positions(values, candidates, test_positions, ends)
         blocked.update(purged)
         train_positions = [position for position in candidates if position not in purged]
@@ -314,6 +342,8 @@ def make_cpcv_splits(
             path_id=path_id,
             embargo_bars=embargo,
             blocked=values.take(sorted(blocked)),
+            future_training=any(position > max(test_positions) for position in train_positions),
+            strictly_chronological=strictly_chronological,
         )
         if not train_positions:
             _warn(f"discarded empty validation split after purge: {path_id}")
@@ -339,8 +369,18 @@ def _run_value(run: object, key: str, default: Any = None) -> Any:
 
 
 def _run_metrics(run: object) -> Mapping[str, Any]:
+    if isinstance(run, Mapping):
+        metrics = run.get("metrics")
+        if isinstance(metrics, Mapping) and metrics:
+            return metrics
+        nested = run.get("run")
+        if nested is not None and nested is not run:
+            return _run_metrics(nested)
+        return run
     metrics = _run_value(run, "metrics", {})
-    return metrics if isinstance(metrics, Mapping) else {}
+    if isinstance(metrics, Mapping):
+        return metrics
+    return {}
 
 
 def _run_spec(run: object) -> Mapping[str, Any]:
@@ -360,10 +400,19 @@ def _normalise_series(series: pd.Series) -> pd.Series:
 
 def _run_equity(run: object) -> pd.DataFrame:
     equity = _run_value(run, "equity", None)
-    return equity.copy() if isinstance(equity, pd.DataFrame) else pd.DataFrame()
+    if isinstance(equity, pd.DataFrame):
+        return equity.copy()
+    if equity is None and isinstance(run, Mapping) and run.get("run") is not None:
+        return _run_equity(run["run"])
+    return pd.DataFrame()
 
 
 def _run_returns(run: object, kind: str) -> pd.Series:
+    raw_equity = _run_value(run, "equity", None)
+    if raw_equity is None and isinstance(run, Mapping) and run.get("run") is not None:
+        raw_equity = _run_value(run["run"], "equity", None)
+    if isinstance(raw_equity, pd.Series):
+        return _normalise_series(raw_equity.pct_change().fillna(0.0))
     equity = _run_equity(run)
     if equity.empty:
         return pd.Series(dtype="float64")
@@ -389,7 +438,10 @@ def _returns_nav(returns: pd.Series) -> pd.Series:
     return (1.0 + returns).cumprod()
 
 
-def _periods_per_year(index: pd.Index) -> float:
+def _periods_per_year(index: pd.Index, configured: object | None = None) -> float:
+    configured_value = _finite_float(configured)
+    if configured_value is not None and configured_value > 0:
+        return configured_value
     if not isinstance(index, pd.DatetimeIndex) or len(index) < 2:
         return float(TRADING_DAYS)
     deltas = np.diff(index.asi8) / 1_000_000_000.0
@@ -397,9 +449,16 @@ def _periods_per_year(index: pd.Index) -> float:
     if not len(deltas):
         return float(TRADING_DAYS)
     median_seconds = float(np.median(deltas))
-    if median_seconds >= 20 * 60 * 60:
+    day = 24 * 60 * 60
+    if median_seconds < 20 * 60 * 60:
+        return max(1.0, 365.25 * day / median_seconds)
+    if median_seconds <= 2 * day:
         return float(TRADING_DAYS)
-    return max(1.0, 365.25 * 24 * 60 * 60 / median_seconds)
+    if median_seconds <= 10 * day:
+        return float(365.25 / 7.0)
+    if median_seconds <= 45 * day:
+        return 12.0
+    return max(1.0, 365.25 * day / median_seconds)
 
 
 def _cagr_from_nav(nav: pd.Series) -> float | None:
@@ -444,30 +503,30 @@ def _max_drawdown(nav: pd.Series) -> float | None:
     return _finite_float((nav / running_max - 1.0).min())
 
 
-def _volatility(returns: pd.Series) -> float | None:
+def _volatility(returns: pd.Series, configured_periods: object | None = None) -> float | None:
     if len(returns) < 2:
         return None
     deviation = float(returns.std(ddof=1))
-    return deviation * sqrt(_periods_per_year(returns.index)) if isfinite(deviation) else None
+    return deviation * sqrt(_periods_per_year(returns.index, configured_periods)) if isfinite(deviation) else None
 
 
-def _sharpe(returns: pd.Series) -> float | None:
+def _sharpe(returns: pd.Series, configured_periods: object | None = None) -> float | None:
     if len(returns) < 2:
         return None
     deviation = float(returns.std(ddof=1))
     if not isfinite(deviation) or deviation <= 0:
         return None
-    return float(returns.mean() / deviation * sqrt(_periods_per_year(returns.index)))
+    return float(returns.mean() / deviation * sqrt(_periods_per_year(returns.index, configured_periods)))
 
 
-def _sortino(returns: pd.Series) -> float | None:
+def _sortino(returns: pd.Series, configured_periods: object | None = None) -> float | None:
     if len(returns) < 2:
         return None
     downside = np.minimum(returns.to_numpy(dtype="float64"), 0.0)
     deviation = float(np.sqrt(np.mean(np.square(downside))))
     if not isfinite(deviation) or deviation <= 0:
         return None
-    return float(returns.mean() / deviation * sqrt(_periods_per_year(returns.index)))
+    return float(returns.mean() / deviation * sqrt(_periods_per_year(returns.index, configured_periods)))
 
 
 def _calmar(cagr: float | None, drawdown: float | None) -> float | None:
@@ -529,6 +588,19 @@ def _metric_or_series_mean(run: object, key: str, series: pd.Series) -> float:
     return float(series.mean()) if not series.empty else 0.0
 
 
+def _configured_periods_per_year(run: object) -> float | None:
+    metrics = _run_metrics(run)
+    candidate = metrics.get("periods_per_year")
+    if candidate is None:
+        validation = _run_spec(run).get("validation")
+        if isinstance(validation, Mapping):
+            candidate = validation.get("periods_per_year")
+    if candidate is None:
+        candidate = _run_spec(run).get("periods_per_year")
+    value = _finite_float(candidate)
+    return value if value is not None and value > 0 else None
+
+
 def _fold_metrics(run: object, path_id: str) -> tuple[dict[str, Any], pd.Series, pd.Series, list[float]]:
     net = _run_returns(run, "net")
     gross = _run_returns(run, "gross")
@@ -539,8 +611,7 @@ def _fold_metrics(run: object, path_id: str) -> tuple[dict[str, Any], pd.Series,
     gross_nav = _returns_nav(gross)
     metrics = _run_metrics(run)
     outcomes = _trade_outcomes(run)
-    if not outcomes:
-        outcomes = [float(value) for value in net if value != 0.0]
+    periods_per_year = _periods_per_year(net.index, _configured_periods_per_year(run)) if not net.empty else None
     trade_count = _finite_float(metrics.get("trade_count"))
     if trade_count is None:
         trades = _run_value(run, "trades", [])
@@ -557,11 +628,11 @@ def _fold_metrics(run: object, path_id: str) -> tuple[dict[str, Any], pd.Series,
         "gross_cagr": gross_cagr,
         "net_cagr": net_cagr,
         "cagr": net_cagr,
-        "volatility": _volatility(net),
-        "gross_volatility": _volatility(gross),
-        "sharpe": _sharpe(net),
-        "gross_sharpe": _sharpe(gross),
-        "sortino": _sortino(net),
+        "volatility": _volatility(net, periods_per_year),
+        "gross_volatility": _volatility(gross, periods_per_year),
+        "sharpe": _sharpe(net, periods_per_year),
+        "gross_sharpe": _sharpe(gross, periods_per_year),
+        "sortino": _sortino(net, periods_per_year),
         "max_drawdown": drawdown,
         "calmar": _calmar(net_cagr, drawdown),
         "turnover": _metric_or_series_sum(run, "turnover", turnover_series),
@@ -572,8 +643,12 @@ def _fold_metrics(run: object, path_id: str) -> tuple[dict[str, Any], pd.Series,
         "trade_count": int(trade_count),
         "test_periods": len(net),
         "n_observations": len(net),
+        "periods_per_year": periods_per_year,
     }
-    for key in ("regime_concentration", "regime", "tested_configurations", "n_trials"):
+    for key in (
+        "regime_concentration", "regime", "tested_configurations", "n_trials",
+        "future_training", "strictly_chronological",
+    ):
         if key in metrics:
             output[key] = to_jsonable(metrics[key])
     return output, net, gross, outcomes
@@ -637,6 +712,29 @@ def _provenance_for_run(run: object) -> Mapping[str, Any] | None:
     return None
 
 
+def _configured_provenance_limits(run: object) -> tuple[object | None, object | None]:
+    """Read explicit data/model age limits from validation or promotion config."""
+
+    spec = _run_spec(run)
+    sections = [spec.get("validation"), spec.get("promotion"), spec.get("provenance"), spec]
+    data_limit: object | None = None
+    model_limit: object | None = None
+    for section in sections:
+        if not isinstance(section, Mapping):
+            continue
+        if data_limit is None:
+            for key in ("max_data_age_seconds", "data_max_age_seconds", "data_age_limit_seconds"):
+                if section.get(key) is not None:
+                    data_limit = section[key]
+                    break
+        if model_limit is None:
+            for key in ("max_model_age_seconds", "model_max_age_seconds", "model_age_limit_seconds"):
+                if section.get(key) is not None:
+                    model_limit = section[key]
+                    break
+    return data_limit, model_limit
+
+
 def _age_limit_seconds(value: object) -> float | None:
     number = _finite_float(value)
     if number is not None:
@@ -662,15 +760,26 @@ def check_data_model_provenance(
 ) -> dict[str, Any]:
     """Check source/model identity, freshness, and point-in-time ordering.
 
-    Missing metadata is a warning and becomes a promotion failure only when a
-    caller explicitly uses the returned ``ok``/``errors`` state in its gate.
-    The function never uses wall-clock time implicitly, keeping results replayable.
+    The function never uses wall-clock time implicitly, keeping results
+    replayable. Missing identity, as-of timestamps, or configured age limits
+    always make ``ok`` false; preview callers can still use the diagnostics.
     """
 
     payload = provenance if isinstance(provenance, Mapping) else {}
     errors: list[str] = []
     warnings: list[str] = []
-    evaluation = _canonical_timestamp(evaluation_at) if evaluation_at is not None else None
+    try:
+        evaluation = _canonical_timestamp(evaluation_at) if evaluation_at is not None else None
+    except (TypeError, ValueError):
+        evaluation = None
+        errors.append("evaluation timestamp is invalid")
+    data_age_limit = _age_limit_seconds(max_data_age_seconds)
+    model_age_limit = _age_limit_seconds(max_model_age_seconds)
+    age_limits_configured = data_age_limit is not None and model_age_limit is not None
+    if not age_limits_configured:
+        warnings.append("provenance age limits are not configured")
+    if evaluation is None:
+        warnings.append("evaluation timestamp is missing")
     data = _provenance_section(payload, "data")
     model = _provenance_section(payload, "model")
     if not data and any(key in payload for key in ("source", "data_source", "data_version", "data_as_of")):
@@ -691,9 +800,9 @@ def check_data_model_provenance(
             data_timestamp = _canonical_timestamp(data_as_of)
             if evaluation is not None and data_timestamp > evaluation:
                 errors.append("data timestamp is later than evaluation timestamp")
-            if evaluation is not None and _age_limit_seconds(max_data_age_seconds) is not None:
+            if evaluation is not None and data_age_limit is not None:
                 age = (evaluation - data_timestamp).total_seconds()
-                if age < 0 or age > float(_age_limit_seconds(max_data_age_seconds)):
+                if age < 0 or age > data_age_limit:
                     warnings.append("data provenance is stale")
         except (TypeError, ValueError):
             errors.append("data provenance timestamp is invalid")
@@ -713,9 +822,9 @@ def check_data_model_provenance(
             model_timestamp = _canonical_timestamp(model_as_of)
             if evaluation is not None and model_timestamp > evaluation:
                 errors.append("model timestamp is later than evaluation timestamp")
-            if evaluation is not None and _age_limit_seconds(max_model_age_seconds) is not None:
+            if evaluation is not None and model_age_limit is not None:
                 age = (evaluation - model_timestamp).total_seconds()
-                if age < 0 or age > float(_age_limit_seconds(max_model_age_seconds)):
+                if age < 0 or age > model_age_limit:
                     warnings.append("model provenance is stale")
         except (TypeError, ValueError):
             errors.append("model provenance timestamp is invalid")
@@ -724,8 +833,15 @@ def check_data_model_provenance(
 
     warnings = list(dict.fromkeys(warnings))
     errors = list(dict.fromkeys(errors))
+    complete = bool(
+        data_source and data_version and data_as_of is not None
+        and model_id and model_version and model_as_of is not None and evaluation is not None
+    )
+    ok = bool(complete and age_limits_configured and not errors and not any("stale" in warning for warning in warnings))
     return to_jsonable({
-        "ok": not errors and not any("stale" in warning for warning in warnings),
+        "ok": ok,
+        "provenance_ok": ok,
+        "age_limits_configured": age_limits_configured,
         "errors": errors,
         "warnings": warnings,
         "data": {"source": data_source, "version": data_version, "as_of": data_as_of, "status": data_status or None},
@@ -838,17 +954,36 @@ def evaluate_validation_folds(
     modes: list[str] = []
     warnings: list[str] = []
     provenance_results: list[dict[str, Any]] = []
+    periods_per_year_values: list[float] = []
+    cpcv_future_training = False
     for number, run in enumerate(folds):
         spec = _run_spec(run)
         validation = spec.get("validation")
         if isinstance(validation, Mapping):
             modes.append(str(validation.get("mode") or "single_pass"))
+            if str(validation.get("mode") or "").strip().lower() == "cpcv":
+                cpcv_future_training = cpcv_future_training or bool(
+                    validation.get("future_training", False)
+                )
+        raw_equity = _run_value(run, "equity", None)
+        if isinstance(raw_equity, (pd.DataFrame, pd.Series)) and raw_equity.index.has_duplicates:
+            warnings.append(f"fold-{number} has duplicate timestamps")
         path_id = str(_run_metrics(run).get("path_id") or f"fold-{number}")
         fold, net, gross, run_outcomes = _fold_metrics(run, path_id)
         fold_payloads.append(fold)
         net_series.append(net)
         gross_series.append(gross)
         outcomes.extend(run_outcomes)
+        if _finite_float(fold.get("periods_per_year")) is not None:
+            periods_per_year_values.append(float(fold["periods_per_year"]))
+        if not run_outcomes:
+            warnings.append(f"fold {path_id} trade PnL unavailable; hit rate and profit factor omitted")
+        if isinstance(validation, Mapping):
+            cpcv_future_training = cpcv_future_training or bool(validation.get("future_training", False))
+        if bool(_run_metrics(run).get("future_training", False)):
+            cpcv_future_training = cpcv_future_training or str(
+                validation.get("mode") if isinstance(validation, Mapping) else ""
+            ).strip().lower() == "cpcv"
         cost_drag_total += float(fold.get("cost_drag") or 0.0)
         turnover_total += float(fold.get("turnover") or 0.0)
         if len(net) < MIN_STATISTICAL_OBSERVATIONS:
@@ -858,11 +993,23 @@ def evaluate_validation_folds(
             warnings.append(f"fold {path_id} data/model provenance is unavailable")
         else:
             evaluation_at = net.index[-1] if not net.empty else None
-            result = check_data_model_provenance(provenance, evaluation_at=evaluation_at)
+            max_data_age, max_model_age = _configured_provenance_limits(run)
+            result = check_data_model_provenance(
+                provenance,
+                evaluation_at=evaluation_at,
+                max_data_age_seconds=max_data_age,
+                max_model_age_seconds=max_model_age,
+            )
             provenance_results.append(result)
             warnings.extend(result["warnings"])
             warnings.extend(result["errors"])
 
+    seen_timestamps: set[object] = set()
+    for series in net_series:
+        overlap = seen_timestamps.intersection(set(series.index))
+        if overlap:
+            warnings.append("validation folds contain overlapping timestamps")
+        seen_timestamps.update(series.index)
     net = _concat_series(net_series)
     gross = _concat_series(gross_series)
     if gross.empty and not net.empty:
@@ -877,23 +1024,42 @@ def evaluate_validation_folds(
     regime_values = [value for value in regime_values if value is not None]
     benchmark = _benchmark_run(benchmarks)
     benchmark_net = _run_returns(benchmark, "net") if benchmark is not None else pd.Series(dtype="float64")
-    benchmark_cagr = _cagr_from_returns(benchmark_net) if not benchmark_net.empty else _finite_float(_run_metrics(benchmark).get("cagr")) if benchmark is not None else None
+    benchmark_metrics = _run_metrics(benchmark) if benchmark is not None else {}
+    supplied_benchmark_cagr = _finite_float(
+        benchmark_metrics.get("net_cagr", benchmark_metrics.get("cagr"))
+    )
+    benchmark_cagr = (
+        supplied_benchmark_cagr
+        if supplied_benchmark_cagr is not None
+        else _cagr_from_returns(benchmark_net)
+        if not benchmark_net.empty
+        else None
+    )
     benchmark_excess = net_cagr - benchmark_cagr if net_cagr is not None and benchmark_cagr is not None else None
     if benchmark is None or benchmark_cagr is None:
         warnings.append("cost-adjusted benchmark excess is unavailable")
 
+    matrix = _configuration_matrix(folds)
     tested = _tested_configurations(folds)
+    if matrix is not None:
+        tested = max(tested, int(matrix.shape[1]))
+    if periods_per_year_values and len(set(periods_per_year_values)) == 1:
+        aggregate_periods_per_year = periods_per_year_values[0]
+    else:
+        aggregate_periods_per_year = _periods_per_year(net.index)
+    if len(set(modes)) > 1:
+        cpcv_future_training = False
     aggregate: dict[str, Any] = {
         "gross_cagr": gross_cagr,
         "net_cagr": net_cagr,
         "cagr": net_cagr,
         "gross_return": float((1.0 + gross.fillna(0.0)).prod() - 1.0) if not gross.empty else 0.0,
         "net_return": float((1.0 + net.fillna(0.0)).prod() - 1.0) if not net.empty else 0.0,
-        "volatility": _volatility(net),
-        "gross_volatility": _volatility(gross),
-        "sharpe": _sharpe(net),
-        "gross_sharpe": _sharpe(gross),
-        "sortino": _sortino(net),
+        "volatility": _volatility(net, aggregate_periods_per_year),
+        "gross_volatility": _volatility(gross, aggregate_periods_per_year),
+        "sharpe": _sharpe(net, aggregate_periods_per_year),
+        "gross_sharpe": _sharpe(gross, aggregate_periods_per_year),
+        "sortino": _sortino(net, aggregate_periods_per_year),
         "max_drawdown": drawdown,
         "calmar": _calmar(net_cagr, drawdown),
         "turnover": turnover_total,
@@ -910,11 +1076,12 @@ def evaluate_validation_folds(
         "regime_concentration": max(regime_values) if regime_values else None,
         "regime_stability": 1.0 - max(regime_values) if regime_values else None,
         "tested_configurations": tested,
+        "periods_per_year": aggregate_periods_per_year,
+        "cpcv_future_training": cpcv_future_training,
     }
     if aggregate["regime_concentration"] is None:
         warnings.append("regime concentration is unavailable")
 
-    matrix = _configuration_matrix(folds)
     if len(net) < MIN_STATISTICAL_OBSERVATIONS:
         warnings.append(f"DSR unavailable: insufficient observations ({len(net)} < {MIN_STATISTICAL_OBSERVATIONS})")
     elif tested <= 1:
@@ -932,6 +1099,12 @@ def evaluate_validation_folds(
             )
             if aggregate["dsr"] is None:
                 warnings.append("DSR unavailable: Sharpe variance is not estimable")
+            else:
+                aggregate["dsr_evidence"] = {
+                    "method": "deflated_sharpe_ratio",
+                    "tested_configurations": tested,
+                    "returns_observations": len(net),
+                }
         except (ImportError, ValueError, TypeError):
             aggregate["dsr"] = None
             warnings.append("DSR unavailable: calculation failed")
@@ -952,6 +1125,13 @@ def evaluate_validation_folds(
             aggregate["pbo_n_combos"] = int(result.get("n_combos", 0)) if isinstance(result, Mapping) else 0
             if aggregate["pbo"] is None:
                 warnings.append("PBO unavailable: configuration matrix is insufficient")
+            else:
+                aggregate["pbo_evidence"] = {
+                    "method": "cscv",
+                    "tested_configurations": int(matrix.shape[1]),
+                    "matrix_shape": [int(matrix.shape[0]), int(matrix.shape[1])],
+                    "n_combinations": aggregate["pbo_n_combos"],
+                }
         except (ImportError, ValueError, TypeError):
             aggregate["pbo"] = None
             aggregate["pbo_n_configs"] = int(matrix.shape[1])
@@ -983,6 +1163,43 @@ def _config_number(config: Mapping[str, Any], key: str, default: float) -> float
     return default if value is None else value
 
 
+def _evidence_count(evidence: object) -> int | None:
+    if not isinstance(evidence, Mapping):
+        return None
+    candidate = evidence.get("tested_configurations", evidence.get("tested_configuration_count", evidence.get("n_trials")))
+    try:
+        return int(candidate) if candidate is not None else None
+    except (TypeError, ValueError):
+        return None
+
+
+def _has_dsr_evidence(evidence: object) -> bool:
+    if not isinstance(evidence, Mapping) or (_evidence_count(evidence) or 0) < 2:
+        return False
+    method = str(evidence.get("method") or "").strip()
+    observations = _finite_float(evidence.get("returns_observations"))
+    return bool(method or (observations is not None and observations >= 2))
+
+
+def _has_pbo_evidence(evidence: object) -> bool:
+    if not isinstance(evidence, Mapping) or (_evidence_count(evidence) or 0) < 2:
+        return False
+    shape = evidence.get("matrix_shape")
+    if shape is None and isinstance(evidence.get("matrix"), Sequence):
+        matrix = evidence["matrix"]
+        shape = getattr(matrix, "shape", None)
+    if isinstance(shape, Sequence) and not isinstance(shape, (str, bytes)) and len(shape) == 2:
+        try:
+            return int(shape[0]) >= 10 and int(shape[1]) >= 2
+        except (TypeError, ValueError):
+            return False
+    return bool(
+        evidence.get("matrix_digest")
+        or evidence.get("configuration_matrix")
+        or evidence.get("matrix")
+    )
+
+
 def promotion_gate(report: ValidationReport, config: dict[str, object]) -> PromotionDecision:
     """Apply activation checks without conflating shadow, pilot, and live."""
 
@@ -995,6 +1212,7 @@ def promotion_gate(report: ValidationReport, config: dict[str, object]) -> Promo
     failed: list[str] = []
     gate_warnings = list(report.warnings)
     preview = mode == "single_pass" or bool(settings.get("preview", False))
+    aggregate = report.aggregate
 
     if requested_environment not in _VALID_ENVIRONMENTS:
         failed.append("environment")
@@ -1005,8 +1223,14 @@ def promotion_gate(report: ValidationReport, config: dict[str, object]) -> Promo
     elif mode not in {"purged_walk_forward", "cpcv"}:
         failed.append("validation_mode")
         gate_warnings.append(f"validation mode is not activation-safe: {mode}")
+    if not preview and mode == "cpcv":
+        if not bool(settings.get("strictly_chronological", False)):
+            failed.append("cpcv_not_activation_safe")
+            gate_warnings.append("CPCV is diagnostic-only unless strictly_chronological=true")
+        if aggregate.get("cpcv_future_training"):
+            failed.append("cpcv_future_training")
+            gate_warnings.append("CPCV training includes groups after its test window")
 
-    aggregate = report.aggregate
     min_trades = int(_config_number(settings, "min_trades", 100.0))
     min_periods = int(_config_number(settings, "min_test_periods", 4.0))
     if int(aggregate.get("trade_count") or 0) < min_trades:
@@ -1048,6 +1272,10 @@ def promotion_gate(report: ValidationReport, config: dict[str, object]) -> Promo
         failed.append("dsr_unavailable")
     elif dsr < min_dsr:
         failed.append("min_dsr")
+    if not preview and dsr is not None and not _has_dsr_evidence(aggregate.get("dsr_evidence")):
+        failed.append("dsr_evidence")
+    if not preview and pbo is not None and not _has_pbo_evidence(aggregate.get("pbo_evidence")):
+        failed.append("pbo_evidence")
 
     max_regime = _config_number(settings, "max_regime_concentration", 0.75)
     concentration = _finite_float(aggregate.get("regime_concentration"))
@@ -1057,7 +1285,7 @@ def promotion_gate(report: ValidationReport, config: dict[str, object]) -> Promo
         failed.append("max_regime_concentration")
 
     provenance_ok = aggregate.get("provenance_ok")
-    if provenance_ok is False:
+    if provenance_ok is not True:
         failed.append("stale_provenance" if any("stale" in warning for warning in gate_warnings) else "provenance")
     if aggregate.get("leakage_detected"):
         failed.append("leakage")
