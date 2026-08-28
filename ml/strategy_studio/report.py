@@ -22,6 +22,7 @@ def build_strategy_report(run: StrategyRun, *, spec: dict[str, Any] | StrategySp
         "sharpe": run.metrics.get("sharpe"),
         "turnover": run.metrics.get("turnover"),
         "benchmark_excess_cagr": run.metrics.get("benchmark_excess_cagr"),
+        "promotion_eligible": bool((run.validation or {}).get("promotion_eligible", False)),
     }
     execution_payload = run.signals.get("execution") if isinstance(run.signals, dict) else None
     execution_summary = {}
@@ -55,5 +56,7 @@ def build_strategy_report(run: StrategyRun, *, spec: dict[str, Any] | StrategySp
         "weights": run.weights.copy() if isinstance(run.weights, pd.DataFrame) else pd.DataFrame(run.weights),
         "signals": to_jsonable(dict(run.signals or {})),
         "execution": execution_summary,
+        "validation": dict(run.validation or {}),
+        "promotion": dict(run.promotion or {}),
         "ok": bool(run.ok),
     })

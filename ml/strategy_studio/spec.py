@@ -28,12 +28,14 @@ _SUPPORTED_SIZING = {
 _SUPPORTED_VALIDATION = {
     "single_pass",
     "walk_forward",
+    "purged_walk_forward",
+    "cpcv",
 }
 
 SUPPORTED_DATA_PROFILES = {"kr_intraday", "global_swing", "extended_us", "generic"}
 SUPPORTED_SIGNAL_TYPES = {"rule", "factor", "model", "ensemble"}
 SUPPORTED_EXECUTION_PROFILES = {"kr_intraday", "global_swing", "extended_us", "bar"}
-SUPPORTED_PROMOTION_ENVIRONMENTS = {"sandbox", "paper", "live"}
+SUPPORTED_PROMOTION_ENVIRONMENTS = {"shadow", "pilot", "live", "sandbox", "paper"}
 SUPPORTED_PORTFOLIO_OPTIMIZERS = {"cost_aware_risk_budget", "equal_weight", "risk_budget"}
 
 _UNSAFE_PLUGIN_NAMES = {"python", "shell", "exec"}

@@ -322,3 +322,57 @@ def summarize_walk_forward(results: "list[FoldResult]") -> dict:
         "test_mean": float(np.mean(test_scores)) if test_scores else None,
         "test_std": float(np.std(test_scores)) if len(test_scores) > 1 else None,
     }
+
+
+def purged_walk_forward_splits(
+    n_rows: int,
+    train_size: int,
+    test_size: int,
+    step: int,
+    embargo: int = 0,
+    label_horizon: int = 0,
+) -> Generator[tuple[np.ndarray, np.ndarray], None, None]:
+    """Yield integer purged walk-forward positions for legacy ML callers."""
+
+    values = [n_rows, train_size, test_size, step, embargo, label_horizon]
+    if any(isinstance(value, bool) or int(value) != value for value in values):
+        raise ValueError("purged walk-forward sizes must be integers")
+    if n_rows < 0 or train_size <= 0 or test_size <= 0 or step <= 0 or embargo < 0 or label_horizon < 0:
+        raise ValueError("purged walk-forward sizes must be positive and embargo non-negative")
+    start = 0
+    while start + train_size + embargo + test_size <= n_rows:
+        train_end = start + train_size
+        test_start = train_end + embargo
+        train = np.arange(start, train_end, dtype=int)
+        test = np.arange(test_start, test_start + test_size, dtype=int)
+        if label_horizon:
+            train = train[train + label_horizon < test_start]
+        yield train, test
+        start += step
+
+
+def leakage_guard_split(
+    train: np.ndarray,
+    test: np.ndarray,
+    *,
+    label_horizon: int = 0,
+    blocked: Optional[np.ndarray] = None,
+    raise_on_error: bool = True,
+) -> list[str]:
+    """Check train/test positions and explicit purge/embargo rows."""
+
+    issues: list[str] = []
+    train_set = set(np.asarray(train, dtype=int).tolist())
+    test_set = set(np.asarray(test, dtype=int).tolist())
+    if train_set.intersection(test_set):
+        issues.append("train_test_overlap")
+    if blocked is not None and train_set.intersection(set(np.asarray(blocked, dtype=int).tolist())):
+        issues.append("train_contains_blocked_rows")
+    horizon = int(label_horizon)
+    if horizon < 0:
+        issues.append("negative_label_horizon")
+    elif train_set and test_set and max(train_set) + horizon >= min(test_set):
+        issues.append("label_horizon_overlaps_test")
+    if issues and raise_on_error:
+        raise ValueError("validation leakage detected: " + ", ".join(issues))
+    return issues

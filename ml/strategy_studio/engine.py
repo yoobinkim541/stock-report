@@ -49,6 +49,8 @@ class StrategyRun:
     weights: pd.DataFrame = field(default_factory=pd.DataFrame)
     signals: dict[str, Any] = field(default_factory=dict)
     allocation_diagnostics: list[dict[str, object]] = field(default_factory=list)
+    validation: dict[str, Any] = field(default_factory=dict)
+    promotion: dict[str, Any] = field(default_factory=dict)
 
 
 def compile_strategy(spec: dict[str, Any] | StrategySpec, prices: pd.DataFrame) -> CompiledStrategy:
@@ -92,7 +94,7 @@ def run_strategy_backtest(
     strategy = compiled.spec
 
     if compiled.errors:
-        return StrategyRun(
+        return _attach_validation(StrategyRun(
             ok=False,
             spec=strategy.to_dict(),
             metrics={},
@@ -101,7 +103,7 @@ def run_strategy_backtest(
             benchmark={"symbol": benchmark or strategy.base_symbol or "", "available": False},
             warnings=compiled.warnings,
             errors=compiled.errors,
-        )
+        ), strategy)
 
     close_panel = compiled.prices
     allocation_diagnostics: list[dict[str, object]] = []
@@ -115,7 +117,7 @@ def run_strategy_backtest(
             errors = [f"signal provider failed: {diagnostic}" for diagnostic in signal_diagnostics]
             if not errors:
                 errors = ["signal provider returned no valid scores"]
-            return StrategyRun(
+            return _attach_validation(StrategyRun(
                 ok=False,
                 spec=strategy.to_dict(),
                 metrics={},
@@ -125,7 +127,7 @@ def run_strategy_backtest(
                 warnings=compiled.warnings,
                 errors=errors,
                 signals={"panel": to_jsonable(signal_panel.to_dict())},
-            )
+            ), strategy)
 
         from .allocation import allocate_targets
 
@@ -149,7 +151,7 @@ def run_strategy_backtest(
     else:
         weights, trade_rows, signal_trace = _simulate_strategy(strategy, compiled.contexts, close_panel, compiled.warnings)
     if weights.empty:
-        return StrategyRun(
+        return _attach_validation(StrategyRun(
             ok=False,
             spec=strategy.to_dict(),
             metrics={},
@@ -160,7 +162,7 @@ def run_strategy_backtest(
             errors=["no weights were produced"],
             weights=weights,
             signals=signal_trace,
-        )
+        ), strategy)
 
     if strategy.uses_allocation_path:
         from .execution import run_execution_backtest
@@ -285,7 +287,7 @@ def _build_execution_run(
     if strategy.validation.get("mode") == "single_pass" and len(execution.trades) < int(strategy.validation.get("min_trades") or 0):
         warnings.append(f"trade count below validation minimum: {len(execution.trades)} < {int(strategy.validation.get('min_trades') or 0)}")
     errors = compiled_errors(metrics, bench)
-    return StrategyRun(
+    run = StrategyRun(
         ok=not errors,
         spec=strategy.to_dict(),
         metrics=metrics,
@@ -298,6 +300,7 @@ def _build_execution_run(
         signals=signal_trace,
         allocation_diagnostics=list(allocation_diagnostics or []),
     )
+    return _attach_validation(run, strategy)
 
 
 def _build_run(
@@ -353,7 +356,7 @@ def _build_run(
 
     ok = not bool(compiled_errors(metrics, bench))
     errors = compiled_errors(metrics, bench)
-    return StrategyRun(
+    run = StrategyRun(
         ok=ok,
         spec=strategy.to_dict(),
         metrics=metrics,
@@ -366,6 +369,37 @@ def _build_run(
         signals=signal_trace,
         allocation_diagnostics=list(allocation_diagnostics or []),
     )
+    return _attach_validation(run, strategy)
+
+
+def _attach_validation(run: StrategyRun, strategy: StrategySpec) -> StrategyRun:
+    """Attach a validation preview without changing how the strategy was run."""
+
+    from .validation import evaluate_validation_folds, promotion_gate
+
+    mode = str((strategy.validation or {}).get("mode") or "single_pass").strip().lower()
+    benchmark_symbol = str(run.benchmark.get("symbol") or "benchmark") if isinstance(run.benchmark, dict) else "benchmark"
+    benchmarks = {benchmark_symbol: run.benchmark} if run.benchmark else {}
+    validation_report = evaluate_validation_folds([run], benchmarks)
+    if mode == "single_pass":
+        validation_report.warnings.append("single_pass is preview-only; no promotion decision is activation-safe")
+    else:
+        validation_report.warnings.append(
+            f"{mode} requested, but this backtest result contains one pass; out-of-sample folds are required for activation"
+        )
+    validation_report.validation_mode = mode
+    validation_report.promotion_eligible = False
+
+    gate_config = dict(strategy.validation or {})
+    gate_config.update(strategy.promotion or {})
+    gate_config["mode"] = mode
+    decision = promotion_gate(validation_report, gate_config)
+    run.validation = validation_report.to_dict()
+    run.promotion = decision.to_dict()
+    for warning in validation_report.warnings:
+        if warning not in run.warnings:
+            run.warnings.append(warning)
+    return run
 
 
 def _allocation_config(strategy: StrategySpec) -> dict[str, object]:

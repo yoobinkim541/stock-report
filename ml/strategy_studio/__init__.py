@@ -6,6 +6,19 @@ from .presets import builtin_strategy_presets
 from .report import build_strategy_report
 from .registry import RegisteredModel, SignalProvider, get_model, get_signal_provider, register_model, register_signal_provider
 from .signals import SignalPanel, combine_signal_panels
+from .validation import (
+    PromotionDecision,
+    ValidationReport,
+    ValidationSplit,
+    check_data_model_provenance,
+    check_data_model_freshness,
+    check_leakage,
+    check_split_leakage,
+    evaluate_validation_folds,
+    make_cpcv_splits,
+    make_purged_walk_forward_splits,
+    promotion_gate,
+)
 from .spec import (
     SUPPORTED_DATA_PROFILES,
     SUPPORTED_EXECUTION_PROFILES,
@@ -51,6 +64,17 @@ __all__ = [
     "execution_defaults",
     "run_execution_backtest",
     "to_jsonable",
+    "ValidationSplit",
+    "ValidationReport",
+    "PromotionDecision",
+    "make_purged_walk_forward_splits",
+    "make_cpcv_splits",
+    "check_split_leakage",
+    "check_data_model_provenance",
+    "check_data_model_freshness",
+    "check_leakage",
+    "evaluate_validation_folds",
+    "promotion_gate",
     "SUPPORTED_DATA_PROFILES",
     "SUPPORTED_SIGNAL_TYPES",
     "SUPPORTED_EXECUTION_PROFILES",
