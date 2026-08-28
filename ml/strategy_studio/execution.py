@@ -2,14 +2,17 @@
 
 from __future__ import annotations
 
+import hashlib
+import json
 from dataclasses import asdict, dataclass, field
+from datetime import date, datetime
 from math import isfinite
 from typing import Any, Mapping
 
 import numpy as np
 import pandas as pd
 
-from .contracts import FillEvent, OrderIntent, PositionState
+from .contracts import FillEvent, OrderIntent, PositionState, serialize_event
 from .profiles import execution_defaults
 
 
@@ -154,17 +157,76 @@ class ExecutionResult:
         return not self.errors
 
     def to_dict(self) -> dict[str, Any]:
-        return {
-            "intents": [asdict(intent) for intent in self.intents],
-            "fills": [asdict(fill) for fill in self.fills],
-            "positions": {symbol: asdict(position) for symbol, position in self.positions.items()},
-            "equity": self.equity.copy(),
+        return to_jsonable({
+            "intents": [serialize_event(intent) for intent in self.intents],
+            "fills": [serialize_event(fill) for fill in self.fills],
+            "positions": {symbol: serialize_event(position) for symbol, position in self.positions.items()},
+            "equity": self.equity,
             "trades": [dict(trade) for trade in self.trades],
             "summary": dict(self.summary),
             "warnings": list(self.warnings),
             "errors": list(self.errors),
             "ok": self.ok,
+        })
+
+
+def to_jsonable(value: object) -> Any:
+    """Convert pandas/numpy values and DTO payloads to strict JSON values."""
+
+    if value is None or value is pd.NA or value is pd.NaT:
+        return None
+    if isinstance(value, pd.DataFrame):
+        return {
+            "index": [to_jsonable(item) for item in value.index.tolist()],
+            "columns": [to_jsonable(item) for item in value.columns.tolist()],
+            "data": [[to_jsonable(item) for item in row] for row in value.to_numpy(dtype=object).tolist()],
         }
+    if isinstance(value, pd.Series):
+        return {
+            "index": [to_jsonable(item) for item in value.index.tolist()],
+            "data": [to_jsonable(item) for item in value.tolist()],
+            "name": to_jsonable(value.name),
+        }
+    if isinstance(value, pd.Index):
+        return [to_jsonable(item) for item in value.tolist()]
+    if isinstance(value, np.ndarray):
+        return [to_jsonable(item) for item in value.tolist()]
+    if isinstance(value, np.generic):
+        return to_jsonable(value.item())
+    if isinstance(value, (pd.Timestamp, datetime, date)):
+        return value.isoformat()
+    if isinstance(value, float):
+        return value if isfinite(value) else None
+    if isinstance(value, Mapping):
+        return {str(key): to_jsonable(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple, set)):
+        return [to_jsonable(item) for item in value]
+    return value
+
+
+def _intent_sort_key(intent: OrderIntent) -> tuple[object, ...]:
+    payload = to_jsonable(serialize_event(intent))
+    semantic_payload = json.dumps(payload, ensure_ascii=True, sort_keys=True, separators=(",", ":"))
+    return (
+        _timestamp(intent.decision_at),
+        intent.symbol.upper().strip(),
+        intent.side,
+        intent.order_type,
+        str(intent.run_id),
+        str(intent.strategy_id),
+        str(intent.strategy_version),
+        semantic_payload,
+    )
+
+
+def _stable_intent_id(intent: OrderIntent) -> str:
+    payload = json.dumps(
+        to_jsonable(serialize_event(intent)),
+        ensure_ascii=True,
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()[:16]
 
 
 def execute_intents(
@@ -181,28 +243,28 @@ def execute_intents(
     if not isinstance(config, ExecutionConfig):
         config = ExecutionConfig.from_dict(config)  # type: ignore[arg-type]
     normalized = _normalize_bars(bars)
-    ordered = sorted(
-        enumerate(intents),
-        key=lambda item: (_timestamp(item[1].decision_at), item[1].symbol, item[0]),
-    )
+    ordered = sorted(intents, key=_intent_sort_key)
+    used_capacity: dict[tuple[str, pd.Timestamp], float] = {}
     fills: list[FillEvent] = []
-    for sequence, (_, intent) in enumerate(ordered):
+    for intent in ordered:
         frame = normalized.get(intent.symbol.upper().strip())
         decision_at = _timestamp_text(intent.decision_at)
         submitted_at = _timestamp_text(intent.submitted_at or intent.decision_at)
-        run_id = intent.run_id or f"{config.run_id}-{sequence:06d}"
+        run_id = intent.run_id or f"{config.run_id}-{_stable_intent_id(intent)}"
         if _is_cancelled(intent):
             fills.append(_event(intent, run_id=run_id, status="cancelled", reason="cancelled_by_strategy", submitted_at=submitted_at))
             continue
         if frame is None:
-            fills.append(_event(intent, run_id=run_id, status="rejected", reason="missing_bars", submitted_at=submitted_at))
+            status = "cancelled" if config.cancel_unfilled else "rejected"
+            fills.append(_event(intent, run_id=run_id, status=status, reason="missing_bars", submitted_at=submitted_at))
             continue
         if intent.quantity <= config.min_order_qty:
             fills.append(_event(intent, run_id=run_id, status="rejected", reason="quantity_below_minimum", submitted_at=submitted_at))
             continue
         eligible = _eligible_bar(frame, intent.decision_at, config.latency_bars)
         if eligible is None:
-            fills.append(_event(intent, run_id=run_id, status="rejected", reason="no_eligible_bar", submitted_at=submitted_at))
+            status = "cancelled" if config.cancel_unfilled else "rejected"
+            fills.append(_event(intent, run_id=run_id, status=status, reason="no_eligible_bar", submitted_at=submitted_at))
             continue
         bar_time, row = eligible
         base_price, reason = _eligible_price(intent, row, config.cancel_unfilled)
@@ -218,7 +280,10 @@ def execute_intents(
             continue
 
         cap = _liquidity_cap(row["volume"], config.max_participation_rate)
-        if cap <= 0.0:
+        capacity_key = (intent.symbol.upper().strip(), _timestamp(bar_time))
+        already_used = used_capacity.get(capacity_key, 0.0)
+        remaining_cap = max(0.0, cap - already_used) if isfinite(cap) else cap
+        if remaining_cap <= 0.0:
             fills.append(
                 _event(
                     intent, run_id=run_id, status="rejected", reason="insufficient_liquidity",
@@ -226,7 +291,7 @@ def execute_intents(
                 )
             )
             continue
-        if intent.quantity > cap and not config.partial_fill:
+        if intent.quantity > remaining_cap and not config.partial_fill:
             fills.append(
                 _event(
                     intent, run_id=run_id, status="rejected", reason="insufficient_liquidity",
@@ -235,7 +300,8 @@ def execute_intents(
             )
             continue
 
-        filled_qty = min(float(intent.quantity), cap)
+        filled_qty = min(float(intent.quantity), remaining_cap)
+        used_capacity[capacity_key] = already_used + filled_qty
         status = "partial" if filled_qty + 1e-12 < intent.quantity else "filled"
         fill_price, slippage_per_unit, spread_per_unit = _apply_price_impact(
             base_price, intent.side, config,
@@ -247,6 +313,7 @@ def execute_intents(
             "spread_per_unit": float(spread_per_unit),
             "slippage_per_unit": float(slippage_per_unit),
             "volume_cap": float(cap) if isfinite(cap) else None,
+            "remaining_volume_cap": float(remaining_cap) if isfinite(remaining_cap) else None,
         })
         fills.append(
             _event(
@@ -501,10 +568,24 @@ def _intents_from_targets(
     bars: dict[str, pd.DataFrame],
     config: ExecutionConfig,
 ) -> tuple[list[OrderIntent], list[str]]:
-    desired = {symbol: 0.0 for symbol in targets.columns}
     warnings: list[str] = []
     intents: list[OrderIntent] = []
     for timestamp, row in targets.iterrows():
+        prior_intents = sorted(intents, key=_intent_sort_key)
+        prior_fills = execute_intents(prior_intents, bars, config) if prior_intents else []
+        executed_quantities: dict[str, float] = {}
+        pending_buys: dict[str, float] = {}
+        pending_sells: dict[str, float] = {}
+        current_timestamp = _timestamp(timestamp)
+        for prior_intent, fill in zip(prior_intents, prior_fills):
+            if fill.filled_at is None:
+                continue
+            sign = 1.0 if prior_intent.side == "buy" else -1.0
+            if _timestamp(fill.filled_at) <= current_timestamp:
+                executed_quantities[prior_intent.symbol] = executed_quantities.get(prior_intent.symbol, 0.0) + sign * fill.filled_qty
+            elif fill.status in {"partial", "filled"}:
+                pending = pending_buys if prior_intent.side == "buy" else pending_sells
+                pending[prior_intent.symbol] = pending.get(prior_intent.symbol, 0.0) + prior_intent.quantity
         for symbol in targets.columns:
             frame = bars.get(symbol)
             if frame is None or frame.empty:
@@ -525,10 +606,19 @@ def _intents_from_targets(
             if not config.allow_short and weight < 0.0:
                 warnings.append(f"negative target clipped for {symbol} at {_timestamp_text(timestamp)}")
                 weight = 0.0
+            elif config.allow_short and weight < 0.0:
+                warnings.append(f"negative target clipped for long-only ledger: {symbol} at {_timestamp_text(timestamp)}")
+                weight = 0.0
             target_quantity = weight * config.initial_cash / price
-            delta = target_quantity - desired[symbol]
+            current_quantity = max(0.0, executed_quantities.get(symbol, 0.0))
+            target_quantity = max(0.0, target_quantity)
+            if target_quantity >= current_quantity:
+                pending_buy_quantity = pending_buys.get(symbol, 0.0)
+                delta = max(0.0, target_quantity - current_quantity - pending_buy_quantity)
+            else:
+                available_to_sell = max(0.0, current_quantity - pending_sells.get(symbol, 0.0))
+                delta = -min(current_quantity - target_quantity, available_to_sell)
             if abs(delta) <= config.min_order_qty:
-                desired[symbol] = target_quantity
                 continue
             side = "buy" if delta > 0.0 else "sell"
             quantity = abs(delta)
@@ -544,7 +634,6 @@ def _intents_from_targets(
                     metadata={"target_weight": weight, "target_quantity": target_quantity},
                 )
             )
-            desired[symbol] = target_quantity
     return intents, warnings
 
 
@@ -599,10 +688,8 @@ def _mark_ledger(
                 gross_quantities[fill.symbol] = gross_quantities.get(fill.symbol, 0.0) - qty
             total_cost += fill.fee + qty * abs(price - raw_price)
             if fill.symbol in positions:
-                try:
-                    positions[fill.symbol] = apply_fills(positions[fill.symbol], [fill])
-                except ValueError as exc:
-                    warnings.append(str(exc))
+                positions[fill.symbol] = apply_fills(positions[fill.symbol], [fill])
+                quantities[fill.symbol] = positions[fill.symbol].quantity
 
         positions_value = 0.0
         gross_positions_value = 0.0
@@ -721,4 +808,5 @@ __all__ = [
     "execute_intents",
     "execution_defaults",
     "run_execution_backtest",
+    "to_jsonable",
 ]

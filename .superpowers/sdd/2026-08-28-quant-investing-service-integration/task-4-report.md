@@ -14,13 +14,18 @@ weight simulator.
 - Applied latency bars, next-bar/open execution, stop gap handling, intrabar
   limit/stop eligibility, volume participation caps, partial fills, fees,
   slippage, and half-spread price impact.
+- Aggregated participation capacity per symbol and eligible bar across all
+  intents, with stable semantic ordering and deterministic fallback IDs.
 - Recorded rejected and cancelled order events as `FillEvent` records with
   reasons and timestamps.
 - Added `apply_fills()` position lifecycle updates with weighted average cost,
   realized P&L, fees, and invariant checks.
 - Added `run_execution_backtest()` to turn target weights into order intents,
-  mark positions to market, and return equity, fills, trades, positions, and a
-  cost-aware summary.
+  reconcile residual orders against executed quantities, reserve only pending
+  order quantities, avoid long-only oversells, mark positions to market, and
+  return consistent equity, fills, trades, positions, and a cost-aware summary.
+- Made `ExecutionResult.to_dict()` and new-strategy signal/report traces strict
+  JSON payloads using the public `serialize_event()` contract.
 - Added the profile-default compatibility hook for `bar`, `kr_intraday`,
   `global_swing`, and `extended_us`; Task 9 profile health and collector work
   remains out of scope.
@@ -30,9 +35,9 @@ weight simulator.
 ## Verification
 
 - `./.venv/bin/pytest tests/test_strategy_execution.py -q`
-  - `9 passed`
+  - `16 passed`
 - `./.venv/bin/pytest tests/test_strategy_execution.py tests/test_strategy_studio.py tests/test_trade_events.py -q`
-  - `21 passed`
+  - `28 passed`
 - `./.venv/bin/pytest tests/test_strategy_contracts.py tests/test_strategy_signals.py tests/test_strategy_allocation.py -q`
   - `47 passed`
 - `./.venv/bin/python -m compileall -q ml/strategy_studio`

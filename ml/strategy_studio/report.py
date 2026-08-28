@@ -5,6 +5,7 @@ from typing import Any
 import pandas as pd
 
 from .engine import StrategyRun
+from .execution import to_jsonable
 from .spec import StrategySpec
 
 
@@ -52,7 +53,7 @@ def build_strategy_report(run: StrategyRun, *, spec: dict[str, Any] | StrategySp
         "trades": trade_table.to_dict("records"),
         "equity": run.equity.copy() if isinstance(run.equity, pd.DataFrame) else pd.DataFrame(run.equity),
         "weights": run.weights.copy() if isinstance(run.weights, pd.DataFrame) else pd.DataFrame(run.weights),
-        "signals": dict(run.signals or {}),
+        "signals": to_jsonable(dict(run.signals or {})),
         "execution": execution_summary,
         "ok": bool(run.ok),
     }

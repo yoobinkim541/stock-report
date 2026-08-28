@@ -106,6 +106,8 @@ def run_strategy_backtest(
     close_panel = compiled.prices
     allocation_diagnostics: list[dict[str, object]] = []
     if strategy.uses_allocation_path:
+        from .execution import to_jsonable
+
         signal_panel = build_signal_panel(strategy, compiled)
         signal_diagnostics = list(signal_panel.diagnostics)
         compiled.warnings.extend(signal_diagnostics)
@@ -122,7 +124,7 @@ def run_strategy_backtest(
                 benchmark={"symbol": benchmark or strategy.base_symbol or "", "available": False},
                 warnings=compiled.warnings,
                 errors=errors,
-                signals={"panel": signal_panel.to_dict()},
+                signals={"panel": to_jsonable(signal_panel.to_dict())},
             )
 
         from .allocation import allocate_targets
@@ -136,13 +138,13 @@ def run_strategy_backtest(
         compiled.warnings.extend(allocation.warnings)
         weights = allocation.weights
         allocation_diagnostics = list(allocation.diagnostics)
-        signal_trace = {
-            "panel": signal_panel.to_dict(),
-            "targets": weights.copy(),
-            "allocation": allocation.to_dict(),
+        signal_trace = to_jsonable({
+            "panel": to_jsonable(signal_panel.to_dict()),
+            "targets": to_jsonable(weights),
+            "allocation": to_jsonable(allocation.to_dict()),
             "allocation_diagnostics": allocation_diagnostics,
             "allocation_warnings": list(allocation.warnings),
-        }
+        })
         trade_rows: list[dict[str, Any]] = []
     else:
         weights, trade_rows, signal_trace = _simulate_strategy(strategy, compiled.contexts, close_panel, compiled.warnings)

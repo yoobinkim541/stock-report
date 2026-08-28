@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import json
+
 import pandas as pd
 import pytest
 
@@ -140,6 +142,147 @@ def test_zero_volume_and_non_partial_liquidity_are_rejected():
 
     assert [fill.status for fill in fills] == ["rejected", "rejected"]
     assert all(fill.reason == "insufficient_liquidity" for fill in fills)
+
+
+def test_partial_target_orders_reconcile_executed_quantity_and_never_oversell():
+    bars = {"AAPL": _bars([
+        {"open": 100.0, "high": 101.0, "low": 99.0, "close": 100.0, "volume": 10.0},
+        {"open": 100.0, "high": 101.0, "low": 99.0, "close": 100.0, "volume": 10.0},
+        {"open": 100.0, "high": 101.0, "low": 99.0, "close": 100.0, "volume": 10.0},
+        {"open": 100.0, "high": 101.0, "low": 99.0, "close": 100.0, "volume": 10.0},
+        {"open": 100.0, "high": 101.0, "low": 99.0, "close": 100.0, "volume": 10.0},
+    ])}
+    targets = pd.DataFrame(
+        {"AAPL": [1.0, 1.0, 0.0, 0.0]},
+        index=bars["AAPL"].index[:4],
+    )
+
+    result = run_execution_backtest(
+        targets,
+        bars,
+        ExecutionConfig(initial_cash=1_000, latency_bars=1, max_participation_rate=0.5),
+    )
+
+    assert [intent.quantity for intent in result.intents] == pytest.approx([10, 5, 10, 5])
+    assert [fill.filled_qty for fill in result.fills] == pytest.approx([5, 5, 5, 5])
+    assert result.positions["AAPL"].quantity == pytest.approx(0)
+    assert result.equity["cash"].iloc[-1] == pytest.approx(1_000)
+    assert result.equity["nav"].iloc[-1] == pytest.approx(1_000)
+    assert (result.equity["nav"] >= 0).all()
+
+
+def test_delayed_reduction_does_not_sell_against_pending_buy():
+    bars = {"AAPL": _bars([
+        {"open": 100.0, "high": 101.0, "low": 99.0, "close": 100.0, "volume": 10.0},
+        {"open": 100.0, "high": 101.0, "low": 99.0, "close": 100.0, "volume": 10.0},
+        {"open": 100.0, "high": 101.0, "low": 99.0, "close": 100.0, "volume": 10.0},
+        {"open": 100.0, "high": 101.0, "low": 99.0, "close": 100.0, "volume": 10.0},
+        {"open": 100.0, "high": 101.0, "low": 99.0, "close": 100.0, "volume": 10.0},
+    ])}
+    targets = pd.DataFrame(
+        {"AAPL": [1.0, 0.0, 0.0, 0.0]},
+        index=bars["AAPL"].index[:4],
+    )
+
+    result = run_execution_backtest(
+        targets,
+        bars,
+        ExecutionConfig(initial_cash=1_000, latency_bars=2, max_participation_rate=0.5),
+    )
+
+    assert [intent.side for intent in result.intents] == ["buy", "sell"]
+    assert [fill.filled_qty for fill in result.fills] == pytest.approx([5, 5])
+    assert result.positions["AAPL"].quantity == pytest.approx(0)
+
+
+def test_participation_cap_is_aggregated_across_same_bar_intents():
+    bars = {"AAPL": _bars([
+        {"open": 100.0, "high": 101.0, "low": 99.0, "close": 100.0, "volume": 100.0},
+        {"open": 100.0, "high": 101.0, "low": 99.0, "close": 100.0, "volume": 100.0},
+    ])}
+    intents = [
+        OrderIntent("AAPL", "buy", 40, bars["AAPL"].index[0], run_id="intent-a"),
+        OrderIntent("AAPL", "buy", 40, bars["AAPL"].index[0], run_id="intent-b"),
+    ]
+
+    fills = execute_intents(
+        intents,
+        bars,
+        ExecutionConfig(latency_bars=1, max_participation_rate=0.5),
+    )
+
+    assert sum(fill.filled_qty for fill in fills) == pytest.approx(50)
+    assert [fill.filled_qty for fill in fills] == pytest.approx([40, 10])
+    assert fills[1].status == "partial"
+
+
+def test_execution_result_and_strategy_trace_are_json_safe():
+    bars = {"AAPL": _bars([
+        {"open": 100.0, "high": 101.0, "low": 99.0, "close": 100.0, "volume": 1000.0},
+        {"open": 101.0, "high": 103.0, "low": 100.0, "close": 102.0, "volume": 1000.0},
+    ])}
+    targets = pd.DataFrame({"AAPL": [1.0]}, index=bars["AAPL"].index[:1])
+    result = run_execution_backtest(targets, bars, ExecutionConfig(initial_cash=10_000))
+
+    json.dumps(result.to_dict())
+
+    prices = bars["AAPL"].rename(columns=lambda field: f"AAPL__{field}")
+    spec = StrategySpec.from_dict({
+        "name": "json trace",
+        "base_symbol": "AAPL",
+        "universe": {"type": "list", "symbols": ["AAPL"]},
+        "signal": {"type": "factor", "plugin": "momentum", "lookback": 1},
+        "portfolio": {"optimizer": "equal_weight", "max_position_pct": 1.0},
+        "execution": {"latency_bars": 1},
+    })
+    run = run_strategy_backtest(spec, prices)
+    report = build_strategy_report(run)
+
+    json.dumps(run.signals)
+    json.dumps(report["signals"])
+
+
+def test_invalid_signal_engine_trace_is_json_safe():
+    prices = pd.DataFrame({"AAPL": [100.0, 101.0]}, index=pd.date_range("2026-01-01", periods=2))
+    spec = StrategySpec.from_dict({
+        "name": "invalid json trace",
+        "base_symbol": "AAPL",
+        "universe": {"type": "list", "symbols": ["AAPL"]},
+        "signal": {"type": "factor", "plugin": "value"},
+    })
+
+    run = run_strategy_backtest(spec, prices)
+
+    assert run.ok is False
+    json.dumps(run.signals)
+
+
+def test_no_eligible_bar_is_cancelled_when_configured():
+    bars = {"AAPL": _bars([
+        {"open": 100.0, "high": 101.0, "low": 99.0, "close": 100.0, "volume": 1000.0},
+    ])}
+    intent = OrderIntent("AAPL", "buy", 10, bars["AAPL"].index[0])
+
+    fills = execute_intents([intent], bars, ExecutionConfig(latency_bars=1, cancel_unfilled=True))
+
+    assert fills[0].status == "cancelled"
+    assert fills[0].reason == "no_eligible_bar"
+
+
+def test_same_time_same_symbol_ordering_is_input_order_independent():
+    bars = {"AAPL": _bars([
+        {"open": 100.0, "high": 101.0, "low": 99.0, "close": 100.0, "volume": 100.0},
+        {"open": 100.0, "high": 101.0, "low": 99.0, "close": 100.0, "volume": 100.0},
+    ])}
+    first = OrderIntent("AAPL", "buy", 30, bars["AAPL"].index[0], reason="intent-a")
+    second = OrderIntent("AAPL", "buy", 30, bars["AAPL"].index[0], reason="intent-b")
+    config = ExecutionConfig(latency_bars=1, max_participation_rate=0.5)
+
+    ordered = execute_intents([first, second], bars, config)
+    shuffled = execute_intents([second, first], bars, config)
+
+    assert ordered == shuffled
+    assert all(fill.run_id.startswith("execution-") for fill in ordered)
 
 
 def test_apply_fills_updates_average_price_and_realized_pnl():

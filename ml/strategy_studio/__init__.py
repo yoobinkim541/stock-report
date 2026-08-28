@@ -1,6 +1,6 @@
 from .engine import CompiledStrategy, StrategyRun, build_signal_panel, compile_strategy, run_strategy_backtest
 from .contracts import DataStamp, FillEvent, OrderIntent, PositionState, SignalOutput, deserialize_event, serialize_event
-from .execution import ExecutionConfig, ExecutionResult, apply_fills, execute_intents, execution_defaults, run_execution_backtest
+from .execution import ExecutionConfig, ExecutionResult, apply_fills, execute_intents, execution_defaults, run_execution_backtest, to_jsonable
 from .patch import apply_strategy_patch, diff_strategy_specs
 from .presets import builtin_strategy_presets
 from .report import build_strategy_report
@@ -50,6 +50,7 @@ __all__ = [
     "execute_intents",
     "execution_defaults",
     "run_execution_backtest",
+    "to_jsonable",
     "SUPPORTED_DATA_PROFILES",
     "SUPPORTED_SIGNAL_TYPES",
     "SUPPORTED_EXECUTION_PROFILES",
