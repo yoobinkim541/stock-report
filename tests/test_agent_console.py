@@ -3553,7 +3553,7 @@ def test_market_prompt_includes_prediction_market_context(monkeypatch, tmp_path)
 
     prompt = agent._build_market_context_prompt("시장 위험을 폴리마켓까지 보고 판단해줘", pack)
 
-    assert "[예측시장/Polymarket]" in prompt
+    assert "[예측시장]" in prompt
     assert "Yes 63.0%" in prompt
     assert "검증된 사실이 아니라" in prompt
 

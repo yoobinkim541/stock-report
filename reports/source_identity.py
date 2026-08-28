@@ -26,6 +26,11 @@ def _hash(value: object) -> str:
     return hashlib.sha256(str(value).strip().lower().encode("utf-8")).hexdigest()[:16]
 
 
+def _identity_part(value: object) -> str:
+    """Normalize a human/source key without allowing whitespace variants."""
+    return "-".join(str(value or "").strip().lower().split())
+
+
 def legacy_content_id(event: dict) -> str:
     key = event.get("url") or f"{event.get('source', '')}:{event.get('title', '')}"
     return _hash(key)
@@ -50,6 +55,11 @@ def _observation_entity(event: dict) -> str:
         return explicit
     source = str(event.get("source") or "unknown").strip().lower() or "unknown"
     metrics = event.get("metrics") if isinstance(event.get("metrics"), dict) else {}
+    if source.split(":", 1)[0] == "worldgovernmentbonds":
+        country = _identity_part(metrics.get("country"))
+        maturity = _identity_part(metrics.get("maturity"))
+        if country and maturity:
+            return f"worldgovernmentbonds:{country}:{maturity}"
     for key in NATIVE_ID_KEYS:
         value = metrics.get(key)
         if value not in (None, ""):
@@ -102,4 +112,3 @@ def normalize_event_identity(
     row["observation_bucket"] = bucket_text
     row["id"] = _hash(f"{entity_id}|{bucket_text}")
     return row
-

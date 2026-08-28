@@ -73,3 +73,23 @@ def test_explicit_observed_at_controls_bucket_instead_of_append_time():
 
     assert row["observation_bucket"] == "2026-08-21T09:30:00+00:00"
     assert row["observed_at"] == "2026-08-21T09:31:15+00:00"
+
+
+def test_worldgovernmentbonds_entity_id_includes_country_and_maturity():
+    from reports.source_identity import normalize_event_identity
+
+    observed_at = datetime(2026, 8, 21, 10, 5, tzinfo=UTC)
+    united_states = normalize_event_identity({
+        "source": "worldgovernmentbonds",
+        "type": "macro_snapshot",
+        "metrics": {"country": "united-states", "maturity": "10Y", "yield_pct": 4.4},
+    }, observed_at)
+    japan = normalize_event_identity({
+        "source": "worldgovernmentbonds",
+        "type": "macro_snapshot",
+        "metrics": {"country": "japan", "maturity": "10Y", "yield_pct": 1.2},
+    }, observed_at)
+
+    assert united_states["entity_id"] == "worldgovernmentbonds:united-states:10y"
+    assert japan["entity_id"] == "worldgovernmentbonds:japan:10y"
+    assert united_states["id"] != japan["id"]

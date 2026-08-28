@@ -10,11 +10,13 @@ from datetime import datetime, timezone
 from typing import Any
 
 from agent_console import evidence_usage, wiki
+from providers import news_labels
 from reports import source_collector
 
 STALE_WIKI_AGE_DAYS = 14
 UNUSED_WIKI_DAYS = 30
 RECENT_EVENT_HOURS = 24
+NEWS_LABEL_FALLBACK_ALERT_RATIO = 0.5
 
 
 def _now_iso() -> str:
@@ -26,6 +28,15 @@ def _clean(value: object, limit: int = 240) -> str:
     if len(text) <= limit:
         return text
     return text[: max(0, limit - 1)].rstrip() + "…"
+
+
+def _health_bool(record: dict[str, Any], key: str, fallback: bool = False) -> bool:
+    value = record.get(key)
+    if value is None:
+        return fallback
+    if isinstance(value, str):
+        return value.strip().lower() not in {"", "0", "false", "no", "none", "null"}
+    return bool(value)
 
 
 def _source_root(source: str) -> str:
@@ -112,6 +123,16 @@ def _build_source_rows(
         availability = _clean(record.get("availability") or "available", 40).lower()
         fetched_count = int(record.get("last_fetched_count") if record.get("last_fetched_count") is not None else last_count)
         persisted_count = int(record.get("last_persisted_count") if record.get("last_persisted_count") is not None else last_count)
+        deduped_count = int(record.get("last_deduped_count") if record.get("last_deduped_count") is not None else record.get("deduped_count") or 0)
+        collision_count = int(record.get("last_collision_count") if record.get("last_collision_count") is not None else record.get("collision_count") or 0)
+        fetch_success = _health_bool(record, "fetch_success", bool(record.get("last_fetch_success")))
+        persist_success = _health_bool(record, "persist_success", bool(record.get("last_persist_success")))
+        duplicate_only = (
+            fetched_count > 0 and persisted_count == 0 and deduped_count >= fetched_count
+            and collision_count == 0 and persist_success
+        )
+        zero_persist_streak = int(record.get("zero_persist_streak") or 0)
+        cardinality_drop_streak = int(record.get("cardinality_drop_streak") or 0)
         rows.append({
             "source": source,
             "observed": source in source_health,
@@ -126,8 +147,17 @@ def _build_source_rows(
             "last_success_count": int(record.get("last_success_count") or 0),
             "last_fetched_count": fetched_count,
             "last_persisted_count": persisted_count,
+            "deduped_count": deduped_count,
+            "collision_count": collision_count,
+            "fetch_success": fetch_success,
+            "persist_success": persist_success,
             "last_duration_ms": int(record.get("last_duration_ms") or 0),
-            "zero_persist_streak": int(record.get("zero_persist_streak") or 0),
+            "zero_persist_streak": zero_persist_streak,
+            "zero_persist_alert": zero_persist_streak >= 2,
+            "cardinality_drop_streak": cardinality_drop_streak,
+            "cardinality_drop_alert": cardinality_drop_streak >= 2,
+            "cardinality_ratio": record.get("last_cardinality_ratio"),
+            "duplicate_only": duplicate_only,
             "availability": availability,
             "availability_reason": _clean(record.get("availability_reason") or "", 200),
             "last_error": _clean(record.get("last_error") or stale.get("error") or "", 200) if stale else _clean(record.get("last_error") or "", 200),
@@ -155,13 +185,16 @@ def _summarize_source_health(
     failed = [row for row in rows if row["availability"] == "error"]
     zero_persist = [
         row for row in rows
-        if row["observed"] and row["last_fetched_count"] > 0 and row["last_persisted_count"] == 0
-        and row["zero_persist_streak"] > 0
+        if row["observed"] and row["zero_persist_alert"]
     ]
+    cardinality_drops = [row for row in rows if row["observed"] and row["cardinality_drop_alert"]]
+    collisions = [row for row in rows if row["observed"] and row["collision_count"] > 0]
+    duplicate_only = [row for row in rows if row["observed"] and row["duplicate_only"]]
     healthy = [
         row for row in rows
         if row["observed"] and not row["is_stale"] and row["has_success"] and row["last_count"] > 0
-        and row["availability"] == "available"
+        and row["availability"] == "available" and not row["zero_persist_alert"]
+        and not row["cardinality_drop_alert"] and row["collision_count"] == 0
     ]
     recent_counts = Counter(_clean(event.get("source") or "unknown", 120) for event in recent_events or [])
     return {
@@ -175,6 +208,9 @@ def _summarize_source_health(
             "blocked_sources": len(blocked),
             "failed_sources": len(failed),
             "zero_persist_sources": len(zero_persist),
+            "cardinality_drop_sources": len(cardinality_drops),
+            "collision_sources": len(collisions),
+            "duplicate_only_sources": len(duplicate_only),
             "recent_event_total": len(recent_events or []),
             "recent_source_total": len([source for source, count in recent_counts.items() if count]),
         },
@@ -270,12 +306,63 @@ def _summarize_curation_health(pages: list[dict[str, Any]]) -> dict[str, Any]:
     }
 
 
+def _summarize_news_label_health() -> dict[str, Any]:
+    """최근 뉴스 라벨 상태를 pipeline health에 연결한다.
+
+    빈 라벨 파일은 아직 라벨링 대상이 없다는 뜻일 수 있으므로 장애로 올리지 않는다.
+    실제 라벨이 존재하는데 LLM 라벨이 없거나 휴리스틱 비율이 높을 때만 attention을 낸다.
+    """
+    try:
+        summary = dict(news_labels.label_health(news_labels.load_labels()))
+    except Exception as exc:
+        return {
+            "status": "error",
+            "attention": True,
+            "total": 0,
+            "llm_count": 0,
+            "heuristic_count": 0,
+            "fallback_ratio": 0.0,
+            "error": _clean(exc, 240),
+        }
+
+    total = int(summary.get("total") or 0)
+    llm_count = int(summary.get("llm_count") or 0)
+    fallback_ratio = float(summary.get("fallback_ratio") or 0.0)
+    reasons = []
+    if total > 0 and llm_count == 0:
+        reasons.append("llm_count=0")
+    if total > 0 and fallback_ratio >= NEWS_LABEL_FALLBACK_ALERT_RATIO:
+        reasons.append(f"fallback_ratio={fallback_ratio:.1%}")
+    summary.update({
+        "status": "no_data" if total == 0 else ("attention" if reasons else "ok"),
+        "attention": bool(reasons),
+        "fallback_alert_ratio": NEWS_LABEL_FALLBACK_ALERT_RATIO,
+        "attention_reasons": reasons,
+    })
+    return summary
+
+
 def _recommendations(
     source_section: dict[str, Any],
     wiki_section: dict[str, Any],
     curation_section: dict[str, Any],
+    news_label_section: dict[str, Any] | None = None,
 ) -> list[dict[str, Any]]:
     recs: list[dict[str, Any]] = []
+    if (news_label_section or {}).get("attention"):
+        total = int(news_label_section.get("total") or 0)
+        llm_count = int(news_label_section.get("llm_count") or 0)
+        fallback_ratio = float(news_label_section.get("fallback_ratio") or 0.0)
+        reason = " · ".join(news_label_section.get("attention_reasons") or [])
+        recs.append({
+            "priority": 1,
+            "category": "news_labels",
+            "title": "뉴스 LLM 라벨 파이프라인 점검",
+            "detail": f"최근 total {total}건 · llm {llm_count}건 · "
+                       f"fallback {fallback_ratio:.1%}"
+                       + (f" · {reason}" if reason else ""),
+            "action": "Codex/Hermes 인증·runner 오류를 확인하고 휴리스틱 폴백 원인을 복구하세요.",
+        })
     stale_rows = list(source_section.get("stale_sources") or [])
     missing_success = [row for row in source_section.get("sources") or [] if row.get("observed") and not row.get("has_success")]
     if stale_rows or missing_success:
@@ -347,7 +434,13 @@ def build_pipeline_health_report(*, dry_run: bool = False) -> dict[str, Any]:
     source_section = _summarize_source_health(source_health, stale_rows, recent_events)
     wiki_section = _summarize_wiki_health(pages, stats_data, lint_data, stale_pages, unused_pages)
     curation_section = _summarize_curation_health(pages)
-    recommendations = _recommendations(source_section, wiki_section, curation_section)
+    news_label_section = _summarize_news_label_health()
+    recommendations = _recommendations(
+        source_section, wiki_section, curation_section, news_label_section
+    )
+    overall_status = "attention" if any(
+        int(rec.get("priority") or 0) > 0 for rec in recommendations
+    ) else "ok"
     try:
         usage = evidence_usage.usage_summary(hours=24)
     except Exception as exc:
@@ -358,6 +451,11 @@ def build_pipeline_health_report(*, dry_run: bool = False) -> dict[str, Any]:
         "source_health": source_section,
         "wiki_health": wiki_section,
         "curation_health": curation_section,
+        "news_label_health": news_label_section,
+        "overall": {
+            "status": overall_status,
+            "news_labels": news_label_section,
+        },
         "evidence_usage": usage,
         "recommendations": recommendations,
     }
@@ -368,6 +466,8 @@ def format_pipeline_health_report(report: dict[str, Any]) -> str:
     wiki_section = report.get("wiki_health") or {}
     curation_section = report.get("curation_health") or {}
     overall = source_section.get("overall") or {}
+    pipeline_overall = report.get("overall") or {}
+    news_labels_section = report.get("news_label_health") or pipeline_overall.get("news_labels") or {}
     stats = wiki_section.get("stats") or {}
     status_counts = stats.get("status_counts") or {}
     lines = ["[LLM Wiki Pipeline Health]"]
@@ -393,6 +493,15 @@ def format_pipeline_health_report(report: dict[str, Any]) -> str:
         f"상태: reviewed {status_counts.get('reviewed', 0)} · stable {status_counts.get('stable', 0)} · "
         f"archived {status_counts.get('archived', 0)}"
     )
+    if int(news_labels_section.get("total") or 0) > 0:
+        lines.append(
+            f"뉴스 LLM 라벨: total {news_labels_section.get('total', 0)} · "
+            f"llm {news_labels_section.get('llm_count', 0)} · "
+            f"fallback {float(news_labels_section.get('fallback_ratio') or 0.0):.1%} · "
+            f"status {news_labels_section.get('status', 'unknown')}"
+        )
+    else:
+        lines.append("뉴스 LLM 라벨: no_data · 라벨 파일이 비어 있음")
     lines.append("")
     lines.append("권장 액션:")
     for rec in (report.get("recommendations") or [])[:5]:

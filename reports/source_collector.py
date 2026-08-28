@@ -288,6 +288,9 @@ class _BoundedResponse:
 
 # 소스별 마지막 오류 (update_source_health 가 헬스 파일에 기록 → 경보에 원인 표시)
 _LAST_ERRORS: dict[str, str] = {}
+# append_events keeps the public integer return value for compatibility while
+# exposing per-source write accounting to update_source_health in this process.
+_LAST_APPEND_STATS: dict[str, dict] = {}
 # 재시도로 해결되지 않는 운영 상태. 일반 수집 오류와 분리해 헬스 경보가
 # 법적 지역 제한을 장애로 반복 보고하지 않게 한다.
 _SOURCE_AVAILABILITY: dict[str, dict[str, str]] = {}
@@ -429,30 +432,66 @@ def append_events(events: Iterable[dict], cache_dir: Path | str = DEFAULT_CACHE_
     from reports.source_identity import normalize_event_identity
 
     with safe_io.file_write_lock(str(path)):
-        seen = set()
+        seen: dict[str, tuple[str, str, str, str]] = {}
         if path.exists():
             for line in path.read_text(encoding="utf-8").splitlines():
                 try:
-                    seen.add(json.loads(line).get("id"))
+                    saved = json.loads(line)
+                    saved_id = saved.get("id")
+                    if saved_id:
+                        seen[str(saved_id)] = (
+                            str(saved.get("record_kind") or ""),
+                            str(saved.get("entity_id") or ""),
+                            str(saved.get("observation_bucket") or ""),
+                            str(saved.get("content_id") or ""),
+                        )
                 except json.JSONDecodeError:
                     continue
 
         rows = []
+        run_stats: dict[str, dict] = {}
         for event in events:
             row = dict(event)
-            row.setdefault("source", "unknown")
+            source = str(row.get("source") or "unknown")
+            row.setdefault("source", source)
             row.setdefault("title", "")
             row["collected_at"] = now.astimezone(KST).isoformat(timespec="seconds")
             row = normalize_event_identity(row, now)
-            if row["id"] in seen:
+            stats = run_stats.setdefault(source, {
+                "run_at": now.astimezone(KST).isoformat(timespec="seconds"),
+                "fetched": 0,
+                "persisted": 0,
+                "deduped": 0,
+                "collisions": 0,
+                "persist_success": True,
+            })
+            stats["fetched"] += 1
+            row_id = str(row["id"])
+            identity = (
+                str(row.get("record_kind") or ""),
+                str(row.get("entity_id") or ""),
+                str(row.get("observation_bucket") or ""),
+                str(row.get("content_id") or ""),
+            )
+            previous_identity = seen.get(row_id)
+            if previous_identity is not None:
+                # Older cache rows may only have the id. Keep their historical
+                # dedupe behavior; only two populated, different identities
+                # are a collision.
+                if previous_identity == identity or not any(previous_identity) or not any(identity):
+                    stats["deduped"] += 1
+                else:
+                    stats["collisions"] += 1
                 continue
-            seen.add(row["id"])
+            seen[row_id] = identity
             rows.append(row)
+            stats["persisted"] += 1
 
         if rows:
             with path.open("a", encoding="utf-8") as f:
                 for row in rows:
                     f.write(json.dumps(row, ensure_ascii=False, sort_keys=True) + "\n")
+        _LAST_APPEND_STATS.update(run_stats)
         return len(rows)
 
 
@@ -876,6 +915,15 @@ def fetch_arca_events(max_pages: int = 2, *, proxy: str | None = None,
     if events:
         _LAST_ERRORS.pop("arca", None)
     return [_classify_event(event) for event in events]
+
+
+def fetch_arca_provider() -> list[dict]:
+    """Importable Arca provider entrypoint for the isolated source worker."""
+    try:
+        pages = max(0, min(20, int(os.getenv("STOCK_COLLECTOR_ARCA_PAGES", "2"))))
+    except (TypeError, ValueError):
+        pages = 2
+    return fetch_arca_events(max_pages=pages)
 
 
 def _telegram_text_from_fragment(fragment: str) -> str:
@@ -1303,6 +1351,8 @@ def fetch_world_gov_bond_events(countries: dict[str, str] = WORLD_GOV_BOND_COUNT
                 "source": "worldgovernmentbonds",
                 "source_url": "https://www.worldgovernmentbonds.com",
                 "type": "macro_snapshot",
+                "record_kind": "observation",
+                "entity_id": f"worldgovernmentbonds:{country}:{maturity.lower()}",
                 "title": f"{label} {maturity}: {value:.3f}%",
                 "url": f"https://www.worldgovernmentbonds.com/country/{country}/#{maturity}",
                 "tickers": [],
@@ -1648,9 +1698,11 @@ def update_source_health(events: list[dict], cache_dir: Path | str = DEFAULT_CAC
                          now: datetime | None = None,
                          attempted_sources: Iterable[str] | None = None,
                          run_stats: dict[str, dict] | None = None) -> dict:
-    """이번 수집 결과를 소스별 헬스 파일에 반영 — {source: {last_run, last_count, last_success, ...}}.
+    """Persist fetch/write health while keeping the legacy success fields.
 
-    count>0 이면 last_success 갱신. 0 이면 last_success 는 보존(공백 기간 측정의 기준점).
+    ``last_success`` remains the legacy "received event" timestamp.  The
+    explicit fetch/persist timestamps and accounting fields below prevent a
+    successful fetch with no new rows from looking like a write failure.
     """
     now = (now or datetime.now(KST)).astimezone(KST)
     cache_dir = Path(cache_dir)
@@ -1671,9 +1723,19 @@ def update_source_health(events: list[dict], cache_dir: Path | str = DEFAULT_CAC
         for src in attempted:
             rec = health.get(src) or {}
             n = int(counts.get(src, 0))
-            stats = stats_by_source.get(src) or stats_by_source.get(src.split(":", 1)[0]) or {}
+            stats = dict(stats_by_source.get(src) or stats_by_source.get(src.split(":", 1)[0]) or {})
+            run_at = now.isoformat(timespec="seconds")
+            append_stats = _LAST_APPEND_STATS.get(src)
+            if append_stats and append_stats.get("run_at") == run_at:
+                for key in ("deduped", "collisions", "persist_success"):
+                    if key not in stats and key in append_stats:
+                        stats[key] = append_stats[key]
             fetched = int(stats.get("fetched", n) or 0)
             persisted = int(stats.get("persisted", n) or 0)
+            deduped = int(stats.get("deduped_count", stats.get("deduped", 0)) or 0)
+            collisions = int(stats.get(
+                "collision_count", stats.get("collisions", stats.get("collision", 0))
+            ) or 0)
             availability = (_SOURCE_AVAILABILITY.get(src)
                             or _SOURCE_AVAILABILITY.get(src.split(":", 1)[0]))
             stats_availability = str(stats.get("availability") or "")
@@ -1682,21 +1744,60 @@ def update_source_health(events: list[dict], cache_dir: Path | str = DEFAULT_CAC
                     "availability": stats_availability,
                     "availability_reason": str(stats.get("availability_reason") or stats.get("error") or ""),
                 }
+            availability_name = str((availability or {}).get("availability") or stats_availability or "")
+            fetch_success_value = stats.get("fetch_success")
+            if fetch_success_value is None:
+                fetch_success = not bool(stats.get("error")) and availability_name not in {"error", "blocked", "disabled"}
+            else:
+                fetch_success = bool(fetch_success_value)
+            persist_success_value = stats.get("persist_success")
+            if persist_success_value is None:
+                persist_success = bool(
+                    persisted > 0
+                    or (fetched > 0 and deduped >= fetched and collisions == 0 and not stats.get("error"))
+                )
+            else:
+                persist_success = bool(persist_success_value)
+            previous_fetched = int(rec.get("last_fetched_count") or 0)
+            cardinality_ratio = round(fetched / previous_fetched, 3) if previous_fetched > 0 else None
+            cardinality_drop = previous_fetched > 0 and fetched < (previous_fetched * 0.5)
             rec.setdefault("first_run", now.isoformat())
             rec["last_run"] = now.isoformat()
             rec["last_count"] = n
             rec["last_fetched_count"] = fetched
             rec["last_persisted_count"] = persisted
+            rec["last_deduped_count"] = max(0, deduped)
+            rec["last_collision_count"] = max(0, collisions)
+            rec["deduped_count"] = max(0, deduped)
+            rec["collision_count"] = max(0, collisions)
+            rec["fetch_success"] = fetch_success
+            rec["persist_success"] = persist_success
             rec["last_duration_ms"] = max(0, int(stats.get("duration_ms") or 0))
             if stats.get("transport"):
                 rec["last_transport"] = str(stats["transport"])
-            if fetched > 0 and persisted == 0:
+            duplicate_only = (
+                fetched > 0 and persisted == 0 and deduped >= fetched
+                and collisions == 0 and persist_success
+            )
+            zero_persist_issue = fetched > 0 and persisted == 0 and not duplicate_only
+            if zero_persist_issue:
                 rec["zero_persist_streak"] = int(rec.get("zero_persist_streak") or 0) + 1
-            elif persisted > 0:
+            elif persisted > 0 or duplicate_only:
                 rec["zero_persist_streak"] = 0
-                rec["last_persist_success"] = now.isoformat()
             else:
                 rec.setdefault("zero_persist_streak", 0)
+            if cardinality_drop:
+                rec["cardinality_drop_streak"] = int(rec.get("cardinality_drop_streak") or 0) + 1
+            else:
+                rec["cardinality_drop_streak"] = 0
+            rec["last_cardinality_ratio"] = cardinality_ratio
+            rec["cardinality_drop_detected"] = cardinality_drop
+            if fetch_success:
+                rec["last_fetch_success"] = now.isoformat()
+                rec["last_fetch_success_count"] = fetched
+            if persist_success:
+                rec["last_persist_success"] = now.isoformat()
+                rec["last_persist_success_count"] = persisted
             if availability:
                 rec.update(availability)
             else:
@@ -1778,7 +1879,7 @@ def collect_once(cache_dir: Path | str = DEFAULT_CACHE_DIR, now: datetime | None
             "arca",
             ("arca",),
             "news",
-            lambda: fetch_arca_events(max_pages=int(os.getenv("STOCK_COLLECTOR_ARCA_PAGES", "2"))),
+            fetch_arca_provider,
             retries=1,
         ),
         ProviderSpec(

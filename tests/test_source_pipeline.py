@@ -1,9 +1,25 @@
 from __future__ import annotations
 
+import os
+import subprocess
+import sys
 import threading
+import time
 from datetime import datetime, timezone
+from pathlib import Path
 
 import requests
+
+
+def _sleeping_provider_worker():
+    pid_path = Path(os.environ["SOURCE_PIPELINE_TEST_PID_FILE"])
+    pid_path.write_text(str(os.getpid()), encoding="utf-8")
+    time.sleep(5)
+    return [{"source": "timeout-test", "title": "unreachable", "url": "https://e/timeout"}]
+
+
+def _healthy_subprocess_worker():
+    return [{"source": "sibling-test", "title": "ok", "url": "https://e/sibling"}]
 
 
 def _http_error(status: int) -> requests.HTTPError:
@@ -155,3 +171,92 @@ def test_run_providers_can_select_one_provider_by_name(tmp_path):
     result = run_providers(registry=registry, sources=["kalshi"], cache_dir=tmp_path / "cache")
 
     assert result["selected"] == ["kalshi"]
+
+
+def test_provider_timeout_terminates_child_and_keeps_sibling_result(tmp_path, monkeypatch):
+    from reports.source_pipeline import ProviderSpec, run_providers
+    from reports.source_runs import load_source_runs
+
+    pid_path = tmp_path / "timed-out-worker.pid"
+    monkeypatch.setenv("SOURCE_PIPELINE_TEST_PID_FILE", str(pid_path))
+    started = time.monotonic()
+    registry = [
+        ProviderSpec(
+            "slow-timeout",
+            ("timeout-test",),
+            "timeout-test",
+            _sleeping_provider_worker,
+            timeout_seconds=2,
+        ),
+        ProviderSpec(
+            "healthy-sibling",
+            ("sibling-test",),
+            "timeout-test",
+            _healthy_subprocess_worker,
+            timeout_seconds=3,
+        ),
+    ]
+
+    result = run_providers(
+        registry=registry,
+        group="timeout-test",
+        cache_dir=tmp_path / "cache",
+        max_workers=2,
+    )
+
+    assert time.monotonic() - started < 3.5
+    timed_out = result["providers"]["slow-timeout"]
+    assert timed_out["availability"] == "timeout", timed_out
+    assert timed_out["timed_out"] is True
+    assert timed_out["terminated"] is True
+    assert "deadline" in timed_out["error"]
+    assert result["providers"]["healthy-sibling"]["availability"] == "available"
+    assert result["providers"]["healthy-sibling"]["fetched"] == 1
+
+    worker_pid = int(pid_path.read_text(encoding="utf-8"))
+    try:
+        os.kill(worker_pid, 0)
+    except ProcessLookupError:
+        pass
+    else:
+        raise AssertionError("timed-out provider child is still alive")
+
+    manifests = load_source_runs(tmp_path / "cache", hours=1)
+    manifest_by_provider = {row["provider"]: row for row in manifests}
+    assert manifest_by_provider["slow-timeout"]["availability"] == "timeout"
+    assert manifest_by_provider["slow-timeout"]["timed_out"] is True
+    assert manifest_by_provider["healthy-sibling"]["availability"] == "available"
+
+
+def test_module_cli_uses_canonical_arca_worker_target(tmp_path):
+    from reports.source_runs import load_source_runs
+
+    cache_dir = tmp_path / "cache"
+    env = os.environ.copy()
+    env["STOCK_COLLECTOR_ARCA_PAGES"] = "0"
+    completed = subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "reports.source_pipeline",
+            "--group",
+            "news",
+            "--source",
+            "arca",
+            "--cache-dir",
+            str(cache_dir),
+        ],
+        cwd=str(Path(__file__).resolve().parents[1]),
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=15,
+    )
+
+    assert completed.returncode == 0, completed.stdout + completed.stderr
+    arca_run = load_source_runs(cache_dir, hours=1)[-1]
+    assert arca_run["provider"] == "arca"
+    assert arca_run["availability"] == "available"
+    assert arca_run["error"] == ""
+    assert arca_run["isolated"] is True
+    assert arca_run["transport"] == "subprocess"

@@ -200,8 +200,10 @@ def prediction_market_state(events: list[dict] | None = None, limit: int = 8) ->
                     continue
                 provider_items.append({
                     "source": provider,
+                    "provider": "Polymarket" if provider == "polymarket" else "Kalshi",
+                    "event_id": row.get("event_id") or row.get("id") or row.get("content_id") or "",
                     "title": str(row.get("title") or "")[:220],
-                    "url": row.get("url") or "",
+                    "url": row.get("url") or row.get("source_url") or "",
                     "topic": (row.get("classification") or {}).get("topic") or row.get("topic") or "예측시장",
                     "yes_probability": round(yes_probability, 4),
                     "volume": _as_float(metrics.get("volume")),

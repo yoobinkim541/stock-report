@@ -8,8 +8,8 @@
 
 정직: LLM 라벨 = 피처 후보일 뿐 엣지 아님 — 승격은 기존 OOS 게이트가 결정.
 안전: NEWS_LLM_LABELS_ENABLED=true 여야 동작(기본 off). 실패·미설치 → 조용히 스킵.
-비용: 회당 NEWS_LLM_LABELS_MAX(기본 30)건 한 번의 배치 호출 — 배치당 총량은 비슷하게
-     유지되면서(같은 백로그를 더 잘게 나눠 처리) World Memory 반영 지연만 줄어든다.
+비용: 회당 NEWS_LLM_LABELS_MAX(기본 30)건 상한을 유지하고, NEWS_LLM_LABELS_CHUNK_SIZE
+     (기본 5) 단위로 나눈다. chunk별 부분 성공은 보존하고 누락 행만 폴백한다.
 크론 (평일 매시 05분 — 2026-07-24부터 하루 2회에서 시간당으로 변경. 뉴스 많은 날
      하루 2회로는 회당 상한(30건)에 걸려 다음 배치까지 밀리는 경우가 있었음):
     5 * * * 1-5 cd <repo> && uv run python crons/news_llm_snapshot.py
@@ -72,18 +72,22 @@ def main() -> int:
     if not targets:
         return 0
 
-    labels = news_labels.label_events(targets)
+    labels = news_labels.label_events(targets, chunk_size=news_labels.NEWS_LLM_CHUNK_SIZE)
     n = news_labels.append_labels(labels)
     logger.info("라벨 적재 %d/%d건 → %s (검증 폐기 %d건)",
                 n, len(targets), news_labels.LABELS_PATH, len(targets) - n)
     health = news_labels.label_health(labels)
     logger.info(
-        "라벨 생성 provenance: llm=%d heuristic=%d fallback=%.1f%% provider=%s model=%s error=%s",
+        "라벨 생성 provenance: llm=%d heuristic=%d fallback=%.1f%% primary=%s model=%s "
+        "chunksize=%d provenance=%s errors=%s first_error=%s",
         health["llm_count"],
         health["heuristic_count"],
         health["fallback_ratio"] * 100,
-        news_labels.NEWS_LLM_PROVIDER,
+        news_labels.NEWS_LLM_PRIMARY,
         news_labels.NEWS_LLM_MODEL,
+        news_labels.NEWS_LLM_CHUNK_SIZE,
+        health["provenance"],
+        health["error_categories"],
         health["first_failure_reason"][:200] or "-",
     )
 

@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from pathlib import Path
+
 
 def test_relevant_cron_lines_normalizes_whitespace_and_comments():
     from scripts.check_crontab_drift import relevant_cron_lines
@@ -46,3 +48,9 @@ def test_drift_report_ignores_unrelated_user_cron_lines():
     installed = expected + "* * * * * bash $HOME/projects/myWiki/watchdog.sh\n"
 
     assert drift_report(expected, installed) == {"ok": True, "missing": [], "unexpected": []}
+
+
+def test_deployed_cron_path_includes_qmd_install_dir():
+    crontab = (Path(__file__).parents[1] / "deploy" / "crontab.stock-report").read_text(encoding="utf-8")
+
+    assert "PATH=/home/ubuntu/.hermes/node/bin:/home/ubuntu/.local/bin:" in crontab

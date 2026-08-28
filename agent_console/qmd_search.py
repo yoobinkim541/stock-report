@@ -20,7 +20,19 @@ def enabled() -> bool:
 
 
 def qmd_bin() -> str:
-    return os.getenv("AGENT_CONSOLE_QMD_BIN", "qmd").strip() or "qmd"
+    configured = os.getenv("AGENT_CONSOLE_QMD_BIN", "").strip()
+    if configured:
+        return configured
+    discovered = shutil.which("qmd")
+    if discovered:
+        return discovered
+    for candidate in (
+        Path.home() / ".hermes" / "node" / "bin" / "qmd",
+        Path.home() / ".local" / "bin" / "qmd",
+    ):
+        if candidate.is_file() and os.access(candidate, os.X_OK):
+            return str(candidate)
+    return "qmd"
 
 
 def timeout_seconds() -> float:

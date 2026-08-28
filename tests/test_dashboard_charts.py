@@ -972,6 +972,18 @@ def test_price_chart_compare_shared_anchor_zero():
     assert cmp_points[cmp_idx[0]] < 0                 # 시작점 이전은 음수 %
 
 
+def test_price_chart_compare_traces_are_marked_for_visible_range_rebase():
+    """브라우저가 현재 표시 범위 기준으로 비교선을 재기준화할 수 있어야 한다."""
+    hist = _ohlc(30)
+    cmp_s = pd.Series([50.0 + i for i in range(30)], index=hist.index)
+    fig = charts.price_chart(hist, "MAIN", compare={"CMP": cmp_s})
+
+    price_traces = [tr for tr in fig.data if tr.name in {"MAIN", "CMP"}]
+    assert len(price_traces) == 2
+    assert all(getattr(tr, "meta", None) == {"tn_role": "compare-price"}
+               for tr in price_traces)
+
+
 def test_price_chart_compare_empty_series_ignored():
     """비교 시리즈가 전부 무효(None·짧음)면 일반 모드 유지."""
     import plotly.graph_objects as go

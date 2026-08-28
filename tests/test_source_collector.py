@@ -61,6 +61,68 @@ def test_append_events_preserves_mutable_observations_across_time_buckets(tmp_pa
     assert rows[0]["id"] != rows[1]["id"]
 
 
+def test_append_events_accounts_for_duplicates_and_identity_collisions(tmp_path):
+    from reports import source_collector as sc
+    from reports.source_identity import normalize_event_identity
+
+    now = datetime(2026, 8, 21, 10, 5, tzinfo=KST)
+    event = {
+        "source": "kalshi",
+        "type": "prediction_market",
+        "entity_id": "kalshi:market-1",
+        "observed_at": now.isoformat(),
+    }
+    cache = tmp_path / "duplicates"
+
+    assert sc.append_events([event], cache_dir=cache, now=now) == 1
+    assert sc.append_events([event], cache_dir=cache, now=now) == 0
+    duplicate_stats = sc._LAST_APPEND_STATS["kalshi"]
+    assert duplicate_stats["fetched"] == 1
+    assert duplicate_stats["persisted"] == 0
+    assert duplicate_stats["deduped"] == 1
+    assert duplicate_stats["collisions"] == 0
+
+    collision_cache = tmp_path / "collisions"
+    normalized = normalize_event_identity(event, now)
+    saved = dict(normalized)
+    saved["entity_id"] = "kalshi:legacy-market"
+    event_file = collision_cache / "events-2026-08-21.jsonl"
+    collision_cache.mkdir(parents=True)
+    event_file.write_text(json.dumps(saved) + "\n", encoding="utf-8")
+
+    assert sc.append_events([event], cache_dir=collision_cache, now=now) == 0
+    collision_stats = sc._LAST_APPEND_STATS["kalshi"]
+    assert collision_stats["deduped"] == 0
+    assert collision_stats["collisions"] == 1
+
+
+def test_append_events_keeps_legacy_same_id_as_duplicate(tmp_path):
+    from reports import source_collector as sc
+    from reports.source_identity import normalize_event_identity
+
+    now = datetime(2026, 8, 21, 10, 5, tzinfo=KST)
+    event = {
+        "source": "kalshi",
+        "type": "prediction_market",
+        "entity_id": "kalshi:market-legacy",
+        "observed_at": now.isoformat(),
+    }
+    normalized = normalize_event_identity(event, now)
+    legacy = dict(normalized)
+    for key in ("record_kind", "entity_id", "observation_bucket", "content_id"):
+        legacy.pop(key, None)
+    cache = tmp_path / "cache"
+    cache.mkdir()
+    (cache / "events-2026-08-21.jsonl").write_text(
+        json.dumps(legacy) + "\n", encoding="utf-8"
+    )
+
+    assert sc.append_events([event], cache_dir=cache, now=now) == 0
+    stats = sc._LAST_APPEND_STATS["kalshi"]
+    assert stats["deduped"] == 1
+    assert stats["collisions"] == 0
+
+
 def test_build_digest_groups_by_source_and_limits_items():
     events = [
         {"source": "saveticker", "source_url": "https://saveticker.com/api", "title": "AI chip demand", "url": "https://e/1", "tickers": ["NVDA"], "classification": {"kind": "article", "topic": "기술/AI", "trust": "B"}},
@@ -276,6 +338,39 @@ def test_fetch_world_gov_bond_events_emits_common_maturities(monkeypatch):
     urls = [event["url"] for event in events]
     assert len(set(urls)) == 4
     assert "#30Y" in urls[-1]
+
+
+def test_fetch_world_gov_bond_events_emits_country_maturity_entity_ids(monkeypatch):
+    markdown = "|  | [10 years](https://example.test/10-years/) | 4.163% | +7.8 bp |"
+
+    class FakeResponse:
+        headers: dict = {}
+        encoding = "utf-8"
+
+        def raise_for_status(self):
+            return None
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+        def iter_content(self, chunk_size=65536):
+            yield markdown.encode("utf-8")
+
+    monkeypatch.setattr(sc.requests, "get", lambda *args, **kwargs: FakeResponse())
+
+    events = sc.fetch_world_gov_bond_events({
+        "united-states": "미국 국채금리",
+        "japan": "일본 국채금리",
+    })
+
+    entity_ids = {event["entity_id"] for event in events}
+    assert entity_ids == {
+        "worldgovernmentbonds:united-states:10y",
+        "worldgovernmentbonds:japan:10y",
+    }
 
 
 def test_fetch_polymarket_events_normalizes_gamma_markets(monkeypatch):
@@ -873,6 +968,93 @@ def test_source_health_preserves_last_success_across_gap(tmp_path):
     h = sc.update_source_health([], cache_dir=cache, now=t2)     # 다음 수집은 전부 0건
     assert h["fred"]["last_count"] == 0
     assert h["fred"]["last_success"].startswith("2026-07-06")    # 성공 시각 보존
+
+
+def test_source_health_separates_fetch_persist_dedupe_and_collision_counts(tmp_path):
+    from reports import source_collector as sc
+
+    now = datetime(2026, 8, 21, 10, 0, tzinfo=KST)
+    health = sc.update_source_health(
+        [],
+        cache_dir=tmp_path / "cache",
+        now=now,
+        attempted_sources=["kalshi"],
+        run_stats={"kalshi": {
+            "fetch_success": True,
+            "persist_success": True,
+            "fetched": 10,
+            "persisted": 2,
+            "deduped": 7,
+            "collisions": 1,
+        }},
+    )
+
+    row = health["kalshi"]
+    assert row["fetch_success"] is True
+    assert row["persist_success"] is True
+    assert row["last_fetch_success"] == "2026-08-21T10:00:00+09:00"
+    assert row["last_persist_success"] == "2026-08-21T10:00:00+09:00"
+    assert row["last_fetched_count"] == 10
+    assert row["last_persisted_count"] == 2
+    assert row["last_deduped_count"] == 7
+    assert row["last_collision_count"] == 1
+
+
+def test_duplicate_only_observation_run_is_not_zero_persist_failure(tmp_path):
+    from reports import source_collector as sc
+    from reports.wiki_pipeline_health import _summarize_source_health
+
+    now = datetime(2026, 8, 21, 10, 0, tzinfo=KST)
+    health = sc.update_source_health(
+        [], cache_dir=tmp_path / "cache", now=now,
+        attempted_sources=["kalshi"],
+        run_stats={"kalshi": {
+            "fetch_success": True, "persist_success": True,
+            "fetched": 4, "persisted": 4, "deduped": 0, "collisions": 0,
+        }},
+    )
+    health = sc.update_source_health(
+        [], cache_dir=tmp_path / "cache", now=now + timedelta(minutes=30),
+        attempted_sources=["kalshi"],
+        run_stats={"kalshi": {
+            "fetch_success": True, "persist_success": True,
+            "fetched": 4, "persisted": 0, "deduped": 4, "collisions": 0,
+        }},
+    )
+
+    section = _summarize_source_health(health, [], [])
+    row = next(row for row in section["sources"] if row["source"] == "kalshi")
+    assert row["duplicate_only"] is True
+    assert row["zero_persist_streak"] == 0
+    assert section["overall"]["zero_persist_sources"] == 0
+
+
+def test_repeated_zero_persist_and_cardinality_drop_are_reported(tmp_path):
+    from reports import source_collector as sc
+    from reports.wiki_pipeline_health import _summarize_source_health
+
+    cache = tmp_path / "cache"
+    now = datetime(2026, 8, 21, 10, 0, tzinfo=KST)
+    for offset, fetched, persisted in ((0, 100, 100), (30, 40, 0), (60, 10, 0)):
+        health = sc.update_source_health(
+            [], cache_dir=cache, now=now + timedelta(minutes=offset),
+            attempted_sources=["kalshi"],
+            run_stats={"kalshi": {
+                "fetch_success": True,
+                "persist_success": persisted > 0,
+                "fetched": fetched,
+                "persisted": persisted,
+                "deduped": 0,
+                "collisions": 0,
+            }},
+        )
+
+    section = _summarize_source_health(health, [], [])
+    row = next(row for row in section["sources"] if row["source"] == "kalshi")
+    assert row["zero_persist_streak"] == 2
+    assert row["cardinality_drop_streak"] == 2
+    assert section["overall"]["zero_persist_sources"] == 1
+    assert section["overall"]["cardinality_drop_sources"] == 1
 
 
 def test_stale_sources_flags_gap_and_never_succeeded():

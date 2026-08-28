@@ -10,9 +10,9 @@
 # 이 파일이 운영 크론의 유일한 출처다 — 직접 `crontab -e` 로 편집 금지, 항상 이 파일을 고쳐 재적용.
 # ─────────────────────────────────────────────────────────────────────────────
 
-# 환경 (cron 은 로그인 셸이 아니므로 PATH 에 uv 위치 보장)
+# 환경 (cron 은 로그인 셸이 아니므로 uv·QMD 위치 보장)
 SHELL=/bin/bash
-PATH=/home/ubuntu/.local/bin:/usr/local/bin:/usr/bin:/bin
+PATH=/home/ubuntu/.hermes/node/bin:/home/ubuntu/.local/bin:/usr/local/bin:/usr/bin:/bin
 
 # ── 상시 리포트·전략 (매일) ──────────────────────────────────────────────────
 # 일일 투자 리포트 생성·발송 (investment_report + barbell_strategy + portfolio_tracker)

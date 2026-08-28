@@ -25,6 +25,8 @@ import json
 import logging
 import math
 import os
+import subprocess
+import tempfile
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -39,6 +41,13 @@ EVENT_TYPES = ("실적", "가이던스", "규제", "제재관세", "인수합병
 NEWS_LLM_MODEL = os.getenv("NEWS_LLM_LABELS_MODEL", "gpt-5-mini")
 NEWS_LLM_PROVIDER = os.getenv("NEWS_LLM_LABELS_PROVIDER", "openai-codex")
 NEWS_LLM_TIMEOUT = int(os.getenv("NEWS_LLM_LABELS_TIMEOUT", "90"))
+NEWS_LLM_PRIMARY = os.getenv("NEWS_LLM_LABELS_PRIMARY", "codex").strip().lower()
+NEWS_LLM_CODEX_MODEL = (os.getenv("NEWS_LLM_LABELS_CODEX_MODEL") or
+                        os.getenv("AGENT_CONSOLE_CODEX_MODEL", "")).strip()
+NEWS_LLM_CHUNK_SIZE = max(1, int(os.getenv("NEWS_LLM_LABELS_CHUNK_SIZE", "5")))
+NEWS_LLM_MAX_CHUNKS = max(1, int(os.getenv("NEWS_LLM_LABELS_MAX_CHUNKS", "6")))
+
+LABEL_ERROR_CATEGORIES = ("", "exit", "timeout", "refusal", "invalid_output", "unavailable")
 
 # news 축 집계 파라미터 — 최근 window 일 라벨의 방향×강도 감쇠합
 AXIS_WINDOW_DAYS = 7
@@ -201,64 +210,155 @@ def parse_labels(text: str, events: list[dict]) -> list[dict]:
     return out
 
 
-def label_events(events: list[dict], runner=None) -> list[dict]:
-    """hermes 로 뉴스 배치 라벨 생성 — 실패 시 휴리스틱 폴백까지 시도한다."""
+def _codex_cwd() -> str:
+    """Codex 뉴스 라벨 호출용 빈 cwd. 레포를 읽지 못하도록 별도 경로를 쓴다."""
+    return os.getenv("NEWS_LLM_LABELS_CODEX_CWD", "/tmp").strip() or "/tmp"
+
+
+def _codex_command(prompt: str) -> tuple[list[str], str]:
+    """현재 CODEX_HOME 인증을 재사용하되, 세션·파일 변경을 금지한 실행 명령."""
+    binary = os.getenv("NEWS_LLM_LABELS_CODEX_BIN", "codex").strip() or "codex"
+    with tempfile.NamedTemporaryFile(prefix="news-label-codex-", suffix=".txt",
+                                     delete=False) as tmp:
+        output_path = tmp.name
+    cmd = [binary, "exec", "--ephemeral", "--sandbox", "read-only",
+           "--cd", _codex_cwd(), "--skip-git-repo-check", "--color", "never",
+           "--output-last-message", output_path]
+    if NEWS_LLM_CODEX_MODEL:
+        cmd.extend(["--model", NEWS_LLM_CODEX_MODEL])
+    cmd.append(prompt)
+    return cmd, output_path
+
+
+def _is_refusal(text: str) -> bool:
+    lower = (text or "").lower()
+    markers = (
+        "i can't", "i cannot", "i’m unable", "i'm unable", "cannot comply",
+        "죄송", "답변할 수 없습니다", "요청을 수행할 수 없습니다", "도와드릴 수 없습니다",
+    )
+    return any(marker in lower for marker in markers)
+
+
+def _output_category(text: str) -> str:
+    if not (text or "").strip():
+        return "invalid_output"
+    return "refusal" if _is_refusal(text) else "invalid_output"
+
+
+def _run_llm(cmd: list[str], *, provider: str, model: str, runner,
+             output_path: str | None = None) -> dict:
+    kwargs = {"capture_output": True, "text": True, "timeout": NEWS_LLM_TIMEOUT}
+    output = ""
+    try:
+        result = runner(cmd, **kwargs)
+    except subprocess.TimeoutExpired:
+        return {"text": None, "provider": provider, "model": model,
+                "category": "timeout", "detail": "LLM timeout"}
+    except FileNotFoundError:
+        return {"text": None, "provider": provider, "model": model,
+                "category": "unavailable", "detail": f"{cmd[0]} not installed"}
+    except Exception as exc:
+        return {"text": None, "provider": provider, "model": model,
+                "category": "unavailable", "detail": f"LLM call failed: {str(exc)[:160]}"}
+
+    finally:
+        if output_path:
+            try:
+                output = Path(output_path).read_text(encoding="utf-8", errors="replace").strip()
+            except Exception:
+                output = ""
+            try:
+                Path(output_path).unlink(missing_ok=True)
+            except Exception:
+                pass
+
+    returncode = getattr(result, "returncode", 1)
+    if returncode != 0:
+        detail = str(getattr(result, "stderr", "") or "").strip()[:200]
+        return {"text": None, "provider": provider, "model": model,
+                "category": "exit", "detail": f"exit {returncode}: {detail}".strip()}
+    text = output or (getattr(result, "stdout", "") or "").strip()
+    return {"text": text, "provider": provider, "model": model,
+            "category": "", "detail": ""}
+
+
+def _llm_routes(prompt: str) -> list[tuple[list[str], str, str, str | None]]:
+    codex_cmd, output_path = _codex_command(prompt)
+    codex = (codex_cmd, "codex-exec", NEWS_LLM_CODEX_MODEL or "codex-config-default", output_path)
+    hermes = (["hermes", "chat", "-q", prompt,
+               "--provider", NEWS_LLM_PROVIDER, "--model", NEWS_LLM_MODEL, "-Q"],
+              "hermes", NEWS_LLM_MODEL, None)
+    return [hermes, codex] if NEWS_LLM_PRIMARY == "hermes" else [codex, hermes]
+
+
+def _annotate_label(label: dict, *, method: str, provider: str, model: str,
+                    category: str = "", error: str = "") -> dict:
+    return {
+        **label,
+        "label_method": method,
+        "label_provider": provider,
+        "label_model": model,
+        "label_provenance": provider if method == "llm" else f"heuristic:fallback_after:{category}",
+        "label_error": error,
+        "label_error_category": category,
+        "labeled_at": datetime.now(KST).isoformat(),
+    }
+
+
+def label_events(events: list[dict], runner=None, *, chunk_size: int | None = None) -> list[dict]:
+    """작은 chunk별 Codex(read-only/ephemeral) → Hermes → 부분 휴리스틱 라벨.
+
+    유효한 LLM 행은 즉시 보존하고, 같은 chunk에서 빠진 행만 휴리스틱으로 채운다.
+    따라서 한 chunk의 일부 JSON 오류가 전체 30건을 규칙 기반으로 강등시키지 않는다.
+    """
     if not events:
         return []
-    import subprocess
     run = runner or subprocess.run
-    prompt = build_label_prompt(events)
-    cmd = ["hermes", "chat", "-q", prompt,
-           "--provider", NEWS_LLM_PROVIDER, "--model", NEWS_LLM_MODEL, "-Q"]
-    text = None
-    failure_reason = ""
-    final_provider = NEWS_LLM_PROVIDER
-    final_model = NEWS_LLM_MODEL
-    try:
-        result = run(cmd, capture_output=True, text=True, timeout=NEWS_LLM_TIMEOUT)
-        if getattr(result, "returncode", 1) == 0:
-            text = getattr(result, "stdout", "") or ""
-        else:
-            failure_reason = f"primary exit {getattr(result, 'returncode', 1)}: {str(getattr(result, 'stderr', ''))[:200]}".strip()
-            logger.warning("뉴스 라벨 LLM 비정상 종료: %s",
-                           str(getattr(result, "stderr", ""))[:200])
-    except Exception as e:
-        failure_reason = f"primary call failed: {str(e)[:200]}"
-        logger.warning("뉴스 라벨 LLM 호출 실패: %s", e)
-    if text is None:
-        try:
-            from lib.llm_cli import backup_chat
-            text, _note = backup_chat(prompt, timeout=NEWS_LLM_TIMEOUT, runner=runner)
-            if text is not None:
-                final_provider = "backup-cli"
-                final_model = ""
-        except Exception as exc:
-            failure_reason = f"{failure_reason}; backup failed: {str(exc)[:200]}".strip("; ")
-            text = None
-    labels = parse_labels(text, events) if text is not None else []
-    if labels:
-        labeled_at = datetime.now(KST).isoformat()
-        return [{
-            **label,
-            "label_method": "llm",
-            "label_provider": final_provider,
-            "label_model": final_model,
-            "label_error": "",
-            "labeled_at": labeled_at,
-        } for label in labels]
-    if text is not None and not failure_reason:
-        failure_reason = "LLM output contained no valid labels"
-    logger.warning("뉴스 라벨 LLM 실패/무효 — 휴리스틱 폴백 사용")
-    fallback_text = "\n".join(json.dumps(lb, ensure_ascii=False) for lb in heuristic_labels(events))
-    labeled_at = datetime.now(KST).isoformat()
-    return [{
-        **label,
-        "label_method": "heuristic",
-        "label_provider": "local-rules",
-        "label_model": "",
-        "label_error": failure_reason or "LLM unavailable",
-        "labeled_at": labeled_at,
-    } for label in parse_labels(fallback_text, events)]
+    size = max(1, int(chunk_size or NEWS_LLM_CHUNK_SIZE))
+    chunks = [events[i:i + size] for i in range(0, len(events), size)]
+    chunks = chunks[:NEWS_LLM_MAX_CHUNKS]
+    out, seen = [], set()
+    for chunk in chunks:
+        pending = {str(e.get("id")) for e in chunk if e.get("id")}
+        accepted = []
+        first_category = ""
+        last_detail = ""
+        for cmd, provider, model, output_path in _llm_routes(build_label_prompt(chunk)):
+            attempt = _run_llm(cmd, provider=provider, model=model, runner=run,
+                               output_path=output_path)
+            text = attempt["text"]
+            parsed = parse_labels(text, chunk) if text is not None else []
+            parsed = [label for label in parsed if label["id"] in pending]
+            if parsed:
+                accepted.extend(_annotate_label(label, method="llm",
+                                                provider=attempt["provider"],
+                                                model=attempt["model"]) for label in parsed)
+                pending -= {label["id"] for label in parsed}
+                if not pending:
+                    break
+                first_category = first_category or _output_category(text)
+                last_detail = f"{attempt['provider']} valid={len(parsed)}/{len(chunk)}"
+                break
+            category = attempt["category"] or _output_category(text)
+            first_category = first_category or category
+            last_detail = attempt["detail"] or f"{attempt['provider']} {category}"
+        out.extend(label for label in accepted if label["id"] not in seen)
+        seen.update(label["id"] for label in accepted)
+
+        if pending:
+            fallback_events = [e for e in chunk if str(e.get("id")) in pending]
+            category = first_category or "invalid_output"
+            error = last_detail or "LLM unavailable"
+            fallback_text = "\n".join(json.dumps(lb, ensure_ascii=False)
+                                        for lb in heuristic_labels(fallback_events))
+            fallback = parse_labels(fallback_text, fallback_events)
+            out.extend(_annotate_label(label, method="heuristic", provider="local-rules",
+                                       model="", category=category, error=error)
+                       for label in fallback if label["id"] not in seen)
+            logger.warning("뉴스 라벨 chunk 일부/전체 휴리스틱 폴백: category=%s pending=%d",
+                           category, len(pending))
+            seen.update(label["id"] for label in fallback)
+    return out
 
 
 def append_labels(labels: list[dict], path: Path | None = None) -> int:
@@ -309,6 +409,14 @@ def label_health(labels: list[dict], *, hours: int = 24, now: datetime | None = 
     llm_count = sum(str(label.get("label_method") or "") == "llm" for label in recent)
     heuristic_count = sum(str(label.get("label_method") or "") == "heuristic" for label in recent)
     failures = [str(label.get("label_error") or "") for label in recent if label.get("label_error")]
+    error_categories = {}
+    provenance = {}
+    for label in recent:
+        category = str(label.get("label_error_category") or "")
+        source = str(label.get("label_provenance") or label.get("label_provider") or "unknown")
+        provenance[source] = provenance.get(source, 0) + 1
+        if category:
+            error_categories[category] = error_categories.get(category, 0) + 1
     total = len(recent)
     return {
         "ok": bool(total) and llm_count > 0,
@@ -318,6 +426,9 @@ def label_health(labels: list[dict], *, hours: int = 24, now: datetime | None = 
         "heuristic_count": heuristic_count,
         "fallback_ratio": heuristic_count / total if total else 0.0,
         "first_failure_reason": failures[0] if failures else "",
+        "error_categories": error_categories,
+        "provenance": provenance,
+        "first_failure_category": next(iter(error_categories), ""),
     }
 
 

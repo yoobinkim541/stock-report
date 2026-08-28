@@ -6,6 +6,7 @@
 """
 import json
 import os
+import subprocess
 import sys
 from datetime import datetime, timedelta
 
@@ -180,6 +181,95 @@ def test_label_events_heuristic_fallback(monkeypatch):
     assert all(label["labeled_at"] for label in labels)
 
 
+def test_label_events_uses_read_only_ephemeral_codex_with_provenance():
+    output = '\n'.join([
+        '{"id":"e1","tickers":["NVDA"],"event_type":"실적","direction":1,"strength":4}',
+        '{"id":"e2","tickers":["MSFT"],"event_type":"규제","direction":-1,"strength":3}',
+    ])
+    calls = []
+
+    def runner(cmd, **kwargs):
+        calls.append((cmd, kwargs))
+        return FakeCompleted(stdout=output)
+
+    labels = NL.label_events(_events(), runner=runner)
+
+    assert calls
+    cmd, kwargs = calls[0]
+    assert cmd[:2] == ["codex", "exec"]
+    assert "--ephemeral" in cmd
+    assert "--sandbox" in cmd and "read-only" in cmd
+    assert "--skip-git-repo-check" in cmd
+    assert "--cd" in cmd and "/home/ubuntu/projects/stock-report" not in cmd
+    assert "--output-last-message" in cmd
+    assert all(label["label_provider"] == "codex-exec" for label in labels)
+    assert all(label["label_provenance"] == "codex-exec" for label in labels)
+    assert all(label["label_error_category"] == "" for label in labels)
+
+
+def test_label_events_chunks_and_preserves_partial_success():
+    events = [
+        {"id": f"e{i}", "title": f"NVDA 뉴스 {i} 상승", "tags": ["$NVDA"],
+         "published_at": f"2026-07-06T{10 + i:02d}:00:00+09:00"}
+        for i in range(6)
+    ]
+    codex_calls = []
+
+    def runner(cmd, **kwargs):
+        if cmd[0] == "codex":
+            codex_calls.append(cmd)
+            if len(codex_calls) == 1:
+                return FakeCompleted(
+                    stdout='{"id":"e0","tickers":["NVDA"],"event_type":"실적",'
+                           '"direction":1,"strength":4}'
+                )
+            return FakeCompleted(stdout="죄송합니다. 이 요청에는 답변할 수 없습니다.")
+        return FakeCompleted(returncode=1, stderr="hermes unavailable")
+
+    labels = NL.label_events(events, runner=runner, chunk_size=3)
+
+    assert len(codex_calls) == 2
+    assert {label["id"] for label in labels} == {f"e{i}" for i in range(6)}
+    by_id = {label["id"]: label for label in labels}
+    assert by_id["e0"]["label_method"] == "llm"
+    assert by_id["e1"]["label_error_category"] == "invalid_output"
+    assert by_id["e1"]["label_provenance"] == "heuristic:fallback_after:invalid_output"
+    assert by_id["e3"]["label_error_category"] == "refusal"
+    assert by_id["e3"]["label_provenance"] == "heuristic:fallback_after:refusal"
+
+
+def test_label_events_distinguishes_timeout_and_exit_errors():
+    def timeout_runner(cmd, **kwargs):
+        raise subprocess.TimeoutExpired(cmd, 1)
+
+    timed_out = NL.label_events(_events()[:1], runner=timeout_runner)
+    assert timed_out[0]["label_error_category"] == "timeout"
+
+    def exit_runner(cmd, **kwargs):
+        return FakeCompleted(returncode=23, stderr="provider failed")
+
+    exited = NL.label_events(_events()[:1], runner=exit_runner)
+    assert exited[0]["label_error_category"] == "exit"
+
+
+def test_label_health_reports_error_categories_and_provenance():
+    now = datetime.now(NL.KST).isoformat()
+    health = NL.label_health([
+        {"label_method": "llm", "label_provenance": "codex-exec", "label_error_category": "",
+         "labeled_at": now},
+        {"label_method": "heuristic", "label_provenance": "heuristic:fallback_after:refusal",
+         "label_error_category": "refusal", "labeled_at": now},
+        {"label_method": "heuristic", "label_provenance": "heuristic:fallback_after:timeout",
+         "label_error_category": "timeout", "labeled_at": now},
+    ])
+
+    assert health["error_categories"] == {"refusal": 1, "timeout": 1}
+    assert health["provenance"] == {"codex-exec": 1,
+                                     "heuristic:fallback_after:refusal": 1,
+                                     "heuristic:fallback_after:timeout": 1}
+    assert health["first_failure_category"] == "refusal"
+
+
 def test_label_events_marks_valid_model_output_with_provenance():
     output = '\n'.join([
         '{"id":"e1","tickers":["NVDA"],"event_type":"실적","direction":1,"strength":4}',
@@ -190,8 +280,8 @@ def test_label_events_marks_valid_model_output_with_provenance():
 
     assert len(labels) == 2
     assert all(label["label_method"] == "llm" for label in labels)
-    assert all(label["label_provider"] == NL.NEWS_LLM_PROVIDER for label in labels)
-    assert all(label["label_model"] == NL.NEWS_LLM_MODEL for label in labels)
+    assert all(label["label_provider"] == "codex-exec" for label in labels)
+    assert all(label["label_model"] == "codex-config-default" for label in labels)
     assert all(label["label_error"] == "" for label in labels)
 
 

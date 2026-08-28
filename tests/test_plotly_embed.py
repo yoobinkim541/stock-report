@@ -254,6 +254,27 @@ def test_compare_bounds_json_shared_anchor_zero():
     assert any(abs(r[2]) < 1e-9 and r[3] == 0 for r in anchor_rows)   # 비교 행
 
 
+def test_embed_compare_rebases_to_visible_range():
+    """비교 iframe은 팬·휠 줌으로 바뀐 표시 범위의 공통 시작점을 0%로 재계산해야 한다."""
+    hist = _hist(80)
+    cmp_s = pd.Series([50.0 + i for i in range(80)], index=hist.index)
+    fig = charts.price_chart(hist, "MAIN", compare={"CMP": cmp_s}, view_days=30)
+    html = plotly_embed.pannable_chart_html(
+        fig, hist, view_days=30,
+        bounds_json=plotly_embed.compare_bounds_json(hist, {"CMP": cmp_s}, 30),
+        pct_mode=True,
+    )
+    for token in (
+        "const compareTraceIndexes",
+        "function rebaseCompareToVisibleRange",
+        "const commonAnchor",
+        "Plotly.restyle",
+        "requestCompareRebase",
+        'e["xaxis.autorange"] ? curXRangeMs() : null',
+    ):
+        assert token in html, f"비교 범위 재기준화 로직 누락: {token}"
+
+
 def test_pannable_bounds_override():
     """bounds_json 오버라이드가 임베드 JS 프레임을 대체 (비교 모드 % y-fit)."""
     hist = _hist(30)

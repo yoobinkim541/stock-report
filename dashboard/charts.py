@@ -1135,11 +1135,13 @@ def price_chart(hist, ticker: str = "", *, kind: str = "line", avg_cost=None,
         anchor_ts = compare_anchor_ts(close, view_days)
         n_main = normalize_pct(close, anchor_ts=anchor_ts)
         fig.add_trace(_SC(x=n_main.index, y=n_main, name=ticker or "메인",
+                          meta={"tn_role": "compare-price"},
                           hovertemplate="%{y:+.2f}%<extra>" + (ticker or "메인") + "</extra>",
                           line=dict(color=_BLUE, width=2)))
         for i, (lab, s) in enumerate(compare.items()):
             ns = normalize_pct(s, anchor_ts=anchor_ts)
             fig.add_trace(_SC(x=ns.index, y=ns, name=lab,
+                              meta={"tn_role": "compare-price"},
                               hovertemplate="%{y:+.2f}%<extra>" + lab + "</extra>",
                               line=dict(color=_CMP_COLORS[i % len(_CMP_COLORS)],
                                         width=1.6)))

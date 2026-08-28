@@ -205,6 +205,19 @@ _TEMPLATE = r"""
   const gd = document.getElementById("chart");
   const fitVH = @@FIT_VH@@;                      // 풀뷰 — 부모 창 높이에 맞춰 리사이즈
   const pctMode = @@PCT_MODE@@;                  // 비교(%) 모드 — 가격 포맷 대신 %
+  // 비교선은 서버가 최초 화면 기준으로 정규화한다. 이후 팬·휠 줌은 Streamlit
+  // 재실행 없이 iframe 안에서 일어나므로, 가격 역할이 표시된 선만 원본 y를 보존해
+  // 현재 표시 범위 기준으로 다시 계산한다.
+  const compareTraceIndexes = pctMode
+    ? (fig.data || []).map((trace, index) => {
+        const meta = trace && trace.meta;
+        return meta && meta.tn_role === "compare-price" ? index : -1;
+      }).filter((index) => index >= 0)
+    : [];
+  const compareBaseY = {};
+  for (const index of compareTraceIndexes) {
+    compareBaseY[index] = (fig.data[index].y || []).slice();
+  }
   const yLog = @@Y_LOG@@;                        // 로그 스케일 — 도형 y 좌표는 log10 공간
   const categoryX = @@CATEGORY_X@@;              // 캔들 category 축 — index↔timestamp 변환 필요
   const crosshairKey = @@CROSSHAIR_KEY@@;        // 멀티 iframe 크로스헤어 동기화 키
@@ -346,10 +359,107 @@ _TEMPLATE = r"""
     });
   }
 
+  function compareXMs(value) {
+    if (typeof value === "number") return value;
+    const parsed = Date.parse(value);
+    return Number.isFinite(parsed) ? parsed : null;
+  }
+
+  function compareRows(index, x0, x1) {
+    const trace = gd.data[index] || {};
+    const xs = trace.x || [];
+    const ys = compareBaseY[index] || [];
+    const rows = [];
+    for (let i = 0; i < Math.min(xs.length, ys.length); i++) {
+      const ms = compareXMs(xs[i]);
+      const y = Number(ys[i]);
+      if (ms == null || ms < x0 || ms > x1 || !Number.isFinite(y)) continue;
+      rows.push({ms: ms, index: i, y: y});
+    }
+    return rows;
+  }
+
+  function rebaseCompareToVisibleRange(x0, x1) {
+    if (!pctMode || !compareTraceIndexes.length || !(x1 > x0)) return Promise.resolve();
+    const rowsByTrace = compareTraceIndexes.map((index) => compareRows(index, x0, x1));
+    if (rowsByTrace.some((rows) => !rows.length)) return Promise.resolve();
+
+    // 휴장일·서로 다른 거래일이 있어도 모든 선이 첫 화면에서 0%가 되도록
+    // 각 선의 첫 유효 시점 중 가장 늦은 시점을 공통 앵커로 사용한다.
+    const commonAnchor = Math.max(...rowsByTrace.map((rows) => rows[0].ms));
+    const updates = [];
+    for (let n = 0; n < compareTraceIndexes.length; n++) {
+      const index = compareTraceIndexes[n];
+      const rows = rowsByTrace[n];
+      const anchor = rows.find((row) => row.ms >= commonAnchor) || rows[rows.length - 1];
+      const scale = 100 + anchor.y;
+      if (!(scale > 0)) continue;
+      const base = compareBaseY[index] || [];
+      const next = base.map((value) => {
+        const y = Number(value);
+        return Number.isFinite(y) ? ((100 + y) / scale - 1) * 100 : value;
+      });
+      updates.push({index: index, y: next});
+    }
+    return Promise.all(updates.map((update) =>
+      Plotly.restyle(gd, {y: [update.y]}, [update.index])
+    ));
+  }
+
+  function compareYFit(x0, x1) {
+    if (!pctMode || !compareTraceIndexes.length) return null;
+    let lo = Infinity, hi = -Infinity, vmax = 0;
+    for (const index of compareTraceIndexes) {
+      const trace = gd.data[index] || {};
+      const xs = trace.x || [], ys = trace.y || [];
+      for (let i = 0; i < Math.min(xs.length, ys.length); i++) {
+        const ms = compareXMs(xs[i]), y = Number(ys[i]);
+        if (ms == null || ms < x0 || ms > x1 || !Number.isFinite(y)) continue;
+        lo = Math.min(lo, y); hi = Math.max(hi, y);
+      }
+    }
+    if (!Number.isFinite(lo) || !Number.isFinite(hi)) return null;
+    lo = Math.min(0, lo); hi = Math.max(0, hi);
+    const pad = Math.max((hi - lo) * 0.06, 0.5);
+    for (const row of bounds) {
+      if (row[0] >= x0 && row[0] <= x1 && row[3] > vmax) vmax = row[3];
+    }
+    return {price: [lo - pad, hi + pad],
+            vol: [0, Math.min(vmax, volCap) * 1.1 || 1]};
+  }
+
+  let comparePendingRange = null, compareRebaseScheduled = false;
+  let compareRebaseBusy = false;
+  function flushCompareRebase() {
+    compareRebaseScheduled = false;
+    if (compareRebaseBusy || !comparePendingRange) return;
+    const range = comparePendingRange;
+    comparePendingRange = null;
+    compareRebaseBusy = true;
+    rebaseCompareToVisibleRange(range[0], range[1]).catch(() => {}).then(() => {
+      compareRebaseBusy = false;
+      setTargetFrame(range[0], range[1]);
+      if (comparePendingRange) requestCompareRebase(comparePendingRange[0], comparePendingRange[1]);
+    });
+  }
+  function requestCompareRebase(x0, x1) {
+    if (!pctMode || !compareTraceIndexes.length) {
+      setTargetFrame(x0, x1);
+      return;
+    }
+    comparePendingRange = [x0, x1];
+    if (!compareRebaseScheduled) {
+      compareRebaseScheduled = true;
+      requestAnimationFrame(flushCompareRebase);
+    }
+  }
+
   let replayCut = null;                          // ⏪ 리플레이 컷(ms) — 이후 봉은 커튼+클램프
 
   function yFit(x0, x1) {                        // 보이는 구간 고저·거래량 최대 + 패딩
     if (!bounds.length) return null;
+    const compareFrame = compareYFit(x0, x1);
+    if (compareFrame) return compareFrame;
     if (replayCut !== null) x1 = Math.min(x1, replayCut);   // 미래 봉이 y 를 누출하면 안 됨
     let lo = Infinity, hi = -Infinity, vmax = 0;
     for (let i = lowerBound(x0); i < bounds.length && bounds[i][0] <= x1; i++) {
@@ -407,11 +517,14 @@ _TEMPLATE = r"""
     if (!done || dragging || zooming) raf = requestAnimationFrame(animStep);
   }
 
-  function setTarget(x0, x1) {
+  function setTargetFrame(x0, x1) {
     const r = yFit(x0, x1);
     if (!r) return;
     target = r;
     if (!raf) raf = requestAnimationFrame(animStep);
+  }
+  function setTarget(x0, x1) {
+    requestCompareRebase(x0, x1);
   }
 
   function evXRange(e) {                         // relayout(ing) 페이로드 → [ms, ms]
@@ -1861,7 +1974,9 @@ _TEMPLATE = r"""
         // 생략 — 네이티브 줌 리드로우와 경합 안 하게(감사 2026-08-26, 팬 개선과 동일 원리).
         zooming = true;
         muteHover();
-        const xr = evXRange(e);
+        // 더블클릭·홈 버튼의 autorange 이벤트는 range 배열을 함께 보내지 않는
+        // Plotly 버전이 있어, 이벤트 직후 gd.layout 에 반영된 현재 범위를 사용한다.
+        const xr = evXRange(e) || (e["xaxis.autorange"] ? curXRangeMs() : null);
         if (xr) {
           setTarget(xr[0], xr[1]);
           publishVisibleRange(xr);

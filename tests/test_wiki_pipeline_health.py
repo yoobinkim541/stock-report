@@ -39,9 +39,22 @@ def _sample_pages() -> list[dict]:
     ]
 
 
+def _patch_empty_pipeline(monkeypatch, module):
+    monkeypatch.setattr(module.source_collector, "load_source_health", lambda: {})
+    monkeypatch.setattr(module.source_collector, "stale_sources", lambda *args, **kwargs: [])
+    monkeypatch.setattr(module.source_collector, "load_recent_events", lambda *args, **kwargs: [])
+    monkeypatch.setattr(module.wiki, "list_pages", lambda **kwargs: [])
+    monkeypatch.setattr(module.wiki, "stats", lambda: {"total": 0, "status_counts": {}})
+    monkeypatch.setattr(module.wiki, "lint_pages", lambda *args, **kwargs: {"issues": []})
+    monkeypatch.setattr(module.wiki, "list_stale_pages", lambda *args, **kwargs: [])
+    monkeypatch.setattr(module.wiki, "list_unused_pages", lambda *args, **kwargs: [])
+    monkeypatch.setattr(module.evidence_usage, "usage_summary", lambda *args, **kwargs: {})
+
+
 def test_pipeline_health_report_merges_source_wiki_and_curation(monkeypatch):
     from reports import wiki_pipeline_health
 
+    monkeypatch.setattr(wiki_pipeline_health.news_labels, "load_labels", lambda: [])
     source_health = {
         "saveticker": {
             "first_run": "2026-07-31T00:00:00+00:00",
@@ -113,6 +126,51 @@ def test_pipeline_health_report_merges_source_wiki_and_curation(monkeypatch):
     assert report["recommendations"][0]["category"] == "collection"
 
 
+def test_pipeline_health_treats_empty_news_labels_as_no_data(monkeypatch):
+    from reports import wiki_pipeline_health
+
+    _patch_empty_pipeline(monkeypatch, wiki_pipeline_health)
+    monkeypatch.setattr(wiki_pipeline_health.news_labels, "load_labels", lambda: [])
+
+    report = wiki_pipeline_health.build_pipeline_health_report(dry_run=True)
+
+    labels = report["news_label_health"]
+    assert labels["total"] == 0
+    assert labels["status"] == "no_data"
+    assert labels["attention"] is False
+    assert report["overall"]["news_labels"]["status"] == "no_data"
+    assert not any(rec["category"] == "news_labels" for rec in report["recommendations"])
+
+
+def test_pipeline_health_flags_recent_news_labels_without_llm(monkeypatch):
+    from reports import wiki_pipeline_health
+
+    _patch_empty_pipeline(monkeypatch, wiki_pipeline_health)
+    now = wiki_pipeline_health.datetime.now(wiki_pipeline_health.timezone.utc).isoformat()
+    rows = [
+        {"label_method": "heuristic", "label_error": "exit 1",
+         "label_error_category": "exit", "labeled_at": now}
+        for _ in range(4)
+    ]
+    monkeypatch.setattr(wiki_pipeline_health.news_labels, "load_labels", lambda: rows)
+
+    report = wiki_pipeline_health.build_pipeline_health_report(dry_run=True)
+
+    labels = report["news_label_health"]
+    assert labels["total"] == 4
+    assert labels["llm_count"] == 0
+    assert labels["fallback_ratio"] == 1.0
+    assert labels["status"] == "attention"
+    assert labels["attention"] is True
+    assert report["overall"]["news_labels"]["llm_count"] == 0
+    assert report["overall"]["news_labels"]["fallback_ratio"] == 1.0
+    assert report["overall"]["status"] == "attention"
+    rec = next(rec for rec in report["recommendations"] if rec["category"] == "news_labels")
+    assert rec["priority"] == 1
+    assert "llm 0건" in rec["detail"]
+    assert "fallback 100.0%" in rec["detail"]
+
+
 def test_source_health_summary_exposes_blocked_and_zero_persistence():
     from reports.wiki_pipeline_health import _summarize_source_health
 
@@ -142,3 +200,31 @@ def test_source_health_summary_exposes_blocked_and_zero_persistence():
     assert by_source["saveticker"]["zero_persist_streak"] == 3
     assert section["overall"]["blocked_sources"] == 1
     assert section["overall"]["zero_persist_sources"] == 1
+
+
+def test_source_health_summary_exposes_explicit_integrity_metrics():
+    from reports.wiki_pipeline_health import _summarize_source_health
+
+    section = _summarize_source_health({
+        "kalshi": {
+            "last_run": "2026-08-21T00:00:00+00:00",
+            "last_count": 4,
+            "last_fetch_success": "2026-08-21T00:00:00+00:00",
+            "last_persist_success": "2026-08-21T00:00:00+00:00",
+            "last_fetched_count": 4,
+            "last_persisted_count": 0,
+            "last_deduped_count": 4,
+            "last_collision_count": 0,
+            "zero_persist_streak": 0,
+            "cardinality_drop_streak": 0,
+            "persist_success": True,
+        },
+    }, [], [])
+
+    row = next(row for row in section["sources"] if row["source"] == "kalshi")
+    assert row["fetch_success"] is True
+    assert row["persist_success"] is True
+    assert row["deduped_count"] == 4
+    assert row["collision_count"] == 0
+    assert row["duplicate_only"] is True
+    assert section["overall"]["collision_sources"] == 0

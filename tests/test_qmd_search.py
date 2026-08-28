@@ -11,6 +11,21 @@ class _Result:
         self.returncode = returncode
 
 
+def test_qmd_bin_finds_hermes_install_when_cron_path_omits_it(monkeypatch, tmp_path):
+    hermes_qmd = tmp_path / ".hermes" / "node" / "bin" / "qmd"
+    hermes_qmd.parent.mkdir(parents=True)
+    hermes_qmd.write_text("#!/bin/sh\n", encoding="utf-8")
+    hermes_qmd.chmod(0o755)
+
+    monkeypatch.delenv("AGENT_CONSOLE_QMD_BIN", raising=False)
+    monkeypatch.setattr("agent_console.qmd_search.Path.home", lambda: tmp_path)
+    monkeypatch.setattr("agent_console.qmd_search.shutil.which", lambda _binary: None)
+
+    from agent_console import qmd_search
+
+    assert qmd_search.qmd_bin() == str(hermes_qmd)
+
+
 def test_qmd_search_parses_json_results_and_builds_search_command(monkeypatch):
     monkeypatch.setenv("AGENT_CONSOLE_QMD_ENABLED", "1")
     monkeypatch.setenv("AGENT_CONSOLE_QMD_BIN", "qmd")
@@ -102,7 +117,8 @@ def test_qmd_search_can_use_query_command_when_configured(monkeypatch):
     from agent_console import qmd_search
 
     assert qmd_search.search("손실한도", runner=fake_runner) == []
-    assert calls[0][:2] == ["qmd", "query"]
+    assert Path(calls[0][0]).name == "qmd"
+    assert calls[0][1] == "query"
 
 
 def test_qmd_health_reports_installation_and_wiki_file_count(monkeypatch, tmp_path):

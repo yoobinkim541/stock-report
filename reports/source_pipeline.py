@@ -1,6 +1,12 @@
 from __future__ import annotations
 
 import argparse
+import importlib
+import inspect
+import json
+import os
+import subprocess
+import sys
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
@@ -35,9 +41,7 @@ def default_registry() -> list[ProviderSpec]:
             "arca",
             ("arca",),
             "news",
-            lambda: source_collector.fetch_arca_events(
-                max_pages=int(source_collector.os.getenv("STOCK_COLLECTOR_ARCA_PAGES", "2"))
-            ),
+            source_collector.fetch_arca_provider,
             retries=1,
         ),
         ProviderSpec(
@@ -70,6 +74,164 @@ def _status_code(exc: BaseException) -> int | None:
         return None
 
 
+def _importable_fetch_target(fetch: Callable[[], list[dict]]) -> tuple[str, str] | None:
+    """Return a stable import path; local closures stay on the compatibility path."""
+    if not inspect.isfunction(fetch):
+        return None
+    module = str(getattr(fetch, "__module__", "") or "")
+    qualname = str(getattr(fetch, "__qualname__", "") or "")
+    if not module or not qualname or "<locals>" in qualname or "<lambda>" in qualname:
+        return None
+    try:
+        current = importlib.import_module(module)
+        for part in qualname.split("."):
+            current = getattr(current, part)
+    except (AttributeError, ImportError, TypeError):
+        return None
+    return (module, qualname) if current is fetch else None
+
+
+def _run_subprocess_fetch(spec: ProviderSpec, target: tuple[str, str]) -> dict:
+    started_clock = time.monotonic()
+    command = [
+        sys.executable,
+        "-m",
+        "reports.source_provider_worker",
+        target[0],
+        target[1],
+    ]
+    process = None
+    try:
+        env = os.environ.copy()
+        inherited_paths = [str(path) for path in sys.path if str(path)]
+        if inherited_paths:
+            env["PYTHONPATH"] = os.pathsep.join(inherited_paths)
+        process = subprocess.Popen(
+            command,
+            cwd=str(Path(__file__).resolve().parent.parent),
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            env=env,
+        )
+        try:
+            stdout, stderr = process.communicate(timeout=max(0.01, float(spec.timeout_seconds)))
+        except subprocess.TimeoutExpired:
+            process.terminate()
+            try:
+                stdout, stderr = process.communicate(timeout=1.0)
+            except subprocess.TimeoutExpired:
+                process.kill()
+                stdout, stderr = process.communicate()
+            duration_ms = max(0, round((time.monotonic() - started_clock) * 1000))
+            return {
+                "events": [],
+                "error": f"provider deadline exceeded after {spec.timeout_seconds:g}s",
+                "status_code": None,
+                "availability": "timeout",
+                "transport": "subprocess",
+                "timed_out": True,
+                "terminated": process.returncode is not None,
+                "duration_ms": duration_ms,
+            }
+    except BaseException as exc:
+        return {
+            "events": [],
+            "error": str(exc)[:500],
+            "status_code": _status_code(exc),
+            "availability": "error",
+            "transport": "subprocess",
+            "timed_out": False,
+            "terminated": False,
+            "duration_ms": max(0, round((time.monotonic() - started_clock) * 1000)),
+        }
+
+    duration_ms = max(0, round((time.monotonic() - started_clock) * 1000))
+    raw = (stdout or "").strip()
+    try:
+        payload = json.loads(raw)
+    except json.JSONDecodeError:
+        detail = (stderr or raw or f"worker exited with code {process.returncode}").strip()
+        return {
+            "events": [],
+            "error": detail[:500],
+            "status_code": None,
+            "availability": "error",
+            "transport": "subprocess",
+            "timed_out": False,
+            "terminated": False,
+            "duration_ms": duration_ms,
+        }
+    if not isinstance(payload, dict) or not payload.get("ok"):
+        error = str((payload or {}).get("error") or stderr or "provider worker failed")
+        status_code = (payload or {}).get("status_code")
+        try:
+            status_code = int(status_code) if status_code is not None else None
+        except (TypeError, ValueError):
+            status_code = None
+        availability = str((payload or {}).get("availability") or ("blocked" if status_code == 451 else "error"))
+        return {
+            "events": [],
+            "error": error[:500],
+            "status_code": status_code,
+            "availability": availability,
+            "transport": "subprocess",
+            "timed_out": False,
+            "terminated": False,
+            "duration_ms": duration_ms,
+        }
+    events = payload.get("events")
+    if not isinstance(events, list) or any(not isinstance(row, dict) for row in events):
+        return {
+            "events": [],
+            "error": f"{spec.name} worker returned invalid list[dict]",
+            "status_code": None,
+            "availability": "error",
+            "transport": "subprocess",
+            "timed_out": False,
+            "terminated": False,
+            "duration_ms": duration_ms,
+        }
+    return {
+        "events": events,
+        "error": "",
+        "status_code": None,
+        "availability": "available",
+        "transport": "subprocess",
+        "timed_out": False,
+        "terminated": False,
+        "duration_ms": duration_ms,
+    }
+
+
+def _run_direct_fetch(spec: ProviderSpec) -> dict:
+    try:
+        events = spec.fetch()
+        if not isinstance(events, list) or any(not isinstance(row, dict) for row in events):
+            raise TypeError(f"{spec.name} fetcher must return list[dict]")
+        return {
+            "events": events,
+            "error": "",
+            "status_code": None,
+            "availability": "available",
+            "transport": "in-process",
+            "timed_out": False,
+            "terminated": False,
+        }
+    except BaseException as exc:
+        status_code = _status_code(exc)
+        return {
+            "events": [],
+            "error": str(exc)[:500],
+            "status_code": status_code,
+            "availability": str(getattr(exc, "availability", "") or ("blocked" if status_code == 451 else "error")),
+            "transport": "in-process",
+            "timed_out": False,
+            "terminated": False,
+        }
+
+
 def _fetch_with_retry(spec: ProviderSpec) -> dict:
     started = datetime.now(timezone.utc)
     started_clock = time.monotonic()
@@ -78,21 +240,23 @@ def _fetch_with_retry(spec: ProviderSpec) -> dict:
     error = ""
     status_code = None
     availability = "available"
+    timed_out = False
+    terminated = False
+    target = _importable_fetch_target(spec.fetch)
     for attempt in range(max(0, int(spec.retries)) + 1):
         attempts = attempt + 1
-        try:
-            result = spec.fetch()
-            if not isinstance(result, list) or any(not isinstance(row, dict) for row in result):
-                raise TypeError(f"{spec.name} fetcher must return list[dict]")
-            events = result
+        outcome = _run_subprocess_fetch(spec, target) if target else _run_direct_fetch(spec)
+        events = outcome["events"]
+        error = outcome["error"]
+        status_code = outcome["status_code"]
+        availability = outcome["availability"]
+        timed_out = bool(outcome.get("timed_out"))
+        terminated = bool(outcome.get("terminated"))
+        if not error:
             error = ""
             break
-        except BaseException as exc:
-            status_code = _status_code(exc)
-            availability = str(getattr(exc, "availability", "") or ("blocked" if status_code == 451 else "error"))
-            error = str(exc)[:500]
-            if status_code in {400, 401, 403, 404, 451} or attempt >= int(spec.retries):
-                break
+        if status_code in {400, 401, 403, 404, 451} or attempt >= int(spec.retries):
+            break
     finished = datetime.now(timezone.utc)
     return {
         "provider": spec.name,
@@ -106,7 +270,11 @@ def _fetch_with_retry(spec: ProviderSpec) -> dict:
         "availability": availability,
         "status_code": status_code,
         "error": error,
-        "transport": "direct",
+        "transport": outcome.get("transport", "direct"),
+        "timeout_seconds": float(spec.timeout_seconds),
+        "timed_out": timed_out,
+        "terminated": terminated,
+        "isolated": target is not None,
     }
 
 
