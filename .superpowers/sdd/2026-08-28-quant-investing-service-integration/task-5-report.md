@@ -137,3 +137,27 @@ Addressed the remaining review findings:
   not sufficient proof that every fold was trained chronologically.
 - A valid fold cannot compensate for an incomplete provenance fold; promotion
   requires complete evidence for the entire validation report.
+
+## Fix Round 3
+
+Addressed the remaining CPCV evidence findings:
+
+- Aggregate `test_periods` now represents the combined net-return observation
+  count, while `fold_count`, `cpcv_fold_count`, and `cpcv_fold_ids` preserve the
+  actual validation-fold identity used by the gate.
+- CPCV chronology evidence is bound to the actual report fold IDs and recorded
+  test timestamps. Activation rejects missing or mismatched IDs, duplicate
+  records, absent proof, timestamp mismatches, and contradictory future-training
+  flags. Mixed validation modes retain the same fail-closed behavior.
+
+### Fix Round 3 Verification
+
+- `./.venv/bin/pytest tests/test_strategy_validation.py -q`
+  - `33 passed`
+
+### Fix Round 3 Trade-offs
+
+- CPCV reports carry more explicit fold metadata so aggregate observation metrics
+  cannot be mistaken for fold counts.
+- Older hand-built CPCV payloads without actual fold IDs and timestamps are
+  rejected for activation and remain available only as diagnostics.

@@ -1062,16 +1062,19 @@ def evaluate_validation_folds(
     cpcv_future_training = False
     cpcv_chronology_candidates: list[object] = []
     cpcv_fold_count = 0
+    cpcv_fold_ids: list[str] = []
     for number, run in enumerate(folds):
         spec = _run_spec(run)
         metrics = _run_metrics(run)
         validation = spec.get("validation")
         validation_mode = ""
+        path_id = str(metrics.get("path_id") or f"fold-{number}")
         if isinstance(validation, Mapping):
             validation_mode = str(validation.get("mode") or "single_pass").strip().lower()
             modes.append(validation_mode)
             if validation_mode == "cpcv":
                 cpcv_fold_count += 1
+                cpcv_fold_ids.append(path_id)
                 cpcv_future_training = cpcv_future_training or bool(
                     validation.get("future_training", False)
                 )
@@ -1085,8 +1088,17 @@ def evaluate_validation_folds(
         raw_equity = _run_value(run, "equity", None)
         if isinstance(raw_equity, (pd.DataFrame, pd.Series)) and raw_equity.index.has_duplicates:
             warnings.append(f"fold-{number} has duplicate timestamps")
-        path_id = str(metrics.get("path_id") or f"fold-{number}")
         fold, net, gross, run_outcomes = _fold_metrics(run, path_id)
+        fold["validation_mode"] = validation_mode or "single_pass"
+        if not net.empty:
+            fold["test_start"] = _json_order_value(net.index[0])
+            fold["test_end"] = _json_order_value(net.index[-1])
+        if validation_mode == "cpcv":
+            candidate = validation.get("cpcv_chronology_evidence", validation.get("chronology_evidence")) if isinstance(validation, Mapping) else None
+            if candidate is None:
+                candidate = metrics.get("cpcv_chronology_evidence", metrics.get("chronology_evidence"))
+            if isinstance(candidate, Mapping):
+                fold["chronology_evidence"] = to_jsonable(candidate)
         fold_payloads.append(fold)
         net_series.append(net)
         gross_series.append(gross)
@@ -1189,7 +1201,8 @@ def evaluate_validation_folds(
         "hit_rate": _hit_rate(outcomes),
         "profit_factor": _profit_factor(outcomes),
         "trade_count": int(sum(int(value.get("trade_count") or 0) for value in fold_payloads)),
-        "test_periods": len(fold_payloads),
+        "test_periods": len(net),
+        "fold_count": len(fold_payloads),
         "n_observations": len(net),
         "benchmark_excess_cagr": benchmark_excess,
         "benchmark_excess": benchmark_excess,
@@ -1202,9 +1215,18 @@ def evaluate_validation_folds(
         "cpcv_future_training": cpcv_future_training,
     }
     if cpcv_fold_count:
+        cpcv_fold_records = [
+            fold for fold in fold_payloads
+            if fold.get("validation_mode") == "cpcv"
+        ]
+        aggregate["cpcv_fold_count"] = cpcv_fold_count
+        aggregate["cpcv_fold_ids"] = cpcv_fold_ids
         aggregate["cpcv_chronology_evidence"] = cpcv_chronology_candidates
         aggregate["cpcv_chronology_ok"] = _has_cpcv_chronology_evidence(
-            cpcv_chronology_candidates, cpcv_fold_count
+            cpcv_chronology_candidates,
+            cpcv_fold_count,
+            expected_ids=cpcv_fold_ids,
+            actual_folds=cpcv_fold_records,
         )
     if aggregate["regime_concentration"] is None:
         warnings.append("regime concentration is unavailable")
@@ -1346,20 +1368,66 @@ def _is_before_in_time(left: object, right: object) -> bool:
         return False
 
 
-def _has_cpcv_chronology_evidence(evidence: object, expected_folds: int) -> bool:
+def _same_time(left: object, right: object) -> bool:
+    if _is_timestamp_like(left) or _is_timestamp_like(right):
+        try:
+            return _canonical_timestamp(left) == _canonical_timestamp(right)
+        except (TypeError, ValueError):
+            return False
+    return left == right
+
+
+def _proof_timestamp(proof: Mapping[str, Any], *keys: str) -> object | None:
+    return _proof_value(proof, *keys)
+
+
+def _actual_cpcv_fold_records(report: ValidationReport) -> list[Mapping[str, Any]]:
+    records: list[Mapping[str, Any]] = []
+    report_mode = str(report.validation_mode or "").strip().lower()
+    for fold in report.folds:
+        if not isinstance(fold, Mapping):
+            continue
+        fold_mode = str(fold.get("validation_mode") or "").strip().lower()
+        if fold_mode == "cpcv" or (not fold_mode and report_mode == "cpcv"):
+            records.append(fold)
+    return records
+
+
+def _has_cpcv_chronology_evidence(
+    evidence: object,
+    expected_folds: int,
+    *,
+    expected_ids: Sequence[str] | None = None,
+    actual_folds: Sequence[Mapping[str, Any]] | None = None,
+) -> bool:
     if expected_folds <= 0 or not isinstance(evidence, Sequence) or isinstance(evidence, (str, bytes)):
         return False
-    if len(evidence) != expected_folds:
+    if len(evidence) != expected_folds or expected_ids is None or len(expected_ids) != expected_folds:
+        return False
+    if actual_folds is None or len(actual_folds) != expected_folds:
+        return False
+    expected_id_set = {str(value) for value in expected_ids}
+    if len(expected_id_set) != expected_folds:
+        return False
+    actual_by_id: dict[str, Mapping[str, Any]] = {}
+    for actual in actual_folds:
+        actual_id = _proof_value(actual, "path_id", "fold_id", "fold")
+        if actual_id is None or str(actual_id) in actual_by_id:
+            return False
+        actual_by_id[str(actual_id)] = actual
+    if set(actual_by_id) != expected_id_set:
         return False
     fold_ids: set[str] = set()
     for candidate in evidence:
         if not isinstance(candidate, Mapping):
             return False
-        fold_id = _proof_value(candidate, "fold_id", "path_id")
-        if fold_id is None or str(fold_id) in fold_ids:
+        fold_id = _proof_value(candidate, "fold_id", "path_id", "fold")
+        if fold_id is None or str(fold_id) in fold_ids or str(fold_id) not in expected_id_set:
             return False
         fold_ids.add(str(fold_id))
         if candidate.get("valid", candidate.get("proof_valid")) is not True:
+            return False
+        if candidate.get("future_training") is True:
             return False
         if candidate.get("future_training") is not False and candidate.get("no_future_training") is not True:
             return False
@@ -1369,7 +1437,76 @@ def _has_cpcv_chronology_evidence(evidence: object, expected_folds: int) -> bool
         test_min = _proof_value(candidate, "test_min", "test_start", "test_min_timestamp")
         if train_max is None or test_min is None or not _is_before_in_time(train_max, test_min):
             return False
-    return True
+        actual = actual_by_id[str(fold_id)]
+        actual_evidence = actual.get("chronology_evidence")
+        actual_proof = actual_evidence if isinstance(actual_evidence, Mapping) else actual
+        if actual.get("future_training") is True or actual_proof.get("future_training") is True:
+            return False
+        if isinstance(actual_evidence, Mapping):
+            if actual_evidence.get("valid", actual_evidence.get("proof_valid")) is False:
+                return False
+            if actual_evidence.get("train_before_test", actual_evidence.get("train_max_before_test_min")) is False:
+                return False
+        actual_train_max = _proof_timestamp(
+            actual, "train_max", "train_end", "train_max_timestamp"
+        )
+        if actual_train_max is None:
+            actual_train_max = _proof_timestamp(
+                actual_proof, "train_max", "train_end", "train_max_timestamp"
+            )
+        actual_test_min = _proof_timestamp(
+            actual, "test_min", "test_start", "test_min_timestamp"
+        )
+        if actual_test_min is None:
+            actual_test_min = _proof_timestamp(
+                actual_proof, "test_min", "test_start", "test_min_timestamp"
+            )
+        if (
+            actual_train_max is None
+            or actual_test_min is None
+            or not _same_time(train_max, actual_train_max)
+            or not _same_time(test_min, actual_test_min)
+        ):
+            return False
+    return fold_ids == expected_id_set
+
+
+def _cpcv_chronology_gate_ok(report: ValidationReport) -> bool:
+    aggregate = report.aggregate
+    actual_folds = _actual_cpcv_fold_records(report)
+    declared_ids = aggregate.get("cpcv_fold_ids")
+    if isinstance(declared_ids, Sequence) and not isinstance(declared_ids, (str, bytes)):
+        expected_ids = [str(value) for value in declared_ids]
+    else:
+        expected_ids = [
+            str(fold_id)
+            for fold_id in (
+                _proof_value(fold, "path_id", "fold_id", "fold")
+                for fold in actual_folds
+            )
+            if fold_id is not None
+        ]
+    declared_count = aggregate.get("cpcv_fold_count")
+    if declared_count is None:
+        expected_count = len(expected_ids)
+    else:
+        try:
+            expected_count = int(declared_count)
+        except (TypeError, ValueError):
+            return False
+    chronology_evidence = aggregate.get("cpcv_chronology_evidence")
+    if chronology_evidence is None:
+        chronology_evidence = [
+            fold["chronology_evidence"]
+            for fold in actual_folds
+            if isinstance(fold.get("chronology_evidence"), Mapping)
+        ]
+    return _has_cpcv_chronology_evidence(
+        chronology_evidence,
+        expected_count,
+        expected_ids=expected_ids,
+        actual_folds=actual_folds,
+    )
 
 
 def promotion_gate(report: ValidationReport, config: dict[str, object]) -> PromotionDecision:
@@ -1398,32 +1535,41 @@ def promotion_gate(report: ValidationReport, config: dict[str, object]) -> Promo
     if not preview and aggregate.get("cpcv_future_training"):
         failed.append("cpcv_future_training")
         gate_warnings.append("CPCV training includes groups after its test window")
-    if not preview and aggregate.get("cpcv_chronology_ok") is False:
+    actual_cpcv_folds = _actual_cpcv_fold_records(report)
+    cpcv_evidence_present = bool(
+        mode == "cpcv"
+        or actual_cpcv_folds
+        or aggregate.get("cpcv_fold_count") is not None
+        or aggregate.get("cpcv_fold_ids") is not None
+        or aggregate.get("cpcv_chronology_evidence") is not None
+        or aggregate.get("cpcv_chronology_ok") is not None
+    )
+    if not preview and cpcv_evidence_present and not _cpcv_chronology_gate_ok(report):
         failed.append("cpcv_chronology_evidence")
-        gate_warnings.append("CPCV per-fold chronology evidence is incomplete or invalid")
+        gate_warnings.append("CPCV per-fold chronology evidence is incomplete, mismatched, or invalid")
     if not preview and mode == "cpcv":
         if not bool(settings.get("strictly_chronological", False)):
             failed.append("cpcv_not_activation_safe")
             gate_warnings.append("CPCV is diagnostic-only unless strictly_chronological=true")
-        expected_cpcv_folds = int(aggregate.get("test_periods") or len(report.folds))
-        chronology_evidence = aggregate.get("cpcv_chronology_evidence")
-        if chronology_evidence is None:
-            chronology_evidence = [
-                fold["chronology_evidence"]
-                for fold in report.folds
-                if isinstance(fold, Mapping) and isinstance(fold.get("chronology_evidence"), Mapping)
-            ]
-        if not _has_cpcv_chronology_evidence(
-            chronology_evidence, expected_cpcv_folds
-        ):
-            failed.append("cpcv_chronology_evidence")
-            gate_warnings.append("CPCV requires affirmative chronology proof for every fold")
 
     min_trades = int(_config_number(settings, "min_trades", 100.0))
     min_periods = int(_config_number(settings, "min_test_periods", 4.0))
     if int(aggregate.get("trade_count") or 0) < min_trades:
         failed.append("min_trades")
-    test_periods = int(aggregate.get("test_periods") or len(report.folds))
+    if cpcv_evidence_present:
+        fold_count = aggregate.get("cpcv_fold_count")
+        if fold_count is None:
+            fold_count = len(actual_cpcv_folds)
+    else:
+        fold_count = aggregate.get("fold_count")
+        if fold_count is None:
+            fold_count = len(report.folds)
+    if not fold_count:
+        fold_count = aggregate.get("test_periods")
+    try:
+        test_periods = int(fold_count or 0)
+    except (TypeError, ValueError):
+        test_periods = 0
     if test_periods < min_periods:
         failed.append("min_test_periods")
     min_observations = int(_config_number(settings, "min_observations", float(MIN_STATISTICAL_OBSERVATIONS)))

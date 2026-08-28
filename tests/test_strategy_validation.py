@@ -212,18 +212,30 @@ def test_cpcv_future_training_cannot_be_activation_safe():
 
 
 def test_cpcv_activation_requires_affirmative_per_fold_chronology_proof():
+    folds = [
+        {
+            "path_id": f"cpcv-{number}",
+            "validation_mode": "cpcv",
+            "train_max": f"2024-01-0{number + 1}T00:00:00Z",
+            "test_start": f"2024-01-1{number + 1}T00:00:00Z",
+            "net_cagr": 0.1,
+            "trade_count": 50,
+        }
+        for number in range(4)
+    ]
     base = {
         "validation_mode": "cpcv",
         "aggregate": {
             "net_cagr": 0.12, "benchmark_excess_cagr": 0.04, "max_drawdown": -0.1,
-            "trade_count": 200, "test_periods": 4, "n_observations": 120,
+            "trade_count": 200, "test_periods": 120, "fold_count": 4, "cpcv_fold_count": 4,
+            "cpcv_fold_ids": [f"cpcv-{number}" for number in range(4)], "n_observations": 120,
             "turnover": 0.3, "dsr": 0.99, "pbo": 0.1, "regime_concentration": 0.2,
             "provenance_ok": True,
             "cpcv_future_training": False,
             "dsr_evidence": {"tested_configurations": 4, "method": "dsr"},
             "pbo_evidence": {"tested_configurations": 4, "matrix_shape": [120, 4]},
         },
-        "folds": [{"net_cagr": 0.1, "trade_count": 50}] * 4,
+        "folds": folds,
     }
     incomplete = {
         **base,
@@ -282,6 +294,97 @@ def test_mixed_validation_modes_do_not_clear_cpcv_future_training_failure():
     assert report.aggregate["cpcv_future_training"] is True
     assert "cpcv_future_training" in decision.failed_checks
     assert "cpcv_chronology_evidence" in decision.failed_checks
+
+
+def test_cpcv_chronology_evidence_is_bound_to_fold_ids_timestamps_and_flags():
+    folds = [
+        {
+            "path_id": "cpcv-0",
+            "validation_mode": "cpcv",
+            "train_max": "2024-01-01T00:00:00Z",
+            "test_start": "2024-01-11T00:00:00Z",
+            "trade_count": 50,
+        },
+        {
+            "path_id": "cpcv-1",
+            "validation_mode": "cpcv",
+            "train_max": "2024-01-02T00:00:00Z",
+            "test_start": "2024-01-12T00:00:00Z",
+            "trade_count": 50,
+        },
+    ]
+    evidence = [
+        {
+            "fold_id": "cpcv-0", "valid": True, "future_training": False,
+            "train_max": "2024-01-01T00:00:00Z", "test_min": "2024-01-11T00:00:00Z",
+            "train_before_test": True,
+        },
+        {
+            "fold_id": "cpcv-1", "valid": True, "future_training": False,
+            "train_max": "2024-01-02T00:00:00Z", "test_min": "2024-01-12T00:00:00Z",
+            "train_before_test": True,
+        },
+    ]
+    base = {
+        "validation_mode": "cpcv",
+        "aggregate": {
+            "net_cagr": 0.12, "benchmark_excess_cagr": 0.04, "max_drawdown": -0.1,
+            "trade_count": 100, "test_periods": 120, "cpcv_fold_count": 2,
+            "cpcv_fold_ids": ["cpcv-0", "cpcv-1"], "n_observations": 120,
+            "turnover": 0.3, "dsr": 0.99, "pbo": 0.1, "regime_concentration": 0.2,
+            "provenance_ok": True,
+            "cpcv_future_training": False,
+            "cpcv_chronology_evidence": evidence,
+            "dsr_evidence": {"tested_configurations": 4, "method": "dsr"},
+            "pbo_evidence": {"tested_configurations": 4, "matrix_shape": [120, 4]},
+        },
+        "folds": folds,
+    }
+
+    variants = [
+        ([{**evidence[0], "fold_id": "cpcv-missing"}, evidence[1]], "mismatched fold ID"),
+        ([evidence[0], {**evidence[1], "fold_id": "cpcv-0"}], "duplicate fold ID"),
+        ([{key: value for key, value in evidence[0].items() if key != "valid"}, evidence[1]], "missing proof"),
+        ([{**evidence[0], "future_training": True, "no_future_training": True}, evidence[1]], "contradictory future proof"),
+        ([{**evidence[0], "test_min": "2024-01-10T00:00:00Z"}, evidence[1]], "mismatched test timestamp"),
+    ]
+
+    for invalid_evidence, label in variants:
+        report = ValidationReport.from_dict({
+            **base,
+            "aggregate": {**base["aggregate"], "cpcv_chronology_evidence": invalid_evidence},
+        })
+        decision = promotion_gate(
+            report, {"environment": "pilot", "strictly_chronological": True}
+        )
+        assert "cpcv_chronology_evidence" in decision.failed_checks, label
+
+
+def test_evaluator_separates_cpcv_fold_count_from_return_observations():
+    folds = []
+    for number, start in enumerate(("2024-01-01", "2024-03-01")):
+        run = _run([0.001, -0.001] * 20, start=start)
+        run.spec["validation"].update({
+            "mode": "cpcv",
+            "chronology_evidence": {
+                "fold_id": f"cpcv-{number}",
+                "valid": True,
+                "future_training": False,
+                "train_max": f"2023-12-{31 - number:02d}T00:00:00Z",
+                "test_min": f"{start}T00:00:00Z",
+                "train_before_test": True,
+            },
+        })
+        run.metrics.update({"path_id": f"cpcv-{number}", "trade_count": 50})
+        folds.append(run)
+
+    report = evaluate_validation_folds(folds, {})
+
+    assert report.aggregate["test_periods"] == 80
+    assert report.aggregate["fold_count"] == 2
+    assert report.aggregate["cpcv_fold_count"] == 2
+    assert report.aggregate["cpcv_fold_ids"] == ["cpcv-0", "cpcv-1"]
+    assert report.aggregate["cpcv_chronology_ok"] is True
 
 
 def test_missing_provenance_and_age_limits_fail_closed_but_remain_diagnostic():
