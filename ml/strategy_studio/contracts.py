@@ -241,6 +241,8 @@ class FillEvent:
         object.__setattr__(self, "side", side)
         object.__setattr__(self, "requested_qty", _nonnegative_number(self.requested_qty, "requested_qty"))
         object.__setattr__(self, "filled_qty", _nonnegative_number(self.filled_qty, "filled_qty"))
+        if self.filled_qty > self.requested_qty + 1e-12:
+            raise ValueError("filled_qty must be <= requested_qty")
         object.__setattr__(self, "decision_price", _nonnegative_number(self.decision_price, "decision_price", optional=True))
         object.__setattr__(self, "fill_price", _nonnegative_number(self.fill_price, "fill_price", optional=True))
         status = _required_text(self.status, "status").lower()
@@ -260,6 +262,14 @@ class FillEvent:
             object.__setattr__(self, "strategy_version", int(self.strategy_version))
         object.__setattr__(self, "reason", _optional_text(self.reason, "reason"))
         object.__setattr__(self, "metadata", _mapping_copy(self.metadata, "metadata"))
+
+    @property
+    def notional(self) -> float:
+        """Return filled notional at the effective execution price."""
+
+        if self.fill_price is None:
+            return 0.0
+        return float(self.filled_qty * self.fill_price)
 
 
 @dataclass(frozen=True, slots=True)

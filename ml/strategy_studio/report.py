@@ -22,7 +22,20 @@ def build_strategy_report(run: StrategyRun, *, spec: dict[str, Any] | StrategySp
         "turnover": run.metrics.get("turnover"),
         "benchmark_excess_cagr": run.metrics.get("benchmark_excess_cagr"),
     }
+    execution_payload = run.signals.get("execution") if isinstance(run.signals, dict) else None
+    execution_summary = {}
+    if isinstance(execution_payload, dict) and isinstance(execution_payload.get("summary"), dict):
+        execution_summary = dict(execution_payload["summary"])
+        summary["execution"] = execution_summary
     trade_table = pd.DataFrame(run.trades or [])
+    if execution_summary:
+        required_fields = (
+            "decision_at", "submitted_at", "filled_at", "requested_qty", "filled_qty",
+            "decision_price", "fill_price", "fee", "slippage", "status",
+        )
+        for field_name in required_fields:
+            if field_name not in trade_table.columns:
+                trade_table[field_name] = None
     if not trade_table.empty and "date" in trade_table.columns:
         trade_table = trade_table.sort_values(["date", "symbol"], ascending=[False, True]).reset_index(drop=True)
 
@@ -40,5 +53,6 @@ def build_strategy_report(run: StrategyRun, *, spec: dict[str, Any] | StrategySp
         "equity": run.equity.copy() if isinstance(run.equity, pd.DataFrame) else pd.DataFrame(run.equity),
         "weights": run.weights.copy() if isinstance(run.weights, pd.DataFrame) else pd.DataFrame(run.weights),
         "signals": dict(run.signals or {}),
+        "execution": execution_summary,
         "ok": bool(run.ok),
     }

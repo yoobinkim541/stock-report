@@ -160,6 +160,27 @@ def run_strategy_backtest(
             signals=signal_trace,
         )
 
+    if strategy.uses_allocation_path:
+        from .execution import run_execution_backtest
+
+        execution = run_execution_backtest(
+            weights,
+            _execution_bars(compiled, weights.columns),
+            _execution_config(strategy),
+        )
+        compiled.warnings.extend(execution.warnings)
+        signal_trace["execution"] = execution.to_dict()
+        return _build_execution_run(
+            strategy,
+            close_panel,
+            weights,
+            execution,
+            signal_trace,
+            benchmark=benchmark,
+            warnings=compiled.warnings,
+            allocation_diagnostics=allocation_diagnostics,
+        )
+
     return _build_run(
         strategy,
         close_panel,
@@ -169,6 +190,111 @@ def run_strategy_backtest(
         benchmark=benchmark,
         warnings=compiled.warnings,
         allocation_diagnostics=allocation_diagnostics,
+    )
+
+
+def _execution_config(strategy: StrategySpec):
+    """Merge profile defaults, explicit execution fields, and legacy costs."""
+
+    from dataclasses import asdict
+
+    from .execution import ExecutionConfig, execution_defaults
+
+    execution_payload = dict(strategy.execution or {})
+    profile = str(execution_payload.get("profile") or strategy.execution_profile or "bar").strip().lower()
+    session = str(execution_payload.get("session") or "regular").strip().lower()
+    defaults = execution_defaults(profile, session=session)
+    payload = asdict(defaults)
+    if "latency_bars" not in execution_payload and "latency_ms" in execution_payload:
+        try:
+            payload["latency_bars"] = 0 if float(execution_payload["latency_ms"]) == 0 else 1
+        except (TypeError, ValueError):
+            payload["latency_bars"] = defaults.latency_bars
+    payload.update(execution_payload)
+    costs = strategy.costs or {}
+    for key in ("fees_bps", "slippage_bps", "spread_bps"):
+        if key not in execution_payload and key in costs:
+            payload[key] = costs[key]
+    if not any(key in execution_payload or key in costs for key in ("fees_bps", "slippage_bps", "spread_bps")):
+        payload["fees_bps"] = _strategy_cost_bps(costs)
+    if "allow_short" not in execution_payload and "allow_short" in (strategy.portfolio or {}):
+        payload["allow_short"] = bool(strategy.portfolio["allow_short"])
+    payload["profile"] = profile
+    payload["session"] = session
+    payload["run_id"] = f"strategy-{strategy.id or strategy.name}"
+    return ExecutionConfig.from_dict(payload)
+
+
+def _execution_bars(compiled: CompiledStrategy, symbols: Any) -> dict[str, pd.DataFrame]:
+    """Build per-symbol OHLCV frames from the normalized strategy price store."""
+
+    bars: dict[str, pd.DataFrame] = {}
+    for raw_symbol in symbols:
+        symbol = str(raw_symbol).upper().strip()
+        close = _field_series(compiled.store, symbol, "close")
+        if close is None and symbol in compiled.prices.columns:
+            close = compiled.prices[symbol]
+        if close is None:
+            continue
+        frame = pd.DataFrame(index=close.index)
+        for field_name in ("open", "high", "low", "close"):
+            series = _field_series(compiled.store, symbol, field_name)
+            frame[field_name] = pd.to_numeric(series if series is not None else close, errors="coerce")
+        volume = _field_series(compiled.store, symbol, "volume")
+        frame["volume"] = pd.to_numeric(volume, errors="coerce") if volume is not None else np.inf
+        bars[symbol] = frame
+    return bars
+
+
+def _build_execution_run(
+    strategy: StrategySpec,
+    close_panel: pd.DataFrame,
+    weights: pd.DataFrame,
+    execution: Any,
+    signal_trace: dict[str, Any],
+    *,
+    benchmark: str | None,
+    warnings: list[str],
+    allocation_diagnostics: list[dict[str, object]] | None = None,
+) -> StrategyRun:
+    equity = execution.equity.copy()
+    if isinstance(equity.index, pd.DatetimeIndex) and equity.index.tz is not None:
+        equity.index = equity.index.tz_convert(None)
+    aligned = weights.reindex(close_panel.index).fillna(0.0)
+    net_ret = equity["net_return"] if "net_return" in equity else pd.Series(0.0, index=equity.index)
+    cost_drag = equity["cost_drag"] if "cost_drag" in equity else pd.Series(0.0, index=equity.index)
+    metrics = _metrics_from_series(
+        equity["nav"] if "nav" in equity else pd.Series(dtype="float64"),
+        net_ret,
+        aligned,
+        cost_drag,
+        execution.trades,
+        equity.index,
+    )
+    metrics.update(execution.summary)
+    bench = _benchmark_summary(close_panel, benchmark or strategy.base_symbol or "", warnings)
+    if bench.get("available"):
+        bench_nav = bench.get("equity")
+        if isinstance(bench_nav, pd.Series):
+            equity["benchmark_nav"] = bench_nav.reindex(equity.index).ffill()
+        metrics["benchmark_excess_cagr"] = _excess_cagr(metrics.get("cagr"), bench.get("cagr"))
+    else:
+        metrics["benchmark_excess_cagr"] = None
+    if strategy.validation.get("mode") == "single_pass" and len(execution.trades) < int(strategy.validation.get("min_trades") or 0):
+        warnings.append(f"trade count below validation minimum: {len(execution.trades)} < {int(strategy.validation.get('min_trades') or 0)}")
+    errors = compiled_errors(metrics, bench)
+    return StrategyRun(
+        ok=not errors,
+        spec=strategy.to_dict(),
+        metrics=metrics,
+        trades=execution.trades,
+        equity=equity,
+        benchmark=bench,
+        warnings=warnings,
+        errors=errors,
+        weights=aligned,
+        signals=signal_trace,
+        allocation_diagnostics=list(allocation_diagnostics or []),
     )
 
 
