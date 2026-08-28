@@ -49,23 +49,39 @@ _SUPPORTED_PLUGIN_NAMES = {
     "factor",
     "fixed",
     "liquidity",
+    "limit",
     "macd",
     "market",
     "market_breadth",
     "momentum",
     "model",
     "quality",
+    "regime",
     "rsi",
     "rolling",
     "sma",
     "stop",
+    "stop_limit",
     "seasonality",
+    "twap",
     "value",
     "volatility",
     "volume_shock",
     "volume_zscore",
     "vwap",
 }
+
+_CONTRACT_FIELDS = {
+    "data_profile",
+    "execution_profile",
+    "features",
+    "signal",
+    "portfolio",
+    "execution",
+    "promotion",
+}
+_SUPPORTED_FEATURE_TYPES = _SUPPORTED_PLUGIN_NAMES
+_SUPPORTED_EXECUTION_TYPES = _SUPPORTED_PLUGIN_NAMES | SUPPORTED_EXECUTION_PROFILES
 
 
 @dataclass(slots=True)
@@ -91,6 +107,7 @@ class StrategySpec:
     portfolio: dict[str, Any] = field(default_factory=dict)
     execution: dict[str, Any] = field(default_factory=dict)
     promotion: dict[str, Any] = field(default_factory=dict)
+    _explicit_contract_fields: frozenset[str] = field(default_factory=frozenset, init=False, repr=False, compare=False)
 
     @classmethod
     def from_dict(cls, payload: dict[str, Any] | "StrategySpec") -> "StrategySpec":
@@ -144,14 +161,38 @@ class StrategySpec:
             version=version,
             id=str(data.get("id") or "").strip() or None,
         )
+        spec._explicit_contract_fields = frozenset(_CONTRACT_FIELDS.intersection(data))
         spec.validate()
         return spec
 
     def to_dict(self) -> dict[str, Any]:
         data = asdict(self)
+        explicit_fields = set(data.pop("_explicit_contract_fields", ()))
+        if not explicit_fields:
+            explicit_fields = self._inferred_contract_fields()
+        for field_name in _CONTRACT_FIELDS - explicit_fields:
+            data.pop(field_name, None)
         if data.get("id") is None:
             data.pop("id", None)
         return _deep_copy(data)
+
+    def _inferred_contract_fields(self) -> set[str]:
+        fields: set[str] = set()
+        if self.data_profile != "generic":
+            fields.add("data_profile")
+        if self.execution_profile != "bar":
+            fields.add("execution_profile")
+        if self.features:
+            fields.add("features")
+        if self.signal:
+            fields.add("signal")
+        if self.portfolio:
+            fields.add("portfolio")
+        if self.execution:
+            fields.add("execution")
+        if self.promotion:
+            fields.add("promotion")
+        return fields
 
     def validate(self) -> list[str]:
         errors: list[str] = []
@@ -299,7 +340,8 @@ def _ensure_list(value: Any) -> list[Any]:
     return [value]
 
 
-def _validate_plugins(value: Any, path: str, errors: list[str]) -> None:
+def _validate_plugins(value: Any, path: str, errors: list[str], block_name: str | None = None) -> None:
+    block_name = block_name or path
     if isinstance(value, dict):
         for key, child in value.items():
             key_text = str(key).strip().lower()
@@ -309,9 +351,17 @@ def _validate_plugins(value: Any, path: str, errors: list[str]) -> None:
                     errors.append(f"unsupported plugin: {plugin} at {path}")
                 elif plugin not in _SUPPORTED_PLUGIN_NAMES:
                     errors.append(f"unsupported plugin: {plugin} at {path}")
-            elif key_text == "type" and str(child or "").strip().lower() in _UNSAFE_PLUGIN_NAMES:
-                errors.append(f"unsupported plugin: {str(child).strip().lower()} at {path}")
-            _validate_plugins(child, f"{path}.{key}", errors)
+            elif key_text == "type":
+                type_name = str(child or "").strip().lower()
+                if type_name in _UNSAFE_PLUGIN_NAMES:
+                    errors.append(f"unsupported plugin: {type_name} at {path}")
+                elif block_name == "signal" and type_name not in SUPPORTED_SIGNAL_TYPES:
+                    errors.append(f"unsupported signal type: {type_name}")
+                elif block_name == "features" and type_name not in _SUPPORTED_FEATURE_TYPES:
+                    errors.append(f"unsupported feature type: {type_name}")
+                elif block_name == "execution" and type_name not in _SUPPORTED_EXECUTION_TYPES:
+                    errors.append(f"unsupported execution type: {type_name}")
+            _validate_plugins(child, f"{path}.{key}", errors, block_name)
     elif isinstance(value, list):
         for idx, child in enumerate(value):
-            _validate_plugins(child, f"{path}[{idx}]", errors)
+            _validate_plugins(child, f"{path}[{idx}]", errors, block_name)

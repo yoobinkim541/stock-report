@@ -13,6 +13,7 @@ from ml.strategy_studio import (
     StrategySpec,
     deserialize_event,
     serialize_event,
+    strategy_spec_hash,
 )
 
 
@@ -71,7 +72,8 @@ def test_strategy_spec_defaults_keep_legacy_shape_and_new_blocks_empty():
     assert spec.portfolio == {}
     assert spec.execution == {}
     assert spec.promotion == {}
-    assert "data_profile" in spec.to_dict()
+    assert "data_profile" not in spec.to_dict()
+    assert "signal" not in spec.to_dict()
 
 
 def test_strategy_spec_keeps_legacy_positional_constructor_order():
@@ -84,6 +86,28 @@ def test_strategy_spec_keeps_legacy_positional_constructor_order():
     assert spec.data_profile == "generic"
 
 
+def test_strategy_spec_retains_explicit_extended_fields_in_canonical_dict():
+    spec = StrategySpec.from_dict({
+        "name": "extended",
+        "data_profile": "generic",
+        "signal": {},
+    })
+
+    canonical = spec.to_dict()
+
+    assert canonical["data_profile"] == "generic"
+    assert canonical["signal"] == {}
+    assert "execution_profile" not in canonical
+    assert "portfolio" not in canonical
+
+
+def test_legacy_strategy_hash_ignores_implicit_contract_defaults():
+    legacy = {"name": "legacy", "base_symbol": "QQQ"}
+
+    assert StrategySpec.from_dict(legacy).to_dict()["version"] == 1
+    assert strategy_spec_hash(legacy) == "2994ec31ddd1ec1ea164"
+
+
 def test_data_stamp_normalizes_naive_timestamp_and_requires_provenance():
     stamp = DataStamp(
         symbol="AAPL",
@@ -93,8 +117,7 @@ def test_data_stamp_normalizes_naive_timestamp_and_requires_provenance():
         quality="complete",
     )
 
-    assert stamp.timestamp.tzinfo == timezone.utc
-    assert stamp.timestamp.isoformat() == "2026-08-28T10:00:00+00:00"
+    assert stamp.timestamp == "2026-08-28T10:00:00+00:00"
 
     with pytest.raises(ValueError, match="source"):
         DataStamp(symbol="AAPL", timestamp=datetime.now(timezone.utc), source="", timeframe="1d", quality="complete")
@@ -122,6 +145,8 @@ def test_fill_event_round_trip_preserves_partial_fill_fields():
     payload = serialize_event(event)
     restored = deserialize_event(payload, "fill")
 
+    assert event.decision_at == "2026-08-28T10:00:00+00:00"
+    assert event.filled_at == "2026-08-28T10:00:01+00:00"
     assert payload["decision_at"] == "2026-08-28T10:00:00+00:00"
     assert restored == event
     assert restored.filled_qty == 60
@@ -138,12 +163,22 @@ def test_event_serialization_round_trip_preserves_datetime_and_optional_fields()
     event_types = ["data", "signal", "order", "position"]
 
     for event, event_type in zip(events, event_types):
+        assert all(
+            not isinstance(value, datetime)
+            for value in (event.__getattribute__(name) for name in ("timestamp", "as_of", "decision_at", "filled_at") if hasattr(event, name))
+        )
         assert deserialize_event(serialize_event(event), event_type) == event
 
 
 def test_strategy_spec_rejects_unknown_nested_types_and_profiles():
     with pytest.raises(ValueError, match="unsupported signal type"):
         StrategySpec.from_dict({"name": "bad", "signal": {"type": "random"}})
+
+    with pytest.raises(ValueError, match="unsupported feature type"):
+        StrategySpec.from_dict({"name": "bad", "features": [{"type": "unknown_plugin"}]})
+
+    with pytest.raises(ValueError, match="unsupported execution type"):
+        StrategySpec.from_dict({"name": "bad", "execution": {"type": "unknown_plugin"}})
 
     with pytest.raises(ValueError, match="unsupported execution profile"):
         StrategySpec.from_dict({"name": "bad", "execution_profile": "unknown"})

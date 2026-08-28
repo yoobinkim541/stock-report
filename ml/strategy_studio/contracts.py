@@ -39,7 +39,7 @@ def _optional_text(value: object, field_name: str) -> str:
     return str(value).strip()
 
 
-def _normalise_timestamp(value: object, field_name: str, *, required: bool = True) -> datetime | None:
+def _normalise_timestamp(value: object, field_name: str, *, required: bool = True) -> str | None:
     if value is None:
         if required:
             raise ValueError(f"{field_name} is required")
@@ -66,7 +66,7 @@ def _normalise_timestamp(value: object, field_name: str, *, required: bool = Tru
 
     if parsed.tzinfo is None:
         parsed = parsed.replace(tzinfo=timezone.utc)
-    return parsed
+    return parsed.isoformat()
 
 
 def _nonnegative_number(value: object, field_name: str, *, optional: bool = False) -> float | None:
@@ -115,13 +115,13 @@ def _mapping_copy(value: object, field_name: str) -> dict[str, Any]:
 @dataclass(frozen=True, slots=True)
 class DataStamp:
     symbol: str
-    timestamp: datetime | str
+    timestamp: str
     source: str
     timeframe: str
     quality: str
     session: str = "regular"
     adjustment: str = "raw"
-    received_at: datetime | str | None = None
+    received_at: str | None = None
     open: float | None = None
     high: float | None = None
     low: float | None = None
@@ -149,7 +149,7 @@ class SignalOutput:
     symbol: str
     score: float
     confidence: float
-    as_of: datetime | str
+    as_of: str
     feature_version: str = ""
     model_version: str = ""
     reason: str = ""
@@ -173,7 +173,7 @@ class OrderIntent:
     symbol: str
     side: str
     quantity: float
-    decision_at: datetime | str
+    decision_at: str
     decision_price: float | None = None
     order_type: str = "market"
     limit_price: float | None = None
@@ -181,7 +181,7 @@ class OrderIntent:
     run_id: str = ""
     strategy_id: str = ""
     strategy_version: int | None = None
-    submitted_at: datetime | str | None = None
+    submitted_at: str | None = None
     reason: str = ""
     metadata: dict[str, Any] | None = None
 
@@ -221,10 +221,10 @@ class FillEvent:
     decision_price: float | None
     fill_price: float | None
     status: str
-    decision_at: datetime | str
-    filled_at: datetime | str | None
-    submitted_at: datetime | str | None = None
-    accepted_at: datetime | str | None = None
+    decision_at: str
+    filled_at: str | None
+    submitted_at: str | None = None
+    accepted_at: str | None = None
     fee: float = 0.0
     slippage: float = 0.0
     strategy_id: str = ""
@@ -267,7 +267,7 @@ class PositionState:
     symbol: str
     quantity: float
     average_price: float | None = 0.0
-    as_of: datetime | str | None = None
+    as_of: str | None = None
     realized_pnl: float = 0.0
     unrealized_pnl: float = 0.0
     market_price: float | None = None
