@@ -240,6 +240,7 @@ def test_execution_result_and_strategy_trace_are_json_safe():
 
     json.dumps(run.signals)
     json.dumps(report["signals"])
+    json.dumps(report)
 
 
 def test_invalid_signal_engine_trace_is_json_safe():
@@ -283,6 +284,31 @@ def test_same_time_same_symbol_ordering_is_input_order_independent():
 
     assert ordered == shuffled
     assert all(fill.run_id.startswith("execution-") for fill in ordered)
+
+
+def test_target_reconciliation_is_causal_to_the_current_bar():
+    targets = pd.DataFrame(
+        {"AAPL": [1.0, 1.0]},
+        index=pd.date_range("2026-01-01", periods=2),
+    )
+    base_bars = {"AAPL": _bars([
+        {"open": 100.0, "high": 101.0, "low": 99.0, "close": 100.0, "volume": 10.0},
+        {"open": 100.0, "high": 101.0, "low": 99.0, "close": 100.0, "volume": 10.0},
+        {"open": 100.0, "high": 101.0, "low": 99.0, "close": 100.0, "volume": 10.0},
+    ])}
+    changed_future = {"AAPL": base_bars["AAPL"].copy()}
+    changed_future["AAPL"].loc[changed_future["AAPL"].index[2], ["open", "high", "low"]] = float("nan")
+    config = ExecutionConfig(initial_cash=1_000, latency_bars=2, max_participation_rate=0.5)
+
+    base = run_execution_backtest(targets, base_bars, config)
+    changed = run_execution_backtest(targets, changed_future, config)
+
+    assert base.intents == changed.intents
+    cutoff = base_bars["AAPL"].index[1].tz_localize("UTC")
+    assert [fill for fill in base.fills if fill.filled_at and pd.Timestamp(fill.filled_at) <= cutoff] == [
+        fill for fill in changed.fills if fill.filled_at and pd.Timestamp(fill.filled_at) <= cutoff
+    ]
+    assert base.equity.loc[:cutoff].equals(changed.equity.loc[:cutoff])
 
 
 def test_apply_fills_updates_average_price_and_realized_pnl():

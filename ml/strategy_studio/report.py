@@ -44,7 +44,7 @@ def build_strategy_report(run: StrategyRun, *, spec: dict[str, Any] | StrategySp
     if not run.ok and run.errors:
         warnings.extend(run.errors)
 
-    return {
+    return to_jsonable({
         "spec": strategy.to_dict(),
         "summary": summary,
         "metrics": dict(run.metrics or {}),
@@ -56,4 +56,4 @@ def build_strategy_report(run: StrategyRun, *, spec: dict[str, Any] | StrategySp
         "signals": to_jsonable(dict(run.signals or {})),
         "execution": execution_summary,
         "ok": bool(run.ok),
-    }
+    })

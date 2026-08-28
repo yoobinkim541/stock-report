@@ -267,63 +267,66 @@ def execute_intents(
             fills.append(_event(intent, run_id=run_id, status=status, reason="no_eligible_bar", submitted_at=submitted_at))
             continue
         bar_time, row = eligible
-        base_price, reason = _eligible_price(intent, row, config.cancel_unfilled)
-        accepted_at = _timestamp_text(bar_time)
-        if base_price is None:
-            status = "cancelled" if config.cancel_unfilled else "rejected"
-            fills.append(
-                _event(
-                    intent, run_id=run_id, status=status, reason=reason,
-                    submitted_at=submitted_at, accepted_at=accepted_at,
-                )
-            )
-            continue
-
-        cap = _liquidity_cap(row["volume"], config.max_participation_rate)
-        capacity_key = (intent.symbol.upper().strip(), _timestamp(bar_time))
-        already_used = used_capacity.get(capacity_key, 0.0)
-        remaining_cap = max(0.0, cap - already_used) if isfinite(cap) else cap
-        if remaining_cap <= 0.0:
-            fills.append(
-                _event(
-                    intent, run_id=run_id, status="rejected", reason="insufficient_liquidity",
-                    submitted_at=submitted_at, accepted_at=accepted_at,
-                )
-            )
-            continue
-        if intent.quantity > remaining_cap and not config.partial_fill:
-            fills.append(
-                _event(
-                    intent, run_id=run_id, status="rejected", reason="insufficient_liquidity",
-                    submitted_at=submitted_at, accepted_at=accepted_at,
-                )
-            )
-            continue
-
-        filled_qty = min(float(intent.quantity), remaining_cap)
-        used_capacity[capacity_key] = already_used + filled_qty
-        status = "partial" if filled_qty + 1e-12 < intent.quantity else "filled"
-        fill_price, slippage_per_unit, spread_per_unit = _apply_price_impact(
-            base_price, intent.side, config,
-        )
-        fee = fill_price * filled_qty * config.fees_bps / 10000.0
-        metadata = dict(intent.metadata or {})
-        metadata.update({
-            "raw_price": float(base_price),
-            "spread_per_unit": float(spread_per_unit),
-            "slippage_per_unit": float(slippage_per_unit),
-            "volume_cap": float(cap) if isfinite(cap) else None,
-            "remaining_volume_cap": float(remaining_cap) if isfinite(remaining_cap) else None,
-        })
-        fills.append(
-            _event(
-                intent, run_id=run_id, status=status, reason=reason,
-                filled_at=_timestamp_text(bar_time), submitted_at=submitted_at,
-                accepted_at=accepted_at, filled_qty=filled_qty, fill_price=fill_price,
-                fee=fee, slippage=slippage_per_unit, metadata=metadata,
-            )
-        )
+        fills.append(_execute_intent_on_bar(intent, row, bar_time, config, used_capacity))
     return fills
+
+
+def _execute_intent_on_bar(
+    intent: OrderIntent,
+    row: pd.Series,
+    bar_time: pd.Timestamp,
+    config: ExecutionConfig,
+    used_capacity: dict[tuple[str, pd.Timestamp], float],
+) -> FillEvent:
+    """Evaluate one intent only against its current eligible bar."""
+
+    submitted_at = _timestamp_text(intent.submitted_at or intent.decision_at)
+    run_id = intent.run_id or f"{config.run_id}-{_stable_intent_id(intent)}"
+    base_price, reason = _eligible_price(intent, row, config.cancel_unfilled)
+    accepted_at = _timestamp_text(bar_time)
+    if base_price is None:
+        status = "cancelled" if config.cancel_unfilled else "rejected"
+        return _event(
+            intent, run_id=run_id, status=status, reason=reason,
+            submitted_at=submitted_at, accepted_at=accepted_at,
+        )
+
+    cap = _liquidity_cap(row["volume"], config.max_participation_rate)
+    capacity_key = (intent.symbol.upper().strip(), _timestamp(bar_time))
+    already_used = used_capacity.get(capacity_key, 0.0)
+    remaining_cap = max(0.0, cap - already_used) if isfinite(cap) else cap
+    if remaining_cap <= 0.0:
+        return _event(
+            intent, run_id=run_id, status="rejected", reason="insufficient_liquidity",
+            submitted_at=submitted_at, accepted_at=accepted_at,
+        )
+    if intent.quantity > remaining_cap and not config.partial_fill:
+        return _event(
+            intent, run_id=run_id, status="rejected", reason="insufficient_liquidity",
+            submitted_at=submitted_at, accepted_at=accepted_at,
+        )
+
+    filled_qty = min(float(intent.quantity), remaining_cap)
+    used_capacity[capacity_key] = already_used + filled_qty
+    status = "partial" if filled_qty + 1e-12 < intent.quantity else "filled"
+    fill_price, slippage_per_unit, spread_per_unit = _apply_price_impact(
+        base_price, intent.side, config,
+    )
+    fee = fill_price * filled_qty * config.fees_bps / 10000.0
+    metadata = dict(intent.metadata or {})
+    metadata.update({
+        "raw_price": float(base_price),
+        "spread_per_unit": float(spread_per_unit),
+        "slippage_per_unit": float(slippage_per_unit),
+        "volume_cap": float(cap) if isfinite(cap) else None,
+        "remaining_volume_cap": float(remaining_cap) if isfinite(remaining_cap) else None,
+    })
+    return _event(
+        intent, run_id=run_id, status=status, reason=reason,
+        filled_at=_timestamp_text(bar_time), submitted_at=submitted_at,
+        accepted_at=accepted_at, filled_qty=filled_qty, fill_price=fill_price,
+        fee=fee, slippage=slippage_per_unit, metadata=metadata,
+    )
 
 
 def apply_fills(position: PositionState, fills: list[FillEvent]) -> PositionState:
@@ -388,8 +391,7 @@ def run_execution_backtest(
     targets = targets.sort_index()
     targets.columns = [str(column).upper().strip() for column in targets.columns]
     targets = targets.loc[:, ~targets.columns.duplicated()]
-    intents, warnings = _intents_from_targets(targets, normalized, config)
-    fills = execute_intents(intents, normalized, config)
+    intents, fills, warnings = _execute_target_weights(targets, normalized, config)
     equity, positions, mark_warnings = _mark_ledger(fills, normalized, config)
     warnings.extend(mark_warnings)
     trades = [_fill_to_trade(fill) for fill in fills if fill.status in {"partial", "filled"} and fill.filled_qty > 0]
@@ -563,77 +565,138 @@ def _event(
     )
 
 
-def _intents_from_targets(
+def _execute_target_weights(
     targets: pd.DataFrame,
     bars: dict[str, pd.DataFrame],
     config: ExecutionConfig,
-) -> tuple[list[OrderIntent], list[str]]:
+) -> tuple[list[OrderIntent], list[FillEvent], list[str]]:
+    """Create and execute target orders in one causal chronological pass."""
+
     warnings: list[str] = []
     intents: list[OrderIntent] = []
+    fills: list[FillEvent] = []
+    held_quantities: dict[str, float] = {symbol: 0.0 for symbol in bars}
+    pending_buys: dict[str, float] = {}
+    pending_sells: dict[str, float] = {}
+    scheduled: dict[pd.Timestamp, list[OrderIntent]] = {}
+    unscheduled: list[OrderIntent] = []
+    used_capacity: dict[tuple[str, pd.Timestamp], float] = {}
+
+    target_events: dict[pd.Timestamp, list[pd.Series]] = {}
     for timestamp, row in targets.iterrows():
-        prior_intents = sorted(intents, key=_intent_sort_key)
-        prior_fills = execute_intents(prior_intents, bars, config) if prior_intents else []
-        executed_quantities: dict[str, float] = {}
-        pending_buys: dict[str, float] = {}
-        pending_sells: dict[str, float] = {}
-        current_timestamp = _timestamp(timestamp)
-        for prior_intent, fill in zip(prior_intents, prior_fills):
-            if fill.filled_at is None:
-                continue
-            sign = 1.0 if prior_intent.side == "buy" else -1.0
-            if _timestamp(fill.filled_at) <= current_timestamp:
-                executed_quantities[prior_intent.symbol] = executed_quantities.get(prior_intent.symbol, 0.0) + sign * fill.filled_qty
-            elif fill.status in {"partial", "filled"}:
-                pending = pending_buys if prior_intent.side == "buy" else pending_sells
-                pending[prior_intent.symbol] = pending.get(prior_intent.symbol, 0.0) + prior_intent.quantity
-        for symbol in targets.columns:
-            frame = bars.get(symbol)
-            if frame is None or frame.empty:
-                warnings.append(f"target skipped for {symbol}: missing bars")
-                continue
-            price = _decision_price(frame, timestamp)
-            if price is None:
-                warnings.append(f"target skipped for {symbol} at {_timestamp_text(timestamp)}: missing decision price")
-                continue
-            try:
-                weight = float(row.get(symbol, 0.0))
-            except (TypeError, ValueError):
-                warnings.append(f"target skipped for {symbol} at {_timestamp_text(timestamp)}: invalid weight")
-                continue
-            if not isfinite(weight):
-                warnings.append(f"target skipped for {symbol} at {_timestamp_text(timestamp)}: invalid weight")
-                continue
-            if not config.allow_short and weight < 0.0:
-                warnings.append(f"negative target clipped for {symbol} at {_timestamp_text(timestamp)}")
-                weight = 0.0
-            elif config.allow_short and weight < 0.0:
-                warnings.append(f"negative target clipped for long-only ledger: {symbol} at {_timestamp_text(timestamp)}")
-                weight = 0.0
-            target_quantity = weight * config.initial_cash / price
-            current_quantity = max(0.0, executed_quantities.get(symbol, 0.0))
-            target_quantity = max(0.0, target_quantity)
-            if target_quantity >= current_quantity:
-                pending_buy_quantity = pending_buys.get(symbol, 0.0)
-                delta = max(0.0, target_quantity - current_quantity - pending_buy_quantity)
-            else:
-                available_to_sell = max(0.0, current_quantity - pending_sells.get(symbol, 0.0))
-                delta = -min(current_quantity - target_quantity, available_to_sell)
-            if abs(delta) <= config.min_order_qty:
-                continue
-            side = "buy" if delta > 0.0 else "sell"
-            quantity = abs(delta)
-            intents.append(
-                OrderIntent(
+        target_events.setdefault(_timestamp(timestamp), []).append(row)
+    event_times = set(target_events)
+    for frame in bars.values():
+        event_times.update(frame.index)
+
+    def process_due(bar_time: pd.Timestamp) -> None:
+        for intent in sorted(scheduled.pop(bar_time, []), key=_intent_sort_key):
+            symbol = intent.symbol.upper().strip()
+            pending = pending_buys if intent.side == "buy" else pending_sells
+            pending[symbol] = max(0.0, pending.get(symbol, 0.0) - intent.quantity)
+            frame = bars[symbol]
+            row = frame.loc[bar_time]
+            fill = _execute_intent_on_bar(intent, row, bar_time, config, used_capacity)
+            fills.append(fill)
+            if fill.status in {"partial", "filled"} and fill.filled_qty > 0.0:
+                if intent.side == "buy":
+                    held_quantities[symbol] = held_quantities.get(symbol, 0.0) + fill.filled_qty
+                else:
+                    held_quantities[symbol] = max(
+                        0.0, held_quantities.get(symbol, 0.0) - fill.filled_qty,
+                    )
+
+    for event_time in sorted(event_times):
+        # Existing orders at this bar settle before decisions made at this time.
+        process_due(event_time)
+        for timestamp_row in target_events.get(event_time, []):
+            for symbol in targets.columns:
+                frame = bars.get(symbol)
+                if frame is None or frame.empty:
+                    warnings.append(f"target skipped for {symbol}: missing bars")
+                    continue
+                price = _decision_price(frame, event_time)
+                if price is None:
+                    warnings.append(f"target skipped for {symbol} at {_timestamp_text(event_time)}: missing decision price")
+                    continue
+                try:
+                    weight = float(timestamp_row.get(symbol, 0.0))
+                except (TypeError, ValueError):
+                    warnings.append(f"target skipped for {symbol} at {_timestamp_text(event_time)}: invalid weight")
+                    continue
+                if not isfinite(weight):
+                    warnings.append(f"target skipped for {symbol} at {_timestamp_text(event_time)}: invalid weight")
+                    continue
+                if weight < 0.0:
+                    warnings.append(f"negative target clipped for {symbol} at {_timestamp_text(event_time)}")
+                    weight = 0.0
+                target_quantity = max(0.0, weight * config.initial_cash / price)
+                current_quantity = max(0.0, held_quantities.get(symbol, 0.0))
+                if target_quantity >= current_quantity:
+                    delta = max(
+                        0.0,
+                        target_quantity - current_quantity - pending_buys.get(symbol, 0.0),
+                    )
+                else:
+                    available_to_sell = max(
+                        0.0,
+                        current_quantity - pending_sells.get(symbol, 0.0),
+                    )
+                    delta = -min(current_quantity - target_quantity, available_to_sell)
+                if abs(delta) <= config.min_order_qty:
+                    continue
+                intent = OrderIntent(
                     symbol=symbol,
-                    side=side,
-                    quantity=quantity,
-                    decision_at=timestamp,
+                    side="buy" if delta > 0.0 else "sell",
+                    quantity=abs(delta),
+                    decision_at=event_time,
                     decision_price=price,
                     run_id=config.run_id,
                     reason="target_weight",
                     metadata={"target_weight": weight, "target_quantity": target_quantity},
                 )
-            )
+                intents.append(intent)
+                eligible_position = _eligible_bar_position(frame, event_time, config.latency_bars)
+                if eligible_position is None:
+                    unscheduled.append(intent)
+                    continue
+                eligible_time = frame.index[eligible_position]
+                scheduled.setdefault(eligible_time, []).append(intent)
+                pending_orders = pending_buys if intent.side == "buy" else pending_sells
+                pending_orders[symbol] = pending_orders.get(symbol, 0.0) + intent.quantity
+        # latency_bars=0 orders are eligible after their current decision.
+        process_due(event_time)
+
+    for intent in sorted(unscheduled, key=_intent_sort_key):
+        status = "cancelled" if config.cancel_unfilled else "rejected"
+        submitted_at = _timestamp_text(intent.submitted_at or intent.decision_at)
+        run_id = intent.run_id or f"{config.run_id}-{_stable_intent_id(intent)}"
+        fills.append(_event(
+            intent, run_id=run_id, status=status, reason="no_eligible_bar",
+            submitted_at=submitted_at,
+        ))
+    return intents, fills, warnings
+
+
+def _eligible_bar_position(frame: pd.DataFrame, decision_at: object, latency_bars: int) -> int | None:
+    if frame.empty:
+        return None
+    decision = _timestamp(decision_at)
+    positions = np.flatnonzero(frame.index >= decision)
+    if len(positions) == 0:
+        return None
+    position = int(positions[0]) + latency_bars
+    return position if position < len(frame) else None
+
+
+def _intents_from_targets(
+    targets: pd.DataFrame,
+    bars: dict[str, pd.DataFrame],
+    config: ExecutionConfig,
+) -> tuple[list[OrderIntent], list[str]]:
+    """Backward-compatible target intent helper for internal callers."""
+
+    intents, _, warnings = _execute_target_weights(targets, bars, config)
     return intents, warnings
 
 

@@ -24,8 +24,12 @@ weight simulator.
   reconcile residual orders against executed quantities, reserve only pending
   order quantities, avoid long-only oversells, mark positions to market, and
   return consistent equity, fills, trades, positions, and a cost-aware summary.
-- Made `ExecutionResult.to_dict()` and new-strategy signal/report traces strict
-  JSON payloads using the public `serialize_event()` contract.
+- Reworked target reconciliation into a single chronological pass so only
+  current and past fill events affect decisions; partial residuals and pending
+  order reservations are carried forward without consulting future bar state.
+- Made `ExecutionResult.to_dict()`, new-strategy signal traces, and complete
+  strategy reports strict JSON payloads using the public `serialize_event()`
+  contract and stable `{index, columns, data}` DataFrame serialization.
 - Added the profile-default compatibility hook for `bar`, `kr_intraday`,
   `global_swing`, and `extended_us`; Task 9 profile health and collector work
   remains out of scope.
@@ -35,9 +39,9 @@ weight simulator.
 ## Verification
 
 - `./.venv/bin/pytest tests/test_strategy_execution.py -q`
-  - `16 passed`
+  - `17 passed`
 - `./.venv/bin/pytest tests/test_strategy_execution.py tests/test_strategy_studio.py tests/test_trade_events.py -q`
-  - `28 passed`
+  - `29 passed`
 - `./.venv/bin/pytest tests/test_strategy_contracts.py tests/test_strategy_signals.py tests/test_strategy_allocation.py -q`
   - `47 passed`
 - `./.venv/bin/python -m compileall -q ml/strategy_studio`
@@ -54,6 +58,9 @@ weight simulator.
   quantities. This makes replays stable, but a large overnight gap can create
   temporary negative cash because no financing or broker margin policy is
   modeled yet.
+- `StrategyRun.equity` and `StrategyRun.weights` remain pandas DataFrames for
+  existing in-memory consumers; `build_strategy_report()` converts them only
+  at its serialization boundary, so report callers receive JSON-safe payloads.
 - Close-only research panels synthesize OHLC values and use an uncapped volume
   sentinel. Real OHLCV inputs still enforce participation caps; missing volume
   is visible only through the absence of a liquidity constraint.
