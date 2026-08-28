@@ -1,8 +1,8 @@
-# Task 7 Fix Round 2 Report: Non-Forgeable Activation and Provider Contracts
+# Task 7 Fix Round 3 Report: Full Validation Failure Contract
 
 ## Status
 
-Task 7 fix round 2 is implemented in `/home/ubuntu/projects/stock-report`.
+Task 7 fix round 3 is implemented in `/home/ubuntu/projects/stock-report`.
 Task 8 UI and Task 9 profiles were not changed.
 
 ## Fixes
@@ -39,6 +39,12 @@ Task 8 UI and Task 9 profiles were not changed.
   result; the capability is never serialized into the public run/validate
   response. A real full-validation activation test covers the adapter-to-save
   handoff and persistence path.
+- `_run_full_validation()` now has a single tuple-preserving failure boundary.
+  Empty folds, fold/backtest exceptions, malformed evaluator or gate results,
+  malformed adapter shapes, and other early full-validation failures return a
+  JSON-safe rejected payload with `None` capability instead of propagating an
+  unpacking error or HTTP 500. The real `/validate` route has a regression for
+  malformed validation output.
 - Provider `plugin`, `provider`, `type`, and indicator `kind` values now use
   the registered signal-provider or existing spec allowlists. Relative and
   absolute path-like values, traversal, executable tokens, and malformed
@@ -49,10 +55,9 @@ Task 8 UI and Task 9 profiles were not changed.
 
 ## Verification
 
-- Focused Task 7 API/security tests: `19 passed, 132 deselected`
-- API/version and legacy route regressions: `6 passed`
-- Shared strategy regression suite: `119 passed, 2 warnings`
-- Strategy gate/storage regressions: `5 passed`
+- Focused Task 7 API/security tests: `21 passed, 132 deselected`
+- API/version and legacy route regressions: `4 passed`
+- Shared strategy/validation/gate regression suite: `122 passed, 2 warnings`
 - `python -m compileall -q agent_console ml/strategy_studio tests/test_agent_console.py`: passed
 - `git diff --check`: passed
 
@@ -71,6 +76,10 @@ Task 8 UI and Task 9 profiles were not changed.
   multi-worker deployment needs a shared registry or equivalent signed
   capability store, and a storage failure after capability consumption
   requires a fresh full validation run.
+- Full-validation failures are exposed as `ok: false` JSON results while the
+  existing run/validate route convention keeps the HTTP response available;
+  callers must inspect the structured failure payload before activation or
+  sandbox persistence.
 - Task 5's chronology-proof alias issue remains parked as the final whole-
   branch activation blocker.
 - The broader `tests/test_agent_console.py -k 'strategy or agent'` run was

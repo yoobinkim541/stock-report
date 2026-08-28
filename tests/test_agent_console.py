@@ -4303,6 +4303,79 @@ def test_full_validation_routes_use_real_folds_and_keep_preview_single_pass_only
         json.dumps(body)
 
 
+def test_empty_full_validation_keeps_payload_and_capability_tuple(monkeypatch):
+    from agent_console import strategy_studio
+
+    monkeypatch.setattr(strategy_studio, "_load_prices", lambda *args, **kwargs: pd.DataFrame())
+    strategy = strategy_studio.StrategySpec.from_dict({
+        "name": "empty-validation",
+        "base_symbol": "AAPL",
+        "validation": {"mode": "purged_walk_forward"},
+    })
+
+    result = strategy_studio._run_full_validation(
+        strategy,
+        period="1y",
+        validation_mode="purged_walk_forward",
+        spec_id="spec-1",
+        activation_environment=None,
+    )
+
+    assert isinstance(result, tuple)
+    assert len(result) == 2
+    payload, token = result
+    assert payload["ok"] is False
+    assert payload["validation"]["folds"] == []
+    assert token is None
+
+
+def test_rejected_full_validation_route_returns_structured_json_failure(monkeypatch, tmp_path):
+    _isolate(monkeypatch, tmp_path)
+    from agent_console import strategy_studio
+    from agent_console.server import create_app
+
+    prices = pd.DataFrame(
+        {"AAPL__close": range(100, 112)},
+        index=pd.date_range("2026-01-01", periods=12, freq="D", tz="UTC"),
+    )
+    monkeypatch.setattr(strategy_studio, "_load_prices", lambda *args, **kwargs: prices)
+    monkeypatch.setattr(strategy_studio, "evaluate_validation_folds", lambda *args, **kwargs: {})
+    monkeypatch.setattr(
+        strategy_studio,
+        "preview_strategy_spec",
+        lambda *args, **kwargs: pytest.fail("rejected full validation must not fall back to preview"),
+    )
+    monkeypatch.setattr(strategy_studio, "get_strategy_spec", lambda *args, **kwargs: {
+        "id": "spec-1",
+        "spec": {
+            "name": "malformed-validation",
+            "base_symbol": "AAPL",
+            "validation": {
+                "mode": "purged_walk_forward",
+                "label_horizon": 0,
+                "train_bars": 4,
+                "test_bars": 2,
+                "step_bars": 2,
+                "embargo_bars": 0,
+            },
+        },
+    })
+
+    response = create_app().test_client().post(
+        "/api/strategy-studio/specs/spec-1/validate",
+        json={"mode": "purged_walk_forward"},
+    )
+
+    body = response.get_json()
+    assert response.status_code == 200
+    assert body["ok"] is False
+    assert body["error"] == "full_validation_failed"
+    assert body["validation"]["promotion_eligible"] is False
+    assert body["promotion"]["accepted"] is False
+    assert body["errors"]
+    json.dumps(body)
+
+
 def test_provider_patch_schema_rejects_malformed_unknown_and_path_values():
     from agent_console.strategy_studio import validate_strategy_patch
 

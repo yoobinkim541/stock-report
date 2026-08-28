@@ -307,10 +307,47 @@ def _run_strategy_spec_internal(
         "errors": errors,
         "trade_count": int(raw.get("trade_count") or (raw.get("metrics") or {}).get("trade_count") or 0),
     }
+    if raw.get("error"):
+        result["error"] = str(raw["error"])
     return _json_safe(result), activation_token
 
 
 def _run_full_validation(
+    strategy: StrategySpec,
+    *,
+    period: str,
+    validation_mode: str,
+    spec_id: str | None,
+    activation_environment: str | None,
+) -> tuple[dict[str, Any], _ValidatedActivationToken | None]:
+    """Keep the full-validation adapter's result/capability tuple contract."""
+
+    try:
+        result = _run_full_validation_impl(
+            strategy,
+            period=period,
+            validation_mode=validation_mode,
+            spec_id=spec_id,
+            activation_environment=activation_environment,
+        )
+        if not isinstance(result, tuple) or len(result) != 2:
+            raise TypeError("full validation adapter returned an invalid result shape")
+        payload, token = result
+        if not isinstance(payload, Mapping):
+            raise TypeError("full validation adapter payload must be an object")
+        if token is not None and not isinstance(token, _ValidatedActivationToken):
+            raise TypeError("full validation adapter capability has an invalid type")
+        return _json_safe(dict(payload)), token
+    except Exception as exc:
+        return _full_validation_failure(
+            strategy,
+            validation_mode=validation_mode,
+            activation_environment=activation_environment,
+            error=exc,
+        )
+
+
+def _run_full_validation_impl(
     strategy: StrategySpec,
     *,
     period: str,
@@ -471,6 +508,67 @@ def _run_full_validation(
             validation_mode=validation_mode,
         )
     return _json_safe(result_payload), token
+
+
+def _full_validation_failure(
+    strategy: StrategySpec,
+    *,
+    validation_mode: str,
+    activation_environment: str | None,
+    error: Exception,
+) -> tuple[dict[str, Any], None]:
+    """Return a structured rejected result for any full-validation failure."""
+
+    message = f"full validation failed: {type(error).__name__}: {error}"
+    run_id = f"validation-{strategy_spec_hash(strategy)}-{validation_mode}"
+    validation = {
+        "folds": [],
+        "aggregate": {"fold_count": 0, "provenance_ok": False},
+        "warnings": [message],
+        "promotion_eligible": False,
+        "validation_mode": validation_mode,
+        "provenance": {"ok": False, "checks": []},
+    }
+    promotion = {
+        "accepted": False,
+        "environment": str(activation_environment or "shadow"),
+        "failed_checks": ["validation_error", "provenance"],
+        "warnings": [message],
+        "activation_safe": False,
+        "preview": False,
+    }
+    payload = {
+        "ok": False,
+        "error": "full_validation_failed",
+        "run_id": run_id,
+        "validation_mode": validation_mode,
+        "spec": strategy.to_dict(),
+        "report": {
+            "spec": strategy.to_dict(),
+            "summary": {},
+            "metrics": {},
+            "benchmark": {},
+            "warnings": [message],
+            "trades": [],
+            "equity": pd.DataFrame(),
+            "weights": pd.DataFrame(),
+            "signals": {},
+            "validation": validation,
+            "promotion": promotion,
+            "ok": False,
+        },
+        "metrics": {},
+        "benchmark": {},
+        "validation": validation,
+        "promotion": promotion,
+        "provenance": {"ok": False, "checks": []},
+        "data_quality": _unknown_data_quality(),
+        "warnings": [message],
+        "errors": [message],
+        "folds": [],
+        "trade_count": 0,
+    }
+    return _json_safe(payload), None
 
 
 def _full_validation_digest(result: Mapping[str, object]) -> str:
