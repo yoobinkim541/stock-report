@@ -106,3 +106,34 @@ Addressed reviewer findings without changing the legacy rule-only routing:
 - Freshness limits and provenance completeness are stricter for activation, so
   legacy runs continue to produce preview reports but cannot be promoted until
   their source/model metadata is supplied.
+
+## Fix Round 2
+
+Addressed the remaining review findings:
+
+- CPCV activation now requires strict chronology configuration plus affirmative
+  per-fold proof: each fold must be valid, explicitly mark no future training,
+  and provide comparable train-max/test-min timestamps. Future-training and
+  chronology failures survive mixed validation modes. Default CPCV remains
+  diagnostic/PBO-only.
+- Provenance aggregation is fail-closed across all folds. Missing source,
+  version, as-of, freshness/status, evaluation timestamp, or configured data and
+  model age limits invalidates activation while remaining visible in preview
+  diagnostics.
+- `check_split_leakage()` now distinguishes an explicitly declared zero horizon
+  from missing metadata, rejects invalid/`NaT` label endpoints, and split
+  blackout windows honor the longer explicit `label_end` horizon. The existing
+  `ml.walk_forward.purged_walk_forward_splits()` default remains unchanged for
+  legacy callers.
+
+### Fix Round 2 Verification
+
+- `./.venv/bin/pytest tests/test_strategy_validation.py -q`
+  - `31 passed`
+
+### Fix Round 2 Trade-offs
+
+- Strict CPCV evidence is intentionally more verbose because a numeric flag is
+  not sufficient proof that every fold was trained chronologically.
+- A valid fold cannot compensate for an incomplete provenance fold; promotion
+  requires complete evidence for the entire validation report.

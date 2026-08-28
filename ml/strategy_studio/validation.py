@@ -47,6 +47,15 @@ def _is_timestamp_like(value: object) -> bool:
     return isinstance(value, (pd.Timestamp, datetime, date, np.datetime64)) or isinstance(value, str)
 
 
+def _json_order_value(value: object) -> object:
+    if _is_timestamp_like(value):
+        try:
+            return _timestamp_text(value)
+        except (TypeError, ValueError):
+            pass
+    return to_jsonable(value)
+
+
 def _normalise_index(index: pd.Index | Sequence[object], name: str = "index") -> pd.Index:
     values = index if isinstance(index, pd.Index) else pd.Index(index)
     if values.has_duplicates:
@@ -82,6 +91,19 @@ def _non_negative_int(value: object, name: str) -> int:
     return number
 
 
+def _is_missing_scalar(value: object) -> bool:
+    try:
+        return bool(pd.isna(value))
+    except (TypeError, ValueError):
+        return False
+
+
+def _has_metadata_value(value: object) -> bool:
+    if value is None or _is_missing_scalar(value):
+        return False
+    return bool(str(value).strip())
+
+
 @dataclass(frozen=True, slots=True)
 class ValidationSplit:
     """One chronological train/test split and its excluded observations."""
@@ -90,9 +112,11 @@ class ValidationSplit:
     test: pd.Index
     path_id: str = "path-0"
     embargo_bars: int = 0
-    blocked: pd.Index = field(default_factory=pd.Index, repr=False, compare=False)
+    blocked: pd.Index = field(default_factory=lambda: pd.Index([]), repr=False, compare=False)
     future_training: bool = False
     strictly_chronological: bool = False
+    label_horizon: int | None = None
+    label_end_provided: bool = False
 
     def __post_init__(self) -> None:
         train = _normalise_index(self.train, "train")
@@ -110,8 +134,13 @@ class ValidationSplit:
         object.__setattr__(self, "path_id", str(self.path_id))
         object.__setattr__(self, "future_training", bool(self.future_training))
         object.__setattr__(self, "strictly_chronological", bool(self.strictly_chronological))
+        horizon = None if self.label_horizon is None else _non_negative_int(self.label_horizon, "label_horizon")
+        object.__setattr__(self, "label_horizon", horizon)
+        object.__setattr__(self, "label_end_provided", bool(self.label_end_provided))
 
     def to_dict(self) -> dict[str, Any]:
+        train_max = self.train[-1] if len(self.train) else None
+        test_min = self.test[0] if len(self.test) else None
         return to_jsonable({
             "train": self.train,
             "test": self.test,
@@ -120,13 +149,29 @@ class ValidationSplit:
             "blocked": self.blocked,
             "future_training": self.future_training,
             "strictly_chronological": self.strictly_chronological,
+            "label_horizon": self.label_horizon,
+            "label_end_provided": self.label_end_provided,
+            "chronology_evidence": {
+                "fold_id": self.path_id,
+                "valid": bool(
+                    len(self.train) and len(self.test)
+                    and not self.future_training
+                    and train_max < test_min
+                ),
+                "future_training": self.future_training,
+                "train_before_test": bool(
+                    len(self.train) and len(self.test) and train_max < test_min
+                ),
+                "train_max": _json_order_value(train_max) if train_max is not None else None,
+                "test_min": _json_order_value(test_min) if test_min is not None else None,
+            },
         })
 
 
 def check_split_leakage(
     split: ValidationSplit,
     *,
-    label_horizon: int = 0,
+    label_horizon: int | None = None,
     label_end: pd.Series | Sequence[object] | None = None,
 ) -> list[str]:
     """Return auditable leakage findings for a split.
@@ -147,7 +192,13 @@ def check_split_leakage(
     if blocked_set.intersection(test_set):
         issues.append("blocked_contains_test_rows")
 
-    horizon = _non_negative_int(label_horizon, "label_horizon")
+    horizon = (
+        _non_negative_int(label_horizon, "label_horizon")
+        if label_horizon is not None
+        else split.label_horizon
+    )
+    if horizon is None and label_end is None and not split.label_end_provided:
+        issues.append("label_horizon_missing")
     if horizon and len(split.train) and len(split.test) and not isinstance(split.train, pd.DatetimeIndex):
         test_start = min(split.test)
         prior_train = [value for value in split.train if value < test_start]
@@ -160,15 +211,25 @@ def check_split_leakage(
         else:
             ends = list(label_end) if not isinstance(label_end, pd.Series) else label_end.tolist()
         if len(ends) == len(split.train):
+            try:
+                normalised_ends = _label_end_values(split.train, ends, 0)
+            except (TypeError, ValueError):
+                issues.append("label_end_invalid")
+                normalised_ends = None
+            if normalised_ends is None:
+                return list(dict.fromkeys(issues))
+            ends = normalised_ends
             test_start = split.test[0]
             test_end = split.test[-1]
             for start, end in zip(split.train, ends):
-                if end is None or (isinstance(end, float) and np.isnan(end)):
-                    issues.append("label_end_missing")
+                if end is None or _is_missing_scalar(end):
+                    issues.append("label_end_invalid")
                     break
                 if end >= test_start and start <= test_end:
                     issues.append("label_end_overlaps_test")
                     break
+        elif label_end is not None:
+            issues.append("label_end_length_mismatch")
     return list(dict.fromkeys(issues))
 
 
@@ -193,9 +254,13 @@ def _label_end_values(
                 parsed = pd.DatetimeIndex(pd.to_datetime(parsed, utc=True))
             elif parsed.tz is not None:
                 parsed = parsed.tz_convert(None)
+            if any(_is_missing_scalar(value) for value in parsed):
+                raise ValueError("label_end contains invalid or NaT endpoints")
             return list(parsed)
         except (TypeError, ValueError) as exc:
             raise ValueError("label_end contains invalid timestamps") from exc
+    if any(_is_missing_scalar(value) for value in values):
+        raise ValueError("label_end contains invalid or NaT endpoints")
     return values
 
 
@@ -216,6 +281,29 @@ def _overlapping_label_positions(
         if end >= test_min and index[position] <= test_max:
             removed.add(position)
     return removed
+
+
+def _post_test_blackout_positions(
+    index: pd.Index,
+    test_positions: Sequence[int],
+    embargo_bars: int,
+    label_ends: Sequence[object] | None,
+    label_horizon: int | None,
+) -> set[int]:
+    """Return rows after each test label window that cannot train a model."""
+
+    blocked: set[int] = set()
+    numeric_horizon = label_horizon or 0
+    for position in test_positions:
+        right = min(len(index), position + numeric_horizon + embargo_bars + 1)
+        if label_ends is not None:
+            endpoint = label_ends[position]
+            cursor = position + 1
+            while cursor < len(index) and index[cursor] <= endpoint:
+                cursor += 1
+            right = max(right, min(len(index), cursor + embargo_bars))
+        blocked.update(range(position + 1, right))
+    return blocked
 
 
 def make_purged_walk_forward_splits(
@@ -262,8 +350,10 @@ def make_purged_walk_forward_splits(
         test_start = start + train_size + embargo
         test_positions = list(range(test_start, test_start + test_size))
         blocked_positions = set(range(start + train_size, test_start))
-        post_test_end = min(len(values), test_positions[-1] + embargo + (horizon or 0) + 1)
-        blocked_positions.update(range(test_positions[-1] + 1, post_test_end))
+        blocked_positions.update(
+            _post_test_blackout_positions(values, test_positions, embargo, ends, horizon)
+        )
+        blocked_positions.difference_update(test_positions)
         purged = _overlapping_label_positions(values, train_positions, test_positions, ends)
         train_positions = [position for position in train_positions if position not in purged]
         blocked_positions.update(purged)
@@ -273,6 +363,8 @@ def make_purged_walk_forward_splits(
             path_id=f"wf-{path}",
             embargo_bars=embargo,
             blocked=values.take(sorted(blocked_positions)),
+            label_horizon=horizon,
+            label_end_provided=label_end is not None,
         )
         if not train_positions:
             _warn(f"discarded empty validation split after purge: {split.path_id}")
@@ -326,6 +418,7 @@ def make_cpcv_splits(
             left = max(0, position - embargo - (horizon or 0))
             right = min(len(values), position + embargo + (horizon or 0) + 1)
             blocked.update(range(left, right))
+        blocked.update(_post_test_blackout_positions(values, test_positions, embargo, ends, horizon))
         blocked.difference_update(test_set)
         if strictly_chronological:
             candidate_positions = range(min(test_positions))
@@ -342,8 +435,10 @@ def make_cpcv_splits(
             path_id=path_id,
             embargo_bars=embargo,
             blocked=values.take(sorted(blocked)),
-            future_training=any(position > max(test_positions) for position in train_positions),
+            future_training=any(position > min(test_positions) for position in train_positions),
             strictly_chronological=strictly_chronological,
+            label_horizon=horizon,
+            label_end_provided=label_end is not None,
         )
         if not train_positions:
             _warn(f"discarded empty validation split after purge: {path_id}")
@@ -647,7 +742,8 @@ def _fold_metrics(run: object, path_id: str) -> tuple[dict[str, Any], pd.Series,
     }
     for key in (
         "regime_concentration", "regime", "tested_configurations", "n_trials",
-        "future_training", "strictly_chronological",
+        "future_training", "strictly_chronological", "chronology_evidence",
+        "cpcv_chronology_evidence",
     ):
         if key in metrics:
             output[key] = to_jsonable(metrics[key])
@@ -769,7 +865,7 @@ def check_data_model_provenance(
     errors: list[str] = []
     warnings: list[str] = []
     try:
-        evaluation = _canonical_timestamp(evaluation_at) if evaluation_at is not None else None
+        evaluation = _canonical_timestamp(evaluation_at) if _has_metadata_value(evaluation_at) else None
     except (TypeError, ValueError):
         evaluation = None
         errors.append("evaluation timestamp is invalid")
@@ -790,10 +886,13 @@ def check_data_model_provenance(
     data_source = data.get("source", data.get("data_source"))
     data_version = data.get("version", data.get("data_version"))
     data_as_of = data.get("as_of", data.get("timestamp", data.get("data_as_of")))
-    data_status = str(data.get("freshness", data.get("status", ""))).strip().lower()
-    if not data_source or not data_version:
+    data_status_value = data.get("freshness", data.get("status", ""))
+    data_status = str(data_status_value).strip().lower() if _has_metadata_value(data_status_value) else ""
+    if not _has_metadata_value(data_source) or not _has_metadata_value(data_version):
         warnings.append("data provenance is incomplete")
-    if data_as_of is None:
+    if not data_status:
+        warnings.append("data provenance freshness metadata is missing")
+    if not _has_metadata_value(data_as_of):
         warnings.append("data provenance timestamp is missing")
     else:
         try:
@@ -812,10 +911,13 @@ def check_data_model_provenance(
     model_id = model.get("model_id")
     model_version = model.get("model_version", model.get("version"))
     model_as_of = model.get("as_of", model.get("trained_until", model.get("model_as_of")))
-    model_status = str(model.get("freshness", model.get("status", ""))).strip().lower()
-    if not model_id or not model_version:
+    model_status_value = model.get("freshness", model.get("status", ""))
+    model_status = str(model_status_value).strip().lower() if _has_metadata_value(model_status_value) else ""
+    if not _has_metadata_value(model_id) or not _has_metadata_value(model_version):
         warnings.append("model provenance is incomplete")
-    if model_as_of is None:
+    if not model_status:
+        warnings.append("model provenance freshness metadata is missing")
+    if not _has_metadata_value(model_as_of):
         warnings.append("model provenance timestamp is missing")
     else:
         try:
@@ -834,8 +936,10 @@ def check_data_model_provenance(
     warnings = list(dict.fromkeys(warnings))
     errors = list(dict.fromkeys(errors))
     complete = bool(
-        data_source and data_version and data_as_of is not None
-        and model_id and model_version and model_as_of is not None and evaluation is not None
+        _has_metadata_value(data_source) and _has_metadata_value(data_version) and _has_metadata_value(data_as_of)
+        and data_status and _has_metadata_value(model_id) and _has_metadata_value(model_version)
+        and _has_metadata_value(model_as_of)
+        and model_status and evaluation is not None
     )
     ok = bool(complete and age_limits_configured and not errors and not any("stale" in warning for warning in warnings))
     return to_jsonable({
@@ -956,19 +1060,32 @@ def evaluate_validation_folds(
     provenance_results: list[dict[str, Any]] = []
     periods_per_year_values: list[float] = []
     cpcv_future_training = False
+    cpcv_chronology_candidates: list[object] = []
+    cpcv_fold_count = 0
     for number, run in enumerate(folds):
         spec = _run_spec(run)
+        metrics = _run_metrics(run)
         validation = spec.get("validation")
+        validation_mode = ""
         if isinstance(validation, Mapping):
-            modes.append(str(validation.get("mode") or "single_pass"))
-            if str(validation.get("mode") or "").strip().lower() == "cpcv":
+            validation_mode = str(validation.get("mode") or "single_pass").strip().lower()
+            modes.append(validation_mode)
+            if validation_mode == "cpcv":
+                cpcv_fold_count += 1
                 cpcv_future_training = cpcv_future_training or bool(
                     validation.get("future_training", False)
                 )
+                candidate = validation.get("cpcv_chronology_evidence", validation.get("chronology_evidence"))
+                if candidate is None:
+                    candidate = metrics.get("cpcv_chronology_evidence", metrics.get("chronology_evidence"))
+                if isinstance(candidate, Mapping):
+                    cpcv_chronology_candidates.append(candidate)
+                elif isinstance(candidate, Sequence) and not isinstance(candidate, (str, bytes)):
+                    cpcv_chronology_candidates.extend(candidate)
         raw_equity = _run_value(run, "equity", None)
         if isinstance(raw_equity, (pd.DataFrame, pd.Series)) and raw_equity.index.has_duplicates:
             warnings.append(f"fold-{number} has duplicate timestamps")
-        path_id = str(_run_metrics(run).get("path_id") or f"fold-{number}")
+        path_id = str(metrics.get("path_id") or f"fold-{number}")
         fold, net, gross, run_outcomes = _fold_metrics(run, path_id)
         fold_payloads.append(fold)
         net_series.append(net)
@@ -980,17 +1097,24 @@ def evaluate_validation_folds(
             warnings.append(f"fold {path_id} trade PnL unavailable; hit rate and profit factor omitted")
         if isinstance(validation, Mapping):
             cpcv_future_training = cpcv_future_training or bool(validation.get("future_training", False))
-        if bool(_run_metrics(run).get("future_training", False)):
-            cpcv_future_training = cpcv_future_training or str(
-                validation.get("mode") if isinstance(validation, Mapping) else ""
-            ).strip().lower() == "cpcv"
+        if bool(metrics.get("future_training", False)) and validation_mode == "cpcv":
+            cpcv_future_training = True
         cost_drag_total += float(fold.get("cost_drag") or 0.0)
         turnover_total += float(fold.get("turnover") or 0.0)
         if len(net) < MIN_STATISTICAL_OBSERVATIONS:
             warnings.append(f"fold {path_id} has insufficient observations for statistical significance: {len(net)} < {MIN_STATISTICAL_OBSERVATIONS}")
         provenance = _provenance_for_run(run)
         if provenance is None:
-            warnings.append(f"fold {path_id} data/model provenance is unavailable")
+            missing_warning = f"fold {path_id} data/model provenance is unavailable"
+            warnings.append(missing_warning)
+            provenance_results.append({
+                "fold": path_id,
+                "ok": False,
+                "provenance_ok": False,
+                "age_limits_configured": False,
+                "errors": [],
+                "warnings": [missing_warning],
+            })
         else:
             evaluation_at = net.index[-1] if not net.empty else None
             max_data_age, max_model_age = _configured_provenance_limits(run)
@@ -1047,8 +1171,6 @@ def evaluate_validation_folds(
         aggregate_periods_per_year = periods_per_year_values[0]
     else:
         aggregate_periods_per_year = _periods_per_year(net.index)
-    if len(set(modes)) > 1:
-        cpcv_future_training = False
     aggregate: dict[str, Any] = {
         "gross_cagr": gross_cagr,
         "net_cagr": net_cagr,
@@ -1079,6 +1201,11 @@ def evaluate_validation_folds(
         "periods_per_year": aggregate_periods_per_year,
         "cpcv_future_training": cpcv_future_training,
     }
+    if cpcv_fold_count:
+        aggregate["cpcv_chronology_evidence"] = cpcv_chronology_candidates
+        aggregate["cpcv_chronology_ok"] = _has_cpcv_chronology_evidence(
+            cpcv_chronology_candidates, cpcv_fold_count
+        )
     if aggregate["regime_concentration"] is None:
         warnings.append("regime concentration is unavailable")
 
@@ -1200,6 +1327,51 @@ def _has_pbo_evidence(evidence: object) -> bool:
     )
 
 
+def _proof_value(proof: Mapping[str, Any], *keys: str) -> object | None:
+    for key in keys:
+        if proof.get(key) is not None:
+            return proof[key]
+    return None
+
+
+def _is_before_in_time(left: object, right: object) -> bool:
+    if _is_timestamp_like(left) or _is_timestamp_like(right):
+        try:
+            return _canonical_timestamp(left) < _canonical_timestamp(right)
+        except (TypeError, ValueError):
+            return False
+    try:
+        return bool(left < right)  # type: ignore[operator]
+    except (TypeError, ValueError):
+        return False
+
+
+def _has_cpcv_chronology_evidence(evidence: object, expected_folds: int) -> bool:
+    if expected_folds <= 0 or not isinstance(evidence, Sequence) or isinstance(evidence, (str, bytes)):
+        return False
+    if len(evidence) != expected_folds:
+        return False
+    fold_ids: set[str] = set()
+    for candidate in evidence:
+        if not isinstance(candidate, Mapping):
+            return False
+        fold_id = _proof_value(candidate, "fold_id", "path_id")
+        if fold_id is None or str(fold_id) in fold_ids:
+            return False
+        fold_ids.add(str(fold_id))
+        if candidate.get("valid", candidate.get("proof_valid")) is not True:
+            return False
+        if candidate.get("future_training") is not False and candidate.get("no_future_training") is not True:
+            return False
+        if candidate.get("train_before_test", candidate.get("train_max_before_test_min")) is not True:
+            return False
+        train_max = _proof_value(candidate, "train_max", "train_end", "train_max_timestamp")
+        test_min = _proof_value(candidate, "test_min", "test_start", "test_min_timestamp")
+        if train_max is None or test_min is None or not _is_before_in_time(train_max, test_min):
+            return False
+    return True
+
+
 def promotion_gate(report: ValidationReport, config: dict[str, object]) -> PromotionDecision:
     """Apply activation checks without conflating shadow, pilot, and live."""
 
@@ -1223,13 +1395,29 @@ def promotion_gate(report: ValidationReport, config: dict[str, object]) -> Promo
     elif mode not in {"purged_walk_forward", "cpcv"}:
         failed.append("validation_mode")
         gate_warnings.append(f"validation mode is not activation-safe: {mode}")
+    if not preview and aggregate.get("cpcv_future_training"):
+        failed.append("cpcv_future_training")
+        gate_warnings.append("CPCV training includes groups after its test window")
+    if not preview and aggregate.get("cpcv_chronology_ok") is False:
+        failed.append("cpcv_chronology_evidence")
+        gate_warnings.append("CPCV per-fold chronology evidence is incomplete or invalid")
     if not preview and mode == "cpcv":
         if not bool(settings.get("strictly_chronological", False)):
             failed.append("cpcv_not_activation_safe")
             gate_warnings.append("CPCV is diagnostic-only unless strictly_chronological=true")
-        if aggregate.get("cpcv_future_training"):
-            failed.append("cpcv_future_training")
-            gate_warnings.append("CPCV training includes groups after its test window")
+        expected_cpcv_folds = int(aggregate.get("test_periods") or len(report.folds))
+        chronology_evidence = aggregate.get("cpcv_chronology_evidence")
+        if chronology_evidence is None:
+            chronology_evidence = [
+                fold["chronology_evidence"]
+                for fold in report.folds
+                if isinstance(fold, Mapping) and isinstance(fold.get("chronology_evidence"), Mapping)
+            ]
+        if not _has_cpcv_chronology_evidence(
+            chronology_evidence, expected_cpcv_folds
+        ):
+            failed.append("cpcv_chronology_evidence")
+            gate_warnings.append("CPCV requires affirmative chronology proof for every fold")
 
     min_trades = int(_config_number(settings, "min_trades", 100.0))
     min_periods = int(_config_number(settings, "min_test_periods", 4.0))

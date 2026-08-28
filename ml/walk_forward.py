@@ -330,18 +330,9 @@ def purged_walk_forward_splits(
     test_size: int,
     step: int,
     embargo: int = 0,
-    label_horizon: Optional[int] = None,
+    label_horizon: int = 0,
 ) -> Generator[tuple[np.ndarray, np.ndarray], None, None]:
-    """Yield integer purged walk-forward positions for legacy ML callers.
-
-    A horizon is required so callers cannot accidentally disable label purge.
-    The two-array legacy result remains unchanged once explicit metadata exists;
-    chronological training already excludes all observations after its test.
-    """
-
-    if label_horizon is None:
-        warnings.warn("label horizon metadata is required for purged validation", UserWarning, stacklevel=2)
-        return
+    """Yield integer purged walk-forward positions for legacy ML callers."""
 
     values = [n_rows, train_size, test_size, step, embargo, label_horizon]
     if any(isinstance(value, bool) or int(value) != value for value in values):
@@ -364,7 +355,7 @@ def leakage_guard_split(
     train: np.ndarray,
     test: np.ndarray,
     *,
-    label_horizon: Optional[int] = None,
+    label_horizon: int = 0,
     blocked: Optional[np.ndarray] = None,
     raise_on_error: bool = True,
 ) -> list[str]:
@@ -377,11 +368,7 @@ def leakage_guard_split(
         issues.append("train_test_overlap")
     if blocked is not None and train_set.intersection(set(np.asarray(blocked, dtype=int).tolist())):
         issues.append("train_contains_blocked_rows")
-    if label_horizon is None:
-        issues.append("label_horizon_missing")
-        horizon = 0
-    else:
-        horizon = int(label_horizon)
+    horizon = int(label_horizon)
     if horizon < 0:
         issues.append("negative_label_horizon")
     elif train_set and test_set and max(train_set) + horizon >= min(test_set):

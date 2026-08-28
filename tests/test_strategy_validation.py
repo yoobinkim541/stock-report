@@ -9,6 +9,7 @@ import pytest
 from ml.strategy_studio import StrategyRun, build_strategy_report, run_strategy_backtest
 from ml.strategy_studio.validation import (
     ValidationReport,
+    ValidationSplit,
     check_data_model_provenance,
     check_split_leakage,
     evaluate_validation_folds,
@@ -16,7 +17,7 @@ from ml.strategy_studio.validation import (
     make_purged_walk_forward_splits,
     promotion_gate,
 )
-from ml.walk_forward import leakage_guard_split, purged_walk_forward_splits
+from ml.walk_forward import purged_walk_forward_splits
 
 
 def _run(
@@ -82,13 +83,9 @@ def test_purged_walk_forward_requires_explicit_label_horizon_metadata():
 
     assert splits == []
 
-
-def test_integer_walk_forward_helper_requires_horizon_metadata_too():
     with pytest.warns(UserWarning, match="label horizon"):
-        assert list(purged_walk_forward_splits(20, 8, 3, 3, embargo=1)) == []
-
-    issues = leakage_guard_split(np.arange(8), np.arange(9, 12), raise_on_error=False)
-    assert "label_horizon_missing" in issues
+        cpcv_splits = make_cpcv_splits(index, groups=4, test_groups=1, embargo_bars=1)
+    assert cpcv_splits == []
 
 
 def test_purged_walk_forward_blocks_post_test_embargo_and_overlapping_labels():
@@ -174,6 +171,16 @@ def test_cpcv_is_diagnostic_by_default_and_strict_mode_has_no_future_training():
     assert strict
     assert all(not split.future_training for split in strict)
     assert all(len(split.train) == 0 or split.train[-1] < split.test[0] for split in strict)
+    assert all(split.to_dict()["chronology_evidence"]["valid"] for split in strict)
+
+
+def test_cpcv_marks_training_between_test_groups_as_future_training():
+    index = pd.date_range("2020-01-01", periods=16, freq="D")
+
+    splits = make_cpcv_splits(index, groups=4, test_groups=2, embargo_bars=0, label_horizon=0)
+
+    separated = next(split for split in splits if split.path_id == "cpcv-0-2")
+    assert separated.future_training is True
 
 
 def test_cpcv_future_training_cannot_be_activation_safe():
@@ -204,6 +211,79 @@ def test_cpcv_future_training_cannot_be_activation_safe():
     assert "cpcv_future_training" in decision.failed_checks
 
 
+def test_cpcv_activation_requires_affirmative_per_fold_chronology_proof():
+    base = {
+        "validation_mode": "cpcv",
+        "aggregate": {
+            "net_cagr": 0.12, "benchmark_excess_cagr": 0.04, "max_drawdown": -0.1,
+            "trade_count": 200, "test_periods": 4, "n_observations": 120,
+            "turnover": 0.3, "dsr": 0.99, "pbo": 0.1, "regime_concentration": 0.2,
+            "provenance_ok": True,
+            "cpcv_future_training": False,
+            "dsr_evidence": {"tested_configurations": 4, "method": "dsr"},
+            "pbo_evidence": {"tested_configurations": 4, "matrix_shape": [120, 4]},
+        },
+        "folds": [{"net_cagr": 0.1, "trade_count": 50}] * 4,
+    }
+    incomplete = {
+        **base,
+        "aggregate": {
+            **base["aggregate"],
+            "cpcv_chronology_evidence": [
+                {"fold_id": "cpcv-0", "valid": True, "future_training": False,
+                 "train_max": "2024-01-01T00:00:00Z", "test_min": "2024-01-02T00:00:00Z",
+                 "train_before_test": True},
+            ],
+        },
+    }
+    complete = {
+        **base,
+        "aggregate": {
+            **base["aggregate"],
+            "cpcv_chronology_evidence": [
+                {"fold_id": f"cpcv-{number}", "valid": True, "future_training": False,
+                 "train_max": f"2024-01-0{number + 1}T00:00:00Z",
+                 "test_min": f"2024-01-1{number + 1}T00:00:00Z",
+                 "train_before_test": True}
+                for number in range(4)
+            ],
+        },
+    }
+
+    rejected = promotion_gate(
+        ValidationReport.from_dict(incomplete),
+        {"environment": "pilot", "strictly_chronological": True},
+    )
+    accepted = promotion_gate(
+        ValidationReport.from_dict(complete),
+        {"environment": "pilot", "strictly_chronological": True},
+    )
+    diagnostic_only = promotion_gate(
+        ValidationReport.from_dict(complete),
+        {"environment": "pilot"},
+    )
+
+    assert "cpcv_chronology_evidence" in rejected.failed_checks
+    assert "cpcv_chronology_evidence" not in accepted.failed_checks
+    assert accepted.accepted is True
+    assert "cpcv_not_activation_safe" in diagnostic_only.failed_checks
+
+
+def test_mixed_validation_modes_do_not_clear_cpcv_future_training_failure():
+    cpcv = _run([0.001, -0.001] * 20)
+    cpcv.spec["validation"]["mode"] = "cpcv"
+    cpcv.metrics["future_training"] = True
+    walk_forward = _run([0.001, -0.001] * 20, start="2025-01-01")
+    walk_forward.spec["validation"]["mode"] = "purged_walk_forward"
+
+    report = evaluate_validation_folds([cpcv, walk_forward], {})
+    decision = promotion_gate(report, {"mode": "purged_walk_forward", "environment": "pilot"})
+
+    assert report.aggregate["cpcv_future_training"] is True
+    assert "cpcv_future_training" in decision.failed_checks
+    assert "cpcv_chronology_evidence" in decision.failed_checks
+
+
 def test_missing_provenance_and_age_limits_fail_closed_but_remain_diagnostic():
     incomplete = check_data_model_provenance(
         {"data": {"source": "prices"}, "model": {"model_id": "m1"}},
@@ -231,6 +311,57 @@ def test_missing_provenance_and_age_limits_fail_closed_but_remain_diagnostic():
     assert "provenance" in decision.failed_checks
 
 
+def test_mixed_fold_provenance_is_invalid_when_one_fold_is_missing():
+    valid = _run([0.001, -0.001] * 20)
+    valid.spec["validation"].update({"max_data_age_seconds": 86400, "max_model_age_seconds": 86400})
+    valid.signals["provenance"] = {
+        "data": {"source": "prices", "version": "v1", "as_of": "2024-02-09T00:00:00Z", "freshness": "fresh"},
+        "model": {"model_id": "m1", "model_version": "v1", "trained_until": "2024-02-09T00:00:00Z", "freshness": "fresh"},
+    }
+    missing = _run([0.001, -0.001] * 20, start="2025-01-01")
+    missing.spec["validation"].update({"max_data_age_seconds": 86400, "max_model_age_seconds": 86400})
+
+    report = evaluate_validation_folds([valid, missing], {})
+    decision = promotion_gate(report, {"mode": "purged_walk_forward", "environment": "pilot"})
+
+    assert report.aggregate["provenance_ok"] is False
+    assert any("provenance is unavailable" in warning for warning in report.warnings)
+    assert "provenance" in decision.failed_checks
+
+
+def test_split_leakage_requires_declared_horizon_and_rejects_nat_label_end():
+    split = ValidationSplit(train=pd.Index([0, 1]), test=pd.Index([3, 4]))
+    assert "label_horizon_missing" in check_split_leakage(split)
+
+    with_nat = ValidationSplit(train=pd.date_range("2024-01-01", periods=2), test=pd.date_range("2024-01-04", periods=2))
+    issues = check_split_leakage(with_nat, label_end=[pd.NaT, pd.Timestamp("2024-01-02")])
+
+    assert "label_end_invalid" in issues
+
+
+def test_explicit_label_end_extends_post_test_blackout_beyond_numeric_horizon():
+    index = pd.date_range("2020-01-01", periods=20, freq="D")
+    label_end = pd.Series(index + pd.to_timedelta(5, unit="D"), index=index)
+
+    splits = make_purged_walk_forward_splits(
+        index, train_bars=8, test_bars=3, step_bars=3, embargo_bars=1,
+        label_horizon=1, label_end=label_end,
+    )
+
+    assert splits
+    first = splits[0]
+    assert index[15] in first.blocked
+    assert index[16] in first.blocked
+
+
+def test_legacy_integer_walk_forward_default_remains_available():
+    splits = list(purged_walk_forward_splits(20, 8, 3, 3, embargo=1))
+
+    assert splits
+    assert splits[0][0].tolist() == list(range(8))
+    assert splits[0][1].tolist() == list(range(9, 12))
+
+
 def test_complete_provenance_without_evaluation_timestamp_is_not_freshness_safe():
     result = check_data_model_provenance(
         {
@@ -245,12 +376,27 @@ def test_complete_provenance_without_evaluation_timestamp_is_not_freshness_safe(
     assert any("evaluation timestamp" in warning for warning in result["warnings"])
 
 
+def test_nat_provenance_timestamp_is_missing_and_not_freshness_safe():
+    result = check_data_model_provenance(
+        {
+            "data": {"source": "prices", "version": "v1", "as_of": pd.NaT, "freshness": "fresh"},
+            "model": {"model_id": "m1", "model_version": "v1", "trained_until": "2024-01-03T00:00:00Z", "freshness": "fresh"},
+        },
+        evaluation_at="2024-01-03T00:00:00Z",
+        max_data_age_seconds=3600,
+        max_model_age_seconds=3600,
+    )
+
+    assert result["ok"] is False
+    assert any("data provenance timestamp is missing" in warning for warning in result["warnings"])
+
+
 def test_evaluator_enforces_configured_data_and_model_age_limits():
     run = _run([0.001, -0.001] * 20)
     run.spec["validation"].update({"max_data_age_seconds": 86400, "max_model_age_seconds": 86400})
     run.signals["provenance"] = {
-        "data": {"source": "prices", "version": "v1", "as_of": "2024-02-09T00:00:00Z"},
-        "model": {"model_id": "m1", "model_version": "v1", "trained_until": "2024-02-09T00:00:00Z"},
+        "data": {"source": "prices", "version": "v1", "as_of": "2024-02-09T00:00:00Z", "freshness": "fresh"},
+        "model": {"model_id": "m1", "model_version": "v1", "trained_until": "2024-02-09T00:00:00Z", "freshness": "fresh"},
     }
 
     report = evaluate_validation_folds([run], {})
