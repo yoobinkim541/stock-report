@@ -3912,10 +3912,10 @@ def test_structured_patch_route_rejects_patch_without_sandbox_save(monkeypatch, 
         "id": "spec-1", "spec": {"name": "test", "base_symbol": "AAPL"},
     })
     monkeypatch.setattr(strategy_studio, "propose_strategy_patch_with_llm", lambda *args, **kwargs: {
-        "ok": False,
+        "ok": True,
         "error": "patch_rejected",
-        "patch": {"parameters": {"execution": {"command": "rm -rf /"}}},
-        "errors": ["forbidden patch field: parameters.execution.command"],
+        "patch": {"providers": {"features": [{"path": "../../secret"}]}},
+        "patched_spec": {"name": "test", "base_symbol": "AAPL"},
     })
     monkeypatch.setattr(strategy_studio, "save_strategy_version", lambda *args, **kwargs: pytest.fail("rejected patch must not save"))
 
@@ -4037,7 +4037,7 @@ def test_live_activation_blocks_incomplete_provenance_and_does_not_save(monkeypa
     monkeypatch.setattr(strategy_studio, "get_strategy_spec", lambda *args, **kwargs: {
         "id": "spec-1", "version": 1, "spec": {"name": "test", "base_symbol": "AAPL"},
     })
-    monkeypatch.setattr(strategy_studio, "run_strategy_spec", lambda *args, **kwargs: {
+    monkeypatch.setattr(strategy_studio, "_run_strategy_spec_internal", lambda *args, **kwargs: ({
         "ok": True,
         "validation": {
             "validation_mode": "purged_walk_forward",
@@ -4045,8 +4045,8 @@ def test_live_activation_blocks_incomplete_provenance_and_does_not_save(monkeypa
             "aggregate": {"provenance_ok": True},
             "provenance": {"ok": False, "checks": []},
         },
-        "promotion": {"accepted": True, "activation_safe": True, "failed_checks": []},
-    })
+        "promotion": {"accepted": True, "activation_safe": True, "preview": False, "failed_checks": []},
+    }, None))
     monkeypatch.setattr(strategy_studio, "save_strategy_version", lambda *args, **kwargs: pytest.fail("save must not execute"))
 
     response = create_app().test_client().post(
@@ -4066,16 +4066,67 @@ def test_live_activation_saves_a_separate_explicit_version_after_all_gates(monke
     monkeypatch.setattr(strategy_studio, "get_strategy_spec", lambda *args, **kwargs: {
         "id": "spec-1", "version": 1, "spec": {"name": "test", "base_symbol": "AAPL"},
     })
-    monkeypatch.setattr(strategy_studio, "run_strategy_spec", lambda *args, **kwargs: {
-        "ok": True,
-        "validation": {
+    def validated_run(spec, **kwargs):
+        strategy = strategy_studio.StrategySpec.from_dict(spec)
+        check = {
+            "fold": "fold-0",
+            "ok": True,
+            "provenance_ok": True,
+            "age_limits_configured": True,
+            "evaluation_at": "2026-01-10T00:00:00Z",
+            "data": {
+                "source": "test-feed",
+                "version": "2026-01-09",
+                "as_of": "2026-01-09T00:00:00Z",
+                "status": "complete",
+            },
+            "model": {
+                "model_id": "model-1",
+                "feature_version": "features-1",
+                "model_version": "model-1",
+                "code_commit": "commit-1",
+                "feature_names": ["close"],
+                "metrics": {"score": 1.0},
+                "train_start": "2026-01-01T00:00:00Z",
+                "train_end": "2026-01-08T00:00:00Z",
+                "as_of": "2026-01-09T00:00:00Z",
+                "status": "complete",
+                "provenance_status": "complete",
+                "seed": 1,
+            },
+        }
+        validation = {
             "validation_mode": "purged_walk_forward",
             "promotion_eligible": True,
-            "aggregate": {"provenance_ok": True},
-            "provenance": {"ok": True, "checks": [{"ok": True, "provenance_ok": True}]},
-        },
-        "promotion": {"accepted": True, "activation_safe": True, "failed_checks": []},
-    })
+            "aggregate": {"provenance_ok": True, "fold_count": 1},
+            "provenance": {"ok": True, "checks": [check]},
+            "folds": [{"path_id": "fold-0"}],
+        }
+        result = {
+            "ok": True,
+            "spec": strategy.to_dict(),
+            "validation_mode": "purged_walk_forward",
+            "validation": validation,
+            "provenance": {"ok": True, "checks": [check]},
+            "data_quality": {"status": "complete", "ok": True},
+            "promotion": {
+                "accepted": True,
+                "activation_safe": True,
+                "preview": False,
+                "environment": "live",
+                "failed_checks": [],
+            },
+        }
+        token = strategy_studio._ValidatedActivationToken(
+            spec_id=str(kwargs["spec_id"]),
+            spec_hash=strategy_studio.strategy_spec_hash(strategy),
+            run_id="run-1",
+            environment="live",
+            validation_mode="purged_walk_forward",
+        )
+        return result, token
+
+    monkeypatch.setattr(strategy_studio, "_run_strategy_spec_internal", validated_run)
     saved = {}
 
     def save_version(*args, **kwargs):
@@ -4119,13 +4170,14 @@ def test_activation_rejects_contradictory_cpcv_aliases_even_when_gate_claims_acc
     monkeypatch.setattr(strategy_studio, "get_strategy_spec", lambda *args, **kwargs: {
         "id": "spec-1", "version": 1, "spec": {"name": "test", "base_symbol": "AAPL"},
     })
-    monkeypatch.setattr(strategy_studio, "run_strategy_spec", lambda *args, **kwargs: {
+    monkeypatch.setattr(strategy_studio, "_run_strategy_spec_internal", lambda *args, **kwargs: ({
         "ok": True,
         "validation": {
             "validation_mode": "cpcv",
             "promotion_eligible": True,
             "aggregate": {
                 "provenance_ok": True,
+                "fold_count": 1,
                 "cpcv_chronology_ok": True,
                 "cpcv_chronology_evidence": [{
                     "fold_id": "cpcv-0",
@@ -4137,7 +4189,7 @@ def test_activation_rejects_contradictory_cpcv_aliases_even_when_gate_claims_acc
                     "train_before_test": True,
                 }],
             },
-            "provenance": {"ok": True, "checks": [{"ok": True, "provenance_ok": True}]},
+            "provenance": {"ok": True, "checks": [{"fold": "cpcv-0", "ok": True, "provenance_ok": True}]},
             "folds": [{
                 "path_id": "cpcv-0",
                 "train_max": "2026-01-01T00:00:00Z",
@@ -4145,8 +4197,10 @@ def test_activation_rejects_contradictory_cpcv_aliases_even_when_gate_claims_acc
                 "chronology_evidence": {"train_max": "2026-01-03T00:00:00Z"},
             }],
         },
-        "promotion": {"accepted": True, "activation_safe": True, "failed_checks": []},
-    })
+        "provenance": {"ok": True, "checks": [{"fold": "cpcv-0", "ok": True, "provenance_ok": True}]},
+        "data_quality": {"status": "complete", "ok": True},
+        "promotion": {"accepted": True, "activation_safe": True, "preview": False, "failed_checks": []},
+    }, None))
     monkeypatch.setattr(strategy_studio, "save_strategy_version", lambda *args, **kwargs: pytest.fail("save must not execute"))
 
     response = create_app().test_client().post(
@@ -4156,3 +4210,168 @@ def test_activation_rejects_contradictory_cpcv_aliases_even_when_gate_claims_acc
 
     assert response.status_code == 409
     assert "cpcv_chronology_evidence" in response.get_json()["activation"]["failed_checks"]
+
+
+def test_full_validation_routes_use_real_folds_and_keep_preview_single_pass_only(monkeypatch, tmp_path):
+    _isolate(monkeypatch, tmp_path)
+    from agent_console import strategy_studio
+    from agent_console.server import create_app
+
+    prices = pd.DataFrame(
+        {"AAPL__close": range(100, 112)},
+        index=pd.date_range("2026-01-01", periods=12, freq="D", tz="UTC"),
+    )
+    monkeypatch.setattr(strategy_studio, "_load_prices", lambda *args, **kwargs: prices)
+    monkeypatch.setattr(
+        strategy_studio,
+        "preview_strategy_spec",
+        lambda *args, **kwargs: pytest.fail("full validation must not call preview_strategy_spec"),
+    )
+    monkeypatch.setattr(strategy_studio, "get_strategy_spec", lambda *args, **kwargs: {
+        "id": "spec-1",
+        "spec": {
+            "name": "full",
+            "base_symbol": "AAPL",
+            "universe": {"type": "list", "symbols": ["AAPL"]},
+            "rules": {"entry": [], "exit": []},
+            "sizing": {"type": "fixed_pct", "position_pct": 1.0},
+            "validation": {
+                "mode": "purged_walk_forward",
+                "label_horizon": 0,
+                "train_bars": 4,
+                "test_bars": 2,
+                "step_bars": 2,
+                "embargo_bars": 0,
+                "min_test_periods": 1,
+            },
+        },
+    })
+    client = create_app().test_client()
+
+    for endpoint in ("run", "validate"):
+        response = client.post(
+            f"/api/strategy-studio/specs/spec-1/{endpoint}",
+            json={"mode": "purged_walk_forward", "period": "1y"},
+        )
+        body = response.get_json()
+        assert response.status_code == 200
+        assert body["validation_mode"] == "purged_walk_forward"
+        assert len(body["validation"]["folds"]) == body["validation"]["aggregate"]["fold_count"]
+        assert body["validation"]["provenance"]["checks"]
+        json.dumps(body)
+
+
+def test_provider_patch_schema_rejects_malformed_unknown_and_path_values():
+    from agent_console.strategy_studio import validate_strategy_patch
+
+    base = {"name": "test", "base_symbol": "AAPL"}
+    malformed = [
+        {"providers": {"features": {"plugin": "momentum"}}},
+        {"providers": {"features": [{"plugin": "momentum", "unknown": True}]}},
+        {"providers": {"signal": {"type": "ensemble", "members": "not-a-list"}}},
+        {"providers": {"indicators": [{"name": "ema", "period": "14"}]}},
+        {"providers": {"features": [{"plugin": "momentum", "path": "../../secret"}]}},
+        {"providers": {"features": [{"plugin": "momentum", "python_path": "safe"}]}},
+        {"providers": {"features": [{"plugin": "momentum", "source": "exec('/tmp/x')"}]}},
+    ]
+
+    for patch in malformed:
+        errors = validate_strategy_patch(patch, base)
+        assert errors, patch
+
+    assert validate_strategy_patch(
+        {
+            "providers": {
+                "features": [{"plugin": "momentum", "lookback": 20, "enabled": True}],
+                "signal": {"type": "rule", "members": [{"type": "rule"}]},
+            },
+        },
+        base,
+    ) == []
+
+
+def test_live_save_cannot_be_authorized_by_source_alone(monkeypatch, tmp_path):
+    _isolate(monkeypatch, tmp_path)
+    from agent_console import strategy_studio
+
+    with pytest.raises(ValueError, match="validated activation token"):
+        strategy_studio.save_strategy_version(
+            "spec-1",
+            {"name": "live", "base_symbol": "AAPL", "promotion": {"environment": "live"}},
+            source="live_activation",
+        )
+
+
+def test_activation_requires_fold_data_quality_and_top_level_provenance(monkeypatch, tmp_path):
+    _isolate(monkeypatch, tmp_path)
+    from agent_console import strategy_studio
+    from agent_console.server import create_app
+
+    monkeypatch.setattr(strategy_studio, "get_strategy_spec", lambda *args, **kwargs: {
+        "id": "spec-1", "spec": {"name": "test", "base_symbol": "AAPL"},
+    })
+    monkeypatch.setattr(strategy_studio, "_run_strategy_spec_internal", lambda *args, **kwargs: ({
+        "ok": True,
+        "validation_mode": "purged_walk_forward",
+        "validation": {
+            "validation_mode": "purged_walk_forward",
+            "promotion_eligible": True,
+            "aggregate": {"provenance_ok": True},
+            "provenance": {"ok": False, "checks": []},
+            "folds": [],
+        },
+        "provenance": {"ok": False, "checks": []},
+        "data_quality": {"status": "complete", "ok": True},
+        "promotion": {"accepted": True, "activation_safe": True, "preview": False, "failed_checks": []},
+    }, None))
+    monkeypatch.setattr(strategy_studio, "save_strategy_version", lambda *args, **kwargs: pytest.fail("save must not execute"))
+
+    response = create_app().test_client().post(
+        "/api/strategy-studio/specs/spec-1/activate",
+        json={"environment": "live", "confirm_live": True},
+    )
+
+    assert response.status_code == 409
+    failed = response.get_json()["activation"]["failed_checks"]
+    assert "folds" in failed
+    assert "provenance" in failed
+
+
+def test_strategy_routes_reject_invalid_versions_and_non_object_json(monkeypatch, tmp_path):
+    _isolate(monkeypatch, tmp_path)
+    from agent_console import strategy_studio
+    from agent_console.server import create_app
+
+    monkeypatch.setattr(strategy_studio, "get_strategy_spec", lambda *args, **kwargs: pytest.fail("invalid version must stop before lookup"))
+    client = create_app().test_client()
+
+    for response in (
+        client.get("/api/strategy-studio/specs/spec-1?version=0"),
+        client.get("/api/strategy-studio/specs/spec-1?version=not-a-number"),
+        client.post("/api/strategy-studio/specs/spec-1/run", json=[]),
+        client.post("/api/strategy-studio/specs/spec-1/validate", data="null", content_type="application/json"),
+        client.post("/api/agent/chat", json=[]),
+    ):
+        assert response.status_code == 400
+        assert response.is_json
+        assert response.get_json()["ok"] is False
+
+
+def test_legacy_chat_and_default_preview_routes_remain_compatible(monkeypatch, tmp_path):
+    _isolate(monkeypatch, tmp_path)
+    from agent_console import agent, strategy_studio
+    from agent_console.server import create_app
+
+    monkeypatch.setattr(strategy_studio, "get_strategy_spec", lambda *args, **kwargs: {
+        "id": "spec-1", "spec": {"name": "test", "base_symbol": "AAPL"},
+    })
+    monkeypatch.setattr(strategy_studio, "preview_strategy_spec", lambda *args, **kwargs: {"ok": True, "report": {}})
+    monkeypatch.setattr(agent, "answer", lambda message, surface: {"ok": True, "answer": "legacy", "surface": surface})
+    client = create_app().test_client()
+
+    preview = client.post("/api/strategy-studio/specs/spec-1/preview", json={})
+    chat = client.post("/api/agent/chat", json={"message": "안녕"})
+    assert preview.status_code == 200
+    assert preview.get_json()["ok"] is True
+    assert chat.status_code == 200
+    assert chat.get_json()["answer"] == "legacy"

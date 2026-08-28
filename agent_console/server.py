@@ -13,6 +13,40 @@ from . import agent, chart_alert_dispatcher, chart_alert_runner, chart_alert_wor
 STATIC_DIR = Path(__file__).resolve().parent / "static"
 
 
+def _json_object_payload(error: str, *, allow_empty: bool = False) -> tuple[dict[str, object] | None, str | None]:
+    payload = request.get_json(silent=True)
+    if payload is None:
+        if allow_empty and not request.data:
+            return {}, None
+        return None, error
+    if not isinstance(payload, dict):
+        return None, error
+    return payload, None
+
+
+def _parse_optional_version(value: object) -> int | None:
+    if value is None:
+        return None
+    if isinstance(value, bool):
+        raise ValueError("version must be a positive integer")
+    if isinstance(value, int):
+        version = value
+    elif isinstance(value, str):
+        text = value.strip()
+        if not text or not text.isdigit():
+            raise ValueError("version must be a positive integer")
+        version = int(text)
+    else:
+        raise ValueError("version must be a positive integer")
+    if version <= 0:
+        raise ValueError("version must be a positive integer")
+    return version
+
+
+def _payload_version(payload: dict[str, object]) -> int | None:
+    return _parse_optional_version(payload["version"]) if "version" in payload else None
+
+
 def create_app() -> Flask:
     app = Flask(__name__, static_folder=str(STATIC_DIR), static_url_path="")
     storage.ensure_schema()
@@ -147,7 +181,10 @@ def create_app() -> Flask:
 
     @app.post("/api/agent/chat")
     def agent_chat():
-        payload = request.get_json(force=True)
+        payload, error = _json_object_payload("chat payload object required")
+        if error:
+            return jsonify({"ok": False, "error": error}), 400
+        assert payload is not None
         return jsonify(agent.answer(payload.get("message", ""), payload.get("surface", "market")))
 
     @app.get("/api/agent/context-prompt")
@@ -171,9 +208,10 @@ def create_app() -> Flask:
 
     @app.post("/api/strategy-studio/specs")
     def strategy_spec_save():
-        payload = request.get_json(force=True)
-        if not isinstance(payload, dict):
-            return jsonify({"ok": False, "error": "spec object required"}), 400
+        payload, error = _json_object_payload("spec object required")
+        if error:
+            return jsonify({"ok": False, "error": error}), 400
+        assert payload is not None
         try:
             saved = strategy_studio.save_strategy_spec(payload)
         except (TypeError, ValueError) as exc:
@@ -182,8 +220,11 @@ def create_app() -> Flask:
 
     @app.get("/api/strategy-studio/specs/<spec_id>")
     def strategy_spec_get(spec_id: str):
-        version = request.args.get("version")
-        spec = strategy_studio.get_strategy_spec(spec_id, version=int(version) if version else None)
+        try:
+            version = _parse_optional_version(request.args.get("version"))
+            spec = strategy_studio.get_strategy_spec(spec_id, version=version)
+        except (TypeError, ValueError) as exc:
+            return jsonify({"ok": False, "error": str(exc)}), 400
         if not spec:
             return jsonify({"ok": False, "error": "strategy spec not found"}), 404
         return jsonify({"ok": True, "spec": spec})
@@ -195,8 +236,14 @@ def create_app() -> Flask:
 
     @app.post("/api/strategy-studio/specs/<spec_id>/preview")
     def strategy_spec_preview(spec_id: str):
-        payload = request.get_json(silent=True) or {}
-        spec = strategy_studio.get_strategy_spec(spec_id, version=int(payload.get("version")) if payload.get("version") else None)
+        payload, error = _json_object_payload("preview options object required", allow_empty=True)
+        if error:
+            return jsonify({"ok": False, "error": error}), 400
+        assert payload is not None
+        try:
+            spec = strategy_studio.get_strategy_spec(spec_id, version=_payload_version(payload))
+        except (TypeError, ValueError) as exc:
+            return jsonify({"ok": False, "error": str(exc)}), 400
         if not spec:
             return jsonify({"ok": False, "error": "strategy spec not found"}), 404
         benchmark = payload.get("benchmark") or payload.get("benchmark_symbol")
@@ -205,16 +252,14 @@ def create_app() -> Flask:
 
     @app.post("/api/strategy-studio/specs/<spec_id>/run")
     def strategy_spec_run(spec_id: str):
-        payload = request.get_json(silent=True) or {}
-        if not isinstance(payload, dict):
-            return jsonify({"ok": False, "error": "run options object required"}), 400
-        spec = strategy_studio.get_strategy_spec(
-            spec_id,
-            version=int(payload.get("version")) if payload.get("version") else None,
-        )
-        if not spec:
-            return jsonify({"ok": False, "error": "strategy spec not found"}), 404
         try:
+            payload, error = _json_object_payload("run options object required")
+            if error:
+                return jsonify({"ok": False, "error": error}), 400
+            assert payload is not None
+            spec = strategy_studio.get_strategy_spec(spec_id, version=_payload_version(payload))
+            if not spec:
+                return jsonify({"ok": False, "error": "strategy spec not found"}), 404
             result = strategy_studio.run_strategy_spec(
                 spec.get("spec") or spec,
                 period=payload.get("period"),
@@ -226,16 +271,14 @@ def create_app() -> Flask:
 
     @app.post("/api/strategy-studio/specs/<spec_id>/validate")
     def strategy_spec_validate(spec_id: str):
-        payload = request.get_json(silent=True) or {}
-        if not isinstance(payload, dict):
-            return jsonify({"ok": False, "error": "validation options object required"}), 400
-        spec = strategy_studio.get_strategy_spec(
-            spec_id,
-            version=int(payload.get("version")) if payload.get("version") else None,
-        )
-        if not spec:
-            return jsonify({"ok": False, "error": "strategy spec not found"}), 404
         try:
+            payload, error = _json_object_payload("validation options object required")
+            if error:
+                return jsonify({"ok": False, "error": error}), 400
+            assert payload is not None
+            spec = strategy_studio.get_strategy_spec(spec_id, version=_payload_version(payload))
+            if not spec:
+                return jsonify({"ok": False, "error": "strategy spec not found"}), 404
             result = strategy_studio.run_strategy_spec(
                 spec.get("spec") or spec,
                 period=payload.get("period"),
@@ -249,25 +292,33 @@ def create_app() -> Flask:
             promotion = dict(sandbox_spec.get("promotion") or {})
             promotion["environment"] = "sandbox"
             sandbox_spec["promotion"] = promotion
-            result["sandbox"] = {
-                "saved": True,
-                "version": strategy_studio.save_strategy_version(
-                    spec_id,
-                    sandbox_spec,
-                    patch={"validation": {"mode": result.get("validation_mode")}},
-                    source="validation_sandbox",
-                ),
-            }
+            try:
+                strategy_studio.StrategySpec.from_dict(sandbox_spec)
+                result["sandbox"] = {
+                    "saved": True,
+                    "version": strategy_studio.save_strategy_version(
+                        spec_id,
+                        sandbox_spec,
+                        patch={"parameters": {"validation": {"mode": result.get("validation_mode")}}},
+                        source="validation_sandbox",
+                    ),
+                }
+            except (TypeError, ValueError) as exc:
+                return jsonify({"ok": False, "error": str(exc), "result": result}), 400
         else:
             result["sandbox"] = {"saved": False}
         return jsonify(result)
 
     @app.post("/api/strategy-studio/specs/<spec_id>/patch")
     def strategy_spec_patch(spec_id: str):
-        payload = request.get_json(silent=True) or {}
-        if not isinstance(payload, dict):
-            return jsonify({"ok": False, "error": "patch options object required"}), 400
-        spec = strategy_studio.get_strategy_spec(spec_id)
+        payload, error = _json_object_payload("patch options object required")
+        if error:
+            return jsonify({"ok": False, "error": error}), 400
+        assert payload is not None
+        try:
+            spec = strategy_studio.get_strategy_spec(spec_id, version=_payload_version(payload))
+        except (TypeError, ValueError) as exc:
+            return jsonify({"ok": False, "error": str(exc)}), 400
         if not spec:
             return jsonify({"ok": False, "error": "strategy spec not found"}), 404
         context_payload = payload.get("context") if isinstance(payload.get("context"), dict) else {}
@@ -282,20 +333,53 @@ def create_app() -> Flask:
             spec.get("spec") or spec,
             context_payload,
         )
+        if result.get("ok") is True:
+            current_payload = spec.get("spec") or spec
+            patch = result.get("patch")
+            patch_errors = strategy_studio.validate_strategy_patch(
+                patch if isinstance(patch, dict) else {},
+                current_payload,
+            )
+            try:
+                supplied_spec = strategy_studio.StrategySpec.from_dict(result.get("patched_spec") or {}).to_dict()
+                if not patch_errors and isinstance(patch, dict):
+                    controlled_patch, shape_errors = strategy_studio._controlled_spec_patch(patch)
+                    patch_errors.extend(shape_errors)
+                    expected_spec = strategy_studio.apply_strategy_patch(current_payload, controlled_patch)
+                    if supplied_spec != expected_spec:
+                        patch_errors.append("patched strategy spec does not match the allowlisted patch")
+            except (TypeError, ValueError) as exc:
+                patch_errors.append(f"patched strategy spec is invalid: {exc}")
+            if patch_errors:
+                result = {
+                    **result,
+                    "ok": False,
+                    "error": "patch_rejected",
+                    "errors": list(dict.fromkeys(patch_errors)),
+                    "diagnostics": [
+                        {"type": "patch_rejected", "message": item}
+                        for item in dict.fromkeys(patch_errors)
+                    ],
+                    "sandbox": {"saved": False},
+                }
         if payload.get("save_sandbox") is True and result.get("ok") is True:
             sandbox_spec = dict(result.get("patched_spec") or {})
             promotion = dict(sandbox_spec.get("promotion") or {})
             promotion["environment"] = "sandbox"
             sandbox_spec["promotion"] = promotion
-            result["sandbox"] = {
-                "saved": True,
-                "version": strategy_studio.save_strategy_version(
-                    spec_id,
-                    sandbox_spec,
-                    patch=result.get("patch") if isinstance(result.get("patch"), dict) else {},
-                    source="ai_sandbox",
-                ),
-            }
+            try:
+                strategy_studio.StrategySpec.from_dict(sandbox_spec)
+                result["sandbox"] = {
+                    "saved": True,
+                    "version": strategy_studio.save_strategy_version(
+                        spec_id,
+                        sandbox_spec,
+                        patch=result.get("patch") if isinstance(result.get("patch"), dict) else {},
+                        source="ai_sandbox",
+                    ),
+                }
+            except (TypeError, ValueError) as exc:
+                return jsonify({"ok": False, "error": str(exc), "result": result}), 400
         else:
             result["sandbox"] = {"saved": False}
         status = 400 if not result.get("ok") and result.get("error") in {"patch_rejected", "invalid_llm_patch"} else 200
@@ -303,8 +387,14 @@ def create_app() -> Flask:
 
     @app.post("/api/strategy-studio/specs/<spec_id>/patch-preview")
     def strategy_spec_patch_preview(spec_id: str):
-        payload = request.get_json(silent=True) or {}
-        spec = strategy_studio.get_strategy_spec(spec_id)
+        payload, error = _json_object_payload("patch preview options object required", allow_empty=True)
+        if error:
+            return jsonify({"ok": False, "error": error}), 400
+        assert payload is not None
+        try:
+            spec = strategy_studio.get_strategy_spec(spec_id, version=_payload_version(payload))
+        except (TypeError, ValueError) as exc:
+            return jsonify({"ok": False, "error": str(exc)}), 400
         if not spec:
             return jsonify({"ok": False, "error": "strategy spec not found"}), 404
         question = str(payload.get("question") or "").strip()
@@ -325,17 +415,18 @@ def create_app() -> Flask:
 
     @app.post("/api/strategy-studio/specs/<spec_id>/activate")
     def strategy_spec_activate(spec_id: str):
-        payload = request.get_json(silent=True) or {}
-        if not isinstance(payload, dict):
-            return jsonify({"ok": False, "error": "activation options object required"}), 400
         try:
+            payload, error = _json_object_payload("activation options object required")
+            if error:
+                return jsonify({"ok": False, "error": error}), 400
+            assert payload is not None
             result = strategy_studio.activate_strategy_spec(
                 spec_id,
                 environment=payload.get("environment"),
                 confirm_live=payload.get("confirm_live", False),
                 period=payload.get("period"),
                 validation_mode=payload.get("validation_mode") or payload.get("mode"),
-                version=int(payload.get("version")) if payload.get("version") else None,
+                version=_payload_version(payload),
             )
         except (TypeError, ValueError) as exc:
             return jsonify({"ok": False, "error": str(exc)}), 400

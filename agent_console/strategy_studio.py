@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 from collections.abc import Mapping
+from dataclasses import dataclass
 import json
+from math import isfinite
 import re
 from typing import Any
 
@@ -15,9 +17,14 @@ from ml.strategy_studio import (
     builtin_strategy_presets,
     build_strategy_report,
     diff_strategy_specs,
+    evaluate_validation_folds,
     run_strategy_backtest,
+    make_cpcv_splits,
+    make_purged_walk_forward_splits,
+    promotion_gate,
     strategy_spec_hash,
 )
+from ml.strategy_studio.validation import _activation_provenance_check_ok as _strict_activation_provenance_check_ok
 
 from . import agent, storage
 
@@ -77,12 +84,31 @@ _CONTROLLED_PARAMETER_TARGETS = {
 }
 _CONTROLLED_PROVIDER_TARGETS = frozenset({"features", "indicators", "signal"})
 _FORBIDDEN_PATCH_KEYS = frozenset({
-    "code", "command", "cmd", "eval", "exec", "expression", "script", "shell", "source_code",
+    "code", "command", "cmd", "eval", "exec", "expression", "file", "filepath", "file_path",
+    "filename", "import", "module", "path", "python_path", "script", "shell", "source_code",
+    "workdir", "cwd",
 })
 _FORBIDDEN_PATCH_TOKENS = re.compile(
-    r"(?:\bpython\b|\bshell\b|\beval\b|\bexec\b|__import__|subprocess|os\.system)",
+    r"(?:\bpython(?:\d+(?:\.\d+)?)?\b|\bshell\b|\bbash\b|\b(?:sh|zsh|pwsh|powershell)\b|\beval\b|\bexec\b|__import__|subprocess|os\.system)",
     flags=re.IGNORECASE,
 )
+_TRAVERSAL_VALUE = re.compile(r"(?:^|[/\\])\.\.(?:[/\\]|$)|^(?:[/\\]{2}|/|[A-Za-z]:[/\\])|^~[/\\]")
+_PROVIDER_FIELDS = {
+    "features": frozenset({"plugin", "type", "name", "kind", "lookback", "lookbacks", "window", "period", "source", "output", "enabled", "version"}),
+    "indicators": frozenset({"plugin", "type", "name", "kind", "lookback", "lookbacks", "window", "period", "source", "output", "method", "std_mult", "signal", "enabled", "version"}),
+    "signal": frozenset({"type", "plugin", "ref", "provider", "model", "aggregation", "min_confidence", "members", "weights", "lookback", "window", "enabled", "version"}),
+}
+
+
+@dataclass(frozen=True, slots=True)
+class _ValidatedActivationToken:
+    """Opaque capability issued only by a successful full validation run."""
+
+    spec_id: str
+    spec_hash: str
+    run_id: str
+    environment: str
+    validation_mode: str
 
 
 def run_strategy_spec(
@@ -92,6 +118,20 @@ def run_strategy_spec(
     validation_mode: str | None = None,
 ) -> dict[str, object]:
     """Run a stored or inline strategy and return one strict JSON response shape."""
+
+    result, _ = _run_strategy_spec_internal(spec, period=period, validation_mode=validation_mode)
+    return result
+
+
+def _run_strategy_spec_internal(
+    spec: dict[str, object],
+    *,
+    period: str | None = None,
+    validation_mode: str | None = None,
+    spec_id: str | None = None,
+    activation_environment: str | None = None,
+) -> tuple[dict[str, object], _ValidatedActivationToken | None]:
+    """Run a strategy and optionally retain an internal activation capability."""
 
     payload = _spec_payload(spec)
     strategy = StrategySpec.from_dict(payload)
@@ -103,11 +143,23 @@ def run_strategy_spec(
         strategy = StrategySpec.from_dict(payload)
 
     requested_period = str(period or _period_for_timeframe(strategy.timeframe)).strip()
-    raw = preview_strategy_spec(
-        strategy,
-        benchmark=strategy.base_symbol or None,
-        period=requested_period,
-    )
+    if mode == "single_pass":
+        raw = preview_strategy_spec(
+            strategy,
+            benchmark=strategy.base_symbol or None,
+            period=requested_period,
+        )
+    else:
+        raw = _run_full_validation(
+            strategy,
+            period=requested_period,
+            validation_mode=mode,
+            spec_id=spec_id,
+            activation_environment=activation_environment,
+        )
+    activation_token = raw.pop("_activation_token", None)
+    if not isinstance(activation_token, _ValidatedActivationToken):
+        activation_token = None
     report = _json_safe(raw.get("report") or {})
     validation = _mapping_copy(raw.get("validation")) or _mapping_copy(report.get("validation")) or {}
     promotion = _mapping_copy(raw.get("promotion")) or _mapping_copy(report.get("promotion")) or {}
@@ -150,6 +202,7 @@ def run_strategy_spec(
         "metrics": _json_safe(raw.get("metrics") or report.get("metrics") or {}),
         "benchmark": _json_safe(raw.get("benchmark") or report.get("benchmark") or {}),
         "validation": _json_safe(validation),
+        "folds": _json_safe(raw.get("folds") or validation.get("folds") or []),
         "promotion": _json_safe(promotion),
         "provenance": _json_safe(provenance),
         "data_quality": _json_safe(data_quality),
@@ -158,7 +211,340 @@ def run_strategy_spec(
         "errors": errors,
         "trade_count": int(raw.get("trade_count") or (raw.get("metrics") or {}).get("trade_count") or 0),
     }
+    return _json_safe(result), activation_token
+
+
+def _run_full_validation(
+    strategy: StrategySpec,
+    *,
+    period: str,
+    validation_mode: str,
+    spec_id: str | None,
+    activation_environment: str | None,
+) -> dict[str, Any]:
+    """Run every requested out-of-sample fold through the shared engine."""
+
+    prices = _load_prices(strategy, period=period)
+    data_quality = _data_quality_from_price_panel(prices)
+    provenance = _strategy_provenance(strategy, prices)
+    splits, split_warnings = _build_validation_splits(
+        prices.index if isinstance(prices, pd.DataFrame) else pd.Index([]),
+        dict(strategy.validation or {}),
+        validation_mode,
+    )
+    fold_runs: list[Any] = []
+    errors: list[str] = []
+    for split in splits:
+        try:
+            fold_prices = prices.loc[list(split.test)]
+        except (KeyError, TypeError) as exc:
+            errors.append(f"validation fold {split.path_id} cannot select test data: {exc}")
+            continue
+        if fold_prices.empty:
+            errors.append(f"validation fold {split.path_id} has no test data")
+            continue
+        fold_spec = strategy.to_dict()
+        fold_validation = dict(fold_spec.get("validation") or {})
+        fold_validation.update({
+            "mode": validation_mode,
+            "path_id": split.path_id,
+            "train_start": _timestamp_or_none(split.train[0]) if len(split.train) else None,
+            "train_max": _timestamp_or_none(split.train[-1]) if len(split.train) else None,
+            "test_min": _timestamp_or_none(split.test[0]) if len(split.test) else None,
+            "test_max": _timestamp_or_none(split.test[-1]) if len(split.test) else None,
+            "future_training": bool(split.future_training),
+            "strictly_chronological": bool(split.strictly_chronological),
+        })
+        if validation_mode == "cpcv":
+            chronology = split.to_dict()["chronology_evidence"]
+            fold_validation["chronology_evidence"] = chronology
+            fold_validation["cpcv_chronology_evidence"] = chronology
+        fold_spec["validation"] = fold_validation
+        try:
+            fold_run = run_strategy_backtest(
+                fold_spec,
+                fold_prices,
+                benchmark=strategy.base_symbol or None,
+            )
+        except (TypeError, ValueError) as exc:
+            errors.append(f"validation fold {split.path_id} failed: {exc}")
+            continue
+        fold_run.spec = fold_spec
+        fold_run.metrics = dict(fold_run.metrics or {})
+        fold_run.metrics.update({
+            "path_id": split.path_id,
+            "future_training": bool(split.future_training),
+            "strictly_chronological": bool(split.strictly_chronological),
+        })
+        if validation_mode == "cpcv":
+            fold_run.metrics["chronology_evidence"] = fold_spec["validation"]["chronology_evidence"]
+            fold_run.metrics["cpcv_chronology_evidence"] = fold_spec["validation"]["cpcv_chronology_evidence"]
+        fold_run.signals = dict(fold_run.signals or {})
+        if provenance:
+            fold_run.signals["provenance"] = _clone_json(provenance)
+        fold_runs.append(fold_run)
+
+    benchmark = fold_runs[0].benchmark if fold_runs else {}
+    benchmark_symbol = str((benchmark or {}).get("symbol") or strategy.base_symbol or "benchmark")
+    validation_report = evaluate_validation_folds(
+        fold_runs,
+        {benchmark_symbol: benchmark} if benchmark else {},
+    )
+    validation_report.validation_mode = validation_mode
+    gate_config = dict(strategy.validation or {})
+    gate_config.update(strategy.promotion or {})
+    gate_config["mode"] = validation_mode
+    if activation_environment is not None:
+        gate_config["environment"] = activation_environment
+        if activation_environment == "live":
+            gate_config["explicit_live_activation"] = True
+    decision = promotion_gate(validation_report, gate_config)
+    validation_report.promotion_eligible = bool(decision.accepted)
+    validation_payload = validation_report.to_dict()
+    promotion_payload = decision.to_dict()
+    warnings = list(dict.fromkeys(
+        [*split_warnings]
+        + [str(value) for value in validation_payload.get("warnings") or []]
+        + [str(value) for fold in fold_runs for value in (fold.warnings or [])]
+    ))
+    errors.extend(str(value) for fold in fold_runs for value in (fold.errors or []))
+    if not splits:
+        errors.append("no validation folds were produced")
+    errors = list(dict.fromkeys(value for value in errors if value))
+    ok = bool(fold_runs) and not errors and all(bool(fold.ok) for fold in fold_runs)
+
+    if fold_runs:
+        report = build_strategy_report(fold_runs[0], spec=strategy)
+        report["summary"] = {**dict(report.get("summary") or {}), **dict(validation_payload.get("aggregate") or {})}
+        report["metrics"] = validation_payload.get("aggregate") or {}
+        report["validation"] = validation_payload
+        report["promotion"] = promotion_payload
+        report["warnings"] = warnings
+    else:
+        report = {
+            "spec": strategy.to_dict(),
+            "summary": validation_payload.get("aggregate") or {},
+            "metrics": validation_payload.get("aggregate") or {},
+            "benchmark": benchmark,
+            "warnings": warnings,
+            "trades": [],
+            "equity": pd.DataFrame(),
+            "weights": pd.DataFrame(),
+            "signals": {},
+            "validation": validation_payload,
+            "promotion": promotion_payload,
+            "ok": False,
+        }
+
+    token = None
+    if (
+        activation_environment in {"paper", "live"}
+        and decision.accepted
+        and decision.activation_safe
+        and ok
+        and _activation_data_quality_ok(data_quality)
+    ):
+        token = _ValidatedActivationToken(
+            spec_id=str(spec_id or strategy.id or ""),
+            spec_hash=strategy_spec_hash(strategy),
+            run_id=f"validation-{strategy_spec_hash(strategy)}-{validation_mode}",
+            environment=str(activation_environment),
+            validation_mode=validation_mode,
+        )
+    return _json_safe({
+        "ok": ok,
+        "run_id": f"validation-{strategy_spec_hash(strategy)}-{validation_mode}",
+        "spec": strategy.to_dict(),
+        "report": report,
+        "metrics": validation_payload.get("aggregate") or {},
+        "benchmark": benchmark,
+        "validation": validation_payload,
+        "promotion": promotion_payload,
+        "provenance": validation_payload.get("provenance") or {},
+        "data_quality": data_quality,
+        "warnings": warnings,
+        "errors": errors,
+        "folds": validation_payload.get("folds") or [],
+        "trade_count": int((validation_payload.get("aggregate") or {}).get("trade_count") or 0),
+        "_activation_token": token,
+    })
+
+
+def _build_validation_splits(
+    index: pd.Index,
+    validation: dict[str, Any],
+    mode: str,
+) -> tuple[list[Any], list[str]]:
+    warnings: list[str] = []
+    if not isinstance(index, pd.Index) or not len(index):
+        return [], ["validation data is empty"]
+    if "label_horizon" not in validation:
+        return [], ["validation.label_horizon is required for full validation"]
+    label_horizon = _non_negative_integer(validation.get("label_horizon"), "validation.label_horizon")
+    embargo_bars = _non_negative_integer(validation.get("embargo_bars", 0), "validation.embargo_bars")
+    label_end = validation.get("label_end")
+    if label_end is not None and not isinstance(label_end, list):
+        return [], ["validation.label_end must be a list when supplied"]
+    if mode == "cpcv":
+        groups = _positive_integer(validation.get("groups", validation.get("cpcv_groups", 5)), "validation.groups")
+        test_groups = _positive_integer(
+            validation.get("test_groups", validation.get("cpcv_test_groups", 1)),
+            "validation.test_groups",
+        )
+        strictly_chronological = validation.get("strictly_chronological") is True
+        with_warnings = make_cpcv_splits(
+            index,
+            groups=groups,
+            test_groups=test_groups,
+            embargo_bars=embargo_bars,
+            label_horizon=label_horizon,
+            label_end=label_end,
+            strictly_chronological=strictly_chronological,
+        )
+    elif mode in {"walk_forward", "purged_walk_forward"}:
+        min_periods = _positive_integer(validation.get("min_test_periods", 4), "validation.min_test_periods")
+        default_test = max(1, len(index) // (min_periods + 1))
+        test_bars = _positive_integer(validation.get("test_bars", default_test), "validation.test_bars")
+        default_train = max(1, len(index) - test_bars * min_periods)
+        train_bars = _positive_integer(validation.get("train_bars", default_train), "validation.train_bars")
+        step_bars = _positive_integer(validation.get("step_bars", test_bars), "validation.step_bars")
+        with_warnings = make_purged_walk_forward_splits(
+            index,
+            train_bars=train_bars,
+            test_bars=test_bars,
+            step_bars=step_bars,
+            embargo_bars=embargo_bars,
+            label_horizon=label_horizon,
+            label_end=label_end,
+        )
+    else:
+        return [], [f"unsupported full validation mode: {mode}"]
+    if not with_warnings:
+        warnings.append(f"no valid {mode} validation folds were produced")
+    return with_warnings, warnings
+
+
+def _timestamp_or_none(value: object) -> str | None:
+    if value is None:
+        return None
+    try:
+        timestamp = pd.Timestamp(value)
+    except (TypeError, ValueError):
+        return None
+    if pd.isna(timestamp):
+        return None
+    return timestamp.isoformat()
+
+
+def _positive_integer(value: object, name: str) -> int:
+    if isinstance(value, bool):
+        raise ValueError(f"{name} must be a positive integer")
+    try:
+        number = int(value)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"{name} must be a positive integer") from exc
+    if number <= 0 or float(value) != number:
+        raise ValueError(f"{name} must be a positive integer")
+    return number
+
+
+def _non_negative_integer(value: object, name: str) -> int:
+    if isinstance(value, bool):
+        raise ValueError(f"{name} must be a non-negative integer")
+    try:
+        number = int(value)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"{name} must be a non-negative integer") from exc
+    if number < 0 or float(value) != number:
+        raise ValueError(f"{name} must be a non-negative integer")
+    return number
+
+
+def _data_quality_from_price_panel(prices: object) -> dict[str, Any]:
+    attrs = getattr(prices, "attrs", {}) if isinstance(prices, pd.DataFrame) else {}
+    if not isinstance(attrs, Mapping):
+        return _unknown_data_quality()
+    explicit = attrs.get("data_quality")
+    if isinstance(explicit, Mapping):
+        return _json_safe(dict(explicit))
+    coverage = attrs.get("source_coverage")
+    if isinstance(coverage, Mapping):
+        status = str(coverage.get("status") or coverage.get("freshness_status") or "").strip().lower()
+        return _json_safe({
+            "status": status or "unknown",
+            "ok": coverage.get("ok") is True,
+            "warnings": list(coverage.get("warnings") or []),
+            "coverage": dict(coverage),
+        })
+    coverages = attrs.get("source_coverages")
+    if isinstance(coverages, list) and coverages:
+        statuses = [
+            str(item.get("status") or item.get("freshness_status") or "").strip().lower()
+            for item in coverages
+            if isinstance(item, Mapping)
+        ]
+        healthy = bool(statuses) and all(status in {"ok", "fresh", "complete"} for status in statuses)
+        return _json_safe({
+            "status": "ok" if healthy else "incomplete",
+            "ok": healthy and all(item.get("ok") is True for item in coverages if isinstance(item, Mapping)),
+            "warnings": [warning for item in coverages if isinstance(item, Mapping) for warning in item.get("warnings") or []],
+            "coverage": coverages,
+        })
+    snapshots = attrs.get("data_snapshots")
+    if isinstance(snapshots, Mapping) and snapshots:
+        qualities = [
+            str(item.get("quality") or "").strip().lower()
+            for item in snapshots.values()
+            if isinstance(item, Mapping)
+        ]
+        healthy = bool(qualities) and all(quality in {"complete", "fresh", "ok"} for quality in qualities)
+        return {
+            "status": "complete" if healthy else "incomplete",
+            "ok": healthy,
+            "warnings": [warning for item in snapshots.values() if isinstance(item, Mapping) for warning in item.get("warnings") or []],
+        }
+    snapshot = attrs.get("data_snapshot")
+    if snapshot is not None:
+        quality = str(getattr(snapshot, "quality", "") or "").strip().lower()
+        return {
+            "status": quality or "unknown",
+            "ok": quality in {"complete", "fresh", "ok"},
+            "warnings": list(getattr(snapshot, "warnings", None) or []),
+        }
+    provenance = attrs.get("provenance")
+    data = provenance.get("data") if isinstance(provenance, Mapping) else provenance
+    if isinstance(data, Mapping):
+        status = str(data.get("status") or data.get("freshness") or "").strip().lower()
+        return _json_safe({
+            "status": status or "unknown",
+            "ok": status in {"complete", "fresh", "ok"},
+            "warnings": list(data.get("warnings") or []),
+        })
+    return _unknown_data_quality()
+
+
+def _strategy_provenance(strategy: StrategySpec, prices: object) -> dict[str, Any]:
+    attrs = getattr(prices, "attrs", {}) if isinstance(prices, pd.DataFrame) else {}
+    result: dict[str, Any] = {}
+    raw = attrs.get("provenance") if isinstance(attrs, Mapping) else None
+    if isinstance(raw, Mapping):
+        result = dict(raw) if any(key in raw for key in ("data", "model")) else {"data": dict(raw)}
+    snapshot = attrs.get("data_snapshot") if isinstance(attrs, Mapping) else None
+    if not result and hasattr(snapshot, "to_provenance"):
+        result = dict(snapshot.to_provenance())
+    metadata = strategy.metadata if isinstance(strategy.metadata, Mapping) else {}
+    declared = metadata.get("provenance", metadata.get("model_provenance"))
+    if isinstance(declared, Mapping):
+        model = declared.get("model") if isinstance(declared.get("model"), Mapping) else declared
+        result["model"] = dict(model)
     return _json_safe(result)
+
+
+def _activation_data_quality_ok(data_quality: object) -> bool:
+    if not isinstance(data_quality, Mapping):
+        return False
+    status = str(data_quality.get("status") or "").strip().lower()
+    return data_quality.get("ok") is True and status in {"ok", "fresh", "complete"}
 
 
 def validate_strategy_patch(
@@ -278,6 +664,23 @@ def propose_strategy_patch_with_llm(
 
     spec_patch, _ = _controlled_spec_patch(patch)
     patched = apply_strategy_patch(base, spec_patch)
+    # Keep this explicit at the API boundary even though the shared merger also
+    # parses the result; the returned payload must never bypass spec validation.
+    try:
+        patched = StrategySpec.from_dict(patched).to_dict()
+    except (TypeError, ValueError) as exc:
+        return {
+            "ok": False,
+            "current": base,
+            "patch": patch,
+            "patched_spec": base,
+            "diff": [],
+            "preview": {},
+            "error": "patch_rejected",
+            "errors": [f"patched strategy spec is invalid: {exc}"],
+            "diagnostics": [{"type": "patch_rejected", "message": str(exc)}],
+            "rationale": rationale,
+        }
     try:
         preview = preview_strategy_spec(
             patched,
@@ -338,10 +741,18 @@ def activate_strategy_spec(
         activation["warnings"].append("live activation requires confirm_live=true")
         return {"ok": False, "error": "live activation requires explicit confirmation", "activation": activation}
 
-    run = run_strategy_spec(
-        record.get("spec") or record,
+    activation_spec = dict(record.get("spec") or record)
+    promotion = dict(activation_spec.get("promotion") or {})
+    promotion["environment"] = requested_environment
+    if requested_environment == "live":
+        promotion["explicit_live_activation"] = True
+    activation_spec["promotion"] = promotion
+    run, activation_token = _run_strategy_spec_internal(
+        activation_spec,
         period=period,
         validation_mode=validation_mode,
+        spec_id=str(record.get("id") or spec_id),
+        activation_environment=requested_environment,
     )
     gate_errors = _activation_gate_errors(run)
     activation["failed_checks"].extend(gate_errors)
@@ -351,6 +762,9 @@ def activate_strategy_spec(
     activation["failed_checks"] = _dedupe_strings(activation["failed_checks"])
     if gate_errors:
         return {"ok": False, "error": "activation blocked", "run": run, "activation": activation}
+    if requested_environment == "live" and activation_token is None:
+        activation["failed_checks"].append("activation_token")
+        return {"ok": False, "error": "activation blocked", "run": run, "activation": activation}
 
     activated_spec = dict(run.get("spec") or record.get("spec") or record)
     promotion = dict(activated_spec.get("promotion") or {})
@@ -359,8 +773,9 @@ def activate_strategy_spec(
     saved = save_strategy_version(
         str(record.get("id") or spec_id),
         activated_spec,
-        patch={"activation": {"environment": requested_environment, "run_id": run.get("run_id")}},
+        patch={"parameters": {"validation": {"mode": run.get("validation_mode")}}},
         source="live_activation" if requested_environment == "live" else "paper_activation",
+        activation_token=activation_token,
     )
     activation.update({"activated": True, "version": saved.get("version"), "saved": saved})
     return {"ok": True, "run": run, "activation": activation}
@@ -454,6 +869,8 @@ def _scan_patch_forbidden_values(value: object, path: str, errors: list[str]) ->
                 errors.append(f"forbidden patch field: {child_path}")
             if key == "environment" and str(child or "").strip().lower() == "live":
                 errors.append("live activation is not a patchable operation")
+            if isinstance(child, str) and _TRAVERSAL_VALUE.search(child.strip()):
+                errors.append(f"path-like patch value is forbidden at {child_path}")
             _scan_patch_forbidden_values(child, child_path, errors)
         return
     if isinstance(value, (list, tuple, set)):
@@ -515,8 +932,92 @@ def _controlled_spec_patch(patch: dict[str, object]) -> tuple[dict[str, Any], li
                 if not isinstance(value, expected):
                     errors.append(f"providers.{key} has an invalid shape")
                     continue
+                _validate_provider_target(value, key, f"providers.{key}", errors)
                 result[key] = _clone_json(value)
     return result, errors
+
+
+def _validate_provider_target(
+    value: object,
+    target: str,
+    path: str,
+    errors: list[str],
+) -> None:
+    """Validate declarative provider data before it can reach the spec merger."""
+
+    if target in {"features", "indicators"}:
+        if not isinstance(value, list):
+            errors.append(f"{path} must be a list")
+            return
+        for index, item in enumerate(value):
+            item_path = f"{path}[{index}]"
+            if not isinstance(item, Mapping):
+                errors.append(f"{item_path} must be an object")
+                continue
+            _validate_provider_mapping(item, target, item_path, errors)
+        return
+    if not isinstance(value, Mapping):
+        errors.append(f"{path} must be an object")
+        return
+    _validate_provider_mapping(value, target, path, errors)
+
+
+def _validate_provider_mapping(
+    value: Mapping[str, object],
+    target: str,
+    path: str,
+    errors: list[str],
+) -> None:
+    allowed = _PROVIDER_FIELDS[target]
+    for raw_key, child in value.items():
+        key = str(raw_key).strip().lower()
+        child_path = f"{path}.{raw_key}"
+        if key not in allowed:
+            errors.append(f"provider field is not allowlisted: {child_path}")
+            continue
+        if key in {"lookback", "window", "period", "std_mult", "min_confidence"}:
+            if not _finite_provider_number(child):
+                errors.append(f"{child_path} must be numeric")
+            continue
+        if key in {"lookbacks", "weights"}:
+            if not isinstance(child, list) or any(
+                not _finite_provider_number(item)
+                for item in child
+            ):
+                errors.append(f"{child_path} must be a numeric list")
+            continue
+        if key == "enabled":
+            if not isinstance(child, bool):
+                errors.append(f"{child_path} must be boolean")
+            continue
+        if key == "members":
+            if target != "signal" or not isinstance(child, list):
+                errors.append(f"{child_path} must be a list of signal objects")
+                continue
+            for index, member in enumerate(child):
+                member_path = f"{child_path}[{index}]"
+                if not isinstance(member, Mapping):
+                    errors.append(f"{member_path} must be an object")
+                    continue
+                _validate_provider_mapping(member, "signal", member_path, errors)
+            continue
+        if key == "signal" and target == "indicators":
+            if not isinstance(child, (str, Mapping)):
+                errors.append(f"{child_path} must be a string or object")
+            elif isinstance(child, Mapping):
+                _validate_provider_mapping(child, "signal", child_path, errors)
+            continue
+        if not isinstance(child, str) or not child.strip():
+            errors.append(f"{child_path} must be a non-empty string")
+
+
+def _finite_provider_number(value: object) -> bool:
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return False
+    try:
+        return isfinite(float(value))
+    except (TypeError, ValueError, OverflowError):
+        return False
 
 
 def _validate_rule_patch(
@@ -625,26 +1126,74 @@ def _activation_gate_errors(run: dict[str, object]) -> list[str]:
     promotion = run.get("promotion") if isinstance(run.get("promotion"), Mapping) else {}
     if validation.get("promotion_eligible") is not True:
         errors.append("validation")
-    if promotion.get("accepted") is not True or promotion.get("activation_safe") is not True:
+    if (
+        promotion.get("accepted") is not True
+        or promotion.get("activation_safe") is not True
+        or promotion.get("preview") is not False
+    ):
         errors.append("promotion")
     failed_checks = _string_list(promotion.get("failed_checks"))
     errors.extend(failed_checks)
 
     aggregate = validation.get("aggregate") if isinstance(validation.get("aggregate"), Mapping) else {}
     provenance = validation.get("provenance") if isinstance(validation.get("provenance"), Mapping) else {}
+    folds = validation.get("folds")
+    if not isinstance(folds, list) or not folds:
+        errors.append("folds")
+        folds = []
+    fold_ids: list[str] = []
+    for fold in folds:
+        if not isinstance(fold, Mapping):
+            errors.append("folds")
+            continue
+        fold_id, fold_ok = _consistent_alias(fold, ("path_id", "fold_id", "fold"))
+        if not fold_ok or fold_id in fold_ids:
+            errors.append("folds")
+        else:
+            fold_ids.append(fold_id)
+    if not isinstance(aggregate.get("fold_count"), int) or aggregate.get("fold_count") != len(folds):
+        errors.append("folds")
+    if not fold_ids or len(fold_ids) != len(folds):
+        errors.append("folds")
+
+    data_quality = run.get("data_quality")
+    if not _activation_data_quality_ok(data_quality):
+        errors.append("data_quality")
+    top_provenance = run.get("provenance") if isinstance(run.get("provenance"), Mapping) else {}
+    top_checks = top_provenance.get("checks")
+    if top_provenance.get("ok") is not True or not isinstance(top_checks, list) or len(top_checks) != len(folds):
+        errors.append("provenance")
+
     checks = provenance.get("checks")
     if aggregate.get("provenance_ok") is not True or provenance.get("ok") is not True:
         errors.append("provenance")
-    if not isinstance(checks, list) or not checks:
+    if not isinstance(checks, list) or len(checks) != len(folds):
         errors.append("provenance")
-    elif any(
-        not isinstance(check, Mapping) or check.get("ok") is not True or check.get("provenance_ok") is not True
-        for check in checks
-    ):
-        errors.append("provenance")
+    for check_set in (checks, top_checks):
+        if not isinstance(check_set, list):
+            continue
+        for expected_id, check in zip(fold_ids, check_set):
+            if (
+                not isinstance(check, Mapping)
+                or check.get("ok") is not True
+                or check.get("provenance_ok") is not True
+                or not _strict_activation_provenance_check_ok(check)
+            ):
+                errors.append("provenance")
+                continue
+            check_id, check_ok = _consistent_alias(check, ("fold", "path_id", "fold_id"))
+            if not check_ok or check_id != expected_id:
+                errors.append("provenance")
 
-    mode = str(validation.get("validation_mode") or run.get("validation_mode") or "").strip().lower()
-    if mode not in {"purged_walk_forward", "cpcv"}:
+    validation_mode = str(validation.get("validation_mode") or "").strip().lower()
+    run_mode = str(run.get("validation_mode") or "").strip().lower()
+    mode = validation_mode or run_mode
+    if (
+        mode not in {"purged_walk_forward", "cpcv"}
+        or not validation_mode
+        or not run_mode
+        or validation_mode != run_mode
+    ):
         errors.append("validation_mode")
     if mode == "cpcv" or any(
         key in aggregate for key in ("cpcv_fold_count", "cpcv_fold_ids", "cpcv_chronology_evidence", "cpcv_chronology_ok")
@@ -831,8 +1380,18 @@ def save_strategy_version(
     *,
     patch: dict[str, Any] | None = None,
     source: str = "ui",
+    activation_token: object | None = None,
 ) -> dict[str, Any]:
-    _reject_unapproved_live_state(spec, source=source)
+    _reject_unapproved_live_state(
+        spec,
+        source=source,
+        activation_token=activation_token,
+        spec_id=spec_id,
+    )
+    if patch is not None:
+        patch_errors = validate_strategy_patch(patch, _spec_payload(spec))
+        if patch_errors:
+            raise ValueError("patch rejected: " + "; ".join(patch_errors))
     return storage.save_strategy_version(spec_id, spec, patch=patch, source=source)
 
 
@@ -853,11 +1412,25 @@ def _reject_unapproved_live_state(
     payload: dict[str, Any] | StrategySpec,
     *,
     source: str,
+    activation_token: object | None = None,
+    spec_id: str | None = None,
 ) -> None:
-    strategy = StrategySpec.from_dict(payload)
+    strategy = StrategySpec.from_dict(_spec_payload(payload))
     environment = str((strategy.promotion or {}).get("environment") or "").strip().lower()
-    if environment == "live" and str(source or "").strip().lower() != "live_activation":
+    if environment != "live":
+        return
+    if str(source or "").strip().lower() != "live_activation":
         raise ValueError("live state requires the explicit activation endpoint")
+    if not isinstance(activation_token, _ValidatedActivationToken):
+        raise ValueError("live state requires a validated activation token")
+    if activation_token.environment != "live":
+        raise ValueError("validated activation token environment mismatch")
+    if activation_token.spec_id and activation_token.spec_id != str(spec_id or ""):
+        raise ValueError("validated activation token strategy mismatch")
+    if activation_token.validation_mode not in {"purged_walk_forward", "cpcv"}:
+        raise ValueError("validated activation token mode is not activation-safe")
+    if activation_token.spec_hash != strategy_spec_hash(strategy):
+        raise ValueError("validated activation token does not match the saved strategy")
 
 
 def preview_strategy_spec(
@@ -1054,6 +1627,9 @@ def _load_prices(spec: StrategySpec, period: str | None = None) -> pd.DataFrame:
         symbols = [spec.base_symbol]
     period = period or _period_for_timeframe(spec.timeframe)
     frames: dict[str, pd.Series] = {}
+    data_snapshots: dict[str, Any] = {}
+    source_coverages: list[Mapping[str, Any]] = []
+    provenance: dict[str, Any] = {}
     for symbol in symbols:
         if symbol == "CASH":
             continue
@@ -1063,12 +1639,36 @@ def _load_prices(spec: StrategySpec, period: str | None = None) -> pd.DataFrame:
             frame = pd.DataFrame()
         if frame is None or frame.empty:
             continue
+        attrs = getattr(frame, "attrs", {})
+        if isinstance(attrs, Mapping):
+            snapshot = attrs.get("data_snapshot")
+            if snapshot is not None:
+                data_snapshots[symbol] = _json_safe(
+                    snapshot.to_dict() if hasattr(snapshot, "to_dict") else snapshot
+                )
+            coverage = attrs.get("source_coverage")
+            if isinstance(coverage, Mapping):
+                source_coverages.append(dict(coverage))
+            raw_provenance = attrs.get("provenance")
+            if isinstance(raw_provenance, Mapping):
+                candidate = dict(raw_provenance)
+                if any(key in candidate for key in ("data", "model")):
+                    provenance.update(candidate)
+                else:
+                    provenance.setdefault("data", {}).update(candidate)
         normalized = frame.copy()
         normalized.columns = [str(col).strip().lower().replace(" ", "_") for col in normalized.columns]
         for field in normalized.columns:
             series = pd.to_numeric(normalized[field], errors="coerce")
             frames[f"{symbol}__{field}"] = series
-    return pd.DataFrame(frames).sort_index().ffill().dropna(how="all")
+    result = pd.DataFrame(frames).sort_index().ffill().dropna(how="all")
+    if data_snapshots:
+        result.attrs["data_snapshots"] = data_snapshots
+    if source_coverages:
+        result.attrs["source_coverages"] = source_coverages
+    if provenance:
+        result.attrs["provenance"] = provenance
+    return result
 
 
 def _period_for_timeframe(timeframe: str) -> str:

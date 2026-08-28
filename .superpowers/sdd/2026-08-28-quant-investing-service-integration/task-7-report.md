@@ -1,75 +1,63 @@
-# Task 7 Implementation Report: Strategy API and Controlled AI Patches
+# Task 7 Fix Round 1 Report: Strategy API and Controlled AI Patches
 
 ## Status
 
-Implemented Task 7 in `/home/ubuntu/projects/stock-report`.
+Task 7 fix round 1 is implemented in `/home/ubuntu/projects/stock-report`.
+Task 8 UI and Task 9 profiles were not changed.
 
-## Implemented
+## Fixes
 
-- Added `run_strategy_spec()` as a JSON-safe adapter for stored or inline specs.
-  Responses include the resolved profile, period, validation mode, report,
-  metrics, provenance, data quality, promotion decision, warnings, errors, and
-  structured diagnostics.
-- Added `POST /api/strategy-studio/specs/<spec_id>/run` and
-  `POST /api/strategy-studio/specs/<spec_id>/validate` while preserving the
-  existing preview and chat routes.
-- Added `propose_strategy_patch_with_llm()` and a structured `/patch` route.
-  LLM output is parsed as JSON only, validated against `StrategySpec`, and
-  restricted to `parameters`, `rules`, and `providers`. Rule fields, provider
-  targets, parameter blocks, and executable-content markers are allowlisted.
-  LLM unavailability returns `llm_unavailable`; it never becomes a heuristic
-  result presented as an LLM patch.
-- Added explicit sandbox save handling for validation and patch responses.
-  Draft saves cannot persist `promotion.environment=live`; activation versions
-  are created through the explicit activation adapter.
-- Added `POST /api/strategy-studio/specs/<spec_id>/activate`. Live activation
-  requires `confirm_live=true`, an affirmative validation result, an accepted
-  activation-safe promotion decision, complete per-fold provenance evidence,
-  and an activation-safe validation mode. No version is saved when any gate
-  fails.
-- Added an API-side CPCV chronology-proof check that rejects contradictory or
-  incomplete aliases even if an upstream promotion payload claims acceptance.
-  The parked Task 5 P1 chronology-proof alias blocker remains a final
-  whole-branch blocker and was not weakened or silently repaired here.
-- Added `agent.request_structured_output()` as a separate entry point over the
-  existing LLM provider chain without changing legacy chat routing or fallback
-  behavior.
+- `run_strategy_spec()` now keeps `single_pass` as preview-only and routes
+  `walk_forward`, `purged_walk_forward`, and `cpcv` through the shared split
+  generators, per-fold backtest engine, `evaluate_validation_folds()`, and
+  `promotion_gate()`. Run and validate responses expose direct folds plus
+  validation evidence, provenance, data quality, promotion, and diagnostics.
+- Provider patches now require typed feature/indicator lists or a typed signal
+  mapping. Nested provider fields are allowlisted, unknown fields and scalar
+  types are rejected, executable/path-like keys and values are rejected, and
+  the merged result is explicitly parsed by `StrategySpec.from_dict()` before
+  preview or persistence.
+- The patch route revalidates both the returned patch and merged spec even when
+  an upstream patch adapter claims success. Persistence also rejects malformed
+  patch metadata before calling storage.
+- Activation is fail-closed on non-empty uniquely identified folds, exact fold
+  counts, matching per-fold provenance checks, top-level data quality status,
+  top-level provenance, strict Task 6 data/model provenance evidence, full
+  validation mode, and a non-preview activation-safe promotion decision.
+  Task 5's parked P1 chronology-proof alias blocker remains a final whole-
+  branch blocker and was not weakened.
+- Live saves require an internal token issued only by a successful full
+  validation path. `source=live_activation` alone and direct adapter calls do
+  not authorize live persistence. Draft and sandbox saves remain separate
+  explicit states.
+- Strategy API routes now return JSON 4xx responses for malformed/non-object
+  JSON and invalid or non-positive versions. Existing chat behavior and the
+  default heuristic preview/patch-preview routes remain available.
 
 ## Verification
 
-- `./.venv/bin/pytest tests/test_agent_console.py -k 'strategy_validate or strategy_run_adapter or strategy_run_route or llm_patch or live_activation or draft_save or contradictory_cpcv or structured_patch_route' -q`
-  - `12 passed`
-- `./.venv/bin/pytest tests/test_agent_console.py::test_strategy_studio_api_routes tests/test_agent_console.py::test_server_endpoints tests/test_agent_console.py::test_strategy_studio_version_store_round_trips -q`
-  - `3 passed`
-- `./.venv/bin/pytest tests/test_strategy_studio.py tests/test_strategy_validation.py tests/test_strategy_contracts.py tests/test_strategy_signals.py tests/test_strategy_allocation.py tests/test_strategy_execution.py -q`
-  - `119 passed, 2 warnings`
-- `./.venv/bin/python -m compileall -q agent_console ml/strategy_studio tests/test_agent_console.py`
-  - passed
-- `git diff --check`
-  - passed
-- A broader `tests/test_agent_console.py -k 'strategy or agent'` run was killed
-  by the constrained test environment with exit code 137 and is not counted as
-  a passing result.
+- Focused Task 7 API/security tests: `18 passed, 132 deselected`
+- API/version regressions: `2 passed`
+- Shared strategy regression suite: `119 passed, 2 warnings`
+- `python -m compileall -q agent_console ml/strategy_studio tests/test_agent_console.py`: passed
+- `git diff --check`: passed
 
 ## Risks and Trade-offs
 
-- The existing engine still treats a single engine pass as preview evidence;
-  non-single-pass runs remain activation-blocked until explicit out-of-sample
-  folds are supplied.
-- Missing point-in-time provenance remains visible as `unknown` data quality
-  and blocks activation. This is conservative but prevents API-level claims of
-  safe promotion without source evidence.
-- The legacy heuristic `propose_strategy_patch()` remains available for the
-  existing dashboard compatibility route. Structured AI patches use the new
-  allowlisted path and do not fall back to that heuristic when the LLM is down.
-- Task 5's parked chronology-proof alias blocker is still unresolved in the
-  shared validation branch. Task 7 adds a conservative API defense and keeps
-  activation blocked when chronology evidence is not independently coherent;
-  final whole-branch activation safety still depends on closing the Task 5 P1.
+- Missing point-in-time data or model provenance remains activation-blocking,
+  even when an upstream result claims success. This is conservative and keeps
+  Task 6's strict provenance contract intact.
+- Full validation evaluates each generated out-of-sample test fold through the
+  existing declarative strategy engine; model-fitting adapters are still
+  outside Task 7.
+- The legacy heuristic patch adapter remains for compatibility with existing
+  preview callers. Structured AI patching does not silently fall back to it
+  when the LLM is unavailable.
+- Task 5's chronology-proof alias issue remains parked as the final whole-
+  branch activation blocker.
 
 ## Changed Files
 
-- `agent_console/agent.py`
 - `agent_console/server.py`
 - `agent_console/strategy_studio.py`
 - `tests/test_agent_console.py`
