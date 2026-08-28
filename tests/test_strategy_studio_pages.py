@@ -199,3 +199,304 @@ def test_strategy_studio_dashboard_wrappers_forward_data(monkeypatch):
     assert preview["ok"] is True
     assert cached_catalog["catalog"]["count"] == 1
     assert cached_preview["ok"] is True
+
+
+def test_strategy_lab_renders_profile_validation_and_gate_diagnostics():
+    script = f"""
+import os, sys
+sys.path.insert(0, {ROOT!r})
+from dashboard import strategy_studio
+
+selected_spec = {{
+    "id": "spec-modern",
+    "name": "Momentum rank",
+    "version": 1,
+    "spec": {{
+        "name": "Momentum rank",
+        "market": "us",
+        "timeframe": "1d",
+        "base_symbol": "QQQ",
+        "data_profile": "global_swing",
+        "execution_profile": "global_swing",
+        "signal": {{"type": "factor", "plugin": "momentum"}},
+        "portfolio": {{"optimizer": "cost_aware_risk_budget", "max_turnover": 0.3}},
+        "execution": {{"profile": "global_swing", "partial_fill": True}},
+        "validation": {{"mode": "purged_walk_forward"}},
+        "promotion": {{"environment": "sandbox"}},
+    }},
+}}
+preview = {{
+    "ok": False,
+    "profile": "global_swing",
+    "execution_profile": "global_swing",
+    "validation_mode": "purged_walk_forward",
+    "validation": {{"promotion_eligible": False, "aggregate": {{"fold_count": 2, "turnover": 0.42}}}},
+    "promotion": {{"accepted": False, "activation_safe": False, "preview": False, "failed_checks": ["net_excess"]}},
+    "data_quality": {{"status": "stale", "ok": False, "warnings": ["가격 스냅샷이 오래되었습니다"]}},
+    "provenance": {{"ok": False, "data": {{"source": "yahoo", "version": "v1"}}}},
+    "diagnostics": [{{"type": "turnover_limit", "message": "turnover limit exceeded"}}],
+    "report": {{"summary": {{"name": "Momentum rank", "trade_count": 3, "cagr": 0.1, "max_drawdown": -0.08, "sharpe": 1.1, "turnover": 0.42}}}},
+}}
+strategy_studio.render_strategy_lab("diagnostics", {{"strategy_studio": {{"ok": True}}}}, mode="research", catalog={{"specs": []}}, selected_spec=selected_spec, preview=preview)
+"""
+    at = AppTest.from_string(script, default_timeout=30)
+    at.run()
+    assert not at.exception, str(at.exception)
+    body = " ".join(str(item.value) for item in list(at.markdown) + list(at.caption))
+    assert "실행 프로필" in body
+    assert "승격" in body
+    assert "데이터 품질" in body
+    assert "진단" in body
+    assert any("net_excess" in str(frame.value) for frame in at.dataframe)
+    assert any(select.key.endswith("data_profile") for select in at.selectbox)
+    assert any(select.key.endswith("execution_profile") for select in at.selectbox)
+    assert any(select.key.endswith("validation_mode") for select in at.selectbox)
+
+
+def test_strategy_lab_disables_live_activation_without_strict_capability_gate():
+    script = f"""
+import os, sys
+sys.path.insert(0, {ROOT!r})
+from dashboard import strategy_studio
+
+selected_spec = {{"id": "spec-blocked", "name": "RSI", "version": 1, "spec": {{
+    "name": "RSI", "base_symbol": "QQQ", "validation": {{"mode": "single_pass"}},
+}}}}
+preview = {{
+    "ok": True,
+    "validation_mode": "single_pass",
+    "validation": {{"promotion_eligible": False, "folds": []}},
+    "promotion": {{"accepted": False, "activation_safe": False, "preview": True, "failed_checks": ["preview_only"]}},
+    "data_quality": {{"status": "unknown", "ok": False}},
+    "provenance": {{"ok": False}},
+    "report": {{"summary": {{"name": "RSI", "trade_count": 1}}}},
+}}
+strategy_studio.render_strategy_lab("blocked", {{"strategy_studio": {{"ok": True}}}}, mode="research", catalog={{"specs": []}}, selected_spec=selected_spec, preview=preview)
+"""
+    at = AppTest.from_string(script, default_timeout=30)
+    at.run()
+    assert not at.exception, str(at.exception)
+    live_buttons = [button for button in at.button if button.key.endswith("activate_live")]
+    assert live_buttons
+    assert live_buttons[0].disabled is True
+    body = " ".join(str(item.value) for item in list(at.markdown) + list(at.caption))
+    assert "실거래 활성화 가능" not in body
+
+
+def test_non_rsi_presets_include_profiles_costs_validation_and_universe_warning():
+    from ml.strategy_studio.presets import builtin_strategy_presets
+
+    presets = builtin_strategy_presets()
+    expected = {
+        "momentum_rank",
+        "mean_reversion",
+        "breakout_with_trailing_stop",
+        "factor_ensemble",
+        "kr_intraday_vwap",
+    }
+    assert expected.issubset(presets)
+    for key in expected:
+        preset = presets[key]
+        assert preset["data_profile"]
+        assert preset["execution_profile"]
+        assert preset["validation"]["mode"]
+        assert preset["validation"]["benchmarks"]
+        assert preset["costs"]
+        assert preset["metadata"]["universe_warning"]
+
+
+def test_strategy_lab_renders_common_result_evidence_and_explicit_states():
+    script = f"""
+import os, sys
+sys.path.insert(0, {ROOT!r})
+from dashboard import strategy_studio
+
+selected_spec = {{"id": "spec-evidence", "name": "Evidence strategy", "version": 2, "spec": {{
+    "name": "Evidence strategy", "market": "us", "timeframe": "1d", "base_symbol": "QQQ",
+    "data_profile": "global_swing", "execution_profile": "global_swing",
+    "signal": {{"type": "factor", "plugin": "momentum"}},
+    "portfolio": {{"optimizer": "cost_aware_risk_budget", "max_turnover": 0.3}},
+    "execution": {{"profile": "global_swing"}},
+    "validation": {{"mode": "purged_walk_forward"}},
+    "promotion": {{"environment": "sandbox"}},
+}}}}
+preview = {{
+    "ok": True, "profile": "global_swing", "execution_profile": "global_swing",
+    "validation_mode": "purged_walk_forward",
+    "report": {{
+        "summary": {{"name": "Evidence strategy", "trade_count": 12, "cagr": 0.16,
+                       "max_drawdown": -0.09, "sharpe": 1.4, "turnover": 0.22,
+                       "cost_drag": 0.013}},
+        "trades": [{{"date": "2026-01-02", "action": "enter_long", "status": "partial"}}],
+        "equity": {{"columns": ["nav"], "index": ["2026-01-01"], "rows": [{{"nav": 100.0}}]}},
+        "weights": {{"columns": ["QQQ"], "index": ["2026-01-01"], "rows": [{{"QQQ": 1.0}}]}},
+    }},
+    "validation": {{"promotion_eligible": False, "aggregate": {{"fold_count": 2, "turnover": 0.22}}}},
+    "promotion": {{"accepted": False, "activation_safe": False, "preview": False, "failed_checks": ["net_excess"]}},
+    "data_quality": {{"status": "stale", "ok": False, "warnings": ["가격 스냅샷이 오래되었습니다"]}},
+    "provenance": {{"ok": False, "checks": [{{"fold": "fold-1", "ok": False}}]}},
+    "folds": [{{"fold_id": "fold-1", "test_start": "2026-01-01", "test_end": "2026-02-01"}}],
+    "diagnostics": [{{"type": "turnover_limit", "message": "turnover limit exceeded"}}],
+}}
+strategy_studio.render_strategy_lab("evidence", {{"strategy_studio": {{"ok": True}}}}, mode="research",
+    catalog={{"specs": []}}, selected_spec=selected_spec, preview=preview)
+"""
+    at = AppTest.from_string(script, default_timeout=30)
+    at.run()
+    assert not at.exception, str(at.exception)
+    body = " ".join(str(item.value) for item in list(at.markdown) + list(at.caption) + list(at.info) + list(at.warning))
+    for label in ("드래프트", "sandbox", "실거래", "검증 폴드", "데이터 품질", "원천", "비용", "회전율", "진단"):
+        assert label in body
+
+
+def test_strategy_lab_keeps_live_disabled_when_cpcv_chronology_proof_is_incomplete():
+    script = f"""
+import os, sys
+sys.path.insert(0, {ROOT!r})
+from dashboard import strategy_studio
+
+selected_spec = {{"id": "spec-cpcv", "name": "CPCV strategy", "version": 1, "spec": {{
+    "name": "CPCV strategy", "market": "us", "base_symbol": "QQQ",
+    "validation": {{"mode": "cpcv"}}, "promotion": {{"environment": "sandbox"}},
+}}}}
+preview = {{
+    "ok": True, "validation_mode": "cpcv",
+    "validation": {{"promotion_eligible": True, "aggregate": {{
+        "fold_count": 1, "cpcv_chronology_ok": True,
+        "cpcv_chronology_evidence": [{{"fold_id": "fold-1", "valid": True}}],
+    }}, "folds": [{{"fold_id": "fold-1"}}]}},
+    "promotion": {{"accepted": True, "activation_safe": True, "preview": False}},
+    "data_quality": {{"status": "fresh", "ok": True}},
+    "provenance": {{"ok": True}}, "report": {{"summary": {{"trade_count": 4}}}},
+}}
+strategy_studio.render_strategy_lab("cpcv", {{"strategy_studio": {{"ok": True}}}}, mode="research",
+    catalog={{"specs": []}}, selected_spec=selected_spec, preview=preview)
+"""
+    at = AppTest.from_string(script, default_timeout=30)
+    at.run()
+    assert not at.exception, str(at.exception)
+    live_buttons = [button for button in at.button if button.key.endswith("activate_live")]
+    assert live_buttons and live_buttons[0].disabled is True
+    body = " ".join(str(item.value) for item in list(at.markdown) + list(at.caption) + list(at.warning))
+    assert "chronology" in body or "시간 순서" in body
+    assert "실거래 활성화 가능" not in body
+
+
+def test_strategy_lab_run_button_uses_public_run_contract_without_network():
+    script = f"""
+import os, sys
+sys.path.insert(0, {ROOT!r})
+import streamlit as st
+from dashboard import strategy_studio
+
+def fake_run(spec, *, period=None, validation_mode=None):
+    st.session_state["test_run_mode"] = validation_mode
+    return {{
+        "ok": True,
+        "run_id": "run-test",
+        "validation_mode": validation_mode,
+        "report": {{"summary": {{"name": "RSI", "trade_count": 7}}}},
+        "metrics": {{"trade_count": 7}},
+        "validation": {{}},
+        "promotion": {{"accepted": False, "activation_safe": False, "preview": True}},
+        "data_quality": {{"status": "fresh", "ok": True}},
+        "provenance": {{"ok": True}},
+        "folds": [],
+        "diagnostics": [],
+    }}
+
+strategy_studio.views.strategy_studio.run_strategy_spec = fake_run
+selected_spec = {{"id": "spec-run", "name": "RSI", "version": 1, "spec": {{
+    "name": "RSI", "market": "us", "timeframe": "1d", "base_symbol": "QQQ",
+    "validation": {{"mode": "single_pass"}},
+}}}}
+strategy_studio.render_strategy_lab("run", {{"strategy_studio": {{"ok": True}}}}, mode="research",
+    catalog={{"specs": []}}, selected_spec=selected_spec)
+"""
+    at = AppTest.from_string(script, default_timeout=30)
+    at.run()
+    assert not at.exception, str(at.exception)
+
+    run_button = next(button for button in at.button if button.key.endswith("run_strategy"))
+    run_button.click().run()
+
+    assert not at.exception, str(at.exception)
+    assert at.session_state["test_run_mode"] == "single_pass"
+    assert any(metric.value == "7" for metric in at.metric)
+
+
+def test_strategy_editor_controls_keep_legacy_rule_specs_intact():
+    from dashboard import strategy_studio
+
+    legacy = {
+        "name": "EMA legacy",
+        "market": "us",
+        "timeframe": "1d",
+        "base_symbol": "QQQ",
+        "indicators": [{"kind": "ema", "period": 20}],
+        "rules": {"entry": [{"field": "close", "op": ">", "value": 1}]},
+        "costs": {"fees_bps": 4, "slippage_bps": 6, "spread_bps": 2},
+    }
+    result = strategy_studio._apply_editor_controls(
+        legacy,
+        {
+            "data_profile": "generic",
+            "execution_profile": "bar",
+            "validation_mode": "single_pass",
+            "strategy_type": "rule",
+            "provider": "rule",
+            "portfolio_optimizer": "legacy_fixed",
+            "cost_scenario": "default",
+        },
+    )
+    assert result["indicators"] == legacy["indicators"]
+    assert result["rules"] == legacy["rules"]
+    assert "signal" not in result
+    assert result["costs"] == legacy["costs"]
+
+
+def test_strict_cpcv_gate_checks_all_chronology_aliases_and_nested_actual_evidence():
+    from dashboard import strategy_studio
+
+    fold = {
+        "fold_id": "fold-1",
+        "train_max": "2026-01-31T00:00:00+00:00",
+        "test_min": "2026-02-01T00:00:00+00:00",
+        "future_training": False,
+        "no_future_training": True,
+        "chronology_evidence": {
+            "fold_id": "fold-1",
+            "train_max": "2026-01-31T00:00:00+00:00",
+            "test_min": "2026-02-01T00:00:00+00:00",
+            "future_training": False,
+            "no_future_training": True,
+            "train_before_test": True,
+            "train_max_before_test_min": True,
+            "valid": True,
+            "proof_valid": True,
+        },
+    }
+    result = {
+        "ok": True,
+        "validation_mode": "cpcv",
+        "validation": {
+            "validation_mode": "cpcv",
+            "promotion_eligible": True,
+            "aggregate": {
+                "fold_count": 1,
+                "provenance_ok": True,
+                "cpcv_fold_ids": ["fold-1"],
+                "cpcv_chronology_ok": True,
+                "cpcv_chronology_evidence": [fold["chronology_evidence"]],
+            },
+            "folds": [fold],
+        },
+        "promotion": {"accepted": True, "activation_safe": True, "preview": False, "failed_checks": []},
+        "data_quality": {"status": "fresh", "ok": True},
+        "provenance": {"ok": True, "checks": [{"fold": "fold-1", "ok": True, "provenance_ok": True}]},
+        "errors": [],
+    }
+    assert strategy_studio._strict_validation_ready(result) is True
+
+    fold["chronology_evidence"]["valid"] = False
+    assert strategy_studio._strict_validation_ready(result) is False

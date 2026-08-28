@@ -274,7 +274,11 @@ def _strategy_studio_section():
         pack = agent_context.context_pack("lab", hours=int(st.session_state.get("agent_hours", 72)))
     except Exception as exc:
         pack = {"ok": False, "strategy_studio": {"error": str(exc), "spec_count": 0, "version_count": 0, "latest": None}}
-    strategy_studio.render_strategy_lab("research", pack, mode="research")
+    try:
+        catalog = cached.strategy_studio_catalog()
+    except Exception as exc:
+        catalog = {"ok": False, "error": str(exc), "catalog": {"count": 0, "specs": []}}
+    strategy_studio.render_strategy_lab("research", pack, mode="research", catalog=catalog)
 
 
 @st.fragment
