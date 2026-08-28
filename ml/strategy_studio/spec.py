@@ -30,6 +30,43 @@ _SUPPORTED_VALIDATION = {
     "walk_forward",
 }
 
+SUPPORTED_DATA_PROFILES = {"kr_intraday", "global_swing", "extended_us", "generic"}
+SUPPORTED_SIGNAL_TYPES = {"rule", "factor", "model", "ensemble"}
+SUPPORTED_EXECUTION_PROFILES = {"kr_intraday", "global_swing", "extended_us", "bar"}
+SUPPORTED_PROMOTION_ENVIRONMENTS = {"sandbox", "paper", "live"}
+
+_UNSAFE_PLUGIN_NAMES = {"python", "shell", "exec"}
+_SUPPORTED_PLUGIN_NAMES = {
+    "atr",
+    "atr_trailing",
+    "bar",
+    "bollinger",
+    "broker",
+    "cross_sectional_rank",
+    "drawdown",
+    "ema",
+    "ensemble",
+    "factor",
+    "fixed",
+    "liquidity",
+    "macd",
+    "market",
+    "market_breadth",
+    "momentum",
+    "model",
+    "quality",
+    "rsi",
+    "rolling",
+    "sma",
+    "stop",
+    "seasonality",
+    "value",
+    "volatility",
+    "volume_shock",
+    "volume_zscore",
+    "vwap",
+}
+
 
 @dataclass(slots=True)
 class StrategySpec:
@@ -47,6 +84,13 @@ class StrategySpec:
     metadata: dict[str, Any] = field(default_factory=dict)
     version: int = 1
     id: str | None = None
+    data_profile: str = "generic"
+    execution_profile: str = "bar"
+    features: list[dict[str, Any]] = field(default_factory=list)
+    signal: dict[str, Any] = field(default_factory=dict)
+    portfolio: dict[str, Any] = field(default_factory=dict)
+    execution: dict[str, Any] = field(default_factory=dict)
+    promotion: dict[str, Any] = field(default_factory=dict)
 
     @classmethod
     def from_dict(cls, payload: dict[str, Any] | "StrategySpec") -> "StrategySpec":
@@ -63,12 +107,19 @@ class StrategySpec:
         validation = _deep_copy(data.get("validation") or {})
         metadata = _deep_copy(data.get("metadata") or {})
         universe = _deep_copy(data.get("universe") or {})
+        features = _deep_copy(data.get("features") or [])
+        signal = _deep_copy(data.get("signal") or {})
+        portfolio = _deep_copy(data.get("portfolio") or {})
+        execution = _deep_copy(data.get("execution") or {})
+        promotion = _deep_copy(data.get("promotion") or {})
         name = str(data.get("name") or "").strip()
         if not name:
             raise ValueError("strategy name is required")
         market = str(data.get("market") or "us").strip().lower() or "us"
         timeframe = str(data.get("timeframe") or "1d").strip().lower() or "1d"
         base_symbol = str(data.get("base_symbol") or data.get("baseSymbol") or "").strip().upper()
+        data_profile = str(data.get("data_profile") or "generic").strip().lower() or "generic"
+        execution_profile = str(data.get("execution_profile") or "bar").strip().lower() or "bar"
         version = int(data.get("version") or 1)
         spec = cls(
             name=name,
@@ -83,6 +134,13 @@ class StrategySpec:
             optimization=optimization,
             validation=validation,
             metadata=metadata,
+            data_profile=data_profile,
+            execution_profile=execution_profile,
+            features=features,
+            signal=signal,
+            portfolio=portfolio,
+            execution=execution,
+            promotion=promotion,
             version=version,
             id=str(data.get("id") or "").strip() or None,
         )
@@ -103,6 +161,14 @@ class StrategySpec:
             errors.append("strategy name is required")
         if not self.base_symbol and self.market != "multi":
             warnings.append("base_symbol is empty; strategy will need an explicit signal symbol")
+
+        data_profile = str(self.data_profile or "").strip().lower()
+        if data_profile not in SUPPORTED_DATA_PROFILES:
+            errors.append(f"unsupported data profile: {data_profile}")
+
+        execution_profile = str(self.execution_profile or "").strip().lower()
+        if execution_profile not in SUPPORTED_EXECUTION_PROFILES:
+            errors.append(f"unsupported execution profile: {execution_profile}")
 
         if not isinstance(self.universe, dict):
             errors.append("universe must be a dict")
@@ -152,9 +218,55 @@ class StrategySpec:
             except (TypeError, ValueError):
                 errors.append(f"costs.{key} must be numeric")
 
+        self._validate_new_blocks(errors)
+
         if errors:
             raise ValueError("; ".join(errors))
         return warnings
+
+    def _validate_new_blocks(self, errors: list[str]) -> None:
+        if not isinstance(self.features, list):
+            errors.append("features must be a list")
+        else:
+            for idx, feature in enumerate(self.features):
+                if not isinstance(feature, dict):
+                    errors.append(f"feature[{idx}] must be a dict")
+
+        if not isinstance(self.signal, dict):
+            errors.append("signal must be a dict")
+        elif self.signal:
+            signal_type = str(self.signal.get("type") or "").strip().lower()
+            if signal_type not in SUPPORTED_SIGNAL_TYPES:
+                errors.append(f"unsupported signal type: {signal_type}")
+            members = self.signal.get("members")
+            if members is not None:
+                if not isinstance(members, list):
+                    errors.append("signal.members must be a list")
+                else:
+                    for idx, member in enumerate(members):
+                        if not isinstance(member, dict):
+                            errors.append(f"signal.members[{idx}] must be a dict")
+                            continue
+                        member_type = str(member.get("type") or "").strip().lower()
+                        if member_type and member_type not in SUPPORTED_SIGNAL_TYPES:
+                            errors.append(f"unsupported signal type: {member_type}")
+
+        for field_name, block in (("portfolio", self.portfolio), ("execution", self.execution), ("promotion", self.promotion)):
+            if not isinstance(block, dict):
+                errors.append(f"{field_name} must be a dict")
+
+        if isinstance(self.execution, dict) and self.execution.get("profile") is not None:
+            profile = str(self.execution.get("profile") or "").strip().lower()
+            if profile not in SUPPORTED_EXECUTION_PROFILES:
+                errors.append(f"unsupported execution profile: {profile}")
+
+        if isinstance(self.promotion, dict) and self.promotion.get("environment") is not None:
+            environment = str(self.promotion.get("environment") or "").strip().lower()
+            if environment not in SUPPORTED_PROMOTION_ENVIRONMENTS:
+                errors.append(f"unsupported promotion environment: {environment}")
+
+        for block_name, block in (("signal", self.signal), ("features", self.features), ("execution", self.execution)):
+            _validate_plugins(block, block_name, errors)
 
 
 def validate_strategy_spec(spec: dict[str, Any] | StrategySpec) -> list[str]:
@@ -185,3 +297,21 @@ def _ensure_list(value: Any) -> list[Any]:
     if isinstance(value, list):
         return value
     return [value]
+
+
+def _validate_plugins(value: Any, path: str, errors: list[str]) -> None:
+    if isinstance(value, dict):
+        for key, child in value.items():
+            key_text = str(key).strip().lower()
+            if key_text == "plugin":
+                plugin = str(child or "").strip().lower()
+                if plugin in _UNSAFE_PLUGIN_NAMES:
+                    errors.append(f"unsupported plugin: {plugin} at {path}")
+                elif plugin not in _SUPPORTED_PLUGIN_NAMES:
+                    errors.append(f"unsupported plugin: {plugin} at {path}")
+            elif key_text == "type" and str(child or "").strip().lower() in _UNSAFE_PLUGIN_NAMES:
+                errors.append(f"unsupported plugin: {str(child).strip().lower()} at {path}")
+            _validate_plugins(child, f"{path}.{key}", errors)
+    elif isinstance(value, list):
+        for idx, child in enumerate(value):
+            _validate_plugins(child, f"{path}[{idx}]", errors)
