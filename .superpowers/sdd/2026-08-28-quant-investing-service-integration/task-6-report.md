@@ -164,3 +164,44 @@ Addressed the remaining strict activation validation findings:
 - Empty metric mappings are accepted because the contract permits a typed
   `dict[str, float | None]`; unavailable individual metrics should be
   represented as `None`.
+
+## Fix Round 5
+
+Closed the remaining strict model provenance metrics validation finding:
+
+- Strict `ModelProvenance.metrics` validation now accepts only finite real
+  numeric values (`int`/`float`, including supported numeric scalar types) or
+  `None`; booleans, numeric strings, and other malformed values are rejected
+  without coercion.
+- Accepted numeric values continue to be normalized to finite floats, and
+  valid metrics remain present in the validation output even when a separate
+  metric entry is invalid.
+- Added a regression proving that `{"sharpe": "1.0"}` cannot authorize
+  provenance while valid integer, float, and `None` entries retain their
+  normalized output.
+- Task 5's parked chronology-proof blocker and all prior Task 6, Task 3,
+  Task 4, and legacy compatibility behavior remain unchanged.
+
+### Fix Round 5 Verification
+
+- `./.venv/bin/pytest tests/test_strategy_validation.py::test_strict_provenance_rejects_numeric_string_metrics_without_coercion -q`
+  - `1 passed`
+- `./.venv/bin/pytest tests/test_strategy_validation.py tests/test_ml_data_sources.py tests/test_ml_universe.py tests/test_data_pipeline_resilience.py tests/test_strategy_registry.py tests/test_strategy_signals.py tests/test_strategy_contracts.py tests/test_strategy_allocation.py tests/test_strategy_execution.py tests/test_strategy_studio.py -q`
+  - `168 passed, 2 warnings`
+- `./.venv/bin/python -m compileall -q ml/strategy_studio ml/data_pipeline.py ml/models.py`
+  - passed
+- `git diff --check`
+  - passed
+
+### Fix Round 5 Risks and Trade-offs
+
+- Strict activation payloads containing numeric strings in `metrics` are now
+  diagnostic-only until their producers emit typed numeric values. This is a
+  deliberate contract enforcement change; legacy `ModelProvenance` construction
+  and non-strict prediction compatibility remain untouched.
+
+### Fix Round 5 Changed Files
+
+- `ml/strategy_studio/validation.py`
+- `tests/test_strategy_validation.py`
+- `.superpowers/sdd/2026-08-28-quant-investing-service-integration/task-6-report.md`

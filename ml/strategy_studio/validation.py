@@ -13,6 +13,7 @@ from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta
 from itertools import combinations
 from math import isfinite, sqrt
+from numbers import Real
 from typing import Any
 import warnings as _warnings
 
@@ -945,14 +946,10 @@ def _strict_model_provenance_diagnostics(
                 if value is None:
                     normalized_metrics[name.strip()] = None
                     continue
-                if isinstance(value, bool):
+                if isinstance(value, bool) or not isinstance(value, Real):
                     issues.append("model provenance field invalid: metrics")
                     continue
-                try:
-                    number = float(value)
-                except (TypeError, ValueError):
-                    issues.append("model provenance field invalid: metrics")
-                    continue
+                number = float(value)
                 if not isfinite(number):
                     issues.append("model provenance field invalid: metrics")
                     continue

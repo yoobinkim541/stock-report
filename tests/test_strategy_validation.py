@@ -732,6 +732,35 @@ def test_strict_provenance_rejects_blank_model_provenance_status():
     assert any("provenance status" in warning for warning in result["warnings"])
 
 
+def test_strict_provenance_rejects_numeric_string_metrics_without_coercion():
+    result = check_data_model_provenance(
+        {
+            "data": {"source": "prices", "version": "v1", "as_of": "2024-02-09T00:00:00Z", "status": "fresh"},
+            "model": {
+                "model_id": "m1",
+                "feature_version": "features-v1",
+                "model_version": "model-v1",
+                "feature_names": ["close"],
+                "metrics": {"sharpe": "1.0", "sortino": 0, "calmar": None},
+                "train_start": "2024-01-01T00:00:00Z",
+                "train_end": "2024-02-08T00:00:00Z",
+                "code_commit": "abc123",
+                "seed": 42,
+                "as_of": "2024-02-09T00:00:00Z",
+                "status": "fresh",
+                "provenance_status": "complete",
+            },
+        },
+        evaluation_at="2024-02-10T00:00:00Z",
+        max_data_age_seconds=86400,
+        max_model_age_seconds=86400,
+    )
+
+    assert result["ok"] is False
+    assert any("model provenance field invalid: metrics" in warning for warning in result["warnings"])
+    assert result["model"]["metrics"] == {"calmar": None, "sortino": 0.0}
+
+
 def test_evaluator_enforces_configured_data_and_model_age_limits():
     run = _run([0.001, -0.001] * 20)
     run.spec["validation"].update({"max_data_age_seconds": 86400, "max_model_age_seconds": 86400})
