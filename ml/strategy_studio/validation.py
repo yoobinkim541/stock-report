@@ -1397,6 +1397,25 @@ def _consistent_timestamp(
     return first, all(_same_time(first, value) for value in values[1:])
 
 
+def _consistent_identifier(
+    record: Mapping[str, Any],
+    *keys: str,
+) -> tuple[str | None, bool]:
+    values = [record[key] for key in keys if key in record]
+    if not values or any(_is_missing_scalar(value) or not str(value).strip() for value in values):
+        return None, False
+    first = str(values[0])
+    return first, all(str(value) == first for value in values[1:])
+
+
+def _has_consistent_no_future_flags(record: Mapping[str, Any]) -> bool:
+    future = record.get("future_training")
+    no_future = record.get("no_future_training")
+    if future is True or no_future is False:
+        return False
+    return future is False or no_future is True
+
+
 def _validation_actual_timestamp(
     validation: Mapping[str, Any],
     keys: Sequence[str],
@@ -1442,37 +1461,45 @@ def _has_cpcv_chronology_evidence(
         return False
     actual_by_id: dict[str, Mapping[str, Any]] = {}
     for actual in actual_folds:
-        actual_id = _proof_value(actual, "path_id", "fold_id", "fold")
-        if actual_id is None or str(actual_id) in actual_by_id:
+        actual_id, actual_id_ok = _consistent_identifier(actual, "path_id", "fold_id", "fold")
+        if not actual_id_ok or actual_id in actual_by_id:
             return False
-        actual_by_id[str(actual_id)] = actual
+        actual_by_id[actual_id] = actual
     if set(actual_by_id) != expected_id_set:
         return False
     fold_ids: set[str] = set()
     for candidate in evidence:
         if not isinstance(candidate, Mapping):
             return False
-        fold_id = _proof_value(candidate, "fold_id", "path_id", "fold")
-        if fold_id is None or str(fold_id) in fold_ids or str(fold_id) not in expected_id_set:
+        fold_id, fold_id_ok = _consistent_identifier(candidate, "fold_id", "path_id", "fold")
+        if not fold_id_ok or fold_id in fold_ids or fold_id not in expected_id_set:
             return False
-        fold_ids.add(str(fold_id))
+        fold_ids.add(fold_id)
         if candidate.get("valid", candidate.get("proof_valid")) is not True:
             return False
-        if candidate.get("future_training") is True:
-            return False
-        if candidate.get("future_training") is not False and candidate.get("no_future_training") is not True:
+        if not _has_consistent_no_future_flags(candidate):
             return False
         if candidate.get("train_before_test", candidate.get("train_max_before_test_min")) is not True:
             return False
-        train_max = _proof_value(candidate, "train_max", "train_end", "train_max_timestamp")
-        test_min = _proof_value(candidate, "test_min", "test_start", "test_min_timestamp")
-        if train_max is None or test_min is None or not _is_before_in_time(train_max, test_min):
+        train_max, train_proof_ok = _consistent_timestamp(
+            candidate, "train_max", "train_end", "train_max_timestamp"
+        )
+        test_min, test_proof_ok = _consistent_timestamp(
+            candidate, "test_min", "test_start", "test_min_timestamp"
+        )
+        if (
+            not train_proof_ok
+            or not test_proof_ok
+            or not _is_before_in_time(train_max, test_min)
+        ):
             return False
-        actual = actual_by_id[str(fold_id)]
+        actual = actual_by_id[fold_id]
         actual_evidence = actual.get("chronology_evidence")
         actual_proof = actual_evidence if isinstance(actual_evidence, Mapping) else {}
-        if actual.get("future_training") is True or actual_proof.get("future_training") is True:
-            return False
+        for actual_flags in (actual, actual_proof):
+            if any(key in actual_flags for key in ("future_training", "no_future_training")):
+                if not _has_consistent_no_future_flags(actual_flags):
+                    return False
         if isinstance(actual_evidence, Mapping):
             if actual_evidence.get("valid", actual_evidence.get("proof_valid")) is False:
                 return False

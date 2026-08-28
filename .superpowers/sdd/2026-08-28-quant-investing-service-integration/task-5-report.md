@@ -183,3 +183,24 @@ Closed the remaining CPCV fail-open paths:
 
 - CPCV activation requires richer fold records, so proof-only or incomplete
   hand-built reports remain diagnostic-only.
+
+## Fix Round 5
+
+Closed the final CPCV proof-alias consistency issue:
+
+- All supplied train-end and test-start proof aliases are validated together;
+  conflicting, missing, or invalid values are rejected instead of using the
+  first matching alias.
+- Future-training and no-future-training flags now require a consistent
+  affirmative combination before proof values are compared with independent
+  actual fold metadata and IDs.
+
+### Fix Round 5 Verification
+
+- `./.venv/bin/pytest tests/test_strategy_validation.py -q`
+  - `35 passed`
+
+### Fix Round 5 Trade-offs
+
+- CPCV activation remains conservative for payloads containing legacy or
+  contradictory aliases; those reports are retained for diagnostics only.

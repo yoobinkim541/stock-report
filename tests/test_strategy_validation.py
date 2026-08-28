@@ -346,6 +346,8 @@ def test_cpcv_chronology_evidence_is_bound_to_fold_ids_timestamps_and_flags():
         ([evidence[0], {**evidence[1], "fold_id": "cpcv-0"}], "duplicate fold ID"),
         ([{key: value for key, value in evidence[0].items() if key != "valid"}, evidence[1]], "missing proof"),
         ([{**evidence[0], "future_training": True, "no_future_training": True}, evidence[1]], "contradictory future proof"),
+        ([{**evidence[0], "train_end": "2024-01-02T00:00:00Z"}, evidence[1]], "conflicting train-end aliases"),
+        ([{**evidence[0], "test_start": "2024-01-12T00:00:00Z"}, evidence[1]], "conflicting test-start aliases"),
         ([{**evidence[0], "test_min": "2024-01-10T00:00:00Z"}, evidence[1]], "mismatched test timestamp"),
     ]
 
