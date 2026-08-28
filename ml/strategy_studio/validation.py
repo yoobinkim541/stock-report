@@ -1093,6 +1093,15 @@ def evaluate_validation_folds(
         if not net.empty:
             fold["test_start"] = _json_order_value(net.index[0])
             fold["test_end"] = _json_order_value(net.index[-1])
+        if validation_mode == "cpcv" and isinstance(validation, Mapping):
+            actual_train_max = _validation_actual_timestamp(
+                validation,
+                ("train_max", "train_end", "train_max_timestamp"),
+                "train",
+                -1,
+            )
+            if actual_train_max is not None:
+                fold["train_max"] = _json_order_value(actual_train_max)
         if validation_mode == "cpcv":
             candidate = validation.get("cpcv_chronology_evidence", validation.get("chronology_evidence")) if isinstance(validation, Mapping) else None
             if candidate is None:
@@ -1377,8 +1386,30 @@ def _same_time(left: object, right: object) -> bool:
     return left == right
 
 
-def _proof_timestamp(proof: Mapping[str, Any], *keys: str) -> object | None:
-    return _proof_value(proof, *keys)
+def _consistent_timestamp(
+    record: Mapping[str, Any],
+    *keys: str,
+) -> tuple[object | None, bool]:
+    values = [record[key] for key in keys if key in record]
+    if not values or any(_is_missing_scalar(value) for value in values):
+        return None, False
+    first = values[0]
+    return first, all(_same_time(first, value) for value in values[1:])
+
+
+def _validation_actual_timestamp(
+    validation: Mapping[str, Any],
+    keys: Sequence[str],
+    sequence_key: str,
+    position: int,
+) -> object | None:
+    if any(key in validation for key in keys):
+        value, valid = _consistent_timestamp(validation, *keys)
+        return value if valid else None
+    values = validation.get(sequence_key)
+    if isinstance(values, Sequence) and not isinstance(values, (str, bytes)) and values:
+        return values[position]
+    return None
 
 
 def _actual_cpcv_fold_records(report: ValidationReport) -> list[Mapping[str, Any]]:
@@ -1439,7 +1470,7 @@ def _has_cpcv_chronology_evidence(
             return False
         actual = actual_by_id[str(fold_id)]
         actual_evidence = actual.get("chronology_evidence")
-        actual_proof = actual_evidence if isinstance(actual_evidence, Mapping) else actual
+        actual_proof = actual_evidence if isinstance(actual_evidence, Mapping) else {}
         if actual.get("future_training") is True or actual_proof.get("future_training") is True:
             return False
         if isinstance(actual_evidence, Mapping):
@@ -1447,23 +1478,15 @@ def _has_cpcv_chronology_evidence(
                 return False
             if actual_evidence.get("train_before_test", actual_evidence.get("train_max_before_test_min")) is False:
                 return False
-        actual_train_max = _proof_timestamp(
+        actual_train_max, train_timestamp_ok = _consistent_timestamp(
             actual, "train_max", "train_end", "train_max_timestamp"
         )
-        if actual_train_max is None:
-            actual_train_max = _proof_timestamp(
-                actual_proof, "train_max", "train_end", "train_max_timestamp"
-            )
-        actual_test_min = _proof_timestamp(
+        actual_test_min, test_timestamp_ok = _consistent_timestamp(
             actual, "test_min", "test_start", "test_min_timestamp"
         )
-        if actual_test_min is None:
-            actual_test_min = _proof_timestamp(
-                actual_proof, "test_min", "test_start", "test_min_timestamp"
-            )
         if (
-            actual_train_max is None
-            or actual_test_min is None
+            not train_timestamp_ok
+            or not test_timestamp_ok
             or not _same_time(train_max, actual_train_max)
             or not _same_time(test_min, actual_test_min)
         ):
@@ -1487,6 +1510,8 @@ def _cpcv_chronology_gate_ok(report: ValidationReport) -> bool:
             if fold_id is not None
         ]
     declared_count = aggregate.get("cpcv_fold_count")
+    if declared_count is None and "fold_count" in aggregate:
+        declared_count = aggregate["fold_count"]
     if declared_count is None:
         expected_count = len(expected_ids)
     else:
@@ -1559,12 +1584,14 @@ def promotion_gate(report: ValidationReport, config: dict[str, object]) -> Promo
     if cpcv_evidence_present:
         fold_count = aggregate.get("cpcv_fold_count")
         if fold_count is None:
+            fold_count = aggregate.get("fold_count")
+        if fold_count is None:
             fold_count = len(actual_cpcv_folds)
     else:
         fold_count = aggregate.get("fold_count")
         if fold_count is None:
             fold_count = len(report.folds)
-    if not fold_count:
+    if fold_count is None:
         fold_count = aggregate.get("test_periods")
     try:
         test_periods = int(fold_count or 0)

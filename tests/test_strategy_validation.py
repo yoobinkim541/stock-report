@@ -374,6 +374,7 @@ def test_evaluator_separates_cpcv_fold_count_from_return_observations():
                 "test_min": f"{start}T00:00:00Z",
                 "train_before_test": True,
             },
+            "train_max": f"2023-12-{31 - number:02d}T00:00:00Z",
         })
         run.metrics.update({"path_id": f"cpcv-{number}", "trade_count": 50})
         folds.append(run)
@@ -385,6 +386,84 @@ def test_evaluator_separates_cpcv_fold_count_from_return_observations():
     assert report.aggregate["cpcv_fold_count"] == 2
     assert report.aggregate["cpcv_fold_ids"] == ["cpcv-0", "cpcv-1"]
     assert report.aggregate["cpcv_chronology_ok"] is True
+
+
+def test_cpcv_explicit_zero_fold_count_does_not_fallback_to_observations():
+    fold = {
+        "path_id": "cpcv-0",
+        "validation_mode": "cpcv",
+        "train_max": "2024-01-01T00:00:00Z",
+        "test_start": "2024-01-11T00:00:00Z",
+        "trade_count": 100,
+    }
+    evidence = [{
+        "fold_id": "cpcv-0", "valid": True, "future_training": False,
+        "train_max": "2024-01-01T00:00:00Z", "test_min": "2024-01-11T00:00:00Z",
+        "train_before_test": True,
+    }]
+    aggregate = {
+        "net_cagr": 0.12, "benchmark_excess_cagr": 0.04, "max_drawdown": -0.1,
+        "trade_count": 100, "test_periods": 120, "n_observations": 120,
+        "turnover": 0.3, "dsr": 0.99, "pbo": 0.1, "regime_concentration": 0.2,
+        "provenance_ok": True, "cpcv_future_training": False,
+        "cpcv_fold_ids": ["cpcv-0"], "cpcv_chronology_evidence": evidence,
+        "dsr_evidence": {"tested_configurations": 4, "method": "dsr"},
+        "pbo_evidence": {"tested_configurations": 4, "matrix_shape": [120, 4]},
+    }
+
+    for count_key in ("fold_count", "cpcv_fold_count"):
+        report = ValidationReport.from_dict({
+            "validation_mode": "cpcv",
+            "aggregate": {**aggregate, count_key: 0},
+            "folds": [fold],
+        })
+        decision = promotion_gate(
+            report, {"environment": "pilot", "strictly_chronological": True}
+        )
+
+        assert "cpcv_chronology_evidence" in decision.failed_checks
+        assert "min_test_periods" in decision.failed_checks
+
+
+def test_cpcv_rejects_proof_only_or_conflicting_actual_timestamps():
+    evidence = [{
+        "fold_id": "cpcv-0", "valid": True, "future_training": False,
+        "train_max": "2024-01-01T00:00:00Z", "test_min": "2024-01-11T00:00:00Z",
+        "train_before_test": True,
+    }]
+    base = {
+        "validation_mode": "cpcv",
+        "aggregate": {
+            "net_cagr": 0.12, "benchmark_excess_cagr": 0.04, "max_drawdown": -0.1,
+            "trade_count": 100, "test_periods": 120, "cpcv_fold_count": 1,
+            "cpcv_fold_ids": ["cpcv-0"], "n_observations": 120,
+            "turnover": 0.3, "dsr": 0.99, "pbo": 0.1, "regime_concentration": 0.2,
+            "provenance_ok": True, "cpcv_future_training": False,
+            "cpcv_chronology_evidence": evidence,
+            "dsr_evidence": {"tested_configurations": 4, "method": "dsr"},
+            "pbo_evidence": {"tested_configurations": 4, "matrix_shape": [120, 4]},
+        },
+    }
+    actual_variants = [
+        {
+            "path_id": "cpcv-0", "validation_mode": "cpcv",
+            "chronology_evidence": evidence[0],
+        },
+        {
+            "path_id": "cpcv-0", "validation_mode": "cpcv",
+            "train_max": "2024-01-01T00:00:00Z",
+            "test_min": "2024-01-11T00:00:00Z",
+            "test_start": "2024-01-12T00:00:00Z",
+        },
+    ]
+
+    for actual in actual_variants:
+        report = ValidationReport.from_dict({**base, "folds": [actual]})
+        decision = promotion_gate(
+            report, {"environment": "pilot", "strictly_chronological": True}
+        )
+
+        assert "cpcv_chronology_evidence" in decision.failed_checks
 
 
 def test_missing_provenance_and_age_limits_fail_closed_but_remain_diagnostic():

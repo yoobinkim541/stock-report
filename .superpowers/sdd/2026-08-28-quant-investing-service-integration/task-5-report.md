@@ -153,7 +153,7 @@ Addressed the remaining CPCV evidence findings:
 ### Fix Round 3 Verification
 
 - `./.venv/bin/pytest tests/test_strategy_validation.py -q`
-  - `33 passed`
+  - `35 passed`
 
 ### Fix Round 3 Trade-offs
 
@@ -161,3 +161,25 @@ Addressed the remaining CPCV evidence findings:
   cannot be mistaken for fold counts.
 - Older hand-built CPCV payloads without actual fold IDs and timestamps are
   rejected for activation and remain available only as diagnostics.
+
+## Fix Round 4
+
+Closed the remaining CPCV fail-open paths:
+
+- Explicit `fold_count=0` and `cpcv_fold_count=0` now remain zero for both
+  chronology and minimum-period checks; they cannot fall back to aggregate
+  return observations.
+- Each actual CPCV fold must independently record train and test timestamps in
+  its fold metadata. Chronology proof is compared to those fields by fold ID;
+  proof payloads cannot supply missing actual timestamps, and conflicting
+  aliases are rejected.
+
+### Fix Round 4 Verification
+
+- `./.venv/bin/pytest tests/test_strategy_validation.py -q`
+  - `35 passed`
+
+### Fix Round 4 Trade-offs
+
+- CPCV activation requires richer fold records, so proof-only or incomplete
+  hand-built reports remain diagnostic-only.
