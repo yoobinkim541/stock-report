@@ -7,6 +7,7 @@ import tempfile
 from pathlib import Path
 
 import pytest
+import pandas as pd
 
 # Ensure project root is importable
 sys.path.insert(0, str(Path(__file__).parent.parent))
@@ -18,6 +19,7 @@ from ml.universe import (
     macro_proxies,
     _tickers_from_snapshot,
 )
+from ml.data_pipeline import point_in_time_universe
 
 
 # ---------------------------------------------------------------------------
@@ -45,6 +47,15 @@ def test_seeds_are_nonempty():
     assert len(nasdaq100_seed()) > 50
     assert len(sp500_seed()) > 50
     assert len(macro_proxies()) >= 9
+
+
+def test_point_in_time_universe_does_not_open_invalid_expiry_dates():
+    membership = pd.DataFrame([
+        {"symbol": "A", "effective_from": "2026-01-01", "effective_to": "not-a-date"},
+        {"symbol": "B", "effective_from": "2026-01-01", "effective_to": None},
+    ])
+
+    assert point_in_time_universe(membership, pd.Timestamp("2026-08-28")) == ["B"]
 
 
 def test_seeds_are_uppercase():
@@ -154,3 +165,14 @@ def test_build_universe_no_seeds_no_macro():
         extra_tickers=["FAKE"],
     )
     assert u == ["FAKE"]
+
+
+def test_point_in_time_universe_excludes_future_members():
+    membership = pd.DataFrame([
+        {"symbol": "A", "effective_from": "2026-01-01", "effective_to": "2026-06-30"},
+        {"symbol": "B", "effective_from": "2026-07-01", "effective_to": None},
+    ])
+
+    assert point_in_time_universe(membership, pd.Timestamp("2026-03-01")) == ["A"]
+    assert point_in_time_universe(membership, pd.Timestamp("2026-08-01")) == ["B"]
+    assert point_in_time_universe(membership, pd.Timestamp("2026-06-30T12:00:00Z")) == ["A"]

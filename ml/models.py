@@ -15,10 +15,12 @@ news_feature_ablation(model, ...)  — train/eval with and without news features
 
 from __future__ import annotations
 
-from typing import Optional, Sequence
+from typing import Mapping, Optional, Sequence
 
 import numpy as np
 import pandas as pd
+
+from ml.strategy_studio.contracts import DataSnapshot, ModelProvenance
 
 try:
     import lightgbm as lgb
@@ -32,6 +34,14 @@ try:
     _SKLEARN_AVAILABLE = True
 except ImportError:
     _SKLEARN_AVAILABLE = False
+
+
+_PROFILE_FRESHNESS_SECONDS = {
+    "kr_intraday": 15 * 60,
+    "extended_us": 15 * 60,
+    "global_swing": 3 * 24 * 60 * 60,
+    "bar": 3 * 24 * 60 * 60,
+}
 
 
 # ---------------------------------------------------------------------------
@@ -204,7 +214,14 @@ class ExcessReturnModel:
         return "mean_baseline"
 
 
-def predict_with_metadata(model: object, features: pd.DataFrame, metadata: dict[str, object]) -> dict[str, object]:
+def predict_with_metadata(
+    model: object,
+    features: pd.DataFrame,
+    metadata: dict[str, object],
+    *,
+    evaluation_at: object | None = None,
+    max_data_age_seconds: float | None = None,
+) -> dict[str, object]:
     """Run a registered model only when its prediction contract is complete.
 
     The wrapper deliberately delegates to the model's public prediction method;
@@ -223,7 +240,13 @@ def predict_with_metadata(model: object, features: pd.DataFrame, metadata: dict[
     if not isinstance(features, pd.DataFrame):
         raise TypeError("model features must be a pandas DataFrame")
 
-    expected = metadata.get("feature_names") or metadata.get("feature_columns")
+    provenance = _model_provenance(metadata)
+    provenance_required = bool(metadata.get("require_provenance", False))
+    if provenance_required and provenance is None:
+        missing_provenance = _missing_model_provenance_fields(metadata)
+        raise ValueError(f"model provenance missing: {', '.join(missing_provenance)}")
+
+    expected = metadata.get("feature_names") if _has_metadata_value(metadata.get("feature_names")) else metadata.get("feature_columns")
     if expected is None:
         expected = getattr(model, "feature_names_", None)
     if isinstance(expected, str):
@@ -255,14 +278,208 @@ def predict_with_metadata(model: object, features: pd.DataFrame, metadata: dict[
         ]
         raise ValueError(f"prediction metadata missing: {', '.join(missing_output)}")
 
-    return {
+    warnings: list[str] = []
+    freshness = _data_freshness(
+        features,
+        metadata,
+        evaluation_at=evaluation_at,
+        max_data_age_seconds=max_data_age_seconds,
+    )
+    warnings.extend(freshness["warnings"])
+    if freshness["status"] == "stale":
+        # Preserve predictions for audit/explanation, but make them unusable
+        # to allocation.  Never substitute a newer row from the same frame.
+        confidence = _zero_confidence(confidence)
+
+    result: dict[str, object] = {
         "model_id": str(metadata["model_id"]),
         "feature_version": str(metadata["feature_version"]),
         "model_version": str(metadata["model_version"]),
         "predictions": predictions,
         "confidence": confidence,
         "as_of": as_of,
+        "freshness": freshness,
+        "warnings": list(dict.fromkeys(warnings)),
+        "diagnostics": list(dict.fromkeys(warnings)),
     }
+    if provenance is not None:
+        result["provenance"] = provenance.to_provenance()
+    return result
+
+
+def _model_provenance(metadata: Mapping[str, object]) -> ModelProvenance | None:
+    """Build complete model provenance, returning ``None`` for legacy entries."""
+
+    payload: dict[str, object] = dict(metadata)
+    nested = payload.get("provenance")
+    if isinstance(nested, Mapping):
+        payload = {**dict(nested), **payload}
+    required = _missing_model_provenance_fields(payload)
+    if required:
+        return None
+    try:
+        feature_names = payload.get("feature_names") if _has_metadata_value(payload.get("feature_names")) else payload.get("feature_columns") or ()
+        profiles = payload.get("profiles") if _has_metadata_value(payload.get("profiles")) else payload.get("supported_profiles") or ()
+        return ModelProvenance(
+            model_id=str(payload["model_id"]),
+            feature_version=str(payload["feature_version"]),
+            train_start=str(payload["train_start"]),
+            train_end=str(payload["train_end"]),
+            code_commit=str(payload["code_commit"]),
+            seed=payload["seed"],  # type: ignore[arg-type]
+            metrics=payload.get("metrics") if isinstance(payload.get("metrics"), Mapping) else {},
+            model_version=str(payload.get("model_version") or ""),
+            feature_names=feature_names,  # type: ignore[arg-type]
+            profiles=profiles,  # type: ignore[arg-type]
+        )
+    except (TypeError, ValueError):
+        return None
+
+
+def _missing_model_provenance_fields(metadata: Mapping[str, object]) -> list[str]:
+    required = ("model_id", "feature_version", "model_version", "feature_names", "train_start", "train_end", "code_commit", "seed")
+    missing: list[str] = []
+    for name in required:
+        value = metadata.get(name)
+        if name == "feature_names" and not _has_metadata_value(value):
+            value = metadata.get("feature_columns")
+        if not _has_metadata_value(value) or (name == "feature_names" and not _has_metadata_value(value)):
+            missing.append(name)
+    return missing
+
+
+def _data_freshness(
+    features: pd.DataFrame,
+    metadata: Mapping[str, object],
+    *,
+    evaluation_at: object | None,
+    max_data_age_seconds: float | None,
+) -> dict[str, object]:
+    snapshot = features.attrs.get("data_snapshot") if isinstance(features.attrs, Mapping) else None
+    snapshot = snapshot if isinstance(snapshot, DataSnapshot) else DataSnapshot.from_dict(snapshot) if isinstance(snapshot, Mapping) and "data_stamps" in snapshot else None
+    source_metadata = metadata.get("data") if isinstance(metadata.get("data"), Mapping) else {}
+    data_as_of = (
+        metadata.get("data_available_at") or metadata.get("data_received_at") or metadata.get("data_as_of")
+        or source_metadata.get("available_at") or source_metadata.get("received_at") or source_metadata.get("as_of")
+    )
+    if data_as_of is None and snapshot is not None:
+        data_as_of = snapshot.latest_transport_at
+    evaluated = evaluation_at or metadata.get("evaluation_at")
+    limit_value = max_data_age_seconds
+    if limit_value is None:
+        for key in ("max_data_age_seconds", "freshness_limit_seconds", "data_max_age_seconds", "profile_freshness_seconds"):
+            if metadata.get(key) is not None:
+                limit_value = metadata.get(key)  # type: ignore[assignment]
+                break
+    if limit_value is None:
+        profile = metadata.get("data_profile") or metadata.get("profile")
+        if isinstance(profile, Mapping):
+            limit_value = profile.get("freshness_seconds") or profile.get("max_data_age_seconds")
+        elif profile:
+            limit_value = _PROFILE_FRESHNESS_SECONDS.get(str(profile).strip().lower())
+    warnings: list[str] = []
+    data_timestamp = _metadata_timestamp(data_as_of)
+    evaluation_timestamp = _metadata_timestamp(evaluated)
+    if snapshot is not None:
+        warnings.extend(snapshot.warnings or [])
+    try:
+        limit = None if limit_value is None else float(limit_value)
+    except (TypeError, ValueError):
+        limit = None
+        warnings.append("freshness_limit_invalid")
+    if limit is not None and (not np.isfinite(limit) or limit < 0):
+        limit = None
+        warnings.append("freshness_limit_invalid")
+    if data_timestamp is None:
+        warnings.append("freshness_timestamp_missing")
+        status = "unknown"
+        age = None
+    elif evaluation_timestamp is None:
+        warnings.append("freshness_evaluation_missing")
+        status = "unknown"
+        age = None
+    else:
+        age = (evaluation_timestamp - data_timestamp).total_seconds()
+        if age < 0:
+            warnings.append("future_timestamp")
+            status = "invalid"
+        elif limit is None:
+            warnings.append("freshness_limit_missing")
+            status = "unknown"
+        elif age > limit:
+            warnings.append("data_stale")
+            status = "stale"
+        else:
+            status = "fresh"
+    snapshot_status = (
+        (snapshot.freshness or {}).get("status") if snapshot is not None else None
+    ) or (snapshot.quality if snapshot is not None else "")
+    if snapshot_status in {"stale", "expired"}:
+        warnings.append("data_stale")
+        status = "stale"
+    elif snapshot_status in {"invalid", "missing"}:
+        warnings.append(f"data_quality_{snapshot_status}")
+        status = "invalid" if snapshot_status == "invalid" else "unknown"
+    return {
+        "status": status,
+        "data_as_of": data_timestamp.isoformat() if data_timestamp is not None else None,
+        "evaluation_at": evaluation_timestamp.isoformat() if evaluation_timestamp is not None else None,
+        "age_seconds": age,
+        "max_age_seconds": limit,
+        "warnings": list(dict.fromkeys(warnings)),
+    }
+
+
+def _metadata_timestamp(value: object) -> pd.Timestamp | None:
+    if isinstance(value, (pd.Series, pd.Index, np.ndarray, list, tuple)):
+        values = [_metadata_timestamp(item) for item in list(value)]
+        values = [item for item in values if item is not None]
+        return max(values) if values else None
+    if value is None:
+        return None
+    try:
+        parsed = pd.Timestamp(value)
+    except (TypeError, ValueError):
+        return None
+    try:
+        if bool(pd.isna(parsed)):
+            return None
+    except (TypeError, ValueError):
+        return None
+    if parsed.tzinfo is None:
+        return parsed.tz_localize("UTC")
+    return parsed.tz_convert("UTC")
+
+
+def _has_metadata_value(value: object) -> bool:
+    if value is None:
+        return False
+    if isinstance(value, str):
+        return bool(value.strip())
+    try:
+        missing = pd.isna(value)
+        if isinstance(missing, (bool, np.bool_)) and bool(missing):
+            return False
+    except (TypeError, ValueError):
+        pass
+    try:
+        return len(value) > 0  # type: ignore[arg-type]
+    except TypeError:
+        return True
+
+
+def _zero_confidence(value: object) -> object:
+    if isinstance(value, pd.Series):
+        return pd.Series(0.0, index=value.index, name=value.name)
+    if isinstance(value, pd.DataFrame):
+        return pd.DataFrame(0.0, index=value.index, columns=value.columns)
+    if isinstance(value, np.ndarray):
+        return np.zeros(value.shape, dtype="float64")
+    if isinstance(value, tuple):
+        return tuple(0.0 for _ in value)
+    if isinstance(value, list):
+        return [0.0 for _ in value]
+    return 0.0
 
 
 def _missing_prediction_metadata(value: object) -> bool:

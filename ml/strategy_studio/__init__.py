@@ -1,10 +1,10 @@
 from .engine import CompiledStrategy, StrategyRun, build_signal_panel, compile_strategy, run_strategy_backtest
-from .contracts import DataStamp, FillEvent, OrderIntent, PositionState, SignalOutput, deserialize_event, serialize_event
+from .contracts import DataSnapshot, DataStamp, FillEvent, ModelProvenance, OrderIntent, PositionState, SignalOutput, deserialize_event, serialize_event
 from .execution import ExecutionConfig, ExecutionResult, apply_fills, execute_intents, execution_defaults, run_execution_backtest, to_jsonable
 from .patch import apply_strategy_patch, diff_strategy_specs
 from .presets import builtin_strategy_presets
 from .report import build_strategy_report
-from .registry import RegisteredModel, SignalProvider, get_model, get_signal_provider, register_model, register_signal_provider
+from .registry import RegisteredModel, SignalProvider, build_model_provenance, get_model, get_model_provenance, get_signal_provider, model_provenance_missing_fields, register_model, register_signal_provider
 from .signals import SignalPanel, combine_signal_panels
 from .validation import (
     PromotionDecision,
@@ -32,6 +32,8 @@ from .spec import (
 __all__ = [
     "StrategySpec",
     "DataStamp",
+    "DataSnapshot",
+    "ModelProvenance",
     "SignalOutput",
     "OrderIntent",
     "FillEvent",
@@ -55,6 +57,9 @@ __all__ = [
     "get_signal_provider",
     "register_model",
     "get_model",
+    "get_model_provenance",
+    "build_model_provenance",
+    "model_provenance_missing_fields",
     "strategy_spec_hash",
     "validate_strategy_spec",
     "serialize_event",

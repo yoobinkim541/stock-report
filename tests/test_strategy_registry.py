@@ -8,7 +8,12 @@ from ml.strategy_studio.registry import (
     get_signal_provider,
     register_model,
     register_signal_provider,
+    get_model_provenance,
 )
+from ml.models import predict_with_metadata
+from ml.strategy_studio.contracts import ModelProvenance
+
+import pandas as pd
 
 
 def test_signal_registry_returns_registered_provider():
@@ -41,3 +46,73 @@ def test_model_registry_preserves_model_and_metadata():
     assert registered.model is model
     assert registered.metadata == metadata
     assert get_model("task-2-missing") is None
+
+
+def test_model_provenance_rejects_missing_required_training_metadata():
+    with pytest.raises(ValueError, match="train_end"):
+        ModelProvenance(
+            model_id="model-v1",
+            feature_version="features-v1",
+            train_start="2025-01-01T00:00:00Z",
+            train_end="",
+            code_commit="abc123",
+            seed=42,
+            metrics={},
+        )
+
+
+def test_model_prediction_uses_stale_fallback_with_visible_warning():
+    class FixedModel:
+        feature_names_ = ["close"]
+
+        def predict(self, features):
+            return [0.25] * len(features)
+
+    features = pd.DataFrame({"close": [100.0, 101.0]})
+    result = predict_with_metadata(
+        FixedModel(),
+        features,
+        {
+            "model_id": "stale-model",
+            "feature_version": "features-v1",
+            "model_version": "stale-v1",
+            "as_of": "2026-08-27T00:00:00Z",
+            "confidence": [0.9, 0.9],
+            "feature_names": ["close"],
+            "train_start": "2025-01-01T00:00:00Z",
+            "train_end": "2026-08-27T00:00:00Z",
+            "code_commit": "abc123",
+            "seed": 42,
+            "data_as_of": "2026-08-28T09:00:00Z",
+            "evaluation_at": "2026-08-28T10:00:00Z",
+            "max_data_age_seconds": 60,
+        },
+    )
+
+    assert result["confidence"] == [0.0, 0.0]
+    assert "data_stale" in result["warnings"]
+
+
+def test_model_registry_exposes_complete_provenance_for_validation():
+    model = object()
+    register_model(
+        "complete-provenance-model",
+        model,
+        {
+            "model_id": "complete-provenance-model",
+            "feature_version": "features-v1",
+            "model_version": "model-v1",
+            "feature_names": ["close"],
+            "train_start": "2025-01-01T00:00:00Z",
+            "train_end": "2026-08-27T00:00:00Z",
+            "code_commit": "abc123",
+            "seed": 42,
+            "metrics": {"sharpe": 1.2},
+        },
+    )
+
+    provenance = get_model_provenance("complete-provenance-model")
+
+    assert provenance is not None
+    assert provenance.train_end == "2026-08-27T00:00:00+00:00"
+    assert provenance.to_provenance()["model"]["model_version"] == "model-v1"

@@ -31,11 +31,13 @@ import os
 import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Literal
+from typing import Any, Iterable, Literal, Mapping
 
 import numpy as np
 import pandas as pd
 import requests
+
+from ml.strategy_studio.contracts import DataSnapshot, DataStamp
 
 logger = logging.getLogger(__name__)
 
@@ -47,6 +49,495 @@ PRICE_TTL_H = 6   # 가격 캐시 유효시간 (시간)
 PRICE_MAX_RETRIES   = 3            # 배치별 최대 재시도 횟수
 PRICE_BACKOFF_BASE  = 2.0          # 지수 백오프 기준 (2s·4s·8s)
 PRICE_SHRINK_STEPS  = (20, 10, 5)  # 반복 실패 시 배치 크기 동적 축소 단계
+
+
+# ── 데이터 시점·provenance ───────────────────────────────────────────────────
+
+def _metadata_value(frame: pd.DataFrame, *names: str) -> object | None:
+    attrs = frame.attrs if isinstance(frame.attrs, Mapping) else {}
+    for name in names:
+        value = attrs.get(name)
+        if not _is_missing_value(value) and str(value).strip() != "":
+            return value
+    return None
+
+
+def _timestamp_or_none(value: object) -> pd.Timestamp | None:
+    if value is None:
+        return None
+    try:
+        parsed = pd.Timestamp(value)
+    except (TypeError, ValueError):
+        return None
+    try:
+        if bool(pd.isna(parsed)):
+            return None
+    except (TypeError, ValueError):
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.tz_localize("UTC")
+    else:
+        parsed = parsed.tz_convert("UTC")
+    return parsed
+
+
+def _timestamp_text(value: object, field_name: str) -> str:
+    if value is None:
+        raise ValueError(f"{field_name} must be an ISO timestamp")
+    try:
+        parsed = pd.Timestamp(value)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"{field_name} must be an ISO timestamp") from exc
+    try:
+        invalid = bool(pd.isna(parsed))
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"{field_name} must be an ISO timestamp") from exc
+    if invalid:
+        raise ValueError(f"{field_name} must be an ISO timestamp")
+    if parsed.tzinfo is None:
+        parsed = parsed.tz_localize("UTC")
+    return parsed.isoformat()
+
+
+def _column_lookup(frame: pd.DataFrame) -> dict[str, object]:
+    return {str(column).strip().lower().replace(" ", "_"): column for column in frame.columns}
+
+
+def _row_number(value: object) -> float | None:
+    if value is None:
+        return None
+    try:
+        if bool(pd.isna(value)):
+            return None
+    except (TypeError, ValueError):
+        return None
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return None
+    return number if np.isfinite(number) and number >= 0 else None
+
+
+def _is_missing_value(value: object) -> bool:
+    if value is None:
+        return True
+    try:
+        return bool(pd.isna(value))
+    except (TypeError, ValueError):
+        return False
+
+
+def _snapshot_stamps(value: object) -> DataSnapshot | None:
+    if isinstance(value, DataSnapshot):
+        return value
+    if isinstance(value, Mapping):
+        try:
+            return DataSnapshot.from_dict(value)
+        except (TypeError, ValueError):
+            return None
+    return None
+
+
+def normalize_data_snapshot(
+    frame: pd.DataFrame,
+    *,
+    symbol: str,
+    source: str,
+    timeframe: str,
+    session: str,
+    adjustment: str,
+    received_at: object | None = None,
+    available_at: object | None = None,
+    raw_ref: str | None = None,
+    quality: str | None = None,
+) -> DataSnapshot:
+    """Normalize a price frame into deterministic, point-in-time metadata.
+
+    The market index is the event time.  Receipt defaults to the instant this
+    normalizer receives the frame, while availability is only populated when a
+    collector explicitly supplies it; no event time is reused as a transport
+    timestamp.  A supplied ``frame.attrs`` value is retained as-is after ISO
+    normalization.
+    """
+
+    if not isinstance(frame, pd.DataFrame):
+        raise TypeError("frame must be a pandas DataFrame")
+    # DataStamp performs the required textual validation without changing the
+    # legacy frame.  The local values are used below so no caller-owned attrs
+    # or columns are mutated.
+    symbol_text = str(symbol or "").strip()
+    source_text = str(source or "").strip()
+    timeframe_text = str(timeframe or "").strip()
+    session_text = str(session or "").strip()
+    adjustment_text = str(adjustment or "").strip()
+    if not symbol_text:
+        raise ValueError("symbol is required")
+    if not source_text:
+        raise ValueError("source is required")
+    if not timeframe_text:
+        raise ValueError("timeframe is required")
+    if not session_text:
+        raise ValueError("session is required")
+    if not adjustment_text:
+        raise ValueError("adjustment is required")
+
+    supplied_received = received_at if received_at is not None else _metadata_value(frame, "received_at", "retrieved_at", "fetched_at")
+    # Normalization is the collector boundary, so this is an observed receipt
+    # time rather than a fabricated market timestamp.  Callers can provide a
+    # fixed value for replay and tests.
+    if supplied_received is None:
+        supplied_received = datetime.now(timezone.utc)
+    received_text = _timestamp_text(supplied_received, "received_at")
+    supplied_available = available_at if available_at is not None else _metadata_value(frame, "available_at")
+    available_text = _timestamp_text(supplied_available, "available_at") if supplied_available is not None else None
+    raw_reference = raw_ref if raw_ref is not None else _metadata_value(frame, "raw_ref", "raw_path", "source_ref")
+    raw_text = str(raw_reference).strip() if raw_reference is not None and str(raw_reference).strip() else None
+    explicit_quality = quality if quality is not None else _metadata_value(frame, "quality")
+    columns = _column_lookup(frame)
+    records: list[tuple[pd.Timestamp, int, pd.Series, str]] = []
+    warnings: list[str] = []
+    original_events: list[pd.Timestamp] = []
+    has_invalid_stamp = False
+    for position, (raw_index, row) in enumerate(frame.iterrows()):
+        event = _timestamp_or_none(raw_index)
+        if event is None:
+            warnings.append("invalid_event_timestamp")
+            has_invalid_stamp = True
+            continue
+        original_events.append(event)
+        raw_event = pd.Timestamp(raw_index)
+        if raw_event.tzinfo is None:
+            raw_event = raw_event.tz_localize("UTC")
+        records.append((event, position, row, raw_event.isoformat()))
+    if any(right < left for left, right in zip(original_events, original_events[1:])):
+        warnings.append("timestamp_order_non_monotonic")
+    records.sort(key=lambda item: (item[0].value, item[1]))
+    seen: set[int] = set()
+    stamps: list[DataStamp] = []
+    has_missing_value = False
+    has_invalid_value = False
+    for event, _, row, event_text in records:
+        event_key = int(event.value)
+        if event_key in seen:
+            warnings.append("duplicate_event_timestamp")
+            continue
+        seen.add(event_key)
+        values: dict[str, float | None] = {}
+        for field_name in ("open", "high", "low", "close", "volume"):
+            column = columns.get(field_name)
+            if column is None:
+                values[field_name] = None
+                continue
+            raw_value = row[column]
+            value = _row_number(raw_value)
+            values[field_name] = value
+            if _is_missing_value(raw_value):
+                has_missing_value = True
+            elif value is None:
+                has_invalid_value = True
+        row_received = row[columns["received_at"]] if "received_at" in columns else received_text
+        row_available = row[columns["available_at"]] if "available_at" in columns else available_text
+        if _is_missing_value(row_received):
+            row_received = received_text
+        if _is_missing_value(row_available):
+            row_available = available_text
+        try:
+            stamp = DataStamp(
+                symbol=symbol_text,
+                timestamp=event_text,
+                source=source_text,
+                timeframe=timeframe_text,
+                quality=str(explicit_quality or "complete").strip().lower() or "unknown",
+                session=session_text,
+                adjustment=adjustment_text,
+                received_at=row_received,
+                available_at=row_available,
+                open=values["open"],
+                high=values["high"],
+                low=values["low"],
+                close=values["close"],
+                volume=values["volume"],
+            )
+        except (TypeError, ValueError) as exc:
+            # Keep the event in the audit trail without coercing an invalid
+            # price into a plausible numeric value.
+            warnings.append(f"invalid_stamp:{exc}")
+            has_invalid_stamp = True
+            stamp = DataStamp(
+                symbol=symbol_text,
+                timestamp=event_text,
+                source=source_text,
+                timeframe=timeframe_text,
+                quality="invalid",
+                session=session_text,
+                adjustment=adjustment_text,
+                received_at=None,
+                available_at=None,
+                metadata={"normalization_error": str(exc)},
+            )
+        stamps.append(stamp)
+    observed_quality = (
+        "missing" if not stamps else
+        "invalid" if has_invalid_value or has_invalid_stamp else
+        "incomplete" if has_missing_value else
+        "complete"
+    )
+    snapshot_quality = _merge_snapshot_quality(explicit_quality, observed_quality)
+    if not frame.empty and supplied_available is None:
+        warnings.append("available_at_missing")
+    snapshot = DataSnapshot(
+        data_stamps=stamps,
+        raw_ref=raw_text,
+        quality=snapshot_quality,
+        warnings=list(dict.fromkeys(warnings)),
+    )
+    return snapshot
+
+
+def _merge_snapshot_quality(explicit_quality: object | None, observed_quality: str) -> str:
+    """Keep source quality while preventing observed defects from being hidden."""
+
+    explicit = str(explicit_quality or "").strip().lower()
+    if not explicit:
+        return observed_quality
+    if observed_quality == "invalid" or explicit in {"invalid", "error"}:
+        return "invalid"
+    if observed_quality == "missing" or explicit in {"missing", "empty"}:
+        return "missing"
+    if observed_quality == "incomplete" or explicit in {"incomplete", "partial"}:
+        return "incomplete"
+    return explicit
+
+
+def source_freshness(
+    snapshot: DataSnapshot,
+    *,
+    evaluation_at: object | None = None,
+    max_age_seconds: float | None = None,
+) -> dict[str, Any]:
+    """Return deterministic freshness status for the latest usable stamp."""
+
+    if not isinstance(snapshot, DataSnapshot):
+        raise TypeError("snapshot must be a DataSnapshot")
+    warnings = list(snapshot.warnings or [])
+    if any(stamp.received_at is None for stamp in snapshot.data_stamps):
+        warnings.append("received_at_missing")
+    if any(stamp.available_at is None for stamp in snapshot.data_stamps):
+        warnings.append("available_at_missing")
+    latest = snapshot.latest_transport_at
+    evaluation = _timestamp_or_none(evaluation_at)
+    limit: float | None
+    try:
+        limit = None if max_age_seconds is None else float(max_age_seconds)
+    except (TypeError, ValueError):
+        limit = None
+        warnings.append("freshness_limit_invalid")
+    if limit is not None and (not np.isfinite(limit) or limit < 0):
+        limit = None
+        warnings.append("freshness_limit_invalid")
+    if latest is None:
+        warnings.append("freshness_timestamp_missing")
+        status = "unknown"
+        age = None
+    elif evaluation is None:
+        warnings.append("freshness_evaluation_missing")
+        status = "unknown"
+        age = None
+    else:
+        latest_dt = _timestamp_or_none(latest)
+        age = (evaluation - latest_dt).total_seconds() if latest_dt is not None else None
+        if age is None:
+            warnings.append("freshness_timestamp_invalid")
+            status = "unknown"
+        elif age < 0:
+            warnings.append("future_timestamp")
+            status = "invalid"
+        elif limit is None:
+            warnings.append("freshness_limit_missing")
+            status = "unknown"
+        elif age > limit:
+            warnings.append("data_stale")
+            status = "stale"
+        else:
+            status = "fresh"
+    if snapshot.quality in {"stale", "expired"}:
+        warnings.append("data_stale")
+        status = "stale" if status == "fresh" else status
+    elif snapshot.quality in {"invalid", "missing"}:
+        warnings.append(f"data_quality_{snapshot.quality}")
+        status = "invalid" if snapshot.quality == "invalid" else "unknown"
+    return {
+        "status": status,
+        "as_of": snapshot.event_end,
+        "received_at": snapshot.latest_received_at,
+        "available_at": snapshot.latest_available_at,
+        "age_seconds": age,
+        "max_age_seconds": limit,
+        "warnings": list(dict.fromkeys(str(value) for value in warnings)),
+    }
+
+
+def source_coverage(
+    snapshots: DataSnapshot | Iterable[DataSnapshot],
+    *,
+    expected_symbols: Iterable[str] | None = None,
+    expected_start: object | None = None,
+    expected_end: object | None = None,
+    evaluation_at: object | None = None,
+    max_age_seconds: float | None = None,
+) -> dict[str, Any]:
+    """Summarize symbol coverage and freshness without hiding missing inputs."""
+
+    if isinstance(snapshots, DataSnapshot):
+        values = [snapshots]
+    else:
+        values = list(snapshots)
+    if any(not isinstance(snapshot, DataSnapshot) for snapshot in values):
+        raise TypeError("snapshots must contain DataSnapshot values")
+    values.sort(key=lambda snapshot: (snapshot.snapshot_id or "", snapshot.event_start or ""))
+    expected = sorted({str(symbol).strip().upper() for symbol in (expected_symbols or []) if str(symbol).strip()})
+    start = _timestamp_or_none(expected_start)
+    end = _timestamp_or_none(expected_end)
+    warnings: list[str] = []
+    sources: dict[str, dict[str, Any]] = {}
+    observed: set[str] = set()
+    grouped: dict[str, list[DataStamp]] = {}
+    source_refs: dict[str, str | None] = {}
+    source_qualities: dict[str, list[str]] = {}
+    source_warnings: dict[str, list[str]] = {}
+    for snapshot in values:
+        stamps = [
+            stamp for stamp in snapshot.data_stamps
+            if (start is None or (_timestamp_or_none(stamp.timestamp) or start) >= start)
+            and (end is None or (_timestamp_or_none(stamp.timestamp) or end) <= end)
+        ]
+        for stamp in stamps:
+            grouped.setdefault(stamp.source, []).append(stamp)
+            observed.add(stamp.symbol)
+            source_refs.setdefault(stamp.source, snapshot.raw_ref)
+            source_qualities.setdefault(stamp.source, []).append(snapshot.quality)
+            source_warnings.setdefault(stamp.source, []).extend(snapshot.warnings or [])
+    for source, source_stamps in sorted(grouped.items()):
+        source_symbols = sorted({stamp.symbol for stamp in source_stamps})
+        qualities = source_qualities.get(source, [])
+        aggregate_quality = _aggregate_snapshot_quality(qualities)
+        source_snapshot = DataSnapshot(
+            source_stamps,
+            source_refs.get(source),
+            aggregate_quality,
+            warnings=list(dict.fromkeys(source_warnings.get(source, []))),
+        )
+        freshness = source_freshness(source_snapshot, evaluation_at=evaluation_at, max_age_seconds=max_age_seconds)
+        source_expected = expected or source_symbols
+        missing = sorted(set(source_expected) - set(source_symbols))
+        ratio = len(set(source_symbols) & set(source_expected)) / len(source_expected) if source_expected else 1.0
+        source_info = {
+            "symbols": source_symbols,
+            "symbol_count": len(source_symbols),
+            "observations": len(source_stamps),
+            "coverage_ratio": ratio,
+            "missing_symbols": missing,
+            "quality": source_snapshot.quality,
+            "freshness": freshness,
+            "event_start": source_snapshot.event_start,
+            "event_end": source_snapshot.event_end,
+        }
+        sources[source] = source_info
+        warnings.extend(f"{source}:{warning}" for warning in freshness["warnings"])
+        warnings.extend(f"{source}:missing_symbol:{symbol}" for symbol in missing)
+    missing_symbols = sorted(set(expected) - observed)
+    coverage_ratio = len(observed & set(expected)) / len(expected) if expected else (1.0 if observed or not values else 0.0)
+    if missing_symbols:
+        warnings.extend(f"missing_symbol:{symbol}" for symbol in missing_symbols)
+    if not values:
+        warnings.append("source_snapshot_missing")
+    unhealthy_qualities = {"invalid", "incomplete", "missing", "stale", "expired", "unknown"}
+    unhealthy_sources = any(info["quality"] in unhealthy_qualities for info in sources.values())
+    return {
+        "expected_symbols": expected,
+        "observed_symbols": sorted(observed),
+        "missing_symbols": missing_symbols,
+        "coverage_ratio": coverage_ratio,
+        "source_count": len(sources),
+        "sources": sources,
+        "warnings": list(dict.fromkeys(warnings)),
+        "ok": bool(values) and not missing_symbols and not unhealthy_sources and not any("data_stale" in warning for warning in warnings),
+    }
+
+
+def _aggregate_snapshot_quality(qualities: Iterable[str]) -> str:
+    """Select the most conservative quality label from source snapshots."""
+
+    values = {str(value).strip().lower() for value in qualities if str(value).strip()}
+    for quality in ("invalid", "missing", "stale", "expired", "incomplete", "unknown", "complete"):
+        if quality in values:
+            return quality
+    return "unknown"
+
+
+def point_in_time_universe(symbols: pd.DataFrame, as_of: pd.Timestamp) -> list[str]:
+    """Return members whose inclusive effective interval contains ``as_of``."""
+
+    if not isinstance(symbols, pd.DataFrame):
+        raise TypeError("symbols must be a pandas DataFrame")
+    required = {"symbol", "effective_from"}
+    missing = sorted(required - set(symbols.columns))
+    if missing:
+        raise ValueError(f"universe membership metadata missing: {', '.join(missing)}")
+    cutoff = _timestamp_or_none(as_of)
+    if cutoff is None:
+        raise ValueError("as_of must be a valid timestamp")
+    members: set[str] = set()
+    for _, row in symbols.iterrows():
+        raw_symbol = row.get("symbol")
+        if _is_missing_value(raw_symbol):
+            continue
+        symbol = str(raw_symbol).strip().upper()
+        start = _membership_boundary(row.get("effective_from"))
+        has_end = "effective_to" in symbols.columns and not _is_missing_value(row.get("effective_to"))
+        end = _membership_boundary(row.get("effective_to"), end=True) if has_end else None
+        if not symbol or start is None:
+            continue
+        if has_end and end is None:
+            continue
+        if start <= cutoff and (end is None or cutoff <= end):
+            members.add(symbol)
+    return sorted(members)
+
+
+def _membership_boundary(value: object, *, end: bool = False) -> pd.Timestamp | None:
+    parsed = _timestamp_or_none(value)
+    if parsed is None:
+        return None
+    # Date-only interval endpoints are calendar dates, not instants at midnight.
+    text = str(value).strip() if isinstance(value, str) else ""
+    if end and len(text) == 10 and text[4] == "-" and text[7] == "-":
+        return parsed + pd.Timedelta(days=1) - pd.Timedelta(nanoseconds=1)
+    return parsed
+
+
+def _attach_snapshot_metadata(
+    frame: pd.DataFrame,
+    *,
+    symbol: str,
+    source: str,
+    timeframe: str,
+    session: str,
+    adjustment: str,
+) -> pd.DataFrame:
+    """Attach provenance while returning the collector's original frame."""
+
+    snapshot = normalize_data_snapshot(
+        frame,
+        symbol=symbol,
+        source=source,
+        timeframe=timeframe,
+        session=session,
+        adjustment=adjustment,
+    )
+    frame.attrs["data_snapshot"] = snapshot
+    frame.attrs["provenance"] = snapshot.to_provenance().get("data", {})
+    return frame
 
 # 포트폴리오 보유 종목 (universe 'portfolio' 모드) — 단일 소스에서 파생
 try:
@@ -258,6 +749,10 @@ def _store_batch_result(
                 df = raw.xs(ticker, axis=1, level=1).dropna(how="all").copy()
                 df.index = pd.to_datetime(df.index).tz_localize(None)
                 if len(df) > 10:
+                    _attach_snapshot_metadata(
+                        df, symbol=ticker, source="yfinance", timeframe="1d",
+                        session="regular", adjustment="adjusted",
+                    )
                     result[ticker] = df
                     _save_cache(f"price_{ticker}_{days}d", df)
             except Exception:
@@ -269,6 +764,10 @@ def _store_batch_result(
             df = raw.dropna(how="all").copy()
             df.index = pd.to_datetime(df.index).tz_localize(None)
             if len(df) > 10:
+                _attach_snapshot_metadata(
+                    df, symbol=ticker, source="yfinance", timeframe="1d",
+                    session="regular", adjustment="adjusted",
+                )
                 result[ticker] = df
                 _save_cache(f"price_{ticker}_{days}d", df)
         except Exception:
@@ -649,6 +1148,12 @@ def build_ml_dataset(
     # 가격 다운로드 (벤치마크 포함)
     all_tickers = list(set(universe + [benchmark_ticker, "QQQ", "SPY", "^VIX", "HYG", "LQD", "IEF", "TLT"]))
     prices = fetch_prices(all_tickers, days=days)
+    price_snapshots = {
+        ticker: snapshot
+        for ticker, frame in sorted(prices.items())
+        if (snapshot := _snapshot_stamps(frame.attrs.get("data_snapshot"))) is not None
+    }
+    coverage = source_coverage(price_snapshots.values(), expected_symbols=sorted(all_tickers))
 
     # Fear/Greed proxy
     fg = build_fear_greed_proxy(days=days)
@@ -730,11 +1235,18 @@ def build_ml_dataset(
     if not all_features:
         logger.warning("유효 종목 없음 — 빈 데이터셋 반환")
         return {"features": pd.DataFrame(), "returns": pd.Series(), "excess": pd.Series(),
-                "universe": [], "fg_score": fg, "meta": {}}
+                "universe": [], "fg_score": fg, "meta": {
+                    "source_coverage": coverage,
+                    "data_snapshots": {ticker: snapshot.to_dict() for ticker, snapshot in price_snapshots.items()},
+                }}
 
     features = pd.concat(all_features)
     returns  = pd.concat(all_returns).rename("fwd_return")
     excess   = pd.concat(all_excess).rename("fwd_excess")
+    features.attrs["source_coverage"] = coverage
+    features.attrs["data_snapshots"] = {
+        ticker: snapshot.to_dict() for ticker, snapshot in price_snapshots.items()
+    }
 
     logger.info(
         "데이터셋 완성: %d행 × %d피처 | 종목 %d개",
@@ -758,6 +1270,8 @@ def build_ml_dataset(
                              if membership_intervals is not None else
                              "현재 구성종목 기준 — survivorship bias 있음"),
             "built_at": datetime.now(timezone.utc).isoformat(),
+            "source_coverage": coverage,
+            "data_snapshots": {ticker: snapshot.to_dict() for ticker, snapshot in price_snapshots.items()},
         },
     }
 
