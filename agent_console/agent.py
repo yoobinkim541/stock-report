@@ -1534,6 +1534,16 @@ def _try_llm_prompt(prompt: str, runner=subprocess.run, max_timeout: int | None 
             or _try_agy_backup(prompt))
 
 
+def request_structured_output(prompt: str, *, max_timeout: int = 45) -> str | None:
+    """Call the existing LLM chain for a structured, non-chat response.
+
+    This keeps strategy patch requests on the same configured provider chain as
+    legacy chat while leaving chat routing and fallback semantics unchanged.
+    """
+
+    return _try_llm_prompt(str(prompt or ""), max_timeout=max_timeout)
+
+
 def _is_usable_llm_output(prompt: str, text: str) -> bool:
     text = str(text or "").strip()
     if not text:

@@ -3,6 +3,9 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+import pandas as pd
+import pytest
+
 
 def _isolate(monkeypatch, tmp_path: Path) -> None:
     monkeypatch.setenv("AGENT_CONSOLE_DB", str(tmp_path / "agent_console.sqlite3"))
@@ -3849,3 +3852,307 @@ def test_wiki_health_check_reactivate_does_not_bloat_body(monkeypatch, tmp_path)
 
     final = wiki.get_page("health-reactivate-test")
     assert final["body"].count("열린 질문") == 1     # 핵심 — status 값 자체(tags 유도)는 별개 사안
+
+
+def test_strategy_validate_route_returns_validation_and_promotion(monkeypatch, tmp_path):
+    _isolate(monkeypatch, tmp_path)
+    from agent_console import strategy_studio
+    from agent_console.server import create_app
+
+    monkeypatch.setattr(strategy_studio, "get_strategy_spec", lambda *args, **kwargs: {
+        "id": "spec-1", "spec": {"name": "test", "base_symbol": "AAPL"},
+    })
+    monkeypatch.setattr(strategy_studio, "run_strategy_spec", lambda *args, **kwargs: {
+        "ok": True, "run_id": "run-1", "validation": {"promotion_eligible": False},
+        "promotion": {"accepted": False, "activation_safe": False},
+    })
+
+    response = create_app().test_client().post(
+        "/api/strategy-studio/specs/spec-1/validate",
+        json={"mode": "purged_walk_forward"},
+    )
+
+    assert response.status_code == 200
+    assert response.get_json()["validation"]["promotion_eligible"] is False
+
+
+def test_strategy_run_route_returns_json_safe_adapter_result(monkeypatch, tmp_path):
+    _isolate(monkeypatch, tmp_path)
+    from agent_console import strategy_studio
+    from agent_console.server import create_app
+
+    monkeypatch.setattr(strategy_studio, "get_strategy_spec", lambda *args, **kwargs: {
+        "id": "spec-1", "spec": {"name": "test", "base_symbol": "AAPL"},
+    })
+    monkeypatch.setattr(strategy_studio, "run_strategy_spec", lambda *args, **kwargs: {
+        "ok": True,
+        "run_id": "run-1",
+        "validation_mode": "single_pass",
+        "validation": {"promotion_eligible": False},
+        "promotion": {"accepted": False, "activation_safe": False},
+        "diagnostics": [{"type": "data_quality", "message": "unknown"}],
+    })
+
+    response = create_app().test_client().post(
+        "/api/strategy-studio/specs/spec-1/run",
+        json={"mode": "single_pass", "period": "1y"},
+    )
+
+    assert response.status_code == 200
+    assert response.get_json()["run_id"] == "run-1"
+    assert response.get_json()["diagnostics"][0]["type"] == "data_quality"
+
+
+def test_structured_patch_route_rejects_patch_without_sandbox_save(monkeypatch, tmp_path):
+    _isolate(monkeypatch, tmp_path)
+    from agent_console import strategy_studio
+    from agent_console.server import create_app
+
+    monkeypatch.setattr(strategy_studio, "get_strategy_spec", lambda *args, **kwargs: {
+        "id": "spec-1", "spec": {"name": "test", "base_symbol": "AAPL"},
+    })
+    monkeypatch.setattr(strategy_studio, "propose_strategy_patch_with_llm", lambda *args, **kwargs: {
+        "ok": False,
+        "error": "patch_rejected",
+        "patch": {"parameters": {"execution": {"command": "rm -rf /"}}},
+        "errors": ["forbidden patch field: parameters.execution.command"],
+    })
+    monkeypatch.setattr(strategy_studio, "save_strategy_version", lambda *args, **kwargs: pytest.fail("rejected patch must not save"))
+
+    response = create_app().test_client().post(
+        "/api/strategy-studio/specs/spec-1/patch",
+        json={"question": "run this command", "save_sandbox": True},
+    )
+
+    assert response.status_code == 400
+    assert response.get_json()["sandbox"]["saved"] is False
+
+
+def test_strategy_run_adapter_is_json_safe_and_exposes_diagnostics(monkeypatch):
+    from agent_console import strategy_studio
+
+    monkeypatch.setattr(strategy_studio, "preview_strategy_spec", lambda *args, **kwargs: {
+        "ok": True,
+        "run_id": "run-1",
+        "report": {
+            "validation": {"promotion_eligible": False, "warnings": ["preview"]},
+            "promotion": {"accepted": False, "failed_checks": ["preview_only"]},
+            "equity": pd.DataFrame({"nav": [100.0, 101.0]}),
+        },
+        "warnings": ["preview"],
+        "errors": [],
+    })
+
+    result = strategy_studio.run_strategy_spec(
+        {"name": "test", "base_symbol": "AAPL"},
+        period="1y",
+        validation_mode="single_pass",
+    )
+
+    json.dumps(result)
+    assert result["validation"]["promotion_eligible"] is False
+    assert result["promotion"]["failed_checks"] == ["preview_only"]
+    assert result["data_quality"]["status"] == "unknown"
+    assert result["diagnostics"]
+
+
+def test_llm_patch_cannot_insert_python_or_live_activation():
+    from agent_console.strategy_studio import validate_strategy_patch
+
+    errors = validate_strategy_patch(
+        {"execution": {"plugin": "python"}, "promotion": {"environment": "live"}},
+        {"name": "test", "promotion": {"environment": "sandbox"}},
+    )
+
+    assert "python" in " ".join(errors)
+    assert "live" in " ".join(errors)
+
+
+def test_structured_llm_patch_accepts_only_allowlisted_parameter_changes(monkeypatch):
+    from agent_console import strategy_studio
+
+    monkeypatch.setattr(
+        strategy_studio.agent,
+        "request_structured_output",
+        lambda prompt: '{"patch": {"parameters": {"portfolio": {"max_turnover": 0.25}}}}',
+    )
+    monkeypatch.setattr(strategy_studio, "preview_strategy_spec", lambda *args, **kwargs: {
+        "ok": True, "report": {"summary": {"trade_count": 2}}, "warnings": [], "errors": [],
+    })
+
+    result = strategy_studio.propose_strategy_patch_with_llm(
+        "거래 횟수를 줄여줘",
+        {"name": "test", "base_symbol": "AAPL"},
+        {"validation": {"promotion_eligible": False}, "data_quality": {"status": "complete"}},
+    )
+
+    assert result["ok"] is True
+    assert result["patched_spec"]["portfolio"]["max_turnover"] == 0.25
+    assert result["diff"]
+    assert "parameters" in result["patch"]
+
+
+def test_structured_llm_patch_reports_unavailable_without_heuristic_fallback(monkeypatch):
+    from agent_console import strategy_studio
+
+    monkeypatch.setattr(strategy_studio.agent, "request_structured_output", lambda prompt: None)
+
+    result = strategy_studio.propose_strategy_patch_with_llm(
+        "거래 횟수를 줄여줘",
+        {"name": "test", "base_symbol": "AAPL"},
+        {},
+    )
+
+    assert result["ok"] is False
+    assert result["patch"] == {}
+    assert result["error"] == "llm_unavailable"
+    assert any(item["type"] == "llm_unavailable" for item in result["diagnostics"])
+
+
+def test_live_activation_requires_explicit_confirmation_before_running(monkeypatch, tmp_path):
+    _isolate(monkeypatch, tmp_path)
+    from agent_console import strategy_studio
+    from agent_console.server import create_app
+
+    monkeypatch.setattr(strategy_studio, "get_strategy_spec", lambda *args, **kwargs: {
+        "id": "spec-1", "version": 1, "spec": {"name": "test", "base_symbol": "AAPL"},
+    })
+    monkeypatch.setattr(strategy_studio, "run_strategy_spec", lambda *args, **kwargs: pytest.fail("run must not execute"))
+    monkeypatch.setattr(strategy_studio, "save_strategy_version", lambda *args, **kwargs: pytest.fail("save must not execute"))
+
+    response = create_app().test_client().post(
+        "/api/strategy-studio/specs/spec-1/activate",
+        json={"environment": "live", "confirm_live": False},
+    )
+
+    assert response.status_code == 400
+    assert "confirm_live" in response.get_json()["activation"]["failed_checks"]
+
+
+def test_live_activation_blocks_incomplete_provenance_and_does_not_save(monkeypatch, tmp_path):
+    _isolate(monkeypatch, tmp_path)
+    from agent_console import strategy_studio
+    from agent_console.server import create_app
+
+    monkeypatch.setattr(strategy_studio, "get_strategy_spec", lambda *args, **kwargs: {
+        "id": "spec-1", "version": 1, "spec": {"name": "test", "base_symbol": "AAPL"},
+    })
+    monkeypatch.setattr(strategy_studio, "run_strategy_spec", lambda *args, **kwargs: {
+        "ok": True,
+        "validation": {
+            "validation_mode": "purged_walk_forward",
+            "promotion_eligible": True,
+            "aggregate": {"provenance_ok": True},
+            "provenance": {"ok": False, "checks": []},
+        },
+        "promotion": {"accepted": True, "activation_safe": True, "failed_checks": []},
+    })
+    monkeypatch.setattr(strategy_studio, "save_strategy_version", lambda *args, **kwargs: pytest.fail("save must not execute"))
+
+    response = create_app().test_client().post(
+        "/api/strategy-studio/specs/spec-1/activate",
+        json={"environment": "live", "confirm_live": True},
+    )
+
+    assert response.status_code == 409
+    assert "provenance" in response.get_json()["activation"]["failed_checks"]
+
+
+def test_live_activation_saves_a_separate_explicit_version_after_all_gates(monkeypatch, tmp_path):
+    _isolate(monkeypatch, tmp_path)
+    from agent_console import strategy_studio
+    from agent_console.server import create_app
+
+    monkeypatch.setattr(strategy_studio, "get_strategy_spec", lambda *args, **kwargs: {
+        "id": "spec-1", "version": 1, "spec": {"name": "test", "base_symbol": "AAPL"},
+    })
+    monkeypatch.setattr(strategy_studio, "run_strategy_spec", lambda *args, **kwargs: {
+        "ok": True,
+        "validation": {
+            "validation_mode": "purged_walk_forward",
+            "promotion_eligible": True,
+            "aggregate": {"provenance_ok": True},
+            "provenance": {"ok": True, "checks": [{"ok": True, "provenance_ok": True}]},
+        },
+        "promotion": {"accepted": True, "activation_safe": True, "failed_checks": []},
+    })
+    saved = {}
+
+    def save_version(*args, **kwargs):
+        saved.update({"args": args, "kwargs": kwargs})
+        return {"id": "spec-1", "version": 2, "source": kwargs.get("source")}
+
+    monkeypatch.setattr(strategy_studio, "save_strategy_version", save_version)
+
+    response = create_app().test_client().post(
+        "/api/strategy-studio/specs/spec-1/activate",
+        json={"environment": "live", "confirm_live": True},
+    )
+
+    assert response.status_code == 200
+    assert response.get_json()["activation"]["activated"] is True
+    assert saved["kwargs"]["source"] == "live_activation"
+
+
+def test_draft_save_cannot_persist_live_environment(monkeypatch, tmp_path):
+    _isolate(monkeypatch, tmp_path)
+    from agent_console.server import create_app
+
+    response = create_app().test_client().post(
+        "/api/strategy-studio/specs",
+        json={
+            "name": "unsafe draft",
+            "base_symbol": "AAPL",
+            "promotion": {"environment": "live"},
+        },
+    )
+
+    assert response.status_code == 400
+    assert "activation" in response.get_json()["error"]
+
+
+def test_activation_rejects_contradictory_cpcv_aliases_even_when_gate_claims_acceptance(monkeypatch, tmp_path):
+    _isolate(monkeypatch, tmp_path)
+    from agent_console import strategy_studio
+    from agent_console.server import create_app
+
+    monkeypatch.setattr(strategy_studio, "get_strategy_spec", lambda *args, **kwargs: {
+        "id": "spec-1", "version": 1, "spec": {"name": "test", "base_symbol": "AAPL"},
+    })
+    monkeypatch.setattr(strategy_studio, "run_strategy_spec", lambda *args, **kwargs: {
+        "ok": True,
+        "validation": {
+            "validation_mode": "cpcv",
+            "promotion_eligible": True,
+            "aggregate": {
+                "provenance_ok": True,
+                "cpcv_chronology_ok": True,
+                "cpcv_chronology_evidence": [{
+                    "fold_id": "cpcv-0",
+                    "valid": True,
+                    "future_training": False,
+                    "no_future_training": False,
+                    "train_max": "2026-01-01T00:00:00Z",
+                    "test_min": "2026-01-02T00:00:00Z",
+                    "train_before_test": True,
+                }],
+            },
+            "provenance": {"ok": True, "checks": [{"ok": True, "provenance_ok": True}]},
+            "folds": [{
+                "path_id": "cpcv-0",
+                "train_max": "2026-01-01T00:00:00Z",
+                "test_min": "2026-01-02T00:00:00Z",
+                "chronology_evidence": {"train_max": "2026-01-03T00:00:00Z"},
+            }],
+        },
+        "promotion": {"accepted": True, "activation_safe": True, "failed_checks": []},
+    })
+    monkeypatch.setattr(strategy_studio, "save_strategy_version", lambda *args, **kwargs: pytest.fail("save must not execute"))
+
+    response = create_app().test_client().post(
+        "/api/strategy-studio/specs/spec-1/activate",
+        json={"environment": "live", "confirm_live": True},
+    )
+
+    assert response.status_code == 409
+    assert "cpcv_chronology_evidence" in response.get_json()["activation"]["failed_checks"]

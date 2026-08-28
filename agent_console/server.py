@@ -174,7 +174,11 @@ def create_app() -> Flask:
         payload = request.get_json(force=True)
         if not isinstance(payload, dict):
             return jsonify({"ok": False, "error": "spec object required"}), 400
-        return jsonify({"ok": True, "spec": strategy_studio.save_strategy_spec(payload)})
+        try:
+            saved = strategy_studio.save_strategy_spec(payload)
+        except (TypeError, ValueError) as exc:
+            return jsonify({"ok": False, "error": str(exc)}), 400
+        return jsonify({"ok": True, "spec": saved})
 
     @app.get("/api/strategy-studio/specs/<spec_id>")
     def strategy_spec_get(spec_id: str):
@@ -199,6 +203,104 @@ def create_app() -> Flask:
         period = payload.get("period")
         return jsonify(strategy_studio.preview_strategy_spec(spec.get("spec") or spec, benchmark=benchmark, period=period))
 
+    @app.post("/api/strategy-studio/specs/<spec_id>/run")
+    def strategy_spec_run(spec_id: str):
+        payload = request.get_json(silent=True) or {}
+        if not isinstance(payload, dict):
+            return jsonify({"ok": False, "error": "run options object required"}), 400
+        spec = strategy_studio.get_strategy_spec(
+            spec_id,
+            version=int(payload.get("version")) if payload.get("version") else None,
+        )
+        if not spec:
+            return jsonify({"ok": False, "error": "strategy spec not found"}), 404
+        try:
+            result = strategy_studio.run_strategy_spec(
+                spec.get("spec") or spec,
+                period=payload.get("period"),
+                validation_mode=payload.get("validation_mode") or payload.get("mode"),
+            )
+        except (TypeError, ValueError) as exc:
+            return jsonify({"ok": False, "error": str(exc)}), 400
+        return jsonify(result)
+
+    @app.post("/api/strategy-studio/specs/<spec_id>/validate")
+    def strategy_spec_validate(spec_id: str):
+        payload = request.get_json(silent=True) or {}
+        if not isinstance(payload, dict):
+            return jsonify({"ok": False, "error": "validation options object required"}), 400
+        spec = strategy_studio.get_strategy_spec(
+            spec_id,
+            version=int(payload.get("version")) if payload.get("version") else None,
+        )
+        if not spec:
+            return jsonify({"ok": False, "error": "strategy spec not found"}), 404
+        try:
+            result = strategy_studio.run_strategy_spec(
+                spec.get("spec") or spec,
+                period=payload.get("period"),
+                validation_mode=payload.get("validation_mode") or payload.get("mode") or "purged_walk_forward",
+            )
+        except (TypeError, ValueError) as exc:
+            return jsonify({"ok": False, "error": str(exc)}), 400
+
+        if payload.get("save_sandbox") is True and result.get("ok") is True:
+            sandbox_spec = dict(result.get("spec") or spec.get("spec") or spec)
+            promotion = dict(sandbox_spec.get("promotion") or {})
+            promotion["environment"] = "sandbox"
+            sandbox_spec["promotion"] = promotion
+            result["sandbox"] = {
+                "saved": True,
+                "version": strategy_studio.save_strategy_version(
+                    spec_id,
+                    sandbox_spec,
+                    patch={"validation": {"mode": result.get("validation_mode")}},
+                    source="validation_sandbox",
+                ),
+            }
+        else:
+            result["sandbox"] = {"saved": False}
+        return jsonify(result)
+
+    @app.post("/api/strategy-studio/specs/<spec_id>/patch")
+    def strategy_spec_patch(spec_id: str):
+        payload = request.get_json(silent=True) or {}
+        if not isinstance(payload, dict):
+            return jsonify({"ok": False, "error": "patch options object required"}), 400
+        spec = strategy_studio.get_strategy_spec(spec_id)
+        if not spec:
+            return jsonify({"ok": False, "error": "strategy spec not found"}), 404
+        context_payload = payload.get("context") if isinstance(payload.get("context"), dict) else {}
+        context_payload = {
+            **context_payload,
+            "period": payload.get("period") or context_payload.get("period"),
+            "validation": context_payload.get("validation") or {},
+            "data_quality": context_payload.get("data_quality") or {},
+        }
+        result = strategy_studio.propose_strategy_patch_with_llm(
+            str(payload.get("question") or ""),
+            spec.get("spec") or spec,
+            context_payload,
+        )
+        if payload.get("save_sandbox") is True and result.get("ok") is True:
+            sandbox_spec = dict(result.get("patched_spec") or {})
+            promotion = dict(sandbox_spec.get("promotion") or {})
+            promotion["environment"] = "sandbox"
+            sandbox_spec["promotion"] = promotion
+            result["sandbox"] = {
+                "saved": True,
+                "version": strategy_studio.save_strategy_version(
+                    spec_id,
+                    sandbox_spec,
+                    patch=result.get("patch") if isinstance(result.get("patch"), dict) else {},
+                    source="ai_sandbox",
+                ),
+            }
+        else:
+            result["sandbox"] = {"saved": False}
+        status = 400 if not result.get("ok") and result.get("error") in {"patch_rejected", "invalid_llm_patch"} else 200
+        return jsonify(result), status
+
     @app.post("/api/strategy-studio/specs/<spec_id>/patch-preview")
     def strategy_spec_patch_preview(spec_id: str):
         payload = request.get_json(silent=True) or {}
@@ -208,7 +310,42 @@ def create_app() -> Flask:
         question = str(payload.get("question") or "").strip()
         history = payload.get("history") if isinstance(payload.get("history"), list) else []
         pack = payload.get("pack") if isinstance(payload.get("pack"), dict) else {}
+        if payload.get("structured") is True or payload.get("use_llm") is True:
+            context_payload = {
+                **pack,
+                "history": history,
+                "period": payload.get("period") or pack.get("period"),
+            }
+            return jsonify(strategy_studio.propose_strategy_patch_with_llm(
+                question,
+                spec.get("spec") or spec,
+                context_payload,
+            ))
         return jsonify(strategy_studio.propose_strategy_patch(question, spec.get("spec") or spec, history=history, pack=pack))
+
+    @app.post("/api/strategy-studio/specs/<spec_id>/activate")
+    def strategy_spec_activate(spec_id: str):
+        payload = request.get_json(silent=True) or {}
+        if not isinstance(payload, dict):
+            return jsonify({"ok": False, "error": "activation options object required"}), 400
+        try:
+            result = strategy_studio.activate_strategy_spec(
+                spec_id,
+                environment=payload.get("environment"),
+                confirm_live=payload.get("confirm_live", False),
+                period=payload.get("period"),
+                validation_mode=payload.get("validation_mode") or payload.get("mode"),
+                version=int(payload.get("version")) if payload.get("version") else None,
+            )
+        except (TypeError, ValueError) as exc:
+            return jsonify({"ok": False, "error": str(exc)}), 400
+        if result.get("error") == "strategy spec not found":
+            return jsonify(result), 404
+        if result.get("ok") is True:
+            return jsonify(result)
+        activation = result.get("activation") if isinstance(result.get("activation"), dict) else {}
+        status = 400 if "confirm_live" in (activation.get("failed_checks") or []) or "activation_environment" in (activation.get("failed_checks") or []) else 409
+        return jsonify(result), status
 
     @app.get("/api/chart-workspaces/<workspace_id>/drawings")
     def chart_workspace_drawing_get(workspace_id: str):
