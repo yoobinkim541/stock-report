@@ -8,6 +8,7 @@ dependencies.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from datetime import date, datetime
 from typing import Any
 
 import numpy as np
@@ -16,6 +17,9 @@ import pandas as pd
 from ml.optimization import cost_aware_objective
 
 from .signals import SignalPanel
+
+
+_COVARIANCE_EPS = 1e-12
 
 try:
     from sklearn.covariance import LedoitWolf
@@ -33,9 +37,9 @@ class AllocationResult:
 
     def to_dict(self) -> dict[str, object]:
         return {
-            "weights": self.weights.copy(),
-            "diagnostics": [dict(item) for item in self.diagnostics],
-            "warnings": list(self.warnings),
+            "weights": _frame_to_json(self.weights),
+            "diagnostics": _json_safe(self.diagnostics),
+            "warnings": _json_safe(self.warnings),
         }
 
 
@@ -53,7 +57,14 @@ def estimate_shrunk_covariance(returns: pd.DataFrame) -> pd.DataFrame:
     if not isinstance(returns, pd.DataFrame):
         raise TypeError("returns must be a pandas DataFrame")
     if returns.empty:
-        return pd.DataFrame(index=returns.columns, columns=returns.columns, dtype="float64")
+        columns = list(returns.columns)
+        if not columns:
+            return pd.DataFrame()
+        return pd.DataFrame(
+            np.eye(len(columns), dtype="float64") * _COVARIANCE_EPS,
+            index=columns,
+            columns=columns,
+        )
 
     frame = returns.copy().apply(pd.to_numeric, errors="coerce")
     frame = frame.replace([np.inf, -np.inf], np.nan)
@@ -68,7 +79,7 @@ def estimate_shrunk_covariance(returns: pd.DataFrame) -> pd.DataFrame:
             matrix = None
 
     if matrix is None:
-        variances = frame.var(axis=0, ddof=1).fillna(0.0).clip(lower=0.0)
+        variances = frame.var(axis=0, ddof=1).fillna(_COVARIANCE_EPS).clip(lower=_COVARIANCE_EPS)
         matrix = np.diag(variances.to_numpy(dtype="float64"))
         if len(complete) >= 2 and len(columns) > 1:
             try:
@@ -111,7 +122,6 @@ def allocate_targets(
     confidence = signal_panel.confidence.reindex(index=index, columns=symbols).apply(pd.to_numeric, errors="coerce")
     returns_frame = returns.copy().apply(pd.to_numeric, errors="coerce")
     returns_frame = returns_frame.replace([np.inf, -np.inf], np.nan)
-    covariance = estimate_shrunk_covariance(returns_frame)
     warnings: list[str] = []
     diagnostics: list[dict[str, object]] = []
 
@@ -126,18 +136,13 @@ def allocate_targets(
     risk_aversion = _config_float(config, "risk_aversion", 1.0, warnings, minimum=0.0)
     turnover_penalty = _config_float(config, "turnover_penalty", 0.0, warnings, minimum=0.0)
     cost_bps = _total_cost_bps(costs, warnings)
-    allow_short = bool(config.get("allow_short", True))
+    allow_short = _config_bool(config, "allow_short", True, warnings)
     optimizer = str(config.get("optimizer") or "cost_aware_risk_budget").strip().lower()
 
-    if returns_frame.empty:
-        warnings.append("returns are empty; covariance risk term is zero")
-    elif covariance.empty:
-        warnings.append("covariance estimate is empty; covariance risk term is zero")
     if optimizer not in {"cost_aware_risk_budget", "equal_weight", "risk_budget"}:
         warnings.append(f"unsupported optimizer {optimizer}; using cost_aware_risk_budget")
         optimizer = "cost_aware_risk_budget"
 
-    covariance_values = _aligned_covariance(covariance, symbols)
     previous = _initial_previous_weights(config.get("previous_weights"), symbols)
     weights = pd.DataFrame(0.0, index=index, columns=symbols, dtype="float64")
     valid_score = score.notna() & np.isfinite(score)
@@ -145,8 +150,34 @@ def allocate_targets(
     valid_confidence &= (confidence >= 0.0) & (confidence <= 1.0)
     low_confidence = valid_score & valid_confidence & (confidence < min_confidence)
     usable = valid_score & valid_confidence & ~low_confidence
+    covariance_warnings: set[str] = set()
 
     for timestamp in index:
+        available_returns = _point_in_time_returns(returns_frame, timestamp)
+        relevant_returns = available_returns.reindex(columns=symbols)
+        complete_rows = len(relevant_returns.dropna(how="any"))
+        fallback_reason: str | None = None
+        if LedoitWolf is None:
+            fallback_reason = "Ledoit-Wolf unavailable; using sample/diagonal fallback"
+        elif complete_rows < 2:
+            fallback_reason = "fewer than two complete point-in-time return rows"
+        row_covariance = _aligned_covariance(estimate_shrunk_covariance(available_returns), symbols)
+        if fallback_reason is not None:
+            warning = f"covariance fallback at {_timestamp_text(timestamp)}: {fallback_reason}"
+            if fallback_reason not in covariance_warnings:
+                warnings.append(warning)
+                covariance_warnings.add(fallback_reason)
+            _add_diagnostic(
+                diagnostics,
+                timestamp,
+                "__portfolio__",
+                float(complete_rows),
+                _COVARIANCE_EPS,
+                "point_in_time_covariance",
+                "covariance_fallback",
+                reason=fallback_reason,
+            )
+
         raw_signal = score.loc[timestamp].to_numpy(dtype="float64", na_value=np.nan)
         row_confidence = confidence.loc[timestamp].to_numpy(dtype="float64", na_value=np.nan)
         row_usable = usable.loc[timestamp].to_numpy(dtype=bool)
@@ -164,7 +195,6 @@ def allocate_targets(
                     "valid_signal", "invalid_signal",
                 )
 
-        row_covariance = covariance_values
         signal_values = np.where(row_usable, raw_signal * row_confidence, 0.0)
         signal_values = np.nan_to_num(signal_values, nan=0.0, posinf=0.0, neginf=0.0)
         if not allow_short:
@@ -177,7 +207,18 @@ def allocate_targets(
                     )
             signal_values = np.maximum(signal_values, 0.0)
 
-        prior = previous.copy()
+        prior = _apply_weight_constraints(
+            previous,
+            row_covariance,
+            symbols=symbols,
+            max_position=max_position,
+            max_gross=max_gross,
+            target_volatility=target_volatility,
+            allow_short=allow_short,
+            timestamp=timestamp,
+            diagnostics=diagnostics,
+            stage="previous",
+        )
         if optimizer == "equal_weight":
             active = np.abs(signal_values) > 0.0
             count = int(active.sum())
@@ -194,43 +235,18 @@ def allocate_targets(
                 cost_bps=cost_bps,
             )
 
-        # 1. Per-position cap.
-        constrained = candidate.astype("float64", copy=True)
-        for position, symbol in enumerate(symbols):
-            before = float(constrained[position])
-            after = float(np.clip(before, -max_position, max_position))
-            if not allow_short:
-                after = max(0.0, after)
-            if not np.isclose(before, after):
-                _add_diagnostic(diagnostics, timestamp, symbol, before, after, "max_position_pct", "position_cap")
-            constrained[position] = after
-
-        # 2. Gross exposure cap.
-        gross = float(np.abs(constrained).sum())
-        if gross > max_gross and gross > 0.0:
-            factor = max_gross / gross
-            before_row = constrained.copy()
-            constrained *= factor
-            for position, symbol in enumerate(symbols):
-                if not np.isclose(before_row[position], constrained[position]):
-                    _add_diagnostic(
-                        diagnostics, timestamp, symbol, before_row[position], constrained[position],
-                        "max_gross_exposure", "gross_exposure",
-                    )
-
-        # 3. Target volatility scaling.
-        if target_volatility is not None and target_volatility > 0.0:
-            portfolio_vol = _portfolio_volatility(constrained, row_covariance)
-            if portfolio_vol > target_volatility:
-                factor = target_volatility / portfolio_vol
-                before_row = constrained.copy()
-                constrained *= factor
-                for position, symbol in enumerate(symbols):
-                    if not np.isclose(before_row[position], constrained[position]):
-                        _add_diagnostic(
-                            diagnostics, timestamp, symbol, before_row[position], constrained[position],
-                            "target_volatility", "target_volatility",
-                        )
+        constrained = _apply_weight_constraints(
+            candidate,
+            row_covariance,
+            symbols=symbols,
+            max_position=max_position,
+            max_gross=max_gross,
+            target_volatility=target_volatility,
+            allow_short=allow_short,
+            timestamp=timestamp,
+            diagnostics=diagnostics,
+            stage="initial",
+        )
 
         # 4. Turnover is measured as the full L1 target change.
         turnover = float(np.abs(constrained - prior).sum())
@@ -244,6 +260,36 @@ def allocate_targets(
                         diagnostics, timestamp, symbol, before_row[position], constrained[position],
                         "max_turnover", "turnover_limit",
                     )
+
+        # Projection after turnover is deliberate: an invalid or stale prior
+        # weight must never make the final target violate portfolio bounds.
+        constrained = _apply_weight_constraints(
+            constrained,
+            row_covariance,
+            symbols=symbols,
+            max_position=max_position,
+            max_gross=max_gross,
+            target_volatility=target_volatility,
+            allow_short=allow_short,
+            timestamp=timestamp,
+            diagnostics=diagnostics,
+            stage="post_turnover",
+        )
+        final_turnover = float(np.abs(constrained - prior).sum())
+        if max_turnover is not None and final_turnover > max_turnover + 1e-12:
+            warning = "turnover limit could not be met after projecting prior weights"
+            if warning not in warnings:
+                warnings.append(warning)
+            _add_diagnostic(
+                diagnostics,
+                timestamp,
+                "__portfolio__",
+                final_turnover,
+                max_turnover,
+                "max_turnover",
+                "turnover_conflict",
+                reason="final bounds take priority over an invalid prior weight",
+            )
 
         weights.loc[timestamp, symbols] = constrained
         objective_before = cost_aware_objective(
@@ -330,6 +376,72 @@ def _risk_budget_weights(scores: np.ndarray, covariance: np.ndarray) -> np.ndarr
 def _portfolio_volatility(weights: np.ndarray, covariance: np.ndarray) -> float:
     variance = float(weights @ covariance @ weights)
     return float(np.sqrt(max(0.0, variance)))
+
+
+def _apply_weight_constraints(
+    values: np.ndarray,
+    covariance: np.ndarray,
+    *,
+    symbols: list[str],
+    max_position: float,
+    max_gross: float,
+    target_volatility: float | None,
+    allow_short: bool,
+    timestamp: Any,
+    diagnostics: list[dict[str, object]],
+    stage: str,
+) -> np.ndarray:
+    """Apply the non-turnover constraints and record every projection."""
+
+    constrained = np.asarray(values, dtype="float64").copy()
+    for position, symbol in enumerate(symbols):
+        before = float(constrained[position])
+        capped = float(np.clip(before, -max_position, max_position))
+        if not np.isclose(before, capped):
+            _add_diagnostic(
+                diagnostics, timestamp, symbol, before, capped,
+                "max_position_pct", "position_cap",
+                stage=stage,
+            )
+        after = capped
+        if not allow_short and after < 0.0:
+            _add_diagnostic(
+                diagnostics, timestamp, symbol, after, 0.0,
+                "allow_short", "long_only", stage=stage,
+            )
+            after = 0.0
+        constrained[position] = after
+
+    gross = float(np.abs(constrained).sum())
+    if gross > max_gross and gross > 0.0:
+        factor = max_gross / gross
+        before_row = constrained.copy()
+        constrained *= factor
+        for position, symbol in enumerate(symbols):
+            if not np.isclose(before_row[position], constrained[position]):
+                _add_diagnostic(
+                    diagnostics, timestamp, symbol, before_row[position], constrained[position],
+                    "max_gross_exposure", "gross_exposure", stage=stage,
+                )
+
+    if target_volatility is not None:
+        portfolio_vol = _portfolio_volatility(constrained, covariance)
+        if target_volatility == 0.0 and portfolio_vol > 0.0:
+            factor = 0.0
+        elif target_volatility > 0.0 and portfolio_vol > target_volatility:
+            factor = target_volatility / portfolio_vol
+        else:
+            factor = 1.0
+        if factor < 1.0:
+            before_row = constrained.copy()
+            constrained *= factor
+            for position, symbol in enumerate(symbols):
+                if not np.isclose(before_row[position], constrained[position]):
+                    _add_diagnostic(
+                        diagnostics, timestamp, symbol, before_row[position], constrained[position],
+                        "target_volatility", "target_volatility", stage=stage,
+                    )
+    return constrained
 
 
 def _aligned_covariance(covariance: pd.DataFrame, symbols: list[str]) -> np.ndarray:
@@ -420,15 +532,69 @@ def _add_diagnostic(
     after: Any,
     constraint: str,
     diagnostic_type: str,
+    *,
+    stage: str | None = None,
+    reason: str | None = None,
 ) -> None:
-    diagnostics.append({
+    diagnostic: dict[str, object] = {
         "type": diagnostic_type,
         "symbol": str(symbol),
         "before": _finite_or_none(before),
         "after": _finite_or_none(after),
         "constraint": constraint,
         "timestamp": _timestamp_text(timestamp),
-    })
+    }
+    if stage is not None:
+        diagnostic["stage"] = stage
+    if reason is not None:
+        diagnostic["reason"] = reason
+    diagnostics.append(diagnostic)
+
+
+def _config_bool(config: dict[str, object], key: str, default: bool, warnings: list[str]) -> bool:
+    value = config.get(key, default)
+    if isinstance(value, (bool, np.bool_)):
+        return bool(value)
+    if isinstance(value, str):
+        normalized = value.strip().lower()
+        if normalized in {"true", "1", "yes", "y", "on", "enabled"}:
+            return True
+        if normalized in {"false", "0", "no", "n", "off", "disabled"}:
+            return False
+    if isinstance(value, (int, float, np.integer, np.floating)) and np.isfinite(value):
+        if float(value) == 1.0:
+            return True
+        if float(value) == 0.0:
+            return False
+    warnings.append(f"{key} is not a recognized boolean; using {default}")
+    return bool(default)
+
+
+def _point_in_time_returns(returns: pd.DataFrame, timestamp: Any) -> pd.DataFrame:
+    """Keep only return observations available at or before ``timestamp``."""
+
+    if returns.empty:
+        return returns.iloc[:0]
+    target = _timestamp_key(timestamp)
+    if pd.isna(target):
+        return returns.iloc[:0]
+    mask = []
+    for candidate in returns.index:
+        candidate_timestamp = _timestamp_key(candidate)
+        mask.append(not pd.isna(candidate_timestamp) and candidate_timestamp <= target)
+    return returns.loc[mask]
+
+
+def _timestamp_key(value: Any) -> pd.Timestamp:
+    try:
+        timestamp = pd.Timestamp(value)
+    except (TypeError, ValueError):
+        return pd.NaT
+    if pd.isna(timestamp):
+        return pd.NaT
+    if timestamp.tzinfo is None:
+        return timestamp.tz_localize("UTC")
+    return timestamp.tz_convert("UTC")
 
 
 def _finite_or_none(value: Any) -> float | None:
@@ -444,6 +610,39 @@ def _timestamp_text(value: Any) -> str:
         return pd.Timestamp(value).isoformat()
     except (TypeError, ValueError):
         return str(value)
+
+
+def _frame_to_json(frame: pd.DataFrame) -> dict[str, object]:
+    return {
+        "orient": "split",
+        "index": [_json_safe(value) for value in frame.index],
+        "columns": [_json_safe(value) for value in frame.columns],
+        "data": [[_json_safe(value) for value in row] for row in frame.to_numpy(dtype=object)],
+    }
+
+
+def _json_safe(value: Any) -> Any:
+    if value is None:
+        return None
+    if isinstance(value, (pd.Timestamp, datetime)):
+        return None if pd.isna(value) else pd.Timestamp(value).isoformat()
+    if isinstance(value, date):
+        return value.isoformat()
+    if isinstance(value, np.generic):
+        return _json_safe(value.item())
+    if isinstance(value, dict):
+        return {str(key): _json_safe(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_json_safe(item) for item in value]
+    if isinstance(value, float):
+        return value if np.isfinite(value) else None
+    try:
+        missing = pd.isna(value)
+    except (TypeError, ValueError):
+        missing = False
+    if isinstance(missing, (bool, np.bool_)) and bool(missing):
+        return None
+    return value
 
 
 def _project_psd(matrix: np.ndarray) -> np.ndarray:

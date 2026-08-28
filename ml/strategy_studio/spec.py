@@ -252,7 +252,7 @@ class StrategySpec:
         if validation_mode not in _SUPPORTED_VALIDATION:
             errors.append(f"unsupported validation mode: {validation_mode}")
 
-        for key in ("fees_bps", "slippage_bps", "spread_bps"):
+        for key in ("fees_bps", "slippage_bps", "spread_bps", "cost_bps"):
             val = (self.costs or {}).get(key, 0)
             try:
                 if float(val) < 0:
@@ -270,12 +270,7 @@ class StrategySpec:
     def uses_allocation_path(self) -> bool:
         """Return whether the input explicitly opted into signal allocation."""
 
-        return bool(
-            self._explicit_contract_fields.intersection({"signal", "portfolio", "execution"})
-            or self.signal
-            or self.portfolio
-            or self.execution
-        )
+        return bool(self.signal or self.portfolio or self.execution)
 
     def _validate_new_blocks(self, errors: list[str]) -> None:
         if not isinstance(self.features, list):

@@ -184,7 +184,7 @@ def _build_run(
     allocation_diagnostics: list[dict[str, object]] | None = None,
 ) -> StrategyRun:
     params = strategy.costs or {}
-    cost_bps = float(params.get("fees_bps") or 0.0) + float(params.get("slippage_bps") or 0.0) + float(params.get("spread_bps") or 0.0)
+    cost_bps = _strategy_cost_bps(params)
 
     aligned = weights.reindex(close_panel.index).fillna(0.0)
     rets = close_panel.pct_change().fillna(0.0)
@@ -819,6 +819,14 @@ def _safe_float(value: Any, default: float = 0.0) -> float:
         return float(value)
     except (TypeError, ValueError):
         return default
+
+
+def _strategy_cost_bps(params: dict[str, Any]) -> float:
+    """Use the same singular or component cost policy as allocation."""
+
+    if "cost_bps" in params:
+        return max(0.0, _safe_float(params.get("cost_bps"), 0.0))
+    return sum(max(0.0, _safe_float(params.get(key), 0.0)) for key in ("fees_bps", "slippage_bps", "spread_bps"))
 
 
 def _rsi(series: pd.Series, period: int = 14) -> pd.Series:
