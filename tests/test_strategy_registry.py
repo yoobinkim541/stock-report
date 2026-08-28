@@ -135,6 +135,8 @@ def test_model_registry_surfaces_malformed_provenance_without_claiming_complete(
     )
 
     payload = registered.to_dict()
+    assert registered.provenance_status == "incomplete"
+    assert payload["provenance_status"] == "incomplete"
     assert payload["provenance"] is None
     assert any("invalid" in warning for warning in payload["warnings"])
 
@@ -207,3 +209,85 @@ def test_prediction_freshness_is_unknown_without_evaluation_timestamp_for_snapsh
 
     assert result["freshness"]["status"] == "unknown"
     assert "freshness_evaluation_missing" in result["warnings"]
+
+
+def test_default_prediction_returns_explicit_incomplete_provenance_status():
+    class FixedModel:
+        feature_names_ = ["close"]
+
+        def predict(self, features):
+            return [0.25] * len(features)
+
+    result = predict_with_metadata(
+        FixedModel(),
+        pd.DataFrame({"close": [100.0]}),
+        {
+            "model_id": "legacy-diagnostic-model",
+            "feature_version": "features-v1",
+            "model_version": "model-v1",
+            "as_of": "2025-12-31T00:00:00Z",
+            "confidence": [0.9],
+            "feature_names": ["close"],
+            "require_provenance": False,
+        },
+    )
+
+    assert result["provenance_status"] == "incomplete"
+    assert result["provenance"]["model"]["status"] == "incomplete"
+    assert result["provenance"]["model"]["provenance_status"] == "incomplete"
+    assert any("model_provenance_missing:train_start" == warning for warning in result["warnings"])
+
+
+def test_default_prediction_does_not_mask_explicit_incomplete_provenance_status():
+    class FixedModel:
+        feature_names_ = ["close"]
+
+        def predict(self, features):
+            return [0.25] * len(features)
+
+    result = predict_with_metadata(
+        FixedModel(),
+        pd.DataFrame({"close": [100.0]}),
+        {
+            "model_id": "malformed-status-model",
+            "feature_version": "features-v1",
+            "model_version": "model-v1",
+            "as_of": "2025-12-31T00:00:00Z",
+            "confidence": [0.9],
+            "feature_names": ["close"],
+            "train_start": "2025-01-01T00:00:00Z",
+            "train_end": "2025-12-30T00:00:00Z",
+            "code_commit": "abc123",
+            "seed": 42,
+            "provenance": {"provenance_status": "incomplete"},
+        },
+    )
+
+    assert result["provenance_status"] == "incomplete"
+    assert result["provenance"]["model"]["provenance_status"] == "incomplete"
+    assert "model_provenance_incomplete" in result["warnings"]
+
+
+def test_model_registry_does_not_mask_explicit_incomplete_provenance_status():
+    registered = RegisteredModel(
+        "registered-incomplete-status-model",
+        object(),
+        {
+            "model_id": "registered-incomplete-status-model",
+            "feature_version": "features-v1",
+            "model_version": "model-v1",
+            "feature_names": ["close"],
+            "train_start": "2025-01-01T00:00:00Z",
+            "train_end": "2025-12-30T00:00:00Z",
+            "code_commit": "abc123",
+            "seed": 42,
+            "provenance": {"provenance_status": "incomplete"},
+        },
+    )
+
+    payload = registered.to_dict()
+
+    assert registered.provenance is None
+    assert registered.provenance_status == "incomplete"
+    assert payload["provenance_status"] == "incomplete"
+    assert "model provenance incomplete" in payload["warnings"]

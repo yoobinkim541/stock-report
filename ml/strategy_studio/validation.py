@@ -913,7 +913,14 @@ def check_data_model_provenance(
     model_as_of = model.get("as_of", model.get("trained_until", model.get("model_as_of")))
     model_status_value = model.get("freshness", model.get("status", ""))
     model_status = str(model_status_value).strip().lower() if _has_metadata_value(model_status_value) else ""
+    model_provenance_status_value = model.get("provenance_status", model.get("provenance_state", ""))
+    model_provenance_status = (
+        str(model_provenance_status_value).strip().lower()
+        if _has_metadata_value(model_provenance_status_value) else ""
+    )
     if not _has_metadata_value(model_id) or not _has_metadata_value(model_version):
+        warnings.append("model provenance is incomplete")
+    if model_provenance_status and model_provenance_status != "complete":
         warnings.append("model provenance is incomplete")
     if not model_status:
         warnings.append("model provenance freshness metadata is missing")
@@ -939,17 +946,27 @@ def check_data_model_provenance(
         _has_metadata_value(data_source) and _has_metadata_value(data_version) and _has_metadata_value(data_as_of)
         and data_status and _has_metadata_value(model_id) and _has_metadata_value(model_version)
         and _has_metadata_value(model_as_of)
-        and model_status and evaluation is not None
+        and model_status not in {"incomplete", "invalid", "missing", "unknown"}
+        and model_status
+        and model_provenance_status in {"", "complete"}
+        and evaluation is not None
     )
     ok = bool(complete and age_limits_configured and not errors and not any("stale" in warning for warning in warnings))
     return to_jsonable({
         "ok": ok,
         "provenance_ok": ok,
         "age_limits_configured": age_limits_configured,
+        "evaluation_at": evaluation,
         "errors": errors,
         "warnings": warnings,
         "data": {"source": data_source, "version": data_version, "as_of": data_as_of, "status": data_status or None},
-        "model": {"model_id": model_id, "model_version": model_version, "as_of": model_as_of, "status": model_status or None},
+        "model": {
+            "model_id": model_id,
+            "model_version": model_version,
+            "as_of": model_as_of,
+            "status": model_status or None,
+            "provenance_status": model_provenance_status or None,
+        },
     })
 
 
@@ -1561,6 +1578,72 @@ def _cpcv_chronology_gate_ok(report: ValidationReport) -> bool:
     )
 
 
+def _promotion_provenance_ok(report: ValidationReport) -> bool:
+    """Require explicit, complete provenance evidence before activation."""
+
+    if report.aggregate.get("provenance_ok") is not True:
+        return False
+    evidence = report.provenance if isinstance(report.provenance, Mapping) else {}
+    if evidence.get("ok") is not True:
+        return False
+    checks = evidence.get("checks")
+    if not isinstance(checks, Sequence) or isinstance(checks, (str, bytes)) or not checks:
+        return False
+    expected_count = report.aggregate.get("cpcv_fold_count")
+    if expected_count is None:
+        expected_count = report.aggregate.get("fold_count")
+    if expected_count is None:
+        expected_count = len(report.folds)
+    try:
+        if int(expected_count) != len(checks):
+            return False
+    except (TypeError, ValueError):
+        return False
+    return all(_activation_provenance_check_ok(check) for check in checks)
+
+
+def _activation_provenance_check_ok(check: object) -> bool:
+    """Validate the fields that make one fold's provenance activation-safe."""
+
+    if not isinstance(check, Mapping):
+        return False
+    if check.get("ok") is not True or check.get("provenance_ok") is not True:
+        return False
+    if check.get("age_limits_configured") is not True:
+        return False
+    evaluation_at = check.get("evaluation_at")
+    data = check.get("data")
+    model = check.get("model")
+    if not isinstance(data, Mapping) or not isinstance(model, Mapping):
+        return False
+    if not _has_metadata_value(evaluation_at):
+        return False
+    if not all(
+        _has_metadata_value(data.get(key))
+        for key in ("source", "version", "as_of", "status")
+    ):
+        return False
+    if not all(
+        _has_metadata_value(model.get(key))
+        for key in ("model_id", "model_version", "as_of", "status")
+    ):
+        return False
+    declared_status = str(model.get("provenance_status") or "").strip().lower()
+    if declared_status and declared_status != "complete":
+        return False
+    if not declared_status and str(model.get("status") or "").strip().lower() not in {"complete", "fresh"}:
+        return False
+    try:
+        evaluation = _canonical_timestamp(evaluation_at)
+        data_as_of = _canonical_timestamp(data["as_of"])
+        model_as_of = _canonical_timestamp(model["as_of"])
+    except (KeyError, TypeError, ValueError):
+        return False
+    if evaluation is None or data_as_of is None or model_as_of is None:
+        return False
+    return data_as_of <= evaluation and model_as_of <= evaluation
+
+
 def promotion_gate(report: ValidationReport, config: dict[str, object]) -> PromotionDecision:
     """Apply activation checks without conflating shadow, pilot, and live."""
 
@@ -1672,7 +1755,7 @@ def promotion_gate(report: ValidationReport, config: dict[str, object]) -> Promo
     elif concentration > max_regime:
         failed.append("max_regime_concentration")
 
-    provenance_ok = aggregate.get("provenance_ok")
+    provenance_ok = _promotion_provenance_ok(report)
     if provenance_ok is not True:
         failed.append("stale_provenance" if any("stale" in warning for warning in gate_warnings) else "provenance")
     if aggregate.get("leakage_detected"):

@@ -2,7 +2,7 @@
 
 ## Status
 
-Task 6 fix round 1 is implemented in `/home/ubuntu/projects/stock-report`.
+Task 6 fix round 2 is implemented in `/home/ubuntu/projects/stock-report`.
 The provenance layer remains additive: existing price collectors continue to
 return the same `DataFrame` shapes, with normalized snapshots attached through
 `.attrs`.
@@ -50,13 +50,25 @@ return the same `DataFrame` shapes, with normalized snapshots attached through
 - Kept incomplete legacy model registrations loadable for existing callers,
   while exposing missing provenance diagnostics and supporting strict
   `require_provenance` prediction calls.
+- Default-compatible predictions now always expose `provenance_status`,
+  `provenance_warnings`, and an explicitly incomplete nested model payload when
+  registration provenance is missing, malformed, or explicitly incomplete.
+  Explicit invalid provenance states can no longer be masked by complete
+  top-level metadata fields.
+- Strict promotion now requires explicit per-fold provenance checks with data
+  source/version/as-of, model identity/version/as-of, configured age limits,
+  complete model provenance status, and evaluation chronology. An aggregate
+  `provenance_ok=True` claim or `require_provenance=False` compatibility flag
+  cannot authorize activation.
 
 ## Verification
 
 - `./.venv/bin/pytest tests/test_ml_data_sources.py tests/test_ml_universe.py tests/test_data_pipeline_resilience.py tests/test_strategy_registry.py tests/test_strategy_signals.py -q`
-  - `66 passed`
+  - `69 passed`
 - `./.venv/bin/pytest tests/test_ml_data_sources.py tests/test_ml_universe.py tests/test_data_pipeline_resilience.py tests/test_strategy_registry.py tests/test_strategy_signals.py tests/test_strategy_contracts.py tests/test_ml_models.py tests/test_strategy_validation.py -q`
-  - `128 passed, 13 warnings`
+  - `134 passed, 13 warnings`
+- `./.venv/bin/pytest tests/test_strategy_validation.py::test_default_compatible_prediction_provenance_cannot_activate_task5 tests/test_strategy_validation.py::test_activation_rejects_aggregate_only_provenance_claim_without_fold_checks tests/test_strategy_registry.py::test_default_prediction_does_not_mask_explicit_incomplete_provenance_status -q`
+  - `3 passed`
 - `./.venv/bin/python -m compileall -q ml/strategy_studio ml/data_pipeline.py ml/models.py`
   - passed
 - `git diff --check`
@@ -71,7 +83,9 @@ return the same `DataFrame` shapes, with normalized snapshots attached through
   timestamp.
 - Legacy registry metadata remains accepted to preserve Task 2 behavior.
   Such registrations expose missing-provenance warnings and cannot satisfy a
-  strict provenance-required prediction or Task 5 promotion check.
+  strict provenance-required prediction or Task 5 promotion check. Strict
+  promotion reports must now carry explicit per-fold provenance evidence;
+  aggregate-only hand-authored reports are intentionally rejected.
 - The point-in-time helper remains list-compatible, but callers that need
   completeness must inspect its status/diagnostics. Invalid rows are excluded
   from membership and exposed, which can reduce coverage rather than treating

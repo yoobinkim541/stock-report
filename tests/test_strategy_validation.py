@@ -6,6 +6,7 @@ import numpy as np
 import pandas as pd
 import pytest
 
+from ml.models import predict_with_metadata
 from ml.strategy_studio import StrategyRun, build_strategy_report, run_strategy_backtest
 from ml.strategy_studio.validation import (
     ValidationReport,
@@ -51,6 +52,29 @@ def _run(
         equity=equity,
         benchmark={"symbol": "SPY", "available": False},
     )
+
+
+def _activation_provenance_evidence(count: int = 4) -> dict[str, object]:
+    check = {
+        "ok": True,
+        "provenance_ok": True,
+        "age_limits_configured": True,
+        "evaluation_at": "2024-02-10T00:00:00Z",
+        "data": {
+            "source": "prices",
+            "version": "v1",
+            "as_of": "2024-02-09T00:00:00Z",
+            "status": "fresh",
+        },
+        "model": {
+            "model_id": "model-v1",
+            "model_version": "model-v1",
+            "as_of": "2024-02-09T00:00:00Z",
+            "status": "fresh",
+            "provenance_status": "complete",
+        },
+    }
+    return {"ok": True, "checks": [dict(check) for _ in range(count)]}
 
 
 def test_purged_walk_forward_is_deterministic_and_embargoed():
@@ -225,6 +249,7 @@ def test_cpcv_activation_requires_affirmative_per_fold_chronology_proof():
     ]
     base = {
         "validation_mode": "cpcv",
+        "provenance": _activation_provenance_evidence(),
         "aggregate": {
             "net_cagr": 0.12, "benchmark_excess_cagr": 0.04, "max_drawdown": -0.1,
             "trade_count": 200, "test_periods": 120, "fold_count": 4, "cpcv_fold_count": 4,
@@ -495,6 +520,104 @@ def test_missing_provenance_and_age_limits_fail_closed_but_remain_diagnostic():
     assert "provenance" in decision.failed_checks
 
 
+def test_promotion_rejects_explicit_incomplete_model_provenance_even_when_prediction_compatibility_is_opt_in():
+    run = _run([0.001, -0.001] * 20)
+    run.spec["validation"].update({"max_data_age_seconds": 172800, "max_model_age_seconds": 172800})
+    run.signals["provenance"] = {
+        "data": {
+            "source": "prices",
+            "version": "v1",
+            "as_of": "2024-02-08T00:00:00Z",
+            "freshness": "fresh",
+        },
+        "model": {
+            "model_id": "legacy-model",
+            "model_version": "model-v1",
+            "as_of": "2024-02-08T00:00:00Z",
+            "freshness": "fresh",
+            "provenance_status": "incomplete",
+            "require_provenance": False,
+        },
+    }
+
+    report = evaluate_validation_folds([run], {})
+    decision = promotion_gate(
+        report,
+        {"mode": "purged_walk_forward", "environment": "pilot"},
+    )
+
+    assert report.aggregate["provenance_ok"] is False
+    assert "provenance" in decision.failed_checks
+
+
+def test_activation_rejects_aggregate_only_provenance_claim_without_fold_checks():
+    report = ValidationReport.from_dict({
+        "validation_mode": "purged_walk_forward",
+        "aggregate": {
+            "net_cagr": 0.12,
+            "benchmark_excess_cagr": 0.04,
+            "max_drawdown": -0.1,
+            "trade_count": 200,
+            "test_periods": 120,
+            "n_observations": 120,
+            "fold_count": 4,
+            "turnover": 0.3,
+            "dsr": 0.99,
+            "pbo": 0.1,
+            "regime_concentration": 0.2,
+            "provenance_ok": True,
+            "dsr_evidence": {"tested_configurations": 4, "method": "dsr"},
+            "pbo_evidence": {"tested_configurations": 4, "matrix_shape": [120, 4]},
+        },
+        "folds": [{"net_cagr": 0.1, "trade_count": 50}] * 4,
+    })
+
+    decision = promotion_gate(report, {"environment": "pilot"})
+
+    assert decision.accepted is False
+    assert "provenance" in decision.failed_checks
+
+
+def test_default_compatible_prediction_provenance_cannot_activate_task5():
+    class FixedModel:
+        feature_names_ = ["close"]
+
+        def predict(self, features):
+            return [0.25] * len(features)
+
+    prediction = predict_with_metadata(
+        FixedModel(),
+        pd.DataFrame({"close": [100.0]}),
+        {
+            "model_id": "legacy-promotion-model",
+            "feature_version": "features-v1",
+            "model_version": "model-v1",
+            "as_of": "2024-02-08T00:00:00Z",
+            "confidence": [0.9],
+            "feature_names": ["close"],
+            "require_provenance": False,
+        },
+    )
+    run = _run([0.001, -0.001] * 20)
+    run.spec["validation"].update({"max_data_age_seconds": 172800, "max_model_age_seconds": 172800})
+    run.signals["provenance"] = {
+        "data": {
+            "source": "prices",
+            "version": "v1",
+            "as_of": "2024-02-08T00:00:00Z",
+            "freshness": "fresh",
+        },
+        **prediction["provenance"],
+    }
+
+    report = evaluate_validation_folds([run], {})
+    decision = promotion_gate(report, {"mode": "purged_walk_forward", "environment": "pilot"})
+
+    assert prediction["provenance_status"] == "incomplete"
+    assert report.aggregate["provenance_ok"] is False
+    assert "provenance" in decision.failed_checks
+
+
 def test_mixed_fold_provenance_is_invalid_when_one_fold_is_missing():
     valid = _run([0.001, -0.001] * 20)
     valid.spec["validation"].update({"max_data_age_seconds": 86400, "max_model_age_seconds": 86400})
@@ -592,6 +715,7 @@ def test_evaluator_enforces_configured_data_and_model_age_limits():
 def test_numeric_only_dsr_pbo_report_is_rejected_and_complete_evidence_passes():
     base = {
         "validation_mode": "purged_walk_forward",
+        "provenance": _activation_provenance_evidence(),
         "aggregate": {
             "net_cagr": 0.12, "benchmark_excess_cagr": 0.04, "max_drawdown": -0.1,
             "trade_count": 200, "test_periods": 4, "n_observations": 120,
@@ -712,6 +836,7 @@ def test_data_and_model_provenance_reject_stale_and_future_timestamps():
 def test_promotion_gate_separates_preview_pilot_and_explicit_live_activation():
     report = ValidationReport.from_dict({
         "validation_mode": "purged_walk_forward",
+        "provenance": _activation_provenance_evidence(),
         "aggregate": {
             "net_cagr": 0.12,
             "benchmark_excess_cagr": 0.04,

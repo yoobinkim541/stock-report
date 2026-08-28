@@ -46,7 +46,18 @@ class RegisteredModel:
         return build_model_provenance(self.model_id, self.metadata, model=self.model)
 
     @property
+    def provenance_status(self) -> str:
+        """Return an explicit status for both complete and legacy registrations."""
+
+        return "complete" if self.provenance is not None else "incomplete"
+
+    @property
     def provenance_warnings(self) -> list[str]:
+        declared_status = _declared_provenance_status(self.metadata)
+        if declared_status == "incomplete":
+            return ["model provenance incomplete"]
+        if declared_status == "invalid":
+            return ["model provenance invalid"]
         missing = model_provenance_missing_fields(
             {**self.metadata, "model_id": self.model_id}, model=self.model
         )
@@ -60,6 +71,7 @@ class RegisteredModel:
         payload: dict[str, object] = {
             "model_id": self.model_id,
             "metadata": deepcopy(self.metadata),
+            "provenance_status": self.provenance_status,
             "provenance": self.provenance.to_dict() if self.provenance is not None else None,
             "warnings": list(self.provenance_warnings),
         }
@@ -142,6 +154,8 @@ def build_model_provenance(
 
     if not isinstance(metadata, dict):
         raise TypeError("metadata must be a dict")
+    if _declared_provenance_status(metadata) in {"incomplete", "invalid"}:
+        return None
     payload = dict(metadata)
     nested = payload.get("provenance")
     if isinstance(nested, dict):
@@ -178,6 +192,34 @@ def get_model_provenance(model_id: str) -> ModelProvenance | None:
 
     registered = get_model(model_id)
     return registered.provenance if registered is not None else None
+
+
+def _declared_provenance_status(metadata: dict[str, object]) -> str | None:
+    """Return an explicit provenance state without masking malformed input."""
+
+    nested = metadata.get("provenance")
+    if "provenance" in metadata and not isinstance(nested, dict):
+        return "invalid"
+    states: list[str] = []
+    sources = [metadata]
+    if isinstance(nested, dict):
+        sources.append(nested)
+    for source in sources:
+        for key in ("provenance_status", "provenance_state"):
+            if key not in source:
+                continue
+            value = source.get(key)
+            if not _has_metadata_value(value):
+                return "incomplete"
+            states.append(str(value).strip().lower())
+        if source is nested and "status" in source:
+            value = source.get("status")
+            if not _has_metadata_value(value):
+                return "incomplete"
+            states.append(str(value).strip().lower())
+    if not states:
+        return None
+    return "complete" if all(value == "complete" for value in states) else "incomplete"
 
 
 def _has_metadata_value(value: object) -> bool:

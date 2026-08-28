@@ -240,6 +240,7 @@ def predict_with_metadata(
     if not isinstance(features, pd.DataFrame):
         raise TypeError("model features must be a pandas DataFrame")
 
+    declared_provenance_status = _declared_provenance_status(metadata)
     provenance = _model_provenance(metadata)
     provenance_required = bool(metadata.get("require_provenance", False))
     if provenance_required and provenance is None:
@@ -282,8 +283,14 @@ def predict_with_metadata(
     provenance_fields = _missing_model_provenance_fields(metadata)
     if provenance_fields:
         warnings.extend(f"model_provenance_missing:{name}" for name in provenance_fields)
+    if declared_provenance_status == "incomplete":
+        warnings.append("model_provenance_incomplete")
+    elif declared_provenance_status == "invalid":
+        warnings.append("model_provenance_invalid")
     elif provenance is None:
         warnings.append("model_provenance_invalid")
+    provenance_status = "complete" if provenance is not None else "incomplete"
+    provenance_warnings = list(dict.fromkeys(warnings))
     warnings.extend(_prediction_as_of_warnings(as_of, features))
     freshness = _data_freshness(
         features,
@@ -305,17 +312,45 @@ def predict_with_metadata(
         "confidence": confidence,
         "as_of": as_of,
         "freshness": freshness,
+        "provenance_status": provenance_status,
+        "provenance_warnings": provenance_warnings,
         "warnings": list(dict.fromkeys(warnings)),
         "diagnostics": list(dict.fromkeys(warnings)),
     }
-    if provenance is not None:
-        result["provenance"] = provenance.to_provenance()
+    result["provenance"] = (
+        provenance.to_provenance()
+        if provenance is not None
+        else _incomplete_model_provenance(metadata, as_of, provenance_warnings)
+    )
     return result
+
+
+def _incomplete_model_provenance(
+    metadata: Mapping[str, object],
+    as_of: object,
+    warnings: list[str],
+) -> dict[str, object]:
+    """Return an explicit non-complete payload for legacy prediction callers."""
+
+    timestamp = _metadata_timestamp(as_of)
+    return {
+        "model": {
+            "model_id": metadata.get("model_id"),
+            "model_version": metadata.get("model_version"),
+            "as_of": timestamp.isoformat() if timestamp is not None else None,
+            "status": "incomplete",
+            "freshness": None,
+            "provenance_status": "incomplete",
+            "warnings": list(warnings),
+        }
+    }
 
 
 def _model_provenance(metadata: Mapping[str, object]) -> ModelProvenance | None:
     """Build complete model provenance, returning ``None`` for legacy entries."""
 
+    if _declared_provenance_status(metadata) in {"incomplete", "invalid"}:
+        return None
     payload: dict[str, object] = dict(metadata)
     nested = payload.get("provenance")
     if isinstance(nested, Mapping):
@@ -340,6 +375,34 @@ def _model_provenance(metadata: Mapping[str, object]) -> ModelProvenance | None:
         )
     except (TypeError, ValueError):
         return None
+
+
+def _declared_provenance_status(metadata: Mapping[str, object]) -> str | None:
+    """Return an explicit provenance state without treating malformed input as complete."""
+
+    nested = metadata.get("provenance")
+    if "provenance" in metadata and not isinstance(nested, Mapping):
+        return "invalid"
+    states: list[str] = []
+    sources = [metadata]
+    if isinstance(nested, Mapping):
+        sources.append(nested)
+    for source in sources:
+        for key in ("provenance_status", "provenance_state"):
+            if key not in source:
+                continue
+            value = source.get(key)
+            if not _has_metadata_value(value):
+                return "incomplete"
+            states.append(str(value).strip().lower())
+        if source is nested and "status" in source:
+            value = source.get("status")
+            if not _has_metadata_value(value):
+                return "incomplete"
+            states.append(str(value).strip().lower())
+    if not states:
+        return None
+    return "complete" if all(value == "complete" for value in states) else "incomplete"
 
 
 def _missing_model_provenance_fields(metadata: Mapping[str, object]) -> list[str]:
