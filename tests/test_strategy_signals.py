@@ -167,10 +167,11 @@ def test_model_provider_rejects_a_feature_schema_mismatch_with_diagnostic():
     register_model(
         "schema-model-task-2",
         FixedModel(),
-        {
-            "model_id": "schema-model-task-2",
-            "feature_version": "features-2026-08-28",
-            "as_of": "2026-01-01T00:00:00+00:00",
+            {
+                "model_id": "schema-model-task-2",
+                "feature_version": "features-2026-08-28",
+                "model_version": "schema-model-v1",
+                "as_of": "2026-01-01T00:00:00+00:00",
             "confidence": 0.7,
             "feature_names": "different_feature",
         },
@@ -186,6 +187,181 @@ def test_model_provider_rejects_a_feature_schema_mismatch_with_diagnostic():
 
     assert not panel.has_valid_scores
     assert any("feature columns do not match" in diagnostic for diagnostic in panel.diagnostics)
+
+
+def test_model_provider_preserves_adapter_model_version_and_rejects_mismatch():
+    class VersionedModel:
+        def __init__(self, model_id, model_version="adapter-v2"):
+            self.model_id = model_id
+            self.model_version = model_version
+
+        def predict_with_metadata(self, features):
+            return {
+                "model_id": self.model_id,
+                "feature_version": "features-2026-08-28",
+                "model_version": self.model_version,
+                "predictions": [0.3] * len(features),
+                "confidence": [0.8] * len(features),
+                "as_of": "2026-01-01T00:00:00+00:00",
+            }
+
+    register_model(
+        "versioned-model-task-2",
+        VersionedModel("versioned-model-task-2"),
+        {
+            "model_id": "versioned-model-task-2",
+            "feature_version": "features-2026-08-28",
+            "model_version": "adapter-v2",
+            "as_of": "2026-01-01T00:00:00+00:00",
+            "confidence": 0.8,
+        },
+    )
+    prices = pd.DataFrame({"AAPL": [100, 101]}, index=pd.date_range("2026-01-01", periods=2))
+    spec = StrategySpec.from_dict({
+        "name": "model", "base_symbol": "AAPL",
+        "universe": {"type": "list", "symbols": ["AAPL"]},
+        "signal": {"type": "model", "ref": "versioned-model-task-2"},
+    })
+
+    panel = build_signal_panel(spec, compile_strategy(spec, prices))
+
+    assert panel.model_version["AAPL"].tolist() == ["adapter-v2", "adapter-v2"]
+
+    register_model(
+        "mismatched-model-task-2",
+        VersionedModel("mismatched-model-task-2"),
+        {
+            "model_id": "mismatched-model-task-2",
+            "feature_version": "features-2026-08-28",
+            "model_version": "registered-v1",
+            "as_of": "2026-01-01T00:00:00+00:00",
+            "confidence": 0.8,
+        },
+    )
+    mismatched_spec = replace_signal_ref(spec, "mismatched-model-task-2")
+    mismatched = build_signal_panel(mismatched_spec, compile_strategy(mismatched_spec, prices))
+
+    assert not mismatched.has_valid_scores
+    assert any("model_version mismatch" in diagnostic for diagnostic in mismatched.diagnostics)
+
+
+def test_model_provider_invalidates_posthoc_rows_and_nan_confidence():
+    class FixedModel:
+        def predict(self, features):
+            return [0.25] * len(features)
+
+    register_model(
+        "invalid-rows-model-task-2",
+        FixedModel(),
+        {
+            "model_id": "invalid-rows-model-task-2",
+            "feature_version": "features-2026-08-28",
+            "model_version": "invalid-rows-v1",
+            "as_of": "2026-01-02T00:00:00+00:00",
+            "confidence": [0.7, float("nan")],
+        },
+    )
+    prices = pd.DataFrame({"AAPL": [100, 101]}, index=pd.date_range("2026-01-01", periods=2))
+    spec = StrategySpec.from_dict({
+        "name": "model", "base_symbol": "AAPL",
+        "universe": {"type": "list", "symbols": ["AAPL"]},
+        "signal": {"type": "model", "ref": "invalid-rows-model-task-2"},
+    })
+
+    panel = build_signal_panel(spec, compile_strategy(spec, prices))
+
+    assert pd.isna(panel.score.iloc[0, 0])
+    assert pd.isna(panel.confidence.iloc[0, 0])
+    assert pd.isna(panel.score.iloc[1, 0])
+    assert pd.isna(panel.confidence.iloc[1, 0])
+    assert any("as_of" in diagnostic for diagnostic in panel.diagnostics)
+    assert any("confidence" in diagnostic for diagnostic in panel.diagnostics)
+
+
+def test_model_provider_maps_multi_index_as_of_values_without_nan():
+    class FixedModel:
+        def predict(self, features):
+            return [0.25] * len(features)
+
+    index = pd.date_range("2026-01-01", periods=2)
+    feature_index = pd.MultiIndex.from_product([index, ["AAPL"]], names=["timestamp", "symbol"])
+    register_model(
+        "multi-index-model-task-2",
+        FixedModel(),
+        {
+            "model_id": "multi-index-model-task-2",
+            "feature_version": "features-2026-08-28",
+            "model_version": "multi-index-v1",
+            "as_of": pd.Series(index, index=feature_index),
+            "confidence": 0.7,
+        },
+    )
+    prices = pd.DataFrame({"AAPL": [100, 101]}, index=index)
+    spec = StrategySpec.from_dict({
+        "name": "model", "base_symbol": "AAPL",
+        "universe": {"type": "list", "symbols": ["AAPL"]},
+        "signal": {"type": "model", "ref": "multi-index-model-task-2"},
+    })
+
+    panel = build_signal_panel(spec, compile_strategy(spec, prices))
+
+    assert panel.as_of["AAPL"].tolist() == list(index)
+    assert not panel.as_of["AAPL"].isna().any()
+
+
+def test_engine_fails_when_model_has_no_confidence_valid_rows():
+    class FixedModel:
+        def predict(self, features):
+            return [0.25] * len(features)
+
+    register_model(
+        "no-confidence-model-task-2",
+        FixedModel(),
+        {
+            "model_id": "no-confidence-model-task-2",
+            "feature_version": "features-2026-08-28",
+            "model_version": "no-confidence-v1",
+            "as_of": "2026-01-01T00:00:00+00:00",
+            "confidence": [float("nan"), float("nan")],
+        },
+    )
+    prices = pd.DataFrame({"AAPL": [100, 101]}, index=pd.date_range("2026-01-01", periods=2))
+    spec = {
+        "name": "model", "base_symbol": "AAPL",
+        "universe": {"type": "list", "symbols": ["AAPL"]},
+        "signal": {"type": "model", "ref": "no-confidence-model-task-2"},
+    }
+
+    run = run_strategy_backtest(spec, prices)
+
+    assert run.ok is False
+    assert any("confidence" in error for error in run.errors)
+
+
+def test_provider_provenance_is_deterministic_and_ensemble_keeps_all_versions():
+    scores = pd.DataFrame({"AAPL": [1.0]})
+    rule = SignalPanel.from_score("rule", scores, confidence=0.8)
+    momentum = SignalPanel.from_score("momentum", scores, confidence=0.8)
+    model_one = SignalPanel(
+        "model", scores, pd.DataFrame({"AAPL": [0.8]}),
+        feature_version=pd.DataFrame({"AAPL": ["features-one"]}),
+        model_version=pd.DataFrame({"AAPL": ["model-one"]}),
+    )
+    model_two = SignalPanel(
+        "model", scores, pd.DataFrame({"AAPL": [0.8]}),
+        feature_version=pd.DataFrame({"AAPL": ["features-two"]}),
+        model_version=pd.DataFrame({"AAPL": ["model-two"]}),
+    )
+
+    assert rule.feature_version.iloc[0, 0] == "rule-v1"
+    assert rule.model_version.iloc[0, 0] == ""
+    combined = combine_signal_panels([rule, momentum, model_one, model_two], [1, 1, 1, 1])
+    assert combined.feature_version.iloc[0, 0] == "rule-v1|momentum-v1|features-one|features-two"
+    assert combined.model_version.iloc[0, 0] == "model-one|model-two"
+
+
+def replace_signal_ref(spec, model_id):
+    return StrategySpec.from_dict({**spec.to_dict(), "signal": {"type": "model", "ref": model_id}})
 
 
 def test_signal_panel_validates_confidence_range_for_direct_construction():

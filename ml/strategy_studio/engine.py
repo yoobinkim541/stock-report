@@ -110,7 +110,7 @@ def run_strategy_backtest(
         signal_panel = build_signal_panel(strategy, compiled)
         signal_diagnostics = list(signal_panel.diagnostics)
         compiled.warnings.extend(signal_diagnostics)
-        if not signal_panel.has_valid_scores:
+        if not signal_panel.has_valid_signals:
             errors = [f"signal provider failed: {diagnostic}" for diagnostic in signal_diagnostics]
             if not errors:
                 errors = ["signal provider returned no valid scores"]

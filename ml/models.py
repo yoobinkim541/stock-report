@@ -214,8 +214,8 @@ def predict_with_metadata(model: object, features: pd.DataFrame, metadata: dict[
 
     if not isinstance(metadata, dict):
         raise TypeError("prediction metadata must be a dict")
-    required = ("model_id", "feature_version", "as_of")
-    missing = [name for name in required if str(metadata.get(name) or "").strip() == ""]
+    required = ("model_id", "feature_version", "model_version", "as_of")
+    missing = [name for name in required if _missing_prediction_metadata(metadata.get(name))]
     if "confidence" not in metadata:
         missing.append("confidence")
     if missing:
@@ -237,6 +237,10 @@ def predict_with_metadata(model: object, features: pd.DataFrame, metadata: dict[
     adapter = getattr(model, "predict_with_metadata", None)
     raw = adapter(features) if callable(adapter) else model.predict(features)  # type: ignore[attr-defined]
     if isinstance(raw, dict):
+        for name in ("model_id", "feature_version", "model_version"):
+            supplied = raw.get(name)
+            if supplied is not None and str(supplied) != str(metadata[name]):
+                raise ValueError(f"{name} mismatch: registered {metadata[name]}, received {supplied}")
         predictions = raw.get("predictions")
         confidence = raw.get("confidence", metadata.get("confidence"))
         as_of = raw.get("as_of", metadata.get("as_of"))
@@ -254,10 +258,22 @@ def predict_with_metadata(model: object, features: pd.DataFrame, metadata: dict[
     return {
         "model_id": str(metadata["model_id"]),
         "feature_version": str(metadata["feature_version"]),
+        "model_version": str(metadata["model_version"]),
         "predictions": predictions,
         "confidence": confidence,
         "as_of": as_of,
     }
+
+
+def _missing_prediction_metadata(value: object) -> bool:
+    if value is None:
+        return True
+    if isinstance(value, str):
+        return not value.strip()
+    try:
+        return len(value) == 0  # type: ignore[arg-type]
+    except TypeError:
+        return False
 
 
 # ---------------------------------------------------------------------------

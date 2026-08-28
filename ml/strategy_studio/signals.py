@@ -31,6 +31,7 @@ class SignalPanel:
 
     def __post_init__(self) -> None:
         self.provider = str(self.provider or "").strip()
+        self.diagnostics = [str(item) for item in self.diagnostics if str(item).strip()]
         self.score = _normalise_frame(self.score, numeric=True)
         nonfinite_score = self.score.notna() & ~np.isfinite(self.score)
         if nonfinite_score.any().any():
@@ -46,7 +47,6 @@ class SignalPanel:
         self.as_of = _metadata_frame(self.as_of, self.score, numeric=False, default=None)
         self.feature_version = _metadata_frame(self.feature_version, self.score, numeric=False, default="")
         self.model_version = _metadata_frame(self.model_version, self.score, numeric=False, default="")
-        self.diagnostics = [str(item) for item in self.diagnostics if str(item).strip()]
 
     @classmethod
     def from_score(
@@ -76,6 +76,7 @@ class SignalPanel:
             confidence=confidence_frame,
             reason=reason,
             as_of=as_of,
+            feature_version=_constant_frame(score, _feature_version_for_provider(provider)),
         )
 
     @classmethod
@@ -85,8 +86,25 @@ class SignalPanel:
         return cls(provider=str(provider or "").strip(), score=pd.DataFrame(), confidence=pd.DataFrame(), diagnostics=[diagnostic])
 
     @property
+    def valid_mask(self) -> pd.DataFrame:
+        """Rows whose score and confidence are both usable for allocation."""
+
+        if self.score.empty:
+            return pd.DataFrame(index=self.score.index, columns=self.score.columns, dtype=bool)
+        valid_score = self.score.notna() & np.isfinite(self.score)
+        valid_confidence = self.confidence.notna() & np.isfinite(self.confidence)
+        valid_confidence &= (self.confidence >= 0) & (self.confidence <= 1)
+        return valid_score & valid_confidence
+
+    @property
+    def has_valid_signals(self) -> bool:
+        return not self.score.empty and self.valid_mask.any().any()
+
+    @property
     def has_valid_scores(self) -> bool:
-        return not self.score.empty and self.score.notna().any().any()
+        """Backward-compatible alias for the confidence-aware validity check."""
+
+        return self.has_valid_signals
 
     def to_frame(self) -> pd.DataFrame:
         """Return score metadata keyed by ``(timestamp, symbol)``."""
@@ -164,25 +182,35 @@ def combine_signal_panels(
         member_score = panel.score.reindex(index=index, columns=columns)
         member_confidence = panel.confidence.reindex(index=index, columns=columns)
         valid_score = member_score.notna() & np.isfinite(member_score)
-        if not valid_score.any().any() and weight > 0:
+        valid_confidence = member_confidence.notna() & np.isfinite(member_confidence)
+        valid_confidence &= (member_confidence >= 0) & (member_confidence <= 1)
+        valid_member = valid_score & valid_confidence
+        if (valid_score & ~valid_confidence).any().any() and weight > 0:
+            diagnostics.append(f"ensemble member {position} ({panel.provider}) has invalid confidence rows")
+        if not valid_member.any().any() and weight > 0:
             diagnostics.append(f"ensemble member {position} ({panel.provider}) has no valid scores")
-        usable |= valid_score
-        score = score.add(member_score.where(valid_score, 0.0) * weight, fill_value=0.0)
-        confidence = confidence.add(member_confidence.where(member_confidence.notna(), 0.0) * weight, fill_value=0.0)
+        usable |= valid_member
+        score = score.add(member_score.where(valid_member, 0.0) * weight, fill_value=0.0)
+        confidence = confidence.add(member_confidence.where(valid_member, 0.0) * weight, fill_value=0.0)
         for dt in index:
             for symbol in columns:
-                if not valid_score.at[dt, symbol]:
+                if not valid_member.at[dt, symbol]:
                     continue
                 label = str(panel.reason.at[dt, symbol] or "").strip()
                 if label:
                     prior = str(reason.at[dt, symbol] or "").strip()
                     reason.at[dt, symbol] = "; ".join(item for item in (prior, label) if item)
-                if pd.isna(as_of.at[dt, symbol]) and not pd.isna(panel.as_of.at[dt, symbol]):
-                    as_of.at[dt, symbol] = panel.as_of.at[dt, symbol]
-                if not str(feature_version.at[dt, symbol] or "") and not pd.isna(panel.feature_version.at[dt, symbol]):
-                    feature_version.at[dt, symbol] = panel.feature_version.at[dt, symbol]
-                if not str(model_version.at[dt, symbol] or "") and not pd.isna(panel.model_version.at[dt, symbol]):
-                    model_version.at[dt, symbol] = panel.model_version.at[dt, symbol]
+                member_as_of = panel.as_of.at[dt, symbol]
+                if not pd.isna(member_as_of) and (
+                    pd.isna(as_of.at[dt, symbol]) or _timestamp_key(member_as_of) > _timestamp_key(as_of.at[dt, symbol])
+                ):
+                    as_of.at[dt, symbol] = member_as_of
+                feature_version.at[dt, symbol] = _append_provenance(
+                    feature_version.at[dt, symbol], panel.feature_version.at[dt, symbol]
+                )
+                model_version.at[dt, symbol] = _append_provenance(
+                    model_version.at[dt, symbol], panel.model_version.at[dt, symbol]
+                )
 
     score = score.where(usable)
     gated = usable & (confidence < threshold)
@@ -257,7 +285,10 @@ def _rule_provider(strategy: Any, compiled: Any) -> SignalPanel:
         if close is not None:
             available[symbol] = close.reindex(index).notna()
     confidence = confidence.mask(available, 1.0)
-    return SignalPanel("rule", scores, confidence, reason=reason, as_of=_as_of_frame(scores))
+    return SignalPanel(
+        "rule", scores, confidence, reason=reason, as_of=_as_of_frame(scores),
+        feature_version=_constant_frame(scores, _feature_version_for_provider("rule")),
+    )
 
 
 def _momentum_provider(strategy: Any, compiled: Any) -> SignalPanel:
@@ -269,7 +300,10 @@ def _momentum_provider(strategy: Any, compiled: Any) -> SignalPanel:
         scores[symbol] = close / close.shift(lookback) - 1.0
     confidence = scores.notna().astype(float)
     reason = _reason_frame(scores, "momentum", "warmup")
-    return SignalPanel("momentum", scores, confidence, reason=reason, as_of=_as_of_frame(scores))
+    return SignalPanel(
+        "momentum", scores, confidence, reason=reason, as_of=_as_of_frame(scores),
+        feature_version=_constant_frame(scores, _feature_version_for_provider("momentum")),
+    )
 
 
 def _volatility_provider(strategy: Any, compiled: Any) -> SignalPanel:
@@ -287,7 +321,11 @@ def _volatility_provider(strategy: Any, compiled: Any) -> SignalPanel:
         scores[symbol] = (1.0 / volatility.where(volatility > 0)).replace([np.inf, -np.inf], np.nan)
     confidence = scores.notna().astype(float)
     reason = _reason_frame(scores, "inverse_volatility", "warmup or zero volatility")
-    return SignalPanel("volatility", scores, confidence, reason=reason, as_of=_as_of_frame(scores), diagnostics=diagnostics)
+    return SignalPanel(
+        "volatility", scores, confidence, reason=reason, as_of=_as_of_frame(scores),
+        feature_version=_constant_frame(scores, _feature_version_for_provider("volatility")),
+        diagnostics=diagnostics,
+    )
 
 
 def _cross_sectional_rank_provider(strategy: Any, compiled: Any) -> SignalPanel:
@@ -300,7 +338,11 @@ def _cross_sectional_rank_provider(strategy: Any, compiled: Any) -> SignalPanel:
     scores = (ranked.sub(1.0).div(counts.sub(1.0).replace(0, np.nan), axis=0)).where(source_scores.notna())
     scores = scores.mask(source_scores.notna() & counts.eq(1).to_numpy()[:, None], 0.0)
     confidence = scores.notna().astype(float)
-    return SignalPanel("cross_sectional_rank", scores, confidence, reason=_reason_frame(scores, "cross_sectional_rank", "warmup"), as_of=_as_of_frame(scores))
+    return SignalPanel(
+        "cross_sectional_rank", scores, confidence,
+        reason=_reason_frame(scores, "cross_sectional_rank", "warmup"), as_of=_as_of_frame(scores),
+        feature_version=_constant_frame(scores, _feature_version_for_provider("cross_sectional_rank")),
+    )
 
 
 def _model_provider(strategy: Any, compiled: Any) -> SignalPanel:
@@ -315,18 +357,38 @@ def _model_provider(strategy: Any, compiled: Any) -> SignalPanel:
     output = predict_with_metadata(registered.model, features, {**registered.metadata, "model_id": model_id})
     predictions = _long_values_to_panel(output["predictions"], features, compiled)
     confidence = _long_values_to_panel(output["confidence"], features, compiled)
-    score = predictions
-    confidence = confidence.where(score.notna())
     index, symbols = _panel_shape(compiled)
+    score = predictions.reindex(index=index, columns=symbols)
+    confidence = confidence.reindex(index=index, columns=symbols)
+    as_of = _metadata_to_panel(output["as_of"], score, default=None).reindex(index=index, columns=symbols)
+    diagnostics: list[str] = []
+    valid_score = score.notna() & np.isfinite(score)
+    valid_confidence = confidence.notna() & np.isfinite(confidence)
+    valid_confidence &= (confidence >= 0) & (confidence <= 1)
+    invalid_confidence = valid_score & ~valid_confidence
+    if invalid_confidence.any().any():
+        diagnostics.extend(_row_diagnostics("model confidence is missing or invalid", invalid_confidence))
+        score = score.mask(invalid_confidence)
+        confidence = confidence.mask(invalid_confidence)
+    invalid_as_of = score.notna() & ~_as_of_valid_mask(score, as_of)
+    if invalid_as_of.any().any():
+        diagnostics.extend(_row_diagnostics("model as_of is later than or invalid for signal timestamp", invalid_as_of))
+        score = score.mask(invalid_as_of)
+        confidence = confidence.mask(invalid_as_of)
+    confidence = confidence.where(score.notna())
     reason = _reason_frame(score, f"model:{model_id}", "invalid prediction")
+    if invalid_confidence.any().any():
+        reason = reason.mask(invalid_confidence, "confidence missing or invalid")
+    if invalid_as_of.any().any():
+        reason = reason.mask(invalid_as_of, "as_of later than signal timestamp")
     feature_version = _constant_frame(score, output["feature_version"])
-    model_version = _constant_frame(score, output.get("model_version") or registered.metadata.get("model_version") or model_id)
-    as_of = _metadata_to_panel(output["as_of"], score, default=None)
+    model_version = _constant_frame(score, output["model_version"])
     return SignalPanel(
         "model", score.reindex(index=index, columns=symbols), confidence.reindex(index=index, columns=symbols),
         reason=reason.reindex(index=index, columns=symbols), as_of=as_of.reindex(index=index, columns=symbols),
         feature_version=feature_version.reindex(index=index, columns=symbols),
         model_version=model_version.reindex(index=index, columns=symbols),
+        diagnostics=diagnostics,
     )
 
 
@@ -423,11 +485,7 @@ def _long_values_to_panel(values: Any, features: pd.DataFrame, compiled: Any) ->
     if isinstance(values, pd.Series):
         series = pd.to_numeric(values, errors="coerce")
         if isinstance(series.index, pd.MultiIndex):
-            result = pd.DataFrame(index=index, columns=symbols, dtype="float64")
-            for (dt, symbol), value in series.items():
-                if dt in result.index and symbol in result.columns:
-                    result.at[dt, symbol] = value
-            return result
+            return _multi_index_values_to_panel(series, index, symbols, numeric=True)
         if series.index.equals(features.index):
             series = series.to_numpy()
         else:
@@ -447,25 +505,104 @@ def _metadata_to_panel(value: Any, score: pd.DataFrame, *, default: Any) -> pd.D
         return value.reindex(index=score.index, columns=score.columns)
     if isinstance(value, pd.Series):
         if isinstance(value.index, pd.MultiIndex):
-            return _long_values_to_panel(value, _features_from_score(score), _compiled_from_score(score))
+            return _multi_index_values_to_panel(value, score.index, list(score.columns), numeric=False)
         if value.index.equals(score.index):
             return pd.DataFrame({column: value for column in score.columns}, index=score.index)
     return pd.DataFrame(value if value is not None else default, index=score.index, columns=score.columns)
 
 
-def _features_from_score(score: pd.DataFrame) -> pd.DataFrame:
-    rows = [(dt, symbol) for dt in score.index for symbol in score.columns]
-    return pd.DataFrame(index=pd.MultiIndex.from_tuples(rows, names=["timestamp", "symbol"]))
+def _multi_index_values_to_panel(
+    values: pd.Series,
+    index: pd.Index,
+    symbols: list[Any],
+    *,
+    numeric: bool,
+) -> pd.DataFrame:
+    result = pd.DataFrame(index=index, columns=symbols, dtype="float64" if numeric else object)
+    for key, value in values.items():
+        if not isinstance(key, tuple) or len(key) < 2:
+            continue
+        timestamp = _matching_timestamp(index, key[0])
+        symbol = _matching_symbol(symbols, key[1])
+        if timestamp is None or symbol is None:
+            continue
+        result.at[timestamp, symbol] = pd.to_numeric(value, errors="coerce") if numeric else value
+    return result
 
 
-def _compiled_from_score(score: pd.DataFrame) -> Any:
-    class _Compiled:
-        pass
+def _matching_timestamp(index: pd.Index, value: Any) -> Any | None:
+    wanted = _timestamp_key(value)
+    if pd.isna(wanted):
+        return None
+    for candidate in index:
+        if _timestamp_key(candidate) == wanted:
+            return candidate
+    return None
 
-    compiled = _Compiled()
-    compiled.prices = score
-    compiled.contexts = {symbol: {"close": pd.Series(index=score.index, dtype=float)} for symbol in score.columns}
-    return compiled
+
+def _matching_symbol(symbols: list[Any], value: Any) -> Any | None:
+    for symbol in symbols:
+        if str(symbol) == str(value):
+            return symbol
+    return None
+
+
+def _as_of_valid_mask(score: pd.DataFrame, as_of: pd.DataFrame) -> pd.DataFrame:
+    valid = pd.DataFrame(False, index=score.index, columns=score.columns)
+    for dt in score.index:
+        signal_timestamp = _timestamp_key(dt)
+        if pd.isna(signal_timestamp):
+            continue
+        for symbol in score.columns:
+            value = _timestamp_key(as_of.at[dt, symbol])
+            valid.at[dt, symbol] = not pd.isna(value) and value <= signal_timestamp
+    return valid
+
+
+def _row_diagnostics(prefix: str, mask: pd.DataFrame) -> list[str]:
+    rows = mask.stack(future_stack=True)
+    return [f"{prefix}: {symbol} @ {pd.Timestamp(timestamp).isoformat()}" for (timestamp, symbol), value in rows.items() if bool(value)]
+
+
+def _timestamp_key(value: Any) -> pd.Timestamp:
+    try:
+        timestamp = pd.Timestamp(value)
+    except (TypeError, ValueError):
+        return pd.NaT
+    if pd.isna(timestamp):
+        return pd.NaT
+    if timestamp.tzinfo is None:
+        return timestamp.tz_localize("UTC")
+    return timestamp.tz_convert("UTC")
+
+
+def _append_provenance(existing: Any, value: Any) -> str:
+    existing_text = "" if value_is_missing(existing) else str(existing).strip()
+    value_text = "" if value_is_missing(value) else str(value).strip()
+    if not value_text:
+        return existing_text
+    parts = [part for part in existing_text.split("|") if part]
+    if value_text not in parts:
+        parts.append(value_text)
+    return "|".join(parts)
+
+
+def value_is_missing(value: Any) -> bool:
+    try:
+        result = pd.isna(value)
+    except (TypeError, ValueError):
+        return False
+    return bool(result) if isinstance(result, (bool, np.bool_)) else False
+
+
+def _feature_version_for_provider(provider: Any) -> str:
+    name = str(provider or "").strip().lower()
+    return {
+        "rule": "rule-v1",
+        "momentum": "momentum-v1",
+        "volatility": "volatility-v1",
+        "cross_sectional_rank": "cross_sectional_rank-v1",
+    }.get(name, f"{name}-v1" if name else "")
 
 
 def _panel_shape(compiled: Any) -> tuple[pd.Index, list[str]]:
@@ -489,11 +626,13 @@ def _normalise_frame(value: Any, *, numeric: bool) -> pd.DataFrame:
 
 def _metadata_frame(value: Any, score: pd.DataFrame, *, numeric: bool, default: Any) -> pd.DataFrame:
     if isinstance(value, pd.DataFrame):
-        frame = value.reindex(index=score.index, columns=score.columns).copy()
+        frame = value.reindex(index=score.index, columns=score.columns).copy() if not value.empty else None
     elif value is None:
-        frame = pd.DataFrame(default, index=score.index, columns=score.columns)
+        frame = None
     else:
         frame = pd.DataFrame(value, index=score.index, columns=score.columns)
+    if frame is None:
+        frame = pd.DataFrame(default, index=score.index, columns=score.columns)
     if numeric:
         frame = frame.apply(pd.to_numeric, errors="coerce")
     return frame
