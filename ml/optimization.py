@@ -18,6 +18,8 @@ import itertools
 import math
 from typing import Any, Callable, Optional
 
+import numpy as np
+
 try:
     import optuna
     optuna.logging.set_verbosity(optuna.logging.WARNING)
@@ -76,6 +78,51 @@ def composite_score(
     if math.isnan(score) or math.isinf(score):
         return float("-inf")
     return float(score)
+
+
+def cost_aware_objective(
+    scores: Any,
+    weights: Any,
+    covariance: Any,
+    previous_weights: Any = None,
+    *,
+    risk_aversion: float = 1.0,
+    turnover_penalty: float = 0.0,
+    cost_bps: float = 0.0,
+) -> float:
+    """Evaluate the deterministic signal-to-position objective.
+
+    The helper is intentionally numeric-only so the allocation layer can use
+    it without introducing a solver or an executable plugin surface.
+    """
+
+    signal_array = np.asarray(scores, dtype="float64").ravel()
+    weight_array = np.asarray(weights, dtype="float64").ravel()
+    covariance_array = np.asarray(covariance, dtype="float64")
+    if previous_weights is None:
+        previous_array = np.zeros_like(weight_array)
+    else:
+        previous_array = np.asarray(previous_weights, dtype="float64").ravel()
+    if len(signal_array) != len(weight_array) or len(previous_array) != len(weight_array):
+        raise ValueError("scores, weights, and previous_weights must have equal lengths")
+    if covariance_array.shape != (len(weight_array), len(weight_array)):
+        raise ValueError("covariance shape must match weights")
+    values = np.concatenate([signal_array, weight_array, previous_array, covariance_array.ravel()])
+    if not np.isfinite(values).all():
+        return float("-inf")
+    try:
+        score_weight = float(signal_array @ weight_array)
+        portfolio_variance = float(weight_array @ covariance_array @ weight_array)
+        turnover = float(np.abs(weight_array - previous_array).sum())
+        objective = (
+            score_weight
+            - float(risk_aversion) * portfolio_variance
+            - float(turnover_penalty) * turnover
+            - float(cost_bps) * turnover / 10000.0
+        )
+    except (TypeError, ValueError, FloatingPointError):
+        return float("-inf")
+    return float(objective) if math.isfinite(objective) else float("-inf")
 
 
 # ---------------------------------------------------------------------------

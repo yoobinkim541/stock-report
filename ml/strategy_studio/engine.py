@@ -48,6 +48,7 @@ class StrategyRun:
     errors: list[str] = field(default_factory=list)
     weights: pd.DataFrame = field(default_factory=pd.DataFrame)
     signals: dict[str, Any] = field(default_factory=dict)
+    allocation_diagnostics: list[dict[str, object]] = field(default_factory=list)
 
 
 def compile_strategy(spec: dict[str, Any] | StrategySpec, prices: pd.DataFrame) -> CompiledStrategy:
@@ -103,10 +104,8 @@ def run_strategy_backtest(
         )
 
     close_panel = compiled.prices
-    declared_signal = bool(strategy.signal)
-    signal_panel = None
-    signal_diagnostics: list[str] = []
-    if declared_signal:
+    allocation_diagnostics: list[dict[str, object]] = []
+    if strategy.uses_allocation_path:
         signal_panel = build_signal_panel(strategy, compiled)
         signal_diagnostics = list(signal_panel.diagnostics)
         compiled.warnings.extend(signal_diagnostics)
@@ -126,9 +125,27 @@ def run_strategy_backtest(
                 signals={"panel": signal_panel.to_dict()},
             )
 
-    weights, trade_rows, signal_trace = _simulate_strategy(strategy, compiled.contexts, close_panel, compiled.warnings)
-    if signal_panel is not None:
-        signal_trace["panel"] = signal_panel.to_dict()
+        from .allocation import allocate_targets
+
+        allocation = allocate_targets(
+            signal_panel,
+            close_panel.pct_change(),
+            _allocation_config(strategy),
+            strategy.costs,
+        )
+        compiled.warnings.extend(allocation.warnings)
+        weights = allocation.weights
+        allocation_diagnostics = list(allocation.diagnostics)
+        signal_trace = {
+            "panel": signal_panel.to_dict(),
+            "targets": weights.copy(),
+            "allocation": allocation.to_dict(),
+            "allocation_diagnostics": allocation_diagnostics,
+            "allocation_warnings": list(allocation.warnings),
+        }
+        trade_rows: list[dict[str, Any]] = []
+    else:
+        weights, trade_rows, signal_trace = _simulate_strategy(strategy, compiled.contexts, close_panel, compiled.warnings)
     if weights.empty:
         return StrategyRun(
             ok=False,
@@ -143,7 +160,16 @@ def run_strategy_backtest(
             signals=signal_trace,
         )
 
-    return _build_run(strategy, close_panel, weights, trade_rows, signal_trace, benchmark=benchmark, warnings=compiled.warnings)
+    return _build_run(
+        strategy,
+        close_panel,
+        weights,
+        trade_rows,
+        signal_trace,
+        benchmark=benchmark,
+        warnings=compiled.warnings,
+        allocation_diagnostics=allocation_diagnostics,
+    )
 
 
 def _build_run(
@@ -155,6 +181,7 @@ def _build_run(
     *,
     benchmark: str | None,
     warnings: list[str],
+    allocation_diagnostics: list[dict[str, object]] | None = None,
 ) -> StrategyRun:
     params = strategy.costs or {}
     cost_bps = float(params.get("fees_bps") or 0.0) + float(params.get("slippage_bps") or 0.0) + float(params.get("spread_bps") or 0.0)
@@ -209,7 +236,19 @@ def _build_run(
         errors=errors,
         weights=aligned,
         signals=signal_trace,
+        allocation_diagnostics=list(allocation_diagnostics or []),
     )
+
+
+def _allocation_config(strategy: StrategySpec) -> dict[str, object]:
+    """Merge legacy sizing defaults into an explicitly opted-in portfolio."""
+
+    config: dict[str, object] = dict(strategy.sizing or {})
+    config.update(strategy.portfolio or {})
+    sizing_type = str((strategy.sizing or {}).get("type") or "fixed_pct").strip().lower()
+    if "optimizer" not in config and sizing_type in {"equal_weight", "risk_budget"}:
+        config["optimizer"] = sizing_type
+    return config
 
 
 def _simulate_strategy(

@@ -34,6 +34,7 @@ SUPPORTED_DATA_PROFILES = {"kr_intraday", "global_swing", "extended_us", "generi
 SUPPORTED_SIGNAL_TYPES = {"rule", "factor", "model", "ensemble"}
 SUPPORTED_EXECUTION_PROFILES = {"kr_intraday", "global_swing", "extended_us", "bar"}
 SUPPORTED_PROMOTION_ENVIRONMENTS = {"sandbox", "paper", "live"}
+SUPPORTED_PORTFOLIO_OPTIMIZERS = {"cost_aware_risk_budget", "equal_weight", "risk_budget"}
 
 _UNSAFE_PLUGIN_NAMES = {"python", "shell", "exec"}
 _SUPPORTED_PLUGIN_NAMES = {
@@ -265,6 +266,17 @@ class StrategySpec:
             raise ValueError("; ".join(errors))
         return warnings
 
+    @property
+    def uses_allocation_path(self) -> bool:
+        """Return whether the input explicitly opted into signal allocation."""
+
+        return bool(
+            self._explicit_contract_fields.intersection({"signal", "portfolio", "execution"})
+            or self.signal
+            or self.portfolio
+            or self.execution
+        )
+
     def _validate_new_blocks(self, errors: list[str]) -> None:
         if not isinstance(self.features, list):
             errors.append("features must be a list")
@@ -295,6 +307,26 @@ class StrategySpec:
         for field_name, block in (("portfolio", self.portfolio), ("execution", self.execution), ("promotion", self.promotion)):
             if not isinstance(block, dict):
                 errors.append(f"{field_name} must be a dict")
+
+        if isinstance(self.portfolio, dict):
+            if self.portfolio.get("optimizer") is not None:
+                optimizer = str(self.portfolio.get("optimizer") or "").strip().lower()
+                if optimizer not in SUPPORTED_PORTFOLIO_OPTIMIZERS:
+                    errors.append(f"unsupported portfolio optimizer: {optimizer}")
+            for key in ("max_position_pct", "max_gross_exposure", "max_turnover", "target_volatility", "risk_aversion", "turnover_penalty"):
+                if key in self.portfolio:
+                    try:
+                        if float(self.portfolio[key]) < 0:
+                            errors.append(f"portfolio.{key} must be >= 0")
+                    except (TypeError, ValueError):
+                        errors.append(f"portfolio.{key} must be numeric")
+            if "min_confidence" in self.portfolio:
+                try:
+                    value = float(self.portfolio["min_confidence"])
+                    if not 0 <= value <= 1:
+                        errors.append("portfolio.min_confidence must be between 0 and 1")
+                except (TypeError, ValueError):
+                    errors.append("portfolio.min_confidence must be numeric")
 
         if isinstance(self.execution, dict) and self.execution.get("profile") is not None:
             profile = str(self.execution.get("profile") or "").strip().lower()
