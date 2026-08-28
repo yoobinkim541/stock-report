@@ -73,6 +73,14 @@ def compile_strategy(spec: dict[str, Any] | StrategySpec, prices: pd.DataFrame) 
     return CompiledStrategy(strategy, close_panel, price_store, contexts, warnings=warnings, errors=[])
 
 
+def build_signal_panel(strategy: StrategySpec, compiled: CompiledStrategy) -> Any:
+    """Build a declared signal without changing the legacy rule simulator."""
+
+    from .signals import build_signal_panel as _build_signal_panel
+
+    return _build_signal_panel(strategy, compiled)
+
+
 def run_strategy_backtest(
     spec: dict[str, Any] | StrategySpec,
     prices: pd.DataFrame,
@@ -95,7 +103,32 @@ def run_strategy_backtest(
         )
 
     close_panel = compiled.prices
+    declared_signal = bool(strategy.signal)
+    signal_panel = None
+    signal_diagnostics: list[str] = []
+    if declared_signal:
+        signal_panel = build_signal_panel(strategy, compiled)
+        signal_diagnostics = list(signal_panel.diagnostics)
+        compiled.warnings.extend(signal_diagnostics)
+        if not signal_panel.has_valid_scores:
+            errors = [f"signal provider failed: {diagnostic}" for diagnostic in signal_diagnostics]
+            if not errors:
+                errors = ["signal provider returned no valid scores"]
+            return StrategyRun(
+                ok=False,
+                spec=strategy.to_dict(),
+                metrics={},
+                trades=[],
+                equity=pd.DataFrame(),
+                benchmark={"symbol": benchmark or strategy.base_symbol or "", "available": False},
+                warnings=compiled.warnings,
+                errors=errors,
+                signals={"panel": signal_panel.to_dict()},
+            )
+
     weights, trade_rows, signal_trace = _simulate_strategy(strategy, compiled.contexts, close_panel, compiled.warnings)
+    if signal_panel is not None:
+        signal_trace["panel"] = signal_panel.to_dict()
     if weights.empty:
         return StrategyRun(
             ok=False,

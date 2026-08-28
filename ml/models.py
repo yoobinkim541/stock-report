@@ -204,6 +204,62 @@ class ExcessReturnModel:
         return "mean_baseline"
 
 
+def predict_with_metadata(model: object, features: pd.DataFrame, metadata: dict[str, object]) -> dict[str, object]:
+    """Run a registered model only when its prediction contract is complete.
+
+    The wrapper deliberately delegates to the model's public prediction method;
+    it never evaluates model code or invents a prediction when metadata or the
+    feature schema is unavailable.
+    """
+
+    if not isinstance(metadata, dict):
+        raise TypeError("prediction metadata must be a dict")
+    required = ("model_id", "feature_version", "as_of")
+    missing = [name for name in required if str(metadata.get(name) or "").strip() == ""]
+    if "confidence" not in metadata:
+        missing.append("confidence")
+    if missing:
+        raise ValueError(f"prediction metadata missing: {', '.join(missing)}")
+    if not isinstance(features, pd.DataFrame):
+        raise TypeError("model features must be a pandas DataFrame")
+
+    expected = metadata.get("feature_names") or metadata.get("feature_columns")
+    if expected is None:
+        expected = getattr(model, "feature_names_", None)
+    if isinstance(expected, str):
+        expected = [expected]
+    if expected is not None and list(features.columns) != [str(item) for item in expected]:
+        raise ValueError(
+            f"feature columns do not match: expected {[str(item) for item in expected]}, "
+            f"got {[str(item) for item in features.columns]}"
+        )
+
+    adapter = getattr(model, "predict_with_metadata", None)
+    raw = adapter(features) if callable(adapter) else model.predict(features)  # type: ignore[attr-defined]
+    if isinstance(raw, dict):
+        predictions = raw.get("predictions")
+        confidence = raw.get("confidence", metadata.get("confidence"))
+        as_of = raw.get("as_of", metadata.get("as_of"))
+    else:
+        predictions = raw
+        confidence = metadata.get("confidence")
+        as_of = metadata.get("as_of")
+    if predictions is None or confidence is None or as_of is None:
+        missing_output = [
+            name for name, value in (("predictions", predictions), ("confidence", confidence), ("as_of", as_of))
+            if value is None
+        ]
+        raise ValueError(f"prediction metadata missing: {', '.join(missing_output)}")
+
+    return {
+        "model_id": str(metadata["model_id"]),
+        "feature_version": str(metadata["feature_version"]),
+        "predictions": predictions,
+        "confidence": confidence,
+        "as_of": as_of,
+    }
+
+
 # ---------------------------------------------------------------------------
 # News feature ablation
 # ---------------------------------------------------------------------------
