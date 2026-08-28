@@ -278,6 +278,37 @@ def test_model_provider_invalidates_posthoc_rows_and_nan_confidence():
     assert any("confidence" in diagnostic for diagnostic in panel.diagnostics)
 
 
+def test_model_provider_invalidates_nonfinite_prediction_with_out_of_range_confidence():
+    class NonfiniteModel:
+        def predict(self, features):
+            return [float("nan")] * len(features)
+
+    register_model(
+        "nonfinite-confidence-model-task-2",
+        NonfiniteModel(),
+        {
+            "model_id": "nonfinite-confidence-model-task-2",
+            "feature_version": "features-2026-08-28",
+            "model_version": "nonfinite-confidence-v1",
+            "as_of": "2026-01-01T00:00:00+00:00",
+            "confidence": 1.1,
+        },
+    )
+    prices = pd.DataFrame({"AAPL": [100]}, index=pd.date_range("2026-01-01", periods=1))
+    spec = StrategySpec.from_dict({
+        "name": "model", "base_symbol": "AAPL",
+        "universe": {"type": "list", "symbols": ["AAPL"]},
+        "signal": {"type": "model", "ref": "nonfinite-confidence-model-task-2"},
+    })
+
+    panel = build_signal_panel(spec, compile_strategy(spec, prices))
+
+    assert pd.isna(panel.score.iloc[0, 0])
+    assert pd.isna(panel.confidence.iloc[0, 0])
+    assert any("confidence" in diagnostic for diagnostic in panel.diagnostics)
+    assert any("prediction" in diagnostic for diagnostic in panel.diagnostics)
+
+
 def test_model_provider_maps_multi_index_as_of_values_without_nan():
     class FixedModel:
         def predict(self, features):

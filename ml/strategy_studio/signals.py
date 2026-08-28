@@ -365,11 +365,16 @@ def _model_provider(strategy: Any, compiled: Any) -> SignalPanel:
     valid_score = score.notna() & np.isfinite(score)
     valid_confidence = confidence.notna() & np.isfinite(confidence)
     valid_confidence &= (confidence >= 0) & (confidence <= 1)
-    invalid_confidence = valid_score & ~valid_confidence
+    invalid_score = ~valid_score
+    invalid_confidence = ~valid_confidence
+    invalid_rows = invalid_score | invalid_confidence
     if invalid_confidence.any().any():
         diagnostics.extend(_row_diagnostics("model confidence is missing or invalid", invalid_confidence))
-        score = score.mask(invalid_confidence)
-        confidence = confidence.mask(invalid_confidence)
+    if invalid_score.any().any():
+        diagnostics.extend(_row_diagnostics("model prediction is missing or invalid", invalid_score))
+    if invalid_rows.any().any():
+        score = score.mask(invalid_rows)
+        confidence = confidence.mask(invalid_rows)
     invalid_as_of = score.notna() & ~_as_of_valid_mask(score, as_of)
     if invalid_as_of.any().any():
         diagnostics.extend(_row_diagnostics("model as_of is later than or invalid for signal timestamp", invalid_as_of))
