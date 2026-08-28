@@ -606,6 +606,36 @@ def _execute_target_weights(
                         0.0, held_quantities.get(symbol, 0.0) - fill.filled_qty,
                     )
 
+    def cancel_pending_orders(
+        symbol: str,
+        side: str,
+        event_time: pd.Timestamp,
+        reason: str,
+    ) -> None:
+        pending = pending_buys if side == "buy" else pending_sells
+        for eligible_time in sorted(list(scheduled)):
+            remaining: list[OrderIntent] = []
+            for intent in sorted(scheduled[eligible_time], key=_intent_sort_key):
+                if intent.symbol.upper().strip() != symbol or intent.side != side:
+                    remaining.append(intent)
+                    continue
+                pending[symbol] = max(0.0, pending.get(symbol, 0.0) - intent.quantity)
+                metadata = dict(intent.metadata or {})
+                metadata.update({
+                    "cancelled_at": _timestamp_text(event_time),
+                    "cancelled_by": "target_reconciliation",
+                })
+                run_id = intent.run_id or f"{config.run_id}-{_stable_intent_id(intent)}"
+                fills.append(_event(
+                    intent, run_id=run_id, status="cancelled", reason=reason,
+                    submitted_at=_timestamp_text(intent.submitted_at or intent.decision_at),
+                    metadata=metadata,
+                ))
+            if remaining:
+                scheduled[eligible_time] = remaining
+            else:
+                scheduled.pop(eligible_time, None)
+
     for event_time in sorted(event_times):
         # Existing orders at this bar settle before decisions made at this time.
         process_due(event_time)
@@ -632,17 +662,26 @@ def _execute_target_weights(
                     weight = 0.0
                 target_quantity = max(0.0, weight * config.initial_cash / price)
                 current_quantity = max(0.0, held_quantities.get(symbol, 0.0))
+                pending_buy_quantity = pending_buys.get(symbol, 0.0)
+                pending_sell_quantity = pending_sells.get(symbol, 0.0)
+                if target_quantity + 1e-12 < current_quantity + pending_buy_quantity:
+                    reason = "target_reversal" if target_quantity < current_quantity else "target_reduced"
+                    cancel_pending_orders(symbol, "buy", event_time, reason)
+                    pending_buy_quantity = 0.0
+                if target_quantity > current_quantity - pending_sell_quantity + 1e-12:
+                    reason = "target_reversal" if target_quantity > current_quantity else "target_increased"
+                    cancel_pending_orders(symbol, "sell", event_time, reason)
+                    pending_sell_quantity = 0.0
                 if target_quantity >= current_quantity:
                     delta = max(
                         0.0,
-                        target_quantity - current_quantity - pending_buys.get(symbol, 0.0),
+                        target_quantity - current_quantity - pending_buy_quantity,
                     )
                 else:
-                    available_to_sell = max(
+                    delta = -max(
                         0.0,
-                        current_quantity - pending_sells.get(symbol, 0.0),
+                        current_quantity - target_quantity - pending_sell_quantity,
                     )
-                    delta = -min(current_quantity - target_quantity, available_to_sell)
                 if abs(delta) <= config.min_order_qty:
                     continue
                 intent = OrderIntent(

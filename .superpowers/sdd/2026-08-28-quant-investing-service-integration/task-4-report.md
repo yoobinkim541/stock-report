@@ -27,6 +27,9 @@ weight simulator.
 - Reworked target reconciliation into a single chronological pass so only
   current and past fill events affect decisions; partial residuals and pending
   order reservations are carried forward without consulting future bar state.
+- Added causal cancel/replace handling for pending target orders: a reduced or
+  reversed target releases its reservation, emits a distinct cancelled event,
+  and schedules only the replacement quantity when still needed.
 - Made `ExecutionResult.to_dict()`, new-strategy signal traces, and complete
   strategy reports strict JSON payloads using the public `serialize_event()`
   contract and stable `{index, columns, data}` DataFrame serialization.
@@ -39,9 +42,9 @@ weight simulator.
 ## Verification
 
 - `./.venv/bin/pytest tests/test_strategy_execution.py -q`
-  - `17 passed`
+  - `21 passed`
 - `./.venv/bin/pytest tests/test_strategy_execution.py tests/test_strategy_studio.py tests/test_trade_events.py -q`
-  - `29 passed`
+  - `33 passed`
 - `./.venv/bin/pytest tests/test_strategy_contracts.py tests/test_strategy_signals.py tests/test_strategy_allocation.py -q`
   - `47 passed`
 - `./.venv/bin/python -m compileall -q ml/strategy_studio`
@@ -67,6 +70,12 @@ weight simulator.
 - A non-triggered order produces a rejected event by default and can be marked
   cancelled with `cancel_unfilled=True`. This keeps the ledger complete without
   inventing a later fill.
+- Pending target orders are cancelled and replaced when a newer target reduces
+  their intended exposure. This prevents stale long positions, but target
+  reversal is intentionally conservative while an order is still in latency.
+- `deploy/crontab.stock-report:21` is an unrelated `jipsuri-class` job from the
+  pre-existing user commit `907b21a`; it was inspected and left untouched as
+  out of scope for Task 4.
 - Short positions and exchange-specific price-limit rules are intentionally not
   added to this task because the existing `PositionState` contract is long-only;
   those policies require a later profile/operational integration.

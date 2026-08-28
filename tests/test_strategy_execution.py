@@ -6,6 +6,7 @@ import pandas as pd
 import pytest
 
 from ml.strategy_studio import (
+    ExecutionResult,
     FillEvent,
     OrderIntent,
     PositionState,
@@ -180,7 +181,7 @@ def test_delayed_reduction_does_not_sell_against_pending_buy():
         {"open": 100.0, "high": 101.0, "low": 99.0, "close": 100.0, "volume": 10.0},
     ])}
     targets = pd.DataFrame(
-        {"AAPL": [1.0, 0.0, 0.0, 0.0]},
+        {"AAPL": [1.0, 1.0, 0.0, 0.0]},
         index=bars["AAPL"].index[:4],
     )
 
@@ -193,6 +194,91 @@ def test_delayed_reduction_does_not_sell_against_pending_buy():
     assert [intent.side for intent in result.intents] == ["buy", "sell"]
     assert [fill.filled_qty for fill in result.fills] == pytest.approx([5, 5])
     assert result.positions["AAPL"].quantity == pytest.approx(0)
+
+
+def test_target_reversal_cancels_pending_buy_before_latency_expiry():
+    bars = {"AAPL": _bars([
+        {"open": 100.0, "high": 101.0, "low": 99.0, "close": 100.0, "volume": 100.0},
+        {"open": 100.0, "high": 101.0, "low": 99.0, "close": 100.0, "volume": 100.0},
+        {"open": 100.0, "high": 101.0, "low": 99.0, "close": 100.0, "volume": 100.0},
+        {"open": 100.0, "high": 101.0, "low": 99.0, "close": 100.0, "volume": 100.0},
+    ])}
+    targets = pd.DataFrame(
+        {"AAPL": [1.0, 0.0, 0.0]},
+        index=bars["AAPL"].index[:3],
+    )
+
+    result = run_execution_backtest(
+        targets,
+        bars,
+        ExecutionConfig(initial_cash=1_000, latency_bars=2),
+    )
+
+    assert len(result.intents) == 1
+    assert [(fill.status, fill.reason) for fill in result.fills] == [("cancelled", "target_reduced")]
+    assert result.positions["AAPL"].quantity == pytest.approx(0)
+    assert result.equity["nav"].iloc[-1] == pytest.approx(1_000)
+
+
+def test_target_reduction_replaces_pending_buy_with_current_delta():
+    bars = {"AAPL": _bars([
+        {"open": 100.0, "high": 101.0, "low": 99.0, "close": 100.0, "volume": 100.0},
+        {"open": 100.0, "high": 101.0, "low": 99.0, "close": 100.0, "volume": 100.0},
+        {"open": 100.0, "high": 101.0, "low": 99.0, "close": 100.0, "volume": 100.0},
+        {"open": 100.0, "high": 101.0, "low": 99.0, "close": 100.0, "volume": 100.0},
+        {"open": 100.0, "high": 101.0, "low": 99.0, "close": 100.0, "volume": 100.0},
+    ])}
+    targets = pd.DataFrame(
+        {"AAPL": [1.0, 0.5, 0.5, 0.5]},
+        index=bars["AAPL"].index[:4],
+    )
+
+    result = run_execution_backtest(
+        targets,
+        bars,
+        ExecutionConfig(initial_cash=1_000, latency_bars=2),
+    )
+
+    assert [intent.quantity for intent in result.intents] == pytest.approx([10, 5])
+    assert [(fill.status, fill.reason, fill.filled_qty) for fill in result.fills] == [
+        ("cancelled", "target_reduced", 0),
+        ("filled", "market_open", 5),
+    ]
+    assert result.positions["AAPL"].quantity == pytest.approx(5)
+
+
+def test_partial_fill_issues_residual_order_on_later_target():
+    bars = {"AAPL": _bars([
+        {"open": 100.0, "high": 101.0, "low": 99.0, "close": 100.0, "volume": 10.0},
+        {"open": 100.0, "high": 101.0, "low": 99.0, "close": 100.0, "volume": 10.0},
+        {"open": 100.0, "high": 101.0, "low": 99.0, "close": 100.0, "volume": 10.0},
+        {"open": 100.0, "high": 101.0, "low": 99.0, "close": 100.0, "volume": 10.0},
+    ])}
+    targets = pd.DataFrame(
+        {"AAPL": [1.0, 1.0]},
+        index=bars["AAPL"].index[:2],
+    )
+
+    result = run_execution_backtest(
+        targets,
+        bars,
+        ExecutionConfig(initial_cash=1_000, latency_bars=1, max_participation_rate=0.5),
+    )
+
+    assert [intent.quantity for intent in result.intents] == pytest.approx([10, 5])
+    assert [fill.filled_qty for fill in result.fills] == pytest.approx([5, 5])
+
+
+def test_execution_result_to_dict_is_directly_json_safe():
+    result = ExecutionResult(
+        equity=pd.DataFrame({"nav": [1_000.0]}, index=pd.date_range("2026-01-01", periods=1)),
+        summary={"final_nav": 1_000.0},
+    )
+
+    payload = result.to_dict()
+
+    assert payload["equity"]["columns"] == ["nav"]
+    json.dumps(payload)
 
 
 def test_participation_cap_is_aggregated_across_same_bar_intents():
