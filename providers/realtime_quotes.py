@@ -223,3 +223,113 @@ def get_volume(symbol: str, *, max_age_s: int = DEFAULT_STALE_S) -> float | None
 
 def is_fresh(symbol: str, *, max_age_s: int = DEFAULT_STALE_S) -> bool:
     return _entry(symbol, max_age_s) is not None
+
+
+def quote_health(
+    symbol: str,
+    *,
+    now: float | None = None,
+    max_age_s: int = DEFAULT_STALE_S,
+) -> dict[str, object]:
+    """Return replayable health for one quote without changing quote reads."""
+
+    current = time.time() if now is None else float(now)
+    name = str(symbol or "").strip().upper()
+    if not name:
+        return {"status": "pause", "reason": "missing_quote_symbol", "age_seconds": None}
+    if not enabled():
+        return {"status": "pause", "reason": "quote_source_disabled", "age_seconds": None, "source": None}
+
+    source_specs = (
+        ("kis_ws", CACHE_PATH, ws_enabled()),
+        ("rest", REST_CACHE_PATH, poll_enabled()),
+    )
+    health = source_health(now=current)
+    candidates: list[tuple[str, dict]] = []
+    invalid_entries: list[tuple[str, str]] = []
+    missing_entries: list[str] = []
+    for source, path, active in source_specs:
+        if not active or health.get(source, {}).get("status") != "fresh":
+            continue
+        cache = _read_cache(path)
+        entry = cache.get(name) or cache.get(symbol) if isinstance(cache, dict) else None
+        if not isinstance(entry, dict):
+            missing_entries.append(source)
+            continue
+        try:
+            age = current - float(entry.get("ts"))
+        except (TypeError, ValueError):
+            invalid_entries.append((source, "invalid_quote_timestamp"))
+            continue
+        if age < -1.0:
+            invalid_entries.append((source, "future_quote_timestamp"))
+            continue
+        age = max(0.0, age)
+        if age > float(max_age_s):
+            invalid_entries.append((source, "stale_quote"))
+            continue
+        candidates.append((source, {**entry, "age_seconds": age}))
+
+    if candidates:
+        source, entry = max(candidates, key=lambda item: _entry_timestamp(item[1]))
+        return {"status": "fresh", "reason": "fresh", "age_seconds": entry["age_seconds"], "source": source}
+    if invalid_entries:
+        source, reason = invalid_entries[0]
+        age = None
+        if reason == "stale_quote":
+            cache = _read_cache(CACHE_PATH if source == "kis_ws" else REST_CACHE_PATH)
+            try:
+                age = max(0.0, current - float((cache.get(name) or cache.get(symbol) or {}).get("ts")))
+            except (AttributeError, TypeError, ValueError):
+                pass
+        return {"status": "pause", "reason": reason, "age_seconds": age, "source": source}
+    if missing_entries:
+        return {"status": "pause", "reason": "missing_quote", "age_seconds": None, "source": missing_entries[0]}
+
+    active_sources = {source for source, _path, active in source_specs if active}
+    active_health = [
+        (source, record) for source, record in health.items()
+        if source in active_sources and record.get("status") != "disabled"
+    ]
+    source, record = active_health[0] if active_health else (None, None)
+    return {
+        "status": "pause",
+        "reason": str((record or {}).get("reason") or "missing_quote"),
+        "age_seconds": (record or {}).get("age_seconds"),
+        "source": source,
+    }
+
+
+def source_health(*, now: float | None = None) -> dict[str, dict[str, object]]:
+    """Summarize heartbeat health for the existing WS and REST cache layers."""
+
+    current = time.time() if now is None else float(now)
+    result: dict[str, dict[str, object]] = {}
+    for name, path, enabled_flag, max_age in (
+        ("kis_ws", CACHE_PATH, ws_enabled(), HEARTBEAT_STALE_S),
+        ("rest", REST_CACHE_PATH, poll_enabled(), REST_HEARTBEAT_STALE_S),
+    ):
+        cache = _read_cache(path)
+        if not enabled_flag:
+            result[name] = {"status": "disabled", "reason": "source_disabled", "age_seconds": None}
+            continue
+        heartbeat = (cache.get(HEARTBEAT_KEY) or {}).get("ts") if isinstance(cache, dict) else None
+        try:
+            age = current - float(heartbeat)
+        except (TypeError, ValueError):
+            result[name] = {"status": "pause", "reason": "missing_heartbeat", "age_seconds": None}
+            continue
+        if age < -1.0:
+            result[name] = {"status": "pause", "reason": "future_heartbeat", "age_seconds": 0.0}
+        elif age > max_age:
+            result[name] = {"status": "pause", "reason": "stale_heartbeat", "age_seconds": age}
+        else:
+            result[name] = {"status": "fresh", "reason": "fresh", "age_seconds": max(0.0, age)}
+    return result
+
+
+def _entry_timestamp(entry: dict) -> float:
+    try:
+        return float(entry.get("ts") or 0.0)
+    except (TypeError, ValueError):
+        return 0.0

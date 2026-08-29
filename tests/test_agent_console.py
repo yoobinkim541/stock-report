@@ -86,6 +86,31 @@ def test_context_pack_empty(monkeypatch, tmp_path):
     assert pack["shared_memory"]["ok"] is True
 
 
+def test_context_pack_exposes_replayable_strategy_profile_health(monkeypatch, tmp_path):
+    _isolate(monkeypatch, tmp_path)
+
+    from agent_console import context
+
+    monkeypatch.setattr(context, "recent_source_events", lambda hours=72, limit=60: [])
+    monkeypatch.setattr(context.realtime_market, "build_market_snapshot", lambda: {"status": "unavailable"})
+    monkeypatch.setattr(
+        context,
+        "strategy_profile_health",
+        lambda: {
+            "kr_intraday": {
+                "status": "pause",
+                "reason": "stale_intraday_bar",
+                "age_seconds": 330.0,
+            }
+        },
+    )
+
+    pack = context.context_pack("market")
+
+    assert pack["strategy_profile_health"]["kr_intraday"]["status"] == "pause"
+    assert pack["strategy_profile_health"]["kr_intraday"]["reason"] == "stale_intraday_bar"
+
+
 def test_context_pack_exposes_prediction_market_summary(monkeypatch, tmp_path):
     _isolate(monkeypatch, tmp_path)
 

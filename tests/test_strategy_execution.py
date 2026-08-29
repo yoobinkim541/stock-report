@@ -21,6 +21,7 @@ from ml.strategy_studio.execution import (
     execution_defaults,
     run_execution_backtest,
 )
+from ml.strategy_studio.profiles import profile_health
 
 
 def _bars(rows: list[dict[str, float]], start: str = "2026-01-01") -> pd.DataFrame:
@@ -477,3 +478,67 @@ def test_execution_defaults_are_profile_specific_and_report_exposes_fill_fields(
     }.issubset(run.trades[0])
     assert report["summary"]["trade_count"] == run.metrics["trade_count"]
     assert report["execution"]["trade_count"] == run.metrics["trade_count"]
+
+
+def test_kr_intraday_profile_pauses_when_1m_sink_is_stale():
+    decision = profile_health(
+        "kr_intraday",
+        last_bar_at="2026-08-28T10:00:00+09:00",
+        now="2026-08-28T10:05:30+09:00",
+        max_age_seconds=60,
+    )
+
+    assert decision.status == "pause"
+    assert decision.reason == "stale_intraday_bar"
+    assert decision.age_seconds == pytest.approx(330.0)
+
+
+def test_extended_us_uses_wider_costs_than_regular_session():
+    regular = execution_defaults("global_swing", session="regular")
+    extended = execution_defaults("extended_us", session="extended")
+
+    assert extended.spread_bps > regular.spread_bps
+    assert extended.max_participation_rate < regular.max_participation_rate
+
+
+def test_paused_profile_blocks_new_entries_but_allows_configured_exits():
+    bars = {"AAPL": _bars([
+        {"open": 100.0, "high": 101.0, "low": 99.0, "close": 100.0, "volume": 100.0},
+        {"open": 100.0, "high": 101.0, "low": 99.0, "close": 100.0, "volume": 100.0},
+    ])}
+    config = ExecutionConfig(
+        profile="kr_intraday",
+        profile_health={"status": "pause", "reason": "stale_intraday_bar", "age_seconds": 330.0},
+        latency_bars=1,
+    )
+    intents = [
+        OrderIntent("AAPL", "buy", 10, bars["AAPL"].index[0]),
+        OrderIntent("AAPL", "sell", 10, bars["AAPL"].index[0]),
+    ]
+
+    fills = execute_intents(intents, bars, config)
+
+    assert [(fill.side, fill.status, fill.reason) for fill in fills] == [
+        ("buy", "cancelled", "strategy_paused"),
+        ("sell", "filled", "market_open"),
+    ]
+
+
+def test_all_failed_quote_sources_pause_new_entries():
+    bars = {"AAPL": _bars([
+        {"open": 100.0, "high": 101.0, "low": 99.0, "close": 100.0, "volume": 100.0},
+        {"open": 100.0, "high": 101.0, "low": 99.0, "close": 100.0, "volume": 100.0},
+    ])}
+    config = ExecutionConfig(
+        quote_health={
+            "kis_ws": {"status": "pause", "reason": "stale_heartbeat"},
+            "rest": {"status": "pause", "reason": "missing_heartbeat"},
+        },
+        latency_bars=1,
+    )
+    intent = OrderIntent("AAPL", "buy", 10, bars["AAPL"].index[0])
+
+    fill = execute_intents([intent], bars, config)[0]
+
+    assert fill.status == "cancelled"
+    assert fill.reason == "strategy_paused"

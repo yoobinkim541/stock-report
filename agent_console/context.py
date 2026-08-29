@@ -155,6 +155,77 @@ def strategy_studio_state() -> dict:
         return {"ok": False, "error": str(exc), "spec_count": 0, "version_count": 0, "latest": None}
 
 
+def strategy_profile_health(snapshot: dict | None = None, *, now: str | None = None) -> dict[str, dict]:
+    """Expose the same profile pause decision used by paper/backtest replay."""
+
+    from ml.strategy_studio.profiles import ProfileHealth, profile_health
+
+    current = now or datetime.now(timezone.utc).isoformat(timespec="seconds")
+    saved = snapshot if isinstance(snapshot, dict) else {}
+    result: dict[str, dict] = {}
+
+    micro = saved.get("kr_intraday") if isinstance(saved.get("kr_intraday"), dict) else None
+    if micro is None:
+        try:
+            from . import market_snapshot_store
+
+            micro = market_snapshot_store.load_market_microstructure()
+        except Exception:
+            micro = {}
+    saved_kr = (micro or {}).get("profile_health") if isinstance(micro, dict) else None
+    if isinstance(saved_kr, dict) and saved_kr.get("status"):
+        result["kr_intraday"] = dict(saved_kr)
+    else:
+        last_bar = _latest_intraday_bar_timestamp()
+        decision = profile_health(
+            "kr_intraday", last_bar_at=last_bar or "", now=current, max_age_seconds=60,
+        )
+        result["kr_intraday"] = decision.to_dict()
+
+    for profile in ("global_swing", "extended_us"):
+        saved_profile = saved.get(profile)
+        if isinstance(saved_profile, dict) and saved_profile.get("status"):
+            result[profile] = dict(saved_profile)
+            continue
+        if profile == "extended_us":
+            session = profile_health(profile, last_bar_at="", now=current, max_age_seconds=60)
+            if session.status == "closed":
+                result[profile] = session.to_dict()
+                continue
+            try:
+                from providers import realtime_quotes
+
+                result[profile] = realtime_quotes.quote_health("QQQ")
+            except Exception:
+                result[profile] = ProfileHealth("pause", "missing_quote", None).to_dict()
+            continue
+        last_bar = saved.get("global_swing_last_bar_at")
+        decision = profile_health(
+            profile,
+            last_bar_at=str(last_bar or ""),
+            now=current,
+            max_age_seconds=24 * 60 * 60,
+        )
+        result[profile] = decision.to_dict()
+    return result
+
+
+def _latest_intraday_bar_timestamp() -> str | None:
+    """Read the latest row from the canonical append-only intraday bar store."""
+
+    try:
+        from providers import intraday_bars
+
+        rows = intraday_bars._read_rows(
+            intraday_bars.today_utc(),
+            base_dir=Path(ml_data_dir()) / "intraday_bars",
+        )
+        timestamps = [str(row.get("ts")) for row in rows if row.get("ts")]
+        return max(timestamps) if timestamps else None
+    except Exception:
+        return None
+
+
 def _as_float(value) -> float | None:
     try:
         if value in (None, ""):
@@ -526,6 +597,7 @@ def context_pack(surface: str = "market", *, hours: int = 72) -> dict:
         "paper": paper_state(),
         "strategy_experiments": strategy_experiment_state(),
         "strategy_studio": strategy_studio_state(),
+        "strategy_profile_health": strategy_profile_health(),
         "prediction_markets": prediction_market_state(events),
         "economic_calendar": economic_calendar_state(events),
         "models": model_state(),

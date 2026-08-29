@@ -952,3 +952,162 @@ def update_leverage_position(ticker: str, shares: float, avg_price: float):
         }
         save_leverage_state(state)
     print(f"✅ {ticker.upper()} 포지션 업데이트: {shares}주 @ ${avg_price:.2f}")
+
+
+def mark_missing_sessions(frame, expected_index, *, profile: str = "global_swing", session: str = "regular"):
+    """Reindex to expected observations and mark gaps without carrying prices."""
+
+    import pandas as pd
+
+    if frame is None:
+        frame = pd.DataFrame()
+    if not isinstance(frame, pd.DataFrame):
+        raise TypeError("frame must be a pandas DataFrame")
+    expected = pd.DatetimeIndex(expected_index)
+    if expected.tz is None:
+        expected = expected.tz_localize("UTC")
+    else:
+        expected = expected.tz_convert("UTC")
+    observed = pd.DatetimeIndex(frame.index)
+    if observed.tz is None:
+        observed = observed.tz_localize("UTC")
+    else:
+        observed = observed.tz_convert("UTC")
+    working = frame.copy()
+    working.index = observed
+    working = working[~working.index.duplicated(keep="last")].sort_index()
+    missing = expected.difference(working.index)
+    out = working.reindex(expected)
+    attrs = dict(getattr(frame, "attrs", {}) or {})
+    attrs.update({
+        "profile": str(profile or "global_swing").strip().lower(),
+        "session": str(session or "regular").strip().lower(),
+        "missing_sessions": [stamp.isoformat() for stamp in missing],
+        "quality": "missing" if len(out) == len(missing) else ("incomplete" if len(missing) else "complete"),
+    })
+    out.attrs = attrs
+    return out
+
+
+def attach_profile_snapshot(
+    frame,
+    *,
+    symbol: str,
+    profile: str = "global_swing",
+    timeframe: str = "1d",
+    session: str = "regular",
+    source: str = "yfinance",
+    adjustment: str = "adjusted",
+    received_at: object | None = None,
+    available_at: object | None = None,
+    raw_ref: str | None = None,
+    expected_index=None,
+    fx: dict | None = None,
+    corporate_actions: dict | list | None = None,
+    overnight_gap: float | None = None,
+):
+    """Attach the common snapshot contract to an existing market-data frame."""
+
+    import pandas as pd
+    from ml.data_pipeline import normalize_data_snapshot
+    from ml.strategy_studio.contracts import DataSnapshot
+
+    key = str(profile or "global_swing").strip().lower()
+    if key not in {"kr_intraday", "global_swing", "extended_us", "generic"}:
+        raise ValueError(f"unsupported data profile: {key}")
+    out = frame.copy() if isinstance(frame, pd.DataFrame) else pd.DataFrame(frame)
+    if expected_index is not None:
+        out = mark_missing_sessions(out, expected_index, profile=key, session=session)
+    metadata = {
+        "profile": key,
+        "session": str(session or "regular").strip().lower(),
+        "fx": dict(fx or {}),
+        "corporate_actions": corporate_actions if corporate_actions is not None else {},
+        "overnight_gap": overnight_gap,
+    }
+    if overnight_gap is None and not out.empty and {"Open", "Close"}.issubset(out.columns):
+        previous_close = pd.to_numeric(out["Close"], errors="coerce").shift(1)
+        opening = pd.to_numeric(out["Open"], errors="coerce")
+        gap = ((opening / previous_close) - 1.0).dropna()
+        if not gap.empty:
+            metadata["overnight_gap"] = float(gap.iloc[-1])
+    quality = str(out.attrs.get("quality") or "complete").strip().lower()
+    snapshot = normalize_data_snapshot(
+        out,
+        symbol=str(symbol).strip().upper(),
+        source=str(source or "yfinance").strip(),
+        timeframe=str(timeframe or "1d").strip(),
+        session=str(session or "regular").strip(),
+        adjustment=str(adjustment or "adjusted").strip(),
+        received_at=received_at,
+        available_at=available_at,
+        raw_ref=raw_ref,
+        quality=quality,
+    )
+    snapshot = DataSnapshot(
+        snapshot.data_stamps,
+        raw_ref=snapshot.raw_ref,
+        quality=snapshot.quality,
+        warnings=snapshot.warnings,
+        source_coverage={
+            "profile": key,
+            "session": metadata["session"],
+            "metadata": metadata,
+            "missing_sessions": list(out.attrs.get("missing_sessions") or []),
+        },
+        freshness=snapshot.freshness,
+    )
+    out.attrs.update({
+        "profile": key,
+        "session": metadata["session"],
+        "profile_metadata": metadata,
+        "data_snapshot": snapshot,
+        "provenance": snapshot.to_provenance()["data"],
+        "source_health": {
+            "status": "degraded" if out.attrs.get("missing_sessions") else "available",
+            "quality": snapshot.quality,
+            "missing_sessions": list(out.attrs.get("missing_sessions") or []),
+        },
+    })
+    return out
+
+
+def load_profile_bars(
+    symbol: str,
+    *,
+    profile: str = "global_swing",
+    timeframe: str = "1d",
+    session: str = "regular",
+    period: str = "1y",
+    frame=None,
+    expected_index=None,
+    fx: dict | None = None,
+    corporate_actions: dict | list | None = None,
+    overnight_gap: float | None = None,
+):
+    """Load from the existing cache/Yahoo adapter and attach profile metadata."""
+
+    import pandas as pd
+
+    data = frame
+    if data is None:
+        data = load_cached_ohlc(symbol, period)
+    if data is None:
+        data = pd.DataFrame()
+    source = "yfinance" if str(profile).lower() in {"global_swing", "extended_us"} else "market_data"
+    return attach_profile_snapshot(
+        data,
+        symbol=symbol,
+        profile=profile,
+        timeframe=timeframe,
+        session=session,
+        source=source,
+        adjustment="adjusted" if str(profile).lower() != "kr_intraday" else "raw",
+        expected_index=expected_index,
+        fx=fx,
+        corporate_actions=corporate_actions,
+        overnight_gap=overnight_gap,
+    )
+
+
+normalize_profile_frame = attach_profile_snapshot

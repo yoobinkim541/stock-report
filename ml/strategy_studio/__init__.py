@@ -1,6 +1,7 @@
 from .engine import CompiledStrategy, StrategyRun, build_signal_panel, compile_strategy, run_strategy_backtest
 from .contracts import DataSnapshot, DataStamp, FillEvent, ModelProvenance, OrderIntent, PositionState, SignalOutput, deserialize_event, serialize_event
 from .execution import ExecutionConfig, ExecutionResult, apply_fills, execute_intents, execution_defaults, run_execution_backtest, to_jsonable
+from .profiles import ProfileHealth, profile_health
 from .patch import apply_strategy_patch, diff_strategy_specs
 from .presets import builtin_strategy_presets
 from .report import build_strategy_report
@@ -67,6 +68,8 @@ __all__ = [
     "apply_fills",
     "execute_intents",
     "execution_defaults",
+    "ProfileHealth",
+    "profile_health",
     "run_execution_backtest",
     "to_jsonable",
     "ValidationSplit",

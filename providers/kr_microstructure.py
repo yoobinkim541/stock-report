@@ -4,9 +4,12 @@ import json
 import os
 import time
 from concurrent.futures import ThreadPoolExecutor
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from zoneinfo import ZoneInfo
+
+from ml.strategy_studio.contracts import DataSnapshot, DataStamp
+from ml.strategy_studio.profiles import profile_health
 
 
 KST = ZoneInfo("Asia/Seoul")
@@ -45,6 +48,42 @@ def _ts(now: datetime | None = None) -> float:
 
 def _dict(value) -> dict:
     return value if isinstance(value, dict) else {}
+
+
+def _source_timestamps(value) -> tuple[list[tuple[datetime, str]], bool]:
+    """Collect explicit source timestamps without treating malformed values as fresh."""
+
+    found: list[tuple[datetime, str]] = []
+    invalid = False
+
+    def visit(item) -> None:
+        nonlocal invalid
+        if isinstance(item, dict):
+            for key, child in item.items():
+                if key == "as_of" and child not in (None, ""):
+                    try:
+                        parsed = datetime.fromisoformat(str(child).strip().replace("Z", "+00:00"))
+                        if parsed.tzinfo is None:
+                            parsed = parsed.replace(tzinfo=KST)
+                        parsed = parsed.astimezone(timezone.utc)
+                        found.append((parsed, parsed.isoformat()))
+                    except (TypeError, ValueError, OverflowError):
+                        invalid = True
+                elif isinstance(child, (dict, list, tuple)):
+                    visit(child)
+        elif isinstance(item, (list, tuple)):
+            for child in item:
+                visit(child)
+
+    visit(value)
+    return found, invalid
+
+
+def _latest_source_timestamp(value) -> tuple[str | None, bool]:
+    timestamps, invalid = _source_timestamps(value)
+    if not timestamps:
+        return None, invalid
+    return max(timestamps, key=lambda item: item[0])[1], invalid
 
 
 def _float(value):
@@ -526,6 +565,13 @@ def build_snapshot(
         sources, errors = collect_sources(fetchers)
     sources = _dict(sources)
     as_of = _asof(now)
+    explicit_timestamps = [
+        timestamp
+        for value in sources.values()
+        for timestamp, _text in _source_timestamps(value)[0]
+    ]
+    if explicit_timestamps:
+        as_of = max(explicit_timestamps).isoformat()
     indices = normalize_indices(sources.get("indices"))
     investor_flow = normalize_investor_flow(sources.get("investor_flow"))
     k200_futures = normalize_futures(sources.get("k200_futures"))
@@ -551,10 +597,113 @@ def build_snapshot(
         source = "injected" if raw else "unavailable"
         if isinstance(raw, dict):
             source = str(raw.get("source") or raw.get("provider") or source)
-        out["field_status"][name] = field_status(name, source, ok, as_of, None if ok else "missing")
+        source_as_of, invalid_timestamp = _latest_source_timestamp(raw)
+        status_as_of = None if invalid_timestamp else (source_as_of or as_of)
+        error = "invalid_timestamp" if invalid_timestamp else (None if ok else "missing")
+        out["field_status"][name] = field_status(name, source, ok, status_as_of, error)
     out["unavailable"] = [
         {"field": name, "reason": status.get("error") or "missing"}
         for name, status in out["field_status"].items()
         if not status.get("ok")
     ]
+    snapshot = build_data_snapshot(out)
+    out["profile"] = "kr_intraday"
+    out["session"] = "regular"
+    out["quality"] = snapshot.quality
+    out["data_snapshot"] = snapshot.to_dict()
+    out["profile_health"] = snapshot_health(out, now=now)
     return out
+
+
+def build_data_snapshot(payload: dict) -> DataSnapshot:
+    """Represent the existing microstructure payload in the shared DTO."""
+
+    payload = _dict(payload)
+    field_status = _dict(payload.get("field_status"))
+    stamps: list[DataStamp] = []
+    for field in FIELDS:
+        status = _dict(field_status.get(field))
+        if status.get("error") == "invalid_timestamp":
+            continue
+        stamp_time = status.get("as_of")
+        if not stamp_time:
+            continue
+        source = str(status.get("source") or payload.get("source") or "kr_microstructure")
+        stamps.append(DataStamp(
+            symbol=f"KRX:{field}",
+            timestamp=stamp_time,
+            source=source,
+            timeframe="snapshot",
+            quality="complete" if status.get("ok") else "missing",
+            session="regular",
+            adjustment="raw",
+            metadata={"field": field, "profile": "kr_intraday"},
+        ))
+    missing = [field for field, status in field_status.items() if not _dict(status).get("ok")]
+    quality = "complete" if stamps and not missing and not payload.get("errors") else "incomplete"
+    return DataSnapshot(
+        stamps,
+        raw_ref=str(payload.get("raw_ref") or "kr_market_microstructure"),
+        quality=quality,
+        warnings=[str(error) for error in payload.get("errors") or []]
+        + [f"missing:{field}" for field in missing],
+        source_coverage={"fields": dict(field_status), "profile": "kr_intraday"},
+    )
+
+
+def snapshot_health(payload: dict, *, now: datetime | None = None, max_age_seconds: int | None = None) -> dict:
+    """Return serializable source health for replay and operational gating."""
+
+    payload = _dict(payload)
+    current = now or datetime.now(KST)
+    if current.tzinfo is None:
+        current = current.replace(tzinfo=KST)
+    current = current.astimezone(KST)
+    statuses = [_dict(status) for status in _dict(payload.get("field_status")).values()]
+    if any(status.get("error") == "invalid_timestamp" for status in statuses):
+        decision = {"status": "pause", "reason": "invalid_microstructure_timestamp", "age_seconds": None}
+        last_observed = None
+    else:
+        observed = []
+        for status in statuses:
+            value = status.get("as_of")
+            if value:
+                try:
+                    parsed = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+                    if parsed.tzinfo is None:
+                        parsed = parsed.replace(tzinfo=KST)
+                    observed.append(parsed.astimezone(KST))
+                except (TypeError, ValueError, OverflowError):
+                    decision = {"status": "pause", "reason": "invalid_microstructure_timestamp", "age_seconds": None}
+                    last_observed = None
+                    break
+        else:
+            last_observed = min(observed).isoformat() if observed else payload.get("as_of")
+            decision = None
+    if decision is None:
+        if not last_observed:
+            decision = {"status": "pause", "reason": "missing_microstructure_timestamp", "age_seconds": None}
+        else:
+            try:
+                decision = profile_health(
+                    "kr_intraday",
+                    last_bar_at=str(last_observed),
+                    now=current.isoformat(),
+                    max_age_seconds=(max_age_seconds if max_age_seconds is not None
+                                     else int(payload.get("max_age_s") or 120)),
+                ).to_dict()
+            except (TypeError, ValueError, OverflowError):
+                decision = {"status": "pause", "reason": "invalid_microstructure_timestamp", "age_seconds": None}
+    missing = [
+        name for name, status in _dict(payload.get("field_status")).items()
+        if not _dict(status).get("ok")
+    ]
+    if missing and decision["status"] == "fresh":
+        decision = {
+            "status": "pause",
+            "reason": "incomplete_microstructure",
+            "age_seconds": decision.get("age_seconds"),
+            "allows_new_entries": False,
+        }
+    decision["missing_fields"] = missing
+    return decision

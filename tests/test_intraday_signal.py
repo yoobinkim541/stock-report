@@ -206,3 +206,57 @@ def test_analyze_intraday_ignores_stale_divergence(monkeypatch):
     sig = intraday_signal.analyze_intraday("TEST", interval="5m")
     assert sig is not None
     assert not any("다이버전스" in a for a in sig.alerts)
+
+
+def test_intraday_bar_loader_attaches_replayable_snapshot_without_forward_fill(tmp_path, monkeypatch):
+    from providers import intraday_bars
+
+    monkeypatch.setattr(intraday_bars, "today_utc", lambda: "2026-08-28")
+    path = intraday_bars.bar_path("2026-08-28", tmp_path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(
+        "\n".join([
+            json.dumps({
+                "ts": "2026-08-28T09:00:00+09:00", "epoch_min": 178787520,
+                "symbol": "005930", "market": "KR", "o": 70000, "h": 70100,
+                "l": 69900, "c": 70050, "v": 100, "n": 3, "src": "kis_ws",
+            }),
+            json.dumps({
+                "ts": "2026-08-28T09:02:00+09:00", "epoch_min": 178787640,
+                "symbol": "005930", "market": "KR", "o": 70050, "h": 70200,
+                "l": 70000, "c": 70150, "v": 120, "n": 4, "src": "kis_ws",
+            }),
+        ]) + "\n",
+        encoding="utf-8",
+    )
+
+    frame = intraday_bars.load_bars("005930", base_dir=tmp_path)
+
+    assert list(frame.index.strftime("%H:%M")) == ["09:00", "09:02"]
+    snapshot = frame.attrs["data_snapshot"]
+    assert snapshot.data_stamps[0].source == "kis_ws"
+    assert snapshot.data_stamps[0].session == "regular"
+    assert frame.attrs["profile"] == "kr_intraday"
+
+
+def test_microstructure_health_uses_source_timestamps_for_stale_gate():
+    from datetime import datetime
+    from providers import kr_microstructure
+
+    stale = "2026-08-28T10:00:00+09:00"
+    sources = {
+        "indices": {"kospi": {"price": 3310.2, "as_of": stale}},
+        "investor_flow": {"kospi": {"foreign_net": 120.0, "as_of": stale}},
+        "k200_futures": {"price": 452.2, "as_of": stale},
+        "breadth": {"advancers": 510, "decliners": 310, "as_of": stale},
+        "fx": {"usdkrw": {"rate": 1387.2, "as_of": stale}},
+    }
+
+    snapshot = kr_microstructure.build_snapshot(
+        now=datetime.fromisoformat("2026-08-28T10:05:30+09:00"),
+        sources=sources,
+    )
+
+    assert snapshot["profile_health"]["status"] == "pause"
+    assert snapshot["profile_health"]["reason"] == "stale_intraday_bar"
+    assert snapshot["data_snapshot"]["data_stamps"][0]["timestamp"].startswith("2026-08-28T01:00:00+00:00")

@@ -74,6 +74,10 @@ class ExecutionConfig:
     cancel_unfilled: bool = False
     min_order_qty: float = 0.0
     run_id: str = "execution"
+    pause_on_stale: bool = True
+    allow_exits_on_pause: bool = True
+    profile_health: object | None = None
+    quote_health: object | None = None
 
     def __post_init__(self) -> None:
         latency = self.latency_bars
@@ -107,6 +111,9 @@ class ExecutionConfig:
         if not isinstance(self.cancel_unfilled, bool):
             raise ValueError("cancel_unfilled must be a boolean")
         object.__setattr__(self, "min_order_qty", _number(self.min_order_qty, "min_order_qty", minimum=0.0))
+        for name in ("pause_on_stale", "allow_exits_on_pause"):
+            if not isinstance(getattr(self, name), bool):
+                raise ValueError(f"{name} must be a boolean")
 
     @classmethod
     def from_dict(cls, payload: dict[str, object] | None) -> "ExecutionConfig":
@@ -129,6 +136,7 @@ class ExecutionConfig:
             "latency_bars", "fees_bps", "slippage_bps", "spread_bps",
             "max_participation_rate", "partial_fill", "initial_cash", "profile",
             "session", "allow_short", "cancel_unfilled", "min_order_qty", "run_id",
+            "pause_on_stale", "allow_exits_on_pause", "profile_health", "quote_health",
         }
         return cls(**{key: values[key] for key in allowed if key in values})
 
@@ -145,6 +153,7 @@ class ExecutionResult:
     summary: dict[str, Any] = field(default_factory=dict)
     warnings: list[str] = field(default_factory=list)
     errors: list[str] = field(default_factory=list)
+    diagnostics: list[dict[str, Any]] = field(default_factory=list)
 
     @property
     def ledger(self) -> list[FillEvent]:
@@ -166,6 +175,7 @@ class ExecutionResult:
             "summary": dict(self.summary),
             "warnings": list(self.warnings),
             "errors": list(self.errors),
+            "diagnostics": [dict(item) for item in self.diagnostics],
             "ok": self.ok,
         })
 
@@ -253,6 +263,21 @@ def execute_intents(
         run_id = intent.run_id or f"{config.run_id}-{_stable_intent_id(intent)}"
         if _is_cancelled(intent):
             fills.append(_event(intent, run_id=run_id, status="cancelled", reason="cancelled_by_strategy", submitted_at=submitted_at))
+            continue
+        health = _health_for_event(config, normalized, intent.symbol, intent.decision_at)
+        if config.pause_on_stale and _health_blocks_order(health, intent.side, config):
+            fills.append(_event(
+                intent,
+                run_id=run_id,
+                status="cancelled",
+                reason="strategy_paused",
+                submitted_at=submitted_at,
+                metadata={
+                    **dict(intent.metadata or {}),
+                    "diagnostic": "strategy_paused",
+                    "profile_health": health,
+                },
+            ))
             continue
         if frame is None:
             status = "cancelled" if config.cancel_unfilled else "rejected"
@@ -391,7 +416,7 @@ def run_execution_backtest(
     targets = targets.sort_index()
     targets.columns = [str(column).upper().strip() for column in targets.columns]
     targets = targets.loc[:, ~targets.columns.duplicated()]
-    intents, fills, warnings = _execute_target_weights(targets, normalized, config)
+    intents, fills, warnings, diagnostics = _execute_target_weights(targets, normalized, config)
     equity, positions, mark_warnings = _mark_ledger(fills, normalized, config)
     warnings.extend(mark_warnings)
     trades = [_fill_to_trade(fill) for fill in fills if fill.status in {"partial", "filled"} and fill.filled_qty > 0]
@@ -404,6 +429,7 @@ def run_execution_backtest(
         trades=trades,
         summary=summary,
         warnings=warnings,
+        diagnostics=diagnostics,
     )
 
 
@@ -418,6 +444,7 @@ def _normalize_bars(bars: dict[str, pd.DataFrame]) -> dict[str, pd.DataFrame]:
         if not isinstance(raw_frame, pd.DataFrame):
             raise TypeError(f"bars[{symbol}] must be a pandas DataFrame")
         frame = raw_frame.copy()
+        frame.attrs = dict(getattr(raw_frame, "attrs", {}) or {})
         if frame.empty:
             normalized[symbol] = pd.DataFrame(columns=_BAR_FIELDS, dtype="float64")
             continue
@@ -565,14 +592,165 @@ def _event(
     )
 
 
+def _health_mapping(value: object) -> dict[str, Any] | None:
+    if value is None:
+        return None
+    if hasattr(value, "to_dict") and callable(value.to_dict):
+        try:
+            value = value.to_dict()
+        except Exception:
+            return None
+    if not isinstance(value, Mapping):
+        return None
+    payload = dict(value)
+    status = str(payload.get("status") or "").strip().lower()
+    reason = payload.get("reason")
+    quality = str(payload.get("quality") or "").strip().lower()
+    if status and reason is not None:
+        return payload
+    if quality in {"missing", "incomplete", "invalid", "degraded"}:
+        return {**payload, "status": "pause", "reason": "incomplete_bars"}
+    if status in {"available", "complete", "ok"}:
+        return {**payload, "status": "fresh", "reason": "fresh"}
+    if status in {"degraded", "missing", "unavailable", "disabled", "stale"}:
+        return {**payload, "status": "pause", "reason": str(reason or "source_unavailable")}
+    if payload.get("fresh") is False:
+        return {**payload, "status": "pause", "reason": str(payload.get("reason") or "stale_quote")}
+    return None
+
+
+def _health_at(value: object, symbol: str, at: object) -> dict[str, Any] | None:
+    """Read one health record or the latest record in a saved replay timeline."""
+
+    payload = _health_mapping(value)
+    if payload is not None:
+        return payload
+    if not isinstance(value, Mapping):
+        return None
+    symbol_key = str(symbol or "").upper().strip()
+    for key in (symbol_key, symbol, "default", "current"):
+        candidate = value.get(key) if key else None
+        mapped = _health_mapping(candidate)
+        if mapped is not None:
+            return mapped
+    source_health = _aggregate_source_health(value)
+    if source_health is not None:
+        return source_health
+    timeline = value.get("timeline") or value.get("by_timestamp") or value.get("history")
+    if not isinstance(timeline, Mapping):
+        timeline = value
+    selected: dict[str, Any] | None = None
+    selected_at: pd.Timestamp | None = None
+    current = _timestamp(at)
+    for stamp, candidate in timeline.items():
+        mapped = _health_mapping(candidate)
+        if mapped is None:
+            continue
+        try:
+            timestamp = _timestamp(stamp)
+        except (TypeError, ValueError):
+            continue
+        if timestamp <= current and (selected_at is None or timestamp > selected_at):
+            selected = mapped
+            selected_at = timestamp
+    return selected
+
+
+def _aggregate_source_health(value: Mapping[str, Any]) -> dict[str, Any] | None:
+    """Combine optional source heartbeats using the same fallback policy as readers."""
+
+    records: list[tuple[str, dict[str, Any]]] = []
+    for source, candidate in value.items():
+        if str(source) in {"timeline", "by_timestamp", "history"}:
+            continue
+        mapped = _health_mapping(candidate)
+        if mapped is not None:
+            records.append((str(source), mapped))
+    if not records:
+        return None
+
+    active = [(source, health) for source, health in records
+              if str(health.get("status") or "").strip().lower() != "disabled"]
+    if not active:
+        return {
+            "status": "pause",
+            "reason": "quote_source_disabled",
+            "sources": [source for source, _health in records],
+        }
+
+    fresh = [(source, health) for source, health in active
+             if not _health_blocks_entries(health)]
+    if fresh:
+        return {
+            "status": "fresh",
+            "reason": "fresh",
+            "source": fresh[0][0],
+            "sources": [source for source, _health in active],
+        }
+
+    source, health = active[0]
+    return {
+        **health,
+        "source": health.get("source") or source,
+        "sources": [item[0] for item in active],
+    }
+
+
+def _health_for_event(
+    config: ExecutionConfig,
+    bars: dict[str, pd.DataFrame],
+    symbol: str,
+    at: object,
+) -> dict[str, Any] | None:
+    frame = bars.get(str(symbol or "").upper().strip())
+    frame_snapshot = frame.attrs.get("data_snapshot") if frame is not None else None
+    snapshot_health = None
+    if frame_snapshot is not None:
+        snapshot_quality = getattr(frame_snapshot, "quality", None)
+        if snapshot_quality is None and isinstance(frame_snapshot, Mapping):
+            snapshot_quality = frame_snapshot.get("quality")
+        if str(snapshot_quality or "").strip().lower() not in {"", "complete", "ok", "fresh"}:
+            snapshot_health = {"status": "pause", "reason": "incomplete_bars", "quality": snapshot_quality}
+    candidates = [
+        _health_at(config.profile_health, symbol, at),
+        _health_at(config.quote_health, symbol, at),
+        _health_at(frame.attrs.get("profile_health") if frame is not None else None, symbol, at),
+        _health_at(frame.attrs.get("quote_health") if frame is not None else None, symbol, at),
+        _health_at(frame.attrs.get("source_health") if frame is not None else None, symbol, at),
+        snapshot_health,
+    ]
+    blocked = next((candidate for candidate in candidates if candidate and _health_blocks_entries(candidate)), None)
+    return blocked or next((candidate for candidate in candidates if candidate), None)
+
+
+def _health_blocks_entries(health: Mapping[str, Any] | None) -> bool:
+    if not health:
+        return False
+    status = str(health.get("status") or "pause").strip().lower()
+    if status == "fresh" and health.get("fresh") is not False:
+        return False
+    return True
+
+
+def _health_blocks_order(
+    health: Mapping[str, Any] | None,
+    side: str,
+    config: ExecutionConfig,
+) -> bool:
+    if not _health_blocks_entries(health):
+        return False
+    return str(side or "").strip().lower() == "buy" or not config.allow_exits_on_pause
+
+
 def _execute_target_weights(
     targets: pd.DataFrame,
     bars: dict[str, pd.DataFrame],
     config: ExecutionConfig,
-) -> tuple[list[OrderIntent], list[FillEvent], list[str]]:
+) -> tuple[list[OrderIntent], list[FillEvent], list[str], list[dict[str, Any]]]:
     """Create and execute target orders in one causal chronological pass."""
 
     warnings: list[str] = []
+    diagnostics: list[dict[str, Any]] = []
     intents: list[OrderIntent] = []
     fills: list[FillEvent] = []
     held_quantities: dict[str, float] = {symbol: 0.0 for symbol in bars}
@@ -684,6 +862,25 @@ def _execute_target_weights(
                     )
                 if abs(delta) <= config.min_order_qty:
                     continue
+                health = _health_for_event(config, bars, symbol, event_time)
+                if config.pause_on_stale and _health_blocks_order(
+                    health,
+                    "buy" if delta > 0.0 else "sell",
+                    config,
+                ):
+                    diagnostic = {
+                        "type": "strategy_paused",
+                        "profile": config.profile,
+                        "symbol": symbol,
+                        "at": _timestamp_text(event_time),
+                        "reason": str((health or {}).get("reason") or "stale_market_data"),
+                        "status": str((health or {}).get("status") or "pause"),
+                        "age_seconds": (health or {}).get("age_seconds"),
+                        "action": "new_entries_blocked" if delta > 0.0 else "exits_blocked",
+                    }
+                    diagnostics.append(diagnostic)
+                    warnings.append(f"strategy paused for {symbol}: {diagnostic['reason']}")
+                    continue
                 intent = OrderIntent(
                     symbol=symbol,
                     side="buy" if delta > 0.0 else "sell",
@@ -714,7 +911,7 @@ def _execute_target_weights(
             intent, run_id=run_id, status=status, reason="no_eligible_bar",
             submitted_at=submitted_at,
         ))
-    return intents, fills, warnings
+    return intents, fills, warnings, diagnostics
 
 
 def _eligible_bar_position(frame: pd.DataFrame, decision_at: object, latency_bars: int) -> int | None:
@@ -735,7 +932,7 @@ def _intents_from_targets(
 ) -> tuple[list[OrderIntent], list[str]]:
     """Backward-compatible target intent helper for internal callers."""
 
-    intents, _, warnings = _execute_target_weights(targets, bars, config)
+    intents, _, warnings, _ = _execute_target_weights(targets, bars, config)
     return intents, warnings
 
 

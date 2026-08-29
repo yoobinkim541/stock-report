@@ -26,6 +26,7 @@ from pathlib import Path
 from zoneinfo import ZoneInfo
 
 from ohlc_utils import normalize_ohlc_frame
+from ml.strategy_studio.profiles import profile_health
 
 logger = logging.getLogger(__name__)
 
@@ -204,13 +205,19 @@ def list_symbols(date_utc: str, market: str | None = None,
 
 
 def load_bars(symbol: str, date_utc: str | None = None, *, interval: str = "1m",
-              base_dir: Path | str | None = None):
+              base_dir: Path | str | None = None, session: str | None = None):
     """자체 bar store → OHLCV DataFrame (tz-aware 인덱스·compute_intraday_features 호환).
 
     빈 결과는 빈 DataFrame (graceful). interval="5m" 은 1m 리샘플.
     """
     import pandas as pd
     rows = _read_rows(date_utc or today_utc(), symbol, base_dir)
+    if session:
+        requested_session = str(session).strip().lower()
+        rows = [
+            row for row in rows
+            if str(row.get("session") or "regular").strip().lower() == requested_session
+        ]
     if not rows:
         return pd.DataFrame()
     dedup: dict[int, dict] = {}
@@ -231,15 +238,98 @@ def load_bars(symbol: str, date_utc: str | None = None, *, interval: str = "1m",
                 .agg({"Open": "first", "High": "max", "Low": "min",
                       "Close": "last", "Volume": "sum"})
                 .dropna(subset=["Open"]))
-    return normalize_ohlc_frame(df)
+    frame = normalize_ohlc_frame(df)
+    source = str(rows[-1].get("src") or "kis_ws")
+    session_name = str(session or rows[-1].get("session") or "regular").strip().lower()
+    quality = "incomplete" if any(row.get("v_partial") or row.get("v_anom") for row in rows) else "complete"
+    frame.attrs.update({
+        "profile": "kr_intraday" if market_of(symbol) == "KR" else "extended_us",
+        "session": session_name,
+        "source_health": _source_health(rows),
+    })
+    frame.attrs["data_snapshot"] = build_data_snapshot(
+        frame,
+        symbol=base_symbol(symbol),
+        source=source,
+        timeframe=interval,
+        session=session_name,
+        quality=quality,
+        raw_ref=str(bar_path(date_utc or today_utc(), base_dir)),
+    )
+    try:
+        last_bar_at = frame.index[-1].isoformat()
+        limit = 60 if interval == "1m" else 300
+        frame.attrs["profile_health"] = profile_health(
+            str(frame.attrs["profile"]),
+            last_bar_at=last_bar_at,
+            now=datetime.now(timezone.utc).isoformat(),
+            max_age_seconds=limit,
+        ).to_dict()
+    except (TypeError, ValueError):
+        frame.attrs["profile_health"] = {
+            "status": "pause",
+            "reason": "invalid_intraday_bar_timestamp",
+            "age_seconds": None,
+        }
+    return frame
 
 
-def _slice_latest_session(df, *, date_utc: str | None = None, market: str | None = None):
+def _source_health(rows: list[dict]) -> dict[str, object]:
+    """Summarize the existing append-only rows without writing another store."""
+
+    sources = sorted({str(row.get("src") or "unknown") for row in rows})
+    quality = "incomplete" if any(row.get("v_partial") or row.get("v_anom") for row in rows) else "complete"
+    return {
+        "status": "degraded" if quality != "complete" else "available",
+        "sources": sources,
+        "bar_count": len(rows),
+        "quality": quality,
+        "last_bar_at": str(rows[-1].get("ts") or "") if rows else None,
+    }
+
+
+def build_data_snapshot(
+    frame,
+    *,
+    symbol: str,
+    source: str = "kis_ws",
+    timeframe: str = "1m",
+    session: str = "regular",
+    quality: str = "complete",
+    raw_ref: str | None = None,
+):
+    """Create the shared provenance DTO from an already-loaded bar frame."""
+
+    from ml.data_pipeline import normalize_data_snapshot
+
+    return normalize_data_snapshot(
+        frame,
+        symbol=symbol,
+        source=source,
+        timeframe=timeframe,
+        session=session,
+        adjustment="raw",
+        raw_ref=raw_ref,
+        quality=quality,
+    )
+
+
+def _slice_latest_session(
+    df,
+    *,
+    date_utc: str | None = None,
+    market: str | None = None,
+    session: str | None = None,
+):
     """여러 세션이 섞인 yfinance 분봉은 한 세션만 남겨 차트를 읽기 쉽게 만든다."""
     import pandas as pd
 
     if df is None or getattr(df, "empty", True):
         return df
+    if session:
+        df = _filter_session_frame(df, market=market, session=session)
+        if df is None or getattr(df, "empty", True):
+            return df
     try:
         idx = pd.DatetimeIndex(df.index)
     except Exception:
@@ -270,13 +360,37 @@ def _slice_latest_session(df, *, date_utc: str | None = None, market: str | None
     return df
 
 
+def _filter_session_frame(df, *, market: str | None, session: str):
+    """Keep regular/extended observations separate without filling gaps."""
+
+    import pandas as pd
+
+    key = str(session or "").strip().lower()
+    if key in {"regular", "opening_auction", "closing_auction"}:
+        start, end = ((9, 0), (15, 40)) if (market or "").upper() == "KR" else ((9, 30), (16, 0))
+    elif key in {"extended", "premarket", "aftermarket", "after_hours", "pre_market"}:
+        if (market or "").upper() != "US":
+            return df.iloc[0:0]
+        start, end = (4, 0), (20, 0)
+    else:
+        return df
+    idx = pd.DatetimeIndex(df.index)
+    local = idx.tz_convert(_TZ.get((market or "").upper(), timezone.utc)) if idx.tz is not None else idx
+    minutes = local.hour * 60 + local.minute
+    start_minutes = start[0] * 60 + start[1]
+    end_minutes = end[0] * 60 + end[1]
+    mask = (minutes >= start_minutes) & (minutes < end_minutes)
+    return df.loc[mask]
+
+
 def load_bars_with_fallback(symbol: str, market: str | None = None,
-                            date_utc: str | None = None, *, interval: str = "1m"):
+                            date_utc: str | None = None, *, interval: str = "1m",
+                            session: str | None = None):
     """bar store 우선, 없으면 yfinance 폴백 (대시보드·백필 전용 — 엔진 핫패스 금지).
 
     반환 (DataFrame, src) — src ∈ {"store", "yfinance", "none"}.
     """
-    df = load_bars(symbol, date_utc, interval=interval)
+    df = load_bars(symbol, date_utc, interval=interval, session=session)
     if df is not None and not getattr(df, "empty", True):
         return df, "store"
     mk = market or market_of(symbol)
@@ -289,7 +403,7 @@ def load_bars_with_fallback(symbol: str, market: str | None = None,
         for yf_t in cands:
             df = fetch_intraday(yf_t, interval=interval, days=fetch_days)
             if df is not None and not getattr(df, "empty", True):
-                df = _slice_latest_session(df, date_utc=date_utc, market=mk)
+                df = _slice_latest_session(df, date_utc=date_utc, market=mk, session=session)
                 return normalize_ohlc_frame(df), "yfinance"
     except Exception as e:
         logger.debug("yfinance 폴백 실패(%s): %s", symbol, e)
