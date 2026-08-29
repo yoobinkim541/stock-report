@@ -239,6 +239,35 @@ def test_intraday_bar_loader_attaches_replayable_snapshot_without_forward_fill(t
     assert frame.attrs["profile"] == "kr_intraday"
 
 
+def test_intraday_bars_persist_and_filter_us_sessions(tmp_path):
+    from providers import intraday_bars
+
+    stamps = [
+        ("2026-07-13T08:30:00-04:00", "premarket"),
+        ("2026-07-13T09:30:00-04:00", "regular"),
+        ("2026-07-13T16:00:00-04:00", "aftermarket"),
+        ("2026-07-13T20:00:00-04:00", "overnight"),
+    ]
+    aggregator = intraday_bars.BarAggregator()
+    for index, (stamp, _) in enumerate(stamps, start=1):
+        aggregator.on_tick(
+            "AAPL", 100 + index, index * 100,
+            datetime.fromisoformat(stamp).timestamp(), "US",
+        )
+    bars = aggregator.roll(datetime.fromisoformat("2026-07-13T20:01:00-04:00").timestamp())
+
+    assert [bar["session"] for bar in bars] == [expected for _, expected in stamps]
+
+    path = intraday_bars.bar_path("2026-07-13", tmp_path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text("\n".join(json.dumps(bar) for bar in bars) + "\n", encoding="utf-8")
+
+    assert len(intraday_bars.load_bars("AAPL", "2026-07-13", base_dir=tmp_path, session="regular")) == 1
+    assert len(intraday_bars.load_bars("AAPL", "2026-07-13", base_dir=tmp_path, session="overnight")) == 1
+    extended = intraday_bars.load_bars("AAPL", "2026-07-13", base_dir=tmp_path, session="extended")
+    assert list(extended.index.strftime("%H:%M")) == ["08:30", "09:30", "16:00"]
+
+
 def test_microstructure_health_uses_source_timestamps_for_stale_gate():
     from datetime import datetime
     from providers import kr_microstructure

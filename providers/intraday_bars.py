@@ -7,7 +7,8 @@ kis_stream(유일 writer)이 BarAggregator 로 틱을 1분 OHLCV 로 확정해
 
 bar 레코드 (1줄 1bar, append-only — Ledger 관례):
   {ts(시장 로컬 ISO·bar 시작 분), epoch_min, symbol(base), market, o,h,l,c,
-   v(당일 누적거래량 차분), n(틱수), v_partial(세션 첫 관측), v_anom(누적 역행), src}
+   v(당일 누적거래량 차분), n(틱수), session, v_partial(세션 첫 관측),
+   v_anom(누적 역행), src}
 
 주의:
   - KIS WS 틱의 volume 은 **당일 누적 거래량** → bar 볼륨은 차분. 누적 역행(글리치)은 0 클램프+v_anom.
@@ -32,6 +33,19 @@ logger = logging.getLogger(__name__)
 
 BAR_DIR = Path(os.path.expanduser("~/reports/ml-data/intraday_bars"))
 _TZ = {"KR": ZoneInfo("Asia/Seoul"), "US": ZoneInfo("America/New_York")}
+_SESSION_ALIASES = {
+    "after_hours": "aftermarket",
+    "afterhours": "aftermarket",
+    "pre_market": "premarket",
+}
+_SESSION_FILTERS = {
+    "regular": frozenset({"regular"}),
+    "premarket": frozenset({"premarket"}),
+    "aftermarket": frozenset({"aftermarket"}),
+    "overnight": frozenset({"overnight"}),
+    "extended": frozenset({"premarket", "regular", "aftermarket"}),
+    "all": frozenset({"premarket", "regular", "aftermarket", "overnight"}),
+}
 
 
 # ── 심볼 변환 단일 진실원 (bar store·state·ledger·실시간 캐시 = base 표기) ────
@@ -58,6 +72,59 @@ def to_yf(symbol: str, market: str | None = None) -> str:
         return t
     mk = market or market_of(t)
     return f"{t}.KS" if mk == "KR" else t
+
+
+def _profile_for_market(market: str) -> str:
+    return "kr_intraday" if str(market or "").strip().upper() == "KR" else "extended_us"
+
+
+def session_for_timestamp(timestamp, *, market: str = "KR", profile: str | None = None) -> str:
+    """시장 프로필과 현지 시각으로 bar 세션을 결정한다.
+
+    KRX는 기존 KIS bar 동작과 호환되도록 regular로 유지하고, extended_us는
+    미국 동부시간 기준으로 premarket/regular/aftermarket/overnight를 구분한다.
+    """
+    profile_key = str(profile or _profile_for_market(market)).strip().lower()
+    market_key = "KR" if profile_key == "kr_intraday" else (
+        "US" if profile_key in {"extended_us", "global_swing"} else str(market or "").strip().upper()
+    )
+    tz = _TZ.get(market_key, timezone.utc)
+    if isinstance(timestamp, datetime):
+        local = timestamp.astimezone(tz) if timestamp.tzinfo else timestamp.replace(tzinfo=tz)
+    else:
+        local = datetime.fromtimestamp(float(timestamp), tz=tz)
+    if profile_key == "kr_intraday" or market_key == "KR":
+        return "regular"
+    minute = local.hour * 60 + local.minute
+    if 4 * 60 <= minute < 9 * 60 + 30:
+        return "premarket"
+    if 9 * 60 + 30 <= minute < 16 * 60:
+        return "regular"
+    if 16 * 60 <= minute < 20 * 60:
+        return "aftermarket"
+    return "overnight"
+
+
+def _normalise_session(session: str) -> str:
+    key = str(session or "").strip().lower()
+    return _SESSION_ALIASES.get(key, key)
+
+
+def _session_filter_values(session: str) -> frozenset[str]:
+    key = _normalise_session(session)
+    return _SESSION_FILTERS.get(key, frozenset({key}))
+
+
+def _row_session(row: dict) -> str:
+    stored = _normalise_session(row.get("session"))
+    if stored:
+        return stored
+    try:
+        timestamp = datetime.fromisoformat(str(row["ts"]).replace("Z", "+00:00"))
+        market = str(row.get("market") or market_of(row.get("symbol", ""))).upper()
+        return session_for_timestamp(timestamp, market=market, profile=_profile_for_market(market))
+    except (KeyError, TypeError, ValueError):
+        return "regular"
 
 
 # ── 집계 (순수·클록 주입 — kis_stream 전용 writer) ────────────────────────────
@@ -124,6 +191,11 @@ class BarAggregator:
             "epoch_min": cur["minute"], "symbol": symbol, "market": cur["market"],
             "o": cur["o"], "h": cur["h"], "l": cur["l"], "c": cur["c"],
             "v": max(0.0, delta), "n": cur["n"],
+            "session": session_for_timestamp(
+                cur["minute"] * 60,
+                market=cur["market"],
+                profile=_profile_for_market(cur["market"]),
+            ),
             "v_partial": bool(cur["v_partial"]), "v_anom": bool(v_anom), "src": "kis_ws",
         })
 
@@ -213,10 +285,10 @@ def load_bars(symbol: str, date_utc: str | None = None, *, interval: str = "1m",
     import pandas as pd
     rows = _read_rows(date_utc or today_utc(), symbol, base_dir)
     if session:
-        requested_session = str(session).strip().lower()
+        requested_sessions = _session_filter_values(session)
         rows = [
             row for row in rows
-            if str(row.get("session") or "regular").strip().lower() == requested_session
+            if _row_session(row) in requested_sessions
         ]
     if not rows:
         return pd.DataFrame()
@@ -240,7 +312,9 @@ def load_bars(symbol: str, date_utc: str | None = None, *, interval: str = "1m",
                 .dropna(subset=["Open"]))
     frame = normalize_ohlc_frame(df)
     source = str(rows[-1].get("src") or "kis_ws")
-    session_name = str(session or rows[-1].get("session") or "regular").strip().lower()
+    requested_session = _normalise_session(session) if session else ""
+    row_sessions = {_row_session(row) for row in rows}
+    session_name = requested_session or (next(iter(row_sessions)) if len(row_sessions) == 1 else "all")
     quality = "incomplete" if any(row.get("v_partial") or row.get("v_anom") for row in rows) else "complete"
     frame.attrs.update({
         "profile": "kr_intraday" if market_of(symbol) == "KR" else "extended_us",
@@ -365,22 +439,23 @@ def _filter_session_frame(df, *, market: str | None, session: str):
 
     import pandas as pd
 
-    key = str(session or "").strip().lower()
-    if key in {"regular", "opening_auction", "closing_auction"}:
-        start, end = ((9, 0), (15, 40)) if (market or "").upper() == "KR" else ((9, 30), (16, 0))
-    elif key in {"extended", "premarket", "aftermarket", "after_hours", "pre_market"}:
-        if (market or "").upper() != "US":
-            return df.iloc[0:0]
-        start, end = (4, 0), (20, 0)
-    else:
-        return df
     idx = pd.DatetimeIndex(df.index)
-    local = idx.tz_convert(_TZ.get((market or "").upper(), timezone.utc)) if idx.tz is not None else idx
-    minutes = local.hour * 60 + local.minute
-    start_minutes = start[0] * 60 + start[1]
-    end_minutes = end[0] * 60 + end[1]
-    mask = (minutes >= start_minutes) & (minutes < end_minutes)
-    return df.loc[mask]
+    market_key = (market or "").upper()
+    key = _normalise_session(session)
+    if market_key == "KR":
+        if key in {"regular", "opening_auction", "closing_auction"}:
+            local = idx.tz_convert(_TZ[market_key]) if idx.tz is not None else idx
+            minutes = local.hour * 60 + local.minute
+            mask = (minutes >= 9 * 60) & (minutes < 15 * 60 + 40)
+            return df.loc[mask]
+        return df.iloc[0:0]
+    requested_sessions = _session_filter_values(key)
+    local = idx.tz_convert(_TZ["US"]) if idx.tz is not None else idx.tz_localize(_TZ["US"])
+    observed = [
+        session_for_timestamp(value, market="US", profile="extended_us")
+        for value in local
+    ]
+    return df.loc[[value in requested_sessions for value in observed]]
 
 
 def load_bars_with_fallback(symbol: str, market: str | None = None,
