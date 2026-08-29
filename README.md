@@ -92,6 +92,42 @@ flowchart TD
 **특정 기능이 어느 파일에 있는지 찾는다면** → [`docs/project-structure.md`](docs/project-structure.md)
 (폴더 지도 + 기능별 파일 인덱스 + 새 파일을 어디에 둘지 가이드).
 
+## 🧪 퀀트 전략 로컬 검증
+
+전략 스튜디오는 같은 `StrategySpec`과 실행 원장을 사용해 세 프로필을 구분한다.
+
+| 프로필 | 데이터·실행 범위 | 운영 기본값 |
+|---|---|---|
+| `kr_intraday` | KIS/KRX 1분·5분봉, 수급·호가·breadth, 국내 정규장 | 신선도·바 완결성·시세 원천이 실패하면 신규 진입을 pause하고 설정된 청산은 허용 |
+| `global_swing` | 미국·한국 일봉/시간봉/주봉, 환율·배당·분할·overnight gap | 정규장 기준의 중기 리밸런싱 |
+| `extended_us` | 미국 extended-hours 전용 세션과 동일한 주문·체결 DTO | 정규장과 분리된 spread·참여율 정책, 폐장 구간을 임의 forward-fill하지 않음 |
+
+검증 모드는 목적을 구분한다. `single_pass`는 빠른 화면 미리보기 전용이며 승격에
+사용할 수 없다. `walk_forward`는 순차 연구용이고, 승격 후보는
+`purged_walk_forward` 또는 엄격한 chronology 증거를 갖춘 `cpcv`에서만 비용·누수·
+최소 표본·DSR/PBO·데이터/모델 provenance 게이트를 통과해야 한다. 결과에는
+`validation`과 `promotion` DTO가 함께 남고, 실패한 검사는 숨기지 않는다.
+
+실행 중 데이터 신선도, 바 완결성 또는 quote source health가 기준을 벗어나면
+`strategy_paused` 진단을 기록하고 신규 진입을 막는다. 설정된 청산은 계속 처리할 수
+있으며, 저장된 snapshot으로 같은 pause 결정을 재현할 수 있다.
+
+`sandbox`/`paper`는 비실거래 검증 환경이다. 검증 통과만으로 live가 되지 않으며,
+live는 명시적인 활성화 상태와 서버 측 capability, 완전한 provenance 및 kill switch를
+추가로 요구한다. 이 저장소의 기본 원칙은 실계좌 자동집행을 제공하지 않고 실제 주문은
+사람이 확인하는 것이다.
+
+첫 working release에는 Redis가 필요하지 않다. 프로세스 메모리와 파일/SQLite 원장을
+우선 사용하며, 여러 수집기·실행기 사이 실시간 상태 공유, 재시작 후 stream 복구,
+초 단위 fan-out 또는 작업 큐가 실제 병목이 된 경우에만 Redis를 hot cache/stream/queue
+용도로 검토한다. 주문·체결 원장과 immutable raw 데이터가 계속 진실의 원천이다.
+
+자격증명이나 네트워크 없이 전체 합성 경로를 확인하려면 다음 명령을 실행한다.
+
+```bash
+./.venv/bin/pytest tests/test_strategy_end_to_end.py -q
+```
+
 ---
 
 ## 🔧 엔지니어링 하이라이트
