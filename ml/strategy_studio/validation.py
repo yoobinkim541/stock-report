@@ -741,9 +741,20 @@ def _fold_metrics(run: object, path_id: str) -> tuple[dict[str, Any], pd.Series,
         "n_observations": len(net),
         "periods_per_year": periods_per_year,
     }
+    validation = _run_spec(run).get("validation")
+    if isinstance(validation, Mapping):
+        for key in (
+            "train_start", "train_max", "test_min", "test_max",
+            "future_training", "no_future_training", "strictly_chronological",
+            "train_before_test", "train_max_before_test_min", "valid", "proof_valid",
+            "chronology_evidence", "cpcv_chronology_evidence",
+        ):
+            if key in validation:
+                output[key] = to_jsonable(validation[key])
     for key in (
         "regime_concentration", "regime", "tested_configurations", "n_trials",
-        "future_training", "strictly_chronological", "chronology_evidence",
+        "future_training", "no_future_training", "strictly_chronological",
+        "train_before_test", "train_max_before_test_min", "valid", "proof_valid", "chronology_evidence",
         "cpcv_chronology_evidence",
     ):
         if key in metrics:

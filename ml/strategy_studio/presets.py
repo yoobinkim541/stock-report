@@ -229,7 +229,7 @@ def builtin_strategy_presets() -> dict[str, dict]:
             "portfolio": {"optimizer": "risk_budget", "max_position_pct": 0.35, "target_volatility": 0.15, "max_turnover": 0.25},
             "execution": {"profile": "global_swing", "stop_policy": "atr_trailing", "time_stop_bars": 15},
             "costs": {"fees_bps": 2, "slippage_bps": 5, "spread_bps": 2},
-            "validation": {"mode": "purged_walk_forward", "min_trades": 30, "min_test_periods": 4, "benchmarks": ["buy_and_hold", "rsi_baseline"]},
+            "validation": {"mode": "purged_walk_forward", "label_horizon": 1, "min_trades": 30, "min_test_periods": 4, "benchmarks": ["buy_and_hold", "rsi_baseline"]},
             "promotion": {"environment": "sandbox"},
             "metadata": {
                 "preset": True,
@@ -261,7 +261,7 @@ def builtin_strategy_presets() -> dict[str, dict]:
             "portfolio": {"optimizer": "cost_aware_risk_budget", "max_position_pct": 0.20, "max_gross_exposure": 1.0, "max_turnover": 0.30},
             "execution": {"profile": "global_swing", "stop_policy": "atr_trailing", "atr_multiple": 3.0, "time_stop_bars": 40},
             "costs": {"fees_bps": 2, "slippage_bps": 6, "spread_bps": 3},
-            "validation": {"mode": "cpcv", "strictly_chronological": True, "min_trades": 30, "min_test_periods": 4, "benchmarks": ["buy_and_hold", "equal_weight"]},
+            "validation": {"mode": "cpcv", "label_horizon": 1, "strictly_chronological": True, "min_trades": 30, "min_test_periods": 4, "benchmarks": ["buy_and_hold", "equal_weight"]},
             "promotion": {"environment": "sandbox"},
             "metadata": {
                 "preset": True,
@@ -289,7 +289,7 @@ def builtin_strategy_presets() -> dict[str, dict]:
             "portfolio": {"optimizer": "cost_aware_risk_budget", "max_position_pct": 0.15, "max_gross_exposure": 1.0, "max_turnover": 0.25},
             "execution": {"profile": "global_swing", "partial_fill": True, "time_stop_bars": 20},
             "costs": {"fees_bps": 2, "slippage_bps": 5, "spread_bps": 2},
-            "validation": {"mode": "purged_walk_forward", "min_trades": 30, "min_test_periods": 4, "benchmarks": ["buy_and_hold", "equal_weight", "rsi_baseline"]},
+            "validation": {"mode": "purged_walk_forward", "label_horizon": 1, "min_trades": 30, "min_test_periods": 4, "benchmarks": ["buy_and_hold", "equal_weight", "rsi_baseline"]},
             "promotion": {"environment": "sandbox"},
             "metadata": {
                 "preset": True,
@@ -318,7 +318,7 @@ def builtin_strategy_presets() -> dict[str, dict]:
             "portfolio": {"optimizer": "cost_aware_risk_budget", "max_position_pct": 0.10, "max_gross_exposure": 1.0, "max_turnover": 0.30},
             "execution": {"profile": "kr_intraday", "latency_ms": 500, "max_participation_rate": 0.10, "partial_fill": True, "time_stop_bars": 24},
             "costs": {"fees_bps": 3, "slippage_bps": 5, "spread_bps": 5},
-            "validation": {"mode": "purged_walk_forward", "embargo_bars": 5, "min_trades": 100, "min_test_periods": 4, "benchmarks": ["buy_and_hold", "equal_weight", "rsi_baseline"]},
+            "validation": {"mode": "purged_walk_forward", "label_horizon": 1, "embargo_bars": 5, "min_trades": 100, "min_test_periods": 4, "benchmarks": ["buy_and_hold", "equal_weight", "rsi_baseline"]},
             "promotion": {"environment": "sandbox"},
             "metadata": {
                 "preset": True,
@@ -341,7 +341,7 @@ def builtin_strategy_presets() -> dict[str, dict]:
             "portfolio": {"optimizer": "equal_weight", "max_position_pct": 0.15, "max_gross_exposure": 1.0, "max_turnover": 0.30},
             "execution": {"profile": "global_swing", "partial_fill": True, "time_stop_bars": 20},
             "costs": {"fees_bps": 2, "slippage_bps": 5, "spread_bps": 2},
-            "validation": {"mode": "purged_walk_forward", "min_trades": 30, "min_test_periods": 4, "benchmarks": ["buy_and_hold", "equal_weight", "rsi_baseline"]},
+            "validation": {"mode": "purged_walk_forward", "label_horizon": 1, "min_trades": 30, "min_test_periods": 4, "benchmarks": ["buy_and_hold", "equal_weight", "rsi_baseline"]},
             "promotion": {"environment": "sandbox"},
             "metadata": {
                 "preset": True,

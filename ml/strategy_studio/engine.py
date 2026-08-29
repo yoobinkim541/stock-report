@@ -94,6 +94,7 @@ def run_strategy_backtest(
 ) -> StrategyRun:
     compiled = compile_strategy(spec, prices)
     strategy = compiled.spec
+    benchmark = benchmark or strategy.benchmark or strategy.base_symbol or None
 
     if compiled.errors:
         return _attach_validation(StrategyRun(

@@ -244,7 +244,7 @@ def _run_strategy_spec_internal(
     if mode == "single_pass":
         raw = preview_strategy_spec(
             strategy,
-            benchmark=strategy.base_symbol or None,
+            benchmark=strategy.benchmark or strategy.base_symbol or None,
             period=requested_period,
         )
         activation_token = None
@@ -386,18 +386,29 @@ def _run_full_validation_impl(
             "test_min": _timestamp_or_none(split.test[0]) if len(split.test) else None,
             "test_max": _timestamp_or_none(split.test[-1]) if len(split.test) else None,
             "future_training": bool(split.future_training),
+            "no_future_training": not bool(split.future_training),
             "strictly_chronological": bool(split.strictly_chronological),
         })
+        chronology = dict(split.to_dict()["chronology_evidence"])
+        chronology["no_future_training"] = not bool(split.future_training)
+        chronology["strictly_chronological"] = bool(split.strictly_chronological)
+        chronology["train_max_before_test_min"] = bool(chronology.get("train_before_test"))
+        chronology["proof_valid"] = bool(chronology.get("valid"))
+        fold_validation.update({
+            "train_before_test": bool(chronology.get("train_before_test")),
+            "train_max_before_test_min": bool(chronology.get("train_max_before_test_min")),
+            "valid": bool(chronology.get("valid")),
+            "proof_valid": bool(chronology.get("proof_valid")),
+            "chronology_evidence": chronology,
+        })
         if validation_mode == "cpcv":
-            chronology = split.to_dict()["chronology_evidence"]
-            fold_validation["chronology_evidence"] = chronology
             fold_validation["cpcv_chronology_evidence"] = chronology
         fold_spec["validation"] = fold_validation
         try:
             fold_run = run_strategy_backtest(
                 fold_spec,
                 fold_prices,
-                benchmark=strategy.base_symbol or None,
+                benchmark=strategy.benchmark or strategy.base_symbol or None,
             )
         except (TypeError, ValueError) as exc:
             errors.append(f"validation fold {split.path_id} failed: {exc}")
@@ -1710,7 +1721,7 @@ def preview_strategy_spec(
 ) -> dict[str, Any]:
     spec_obj = StrategySpec.from_dict(spec)
     price_panel = prices if prices is not None else _load_prices(spec_obj, period=period)
-    run = run_strategy_backtest(spec_obj, price_panel, benchmark=benchmark or spec_obj.base_symbol or None)
+    run = run_strategy_backtest(spec_obj, price_panel, benchmark=benchmark or spec_obj.benchmark or spec_obj.base_symbol or None)
     report = build_strategy_report(run, spec=spec_obj)
     return {
         "ok": bool(run.ok),
@@ -1733,7 +1744,7 @@ def propose_strategy_patch(
     base = StrategySpec.from_dict(current_spec).to_dict()
     patch = _heuristic_patch(question, base)
     patched = apply_strategy_patch(base, patch) if patch else base
-    preview = preview_strategy_spec(patched, benchmark=base.get("base_symbol") or None)
+    preview = preview_strategy_spec(patched, benchmark=base.get("benchmark") or base.get("base_symbol") or None)
     return {
         "ok": bool(preview.get("ok")),
         "current": base,

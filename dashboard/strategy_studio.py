@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 from collections.abc import Mapping
 from copy import deepcopy
@@ -10,7 +11,7 @@ import streamlit as st
 
 from agent_console import agent
 from dashboard import cached, charts, data, theme, views
-from ml.strategy_studio import StrategySpec, apply_strategy_patch, builtin_strategy_presets
+from ml.strategy_studio import StrategySpec, apply_strategy_patch, builtin_strategy_presets, strategy_spec_hash
 
 
 _DATA_PROFILES = ("generic", "global_swing", "kr_intraday", "extended_us")
@@ -235,7 +236,12 @@ def _cost_scenario_for_spec(spec: dict[str, Any]) -> str:
     return "default"
 
 
-def _apply_editor_controls(spec: dict[str, Any], controls: dict[str, str]) -> dict[str, Any]:
+def _apply_editor_controls(
+    spec: dict[str, Any],
+    controls: dict[str, str],
+    *,
+    benchmark: str | None = None,
+) -> dict[str, Any]:
     """Apply UI choices while retaining legacy rule specs until opted in."""
 
     payload = deepcopy(spec)
@@ -284,6 +290,8 @@ def _apply_editor_controls(spec: dict[str, Any], controls: dict[str, str]) -> di
 
     if cost_scenario != "default" or not payload.get("costs"):
         payload["costs"] = dict(_COST_SCENARIO_VALUES.get(cost_scenario, _COST_SCENARIO_VALUES["default"]))
+    if benchmark is not None and benchmark.strip():
+        payload["benchmark"] = benchmark.strip().upper()
     return payload
 
 
@@ -293,7 +301,7 @@ def _render_environment_state(
     preview: dict[str, Any] | None,
 ) -> None:
     spec = _current_spec_payload(selected_record)
-    selected_preview = _ensure_preview(prefix, preview)
+    selected_preview = _ensure_preview(prefix, preview, **_preview_context(prefix, selected_record))
     activation = st.session_state.get(_state_key(prefix, "activation"))
     if isinstance(activation, Mapping) and activation.get("activated") is True:
         state = "live 활성"
@@ -399,44 +407,43 @@ def _render_editor_panel(
     if action_cols[0].button("미리보기", key=_state_key(prefix, "run_preview"), type="primary", width="stretch"):
         spec = _parse_spec_text(draft_text)
         if spec is not None:
-            spec = _apply_editor_controls(spec, controls)
-            _set_preview(prefix, _run_preview(spec, benchmark=benchmark, period=period))
+            spec = _apply_editor_controls(spec, controls, benchmark=benchmark)
+            _set_preview(prefix, _run_preview(spec, benchmark=benchmark, period=period), spec_payload=spec, controls=controls, benchmark=benchmark, version=spec.get("version"))
             _set_draft_record(prefix, spec)
             st.rerun()
     if action_cols[1].button("실행", key=_state_key(prefix, "run_strategy"), width="stretch"):
         spec = _parse_spec_text(draft_text)
         if spec is not None:
-            spec = _apply_editor_controls(spec, controls)
+            spec = _apply_editor_controls(spec, controls, benchmark=benchmark)
             mode_to_run = str(controls["validation_mode"] or "single_pass")
             with st.spinner("전략 실행 중…"):
-                _set_preview(prefix, _run_strategy(spec, period=period, validation_mode=mode_to_run))
+                _set_preview(prefix, _run_strategy(spec, period=period, validation_mode=mode_to_run), spec_payload=spec, controls=controls, benchmark=benchmark, version=spec.get("version"))
             _set_draft_record(prefix, spec)
             st.rerun()
     if action_cols[2].button("검증", key=_state_key(prefix, "validate_spec"), width="stretch"):
         spec = _parse_spec_text(draft_text)
         if spec is not None:
-            spec = _apply_editor_controls(spec, controls)
+            spec = _apply_editor_controls(spec, controls, benchmark=benchmark)
             validation_mode = controls["validation_mode"]
-            if validation_mode in {"single_pass", "walk_forward"}:
-                validation_mode = "purged_walk_forward"
             with st.spinner("시계열 검증 중…"):
-                _set_preview(prefix, _run_strategy(spec, period=period, validation_mode=validation_mode))
+                _set_preview(prefix, _run_strategy(spec, period=period, validation_mode=validation_mode), spec_payload=spec, controls=controls, benchmark=benchmark, version=spec.get("version"))
             _set_draft_record(prefix, spec)
             st.rerun()
     if action_cols[3].button("초안 저장", key=_state_key(prefix, "save_spec"), width="stretch"):
         spec = _parse_spec_text(draft_text)
         if spec is not None:
-            spec = _apply_editor_controls(spec, controls)
+            spec = _apply_editor_controls(spec, controls, benchmark=benchmark)
             saved = _save_spec(spec)
             if saved:
                 _set_draft_record(prefix, saved)
-                _set_preview(prefix, _run_preview(_current_spec_payload(saved), benchmark=benchmark, period=period))
+                saved_spec = _current_spec_payload(saved)
+                _set_preview(prefix, _run_preview(saved_spec, benchmark=benchmark, period=period), spec_payload=saved_spec, controls=controls, benchmark=benchmark, version=saved.get("version"))
                 _refresh_caches()
                 st.toast("초안을 저장했습니다.")
                 st.rerun()
     if st.button("초안 되돌리기", key=_state_key(prefix, "reset_spec"), width="stretch"):
         _set_draft_record(prefix, _catalog_record_or_fallback(selected_record, _safe_catalog(None), builtin_strategy_presets()))
-        _set_preview(prefix, preview)
+        _set_preview(prefix, preview, **_preview_context(prefix, selected_record))
         st.rerun()
 
     if mode == "lab":
@@ -452,7 +459,7 @@ def _render_preview_panel(
 ) -> None:
     st.markdown("##### 미리보기")
     spec_payload = _current_spec_payload(selected_record)
-    selected_preview = _ensure_preview(prefix, preview)
+    selected_preview = _ensure_preview(prefix, preview, **_preview_context(prefix, selected_record))
     if not selected_preview:
         st.info("전략을 미리보기하면 수익률, 거래수, 이퀴티 곡선, 거래 표식을 한 번에 볼 수 있습니다.")
         _render_environment_actions(prefix, selected_record, None, mode=mode)
@@ -733,6 +740,9 @@ def _render_environment_actions(
     st.markdown("##### 환경 작업")
     draft_spec = _draft_spec_from_state(prefix, selected_record)
     spec_id = str((selected_record or {}).get("id") or (draft_spec or {}).get("id") or "").strip()
+    bound_result = _ensure_preview(prefix, None, **_preview_context(prefix, selected_record))
+    if result is not None and bound_result is None:
+        result = None
     strict_ready = _strict_validation_ready(result)
     activation = st.session_state.get(_state_key(prefix, "activation"))
     promotion = (draft_spec or {}).get("promotion") if isinstance((draft_spec or {}).get("promotion"), Mapping) else {}
@@ -789,7 +799,7 @@ def _render_environment_actions(
             activation_result = {"ok": False, "error": str(exc), "activation": {"activated": False, "warnings": [str(exc)]}}
         st.session_state[_state_key(prefix, "activation")] = activation_result.get("activation") or activation_result
         if isinstance(activation_result.get("run"), Mapping):
-            _set_preview(prefix, activation_result["run"])
+            _set_preview(prefix, activation_result["run"], **_preview_context(prefix, selected_record))
         if activation_result.get("ok") is True:
             _refresh_caches()
             st.toast("실거래 활성화가 완료되었습니다.")
@@ -875,9 +885,9 @@ def _strict_validation_ready(result: object) -> bool:
         if not fold_id or fold_id in fold_ids:
             return False
         fold_ids.add(fold_id)
-        if not _safe_chronology_flags(fold, required=True):
+        if mode == "cpcv" and not _strict_cpcv_fold(fold, require_proof=True):
             return False
-        if mode == "cpcv" and not _strict_cpcv_fold(fold, require_proof=False):
+        if mode != "cpcv" and not _strict_validation_fold(fold):
             return False
 
     checks = provenance.get("checks")
@@ -911,7 +921,7 @@ def _strict_validation_ready(result: object) -> bool:
             if not item_id or item_id in evidence_ids or item_id not in fold_ids:
                 return False
             evidence_ids.add(item_id)
-            if not _strict_cpcv_fold(item, require_proof=True):
+            if not _strict_cpcv_fold(item, require_proof=False):
                 return False
         if evidence_ids != fold_ids:
             return False
@@ -940,6 +950,15 @@ def _safe_chronology_flags(value: Mapping[str, Any], *, required: bool) -> bool:
     return present or not required
 
 
+def _strict_validation_fold(fold: Mapping[str, Any]) -> bool:
+    if not _strict_cpcv_fold(fold, require_proof=False):
+        return False
+    return (
+        _safe_boolean_aliases(fold, ("train_before_test", "train_max_before_test_min"), expected=True, required=True)
+        and _safe_boolean_aliases(fold, ("valid", "proof_valid"), expected=True, required=True)
+    )
+
+
 def _safe_boolean_aliases(value: Mapping[str, Any], keys: tuple[str, ...], *, expected: bool, required: bool) -> bool:
     present = [value[key] for key in keys if key in value]
     if not present:
@@ -956,6 +975,11 @@ def _strict_cpcv_fold(fold: Mapping[str, Any], *, require_proof: bool) -> bool:
         if not pd.Timestamp(train) < pd.Timestamp(test):
             return False
     except (TypeError, ValueError):
+        return False
+    if not (
+        fold.get("future_training") is False
+        and fold.get("no_future_training") is True
+    ):
         return False
     nested = fold.get("chronology_evidence")
     records = [fold]
@@ -989,12 +1013,16 @@ def _strict_cpcv_fold(fold: Mapping[str, Any], *, require_proof: bool) -> bool:
             return False
         if record_test is not None and record_test != test:
             return False
-    if require_proof and (
-        not _safe_chronology_flags(fold, required=True)
-        or not _safe_boolean_aliases(fold, ("train_before_test", "train_max_before_test_min"), expected=True, required=True)
-        or not _safe_boolean_aliases(fold, ("valid", "proof_valid"), expected=True, required=True)
-    ):
-        return False
+    if require_proof:
+        if not isinstance(nested, Mapping):
+            return False
+        if not (
+            nested.get("future_training") is False
+            and nested.get("no_future_training") is True
+            and _safe_boolean_aliases(nested, ("train_before_test", "train_max_before_test_min"), expected=True, required=True)
+            and _safe_boolean_aliases(nested, ("valid", "proof_valid"), expected=True, required=True)
+        ):
+            return False
     return True
 
 
@@ -1150,7 +1178,7 @@ def _render_conversation_panel(prefix: str, pack: dict[str, Any], selected_recor
     if patch_result:
         _set_patch(prefix, patch_result)
         if patch_result.get("preview"):
-            _set_preview(prefix, patch_result.get("preview"))
+            _set_preview(prefix, patch_result.get("preview"), **_preview_context(prefix, selected_record))
 
     if patch_result and patch_result.get("patch"):
         patch_bits = []
@@ -1243,11 +1271,26 @@ def _set_draft_record(prefix: str, record: dict[str, Any] | None) -> None:
     st.session_state[_state_key(prefix, "draft_record")] = record
 
 
-def _set_preview(prefix: str, preview: dict[str, Any] | None) -> None:
+def _set_preview(
+    prefix: str,
+    preview: dict[str, Any] | None,
+    *,
+    spec_payload: dict[str, Any] | None = None,
+    controls: Mapping[str, Any] | None = None,
+    benchmark: str | None = None,
+    version: object | None = None,
+) -> None:
     if preview is None:
         st.session_state.pop(_state_key(prefix, "preview"), None)
+        st.session_state.pop(_state_key(prefix, "preview_binding"), None)
     else:
         st.session_state[_state_key(prefix, "preview")] = preview
+        if spec_payload is not None and controls is not None:
+            st.session_state[_state_key(prefix, "preview_binding")] = _preview_binding(
+                spec_payload, controls, benchmark=benchmark, version=version
+            )
+        else:
+            st.session_state.pop(_state_key(prefix, "preview_binding"), None)
 
 
 def _set_patch(prefix: str, patch: dict[str, Any] | None) -> None:
@@ -1260,14 +1303,62 @@ def _set_patch(prefix: str, patch: dict[str, Any] | None) -> None:
 def _ensure_preview(
     prefix: str,
     preview: dict[str, Any] | None,
+    *,
+    spec_payload: dict[str, Any] | None = None,
+    controls: Mapping[str, Any] | None = None,
+    benchmark: str | None = None,
+    version: object | None = None,
 ) -> dict[str, Any] | None:
     if preview is not None:
-        st.session_state[_state_key(prefix, "preview")] = preview
+        _set_preview(prefix, preview, spec_payload=spec_payload, controls=controls, benchmark=benchmark, version=version)
         return preview
     stored = st.session_state.get(_state_key(prefix, "preview"))
     if stored is not None:
+        if spec_payload is not None and controls is not None:
+            expected = _preview_binding(spec_payload, controls, benchmark=benchmark, version=version)
+            if st.session_state.get(_state_key(prefix, "preview_binding")) != expected:
+                _set_preview(prefix, None)
+                return None
         return stored
     return None
+
+
+def _preview_context(prefix: str, selected_record: dict[str, Any] | None) -> dict[str, Any]:
+    spec_payload = _current_spec_payload(selected_record)
+    defaults = _editor_control_defaults(spec_payload)
+    controls = {
+        key: st.session_state.get(_state_key(prefix, key), value)
+        for key, value in defaults.items()
+    }
+    benchmark = st.session_state.get(_state_key(prefix, "benchmark")) or _benchmark_for_payload(spec_payload)
+    version = (selected_record or {}).get("version") or spec_payload.get("version") or 1
+    return {
+        "spec_payload": spec_payload,
+        "controls": controls,
+        "benchmark": benchmark,
+        "version": version,
+    }
+
+
+def _preview_binding(
+    spec_payload: dict[str, Any],
+    controls: Mapping[str, Any],
+    *,
+    benchmark: str | None,
+    version: object | None,
+) -> dict[str, Any]:
+    spec_hash = strategy_spec_hash(spec_payload)
+    controls_blob = json.dumps(dict(controls), ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    try:
+        version_value = int(version or spec_payload.get("version") or 1)
+    except (TypeError, ValueError):
+        version_value = 0
+    return {
+        "spec_hash": spec_hash,
+        "controls_hash": hashlib.sha256(controls_blob.encode("utf-8")).hexdigest(),
+        "benchmark": str(benchmark or "").strip().upper(),
+        "version": version_value,
+    }
 
 
 def _run_preview(spec_payload: dict[str, Any], *, benchmark: str | None, period: str | None) -> dict[str, Any]:

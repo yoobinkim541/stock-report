@@ -103,6 +103,7 @@ class StrategySpec:
     metadata: dict[str, Any] = field(default_factory=dict)
     version: int = 1
     id: str | None = None
+    benchmark: str = ""
     data_profile: str = "generic"
     execution_profile: str = "bar"
     features: list[dict[str, Any]] = field(default_factory=list)
@@ -138,6 +139,7 @@ class StrategySpec:
         market = str(data.get("market") or "us").strip().lower() or "us"
         timeframe = str(data.get("timeframe") or "1d").strip().lower() or "1d"
         base_symbol = str(data.get("base_symbol") or data.get("baseSymbol") or "").strip().upper()
+        benchmark = str(data.get("benchmark") or "").strip().upper()
         data_profile = str(data.get("data_profile") or "generic").strip().lower() or "generic"
         execution_profile = str(data.get("execution_profile") or "bar").strip().lower() or "bar"
         version = int(data.get("version") or 1)
@@ -146,6 +148,7 @@ class StrategySpec:
             market=market,
             timeframe=timeframe,
             base_symbol=base_symbol,
+            benchmark=benchmark,
             universe=universe,
             indicators=indicators,
             rules=rules,
@@ -171,6 +174,8 @@ class StrategySpec:
     def to_dict(self) -> dict[str, Any]:
         data = asdict(self)
         explicit_fields = set(data.pop("_explicit_contract_fields", ()))
+        if not data.get("benchmark"):
+            data.pop("benchmark", None)
         if not explicit_fields:
             explicit_fields = self._inferred_contract_fields()
         for field_name in _CONTRACT_FIELDS - explicit_fields:

@@ -500,3 +500,258 @@ def test_strict_cpcv_gate_checks_all_chronology_aliases_and_nested_actual_eviden
 
     fold["chronology_evidence"]["valid"] = False
     assert strategy_studio._strict_validation_ready(result) is False
+
+
+def test_new_full_validation_presets_declare_label_horizon():
+    from ml.strategy_studio.presets import builtin_strategy_presets
+
+    expected = {
+        "momentum_rank",
+        "mean_reversion",
+        "breakout_with_trailing_stop",
+        "factor_ensemble",
+        "kr_intraday_vwap",
+    }
+    presets = builtin_strategy_presets()
+
+    for key in expected:
+        horizon = presets[key]["validation"].get("label_horizon")
+        assert isinstance(horizon, int)
+        assert horizon > 0
+
+
+def test_strategy_benchmark_is_preserved_and_forwarded_to_run(monkeypatch):
+    from agent_console import strategy_studio
+    from ml.strategy_studio import StrategySpec
+
+    spec = StrategySpec.from_dict({
+        "name": "KOSPI benchmark",
+        "market": "kr",
+        "base_symbol": "005930.KS",
+        "benchmark": "^KS11",
+        "validation": {"mode": "single_pass"},
+    })
+    assert spec.to_dict()["benchmark"] == "^KS11"
+
+    received = {}
+
+    def fake_preview(*args, **kwargs):
+        received["benchmark"] = kwargs["benchmark"]
+        return {
+            "ok": True,
+            "benchmark": {"symbol": kwargs["benchmark"], "available": True},
+            "report": {},
+            "warnings": [],
+            "errors": [],
+        }
+
+    monkeypatch.setattr(strategy_studio, "preview_strategy_spec", fake_preview)
+    result = strategy_studio.run_strategy_spec(spec.to_dict(), validation_mode="single_pass")
+
+    assert received["benchmark"] == "^KS11"
+    assert result["benchmark"]["symbol"] == "^KS11"
+
+
+def test_cached_preview_evidence_is_invalidated_when_context_changes():
+    script = f"""
+import os, sys
+sys.path.insert(0, {ROOT!r})
+import streamlit as st
+from dashboard import strategy_studio
+
+prefix = strategy_studio._state_prefix("binding", "research")
+spec = {{"name": "Binding", "base_symbol": "QQQ"}}
+controls = {{"validation_mode": "single_pass", "data_profile": "generic"}}
+strategy_studio._set_preview(
+    prefix,
+    {{"ok": True}},
+    spec_payload=spec,
+    controls=controls,
+    benchmark="QQQ",
+    version=1,
+)
+assert strategy_studio._ensure_preview(
+    prefix,
+    None,
+    spec_payload=spec,
+    controls=controls,
+    benchmark="QQQ",
+    version=1,
+) is not None
+assert strategy_studio._ensure_preview(
+    prefix,
+    None,
+    spec_payload={{**spec, "name": "Changed"}},
+    controls=controls,
+    benchmark="QQQ",
+    version=1,
+) is None
+
+strategy_studio._set_preview(
+    prefix,
+    {{"ok": True}},
+    spec_payload=spec,
+    controls=controls,
+    benchmark="QQQ",
+    version=1,
+)
+assert strategy_studio._ensure_preview(
+    prefix,
+    None,
+    spec_payload=spec,
+    controls={{**controls, "validation_mode": "cpcv"}},
+    benchmark="QQQ",
+    version=1,
+) is None
+
+strategy_studio._set_preview(
+    prefix,
+    {{"ok": True}},
+    spec_payload=spec,
+    controls=controls,
+    benchmark="QQQ",
+    version=1,
+)
+assert strategy_studio._ensure_preview(
+    prefix,
+    None,
+    spec_payload=spec,
+    controls=controls,
+    benchmark="^KS11",
+    version=1,
+) is None
+
+strategy_studio._set_preview(
+    prefix,
+    {{"ok": True}},
+    spec_payload=spec,
+    controls=controls,
+    benchmark="QQQ",
+    version=1,
+)
+assert strategy_studio._ensure_preview(
+    prefix,
+    None,
+    spec_payload=spec,
+    controls=controls,
+    benchmark="QQQ",
+    version=2,
+) is None
+"""
+    at = AppTest.from_string(script, default_timeout=30)
+    at.run()
+    assert not at.exception, str(at.exception)
+
+
+def test_strict_cpcv_gate_requires_nested_chronology_proof():
+    from dashboard import strategy_studio
+
+    fold = {
+        "fold_id": "fold-1",
+        "train_max": "2026-01-31T00:00:00+00:00",
+        "test_min": "2026-02-01T00:00:00+00:00",
+        "future_training": False,
+        "strictly_chronological": True,
+        "train_before_test": True,
+        "valid": True,
+    }
+    result = {
+        "ok": True,
+        "validation_mode": "cpcv",
+        "validation": {
+            "validation_mode": "cpcv",
+            "promotion_eligible": True,
+            "aggregate": {
+                "fold_count": 1,
+                "provenance_ok": True,
+                "cpcv_fold_ids": ["fold-1"],
+                "cpcv_chronology_ok": True,
+                "cpcv_chronology_evidence": [fold],
+            },
+            "folds": [fold],
+        },
+        "promotion": {"accepted": True, "activation_safe": True, "preview": False, "failed_checks": []},
+        "data_quality": {"status": "fresh", "ok": True},
+        "provenance": {"ok": True, "checks": [{"fold": "fold-1", "ok": True, "provenance_ok": True}]},
+        "errors": [],
+    }
+
+    assert strategy_studio._strict_validation_ready(result) is False
+
+
+def test_strategy_lab_validation_preserves_requested_mode():
+    script = f"""
+import os, sys
+sys.path.insert(0, {ROOT!r})
+import streamlit as st
+from dashboard import strategy_studio
+
+def fake_run(spec, *, period=None, validation_mode=None):
+    st.session_state["requested_mode"] = validation_mode
+    return {{
+        "ok": False,
+        "validation_mode": validation_mode,
+        "validation": {{"promotion_eligible": False}},
+        "promotion": {{"accepted": False, "activation_safe": False, "preview": validation_mode == "single_pass"}},
+        "data_quality": {{"status": "unknown", "ok": False}},
+        "provenance": {{"ok": False}},
+        "report": {{"summary": {{"name": "Mode"}}}},
+        "folds": [],
+        "diagnostics": [],
+    }}
+
+strategy_studio.views.strategy_studio.run_strategy_spec = fake_run
+strategy_studio.render_strategy_lab(
+    "mode-preserve",
+    {{"strategy_studio": {{"ok": True}}}},
+    mode="research",
+    catalog={{"specs": []}},
+    selected_spec={{"name": "Mode", "spec": {{"name": "Mode", "base_symbol": "QQQ", "validation": {{"mode": "single_pass"}}}}}},
+)
+"""
+    at = AppTest.from_string(script, default_timeout=30)
+    at.run()
+    assert not at.exception, str(at.exception)
+    validate_button = next(button for button in at.button if button.key.endswith("validate_spec"))
+    validate_button.click().run()
+
+    assert not at.exception, str(at.exception)
+    assert at.session_state["requested_mode"] == "single_pass"
+
+
+def test_factor_ensemble_equal_weight_fallback_excludes_unavailable_member(monkeypatch):
+    import pandas as pd
+
+    from ml.strategy_studio import StrategySpec
+    from ml.strategy_studio import signals
+
+    index = pd.date_range("2026-01-01", periods=1, freq="D")
+
+    def panel_for(strategy, compiled):
+        member_type = strategy.signal.get("type")
+        if member_type == "model":
+            return signals.SignalPanel.invalid("model", "model unavailable")
+        value = 1.0 if strategy.signal.get("plugin") == "momentum" else 3.0
+        frame = pd.DataFrame({"QQQ": [value]}, index=index)
+        return signals.SignalPanel.from_score(member_type, frame, 1.0)
+
+    monkeypatch.setattr(signals, "build_signal_panel", panel_for)
+    strategy = StrategySpec.from_dict({
+        "name": "Factor fallback",
+        "market": "multi",
+        "base_symbol": "QQQ",
+        "signal": {
+            "type": "ensemble",
+            "aggregation": "equal_weight",
+            "members": [
+                {"type": "factor", "plugin": "momentum"},
+                {"type": "factor", "plugin": "volatility"},
+                {"type": "model", "ref": "quality_factor_v1", "fallback": "equal_weight"},
+            ],
+        },
+    })
+
+    panel = signals._ensemble_provider(strategy, object())
+
+    assert panel.score.loc[index[0], "QQQ"] == 2.0
+    assert any("equal_weight" in diagnostic for diagnostic in panel.diagnostics)

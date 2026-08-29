@@ -169,6 +169,7 @@ def combine_signal_panels(
     columns = _union_columns([panel.score.columns for panel in panels])
     score = pd.DataFrame(0.0, index=index, columns=columns)
     confidence = pd.DataFrame(0.0, index=index, columns=columns)
+    weight_totals = pd.DataFrame(0.0, index=index, columns=columns)
     reason = pd.DataFrame("", index=index, columns=columns)
     as_of = pd.DataFrame(None, index=index, columns=columns, dtype=object)
     feature_version = pd.DataFrame("", index=index, columns=columns)
@@ -190,6 +191,7 @@ def combine_signal_panels(
         if not valid_member.any().any() and weight > 0:
             diagnostics.append(f"ensemble member {position} ({panel.provider}) has no valid scores")
         usable |= valid_member
+        weight_totals = weight_totals.add(valid_member.astype(float) * weight, fill_value=0.0)
         score = score.add(member_score.where(valid_member, 0.0) * weight, fill_value=0.0)
         confidence = confidence.add(member_confidence.where(valid_member, 0.0) * weight, fill_value=0.0)
         for dt in index:
@@ -212,7 +214,8 @@ def combine_signal_panels(
                     model_version.at[dt, symbol], panel.model_version.at[dt, symbol]
                 )
 
-    score = score.where(usable)
+    score = score.div(weight_totals.where(weight_totals > 0)).where(usable)
+    confidence = confidence.div(weight_totals.where(weight_totals > 0)).where(usable)
     gated = usable & (confidence < threshold)
     if gated.any().any():
         reason = reason.mask(gated, "minimum confidence gate")
@@ -405,18 +408,26 @@ def _ensemble_provider(strategy: Any, compiled: Any) -> SignalPanel:
         raise ValueError("ensemble requires non-empty signal.members")
     panels: list[SignalPanel] = []
     weights: list[float] = []
+    fallback_diagnostics: list[str] = []
     for member in members:
         if not isinstance(member, dict):
             panels.append(SignalPanel.invalid("member", "ensemble member must be a dict"))
             weights.append(0.0)
             continue
         member_spec = replace(strategy, signal=dict(member))
-        panels.append(build_signal_panel(member_spec, compiled))
+        panel = build_signal_panel(member_spec, compiled)
+        panels.append(panel)
         weights.append(float(member["weight"]) if "weight" in member else 1.0)
+        if str(member.get("fallback") or "").strip().lower() == "equal_weight" and not panel.has_valid_signals:
+            fallback_diagnostics.append(
+                f"ensemble member {len(panels) - 1} ({panel.provider}) unavailable; equal_weight fallback excludes it"
+            )
     config_weights = config.get("weights")
     if isinstance(config_weights, list) and len(config_weights) == len(panels):
         weights = [float(value) for value in config_weights]
-    return combine_signal_panels(panels, weights, min_confidence=float(config.get("min_confidence") or 0.0))
+    combined = combine_signal_panels(panels, weights, min_confidence=float(config.get("min_confidence") or 0.0))
+    combined.diagnostics.extend(fallback_diagnostics)
+    return combined
 
 
 def _matching_rule(strategy: Any, compiled: Any, matcher: Any, bucket: str, symbol: str, dt: Any) -> dict[str, Any] | None:
