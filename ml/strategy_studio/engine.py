@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from math import sqrt
-from typing import Any
+from typing import Any, Mapping
 
 import numpy as np
 import pandas as pd
@@ -69,7 +69,7 @@ def compile_strategy(spec: dict[str, Any] | StrategySpec, prices: pd.DataFrame) 
 
     contexts: dict[str, dict[str, pd.Series]] = {}
     for symbol in tradeable:
-        series = close_panel[symbol].astype(float).ffill()
+        series = close_panel[symbol].astype(float)
         ctx: dict[str, pd.Series] = {"close": series, "price": series}
         _apply_indicators(strategy, symbol, ctx, price_store, warnings)
         contexts[symbol] = ctx
@@ -136,7 +136,7 @@ def run_strategy_backtest(
 
         allocation = allocate_targets(
             signal_panel,
-            close_panel.pct_change(),
+            close_panel.pct_change(fill_method=None),
             _allocation_config(strategy),
             strategy.costs,
         )
@@ -244,6 +244,13 @@ def _execution_bars(compiled: CompiledStrategy, symbols: Any) -> dict[str, pd.Da
         if close is None:
             continue
         frame = pd.DataFrame(index=close.index)
+        _copy_data_provenance_attrs(frame, compiled.store)
+        _copy_data_provenance_attrs(frame, compiled.prices)
+        snapshots = frame.attrs.get("data_snapshots")
+        if isinstance(snapshots, Mapping):
+            snapshot = snapshots.get(symbol) or snapshots.get(raw_symbol)
+            if snapshot is not None:
+                frame.attrs["data_snapshot"] = snapshot
         for field_name in ("open", "high", "low", "close"):
             series = _field_series(compiled.store, symbol, field_name)
             frame[field_name] = pd.to_numeric(series if series is not None else close, errors="coerce")
@@ -283,7 +290,7 @@ def _build_execution_run(
     if bench.get("available"):
         bench_nav = bench.get("equity")
         if isinstance(bench_nav, pd.Series):
-            equity["benchmark_nav"] = bench_nav.reindex(equity.index).ffill()
+            equity["benchmark_nav"] = bench_nav.reindex(equity.index)
         metrics["benchmark_excess_cagr"] = _excess_cagr(metrics.get("cagr"), bench.get("cagr"))
     else:
         metrics["benchmark_excess_cagr"] = None
@@ -321,7 +328,7 @@ def _build_run(
     cost_bps = _strategy_cost_bps(params)
 
     aligned = weights.reindex(close_panel.index).fillna(0.0)
-    rets = close_panel.pct_change().fillna(0.0)
+    rets = close_panel.pct_change(fill_method=None).fillna(0.0)
     applied = aligned.shift(1).fillna(0.0)
     gross_ret = (applied * rets[applied.columns.intersection(rets.columns)]).sum(axis=1)
     turnover = aligned.diff().abs().sum(axis=1).fillna(aligned.iloc[0].abs().sum() if len(aligned) else 0.0)
@@ -349,7 +356,7 @@ def _build_run(
     if bench.get("available"):
         bench_nav = bench.get("equity")
         if isinstance(bench_nav, pd.Series):
-            equity["benchmark_nav"] = bench_nav.reindex(equity.index).ffill()
+            equity["benchmark_nav"] = bench_nav.reindex(equity.index)
         metrics["benchmark_excess_cagr"] = _excess_cagr(metrics.get("cagr"), bench.get("cagr"))
     else:
         metrics["benchmark_excess_cagr"] = None
@@ -554,7 +561,7 @@ def _benchmark_summary(close_panel: pd.DataFrame, benchmark: str, warnings: list
     return {
         "symbol": symbol,
         "available": True,
-        "equity": close.reindex(close_panel.index).ffill(),
+        "equity": close.reindex(close_panel.index),
         "cumulative_return": result.cumulative_return,
         "cagr": result.cagr,
         "max_drawdown": result.max_drawdown,
@@ -636,7 +643,9 @@ def _normalize_price_store(prices: pd.DataFrame) -> pd.DataFrame:
             flat[f"{symbol}__{field}"] = pd.to_numeric(frame[col], errors="coerce")
         if not flat:
             return pd.DataFrame(index=frame.index)
-        return pd.DataFrame(flat).sort_index().ffill().dropna(how="all")
+        normalized = pd.DataFrame(flat).sort_index()
+        _copy_data_provenance_attrs(normalized, frame)
+        return normalized
     new_columns = []
     for col in frame.columns:
         name = str(col).strip()
@@ -650,7 +659,9 @@ def _normalize_price_store(prices: pd.DataFrame) -> pd.DataFrame:
             name = name.upper()
         new_columns.append(name)
     frame.columns = new_columns
-    return frame.sort_index().ffill().dropna(how="all")
+    normalized = frame.sort_index()
+    _copy_data_provenance_attrs(normalized, prices)
+    return normalized
 
 
 def _copy_data_provenance_attrs(target: pd.DataFrame, source: object) -> None:
@@ -658,7 +669,11 @@ def _copy_data_provenance_attrs(target: pd.DataFrame, source: object) -> None:
 
     if not isinstance(target, pd.DataFrame) or not isinstance(getattr(source, "attrs", None), dict):
         return
-    for key in ("data_snapshot", "data_snapshots", "source_coverage", "provenance"):
+    for key in (
+        "data_snapshot", "data_snapshots", "source_coverage", "provenance",
+        "profile_health", "quote_health", "source_health", "quality",
+        "data_quality", "data_snapshot_quality",
+    ):
         if key in source.attrs:
             target.attrs[key] = source.attrs[key]
 
@@ -688,7 +703,9 @@ def _close_panel_from_store(store: pd.DataFrame) -> pd.DataFrame:
             close_cols[symbol] = pd.to_numeric(series, errors="coerce")
     if not close_cols:
         return pd.DataFrame(index=store.index)
-    return pd.DataFrame(close_cols).sort_index().ffill().dropna(how="all")
+    close_panel = pd.DataFrame(close_cols).sort_index()
+    _copy_data_provenance_attrs(close_panel, store)
+    return close_panel
 
 
 def _field_series(store: pd.DataFrame, symbol: str, field: str) -> pd.Series | None:
@@ -744,7 +761,7 @@ def _apply_indicators(
             else:
                 warnings.append(f"indicator {kind} on {ind_symbol} missing field {source_field}")
                 continue
-        series = pd.to_numeric(series, errors="coerce").ffill()
+        series = pd.to_numeric(series, errors="coerce")
 
         if kind == "rsi":
             ctx[output] = _rsi(series, period)
@@ -896,7 +913,7 @@ def _series_for_rule(ctx: dict[str, pd.Series], field: str) -> pd.Series | None:
 def _compare_series(left: pd.Series, right: pd.Series | float | int | None, op: str) -> pd.Series:
     left = pd.to_numeric(left, errors="coerce")
     if isinstance(right, pd.Series):
-        right_series = pd.to_numeric(right, errors="coerce").reindex(left.index).ffill()
+        right_series = pd.to_numeric(right, errors="coerce").reindex(left.index)
     else:
         scalar = float(right) if right is not None else np.nan
         right_series = pd.Series(scalar, index=left.index)

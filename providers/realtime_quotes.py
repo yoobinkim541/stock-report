@@ -98,10 +98,11 @@ def _is_fresh(ts, now: float, max_age_s: float) -> bool:
     """ts 가 now 기준 max_age_s 이내인가. ts None/형식오류/미래과다 → False."""
     try:
         ts = float(ts)
+        now = float(now)
         max_age_s = float(max_age_s)
-    except (TypeError, ValueError):
+    except (TypeError, ValueError, OverflowError):
         return False
-    if not isfinite(ts) or not isfinite(max_age_s) or max_age_s < 0.0:
+    if not isfinite(ts) or not isfinite(now) or not isfinite(max_age_s) or max_age_s < 0.0:
         return False
     age = now - ts
     return isfinite(age) and -1.0 <= age <= max_age_s  # 약간의 시계 skew(미래 1s) 허용
@@ -238,7 +239,12 @@ def quote_health(
 ) -> dict[str, object]:
     """Return replayable health for one quote without changing quote reads."""
 
-    current = time.time() if now is None else float(now)
+    try:
+        current = time.time() if now is None else float(now)
+    except (TypeError, ValueError, OverflowError):
+        return {"status": "pause", "reason": "invalid_quote_now", "age_seconds": None}
+    if not isfinite(current):
+        return {"status": "pause", "reason": "invalid_quote_now", "age_seconds": None}
     try:
         max_age = float(max_age_s)
     except (TypeError, ValueError):
@@ -269,7 +275,10 @@ def quote_health(
             continue
         try:
             age = current - float(entry.get("ts"))
-        except (TypeError, ValueError):
+        except (TypeError, ValueError, OverflowError):
+            invalid_entries.append((source, "invalid_quote_timestamp"))
+            continue
+        if not isfinite(age):
             invalid_entries.append((source, "invalid_quote_timestamp"))
             continue
         if age < -1.0:
@@ -314,7 +323,12 @@ def quote_health(
 def source_health(*, now: float | None = None) -> dict[str, dict[str, object]]:
     """Summarize heartbeat health for the existing WS and REST cache layers."""
 
-    current = time.time() if now is None else float(now)
+    try:
+        current = time.time() if now is None else float(now)
+    except (TypeError, ValueError, OverflowError):
+        current = None
+    if current is not None and not isfinite(current):
+        current = None
     result: dict[str, dict[str, object]] = {}
     for name, path, enabled_flag, max_age in (
         ("kis_ws", CACHE_PATH, ws_enabled(), HEARTBEAT_STALE_S),
@@ -323,6 +337,9 @@ def source_health(*, now: float | None = None) -> dict[str, dict[str, object]]:
         cache = _read_cache(path)
         if not enabled_flag:
             result[name] = {"status": "disabled", "reason": "source_disabled", "age_seconds": None}
+            continue
+        if current is None:
+            result[name] = {"status": "pause", "reason": "invalid_quote_now", "age_seconds": None}
             continue
         heartbeat = (cache.get(HEARTBEAT_KEY) or {}).get("ts") if isinstance(cache, dict) else None
         try:

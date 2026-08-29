@@ -626,19 +626,28 @@ def _health_mapping(value: object) -> dict[str, Any] | None:
     status = str(payload.get("status") or "").strip().lower()
     reason = payload.get("reason")
     quality = str(payload.get("quality") or "").strip().lower()
-    if status == "fresh":
-        mapped = {**payload, "reason": str(reason or "fresh")}
+    if status == "fresh" or status in {"available", "complete", "ok"}:
+        mapped = {**payload, "status": "fresh", "reason": str(reason or "fresh")}
         if _health_blocks_entries(mapped):
-            return {**mapped, "status": "pause", "reason": "invalid_health_age"}
+            return {
+                **mapped,
+                "status": "pause",
+                "reason": "invalid_health_timestamp" if _health_has_invalid_timestamp(mapped) else "invalid_health_age",
+            }
         return mapped
-    if status in {"available", "complete", "ok"}:
-        return {**payload, "status": "fresh", "reason": str(reason or "fresh")}
     if status:
         return {**payload, "reason": str(reason or "source_unavailable")}
     if quality in {"missing", "incomplete", "invalid", "degraded"}:
         return {**payload, "status": "pause", "reason": "incomplete_bars"}
     if quality in {"fresh", "complete", "ok"}:
-        return {**payload, "status": "fresh", "reason": "fresh"}
+        mapped = {**payload, "status": "fresh", "reason": str(reason or "fresh")}
+        if _health_blocks_entries(mapped):
+            return {
+                **mapped,
+                "status": "pause",
+                "reason": "invalid_health_timestamp" if _health_has_invalid_timestamp(mapped) else "invalid_health_age",
+            }
+        return mapped
     if quality:
         return {**payload, "status": "pause", "reason": "source_unavailable"}
     if payload.get("fresh") is False:
@@ -730,14 +739,24 @@ def _health_for_event(
     at: object,
 ) -> dict[str, Any] | None:
     frame = bars.get(str(symbol or "").upper().strip())
-    frame_snapshot = frame.attrs.get("data_snapshot") if frame is not None else None
     snapshot_health = None
-    if frame_snapshot is not None:
-        snapshot_quality = getattr(frame_snapshot, "quality", None)
-        if snapshot_quality is None and isinstance(frame_snapshot, Mapping):
-            snapshot_quality = frame_snapshot.get("quality")
-        if str(snapshot_quality or "").strip().lower() not in {"", "complete", "ok", "fresh"}:
-            snapshot_health = {"status": "pause", "reason": "incomplete_bars", "quality": snapshot_quality}
+    if frame is not None:
+        snapshot_candidates = [frame.attrs.get("data_snapshot")]
+        snapshot_candidates.append(_health_at(frame.attrs.get("data_snapshots"), symbol, at))
+        for snapshot in snapshot_candidates:
+            if snapshot is None:
+                continue
+            snapshot_quality = getattr(snapshot, "quality", None)
+            if snapshot_quality is None and isinstance(snapshot, Mapping):
+                snapshot_quality = snapshot.get("quality")
+            if str(snapshot_quality or "").strip().lower() not in {"complete", "ok", "fresh"}:
+                snapshot_health = {"status": "pause", "reason": "incomplete_bars", "quality": snapshot_quality}
+                break
+        for quality_key in ("quality", "data_quality", "data_snapshot_quality"):
+            quality = frame.attrs.get(quality_key)
+            if quality is not None and str(quality).strip().lower() not in {"complete", "ok", "fresh"}:
+                snapshot_health = {"status": "pause", "reason": "incomplete_bars", "quality": quality}
+                break
     candidates = [
         _health_at(config.profile_health, symbol, at),
         _health_at(config.quote_health, symbol, at),
@@ -757,6 +776,8 @@ def _health_blocks_entries(health: Mapping[str, Any] | None) -> bool:
     if status == "fresh":
         if health.get("fresh") is False:
             return True
+        if _health_has_invalid_timestamp(health):
+            return True
         age = health.get("age_seconds")
         if age is None or isinstance(age, bool):
             return True
@@ -766,6 +787,39 @@ def _health_blocks_entries(health: Mapping[str, Any] | None) -> bool:
             return True
         return not isfinite(age_value) or age_value < 0.0
     return True
+
+
+_HEALTH_TIMESTAMP_FIELDS = (
+    "timestamp",
+    "timestamp_at",
+    "last_bar_at",
+    "quote_at",
+    "updated_at",
+    "observed_at",
+    "now",
+)
+
+
+def _health_has_invalid_timestamp(health: Mapping[str, Any]) -> bool:
+    """Reject explicitly supplied clock fields that cannot be replayed."""
+
+    for field in _HEALTH_TIMESTAMP_FIELDS:
+        if field not in health:
+            continue
+        value = health[field]
+        if value is None or isinstance(value, bool):
+            return True
+        try:
+            if isinstance(value, (int, float)):
+                if not isfinite(float(value)):
+                    return True
+                continue
+            parsed = pd.Timestamp(value)
+            if pd.isna(parsed):
+                return True
+        except (TypeError, ValueError, OverflowError):
+            return True
+    return False
 
 
 def _health_blocks_order(

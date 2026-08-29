@@ -130,6 +130,25 @@ def test_invalid_heartbeat_is_not_treated_as_fresh(monkeypatch, tmp_path):
     assert rq.get_price("AAPL") is None
 
 
+@pytest.mark.parametrize("now", ["bad", float("nan"), float("inf")])
+def test_quote_health_invalid_now_fails_closed(live, now):
+    live({"AAPL": {"price": 201.5, "ts": time.time()}})
+
+    result = rq.quote_health("AAPL", now=now)
+
+    assert result["status"] == "pause"
+    assert result["reason"] == "invalid_quote_now"
+
+
+def test_quote_health_invalid_quote_timestamp_fails_closed(live):
+    live({"AAPL": {"price": 201.5, "ts": "nan"}})
+
+    result = rq.quote_health("AAPL", now=time.time())
+
+    assert result["status"] == "pause"
+    assert result["reason"] == "invalid_quote_timestamp"
+
+
 def test_rest_cache_prefers_redis_when_available(monkeypatch, tmp_path):
     now = time.time()
     monkeypatch.setenv("REALTIME_ENABLED", "false")

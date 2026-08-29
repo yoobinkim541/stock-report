@@ -21,6 +21,12 @@ from ml.strategy_studio.execution import (
     execution_defaults,
     run_execution_backtest,
 )
+from ml.strategy_studio.engine import (
+    _close_panel_from_store,
+    _execution_bars,
+    _normalize_price_store,
+    compile_strategy,
+)
 from ml.strategy_studio.profiles import profile_health
 
 
@@ -604,7 +610,7 @@ def test_explicit_pause_without_reason_remains_conservative():
     assert fill.reason == "strategy_paused"
 
 
-@pytest.mark.parametrize("age_seconds", ["bad", -1.0])
+@pytest.mark.parametrize("age_seconds", [None, "bad", float("nan"), float("inf"), -1.0])
 def test_malformed_fresh_health_pauses_entries_but_allows_configured_exits(age_seconds):
     bars = {"AAPL": _bars([
         {"open": 100.0, "high": 101.0, "low": 99.0, "close": 100.0, "volume": 100.0},
@@ -625,3 +631,82 @@ def test_malformed_fresh_health_pauses_entries_but_allows_configured_exits(age_s
         ("buy", "cancelled", "strategy_paused"),
         ("sell", "filled", "market_open"),
     ]
+
+
+@pytest.mark.parametrize("health", [
+    {"status": "available"},
+    {"status": "fresh", "age_seconds": 0.0, "timestamp": "not-a-timestamp"},
+    {"status": "fresh", "age_seconds": 0.0, "now": float("nan")},
+])
+def test_health_aliases_and_invalid_clock_fields_fail_closed(health):
+    bars = {"AAPL": _bars([
+        {"open": 100.0, "high": 101.0, "low": 99.0, "close": 100.0, "volume": 100.0},
+        {"open": 100.0, "high": 101.0, "low": 99.0, "close": 100.0, "volume": 100.0},
+    ])}
+    intent = OrderIntent("AAPL", "buy", 10, bars["AAPL"].index[0])
+
+    fill = execute_intents(
+        [intent],
+        bars,
+        ExecutionConfig(profile_health=health, latency_bars=1),
+    )[0]
+
+    assert fill.status == "cancelled"
+    assert fill.reason == "strategy_paused"
+
+
+def test_public_execution_bars_preserve_health_attrs_and_block_incomplete_snapshot():
+    index = pd.date_range("2026-01-01", periods=2, freq="D")
+    prices = pd.DataFrame({
+        "AAPL__open": [100.0, 101.0],
+        "AAPL__high": [101.0, 102.0],
+        "AAPL__low": [99.0, 100.0],
+        "AAPL__close": [100.0, 101.0],
+        "AAPL__volume": [1000.0, 1000.0],
+    }, index=index)
+    prices.attrs.update({
+        "profile_health": {"status": "fresh", "age_seconds": 0.0},
+        "quote_health": {"status": "fresh", "age_seconds": 0.0},
+        "data_snapshot": {"quality": "incomplete", "snapshot_id": "snapshot-1"},
+    })
+    compiled = compile_strategy({"name": "attrs", "base_symbol": "AAPL"}, prices)
+    bars = _execution_bars(compiled, ["AAPL"])
+
+    assert bars["AAPL"].attrs["profile_health"]["status"] == "fresh"
+    assert bars["AAPL"].attrs["quote_health"]["status"] == "fresh"
+    assert bars["AAPL"].attrs["data_snapshot"]["quality"] == "incomplete"
+
+    fill = execute_intents(
+        [OrderIntent("AAPL", "buy", 10, index[0])],
+        bars,
+        ExecutionConfig(latency_bars=1),
+    )[0]
+    assert fill.status == "cancelled"
+    assert fill.reason == "strategy_paused"
+
+
+def test_engine_preserves_nan_gaps_and_execution_rejects_missing_bar():
+    index = pd.date_range("2026-01-01", periods=3, freq="D")
+    missing = float("nan")
+    prices = pd.DataFrame({
+        "AAPL__open": [100.0, missing, 102.0],
+        "AAPL__high": [101.0, missing, 103.0],
+        "AAPL__low": [99.0, missing, 101.0],
+        "AAPL__close": [100.0, missing, 102.0],
+        "AAPL__volume": [1000.0, missing, 1000.0],
+    }, index=index)
+
+    store = _normalize_price_store(prices)
+    close_panel = _close_panel_from_store(store)
+    assert pd.isna(store.loc[index[1], "AAPL__close"])
+    assert pd.isna(close_panel.loc[index[1], "AAPL"])
+
+    compiled = compile_strategy({"name": "gap", "base_symbol": "AAPL"}, prices)
+    bars = _execution_bars(compiled, ["AAPL"])
+    fill = execute_intents(
+        [OrderIntent("AAPL", "buy", 10, index[1])],
+        bars,
+        ExecutionConfig(latency_bars=0),
+    )[0]
+    assert fill.status == "rejected"
+    assert fill.reason == "invalid_bar_price"
