@@ -573,7 +573,7 @@ def test_pending_entry_is_paused_if_health_turns_stale_before_fill():
     config = ExecutionConfig(
         profile_health={
             "timeline": {
-                index[0].isoformat(): {"status": "fresh", "reason": "fresh"},
+                index[0].isoformat(): {"status": "fresh", "reason": "fresh", "age_seconds": 0.0},
                 index[1].isoformat(): {"status": "pause", "reason": "stale_intraday_bar"},
             },
         },
@@ -602,3 +602,26 @@ def test_explicit_pause_without_reason_remains_conservative():
 
     assert fill.status == "cancelled"
     assert fill.reason == "strategy_paused"
+
+
+@pytest.mark.parametrize("age_seconds", ["bad", -1.0])
+def test_malformed_fresh_health_pauses_entries_but_allows_configured_exits(age_seconds):
+    bars = {"AAPL": _bars([
+        {"open": 100.0, "high": 101.0, "low": 99.0, "close": 100.0, "volume": 100.0},
+        {"open": 100.0, "high": 101.0, "low": 99.0, "close": 100.0, "volume": 100.0},
+    ])}
+    config = ExecutionConfig(
+        profile_health={"status": "fresh", "reason": "fresh", "age_seconds": age_seconds},
+        latency_bars=1,
+    )
+    intents = [
+        OrderIntent("AAPL", "buy", 10, bars["AAPL"].index[0]),
+        OrderIntent("AAPL", "sell", 10, bars["AAPL"].index[0]),
+    ]
+
+    fills = execute_intents(intents, bars, config)
+
+    assert [(fill.side, fill.status, fill.reason) for fill in fills] == [
+        ("buy", "cancelled", "strategy_paused"),
+        ("sell", "filled", "market_open"),
+    ]

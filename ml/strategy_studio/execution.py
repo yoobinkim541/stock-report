@@ -627,7 +627,10 @@ def _health_mapping(value: object) -> dict[str, Any] | None:
     reason = payload.get("reason")
     quality = str(payload.get("quality") or "").strip().lower()
     if status == "fresh":
-        return {**payload, "reason": str(reason or "fresh")}
+        mapped = {**payload, "reason": str(reason or "fresh")}
+        if _health_blocks_entries(mapped):
+            return {**mapped, "status": "pause", "reason": "invalid_health_age"}
+        return mapped
     if status in {"available", "complete", "ok"}:
         return {**payload, "status": "fresh", "reason": str(reason or "fresh")}
     if status:
@@ -751,8 +754,17 @@ def _health_blocks_entries(health: Mapping[str, Any] | None) -> bool:
     if not health:
         return False
     status = str(health.get("status") or "pause").strip().lower()
-    if status == "fresh" and health.get("fresh") is not False:
-        return False
+    if status == "fresh":
+        if health.get("fresh") is False:
+            return True
+        age = health.get("age_seconds")
+        if age is None or isinstance(age, bool):
+            return True
+        try:
+            age_value = float(age)
+        except (TypeError, ValueError, OverflowError):
+            return True
+        return not isfinite(age_value) or age_value < 0.0
     return True
 
 

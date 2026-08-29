@@ -26,20 +26,28 @@ class ProfileHealth:
     age_seconds: float | None
 
     def __post_init__(self) -> None:
-        object.__setattr__(self, "status", str(self.status or "unknown").strip().lower())
-        object.__setattr__(self, "reason", str(self.reason or "unknown").strip())
+        status = str(self.status or "unknown").strip().lower()
+        reason = str(self.reason or "unknown").strip()
+        invalid_age = status == "fresh" and self.age_seconds is None
         if self.age_seconds is not None:
             if isinstance(self.age_seconds, bool):
-                raise ValueError("age_seconds must be a finite non-negative number")
-            try:
-                age = float(self.age_seconds)
-            except (TypeError, ValueError) as exc:
-                raise ValueError("age_seconds must be a finite non-negative number") from exc
-            if not isfinite(age):
-                raise ValueError("age_seconds must be a finite non-negative number")
-            if age < 0.0:
-                age = 0.0
-            object.__setattr__(self, "age_seconds", age)
+                invalid_age = True
+            else:
+                try:
+                    age = float(self.age_seconds)
+                except (TypeError, ValueError, OverflowError):
+                    invalid_age = True
+                else:
+                    if not isfinite(age) or age < 0.0:
+                        invalid_age = True
+                    else:
+                        object.__setattr__(self, "age_seconds", age)
+        if invalid_age:
+            status = "pause"
+            reason = "invalid_health_age"
+            object.__setattr__(self, "age_seconds", None)
+        object.__setattr__(self, "status", status)
+        object.__setattr__(self, "reason", reason)
 
     @property
     def allows_new_entries(self) -> bool:
@@ -241,12 +249,7 @@ def health_from_payload(value: object) -> ProfileHealth | None:
     reason = value.get("reason")
     if status is None or reason is None:
         return None
-    age = value.get("age_seconds")
-    try:
-        age_value = None if age is None else float(age)
-    except (TypeError, ValueError):
-        age_value = None
-    return ProfileHealth(str(status), str(reason), age_value)
+    return ProfileHealth(str(status), str(reason), value.get("age_seconds"))
 
 
 __all__ = ["ProfileHealth", "execution_defaults", "health_from_payload", "profile_health"]
