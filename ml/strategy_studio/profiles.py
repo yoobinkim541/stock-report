@@ -119,7 +119,7 @@ _PROFILE_TZ = {
 }
 
 
-def _parse_timestamp(value: object, field_name: str) -> datetime:
+def _parse_timestamp(value: object, field_name: str, *, profile: str | None = None) -> datetime:
     if value is None or not str(value).strip():
         raise ValueError(f"{field_name} is required")
     if isinstance(value, datetime):
@@ -130,7 +130,7 @@ def _parse_timestamp(value: object, field_name: str) -> datetime:
         except ValueError as exc:
             raise ValueError(f"{field_name} must be an ISO timestamp") from exc
     if parsed.tzinfo is None:
-        parsed = parsed.replace(tzinfo=timezone.utc)
+        parsed = parsed.replace(tzinfo=_PROFILE_TZ.get(profile or "", timezone.utc))
     return parsed.astimezone(timezone.utc)
 
 
@@ -182,11 +182,11 @@ def profile_health(
     if not isfinite(limit) or limit < 0.0:
         raise ValueError("max_age_seconds must be a finite non-negative number")
 
-    current = _parse_timestamp(now, "now")
+    current = _parse_timestamp(now, "now", profile=key)
     last = None
     if last_bar_at is not None and str(last_bar_at).strip():
         try:
-            last = _parse_timestamp(last_bar_at, "last_bar_at")
+            last = _parse_timestamp(last_bar_at, "last_bar_at", profile=key)
         except ValueError:
             return ProfileHealth("pause", "invalid_bar_timestamp", None)
     if last is not None:

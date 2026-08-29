@@ -1018,56 +1018,109 @@ def attach_profile_snapshot(
     out = frame.copy() if isinstance(frame, pd.DataFrame) else pd.DataFrame(frame)
     if expected_index is not None:
         out = mark_missing_sessions(out, expected_index, profile=key, session=session)
-    metadata = {
+    existing_metadata = out.attrs.get("profile_metadata")
+    metadata = dict(existing_metadata) if isinstance(existing_metadata, dict) else {}
+    metadata.update({
         "profile": key,
         "session": str(session or "regular").strip().lower(),
-        "fx": dict(fx or {}),
-        "corporate_actions": corporate_actions if corporate_actions is not None else {},
-        "overnight_gap": overnight_gap,
-    }
+    })
+    if fx is not None:
+        metadata["fx"] = dict(fx)
+    else:
+        metadata.setdefault("fx", {})
+    if corporate_actions is not None:
+        metadata["corporate_actions"] = corporate_actions
+    else:
+        metadata.setdefault("corporate_actions", {})
+    if overnight_gap is not None:
+        metadata["overnight_gap"] = overnight_gap
+    else:
+        metadata.setdefault("overnight_gap", None)
     if overnight_gap is None and not out.empty and {"Open", "Close"}.issubset(out.columns):
         previous_close = pd.to_numeric(out["Close"], errors="coerce").shift(1)
         opening = pd.to_numeric(out["Open"], errors="coerce")
         gap = ((opening / previous_close) - 1.0).dropna()
         if not gap.empty:
             metadata["overnight_gap"] = float(gap.iloc[-1])
-    quality = str(out.attrs.get("quality") or "complete").strip().lower()
-    snapshot = normalize_data_snapshot(
-        out,
-        symbol=str(symbol).strip().upper(),
-        source=str(source or "yfinance").strip(),
-        timeframe=str(timeframe or "1d").strip(),
-        session=str(session or "regular").strip(),
-        adjustment=str(adjustment or "adjusted").strip(),
-        received_at=received_at,
-        available_at=available_at,
-        raw_ref=raw_ref,
-        quality=quality,
-    )
+    existing_snapshot = out.attrs.get("data_snapshot")
+    if isinstance(existing_snapshot, dict):
+        try:
+            existing_snapshot = DataSnapshot.from_dict(existing_snapshot)
+        except (TypeError, ValueError):
+            existing_snapshot = None
+    quality = str(
+        out.attrs.get("quality")
+        or (existing_snapshot.quality if isinstance(existing_snapshot, DataSnapshot) else "complete")
+    ).strip().lower()
+    if isinstance(existing_snapshot, DataSnapshot):
+        source_coverage = dict(existing_snapshot.source_coverage or {})
+        coverage_metadata = dict(source_coverage.get("metadata") or {})
+        coverage_metadata.update(metadata)
+        missing_sessions = list(
+            out.attrs.get("missing_sessions")
+            or source_coverage.get("missing_sessions")
+            or []
+        )
+        source_coverage.update({
+            "profile": key,
+            "session": metadata["session"],
+            "metadata": coverage_metadata,
+            "missing_sessions": missing_sessions,
+        })
+        snapshot = DataSnapshot(
+            existing_snapshot.data_stamps,
+            raw_ref=raw_ref if raw_ref is not None else existing_snapshot.raw_ref,
+            quality=quality,
+            warnings=existing_snapshot.warnings,
+            source_coverage=source_coverage,
+            freshness=existing_snapshot.freshness,
+            snapshot_id=existing_snapshot.snapshot_id,
+        )
+    else:
+        snapshot = normalize_data_snapshot(
+            out,
+            symbol=str(symbol).strip().upper(),
+            source=str(source or "yfinance").strip(),
+            timeframe=str(timeframe or "1d").strip(),
+            session=str(session or "regular").strip(),
+            adjustment=str(adjustment or "adjusted").strip(),
+            received_at=received_at,
+            available_at=available_at,
+            raw_ref=raw_ref,
+            quality=quality,
+        )
+        source_coverage = dict(snapshot.source_coverage or {})
+        missing_sessions = list(out.attrs.get("missing_sessions") or [])
+        source_coverage.update({
+            "profile": key,
+            "session": metadata["session"],
+            "metadata": metadata,
+            "missing_sessions": missing_sessions,
+        })
     snapshot = DataSnapshot(
         snapshot.data_stamps,
         raw_ref=snapshot.raw_ref,
         quality=snapshot.quality,
         warnings=snapshot.warnings,
-        source_coverage={
-            "profile": key,
-            "session": metadata["session"],
-            "metadata": metadata,
-            "missing_sessions": list(out.attrs.get("missing_sessions") or []),
-        },
+        source_coverage=source_coverage,
         freshness=snapshot.freshness,
+        snapshot_id=snapshot.snapshot_id,
     )
+    missing_sessions = list(out.attrs.get("missing_sessions") or source_coverage.get("missing_sessions") or [])
+    source_health = {
+        "status": "unavailable" if out.empty else ("degraded" if missing_sessions else "available"),
+        "quality": snapshot.quality,
+        "missing_sessions": missing_sessions,
+    }
+    if out.empty:
+        source_health["reason"] = "profile_data_unavailable"
     out.attrs.update({
         "profile": key,
         "session": metadata["session"],
         "profile_metadata": metadata,
         "data_snapshot": snapshot,
         "provenance": snapshot.to_provenance()["data"],
-        "source_health": {
-            "status": "degraded" if out.attrs.get("missing_sessions") else "available",
-            "quality": snapshot.quality,
-            "missing_sessions": list(out.attrs.get("missing_sessions") or []),
-        },
+        "source_health": source_health,
     })
     return out
 
@@ -1089,20 +1142,49 @@ def load_profile_bars(
 
     import pandas as pd
 
+    key = str(profile or "global_swing").strip().lower()
     data = frame
+    source = None
     if data is None:
         data = load_cached_ohlc(symbol, period)
+        if data is not None and not getattr(data, "empty", True):
+            source = "yfinance"
+    interval = str(timeframe or "").strip().lower()
+    intraday_intervals = {"1m", "5m", "15m", "1h"}
+    if data is None or getattr(data, "empty", True):
+        if key in {"kr_intraday", "global_swing", "extended_us"} and interval in intraday_intervals:
+            try:
+                from providers.intraday_bars import load_bars_with_fallback
+
+                market = "KR" if key == "kr_intraday" else "US"
+                data, source = load_bars_with_fallback(
+                    symbol, market, interval=interval, session=session,
+                )
+            except Exception as exc:
+                logger.warning("profile intraday fallback unavailable(%s): %s", symbol, exc)
+                data, source = pd.DataFrame(), "unavailable"
+        elif key in {"global_swing", "extended_us"}:
+            try:
+                data = _history_cached(symbol, period)
+                source = "yfinance" if data is not None and not getattr(data, "empty", True) else "unavailable"
+            except Exception as exc:
+                logger.warning("profile history fallback unavailable(%s): %s", symbol, exc)
+                data, source = pd.DataFrame(), "unavailable"
+        else:
+            data = pd.DataFrame()
+            source = "unavailable"
     if data is None:
         data = pd.DataFrame()
-    source = "yfinance" if str(profile).lower() in {"global_swing", "extended_us"} else "market_data"
+    if not source:
+        source = "yfinance" if key in {"global_swing", "extended_us"} else "market_data"
     return attach_profile_snapshot(
         data,
         symbol=symbol,
-        profile=profile,
+        profile=key,
         timeframe=timeframe,
         session=session,
         source=source,
-        adjustment="adjusted" if str(profile).lower() != "kr_intraday" else "raw",
+        adjustment="adjusted" if key != "kr_intraday" else "raw",
         expected_index=expected_index,
         fx=fx,
         corporate_actions=corporate_actions,

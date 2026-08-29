@@ -3,6 +3,7 @@ from datetime import datetime, timedelta
 from pathlib import Path
 
 import pandas as pd
+import pytest
 
 from ml.intraday_signal import (
     IntradaySignal,
@@ -266,6 +267,33 @@ def test_intraday_bars_persist_and_filter_us_sessions(tmp_path):
     assert len(intraday_bars.load_bars("AAPL", "2026-07-13", base_dir=tmp_path, session="overnight")) == 1
     extended = intraday_bars.load_bars("AAPL", "2026-07-13", base_dir=tmp_path, session="extended")
     assert list(extended.index.strftime("%H:%M")) == ["08:30", "09:30", "16:00"]
+
+
+@pytest.mark.parametrize(
+    ("session", "expected"),
+    [
+        ("opening_auction", ["08:30", "08:59"]),
+        ("closing_auction", ["15:20", "15:29"]),
+    ],
+)
+def test_kr_auction_filters_use_only_the_exact_auction_window(session, expected):
+    from providers import intraday_bars
+
+    index = pd.DatetimeIndex([
+        "2026-07-13 08:29:00+09:00",
+        "2026-07-13 08:30:00+09:00",
+        "2026-07-13 08:59:00+09:00",
+        "2026-07-13 09:00:00+09:00",
+        "2026-07-13 15:19:00+09:00",
+        "2026-07-13 15:20:00+09:00",
+        "2026-07-13 15:29:00+09:00",
+        "2026-07-13 15:30:00+09:00",
+    ])
+    frame = pd.DataFrame({"Open": range(len(index)), "Close": range(len(index))}, index=index)
+
+    filtered = intraday_bars._filter_session_frame(frame, market="KR", session=session)
+
+    assert list(filtered.index.strftime("%H:%M")) == expected
 
 
 def test_microstructure_health_uses_source_timestamps_for_stale_gate():

@@ -570,6 +570,26 @@ def test_profile_health_rejects_nonfinite_freshness_threshold():
         )
 
 
+@pytest.mark.parametrize(
+    ("profile", "last_bar_at", "now"),
+    [
+        ("kr_intraday", "2026-08-28T10:00:00", "2026-08-28T10:05:00"),
+        ("extended_us", "2026-08-28T04:00:00", "2026-08-28T04:05:00"),
+    ],
+)
+def test_profile_health_interprets_naive_timestamps_in_exchange_timezone(profile, last_bar_at, now):
+    decision = profile_health(
+        profile,
+        last_bar_at=last_bar_at,
+        now=now,
+        max_age_seconds=600,
+    )
+
+    assert decision.status == "fresh"
+    assert decision.reason == "fresh"
+    assert decision.age_seconds == pytest.approx(300.0)
+
+
 def test_pending_entry_is_paused_if_health_turns_stale_before_fill():
     bars = {"AAPL": _bars([
         {"open": 100.0, "high": 101.0, "low": 99.0, "close": 100.0, "volume": 100.0},

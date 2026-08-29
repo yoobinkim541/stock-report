@@ -46,6 +46,10 @@ _SESSION_FILTERS = {
     "extended": frozenset({"premarket", "regular", "aftermarket"}),
     "all": frozenset({"premarket", "regular", "aftermarket", "overnight"}),
 }
+_KR_AUCTION_WINDOWS = {
+    "opening_auction": (8 * 60 + 30, 9 * 60),
+    "closing_auction": (15 * 60 + 20, 15 * 60 + 30),
+}
 
 
 # ── 심볼 변환 단일 진실원 (bar store·state·ledger·실시간 캐시 = base 표기) ────
@@ -443,12 +447,15 @@ def _filter_session_frame(df, *, market: str | None, session: str):
     market_key = (market or "").upper()
     key = _normalise_session(session)
     if market_key == "KR":
-        if key in {"regular", "opening_auction", "closing_auction"}:
-            local = idx.tz_convert(_TZ[market_key]) if idx.tz is not None else idx
-            minutes = local.hour * 60 + local.minute
-            mask = (minutes >= 9 * 60) & (minutes < 15 * 60 + 40)
-            return df.loc[mask]
-        return df.iloc[0:0]
+        local = idx.tz_convert(_TZ[market_key]) if idx.tz is not None else idx
+        minutes = local.hour * 60 + local.minute
+        if key == "regular":
+            start, end = 9 * 60, 15 * 60 + 40
+        elif key in _KR_AUCTION_WINDOWS:
+            start, end = _KR_AUCTION_WINDOWS[key]
+        else:
+            return df.iloc[0:0]
+        return df.loc[(minutes >= start) & (minutes < end)]
     requested_sessions = _session_filter_values(key)
     local = idx.tz_convert(_TZ["US"]) if idx.tz is not None else idx.tz_localize(_TZ["US"])
     observed = [
