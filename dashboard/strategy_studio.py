@@ -8,6 +8,7 @@ from typing import Any
 
 import pandas as pd
 import streamlit as st
+from streamlit.errors import StreamlitAPIException
 
 from agent_console import agent
 from dashboard import cached, charts, data, theme, views
@@ -290,8 +291,12 @@ def _apply_editor_controls(
 
     if cost_scenario != "default" or not payload.get("costs"):
         payload["costs"] = dict(_COST_SCENARIO_VALUES.get(cost_scenario, _COST_SCENARIO_VALUES["default"]))
-    if benchmark is not None and benchmark.strip():
-        payload["benchmark"] = benchmark.strip().upper()
+    if benchmark is not None:
+        benchmark_value = benchmark.strip().upper()
+        if benchmark_value:
+            payload["benchmark"] = benchmark_value
+        else:
+            payload.pop("benchmark", None)
     return payload
 
 
@@ -364,6 +369,14 @@ def _render_editor_panel(
     mode: str,
 ) -> None:
     st.markdown("##### 전략 편집")
+    benchmark_key = _state_key(prefix, "benchmark")
+    benchmark_pending_key = _state_key(prefix, "benchmark_pending")
+    if benchmark_pending_key in st.session_state:
+        pending_benchmark = st.session_state.pop(benchmark_pending_key)
+        if pending_benchmark:
+            st.session_state[benchmark_key] = pending_benchmark
+        else:
+            st.session_state.pop(benchmark_key, None)
     pending_key = _state_key(prefix, "draft_text_pending")
     if pending_key in st.session_state:
         st.session_state[_state_key(prefix, "draft_text")] = st.session_state.pop(pending_key)
@@ -408,7 +421,7 @@ def _render_editor_panel(
         spec = _parse_spec_text(draft_text)
         if spec is not None:
             spec = _apply_editor_controls(spec, controls, benchmark=benchmark)
-            _set_preview(prefix, _run_preview(spec, benchmark=benchmark, period=period), spec_payload=spec, controls=controls, benchmark=benchmark, version=spec.get("version"))
+            _set_preview(prefix, _run_preview(spec, benchmark=benchmark, period=period), spec_payload=spec, controls=controls, benchmark=benchmark, period=period, version=spec.get("version"))
             _set_draft_record(prefix, spec)
             st.rerun()
     if action_cols[1].button("실행", key=_state_key(prefix, "run_strategy"), width="stretch"):
@@ -417,7 +430,7 @@ def _render_editor_panel(
             spec = _apply_editor_controls(spec, controls, benchmark=benchmark)
             mode_to_run = str(controls["validation_mode"] or "single_pass")
             with st.spinner("전략 실행 중…"):
-                _set_preview(prefix, _run_strategy(spec, period=period, validation_mode=mode_to_run), spec_payload=spec, controls=controls, benchmark=benchmark, version=spec.get("version"))
+                _set_preview(prefix, _run_strategy(spec, period=period, validation_mode=mode_to_run), spec_payload=spec, controls=controls, benchmark=benchmark, period=period, version=spec.get("version"))
             _set_draft_record(prefix, spec)
             st.rerun()
     if action_cols[2].button("검증", key=_state_key(prefix, "validate_spec"), width="stretch"):
@@ -426,7 +439,7 @@ def _render_editor_panel(
             spec = _apply_editor_controls(spec, controls, benchmark=benchmark)
             validation_mode = controls["validation_mode"]
             with st.spinner("시계열 검증 중…"):
-                _set_preview(prefix, _run_strategy(spec, period=period, validation_mode=validation_mode), spec_payload=spec, controls=controls, benchmark=benchmark, version=spec.get("version"))
+                _set_preview(prefix, _run_strategy(spec, period=period, validation_mode=validation_mode), spec_payload=spec, controls=controls, benchmark=benchmark, period=period, version=spec.get("version"))
             _set_draft_record(prefix, spec)
             st.rerun()
     if action_cols[3].button("초안 저장", key=_state_key(prefix, "save_spec"), width="stretch"):
@@ -437,7 +450,7 @@ def _render_editor_panel(
             if saved:
                 _set_draft_record(prefix, saved)
                 saved_spec = _current_spec_payload(saved)
-                _set_preview(prefix, _run_preview(saved_spec, benchmark=benchmark, period=period), spec_payload=saved_spec, controls=controls, benchmark=benchmark, version=saved.get("version"))
+                _set_preview(prefix, _run_preview(saved_spec, benchmark=benchmark, period=period), spec_payload=saved_spec, controls=controls, benchmark=benchmark, period=period, version=saved.get("version"))
                 _refresh_caches()
                 st.toast("초안을 저장했습니다.")
                 st.rerun()
@@ -739,10 +752,10 @@ def _render_environment_actions(
 ) -> None:
     st.markdown("##### 환경 작업")
     draft_spec = _draft_spec_from_state(prefix, selected_record)
-    spec_id = str((selected_record or {}).get("id") or (draft_spec or {}).get("id") or "").strip()
-    bound_result = _ensure_preview(prefix, None, **_preview_context(prefix, selected_record))
-    if result is not None and bound_result is None:
-        result = None
+    spec_id = str((draft_spec or {}).get("id") or (selected_record or {}).get("id") or "").strip()
+    preview_context = _preview_context(prefix, selected_record)
+    bound_result = _ensure_preview(prefix, None, **preview_context)
+    result = bound_result
     strict_ready = _strict_validation_ready(result)
     activation = st.session_state.get(_state_key(prefix, "activation"))
     promotion = (draft_spec or {}).get("promotion") if isinstance((draft_spec or {}).get("promotion"), Mapping) else {}
@@ -790,16 +803,16 @@ def _render_environment_actions(
                     spec_id,
                     environment="live",
                     confirm_live=True,
-                    period=(result or {}).get("period"),
+                    period=preview_context["period"],
                     validation_mode=(result or {}).get("validation_mode"),
-                    version=(selected_record or {}).get("version"),
+                    version=(draft_spec or {}).get("version") or (selected_record or {}).get("version"),
                 )
             activation_result = dict(activation_result) if isinstance(activation_result, Mapping) else {"ok": False, "error": "활성화 결과 형식이 잘못되었습니다"}
         except Exception as exc:
             activation_result = {"ok": False, "error": str(exc), "activation": {"activated": False, "warnings": [str(exc)]}}
         st.session_state[_state_key(prefix, "activation")] = activation_result.get("activation") or activation_result
         if isinstance(activation_result.get("run"), Mapping):
-            _set_preview(prefix, activation_result["run"], **_preview_context(prefix, selected_record))
+            _set_preview(prefix, activation_result["run"], **preview_context)
         if activation_result.get("ok") is True:
             _refresh_caches()
             st.toast("실거래 활성화가 완료되었습니다.")
@@ -893,6 +906,7 @@ def _strict_validation_ready(result: object) -> bool:
     checks = provenance.get("checks")
     if not isinstance(checks, list) or len(checks) != len(folds):
         return False
+    check_ids: set[str] = set()
     for check in checks:
         if (
             not isinstance(check, Mapping)
@@ -900,6 +914,12 @@ def _strict_validation_ready(result: object) -> bool:
             or check.get("provenance_ok") is not True
         ):
             return False
+        check_id = _consistent_text_alias(check, ("fold", "path_id", "fold_id"))
+        if not check_id or check_id in check_ids or check_id not in fold_ids:
+            return False
+        check_ids.add(check_id)
+    if check_ids != fold_ids:
+        return False
     if mode == "cpcv":
         if aggregate.get("provenance_ok") is not True:
             return False
@@ -1230,6 +1250,13 @@ def _ensure_selected_record(
     catalog: dict[str, Any],
     selected_spec: dict[str, Any] | None,
 ) -> dict[str, Any] | None:
+    stored_draft = st.session_state.get(_state_key(prefix, "draft_record"))
+    if isinstance(stored_draft, dict):
+        normalized_draft = _normalize_record(stored_draft)
+        if normalized_draft and (
+            selected_spec is None or _records_match(normalized_draft, _normalize_record(selected_spec))
+        ):
+            return normalized_draft
     if selected_spec:
         return _normalize_record(selected_spec)
     specs = list(catalog.get("specs") or [])
@@ -1244,6 +1271,19 @@ def _ensure_selected_record(
     idx = int(st.session_state.get(_state_key(prefix, "catalog_index"), 0) or 0)
     idx = max(0, min(idx, len(specs) - 1))
     return _normalize_record(specs[idx])
+
+
+def _records_match(left: dict[str, Any] | None, right: dict[str, Any] | None) -> bool:
+    if not left or not right:
+        return False
+    left_id = str(left.get("id") or _current_spec_payload(left).get("id") or "").strip()
+    right_id = str(right.get("id") or _current_spec_payload(right).get("id") or "").strip()
+    if left_id or right_id:
+        return bool(left_id and right_id and left_id == right_id)
+    try:
+        return strategy_spec_hash(_current_spec_payload(left)) == strategy_spec_hash(_current_spec_payload(right))
+    except (TypeError, ValueError):
+        return _current_spec_payload(left) == _current_spec_payload(right)
 
 
 def _catalog_record_or_fallback(
@@ -1269,6 +1309,17 @@ def _set_draft_record(prefix: str, record: dict[str, Any] | None) -> None:
     st.session_state[_state_key(prefix, "draft_text_pending")] = _spec_to_text(spec)
     st.session_state[_state_key(prefix, "controls_pending")] = _editor_control_defaults(spec)
     st.session_state[_state_key(prefix, "draft_record")] = record
+    benchmark = _benchmark_for_payload(spec)
+    benchmark_key = _state_key(prefix, "benchmark")
+    benchmark_pending_key = _state_key(prefix, "benchmark_pending")
+    try:
+        if benchmark:
+            st.session_state[benchmark_key] = benchmark
+        else:
+            st.session_state.pop(benchmark_key, None)
+        st.session_state.pop(benchmark_pending_key, None)
+    except StreamlitAPIException:
+        st.session_state[benchmark_pending_key] = benchmark or ""
 
 
 def _set_preview(
@@ -1278,6 +1329,7 @@ def _set_preview(
     spec_payload: dict[str, Any] | None = None,
     controls: Mapping[str, Any] | None = None,
     benchmark: str | None = None,
+    period: str | None = None,
     version: object | None = None,
 ) -> None:
     if preview is None:
@@ -1287,7 +1339,7 @@ def _set_preview(
         st.session_state[_state_key(prefix, "preview")] = preview
         if spec_payload is not None and controls is not None:
             st.session_state[_state_key(prefix, "preview_binding")] = _preview_binding(
-                spec_payload, controls, benchmark=benchmark, version=version
+                spec_payload, controls, benchmark=benchmark, period=period, version=version
             )
         else:
             st.session_state.pop(_state_key(prefix, "preview_binding"), None)
@@ -1307,15 +1359,24 @@ def _ensure_preview(
     spec_payload: dict[str, Any] | None = None,
     controls: Mapping[str, Any] | None = None,
     benchmark: str | None = None,
+    period: str | None = None,
     version: object | None = None,
 ) -> dict[str, Any] | None:
     if preview is not None:
-        _set_preview(prefix, preview, spec_payload=spec_payload, controls=controls, benchmark=benchmark, version=version)
+        _set_preview(
+            prefix,
+            preview,
+            spec_payload=spec_payload,
+            controls=controls,
+            benchmark=benchmark,
+            period=period,
+            version=version,
+        )
         return preview
     stored = st.session_state.get(_state_key(prefix, "preview"))
     if stored is not None:
         if spec_payload is not None and controls is not None:
-            expected = _preview_binding(spec_payload, controls, benchmark=benchmark, version=version)
+            expected = _preview_binding(spec_payload, controls, benchmark=benchmark, period=period, version=version)
             if st.session_state.get(_state_key(prefix, "preview_binding")) != expected:
                 _set_preview(prefix, None)
                 return None
@@ -1324,18 +1385,34 @@ def _ensure_preview(
 
 
 def _preview_context(prefix: str, selected_record: dict[str, Any] | None) -> dict[str, Any]:
-    spec_payload = _current_spec_payload(selected_record)
+    selected_payload = _current_spec_payload(selected_record)
+    stored_draft = st.session_state.get(_state_key(prefix, "draft_record"))
+    pending_draft = st.session_state.get(_state_key(prefix, "draft_text_pending"))
+    if isinstance(stored_draft, dict) and pending_draft is not None:
+        spec_payload = _current_spec_payload(stored_draft)
+    else:
+        spec_payload = _draft_spec_from_state(prefix, selected_record) or selected_payload
+    selected_id = str(selected_payload.get("id") or "").strip()
+    draft_id = str(spec_payload.get("id") or "").strip()
+    if selected_id and draft_id and selected_id != draft_id:
+        spec_payload = selected_payload
     defaults = _editor_control_defaults(spec_payload)
     controls = {
         key: st.session_state.get(_state_key(prefix, key), value)
         for key, value in defaults.items()
     }
-    benchmark = st.session_state.get(_state_key(prefix, "benchmark")) or _benchmark_for_payload(spec_payload)
-    version = (selected_record or {}).get("version") or spec_payload.get("version") or 1
+    pending_benchmark_key = _state_key(prefix, "benchmark_pending")
+    if pending_benchmark_key in st.session_state:
+        benchmark = str(st.session_state.get(pending_benchmark_key) or "").strip().upper()
+    else:
+        benchmark = st.session_state.get(_state_key(prefix, "benchmark")) or _benchmark_for_payload(spec_payload)
+    period = str(st.session_state.get(_state_key(prefix, "period")) or _period_for_payload(spec_payload)).strip()
+    version = spec_payload.get("version") or (selected_record or {}).get("version") or 1
     return {
         "spec_payload": spec_payload,
         "controls": controls,
         "benchmark": benchmark,
+        "period": period,
         "version": version,
     }
 
@@ -1345,6 +1422,7 @@ def _preview_binding(
     controls: Mapping[str, Any],
     *,
     benchmark: str | None,
+    period: str | None,
     version: object | None,
 ) -> dict[str, Any]:
     spec_hash = strategy_spec_hash(spec_payload)
@@ -1357,6 +1435,7 @@ def _preview_binding(
         "spec_hash": spec_hash,
         "controls_hash": hashlib.sha256(controls_blob.encode("utf-8")).hexdigest(),
         "benchmark": str(benchmark or "").strip().upper(),
+        "period": str(period or _period_for_payload(spec_payload)).strip(),
         "version": version_value,
     }
 

@@ -383,14 +383,20 @@ strategy_studio.render_strategy_lab("cpcv", {{"strategy_studio": {{"ok": True}}}
 
 
 def test_strategy_lab_run_button_uses_public_run_contract_without_network():
+    from agent_console import strategy_studio as backend
+
+    original_backend_run = backend.run_strategy_spec
     script = f"""
 import os, sys
 sys.path.insert(0, {ROOT!r})
 import streamlit as st
 from dashboard import strategy_studio
 
+original_run = strategy_studio.views.strategy_studio.run_strategy_spec
+
 def fake_run(spec, *, period=None, validation_mode=None):
     st.session_state["test_run_mode"] = validation_mode
+    strategy_studio.views.strategy_studio.run_strategy_spec = original_run
     return {{
         "ok": True,
         "run_id": "run-test",
@@ -413,16 +419,48 @@ selected_spec = {{"id": "spec-run", "name": "RSI", "version": 1, "spec": {{
 strategy_studio.render_strategy_lab("run", {{"strategy_studio": {{"ok": True}}}}, mode="research",
     catalog={{"specs": []}}, selected_spec=selected_spec)
 """
+    try:
+        at = AppTest.from_string(script, default_timeout=30)
+        at.run()
+        assert not at.exception, str(at.exception)
+
+        run_button = next(button for button in at.button if button.key.endswith("run_strategy"))
+        run_button.click().run()
+
+        assert not at.exception, str(at.exception)
+        assert at.session_state["test_run_mode"] == "single_pass"
+        assert any(metric.value == "7" for metric in at.metric)
+    finally:
+        backend.run_strategy_spec = original_backend_run
+
+
+def test_strategy_lab_prefers_current_stored_draft_over_catalog_record():
+    script = f"""
+import os, sys
+sys.path.insert(0, {ROOT!r})
+import streamlit as st
+from dashboard import strategy_studio
+
+prefix = strategy_studio._state_prefix("draft", "research")
+catalog = {{
+    "specs": [{{"id": "spec-1", "name": "Saved", "version": 1, "spec": {{
+        "name": "Saved", "base_symbol": "QQQ"
+    }}}}]
+}}
+selected = {{"id": "spec-1", "name": "Saved", "version": 1, "spec": {{
+    "name": "Saved", "base_symbol": "QQQ"
+}}}}
+strategy_studio._set_draft_record(prefix, {{"id": "spec-1", "name": "Edited", "version": 2, "spec": {{
+    "name": "Edited", "base_symbol": "QQQ", "version": 2
+}}}})
+
+record = strategy_studio._ensure_selected_record(prefix, catalog, selected)
+assert record["spec"]["name"] == "Edited"
+assert record["version"] == 2
+"""
     at = AppTest.from_string(script, default_timeout=30)
     at.run()
     assert not at.exception, str(at.exception)
-
-    run_button = next(button for button in at.button if button.key.endswith("run_strategy"))
-    run_button.click().run()
-
-    assert not at.exception, str(at.exception)
-    assert at.session_state["test_run_mode"] == "single_pass"
-    assert any(metric.value == "7" for metric in at.metric)
 
 
 def test_strategy_editor_controls_keep_legacy_rule_specs_intact():
@@ -521,8 +559,11 @@ def test_new_full_validation_presets_declare_label_horizon():
 
 
 def test_strategy_benchmark_is_preserved_and_forwarded_to_run(monkeypatch):
+    from agent_console import strategy_studio as backend
     from agent_console import strategy_studio
     from ml.strategy_studio import StrategySpec
+
+    original_run = backend.run_strategy_spec
 
     spec = StrategySpec.from_dict({
         "name": "KOSPI benchmark",
@@ -545,8 +586,11 @@ def test_strategy_benchmark_is_preserved_and_forwarded_to_run(monkeypatch):
             "errors": [],
         }
 
-    monkeypatch.setattr(strategy_studio, "preview_strategy_spec", fake_preview)
-    result = strategy_studio.run_strategy_spec(spec.to_dict(), validation_mode="single_pass")
+    try:
+        monkeypatch.setattr(strategy_studio, "preview_strategy_spec", fake_preview)
+        result = strategy_studio.run_strategy_spec(spec.to_dict(), validation_mode="single_pass")
+    finally:
+        backend.run_strategy_spec = original_run
 
     assert received["benchmark"] == "^KS11"
     assert result["benchmark"]["symbol"] == "^KS11"
@@ -643,6 +687,76 @@ assert strategy_studio._ensure_preview(
     assert not at.exception, str(at.exception)
 
 
+def test_cached_preview_evidence_includes_selected_period():
+    script = f"""
+import os, sys
+sys.path.insert(0, {ROOT!r})
+import streamlit as st
+from dashboard import strategy_studio
+
+prefix = strategy_studio._state_prefix("period", "research")
+spec = {{"name": "Period", "base_symbol": "QQQ"}}
+controls = {{"validation_mode": "single_pass", "data_profile": "generic"}}
+strategy_studio._set_preview(
+    prefix,
+    {{"ok": True}},
+    spec_payload=spec,
+    controls=controls,
+    benchmark="QQQ",
+    period="1y",
+    version=1,
+)
+assert strategy_studio._ensure_preview(
+    prefix,
+    None,
+    spec_payload=spec,
+    controls=controls,
+    benchmark="QQQ",
+    period="1y",
+    version=1,
+) is not None
+assert strategy_studio._ensure_preview(
+    prefix,
+    None,
+    spec_payload=spec,
+    controls=controls,
+    benchmark="QQQ",
+    period="2y",
+    version=1,
+) is None
+"""
+    at = AppTest.from_string(script, default_timeout=30)
+    at.run()
+    assert not at.exception, str(at.exception)
+
+
+def test_benchmark_state_is_replaced_when_switching_strategy():
+    script = f"""
+import os, sys
+sys.path.insert(0, {ROOT!r})
+import streamlit as st
+from dashboard import strategy_studio
+
+prefix = strategy_studio._state_prefix("benchmark", "research")
+benchmark_key = strategy_studio._state_key(prefix, "benchmark")
+st.session_state[benchmark_key] = "^KS11"
+strategy_studio._set_draft_record(prefix, {{
+    "id": "us-1", "name": "US", "version": 1,
+    "spec": {{"name": "US", "base_symbol": "QQQ"}},
+}})
+assert st.session_state[benchmark_key] == "QQQ"
+
+strategy_studio._set_draft_record(prefix, {{
+    "id": "kr-1", "name": "KR", "version": 1,
+    "spec": {{"name": "KR", "market": "kr", "base_symbol": "005930.KS", "benchmark": "^KS11"}},
+}})
+assert st.session_state[benchmark_key] == "^KS11"
+"""
+    at = AppTest.from_string(script, default_timeout=30)
+    at.run()
+    assert not at.exception, str(at.exception)
+
+
 def test_strict_cpcv_gate_requires_nested_chronology_proof():
     from dashboard import strategy_studio
 
@@ -673,6 +787,37 @@ def test_strict_cpcv_gate_requires_nested_chronology_proof():
         "promotion": {"accepted": True, "activation_safe": True, "preview": False, "failed_checks": []},
         "data_quality": {"status": "fresh", "ok": True},
         "provenance": {"ok": True, "checks": [{"fold": "fold-1", "ok": True, "provenance_ok": True}]},
+        "errors": [],
+    }
+
+    assert strategy_studio._strict_validation_ready(result) is False
+
+
+def test_strict_validation_gate_requires_provenance_checks_for_actual_fold_ids():
+    from dashboard import strategy_studio
+
+    result = {
+        "ok": True,
+        "validation_mode": "purged_walk_forward",
+        "validation": {
+            "validation_mode": "purged_walk_forward",
+            "promotion_eligible": True,
+            "aggregate": {"fold_count": 1},
+            "folds": [{
+                "path_id": "fold-1",
+                "train_max": "2026-01-31T00:00:00+00:00",
+                "test_min": "2026-02-01T00:00:00+00:00",
+                "future_training": False,
+                "no_future_training": True,
+                "train_before_test": True,
+                "train_max_before_test_min": True,
+                "valid": True,
+                "proof_valid": True,
+            }],
+        },
+        "promotion": {"accepted": True, "activation_safe": True, "preview": False, "failed_checks": []},
+        "data_quality": {"status": "fresh", "ok": True},
+        "provenance": {"ok": True, "checks": [{"fold": "different-fold", "ok": True, "provenance_ok": True}]},
         "errors": [],
     }
 
