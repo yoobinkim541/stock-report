@@ -129,7 +129,13 @@ class ExecutionConfig:
             key in values for key in ("fees_bps", "slippage_bps", "spread_bps")
         ):
             values["fees_bps"] = values["cost_bps"]
-        for key in ("partial_fill", "allow_short", "cancel_unfilled"):
+        for key in (
+            "partial_fill",
+            "allow_short",
+            "cancel_unfilled",
+            "pause_on_stale",
+            "allow_exits_on_pause",
+        ):
             if key in values:
                 values[key] = _boolean(values[key], key)
         allowed = {
@@ -266,18 +272,7 @@ def execute_intents(
             continue
         health = _health_for_event(config, normalized, intent.symbol, intent.decision_at)
         if config.pause_on_stale and _health_blocks_order(health, intent.side, config):
-            fills.append(_event(
-                intent,
-                run_id=run_id,
-                status="cancelled",
-                reason="strategy_paused",
-                submitted_at=submitted_at,
-                metadata={
-                    **dict(intent.metadata or {}),
-                    "diagnostic": "strategy_paused",
-                    "profile_health": health,
-                },
-            ))
+            fills.append(_strategy_paused_event(intent, config, health))
             continue
         if frame is None:
             status = "cancelled" if config.cancel_unfilled else "rejected"
@@ -292,6 +287,10 @@ def execute_intents(
             fills.append(_event(intent, run_id=run_id, status=status, reason="no_eligible_bar", submitted_at=submitted_at))
             continue
         bar_time, row = eligible
+        fill_health = _health_for_event(config, normalized, intent.symbol, bar_time)
+        if config.pause_on_stale and _health_blocks_order(fill_health, intent.side, config):
+            fills.append(_strategy_paused_event(intent, config, fill_health, accepted_at=_timestamp_text(bar_time)))
+            continue
         fills.append(_execute_intent_on_bar(intent, row, bar_time, config, used_capacity))
     return fills
 
@@ -592,6 +591,27 @@ def _event(
     )
 
 
+def _strategy_paused_event(
+    intent: OrderIntent,
+    config: ExecutionConfig,
+    health: Mapping[str, Any] | None,
+    *,
+    accepted_at: str | None = None,
+) -> FillEvent:
+    run_id = intent.run_id or f"{config.run_id}-{_stable_intent_id(intent)}"
+    metadata = dict(intent.metadata or {})
+    metadata.update({"diagnostic": "strategy_paused", "profile_health": health})
+    return _event(
+        intent,
+        run_id=run_id,
+        status="cancelled",
+        reason="strategy_paused",
+        submitted_at=_timestamp_text(intent.submitted_at or intent.decision_at),
+        accepted_at=accepted_at,
+        metadata=metadata,
+    )
+
+
 def _health_mapping(value: object) -> dict[str, Any] | None:
     if value is None:
         return None
@@ -606,14 +626,18 @@ def _health_mapping(value: object) -> dict[str, Any] | None:
     status = str(payload.get("status") or "").strip().lower()
     reason = payload.get("reason")
     quality = str(payload.get("quality") or "").strip().lower()
-    if status and reason is not None:
-        return payload
+    if status == "fresh":
+        return {**payload, "reason": str(reason or "fresh")}
+    if status in {"available", "complete", "ok"}:
+        return {**payload, "status": "fresh", "reason": str(reason or "fresh")}
+    if status:
+        return {**payload, "reason": str(reason or "source_unavailable")}
     if quality in {"missing", "incomplete", "invalid", "degraded"}:
         return {**payload, "status": "pause", "reason": "incomplete_bars"}
-    if status in {"available", "complete", "ok"}:
+    if quality in {"fresh", "complete", "ok"}:
         return {**payload, "status": "fresh", "reason": "fresh"}
-    if status in {"degraded", "missing", "unavailable", "disabled", "stale"}:
-        return {**payload, "status": "pause", "reason": str(reason or "source_unavailable")}
+    if quality:
+        return {**payload, "status": "pause", "reason": "source_unavailable"}
     if payload.get("fresh") is False:
         return {**payload, "status": "pause", "reason": str(payload.get("reason") or "stale_quote")}
     return None
@@ -774,6 +798,13 @@ def _execute_target_weights(
             pending[symbol] = max(0.0, pending.get(symbol, 0.0) - intent.quantity)
             frame = bars[symbol]
             row = frame.loc[bar_time]
+            health = _health_for_event(config, bars, symbol, bar_time)
+            if config.pause_on_stale and _health_blocks_order(health, intent.side, config):
+                diagnostic = _strategy_pause_diagnostic(config, intent, health, bar_time)
+                diagnostics.append(diagnostic)
+                warnings.append(f"strategy paused for {symbol}: {diagnostic['reason']}")
+                fills.append(_strategy_paused_event(intent, config, health, accepted_at=_timestamp_text(bar_time)))
+                continue
             fill = _execute_intent_on_bar(intent, row, bar_time, config, used_capacity)
             fills.append(fill)
             if fill.status in {"partial", "filled"} and fill.filled_qty > 0.0:
@@ -868,16 +899,13 @@ def _execute_target_weights(
                     "buy" if delta > 0.0 else "sell",
                     config,
                 ):
-                    diagnostic = {
-                        "type": "strategy_paused",
-                        "profile": config.profile,
-                        "symbol": symbol,
-                        "at": _timestamp_text(event_time),
-                        "reason": str((health or {}).get("reason") or "stale_market_data"),
-                        "status": str((health or {}).get("status") or "pause"),
-                        "age_seconds": (health or {}).get("age_seconds"),
-                        "action": "new_entries_blocked" if delta > 0.0 else "exits_blocked",
-                    }
+                    diagnostic = _strategy_pause_diagnostic(
+                        config,
+                        health=health,
+                        event_time=event_time,
+                        symbol=symbol,
+                        side="buy" if delta > 0.0 else "sell",
+                    )
                     diagnostics.append(diagnostic)
                     warnings.append(f"strategy paused for {symbol}: {diagnostic['reason']}")
                     continue
@@ -912,6 +940,29 @@ def _execute_target_weights(
             submitted_at=submitted_at,
         ))
     return intents, fills, warnings, diagnostics
+
+
+def _strategy_pause_diagnostic(
+    config: ExecutionConfig,
+    intent: OrderIntent | None = None,
+    health: Mapping[str, Any] | None = None,
+    event_time: object | None = None,
+    symbol: str | None = None,
+    side: str | None = None,
+) -> dict[str, Any]:
+    order_side = side or (intent.side if intent is not None else "")
+    order_symbol = symbol or (intent.symbol if intent is not None else "")
+    at = event_time if event_time is not None else (intent.decision_at if intent is not None else None)
+    return {
+        "type": "strategy_paused",
+        "profile": config.profile,
+        "symbol": str(order_symbol).upper().strip(),
+        "at": _timestamp_text(at),
+        "reason": str((health or {}).get("reason") or "stale_market_data"),
+        "status": str((health or {}).get("status") or "pause"),
+        "age_seconds": (health or {}).get("age_seconds"),
+        "action": "new_entries_blocked" if order_side == "buy" else "exits_blocked",
+    }
 
 
 def _eligible_bar_position(frame: pd.DataFrame, decision_at: object, latency_bars: int) -> int | None:

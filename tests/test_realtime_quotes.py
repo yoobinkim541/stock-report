@@ -114,6 +114,22 @@ def test_heartbeat_age(live):
     assert age is not None and 3 < age < 8
 
 
+def test_invalid_heartbeat_is_not_treated_as_fresh(monkeypatch, tmp_path):
+    monkeypatch.setenv("REALTIME_ENABLED", "true")
+    path = tmp_path / "invalid-heartbeat.json"
+    path.write_text(
+        json.dumps({
+            "__heartbeat__": {"ts": "nan"},
+            "AAPL": {"price": 201.5, "ts": time.time()},
+        }),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(rq, "CACHE_PATH", str(path))
+
+    assert rq.source_health(now=time.time())["kis_ws"]["status"] == "pause"
+    assert rq.get_price("AAPL") is None
+
+
 def test_rest_cache_prefers_redis_when_available(monkeypatch, tmp_path):
     now = time.time()
     monkeypatch.setenv("REALTIME_ENABLED", "false")

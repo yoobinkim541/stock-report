@@ -542,3 +542,63 @@ def test_all_failed_quote_sources_pause_new_entries():
 
     assert fill.status == "cancelled"
     assert fill.reason == "strategy_paused"
+
+
+def test_execution_config_parses_pause_policy_booleans_from_saved_payload():
+    config = ExecutionConfig.from_dict({
+        "pause_on_stale": "false",
+        "allow_exits_on_pause": "false",
+    })
+
+    assert config.pause_on_stale is False
+    assert config.allow_exits_on_pause is False
+
+
+def test_profile_health_rejects_nonfinite_freshness_threshold():
+    with pytest.raises(ValueError, match="max_age_seconds"):
+        profile_health(
+            "kr_intraday",
+            last_bar_at="2026-08-28T10:00:00+09:00",
+            now="2026-08-28T10:05:30+09:00",
+            max_age_seconds=float("nan"),
+        )
+
+
+def test_pending_entry_is_paused_if_health_turns_stale_before_fill():
+    bars = {"AAPL": _bars([
+        {"open": 100.0, "high": 101.0, "low": 99.0, "close": 100.0, "volume": 100.0},
+        {"open": 100.0, "high": 101.0, "low": 99.0, "close": 100.0, "volume": 100.0},
+    ])}
+    index = bars["AAPL"].index
+    config = ExecutionConfig(
+        profile_health={
+            "timeline": {
+                index[0].isoformat(): {"status": "fresh", "reason": "fresh"},
+                index[1].isoformat(): {"status": "pause", "reason": "stale_intraday_bar"},
+            },
+        },
+        latency_bars=1,
+    )
+    result = run_execution_backtest(
+        pd.DataFrame({"AAPL": [1.0]}, index=index[:1]),
+        bars,
+        config,
+    )
+
+    assert result.fills[0].reason == "strategy_paused"
+    assert result.fills[0].status == "cancelled"
+    assert result.diagnostics[0]["type"] == "strategy_paused"
+
+
+def test_explicit_pause_without_reason_remains_conservative():
+    bars = {"AAPL": _bars([
+        {"open": 100.0, "high": 101.0, "low": 99.0, "close": 100.0, "volume": 100.0},
+        {"open": 100.0, "high": 101.0, "low": 99.0, "close": 100.0, "volume": 100.0},
+    ])}
+    config = ExecutionConfig(profile_health={"status": "pause"}, latency_bars=1)
+    intent = OrderIntent("AAPL", "buy", 10, bars["AAPL"].index[0])
+
+    fill = execute_intents([intent], bars, config)[0]
+
+    assert fill.status == "cancelled"
+    assert fill.reason == "strategy_paused"

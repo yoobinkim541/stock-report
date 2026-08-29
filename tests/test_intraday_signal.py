@@ -260,3 +260,30 @@ def test_microstructure_health_uses_source_timestamps_for_stale_gate():
     assert snapshot["profile_health"]["status"] == "pause"
     assert snapshot["profile_health"]["reason"] == "stale_intraday_bar"
     assert snapshot["data_snapshot"]["data_stamps"][0]["timestamp"].startswith("2026-08-28T01:00:00+00:00")
+
+
+def test_microstructure_health_survives_existing_snapshot_store_round_trip(tmp_path):
+    from agent_console import market_snapshot_store
+
+    payload = {
+        "as_of": "2026-08-28T01:00:00+00:00",
+        "profile": "kr_intraday",
+        "session": "regular",
+        "quality": "incomplete",
+        "profile_health": {
+            "status": "pause",
+            "reason": "stale_intraday_bar",
+            "age_seconds": 330.0,
+        },
+        "data_snapshot": {"quality": "incomplete", "snapshot_id": "snapshot-1"},
+        "field_status": {"indices": {"ok": False, "error": "missing"}},
+    }
+    store = market_snapshot_store.FileSnapshotStore(tmp_path / "micro.json")
+
+    assert market_snapshot_store.write_market_microstructure(payload, store=store)
+    loaded = store.read()
+
+    assert loaded["profile"] == "kr_intraday"
+    assert loaded["quality"] == "incomplete"
+    assert loaded["profile_health"]["reason"] == "stale_intraday_bar"
+    assert loaded["data_snapshot"]["snapshot_id"] == "snapshot-1"

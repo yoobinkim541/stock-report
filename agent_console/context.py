@@ -165,6 +165,12 @@ def strategy_profile_health(snapshot: dict | None = None, *, now: str | None = N
     result: dict[str, dict] = {}
 
     micro = saved.get("kr_intraday") if isinstance(saved.get("kr_intraday"), dict) else None
+    if micro is None and (
+        isinstance(saved.get("profile_health"), dict)
+        or str(saved.get("profile") or "").strip().lower() == "kr_intraday"
+        or isinstance(saved.get("field_status"), dict)
+    ):
+        micro = saved
     if micro is None:
         try:
             from . import market_snapshot_store

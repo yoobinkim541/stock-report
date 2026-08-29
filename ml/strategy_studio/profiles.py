@@ -9,6 +9,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime, time, timezone
+from math import isfinite
 from typing import TYPE_CHECKING, Any, Mapping
 from zoneinfo import ZoneInfo
 
@@ -28,7 +29,14 @@ class ProfileHealth:
         object.__setattr__(self, "status", str(self.status or "unknown").strip().lower())
         object.__setattr__(self, "reason", str(self.reason or "unknown").strip())
         if self.age_seconds is not None:
-            age = float(self.age_seconds)
+            if isinstance(self.age_seconds, bool):
+                raise ValueError("age_seconds must be a finite non-negative number")
+            try:
+                age = float(self.age_seconds)
+            except (TypeError, ValueError) as exc:
+                raise ValueError("age_seconds must be a finite non-negative number") from exc
+            if not isfinite(age):
+                raise ValueError("age_seconds must be a finite non-negative number")
             if age < 0.0:
                 age = 0.0
             object.__setattr__(self, "age_seconds", age)
@@ -157,12 +165,14 @@ def profile_health(
     key = str(profile or "").strip().lower()
     if key not in _PROFILE_DEFAULTS:
         raise ValueError(f"unsupported execution profile: {key}")
+    if isinstance(max_age_seconds, bool):
+        raise ValueError("max_age_seconds must be a finite non-negative number")
     try:
         limit = float(max_age_seconds)
     except (TypeError, ValueError) as exc:
         raise ValueError("max_age_seconds must be numeric") from exc
-    if limit < 0.0:
-        raise ValueError("max_age_seconds must be >= 0")
+    if not isfinite(limit) or limit < 0.0:
+        raise ValueError("max_age_seconds must be a finite non-negative number")
 
     current = _parse_timestamp(now, "now")
     last = None

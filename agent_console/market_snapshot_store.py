@@ -25,7 +25,7 @@ def normalize_market_microstructure(payload: dict, now: float | None = None) -> 
     payload = dict(payload or {})
     ts = time.time() if now is None else float(now)
     max_age = int(payload.get("max_age_s") or os.getenv("KR_MARKET_MICROSTRUCTURE_STALE_S", DEFAULT_MAX_AGE_S))
-    return {
+    normalized = {
         "schema": "kr-market-microstructure.v1",
         "ts": ts,
         "max_age_s": max_age,
@@ -40,6 +40,16 @@ def normalize_market_microstructure(payload: dict, now: float | None = None) -> 
         "errors": list(payload.get("errors") or []),
         "unavailable": list(payload.get("unavailable") or []),
     }
+    # Keep operational metadata in the existing store so a saved snapshot can
+    # reproduce the same strategy pause decision in the AI console.
+    for key in ("profile", "session", "quality", "raw_ref"):
+        if key in payload and payload[key] not in (None, ""):
+            normalized[key] = payload[key]
+    for key in ("profile_health", "data_snapshot", "source_health"):
+        value = payload.get(key)
+        if isinstance(value, dict):
+            normalized[key] = dict(value)
+    return normalized
 
 
 class FileSnapshotStore:

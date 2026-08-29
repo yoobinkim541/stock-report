@@ -111,6 +111,31 @@ def test_context_pack_exposes_replayable_strategy_profile_health(monkeypatch, tm
     assert pack["strategy_profile_health"]["kr_intraday"]["reason"] == "stale_intraday_bar"
 
 
+def test_strategy_profile_health_replays_direct_microstructure_snapshot(monkeypatch):
+    from agent_console import context
+
+    monkeypatch.setattr(
+        context,
+        "_latest_intraday_bar_timestamp",
+        lambda: (_ for _ in ()).throw(AssertionError("direct snapshot should be used")),
+    )
+
+    health = context.strategy_profile_health(
+        snapshot={
+            "profile": "kr_intraday",
+            "profile_health": {
+                "status": "pause",
+                "reason": "stale_intraday_bar",
+                "age_seconds": 330.0,
+            },
+        },
+        now="2026-08-28T10:05:30+09:00",
+    )
+
+    assert health["kr_intraday"]["status"] == "pause"
+    assert health["kr_intraday"]["reason"] == "stale_intraday_bar"
+
+
 def test_context_pack_exposes_prediction_market_summary(monkeypatch, tmp_path):
     _isolate(monkeypatch, tmp_path)
 

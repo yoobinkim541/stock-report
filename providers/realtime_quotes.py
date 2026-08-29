@@ -18,6 +18,7 @@ from __future__ import annotations
 import json
 import os
 import time
+from math import isfinite
 
 CACHE_PATH = os.path.expanduser("~/.cache/kis_realtime_quotes.json")
 REST_CACHE_PATH = os.path.expanduser("~/.cache/rest_quotes.json")
@@ -97,10 +98,13 @@ def _is_fresh(ts, now: float, max_age_s: float) -> bool:
     """ts 가 now 기준 max_age_s 이내인가. ts None/형식오류/미래과다 → False."""
     try:
         ts = float(ts)
+        max_age_s = float(max_age_s)
     except (TypeError, ValueError):
         return False
+    if not isfinite(ts) or not isfinite(max_age_s) or max_age_s < 0.0:
+        return False
     age = now - ts
-    return -1.0 <= age <= max_age_s     # 약간의 시계 skew(미래 1s) 허용, 그 외 미래값 거부
+    return isfinite(age) and -1.0 <= age <= max_age_s  # 약간의 시계 skew(미래 1s) 허용
 
 
 # ── 캐시 읽기 (예외 무발) ─────────────────────────────────────────────────────
@@ -128,9 +132,10 @@ def heartbeat_age(cache: dict | None = None) -> float | None:
     cache = _read_cache() if cache is None else cache
     hb = cache.get(HEARTBEAT_KEY) or {}
     try:
-        return time.time() - float(hb.get("ts"))
+        age = time.time() - float(hb.get("ts"))
     except (TypeError, ValueError):
         return None
+    return age if isfinite(age) else None
 
 
 def _live_cache() -> dict | None:
@@ -234,6 +239,12 @@ def quote_health(
     """Return replayable health for one quote without changing quote reads."""
 
     current = time.time() if now is None else float(now)
+    try:
+        max_age = float(max_age_s)
+    except (TypeError, ValueError):
+        return {"status": "pause", "reason": "invalid_quote_age", "age_seconds": None}
+    if not isfinite(max_age) or max_age < 0.0:
+        return {"status": "pause", "reason": "invalid_quote_age", "age_seconds": None}
     name = str(symbol or "").strip().upper()
     if not name:
         return {"status": "pause", "reason": "missing_quote_symbol", "age_seconds": None}
@@ -265,7 +276,7 @@ def quote_health(
             invalid_entries.append((source, "future_quote_timestamp"))
             continue
         age = max(0.0, age)
-        if age > float(max_age_s):
+        if age > max_age:
             invalid_entries.append((source, "stale_quote"))
             continue
         candidates.append((source, {**entry, "age_seconds": age}))
@@ -319,7 +330,9 @@ def source_health(*, now: float | None = None) -> dict[str, dict[str, object]]:
         except (TypeError, ValueError):
             result[name] = {"status": "pause", "reason": "missing_heartbeat", "age_seconds": None}
             continue
-        if age < -1.0:
+        if not isfinite(age):
+            result[name] = {"status": "pause", "reason": "invalid_heartbeat", "age_seconds": None}
+        elif age < -1.0:
             result[name] = {"status": "pause", "reason": "future_heartbeat", "age_seconds": 0.0}
         elif age > max_age:
             result[name] = {"status": "pause", "reason": "stale_heartbeat", "age_seconds": age}
