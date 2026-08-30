@@ -1833,16 +1833,41 @@ def _load_prices(spec: StrategySpec, period: str | None = None) -> pd.DataFrame:
     symbols = [str(sym).upper().strip() for sym in (spec.universe or {}).get("symbols") or [] if str(sym).strip()]
     if not symbols and spec.base_symbol:
         symbols = [spec.base_symbol]
+    benchmark = str(spec.benchmark or "").strip().upper()
+    if benchmark and benchmark not in symbols:
+        symbols.append(benchmark)
     period = period or _period_for_timeframe(spec.timeframe)
+    supported_profiles = {"kr_intraday", "global_swing", "extended_us"}
+    profile = str(spec.data_profile or "").strip().lower()
+    if profile not in supported_profiles:
+        execution_profile = str(spec.execution_profile or "").strip().lower()
+        profile = execution_profile if execution_profile in supported_profiles else "global_swing"
+    execution_payload = spec.execution if isinstance(spec.execution, Mapping) else {}
+    metadata = spec.metadata if isinstance(spec.metadata, Mapping) else {}
+    session = str(
+        execution_payload.get("session")
+        or metadata.get("session")
+        or "regular"
+    ).strip().lower() or "regular"
     frames: dict[str, pd.Series] = {}
     data_snapshots: dict[str, Any] = {}
     source_coverages: list[Mapping[str, Any]] = []
     provenance: dict[str, Any] = {}
+    from providers.market_data import load_profile_bars
+
     for symbol in symbols:
         if symbol == "CASH":
             continue
         try:
-            frame = cached.ohlc(symbol, period=period)
+            # The chart cache is display-oriented: it may fill a stale last close.
+            # Backtests must use the profile loader and retain missing observations.
+            frame = load_profile_bars(
+                symbol,
+                profile=profile,
+                timeframe=spec.timeframe,
+                session=session,
+                period=period,
+            )
         except Exception:
             frame = pd.DataFrame()
         if frame is None or frame.empty:
@@ -1865,11 +1890,16 @@ def _load_prices(spec: StrategySpec, period: str | None = None) -> pd.DataFrame:
                 else:
                     provenance.setdefault("data", {}).update(candidate)
         normalized = frame.copy()
+        try:
+            normalized.index = pd.to_datetime(normalized.index, utc=True)
+            normalized = normalized[~normalized.index.duplicated(keep="last")].sort_index(kind="mergesort")
+        except (TypeError, ValueError):
+            continue
         normalized.columns = [str(col).strip().lower().replace(" ", "_") for col in normalized.columns]
         for field in normalized.columns:
             series = pd.to_numeric(normalized[field], errors="coerce")
             frames[f"{symbol}__{field}"] = series
-    result = pd.DataFrame(frames).sort_index().ffill().dropna(how="all")
+    result = pd.DataFrame(frames).sort_index().dropna(how="all")
     if data_snapshots:
         result.attrs["data_snapshots"] = data_snapshots
     if source_coverages:

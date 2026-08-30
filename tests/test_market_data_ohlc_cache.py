@@ -72,6 +72,24 @@ def test_load_profile_bars_reuses_existing_intraday_fallback(monkeypatch):
     assert loaded.attrs["data_snapshot"].data_stamps[0].source == "store"
 
 
+def test_intraday_profile_never_uses_daily_cache_before_fallback(monkeypatch):
+    from providers import intraday_bars
+
+    daily_cache = _frame()
+    intraday = _frame().iloc[:2]
+    monkeypatch.setattr(md, "load_cached_ohlc", lambda *args, **kwargs: daily_cache)
+    monkeypatch.setattr(
+        intraday_bars,
+        "load_bars_with_fallback",
+        lambda *args, **kwargs: (intraday, "store"),
+    )
+
+    loaded = md.load_profile_bars("005930", profile="kr_intraday", timeframe="5m")
+
+    assert len(loaded) == len(intraday)
+    assert loaded.attrs["data_snapshot"].data_stamps[0].timeframe == "5m"
+
+
 def test_load_profile_bars_preserves_existing_snapshot_metadata(monkeypatch):
     from ml.data_pipeline import normalize_data_snapshot
 

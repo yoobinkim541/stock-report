@@ -67,6 +67,39 @@ def test_compile_strategy_reads_single_underscore_field_symbol_columns():
     assert list(compiled.prices["AAPL"]) == [100.0 + i for i in range(10)]
 
 
+def test_console_price_loader_uses_profile_data_without_filling_gaps(monkeypatch):
+    """백테스트가 표시용 cache/ffill을 우회하고 벤치마크를 함께 로드하는지 검증."""
+    from agent_console import strategy_studio as console_studio
+
+    calls = []
+
+    def fake_load_profile_bars(symbol, **kwargs):
+        calls.append((symbol, kwargs))
+        index = pd.date_range("2026-01-01", periods=3, freq="D", tz="UTC")
+        close = [100.0, float("nan"), 102.0] if symbol == "QQQ" else [200.0, 201.0, 202.0]
+        return pd.DataFrame({"Open": close, "High": close, "Low": close, "Close": close, "Volume": [1000.0] * 3}, index=index)
+
+    monkeypatch.setattr("providers.market_data.load_profile_bars", fake_load_profile_bars)
+    monkeypatch.setattr(console_studio.cached, "ohlc", lambda *args, **kwargs: pytest.fail("display cache must not be used"))
+    spec = StrategySpec.from_dict({
+        "name": "profile-loader",
+        "market": "us",
+        "timeframe": "1d",
+        "base_symbol": "QQQ",
+        "benchmark": "SPY",
+        "universe": {"type": "list", "symbols": ["QQQ"]},
+        "data_profile": "global_swing",
+        "execution_profile": "global_swing",
+    })
+
+    prices = console_studio._load_prices(spec, period="1y")
+
+    assert {symbol for symbol, _kwargs in calls} == {"QQQ", "SPY"}
+    assert all(kwargs["profile"] == "global_swing" for _symbol, kwargs in calls)
+    assert "SPY__close" in prices
+    assert pd.isna(prices.loc[pd.Timestamp("2026-01-02", tz="UTC"), "QQQ__close"])
+
+
 def test_builtin_rsi_cash_preset_runs_and_reports_trades():
     spec = builtin_strategy_presets()["rsi_cash"]
     run = run_strategy_backtest(spec, _prices(), benchmark="QQQ")

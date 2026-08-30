@@ -1145,12 +1145,14 @@ def load_profile_bars(
     key = str(profile or "global_swing").strip().lower()
     data = frame
     source = None
-    if data is None:
+    interval = str(timeframe or "").strip().lower()
+    intraday_intervals = {"1m", "5m", "15m", "1h"}
+    # The OHLC parquet cache is a daily display cache.  It must not satisfy an
+    # intraday request, otherwise the intraday fallback is silently skipped.
+    if data is None and interval not in intraday_intervals:
         data = load_cached_ohlc(symbol, period)
         if data is not None and not getattr(data, "empty", True):
             source = "yfinance"
-    interval = str(timeframe or "").strip().lower()
-    intraday_intervals = {"1m", "5m", "15m", "1h"}
     if data is None or getattr(data, "empty", True):
         if key in {"kr_intraday", "global_swing", "extended_us"} and interval in intraday_intervals:
             try:
