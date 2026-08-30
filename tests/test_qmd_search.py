@@ -5,9 +5,9 @@ from pathlib import Path
 
 
 class _Result:
-    def __init__(self, stdout: str, returncode: int = 0):
+    def __init__(self, stdout: str, returncode: int = 0, stderr: str = ""):
         self.stdout = stdout
-        self.stderr = ""
+        self.stderr = stderr
         self.returncode = returncode
 
 
@@ -92,6 +92,13 @@ def test_qmd_export_pages_writes_markdown_mirror(monkeypatch, tmp_path):
                 "body": "손실한도 1% 기준에서는 현금 완충이 필요합니다.",
                 "tags": ["risk", "portfolio"],
                 "updated_at": "2026-07-23T00:00:00+00:00",
+                "evidence_ids": ["evidence-1"],
+                "merged_into": "target-card",
+                "merge_history": [{
+                    "event_id": "merge-1",
+                    "source_ids": ["old-card"],
+                    "occurred_at": "2026-07-23T00:00:00+00:00",
+                }],
             }
         ]
     )
@@ -103,6 +110,8 @@ def test_qmd_export_pages_writes_markdown_mirror(monkeypatch, tmp_path):
     assert "# 손실한도와 레버리지" in text
     assert "surface: portfolio" in text
     assert "손실한도 1% 기준" in text
+    assert "## Merge Archive" in text
+    assert "merge-1" in text
 
 
 def test_qmd_search_can_use_query_command_when_configured(monkeypatch):
@@ -162,7 +171,7 @@ def test_qmd_sync_exports_pages_and_updates_index_once(monkeypatch, tmp_path):
     result = qmd_search.sync_pages([
         {"id": "one", "title": "One", "body": "first"},
         {"id": "two", "title": "Two", "body": "second"},
-    ], runner=fake_runner)
+    ], complete=True, runner=fake_runner)
 
     assert result["ok"] is True
     assert result["exported_count"] == 2
@@ -184,6 +193,49 @@ def test_qmd_sync_rejects_empty_snapshot_without_deleting_existing_docs(monkeypa
     assert result["ok"] is False
     assert result["skipped"] == "empty_snapshot"
     assert existing.exists()
+
+
+def test_qmd_partial_sync_does_not_remove_existing_docs(monkeypatch, tmp_path):
+    wiki_dir = tmp_path / "wiki-md"
+    wiki_dir.mkdir()
+    existing = wiki_dir / "existing.md"
+    existing.write_text("keep", encoding="utf-8")
+    monkeypatch.setenv("AGENT_CONSOLE_QMD_WIKI_DIR", str(wiki_dir))
+    from agent_console import qmd_search
+
+    result = qmd_search.sync_pages(
+        [{"id": "new", "title": "New", "body": "new"}],
+        complete=False,
+        runner=lambda *args, **kwargs: _Result("updated"),
+    )
+
+    assert result["ok"] is True
+    assert result["skipped"] == "partial_snapshot"
+    assert result["removed_count"] == 0
+    assert existing.exists()
+
+
+def test_qmd_complete_sync_restores_removed_docs_when_update_fails(monkeypatch, tmp_path):
+    wiki_dir = tmp_path / "wiki-md"
+    wiki_dir.mkdir()
+    stale = wiki_dir / "stale.md"
+    stale.write_text("keep this source", encoding="utf-8")
+    monkeypatch.setenv("AGENT_CONSOLE_QMD_ENABLED", "1")
+    monkeypatch.setenv("AGENT_CONSOLE_QMD_BIN", "qmd")
+    monkeypatch.setenv("AGENT_CONSOLE_QMD_WIKI_DIR", str(wiki_dir))
+
+    from agent_console import qmd_search
+
+    monkeypatch.setattr(qmd_search.shutil, "which", lambda _binary: "/usr/bin/qmd")
+    result = qmd_search.sync_pages(
+        [{"id": "new", "title": "New", "body": "new"}],
+        complete=True,
+        runner=lambda *args, **kwargs: _Result("failed", returncode=1, stderr="index failed"),
+    )
+
+    assert result["ok"] is False
+    assert result["removed_count"] == 0
+    assert stale.read_text(encoding="utf-8") == "keep this source"
 
 
 def test_qmd_health_executes_query_probe_and_detects_stale_export(monkeypatch, tmp_path):
@@ -209,6 +261,8 @@ def test_qmd_health_executes_query_probe_and_detects_stale_export(monkeypatch, t
 
     assert health["query_ok"] is True
     assert health["index_fresh"] is False
+    assert health["mirror_complete"] is False
+    assert health["stale_file_count"] == 1
     assert health["latest_page_at"] == "2099-01-01T00:00:00+00:00"
 
 

@@ -126,10 +126,15 @@ def answer(question: str, surface: str = "market", *, async_postprocess: bool = 
     pack["_evidence_query_id"] = evidence_usage.query_id_for(question, surface)
     provided_evidence_ids = _provided_context_evidence_ids(pack, wiki_pages)
     for _wp in wiki_pages:
-        try:
-            wiki.track_page_usage(_wp.get("id"), question)
-        except Exception:
-            pass
+        if async_postprocess:
+            threading.Thread(
+                target=_track_wiki_page_usage,
+                args=(_wp.get("id"), question),
+                name="agent-console-wiki-usage",
+                daemon=True,
+            ).start()
+        else:
+            _track_wiki_page_usage(_wp.get("id"), question)
     _reset_llm_engine()
     try:
         response = _compose_answer(question, pack, history=history)
@@ -194,6 +199,13 @@ def answer(question: str, surface: str = "market", *, async_postprocess: bool = 
 
 
 _LAST_POSTPROCESS_THREAD: threading.Thread | None = None
+
+
+def _track_wiki_page_usage(page_id: str | None, question: str) -> None:
+    try:
+        wiki.track_page_usage(page_id, question)
+    except Exception:
+        pass
 
 
 def _wiki_autocurate_enabled() -> bool:

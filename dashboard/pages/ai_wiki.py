@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from html import escape
+
 import pandas as pd
 import streamlit as st
 
@@ -20,7 +22,7 @@ def _safe_wiki_stats() -> dict:
             pass
     pages = []
     try:
-        pages = wiki.list_pages(query="", surface="all", status="all", limit=400)
+        pages = wiki.list_pages(query="", surface="all", status="all", limit=10000)
     except Exception:
         pages = []
     status_counts = {"draft": 0, "reviewed": 0, "stable": 0, "archived": 0}
@@ -68,7 +70,7 @@ def render():
     cols[3].metric("최근", (latest.get("title", "—") or "—")[:20])
 
     try:
-        pages_all = wiki.list_pages(query="", surface="all", status="all", limit=400)
+        pages_all = wiki.list_pages(query="", surface="all", status="all", limit=10000)
     except Exception:
         pages_all = []
     try:
@@ -219,14 +221,19 @@ def _select_page(pages: list[dict]) -> dict | None:
 
 
 def _page_card(page: dict):
+    title = escape(str(page.get("title") or "위키 페이지"))
+    status = escape(str(page.get("status") or "draft"))
+    surface = escape(str(page.get("surface") or "wiki"))
+    kind = escape(str(page.get("kind") or "note"))
+    summary = escape(str(page.get("summary") or ""))
     st.markdown(
         f"""
         <div style="border:1px solid rgba(148,163,184,.18);border-radius:8px;background:rgba(15,23,42,.28);padding:12px 13px;margin:10px 0 14px;">
           <div>
-            <span style="display:block;color:rgba(148,163,184,.82);font-size:.74rem;margin-bottom:2px;">{page.get('surface', 'wiki')} · {page.get('kind', 'note')} · {page.get('status', 'draft')}</span>
-            <b style="display:block;color:rgba(241,245,249,.98);font-size:1.02rem;margin-bottom:8px;">{page.get('title', '위키 페이지')}</b>
+            <span style="display:block;color:rgba(148,163,184,.82);font-size:.74rem;margin-bottom:2px;">{surface} · {kind} · {status}</span>
+            <b style="display:block;color:rgba(241,245,249,.98);font-size:1.02rem;margin-bottom:8px;">{title}</b>
           </div>
-          <p style="margin:0 0 10px;color:rgba(226,232,240,.94);line-height:1.5;">{page.get('summary', '')}</p>
+          <p style="margin:0 0 10px;color:rgba(226,232,240,.94);line-height:1.5;">{summary}</p>
         </div>
         """,
         unsafe_allow_html=True,
@@ -234,6 +241,15 @@ def _page_card(page: dict):
     if page.get("body"):
         st.markdown("##### 본문")
         st.write(page["body"])
+    if page.get("merge_history") or page.get("merged_into"):
+        st.markdown("##### 병합/아카이브 기록")
+        if page.get("merged_into"):
+            st.caption(f"이 문서는 {page['merged_into']}에 병합되어 보관 중입니다.")
+        for event in page.get("merge_history") or []:
+            sources = ", ".join(event.get("source_titles") or event.get("source_ids") or [])
+            st.caption(f"{event.get('occurred_at', '')} · {event.get('action', 'merge')} · 원본: {sources or 'unknown'}")
+            if event.get("reason"):
+                st.write(event["reason"])
     split_children = wiki.split_children_for_page(page)
     if split_children:
         st.markdown("##### 분할된 세부 문서")

@@ -12,6 +12,8 @@ from typing import Any
 import numpy as np
 import plotly.graph_objects as go
 
+from agent_console import wiki as core_wiki
+
 
 STATUS_COLORS = {
     "draft": "#60a5fa",
@@ -132,20 +134,10 @@ def _status_from_tags(tags: list[str]) -> str:
 
 
 def _has_non_conversation_source_refs(refs: Iterable[object]) -> bool:
-    for raw in refs or []:
-        ref = _clean(raw, 240).lower()
-        if not ref:
-            continue
-        if ref.startswith("conversation:") or ref.startswith("chat:"):
-            continue
-        return True
-    return False
+    return core_wiki.has_non_conversation_source_refs(refs)
 
 
 def _verification_status(page: dict[str, Any]) -> str:
-    explicit = _clean(page.get("verification_status") or "", 40)
-    if explicit:
-        return explicit
     return "source-backed" if _has_non_conversation_source_refs(page.get("source_refs") or []) else "unverified"
 
 

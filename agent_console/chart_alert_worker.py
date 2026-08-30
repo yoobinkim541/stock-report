@@ -4,6 +4,7 @@ import argparse
 import inspect
 import json
 import os
+from pathlib import Path
 from typing import Any, Callable
 
 import pandas as pd
@@ -16,6 +17,23 @@ from dashboard import chart_conditions
 LoadBarsFn = Callable[..., Any]
 
 _LOCK_TARGET = os.path.expanduser("~/.cache/stock-report/chart_alert_worker")
+
+
+def _lock_target() -> str:
+    """읽기 전용 홈 디렉터리에서도 워커 중복 실행 락을 확보한다."""
+    default_target = os.path.expanduser("~/.cache/stock-report/chart_alert_worker")
+    # 기존 호출부/테스트가 모듈 상수를 명시한 경우 환경변수보다 우선한다.
+    if _LOCK_TARGET != default_target:
+        return _LOCK_TARGET
+    configured = os.getenv("AGENT_CONSOLE_CHART_ALERT_LOCK", "").strip()
+    if configured:
+        return os.path.expanduser(configured)
+    runtime_dir = os.getenv("AGENT_CONSOLE_RUNTIME_DIR", "").strip()
+    if not runtime_dir:
+        runtime_dir = os.getenv("AGENT_CONSOLE_SHARED_MEMORY_DIR", "").strip()
+    if runtime_dir:
+        return str(Path(runtime_dir).expanduser() / "chart_alert_worker")
+    return _LOCK_TARGET
 
 
 def run_chart_alert_cycle(
@@ -34,7 +52,7 @@ def run_chart_alert_cycle(
     이번 호출은 통째로 스킵(룰 조회도 시작 안 함).
     """
     try:
-        with safe_io.file_write_lock(_LOCK_TARGET, timeout=0):
+        with safe_io.file_write_lock(_lock_target(), timeout=0):
             return _run_chart_alert_cycle_locked(
                 workspace_id=workspace_id, symbols=symbols, notify=notify,
                 load_bars_fn=load_bars_fn, send_fn=send_fn, limit=limit,

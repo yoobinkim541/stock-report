@@ -4,6 +4,8 @@ import hashlib
 import json
 import os
 import re
+import threading
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Iterable
@@ -14,6 +16,12 @@ import safe_io
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 SCHEMA_VERSION = "finance-agent-gui.shared-memory.v1"
 DEFAULT_PROVIDER = "codex-cli"
+_SUMMARY_REFRESH_LOCK = threading.Lock()
+_SUMMARY_REFRESH_TIMER: threading.Timer | None = None
+_SUMMARY_REFRESH_RUNNING = False
+_SUMMARY_REFRESH_PENDING = False
+# 요청 직후의 다음 대화가 외부 이벤트 파일 스캔과 GIL을 경쟁하지 않게 한다.
+_SUMMARY_REFRESH_DELAY = 2.0
 
 
 def shared_memory_dir() -> Path:
@@ -59,6 +67,39 @@ def ensure_store() -> None:
 
 def _now() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="seconds")
+
+
+def _run_context_memory_summary() -> None:
+    global _SUMMARY_REFRESH_TIMER, _SUMMARY_REFRESH_RUNNING, _SUMMARY_REFRESH_PENDING
+    with _SUMMARY_REFRESH_LOCK:
+        _SUMMARY_REFRESH_TIMER = None
+        if _SUMMARY_REFRESH_RUNNING:
+            _SUMMARY_REFRESH_PENDING = True
+            return
+        _SUMMARY_REFRESH_RUNNING = True
+    try:
+        refresh_context_memory_summary()
+    finally:
+        with _SUMMARY_REFRESH_LOCK:
+            _SUMMARY_REFRESH_RUNNING = False
+            pending = _SUMMARY_REFRESH_PENDING
+            _SUMMARY_REFRESH_PENDING = False
+        if pending:
+            _schedule_context_memory_summary()
+
+
+def _schedule_context_memory_summary() -> None:
+    """비싼 외부 메모리 재구성을 한 번에 예약하고 쓰기 중 누락을 방지한다."""
+    global _SUMMARY_REFRESH_TIMER, _SUMMARY_REFRESH_PENDING
+    with _SUMMARY_REFRESH_LOCK:
+        if _SUMMARY_REFRESH_RUNNING:
+            _SUMMARY_REFRESH_PENDING = True
+            return
+        if _SUMMARY_REFRESH_TIMER and _SUMMARY_REFRESH_TIMER.is_alive():
+            return
+        _SUMMARY_REFRESH_TIMER = threading.Timer(_SUMMARY_REFRESH_DELAY, _run_context_memory_summary)
+        _SUMMARY_REFRESH_TIMER.daemon = True
+        _SUMMARY_REFRESH_TIMER.start()
 
 
 def _clean_text(value, limit: int = 1800) -> str:
@@ -145,7 +186,7 @@ def append_record(payload: dict) -> dict:
         with _paths()["events"].open("a", encoding="utf-8") as f:
             f.write(json.dumps(record, ensure_ascii=False, sort_keys=True) + "\n")
         _write_index_locked()
-    refresh_context_memory_summary()   # 락 밖 — 다른 파일을 쓰고 오래 걸린다
+    _schedule_context_memory_summary()
     return record
 
 
@@ -181,7 +222,7 @@ def append_chat_exchange(question: str, answer: str, surface: str = "market",
     # lib 사용 불가 시에만 콘솔 자체 포맷 폴백 — 두 포맷이 섞이는 것 방지.
     if not _record_chat_via_lib(question, answer, surface):
         _append_user_notebook(record, question, answer)
-    refresh_context_memory_summary()
+    _schedule_context_memory_summary()
     return record
 
 
@@ -300,7 +341,7 @@ def delete_record(record_id: str) -> bool:
             return False
         _write_jsonl_locked(kept)
         _write_index_locked()
-    refresh_context_memory_summary()
+    _schedule_context_memory_summary()
     return True
 
 
@@ -321,7 +362,7 @@ def upsert_record(record: dict) -> dict:
         kept.append(normalized)
         _write_jsonl_locked(kept)
         _write_index_locked()
-    refresh_context_memory_summary()
+    _schedule_context_memory_summary()
     return normalized
 
 
@@ -341,7 +382,7 @@ def batch_upsert_delete(*, upserts: list[dict], deletes: list[str]) -> dict:
         rows.extend(normalize_record(r) for r in (upserts or []))
         _write_jsonl_locked(rows)
         _write_index_locked()
-    refresh_context_memory_summary()
+    _schedule_context_memory_summary()
     return {"ok": True, "upserted": len(upserts or []), "deleted": len(deletes or [])}
 
 
@@ -469,7 +510,7 @@ def sync_external_layer_from_pack(pack: dict) -> None:
             ),
             encoding="utf-8",
         )
-        refresh_context_memory_summary()
+        _schedule_context_memory_summary()
 
 
 def _strip_world_memory_suggestions(text: str) -> str:
@@ -495,7 +536,7 @@ def refresh_context_memory_summary() -> str:
     return _legacy_refresh_summary()
 
 
-def _legacy_refresh_summary() -> str:
+def _legacy_summary_text() -> str:
     ensure_store()
     paths = _paths()
     user_layer = _read_bounded(paths["user_notebook"], 4500)
@@ -518,7 +559,12 @@ def _legacy_refresh_summary() -> str:
         for row in recent:
             tags = ", ".join(row.get("tags") or [])
             lines.append(f"- {row.get('createdAt', '')} · {row.get('title', '')} · {tags}")
-    summary = "\n".join(lines).strip() + "\n"
+    return "\n".join(lines).strip() + "\n"
+
+
+def _legacy_refresh_summary() -> str:
+    summary = _legacy_summary_text()
+    paths = _paths()
     paths["summary"].write_text(summary, encoding="utf-8")
     return summary
 
@@ -538,7 +584,12 @@ def _read_bounded(path: Path, limit: int) -> str:
 def build_context_packet(payload: dict | None = None) -> dict:
     payload = payload or {}
     ensure_store()
-    context_memory_summary = refresh_context_memory_summary()
+    # 요청 경로에서 lib/agent_memory.refresh_memory_summary(force=True)를 호출하면
+    # 외부 소스 캐시 전체를 다시 읽어 응답이 수십 초 지연될 수 있다. 저장 경로가
+    # 예약한 비동기 갱신 결과를 우선 사용하고, 최초 실행만 빠른 로컬 스냅샷으로 채운다.
+    context_memory_summary = _read_bounded(_paths()["summary"], 12000)
+    if not context_memory_summary:
+        context_memory_summary = _legacy_summary_text()
     query = _clean_text(payload.get("query") or payload.get("prompt") or payload.get("userIntent") or "", 1200)
     screen = _clean_text(payload.get("screen") or (payload.get("contextPacket") or {}).get("screen") or "", 80)
     provider = _clean_text(payload.get("provider") or (payload.get("contextPacket") or {}).get("provider")

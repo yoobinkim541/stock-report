@@ -113,6 +113,33 @@ def test_distill_one_creates_payload_linked_to_source(monkeypatch, tmp_path):
     assert f"wiki:{digest['id']}" in payload["source_refs"]
 
 
+def test_distill_one_inherits_source_evidence_and_uses_stable_id(monkeypatch, tmp_path):
+    _isolate(monkeypatch, tmp_path)
+    from agent_console import wiki
+    from reports import wiki_distillation as wd
+
+    digest = wiki.upsert_page({
+        "title": "수집 소스 위키: AI 수요", "summary": "요약", "body": "본문",
+        "surface": "market", "kind": "source_digest", "status": "draft",
+        "source_refs": ["https://example.com/source"],
+        "evidence_ids": ["e1", "e2"],
+        "conflicting_evidence_ids": ["e3"],
+        "staleness_policy": "refresh_after_12h",
+        "answer_hints": ["교차확인"],
+    })
+    response = '{"action":"create","kind":"risk","title":"AI 수요 리스크","summary":"s","body":"b","status":"draft"}'
+
+    first = wd._distill_one(wiki.get_page(digest["id"]), lambda prompt: response)
+    second = wd._distill_one(wiki.get_page(digest["id"]), lambda prompt: response)
+
+    assert first["id"] == second["id"]
+    assert first["source_refs"] == ["https://example.com/source", f"wiki:{digest['id']}"]
+    assert first["evidence_ids"] == ["e1", "e2"]
+    assert first["conflicting_evidence_ids"] == ["e3"]
+    assert first["staleness_policy"] == "refresh_after_12h"
+    assert first["answer_hints"] == ["교차확인"]
+
+
 def test_distill_one_returns_none_on_skip():
     from reports import wiki_distillation as wd
 
@@ -205,3 +232,28 @@ def test_run_skips_already_linked_digests(monkeypatch, tmp_path):
 
     assert result["candidates_considered"] == 0
     assert calls == []
+
+
+def test_distillation_notification_is_coalesced_during_cooldown(monkeypatch, tmp_path):
+    from reports import wiki_distillation as wd
+
+    state_path = tmp_path / "wiki-distillation-notify.json"
+    monkeypatch.setenv("WIKI_DISTILLATION_NOTIFY_STATE_FILE", str(state_path))
+    monkeypatch.setenv("WIKI_DISTILLATION_NOTIFY_COOLDOWN_HOURS", "24")
+    monkeypatch.setattr(wd, "_notification_now", lambda: "2026-08-30T00:00:00+00:00")
+    sent = []
+    monkeypatch.setattr(wd.notify, "send_telegram", lambda text, **kwargs: sent.append(text) or True)
+
+    first = [{"id": "p1", "kind": "risk", "status": "draft", "title": "첫 리스크"}]
+    second = [{"id": "p2", "kind": "playbook", "status": "draft", "title": "두 번째 플레이북"}]
+
+    assert wd._notify_created_pages(first) is True
+    assert wd._notify_created_pages(second) is False
+    assert len(sent) == 1
+    assert "첫 리스크" in sent[0]
+    assert "두 번째 플레이북" not in sent[0]
+
+    monkeypatch.setattr(wd, "_notification_now", lambda: "2026-08-31T00:00:01+00:00")
+    assert wd._notify_created_pages([]) is True
+    assert len(sent) == 2
+    assert "두 번째 플레이북" in sent[1]

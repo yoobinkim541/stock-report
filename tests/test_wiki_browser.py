@@ -129,7 +129,7 @@ def test_aliases_are_available():
 def test_build_wiki_health_model_counts_trust_and_search_state():
     health = wiki_browser.build_wiki_health_model(
         [
-            {"id": "a", "verification_status": "source-backed", "openQuestions": ["확인할 것"]},
+            {"id": "a", "verification_status": "source-backed", "source_refs": ["source:saveticker:health"], "openQuestions": ["확인할 것"]},
             {"id": "b", "verification_status": "unverified", "trust_warnings": ["원문 출처 없음"]},
         ],
         search_health={"provider": "qmd", "qmd": {"file_count": 7, "installed": True}, "fallback_available": True},
@@ -212,3 +212,45 @@ def test_promotion_guardrail_blocks_promoted_conversation_only_pages():
     assert blocked["downgraded_to"] == "draft"
     assert "source ref" in blocked["message"]
     assert allowed["allowed"] is True
+
+
+def test_internal_wiki_refs_are_not_treated_as_verified_source():
+    page = {
+        "title": "병합된 판단 카드",
+        "summary": "내부 문서 링크만 가진 카드",
+        "body": "본문",
+        "source_refs": ["wiki:source-topic-ai", "<local-path>"],
+        "status": "stable",
+        "verification_status": "source-backed",
+    }
+
+    normalized = wiki_browser.build_selected_evidence_model(page)
+
+    assert normalized["verification_status"] == "unverified"
+    assert wiki_browser.promotion_guardrail("stable", page["source_refs"])["allowed"] is False
+
+
+def test_selected_evidence_keeps_merge_archive_history():
+    page = {
+        "id": "merged-card",
+        "title": "통합된 카드",
+        "summary": "두 문서를 통합한 결과",
+        "body": "통합 본문",
+        "source_refs": ["https://example.com/source"],
+        "merge_history": [{
+            "event_id": "merge-001",
+            "target_id": "merged-card",
+            "source_ids": ["old-card"],
+            "source_titles": ["이전 카드"],
+            "reason": "중복 판단 통합",
+            "synthesis": "공통 규칙으로 정리",
+            "occurred_at": "2026-08-30T00:00:00+00:00",
+        }],
+        "merged_into": "",
+        "merge_event_id": "merge-001",
+    }
+
+    model = wiki_browser.build_selected_evidence_model(page)
+
+    assert model["merge_event_id"] == "merge-001"
+    assert model["merge_history"][0]["source_ids"] == ["old-card"]

@@ -15,8 +15,9 @@ SHELL=/bin/bash
 PATH=/home/ubuntu/.hermes/node/bin:/home/ubuntu/.local/bin:/usr/local/bin:/usr/bin:/bin
 
 # ── 상시 리포트·전략 (매일) ──────────────────────────────────────────────────
-# 일일 투자 리포트 생성·발송 (investment_report + barbell_strategy + portfolio_tracker)
-0 23 * * * cd /home/ubuntu/projects/stock-report && bash scripts/deliver_investment_report.sh >> /tmp/deliver_investment_report.log 2>&1   # 23:00 UTC = 08:00 KST
+# 일일 투자 리포트는 Hermes `stock-investment-report`가 단일 소유한다.
+# 아래 OS cron 중복 라인은 과거에 같은 리포트를 두 번 발송했으므로 비활성화했다.
+# 0 23 * * * cd /home/ubuntu/projects/stock-report && bash scripts/deliver_investment_report.sh >> /tmp/deliver_investment_report.log 2>&1   # 23:00 UTC = 08:00 KST
 # 집수리클라쓰 네이버 SA 광고 일일 성과·개선 제안 리포트 (KST 전일 기준)
 10 18 * * * cd /home/ubuntu/projects/jipsuri-class && set -a && . ./.env && if [ -f ./.env.local ]; then . ./.env.local; fi && set +a && flock -n /tmp/jipsuri-sa-report.lock npm run report:naver-sa >> /tmp/jipsuri-sa-report.log 2>&1   # 18:10 UTC = 03:10 KST
 # 시장 위험 보고서 생성·발송 (cross-asset risk flash + deep dive)

@@ -54,6 +54,23 @@ def test_storage_memory_and_scenario(monkeypatch, tmp_path):
     assert storage.list_scenarios()[0]["rules"]["max_loss_pct"] == 8
 
 
+def test_shared_memory_writes_defer_expensive_summary_refresh(monkeypatch, tmp_path):
+    _isolate(monkeypatch, tmp_path)
+    from agent_console import shared_memory
+
+    scheduled = []
+    monkeypatch.setattr(shared_memory, "_schedule_context_memory_summary", lambda: scheduled.append(True), raising=False)
+    monkeypatch.setattr(
+        shared_memory,
+        "refresh_context_memory_summary",
+        lambda: (_ for _ in ()).throw(AssertionError("write path must not synchronously rebuild the external memory layer")),
+    )
+
+    shared_memory.upsert_record({"id": "wiki-write", "title": "빠른 저장", "tags": ["wiki"]})
+
+    assert scheduled == [True]
+
+
 def test_storage_conversation_filters_by_surface(monkeypatch, tmp_path):
     _isolate(monkeypatch, tmp_path)
 
@@ -295,6 +312,24 @@ def test_shared_memory_context_contract(monkeypatch, tmp_path):
     assert packet["memories"][0]["title"].startswith("나는 레버리지는")
     assert "[컨텍스트 메모리]" in section
     assert "레버리지" in section
+
+
+def test_context_packet_does_not_refresh_expensive_summary_synchronously(monkeypatch, tmp_path):
+    _isolate(monkeypatch, tmp_path)
+
+    from agent_console import shared_memory
+
+    monkeypatch.setattr(
+        shared_memory,
+        "refresh_context_memory_summary",
+        lambda: (_ for _ in ()).throw(AssertionError("context reads must use the cached snapshot")),
+    )
+
+    shared_memory.append_chat_exchange("레버리지 손실한도", "손실한도 안에서만 사용", "portfolio")
+    packet = shared_memory.build_context_packet({"query": "레버리지"})
+
+    assert packet["ok"] is True
+    assert "레버리지" in packet["contextMemorySummary"]
 
 
 def test_wiki_capture_and_context_section(monkeypatch, tmp_path):
@@ -622,6 +657,55 @@ def test_wiki_lint_skips_missing_cross_ref_when_linked(monkeypatch, tmp_path):
     assert "missing_cross_ref" not in codes
 
 
+def test_wiki_lint_does_not_explode_on_shared_placeholder_ref(monkeypatch, tmp_path):
+    """shared_memory 의 로컬 경로 리댁션 자리표시자("<local-path>")를 진짜 공유 출처로
+    취급해 그룹핑하면 그걸 공유하는 모든 페이지 쌍마다 missing_cross_ref 를 만든다.
+    실측(2026-08-30): 라이브 위키에서 367개 페이지가 이 자리표시자를 공유해 린트
+    이슈가 67,432개(거의 다 이 조합)로 폭증 — 헬스체크 LLM 프롬프트·lint.md 무의미해짐."""
+    _isolate(monkeypatch, tmp_path)
+
+    from agent_console import wiki
+
+    pages = [
+        {
+            "id": f"placeholder-{i}", "title": f"플레이스홀더 {i}", "status": "draft",
+            "verification_status": "unverified", "source_refs": ["<local-path>"],
+            "surface": "market", "kind": "note", "tags": ["wiki"],
+            "links": [], "backlinks": [],
+        }
+        for i in range(50)
+    ]
+
+    result = wiki.lint_pages(pages)
+
+    cross_ref_issues = [issue for issue in result["issues"] if issue["code"] == "missing_cross_ref"]
+    assert not cross_ref_issues, f"자리표시자 공유로 {len(cross_ref_issues)}건의 무의미한 교차링크 제안 생성됨"
+
+
+def test_wiki_lint_caps_cross_ref_group_size(monkeypatch, tmp_path):
+    """진짜 출처라도 그룹이 지나치게 크면(실질적 병합 제안 가치 없음·O(n²) 폭증 위험)
+    pairwise 제안을 통째로 스킵해야 한다 — 자리표시자 필터와 별개의 일반 안전장치."""
+    _isolate(monkeypatch, tmp_path)
+
+    from agent_console import wiki
+
+    pages = [
+        {
+            "id": f"big-group-{i}", "title": f"큰 그룹 페이지 {i}", "status": "draft",
+            "verification_status": "unverified",
+            "source_refs": ["https://example.com/shared-article"],
+            "surface": "market", "kind": "note", "tags": ["wiki"],
+            "links": [], "backlinks": [],
+        }
+        for i in range(40)
+    ]
+
+    result = wiki.lint_pages(pages)
+
+    cross_ref_issues = [issue for issue in result["issues"] if issue["code"] == "missing_cross_ref"]
+    assert not cross_ref_issues, f"40개짜리 그룹인데 캡 없이 {len(cross_ref_issues)}건 생성됨"
+
+
 def test_wiki_search_health_reports_qmd_or_fallback(monkeypatch, tmp_path):
     _isolate(monkeypatch, tmp_path)
 
@@ -699,6 +783,176 @@ def test_wiki_context_section_includes_search_and_trust_metadata(monkeypatch, tm
     assert "score=0.93" in section
     assert "검증: source-backed" in section
     assert "출처: source:saveticker:qmd-meta" in section
+
+
+def test_wiki_internal_refs_are_not_treated_as_verified_source(monkeypatch, tmp_path):
+    _isolate(monkeypatch, tmp_path)
+
+    from agent_console import wiki
+
+    assert wiki.verification_status_for(["conversation:abc", "wiki:source-ticker-nvda"]) == "unverified"
+    assert wiki.verification_status_for(["<local-path>"]) == "unverified"
+    assert wiki.verification_status_for(["source:saveticker:abc"]) == "source-backed"
+
+
+def test_wiki_normalizes_untrusted_shapes_and_redacts_secret_like_values(monkeypatch, tmp_path):
+    _isolate(monkeypatch, tmp_path)
+
+    from agent_console import wiki
+
+    page = wiki.upsert_page({
+        "title": "입력 경계 점검",
+        "summary": "token=summary-secret",
+        "body": '본문 api_key=body-secret {"password": "json-secret"}',
+        "surface": "market",
+        "kind": "note",
+        "status": "draft",
+        "tags": "risk",
+        "links": "related-page",
+        "source_refs": "https://example.com/report?token=url-secret",
+        "messages": "잘못된 배열",
+        "confidence": "nan",
+        "useCount": "not-a-number",
+    })
+
+    assert "summary-secret" not in page["summary"]
+    assert "body-secret" not in page["body"]
+    assert "json-secret" not in page["body"]
+    assert "url-secret" not in page["source_refs"][0]
+    assert "risk" in page["tags"]
+    assert page["links"] == ["related-page"]
+    assert page["messages"] == []
+    assert page["confidence"] == 0.5
+    assert page["useCount"] == 0
+
+
+def test_merge_pages_archives_sources_and_preserves_metadata(monkeypatch, tmp_path):
+    _isolate(monkeypatch, tmp_path)
+
+    from agent_console import wiki
+
+    target = wiki.upsert_page({
+        "title": "NVDA 판단",
+        "summary": "target",
+        "body": "target body",
+        "surface": "market",
+        "kind": "playbook",
+        "status": "draft",
+        "source_refs": ["source:saveticker:target"],
+        "evidence_ids": ["e-target"],
+        "conflicting_evidence_ids": ["e-conflict-target"],
+        "staleness_policy": "refresh_after_12h",
+        "answer_hints": ["target hint"],
+    })
+    source = wiki.upsert_page({
+        "title": "NVDA 판단 중복",
+        "summary": "source",
+        "body": "source body",
+        "surface": "market",
+        "kind": "playbook",
+        "status": "draft",
+        "source_refs": ["https://example.com/source"],
+        "evidence_ids": ["e-source"],
+        "conflicting_evidence_ids": ["e-conflict-source"],
+        "staleness_policy": "refresh_after_24h",
+        "answer_hints": ["source hint"],
+    })
+
+    result = wiki._merge_pages(
+        [source["id"]], target["id"], "합성 근거", reason="중복 판단 병합"
+    )
+
+    assert result["action"] == "merge"
+    assert result["archived"] == [source["id"]]
+    assert result["deleted"] == []
+    archived = wiki.get_page(source["id"])
+    merged = wiki.get_page(target["id"])
+    assert archived["status"] == "archived"
+    assert target["id"] in archived["links"]
+    assert f"merged_into:{target['id']}" in archived["tags"]
+    assert "source body" in archived["body"]
+    assert {"e-target", "e-source"} <= set(merged["evidence_ids"])
+    assert {"e-conflict-target", "e-conflict-source"} <= set(merged["conflicting_evidence_ids"])
+    assert merged["staleness_policy"] == "refresh_after_12h"
+    assert {"target hint", "source hint"} <= set(merged["answer_hints"])
+    assert merged["merge_history"]
+    assert merged["merge_history"][-1]["source_ids"] == [source["id"]]
+    wiki.rebuild_artifacts()
+    log_text = (wiki.wiki_artifacts_dir() / "log.md").read_text(encoding="utf-8")
+    assert result["merge_event_id"] in log_text
+    assert source["title"] in log_text
+
+
+def test_merge_pages_rejects_surface_mismatch(monkeypatch, tmp_path):
+    _isolate(monkeypatch, tmp_path)
+
+    from agent_console import wiki
+
+    target = wiki.upsert_page({
+        "title": "시장 메모", "summary": "t", "body": "t", "surface": "market",
+        "kind": "note", "status": "draft", "source_refs": [],
+    })
+    source = wiki.upsert_page({
+        "title": "포트폴리오 메모", "summary": "s", "body": "s", "surface": "portfolio",
+        "kind": "note", "status": "draft", "source_refs": [],
+    })
+
+    assert wiki._merge_pages([source["id"]], target["id"], "cross surface") is None
+    assert wiki.get_page(source["id"])["status"] == "draft"
+
+
+def test_auto_curate_merge_rejects_cross_surface_pages(monkeypatch, tmp_path):
+    _isolate(monkeypatch, tmp_path)
+
+    from agent_console import wiki
+
+    target = wiki.upsert_page({
+        "title": "시장 판단", "summary": "t", "body": "t", "surface": "market",
+        "kind": "note", "status": "draft", "source_refs": [],
+    })
+    source = wiki.upsert_page({
+        "title": "포트폴리오 판단", "summary": "s", "body": "s", "surface": "portfolio",
+        "kind": "note", "status": "draft", "source_refs": [],
+    })
+
+    result = wiki.auto_curate_from_chat(
+        "두 판단을 같은 기준으로 합쳐줘",
+        "중복 내용을 정리했습니다. 규칙과 기준을 합칩니다.\n- surface를 검증합니다.\n- 출처와 예외를 확인합니다.\n- 병합 뒤 원문과 메타데이터를 보존합니다.\n이 판단은 재사용 가능한 위키 기준으로 저장합니다.",
+        surface="market",
+        pack={"focus": []},
+        history=[],
+        llm=lambda prompt: (
+            '{"action":"merge","target_page_id":"' + target["id"] + '",'
+            '"source_page_ids":["' + source["id"] + '"],"body":"합성"}'
+        ),
+    )
+
+    assert result["ok"] is False
+    assert result["action"] == "skipped_injection_guard"
+    assert wiki.get_page(source["id"])["status"] == "draft"
+
+
+def test_parse_curation_plan_rejects_string_array_fields():
+    from agent_console import wiki
+
+    plan = wiki._parse_curation_plan(
+        '{"action":"merge","source_page_ids":"source-1","tags":"risk"}'
+    )
+
+    assert plan["source_page_ids"] == []
+    assert plan["tags"] == []
+
+
+def test_parse_curation_plan_extracts_one_valid_json_object_without_greedy_brace_match():
+    from agent_console import wiki
+
+    plan = wiki._parse_curation_plan(
+        '로그 {"not_action":"ignore"} 결과 '
+        '{"action":"create","title":"유효한 카드","body":"본문","kind":"note"}'
+    )
+
+    assert plan["action"] == "create"
+    assert plan["title"] == "유효한 카드"
 
 
 def test_wiki_index_md_shows_link_marker(monkeypatch, tmp_path):
@@ -1506,6 +1760,10 @@ def test_agent_answer_async_postprocess_does_not_block_on_wiki(monkeypatch):
 
     from agent_console import agent, context
 
+    # 이 latency 단위 테스트는 외부 qmd 프로세스 시작 비용이 아니라
+    # postprocess 분리를 검증한다.
+    monkeypatch.setenv("AGENT_CONSOLE_QMD_ENABLED", "0")
+
     monkeypatch.setattr(
         context,
         "context_pack",
@@ -1545,6 +1803,33 @@ def test_agent_answer_async_postprocess_does_not_block_on_wiki(monkeypatch):
     assert started.wait(timeout=1)
     release.set()
     agent._LAST_POSTPROCESS_THREAD.join(timeout=1)
+
+
+def test_agent_answer_async_tracks_wiki_usage_off_request_thread(monkeypatch):
+    import threading
+
+    from agent_console import agent, context
+
+    monkeypatch.setattr(
+        context,
+        "context_pack",
+        lambda surface: {
+            "ok": True, "surface": surface, "sources": {"events": [], "source_counts": [], "symbol_counts": []},
+            "reports": [], "ml_activity": [], "portfolio": {"holdings": []}, "paper": {},
+            "models": {}, "memory": [], "focus": [],
+        },
+    )
+    usage_thread = []
+    monkeypatch.setattr(agent.wiki, "list_pages", lambda **_kwargs: [{"id": "wiki-1"}])
+    monkeypatch.setattr(agent.wiki, "track_page_usage", lambda *_args: usage_thread.append(threading.current_thread().name))
+    monkeypatch.setattr(agent, "_compose_answer", lambda *args, **kwargs: "빠른 답변")
+    monkeypatch.setattr(agent, "_postprocess_chat", lambda *args, **kwargs: {"wiki_autocurate": "queued"})
+
+    result = agent.answer("사용량 추적 테스트", "market", async_postprocess=True)
+
+    assert result["ok"] is True
+    assert usage_thread
+    assert all(name != threading.current_thread().name for name in usage_thread)
 
 
 def test_agent_trading_logic_question_uses_logic_report():
@@ -3199,7 +3484,35 @@ def test_wiki_auto_curate_llm_delete_without_target_id_is_noop(monkeypatch, tmp_
     assert result is None
 
 
-def test_merge_pages_combines_sources_and_deletes_them(monkeypatch, tmp_path):
+def test_wiki_auto_curate_cannot_delete_source_backed_candidate_without_explicit_target(monkeypatch, tmp_path):
+    _isolate(monkeypatch, tmp_path)
+
+    from agent_console import wiki
+
+    existing = wiki.upsert_page({
+        "title": "검증된 시장 메모",
+        "summary": "공식 출처 기반 메모",
+        "body": "원문을 보존해야 하는 문서입니다.",
+        "surface": "market",
+        "kind": "note",
+        "status": "draft",
+        "source_refs": ["source:saveticker:verified"],
+    })
+
+    result = wiki.auto_curate_from_chat(
+        "위키 페이지 삭제 기준을 정리해줘. 오래된 메모는 지워도 될까?",
+        "네, 아래 기준에 맞으면 삭제합니다.\n- 30일 이상 갱신 안 됨\n- 최신 리포트와 모순\n- 중복 내용\n검증 결과 이 페이지는 삭제 대상입니다.",
+        surface="market",
+        llm=lambda _prompt: '{"action":"delete","target_id":"","reason":"stale"}',
+        pack={"focus": []},
+        history=[],
+    )
+
+    assert result["action"] == "skipped_injection_guard"
+    assert wiki.get_page(existing["id"])["status"] == "draft"
+
+
+def test_merge_pages_combines_sources_and_archives_them(monkeypatch, tmp_path):
     _isolate(monkeypatch, tmp_path)
 
     from agent_console import wiki
@@ -3227,9 +3540,10 @@ def test_merge_pages_combines_sources_and_deletes_them(monkeypatch, tmp_path):
 
     assert result["action"] == "merge"
     assert result["target"] == target["id"]
-    assert result["deleted"] == [source["id"]]
+    assert result["archived"] == [source["id"]]
+    assert result["deleted"] == []
 
-    assert wiki.get_page(source["id"]) is None
+    assert wiki.get_page(source["id"])["status"] == "archived"
     merged = wiki.get_page(target["id"])
     assert "데이터센터 매출" in merged["body"]
     assert "두 메모는 같은 NVDA Q2 실적을 다룬다" in merged["body"]
@@ -3294,7 +3608,11 @@ def test_wiki_upsert_page_auto_splits_overlong_body(monkeypatch, tmp_path):
         "kind": "playbook",
         "status": "reviewed",
         "tags": ["wiki", "split"],
-        "source_refs": ["conversation:long"],
+        "source_refs": ["https://example.com/long"],
+        "evidence_ids": ["e-long"],
+        "conflicting_evidence_ids": ["e-conflict"],
+        "staleness_policy": "refresh_after_12h",
+        "answer_hints": ["본문 근거를 유지합니다."],
     })
 
     split_into = [tag.split(":", 1)[1] for tag in saved["tags"] if str(tag).startswith("split_into:")]
@@ -3302,6 +3620,8 @@ def test_wiki_upsert_page_auto_splits_overlong_body(monkeypatch, tmp_path):
     assert saved["links"] == split_into
     assert "[END_MARKER]" not in saved["body"]
     assert "세부 문서" in saved["body"] or "분리" in saved["body"]
+    assert saved["evidence_ids"] == ["e-long"]
+    assert saved["conflicting_evidence_ids"] == ["e-conflict"]
 
     child_bodies = []
     for child_id in split_into:
@@ -3309,6 +3629,8 @@ def test_wiki_upsert_page_auto_splits_overlong_body(monkeypatch, tmp_path):
         assert child is not None
         assert f"split_from:{saved['id']}" in child["tags"]
         assert saved["id"] in child["links"]
+        assert child["evidence_ids"] == ["e-long"]
+        assert child["conflicting_evidence_ids"] == ["e-conflict"]
         child_bodies.append(child["body"])
 
     assert any("[END_MARKER]" in body_text for body_text in child_bodies)
@@ -3361,7 +3683,10 @@ def test_wiki_auto_curate_llm_merge_action_merges_pages(monkeypatch, tmp_path):
     assert result["ok"] is True
     assert result["action"] == "merge"
     assert result["target"] == target["id"]
-    assert wiki.get_page(source["id"]) is None
+    archived_source = wiki.get_page(source["id"])
+    assert archived_source is not None
+    assert archived_source["status"] == "archived"
+    assert archived_source["merged_into"] == target["id"]
 
 
 def test_wiki_auto_curate_llm_split_action_splits_page(monkeypatch, tmp_path):

@@ -134,6 +134,31 @@ def test_archive_stale_pages_deletes_pages_archived_over_90_days(monkeypatch, tm
     assert wiki.get_page(expired["id"]) is None
 
 
+def test_archive_stale_pages_preserves_merge_archives(monkeypatch, tmp_path):
+    _isolate(monkeypatch, tmp_path)
+
+    from agent_console import wiki
+
+    merged_archive = wiki.upsert_page({
+        "title": "병합 원본 보존 기록",
+        "summary": "병합 전 원본",
+        "body": "원본 본문",
+        "surface": "portfolio",
+        "kind": "note",
+        "status": "archived",
+        "tags": ["merged_into:target-card", "merge_event:merge-001"],
+        "merged_into": "target-card",
+        "merge_event_id": "merge-001",
+        "merge_history": [{"event_id": "merge-001", "source_ids": ["old-card"]}],
+        "updated_at": _iso(120),
+    })
+
+    result = wiki.archive_stale_pages(max_age_days=30)
+
+    assert result["deleted"] == 0
+    assert wiki.get_page(merged_archive["id"])["status"] == "archived"
+
+
 def test_upsert_page_can_reactivate_archived_page(monkeypatch, tmp_path):
     _isolate(monkeypatch, tmp_path)
 
@@ -164,6 +189,28 @@ def test_upsert_page_can_reactivate_archived_page(monkeypatch, tmp_path):
 
     assert reactivated["status"] == "draft"
     assert wiki.get_page(archived["id"])["status"] == "draft"
+
+
+def test_upsert_and_delete_schedule_artifact_rebuild(monkeypatch, tmp_path):
+    _isolate(monkeypatch, tmp_path)
+
+    from agent_console import wiki
+
+    rebuild_calls = []
+    monkeypatch.setattr(wiki, "_debounced_rebuild", lambda: rebuild_calls.append(True))
+    page = wiki.upsert_page({
+        "title": "아티팩트 갱신 대상",
+        "summary": "요약",
+        "body": "본문",
+        "surface": "market",
+        "kind": "note",
+        "status": "draft",
+    })
+    assert rebuild_calls == [True]
+
+    rebuild_calls.clear()
+    assert wiki.delete_page(page["id"]) is True
+    assert rebuild_calls == [True]
 
 
 def test_rebuild_artifacts_index_shows_archived_section(monkeypatch, tmp_path):

@@ -21,7 +21,7 @@ def test_build_wiki_pages_from_events_groups_source_backed_topic():
             "tickers": ["NVDA"],
             "text_path": "/tmp/nvda.txt",
             "raw_path": "/tmp/nvda.json",
-            "classification": {"kind": "article", "topic": "기술/AI", "trust": "B"},
+            "classification": {"kind": "article", "topic": "기술/AI", "trust": "B", "wiki_eligible": True},
         },
         {
             "source": "telegram:insidertracking",
@@ -53,6 +53,34 @@ def test_build_wiki_pages_from_events_groups_source_backed_topic():
     assert "source:telegram" in page["tags"]
     assert "/tmp/nvda.txt" in page["source_refs"]
     assert "https://t.me/insidertracking/1" in page["source_refs"]
+
+
+def test_single_external_event_stays_draft_until_corrobated():
+    pages = swc.build_wiki_pages_from_events([
+        {
+            "source": "saveticker",
+            "title": "단일 SaveTicker 기사",
+            "url": "https://saveticker.com/one",
+            "body_raw": "단일 기사 본문",
+            "topic": "기술/AI",
+            "tags": ["기술/AI"],
+            "tickers": ["NVDA"],
+            "classification": {"kind": "article", "topic": "기술/AI", "trust": "B", "wiki_eligible": True},
+        },
+    ])
+
+    page = next(page for page in pages if page["id"] == "source-ticker-nvda")
+    assert page["status"] == "draft"
+    assert page["confidence"] < 0.78
+
+
+def test_local_paths_alone_cannot_promote_source_digest():
+    events = [
+        {"source": "saveticker", "title": "첫 번째", "url": "", "body_raw": "본문"},
+        {"source": "saveticker", "title": "두 번째", "url": "", "body_raw": "본문"},
+    ]
+
+    assert swc._status_for(events, ["/tmp/one.txt", "/tmp/two.txt"]) == "draft"
 
 
 def test_build_wiki_pages_from_events_dedupes_source_refs_and_skips_weak_groups():
@@ -132,6 +160,57 @@ def test_build_wiki_pages_from_events_links_pages_sharing_events():
 
     assert by_id["source-topic-기술-ai"]["links"] == ["source-ticker-nvda"]
     assert by_id["source-ticker-nvda"]["links"] == ["source-topic-기술-ai"]
+
+
+def test_build_wiki_pages_fetches_existing_wiki_pages_once_for_cross_links(monkeypatch):
+    events = [
+        {
+            "source": "saveticker",
+            "title": "AI 서버 수요 확대",
+            "url": "https://saveticker.com/1",
+            "body_raw": "AI 서버 수요",
+            "topic": "기술/AI",
+            "tags": ["기술/AI"],
+            "tickers": ["NVDA"],
+            "classification": {"kind": "article", "topic": "기술/AI", "trust": "B"},
+        },
+        {
+            "source": "saveticker",
+            "title": "금리 상승 경고",
+            "url": "https://saveticker.com/2",
+            "body_raw": "금리 상승",
+            "topic": "금리/채권",
+            "tags": ["금리/채권"],
+            "tickers": ["TLT"],
+            "classification": {"kind": "article", "topic": "금리/채권", "trust": "B"},
+        },
+        {
+            "source": "saveticker",
+            "title": "AI 서버 전력 수요 확대",
+            "url": "https://saveticker.com/3",
+            "body_raw": "데이터센터 전력 수요",
+            "topic": "기술/AI",
+            "tags": ["기술/AI"],
+            "tickers": ["NVDA"],
+            "classification": {"kind": "article", "topic": "기술/AI", "trust": "B"},
+        },
+    ]
+    calls = []
+    from agent_console import wiki
+
+    monkeypatch.setattr(
+        wiki,
+        "list_pages",
+        lambda **kwargs: calls.append(kwargs) or [
+            {"id": "conv-ai", "title": "기술 AI 서버 수요 확대 대응", "summary": "", "kind": "playbook", "surface": "market"},
+        ],
+    )
+
+    pages = swc.build_wiki_pages_from_events(events)
+
+    assert len(calls) == 1
+    assert calls[0]["limit"] >= 10000
+    assert any("conv-ai" in (page.get("links") or []) for page in pages)
 
 
 def test_build_wiki_pages_from_events_attaches_evidence_metadata():
@@ -242,7 +321,7 @@ def test_curate_recent_source_wiki_limit_zero_saves_all_groups(monkeypatch):
         lambda **_kwargs: [{"id": page_id, "title": page_id} for page_id in saved_ids],
     )
     sync_calls = []
-    monkeypatch.setattr(wiki.qmd_search, "sync_pages", lambda pages: sync_calls.append(list(pages)) or {
+    monkeypatch.setattr(wiki.qmd_search, "sync_pages", lambda pages, **_kwargs: sync_calls.append(list(pages)) or {
         "ok": True, "exported_count": len(pages), "error": "",
     })
 

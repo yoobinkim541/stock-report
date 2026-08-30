@@ -426,7 +426,7 @@ def build_pipeline_health_report(*, dry_run: bool = False) -> dict[str, Any]:
     source_health = source_collector.load_source_health() or {}
     stale_rows = source_collector.stale_sources(source_health)
     recent_events = source_collector.load_recent_events(hours=RECENT_EVENT_HOURS)
-    pages = wiki.list_pages(status="all", surface="all", limit=400)
+    pages = wiki.list_pages(status="all", surface="all", limit=10000)
     stats_data = wiki.stats()
     lint_data = wiki.lint_pages(pages)
     stale_pages = wiki.list_stale_pages(max_age_days=STALE_WIKI_AGE_DAYS)

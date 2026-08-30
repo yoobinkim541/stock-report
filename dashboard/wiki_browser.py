@@ -8,6 +8,8 @@ import hashlib
 import re
 from typing import Any
 
+from agent_console import wiki as core_wiki
+
 WIKI_SURFACE = "wiki"
 VALID_STATUSES = ("draft", "reviewed", "stable", "archived")
 WIKI_BODY_LIMIT = 12000
@@ -40,6 +42,11 @@ class WikiPage:
     updated_at: str = ""
     source_refs: tuple[str, ...] = field(default_factory=tuple)
     source: dict[str, Any] = field(default_factory=dict)
+    evidence_ids: tuple[str, ...] = field(default_factory=tuple)
+    conflicting_evidence_ids: tuple[str, ...] = field(default_factory=tuple)
+    merge_history: tuple[dict[str, Any], ...] = field(default_factory=tuple)
+    merged_into: str = ""
+    merge_event_id: str = ""
 
     def as_dict(self) -> dict[str, Any]:
         return {
@@ -56,6 +63,12 @@ class WikiPage:
             "updated_at": self.updated_at,
             "source_refs": list(self.source_refs),
             "source": dict(self.source),
+            "verification_status": "source-backed" if _has_non_conversation_source_refs(self.source_refs) else "unverified",
+            "evidence_ids": list(self.evidence_ids),
+            "conflicting_evidence_ids": list(self.conflicting_evidence_ids),
+            "merge_history": [dict(item) for item in self.merge_history],
+            "merged_into": self.merged_into,
+            "merge_event_id": self.merge_event_id,
         }
 
 
@@ -111,14 +124,7 @@ def _expanded_query_tokens(text: str) -> set[str]:
 
 
 def _has_non_conversation_source_refs(refs: Iterable[object]) -> bool:
-    for raw in refs or []:
-        ref = _clean(raw, 240).lower()
-        if not ref:
-            continue
-        if ref.startswith("conversation:") or ref.startswith("chat:"):
-            continue
-        return True
-    return False
+    return core_wiki.has_non_conversation_source_refs(refs)
 
 
 def _surface_label(surface: str) -> str:
@@ -169,9 +175,6 @@ def _render_page_card(page: dict[str, Any]) -> str:
 
 
 def _verification_status(page: dict[str, Any]) -> str:
-    explicit = _clean(page.get("verification_status") or "", 40)
-    if explicit:
-        return explicit
     return "source-backed" if _has_non_conversation_source_refs(page.get("source_refs") or []) else "unverified"
 
 
@@ -283,6 +286,11 @@ def build_selected_evidence_model(page: dict[str, Any] | WikiPage | None, *, con
         "verification_status": normalized.get("verification_status") or "unverified",
         "warnings": list(normalized.get("trust_warnings") or []),
         "open_questions": list(normalized.get("openQuestions") or []),
+        "evidence_ids": list(normalized.get("evidence_ids") or []),
+        "conflicting_evidence_ids": list(normalized.get("conflicting_evidence_ids") or []),
+        "merge_history": [dict(item) for item in normalized.get("merge_history") or []],
+        "merged_into": normalized.get("merged_into") or "",
+        "merge_event_id": normalized.get("merge_event_id") or "",
         "prompt_preview": context_section,
         "tags": list(normalized.get("tags") or []),
     }
@@ -382,6 +390,11 @@ def _record_to_page(record: dict[str, Any]) -> dict[str, Any]:
         "updated_at": record.get("updatedAt") or record.get("createdAt") or "",
         "source": source,
         "source_refs": _dedupe_texts(record.get("artifacts") or [], limit=12, item_limit=120),
+        "evidence_ids": _dedupe_texts(record.get("evidence_ids") or [], limit=100, item_limit=120),
+        "conflicting_evidence_ids": _dedupe_texts(record.get("conflicting_evidence_ids") or [], limit=100, item_limit=120),
+        "merge_history": core_wiki._normalize_merge_history(record.get("merge_history")),
+        "merged_into": _clean(record.get("merged_into") or "", 80),
+        "merge_event_id": _clean(record.get("merge_event_id") or "", 100),
         "decisions": decisions,
         "openQuestions": open_questions,
         "messages": messages,
@@ -415,6 +428,11 @@ def _normalize_page(page: dict[str, Any] | WikiPage) -> dict[str, Any]:
             "updated_at": page.get("updated_at") or page.get("updatedAt") or page.get("createdAt") or "",
             "source": dict(page.get("source") or {}),
             "source_refs": source_refs,
+            "evidence_ids": _dedupe_texts(page.get("evidence_ids") or [], limit=100, item_limit=120),
+            "conflicting_evidence_ids": _dedupe_texts(page.get("conflicting_evidence_ids") or [], limit=100, item_limit=120),
+            "merge_history": core_wiki._normalize_merge_history(page.get("merge_history")),
+            "merged_into": _clean(page.get("merged_into") or "", 80),
+            "merge_event_id": _clean(page.get("merge_event_id") or "", 100),
             "decisions": _dedupe_texts(page.get("decisions") or [], limit=8, item_limit=280),
             "openQuestions": _dedupe_texts(page.get("openQuestions") or [], limit=8, item_limit=280),
             "messages": list(page.get("messages") or []),
@@ -609,7 +627,7 @@ def _wiki_stats() -> dict[str, Any]:
             pass
     pages = []
     try:
-        pages = wiki.list_pages(query="", surface="all", status="all", limit=400)
+        pages = wiki.list_pages(query="", surface="all", status="all", limit=10000)
     except Exception:
         pages = []
     counter = Counter()
@@ -646,7 +664,7 @@ def render_wiki_tab(surface: str, pack: dict[str, Any] | None = None) -> None:
     latest = stats.get("latest") or {}
     cols[3].metric("최근", latest.get("title", "—")[:20] if latest else "—")
 
-    pages_all = wiki.list_pages(query="", surface="all", status="all", limit=400)
+    pages_all = wiki.list_pages(query="", surface="all", status="all", limit=10000)
     try:
         search_health = wiki.search_health()
     except Exception:
@@ -799,6 +817,19 @@ def render_wiki_tab(surface: str, pack: dict[str, Any] | None = None) -> None:
 
                 if evidence.get("tags"):
                     st.caption("태그: " + " · ".join(evidence["tags"]))
+
+                if evidence.get("merge_history") or evidence.get("merged_into"):
+                    st.markdown("##### 병합/아카이브 기록")
+                    if evidence.get("merged_into"):
+                        st.caption(f"이 문서는 {evidence['merged_into']}에 병합되어 보관 중입니다.")
+                    for event in evidence.get("merge_history") or []:
+                        source_titles = ", ".join(event.get("source_titles") or event.get("source_ids") or [])
+                        detail = f"{event.get('occurred_at', '')} · {event.get('action', 'merge')}"
+                        if source_titles:
+                            detail += f" · 원본: {source_titles}"
+                        st.caption(detail)
+                        if event.get("reason"):
+                            st.write(event["reason"])
 
                 with st.expander("프롬프트 주입 참고", expanded=False):
                     if evidence.get("prompt_preview"):

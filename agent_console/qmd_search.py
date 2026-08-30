@@ -106,15 +106,28 @@ def health(*, probe_query: str = "시장", runner: Callable[..., Any] = subproce
         records = shared_memory.inspect_records()
     except Exception:
         records = []
-    page_times = [
-        str(row.get("updatedAt") or row.get("updated_at") or row.get("createdAt") or "")
-        for row in records
+    wiki_rows = [
+        row for row in records
         if "wiki" in {str(tag).lower() for tag in row.get("tags") or []}
     ]
+    page_times = [
+        str(row.get("updatedAt") or row.get("updated_at") or row.get("createdAt") or "")
+        for row in wiki_rows
+    ]
+    wiki_record_count = len(page_times)
     latest_page_at = max((value for value in page_times if _parse_time(value)), default="")
     page_time = _parse_time(latest_page_at)
     export_time = _parse_time(latest_export_at)
-    index_fresh = not page_time or bool(export_time and export_time >= page_time)
+    expected_files = {
+        f"{_safe_file_stem(_clean(row.get('id'), 100) or _hash_id(row))}.md"
+        for row in wiki_rows
+    }
+    actual_files = {path.name for path in markdown_files}
+    missing_files = expected_files - actual_files
+    stale_files = actual_files - expected_files
+    coverage_ok = not missing_files
+    mirror_complete = not missing_files and not stale_files
+    index_fresh = (not page_time or bool(export_time and export_time >= page_time)) and mirror_complete
     query_ok = False
     error = ""
     if not base["enabled"]:
@@ -133,11 +146,19 @@ def health(*, probe_query: str = "시장", runner: Callable[..., Any] = subproce
         except (FileNotFoundError, subprocess.TimeoutExpired, OSError) as exc:
             error = _clean(exc, 500)
     if not index_fresh and not error:
-        error = "qmd markdown export is older than the latest wiki page"
+        error = (
+            "qmd markdown export is incomplete"
+            if not mirror_complete else "qmd markdown export is older than the latest wiki page"
+        )
     return {
         "provider": "qmd",
         **base,
         "file_count": file_count,
+        "wiki_record_count": wiki_record_count,
+        "coverage_ok": coverage_ok,
+        "mirror_complete": mirror_complete,
+        "missing_file_count": len(missing_files),
+        "stale_file_count": len(stale_files),
         "query_ok": query_ok,
         "index_fresh": index_fresh,
         "latest_page_at": latest_page_at,
@@ -156,12 +177,19 @@ def export_pages(pages: list[dict]) -> dict:
             continue
         page_id = _clean(page.get("id"), 100) or _hash_id(page)
         path = out_dir / f"{_safe_file_stem(page_id)}.md"
-        path.write_text(_page_markdown(page, page_id), encoding="utf-8")
+        temporary = path.with_name(f".{path.name}.tmp")
+        temporary.write_text(_page_markdown(page, page_id), encoding="utf-8")
+        temporary.replace(path)
         files.append(str(path))
     return {"ok": True, "dir": str(out_dir), "files": files, "count": len(files)}
 
 
-def sync_pages(pages: list[dict], *, runner: Callable[..., Any] = subprocess.run) -> dict:
+def sync_pages(
+    pages: list[dict],
+    *,
+    complete: bool = False,
+    runner: Callable[..., Any] = subprocess.run,
+) -> dict:
     if not pages:
         return {
             "ok": False,
@@ -175,20 +203,28 @@ def sync_pages(pages: list[dict], *, runner: Callable[..., Any] = subprocess.run
     exported = export_pages(pages)
     expected = {Path(path).name for path in exported.get("files") or []}
     removed = []
-    try:
-        for path in wiki_docs_dir().glob("*.md"):
-            if path.name not in expected:
-                path.unlink()
-                removed.append(str(path))
-    except OSError as exc:
-        return {
-            "ok": False,
-            "enabled": enabled(),
-            "exported_count": int(exported.get("count") or 0),
-            "removed_count": len(removed),
-            "files": exported.get("files") or [],
-            "error": _clean(exc, 500),
-        }
+    removed_contents: dict[Path, bytes] = {}
+    if complete:
+        try:
+            for path in wiki_docs_dir().glob("*.md"):
+                if path.name not in expected:
+                    removed_contents[path] = path.read_bytes()
+                    path.unlink()
+                    removed.append(str(path))
+        except OSError as exc:
+            for path, content in removed_contents.items():
+                try:
+                    path.write_bytes(content)
+                except OSError:
+                    pass
+            return {
+                "ok": False,
+                "enabled": enabled(),
+                "exported_count": int(exported.get("count") or 0),
+                "removed_count": len(removed),
+                "files": exported.get("files") or [],
+                "error": _clean(exc, 500),
+            }
     result = {
         "ok": True,
         "enabled": enabled(),
@@ -197,6 +233,8 @@ def sync_pages(pages: list[dict], *, runner: Callable[..., Any] = subprocess.run
         "files": exported.get("files") or [],
         "error": "",
     }
+    if not complete:
+        result["skipped"] = "partial_snapshot"
     if not enabled():
         result["skipped"] = "disabled"
         return result
@@ -208,9 +246,21 @@ def sync_pages(pages: list[dict], *, runner: Callable[..., Any] = subprocess.run
             timeout=update_timeout_seconds(),
         )
     except (FileNotFoundError, subprocess.TimeoutExpired, OSError) as exc:
+        for path, content in removed_contents.items():
+            try:
+                path.write_bytes(content)
+            except OSError:
+                pass
+        result["removed_count"] = 0
         result.update(ok=False, error=_clean(exc, 500))
         return result
     if getattr(completed, "returncode", 1) != 0:
+        for path, content in removed_contents.items():
+            try:
+                path.write_bytes(content)
+            except OSError:
+                pass
+        result["removed_count"] = 0
         result.update(
             ok=False,
             error=_clean(getattr(completed, "stderr", "") or f"qmd update exited {getattr(completed, 'returncode', 1)}", 500),
@@ -335,6 +385,22 @@ def _page_markdown(page: dict, page_id: str) -> str:
         lines += ["## Body", "", body, ""]
     if source_refs:
         lines += ["## Source Refs", "", *[f"- {ref}" for ref in source_refs], ""]
+    evidence_ids = [str(item).strip() for item in (page.get("evidence_ids") or []) if str(item).strip()]
+    if evidence_ids:
+        lines += ["## Evidence IDs", "", *[f"- {item}" for item in evidence_ids[:100]], ""]
+    if page.get("merge_history") or page.get("merged_into"):
+        lines += ["## Merge Archive", ""]
+        if page.get("merged_into"):
+            lines.append(f"- merged_into: {page['merged_into']}")
+        for event in page.get("merge_history") or []:
+            sources = ", ".join(event.get("source_titles") or event.get("source_ids") or [])
+            lines.append(
+                f"- event: {event.get('event_id', 'unknown')} · {event.get('occurred_at', 'unknown')}"
+                f" · sources: {sources or 'unknown'}"
+            )
+            if event.get("reason"):
+                lines.append(f"  - reason: {_clean(event['reason'], 600)}")
+        lines.append("")
     return "\n".join(lines).strip() + "\n"
 
 
@@ -369,12 +435,22 @@ def _safe_file_stem(value: str) -> str:
 
 
 def _yaml_scalar(value: object) -> str:
-    text = _clean(value, 300).replace('"', '\\"')
+    text = _clean(value, 300).replace("\r", " ").replace("\n", " ").replace('"', '\\"')
     return f'"{text}"'
 
 
 def _clean(value: object, limit: int = 2200) -> str:
     text = str(value or "").replace("\x00", " ").strip()
+    text = re.sub(
+        r"(?i)\b(api[_-]?key|token|password|passwd|secret|authorization)\s*[:=]\s*\S+",
+        r"\1=<redacted>",
+        text,
+    )
+    text = re.sub(
+        r'''(?i)(["'`]?(?:api[_-]?key|token|password|passwd|secret|authorization)["'`]?\s*[:=]\s*["'`]?)[^\s,"'`}\]]+''',
+        r"\1<redacted>",
+        text,
+    )
     if len(text) <= limit:
         return text
     return text[: max(0, limit - 1)].rstrip() + "…"

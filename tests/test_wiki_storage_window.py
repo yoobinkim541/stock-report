@@ -76,3 +76,20 @@ def test_upsert_old_page_does_not_duplicate_id(monkeypatch, tmp_path):
     matching = [r for r in rows if r.get("id") == page_id]
     assert len(matching) == 1, f"같은 id 레코드가 {len(matching)}개 — 중복 누적"
     assert matching[0]["summary"] == "v2"
+
+
+def test_list_pages_returns_wiki_pages_beyond_previous_400_cap(monkeypatch, tmp_path):
+    _isolate(monkeypatch, tmp_path)
+    from agent_console import shared_memory, wiki
+
+    rows = [{
+            "id": f"wiki-{i}",
+            "title": f"위키 {i}",
+            "summary": "본문",
+            "body": "본문",
+            "tags": ["wiki", "market", "note", "draft"],
+            "source": {"surface": "market", "screen": "market"},
+        } for i in range(405)]
+    shared_memory.batch_upsert_delete(upserts=rows, deletes=[])
+
+    assert len(wiki.list_pages(status="all", surface="all", limit=500)) == 405

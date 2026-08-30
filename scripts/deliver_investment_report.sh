@@ -5,6 +5,19 @@ set -e
 PROJECT_DIR="${STOCK_REPORT_PROJECT_DIR:-/home/ubuntu/projects/stock-report}"
 cd "$PROJECT_DIR"
 
+# Hermes와 구형 OS cron이 잠시 겹쳐도 같은 리포트를 병렬 전송하지 않는다.
+# 날짜 마커는 프로세스가 끝난 뒤 성공적으로 전송했을 때만 남기므로, 실패한 실행은 재시도할 수 있다.
+DELIVERY_STATE_DIR="${INVESTMENT_REPORT_STATE_DIR:-$HOME/.local/state/stock-report}"
+# Hermes 래퍼는 investment-report.lock을 이미 보유한 채 이 스크립트를 호출한다.
+# 같은 파일을 다시 flock하면 정상 실행까지 스킵되므로, 모든 호출자가 공유하는 별도 파일을 쓴다.
+DELIVERY_LOCK="${INVESTMENT_REPORT_DELIVERY_LOCK:-$DELIVERY_STATE_DIR/investment-report-delivery.lock}"
+mkdir -p "$DELIVERY_STATE_DIR" "$(dirname "$DELIVERY_LOCK")"
+exec 8>"$DELIVERY_LOCK"
+if ! flock -n 8; then
+    echo "[SKIP] 일일 리포트가 이미 실행 중이어서 중복 전송을 건너뜁니다" >&2
+    exit 0
+fi
+
 # Load bot token
 if [ -f .env ]; then
     set -a
@@ -37,6 +50,11 @@ export INVESTMENT_REPORT_LLM_DECISION_ENABLED="${INVESTMENT_REPORT_LLM_DECISION_
 export INVESTMENT_REPORT_LLM_DECISION_MODE="${INVESTMENT_REPORT_LLM_DECISION_MODE:-shadow}"
 
 DATE=$("$PYTHON_BIN" -c "from datetime import datetime, timezone, timedelta; print(datetime.now(timezone(timedelta(hours=9))).strftime('%Y-%m-%d'))")
+DELIVERY_MARKER="${INVESTMENT_REPORT_SENT_MARKER:-$DELIVERY_STATE_DIR/investment-report-${DATE}.sent}"
+if [ "${INVESTMENT_REPORT_FORCE_DELIVERY:-0}" != "1" ] && [ -f "$DELIVERY_MARKER" ]; then
+    echo "[SKIP] ${DATE} 일일 리포트는 이미 전송되었습니다: ${DELIVERY_MARKER}"
+    exit 0
+fi
 
 # Generate report (silent progress → stderr, keep stdout clean)
 "$PYTHON_BIN" reports/investment_report.py > /tmp/invest_report_stdout.txt 2>/tmp/invest_report_stderr.txt
@@ -156,6 +174,10 @@ if [ -n "$STOCK_BOT_TOKEN" ]; then
         -F "chat_id=${STOCK_BOT_CHAT_ID}" \
         -F "document=@${COMBINED_REPORT_FILE}" \
         -F "caption=통합 데일리 리포트 (${DATE})"
+
+    marker_tmp="${DELIVERY_MARKER}.tmp.$$"
+    printf 'sent_at=%s\ndate=%s\n' "$(date -Is)" "$DATE" > "$marker_tmp"
+    mv -f "$marker_tmp" "$DELIVERY_MARKER"
 fi
 
 # ── stdout: compact delivery report (this goes to Hermes cron output) ──
