@@ -502,6 +502,10 @@ def test_strict_cpcv_gate_checks_all_chronology_aliases_and_nested_actual_eviden
         "test_min": "2026-02-01T00:00:00+00:00",
         "future_training": False,
         "no_future_training": True,
+        "train_before_test": True,
+        "train_max_before_test_min": True,
+        "valid": True,
+        "proof_valid": True,
         "chronology_evidence": {
             "fold_id": "fold-1",
             "train_max": "2026-01-31T00:00:00+00:00",
@@ -522,6 +526,7 @@ def test_strict_cpcv_gate_checks_all_chronology_aliases_and_nested_actual_eviden
             "promotion_eligible": True,
             "aggregate": {
                 "fold_count": 1,
+                "cpcv_fold_count": 1,
                 "provenance_ok": True,
                 "cpcv_fold_ids": ["fold-1"],
                 "cpcv_chronology_ok": True,

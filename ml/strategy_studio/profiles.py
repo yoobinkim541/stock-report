@@ -28,6 +28,13 @@ class ProfileHealth:
     def __post_init__(self) -> None:
         status = str(self.status or "unknown").strip().lower()
         reason = str(self.reason or "unknown").strip()
+        if status in {"available", "complete", "ok"}:
+            status = "fresh"
+        elif status in {"stale", "unavailable", "missing", "invalid", "degraded", "disabled"}:
+            status = "pause"
+        elif status not in {"fresh", "pause", "closed"}:
+            status = "pause"
+            reason = "unknown_health_status"
         invalid_age = status == "fresh" and self.age_seconds is None
         if self.age_seconds is not None:
             if isinstance(self.age_seconds, bool):
@@ -241,14 +248,16 @@ def execution_defaults(profile: str, session: str = "regular") -> "ExecutionConf
 def health_from_payload(value: object) -> ProfileHealth | None:
     """Convert a saved health mapping to the immutable replay DTO."""
 
+    if value is None:
+        return None
     if isinstance(value, ProfileHealth):
         return value
     if not isinstance(value, Mapping):
-        return None
+        return ProfileHealth("pause", "malformed_health", None)
     status = value.get("status")
-    reason = value.get("reason")
-    if status is None or reason is None:
-        return None
+    reason = value.get("reason") or "malformed_health"
+    if status is None:
+        return ProfileHealth("pause", "malformed_health", None)
     return ProfileHealth(str(status), str(reason), value.get("age_seconds"))
 
 

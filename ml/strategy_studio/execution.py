@@ -619,9 +619,9 @@ def _health_mapping(value: object) -> dict[str, Any] | None:
         try:
             value = value.to_dict()
         except Exception:
-            return None
+            return {"status": "pause", "reason": "malformed_health"}
     if not isinstance(value, Mapping):
-        return None
+        return {"status": "pause", "reason": "malformed_health"}
     payload = dict(value)
     status = str(payload.get("status") or "").strip().lower()
     reason = payload.get("reason")
@@ -636,7 +636,11 @@ def _health_mapping(value: object) -> dict[str, Any] | None:
             }
         return mapped
     if status:
-        return {**payload, "reason": str(reason or "source_unavailable")}
+        if status in {"closed", "disabled"}:
+            return {**payload, "status": status, "reason": str(reason or status)}
+        if status in {"pause", "stale", "unavailable", "missing", "invalid", "degraded"}:
+            return {**payload, "status": "pause", "reason": str(reason or "source_unavailable")}
+        return {**payload, "status": "pause", "reason": "unknown_health_status"}
     if quality in {"missing", "incomplete", "invalid", "degraded"}:
         return {**payload, "status": "pause", "reason": "incomplete_bars"}
     if quality in {"fresh", "complete", "ok"}:
@@ -652,7 +656,17 @@ def _health_mapping(value: object) -> dict[str, Any] | None:
         return {**payload, "status": "pause", "reason": "source_unavailable"}
     if payload.get("fresh") is False:
         return {**payload, "status": "pause", "reason": str(payload.get("reason") or "stale_quote")}
-    return None
+    if _looks_like_health_container(payload):
+        return None
+    return {**payload, "status": "pause", "reason": "malformed_health"}
+
+
+def _looks_like_health_container(payload: Mapping[str, Any]) -> bool:
+    structural_keys = {"timeline", "by_timestamp", "history", "sources", "source_health", "profile_health"}
+    if structural_keys.intersection(payload):
+        return True
+    values = list(payload.values())
+    return bool(values) and all(isinstance(value, Mapping) for value in values)
 
 
 def _health_at(value: object, symbol: str, at: object) -> dict[str, Any] | None:
@@ -689,7 +703,7 @@ def _health_at(value: object, symbol: str, at: object) -> dict[str, Any] | None:
         if timestamp <= current and (selected_at is None or timestamp > selected_at):
             selected = mapped
             selected_at = timestamp
-    return selected
+    return selected or {"status": "pause", "reason": "malformed_health"}
 
 
 def _aggregate_source_health(value: Mapping[str, Any]) -> dict[str, Any] | None:

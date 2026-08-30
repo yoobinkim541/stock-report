@@ -30,7 +30,10 @@ from ml.strategy_studio import (
     strategy_spec_hash,
 )
 from ml.strategy_studio.spec import _SUPPORTED_INDICATORS, _SUPPORTED_PLUGIN_NAMES, SUPPORTED_SIGNAL_TYPES
-from ml.strategy_studio.validation import _activation_provenance_check_ok as _strict_activation_provenance_check_ok
+from ml.strategy_studio.validation import (
+    _activation_provenance_check_ok as _strict_activation_provenance_check_ok,
+    _cpcv_chronology_payload_ok as _strict_cpcv_chronology_payload_ok,
+)
 
 from . import agent, storage
 
@@ -1489,88 +1492,14 @@ def _activation_gate_errors(run: dict[str, object]) -> list[str]:
 
 def _cpcv_chronology_is_activation_safe(validation: Mapping[str, object]) -> bool:
     aggregate = validation.get("aggregate")
-    if not isinstance(aggregate, Mapping) or aggregate.get("cpcv_chronology_ok") is not True:
-        return False
-    for count_key in ("cpcv_fold_count", "fold_count"):
-        if count_key in aggregate:
-            try:
-                if int(aggregate[count_key]) <= 0:
-                    return False
-            except (TypeError, ValueError):
-                return False
-    evidence = aggregate.get("cpcv_chronology_evidence")
     folds = validation.get("folds")
-    if not isinstance(evidence, list) or not isinstance(folds, list) or len(evidence) != len(folds):
+    if not isinstance(aggregate, Mapping) or not isinstance(folds, list):
         return False
-    expected_ids = aggregate.get("cpcv_fold_ids", aggregate.get("fold_ids"))
-    if expected_ids is not None:
-        if not isinstance(expected_ids, list) or len(expected_ids) != len(folds):
-            return False
-        expected_id_set = {str(value) for value in expected_ids}
-        if len(expected_id_set) != len(folds):
-            return False
-    else:
-        expected_id_set = None
-    fold_ids: set[str] = set()
-    for proof, fold in zip(evidence, folds):
-        if not isinstance(proof, Mapping) or not isinstance(fold, Mapping):
-            return False
-        proof_id, proof_ok = _consistent_alias(proof, ("fold_id", "path_id", "fold"))
-        actual_id, actual_ok = _consistent_alias(fold, ("fold_id", "path_id", "fold"))
-        if (
-            not proof_ok
-            or not actual_ok
-            or proof_id != actual_id
-            or proof_id in fold_ids
-            or (expected_id_set is not None and proof_id not in expected_id_set)
-        ):
-            return False
-        fold_ids.add(proof_id)
-        if not _consistent_boolean_alias(proof, ("valid", "proof_valid"), expected=True, required=True):
-            return False
-        if not _chronology_flags_are_safe(proof, required=True):
-            return False
-        if not _consistent_boolean_alias(
-            proof,
-            ("train_before_test", "train_max_before_test_min"),
-            expected=True,
-            required=True,
-        ):
-            return False
-        train, train_ok = _consistent_timestamp_alias(proof, ("train_max", "train_end", "train_max_timestamp"))
-        test, test_ok = _consistent_timestamp_alias(proof, ("test_min", "test_start", "test_min_timestamp"))
-        actual_proof = fold.get("chronology_evidence")
-        actual_records = [fold]
-        if isinstance(actual_proof, Mapping):
-            actual_records.append(actual_proof)
-        for actual_record in actual_records:
-            if not _chronology_flags_are_safe(actual_record, required=False):
-                return False
-            if not _consistent_boolean_alias(actual_record, ("valid", "proof_valid"), expected=True, required=False):
-                return False
-            if not _consistent_boolean_alias(
-                actual_record,
-                ("train_before_test", "train_max_before_test_min"),
-                expected=True,
-                required=False,
-            ):
-                return False
-        actual_train, actual_train_ok = _consistent_timestamp_aliases(
-            actual_records, ("train_max", "train_end", "train_max_timestamp")
-        )
-        actual_test, actual_test_ok = _consistent_timestamp_aliases(
-            actual_records, ("test_min", "test_start", "test_min_timestamp")
-        )
-        if not train_ok or not test_ok or not actual_train_ok or not actual_test_ok:
-            return False
-        try:
-            if _canonical_gate_timestamp(train) >= _canonical_gate_timestamp(test):
-                return False
-        except (TypeError, ValueError):
-            return False
-        if str(train) != str(actual_train) or str(test) != str(actual_test):
-            return False
-    return bool(fold_ids)
+    actual_folds = [fold for fold in folds if isinstance(fold, Mapping)]
+    return len(actual_folds) == len(folds) and _strict_cpcv_chronology_payload_ok(
+        aggregate,
+        actual_folds,
+    )
 
 
 def _consistent_boolean_alias(

@@ -158,7 +158,13 @@ def strategy_studio_state() -> dict:
 def strategy_profile_health(snapshot: dict | None = None, *, now: str | None = None) -> dict[str, dict]:
     """Expose the same profile pause decision used by paper/backtest replay."""
 
-    from ml.strategy_studio.profiles import ProfileHealth, profile_health
+    from ml.strategy_studio.profiles import ProfileHealth, health_from_payload, profile_health
+
+    def normalise_saved_health(value: object) -> dict:
+        decision = health_from_payload(value)
+        if decision is None:
+            decision = ProfileHealth("pause", "malformed_health", None)
+        return decision.to_dict()
 
     current = now or datetime.now(timezone.utc).isoformat(timespec="seconds")
     saved = snapshot if isinstance(snapshot, dict) else {}
@@ -179,8 +185,8 @@ def strategy_profile_health(snapshot: dict | None = None, *, now: str | None = N
         except Exception:
             micro = {}
     saved_kr = (micro or {}).get("profile_health") if isinstance(micro, dict) else None
-    if isinstance(saved_kr, dict) and saved_kr.get("status"):
-        result["kr_intraday"] = dict(saved_kr)
+    if isinstance(micro, dict) and "profile_health" in micro:
+        result["kr_intraday"] = normalise_saved_health(saved_kr)
     else:
         last_bar = _latest_intraday_bar_timestamp()
         decision = profile_health(
@@ -189,9 +195,8 @@ def strategy_profile_health(snapshot: dict | None = None, *, now: str | None = N
         result["kr_intraday"] = decision.to_dict()
 
     for profile in ("global_swing", "extended_us"):
-        saved_profile = saved.get(profile)
-        if isinstance(saved_profile, dict) and saved_profile.get("status"):
-            result[profile] = dict(saved_profile)
+        if profile in saved:
+            result[profile] = normalise_saved_health(saved.get(profile))
             continue
         if profile == "extended_us":
             session = profile_health(profile, last_bar_at="", now=current, max_age_seconds=60)
@@ -201,7 +206,7 @@ def strategy_profile_health(snapshot: dict | None = None, *, now: str | None = N
             try:
                 from providers import realtime_quotes
 
-                result[profile] = realtime_quotes.quote_health("QQQ")
+                result[profile] = normalise_saved_health(realtime_quotes.quote_health("QQQ"))
             except Exception:
                 result[profile] = ProfileHealth("pause", "missing_quote", None).to_dict()
             continue

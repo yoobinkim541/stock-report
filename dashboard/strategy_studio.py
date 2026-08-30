@@ -13,6 +13,7 @@ from streamlit.errors import StreamlitAPIException
 from agent_console import agent
 from dashboard import cached, charts, data, theme, views
 from ml.strategy_studio import StrategySpec, apply_strategy_patch, builtin_strategy_presets, strategy_spec_hash
+from ml.strategy_studio.validation import _cpcv_chronology_payload_ok as _strict_cpcv_chronology_payload_ok
 
 
 _DATA_PROFILES = ("generic", "global_swing", "kr_intraday", "extended_us")
@@ -923,27 +924,9 @@ def _strict_validation_ready(result: object) -> bool:
     if mode == "cpcv":
         if aggregate.get("provenance_ok") is not True:
             return False
-        if aggregate.get("cpcv_chronology_ok") is not True:
-            return False
-        evidence = aggregate.get("cpcv_chronology_evidence")
-        if not isinstance(evidence, list) or len(evidence) != len(folds):
-            return False
-        declared_ids = aggregate.get("cpcv_fold_ids")
-        if not isinstance(declared_ids, list) or len(declared_ids) != len(folds):
-            return False
-        if {str(value) for value in declared_ids} != fold_ids or len(set(map(str, declared_ids))) != len(folds):
-            return False
-        evidence_ids = set()
-        for item in evidence:
-            if not isinstance(item, Mapping):
-                return False
-            item_id = _consistent_text_alias(item, ("fold_id", "path_id", "fold"))
-            if not item_id or item_id in evidence_ids or item_id not in fold_ids:
-                return False
-            evidence_ids.add(item_id)
-            if not _strict_cpcv_fold(item, require_proof=False):
-                return False
-        if evidence_ids != fold_ids:
+        if not _strict_cpcv_chronology_payload_ok(aggregate, [
+            fold for fold in folds if isinstance(fold, Mapping)
+        ]):
             return False
     return True
 
