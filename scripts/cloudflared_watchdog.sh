@@ -27,38 +27,91 @@ if [ -f "$PROJECT_DIR/.env" ]; then set -a; source "$PROJECT_DIR/.env"; set +a; 
 
 PORT="${DASHBOARD_PORT:-8501}"
 
-# cloudflared 프로세스 살아있으면 no-op (스트림릿 일시중단엔 터널 재시작 안 함)
-if [ -f "$PID_FILE" ] && kill -0 "$(cat "$PID_FILE")" 2>/dev/null; then
-    exit 0
+# PID가 살아 있어도 quick tunnel의 control stream이 끊기면 프로세스만 남을 수 있다.
+# 저장된 URL의 Streamlit health endpoint를 확인해야 죽은 터널을 정상으로 오판하지 않는다.
+probe_tunnel() {
+    local url="$1" host ip
+    [ -n "$url" ] || return 1
+    host="${url#*://}"
+    host="${host%%/*}"
+    if curl -fsS --connect-timeout 3 --max-time 8 "${url%/}/_stcore/health" 2>/dev/null | grep -q "ok"; then
+        return 0
+    fi
+    # 서버 기본 resolver가 trycloudflare.com을 늦게/실패하는 환경에서도 public DNS로
+    # edge IP를 얻어 SNI Host를 보존한 채 확인한다.
+    command -v dig >/dev/null 2>&1 || return 1
+    while IFS= read -r ip; do
+        [ -n "$ip" ] || continue
+        if curl -fsS --resolve "${host}:443:${ip}" --connect-timeout 3 --max-time 8 \
+            "${url%/}/_stcore/health" 2>/dev/null | grep -q "ok"; then
+            return 0
+        fi
+    done < <(dig +short +time=2 +tries=1 @1.1.1.1 "$host" 2>/dev/null | grep -E '^[0-9.]+$')
+    return 1
+}
+
+CUR="$(cat "$URL_FILE" 2>/dev/null || true)"
+PID="$(cat "$PID_FILE" 2>/dev/null || true)"
+NEW=""
+TUNNEL_RUNNING="false"
+if [[ "$PID" =~ ^[0-9]+$ ]] && kill -0 "$PID" 2>/dev/null; then
+    if probe_tunnel "$CUR"; then
+        NEW="$CUR"
+        TUNNEL_RUNNING="true"
+    else
+        echo "[$(date '+%F %T')] cloudflared PID는 살아 있지만 터널 probe 실패 — 재기동"
+        kill "$PID" 2>/dev/null || true
+        for _ in 1 2 3 4 5; do
+            kill -0 "$PID" 2>/dev/null || break
+            sleep 1
+        done
+        kill -9 "$PID" 2>/dev/null || true
+    fi
 fi
 
-echo "[$(date '+%F %T')] cloudflared 미실행 — 터널 재시작"
-: > "$LOG"
-nohup cloudflared tunnel --url "http://localhost:${PORT}" >> "$LOG" 2>&1 &
-echo $! > "$PID_FILE"
+if [ "$TUNNEL_RUNNING" != "true" ]; then
+    echo "[$(date '+%F %T')] cloudflared 미실행 — 터널 재시작"
+    : > "$LOG"
+    # watchdog lock FD는 자식이 상속하지 않게 닫는다. 상속되면 cloudflared 수명만큼
+    # flock이 유지되어 이후 watchdog 실행이 모두 조용히 skip 된다.
+    nohup cloudflared tunnel --url "http://localhost:${PORT}" 9>&- >> "$LOG" 2>&1 &
+    echo $! > "$PID_FILE"
 
-# 새 trycloudflare URL 확보 — 로그 파일 폴링(최대 60초). cloudflared precheck 가
-# ~15초 걸리고 URL 은 그 뒤 찍히므로 짧은 타임아웃은 놓친다. URL 은 로그에 남으므로
-# 파일을 반복 grep(고정 tail -f 보다 견고).
-NEW=""
-for _ in $(seq 1 30); do
-    NEW=$(grep -oE "https://[a-z0-9-]+\.trycloudflare\.com" "$LOG" 2>/dev/null | tail -1)
-    [ -n "$NEW" ] && break
-    sleep 2
-done
-if [ -z "$NEW" ]; then echo "  URL 확보 실패(60s)"; exit 1; fi
-CUR=$(cat "$URL_FILE" 2>/dev/null)
-echo "$NEW" > "$URL_FILE"
-echo "  새 URL: $NEW (이전: ${CUR:-없음})"
+    # 새 trycloudflare URL 확보 — cloudflared precheck가 끝날 때까지 최대 60초 대기한다.
+    for _ in $(seq 1 30); do
+        NEW=$(grep -oE "https://[a-z0-9-]+\.trycloudflare\.com" "$LOG" 2>/dev/null | tail -1)
+        [ -n "$NEW" ] && break
+        sleep 2
+    done
+    if [ -z "$NEW" ]; then echo "  URL 확보 실패(60s)"; exit 1; fi
+    LIVE=""
+    for _ in 1 2 3 4 5 6 7 8 9 10; do
+        if probe_tunnel "$NEW"; then
+            LIVE="true"
+            break
+        fi
+        sleep 2
+    done
+    if [ "$LIVE" != "true" ]; then
+        echo "  새 URL probe 실패(20s): $NEW"
+        exit 1
+    fi
+
+    echo "$NEW" > "$URL_FILE"
+    echo "  새 URL: $NEW (이전: ${CUR:-없음})"
+fi
 
 # URL 변경 시 Vercel 현관(landing) 링크 갱신 → master push → Vercel 자동배포.
 # 메인 트리가 feature 브랜치일 수 있으므로(라이브 실증: feat/llm-decision-layer 체크아웃
 # 중이면 커밋이 엉뚱한 브랜치에 감) master 고정 전용 워크트리에서 커밋한다.
 WT="$HOME/.cache/landing_master_wt"
-if [ "$NEW" != "$CUR" ]; then
+CURRENT_GATEWAY="$(grep -oE "https://[a-z0-9-]+\.trycloudflare\.com" "$LANDING" 2>/dev/null | tail -1)"
+if [ "$CURRENT_GATEWAY" != "$NEW" ]; then
     cd "$PROJECT_DIR" || exit 1
     if [ ! -e "$WT/.git" ]; then
-        git worktree add "$WT" master 2>>"$LOG" || { echo "  워크트리 생성 실패"; exit 1; }
+        # 이 스크립트는 보통 master checkout에서 실행된다. 브랜치 worktree는
+        # 같은 브랜치가 이미 사용 중이면 생성할 수 없으므로 detached로 만든다.
+        git worktree add --detach "$WT" master 2>>"$LOG" || { echo "  워크트리 생성 실패"; exit 1; }
     fi
     cd "$WT" || exit 1
     git fetch -q origin master && git reset -q --hard origin/master
