@@ -713,11 +713,18 @@ def test_views_sp500_heatmap_assembles(monkeypatch):
     df = pd.DataFrame(1.0, index=idx, columns=cols)
     df[("AAPL", "Close")] = [100.0, 102.0]   # +2%
     df[("MSFT", "Close")] = [200.0, 194.0]   # -3%
-    monkeypatch.setattr(yf, "download", lambda *a, **k: df)
+    calls = {}
+
+    def download(*args, **kwargs):
+        calls.update(kwargs)
+        return df
+
+    monkeypatch.setattr(yf, "download", download)
     got = {r["ticker"]: r for r in views._sp500_heatmap_live()}   # 라이브 조립(스냅샷 우회)
     assert "AAPL" in got and "MSFT" in got                     # Close 있는 종목만
     assert abs(got["AAPL"]["pct"] - 2.0) < 0.01
     assert got["AAPL"]["sector_kr"] == "기술" and got["AAPL"]["market_cap"] > 0   # 실제 메타
+    assert calls["period"] == "7d"                                  # 주말·휴장일 안전 윈도우
 
 
 def test_views_sp500_heatmap_graceful(monkeypatch):
@@ -736,7 +743,8 @@ def test_views_sp500_heatmap_snapshot_first(monkeypatch, tmp_path):
     import json
     from dashboard import views
     snap = tmp_path / "sp500_heatmap.json"
-    rows = [{"ticker": "AAPL", "name": "Apple", "sector_kr": "기술", "market_cap": 4e12, "pct": 1.5}]
+    rows = [{"ticker": f"T{i}", "name": f"Ticker {i}", "sector_kr": "기술",
+             "market_cap": 1e9 + i, "pct": 1.5} for i in range(450)]
     snap.write_text(json.dumps(rows), encoding="utf-8")
     monkeypatch.setattr(views, "_HEATMAP_SNAP", str(snap))
 
@@ -745,6 +753,21 @@ def test_views_sp500_heatmap_snapshot_first(monkeypatch, tmp_path):
 
     monkeypatch.setattr(views, "_sp500_heatmap_live", boom)
     assert views.sp500_heatmap() == rows
+
+
+def test_views_sp500_heatmap_rejects_partial_snapshot(monkeypatch, tmp_path):
+    """한 종목만 남은 신선한 snapshot은 라이브 재수집으로 복구해야 한다."""
+    import json
+    from dashboard import views
+    snap = tmp_path / "sp500_heatmap.json"
+    partial = [{"ticker": "HUBB", "name": "Hubbell", "sector_kr": "산업재",
+                "market_cap": 1e9, "pct": -2.26}]
+    full = [{"ticker": f"T{i}", "name": f"Ticker {i}", "sector_kr": "기술",
+             "market_cap": 1e9 + i, "pct": 0.0} for i in range(450)]
+    snap.write_text(json.dumps(partial), encoding="utf-8")
+    monkeypatch.setattr(views, "_HEATMAP_SNAP", str(snap))
+    monkeypatch.setattr(views, "_sp500_heatmap_live", lambda: full)
+    assert views.sp500_heatmap() == full
 
 
 # ── O1 시장 지표 (F&G + 지수 RSI·monkeypatch·무네트워크) ─────────────────

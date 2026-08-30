@@ -5,6 +5,7 @@ app.py 에서 st.cache_data 로 감싼다. provider 는 함수 내부 import(테
 """
 from __future__ import annotations
 
+import logging
 import os
 import re
 from datetime import timedelta
@@ -13,6 +14,9 @@ from typing import Any
 from agent_console import storage
 from dashboard import chart_workspace
 from ohlc_utils import normalize_ohlc_frame
+
+
+logger = logging.getLogger(__name__)
 
 
 class _StrategyStudioProxy:
@@ -844,6 +848,9 @@ def realtime_quote(ticker: str) -> dict | None:
 
 
 _HEATMAP_SNAP = os.path.expanduser("~/reports/ml-cache/sp500_heatmap.json")
+# The seed currently contains 503 constituents; a small row count is a broken
+# snapshot, not a valid partial market map.
+_MIN_SP500_HEATMAP_ROWS = 400
 
 
 def sp500_heatmap() -> list[dict]:
@@ -857,8 +864,14 @@ def sp500_heatmap() -> list[dict]:
         if time.time() - os.stat(_HEATMAP_SNAP).st_mtime < 5400:      # 90분 이내 신선
             with open(_HEATMAP_SNAP, encoding="utf-8") as f:
                 rows = json.load(f)
-            if rows:
+            if isinstance(rows, list) and len(rows) >= _MIN_SP500_HEATMAP_ROWS:
                 return rows
+            if rows:
+                logger.warning(
+                    "S&P500 heatmap partial snapshot ignored: %s rows (minimum %s)",
+                    len(rows) if isinstance(rows, list) else "unknown",
+                    _MIN_SP500_HEATMAP_ROWS,
+                )
     except Exception:
         pass
     rows = _sp500_heatmap_live()
@@ -874,7 +887,7 @@ def sp500_heatmap() -> list[dict]:
 def _sp500_heatmap_live() -> list[dict]:
     """S&P500 시장 맵 라이브 조립 — [{ticker,name,sector_kr,market_cap,pct}]. 표시·graceful.
 
-    섹터·시총 = 정적 시드(sp500_seed·sp500_meta), 당일 등락% = 라이브 배치(yf.download 2일 종가).
+    섹터·시총 = 정적 시드(sp500_seed·sp500_meta), 당일 등락% = 라이브 배치(yf.download 7일 종가).
     결측(시총·pct 없음) 스킵. 네트워크/모듈 실패 시 빈 리스트. (크론·스냅샷 미스 시 폴백)
     """
     try:
@@ -891,7 +904,9 @@ def _sp500_heatmap_live() -> list[dict]:
         import warnings
         warnings.filterwarnings("ignore")
         import yfinance as yf
-        df = yf.download(tickers, period="2d", progress=False, group_by="ticker", threads=True)
+        # 주말·미국 휴장일에는 2d가 실제 거래일 한 개만 포함할 수 있다.
+        # 7d로 여유를 두고 마지막 두 유효 종가를 비교한다.
+        df = yf.download(tickers, period="7d", progress=False, group_by="ticker", threads=True)
         for t in tickers:
             try:
                 c = df[t]["Close"].dropna()
