@@ -249,6 +249,12 @@ def test_cpcv_activation_requires_affirmative_per_fold_chronology_proof():
             "validation_mode": "cpcv",
             "train_max": f"2024-01-0{number + 1}T00:00:00Z",
             "test_start": f"2024-01-1{number + 1}T00:00:00Z",
+            "chronology_evidence": {
+                "fold_id": f"cpcv-{number}", "valid": True, "future_training": False,
+                "train_max": f"2024-01-0{number + 1}T00:00:00Z",
+                "test_min": f"2024-01-1{number + 1}T00:00:00Z",
+                "train_before_test": True,
+            },
             "net_cagr": 0.1,
             "trade_count": 50,
         }
@@ -264,6 +270,7 @@ def test_cpcv_activation_requires_affirmative_per_fold_chronology_proof():
             "turnover": 0.3, "dsr": 0.99, "pbo": 0.1, "regime_concentration": 0.2,
             "provenance_ok": True,
             "cpcv_future_training": False,
+            "cpcv_chronology_ok": True,
             "dsr_evidence": {"tested_configurations": 4, "method": "dsr"},
             "pbo_evidence": {"tested_configurations": 4, "matrix_shape": [120, 4]},
         },
@@ -335,6 +342,11 @@ def test_cpcv_chronology_evidence_is_bound_to_fold_ids_timestamps_and_flags():
             "validation_mode": "cpcv",
             "train_max": "2024-01-01T00:00:00Z",
             "test_start": "2024-01-11T00:00:00Z",
+            "chronology_evidence": {
+                "fold_id": "cpcv-0", "valid": True, "future_training": False,
+                "train_max": "2024-01-01T00:00:00Z", "test_min": "2024-01-11T00:00:00Z",
+                "train_before_test": True,
+            },
             "trade_count": 50,
         },
         {
@@ -342,6 +354,11 @@ def test_cpcv_chronology_evidence_is_bound_to_fold_ids_timestamps_and_flags():
             "validation_mode": "cpcv",
             "train_max": "2024-01-02T00:00:00Z",
             "test_start": "2024-01-12T00:00:00Z",
+            "chronology_evidence": {
+                "fold_id": "cpcv-1", "valid": True, "future_training": False,
+                "train_max": "2024-01-02T00:00:00Z", "test_min": "2024-01-12T00:00:00Z",
+                "train_before_test": True,
+            },
             "trade_count": 50,
         },
     ]
@@ -378,6 +395,10 @@ def test_cpcv_chronology_evidence_is_bound_to_fold_ids_timestamps_and_flags():
         ([evidence[0], {**evidence[1], "fold_id": "cpcv-0"}], "duplicate fold ID"),
         ([{key: value for key, value in evidence[0].items() if key != "valid"}, evidence[1]], "missing proof"),
         ([{**evidence[0], "future_training": True, "no_future_training": True}, evidence[1]], "contradictory future proof"),
+        ([{**evidence[0], "proof_valid": False}, evidence[1]], "contradictory validity aliases"),
+        ([{**evidence[0], "train_max_before_test_min": False}, evidence[1]], "contradictory chronology aliases"),
+        ([{key: value for key, value in evidence[0].items() if key != "fold_id"}, evidence[1]], "missing proof fold ID"),
+        ([{**evidence[0], "fold_id": None}, evidence[1]], "None proof fold ID"),
         ([{**evidence[0], "train_end": "2024-01-02T00:00:00Z"}, evidence[1]], "conflicting train-end aliases"),
         ([{**evidence[0], "test_start": "2024-01-12T00:00:00Z"}, evidence[1]], "conflicting test-start aliases"),
         ([{**evidence[0], "test_min": "2024-01-10T00:00:00Z"}, evidence[1]], "mismatched test timestamp"),
@@ -388,6 +409,41 @@ def test_cpcv_chronology_evidence_is_bound_to_fold_ids_timestamps_and_flags():
             **base,
             "aggregate": {**base["aggregate"], "cpcv_chronology_evidence": invalid_evidence},
         })
+        decision = promotion_gate(
+            report, {"environment": "pilot", "strictly_chronological": True}
+        )
+        assert "cpcv_chronology_evidence" in decision.failed_checks, label
+
+    actual_variants = [
+        ([{key: value for key, value in folds[0].items() if key != "path_id"}, folds[1]], "missing actual fold ID"),
+        ([{**folds[0], "path_id": None}, folds[1]], "None actual fold ID"),
+        ([
+            {**folds[0], "chronology_evidence": {
+                key: value for key, value in folds[0]["chronology_evidence"].items() if key != "fold_id"
+            }},
+            folds[1],
+        ], "missing nested fold ID"),
+        ([
+            {**folds[0], "chronology_evidence": {
+                **folds[0]["chronology_evidence"], "fold_id": None,
+            }},
+            folds[1],
+        ], "None nested fold ID"),
+        ([
+            {**folds[0], "chronology_evidence": {
+                **folds[0]["chronology_evidence"], "proof_valid": False,
+            }},
+            folds[1],
+        ], "contradictory nested validity aliases"),
+        ([
+            {**folds[0], "chronology_evidence": {
+                **folds[0]["chronology_evidence"], "train_max_before_test_min": False,
+            }},
+            folds[1],
+        ], "contradictory nested chronology aliases"),
+    ]
+    for invalid_folds, label in actual_variants:
+        report = ValidationReport.from_dict({**base, "folds": invalid_folds})
         decision = promotion_gate(
             report, {"environment": "pilot", "strictly_chronological": True}
         )

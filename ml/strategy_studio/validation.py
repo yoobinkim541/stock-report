@@ -160,11 +160,20 @@ class ValidationSplit:
                     and train_max < test_min
                 ),
                 "future_training": self.future_training,
+                "no_future_training": not self.future_training,
                 "train_before_test": bool(
+                    len(self.train) and len(self.test) and train_max < test_min
+                ),
+                "train_max_before_test_min": bool(
                     len(self.train) and len(self.test) and train_max < test_min
                 ),
                 "train_max": _json_order_value(train_max) if train_max is not None else None,
                 "test_min": _json_order_value(test_min) if test_min is not None else None,
+                "proof_valid": bool(
+                    len(self.train) and len(self.test)
+                    and not self.future_training
+                    and train_max < test_min
+                ),
             },
         })
 
@@ -1654,18 +1663,44 @@ def _consistent_identifier(
     *keys: str,
 ) -> tuple[str | None, bool]:
     values = [record[key] for key in keys if key in record]
-    if not values or any(_is_missing_scalar(value) or not str(value).strip() for value in values):
+    identifiers: list[str] = []
+    for value in values:
+        if _is_missing_scalar(value):
+            return None, False
+        identifier = str(value).strip()
+        if not identifier:
+            return None, False
+        identifiers.append(identifier)
+    if not identifiers:
         return None, False
-    first = str(values[0])
-    return first, all(str(value) == first for value in values[1:])
+    first = identifiers[0]
+    return first, all(identifier == first for identifier in identifiers[1:])
 
 
-def _has_consistent_no_future_flags(record: Mapping[str, Any]) -> bool:
-    future = record.get("future_training")
-    no_future = record.get("no_future_training")
-    if future is True or no_future is False:
+def _has_consistent_no_future_flags(
+    record: Mapping[str, Any],
+    *,
+    required: bool = True,
+) -> bool:
+    values = [record[key] for key in ("future_training", "no_future_training") if key in record]
+    if not values:
+        return not required
+    if "future_training" in record and record["future_training"] is not False:
         return False
-    return future is False or no_future is True
+    if "no_future_training" in record and record["no_future_training"] is not True:
+        return False
+    return True
+
+
+def _consistent_boolean_aliases(
+    record: Mapping[str, Any],
+    keys: Sequence[str],
+    *,
+    expected: bool,
+    required: bool = True,
+) -> bool:
+    values = [record[key] for key in keys if key in record]
+    return (bool(values) or not required) and all(value is expected for value in values)
 
 
 def _validation_actual_timestamp(
@@ -1708,13 +1743,13 @@ def _has_cpcv_chronology_evidence(
         return False
     if actual_folds is None or len(actual_folds) != expected_folds:
         return False
-    expected_id_set = {str(value) for value in expected_ids}
+    expected_id_set = {str(value).strip() for value in expected_ids}
     if len(expected_id_set) != expected_folds:
         return False
     actual_by_id: dict[str, Mapping[str, Any]] = {}
     for actual in actual_folds:
         actual_id, actual_id_ok = _consistent_identifier(actual, "path_id", "fold_id", "fold")
-        if not actual_id_ok or actual_id in actual_by_id:
+        if not actual_id_ok or not actual_id or actual_id in actual_by_id:
             return False
         actual_by_id[actual_id] = actual
     if set(actual_by_id) != expected_id_set:
@@ -1724,14 +1759,18 @@ def _has_cpcv_chronology_evidence(
         if not isinstance(candidate, Mapping):
             return False
         fold_id, fold_id_ok = _consistent_identifier(candidate, "fold_id", "path_id", "fold")
-        if not fold_id_ok or fold_id in fold_ids or fold_id not in expected_id_set:
+        if not fold_id_ok or not fold_id or fold_id in fold_ids or fold_id not in expected_id_set:
             return False
         fold_ids.add(fold_id)
-        if candidate.get("valid", candidate.get("proof_valid")) is not True:
+        if not _consistent_boolean_aliases(candidate, ("valid", "proof_valid"), expected=True):
             return False
         if not _has_consistent_no_future_flags(candidate):
             return False
-        if candidate.get("train_before_test", candidate.get("train_max_before_test_min")) is not True:
+        if not _consistent_boolean_aliases(
+            candidate,
+            ("train_before_test", "train_max_before_test_min"),
+            expected=True,
+        ):
             return False
         train_max, train_proof_ok = _consistent_timestamp(
             candidate, "train_max", "train_end", "train_max_timestamp"
@@ -1747,70 +1786,127 @@ def _has_cpcv_chronology_evidence(
             return False
         actual = actual_by_id[fold_id]
         actual_evidence = actual.get("chronology_evidence")
-        actual_proof = actual_evidence if isinstance(actual_evidence, Mapping) else {}
-        for actual_flags in (actual, actual_proof):
-            if any(key in actual_flags for key in ("future_training", "no_future_training")):
-                if not _has_consistent_no_future_flags(actual_flags):
-                    return False
-        if isinstance(actual_evidence, Mapping):
-            if actual_evidence.get("valid", actual_evidence.get("proof_valid")) is False:
-                return False
-            if actual_evidence.get("train_before_test", actual_evidence.get("train_max_before_test_min")) is False:
-                return False
+        if not isinstance(actual_evidence, Mapping):
+            return False
+        actual_evidence_id, actual_evidence_id_ok = _consistent_identifier(
+            actual_evidence, "fold_id", "path_id", "fold"
+        )
+        if not actual_evidence_id_ok or actual_evidence_id != fold_id:
+            return False
+        if not _consistent_boolean_aliases(
+            actual, ("valid", "proof_valid"), expected=True, required=False
+        ):
+            return False
+        if not _has_consistent_no_future_flags(actual, required=False):
+            return False
+        if not _consistent_boolean_aliases(
+            actual,
+            ("train_before_test", "train_max_before_test_min"),
+            expected=True,
+            required=False,
+        ):
+            return False
+        if not _consistent_boolean_aliases(actual_evidence, ("valid", "proof_valid"), expected=True):
+            return False
+        if not _has_consistent_no_future_flags(actual_evidence):
+            return False
+        if not _consistent_boolean_aliases(
+            actual_evidence,
+            ("train_before_test", "train_max_before_test_min"),
+            expected=True,
+        ):
+            return False
         actual_train_max, train_timestamp_ok = _consistent_timestamp(
             actual, "train_max", "train_end", "train_max_timestamp"
         )
         actual_test_min, test_timestamp_ok = _consistent_timestamp(
             actual, "test_min", "test_start", "test_min_timestamp"
         )
+        nested_train_max, nested_train_timestamp_ok = _consistent_timestamp(
+            actual_evidence, "train_max", "train_end", "train_max_timestamp"
+        )
+        nested_test_min, nested_test_timestamp_ok = _consistent_timestamp(
+            actual_evidence, "test_min", "test_start", "test_min_timestamp"
+        )
         if (
             not train_timestamp_ok
             or not test_timestamp_ok
+            or not nested_train_timestamp_ok
+            or not nested_test_timestamp_ok
             or not _same_time(train_max, actual_train_max)
             or not _same_time(test_min, actual_test_min)
+            or not _same_time(train_max, nested_train_max)
+            or not _same_time(test_min, nested_test_min)
         ):
             return False
     return fold_ids == expected_id_set
 
 
-def _cpcv_chronology_gate_ok(report: ValidationReport) -> bool:
-    aggregate = report.aggregate
-    actual_folds = _actual_cpcv_fold_records(report)
+def _cpcv_chronology_payload_ok(
+    aggregate: Mapping[str, Any],
+    actual_folds: Sequence[Mapping[str, Any]],
+) -> bool:
+    """Validate one complete CPCV chronology payload against actual folds.
+
+    This is shared by promotion, activation, and the dashboard. The public
+    result is untrusted input, so every declared count, ID, alias, and nested
+    proof is required to agree rather than relying on a first-present value.
+    """
+
+    if not isinstance(aggregate, Mapping) or not actual_folds:
+        return False
+    if aggregate.get("cpcv_chronology_ok") is not True:
+        return False
+    if "cpcv_future_training" in aggregate and aggregate["cpcv_future_training"] is not False:
+        return False
+
     declared_ids = aggregate.get("cpcv_fold_ids")
-    if isinstance(declared_ids, Sequence) and not isinstance(declared_ids, (str, bytes)):
-        expected_ids = [str(value) for value in declared_ids]
-    else:
-        expected_ids = [
-            str(fold_id)
-            for fold_id in (
-                _proof_value(fold, "path_id", "fold_id", "fold")
-                for fold in actual_folds
-            )
-            if fold_id is not None
-        ]
+    if not isinstance(declared_ids, Sequence) or isinstance(declared_ids, (str, bytes)):
+        return False
+    expected_ids = [str(value).strip() for value in declared_ids]
+    if len(expected_ids) != len(actual_folds) or any(not value for value in expected_ids):
+        return False
+    if len(set(expected_ids)) != len(expected_ids):
+        return False
+    if "fold_ids" in aggregate:
+        fold_ids = aggregate["fold_ids"]
+        if not isinstance(fold_ids, Sequence) or isinstance(fold_ids, (str, bytes)):
+            return False
+        if [str(value).strip() for value in fold_ids] != expected_ids:
+            return False
+
     declared_count = aggregate.get("cpcv_fold_count")
-    if declared_count is None and "fold_count" in aggregate:
-        declared_count = aggregate["fold_count"]
-    if declared_count is None:
-        expected_count = len(expected_ids)
-    else:
+    if isinstance(declared_count, bool):
+        return False
+    try:
+        count = int(declared_count)
+    except (TypeError, ValueError):
+        return False
+    if count != len(actual_folds) or count <= 0:
+        return False
+    if "fold_count" in aggregate:
+        fold_count = aggregate["fold_count"]
+        if isinstance(fold_count, bool):
+            return False
         try:
-            expected_count = int(declared_count)
+            if int(fold_count) != count:
+                return False
         except (TypeError, ValueError):
             return False
-    chronology_evidence = aggregate.get("cpcv_chronology_evidence")
-    if chronology_evidence is None:
-        chronology_evidence = [
-            fold["chronology_evidence"]
-            for fold in actual_folds
-            if isinstance(fold.get("chronology_evidence"), Mapping)
-        ]
+
+    evidence = aggregate.get("cpcv_chronology_evidence")
     return _has_cpcv_chronology_evidence(
-        chronology_evidence,
-        expected_count,
+        evidence,
+        count,
         expected_ids=expected_ids,
         actual_folds=actual_folds,
     )
+
+
+def _cpcv_chronology_gate_ok(report: ValidationReport) -> bool:
+    aggregate = report.aggregate
+    actual_folds = _actual_cpcv_fold_records(report)
+    return _cpcv_chronology_payload_ok(aggregate, actual_folds)
 
 
 def _promotion_provenance_ok(report: ValidationReport) -> bool:
