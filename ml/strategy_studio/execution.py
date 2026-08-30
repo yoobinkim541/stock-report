@@ -632,7 +632,11 @@ def _health_mapping(value: object) -> dict[str, Any] | None:
             return {
                 **mapped,
                 "status": "pause",
-                "reason": "invalid_health_timestamp" if _health_has_invalid_timestamp(mapped) else "invalid_health_age",
+                "reason": (
+                    "invalid_health_timestamp"
+                    if _health_has_invalid_timestamp(mapped)
+                    else "stale_source" if _health_age_exceeds_limit(mapped) else "invalid_health_age"
+                ),
             }
         return mapped
     if status:
@@ -649,7 +653,11 @@ def _health_mapping(value: object) -> dict[str, Any] | None:
             return {
                 **mapped,
                 "status": "pause",
-                "reason": "invalid_health_timestamp" if _health_has_invalid_timestamp(mapped) else "invalid_health_age",
+                "reason": (
+                    "invalid_health_timestamp"
+                    if _health_has_invalid_timestamp(mapped)
+                    else "stale_source" if _health_age_exceeds_limit(mapped) else "invalid_health_age"
+                ),
             }
         return mapped
     if quality:
@@ -731,10 +739,12 @@ def _aggregate_source_health(value: Mapping[str, Any]) -> dict[str, Any] | None:
     fresh = [(source, health) for source, health in active
              if not _health_blocks_entries(health)]
     if fresh:
+        source, health = fresh[0]
         return {
+            **health,
             "status": "fresh",
-            "reason": "fresh",
-            "source": fresh[0][0],
+            "reason": str(health.get("reason") or "fresh"),
+            "source": health.get("source") or source,
             "sources": [source for source, _health in active],
         }
 
@@ -799,8 +809,28 @@ def _health_blocks_entries(health: Mapping[str, Any] | None) -> bool:
             age_value = float(age)
         except (TypeError, ValueError, OverflowError):
             return True
-        return not isfinite(age_value) or age_value < 0.0
+        if not isfinite(age_value) or age_value < 0.0:
+            return True
+        limit = health.get("max_age_seconds")
+        if limit is not None:
+            try:
+                limit_value = float(limit)
+            except (TypeError, ValueError, OverflowError):
+                return True
+            if not isfinite(limit_value) or limit_value < 0.0:
+                return True
+            return age_value > limit_value
+        return False
     return True
+
+
+def _health_age_exceeds_limit(health: Mapping[str, Any] | None) -> bool:
+    if not health or health.get("age_seconds") is None or health.get("max_age_seconds") is None:
+        return False
+    try:
+        return float(health["age_seconds"]) > float(health["max_age_seconds"])
+    except (TypeError, ValueError, OverflowError):
+        return False
 
 
 _HEALTH_TIMESTAMP_FIELDS = (

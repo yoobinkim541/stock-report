@@ -1617,6 +1617,9 @@ def test_ohlc_tf_uses_intraday_store_before_yfinance(monkeypatch):
                         lambda symbol, date_utc=None, *, interval="1m", base_dir=None:
                         day1 if date_utc == "2026-07-07" else day2 if date_utc == "2026-07-08"
                         else pd.DataFrame())
+    monkeypatch.setattr(ib, "load_bars_bulk",
+                        lambda symbols, dates, *, interval="1m", base_dir=None, session=None:
+                        {"AAPL": pd.concat([day1, day2])})
     monkeypatch.setattr(ib, "market_of", lambda ticker: "US")
     monkeypatch.setattr(md, "load_cached_ohlc", lambda *a, **k: None)
     def _save(symbol, period, df):

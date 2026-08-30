@@ -190,6 +190,22 @@ def test_cpcv_paths_are_chronological_and_have_post_test_embargo():
             assert following[0] not in split.train
 
 
+def test_cpcv_rejects_combinatorial_path_count_before_generating_folds():
+    index = pd.date_range("2020-01-01", periods=100, freq="D")
+
+    with pytest.warns(UserWarning, match="max_cpcv_paths"):
+        splits = make_cpcv_splits(
+            index,
+            groups=10,
+            test_groups=5,
+            embargo_bars=0,
+            label_horizon=0,
+            max_paths=10,
+        )
+
+    assert splits == []
+
+
 def test_cpcv_is_diagnostic_by_default_and_strict_mode_has_no_future_training():
     index = pd.date_range("2020-01-01", periods=12, freq="D")
     diagnostic = make_cpcv_splits(index, groups=3, test_groups=1, embargo_bars=1, label_horizon=0)

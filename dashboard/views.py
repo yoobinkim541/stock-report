@@ -1705,17 +1705,16 @@ def _load_intraday_store_tf(ticker: str, tf: str):
 
     session_limits = {"5m": 90, "1h": 180, "2h": 180, "4h": 180}
     limit = session_limits.get(tf, 90)
-    frames = []
-    for date in dates[-limit:]:
-        frame = intraday_bars.load_bars(ticker, date, interval="1m")
-        if frame is None or getattr(frame, "empty", True):
-            frame = intraday_bars.load_bars(ticker, date, interval="5m")
-        if frame is not None and not getattr(frame, "empty", True):
-            frames.append(frame)
-    if not frames:
+    selected_dates = dates[-limit:]
+    loaded = intraday_bars.load_bars_bulk([ticker], selected_dates, interval="1m")
+    hist = loaded.get(intraday_bars.base_symbol(ticker)) if isinstance(loaded, dict) else None
+    if hist is None or getattr(hist, "empty", True):
+        loaded = intraday_bars.load_bars_bulk([ticker], selected_dates, interval="5m")
+        hist = loaded.get(intraday_bars.base_symbol(ticker)) if isinstance(loaded, dict) else None
+    if hist is None or getattr(hist, "empty", True):
         return None
 
-    hist = normalize_ohlc_frame(pd.concat(frames))
+    hist = normalize_ohlc_frame(hist)
     if hist is None or getattr(hist, "empty", True):
         return None
     market = intraday_bars.market_of(ticker)

@@ -12,7 +12,7 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta
 from itertools import combinations
-from math import isfinite, sqrt
+from math import comb, isfinite, sqrt
 from numbers import Real
 from typing import Any
 import warnings as _warnings
@@ -27,6 +27,7 @@ TRADING_DAYS = 252
 MIN_STATISTICAL_OBSERVATIONS = 30
 _VALID_ENVIRONMENTS = {"shadow", "pilot", "live", "sandbox", "paper"}
 _ENVIRONMENT_ALIASES = {"sandbox": "shadow", "paper": "pilot"}
+DEFAULT_MAX_CPCV_PATHS = 128
 
 
 def _warn(message: str) -> None:
@@ -398,6 +399,7 @@ def make_cpcv_splits(
     label_horizon: int | None = None,
     label_end: pd.Series | Sequence[object] | None = None,
     strictly_chronological: bool = False,
+    max_paths: int | None = DEFAULT_MAX_CPCV_PATHS,
 ) -> list[ValidationSplit]:
     """Enumerate chronological CPCV paths with purge and embargo blackout rows."""
 
@@ -412,6 +414,16 @@ def make_cpcv_splits(
     if group_count > len(values) or not len(values):
         _warn("CPCV groups do not fit the supplied index")
         return []
+    if max_paths is not None:
+        try:
+            path_limit = _non_negative_int(max_paths, "max_cpcv_paths")
+        except (TypeError, ValueError) as exc:
+            _warn(str(exc))
+            return []
+        path_count = comb(group_count, selected_count)
+        if path_limit < 1 or path_count > path_limit:
+            _warn(f"CPCV path count {path_count} exceeds max_cpcv_paths {path_limit}")
+            return []
 
     group_positions = [list(part) for part in np.array_split(np.arange(len(values)), group_count)]
     try:

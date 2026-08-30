@@ -100,6 +100,62 @@ def test_console_price_loader_uses_profile_data_without_filling_gaps(monkeypatch
     assert pd.isna(prices.loc[pd.Timestamp("2026-01-02", tz="UTC"), "QQQ__close"])
 
 
+def test_console_price_loader_records_symbol_failures_and_benchmark_coverage(monkeypatch):
+    from agent_console import strategy_studio as console_studio
+
+    index = pd.date_range("2026-01-01", periods=3, freq="D", tz="UTC")
+
+    def fake_load_profile_bars(symbol, **kwargs):
+        if symbol == "MSFT":
+            raise TimeoutError("provider timeout")
+        if symbol == "SPY":
+            return pd.DataFrame()
+        values = [100.0, 101.0, 102.0]
+        return pd.DataFrame(
+            {"Open": values, "High": values, "Low": values, "Close": values, "Volume": [1.0] * 3},
+            index=index,
+        )
+
+    monkeypatch.setattr("providers.market_data.load_profile_bars", fake_load_profile_bars)
+    spec = StrategySpec.from_dict({
+        "name": "coverage-manifest",
+        "market": "us",
+        "timeframe": "1d",
+        "base_symbol": "AAPL",
+        "benchmark": "SPY",
+        "universe": {"type": "list", "symbols": ["AAPL", "MSFT"]},
+    })
+
+    prices = console_studio._load_prices(spec, period="1y")
+    manifest = prices.attrs["load_manifest"]
+
+    assert manifest["requested_symbols"] == ["AAPL", "MSFT", "SPY"]
+    assert manifest["loaded_symbols"] == ["AAPL"]
+    assert manifest["failed_symbols"]["MSFT"]["reason"] == "provider timeout"
+    assert manifest["failed_symbols"]["SPY"]["reason"] == "empty_frame"
+    assert manifest["benchmark"] == {"symbol": "SPY", "available": False}
+    assert manifest["coverage"] == pytest.approx(1 / 3)
+
+
+def test_compile_strategy_builds_indicator_context_from_pre_test_history():
+    context = _prices()
+    execution = context.iloc[20:].copy()
+    spec = {
+        "name": "warmup",
+        "market": "us",
+        "timeframe": "1d",
+        "base_symbol": "QQQ",
+        "universe": {"type": "list", "symbols": ["QQQ"]},
+        "indicators": [{"name": "ema", "kind": "ema", "period": 5, "source": "close", "output": "ema"}],
+        "rules": {"entry": [], "exit": []},
+    }
+
+    compiled = compile_strategy(spec, execution, feature_context=context)
+
+    expected = context["QQQ"].ewm(span=5, adjust=False, min_periods=5).mean().loc[execution.index[0]]
+    assert compiled.contexts["QQQ"]["ema"].loc[execution.index[0]] == pytest.approx(expected)
+
+
 def test_builtin_rsi_cash_preset_runs_and_reports_trades():
     spec = builtin_strategy_presets()["rsi_cash"]
     run = run_strategy_backtest(spec, _prices(), benchmark="QQQ")

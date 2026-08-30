@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import time
 from collections.abc import Mapping
 from copy import deepcopy
 from typing import Any
@@ -1424,10 +1425,51 @@ def _preview_binding(
 
 
 def _run_preview(spec_payload: dict[str, Any], *, benchmark: str | None, period: str | None) -> dict[str, Any]:
+    data_watermark = _preview_data_watermark(spec_payload, period)
     try:
-        return cached.strategy_studio_preview(spec_payload, benchmark=benchmark, period=period)
+        return cached.strategy_studio_preview(
+            spec_payload, benchmark=benchmark, period=period, data_watermark=data_watermark,
+        )
     except Exception:
         return views.strategy_studio_preview(spec_payload, benchmark=benchmark, period=period)
+
+
+def _preview_data_watermark(spec_payload: Mapping[str, Any], period: str | None) -> str:
+    """Produce a cheap cache token that follows live-store changes."""
+
+    profile = str((spec_payload or {}).get("data_profile") or "").strip().lower()
+    timeframe = str((spec_payload or {}).get("timeframe") or "1d").strip().lower()
+    if profile in {"kr_intraday", "extended_us"} or timeframe in {"1m", "5m", "15m", "1h"}:
+        try:
+            from providers import intraday_bars
+
+            dates = intraday_bars.available_dates()
+            if dates:
+                latest = intraday_bars.bar_path(dates[-1])
+                stat = latest.stat()
+                return f"intraday:{dates[-1]}:{stat.st_mtime_ns}:{stat.st_size}"
+        except (OSError, TypeError, ValueError):
+            pass
+        return f"intraday:missing:{int(time.time() // 60)}"
+    # Daily/weekly/monthly provider caches are refreshed less often and do not
+    # expose a single shared watermark, so a bounded time bucket prevents the
+    # old one-hour stale-preview window without multiplying provider calls.
+    try:
+        from providers.market_data import profile_cache_watermark
+
+        universe = (spec_payload or {}).get("universe")
+        universe = universe if isinstance(universe, Mapping) else {}
+        symbols = list(universe.get("symbols") or [])
+        symbols.extend([
+            (spec_payload or {}).get("base_symbol"),
+            (spec_payload or {}).get("benchmark"),
+        ])
+        watermark = profile_cache_watermark(symbols, period or "1y")
+        if watermark != "empty":
+            return f"history:{watermark}"
+    except (OSError, TypeError, ValueError):
+        pass
+    return f"history:{period or 'default'}:{int(time.time() // 900)}"
 
 
 def _save_spec(spec_payload: dict[str, Any]) -> dict[str, Any] | None:
@@ -1597,13 +1639,13 @@ def _price_history(symbol: str, spec_payload: dict[str, Any]) -> pd.DataFrame:
 
 def _period_for_payload(spec_payload: dict[str, Any]) -> str:
     tf = str((spec_payload or {}).get("timeframe") or "1d").lower().strip()
-    mapping = {"1d": "2y", "1wk": "5y", "1w": "5y", "5m": "60d", "1m": "30d"}
+    mapping = {"1d": "2y", "1wk": "5y", "1w": "5y", "1mo": "10y", "5m": "60d", "1m": "30d"}
     return mapping.get(tf, "2y")
 
 
 def _view_days(spec_payload: dict[str, Any]) -> int | None:
     tf = str((spec_payload or {}).get("timeframe") or "1d").lower().strip()
-    mapping = {"1d": 365, "1wk": 730, "1w": 730, "5m": 30, "1m": 14}
+    mapping = {"1d": 365, "1wk": 730, "1w": 730, "1mo": 3650, "5m": 30, "1m": 14}
     return mapping.get(tf, 365)
 
 

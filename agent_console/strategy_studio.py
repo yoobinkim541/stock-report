@@ -59,6 +59,7 @@ _CONTROLLED_PARAMETER_BLOCK_KEYS = {
         "mode", "min_trades", "min_test_periods", "min_observations", "max_drawdown", "max_mdd",
         "max_turnover", "max_pbo", "min_dsr", "max_regime_concentration",
         "require_cost_adjusted_positive_excess", "embargo_bars", "strictly_chronological",
+        "min_universe_coverage", "max_cpcv_paths",
     }),
 }
 _CONTROLLED_PARAMETER_TARGETS = {
@@ -363,13 +364,28 @@ def _run_full_validation_impl(
     prices = _load_prices(strategy, period=period)
     data_quality = _data_quality_from_price_panel(prices)
     provenance = _strategy_provenance(strategy, prices)
+    manifest = prices.attrs.get("load_manifest") if isinstance(prices, pd.DataFrame) else None
+    errors: list[str] = []
+    if isinstance(manifest, Mapping):
+        try:
+            minimum_coverage = float((strategy.validation or {}).get("min_universe_coverage", 1.0))
+        except (TypeError, ValueError):
+            minimum_coverage = 1.0
+        minimum_coverage = min(1.0, max(0.0, minimum_coverage))
+        coverage = float(manifest.get("coverage") or 0.0)
+        if coverage < minimum_coverage:
+            errors.append(
+                f"data coverage below minimum: {coverage:.1%} < {minimum_coverage:.1%}"
+            )
+        benchmark_status = manifest.get("benchmark")
+        if isinstance(benchmark_status, Mapping) and benchmark_status.get("symbol") and not benchmark_status.get("available"):
+            errors.append(f"benchmark data unavailable: {benchmark_status.get('symbol')}")
     splits, split_warnings = _build_validation_splits(
         prices.index if isinstance(prices, pd.DataFrame) else pd.Index([]),
         dict(strategy.validation or {}),
         validation_mode,
     )
     fold_runs: list[Any] = []
-    errors: list[str] = []
     for split in splits:
         try:
             fold_prices = prices.loc[list(split.test)]
@@ -379,6 +395,8 @@ def _run_full_validation_impl(
         if fold_prices.empty:
             errors.append(f"validation fold {split.path_id} has no test data")
             continue
+        context_index = pd.Index([*split.train, *split.test])
+        feature_context = prices.loc[prices.index.isin(context_index)]
         fold_spec = strategy.to_dict()
         fold_validation = dict(fold_spec.get("validation") or {})
         fold_validation.update({
@@ -391,6 +409,8 @@ def _run_full_validation_impl(
             "future_training": bool(split.future_training),
             "no_future_training": not bool(split.future_training),
             "strictly_chronological": bool(split.strictly_chronological),
+            "feature_context_bars": int(len(feature_context)),
+            "warmup_bars": max(0, int(len(feature_context) - len(fold_prices))),
         })
         chronology = dict(split.to_dict()["chronology_evidence"])
         chronology["no_future_training"] = not bool(split.future_training)
@@ -412,6 +432,7 @@ def _run_full_validation_impl(
                 fold_spec,
                 fold_prices,
                 benchmark=strategy.benchmark or strategy.base_symbol or None,
+                feature_context=feature_context,
             )
         except (TypeError, ValueError) as exc:
             errors.append(f"validation fold {split.path_id} failed: {exc}")
@@ -645,6 +666,7 @@ def _build_validation_splits(
             validation.get("test_groups", validation.get("cpcv_test_groups", 1)),
             "validation.test_groups",
         )
+        max_paths = validation.get("max_cpcv_paths", 128)
         strictly_chronological = validation.get("strictly_chronological") is True
         with_warnings = make_cpcv_splits(
             index,
@@ -654,6 +676,7 @@ def _build_validation_splits(
             label_horizon=label_horizon,
             label_end=label_end,
             strictly_chronological=strictly_chronological,
+            max_paths=max_paths,
         )
     elif mode in {"walk_forward", "purged_walk_forward"}:
         min_periods = _positive_integer(validation.get("min_test_periods", 4), "validation.min_test_periods")
@@ -718,6 +741,27 @@ def _data_quality_from_price_panel(prices: object) -> dict[str, Any]:
     attrs = getattr(prices, "attrs", {}) if isinstance(prices, pd.DataFrame) else {}
     if not isinstance(attrs, Mapping):
         return _unknown_data_quality()
+    manifest = attrs.get("load_manifest")
+    if isinstance(manifest, Mapping):
+        failed = manifest.get("failed_symbols")
+        failed = dict(failed) if isinstance(failed, Mapping) else {}
+        coverage = float(manifest.get("coverage") or 0.0)
+        benchmark = manifest.get("benchmark")
+        benchmark_ok = not isinstance(benchmark, Mapping) or benchmark.get("available") is True
+        complete = coverage >= 1.0 and benchmark_ok and not failed
+        return _json_safe({
+            "status": "complete" if complete else "incomplete",
+            "ok": complete,
+            "coverage": coverage,
+            "loaded_symbols": list(manifest.get("loaded_symbols") or []),
+            "failed_symbols": failed,
+            "benchmark": dict(benchmark) if isinstance(benchmark, Mapping) else {},
+            "warnings": [
+                f"{symbol}: {detail.get('reason', 'load_failed')}"
+                for symbol, detail in failed.items()
+                if isinstance(detail, Mapping)
+            ],
+        })
     explicit = attrs.get("data_quality")
     if isinstance(explicit, Mapping):
         return _json_safe(dict(explicit))
@@ -791,6 +835,15 @@ def _strategy_provenance(strategy: StrategySpec, prices: object) -> dict[str, An
     if isinstance(declared, Mapping):
         model = declared.get("model") if isinstance(declared.get("model"), Mapping) else declared
         result["model"] = dict(model)
+    if isinstance(attrs, Mapping):
+        manifest = attrs.get("load_manifest")
+        watermarks = attrs.get("data_watermarks")
+        if isinstance(manifest, Mapping) or isinstance(watermarks, Mapping):
+            data = result.setdefault("data", {})
+            if isinstance(manifest, Mapping):
+                data["load_manifest"] = _json_safe(dict(manifest))
+            if isinstance(watermarks, Mapping):
+                data["watermarks"] = _json_safe(dict(watermarks))
     return _json_safe(result)
 
 
@@ -1849,29 +1902,67 @@ def _load_prices(spec: StrategySpec, period: str | None = None) -> pd.DataFrame:
         or metadata.get("session")
         or "regular"
     ).strip().lower() or "regular"
+    required_symbols = [symbol for symbol in symbols if symbol != "CASH"]
+    load_started = time.perf_counter()
     frames: dict[str, pd.Series] = {}
     data_snapshots: dict[str, Any] = {}
     source_coverages: list[Mapping[str, Any]] = []
+    data_watermarks: dict[str, str] = {}
     provenance: dict[str, Any] = {}
-    from providers.market_data import load_profile_bars
+    loaded_symbols: list[str] = []
+    failed_symbols: dict[str, dict[str, str]] = {}
+    from providers.market_data import load_profile_bars_many
 
-    for symbol in symbols:
-        if symbol == "CASH":
-            continue
-        try:
-            # The chart cache is display-oriented: it may fill a stale last close.
-            # Backtests must use the profile loader and retain missing observations.
-            frame = load_profile_bars(
-                symbol,
-                profile=profile,
-                timeframe=spec.timeframe,
-                session=session,
-                period=period,
-            )
-        except Exception:
+    try:
+        loaded_frames = load_profile_bars_many(
+            required_symbols,
+            profile=profile,
+            timeframe=spec.timeframe,
+            session=session,
+            period=period,
+        )
+    except Exception as exc:
+        loaded_frames = {}
+        for symbol in required_symbols:
+            failed_symbols[symbol] = {
+                "status": "error",
+                "error_type": type(exc).__name__,
+                "reason": str(exc) or type(exc).__name__,
+            }
+
+    for symbol in required_symbols:
+        # The chart cache is display-oriented: it may fill a stale last close.
+        # Backtests must use the profile loader and retain missing observations.
+        frame = loaded_frames.get(symbol) if isinstance(loaded_frames, Mapping) else None
+        if frame is None:
             frame = pd.DataFrame()
-        if frame is None or frame.empty:
+        load_error = getattr(frame, "attrs", {}).get("load_error")
+        if isinstance(load_error, Mapping):
+            failed_symbols[symbol] = {
+                "status": "error",
+                "error_type": str(load_error.get("error_type") or "LoadError"),
+                "reason": str(load_error.get("reason") or "load_failed"),
+            }
             continue
+        if frame is None or frame.empty:
+            failed_symbols.setdefault(symbol, {
+                "status": "empty",
+                "error_type": "EmptyData",
+                "reason": "empty_frame",
+            })
+            continue
+        requested_timeframe = _canonical_strategy_timeframe(spec.timeframe)
+        actual_timeframe = _canonical_strategy_timeframe(
+            getattr(frame, "attrs", {}).get("actual_timeframe")
+        )
+        if actual_timeframe and actual_timeframe != requested_timeframe:
+            failed_symbols[symbol] = {
+                "status": "error",
+                "error_type": "TimeframeMismatch",
+                "reason": f"requested {requested_timeframe}, received {actual_timeframe}",
+            }
+            continue
+        loaded_symbols.append(symbol)
         attrs = getattr(frame, "attrs", {})
         if isinstance(attrs, Mapping):
             snapshot = attrs.get("data_snapshot")
@@ -1880,8 +1971,13 @@ def _load_prices(spec: StrategySpec, period: str | None = None) -> pd.DataFrame:
                     snapshot.to_dict() if hasattr(snapshot, "to_dict") else snapshot
                 )
             coverage = attrs.get("source_coverage")
+            if not isinstance(coverage, Mapping) and snapshot is not None:
+                coverage = getattr(snapshot, "source_coverage", None)
             if isinstance(coverage, Mapping):
                 source_coverages.append(dict(coverage))
+            watermark = attrs.get("data_watermark")
+            if watermark:
+                data_watermarks[symbol] = str(watermark)
             raw_provenance = attrs.get("provenance")
             if isinstance(raw_provenance, Mapping):
                 candidate = dict(raw_provenance)
@@ -1893,7 +1989,13 @@ def _load_prices(spec: StrategySpec, period: str | None = None) -> pd.DataFrame:
         try:
             normalized.index = pd.to_datetime(normalized.index, utc=True)
             normalized = normalized[~normalized.index.duplicated(keep="last")].sort_index(kind="mergesort")
-        except (TypeError, ValueError):
+        except (TypeError, ValueError) as exc:
+            loaded_symbols.remove(symbol)
+            failed_symbols[symbol] = {
+                "status": "error",
+                "error_type": type(exc).__name__,
+                "reason": "invalid_datetime_index",
+            }
             continue
         normalized.columns = [str(col).strip().lower().replace(" ", "_") for col in normalized.columns]
         for field in normalized.columns:
@@ -1904,15 +2006,36 @@ def _load_prices(spec: StrategySpec, period: str | None = None) -> pd.DataFrame:
         result.attrs["data_snapshots"] = data_snapshots
     if source_coverages:
         result.attrs["source_coverages"] = source_coverages
+    benchmark_available = bool(benchmark and benchmark in loaded_symbols)
+    result.attrs["load_manifest"] = {
+        "requested_symbols": list(required_symbols),
+        "loaded_symbols": list(loaded_symbols),
+        "failed_symbols": failed_symbols,
+        "coverage": (len(loaded_symbols) / len(required_symbols)) if required_symbols else 0.0,
+        "benchmark": {"symbol": benchmark, "available": benchmark_available},
+        "duration_ms": round((time.perf_counter() - load_started) * 1000.0, 3),
+    }
+    if data_watermarks:
+        result.attrs["data_watermarks"] = data_watermarks
+    result.attrs["timeframe"] = str(spec.timeframe or "1d").strip().lower()
     if provenance:
         result.attrs["provenance"] = provenance
     return result
 
 
 def _period_for_timeframe(timeframe: str) -> str:
-    tf = str(timeframe or "1d").lower().strip()
-    mapping = {"1d": "2y", "5m": "60d", "1m": "30d", "1wk": "5y", "1w": "5y"}
+    tf = _canonical_strategy_timeframe(timeframe) or "1d"
+    mapping = {"1d": "2y", "5m": "60d", "1m": "30d", "1wk": "5y", "1w": "5y", "1mo": "10y"}
     return mapping.get(tf, "2y")
+
+
+def _canonical_strategy_timeframe(timeframe: object) -> str:
+    value = str(timeframe or "").strip().lower()
+    return {
+        "daily": "1d", "1day": "1d",
+        "weekly": "1wk", "1w": "1wk", "1week": "1wk",
+        "monthly": "1mo", "1month": "1mo",
+    }.get(value, value)
 
 
 def _json_safe(value: Any) -> Any:

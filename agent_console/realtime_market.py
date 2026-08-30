@@ -34,22 +34,22 @@ def _market_for(symbol: str) -> str:
     return "KR" if symbol.isdigit() and len(symbol) == 6 else "US"
 
 
-def _quote_from_cache(symbol: str, *, now: float, max_age_s: int) -> dict | None:
+def _quote_from_cache(symbol: str, *, now: float, max_age_s: int, snapshot: dict | None = None) -> dict | None:
     try:
         from providers import realtime_quotes
 
-        price = realtime_quotes.get_price(symbol, max_age_s=max_age_s)
-        if price is None:
+        entry = realtime_quotes.entry_from_snapshot(
+            symbol, max_age_s=max_age_s, snapshot=snapshot, now=now,
+        )
+        if not entry or entry.get("price") is None:
             return None
-        volume = realtime_quotes.get_volume(symbol, max_age_s=max_age_s)
-        entry = realtime_quotes._entry(symbol, max_age_s) or {}
         ts = float(entry.get("ts") or now)
         source = str(entry.get("src") or entry.get("source") or "realtime_cache")
         out = {
             "symbol": symbol,
             "market": _market_for(symbol),
-            "price": float(price),
-            "volume": float(volume) if volume is not None else None,
+            "price": float(entry["price"]),
+            "volume": float(entry["volume"]) if entry.get("volume") is not None else None,
             "ts": ts,
             "age_s": max(0, int(now - ts)),
             "source": f"rest_cache:{source}" if source not in {"kis_ws", "kis_rest"} else source,
@@ -101,6 +101,8 @@ def _fx_snapshot() -> dict | None:
 
 
 def build_market_snapshot(symbols: list[str] | None = None, now: float | None = None) -> dict:
+    from providers import realtime_quotes
+
     now = time.time() if now is None else float(now)
     max_age_s = int(os.getenv("AGENT_CONSOLE_MARKET_STALE_S", "90"))
     micro = market_snapshot_store.load_market_microstructure()
@@ -110,8 +112,11 @@ def build_market_snapshot(symbols: list[str] | None = None, now: float | None = 
     breadth = micro.get("breadth") or micro.get("advancers_decliners") or None
     quotes = []
     missing = []
+    quote_snapshot = realtime_quotes.read_realtime_snapshot()
     for symbol in _symbols(symbols):
-        quote = _quote_from_cache(symbol, now=now, max_age_s=max_age_s) or _quote_from_kis(symbol, now=now)
+        quote = _quote_from_cache(
+            symbol, now=now, max_age_s=max_age_s, snapshot=quote_snapshot,
+        ) or _quote_from_kis(symbol, now=now)
         if quote:
             quotes.append(quote)
         else:

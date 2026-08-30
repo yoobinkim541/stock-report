@@ -151,32 +151,49 @@ def allocate_targets(
     low_confidence = valid_score & valid_confidence & (confidence < min_confidence)
     usable = valid_score & valid_confidence & ~low_confidence
     covariance_warnings: set[str] = set()
+    try:
+        covariance_refresh_bars = int(config.get("covariance_refresh_bars", 5))
+    except (TypeError, ValueError):
+        covariance_refresh_bars = 5
+        warnings.append("invalid covariance_refresh_bars; using 5")
+    if covariance_refresh_bars < 1:
+        warnings.append("covariance_refresh_bars must be >= 1; using 1")
+        covariance_refresh_bars = 1
+    cached_covariance = None
+    cached_covariance_position = -covariance_refresh_bars
 
-    for timestamp in index:
-        available_returns = _point_in_time_returns(returns_frame, timestamp)
-        relevant_returns = available_returns.reindex(columns=symbols)
-        complete_rows = len(relevant_returns.dropna(how="any"))
-        fallback_reason: str | None = None
-        if LedoitWolf is None:
-            fallback_reason = "Ledoit-Wolf unavailable; using sample/diagonal fallback"
-        elif complete_rows < 2:
-            fallback_reason = "fewer than two complete point-in-time return rows"
-        row_covariance = _aligned_covariance(estimate_shrunk_covariance(available_returns), symbols)
-        if fallback_reason is not None:
-            warning = f"covariance fallback at {_timestamp_text(timestamp)}: {fallback_reason}"
-            if fallback_reason not in covariance_warnings:
-                warnings.append(warning)
-                covariance_warnings.add(fallback_reason)
-            _add_diagnostic(
-                diagnostics,
-                timestamp,
-                "__portfolio__",
-                float(complete_rows),
-                _COVARIANCE_EPS,
-                "point_in_time_covariance",
-                "covariance_fallback",
-                reason=fallback_reason,
-            )
+    for position_in_index, timestamp in enumerate(index):
+        refresh_covariance = (
+            cached_covariance is None
+            or position_in_index - cached_covariance_position >= covariance_refresh_bars
+        )
+        if refresh_covariance:
+            available_returns = _point_in_time_returns(returns_frame, timestamp)
+            relevant_returns = available_returns.reindex(columns=symbols)
+            complete_rows = len(relevant_returns.dropna(how="any"))
+            fallback_reason: str | None = None
+            if LedoitWolf is None:
+                fallback_reason = "Ledoit-Wolf unavailable; using sample/diagonal fallback"
+            elif complete_rows < 2:
+                fallback_reason = "fewer than two complete point-in-time return rows"
+            cached_covariance = estimate_shrunk_covariance(available_returns)
+            cached_covariance_position = position_in_index
+            if fallback_reason is not None:
+                warning = f"covariance fallback at {_timestamp_text(timestamp)}: {fallback_reason}"
+                if fallback_reason not in covariance_warnings:
+                    warnings.append(warning)
+                    covariance_warnings.add(fallback_reason)
+                _add_diagnostic(
+                    diagnostics,
+                    timestamp,
+                    "__portfolio__",
+                    float(complete_rows),
+                    _COVARIANCE_EPS,
+                    "point_in_time_covariance",
+                    "covariance_fallback",
+                    reason=fallback_reason,
+                )
+        row_covariance = _aligned_covariance(cached_covariance, symbols)
 
         raw_signal = score.loc[timestamp].to_numpy(dtype="float64", na_value=np.nan)
         row_confidence = confidence.loc[timestamp].to_numpy(dtype="float64", na_value=np.nan)

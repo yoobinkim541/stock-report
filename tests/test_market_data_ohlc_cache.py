@@ -142,3 +142,34 @@ def test_load_profile_bars_reports_unavailable_when_sync_fallback_has_no_data(mo
         "missing_sessions": [],
         "reason": "profile_data_unavailable",
     }
+
+
+@pytest.mark.parametrize("timeframe, expected_rows", [("1wk", 7), ("1mo", 2)])
+def test_load_profile_bars_resamples_daily_cache_to_requested_timeframe(
+    monkeypatch, timeframe, expected_rows
+):
+    daily = _frame().reindex(pd.date_range("2026-01-01", periods=40, freq="D"))
+    daily["Open"] = range(100, 140)
+    daily["High"] = daily["Open"] + 3
+    daily["Low"] = daily["Open"] - 2
+    daily["Close"] = daily["Open"] + 1
+    daily["Volume"] = 100
+    monkeypatch.setattr(md, "load_cached_ohlc", lambda symbol, period: daily)
+
+    loaded = md.load_profile_bars("AAPL", profile="global_swing", timeframe=timeframe)
+
+    assert len(loaded) == expected_rows
+    assert loaded.attrs["actual_timeframe"] == timeframe
+    assert loaded.attrs["data_watermark"] == loaded.index[-1].isoformat()
+    assert loaded.attrs["data_snapshot"].data_stamps[0].timeframe == timeframe
+
+
+def test_load_profile_bars_keeps_daily_snapshot_timeframe_and_watermark(monkeypatch):
+    daily = _frame()
+    monkeypatch.setattr(md, "load_cached_ohlc", lambda symbol, period: daily)
+
+    loaded = md.load_profile_bars("AAPL", profile="global_swing", timeframe="1d")
+
+    assert loaded.attrs["actual_timeframe"] == "1d"
+    assert loaded.attrs["data_watermark"] == loaded.index[-1].isoformat()
+    assert loaded.attrs["data_snapshot"].data_stamps[0].timeframe == "1d"

@@ -240,6 +240,34 @@ def test_intraday_bar_loader_attaches_replayable_snapshot_without_forward_fill(t
     assert frame.attrs["profile"] == "kr_intraday"
 
 
+def test_bulk_intraday_loader_reads_multiple_symbols_and_dates_into_separate_frames(tmp_path):
+    from providers import intraday_bars
+
+    rows = []
+    for date, offset in (("2026-08-27", 0), ("2026-08-28", 10)):
+        for symbol, price in (("AAPL", 100 + offset), ("MSFT", 200 + offset)):
+            rows.append({
+                "ts": f"{date}T09:00:00-04:00", "epoch_min": 1000 + offset,
+                "symbol": symbol, "market": "US", "o": price, "h": price + 1,
+                "l": price - 1, "c": price + 0.5, "v": 100, "n": 3, "src": "kis_ws",
+                "session": "regular",
+            })
+    path = intraday_bars.bar_path("2026-08-27", tmp_path)
+    path.write_text("\n".join(json.dumps(row) for row in rows[:2]) + "\n", encoding="utf-8")
+    path = intraday_bars.bar_path("2026-08-28", tmp_path)
+    path.write_text("\n".join(json.dumps(row) for row in rows[2:]) + "\n", encoding="utf-8")
+
+    loaded = intraday_bars.load_bars_bulk(
+        ["AAPL", "MSFT"], ["2026-08-27", "2026-08-28"], base_dir=tmp_path,
+    )
+
+    assert set(loaded) == {"AAPL", "MSFT"}
+    assert len(loaded["AAPL"]) == 2
+    assert len(loaded["MSFT"]) == 2
+    assert loaded["AAPL"]["Close"].tolist() == [100.5, 110.5]
+    assert loaded["MSFT"].attrs["data_snapshot"].symbols == ["MSFT"]
+
+
 def test_intraday_bars_persist_and_filter_us_sessions(tmp_path):
     from providers import intraday_bars
 

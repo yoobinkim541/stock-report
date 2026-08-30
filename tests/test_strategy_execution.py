@@ -16,6 +16,8 @@ from ml.strategy_studio import (
 )
 from ml.strategy_studio.execution import (
     ExecutionConfig,
+    _health_at,
+    _health_blocks_entries,
     apply_fills,
     execute_intents,
     execution_defaults,
@@ -548,6 +550,36 @@ def test_all_failed_quote_sources_pause_new_entries():
 
     assert fill.status == "cancelled"
     assert fill.reason == "strategy_paused"
+
+
+def test_fresh_source_mapping_keeps_age_after_health_aggregation():
+    health = _health_at(
+        {"kis_ws": {"status": "fresh", "reason": "fresh", "age_seconds": 0.0}},
+        "AAPL",
+        "2026-08-28T10:00:00+00:00",
+    )
+
+    assert health["status"] == "fresh"
+    assert health["age_seconds"] == pytest.approx(0.0)
+    assert _health_blocks_entries(health) is False
+
+
+def test_available_source_with_expired_age_limit_blocks_entries():
+    health = _health_at(
+        {
+            "kis_ws": {
+                "status": "available",
+                "reason": "available",
+                "age_seconds": 301.0,
+                "max_age_seconds": 300.0,
+            },
+        },
+        "AAPL",
+        "2026-08-28T10:00:00+00:00",
+    )
+
+    assert health["status"] == "pause"
+    assert health["reason"] == "stale_source"
 
 
 def test_execution_config_parses_pause_policy_booleans_from_saved_payload():

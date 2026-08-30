@@ -480,16 +480,20 @@ def _feature_frame(strategy: Any, compiled: Any) -> pd.DataFrame:
                 if value is None:
                     raise ValueError(f"feature field not available: {plugin}")
                 columns[f"{symbol}:{name}"] = value.reindex(index)
-    rows = []
-    for dt in index:
-        for symbol in symbols:
-            row = {name: series.at[dt] for name, series in columns.items() if name.startswith(f"{symbol}:")}
-            row = {name.split(":", 1)[1]: value for name, value in row.items()}
-            row["__timestamp"] = dt
-            row["__symbol"] = symbol
-            rows.append(row)
-    frame = pd.DataFrame(rows).set_index(["__timestamp", "__symbol"])
-    frame.index.names = ["timestamp", "symbol"]
+    symbol_frames = []
+    for symbol in symbols:
+        feature_columns = {
+            name.split(":", 1)[1]: series.reindex(index)
+            for name, series in columns.items()
+            if name.startswith(f"{symbol}:")
+        }
+        symbol_frames.append(pd.DataFrame(feature_columns, index=index))
+    if symbol_frames:
+        frame = pd.concat(symbol_frames, keys=symbols, names=["symbol", "timestamp"])
+        frame = frame.reorder_levels(["timestamp", "symbol"]).sort_index(kind="mergesort")
+    else:
+        empty_index = pd.MultiIndex.from_arrays([[], []], names=["timestamp", "symbol"])
+        frame = pd.DataFrame(index=empty_index)
     source_attrs = getattr(compiled.store, "attrs", {})
     if not isinstance(source_attrs, dict):
         source_attrs = {}

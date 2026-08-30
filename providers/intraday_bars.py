@@ -50,6 +50,8 @@ _KR_AUCTION_WINDOWS = {
     "opening_auction": (8 * 60 + 30, 9 * 60),
     "closing_auction": (15 * 60 + 20, 15 * 60 + 30),
 }
+_ROWS_CACHE: dict[tuple[str, int, int], dict[str, list[dict]]] = {}
+_ROWS_CACHE_MAX_FILES = 16
 
 
 # ── 심볼 변환 단일 진실원 (bar store·state·ledger·실시간 캐시 = base 표기) ────
@@ -233,11 +235,27 @@ def append_bars(bars: list[dict], base_dir: Path | str | None = None) -> int:
 
 def _read_rows(date_utc: str, symbol: str | None = None,
                base_dir: Path | str | None = None) -> list[dict]:
+    grouped = _read_rows_by_symbol(date_utc, base_dir=base_dir)
+    if symbol:
+        return list(grouped.get(base_symbol(symbol), []))
+    return list(grouped.get("__all__", []))
+
+
+def _read_rows_by_symbol(date_utc: str, *, base_dir: Path | str | None = None) -> dict[str, list[dict]]:
+    """Read one date file once and index its rows by base symbol."""
+
     path = bar_path(date_utc, base_dir)
     if not path.exists():
-        return []
-    sym = base_symbol(symbol) if symbol else None
-    rows = []
+        return {"__all__": []}
+    try:
+        stat = path.stat()
+        cache_key = (str(path), int(stat.st_mtime_ns), int(stat.st_size))
+        cached = _ROWS_CACHE.get(cache_key)
+        if cached is not None:
+            return cached
+    except OSError:
+        cache_key = None
+    grouped: dict[str, list[dict]] = {"__all__": []}
     try:
         with open(path, encoding="utf-8") as f:
             for line in f:
@@ -248,11 +266,17 @@ def _read_rows(date_utc: str, symbol: str | None = None,
                     r = json.loads(line)
                 except ValueError:
                     continue
-                if sym is None or r.get("symbol") == sym:
-                    rows.append(r)
+                if not isinstance(r, dict):
+                    continue
+                grouped["__all__"].append(r)
+                grouped.setdefault(base_symbol(r.get("symbol", "")), []).append(r)
     except OSError as e:
         logger.debug("bar 파일 읽기 실패(%s): %s", path, e)
-    return rows
+    if cache_key is not None:
+        _ROWS_CACHE[cache_key] = grouped
+        while len(_ROWS_CACHE) > _ROWS_CACHE_MAX_FILES:
+            _ROWS_CACHE.pop(next(iter(_ROWS_CACHE)))
+    return grouped
 
 
 def today_utc() -> str:
@@ -286,8 +310,53 @@ def load_bars(symbol: str, date_utc: str | None = None, *, interval: str = "1m",
 
     빈 결과는 빈 DataFrame (graceful). interval="5m" 은 1m 리샘플.
     """
+    date = date_utc or today_utc()
+    rows = _read_rows(date, symbol, base_dir)
+    return _rows_to_frame(
+        symbol, rows, interval=interval, session=session,
+        raw_ref=str(bar_path(date, base_dir)),
+    )
+
+
+def load_bars_bulk(
+    symbols: list[str],
+    dates: list[str] | None = None,
+    *,
+    interval: str = "1m",
+    base_dir: Path | str | None = None,
+    session: str | None = None,
+) -> dict[str, object]:
+    """Load multiple symbols with one JSONL pass per date."""
+
+    requested = []
+    for symbol in symbols or []:
+        key = base_symbol(symbol)
+        if key and key not in requested:
+            requested.append(key)
+    result = {symbol: _empty_frame() for symbol in requested}
+    selected_dates = list(dates) if dates is not None else available_dates(base_dir)
+    rows_by_symbol = {symbol: [] for symbol in requested}
+    for date in selected_dates:
+        grouped = _read_rows_by_symbol(date, base_dir=base_dir)
+        for symbol in requested:
+            rows_by_symbol[symbol].extend(grouped.get(symbol, []))
+    for symbol in requested:
+        result[symbol] = _rows_to_frame(
+            symbol, rows_by_symbol[symbol], interval=interval, session=session,
+            raw_ref=str(bar_path(selected_dates[-1], base_dir)) if selected_dates else None,
+        )
+    return result
+
+
+def _empty_frame():
     import pandas as pd
-    rows = _read_rows(date_utc or today_utc(), symbol, base_dir)
+    return pd.DataFrame()
+
+
+def _rows_to_frame(symbol: str, rows: list[dict], *, interval: str, session: str | None,
+                   raw_ref: str | None):
+    import pandas as pd
+
     if session:
         requested_sessions = _session_filter_values(session)
         rows = [
@@ -320,10 +389,11 @@ def load_bars(symbol: str, date_utc: str | None = None, *, interval: str = "1m",
     row_sessions = {_row_session(row) for row in rows}
     session_name = requested_session or (next(iter(row_sessions)) if len(row_sessions) == 1 else "all")
     quality = "incomplete" if any(row.get("v_partial") or row.get("v_anom") for row in rows) else "complete"
+    limit = 60 if interval == "1m" else 300
     frame.attrs.update({
         "profile": "kr_intraday" if market_of(symbol) == "KR" else "extended_us",
         "session": session_name,
-        "source_health": _source_health(rows),
+        "source_health": _source_health(rows, max_age_seconds=limit),
     })
     frame.attrs["data_snapshot"] = build_data_snapshot(
         frame,
@@ -332,11 +402,10 @@ def load_bars(symbol: str, date_utc: str | None = None, *, interval: str = "1m",
         timeframe=interval,
         session=session_name,
         quality=quality,
-        raw_ref=str(bar_path(date_utc or today_utc(), base_dir)),
+        raw_ref=raw_ref,
     )
     try:
         last_bar_at = frame.index[-1].isoformat()
-        limit = 60 if interval == "1m" else 300
         frame.attrs["profile_health"] = profile_health(
             str(frame.attrs["profile"]),
             last_bar_at=last_bar_at,
@@ -352,18 +421,34 @@ def load_bars(symbol: str, date_utc: str | None = None, *, interval: str = "1m",
     return frame
 
 
-def _source_health(rows: list[dict]) -> dict[str, object]:
+def _source_health(rows: list[dict], *, max_age_seconds: float = 60.0) -> dict[str, object]:
     """Summarize the existing append-only rows without writing another store."""
+
+    import pandas as pd
 
     sources = sorted({str(row.get("src") or "unknown") for row in rows})
     quality = "incomplete" if any(row.get("v_partial") or row.get("v_anom") for row in rows) else "complete"
-    return {
+    result = {
         "status": "degraded" if quality != "complete" else "available",
         "sources": sources,
         "bar_count": len(rows),
         "quality": quality,
         "last_bar_at": str(rows[-1].get("ts") or "") if rows else None,
     }
+    if rows:
+        try:
+            last = pd.Timestamp(result["last_bar_at"])
+            if last.tzinfo is None:
+                last = last.tz_localize("UTC")
+            else:
+                last = last.tz_convert("UTC")
+            result["age_seconds"] = max(0.0, (pd.Timestamp.now(tz="UTC") - last).total_seconds())
+        except (TypeError, ValueError):
+            result["age_seconds"] = None
+    else:
+        result["age_seconds"] = None
+    result["max_age_seconds"] = float(max_age_seconds)
+    return result
 
 
 def build_data_snapshot(

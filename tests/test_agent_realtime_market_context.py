@@ -175,6 +175,33 @@ def test_realtime_snapshot_exposes_us_quote_session(monkeypatch, tmp_path):
     assert "premarket" in "\n".join(realtime_market.compact_snapshot_lines(snapshot))
 
 
+def test_realtime_snapshot_reads_quote_layers_once_for_many_symbols(monkeypatch):
+    from agent_console import realtime_market
+    from providers import realtime_quotes
+
+    now = 1_000.0
+    calls = []
+    cache = {
+        "__heartbeat__": {"ts": now},
+        "AAPL": {"price": 100.0, "volume": 10, "ts": now - 1, "src": "ws"},
+        "MSFT": {"price": 200.0, "volume": 20, "ts": now - 1, "src": "ws"},
+    }
+
+    def snapshot_reader():
+        calls.append(True)
+        return {"ws": cache, "rest": {}}
+
+    monkeypatch.setattr(realtime_quotes, "read_realtime_snapshot", snapshot_reader)
+    monkeypatch.setattr(realtime_market.market_snapshot_store, "load_market_microstructure", lambda: {})
+    monkeypatch.setattr(realtime_market, "_quote_from_kis", lambda *args, **kwargs: None)
+    monkeypatch.setenv("REALTIME_ENABLED", "true")
+
+    snapshot = realtime_market.build_market_snapshot(symbols=["AAPL", "MSFT"], now=now)
+
+    assert [quote["symbol"] for quote in snapshot["quotes"]] == ["AAPL", "MSFT"]
+    assert len(calls) == 1
+
+
 def test_context_pack_includes_strategy_experiment_summary(monkeypatch, tmp_path):
     from agent_console import context
 

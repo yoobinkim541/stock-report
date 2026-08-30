@@ -190,8 +190,8 @@ def strategy_studio_versions(spec_id, limit=20):
     return views.strategy_studio_versions(spec_id, limit=limit)
 
 
-@st.cache_data(ttl=_TTL_HEAVY, show_spinner="전략 미리보기 중…")
-def strategy_studio_preview(spec, benchmark=None, period=None):
+@st.cache_data(ttl=300, max_entries=32, show_spinner="전략 미리보기 중…")
+def strategy_studio_preview(spec, benchmark=None, period=None, data_watermark=None):
     return views.strategy_studio_preview(spec, benchmark=benchmark, period=period)
 
 

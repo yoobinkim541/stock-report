@@ -169,6 +169,37 @@ def test_point_in_time_covariance_ignores_returns_after_each_target_timestamp():
     pd.testing.assert_frame_equal(base.weights, extended.weights)
 
 
+def test_allocator_reuses_covariance_inside_configured_refresh_window(monkeypatch):
+    from ml.strategy_studio import allocation as allocation_module
+
+    idx = pd.date_range("2026-01-01", periods=5)
+    panel = SignalPanel.from_score(
+        "factor",
+        pd.DataFrame({"A": [1.0] * len(idx), "B": [0.5] * len(idx)}, index=idx),
+        confidence=1.0,
+    )
+    returns = pd.DataFrame(
+        {"A": [0.01, 0.02, -0.01, 0.03, 0.01], "B": [0.02, 0.01, 0.01, -0.02, 0.02]},
+        index=idx,
+    )
+    calls = []
+    original = allocation_module.estimate_shrunk_covariance
+
+    def counted(frame):
+        calls.append(len(frame))
+        return original(frame)
+
+    monkeypatch.setattr(allocation_module, "estimate_shrunk_covariance", counted)
+    result = allocate_targets(
+        panel, returns,
+        {"optimizer": "risk_budget", "covariance_refresh_bars": 3},
+        {},
+    )
+
+    assert not result.weights.empty
+    assert len(calls) == 2
+
+
 def test_string_false_allow_short_is_respected_and_final_weights_are_bounded():
     idx = pd.date_range("2026-01-01", periods=2)
     panel = SignalPanel.from_score(

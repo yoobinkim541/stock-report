@@ -53,7 +53,20 @@ class StrategyRun:
     promotion: dict[str, Any] = field(default_factory=dict)
 
 
-def compile_strategy(spec: dict[str, Any] | StrategySpec, prices: pd.DataFrame) -> CompiledStrategy:
+def compile_strategy(
+    spec: dict[str, Any] | StrategySpec,
+    prices: pd.DataFrame,
+    *,
+    feature_context: pd.DataFrame | None = None,
+) -> CompiledStrategy:
+    """Compile indicators from an optional pre-test context.
+
+    ``prices`` remains the execution panel. ``feature_context`` may contain
+    earlier train/warm-up observations so rolling indicators do not restart at
+    the first OOS bar. Keeping the two stores separate prevents warm-up rows
+    from becoming tradable rows.
+    """
+
     strategy = StrategySpec.from_dict(spec)
     warnings = list(strategy.validate())
     price_store = _normalize_price_store(prices)
@@ -63,15 +76,22 @@ def compile_strategy(spec: dict[str, Any] | StrategySpec, prices: pd.DataFrame) 
     if close_panel.empty:
         return CompiledStrategy(strategy, close_panel, price_store, {}, warnings=warnings, errors=["price panel is empty"])
 
+    feature_store = price_store
+    if feature_context is not None:
+        feature_store = _normalize_price_store(feature_context)
+        _copy_data_provenance_attrs(feature_store, feature_context)
     tradeable = _resolve_universe_symbols(strategy, close_panel)
     if not tradeable:
         return CompiledStrategy(strategy, close_panel, price_store, {}, warnings=warnings, errors=["no tradable symbols found"])
 
     contexts: dict[str, dict[str, pd.Series]] = {}
     for symbol in tradeable:
-        series = close_panel[symbol].astype(float)
+        series = _field_series(feature_store, symbol, "close")
+        if series is None:
+            series = close_panel[symbol]
+        series = series.astype(float)
         ctx: dict[str, pd.Series] = {"close": series, "price": series}
-        _apply_indicators(strategy, symbol, ctx, price_store, warnings)
+        _apply_indicators(strategy, symbol, ctx, feature_store, warnings)
         contexts[symbol] = ctx
 
     _validate_rule_fields(strategy, contexts, warnings)
@@ -91,8 +111,9 @@ def run_strategy_backtest(
     prices: pd.DataFrame,
     *,
     benchmark: str | None = None,
+    feature_context: pd.DataFrame | None = None,
 ) -> StrategyRun:
-    compiled = compile_strategy(spec, prices)
+    compiled = compile_strategy(spec, prices, feature_context=feature_context)
     strategy = compiled.spec
     benchmark = benchmark or strategy.benchmark or strategy.base_symbol or None
 
@@ -621,8 +642,8 @@ def compiled_errors(metrics: dict[str, Any], bench: dict[str, Any]) -> list[str]
     errors: list[str] = []
     if metrics.get("n_days", 0) < 2:
         errors.append("insufficient bars")
-    if bench and bench.get("symbol") and not bench.get("available") and "benchmark symbol missing" in " ".join(bench.get("warnings") or []):
-        return errors
+    if bench and bench.get("symbol") and not bench.get("available"):
+        errors.append(f"benchmark unavailable: {bench.get('symbol')}")
     return errors
 
 

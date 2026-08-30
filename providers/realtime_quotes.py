@@ -26,6 +26,9 @@ HEARTBEAT_KEY = "__heartbeat__"
 WS_REDIS_KEY = "quotes:ws"
 REST_REDIS_KEY = "quotes:rest"
 
+_REDIS_CLIENT = None
+_REDIS_CLIENT_URL = None
+
 
 def _int_env(name: str, default: int) -> int:
     try:
@@ -57,9 +60,16 @@ def _redis_url() -> str:
 
 
 def _redis_client():
+    global _REDIS_CLIENT, _REDIS_CLIENT_URL
+
+    url = _redis_url()
+    if _REDIS_CLIENT is not None and _REDIS_CLIENT_URL == url:
+        return _REDIS_CLIENT
     import redis
 
-    return redis.Redis.from_url(_redis_url(), decode_responses=True, socket_timeout=1.0, socket_connect_timeout=1.0)
+    _REDIS_CLIENT = redis.Redis.from_url(url, decode_responses=True, socket_timeout=1.0, socket_connect_timeout=1.0)
+    _REDIS_CLIENT_URL = url
+    return _REDIS_CLIENT
 
 
 def _read_redis_cache(key: str) -> dict:
@@ -114,11 +124,13 @@ def _read_cache(path: str | None = None) -> dict:
     target = CACHE_PATH if path is None else path
     if target == CACHE_PATH:
         redis_cache = _read_redis_cache(os.getenv("REALTIME_WS_REDIS_KEY", WS_REDIS_KEY))
-        if redis_cache and heartbeat_age(redis_cache) is not None and heartbeat_age(redis_cache) <= HEARTBEAT_STALE_S:
+        redis_age = heartbeat_age(redis_cache) if redis_cache else None
+        if redis_cache and redis_age is not None and redis_age <= HEARTBEAT_STALE_S:
             return redis_cache
     if target == REST_CACHE_PATH:
         redis_cache = _read_redis_cache(os.getenv("REALTIME_REST_REDIS_KEY", REST_REDIS_KEY))
-        if redis_cache and heartbeat_age(redis_cache) is not None and heartbeat_age(redis_cache) <= REST_HEARTBEAT_STALE_S:
+        redis_age = heartbeat_age(redis_cache) if redis_cache else None
+        if redis_cache and redis_age is not None and redis_age <= REST_HEARTBEAT_STALE_S:
             return redis_cache
     try:
         with open(target, encoding="utf-8") as f:
@@ -165,13 +177,43 @@ def _rest_cache() -> dict | None:
     return cache
 
 
-def _pick(cache: dict | None, symbol: str, max_age_s: int) -> dict | None:
+def _pick(cache: dict | None, symbol: str, max_age_s: int, *, now: float | None = None) -> dict | None:
     if not cache:
         return None
     e = cache.get(symbol) or cache.get(symbol.upper())
     if not isinstance(e, dict):
         return None
-    return e if _is_fresh(e.get("ts"), time.time(), max_age_s) else None
+    return e if _is_fresh(e.get("ts"), time.time() if now is None else now, max_age_s) else None
+
+
+def read_realtime_snapshot() -> dict[str, dict]:
+    """Read each live quote layer once for a request.
+
+    Consumers should pass this snapshot through their symbol loop instead of
+    calling the scalar readers repeatedly. Empty dictionaries are intentional:
+    they preserve the existing graceful fallback contract.
+    """
+
+    return {
+        "ws": _live_cache() or {},
+        "rest": _rest_cache() or {},
+    }
+
+
+def entry_from_snapshot(
+    symbol: str,
+    *,
+    max_age_s: int = DEFAULT_STALE_S,
+    snapshot: dict | None = None,
+    now: float | None = None,
+) -> dict | None:
+    """Return the best fresh entry from a previously read quote snapshot."""
+
+    layers = snapshot if isinstance(snapshot, dict) else read_realtime_snapshot()
+    entry = _pick(layers.get("ws"), symbol, max_age_s, now=now)
+    if entry is not None:
+        return entry
+    return _pick(layers.get("rest"), symbol, max_age_s, now=now)
 
 
 def _entry(symbol: str, max_age_s: int, cache: dict | None = None) -> dict | None:

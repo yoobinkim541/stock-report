@@ -128,6 +128,22 @@ def _ohlc_disk_path(symbol: str, period: str) -> Path:
     return _ohlc_cache_root() / f"{safe}__{period}.parquet"
 
 
+def profile_cache_watermark(symbols: list[str], period: str = "1y") -> str:
+    """Return a cheap filesystem watermark for provider cache inputs."""
+
+    parts = []
+    for symbol in sorted({str(value or "").strip().upper() for value in symbols if str(value or "").strip()}):
+        paths = [_ohlc_disk_path(symbol, period), *_cached_price_paths(symbol)]
+        existing = [path for path in paths if path.exists()]
+        if not existing:
+            parts.append(f"{symbol}:missing")
+            continue
+        latest = max(existing, key=lambda path: path.stat().st_mtime_ns)
+        stat = latest.stat()
+        parts.append(f"{symbol}:{latest.name}:{stat.st_mtime_ns}:{stat.st_size}")
+    return "|".join(parts) or "empty"
+
+
 def load_cached_ohlc(symbol: str, period: str = "1y"):
     """대시보드가 저장한 로컬 OHLC parquet 를 읽는다. 없으면 None."""
     try:
@@ -1048,6 +1064,14 @@ def attach_profile_snapshot(
             existing_snapshot = DataSnapshot.from_dict(existing_snapshot)
         except (TypeError, ValueError):
             existing_snapshot = None
+    requested_timeframe = str(timeframe or "1d").strip().lower()
+    if isinstance(existing_snapshot, DataSnapshot):
+        snapshot_timeframes = {str(stamp.timeframe).strip().lower() for stamp in existing_snapshot.data_stamps}
+        if snapshot_timeframes and snapshot_timeframes != {requested_timeframe}:
+            # A resampled frame must not retain the source frame's daily
+            # snapshot contract; otherwise provenance says daily while the
+            # strategy is executing weekly/monthly bars.
+            existing_snapshot = None
     quality = str(
         out.attrs.get("quality")
         or (existing_snapshot.quality if isinstance(existing_snapshot, DataSnapshot) else "complete")
@@ -1121,7 +1145,80 @@ def attach_profile_snapshot(
         "data_snapshot": snapshot,
         "provenance": snapshot.to_provenance()["data"],
         "source_health": source_health,
+        "source_coverage": source_coverage,
     })
+    out.attrs["requested_timeframe"] = requested_timeframe
+    out.attrs["actual_timeframe"] = str(out.attrs.get("actual_timeframe") or requested_timeframe).strip().lower()
+    try:
+        out.attrs["data_watermark"] = pd.Timestamp(out.index[-1]).isoformat() if not out.empty else None
+    except (IndexError, TypeError, ValueError):
+        out.attrs["data_watermark"] = None
+    return out
+
+
+def resample_profile_bars(frame, timeframe: str = "1d"):
+    """Return OHLCV bars at the requested profile timeframe.
+
+    Daily cache data is the common source for swing strategies.  Weekly and
+    monthly requests must aggregate that data before the snapshot is built;
+    merely changing the metadata would make indicators and annualisation use
+    the wrong number of observations.
+    """
+
+    import pandas as pd
+
+    aliases = {
+        "daily": "1d", "1day": "1d",
+        "weekly": "1wk", "1w": "1wk", "1week": "1wk",
+        "monthly": "1mo", "1month": "1mo",
+    }
+    requested = aliases.get(str(timeframe or "1d").strip().lower(), str(timeframe or "1d").strip().lower())
+    out = normalize_ohlc_frame(frame)
+    if out is None:
+        out = pd.DataFrame()
+    attrs = dict(getattr(out, "attrs", {}) or {})
+    if getattr(out, "empty", True):
+        attrs.update({"requested_timeframe": requested, "actual_timeframe": requested, "data_watermark": None})
+        out.attrs = attrs
+        return out
+
+    source_timeframe = str(attrs.get("actual_timeframe") or attrs.get("timeframe") or "").strip().lower()
+    snapshot = attrs.get("data_snapshot")
+    if not source_timeframe and snapshot is not None:
+        stamps = getattr(snapshot, "data_stamps", None)
+        if stamps:
+            source_timeframe = str(getattr(stamps[0], "timeframe", "") or "").strip().lower()
+    source_timeframe = aliases.get(source_timeframe, source_timeframe or "1d")
+
+    if requested in {"1wk", "1mo"} and source_timeframe != requested:
+        rule = "W-FRI" if requested == "1wk" else "ME"
+        columns = {str(column).strip().lower(): column for column in out.columns}
+        open_col = columns.get("open")
+        high_col = columns.get("high")
+        low_col = columns.get("low")
+        close_col = columns.get("close")
+        if not all((open_col, high_col, low_col, close_col)):
+            raise ValueError("OHLC columns are required for weekly/monthly resampling")
+        aggregation = {
+            open_col: "first", high_col: "max", low_col: "min", close_col: "last",
+        }
+        volume_col = columns.get("volume")
+        if volume_col:
+            aggregation[volume_col] = "sum"
+        result = out.resample(rule, label="right", closed="right").agg(aggregation)
+        result = result.dropna(subset=[open_col, high_col, low_col, close_col])
+        result = normalize_ohlc_frame(result)
+        attrs.update({
+            "requested_timeframe": requested,
+            "actual_timeframe": requested,
+            "resampled_from": source_timeframe,
+        })
+        out = result
+    else:
+        attrs.update({"requested_timeframe": requested, "actual_timeframe": source_timeframe if source_timeframe == requested else requested})
+
+    attrs["data_watermark"] = pd.Timestamp(out.index[-1]).isoformat() if not out.empty else None
+    out.attrs = attrs
     return out
 
 
@@ -1146,6 +1243,7 @@ def load_profile_bars(
     data = frame
     source = None
     interval = str(timeframe or "").strip().lower()
+    interval = {"daily": "1d", "1day": "1d", "weekly": "1wk", "1w": "1wk", "monthly": "1mo", "1month": "1mo"}.get(interval, interval)
     intraday_intervals = {"1m", "5m", "15m", "1h"}
     # The OHLC parquet cache is a daily display cache.  It must not satisfy an
     # intraday request, otherwise the intraday fallback is silently skipped.
@@ -1179,11 +1277,12 @@ def load_profile_bars(
         data = pd.DataFrame()
     if not source:
         source = "yfinance" if key in {"global_swing", "extended_us"} else "market_data"
+    data = resample_profile_bars(data, interval)
     return attach_profile_snapshot(
         data,
         symbol=symbol,
         profile=key,
-        timeframe=timeframe,
+        timeframe=interval,
         session=session,
         source=source,
         adjustment="adjusted" if key != "kr_intraday" else "raw",
@@ -1192,6 +1291,64 @@ def load_profile_bars(
         corporate_actions=corporate_actions,
         overnight_gap=overnight_gap,
     )
+
+
+def load_profile_bars_many(
+    symbols: list[str],
+    *,
+    profile: str = "global_swing",
+    timeframe: str = "1d",
+    session: str = "regular",
+    period: str = "1y",
+    max_workers: int | None = None,
+) -> dict[str, object]:
+    """Load independent profile frames with bounded concurrency.
+
+    The per-symbol loader remains the source of truth for fallback and
+    provenance. This wrapper only removes avoidable serial latency and returns
+    an empty frame carrying ``load_error`` when one symbol fails.
+    """
+
+    import pandas as pd
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+
+    requested = []
+    for symbol in symbols or []:
+        key = str(symbol or "").strip().upper()
+        if key and key not in requested:
+            requested.append(key)
+    if not requested:
+        return {}
+    try:
+        workers = int(max_workers or os.getenv("MARKET_DATA_MAX_WORKERS", "4"))
+    except (TypeError, ValueError):
+        workers = 4
+    workers = max(1, min(workers, 8, len(requested)))
+
+    def load_one(symbol: str):
+        return load_profile_bars(
+            symbol,
+            profile=profile,
+            timeframe=timeframe,
+            session=session,
+            period=period,
+        )
+
+    results: dict[str, object] = {}
+    with ThreadPoolExecutor(max_workers=workers, thread_name_prefix="profile-bars") as executor:
+        futures = {executor.submit(load_one, symbol): symbol for symbol in requested}
+        for future in as_completed(futures):
+            symbol = futures[future]
+            try:
+                results[symbol] = future.result()
+            except Exception as exc:
+                empty = pd.DataFrame()
+                empty.attrs["load_error"] = {
+                    "error_type": type(exc).__name__,
+                    "reason": str(exc) or type(exc).__name__,
+                }
+                results[symbol] = empty
+    return {symbol: results.get(symbol, pd.DataFrame()) for symbol in requested}
 
 
 normalize_profile_frame = attach_profile_snapshot
