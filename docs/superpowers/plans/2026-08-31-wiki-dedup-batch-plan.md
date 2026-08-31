@@ -933,13 +933,17 @@ git push origin HEAD:master
 
 ## Implementation Checkpoint (2026-08-31)
 
-- [x] Phase 1a 모듈, 후보 추림, 보수적 LLM 판정, target/source 선택, 실행·dry-run, CLI 구현
-- [x] 관련 테스트 18개와 위키 회귀 테스트 42개 통과
-- [x] 전체 회귀에서 `3107 passed, 1 skipped, 1 failed` 확인
+- [x] Phase 1a 중복 병합 배치: 후보 추림, 보수적 LLM 판정, target/source 선택, dry-run, CLI, 1일 2회 크론
+- [x] Phase 1b 백과사전형 판단 문서: `report_citation`, `wiki_schema_version`, 기존 본문 추출 하위호환
+- [x] Phase 1c 자율 위키 관리자: 대주제 병합, 가독성 기준 의미 단위 분할, `parent_page_id`, 1일 1회 크론
+- [x] Phase 1d `investment_report.py`의 보유 티커별 정확 매칭 인용: 위키 전체 검색 없이 risk/playbook만 연결
+- [x] Phase 1e 기존 judgment 문서 5건씩 백필하는 `--dry-run` 지원 배치 러너 및 크론
+- [x] 그래프가 `parent_page_id`를 명시적 부모·자식 edge로 표시
+- [x] 신규·회귀 통합 테스트 293개 통과
 - [ ] 전체 회귀의 기존 `tests/test_gateway_url_sync.py::test_watchdog_probes_live_tunnel_before_trusting_pid` 실패 정리
-- [ ] 운영 환경에서 `--dry-run` 결과를 검토한 뒤 push
+- [ ] 운영 환경에서 각 배치의 `--dry-run` 결과를 별도 검토한 뒤 push
 
-전체 회귀의 유일한 실패는 이번 파일과 무관한 기존 watchdog 계약 불일치다. 테스트는
-`probe_tunnel "$CUR"`를 기대하지만 현재 스크립트는 재시도 래퍼인
-`probe_tunnel_with_retries "$CUR"`를 사용한다. Phase 1a 구현은 이 실패를 숨기거나
-수정하지 않고 별도 후속 작업으로 남긴다.
+현재까지 확인한 전체 회귀의 유일한 기존 실패는 이번 위키 작업과 무관한 watchdog
+계약 불일치다. 테스트는 `probe_tunnel "$CUR"`를 기대하지만 현재 스크립트는
+재시도 래퍼인 `probe_tunnel_with_retries "$CUR"`를 사용한다. 이 작업에서는 범위를
+넓혀 수정하지 않고 후속 작업으로 남긴다.

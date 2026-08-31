@@ -97,6 +97,8 @@ PATH=/home/ubuntu/.hermes/node/bin:/home/ubuntu/.local/bin:/usr/local/bin:/usr/b
 15 */2 * * * cd /home/ubuntu/projects/stock-report && uv run python -m reports.wiki_health_check >> /tmp/wiki_health_check.log 2>&1   # 위키 헬스 체크(통계·린트·스테일·미사용) — 2시간마다
 0 */6 * * * cd /home/ubuntu/projects/stock-report && flock -n /tmp/wiki_distillation.lock env WIKI_DISTILLATION_BATCH_SIZE=20 uv run python -m reports.wiki_distillation >> /tmp/wiki_distillation.log 2>&1   # 6시간마다 — source_digest 를 playbook/risk/concept 판단카드로 증류(최대 20건)
 20 3,15 * * * cd /home/ubuntu/projects/stock-report && flock -n /tmp/wiki_dedup_batch.lock uv run python -m reports.wiki_dedup_batch >> /tmp/wiki_dedup_batch.log 2>&1   # 1일 2회 — 재탕 판단카드(playbook/risk/concept) 정기 병합
+25 4 * * * cd /home/ubuntu/projects/stock-report && flock -n /tmp/wiki_autonomous_curator.lock env WIKI_AUTONOMOUS_MAX_OPERATIONS=6 uv run python -m reports.wiki_autonomous_curator >> /tmp/wiki_autonomous_curator.log 2>&1   # 매일 — 대주제 병합·의미 단위 분할
+45 4 * * * cd /home/ubuntu/projects/stock-report && flock -n /tmp/wiki_backfill.lock env WIKI_BACKFILL_BATCH_SIZE=5 uv run python -m reports.wiki_backfill >> /tmp/wiki_backfill.log 2>&1   # 매일 — 기존 판단 문서 5건씩 새 문체 백필
 30 2 * * 1 cd /home/ubuntu/projects/stock-report && uv run python -m reports.institution_watch >> /tmp/institution_watch.log 2>&1   # 월요일 02:30 UTC — 다기관 위키 갱신 + 공통 패턴 digest 축적
 
 # ── 주간 스냅샷 (토요일) ─────────────────────────────────────────────────────

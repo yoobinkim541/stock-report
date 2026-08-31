@@ -23,6 +23,20 @@ def test_load_portfolio_tickers_uses_snapshot_holdings(tmp_path):
     assert ir.load_portfolio_tickers(str(snap_path)) == ["QQQI", "SGOV"]
 
 
+def test_wiki_citations_are_loaded_only_for_requested_report_tickers(monkeypatch):
+    from agent_console import wiki
+
+    monkeypatch.setattr(wiki, "for_report_targets", lambda tickers, **kwargs: {
+        "MSFT": [{"id": "wiki-msft", "title": "MSFT 위험", "report_citation": "MSFT 마진 확인"}],
+        "NVDA": [],
+    })
+
+    citations = ir._wiki_citations_for_tickers(["MSFT", "NVDA"])
+
+    assert citations["MSFT"] == [{"page_id": "wiki-msft", "title": "MSFT 위험", "citation": "MSFT 마진 확인"}]
+    assert citations["NVDA"] == []
+
+
 class FixedDateTime:
     @classmethod
     def now(cls, tz=None):

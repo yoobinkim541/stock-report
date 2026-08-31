@@ -104,6 +104,17 @@ def test_build_wiki_graph_model_uses_explicit_links_and_keeps_edges_visible():
     assert any(trace.line.color == "rgba(34,211,238,0.48)" for trace in figure.data if trace.mode == "lines")
 
 
+def test_build_wiki_graph_model_shows_parent_child_hierarchy():
+    pages = [
+        {"id": "parent", "title": "부모 문서", "summary": "개요", "surface": "wiki", "kind": "playbook"},
+        {"id": "child", "title": "세부 문서", "summary": "세부", "surface": "wiki", "kind": "playbook", "parent_page_id": "parent"},
+    ]
+
+    model = wiki_mesh.build_wiki_graph_model(pages, selected_page_id="parent", depth=1, max_nodes=10)
+
+    assert any({edge.source, edge.target} == {"parent", "child"} and edge.explicit for edge in model["edges"])
+
+
 def test_build_figure_uses_webgl_for_large_graphs():
     pages = [
         {"id": f"page-{idx}", "title": f"문서 {idx}", "summary": "지식", "surface": "wiki", "kind": "note"}

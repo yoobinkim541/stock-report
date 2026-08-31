@@ -28,6 +28,8 @@ WIKI_SUMMARY_LIMIT = 2400
 WIKI_BODY_LIMIT = 12000
 WIKI_CONTEXT_BODY_SNIPPET = 1600
 WIKI_SPLIT_TARGET = 9000
+WIKI_SCHEMA_VERSION = 2
+REPORT_CITATION_MARKER = "리포트 인용 요약"
 
 _CACHE: dict[str, tuple[float, Any]] = {}
 _CACHE_TTL = 30.0
@@ -249,6 +251,34 @@ def _raw_text(value: object) -> str:
     return re.sub(r"\r\n?", "\n", str(value or "").replace("\x00", " ")).strip()
 
 
+def _extract_report_citation(body: object) -> str:
+    """본문 끝의 고정 인용 한 줄을 읽는다.
+
+    예전 자유서술 문서도 리포트에서 재사용할 수 있게 읽기 단계에서만
+    추출한다. 본문 안의 임의 지시문은 인용으로 승격하지 않고, marker가
+    있는 단일 blockquote 형식만 허용한다.
+    """
+    text = _raw_text(body)
+    if not text:
+        return ""
+    pattern = rf"(?mi)^\s*>\s*\*\*{re.escape(REPORT_CITATION_MARKER)}\*\*\s*:\s*(.+?)\s*$"
+    matches = re.findall(pattern, text)
+    return _clean(matches[-1], 600) if matches else ""
+
+
+def _with_report_citation(body: object, citation: object = "", *, fallback: object = "") -> tuple[str, str]:
+    """판단 문서에 인용 한 줄을 멱등적으로 붙이고 저장할 값을 반환한다."""
+    text = _raw_text(body)
+    existing = _extract_report_citation(text)
+    chosen = existing or _clean(citation, 600) or _clean(fallback, 600)
+    if not chosen:
+        return text, ""
+    if existing:
+        return text, existing
+    suffix = f"> **{REPORT_CITATION_MARKER}**: {chosen}"
+    return f"{text}\n\n{suffix}".strip(), chosen
+
+
 def _split_blocks(text: str) -> list[str]:
     body = _raw_text(text)
     if not body:
@@ -387,6 +417,10 @@ def _save_split_wiki_page(page: dict) -> dict | None:
     answer_hints = _dedupe_texts(page.get("answer_hints") or [], limit=12, item_limit=280)
     merge_history = _normalize_merge_history(page.get("merge_history"))
     original_summary = _clean(page.get("summary") or "", WIKI_SUMMARY_LIMIT)
+    report_citation = _clean(
+        page.get("report_citation") or _extract_report_citation(raw_body),
+        600,
+    )
 
     child_payloads: list[dict[str, Any]] = []
     seen_titles: set[str] = set()
@@ -408,6 +442,8 @@ def _save_split_wiki_page(page: dict) -> dict | None:
             "staleness_policy": staleness_policy,
             "answer_hints": answer_hints,
             "merge_history": merge_history,
+            "report_citation": report_citation,
+            "parent_page_id": parent_id,
         })
 
     child_records = [_build_wiki_record(payload, existing=get_page(payload.get("id") or "") or {}) for payload in child_payloads]
@@ -438,6 +474,8 @@ def _save_split_wiki_page(page: dict) -> dict | None:
         "staleness_policy": staleness_policy,
         "answer_hints": answer_hints,
         "merge_history": merge_history,
+        "report_citation": report_citation,
+        "parent_page_id": _clean(page.get("parent_page_id") or "", 80),
     }
     parent_record = _build_wiki_record(parent_payload, existing=get_page(parent_id) or {})
 
@@ -590,6 +628,7 @@ def _record_to_page(record: dict) -> dict:
     source = record.get("source") if isinstance(record.get("source"), dict) else {}
     body_parts = []
     body_text = _clean(record.get("body") or "", WIKI_BODY_LIMIT)
+    report_citation = _clean(record.get("report_citation") or _extract_report_citation(body_text), 600)
     if body_text:
         body_parts.append(body_text)
     elif summary:
@@ -623,6 +662,9 @@ def _record_to_page(record: dict) -> dict:
         "slug": _slugify(record.get("title") or "위키 페이지"),
         "summary": summary,
         "body": "\n\n".join(part for part in body_parts if part).strip(),
+        "report_citation": report_citation,
+        "wiki_schema_version": _safe_count(record.get("wiki_schema_version"), 2 if report_citation else 1, 10),
+        "parent_page_id": _clean(record.get("parent_page_id") or "", 80),
         "tags": tags,
         "status": status,
         "verification_status": verification_status_for(source_refs),
@@ -845,6 +887,97 @@ def get_page(page_id: str) -> dict | None:
             page = _record_to_page(row)
             return _apply_backlinks([page], records)[0]
     return None
+
+
+_REPORT_WIKI_KINDS = ("risk", "playbook")
+
+
+def _ticker_lookup_variants(ticker: object) -> list[str]:
+    value = _clean(ticker, 40).upper()
+    if not value:
+        return []
+    variants = [value]
+    if value.endswith(".KS") or value.endswith(".KQ"):
+        variants.append(value.rsplit(".", 1)[0])
+    return list(dict.fromkeys(variants))
+
+
+def _page_matches_report_ticker(page: dict, ticker: str) -> bool:
+    variants = _ticker_lookup_variants(ticker)
+    if not variants:
+        return False
+    exact_tags = {
+        _clean(tag, 80).upper()
+        for tag in page.get("tags") or []
+        if _clean(tag, 80).lower().startswith("ticker:")
+    }
+    if any(f"TICKER:{variant}" in exact_tags for variant in variants):
+        return True
+    haystack = " ".join([
+        str(page.get("title") or ""),
+        str(page.get("summary") or ""),
+        str(page.get("body") or ""),
+        " ".join(str(tag) for tag in page.get("tags") or []),
+    ]).upper()
+    return any(re.search(rf"(?<![A-Z0-9]){re.escape(variant)}(?![A-Z0-9])", haystack) for variant in variants)
+
+
+def _page_matches_report_topic(page: dict, topic: str) -> bool:
+    topic = _clean(topic, 120).lower()
+    if not topic:
+        return False
+    tags = {_clean(tag, 120).lower() for tag in page.get("tags") or []}
+    if f"topic:{topic}" in tags:
+        return True
+    haystack = " ".join([
+        str(page.get("title") or ""),
+        str(page.get("summary") or ""),
+        str(page.get("body") or ""),
+    ]).lower()
+    return topic in haystack
+
+
+def for_report_targets(
+    tickers: Iterable[object] | None = None,
+    *,
+    topics: Iterable[object] | None = None,
+    surface: str = "all",
+    limit: int = 3,
+) -> dict[str, list[dict]]:
+    """리포트가 이미 정한 대상에 연결된 판단 위키만 조회한다.
+
+    QMD의 광범위한 관련성 검색을 사용하지 않고, 요청된 ticker/topic의 정확한
+    태그·경계 일치만 허용한다. 따라서 리포트마다 위키 전체가 끼어드는 회귀를
+    막고, 매칭 결과에는 리포트가 바로 출력할 ``report_citation``이 포함된다.
+    """
+    requested_tickers = [_clean(value, 40).upper() for value in (tickers or []) if _clean(value, 40)]
+    requested_topics = [_clean(value, 120) for value in (topics or []) if _clean(value, 120)]
+    keys = list(dict.fromkeys([*requested_tickers, *requested_topics]))
+    if not keys:
+        return {}
+    surface = _clean(surface or "all", 60).lower() or "all"
+    limit = max(1, min(int(limit or 3), 10))
+    pages = [
+        page for page in _all_wiki_pages()
+        if page.get("status") != "archived"
+        and page.get("kind") in _REPORT_WIKI_KINDS
+        and (surface == "all" or page.get("surface") == surface)
+    ]
+
+    def rank(page: dict) -> tuple[int, float, str]:
+        status_score = {"stable": 3, "reviewed": 2, "draft": 1}.get(page.get("status"), 0)
+        return status_score, _safe_confidence(page.get("confidence")), str(page.get("updated_at") or "")
+
+    result: dict[str, list[dict]] = {}
+    for key in keys:
+        is_ticker = key in requested_tickers
+        matches = [
+            page for page in pages
+            if (_page_matches_report_ticker(page, key) if is_ticker else _page_matches_report_topic(page, key))
+        ]
+        matches.sort(key=rank, reverse=True)
+        result[key] = matches[:limit]
+    return result
 
 
 @_cached("stats")
@@ -1178,6 +1311,17 @@ def _build_wiki_record(page: dict, *, existing: dict | None = None) -> dict:
     merged_into = page.get("merged_into") if "merged_into" in page else existing.get("merged_into")
     merge_event_id = page.get("merge_event_id") if "merge_event_id" in page else existing.get("merge_event_id")
     distillation_state = page.get("distillation_state") if "distillation_state" in page else existing.get("distillation_state")
+    report_citation_value = (
+        page.get("report_citation") if "report_citation" in page else existing.get("report_citation")
+    )
+    body, report_citation = _with_report_citation(
+        page.get("body") or "",
+        report_citation_value,
+    )
+    parent_page_id = page.get("parent_page_id") if "parent_page_id" in page else existing.get("parent_page_id")
+    schema_version = page.get("wiki_schema_version") if "wiki_schema_version" in page else existing.get("wiki_schema_version")
+    if schema_version is None:
+        schema_version = WIKI_SCHEMA_VERSION if report_citation else 1
     created_at = _clean(existing.get("created_at") or page.get("created_at") or _now(), 80)
     updated_at = _clean(page.get("updated_at") or _now(), 80)
     tags = _dedupe_texts(
@@ -1189,7 +1333,10 @@ def _build_wiki_record(page: dict, *, existing: dict | None = None) -> dict:
         "id": page_id,
         "title": title,
         "summary": _clean(page.get("summary") or "", WIKI_SUMMARY_LIMIT),
-        "body": _clean(page.get("body") or "", WIKI_BODY_LIMIT),
+        "body": _clean(body, WIKI_BODY_LIMIT),
+        "report_citation": _clean(report_citation, 600),
+        "wiki_schema_version": _safe_count(schema_version, WIKI_SCHEMA_VERSION if report_citation else 1, 10),
+        "parent_page_id": _clean(parent_page_id or "", 80),
         "tags": tags,
         "artifacts": source_refs,
         "links": links,
@@ -1517,6 +1664,11 @@ def _merge_pages(
         (policy for policy in staleness_policies if "12h" in policy),
         next((policy for policy in staleness_policies if policy), ""),
     )
+    report_citation = next(
+        (page.get("report_citation") for page in all_pages if page.get("report_citation")),
+        _extract_report_citation(merged_body),
+    )
+    merged_body, report_citation = _with_report_citation(merged_body, report_citation)
 
     record = _build_wiki_record({
         "id": target_id,
@@ -1549,6 +1701,8 @@ def _merge_pages(
         "merge_history": merge_history,
         "merge_event_id": event_id,
         "confidence": min(_safe_confidence(page.get("confidence")) for page in all_pages),
+        "report_citation": report_citation,
+        "parent_page_id": target.get("parent_page_id") or "",
     }, existing=target)
 
     archived_records = []
@@ -1580,6 +1734,8 @@ def _merge_pages(
             "merged_into": target_id,
             "merge_event_id": event_id,
             "confidence": source.get("confidence"),
+            "report_citation": source.get("report_citation") or _extract_report_citation(source.get("body")),
+            "parent_page_id": source.get("parent_page_id") or "",
         }, existing=source))
 
     shared_memory.batch_upsert_delete(upserts=[record, *archived_records], deletes=[])
@@ -1604,6 +1760,7 @@ def _split_page(source_id: str, new_titles: list[str], llm_bodies: list[str]) ->
     if not titles:
         return None
     bodies = list(llm_bodies or [])
+    source_citation = source.get("report_citation") or _extract_report_citation(source.get("body"))
 
     base_payloads = []
     for idx, title in enumerate(titles):
@@ -1622,6 +1779,8 @@ def _split_page(source_id: str, new_titles: list[str], llm_bodies: list[str]) ->
             "staleness_policy": source.get("staleness_policy") or "",
             "answer_hints": source.get("answer_hints") or [],
             "merge_history": source.get("merge_history") or [],
+            "report_citation": source_citation,
+            "parent_page_id": source_id,
         })
 
     new_ids = [_build_wiki_record(payload, existing={})["id"] for payload in base_payloads]
@@ -1653,6 +1812,8 @@ def _split_page(source_id: str, new_titles: list[str], llm_bodies: list[str]) ->
         "staleness_policy": source.get("staleness_policy") or "",
         "answer_hints": source.get("answer_hints") or [],
         "merge_history": source.get("merge_history") or [],
+        "report_citation": source_citation,
+        "parent_page_id": source.get("parent_page_id") or "",
     }, existing=source))
 
     shared_memory.batch_upsert_delete(upserts=upserts, deletes=[])
@@ -1674,15 +1835,22 @@ def capture_from_chat(question: str, answer: str, *, surface: str = WIKI_SURFACE
         ]
         if part
     )
+    final_kind = kind if kind in VALID_KINDS else "playbook"
+    summary = _clean(answer or question or title, WIKI_SUMMARY_LIMIT)
+    body, report_citation = _with_report_citation(
+        body,
+        summary if final_kind in {"playbook", "risk", "concept"} else "",
+    )
     return upsert_page(
         {
             "title": title,
             "surface": surface,
-            "kind": kind if kind in VALID_KINDS else "playbook",
+            "kind": final_kind,
             "status": status if status in VALID_STATUSES else "draft",
             "tags": tags or ["conversation"],
-            "summary": _clean(answer or question or title, WIKI_SUMMARY_LIMIT),
+            "summary": summary,
             "body": body,
+            "report_citation": report_citation,
             "source_refs": source_refs or [],
             "confidence": confidence,
         }
@@ -2076,8 +2244,9 @@ def _build_auto_curation_prompt(
         "짧은 진행 확인, 단발성 수다, 상태 보고, 확인 대답은 생성 금지다.",
         "반드시 JSON object만 출력한다. 마크다운, 설명문, 코드펜스는 금지한다.",
         "body는 요약문이 아니라 재사용 가능한 위키 문서여야 한다.",
-        "본문은 가능하면 3~6개의 섹션 또는 불릿 묶음으로 구성하고, 규칙·예외·체크리스트·실패 조건·복구 절차를 포함한다.",
+        "본문은 백과사전형 문장으로 작성하고, 필요할 때만 자연스러운 소제목을 사용한다. 배경·적용·예외·관찰 사례·같이 보기를 내용에 맞게 포함한다.",
         "질문이나 답변이 길면 body도 충분히 길게 유지하고, 핵심 내용을 억지로 한 문단으로 압축하지 않는다.",
+        f"playbook/risk/concept 판단 문서는 본문 마지막에 '> **{REPORT_CITATION_MARKER}**: 한 줄 요약'을 정확히 한 번 포함한다.",
         "가능한 action 값은 create, update, skip, delete, merge, split 이다.",
         "update 를 고를 때는 target_id 를 기존 후보 페이지 id 로 지정한다.",
         "확신이 낮으면 status 는 draft, 중간이면 reviewed, 이미 안정적인 운영 규칙이면 stable 이다.",
@@ -2088,7 +2257,7 @@ def _build_auto_curation_prompt(
         "- concept: 용어·지표·구조에 대한 정의/설명",
         "- note: 위 4개에 안 맞는 그 외 재사용 가능한 메모",
         "source_digest 는 이 경로에서 쓰지 않는다 (수집 파이프라인 전용 kind).",
-        "필드: action, title, summary, body, kind, status, tags, source_refs, links, target_id, confidence, reason, page_feedback.",
+        "필드: action, title, summary, body, kind, status, tags, source_refs, links, target_id, confidence, reason, report_citation, page_feedback.",
         "관련 있는 기존 위키 후보가 있으면 해당 id 를 links 배열에 넣는다. 관련 없으면 links 는 빈 배열이다.",
         "action이 delete면 target_id(삭제할 기존 후보 id)와 reason만 있으면 된다.",
         "delete 판단 기준: 30일 이상 갱신 안 됨, 현재 시장 상황과 모순, 다른 페이지와 완전히 중복, 내용이 부실하거나 검증 불가능.",
@@ -2136,7 +2305,7 @@ def _build_auto_curation_prompt(
     lines += [
         "",
         "JSON 예시 (create/update/delete/merge/split):",
-        '{"action":"create","title":"손실한도와 레버리지","summary":"...","body":"...","kind":"playbook","status":"reviewed","tags":["risk","portfolio"],"source_refs":["conversation:123"],"links":[],"target_id":"","confidence":0.86,"reason":"..."}',
+        '{"action":"create","title":"손실한도와 레버리지","summary":"...","body":"...\\n\\n> **리포트 인용 요약**: ...","kind":"playbook","status":"reviewed","tags":["risk","portfolio"],"source_refs":["conversation:123"],"links":[],"target_id":"","confidence":0.86,"report_citation":"...","reason":"..."}',
         '{"action":"delete","target_id":"id-to-delete","reason":"..."}',
         '{"action":"merge","target_page_id":"id-to-merge-into","source_page_ids":["id-to-absorb"],"body":"...","reason":"..."}',
         '{"action":"split","source_page_id":"id-to-split","new_titles":["...","..."],"new_bodies":["...","..."],"reason":"..."}',
@@ -2177,6 +2346,8 @@ def _parse_curation_plan(text: str | None) -> dict | None:
                     )
             if "new_bodies" in normalized:
                 normalized["new_bodies"] = _string_list(normalized["new_bodies"], limit=20, item_limit=WIKI_BODY_LIMIT)
+            if "report_citation" in normalized:
+                normalized["report_citation"] = _clean(normalized.get("report_citation"), 600)
             if "page_feedback" in normalized and not isinstance(normalized["page_feedback"], dict):
                 normalized["page_feedback"] = {}
             if "confidence" in normalized:
@@ -2246,6 +2417,15 @@ def _plan_to_page_payload(
     if status not in VALID_STATUSES:
         status = "draft"
     confidence = _num_or_default(plan.get("confidence"), 0.5)
+    citation_fallback = summary if kind in {"playbook", "risk", "concept"} else ""
+    report_citation = _clean(
+        plan.get("report_citation")
+        or _extract_report_citation(body)
+        or ((target or {}).get("report_citation") if target else "")
+        or citation_fallback,
+        600,
+    )
+    body, report_citation = _with_report_citation(body, report_citation, fallback=citation_fallback)
     final_id = target_id or _page_id(title, surface, kind)
     links = _clean_links(_string_list(plan.get("links"), limit=MAX_LINKS, item_limit=80), self_id=final_id)
     if target:
@@ -2278,6 +2458,8 @@ def _plan_to_page_payload(
         "title": title,
         "summary": summary,
         "body": body,
+        "report_citation": report_citation,
+        "wiki_schema_version": WIKI_SCHEMA_VERSION if report_citation else 1,
         "surface": surface,
         "kind": kind,
         "status": status,

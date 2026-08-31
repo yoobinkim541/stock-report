@@ -408,6 +408,7 @@ def _build_llm_analysis_payload(clean_data, source_digest=""):
             "1mo_pct": item.get("change_1mo_pct"),
             "reasons": item.get("top_reasons", [])[:2],
             "risks": item.get("top_risks", [])[:2],
+            "wiki_citations": item.get("wiki_citations", [])[:3],
         })
 
     # C: nasdaq/kospi lists with list_cap
@@ -1690,6 +1691,31 @@ def _fx_timing_mobile_line(timing):
 
 # ── report assembly helpers (순수 추출: generate_report 의 dict/텍스트 조립부) ──
 
+
+def _wiki_citations_for_tickers(tickers):
+    """보유종목처럼 리포트가 이미 선택한 대상에만 판단 위키를 연결한다."""
+    requested = [str(ticker or "").strip().upper() for ticker in (tickers or []) if str(ticker or "").strip()]
+    if not requested:
+        return {}
+    try:
+        from agent_console import wiki
+
+        matches = wiki.for_report_targets(requested, limit=3)
+    except Exception as exc:
+        logger.warning("위키 리포트 인용 조회 실패(무시): %s", exc)
+        return {ticker: [] for ticker in requested}
+    citations = {}
+    for ticker in requested:
+        rows = []
+        for page in matches.get(ticker, []):
+            citation = str(page.get("report_citation") or page.get("summary") or "").strip()
+            title = str(page.get("title") or "위키 판단").strip()
+            page_id = str(page.get("id") or "").strip()
+            if citation and page_id:
+                rows.append({"page_id": page_id, "title": title, "citation": citation})
+        citations[ticker] = rows
+    return citations
+
 def _build_json_data(today_str, market, ndx_results, top_buy_candidates,
                      top_watch, kospi_results, kospi_top, kospi_watch,
                      accum_picks, name_fn, portfolio_results):
@@ -1734,6 +1760,7 @@ def _build_json_data(today_str, market, ndx_results, top_buy_candidates,
             "volume_info": r["signal"].get("volume_info", {}),
             "reasons": r["reasons"],
             "risks": r["risks"],
+            "wiki_citations": r.get("wiki_citations", []),
         }
         json_data["portfolio"].append(entry)
     return json_data
@@ -1777,6 +1804,7 @@ def _build_clean_data(today_str, spy_change, market, kospi_str,
             "volume_vs_20d_avg_pct": round((sig.get("volume_info", {}).get("ratio", 1) - 1) * 100, 1) if sig.get("volume_info", {}).get("ratio") else None,
             "top_reasons": r["reasons"][:2],
             "top_risks": r["risks"][:2],
+            "wiki_citations": r.get("wiki_citations", []),
         })
     clean_data["nasdaq_top_buy"] = []
     for r in top_buy_candidates[:5]:
@@ -2354,6 +2382,11 @@ def generate_report():
     llm_decision_status = _attach_context_decisions(portfolio_results, market)
     print(f"   LLM decision: {llm_decision_status}")
 
+    # 리포트가 이미 정한 보유종목 범위 안에서만 위키 판단을 조회한다.
+    wiki_citations = _wiki_citations_for_tickers(PORTFOLIO_TICKERS)
+    for result in portfolio_results:
+        result["wiki_citations"] = wiki_citations.get(result.get("ticker"), [])
+
     # ── NASDAQ 100 scan ──
     print(f"\n📋 NASDAQ 100 스캔 중...")
     ndx_results = []
@@ -2645,6 +2678,10 @@ def generate_report():
                 lines.append(f"  {idx}. {finding}")
         else:
             lines.append(f"  - 특이한 뉴스나 이벤트 없음")
+        if r.get("wiki_citations"):
+            lines.append(f"- **위키 판단 근거:**")
+            for citation in r["wiki_citations"][:3]:
+                lines.append(f"  - {citation['citation']} [위키: {citation['title']}]")
         lines.append(f"")
 
     # Section 3: NASDAQ 100 scan

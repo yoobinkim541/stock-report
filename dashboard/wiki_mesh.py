@@ -287,6 +287,7 @@ def _normalize_page(page: dict[str, Any] | WikiGraphNode) -> dict[str, Any]:
             "decisions": _dedupe_texts(page.get("decisions") or [], limit=8, item_limit=280),
             "openQuestions": _dedupe_texts(page.get("openQuestions") or [], limit=8, item_limit=280),
             "messages": list(page.get("messages") or []),
+            "parent_page_id": _clean(page.get("parent_page_id") or "", 80),
             "snippet": _clean(page.get("summary") or page.get("body") or "", 260),
             "raw": dict(page),
         }
@@ -378,6 +379,9 @@ def _build_adjacency(pages: list[dict[str, Any]]) -> tuple[dict[str, dict[str, W
     for page in pages:
         page_id = str(page.get("id") or "")
         linked_ids = [*(page.get("links") or []), *(page.get("backlinks") or [])]
+        parent_id = str(page.get("parent_page_id") or "")
+        if parent_id and parent_id in page_ids:
+            linked_ids.append(parent_id)
         for linked_id in linked_ids:
             target_id = str(linked_id or "")
             if target_id not in page_ids:
@@ -655,6 +659,7 @@ def build_wiki_graph_model(
                 "summary": page.get("summary") or "",
                 "tags": tuple(page.get("tags") or ()),
                 "source_refs": tuple(page.get("source_refs") or ()),
+                "parent_page_id": str(page.get("parent_page_id") or ""),
                 "group": page.get("surface") or WIKI_SURFACE,
                 "surface_color": _surface_color(page.get("surface") or WIKI_SURFACE),
                 "degree": degree,
