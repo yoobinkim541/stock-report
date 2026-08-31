@@ -9,6 +9,7 @@ import re
 import subprocess
 import tempfile
 import threading
+from contextvars import ContextVar
 
 from . import context, evidence_context, evidence_usage, realtime_market, shared_memory, storage, wiki
 
@@ -109,15 +110,42 @@ def build_context_prompt(surface: str = "market") -> str:
     return "\n".join(lines)
 
 
+_ACTIVE_PROGRESS_EVENTS: ContextVar[list[dict] | None] = ContextVar(
+    "agent_console_progress_events", default=None
+)
+
+
+def _emit_progress_event(name: str, **details) -> None:
+    events = _ACTIVE_PROGRESS_EVENTS.get()
+    if events is None or any(item.get("name") == name for item in events):
+        return
+    event = {"name": str(name), "at": datetime.now(_KST).isoformat(timespec="seconds")}
+    event.update({key: value for key, value in details.items() if value is not None})
+    events.append(event)
+
+
 def answer(question: str, surface: str = "market", *, async_postprocess: bool = False) -> dict:
     question = str(question or "").strip()
     surface = str(surface or "market").strip().lower()
     if not question:
         return {"ok": False, "error": "질문을 입력해 주세요."}
 
+    progress_events: list[dict] = []
+    progress_token = _ACTIVE_PROGRESS_EVENTS.set(progress_events)
+    try:
+        return _answer_impl(question, surface, async_postprocess, progress_events)
+    finally:
+        # ContextVar는 요청 예외가 나도 다음 요청으로 전파되면 안 된다.
+        _ACTIVE_PROGRESS_EVENTS.reset(progress_token)
+
+
+def _answer_impl(question: str, surface: str, async_postprocess: bool,
+                 progress_events: list[dict]) -> dict:
     history = _safe_list_conversation(limit=12, surface=surface)
     _safe_add_conversation("user", question, surface)
     pack = _safe_context_pack(surface)
+    _emit_progress_event("context_ready")
+    _emit_progress_event("tools_started", tool="wiki_search")
     try:
         wiki_pages = wiki.list_pages(query=question, surface=surface, limit=4)
     except Exception:
@@ -140,7 +168,10 @@ def answer(question: str, surface: str = "market", *, async_postprocess: bool = 
         response = _compose_answer(question, pack, history=history)
     except Exception as exc:
         _mark_rules_fallback("compose_error")
+        _emit_progress_event("failed", reason="compose_error")
         response = _compose_error_fallback_answer(question, pack, exc)
+    if not any(item.get("name") == "failed" for item in progress_events):
+        _emit_progress_event("answer_ready")
     engine = _LAST_LLM_ENGINE or "local-rules"
     fallback_reason = _LAST_FALLBACK_REASON
     intent = _classify_question_intent(question, pack, history)
@@ -167,14 +198,17 @@ def answer(question: str, surface: str = "market", *, async_postprocess: bool = 
         answer_validation = evidence_usage.validate_citations(cited_evidence_ids, provided_evidence_ids)
     _safe_add_conversation("assistant", response, surface)
     postprocess = _postprocess_chat(question, response, surface, pack, history, async_mode=async_postprocess)
+    if (postprocess or {}).get("wiki_autocurate") == "queued":
+        _emit_progress_event("postprocess_queued")
     sources = pack.get("sources") or {}
     market_snapshot = pack.get("market_snapshot") or {}
-    return {
+    result = {
         "ok": True,
         "answer": response,
         "cited_evidence_ids": cited_evidence_ids,
         "answer_structured": {"answer": response, "cited_evidence_ids": cited_evidence_ids},
         "surface": surface,
+        "as_of": pack.get("generated_at"),
         "context": {
             "engine": engine,
             "fallback_reason": fallback_reason,
@@ -193,9 +227,12 @@ def answer(question: str, surface: str = "market", *, async_postprocess: bool = 
             "provided_evidence_count": len(provided_evidence_ids),
             "citation_validation": answer_validation,
             "postprocess": postprocess,
+            "progress_events": progress_events,
+            "as_of": pack.get("generated_at"),
         },
         "conversation": _safe_list_conversation(limit=20, surface=surface),
     }
+    return result
 
 
 _LAST_POSTPROCESS_THREAD: threading.Thread | None = None
@@ -1540,6 +1577,7 @@ def _accept_llm_response(text: str | None, intent: dict) -> bool:
 def _try_llm_prompt(prompt: str, runner=subprocess.run, max_timeout: int | None = None) -> str | None:
     if os.getenv("AGENT_CONSOLE_LLM_ENABLED", "1").lower() in {"0", "false", "no", "off"}:
         return None
+    _emit_progress_event("llm_started")
     return (_try_codex_chat(prompt, runner=runner, max_timeout=max_timeout)
             or _try_hermes_chat(prompt, runner=runner, max_timeout=max_timeout)
             or _try_gemini_chat(prompt, runner=runner, max_timeout=max_timeout)

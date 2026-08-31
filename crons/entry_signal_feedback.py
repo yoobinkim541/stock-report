@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """entry_signal_feedback.py — 진입 후보 추천 사후성과 백필/회고.
 
-매일 실행해 20/60거래일이 지난 추천 후보의 실제 성과를 outcome 원장에 추가한다.
+매일 실행해 단기·스윙 horizon이 성숙한 추천 후보의 실제 성과를 outcome 원장에 추가한다.
 추천 스냅샷은 telegram_bot.notify_entry_signals / /entry 명령에서 적재한다.
 """
 from __future__ import annotations
@@ -28,18 +28,21 @@ logger = logging.getLogger(__name__)
 def main() -> int:
     logger.info("=== entry_signal_feedback 시작 [%s] ===", datetime.now(KST).strftime("%Y-%m-%d %H:%M"))
     added = entry_feedback.backfill_outcomes()
-    s20 = entry_feedback.summarize_feedback(horizon=20)
-    s60 = entry_feedback.summarize_feedback(horizon=60)
+    summary_horizons = ("30m", "1h", "4h", "1d", "3d", 20, 60)
+    summaries = {h: entry_feedback.summarize_feedback(horizon=h) for h in summary_horizons}
+    s20, s60 = summaries[20], summaries[60]
     adjust = entry_feedback.learn_feedback_adjustments(horizon=20)
+    compact = " · ".join(f"{h} n={summaries[h].get('n', 0)}" for h in summary_horizons)
     logger.info(
-        "백필 %d건 · 20d n=%s · 60d n=%s · 보정학습 adopted=%s (%s)",
-        added, s20.get("n"), s60.get("n"), adjust.get("adopted"), adjust.get("reason"),
+        "백필 %d건 · %s · 보정학습 adopted=%s (%s)",
+        added, compact, adjust.get("adopted"), adjust.get("reason"),
     )
 
     if added or os.getenv("ENTRY_FEEDBACK_ALWAYS_SEND", "false").lower() == "true":
         send_cron_telegram("\n".join([
             "🧪 진입 후보 사후검증",
             f"신규 성숙 outcome: {added}건",
+            " · ".join(f"{h} 표본 {summaries[h].get('n', 0)}건" for h in summary_horizons),
             entry_feedback.format_feedback_summary(s20),
             entry_feedback.format_feedback_summary(s60),
             f"점수 보정학습: {'채택' if adjust.get('adopted') else '대기'} — {adjust.get('reason')}",

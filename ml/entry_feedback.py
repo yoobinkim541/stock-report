@@ -28,10 +28,15 @@ logger = logging.getLogger(__name__)
 
 KST = timezone(timedelta(hours=9))
 SURFACE = "entry_signals"
-HORIZONS = (20, 60)
+# Integer horizons are retained for legacy daily records. String horizons make
+# the sampling unit explicit for short intraday and swing evaluations.
+HORIZONS = (20, 60, "30m", "1h", "4h", "1d", "3d", "5d", "20d")
+SHORT_HORIZONS = {"30m": 30, "1h": 60, "4h": 240}
+SWING_HORIZONS = {"1d": 1, "3d": 3, "5d": 5, "20d": 20}
 ADJUST_PATH = Path(os.path.expanduser("~/reports/ml-cache/entry_feedback_adjustments.json"))
 MIN_ADJUST_SAMPLES = int(os.getenv("ENTRY_FEEDBACK_ADJUST_MIN_SAMPLES", "30"))
 MIN_FACTOR_SAMPLES = int(os.getenv("ENTRY_FEEDBACK_FACTOR_MIN_SAMPLES", "8"))
+MIN_OOS_SAMPLES = int(os.getenv("ENTRY_FEEDBACK_OOS_MIN_SAMPLES", "10"))
 FACTOR_ADJUST_CAP = 0.04
 TOTAL_ADJUST_CAP = 0.08
 FACTOR_SCORE_PER_R = 0.035
@@ -144,18 +149,75 @@ def _reward_risk(score) -> tuple[float, float]:
     return round(risk, 5), round(rr, 4)
 
 
-def score_to_decision(score, *, source: str, universe: str, date: str | None = None) -> dict:
+def _horizon_key(horizon: int | str) -> str:
+    text = str(horizon).strip()
+    return str(int(text)) if text.isdigit() else text.lower()
+
+
+def _horizon_value(horizon: int | str) -> int | str:
+    key = _horizon_key(horizon)
+    return int(key) if key.isdigit() else key
+
+
+def _evaluation_profile(horizon: int | str) -> str:
+    return "short" if _horizon_key(horizon) in SHORT_HORIZONS else "swing"
+
+
+def _session_for_decision(timestamp: str, market: str) -> str:
+    text = str(timestamp or "")
+    if "T" in text:
+        try:
+            hour = int(text.split("T", 1)[1][0:2])
+            return "regular" if 9 <= hour < 16 else "extended"
+        except (ValueError, IndexError):
+            pass
+    return "regular" if market == "KR" else "unknown"
+
+
+def score_to_decision(score, *, source: str, universe: str, date: str | None = None,
+                      snapshot_ts: str | None = None, session: str | None = None,
+                      evaluation_profile: str = "daily", event_id: str | None = None,
+                      event_type: str | None = None, model_version: str | None = None,
+                      parameter_version: str | None = None, feature_version: str | None = None,
+                      freshness_seconds: int | float | None = None) -> dict:
     """EntryScore를 학습용 point-in-time decision 레코드로 변환."""
     from ml.entry_analyzer import trade_level_values
 
     d = date or _today_kst()
+    stamp = str(snapshot_ts or _now_kst())
     buy_lo, target, stop = trade_level_values(score)
     risk_pct, rr = _reward_risk(score)
     market = _market(score.ticker, score.currency)
+    profile = str(evaluation_profile or "daily").strip().lower()
+    current_session = str(session or _session_for_decision(stamp, market)).strip().lower()
+    current_event_type = str(event_type or ("enter" if score.signal == "enter" else "signal"))
+    if profile == "daily":
+        decision_id = _decision_id(d, source, universe, score.ticker)
+    else:
+        decision_id = event_id or (
+            f"{d}:{_slug(current_session)}:{_slug(source)}:{_slug(universe)}:{score.ticker}:{_slug(current_event_type)}"
+        )
+    metadata = {
+        "model_version": model_version or os.getenv("ENTRY_MODEL_VERSION", "entry-v1"),
+        "parameter_version": parameter_version or os.getenv("ENTRY_PARAMETER_VERSION", "default"),
+        "feature_version": feature_version or os.getenv("ENTRY_FEATURE_VERSION", "default"),
+        "evaluation_profile": profile,
+        "session": current_session,
+        "freshness_seconds": freshness_seconds,
+    }
     return {
-        "id": _decision_id(d, source, universe, score.ticker),
+        "id": decision_id,
         "date": d,
-        "snapshot_ts": _now_kst(),
+        "snapshot_ts": stamp,
+        "event_id": decision_id,
+        "event_type": current_event_type,
+        "evaluation_profile": profile,
+        "session": current_session,
+        "model_version": metadata["model_version"],
+        "parameter_version": metadata["parameter_version"],
+        "feature_version": metadata["feature_version"],
+        "freshness_seconds": freshness_seconds,
+        "metadata": metadata,
         "source": source,
         "universe": universe,
         "ticker": score.ticker,
@@ -202,7 +264,12 @@ def score_to_decision(score, *, source: str, universe: str, date: str | None = N
 
 
 def record_entry_scores(scores: Iterable, *, source: str = "auto_watch",
-                        universe: str = "watch", ledger=None) -> int:
+                        universe: str = "watch", ledger=None,
+                        evaluation_profile: str = "daily", session: str | None = None,
+                        event_id: str | None = None, event_type: str | None = None,
+                        model_version: str | None = None, parameter_version: str | None = None,
+                        feature_version: str | None = None,
+                        freshness_seconds: int | float | None = None) -> int:
     """분석된 EntryScore 전체를 일 1회/종목 단위로 불변 저장. 신규 기록 수 반환."""
     from ml.adaptive import Ledger
 
@@ -210,7 +277,13 @@ def record_entry_scores(scores: Iterable, *, source: str = "auto_watch",
     existing = {d.get("id") for d in ledger.read_decisions()}
     added = 0
     for score in scores or []:
-        rec = score_to_decision(score, source=source, universe=universe)
+        rec = score_to_decision(
+            score, source=source, universe=universe,
+            evaluation_profile=evaluation_profile, session=session,
+            event_id=event_id, event_type=event_type,
+            model_version=model_version, parameter_version=parameter_version,
+            feature_version=feature_version, freshness_seconds=freshness_seconds,
+        )
         if rec["id"] not in existing:
             ledger.log_decision(rec)
             existing.add(rec["id"])
@@ -220,8 +293,8 @@ def record_entry_scores(scores: Iterable, *, source: str = "auto_watch",
     return added
 
 
-def _outcome_id(decision_id: str, horizon: int) -> str:
-    return f"{decision_id}:h{int(horizon)}"
+def _outcome_id(decision_id: str, horizon: int | str) -> str:
+    return f"{decision_id}:h{_horizon_key(horizon)}"
 
 
 def _base_decision_id(outcome_id: str) -> str:
@@ -242,33 +315,178 @@ def _max_drawdown(values: list[float]) -> float:
     return abs(mdd)
 
 
-def _first_touch(window: pd.DataFrame, target: float | None, stop: float | None) -> tuple[str, str | None, float | None]:
-    """목표/무효화선 첫 터치. 같은 날 둘 다 닿으면 보수적으로 stop 우선."""
+def _elapsed_minutes(origin: pd.Timestamp, current: pd.Timestamp) -> int | None:
+    try:
+        if origin.tzinfo is not None and current.tzinfo is None:
+            current = current.tz_localize(origin.tzinfo)
+        elif origin.tzinfo is None and current.tzinfo is not None:
+            current = current.tz_localize(None)
+        return max(0, int(round((current - origin).total_seconds() / 60)))
+    except (TypeError, ValueError, AttributeError):
+        return None
+
+
+def _first_touch_details(window: pd.DataFrame, target: float | None,
+                         stop: float | None) -> tuple[str, str | None, float | None, int | None, int | None]:
+    """목표/무효화선 경로와 각 레벨까지의 시간을 계산한다.
+
+    같은 캔들에서 목표와 손절이 모두 닿으면 경로 판정은 보수적으로 stop
+    우선으로 유지한다. 다만 백테스트 진단을 위해 목표·손절의 최초 터치
+    시간은 각각 기록한다.
+    """
     if window is None or len(window) <= 1:
-        return "none", None, None
+        return "none", None, None, None, None
+    origin = pd.Timestamp(window.index[0])
+    path_result = "none"
+    path_date = None
+    path_price = None
+    target_minutes = None
+    stop_minutes = None
     for idx, row in window.iloc[1:].iterrows():
         hi = float(row.get("High", row.get("Close")))
         lo = float(row.get("Low", row.get("Close")))
-        day = pd.Timestamp(idx).strftime("%Y-%m-%d")
-        if stop and lo <= stop:
-            return "stop", day, float(stop)
-        if target and hi >= target:
-            return "target", day, float(target)
-    return "none", None, None
+        stamp = pd.Timestamp(idx)
+        day = stamp.strftime("%Y-%m-%d")
+        elapsed = _elapsed_minutes(origin, stamp)
+        hit_stop = bool(stop and lo <= stop)
+        hit_target = bool(target and hi >= target)
+        if hit_stop and stop_minutes is None:
+            stop_minutes = elapsed
+        if hit_target and target_minutes is None:
+            target_minutes = elapsed
+        if path_result == "none" and (hit_stop or hit_target):
+            # Intrabar 순서를 알 수 없으므로 같은 봉은 stop 우선이다.
+            path_result = "stop" if hit_stop else "target"
+            path_date = day
+            path_price = float(stop if hit_stop else target)
+    return path_result, path_date, path_price, target_minutes, stop_minutes
 
 
-def _default_price_result(decision: dict, horizon: int) -> dict | None:
-    """결정일 이후 horizon 거래일 수익률/경로 결과 계산. 미성숙이면 None."""
+def _first_touch(window: pd.DataFrame, target: float | None, stop: float | None) -> tuple[str, str | None, float | None]:
+    """목표/무효화선 첫 터치의 기존 3개 값 호환 래퍼."""
+    return _first_touch_details(window, target, stop)[:3]
+
+
+def _intraday_steps(horizon: int | str) -> int | None:
+    return SHORT_HORIZONS.get(_horizon_key(horizon))
+
+
+def _swing_steps(horizon: int | str) -> int:
+    key = _horizon_key(horizon)
+    return SWING_HORIZONS.get(key, int(key) if key.isdigit() else 20)
+
+
+def _intraday_symbol(symbol: str, market: str) -> str:
+    """intraday provider용 심볼 정규화. 지수·매크로 심볼은 suffix를 붙이지 않는다."""
+    symbol = str(symbol or "").strip()
+    if str(market or "").upper() != "KR":
+        return symbol
+    if symbol.startswith("^") or symbol.endswith((".KS", ".KQ", "=X", "-USD")):
+        return symbol
+    return f"{symbol}.KS"
+
+
+def _intraday_frame(symbol: str, date: str, *, market: str) -> pd.DataFrame:
+    """자체 1분봉을 우선 사용하고 없을 때만 기존 공급자 fetch를 시도한다."""
+    try:
+        from providers.intraday_bars import load_bars
+
+        frame = load_bars(symbol, date, interval="1m", session="all")
+        if isinstance(frame, pd.DataFrame) and not frame.empty:
+            return frame
+    except Exception:
+        pass
+    try:
+        from ml.intraday_signal import fetch_intraday
+        ticker = _intraday_symbol(symbol, market)
+        frame = fetch_intraday(ticker, interval="1m", days=7)
+        return frame if isinstance(frame, pd.DataFrame) else pd.DataFrame()
+    except Exception:
+        return pd.DataFrame()
+
+
+def _parse_snapshot_timestamp(value: object):
+    text = str(value or "").strip()
+    if text.endswith(" KST"):
+        text = text[:-4] + "+09:00"
+    try:
+        return pd.Timestamp(text) if text else None
+    except (TypeError, ValueError):
+        return None
+
+
+def _default_intraday_result(decision: dict, horizon: int | str) -> dict | None:
+    steps = _intraday_steps(horizon)
+    if steps is None:
+        return None
+    ticker = str(decision.get("ticker") or "")
+    benchmark = str(decision.get("benchmark") or _benchmark(decision))
+    market = str(decision.get("market") or _market(ticker)).upper()
+    date = str(decision.get("date") or _today_kst())[:10]
+    df = _intraday_frame(ticker, date, market=market)
+    bm = _intraday_frame(benchmark, date, market="US" if market != "KR" else "KR")
+    if df.empty or bm.empty:
+        return None
+    df = df.sort_index()
+    bm = bm.sort_index()
+    snapshot = _parse_snapshot_timestamp(decision.get("snapshot_ts"))
+    def after_snapshot(frame: pd.DataFrame) -> pd.DataFrame:
+        if snapshot is None:
+            return frame
+        start = snapshot
+        try:
+            if getattr(start, "tzinfo", None) is None and getattr(frame.index, "tz", None) is not None:
+                start = start.tz_localize(frame.index.tz)
+            elif getattr(start, "tzinfo", None) is not None and getattr(frame.index, "tz", None) is None:
+                start = start.tz_localize(None)
+            return frame[frame.index >= start]
+        except (TypeError, ValueError):
+            return frame.iloc[0:0]
+    df = after_snapshot(df)
+    bm = after_snapshot(bm)
+    if len(df) <= steps or len(bm) <= steps:
+        return None
+    window, bwindow = df.iloc[:steps + 1], bm.iloc[:steps + 1]
+    entry, exit_ = float(window["Close"].iloc[0]), float(window["Close"].iloc[-1])
+    bentry, bexit = float(bwindow["Close"].iloc[0]), float(bwindow["Close"].iloc[-1])
+    target = _as_float(decision.get("target_price"), 0.0) or None
+    stop = _as_float(decision.get("stop_price"), 0.0) or None
+    path_result, path_date, path_price, time_to_target, time_to_stop = _first_touch_details(
+        window, target, stop
+    )
+    stock_prices = [float(x) for x in window["Close"].tolist()]
+    return {
+        "entry_date": pd.Timestamp(window.index[0]).isoformat(),
+        "exit_date": pd.Timestamp(window.index[-1]).isoformat(),
+        "entry_price_actual": entry, "exit_price": exit_,
+        "benchmark_entry": bentry, "benchmark_exit": bexit,
+        "stock_ret": exit_ / entry - 1.0 if entry > 0 else 0.0,
+        "benchmark_ret": bexit / bentry - 1.0 if bentry > 0 else 0.0,
+        "fwd_mdd": _max_drawdown(stock_prices),
+        "idx_fwd_mdd": _max_drawdown([float(x) for x in bwindow["Close"].tolist()]),
+        "mfe": max(stock_prices) / entry - 1.0 if entry > 0 else 0.0,
+        "mae": min(stock_prices) / entry - 1.0 if entry > 0 else 0.0,
+        "path_result": path_result, "path_date": path_date, "path_price": path_price,
+        "time_to_target": time_to_target, "time_to_stop": time_to_stop,
+        "time_to_target_minutes": time_to_target, "time_to_stop_minutes": time_to_stop,
+    }
+
+
+def _default_price_result(decision: dict, horizon: int | str) -> dict | None:
+    """결정일 이후 market-aware horizon 수익률/경로 결과 계산."""
+    if _intraday_steps(horizon) is not None:
+        return _default_intraday_result(decision, horizon)
     from ml.data_pipeline import fetch_prices
 
     ticker = decision.get("ticker")
     benchmark = decision.get("benchmark") or _benchmark(decision)
     if not ticker:
         return None
-    prices = fetch_prices([ticker, benchmark], days=max(756, horizon * 4 + 80))
+    steps = _swing_steps(horizon)
+    prices = fetch_prices([ticker, benchmark], days=max(756, steps * 4 + 80))
     df = prices.get(ticker)
     bm = prices.get(benchmark)
-    if df is None or bm is None or len(df) <= horizon or len(bm) <= horizon:
+    if df is None or bm is None or len(df) <= steps or len(bm) <= steps:
         return None
 
     start = pd.Timestamp(decision.get("date"))
@@ -276,11 +494,11 @@ def _default_price_result(decision: dict, horizon: int) -> dict | None:
     bm = bm.sort_index()
     fut = df[df.index >= start]
     bfut = bm[bm.index >= start]
-    if len(fut) <= horizon or len(bfut) <= horizon:
+    if len(fut) <= steps or len(bfut) <= steps:
         return None
 
-    window = fut.iloc[:horizon + 1]
-    bwindow = bfut.iloc[:horizon + 1]
+    window = fut.iloc[:steps + 1]
+    bwindow = bfut.iloc[:steps + 1]
     entry = float(window["Close"].iloc[0])
     exit_ = float(window["Close"].iloc[-1])
     bentry = float(bwindow["Close"].iloc[0])
@@ -292,7 +510,9 @@ def _default_price_result(decision: dict, horizon: int) -> dict | None:
         stop = float(stop) if stop is not None else None
     except Exception:
         target, stop = None, None
-    path_result, path_date, path_price = _first_touch(window, target, stop)
+    path_result, path_date, path_price, time_to_target, time_to_stop = _first_touch_details(
+        window, target, stop
+    )
     return {
         "entry_date": pd.Timestamp(window.index[0]).strftime("%Y-%m-%d"),
         "exit_date": pd.Timestamp(window.index[-1]).strftime("%Y-%m-%d"),
@@ -304,9 +524,15 @@ def _default_price_result(decision: dict, horizon: int) -> dict | None:
         "benchmark_ret": bexit / bentry - 1.0 if bentry > 0 else 0.0,
         "fwd_mdd": _max_drawdown([float(x) for x in window["Close"].tolist()]),
         "idx_fwd_mdd": _max_drawdown([float(x) for x in bwindow["Close"].tolist()]),
+        "mfe": max(float(x) for x in window["Close"].tolist()) / entry - 1.0 if entry > 0 else 0.0,
+        "mae": min(float(x) for x in window["Close"].tolist()) / entry - 1.0 if entry > 0 else 0.0,
         "path_result": path_result,
         "path_date": path_date,
         "path_price": path_price,
+        "time_to_target": time_to_target,
+        "time_to_stop": time_to_stop,
+        "time_to_target_minutes": time_to_target,
+        "time_to_stop_minutes": time_to_stop,
     }
 
 
@@ -360,7 +586,23 @@ def _diagnose(decision: dict, outcome: dict) -> tuple[str, list[str], str]:
     return primary, tags, note
 
 
-def build_outcome(decision: dict, horizon: int, result: dict) -> dict:
+def _is_pending_result(result: object) -> bool:
+    return not isinstance(result, dict) or str(result.get("status") or "").lower() in {
+        "pending", "quality_error", "stale", "unavailable"
+    }
+
+
+def build_outcome(decision: dict, horizon: int | str, result: dict) -> dict:
+    """Build one immutable outcome row; return a pending row for bad data."""
+    if _is_pending_result(result) or any(
+        result.get(key) is None for key in ("stock_ret", "benchmark_ret", "entry_price_actual", "exit_price")
+    ):
+        return {
+            "decision_id": _outcome_id(decision.get("id", "unknown"), horizon),
+            "base_decision_id": decision.get("id"), "ticker": decision.get("ticker"),
+            "horizon": _horizon_value(horizon), "status": "pending",
+            "quality_reason": (result or {}).get("status") if isinstance(result, dict) else "missing_price_data",
+        }
     stock_ret = float(result["stock_ret"])
     bench_ret = float(result["benchmark_ret"])
     excess = stock_ret - bench_ret
@@ -372,11 +614,28 @@ def build_outcome(decision: dict, horizon: int, result: dict) -> dict:
         result.get("path_result") == "target"
         or (result.get("path_result") != "stop" and stock_ret > 0 and excess > 0)
     )
+    horizon_key = _horizon_value(horizon)
+    direction_up = str(decision.get("signal") or "enter").lower() != "avoid"
+    direction_hit = stock_ret > 0 if direction_up else stock_ret <= 0
+    fee_rate = _as_float(result.get("fee_rate"), _as_float(os.getenv("ENTRY_FEES_RATE"), 0.0005))
+    slippage_rate = _as_float(result.get("slippage_rate"), _as_float(os.getenv("ENTRY_SLIPPAGE_RATE"), 0.0005))
+    gross_ret = stock_ret
+    net_ret = gross_ret - fee_rate - slippage_rate
+    mfe = result.get("mfe")
+    mae = result.get("mae")
+    if mfe is None:
+        mfe = max(stock_ret, 0.0)
+    if mae is None:
+        mae = min(stock_ret, 0.0)
+    path_result = result.get("path_result") or "none"
     outcome = {
         "decision_id": _outcome_id(decision["id"], horizon),
         "base_decision_id": decision["id"],
         "ticker": decision.get("ticker"),
-        "horizon": int(horizon),
+        "horizon": horizon_key,
+        "evaluation_profile": decision.get("evaluation_profile") or _evaluation_profile(horizon),
+        "market": decision.get("market") or _market(str(decision.get("ticker") or "")),
+        "status": "matured",
         "matured_at": _today_kst(),
         "entry_date": result.get("entry_date"),
         "exit_date": result.get("exit_date"),
@@ -386,11 +645,26 @@ def build_outcome(decision: dict, horizon: int, result: dict) -> dict:
         "benchmark": decision.get("benchmark") or _benchmark(decision),
         "benchmark_ret": round(bench_ret, 5),
         "fwd_excess": round(excess, 5),
+        "stock_ret": round(stock_ret, 5),
+        "excess_ret": round(excess, 5),
+        "direction_hit": direction_hit,
         "fwd_mdd": round(float(result.get("fwd_mdd") or 0), 5),
         "idx_fwd_mdd": round(float(result.get("idx_fwd_mdd") or 0), 5),
-        "path_result": result.get("path_result") or "none",
+        "path_result": path_result,
+        "target_first": path_result == "target",
+        "stop_first": path_result == "stop",
         "path_date": result.get("path_date"),
         "path_price": result.get("path_price"),
+        "mfe": round(_as_float(mfe), 5),
+        "mae": round(_as_float(mae), 5),
+        "time_to_target": result.get("time_to_target") or result.get("time_to_target_minutes"),
+        "time_to_stop": result.get("time_to_stop") or result.get("time_to_stop_minutes"),
+        "time_to_target_minutes": result.get("time_to_target_minutes"),
+        "time_to_stop_minutes": result.get("time_to_stop_minutes"),
+        "fee_rate": round(fee_rate, 6),
+        "slippage_rate": round(slippage_rate, 6),
+        "gross_ret": round(gross_ret, 5),
+        "net_ret": round(net_ret, 5),
         "r_multiple": round(r_multiple, 3),
         "success": success,
     }
@@ -399,12 +673,13 @@ def build_outcome(decision: dict, horizon: int, result: dict) -> dict:
     return outcome
 
 
-def backfill_outcomes(*, ledger=None, horizons: tuple[int, ...] = HORIZONS,
+def backfill_outcomes(*, ledger=None, horizons: tuple[int | str, ...] = HORIZONS,
                       price_fn=None) -> int:
     """성숙한 추천 후보 outcome을 append-only 백필. 신규 outcome 수 반환."""
     from ml.adaptive import Ledger
 
     ledger = ledger or Ledger(SURFACE)
+    use_default_price_fn = price_fn is None
     price_fn = price_fn or _default_price_result
     done = {o.get("decision_id") for o in ledger.read_outcomes()}
     added = 0
@@ -412,13 +687,20 @@ def backfill_outcomes(*, ledger=None, horizons: tuple[int, ...] = HORIZONS,
         if not decision.get("id") or not decision.get("ticker"):
             continue
         for horizon in horizons:
+            if use_default_price_fn and _intraday_steps(horizon) is not None and str(
+                decision.get("evaluation_profile") or "daily"
+            ).lower() not in {"short", "intraday"}:
+                continue
             oid = _outcome_id(decision["id"], horizon)
             if oid in done:
                 continue
             result = price_fn(decision, horizon)
-            if result is None:
+            if _is_pending_result(result):
                 continue
-            ledger.log_outcome(build_outcome(decision, horizon, result))
+            outcome = build_outcome(decision, horizon, result)
+            if outcome.get("status") != "matured":
+                continue
+            ledger.log_outcome(outcome)
             done.add(oid)
             added += 1
     if added:
@@ -426,14 +708,14 @@ def backfill_outcomes(*, ledger=None, horizons: tuple[int, ...] = HORIZONS,
     return added
 
 
-def training_rows(*, ledger=None, horizon: int = 20) -> list[dict]:
+def training_rows(*, ledger=None, horizon: int | str = 20) -> list[dict]:
     """decision + horizon별 outcome 조인."""
     from ml.adaptive import Ledger
 
     ledger = ledger or Ledger(SURFACE)
     decisions = {d.get("id"): d for d in ledger.read_decisions() if d.get("id")}
     rows = []
-    suffix = f":h{int(horizon)}"
+    suffix = f":h{_horizon_key(horizon)}"
     for outcome in ledger.read_outcomes():
         oid = str(outcome.get("decision_id") or "")
         if not oid.endswith(suffix):
@@ -446,7 +728,7 @@ def training_rows(*, ledger=None, horizon: int = 20) -> list[dict]:
     return rows
 
 
-def summarize_feedback(rows: list[dict] | None = None, *, horizon: int = 20) -> dict:
+def summarize_feedback(rows: list[dict] | None = None, *, horizon: int | str = 20) -> dict:
     rows = list(rows if rows is not None else training_rows(horizon=horizon))
     if not rows:
         return {"horizon": horizon, "n": 0}
@@ -461,6 +743,12 @@ def summarize_feedback(rows: list[dict] | None = None, *, horizon: int = 20) -> 
         "success_rate": round(len(wins) / len(rows), 3),
         "avg_excess": round(sum(float(r.get("fwd_excess") or 0) for r in rows) / len(rows), 4),
         "avg_r": round(sum(float(r.get("r_multiple") or 0) for r in rows) / len(rows), 3),
+        "avg_stock_ret": round(sum(float(r.get("stock_ret", r.get("fwd_ret")) or 0) for r in rows) / len(rows), 4),
+        "avg_net_ret": round(sum(float(r.get("net_ret", r.get("fwd_ret")) or 0) for r in rows) / len(rows), 4),
+        "direction_hit_rate": round(sum(bool(r.get("direction_hit", r.get("success"))) for r in rows) / len(rows), 3),
+        "avg_mfe": round(sum(float(r.get("mfe") or 0) for r in rows) / len(rows), 4),
+        "avg_mae": round(sum(float(r.get("mae") or 0) for r in rows) / len(rows), 4),
+        "path_counts": dict(Counter(str(r.get("path_result") or "none") for r in rows)),
         "enter_n": len(enter_rows),
         "enter_success_rate": round(
             sum(1 for r in enter_rows if r.get("success")) / len(enter_rows), 3
@@ -532,6 +820,14 @@ def _score_with_adjustment(row: dict, adjustments: dict[str, float]) -> tuple[fl
     return round(_clamp(score + adj, 0.0, 1.0), 4), round(adj, 4), tags
 
 
+def _realized_excess(row: dict) -> float:
+    """OOS 비교 지표. 새 원장은 초과수익을 쓰고 legacy 행은 R로 호환한다."""
+    for key in ("fwd_excess", "excess_ret", "r_multiple"):
+        if row.get(key) is not None:
+            return _as_float(row.get(key))
+    return 0.0
+
+
 def _eval_adjustments(rows: list[dict], adjustments: dict[str, float], threshold: float) -> dict:
     selected = []
     for row in rows:
@@ -539,15 +835,37 @@ def _eval_adjustments(rows: list[dict], adjustments: dict[str, float], threshold
         if adj_score >= threshold:
             selected.append(row)
     if not selected:
-        return {"excess": 0.0, "mdd": 0.0, "n": 0, "win_rate": 0.0}
-    r_vals = [_as_float(r.get("r_multiple")) for r in selected]
+        return {"excess": 0.0, "mdd": 0.0, "avg_loss": 0.0, "n": 0, "win_rate": 0.0}
+    excess_values = [_realized_excess(r) for r in selected]
     wins = sum(1 for r in selected if r.get("success"))
+    losses = [value for value in excess_values if value < 0]
+    mdd_values = [
+        _as_float(row.get("fwd_mdd"), abs(value) if value < 0 else 0.0)
+        for row, value in zip(selected, excess_values)
+    ]
     return {
-        "excess": round(sum(r_vals) / len(r_vals), 4),
-        "mdd": round(max([0.0] + [-r for r in r_vals if r < 0]), 4),
+        "excess": round(sum(excess_values) / len(excess_values), 4),
+        "mdd": round(max([0.0] + mdd_values), 4),
+        "avg_loss": round(abs(sum(losses) / len(losses)), 4) if losses else 0.0,
         "n": len(selected),
         "win_rate": round(wins / len(selected), 4),
     }
+
+
+def _oos_constraints_ok(challenger: dict, champion: dict | None) -> bool:
+    """절대 양의 초과수익과 champion 대비 MDD/평균손실 제약을 검사한다."""
+    if not challenger:
+        return False
+    if _as_float(challenger.get("excess")) <= 0:
+        return False
+    champion = champion or {}
+    champion_mdd = max(0.0, _as_float(champion.get("mdd")))
+    champion_avg_loss = max(0.0, _as_float(champion.get("avg_loss")))
+    if _as_float(challenger.get("mdd")) > champion_mdd:
+        return False
+    if _as_float(challenger.get("avg_loss")) > champion_avg_loss:
+        return False
+    return True
 
 
 def load_feedback_adjustments(path: Path | str | None = None) -> dict:
@@ -609,6 +927,16 @@ def learn_feedback_adjustments(rows: list[dict] | None = None, *,
         split = max(1, len(rows) // 2)
     train = rows[:split]
     oos = rows[split:]
+    if len(oos) < MIN_OOS_SAMPLES:
+        return {
+            "adopted": False,
+            "reason": f"OOS 표본 부족({len(oos)}/{MIN_OOS_SAMPLES})",
+            "horizon": horizon,
+            "n": len(rows),
+            "train_n": len(train),
+            "oos_n": len(oos),
+            "adjustments": {},
+        }
     adjustments = _fit_factor_adjustments(train)
     if not adjustments:
         return {
@@ -632,14 +960,23 @@ def learn_feedback_adjustments(rows: list[dict] | None = None, *,
 
     try:
         from ml.adaptive.reward import should_adopt
-        index_mdd = max(float(champion.get("mdd") or 0.0) * 1.1, 1.0)
+        index_mdd = float(champion.get("mdd") or 0.0)
         min_samples = max(5, min(MIN_FACTOR_SAMPLES, len(oos)))
+        # MIN_OOS_SAMPLES applies to the held-out time window. A stricter
+        # per-threshold selected-count gate would reject a valid OOS window
+        # simply because the challenger is intentionally selective.
         adopted = should_adopt(challenger, champion, index_mdd=index_mdd, min_samples=min_samples)
     except Exception:
         adopted = (
-            challenger.get("n", 0) >= max(5, min(MIN_FACTOR_SAMPLES, len(oos)))
+            challenger.get("n", 0) >= MIN_OOS_SAMPLES
+            and challenger.get("excess", 0.0) > 0
             and challenger.get("excess", 0.0) > champion.get("excess", 0.0)
+            and challenger.get("mdd", 0.0) <= max(champion.get("mdd", 0.0) * 1.25, 1.0)
         )
+    # Keep drawdown and average-loss constraints explicit even if the shared
+    # reward gate changes implementation details later.
+    if adopted and not _oos_constraints_ok(challenger, champion):
+        adopted = False
 
     result = {
         "adopted": bool(adopted),
@@ -658,8 +995,9 @@ def learn_feedback_adjustments(rows: list[dict] | None = None, *,
         model_path.parent.mkdir(parents=True, exist_ok=True)
         payload = {
             "version": 1,
+            "policy_version": f"entry-factor-{_now_kst().replace(':', '').replace('+', '-')}",
             "learned_at": _now_kst(),
-            "horizon": int(horizon),
+            "horizon": _horizon_value(horizon),
             "adjustments": adjustments,
             "meta": {
                 "n": len(rows),

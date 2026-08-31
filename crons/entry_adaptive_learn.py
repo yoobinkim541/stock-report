@@ -33,6 +33,7 @@ logger = logging.getLogger(__name__)
 KST = timezone(timedelta(hours=9))
 SHADOW_PATH = Path(os.path.expanduser("~/reports/ml-cache/entry_score_params_adaptive.json"))
 MIN_SAMPLES = 20                          # signal_outcomes 는 희소 → 보수적 최소 표본
+MIN_OOS_SAMPLES = 10                       # 후보 채택 판단은 최소 10건의 미래 구간 필요
 THRESH_GRID = [round(0.45 + 0.05 * i, 2) for i in range(9)]   # 0.45~0.85
 DOWNSIDE_CAP_R = 1.0                      # 진입군 평균 하방이 -1R 보다 나쁘면 채택 안 함(★MDD 제약)
 
@@ -109,7 +110,7 @@ def learn(samples: list[tuple[float, float]]) -> dict:
     # 날짜 정보 없음 → 순서(기록순) 기준 train/OOS 분할(앞 60% train)
     split = int(n * 0.6)
     train, oos = samples[:split], samples[split:]
-    if len(train) < 5 or len(oos) < 5:
+    if len(train) < 5 or len(oos) < MIN_OOS_SAMPLES:
         return {"adopted": False, "reason": "분할 표본 부족 — 보류", "n": n}
 
     cand_thr = _best_threshold(train)
@@ -129,8 +130,12 @@ def learn(samples: list[tuple[float, float]]) -> dict:
         {"excess": champ["excess"], "mdd": champ["mdd"], "n": champ["n"]},
         index_mdd=DOWNSIDE_CAP_R, min_samples=max(5, MIN_SAMPLES // 4))
 
+    # shared reward gate와 별개로 absolute positive edge를 명시한다.
+    if chal["excess"] <= 0 or chal["mdd"] > DOWNSIDE_CAP_R:
+        adopt = False
+
     if adopt:
-        _save_shadow(cand_thr, chal)
+        _save_shadow(cand_thr, {**chal, "oos_n": len(oos), "policy_version": _policy_version()})
         reason = (f"채택(shadow) ✅ thr {cur_thr:.2f}→{cand_thr:.2f} · OOS 평균R {chal['excess']:+.2f}"
                   f">{champ['excess']:+.2f} · 승률 {chal['win_rate']*100:.0f}% · 하방 {chal['mdd']:.2f}R")
     else:
@@ -140,14 +145,19 @@ def learn(samples: list[tuple[float, float]]) -> dict:
             "chal": chal, "champ": champ, "cur_thr": cur_thr}
 
 
+def _policy_version() -> str:
+    return "entry-threshold-" + datetime.now(timezone.utc).strftime("%Y%m%d%H%M%S")
+
+
 def _save_shadow(thr: float, ev: dict) -> None:
     from ml.entry_analyzer import _clamp_score_params
     thr = _clamp_score_params({"enter_threshold": thr})["enter_threshold"]
     SHADOW_PATH.parent.mkdir(parents=True, exist_ok=True)
     tmp = SHADOW_PATH.with_suffix(".tmp")
-    tmp.write_text(json.dumps({"enter_threshold": thr, "_meta": {
+    tmp.write_text(json.dumps({"enter_threshold": thr, "policy_version": ev.get("policy_version"), "_meta": {
         "learned_at": datetime.now(KST).strftime("%Y-%m-%d %H:%M"),
-        "oos_mean_r": ev["excess"], "oos_n": ev["n"], "win_rate": ev["win_rate"]}},
+        "oos_mean_r": ev["excess"], "oos_n": ev.get("oos_n", ev["n"]),
+        "win_rate": ev["win_rate"]}},
         ensure_ascii=False, indent=2), encoding="utf-8")
     os.replace(tmp, SHADOW_PATH)
 

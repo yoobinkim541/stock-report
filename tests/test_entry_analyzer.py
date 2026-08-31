@@ -7,7 +7,7 @@ import pytest
 
 from ml.entry_analyzer import (
     DEFAULT_PORTFOLIO_STOCKS, EntryScore, KST, check_alert_signals,
-    format_alert_message, portfolio_stocks,
+    format_alert_message, format_entry_digest, portfolio_stocks,
 )
 
 
@@ -140,6 +140,36 @@ def test_format_alert_message_is_explanatory_not_prescriptive():
     assert "목표 참고:" in msg and "+8.2%" in msg
     assert "판단 해석" in msg
     assert "정보형 알림 — 자동 주문 아님" in msg
+
+
+def test_format_entry_digest_is_compact_sorted_and_market_aware():
+    scores = [
+        _entry_score(ticker="NVDA", display_name="NVIDIA", score=0.91,
+                     current_price=123.456, n_similar=42),
+        _entry_score(ticker="005930.KS", display_name="삼성전자", currency="KRW",
+                     score=0.72, current_price=71000, n_similar=18),
+    ]
+
+    msg = format_entry_digest(scores, as_of="2026-08-31 09:30 KST")
+
+    assert msg.startswith("🎯 진입 후보 | 2026-08-31 09:30 KST")
+    assert msg.index("NVDA") < msg.index("005930.KS")
+    assert "$123.46" in msg
+    assert "₩71,000" in msg
+    assert "관찰" in msg and "목표" in msg and "무효화" in msg
+    assert "20d" in msg and "표본 42건" in msg
+    assert "정보형 추천 · 자동 주문 아님" in msg
+
+
+def test_format_entry_digest_caps_candidates_and_handles_bad_candidate():
+    bad = object()
+    scores = [_entry_score(ticker=f"T{i:02d}", score=0.90 - i / 100) for i in range(7)]
+    msg = format_entry_digest([bad, *scores], as_of="2026-08-31")
+
+    assert len(msg) <= 4000
+    assert "T00" in msg and "T04" in msg
+    assert "T05" not in msg and "T06" not in msg
+    assert "후보 데이터 누락" in msg
 
 
 def test_format_alert_message_flags_tiny_p25_inflated_reward_risk():

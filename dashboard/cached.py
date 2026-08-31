@@ -15,6 +15,18 @@ _TTL_SLOW = 1800  # 30분
 _TTL_HEAVY = 3600  # 1시간 (ML)
 
 
+@st.cache_data(ttl=30, show_spinner=False)
+def holdings():
+    """해외 보유 목록 공용 cache — 사이드바·홈·상세 페이지가 같은 결과를 공유한다."""
+    return data.load_holdings()
+
+
+@st.cache_data(ttl=30, show_spinner=False)
+def portfolio_summary():
+    """포트폴리오 헤더 요약 공용 cache — 파일 snapshot 기반, holdings provider와 분리."""
+    return data.portfolio_summary()
+
+
 @st.cache_data(ttl=_TTL, show_spinner="불러오는 중…")
 def valuation(t):
     return views.valuation(t)
@@ -285,9 +297,15 @@ def realtime_quote(ticker):
 
 
 @st.cache_data(ttl=300, show_spinner="시장 맵 불러오는 중…")
-def sp500_heatmap():
+def sp500_heatmap(allow_live=True):
     """S&P500 시장 맵 rows (섹터·시총 정적 + 당일 등락 라이브·30분 캐시·크론 스냅샷 우선)."""
-    return views.sp500_heatmap()
+    return views.sp500_heatmap(allow_live=allow_live)
+
+
+@st.cache_data(ttl=300, show_spinner=False)
+def heatmap_status(kind="S&P 500"):
+    """시장 맵 snapshot freshness — 첫 렌더에서 데이터 경계를 함께 표시한다."""
+    return views.heatmap_status(kind)
 
 
 @st.cache_data(ttl=_TTL, show_spinner="시장 지표 불러오는 중…")
@@ -323,13 +341,13 @@ def chart_data_bundle(t, timeframe, session_policy="regular"):
 
 
 @st.cache_data(ttl=300, show_spinner="코스피200 맵 불러오는 중…")
-def kr200_heatmap():
-    return views.kr200_heatmap()
+def kr200_heatmap(allow_live=True):
+    return views.kr200_heatmap(allow_live=allow_live)
 
 
 @st.cache_data(ttl=300, show_spinner="러셀2000 맵 불러오는 중…")
-def russell2000_heatmap():
-    return views.russell2000_heatmap()
+def russell2000_heatmap(allow_live=True):
+    return views.russell2000_heatmap(allow_live=allow_live)
 
 
 @st.cache_data(ttl=_TTL, show_spinner="추세선 감지 중…")
@@ -338,8 +356,8 @@ def trendlines_for(t, tf, lines, ch_key):
 
 
 @st.cache_data(ttl=300, show_spinner=False)
-def market_tape():
-    return views.market_tape()
+def market_tape(force_live=False, allow_live=True):
+    return views.market_tape(force_live=force_live, allow_live=allow_live)
 
 
 @st.cache_data(ttl=900, show_spinner="매크로 자산 불러오는 중…")

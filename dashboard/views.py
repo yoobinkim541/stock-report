@@ -8,7 +8,7 @@ from __future__ import annotations
 import logging
 import os
 import re
-from datetime import timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
 from agent_console import storage
@@ -853,27 +853,50 @@ _HEATMAP_SNAP = os.path.expanduser("~/reports/ml-cache/sp500_heatmap.json")
 _MIN_SP500_HEATMAP_ROWS = 400
 
 
-def sp500_heatmap() -> list[dict]:
+def _read_heatmap_snapshot(path: str, *, min_rows: int = 1,
+                           max_age_s: int = 5400) -> dict:
+    """시장 맵 snapshot을 읽고 freshness를 계산한다. 네트워크는 절대 호출하지 않는다."""
+    import json
+    import time
+
+    try:
+        stat = os.stat(path)
+        with open(path, encoding="utf-8") as f:
+            payload = json.load(f)
+        rows = payload.get("rows") if isinstance(payload, dict) else payload
+        rows = rows if isinstance(rows, list) else []
+        age = max(0.0, time.time() - stat.st_mtime)
+        valid = len(rows) >= min_rows
+        asof = payload.get("asof") if isinstance(payload, dict) else None
+        if not asof:
+            asof = datetime.fromtimestamp(stat.st_mtime, tz=timezone.utc).isoformat()
+        return {"rows": rows if valid else [], "valid": valid,
+                "partial": bool(rows) and not valid, "age_s": age,
+                "freshness": "fresh" if age < max_age_s else "stale",
+                "source": (payload.get("source") if isinstance(payload, dict) else None)
+                          or "snapshot",
+                "asof": asof}
+    except Exception:
+        return {"rows": [], "valid": False, "partial": False,
+                "age_s": None, "freshness": "unavailable", "source": "unavailable",
+                "asof": None}
+
+
+def sp500_heatmap(allow_live: bool = True) -> list[dict]:
     """S&P500 시장 맵 rows — 크론 JSON 스냅샷(<90분) 우선(즉시) → 없으면 라이브 후 스냅샷 기록(self-heal).
 
     콜드로드 ~60초(503 배치)를 스냅샷 파일읽기로 즉시화. crons/sp500_heatmap_snapshot.py 가 20분마다 갱신.
     """
-    import json
-    import time
-    try:
-        if time.time() - os.stat(_HEATMAP_SNAP).st_mtime < 5400:      # 90분 이내 신선
-            with open(_HEATMAP_SNAP, encoding="utf-8") as f:
-                rows = json.load(f)
-            if isinstance(rows, list) and len(rows) >= _MIN_SP500_HEATMAP_ROWS:
-                return rows
-            if rows:
-                logger.warning(
-                    "S&P500 heatmap partial snapshot ignored: %s rows (minimum %s)",
-                    len(rows) if isinstance(rows, list) else "unknown",
-                    _MIN_SP500_HEATMAP_ROWS,
-                )
-    except Exception:
-        pass
+    snap = _read_heatmap_snapshot(_HEATMAP_SNAP, min_rows=_MIN_SP500_HEATMAP_ROWS)
+    if snap["valid"] and snap["freshness"] == "fresh":
+        return snap["rows"]
+    if snap["partial"]:
+        logger.warning("S&P500 heatmap partial snapshot ignored: minimum %s rows",
+                       _MIN_SP500_HEATMAP_ROWS)
+    # 첫 화면은 stale/부분 snapshot을 정직하게 표시하거나 비워 둔다. 503종목
+    # live 배치는 명시적인 refresh/detail 경로에서만 허용한다.
+    if not allow_live:
+        return snap["rows"] if snap["valid"] else []
     rows = _sp500_heatmap_live()
     if rows:
         try:
@@ -882,6 +905,20 @@ def sp500_heatmap() -> list[dict]:
         except Exception:
             pass
     return rows
+
+
+def heatmap_status(kind: str = "S&P 500") -> dict:
+    """시장 맵의 source/freshness/as-of를 UI에 표시하기 위한 무네트워크 상태 조회."""
+    specs = {
+        "S&P 500": (_HEATMAP_SNAP, _MIN_SP500_HEATMAP_ROWS),
+        "코스피 200": (_KR200_SNAP, 1),
+        "러셀 2000": (_RUSSELL_SNAP, 1),
+    }
+    path, minimum = specs.get(kind, specs["S&P 500"])
+    snap = _read_heatmap_snapshot(path, min_rows=minimum)
+    return {"source": snap["source"], "freshness": snap["freshness"],
+            "asof": snap["asof"], "rows": len(snap["rows"]),
+            "age_s": snap["age_s"], "partial": snap["partial"]}
 
 
 def _sp500_heatmap_live() -> list[dict]:
@@ -1883,18 +1920,14 @@ _NASDAQ_SECTOR_KR = {
 _NON_COMMON = ("Warrant", "Right", "Unit", "Preferred", "Depositary", "Notes")
 
 
-def _snap_or(build, snap_path: str, max_age_s: int = 5400) -> list[dict]:
+def _snap_or(build, snap_path: str, max_age_s: int = 5400, *,
+             allow_live: bool = True) -> list[dict]:
     """스냅샷(<max_age) 우선 → 없으면 build() 후 self-heal 기록 (sp500 패턴 공용)."""
-    import json
-    import time
-    try:
-        if time.time() - os.stat(snap_path).st_mtime < max_age_s:
-            with open(snap_path, encoding="utf-8") as f:
-                rows = json.load(f)
-            if rows:
-                return rows
-    except Exception:
-        pass
+    snap = _read_heatmap_snapshot(snap_path, max_age_s=max_age_s)
+    if snap["valid"] and snap["freshness"] == "fresh":
+        return snap["rows"]
+    if not allow_live:
+        return snap["rows"] if snap["valid"] else []
     rows = build()
     if rows:
         try:
@@ -1905,9 +1938,9 @@ def _snap_or(build, snap_path: str, max_age_s: int = 5400) -> list[dict]:
     return rows
 
 
-def kr200_heatmap() -> list[dict]:
+def kr200_heatmap(allow_live: bool = True) -> list[dict]:
     """코스피200 시장 맵 rows — 크론 스냅샷 우선(즉시) → 라이브(199종목 배치 ~30초)."""
-    return _snap_or(_kr200_heatmap_live, _KR200_SNAP)
+    return _snap_or(_kr200_heatmap_live, _KR200_SNAP, allow_live=allow_live)
 
 
 def _kr200_heatmap_live() -> list[dict]:
@@ -1947,9 +1980,9 @@ def _kr200_heatmap_live() -> list[dict]:
     return rows
 
 
-def russell2000_heatmap() -> list[dict]:
+def russell2000_heatmap(allow_live: bool = True) -> list[dict]:
     """러셀2000 근사 시장 맵 — 美 보통주 시총 1001~3000위 (NASDAQ 스크리너 1콜·정직 라벨)."""
-    return _snap_or(_russell2000_live, _RUSSELL_SNAP)
+    return _snap_or(_russell2000_live, _RUSSELL_SNAP, allow_live=allow_live)
 
 
 def _russell2000_live() -> list[dict]:
@@ -2001,9 +2034,44 @@ _TAPE_SYMS = [("^VIX", "VIX", 2), ("DX-Y.NYB", "달러 인덱스", 2), ("KRW=X",
               ("^GSPC", "S&P500", 2), ("NQ=F", "나스닥100 선물", 1), ("ES=F", "S&P 선물", 1),
               ("GC=F", "금", 1), ("BTC-USD", "비트코인", 0), ("^TNX", "미10년물", 2)]
 
+_TAPE_SNAP = os.path.expanduser("~/reports/ml-cache/market_tape.json")
+_TAPE_MAX_AGE_S = 900
 
-def market_tape() -> list[dict]:
-    """하단 마퀴 띠 데이터 — [{label, value, chg, pct}]. yf 2d 배치·graceful []."""
+
+def _annotate_tape(rows: list[dict], *, source: str, freshness: str,
+                   asof: str | None) -> list[dict]:
+    """기존 theme row shape를 유지하면서 데이터 경계 메타데이터를 함께 보존한다."""
+    return [{**row, "source": source, "freshness": freshness, "asof": asof}
+            for row in rows if isinstance(row, dict)]
+
+
+def _read_market_tape_snapshot() -> dict:
+    import json
+    import time
+
+    try:
+        stat = os.stat(_TAPE_SNAP)
+        with open(_TAPE_SNAP, encoding="utf-8") as f:
+            payload = json.load(f)
+        rows = payload.get("rows") if isinstance(payload, dict) else payload
+        rows = rows if isinstance(rows, list) else []
+        if not rows:
+            raise ValueError("empty snapshot")
+        age = max(0.0, time.time() - stat.st_mtime)
+        asof = payload.get("asof") if isinstance(payload, dict) else None
+        if not asof:
+            asof = datetime.fromtimestamp(stat.st_mtime, tz=timezone.utc).isoformat()
+        return {"rows": rows, "source": (payload.get("source")
+                if isinstance(payload, dict) else None) or "snapshot",
+                "freshness": "fresh" if age < _TAPE_MAX_AGE_S else "stale",
+                "asof": asof, "valid": True, "age_s": age}
+    except Exception:
+        return {"rows": [], "source": "unavailable", "freshness": "unavailable",
+                "asof": None, "valid": False, "age_s": None}
+
+
+def _market_tape_live() -> list[dict]:
+    """마퀴 live 데이터 조립. 호출 여부는 market_tape가 결정한다."""
     try:
         import warnings
         warnings.filterwarnings("ignore")
@@ -2025,6 +2093,36 @@ def market_tape() -> list[dict]:
         except Exception:
             continue
     return out
+
+
+def market_tape(force_live: bool = False, allow_live: bool = True) -> list[dict]:
+    """하단 마퀴 띠 — snapshot 우선, stale snapshot graceful fallback.
+
+    snapshot이 있으면 stale하더라도 첫 렌더에서 네트워크를 막지 않는다. snapshot이
+    전혀 없을 때는 allow_live가 켜진 명시적 경로에서만 live를 한 번 시도한다.
+    """
+    snap = _read_market_tape_snapshot()
+    if snap["valid"] and not force_live:
+        return _annotate_tape(snap["rows"], source=snap["source"],
+                              freshness=snap["freshness"], asof=snap["asof"])
+    if not allow_live and not force_live:
+        return _annotate_tape(snap["rows"], source=snap["source"],
+                              freshness=snap["freshness"], asof=snap["asof"])
+
+    rows = _market_tape_live()
+    if rows:
+        asof = datetime.now(tz=timezone.utc).isoformat()
+        try:
+            from safe_io import atomic_write_json
+            os.makedirs(os.path.dirname(_TAPE_SNAP), exist_ok=True)
+            atomic_write_json(_TAPE_SNAP, {"rows": rows, "source": "yfinance", "asof": asof})
+        except Exception:
+            pass
+        return _annotate_tape(rows, source="yfinance", freshness="fresh", asof=asof)
+    if snap["valid"]:
+        return _annotate_tape(snap["rows"], source=snap["source"],
+                              freshness="stale", asof=snap["asof"])
+    return []
 
 
 def etf_tr_pr(ticker: str, years: int = 5):

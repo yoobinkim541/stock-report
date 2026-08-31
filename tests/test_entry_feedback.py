@@ -4,6 +4,8 @@ import json
 import os
 import sys
 
+import pandas as pd
+
 ROOT = os.path.join(os.path.dirname(__file__), "..")
 sys.path.insert(0, ROOT)
 
@@ -58,6 +60,147 @@ def test_record_entry_scores_is_daily_idempotent(tmp_path, monkeypatch):
     assert row["signal"] == "enter"
     assert row["features"]["technical_rating"] == "🔴 매도"
     assert row["target_price"] > row["current_price"] > row["stop_price"]
+
+
+def test_short_decision_contains_versioned_metadata_and_is_session_idempotent(tmp_path, monkeypatch):
+    monkeypatch.setattr(F, "_today_kst", lambda: "2026-08-31")
+    monkeypatch.setattr(F, "_now_kst", lambda: "2026-08-31T09:30:00+09:00")
+    led = Ledger(F.SURFACE, base_dir=tmp_path)
+
+    kwargs = dict(source="auto_watch", universe="watch", ledger=led,
+                  evaluation_profile="short", session="regular",
+                  model_version="entry-v3", parameter_version="params-7",
+                  feature_version="features-2", freshness_seconds=12)
+    assert F.record_entry_scores([_score()], **kwargs) == 1
+    assert F.record_entry_scores([_score(score=0.91)], **kwargs) == 0
+
+    row = led.read_decisions()[0]
+    assert row["evaluation_profile"] == "short"
+    assert row["session"] == "regular"
+    assert row["model_version"] == "entry-v3"
+    assert row["parameter_version"] == "params-7"
+    assert row["feature_version"] == "features-2"
+    assert row["freshness_seconds"] == 12
+    assert row["event_type"] == "enter"
+    assert ":regular:" in row["id"]
+
+
+def test_build_short_outcome_has_direction_path_and_net_metrics():
+    decision = F.score_to_decision(_score(), source="auto_watch", universe="watch",
+                                   date="2026-08-29", evaluation_profile="short",
+                                   session="regular")
+    result = {
+        "entry_date": "2026-08-29T09:30:00+09:00",
+        "exit_date": "2026-08-29T10:30:00+09:00",
+        "entry_price_actual": 126.45,
+        "exit_price": 130.0,
+        "benchmark_ret": 0.01,
+        "stock_ret": 0.0281,
+        "fwd_mdd": 0.01,
+        "idx_fwd_mdd": 0.005,
+        "path_result": "target",
+        "path_date": "2026-08-29T10:00:00+09:00",
+        "path_price": decision["target_price"],
+        "mfe": 0.04,
+        "mae": -0.012,
+        "time_to_target_minutes": 30,
+        "fee_rate": 0.001,
+        "slippage_rate": 0.001,
+    }
+    out = F.build_outcome(decision, "1h", result)
+
+    assert out["horizon"] == "1h"
+    assert out["direction_hit"] is True
+    assert out["stock_ret"] == out["fwd_ret"]
+    assert out["excess_ret"] == out["fwd_excess"]
+    assert out["target_first"] is True and out["stop_first"] is False
+    assert out["mfe"] == 0.04 and out["mae"] == -0.012
+    assert out["time_to_target_minutes"] == 30
+    assert out["net_ret"] < out["gross_ret"]
+
+
+def test_default_intraday_result_records_time_to_level(monkeypatch):
+    index = pd.date_range("2026-08-31 09:30", periods=32, freq="min", tz="Asia/Seoul")
+    target = 130.0
+    stock = pd.DataFrame({
+        "Open": [100.0] * 32,
+        "High": [100.0, 101.0, 100.0, target] + [100.0] * 28,
+        "Low": [100.0] * 32,
+        "Close": [100.0] * 32,
+        "Volume": [1000] * 32,
+    }, index=index)
+    benchmark = stock.copy()
+
+    def fake_frame(symbol, date, *, market):
+        return stock if symbol == "PLTR" else benchmark
+
+    monkeypatch.setattr(F, "_intraday_frame", fake_frame)
+    decision = {
+        "ticker": "PLTR", "benchmark": "QQQ", "market": "US",
+        "date": "2026-08-31", "snapshot_ts": "2026-08-31T09:30:00+09:00",
+        "target_price": target, "stop_price": 95.0,
+    }
+
+    result = F._default_intraday_result(decision, "30m")
+
+    assert result["path_result"] == "target"
+    assert result["time_to_target_minutes"] == 3
+    assert result["time_to_target"] == 3
+    assert result["time_to_stop_minutes"] is None
+
+
+def test_intraday_symbol_preserves_domestic_index_benchmark():
+    assert F._intraday_symbol("^KS11", "KR") == "^KS11"
+    assert F._intraday_symbol("005930", "KR") == "005930.KS"
+    assert F._intraday_symbol("PLTR", "US") == "PLTR"
+
+
+def test_default_price_result_records_time_to_level(monkeypatch):
+    index = pd.date_range("2026-08-25", periods=21, freq="D")
+    target = 130.0
+    stock = pd.DataFrame({
+        "Open": [100.0] * 21,
+        "High": [100.0, 101.0, target] + [100.0] * 18,
+        "Low": [100.0] * 21,
+        "Close": [100.0] * 21,
+        "Volume": [1000] * 21,
+    }, index=index)
+    benchmark = stock.copy()
+    monkeypatch.setattr(
+        "ml.data_pipeline.fetch_prices",
+        lambda tickers, days: {"PLTR": stock, "QQQ": benchmark},
+    )
+    decision = {
+        "ticker": "PLTR", "benchmark": "QQQ", "market": "US",
+        "date": "2026-08-25", "target_price": target, "stop_price": 95.0,
+    }
+
+    result = F._default_price_result(decision, "20d")
+
+    assert result["path_result"] == "target"
+    assert result["time_to_target_minutes"] == 2 * 24 * 60
+    assert result["time_to_target"] == 2 * 24 * 60
+
+
+def test_backfill_skips_pending_result_and_accepts_string_horizon(tmp_path):
+    led = Ledger(F.SURFACE, base_dir=tmp_path)
+    F.record_entry_scores([_score()], source="auto_watch", universe="watch", ledger=led)
+    calls = []
+
+    def pending_then_ready(decision, horizon):
+        calls.append(horizon)
+        if horizon == "30m":
+            return {"status": "pending"}
+        return {
+            "entry_date": "2026-07-11", "exit_date": "2026-07-11",
+            "entry_price_actual": 126.45, "exit_price": 127.0,
+            "benchmark_ret": 0.0, "stock_ret": 0.004,
+            "path_result": "none", "fwd_mdd": 0, "idx_fwd_mdd": 0,
+        }
+
+    assert F.backfill_outcomes(ledger=led, horizons=("30m",), price_fn=pending_then_ready) == 0
+    assert led.read_outcomes() == []
+    assert calls == ["30m"]
 
 
 def test_backfill_outcomes_adds_diagnosis_and_summary(tmp_path, monkeypatch):
@@ -215,3 +358,29 @@ def test_apply_score_adjustment_can_be_disabled(tmp_path):
     assert adjusted == 0.75
     assert delta == 0.0
     assert factors == ["technical_conflict"]
+
+
+def test_eval_adjustments_uses_realized_excess_and_average_loss():
+    rows = [
+        {"score": 0.70, "fwd_excess": 0.04, "fwd_mdd": 0.03, "r_multiple": 2.0, "success": True},
+        {"score": 0.70, "fwd_excess": -0.02, "fwd_mdd": 0.10, "r_multiple": -0.5, "success": False},
+    ]
+
+    result = F._eval_adjustments(rows, {}, threshold=0.62)
+
+    assert result["excess"] == 0.01
+    assert result["avg_loss"] == 0.02
+    assert result["mdd"] == 0.10
+
+
+def test_oos_constraints_reject_mdd_or_average_loss_regression():
+    champion = {"excess": 0.01, "mdd": 0.05, "avg_loss": 0.02}
+    assert F._oos_constraints_ok(
+        {"excess": 0.03, "mdd": 0.06, "avg_loss": 0.02, "n": 10}, champion
+    ) is False
+    assert F._oos_constraints_ok(
+        {"excess": 0.03, "mdd": 0.05, "avg_loss": 0.03, "n": 10}, champion
+    ) is False
+    assert F._oos_constraints_ok(
+        {"excess": 0.03, "mdd": 0.05, "avg_loss": 0.02, "n": 10}, champion
+    ) is True

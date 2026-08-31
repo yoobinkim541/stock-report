@@ -20,8 +20,8 @@ def render():
     st.caption("USD 해외북 · 표시 전용 · 배분 변경 아님 · 실계좌 주문 없음")
 
     hist = cached.port_history()
-    rows = data.load_holdings()
-    _headline(hist, rows)
+    rows = cached.holdings()
+    _headline(hist, rows, cached.portfolio_summary())
     _growth_section(hist)
     _risk_section()
     st.divider()
@@ -36,10 +36,10 @@ def render():
     st.caption("과거 실현 기반 · 미래 보장 아님 · 국내 제외(USD북)")
 
 
-def _headline(hist, rows):
+def _headline(hist, rows, summary=None):
     """총액($·₩) + 예수금 + 기간 수익 분해 (환율 기여 — 원화 투자자 관점)."""
     fx = data.fx_attribution(hist, days=30)
-    cash_usd = data.portfolio_summary().get("cash_usd", 0) or 0
+    cash_usd = (summary or cached.portfolio_summary()).get("cash_usd", 0) or 0
     total = sum((r.get("value") or 0) for r in rows)
     last = hist[-1] if hist else {}
     m = st.columns(5)

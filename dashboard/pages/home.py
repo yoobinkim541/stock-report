@@ -15,8 +15,9 @@ from dashboard import cached, charts, data, theme
 
 
 def render():
-    summ = data.portfolio_summary()
+    summ = cached.portfolio_summary()
     ph = data.phase_badge()
+    rows = cached.holdings()
 
     theme.render(theme.ticker_hero_html(
         symbol="PORT", name="내 포트폴리오", price=summ["total_usd"],
@@ -32,12 +33,12 @@ def render():
     _ai_briefing_card()
 
     st.divider()
-    _market_bar()
-    _macro_row()
+    load_details = _market_detail_control()
+    _market_bar(load_details)
+    _macro_row(load_details)
     _market_map()
     st.divider()
 
-    rows = data.load_holdings()
     if rows:
         left, right = st.columns([1, 1.3])
         with left:
@@ -160,9 +161,30 @@ def _ai_briefing_card():
                    "(계산된 지표·뉴스 DATA 한정) — 검증 안 된 참고용·매매신호 아님")
 
 
-def _market_bar():
+def _market_detail_control() -> bool:
+    """상세 시장 네트워크 호출은 사용자가 요청한 경우에만 허용한다."""
+    loaded = bool(st.session_state.get("_home_market_details_loaded", False))
+    left, right = st.columns([1, 2.4], vertical_alignment="center")
+    with left:
+        if st.button("상세 시장 데이터 불러오기", key="_home_load_market_details",
+                     type="secondary", width="stretch"):
+            st.session_state["_home_market_details_loaded"] = True
+            st.rerun()
+            return True
+    with right:
+        if loaded:
+            st.caption("상세 시장 데이터 로드됨 · 15분/1시간 캐시 사용")
+        else:
+            st.caption("핵심 화면을 먼저 표시했습니다 · 시장 지표·매크로·밸류는 요청 시 조회")
+    return loaded
+
+
+def _market_bar(load_details: bool = False):
     """시장 지표 — 공포·탐욕지수 + 지수 RSI + S&P500 밸류에이션 (경량 캐시)."""
     st.markdown("#### 📊 시장 지표")
+    if not load_details:
+        st.info("상세 시장 데이터는 **상세 시장 데이터 불러오기**를 눌렀을 때 조회됩니다.")
+        return
     mi = cached.market_indicators()
     fg = mi.get("fear_greed")
     idx = mi.get("indices") or []
@@ -211,13 +233,16 @@ def _market_bar():
 
 
 @st.fragment
-def _macro_row():
+def _macro_row(load_details: bool = False):
     """매크로 자산 — 환율·금·비트코인·유가·금리. **카드 클릭 → 매크로 전용 분석**.
 
     카드는 순수 HTML(콜백 없음) → `?tk=<티커>` 앵커로 이동(app.py 가 쿼리파라미터 소비).
     별도 버튼 행 불필요.
     """
     st.markdown("#### 🌐 매크로 자산")
+    if not load_details:
+        st.caption("상세 시장 데이터 로드 후 환율·금·비트코인·유가·금리 카드가 표시됩니다.")
+        return
     items = cached.macro_assets()
     if not items:
         st.caption("매크로 자산 데이터를 불러오지 못했습니다 (네트워크 일시 오류 — 새로고침).")
@@ -242,11 +267,17 @@ def _market_map():
     which = st.segmented_control("시장", list(_MAPS), default="S&P 500",
                                  label_visibility="collapsed", key="_map_kind") or "S&P 500"
     loader, note = _MAPS[which]
+    allow_live = bool(st.session_state.pop("_heatmap_allow_live", False))
+    rows = getattr(cached, loader)(allow_live=allow_live)
+    status = cached.heatmap_status(which)
+    freshness = status.get("freshness") or "unavailable"
+    source = status.get("source") or "unknown"
+    asof = status.get("asof") or "기준 시각 미상"
     st.caption("타일 크기 = 시가총액 · 색 = 당일 등락(🟩상승 / 🟥하락) · "
-               f"**타일 클릭 → 종목 분석** · {note}")
-    rows = getattr(cached, loader)()
+               f"**타일 클릭 → 종목 분석** · {note} · source={source} · "
+               f"freshness={freshness} · {asof}")
     if not rows:
-        st.info("시장 맵 데이터를 불러오지 못했습니다 (첫 로드는 크론 스냅샷 대기 — 최대 20분).")
+        st.info("시장 맵 snapshot이 없거나 부분 데이터입니다. 운영 refresh 후 다시 시도해 주세요.")
         return
     ev = st.plotly_chart(charts.market_treemap(rows), width="stretch",
                          config={"displayModeBar": False}, on_select="rerun",

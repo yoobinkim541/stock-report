@@ -35,6 +35,14 @@ _AGENT_PROGRESS_LABELS = (
     "LLM 분석 요청 중",
     "답변 정리 중",
 )
+_EVENT_PROGRESS_LABELS = {
+    "context_ready": "맥락 준비 완료",
+    "tools_started": "필요 데이터 확인 완료",
+    "llm_started": "LLM 분석 요청 중",
+    "answer_ready": "핵심 답변 준비 완료",
+    "postprocess_queued": "위키 정리는 뒤에서 진행",
+    "failed": "답변 생성 실패",
+}
 
 _CANVAS_FIELD_LABELS = {
     "buy_rsi": "매수 RSI",
@@ -330,12 +338,29 @@ def _safe_status_update(status, **kwargs) -> None:
 def _answer_with_progress(question: str, surface: str) -> dict:
     status_factory = getattr(st, "status", None)
     if callable(status_factory):
-        status_context = status_factory(_AGENT_PROGRESS_LABELS[0], expanded=True)
+        status_context = status_factory("분석 중", expanded=True)
         with status_context as status:
             updater = status or status_context
-            for label in _AGENT_PROGRESS_LABELS[1:]:
-                _safe_status_update(updater, label=label, state="running", expanded=True)
             result = _answer_agent_fast(question, surface)
+            result_context = result.get("context") or {}
+            # New agent responses carry only events that actually happened.
+            # Missing metadata means a legacy provider/test double, for which
+            # the old progress contract remains available.
+            if "progress_events" in result_context:
+                events = result_context.get("progress_events") or []
+                if events:
+                    for event in events:
+                        name = str(event.get("name") or "")
+                        label = _EVENT_PROGRESS_LABELS.get(name)
+                        if label:
+                            _safe_status_update(updater, label=label,
+                                                state="error" if name == "failed" else "complete",
+                                                expanded=True)
+                else:
+                    _safe_status_update(updater, label="분석 중", state="running", expanded=True)
+            else:
+                for label in _AGENT_PROGRESS_LABELS[1:]:
+                    _safe_status_update(updater, label=label, state="running", expanded=True)
             post = ((result.get("context") or {}).get("postprocess") or {}).get("wiki_autocurate")
             done_label = "답변 표시 완료"
             if post == "queued":
@@ -391,6 +416,8 @@ def _run_agent_question(question: str, surface: str, pack: dict | None = None, c
             meta += f" · events {ctx.get('event_count', 0)} · memory {ctx.get('memory_count', 0)}"
             if ctx.get("market_quote_count") is not None:
                 meta += f" · quotes {ctx.get('market_quote_count', 0)}"
+            if ctx.get("as_of"):
+                meta += f" · 기준 {str(ctx['as_of']).replace('T', ' ')[:19]}"
         engine = str(ctx.get("engine") or "")
         if engine:
             st.session_state["agent_last_engine"] = "규칙" if engine == "local-rules" else engine
@@ -942,7 +969,7 @@ def _render_canvas_chat(current: dict) -> None:
 
 def _default_canvas_allocations() -> str:
     try:
-        holdings = data.load_holdings()
+        holdings = cached.holdings()
     except Exception:
         holdings = []
     rows = []

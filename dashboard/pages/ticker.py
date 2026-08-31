@@ -303,7 +303,7 @@ def _compare_suggestions(ticker: str, active: list[str]) -> list[str]:
     for p in ("QQQ", "SPY"):
         add(p)
     try:
-        for h in data.load_holdings() or []:
+        for h in cached.holdings() or []:
             add(h.get("ticker"))
     except Exception:
         pass
@@ -739,7 +739,7 @@ def _macro_sections(ticker, hist):
             st.info(f"{fx.get('emoji', '')} **{fx.get('verdict', '')}** — 현재 "
                     f"{fx.get('rate', 0):,.1f}원 · 3년 분포 상위 {fx.get('pct_display', 0):.0f}% "
                     f"구간 · 권장: {fx.get('action', '')} (환전 배율 {fx.get('multiplier', 1):g}×)")
-        summ = data.portfolio_summary() or {}
+        summ = cached.portfolio_summary() or {}
         tot = summ.get("total_usd")
         if tot:
             st.caption(f"💼 내 포트 민감도 — 해외북 ${tot:,.0f} 기준 환율 **10원 변동 ≈ "

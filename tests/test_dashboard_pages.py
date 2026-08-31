@@ -52,7 +52,9 @@ _IDX = pd.date_range("2025-01-01", periods=70, freq="D")
 data.load_holdings = lambda *a, **k: [
     {"ticker":"MSFT","name":"Microsoft","shares":10,"value":4000.0,"ret":12.0,"weight":40.0},
     {"ticker":"NVDA","name":"Nvidia","shares":5,"value":6000.0,"ret":30.0,"weight":60.0}]
+cached.holdings = lambda *a, **k: data.load_holdings(*a, **k)
 data.portfolio_summary = lambda *a, **k: {"total_usd":10000.0,"return_pct":15.0,"n_holdings":2}
+cached.portfolio_summary = lambda *a, **k: data.portfolio_summary(*a, **k)
 data.portfolio_weights = lambda *a, **k: {"MSFT":0.4,"NVDA":0.6}
 data.trade_events = lambda *a, **k: []
 data.load_kr_holdings = lambda *a, **k: {}
@@ -192,7 +194,7 @@ cached.backtest_last = lambda: {"ml": {"cagr": 0.21, "sharpe": 1.1, "mdd": -0.18
     "qqq": {"cagr": 0.18, "sharpe": 0.9, "mdd": -0.22}, "overlay": {},
     "verdict": "비채택", "reasons": ["OOS 개선 미달"], "equity": None,
     "asof": "2026-07-08 12:00"}
-cached.sp500_heatmap = lambda: [
+cached.sp500_heatmap = lambda *a, **k: [
     {"ticker":"AAPL","name":"Apple","sector_kr":"기술","market_cap":4e12,"pct":1.96},
     {"ticker":"MSFT","name":"Microsoft","sector_kr":"기술","market_cap":2.8e12,"pct":3.17},
     {"ticker":"JPM","name":"JPMorgan","sector_kr":"금융","market_cap":9e11,"pct":-2.18}]

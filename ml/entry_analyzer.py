@@ -994,6 +994,89 @@ def _confidence(s: EntryScore, adjusted_rr: float) -> tuple[str, int, list[str]]
     return label, len(conflicts), conflicts
 
 
+def _digest_candidate(s: EntryScore) -> str:
+    """자동 추천 digest의 한 후보를 짧게 렌더링한다.
+
+    상세 설명은 ``format_alert_message``의 책임으로 남기고, digest에는
+    판단에 필요한 가격·위험·표본·기준시각만 둔다.
+    """
+    buy_lo, target, stop = trade_level_values(s)
+    _, adjusted_rr, _, _ = _reward_risk(s)
+    confidence, _, _ = _confidence(s, adjusted_rr)
+    name = str(getattr(s, "display_name", "") or getattr(s, "ticker", "") or "UNKNOWN")
+    ticker = str(getattr(s, "ticker", "") or "UNKNOWN")
+    currency = str(getattr(s, "currency", "USD") or "USD")
+    current = _fmt_price(float(s.current_price), currency)
+    observed = f"{_fmt_price(buy_lo, currency)}~{current}"
+    target_pct = max(float(s.upside_p75_20d), 0.02)
+    stop_pct = min(float(s.downside_p25_20d), -risk_floor(float(s.current_vol20)))
+    caution = str((getattr(s, "reasons", None) or [""])[0] or "가격·리스크 추가 확인")
+    caution = " ".join(caution.replace("\n", " ").split())[:90]
+    return "\n".join([
+        f"{name} ({ticker}) · 점수 {float(s.score):.2f} · 신뢰도 {confidence}",
+        f"  현재 {current} · 관찰 {observed}",
+        f"  목표 {_fmt_price(float(target), currency)} ({_fmt_pct(target_pct)}) · "
+        f"무효화 {_fmt_price(float(stop), currency)} ({_fmt_pct(stop_pct)})",
+        f"  20d 승률 {float(s.win_prob_20d) * 100:.0f}% · 기대 {_fmt_pct(float(s.expected_ret_20d))} · "
+        f"표본 {int(s.n_similar)}건",
+        f"  주의: {caution}",
+    ])
+
+
+def format_entry_digest(scores: list[EntryScore] | None, as_of: str | None = None,
+                        *, max_chars: int = 4000, limit: int = 5) -> str:
+    """자동 Telegram용 compact 추천 digest를 만든다.
+
+    후보별 상세 설명과 달리 한 번에 최대 ``limit``개만 표시한다. 길이 제한에
+    닿으면 후보 수를 먼저 줄이고, 최후에도 넘칠 때만 안전하게 잘라낸다.
+    잘못된 후보 하나는 전체 발송을 막지 않고 누락 경고로 집계한다.
+    """
+    raw_scores = list(scores or [])
+    valid: list[EntryScore] = []
+    malformed = 0
+    for score in raw_scores:
+        try:
+            if not getattr(score, "ticker", None):
+                raise ValueError("ticker missing")
+            float(score.score)
+            valid.append(score)
+        except Exception:
+            malformed += 1
+    valid.sort(key=lambda score: float(getattr(score, "score", 0.0)), reverse=True)
+    if not valid and not malformed:
+        return ""
+    shown_limit = max(1, int(limit or 1))
+    stamp = str(as_of or getattr(valid[0], "timestamp", "") or
+                datetime.now(KST).strftime("%Y-%m-%d %H:%M KST"))
+
+    def build(count: int) -> str:
+        lines = [f"🎯 진입 후보 | {stamp}", ""]
+        if malformed:
+            lines += [f"⚠️ 후보 데이터 누락 {malformed}건", ""]
+        for idx, score in enumerate(valid[:count], start=1):
+            try:
+                rendered = _digest_candidate(score)
+            except Exception:
+                rendered = f"{getattr(score, 'ticker', 'UNKNOWN')} · 후보 데이터 누락"
+            lines.append(f"{idx}) {rendered}")
+            lines.append("")
+        lines += [
+            f"데이터 기준: {stamp}",
+            "상세: /signals entry <TICKER>",
+            "⚠️ 정보형 추천 · 자동 주문 아님",
+        ]
+        return "\n".join(lines).strip()
+
+    for count in range(min(shown_limit, len(valid)), 0, -1):
+        message = build(count)
+        if len(message) <= max_chars:
+            return message
+    # A single candidate should normally fit; keep the header and disclaimer if
+    # an upstream name/reason contains an unexpectedly huge value.
+    message = build(1)
+    return message[:max(1, int(max_chars))].rstrip()
+
+
 def format_alert_message(s: EntryScore) -> str:
     """단일 종목 알림 메시지 (한국/미국/레버리지 공통) — 알림 V2.
 

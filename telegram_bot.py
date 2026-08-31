@@ -1475,7 +1475,7 @@ def notify_entry_signals() -> None:
     감시 대상: 포트폴리오 + 레버리지 ETF + 미국 시총 50 + 한국 시총 10
     """
     try:
-        from ml.entry_analyzer import analyze_all_entries, check_alert_signals, format_alert_message
+        from ml.entry_analyzer import analyze_all_entries, check_alert_signals, format_entry_digest
         # watch 유니버스: 포트폴리오 + US50 + KR10 + 레버리지
         scores  = analyze_all_entries(days=756, n_similar=25, universe="watch")
         try:
@@ -1484,20 +1484,35 @@ def notify_entry_signals() -> None:
         except Exception as e:
             logger.debug("진입 후보 스냅샷 저장 생략: %s", e)
         alerts  = check_alert_signals(scores)
-        for s in alerts:
-            msg = format_alert_message(s)
+        if not alerts:
+            return
+        try:
+            # Daily snapshot keeps the full universe history; an alert is also
+            # an intraday recommendation event for short-horizon evaluation.
+            from ml.entry_feedback import record_entry_scores
+            record_entry_scores(
+                alerts, source="auto_watch", universe="watch",
+                evaluation_profile="short", session="regular", event_type="enter",
+            )
+        except Exception as exc:
+            logger.debug("단기 추천 이벤트 기록 생략: %s", exc)
+        # 자동 알림은 훑어보기용 digest 하나로 묶고, 상세 포맷은
+        # /signals entry TICKER 경로에만 남긴다.
+        digest = format_entry_digest(alerts)
+        if digest:
+            msg = digest.rstrip() + "\n" + _NOEDGE_LABEL
             try:
-                from ml.technical_rating import build_reference_brief
-                ref = build_reference_brief(s.ticker)
-                if ref:
-                    msg += "\n" + ref
-            except Exception:
-                pass
-            msg = msg.rstrip() + "\n" + _NOEDGE_LABEL   # 푸시도 정직 라벨(무엣지)
-            for chunk in (msg[i:i+4000] for i in range(0, len(msg), 4000)):
-                send(ALLOWED_CHAT_ID, chunk)
+                for chunk in (msg[i:i+4000] for i in range(0, len(msg), 4000)):
+                    send(ALLOWED_CHAT_ID, chunk)
+            except Exception as exc:
+                # 발송 실패가 가격 알림 등록과 원장 기록까지 삼키지 않게 한다.
+                logger.warning("진입 digest 발송 실패: %s", exc)
+        for s in alerts:
             logger.info("진입 알림 발송: %s (점수=%.2f, %s)", s.ticker, s.score, s.currency)
-            _register_trade_level_alerts(s)
+            try:
+                _register_trade_level_alerts(s)
+            except Exception as exc:
+                logger.warning("가격 알림 등록 실패(%s): %s", s.ticker, exc)
     except Exception as e:
         logger.warning("진입 타점 모니터링 오류: %s", e)
 

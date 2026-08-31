@@ -16,7 +16,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import streamlit as st
 
 import ticker_names  # 종목명 resolver (검색·표시 — 루트 모듈, sys.path 세팅 이후)
-from dashboard import auth, cached, data, theme
+from dashboard import auth, cached, theme
 
 st.set_page_config(page_title="퀀트 터미널", page_icon="📊", layout="wide")
 
@@ -61,7 +61,7 @@ if not auth.password_gate():
     st.stop()
 
 # ── 사이드바: 단일 검색 셀렉트박스 (한글·영문·티커 타입어헤드) ────────────────
-_holdings = data.load_holdings()
+_holdings = cached.holdings()
 _held = [h["ticker"] for h in _holdings if h.get("ticker")]
 st.session_state.setdefault("ticker", _held[0] if _held else "MSFT")
 
@@ -126,6 +126,10 @@ with st.sidebar:
             st.warning("종목을 찾지 못했습니다 — 티커(예: BRK-B)로 입력해 주세요")
     if st.button("🔄 새로고침", width="stretch", help="캐시 비우고 다시 불러오기"):
         st.cache_data.clear()
+        # 공통 마퀴·시장 맵은 stale snapshot을 첫 렌더에서 그대로 쓰지만,
+        # 사용자가 명시적으로 새로고침한 경우에만 live 보강을 허용한다.
+        st.session_state["_market_tape_force_live"] = True
+        st.session_state["_heatmap_allow_live"] = True
         # 무거운 게이트(스크리너·백테스트)도 초기화 → 캐시 비운 뒤 자동 재계산 방지
         for _k in ("scr_done", "bt_done"):
             st.session_state.pop(_k, None)
@@ -153,10 +157,18 @@ with st.sidebar:
                      help="계좌 현황·NAV 곡선·판단근거 원장"):
             st.session_state["_nav_to_paper"] = True   # 페이지 객체 생성 후 switch (아래)
 
-    # 💰 주식 모으기 레일 (소수점 DCA 통합 관리 — 계획·기록·비중 편집 다이얼로그)
+    # 💰 주식 모으기 레일 — 주문서 계산은 QQQ/VIX/환율·종목가 네트워크를 사용하므로
+    # 첫 페인트에서는 열지 않는다. 사용자가 요청한 뒤에만 기존 레일을 실행한다.
     from dashboard import accumulate as _accum
     st.markdown("<div style='height:8px'></div>", unsafe_allow_html=True)
-    _accum.sidebar_rail()
+    if st.session_state.get("_show_accum_rail", False):
+        _accum.sidebar_rail()
+    elif st.button("💰 모으기 레일 열기", width="stretch", key="_show_accum_rail_btn",
+                   help="주식 모으기 계획을 요청할 때만 상세 가격·시장 데이터를 조회합니다"):
+        st.session_state["_show_accum_rail"] = True
+        st.rerun()
+    else:
+        st.caption("주식 모으기 계획은 버튼을 눌렀을 때 조회")
 
 from dashboard.pages import ai_console, ai_wiki, chart_full, home, kr_etf, market, paper, portfolio, research, watchlist
 from dashboard.pages import ticker as ticker_pg
@@ -195,8 +207,16 @@ nav.run()
 try:
     from dashboard import cached as _cached
     from dashboard import theme as _theme
-    _tape = _theme.market_tape_html(_cached.market_tape())
+    _tape_force_live = bool(st.session_state.pop("_market_tape_force_live", False))
+    _tape_items = _cached.market_tape(force_live=_tape_force_live,
+                                      allow_live=_tape_force_live)
+    _tape = _theme.market_tape_html(_tape_items)
     if _tape:
         st.markdown(_tape, unsafe_allow_html=True)
+        _tape_meta = _tape_items[0] if _tape_items else {}
+        _tape_source = _tape_meta.get("source") or "미상"
+        _tape_freshness = _tape_meta.get("freshness") or "미상"
+        _tape_asof = _tape_meta.get("asof") or "기준 시각 미상"
+        st.caption(f"시장 마퀴 · source={_tape_source} · freshness={_tape_freshness} · {_tape_asof}")
 except Exception:
     pass

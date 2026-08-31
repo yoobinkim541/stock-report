@@ -1832,6 +1832,47 @@ def test_agent_answer_async_postprocess_does_not_block_on_wiki(monkeypatch):
     agent._LAST_POSTPROCESS_THREAD.join(timeout=1)
 
 
+def test_agent_answer_reports_only_events_that_really_ran(monkeypatch):
+    from agent_console import agent, context
+
+    monkeypatch.setattr(
+        context,
+        "context_pack",
+        lambda surface: {
+            "ok": True, "surface": surface, "generated_at": "2026-08-31T09:30:00+00:00",
+            "sources": {"events": [], "source_counts": [], "symbol_counts": []},
+            "reports": [], "ml_activity": [], "portfolio": {"holdings": []}, "paper": {},
+            "models": {}, "memory": [], "focus": [],
+        },
+    )
+    monkeypatch.setattr(agent.wiki, "list_pages", lambda **_: [])
+    monkeypatch.setattr(agent, "_compose_answer", lambda *args, **kwargs: "LLM 답변")
+    monkeypatch.setattr(agent, "_postprocess_chat", lambda *args, **kwargs: {"wiki_autocurate": "queued"})
+
+    result = agent.answer("실제 상태를 보여줘", "market", async_postprocess=True)
+
+    names = [event["name"] for event in result["context"]["progress_events"]]
+    assert names == ["context_ready", "tools_started", "answer_ready", "postprocess_queued"]
+    assert "llm_started" not in names
+    assert "failed" not in names
+
+
+def test_agent_answer_resets_progress_context_after_unexpected_error(monkeypatch, tmp_path):
+    _isolate(monkeypatch, tmp_path)
+
+    from agent_console import agent
+
+    def explode(_surface):
+        raise RuntimeError("context exploded")
+
+    monkeypatch.setattr(agent, "_safe_context_pack", explode)
+
+    with pytest.raises(RuntimeError, match="context exploded"):
+        agent.answer("예외 복구 테스트", "market")
+
+    assert agent._ACTIVE_PROGRESS_EVENTS.get() is None
+
+
 def test_agent_answer_async_tracks_wiki_usage_off_request_thread(monkeypatch):
     import threading
 
