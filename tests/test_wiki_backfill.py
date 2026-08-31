@@ -78,3 +78,22 @@ def test_run_dry_run_does_not_modify_and_live_run_preserves_provenance(monkeypat
     assert loaded["body"].count("리포트 인용 요약") == 1
     assert loaded["source_refs"] == ["https://example.com/source"]
     assert loaded["merge_history"][0]["event_id"] == "merge-1"
+
+
+def test_run_all_repeats_batches_until_candidates_are_exhausted(monkeypatch, tmp_path):
+    _isolate(monkeypatch, tmp_path)
+    from agent_console import wiki
+    from reports import wiki_backfill as backfill
+
+    _page(wiki, title="첫 번째 판단", body="기존 본문 1")
+    _page(wiki, title="두 번째 판단", body="기존 본문 2")
+
+    def llm(_prompt):
+        return '{"body":"백과사전형 본문","report_citation":"판단 근거 요약"}'
+
+    result = backfill.run_all(llm_fn=llm, batch_size=1, max_batches=5)
+
+    assert result["batches"] == 3
+    assert result["candidates_considered"] == 2
+    assert len(result["updated"]) == 2
+    assert result["remaining"] == 0
