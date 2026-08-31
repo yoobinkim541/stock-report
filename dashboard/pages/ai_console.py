@@ -71,10 +71,12 @@ def render():
 
     surface = _current_surface()
     hours = int(st.session_state.get("agent_hours", 72))
-    pack = _safe_context(surface, hours)
-    _context_glance(pack)
-
     section = _console_section_control()
+    # 위키/기억/커넥터 화면은 대화용 대형 context pack을 사용하지 않는다.
+    # 선택된 화면에 필요한 데이터만 읽어 첫 렌더링 지연을 줄인다.
+    pack = _safe_context(surface, hours) if section in {"대화", "전략 캔버스"} else {}
+    if pack:
+        _context_glance(pack)
     _render_console_section(section, surface, pack)
 
 

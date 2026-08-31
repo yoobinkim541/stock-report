@@ -540,6 +540,7 @@ def _is_wiki_record(record: dict) -> bool:
     return surface == WIKI_SURFACE
 
 
+@_cached("wiki_records")
 def _wiki_records() -> list[dict]:
     try:
         rows = shared_memory.all_records()
@@ -548,6 +549,7 @@ def _wiki_records() -> list[dict]:
     return [row for row in rows if _is_wiki_record(row)]
 
 
+@_cached("all_wiki_pages")
 def _all_wiki_pages() -> list[dict]:
     records = _wiki_records()
     return _apply_backlinks([_record_to_page(row) for row in records], records)
@@ -700,6 +702,25 @@ def list_pages(*, query: str = "", surface: str = "all", status: str = "all", li
     query = _clean(query, 600)
     surface = _clean(surface or "all", 60).lower() or "all"
     status = _clean(status or "all", 40).lower() or "all"
+    # 브라우저와 배치 작업의 전체 목록은 검색 랭킹이 필요 없다. 기존에는
+    # 빈 query도 모든 레코드를 다시 _record_to_page/_candidate_score 하면서
+    # QMD를 확인해 초기 위키 렌더링을 불필요하게 늦췄다.
+    if not query:
+        pages = [
+            page
+            for page in _all_wiki_pages()
+            if (status == "all" or str(page.get("status") or "draft").lower() == status)
+            and (surface == "all" or str(page.get("surface") or WIKI_SURFACE).lower() == surface)
+        ]
+        pages.sort(
+            key=lambda page: (
+                2 if page.get("status") == "stable" else 1 if page.get("status") == "reviewed" else 0,
+                str(page.get("updated_at") or page.get("created_at") or ""),
+            ),
+            reverse=True,
+        )
+        return pages[:limit]
+
     records = _wiki_records()
     if not records:
         return []
@@ -828,13 +849,12 @@ def get_page(page_id: str) -> dict | None:
 
 @_cached("stats")
 def stats() -> dict:
-    rows = _wiki_records()
+    pages = _all_wiki_pages()
     status_counts = Counter()
     kind_counts = Counter()
     surface_counts = Counter()
     latest: dict | None = None
-    for row in rows:
-        page = _record_to_page(row)
+    for page in pages:
         status_counts[page.get("status", "draft")] += 1
         kind_counts[page.get("kind", "note")] += 1
         surface_counts[page.get("surface", WIKI_SURFACE)] += 1
@@ -846,7 +866,7 @@ def stats() -> dict:
         if page_at > latest_at:
             latest = page
     return {
-        "total": len(rows),
+        "total": len(pages),
         "status_counts": dict(status_counts),
         "kind_counts": dict(kind_counts),
         "surface_counts": dict(surface_counts),

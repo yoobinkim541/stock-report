@@ -430,6 +430,25 @@ def test_ai_console_context_glance_items_are_compact():
     assert [item["label"] for item in items] == ["최근 이벤트", "누적 기억", "모델 파일", "최신 리포트"]
 
 
+def test_ai_console_does_not_build_context_pack_for_wiki(monkeypatch):
+    from dashboard.pages import ai_console
+
+    captured = {}
+    monkeypatch.setattr(ai_console, "_current_surface", lambda: "market")
+    monkeypatch.setattr(ai_console, "_console_section_control", lambda: "AI 위키")
+    monkeypatch.setattr(ai_console, "_safe_context", lambda *_args: (_ for _ in ()).throw(AssertionError("wiki does not need context pack")))
+    monkeypatch.setattr(ai_console, "_context_glance", lambda *_args: (_ for _ in ()).throw(AssertionError("wiki does not need context glance")))
+    monkeypatch.setattr(
+        ai_console,
+        "_render_console_section",
+        lambda section, surface, pack: captured.update(section=section, surface=surface, pack=pack),
+    )
+
+    ai_console.render()
+
+    assert captured == {"section": "AI 위키", "surface": "market", "pack": {}}
+
+
 def test_ticker_analysis_context_collects_kr_deep_signals(monkeypatch):
     from dashboard.pages import ticker
     import pandas as pd

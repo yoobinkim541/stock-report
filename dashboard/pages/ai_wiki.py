@@ -78,7 +78,7 @@ def render():
     except Exception:
         search_health = {"provider": "fallback", "fallback_available": True, "qmd": {}}
     try:
-        lint = wiki.lint_pages(pages_all)
+        lint = wiki.lint_pages()
     except Exception:
         lint = {"issue_count": 0, "issues": []}
     health = build_wiki_health_model(pages_all, search_health=search_health, lint=lint)

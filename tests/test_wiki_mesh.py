@@ -104,6 +104,18 @@ def test_build_wiki_graph_model_uses_explicit_links_and_keeps_edges_visible():
     assert any(trace.line.color == "rgba(34,211,238,0.48)" for trace in figure.data if trace.mode == "lines")
 
 
+def test_build_figure_uses_webgl_for_large_graphs():
+    pages = [
+        {"id": f"page-{idx}", "title": f"문서 {idx}", "summary": "지식", "surface": "wiki", "kind": "note"}
+        for idx in range(500)
+    ]
+
+    figure = wiki_mesh._build_figure(wiki_mesh.build_wiki_graph_model(pages))
+
+    assert figure.data
+    assert all(trace.type == "scattergl" for trace in figure.data)
+
+
 def test_extract_selected_page_id_reads_plotly_customdata():
     event = {
         "selection": {

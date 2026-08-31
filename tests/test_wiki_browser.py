@@ -118,6 +118,26 @@ def test_build_browser_model_groups_visible_pages_by_surface():
     assert [group["count"] for group in model["groups"]] == [2, 2]
 
 
+def test_limit_browser_groups_keeps_counts_but_caps_rendered_pages():
+    groups = wiki_browser._group_visible_pages(
+        [
+            {"id": f"market-{idx}", "title": f"시장 {idx}", "surface": "market"}
+            for idx in range(5)
+        ]
+        + [
+            {"id": f"portfolio-{idx}", "title": f"포트폴리오 {idx}", "surface": "portfolio"}
+            for idx in range(5)
+        ]
+    )
+
+    limited = wiki_browser.limit_browser_groups(groups, limit=6)
+
+    assert [group["count"] for group in limited] == [5, 5]
+    assert sum(len(group["pages"]) for group in limited) == 6
+    assert [page["id"] for page in limited[0]["pages"]] == [f"market-{idx}" for idx in range(5)]
+    assert [page["id"] for page in limited[1]["pages"]] == ["portfolio-0"]
+
+
 def test_aliases_are_available():
     filtered = wiki_browser.filter_pages(PAGES, query="레버리지", surface="portfolio", status="all")
     picked = wiki_browser.pick_selected_page(PAGES, selected_page_id="p4", query="", surface="all", status="all")

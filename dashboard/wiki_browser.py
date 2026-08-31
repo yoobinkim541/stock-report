@@ -25,6 +25,7 @@ SURFACE_LABELS = {
 # 편집 UI 는 [1:] 를 쓴다. dashboard/pages/ai_wiki.py 가 여기서 가져간다.
 SURFACE_OPTIONS = ["all", "market", "portfolio", "ticker", "paper", "lab", "wiki"]
 KIND_OPTIONS = ["all", "note", "playbook", "decision", "risk", "concept", "source_digest"]
+DOCUMENT_BROWSER_PAGE_SIZE = 18
 
 
 @dataclass(frozen=True)
@@ -148,6 +149,22 @@ def _group_visible_pages(pages: list[dict[str, Any]]) -> list[dict[str, Any]]:
         }
         for surface in ordered_surfaces
     ]
+
+
+def limit_browser_groups(groups: Iterable[dict[str, Any]], *, limit: int = DOCUMENT_BROWSER_PAGE_SIZE) -> list[dict[str, Any]]:
+    """문서 브라우저 카드 수만 제한하고 전체 페이지/그래프 모델은 보존한다."""
+    remaining = max(0, int(limit or 0))
+    limited: list[dict[str, Any]] = []
+    for group in groups or []:
+        if remaining <= 0:
+            break
+        pages = list(group.get("pages") or [])
+        visible = pages[:remaining]
+        if not visible:
+            continue
+        limited.append({**group, "pages": visible})
+        remaining -= len(visible)
+    return limited
 
 
 def _render_page_card(page: dict[str, Any]) -> str:
@@ -513,6 +530,10 @@ def related_pages(selected_page: dict[str, Any] | WikiPage | None, pages: Iterab
         return []
     selected = _normalize_page(selected_page)
     corpus = _normalize_pages(pages)
+    return _related_pages_normalized(selected, corpus, limit=limit)
+
+
+def _related_pages_normalized(selected: dict[str, Any], corpus: list[dict[str, Any]], *, limit: int = 6) -> list[dict[str, Any]]:
     if not corpus:
         return []
     counter = Counter()
@@ -533,6 +554,10 @@ def related_pages(selected_page: dict[str, Any] | WikiPage | None, pages: Iterab
 
 def select_page_id(pages: Iterable[dict[str, Any] | WikiPage], *, selected_page_id: str = "", query: str = "", surface: str = "all", status: str = "all") -> str | None:
     normalized = _normalize_pages(pages)
+    return _select_page_id_normalized(normalized, selected_page_id=selected_page_id, query=query, surface=surface, status=status)
+
+
+def _select_page_id_normalized(normalized: list[dict[str, Any]], *, selected_page_id: str = "", query: str = "", surface: str = "all", status: str = "all") -> str | None:
     visible = _visible_pages(normalized, query=query, surface=surface, status=status)
     if not visible:
         return None
@@ -547,11 +572,11 @@ def select_page_id(pages: Iterable[dict[str, Any] | WikiPage], *, selected_page_
 def build_browser_model(pages: Iterable[dict[str, Any] | WikiPage], *, selected_page_id: str = "", query: str = "", surface: str = "all", status: str = "all") -> dict[str, Any]:
     normalized = _normalize_pages(pages)
     visible = _visible_pages(normalized, query=query, surface=surface, status=status)
-    selected_id = select_page_id(normalized, selected_page_id=selected_page_id, query=query, surface=surface, status=status)
+    selected_id = _select_page_id_normalized(normalized, selected_page_id=selected_page_id, query=query, surface=surface, status=status)
     selected = next((page for page in visible if page.get("id") == selected_id), None)
     if selected is None and selected_id:
         selected = next((page for page in normalized if page.get("id") == selected_id), None)
-    related = related_pages(selected, normalized, limit=6) if selected else []
+    related = _related_pages_normalized(selected, normalized, limit=6) if selected else []
     return {
         "query": query,
         "surface": surface,
@@ -670,7 +695,7 @@ def render_wiki_tab(surface: str, pack: dict[str, Any] | None = None) -> None:
     except Exception:
         search_health = {"provider": "fallback", "fallback_available": True, "qmd": {}}
     try:
-        lint = wiki.lint_pages(pages_all)
+        lint = wiki.lint_pages()
     except Exception:
         lint = {"issue_count": 0, "issues": []}
     health = build_wiki_health_model(pages_all, search_health=search_health, lint=lint)
@@ -739,18 +764,22 @@ def render_wiki_tab(surface: str, pack: dict[str, Any] | None = None) -> None:
     with left:
         st.markdown("##### 문서 브라우저")
         st.caption(f"{browser.get('visible_count', 0)}개 표시 · {len(browser.get('groups') or [])}개 그룹")
-        visible = browser.get("visible") or []
         groups = browser.get("groups") or []
+        visible = browser.get("visible") or []
         if visible:
             if surface_filter == "all" and groups:
-                for group in groups:
+                display_groups = limit_browser_groups(groups, limit=DOCUMENT_BROWSER_PAGE_SIZE)
+                display_count = sum(len(group.get("pages") or []) for group in display_groups)
+                if display_count < len(visible):
+                    st.caption(f"최신 문서 {display_count}개 표시 · 전체 {len(visible)}개")
+                for group in display_groups:
                     st.markdown(f"**{group.get('label', group.get('surface', 'wiki'))}** · {group.get('count', 0)}개")
                     for page in group.get("pages") or []:
                         loaded = _render_page_card(page)
                         if loaded:
                             load_selected_id = loaded
             else:
-                for page in visible:
+                for page in visible[:DOCUMENT_BROWSER_PAGE_SIZE]:
                     loaded = _render_page_card(page)
                     if loaded:
                         load_selected_id = loaded
@@ -774,7 +803,9 @@ def render_wiki_tab(surface: str, pack: dict[str, Any] | None = None) -> None:
     with center:
         st.markdown("##### 문서 읽기")
         browser_selected = browser.get("selected") or {}
-        preview_page = wiki.get_page(selected_page_id) or browser_selected
+        preview_page = browser_selected
+        if not preview_page.get("body") and selected_page_id:
+            preview_page = wiki.get_page(selected_page_id) or browser_selected
         if not preview_page:
             st.info("왼쪽에서 페이지를 선택해 보세요.")
         else:
@@ -863,7 +894,9 @@ def render_wiki_tab(surface: str, pack: dict[str, Any] | None = None) -> None:
 
     with right:
         st.markdown("##### 편집기")
-        editor_page = wiki.get_page(st.session_state.get("agent_wiki_selected_page_id", ""))
+        editor_page = browser.get("selected") or {}
+        if not editor_page.get("body"):
+            editor_page = wiki.get_page(st.session_state.get("agent_wiki_selected_page_id", "")) or editor_page
         default_page = editor_page or {"title": query[:80] or "새 위키 페이지", "surface": surface if surface != "all" else "market", "kind": "note", "status": "draft", "tags": [], "summary": "", "body": "", "source_refs": [], "confidence": 0.7}
         with st.form("wiki_editor", clear_on_submit=False):
             title = st.text_input("제목", value=default_page.get("title", ""))

@@ -755,6 +755,7 @@ def _build_figure(model: dict[str, Any]) -> go.Figure:
     positions = model.get("positions") or {}
     edges = model.get("edges") or []
     groups = model.get("groups") or []
+    trace_type = go.Scattergl if len(nodes) >= 300 else go.Scatter
     fig = go.Figure()
     edge_paths: dict[str, tuple[list[float | None], list[float | None]]] = {
         "explicit": ([], []),
@@ -772,7 +773,7 @@ def _build_figure(model: dict[str, Any]) -> go.Figure:
         if not xs:
             continue
         fig.add_trace(
-            go.Scatter(
+            trace_type(
                 x=xs,
                 y=ys,
                 mode="lines",
@@ -825,7 +826,7 @@ def _build_figure(model: dict[str, Any]) -> go.Figure:
 
     if x_rest:
         fig.add_trace(
-            go.Scatter(
+            trace_type(
                 x=x_rest,
                 y=y_rest,
                 mode="markers",
@@ -844,7 +845,7 @@ def _build_figure(model: dict[str, Any]) -> go.Figure:
         )
     if x_sel:
         fig.add_trace(
-            go.Scatter(
+            trace_type(
                 x=x_sel,
                 y=y_sel,
                 mode="markers+text",
