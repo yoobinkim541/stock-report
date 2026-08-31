@@ -16,6 +16,7 @@ from reports import source_collector
 STALE_WIKI_AGE_DAYS = 14
 UNUSED_WIKI_DAYS = 30
 RECENT_EVENT_HOURS = 24
+RECENT_EVENT_SAMPLE_LIMIT = 120
 NEWS_LABEL_FALLBACK_ALERT_RATIO = 0.5
 
 
@@ -422,16 +423,34 @@ def _recommendations(
     return recs
 
 
+def _load_recent_events_for_health(*, dry_run: bool) -> list[dict]:
+    """Keep the dashboard dry-run bounded; full reports retain full event counts."""
+    if not dry_run:
+        return source_collector.load_recent_events(hours=RECENT_EVENT_HOURS)
+    try:
+        return source_collector.load_recent_events(
+            hours=RECENT_EVENT_HOURS,
+            limit=RECENT_EVENT_SAMPLE_LIMIT,
+        )
+    except TypeError as exc:
+        # Keep compatibility with older injected collectors used by integrations/tests.
+        if "limit" not in str(exc):
+            raise
+        return source_collector.load_recent_events(hours=RECENT_EVENT_HOURS)
+
+
 def build_pipeline_health_report(*, dry_run: bool = False) -> dict[str, Any]:
     source_health = source_collector.load_source_health() or {}
     stale_rows = source_collector.stale_sources(source_health)
-    recent_events = source_collector.load_recent_events(hours=RECENT_EVENT_HOURS)
+    recent_events = _load_recent_events_for_health(dry_run=dry_run)
     pages = wiki.list_pages(status="all", surface="all", limit=10000)
     stats_data = wiki.stats()
     lint_data = wiki.lint_pages(pages)
     stale_pages = wiki.list_stale_pages(max_age_days=STALE_WIKI_AGE_DAYS)
     unused_pages = wiki.list_unused_pages(days=UNUSED_WIKI_DAYS)
     source_section = _summarize_source_health(source_health, stale_rows, recent_events)
+    source_section["recent"]["sampled"] = bool(dry_run)
+    source_section["recent"]["sample_limit"] = RECENT_EVENT_SAMPLE_LIMIT if dry_run else None
     wiki_section = _summarize_wiki_health(pages, stats_data, lint_data, stale_pages, unused_pages)
     curation_section = _summarize_curation_health(pages)
     news_label_section = _summarize_news_label_health()

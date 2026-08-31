@@ -51,7 +51,7 @@ def recent_source_events(hours: int = 72, limit: int = 60) -> list[dict]:
     try:
         from reports.source_collector import load_recent_events
 
-        events = load_recent_events(cache_dir=source_cache_dir(), hours=hours)
+        events = load_recent_events(cache_dir=source_cache_dir(), hours=hours, limit=limit)
     except Exception:
         events = []
         for path in sorted(source_cache_dir().glob("events-*.jsonl"))[-5:]:

@@ -40,6 +40,45 @@ def test_load_recent_events_reads_multiple_days_and_dedupes(tmp_path):
     assert [e["title"] for e in events] == ["fresh"]
 
 
+def test_load_recent_events_limit_reads_newest_tail_without_full_file_scan(tmp_path, monkeypatch):
+    cache_dir = tmp_path / "cache"
+    event_file = cache_dir / "events-2026-06-04.jsonl"
+    cache_dir.mkdir()
+    now = datetime(2026, 6, 4, 8, 0, tzinfo=KST)
+    rows = [
+        {
+            "id": f"old-{idx}",
+            "source": "saveticker",
+            "title": f"old-{idx}",
+            "collected_at": (now - timedelta(minutes=2010 - idx)).isoformat(),
+        }
+        for idx in range(2000)
+    ]
+    rows.extend(
+        {
+            "id": f"new-{idx}",
+            "source": "saveticker",
+            "title": f"new-{idx}",
+            "collected_at": (now - timedelta(seconds=5 - idx)).isoformat(),
+        }
+        for idx in range(5)
+    )
+    event_file.write_text("\n".join(json.dumps(row) for row in rows) + "\n", encoding="utf-8")
+
+    original_read_text = Path.read_text
+
+    def reject_full_read(path, *args, **kwargs):
+        if path == event_file:
+            raise AssertionError("recent event lookup must not read the whole event file")
+        return original_read_text(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "read_text", reject_full_read)
+
+    events = sc.load_recent_events(cache_dir=cache_dir, now=now, hours=1, limit=3)
+
+    assert [event["title"] for event in events] == ["new-2", "new-3", "new-4"]
+
+
 def test_append_events_preserves_mutable_observations_across_time_buckets(tmp_path):
     cache_dir = tmp_path / "cache"
     first_at = datetime(2026, 8, 21, 10, 5, tzinfo=KST)

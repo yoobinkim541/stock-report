@@ -25,6 +25,7 @@ _SURFACES = {
     "paper": "모의투자",
     "lab": "전략랩",
 }
+_CONSOLE_SECTIONS = ("대화", "시장 기억", "AI 위키", "전략 캔버스", "로컬 커넥터")
 _AUTO_CHAT = "auto"
 _PIN_AUTO = "자동"
 _AGENT_PROGRESS_LABELS = (
@@ -73,19 +74,46 @@ def render():
     pack = _safe_context(surface, hours)
     _context_glance(pack)
 
-    tab_chat, tab_memory, tab_wiki, tab_lab, tab_connectors = st.tabs(
-        ["대화", "시장 기억", "AI 위키", "전략 캔버스", "로컬 커넥터"]
-    )
-    with tab_chat:
-        _chat_tab(surface, pack)
-    with tab_memory:
+    section = _console_section_control()
+    _render_console_section(section, surface, pack)
+
+
+def _console_section_control() -> str:
+    """Render one selectable console section so hidden sections stay unevaluated."""
+    segmented_control = getattr(st, "segmented_control", None)
+    if callable(segmented_control):
+        selected = segmented_control(
+            "콘솔 영역",
+            options=list(_CONSOLE_SECTIONS),
+            default=_CONSOLE_SECTIONS[0],
+            key="_ai_console_section",
+            label_visibility="collapsed",
+            width="stretch",
+        )
+    else:
+        selected = st.radio(
+            "콘솔 영역",
+            options=list(_CONSOLE_SECTIONS),
+            index=0,
+            key="_ai_console_section",
+            horizontal=True,
+            label_visibility="collapsed",
+        )
+    return selected if selected in _CONSOLE_SECTIONS else _CONSOLE_SECTIONS[0]
+
+
+def _render_console_section(section: str, surface: str, pack: dict) -> None:
+    """Render only the selected section; Streamlit tabs eagerly run every body."""
+    if section == "시장 기억":
         _memory_tab(surface)
-    with tab_wiki:
+    elif section == "AI 위키":
         _wiki_tab(surface, pack)
-    with tab_lab:
+    elif section == "전략 캔버스":
         _lab_tab(surface, pack)
-    with tab_connectors:
+    elif section == "로컬 커넥터":
         _connectors_tab()
+    else:
+        _chat_tab(surface, pack)
 
 
 def _current_surface() -> str:

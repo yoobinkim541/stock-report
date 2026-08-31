@@ -495,28 +495,76 @@ def append_events(events: Iterable[dict], cache_dir: Path | str = DEFAULT_CACHE_
         return len(rows)
 
 
-def load_recent_events(cache_dir: Path | str = DEFAULT_CACHE_DIR, now: datetime | None = None, hours: int = 24) -> list[dict]:
+def _iter_recent_jsonl_rows(path: Path, cutoff: datetime, *, chunk_size: int = 1024 * 1024):
+    """Yield recent JSONL rows from the file tail without loading the whole file.
+
+    Event files are append-only and ``collected_at`` is assigned immediately before
+    append. Walking backwards therefore lets recent, bounded callers stop after the
+    requested number of rows instead of reading hundreds of megabytes of history.
+    """
+    with path.open("rb") as stream:
+        position = stream.seek(0, 2)
+        pending = b""
+        while position > 0:
+            start = max(0, position - chunk_size)
+            stream.seek(start)
+            pending = stream.read(position - start) + pending
+            parts = pending.split(b"\n")
+            if start:
+                pending = parts[0]
+                complete = parts[1:]
+            else:
+                pending = b""
+                complete = parts
+
+            for raw in reversed(complete):
+                if not raw.strip():
+                    continue
+                try:
+                    row = json.loads(raw.decode("utf-8"))
+                    ts = datetime.fromisoformat(row.get("collected_at", ""))
+                except (AttributeError, UnicodeDecodeError, TypeError, ValueError, json.JSONDecodeError):
+                    continue
+                if ts < cutoff:
+                    return
+                yield row
+            position = start
+
+
+def load_recent_events(cache_dir: Path | str = DEFAULT_CACHE_DIR, now: datetime | None = None,
+                       hours: int = 24, limit: int | None = None) -> list[dict]:
+    """Load recent events, optionally stopping after ``limit`` newest unique rows.
+
+    A bounded lookup is served from the tail of each append-only daily file. The
+    unbounded form keeps the historical behavior needed by report generation.
+    """
     now = now or datetime.now(KST)
     cache_dir = Path(cache_dir)
     cutoff = now.astimezone(KST) - timedelta(hours=hours)
     events = []
     seen = set()
+    max_rows = None if limit is None else max(0, int(limit))
+    if max_rows == 0:
+        return []
 
     for days_back in range((hours // 24) + 3):
         path = _event_file(cache_dir, now - timedelta(days=days_back))
         if not path.exists():
             continue
-        for line in path.read_text(encoding="utf-8").splitlines():
-            try:
-                row = json.loads(line)
-                ts = datetime.fromisoformat(row.get("collected_at", ""))
-            except Exception:
-                continue
-            row_id = row.get("id") or event_id(row)
-            if ts < cutoff or row_id in seen:
-                continue
-            seen.add(row_id)
-            events.append(row)
+        rows = _iter_recent_jsonl_rows(path, cutoff)
+        try:
+            for row in rows:
+                row_id = row.get("id") or event_id(row)
+                if row_id in seen:
+                    continue
+                seen.add(row_id)
+                events.append(row)
+                if max_rows is not None and len(events) >= max_rows:
+                    break
+        finally:
+            rows.close()
+        if max_rows is not None and len(events) >= max_rows:
+            break
 
     return sorted(events, key=lambda e: e.get("collected_at", ""))
 

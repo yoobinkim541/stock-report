@@ -126,6 +126,24 @@ def test_pipeline_health_report_merges_source_wiki_and_curation(monkeypatch):
     assert report["recommendations"][0]["category"] == "collection"
 
 
+def test_dry_run_pipeline_health_uses_bounded_recent_event_sample(monkeypatch):
+    from reports import wiki_pipeline_health
+
+    _patch_empty_pipeline(monkeypatch, wiki_pipeline_health)
+    seen = {}
+
+    def load_recent_events(*, hours=24, limit=None, **kwargs):
+        seen["hours"] = hours
+        seen["limit"] = limit
+        return []
+
+    monkeypatch.setattr(wiki_pipeline_health.source_collector, "load_recent_events", load_recent_events)
+
+    wiki_pipeline_health.build_pipeline_health_report(dry_run=True)
+
+    assert seen == {"hours": wiki_pipeline_health.RECENT_EVENT_HOURS, "limit": 120}
+
+
 def test_pipeline_health_treats_empty_news_labels_as_no_data(monkeypatch):
     from reports import wiki_pipeline_health
 

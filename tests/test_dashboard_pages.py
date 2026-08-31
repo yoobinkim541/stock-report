@@ -327,6 +327,9 @@ def test_ai_console_canvas_buy_rsi_persists_across_rerun():
     at.run()
     assert not at.exception, str(at.exception)
 
+    at.segmented_control(key="_ai_console_section").set_value("전략 캔버스").run()
+    assert not at.exception, str(at.exception)
+
     rsi_input = at.number_input(key="strategy_canvas_buy_rsi")
     rsi_input.set_value(45).run()
     assert not at.exception, str(at.exception)
@@ -342,6 +345,21 @@ def test_ai_console_quick_prompt_list_stays_small():
 
     assert len(prompts) == 3
     assert any("위키" in prompt for prompt in prompts)
+
+
+def test_ai_console_renders_only_selected_section(monkeypatch):
+    from dashboard.pages import ai_console
+
+    calls = []
+    monkeypatch.setattr(ai_console, "_chat_tab", lambda surface, pack: calls.append("chat"))
+    monkeypatch.setattr(ai_console, "_memory_tab", lambda surface: calls.append("memory"))
+    monkeypatch.setattr(ai_console, "_wiki_tab", lambda surface, pack: calls.append("wiki"))
+    monkeypatch.setattr(ai_console, "_lab_tab", lambda surface, pack: calls.append("lab"))
+    monkeypatch.setattr(ai_console, "_connectors_tab", lambda: calls.append("connectors"))
+
+    ai_console._render_console_section("전략 캔버스", "market", {})
+
+    assert calls == ["lab"]
 
 
 def test_wiki_pipeline_health_summary_wraps_report(monkeypatch):
@@ -2195,6 +2213,9 @@ def test_ai_console_canvas_chat_propose_and_apply(monkeypatch):
     at.run()
     assert not at.exception, str(at.exception)
 
+    at.segmented_control(key="_ai_console_section").set_value("전략 캔버스").run()
+    assert not at.exception, str(at.exception)
+
     chat = at.chat_input(key="strategy_canvas_chat_input")
     chat.set_value("RSI를 25/75로 바꿔줘").run()
     assert not at.exception, str(at.exception)
@@ -2224,6 +2245,9 @@ def test_ai_console_canvas_chat_no_match_shows_no_diff(monkeypatch):
     script = _script("from dashboard.pages import ai_console", "ai_console.render()")
     at = AppTest.from_string(script, default_timeout=30)
     at.run()
+
+    at.segmented_control(key="_ai_console_section").set_value("전략 캔버스").run()
+    assert not at.exception, str(at.exception)
 
     chat = at.chat_input(key="strategy_canvas_chat_input")
     chat.set_value("오늘 시장 어때?").run()
