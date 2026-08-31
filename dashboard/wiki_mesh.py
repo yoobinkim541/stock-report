@@ -5,6 +5,7 @@ from collections.abc import Iterable
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 import hashlib
+from itertools import combinations
 import math
 import re
 from typing import Any
@@ -42,6 +43,9 @@ VALID_STATUSES = ("draft", "reviewed", "stable", "archived")
 WIKI_SURFACE = "wiki"
 WIKI_BODY_LIMIT = 12000
 SURFACE_ORDER = ["market", "portfolio", "ticker", "paper", "lab", "wiki"]
+MAX_INFERRED_GROUP = 80
+MAX_INFERRED_NEIGHBORS = 8
+LARGE_GRAPH_LAYOUT_THRESHOLD = 240
 SURFACE_LABELS = {
     "market": "시장",
     "portfolio": "포트폴리오",
@@ -74,6 +78,7 @@ class WikiGraphEdge:
     weight: int
     tags: int = 0
     refs: int = 0
+    explicit: bool = False
 
 
 def _clean(value: object, limit: int = 2000) -> str:
@@ -216,6 +221,8 @@ def _record_to_page(record: dict[str, Any]) -> dict[str, Any]:
         "updated_at": record.get("updatedAt") or record.get("createdAt") or "",
         "source": source,
         "source_refs": _dedupe_texts(record.get("artifacts") or [], limit=12, item_limit=120),
+        "links": _dedupe_texts(record.get("links") or [], limit=12, item_limit=80),
+        "backlinks": _dedupe_texts(record.get("backlinks") or [], limit=12, item_limit=80),
         "decisions": decisions,
         "openQuestions": open_questions,
         "messages": messages,
@@ -244,6 +251,8 @@ def _normalize_page(page: dict[str, Any] | WikiGraphNode) -> dict[str, Any]:
             "updated_at": "",
             "source": {},
             "source_refs": list(page.source_refs),
+            "links": [],
+            "backlinks": [],
             "decisions": [],
             "openQuestions": [],
             "messages": [],
@@ -273,6 +282,8 @@ def _normalize_page(page: dict[str, Any] | WikiGraphNode) -> dict[str, Any]:
             "updated_at": page.get("updated_at") or page.get("updatedAt") or page.get("createdAt") or "",
             "source": dict(page.get("source") or {}),
             "source_refs": source_refs,
+            "links": _dedupe_texts(page.get("links") or [], limit=12, item_limit=80),
+            "backlinks": _dedupe_texts(page.get("backlinks") or [], limit=12, item_limit=80),
             "decisions": _dedupe_texts(page.get("decisions") or [], limit=8, item_limit=280),
             "openQuestions": _dedupe_texts(page.get("openQuestions") or [], limit=8, item_limit=280),
             "messages": list(page.get("messages") or []),
@@ -334,23 +345,98 @@ def _edge_similarity(left: dict[str, Any], right: dict[str, Any]) -> tuple[int, 
 def _build_adjacency(pages: list[dict[str, Any]]) -> tuple[dict[str, dict[str, WikiGraphEdge]], Counter[str]]:
     adjacency: dict[str, dict[str, WikiGraphEdge]] = defaultdict(dict)
     ref_counter: Counter[str] = Counter()
+    page_ids = {str(page.get("id") or "") for page in pages if str(page.get("id") or "")}
+
+    def add_edge(left_id: str, right_id: str, *, weight: int, tags: int = 0, refs: int = 0, explicit: bool = False) -> None:
+        if not left_id or not right_id or left_id == right_id:
+            return
+        current = adjacency[left_id].get(right_id)
+        if current:
+            adjacency[left_id][right_id] = WikiGraphEdge(
+                source=left_id,
+                target=right_id,
+                weight=max(current.weight, weight),
+                tags=max(current.tags, tags),
+                refs=max(current.refs, refs),
+                explicit=current.explicit or explicit,
+            )
+            return
+        adjacency[left_id][right_id] = WikiGraphEdge(
+            source=left_id,
+            target=right_id,
+            weight=weight,
+            tags=tags,
+            refs=refs,
+            explicit=explicit,
+        )
+
     for page in pages:
         for ref in page.get("source_refs") or []:
             ref_counter[str(ref)] += 1
-    for idx, left in enumerate(pages):
-        left_id = str(left.get("id") or "")
-        if not left_id:
+
+    # Explicit wiki links are the authoritative relation, like an Obsidian wikilink.
+    for page in pages:
+        page_id = str(page.get("id") or "")
+        linked_ids = [*(page.get("links") or []), *(page.get("backlinks") or [])]
+        for linked_id in linked_ids:
+            target_id = str(linked_id or "")
+            if target_id not in page_ids:
+                continue
+            add_edge(page_id, target_id, weight=12, explicit=True)
+            add_edge(target_id, page_id, weight=12, explicit=True)
+
+    # Inferred links use inverted indexes rather than an O(n^2) all-page scan.
+    # Generic tags such as `wiki` can connect hundreds of pages and are skipped.
+    tag_groups: dict[str, list[str]] = defaultdict(list)
+    ref_groups: dict[str, list[str]] = defaultdict(list)
+    for page in pages:
+        page_id = str(page.get("id") or "")
+        for tag in {str(tag).strip().lower() for tag in page.get("tags") or [] if str(tag).strip()}:
+            tag_groups[tag].append(page_id)
+        for ref in {str(ref).strip().lower() for ref in page.get("source_refs") or [] if str(ref).strip()}:
+            ref_groups[ref].append(page_id)
+
+    pair_scores: dict[tuple[str, str], list[int]] = {}
+    for groups, index in ((tag_groups, 0), (ref_groups, 1)):
+        for members in groups.values():
+            if len(members) < 2 or len(members) > MAX_INFERRED_GROUP:
+                continue
+            for left_id, right_id in combinations(sorted(set(members)), 2):
+                score = pair_scores.setdefault((left_id, right_id), [0, 0])
+                score[index] += 1
+
+    page_by_id = {str(page.get("id") or ""): page for page in pages}
+    inferred_edges: dict[tuple[str, str], WikiGraphEdge] = {}
+    for (left_id, right_id), (tag_hits, ref_hits) in pair_scores.items():
+        left = page_by_id.get(left_id) or {}
+        right = page_by_id.get(right_id) or {}
+        score = tag_hits * 4 + ref_hits * 6
+        inferred_edges[(left_id, right_id)] = WikiGraphEdge(
+            source=left_id,
+            target=right_id,
+            weight=score + int((left.get("surface") or "").lower() == (right.get("surface") or "").lower()),
+            tags=tag_hits,
+            refs=ref_hits,
+        )
+
+    # Keep the strongest inferred neighborhood per page. Explicit links are never trimmed.
+    selected_pairs: set[tuple[str, str]] = set()
+    by_node: dict[str, list[tuple[str, WikiGraphEdge]]] = defaultdict(list)
+    for pair, edge in inferred_edges.items():
+        by_node[edge.source].append((edge.target, edge))
+        by_node[edge.target].append((edge.source, edge))
+    for node_id, candidates in by_node.items():
+        ranked = sorted(candidates, key=lambda item: (item[1].weight, item[1].refs, item[1].tags, item[0]), reverse=True)
+        for other_id, _edge in ranked[:MAX_INFERRED_NEIGHBORS]:
+            selected_pairs.add(tuple(sorted((node_id, other_id))))
+
+    for (left_id, right_id), edge in inferred_edges.items():
+        pair = (left_id, right_id)
+        if pair not in selected_pairs:
             continue
-        for right in pages[idx + 1 :]:
-            right_id = str(right.get("id") or "")
-            if not right_id or right_id == left_id:
-                continue
-            score, tag_hits, ref_hits = _edge_similarity(left, right)
-            if score <= 0:
-                continue
-            edge = WikiGraphEdge(source=left_id, target=right_id, weight=score, tags=tag_hits, refs=ref_hits)
-            adjacency[left_id][right_id] = edge
-            adjacency[right_id][left_id] = WikiGraphEdge(source=right_id, target=left_id, weight=score, tags=tag_hits, refs=ref_hits)
+        add_edge(left_id, right_id, weight=edge.weight, tags=edge.tags, refs=edge.refs)
+        add_edge(right_id, left_id, weight=edge.weight, tags=edge.tags, refs=edge.refs)
+
     return adjacency, ref_counter
 
 
@@ -426,9 +512,41 @@ def _cluster_centers(surfaces: list[str], focus_surface: str) -> dict[str, np.nd
     return centers
 
 
+def _layout_large_nodes(nodes: list[dict[str, Any]], *, focus_surface: str, selected_id: str) -> dict[str, tuple[float, float]]:
+    """Place large corpora in deterministic surface clusters without dense force simulation."""
+    positions: dict[str, tuple[float, float]] = {}
+    groups: dict[str, list[dict[str, Any]]] = defaultdict(list)
+    for node in nodes:
+        groups[str(node.get("surface") or WIKI_SURFACE).lower()].append(node)
+    surfaces = _ordered_surfaces(list(groups), focus_surface)
+    ring = max(3.4, 2.2 + 0.8 * len(surfaces))
+    for surface_index, surface in enumerate(surfaces):
+        group = sorted(groups.get(surface) or [], key=lambda node: (str(node.get("updated_at") or ""), str(node.get("id") or "")))
+        count = len(group)
+        columns = max(5, math.ceil(math.sqrt(count)))
+        rows = max(1, math.ceil(count / columns))
+        angle = 0.0 if surface_index == 0 else (2.0 * math.pi * surface_index) / max(1, len(surfaces) - 1)
+        center_x = 0.0 if surface_index == 0 else math.cos(angle) * ring
+        center_y = 0.0 if surface_index == 0 else math.sin(angle) * ring
+        step = max(0.18, min(0.34, 5.5 / max(columns, rows)))
+        for index, node in enumerate(group):
+            col = index % columns
+            row = index // columns
+            x = center_x + (col - (columns - 1) / 2) * step
+            y = center_y + (row - (rows - 1) / 2) * step
+            positions[str(node.get("id") or "")] = (x, y)
+    if selected_id in positions:
+        positions[selected_id] = (0.0, 0.0)
+    max_abs = max((abs(value) for point in positions.values() for value in point), default=1.0)
+    scale = max(1.2, max_abs)
+    return {node_id: (x / scale, y / scale) for node_id, (x, y) in positions.items()}
+
+
 def _layout_nodes(nodes: list[dict[str, Any]], edges: list[WikiGraphEdge], *, focus_surface: str, selected_id: str) -> dict[str, tuple[float, float]]:
     if not nodes:
         return {}
+    if len(nodes) > LARGE_GRAPH_LAYOUT_THRESHOLD:
+        return _layout_large_nodes(nodes, focus_surface=focus_surface, selected_id=selected_id)
     surfaces = [str(node.get("surface") or WIKI_SURFACE).lower() for node in nodes]
     centers = _cluster_centers(surfaces, focus_surface)
     seed = sum(ord(ch) for ch in f"{focus_surface}|{selected_id}|{len(nodes)}")
@@ -489,7 +607,7 @@ def build_wiki_graph_model(
     surface: str = "all",
     status: str = "all",
     depth: int = 2,
-    max_nodes: int = 96,
+    max_nodes: int | None = None,
 ) -> dict[str, Any]:
     normalized = [_normalize_page(page) for page in pages or []]
     if not normalized:
@@ -506,15 +624,16 @@ def build_wiki_graph_model(
     corpus = visible or normalized
     adjacency, ref_counter = _build_adjacency(corpus)
     pages_by_id = {str(page.get("id") or ""): page for page in corpus if str(page.get("id") or "")}
+    node_limit = len(corpus) if max_nodes is None or int(max_nodes) <= 0 else min(int(max_nodes), len(corpus))
     selected_id = str(selected_page_id or "").strip()
     if selected_id and selected_id not in pages_by_id:
         selected_id = ""
     seed_ids = _rank_seed_pages(corpus, adjacency, selected_id=selected_id)
     if not seed_ids and corpus:
         seed_ids = [str(corpus[0].get("id") or "")]
-    node_ids, level_map = _expand_nodes(seed_ids, pages_by_id, adjacency, depth, max_nodes=max_nodes)
+    node_ids, level_map = _expand_nodes(seed_ids, pages_by_id, adjacency, depth, max_nodes=node_limit)
     visited = set(node_ids)
-    node_ids = _fill_by_degree(corpus, adjacency, visited, max_nodes=max_nodes)
+    node_ids = _fill_by_degree(corpus, adjacency, visited, max_nodes=node_limit)
     nodes: list[dict[str, Any]] = []
     edges: dict[tuple[str, str], WikiGraphEdge] = {}
     for pid in node_ids:
@@ -544,12 +663,22 @@ def build_wiki_graph_model(
             }
         )
         nodes[-1]["color"] = trust_color_for_node(nodes[-1])
+    node_id_set = {node["id"] for node in nodes}
     for node in nodes:
         for edge in adjacency.get(node["id"], {}).values():
+            if edge.target not in node_id_set:
+                continue
             a, b = sorted((edge.source, edge.target))
             if a == b:
                 continue
-            edges[(a, b)] = WikiGraphEdge(source=a, target=b, weight=edge.weight, tags=edge.tags, refs=edge.refs)
+            edges[(a, b)] = WikiGraphEdge(
+                source=a,
+                target=b,
+                weight=edge.weight,
+                tags=edge.tags,
+                refs=edge.refs,
+                explicit=edge.explicit,
+            )
     ordered_edges = list(edges.values())
     focus_surface = surface if surface != "all" else ""
     positions = _layout_nodes(nodes, ordered_edges, focus_surface=focus_surface, selected_id=selected_id)
@@ -627,22 +756,30 @@ def _build_figure(model: dict[str, Any]) -> go.Figure:
     edges = model.get("edges") or []
     groups = model.get("groups") or []
     fig = go.Figure()
-    if edges:
-        xs: list[float | None] = []
-        ys: list[float | None] = []
-        for edge in edges:
-            left = positions.get(edge.source)
-            right = positions.get(edge.target)
-            if not left or not right:
-                continue
-            xs.extend([left[0], right[0], None])
-            ys.extend([left[1], right[1], None])
+    edge_paths: dict[str, tuple[list[float | None], list[float | None]]] = {
+        "explicit": ([], []),
+        "inferred": ([], []),
+    }
+    for edge in edges:
+        left = positions.get(edge.source)
+        right = positions.get(edge.target)
+        if not left or not right:
+            continue
+        xs, ys = edge_paths["explicit" if edge.explicit else "inferred"]
+        xs.extend([left[0], right[0], None])
+        ys.extend([left[1], right[1], None])
+    for relation, (xs, ys) in edge_paths.items():
+        if not xs:
+            continue
         fig.add_trace(
             go.Scatter(
                 x=xs,
                 y=ys,
                 mode="lines",
-                line={"color": "rgba(148,163,184,0.22)", "width": 1},
+                line={
+                    "color": "rgba(34,211,238,0.48)" if relation == "explicit" else "rgba(148,163,184,0.18)",
+                    "width": 1.6 if relation == "explicit" else 0.8,
+                },
                 hoverinfo="skip",
                 showlegend=False,
             )
@@ -755,7 +892,7 @@ def _build_figure(model: dict[str, Any]) -> go.Figure:
         plot_bgcolor="rgba(0,0,0,0)",
         xaxis={"visible": False, "fixedrange": True},
         yaxis={"visible": False, "fixedrange": True, "scaleanchor": "x", "scaleratio": 1},
-        dragmode="lasso",
+        dragmode="pan",
         hovermode="closest",
         annotations=annotations,
         showlegend=False,
@@ -775,7 +912,7 @@ def render_wiki_mesh(
     surface: str = "all",
     status: str = "all",
     depth: int = 2,
-    max_nodes: int = 96,
+    max_nodes: int | None = None,
     key: str = "agent_wiki_mesh",
 ) -> str:
     import streamlit as st
@@ -827,7 +964,7 @@ def render_wiki_mesh(
             unsafe_allow_html=True,
         )
     stat_col.caption(f"{len(nodes)} nodes · {len(model.get('edges') or [])} links · {len(groups)} groups · surface {surface} · status {status}")
-    st.caption("그래프의 점을 클릭하면 해당 위키 문서가 읽기 패널로 열립니다.")
+    st.caption("모든 위키 페이지를 노드로 표시합니다. 점을 클릭하면 해당 문서가 읽기 패널로 열립니다.")
 
     fig = _build_figure({**model, "selected_id": selected_page_id})
     event = st.plotly_chart(
@@ -836,7 +973,7 @@ def render_wiki_mesh(
         on_select="rerun",
         selection_mode="points",
         width="stretch",
-        config={"displayModeBar": False, "scrollZoom": True},
+        config={"displayModeBar": True, "scrollZoom": True},
     )
     chosen = _extract_selected_page_id(event)
     if chosen:

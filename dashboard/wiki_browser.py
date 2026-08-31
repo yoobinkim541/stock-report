@@ -691,7 +691,9 @@ def render_wiki_tab(surface: str, pack: dict[str, Any] | None = None) -> None:
     statuses = ["all", *VALID_STATUSES]
     f1, f2, f3 = st.columns([1.15, 0.75, 0.75], gap="small")
     query = f1.text_input("위키 검색", key="agent_wiki_query", placeholder="손실한도, 레버리지, AI ETF, 시장 신호...")
-    current_surface = str(surface or "all")
+    # AI 콘솔의 현재 surface는 답변 맥락이지 위키 그래프의 기본 필터가 아니다.
+    # 기본값은 Obsidian처럼 전체 지식 그래프를 보여주고, 사용자가 고른 필터만 유지한다.
+    current_surface = str(st.session_state.get("agent_wiki_surface_filter") or "all")
     surface_index = surfaces.index(current_surface) if current_surface in surfaces else 0
     surface_filter = f2.selectbox(
         "표면",
@@ -714,7 +716,7 @@ def render_wiki_tab(surface: str, pack: dict[str, Any] | None = None) -> None:
         surface=surface_filter,
         status=status_filter,
         depth=int(st.session_state.get("agent_wiki_graph_depth", 2)),
-        max_nodes=96,
+        max_nodes=None,
         key="agent_wiki_graph",
     )
     if graph_selected:

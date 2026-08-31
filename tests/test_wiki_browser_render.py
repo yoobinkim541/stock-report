@@ -49,6 +49,8 @@ finally:
     assert "문서 브라우저" in body
     assert "문서 읽기" in body
     assert "관련 문서" in body
+    surface_filter = at.selectbox(key="agent_wiki_surface_filter")
+    assert surface_filter.value == "all"
 
 
 def test_wiki_browser_load_button_refreshes_preview_body():

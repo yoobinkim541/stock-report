@@ -75,6 +75,35 @@ def test_build_wiki_graph_model_respects_max_nodes():
     assert {node["id"] for node in model["nodes"]} <= {"page-a", "page-b"}
 
 
+def test_build_wiki_graph_model_includes_all_pages_when_no_limit_is_requested():
+    pages = [
+        {"id": f"page-{idx}", "title": f"문서 {idx}", "summary": "지식", "surface": "wiki", "kind": "note"}
+        for idx in range(120)
+    ]
+
+    model = wiki_mesh.build_wiki_graph_model(pages)
+
+    assert len(model["nodes"]) == len(pages)
+
+
+def test_build_wiki_graph_model_uses_explicit_links_and_keeps_edges_visible():
+    pages = [
+        {"id": "page-a", "title": "A", "summary": "A", "surface": "wiki", "kind": "note", "links": ["page-b"]},
+        {"id": "page-b", "title": "B", "summary": "B", "surface": "wiki", "kind": "note"},
+        {"id": "page-c", "title": "C", "summary": "C", "surface": "wiki", "kind": "note"},
+    ]
+
+    model = wiki_mesh.build_wiki_graph_model(pages, max_nodes=2)
+
+    node_ids = {node["id"] for node in model["nodes"]}
+    direct_edge = next(edge for edge in model["edges"] if {edge.source, edge.target} == {"page-a", "page-b"})
+    assert direct_edge.explicit is True
+    assert all(edge.source in node_ids and edge.target in node_ids for edge in model["edges"])
+
+    figure = wiki_mesh._build_figure(model)
+    assert any(trace.line.color == "rgba(34,211,238,0.48)" for trace in figure.data if trace.mode == "lines")
+
+
 def test_extract_selected_page_id_reads_plotly_customdata():
     event = {
         "selection": {
