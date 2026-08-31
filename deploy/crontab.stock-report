@@ -48,6 +48,8 @@ PATH=/home/ubuntu/.hermes/node/bin:/home/ubuntu/.local/bin:/usr/local/bin:/usr/b
 40 20 * * * cd /home/ubuntu/projects/stock-report && bash scripts/backup_stock_data.sh >> /tmp/backup_stock_data.log 2>&1   # 20:40 UTC = 05:40 KST
 
 # raw 아카이브 TTL 청소 (소스별 TTL — reports/raw_archive.py RAW_TTL_DAYS_BY_SOURCE. 이게 없으면 raw/가 무기한 누적됨)
+# 원문 cold bundle 압축 (원래 경로는 번들 인덱스로 투명 복원)
+30 20 * * * cd /home/ubuntu/projects/stock-report && flock -n /tmp/raw_archive_compact.lock uv run python crons/raw_archive_compact.py --min-age-days 2 >> /tmp/raw_archive_compact.log 2>&1   # 20:30 UTC = 05:30 KST
 45 20 * * * cd /home/ubuntu/projects/stock-report && uv run python crons/raw_archive_cleanup.py >> /tmp/raw_archive_cleanup.log 2>&1   # 20:45 UTC = 05:45 KST
 
 # 주식 모으기 자동 기록 — 미 정규장 마감 직후 종가·확정 종가 환율로 소수점 계좌 기록 (플랜 없으면 no-op·기록 전용)

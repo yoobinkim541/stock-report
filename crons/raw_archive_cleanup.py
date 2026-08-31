@@ -29,9 +29,11 @@ def main() -> int:
     now = datetime.now(KST)
     result = cleanup_expired_raw_artifacts(now=now)
     logger.info(
-        "SaveTicker 원본 청소 완료: raw=%d manifests=%d scanned=%d",
+        "SaveTicker 원본 청소 완료: raw=%d manifests=%d bundles=%d bundle_entries=%d scanned=%d",
         result.get("deleted_raw", 0),
         result.get("deleted_manifests", 0),
+        result.get("deleted_bundles", 0),
+        result.get("deleted_bundle_entries", 0),
         result.get("scanned", 0),
     )
     return 0

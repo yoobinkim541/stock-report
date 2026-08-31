@@ -125,3 +125,90 @@ def test_cleanup_main_removes_expired_raw_artifacts(tmp_path, monkeypatch):
     assert not Path(rec["manifest_path"]).exists()
     assert Path(rec["text_path"]).exists()
     assert Path(rec["text_path"]).read_text(encoding="utf-8") == "hello world"
+
+
+def test_compact_raw_artifacts_keeps_original_paths_readable(tmp_path, monkeypatch):
+    monkeypatch.setenv("STOCK_REPORT_REPORTS_DIR", str(tmp_path / "reports"))
+    rec = ra.save_raw_artifact(
+        source="saveticker_article",
+        kind="json",
+        fetched_at=datetime(2026, 7, 1, 9, 0, tzinfo=timezone.utc),
+        title="NVDA earnings",
+        url="https://saveticker.com/news/1",
+        payload=b'{"original":true}',
+        suffix=".json",
+        ttl_days=60,
+    )
+    ra.save_extracted_text(rec, "원문 텍스트")
+
+    result = ra.compact_raw_artifacts(
+        now=datetime(2026, 8, 31, 9, 0, tzinfo=timezone.utc),
+        min_age_days=2,
+    )
+
+    assert result["bundles"] == 1
+    assert result["files_packed"] == 3
+    assert not Path(rec["raw_path"]).exists()
+    assert not Path(rec["text_path"]).exists()
+    assert not Path(rec["manifest_path"]).exists()
+    assert ra.read_raw_artifact(rec["raw_path"]) == b'{"original":true}'
+    assert ra.read_raw_text(rec["text_path"]) == "원문 텍스트"
+    manifest = json.loads(ra.read_raw_text(rec["manifest_path"]) or "{}")
+    assert manifest["sha256"] == rec["sha256"]
+
+    cleanup = ra.cleanup_expired_raw_artifacts(
+        now=datetime(2026, 11, 1, 9, 0, tzinfo=timezone.utc),
+    )
+    assert cleanup["deleted_bundles"] == 1
+    assert ra.read_raw_artifact(rec["raw_path"]) is None
+
+
+def test_compact_raw_artifacts_dry_run_does_not_remove_files(tmp_path, monkeypatch):
+    monkeypatch.setenv("STOCK_REPORT_REPORTS_DIR", str(tmp_path / "reports"))
+    rec = ra.save_raw_artifact(
+        source="telegram:test",
+        kind="html",
+        fetched_at=datetime(2026, 7, 1, 9, 0, tzinfo=timezone.utc),
+        title="Telegram post",
+        url="https://t.me/test/1",
+        payload="<html>original</html>",
+        suffix=".html",
+    )
+    ra.save_extracted_text(rec, "본문")
+
+    result = ra.compact_raw_artifacts(
+        now=datetime(2026, 8, 31, 9, 0, tzinfo=timezone.utc),
+        min_age_days=2,
+        dry_run=True,
+    )
+
+    assert result["bundles"] == 1
+    assert result["files_packed"] == 3
+    assert Path(rec["raw_path"]).exists()
+    assert Path(rec["text_path"]).exists()
+    assert Path(rec["manifest_path"]).exists()
+
+
+def test_compact_raw_artifacts_honors_file_limit(tmp_path, monkeypatch):
+    monkeypatch.setenv("STOCK_REPORT_REPORTS_DIR", str(tmp_path / "reports"))
+    for index in range(2):
+        rec = ra.save_raw_artifact(
+            source="telegram:test",
+            kind="html",
+            fetched_at=datetime(2026, 7, 1, 9, index, tzinfo=timezone.utc),
+            title=f"Telegram post {index}",
+            url=f"https://t.me/test/{index}",
+            payload=f"<html>{index}</html>",
+            suffix=".html",
+        )
+        ra.save_extracted_text(rec, f"본문 {index}")
+
+    result = ra.compact_raw_artifacts(
+        now=datetime(2026, 8, 31, 9, 0, tzinfo=timezone.utc),
+        min_age_days=2,
+        max_files=3,
+        max_bundles=1,
+    )
+
+    assert result["bundles"] == 1
+    assert result["files_packed"] == 3
