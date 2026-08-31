@@ -48,6 +48,15 @@ _DEFAULT_NOTIFY_COOLDOWN_HOURS = 24.0
 _NOTIFY_PENDING_LIMIT = 200
 
 
+def _distillation_batch_size() -> int:
+    """크론 비용과 대기열 처리량을 운영 환경에서 조절한다."""
+    raw = os.getenv("WIKI_DISTILLATION_BATCH_SIZE", str(MAX_CANDIDATES_PER_RUN))
+    try:
+        return max(1, min(100, int(raw)))
+    except (TypeError, ValueError):
+        return MAX_CANDIDATES_PER_RUN
+
+
 def _has_judgment_link(page: dict, pages_by_id: dict[str, dict] | None = None) -> bool:
     """이 source_digest 가 이미 playbook/risk/decision/concept 카드로 연결돼 있는가."""
     for link_id in [*(page.get("links") or []), *(page.get("backlinks") or [])]:
@@ -356,12 +365,13 @@ def _notify_created_pages(created: list[dict]) -> bool:
         return False
 
 
-def run(*, dry_run: bool = False, llm_fn=None) -> dict:
+def run(*, dry_run: bool = False, llm_fn=None, limit: int | None = None) -> dict:
     if llm_fn is None:
         from agent_console.agent import _try_llm_prompt as llm_fn
 
     pages = wiki._all_wiki_pages()
-    candidates = select_distillation_candidates(pages)
+    batch_size = _distillation_batch_size() if limit is None else max(1, min(100, int(limit)))
+    candidates = select_distillation_candidates(pages, limit=batch_size)
     created = []
     for page in candidates:
         payload, outcome, reason = _distill_one_with_status(page, llm_fn)
@@ -401,9 +411,10 @@ def run(*, dry_run: bool = False, llm_fn=None) -> dict:
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--dry-run", action="store_true")
+    parser.add_argument("--limit", type=int, default=None, help="이번 실행에서 증류할 최대 페이지 수")
     args = parser.parse_args()
 
-    result = run(dry_run=args.dry_run)
+    result = run(dry_run=args.dry_run, limit=args.limit)
     logger.info(
         "위키 증류 완료: 후보 %d건 검토, %d건 생성 (dry_run=%s)",
         result["candidates_considered"], len(result["created"]), result["dry_run"],

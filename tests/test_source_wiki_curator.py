@@ -213,6 +213,59 @@ def test_build_wiki_pages_fetches_existing_wiki_pages_once_for_cross_links(monke
     assert any("conv-ai" in (page.get("links") or []) for page in pages)
 
 
+def test_build_wiki_pages_preserves_and_adds_existing_judgment_links(monkeypatch):
+    events = [
+        {
+            "source": "saveticker",
+            "title": "AI 서버 수요 확대",
+            "url": "https://saveticker.com/1",
+            "body_raw": "AI 서버 수요",
+            "topic": "기술/AI",
+            "tags": ["기술/AI"],
+            "tickers": ["NVDA"],
+            "classification": {"kind": "article", "topic": "기술/AI", "trust": "B"},
+        },
+        {
+            "source": "telegram:insidertracking",
+            "title": "AI 서버 전력 수요 확대",
+            "url": "https://t.me/insidertracking/1",
+            "body_raw": "데이터센터 전력 수요",
+            "topic": "기술/AI",
+            "tags": ["기술/AI"],
+            "tickers": ["NVDA"],
+            "classification": {"kind": "community_signal", "topic": "기술/AI", "trust": "C"},
+        },
+    ]
+    monkeypatch.setattr(
+        swc,
+        "_existing_wiki_pages",
+        lambda: [
+            {
+                "id": "risk-ai",
+                "title": "AI 수요 리스크",
+                "kind": "risk",
+                "surface": "ticker",
+                "source_refs": ["https://saveticker.com/1"],
+                "links": [],
+            },
+            {
+                "id": "source-ticker-nvda",
+                "title": "기존 NVDA 다이제스트",
+                "kind": "source_digest",
+                "surface": "ticker",
+                "source_refs": [],
+                "links": ["risk-ai"],
+            },
+        ],
+    )
+
+    pages = swc.build_wiki_pages_from_events(events)
+    ticker_page = next(page for page in pages if page["id"] == "source-ticker-nvda")
+
+    assert "risk-ai" in ticker_page["links"]
+
+
+
 def test_build_wiki_pages_from_events_attaches_evidence_metadata():
     events = [
         {

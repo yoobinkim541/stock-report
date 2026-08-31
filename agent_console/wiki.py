@@ -1337,12 +1337,22 @@ def _is_page_stale(page: dict, max_age_days: int = 30) -> bool:
 
 def list_stale_pages(max_age_days: int = 30) -> list[dict]:
     pages = _all_wiki_pages()
-    return [page for page in pages if page.get("status") != "archived" and _is_page_stale(page, max_age_days)]
+    return [
+        page for page in pages
+        if page.get("status") != "archived"
+        and page.get("kind") != "source_digest"
+        and _is_page_stale(page, max_age_days)
+    ]
 
 
 def archive_stale_pages(max_age_days: int = 30, dry_run: bool = False, max_archive_days: int = 90) -> dict:
     pages = _all_wiki_pages()
-    to_archive = [page for page in pages if page.get("status") != "archived" and _is_page_stale(page, max_age_days)]
+    to_archive = [
+        page for page in pages
+        if page.get("status") != "archived"
+        and page.get("kind") != "source_digest"
+        and _is_page_stale(page, max_age_days)
+    ]
     archived_pages = [page for page in pages if page.get("status") == "archived"]
     # 병합 원본은 감사·복구를 위한 아카이브다. 일반 stale 정리 대상에 넣으면
     # merge_history가 가리키는 원문이 사라져 provenance가 끊긴다.
@@ -1353,7 +1363,9 @@ def archive_stale_pages(max_age_days: int = 30, dry_run: bool = False, max_archi
     ]
     to_delete = [
         page for page in archived_pages
-        if page not in merge_archives and _is_page_stale(page, max_archive_days)
+        if page not in merge_archives
+        and page.get("kind") != "source_digest"
+        and _is_page_stale(page, max_archive_days)
     ]
     stale_skipped = len([page for page in archived_pages if _is_page_stale(page, max_age_days)]) - len(to_delete)
 

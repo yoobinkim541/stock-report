@@ -68,6 +68,14 @@ def test_select_distillation_candidates_respects_limit():
     assert len(candidates) == 2
 
 
+def test_distillation_batch_size_can_be_tuned_by_environment(monkeypatch):
+    from reports import wiki_distillation as wd
+
+    monkeypatch.setenv("WIKI_DISTILLATION_BATCH_SIZE", "12")
+
+    assert wd._distillation_batch_size() == 12
+
+
 def test_institution_digest_is_distillable(monkeypatch, tmp_path):
     _isolate(monkeypatch, tmp_path)
     from agent_console import wiki

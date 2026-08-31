@@ -95,7 +95,7 @@ PATH=/home/ubuntu/.hermes/node/bin:/home/ubuntu/.local/bin:/usr/local/bin:/usr/b
 12,42 * * * * cd /home/ubuntu/projects/stock-report && flock -n /tmp/source_wiki_curator.lock uv run python -m reports.source_wiki_curator --hours 48 --limit 0 >> /tmp/source_wiki_curator.log 2>&1   # source-cache -> LLM wiki 자동 갱신(무제한 저장)+QMD 동기화
 14,44 * * * * cd /home/ubuntu/projects/stock-report && uv run python -c "from agent_console.wiki import archive_stale_pages; from agent_console.shared_memory import ensure_store; ensure_store(); archive_stale_pages(max_age_days=30)" >> /tmp/wiki_archive.log 2>&1   # 위키 스테일 페이지 자동 아카이브/만료 삭제
 15 */2 * * * cd /home/ubuntu/projects/stock-report && uv run python -m reports.wiki_health_check >> /tmp/wiki_health_check.log 2>&1   # 위키 헬스 체크(통계·린트·스테일·미사용) — 2시간마다
-0 */6 * * * cd /home/ubuntu/projects/stock-report && uv run python -m reports.wiki_distillation >> /tmp/wiki_distillation.log 2>&1   # 6시간마다 — source_digest 를 playbook/risk/concept 판단카드로 증류
+0 */6 * * * cd /home/ubuntu/projects/stock-report && flock -n /tmp/wiki_distillation.lock env WIKI_DISTILLATION_BATCH_SIZE=20 uv run python -m reports.wiki_distillation >> /tmp/wiki_distillation.log 2>&1   # 6시간마다 — source_digest 를 playbook/risk/concept 판단카드로 증류(최대 20건)
 30 2 * * 1 cd /home/ubuntu/projects/stock-report && uv run python -m reports.institution_watch >> /tmp/institution_watch.log 2>&1   # 월요일 02:30 UTC — 다기관 위키 갱신 + 공통 패턴 digest 축적
 
 # ── 주간 스냅샷 (토요일) ─────────────────────────────────────────────────────

@@ -28,7 +28,10 @@ def build_health_report(dry_run: bool = False) -> dict:
     lint_data = dict(wiki_health.get("lint") or wiki.lint_pages())
     stale_pages = wiki.list_stale_pages(max_age_days=STALE_MAX_AGE_DAYS)
     unused_pages = wiki.list_unused_pages(days=30)
-    very_unused_pages = wiki.list_unused_pages(days=VERY_UNUSED_DAYS)
+    very_unused_pages = [
+        page for page in wiki.list_unused_pages(days=VERY_UNUSED_DAYS)
+        if page.get("kind") != "source_digest"
+    ]
 
     report = {
         "dry_run": dry_run,
@@ -40,6 +43,8 @@ def build_health_report(dry_run: bool = False) -> dict:
         "lint_issues": lint_data.get("issues", []),
         "stale_count": len(stale_pages),
         "unused_count": len(unused_pages),
+        "unused_provenance_count": sum(1 for page in unused_pages if page.get("kind") == "source_digest"),
+        "unused_actionable_count": sum(1 for page in unused_pages if page.get("kind") != "source_digest"),
         "very_unused_count": len(very_unused_pages),
         "recommendations": [],
     }
@@ -85,7 +90,8 @@ def run_llm_health_review(report: dict) -> list[dict]:
 위키 unverified: {wiki_health.get('unverified_count', 0)}
 위키 archived: {stats_data.get('status_counts', {}).get('archived', 0)}
 스테일(14일+): {wiki_health.get('stale_count', report.get('stale_count', 0))}
-미사용(30일+): {wiki_health.get('unused_count', report.get('unused_count', 0))}
+미사용(30일+): {wiki_health.get('unused_actionable_count', report.get('unused_actionable_count', report.get('unused_count', 0)))}
+원문 보존 미사용: {wiki_health.get('unused_provenance_count', report.get('unused_provenance_count', 0))}
 source_digest unlinked: {curation_health.get('source_digest_unlinked_count', 0)}
 
 린트 이슈:
@@ -124,7 +130,10 @@ def format_report(report: dict) -> str:
     lines.append(f"  활성: {sum(status_counts.get(s, 0) for s in ('draft', 'reviewed', 'stable'))}")
     lines.append(f"  Archived: {status_counts.get('archived', 0)}")
     lines.append(f"  스테일({STALE_MAX_AGE_DAYS}일+): {report.get('stale_count', 0)}")
-    lines.append(f"  미사용(30일+): {report.get('unused_count', 0)}")
+    lines.append(
+        f"  미사용(30일+): {report.get('unused_actionable_count', report.get('unused_count', 0))}"
+        f" · 원문 보존: {report.get('unused_provenance_count', 0)}"
+    )
     lines.append("")
 
     source_overall = source_section.get("overall") or {}

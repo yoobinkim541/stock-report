@@ -160,6 +160,63 @@ def test_pipeline_health_treats_empty_news_labels_as_no_data(monkeypatch):
     assert not any(rec["category"] == "news_labels" for rec in report["recommendations"])
 
 
+def test_wiki_health_separates_provenance_pages_from_actionable_unused_pages():
+    from reports.wiki_pipeline_health import _summarize_wiki_health
+
+    summary = _summarize_wiki_health(
+        [
+            {"id": "digest", "kind": "source_digest", "status": "reviewed"},
+            {"id": "note", "kind": "note", "status": "draft"},
+        ],
+        {"status_counts": {}},
+        {"issues": []},
+        [],
+        [
+            {"id": "digest", "kind": "source_digest"},
+            {"id": "note", "kind": "note"},
+        ],
+    )
+
+    assert summary["unused_count"] == 2
+    assert summary["unused_provenance_count"] == 1
+    assert summary["unused_actionable_count"] == 1
+
+
+def test_recommendations_do_not_flag_provenance_only_unused_pages():
+    from reports.wiki_pipeline_health import _recommendations
+
+    recommendations = _recommendations(
+        {"stale_sources": [], "sources": []},
+        {
+            "stale_count": 0,
+            "unused_count": 31,
+            "unused_actionable_count": 0,
+            "source_missing_for_promoted_count": 0,
+        },
+        {"source_digest_unlinked_count": 0},
+    )
+
+    assert not any(rec["category"] == "hygiene" for rec in recommendations)
+
+
+def test_curation_health_exposes_distillation_queue_states():
+    from reports.wiki_pipeline_health import _summarize_curation_health
+
+    result = _summarize_curation_health(
+        [
+            {"id": "pending", "kind": "source_digest", "status": "draft", "links": [], "backlinks": [], "distillation_state": {"status": ""}},
+            {"id": "created", "kind": "source_digest", "status": "draft", "links": [], "backlinks": [], "distillation_state": {"status": "created"}},
+            {"id": "skipped", "kind": "source_digest", "status": "draft", "links": [], "backlinks": [], "distillation_state": {"status": "skipped"}},
+            {"id": "linked-pending", "kind": "source_digest", "status": "draft", "links": ["judgment"], "backlinks": [], "distillation_state": {"status": ""}},
+            {"id": "judgment", "kind": "risk", "status": "draft", "links": [], "backlinks": []},
+        ]
+    )
+
+    assert result["distillation_pending_count"] == 1
+    assert result["distillation_created_count"] == 1
+    assert result["distillation_skipped_count"] == 1
+
+
 def test_pipeline_health_flags_recent_news_labels_without_llm(monkeypatch):
     from reports import wiki_pipeline_health
 

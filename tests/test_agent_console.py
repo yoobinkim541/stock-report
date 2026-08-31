@@ -1432,6 +1432,33 @@ def test_wiki_list_unused_pages_flags_old_and_never_used_pages(monkeypatch, tmp_
     assert recent["id"] not in unused_ids
 
 
+def test_archive_stale_pages_preserves_source_digest_provenance(monkeypatch, tmp_path):
+    _isolate(monkeypatch, tmp_path)
+    from datetime import datetime, timedelta, timezone
+
+    from agent_console import wiki
+
+    def _iso(days_ago: int) -> str:
+        return (datetime.now(timezone.utc) - timedelta(days=days_ago)).isoformat(timespec="seconds")
+
+    digest = wiki.upsert_page({
+        "title": "오래된 원문 다이제스트",
+        "summary": "원문 보존",
+        "body": "원문",
+        "surface": "ticker",
+        "kind": "source_digest",
+        "status": "reviewed",
+        "source_refs": ["https://example.com/source"],
+        "created_at": _iso(120),
+        "updated_at": _iso(120),
+    })
+
+    result = wiki.archive_stale_pages(max_age_days=14)
+
+    assert result["archived"] == 0
+    assert wiki.get_page(digest["id"])["status"] == "reviewed"
+
+
 def test_wiki_lint_flags_zero_usage_pages(monkeypatch, tmp_path):
     _isolate(monkeypatch, tmp_path)
 

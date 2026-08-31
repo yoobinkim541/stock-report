@@ -22,6 +22,7 @@ MIN_GROUP_EVENTS = 2
 MAX_EVENTS_PER_PAGE = 12
 MAX_SOURCE_REFS = 12
 MAX_CURATOR_LINKS = 12
+JUDGMENT_KINDS = {"playbook", "risk", "decision", "concept"}
 GENERIC_TOPICS = {"기타", "saveticker", "텔레그램", "시장데이터"}
 GENERIC_KINDS = {"article", "community_signal", "snapshot", "macro_snapshot", "event", "report"}
 
@@ -81,6 +82,54 @@ def _page_matches_query(page: dict, query: str) -> bool:
         ]
     ).lower()
     return all(token in haystack for token in tokens)
+
+
+def _existing_wiki_pages() -> list[dict]:
+    from agent_console.wiki import list_pages
+
+    return list_pages(query="", surface="all", status="all", limit=10000)
+
+
+def _usable_source_refs(page: dict) -> set[str]:
+    """비교·연결에 사용할 외부 출처만 반환한다.
+
+    로컬 원문 경로는 여러 다이제스트에 공통으로 들어갈 수 있어 같은 judgment를
+    잘못 연결한다. ``wiki:`` 역참조는 별도 규칙에서 처리한다.
+    """
+    refs = set()
+    for raw in page.get("source_refs") or []:
+        ref = _clean(raw, 260)
+        if not ref or ref.startswith("wiki:") or ref.startswith("/") or ref.startswith("<"):
+            continue
+        refs.add(ref)
+    return refs
+
+
+def _judgment_links_for_source_page(page: dict, existing_pages: list[dict]) -> list[str]:
+    """기존 판단 카드와 source digest를 강한 근거로 양방향 연결한다."""
+    by_id = {str(candidate.get("id")): candidate for candidate in existing_pages if candidate.get("id")}
+    digest_id = str(page.get("id") or "")
+    digest_refs = _usable_source_refs(page)
+    existing_digest = by_id.get(digest_id) or {}
+    links: list[str] = []
+
+    # 큐레이터 재생성으로 이미 증류된 judgment 링크가 사라지지 않게 보존한다.
+    for link_id in existing_digest.get("links") or []:
+        candidate = by_id.get(str(link_id))
+        if candidate and candidate.get("kind") in JUDGMENT_KINDS and candidate.get("status") != "archived":
+            links.append(str(link_id))
+
+    for candidate in existing_pages:
+        candidate_id = str(candidate.get("id") or "")
+        if not candidate_id or candidate.get("kind") not in JUDGMENT_KINDS or candidate.get("status") == "archived":
+            continue
+        candidate_refs = {str(ref) for ref in candidate.get("source_refs") or []}
+        explicit_link = f"wiki:{digest_id}" in candidate_refs
+        shared_ref = bool(digest_refs & _usable_source_refs(candidate))
+        if explicit_link or shared_ref:
+            links.append(candidate_id)
+
+    return _dedupe(links, limit=MAX_CURATOR_LINKS)
 
 
 def _dedupe(values: Iterable[object], *, limit: int = MAX_SOURCE_REFS) -> list[str]:
@@ -404,16 +453,18 @@ def build_wiki_pages_from_events(events: list[dict], now: datetime | None = None
         pages.append(page)
         page_event_keys[page_id] = {key for key in (_event_key(row) for row in rows) if key}
     _link_pages_sharing_events(pages, page_event_keys)
-    # 회화 위키 페이지와 교차 링크: source_digest ↔ playbook/decision
-    from agent_console.wiki import list_pages as wiki_list_pages
-    existing_pages = wiki_list_pages(query="", surface="all", status="all", limit=10000)
+    # 기존 판단 카드와 교차 링크: source_digest ↔ playbook/risk/decision/concept.
+    # 증류 크론이 만든 링크를 다음 source-wiki 재생성에서도 유지한다.
+    existing_pages = _existing_wiki_pages()
     for page in pages:
         display = page.get("title", "").replace("수집 소스 위키: ", "") or ""
         existing = [candidate for candidate in existing_pages if _page_matches_query(candidate, display)][:3]
-        conv_ids = [p["id"] for p in existing if p.get("kind") in ("playbook", "decision")]
-        if conv_ids:
-            current = page.get("links") or []
-            page["links"] = _dedupe([*current, *conv_ids], limit=MAX_CURATOR_LINKS)
+        query_ids = [p["id"] for p in existing if p.get("kind") in JUDGMENT_KINDS]
+        evidence_ids = _judgment_links_for_source_page(page, existing_pages)
+        page["links"] = _dedupe(
+            [*(page.get("links") or []), *evidence_ids, *query_ids],
+            limit=MAX_CURATOR_LINKS,
+        )
     return pages
 
 

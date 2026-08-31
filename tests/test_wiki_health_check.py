@@ -86,6 +86,29 @@ def test_build_health_report_flags_very_unused_pages(monkeypatch, tmp_path):
     assert any("60일" in rec for rec in report["recommendations"])
 
 
+def test_build_health_report_does_not_flag_very_unused_source_digest(monkeypatch, tmp_path):
+    _isolate(monkeypatch, tmp_path)
+    from agent_console import wiki
+    from reports import wiki_health_check
+
+    wiki.upsert_page({
+        "title": "오래된 원문 다이제스트",
+        "summary": "원문 보존",
+        "body": "원문",
+        "surface": "market",
+        "kind": "source_digest",
+        "status": "reviewed",
+        "source_refs": ["https://example.com/source"],
+        "created_at": _iso(70),
+        "updated_at": _iso(70),
+    })
+
+    report = wiki_health_check.build_health_report(dry_run=True)
+
+    assert report["very_unused_count"] == 0
+    assert not any("삭제 검토" in rec for rec in report["recommendations"])
+
+
 def test_build_health_report_wraps_pipeline_report(monkeypatch, tmp_path):
     _isolate(monkeypatch, tmp_path)
 

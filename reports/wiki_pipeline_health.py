@@ -236,6 +236,8 @@ def _summarize_wiki_health(
     open_question_count = sum(len(page.get("openQuestions") or []) for page in pages)
     lint_issues = lint_data.get("issues") or []
     lint_codes = Counter(_clean(issue.get("code") or "", 80) for issue in lint_issues)
+    unused_provenance = [page for page in unused_pages or [] if _page_kind(page) == "source_digest"]
+    unused_actionable = [page for page in unused_pages or [] if _page_kind(page) != "source_digest"]
     return {
         "page_count": len(pages),
         "stats": stats_data,
@@ -245,6 +247,8 @@ def _summarize_wiki_health(
         "unverified_count": len(unverified),
         "stale_count": len(stale_pages or []),
         "unused_count": len(unused_pages or []),
+        "unused_provenance_count": len(unused_provenance),
+        "unused_actionable_count": len(unused_actionable),
         "open_question_count": open_question_count,
         "archived_count": int((stats_data.get("status_counts") or {}).get("archived", 0)),
         "promoted_count": sum(1 for page in pages if _page_status(page) in {"reviewed", "stable"}),
@@ -265,7 +269,8 @@ def _source_digest_backlinks(
             continue
         page_id = _page_id(page)
         judgment_backlinks = []
-        for backlink_id in sorted(reverse_links.get(page_id, set())):
+        related_ids = set(reverse_links.get(page_id, set())) | set(_page_links(page))
+        for backlink_id in sorted(related_ids):
             backlink_page = by_id.get(backlink_id)
             if not backlink_page:
                 continue
@@ -274,6 +279,11 @@ def _source_digest_backlinks(
             if _page_status(backlink_page) == "archived":
                 continue
             judgment_backlinks.append(backlink_id)
+        state = page.get("distillation_state") or {}
+        try:
+            distillation_attempts = max(0, int(state.get("attempts") or 0))
+        except (TypeError, ValueError):
+            distillation_attempts = 0
         rows.append({
             "id": page_id,
             "title": _page_title(page),
@@ -283,6 +293,10 @@ def _source_digest_backlinks(
             "judgment_backlinks": judgment_backlinks,
             "linked_to_judgment": bool(judgment_backlinks),
             "has_source_refs": _has_non_conversation_source_refs(page),
+            "distillation_status": _clean(
+                state.get("status") or "pending", 40
+            ).lower() or "pending",
+            "distillation_attempts": distillation_attempts,
         })
     return rows
 
@@ -296,6 +310,19 @@ def _summarize_curation_health(pages: list[dict[str, Any]]) -> dict[str, Any]:
         page for page in source_digests
         if page["has_source_refs"] and page["open_questions"] == 0 and not page["linked_to_judgment"]
     ]
+    distillation_states = Counter(page.get("distillation_status") or "pending" for page in source_digests)
+    distillation_pending_count = sum(
+        1
+        for page in source_digests
+        if not page["linked_to_judgment"]
+        and (
+            page["distillation_status"] == "pending"
+            or (
+                page["distillation_status"] == "failed"
+                and int(page.get("distillation_attempts") or 0) < 3
+            )
+        )
+    )
     return {
         "source_digest_count": len(source_digests),
         "source_digest_linked_count": len(linked),
@@ -304,6 +331,10 @@ def _summarize_curation_health(pages: list[dict[str, Any]]) -> dict[str, Any]:
         "ready_for_promotion_count": len(ready_for_promotion),
         "ready_for_promotion_pages": ready_for_promotion,
         "linked_source_digest_pages": linked,
+        "distillation_pending_count": distillation_pending_count,
+        "distillation_created_count": int(distillation_states.get("created", 0)),
+        "distillation_skipped_count": int(distillation_states.get("skipped", 0)),
+        "distillation_failed_count": int(distillation_states.get("failed", 0)),
     }
 
 
@@ -391,6 +422,9 @@ def _recommendations(
         detail_bits = []
         if unlinked:
             detail_bits.append(f"source_digest {unlinked}개가 judgment page로 연결되지 않음")
+            pending = int(curation_section.get("distillation_pending_count") or 0)
+            if pending:
+                detail_bits.append(f"증류 대기 {pending}개")
         if promoted_missing:
             detail_bits.append(f"reviewed/stable {promoted_missing}개가 원문 출처 부족")
         recs.append({
@@ -398,18 +432,24 @@ def _recommendations(
             "category": "curation",
             "title": "큐레이션 승격 경로 보강",
             "detail": " · ".join(detail_bits),
-            "action": "source_digest를 playbook/risk/concept로 승격하고 judgment 링크를 채우세요.",
+            "action": "증류 크론이 대기 source_digest를 검토하도록 두고, 기존 judgment 링크는 보존·복구하세요.",
         })
 
     stale_count = int(wiki_section.get("stale_count") or 0)
-    unused_count = int(wiki_section.get("unused_count") or 0)
-    if stale_count or unused_count:
+    unused_actionable_count = int(
+        wiki_section.get("unused_actionable_count", wiki_section.get("unused_count") or 0) or 0
+    )
+    unused_provenance_count = int(wiki_section.get("unused_provenance_count") or 0)
+    if stale_count or unused_actionable_count:
+        unused_detail = f"unused {unused_actionable_count}개"
+        if unused_provenance_count:
+            unused_detail += f" (원문 보존 {unused_provenance_count}개 제외)"
         recs.append({
             "priority": 3,
             "category": "hygiene",
             "title": "위키 위생 정리",
-            "detail": f"stale {stale_count}개 · unused {unused_count}개",
-            "action": "오래된 페이지는 archive 또는 삭제 검토로 밀도를 높이세요.",
+            "detail": f"stale {stale_count}개 · {unused_detail}",
+            "action": "오래된 판단·대화 페이지는 archive 또는 삭제 검토하되 source_digest 원문은 보존하세요.",
         })
 
     if not recs:
