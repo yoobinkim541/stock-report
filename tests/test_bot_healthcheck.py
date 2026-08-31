@@ -86,3 +86,41 @@ def test_market_microstructure_healthcheck_warns_on_missing_required_field(monke
     assert result is not None
     assert result[0] == "market_microstructure_partial"
     assert "breadth" in result[1]
+
+
+def test_orderflow_healthcheck_warns_on_capture_loss(monkeypatch):
+    from providers import orderflow_store
+    from tests import bot_healthcheck as health
+
+    monkeypatch.setenv("ORDERFLOW_CAPTURE_ENABLED", "true")
+    monkeypatch.setattr(orderflow_store, "load_capture_status", lambda: {
+        "capture_enabled": True,
+        "dropped_events": 43127,
+        "byte_limit_events": 43127,
+        "queue_overflow_events": 0,
+        "write_failures": 0,
+        "dropped_by_session": {"2026-08-31": 43127},
+    })
+
+    result = health.check_orderflow_capture()
+
+    assert result is not None
+    assert result[0] == "orderflow_capture_degraded"
+    assert "43,127건" in result[1]
+    assert "2026-08-31" in result[1]
+
+
+def test_orderflow_healthcheck_is_quiet_when_capture_is_clean(monkeypatch):
+    from providers import orderflow_store
+    from tests import bot_healthcheck as health
+
+    monkeypatch.setenv("ORDERFLOW_CAPTURE_ENABLED", "true")
+    monkeypatch.setattr(orderflow_store, "load_capture_status", lambda: {
+        "capture_enabled": True,
+        "dropped_events": 0,
+        "byte_limit_events": 0,
+        "queue_overflow_events": 0,
+        "write_failures": 0,
+    })
+
+    assert health.check_orderflow_capture() is None

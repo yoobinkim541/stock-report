@@ -111,6 +111,30 @@ def test_build_universe_dedupe_cap(monkeypatch):
     assert len(syms) <= 500
 
 
+def test_fetch_toss_backs_off_after_rate_limit(monkeypatch):
+    from providers import toss_api
+
+    class Response:
+        status_code = 429
+
+    class RateLimited(Exception):
+        response = Response()
+
+    calls = []
+
+    def fail(_symbols):
+        calls.append(True)
+        raise RateLimited("too many requests")
+
+    monkeypatch.setattr(Q, "_TOSS_BACKOFF_UNTIL", 0.0)
+    monkeypatch.setattr(Q, "TOSS_429_BACKOFF_SECS", 900)
+    monkeypatch.setattr(toss_api, "prices", fail)
+
+    assert Q.fetch_toss(["AAPL"]) == {}
+    assert Q.fetch_toss(["AAPL"]) == {}
+    assert len(calls) == 1
+
+
 # ── realtime_quotes 2계층 병합 ───────────────────────────────────────────────
 
 def _write(path, entries):

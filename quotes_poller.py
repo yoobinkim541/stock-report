@@ -42,9 +42,11 @@ CACHE_PATH = os.path.expanduser("~/.cache/rest_quotes.json")
 PID_FILE = os.path.expanduser("~/.local/state/stock-report/quotes_poller.pid")
 
 ENABLED = os.getenv("QUOTES_POLL_ENABLED", "false").lower() == "true"
-POLL_SECS = max(5, int(os.getenv("QUOTES_POLL_SECS", "10")))
+POLL_SECS = max(5, int(os.getenv("QUOTES_POLL_SECS", "30")))
 POLL_MAX = min(200, int(os.getenv("QUOTES_POLL_MAX", "200")))     # 토스 배치 상한 200
 KIWOOM_FALLBACK_MAX = int(os.getenv("QUOTES_POLL_KIWOOM_MAX", "30"))
+TOSS_429_BACKOFF_SECS = max(60, int(os.getenv("TOSS_429_BACKOFF_SECS", "900")))
+_TOSS_BACKOFF_UNTIL = 0.0
 
 _KIWOOM_QUOTE_URL = "https://api.kiwoom.com/api/dostk/stkinfo"    # 시세 조회 전용 (read-only)
 
@@ -138,11 +140,27 @@ def build_universe(cap: int = POLL_MAX) -> list[str]:
 
 def fetch_toss(symbols: list[str]) -> dict[str, float]:
     """토스 배치 현재가 — {base_symbol: price}. 실패/키없음 → {}."""
+    global _TOSS_BACKOFF_UNTIL
+    now = time.monotonic()
+    if now < _TOSS_BACKOFF_UNTIL:
+        return {}
     try:
         from providers import toss_api
         return {_base(k): v for k, v in toss_api.prices(symbols).items() if v}
     except Exception as e:
-        logger.info("토스 시세 실패: %s", e)
+        response = getattr(e, "response", None)
+        status_code = getattr(response, "status_code", None) or getattr(e, "status_code", None)
+        if status_code == 429 or "429" in str(e):
+            _TOSS_BACKOFF_UNTIL = max(
+                _TOSS_BACKOFF_UNTIL,
+                time.monotonic() + TOSS_429_BACKOFF_SECS,
+            )
+            logger.warning(
+                "토스 시세 429 — %d초 백오프 후 재시도합니다",
+                TOSS_429_BACKOFF_SECS,
+            )
+        else:
+            logger.info("토스 시세 실패: %s", e)
         return {}
 
 

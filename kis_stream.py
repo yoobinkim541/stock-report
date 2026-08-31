@@ -12,7 +12,7 @@
 
 env: REALTIME_ENABLED·REALTIME_US_ENABLED·REALTIME_KR_MAX(10)·REALTIME_US_MAX(10)·REALTIME_FLUSH_SECS(1.0)
      INTRADAY_BARS_ENABLED(false) — 틱→1분봉 집계 sink (providers/intraday_bars, 단기 모의용)
-     ORDERFLOW_CAPTURE_ENABLED(false) — 버전형 체결·호가 JSONL (기본 1초 호가 샘플·일 256MiB 상한)
+     ORDERFLOW_CAPTURE_ENABLED(false) — 버전형 체결·호가 JSONL (기본 1초 호가 샘플·일 1GiB 상한)
 크론(watchdog): * * * * * scripts/kis_stream_watchdog.sh
 """
 from __future__ import annotations
@@ -76,6 +76,8 @@ _ORDERFLOW_LAST_MAINTENANCE_DATE: str | None = None
 def _new_orderflow_status() -> dict:
     return {
         "capture_enabled": bool(ORDERFLOW_ENABLED),
+        "max_bytes": ORDERFLOW_MAX_BYTES,
+        "retention_days": ORDERFLOW_RETENTION_DAYS,
         "dropped_events": 0,
         "dropped_by_session": {},
         "queue_overflow_events": 0,

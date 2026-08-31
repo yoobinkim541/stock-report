@@ -16,7 +16,10 @@ import safe_io
 
 EVENT_VERSION = 1
 ORDERFLOW_DIR = Path(os.path.expanduser("~/reports/ml-data/orderflow"))
-DEFAULT_MAX_BYTES = 256 * 1024 * 1024
+# A busy US session can produce hundreds of megabytes of trades and sampled
+# books. Keep a generous daily bound while leaving retention as the long-term
+# disk guardrail.
+DEFAULT_MAX_BYTES = 1024 * 1024 * 1024
 DEFAULT_RETENTION_DAYS = 14
 DEFAULT_LOAD_LIMIT = 10_000
 DEFAULT_SCAN_BYTES = 8 * 1024 * 1024

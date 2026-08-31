@@ -364,6 +364,60 @@ def check_intraday_bars() -> tuple[str, str] | None:
     return None
 
 
+def check_orderflow_capture() -> tuple[str, str] | None:
+    """order-flow sink 드롭·오버플로·쓰기 실패 감지.
+
+    시세 스트림과 1분봉이 살아 있어도 order-flow 파일만 용량 한도에
+    걸릴 수 있으므로, capture 상태 파일을 별도 운영 신호로 점검한다.
+    """
+    if os.getenv("ORDERFLOW_CAPTURE_ENABLED", "false").lower() not in {"1", "true", "yes", "on"}:
+        return None
+    try:
+        if PROJECT_DIR not in sys.path:
+            sys.path.insert(0, PROJECT_DIR)
+        from providers import orderflow_store
+
+        status = orderflow_store.load_capture_status()
+    except Exception as e:
+        return ("orderflow_capture_error", f"⚠️ order-flow 캡처 상태 점검 실패: {e}")
+    if not status:
+        return ("orderflow_capture_missing", "⚠️ order-flow 캡처 상태 파일 없음 — kis_stream 초기화 확인 필요")
+
+    def _count(name: str) -> int:
+        try:
+            return max(0, int(status.get(name) or 0))
+        except (TypeError, ValueError):
+            return 0
+
+    dropped = _count("dropped_events")
+    byte_limit = _count("byte_limit_events")
+    queue_overflow = _count("queue_overflow_events")
+    write_failures = _count("write_failures")
+    if not any((dropped, byte_limit, queue_overflow, write_failures)):
+        return None
+
+    sessions = status.get("dropped_by_session")
+    session_text = ""
+    if isinstance(sessions, dict):
+        active = []
+        for date, count in sessions.items():
+            try:
+                count = max(0, int(count or 0))
+            except (TypeError, ValueError):
+                continue
+            if count:
+                active.append(f"{date} {count:,}건")
+        if active:
+            session_text = "\n  └ 세션별: " + ", ".join(active[:4])
+    error_text = f"\n  └ 마지막 오류: {status['last_error']}" if status.get("last_error") else ""
+    return (
+        "orderflow_capture_degraded",
+        "⚠️ order-flow 캡처 손실 감지"
+        f" — 드롭 {dropped:,}건 · 용량 {byte_limit:,}건 · 큐 {queue_overflow:,}건 · 쓰기 실패 {write_failures:,}건"
+        f"{session_text}{error_text}",
+    )
+
+
 def check_market_microstructure_snapshot() -> tuple[str, str] | None:
     """AI 콘솔 장중 시장 미시구조 스냅샷 신선도와 필드 공백을 점검."""
     if os.getenv("KR_MARKET_MICROSTRUCTURE_ENABLED", "false").lower() not in {"1", "true", "yes", "on"}:
@@ -430,6 +484,7 @@ def main():
         check_source_collection,
         check_market_microstructure_snapshot,
         check_intraday_bars,
+        check_orderflow_capture,
     ]
 
     state   = _load_alert_state()

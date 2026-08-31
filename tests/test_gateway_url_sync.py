@@ -29,7 +29,7 @@ def test_watchdog_probes_live_tunnel_before_trusting_pid():
     body = WATCHDOG.read_text(encoding="utf-8")
     assert "probe_tunnel" in body
     assert "curl -fsS" in body
-    assert "probe_tunnel \"$CUR\"" in body
+    assert re.search(r"probe_tunnel(?:_with_retries)? \"\$CUR\"", body)
     assert "dig +short" in body
     assert "--resolve" in body
 
