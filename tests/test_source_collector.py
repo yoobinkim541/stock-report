@@ -1222,7 +1222,7 @@ def test_collect_once_isolates_source_crash(tmp_path, monkeypatch):
     """한 소스 fetcher 가 크래시해도 나머지 수집 + 헬스 기록은 계속."""
     monkeypatch.setattr(sc, "fetch_saveticker_events",
                         lambda: (_ for _ in ()).throw(RuntimeError("boom")))
-    monkeypatch.setattr(sc, "fetch_arca_events", lambda max_pages=2: [])
+    monkeypatch.setattr(sc, "fetch_arca_provider", lambda: [])
     monkeypatch.setattr(sc, "fetch_telegram_channel_events",
                         lambda: [{"source": "telegram:yuzukinaok1", "title": "t", "url": "https://t.me/y/1"}])
     monkeypatch.setattr(sc, "fetch_market_snapshot_events", lambda: [])
@@ -1239,7 +1239,7 @@ def test_collect_once_isolates_source_crash(tmp_path, monkeypatch):
 
 def test_collect_once_includes_polymarket(tmp_path, monkeypatch):
     monkeypatch.setattr(sc, "fetch_saveticker_events", lambda: [])
-    monkeypatch.setattr(sc, "fetch_arca_events", lambda max_pages=2: [])
+    monkeypatch.setattr(sc, "fetch_arca_provider", lambda: [])
     monkeypatch.setattr(sc, "fetch_telegram_channel_events", lambda: [])
     monkeypatch.setattr(sc, "fetch_market_snapshot_events", lambda: [])
     monkeypatch.setattr(sc, "fetch_fred_macro_events", lambda: [])
@@ -1257,7 +1257,7 @@ def test_collect_once_includes_polymarket(tmp_path, monkeypatch):
 
 def test_collect_once_includes_kalshi(tmp_path, monkeypatch):
     monkeypatch.setattr(sc, "fetch_saveticker_events", lambda: [])
-    monkeypatch.setattr(sc, "fetch_arca_events", lambda max_pages=2: [])
+    monkeypatch.setattr(sc, "fetch_arca_provider", lambda: [])
     monkeypatch.setattr(sc, "fetch_telegram_channel_events", lambda: [])
     monkeypatch.setattr(sc, "fetch_market_snapshot_events", lambda: [])
     monkeypatch.setattr(sc, "fetch_fred_macro_events", lambda: [])
@@ -1278,7 +1278,7 @@ def test_collect_once_includes_kalshi(tmp_path, monkeypatch):
 
 def test_collect_once_uses_provider_runner_and_writes_manifests(tmp_path, monkeypatch):
     monkeypatch.setattr(sc, "fetch_saveticker_events", lambda: [])
-    monkeypatch.setattr(sc, "fetch_arca_events", lambda max_pages=2: [])
+    monkeypatch.setattr(sc, "fetch_arca_provider", lambda: [])
     monkeypatch.setattr(sc, "fetch_telegram_channel_events", lambda: [])
     monkeypatch.setattr(sc, "fetch_market_snapshot_events", lambda: [])
     monkeypatch.setattr(sc, "fetch_fred_macro_events", lambda: [])
