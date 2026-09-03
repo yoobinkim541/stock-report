@@ -19,7 +19,9 @@ PATH=/home/ubuntu/.hermes/node/bin:/home/ubuntu/.local/bin:/usr/local/bin:/usr/b
 # 아래 OS cron 중복 라인은 과거에 같은 리포트를 두 번 발송했으므로 비활성화했다.
 # 0 23 * * * cd /home/ubuntu/projects/stock-report && bash scripts/deliver_investment_report.sh >> /tmp/deliver_investment_report.log 2>&1   # 23:00 UTC = 08:00 KST
 # 집수리클라쓰 네이버 SA 광고 일일 성과·개선 제안 리포트 (KST 전일 기준)
-10 18 * * * cd /home/ubuntu/projects/jipsuri-class && set -a && . ./.env && if [ -f ./.env.local ]; then . ./.env.local; fi && set +a && flock -n /tmp/jipsuri-sa-report.lock npm run report:naver-sa >> /tmp/jipsuri-sa-report.log 2>&1   # 18:10 UTC = 03:10 KST
+# 03:10 KST → 10:30 KST로 지연: 네이버 SA 클릭·비용 정산이 자정 직후엔 미확정이라
+# 새벽 실행 시 노출만 잡히고 클릭/비용이 0으로 오는 문제가 실측 확인됨(2026-09-03).
+30 1 * * * cd /home/ubuntu/projects/jipsuri-class && set -a && . ./.env && if [ -f ./.env.local ]; then . ./.env.local; fi && set +a && flock -n /tmp/jipsuri-sa-report.lock npm run report:naver-sa >> /tmp/jipsuri-sa-report.log 2>&1   # 01:30 UTC = 10:30 KST
 # 시장 위험 보고서 생성·발송 (cross-asset risk flash + deep dive)
 20 23 * * * cd /home/ubuntu/projects/stock-report && flock -n /tmp/market_risk_report.lock bash scripts/deliver_market_risk_report.sh >> /tmp/deliver_market_risk_report.log 2>&1   # 23:20 UTC = 08:20 KST
 

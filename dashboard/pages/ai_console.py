@@ -317,10 +317,17 @@ def _quick_prompts() -> str | None:
     return None
 
 
-def _answer_agent_fast(question: str, surface: str) -> dict:
+def _answer_agent_fast(question: str, surface: str, pack: dict | None = None) -> dict:
+    kwargs = {"async_postprocess": True}
+    if isinstance(pack, dict) and pack:
+        kwargs["context_pack_data"] = pack
     try:
-        return agent.answer(question, surface, async_postprocess=True)
+        return agent.answer(question, surface, **kwargs)
     except TypeError as exc:
+        # Keep compatibility with older test doubles/long-lived workers while
+        # the dashboard and agent deploy independently.
+        if "context_pack_data" in str(exc):
+            return agent.answer(question, surface, async_postprocess=True)
         if "async_postprocess" not in str(exc):
             raise
         return agent.answer(question, surface)
@@ -335,13 +342,13 @@ def _safe_status_update(status, **kwargs) -> None:
             pass
 
 
-def _answer_with_progress(question: str, surface: str) -> dict:
+def _answer_with_progress(question: str, surface: str, pack: dict | None = None) -> dict:
     status_factory = getattr(st, "status", None)
     if callable(status_factory):
         status_context = status_factory("분석 중", expanded=True)
         with status_context as status:
             updater = status or status_context
-            result = _answer_agent_fast(question, surface)
+            result = _answer_agent_fast(question, surface, pack)
             result_context = result.get("context") or {}
             # New agent responses carry only events that actually happened.
             # Missing metadata means a legacy provider/test double, for which
@@ -368,7 +375,7 @@ def _answer_with_progress(question: str, surface: str) -> dict:
             _safe_status_update(updater, label=done_label, state="complete", expanded=False)
             return result
     with st.spinner("답변 생성 중"):
-        return _answer_agent_fast(question, surface)
+        return _answer_agent_fast(question, surface, pack)
 
 
 def _run_agent_question_auto(question: str, pack: dict | None = None):
@@ -401,7 +408,7 @@ def _run_agent_question(question: str, surface: str, pack: dict | None = None, c
         _ensure_chat_state(_AUTO_CHAT)
 
     st.session_state[chat_key].append({"role": "user", "content": question})
-    result = _answer_with_progress(question, surface)
+    result = _answer_with_progress(question, surface, pack)
     if result.get("ok"):
         ctx = result.get("context") or {}
         answer = result.get("answer", "")

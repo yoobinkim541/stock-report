@@ -247,7 +247,6 @@ def test_dispatch_routes_plain_internal_feature_request_without_llm(monkeypatch)
     monkeypatch.setattr(telegram_bot, "refresh_portfolio_prices", lambda: None)
     monkeypatch.setattr(telegram_bot, "fetch_market", lambda force=False: {"portfolio": {"total_usd": 1}})
     monkeypatch.setattr(telegram_bot, "cmd_portfolio", lambda d: "포트폴리오 현황")
-    monkeypatch.setattr(telegram_bot, "ask_portfolio_advisor", lambda q, d: asked.append(q) or "LLM 답변")
     monkeypatch.setattr(telegram_bot, "send", lambda chat_id, text: sent.append(text))
     monkeypatch.setattr(telegram_bot, "send_html", lambda chat_id, text, max_len=4000: sent.append(text))
     monkeypatch.setattr(telegram_bot, "typing", lambda chat_id: None)
@@ -280,20 +279,19 @@ def test_fetch_benchmark_returns_calculates_ytd():
     assert returns == {"QQQ": {"current": 110.0, "ytd_pct": 10.0}}
 
 
-def test_dispatch_ask_fetches_market_and_sends_advice(monkeypatch):
+def test_dispatch_ask_sends_shared_agent_answer_and_stops_typing(monkeypatch):
     import telegram_bot
 
-    calls = {"fetch_market": 0, "ask": None, "send": [], "typing_stop": 0}
-    market = {"market_type": "bull", "phase_key": "bull_1"}
+    calls = {"infer": None, "answer": None, "send": [], "typing_stop": 0}
 
-    def fake_fetch_market(force=False):
-        calls["fetch_market"] += 1
-        calls["fetch_market_force"] = force
-        return market
+    class FakeSharedAgent:
+        def infer_surface(self, question, history=None, default="market"):
+            calls["infer"] = (question, history, default)
+            return "portfolio"
 
-    def fake_ask(question, data):
-        calls["ask"] = (question, data)
-        return "상담 답변"
+        def answer(self, question, surface, *, async_postprocess=False):
+            calls["answer"] = (question, surface, async_postprocess)
+            return {"ok": True, "answer": "상담 답변"}
 
     def fake_send(chat_id, text):
         calls["send"].append((chat_id, text))
@@ -306,19 +304,53 @@ def test_dispatch_ask_fetches_market_and_sends_advice(monkeypatch):
 
         return stop
 
-    monkeypatch.setattr(telegram_bot, "fetch_market", fake_fetch_market)
-    monkeypatch.setattr(telegram_bot, "ask_portfolio_advisor", fake_ask)
+    monkeypatch.setattr(telegram_bot, "shared_agent", FakeSharedAgent())
+    monkeypatch.setattr(
+        telegram_bot,
+        "fetch_market",
+        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("legacy market fetch")),
+    )
     monkeypatch.setattr(telegram_bot, "send", fake_send)
     monkeypatch.setattr(telegram_bot, "keep_typing", fake_keep_typing)
 
     telegram_bot.dispatch("/ask 지금 추가매수해도 돼?", "chat-1")
 
-    assert calls["fetch_market"] == 1
-    assert calls["fetch_market_force"] is True
-    assert calls["ask"] == ("지금 추가매수해도 돼?", market)
+    assert calls["infer"] == ("지금 추가매수해도 돼?", None, "market")
+    assert calls["answer"] == ("지금 추가매수해도 돼?", "portfolio", True)
     assert calls["typing_chat_id"] == "chat-1"
     assert calls["typing_stop"] == 1
     assert calls["send"] == [("chat-1", "상담 답변")]
+
+
+def test_dispatch_ask_uses_the_shared_agent_console(monkeypatch):
+    """자연어 /ask는 AI 콘솔과 같은 라우터·답변 엔진·후처리 경로를 사용한다."""
+    import telegram_bot
+
+    calls = {"infer": [], "answer": [], "send": []}
+
+    class FakeSharedAgent:
+        def infer_surface(self, question, history=None, default="market"):
+            calls["infer"].append((question, history, default))
+            return "ticker"
+
+        def answer(self, question, surface, *, async_postprocess=False):
+            calls["answer"].append((question, surface, async_postprocess))
+            return {"ok": True, "answer": "공유 엔진 답변"}
+
+    monkeypatch.setattr(telegram_bot, "shared_agent", FakeSharedAgent(), raising=False)
+    monkeypatch.setattr(
+        telegram_bot,
+        "fetch_market",
+        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("legacy market fetch")),
+    )
+    monkeypatch.setattr(telegram_bot, "send", lambda chat_id, text: calls["send"].append((chat_id, text)))
+    monkeypatch.setattr(telegram_bot, "keep_typing", lambda chat_id: (lambda: None))
+
+    telegram_bot.dispatch("/ask LLY 전망 알려줘", "chat-1")
+
+    assert calls["infer"] == [("LLY 전망 알려줘", None, "market")]
+    assert calls["answer"] == [("LLY 전망 알려줘", "ticker", True)]
+    assert calls["send"] == [("chat-1", "공유 엔진 답변")]
 
 
 def test_configure_bot_commands_scopes_owner_and_guest_menus(monkeypatch):
@@ -364,21 +396,24 @@ def test_plain_text_normalized_to_ask_and_dispatched(monkeypatch):
 
     monkeypatch.setattr(telegram_bot, "detect_content_type", lambda text, caption="": "unknown")
 
-    # dispatch with normalized plain text invokes ask_portfolio_advisor with the original question
+    # dispatch with normalized plain text invokes the shared agent with the original question
     asked = []
 
-    def fake_ask(question, data):
-        asked.append(question)
-        return "답변"
+    class FakeSharedAgent:
+        def infer_surface(self, question, history=None, default="market"):
+            return "market"
 
-    monkeypatch.setattr(telegram_bot, "fetch_market", lambda force=False: {"market_type": "bull", "phase_key": "bull_1"})
-    monkeypatch.setattr(telegram_bot, "ask_portfolio_advisor", fake_ask)
+        def answer(self, question, surface, *, async_postprocess=False):
+            asked.append((question, surface, async_postprocess))
+            return {"ok": True, "answer": "답변"}
+
+    monkeypatch.setattr(telegram_bot, "shared_agent", FakeSharedAgent())
     monkeypatch.setattr(telegram_bot, "send", lambda *a: None)
     monkeypatch.setattr(telegram_bot, "keep_typing", lambda chat_id: (lambda: None))
 
     normalized = telegram_bot._normalize_message_text("추가매수해도 돼?")
     telegram_bot.dispatch(normalized, "chat-1")
-    assert asked == ["추가매수해도 돼?"]
+    assert asked == [("추가매수해도 돼?", "market", True)]
 
 
 def test_plain_text_market_report_with_portfolio_routes_to_ask(monkeypatch):
@@ -388,8 +423,15 @@ def test_plain_text_market_report_with_portfolio_routes_to_ask(monkeypatch):
     asked = []
 
     monkeypatch.setattr(telegram_bot, "refresh_portfolio_prices", lambda: None)
-    monkeypatch.setattr(telegram_bot, "fetch_market", lambda force=False: {"portfolio": {"total_usd": 1}})
-    monkeypatch.setattr(telegram_bot, "ask_portfolio_advisor", lambda q, d: asked.append(q) or "LLM 답변")
+    class FakeSharedAgent:
+        def infer_surface(self, question, history=None, default="market"):
+            return "portfolio"
+
+        def answer(self, question, surface, *, async_postprocess=False):
+            asked.append((question, surface, async_postprocess))
+            return {"ok": True, "answer": "LLM 답변"}
+
+    monkeypatch.setattr(telegram_bot, "shared_agent", FakeSharedAgent())
     monkeypatch.setattr(telegram_bot, "send", lambda chat_id, text: sent.append(text))
     monkeypatch.setattr(telegram_bot, "send_html", lambda chat_id, text, max_len=4000: sent.append(text))
     monkeypatch.setattr(telegram_bot, "keep_typing", lambda chat_id: (lambda: None))
@@ -399,7 +441,7 @@ def test_plain_text_market_report_with_portfolio_routes_to_ask(monkeypatch):
     assert telegram_bot.handle_plain_text(text, "chat-1") is False
     telegram_bot.dispatch(telegram_bot._normalize_message_text(text), "chat-1")
 
-    assert asked == [text]
+    assert asked == [(text, "portfolio", True)]
     assert sent == ["LLM 답변"]
 
 

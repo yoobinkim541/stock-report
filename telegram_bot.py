@@ -76,7 +76,9 @@ from portfolio_tracker import (
 )
 from bot.order_generator import generate as generate_order
 from holding_manager import refresh_portfolio_prices
-from bot.stock_advisor import ask_portfolio_advisor
+# AI 콘솔과 텔레그램 자연어 상담은 같은 라우터·컨텍스트·LLM 폴백을 공유한다.
+# 명령형 핸들러(/portfolio, /holding 등)는 아래 레거시 명령 모듈을 계속 사용한다.
+from agent_console import agent as shared_agent
 from bot.tax_commands import cmd_tax
 from bot.holding_commands import cmd_holding, cmd_dividend, cmd_apply_snapshot
 from bot.watchlist_commands import cmd_watch
@@ -1755,10 +1757,17 @@ def _dispatch_ask(chat_id: str, args: list):
     if not args:
         send(chat_id, "사용법: /ask 질문\n예: /ask 지금 추가매수해도 돼?")
         return
+    question = " ".join(args)
     stop_typing = keep_typing(chat_id)
     try:
-        d = fetch_market(force=True)
-        send(chat_id, ask_portfolio_advisor(" ".join(args), d))
+        surface = shared_agent.infer_surface(question, default="market")
+        result = shared_agent.answer(question, surface, async_postprocess=True)
+        if not isinstance(result, dict) or not result.get("ok"):
+            error = (result or {}).get("error") if isinstance(result, dict) else None
+            send(chat_id, f"⚠️ AI 상담을 완료하지 못했습니다{f': {error}' if error else ''}")
+            return
+        answer = str(result.get("answer") or "").strip()
+        send(chat_id, answer or "⚠️ AI 상담 결과가 비어 있습니다.")
     except Exception as e:
         send(chat_id, f"❌ 오류: {e}")
         logger.exception("dispatch /ask")

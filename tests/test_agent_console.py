@@ -1121,6 +1121,125 @@ def test_agent_prompt_frames_external_context_as_untrusted_data(monkeypatch, tmp
     assert "[사용자 질문]" in prompt
 
 
+def test_agent_prompt_prioritises_natural_direct_answer(monkeypatch, tmp_path):
+    _isolate(monkeypatch, tmp_path)
+
+    from agent_console import agent
+
+    pack = {
+        "surface": "market",
+        "sources": {"events": [], "source_counts": [], "symbol_counts": []},
+        "memory": [],
+        "reports": [],
+        "ml_activity": [],
+        "portfolio": {"holdings": []},
+        "paper": {},
+        "models": {},
+        "focus": [],
+    }
+
+    prompt = agent._build_general_chat_prompt("왜 이렇게 답했어?", pack, history=[])
+
+    assert "첫 문장에서 사용자의 최신 질문에 직접 답합니다" in prompt
+    assert "자연스러운 한국어" in prompt
+    assert "정보가 부족해도" in prompt
+    assert "시장 리포트 형식" in prompt
+
+
+def test_llm_fallback_chain_stops_after_overall_budget(monkeypatch):
+    from agent_console import agent
+
+    clock = [0.0]
+    calls = []
+    monkeypatch.setenv("AGENT_CONSOLE_LLM_TIMEOUT", "20")
+    monkeypatch.setattr(agent.time, "monotonic", lambda: clock[0])
+
+    def exhausted(name):
+        def _call(*args, **kwargs):
+            calls.append(name)
+            clock[0] = 18.0
+            return None
+        return _call
+
+    monkeypatch.setattr(agent, "_try_codex_chat", exhausted("codex"))
+    monkeypatch.setattr(agent, "_try_hermes_chat", exhausted("hermes"))
+    monkeypatch.setattr(agent, "_try_gemini_chat", exhausted("gemini"))
+    monkeypatch.setattr(agent, "_try_agy_backup", exhausted("agy"))
+
+    assert agent._try_llm_prompt("테스트") is None
+    assert calls == ["codex"]
+
+
+def test_llm_model_alias_is_normalized_before_provider_call(monkeypatch, tmp_path):
+    from agent_console import agent
+
+    monkeypatch.setenv("AGENT_CONSOLE_CODEX_MODEL", "gpt-5.6-luna-900k")
+    monkeypatch.setenv("AGENT_CONSOLE_CODEX_CWD", str(tmp_path))
+    seen = {}
+
+    def fake_runner(cmd, **kwargs):
+        seen["cmd"] = cmd
+        out_path = cmd[cmd.index("--output-last-message") + 1]
+        Path(out_path).write_text("한국어 답변", encoding="utf-8")
+        return type("Result", (), {"returncode": 0, "stdout": ""})()
+
+    assert agent._try_codex_chat("테스트", runner=fake_runner) == "한국어 답변"
+    model_index = seen["cmd"].index("--model") + 1
+    assert seen["cmd"][model_index] == "gpt-5.6-luna"
+    assert "model_reasoning_effort=high" in seen["cmd"]
+
+
+def test_chat_search_is_reserved_for_freshness_sensitive_questions(monkeypatch):
+    from agent_console import agent
+
+    captured = []
+    monkeypatch.setattr(
+        agent,
+        "_try_llm_prompt",
+        lambda prompt, **kwargs: captured.append(kwargs) or "답변",
+    )
+    pack = {"surface": "market", "sources": {"events": []}, "memory": []}
+
+    agent._try_llm_chat("왜 이렇게 답했어?", pack)
+    assert captured[-1]["search"] is False
+    assert captured[-1]["reasoning_effort"] == "medium"
+
+    agent._try_llm_chat("지금 최신 뉴스와 주가를 확인해줘", pack)
+    assert captured[-1]["search"] is True
+    assert captured[-1]["reasoning_effort"] == "high"
+
+
+def test_agent_answer_reuses_context_pack_from_dashboard(monkeypatch, tmp_path):
+    _isolate(monkeypatch, tmp_path)
+
+    from agent_console import agent
+
+    pack = {
+        "ok": True,
+        "surface": "market",
+        "generated_at": "2026-08-31T09:30:00+00:00",
+        "sources": {"events": [], "source_counts": [], "symbol_counts": []},
+        "reports": [],
+        "ml_activity": [],
+        "portfolio": {"holdings": []},
+        "paper": {},
+        "models": {},
+        "memory": [],
+        "focus": [],
+    }
+    monkeypatch.setattr(agent, "_safe_context_pack", lambda _surface: (_ for _ in ()).throw(
+        AssertionError("dashboard context should be reused")))
+    monkeypatch.setattr(agent.wiki, "list_pages", lambda **_: [])
+    monkeypatch.setattr(agent, "_compose_answer", lambda *args, **kwargs: "재사용 답변")
+    monkeypatch.setattr(agent, "_postprocess_chat", lambda *args, **kwargs: {"wiki_autocurate": "disabled"})
+
+    result = agent.answer("컨텍스트 재사용 테스트", "market", context_pack_data=pack)
+
+    assert result["ok"] is True
+    assert result["answer"] == "재사용 답변"
+    assert result["as_of"] == pack["generated_at"]
+
+
 def test_agent_prompt_pins_peer_compare_intent_contract(monkeypatch, tmp_path):
     _isolate(monkeypatch, tmp_path)
 

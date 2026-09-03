@@ -71,6 +71,7 @@ if [ -n "$PID" ]; then
         THRESH=$((START_EPOCH + 5))
         # 대시보드 import 트리(+루트 공용 모듈)에서 기동 이후 변경된 첫 .py 를 탐색
         NEWER="$(find "$PROJECT_DIR"/dashboard "$PROJECT_DIR"/ml "$PROJECT_DIR"/providers \
+                      "$PROJECT_DIR"/agent_console \
                       "$PROJECT_DIR"/bot "$PROJECT_DIR"/lib "$PROJECT_DIR"/config \
                       "$PROJECT_DIR"/*.py \
                       -name '*.py' -not -path '*/__pycache__/*' \
