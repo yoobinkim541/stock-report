@@ -1796,6 +1796,13 @@ def _try_codex_chat(prompt: str, runner=subprocess.run, max_timeout: int | None 
                 pass
 
 
+def _valid_reasoning_effort(value: str | None, default: str = "medium") -> str:
+    effort = str(value or default).strip().lower()
+    if effort not in {"none", "minimal", "low", "medium", "high", "xhigh"}:
+        effort = default
+    return effort
+
+
 def _try_hermes_chat(prompt: str, runner=subprocess.run, max_timeout: int | None = None,
                      deadline: float | None = None, search: bool | None = None,
                      reasoning_effort: str | None = None) -> str | None:
@@ -1813,6 +1820,10 @@ def _try_hermes_chat(prompt: str, runner=subprocess.run, max_timeout: int | None
             "AGENT_CONSOLE_LLM_MODEL",
             os.getenv("INVESTMENT_REPORT_LLM_MODEL", "gpt-5-mini"),
         ),
+        # 미지정 시 hermes 자체 기본 reasoning 이 더 느리다(실측 2026-09-03: 플래그
+        # 없이 36~38초 vs medium 명시 시 23~25초, 같은 25KB 프롬프트) — 항상 명시한다.
+        "--reasoning",
+        _valid_reasoning_effort(reasoning_effort),
         "-Q",
     ]
     timeout = int(os.getenv("AGENT_CONSOLE_LLM_TIMEOUT", "60") or "60")
@@ -1854,6 +1865,8 @@ def _try_gemini_chat(prompt: str, runner=subprocess.run, max_timeout: int | None
         "gemini",
         "--model",
         os.getenv("AGENT_CONSOLE_GEMINI_MODEL", "gemini-2.5-flash"),
+        "--reasoning",
+        _valid_reasoning_effort(reasoning_effort),
         "-Q",
     ]
     timeout = int(os.getenv("AGENT_CONSOLE_LLM_TIMEOUT", "60") or "60")

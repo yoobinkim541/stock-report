@@ -2612,6 +2612,81 @@ def test_agent_codex_chat_runner_writes_last_message(monkeypatch, tmp_path):
     assert _try_codex_chat("테스트", runner=fake_runner) == "Codex 응답"
 
 
+def test_agent_hermes_chat_forwards_reasoning_effort(monkeypatch):
+    """_try_hermes_chat 가 reasoning_effort 인자를 받으면서도 실제 hermes CLI 커맨드에
+    --reasoning 을 안 붙이고 있었다(2026-09-03 실측) — hermes 가 매번 자체 기본
+    reasoning(플래그 미지정 시 더 느린 수준)으로 도니 25KB 짜리 실제 프롬프트에서
+    36~38초 걸리던 게, --reasoning minimal/medium 을 명시하면 23~25초로 줄었다."""
+    from agent_console.agent import _try_hermes_chat
+
+    def fake_runner(cmd, **kwargs):
+        assert "--reasoning" in cmd
+        idx = cmd.index("--reasoning")
+        assert cmd[idx + 1] == "low"
+
+        class Result:
+            returncode = 0
+            stdout = "답변"
+            stderr = ""
+
+        return Result()
+
+    assert _try_hermes_chat("테스트", runner=fake_runner, reasoning_effort="low") == "답변"
+
+
+def test_agent_hermes_chat_defaults_reasoning_when_not_specified(monkeypatch):
+    from agent_console.agent import _try_hermes_chat
+
+    def fake_runner(cmd, **kwargs):
+        assert "--reasoning" in cmd
+        idx = cmd.index("--reasoning")
+        assert cmd[idx + 1] == "medium"
+
+        class Result:
+            returncode = 0
+            stdout = "답변"
+            stderr = ""
+
+        return Result()
+
+    assert _try_hermes_chat("테스트", runner=fake_runner) == "답변"
+
+
+def test_agent_hermes_chat_rejects_invalid_reasoning_effort(monkeypatch):
+    from agent_console.agent import _try_hermes_chat
+
+    def fake_runner(cmd, **kwargs):
+        idx = cmd.index("--reasoning")
+        assert cmd[idx + 1] == "medium"   # 잘못된 값은 기본값으로 폴백
+
+        class Result:
+            returncode = 0
+            stdout = "답변"
+            stderr = ""
+
+        return Result()
+
+    assert _try_hermes_chat("테스트", runner=fake_runner, reasoning_effort="turbo") == "답변"
+
+
+def test_agent_gemini_chat_forwards_reasoning_effort(monkeypatch):
+    from agent_console.agent import _try_gemini_chat
+
+    def fake_runner(cmd, **kwargs):
+        assert "--reasoning" in cmd
+        idx = cmd.index("--reasoning")
+        assert cmd[idx + 1] == "low"
+
+        class Result:
+            returncode = 0
+            stdout = "답변"
+            stderr = ""
+
+        return Result()
+
+    assert _try_gemini_chat("테스트", runner=fake_runner, reasoning_effort="low") == "답변"
+
+
 def test_agent_gemini_chat_runner_builds_correct_command(monkeypatch):
     from agent_console.agent import _try_gemini_chat
 
