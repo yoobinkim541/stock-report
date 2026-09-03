@@ -1008,7 +1008,7 @@ def _render_analysis_rail(
         alert_loader=lambda _symbol: list(document.get("alerts") or []),
         orderflow_loader=_analysis_orderflow_loader(replay_until),
     )
-    chart_workbench_ui.render_analysis_rail(snapshot)
+    chart_workbench_ui.render_analysis_rail(snapshot, hist=hist)
     tools_key = f"cw_{ws.get('id', 'default')}_{panel['id']}"
     with st.expander("시리즈·인디케이터·조건", expanded=False):
         document = chart_workbench_ui.render_series_manager(document, key_prefix=tools_key)

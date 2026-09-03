@@ -4,12 +4,13 @@ from __future__ import annotations
 import copy
 import json
 from collections.abc import Mapping
+from datetime import date
 from typing import Any
 
 import pandas as pd
 import streamlit as st
 
-from dashboard import chart_conditions, chart_document, chart_orderflow, chart_studies
+from dashboard import chart_conditions, chart_document, chart_orderflow, chart_studies, chart_vision
 
 
 CHART_TYPE_GROUPS = {
@@ -271,7 +272,52 @@ def render_condition_builder(document, *, key_prefix: str = "chart") -> dict[str
     return condition
 
 
-def render_analysis_rail(snapshot: Mapping[str, Any]) -> None:
+def _render_vision_pattern_section(snapshot: Mapping[str, Any], hist) -> None:
+    """LLM 비전 기반 고전 차트 패턴(삼각수렴·엘리엇 파동 등) 분석.
+
+    dashboard/chart_analysis.py::pattern_candidates() 는 규칙 2개(채널 돌파·볼린저
+    스퀴즈)만 감지해 대부분 종목·대부분 날엔 "패턴 후보 없음"만 뜬다 — 이 섹션은
+    캔들 이미지를 LLM에게 보여줘 삼각수렴·엘리엇 파동 등 기하학적 패턴을 식별한다.
+    호출당 수십 초 걸려 자동 호출하지 않고, 버튼 클릭 + (ticker, 날짜) 세션 캐시로 제한한다.
+    """
+    ticker = str(snapshot.get("symbol") or "")
+    st.markdown("###### 🤖 AI 시각 분석 (삼각수렴·엘리엇 파동 등)")
+    if hist is None or getattr(hist, "empty", True) or not ticker:
+        st.caption("차트 데이터가 없어 시각 분석을 사용할 수 없습니다.")
+        return
+
+    cache_key = f"_chart_vision_{ticker}_{date.today().isoformat()}"
+    cached_result = st.session_state.get(cache_key)
+
+    if st.button("AI로 패턴 분석하기", key=f"chart_vision_btn_{ticker}"):
+        with st.spinner("차트 이미지를 분석하는 중입니다 (최대 90초)..."):
+            cached_result = chart_vision.analyze_chart_patterns(hist, ticker)
+        st.session_state[cache_key] = cached_result
+
+    if cached_result is None:
+        st.caption("버튼을 누르면 삼각수렴·엘리엇 파동 등 고전 차트 패턴을 AI가 분석합니다(오늘 1회 결과 캐시).")
+        return
+
+    if not cached_result.get("ok"):
+        st.warning(f"분석 실패: {cached_result.get('reason', 'unknown')}")
+        return
+
+    patterns = cached_result.get("patterns") or []
+    if cached_result.get("summary"):
+        st.caption(cached_result["summary"])
+    if not patterns:
+        st.caption("뚜렷한 고전 패턴이 식별되지 않았습니다.")
+        return
+    for pattern in patterns:
+        with st.container(border=True):
+            st.markdown(f"**{pattern.get('kind', '?')}** · 신뢰도 {float(pattern.get('confidence') or 0):.2f}")
+            if pattern.get("description"):
+                st.caption(pattern["description"])
+            if pattern.get("implication"):
+                st.caption(f"시사점: {pattern['implication']}")
+
+
+def render_analysis_rail(snapshot: Mapping[str, Any], *, hist=None) -> None:
     """Always-visible compact rail; each tab degrades independently."""
     st.markdown("##### 분석 레일")
     quality = snapshot.get("data_quality") or {}
@@ -293,6 +339,8 @@ def render_analysis_rail(snapshot: Mapping[str, Any]) -> None:
     with tabs[1]:
         rows = snapshot.get("patterns") or []
         st.dataframe(pd.DataFrame(rows), hide_index=True, width="stretch") if rows else st.caption("패턴 후보 없음")
+        st.divider()
+        _render_vision_pattern_section(snapshot, hist)
     with tabs[2]:
         rows = (snapshot.get("multi_timeframe") or {}).get("rows") or []
         st.dataframe(pd.DataFrame(rows), hide_index=True, width="stretch") if rows else st.caption("멀티봉 데이터 없음")

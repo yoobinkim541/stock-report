@@ -230,6 +230,126 @@ chart_workbench_ui.render_analysis_rail({{
     assert any("kis_ws" in str(item.value) for item in at.json)
 
 
+_VISION_SNAPSHOT = """{
+    "symbol": "NVDA", "benchmark": "QQQ",
+    "trend": {}, "patterns": [], "multi_timeframe": {}, "seasonality": {},
+    "relative_strength": {}, "fundamentals": {}, "alerts": [], "errors": {},
+    "data_quality": {"source": "yfinance", "freshness": "delayed", "as_of": "now"},
+    "orderflow": {"ok": False, "reason": "capture_not_configured"},
+}"""
+
+_VISION_HIST_SNIPPET = """
+import pandas as pd
+_idx = pd.date_range("2025-01-01", periods=120, freq="B")
+_close = [100.0 + i * 0.3 for i in range(120)]
+hist = pd.DataFrame({
+    "Open": _close, "High": [c + 1 for c in _close], "Low": [c - 1 for c in _close],
+    "Close": [c + 0.1 for c in _close], "Volume": [1000 + i for i in range(120)],
+}, index=_idx)
+"""
+
+
+def test_vision_section_shows_prompt_before_click():
+    pytest.importorskip("streamlit")
+    from streamlit.testing.v1 import AppTest
+
+    script = f"""
+import sys
+sys.path.insert(0, {ROOT!r})
+{_VISION_HIST_SNIPPET}
+from dashboard import chart_workbench_ui
+chart_workbench_ui.render_analysis_rail({_VISION_SNAPSHOT}, hist=hist)
+"""
+    at = AppTest.from_string(script, default_timeout=30).run()
+
+    assert not at.exception, str(at.exception)
+    body = " ".join(str(item.value) for item in at.caption)
+    assert "AI가 분석합니다" in body
+    assert any("AI로 패턴 분석하기" in str(b.label) for b in at.button)
+
+
+def test_vision_section_no_hist_shows_disabled_caption():
+    pytest.importorskip("streamlit")
+    from streamlit.testing.v1 import AppTest
+
+    script = f"""
+import sys
+sys.path.insert(0, {ROOT!r})
+from dashboard import chart_workbench_ui
+chart_workbench_ui.render_analysis_rail({_VISION_SNAPSHOT})
+"""
+    at = AppTest.from_string(script, default_timeout=30).run()
+
+    assert not at.exception, str(at.exception)
+    body = " ".join(str(item.value) for item in at.caption)
+    assert "차트 데이터가 없어 시각 분석" in body
+
+
+def test_vision_section_button_click_shows_patterns(monkeypatch):
+    pytest.importorskip("streamlit")
+    from streamlit.testing.v1 import AppTest
+    from dashboard import chart_vision
+
+    monkeypatch.setattr(
+        chart_vision,
+        "analyze_chart_patterns",
+        lambda hist, ticker, **kwargs: {
+            "ok": True,
+            "patterns": [{
+                "kind": "triangle_convergence", "confidence": 0.8,
+                "description": "고점 하락·저점 상승 수렴",
+                "implication": "변동성 축소 후 방향성 돌파 대기",
+            }],
+            "summary": "삼각수렴 진행 중",
+            "ticker": ticker,
+        },
+    )
+
+    script = f"""
+import sys
+sys.path.insert(0, {ROOT!r})
+{_VISION_HIST_SNIPPET}
+from dashboard import chart_workbench_ui
+chart_workbench_ui.render_analysis_rail({_VISION_SNAPSHOT}, hist=hist)
+"""
+    at = AppTest.from_string(script, default_timeout=30).run()
+    at.button[0].click().run()
+
+    assert not at.exception, str(at.exception)
+    body = " ".join(str(item.value) for item in at.markdown)
+    body += " " + " ".join(str(item.value) for item in at.caption)
+    assert "triangle_convergence" in body
+    assert "삼각수렴 진행 중" in body
+    assert "변동성 축소 후 방향성 돌파 대기" in body
+
+
+def test_vision_section_button_click_shows_warning_on_failure(monkeypatch):
+    pytest.importorskip("streamlit")
+    from streamlit.testing.v1 import AppTest
+    from dashboard import chart_vision
+
+    monkeypatch.setattr(
+        chart_vision,
+        "analyze_chart_patterns",
+        lambda hist, ticker, **kwargs: {
+            "ok": False, "reason": "invalid_llm_response", "patterns": [], "summary": "",
+        },
+    )
+
+    script = f"""
+import sys
+sys.path.insert(0, {ROOT!r})
+{_VISION_HIST_SNIPPET}
+from dashboard import chart_workbench_ui
+chart_workbench_ui.render_analysis_rail({_VISION_SNAPSHOT}, hist=hist)
+"""
+    at = AppTest.from_string(script, default_timeout=30).run()
+    at.button[0].click().run()
+
+    assert not at.exception, str(at.exception)
+    assert any("invalid_llm_response" in str(w.value) for w in at.warning)
+
+
 def test_orderflow_empty_state_message_is_reason_specific():
     from dashboard import chart_workbench_ui
 

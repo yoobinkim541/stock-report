@@ -1175,7 +1175,7 @@ def _price_chart(ticker, hist, avg_cost, trades, fullscreen: bool = False,
         alert_loader=lambda symbol: data.ticker_alerts(symbol) or [],
         orderflow_loader=chart_orderflow.load_snapshot,
     )
-    chart_workbench_ui.render_analysis_rail(snapshot)
+    chart_workbench_ui.render_analysis_rail(snapshot, hist=df)
     with st.expander("시리즈·조건·내보내기", expanded=False):
         managed_document = chart_workbench_ui.render_series_manager(
             document, key_prefix=f"ticker_{ticker}_{tf}",
