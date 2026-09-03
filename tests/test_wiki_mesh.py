@@ -115,6 +115,23 @@ def test_build_wiki_graph_model_shows_parent_child_hierarchy():
     assert any({edge.source, edge.target} == {"parent", "child"} and edge.explicit for edge in model["edges"])
 
 
+def test_build_figure_allows_drag_pan_and_zoom():
+    """dragmode="pan" 은 이미 설정돼 있었는데 xaxis/yaxis 의 fixedrange=True 가 팬·줌을
+    전부 무력화하고 있었다(감사 2026-09-03, 유빈님 리포트: "옵시디언처럼 드래그로 옮기고
+    싶은데 안 됨"). 캔버스를 드래그해 옮기려면(Obsidian 식) 두 축 다 fixedrange 가
+    아니어야 한다."""
+    pages = [
+        {"id": "page-a", "title": "A", "summary": "A", "surface": "wiki", "kind": "note"},
+        {"id": "page-b", "title": "B", "summary": "B", "surface": "wiki", "kind": "note"},
+    ]
+
+    figure = wiki_mesh._build_figure(wiki_mesh.build_wiki_graph_model(pages))
+
+    assert figure.layout.dragmode == "pan"
+    assert figure.layout.xaxis.fixedrange is not True
+    assert figure.layout.yaxis.fixedrange is not True
+
+
 def test_build_figure_uses_webgl_for_large_graphs():
     pages = [
         {"id": f"page-{idx}", "title": f"문서 {idx}", "summary": "지식", "surface": "wiki", "kind": "note"}
