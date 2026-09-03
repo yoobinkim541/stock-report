@@ -1170,6 +1170,19 @@ def test_llm_fallback_chain_stops_after_overall_budget(monkeypatch):
     assert calls == ["codex"]
 
 
+def test_llm_default_budget_is_generous_enough_for_real_prompts(monkeypatch):
+    """기본 45초 예산은 실측(2026-09-03)에서 실제 종목/시장 질문 프롬프트(위키·포트폴리오·
+    시세 컨텍스트 다 붙으면 ~25KB)엔 부족했다 — codex 가 사용량 제한으로 몇 초 날린 뒤
+    hermes 로 넘어가도 36초 이상 걸려 45초 예산을 넘겨 결국 local-rules 로 폴백됐다.
+    기본값을 넉넉히 잡아야 실제 트래픽에서 매번 폴백하는 걸 막는다."""
+    from agent_console import agent
+
+    monkeypatch.delenv("AGENT_CONSOLE_CHAT_TIMEOUT", raising=False)
+    monkeypatch.delenv("AGENT_CONSOLE_LLM_TIMEOUT", raising=False)
+
+    assert agent._llm_budget() >= 90
+
+
 def test_llm_model_alias_is_normalized_before_provider_call(monkeypatch, tmp_path):
     from agent_console import agent
 

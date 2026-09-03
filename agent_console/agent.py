@@ -1619,11 +1619,17 @@ _LLM_PROVIDER_MIN_TIMEOUT = 10
 
 
 def _llm_budget(max_timeout: int | None = None) -> int:
-    """Return one request budget shared by every provider fallback."""
+    """Return one request budget shared by every provider fallback.
+
+    45s 는 실측(2026-09-03)에서 부족했다 — 위키·포트폴리오·시세 컨텍스트가 다 붙는
+    실제 프롬프트(~25KB)는 codex 가 몇 초 실패한 뒤 hermes 로 넘어가도 36초+ 걸려
+    45초 예산을 넘겼고, 매번 local-rules 로 폴백되고 있었다(agent 답변이 딱딱하다는
+    리포트의 실제 원인). 90s 로 올려 실제 트래픽에서 안정적으로 LLM 까지 도달하게 한다.
+    """
     try:
-        configured = int(os.getenv("AGENT_CONSOLE_CHAT_TIMEOUT", os.getenv("AGENT_CONSOLE_LLM_TIMEOUT", "45")) or "45")
+        configured = int(os.getenv("AGENT_CONSOLE_CHAT_TIMEOUT", os.getenv("AGENT_CONSOLE_LLM_TIMEOUT", "90")) or "90")
     except (TypeError, ValueError):
-        configured = 45
+        configured = 90
     configured = max(_LLM_PROVIDER_MIN_TIMEOUT, min(configured, 240))
     if max_timeout is not None:
         configured = min(configured, max(_LLM_PROVIDER_MIN_TIMEOUT, int(max_timeout)))
