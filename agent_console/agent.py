@@ -1361,10 +1361,38 @@ def _should_use_web_search(question: str, pack: dict) -> bool:
     return intent_name in {"live_market_check", "market_analysis", "stock_compare", "ticker_research"}
 
 
+_CHITCHAT_PATTERNS = (
+    "안녕", "hello", "hi ", "하이", "반가", "고마워", "감사", "고맙",
+    "잘가", "잘 가", "수고", "굿밤", "잘자", "너 누구", "너는 누구", "넌 누구",
+    "너 이름", "네 이름", "이름이 뭐", "뭐하는 애", "뭐 하는 앱", "테스트", "test",
+    "잘 지내", "how are you",
+)
+
+
+def _looks_like_chitchat(question: str) -> bool:
+    """투자 컨텍스트가 전혀 필요 없는 짧은 인사말/잡담만 True — 판단이 애매하면
+    항상 False(기존처럼 풀 컨텍스트)로 안전하게 기운다. 오탐(진짜 투자 질문을
+    잡담으로 잘못 판단)이 미탐(잡담을 풀 컨텍스트로 처리)보다 훨씬 나쁘다."""
+    q = str(question or "").strip()
+    if not q or len(q) > 20:
+        return False
+    ql = q.lower()
+    if not any(pattern in ql for pattern in _CHITCHAT_PATTERNS):
+        return False
+    try:
+        if _extract_asset_symbol(q):
+            return False
+    except Exception:
+        pass
+    return True
+
+
 def _chat_reasoning_effort(question: str, pack: dict) -> str:
     configured = os.getenv("AGENT_CONSOLE_CHAT_REASONING_EFFORT", "").strip().lower()
     if configured in {"none", "minimal", "low", "medium", "high", "xhigh"}:
         return configured
+    if _looks_like_chitchat(question):
+        return "low"
     return "high" if _should_use_web_search(question, pack) else "medium"
 
 
@@ -1959,52 +1987,70 @@ def _build_general_chat_prompt(question: str, pack: dict, history: list[dict] | 
         msg = str(row.get("message") or "").replace("\n", " ")[:500]
         if msg:
             hist.append(f"- {role}: {msg}")
-    ctx = []
-    for item in events[:4]:
-        title = item.get("title") or item.get("summary")
-        if title:
-            ctx.append(f"- {item.get('source', 'source')}: {title}")
-    for item in memory[:3]:
-        title = item.get("title")
-        if title:
-            ctx.append(f"- memory: {title}")
-    portfolio_ctx = _compact_portfolio_context(pack)
-    paper_ctx = _compact_paper_context(pack)
-    market_snapshot_ctx = _compact_market_snapshot_context(pack)
-    prediction_ctx = _compact_prediction_market_context(pack)
-    citation_ctx = _compact_citation_context(pack)
-    try:
-        shared_section = shared_memory.build_context_section(
-            {
-                "screen": pack.get("surface") or "market",
-                "query": question,
-                "provider": "codex-cli",
-                "limit": 6,
-            }
-        )
-    except Exception:
-        shared_section = ""
-    try:
-        wiki_section = wiki.build_context_section(
-            query=question,
-            surface=pack.get("surface") or "market",
-            limit=4,
-            pages=pack.get("_wiki_context_pages"),
-        )
-    except Exception:
-        wiki_section = ""
+
     intent = _classify_question_intent(question, pack, history)
     intent_lines = _intent_contract_lines(intent)
-    try:
-        evidence_usage.record_context_use(
-            str(pack.get("_evidence_query_id") or evidence_usage.query_id_for(
-                question, str(pack.get("surface") or "market")
-            )),
-            retrieved_page_ids=[page.get("id") for page in pack.get("_wiki_context_pages") or [] if isinstance(page, dict)],
-            provided_evidence_ids=_provided_context_evidence_ids(pack, pack.get("_wiki_context_pages") or []),
-        )
-    except Exception:
-        pass
+
+    # 인사말/잡담처럼 투자 컨텍스트가 전혀 필요 없는 질문은 무거운 컨텍스트 섹션
+    # (위키·공유메모리·시세·포트폴리오 등) 조립을 아예 건너뛴다 — 실측(2026-09-04):
+    # 이 섹션들이 실제 질문 프롬프트(~23KB)의 대부분을 차지해, 잡담 한 마디에도
+    # 매번 똑같이 무거운 프롬프트를 만들어 응답을 늦추고 있었다. 투자 질문은 그대로
+    # 풀 컨텍스트를 쓴다 — 판단이 애매하면 _looks_like_chitchat 자체가 False 로
+    # 기운다.
+    if _looks_like_chitchat(question):
+        ctx: list[str] = []
+        portfolio_ctx: list[str] = []
+        paper_ctx: list[str] = []
+        market_snapshot_ctx: list[str] = []
+        prediction_ctx: list[str] = []
+        citation_ctx: list[str] = []
+        shared_section = ""
+        wiki_section = ""
+    else:
+        ctx = []
+        for item in events[:4]:
+            title = item.get("title") or item.get("summary")
+            if title:
+                ctx.append(f"- {item.get('source', 'source')}: {title}")
+        for item in memory[:3]:
+            title = item.get("title")
+            if title:
+                ctx.append(f"- memory: {title}")
+        portfolio_ctx = _compact_portfolio_context(pack)
+        paper_ctx = _compact_paper_context(pack)
+        market_snapshot_ctx = _compact_market_snapshot_context(pack)
+        prediction_ctx = _compact_prediction_market_context(pack)
+        citation_ctx = _compact_citation_context(pack)
+        try:
+            shared_section = shared_memory.build_context_section(
+                {
+                    "screen": pack.get("surface") or "market",
+                    "query": question,
+                    "provider": "codex-cli",
+                    "limit": 6,
+                }
+            )
+        except Exception:
+            shared_section = ""
+        try:
+            wiki_section = wiki.build_context_section(
+                query=question,
+                surface=pack.get("surface") or "market",
+                limit=4,
+                pages=pack.get("_wiki_context_pages"),
+            )
+        except Exception:
+            wiki_section = ""
+        try:
+            evidence_usage.record_context_use(
+                str(pack.get("_evidence_query_id") or evidence_usage.query_id_for(
+                    question, str(pack.get("surface") or "market")
+                )),
+                retrieved_page_ids=[page.get("id") for page in pack.get("_wiki_context_pages") or [] if isinstance(page, dict)],
+                provided_evidence_ids=_provided_context_evidence_ids(pack, pack.get("_wiki_context_pages") or []),
+            )
+        except Exception:
+            pass
     return "\n".join([
         "너는 stock-report 안의 대화형 에이전트다.",
         "사용자는 한국어로 편하게 말한다. 너도 자연스러운 한국어 대화체로 답한다.",

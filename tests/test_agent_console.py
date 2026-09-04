@@ -1272,6 +1272,52 @@ def test_chat_search_is_reserved_for_freshness_sensitive_questions(monkeypatch):
     assert captured[-1]["reasoning_effort"] == "high"
 
 
+def test_looks_like_chitchat_matches_short_greetings_only():
+    """투자 컨텍스트가 필요 없는 짧은 인사말/잡담만 True. 판단이 애매하면 항상
+    False(기존처럼 풀 컨텍스트) 로 안전하게 기운다 — 오탐(진짜 투자 질문을 잡담으로
+    잘못 판단)이 미탐보다 훨씬 나쁘다."""
+    from agent_console import agent
+
+    assert agent._looks_like_chitchat("안녕") is True
+    assert agent._looks_like_chitchat("고마워!") is True
+    assert agent._looks_like_chitchat("너 이름이 뭐야?") is True
+    assert agent._looks_like_chitchat("테스트") is True
+
+    # 투자 관련 질문은 아무리 짧아도 False
+    assert agent._looks_like_chitchat("삼성전자 어때") is False
+    assert agent._looks_like_chitchat("NVDA 지금 사도 돼?") is False
+    # 길이가 길면 인사말 단어가 섞여 있어도 False(안전하게 풀 컨텍스트로)
+    assert agent._looks_like_chitchat("고마워, 근데 오늘 코스피 시황이랑 내 포트폴리오 손실한도 좀 알려줘") is False
+    assert agent._looks_like_chitchat("") is False
+
+
+def test_chat_reasoning_effort_is_low_for_chitchat(monkeypatch):
+    from agent_console import agent
+
+    monkeypatch.delenv("AGENT_CONSOLE_CHAT_REASONING_EFFORT", raising=False)
+    pack = {"surface": "market", "sources": {"events": []}, "memory": []}
+    assert agent._chat_reasoning_effort("안녕!", pack) == "low"
+    assert agent._chat_reasoning_effort("포트폴리오 리밸런싱 어떻게 하면 좋을까", pack) == "medium"
+
+
+def test_chat_prompt_skips_heavy_context_sections_for_chitchat(monkeypatch):
+    """잡담엔 위키·공유메모리 같은 무거운 컨텍스트 섹션을 아예 안 만든다 — 프롬프트
+    크기·조립 비용을 줄여 응답을 더 빠르게 한다. 실제 투자 질문은 그대로 풀 컨텍스트."""
+    from agent_console import agent
+
+    monkeypatch.setattr(agent.wiki, "build_context_section", lambda **kwargs: "[위키 지식]\nSENTINEL_WIKI")
+    monkeypatch.setattr(agent.shared_memory, "build_context_section", lambda *args, **kwargs: "[컨텍스트 메모리]\nSENTINEL_MEMORY")
+    pack = {"surface": "market", "sources": {"events": []}, "memory": []}
+
+    chitchat_prompt = agent._build_general_chat_prompt("안녕!", pack, [])
+    assert "SENTINEL_WIKI" not in chitchat_prompt
+    assert "SENTINEL_MEMORY" not in chitchat_prompt
+
+    real_prompt = agent._build_general_chat_prompt("오늘 코스피 어때", pack, [])
+    assert "SENTINEL_WIKI" in real_prompt
+    assert "SENTINEL_MEMORY" in real_prompt
+
+
 def test_agent_answer_reuses_context_pack_from_dashboard(monkeypatch, tmp_path):
     _isolate(monkeypatch, tmp_path)
 
