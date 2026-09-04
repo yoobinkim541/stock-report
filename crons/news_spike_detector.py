@@ -14,7 +14,7 @@ news_spike_detector.py — saveticker 속보 알림
 
 환경변수:
     STOCK_BOT_TOKEN      — 텔레그램 봇 토큰 (필수)
-    STOCK_BOT_CHAT_ID    — 텔레그램 채팅 ID (필수)
+    STOCK_BOT_CHAT_ID    — 텔레그램 채팅 ID (미설정 시 notify 기본값)
 """
 from __future__ import annotations
 
@@ -41,7 +41,6 @@ CACHE_DIR  = Path(os.path.expanduser("~/reports/source-cache"))
 STATE_FILE = Path(os.path.expanduser("~/.cache/news_spike_state.json"))
 
 BOT_TOKEN = os.getenv("STOCK_BOT_TOKEN")
-CHAT_ID   = os.getenv("STOCK_BOT_CHAT_ID")
 
 # 발송 완료 ID를 이 시간 이상 지난 건 state에서 제거 (파일 비대화 방지)
 STATE_TTL_HOURS      = 48
@@ -259,10 +258,11 @@ def judge_importance(event: dict, *, allow_llm: bool = False, runner=None) -> tu
 # ── Telegram ──────────────────────────────────────────────────────────────────
 
 def _send_telegram(text: str) -> bool:
-    if not BOT_TOKEN or not CHAT_ID:
-        logger.warning("STOCK_BOT_TOKEN / STOCK_BOT_CHAT_ID 미설정")
+    # chat_id 는 notify 단일 진실원이 STOCK_BOT_CHAT_ID → 기본값 순으로 해석한다.
+    if not BOT_TOKEN:
+        logger.warning("STOCK_BOT_TOKEN 미설정")
         return False
-    return notify.send_telegram(text, token=BOT_TOKEN, chat_id=CHAT_ID)
+    return notify.send_telegram(text, token=BOT_TOKEN)
 
 
 def _realtime_tag(tickers: list) -> str:

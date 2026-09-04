@@ -25,14 +25,14 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(mess
 logger = logging.getLogger(__name__)
 
 BOT_TOKEN = os.getenv("STOCK_BOT_TOKEN")
-CHAT_ID   = os.getenv("STOCK_BOT_CHAT_ID")
 
 
 def _send(text: str) -> bool:
-    if not BOT_TOKEN or not CHAT_ID:
-        logger.warning("STOCK_BOT_TOKEN / STOCK_BOT_CHAT_ID 미설정")
+    # chat_id 는 notify 단일 진실원이 STOCK_BOT_CHAT_ID → 기본값 순으로 해석한다.
+    if not BOT_TOKEN:
+        logger.warning("STOCK_BOT_TOKEN 미설정")
         return False
-    return notify.send_telegram(text, token=BOT_TOKEN, chat_id=CHAT_ID, timeout=15)
+    return notify.send_telegram(text, timeout=15)
 
 
 def _should_reoptimize() -> bool:
