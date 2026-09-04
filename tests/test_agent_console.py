@@ -1147,6 +1147,8 @@ def test_agent_prompt_prioritises_natural_direct_answer(monkeypatch, tmp_path):
 
 
 def test_llm_fallback_chain_stops_after_overall_budget(monkeypatch):
+    """codex·hermes 는 순차가 아니라 동시(레이싱)에 시도된다(2026-09-04 변경) — 그
+    시점에 공유 예산이 소진되면 gemini·agy 는 건너뛴다."""
     from agent_console import agent
 
     clock = [0.0]
@@ -1167,7 +1169,55 @@ def test_llm_fallback_chain_stops_after_overall_budget(monkeypatch):
     monkeypatch.setattr(agent, "_try_agy_backup", exhausted("agy"))
 
     assert agent._try_llm_prompt("테스트") is None
-    assert calls == ["codex"]
+    assert set(calls) == {"codex", "hermes"}
+    assert "gemini" not in calls
+    assert "agy" not in calls
+
+
+def test_llm_races_codex_and_hermes_uses_whichever_succeeds_first(monkeypatch):
+    """순차 실행이면 앞선 provider 의 실패/지연이 뒤 provider 시작을 늦춰 공유 예산을
+    낭비한다(실측 2026-09-03~04: 같은 프롬프트도 provider 응답시간 변동폭이 커서
+    24초 만에 끝날 때도 57초 걸릴 때도 있었다). codex·hermes 를 동시에 띄워 먼저
+    성공하는 쪽을 쓰면 이 변동폭에 대해 헤지가 된다."""
+    from agent_console import agent
+
+    def slow_but_fails(prompt, **kwargs):
+        import time as time_mod
+        time_mod.sleep(0.15)
+        return None
+
+    def fast_success(prompt, **kwargs):
+        agent._mark_llm_engine("hermes")
+        return "빠른 답변"
+
+    monkeypatch.setattr(agent, "_try_codex_chat", slow_but_fails)
+    monkeypatch.setattr(agent, "_try_hermes_chat", fast_success)
+
+    assert agent._try_llm_prompt("테스트") == "빠른 답변"
+
+
+def test_llm_race_does_not_let_the_slower_loser_overwrite_the_winner_engine(monkeypatch):
+    """codex·hermes 둘 다 결국 성공해도, 먼저 끝난 쪽의 답을 쓰고 엔진 표시도 그
+    답을 만든 provider 로 고정돼야 한다 — 늦게 끝난 쪽이 전역 엔진 표시를 덮어써
+    UI 에 잘못된 provider 가 표기되면 안 된다."""
+    from agent_console import agent
+
+    def slow_codex(prompt, **kwargs):
+        import time as time_mod
+        time_mod.sleep(0.2)
+        agent._mark_llm_engine("codex")
+        return "느린 답변"
+
+    def fast_hermes(prompt, **kwargs):
+        agent._mark_llm_engine("hermes")
+        return "빠른 답변"
+
+    monkeypatch.setattr(agent, "_try_codex_chat", slow_codex)
+    monkeypatch.setattr(agent, "_try_hermes_chat", fast_hermes)
+
+    result = agent._try_llm_prompt("테스트")
+    assert result == "빠른 답변"
+    assert agent._LAST_LLM_ENGINE == "hermes"
 
 
 def test_llm_default_budget_is_generous_enough_for_real_prompts(monkeypatch):
@@ -2667,6 +2717,74 @@ def test_agent_hermes_chat_rejects_invalid_reasoning_effort(monkeypatch):
         return Result()
 
     assert _try_hermes_chat("테스트", runner=fake_runner, reasoning_effort="turbo") == "답변"
+
+
+def test_agent_hermes_chat_own_default_timeout_matches_shared_budget(monkeypatch):
+    """hermes 자체 내부 fallback 이 과거 60초로 하드코딩돼 있어, 공유 예산
+    _llm_budget() 을 90초로 올려도(b53c50d) 호출자가 max_timeout=90 을 넘기면 여기서
+    조용히 60초로 다시 깎였다(실측 2026-09-04: 실제 프롬프트가 60.1초 만에 None으로
+    끊김 — 90초 budget 이 무색해짐). 두 기본값을 맞춘다."""
+    from agent_console import agent
+
+    monkeypatch.delenv("AGENT_CONSOLE_LLM_TIMEOUT", raising=False)
+    captured = {}
+
+    def fake_runner(cmd, **kwargs):
+        captured["timeout"] = kwargs.get("timeout")
+
+        class Result:
+            returncode = 0
+            stdout = "답변"
+            stderr = ""
+
+        return Result()
+
+    agent._try_hermes_chat("테스트", runner=fake_runner, max_timeout=90)
+    assert captured["timeout"] >= 90
+
+
+def test_agent_gemini_chat_own_default_timeout_matches_shared_budget(monkeypatch):
+    from agent_console import agent
+
+    monkeypatch.delenv("AGENT_CONSOLE_LLM_TIMEOUT", raising=False)
+    captured = {}
+
+    def fake_runner(cmd, **kwargs):
+        captured["timeout"] = kwargs.get("timeout")
+
+        class Result:
+            returncode = 0
+            stdout = "답변"
+            stderr = ""
+
+        return Result()
+
+    agent._try_gemini_chat("테스트", runner=fake_runner, max_timeout=90)
+    assert captured["timeout"] >= 90
+
+
+def test_agent_codex_chat_own_default_timeout_matches_shared_budget(monkeypatch, tmp_path):
+    from agent_console import agent
+
+    monkeypatch.delenv("AGENT_CONSOLE_LLM_TIMEOUT", raising=False)
+    monkeypatch.delenv("AGENT_CONSOLE_CODEX_TIMEOUT", raising=False)
+    monkeypatch.setenv("AGENT_CONSOLE_CODEX_CWD", str(tmp_path))
+    captured = {}
+
+    def fake_runner(cmd, **kwargs):
+        captured["timeout"] = kwargs.get("timeout")
+        out_path = cmd[cmd.index("--output-last-message") + 1]
+        Path(out_path).write_text("답변", encoding="utf-8")
+
+        class Result:
+            returncode = 0
+            stdout = ""
+            stderr = ""
+
+        return Result()
+
+    agent._try_codex_chat("테스트", runner=fake_runner, max_timeout=90)
+    assert captured["timeout"] >= 90
 
 
 def test_agent_gemini_chat_forwards_reasoning_effort(monkeypatch):

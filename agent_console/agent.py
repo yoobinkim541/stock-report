@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from collections import Counter
+from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 from datetime import datetime, timedelta, timezone
 import json
 import os
@@ -1642,6 +1643,53 @@ def _remaining_timeout(deadline: float | None, ceiling: int) -> int:
     return max(0, min(int(ceiling), int(deadline - time.monotonic())))
 
 
+def _race_providers(prompt: str, providers, *, runner, deadline, max_timeout,
+                     search, reasoning_effort) -> str | None:
+    """여러 provider 함수를 동시에 띄워 가장 먼저 성공(non-None)하는 응답을 쓴다.
+
+    순차 실행이면 앞선 provider 의 실패/지연이 뒤 provider 의 시작을 늦춰 공유
+    예산을 낭비한다(실측 2026-09-03~04: 같은 프롬프트도 provider 응답시간
+    변동폭이 커서 medium reasoning 으로 24초 만에 끝날 때도, 57초 걸릴 때도
+    있었다). 먼저 끝나는 쪽을 쓰면 이 변동폭에 대해 헤지가 된다.
+
+    승자를 찾으면 아직 안 끝난 나머지(loser)는 기다리지 않고 즉시 반환한다 —
+    loser 는 백그라운드에서 마저 끝나든 타임아웃으로 죽든 그냥 둔다(결과는 버림).
+    """
+    pool = ThreadPoolExecutor(max_workers=len(providers))
+    futures = {
+        pool.submit(
+            fn, prompt, runner=runner, max_timeout=max_timeout, deadline=deadline,
+            search=search, reasoning_effort=reasoning_effort,
+        ): name
+        for name, fn in providers
+    }
+    winner = None
+    winner_name = None
+    pending = set(futures)
+    try:
+        while pending:
+            done, pending = wait(pending, return_when=FIRST_COMPLETED)
+            for future in done:
+                try:
+                    result = future.result()
+                except Exception:
+                    result = None
+                if result:
+                    winner = result
+                    winner_name = futures[future]
+                    break
+            if winner:
+                break
+    finally:
+        # wait=False — 아직 도는 loser 스레드(subprocess)를 기다리지 않고 풀만 놓아준다.
+        pool.shutdown(wait=False)
+    if winner:
+        # loser 가 나중에 성공해 _mark_llm_engine 을 다시 부를 가능성에 대비해, 실제로
+        # 반환하는 답의 provider 로 한 번 더 못박는다.
+        _mark_llm_engine(winner_name)
+    return winner
+
+
 def _try_llm_prompt(prompt: str, runner=subprocess.run, max_timeout: int | None = None,
                     search: bool | None = None,
                     reasoning_effort: str | None = None) -> str | None:
@@ -1649,16 +1697,24 @@ def _try_llm_prompt(prompt: str, runner=subprocess.run, max_timeout: int | None 
         return None
     _emit_progress_event("llm_started")
     deadline = time.monotonic() + _llm_budget(max_timeout)
-    providers = (
-        ("codex", _try_codex_chat),
-        ("hermes", _try_hermes_chat),
-        ("gemini", _try_gemini_chat),
-    )
-    for _name, provider in providers:
-        remaining = _remaining_timeout(deadline, _llm_budget(max_timeout))
-        if remaining < _LLM_PROVIDER_MIN_TIMEOUT:
-            break
-        result = provider(
+
+    remaining = _remaining_timeout(deadline, _llm_budget(max_timeout))
+    if remaining >= _LLM_PROVIDER_MIN_TIMEOUT:
+        result = _race_providers(
+            prompt,
+            (("codex", _try_codex_chat), ("hermes", _try_hermes_chat)),
+            runner=runner,
+            deadline=deadline,
+            max_timeout=remaining,
+            search=search,
+            reasoning_effort=reasoning_effort,
+        )
+        if result:
+            return result
+
+    remaining = _remaining_timeout(deadline, _llm_budget(max_timeout))
+    if remaining >= _LLM_PROVIDER_MIN_TIMEOUT:
+        result = _try_gemini_chat(
             prompt,
             runner=runner,
             max_timeout=remaining,
@@ -1763,7 +1819,9 @@ def _try_codex_chat(prompt: str, runner=subprocess.run, max_timeout: int | None 
             cmd.append(prompt)
             return cmd
 
-        timeout = int(os.getenv("AGENT_CONSOLE_CODEX_TIMEOUT", os.getenv("AGENT_CONSOLE_LLM_TIMEOUT", "75")) or "75")
+        # _llm_budget() 기본값(90)과 맞춘다 — 예전엔 여기 자체 fallback(75)이 더 낮아
+        # 공유 예산을 올려도(b53c50d) 여기서 조용히 다시 깎였다(실측 2026-09-04).
+        timeout = int(os.getenv("AGENT_CONSOLE_CODEX_TIMEOUT", os.getenv("AGENT_CONSOLE_LLM_TIMEOUT", "90")) or "90")
         timeout = max(10, min(timeout, 240))
         if max_timeout is not None:
             timeout = min(timeout, max_timeout)
@@ -1826,7 +1884,9 @@ def _try_hermes_chat(prompt: str, runner=subprocess.run, max_timeout: int | None
         _valid_reasoning_effort(reasoning_effort),
         "-Q",
     ]
-    timeout = int(os.getenv("AGENT_CONSOLE_LLM_TIMEOUT", "60") or "60")
+    # _llm_budget() 기본값(90)과 맞춘다 — 예전엔 여기 자체 fallback(60)이 더 낮아
+    # 공유 예산을 올려도(b53c50d) 여기서 조용히 다시 깎였다(실측 2026-09-04).
+    timeout = int(os.getenv("AGENT_CONSOLE_LLM_TIMEOUT", "90") or "90")
     try:
         if max_timeout is not None:
             timeout = min(timeout, max_timeout)
@@ -1869,7 +1929,9 @@ def _try_gemini_chat(prompt: str, runner=subprocess.run, max_timeout: int | None
         _valid_reasoning_effort(reasoning_effort),
         "-Q",
     ]
-    timeout = int(os.getenv("AGENT_CONSOLE_LLM_TIMEOUT", "60") or "60")
+    # _llm_budget() 기본값(90)과 맞춘다 — 예전엔 여기 자체 fallback(60)이 더 낮아
+    # 공유 예산을 올려도(b53c50d) 여기서 조용히 다시 깎였다(실측 2026-09-04).
+    timeout = int(os.getenv("AGENT_CONSOLE_LLM_TIMEOUT", "90") or "90")
     try:
         if max_timeout is not None:
             timeout = min(timeout, max_timeout)
