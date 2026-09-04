@@ -549,9 +549,9 @@ def portfolio_brief(facts: dict, runner=subprocess.run,
                               _env("INVESTMENT_REPORT_LLM_PROVIDER", "openai-codex")),
            "--model", model, "-Q"]
     try:
-        timeout = max(20, int(os.getenv("DASH_AI_BRIEFING_TIMEOUT", "120")))
+        timeout = max(20, int(os.getenv("DASH_AI_BRIEFING_TIMEOUT", "180")))
     except ValueError:
-        timeout = 120
+        timeout = 180
     try:
         res = runner(cmd, capture_output=True, text=True, timeout=timeout)
     except Exception as exc:
