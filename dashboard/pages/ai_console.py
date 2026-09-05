@@ -253,8 +253,14 @@ def _chat_tab(surface: str, pack: dict):
 
         pending = _quick_prompts()
         if pending:
-            _run_agent_question_auto(pending, pack)
+            try:
+                _run_agent_question_auto(pending, pack)
+            except BaseException as exc:
+                import traceback
+                print(f"[DEBUG_CHAT] BASEEXCEPTION in _run_agent_question_auto: type={type(exc)} {exc}\n{traceback.format_exc()}", flush=True)
+                raise
 
+        print(f"[DEBUG_CHAT] rendering loop. chat_key={chat_key} id(session_state)={id(st.session_state)} len={len(st.session_state[chat_key])}", flush=True)
         for idx, msg in enumerate(st.session_state[chat_key][-16:]):
             role_raw = str(msg.get("role", "assistant")).strip().lower()
             role = "user" if role_raw in {"user", "human"} else "assistant"
@@ -342,40 +348,26 @@ def _safe_status_update(status, **kwargs) -> None:
             pass
 
 
-def _answer_with_progress(question: str, surface: str, pack: dict | None = None) -> dict:
-    status_factory = getattr(st, "status", None)
-    if callable(status_factory):
-        status_context = status_factory("분석 중", expanded=True)
-        with status_context as status:
-            updater = status or status_context
-            result = _answer_agent_fast(question, surface, pack)
-            result_context = result.get("context") or {}
-            # New agent responses carry only events that actually happened.
-            # Missing metadata means a legacy provider/test double, for which
-            # the old progress contract remains available.
-            if "progress_events" in result_context:
-                events = result_context.get("progress_events") or []
-                if events:
-                    for event in events:
-                        name = str(event.get("name") or "")
-                        label = _EVENT_PROGRESS_LABELS.get(name)
-                        if label:
-                            _safe_status_update(updater, label=label,
-                                                state="error" if name == "failed" else "complete",
-                                                expanded=True)
-                else:
-                    _safe_status_update(updater, label="분석 중", state="running", expanded=True)
-            else:
-                for label in _AGENT_PROGRESS_LABELS[1:]:
-                    _safe_status_update(updater, label=label, state="running", expanded=True)
-            post = ((result.get("context") or {}).get("postprocess") or {}).get("wiki_autocurate")
-            done_label = "답변 표시 완료"
-            if post == "queued":
-                done_label = "답변 표시 완료 · 위키 정리는 뒤에서 진행"
-            _safe_status_update(updater, label=done_label, state="complete", expanded=False)
-            return result
-    with st.spinner("답변 생성 중"):
-        return _answer_agent_fast(question, surface, pack)
+def _report_llm_progress(updater, result: dict) -> None:
+    result_context = result.get("context") or {}
+    # New agent responses carry only events that actually happened.
+    # Missing metadata means a legacy provider/test double, for which
+    # the old progress contract remains available.
+    if "progress_events" in result_context:
+        events = result_context.get("progress_events") or []
+        if events:
+            for event in events:
+                name = str(event.get("name") or "")
+                label = _EVENT_PROGRESS_LABELS.get(name)
+                if label:
+                    _safe_status_update(updater, label=label,
+                                        state="error" if name == "failed" else "complete",
+                                        expanded=True)
+        else:
+            _safe_status_update(updater, label="분석 중", state="running", expanded=True)
+    else:
+        for label in _AGENT_PROGRESS_LABELS[1:]:
+            _safe_status_update(updater, label=label, state="running", expanded=True)
 
 
 def _run_agent_question_auto(question: str, pack: dict | None = None):
@@ -408,10 +400,32 @@ def _run_agent_question(question: str, surface: str, pack: dict | None = None, c
         _ensure_chat_state(_AUTO_CHAT)
 
     st.session_state[chat_key].append({"role": "user", "content": question})
-    result = _answer_with_progress(question, surface, pack)
+
+    status_factory = getattr(st, "status", None)
+    if callable(status_factory):
+        with status_factory("분석 중", expanded=True) as status:
+            _answer_and_append(question, surface, pack, chat_key, status)
+    else:
+        with st.spinner("답변 생성 중"):
+            _answer_and_append(question, surface, pack, chat_key, status=None)
+
+
+def _answer_and_append(question: str, surface: str, pack: dict | None, chat_key: str, status) -> None:
+    """LLM 응답과 참고자료·트레이스 구성까지 끝난 뒤에만 상태를 완료로 표시한다.
+
+    이전엔 LLM 응답이 오자마자 '답변 표시 완료'로 접혔는데, 그 뒤 참고자료/트레이스
+    구성이 수십 초 더 걸려(위키 1740페이지 검색 등) 실제 대화창에 메시지가 붙기까지
+    진행 표시가 하나도 없었다 — 사용자 입장에선 완료라고 떴는데 답이 안 보이는
+    것처럼 느껴졌다(2026-09-05 실측 확인).
+    """
+    result = _answer_agent_fast(question, surface, pack)
+    if status is not None:
+        _report_llm_progress(status, result)
     if result.get("ok"):
         ctx = result.get("context") or {}
         answer = result.get("answer", "")
+        if status is not None:
+            _safe_status_update(status, label="참고 자료 정리 중", state="running", expanded=True)
         references = chat_references.build_answer_references(question, surface, pack, answer)
         trace = chat_feedback.build_trace(question, surface, pack, result, references)
         ref_counts = {
@@ -444,6 +458,11 @@ def _run_agent_question(question: str, surface: str, pack: dict | None = None, c
             "references": references,
             "trace": trace,
         })
+        if status is not None:
+            done_label = "답변 표시 완료"
+            if post == "queued":
+                done_label = "답변 표시 완료 · 위키 정리는 뒤에서 진행"
+            _safe_status_update(status, label=done_label, state="complete", expanded=False)
     else:
         st.session_state[chat_key].append({
             "role": "assistant",
@@ -451,6 +470,8 @@ def _run_agent_question(question: str, surface: str, pack: dict | None = None, c
             "meta": "error",
             "question": question,
         })
+        if status is not None:
+            _safe_status_update(status, label="답변 생성 실패", state="error", expanded=True)
 
 
 def _open_wiki_reference(page_id: str | None) -> None:

@@ -316,6 +316,21 @@ def test_embed_fit_viewport_contract():
     assert "const fitVH = false" in norm
 
 
+def test_embed_default_toolbar_scrolls_horizontally_on_narrow_screens():
+    """실측(2026-09-05): 종목분석(비-dock, 기본) 차트 툴바는 좁은 화면(모바일 390px)에서
+    24개 넘는 그리기도구 아이콘이 여러 줄로 다닥다닥 줄바꿈돼 탭하기도 알아보기도
+    힘들었다. 풀뷰(dock=True) 쪽엔 이미 @media(max-width:760px)에서 가로 스크롤로
+    바꾸는 규칙이 있었는데(`#wrap.dock #tools`) 기본(dock=False에서도 쓰는 공유
+    #tools) 엔 그 처리가 적용돼 있지 않았다 — .dock 클래스 여부와 무관하게 좁은
+    화면에서 한 줄 가로 스크롤로 보이도록 일반 규칙을 추가한다."""
+    hist = _hist(40)
+    fig = charts.price_chart(hist, "T")
+    html = plotly_embed.pannable_chart_html(fig, hist)
+    media_block = html.split("@media (max-width: 760px)")[1].split("</style>")[0]
+    # .dock 접두사가 없는 일반 #tools 규칙이어야 dock=False 인 기본 차트에도 걸린다.
+    assert "#tools { flex-wrap:nowrap; overflow-x:auto" in media_block
+
+
 def test_embed_dock_layout_reserves_chart_column():
     """풀뷰 좌측 도구 독 — 차트와 겹치지 않도록 고정 컬럼을 예약한다."""
     hist = _hist(40)

@@ -132,6 +132,10 @@ _TEMPLATE = r"""
   #wrap.dock.cmp #bt-avwap, #wrap.dock.cmp #bt-vprof { display:none; }
   #wrap.compact #tools, #wrap.compact #replaybar, #wrap.compact #detail { display:none !important; }
   @media (max-width: 760px) {
+    /* 기본(비-dock) 툴바 — 실측(2026-09-05): 그리기도구 24개+가 좁은 화면에서
+       여러 줄로 줄바꿈돼 다닥다닥 붙어 탭·식별이 힘들었다. 한 줄 가로 스크롤로 바꾼다. */
+    #tools { flex-wrap:nowrap; overflow-x:auto; overflow-y:hidden; }
+    .tbtn { flex:0 0 auto; }
     #wrap.dock { display:block; overflow:visible; }
     #wrap.dock #tools { width:auto; max-width:none; max-height:none; flex-direction:row;
                         flex-wrap:nowrap; overflow-x:auto; overflow-y:hidden; margin:0 0 6px 0;

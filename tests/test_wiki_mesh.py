@@ -171,6 +171,42 @@ def test_wiki_graph_nodes_carry_trust_metadata_and_color():
     assert by_id["bad"]["color"] == wiki_mesh.TRUST_COLORS["lint"]
 
 
+def test_build_figure_caps_text_labels_on_dense_large_graphs():
+    """실측(2026-09-05): 위키 페이지 1740개·링크 4947개짜리 실제 그래프를 열면 라벨이
+    전부 겹쳐서 화면이 텍스트 뭉텅이로 보였다 — degree>=3 인 노드는 전부 상시 라벨을
+    붙이는데, 노드가 조밀하게 연결된 큰 그래프에선 대부분이 그 기준을 넘는다. 라벨은
+    허브(연결이 가장 많은) 노드 상위 일부에만 붙여야 큰 그래프에서도 읽힌다."""
+    pages = []
+    for idx in range(200):
+        links = [f"page-{(idx + offset) % 200}" for offset in (1, 2, 3, 4)]
+        pages.append({
+            "id": f"page-{idx}", "title": f"문서 {idx}", "summary": "지식",
+            "surface": "wiki", "kind": "note", "links": links,
+        })
+
+    model = wiki_mesh.build_wiki_graph_model(pages, max_nodes=300)
+    figure = wiki_mesh._build_figure(model)
+
+    labeled_trace = next(trace for trace in figure.data if trace.mode == "markers+text")
+    assert len(labeled_trace.text) <= 30
+
+
+def test_build_figure_always_labels_the_selected_node_even_in_dense_graphs():
+    pages = []
+    for idx in range(200):
+        links = [f"page-{(idx + offset) % 200}" for offset in (1, 2, 3, 4)]
+        pages.append({
+            "id": f"page-{idx}", "title": f"문서 {idx}", "summary": "지식",
+            "surface": "wiki", "kind": "note", "links": links,
+        })
+
+    model = wiki_mesh.build_wiki_graph_model(pages, selected_page_id="page-100", max_nodes=300)
+    figure = wiki_mesh._build_figure(model)
+
+    labeled_trace = next(trace for trace in figure.data if trace.mode == "markers+text")
+    assert "문서 100" in labeled_trace.text
+
+
 def test_trust_color_for_node_prioritizes_lint_then_verification():
     assert wiki_mesh.trust_color_for_node({"lint_issue_count": 1, "verification_status": "source-backed"}) == wiki_mesh.TRUST_COLORS["lint"]
     assert wiki_mesh.trust_color_for_node({"verification_status": "source-backed"}) == wiki_mesh.TRUST_COLORS["source-backed"]

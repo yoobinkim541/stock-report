@@ -635,6 +635,55 @@ def test_ai_console_run_agent_question_uses_fast_progress_path(monkeypatch):
     assert "후처리 queued" in msgs[-1]["meta"]
 
 
+def test_ai_console_status_only_completes_after_message_is_appended(monkeypatch):
+    """'답변 표시 완료' 라벨이 뜨는 시점엔 실제로 대화창에 메시지가 이미 들어가
+    있어야 한다. 예전엔 LLM 응답이 오자마자 완료로 접히고, 그 뒤 참고자료/트레이스
+    구성(위키 1740페이지 검색 등)이 수십 초 더 걸려 '완료'라고 뜬 채로 정작 화면엔
+    아무 메시지도 없는 것처럼 보였다(2026-09-05 실측 재현: stChatMessage 가 30초
+    가까이 늘지 않음). 완료 라벨이 찍히는 시점의 메시지 개수를 기록해 검증한다."""
+    from dashboard.pages import ai_console
+
+    fake_state = {}
+    updates = []
+    msg_count_at_done = []
+
+    class FakeStatus:
+        def __init__(self, label, **kwargs):
+            updates.append(label)
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            return False
+
+        def update(self, **kwargs):
+            label = kwargs.get("label")
+            if label:
+                updates.append(label)
+                if "완료" in label:
+                    msg_count_at_done.append(len(fake_state[ai_console._chat_key("market")]))
+
+    def fake_answer(question, surface, *, async_postprocess=False):
+        return {"ok": True, "answer": "느린 답변", "context": {"event_count": 0, "memory_count": 0}}
+
+    def slow_build_references(question, surface, pack, answer):
+        # 참고자료 구성이 느려도(위키 검색 등) 이 시점엔 아직 assistant 답변이 안 들어가 있어야 한다.
+        assert len(fake_state[ai_console._chat_key("market")]) == 2  # 웰컴 + user turn만 있음
+        return {"wiki": [], "sources": []}
+
+    monkeypatch.setattr(ai_console.st, "session_state", fake_state)
+    monkeypatch.setattr(ai_console.st, "status", FakeStatus)
+    monkeypatch.setattr(ai_console.agent, "answer", fake_answer)
+    monkeypatch.setattr(ai_console.chat_references, "build_answer_references", slow_build_references)
+    monkeypatch.setattr(ai_console.chat_feedback, "build_trace", lambda *a, **k: {})
+
+    ai_console._run_agent_question("천천히 답해줘", "market")
+
+    assert "참고 자료 정리 중" in updates
+    assert msg_count_at_done == [3]  # 웰컴 + user + assistant 다 들어간 뒤에 완료 표시
+
+
 def test_ai_console_strategy_canvas_uses_matrix_dsl(monkeypatch):
     from dashboard.pages import ai_console
     import pandas as pd

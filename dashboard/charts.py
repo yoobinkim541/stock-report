@@ -481,7 +481,11 @@ def market_treemap(rows: list[dict], height: int = 560):
                     line=dict(width=1, color="#0e1117")),
         tiling=dict(pad=1),
         hovertemplate="%{customdata} (%{label})<br>시총 %{value:,.0f}<extra></extra>"))
-    fig.update_layout(margin=dict(t=6, b=6, l=6, r=6), height=height)
+    # 모바일처럼 타일이 잘게 쪼개지는 폭에서도 라벨을 억지로 찌그러뜨리지 않는다 —
+    # 최소 크기(9px) 밑으로 내려가는 라벨은 아예 숨기고, 보이는 라벨은 항상 읽을 수
+    # 있는 크기를 유지한다(실측 2026-09-05: 390px 폭에서 라벨이 깨알같이 작아짐).
+    fig.update_layout(margin=dict(t=6, b=6, l=6, r=6), height=height,
+                      uniformtext=dict(minsize=9, mode="hide"))
     return _t(fig)
 
 

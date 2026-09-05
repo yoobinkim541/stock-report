@@ -755,6 +755,27 @@ def _extract_selected_page_id(event: Any) -> str:
     return ""
 
 
+_MAX_LABELED_NODES = 30
+
+
+def _label_node_ids(nodes: list[dict[str, Any]], *, cap: int = _MAX_LABELED_NODES) -> set[str]:
+    """조밀하게 연결된 큰 그래프에서 라벨이 다 겹쳐 읽을 수 없게 되는 걸 막는다.
+
+    실측(2026-09-05): 위키 1740페이지·4947링크 그래프에서 'degree>=3' 기준을 쓰니
+    거의 모든 노드가 상시 라벨을 달아 화면이 텍스트 뭉텅이가 됐다. 선택된 노드는
+    항상 라벨을 붙이고, 나머지는 연결이 가장 많은(허브) 노드 상위 cap개만 붙인다 —
+    작은 그래프에선 애초에 cap을 넘지 않아 기존 동작(전부 라벨)과 같다.
+    """
+    selected_ids = {node["id"] for node in nodes if node.get("selected")}
+    candidates = sorted(
+        (node for node in nodes if node["id"] not in selected_ids and node.get("degree", 0) >= 3),
+        key=lambda node: node.get("degree", 0),
+        reverse=True,
+    )
+    remaining = max(0, cap - len(selected_ids))
+    return selected_ids | {node["id"] for node in candidates[:remaining]}
+
+
 def _build_figure(model: dict[str, Any]) -> go.Figure:
     nodes = model.get("nodes") or []
     positions = model.get("positions") or {}
@@ -805,6 +826,7 @@ def _build_figure(model: dict[str, Any]) -> go.Figure:
     color_rest: list[str] = []
     hover_rest: list[str] = []
 
+    label_ids = _label_node_ids(nodes)
     for node in nodes:
         pos = positions.get(node["id"], (0.0, 0.0))
         size = 11 + min(12, node.get("degree", 0) * 1.8)
@@ -813,7 +835,7 @@ def _build_figure(model: dict[str, Any]) -> go.Figure:
         fill_color = node.get("surface_color") or _surface_color(node.get("surface") or WIKI_SURFACE)
         hover = _node_hover(node)
         label = _clean(node.get("title") or "", 18)
-        if node.get("selected") or node.get("degree", 0) >= 3:
+        if node["id"] in label_ids:
             x_sel.append(pos[0])
             y_sel.append(pos[1])
             text_sel.append(label)
