@@ -167,11 +167,26 @@ def limit_browser_groups(groups: Iterable[dict[str, Any]], *, limit: int = DOCUM
     return limited
 
 
+_MARKDOWN_EMPHASIS_RE = re.compile(r"([*_`])")
+
+
+def safe_markdown_bold(text: str) -> str:
+    """임의 텍스트를 안전하게 마크다운 굵게(**...**)로 감싼다.
+
+    실측(2026-09-06): 대화 승격 제목이 원본 답변의 **강조** 구문을 그대로 물고
+    들어온 경우가 있었다 — 카드가 제목을 다시 `**{title}**`로 감싸면 중첩
+    마크다운이 깨져 별표가 글자 그대로 노출됐다. 감싸기 전에 강조 특수문자를
+    이스케이프해 항상 온전한 굵은 글씨 하나로 렌더링되게 한다.
+    """
+    escaped = _MARKDOWN_EMPHASIS_RE.sub(r"\\\1", str(text or ""))
+    return f"**{escaped}**"
+
+
 def _render_page_card(page: dict[str, Any]) -> str:
     import streamlit as st
 
     with st.container(border=True):
-        st.markdown(f"**{page.get('title', '위키')}**")
+        st.markdown(safe_markdown_bold(page.get("title", "위키")))
         st.caption(f"{page.get('surface', 'wiki')} · {page.get('kind', 'note')} · {page.get('status', 'draft')}")
         if page.get("summary"):
             st.caption(str(page["summary"])[:180])
@@ -575,6 +590,38 @@ def _select_page_id_normalized(normalized: list[dict[str, Any]], *, selected_pag
     return str(visible[0].get("id")) if visible else None
 
 
+def build_merge_log(pages: Iterable[dict[str, Any] | WikiPage], *, limit: int = 30) -> list[dict[str, Any]]:
+    """전체 위키에서 최근 병합 이력을 시간순(최신 우선)으로 모은다.
+
+    병합 시 타깃 페이지는 소스들의 과거 이력까지 누적해서 들고, 각 소스 페이지도
+    자기 관점의 merge_history를 따로 들기 때문에(agent_console.wiki._merge_pages)
+    같은 event_id 가 여러 페이지에 걸쳐 중복 등장한다 — event_id 로 한 번만 센다.
+    """
+    normalized = _normalize_pages(list(pages or []))
+    by_id = {str(page.get("id") or ""): page for page in normalized if page.get("id")}
+    events: dict[str, dict[str, Any]] = {}
+    for page in normalized:
+        for event in page.get("merge_history") or []:
+            event_id = str(event.get("event_id") or "")
+            if not event_id or event_id in events:
+                continue
+            target_id = str(event.get("target_id") or "")
+            target_page = by_id.get(target_id)
+            events[event_id] = {
+                "event_id": event_id,
+                "occurred_at": str(event.get("occurred_at") or ""),
+                "target_id": target_id,
+                "target_title": str((target_page or {}).get("title") or "") or target_id or "알 수 없음",
+                "target_archived": bool(target_page) and target_page.get("status") == "archived",
+                "source_ids": list(event.get("source_ids") or []),
+                "source_titles": list(event.get("source_titles") or []),
+                "reason": str(event.get("reason") or ""),
+                "synthesis": str(event.get("synthesis") or ""),
+            }
+    ordered = sorted(events.values(), key=lambda item: item["occurred_at"], reverse=True)
+    return ordered[: max(1, int(limit))]
+
+
 def build_browser_model(pages: Iterable[dict[str, Any] | WikiPage], *, selected_page_id: str = "", query: str = "", surface: str = "all", status: str = "all") -> dict[str, Any]:
     normalized = _normalize_pages(pages)
     visible = _visible_pages(normalized, query=query, surface=surface, status=status)
@@ -714,6 +761,24 @@ def render_wiki_tab(surface: str, pack: dict[str, Any] | None = None) -> None:
     hcols[4].metric("lint", f"{health.get('lint_issue_count', 0)}")
     hcols[5].metric("open Q", f"{health.get('open_question_count', 0)}")
 
+    merge_log = build_merge_log(pages_all, limit=30)
+    with st.expander(f"🔀 최근 병합 이력 · {len(merge_log)}건", expanded=False):
+        if not merge_log:
+            st.caption("아직 병합된 문서가 없습니다.")
+        for item in merge_log:
+            with st.container(border=True):
+                sources = " · ".join(item["source_titles"]) or "(제목 없음)"
+                st.markdown(f"{safe_markdown_bold(sources)} → {safe_markdown_bold(item['target_title'])}")
+                meta = item["occurred_at"].replace("T", " ")[:19]
+                if item.get("target_archived"):
+                    meta += " · 이후 다시 병합됨"
+                st.caption(meta)
+                if item.get("reason"):
+                    st.write(item["reason"])
+                if st.button("병합된 문서 보기", key=f"wiki_merge_log_open_{item['event_id']}", width="stretch"):
+                    st.session_state["agent_wiki_selected_page_id"] = item["target_id"]
+                    st.rerun()
+
     if not pages_all:
         st.info("아직 위키 카드가 없습니다. 아래에서 현재 대화를 위키로 승격해 보세요.")
         return
@@ -822,7 +887,7 @@ def render_wiki_tab(surface: str, pack: dict[str, Any] | None = None) -> None:
                     limit=4,
                 )
                 evidence = build_selected_evidence_model(preview_page, context_section=prompt_preview)
-                st.markdown(f"**{evidence.get('title', '위키 페이지')}**")
+                st.markdown(safe_markdown_bold(evidence.get("title", "위키 페이지")))
                 st.caption(
                     f"{preview_page.get('surface', 'wiki')} · {preview_page.get('kind', 'note')} · {preview_page.get('status', 'draft')}"
                 )
@@ -887,7 +952,7 @@ def render_wiki_tab(surface: str, pack: dict[str, Any] | None = None) -> None:
                     st.markdown("##### 분할된 세부 문서")
                     for child in split_children[:6]:
                         with st.container(border=True):
-                            st.markdown(f"**{child.get('title', '세부 문서')}**")
+                            st.markdown(safe_markdown_bold(child.get("title", "세부 문서")))
                             st.caption(
                                 f"{child.get('surface', 'wiki')} · {child.get('kind', 'note')} · {child.get('status', 'draft')}"
                             )

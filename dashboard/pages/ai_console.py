@@ -494,7 +494,7 @@ def _render_reference_panel(references: dict, key_prefix: str) -> None:
             st.markdown("##### 참고 위키")
             for idx, ref in enumerate(wiki_refs):
                 with st.container(border=True):
-                    st.markdown(f"**{_esc(ref.get('title') or '위키 페이지')}**")
+                    st.markdown(wiki_browser.safe_markdown_bold(_esc(ref.get("title") or "위키 페이지")))
                     st.caption(
                         f"{_esc(ref.get('surface') or 'wiki')} · {_esc(ref.get('page_kind') or 'note')} · "
                         f"{_esc(ref.get('status') or 'draft')} · {_esc(ref.get('verification_status') or 'unverified')}"
@@ -510,7 +510,7 @@ def _render_reference_panel(references: dict, key_prefix: str) -> None:
             st.markdown("##### 원문 출처")
             for idx, ref in enumerate(source_refs):
                 with st.container(border=True):
-                    st.markdown(f"**{_esc(ref.get('title') or '원문 출처')}**")
+                    st.markdown(wiki_browser.safe_markdown_bold(_esc(ref.get("title") or "원문 출처")))
                     meta_bits = [ref.get("source"), ref.get("published_at")]
                     st.caption(" · ".join(str(item) for item in meta_bits if item))
                     if ref.get("summary"):

@@ -149,3 +149,52 @@ finally:
     )
     assert "문서 읽기" in body
     assert "[FULL_BODY_TAIL]" in body
+
+
+def test_wiki_browser_shows_recent_merge_log():
+    """유빈님 요청(2026-09-06): 어떤 문서가 어떤 문서로 병합됐는지 mywiki 처럼
+    보고 싶다 — AI 위키 탭에 최근 병합 이력 섹션이 실제로 렌더링되는지 확인."""
+    script = f"""
+import os, sys, streamlit as st
+sys.path.insert(0, {ROOT!r})
+from agent_console import wiki
+from dashboard import wiki_browser
+_wiki_stubs = {{
+    "stats": wiki.stats,
+    "list_pages": wiki.list_pages,
+    "build_context_section": wiki.build_context_section,
+    "delete_page": wiki.delete_page,
+    "upsert_page": wiki.upsert_page,
+    "capture_from_chat": wiki.capture_from_chat,
+}}
+try:
+    merge_event = {{
+        "event_id": "merge-001", "action": "merge", "occurred_at": "2026-09-05T00:00:00+00:00",
+        "target_id": "p2", "source_ids": ["p1"], "source_titles": ["옛 카드"],
+        "reason": "같은 판단", "synthesis": "통합 요약", "status": "completed",
+    }}
+    wiki.stats = lambda: {{"total": 1, "status_counts": {{"draft": 0, "reviewed": 1, "stable": 0, "archived": 1}}, "latest": {{"title": "새 카드"}}}}
+    wiki.list_pages = lambda *args, **kwargs: [
+        {{"id": "p2", "title": "새 카드", "summary": "요약", "body": "본문", "tags": ["wiki"], "status": "reviewed", "surface": "portfolio", "kind": "note", "source_refs": [], "merge_history": [merge_event], "updated_at": "2026-07-13T02:00:00+00:00"}},
+    ]
+    wiki.build_context_section = lambda **kwargs: "[위키 지식]\\n- stub"
+    wiki.delete_page = lambda page_id: True
+    wiki.upsert_page = lambda payload: dict(payload, id=payload.get("id") or "p1")
+    wiki.capture_from_chat = lambda *args, **kwargs: {{"id": "p1", "title": "captured"}}
+    wiki_browser.render_wiki_tab('market', {{"chat_rows": []}})
+finally:
+    for _name, _value in _wiki_stubs.items():
+        setattr(wiki, _name, _value)
+"""
+    at = AppTest.from_string(script, default_timeout=30)
+    at.run()
+    assert not at.exception, str(at.exception)
+    body = " ".join(
+        str(getattr(item, "value", ""))
+        for collection in (at.markdown, at.caption, getattr(at, "text", []))
+        for item in collection
+    )
+    expander_labels = " ".join(str(getattr(exp, "label", "")) for exp in at.expander)
+    assert "최근 병합 이력" in expander_labels
+    assert "옛 카드" in body and "새 카드" in body
+    assert "같은 판단" in body

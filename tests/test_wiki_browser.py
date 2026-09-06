@@ -274,3 +274,74 @@ def test_selected_evidence_keeps_merge_archive_history():
 
     assert model["merge_event_id"] == "merge-001"
     assert model["merge_history"][0]["source_ids"] == ["old-card"]
+
+
+def test_safe_markdown_bold_escapes_embedded_emphasis_markers():
+    """실측(2026-09-06): 대화 승격 제목이 원본 답변의 **강조** 구문을 그대로 물고
+    들어온 사례가 있었다 — 카드가 제목을 `**{title}**`로 다시 감싸면 중첩
+    마크다운이 깨져 별표가 글자 그대로 화면에 노출됐다(문서 브라우저 카드
+    '**방금 말은 **"..."**의 후속으로...' 처럼). _derive_title 을 고쳐 새 제목은
+    깨끗해지지만, 이미 저장된 낡은 제목도 안전하게 보이도록 렌더링 쪽에서도
+    별표·밑줄·백틱을 이스케이프해 항상 온전한 굵은 글씨로 보이게 한다."""
+    raw = '**방금 말은 **"오늘 시장 변화가 어디서 시작됐는지 추적해줘"**의 후속으로 이해했습니다.'
+    escaped = wiki_browser.safe_markdown_bold(raw)
+
+    assert escaped == r'**\*\*방금 말은 \*\*"오늘 시장 변화가 어디서 시작됐는지 추적해줘"\*\*의 후속으로 이해했습니다.**'
+    assert "*" not in escaped.strip("*").replace(r"\*", "")
+
+
+def test_safe_markdown_bold_leaves_plain_titles_untouched():
+    from dashboard import wiki_browser
+
+    assert wiki_browser.safe_markdown_bold("손실한도와 레버리지") == "**손실한도와 레버리지**"
+
+
+def _merge_event(event_id, *, target_id, source_ids, source_titles, occurred_at, reason="같은 판단"):
+    return {
+        "event_id": event_id,
+        "action": "merge",
+        "occurred_at": occurred_at,
+        "target_id": target_id,
+        "source_ids": source_ids,
+        "source_titles": source_titles,
+        "reason": reason,
+        "synthesis": "통합 요약",
+        "status": "completed",
+    }
+
+
+def test_build_merge_log_dedupes_event_seen_on_both_target_and_source(monkeypatch):
+    """agent_console.wiki._merge_pages 는 타깃과 소스 양쪽에 같은 event_id 를
+    저장한다 — 병합 로그는 이걸 한 번만 세야 한다."""
+    event = _merge_event(
+        "merge-001", target_id="target-1", source_ids=["source-1"],
+        source_titles=["옛 카드"], occurred_at="2026-09-05T00:00:00+00:00",
+    )
+    pages = [
+        {"id": "target-1", "title": "새 카드", "status": "reviewed", "merge_history": [event]},
+        {"id": "source-1", "title": "옛 카드", "status": "archived", "merge_history": [event], "merged_into": "target-1"},
+    ]
+
+    log = wiki_browser.build_merge_log(pages)
+
+    assert len(log) == 1
+    assert log[0]["event_id"] == "merge-001"
+    assert log[0]["target_title"] == "새 카드"
+    assert log[0]["source_titles"] == ["옛 카드"]
+
+
+def test_build_merge_log_orders_most_recent_first_and_respects_limit():
+    events = [
+        _merge_event("merge-old", target_id="t1", source_ids=["s1"], source_titles=["A"], occurred_at="2026-09-01T00:00:00+00:00"),
+        _merge_event("merge-mid", target_id="t2", source_ids=["s2"], source_titles=["B"], occurred_at="2026-09-03T00:00:00+00:00"),
+        _merge_event("merge-new", target_id="t3", source_ids=["s3"], source_titles=["C"], occurred_at="2026-09-05T00:00:00+00:00"),
+    ]
+    pages = [
+        {"id": "t1", "title": "T1", "merge_history": [events[0]]},
+        {"id": "t2", "title": "T2", "merge_history": [events[1]]},
+        {"id": "t3", "title": "T3", "merge_history": [events[2]]},
+    ]
+
+    log = wiki_browser.build_merge_log(pages, limit=2)
+
+    assert [item["event_id"] for item in log] == ["merge-new", "merge-mid"]

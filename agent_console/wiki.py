@@ -2545,16 +2545,25 @@ def _recently_created_dedup(question: str, surface: str, *, hours: int = 24) -> 
     return False
 
 
+_TITLE_MARKDOWN_RE = re.compile(r"[*_`]")
+
+
 def _derive_title(question: str, answer: str) -> str:
-    """답변에서 bullet point 기반 제목을 추출, 없으면 질문."""
+    """답변에서 bullet point 기반 제목을 추출, 없으면 질문.
+
+    후보 줄에서 마크다운 강조 문자(*_`)를 제거한다 — 그대로 두면 카드가 제목을
+    다시 `**{title}**`로 감쌀 때 중첩 마크다운이 깨져 별표가 글자 그대로
+    노출된다(실측 2026-09-06: "**방금 말은 **"...""처럼 원본 답변의 강조
+    구문을 물고 온 제목).
+    """
     for line in _clean(answer, 300).splitlines():
-        stripped = line.strip().lstrip("-•*").strip()
+        stripped = _TITLE_MARKDOWN_RE.sub("", line.strip().lstrip("-•*")).strip()
         if 12 <= len(stripped) <= 55:
             return stripped[:80]
-    q = _clean(question, 120)
+    q = _TITLE_MARKDOWN_RE.sub("", _clean(question, 120)).strip()
     if q:
         return q[:80]
-    a = _clean(answer, 120)
+    a = _TITLE_MARKDOWN_RE.sub("", _clean(answer, 120)).strip()
     return a[:80] or "위키 페이지"
 
 
