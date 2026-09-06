@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import math
+
 from dashboard import wiki_mesh
 
 
@@ -295,3 +297,26 @@ def test_build_figure_adds_soft_halo_layer_behind_labeled_hub_nodes():
     assert halo.marker.opacity < 0.3
     labeled = figure.data[labeled_idx]
     assert all(h > s for h, s in zip(halo.marker.size, labeled.marker.size))
+
+
+def test_declutter_labeled_positions_pushes_overlapping_hubs_apart():
+    """유빈님 요청(2026-09-06): 시각화를 더 개선 — 큰 그래프는 격자로 배치되는데
+    (좌표 순서 기반), 연결 밀도로 뽑힌 허브 노드가 우연히 인접 칸에 놓이면 라벨이
+    겹친다. 라벨 붙는 노드끼리만 최소 간격을 확보하도록 밀어내고, 라벨 없는
+    노드는 그대로 둬야 한다."""
+    positions = {
+        "hub-a": (0.0, 0.0),
+        "hub-b": (0.01, 0.0),  # 격자 충돌 재현 — 사실상 같은 자리
+        "leaf-x": (5.0, 5.0),
+    }
+    result = wiki_mesh._declutter_labeled_positions(positions, {"hub-a", "hub-b"}, min_separation=0.16)
+
+    dist = math.dist(result["hub-a"], result["hub-b"])
+    assert dist >= 0.15  # 부동소수 오차 감안
+    assert result["leaf-x"] == (5.0, 5.0)  # 라벨 없는 노드는 손대지 않음
+
+
+def test_declutter_labeled_positions_noop_when_already_spread_out():
+    positions = {"hub-a": (0.0, 0.0), "hub-b": (3.0, 3.0)}
+    result = wiki_mesh._declutter_labeled_positions(positions, {"hub-a", "hub-b"}, min_separation=0.16)
+    assert result == positions

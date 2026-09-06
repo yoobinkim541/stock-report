@@ -788,9 +788,51 @@ def _rest_node_opacity(degree: int) -> float:
     return max(0.24, min(0.8, 0.24 + int(degree or 0) * 0.07))
 
 
+def _declutter_labeled_positions(
+    positions: dict[str, tuple[float, float]],
+    label_ids: set[str],
+    *,
+    min_separation: float = 0.16,
+    iterations: int = 40,
+) -> dict[str, tuple[float, float]]:
+    """라벨 붙는 허브 노드끼리 최소 간격을 확보하도록 서로 밀어낸다.
+
+    실측(2026-09-06): 큰 그래프는 좌표 순서로 배치되는 격자 레이아웃을 쓰는데
+    (_layout_large_nodes), 연결 밀도로 뽑힌 허브 노드가 우연히 인접 칸에 놓이면
+    라벨끼리 겹친다. 라벨 없는 나머지 노드는 그대로 두고, 라벨이 붙는 소수
+    (최대 16개)만 서로 반발시켜 텍스트 겹침을 줄인다 — 유빈님 확인 후 추가.
+    """
+    ids = [nid for nid in label_ids if nid in positions]
+    if len(ids) < 2:
+        return positions
+    pts = np.array([positions[nid] for nid in ids], dtype=float)
+    for _ in range(iterations):
+        moved = False
+        for i in range(len(ids)):
+            for j in range(i + 1, len(ids)):
+                diff = pts[i] - pts[j]
+                dist = float(np.linalg.norm(diff))
+                if dist < min_separation:
+                    moved = True
+                    if dist < 1e-6:
+                        diff = np.array([0.01, 0.01 * (1 if i % 2 == 0 else -1)])
+                        dist = float(np.linalg.norm(diff))
+                    unit = diff / dist
+                    push = (min_separation - dist) / 2.0
+                    pts[i] += unit * push
+                    pts[j] -= unit * push
+        if not moved:
+            break
+    updated = dict(positions)
+    for nid, pt in zip(ids, pts):
+        updated[nid] = (float(pt[0]), float(pt[1]))
+    return updated
+
+
 def _build_figure(model: dict[str, Any]) -> go.Figure:
     nodes = model.get("nodes") or []
     positions = model.get("positions") or {}
+    positions = _declutter_labeled_positions(positions, _label_node_ids(nodes))
     edges = model.get("edges") or []
     groups = model.get("groups") or []
     trace_type = go.Scattergl if len(nodes) >= 300 else go.Scatter
