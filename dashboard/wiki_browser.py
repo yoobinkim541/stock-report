@@ -182,27 +182,35 @@ def safe_markdown_bold(text: str) -> str:
     return f"**{escaped}**"
 
 
-def _render_page_card(page: dict[str, Any]) -> str:
+def _tree_item_label(page: dict[str, Any]) -> str:
+    status_dot = {"draft": "○", "reviewed": "◐", "stable": "●", "archived": "▢"}.get(
+        str(page.get("status") or "draft"), "○"
+    )
+    return f"{status_dot} {_clean(page.get('title') or '위키', 60)}"
+
+
+def _render_tree_item(page: dict[str, Any], *, selected_page_id: str = "") -> str:
+    """Obsidian 탐색기처럼 제목을 누르면 바로 열리는 한 줄짜리 트리 항목.
+
+    유빈님 요청(2026-09-06): 위키 문서 보는 UI를 Obsidian 같은 노트 앱 스타일로
+    (좌측 파일 트리 + 가운데 문서 + 우측 백링크). 기존 카드형(제목·캡션·태그·
+    불러오기/삭제 버튼)은 한 문서당 세로 공간을 많이 써 트리처럼 훑어보기
+    어려웠다 — 한 줄 버튼으로 압축하고, 삭제는 문서를 연 뒤 편집 모드에서
+    하도록 옮긴다(우발적 삭제 방지 겸 실제 파일 탐색기 동작에 더 가까움).
+    """
     import streamlit as st
 
-    with st.container(border=True):
-        st.markdown(safe_markdown_bold(page.get("title", "위키")))
-        st.caption(f"{page.get('surface', 'wiki')} · {page.get('kind', 'note')} · {page.get('status', 'draft')}")
-        if page.get("summary"):
-            st.caption(str(page["summary"])[:180])
-        if page.get("tags"):
-            st.caption(" · ".join(page["tags"][:5]))
-        btn1, btn2 = st.columns(2)
-        if btn1.button("불러오기", key=f"wiki_load_{page.get('id')}", width="stretch"):
-            selected_id = str(page.get("id") or "")
-            st.session_state["agent_wiki_selected_page_id"] = selected_id
-            st.toast("위키 페이지를 불러왔습니다.")
-            return selected_id
-        if btn2.button("삭제", key=f"wiki_drop_{page.get('id')}", width="stretch"):
-            if wiki.delete_page(page.get("id")):
-                st.session_state.pop("agent_wiki_selected_page_id", None)
-                st.toast("위키 페이지 삭제 완료")
-                st.rerun()
+    page_id = str(page.get("id") or "")
+    is_selected = page_id != "" and page_id == selected_page_id
+    if st.button(
+        _tree_item_label(page),
+        key=f"wiki_tree_{page_id}",
+        width="stretch",
+        type="primary" if is_selected else "secondary",
+    ):
+        st.session_state["agent_wiki_selected_page_id"] = page_id
+        st.session_state["wiki_editor_mode"] = "read"
+        return page_id
     return ""
 
 
@@ -830,11 +838,18 @@ def render_wiki_tab(surface: str, pack: dict[str, Any] | None = None) -> None:
         selected_page_id = browser["selected_id"]
         st.session_state["agent_wiki_selected_page_id"] = selected_page_id
 
-    left, center, right = st.columns([0.92, 1.18, 0.9], gap="large")
+    # Obsidian 식 3단 레이아웃 — 좌측 탐색기(파일 트리) · 가운데 문서(읽기/편집
+    # 토글, 한 페이지에서 전환) · 우측 백링크·태그·병합 이력 사이드바.
+    left, center, right = st.columns([0.8, 1.5, 0.85], gap="large")
     load_selected_id = ""
     with left:
-        st.markdown("##### 문서 브라우저")
-        st.caption(f"{browser.get('visible_count', 0)}개 표시 · {len(browser.get('groups') or [])}개 그룹")
+        header_col, new_col = st.columns([2, 1])
+        header_col.markdown("##### 탐색기")
+        if new_col.button("+ 새 글", key="wiki_new_page", width="stretch"):
+            st.session_state.pop("agent_wiki_selected_page_id", None)
+            st.session_state["wiki_editor_mode"] = "edit"
+            st.rerun()
+        st.caption(f"{browser.get('visible_count', 0)}개 · {len(browser.get('groups') or [])}개 그룹")
         groups = browser.get("groups") or []
         visible = browser.get("visible") or []
         if visible:
@@ -844,14 +859,15 @@ def render_wiki_tab(surface: str, pack: dict[str, Any] | None = None) -> None:
                 if display_count < len(visible):
                     st.caption(f"최신 문서 {display_count}개 표시 · 전체 {len(visible)}개")
                 for group in display_groups:
-                    st.markdown(f"**{group.get('label', group.get('surface', 'wiki'))}** · {group.get('count', 0)}개")
-                    for page in group.get("pages") or []:
-                        loaded = _render_page_card(page)
-                        if loaded:
-                            load_selected_id = loaded
+                    label = f"📁 {group.get('label', group.get('surface', 'wiki'))} · {group.get('count', 0)}"
+                    with st.expander(label, expanded=True):
+                        for page in group.get("pages") or []:
+                            loaded = _render_tree_item(page, selected_page_id=selected_page_id)
+                            if loaded:
+                                load_selected_id = loaded
             else:
                 for page in visible[:DOCUMENT_BROWSER_PAGE_SIZE]:
-                    loaded = _render_page_card(page)
+                    loaded = _render_tree_item(page, selected_page_id=selected_page_id)
                     if loaded:
                         load_selected_id = loaded
         else:
@@ -871,154 +887,174 @@ def render_wiki_tab(surface: str, pack: dict[str, Any] | None = None) -> None:
             selected_page_id = browser["selected_id"]
             st.session_state["agent_wiki_selected_page_id"] = selected_page_id
 
+    editor_mode = str(st.session_state.get("wiki_editor_mode") or "read")
+    browser_selected = browser.get("selected") or {}
+    preview_page = browser_selected
+    if not preview_page.get("body") and selected_page_id:
+        preview_page = wiki.get_page(selected_page_id) or browser_selected
+    prompt_preview = ""
+    evidence: dict[str, Any] = {}
+    if preview_page:
+        prompt_preview = wiki.build_context_section(
+            query=query or preview_page.get("title", ""),
+            surface=str(preview_page.get("surface") or surface_filter or surface),
+            limit=4,
+        )
+        evidence = build_selected_evidence_model(preview_page, context_section=prompt_preview)
+
     with center:
-        st.markdown("##### 문서 읽기")
-        browser_selected = browser.get("selected") or {}
-        preview_page = browser_selected
-        if not preview_page.get("body") and selected_page_id:
-            preview_page = wiki.get_page(selected_page_id) or browser_selected
-        if not preview_page:
-            st.info("왼쪽에서 페이지를 선택해 보세요.")
-        else:
-            with st.container(border=True):
-                prompt_preview = wiki.build_context_section(
-                    query=query or preview_page.get("title", ""),
-                    surface=str(preview_page.get("surface") or surface_filter or surface),
-                    limit=4,
-                )
-                evidence = build_selected_evidence_model(preview_page, context_section=prompt_preview)
-                st.markdown(safe_markdown_bold(evidence.get("title", "위키 페이지")))
-                st.caption(
-                    f"{preview_page.get('surface', 'wiki')} · {preview_page.get('kind', 'note')} · {preview_page.get('status', 'draft')}"
-                )
-
-                st.markdown("##### 요약")
-                st.write(evidence.get("summary") or evidence.get("judgment") or "요약이 아직 없습니다.")
-
-                st.markdown("##### 본문 전체")
-                if evidence.get("body"):
-                    st.markdown(evidence["body"])
-                else:
-                    st.info("본문이 아직 없습니다.")
-
-                st.markdown("##### 근거")
-                refs = evidence.get("evidence") or []
-                if refs:
-                    for ref in refs[:8]:
-                        st.caption(f"source ref · {ref}")
-                else:
-                    st.warning("원문 출처가 없어 대화 기반 참고로만 사용됩니다.")
-
-                st.markdown("##### 검증")
-                st.caption(f"verification: {evidence.get('verification_status', 'unverified')}")
-                for warning in evidence.get("warnings") or []:
-                    st.warning(warning)
-
-                if evidence.get("open_questions"):
-                    st.markdown("##### 열린 질문")
-                    for item in evidence["open_questions"][:6]:
-                        st.markdown(f"- {item}")
-
-                if evidence.get("tags"):
-                    st.caption("태그: " + " · ".join(evidence["tags"]))
-
-                if evidence.get("merge_history") or evidence.get("merged_into"):
-                    st.markdown("##### 병합/아카이브 기록")
-                    if evidence.get("merged_into"):
-                        st.caption(f"이 문서는 {evidence['merged_into']}에 병합되어 보관 중입니다.")
-                    for event in evidence.get("merge_history") or []:
-                        source_titles = ", ".join(event.get("source_titles") or event.get("source_ids") or [])
-                        detail = f"{event.get('occurred_at', '')} · {event.get('action', 'merge')}"
-                        if source_titles:
-                            detail += f" · 원본: {source_titles}"
-                        st.caption(detail)
-                        if event.get("reason"):
-                            st.write(event["reason"])
-
-                with st.expander("프롬프트 주입 참고", expanded=False):
-                    if evidence.get("prompt_preview"):
-                        st.code(evidence["prompt_preview"], language="text")
-                    else:
-                        st.caption("현재 필터로 주입될 위키 지식이 없습니다.")
-
-                related = browser.get("related") or []
-                if related:
-                    st.markdown("##### 관련 페이지")
-                    for page in related[:4]:
-                        st.markdown(f"- {page.get('title', '위키')} · {page.get('status', 'draft')} · {page.get('surface', 'wiki')}")
-
-                split_children = wiki.split_children_for_page(preview_page)
-                if split_children:
-                    st.markdown("##### 분할된 세부 문서")
-                    for child in split_children[:6]:
-                        with st.container(border=True):
-                            st.markdown(safe_markdown_bold(child.get("title", "세부 문서")))
-                            st.caption(
-                                f"{child.get('surface', 'wiki')} · {child.get('kind', 'note')} · {child.get('status', 'draft')}"
-                            )
-                            if child.get("summary"):
-                                st.caption(str(child["summary"])[:180])
-                            if st.button("읽기", key=f"wiki_split_child_{child.get('id')}", width="stretch"):
-                                selected_page_id = str(child.get("id") or "")
-                                st.session_state["agent_wiki_selected_page_id"] = selected_page_id
-                                st.rerun()
-
-    with right:
-        st.markdown("##### 편집기")
-        editor_page = browser.get("selected") or {}
-        if not editor_page.get("body"):
-            editor_page = wiki.get_page(st.session_state.get("agent_wiki_selected_page_id", "")) or editor_page
-        default_page = editor_page or {"title": query[:80] or "새 위키 페이지", "surface": surface if surface != "all" else "market", "kind": "note", "status": "draft", "tags": [], "summary": "", "body": "", "source_refs": [], "confidence": 0.7}
-        with st.form("wiki_editor", clear_on_submit=False):
-            title = st.text_input("제목", value=default_page.get("title", ""))
-            editor_surface = st.selectbox(
-                "surface",
-                SURFACE_OPTIONS[1:],
-                index=max(0, SURFACE_OPTIONS[1:].index(default_page.get("surface", "market"))
-                      if default_page.get("surface", "market") in SURFACE_OPTIONS[1:] else 0),
-                key="wiki_editor_surface",
-            )
-            kind = st.selectbox(
-                "kind",
-                KIND_OPTIONS[1:],
-                index=max(0, KIND_OPTIONS[1:].index(default_page.get("kind", "note"))
-                      if default_page.get("kind", "note") in KIND_OPTIONS[1:] else 0),
-                key="wiki_editor_kind",
-            )
-            editor_status = st.selectbox(
-                "status",
-                ["draft", "reviewed", "stable", "archived"],
-                index=max(0, ["draft", "reviewed", "stable", "archived"].index(default_page.get("status", "draft"))
-                      if default_page.get("status", "draft") in ["draft", "reviewed", "stable", "archived"] else 0),
-                key="wiki_editor_status",
-            )
-            tags = st.text_input("tags", value=", ".join(default_page.get("tags", [])))
-            summary = st.text_area("요약", value=default_page.get("summary", ""), height=130)
-            body = st.text_area("본문", value=default_page.get("body", ""), height=220)
-            source_refs = st.text_input("source refs", value=", ".join(default_page.get("source_refs", [])))
-            parsed_source_refs = [item.strip() for item in source_refs.replace(";", ",").split(",") if item.strip()]
-            guardrail = promotion_guardrail(editor_status, parsed_source_refs)
-            if not guardrail.get("allowed"):
-                st.warning(f"승격 불가: {guardrail.get('message')} 저장 시 {guardrail.get('downgraded_to')}로 낮아집니다.")
-            if st.form_submit_button("위키 저장", type="primary", width="stretch"):
-                saved = wiki.upsert_page(
-                    {
-                        "id": default_page.get("id"),
-                        "title": title,
-                        "surface": editor_surface,
-                        "kind": kind,
-                        "status": editor_status,
-                        "tags": [item.strip() for item in tags.replace(";", ",").split(",") if item.strip()],
-                        "summary": summary,
-                        "body": body,
-                        "source_refs": parsed_source_refs,
-                        "confidence": default_page.get("confidence", 0.7),
-                    }
-                )
-                st.session_state["agent_wiki_selected_page_id"] = saved.get("id")
-                st.success("위키 페이지를 저장했습니다.")
+        title_col, mode_col = st.columns([3, 1])
+        title_col.markdown("##### 문서 읽기" if editor_mode == "read" else "##### 문서 편집")
+        if preview_page or editor_mode == "edit":
+            toggle_label = "편집" if editor_mode == "read" else "읽기로"
+            if mode_col.button(toggle_label, key="wiki_mode_toggle", width="stretch"):
+                st.session_state["wiki_editor_mode"] = "edit" if editor_mode == "read" else "read"
                 st.rerun()
 
+        if editor_mode == "read":
+            if not preview_page:
+                st.info("왼쪽 탐색기에서 페이지를 선택해 보세요.")
+            else:
+                with st.container(border=True):
+                    st.markdown(safe_markdown_bold(evidence.get("title", "위키 페이지")))
+                    st.caption(
+                        f"{preview_page.get('surface', 'wiki')} · {preview_page.get('kind', 'note')} · "
+                        f"{preview_page.get('status', 'draft')} · verification: {evidence.get('verification_status', 'unverified')}"
+                    )
+                    summary_text = evidence.get("summary") or evidence.get("judgment")
+                    if summary_text:
+                        st.caption(summary_text)
+
+                    if evidence.get("body"):
+                        st.markdown(evidence["body"])
+                    else:
+                        st.info("본문이 아직 없습니다.")
+
+                    for warning in evidence.get("warnings") or []:
+                        st.warning(warning)
+
+                    refs = evidence.get("evidence") or []
+                    with st.expander(f"근거 · {len(refs)}", expanded=False):
+                        if refs:
+                            for ref in refs[:8]:
+                                st.caption(f"source ref · {ref}")
+                        else:
+                            st.warning("원문 출처가 없어 대화 기반 참고로만 사용됩니다.")
+
+                    if evidence.get("open_questions"):
+                        with st.expander(f"열린 질문 · {len(evidence['open_questions'])}", expanded=False):
+                            for item in evidence["open_questions"][:6]:
+                                st.markdown(f"- {item}")
+
+                    with st.expander("프롬프트 주입 참고", expanded=False):
+                        if evidence.get("prompt_preview"):
+                            st.code(evidence["prompt_preview"], language="text")
+                        else:
+                            st.caption("현재 필터로 주입될 위키 지식이 없습니다.")
+        else:
+            editor_page = preview_page or {}
+            default_page = editor_page or {"title": query[:80] or "새 위키 페이지", "surface": surface if surface != "all" else "market", "kind": "note", "status": "draft", "tags": [], "summary": "", "body": "", "source_refs": [], "confidence": 0.7}
+            with st.form("wiki_editor", clear_on_submit=False):
+                title = st.text_input("제목", value=default_page.get("title", ""))
+                editor_surface = st.selectbox(
+                    "surface",
+                    SURFACE_OPTIONS[1:],
+                    index=max(0, SURFACE_OPTIONS[1:].index(default_page.get("surface", "market"))
+                          if default_page.get("surface", "market") in SURFACE_OPTIONS[1:] else 0),
+                    key="wiki_editor_surface",
+                )
+                kind = st.selectbox(
+                    "kind",
+                    KIND_OPTIONS[1:],
+                    index=max(0, KIND_OPTIONS[1:].index(default_page.get("kind", "note"))
+                          if default_page.get("kind", "note") in KIND_OPTIONS[1:] else 0),
+                    key="wiki_editor_kind",
+                )
+                editor_status = st.selectbox(
+                    "status",
+                    ["draft", "reviewed", "stable", "archived"],
+                    index=max(0, ["draft", "reviewed", "stable", "archived"].index(default_page.get("status", "draft"))
+                          if default_page.get("status", "draft") in ["draft", "reviewed", "stable", "archived"] else 0),
+                    key="wiki_editor_status",
+                )
+                tags = st.text_input("tags", value=", ".join(default_page.get("tags", [])))
+                summary = st.text_area("요약", value=default_page.get("summary", ""), height=130)
+                body = st.text_area("본문", value=default_page.get("body", ""), height=280)
+                source_refs = st.text_input("source refs", value=", ".join(default_page.get("source_refs", [])))
+                parsed_source_refs = [item.strip() for item in source_refs.replace(";", ",").split(",") if item.strip()]
+                guardrail = promotion_guardrail(editor_status, parsed_source_refs)
+                if not guardrail.get("allowed"):
+                    st.warning(f"승격 불가: {guardrail.get('message')} 저장 시 {guardrail.get('downgraded_to')}로 낮아집니다.")
+                if st.form_submit_button("위키 저장", type="primary", width="stretch"):
+                    saved = wiki.upsert_page(
+                        {
+                            "id": default_page.get("id"),
+                            "title": title,
+                            "surface": editor_surface,
+                            "kind": kind,
+                            "status": editor_status,
+                            "tags": [item.strip() for item in tags.replace(";", ",").split(",") if item.strip()],
+                            "summary": summary,
+                            "body": body,
+                            "source_refs": parsed_source_refs,
+                            "confidence": default_page.get("confidence", 0.7),
+                        }
+                    )
+                    st.session_state["agent_wiki_selected_page_id"] = saved.get("id")
+                    st.session_state["wiki_editor_mode"] = "read"
+                    st.success("위키 페이지를 저장했습니다.")
+                    st.rerun()
+            if default_page.get("id"):
+                if st.button("🗑 이 페이지 삭제", key=f"wiki_delete_{default_page.get('id')}", width="stretch"):
+                    if wiki.delete_page(default_page["id"]):
+                        st.session_state.pop("agent_wiki_selected_page_id", None)
+                        st.session_state["wiki_editor_mode"] = "read"
+                        st.toast("위키 페이지 삭제 완료")
+                        st.rerun()
+
+    with right:
+        st.markdown("##### 백링크 · 태그")
+        if not preview_page:
+            st.caption("페이지를 선택하면 관련 문서·태그·병합 이력이 여기 표시됩니다.")
+        else:
+            related = browser.get("related") or []
+            st.markdown("###### 관련 문서")
+            if related:
+                for page in related[:6]:
+                    if st.button(f"↳ {_clean(page.get('title') or '위키', 50)}", key=f"wiki_related_{page.get('id')}", width="stretch"):
+                        st.session_state["agent_wiki_selected_page_id"] = page.get("id")
+                        st.session_state["wiki_editor_mode"] = "read"
+                        st.rerun()
+            else:
+                st.caption("관련 문서 없음")
+
+            if evidence.get("tags"):
+                st.markdown("###### 태그")
+                st.caption(" · ".join(evidence["tags"]))
+
+            if evidence.get("merge_history") or evidence.get("merged_into"):
+                st.markdown("###### 병합/아카이브 기록")
+                if evidence.get("merged_into"):
+                    st.caption(f"이 문서는 {evidence['merged_into']}에 병합되어 보관 중입니다.")
+                for event in evidence.get("merge_history") or []:
+                    source_titles = ", ".join(event.get("source_titles") or event.get("source_ids") or [])
+                    detail = f"{event.get('occurred_at', '')} · {event.get('action', 'merge')}"
+                    if source_titles:
+                        detail += f" · 원본: {source_titles}"
+                    st.caption(detail)
+                    if event.get("reason"):
+                        st.write(event["reason"])
+
+            split_children = wiki.split_children_for_page(preview_page)
+            if split_children:
+                st.markdown("###### 분할된 세부 문서")
+                for child in split_children[:6]:
+                    if st.button(f"↳ {_clean(child.get('title') or '세부 문서', 50)}", key=f"wiki_split_child_{child.get('id')}", width="stretch"):
+                        st.session_state["agent_wiki_selected_page_id"] = str(child.get("id") or "")
+                        st.session_state["wiki_editor_mode"] = "read"
+                        st.rerun()
+
+        st.divider()
         st.markdown("##### 최근 대화에서 승격")
         chat_rows = st.session_state.get("agent_chat_messages_auto", [])
         exchange = _last_chat_exchange(chat_rows)
@@ -1038,6 +1074,7 @@ def render_wiki_tab(surface: str, pack: dict[str, Any] | None = None) -> None:
                     source_refs=[f"conversation:{exchange['id']}"],
                 )
                 st.session_state["agent_wiki_selected_page_id"] = saved.get("id")
+                st.session_state["wiki_editor_mode"] = "read"
                 st.toast("대화를 위키로 저장했습니다.")
                 st.rerun()
             if reset_col.button("선택 해제", width="stretch"):
@@ -1047,7 +1084,7 @@ def render_wiki_tab(surface: str, pack: dict[str, Any] | None = None) -> None:
             st.caption("현재 대화 기록이 없어 승격할 항목이 없습니다.")
 
         with st.expander("위키가 챗봇에 들어가는 방식", expanded=False):
-            section = wiki.build_context_section(query=query or preview_page.get("title", ""), surface=surface, limit=4)
+            section = wiki.build_context_section(query=query or (preview_page.get("title", "") if preview_page else ""), surface=surface, limit=4)
             if section:
                 st.code(section, language="text")
             else:
