@@ -98,6 +98,35 @@ def test_run_dry_run_reports_merge_and_split_without_writes(monkeypatch, tmp_pat
     assert wiki.get_page(long_page["id"])["status"] != "archived"
 
 
+def test_run_reserves_split_budget_when_merge_candidates_exceed_limit(monkeypatch, tmp_path):
+    """실측(2026-09-06): 실제 배포 로그에서 5일 연속 '병합 6건, 분할 0건'이 나왔다 —
+    merge 루프가 공유 max_operations 예산을 먼저 다 써버려, 가독성 임계치를 넘는
+    분할 후보(실측 시점에 2건 존재)가 구조적으로 영원히 굶었다. 병합 후보가 예산을
+    넘게 많아도 분할 후보가 있으면 최소 1건은 이번 실행에서 처리돼야 한다."""
+    _isolate(monkeypatch, tmp_path)
+    from agent_console import wiki
+    from reports import wiki_autonomous_curator as curator
+
+    # merge 후보가 예산(limit=2)보다 훨씬 많게 — 서로 다른 4쌍(8페이지)을 만든다.
+    merge_pages = []
+    for i in range(8):
+        merge_pages.append(_page(wiki, title=f"금리 성장주 위험 {i}", body="금리 상승 할인율 성장주 위험 공통 판단"))
+    long_page = _page(wiki, title="분할 대상", body=("## 배경\n" + "배경 문장 " * 700) + "\n\n## 적용\n" + "적용 문장 " * 700)
+
+    import re
+
+    def llm(prompt):
+        if "<operation>merge" in prompt:
+            ids = re.findall(r"^id: (\S+)$", prompt, flags=re.MULTILINE)
+            target_id, source_id = ids[0], ids[1]
+            return '{"action":"merge","target_page_id":"%s","source_page_ids":["%s"],"body":"통합 판단","reason":"같은 판단"}' % (target_id, source_id)
+        return '{"action":"split","source_page_id":"%s","new_titles":["배경","적용"],"new_bodies":["배경 판단","적용 판단"],"reason":"의미 단위"}' % long_page["id"]
+
+    result = curator.run(dry_run=True, llm_fn=llm, limit=2, readability_limit=1000)
+
+    assert len(result["split"]) >= 1, "병합 후보가 넘쳐도 분할 후보는 최소 1건 처리돼야 한다"
+
+
 def test_run_split_persists_parent_page_id(monkeypatch, tmp_path):
     _isolate(monkeypatch, tmp_path)
     from agent_console import wiki

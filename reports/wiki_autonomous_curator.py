@@ -219,12 +219,19 @@ def run(
 
     pages = wiki._all_wiki_pages()
     max_operations = max(1, min(20, int(limit))) if limit is not None else _max_operations()
+    split_candidates = find_split_candidates(pages, readability_limit=readability_limit)
+    # merge 후보는 거의 매일 예산을 다 채울 만큼 많아 분할 루프가 시작도 못 하고
+    # 굶는 구조였다(실측 2026-09-06: 배포 로그 5일 연속 '병합 6건, 분할 0건' —
+    # 가독성 임계치를 넘는 문서가 실제로 있었는데도 분할이 전혀 안 됐다). 분할
+    # 후보가 있으면 merge 가 예산 전부를 못 가져가도록 최소 몫을 미리 떼어둔다.
+    split_reserve = min(len(split_candidates), max(1, max_operations // 3)) if split_candidates else 0
+    merge_budget = max_operations - split_reserve
     merged: list[dict] = []
     split: list[dict] = []
     consumed: set[str] = set()
 
     for first, second, similarity in find_management_pairs(pages):
-        if len(merged) + len(split) >= max_operations:
+        if len(merged) >= merge_budget:
             break
         if str(first.get("id")) in consumed or str(second.get("id")) in consumed:
             continue
@@ -247,7 +254,7 @@ def run(
         merged.append(entry)
         consumed.update([target_id, *source_ids])
 
-    for source in find_split_candidates(pages, readability_limit=readability_limit):
+    for source in split_candidates:
         if len(merged) + len(split) >= max_operations or str(source.get("id")) in consumed:
             break
         try:

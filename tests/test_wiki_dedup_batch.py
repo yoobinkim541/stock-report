@@ -101,6 +101,53 @@ def test_find_candidate_pairs_excludes_dissimilar_pages(monkeypatch, tmp_path):
     assert {a["id"], b["id"]} not in [{p[0]["id"], p[1]["id"]} for p in pairs]
 
 
+def test_find_candidate_pairs_catches_llm_paraphrased_real_duplicates(monkeypatch, tmp_path):
+    """실측(2026-09-06): 실제 위키에서 개념적으로 동일한 두 playbook —
+    '단독·커뮤니티성 종목 신호의 교차검증 절차' / '...기업 이벤트 신호의 교차검증
+    절차' — 이 LLM 증류마다 문구를 다르게 풀어써서 Jaccard 유사도가 0.242밖에 안
+    나왔다. 기존 임계값(0.35)에선 후보로도 못 올라와 5일 연속(9/1~9/5) 병합 후보가
+    0쌍으로 나왔다 — 유빈님 확인 후 임계값을 0.20으로 낮춤(0.25도 이 쌍은 못 잡음).
+    """
+    _isolate(monkeypatch, tmp_path)
+    from agent_console import wiki
+    from reports import wiki_dedup_batch as wdb
+
+    a = _page(
+        wiki,
+        title="단독·커뮤니티성 기업 이벤트 신호의 교차검증 절차",
+        kind="playbook",
+        surface="ticker",
+        body=(
+            "단일 출처나 커뮤니티성 채널에서 전해진 IPO, 인수 확약, 증자와 같은 기업 이벤트는 사실로 "
+            "확정하기보다 초기 탐색 신호로 취급한다. 우선 기사에 등장한 사업체와 분석 대상 티커가 실제로 "
+            "동일한 법인·경제적 노출을 가리키는지 확인하고, 이후 회사 공시·규제기관 자료·공식 발표와 "
+            "가격·거래량·크레딧·환율·수급 및 후속 실적 변화가 같은 방향을 보이는지 점검한다. 공식 자료가 "
+            "확인되거나 여러 독립 출처와 시장 반응이 일치하면 신뢰도를 높일 수 있지만, 출처 간 법인 불일치, "
+            "번역·전재 가능성, 공모 조건 변경, 미확정 소식통이 존재하면 확정적 투자 판단을 유보해야 한다.\n\n"
+            "> **리포트 인용 요약**: 커뮤니티·단독 신호는 가격·재무·공식 자료와 교차확인 전까지 보조 근거로 둔다."
+        ),
+    )
+    b = _page(
+        wiki,
+        title="단독·커뮤니티성 종목 신호의 교차검증 절차",
+        kind="playbook",
+        surface="ticker",
+        body=(
+            "단독 기사나 커뮤니티성 정보처럼 출처가 제한된 종목 신호는 즉시 투자 판단으로 승격하지 않고 "
+            "보조 근거로 분류하는 것이 기본이다. 먼저 동일 사건의 반복 보도 여부와 원출처의 신뢰도를 확인한 "
+            "뒤, 회사의 공식 공시·투자자 자료, 가격·거래량·크레딧·환율 등 시장 데이터, 후속 수급·실적 변화를 "
+            "교차검증해야 한다. 인수·매각 검토설처럼 사실일 경우 자산 가치나 지분 구조에 영향을 줄 수 있는 "
+            "사안도 검토 단계와 확정 거래를 구분하고, 공식 자료와 충돌하거나 후속 확인이 없으면 판단의 확신도를 "
+            "낮게 유지한다.\n\n"
+            "> **리포트 인용 요약**: 커뮤니티/텔레그램 단독 신호는 가격·재무·공식 자료와 교차확인 전에는 "
+            "보조 근거로 둡니다."
+        ),
+    )
+
+    pairs = wdb.find_candidate_pairs(wiki._all_wiki_pages())
+    assert {a["id"], b["id"]} in [{p[0]["id"], p[1]["id"]} for p in pairs]
+
+
 def test_parse_dedup_judgment_plain_json_and_code_fence():
     from reports import wiki_dedup_batch as wdb
 

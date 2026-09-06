@@ -34,7 +34,11 @@ logger = logging.getLogger(__name__)
 
 MAX_PAIRS_PER_RUN = 10
 _DEDUP_KINDS = ("playbook", "risk", "concept")
-_CANDIDATE_MIN_SIMILARITY = 0.35
+# 0.35였을 땐 실측(2026-09-06)으로 5일 연속(10회 실행) 후보 0쌍 — 개념적으로 동일한
+# playbook 쌍도 LLM 증류마다 문구가 달라져 Jaccard 가 0.242 정도로 임계값 밑에서
+# 새고 있었다. 0.20으로 낮춰 이런 패러프레이즈 중복도 LLM 판정 단계까지 올린다
+# (최종 병합 여부는 여전히 엄격한 LLM 판정이 걸러낸다 — 여기는 후보 필터일 뿐).
+_CANDIDATE_MIN_SIMILARITY = 0.20
 
 _DEDUP_PRINCIPLES = """\
 다음 경계 원칙을 반드시 지켜라. 하나라도 해당하면 merge=false다.
