@@ -18,6 +18,11 @@ import os, sys
 sys.path.insert(0, {ROOT!r})
 from agent_console import wiki
 from dashboard import wiki_browser
+# 다른 테스트가 채운 st.cache_data 캐시(list_pages/context_section)가 남아있으면
+# 이 테스트의 스텁 대신 그 스테일 데이터를 돌려준다(테스트끼리 프로세스 공유 캐시
+# 오염) — 각 테스트는 항상 자기 스텁으로만 시작하도록 먼저 비운다.
+wiki_browser._cached_wiki_snapshot.clear()
+wiki_browser._cached_context_section.clear()
 _wiki_stubs = {{
     "stats": wiki.stats,
     "list_pages": wiki.list_pages,
@@ -59,6 +64,11 @@ import os, sys, streamlit as st
 sys.path.insert(0, {ROOT!r})
 from agent_console import wiki
 from dashboard import wiki_browser
+# 다른 테스트가 채운 st.cache_data 캐시(list_pages/context_section)가 남아있으면
+# 이 테스트의 스텁 대신 그 스테일 데이터를 돌려준다(테스트끼리 프로세스 공유 캐시
+# 오염) — 각 테스트는 항상 자기 스텁으로만 시작하도록 먼저 비운다.
+wiki_browser._cached_wiki_snapshot.clear()
+wiki_browser._cached_context_section.clear()
 _wiki_stubs = {{
     "stats": wiki.stats,
     "list_pages": wiki.list_pages,
@@ -114,6 +124,11 @@ import os, sys, streamlit as st
 sys.path.insert(0, {ROOT!r})
 from agent_console import wiki
 from dashboard import wiki_browser
+# 다른 테스트가 채운 st.cache_data 캐시(list_pages/context_section)가 남아있으면
+# 이 테스트의 스텁 대신 그 스테일 데이터를 돌려준다(테스트끼리 프로세스 공유 캐시
+# 오염) — 각 테스트는 항상 자기 스텁으로만 시작하도록 먼저 비운다.
+wiki_browser._cached_wiki_snapshot.clear()
+wiki_browser._cached_context_section.clear()
 _wiki_stubs = {{
     "stats": wiki.stats,
     "list_pages": wiki.list_pages,
@@ -161,6 +176,11 @@ import os, sys, streamlit as st
 sys.path.insert(0, {ROOT!r})
 from agent_console import wiki
 from dashboard import wiki_browser
+# 다른 테스트가 채운 st.cache_data 캐시(list_pages/context_section)가 남아있으면
+# 이 테스트의 스텁 대신 그 스테일 데이터를 돌려준다(테스트끼리 프로세스 공유 캐시
+# 오염) — 각 테스트는 항상 자기 스텁으로만 시작하도록 먼저 비운다.
+wiki_browser._cached_wiki_snapshot.clear()
+wiki_browser._cached_context_section.clear()
 _wiki_stubs = {{
     "stats": wiki.stats,
     "list_pages": wiki.list_pages,
@@ -211,6 +231,11 @@ import os, sys, streamlit as st
 sys.path.insert(0, {ROOT!r})
 from agent_console import wiki
 from dashboard import wiki_browser
+# 다른 테스트가 채운 st.cache_data 캐시(list_pages/context_section)가 남아있으면
+# 이 테스트의 스텁 대신 그 스테일 데이터를 돌려준다(테스트끼리 프로세스 공유 캐시
+# 오염) — 각 테스트는 항상 자기 스텁으로만 시작하도록 먼저 비운다.
+wiki_browser._cached_wiki_snapshot.clear()
+wiki_browser._cached_context_section.clear()
 _wiki_stubs = {{
     "stats": wiki.stats,
     "list_pages": wiki.list_pages,

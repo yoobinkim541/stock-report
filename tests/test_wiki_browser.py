@@ -370,3 +370,25 @@ def test_cached_context_section_skips_recompute_for_unrelated_interactions(monke
     fp2 = (10, "2026-09-05T00:00:00+00:00")  # 실제 데이터 변경(병합 등)
     wiki_browser._cached_context_section(fp2, query="A", surface="market", limit=4)
     assert calls["n"] == 2
+
+
+def test_cached_wiki_snapshot_reuses_list_pages_across_reruns(monkeypatch):
+    """실측(2026-09-06): list_pages+search_health+lint_pages 만으로 약 4.3초 —
+    상호작용마다 다시 부르면 그래프·문맥 캐시로 줄인 이득이 여기서 새 나간다."""
+    from dashboard import wiki_browser
+
+    wiki_browser._cached_wiki_snapshot.clear()
+    calls = {"n": 0}
+
+    def fake_list_pages(**kwargs):
+        calls["n"] += 1
+        return [{"id": "p1", "title": "A"}]
+
+    monkeypatch.setattr(wiki_browser.core_wiki, "list_pages", fake_list_pages)
+    monkeypatch.setattr(wiki_browser.core_wiki, "search_health", lambda: {"provider": "qmd"})
+    monkeypatch.setattr(wiki_browser.core_wiki, "lint_pages", lambda: {"issue_count": 0})
+
+    pages1, _, _ = wiki_browser._cached_wiki_snapshot()
+    pages2, _, _ = wiki_browser._cached_wiki_snapshot()  # 무관한 rerun 재현
+    assert calls["n"] == 1
+    assert pages1 == pages2 == [{"id": "p1", "title": "A"}]

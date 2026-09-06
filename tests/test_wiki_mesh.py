@@ -188,7 +188,7 @@ def test_build_figure_caps_text_labels_on_dense_large_graphs():
     figure = wiki_mesh._build_figure(model)
 
     labeled_trace = next(trace for trace in figure.data if trace.mode == "markers+text")
-    assert len(labeled_trace.text) <= 30
+    assert len(labeled_trace.text) <= 16
 
 
 def test_build_figure_always_labels_the_selected_node_even_in_dense_graphs():
@@ -267,3 +267,31 @@ def test_cached_graph_model_skips_recompute_for_unrelated_interactions(monkeypat
     pages[1]["updated_at"] = "2026-09-05T00:00:00+00:00"  # 실제 변경(병합 등)
     get_model()
     assert calls["n"] == 2
+
+
+def test_rest_node_opacity_grows_with_degree_but_stays_bounded():
+    """유빈님 요청(2026-09-06): 위키 그래프를 더 예쁘게 — 라벨 없는(리프) 노드가
+    전부 고정 불투명도라 대량 노드 덩어리가 평평한 블록으로 보였다. 연결 수가
+    많을수록 점점 진해지되 범위 안에 머물러야 한다."""
+    assert wiki_mesh._rest_node_opacity(0) < wiki_mesh._rest_node_opacity(2) < wiki_mesh._rest_node_opacity(10)
+    assert 0.2 <= wiki_mesh._rest_node_opacity(0) <= 0.3
+    assert wiki_mesh._rest_node_opacity(100) <= 0.8
+
+
+def test_build_figure_adds_soft_halo_layer_behind_labeled_hub_nodes():
+    """허브 노드 뒤에 크고 옅은 후광 레이어를 깔아 은은하게 빛나는 느낌을 준다 —
+    실제 노드(선명한 markers+text)보다 먼저 그려지는 별도 marker-only 트레이스."""
+    pages = [
+        {"id": "page-a", "title": "A", "summary": "A", "surface": "wiki", "kind": "note", "links": ["page-b", "page-c", "page-d"]},
+        {"id": "page-b", "title": "B", "summary": "B", "surface": "wiki", "kind": "note"},
+        {"id": "page-c", "title": "C", "summary": "C", "surface": "wiki", "kind": "note"},
+        {"id": "page-d", "title": "D", "summary": "D", "surface": "wiki", "kind": "note"},
+    ]
+    figure = wiki_mesh._build_figure(wiki_mesh.build_wiki_graph_model(pages, selected_page_id="page-a", max_nodes=10))
+
+    labeled_idx = next(i for i, trace in enumerate(figure.data) if trace.mode == "markers+text")
+    halo = figure.data[labeled_idx - 1]
+    assert halo.mode == "markers"
+    assert halo.marker.opacity < 0.3
+    labeled = figure.data[labeled_idx]
+    assert all(h > s for h, s in zip(halo.marker.size, labeled.marker.size))

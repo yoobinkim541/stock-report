@@ -756,7 +756,7 @@ def _extract_selected_page_id(event: Any) -> str:
     return ""
 
 
-_MAX_LABELED_NODES = 30
+_MAX_LABELED_NODES = 16
 
 
 def _label_node_ids(nodes: list[dict[str, Any]], *, cap: int = _MAX_LABELED_NODES) -> set[str]:
@@ -775,6 +775,17 @@ def _label_node_ids(nodes: list[dict[str, Any]], *, cap: int = _MAX_LABELED_NODE
     )
     remaining = max(0, cap - len(selected_ids))
     return selected_ids | {node["id"] for node in candidates[:remaining]}
+
+
+def _rest_node_opacity(degree: int) -> float:
+    """라벨 없는(리프) 노드의 불투명도를 연결 수에 따라 점진적으로 준다.
+
+    예전엔 라벨 없는 노드가 전부 고정 0.72라 1666개짜리 티커 덩어리가 평평한
+    분홍 블록으로 뭉쳐 보였다(유빈님 2026-09-06: '더 예쁘게'). 연결이 적을수록
+    옅게 가라앉히고 허브에 가까울수록 진해지게 해, 같은 덩어리 안에서도
+    별자리 같은 밝기 차이(깊이감)가 생기게 한다.
+    """
+    return max(0.24, min(0.8, 0.24 + int(degree or 0) * 0.07))
 
 
 def _build_figure(model: dict[str, Any]) -> go.Figure:
@@ -826,6 +837,7 @@ def _build_figure(model: dict[str, Any]) -> go.Figure:
     size_rest: list[float] = []
     color_rest: list[str] = []
     hover_rest: list[str] = []
+    opacity_rest: list[float] = []
 
     label_ids = _label_node_ids(nodes)
     for node in nodes:
@@ -851,6 +863,7 @@ def _build_figure(model: dict[str, Any]) -> go.Figure:
             size_rest.append(size)
             color_rest.append(fill_color)
             hover_rest.append(hover)
+            opacity_rest.append(_rest_node_opacity(node.get("degree", 0)))
 
     if x_rest:
         fig.add_trace(
@@ -862,7 +875,9 @@ def _build_figure(model: dict[str, Any]) -> go.Figure:
                     "size": size_rest,
                     "color": color_rest,
                     "line": {"width": 1.2, "color": "rgba(15,23,42,0.95)"},
-                    "opacity": 0.72,
+                    # 연결이 적은 리프 노드는 옅게, 허브에 가까울수록 진하게 —
+                    # 조밀한 덩어리에도 시각적 깊이(별자리 느낌)가 생기게 한다.
+                    "opacity": opacity_rest,
                 },
                 customdata=custom_rest,
                 hovertext=hover_rest,
@@ -872,6 +887,26 @@ def _build_figure(model: dict[str, Any]) -> go.Figure:
             )
         )
     if x_sel:
+        # 허브 노드 뒤에 크고 옅은 후광(halo) 레이어를 한 겹 깔아 은은하게 빛나는
+        # 느낌을 준다 — 실제 노드보다 먼저 그려 밑에 깔리게 한다.
+        fig.add_trace(
+            trace_type(
+                x=x_sel,
+                y=y_sel,
+                mode="markers",
+                marker={
+                    "size": [round(s * 2.4, 1) for s in size_sel],
+                    "color": color_sel,
+                    "opacity": 0.16,
+                    "line": {"width": 0},
+                },
+                # 후광이 실제 노드와 정확히 같은 좌표에 겹치므로, 클릭이 후광
+                # 쪽으로 잡혀도 같은 페이지로 풀리도록 customdata 를 동일하게 준다.
+                customdata=custom_sel,
+                hoverinfo="skip",
+                showlegend=False,
+            )
+        )
         fig.add_trace(
             trace_type(
                 x=x_sel,
@@ -879,7 +914,7 @@ def _build_figure(model: dict[str, Any]) -> go.Figure:
                 mode="markers+text",
                 text=text_sel,
                 textposition="top center",
-                textfont={"size": 12, "color": "#e2e8f0"},
+                textfont={"size": 12, "color": "#f1f5f9", "family": "Pretendard, -apple-system, sans-serif"},
                 marker={
                     "size": size_sel,
                     "color": color_sel,
@@ -904,18 +939,18 @@ def _build_figure(model: dict[str, Any]) -> go.Figure:
             dict(
                 x=float(centroid[0]),
                 y=float(centroid[1]),
-                text=f"{group.get('label', group.get('surface', '기타'))}<br>{count}개",
+                text=f"<b>{group.get('label', group.get('surface', '기타'))}</b><br>{count}개",
                 showarrow=False,
-                font={"size": 11, "color": "rgba(226,232,240,0.94)"},
-                bgcolor="rgba(15,23,42,0.45)",
-                bordercolor=group.get("color") or "rgba(148,163,184,0.35)",
-                borderwidth=1,
-                borderpad=3,
+                font={"size": 12, "color": "rgba(241,245,249,0.96)", "family": "Pretendard, -apple-system, sans-serif"},
+                bgcolor="rgba(15,23,42,0.62)",
+                bordercolor=group.get("color") or "rgba(148,163,184,0.4)",
+                borderwidth=1.4,
+                borderpad=6,
             )
         )
 
     fig.update_layout(
-        height=680,
+        height=720,
         margin={"l": 8, "r": 8, "t": 10, "b": 10},
         paper_bgcolor="rgba(0,0,0,0)",
         plot_bgcolor="rgba(0,0,0,0)",

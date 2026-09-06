@@ -718,6 +718,30 @@ def _cached_context_section(fingerprint: tuple[int, str], *, query: str, surface
     return core_wiki.build_context_section(query=query, surface=surface, limit=limit)
 
 
+@st.cache_data(ttl=30, show_spinner=False)
+def _cached_wiki_snapshot() -> tuple[list[dict[str, Any]], dict[str, Any], dict[str, Any]]:
+    """wiki.list_pages/search_health/lint_pages 캐시 — 전체 위키 스냅샷.
+
+    실측(2026-09-06): 이 세 호출만으로 약 4.3초(2.4+0.4+1.5) — 그래프·문맥
+    캐시로 줄인 이득이 상호작용마다 여기서 다시 새고 있었다. list_pages 는
+    다른 캐시들의 지문(fingerprint) 원천이라 자기 자신을 지문으로 캐시할 수
+    없으므로, 짧은 TTL(30초)로 캐시한다 — 실시간 수집·자동 병합이 잦은
+    시스템이라 너무 길게 캐시하면 방금 일어난 변화가 늦게 보일 수 있다.
+    이 세션에서 직접 저장/삭제/승격한 경우엔 그 즉시 .clear() 로 무효화해
+    자기 변경은 항상 바로 보이게 한다.
+    """
+    pages_all = core_wiki.list_pages(query="", surface="all", status="all", limit=10000)
+    try:
+        search_health = core_wiki.search_health()
+    except Exception:
+        search_health = {"provider": "fallback", "fallback_available": True, "qmd": {}}
+    try:
+        lint = core_wiki.lint_pages()
+    except Exception:
+        lint = {"issue_count": 0, "issues": []}
+    return pages_all, search_health, lint
+
+
 def _wiki_stats() -> dict[str, Any]:
     from agent_console import wiki
 
@@ -766,15 +790,7 @@ def render_wiki_tab(surface: str, pack: dict[str, Any] | None = None) -> None:
     latest = stats.get("latest") or {}
     cols[3].metric("최근", latest.get("title", "—")[:20] if latest else "—")
 
-    pages_all = wiki.list_pages(query="", surface="all", status="all", limit=10000)
-    try:
-        search_health = wiki.search_health()
-    except Exception:
-        search_health = {"provider": "fallback", "fallback_available": True, "qmd": {}}
-    try:
-        lint = wiki.lint_pages()
-    except Exception:
-        lint = {"issue_count": 0, "issues": []}
+    pages_all, search_health, lint = _cached_wiki_snapshot()
     health = build_wiki_health_model(pages_all, search_health=search_health, lint=lint)
 
     hcols = st.columns(6)
@@ -1018,6 +1034,7 @@ def render_wiki_tab(surface: str, pack: dict[str, Any] | None = None) -> None:
                             "confidence": default_page.get("confidence", 0.7),
                         }
                     )
+                    _cached_wiki_snapshot.clear()
                     st.session_state["agent_wiki_selected_page_id"] = saved.get("id")
                     st.session_state["wiki_editor_mode"] = "read"
                     st.success("위키 페이지를 저장했습니다.")
@@ -1025,6 +1042,7 @@ def render_wiki_tab(surface: str, pack: dict[str, Any] | None = None) -> None:
             if default_page.get("id"):
                 if st.button("🗑 이 페이지 삭제", key=f"wiki_delete_{default_page.get('id')}", width="stretch"):
                     if wiki.delete_page(default_page["id"]):
+                        _cached_wiki_snapshot.clear()
                         st.session_state.pop("agent_wiki_selected_page_id", None)
                         st.session_state["wiki_editor_mode"] = "read"
                         st.toast("위키 페이지 삭제 완료")
@@ -1091,6 +1109,7 @@ def render_wiki_tab(surface: str, pack: dict[str, Any] | None = None) -> None:
                     tags=["conversation", surface],
                     source_refs=[f"conversation:{exchange['id']}"],
                 )
+                _cached_wiki_snapshot.clear()
                 st.session_state["agent_wiki_selected_page_id"] = saved.get("id")
                 st.session_state["wiki_editor_mode"] = "read"
                 st.toast("대화를 위키로 저장했습니다.")
