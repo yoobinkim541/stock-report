@@ -345,3 +345,28 @@ def test_build_merge_log_orders_most_recent_first_and_respects_limit():
     log = wiki_browser.build_merge_log(pages, limit=2)
 
     assert [item["event_id"] for item in log] == ["merge-new", "merge-mid"]
+
+
+def test_cached_context_section_skips_recompute_for_unrelated_interactions(monkeypatch):
+    """실측(2026-09-06): 선택된 문서 1건 기준 build_context_section 호출이
+    4.4초 걸렸다(내부에서 검색 엔진을 다시 탐) — 같은 문서를 열어둔 채 탭 전환·
+    편집 토글처럼 무관한 rerun이 나도 매번 같은 검색을 다시 하고 있었다."""
+    from dashboard import wiki_browser
+
+    wiki_browser._cached_context_section.clear()
+    calls = {"n": 0}
+
+    def fake_build_context_section(*, query, surface, limit):
+        calls["n"] += 1
+        return f"[stub]{query}/{surface}/{limit}"
+
+    monkeypatch.setattr(wiki_browser.core_wiki, "build_context_section", fake_build_context_section)
+
+    fp = (10, "2026-09-01T00:00:00+00:00")
+    wiki_browser._cached_context_section(fp, query="A", surface="market", limit=4)
+    wiki_browser._cached_context_section(fp, query="A", surface="market", limit=4)  # 무관한 rerun 재현
+    assert calls["n"] == 1
+
+    fp2 = (10, "2026-09-05T00:00:00+00:00")  # 실제 데이터 변경(병합 등)
+    wiki_browser._cached_context_section(fp2, query="A", surface="market", limit=4)
+    assert calls["n"] == 2

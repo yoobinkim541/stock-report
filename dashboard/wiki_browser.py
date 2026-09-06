@@ -8,7 +8,10 @@ import hashlib
 import re
 from typing import Any
 
+import streamlit as st
+
 from agent_console import wiki as core_wiki
+from dashboard.wiki_mesh import _corpus_fingerprint
 
 WIKI_SURFACE = "wiki"
 VALID_STATUSES = ("draft", "reviewed", "stable", "archived")
@@ -702,6 +705,19 @@ def _extract_selected_page_id(event: Any) -> str:
     return ""
 
 
+@st.cache_data(ttl=600, show_spinner=False)
+def _cached_context_section(fingerprint: tuple[int, str], *, query: str, surface: str, limit: int) -> str:
+    """agent_console.wiki.build_context_section 캐시.
+
+    실측(2026-09-06): 선택된 문서 1건 기준 이 호출이 4.4초 걸렸다 — query 가
+    비어있지 않으면 내부적으로 검색 엔진(QMD 등)을 다시 타는 무거운 호출인데,
+    문서를 열어둔 채 탭 전환·편집 토글처럼 그래프/문서와 무관한 rerun에도 매번
+    똑같은 (query, surface) 조합으로 다시 검색하고 있었다. 위키 그래프 캐시와
+    같은 지문(fingerprint)으로 실제 데이터 변경 때만 재검색한다.
+    """
+    return core_wiki.build_context_section(query=query, surface=surface, limit=limit)
+
+
 def _wiki_stats() -> dict[str, Any]:
     from agent_console import wiki
 
@@ -887,6 +903,7 @@ def render_wiki_tab(surface: str, pack: dict[str, Any] | None = None) -> None:
             selected_page_id = browser["selected_id"]
             st.session_state["agent_wiki_selected_page_id"] = selected_page_id
 
+    corpus_fingerprint = _corpus_fingerprint(pages_all)
     editor_mode = str(st.session_state.get("wiki_editor_mode") or "read")
     browser_selected = browser.get("selected") or {}
     preview_page = browser_selected
@@ -895,7 +912,8 @@ def render_wiki_tab(surface: str, pack: dict[str, Any] | None = None) -> None:
     prompt_preview = ""
     evidence: dict[str, Any] = {}
     if preview_page:
-        prompt_preview = wiki.build_context_section(
+        prompt_preview = _cached_context_section(
+            corpus_fingerprint,
             query=query or preview_page.get("title", ""),
             surface=str(preview_page.get("surface") or surface_filter or surface),
             limit=4,
@@ -1084,7 +1102,12 @@ def render_wiki_tab(surface: str, pack: dict[str, Any] | None = None) -> None:
             st.caption("현재 대화 기록이 없어 승격할 항목이 없습니다.")
 
         with st.expander("위키가 챗봇에 들어가는 방식", expanded=False):
-            section = wiki.build_context_section(query=query or (preview_page.get("title", "") if preview_page else ""), surface=surface, limit=4)
+            section = _cached_context_section(
+                corpus_fingerprint,
+                query=query or (preview_page.get("title", "") if preview_page else ""),
+                surface=surface,
+                limit=4,
+            )
             if section:
                 st.code(section, language="text")
             else:

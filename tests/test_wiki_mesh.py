@@ -211,3 +211,59 @@ def test_trust_color_for_node_prioritizes_lint_then_verification():
     assert wiki_mesh.trust_color_for_node({"lint_issue_count": 1, "verification_status": "source-backed"}) == wiki_mesh.TRUST_COLORS["lint"]
     assert wiki_mesh.trust_color_for_node({"verification_status": "source-backed"}) == wiki_mesh.TRUST_COLORS["source-backed"]
     assert wiki_mesh.trust_color_for_node({"verification_status": "unverified"}) == wiki_mesh.TRUST_COLORS["unverified"]
+
+
+def test_corpus_fingerprint_changes_only_when_count_or_latest_update_changes():
+    pages_a = [
+        {"id": "p1", "updated_at": "2026-09-01T00:00:00+00:00"},
+        {"id": "p2", "updated_at": "2026-09-02T00:00:00+00:00"},
+    ]
+    pages_same_data = [
+        {"id": "p1", "updated_at": "2026-09-01T00:00:00+00:00"},
+        {"id": "p2", "updated_at": "2026-09-02T00:00:00+00:00"},
+    ]
+    pages_edited = [
+        {"id": "p1", "updated_at": "2026-09-01T00:00:00+00:00"},
+        {"id": "p2", "updated_at": "2026-09-05T00:00:00+00:00"},
+    ]
+    pages_more = [*pages_a, {"id": "p3", "updated_at": "2026-09-03T00:00:00+00:00"}]
+
+    fp_a = wiki_mesh._corpus_fingerprint(pages_a)
+    assert fp_a == wiki_mesh._corpus_fingerprint(pages_same_data)
+    assert fp_a != wiki_mesh._corpus_fingerprint(pages_edited)
+    assert fp_a != wiki_mesh._corpus_fingerprint(pages_more)
+
+
+def test_cached_graph_model_skips_recompute_for_unrelated_interactions(monkeypatch):
+    """실측(2026-09-06): 1810노드 그래프가 편집 토글처럼 그래프와 무관한
+    상호작용(rerun)마다 매번 처음부터 다시 계산돼(force-directed 레이아웃 등)
+    상호작용할 때마다 몇 초씩 걸렸다. 같은 데이터·같은 필터로 다시 부르면
+    build_wiki_graph_model 을 다시 돌리지 않고 캐시를 재사용해야 한다."""
+    wiki_mesh._cached_graph_model.clear()
+    calls = {"n": 0}
+    real_build = wiki_mesh.build_wiki_graph_model
+
+    def spy_build(*args, **kwargs):
+        calls["n"] += 1
+        return real_build(*args, **kwargs)
+
+    monkeypatch.setattr(wiki_mesh, "build_wiki_graph_model", spy_build)
+
+    pages = [
+        {"id": "p1", "title": "A", "summary": "A", "surface": "wiki", "kind": "note", "updated_at": "2026-09-01T00:00:00+00:00"},
+        {"id": "p2", "title": "B", "summary": "B", "surface": "wiki", "kind": "note", "updated_at": "2026-09-02T00:00:00+00:00"},
+    ]
+
+    def get_model():
+        fingerprint = wiki_mesh._corpus_fingerprint(pages)
+        return wiki_mesh._cached_graph_model(
+            pages, fingerprint, selected_page_id="", query="", surface="all", status="all", depth=2, max_nodes=None,
+        )
+
+    get_model()
+    get_model()  # 편집 토글처럼 무관한 rerun — 데이터·필터 그대로
+    assert calls["n"] == 1
+
+    pages[1]["updated_at"] = "2026-09-05T00:00:00+00:00"  # 실제 변경(병합 등)
+    get_model()
+    assert calls["n"] == 2

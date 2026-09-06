@@ -12,6 +12,7 @@ from typing import Any
 
 import numpy as np
 import plotly.graph_objects as go
+import streamlit as st
 
 from agent_console import wiki as core_wiki
 
@@ -932,6 +933,49 @@ def _status_color(status: object) -> str:
     return STATUS_COLORS.get(str(status or "draft").lower(), STATUS_COLORS["draft"])
 
 
+def _corpus_fingerprint(pages: list[dict[str, Any]]) -> tuple[int, str]:
+    """전체 위키 페이지 리스트를 값으로 통째로 해싱하는 대신 개수·최신 갱신
+    시각만으로 가벼운 캐시 키를 만든다.
+
+    실측(2026-09-06): 1810개 노드짜리 그래프가 편집 토글처럼 그래프와 무관한
+    상호작용(매 rerun)마다 인접행렬·레이아웃을 처음부터 다시 계산해 수 초씩
+    걸렸다. st.cache_data 기본 해셔에 페이지 리스트 전체를 그대로 넘기면 그
+    해싱 자체도(각 페이지 본문 포함) 가볍지 않으므로, 개수+최신
+    updated_at(생성/수정/병합/아카이브 시 항상 갱신됨)만으로 변경 여부를 판단한다.
+    """
+    latest = ""
+    for page in pages:
+        updated = str(page.get("updated_at") or page.get("created_at") or "")
+        if updated > latest:
+            latest = updated
+    return (len(pages), latest)
+
+
+@st.cache_data(ttl=600, show_spinner=False)
+def _cached_graph_model(
+    _pages: list[dict[str, Any]],
+    fingerprint: tuple[int, str],
+    *,
+    selected_page_id: str,
+    query: str,
+    surface: str,
+    status: str,
+    depth: int,
+    max_nodes: int | None,
+) -> dict[str, Any]:
+    # fingerprint 는 캐시 키에만 쓰인다 — _pages(밑줄 접두) 는 st.cache_data 가
+    # 해싱하지 않고 캐시 미스일 때만 실제로 읽는다.
+    return build_wiki_graph_model(
+        _pages,
+        selected_page_id=selected_page_id,
+        query=query,
+        surface=surface,
+        status=status,
+        depth=depth,
+        max_nodes=max_nodes,
+    )
+
+
 def render_wiki_mesh(
     pages: Iterable[dict[str, Any]],
     *,
@@ -960,8 +1004,10 @@ def render_wiki_mesh(
     if fit_pressed:
         st.session_state[f"{key}_fit_token"] = datetime.now(timezone.utc).isoformat(timespec="seconds")
 
-    model = build_wiki_graph_model(
-        pages,
+    pages_list = list(pages)
+    model = _cached_graph_model(
+        pages_list,
+        _corpus_fingerprint(pages_list),
         selected_page_id=selected_page_id,
         query=query,
         surface=surface,
