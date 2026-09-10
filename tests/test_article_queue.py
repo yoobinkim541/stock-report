@@ -3,6 +3,7 @@ from __future__ import annotations
 from datetime import datetime, timedelta, timezone
 
 from reports.article_queue import enqueue_events, get_article, load_index
+from reports.evidence_cards import event_to_evidence_card
 
 
 UTC = timezone.utc
@@ -109,3 +110,20 @@ def test_enqueue_prunes_completed_metadata_older_than_fourteen_days(tmp_path):
 
     assert result["pruned"] == 1
     assert set(load_index(root=tmp_path)) == {"https://saveticker.com/news/new"}
+
+
+def test_same_url_merges_bounded_ids_used_by_evidence_cards(tmp_path):
+    now = datetime(2026, 9, 9, tzinfo=UTC)
+    first = _event(id="source-event-1")
+    rediscovered = _event(id="source-event-2", title="새 분석 제목")
+
+    enqueue_events([first, rediscovered], root=tmp_path, now=now)
+    metadata = load_index(root=tmp_path)[first["url"]]
+
+    assert metadata["event_ids"] == ["source-event-1", "source-event-2"]
+    assert metadata["evidence_ids"] == [
+        event_to_evidence_card(first, now=now).id,
+        event_to_evidence_card(rediscovered, now=now).id,
+    ]
+    assert "raw_payload" not in metadata
+    assert "body_raw" not in metadata

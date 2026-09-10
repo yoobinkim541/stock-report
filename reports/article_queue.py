@@ -26,7 +26,7 @@ MAX_INDEX_RECORDS = 10_000
 MAX_EVENT_IDS = 50
 COMPLETED_RETENTION = timedelta(days=14)
 REVALIDATE_AFTER = timedelta(hours=24)
-TERMINAL_STATUSES = {"ready", "failed", "unavailable", "needs_browser", "blocked"}
+TERMINAL_STATUSES = {"ready", "failed", "unavailable", "needs_browser", "blocked", "capacity"}
 TRACKING_PARAMETERS = {
     "fbclid", "gclid", "dclid", "gbraid", "wbraid", "mc_cid", "mc_eid", "_ga", "_gl",
 }
@@ -142,12 +142,18 @@ def locked_index(
         safe_io.atomic_write_json(str(path), index)
 
 
-def _merge_event_id(existing: list, event_id: object) -> list[str]:
+def _merge_bounded_id(existing: list, candidate_id: object) -> list[str]:
     values = [str(value) for value in existing if str(value or "").strip()]
-    candidate = str(event_id or "").strip()
+    candidate = str(candidate_id or "").strip()
     if candidate and candidate not in values:
         values.append(candidate)
     return values[-MAX_EVENT_IDS:]
+
+
+def _evidence_id(event: dict) -> str:
+    from reports.evidence_cards import _id_for
+
+    return _id_for(event)
 
 
 def _new_record(event: dict, url: str, now: datetime) -> dict:
@@ -163,7 +169,8 @@ def _new_record(event: dict, url: str, now: datetime) -> dict:
         "last_error": "",
         "content_hash": None,
         "body_path": None,
-        "event_ids": _merge_event_id([], event.get("id")),
+        "event_ids": _merge_bounded_id([], event.get("id")),
+        "evidence_ids": _merge_bounded_id([], _evidence_id(event)),
         "first_discovered_at": stamp,
         "last_discovered_at": stamp,
         "fetched_at": None,
@@ -187,7 +194,10 @@ def _merge_discovery(record: dict, event: dict, now: datetime) -> bool:
         if incoming and incoming != str(record.get(field) or ""):
             record[field] = incoming
             changed = True
-    record["event_ids"] = _merge_event_id(record.get("event_ids") or [], event.get("id"))
+    record["event_ids"] = _merge_bounded_id(record.get("event_ids") or [], event.get("id"))
+    record["evidence_ids"] = _merge_bounded_id(
+        record.get("evidence_ids") or [], _evidence_id(event)
+    )
     record["last_discovered_at"] = _iso(now)
     return changed
 
@@ -203,7 +213,7 @@ def _schedule_rediscovery(record: dict, *, changed: bool, now: datetime) -> None
     completed = _completion_time(record)
     if status == "ready" and completed and now - completed >= REVALIDATE_AFTER:
         record.update(refresh_pending=True, attempts=0, next_attempt_at=_iso(now), last_error="")
-    elif status in {"unavailable", "needs_browser"} and completed and now - completed >= REVALIDATE_AFTER:
+    elif status in {"unavailable", "needs_browser", "capacity"} and completed and now - completed >= REVALIDATE_AFTER:
         record.update(
             status="pending", attempts=0, next_attempt_at=_iso(now), last_error="", completed_at=None,
             claim_id=None, claim_expires_at=None,
@@ -283,12 +293,19 @@ def get_article(url, *, root=None) -> dict | None:
         payload = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, UnicodeError, json.JSONDecodeError):
         return None
-    fields = ("url", "title", "source", "published_at", "fetched_at", "text", "content_hash")
     if not isinstance(payload, dict) or payload.get("url") != canonical:
         return None
     if payload.get("content_hash") != record.get("content_hash"):
         return None
-    return {field: payload.get(field) for field in fields}
+    return {
+        "url": canonical,
+        "title": record.get("title"),
+        "source": record.get("source"),
+        "published_at": record.get("published_at"),
+        "fetched_at": payload.get("fetched_at"),
+        "text": payload.get("text"),
+        "content_hash": payload.get("content_hash"),
+    }
 
 
 def status_snapshot(*, root=None, now=None) -> dict:

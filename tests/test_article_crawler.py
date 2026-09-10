@@ -6,6 +6,7 @@ from datetime import datetime, timedelta, timezone
 import pytest
 
 import safe_io
+import reports.article_crawler as crawler
 
 from reports.article_crawler import _eligible_seed_events, crawl_pending, main
 from reports.article_queue import enqueue_events, get_article, load_index
@@ -354,3 +355,275 @@ def test_seed_accepts_only_wiki_eligible_articles_on_approved_hosts(monkeypatch)
     result = _eligible_seed_events([accepted, not_wiki, not_article, not_approved])
 
     assert result == [accepted]
+
+
+def test_default_https_transport_connects_to_pinned_ip_with_original_tls_identity(monkeypatch):
+    captured = {}
+
+    class Socket:
+        def settimeout(self, value):
+            captured["socket_timeout"] = value
+
+    class Response:
+        status = 200
+        headers = {"Content-Type": "text/html"}
+        connection = type("Connection", (), {"sock": Socket()})()
+
+        def __init__(self):
+            self._chunks = [b"<html>ok</html>", b""]
+
+        def read(self, _amount, decode_content=True):
+            return self._chunks.pop(0)
+
+        def release_conn(self):
+            captured["released"] = True
+
+    class Pool:
+        def __init__(self, host, port, **kwargs):
+            captured.update(host=host, port=port, pool_kwargs=kwargs)
+
+        def request(self, method, path, **kwargs):
+            captured.update(method=method, path=path, request_kwargs=kwargs)
+            return Response()
+
+    monkeypatch.setattr(crawler.urllib3, "HTTPSConnectionPool", Pool)
+    target = crawler.ResolvedTarget(
+        url="https://saveticker.com/news/1?x=1",
+        hostname="saveticker.com",
+        port=443,
+        ip="203.0.113.10",
+    )
+
+    response = crawler._default_fetch(target, deadline=crawler.time.monotonic() + 15)
+
+    assert captured["host"] == "203.0.113.10"
+    assert captured["pool_kwargs"]["server_hostname"] == "saveticker.com"
+    assert captured["pool_kwargs"]["assert_hostname"] == "saveticker.com"
+    assert captured["request_kwargs"]["headers"]["Host"] == "saveticker.com"
+    assert captured["path"] == "/news/1?x=1"
+    assert response["text"] == "<html>ok</html>"
+    assert captured["released"] is True
+
+
+def test_default_transport_enforces_total_deadline_during_slow_trickle(monkeypatch):
+    clock = [100.0]
+    released = []
+
+    class Socket:
+        def settimeout(self, _value):
+            pass
+
+    class Response:
+        status = 200
+        headers = {"Content-Type": "text/html"}
+        connection = type("Connection", (), {"sock": Socket()})()
+
+        def read(self, _amount, decode_content=True):
+            clock[0] += 2.0
+            return b"slow"
+
+        def release_conn(self):
+            released.append(True)
+
+    class Pool:
+        def __init__(self, *_args, **_kwargs):
+            pass
+
+        def request(self, *_args, **_kwargs):
+            return Response()
+
+    monkeypatch.setattr(crawler.time, "monotonic", lambda: clock[0])
+    monkeypatch.setattr(crawler.urllib3, "HTTPSConnectionPool", Pool)
+    target = crawler.ResolvedTarget(
+        url="https://saveticker.com/news/1",
+        hostname="saveticker.com",
+        port=443,
+        ip="203.0.113.10",
+    )
+
+    with pytest.raises(crawler.CrawlOutcome, match="deadline"):
+        crawler._default_fetch(target, deadline=103.0)
+
+    assert released == [True]
+
+
+def test_real_transport_rejects_missing_content_type(monkeypatch, tmp_path):
+    now = datetime(2026, 9, 9, tzinfo=UTC)
+    event = _event()
+    enqueue_events([event], root=tmp_path, now=now)
+    monkeypatch.setattr(crawler, "HOST_DELAY_SECONDS", 0)
+    monkeypatch.setattr(
+        crawler.socket,
+        "getaddrinfo",
+        lambda *_args, **_kwargs: [(2, 1, 6, "", ("93.184.216.34", 443))],
+    )
+
+    def fake_default(target, **_kwargs):
+        url = getattr(target, "url", target)
+        if url.endswith("/robots.txt"):
+            return _response(404)
+        return _response(200, _html("헤더 없는 실제 응답"))
+
+    monkeypatch.setattr(crawler, "_default_fetch", fake_default)
+
+    result = crawl_pending(root=tmp_path, now=now)
+
+    assert result["unavailable"] == 1
+    assert get_article(event["url"], root=tmp_path) is None
+
+
+def test_redirect_target_robots_is_checked_before_fetching_disallowed_path(tmp_path):
+    now = datetime(2026, 9, 9, tzinfo=UTC)
+    event = _event()
+    enqueue_events([event], root=tmp_path, now=now)
+    calls = []
+
+    def fetch(url: str):
+        calls.append(url)
+        if url.endswith("/robots.txt"):
+            return _response(200, "User-agent: *\nDisallow: /private/")
+        if url.endswith("/news/1"):
+            return _response(302, Location="/private/2")
+        raise AssertionError("disallowed redirect target was fetched")
+
+    result = crawl_pending(root=tmp_path, fetcher=fetch, now=now)
+
+    assert result["blocked"] == 1
+    assert "https://saveticker.com/private/2" not in calls
+
+
+def test_transient_robots_failure_fails_closed_but_remains_retryable(tmp_path):
+    now = datetime(2026, 9, 9, tzinfo=UTC)
+    event = _event()
+    enqueue_events([event], root=tmp_path, now=now)
+    calls = []
+
+    def fetch(url: str):
+        calls.append(url)
+        assert url.endswith("/robots.txt")
+        return _response(503, "temporarily unavailable")
+
+    result = crawl_pending(root=tmp_path, fetcher=fetch, now=now)
+    metadata = load_index(root=tmp_path)[event["url"]]
+
+    assert result["retries"] == 1
+    assert calls == ["https://saveticker.com/robots.txt"]
+    assert metadata["status"] == "retry"
+    assert metadata["next_attempt_at"] is not None
+    assert "robots unavailable" in metadata["last_error"]
+
+
+def test_cross_host_redirect_resolves_and_checks_new_robots_before_body(monkeypatch, tmp_path):
+    now = datetime(2026, 9, 9, tzinfo=UTC)
+    event = _event()
+    enqueue_events([event], root=tmp_path, now=now)
+    monkeypatch.setenv("ARTICLE_CRAWLER_ALLOWED_HOSTS", "news.example")
+    monkeypatch.setattr(crawler, "HOST_DELAY_SECONDS", 0)
+    resolved = {
+        "saveticker.com": "93.184.216.34",
+        "news.example": "142.250.72.14",
+    }
+    monkeypatch.setattr(
+        crawler.socket,
+        "getaddrinfo",
+        lambda host, port, **_kwargs: [(2, 1, 6, "", (resolved[host], port))],
+    )
+    calls = []
+
+    def fake_default(target, **_kwargs):
+        calls.append((target.url, target.ip))
+        if target.url == "https://saveticker.com/robots.txt":
+            return _response(404)
+        if target.url == event["url"]:
+            return _response(302, Location="https://news.example/private/2")
+        if target.url == "https://news.example/robots.txt":
+            return _response(200, "User-agent: *\nDisallow: /private/")
+        raise AssertionError("cross-host disallowed body was fetched")
+
+    monkeypatch.setattr(crawler, "_default_fetch", fake_default)
+
+    result = crawl_pending(root=tmp_path, now=now)
+
+    assert result["blocked"] == 1
+    assert calls == [
+        ("https://saveticker.com/robots.txt", "93.184.216.34"),
+        ("https://saveticker.com/news/1", "93.184.216.34"),
+        ("https://news.example/robots.txt", "142.250.72.14"),
+    ]
+
+
+def test_same_url_rediscovery_during_fetch_returns_latest_metadata(tmp_path):
+    start = datetime(2026, 9, 9, tzinfo=UTC)
+    event = _event()
+    enqueue_events([event], root=tmp_path, now=start)
+    entered = threading.Event()
+    release = threading.Event()
+
+    def fetch(url: str):
+        if url.endswith("/robots.txt"):
+            return _response(404)
+        entered.set()
+        assert release.wait(timeout=5)
+        return _response(200, _html("최신 메타데이터 본문"), **{"Content-Type": "text/html"})
+
+    worker = threading.Thread(target=lambda: crawl_pending(root=tmp_path, fetcher=fetch, now=start))
+    worker.start()
+    assert entered.wait(timeout=5)
+    enqueue_events(
+        [_event(id="event-new", title="갱신된 제목", source="saveticker:revised", published_at="2026-09-09T01:00:00+00:00")],
+        root=tmp_path,
+        now=start + timedelta(minutes=1),
+    )
+    release.set()
+    worker.join(timeout=5)
+
+    article = get_article(event["url"], root=tmp_path)
+    metadata = load_index(root=tmp_path)[event["url"]]
+    assert not worker.is_alive()
+    assert article["title"] == "갱신된 제목"
+    assert article["source"] == "saveticker:revised"
+    assert article["published_at"] == "2026-09-09T01:00:00+00:00"
+    assert metadata["event_ids"] == ["event-1", "event-new"]
+
+
+def test_body_artifact_budget_rejects_growth_and_preserves_last_good(monkeypatch, tmp_path):
+    start = datetime(2026, 9, 9, tzinfo=UTC)
+    event = _event()
+    enqueue_events([event], root=tmp_path, now=start)
+    crawl_pending(root=tmp_path, fetcher=_article_fetcher(_html("원래 본문"), []), now=start)
+    original = get_article(event["url"], root=tmp_path)
+    original_files = list((tmp_path / "bodies").rglob("*.json"))
+    monkeypatch.setattr(crawler, "BODY_CACHE_MAX_ARTIFACTS", 10)
+    monkeypatch.setattr(crawler, "BODY_CACHE_MAX_BYTES", original_files[0].stat().st_size)
+    enqueue_events([event], root=tmp_path, now=start + timedelta(hours=25))
+
+    result = crawl_pending(
+        root=tmp_path,
+        fetcher=_article_fetcher(_html("용량을 넘는 변경 본문"), []),
+        now=start + timedelta(hours=25),
+    )
+
+    current = get_article(event["url"], root=tmp_path)
+    assert result["capacity_errors"] == 1
+    assert current["content_hash"] == original["content_hash"]
+    assert len(list((tmp_path / "bodies").rglob("*.json"))) == 1
+    assert "capacity" in load_index(root=tmp_path)[event["url"]]["last_error"]
+
+
+def test_worker_sweeps_only_unreferenced_body_artifacts(monkeypatch, tmp_path):
+    start = datetime(2026, 9, 9, tzinfo=UTC)
+    event = _event()
+    enqueue_events([event], root=tmp_path, now=start)
+    crawl_pending(root=tmp_path, fetcher=_article_fetcher(_html("참조 본문"), []), now=start)
+    referenced = list((tmp_path / "bodies").rglob("*.json"))[0]
+    orphan = tmp_path / "bodies" / "orphan.json"
+    orphan.write_text("{}", encoding="utf-8")
+    monkeypatch.setattr(crawler, "BODY_CACHE_MAX_ARTIFACTS", 1)
+    monkeypatch.setattr(crawler, "BODY_CACHE_MAX_BYTES", referenced.stat().st_size)
+
+    result = crawl_pending(root=tmp_path, limit=0, fetcher=lambda _url: None, now=start)
+
+    assert referenced.exists()
+    assert not orphan.exists()
+    assert result["swept_artifacts"] == 1
+    assert result["body_capacity"]["artifacts"] == 1

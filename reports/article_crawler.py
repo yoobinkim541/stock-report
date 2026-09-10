@@ -11,12 +11,14 @@ import re
 import socket
 import time
 import uuid
+from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from urllib.parse import urljoin, urlsplit, urlunsplit
 from urllib.robotparser import RobotFileParser
 
-import requests
+import certifi
+import urllib3
 from bs4 import BeautifulSoup
 
 import safe_io
@@ -28,6 +30,7 @@ from reports.article_queue import (
     cache_root,
     canonicalize_url,
     enqueue_events,
+    load_index,
     locked_index,
     status_snapshot,
 )
@@ -37,6 +40,10 @@ USER_AGENT = "StockReportArticleCrawler/1.0"
 MAX_RUN_LIMIT = 20
 MAX_REDIRECTS = 3
 MAX_RESPONSE_BYTES = 2 * 1024 * 1024
+HTTP_WALLCLOCK_SECONDS = 15.0
+CONNECT_TIMEOUT_SECONDS = 5.0
+BODY_CACHE_MAX_BYTES = 512 * 1024 * 1024
+BODY_CACHE_MAX_ARTIFACTS = 10_000
 CLAIM_LEASE = timedelta(minutes=10)
 MAX_ATTEMPTS = 3
 RETRY_DELAYS = (timedelta(minutes=5), timedelta(minutes=30))
@@ -72,7 +79,15 @@ def _public_ip(address: str) -> bool:
         return False
 
 
-def _validate_target(url: str, *, resolve_dns: bool) -> str:
+@dataclass(frozen=True)
+class ResolvedTarget:
+    url: str
+    hostname: str
+    port: int
+    ip: str | None
+
+
+def _validate_target(url: str, *, resolve_dns: bool) -> ResolvedTarget:
     canonical = canonicalize_url(url)
     if not canonical:
         raise CrawlOutcome("blocked", "invalid HTTP URL")
@@ -86,6 +101,7 @@ def _validate_target(url: str, *, resolve_dns: bool) -> str:
         literal = None
     if literal is not None and not literal.is_global:
         raise CrawlOutcome("blocked", "private or non-public address")
+    addresses: set[str] = set()
     if resolve_dns:
         try:
             addresses = {item[4][0] for item in socket.getaddrinfo(host, parsed.port or (443 if parsed.scheme == "https" else 80), type=socket.SOCK_STREAM)}
@@ -93,45 +109,107 @@ def _validate_target(url: str, *, resolve_dns: bool) -> str:
             raise CrawlOutcome("failed", f"DNS unavailable: {exc}", retryable=True) from exc
         if not addresses or any(not _public_ip(address) for address in addresses):
             raise CrawlOutcome("blocked", "DNS resolved to a non-public address")
-    return canonical
+    ordered = sorted(addresses, key=lambda value: (ipaddress.ip_address(value).version, value))
+    port = parsed.port or (443 if parsed.scheme == "https" else 80)
+    return ResolvedTarget(canonical, host, port, ordered[0] if ordered else None)
 
 
-def _default_fetch(url: str) -> dict:
-    session = requests.Session()
-    session.trust_env = False
-    response = session.get(
-        url,
-        allow_redirects=False,
-        timeout=(5, 15),
-        stream=True,
-        headers={"User-Agent": USER_AGENT, "Accept": "text/html,application/xhtml+xml;q=0.9,*/*;q=0.1"},
-    )
-    declared = response.headers.get("Content-Length")
-    if declared:
-        try:
-            if int(declared) > MAX_RESPONSE_BYTES:
-                response.close()
-                raise CrawlOutcome("unavailable", "response exceeds size limit")
-        except ValueError:
-            pass
-    chunks = []
-    size = 0
-    for chunk in response.iter_content(64 * 1024):
-        if not chunk:
-            continue
-        size += len(chunk)
-        if size > MAX_RESPONSE_BYTES:
-            response.close()
-            raise CrawlOutcome("unavailable", "response exceeds size limit")
-        chunks.append(chunk)
-    response.close()
-    data = b"".join(chunks)
-    encoding = response.encoding or "utf-8"
-    return {
-        "status_code": response.status_code,
-        "headers": dict(response.headers),
-        "text": data.decode(encoding, errors="replace"),
+def _remaining(deadline: float) -> float:
+    remaining = deadline - time.monotonic()
+    if remaining <= 0:
+        raise CrawlOutcome("failed", "HTTP wall-clock deadline exceeded", retryable=True)
+    return remaining
+
+
+def _response_socket(response):
+    connection = getattr(response, "connection", None)
+    return getattr(connection, "sock", None)
+
+
+def _response_encoding(headers: dict) -> str:
+    content_type = str(headers.get("Content-Type") or headers.get("content-type") or "")
+    match = re.search(r"charset=([^;\s]+)", content_type, re.I)
+    return match.group(1).strip("\"'") if match else "utf-8"
+
+
+def _default_fetch(target: ResolvedTarget, *, deadline: float) -> dict:
+    """Connect to the validated IP while retaining the URL host as HTTP/TLS identity."""
+    if not target.ip:
+        raise CrawlOutcome("failed", "validated connection IP is missing", retryable=True)
+    parsed = urlsplit(target.url)
+    remaining = _remaining(deadline)
+    pool_kwargs = {
+        "host": target.ip,
+        "port": target.port,
+        "timeout": urllib3.Timeout(
+            total=remaining,
+            connect=min(CONNECT_TIMEOUT_SECONDS, remaining),
+            read=remaining,
+        ),
     }
+    if parsed.scheme == "https":
+        pool = urllib3.HTTPSConnectionPool(
+            **pool_kwargs,
+            cert_reqs="CERT_REQUIRED",
+            ca_certs=certifi.where(),
+            server_hostname=target.hostname,
+            assert_hostname=target.hostname,
+        )
+    else:
+        pool = urllib3.HTTPConnectionPool(**pool_kwargs)
+    path = urlunsplit(("", "", parsed.path or "/", parsed.query, ""))
+    headers = {
+        "Host": parsed.netloc,
+        "User-Agent": USER_AGENT,
+        "Accept": "text/html,application/xhtml+xml;q=0.9,*/*;q=0.1",
+    }
+    response = None
+    try:
+        response = pool.request(
+            "GET",
+            path,
+            headers=headers,
+            redirect=False,
+            retries=False,
+            preload_content=False,
+            decode_content=False,
+            timeout=pool_kwargs["timeout"],
+        )
+        response_headers = dict(response.headers)
+        declared = response_headers.get("Content-Length") or response_headers.get("content-length")
+        if declared:
+            try:
+                if int(declared) > MAX_RESPONSE_BYTES:
+                    raise CrawlOutcome("unavailable", "response exceeds size limit")
+            except ValueError:
+                pass
+        chunks = []
+        size = 0
+        while True:
+            remaining = _remaining(deadline)
+            sock = _response_socket(response)
+            if sock is not None:
+                sock.settimeout(remaining)
+            chunk = response.read(64 * 1024, decode_content=True)
+            _remaining(deadline)
+            if not chunk:
+                break
+            size += len(chunk)
+            if size > MAX_RESPONSE_BYTES:
+                raise CrawlOutcome("unavailable", "response exceeds size limit")
+            chunks.append(chunk)
+        data = b"".join(chunks)
+        return {
+            "status_code": int(response.status),
+            "headers": response_headers,
+            "text": data.decode(_response_encoding(response_headers), errors="replace"),
+        }
+    finally:
+        if response is not None:
+            response.release_conn()
+        close = getattr(pool, "close", None)
+        if close:
+            close()
 
 
 def _normalize_response(response) -> dict:
@@ -170,21 +248,34 @@ def _rate_limit(url: str, host_last: dict[str, float]) -> None:
     host_last[host] = time.monotonic()
 
 
-def _fetch_redirects(url: str, *, fetcher, resolve_dns: bool, host_last: dict[str, float]) -> tuple[dict, str]:
+def _fetch_redirects(
+    url: str,
+    *,
+    fetcher,
+    resolve_dns: bool,
+    host_last: dict[str, float],
+    before_request=None,
+) -> tuple[dict, str]:
     current = url
     for redirect_count in range(MAX_REDIRECTS + 1):
-        current = _validate_target(current, resolve_dns=resolve_dns)
-        if fetcher is _default_fetch:
-            _rate_limit(current, host_last)
-        response = _normalize_response(fetcher(current))
+        target = _validate_target(current, resolve_dns=resolve_dns)
+        if before_request is not None:
+            before_request(target.url)
+        if resolve_dns:
+            _rate_limit(target.url, host_last)
+            response = _normalize_response(
+                fetcher(target, deadline=time.monotonic() + HTTP_WALLCLOCK_SECONDS)
+            )
+        else:
+            response = _normalize_response(fetcher(target.url))
         if response["status_code"] not in REDIRECT_STATUSES:
-            return response, current
+            return response, target.url
         location = response["headers"].get("location", "").strip()
         if not location:
             raise CrawlOutcome("unavailable", "redirect has no location")
         if redirect_count >= MAX_REDIRECTS:
             raise CrawlOutcome("blocked", "redirect limit exceeded")
-        current = urljoin(current, location)
+        current = urljoin(target.url, location)
     raise CrawlOutcome("blocked", "redirect limit exceeded")
 
 
@@ -205,12 +296,22 @@ def _robots_allowed(
                 robots_url, fetcher=fetcher, resolve_dns=resolve_dns, host_last=host_last
             )
         except CrawlOutcome as exc:
+            if exc.retryable:
+                raise CrawlOutcome(
+                    "failed", f"robots unavailable: {exc.message}", retryable=True
+                ) from exc
             raise CrawlOutcome("blocked", f"robots unavailable: {exc.message}") from exc
         except Exception as exc:
-            raise CrawlOutcome("blocked", f"robots unavailable: {exc}") from exc
+            raise CrawlOutcome(
+                "failed", f"robots unavailable: {exc}", retryable=True
+            ) from exc
         status = response["status_code"]
         if status == 404:
             cache[origin] = None
+        elif status == 408 or status == 429 or status >= 500:
+            raise CrawlOutcome(
+                "failed", f"robots unavailable: HTTP {status}", retryable=True
+            )
         elif 200 <= status < 300:
             parser = RobotFileParser()
             parser.set_url(final_url)
@@ -262,15 +363,22 @@ def _extract_article_text(html: str, title: str) -> str:
 
 
 def _fetch_article(record: dict, *, fetcher, resolve_dns: bool, host_last: dict[str, float], robots_cache: dict) -> str:
-    url = _validate_target(str(record.get("url") or ""), resolve_dns=resolve_dns)
-    _robots_allowed(
-        url,
+    def check_robots(url: str) -> None:
+        _robots_allowed(
+            url,
+            fetcher=fetcher,
+            resolve_dns=resolve_dns,
+            host_last=host_last,
+            cache=robots_cache,
+        )
+
+    response, _final_url = _fetch_redirects(
+        str(record.get("url") or ""),
         fetcher=fetcher,
         resolve_dns=resolve_dns,
         host_last=host_last,
-        cache=robots_cache,
+        before_request=check_robots,
     )
-    response, _final_url = _fetch_redirects(url, fetcher=fetcher, resolve_dns=resolve_dns, host_last=host_last)
     status = response["status_code"]
     text = response["text"]
     if _looks_browser_dependent(status, text):
@@ -280,6 +388,8 @@ def _fetch_article(record: dict, *, fetcher, resolve_dns: bool, host_last: dict[
     if not 200 <= status < 300:
         raise CrawlOutcome("unavailable", f"HTTP {status}")
     content_type = response["headers"].get("content-type", "").lower()
+    if resolve_dns and not content_type:
+        raise CrawlOutcome("unavailable", "missing Content-Type")
     if content_type and "text/html" not in content_type and "application/xhtml+xml" not in content_type:
         raise CrawlOutcome("unavailable", f"non-HTML content type: {content_type[:100]}")
     cleaned = _extract_article_text(text, str(record.get("title") or ""))
@@ -338,29 +448,97 @@ def _claim_next(*, root, now: datetime) -> tuple[dict, str, bool] | None:
         return dict(record), claim_id, was_refresh
 
 
-def _write_body(root_path: Path, record: dict, text: str, now: datetime) -> tuple[str, str, bool]:
-    content_hash = hashlib.sha256(text.encode("utf-8")).hexdigest()
-    relative = body_relative_path(str(record["url"]), content_hash)
-    path = root_path / relative
-    existed = path.exists()
-    payload = {
+def _body_payload(record: dict, text: str, now: datetime) -> dict:
+    return {
         "url": record["url"],
         "title": str(record.get("title") or ""),
         "source": str(record.get("source") or ""),
         "published_at": str(record.get("published_at") or ""),
         "fetched_at": _iso(now),
         "text": text,
-        "content_hash": content_hash,
+        "content_hash": hashlib.sha256(text.encode("utf-8")).hexdigest(),
     }
+
+
+def _body_files(root_path: Path) -> list[Path]:
+    body_root = root_path / "bodies"
+    if not body_root.exists():
+        return []
+    return [path for path in body_root.rglob("*.json") if path.is_file()]
+
+
+def _referenced_body_paths(root_path: Path) -> set[Path]:
+    referenced = set()
+    for record in load_index(root=root_path).values():
+        relative = Path(str(record.get("body_path") or ""))
+        if not relative or relative.is_absolute() or ".." in relative.parts:
+            continue
+        referenced.add(root_path / relative)
+    return referenced
+
+
+def _body_capacity(root_path: Path) -> dict:
+    files = _body_files(root_path)
+    used_bytes = sum(path.stat().st_size for path in files)
+    return {
+        "bytes": used_bytes,
+        "byte_limit": BODY_CACHE_MAX_BYTES,
+        "available_bytes": max(0, BODY_CACHE_MAX_BYTES - used_bytes),
+        "artifacts": len(files),
+        "artifact_limit": BODY_CACHE_MAX_ARTIFACTS,
+        "available_artifacts": max(0, BODY_CACHE_MAX_ARTIFACTS - len(files)),
+    }
+
+
+def _sweep_body_cache(root_path: Path) -> dict:
+    referenced = _referenced_body_paths(root_path)
+    removed = 0
+    removed_bytes = 0
+    for path in _body_files(root_path):
+        if path in referenced:
+            continue
+        try:
+            size = path.stat().st_size
+            path.unlink()
+        except OSError:
+            continue
+        removed += 1
+        removed_bytes += size
+    return {
+        "swept_artifacts": removed,
+        "swept_bytes": removed_bytes,
+        "body_capacity": _body_capacity(root_path),
+    }
+
+
+def _write_body(root_path: Path, record: dict, text: str, now: datetime) -> tuple[str, str, bool]:
+    _sweep_body_cache(root_path)
+    payload = _body_payload(record, text, now)
+    content_hash = str(payload["content_hash"])
+    relative = body_relative_path(str(record["url"]), content_hash)
+    path = root_path / relative
+    existed = path.exists()
+    encoded_size = len(json.dumps(payload, ensure_ascii=False, indent=2).encode("utf-8"))
+    capacity = _body_capacity(root_path)
+    previous_size = path.stat().st_size if existed else 0
+    projected_bytes = capacity["bytes"] - previous_size + encoded_size
+    projected_artifacts = capacity["artifacts"] + (0 if existed else 1)
+    if projected_bytes > BODY_CACHE_MAX_BYTES or projected_artifacts > BODY_CACHE_MAX_ARTIFACTS:
+        raise CrawlOutcome("capacity", "body cache capacity exceeded")
     safe_io.atomic_write_json(str(path), payload)
     return content_hash, relative, existed
 
 
 def _finish_success(*, root, url: str, claim_id: str, text: str, snapshot: dict, now: datetime) -> tuple[bool, bool]:
     root_path = cache_root(root, create=True)
-    content_hash, relative, existed = _write_body(root_path, snapshot, text, now)
+    with locked_index(root=root, now=now) as (_root, index, _pruned):
+        current = index.get(url)
+        if not current or current.get("claim_id") != claim_id:
+            return False, False
+        current = dict(current)
+    content_hash, relative, existed = _write_body(root_path, current, text, now)
     committed = False
-    unchanged = bool(snapshot.get("content_hash") == content_hash)
+    unchanged = bool(current.get("content_hash") == content_hash)
     with locked_index(root=root, now=now) as (_root, index, _pruned):
         record = index.get(url)
         if record and record.get("claim_id") == claim_id:
@@ -424,9 +602,12 @@ def crawl_pending(*, root=None, limit=20, fetcher=None, now=None) -> dict:
         "unavailable": 0,
         "needs_browser": 0,
         "blocked": 0,
+        "capacity_errors": 0,
         "stale": 0,
         "recovered_claims": 0,
         "worker_locked": False,
+        "swept_artifacts": 0,
+        "swept_bytes": 0,
     }
     root_path = cache_root(root, create=True)
     worker_target = root_path / "worker-lease"
@@ -437,6 +618,9 @@ def crawl_pending(*, root=None, limit=20, fetcher=None, now=None) -> dict:
     try:
         with safe_io.file_write_lock(str(worker_target), timeout=0):
             result["recovered_claims"] = _recover_expired_claims(root=root_path, now=current)
+            swept = _sweep_body_cache(root_path)
+            result["swept_artifacts"] += swept["swept_artifacts"]
+            result["swept_bytes"] += swept["swept_bytes"]
             while result["processed"] < bounded_limit:
                 claimed = _claim_next(root=root_path, now=current)
                 if claimed is None:
@@ -474,7 +658,13 @@ def crawl_pending(*, root=None, limit=20, fetcher=None, now=None) -> dict:
                         outcome=exc,
                         now=current,
                     )
-                    key = "retries" if status == "retry" else status
+                    key = (
+                        "retries"
+                        if status == "retry"
+                        else "capacity_errors"
+                        if status == "capacity"
+                        else status
+                    )
                     if key in result:
                         result[key] += 1
                 except Exception as exc:
@@ -487,11 +677,23 @@ def crawl_pending(*, root=None, limit=20, fetcher=None, now=None) -> dict:
                         outcome=outcome,
                         now=current,
                     )
-                    key = "retries" if status == "retry" else status
+                    key = (
+                        "retries"
+                        if status == "retry"
+                        else "capacity_errors"
+                        if status == "capacity"
+                        else status
+                    )
                     if key in result:
                         result[key] += 1
+            swept = _sweep_body_cache(root_path)
+            result["swept_artifacts"] += swept["swept_artifacts"]
+            result["swept_bytes"] += swept["swept_bytes"]
+            result["body_capacity"] = swept["body_capacity"]
     except safe_io.LockTimeout:
         result["worker_locked"] = True
+    if "body_capacity" not in result:
+        result["body_capacity"] = _body_capacity(root_path)
     result.update({key: value for key, value in status_snapshot(root=root_path, now=current).items() if key in {"capacity", "retry_counts", "statuses"}})
     return result
 
