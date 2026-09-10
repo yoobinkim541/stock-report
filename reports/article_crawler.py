@@ -6,9 +6,11 @@ import argparse
 import hashlib
 import ipaddress
 import json
+import multiprocessing
 import os
 import re
 import socket
+import tempfile
 import time
 import uuid
 from dataclasses import dataclass
@@ -132,7 +134,7 @@ def _response_encoding(headers: dict) -> str:
     return match.group(1).strip("\"'") if match else "utf-8"
 
 
-def _default_fetch(target: ResolvedTarget, *, deadline: float) -> dict:
+def _default_fetch_once(target: ResolvedTarget, *, deadline: float) -> dict:
     """Connect to the validated IP while retaining the URL host as HTTP/TLS identity."""
     if not target.ip:
         raise CrawlOutcome("failed", "validated connection IP is missing", retryable=True)
@@ -210,6 +212,78 @@ def _default_fetch(target: ResolvedTarget, *, deadline: float) -> dict:
         close = getattr(pool, "close", None)
         if close:
             close()
+
+
+def _fetch_process_entry(send_connection, target: ResolvedTarget, deadline: float, result_path: str) -> None:
+    """Run one HTTP request in a process that the parent can cancel at its deadline."""
+    try:
+        result = _default_fetch_once(target, deadline=deadline)
+        Path(result_path).write_text(json.dumps(result, ensure_ascii=False), encoding="utf-8")
+        message = ("ok",)
+    except CrawlOutcome as exc:
+        message = ("crawl_outcome", exc.status, exc.message, exc.retryable)
+    except BaseException as exc:
+        message = ("error", type(exc).__name__, str(exc)[:500])
+    try:
+        send_connection.send(message)
+    except (BrokenPipeError, EOFError, OSError):
+        pass
+    finally:
+        send_connection.close()
+
+
+def _stop_fetch_process(process) -> None:
+    if process.pid is None:
+        return
+    if process.is_alive():
+        process.terminate()
+    process.join(timeout=0.25)
+    if process.is_alive():
+        process.kill()
+        process.join(timeout=0.25)
+    if process.is_alive():  # pragma: no cover - SIGKILL failure is an OS-level fault
+        raise RuntimeError("HTTP transport process could not be stopped")
+    process.close()
+
+
+def _default_fetch(target: ResolvedTarget, *, deadline: float) -> dict:
+    """Enforce one absolute deadline over DNS-pinned connect, headers, and body."""
+    _remaining(deadline)
+    context = multiprocessing.get_context("spawn")
+    receive_connection, send_connection = context.Pipe(duplex=False)
+    with tempfile.TemporaryDirectory(prefix="article-http-fetch-") as temporary_directory:
+        result_path = str(Path(temporary_directory) / "result.json")
+        process = context.Process(
+            target=_fetch_process_entry,
+            args=(send_connection, target, deadline, result_path),
+            name="article-http-fetch",
+        )
+        try:
+            process.start()
+            send_connection.close()
+            if not receive_connection.poll(_remaining(deadline)):
+                raise CrawlOutcome("failed", "HTTP wall-clock deadline exceeded", retryable=True)
+            try:
+                message = receive_connection.recv()
+            except EOFError as exc:
+                raise CrawlOutcome("failed", "HTTP transport process ended unexpectedly", retryable=True) from exc
+            if message[0] == "crawl_outcome":
+                raise CrawlOutcome(message[1], message[2], retryable=bool(message[3]))
+            if message[0] == "error":
+                raise CrawlOutcome("failed", f"HTTP transport failed: {message[1]}: {message[2]}", retryable=True)
+            if message[0] != "ok":
+                raise CrawlOutcome("failed", "invalid HTTP transport result", retryable=True)
+            _remaining(deadline)
+            try:
+                result = json.loads(Path(result_path).read_text(encoding="utf-8"))
+            except (OSError, ValueError) as exc:
+                raise CrawlOutcome("failed", "invalid HTTP transport result", retryable=True) from exc
+            _remaining(deadline)
+            return result
+        finally:
+            send_connection.close()
+            receive_connection.close()
+            _stop_fetch_process(process)
 
 
 def _normalize_response(response) -> dict:

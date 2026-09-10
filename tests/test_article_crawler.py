@@ -1,6 +1,9 @@
 from __future__ import annotations
 
+import multiprocessing
+import socket
 import threading
+import time
 from datetime import datetime, timedelta, timezone
 
 import pytest
@@ -45,6 +48,10 @@ def _article_fetcher(text: str, calls: list[str]):
         return _response(200, text, **{"Content-Type": "text/html; charset=utf-8"})
 
     return fetch
+
+
+def _active_fetch_children():
+    return [child for child in multiprocessing.active_children() if child.name == "article-http-fetch"]
 
 
 def test_success_persists_ready_body_and_second_run_does_not_fetch(tmp_path):
@@ -394,7 +401,7 @@ def test_default_https_transport_connects_to_pinned_ip_with_original_tls_identit
         ip="203.0.113.10",
     )
 
-    response = crawler._default_fetch(target, deadline=crawler.time.monotonic() + 15)
+    response = crawler._default_fetch_once(target, deadline=crawler.time.monotonic() + 15)
 
     assert captured["host"] == "203.0.113.10"
     assert captured["pool_kwargs"]["server_hostname"] == "saveticker.com"
@@ -442,9 +449,97 @@ def test_default_transport_enforces_total_deadline_during_slow_trickle(monkeypat
     )
 
     with pytest.raises(crawler.CrawlOutcome, match="deadline"):
-        crawler._default_fetch(target, deadline=103.0)
+        crawler._default_fetch_once(target, deadline=103.0)
 
     assert released == [True]
+
+
+@pytest.mark.parametrize("phase", ["headers", "body"])
+def test_default_transport_interrupts_real_slow_stream_at_wallclock_deadline(phase):
+    listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    listener.bind(("127.0.0.1", 0))
+    listener.listen(1)
+    listener.settimeout(1)
+    port = listener.getsockname()[1]
+
+    def serve_slow_response():
+        try:
+            connection, _ = listener.accept()
+            with connection:
+                connection.recv(4096)
+                headers = b"HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nContent-Length: 64\r\n\r\n"
+                if phase == "headers":
+                    for byte in headers:
+                        connection.sendall(bytes([byte]))
+                        time.sleep(0.03)
+                else:
+                    connection.sendall(headers)
+                    for _ in range(64):
+                        connection.sendall(b"x")
+                        time.sleep(0.03)
+        except (BrokenPipeError, ConnectionResetError, OSError):
+            pass
+        finally:
+            listener.close()
+
+    server = threading.Thread(target=serve_slow_response, daemon=True)
+    server.start()
+    target = crawler.ResolvedTarget(
+        url=f"http://localhost:{port}/slow",
+        hostname="localhost",
+        port=port,
+        ip="127.0.0.1",
+    )
+    started = time.monotonic()
+
+    with pytest.raises(crawler.CrawlOutcome, match="deadline"):
+        crawler._default_fetch(target, deadline=started + 0.50)
+
+    elapsed = time.monotonic() - started
+    assert elapsed < 0.90
+    server.join(timeout=2)
+    assert not server.is_alive()
+    assert _active_fetch_children() == []
+
+
+def test_default_transport_returns_large_body_without_pipe_deadlock_and_cleans_child():
+    body = b"x" * (512 * 1024)
+    listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    listener.bind(("127.0.0.1", 0))
+    listener.listen(1)
+    port = listener.getsockname()[1]
+
+    def serve_large_response():
+        try:
+            connection, _ = listener.accept()
+            with connection:
+                connection.recv(4096)
+                headers = (
+                    b"HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nContent-Length: "
+                    + str(len(body)).encode("ascii")
+                    + b"\r\n\r\n"
+                )
+                connection.sendall(headers + body)
+        finally:
+            listener.close()
+
+    server = threading.Thread(target=serve_large_response, daemon=True)
+    server.start()
+    target = crawler.ResolvedTarget(
+        url=f"http://localhost:{port}/large",
+        hostname="localhost",
+        port=port,
+        ip="127.0.0.1",
+    )
+
+    response = crawler._default_fetch(target, deadline=time.monotonic() + 5)
+
+    assert response["text"] == body.decode("ascii")
+    server.join(timeout=2)
+    assert not server.is_alive()
+    assert _active_fetch_children() == []
 
 
 def test_real_transport_rejects_missing_content_type(monkeypatch, tmp_path):
