@@ -127,3 +127,30 @@ def test_same_url_merges_bounded_ids_used_by_evidence_cards(tmp_path):
     ]
     assert "raw_payload" not in metadata
     assert "body_raw" not in metadata
+
+
+def test_get_article_uses_supplied_index_snapshot_without_reloading(monkeypatch, tmp_path):
+    from reports import article_crawler as crawler
+    from reports import article_queue as queue
+
+    now = datetime(2026, 9, 9, tzinfo=UTC)
+    event = _event()
+    enqueue_events([event], root=tmp_path, now=now)
+    crawler.crawl_pending(
+        root=tmp_path,
+        fetcher=lambda _url: (
+            "<article><p>" + "본문 캐시 스냅샷 검증 문장입니다. " * 20 + "</p></article>"
+        ),
+        now=now,
+    )
+    snapshot = load_index(root=tmp_path)
+    monkeypatch.setattr(
+        queue,
+        "load_index",
+        lambda **_kwargs: (_ for _ in ()).throw(AssertionError("must not reload metadata")),
+    )
+
+    article = queue.get_article(event["url"], root=tmp_path, index=snapshot)
+
+    assert article is not None
+    assert article["url"] == event["url"]

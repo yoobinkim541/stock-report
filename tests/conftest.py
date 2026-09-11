@@ -29,6 +29,7 @@ os.environ.setdefault("WORLD_MEMORY_DB", os.path.join(_TMPDIR, "shared-memory", 
 # AI 콘솔 SQLite/파일 캐시도 tmp 격리 — Streamlit AppTest 가 실제 홈 DB 를 열지 않게 한다.
 os.environ.setdefault("AGENT_CONSOLE_DB", os.path.join(_TMPDIR, "agent_console.sqlite3"))
 os.environ.setdefault("AGENT_CONSOLE_REPORTS_DIR", os.path.join(_TMPDIR, "reports"))
+os.environ["ARTICLE_CACHE_DIR"] = os.path.join(_TMPDIR, "reports", "article-cache")
 os.environ.setdefault("AGENT_CONSOLE_SOURCE_CACHE_DIR", os.path.join(_TMPDIR, "reports", "source-cache"))
 os.environ.setdefault("AGENT_CONSOLE_ML_DATA_DIR", os.path.join(_TMPDIR, "reports", "ml-data"))
 os.environ.setdefault("AGENT_CONSOLE_SHARED_MEMORY_DIR", os.path.join(_TMPDIR, "shared-memory"))

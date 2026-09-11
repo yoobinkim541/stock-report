@@ -277,12 +277,12 @@ def body_relative_path(url: str, content_hash: str) -> str:
     return str(Path("bodies") / url_hash[:2] / url_hash / f"{content_hash}.json")
 
 
-def get_article(url, *, root=None) -> dict | None:
+def get_article(url, *, root=None, index: dict | None = None) -> dict | None:
     """Return the current ready article body, never queue metadata or stale files."""
     canonical = canonicalize_url(url)
     if not canonical:
         return None
-    record = load_index(root=root).get(canonical)
+    record = (index if index is not None else load_index(root=root)).get(canonical)
     if not record or record.get("status") != "ready" or not record.get("content_hash"):
         return None
     relative = Path(str(record.get("body_path") or ""))
