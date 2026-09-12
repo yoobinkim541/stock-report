@@ -45,6 +45,74 @@ def test_news_ingress_enqueues_each_source_batch_and_canonicalizes_duplicates(tm
     assert result["health"]["saveticker"]["article_queue"]["updated"] == 1
 
 
+def test_actual_short_saveticker_polling_event_is_enqueued_without_fulltext_fetch(tmp_path, monkeypatch):
+    from reports import source_collector
+    from reports import source_wiki_curator, wiki_distillation
+    from reports.article_crawler import crawl_pending
+    from reports.article_queue import load_index
+    from reports.source_pipeline import ProviderSpec, run_providers
+
+    class FakeResponse:
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return {"news_list": [{
+                "id": 84,
+                "title": "AI 반도체 공급 제약",
+                "content": "실제 API에서 전달되는 짧은 기사 미리보기",
+                "group_summary": "",
+                "created_at": "2026-09-12",
+                "tag_names": ["반도체"],
+            }]}
+
+    article_root = tmp_path / "article-cache"
+    monkeypatch.setenv("ARTICLE_CACHE_DIR", str(article_root))
+    monkeypatch.setenv("STOCK_REPORT_REPORTS_DIR", str(tmp_path / "reports"))
+    monkeypatch.setattr(source_collector.requests, "get", lambda *args, **kwargs: FakeResponse())
+    monkeypatch.setattr(
+        source_collector,
+        "_fetch_saveticker_article_body",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("synchronous article fetch")),
+    )
+
+    events = source_collector.fetch_saveticker_events()
+    assert events[0]["classification"]["wiki_eligible"] is False
+    assert events[0]["classification"]["article_discovery_eligible"] is True
+    result = run_providers(
+        registry=[ProviderSpec(
+            "saveticker",
+            ("saveticker",),
+            "news",
+            lambda: events,
+        )],
+        group="news",
+        cache_dir=tmp_path / "source-cache",
+    )
+
+    index = load_index(root=article_root)
+    assert result["fetched"] == 1
+    assert result["article_queue"]["enqueued"] == 1
+    assert list(index) == ["https://saveticker.com/news/84"]
+    assert index["https://saveticker.com/news/84"]["status"] == "pending"
+    pages = source_wiki_curator.build_wiki_pages_from_events(events, llm_fn=lambda _prompt: None)
+    assert any("https://saveticker.com/news/84" in page["source_refs"] for page in pages)
+
+    wiki_distillation._attach_article_metadata(pages, index)
+    wiki_distillation._attach_article_context(pages, index=index, cache_dir=article_root)
+    assert all(not page["_source_articles"] for page in pages)
+
+    body = "공급 제약은 출하 시점과 매출 인식, 고객사의 재고 정책에 영향을 준다. " * 8
+    crawl_pending(
+        root=article_root,
+        fetcher=lambda _url: f"<html><body><article><p>{body}</p></article></body></html>",
+    )
+    ready_index = load_index(root=article_root)
+    wiki_distillation._attach_article_metadata(pages, ready_index)
+    wiki_distillation._attach_article_context(pages, index=ready_index, cache_dir=article_root)
+    assert any(page["_source_articles"] for page in pages)
+
+
 def test_market_snapshots_are_persisted_but_not_enqueued(tmp_path, monkeypatch):
     from reports.article_queue import load_index
     from reports.source_pipeline import ProviderSpec, run_providers

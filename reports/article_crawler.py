@@ -780,15 +780,29 @@ def _eligible_seed_events(events: list[dict]) -> list[dict]:
             continue
         classification = event.get("classification") or {}
         kind = str(classification.get("kind") or "").lower()
-        wiki_eligible = classification.get("wiki_eligible") is not False
         url = canonicalize_url(event.get("url"))
         host = (urlsplit(url).hostname or "").lower() if url else ""
-        if url and kind == "article" and wiki_eligible and host in allowed:
+        explicit = classification.get("article_discovery_eligible")
+        source_root = str(event.get("source") or "").split(":", 1)[0].strip().lower()
+        wiki_eligible = classification.get("wiki_eligible") is not False
+        discovery_eligible = (
+            explicit is True
+            or (explicit is not False and wiki_eligible)
+            or (explicit is None and source_root == "saveticker")
+        )
+        if url and kind in {"article", "analysis"} and discovery_eligible and host in allowed:
             eligible.append(event)
     return eligible
 
 
+def _load_cli_env() -> None:
+    from dotenv import load_dotenv
+
+    load_dotenv(Path(__file__).resolve().parent.parent / ".env", override=False)
+
+
 def main(argv: list[str] | None = None) -> int:
+    _load_cli_env()
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--limit", type=int, default=20)
     parser.add_argument("--status", action="store_true", help="print queue status without writes or network")

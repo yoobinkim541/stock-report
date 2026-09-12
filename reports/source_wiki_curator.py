@@ -160,7 +160,11 @@ def _event_key(event: dict) -> str:
 def _is_strong_group(events: list[dict]) -> bool:
     if len(events) >= MIN_GROUP_EVENTS:
         return True
-    return any(bool((event.get("classification") or {}).get("wiki_eligible")) for event in events)
+    return any(
+        bool((event.get("classification") or {}).get("wiki_eligible"))
+        or bool((event.get("classification") or {}).get("article_discovery_eligible"))
+        for event in events
+    )
 
 
 def _status_for(events: list[dict], refs: list[str]) -> str:

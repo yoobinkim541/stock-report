@@ -342,16 +342,29 @@ def test_status_cli_is_read_only_for_missing_root(tmp_path, capsys):
     assert not missing.exists()
 
 
-def test_seed_accepts_only_wiki_eligible_articles_on_approved_hosts(monkeypatch):
+def test_seed_accepts_discoverable_articles_on_approved_hosts(monkeypatch):
     monkeypatch.setenv("ARTICLE_CRAWLER_ALLOWED_HOSTS", "news.example")
     accepted = _event(
         url="https://news.example/story/1",
         source="approved_feed",
         classification={"kind": "article", "wiki_eligible": True},
     )
-    not_wiki = _event(
+    explicitly_excluded = _event(
         url="https://news.example/story/2",
+        classification={
+            "kind": "article",
+            "wiki_eligible": False,
+            "article_discovery_eligible": False,
+        },
+    )
+    short_discovery = _event(
+        url="https://saveticker.com/news/5",
         classification={"kind": "article", "wiki_eligible": False},
+    )
+    analysis = _event(
+        url="https://news.example/story/6",
+        source="approved_feed",
+        classification={"source_family": "news", "kind": "analysis", "wiki_eligible": True},
     )
     not_article = _event(
         url="https://news.example/report/3",
@@ -359,9 +372,34 @@ def test_seed_accepts_only_wiki_eligible_articles_on_approved_hosts(monkeypatch)
     )
     not_approved = _event(url="https://unapproved.example/story/4")
 
-    result = _eligible_seed_events([accepted, not_wiki, not_article, not_approved])
+    result = _eligible_seed_events([
+        accepted,
+        explicitly_excluded,
+        short_discovery,
+        analysis,
+        not_article,
+        not_approved,
+    ])
 
-    assert result == [accepted]
+    assert result == [accepted, short_discovery, analysis]
+
+
+def test_cli_loads_repo_dotenv_for_env_only_cache_and_allowed_hosts(tmp_path, monkeypatch, capsys):
+    article_root = tmp_path / "article-cache"
+    enqueue_events([_event()], root=article_root)
+    (tmp_path / ".env").write_text(
+        f"ARTICLE_CACHE_DIR={article_root}\nARTICLE_CRAWLER_ALLOWED_HOSTS=example.com\n",
+        encoding="utf-8",
+    )
+    monkeypatch.delenv("ARTICLE_CACHE_DIR", raising=False)
+    monkeypatch.delenv("ARTICLE_CRAWLER_ALLOWED_HOSTS", raising=False)
+    monkeypatch.setattr(crawler, "__file__", str(tmp_path / "reports" / "article_crawler.py"))
+
+    assert main(["--status"]) == 0
+
+    payload = __import__("json").loads(capsys.readouterr().out)
+    assert payload["total"] == 1
+    assert "example.com" in crawler._allowed_hosts()
 
 
 def test_default_https_transport_connects_to_pinned_ip_with_original_tls_identity(monkeypatch):

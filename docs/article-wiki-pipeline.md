@@ -47,4 +47,4 @@ uv run python -m reports.article_crawler --seed-hours 48 --seed-limit 100 --limi
 
 ## 롤백
 
-문제가 생기면 설치된 crontab에서 `reports.article_crawler --limit 20` 한 줄만 비활성화하고 ingress 기능 변경을 되돌린다. 다른 source 수집, 기존 위키 생성 주기와 runtime 데이터를 삭제하거나 초기화하지 않는다. 재가동 전 `--status`와 drift 검사를 수행하고, 보존된 source 이벤트와 마지막 정상 `ready` 본문을 확인한다.
+문제가 생기면 먼저 `deploy/crontab.stock-report`에서 `reports.article_crawler --limit 20` 한 줄만 비활성화해 source of truth를 변경한다. 그 변경을 승인된 설치 절차로 반영하고 drift 검사로 일치 여부를 확인한 뒤 ingress 기능 변경을 되돌린다. 다른 source 수집, 기존 위키 생성 주기와 runtime 데이터를 삭제하거나 초기화하지 않는다. 재가동 전 `--status`와 drift 검사를 수행하고, 보존된 source 이벤트와 마지막 정상 `ready` 본문을 확인한다.

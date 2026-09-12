@@ -180,6 +180,7 @@ def _classify_event(event: dict) -> dict:
         return text[: max(0, limit - 1)].rstrip() + "…"
 
     row = dict(event or {})
+    incoming_classification = row.get("classification") if isinstance(row.get("classification"), dict) else {}
     source = str(row.get("source") or "unknown").strip() or "unknown"
     root = _source_root(source)
     profile = SOURCE_CLASSIFICATION.get(root, {"family": "other", "kind": "event", "trust": "C", "horizon": "1d"})
@@ -246,6 +247,10 @@ def _classify_event(event: dict) -> dict:
     elif root == "polymarket":
         wiki_eligible = True
 
+    article_discovery_eligible = profile["family"] == "news" and kind in {"article", "analysis"}
+    if incoming_classification.get("article_discovery_eligible") is False:
+        article_discovery_eligible = False
+
     trust = profile["trust"]
     confidence_map = {"A": 0.92, "B": 0.8, "C": 0.62, "D": 0.45}
     confidence = confidence_map.get(trust, 0.55)
@@ -257,6 +262,7 @@ def _classify_event(event: dict) -> dict:
         "trust": trust,
         "horizon": profile["horizon"],
         "wiki_eligible": wiki_eligible,
+        "article_discovery_eligible": article_discovery_eligible,
         "confidence": confidence,
         "labels": labels[:8],
     }
@@ -265,6 +271,7 @@ def _classify_event(event: dict) -> dict:
     row["topic"] = classification["topic"]
     row["trust"] = classification["trust"]
     row["wiki_eligible"] = classification["wiki_eligible"]
+    row["article_discovery_eligible"] = classification["article_discovery_eligible"]
     row["horizon"] = classification["horizon"]
     return row
 

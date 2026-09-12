@@ -74,6 +74,42 @@ def test_single_external_event_stays_draft_until_corrobated():
     assert page["confidence"] < 0.78
 
 
+def test_short_article_discovery_creates_metadata_digest_but_exclusions_stay_weak():
+    from reports.source_collector import _classify_event
+
+    short_article = _classify_event({
+        "source": "saveticker",
+        "title": "AI 반도체 공급 제약",
+        "url": "https://saveticker.com/news/84",
+        "body_raw": "짧은 API 미리보기",
+        "topic": "기술/AI",
+        "tickers": ["NVDA"],
+    })
+    report_pdf = _classify_event({
+        "source": "saveticker_report_pdf",
+        "title": "데일리 PDF",
+        "url": "https://saveticker.com/report.pdf",
+        "topic": "기술/AI",
+        "tickers": ["NVDA"],
+    })
+    explicitly_excluded = _classify_event({
+        "source": "saveticker",
+        "title": "제외된 기사",
+        "url": "https://saveticker.com/news/excluded",
+        "topic": "기술/AI",
+        "tickers": ["NVDA"],
+        "classification": {"article_discovery_eligible": False},
+    })
+
+    assert short_article["classification"]["wiki_eligible"] is False
+    assert short_article["classification"]["article_discovery_eligible"] is True
+    assert report_pdf["classification"]["article_discovery_eligible"] is False
+    assert explicitly_excluded["classification"]["article_discovery_eligible"] is False
+    pages = swc.build_wiki_pages_from_events([short_article], llm_fn=lambda _prompt: None)
+    assert any(short_article["url"] in page["source_refs"] for page in pages)
+    assert swc.build_wiki_pages_from_events([explicitly_excluded], llm_fn=lambda _prompt: None) == []
+
+
 def test_local_paths_alone_cannot_promote_source_digest():
     events = [
         {"source": "saveticker", "title": "첫 번째", "url": "", "body_raw": "본문"},
