@@ -268,7 +268,7 @@ def _holdings_table(rows):
 
 def _kr_section():
     """🇰🇷 국내(KR)북 — 국내 잔고 동기화 표시 (리스크 모델은 USD북 한정 — 분리 명시)."""
-    kr = data.load_kr_holdings()
+    kr = cached.kr_holdings()
     if not kr:
         return
     src = {"toss": "토스", "kiwoom": "키움"}.get(kr.get("source"), kr.get("source") or "?")

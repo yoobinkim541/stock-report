@@ -58,6 +58,7 @@ cached.portfolio_summary = lambda *a, **k: data.portfolio_summary(*a, **k)
 data.portfolio_weights = lambda *a, **k: {"MSFT":0.4,"NVDA":0.6}
 data.trade_events = lambda *a, **k: []
 data.load_kr_holdings = lambda *a, **k: {}
+cached.kr_holdings = lambda *a, **k: data.load_kr_holdings(*a, **k)
 data.ticker_alerts = lambda t: [{"id": "ab12cd34", "ticker": "MSFT", "price": 380.0,
                                  "type": "buy", "note": "지지선", "triggered": False,
                                  "created_at": "2026-07-09T10:00:00"}]

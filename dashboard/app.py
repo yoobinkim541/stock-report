@@ -125,7 +125,7 @@ with st.sidebar:
         else:
             st.warning("종목을 찾지 못했습니다 — 티커(예: BRK-B)로 입력해 주세요")
     if st.button("🔄 새로고침", width="stretch", help="캐시 비우고 다시 불러오기"):
-        st.cache_data.clear()
+        cached.clear_dashboard_refresh_caches()
         # 공통 마퀴·시장 맵은 stale snapshot을 첫 렌더에서 그대로 쓰지만,
         # 사용자가 명시적으로 새로고침한 경우에만 live 보강을 허용한다.
         st.session_state["_market_tape_force_live"] = True

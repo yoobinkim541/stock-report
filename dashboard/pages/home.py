@@ -67,7 +67,7 @@ def render():
     else:
         st.warning("보유 데이터 없음 — portfolio_snapshot 확인")
 
-    kr = data.load_kr_holdings()
+    kr = cached.kr_holdings()
     if kr.get("rows"):
         st.divider()
         kleft, kright = st.columns([1, 1.3])

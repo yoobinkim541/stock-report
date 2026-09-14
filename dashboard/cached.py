@@ -22,6 +22,12 @@ def holdings():
 
 
 @st.cache_data(ttl=30, show_spinner=False)
+def kr_holdings():
+    """국내 보유 목록 공용 cache — 홈·포트폴리오가 같은 동기화 결과를 공유한다."""
+    return data.load_kr_holdings()
+
+
+@st.cache_data(ttl=30, show_spinner=False)
 def portfolio_summary():
     """포트폴리오 헤더 요약 공용 cache — 파일 snapshot 기반, holdings provider와 분리."""
     return data.portfolio_summary()
@@ -65,6 +71,92 @@ def source_health():
 @st.cache_data(ttl=600, show_spinner=False)
 def wiki_pipeline_health():
     return views.wiki_pipeline_health_summary()
+
+
+def _wiki_storage_revision() -> str:
+    """위키 저장소 경로·파일 변경을 Streamlit cache key에 포함한다."""
+    try:
+        from agent_console import shared_memory, wiki
+
+        return f"{shared_memory.shared_memory_dir()}:{wiki._cache_storage_signature()}"
+    except Exception:
+        return "unknown"
+
+
+@st.cache_data(ttl=60, max_entries=8, show_spinner=False)
+def _wiki_stats_cached(revision):
+    from agent_console import wiki
+
+    return wiki.stats()
+
+
+def wiki_stats():
+    return _wiki_stats_cached(_wiki_storage_revision())
+
+
+@st.cache_data(ttl=60, max_entries=64, show_spinner=False)
+def _wiki_pages_cached(query="", surface="all", status="all", limit=10000, revision=""):
+    from agent_console import wiki
+
+    return wiki.list_pages(query=query, surface=surface, status=status, limit=limit)
+
+
+def wiki_pages(query="", surface="all", status="all", limit=10000):
+    return _wiki_pages_cached(query, surface, status, limit, _wiki_storage_revision())
+
+
+@st.cache_data(ttl=60, max_entries=8, show_spinner=False)
+def _wiki_search_health_cached(revision):
+    from agent_console import wiki
+
+    return wiki.search_health()
+
+
+def wiki_search_health():
+    return _wiki_search_health_cached(_wiki_storage_revision())
+
+
+@st.cache_data(ttl=60, max_entries=8, show_spinner=False)
+def _wiki_lint_pages_cached(revision):
+    from agent_console import wiki
+
+    return wiki.lint_pages()
+
+
+def wiki_lint_pages():
+    return _wiki_lint_pages_cached(_wiki_storage_revision())
+
+
+@st.cache_data(ttl=60, max_entries=64, show_spinner=False)
+def _wiki_page_cached(page_id, revision=""):
+    from agent_console import wiki
+
+    return wiki.get_page(page_id) if page_id else None
+
+
+def wiki_page(page_id):
+    return _wiki_page_cached(page_id, _wiki_storage_revision())
+
+
+@st.cache_data(ttl=60, max_entries=64, show_spinner=False)
+def _wiki_context_cached(query="", surface="wiki", limit=4, revision=""):
+    from agent_console import wiki
+
+    return wiki.build_context_section(query=query, surface=surface, limit=limit)
+
+
+def wiki_context(query="", surface="wiki", limit=4):
+    return _wiki_context_cached(query, surface, limit, _wiki_storage_revision())
+
+
+# Proxy helpers keep the public page-level functions easy to monkeypatch while
+# retaining Streamlit's cache invalidation API for mutations and tests.
+wiki_stats.clear = _wiki_stats_cached.clear
+wiki_pages.clear = _wiki_pages_cached.clear
+wiki_search_health.clear = _wiki_search_health_cached.clear
+wiki_lint_pages.clear = _wiki_lint_pages_cached.clear
+wiki_page.clear = _wiki_page_cached.clear
+wiki_context.clear = _wiki_context_cached.clear
 
 
 @st.cache_data(ttl=900, show_spinner=False)
@@ -498,3 +590,92 @@ def chart_workspace_versions(workspace_id):
 @st.cache_data(ttl=30, show_spinner=False)
 def chart_templates(kind=None, limit=50):
     return views.chart_templates(kind=kind, limit=limit)
+
+
+def _clear_cache_functions(functions):
+    for fn in functions:
+        clear = getattr(fn, "clear", None)
+        if callable(clear):
+            clear()
+
+
+def clear_dashboard_refresh_caches():
+    """수동 새로고침용 범위 — 비싼 히스토리·ML·LLM 결과는 유지한다."""
+    _clear_cache_functions(
+        (
+            holdings,
+            kr_holdings,
+            portfolio_summary,
+            paper_glance,
+            paper,
+            realtime_quote,
+            market_tape,
+            sp500_heatmap,
+            kr200_heatmap,
+            russell2000_heatmap,
+            intraday_overview,
+            intraday_day,
+            intraday_chart,
+            fx_now,
+        )
+    )
+
+
+def clear_position_caches():
+    """포지션 기록 변경용 범위 — 보유·리스크 요약만 즉시 재계산한다."""
+    _clear_cache_functions(
+        (
+            holdings,
+            kr_holdings,
+            portfolio_summary,
+            paper_glance,
+            paper,
+            risk,
+            risk_struct,
+            port_history,
+            income_summary,
+        )
+    )
+
+
+def clear_ticker_caches():
+    """현재 종목 수동 새로고침용 범위 — 다른 페이지의 무거운 캐시는 보존한다."""
+    _clear_cache_functions(
+        (
+            realtime_quote,
+            ohlc,
+            ohlc_tf,
+            chart_data_bundle,
+            trendlines_for,
+            chart_news,
+            chart_fundamentals,
+            valuation,
+            financials,
+            institutional,
+            news,
+            earnings,
+            intrinsic,
+            insider,
+            disclosures,
+            llm_analysis,
+            llm_related,
+            macro_corr,
+            etf,
+            tr_pr,
+            etf_peers,
+        )
+    )
+
+
+def clear_wiki_caches():
+    """위키 mutation 직후 목록·본문·검색 컨텍스트만 재조회한다."""
+    _clear_cache_functions(
+        (
+            wiki_stats,
+            wiki_pages,
+            wiki_search_health,
+            wiki_lint_pages,
+            wiki_page,
+            wiki_context,
+        )
+    )

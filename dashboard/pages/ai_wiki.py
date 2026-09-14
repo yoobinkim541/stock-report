@@ -8,13 +8,14 @@ import streamlit as st
 from agent_console import wiki
 
 
+from dashboard import cached
 from dashboard.wiki_browser import KIND_OPTIONS, SURFACE_OPTIONS, build_wiki_health_model
 
 STATUS_OPTIONS = ["all", "draft", "reviewed", "stable", "archived"]
 
 
 def _safe_wiki_stats() -> dict:
-    stats_fn = getattr(wiki, "stats", None)
+    stats_fn = getattr(cached, "wiki_stats", None)
     if callable(stats_fn):
         try:
             return stats_fn()
@@ -22,7 +23,7 @@ def _safe_wiki_stats() -> dict:
             pass
     pages = []
     try:
-        pages = wiki.list_pages(query="", surface="all", status="all", limit=10000)
+        pages = cached.wiki_pages(query="", surface="all", status="all", limit=10000)
     except Exception:
         pages = []
     status_counts = {"draft": 0, "reviewed": 0, "stable": 0, "archived": 0}
@@ -70,15 +71,15 @@ def render():
     cols[3].metric("최근", (latest.get("title", "—") or "—")[:20])
 
     try:
-        pages_all = wiki.list_pages(query="", surface="all", status="all", limit=10000)
+        pages_all = cached.wiki_pages(query="", surface="all", status="all", limit=10000)
     except Exception:
         pages_all = []
     try:
-        search_health = wiki.search_health()
+        search_health = cached.wiki_search_health()
     except Exception:
         search_health = {"provider": "fallback", "fallback_available": True, "qmd": {}}
     try:
-        lint = wiki.lint_pages()
+        lint = cached.wiki_lint_pages()
     except Exception:
         lint = {"issue_count": 0, "issues": []}
     health = build_wiki_health_model(pages_all, search_health=search_health, lint=lint)
@@ -110,7 +111,7 @@ def render():
     status = f2.selectbox("status", STATUS_OPTIONS, index=0, key="wiki_status_filter")
     kind_filter = f3.selectbox("kind", KIND_OPTIONS, index=0, key="wiki_kind_filter")
 
-    pages = wiki.list_pages(query=query, surface=surface, status=status, limit=60)
+    pages = cached.wiki_pages(query=query, surface=surface, status=status, limit=60)
     if kind_filter != "all":
         pages = [page for page in pages if page.get("kind") == kind_filter]
 
@@ -126,12 +127,13 @@ def render():
                 _page_card(selected)
                 if st.button("삭제", width="stretch"):
                     if wiki.delete_page(selected["id"]):
+                        cached.clear_wiki_caches()
                         st.toast("위키 페이지 삭제 완료")
                         st.rerun()
 
     with right:
         st.markdown("##### 편집기")
-        selected_page = wiki.get_page(st.session_state.get("wiki_selected_page_id", ""))
+        selected_page = cached.wiki_page(st.session_state.get("wiki_selected_page_id", ""))
         default_page = selected_page or _blank_page(query=query, surface=surface)
         with st.form("wiki_editor", clear_on_submit=False):
             title = st.text_input("제목", value=default_page.get("title", ""))
@@ -175,6 +177,7 @@ def render():
                         "confidence": default_page.get("confidence", 0.7),
                     }
                 )
+                cached.clear_wiki_caches()
                 st.session_state["wiki_selected_page_id"] = saved.get("id")
                 st.success("위키 페이지를 저장했습니다.")
                 st.rerun()
@@ -183,7 +186,7 @@ def render():
         st.caption("이 페이지는 호환용입니다. 최신 콘솔에서는 대화 탭의 위키 브라우저를 사용합니다.")
 
         with st.expander("위키가 챗봇에 들어가는 방식", expanded=False):
-            section = wiki.build_context_section(query=query or default_page.get("title", ""), surface=surface, limit=4)
+            section = cached.wiki_context(query=query or default_page.get("title", ""), surface=surface, limit=4)
             if section:
                 st.code(section, language="text")
             else:

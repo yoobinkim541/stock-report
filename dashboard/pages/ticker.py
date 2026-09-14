@@ -2316,7 +2316,7 @@ def _apply_action(fn):
         with st.spinner("기록 중… (가격 갱신 포함)"):
             msg = fn()
         st.success(str(msg) if msg else "완료")
-        st.cache_data.clear()
+        cached.clear_position_caches()
         st.rerun(scope="app")   # fragment 밖(차트 마커·거래 이력)까지 갱신
     except Exception as e:
         st.error(f"실패: {e}")

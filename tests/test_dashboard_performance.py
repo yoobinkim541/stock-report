@@ -9,6 +9,9 @@ import json
 import os
 import sys
 import time
+from pathlib import Path
+
+import pytest
 
 from streamlit.testing.v1 import AppTest
 
@@ -35,6 +38,97 @@ def test_cached_holdings_deduplicates_provider_calls(monkeypatch):
     assert cached.holdings() == rows
     assert cached.holdings() == rows
     assert len(calls) == 1
+
+
+def test_cached_kr_holdings_deduplicates_provider_calls(monkeypatch):
+    """국내 보유내역도 홈·포트폴리오가 공유하는 cache 경계를 사용해야 한다."""
+    from dashboard import cached, data
+
+    calls = []
+    payload = {"rows": [], "total": 0, "cash": 0, "total_with_cash": 0}
+    monkeypatch.setattr(data, "load_kr_holdings", lambda: calls.append(1) or payload)
+    cached.kr_holdings.clear()
+
+    assert cached.kr_holdings() == payload
+    assert cached.kr_holdings() == payload
+    assert len(calls) == 1
+
+
+def test_wiki_page_queries_share_a_cache_boundary(monkeypatch):
+    """AI 위키의 동일한 목록 조회는 한 번만 storage/qmd를 읽어야 한다."""
+    from agent_console import wiki
+    from dashboard import cached
+
+    calls = []
+    pages = [{"id": "p1", "title": "캐시 계약", "status": "stable", "surface": "market"}]
+    monkeypatch.setattr(
+        wiki,
+        "list_pages",
+        lambda **kwargs: calls.append(kwargs) or pages,
+    )
+    cached.wiki_pages.clear()
+
+    assert cached.wiki_pages(query="캐시", surface="market", status="all", limit=60) == pages
+    assert cached.wiki_pages(query="캐시", surface="market", status="all", limit=60) == pages
+    assert len(calls) == 1
+
+
+def test_refresh_cache_scope_keeps_heavy_page_results(monkeypatch):
+    """수동 새로고침은 live/glance 캐시만 비우고 ML·펀더멘털 캐시는 보존해야 한다."""
+    from dashboard import cached
+
+    touched = []
+
+    class Probe:
+        def __init__(self, name):
+            self.name = name
+
+        def clear(self):
+            touched.append(self.name)
+
+    monkeypatch.setattr(cached, "holdings", Probe("holdings"))
+    monkeypatch.setattr(cached, "portfolio_summary", Probe("portfolio_summary"))
+    monkeypatch.setattr(cached, "realtime_quote", Probe("realtime_quote"))
+    monkeypatch.setattr(cached, "market_tape", Probe("market_tape"))
+    monkeypatch.setattr(cached, "screener", Probe("screener"))
+    monkeypatch.setattr(cached, "backtest", Probe("backtest"))
+    monkeypatch.setattr(cached, "llm_analysis", Probe("llm_analysis"))
+
+    cached.clear_dashboard_refresh_caches()
+
+    assert {"holdings", "portfolio_summary", "realtime_quote", "market_tape"} <= set(touched)
+    assert not {"screener", "backtest", "llm_analysis"} & set(touched)
+
+
+def test_refresh_button_uses_scoped_cache_invalidation():
+    """앱 진입점도 전체 Streamlit 캐시 삭제 대신 공용 범위 삭제 helper를 호출해야 한다."""
+    source = Path(__file__).parents[1].joinpath("dashboard", "app.py").read_text(encoding="utf-8")
+
+    assert "cached.clear_dashboard_refresh_caches()" in source
+    assert "st.cache_data.clear()" not in source
+
+
+@pytest.mark.parametrize(
+    "page_import,page_call",
+    [
+        ("from dashboard.pages import home", "home.render()"),
+        ("from dashboard.pages import portfolio", "portfolio.render()"),
+    ],
+)
+def test_portfolio_pages_use_shared_kr_holdings_boundary(page_import, page_call):
+    """국내 잔고 provider는 각 페이지가 직접 읽지 않고 공용 cache를 경유해야 한다."""
+    script = _page_script(
+        f"""
+cached.kr_holdings = lambda: {{}}
+data.load_kr_holdings = lambda *a, **k: (_ for _ in ()).throw(
+    AssertionError("페이지에서 국내 잔고 provider 직접 호출"))
+{page_import}
+{page_call}
+"""
+    )
+    at = AppTest.from_string(script, default_timeout=30)
+    at.run()
+    assert not at.exception, str(at.exception)
 
 
 def test_home_uses_shared_holdings_boundary():
