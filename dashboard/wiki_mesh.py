@@ -424,20 +424,41 @@ def _build_adjacency(pages: list[dict[str, Any]]) -> tuple[dict[str, dict[str, W
             refs=ref_hits,
         )
 
-    # Keep the strongest inferred neighborhood per page. Explicit links are never trimmed.
+    # Explicit relationships are authoritative and do not consume the inferred-degree budget.
+    explicit_pairs = {
+        tuple(sorted((left_id, right_id)))
+        for left_id, targets in adjacency.items()
+        for right_id, edge in targets.items()
+        if edge.explicit
+    }
     selected_pairs: set[tuple[str, str]] = set()
-    by_node: dict[str, list[tuple[str, WikiGraphEdge]]] = defaultdict(list)
-    for pair, edge in inferred_edges.items():
-        by_node[edge.source].append((edge.target, edge))
-        by_node[edge.target].append((edge.source, edge))
-    for node_id, candidates in by_node.items():
-        ranked = sorted(candidates, key=lambda item: (item[1].weight, item[1].refs, item[1].tags, item[0]), reverse=True)
-        for other_id, _edge in ranked[:MAX_INFERRED_NEIGHBORS]:
-            selected_pairs.add(tuple(sorted((node_id, other_id))))
+    inferred_degree: Counter[str] = Counter()
+    candidates = sorted(
+        inferred_edges.items(),
+        key=lambda item: (
+            -item[1].weight,
+            -item[1].refs,
+            -item[1].tags,
+            item[0][0],
+            item[0][1],
+        ),
+    )
+    for pair, _edge in candidates:
+        if pair in explicit_pairs:
+            continue
+        left_id, right_id = pair
+        if (
+            inferred_degree[left_id] >= MAX_INFERRED_NEIGHBORS
+            or inferred_degree[right_id] >= MAX_INFERRED_NEIGHBORS
+        ):
+            continue
+        selected_pairs.add(pair)
+        inferred_degree[left_id] += 1
+        inferred_degree[right_id] += 1
 
     for (left_id, right_id), edge in inferred_edges.items():
         pair = (left_id, right_id)
-        if pair not in selected_pairs:
+        if pair not in explicit_pairs and pair not in selected_pairs:
             continue
         add_edge(left_id, right_id, weight=edge.weight, tags=edge.tags, refs=edge.refs)
         add_edge(right_id, left_id, weight=edge.weight, tags=edge.tags, refs=edge.refs)

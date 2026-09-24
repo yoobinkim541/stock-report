@@ -701,6 +701,10 @@ def _record_to_page(record: dict) -> dict:
 
 def _candidate_score(record: dict, query: str, surface: str, status: str) -> int:
     page = _record_to_page(record)
+    return _candidate_score_page(page, query, surface, status)
+
+
+def _candidate_score_page(page: dict, query: str, surface: str, status: str) -> int:
     haystack = " ".join(
         [
             page["title"],
@@ -767,24 +771,14 @@ def list_pages(*, query: str = "", surface: str = "all", status: str = "all", li
     records = _wiki_records()
     if not records:
         return []
-    fallback = _fallback_ranked_pages(records, query=query, surface=surface, status=status, limit=limit)
     qmd_pages = _qmd_ranked_pages(records, query=query, surface=surface, status=status, limit=limit)
     if not qmd_pages:
+        fallback = _fallback_ranked_pages(records, query=query, surface=surface, status=status, limit=limit)
         pages = _apply_backlinks(fallback, records)
         _record_retrieval_usage(query, surface, status, pages, provider="fallback")
         return pages
-    merged: list[dict] = []
-    seen: set[str] = set()
-    for page in [*qmd_pages, *fallback]:
-        page_id = _clean(page.get("id"), 120)
-        if page_id and page_id in seen:
-            continue
-        if page_id:
-            seen.add(page_id)
-        merged.append(page)
-        if len(merged) >= limit:
-            break
-    pages = _apply_backlinks(merged, records)
+
+    pages = _apply_backlinks(qmd_pages, records)
     _record_retrieval_usage(query, surface, status, pages, provider="qmd")
     return pages
 
@@ -815,7 +809,7 @@ def _fallback_ranked_pages(records: list[dict], *, query: str, surface: str, sta
         page = _record_to_page(row)
         if status and status != "all" and page["status"] != status.lower():
             continue
-        score = _candidate_score(row, query, surface, status)
+        score = _candidate_score_page(page, query, surface, status)
         scored.append((score, -idx, page))
     if not scored:
         scored = [(0, -idx, _record_to_page(row)) for idx, row in enumerate(records)]
@@ -834,14 +828,13 @@ def _qmd_ranked_pages(records: list[dict], *, query: str, surface: str, status: 
             return []
     except Exception:
         return []
-    source_pages = [_record_to_page(row) for row in records]
     try:
         hits = qmd_search.search(query, limit=limit, surface=surface, status=status)
     except Exception:
         return []
     if not hits:
         return []
-    by_id = {_clean(page.get("id"), 120): page for page in source_pages if page.get("id")}
+    by_id = {_clean(row.get("id"), 120): row for row in records if row.get("id")}
     out: list[dict] = []
     seen: set[str] = set()
     for hit in hits:
@@ -866,7 +859,7 @@ def _page_from_qmd_hit(hit: dict, *, by_id: dict[str, dict], surface: str, statu
     source = by_id.get(page_id)
     if not source:
         return None
-    page = dict(source)
+    page = _record_to_page(source)
     if status and status != "all" and page.get("status") != status:
         return None
     if surface and surface != "all" and page.get("surface") != surface:
