@@ -63,9 +63,19 @@ def _has_judgment_link(page: dict, pages_by_id: dict[str, dict] | None = None) -
     """이 source_digest 가 이미 playbook/risk/decision/concept 카드로 연결돼 있는가."""
     for link_id in [*(page.get("links") or []), *(page.get("backlinks") or [])]:
         linked = (pages_by_id or {}).get(link_id) if pages_by_id is not None else wiki.get_page(link_id)
-        if linked and linked.get("kind") in _JUDGMENT_KINDS:
+        if linked and linked.get("kind") in _JUDGMENT_KINDS and linked.get("status") != "archived":
             return True
     return False
+
+
+def _has_archived_judgment_result(page: dict, pages_by_id: dict[str, dict]) -> bool:
+    result_id = str((page.get("distillation_state") or {}).get("last_result_id") or "")
+    if not result_id:
+        return False
+    result = pages_by_id.get(result_id)
+    return bool(
+        result and result.get("kind") in _JUDGMENT_KINDS and result.get("status") == "archived"
+    )
 
 
 def select_distillation_candidates(pages: list[dict], *, limit: int = MAX_CANDIDATES_PER_RUN) -> list[dict]:
@@ -77,7 +87,7 @@ def select_distillation_candidates(pages: list[dict], *, limit: int = MAX_CANDID
         and p.get("status") != "archived"
         and (not _has_judgment_link(p, pages_by_id) or _refresh_due(p) or _refresh_retry_due(p)
              or bool(p.get("evidence_ids") and not (p.get("distillation_state") or {}).get("status")))
-        and _distillation_is_eligible(p)
+        and (_distillation_is_eligible(p) or _has_archived_judgment_result(p, pages_by_id))
     ]
     unlinked.sort(key=lambda p: (str((p.get("distillation_state") or {}).get("last_attempt_at") or ""),
                                 -len(p.get("evidence_ids") or [])))
@@ -216,6 +226,14 @@ def _attach_article_context(
             })
 
 
+def _has_rich_digest_fallback(page: dict) -> bool:
+    return bool(
+        len(str(page.get("body") or "").strip()) >= 300
+        and page.get("source_refs")
+        and page.get("evidence_ids")
+    )
+
+
 def _build_distillation_prompt(page: dict) -> str:
     if page.get("_source_articles"):
         return wiki_narrative.build_prompt(
@@ -241,7 +259,11 @@ def _build_distillation_prompt(page: dict) -> str:
         f"제목: {page.get('title', '')}",
         f"요약: {page.get('summary', '')}",
         f"본문: {(page.get('body') or '')[:3000]}",
+        f"출처 참조: {json.dumps(page.get('source_refs') or [], ensure_ascii=False)}",
+        f"근거 ID: {json.dumps(page.get('evidence_ids') or [], ensure_ascii=False)}",
         "</source_digest>",
+        "현재 보관 원문이 없으므로 위 source_digest의 본문·출처 참조·근거 ID만 사용한다.",
+        "확인할 수 없는 세부 사실이나 인과관계는 만들지 않는다. 근거가 충분하지 않으면 skip 한다.",
     ])
     articles = page.get("_source_articles") or []
     previous = page.get("_previous_knowledge") or {}
@@ -258,7 +280,10 @@ def _build_distillation_prompt(page: dict) -> str:
 
 
 def _distill_one_with_status(page: dict, llm_fn) -> tuple[dict | None, str, str]:
-    if page.get("_require_articles") and not page.get("_source_articles"):
+    if (
+        page.get("_require_articles") and not page.get("_source_articles")
+        and not _has_rich_digest_fallback(page)
+    ):
         return None, "failed", "archived article bodies unavailable"
     prompt = _build_distillation_prompt(page)
     try:
@@ -306,7 +331,11 @@ def _distill_one_with_status(page: dict, llm_fn) -> tuple[dict | None, str, str]
         return None, "failed", "empty distillation payload"
     # Generated evidence is not a user/assistant conversation.
     payload["messages"] = []
-    payload["id"] = previous.get("id") or _distillation_id(str(page.get("id") or ""), kind)
+    stable_id = _distillation_id(str(page.get("id") or ""), kind)
+    version = page.get("_distillation_version")
+    if version and not previous:
+        stable_id = f"{stable_id}-r{int(version)}"
+    payload["id"] = previous.get("id") or stable_id
     payload["links"] = wiki._clean_links(
         [page.get("id"), *(previous.get("links") or []), *(payload.get("links") or [])], self_id=payload["id"]
     )
@@ -547,10 +576,16 @@ def run(*, dry_run: bool = False, llm_fn=None, limit: int | None = None,
         previous_id = (page.get("distillation_state") or {}).get("last_result_id")
         previous = by_id.get(previous_id)
         if fulltext and previous and previous.get("status") == "archived":
-            if not dry_run:
-                _mark_distillation_attempt(page, status="skipped", reason="previous knowledge archived")
-            continue
-        if fulltext and previous and previous.get("kind") in _DISTILLABLE_KINDS:
+            if not page.get("_source_articles") and not _has_rich_digest_fallback(page):
+                if not dry_run:
+                    _mark_distillation_attempt(
+                        page, status="skipped", reason="previous knowledge archived; stored digest evidence insufficient"
+                    )
+                continue
+            page["_distillation_version"] = max(
+                2, int((page.get("distillation_state") or {}).get("attempts") or 0) + 1
+            )
+        elif fulltext and previous and previous.get("kind") in _DISTILLABLE_KINDS:
             page["_previous_knowledge"] = previous
         payload, outcome, reason = _distill_one_with_status(page, llm_fn)
         if not payload:

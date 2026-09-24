@@ -21,6 +21,20 @@ def test_skipped_evidence_retries_only_after_change():
     assert wd._distillation_is_eligible(page)
 
 
+def test_archived_judgment_link_reselects_completed_digest():
+    page = {
+        "id": "source-archived",
+        "kind": "source_digest",
+        "evidence_ids": ["e1"],
+        "links": ["old-judgment"],
+        "distillation_state": {"status": "created", "last_result_id": "old-judgment"},
+    }
+    page["distillation_state"]["evidence_fingerprint"] = wd._evidence_fingerprint(page)
+    archived = {"id": "old-judgment", "kind": "concept", "status": "archived"}
+
+    assert wd.select_distillation_candidates([page, archived]) == [page]
+
+
 def test_article_context_loads_only_selected_ready_body(monkeypatch):
     selected_url = "https://example.org/selected"
     other_url = "https://example.org/other"

@@ -217,6 +217,37 @@ def test_curation_health_exposes_distillation_queue_states():
     assert result["distillation_skipped_count"] == 1
 
 
+def test_intentional_unchanged_skip_is_unlinked_but_not_actionable():
+    from reports.wiki_pipeline_health import _recommendations, _summarize_curation_health
+
+    result = _summarize_curation_health([
+        {
+            "id": "skipped",
+            "kind": "source_digest",
+            "status": "draft",
+            "source_refs": ["https://example.org/source"],
+            "links": [],
+            "backlinks": [],
+            "distillation_state": {
+                "status": "skipped",
+                "reason": "no reusable judgment",
+                "evidence_fingerprint": "a" * 64,
+            },
+        },
+    ])
+
+    assert result["source_digest_unlinked_count"] == 1
+    assert result["intentional_skip_count"] == 1
+    assert result["actionable_unlinked_count"] == 0
+    recommendations = _recommendations(
+        {"stale_sources": [], "sources": []},
+        {"stale_count": 0, "unused_actionable_count": 0,
+         "source_missing_for_promoted_count": 0},
+        result,
+    )
+    assert not any(item["category"] == "curation" for item in recommendations)
+
+
 def test_pipeline_health_flags_recent_news_labels_without_llm(monkeypatch):
     from reports import wiki_pipeline_health
 

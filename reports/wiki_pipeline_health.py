@@ -297,6 +297,8 @@ def _source_digest_backlinks(
                 state.get("status") or "pending", 40
             ).lower() or "pending",
             "distillation_attempts": distillation_attempts,
+            "distillation_result_id": _clean(state.get("last_result_id") or "", 100),
+            "distillation_reason": _clean(state.get("reason") or "", 240),
         })
     return rows
 
@@ -311,6 +313,21 @@ def _summarize_curation_health(pages: list[dict[str, Any]]) -> dict[str, Any]:
         if page["has_source_refs"] and page["open_questions"] == 0 and not page["linked_to_judgment"]
     ]
     distillation_states = Counter(page.get("distillation_status") or "pending" for page in source_digests)
+    by_id = {_page_id(page): page for page in pages if _page_id(page)}
+    intentional_skips = [
+        page for page in unlinked if page["distillation_status"] == "skipped"
+    ]
+    orphaned_judgments = [
+        page for page in unlinked
+        if page["distillation_status"] == "created"
+        and page.get("distillation_result_id")
+        and _page_status(by_id.get(page["distillation_result_id"], {})) == "archived"
+    ]
+    actionable_unlinked = [
+        page for page in unlinked
+        if page["distillation_status"] in {"pending", "created"}
+        or (page["distillation_status"] == "failed" and int(page.get("distillation_attempts") or 0) < 3)
+    ]
     distillation_pending_count = sum(
         1
         for page in source_digests
@@ -329,6 +346,9 @@ def _summarize_curation_health(pages: list[dict[str, Any]]) -> dict[str, Any]:
         "source_digest_unlinked_count": len(unlinked),
         "source_digest_unlinked_pages": unlinked,
         "ready_for_promotion_count": len(ready_for_promotion),
+        "actionable_unlinked_count": len(actionable_unlinked),
+        "intentional_skip_count": len(intentional_skips),
+        "orphaned_judgment_count": len(orphaned_judgments),
         "ready_for_promotion_pages": ready_for_promotion,
         "linked_source_digest_pages": linked,
         "distillation_pending_count": distillation_pending_count,
@@ -416,12 +436,16 @@ def _recommendations(
             "action": "크론·인증·채널 상태를 먼저 복구해서 원문 유입을 다시 살리세요.",
         })
 
-    unlinked = int(curation_section.get("source_digest_unlinked_count") or 0)
+    unlinked = int(curation_section.get("actionable_unlinked_count") or 0)
+    unlinked_total = int(curation_section.get("source_digest_unlinked_count") or 0)
     promoted_missing = int(wiki_section.get("source_missing_for_promoted_count") or 0)
     if unlinked or promoted_missing:
         detail_bits = []
         if unlinked:
-            detail_bits.append(f"source_digest {unlinked}개가 judgment page로 연결되지 않음")
+            detail_bits.append(f"처리 대상 source_digest {unlinked}개가 judgment page로 연결되지 않음")
+            skipped = int(curation_section.get("intentional_skip_count") or 0)
+            if skipped:
+                detail_bits.append(f"의도적 스킵 {skipped}개 제외 (전체 미연결 {unlinked_total}개)")
             pending = int(curation_section.get("distillation_pending_count") or 0)
             if pending:
                 detail_bits.append(f"증류 대기 {pending}개")

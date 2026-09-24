@@ -236,6 +236,7 @@ def _normalize_distillation_state(value: object) -> dict:
         "attempts": attempts,
         "last_attempt_at": _clean(value.get("last_attempt_at") or "", 80),
         "last_result_id": _clean(value.get("last_result_id") or "", 80),
+        "evidence_fingerprint": _clean(value.get("evidence_fingerprint") or "", 80),
         "reason": _clean(value.get("reason") or "", 600),
     }
 

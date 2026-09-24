@@ -227,6 +227,54 @@ def test_pending_only_group_never_calls_model_and_stays_retryable(monkeypatch, t
     assert wd.select_distillation_candidates([wiki.get_page(source["id"])]) != []
 
 
+def test_archived_result_uses_rich_digest_fallback_without_resurrecting(monkeypatch, tmp_path):
+    _isolate(monkeypatch, tmp_path)
+    cache = tmp_path / "article-cache"
+    archived = wiki.upsert_page({
+        "id": "distill-archived",
+        "title": "보관된 지식",
+        "summary": "과거 요약",
+        "body": "과거 본문",
+        "surface": "ticker",
+        "kind": "concept",
+        "status": "archived",
+        "source_refs": ["https://example.com/old"],
+    })
+    event = _event()
+    evidence_id = event_to_evidence_card(event).id
+    rich_marker = "저장된 다이제스트의 검증 가능한 설비 가동률 근거"
+    source = _source_page(
+        event,
+        body=(rich_marker + " ") * 20,
+        links=[archived["id"]],
+        distillation_state={"status": "created", "attempts": 1,
+                            "last_result_id": archived["id"]},
+    )
+    source["distillation_state"]["evidence_fingerprint"] = wd._evidence_fingerprint(source)
+    wiki.upsert_page(source)
+    prompts = []
+
+    result = wd.run(
+        llm_fn=lambda prompt: prompts.append(prompt) or json.dumps({
+            "action": "create", "kind": "concept", "title": "새 지식",
+            "summary": "저장 근거만 사용한 요약", "body": "저장 근거에서 확인되는 조건부 판단",
+        }, ensure_ascii=False),
+        fulltext=True,
+        article_cache_dir=cache,
+    )
+
+    assert len(result["created"]) == 1
+    replacement = result["created"][0]
+    assert replacement["id"] != archived["id"]
+    assert wiki.get_page(archived["id"])["status"] == "archived"
+    assert rich_marker in prompts[0]
+    assert event["url"] in prompts[0]
+    assert evidence_id in prompts[0]
+    assert "확인할 수 없는 세부 사실이나 인과관계는 만들지 않는다" in prompts[0]
+    assert replacement["source_refs"][:2] == [event["url"], f"wiki:{source['id']}"]
+    assert replacement["evidence_ids"] == [evidence_id]
+
+
 def test_invalid_reference_preserves_previous_document_byte_for_byte(monkeypatch, tmp_path):
     _isolate(monkeypatch, tmp_path)
     cache = tmp_path / "article-cache"
