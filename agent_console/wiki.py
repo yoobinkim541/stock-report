@@ -778,7 +778,15 @@ def list_pages(*, query: str = "", surface: str = "all", status: str = "all", li
         _record_retrieval_usage(query, surface, status, pages, provider="fallback")
         return pages
 
-    pages = _apply_backlinks(qmd_pages, records)
+    # QMD 의미 검색을 우선하되, 결과가 limit보다 적으면 로컬 점수 검색으로
+    # 보충한다. 검색엔진의 부분 장애나 희소한 의미 매칭 때문에 화면이 빈약해지는
+    # 것을 막고, QMD 우선순위 자체는 유지한다.
+    qmd_ids = {str(page.get("id") or "") for page in qmd_pages}
+    fallback = [
+        page for page in _fallback_ranked_pages(records, query=query, surface=surface, status=status, limit=limit)
+        if str(page.get("id") or "") not in qmd_ids
+    ]
+    pages = _apply_backlinks([*qmd_pages, *fallback][:limit], records)
     _record_retrieval_usage(query, surface, status, pages, provider="qmd")
     return pages
 

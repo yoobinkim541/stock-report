@@ -11,7 +11,7 @@ import pytest
 import safe_io
 import reports.article_crawler as crawler
 
-from reports.article_crawler import _eligible_seed_events, crawl_pending, main
+from reports.article_crawler import _eligible_seed_events, crawl_pending, import_ready_events, main
 from reports.article_queue import enqueue_events, get_article, load_index
 
 
@@ -81,6 +81,23 @@ def test_success_persists_ready_body_and_second_run_does_not_fetch(tmp_path):
     assert len(article["content_hash"]) == 64
     assert second["processed"] == 0
     assert calls == calls_after_first
+
+
+def test_import_ready_events_promotes_existing_raw_body_without_http(tmp_path):
+    event = _event(
+        body_raw=("원문 저장소에 이미 보관된 기사 본문입니다. " * 30).strip(),
+    )
+
+    result = import_ready_events([event], root=tmp_path, now=datetime(2026, 9, 9, tzinfo=UTC))
+    article = get_article(event["url"], root=tmp_path)
+
+    assert result["imported"] == 1
+    assert result["network_requests"] == 0
+    assert article is not None
+    assert article["text"] == event["body_raw"]
+    record = load_index(root=tmp_path)[event["url"]]
+    assert record["body_origin"] == "raw_source_event"
+    assert record["raw_event_id"] == event["id"]
 
 
 def test_injected_fetcher_may_return_html_string_directly(tmp_path):

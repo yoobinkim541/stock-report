@@ -637,6 +637,96 @@ def _finish_success(*, root, url: str, claim_id: str, text: str, snapshot: dict,
     return committed, unchanged
 
 
+def _raw_event_body(event: dict) -> str:
+    """Return a sufficiently rich body already preserved by a source collector."""
+    text = str(event.get("body_raw") or "").strip()
+    if not text:
+        return ""
+    title = re.sub(r"\s+", " ", str(event.get("title") or "")).strip()
+    comparable = re.sub(r"\s+", " ", text).strip()
+    if len(comparable) < 120 or (title and comparable == title):
+        return ""
+    return text
+
+
+def import_ready_events(events, *, root=None, now=None) -> dict:
+    """Promote rich raw source bodies into the article cache without HTTP.
+
+    Source collectors may already have fetched and archived an article body.
+    Reusing that immutable evidence avoids a second request while retaining the
+    same ready/body-hash contract as the network crawler.
+    """
+    current = _as_utc(now)
+    result = {
+        "seen": 0,
+        "imported": 0,
+        "unchanged": 0,
+        "skipped": 0,
+        "busy": 0,
+        "invalid": 0,
+        "capacity_errors": 0,
+        "network_requests": 0,
+    }
+    for event in events or []:
+        result["seen"] += 1
+        if not isinstance(event, dict):
+            result["invalid"] += 1
+            continue
+        url = canonicalize_url(event.get("url"))
+        text = _raw_event_body(event)
+        if not url or not text:
+            result["skipped"] += 1
+            continue
+        enqueue_events([event], root=root, now=current)
+        root_path = cache_root(root, create=True)
+        with locked_index(root=root, now=current) as (_root, index, _pruned):
+            record = index.get(url)
+            if not record:
+                result["invalid"] += 1
+                continue
+            if record.get("status") == "ready" and record.get("content_hash"):
+                result["unchanged"] += 1
+                continue
+            if record.get("claim_id"):
+                result["busy"] += 1
+                continue
+            snapshot = dict(record)
+        try:
+            content_hash, relative, existed = _write_body(root_path, snapshot, text, current)
+        except CrawlOutcome as exc:
+            if exc.status == "capacity":
+                result["capacity_errors"] += 1
+            else:
+                result["skipped"] += 1
+            continue
+        committed = False
+        with locked_index(root=root, now=current) as (_root, index, _pruned):
+            record = index.get(url)
+            if record and not record.get("claim_id"):
+                record.update(
+                    status="ready",
+                    content_hash=content_hash,
+                    body_path=relative,
+                    fetched_at=_iso(current),
+                    completed_at=_iso(current),
+                    refresh_pending=False,
+                    next_attempt_at=None,
+                    last_error="",
+                    body_origin="raw_source_event",
+                    raw_event_id=str(event.get("id") or "")[:160],
+                )
+                committed = True
+        if committed:
+            result["imported"] += 1
+        elif not existed:
+            try:
+                (root_path / relative).unlink()
+            except OSError:
+                pass
+            result["busy"] += 1
+    return result
+
+
 def _finish_failure(*, root, url: str, claim_id: str, was_refresh: bool, outcome: CrawlOutcome, now: datetime) -> str:
     final_status = outcome.status
     with locked_index(root=root, now=now) as (_root, index, _pruned):

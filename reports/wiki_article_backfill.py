@@ -9,6 +9,7 @@ from __future__ import annotations
 import argparse
 import copy
 import json
+import os
 import re
 from collections import Counter
 from datetime import datetime, timezone
@@ -248,6 +249,54 @@ def seed_backfill(
     }
 
 
+def import_raw_cache(*, root=None, source_cache=None, limit: int = MAX_SEED_LIMIT, now=None) -> dict:
+    """Promote matching rich source-cache events before making HTTP requests."""
+    queue_root = article_queue.cache_root(root)
+    source_root = Path(source_cache).expanduser() if source_cache else Path(
+        os.getenv("SOURCE_CACHE_DIR", "~/reports/source-cache")
+    ).expanduser()
+    index = article_queue.load_index(root=queue_root)
+    wanted = set(index)
+    matches: dict[str, dict] = {}
+    scanned_files = scanned_rows = 0
+    bounded_limit = max(0, min(MAX_SEED_LIMIT * 10, int(limit)))
+    if source_root.exists():
+        for path in sorted(source_root.glob("events-*.jsonl")):
+            scanned_files += 1
+            try:
+                stream = path.open("r", encoding="utf-8", errors="replace")
+            except OSError:
+                continue
+            with stream:
+                for line in stream:
+                    scanned_rows += 1
+                    try:
+                        event = json.loads(line)
+                    except (TypeError, ValueError):
+                        continue
+                    if not isinstance(event, dict):
+                        continue
+                    url = article_queue.canonicalize_url(event.get("url"))
+                    if not url or url not in wanted or url in matches:
+                        continue
+                    if not article_crawler._raw_event_body(event):
+                        continue
+                    matches[url] = event
+                    if len(matches) >= bounded_limit:
+                        break
+            if len(matches) >= bounded_limit:
+                break
+    imported = article_crawler.import_ready_events(matches.values(), root=queue_root, now=now)
+    return {
+        "source_cache": str(source_root),
+        "queue_root": str(queue_root),
+        "scanned_files": scanned_files,
+        "scanned_rows": scanned_rows,
+        "matched": len(matches),
+        **imported,
+    }
+
+
 def _load_pages() -> list[dict]:
     from agent_console import wiki
 
@@ -258,17 +307,19 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--plan", action="store_true", help="read wiki refs and queue status without writes or network")
     parser.add_argument("--seed", action="store_true", help="write a review manifest and enqueue refs, without fetching")
+    parser.add_argument("--raw-import", action="store_true", help="promote rich existing source-cache bodies without fetching")
     parser.add_argument("--crawl", action="store_true", help="run the crawler; requires explicit --crawl")
     parser.add_argument("--root")
+    parser.add_argument("--source-cache")
     parser.add_argument("--seed-limit", type=int, default=100)
     parser.add_argument("--limit", type=int, default=20)
     args = parser.parse_args(argv)
 
     article_crawler._load_cli_env()
-    if args.plan and (args.seed or args.crawl):
-        parser.error("--plan cannot be combined with --seed or --crawl")
-    if not (args.plan or args.seed or args.crawl):
-        parser.error("choose --plan, --seed, and/or --crawl")
+    if args.plan and (args.seed or args.raw_import or args.crawl):
+        parser.error("--plan cannot be combined with --seed, --raw-import, or --crawl")
+    if not (args.plan or args.seed or args.raw_import or args.crawl):
+        parser.error("choose --plan, --seed, --raw-import, and/or --crawl")
 
     if args.plan:
         result = plan_backfill(_load_pages(), root=args.root, limit=args.seed_limit)
@@ -284,6 +335,12 @@ def main(argv: list[str] | None = None) -> int:
         result["seed"] = seed_backfill(
             _load_pages(),
             root=args.root,
+            limit=args.seed_limit,
+        )
+    if args.raw_import:
+        result["raw_import"] = import_raw_cache(
+            root=args.root,
+            source_cache=args.source_cache,
             limit=args.seed_limit,
         )
     if args.crawl:
