@@ -682,6 +682,26 @@ def test_wiki_lint_does_not_explode_on_shared_placeholder_ref(monkeypatch, tmp_p
     assert not cross_ref_issues, f"자리표시자 공유로 {len(cross_ref_issues)}건의 무의미한 교차링크 제안 생성됨"
 
 
+def test_wiki_lint_treats_shared_source_ref_as_provenance_not_relation(monkeypatch, tmp_path):
+    _isolate(monkeypatch, tmp_path)
+
+    from agent_console import wiki
+
+    pages = [
+        {
+            "id": f"same-source-{i}", "title": f"같은 원문 {i}", "status": "draft",
+            "source_refs": ["https://example.com/shared-article"],
+            "surface": "market", "kind": "note", "tags": ["wiki"],
+            "links": [], "backlinks": [],
+        }
+        for i in range(2)
+    ]
+
+    result = wiki.lint_pages(pages)
+
+    assert not [issue for issue in result["issues"] if issue["code"] == "missing_cross_ref"]
+
+
 def test_wiki_lint_caps_cross_ref_group_size(monkeypatch, tmp_path):
     """진짜 출처라도 그룹이 지나치게 크면(실질적 병합 제안 가치 없음·O(n²) 폭증 위험)
     pairwise 제안을 통째로 스킵해야 한다 — 자리표시자 필터와 별개의 일반 안전장치."""

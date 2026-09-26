@@ -1029,9 +1029,11 @@ def search_health() -> dict:
     }
 
 
-# 그룹핑에서도 내부 참조와 로컬 경로 자리표시자는 출처로 사용하지 않는다.
-MAX_CROSS_REF_GROUP = 30   # 이보다 큰 그룹은 pairwise 제안이 실질 가치가 없고(N개 다
-                            # 묶어 제안할 리 없음) O(n²) 폭증 위험만 크다 — 통째로 스킵.
+# 출처 URL은 provenance이지 페이지 간 의미 관계가 아니다. 관계 린트는 티커 태그만
+# 사용하고, 작은 그룹의 고신뢰 후보만 제한적으로 제안해 대형 원문 공유 그룹의
+# pairwise 경고와 UI/헬스체크 비용을 줄인다.
+MAX_CROSS_REF_GROUP = 8
+MAX_CROSS_REF_ISSUES = 1_000
 
 
 def _lint_relational_issues(pages: list[dict]) -> list[dict]:
@@ -1053,19 +1055,14 @@ def _lint_relational_issues(pages: list[dict]) -> list[dict]:
             })
 
     ticker_index: dict[str, list[dict]] = defaultdict(list)
-    ref_index: dict[str, list[dict]] = defaultdict(list)
     for page in valid_pages:
         for tag in page.get("tags") or []:
             clean_tag = _clean(tag, 60).lower()
             if clean_tag.startswith("ticker:"):
                 ticker_index[clean_tag].append(page)
-        for ref in page.get("source_refs") or page.get("artifacts") or []:
-            clean_ref = _clean(ref, 200)
-            if _is_verifiable_source_ref(clean_ref):
-                ref_index[clean_ref].append(page)
 
     seen_pairs: set[tuple[str, str]] = set()
-    for group in [*ticker_index.values(), *ref_index.values()]:
+    for group in ticker_index.values():
         if len(group) < 2 or len(group) > MAX_CROSS_REF_GROUP:
             continue
         for i in range(len(group)):
@@ -1082,6 +1079,8 @@ def _lint_relational_issues(pages: list[dict]) -> list[dict]:
                 right_links = set(_clean_links(right.get("links") or [], self_id=right_id))
                 if right_id in left_links or left_id in right_links:
                     continue
+                if len(issues) >= MAX_CROSS_REF_ISSUES:
+                    return issues
                 seen_pairs.add(pair)
                 left_title = _clean(left.get("title") or "위키 페이지", 160)
                 right_title = _clean(right.get("title") or "위키 페이지", 160)
