@@ -100,6 +100,29 @@ def test_import_ready_events_promotes_existing_raw_body_without_http(tmp_path):
     assert record["raw_event_id"] == event["id"]
 
 
+def test_extract_article_text_tolerates_tags_without_attrs(monkeypatch):
+    class TagWithoutAttrs:
+        attrs = None
+
+        def get_text(self, *_args, **_kwargs):
+            return "속성 없는 태그에서도 본문을 추출합니다. " * 20
+
+    class FakeSoup:
+        body = TagWithoutAttrs()
+
+        def find_all(self, selector):
+            return [] if selector != True else [TagWithoutAttrs()]
+
+        def find(self, *_args, **_kwargs):
+            return None
+
+    monkeypatch.setattr(crawler, "BeautifulSoup", lambda *_args, **_kwargs: FakeSoup())
+
+    text = crawler._extract_article_text("<html></html>", "제목")
+
+    assert len(text) >= 120
+
+
 def test_injected_fetcher_may_return_html_string_directly(tmp_path):
     now = datetime(2026, 9, 9, tzinfo=UTC)
     event = _event()

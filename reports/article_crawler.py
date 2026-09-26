@@ -413,8 +413,9 @@ def _extract_article_text(html: str, title: str) -> str:
     for element in soup.find_all(_REMOVE_TAGS):
         element.decompose()
     for element in soup.find_all(True):
+        attrs = getattr(element, "attrs", None) or {}
         labels = " ".join(
-            [str(element.get("id") or ""), *[str(value) for value in (element.get("class") or [])]]
+            [str(attrs.get("id") or ""), *[str(value) for value in (attrs.get("class") or [])]]
         )
         if labels and _NOISE.search(labels):
             element.decompose()
