@@ -1382,6 +1382,31 @@ def upsert_page(page: dict) -> dict:
     return saved
 
 
+def batch_upsert_pages(pages: Iterable[dict]) -> list[dict]:
+    """Persist a group of wiki pages with one shared-memory rewrite.
+
+    Distillation can create a source page and its linked judgment page in the
+    same batch. Rewriting the append-only store once avoids scheduling a full
+    artifact rebuild for every page and keeps large local-only backfills fast.
+    """
+    candidates = [dict(page or {}) for page in pages or [] if isinstance(page, dict)]
+    if not candidates:
+        return []
+    existing_by_id = {
+        str(record.get("id")): record
+        for record in _wiki_records()
+        if isinstance(record, dict) and record.get("id")
+    }
+    records = [
+        _build_wiki_record(page, existing=existing_by_id.get(str(page.get("id") or "")))
+        for page in candidates
+    ]
+    shared_memory.batch_upsert_delete(upserts=records, deletes=[])
+    _CACHE.clear()
+    _debounced_rebuild()
+    return [_record_to_page(record) for record in records]
+
+
 def split_child_ids(page: dict | None) -> list[str]:
     if not page:
         return []

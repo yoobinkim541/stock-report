@@ -68,6 +68,23 @@ def test_select_distillation_candidates_respects_limit():
     assert len(candidates) == 2
 
 
+def test_select_distillation_candidates_can_recover_exhausted_failure():
+    from reports import wiki_distillation as wd
+
+    page = {
+        "id": "failed-source",
+        "kind": "source_digest",
+        "status": "reviewed",
+        "links": [],
+        "backlinks": [],
+        "body": "cached source body",
+        "distillation_state": {"status": "failed", "attempts": 3},
+    }
+
+    assert wd.select_distillation_candidates([page]) == []
+    assert wd.select_distillation_candidates([page], include_exhausted=True) == [page]
+
+
 def test_distillation_batch_size_can_be_tuned_by_environment(monkeypatch):
     from reports import wiki_distillation as wd
 
@@ -177,6 +194,65 @@ def test_distill_one_returns_none_on_llm_failure():
     payload = wd._distill_one({"id": "d1", "title": "t", "summary": "s", "body": "b"}, broken_llm)
 
     assert payload is None
+
+
+def test_local_only_distillation_uses_source_evidence_without_llm(monkeypatch, tmp_path):
+    _isolate(monkeypatch, tmp_path)
+    from agent_console import wiki
+    from reports import wiki_distillation as wd
+
+    digest = wiki.upsert_page({
+        "title": "수집 소스 위키: 원유 공급 위험",
+        "summary": "원유 공급 차질 가능성이 관찰됨",
+        "body": "원문 다이제스트 본문",
+        "surface": "market",
+        "kind": "source_digest",
+        "status": "draft",
+        "source_refs": ["https://example.com/article"],
+        "evidence_ids": ["e1"],
+        "tags": ["wiki", "source_digest", "risk"],
+    })
+    page = wiki.get_page(digest["id"])
+    page["_source_articles"] = [{
+        "title": "원문 제목",
+        "text": "원문에 실제로 보관된 사실 문장입니다.",
+        "evidence_id": "e1",
+    }]
+
+    def fail_llm(_prompt):
+        raise AssertionError("local-only 경로에서는 LLM을 호출하면 안 됨")
+
+    payload, status, reason = wd._distill_one_with_status(page, fail_llm, local_only=True)
+
+    assert status == "created"
+    assert reason == ""
+    assert payload["kind"] == "risk"
+    assert "원문에 실제로 보관된 사실 문장" in payload["body"]
+    assert payload["report_citation"]
+
+
+def test_local_only_distillation_can_use_digest_when_article_is_unavailable():
+    from reports import wiki_distillation as wd
+
+    page = {
+        "id": "digest-1",
+        "title": "수집 소스 위키: 단순 관찰",
+        "summary": "원문 캐시가 없는 다이제스트 관찰",
+        "body": "다이제스트에 보관된 관찰 문장",
+        "surface": "market",
+        "kind": "source_digest",
+        "status": "draft",
+        "source_refs": ["https://example.com/source"],
+        "evidence_ids": ["e1"],
+        "tags": ["wiki", "source_digest", "source:saveticker"],
+        "_require_articles": True,
+        "_source_articles": [],
+    }
+
+    payload, status, _reason = wd._distill_one_with_status(page, lambda _: "", local_only=True)
+
+    assert status == "created"
+    assert payload["source_refs"] == ["https://example.com/source", "wiki:digest-1"]
 
 
 def test_run_dry_run_does_not_persist(monkeypatch, tmp_path):

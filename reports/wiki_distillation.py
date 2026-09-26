@@ -78,7 +78,10 @@ def _has_archived_judgment_result(page: dict, pages_by_id: dict[str, dict]) -> b
     )
 
 
-def select_distillation_candidates(pages: list[dict], *, limit: int = MAX_CANDIDATES_PER_RUN) -> list[dict]:
+def select_distillation_candidates(
+    pages: list[dict], *, limit: int = MAX_CANDIDATES_PER_RUN,
+    include_exhausted: bool = False,
+) -> list[dict]:
     """판단 카드로 아직 안 이어진 source_digest 중 근거(evidence)가 많은 순 상위 N개."""
     pages_by_id = {str(page.get("id")): page for page in pages if isinstance(page, dict) and page.get("id")}
     unlinked = [
@@ -87,7 +90,11 @@ def select_distillation_candidates(pages: list[dict], *, limit: int = MAX_CANDID
         and p.get("status") != "archived"
         and (not _has_judgment_link(p, pages_by_id) or _refresh_due(p) or _refresh_retry_due(p)
              or bool(p.get("evidence_ids") and not (p.get("distillation_state") or {}).get("status")))
-        and (_distillation_is_eligible(p) or _has_archived_judgment_result(p, pages_by_id))
+        and (
+            _distillation_is_eligible(p)
+            or _has_archived_judgment_result(p, pages_by_id)
+            or (include_exhausted and (p.get("distillation_state") or {}).get("status") == "failed")
+        )
     ]
     unlinked.sort(key=lambda p: (str((p.get("distillation_state") or {}).get("last_attempt_at") or ""),
                                 -len(p.get("evidence_ids") or [])))
@@ -279,19 +286,78 @@ def _build_distillation_prompt(page: dict) -> str:
     return prompt
 
 
-def _distill_one_with_status(page: dict, llm_fn) -> tuple[dict | None, str, str]:
+def _local_distillation_plan(page: dict) -> dict | None:
+    """Build a source-only draft when an external LLM is unavailable.
+
+    This path deliberately does not infer causality or an investment action. It
+    turns the cached digest/article evidence into a searchable draft card and
+    keeps the source-backed boundary visible to later review.
+    """
+    digest_body = re.sub(r"\s+", " ", str(page.get("body") or "")).strip()
+    summary = re.sub(r"\s+", " ", str(page.get("summary") or "")).strip()
+    articles = page.get("_source_articles") or []
+    if not digest_body and not summary and not articles:
+        return None
+    tags = {str(tag).strip().lower() for tag in page.get("tags") or []}
+    title_text = str(page.get("title") or "수집 소스")
+    risk_tokens = ("risk", "위험", "중동", "전쟁", "금리", "변동성", "mdd", "손실", "크레딧")
+    playbook_tokens = ("전략", "strategy", "매수", "매도", "포트폴리오", "레버리지", "대응")
+    lowered = f"{title_text} {summary} {digest_body}".lower()
+    if any(token in lowered for token in playbook_tokens):
+        kind = "playbook"
+    elif any(token in lowered for token in risk_tokens) or "risk" in tags:
+        kind = "risk"
+    else:
+        kind = "concept"
+
+    body_parts = ["## 관찰된 근거", summary or digest_body[:700]]
+    if digest_body and digest_body != summary:
+        body_parts.append(digest_body[:1800])
+    if articles:
+        body_parts.append("## 보관 원문 발췌")
+        for index, article in enumerate(articles[:8], 1):
+            article_title = re.sub(r"\s+", " ", str(article.get("title") or "")).strip()
+            article_text = re.sub(r"\s+", " ", str(article.get("text") or "")).strip()
+            if not article_text:
+                continue
+            body_parts.append(f"- [S{index}] {article_title}: {article_text[:700]}")
+    body_parts.extend([
+        "## 해석 경계",
+        "이 카드는 수집된 원문과 다이제스트를 검색 가능한 위키 초안으로 정리한 것입니다. "
+        "원문에 없는 인과관계·매매 처방·미래 예측은 포함하지 않았으며, 가격·공식 자료·수급과의 교차확인이 필요합니다.",
+    ])
+    citation = "원문 캐시와 수집 소스 다이제스트의 관찰 요약이며 추가 교차확인이 필요함"
+    body_parts.append(f"> **{wiki.REPORT_CITATION_MARKER}**: {citation}")
+    return {
+        "action": "create",
+        "kind": kind,
+        "title": f"{title_text} · 근거 정리",
+        "summary": (summary or digest_body or title_text)[:600],
+        "body": "\n\n".join(part for part in body_parts if part).strip(),
+        "status": "draft",
+        "confidence": 0.35,
+        "report_citation": citation,
+        "reason": "local source-only fallback",
+    }
+
+
+def _distill_one_with_status(page: dict, llm_fn, *, local_only: bool = False) -> tuple[dict | None, str, str]:
     if (
         page.get("_require_articles") and not page.get("_source_articles")
         and not _has_rich_digest_fallback(page)
+        and not local_only
     ):
         return None, "failed", "archived article bodies unavailable"
-    prompt = _build_distillation_prompt(page)
-    try:
-        text = llm_fn(prompt)
-    except Exception as e:
-        logger.warning("증류 LLM 호출 실패 (%s): %s", page.get("id"), e)
-        return None, "failed", str(e)
-    plan = wiki._parse_curation_plan(text)
+    if local_only:
+        plan = _local_distillation_plan(page)
+    else:
+        prompt = _build_distillation_prompt(page)
+        try:
+            text = llm_fn(prompt)
+        except Exception as e:
+            logger.warning("증류 LLM 호출 실패 (%s): %s", page.get("id"), e)
+            return None, "failed", str(e)
+        plan = wiki._parse_curation_plan(text)
     if not plan:
         return None, "failed", "invalid curation JSON"
     if str(plan.get("action", "")).lower() == "skip":
@@ -306,7 +372,7 @@ def _distill_one_with_status(page: dict, llm_fn) -> tuple[dict | None, str, str]
         return None, "failed", "refresh must preserve knowledge kind"
     articles = page.get("_source_articles") or []
     narrative_result = None
-    if articles:
+    if articles and not local_only:
         try:
             narrative_result = wiki_narrative.render_plan(plan, articles=articles, previous=previous)
         except wiki_narrative.NarrativeValidationError as exc:
@@ -549,7 +615,8 @@ def _notify_created_pages(created: list[dict]) -> bool:
 
 def run(*, dry_run: bool = False, llm_fn=None, limit: int | None = None,
         fulltext: bool | None = None, page_ids: list[str] | None = None,
-        article_cache_dir=None) -> dict:
+        article_cache_dir=None, local_only: bool = False,
+        rebuild_artifacts: bool = True) -> dict:
     if llm_fn is None:
         from agent_console.agent import _try_llm_prompt as llm_fn
 
@@ -566,12 +633,20 @@ def run(*, dry_run: bool = False, llm_fn=None, limit: int | None = None,
     if page_ids is not None:
         selected = set(page_ids)
         eligible_pages = [p for p in eligible_pages if p.get("kind") != "source_digest" or p.get("id") in selected]
-    candidates = select_distillation_candidates(eligible_pages, limit=batch_size)
+    candidates = select_distillation_candidates(
+        eligible_pages,
+        limit=batch_size,
+        # Explicit page_ids are an operator-directed recovery action. The
+        # local-only path may safely revisit exhausted external-LLM failures.
+        include_exhausted=bool(local_only and page_ids),
+    )
     candidates = [dict(page) for page in candidates]
     if fulltext:
         _attach_article_context(candidates, index=article_index, cache_dir=article_cache_dir)
     by_id = {page.get("id"): page for page in pages}
     created = []
+    pending_upserts: list[dict] = []
+    created_ids: list[str] = []
     for page in candidates:
         previous_id = (page.get("distillation_state") or {}).get("last_result_id")
         previous = by_id.get(previous_id)
@@ -587,7 +662,7 @@ def run(*, dry_run: bool = False, llm_fn=None, limit: int | None = None,
             )
         elif fulltext and previous and previous.get("kind") in _DISTILLABLE_KINDS:
             page["_previous_knowledge"] = previous
-        payload, outcome, reason = _distill_one_with_status(page, llm_fn)
+        payload, outcome, reason = _distill_one_with_status(page, llm_fn, local_only=local_only)
         if not payload:
             if not dry_run:
                 _mark_distillation_attempt(page, status=outcome, reason=reason)
@@ -600,37 +675,54 @@ def run(*, dry_run: bool = False, llm_fn=None, limit: int | None = None,
         if dry_run:
             created.append(payload)
         else:
-            saved = wiki.upsert_page(payload)
-            created.append(saved)
+            pending_upserts.append(payload)
+            created_ids.append(str(payload.get("id") or ""))
             linked = _page_payload(
                 page,
-                links=wiki._clean_links([*(page.get("links") or []), saved["id"]], self_id=page["id"]),
+                links=wiki._clean_links([*(page.get("links") or []), payload["id"]], self_id=page["id"]),
                 distillation_state={
                     "status": "created",
                     "attempts": int((page.get("distillation_state") or {}).get("attempts") or 0) + 1,
                     "last_attempt_at": wiki._now(),
-                    "last_result_id": saved["id"],
+                    "last_result_id": payload["id"],
                     "reason": "distillation created",
                     "evidence_fingerprint": _evidence_fingerprint(page),
                 },
             )
-            wiki.upsert_page(linked)
-            pages.append(saved)
-    if created and not dry_run:
+            pending_upserts.append(linked)
+            pages.append(payload)
+    if pending_upserts and not dry_run:
+        saved_pages = wiki.batch_upsert_pages(pending_upserts)
+        saved_by_id = {str(page.get("id") or ""): page for page in saved_pages}
+        created = [saved_by_id[page_id] for page_id in created_ids if page_id in saved_by_id]
+    if created and not dry_run and rebuild_artifacts:
         wiki.rebuild_artifacts()
         qmd = wiki.sync_qmd()
     else:
-        qmd = {"ok": True, "skipped": "dry_run_or_no_creation"}
-    return {"dry_run": dry_run, "candidates_considered": len(candidates), "created": created, "qmd": qmd}
+        qmd = {"ok": True, "skipped": "deferred_or_dry_run_or_no_creation"}
+    return {
+        "dry_run": dry_run,
+        "local_only": local_only,
+        "candidates_considered": len(candidates),
+        "created": created,
+        "qmd": qmd,
+    }
 
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--dry-run", action="store_true")
+    parser.add_argument("--local-only", action="store_true", help="외부 LLM 없이 원문 근거만으로 draft 카드 생성")
+    parser.add_argument("--defer-artifacts", action="store_true", help="배치 중 위키/QMD 산출물 재생성을 미룸")
     parser.add_argument("--limit", type=int, default=None, help="이번 실행에서 증류할 최대 페이지 수")
     args = parser.parse_args()
 
-    result = run(dry_run=args.dry_run, limit=args.limit)
+    result = run(
+        dry_run=args.dry_run,
+        limit=args.limit,
+        local_only=args.local_only,
+        rebuild_artifacts=not args.defer_artifacts,
+    )
     logger.info(
         "위키 증류 완료: 후보 %d건 검토, %d건 생성 (dry_run=%s)",
         result["candidates_considered"], len(result["created"]), result["dry_run"],
