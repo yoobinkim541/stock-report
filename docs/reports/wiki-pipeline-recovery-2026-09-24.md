@@ -76,4 +76,4 @@ raw import는 47개 이벤트 파일, 349,465행을 훑었고, 2,259건을 네�
 - 위키 raw cache backfill 테스트: 1 passed
 - 계획의 기존 수집·운영·증류·헬스 focused suite: 111 passed
 
-로컬 fallback·배치 저장·소진 실패 복구·HTML 파서 회귀 테스트를 포함한 관련 focused suite 340 passed를 확인했다. 샌드박스에서 소켓 생성이 제한된 스트림 테스트도 권한 허용 환경에서 같은 suite 안에서 통과했다.
+로컬 fallback·배치 저장·소진 실패 복구·HTML 파서·린트 회귀 테스트를 포함한 관련 focused suite 341 passed를 확인했다. 샌드박스에서 소켓 생성이 제한된 스트림 테스트도 권한 허용 환경에서 같은 suite 안에서 통과했다.
