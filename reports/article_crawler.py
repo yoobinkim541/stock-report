@@ -51,7 +51,23 @@ MAX_ATTEMPTS = 3
 RETRY_DELAYS = (timedelta(minutes=5), timedelta(minutes=30))
 HOST_DELAY_SECONDS = 2.0
 ALLOWED_HOSTS_ENV = "ARTICLE_CRAWLER_ALLOWED_HOSTS"
-DEFAULT_ALLOWED_HOSTS = {"saveticker.com", "www.saveticker.com"}
+# Wiki source refs are crawled only for known, public source domains.  This is
+# deliberately an explicit set rather than a wildcard: the SSRF and robots
+# checks below still apply, while newly cited hosts require operator review.
+DEFAULT_ALLOWED_HOSTS = {
+    "saveticker.com",
+    "www.saveticker.com",
+    "arca.live",
+    "t.me",
+    "kalshi.com",
+    "www.kalshi.com",
+    "polymarket.com",
+    "www.polymarket.com",
+    "finance.yahoo.com",
+    "www.sec.gov",
+    "fred.stlouisfed.org",
+    "www.worldgovernmentbonds.com",
+}
 REDIRECT_STATUSES = {301, 302, 303, 307, 308}
 _REMOVE_TAGS = ("script", "style", "noscript", "nav", "footer", "header", "aside", "iframe", "form", "button", "svg", "canvas")
 _NOISE = re.compile(r"(?:^|[-_\s])(ad|ads|advert|cookie|promo|related|share|social|newsletter|sidebar)(?:$|[-_\s])", re.I)
@@ -503,10 +519,10 @@ def _due(record: dict, now: datetime) -> bool:
     return due is None or due <= now
 
 
-def _claim_next(*, root, now: datetime) -> tuple[dict, str, bool] | None:
+def _claim_next(*, root, now: datetime, urls: set[str] | None = None) -> tuple[dict, str, bool] | None:
     with locked_index(root=root, now=now) as (_root, index, _pruned):
         candidates = sorted(
-            ((url, record) for url, record in index.items() if _due(record, now)),
+            ((url, record) for url, record in index.items() if _due(record, now) and (urls is None or url in urls)),
             key=lambda item: (str(item[1].get("next_attempt_at") or ""), str(item[1].get("first_discovered_at") or ""), item[0]),
         )
         if not candidates:
@@ -754,10 +770,17 @@ def _finish_failure(*, root, url: str, claim_id: str, was_refresh: bool, outcome
     return final_status
 
 
-def crawl_pending(*, root=None, limit=20, fetcher=None, now=None) -> dict:
-    """Claim and crawl at most twenty due URLs with network outside metadata locks."""
+def crawl_pending(*, root=None, limit=20, fetcher=None, now=None, urls=None) -> dict:
+    """Claim due URLs, optionally restricted to a canonical URL allowlist."""
     current = _as_utc(now)
     bounded_limit = min(MAX_RUN_LIMIT, max(0, int(limit)))
+    target_urls = None
+    if urls is not None:
+        target_urls = set()
+        for url in urls:
+            canonical = canonicalize_url(url)
+            if canonical:
+                target_urls.add(canonical)
     result = {
         "processed": 0,
         "ready": 0,
@@ -787,7 +810,7 @@ def crawl_pending(*, root=None, limit=20, fetcher=None, now=None) -> dict:
             result["swept_artifacts"] += swept["swept_artifacts"]
             result["swept_bytes"] += swept["swept_bytes"]
             while result["processed"] < bounded_limit:
-                claimed = _claim_next(root=root_path, now=current)
+                claimed = _claim_next(root=root_path, now=current, urls=target_urls)
                 if claimed is None:
                     break
                 record, claim_id, was_refresh = claimed
@@ -898,6 +921,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--limit", type=int, default=20)
     parser.add_argument("--status", action="store_true", help="print queue status without writes or network")
     parser.add_argument("--root")
+    parser.add_argument("--url", action="append", dest="urls", help="crawl only this URL (repeatable)")
     parser.add_argument("--seed-hours", type=int)
     parser.add_argument("--seed-limit", type=int, default=100)
     args = parser.parse_args(argv)
@@ -914,7 +938,7 @@ def main(argv: list[str] | None = None) -> int:
             limit=max(0, args.seed_limit),
         )
         seeded = enqueue_events(_eligible_seed_events(events), root=args.root)
-    result = crawl_pending(root=args.root, limit=args.limit)
+    result = crawl_pending(root=args.root, limit=args.limit, urls=args.urls)
     if seeded is not None:
         result["seed"] = seeded
     print(json.dumps(result, ensure_ascii=False, sort_keys=True))

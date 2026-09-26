@@ -48,6 +48,21 @@ def _patch_empty_pipeline(monkeypatch, module):
     monkeypatch.setattr(module.wiki, "lint_pages", lambda *args, **kwargs: {"issues": []})
     monkeypatch.setattr(module.wiki, "list_stale_pages", lambda *args, **kwargs: [])
     monkeypatch.setattr(module.wiki, "list_unused_pages", lambda *args, **kwargs: [])
+    monkeypatch.setattr(module.wiki_article_backfill, "reference_coverage", lambda *args, **kwargs: {
+        "url_count": 0,
+        "status_counts": {},
+        "by_host": {},
+        "ready_count": 0,
+        "blocked_count": 0,
+        "unavailable_count": 0,
+        "retry_count": 0,
+        "pending_count": 0,
+        "missing_count": 0,
+        "ready_missing_body_count": 0,
+        "unresolved_count": 0,
+        "terminal_count": 0,
+        "coverage_complete": True,
+    })
     monkeypatch.setattr(module.evidence_usage, "usage_summary", lambda *args, **kwargs: {})
 
 
@@ -306,6 +321,34 @@ def test_source_health_summary_exposes_blocked_and_zero_persistence():
     assert by_source["saveticker"]["zero_persist_streak"] == 3
     assert section["overall"]["blocked_sources"] == 1
     assert section["overall"]["zero_persist_sources"] == 1
+
+
+def test_pipeline_health_exposes_article_reference_coverage(monkeypatch):
+    from reports import wiki_pipeline_health
+
+    _patch_empty_pipeline(monkeypatch, wiki_pipeline_health)
+    monkeypatch.setattr(
+        wiki_pipeline_health.wiki_article_backfill,
+        "reference_coverage",
+        lambda pages, root=None: {
+            "url_count": 4,
+            "status_counts": {"ready": 2, "blocked": 1, "retry": 1},
+            "ready_count": 2,
+            "blocked_count": 1,
+            "retry_count": 1,
+            "missing_count": 0,
+            "unavailable_count": 0,
+            "unresolved_count": 1,
+            "coverage_complete": False,
+            "by_host": {},
+        },
+    )
+
+    report = wiki_pipeline_health.build_pipeline_health_report(dry_run=True)
+
+    assert report["article_coverage"]["url_count"] == 4
+    assert report["article_coverage"]["retry_count"] == 1
+    assert any(item["category"] == "article_backfill" for item in report["recommendations"])
 
 
 def test_source_health_summary_exposes_explicit_integrity_metrics():

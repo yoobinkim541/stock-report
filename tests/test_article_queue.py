@@ -43,6 +43,15 @@ def test_enqueue_deduplicates_canonical_url_without_losing_meaningful_query(tmp_
     assert get_article(first["url"], root=tmp_path) is None
 
 
+def test_default_cache_root_matches_source_cache_layout(monkeypatch, tmp_path):
+    import reports.article_queue as queue
+
+    monkeypatch.delenv("ARTICLE_CACHE_DIR", raising=False)
+    monkeypatch.setattr(queue.raw_archive, "reports_root", lambda: tmp_path)
+
+    assert queue.cache_root() == tmp_path / "source-cache" / "article-cache"
+
+
 def test_terminal_failure_is_reopened_only_by_changed_discovery_metadata(tmp_path):
     now = datetime(2026, 9, 9, tzinfo=UTC)
     event = _event()

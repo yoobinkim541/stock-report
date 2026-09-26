@@ -4,6 +4,7 @@ import json
 from datetime import datetime, timezone
 
 from reports import article_queue
+from reports import wiki_article_backfill as backfill
 from reports.article_queue import enqueue_events, load_index
 from reports.wiki_article_backfill import import_raw_cache, plan_backfill, seed_backfill
 
@@ -111,6 +112,28 @@ def test_plan_leaves_disabled_host_visible_until_explicitly_allowlisted(tmp_path
     assert not (tmp_path / "index.json").exists()
 
 
+def test_plan_queues_known_public_source_hosts_by_default(tmp_path, monkeypatch):
+    monkeypatch.delenv("ARTICLE_CRAWLER_ALLOWED_HOSTS", raising=False)
+    pages = [
+        _page("page-9", [
+            "https://arca.live/b/stock/123",
+            "https://t.me/insidertracking/456",
+            "https://kalshi.com/markets/example",
+            "https://unknown.example/article",
+        ])
+    ]
+
+    plan = plan_backfill(pages, root=tmp_path, limit=20)
+
+    selected = {event["url"] for event in plan["events"]}
+    assert {
+        "https://arca.live/b/stock/123",
+        "https://t.me/insidertracking/456",
+        "https://kalshi.com/markets/example",
+    } <= selected
+    assert plan["blocked_by_host"] == {"unknown.example": 1}
+
+
 def test_import_raw_cache_promotes_existing_source_body_without_network(tmp_path):
     article_root = tmp_path / "article-cache"
     source_root = tmp_path / "source-cache"
@@ -133,3 +156,32 @@ def test_import_raw_cache_promotes_existing_source_body_without_network(tmp_path
     assert result["imported"] == 1
     assert result["network_requests"] == 0
     assert load_index(root=article_root)[event["url"]]["status"] == "ready"
+
+
+def test_reference_coverage_distinguishes_ready_blocked_retry_and_unqueued(tmp_path):
+    ready_url = "https://saveticker.com/news/ready"
+    blocked_url = "https://arca.live/b/stock/blocked"
+    retry_url = "https://kalshi.com/markets/retry"
+    pages = [_page("coverage", [ready_url, blocked_url, retry_url, "https://t.me/post/missing"])]
+    enqueue_events(
+        [{"id": url, "url": url, "title": url, "source": "test"} for url in (ready_url, blocked_url, retry_url)],
+        root=tmp_path,
+    )
+    with article_queue.locked_index(root=tmp_path) as (_root, index, _pruned):
+        index[ready_url].update(status="ready", content_hash="ready-hash", body_path="bodies/ready.json")
+        index[blocked_url].update(status="blocked", last_error="robots unavailable: HTTP 403")
+        index[retry_url].update(status="retry", next_attempt_at="2099-01-01T00:00:00+00:00")
+
+    coverage = backfill.reference_coverage(pages, root=tmp_path)
+
+    assert coverage["url_count"] == 4
+    assert coverage["status_counts"] == {
+        "ready_missing_body": 1,
+        "blocked": 1,
+        "retry": 1,
+        "missing": 1,
+    }
+    assert coverage["missing_count"] == 1
+    assert coverage["blocked_count"] == 1
+    assert coverage["retry_count"] == 1
+    assert coverage["coverage_complete"] is False

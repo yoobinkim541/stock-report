@@ -59,7 +59,12 @@ def cache_root(root: str | Path | None = None, *, create: bool = False) -> Path:
     elif os.getenv(ARTICLE_CACHE_ENV):
         resolved = Path(os.environ[ARTICLE_CACHE_ENV]).expanduser()
     else:
-        resolved = raw_archive.reports_root() / "article-cache"
+        reports_root = raw_archive.reports_root()
+        source_cache = reports_root / "source-cache" / "article-cache"
+        legacy_cache = reports_root / "article-cache"
+        # Keep an existing pre-source-cache installation readable, but make
+        # the article queue share the collector's default storage layout.
+        resolved = legacy_cache if legacy_cache.exists() and not source_cache.exists() else source_cache
     if create:
         resolved.mkdir(parents=True, exist_ok=True)
     return resolved

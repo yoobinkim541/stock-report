@@ -86,6 +86,77 @@ def _manifest_url(url: str) -> str:
     return urlunsplit((parsed.scheme, parsed.netloc, parsed.path, urlencode(query, doseq=True), ""))
 
 
+def _referenced_urls(pages) -> set[str]:
+    """Return canonical HTTP(S) URLs cited by the supplied wiki pages."""
+    urls: set[str] = set()
+    for page in pages or []:
+        if not isinstance(page, dict):
+            continue
+        for ref in _refs(page):
+            for match in _URL_PATTERN.findall(ref):
+                canonical = article_queue.canonicalize_url(
+                    match.rstrip(_TRAILING_URL_PUNCTUATION)
+                )
+                if canonical:
+                    urls.add(canonical)
+    return urls
+
+
+def reference_coverage(pages, *, root=None) -> dict:
+    """Summarize whether every cited URL is queued and has a usable body.
+
+    ``blocked`` and ``unavailable`` are terminal, auditable outcomes rather
+    than unresolved work. A URL is unresolved only while it is unqueued,
+    pending/retrying, or marked ready without a readable body artifact.
+    """
+    urls = _referenced_urls(pages)
+    index = article_queue.load_index(root=root)
+    status_counts: Counter[str] = Counter()
+    host_counts: dict[str, Counter[str]] = {}
+    unresolved = 0
+    for url in sorted(urls):
+        record = index.get(url)
+        if not record:
+            state = "missing"
+        else:
+            state = str(record.get("status") or "unknown")
+            if state == "ready":
+                body_path = Path(str(record.get("body_path") or ""))
+                body_file = article_queue.cache_root(root) / body_path
+                if (
+                    not str(record.get("content_hash") or "").strip()
+                    or body_path.is_absolute()
+                    or not body_file.is_file()
+                ):
+                    state = "ready_missing_body"
+        status_counts[state] += 1
+        host = (urlsplit(url).hostname or "unknown").lower()
+        host_counts.setdefault(host, Counter())[state] += 1
+        if state in {
+            "missing", "pending", "retry", "failed", "needs_browser",
+            "fetching", "capacity", "ready_missing_body", "unknown",
+        }:
+            unresolved += 1
+    return {
+        "url_count": len(urls),
+        "status_counts": dict(sorted(status_counts.items())),
+        "by_host": {
+            host: dict(sorted(counts.items()))
+            for host, counts in sorted(host_counts.items())
+        },
+        "ready_count": int(status_counts.get("ready", 0)),
+        "blocked_count": int(status_counts.get("blocked", 0)),
+        "unavailable_count": int(status_counts.get("unavailable", 0)),
+        "retry_count": int(status_counts.get("retry", 0)),
+        "pending_count": int(status_counts.get("pending", 0)),
+        "missing_count": int(status_counts.get("missing", 0)),
+        "ready_missing_body_count": int(status_counts.get("ready_missing_body", 0)),
+        "unresolved_count": unresolved,
+        "terminal_count": len(urls) - unresolved,
+        "coverage_complete": unresolved == 0,
+    }
+
+
 def plan_backfill(
     pages,
     *,

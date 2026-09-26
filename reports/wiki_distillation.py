@@ -455,7 +455,9 @@ def _page_payload(page: dict, **changes) -> dict:
     return payload
 
 
-def _mark_distillation_attempt(page: dict, *, status: str, reason: str = "", result_id: str = "") -> dict:
+def _distillation_attempt_payload(
+    page: dict, *, status: str, reason: str = "", result_id: str = ""
+) -> dict:
     state = dict(page.get("distillation_state") or {})
     attempts = (0 if _refresh_due(page) else int(state.get("attempts") or 0)) + 1
     state.update({
@@ -466,7 +468,14 @@ def _mark_distillation_attempt(page: dict, *, status: str, reason: str = "", res
         "reason": reason,
         "evidence_fingerprint": _evidence_fingerprint(page),
     })
-    return wiki.upsert_page(_page_payload(page, distillation_state=state))
+    return _page_payload(page, distillation_state=state)
+
+
+def _mark_distillation_attempt(page: dict, *, status: str, reason: str = "", result_id: str = "") -> dict:
+    """Persist one attempt for callers outside the batch runner."""
+    return wiki.upsert_page(_distillation_attempt_payload(
+        page, status=status, reason=reason, result_id=result_id
+    ))
 
 
 def _notification_state_path() -> Path:
@@ -653,9 +662,9 @@ def run(*, dry_run: bool = False, llm_fn=None, limit: int | None = None,
         if fulltext and previous and previous.get("status") == "archived":
             if not page.get("_source_articles") and not _has_rich_digest_fallback(page):
                 if not dry_run:
-                    _mark_distillation_attempt(
+                    pending_upserts.append(_distillation_attempt_payload(
                         page, status="skipped", reason="previous knowledge archived; stored digest evidence insufficient"
-                    )
+                    ))
                 continue
             page["_distillation_version"] = max(
                 2, int((page.get("distillation_state") or {}).get("attempts") or 0) + 1
@@ -665,7 +674,9 @@ def run(*, dry_run: bool = False, llm_fn=None, limit: int | None = None,
         payload, outcome, reason = _distill_one_with_status(page, llm_fn, local_only=local_only)
         if not payload:
             if not dry_run:
-                _mark_distillation_attempt(page, status=outcome, reason=reason)
+                pending_upserts.append(_distillation_attempt_payload(
+                    page, status=outcome, reason=reason
+                ))
             continue
         duplicate = _semantic_duplicate(payload, pages)
         if duplicate:

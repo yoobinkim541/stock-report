@@ -83,6 +83,29 @@ def test_success_persists_ready_body_and_second_run_does_not_fetch(tmp_path):
     assert calls == calls_after_first
 
 
+def test_targeted_crawl_processes_only_requested_urls(tmp_path):
+    now = datetime(2026, 9, 9, tzinfo=UTC)
+    first = _event(1)
+    second = _event(2)
+    enqueue_events([first, second], root=tmp_path, now=now)
+    calls: list[str] = []
+
+    result = crawl_pending(
+        root=tmp_path,
+        limit=20,
+        urls=[second["url"]],
+        fetcher=_article_fetcher(_html("선택 본문"), calls),
+        now=now,
+    )
+
+    index = load_index(root=tmp_path)
+    assert result["processed"] == 1
+    assert index[first["url"]]["status"] == "pending"
+    assert index[second["url"]]["status"] == "ready"
+    assert second["url"] in calls
+    assert first["url"] not in calls
+
+
 def test_import_ready_events_promotes_existing_raw_body_without_http(tmp_path):
     event = _event(
         body_raw=("원문 저장소에 이미 보관된 기사 본문입니다. " * 30).strip(),
@@ -341,6 +364,25 @@ def test_non_allowlisted_host_is_blocked_without_transport_call(tmp_path):
 
     assert calls == []
     assert load_index(root=tmp_path)["https://example.com/news/1"]["status"] == "blocked"
+
+
+def test_default_allowlist_covers_wiki_source_hosts(monkeypatch):
+    monkeypatch.delenv("ARTICLE_CRAWLER_ALLOWED_HOSTS", raising=False)
+
+    hosts = crawler._allowed_hosts()
+
+    assert {
+        "saveticker.com",
+        "www.saveticker.com",
+        "arca.live",
+        "t.me",
+        "kalshi.com",
+        "polymarket.com",
+        "finance.yahoo.com",
+        "www.sec.gov",
+        "fred.stlouisfed.org",
+        "www.worldgovernmentbonds.com",
+    } <= hosts
 
 
 def test_worker_lock_prevents_a_second_active_worker(tmp_path):

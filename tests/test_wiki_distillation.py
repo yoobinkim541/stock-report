@@ -295,6 +295,42 @@ def test_run_persists_created_pages(monkeypatch, tmp_path):
     assert any(p.get("kind") == "risk" and p.get("title") == "위험 신호" for p in saved_pages)
 
 
+def test_run_batches_failed_distillation_state_updates(monkeypatch, tmp_path):
+    _isolate(monkeypatch, tmp_path)
+    from agent_console import wiki
+    from reports import wiki_distillation as wd
+
+    for title in ("첫 다이제스트", "두 번째 다이제스트"):
+        wiki.upsert_page({
+            "title": title, "summary": "s", "body": "b",
+            "surface": "market", "kind": "source_digest", "status": "reviewed", "source_refs": [],
+        })
+
+    original_batch_upsert_pages = wiki.batch_upsert_pages
+    batches = []
+
+    def capture_batch(pages):
+        pages = list(pages)
+        batches.append(pages)
+        return original_batch_upsert_pages(pages)
+
+    monkeypatch.setattr(wiki, "batch_upsert_pages", capture_batch)
+
+    result = wd.run(
+        dry_run=False,
+        fulltext=False,
+        limit=10,
+        llm_fn=lambda _prompt: "not json",
+        rebuild_artifacts=False,
+    )
+
+    assert result["candidates_considered"] == 2
+    assert result["created"] == []
+    assert len(batches) == 1
+    assert len(batches[0]) == 2
+    assert {page["distillation_state"]["status"] for page in batches[0]} == {"failed"}
+
+
 def test_run_skips_already_linked_digests(monkeypatch, tmp_path):
     _isolate(monkeypatch, tmp_path)
     from agent_console import wiki
