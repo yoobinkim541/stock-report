@@ -160,7 +160,11 @@ def _event_key(event: dict) -> str:
 def _is_strong_group(events: list[dict]) -> bool:
     if len(events) >= MIN_GROUP_EVENTS:
         return True
-    return any(bool((event.get("classification") or {}).get("wiki_eligible")) for event in events)
+    return any(
+        bool((event.get("classification") or {}).get("wiki_eligible"))
+        or bool((event.get("classification") or {}).get("article_discovery_eligible"))
+        for event in events
+    )
 
 
 def _status_for(events: list[dict], refs: list[str]) -> str:
@@ -295,26 +299,12 @@ def _group_label(key: str) -> tuple[str, str, str]:
 
 
 def _link_pages_sharing_events(pages: list[dict], page_event_keys: dict[str, set[str]]) -> None:
-    # links 는 매 배치마다 통째로 재계산되어 덮어써진다 (대화 경로의 links 는 대상
-    # 병합 시 기존 links 와 합쳐지는 것과 다름) — 소스 다이제스트는 결정적 재생성이
-    # 전제이므로 이전 배치의 links 를 보존할 이유가 없다.
+    # 같은 원문이 topic/ticker 그룹에 반복되는 것은 source_refs가 이미 provenance로
+    # 보존한다. 이를 source_digest 간 명시적 링크로 복제하면 그래프와 답변의 관련
+    # 문서가 불필요하게 팽창한다. 명시적 links는 아래의 source_digest -> judgment
+    # 관계만 남기고, 그래프 UI의 제한된 source_refs 추론 엣지는 그대로 사용한다.
     for left in pages:
-        left_id = left.get("id")
-        left_keys = page_event_keys.get(left_id) or set()
-        if not left_keys:
-            left["links"] = []
-            continue
-        linked: list[str] = []
-        for right in pages:
-            right_id = right.get("id")
-            if right_id == left_id:
-                continue
-            right_keys = page_event_keys.get(right_id) or set()
-            if left_keys & right_keys:
-                linked.append(right_id)
-            if len(linked) >= MAX_CURATOR_LINKS:
-                break
-        left["links"] = linked
+        left["links"] = []
 
 
 def _llm_enrich_event_group(group_title: str, events: list[dict], llm_fn: Callable[[str], str | None] | None) -> dict | None:
@@ -395,7 +385,6 @@ def build_wiki_pages_from_events(events: list[dict], now: datetime | None = None
                 groups[f"ticker:{ticker.strip().upper()}"].append(event)
 
     pages: list[dict] = []
-    page_event_keys: dict[str, set[str]] = {}
     for key, rows in sorted(groups.items(), key=lambda item: (-len(item[1]), item[0])):
         group_type, label, display = _group_label(key)
         rows = sorted(rows, key=lambda event: str(event.get("published_at") or event.get("collected_at") or ""), reverse=True)
@@ -451,8 +440,7 @@ def build_wiki_pages_from_events(events: list[dict], now: datetime | None = None
                 if enriched.get("tags"):
                     page["tags"] = _dedupe([*tags, *enriched["tags"]], limit=20)
         pages.append(page)
-        page_event_keys[page_id] = {key for key in (_event_key(row) for row in rows) if key}
-    _link_pages_sharing_events(pages, page_event_keys)
+    # 같은 이벤트를 공유하는 source_digest 간 연결은 source_refs로 충분하다.
     # 기존 판단 카드와 교차 링크: source_digest ↔ playbook/risk/decision/concept.
     # 증류 크론이 만든 링크를 다음 source-wiki 재생성에서도 유지한다.
     existing_pages = _existing_wiki_pages()

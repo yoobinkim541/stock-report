@@ -9,6 +9,7 @@ from pathlib import Path
 
 RELEVANT_MARKERS = (
     "reports.source_pipeline",
+    "reports.article_crawler",
     "reports/source_collector.py",
     "reports.source_wiki_curator",
     "wiki_archive.log",
@@ -57,4 +58,3 @@ def main(argv: list[str] | None = None) -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
-

@@ -657,6 +657,39 @@ def test_wiki_lint_skips_missing_cross_ref_when_linked(monkeypatch, tmp_path):
     assert "missing_cross_ref" not in codes
 
 
+def test_wiki_lint_does_not_suggest_source_digest_cross_links(monkeypatch, tmp_path):
+    _isolate(monkeypatch, tmp_path)
+
+    from agent_console import wiki
+
+    result = wiki.lint_pages([
+        {
+            "id": "source-topic",
+            "title": "소스 주제",
+            "status": "draft",
+            "source_refs": ["https://example.com/article"],
+            "surface": "market",
+            "kind": "source_digest",
+            "tags": ["wiki", "ticker:nvda"],
+            "links": [],
+            "backlinks": [],
+        },
+        {
+            "id": "source-ticker",
+            "title": "소스 티커",
+            "status": "draft",
+            "source_refs": ["https://example.com/article"],
+            "surface": "ticker",
+            "kind": "source_digest",
+            "tags": ["wiki", "ticker:nvda"],
+            "links": [],
+            "backlinks": [],
+        },
+    ])
+
+    assert not [issue for issue in result["issues"] if issue["code"] == "missing_cross_ref"]
+
+
 def test_wiki_lint_does_not_explode_on_shared_placeholder_ref(monkeypatch, tmp_path):
     """shared_memory 의 로컬 경로 리댁션 자리표시자("<local-path>")를 진짜 공유 출처로
     취급해 그룹핑하면 그걸 공유하는 모든 페이지 쌍마다 missing_cross_ref 를 만든다.
@@ -680,6 +713,26 @@ def test_wiki_lint_does_not_explode_on_shared_placeholder_ref(monkeypatch, tmp_p
 
     cross_ref_issues = [issue for issue in result["issues"] if issue["code"] == "missing_cross_ref"]
     assert not cross_ref_issues, f"자리표시자 공유로 {len(cross_ref_issues)}건의 무의미한 교차링크 제안 생성됨"
+
+
+def test_wiki_lint_treats_shared_source_ref_as_provenance_not_relation(monkeypatch, tmp_path):
+    _isolate(monkeypatch, tmp_path)
+
+    from agent_console import wiki
+
+    pages = [
+        {
+            "id": f"same-source-{i}", "title": f"같은 원문 {i}", "status": "draft",
+            "source_refs": ["https://example.com/shared-article"],
+            "surface": "market", "kind": "note", "tags": ["wiki"],
+            "links": [], "backlinks": [],
+        }
+        for i in range(2)
+    ]
+
+    result = wiki.lint_pages(pages)
+
+    assert not [issue for issue in result["issues"] if issue["code"] == "missing_cross_ref"]
 
 
 def test_wiki_lint_caps_cross_ref_group_size(monkeypatch, tmp_path):
@@ -1065,7 +1118,10 @@ def test_wiki_list_pages_prefers_qmd_search_when_available(monkeypatch, tmp_path
 
     assert pages[0]["id"] == qmd_target["id"]
     assert pages[0]["search_provider"] == "qmd"
-    assert fallback["id"] in {page["id"] for page in pages}
+    # QMD hit가 있으면 전체 원장을 다시 스캔하지 않고 의미 검색 결과를
+    # authoritative 결과로 사용한다. fallback 페이지는 QMD 장애/무결과 때만 쓴다.
+    assert fallback["id"] not in {page["id"] for page in pages}
+    assert {page["id"] for page in pages} == {qmd_target["id"]}
     assert not any(call[0] == "export" for call in calls)
     assert "[위키 지식]" in section
     assert "qmd 우선 후보" in section

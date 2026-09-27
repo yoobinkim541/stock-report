@@ -25,6 +25,7 @@ import json
 import logging
 import math
 import os
+import re
 import subprocess
 import tempfile
 from datetime import datetime, timedelta, timezone
@@ -42,8 +43,7 @@ NEWS_LLM_MODEL = os.getenv("NEWS_LLM_LABELS_MODEL", "gpt-5-mini")
 NEWS_LLM_PROVIDER = os.getenv("NEWS_LLM_LABELS_PROVIDER", "openai-codex")
 NEWS_LLM_TIMEOUT = int(os.getenv("NEWS_LLM_LABELS_TIMEOUT", "90"))
 NEWS_LLM_PRIMARY = os.getenv("NEWS_LLM_LABELS_PRIMARY", "codex").strip().lower()
-NEWS_LLM_CODEX_MODEL = (os.getenv("NEWS_LLM_LABELS_CODEX_MODEL") or
-                        os.getenv("AGENT_CONSOLE_CODEX_MODEL", "")).strip()
+NEWS_LLM_CODEX_MODEL = os.getenv("NEWS_LLM_LABELS_CODEX_MODEL", "").strip()
 NEWS_LLM_CHUNK_SIZE = max(1, int(os.getenv("NEWS_LLM_LABELS_CHUNK_SIZE", "5")))
 NEWS_LLM_MAX_CHUNKS = max(1, int(os.getenv("NEWS_LLM_LABELS_MAX_CHUNKS", "6")))
 
@@ -215,6 +215,14 @@ def _codex_cwd() -> str:
     return os.getenv("NEWS_LLM_LABELS_CODEX_CWD", "/tmp").strip() or "/tmp"
 
 
+def _effective_codex_model() -> str:
+    """ChatGPT 계정에서 거부되는 실험용 5.6 alias는 CLI 기본 모델로 폴백한다."""
+    configured = str(NEWS_LLM_CODEX_MODEL or "").strip()
+    if re.match(r"^gpt-5\.6(?:-|$)", configured, re.IGNORECASE):
+        return ""
+    return configured
+
+
 def _codex_command(prompt: str) -> tuple[list[str], str]:
     """현재 CODEX_HOME 인증을 재사용하되, 세션·파일 변경을 금지한 실행 명령."""
     binary = os.getenv("NEWS_LLM_LABELS_CODEX_BIN", "codex").strip() or "codex"
@@ -224,8 +232,9 @@ def _codex_command(prompt: str) -> tuple[list[str], str]:
     cmd = [binary, "exec", "--ephemeral", "--sandbox", "read-only",
            "--cd", _codex_cwd(), "--skip-git-repo-check", "--color", "never",
            "--output-last-message", output_path]
-    if NEWS_LLM_CODEX_MODEL:
-        cmd.extend(["--model", NEWS_LLM_CODEX_MODEL])
+    model = _effective_codex_model()
+    if model:
+        cmd.extend(["--model", model])
     cmd.append(prompt)
     return cmd, output_path
 
@@ -284,7 +293,7 @@ def _run_llm(cmd: list[str], *, provider: str, model: str, runner,
 
 def _llm_routes(prompt: str) -> list[tuple[list[str], str, str, str | None]]:
     codex_cmd, output_path = _codex_command(prompt)
-    codex = (codex_cmd, "codex-exec", NEWS_LLM_CODEX_MODEL or "codex-config-default", output_path)
+    codex = (codex_cmd, "codex-exec", _effective_codex_model() or "codex-config-default", output_path)
     hermes = (["hermes", "chat", "-q", prompt,
                "--provider", NEWS_LLM_PROVIDER, "--model", NEWS_LLM_MODEL, "-Q"],
               "hermes", NEWS_LLM_MODEL, None)

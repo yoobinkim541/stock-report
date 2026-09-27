@@ -74,6 +74,42 @@ def test_single_external_event_stays_draft_until_corrobated():
     assert page["confidence"] < 0.78
 
 
+def test_short_article_discovery_creates_metadata_digest_but_exclusions_stay_weak():
+    from reports.source_collector import _classify_event
+
+    short_article = _classify_event({
+        "source": "saveticker",
+        "title": "AI 반도체 공급 제약",
+        "url": "https://saveticker.com/news/84",
+        "body_raw": "짧은 API 미리보기",
+        "topic": "기술/AI",
+        "tickers": ["NVDA"],
+    })
+    report_pdf = _classify_event({
+        "source": "saveticker_report_pdf",
+        "title": "데일리 PDF",
+        "url": "https://saveticker.com/report.pdf",
+        "topic": "기술/AI",
+        "tickers": ["NVDA"],
+    })
+    explicitly_excluded = _classify_event({
+        "source": "saveticker",
+        "title": "제외된 기사",
+        "url": "https://saveticker.com/news/excluded",
+        "topic": "기술/AI",
+        "tickers": ["NVDA"],
+        "classification": {"article_discovery_eligible": False},
+    })
+
+    assert short_article["classification"]["wiki_eligible"] is False
+    assert short_article["classification"]["article_discovery_eligible"] is True
+    assert report_pdf["classification"]["article_discovery_eligible"] is False
+    assert explicitly_excluded["classification"]["article_discovery_eligible"] is False
+    pages = swc.build_wiki_pages_from_events([short_article], llm_fn=lambda _prompt: None)
+    assert any(short_article["url"] in page["source_refs"] for page in pages)
+    assert swc.build_wiki_pages_from_events([explicitly_excluded], llm_fn=lambda _prompt: None) == []
+
+
 def test_local_paths_alone_cannot_promote_source_digest():
     events = [
         {"source": "saveticker", "title": "첫 번째", "url": "", "body_raw": "본문"},
@@ -127,7 +163,7 @@ def test_build_wiki_pages_from_events_dedupes_source_refs_and_skips_weak_groups(
     assert refs.count("/tmp/rates.json") == 1
 
 
-def test_build_wiki_pages_from_events_links_pages_sharing_events():
+def test_build_wiki_pages_keep_shared_event_as_provenance_not_explicit_edge():
     events = [
         {
             "source": "saveticker",
@@ -158,8 +194,12 @@ def test_build_wiki_pages_from_events_links_pages_sharing_events():
     pages = swc.build_wiki_pages_from_events(events, now=datetime(2026, 7, 23, 10, 0, tzinfo=KST))
     by_id = {page["id"]: page for page in pages}
 
-    assert by_id["source-topic-기술-ai"]["links"] == ["source-ticker-nvda"]
-    assert by_id["source-ticker-nvda"]["links"] == ["source-topic-기술-ai"]
+    # 같은 이벤트가 topic/ticker 그룹에 반복되어도 source_refs가 provenance를
+    # 보존하므로 source_digest끼리의 명시적 링크는 만들지 않는다.
+    assert by_id["source-topic-기술-ai"]["links"] == []
+    assert by_id["source-ticker-nvda"]["links"] == []
+    assert "https://saveticker.com/nvda" in by_id["source-topic-기술-ai"]["source_refs"]
+    assert "https://saveticker.com/nvda" in by_id["source-ticker-nvda"]["source_refs"]
 
 
 def test_build_wiki_pages_fetches_existing_wiki_pages_once_for_cross_links(monkeypatch):

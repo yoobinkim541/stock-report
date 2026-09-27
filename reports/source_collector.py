@@ -180,6 +180,7 @@ def _classify_event(event: dict) -> dict:
         return text[: max(0, limit - 1)].rstrip() + "…"
 
     row = dict(event or {})
+    incoming_classification = row.get("classification") if isinstance(row.get("classification"), dict) else {}
     source = str(row.get("source") or "unknown").strip() or "unknown"
     root = _source_root(source)
     profile = SOURCE_CLASSIFICATION.get(root, {"family": "other", "kind": "event", "trust": "C", "horizon": "1d"})
@@ -246,6 +247,10 @@ def _classify_event(event: dict) -> dict:
     elif root == "polymarket":
         wiki_eligible = True
 
+    article_discovery_eligible = profile["family"] == "news" and kind in {"article", "analysis"}
+    if incoming_classification.get("article_discovery_eligible") is False:
+        article_discovery_eligible = False
+
     trust = profile["trust"]
     confidence_map = {"A": 0.92, "B": 0.8, "C": 0.62, "D": 0.45}
     confidence = confidence_map.get(trust, 0.55)
@@ -257,6 +262,7 @@ def _classify_event(event: dict) -> dict:
         "trust": trust,
         "horizon": profile["horizon"],
         "wiki_eligible": wiki_eligible,
+        "article_discovery_eligible": article_discovery_eligible,
         "confidence": confidence,
         "labels": labels[:8],
     }
@@ -265,6 +271,7 @@ def _classify_event(event: dict) -> dict:
     row["topic"] = classification["topic"]
     row["trust"] = classification["trust"]
     row["wiki_eligible"] = classification["wiki_eligible"]
+    row["article_discovery_eligible"] = classification["article_discovery_eligible"]
     row["horizon"] = classification["horizon"]
     return row
 
@@ -723,7 +730,7 @@ def _fetch_saveticker_article_body(url: str, title: str = "") -> str:
         return ""
 
 
-def _saveticker_article_record(item: dict, base: str) -> dict:
+def _saveticker_article_record(item: dict, base: str, *, fetch_full: bool = True) -> dict:
     from reports.raw_archive import save_extracted_text, save_raw_artifact
 
     fetched_at = datetime.now(KST)
@@ -735,7 +742,7 @@ def _saveticker_article_record(item: dict, base: str) -> dict:
     # saveticker 자체 미리보기가 80~90자 근처서 "..."로 잘려 오는 경우가 흔해 길이만으로는
     # 거의 안 걸림 — 말줄임표로 끝나면 길이 무관하게 전체 기사를 마저 가져온다(2026-07-25).
     looks_truncated = body_raw.endswith("...") or body_raw.endswith("…")
-    if (len(body_raw) < 80 or looks_truncated) and url:
+    if fetch_full and (len(body_raw) < 80 or looks_truncated) and url:
         fetched = _fetch_saveticker_article_body(url, title=title)
         if fetched and len(fetched) > len(body_raw):
             body_raw = fetched   # 전체 기사가 미리보기의 상위집합 — 미리보기 중복 없이 이걸로 대체
@@ -840,7 +847,7 @@ def fetch_saveticker_events() -> list[dict]:
                 body_raw = _combine_body_raw(item.get("content"), item.get("group_summary")) or text
                 raw_path = text_path = manifest_path = raw_sha256 = raw_source = ""
             else:
-                record = _saveticker_article_record(item, base)
+                record = _saveticker_article_record(item, base, fetch_full=False)
                 body_raw = record["body_raw"] or _combine_body_raw(item.get("content"), item.get("group_summary")) or text
                 raw_path, text_path = record["raw_path"], record["text_path"]
                 manifest_path, raw_sha256, raw_source = (
@@ -1821,6 +1828,16 @@ def update_source_health(events: list[dict], cache_dir: Path | str = DEFAULT_CAC
             rec["fetch_success"] = fetch_success
             rec["persist_success"] = persist_success
             rec["last_duration_ms"] = max(0, int(stats.get("duration_ms") or 0))
+            queue_stats = stats.get("article_queue")
+            if isinstance(queue_stats, dict):
+                errors = [str(value)[:500] for value in (queue_stats.get("errors") or [])[:1]]
+                rec["article_queue"] = {
+                    "enqueued": max(0, int(queue_stats.get("enqueued") or 0)),
+                    "updated": max(0, int(queue_stats.get("updated") or 0)),
+                    "invalid": max(0, int(queue_stats.get("invalid") or 0)),
+                    "capacity_rejected": max(0, int(queue_stats.get("capacity_rejected") or 0)),
+                    "error": errors[0] if errors else "",
+                }
             if stats.get("transport"):
                 rec["last_transport"] = str(stats["transport"])
             duplicate_only = (

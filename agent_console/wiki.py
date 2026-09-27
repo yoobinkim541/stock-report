@@ -236,6 +236,7 @@ def _normalize_distillation_state(value: object) -> dict:
         "attempts": attempts,
         "last_attempt_at": _clean(value.get("last_attempt_at") or "", 80),
         "last_result_id": _clean(value.get("last_result_id") or "", 80),
+        "evidence_fingerprint": _clean(value.get("evidence_fingerprint") or "", 80),
         "reason": _clean(value.get("reason") or "", 600),
     }
 
@@ -599,6 +600,10 @@ def _backlink_index(records: list[dict]) -> dict[str, list[str]]:
         row_id = _clean(row.get("id"), 80)
         if not row_id:
             continue
+        # Archived pages remain available for audit, but must not inflate the
+        # active graph or leak historical backlinks into answer context.
+        if _status_from_tags(row.get("tags") or []) == "archived":
+            continue
         for target_id in _clean_links(row.get("links") or [], self_id=row_id):
             index[target_id].append(row_id)
     return index
@@ -700,6 +705,10 @@ def _record_to_page(record: dict) -> dict:
 
 def _candidate_score(record: dict, query: str, surface: str, status: str) -> int:
     page = _record_to_page(record)
+    return _candidate_score_page(page, query, surface, status)
+
+
+def _candidate_score_page(page: dict, query: str, surface: str, status: str) -> int:
     haystack = " ".join(
         [
             page["title"],
@@ -766,24 +775,18 @@ def list_pages(*, query: str = "", surface: str = "all", status: str = "all", li
     records = _wiki_records()
     if not records:
         return []
-    fallback = _fallback_ranked_pages(records, query=query, surface=surface, status=status, limit=limit)
     qmd_pages = _qmd_ranked_pages(records, query=query, surface=surface, status=status, limit=limit)
     if not qmd_pages:
+        fallback = _fallback_ranked_pages(records, query=query, surface=surface, status=status, limit=limit)
         pages = _apply_backlinks(fallback, records)
         _record_retrieval_usage(query, surface, status, pages, provider="fallback")
         return pages
-    merged: list[dict] = []
-    seen: set[str] = set()
-    for page in [*qmd_pages, *fallback]:
-        page_id = _clean(page.get("id"), 120)
-        if page_id and page_id in seen:
-            continue
-        if page_id:
-            seen.add(page_id)
-        merged.append(page)
-        if len(merged) >= limit:
-            break
-    pages = _apply_backlinks(merged, records)
+
+    # QMD가 한 건이라도 반환하면 전체 원장을 다시 점수화하지 않는다. 이전에는
+    # 결과가 limit보다 적다는 이유로 매 검색마다 fallback 전체 스캔을 실행해
+    # 대형 위키에서 검색 지연과 중복 결과가 생겼다. QMD 장애/무결과일 때만 위
+    # 분기의 bounded fallback을 사용한다.
+    pages = _apply_backlinks(qmd_pages[:limit], records)
     _record_retrieval_usage(query, surface, status, pages, provider="qmd")
     return pages
 
@@ -814,7 +817,7 @@ def _fallback_ranked_pages(records: list[dict], *, query: str, surface: str, sta
         page = _record_to_page(row)
         if status and status != "all" and page["status"] != status.lower():
             continue
-        score = _candidate_score(row, query, surface, status)
+        score = _candidate_score_page(page, query, surface, status)
         scored.append((score, -idx, page))
     if not scored:
         scored = [(0, -idx, _record_to_page(row)) for idx, row in enumerate(records)]
@@ -833,14 +836,13 @@ def _qmd_ranked_pages(records: list[dict], *, query: str, surface: str, status: 
             return []
     except Exception:
         return []
-    source_pages = [_record_to_page(row) for row in records]
     try:
         hits = qmd_search.search(query, limit=limit, surface=surface, status=status)
     except Exception:
         return []
     if not hits:
         return []
-    by_id = {_clean(page.get("id"), 120): page for page in source_pages if page.get("id")}
+    by_id = {_clean(row.get("id"), 120): row for row in records if row.get("id")}
     out: list[dict] = []
     seen: set[str] = set()
     for hit in hits:
@@ -865,7 +867,7 @@ def _page_from_qmd_hit(hit: dict, *, by_id: dict[str, dict], surface: str, statu
     source = by_id.get(page_id)
     if not source:
         return None
-    page = dict(source)
+    page = _record_to_page(source)
     if status and status != "all" and page.get("status") != status:
         return None
     if surface and surface != "all" and page.get("surface") != surface:
@@ -1027,9 +1029,11 @@ def search_health() -> dict:
     }
 
 
-# 그룹핑에서도 내부 참조와 로컬 경로 자리표시자는 출처로 사용하지 않는다.
-MAX_CROSS_REF_GROUP = 30   # 이보다 큰 그룹은 pairwise 제안이 실질 가치가 없고(N개 다
-                            # 묶어 제안할 리 없음) O(n²) 폭증 위험만 크다 — 통째로 스킵.
+# 출처 URL은 provenance이지 페이지 간 의미 관계가 아니다. 관계 린트는 티커 태그만
+# 사용하고, 작은 그룹의 고신뢰 후보만 제한적으로 제안해 대형 원문 공유 그룹의
+# pairwise 경고와 UI/헬스체크 비용을 줄인다.
+MAX_CROSS_REF_GROUP = 8
+MAX_CROSS_REF_ISSUES = 1_000
 
 
 def _lint_relational_issues(pages: list[dict]) -> list[dict]:
@@ -1051,19 +1055,14 @@ def _lint_relational_issues(pages: list[dict]) -> list[dict]:
             })
 
     ticker_index: dict[str, list[dict]] = defaultdict(list)
-    ref_index: dict[str, list[dict]] = defaultdict(list)
     for page in valid_pages:
         for tag in page.get("tags") or []:
             clean_tag = _clean(tag, 60).lower()
             if clean_tag.startswith("ticker:"):
                 ticker_index[clean_tag].append(page)
-        for ref in page.get("source_refs") or page.get("artifacts") or []:
-            clean_ref = _clean(ref, 200)
-            if _is_verifiable_source_ref(clean_ref):
-                ref_index[clean_ref].append(page)
 
     seen_pairs: set[tuple[str, str]] = set()
-    for group in [*ticker_index.values(), *ref_index.values()]:
+    for group in ticker_index.values():
         if len(group) < 2 or len(group) > MAX_CROSS_REF_GROUP:
             continue
         for i in range(len(group)):
@@ -1073,6 +1072,10 @@ def _lint_relational_issues(pages: list[dict]) -> list[dict]:
                 right_id = _clean(right.get("id"), 80)
                 if not left_id or not right_id or left_id == right_id:
                     continue
+                # source_digest 간 공통 URL/티커는 provenance이지 병합 후보가
+                # 아니다. 원문은 source_refs로 검색되므로 관계 경고를 생략한다.
+                if left.get("kind") == "source_digest" or right.get("kind") == "source_digest":
+                    continue
                 pair = tuple(sorted((left_id, right_id)))
                 if pair in seen_pairs:
                     continue
@@ -1080,6 +1083,8 @@ def _lint_relational_issues(pages: list[dict]) -> list[dict]:
                 right_links = set(_clean_links(right.get("links") or [], self_id=right_id))
                 if right_id in left_links or left_id in right_links:
                     continue
+                if len(issues) >= MAX_CROSS_REF_ISSUES:
+                    return issues
                 seen_pairs.add(pair)
                 left_title = _clean(left.get("title") or "위키 페이지", 160)
                 right_title = _clean(right.get("title") or "위키 페이지", 160)
@@ -1378,6 +1383,60 @@ def upsert_page(page: dict) -> dict:
     _CACHE.clear()
     _debounced_rebuild()
     return saved
+
+
+def batch_upsert_pages(pages: Iterable[dict]) -> list[dict]:
+    """Persist a group of wiki pages with one shared-memory rewrite.
+
+    Distillation can create a source page and its linked judgment page in the
+    same batch. Rewriting the append-only store once avoids scheduling a full
+    artifact rebuild for every page and keeps large local-only backfills fast.
+    """
+    candidates = [dict(page or {}) for page in pages or [] if isinstance(page, dict)]
+    if not candidates:
+        return []
+    existing_by_id = {
+        str(record.get("id")): record
+        for record in _wiki_records()
+        if isinstance(record, dict) and record.get("id")
+    }
+    records = [
+        _build_wiki_record(page, existing=existing_by_id.get(str(page.get("id") or "")))
+        for page in candidates
+    ]
+    shared_memory.batch_upsert_delete(upserts=records, deletes=[])
+    _CACHE.clear()
+    _debounced_rebuild()
+    return [_record_to_page(record) for record in records]
+
+
+def batch_replace_pages(pages: Iterable[dict], *, deletes: Iterable[str] = ()) -> list[dict]:
+    """Atomically replace wiki rows while removing obsolete IDs.
+
+    This is intentionally separate from ``batch_upsert_pages``: record-ID
+    repair must delete the old colliding key in the same lock window in which
+    the repaired rows are written, otherwise QMD can observe a mixed snapshot.
+    """
+    candidates = [dict(page or {}) for page in pages or [] if isinstance(page, dict)]
+    delete_ids = [str(page_id) for page_id in (deletes or []) if str(page_id).strip()]
+    if not candidates and not delete_ids:
+        return []
+    existing_by_id = {
+        str(record.get("id")): record
+        for record in _wiki_records()
+        if isinstance(record, dict) and record.get("id")
+    }
+    records = [
+        _build_wiki_record(page, existing=existing_by_id.get(str(page.get("id") or "")))
+        for page in candidates
+    ]
+    shared_memory.batch_upsert_delete(
+        upserts=records,
+        deletes=delete_ids,
+    )
+    _CACHE.clear()
+    _debounced_rebuild()
+    return [_record_to_page(record) for record in records]
 
 
 def split_child_ids(page: dict | None) -> list[str]:
@@ -1863,7 +1922,7 @@ def _title_lookup_for(page_ids: set[str]) -> dict[str, str]:
     lookup: dict[str, str] = {}
     for row in _wiki_records():
         row_id = _clean(row.get("id"), 80)
-        if row_id in page_ids:
+        if row_id in page_ids and _status_from_tags(row.get("tags") or []) != "archived":
             lookup[row_id] = _clean(row.get("title") or "위키 페이지", 160)
     return lookup
 

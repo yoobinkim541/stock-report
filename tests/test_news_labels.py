@@ -207,6 +207,30 @@ def test_label_events_uses_read_only_ephemeral_codex_with_provenance():
     assert all(label["label_error_category"] == "" for label in labels)
 
 
+def test_codex_command_omits_chatgpt_unsupported_56_model(monkeypatch):
+    monkeypatch.setattr(NL, "NEWS_LLM_CODEX_MODEL", "gpt-5.6-luna-900k")
+
+    cmd, output_path = NL._codex_command("Return {}")
+
+    try:
+        assert "--model" not in cmd
+    finally:
+        os.unlink(output_path)
+
+
+def test_codex_command_does_not_inherit_general_agent_model(monkeypatch):
+    monkeypatch.delenv("NEWS_LLM_LABELS_CODEX_MODEL", raising=False)
+    monkeypatch.setenv("AGENT_CONSOLE_CODEX_MODEL", "gpt-5.6-luna-900k")
+    monkeypatch.setattr(NL, "NEWS_LLM_CODEX_MODEL", "")
+
+    cmd, output_path = NL._codex_command("Return {}")
+
+    try:
+        assert "--model" not in cmd
+    finally:
+        os.unlink(output_path)
+
+
 def test_label_events_chunks_and_preserves_partial_success():
     events = [
         {"id": f"e{i}", "title": f"NVDA 뉴스 {i} 상승", "tags": ["$NVDA"],

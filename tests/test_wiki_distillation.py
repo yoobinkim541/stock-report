@@ -68,6 +68,23 @@ def test_select_distillation_candidates_respects_limit():
     assert len(candidates) == 2
 
 
+def test_select_distillation_candidates_can_recover_exhausted_failure():
+    from reports import wiki_distillation as wd
+
+    page = {
+        "id": "failed-source",
+        "kind": "source_digest",
+        "status": "reviewed",
+        "links": [],
+        "backlinks": [],
+        "body": "cached source body",
+        "distillation_state": {"status": "failed", "attempts": 3},
+    }
+
+    assert wd.select_distillation_candidates([page]) == []
+    assert wd.select_distillation_candidates([page], include_exhausted=True) == [page]
+
+
 def test_distillation_batch_size_can_be_tuned_by_environment(monkeypatch):
     from reports import wiki_distillation as wd
 
@@ -179,6 +196,120 @@ def test_distill_one_returns_none_on_llm_failure():
     assert payload is None
 
 
+def test_previous_result_guard_rejects_a_different_ticker_card():
+    from reports import wiki_distillation as wd
+
+    previous = {
+        "id": "distill-collision",
+        "title": "수집 소스 위키: 종목:LPSN · 근거 정리",
+        "tags": ["wiki", "ticker:lpsn"],
+        "links": ["source-ticker-lpsn"],
+        "source_refs": ["wiki:source-ticker-lpsn"],
+    }
+    page = {
+        "id": "source-ticker-soun",
+        "title": "수집 소스 위키: 종목:SOUN",
+        "tags": ["wiki", "ticker:soun"],
+    }
+
+    assert wd._previous_belongs_to_page(previous, page) is False
+
+
+def test_previous_result_guard_does_not_match_short_ticker_as_substring():
+    from reports import wiki_distillation as wd
+
+    previous = {
+        "id": "distill-collision",
+        "title": "수집 소스 위키: 종목:TEAM · 근거 정리",
+        "tags": ["wiki", "ticker:team"],
+    }
+    page = {
+        "id": "source-ticker-e",
+        "title": "수집 소스 위키: 종목:E",
+        "tags": ["wiki", "ticker:e"],
+    }
+
+    assert wd._previous_belongs_to_page(previous, page) is False
+
+
+def test_collision_safe_result_id_does_not_reuse_another_ticker_card():
+    from reports import wiki_distillation as wd
+
+    payload = {"id": "distill-collision", "title": "수집 소스 위키: 종목:SOUN · 근거 정리"}
+    page = {"id": "source-ticker-soun", "title": "수집 소스 위키: 종목:SOUN"}
+    existing = {
+        "distill-collision": {
+            "id": "distill-collision",
+            "title": "수집 소스 위키: 종목:LPSN · 근거 정리",
+            "tags": ["ticker:lpsn"],
+        }
+    }
+
+    repaired = wd._collision_safe_result_id(payload, page, existing)
+
+    assert repaired.startswith("distill-collision-r")
+    assert repaired != payload["id"]
+
+
+def test_local_only_distillation_uses_source_evidence_without_llm(monkeypatch, tmp_path):
+    _isolate(monkeypatch, tmp_path)
+    from agent_console import wiki
+    from reports import wiki_distillation as wd
+
+    digest = wiki.upsert_page({
+        "title": "수집 소스 위키: 원유 공급 위험",
+        "summary": "원유 공급 차질 가능성이 관찰됨",
+        "body": "원문 다이제스트 본문",
+        "surface": "market",
+        "kind": "source_digest",
+        "status": "draft",
+        "source_refs": ["https://example.com/article"],
+        "evidence_ids": ["e1"],
+        "tags": ["wiki", "source_digest", "risk"],
+    })
+    page = wiki.get_page(digest["id"])
+    page["_source_articles"] = [{
+        "title": "원문 제목",
+        "text": "원문에 실제로 보관된 사실 문장입니다.",
+        "evidence_id": "e1",
+    }]
+
+    def fail_llm(_prompt):
+        raise AssertionError("local-only 경로에서는 LLM을 호출하면 안 됨")
+
+    payload, status, reason = wd._distill_one_with_status(page, fail_llm, local_only=True)
+
+    assert status == "created"
+    assert reason == ""
+    assert payload["kind"] == "risk"
+    assert "원문에 실제로 보관된 사실 문장" in payload["body"]
+    assert payload["report_citation"]
+
+
+def test_local_only_distillation_can_use_digest_when_article_is_unavailable():
+    from reports import wiki_distillation as wd
+
+    page = {
+        "id": "digest-1",
+        "title": "수집 소스 위키: 단순 관찰",
+        "summary": "원문 캐시가 없는 다이제스트 관찰",
+        "body": "다이제스트에 보관된 관찰 문장",
+        "surface": "market",
+        "kind": "source_digest",
+        "status": "draft",
+        "source_refs": ["https://example.com/source"],
+        "evidence_ids": ["e1"],
+        "tags": ["wiki", "source_digest", "source:saveticker"],
+        "_require_articles": True,
+        "_source_articles": [],
+    }
+
+    payload, status, _reason = wd._distill_one_with_status(page, lambda _: "", local_only=True)
+
+    assert status == "created"
+    assert payload["source_refs"] == ["https://example.com/source", "wiki:digest-1"]
+
+
 def test_run_dry_run_does_not_persist(monkeypatch, tmp_path):
     _isolate(monkeypatch, tmp_path)
     from agent_console import wiki
@@ -217,6 +348,42 @@ def test_run_persists_created_pages(monkeypatch, tmp_path):
     assert len(result["created"]) == 1
     saved_pages = wiki.list_pages(status="all", limit=50)
     assert any(p.get("kind") == "risk" and p.get("title") == "위험 신호" for p in saved_pages)
+
+
+def test_run_batches_failed_distillation_state_updates(monkeypatch, tmp_path):
+    _isolate(monkeypatch, tmp_path)
+    from agent_console import wiki
+    from reports import wiki_distillation as wd
+
+    for title in ("첫 다이제스트", "두 번째 다이제스트"):
+        wiki.upsert_page({
+            "title": title, "summary": "s", "body": "b",
+            "surface": "market", "kind": "source_digest", "status": "reviewed", "source_refs": [],
+        })
+
+    original_batch_upsert_pages = wiki.batch_upsert_pages
+    batches = []
+
+    def capture_batch(pages):
+        pages = list(pages)
+        batches.append(pages)
+        return original_batch_upsert_pages(pages)
+
+    monkeypatch.setattr(wiki, "batch_upsert_pages", capture_batch)
+
+    result = wd.run(
+        dry_run=False,
+        fulltext=False,
+        limit=10,
+        llm_fn=lambda _prompt: "not json",
+        rebuild_artifacts=False,
+    )
+
+    assert result["candidates_considered"] == 2
+    assert result["created"] == []
+    assert len(batches) == 1
+    assert len(batches[0]) == 2
+    assert {page["distillation_state"]["status"] for page in batches[0]} == {"failed"}
 
 
 def test_run_skips_already_linked_digests(monkeypatch, tmp_path):

@@ -838,7 +838,7 @@ def test_fetch_saveticker_events_skips_rearchive_for_recently_seen_article(monke
     assert len(manifests_after_second) == 1       # 파일 수 그대로 — 중복 저장 안 됨
 
 
-def test_fetch_saveticker_events_enriches_thin_articles(monkeypatch, tmp_path):
+def test_fetch_saveticker_events_keeps_thin_preview_without_synchronous_article_fetch(monkeypatch, tmp_path):
     class FakeResponse:
         def __init__(self, payload):
             self._payload = payload
@@ -850,7 +850,11 @@ def test_fetch_saveticker_events_enriches_thin_articles(monkeypatch, tmp_path):
             return self._payload
 
     monkeypatch.setenv("STOCK_REPORT_REPORTS_DIR", str(tmp_path / "reports"))
-    monkeypatch.setattr(sc, "_fetch_saveticker_article_body", lambda url, title="": "상세 기사 본문")
+    monkeypatch.setattr(
+        sc,
+        "_fetch_saveticker_article_body",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("synchronous article fetch")),
+    )
 
     payload = {"news_list": [{
         "title": "오라클 급등",
@@ -867,8 +871,22 @@ def test_fetch_saveticker_events_enriches_thin_articles(monkeypatch, tmp_path):
     events = sc.fetch_saveticker_events()
 
     assert events
-    assert "상세 기사 본문" in events[0]["body_raw"]
+    assert events[0]["body_raw"] == "짧은 본문"
+    assert events[0]["body_excerpt"] == "짧은 본문"
     assert Path(events[0]["raw_path"]).exists()
+
+
+def test_explicit_saveticker_article_record_keeps_legacy_full_body_fetch(monkeypatch, tmp_path):
+    monkeypatch.setenv("STOCK_REPORT_REPORTS_DIR", str(tmp_path / "reports"))
+    monkeypatch.setattr(sc, "_fetch_saveticker_article_body", lambda url, title="": "상세 기사 본문")
+
+    record = sc._saveticker_article_record(
+        {"title": "오라클 급등", "content": "짧은 본문", "url": "https://e/orcl"},
+        "https://saveticker.com/api",
+    )
+
+    assert record["body_raw"] == "상세 기사 본문"
+    assert Path(record["raw_path"]).exists()
 
 
 def test_saveticker_article_url_falls_back_to_id():
@@ -905,12 +923,8 @@ def test_strip_saveticker_boilerplate_returns_original_when_title_not_found():
     assert sc._SAVETICKER_DISCLAIMER not in cleaned   # 면책조항은 제목 매칭 여부와 무관하게 제거
 
 
-def test_fetch_saveticker_events_enriches_ellipsis_truncated_preview(monkeypatch, tmp_path):
-    """summary가 80자 넘어도 '...'로 끝나면(saveticker 자체 미리보기 잘림) 전체 기사를 마저 가져온다.
-
-    2026-07-25 회귀방지 — saveticker 미리보기가 대개 80~90자서 '...'로 잘려 오는데,
-    예전엔 len<80 조건에 안 걸려서 이 잘린 미리보기가 그대로 World Memory 까지 흘러갔음.
-    """
+def test_fetch_saveticker_events_keeps_ellipsis_preview_without_synchronous_article_fetch(monkeypatch, tmp_path):
+    """잘린 API preview도 polling 중 동기 원문 fetch 없이 queue ingress로 넘긴다."""
     class FakeResponse:
         def __init__(self, payload):
             self._payload = payload
@@ -922,7 +936,11 @@ def test_fetch_saveticker_events_enriches_ellipsis_truncated_preview(monkeypatch
             return self._payload
 
     monkeypatch.setenv("STOCK_REPORT_REPORTS_DIR", str(tmp_path / "reports"))
-    monkeypatch.setattr(sc, "_fetch_saveticker_article_body", lambda url, title="": "전체 기사 본문 — 훨씬 더 긴 내용")
+    monkeypatch.setattr(
+        sc,
+        "_fetch_saveticker_article_body",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("synchronous article fetch")),
+    )
 
     thin_summary = ("글로벌 반도체주가 극심한 변동성을 보이는 가운데, 다음 주 SK하이닉스와 삼성전자, "
                     "일본 키옥시아 등 3사가 메모리 반도체 시장의 투자심리를 좌...")
@@ -940,7 +958,8 @@ def test_fetch_saveticker_events_enriches_ellipsis_truncated_preview(monkeypatch
 
     events = sc.fetch_saveticker_events()
     assert events
-    assert "전체 기사 본문" in events[0]["body_raw"]
+    assert events[0]["body_raw"] == thin_summary
+    assert events[0]["body_excerpt"] == thin_summary[:500]
     assert events[0]["url"] == "https://saveticker.com/news/999"
 
 

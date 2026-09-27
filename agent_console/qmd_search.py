@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+from collections import Counter
 from pathlib import Path
 import re
 import shutil
@@ -115,6 +116,9 @@ def health(*, probe_query: str = "시장", runner: Callable[..., Any] = subproce
         for row in wiki_rows
     ]
     wiki_record_count = len(page_times)
+    wiki_id_counts = Counter(_clean(row.get("id"), 100) for row in wiki_rows if _clean(row.get("id"), 100))
+    duplicate_id_count = sum(count - 1 for count in wiki_id_counts.values() if count > 1)
+    duplicate_id_group_count = sum(1 for count in wiki_id_counts.values() if count > 1)
     latest_page_at = max((value for value in page_times if _parse_time(value)), default="")
     page_time = _parse_time(latest_page_at)
     export_time = _parse_time(latest_export_at)
@@ -125,8 +129,8 @@ def health(*, probe_query: str = "시장", runner: Callable[..., Any] = subproce
     actual_files = {path.name for path in markdown_files}
     missing_files = expected_files - actual_files
     stale_files = actual_files - expected_files
-    coverage_ok = not missing_files
-    mirror_complete = not missing_files and not stale_files
+    coverage_ok = not missing_files and duplicate_id_count == 0
+    mirror_complete = not missing_files and not stale_files and duplicate_id_count == 0
     index_fresh = (not page_time or bool(export_time and export_time >= page_time)) and mirror_complete
     query_ok = False
     error = ""
@@ -147,14 +151,20 @@ def health(*, probe_query: str = "시장", runner: Callable[..., Any] = subproce
             error = _clean(exc, 500)
     if not index_fresh and not error:
         error = (
+            f"duplicate wiki record IDs: {duplicate_id_group_count} groups / {duplicate_id_count} extra rows"
+            if duplicate_id_count
+            else (
             "qmd markdown export is incomplete"
             if not mirror_complete else "qmd markdown export is older than the latest wiki page"
+            )
         )
     return {
         "provider": "qmd",
         **base,
         "file_count": file_count,
         "wiki_record_count": wiki_record_count,
+        "duplicate_wiki_id_count": duplicate_id_count,
+        "duplicate_wiki_id_group_count": duplicate_id_group_count,
         "coverage_ok": coverage_ok,
         "mirror_complete": mirror_complete,
         "missing_file_count": len(missing_files),
