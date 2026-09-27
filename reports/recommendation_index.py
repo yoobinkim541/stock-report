@@ -1,0 +1,283 @@
+from __future__ import annotations
+
+import json
+import os
+import sqlite3
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Iterable
+
+from reports.source_collector import DEFAULT_CACHE_DIR, _classify_event
+from reports.source_identity import normalize_event_identity
+
+
+DEFAULT_LIMIT = 500
+MAX_LIMIT = 2_000
+TRUST_PRIORS = {"A": 0.92, "B": 0.80, "C": 0.62, "D": 0.45}
+
+
+class RecommendationIndex:
+    def __init__(self, db_path: Path | None = None, cache_dir: Path | None = None):
+        self.cache_dir = Path(cache_dir or DEFAULT_CACHE_DIR)
+        self.db_path = Path(db_path or self.cache_dir / "recommendation_index.sqlite")
+
+    def _connect(self) -> sqlite3.Connection:
+        self.db_path.parent.mkdir(parents=True, exist_ok=True)
+        connection = sqlite3.connect(self.db_path)
+        connection.row_factory = sqlite3.Row
+        return connection
+
+    def initialize(self) -> None:
+        with self._connect() as connection:
+            connection.executescript(
+                """
+                CREATE TABLE IF NOT EXISTS ingest_checkpoint (
+                    raw_path TEXT PRIMARY KEY,
+                    inode INTEGER NOT NULL,
+                    size INTEGER NOT NULL,
+                    offset INTEGER NOT NULL,
+                    line_number INTEGER NOT NULL,
+                    errors INTEGER NOT NULL DEFAULT 0,
+                    updated_at TEXT NOT NULL
+                );
+                CREATE TABLE IF NOT EXISTS event_index (
+                    event_id TEXT NOT NULL,
+                    ticker TEXT NOT NULL,
+                    event_at TEXT NOT NULL,
+                    source TEXT NOT NULL,
+                    source_family TEXT NOT NULL,
+                    record_kind TEXT NOT NULL,
+                    event_kind TEXT NOT NULL,
+                    trust TEXT NOT NULL,
+                    body_available INTEGER NOT NULL,
+                    raw_path TEXT NOT NULL,
+                    raw_line INTEGER NOT NULL,
+                    raw_offset INTEGER NOT NULL,
+                    PRIMARY KEY (event_id, ticker)
+                );
+                CREATE INDEX IF NOT EXISTS event_index_ticker_at ON event_index (ticker, event_at DESC);
+                CREATE INDEX IF NOT EXISTS event_index_family_at ON event_index (source_family, event_at DESC);
+                CREATE INDEX IF NOT EXISTS event_index_source_at ON event_index (source, event_at DESC);
+                CREATE TABLE IF NOT EXISTS ticker_day_features (
+                    ticker TEXT NOT NULL,
+                    day TEXT NOT NULL,
+                    event_count INTEGER NOT NULL,
+                    article_count INTEGER NOT NULL,
+                    community_count INTEGER NOT NULL,
+                    source_diversity INTEGER NOT NULL,
+                    trust_prior REAL NOT NULL,
+                    body_available_count INTEGER NOT NULL,
+                    latest_event_at TEXT NOT NULL,
+                    PRIMARY KEY (ticker, day)
+                );
+                """
+            )
+
+    def ingest(self, paths: Iterable[Path] | None = None) -> dict:
+        self.initialize()
+        files = self._event_files(paths)
+        indexed = errors = fallback_count = 0
+        with self._connect() as connection:
+            for path in files:
+                result = self._ingest_file(connection, path)
+                indexed += result["indexed"]
+                errors += result["errors"]
+                fallback_count += result["fallback_count"]
+            self._rebuild_features(connection)
+        return {"files": len(files), "indexed": indexed, "errors": errors, "fallback_count": fallback_count}
+
+    def _event_files(self, paths: Iterable[Path] | None) -> list[Path]:
+        candidates = paths if paths is not None else self.cache_dir.glob("events-*.jsonl")
+        return sorted(
+            (Path(path) for path in candidates if Path(path).name.startswith("events-") and Path(path).suffix == ".jsonl" and not Path(path).name.endswith(".lock")),
+            key=lambda path: str(path),
+        )
+
+    def _ingest_file(self, connection: sqlite3.Connection, path: Path) -> dict:
+        path = path.resolve()
+        stat = path.stat()
+        raw_path = str(path)
+        checkpoint = connection.execute(
+            "SELECT inode, size, offset, line_number, errors FROM ingest_checkpoint WHERE raw_path = ?", (raw_path,)
+        ).fetchone()
+        reset = checkpoint is not None and (checkpoint["inode"] != stat.st_ino or stat.st_size < checkpoint["size"])
+        if reset:
+            connection.execute("DELETE FROM event_index WHERE raw_path = ?", (raw_path,))
+            checkpoint = None
+        offset = int(checkpoint["offset"]) if checkpoint else 0
+        line_number = int(checkpoint["line_number"]) if checkpoint else 0
+        total_errors = int(checkpoint["errors"]) if checkpoint else 0
+        indexed = errors = fallback_count = 0
+        with path.open("rb") as handle:
+            handle.seek(offset)
+            while True:
+                raw_offset = handle.tell()
+                raw_line = handle.readline()
+                if not raw_line:
+                    break
+                line_number += 1
+                try:
+                    event = json.loads(raw_line.decode("utf-8"))
+                    if not isinstance(event, dict):
+                        raise ValueError("event is not an object")
+                    rows, used_fallback = self._index_rows(event, raw_path, line_number, raw_offset)
+                    fallback_count += used_fallback
+                    for row in rows:
+                        before = connection.total_changes
+                        connection.execute(
+                            """
+                            INSERT OR IGNORE INTO event_index (
+                                event_id, ticker, event_at, source, source_family, record_kind,
+                                event_kind, trust, body_available, raw_path, raw_line, raw_offset
+                            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                            """,
+                            row,
+                        )
+                        indexed += int(connection.total_changes > before)
+                except (UnicodeDecodeError, json.JSONDecodeError, TypeError, ValueError):
+                    errors += 1
+                    total_errors += 1
+                offset = handle.tell()
+                connection.execute(
+                    """
+                    INSERT INTO ingest_checkpoint (raw_path, inode, size, offset, line_number, errors, updated_at)
+                    VALUES (?, ?, ?, ?, ?, ?, ?)
+                    ON CONFLICT(raw_path) DO UPDATE SET inode=excluded.inode, size=excluded.size,
+                        offset=excluded.offset, line_number=excluded.line_number, errors=excluded.errors,
+                        updated_at=excluded.updated_at
+                    """,
+                    (raw_path, stat.st_ino, stat.st_size, offset, line_number, total_errors, _utc_now()),
+                )
+        return {"indexed": indexed, "errors": errors, "fallback_count": fallback_count}
+
+    def _index_rows(self, event: dict, raw_path: str, raw_line: int, raw_offset: int) -> tuple[list[tuple], int]:
+        event_at = _event_time(event)
+        classified = _classify_event(event)
+        normalized = normalize_event_identity(classified, event_at)
+        classification = normalized.get("classification") or {}
+        family = str(classification.get("source_family") or normalized.get("source_family") or "other")
+        trust = str(classification.get("trust") or normalized.get("trust") or "C").upper()
+        tickers = _tickers(normalized)
+        body_available = int(bool(normalized.get("body") or normalized.get("body_raw") or normalized.get("body_excerpt")))
+        return (
+            [
+                (
+                    str(normalized["id"]), ticker, event_at.isoformat(timespec="seconds"),
+                    str(normalized.get("source") or "unknown"), family, str(normalized.get("record_kind") or "content"),
+                    str(classification.get("kind") or normalized.get("kind") or "event"), trust, body_available,
+                    raw_path, raw_line, raw_offset,
+                )
+                for ticker in (tickers or [""])
+            ],
+            int(family == "other"),
+        )
+
+    def _rebuild_features(self, connection: sqlite3.Connection) -> None:
+        connection.execute("DELETE FROM ticker_day_features")
+        connection.execute(
+            """
+            INSERT INTO ticker_day_features (
+                ticker, day, event_count, article_count, community_count, source_diversity,
+                trust_prior, body_available_count, latest_event_at
+            )
+            SELECT ticker, substr(event_at, 1, 10), COUNT(*),
+                SUM(CASE WHEN event_kind IN ('article', 'report', 'analysis', 'news') THEN 1 ELSE 0 END),
+                SUM(CASE WHEN source_family = 'community' THEN 1 ELSE 0 END),
+                COUNT(DISTINCT source),
+                ROUND(AVG(CASE trust WHEN 'A' THEN 0.92 WHEN 'B' THEN 0.80 WHEN 'C' THEN 0.62 WHEN 'D' THEN 0.45 ELSE 0.55 END), 2),
+                SUM(body_available), MAX(event_at)
+            FROM event_index WHERE ticker != '' GROUP BY ticker, substr(event_at, 1, 10)
+            """
+        )
+
+    def query_events(self, tickers: Iterable[str] | None = None, start: datetime | None = None,
+                     end: datetime | None = None, source_families: Iterable[str] | None = None,
+                     limit: int | None = None) -> list[dict]:
+        self.initialize()
+        clauses, values = [], []
+        _add_in_clause(clauses, values, "ticker", _normalized_strings(tickers))
+        if start:
+            clauses.append("event_at >= ?")
+            values.append(_as_utc(start))
+        if end:
+            clauses.append("event_at <= ?")
+            values.append(_as_utc(end))
+        _add_in_clause(clauses, values, "source_family", _normalized_strings(source_families, upper=False))
+        where = f" WHERE {' AND '.join(clauses)}" if clauses else ""
+        values.append(_bounded_limit(limit))
+        with self._connect() as connection:
+            rows = connection.execute(
+                "SELECT event_id, ticker, event_at, source, source_family, record_kind, event_kind, trust, body_available, raw_path, raw_line, raw_offset"
+                f" FROM event_index{where} ORDER BY event_at ASC, raw_path ASC, raw_offset ASC LIMIT ?", values
+            ).fetchall()
+        return [dict(row) for row in rows]
+
+    def ticker_day_features(self, ticker: str, asof: datetime | None = None, window_days: int = 7) -> list[dict]:
+        self.initialize()
+        day = (_event_time({"collected_at": (asof or datetime.now(timezone.utc)).isoformat()}).date())
+        start = day.fromordinal(day.toordinal() - max(0, int(window_days) - 1)).isoformat()
+        with self._connect() as connection:
+            rows = connection.execute(
+                """SELECT ticker, day, event_count, article_count, community_count, source_diversity,
+                          trust_prior, body_available_count, latest_event_at
+                   FROM ticker_day_features WHERE ticker = ? AND day >= ? AND day <= ? ORDER BY day ASC""",
+                (str(ticker).upper(), start, day.isoformat()),
+            ).fetchall()
+        reference = _event_time({"collected_at": (asof or datetime.now(timezone.utc)).isoformat()})
+        return [{**{key: row[key] for key in row.keys() if key != "latest_event_at"},
+                 "freshness_seconds": max(0, int((reference - _parse_time(row["latest_event_at"])).total_seconds()))} for row in rows]
+
+    def status(self) -> dict:
+        self.initialize()
+        with self._connect() as connection:
+            event_count = connection.execute("SELECT COUNT(*) FROM event_index").fetchone()[0]
+            latest = connection.execute("SELECT MAX(event_at) FROM event_index").fetchone()[0]
+            checkpoints = connection.execute("SELECT COUNT(*) FROM ingest_checkpoint").fetchone()[0]
+            errors = connection.execute("SELECT COALESCE(SUM(errors), 0) FROM ingest_checkpoint").fetchone()[0]
+            fallback_count = connection.execute("SELECT COUNT(*) FROM event_index WHERE source_family = 'other'").fetchone()[0]
+        lag = max(0, int((datetime.now(timezone.utc) - _parse_time(latest)).total_seconds())) if latest else None
+        return {"event_count": event_count, "checkpoint_count": checkpoints, "lag_seconds": lag, "errors": errors, "fallback_count": fallback_count}
+
+
+def _event_time(event: dict) -> datetime:
+    for key in ("observed_at", "collected_at", "published_at", "timestamp"):
+        if event.get(key):
+            return _parse_time(event[key])
+    return datetime.now(timezone.utc)
+
+
+def _parse_time(value: object) -> datetime:
+    try:
+        parsed = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+    except (TypeError, ValueError):
+        return datetime.now(timezone.utc)
+    return parsed.replace(tzinfo=timezone.utc) if parsed.tzinfo is None else parsed.astimezone(timezone.utc)
+
+
+def _tickers(event: dict) -> list[str]:
+    values = event.get("tickers") or event.get("ticker") or event.get("symbol") or []
+    if isinstance(values, str):
+        values = [values]
+    return [str(value).strip().upper() for value in values if str(value).strip()]
+
+
+def _normalized_strings(values: Iterable[str] | None, *, upper: bool = True) -> list[str]:
+    return [(str(value).strip().upper() if upper else str(value).strip().lower()) for value in values or [] if str(value).strip()]
+
+
+def _add_in_clause(clauses: list[str], values: list, column: str, items: list[str]) -> None:
+    if items:
+        clauses.append(f"{column} IN ({', '.join('?' for _ in items)})")
+        values.extend(items)
+
+
+def _as_utc(value: datetime) -> str:
+    return (value.replace(tzinfo=timezone.utc) if value.tzinfo is None else value.astimezone(timezone.utc)).isoformat(timespec="seconds")
+
+
+def _bounded_limit(limit: int | None) -> int:
+    return max(1, min(MAX_LIMIT, DEFAULT_LIMIT if limit is None else int(limit)))
+
+
+def _utc_now() -> str:
+    return datetime.now(timezone.utc).isoformat(timespec="seconds")
