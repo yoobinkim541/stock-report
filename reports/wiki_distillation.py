@@ -140,6 +140,54 @@ def _distillation_id(source_page_id: str, kind: str) -> str:
     return "distill-" + hashlib.sha256(f"{source_page_id}|{kind}".encode("utf-8")).hexdigest()[:20]
 
 
+def _source_identity(page: dict) -> str:
+    """Return a stable ticker/topic token for guarding legacy result links."""
+    title = str(page.get("title") or "")
+    match = re.search(r"종목:([^·]+)", title)
+    if match:
+        return re.sub(r"[^0-9a-zA-Z가-힣]+", "-", match.group(1).strip().lower()).strip("-")
+    for tag in page.get("tags") or []:
+        value = str(tag).strip().lower()
+        if value.startswith("ticker:"):
+            return value.split(":", 1)[1].strip()
+    return ""
+
+
+def _previous_belongs_to_page(previous: dict | None, page: dict) -> bool:
+    """Reject a stale shared result ID from the pre-repair distillation runs."""
+    if not previous:
+        return False
+    source_id = str(page.get("id") or "").strip()
+    identity = _source_identity(page)
+    if identity:
+        previous_identity = _source_identity(previous)
+        if previous_identity:
+            return identity == previous_identity
+        return f"ticker:{identity}" in {
+            str(tag).strip().lower() for tag in previous.get("tags") or []
+        }
+    return bool(
+        source_id in {str(link) for link in previous.get("links") or []}
+        or f"wiki:{source_id}" in {str(ref) for ref in previous.get("source_refs") or []}
+    )
+
+
+def _collision_safe_result_id(payload: dict, page: dict, existing: dict[str, dict]) -> str:
+    """Keep a generated result unique when a legacy ID is still occupied."""
+    candidate = str(payload.get("id") or "").strip()
+    occupant = existing.get(candidate)
+    if not candidate or occupant is None or _previous_belongs_to_page(occupant, page):
+        return candidate
+    seed = f"{candidate}|{page.get('id')}|{payload.get('title')}"
+    suffix = hashlib.sha256(seed.encode("utf-8")).hexdigest()[:10]
+    repaired = f"{candidate}-r{suffix}"
+    counter = 1
+    while repaired in existing:
+        repaired = f"{candidate}-r{suffix}-{counter}"
+        counter += 1
+    return repaired
+
+
 def _token_set(text: object) -> set[str]:
     return {
         token for token in re.findall(r"[0-9a-zA-Z가-힣]{2,}", str(text or "").lower())
@@ -659,6 +707,11 @@ def run(*, dry_run: bool = False, llm_fn=None, limit: int | None = None,
     for page in candidates:
         previous_id = (page.get("distillation_state") or {}).get("last_result_id")
         previous = by_id.get(previous_id)
+        if previous and not _previous_belongs_to_page(previous, page):
+            # A historical collision can make a source page point at another
+            # ticker's card.  Ignore it and regenerate from this source's
+            # stable ID rather than copying the wrong document.
+            previous = None
         if fulltext and previous and previous.get("status") == "archived":
             if not page.get("_source_articles") and not _has_rich_digest_fallback(page):
                 if not dry_run:
@@ -678,6 +731,7 @@ def run(*, dry_run: bool = False, llm_fn=None, limit: int | None = None,
                     page, status=outcome, reason=reason
                 ))
             continue
+        payload["id"] = _collision_safe_result_id(payload, page, by_id)
         duplicate = _semantic_duplicate(payload, pages)
         if duplicate:
             # A lexical match is not permission to replace an unrelated body.

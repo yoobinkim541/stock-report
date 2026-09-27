@@ -600,6 +600,10 @@ def _backlink_index(records: list[dict]) -> dict[str, list[str]]:
         row_id = _clean(row.get("id"), 80)
         if not row_id:
             continue
+        # Archived pages remain available for audit, but must not inflate the
+        # active graph or leak historical backlinks into answer context.
+        if _status_from_tags(row.get("tags") or []) == "archived":
+            continue
         for target_id in _clean_links(row.get("links") or [], self_id=row_id):
             index[target_id].append(row_id)
     return index
@@ -778,15 +782,11 @@ def list_pages(*, query: str = "", surface: str = "all", status: str = "all", li
         _record_retrieval_usage(query, surface, status, pages, provider="fallback")
         return pages
 
-    # QMD 의미 검색을 우선하되, 결과가 limit보다 적으면 로컬 점수 검색으로
-    # 보충한다. 검색엔진의 부분 장애나 희소한 의미 매칭 때문에 화면이 빈약해지는
-    # 것을 막고, QMD 우선순위 자체는 유지한다.
-    qmd_ids = {str(page.get("id") or "") for page in qmd_pages}
-    fallback = [
-        page for page in _fallback_ranked_pages(records, query=query, surface=surface, status=status, limit=limit)
-        if str(page.get("id") or "") not in qmd_ids
-    ]
-    pages = _apply_backlinks([*qmd_pages, *fallback][:limit], records)
+    # QMD가 한 건이라도 반환하면 전체 원장을 다시 점수화하지 않는다. 이전에는
+    # 결과가 limit보다 적다는 이유로 매 검색마다 fallback 전체 스캔을 실행해
+    # 대형 위키에서 검색 지연과 중복 결과가 생겼다. QMD 장애/무결과일 때만 위
+    # 분기의 bounded fallback을 사용한다.
+    pages = _apply_backlinks(qmd_pages[:limit], records)
     _record_retrieval_usage(query, surface, status, pages, provider="qmd")
     return pages
 
@@ -1071,6 +1071,10 @@ def _lint_relational_issues(pages: list[dict]) -> list[dict]:
                 left_id = _clean(left.get("id"), 80)
                 right_id = _clean(right.get("id"), 80)
                 if not left_id or not right_id or left_id == right_id:
+                    continue
+                # source_digest 간 공통 URL/티커는 provenance이지 병합 후보가
+                # 아니다. 원문은 source_refs로 검색되므로 관계 경고를 생략한다.
+                if left.get("kind") == "source_digest" or right.get("kind") == "source_digest":
                     continue
                 pair = tuple(sorted((left_id, right_id)))
                 if pair in seen_pairs:
@@ -1401,6 +1405,35 @@ def batch_upsert_pages(pages: Iterable[dict]) -> list[dict]:
         for page in candidates
     ]
     shared_memory.batch_upsert_delete(upserts=records, deletes=[])
+    _CACHE.clear()
+    _debounced_rebuild()
+    return [_record_to_page(record) for record in records]
+
+
+def batch_replace_pages(pages: Iterable[dict], *, deletes: Iterable[str] = ()) -> list[dict]:
+    """Atomically replace wiki rows while removing obsolete IDs.
+
+    This is intentionally separate from ``batch_upsert_pages``: record-ID
+    repair must delete the old colliding key in the same lock window in which
+    the repaired rows are written, otherwise QMD can observe a mixed snapshot.
+    """
+    candidates = [dict(page or {}) for page in pages or [] if isinstance(page, dict)]
+    delete_ids = [str(page_id) for page_id in (deletes or []) if str(page_id).strip()]
+    if not candidates and not delete_ids:
+        return []
+    existing_by_id = {
+        str(record.get("id")): record
+        for record in _wiki_records()
+        if isinstance(record, dict) and record.get("id")
+    }
+    records = [
+        _build_wiki_record(page, existing=existing_by_id.get(str(page.get("id") or "")))
+        for page in candidates
+    ]
+    shared_memory.batch_upsert_delete(
+        upserts=records,
+        deletes=delete_ids,
+    )
     _CACHE.clear()
     _debounced_rebuild()
     return [_record_to_page(record) for record in records]
@@ -1889,7 +1922,7 @@ def _title_lookup_for(page_ids: set[str]) -> dict[str, str]:
     lookup: dict[str, str] = {}
     for row in _wiki_records():
         row_id = _clean(row.get("id"), 80)
-        if row_id in page_ids:
+        if row_id in page_ids and _status_from_tags(row.get("tags") or []) != "archived":
             lookup[row_id] = _clean(row.get("title") or "위키 페이지", 160)
     return lookup
 

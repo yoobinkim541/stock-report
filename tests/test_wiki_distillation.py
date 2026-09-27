@@ -196,6 +196,61 @@ def test_distill_one_returns_none_on_llm_failure():
     assert payload is None
 
 
+def test_previous_result_guard_rejects_a_different_ticker_card():
+    from reports import wiki_distillation as wd
+
+    previous = {
+        "id": "distill-collision",
+        "title": "수집 소스 위키: 종목:LPSN · 근거 정리",
+        "tags": ["wiki", "ticker:lpsn"],
+        "links": ["source-ticker-lpsn"],
+        "source_refs": ["wiki:source-ticker-lpsn"],
+    }
+    page = {
+        "id": "source-ticker-soun",
+        "title": "수집 소스 위키: 종목:SOUN",
+        "tags": ["wiki", "ticker:soun"],
+    }
+
+    assert wd._previous_belongs_to_page(previous, page) is False
+
+
+def test_previous_result_guard_does_not_match_short_ticker_as_substring():
+    from reports import wiki_distillation as wd
+
+    previous = {
+        "id": "distill-collision",
+        "title": "수집 소스 위키: 종목:TEAM · 근거 정리",
+        "tags": ["wiki", "ticker:team"],
+    }
+    page = {
+        "id": "source-ticker-e",
+        "title": "수집 소스 위키: 종목:E",
+        "tags": ["wiki", "ticker:e"],
+    }
+
+    assert wd._previous_belongs_to_page(previous, page) is False
+
+
+def test_collision_safe_result_id_does_not_reuse_another_ticker_card():
+    from reports import wiki_distillation as wd
+
+    payload = {"id": "distill-collision", "title": "수집 소스 위키: 종목:SOUN · 근거 정리"}
+    page = {"id": "source-ticker-soun", "title": "수집 소스 위키: 종목:SOUN"}
+    existing = {
+        "distill-collision": {
+            "id": "distill-collision",
+            "title": "수집 소스 위키: 종목:LPSN · 근거 정리",
+            "tags": ["ticker:lpsn"],
+        }
+    }
+
+    repaired = wd._collision_safe_result_id(payload, page, existing)
+
+    assert repaired.startswith("distill-collision-r")
+    assert repaired != payload["id"]
+
+
 def test_local_only_distillation_uses_source_evidence_without_llm(monkeypatch, tmp_path):
     _isolate(monkeypatch, tmp_path)
     from agent_console import wiki

@@ -57,6 +57,55 @@ uv run python -m reports.article_crawler \
 
 위키 출처 커버리지에서 `missing`·`pending`·`retry`·`failed`·본문이 없는 `ready`는 미해결로 집계한다. `failed`는 재시도 한도에 도달했더라도 원문을 확보하지 못한 상태이므로 근거로 사용하지 않는다. `blocked`와 `unavailable`은 접근 제한·본문 부재가 명시된 감사 가능한 결과로 보존한다.
 
+## 위키 관계 정리와 검색 컨텍스트
+
+`source_digest`가 같은 원문을 topic·ticker 그룹으로 나눠 가질 때 원문 URL은 각
+페이지의 `source_refs`에 남긴다. 이 provenance를 source digest 간 `links`로 다시
+복제하지 않는다. 명시적 링크는 source digest와 판단 카드(risk/playbook/concept)
+사이의 의미 관계에 사용하고, 그래프 화면에서 필요한 약한 source-ref 관계는 제한된
+추론 엣지로 계산한다. 따라서 원문 추적성은 유지하면서 답변 컨텍스트와 그래프의
+불필요한 확장을 막는다.
+
+관계 정리는 다음 규칙만 자동 적용한다.
+
+- 자기 링크·중복 링크·존재하지 않는 대상은 제거한다.
+- `archived_reason:stale` 아카이브 또는 병합 메타데이터가 전혀 없는 아카이브를
+  활성 페이지가 가리키면 제거한다.
+- `merged_into`, `merge_event_id`, `merge_event:*`, `merged_from:*`가 있는 병합
+  아카이브 링크와 아카이브 원본 자체는 감사용으로 보존한다.
+- 활성 답변의 backlinks와 관련 문서 목록에는 archived 페이지를 확장하지 않는다.
+
+읽기 전 계획을 확인하거나 적용하려면 다음 명령을 사용한다. 기본 실행은 dry-run이다.
+
+```bash
+uv run python -m reports.wiki_relation_cleanup
+uv run python -m reports.wiki_relation_cleanup --apply
+```
+
+적용 후에는 `wiki.rebuild_artifacts()`와 `wiki.sync_qmd()`를 실행해 마크다운
+산출물과 검색 인덱스를 함께 갱신한다. 이 배치 정리는 페이지 본문·원문 캐시·병합
+기록을 삭제하지 않는다.
+
+## 문서 ID 정합성과 QMD 건강검사
+
+증류 카드는 `source_page_id + kind`를 기반으로 stable ID를 만든다. 과거에
+`last_result_id`가 잘못 재사용된 경우 JSONL에는 서로 다른 카드가 같은 ID로 남을 수
+있고, QMD는 파일명 충돌로 뒤의 카드를 덮어쓸 수 있다. 다음 복구 명령은 충돌 그룹의
+첫 카드 ID를 호환성 앵커로 보존하고, 나머지 카드는 결정론적 `distill-repair-*` ID로
+분리한다. 원문·본문·근거는 삭제하지 않으며 source digest의 링크와
+`last_result_id`만 식별 가능한 카드로 되돌린다.
+
+```bash
+uv run python -m reports.wiki_record_repair
+uv run python -m reports.wiki_record_repair --apply
+```
+
+QMD health는 파일 누락뿐 아니라 중복 wiki ID도 실패로 판정한다. 적용 후에는 항상
+`duplicate_wiki_id_count=0`, `coverage_ok=true`, `mirror_complete=true`,
+`query_ok=true`, `index_fresh=true`를 확인한다. 검색 프로브가 실패해도 로컬 점수
+검색 fallback은 남아 있지만, QMD DB 권한·경로 오류는 운영 환경에서 별도로 고쳐야
+한다.
+
 ## 롤백
 
 문제가 생기면 먼저 `deploy/crontab.stock-report`에서 `reports.article_crawler --limit 20` 한 줄만 비활성화해 source of truth를 변경한다. 그 변경을 승인된 설치 절차로 반영하고 drift 검사로 일치 여부를 확인한 뒤 ingress 기능 변경을 되돌린다. 다른 source 수집, 기존 위키 생성 주기와 runtime 데이터를 삭제하거나 초기화하지 않는다. 재가동 전 `--status`와 drift 검사를 수행하고, 보존된 source 이벤트와 마지막 정상 `ready` 본문을 확인한다.
