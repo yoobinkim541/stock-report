@@ -106,6 +106,85 @@ def test_ingest_indexes_each_ticker_named_by_one_event(tmp_path):
     assert index.ticker_day_features("MSFT", asof=at + timedelta(hours=1))[0]["event_count"] == 1
 
 
+def test_ingest_leaves_unterminated_jsonl_tail_pending_until_writer_finishes_it(tmp_path):
+    """Advancing past an incomplete append-only record permanently loses evidence."""
+    cache = tmp_path / "cache"
+    event_file = cache / "events-2026-09-21.jsonl"
+    event = _event("saveticker", "AAPL", datetime(2026, 9, 21, 12, 0, tzinfo=UTC))
+    serialized = json.dumps(event).encode("utf-8")
+    event_file.parent.mkdir(parents=True)
+    event_file.write_bytes(serialized[:20])
+    index = RecommendationIndex(db_path=tmp_path / "index.sqlite", cache_dir=cache)
+
+    assert index.ingest() == {"files": 1, "indexed": 0, "errors": 0, "fallback_count": 0}
+    with event_file.open("ab") as handle:
+        handle.write(serialized[20:] + b"\n")
+
+    assert index.ingest()["indexed"] == 1
+    assert [row["ticker"] for row in index.query_events(tickers=["AAPL"])] == ["AAPL"]
+
+
+def test_query_preserves_timestamp_provenance_and_uses_published_time_for_cutoffs(tmp_path):
+    """Using collection time for a future-published event violates point-in-time exclusion."""
+    cache = tmp_path / "cache"
+    at = datetime(2026, 9, 21, 9, 0, tzinfo=UTC)
+    future = at + timedelta(hours=6)
+    _write_rows(
+        cache / "events-2026-09-21.jsonl",
+        [_event("saveticker", "AAPL", at, observed_at=(at + timedelta(hours=1)).isoformat(), published_at=future.isoformat())],
+    )
+    index = RecommendationIndex(db_path=tmp_path / "index.sqlite", cache_dir=cache)
+    index.ingest()
+
+    row = index.query_events(tickers=["AAPL"])[0]
+    assert row["collected_at"] == at.isoformat()
+    assert row["observed_at"] == (at + timedelta(hours=1)).isoformat()
+    assert row["published_at"] == future.isoformat()
+    assert row["event_at"] == future.isoformat()
+    assert index.query_events(tickers=["AAPL"], end=at + timedelta(hours=2)) == []
+
+
+def test_same_content_from_two_sources_counts_once_but_keeps_source_diversity(tmp_path):
+    """Counting duplicate body hashes as separate evidence overstates corroboration."""
+    cache = tmp_path / "cache"
+    at = datetime(2026, 9, 21, 9, 0, tzinfo=UTC)
+    _write_rows(
+        cache / "events-2026-09-21.jsonl",
+        [
+            _event("saveticker", "AAPL", at, body="Same syndicated article body", url="https://first.test/article"),
+            _event("arca", "AAPL", at + timedelta(minutes=5), body="Same syndicated article body", url="https://first.test/article"),
+        ],
+    )
+    index = RecommendationIndex(db_path=tmp_path / "index.sqlite", cache_dir=cache)
+    index.ingest()
+
+    rows = index.query_events(tickers=["AAPL"])
+    features = index.ticker_day_features("AAPL", asof=at + timedelta(hours=1))
+
+    assert len(rows) == 2
+    assert rows[0]["content_hash"] == rows[1]["content_hash"]
+    assert features[0]["event_count"] == 1
+    assert features[0]["source_diversity"] == 2
+
+
+def test_query_filters_by_source_and_asof_excludes_same_day_future_events(tmp_path):
+    """Source selection and intra-day as-of must not leak unrelated or future evidence."""
+    cache = tmp_path / "cache"
+    morning = datetime(2026, 9, 21, 9, 0, tzinfo=UTC)
+    evening = datetime(2026, 9, 21, 18, 0, tzinfo=UTC)
+    _write_rows(
+        cache / "events-2026-09-21.jsonl",
+        [_event("saveticker", "AAPL", morning), _event("arca", "AAPL", evening)],
+    )
+    index = RecommendationIndex(db_path=tmp_path / "index.sqlite", cache_dir=cache)
+    index.ingest()
+
+    assert [row["source"] for row in index.query_events(tickers=["AAPL"], sources=["saveticker"])] == ["saveticker"]
+    features = index.ticker_day_features("AAPL", asof=morning + timedelta(hours=3))
+    assert features[0]["event_count"] == 1
+    assert features[0]["freshness_seconds"] == 10800
+
+
 def test_ingest_recovers_after_rotation_and_reports_invalid_json_health(tmp_path):
     """Failure to reset a shrunken file checkpoint would miss replacement cache data."""
     cache = tmp_path / "cache"
