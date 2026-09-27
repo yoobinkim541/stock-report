@@ -39,6 +39,10 @@ logger = logging.getLogger(__name__)
 KST        = timezone(timedelta(hours=9))
 CACHE_DIR  = Path(os.path.expanduser("~/reports/source-cache"))
 STATE_FILE = Path(os.path.expanduser("~/.cache/news_spike_state.json"))
+PROVIDER_ERROR_STATE_FILE = Path(os.path.expanduser(
+    os.getenv("NEWS_SPIKE_PROVIDER_ERROR_STATE_FILE", "~/.cache/news_spike_provider_error.json")
+))
+PROVIDER_ERROR_COOLDOWN_HOURS = max(1, int(os.getenv("NEWS_SPIKE_PROVIDER_ERROR_COOLDOWN_HOURS", "6")))
 
 BOT_TOKEN = os.getenv("STOCK_BOT_TOKEN")
 
@@ -79,6 +83,37 @@ def _save_state(state: dict) -> None:
     tmp = STATE_FILE.with_suffix(".tmp")
     tmp.write_text(json.dumps(state, ensure_ascii=False, indent=2), encoding="utf-8")
     tmp.rename(STATE_FILE)
+
+
+def _log_collection_failure(exc: BaseException, now: datetime) -> None:
+    """로그를 도배하는 지속적 provider 차단을 주기적으로만 기록한다.
+
+    일시 오류는 기존처럼 매 실행 기록하지만, 403/451처럼 재시도로 해결되지 않는
+    provider 차단은 최초와 쿨다운 만료 시점에만 ERROR를 남긴다. 원인은 source
+    pipeline의 availability/last_error 기록에 계속 보존된다.
+    """
+    availability = str(getattr(exc, "availability", "") or "").lower()
+    status_code = getattr(exc, "status_code", None)
+    if availability != "blocked" and status_code not in {403, 451}:
+        logger.error("수집 실패: %s", exc)
+        return
+
+    PROVIDER_ERROR_STATE_FILE.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        state = json.loads(PROVIDER_ERROR_STATE_FILE.read_text(encoding="utf-8"))
+    except Exception:
+        state = {}
+    key = f"{status_code or 'blocked'}:{str(exc)[:180]}"
+    now_ts = now.timestamp()
+    last_ts = float(state.get(key, 0) or 0)
+    if now_ts - last_ts < PROVIDER_ERROR_COOLDOWN_HOURS * 3600:
+        return
+    state[key] = now_ts
+    tmp = PROVIDER_ERROR_STATE_FILE.with_suffix(".tmp")
+    tmp.write_text(json.dumps(state, ensure_ascii=False, indent=2), encoding="utf-8")
+    tmp.replace(PROVIDER_ERROR_STATE_FILE)
+    logger.error("수집 차단(%s): %s — %d시간 동안 동일 오류 로그 생략",
+                 status_code or availability, exc, PROVIDER_ERROR_COOLDOWN_HOURS)
 
 
 def _prune_state(state: dict, now: datetime) -> None:
@@ -313,7 +348,7 @@ def main() -> None:
     try:
         breaking = fetch_breaking_news(now)
     except Exception as e:
-        logger.error("수집 실패: %s", e)
+        _log_collection_failure(e, now)
         return
     logger.info("최근 %dh 속보: %d건", MAX_AGE_HOURS, len(breaking))
 
