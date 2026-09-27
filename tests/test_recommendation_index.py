@@ -1,6 +1,7 @@
 import json
 import sqlite3
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 
 from reports.recommendation_index import RecommendationIndex
 
@@ -84,7 +85,7 @@ def test_ingest_is_idempotent_tails_appends_and_materializes_ticker_day_features
             "article_count": 2,
             "community_count": 1,
             "source_diversity": 2,
-            "trust_prior": 0.74,
+            "trust_prior": 0.68,
             "body_available_count": 0,
             "freshness_seconds": 79200,
         }
@@ -104,6 +105,33 @@ def test_ingest_indexes_each_ticker_named_by_one_event(tmp_path):
     assert index.ingest()["indexed"] == 2
     assert [row["ticker"] for row in index.query_events(tickers=["MSFT"])] == ["MSFT"]
     assert index.ticker_day_features("MSFT", asof=at + timedelta(hours=1))[0]["event_count"] == 1
+
+
+def test_defaults_keep_raw_cache_and_ml_index_storage_separate():
+    """Placing the SQLite index in the raw cache violates the storage layout contract."""
+    index = RecommendationIndex()
+
+    assert index.cache_dir == Path.home() / "reports" / "source-cache"
+    assert index.db_path == Path.home() / "reports" / "ml-cache" / "recommendation_index.sqlite3"
+
+
+def test_ticker_day_features_use_specified_source_trust_priors(tmp_path, monkeypatch):
+    """Changing source trust priors must change the materialized feature value."""
+    from reports import source_collector
+
+    monkeypatch.setitem(source_collector.SOURCE_CLASSIFICATION, "dsource", {
+        "family": "other", "kind": "event", "trust": "D", "horizon": "1d",
+    })
+    at = datetime(2026, 9, 21, 9, 0, tzinfo=UTC)
+    expected = {"yahoo_finance": 0.90, "saveticker": 0.75, "arca": 0.55, "dsource": 0.35}
+
+    for source, prior in expected.items():
+        cache = tmp_path / source
+        _write_rows(cache / "events-2026-09-21.jsonl", [_event(source, "AAPL", at)])
+        index = RecommendationIndex(db_path=tmp_path / f"{source}.sqlite", cache_dir=cache)
+        index.ingest()
+
+        assert index.ticker_day_features("AAPL", asof=at + timedelta(hours=1))[0]["trust_prior"] == prior
 
 
 def test_ingest_leaves_unterminated_jsonl_tail_pending_until_writer_finishes_it(tmp_path):

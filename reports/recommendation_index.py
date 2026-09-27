@@ -13,7 +13,11 @@ from reports.source_identity import normalize_event_identity
 
 DEFAULT_LIMIT = 500
 MAX_LIMIT = 2_000
-TRUST_PRIORS = {"A": 0.92, "B": 0.80, "C": 0.62, "D": 0.45}
+TRUST_PRIORS = {"A": 0.90, "B": 0.75, "C": 0.55, "D": 0.35}
+DEFAULT_INDEX_PATH = Path.home() / "reports" / "ml-cache" / "recommendation_index.sqlite3"
+TRUST_PRIOR_SQL = "CASE trust " + " ".join(
+    f"WHEN '{trust}' THEN {prior:.2f}" for trust, prior in TRUST_PRIORS.items()
+) + " ELSE 0.55 END"
 
 _FEATURES_SQL = """
 WITH eligible AS (
@@ -25,7 +29,7 @@ WITH eligible AS (
     SELECT ticker, substr(event_at, 1, 10) AS day, evidence_id,
         MAX(CASE WHEN event_kind IN ('article', 'report', 'analysis', 'news') THEN 1 ELSE 0 END) AS article_count,
         MAX(CASE WHEN source_family = 'community' THEN 1 ELSE 0 END) AS community_count,
-        MAX(CASE trust WHEN 'A' THEN 0.92 WHEN 'B' THEN 0.80 WHEN 'C' THEN 0.62 WHEN 'D' THEN 0.45 ELSE 0.55 END) AS trust_prior,
+        MAX(""" + TRUST_PRIOR_SQL + """) AS trust_prior,
         MAX(body_available) AS body_available_count, MAX(event_at) AS latest_event_at
     FROM eligible GROUP BY ticker, substr(event_at, 1, 10), evidence_id
 ), sources AS (
@@ -44,7 +48,7 @@ GROUP BY evidence.ticker, evidence.day, sources.source_diversity ORDER BY eviden
 class RecommendationIndex:
     def __init__(self, db_path: Path | None = None, cache_dir: Path | None = None):
         self.cache_dir = Path(cache_dir or DEFAULT_CACHE_DIR)
-        self.db_path = Path(db_path or self.cache_dir / "recommendation_index.sqlite")
+        self.db_path = Path(db_path or DEFAULT_INDEX_PATH)
 
     def _connect(self) -> sqlite3.Connection:
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
