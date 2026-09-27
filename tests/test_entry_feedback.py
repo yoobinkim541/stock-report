@@ -229,7 +229,7 @@ def test_backfill_outcomes_adds_diagnosis_and_summary(tmp_path, monkeypatch):
     assert F.backfill_outcomes(ledger=led, horizons=(20,), price_fn=fake_price_result) == 0
 
     out = led.read_outcomes()[0]
-    assert out["decision_id"].endswith(":h20")
+    assert out["decision_id"].endswith(":h20d")
     assert out["success"] is False
     assert out["diagnosis"] == "무효화선 이탈"
     assert "technical_conflict" in out["factor_tags"]
@@ -242,6 +242,32 @@ def test_backfill_outcomes_adds_diagnosis_and_summary(tmp_path, monkeypatch):
     assert summary["success_rate"] == 0.0
     assert ("technical_conflict", 1) in summary["top_failure_factors"]
     assert "20일 표본 1건" in F.format_feedback_summary(summary)
+
+
+def test_training_rows_dedupes_legacy_and_canonical_outcomes(tmp_path):
+    led = Ledger(F.SURFACE, base_dir=tmp_path)
+    led.log_decision({"id": "d1", "date": "2026-07-11", "ticker": "PLTR", "signal": "enter"})
+    led.log_outcome({"decision_id": "d1:h20", "horizon": 20, "status": "matured", "success": False})
+    led.log_outcome({"decision_id": "d1:h20d", "horizon": "20d", "status": "matured", "matured_at": "2026-08-10", "success": True})
+
+    rows = F.training_rows(ledger=led, horizon=20)
+
+    assert len(rows) == 1
+    assert rows[0]["decision_id"] == "d1:h20d"
+
+
+def test_summary_excludes_non_finite_metrics_but_retains_rows():
+    rows = [
+        {"success": True, "fwd_excess": float("nan"), "r_multiple": float("inf"), "stock_ret": 0.1},
+        {"success": False, "fwd_excess": 0.04, "r_multiple": 1.0, "stock_ret": 0.2},
+    ]
+
+    summary = F.summarize_feedback(rows, horizon=20)
+
+    assert summary["n"] == 2
+    assert summary["avg_excess"] == 0.04
+    assert summary["avg_r"] == 1.0
+    assert summary["avg_stock_ret"] == 0.15
 
 
 def test_build_outcome_marks_target_success():

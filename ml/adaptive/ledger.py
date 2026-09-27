@@ -21,6 +21,8 @@ import logging
 import os
 from pathlib import Path
 
+from ml.recommendation_contracts import sanitize_record
+
 logger = logging.getLogger(__name__)
 
 _DATA_DIR = Path(os.path.expanduser("~/reports/ml-data"))
@@ -40,7 +42,7 @@ class Ledger:
     def _append_line(self, path: Path, obj: dict) -> None:
         path.parent.mkdir(parents=True, exist_ok=True)
         with open(path, "a", encoding="utf-8") as f:   # append-only
-            f.write(json.dumps(obj, ensure_ascii=False) + "\n")
+            f.write(json.dumps(sanitize_record(obj), ensure_ascii=False) + "\n")
 
     @staticmethod
     def _read_lines(path: Path) -> list[dict]:

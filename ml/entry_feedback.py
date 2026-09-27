@@ -24,6 +24,12 @@ from typing import Iterable
 
 import pandas as pd
 
+from ml.recommendation_contracts import (
+    canonical_horizon,
+    canonical_outcome_key,
+    dedupe_canonical_outcomes,
+)
+
 logger = logging.getLogger(__name__)
 
 KST = timezone(timedelta(hours=9))
@@ -150,13 +156,11 @@ def _reward_risk(score) -> tuple[float, float]:
 
 
 def _horizon_key(horizon: int | str) -> str:
-    text = str(horizon).strip()
-    return str(int(text)) if text.isdigit() else text.lower()
+    return canonical_horizon(horizon)
 
 
 def _horizon_value(horizon: int | str) -> int | str:
-    key = _horizon_key(horizon)
-    return int(key) if key.isdigit() else key
+    return _horizon_key(horizon)
 
 
 def _evaluation_profile(horizon: int | str) -> str:
@@ -681,7 +685,16 @@ def backfill_outcomes(*, ledger=None, horizons: tuple[int | str, ...] = HORIZONS
     ledger = ledger or Ledger(SURFACE)
     use_default_price_fn = price_fn is None
     price_fn = price_fn or _default_price_result
-    done = {o.get("decision_id") for o in ledger.read_outcomes()}
+    done = {
+        canonical_outcome_key(
+            o.get("base_decision_id") or _base_decision_id(str(o.get("decision_id") or "")),
+            o.get("horizon") or (
+                str(o.get("decision_id") or "").rsplit(":h", 1)[1]
+                if ":h" in str(o.get("decision_id") or "") else ""
+            ),
+        )
+        for o in ledger.read_outcomes()
+    }
     added = 0
     for decision in ledger.read_decisions():
         if not decision.get("id") or not decision.get("ticker"):
@@ -691,8 +704,8 @@ def backfill_outcomes(*, ledger=None, horizons: tuple[int | str, ...] = HORIZONS
                 decision.get("evaluation_profile") or "daily"
             ).lower() not in {"short", "intraday"}:
                 continue
-            oid = _outcome_id(decision["id"], horizon)
-            if oid in done:
+            outcome_key = canonical_outcome_key(decision["id"], horizon)
+            if outcome_key in done:
                 continue
             result = price_fn(decision, horizon)
             if _is_pending_result(result):
@@ -701,7 +714,7 @@ def backfill_outcomes(*, ledger=None, horizons: tuple[int | str, ...] = HORIZONS
             if outcome.get("status") != "matured":
                 continue
             ledger.log_outcome(outcome)
-            done.add(oid)
+            done.add(outcome_key)
             added += 1
     if added:
         logger.info("진입 후보 outcome 백필: %d건", added)
@@ -715,12 +728,16 @@ def training_rows(*, ledger=None, horizon: int | str = 20) -> list[dict]:
     ledger = ledger or Ledger(SURFACE)
     decisions = {d.get("id"): d for d in ledger.read_decisions() if d.get("id")}
     rows = []
-    suffix = f":h{_horizon_key(horizon)}"
-    for outcome in ledger.read_outcomes():
+    target_horizon = _horizon_key(horizon)
+    outcomes = dedupe_canonical_outcomes(ledger.read_outcomes())
+    for outcome in outcomes:
         oid = str(outcome.get("decision_id") or "")
-        if not oid.endswith(suffix):
-            continue
         base_id = outcome.get("base_decision_id") or _base_decision_id(oid)
+        outcome_horizon = outcome.get("horizon")
+        if outcome_horizon is None and ":h" in oid:
+            outcome_horizon = oid.rsplit(":h", 1)[1]
+        if canonical_outcome_key(base_id, outcome_horizon or "")[1] != target_horizon:
+            continue
         decision = decisions.get(base_id)
         if decision:
             rows.append({**decision, **outcome, "base_decision_id": base_id})
@@ -737,17 +754,32 @@ def summarize_feedback(rows: list[dict] | None = None, *, horizon: int | str = 2
     fail_tags = Counter(tag for r in losses for tag in (r.get("factor_tags") or []))
     win_tags = Counter(tag for r in wins for tag in (r.get("factor_tags") or []))
     enter_rows = [r for r in rows if r.get("signal") == "enter"]
+    def finite_metric(row: dict, *keys: str) -> float | None:
+        for key in keys:
+            value = row.get(key)
+            try:
+                value = float(value)
+            except (TypeError, ValueError):
+                continue
+            if math.isfinite(value):
+                return value
+        return None
+
+    def average(*keys: str) -> float:
+        values = [value for row in rows if (value := finite_metric(row, *keys)) is not None]
+        return sum(values) / len(values) if values else 0.0
+
     return {
         "horizon": horizon,
         "n": len(rows),
         "success_rate": round(len(wins) / len(rows), 3),
-        "avg_excess": round(sum(float(r.get("fwd_excess") or 0) for r in rows) / len(rows), 4),
-        "avg_r": round(sum(float(r.get("r_multiple") or 0) for r in rows) / len(rows), 3),
-        "avg_stock_ret": round(sum(float(r.get("stock_ret", r.get("fwd_ret")) or 0) for r in rows) / len(rows), 4),
-        "avg_net_ret": round(sum(float(r.get("net_ret", r.get("fwd_ret")) or 0) for r in rows) / len(rows), 4),
+        "avg_excess": round(average("fwd_excess", "excess_ret"), 4),
+        "avg_r": round(average("r_multiple"), 3),
+        "avg_stock_ret": round(average("stock_ret", "fwd_ret"), 4),
+        "avg_net_ret": round(average("net_ret", "fwd_ret"), 4),
         "direction_hit_rate": round(sum(bool(r.get("direction_hit", r.get("success"))) for r in rows) / len(rows), 3),
-        "avg_mfe": round(sum(float(r.get("mfe") or 0) for r in rows) / len(rows), 4),
-        "avg_mae": round(sum(float(r.get("mae") or 0) for r in rows) / len(rows), 4),
+        "avg_mfe": round(average("mfe"), 4),
+        "avg_mae": round(average("mae"), 4),
         "path_counts": dict(Counter(str(r.get("path_result") or "none") for r in rows)),
         "enter_n": len(enter_rows),
         "enter_success_rate": round(
