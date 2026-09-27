@@ -222,18 +222,10 @@ def fetch_news_features(
     ticker: str,
     start: str = "2020-01-01",
     as_of: str | None = None,
+    index=None,
+    labels: list[dict] | None = None,
 ) -> pd.DataFrame:
-    """Aggregate news features (count, sentiment, theme, event) from source-cache JSONL.
+    """Return point-in-time news features from ``RecommendationIndex`` metadata."""
+    from ml.recommendation_features import build_news_feature_frame
 
-    Returns an empty DataFrame if no cache files are found (safe for tests).
-    Full implementation reads ~/reports/source-cache/*.jsonl and aggregates by date.
-    """
-    files = source_cache_files(ticker=ticker)
-    if not files:
-        return pd.DataFrame(columns=["date", "ticker", "count", "sentiment", "theme", "event"])
-
-    # p7+: parse JSONL files and aggregate by date
-    raise NotImplementedError(
-        "fetch_news_features: JSONL parsing not yet implemented. "
-        "Implement aggregation in p7+ or monkeypatch in tests."
-    )
+    return build_news_feature_frame(ticker, start, as_of, index=index, labels=labels)
