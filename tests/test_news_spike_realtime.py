@@ -2,6 +2,7 @@
 """test_news_spike_realtime.py — 속보 실시간 시세 동반표시 (무네트워크·부가)."""
 import os
 import sys
+from datetime import datetime, timezone
 
 import pytest
 
@@ -50,6 +51,25 @@ def test_portfolio_set_derived_from_universe_not_hardcoded():
     from portfolio_universe import load_portfolio_tickers
     expected = {t.split(".")[0].upper() for t in load_portfolio_tickers()}
     assert N._PORTFOLIO == expected      # 하드코딩 재도입 시 실패
+
+
+def test_blocked_provider_error_is_logged_once_per_cooldown(monkeypatch, tmp_path, caplog):
+    class BlockedProviderError(RuntimeError):
+        availability = "blocked"
+        status_code = 403
+
+    state_file = tmp_path / "provider-error.json"
+    monkeypatch.setattr(N, "PROVIDER_ERROR_STATE_FILE", state_file)
+    monkeypatch.setattr(N, "PROVIDER_ERROR_COOLDOWN_HOURS", 6)
+    now = datetime(2026, 9, 27, 4, 0, tzinfo=timezone.utc)
+    exc = BlockedProviderError("SaveTicker HTTP 403 (provider access blocked)")
+
+    with caplog.at_level("ERROR"):
+        N._log_collection_failure(exc, now)
+        N._log_collection_failure(exc, now)
+
+    assert caplog.text.count("수집 차단") == 1
+    assert state_file.exists()
 
 
 if __name__ == "__main__":

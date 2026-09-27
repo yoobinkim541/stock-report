@@ -124,3 +124,24 @@ def test_orderflow_healthcheck_is_quiet_when_capture_is_clean(monkeypatch):
     })
 
     assert health.check_orderflow_capture() is None
+
+
+def test_ensure_sync_server_invokes_watchdog(monkeypatch, tmp_path):
+    from tests import bot_healthcheck as health
+
+    scripts_dir = tmp_path / "scripts"
+    scripts_dir.mkdir()
+    watchdog = scripts_dir / "sync_server_watchdog.sh"
+    watchdog.write_text("#!/usr/bin/env bash\n", encoding="utf-8")
+    monkeypatch.setattr(health, "PROJECT_DIR", str(tmp_path))
+    calls = []
+
+    def fake_run(*args, **kwargs):
+        calls.append((args, kwargs))
+        return None
+
+    monkeypatch.setattr(health.subprocess, "run", fake_run)
+    health.ensure_sync_server()
+
+    assert calls
+    assert calls[0][0][0] == ["bash", str(watchdog)]

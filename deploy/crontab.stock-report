@@ -73,6 +73,8 @@ PATH=/home/ubuntu/.hermes/node/bin:/home/ubuntu/.local/bin:/usr/local/bin:/usr/b
 30 7 * * 1-5 cd /home/ubuntu/projects/stock-report && uv run python crons/naver_flow_snapshot.py >> /tmp/naver_flow_snapshot.log 2>&1   # 07:30 UTC = 16:30 KST
 
 # ── 고빈도 수집·감지 ─────────────────────────────────────────────────────────
+# 포트폴리오 동기화 API 워치독 (healthcheck 실패 시 자동 재기동)
+* * * * * cd /home/ubuntu/projects/stock-report && bash scripts/sync_server_watchdog.sh >> /tmp/sync_watchdog.log 2>&1   # 매 1분
 # AI 콘솔 장중 시장 미시구조 스냅샷 (KOSPI/KOSDAQ·수급·K200선물·시장폭·USD/KRW — 연결된 소스만 기록)
 * * * * * cd /home/ubuntu/projects/stock-report && flock -n /tmp/kr_microstructure_snapshot.lock env KR_MARKET_MICROSTRUCTURE_ENABLED=true AGENT_CONSOLE_TOSS_FX_ENABLED=true uv run python crons/kr_microstructure_snapshot.py >> /tmp/kr_microstructure_snapshot.log 2>&1   # 매 1분 (AI 콘솔 장중 미시구조 스냅샷 — 현재 연결 소스만 기록·미연결 필드는 명시)
 # 속보 수집 + 급증 감지 + 텔레그램 알림

@@ -220,6 +220,28 @@ def check_sync_server() -> tuple[str, str] | None:
     return None
 
 
+def ensure_sync_server() -> None:
+    """동기화 API가 없으면 워치독으로 복구를 시도한다.
+
+    헬스체크가 단순 알림만 보내고 끝나면 같은 장애가 계속 반복된다.
+    워치독은 이미 실행 중이면 no-op이므로 매 체크 전에 호출해도 안전하다.
+    """
+    watchdog = os.path.join(PROJECT_DIR, "scripts", "sync_server_watchdog.sh")
+    if not os.path.isfile(watchdog):
+        return
+    try:
+        subprocess.run(
+            ["bash", watchdog],
+            cwd=PROJECT_DIR,
+            timeout=20,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+    except Exception as exc:
+        print(f"sync_server 워치독 실행 실패: {exc}")
+
+
 def check_portfolio_age() -> tuple[str, str] | None:
     """portfolio_snapshot.json 최근 갱신 확인 (72시간 초과 시 경고)."""
     try:
@@ -470,6 +492,7 @@ def check_store_db() -> tuple[str, str] | None:
 # ── 메인 ───────────────────────────────────────────────────────────────
 
 def main():
+    ensure_sync_server()
     checks = [
         check_telegram_bot,
         check_bot_instance_count,
