@@ -119,9 +119,29 @@ def test_source_diversity_counts_distinct_sources_not_duplicate_events(tmp_path)
     assert frame.loc[0, "source_diversity"] == 2
 
 
-def test_blocked_source_health_is_degraded_not_zero_news_claim(tmp_path):
+def test_duplicate_content_counts_once_but_preserves_contributing_source_diversity(tmp_path):
+    at = datetime(2026, 9, 20, 9, tzinfo=UTC)
+    index = _index(tmp_path, [
+        _event("saveticker", at, body="same syndicated article"),
+        _event("arca", at + timedelta(minutes=1), body="same syndicated article"),
+    ])
+
+    frame = _build("NVDA", "2026-09-20", "2026-09-20T23:59:59+00:00", index=index)
+
+    assert frame.loc[0, "count"] == 1
+    assert frame.loc[0, "article_count"] == 1
+    assert frame.loc[0, "community_count"] == 1
+    assert frame.loc[0, "source_diversity"] == 2
+    assert frame.loc[0, "trust_score"] == 0.75
+    assert frame.loc[0, "body_ratio"] == 1.0
+
+
+def test_blocked_cache_source_health_is_degraded_not_zero_news_claim(tmp_path):
     index = _index(tmp_path, [])
-    index.source_health = {"saveticker": {"availability": "blocked", "availability_reason": "rate limit"}}
+    (index.cache_dir / "source_health.json").write_text(
+        json.dumps({"saveticker": {"availability": "blocked", "availability_reason": "rate limit"}}),
+        encoding="utf-8",
+    )
 
     frame = _build("NVDA", "2026-09-20", "2026-09-20T23:59:59+00:00", index=index)
 

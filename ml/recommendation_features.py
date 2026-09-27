@@ -9,6 +9,7 @@ import pandas as pd
 
 from providers import news_labels
 from reports.recommendation_index import RecommendationIndex
+from reports.source_collector import load_source_health
 
 
 FEATURE_VERSION = "recommendation-news-v2"
@@ -69,7 +70,8 @@ def _aggregate_events(
     axis = news_labels.news_axis(str(ticker), labels=labels, asof=cutoff) if labels else None
     rows = []
     for day, day_events in sorted(by_day.items()):
-        count = len(day_events)
+        evidence = _group_evidence(day_events)
+        count = len(evidence)
         latest = max(_parse_time(event["event_at"]) for event in day_events)
         rows.append({
             "date": day,
@@ -78,17 +80,29 @@ def _aggregate_events(
             "sentiment": pd.NA,
             "theme": pd.NA,
             "event": pd.NA,
-            "article_count": sum(event.get("source_family") == "news" for event in day_events),
-            "community_count": sum(event.get("source_family") == "community" for event in day_events),
+            "article_count": sum(any(event.get("source_family") == "news" for event in records)
+                                 for records in evidence.values()),
+            "community_count": sum(any(event.get("source_family") == "community" for event in records)
+                                   for records in evidence.values()),
             "source_diversity": len({str(event.get("source") or "") for event in day_events}),
-            "trust_score": round(sum(TRUST_SCORES.get(str(event.get("trust") or "").upper(), 0.55)
-                                       for event in day_events) / count, 2),
-            "body_ratio": round(sum(bool(event.get("body_available")) for event in day_events) / count, 4),
+            "trust_score": round(sum(max(TRUST_SCORES.get(str(event.get("trust") or "").upper(), 0.55)
+                                           for event in records) for records in evidence.values()) / count, 2),
+            "body_ratio": round(sum(any(bool(event.get("body_available")) for event in records)
+                                    for records in evidence.values()) / count, 4),
             "freshness_seconds": max(0, int((cutoff - latest).total_seconds())),
             "news_axis": axis,
             "data_quality": _quality_text(quality),
         })
     return rows
+
+
+def _group_evidence(events: Iterable[dict]) -> dict[str, list[dict]]:
+    grouped: dict[str, list[dict]] = {}
+    for event in events:
+        identity = next((str(event.get(key) or "") for key in ("content_hash", "observation_id", "event_id")
+                         if event.get(key)), "")
+        grouped.setdefault(identity, []).append(event)
+    return grouped
 
 
 def _available_labels(ticker: str, labels: list[dict] | None, cutoff: datetime) -> tuple[list[dict], list[str]]:
@@ -123,6 +137,8 @@ def _source_health_quality(index: RecommendationIndex) -> str:
         except TypeError:
             health = None
     if not isinstance(health, dict):
+        health = load_source_health(index.cache_dir)
+    if not health:
         return "no_cache_health"
     availability = {str((record or {}).get("availability") or "").lower() for record in health.values()}
     if availability & {"blocked", "disabled"}:
