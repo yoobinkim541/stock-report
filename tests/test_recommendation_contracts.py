@@ -39,6 +39,14 @@ def test_dedupe_prefers_canonical_valid_latest_matured_outcome():
     assert dedupe_canonical_outcomes(rows) == [rows[2]]
 
 
+def test_dedupe_prefers_canonical_decision_id_when_horizon_is_omitted():
+    legacy = {"decision_id": "d:h20", "status": "matured"}
+    canonical = {"decision_id": "d:h20d", "status": "matured"}
+
+    assert dedupe_canonical_outcomes([legacy, canonical]) == [canonical]
+    assert dedupe_canonical_outcomes([canonical, legacy]) == [canonical]
+
+
 def test_finite_json_value_keeps_finite_scalars():
     assert finite_json_value(3) == 3
     assert finite_json_value(2.5) == 2.5

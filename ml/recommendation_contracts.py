@@ -67,7 +67,11 @@ def dedupe_canonical_outcomes(rows: Iterable[dict]) -> list[dict]:
         base_id = _base_decision_id(row)
         horizon = _row_horizon(row)
         key = canonical_outcome_key(base_id, horizon)
-        raw_horizon = str(row.get("horizon") or "").strip().lower()
+        raw_horizon = row.get("horizon")
+        if raw_horizon is None:
+            decision_id = str(row.get("decision_id") or "")
+            raw_horizon = decision_id.rsplit(":h", 1)[1] if ":h" in decision_id else ""
+        raw_horizon = str(raw_horizon).strip().lower()
         is_canonical = int(raw_horizon == horizon)
         is_valid = int(str(row.get("status") or "").lower() == "matured")
         matured_at = str(row.get("matured_at") or "")
