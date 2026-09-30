@@ -50,6 +50,80 @@ def test_build_snapshot_normalizes_candidate_without_inventing_missing_evidence(
     assert "missing_fields:market" in snapshot["data_quality"]
 
 
+def test_build_snapshot_merges_inherited_and_comprehensive_missing_metadata():
+    engine = _engine()
+
+    snapshot = engine.build_snapshot(
+        "report",
+        {
+            "id": "report-AAPL-1",
+            "ticker": "AAPL",
+            "horizon": "20d",
+            "raw_score": 0.6,
+            "missing_fields": ["body_available", "macro_feature"],
+        },
+        source_features={"missing_fields": ["macro_feature", "blocked_source"]},
+    )
+
+    assert snapshot["missing_fields"][:3] == ["body_available", "macro_feature", "blocked_source"]
+    assert {
+        "decision_ts", "asof_date", "market", "calibrated_probability", "expected_excess",
+        "signal", "rank", "sample_size", "uncertainty_low", "uncertainty_high",
+        "freshness_seconds", "source_coverage", "risk_score", "model_version",
+        "parameter_version", "feature_version", "evidence_refs",
+    } <= set(snapshot["missing_fields"])
+    assert "missing_fields:body_available" in snapshot["data_quality"]
+    assert "missing_fields:blocked_source" in snapshot["data_quality"]
+    assert "missing_fields:expected_excess" in snapshot["data_quality"]
+    assert len(snapshot["missing_fields"]) == len(set(snapshot["missing_fields"]))
+    assert "sample_quality" in snapshot["missing_fields"]
+
+
+def test_empty_snapshot_marks_every_unavailable_output_missing():
+    snapshot = _engine().build_snapshot("report", {})
+
+    unavailable = {name for name, value in snapshot.items() if value is None}
+    assert "total_rank_score" in unavailable
+    assert unavailable <= set(snapshot["missing_fields"])
+    assert {"sample_quality", "evidence_refs", "source_features"} <= set(snapshot["missing_fields"])
+    for name in snapshot["missing_fields"]:
+        assert f"missing_fields:{name}" in snapshot["data_quality"].split("|")
+
+
+def test_snapshot_preserves_evidence_quality_and_zero_values_without_mutation():
+    from copy import deepcopy
+
+    candidate = {
+        "id": "report-AAPL-1", "ticker": "AAPL", "market": "US", "horizon": 20,
+        "raw_score": 0, "wins": 0, "samples": 0, "expected_excess": 0,
+        "signal": "hold", "rank": 0, "risk_score": 0, "source_coverage": 0,
+        "freshness_seconds": 0, "parameter_version": "params-v1",
+        "evidence_references": {"url": "https://example.com/evidence", "status": "blocked"},
+        "missing_fields": [" body_available ", "missing_fields:body_available"],
+        "data_quality": "blocked",
+    }
+    source = {
+        "coverage": 1, "feature_version": "features-v1",
+        "missing_fields": ["body_available", "macro_feature"], "data_quality": ["partial"],
+    }
+    original_candidate, original_source = deepcopy(candidate), deepcopy(source)
+    snapshot = _engine().build_snapshot(
+        "report", candidate, source_features=source,
+        as_of="2026-09-27T09:00:00+00:00", model_version="model-v1",
+    )
+
+    assert snapshot["missing_fields"] == ["body_available", "macro_feature"]
+    assert snapshot["data_quality"] == "blocked|partial|missing_fields:body_available|missing_fields:macro_feature"
+    assert snapshot["evidence_refs"] == [candidate["evidence_references"]]
+    assert snapshot["source_features"] == source
+    assert snapshot["source_coverage"] == 0
+    assert snapshot["sample_size"] == 0
+    assert snapshot["raw_score"] == 0
+    assert snapshot["asof_date"] == "2026-09-27"
+    assert candidate == original_candidate
+    assert source == original_source
+
+
 def test_shrink_probability_uses_beta_two_two_prior():
     engine = _engine()
 
@@ -99,6 +173,48 @@ def test_score_calibration_is_monotonic_and_reports_held_out_metrics():
     assert engine.calibrate_score(0.9, calibrator) == pytest.approx(1.0)
     assert calibrator["brier"] == pytest.approx(0.09375)
     assert calibrator["ece"] == pytest.approx(0.25)
+
+
+def test_score_calibration_ece_groups_held_out_rows_by_calibrated_probability():
+    engine = _engine()
+    rows = []
+    for index, score in enumerate((10.0, 20.0, 30.0, 40.0, 50.0)):
+        rows.extend(
+            {"raw_score": score, "positive_excess": int(offset < index * 5), "split": "train"}
+            for offset in range(20)
+        )
+    rows.extend([
+        {"raw_score": 10.0, "positive_excess": 0, "split": "holdout"},
+        {"raw_score": 20.0, "positive_excess": 1, "split": "holdout"},
+        {"raw_score": 30.0, "positive_excess": 0, "split": "holdout"},
+        {"raw_score": 40.0, "positive_excess": 1, "split": "holdout"},
+        {"raw_score": 50.0, "positive_excess": 0, "split": "holdout"},
+    ])
+
+    calibrator = engine.fit_score_calibrator(rows)
+
+    assert calibrator["ece"] == pytest.approx(0.5)
+    assert calibrator["brier"] == pytest.approx(0.375)
+
+
+def test_ece_pools_equal_calibrated_probabilities_and_weights_by_sample_count():
+    rows = []
+    for score, positives in ((10, 0), (20, 15), (30, 5), (40, 15), (50, 20)):
+        rows.extend(
+            {"raw_score": score, "positive_excess": int(i < positives), "split": "train"}
+            for i in range(20)
+        )
+    rows.extend(
+        {"raw_score": score, "positive_excess": target, "split": "holdout"}
+        for score, target in ((20, 0), (30, 1), (50, 0))
+    )
+
+    calibrator = _engine().fit_score_calibrator(rows)
+
+    assert [bin_["probability"] for bin_ in calibrator["bins"]] == [0, 0.5, 0.5, 0.75, 1]
+    assert calibrator["metrics"]["sample_size"] == 3
+    assert calibrator["ece"] == pytest.approx(1 / 3)
+    assert calibrator["brier"] == pytest.approx(0.5)
 
 
 def test_calibrator_marks_metrics_unavailable_without_finite_held_out_rows():

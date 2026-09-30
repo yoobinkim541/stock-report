@@ -75,6 +75,23 @@ def _quality_text(candidate: Mapping, source_features: Mapping, missing_fields: 
     return "|".join(dict.fromkeys(issues)) if issues else "complete"
 
 
+def _missing_field_names(value: object) -> list[str]:
+    if isinstance(value, str):
+        values = [value]
+    elif isinstance(value, Sequence) and not isinstance(value, (str, bytes)):
+        values = value
+    else:
+        values = []
+    names = []
+    for item in values:
+        name = str(item).strip()
+        if name.startswith("missing_fields:"):
+            name = name.removeprefix("missing_fields:").strip()
+        if name:
+            names.append(name)
+    return names
+
+
 def _risk_penalty(snapshot: Mapping) -> float:
     explicit = _finite_number(snapshot.get("risk_penalty"))
     if explicit is not None:
@@ -133,6 +150,9 @@ def build_snapshot(
     freshness = _finite_number(_first(candidate, "freshness_seconds"))
     if freshness is None:
         freshness = _finite_number(_first(source, "freshness_seconds", "median_freshness_seconds"))
+    source_coverage = _first(candidate, "source_coverage")
+    if source_coverage is None:
+        source_coverage = _first(source, "source_coverage", "coverage")
     evidence_refs = _first(candidate, "evidence_refs", "evidence_references")
     if isinstance(evidence_refs, Mapping):
         evidence_refs = [dict(evidence_refs)]
@@ -142,20 +162,46 @@ def build_snapshot(
         evidence_refs = []
 
     horizon = _first(candidate, "horizon")
-    missing_fields = [
+    expected_excess = _finite_number(_first(candidate, "expected_excess", "expected_ret", "expected_ret_20d"))
+    signal = _first(candidate, "signal")
+    rank = _first(candidate, "rank", "selection_rank")
+    risk_score = _finite_number(_first(candidate, "risk_score", "risk_pct", "volatility"))
+    resolved_model_version = model_version or _first(candidate, "model_version")
+    parameter_version = _first(candidate, "parameter_version")
+    feature_version = _first(candidate, "feature_version") or _first(source, "feature_version")
+    local_missing_fields = [
         name for name, value in (
             ("id", _first(candidate, "id", "decision_id", "event_id")),
             ("decision_ts", decision_ts),
+            ("asof_date", asof_date),
             ("market", _first(candidate, "market")),
             ("ticker", _first(candidate, "ticker", "symbol")),
             ("horizon", horizon),
             ("raw_score", raw_score),
+            ("calibrated_probability", calibrated_probability),
+            ("expected_excess", expected_excess),
+            ("signal", signal),
+            ("rank", rank),
+            ("sample_size", sample_size),
+            ("sample_quality", sample_size),
+            ("uncertainty_low", uncertainty_low),
+            ("uncertainty_high", uncertainty_high),
+            ("freshness_seconds", freshness),
             ("evidence_refs", evidence_refs or None),
-            ("source_coverage", _first(candidate, "source_coverage") or _first(source, "source_coverage", "coverage")),
+            ("source_coverage", source_coverage),
+            ("risk_score", risk_score),
+            ("model_version", resolved_model_version),
+            ("parameter_version", parameter_version),
+            ("feature_version", feature_version),
         ) if value is None
     ]
     if source_features is None:
-        missing_fields.append("source_features")
+        local_missing_fields.append("source_features")
+    missing_fields = list(dict.fromkeys(
+        _missing_field_names(candidate.get("missing_fields"))
+        + _missing_field_names(source.get("missing_fields"))
+        + local_missing_fields
+    ))
 
     snapshot = {
         "id": _first(candidate, "id", "decision_id", "event_id"),
@@ -167,24 +213,24 @@ def build_snapshot(
         "horizon": canonical_horizon(horizon) if horizon is not None else None,
         "raw_score": raw_score,
         "calibrated_probability": calibrated_probability,
-        "expected_excess": _finite_number(_first(candidate, "expected_excess", "expected_ret", "expected_ret_20d")),
-        "signal": _first(candidate, "signal"),
-        "rank": _first(candidate, "rank", "selection_rank"),
+        "expected_excess": expected_excess,
+        "signal": signal,
+        "rank": rank,
         "selection_status": str(_first(candidate, "selection_status") or "shadow"),
         "sample_size": sample_size,
         "sample_quality": _sample_quality(sample_size),
         "uncertainty_low": uncertainty_low,
         "uncertainty_high": uncertainty_high,
         "freshness_seconds": freshness,
-        "source_coverage": _first(candidate, "source_coverage") or _first(source, "source_coverage", "coverage"),
+        "source_coverage": source_coverage,
         "data_quality": _quality_text(candidate, source, missing_fields, freshness),
         "missing_fields": list(dict.fromkeys(missing_fields)),
-        "risk_score": _finite_number(_first(candidate, "risk_score", "risk_pct", "volatility")),
+        "risk_score": risk_score,
         "concentration_penalty": _bounded(candidate.get("concentration_penalty"), _MAX_CONCENTRATION_PENALTY),
         "total_rank_score": None,
-        "model_version": model_version or _first(candidate, "model_version"),
-        "parameter_version": _first(candidate, "parameter_version"),
-        "feature_version": _first(candidate, "feature_version") or _first(source, "feature_version"),
+        "model_version": resolved_model_version,
+        "parameter_version": parameter_version,
+        "feature_version": feature_version,
         "reasons": list(_first(candidate, "reasons") or []),
         "evidence_refs": finite_json_value(evidence_refs),
         "source_features": finite_json_value(source),
@@ -193,6 +239,10 @@ def build_snapshot(
     alpha = _calibrated_alpha(snapshot)
     if alpha is not None:
         snapshot["total_rank_score"] = alpha - _risk_penalty(snapshot) - snapshot["concentration_penalty"]
+    else:
+        if "total_rank_score" not in snapshot["missing_fields"]:
+            snapshot["missing_fields"].append("total_rank_score")
+        snapshot["data_quality"] = _quality_text(candidate, source, snapshot["missing_fields"], freshness)
     return snapshot
 
 
@@ -297,14 +347,12 @@ def fit_score_calibrator(
     predictions = [(prediction, target) for prediction, target in predictions if prediction is not None]
     if predictions:
         brier = sum((prediction - target) ** 2 for prediction, target in predictions) / len(predictions)
-        by_bin: dict[int, list[tuple[float, int]]] = {}
+        by_prediction: dict[float, list[int]] = {}
         for prediction, target in predictions:
-            by_bin.setdefault(_bin_index(prediction, bins), []).append((prediction, target))
+            by_prediction.setdefault(prediction, []).append(target)
         ece = sum(
-            len(values) / len(predictions) * abs(
-                sum(prediction for prediction, _ in values) / len(values) - sum(target for _, target in values) / len(values)
-            )
-            for values in by_bin.values()
+            len(targets) / len(predictions) * abs(prediction - sum(targets) / len(targets))
+            for prediction, targets in by_prediction.items()
         )
         metrics = {"status": "available", "sample_size": len(predictions), "brier": brier, "ece": ece}
     else:
