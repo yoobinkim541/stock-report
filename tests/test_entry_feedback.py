@@ -5,6 +5,7 @@ import os
 import sys
 
 import pandas as pd
+import pytest
 
 ROOT = os.path.join(os.path.dirname(__file__), "..")
 sys.path.insert(0, ROOT)
@@ -247,13 +248,53 @@ def test_backfill_outcomes_adds_diagnosis_and_summary(tmp_path, monkeypatch):
 def test_training_rows_dedupes_legacy_and_canonical_outcomes(tmp_path):
     led = Ledger(F.SURFACE, base_dir=tmp_path)
     led.log_decision({"id": "d1", "date": "2026-07-11", "ticker": "PLTR", "signal": "enter"})
-    led.log_outcome({"decision_id": "d1:h20", "horizon": 20, "status": "matured", "success": False})
-    led.log_outcome({"decision_id": "d1:h20d", "horizon": "20d", "status": "matured", "matured_at": "2026-08-10", "success": True})
+    valid = {"fwd_ret": .1, "fwd_excess": .05, "benchmark_ret": .05,
+             "entry_price_actual": 100, "exit_price": 110, "path_result": "none"}
+    led.log_outcome({**valid, "decision_id": "d1:h20", "horizon": 20, "status": "matured", "success": False})
+    led.log_outcome({**valid, "decision_id": "d1:h20d", "horizon": "20d", "status": "matured", "matured_at": "2026-08-10", "success": True})
 
     rows = F.training_rows(ledger=led, horizon=20)
 
     assert len(rows) == 1
     assert rows[0]["decision_id"] == "d1:h20d"
+
+
+@pytest.mark.parametrize("field,value", [("stock_ret", float("nan")),
+    ("benchmark_ret", float("inf")), ("exit_price", float("-inf")),
+    ("entry_price_actual", 0), ("path_result", None), ("stock_ret", None)])
+def test_corrupt_evaluable_outcome_is_invalid_and_append_only(tmp_path, field, value):
+    led = Ledger(F.SURFACE, base_dir=tmp_path)
+    decision = F.score_to_decision(_score(), source="test", universe="test")
+    led.log_decision(decision)
+    result = {"stock_ret": .1, "benchmark_ret": .02, "entry_price_actual": 100,
+              "exit_price": 110, "path_result": "none", field: value}
+    out = F.build_outcome(decision, 20, result)
+    assert out["status"] == "invalid"
+    assert out["success"] is None
+    json.dumps(out, allow_nan=False)
+    assert F.backfill_outcomes(ledger=led, horizons=(20, "20d"), price_fn=lambda *a: result) == 1
+    before = list(tmp_path.glob("*outcomes.jsonl"))[0].read_bytes()
+    assert F.training_rows(ledger=led) == []
+    assert F.backfill_outcomes(ledger=led, horizons=(20,), price_fn=lambda *a: result) == 0
+    assert list(tmp_path.glob("*outcomes.jsonl"))[0].read_bytes() == before
+
+
+def test_training_excludes_incomplete_legacy_rows(tmp_path):
+    led = Ledger(F.SURFACE, base_dir=tmp_path)
+    led.log_decision({"id": "d", "ticker": "A"})
+    led.log_outcome({"decision_id": "d:h20", "horizon": 20, "status": "matured", "success": True})
+    assert F.training_rows(ledger=led) == []
+
+
+def test_entry_records_common_snapshots_for_wait_and_enter(tmp_path):
+    led = Ledger(F.SURFACE, base_dir=tmp_path)
+    F.record_entry_scores([_score(), _score(ticker="B", signal="wait")], ledger=led)
+    rows = led.read_decisions()
+    assert [r["selection_status"] for r in rows] == ["selected", "shadow"]
+    for row in rows:
+        assert row["recommendation_v2_shadow"]["horizon"] == "20d"
+        assert row["recommendation_v2_shadow"]["expected_excess"] is None
+        assert "source_coverage" in row and "data_quality" in row
 
 
 def test_summary_excludes_non_finite_metrics_but_retains_rows():

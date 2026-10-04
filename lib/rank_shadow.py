@@ -37,10 +37,16 @@ def log_ranked_candidates(ledger, signals, *, today: str, market: str,
     if limit:
         ranked = ranked[:limit]
     universe = len(ranked)
+    from ml.recommendation_surfaces import snapshot_candidates, decision_metadata
+
+    snapshots = snapshot_candidates(f"{market.lower()}_mock", ranked, market=market)
+    for sig, snapshot in zip(ranked, snapshots):
+        sig.update(decision_metadata(snapshot))
     n = 0
     for i, sig in enumerate(ranked, start=1):
         try:
             ledger.log_decision({
+                **decision_metadata(sig["recommendation_v2_shadow"]),
                 "date": today,
                 "ticker": sig.get("ticker"),
                 "code": sig.get("code"),

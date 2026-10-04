@@ -28,6 +28,7 @@ from ml.recommendation_contracts import (
     canonical_horizon,
     canonical_outcome_key,
     dedupe_canonical_outcomes,
+    finite_json_value,
 )
 
 logger = logging.getLogger(__name__)
@@ -183,7 +184,10 @@ def score_to_decision(score, *, source: str, universe: str, date: str | None = N
                       evaluation_profile: str = "daily", event_id: str | None = None,
                       event_type: str | None = None, model_version: str | None = None,
                       parameter_version: str | None = None, feature_version: str | None = None,
-                      freshness_seconds: int | float | None = None) -> dict:
+                      freshness_seconds: int | float | None = None,
+                      selection_status: str | None = None, selection_rank: int | None = None,
+                      data_quality: str | None = None, source_coverage: dict | None = None,
+                      evidence_refs: list | None = None) -> dict:
     """EntryScore를 학습용 point-in-time decision 레코드로 변환."""
     from ml.entry_analyzer import trade_level_values
 
@@ -208,6 +212,11 @@ def score_to_decision(score, *, source: str, universe: str, date: str | None = N
         "evaluation_profile": profile,
         "session": current_session,
         "freshness_seconds": freshness_seconds,
+        "selection_status": selection_status or ("selected" if score.signal == "enter" else "shadow"),
+        "selection_rank": selection_rank,
+        "data_quality": data_quality or "degraded:source_metadata_not_loaded",
+        "source_coverage": source_coverage,
+        "evidence_refs": evidence_refs or [],
     }
     return {
         "id": decision_id,
@@ -222,6 +231,12 @@ def score_to_decision(score, *, source: str, universe: str, date: str | None = N
         "feature_version": metadata["feature_version"],
         "freshness_seconds": freshness_seconds,
         "metadata": metadata,
+        "selection_status": metadata["selection_status"],
+        "selection_rank": selection_rank,
+        "data_quality": metadata["data_quality"],
+        "source_coverage": source_coverage,
+        "evidence_refs": evidence_refs or [],
+        "horizon": "1h" if profile in {"short", "intraday"} else "20d",
         "source": source,
         "universe": universe,
         "ticker": score.ticker,
@@ -280,6 +295,7 @@ def record_entry_scores(scores: Iterable, *, source: str = "auto_watch",
     ledger = ledger or Ledger(SURFACE)
     existing = {d.get("id") for d in ledger.read_decisions()}
     added = 0
+    records = []
     for score in scores or []:
         rec = score_to_decision(
             score, source=source, universe=universe,
@@ -288,6 +304,16 @@ def record_entry_scores(scores: Iterable, *, source: str = "auto_watch",
             model_version=model_version, parameter_version=parameter_version,
             feature_version=feature_version, freshness_seconds=freshness_seconds,
         )
+        records.append(rec)
+    from ml.recommendation_surfaces import snapshot_candidates, decision_metadata
+
+    snapshots = snapshot_candidates(
+        SURFACE, records, as_of=records[0]["snapshot_ts"] if records else None,
+        selected_tickers={rec["ticker"] for rec in records if rec["signal"] == "enter"},
+    )
+    for rec, snapshot in zip(records, snapshots):
+        rec.update(decision_metadata(snapshot))
+        rec["metadata"].update(decision_metadata(snapshot))
         if rec["id"] not in existing:
             ledger.log_decision(rec)
             existing.add(rec["id"])
@@ -597,16 +623,26 @@ def _is_pending_result(result: object) -> bool:
 
 
 def build_outcome(decision: dict, horizon: int | str, result: dict) -> dict:
-    """Build one immutable outcome row; return a pending row for bad data."""
-    if _is_pending_result(result) or any(
-        result.get(key) is None for key in ("stock_ret", "benchmark_ret", "entry_price_actual", "exit_price")
-    ):
+    """Keep immature data pending and retain corrupt evaluable data as invalid."""
+    if _is_pending_result(result):
         return {
             "decision_id": _outcome_id(decision.get("id", "unknown"), horizon),
             "base_decision_id": decision.get("id"), "ticker": decision.get("ticker"),
             "horizon": _horizon_value(horizon), "status": "pending",
             "quality_reason": (result or {}).get("status") if isinstance(result, dict) else "missing_price_data",
         }
+    invalid = _invalid_outcome_fields(result, returns=("stock_ret", "benchmark_ret"))
+    if result.get("status") == "invalid":
+        invalid.append("status")
+    if invalid:
+        return finite_json_value({
+            **result, "decision_id": _outcome_id(decision.get("id", "unknown"), horizon),
+            "base_decision_id": decision.get("id"), "ticker": decision.get("ticker"),
+            "horizon": _horizon_value(horizon), "status": "invalid", "success": None,
+            "fwd_ret": result.get("stock_ret"), "fwd_excess": None,
+            "quality_reason": "invalid_fields:" + ",".join(invalid),
+            "diagnosis": "invalid_price_or_path_data",
+        })
     stock_ret = float(result["stock_ret"])
     bench_ret = float(result["benchmark_ret"])
     excess = stock_ret - bench_ret
@@ -674,7 +710,20 @@ def build_outcome(decision: dict, horizon: int | str, result: dict) -> dict:
     }
     primary, tags, note = _diagnose(decision, outcome)
     outcome.update({"diagnosis": primary, "factor_tags": tags, "learn_note": note})
-    return outcome
+    return finite_json_value(outcome)
+
+
+def _invalid_outcome_fields(row, *, returns):
+    invalid = []
+    for key in (*returns, "entry_price_actual", "exit_price"):
+        value = _as_float(row.get(key), float("nan"))
+        if isinstance(row.get(key), bool) or not math.isfinite(value) or (
+            key in {"entry_price_actual", "exit_price"} and value <= 0
+        ):
+            invalid.append(key)
+    if row.get("path_result") not in {"none", "target", "stop"}:
+        invalid.append("path_result")
+    return invalid
 
 
 def backfill_outcomes(*, ledger=None, horizons: tuple[int | str, ...] = HORIZONS,
@@ -711,7 +760,7 @@ def backfill_outcomes(*, ledger=None, horizons: tuple[int | str, ...] = HORIZONS
             if _is_pending_result(result):
                 continue
             outcome = build_outcome(decision, horizon, result)
-            if outcome.get("status") != "matured":
+            if outcome.get("status") not in {"matured", "invalid"}:
                 continue
             ledger.log_outcome(outcome)
             done.add(outcome_key)
@@ -731,6 +780,10 @@ def training_rows(*, ledger=None, horizon: int | str = 20) -> list[dict]:
     target_horizon = _horizon_key(horizon)
     outcomes = dedupe_canonical_outcomes(ledger.read_outcomes())
     for outcome in outcomes:
+        if (outcome.get("status") not in {None, "matured"}
+                or not isinstance(outcome.get("success"), bool)
+                or _invalid_outcome_fields(outcome, returns=("fwd_ret", "fwd_excess", "benchmark_ret"))):
+            continue
         oid = str(outcome.get("decision_id") or "")
         base_id = outcome.get("base_decision_id") or _base_decision_id(oid)
         outcome_horizon = outcome.get("horizon")

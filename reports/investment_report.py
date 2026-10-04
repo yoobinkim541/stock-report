@@ -784,6 +784,16 @@ def _select_top_buy_candidates(results, limit=5):
     for r in scored:
         if r not in picks and len(picks) < limit:
             picks.append(r)
+    from ml.recommendation_surfaces import snapshot_candidates, decision_metadata
+
+    candidates = [{**row, "selection_status": "selected" if row in picks else
+                   ("shadow" if row in scored else "filtered")} for row in results]
+    snapshots = snapshot_candidates("investment_report", candidates, top_n=limit, allow_active=True)
+    for row, snapshot in zip(results, snapshots):
+        row.update(decision_metadata(snapshot))
+    if snapshots and snapshots[0]["ranking_mode"] == "active":
+        originals = {row["ticker"]: row for row in results}
+        picks = [originals[s["ticker"]] for s in snapshots if s["selection_status"] == "selected"]
     return picks
 
 
@@ -1723,6 +1733,9 @@ def _build_json_data(today_str, market, ndx_results, top_buy_candidates,
     json_data = {
         "date": today_str,
         "generated_at": datetime.now(KST).isoformat(),
+        "recommendation_v2_shadow": [r["recommendation_v2_shadow"]
+                                     for r in [*ndx_results, *kospi_results]
+                                     if "recommendation_v2_shadow" in r],
         "market": market,
         "portfolio": [],
         "nasdaq_100_scan": {

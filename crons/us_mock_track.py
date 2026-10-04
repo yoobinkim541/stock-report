@@ -777,8 +777,10 @@ def main(argv: list[str] | None = None) -> int:
 
 
 def _log_decision(ledger, sig, sym, kind, order_side, qty, ok, today):
+    from ml.recommendation_surfaces import decision_metadata
     try:
         ledger.log_decision({
+            **decision_metadata(sig.get("recommendation_v2_shadow", {}), selection_status="selected"),
             "date": today, "ticker": sym, "side": kind, "order_side": order_side, "qty": qty,
             "price": sig.get("price"), "base_score": sig.get("base_score"),
             "policy_score": sig.get("policy_score"),

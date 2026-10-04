@@ -476,8 +476,10 @@ def _classify_kind(side: str, qty: int, cur_shares: int) -> str:
 def _log_decision(ledger, sig: dict, code: str, kind: str, order_side: str,
                   qty: int, ok, today: str) -> None:
     """결정+근거를 불변 원장(kr_decisions.jsonl)에 적재 + 편입/퇴출은 MD 저널에도."""
+    from ml.recommendation_surfaces import decision_metadata
     try:
         ledger.log_decision({
+            **decision_metadata(sig.get("recommendation_v2_shadow", {}), selection_status="selected"),
             "date": today,
             "ticker": sig.get("ticker", f"{code}.KS"),
             "code": code,
