@@ -91,6 +91,16 @@ def test_health_counts_actual_fallbacks_duplicates_nonfinite_and_freshness(tmp_p
     assert 'blocked' in format_report(health)
 
 
+def test_health_counts_persisted_invalid_and_missing_matured_metrics(tmp_path):
+    from reports.recommendation_health import collect
+    health = collect(index=RecommendationIndex(tmp_path / 'index.db', tmp_path), outcomes=[
+        {'decision_id': 'a:h20', 'status': 'invalid', 'fwd_ret': None},
+        {'decision_id': 'b:h20', 'status': 'matured', 'fwd_ret': 0.1, 'fwd_excess': None},
+        {'decision_id': 'c:h20', 'status': 'matured', 'fwd_ret': 0.1, 'fwd_excess': 0.05},
+    ], model={'train_end_date': '2026-09-27', 'trained_at': '2026-09-27'}, source_health={})
+    assert health['invalid_metric_count'] == 2
+
+
 def test_partial_tail_and_oversize_record_are_not_consumed(tmp_path):
     raw = tmp_path / 'events-test.jsonl'
     seed(raw, 1)
@@ -100,6 +110,22 @@ def test_partial_tail_and_oversize_record_are_not_consumed(tmp_path):
     assert result['bytes_read'] == 10
     assert result['budget_blocked'] is True
     assert index.ingest(max_bytes=10000)['indexed'] == 1
+
+
+def test_oversized_record_does_not_starve_later_source_files(tmp_path):
+    large = tmp_path / 'events-a.jsonl'
+    small = tmp_path / 'events-b.jsonl'
+    large.write_text(json.dumps({'source': 'saveticker', 'tickers': ['AAPL'],
+                                 'body': 'x' * 2000, 'collected_at': '2026-09-27T10:00:00Z'}) + '\n')
+    seed(small, 1)
+    budget = len(small.read_bytes()) + 1
+    index = RecommendationIndex(tmp_path / 'index.db', tmp_path)
+    first = index.ingest(max_bytes=budget)
+    assert first['budget_blocked'] is True
+    assert first['indexed'] == 0
+    second = index.ingest(max_bytes=budget)
+    assert second['indexed'] == 1
+    assert [row['ticker'] for row in index.query_events(tickers=['AAPL'])] == ['AAPL']
 
 
 def test_incremental_refresh_only_updates_affected_days(tmp_path):

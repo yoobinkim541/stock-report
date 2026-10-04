@@ -26,8 +26,14 @@ def _duplicate_count(rows: list[dict]) -> int:
 
 
 def _invalid_count(rows: list[dict]) -> int:
-    return sum(any(isinstance(value, float) and not math.isfinite(value)
-                   for value in row.values()) for row in rows)
+    def invalid(row: dict) -> bool:
+        if row.get("status") == "invalid":
+            return True
+        if row.get("status") == "matured" and any(row.get(key) is None for key in ("fwd_ret", "fwd_excess")):
+            return True
+        return any(isinstance(value, float) and not math.isfinite(value) for value in row.values())
+
+    return sum(invalid(row) for row in rows)
 
 
 def _model_health(model, now: datetime) -> dict:
@@ -37,8 +43,13 @@ def _model_health(model, now: datetime) -> dict:
         date = model.get("train_end_date")
         trained = model.get("trained_at")
         try:
-            age = (now - datetime.fromisoformat(str(date)).replace(tzinfo=timezone.utc)).days
-            trained_age = (now - datetime.fromisoformat(str(trained)).replace(tzinfo=timezone.utc)).days
+            def days_since(value):
+                parsed = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+                parsed = parsed.replace(tzinfo=timezone.utc) if parsed.tzinfo is None else parsed.astimezone(timezone.utc)
+                return (now - parsed).days
+
+            age = days_since(date)
+            trained_age = days_since(trained)
         except (TypeError, ValueError):
             age = trained_age = None
         stale = age is None or trained_age is None or min(age, trained_age) < 0 or max(age, trained_age) > 90
@@ -60,6 +71,12 @@ def collect(*, index: RecommendationIndex | None = None, outcomes: list[dict] | 
         status = {"status": "unavailable", "error": str(exc), "lag_seconds": None,
                   "errors": None, "fallback_count": None}
     health = source_health if source_health is not None else load_source_health(index.cache_dir)
+    if model is None:
+        try:
+            from ml.ranker import load_ranker
+            model = load_ranker()
+        except Exception:
+            model = None
     blocked = sorted(name for name, row in (health or {}).items()
                      if isinstance(row, Mapping) and row.get("availability") in {"blocked", "disabled", "unavailable"})
     rows = list(outcomes or [])

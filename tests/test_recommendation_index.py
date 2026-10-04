@@ -216,6 +216,23 @@ def test_query_filters_by_source_and_asof_excludes_same_day_future_events(tmp_pa
     assert features[0]["freshness_seconds"] == 10800
 
 
+def test_indexed_daily_features_respect_collection_availability(tmp_path):
+    at = datetime(2026, 9, 21, 9, tzinfo=UTC)
+    cache = tmp_path / "cache"
+    _write_rows(cache / "events-2026-09-21.jsonl", [
+        _event("saveticker", "AAPL", at, published_at=at.isoformat()),
+        _event("arca", "AAPL", at + timedelta(hours=1), published_at=at.isoformat(),
+               observed_at=(at + timedelta(hours=2)).isoformat()),
+        _event("saveticker", "AAPL", at + timedelta(days=1), published_at=at.isoformat()),
+    ])
+    index = RecommendationIndex(tmp_path / "index.sqlite", cache)
+    index.ingest()
+    before = index.ticker_day_features("AAPL", asof=at + timedelta(hours=1))
+    after = index.ticker_day_features_batch(["AAPL"], asof=at + timedelta(hours=3))["AAPL"]
+    assert before[0]["event_count"] == 1
+    assert after[0]["event_count"] == 2
+
+
 def test_ingest_recovers_after_rotation_and_reports_invalid_json_health(tmp_path):
     """Failure to reset a shrunken file checkpoint would miss replacement cache data."""
     cache = tmp_path / "cache"

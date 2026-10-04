@@ -28,6 +28,8 @@ WITH eligible AS (
         CASE WHEN content_hash != '' THEN content_hash
              WHEN observation_id != '' THEN observation_id ELSE event_id END AS evidence_id
     FROM event_index {where}
+      AND MAX(COALESCE(published_at, event_at), COALESCE(observed_at, event_at),
+              COALESCE(collected_at, event_at)) <= substr(event_at, 1, 10) || 'T23:59:59+00:00'
 ), evidence AS (
     SELECT ticker, substr(event_at, 1, 10) AS day, evidence_id,
         MAX(CASE WHEN event_kind IN ('article', 'report', 'analysis', 'news') THEN 1 ELSE 0 END) AS article_count,
@@ -158,9 +160,16 @@ class RecommendationIndex:
                       budget_blocked=False, file_errors=0)
         dirty = set()
         with self._connect() as connection:
+            cursor_row = connection.execute("SELECT value FROM index_runtime WHERE key='next_file'").fetchone()
+            cursor = json.loads(cursor_row[0]) if cursor_row else None
+            if cursor:
+                start_at = next((i for i, path in enumerate(files) if str(path.resolve()) == cursor), 0)
+                files = files[start_at:] + files[:start_at]
+            last_path = None
             for path in files:
                 if totals['fetched'] >= max_rows or totals['bytes_read'] >= max_bytes:
                     break
+                last_path = path
                 try:
                     result = self._ingest_file(connection, path, dirty,
                                                max_rows - totals['fetched'], max_bytes - totals['bytes_read'])
@@ -174,6 +183,9 @@ class RecommendationIndex:
                     else:
                         totals[key] += value
             self._refresh_features(connection, dirty)
+            if files and last_path is not None:
+                next_path = files[(files.index(last_path) + 1) % len(files)]
+                self._set_runtime(connection, 'next_file', str(next_path.resolve()))
             totals['elapsed_seconds'] = time.perf_counter() - started
             self._set_runtime(connection, 'last_ingest', totals)
         return totals
@@ -348,8 +360,11 @@ class RecommendationIndex:
         start_day = reference.date().fromordinal(reference.date().toordinal() - max(0, int(window_days) - 1)).isoformat()
         with self._connect(readonly=True) as connection:
             rows = connection.execute(
-                _FEATURES_SQL.replace("{where}", "WHERE ticker = ? AND event_at >= ? AND event_at <= ?"),
-                (str(ticker).upper(), f"{start_day}T00:00:00+00:00", reference.isoformat(timespec="seconds")),
+                _FEATURES_SQL.replace("{where}", "WHERE ticker = ? AND event_at >= ? AND event_at <= ? "
+                                      "AND MAX(COALESCE(published_at, event_at), COALESCE(observed_at, event_at), "
+                                      "COALESCE(collected_at, event_at)) <= ?"),
+                (str(ticker).upper(), f"{start_day}T00:00:00+00:00",
+                 reference.isoformat(timespec="seconds"), reference.isoformat(timespec="seconds")),
             ).fetchall()
         return [
             {**{key: row[key] for key in row.keys() if key != "latest_event_at"},
@@ -371,10 +386,13 @@ class RecommendationIndex:
         placeholders = ",".join("?" for _ in names)
         query = _FEATURES_SQL.replace(
             "{where}",
-            f"WHERE ticker IN ({placeholders}) AND event_at >= ? AND event_at <= ?",
+            f"WHERE ticker IN ({placeholders}) AND event_at >= ? AND event_at <= ? "
+            "AND MAX(COALESCE(published_at, event_at), COALESCE(observed_at, event_at), "
+            "COALESCE(collected_at, event_at)) <= ?",
         )
         with self._connect(readonly=True) as connection:
             rows = connection.execute(query, (*names, f"{start_day}T00:00:00+00:00",
+                                              reference.isoformat(timespec="seconds"),
                                               reference.isoformat(timespec="seconds"))).fetchall()
         result = {name: [] for name in names}
         for row in rows:

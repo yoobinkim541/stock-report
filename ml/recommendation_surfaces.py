@@ -125,8 +125,13 @@ def snapshot_candidates(surface, candidates, *, as_of=None, market=None,
             logger.warning("Recommendation activation held: %s", exc)
     ranked = rank_snapshots(snapshots, top_n=len(snapshots), active=active, gate=gate)
     if ranked and ranked[0]["ranking_mode"] == "active":
+        ranked_ids = {snapshot["id"] for snapshot in ranked}
+        for snapshot in snapshots:
+            if snapshot["id"] not in ranked_ids:
+                ranked.append({**snapshot, "ranking_mode": "active"})
         for position, snapshot in enumerate(ranked):
-            snapshot["selection_status"] = "selected" if position < top_n else "shadow"
+            if snapshot["selection_status"] not in {"filtered", "invalid"}:
+                snapshot["selection_status"] = "selected" if position < top_n else "shadow"
     else:
         for snapshot, row in zip(ranked, candidates):
             snapshot["selection_status"] = row.get("selection_status") or (

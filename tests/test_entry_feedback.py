@@ -120,6 +120,20 @@ def test_build_short_outcome_has_direction_path_and_net_metrics():
     assert out["net_ret"] < out["gross_ret"]
 
 
+def test_invalid_benchmark_price_cannot_enter_learning_rows(tmp_path):
+    decision = F.score_to_decision(_score(), source="test", universe="watch", date="2026-07-11")
+    result = {"stock_ret": 0.1, "benchmark_ret": 0.0, "entry_price_actual": 100.0,
+              "exit_price": 110.0, "benchmark_entry": 0.0, "benchmark_exit": 100.0,
+              "path_result": "none"}
+    outcome = F.build_outcome(decision, 20, result)
+    assert outcome["status"] == "invalid"
+    assert "benchmark_entry" in outcome["quality_reason"]
+    led = Ledger(F.SURFACE, base_dir=tmp_path)
+    led.log_decision(decision)
+    led.log_outcome(outcome)
+    assert F.training_rows(ledger=led, horizon=20) == []
+
+
 def test_default_intraday_result_records_time_to_level(monkeypatch):
     index = pd.date_range("2026-08-31 09:30", periods=32, freq="min", tz="Asia/Seoul")
     target = 130.0

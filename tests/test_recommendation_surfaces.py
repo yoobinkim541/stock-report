@@ -116,6 +116,27 @@ def test_index_query_failure_is_counted_as_degraded_fallback(tmp_path, monkeypat
     assert index.status()["fallback_count"] == 1
 
 
+def test_active_report_keeps_snapshot_bound_to_original_candidate(monkeypatch):
+    from ml import ranker
+
+    monkeypatch.setenv("RECOMMENDER_V2_MODE", "active")
+    monkeypatch.setattr(ranker, "load_ranker", lambda: SimpleNamespace(meta={
+        "surface": "investment_report", "horizon": "20d", "model_version": "report-v2",
+    }))
+    monkeypatch.setattr(ranker, "ranker_gate", lambda _: {"passed": True})
+    rows = [
+        {"ticker": "LOW", "total_score": 90, "raw_score": .9, "risk_score": 1.0,
+         "signal": "Positive", "model_version": "report-v2"},
+        {"ticker": "HIGH", "total_score": 80, "raw_score": .8, "risk_score": 0.0,
+         "signal": "Positive", "model_version": "report-v2"},
+        {"ticker": "FILTER", "total_score": 0, "signal": "Negative", "model_version": "report-v2"},
+    ]
+    picks = report._select_top_buy_candidates(rows, limit=1)
+    assert [row["ticker"] for row in picks] == ["HIGH"]
+    assert all(row["recommendation_v2_shadow"]["ticker"] == row["ticker"] for row in rows)
+    assert rows[2]["selection_status"] == "filtered"
+
+
 @pytest.mark.parametrize("market,module,symbol", [
     ("US", "crons.us_mock_track", "A"), ("KR", "crons.kiwoom_mock_track", "A"),
 ])

@@ -786,14 +786,17 @@ def _select_top_buy_candidates(results, limit=5):
             picks.append(r)
     from ml.recommendation_surfaces import snapshot_candidates, decision_metadata
 
-    candidates = [{**row, "selection_status": "selected" if row in picks else
-                   ("shadow" if row in scored else "filtered")} for row in results]
+    candidates = [{**row, "id": f"investment_report:{index}:{row.get('ticker')}",
+                   "selection_status": "selected" if row in picks else
+                   ("shadow" if row in scored else "filtered")}
+                  for index, row in enumerate(results)]
     snapshots = snapshot_candidates("investment_report", candidates, top_n=limit, allow_active=True)
-    for row, snapshot in zip(results, snapshots):
-        row.update(decision_metadata(snapshot))
+    by_id = {snapshot["id"]: snapshot for snapshot in snapshots}
+    for row, candidate in zip(results, candidates):
+        row.update(decision_metadata(by_id[candidate["id"]]))
     if snapshots and snapshots[0]["ranking_mode"] == "active":
-        originals = {row["ticker"]: row for row in results}
-        picks = [originals[s["ticker"]] for s in snapshots if s["selection_status"] == "selected"]
+        originals = {candidate["id"]: row for row, candidate in zip(results, candidates)}
+        picks = [originals[s["id"]] for s in snapshots if s["selection_status"] == "selected"]
     return picks
 
 

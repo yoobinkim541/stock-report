@@ -58,6 +58,13 @@ def main() -> int:
             xgb_eval = evaluate_ranker_backend(ds, backend="xgboost", use_ranker=False, n_folds=3)
             xgb_line = format_backend_evaluation(xgb_eval, champion_wf_ic=mean_ic)
 
+        try:
+            from ml.adaptive.ledger import Ledger
+            from reports.recommendation_health import collect, format_report
+            recommendation_health = format_report(collect(outcomes=Ledger("entry_signals").read_outcomes()))
+        except Exception as exc:
+            recommendation_health = f"Recommendation health: unavailable ({type(exc).__name__})"
+
         champion_text = f"{champ_ic:+.3f}" if champ_ic is not None else "n/a"
         adopt_str = ("채택 ✅" if adopted else f"보류 shadow (챔피언 IC {champion_text} 유지)")
         msg = "\n".join(x for x in [
@@ -66,6 +73,7 @@ def main() -> int:
             f"분할 OOS IC: {result.oos_ic:+.3f}  ICIR: {result.oos_icir:.2f}  → {adopt_str}",
             f"WF 평균 IC: {mean_ic:+.4f}  ICIR: {icir:.2f}" if mean_ic is not None else "WF: 데이터 부족",
             xgb_line,
+            recommendation_health,
             f"Gate: {gate['passed']} · reasons: {', '.join(gate['reasons']) or 'none'}",
             f"Freshness: train_end={freshness['train_end_date']} · age_days={freshness['model_age_days']} · stale={freshness['stale']}",
             f"Calibration: Brier={metrics.get('brier')} · ECE={metrics.get('ece')}",

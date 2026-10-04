@@ -681,6 +681,7 @@ def build_outcome(decision: dict, horizon: int | str, result: dict) -> dict:
         "exit_date": result.get("exit_date"),
         "entry_price_actual": round(float(result["entry_price_actual"]), 4),
         "exit_price": round(float(result["exit_price"]), 4),
+        **{key: result[key] for key in ("benchmark_entry", "benchmark_exit") if key in result},
         "fwd_ret": round(stock_ret, 5),
         "benchmark": decision.get("benchmark") or _benchmark(decision),
         "benchmark_ret": round(bench_ret, 5),
@@ -721,6 +722,11 @@ def _invalid_outcome_fields(row, *, returns):
             key in {"entry_price_actual", "exit_price"} and value <= 0
         ):
             invalid.append(key)
+    for key in ("benchmark_entry", "benchmark_exit"):
+        if key in row:
+            value = _as_float(row.get(key), float("nan"))
+            if isinstance(row.get(key), bool) or not math.isfinite(value) or value <= 0:
+                invalid.append(key)
     if row.get("path_result") not in {"none", "target", "stop"}:
         invalid.append("path_result")
     return invalid
