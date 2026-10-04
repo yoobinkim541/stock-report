@@ -62,14 +62,26 @@ def _aggregate_events(
 ) -> list[dict]:
     by_day: dict[str, list[dict]] = {}
     for event in events:
-        event_at = _parse_time(event.get("event_at"))
-        if event_at > cutoff:
+        event_at = _try_parse_time(event.get("event_at"))
+        provenance = [
+            _try_parse_time(event.get(key))
+            for key in ("published_at", "observed_at", "collected_at")
+        ]
+        available_times = [stamp for stamp in provenance if stamp is not None]
+        if event_at is None or not available_times:
+            quality.append("missing_fields:event_timestamp")
+            continue
+        row_cutoff = min(cutoff, event_at.replace(hour=23, minute=59, second=59, microsecond=999999))
+        if event_at > row_cutoff or max(available_times) > row_cutoff:
             continue
         by_day.setdefault(event_at.date().isoformat(), []).append(event)
 
-    axis = news_labels.news_axis(str(ticker), labels=labels, asof=cutoff) if labels else None
     rows = []
     for day, day_events in sorted(by_day.items()):
+        row_cutoff = min(cutoff, _start_of_day(day).replace(hour=23, minute=59, second=59, microsecond=999999))
+        row_labels, row_label_quality = _available_labels(ticker, labels, row_cutoff)
+        axis = news_labels.news_axis(str(ticker), labels=row_labels, asof=row_cutoff) if row_labels else None
+        row_quality = [value for value in quality if value != "missing_labels"] + row_label_quality
         evidence = _group_evidence(day_events)
         count = len(evidence)
         latest = max(_parse_time(event["event_at"]) for event in day_events)
@@ -89,9 +101,9 @@ def _aggregate_events(
                                            for event in records) for records in evidence.values()) / count, 2),
             "body_ratio": round(sum(any(bool(event.get("body_available")) for event in records)
                                     for records in evidence.values()) / count, 4),
-            "freshness_seconds": max(0, int((cutoff - latest).total_seconds())),
+            "freshness_seconds": max(0, int((row_cutoff - latest).total_seconds())),
             "news_axis": axis,
-            "data_quality": _quality_text(quality),
+            "data_quality": _quality_text(row_quality),
         })
     return rows
 

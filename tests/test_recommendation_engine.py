@@ -276,7 +276,82 @@ def test_rank_snapshots_is_shadow_first_and_only_reorders_after_a_passed_gate():
     assert 0.0 <= active[-1]["risk_penalty"] <= 0.5
     assert 0.0 <= active[1]["concentration_penalty"] <= 0.35
     assert active[-1]["total_rank_score"] == pytest.approx(0.4)
-    assert active[-1]["news_contribution"] == pytest.approx(0.9)
+    assert active[-1]["news_contribution"] == 0.0
+
+
+def test_active_rank_never_promotes_invalid_filtered_or_unscored_rows():
+    rows = [
+        {"ticker": "INVALID", "raw_score": 1.0, "selection_status": "invalid"},
+        {"ticker": "FILTERED", "raw_score": 0.9, "selection_status": "filtered"},
+        {"ticker": "MISSING", "raw_score": None},
+        {"ticker": "VALID", "raw_score": 0.7},
+    ]
+    ranked = _engine().rank_snapshots(rows, top_n=4, active=True, gate={"passed": True})
+    assert [row["ticker"] for row in ranked] == ["VALID"]
+
+
+def test_calibrator_requires_minimum_training_bin_even_with_large_holdout():
+    rows = [{"raw_score": 0.1, "positive_excess": 1, "split": "train"}]
+    rows += [{"raw_score": 0.2, "positive_excess": 0, "split": "holdout"}] * 100
+    assert _engine().fit_score_calibrator(rows) is None
+
+
+def test_snapshot_does_not_relabel_absolute_return_as_excess():
+    snapshot = _engine().build_snapshot("report", {"raw_score": 0.5, "expected_ret_20d": 0.1})
+    assert snapshot["expected_excess"] is None
+    assert "expected_excess" in snapshot["missing_fields"]
+
+
+@pytest.mark.parametrize("inherited_rank", [False, True])
+def test_active_ranking_clears_only_resolved_rank_missingness(inherited_rank):
+    from copy import deepcopy
+
+    engine = _engine()
+    candidate = {
+        "raw_score": 0.6,
+        "missing_fields": ["raw_score", "body_available"],
+        "data_quality": "blocked|missing_fields:rank_context",
+    }
+    source = {"missing_fields": ["macro_feature"], "data_quality": "partial"}
+    if inherited_rank:
+        candidate["missing_fields"].append("rank")
+        source["missing_fields"].append("rank")
+        source["data_quality"] += "|missing_fields:rank"
+    snapshot = engine.build_snapshot("report", candidate, source_features=source)
+    original = deepcopy(snapshot)
+
+    ranked = engine.rank_snapshots([snapshot], active=True, gate={"passed": True})[0]
+
+    assert ranked["rank"] == ranked["selection_rank"] == 1
+    assert ranked["missing_fields"] == [name for name in original["missing_fields"] if name != "rank"]
+    assert ranked["data_quality"].split("|") == [
+        issue for issue in original["data_quality"].split("|") if issue != "missing_fields:rank"
+    ]
+    assert snapshot == original
+
+
+@pytest.mark.parametrize("active,gate", [(False, {"passed": True}), (True, {"passed": False}), (True, None)])
+def test_shadow_ranking_preserves_unresolved_rank_missingness(active, gate):
+    engine = _engine()
+    snapshot = engine.build_snapshot("report", {"raw_score": 0.6})
+
+    ranked = engine.rank_snapshots([snapshot], active=active, gate=gate)[0]
+
+    assert ranked["rank"] is None
+    assert "rank" in ranked["missing_fields"]
+    assert "missing_fields:rank" in ranked["data_quality"].split("|")
+    assert ranked["missing_fields"] == snapshot["missing_fields"]
+    assert ranked["data_quality"] == snapshot["data_quality"]
+
+
+def test_active_ranking_marks_quality_complete_when_only_rank_was_missing():
+    snapshot = {"raw_score": 0.6, "missing_fields": ["rank"], "data_quality": "missing_fields:rank"}
+
+    ranked = _engine().rank_snapshots([snapshot], active=True, gate={"passed": True})[0]
+
+    assert ranked["rank"] == 1
+    assert ranked["missing_fields"] == []
+    assert ranked["data_quality"] == "complete"
 
 
 def test_calibrate_score_rejects_non_finite_inputs():

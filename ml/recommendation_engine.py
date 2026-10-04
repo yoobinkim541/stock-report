@@ -162,7 +162,7 @@ def build_snapshot(
         evidence_refs = []
 
     horizon = _first(candidate, "horizon")
-    expected_excess = _finite_number(_first(candidate, "expected_excess", "expected_ret", "expected_ret_20d"))
+    expected_excess = _finite_number(_first(candidate, "expected_excess"))
     signal = _first(candidate, "signal")
     rank = _first(candidate, "rank", "selection_rank")
     risk_score = _finite_number(_first(candidate, "risk_score", "risk_pct", "volatility"))
@@ -322,7 +322,9 @@ def fit_score_calibrator(
     """Fit five monotonic score bins and evaluate only the subsequent held-out rows."""
     training, held_out = _partition_rows(rows, score_key, target_key)
     valid_count = len(training) + len(held_out)
-    if valid_count < min_samples or not training:
+    if min_bin_size < 1 or min_samples < 1:
+        raise ValueError("sample thresholds must be positive")
+    if valid_count < min_samples or len(training) < min_bin_size:
         return None
 
     ordered_training = sorted(training, key=lambda item: item[2])
@@ -402,17 +404,28 @@ def rank_snapshots(
         snapshot["risk_penalty"] = risk_penalty
         snapshot["concentration_penalty"] = concentration_penalty
         snapshot["total_rank_score"] = None if alpha is None else alpha - risk_penalty - concentration_penalty
-        source = snapshot.get("source_features")
-        news_axis = _finite_number(source.get("news_axis")) if isinstance(source, Mapping) else None
-        snapshot["news_contribution"] = news_axis if active_ranking and news_axis is not None else 0.0
+        # Source axes remain diagnostics until independently validated weights exist.
+        snapshot["news_contribution"] = 0.0
         snapshot["ranking_mode"] = "active" if active_ranking else "shadow"
         snapshot["_legacy_index"] = index
         annotated.append(snapshot)
 
     if active_ranking:
+        annotated = [row for row in annotated
+                     if row.get("selection_status") not in {"filtered", "invalid"}
+                     and row["total_rank_score"] is not None]
         annotated.sort(key=lambda row: (-(row["total_rank_score"] if row["total_rank_score"] is not None else float("-inf")), row["_legacy_index"]))
         for rank, snapshot in enumerate(annotated, start=1):
             snapshot["rank"] = rank
+            if "missing_fields" in snapshot:
+                snapshot["missing_fields"] = [
+                    field for field in snapshot["missing_fields"] if field != "rank"
+                ]
+            quality = snapshot.get("data_quality")
+            if isinstance(quality, str):
+                snapshot["data_quality"] = "|".join(
+                    issue for issue in quality.split("|") if issue != "missing_fields:rank"
+                ) or "complete"
             snapshot["selection_rank"] = rank
             snapshot["selection_status"] = "selected"
     else:
