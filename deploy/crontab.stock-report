@@ -14,6 +14,9 @@
 SHELL=/bin/bash
 PATH=/home/ubuntu/.hermes/node/bin:/home/ubuntu/.local/bin:/usr/local/bin:/usr/bin:/bin
 
+# 추천 메타데이터 증분 색인 (수집 자체는 기존 소스 크론 소유)
+7,37 * * * * cd /home/ubuntu/projects/stock-report && uv run python crons/recommendation_index_refresh.py --max-rows 10000 >> /tmp/recommendation_index_refresh.log 2>&1
+
 # ── 상시 리포트·전략 (매일) ──────────────────────────────────────────────────
 # 일일 투자 리포트는 Hermes `stock-investment-report`가 단일 소유한다.
 # 아래 OS cron 중복 라인은 과거에 같은 리포트를 두 번 발송했으므로 비활성화했다.

@@ -144,7 +144,10 @@ def test_ingest_leaves_unterminated_jsonl_tail_pending_until_writer_finishes_it(
     event_file.write_bytes(serialized[:20])
     index = RecommendationIndex(db_path=tmp_path / "index.sqlite", cache_dir=cache)
 
-    assert index.ingest() == {"files": 1, "indexed": 0, "errors": 0, "fallback_count": 0}
+    pending = index.ingest()
+    assert {key: pending[key] for key in ("files", "indexed", "errors", "fallback_count")} == {
+        "files": 1, "indexed": 0, "errors": 0, "fallback_count": 0,
+    }
     with event_file.open("ab") as handle:
         handle.write(serialized[20:] + b"\n")
 

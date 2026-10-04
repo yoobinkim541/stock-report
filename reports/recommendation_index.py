@@ -3,6 +3,9 @@ from __future__ import annotations
 import json
 import hashlib
 import sqlite3
+import fcntl
+import time
+from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Iterable
@@ -50,9 +53,10 @@ class RecommendationIndex:
         self.cache_dir = Path(cache_dir or DEFAULT_CACHE_DIR)
         self.db_path = Path(db_path or DEFAULT_INDEX_PATH)
 
-    def _connect(self) -> sqlite3.Connection:
-        self.db_path.parent.mkdir(parents=True, exist_ok=True)
-        connection = sqlite3.connect(self.db_path)
+    def _connect(self, *, readonly=False) -> sqlite3.Connection:
+        if not readonly:
+            self.db_path.parent.mkdir(parents=True, exist_ok=True)
+        connection = sqlite3.connect(self.db_path.resolve().as_uri() + '?mode=ro', uri=True, timeout=0.1) if readonly else sqlite3.connect(self.db_path, timeout=0.1)
         connection.row_factory = sqlite3.Row
         return connection
 
@@ -60,6 +64,7 @@ class RecommendationIndex:
         with self._connect() as connection:
             connection.executescript(
                 """
+                CREATE TABLE IF NOT EXISTS index_runtime (key TEXT PRIMARY KEY, value TEXT NOT NULL);
                 CREATE TABLE IF NOT EXISTS ingest_checkpoint (
                     raw_path TEXT PRIMARY KEY,
                     inode INTEGER NOT NULL,
@@ -122,18 +127,56 @@ class RecommendationIndex:
             if name not in existing:
                 connection.execute(f"ALTER TABLE {table} ADD COLUMN {name} {definition}")
 
-    def ingest(self, paths: Iterable[Path] | None = None) -> dict:
+    @contextmanager
+    def writer_lock(self):
+        self.db_path.parent.mkdir(parents=True, exist_ok=True)
+        with Path(str(self.db_path) + '.lock').open('a') as handle:
+            fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            try:
+                yield
+            finally:
+                fcntl.flock(handle, fcntl.LOCK_UN)
+
+    def ingest(self, paths: Iterable[Path] | None = None, *, max_rows: int = 10_000,
+               max_bytes: int = 64 * 1024 * 1024) -> dict:
+        """Read complete records within global budgets; oversized records stay pending.
+
+        budget_blocked means a record needs a larger byte budget on a later run.
+        No raw body or partial record is copied into SQLite.
+        """
+        if max_rows <= 0 or max_bytes <= 0:
+            raise ValueError('ingestion budgets must be positive')
+        with self.writer_lock():
+            return self._ingest_locked(paths, max_rows, max_bytes)
+
+    def _ingest_locked(self, paths, max_rows, max_bytes):
+        started = time.perf_counter()
         self.initialize()
         files = self._event_files(paths)
-        indexed = errors = fallback_count = 0
+        totals = dict(files=0, indexed=0, errors=0, fallback_count=0,
+                      fetched=0, bytes_read=0, unknown_source_count=0,
+                      budget_blocked=False, file_errors=0)
+        dirty = set()
         with self._connect() as connection:
             for path in files:
-                result = self._ingest_file(connection, path)
-                indexed += result["indexed"]
-                errors += result["errors"]
-                fallback_count += result["fallback_count"]
-            self._rebuild_features(connection)
-        return {"files": len(files), "indexed": indexed, "errors": errors, "fallback_count": fallback_count}
+                if totals['fetched'] >= max_rows or totals['bytes_read'] >= max_bytes:
+                    break
+                try:
+                    result = self._ingest_file(connection, path, dirty,
+                                               max_rows - totals['fetched'], max_bytes - totals['bytes_read'])
+                except OSError:
+                    totals['file_errors'] += 1
+                    continue
+                totals['files'] += 1
+                for key, value in result.items():
+                    if key == 'budget_blocked':
+                        totals[key] |= value
+                    else:
+                        totals[key] += value
+            self._refresh_features(connection, dirty)
+            totals['elapsed_seconds'] = time.perf_counter() - started
+            self._set_runtime(connection, 'last_ingest', totals)
+        return totals
 
     def _event_files(self, paths: Iterable[Path] | None) -> list[Path]:
         candidates = paths if paths is not None else self.cache_dir.glob("events-*.jsonl")
@@ -142,7 +185,8 @@ class RecommendationIndex:
             key=lambda path: str(path),
         )
 
-    def _ingest_file(self, connection: sqlite3.Connection, path: Path) -> dict:
+    def _ingest_file(self, connection: sqlite3.Connection, path: Path, dirty: set,
+                     max_rows: int, max_bytes: int) -> dict:
         path = path.resolve()
         stat = path.stat()
         raw_path = str(path)
@@ -151,28 +195,36 @@ class RecommendationIndex:
         ).fetchone()
         reset = checkpoint is not None and (checkpoint["inode"] != stat.st_ino or stat.st_size < checkpoint["size"])
         if reset:
+            dirty.update(tuple(row) for row in connection.execute(
+                "SELECT DISTINCT ticker, substr(event_at, 1, 10) FROM event_index WHERE raw_path = ?", (raw_path,)))
             connection.execute("DELETE FROM event_index WHERE raw_path = ?", (raw_path,))
             checkpoint = None
         offset = int(checkpoint["offset"]) if checkpoint else 0
         line_number = int(checkpoint["line_number"]) if checkpoint else 0
         total_errors = int(checkpoint["errors"]) if checkpoint else 0
-        indexed = errors = fallback_count = 0
+        result = dict(indexed=0, errors=0, unknown_source_count=0, fetched=0,
+                      bytes_read=0, budget_blocked=False)
+        if offset == stat.st_size and not reset:
+            return result
         with path.open("rb") as handle:
             handle.seek(offset)
-            while True:
+            while result['fetched'] < max_rows and result['bytes_read'] < max_bytes:
                 raw_offset = handle.tell()
-                raw_line = handle.readline()
+                raw_line = handle.readline(max_bytes - result['bytes_read'])
+                result['bytes_read'] += len(raw_line)
                 if not raw_line:
                     break
                 if not raw_line.endswith(b"\n"):
+                    result['budget_blocked'] = result['bytes_read'] == max_bytes
                     break
                 line_number += 1
+                result['fetched'] += 1
                 try:
                     event = json.loads(raw_line.decode("utf-8"))
                     if not isinstance(event, dict):
                         raise ValueError("event is not an object")
                     rows, used_fallback = self._index_rows(event, raw_path, line_number, raw_offset)
-                    fallback_count += used_fallback
+                    result['unknown_source_count'] += used_fallback
                     for row in rows:
                         before = connection.total_changes
                         connection.execute(
@@ -185,11 +237,14 @@ class RecommendationIndex:
                             """,
                             row,
                         )
-                        indexed += int(connection.total_changes > before)
+                        if connection.total_changes > before:
+                            result['indexed'] += 1
+                            dirty.add((row[3], row[4][:10]))
                 except (UnicodeDecodeError, json.JSONDecodeError, TypeError, ValueError):
-                    errors += 1
+                    result['errors'] += 1
                     total_errors += 1
                 offset = handle.tell()
+            if offset or reset:
                 connection.execute(
                     """
                     INSERT INTO ingest_checkpoint (raw_path, inode, size, offset, line_number, errors, updated_at)
@@ -200,7 +255,32 @@ class RecommendationIndex:
                     """,
                     (raw_path, stat.st_ino, stat.st_size, offset, line_number, total_errors, _utc_now()),
                 )
-        return {"indexed": indexed, "errors": errors, "fallback_count": fallback_count}
+        return result
+
+    def _refresh_features(self, connection, dirty):
+        from datetime import timedelta
+        for ticker, day in sorted(dirty):
+            connection.execute('DELETE FROM ticker_day_features WHERE ticker = ? AND day = ?', (ticker, day))
+            if ticker:
+                next_day = (datetime.fromisoformat(day) + timedelta(days=1)).date().isoformat()
+                connection.execute(
+                    'INSERT INTO ticker_day_features ' + _FEATURES_SQL.replace(
+                        '{where}', 'WHERE ticker = ? AND event_at >= ? AND event_at < ?'),
+                    (ticker, day, next_day))
+
+    @staticmethod
+    def _set_runtime(connection, key, value):
+        connection.execute('INSERT INTO index_runtime VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value=excluded.value',
+                           (key, json.dumps(value)))
+
+    def record_fallback(self, reason: str) -> None:
+        """Record an actual caller fallback, never a source classification."""
+        with self.writer_lock():
+            self.initialize()
+            with self._connect() as connection:
+                row = connection.execute("SELECT value FROM index_runtime WHERE key='fallback_count'").fetchone()
+                self._set_runtime(connection, 'fallback_count', (json.loads(row[0]) if row else 0) + 1)
+                self._set_runtime(connection, 'last_fallback_reason', str(reason))
 
     def _index_rows(self, event: dict, raw_path: str, raw_line: int, raw_offset: int) -> tuple[list[tuple], int]:
         published_at, observed_at, collected_at, event_at = _timestamp_metadata(event)
@@ -243,7 +323,6 @@ class RecommendationIndex:
     def query_events(self, tickers: Iterable[str] | None = None, start: datetime | None = None,
                      end: datetime | None = None, source_families: Iterable[str] | None = None,
                      limit: int | None = None, sources: Iterable[str] | None = None) -> list[dict]:
-        self.initialize()
         clauses, values = [], []
         _add_in_clause(clauses, values, "ticker", _normalized_strings(tickers))
         if start:
@@ -256,19 +335,18 @@ class RecommendationIndex:
         _add_in_clause(clauses, values, "source", _normalized_strings(sources, upper=False))
         where = f" WHERE {' AND '.join(clauses)}" if clauses else ""
         values.append(_bounded_limit(limit))
-        with self._connect() as connection:
+        with self._connect(readonly=True) as connection:
             rows = connection.execute(
                 "SELECT event_id, observation_id, content_hash, ticker, event_at, published_at, observed_at, collected_at, "
                 "source, source_family, record_kind, event_kind, trust, body_available, raw_path, raw_line, raw_offset"
-                f" FROM event_index{where} ORDER BY event_at ASC, raw_path ASC, raw_offset ASC LIMIT ?", values
+                f" FROM event_index{where} ORDER BY event_at DESC, raw_path DESC, raw_offset DESC LIMIT ?", values
             ).fetchall()
-        return [dict(row) for row in rows]
+        return [dict(row) for row in reversed(rows)]
 
     def ticker_day_features(self, ticker: str, asof: datetime | None = None, window_days: int = 7) -> list[dict]:
-        self.initialize()
         reference = _event_time({"collected_at": (asof or datetime.now(timezone.utc)).isoformat()})
         start_day = reference.date().fromordinal(reference.date().toordinal() - max(0, int(window_days) - 1)).isoformat()
-        with self._connect() as connection:
+        with self._connect(readonly=True) as connection:
             rows = connection.execute(
                 _FEATURES_SQL.replace("{where}", "WHERE ticker = ? AND event_at >= ? AND event_at <= ?"),
                 (str(ticker).upper(), f"{start_day}T00:00:00+00:00", reference.isoformat(timespec="seconds")),
@@ -279,16 +357,53 @@ class RecommendationIndex:
             for row in rows
         ]
 
+    def ticker_day_features_batch(self, tickers: Iterable[str], asof: datetime | None = None,
+                                  window_days: int = 7) -> dict[str, list[dict]]:
+        """Aggregate a whole universe in one bounded read-only query."""
+        names = _normalized_strings(tickers)
+        if not names:
+            return {}
+        if len(names) > 500:
+            raise ValueError("batch ticker limit is 500")
+        reference = asof or datetime.now(timezone.utc)
+        reference = reference.astimezone(timezone.utc)
+        start_day = reference.date().fromordinal(reference.date().toordinal() - max(0, int(window_days) - 1)).isoformat()
+        placeholders = ",".join("?" for _ in names)
+        query = _FEATURES_SQL.replace(
+            "{where}",
+            f"WHERE ticker IN ({placeholders}) AND event_at >= ? AND event_at <= ?",
+        )
+        with self._connect(readonly=True) as connection:
+            rows = connection.execute(query, (*names, f"{start_day}T00:00:00+00:00",
+                                              reference.isoformat(timespec="seconds"))).fetchall()
+        result = {name: [] for name in names}
+        for row in rows:
+            result[row["ticker"]].append({
+                **{key: row[key] for key in row.keys() if key != "latest_event_at"},
+                "freshness_seconds": max(0, int((reference - _parse_time(row["latest_event_at"])).total_seconds())),
+            })
+        return result
+
     def status(self) -> dict:
-        self.initialize()
-        with self._connect() as connection:
+        with self._connect(readonly=True) as connection:
             event_count = connection.execute("SELECT COUNT(*) FROM event_index").fetchone()[0]
             latest = connection.execute("SELECT MAX(event_at) FROM event_index").fetchone()[0]
             checkpoints = connection.execute("SELECT COUNT(*) FROM ingest_checkpoint").fetchone()[0]
             errors = connection.execute("SELECT COALESCE(SUM(errors), 0) FROM ingest_checkpoint").fetchone()[0]
-            fallback_count = connection.execute("SELECT COUNT(*) FROM event_index WHERE source_family = 'other'").fetchone()[0]
+            fallback_row = connection.execute("SELECT value FROM index_runtime WHERE key='fallback_count'").fetchone()
+            ingest_row = connection.execute("SELECT value FROM index_runtime WHERE key='last_ingest'").fetchone()
+            latest_checkpoint = connection.execute(
+                "SELECT raw_path, offset, updated_at FROM ingest_checkpoint ORDER BY updated_at DESC LIMIT 1"
+            ).fetchone()
+            fallback_count = json.loads(fallback_row[0]) if fallback_row else 0
+            last_ingest = json.loads(ingest_row[0]) if ingest_row else {}
         lag = max(0, int((datetime.now(timezone.utc) - _parse_time(latest)).total_seconds())) if latest else None
-        return {"event_count": event_count, "checkpoint_count": checkpoints, "lag_seconds": lag, "errors": errors, "fallback_count": fallback_count}
+        return {"event_count": event_count, "checkpoint_count": checkpoints,
+                "lag_seconds": lag, "errors": errors, "fallback_count": fallback_count,
+                "last_offset": latest_checkpoint["offset"] if latest_checkpoint else None,
+                "last_source_file": latest_checkpoint["raw_path"] if latest_checkpoint else None,
+                "last_indexed_at": latest_checkpoint["updated_at"] if latest_checkpoint else None,
+                "last_ingest_seconds": last_ingest.get("elapsed_seconds")}
 
 
 def _timestamp_metadata(event: dict) -> tuple[str | None, str | None, str | None, datetime]:
