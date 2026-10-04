@@ -45,7 +45,7 @@ def test_train_ranker_records_backend_metadata(monkeypatch):
 def test_walk_forward_backtest_accepts_backend(monkeypatch):
     monkeypatch.setattr(rk.gbdt, "make_regressor", lambda **kwargs: _FakeRegressor())
 
-    out = rk.walk_forward_backtest(_dataset(n_days=360), n_folds=3, min_train_months=3, backend="lightgbm")
+    out = rk.walk_forward_backtest(_dataset(n_days=360), n_folds=3, min_train_months=3, backend="lightgbm", use_ranker=False)
 
     assert out["backend"] == "lightgbm"
     assert out["n_folds"] > 0
@@ -60,6 +60,27 @@ def test_evaluate_ranker_backend_handles_unavailable(monkeypatch):
     assert out["backend"] == "xgboost"
     assert out["available"] is False
     assert "미설치" in out["error"]
+
+
+def test_walk_forward_uses_ranker_and_reports_purge(monkeypatch):
+    fits = []
+
+    def fit(model, X, labels, groups, names, backend):
+        fits.append((len(X), len(labels), sum(groups), backend))
+
+    monkeypatch.setattr(rk.gbdt, "make_ranker", lambda **kwargs: _FakeRegressor())
+    monkeypatch.setattr(rk.gbdt, "fit_ranker_model", fit)
+    out = rk.walk_forward_backtest(_dataset(n_days=360, n_tickers=16), n_folds=3, min_train_months=3)
+    assert len(fits) == out["n_folds"] == 3
+    assert all(rows == labels == groups for rows, labels, groups, _ in fits)
+    assert out["use_ranker"] is True
+    assert out["purged"] is True and out["embargo"] == 5
+    assert out["top_decile_excess"] == np.mean(out["fold_top10_rets"])
+
+    unpurged = rk.walk_forward_backtest(
+        _dataset(n_days=360), n_folds=3, min_train_months=3, embargo=0,
+    )
+    assert unpurged["purged"] is False
 
 
 def test_compare_ranker_backends_marks_better_challenger(monkeypatch):
@@ -79,4 +100,4 @@ def test_compare_ranker_backends_marks_better_challenger(monkeypatch):
 
     assert out["best_backend"] == "xgboost"
     assert out["champion_backend"] == "lightgbm"
-    assert out["adopt_candidate"] is True
+    assert out["adopt_candidate"] is False  # IC alone is not validation evidence.

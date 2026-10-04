@@ -23,6 +23,7 @@ import numpy as np
 import pandas as pd
 
 from ml import gbdt_adapters as gbdt
+from ml.recommendation_validation import recommendation_gate, _finite
 
 logger = logging.getLogger(__name__)
 
@@ -65,6 +66,57 @@ class RankerResult:
     oos_hit_rate:       float          # 상위 10분위 픽의 양수 초과수익 적중률(모델 성능)
     feature_importance: pd.Series
     meta:               dict = field(default_factory=dict)
+
+
+def ranker_freshness(result: RankerResult, now: datetime | None = None) -> dict:
+    """90-day training/artifact age ceiling; missing or future dates fail closed."""
+    now = now or datetime.now(timezone.utc)
+    if now.tzinfo is None:
+        now = now.replace(tzinfo=timezone.utc)
+    meta = getattr(result, "meta", {}) or {}
+    reasons = []
+
+    def age(value, key):
+        try:
+            parsed = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+            if parsed.tzinfo is None:
+                parsed = parsed.replace(tzinfo=timezone.utc)
+            days = (now - parsed).total_seconds() / 86400
+            if days < 0 or days > 90:
+                reasons.append(key)
+            return days
+        except (TypeError, ValueError):
+            reasons.append(key)
+            return None
+
+    train_end = getattr(result, "train_end_date", None)
+    training_age = age(train_end, "training_stale_or_unknown")
+    model_age = age(meta.get("trained_at"), "model_stale_or_unknown")
+    stale = bool(reasons)
+    ic = getattr(result, "oos_ic", None)
+    top = getattr(result, "oos_top_decile_ret", None)
+    if not _finite(ic) or ic < 0:
+        reasons.append("negative_or_missing_oos_ic")
+    if not _finite(top) or top <= 0:
+        reasons.append("nonpositive_or_missing_oos_excess")
+    return {"train_end_date": train_end, "model_age_days": model_age,
+            "training_age_days": training_age, "max_age_days": 90,
+            "oos_ic": ic if _finite(ic) else None,
+            "oos_top_decile_ret": top if _finite(top) else None,
+            "data_coverage": meta.get("data_coverage"), "stale": stale,
+            "shadow_only": bool(reasons), "reasons": reasons}
+
+
+def ranker_gate(result: RankerResult) -> dict:
+    """Recompute eligibility from evidence, never trust a cached passed flag."""
+    meta = getattr(result, "meta", {}) or {}
+    gate = recommendation_gate(meta.get("validation_metrics"), meta.get("validation_baseline"))
+    freshness = ranker_freshness(result)
+    gate["reasons"].extend(freshness["reasons"])
+    gate["passed"] = not gate["reasons"]
+    gate["shadow_only"] = not gate["passed"]
+    gate["freshness"] = freshness
+    return gate
 
 
 # ── 학습 ──────────────────────────────────────────────────────────────────────
@@ -178,7 +230,7 @@ def train_ranker(
     return RankerResult(
         model=model,
         feature_names=feat_names,
-        train_end_date=str(split_date.date()),
+        train_end_date=str(train_dates.max().date()),
         oos_ic=oos_ic,
         oos_icir=oos_icir,
         oos_top_decile_ret=oos_top_decile_ret,
@@ -193,6 +245,10 @@ def train_ranker(
             "n_test":  int(test_valid.sum()),
             "n_tickers": features.index.get_level_values("ticker").nunique(),
             "trained_at": datetime.now(timezone.utc).isoformat(),
+            "data_coverage": {"train_valid_rows": int(train_valid.sum()),
+                              "train_total_rows": len(train_valid),
+                              "oos_valid_rows": int(test_valid.sum()),
+                              "oos_total_rows": len(test_valid)},
         },
     )
 
@@ -228,6 +284,7 @@ def walk_forward_backtest(
     min_train_months: int = 12,
     embargo: int | None = None,
     backend: str = "lightgbm",
+    use_ranker: bool = True,
 ) -> dict:
     """롤링 Walk-forward 백테스트 — 폴드별 독립 학습 + OOS 평가 (Purged).
 
@@ -290,8 +347,15 @@ def walk_forward_backtest(
         if len(X_tr) < 500 or len(X_te) < 100:
             continue
 
-        model = gbdt.make_regressor(backend=backend, random_state=42)
-        gbdt.fit_regressor_model(model, X_tr, y_tr, list(features.columns), backend)
+        if use_ranker:
+            train_dates = features[train_mask][valid_tr].index.get_level_values("date")
+            labels, groups = _make_ranker_labels(y_tr, train_dates)
+            order = np.argsort(train_dates, kind="stable")
+            model = gbdt.make_ranker(backend=backend, random_state=42)
+            gbdt.fit_ranker_model(model, X_tr[order], labels, groups, list(features.columns), backend)
+        else:
+            model = gbdt.make_regressor(backend=backend, random_state=42)
+            gbdt.fit_regressor_model(model, X_tr, y_tr, list(features.columns), backend)
         preds = np.asarray(model.predict(X_te)).ravel()
 
         test_dates_fold = features[test_mask][valid_te].index.get_level_values("date")
@@ -324,6 +388,10 @@ def walk_forward_backtest(
         "n_folds":        len(fold_ics),
         "fold_ics":       fold_ics,
         "fold_top10_rets": fold_top10,
+        "top_decile_excess": float(np.mean(fold_top10)) if fold_top10 else None,
+        "purged": embargo >= max(1, int(dataset.get("meta", {}).get("forward_days", 20))),
+        "embargo": embargo,
+        "use_ranker": use_ranker,
     }
 
 
@@ -352,7 +420,10 @@ def evaluate_ranker_backend(
             n_folds=n_folds,
             min_train_months=min_train_months,
             backend=backend,
+            use_ranker=use_ranker,
         )
+        result.meta["validation_metrics"] = wf
+        gate = ranker_gate(result)
         return {
             "backend": backend,
             "backend_label": gbdt.backend_label(backend),
@@ -367,6 +438,9 @@ def evaluate_ranker_backend(
             "wf_icir": wf.get("icir"),
             "wf_n_folds": wf.get("n_folds", 0),
             "wf_fold_ics": wf.get("fold_ics", []),
+            "gate": gate,
+            "freshness": gate["freshness"],
+            "shadow_only": not gate["passed"],
         }
     except (gbdt.BackendUnavailable, ImportError) as e:
         return {
@@ -421,6 +495,7 @@ def compare_ranker_backends(
         and best_score is not None
         and champion_score is not None
         and best_score >= champion_score + improvement_tol
+        and best.get("gate", {}).get("passed") is True
     )
 
     return {
@@ -451,12 +526,29 @@ def format_backend_evaluation(evaluation: dict, champion_wf_ic: float | None = N
     )
 
 
-def save_ranker(result: RankerResult, path: Path = MODEL_CACHE) -> None:
+def save_ranker(result: RankerResult, path: Path = MODEL_CACHE, *,
+                dataset: dict | None = None, tol: float = .01) -> bool:
+    if not ranker_gate(result)["passed"]:
+        logger.info("Ranker cache unchanged: validation requires shadow mode")
+        return False
+    champ = load_ranker(path)
+    if champ is None and (path.exists() or path.is_symlink()):
+        logger.warning("Ranker cache unchanged: existing artifact could not be loaded")
+        return False
+    if champ is not None:
+        champ_ic = champ.oos_ic
+        if dataset is not None:
+            reevaluated = _oos_ic_for_model(champ.model, champ.feature_names, dataset)
+            if reevaluated is not None:
+                champ_ic = reevaluated
+        if not _finite(champ_ic) or result.oos_ic < champ_ic - tol:
+            return False
     path.parent.mkdir(parents=True, exist_ok=True)
     from ml._safe_cache import harden_cache_dir
     harden_cache_dir(path.parent)  # 0700 best-effort — 타 사용자 모델 주입 방지
     path.write_bytes(pickle.dumps(result))
     logger.info("모델 저장: %s", path)
+    return True
 
 
 def load_ranker(path: Path = MODEL_CACHE) -> Optional[RankerResult]:
@@ -513,17 +605,17 @@ def adopt_if_better(result: RankerResult, path: Path = MODEL_CACHE, *, tol: floa
     반환: (채택 여부, 비교에 쓴 챔피언 OOS IC | None).
     """
     champ = load_ranker(path)
+    if not ranker_gate(result)["passed"]:
+        return False, getattr(champ, "oos_ic", None)
     if champ is None:
-        save_ranker(result, path)
-        return True, None
+        return save_ranker(result, path, dataset=dataset, tol=tol) is not False, None
     champ_ic = champ.oos_ic
     if dataset is not None:
         re_ic = _oos_ic_for_model(champ.model, champ.feature_names, dataset)
         if re_ic is not None:
             champ_ic = re_ic
-    if champ_ic is None or result.oos_ic >= champ_ic - tol:
-        save_ranker(result, path)
-        return True, champ_ic
+    if _finite(champ_ic) and result.oos_ic >= champ_ic - tol:
+        return save_ranker(result, path, dataset=dataset, tol=tol) is not False, champ_ic
     logger.info("랭커 재학습 보류 — OOS IC %.3f < 챔피언 %.3f (동일창 재평가·퇴보) → 기존 유지",
                 result.oos_ic, champ_ic)
     return False, champ_ic
@@ -558,7 +650,13 @@ def rank_today(
         logger.info("모델 없음 — 신규 학습 시작 (bench=%s)", benchmark_ticker)
         ds = build_ml_dataset(mode=mode, days=756, forward_days=20, benchmark_ticker=benchmark_ticker)
         result = train_ranker(ds)
-        save_ranker(result, cache_path)
+        adopted, _ = adopt_if_better(result, cache_path, dataset=ds)
+        if not adopted:
+            result = load_ranker(cache_path)
+
+    if result is None or not ranker_gate(result)["passed"]:
+        logger.info("Ranker production scoring disabled: shadow-only evidence")
+        return pd.DataFrame(columns=["ticker", "score", "rank"])
 
     # 오늘 데이터로 예측
     from ml.data_pipeline import fetch_universe, PORTFOLIO_TICKERS

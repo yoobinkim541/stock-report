@@ -2,6 +2,7 @@
 """test_index_rsi_and_gate.py — 지수 다중TF RSI 피처 + 랭커 챔피언/챌린저 게이트 (무네트워크)."""
 import os
 import sys
+from datetime import datetime, timezone
 
 import numpy as np
 import pandas as pd
@@ -46,12 +47,20 @@ def test_index_multitf_rsi_no_lookahead_weekly_shifted():
 class _Fake:
     def __init__(self, ic):
         self.oos_ic = ic
+        self.oos_top_decile_ret = .03
+        self.train_end_date = datetime.now(timezone.utc).isoformat()
+        self.meta = {"trained_at": self.train_end_date,
+                     "validation_metrics": dict(n_folds=3, purged=True,
+                         fold_ics=[.06]*3, mean_ic=.06, top_decile_excess=.03,
+                         transaction_cost=.01, mdd=.1, brier=.2, ece=.02,
+                         clean_mean_ic=.03, clean_top_decile_excess=.02),
+                     "validation_baseline": dict(mean_ic=.04, mdd=.1, brier=.2, ece=.02)}
 
 
 def test_adopt_when_no_champion(monkeypatch):
     saved = {}
     monkeypatch.setattr(rk, "load_ranker", lambda path=rk.MODEL_CACHE: None)
-    monkeypatch.setattr(rk, "save_ranker", lambda r, p=rk.MODEL_CACHE: saved.update(ic=r.oos_ic))
+    monkeypatch.setattr(rk, "save_ranker", lambda r, p=rk.MODEL_CACHE, **kw: saved.update(ic=r.oos_ic))
     adopted, champ = rk.adopt_if_better(_Fake(0.05))
     assert adopted is True and champ is None and saved["ic"] == 0.05
 
@@ -59,7 +68,7 @@ def test_adopt_when_no_champion(monkeypatch):
 def test_adopt_when_not_worse(monkeypatch):
     saved = {}
     monkeypatch.setattr(rk, "load_ranker", lambda path=rk.MODEL_CACHE: _Fake(0.04))
-    monkeypatch.setattr(rk, "save_ranker", lambda r, p=rk.MODEL_CACHE: saved.update(ic=r.oos_ic))
+    monkeypatch.setattr(rk, "save_ranker", lambda r, p=rk.MODEL_CACHE, **kw: saved.update(ic=r.oos_ic))
     adopted, champ = rk.adopt_if_better(_Fake(0.06))     # 개선
     assert adopted is True and champ == 0.04 and saved.get("ic") == 0.06
 
@@ -67,7 +76,7 @@ def test_adopt_when_not_worse(monkeypatch):
 def test_reject_when_worse(monkeypatch):
     saved = {}
     monkeypatch.setattr(rk, "load_ranker", lambda path=rk.MODEL_CACHE: _Fake(0.10))
-    monkeypatch.setattr(rk, "save_ranker", lambda r, p=rk.MODEL_CACHE: saved.update(ic=r.oos_ic))
+    monkeypatch.setattr(rk, "save_ranker", lambda r, p=rk.MODEL_CACHE, **kw: saved.update(ic=r.oos_ic))
     adopted, champ = rk.adopt_if_better(_Fake(0.02))     # 퇴보 → 보류
     assert adopted is False and champ == 0.10 and "ic" not in saved   # 저장 안 함
 

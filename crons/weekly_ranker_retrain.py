@@ -37,13 +37,19 @@ def main() -> int:
             format_backend_evaluation,
             train_ranker,
             walk_forward_backtest,
+            ranker_gate,
         )
 
         ds = build_ml_dataset(mode="nasdaq100", days=756, forward_days=20)
         result = train_ranker(ds)
-        adopted, champ_ic = adopt_if_better(result, dataset=ds)   # 챔피언/챌린저(동일창 재평가) — 퇴보 시 기존 유지
-
         wf = walk_forward_backtest(ds, n_folds=4)
+        result.meta["validation_metrics"] = {
+            **result.meta.get("validation_metrics", {}), **wf,
+        }
+        gate = ranker_gate(result)
+        adopted, champ_ic = adopt_if_better(result, dataset=ds)
+        freshness = gate["freshness"]
+        metrics = result.meta["validation_metrics"]
         mean_ic = wf.get("mean_ic")
         icir    = wf.get("icir")
         fold_str = " / ".join(f"{x:+.3f}" for x in wf.get("fold_ics", []))
@@ -52,13 +58,18 @@ def main() -> int:
             xgb_eval = evaluate_ranker_backend(ds, backend="xgboost", use_ranker=False, n_folds=3)
             xgb_line = format_backend_evaluation(xgb_eval, champion_wf_ic=mean_ic)
 
-        adopt_str = ("채택 ✅" if adopted else f"보류 ⏸️ (챔피언 IC {champ_ic:+.3f} 유지)")
+        champion_text = f"{champ_ic:+.3f}" if champ_ic is not None else "n/a"
+        adopt_str = ("채택 ✅" if adopted else f"보류 shadow (챔피언 IC {champion_text} 유지)")
         msg = "\n".join(x for x in [
             "🔄 랭커 주간 재학습 (Purged WF · 챔피언/챌린저)",
             "━━━━━━━━━━━━━━",
             f"분할 OOS IC: {result.oos_ic:+.3f}  ICIR: {result.oos_icir:.2f}  → {adopt_str}",
             f"WF 평균 IC: {mean_ic:+.4f}  ICIR: {icir:.2f}" if mean_ic is not None else "WF: 데이터 부족",
             xgb_line,
+            f"Gate: {gate['passed']} · reasons: {', '.join(gate['reasons']) or 'none'}",
+            f"Freshness: train_end={freshness['train_end_date']} · age_days={freshness['model_age_days']} · stale={freshness['stale']}",
+            f"Calibration: Brier={metrics.get('brier')} · ECE={metrics.get('ece')}",
+            f"Source-quality coverage: {metrics.get('source_quality_coverage')} · data coverage: {freshness['data_coverage']}",
             f"폴드별 IC: {fold_str}" if fold_str else "",
             f"상위10% 초과수익: {result.oos_top_decile_ret*100:+.1f}%",
             "⚠️ WF IC < 0.02 지속 시 DCA 틸트 비중 축소 검토",
