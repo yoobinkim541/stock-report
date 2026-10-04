@@ -45,6 +45,20 @@ def test_byte_limit_and_noop_do_not_rebuild_features(tmp_path, monkeypatch):
     assert index.ingest()['bytes_read'] == 0
 
 
+def test_index_reader_remains_available_during_writer_transaction(tmp_path):
+    raw = tmp_path / 'events-test.jsonl'
+    seed(raw, 1)
+    index = RecommendationIndex(tmp_path / 'index.db', tmp_path)
+    index.ingest()
+    with index._connect() as writer:
+        assert writer.execute('PRAGMA journal_mode').fetchone()[0] == 'wal'
+        writer.execute('BEGIN IMMEDIATE')
+        writer.execute("UPDATE event_index SET source = 'arca'")
+        assert index.query_events(tickers=['AAPL'])[0]['source'] == 'saveticker'
+        assert index.status()['event_count'] == 1
+        writer.rollback()
+
+
 def test_lock_contention_is_a_successful_skip(tmp_path, capsys):
     from crons.recommendation_index_refresh import main
     db = tmp_path / 'index.db'

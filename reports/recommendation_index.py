@@ -64,6 +64,7 @@ class RecommendationIndex:
 
     def initialize(self) -> None:
         with self._connect() as connection:
+            connection.execute("PRAGMA journal_mode=WAL")
             connection.executescript(
                 """
                 CREATE TABLE IF NOT EXISTS index_runtime (key TEXT PRIMARY KEY, value TEXT NOT NULL);

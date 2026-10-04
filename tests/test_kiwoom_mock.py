@@ -193,6 +193,51 @@ def test_token_reuses_disk_cache_without_http(rec, monkeypatch, isolated_token_f
     assert kiwoom_mock._get_token() == "disk-token"
 
 
+def test_token_refresh_is_serialized_across_processes_via_lock(rec, monkeypatch, isolated_token_file):
+    """실측(2026-09-18): kiwoom_mock_track·report·intraday_mock_track(매분) 등 8개
+    크론이 같은 토큰 캐시 파일을 공유한다. 락 없이 각자 갱신하면 동시에 여러
+    프로세스가 새 토큰을 발급받고, 키움 쪽에서 직전 토큰이 무효화되는 경합이
+    생겨 간헐적 '8005:Token이 유효하지 않습니다'로 이어졌다. 락을 잡은 뒤엔
+    디스크를 재확인해, 대기 중 다른 프로세스가 이미 갱신한 토큰을 그대로 재사용
+    (중복 발급 없이)해야 한다."""
+    import contextlib
+    import time
+
+    import safe_io
+
+    def fake_lock(target_path, **kwargs):
+        # 락을 잡는 시점에 마치 다른 프로세스가 방금 갱신을 끝낸 것처럼 디스크에
+        # 새 토큰을 미리 써 둔다.
+        safe_io.atomic_write_json(target_path, {"token": "other-process-token", "exp": time.time() + 3600})
+
+        @contextlib.contextmanager
+        def _cm():
+            yield
+
+        return _cm()
+
+    def post(*_a, **_k):
+        raise AssertionError("락 획득 뒤 재확인에서 디스크 토큰을 재사용해야 하며 새로 발급받으면 안 됨")
+
+    monkeypatch.setattr(kiwoom_mock.requests, "post", post)
+    monkeypatch.setattr(kiwoom_mock.safe_io, "file_write_lock", fake_lock)
+    kiwoom_mock._token_cache.update(token=None, exp=0.0)
+
+    assert kiwoom_mock._get_token() == "other-process-token"
+
+
+def test_token_refresh_lock_timeout_fails_closed(rec, monkeypatch, isolated_token_file):
+    import safe_io
+
+    def fake_lock(target_path, **kwargs):
+        raise safe_io.LockTimeout("timeout")
+
+    monkeypatch.setattr(kiwoom_mock.safe_io, "file_write_lock", fake_lock)
+    kiwoom_mock._token_cache.update(token=None, exp=0.0)
+
+    assert kiwoom_mock._get_token() is None
+
+
 # ── 4. is_enabled 게이팅 ──────────────────────────────────────────────────────
 def test_is_enabled(monkeypatch):
     monkeypatch.delenv("KIWOOM_MOCK_ENABLED", raising=False)

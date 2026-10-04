@@ -26,6 +26,7 @@ import os
 import time
 
 import requests
+import safe_io
 
 logger = logging.getLogger(__name__)
 
@@ -97,7 +98,6 @@ def _load_token_disk(now: float) -> str | None:
 
 def _save_token_disk(token: str, exp: float) -> None:
     try:
-        import safe_io
         safe_io.atomic_write_json(_TOKEN_FILE, {"token": token, "exp": exp})
     except Exception as e:
         logger.debug("모의 토큰 디스크 저장 실패(무시): %s", e)
@@ -110,6 +110,19 @@ def _get_token() -> str | None:
     disk = _load_token_disk(now)
     if disk:
         return disk
+    try:
+        with safe_io.file_write_lock(_TOKEN_FILE, timeout=20):
+            now = time.time()
+            disk = _load_token_disk(now)
+            if disk:
+                return disk
+            return _refresh_token(now)
+    except (safe_io.LockTimeout, OSError) as exc:
+        logger.error("모의 토큰 갱신 락 실패: %s", exc)
+        return None
+
+
+def _refresh_token(now: float) -> str | None:
     if not _key() or not _secret():
         logger.error("모의 앱키 없음 (KIWOOM_MOCK_API_KEY 또는 KIWOOM_API_KEY)")
         return None
