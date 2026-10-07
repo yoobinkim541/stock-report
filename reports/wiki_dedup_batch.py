@@ -33,6 +33,10 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(mess
 logger = logging.getLogger(__name__)
 
 MAX_PAIRS_PER_RUN = 10
+# 1회 실행의 판정(LLM 호출) 상한. 병합 수(batch_size)만으로 끊으면 대부분이 merge=false 인 날
+# 후보 쌍을 끝까지 판정하느라 1회 실행이 수일 이어진다(실측 2026-10-04~07: 3일+ 가동, 쌍마다
+# hermes·codex 동시 기동 → 시간당 세션 500+, flock 으로 이후 정기 실행도 전부 스킵).
+MAX_JUDGMENTS_PER_RUN = 50
 _DEDUP_KINDS = ("playbook", "risk", "concept")
 # 0.35였을 땐 실측(2026-09-06)으로 5일 연속(10회 실행) 후보 0쌍 — 개념적으로 동일한
 # playbook 쌍도 LLM 증류마다 문구가 달라져 Jaccard 가 0.242 정도로 임계값 밑에서
@@ -179,6 +183,14 @@ def _dedup_batch_size() -> int:
         return MAX_PAIRS_PER_RUN
 
 
+def _dedup_max_judgments() -> int:
+    raw = os.getenv("WIKI_DEDUP_MAX_JUDGMENTS", str(MAX_JUDGMENTS_PER_RUN))
+    try:
+        return max(1, min(500, int(raw)))
+    except (TypeError, ValueError):
+        return MAX_JUDGMENTS_PER_RUN
+
+
 def run(*, dry_run: bool = False, llm_fn=None, limit: int | None = None) -> dict:
     """후보 쌍을 판정하고, 확인된 쌍만 한 번씩 병합한다."""
     if llm_fn is None:
@@ -189,6 +201,7 @@ def run(*, dry_run: bool = False, llm_fn=None, limit: int | None = None) -> dict
     pages = wiki._all_wiki_pages()
     batch_size = _dedup_batch_size() if limit is None else max(1, min(50, int(limit)))
     pairs = find_candidate_pairs(pages)
+    max_judgments = _dedup_max_judgments()
     merged_away: set[str] = set()
     merged: list[dict] = []
     pairs_considered = 0
@@ -200,6 +213,9 @@ def run(*, dry_run: bool = False, llm_fn=None, limit: int | None = None) -> dict
         page_b_id = str(page_b.get("id") or "")
         if not page_a_id or not page_b_id or page_a_id in merged_away or page_b_id in merged_away:
             continue
+        if pairs_considered >= max_judgments:
+            logger.info("판정 상한 도달(%d회, 병합 %d건) — 남은 후보는 다음 실행에서", max_judgments, len(merged))
+            break
         pairs_considered += 1
         should_merge, reason = _judge_pair(page_a, page_b, llm_fn)
         if not should_merge:

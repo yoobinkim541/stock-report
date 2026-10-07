@@ -324,3 +324,27 @@ def test_main_dry_run_prints_summary_and_returns_zero(monkeypatch, tmp_path, cap
 
     assert wdb.main() == 0
     assert "위키 중복 병합 완료" in caplog.text
+
+
+def test_run_stops_after_judgment_cap_even_when_nothing_merges(monkeypatch, tmp_path):
+    _isolate(monkeypatch, tmp_path)
+    from agent_console import wiki
+    from reports import wiki_dedup_batch as wdb
+
+    _page(wiki, title="커뮤니티 단독 신호 평가 전략", body=_SIGNAL_BODY_A)
+    _page(wiki, title="비공식 신호 교차확인 절차", body=_SIGNAL_BODY_B)
+    _page(wiki, title="비공식 신호 교차확인 절차 2", body=_SIGNAL_BODY_B + " 추가")
+    assert len(wdb.find_candidate_pairs(wiki._all_wiki_pages())) >= 2
+
+    calls = []
+
+    def reject(prompt):
+        calls.append(prompt)
+        return '{"merge": false, "reason": "결론 상충"}'
+
+    monkeypatch.setenv("WIKI_DEDUP_MAX_JUDGMENTS", "1")
+    result = wdb.run(dry_run=False, llm_fn=reject)
+
+    assert len(calls) == 1
+    assert result["pairs_considered"] == 1
+    assert result["merged"] == []
