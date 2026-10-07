@@ -11,6 +11,17 @@ from ml import recommendation_calibration as calibration
 NOW = datetime.now(timezone.utc) + timedelta(minutes=1)
 
 
+@pytest.fixture(autouse=True)
+def fixed_training_clock(monkeypatch):
+    class Clock(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            stamp = NOW - timedelta(seconds=1)
+            return stamp.astimezone(tz) if tz else stamp.replace(tzinfo=None)
+
+    monkeypatch.setattr(calibration, "datetime", Clock)
+
+
 def records(n=10, *, model="m1", parameter="p1"):
     start = NOW - timedelta(days=40)
     decisions, outcomes = [], []

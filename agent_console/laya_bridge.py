@@ -63,6 +63,7 @@ class _Config:
     assets_status: str = "unknown"
     head_status: str = "unknown"
     model_root_status: str = "unconfigured"
+    profile: str = "unknown"
 
 
 def _boolean(name: str) -> bool:
@@ -113,8 +114,24 @@ def _configuration() -> _Config:
     if not _POSIX_SUPPORTED:
         return replace(config, error="unsupported_worker_platform")
 
+    if Path(config.command[0]).name == "ssh":
+        return config
+
     # The original worker's local paths must be provisioned before it can load.
     scripts = [Path(arg).expanduser() for arg in config.command if arg.endswith(".py")]
+    public = next((path for path in scripts if path.name == "laya_public_worker.py"), None)
+    if public is not None:
+        model_arg = _argument(config.command, "--model")
+        model = Path(model_arg).expanduser() if model_arg else None
+        files = ("model.safetensors", "rl_agent_config.json", "encoder/config.json",
+                 "tokenizer/tokenizer.json", "tokenizer/tokenizer_config.json")
+        assets = bool(public.is_file() and model and all((model / name).is_file() for name in files))
+        return replace(config, validated=False, profile="public_multilingual",
+                       code_configured=public.is_file(),
+                       assets_status="present" if assets else "missing",
+                       head_status="public_checkpoint",
+                       model_root_status="public_assets_present" if assets else "public_assets_missing",
+                       error=None if assets else "model_assets_missing")
     original = next((path for path in scripts if path.name == "worker.py"), None)
     code = any(path.is_file() for path in scripts)
     if original is None:
@@ -205,7 +222,13 @@ def _selection(response: dict, ids: list[str]) -> tuple[str, dict, float]:
     confidence = probabilities[chosen]
     if confidence < max(probabilities.values()):
         raise _BridgeError("invalid_probabilities")
-    if "confidence" in action and not math.isclose(
+    if "answer_confidence" in action:
+        # SDK 0.3.29 retains entropy as `confidence`; its calibrated answer
+        # confidence is separate and can differ after histogram calibration.
+        if "confidence" in action:
+            _probability(action["confidence"])
+        confidence = _probability(action["answer_confidence"])
+    elif "confidence" in action and not math.isclose(
             _probability(action["confidence"]), confidence, abs_tol=1e-6):
         raise _BridgeError("invalid_probabilities")
     return chosen, probabilities, confidence
@@ -220,11 +243,13 @@ class _Worker:
         self.command = ()
         self.buffer = bytearray()
         self.ready = False
+        self.metadata = {}
         self.closing = threading.Event()
 
     def _close(self):
         process, self.process = self.process, None
         self.ready = False
+        self.metadata = {}
         self.command = ()
         self.buffer.clear()
         if process is None:
@@ -309,6 +334,8 @@ class _Worker:
         ready = self._read(config.load_timeout)
         if ready.get("ready") is not True or ready.get("backend") != "laya":
             raise _BridgeError("invalid_worker_ready")
+        self.metadata = {key: ready[key] for key in ("profile", "device", "assets_status", "head_status")
+                         if isinstance(ready.get(key), str) and len(ready[key]) <= 80}
         self.ready = True
 
     def transaction(self, config, request=None):
@@ -334,7 +361,8 @@ class _Worker:
             if remaining <= 0:
                 raise _BridgeError("worker_timeout")
             response = self._read(remaining)
-            return _selection(response, list(request["questions"]["action"]["criteria"]))
+            selection = _selection(response, list(request["questions"]["action"]["criteria"]))
+            return (*selection, dict(self.metadata))
         except _BridgeError:
             self._close()
             raise
@@ -364,11 +392,14 @@ def readiness(*, start: bool = False) -> dict:
     process = _worker.process
     ready = bool(config.enabled and not error and _worker.command == config.command
                  and _worker.ready and process is not None and process.poll() is None)
+    metadata = _worker.metadata if ready else {}
     return {"enabled": config.enabled, "configured": bool(config.command),
             "code_configured": config.code_configured, "assets_status": config.assets_status,
             "head_status": config.head_status,
             "model_root_status": config.model_root_status, "ready": ready,
-            "backend": "laya" if ready else None, "error_code": error}
+            "backend": "laya" if ready else None, "profile": metadata.get("profile", config.profile),
+            "device": metadata.get("device"), "error_code": error,
+            "runtime_assets_status": metadata.get("assets_status", "unknown")}
 
 
 def _text(value, length):
@@ -459,7 +490,8 @@ def review_wiki_candidates(question, pages, history=None, limit=4) -> tuple[list
                            "source_refs": _provenance(page, "source_refs", "sourceRefs", "artifacts"),
                            "evidence_ids": _provenance(page, "evidence_ids", "evidenceIds")}
                           for page in candidates],
-              "model_root_status": config.model_root_status, "assets_status": config.assets_status}
+              "model_root_status": config.model_root_status, "assets_status": config.assets_status,
+              "profile": config.profile}
     reference_ids, references_truncated = _references(question)
     refs = set(reference_ids)
     unmatched = sorted(refs - seen)
@@ -509,14 +541,18 @@ def review_wiki_candidates(question, pages, history=None, limit=4) -> tuple[list
         review.update(needs_review=True, reason="indistinguishable_candidates")
         return baseline, review
     try:
-        chosen, probabilities, confidence = _worker.transaction(config, request)
+        chosen, probabilities, confidence, metadata = _worker.transaction(config, request)
     except _BridgeError as exc:
         review.update(needs_review=True, reason="worker_failure", error_code=str(exc))
         return baseline, review
     review.update(method="model_choice", backend="laya", selected_id=chosen, selected_ids=[chosen],
                   confidence=confidence, alternatives=[{"id": page_id, "probability": probabilities[page_id]}
                                                       for page_id in ids if page_id != chosen])
-    if not config.validated:
+    public_profile = config.profile == "public_multilingual" or metadata.get("profile") == "public_multilingual"
+    review.update(profile=metadata.get("profile", config.profile), device=metadata.get("device"))
+    if public_profile:
+        review.update(mode="shadow", configured_policy="shadow")
+    if not config.validated or public_profile:
         review.update(needs_review=True, reason="profile_unvalidated")
         return baseline, review
     if confidence < config.minimum:
