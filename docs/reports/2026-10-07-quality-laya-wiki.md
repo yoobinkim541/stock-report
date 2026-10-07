@@ -105,10 +105,21 @@ Reference syntax, links and graph density do not establish source truth. The
 1,447 draft knowledge pages are not 1,447 reviewed investment rules. Lexical
 QMD coverage includes all 3,934 pages, but vector chunks are zero.
 
-Priority findings remain distinct from this integration:
+Follow-up snapshot on 2026-10-07 after deployment:
 
-1. Health reports zero pending/refresh work, while the actual pure selector
-   identifies 80 eligible candidates. Align health with selector eligibility.
+| Measure | Value |
+| --- | ---: |
+| Total / active / archived pages | 3,937 / 3,079 / 858 |
+| Active knowledge pages, all draft | 1,449 |
+| Actual distillation queue / refresh subset | 76 / 75 |
+
+Background curation continues, so inventory changes between snapshots.
+
+Completed correction and remaining priorities:
+
+1. Fixed: health now uses the actual runtime selector instead of reporting zero
+   pending/refresh work. The current queue contains 76 candidates, including 75
+   refresh candidates. Scheduled cached reports update on their next normal run.
 2. Recent distillation failures include 120 invalid JSON and 100 kind-preservation
    failures. Repair refresh output validation before increasing throughput.
 3. Separate the 924 evidence summaries from substantive reviewed knowledge in
@@ -124,5 +135,33 @@ source archive, execute models, mutate pages or send Telegram messages.
 
 Regression tests cover rejected calibration, scope/time/identity validation,
 baseline preservation, bounded local worker behavior and chatbot integration.
-Production activation and deployment verification are recorded after the final
-test/review pass. Existing operating worktree changes are preserved.
+Existing operating worktree changes were preserved. Local commits:
+
+- `952118f`: recommendation calibration and LAYA context-selection bridge.
+- `987c13d`: wiki health aligned with the actual refresh queue.
+
+Verification results:
+
+- Isolated core regression suite: 466 passed.
+- Operating core regression suite: 432 passed.
+- Operating health/distillation/caller checks: 52 passed, 1 skipped.
+- Final focused recheck: 176 passed, 1 skipped.
+- Full repository suite was not verified; broader checks encountered unrelated
+  missing chart dependencies.
+- Live refresh read 10,607 decisions and 50,655 outcomes; 6 of 26 scopes passed.
+- A live US 3d consumer attached accepted calibration in shadow mode, while a
+  20d consumer retained its baseline. No trading policy or ranking activation.
+- Installed weekday refresh at 09:21 and 16:21 KST using a nonblocking lock.
+- Streamlit was restarted (PID 3600518). Bot PID 3595414 is running.
+- Local and public Streamlit health returned `ok`; public root returned HTTP 200.
+- Public access: https://plumbing-thought-course-portable.trycloudflare.com/
+
+LAYA passive readiness remains `enabled=false`, `configured=false`, `ready=false`.
+The bridge is deployed, but trained base-model/head assets and profile validation
+are still required before real learned selection can be enabled. No production
+environment model settings were changed. Subagent implementation/review used
+gpt-6.1-sol and gpt-6-luna as requested.
+
+GitHub push was not performed in this turn. No Vercel landing changes were made.
+No financial orders, Telegram sends, model downloads or wiki promotion were
+initiated by verification.
