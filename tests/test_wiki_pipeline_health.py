@@ -212,7 +212,9 @@ def test_curation_health_exposes_distillation_queue_states():
         ]
     )
 
+    # Created without new evidence or an archived result is not selector-eligible.
     assert result["distillation_pending_count"] == 1
+    assert result["distillation_queue_ids"] == ["pending"]
     assert result["distillation_created_count"] == 1
     assert result["distillation_skipped_count"] == 1
 

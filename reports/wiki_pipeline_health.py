@@ -83,6 +83,27 @@ def _has_non_conversation_source_refs(page: dict[str, Any]) -> bool:
     return wiki.has_non_conversation_source_refs(page)
 
 
+def distillation_queue_health(pages: list[dict[str, Any]]) -> dict[str, Any]:
+    """Return selector-ordered queue IDs/counts for only the supplied corpus.
+
+    Pending includes linked refresh retries; refresh_due includes only eligible
+    fingerprint refreshes. Legacy selectors without a refresh predicate report
+    zero refreshes. No pages are loaded, changed, or distilled.
+    """
+    from reports import wiki_distillation
+
+    candidates = wiki_distillation.select_distillation_candidates(pages, limit=len(pages))
+    refresh_due = getattr(wiki_distillation, "_refresh_due", lambda page: False)
+    queue_ids = [page["id"] for page in candidates]
+    refresh_ids = [page["id"] for page in candidates if refresh_due(page)]
+    return {
+        "distillation_pending_count": len(queue_ids),
+        "distillation_queue_ids": queue_ids,
+        "refresh_due_count": len(refresh_ids),
+        "refresh_due_ids": refresh_ids,
+    }
+
+
 def _build_reverse_links(pages: list[dict[str, Any]]) -> dict[str, set[str]]:
     reverse: dict[str, set[str]] = defaultdict(set)
     for page in pages:
@@ -335,6 +356,7 @@ def _summarize_curation_health(pages: list[dict[str, Any]]) -> dict[str, Any]:
         "distillation_created_count": int(distillation_states.get("created", 0)),
         "distillation_skipped_count": int(distillation_states.get("skipped", 0)),
         "distillation_failed_count": int(distillation_states.get("failed", 0)),
+        **distillation_queue_health(pages),
     }
 
 
