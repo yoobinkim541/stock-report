@@ -7,6 +7,7 @@ import json
 import os
 from pathlib import Path
 import re
+import signal
 import subprocess
 import tempfile
 import threading
@@ -1691,6 +1692,66 @@ def _remaining_timeout(deadline: float | None, ceiling: int) -> int:
     return max(0, min(int(ceiling), int(deadline - time.monotonic())))
 
 
+def _terminate_process_group(proc, grace: float = 3.0) -> None:
+    """proc 의 프로세스 그룹 전체(hermes 가 띄운 MCP 자식 포함)에 SIGTERM, grace 초 뒤 SIGKILL."""
+    def _signal(sig):
+        try:
+            os.killpg(proc.pid, sig)
+        except (ProcessLookupError, PermissionError):
+            pass
+
+    _signal(signal.SIGTERM)
+    timer = threading.Timer(grace, _signal, args=(signal.SIGKILL,))
+    timer.daemon = True
+    timer.start()
+
+
+class _ProcessTrackingRunner:
+    """_race_providers 전용 runner 래퍼 — 띄운 subprocess 를 기억했다가 승자가 정해지면 loser 쪽을 끈다.
+
+    기본 runner(subprocess.run)일 때만 개입하고, 테스트 등에서 주입한 runner 는 그대로 통과시킨다.
+    """
+
+    def __init__(self, base):
+        self._base = base
+        self._lock = threading.Lock()
+        self._procs: set = set()
+        self._cancelled = False
+
+    def __call__(self, cmd, **kwargs):
+        if self._base is not subprocess.run:
+            return self._base(cmd, **kwargs)
+        timeout = kwargs.pop("timeout", None)
+        check = kwargs.pop("check", False)
+        if kwargs.pop("capture_output", False):
+            kwargs.setdefault("stdout", subprocess.PIPE)
+            kwargs.setdefault("stderr", subprocess.PIPE)
+        with self._lock:
+            if self._cancelled:
+                return subprocess.CompletedProcess(cmd, -signal.SIGTERM, "", "")
+            proc = subprocess.Popen(cmd, start_new_session=True, **kwargs)
+            self._procs.add(proc)
+        try:
+            out, err = proc.communicate(timeout=timeout)
+        except subprocess.TimeoutExpired:
+            _terminate_process_group(proc)
+            proc.communicate()
+            raise
+        finally:
+            with self._lock:
+                self._procs.discard(proc)
+        if check and proc.returncode:
+            raise subprocess.CalledProcessError(proc.returncode, cmd, out, err)
+        return subprocess.CompletedProcess(cmd, proc.returncode, out, err)
+
+    def cancel(self) -> None:
+        with self._lock:
+            self._cancelled = True
+            procs = list(self._procs)
+        for proc in procs:
+            _terminate_process_group(proc)
+
+
 def _race_providers(prompt: str, providers, *, runner, deadline, max_timeout,
                      search, reasoning_effort) -> str | None:
     """여러 provider 함수를 동시에 띄워 가장 먼저 성공(non-None)하는 응답을 쓴다.
@@ -1700,13 +1761,15 @@ def _race_providers(prompt: str, providers, *, runner, deadline, max_timeout,
     변동폭이 커서 medium reasoning 으로 24초 만에 끝날 때도, 57초 걸릴 때도
     있었다). 먼저 끝나는 쪽을 쓰면 이 변동폭에 대해 헤지가 된다.
 
-    승자를 찾으면 아직 안 끝난 나머지(loser)는 기다리지 않고 즉시 반환한다 —
-    loser 는 백그라운드에서 마저 끝나든 타임아웃으로 죽든 그냥 둔다(결과는 버림).
+    승자를 찾으면 아직 안 끝난 나머지(loser)는 기다리지 않고 즉시 반환하고, loser 가 띄운
+    subprocess 그룹은 바로 끈다 — 예전엔 그냥 둬서 판정마다 진 쪽(codex 또는 hermes+MCP)도
+    끝까지 돌았다(실측 2026-10-07, 위키 중복 판정 배치에서 호출당 프로세스 2배).
     """
     pool = ThreadPoolExecutor(max_workers=len(providers))
+    trackers = {name: _ProcessTrackingRunner(runner) for name, _fn in providers}
     futures = {
         pool.submit(
-            fn, prompt, runner=runner, max_timeout=max_timeout, deadline=deadline,
+            fn, prompt, runner=trackers[name], max_timeout=max_timeout, deadline=deadline,
             search=search, reasoning_effort=reasoning_effort,
         ): name
         for name, fn in providers
@@ -1729,7 +1792,11 @@ def _race_providers(prompt: str, providers, *, runner, deadline, max_timeout,
             if winner:
                 break
     finally:
-        # wait=False — 아직 도는 loser 스레드(subprocess)를 기다리지 않고 풀만 놓아준다.
+        if winner_name is not None:
+            for name, tracker in trackers.items():
+                if name != winner_name:
+                    tracker.cancel()
+        # wait=False — loser 스레드는 위에서 subprocess 가 끊겨 곧 끝난다. 기다리지 않고 풀만 놓아준다.
         pool.shutdown(wait=False)
     if winner:
         # loser 가 나중에 성공해 _mark_llm_engine 을 다시 부를 가능성에 대비해, 실제로
@@ -1932,6 +1999,11 @@ def _try_hermes_chat(prompt: str, runner=subprocess.run, max_timeout: int | None
         _valid_reasoning_effort(reasoning_effort),
         "-Q",
     ]
+    # 도구가 필요 없는 호출(예: 위키 중복 판정 배치)은 env 로 toolset 을 좁힌다 — hermes 는 -t 에
+    # 없는 MCP 서버(chrome 등)를 아예 띄우지 않아 호출마다 headless chromium 기동 비용이 사라진다.
+    toolsets = os.getenv("AGENT_CONSOLE_HERMES_TOOLSETS", "").strip()
+    if toolsets:
+        cmd += ["-t", toolsets]
     # _llm_budget() 기본값(90)과 맞춘다 — 예전엔 여기 자체 fallback(60)이 더 낮아
     # 공유 예산을 올려도(b53c50d) 여기서 조용히 다시 깎였다(실측 2026-09-04).
     timeout = int(os.getenv("AGENT_CONSOLE_LLM_TIMEOUT", "90") or "90")
@@ -1977,6 +2049,11 @@ def _try_gemini_chat(prompt: str, runner=subprocess.run, max_timeout: int | None
         _valid_reasoning_effort(reasoning_effort),
         "-Q",
     ]
+    # 도구가 필요 없는 호출(예: 위키 중복 판정 배치)은 env 로 toolset 을 좁힌다 — hermes 는 -t 에
+    # 없는 MCP 서버(chrome 등)를 아예 띄우지 않아 호출마다 headless chromium 기동 비용이 사라진다.
+    toolsets = os.getenv("AGENT_CONSOLE_HERMES_TOOLSETS", "").strip()
+    if toolsets:
+        cmd += ["-t", toolsets]
     # _llm_budget() 기본값(90)과 맞춘다 — 예전엔 여기 자체 fallback(60)이 더 낮아
     # 공유 예산을 올려도(b53c50d) 여기서 조용히 다시 깎였다(실측 2026-09-04).
     timeout = int(os.getenv("AGENT_CONSOLE_LLM_TIMEOUT", "90") or "90")

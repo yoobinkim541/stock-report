@@ -5308,3 +5308,97 @@ def test_legacy_chat_and_default_preview_routes_remain_compatible(monkeypatch, t
     assert preview.get_json()["ok"] is True
     assert chat.status_code == 200
     assert chat.get_json()["answer"] == "legacy"
+
+
+def _ok_result(stdout="답변"):
+    class Result:
+        returncode = 0
+        stderr = ""
+
+    Result.stdout = stdout
+    return Result()
+
+
+def test_agent_hermes_chat_adds_toolsets_only_when_env_set(monkeypatch):
+    """도구가 필요 없는 배치(위키 중복 판정)는 AGENT_CONSOLE_HERMES_TOOLSETS 로 -t 를 붙여
+    hermes 가 chrome MCP 를 띄우지 않게 한다. env 가 없으면 커맨드는 예전과 같아야 한다."""
+    from agent_console.agent import _try_gemini_chat, _try_hermes_chat
+
+    seen = []
+
+    def fake_runner(cmd, **kwargs):
+        seen.append(cmd)
+        return _ok_result()
+
+    monkeypatch.delenv("AGENT_CONSOLE_HERMES_TOOLSETS", raising=False)
+    assert _try_hermes_chat("테스트", runner=fake_runner) == "답변"
+    assert "-t" not in seen[-1]
+
+    monkeypatch.setenv("AGENT_CONSOLE_HERMES_TOOLSETS", "todo")
+    assert _try_hermes_chat("테스트", runner=fake_runner) == "답변"
+    assert seen[-1][seen[-1].index("-t") + 1] == "todo"
+    assert _try_gemini_chat("테스트", runner=fake_runner) == "답변"
+    assert seen[-1][seen[-1].index("-t") + 1] == "todo"
+
+
+def test_llm_race_terminates_loser_subprocess_group(tmp_path):
+    """승자가 정해지면 loser 가 띄운 subprocess 와 그 자식까지 끈다 — 예전엔 끝까지 돌게 둬서
+    판정마다 진 쪽 provider 프로세스(hermes+MCP 또는 codex)가 계속 자원을 썼다."""
+    import os as os_mod
+    import subprocess as sp
+    import time as time_mod
+
+    from agent_console import agent
+
+    shell_pid_file = tmp_path / "shell.pid"
+    child_pid_file = tmp_path / "child.pid"
+
+    def slow_loser(prompt, runner, **kwargs):
+        runner(["bash", "-c", f"echo $$ > {shell_pid_file}; sleep 30 & echo $! > {child_pid_file}; wait"],
+               capture_output=True, text=True, timeout=60)
+        return None
+
+    def fast_winner(prompt, runner, **kwargs):
+        deadline = time_mod.monotonic() + 10
+        while not child_pid_file.exists() and time_mod.monotonic() < deadline:
+            time_mod.sleep(0.05)
+        return "빠른 답변"
+
+    result = agent._race_providers(
+        "테스트", (("slow", slow_loser), ("fast", fast_winner)),
+        runner=sp.run, deadline=None, max_timeout=60, search=None, reasoning_effort=None,
+    )
+    assert result == "빠른 답변"
+
+    def alive(pid):
+        try:
+            os_mod.kill(pid, 0)
+        except ProcessLookupError:
+            return False
+        try:  # 좀비(종료됐지만 아직 회수 전)는 죽은 것으로 본다
+            return open(f"/proc/{pid}/stat").read().split(")")[-1].split()[0] != "Z"
+        except OSError:
+            return False
+
+    pids = [int(shell_pid_file.read_text()), int(child_pid_file.read_text())]
+    deadline = time_mod.monotonic() + 8
+    while time_mod.monotonic() < deadline and any(alive(p) for p in pids):
+        time_mod.sleep(0.1)
+    leftover = [p for p in pids if alive(p)]
+    for p in leftover:
+        os_mod.kill(p, 9)
+    assert not leftover, f"loser 프로세스가 살아 있음: {leftover}"
+
+
+def test_process_tracking_runner_passes_injected_runner_through():
+    from agent_console import agent
+
+    calls = []
+
+    def fake_runner(cmd, **kwargs):
+        calls.append((cmd, kwargs))
+        return _ok_result("x")
+
+    tracker = agent._ProcessTrackingRunner(fake_runner)
+    assert tracker(["echo"], capture_output=True, text=True, timeout=5).stdout == "x"
+    assert calls == [(["echo"], {"capture_output": True, "text": True, "timeout": 5})]

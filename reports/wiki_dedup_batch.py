@@ -266,4 +266,7 @@ def main() -> int:
 
 
 if __name__ == "__main__":
+    # 판정은 텍스트만 보면 되므로 hermes 도구를 todo 로 좁혀 chrome MCP 기동을 막는다
+    # (판정마다 headless chromium·MCP 를 띄우던 비용 제거, 실측 2026-10-07 호출당 ~1.8초 단축).
+    os.environ.setdefault("AGENT_CONSOLE_HERMES_TOOLSETS", "todo")
     sys.exit(main())
