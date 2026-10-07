@@ -2,16 +2,87 @@
 from __future__ import annotations
 
 import logging
+import math
 import os
 from datetime import datetime, timedelta, timezone
+from numbers import Real
 
 from ml.recommendation_contracts import finite_json_value
-from ml.recommendation_engine import build_snapshot, rank_snapshots
+from ml.recommendation_engine import build_snapshot, calibrate_score, rank_snapshots
 from reports.recommendation_index import RecommendationIndex
 
 logger = logging.getLogger(__name__)
 EVENT_LIMIT = 2_000
 FEATURE_VERSION = "indexed-source-metadata-v2"
+
+
+def _version_values(row):
+    metadata = row.get("metadata") if isinstance(row.get("metadata"), dict) else {}
+    values = {}
+    for name in ("model_version", "parameter_version"):
+        direct, nested = row.get(name), metadata.get(name)
+        if (any(value is not None and (not isinstance(value, str) or not value.strip())
+                for value in (direct, nested))
+                or direct is not None and nested is not None and direct != nested):
+            raise ValueError("invalid calibration version metadata")
+        values[name] = direct if direct is not None else nested
+    return values
+
+
+def _apply_calibration(snapshot, row, as_of, cache):
+    try:
+        _version_values(row)
+    except ValueError:
+        snapshot["calibration"] = {"status": "invalid_metadata"}
+        return
+    try:
+        cutoff = min(_timestamp(as_of), _timestamp(snapshot["decision_ts"])).isoformat()
+    except (ValueError, TypeError):
+        snapshot["calibration"] = {"status": "invalid_timestamp"}
+        return
+    scale = row.get("score_range", (0, 1) if snapshot["surface"] == "entry_signals" else None)
+    if (not isinstance(scale, (list, tuple)) or len(scale) != 2
+            or any(isinstance(v, bool) or not isinstance(v, Real) or not math.isfinite(v) for v in scale)
+            or scale[0] >= scale[1]):
+        snapshot["calibration"] = {"status": "unknown_scale"}
+        return
+    score = snapshot["raw_score"]
+    if score is None or not scale[0] <= score <= scale[1]:
+        snapshot["calibration"] = {"status": "invalid_score"}
+        return
+    scope = {key: snapshot[key] for key in
+             ("surface", "horizon", "market", "model_version", "parameter_version")}
+    key = (*scope.values(), *scale, cutoff)
+    if key not in cache:
+        try:
+            from ml.recommendation_calibration import load_accepted_calibrator
+            cache[key] = load_accepted_calibrator(**scope, as_of=cutoff, score_range=scale)
+        except Exception:
+            logger.debug("Scoped calibration unavailable", exc_info=True)
+            cache[key] = None
+    artifact = cache[key]
+    snapshot["calibration"] = {"status": "unavailable"}
+    if artifact is None:
+        return
+    probability = calibrate_score(score, artifact["calibrator"])
+    if probability is None:
+        return
+    snapshot["calibrated_probability"] = probability
+    # Beta sample bounds are not uncertainty bounds for a held-out score calibrator.
+    snapshot["uncertainty_low"] = snapshot["uncertainty_high"] = None
+    snapshot["missing_fields"] = list(dict.fromkeys(
+        [name for name in snapshot["missing_fields"] if name != "calibrated_probability"]
+        + ["uncertainty_low", "uncertainty_high"]))
+    quality = [part for part in snapshot["data_quality"].split("|")
+               if part != "missing_fields:calibrated_probability"]
+    quality.extend(["missing_fields:uncertainty_low", "missing_fields:uncertainty_high"])
+    snapshot["data_quality"] = "|".join(dict.fromkeys(quality))
+    snapshot["calibration"] = {
+        "status": "accepted", "version": artifact["version"], "scope": artifact["scope"],
+        "score_range": list(scale), "source_digest": artifact["source_snapshot"]["digest"],
+        "validation_end_date": artifact["validation_end_date"],
+        "validation_metrics": artifact["validation_metrics"],
+    }
 
 
 def _timestamp(value):
@@ -88,14 +159,19 @@ def snapshot_candidates(surface, candidates, *, as_of=None, market=None,
     stamp = as_of or datetime.now(timezone.utc).isoformat(timespec="seconds")
     sources = source_metadata([r.get("ticker") or r.get("code") for r in candidates], stamp, index=index)
     snapshots = []
+    calibration_cache = {}
     for rank, row in enumerate(candidates, 1):
         ticker = row.get("ticker") or row.get("code")
         source = sources.get(str(ticker).upper(), {})
         features = row.get("features") or {}
+        try:
+            versions = _version_values(row)
+        except ValueError:
+            versions = {"model_version": None, "parameter_version": None}
         candidate = {
             **row, "ticker": ticker,
             "id": row.get("id") or f"{stamp}:{surface}:{ticker}",
-            "decision_ts": row.get("snapshot_ts") or stamp,
+            "decision_ts": row.get("decision_ts") or row.get("snapshot_ts") or stamp,
             "market": row.get("market") or market or ("KR" if str(ticker).endswith((".KS", ".KQ")) else "US"),
             "horizon": row.get("horizon") or "20d",
             "raw_score": row.get("raw_score", row.get("policy_score", row.get("total_score", row.get("score")))),
@@ -105,8 +181,11 @@ def snapshot_candidates(surface, candidates, *, as_of=None, market=None,
             "selection_status": row.get("selection_status") or ("selected" if ticker in selected_tickers else "shadow"),
             "evidence_refs": source.get("evidence_refs", []),
             "source_coverage": source.get("source_coverage"),
+            **versions,
         }
-        snapshots.append(build_snapshot(surface, candidate, source_features=source, as_of=stamp))
+        snapshot = build_snapshot(surface, candidate, source_features=source, as_of=stamp)
+        _apply_calibration(snapshot, row, stamp, calibration_cache)
+        snapshots.append(snapshot)
     gate = None
     active = allow_active and os.getenv("RECOMMENDER_V2_MODE", "shadow").strip().lower() == "active"
     if active:

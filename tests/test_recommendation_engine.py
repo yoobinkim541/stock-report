@@ -175,6 +175,31 @@ def test_score_calibration_is_monotonic_and_reports_held_out_metrics():
     assert calibrator["ece"] == pytest.approx(0.25)
 
 
+def test_calibration_rejects_worse_heldout_predictions_against_raw_baseline():
+    rows = [{"raw_score": 0.1, "positive_excess": 1, "split": "train"} for _ in range(100)]
+    rows += [{"raw_score": 0.1, "positive_excess": 0, "split": "holdout"} for _ in range(20)]
+    calibrator = _engine().fit_score_calibrator(rows)
+    assert calibrator["baseline_metrics"]["brier"] == pytest.approx(0.01)
+    assert calibrator["acceptance"]["accepted"] is False
+    assert "brier_deterioration" in calibrator["acceptance"]["reasons"]
+    assert "ece_deterioration" in calibrator["acceptance"]["reasons"]
+
+
+def test_calibration_accepts_improvement_only_with_sufficient_holdout_and_explicit_scale():
+    rows = [{"raw_score": 20, "positive_excess": 1, "split": "train"} for _ in range(100)]
+    rows += [{"raw_score": 20, "positive_excess": 1, "split": "holdout"} for _ in range(20)]
+    rejected = _engine().fit_score_calibrator(rows)
+    assert rejected["acceptance"]["accepted"] is False
+    assert "baseline_unavailable" in rejected["acceptance"]["reasons"]
+    accepted = _engine().fit_score_calibrator(rows, score_range=(0, 100))
+    assert accepted["acceptance"]["accepted"] is True
+    assert accepted["score_range"] == [0.0, 100.0]
+    assert accepted["validation_metrics"]["brier"] == 0
+    sparse = _engine().fit_score_calibrator(rows[:105], score_range=(0, 100))
+    assert sparse["acceptance"]["accepted"] is False
+    assert "heldout_sample_size" in sparse["acceptance"]["reasons"]
+
+
 def test_score_calibration_ece_groups_held_out_rows_by_calibrated_probability():
     engine = _engine()
     rows = []
@@ -359,3 +384,17 @@ def test_calibrate_score_rejects_non_finite_inputs():
 
     assert engine.calibrate_score(math.nan, {"bins": []}) is None
     assert engine.calibrate_score(0.5, None) is None
+
+
+def test_calibration_rejects_out_of_scale_training_scores():
+    rows = [{"raw_score": 2, "positive_excess": i % 2, "split": "train"} for i in range(80)]
+    rows += [{"raw_score": .5, "positive_excess": i % 2, "split": "holdout"} for i in range(20)]
+    result = _engine().fit_score_calibrator(rows)
+    assert result["acceptance"]["accepted"] is False
+    assert "training_score_out_of_range" in result["acceptance"]["reasons"]
+
+
+@pytest.mark.parametrize("scale", [None, "01", (0,), (1, 0), (0, math.inf)])
+def test_calibration_requires_explicit_valid_scale(scale):
+    with pytest.raises(ValueError, match="score_range"):
+        _engine().fit_score_calibrator([], score_range=scale)

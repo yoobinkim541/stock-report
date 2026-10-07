@@ -318,12 +318,19 @@ def fit_score_calibrator(
     target_key: str = "positive_excess",
     min_bin_size: int = 20,
     min_samples: int = 100,
+    score_range: tuple[float, float] = (0.0, 1.0),
+    min_holdout_samples: int = 20,
 ) -> dict | None:
     """Fit five monotonic score bins and evaluate only the subsequent held-out rows."""
     training, held_out = _partition_rows(rows, score_key, target_key)
     valid_count = len(training) + len(held_out)
-    if min_bin_size < 1 or min_samples < 1:
+    if min_bin_size < 1 or min_samples < 1 or min_holdout_samples < 1:
         raise ValueError("sample thresholds must be positive")
+    if (not isinstance(score_range, (tuple, list)) or len(score_range) != 2
+            or any(_finite_number(value) is None for value in score_range)
+            or score_range[0] >= score_range[1]):
+        raise ValueError("score_range must contain two increasing finite values")
+    score_low, score_high = map(float, score_range)
     if valid_count < min_samples or len(training) < min_bin_size:
         return None
 
@@ -359,6 +366,26 @@ def fit_score_calibrator(
         metrics = {"status": "available", "sample_size": len(predictions), "brier": brier, "ece": ece}
     else:
         metrics = {"status": "unavailable", "sample_size": 0, "brier": None, "ece": None}
+    from ml.recommendation_validation import validate_calibration
+
+    targets = [target for _, _, _, target in held_out]
+    calibrated_validation = validate_calibration(targets, [prediction for prediction, _ in predictions])
+    baseline_probabilities = [(score - score_low) / (score_high - score_low) for _, _, score, _ in held_out]
+    baseline_validation = validate_calibration(targets, baseline_probabilities)
+    reasons = []
+    if any(not score_low <= score <= score_high for _, _, score, _ in training):
+        reasons.append("training_score_out_of_range")
+    if len(held_out) < min_holdout_samples:
+        reasons.append("heldout_sample_size")
+    if not baseline_validation["valid"]:
+        reasons.append("baseline_unavailable")
+    if not calibrated_validation["valid"]:
+        reasons.append("calibrated_validation_unavailable")
+    if baseline_validation["valid"] and calibrated_validation["valid"]:
+        if calibrated_validation["brier"] > baseline_validation["brier"] + 1e-12:
+            reasons.append("brier_deterioration")
+        if calibrated_validation["ece"] >= baseline_validation["ece"] + 0.02 - 1e-12:
+            reasons.append("ece_deterioration")
     return {
         "version": "five-bin-monotonic-v1",
         "score_key": score_key,
@@ -370,6 +397,11 @@ def fit_score_calibrator(
         "metrics": metrics,
         "brier": metrics["brier"],
         "ece": metrics["ece"],
+        "score_range": [score_low, score_high],
+        "baseline_metrics": baseline_validation,
+        "validation_metrics": calibrated_validation,
+        "acceptance": {"accepted": not reasons, "reasons": reasons,
+                       "min_holdout_samples": min_holdout_samples},
     }
 
 

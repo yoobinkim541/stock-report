@@ -13,7 +13,7 @@ import threading
 import time
 from contextvars import ContextVar
 
-from . import context, evidence_context, evidence_usage, realtime_market, shared_memory, storage, wiki
+from . import context, evidence_context, evidence_usage, laya_bridge, realtime_market, shared_memory, storage, wiki
 
 _KST = timezone(timedelta(hours=9))
 
@@ -164,10 +164,29 @@ def _answer_impl(question: str, surface: str, async_postprocess: bool,
     _emit_progress_event("context_ready")
     _emit_progress_event("tools_started", tool="wiki_search")
     try:
-        wiki_pages = wiki.list_pages(query=question, surface=surface, limit=4)
+        wiki_pages = wiki.list_pages(query=question, surface=surface, limit=8)
     except Exception:
         wiki_pages = []
+    try:
+        retrieved_ids = {page.get("id") for page in wiki_pages if isinstance(page, dict)}
+        explicit_pages = []
+        for page_id in laya_bridge.referenced_page_ids(question):
+            if page_id in retrieved_ids:
+                continue
+            try:
+                page = wiki.get_page(page_id)
+            except Exception:
+                page = None
+            if isinstance(page, dict) and page.get("id") == page_id and page.get("status") != "archived":
+                explicit_pages.append(page)
+        wiki_pages = (explicit_pages + wiki_pages)[:8]
+        wiki_pages, laya_review = laya_bridge.review_wiki_candidates(
+            question, wiki_pages, history=history, limit=4)
+    except Exception:
+        wiki_pages = wiki_pages[:4]
+        laya_review = {"mode": "baseline", "reason": "bridge_failure"}
     pack["_wiki_context_pages"] = wiki_pages
+    pack["_laya_review"] = laya_review
     pack["_evidence_query_id"] = evidence_usage.query_id_for(question, surface)
     provided_evidence_ids = _provided_context_evidence_ids(pack, wiki_pages)
     for _wp in wiki_pages:
@@ -243,6 +262,7 @@ def _answer_impl(question: str, surface: str, async_postprocess: bool,
             "evidence_query_id": evidence_usage.query_id_for(question, surface),
             "provided_evidence_count": len(provided_evidence_ids),
             "citation_validation": answer_validation,
+            "laya_review": laya_review,
             "postprocess": postprocess,
             "progress_events": progress_events,
             "as_of": pack.get("generated_at"),

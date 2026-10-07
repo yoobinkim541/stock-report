@@ -161,3 +161,7 @@ PATH=/home/ubuntu/.hermes/node/bin:/home/ubuntu/.local/bin:/usr/local/bin:/usr/b
 10 0 * * 1-5 cd /home/ubuntu/projects/stock-report && uv run python tests/intraday_smoke_test.py >> /tmp/intraday_smoke_test.log 2>&1   # 00:10 UTC = 09:10 KST
 # 봇·서버 상태 점검 (프로세스·PID·파일 신선도·store DB 무결성)
 */30 * * * * cd /home/ubuntu/projects/stock-report && uv run python tests/bot_healthcheck.py >> /tmp/bot_healthcheck.log 2>&1         # 매 30분
+
+# Scoped recommendation calibration diagnostics (immutable ledgers; no orders).
+# UTC 00:21/07:21 = KST 09:21/16:21. Refuse partial source snapshots above 128 MiB.
+21 0,7 * * 1-5 cd /home/ubuntu/projects/stock-report && flock -n /tmp/recommendation_calibration_refresh.lock uv run python crons/recommendation_calibration_refresh.py --max-bytes 134217728 >> /tmp/recommendation_calibration_refresh.log 2>&1

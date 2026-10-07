@@ -7,6 +7,107 @@ from lib import rank_shadow
 from reports import investment_report as report
 
 
+def test_accepted_calibration_is_scoped_cached_and_preserves_order(monkeypatch):
+    from ml import recommendation_calibration as calibration
+    from ml import recommendation_surfaces as surfaces
+
+    calls = []
+    artifact = {"version": "calibration-v1", "source_snapshot": {"digest": "a" * 64},
+                "validation_end_date": "2026-09-26", "validation_metrics": {"brier": .2},
+                "scope": {"surface": "entry_signals"},
+                "calibrator": {"bins": [{"max_score": 1.0, "probability": .7}]}}
+
+    def load(**kwargs):
+        calls.append(kwargs)
+        return artifact
+
+    monkeypatch.setattr(calibration, "load_accepted_calibrator", load)
+    monkeypatch.setattr(surfaces, "source_metadata", lambda *a, **kw: {})
+    monkeypatch.setenv("RECOMMENDER_V2_MODE", "shadow")
+    rows = [{"ticker": "A", "score": .2, "model_version": "entry-v1",
+             "parameter_version": "default", "wins": 1, "sample_size": 10},
+            {"ticker": "B", "score": .9, "metadata": {"model_version": "entry-v1",
+                                                        "parameter_version": "default"}}]
+    result = surfaces.snapshot_candidates("entry_signals", rows, as_of="2026-09-27T12:00:00Z")
+    assert len(calls) == 1
+    assert calls[0]["market"] == "US"
+    assert calls[0]["horizon"] == "20d"
+    assert calls[0]["model_version"] == "entry-v1"
+    assert [row["ticker"] for row in result] == ["A", "B"]
+    assert [row["raw_score"] for row in result] == [.2, .9]
+    assert all(row["calibrated_probability"] == .7 for row in result)
+    assert result[0]["calibration"]["source_digest"] == "a" * 64
+    assert result[0]["uncertainty_low"] is None
+    assert "calibrated_probability" not in result[1]["missing_fields"]
+
+
+def test_calibration_failure_or_unknown_scale_retains_baseline(monkeypatch):
+    from ml import recommendation_calibration as calibration
+    from ml import recommendation_surfaces as surfaces
+
+    calls = []
+
+    def load(**kwargs):
+        calls.append(kwargs)
+        raise OSError("artifact unavailable")
+
+    monkeypatch.setattr(calibration, "load_accepted_calibrator", load)
+    monkeypatch.setattr(surfaces, "source_metadata", lambda *a, **kw: {})
+    row = {"ticker": "A", "score": .8, "model_version": "entry-v1"}
+    result = surfaces.snapshot_candidates("entry_signals", [row])[0]
+    assert result["raw_score"] == .8
+    assert result["calibrated_probability"] is None
+    assert result["calibration"]["status"] == "unavailable"
+    assert len(calls) == 1
+    calls.clear()
+    report_row = surfaces.snapshot_candidates("investment_report", [row])[0]
+    assert calls == []
+    assert report_row["calibration"]["status"] == "unknown_scale"
+
+
+def test_calibration_does_not_activate_unscoped_ranker(monkeypatch):
+    from ml import recommendation_calibration as calibration
+    from ml import recommendation_surfaces as surfaces
+    from ml import ranker
+
+    monkeypatch.setattr(calibration, "load_accepted_calibrator", lambda **kw: None)
+    monkeypatch.setattr(surfaces, "source_metadata", lambda *a, **kw: {})
+    monkeypatch.setattr(ranker, "load_ranker", lambda: SimpleNamespace(meta={"gate": {"passed": True}}))
+    monkeypatch.setenv("RECOMMENDER_V2_MODE", "active")
+    result = surfaces.snapshot_candidates("entry_signals", [{"ticker": "A", "score": .1},
+                                                              {"ticker": "B", "score": .9}], allow_active=True)
+    assert [r["ticker"] for r in result] == ["A", "B"]
+    assert all(r["ranking_mode"] == "shadow" for r in result)
+
+
+def test_calibration_lookup_is_at_decision_time_not_later_batch_time(monkeypatch):
+    from ml import recommendation_calibration as calibration
+    from ml import recommendation_surfaces as surfaces
+
+    calls = []
+    monkeypatch.setattr(calibration, "load_accepted_calibrator", lambda **kw: calls.append(kw))
+    monkeypatch.setattr(surfaces, "source_metadata", lambda *a, **kw: {})
+    rows = [{"ticker": "A", "score": .5, "snapshot_ts": "2026-08-01T12:00:00Z"},
+            {"ticker": "B", "score": .5, "decision_ts": "2026-08-02T12:00:00Z"}]
+    surfaces.snapshot_candidates("entry_signals", rows, as_of="2026-09-27T12:00:00Z")
+    assert [kw["as_of"] for kw in calls] == ["2026-08-01T12:00:00+00:00", "2026-08-02T12:00:00+00:00"]
+
+
+@pytest.mark.parametrize("row", [
+    {"model_version": ["bad"]},
+    {"model_version": "a", "metadata": {"model_version": "b"}},
+    {"parameter_version": {}, "model_version": "entry-v1"},
+])
+def test_calibration_rejects_invalid_or_conflicting_version_metadata(monkeypatch, row):
+    from ml import recommendation_calibration as calibration
+    from ml import recommendation_surfaces as surfaces
+
+    monkeypatch.setattr(calibration, "load_accepted_calibrator", lambda **kw: pytest.fail("invalid lookup"))
+    monkeypatch.setattr(surfaces, "source_metadata", lambda *a, **kw: {})
+    result = surfaces.snapshot_candidates("entry_signals", [{"ticker": "A", "score": .5, **row}])[0]
+    assert result["calibration"]["status"] == "invalid_metadata"
+
+
 class Ledger:
     def __init__(self):
         self.rows = []
