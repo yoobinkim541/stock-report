@@ -14,11 +14,11 @@ from __future__ import annotations
 import json
 import os
 import re
-import subprocess
 import time
 from pathlib import Path
 
 from lib import file_cache
+from lib import llm_direct
 
 CACHE_DIR = Path(os.path.expanduser("~/reports/ml-cache/llm_analysis"))
 CACHE_TTL_H = 24.0
@@ -381,7 +381,7 @@ def _cache_path(ticker: str) -> Path:
 
 
 def analyze(ticker: str, name: str, facts: dict,
-            runner=subprocess.run, force: bool = False) -> tuple[dict | None, str]:
+            runner=llm_direct.run, force: bool = False) -> tuple[dict | None, str]:
     """종목 분석 해설 — (dict|None, 상태). 24h 디스크 캐시·graceful.
 
     상태: "ok" | "cached" | "fallback" | "disabled" | "call failed: …" | "empty".
@@ -530,7 +530,7 @@ def parse_portfolio_brief(text: str) -> dict | None:
     return out
 
 
-def portfolio_brief(facts: dict, runner=subprocess.run,
+def portfolio_brief(facts: dict, runner=llm_direct.run,
                     force: bool = False) -> tuple[dict | None, str]:
     """🌅 포트폴리오 브리핑 — (dict|None, 상태). 20h 디스크 캐시·graceful.
 
