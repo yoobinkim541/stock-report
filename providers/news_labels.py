@@ -322,7 +322,8 @@ def label_events(events: list[dict], runner=None, *, chunk_size: int | None = No
     """
     if not events:
         return []
-    run = runner or subprocess.run
+    from lib import llm_direct
+    run = runner or llm_direct.run   # openrouter면 API 직접 호출, 아니면 subprocess.run
     size = max(1, int(chunk_size or NEWS_LLM_CHUNK_SIZE))
     chunks = [events[i:i + size] for i in range(0, len(events), size)]
     chunks = chunks[:NEWS_LLM_MAX_CHUNKS]

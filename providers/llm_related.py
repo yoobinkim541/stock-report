@@ -14,10 +14,10 @@ from __future__ import annotations
 import json
 import os
 import re
-import subprocess
 from pathlib import Path
 
 from lib import file_cache
+from lib import llm_direct
 
 CACHE_DIR = Path(os.path.expanduser("~/reports/ml-cache/llm_related"))
 CACHE_TTL_H = 24.0
@@ -296,7 +296,7 @@ def _cache_path(ticker: str) -> Path:
 
 
 def related_tickers(ticker: str, name: str = "", context: str = "",
-                    runner=subprocess.run, force: bool = False) -> tuple[list[dict] | None, str]:
+                    runner=llm_direct.run, force: bool = False) -> tuple[list[dict] | None, str]:
     """연관 종목 추천 — (목록|None, 상태). 24h 디스크 캐시·graceful.
 
     상태: "ok" | "cached" | "fallback" | "disabled" | "call failed: …" | "empty".
