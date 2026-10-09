@@ -67,7 +67,8 @@ def chat_once(prompt: str, *, model: str = "gpt-5-mini", provider: str = "openai
 
     새 코드용 공용 진입점 (기존 4개 호출부는 자체 hermes cmd 유지 — 회귀 방지).
     """
-    run = runner or subprocess.run
+    from lib import llm_direct
+    run = runner or llm_direct.run   # openrouter면 API 직접 호출
     try:
         result = run(["hermes", "chat", "-q", prompt, "--provider", provider,
                       "--model", model, "-Q"],

@@ -251,8 +251,8 @@ def _parse_llm_verdict(text: str) -> tuple[int, str] | None:
 
 def _llm_score(event: dict, runner=None) -> tuple[int, str] | None:
     """LLM 2차 판정 — 성공 시 (점수, 이유), 실패 시 None. hermes 실패 시 백업(agy) 시도."""
-    import subprocess
-    run = runner or subprocess.run
+    from lib import llm_direct
+    run = runner or llm_direct.run   # openrouter면 API 직접 호출, 아니면 subprocess.run
     prompt = _llm_prompt(event)
     cmd = ["hermes", "chat", "-q", prompt,
            "--provider", NEWS_LLM_PROVIDER, "--model", NEWS_LLM_MODEL, "-Q"]
