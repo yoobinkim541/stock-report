@@ -1742,6 +1742,17 @@ def expected_sources() -> list[str]:
             + ["yahoo_finance", "fred", "worldgovernmentbonds", "polymarket", "kalshi", "economic_calendar"])
 
 
+def source_collection_mode(source: str, record: dict | None = None) -> str:
+    """Separate passive ingress from a sender with an expected delivery cadence."""
+    if source != "hermes_webhook":
+        return "scheduled"
+    mode = os.getenv("HERMES_SOURCE_COLLECTION_MODE")
+    if mode is None:
+        mode = (record or {}).get("collection_mode", "on_demand")
+    # Unknown configuration must not disable missing-delivery monitoring.
+    return "on_demand" if mode == "on_demand" else "scheduled"
+
+
 def update_source_health(events: list[dict], cache_dir: Path | str = DEFAULT_CACHE_DIR,
                          now: datetime | None = None,
                          attempted_sources: Iterable[str] | None = None,
@@ -1770,6 +1781,7 @@ def update_source_health(events: list[dict], cache_dir: Path | str = DEFAULT_CAC
                 health = {}
         for src in attempted:
             rec = health.get(src) or {}
+            rec["collection_mode"] = source_collection_mode(src, rec)
             n = int(counts.get(src, 0))
             stats = dict(stats_by_source.get(src) or stats_by_source.get(src.split(":", 1)[0]) or {})
             run_at = now.isoformat(timespec="seconds")
@@ -1900,6 +1912,8 @@ def stale_sources(health: dict | None = None, now: datetime | None = None,
 
     out = []
     for src, rec in sorted(health.items()):
+        if source_collection_mode(src, rec) == "on_demand":
+            continue
         if rec.get("availability") in {"blocked", "disabled"}:
             continue
         limit = th.get(src) or th.get(f"{src.split(':')[0]}:*") or th.get(src.split(":")[0]) or 24

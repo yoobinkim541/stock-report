@@ -157,6 +157,7 @@ def _build_source_rows(
         cardinality_drop_streak = int(record.get("cardinality_drop_streak") or 0)
         rows.append({
             "source": source,
+            "collection_mode": source_collector.source_collection_mode(source, record),
             "observed": source in source_health,
             "family": profile["family"],
             "kind": profile["kind"],
@@ -215,6 +216,7 @@ def _summarize_source_health(
     healthy = [
         row for row in rows
         if row["observed"] and not row["is_stale"] and row["has_success"] and row["last_count"] > 0
+        and row["collection_mode"] == "scheduled"
         and row["availability"] == "available" and not row["zero_persist_alert"]
         and not row["cardinality_drop_alert"] and row["collision_count"] == 0
     ]
@@ -224,6 +226,7 @@ def _summarize_source_health(
             "tracked_sources": len(source_health),
             "expected_sources": len(source_collector.expected_sources()),
             "healthy_sources": len(healthy),
+            "on_demand_sources": sum(row["collection_mode"] == "on_demand" for row in rows),
             "stale_sources": len(stale_sources),
             "missing_success_sources": len(missing_success),
             "zero_event_sources": len(zero_event),
