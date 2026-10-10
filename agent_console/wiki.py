@@ -889,6 +889,55 @@ def get_page(page_id: str) -> dict | None:
     return None
 
 
+def semantic_snapshot(page_id: str, *, records: list[dict] | None = None) -> dict:
+    """Project complete knowledge and split children without usage-derived fields."""
+    rows = shared_memory.inspect_records() if records is None else records
+    matches = [row for row in rows if row.get("id") == page_id]
+    if len(matches) != 1:
+        raise ValueError("target_unavailable")
+    parent = matches[0]
+    page = _record_to_page(parent)
+    if WIKI_TAG not in (parent.get("tags") or []) or page["status"] == "archived":
+        raise ValueError("target_unavailable")
+    explicit = [str(tag).split(":", 1)[1] for tag in parent.get("tags") or []
+                if str(tag).startswith("split_into:")]
+    children = [row for row in rows if row.get("id") != page_id
+                and (row.get("parent_page_id") == page_id
+                     or f"split_from:{page_id}" in (row.get("tags") or [])
+                     or row.get("id") in explicit)
+                and _record_to_page(row)["status"] != "archived"]
+    if len({row["id"] for row in children}) != len(children):
+        raise ValueError("target_duplicate_child")
+
+    def order(row):
+        ordinal = re.search(r"\[(\d+)\]", str(row.get("title") or ""))
+        return (int(ordinal.group(1)) if ordinal else 10**9,
+                explicit.index(row["id"]) if row["id"] in explicit else len(explicit), row["id"])
+
+    children.sort(key=order)
+    semantic_fields = ("id", "title", "summary", "body", "tags", "artifacts", "links",
+                       "parent_page_id", "decisions", "openQuestions", "messages", "evidence_ids",
+                       "conflicting_evidence_ids", "source_knowledge", "confidence", "source",
+                       "report_citation", "staleness_policy", "answer_hints", "merge_history", "merged_into")
+    projections = [{key: deepcopy(row.get(key)) for key in semantic_fields} for row in [parent, *children]]
+    revision_hash = hashlib.sha256(json.dumps(projections, ensure_ascii=False, sort_keys=True,
+        separators=(",", ":"), allow_nan=False).encode()).hexdigest()
+    page["body"] = str(parent.get("body") or "")
+    child_pages = []
+    for row in children:
+        child = _record_to_page(row)
+        child["body"] = str(row.get("body") or "")
+        child_pages.append(child)
+    knowledge = [row.get("source_knowledge") or {} for row in [parent, *children]]
+    return {"page_id": page_id, "revision_hash": revision_hash, "page": page, "children": child_pages,
+            "body": "".join(child["body"] for child in child_pages) if child_pages else page["body"],
+            "claims": [deepcopy(claim) for item in knowledge for claim in item.get("claims", [])],
+            "source_refs": list(dict.fromkeys(ref for row in [parent, *children] for ref in row.get("artifacts") or [])),
+            "evidence_ids": list(dict.fromkeys(ref for row in [parent, *children] for ref in row.get("evidence_ids") or [])),
+            "conflicting_evidence_ids": list(dict.fromkeys(ref for row in [parent, *children]
+                                                          for ref in row.get("conflicting_evidence_ids") or []))}
+
+
 _REPORT_WIKI_KINDS = ("risk", "playbook")
 
 
