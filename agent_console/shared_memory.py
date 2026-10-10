@@ -8,7 +8,7 @@ import threading
 import time
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Iterable
+from typing import Callable, Iterable
 
 import safe_io
 
@@ -16,6 +16,7 @@ import safe_io
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 SCHEMA_VERSION = "finance-agent-gui.shared-memory.v1"
 DEFAULT_PROVIDER = "codex-cli"
+ARTIFACT_REF_MAX_CHARS = 4096
 _SUMMARY_REFRESH_LOCK = threading.Lock()
 _SUMMARY_REFRESH_TIMER: threading.Timer | None = None
 _SUMMARY_REFRESH_RUNNING = False
@@ -110,15 +111,46 @@ def _clean_text(value, limit: int = 1800) -> str:
     return text[: max(0, limit - 1)].rstrip() + "…"
 
 
-def _redact_sensitive(text: str) -> str:
+def normalize_artifact_refs(values: Iterable[object] | object, *, limit: int = 20) -> list[str]:
+    """Keep bounded source identifiers intact rather than truncating pointers."""
+    if isinstance(values, (str, bytes)):
+        values = [values]
+    elif not isinstance(values, (list, tuple, set)):
+        return []
+    refs = []
+    seen = set()
+    for value in values:
+        text = str(value or "").replace("\x00", " ").strip()
+        source_path = False
+        try:
+            from reports.raw_archive import reports_root
+
+            path = Path(text).expanduser()
+            if path.is_absolute():
+                relative = path.resolve().relative_to(reports_root().resolve())
+                source_path = bool(relative.parts and relative.parts[0] in {"raw", "text"})
+        except (OSError, RuntimeError, ValueError):
+            pass
+        text = _redact_sensitive(text, redact_local_paths=not source_path)
+        if not text or len(text) > ARTIFACT_REF_MAX_CHARS or text in seen:
+            continue
+        seen.add(text)
+        refs.append(text)
+        if len(refs) >= limit:
+            break
+    return refs
+
+
+def _redact_sensitive(text: str, *, redact_local_paths: bool = True) -> str:
     text = re.sub(
         r"(?i)\b(api[_-]?key|token|password|passwd|secret|authorization)\s*[:=]\s*\S+",
         r"\1=<redacted>",
         text,
     )
     text = re.sub(r"(?i)\bBearer\s+[A-Za-z0-9._~+/=-]+", "Bearer <redacted>", text)
-    text = re.sub(r"/home/[A-Za-z0-9._/@+-][^\s,)]*", "<local-path>", text)
-    text = re.sub(r"/Users/[A-Za-z0-9._/@+-][^\s,)]*", "<local-path>", text)
+    if redact_local_paths:
+        text = re.sub(r"/home/[A-Za-z0-9._/@+-][^\s,)]*", "<local-path>", text)
+        text = re.sub(r"/Users/[A-Za-z0-9._/@+-][^\s,)]*", "<local-path>", text)
     return text
 
 
@@ -162,7 +194,7 @@ def normalize_record(payload: dict) -> dict:
     record["decisions"] = [_clean_text(x, 300) for x in payload.get("decisions") or []][:12]
     record["openQuestions"] = [_clean_text(x, 300) for x in payload.get("openQuestions") or []][:12]
     record["tags"] = [_clean_text(x, 60).lower() for x in payload.get("tags") or []][:20]
-    record["artifacts"] = [_clean_text(x, 180) for x in payload.get("artifacts") or []][:20]
+    record["artifacts"] = normalize_artifact_refs(payload.get("artifacts") or [])
     record["messages"] = [
         {
             "role": _clean_text(msg.get("role"), 32),
@@ -384,6 +416,57 @@ def batch_upsert_delete(*, upserts: list[dict], deletes: list[str]) -> dict:
         _write_index_locked()
     _schedule_context_memory_summary()
     return {"ok": True, "upserted": len(upserts or []), "deleted": len(deletes or [])}
+
+
+def _read_jsonl_checked(path: Path) -> list[dict]:
+    """A writer must never replace a partially readable store with its good rows."""
+    if not path.exists():
+        return []
+    def unique_object(pairs):
+        result = {}
+        for key, value in pairs:
+            if key in result:
+                raise ValueError("duplicate JSON key")
+            result[key] = value
+        return result
+    def reject_constant(value):
+        raise ValueError("non-finite JSON constant")
+    try:
+        rows = [json.loads(line, object_pairs_hook=unique_object, parse_constant=reject_constant)
+                for line in path.read_text(encoding="utf-8").splitlines() if line.strip()]
+    except (ValueError, UnicodeError) as exc:
+        raise ValueError("store_corrupt") from exc
+    if any(not isinstance(row, dict) or not row.get("id") for row in rows):
+        raise ValueError("store_corrupt")
+    if len({row["id"] for row in rows}) != len(rows):
+        raise ValueError("store_corrupt")
+    return rows
+
+
+def guarded_batch_upsert(*, upserts: list[dict], expected: dict[str, str | None],
+                         fingerprint: Callable, preserve_fields: tuple[str, ...] = ()) -> dict:
+    ids = [row.get("id") for row in upserts]
+    if not ids or len(set(ids)) != len(ids) or any(page_id not in expected for page_id in ids):
+        raise ValueError("batch_identity_invalid")
+    normalized = [normalize_record(row) for row in upserts]
+    with _events_lock():
+        rows = _read_jsonl_checked(_paths()["events"])
+        stale = [page_id for page_id, revision in expected.items() if fingerprint(page_id, rows) != revision]
+        if stale:
+            return {"status": "stale-base", "changed_ids": [], "stale_ids": stale, "index_pending": False}
+        existing = {row["id"]: row for row in rows}
+        for row in normalized:
+            for field in preserve_fields:
+                if field in existing.get(row["id"], {}):
+                    row[field] = existing[row["id"]][field]
+        kept = [row for row in rows if row["id"] not in ids]
+        _write_jsonl_locked([*kept, *normalized])
+        index_pending = False
+        try:
+            _write_index_locked()
+        except OSError:
+            index_pending = True
+    return {"status": "applied", "changed_ids": ids, "stale_ids": [], "index_pending": index_pending}
 
 
 def _write_index_locked() -> None:

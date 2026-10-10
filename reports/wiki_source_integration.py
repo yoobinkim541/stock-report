@@ -155,6 +155,19 @@ def propose_integration(compiled: CompiledSource, source: SourceRevision, target
                          "canonical_url": source["canonical_url"], "role": source["role"]},
                          "targets": targets, "new_page_specs": new_page_specs}, ensure_ascii=False))
     payload = _json_response(prompt, llm_fn)
+    return validate_integration(payload, compiled, source, targets, new_page_specs=new_page_specs)
+
+
+def validate_integration(payload: dict, compiled: CompiledSource, source: SourceRevision,
+                         targets: list[dict], *, new_page_specs: list[dict]) -> dict:
+    if compiled["revision_id"] != source["revision_id"] or source["role"] not in {"support", "conflict"}:
+        raise ValueError("proposal_source_invalid")
+    surfaces = {snap["page"]["surface"] for snap in targets} | {spec["surface"] for spec in new_page_specs}
+    if len(surfaces) > 1 or any(snap["page"]["status"] == "archived" or snap["page"]["kind"] not in ELIGIBLE_KINDS
+                                for snap in targets):
+        raise ValueError("proposal_target_scope_invalid")
+    allowed_targets = {snap["page_id"]: snap for snap in targets}
+    specs_by_id = {spec["page_id"]: spec for spec in new_page_specs}
     if set(payload) != {"targets"} or not isinstance(payload["targets"], list):
         raise ValueError("proposal_fields_invalid")
     compiled_claims = {claim["claim_id"]: claim for claim in compiled["claims"]}

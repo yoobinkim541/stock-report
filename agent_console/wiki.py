@@ -16,6 +16,7 @@ from pathlib import Path
 from typing import Any, Iterable
 
 from . import evidence_usage, qmd_search, shared_memory, storage
+import safe_io
 
 
 WIKI_TAG = "wiki"
@@ -35,6 +36,7 @@ _CACHE: dict[str, tuple[float, Any]] = {}
 _CACHE_TTL = 30.0
 MERGE_HISTORY_LIMIT = 50
 MAX_MERGE_SOURCES = 8
+MAX_WIKI_REVISION_BYTES = 1_000_000
 
 
 def _cache_storage_signature() -> str:
@@ -251,6 +253,10 @@ def _raw_text(value: object) -> str:
     return re.sub(r"\r\n?", "\n", str(value or "").replace("\x00", " ")).strip()
 
 
+def _clean_body_exact(value: object) -> str:
+    return re.sub(r"[\x00-\x08\x0B\x0C\x0E-\x1F\x7F]", " ", str(value or "").replace("\r\n", "\n").replace("\r", "\n"))
+
+
 def _extract_report_citation(body: object) -> str:
     """본문 끝의 고정 인용 한 줄을 읽는다.
 
@@ -279,38 +285,19 @@ def _with_report_citation(body: object, citation: object = "", *, fallback: obje
     return f"{text}\n\n{suffix}".strip(), chosen
 
 
-def _split_blocks(text: str) -> list[str]:
-    body = _raw_text(text)
+def _split_blocks(text: str, *, limit: int = WIKI_SPLIT_TARGET) -> list[str]:
+    body = str(text or "").replace("\r\n", "\n").replace("\r", "\n").replace("\x00", " ")
     if not body:
         return []
-    paragraphs = [block.strip() for block in re.split(r"\n{2,}", body) if block.strip()]
-    if not paragraphs:
-        return [body]
-    chunks: list[str] = []
-    current = ""
-    for block in paragraphs:
-        if len(block) > WIKI_SPLIT_TARGET:
-            if current:
-                chunks.append(current.strip())
-                current = ""
-            chunks.extend(_hard_split_text(block, WIKI_SPLIT_TARGET))
-            continue
-        candidate = block if not current else f"{current}\n\n{block}"
-        if len(candidate) <= WIKI_SPLIT_TARGET:
-            current = candidate
-            continue
-        if current:
-            chunks.append(current.strip())
-        current = block
-    if current:
-        chunks.append(current.strip())
-    return [chunk for chunk in chunks if chunk]
+    limit = max(1, int(limit))
+    return _hard_split_text(body, limit)
 
 
 def _hard_split_text(text: str, limit: int) -> list[str]:
-    text = _raw_text(text)
+    text = str(text or "")
     if not text:
         return []
+    limit = max(1, int(limit))
     if len(text) <= limit:
         return [text]
     pieces: list[str] = []
@@ -320,19 +307,18 @@ def _hard_split_text(text: str, limit: int) -> list[str]:
         end = min(length, start + limit)
         if end < length:
             pivot = text.rfind("\n\n", start, end)
+            separator = 2
             if pivot <= start:
                 pivot = text.rfind("\n", start, end)
+                separator = 1
             if pivot <= start:
                 pivot = text.rfind(" ", start, end)
-            if pivot > start + max(1200, limit // 2):
-                end = pivot
-        chunk = text[start:end].strip()
-        if chunk:
-            pieces.append(chunk)
+                separator = 1
+            if pivot > start + limit // 2:
+                end = pivot + separator
+        pieces.append(text[start:end])
         start = end
-        while start < length and text[start] in "\n \t":
-            start += 1
-    return pieces or [text]
+    return pieces
 
 
 def _chunk_title(parent_title: str, chunk: str, *, index: int, total: int, seen: set[str]) -> str:
@@ -348,13 +334,13 @@ def _chunk_title(parent_title: str, chunk: str, *, index: int, total: int, seen:
         candidate = re.sub(r"^\d+[\).\s]+", "", candidate).strip()
         heading = candidate
     parent = _clean(parent_title, 120)
+    suffix = f" [{index:04d}]"
     if heading:
-        title = f"{parent} - {_clean(heading, 80)}"
+        prefix = f"{parent} - {_clean(heading, 80)}"
     else:
-        title = f"{parent} ({index}/{total})"
-    title = _clean(title, 160)
-    if title in seen:
-        title = _clean(f"{title} {index}", 160)
+        prefix = parent
+    # Shared memory stores titles at 120 characters, including the ordering key.
+    title = _clean(prefix, 120 - len(suffix)) + suffix
     seen.add(title)
     return title
 
@@ -388,11 +374,33 @@ def _save_wiki_page(page: dict, *, allow_split: bool = True) -> dict:
     return _record_to_page(saved)
 
 
-def _save_split_wiki_page(page: dict) -> dict | None:
-    page = dict(page or {})
-    raw_body = _raw_text(page.get("body") or "")
-    if len(raw_body) <= WIKI_BODY_LIMIT:
+def _save_split_wiki_page(page: dict, *, body_limit: int = WIKI_BODY_LIMIT) -> dict | None:
+    records = shared_memory.inspect_records()
+    prepared = _prepare_split_records(page, records=records, body_limit=body_limit)
+    if not prepared:
         return None
+    parent_id = page.get("id") or _page_id(page.get("title") or "", page.get("surface") or WIKI_SURFACE,
+                                         page.get("kind") or "note")
+    for record in records:
+        if record["id"] in {row["id"] for row in prepared}:
+            _snapshot_page_revision(record)
+    shared_memory.batch_upsert_delete(upserts=prepared, deletes=[])
+    _CACHE.clear()
+    _append_wiki_log("split", page_id=parent_id,
+                     child_ids=[row["id"] for row in prepared if row.get("parent_page_id") == parent_id])
+    _debounced_rebuild()
+    return _record_to_page(next(row for row in prepared if row["id"] == parent_id))
+
+
+def _prepare_split_records(page: dict, *, records: list[dict], body_limit: int = WIKI_BODY_LIMIT) -> list[dict]:
+    existing_by_id = {row["id"]: _record_to_page(row) for row in records}
+    page = dict(page or {})
+    stored_page = page.get("raw") if isinstance(page.get("raw"), dict) else None
+    body_source = stored_page.get("body") if stored_page else page.get("body")
+    raw_body = _clean_body_exact(body_source or "")
+    body_limit = max(1, min(int(body_limit), WIKI_BODY_LIMIT))
+    if len(raw_body) <= body_limit:
+        return []
 
     title = _clean(page.get("title") or "위키 페이지", 160)
     surface = _clean(page.get("surface") or WIKI_SURFACE, 60).lower() or WIKI_SURFACE
@@ -400,15 +408,26 @@ def _save_split_wiki_page(page: dict) -> dict | None:
     if kind not in VALID_KINDS:
         kind = "note"
     parent_id = _clean(page.get("id") or _page_id(title, surface, kind), 80)
-    chunks = _split_blocks(raw_body)
+    chunks = _split_blocks(raw_body, limit=min(body_limit, WIKI_SPLIT_TARGET))
     if len(chunks) <= 1:
-        return None
+        return []
 
     status = _clean(page.get("status") or "draft", 40).lower() or "draft"
     if status not in VALID_STATUSES:
         status = "draft"
-    source_refs = _dedupe_texts(page.get("source_refs") or [], limit=12, item_limit=120)
-    tags = _dedupe_texts(page.get("tags") or [], limit=20, item_limit=60)
+    source_refs = shared_memory.normalize_artifact_refs(page.get("source_refs") or [])
+    original_record = stored_page
+    if not original_record or original_record.get("id") != parent_id:
+        original_record = next((row for row in records if row.get("id") == parent_id), None)
+    if stored_page and original_record and isinstance(original_record.get("artifacts"), list):
+        source_refs = deepcopy(original_record["artifacts"])
+    elif "source_refs" not in page and original_record and isinstance(original_record.get("artifacts"), list):
+        source_refs = deepcopy(original_record["artifacts"])
+    tags = _dedupe_texts(
+        [tag for tag in (page.get("tags") or []) if not str(tag).startswith(("split_into:", "split_from:", "split_superseded"))],
+        limit=20,
+        item_limit=60,
+    )
     links = _clean_links(page.get("links") or [], self_id=parent_id)
     confidence = _safe_confidence(page.get("confidence"))
     evidence_ids = _dedupe_texts(page.get("evidence_ids") or [], limit=100, item_limit=120)
@@ -416,6 +435,7 @@ def _save_split_wiki_page(page: dict) -> dict | None:
     staleness_policy = _clean(page.get("staleness_policy") or "", 120)
     answer_hints = _dedupe_texts(page.get("answer_hints") or [], limit=12, item_limit=280)
     merge_history = _normalize_merge_history(page.get("merge_history"))
+    distillation_state = _normalize_distillation_state(page.get("distillation_state"))
     original_summary = _clean(page.get("summary") or "", WIKI_SUMMARY_LIMIT)
     report_citation = _clean(
         page.get("report_citation") or _extract_report_citation(raw_body),
@@ -433,9 +453,9 @@ def _save_split_wiki_page(page: dict) -> dict | None:
             "surface": surface,
             "kind": kind,
             "status": status,
-            "tags": _dedupe_texts([*tags, f"split_from:{parent_id}"], limit=20, item_limit=60),
+            "tags": _dedupe_texts([f"split_from:{parent_id}", *tags], limit=20, item_limit=60),
             "source_refs": source_refs,
-            "links": links + [parent_id],
+            "links": [parent_id, *links],
             "confidence": confidence,
             "evidence_ids": evidence_ids,
             "conflicting_evidence_ids": conflicting_evidence_ids,
@@ -444,14 +464,16 @@ def _save_split_wiki_page(page: dict) -> dict | None:
             "merge_history": merge_history,
             "report_citation": report_citation,
             "parent_page_id": parent_id,
+            "_preserve_body_exact": True,
         })
 
-    child_records = [_build_wiki_record(payload, existing=get_page(payload.get("id") or "") or {}) for payload in child_payloads]
+    child_records = [_build_wiki_record(payload, existing=existing_by_id.get(payload.get("id") or "") or {}) for payload in child_payloads]
     child_ids = [record["id"] for record in child_records]
 
     for record, payload in zip(child_records, child_payloads):
         payload["links"] = _clean_links([*(payload.get("links") or []), *[cid for cid in child_ids if cid != record["id"]]], self_id=record["id"])
-        record.update(_build_wiki_record(payload, existing=get_page(record["id"]) or {}))
+        record.update(_build_wiki_record(payload, existing=existing_by_id.get(record["id"]) or {}))
+        record["artifacts"] = deepcopy(source_refs)
 
     parent_body = _split_body_overview(title, child_records, original_summary=original_summary)
     parent_summary = original_summary or _clean(chunks[0], 900)
@@ -474,15 +496,92 @@ def _save_split_wiki_page(page: dict) -> dict | None:
         "staleness_policy": staleness_policy,
         "answer_hints": answer_hints,
         "merge_history": merge_history,
+        "distillation_state": distillation_state,
         "report_citation": report_citation,
         "parent_page_id": _clean(page.get("parent_page_id") or "", 80),
+        "messages": page.get("messages") or [],
+        "decisions": page.get("decisions") or [],
+        "openQuestions": page.get("openQuestions") or [],
+        "feedback": page.get("feedback") or {},
+        "useCount": page.get("useCount", 0),
+        "lastUsedAt": page.get("lastUsedAt") or "",
+        "lastQuery": page.get("lastQuery") or "",
+        "created_at": page.get("created_at") or "",
+        "wiki_schema_version": page.get("wiki_schema_version"),
     }
-    parent_record = _build_wiki_record(parent_payload, existing=get_page(parent_id) or {})
+    parent_record = _build_wiki_record(parent_payload, existing=existing_by_id.get(parent_id) or {})
+    if "source_knowledge" in page:
+        parent_record["source_knowledge"] = deepcopy(page["source_knowledge"])
+    if original_record:
+        payload_keys = {
+            "messages": "messages", "decisions": "decisions", "openQuestions": "openQuestions",
+            "feedback": "feedback", "useCount": "useCount", "lastUsedAt": "lastUsedAt",
+            "lastQuery": "lastQuery", "createdAt": "created_at", "confidence": "confidence",
+            "source": "source", "evidence_ids": "evidence_ids",
+            "conflicting_evidence_ids": "conflicting_evidence_ids",
+            "staleness_policy": "staleness_policy", "answer_hints": "answer_hints",
+            "merge_history": "merge_history", "distillation_state": "distillation_state",
+            "report_citation": "report_citation", "wiki_schema_version": "wiki_schema_version",
+        }
+        for field, value in original_record.items():
+            payload_key = payload_keys.get(field, field)
+            if (field not in {"title", "summary", "body", "tags", "links", "artifacts", "updatedAt", "kind"}
+                    and payload_key not in page):
+                parent_record[field] = deepcopy(value)
+    parent_record["artifacts"] = deepcopy(source_refs)
 
-    shared_memory.batch_upsert_delete(upserts=[*child_records, parent_record], deletes=[])
-    _CACHE.clear()
-    _debounced_rebuild()
-    return _record_to_page(parent_record)
+    new_child_ids = set(child_ids)
+    stale_children = [
+        child for child in existing_by_id.values()
+        if (child.get("parent_page_id") == parent_id or f"split_from:{parent_id}" in (child.get("tags") or []))
+        and child.get("id") not in new_child_ids
+        and child.get("status") != "archived" and not child.get("raw", {}).get("provenance_only")
+    ]
+    for child in stale_children:
+        archived_payload = dict(child)
+        archived_payload["status"] = "archived"
+        archived_payload["links"] = _clean_links([*(child.get("links") or []), parent_id], self_id=child.get("id"))
+        child_record = _build_wiki_record(archived_payload, existing=child)
+        child_record["tags"] = _dedupe_texts([*child_record.get("tags", []), "split_superseded"], limit=20, item_limit=60)
+        child_records.append(child_record)
+
+    return [*child_records, parent_record]
+
+
+def split_for_readability(page_id: str, max_chars: int = 2600) -> dict | None:
+    """Losslessly split an existing top-level page without semantic rewriting."""
+    page = get_page(page_id)
+    if not page or page.get("parent_page_id") or page.get("status") == "archived":
+        return None
+    body_limit = max(1, min(int(max_chars), WIKI_BODY_LIMIT))
+    stored_body = page.get("raw", {}).get("body") if isinstance(page.get("raw"), dict) else page.get("body")
+    if len(_raw_text(stored_body or "")) <= body_limit:
+        stale_children = [
+            child for child in _all_wiki_pages()
+            if child.get("parent_page_id") == page_id
+            or f"split_from:{page_id}" in (child.get("tags") or [])
+        ]
+        if not stale_children:
+            return None
+        stale_ids = {child.get("id") for child in stale_children}
+        page["tags"] = [tag for tag in page.get("tags") or [] if not str(tag).startswith("split_into:")]
+        page["links"] = [link for link in page.get("links") or [] if link not in stale_ids]
+        parent_record = _build_wiki_record(page, existing=page)
+        archived_records = []
+        for child in stale_children:
+            archived = dict(child)
+            archived["status"] = "archived"
+            archived["tags"] = _dedupe_texts([*archived.get("tags", []), "split_superseded"], limit=20, item_limit=60)
+            archived_records.append(_build_wiki_record(archived, existing=child))
+        shared_memory.batch_upsert_delete(upserts=[*archived_records, parent_record], deletes=[])
+        _CACHE.clear()
+        _append_wiki_log("split", page_id=page_id, archived_child_ids=sorted(stale_ids))
+        _debounced_rebuild()
+        return _record_to_page(parent_record)
+    saved = _save_split_wiki_page(page, body_limit=body_limit)
+    if saved:
+        return saved
+    return None
 
 
 def _page_id(title: str, surface: str, kind: str) -> str:
@@ -627,7 +726,8 @@ def _record_to_page(record: dict) -> dict:
     messages = _normalize_messages(record.get("messages"))
     source = record.get("source") if isinstance(record.get("source"), dict) else {}
     body_parts = []
-    body_text = _clean(record.get("body") or "", WIKI_BODY_LIMIT)
+    is_split_child = any(str(tag).startswith("split_from:") for tag in tags)
+    body_text = _clean_body_exact(record.get("body") or "") if is_split_child else _clean(record.get("body") or "", WIKI_BODY_LIMIT)
     report_citation = _clean(record.get("report_citation") or _extract_report_citation(body_text), 600)
     if body_text:
         body_parts.append(body_text)
@@ -653,7 +753,7 @@ def _record_to_page(record: dict) -> dict:
                 msg_lines.append(f"{role}: {text}")
         if msg_lines:
             body_parts.append("대화 발췌\n- " + "\n- ".join(msg_lines))
-    source_refs = _dedupe_texts(record.get("artifacts") or [], limit=12, item_limit=120)
+    source_refs = shared_memory.normalize_artifact_refs(record.get("artifacts") or [])
     status = normalize_trust_status(_status_from_tags(tags), source_refs)
     warnings = trust_warnings_for(status, source_refs)
     return {
@@ -661,7 +761,7 @@ def _record_to_page(record: dict) -> dict:
         "title": _clean(record.get("title") or "위키 페이지", 160),
         "slug": _slugify(record.get("title") or "위키 페이지"),
         "summary": summary,
-        "body": "\n\n".join(part for part in body_parts if part).strip(),
+        "body": body_text if is_split_child else "\n\n".join(part for part in body_parts if part).strip(),
         "report_citation": report_citation,
         "wiki_schema_version": _safe_count(record.get("wiki_schema_version"), 2 if report_citation else 1, 10),
         "parent_page_id": _clean(record.get("parent_page_id") or "", 80),
@@ -692,6 +792,7 @@ def _record_to_page(record: dict) -> dict:
         "merge_event_id": _clean(record.get("merge_event_id") or "", 100),
         "distillation_state": distillation_state,
         "messages": messages,
+        "source_knowledge": deepcopy(record.get("source_knowledge") or {}),
         "feedback": record.get("feedback") or {},
         "snippet": summary[:260] if summary else "",
         "raw": record,
@@ -930,12 +1031,135 @@ def semantic_snapshot(page_id: str, *, records: list[dict] | None = None) -> dic
         child_pages.append(child)
     knowledge = [row.get("source_knowledge") or {} for row in [parent, *children]]
     return {"page_id": page_id, "revision_hash": revision_hash, "page": page, "children": child_pages,
-            "body": "".join(child["body"] for child in child_pages) if child_pages else page["body"],
-            "claims": [deepcopy(claim) for item in knowledge for claim in item.get("claims", [])],
+            "body": "".join(child["body"] for child in child_pages if not child["raw"].get("provenance_only"))
+                    if any(not child["raw"].get("provenance_only") for child in child_pages) else page["body"],
+            "claims": list({claim["claim_id"]: deepcopy(claim) for item in knowledge
+                            for claim in item.get("claims", [])}.values()),
             "source_refs": list(dict.fromkeys(ref for row in [parent, *children] for ref in row.get("artifacts") or [])),
             "evidence_ids": list(dict.fromkeys(ref for row in [parent, *children] for ref in row.get("evidence_ids") or [])),
             "conflicting_evidence_ids": list(dict.fromkeys(ref for row in [parent, *children]
                                                           for ref in row.get("conflicting_evidence_ids") or []))}
+
+
+def _source_fingerprint(page_id: str, records: list[dict]) -> str | None:
+    matches = [row for row in records if row.get("id") == page_id]
+    if not matches:
+        return None
+    if len(matches) != 1:
+        raise ValueError("store_corrupt")
+    row = matches[0]
+    if _is_wiki_record(row) and _record_to_page(row)["status"] != "archived":
+        return semantic_snapshot(page_id, records=records)["revision_hash"]
+    metadata = {key: value for key, value in row.items()
+                if key not in {"updatedAt", "createdAt", "useCount", "lastUsedAt", "lastQuery", "backlinks"}}
+    return hashlib.sha256(json.dumps(metadata, ensure_ascii=False, sort_keys=True,
+                        separators=(",", ":"), allow_nan=False).encode()).hexdigest()
+
+
+def prepare_source_batch(proposal: dict, compiled: dict, source: dict) -> dict:
+    """Freeze a validated, lossless multi-target update without mutating the store."""
+    from reports.wiki_source_integration import _new_spec, validate_integration
+
+    if proposal.get("revision_id") != source["revision_id"] or proposal.get("role") != source["role"]:
+        raise ValueError("proposal_source_invalid")
+    records = shared_memory._read_jsonl_checked(shared_memory._paths()["events"])
+    by_id = {row["id"]: row for row in records}
+    targets, specs = [], []
+    for target in proposal["targets"]:
+        if target["before_hash"] is not None:
+            targets.append(semantic_snapshot(target["page_id"], records=records))
+        else:
+            spec = _new_spec({key: target[key] for key in ("title", "kind", "surface", "purpose")},
+                             source["revision_id"], target["surface"])
+            if spec["page_id"] != target["page_id"] or target["page_id"] in by_id:
+                raise ValueError("new_page_identity_invalid")
+            specs.append(spec)
+    checked = validate_integration({"targets": deepcopy(proposal["targets"])}, compiled, source,
+                                    targets, new_page_specs=specs)
+    snapshots = {snap["page_id"]: snap for snap in targets}
+    upserts, parent_ids = [], []
+    fixed_time = _now()
+    for target in checked["targets"]:
+        page_id = target["page_id"]
+        snap = snapshots.get(page_id)
+        raw = deepcopy(snap["page"]["raw"]) if snap else {}
+        page = deepcopy(snap["page"]) if snap else {"id": page_id, "title": target["title"],
+                    "kind": target["kind"], "surface": target["surface"], "status": "draft"}
+        page.pop("raw", None)
+        old_body = snap["body"] if snap else ""
+        prose = [f"\n\n### {addition['as_of']} | {addition['scope']}\n{addition['body']}"
+                 for addition in target["additions"]]
+        page.update(body=old_body + "".join(prose), updated_at=fixed_time, _preserve_body_exact=True)
+        refs = list(dict.fromkeys([*(snap["source_refs"] if snap else []), source["canonical_url"],
+                                  source["raw_ref"], source["text_ref"]]))
+        support = list(snap["evidence_ids"] if snap else [])
+        conflict = list(snap["conflicting_evidence_ids"] if snap else [])
+        association = conflict if source["role"] == "conflict" else support
+        association[:] = list(dict.fromkeys([*association, *source["observed_evidence_ids"]]))
+        selected_claims = {cid for addition in target["additions"] for cid in addition["claim_ids"]}
+        claims = {claim["claim_id"]: deepcopy(claim) for claim in (snap["claims"] if snap else [])}
+        claims.update({claim["claim_id"]: {**deepcopy(claim), "knowledge_state": "draft"}
+                       for claim in compiled["claims"] if claim["claim_id"] in selected_claims})
+        claim_list = list(claims.values())
+        knowledge = deepcopy(raw.get("source_knowledge") or {})
+        knowledge.update(claims=claim_list[:100], relations=[*knowledge.get("relations", []), *target["relations"]],
+                         limitations=list(dict.fromkeys([*knowledge.get("limitations", []), *compiled["limitations"]])))
+        page.update(source_refs=refs[:20], evidence_ids=support[:100], conflicting_evidence_ids=conflict[:100],
+                    source_knowledge=knowledge)
+        pure = _prepare_split_records(page, records=records)
+        if not pure:
+            built = _build_wiki_record(page, existing=snap["page"] if snap else {})
+            pure = [{**raw, **built}]
+        # Provenance children stay discoverable through parent_page_id, beyond link caps.
+        chunks = max((len(refs) + 19) // 20, (len(support) + 99) // 100,
+                     (len(conflict) + 99) // 100, (len(claim_list) + 99) // 100)
+        if len(refs) > 20 or len(support) > 100 or len(conflict) > 100 or len(claim_list) > 100:
+            for index in range(chunks):
+                child_id = "prov-" + hashlib.sha256(f"{page_id}:{source['revision_id']}:{source['role']}:{index}".encode()).hexdigest()
+                child_refs = refs[index * 20:(index + 1) * 20]
+                child = _build_wiki_record({"id": child_id, "title": f"{page['title']} provenance [{index + 1:04d}]",
+                    "body": "\n".join(child_refs) or "Claim and evidence provenance", "kind": "note",
+                    "surface": page["surface"], "status": "draft", "parent_page_id": page_id,
+                    "source_refs": child_refs, "links": [page_id], "updated_at": fixed_time,
+                    "evidence_ids": support[index * 100:(index + 1) * 100],
+                    "conflicting_evidence_ids": conflict[index * 100:(index + 1) * 100],
+                    "source_knowledge": {"claims": claim_list[index * 100:(index + 1) * 100]}}, existing={})
+                child["provenance_only"] = True
+                pure.append(child)
+        for row in pure:
+            row["updatedAt"] = fixed_time
+            if row["id"] != page_id and row["id"] in by_id:
+                old = by_id[row["id"]]
+                if old.get("parent_page_id") != page_id and f"split_from:{page_id}" not in old.get("tags", []):
+                    raise ValueError("child_identity_collision")
+        upserts.extend(shared_memory.normalize_record(row) for row in pure)
+        parent_ids.append(page_id)
+    if not upserts or len({row["id"] for row in upserts}) != len(upserts):
+        raise ValueError("batch_identity_invalid")
+    ids = list(dict.fromkeys([*parent_ids, *(row["id"] for row in upserts)]))
+    before = {page_id: _source_fingerprint(page_id, records) for page_id in ids}
+    projected = [row for row in records if row["id"] not in ids] + upserts
+    after = {page_id: _source_fingerprint(page_id, projected) for page_id in ids}
+    identity = json.dumps([source["revision_id"], source["role"], before, checked], ensure_ascii=False,
+                          sort_keys=True, separators=(",", ":"), allow_nan=False)
+    return {"operation_id": hashlib.sha256(identity.encode()).hexdigest(), "revision_id": source["revision_id"],
+            "expected_before": before, "expected_after": after, "upserts": upserts,
+            "snapshots": [deepcopy(row) for row in records if row["id"] in ids], "target_ids": parent_ids}
+
+
+def apply_source_batch(batch: dict) -> dict:
+    rows = shared_memory._read_jsonl_checked(shared_memory._paths()["events"])
+    if all(_source_fingerprint(page_id, rows) == expected for page_id, expected in batch["expected_before"].items()):
+        ids = {row["id"] for row in batch["upserts"]}
+        after = [row for row in rows if row["id"] not in ids] + [shared_memory.normalize_record(row) for row in batch["upserts"]]
+        if any(_source_fingerprint(page_id, after) != expected for page_id, expected in batch["expected_after"].items()):
+            raise ValueError("batch_after_hash_invalid")
+    for row in batch["snapshots"]:
+        _snapshot_page_revision(row)
+    result = shared_memory.guarded_batch_upsert(upserts=batch["upserts"], expected=batch["expected_before"],
+                    fingerprint=_source_fingerprint, preserve_fields=("useCount", "lastUsedAt", "lastQuery"))
+    _CACHE.clear()
+    return result
 
 
 _REPORT_WIKI_KINDS = ("risk", "playbook")
@@ -1337,7 +1561,7 @@ def _build_wiki_record(page: dict, *, existing: dict | None = None) -> dict:
     kind = _clean(page.get("kind") or "note", 40).lower()
     if kind not in VALID_KINDS:
         kind = "note"
-    source_refs = _dedupe_texts(page.get("source_refs") or [], limit=12, item_limit=120)
+    source_refs = shared_memory.normalize_artifact_refs(page.get("source_refs") or [])
     status = normalize_trust_status(page.get("status") or "draft", source_refs)
     page_id = _clean(page.get("id") or _page_id(title, surface, kind), 80)
     links = _clean_links(page.get("links") or [], self_id=page_id)
@@ -1363,10 +1587,14 @@ def _build_wiki_record(page: dict, *, existing: dict | None = None) -> dict:
     report_citation_value = (
         page.get("report_citation") if "report_citation" in page else existing.get("report_citation")
     )
-    body, report_citation = _with_report_citation(
-        page.get("body") or "",
-        report_citation_value,
+    preserve_body_exact = bool(page.get("_preserve_body_exact")) or any(
+        str(tag).startswith("split_from:") for tag in (page.get("tags") or [])
     )
+    if preserve_body_exact:
+        body = _clean_body_exact(page.get("body") or "")
+        report_citation = _clean(report_citation_value or _extract_report_citation(body), 600)
+    else:
+        body, report_citation = _with_report_citation(page.get("body") or "", report_citation_value)
     parent_page_id = page.get("parent_page_id") if "parent_page_id" in page else existing.get("parent_page_id")
     schema_version = page.get("wiki_schema_version") if "wiki_schema_version" in page else existing.get("wiki_schema_version")
     if schema_version is None:
@@ -1382,7 +1610,7 @@ def _build_wiki_record(page: dict, *, existing: dict | None = None) -> dict:
         "id": page_id,
         "title": title,
         "summary": _clean(page.get("summary") or "", WIKI_SUMMARY_LIMIT),
-        "body": _clean(body, WIKI_BODY_LIMIT),
+        "body": body if preserve_body_exact else _clean(body, WIKI_BODY_LIMIT),
         "report_citation": _clean(report_citation, 600),
         "wiki_schema_version": _safe_count(schema_version, WIKI_SCHEMA_VERSION if report_citation else 1, 10),
         "parent_page_id": _clean(parent_page_id or "", 80),
@@ -1402,6 +1630,7 @@ def _build_wiki_record(page: dict, *, existing: dict | None = None) -> dict:
         "merged_into": _clean(merged_into or "", 80),
         "merge_event_id": _clean(merge_event_id or "", 100),
         "distillation_state": _normalize_distillation_state(distillation_state),
+        "source_knowledge": deepcopy(page.get("source_knowledge", existing.get("source_knowledge", {}))),
         "confidence": _safe_confidence(page.get("confidence") or existing.get("confidence")),
         "createdAt": created_at,
         "updatedAt": updated_at,
@@ -1422,9 +1651,58 @@ def _build_wiki_record(page: dict, *, existing: dict | None = None) -> dict:
     }
 
 
+def _snapshot_page_revision(record: dict) -> Path | None:
+    """Atomically preserve one prior full page under a content-addressed local path."""
+    if not isinstance(record, dict) or not _raw_text(record.get("body") or ""):
+        return None
+    page_id = _clean(record.get("id") or "", 80)
+    if not page_id:
+        return None
+    canonical = json.dumps(record, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    revision_hash = hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+    safe_page_id = hashlib.sha256(page_id.encode("utf-8")).hexdigest()
+    path = wiki_artifacts_dir() / "revisions" / safe_page_id / f"{revision_hash}.json"
+    payload = {
+        "schema": "wiki-page-revision.v1",
+        "page_id": page_id,
+        "revision_hash": revision_hash,
+        "captured_at": _now(),
+        "page": record,
+    }
+    if len(json.dumps(payload, ensure_ascii=False).encode("utf-8")) > MAX_WIKI_REVISION_BYTES:
+        raise ValueError("wiki revision snapshot exceeds size limit")
+    with safe_io.file_write_lock(str(path), timeout=5.0):
+        if not path.exists():
+            safe_io.atomic_write_json(str(path), payload)
+    return path
+
+
+def _snapshot_before_body_change(page: dict) -> None:
+    if "body" not in page:
+        return
+    page_id = _clean(page.get("id") or _page_id(
+        _clean(page.get("title") or "위키 페이지", 160),
+        _clean(page.get("surface") or WIKI_SURFACE, 60).lower() or WIKI_SURFACE,
+        _clean(page.get("kind") or "note", 40).lower(),
+    ), 80)
+    existing = next((row for row in _wiki_records() if row.get("id") == page_id), None)
+    if not existing or not _raw_text(existing.get("body") or ""):
+        return
+    old_body = _raw_text(existing.get("body") or "")
+    new_body = _raw_text(page.get("body") or "")
+    if old_body != new_body:
+        _snapshot_page_revision(existing)
+
+
 def upsert_page(page: dict) -> dict:
+    page = dict(page or {})
+    _snapshot_before_body_change(page)
     saved = _save_wiki_page(page)
     _CACHE.clear()
+    _append_wiki_log(
+        "page_upsert", page_id=saved.get("id"), surface=saved.get("surface"),
+        kind=saved.get("kind"), status=saved.get("status"),
+    )
     _debounced_rebuild()
     return saved
 
@@ -1440,6 +1718,12 @@ def split_child_ids(page: dict | None) -> list[str]:
         child_id = _clean(clean.split(":", 1)[1], 80)
         if child_id and child_id not in ids:
             ids.append(child_id)
+    parent_id = _clean(page.get("id") or "", 80)
+    if parent_id:
+        for child in _all_wiki_pages():
+            child_id = _clean(child.get("id") or "", 80)
+            if child.get("parent_page_id") == parent_id and child.get("status") != "archived" and child_id and child_id not in ids:
+                ids.append(child_id)
     return ids
 
 
@@ -1447,7 +1731,7 @@ def split_children_for_page(page: dict | None) -> list[dict]:
     children = []
     for child_id in split_child_ids(page):
         child = get_page(child_id)
-        if child:
+        if child and child.get("status") != "archived":
             children.append(child)
     return children
 
