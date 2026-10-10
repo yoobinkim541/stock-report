@@ -7,6 +7,8 @@ from dataclasses import asdict, dataclass, field
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
+from agent_console.shared_memory import normalize_artifact_refs
+
 
 KST = timezone(timedelta(hours=9))
 
@@ -156,7 +158,7 @@ def event_to_evidence_card(event: dict, *, now: datetime | None = None) -> Evide
         id=_id_for(event),
         source_type=_source_type(event.get("source")),
         source_name=_clean(event.get("source"), 120) or "unknown",
-        source_url=_clean(event.get("url"), 500),
+        source_url=next(iter(normalize_artifact_refs([event.get("url")], limit=1)), ""),
         captured_at=now.astimezone(timezone.utc).isoformat(timespec="seconds"),
         event_time=event_time.astimezone(timezone.utc).isoformat(timespec="seconds"),
         raw_text=raw_text,
@@ -206,4 +208,4 @@ def cards_to_source_refs(cards: list[EvidenceCard]) -> list[str]:
     refs: list[object] = []
     for card in cards:
         refs.extend([card.source_url, card.raw_payload.get("text_path"), card.raw_payload.get("raw_path")])
-    return _dedupe(refs, limit=40)
+    return normalize_artifact_refs(refs, limit=40)

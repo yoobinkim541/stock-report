@@ -60,7 +60,10 @@ def _new_spec(spec: dict, revision_id: str, surface: str) -> dict:
     if len(spec["title"]) > 120:
         raise ValueError("new_page_title_invalid")
     identity = json.dumps([revision_id, spec], ensure_ascii=False, sort_keys=True, separators=(",", ":"))
-    return {**spec, "page_id": "source-topic-" + hashlib.sha256(identity.encode()).hexdigest()}
+    page_id = "source-topic-" + hashlib.sha256(identity.encode()).hexdigest()
+    if spec["purpose"] == "compiled_source" and spec["kind"] == "note":
+        page_id = hashlib.sha256(("compiled-source:" + revision_id).encode()).hexdigest()
+    return {**spec, "page_id": page_id}
 
 
 def discover_targets(compiled: CompiledSource, *, surface: str) -> RoutingState:
@@ -188,7 +191,9 @@ def validate_integration(payload: dict, compiled: CompiledSource, source: Source
         if set(target) != fields or target["before_hash"] != (snap["revision_hash"] if snap else None):
             raise ValueError("proposal_target_fields_invalid")
         additions = target["additions"]
-        if not isinstance(additions, list) or not additions:
+        already_compiled = bool(snap and any(claim.get("source_revision_id") == source["revision_id"]
+                                            for claim in snap["claims"]))
+        if not isinstance(additions, list) or (not additions and not already_compiled):
             raise ValueError("proposal_additions_invalid")
         normalized = []
         for addition in additions:
@@ -222,4 +227,6 @@ def validate_integration(payload: dict, compiled: CompiledSource, source: Source
                 raise ValueError("proposal_relation_identity_invalid")
             relation["scope_explanation"] = _text(relation["scope_explanation"])
         results.append({**target, "additions": normalized, "relations": relations})
+    if seen != set(allowed_targets) | set(specs_by_id):
+        raise ValueError("proposal_targets_incomplete")
     return {"revision_id": source["revision_id"], "role": source["role"], "targets": results}

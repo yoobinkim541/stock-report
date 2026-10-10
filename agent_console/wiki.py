@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import functools
+import fcntl
 import json
 import os
 import hashlib
@@ -17,6 +18,7 @@ from typing import Any, Iterable
 
 from . import evidence_usage, qmd_search, shared_memory, storage
 import safe_io
+from . import wiki_contract
 
 
 WIKI_TAG = "wiki"
@@ -74,6 +76,7 @@ _REBUILD_TIMER: threading.Timer | None = None
 _REBUILD_LOCK = threading.Lock()
 _REBUILD_RUNNING = False
 _REBUILD_PENDING = False
+_WIKI_LOG_LOCK = threading.Lock()
 
 
 def _run_debounced_rebuild() -> None:
@@ -1086,6 +1089,8 @@ def prepare_source_batch(proposal: dict, compiled: dict, source: dict) -> dict:
         page = deepcopy(snap["page"]) if snap else {"id": page_id, "title": target["title"],
                     "kind": target["kind"], "surface": target["surface"], "status": "draft"}
         page.pop("raw", None)
+        if target.get("purpose") == "compiled_source":
+            page["tags"] = [*page.get("tags", []), "compiled_source"]
         old_body = snap["body"] if snap else ""
         prose = [f"\n\n### {addition['as_of']} | {addition['scope']}\n{addition['body']}"
                  for addition in target["additions"]]
@@ -1097,6 +1102,8 @@ def prepare_source_batch(proposal: dict, compiled: dict, source: dict) -> dict:
         association = conflict if source["role"] == "conflict" else support
         association[:] = list(dict.fromkeys([*association, *source["observed_evidence_ids"]]))
         selected_claims = {cid for addition in target["additions"] for cid in addition["claim_ids"]}
+        if target.get("purpose") == "compiled_source":
+            selected_claims.update(claim["claim_id"] for claim in compiled["claims"])
         claims = {claim["claim_id"]: deepcopy(claim) for claim in (snap["claims"] if snap else [])}
         claims.update({claim["claim_id"]: {**deepcopy(claim), "knowledge_state": "draft"}
                        for claim in compiled["claims"] if claim["claim_id"] in selected_claims})
@@ -1104,6 +1111,14 @@ def prepare_source_batch(proposal: dict, compiled: dict, source: dict) -> dict:
         knowledge = deepcopy(raw.get("source_knowledge") or {})
         knowledge.update(claims=claim_list[:100], relations=[*knowledge.get("relations", []), *target["relations"]],
                          limitations=list(dict.fromkeys([*knowledge.get("limitations", []), *compiled["limitations"]])))
+        integrations = list(knowledge.get("integrations", []))
+        matching = next((item for item in integrations if item.get("revision_id") == source["revision_id"]
+                         and item.get("role") == source["role"]), None)
+        if matching is None:
+            matching = {"revision_id": source["revision_id"], "role": source["role"], "evidence_ids": []}
+            integrations.append(matching)
+        matching["evidence_ids"] = list(dict.fromkeys([*matching["evidence_ids"], *source["observed_evidence_ids"]]))
+        knowledge["integrations"] = integrations
         page.update(source_refs=refs[:20], evidence_ids=support[:100], conflicting_evidence_ids=conflict[:100],
                     source_knowledge=knowledge)
         pure = _prepare_split_records(page, records=records)
@@ -1428,29 +1443,89 @@ def lint_pages(pages: list[dict] | None = None) -> dict:
                     "message": f"not_helpful({not_helpful})이 helpful({helpful})의 2배를 초과합니다. 페이지 개선 또는 삭제를 고려하세요.",
                 })
     issues.extend(_lint_relational_issues(pages or []))
-    return {"ok": not issues, "issue_count": len(issues), "issues": issues}
+    result = {"ok": not issues, "issue_count": len(issues), "issues": issues}
+    _append_wiki_log(
+        "lint",
+        page_ids=sorted({issue.get("page_id", "") for issue in issues if issue.get("page_id")}),
+        issue_count=len(issues),
+        issue_codes=sorted({issue.get("code", "") for issue in issues if issue.get("code")}),
+    )
+    return result
 
 
-def rebuild_artifacts() -> dict:
+def rebuild_artifacts(*, operation_id: str | None = None) -> dict:
     pages = _all_wiki_pages()
     out_dir = wiki_artifacts_dir()
     out_dir.mkdir(parents=True, exist_ok=True)
     lint = lint_pages(pages)
     payloads = {
         "index.md": _render_index_md(pages),
-        "log.md": _render_log_md(pages),
         "open-questions.md": _render_open_questions_md(pages),
         "lint.md": _render_lint_md(lint),
+        "schema.md": wiki_contract.maintenance_schema(),
     }
     for name, body in payloads.items():
         (out_dir / name).write_text(body, encoding="utf-8")
+    _append_wiki_log("rebuild", operation_id=operation_id, page_count=len(pages), issue_count=lint.get("issue_count", 0))
     return {
         "ok": True,
         "dir": str(out_dir),
-        "files": sorted(payloads),
+        "files": sorted([*payloads, "log.md"]),
         "page_count": len(pages),
         "lint": lint,
     }
+
+
+def _append_wiki_log(action: str, *, operation_id: str | None = None, **metadata: object) -> None:
+    """Append action metadata only; never serialize page bodies or user queries."""
+    path = wiki_artifacts_dir() / "log.md"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    event = {"at": _now(), "action": _clean(action, 40)}
+    if operation_id is not None:
+        if not re.fullmatch(r"[a-f0-9]{64}", operation_id):
+            raise ValueError("operation_id_invalid")
+        event["operation_id"] = operation_id
+    for key, value in metadata.items():
+        if isinstance(value, (list, tuple)):
+            event[key] = [_clean(item, 100) for item in value[:100]]
+        elif isinstance(value, (int, float, bool)) or value is None:
+            event[key] = value
+        else:
+            event[key] = _clean(value, 120)
+    line = ("## [" + event["at"] + "] " + event["action"] + "\n"
+            + "- metadata: " + json.dumps(event, ensure_ascii=False, sort_keys=True) + "\n\n")
+    with _WIKI_LOG_LOCK:
+        fd = os.open(path, os.O_CREAT | os.O_RDWR | os.O_APPEND, 0o600)
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX)
+            if operation_id is not None:
+                with os.fdopen(os.dup(fd), "r", encoding="utf-8") as stream:
+                    stream.seek(0)
+                    for previous in stream:
+                        if not previous.startswith("- metadata: "):
+                            continue
+                        try:
+                            item = json.loads(previous.removeprefix("- metadata: "))
+                        except ValueError:
+                            continue
+                        if item.get("action") == event["action"] and item.get("operation_id") == operation_id:
+                            return
+            size = os.fstat(fd).st_size
+            prefix = b"# LLM Wiki Log\n\n" if size == 0 else b""
+            if size:
+                last = os.pread(fd, 1, size - 1)
+                if last not in (b"\n", b"\r"):
+                    prefix = b"\n"
+            data = prefix + line.encode("utf-8")
+            while data:
+                written = os.write(fd, data)
+                if written <= 0:
+                    raise OSError("wiki_log_write_failed")
+                data = data[written:]
+            os.fsync(fd)
+        finally:
+            fcntl.flock(fd, fcntl.LOCK_UN)
+            os.close(fd)
 
 
 def sync_qmd() -> dict:

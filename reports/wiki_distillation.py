@@ -29,13 +29,14 @@ from pathlib import Path
 import re
 import sys
 from typing import Iterator
+from urllib.parse import urlsplit
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from dotenv import load_dotenv          # crons/*.py 관례 — uv run 은 .env 를 자동 주입 안 함
 load_dotenv()
 
-from agent_console import wiki
+from agent_console import shared_memory, wiki
 import notify
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
@@ -44,6 +45,9 @@ logger = logging.getLogger(__name__)
 MAX_CANDIDATES_PER_RUN = 5
 _JUDGMENT_KINDS = ("playbook", "risk", "decision", "concept")
 _DISTILLABLE_KINDS = ("playbook", "risk", "concept")
+MAX_SOURCE_ARTICLE_CHARS = 20_000
+MAX_SOURCE_TEXT_CHARS_PER_PAGE = 80_000
+MAX_SOURCE_ARTICLES_PER_PAGE = 8
 _DEFAULT_NOTIFY_COOLDOWN_HOURS = 24.0
 _NOTIFY_PENDING_LIMIT = 200
 
@@ -202,6 +206,101 @@ def _parse_distillation_plan(text: str | None) -> dict | None:
         return None
     plan["action"] = action
     return plan
+
+
+def _full_body_source_class(article: dict) -> str:
+    """Return a narrowly recognized non-editorial full-body source class."""
+    if article.get("text_complete") is not True:
+        return ""
+    content_kind = str(article.get("content_kind") or "").lower()
+    scope = str(article.get("source_text_scope") or "").lower()
+    provenance = str(article.get("provenance") or "").lower()
+    try:
+        parsed = urlsplit(str(article.get("url") or ""))
+    except ValueError:
+        return ""
+    if parsed.scheme != "https" or parsed.query or parsed.fragment or parsed.username or parsed.password:
+        return ""
+
+    if content_kind in {"community_signal", "analysis", "news", "earnings", "info", "breaking", "premarket"}:
+        telegram = re.fullmatch(r"telegram:([a-z0-9_]+)", provenance)
+        message = re.fullmatch(r"/(?:s/)?([a-z0-9_]+)/\d+/?", parsed.path, re.I)
+        if (telegram and parsed.netloc.lower() == "t.me" and message
+                and telegram.group(1).lower() == message.group(1).lower()
+                and scope in {"article_fulltext", "public_message", "extracted_text"}):
+            return "community"
+        if (provenance in {"arca", "arca:stock"} and parsed.netloc.lower() == "arca.live"
+                and re.fullmatch(r"/b/stock/\d+/?", parsed.path)
+                and scope in {"article_fulltext", "authorized_article", "rendered_article", "extracted_text"}):
+            return "community"
+
+    if (content_kind in {"unknown", "series_notes"} and provenance == "fred"
+            and parsed.netloc.lower() == "fred.stlouisfed.org"
+            and re.fullmatch(r"/series/[A-Za-z0-9_-]+/?", parsed.path)
+            and scope in {"series_notes", "extracted_text"}):
+        return "fred_series_notes"
+    return ""
+
+
+def _article_is_eligible(article: dict) -> bool:
+    if not str(article.get("text") or "").strip():
+        return False
+    url = str(article.get("url") or "").strip()
+    if len(url) > shared_memory.ARTIFACT_REF_MAX_CHARS:
+        return False
+    if not (url or str(article.get("evidence_id") or "").strip()):
+        return False
+    provenance = str(article.get("provenance") or "").lower()
+    # Provider-specific provenance must not fall through to editorial validation.
+    if provenance.split(":", 1)[0] in {"arca", "telegram", "fred"}:
+        return bool(_full_body_source_class(article))
+    if url:
+        try:
+            parsed = urlsplit(url)
+            if (parsed.scheme not in {"https", "http"} or not parsed.hostname
+                    or parsed.username or parsed.password):
+                return False
+        except ValueError:
+            return False
+    return (
+        str(article.get("content_kind") or "").lower() in {"article", "news", "report", "analysis"}
+        and str(article.get("source_text_scope") or "").lower()
+        in {"article_fulltext", "source_event_body", "extracted_text", "ocr_extracted_text", "attached_source_body"}
+    )
+
+
+def _resolve_article_citations(body: str, articles: list[dict], knowledge: list[dict]) -> tuple[str, set[int]] | None:
+    citation_pattern = re.compile(r"\[S(\d+)\](?:\(([^)\n]*)\))?")
+    historical = {
+        (int(match.group(1)), match.group(2))
+        for previous in knowledge
+        for match in citation_pattern.finditer(str(previous.get("body") or ""))
+        if match.group(2) is not None
+    }
+    current = set()
+    invalid = False
+
+    def resolve(match):
+        nonlocal invalid
+        index, url = int(match.group(1)), match.group(2)
+        if url is not None and (index, url) in historical:
+            if 1 <= index <= len(articles) and articles[index - 1].get("url") == url:
+                current.add(index)
+            return match.group(0)
+        if (url is None and body[match.end():].startswith("(")) or not 1 <= index <= len(articles):
+            invalid = True
+            return match.group(0)
+        article = articles[index - 1]
+        if url is not None and (not article.get("url") or url != article["url"]):
+            invalid = True
+            return match.group(0)
+        current.add(index)
+        if article.get("url"):
+            return f"[S{index}]({article['url']})"
+        return f"[근거 {article.get('evidence_id') or article.get('raw_sha256') or 'archive'}]"
+
+    resolved = citation_pattern.sub(resolve, body)
+    return None if invalid or not current else (resolved, current)
 
 
 def _distill_one_with_status(page: dict, llm_fn) -> tuple[dict | None, str, str]:
@@ -440,6 +539,8 @@ def run(*, dry_run: bool = False, llm_fn=None, limit: int | None = None) -> dict
         from agent_console.agent import _try_llm_prompt as llm_fn
 
     pages = wiki._all_wiki_pages()
+    if os.getenv("WIKI_SOURCE_PIPELINE_ENABLED", "0") == "1":
+        pages = [page for page in pages if page.get("kind") != "source_digest"]
     batch_size = _distillation_batch_size() if limit is None else max(1, min(100, int(limit)))
     candidates = select_distillation_candidates(pages, limit=batch_size)
     created = []
@@ -483,6 +584,12 @@ def main() -> int:
     parser.add_argument("--dry-run", action="store_true")
     parser.add_argument("--limit", type=int, default=None, help="이번 실행에서 증류할 최대 페이지 수")
     args = parser.parse_args()
+
+    if os.getenv("WIKI_SOURCE_PIPELINE_ENABLED", "0") == "1":
+        from reports import wiki_source_pipeline
+        result = wiki_source_pipeline.run(dry_run=args.dry_run, source_limit=args.limit or 5)
+        logger.info("원문 지식화 단계 상태: %s", json.dumps(result, ensure_ascii=False))
+        return 0
 
     result = run(dry_run=args.dry_run, limit=args.limit)
     logger.info(

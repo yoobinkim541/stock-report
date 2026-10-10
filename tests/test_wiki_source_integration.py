@@ -29,6 +29,14 @@ def source():
             "observed_evidence_ids": ["actual-id"], "published_at": "2026-10-09"}
 
 
+def test_model_cannot_silently_omit_selected_targets(monkeypatch):
+    install(monkeypatch, [record("entity"), record("topic")])
+    targets = [module().hydrate_target(page_id) for page_id in ("entity", "topic")]
+    with pytest.raises(ValueError, match="proposal_targets_incomplete"):
+        module().propose_integration(compiled(), source(), targets, new_page_specs=[],
+                                    llm_fn=lambda _: json.dumps({"targets": []}))
+
+
 def module():
     return importlib.import_module("reports.wiki_source_integration")
 

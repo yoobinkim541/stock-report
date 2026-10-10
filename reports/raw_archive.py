@@ -175,6 +175,10 @@ def save_extracted_text(raw_record: dict, text: str) -> dict:
         except Exception:
             manifest = dict(raw_record)
         manifest["text_path"] = str(text_path)
+        for key in ("body_coverage", "text_complete", "fulltext_status", "extraction_scope",
+                    "source_text_scope", "transport", "evidence_id"):
+            if key in raw_record:
+                manifest[key] = raw_record[key]
         manifest_path.write_text(json.dumps(manifest, ensure_ascii=False, indent=2, default=_json_default), encoding="utf-8")
     return record
 
