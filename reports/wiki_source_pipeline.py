@@ -30,11 +30,15 @@ def _record_integration(receipt: dict, journal: Journal) -> None:
     role = batch["role"]
     state = deepcopy(batch["routing_state"])
     previous = source["routing"].get(role, {})
+    same_pass = all(previous.get(key) == state.get(key) for key in (
+        "cursor", "examined", "selected", "unexamined", "new_page_specs", "surface"))
+    completes_current_pass = previous.get("cursor", 0) < state.get("cursor", 0) or same_pass
     if previous.get("cursor", 0) >= state.get("cursor", 0):
         state = deepcopy(previous)
     state["integrated_evidence_ids"] = list(dict.fromkeys([
         *previous.get("integrated_evidence_ids", []), *batch["observed_evidence_ids"]]))
-    state["integrated"] = True
+    if completes_current_pass:
+        state["integrated"] = True
     journal.save_routing(receipt["revision_id"], role, state)
 
 
@@ -121,17 +125,18 @@ def _pending_source(source: dict, journal: Journal) -> bool:
 
 def _build_batch(source: dict, compiled: dict, state: dict, llm_fn: Callable) -> dict:
     targets = [hydrate_target(page_id) for page_id in state["selected"]]
-    known = [snap for snap in targets if any(claim.get("source_revision_id") == source["revision_id"] for claim in snap["claims"])]
-    new = [snap for snap in targets if snap not in known]
     specs = state["new_page_specs"]
-    live_specs, existing_specs = [], []
+    live_specs = []
     for spec in specs:
         if wiki.get_page(spec["page_id"]):
-            existing_specs.append(hydrate_target(spec["page_id"]))
+            if not any(snap["page_id"] == spec["page_id"] for snap in targets):
+                targets.append(hydrate_target(spec["page_id"]))
         else:
             live_specs.append(spec)
-    if new or live_specs or existing_specs:
-        proposal = propose_integration(compiled, source, [*new, *existing_specs], new_page_specs=live_specs, llm_fn=llm_fn)
+    known = [snap for snap in targets if any(claim.get("source_revision_id") == source["revision_id"] for claim in snap["claims"])]
+    new = [snap for snap in targets if snap not in known]
+    if new or live_specs:
+        proposal = propose_integration(compiled, source, new, new_page_specs=live_specs, llm_fn=llm_fn)
     else:
         proposal = {"revision_id": source["revision_id"], "role": source["role"], "targets": []}
     proposal["targets"].extend({"page_id": snap["page_id"], "before_hash": snap["revision_hash"],

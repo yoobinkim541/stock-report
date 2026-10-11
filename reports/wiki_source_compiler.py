@@ -99,7 +99,16 @@ def compile_source(source: SourceRevision, *, llm_fn: Callable[[str], str | None
         "body with [S1] citations, claims, terms, limitations, skip_reason=null. Each claim has text, as_of "
         "(use unknown when absent), scope, anchor=null or {start,end,quote} in exact source character offsets, "
         "and competing_claim_ids=[] unless an actual intra-source relationship is established. "
-        "For no reusable knowledge use action=skip and a nonempty skip_reason; do not provide body or claims.\n"
+        "Use exactly the illustrated keys. Do not add id, claim_id or source_revision_id to claims; "
+        "claim identities are assigned by the server.\nOUTPUT_SCHEMA\n"
+        + json.dumps({"action": "create", "kind": "concept", "title": "Source synthesis",
+                      "body": "Source-backed explanation with uncertainty [S1].",
+                      "claims": [{"text": "Attributed source claim", "as_of": "unknown",
+                                  "scope": "Exact subject and time horizon", "anchor": None,
+                                  "competing_claim_ids": []}],
+                      "terms": [], "limitations": [], "skip_reason": None})
+        + "\nEND_OUTPUT_SCHEMA\n"
+        + "For no reusable knowledge use action=skip and a nonempty skip_reason; do not provide body or claims.\n"
         + json.dumps(metadata, ensure_ascii=False, sort_keys=True)
         + "\nBEGIN UNTRUSTED SOURCE TEXT\n" + source["body"] + "\nEND UNTRUSTED SOURCE TEXT"
     )

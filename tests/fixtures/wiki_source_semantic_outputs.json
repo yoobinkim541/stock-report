@@ -1,0 +1,147 @@
+{
+  "model": "gpt-6.1-sol",
+  "cases": [
+    {
+      "id": "capacity-demand",
+      "response": {
+        "action": "create",
+        "kind": "concept",
+        "title": "Capacity Increase With Uncertain Demand",
+        "body": "Capacity increased in October, with no year specified. Demand remained uncertain, and realized orders were not reported. The capacity increase does not establish realized demand. [S1]",
+        "claims": [
+          {
+            "text": "Capacity increased in October.",
+            "as_of": "October (year unknown)",
+            "scope": "synthetic_text",
+            "anchor": null,
+            "competing_claim_ids": []
+          },
+          {
+            "text": "Demand was uncertain; realized orders were not reported.",
+            "as_of": "unknown",
+            "scope": "synthetic_text",
+            "anchor": null,
+            "competing_claim_ids": []
+          }
+        ],
+        "terms": [
+          "capacity",
+          "demand",
+          "realized orders"
+        ],
+        "limitations": [
+          "The year and magnitude of the capacity increase are unspecified.",
+          "Realized orders are not reported, so realized demand cannot be inferred."
+        ],
+        "skip_reason": null
+      }
+    },
+    {
+      "id": "different-horizons",
+      "response": {
+        "action": "create",
+        "kind": "concept",
+        "title": "Weak Near-Term Orders and a Next-Year Recovery Expectation",
+        "body": "On October 9, near-term orders were weak. Management expected a recovery next year, not this quarter. The recovery statement is an expectation for a different horizon, not a report of realized recovery. No year is specified for October 9. [S1]",
+        "claims": [
+          {
+            "text": "On October 9, near-term orders were weak.",
+            "as_of": "October 9 (year unknown)",
+            "scope": "synthetic_text",
+            "anchor": null,
+            "competing_claim_ids": []
+          },
+          {
+            "text": "Management expected a recovery next year, not this quarter.",
+            "as_of": "unknown",
+            "scope": "synthetic_text",
+            "anchor": null,
+            "competing_claim_ids": []
+          }
+        ],
+        "terms": [
+          "near-term orders",
+          "management expectation",
+          "recovery horizon"
+        ],
+        "limitations": [
+          "The calendar year and quarter are unspecified.",
+          "The source reports an expectation, not a realized recovery.",
+          "Near-term weakness and next-year recovery expectations concern different horizons."
+        ],
+        "skip_reason": null
+      }
+    },
+    {
+      "id": "community-claim",
+      "response": {
+        "action": "create",
+        "kind": "concept",
+        "title": "Community Suspicion of Inventory Improvement",
+        "body": "A public channel author suspects inventory has improved. This is an attributed suspicion, not an established inventory finding; no supporting official figures are supplied. [S1]",
+        "claims": [
+          {
+            "text": "A public channel author suspects inventory has improved.",
+            "as_of": "unknown",
+            "scope": "synthetic_text",
+            "anchor": null,
+            "competing_claim_ids": []
+          },
+          {
+            "text": "No supporting official figures are supplied.",
+            "as_of": "unknown",
+            "scope": "synthetic_text",
+            "anchor": null,
+            "competing_claim_ids": []
+          }
+        ],
+        "terms": [
+          "inventory",
+          "community claim",
+          "official figures"
+        ],
+        "limitations": [
+          "Inventory improvement is presented only as the author's suspicion.",
+          "No supporting official figures or publication date are supplied."
+        ],
+        "skip_reason": null
+      }
+    },
+    {
+      "id": "ocr-number",
+      "response": {
+        "action": "create",
+        "kind": "concept",
+        "title": "Ambiguous OCR Ratio",
+        "body": "OCR output reports a ratio as \"1O.2\". The letter O may have been recognized in place of zero, so the numeric value remains unresolved; \"10.2\" is only a possible reading, not a confirmed value. [S1]",
+        "claims": [
+          {
+            "text": "OCR output reports a ratio of \"1O.2\".",
+            "as_of": "unknown",
+            "scope": "synthetic_text",
+            "anchor": null,
+            "competing_claim_ids": []
+          },
+          {
+            "text": "The letter O may have been recognized in place of zero.",
+            "as_of": "unknown",
+            "scope": "synthetic_text",
+            "anchor": null,
+            "competing_claim_ids": []
+          }
+        ],
+        "terms": [
+          "OCR",
+          "ratio",
+          "character recognition uncertainty"
+        ],
+        "limitations": [
+          "The source does not confirm the intended numeric value.",
+          "The ratio's definition, context, and date are unspecified."
+        ],
+        "skip_reason": null
+      }
+    }
+  ],
+  "evaluation_scope": "Synthetic compilation output only; not live collection or end-to-end provider activation."
+}

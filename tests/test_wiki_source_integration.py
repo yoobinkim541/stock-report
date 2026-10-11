@@ -37,6 +37,27 @@ def test_model_cannot_silently_omit_selected_targets(monkeypatch):
                                     llm_fn=lambda _: json.dumps({"targets": []}))
 
 
+def test_proposal_prompt_excludes_private_metadata_but_retains_complete_knowledge(monkeypatch):
+    install(monkeypatch, [record("entity", messages=[{"role": "user", "text": "PRIVATE_MESSAGE"}],
+        lastQuery="PRIVATE_QUERY", contextPacket={"secret": "PRIVATE_PACKET"})])
+    snap = module().hydrate_target("entity")
+    def llm(prompt):
+        assert "Old exception. Opposing evidence." in prompt
+        assert all(marker not in prompt for marker in ("PRIVATE_MESSAGE", "PRIVATE_QUERY", "PRIVATE_PACKET"))
+        payload = {"targets": [{"page_id": "entity", "before_hash": snap["revision_hash"], "additions": [{
+            "claim_ids": ["new-claim"], "as_of": "2026-10-09", "scope": "capacity", "body": "Capacity rose [S1]."}],
+            "relations": []}]}
+        return json.dumps(payload)
+    module().propose_integration(compiled(), source(), [snap], new_page_specs=[], llm_fn=llm)
+
+
+def test_generated_child_ordinal_uses_terminal_brackets_not_parent_date():
+    rows = [record("parent", title="Capacity [2026]"),
+        record("z-first", title="Capacity [2026] [0001]", body="FIRST", parent_page_id="parent"),
+        record("a-second", title="Capacity [2026] [0002]", body="SECOND", parent_page_id="parent")]
+    assert wiki.semantic_snapshot("parent", records=rows)["body"] == "FIRSTSECOND"
+
+
 def module():
     return importlib.import_module("reports.wiki_source_integration")
 

@@ -153,6 +153,47 @@ def test_target_cursor_progresses_across_passes_without_repeating_prose(pipeline
         assert wiki.semantic_snapshot(page_id)["body"].count("Added capacity") == 1
 
 
+def test_routed_new_concept_redelivery_does_not_duplicate_prose(pipeline_env):
+    original = pipeline_env["llm"]
+    def llm(prompt):
+        payload = json.loads(original(prompt))
+        if prompt.startswith("Route"):
+            payload["new_page_specs"] = [{"title": "Demand versus capacity", "kind": "concept",
+                "surface": "market", "purpose": "Separate reported capacity from actual demand"}]
+        elif prompt.startswith("Propose"):
+            data = json.loads(prompt.rsplit("\n", 1)[1])
+            claim = data["compiled"]["claims"][0]
+            payload["targets"].extend({**spec, "before_hash": None, "additions": [{
+                "claim_ids": [claim["claim_id"]], "as_of": claim["as_of"], "scope": claim["scope"],
+                "body": "Added capacity; demand uncertain [S1]."}], "relations": []}
+                for spec in data["new_page_specs"])
+        return json.dumps(payload)
+    first = module().run(events=[{}], dry_run=False, llm_fn=llm, now=NOW)
+    assert first["data_committed"] == 1
+    created = next(page for page in wiki.list_pages(surface="market", limit=20)
+                   if page["title"] == "Demand versus capacity")
+    pipeline_env["source"]["observed_evidence_ids"] = ["actual-redelivery"]
+    module().run(events=[{}], dry_run=False, llm_fn=llm, now=NOW)
+    snap = wiki.semantic_snapshot(created["id"])
+    assert snap["body"].count("Added capacity") == 1
+    assert "actual-redelivery" in snap["evidence_ids"]
+
+
+def test_failed_final_routing_pass_is_retried_with_unchanged_evidence(pipeline_env):
+    wiki.upsert_page({"id": "topic", "title": "Capacity planning", "body": "Prior caveat.",
+                      "kind": "concept", "surface": "market"})
+    module().run(events=[{}], dry_run=False, llm_fn=pipeline_env["llm"], target_limit=1, now=NOW)
+    def fail_proposal(prompt):
+        if prompt.startswith("Propose"):
+            raise ValueError("temporary model failure")
+        return pipeline_env["llm"](prompt)
+    failed = module().run(events=[{}], dry_run=False, llm_fn=fail_proposal, target_limit=1, now=NOW)
+    assert failed["routing_pending"] == 1
+    retried = module().run(events=[{}], dry_run=False, llm_fn=pipeline_env["llm"], target_limit=1, now=NOW)
+    assert retried["data_committed"] == 1
+    assert "Added capacity" in wiki.semantic_snapshot("topic")["body"]
+
+
 def test_enabled_worker_excludes_direct_legacy_source_writes(monkeypatch):
     from reports import wiki_distillation
     monkeypatch.setenv("WIKI_SOURCE_PIPELINE_ENABLED", "1")

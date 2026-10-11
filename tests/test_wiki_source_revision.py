@@ -137,6 +137,19 @@ def test_source_classes_keep_attribution_and_scope(archived_event, source, archi
     assert result["scope"] == scope
 
 
+@pytest.mark.parametrize("classified", [True, False])
+def test_native_public_telegram_without_top_level_kind_is_eligible(archived_event, classified):
+    event = archived_event(source="telegram:public_channel", archive_source="telegram",
+        url="https://t.me/public_channel/42", scope="public_message", kind="community_signal")
+    event.pop("kind")
+    event["record_kind"] = "content"
+    if classified:
+        event["classification"] = {"kind": "community_signal"}
+    revision = module().build_revision(event, now=NOW)
+    assert revision["provenance_class"] == "community"
+    assert revision["provider"] == "telegram:public_channel"
+
+
 def test_expired_original_is_not_verified_from_text(archived_event):
     event = archived_event()
     manifest = json.loads(Path(event["manifest_path"]).read_text())

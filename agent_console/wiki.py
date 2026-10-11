@@ -1014,7 +1014,7 @@ def semantic_snapshot(page_id: str, *, records: list[dict] | None = None) -> dic
         raise ValueError("target_duplicate_child")
 
     def order(row):
-        ordinal = re.search(r"\[(\d+)\]", str(row.get("title") or ""))
+        ordinal = re.search(r"\[(\d+)\]\s*$", str(row.get("title") or ""))
         return (int(ordinal.group(1)) if ordinal else 10**9,
                 explicit.index(row["id"]) if row["id"] in explicit else len(explicit), row["id"])
 
@@ -1454,6 +1454,12 @@ def lint_pages(pages: list[dict] | None = None) -> dict:
 
 
 def rebuild_artifacts(*, operation_id: str | None = None) -> dict:
+    with safe_io.file_write_lock(str(wiki_artifacts_dir() / "publication")):
+        _CACHE.clear()
+        return _publish_artifacts(operation_id=operation_id)
+
+
+def _publish_artifacts(*, operation_id: str | None = None) -> dict:
     pages = _all_wiki_pages()
     out_dir = wiki_artifacts_dir()
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -1530,7 +1536,9 @@ def _append_wiki_log(action: str, *, operation_id: str | None = None, **metadata
 
 def sync_qmd() -> dict:
     """전체 위키 스냅샷만 QMD에 반영한다. 부분 조회 결과로 기존 문서를 지우지 않는다."""
-    return qmd_search.sync_pages(_all_wiki_pages(), complete=True)
+    with safe_io.file_write_lock(str(wiki_artifacts_dir() / "publication")):
+        _CACHE.clear()
+        return qmd_search.sync_pages(_all_wiki_pages(), complete=True)
 
 
 def _render_index_md(pages: list[dict]) -> str:

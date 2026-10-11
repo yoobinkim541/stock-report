@@ -147,7 +147,10 @@ def build_revision(event: dict, *, now: datetime) -> SourceRevision:
                  r"\uB85C\uADF8\uC778\s*\uD6C4\s*(\uC774\uC6A9|\uC5F4\uB78C)", scan):
         raise SourceGateError("reauth_required")
 
-    content_kind = str(event.get("content_kind") or event.get("kind") or "article")
+    classification = event.get("classification")
+    classified_kind = classification.get("kind") if isinstance(classification, dict) else None
+    default_kind = "community_signal" if provider.startswith("telegram:") and scope == "public_message" else "article"
+    content_kind = str(event.get("content_kind") or event.get("kind") or classified_kind or default_kind)
     parsed_url = urlsplit(url)
     if provider in {"saveticker", "saveticker_report_pdf"} and (
             parsed_url.hostname not in {"saveticker.com", "www.saveticker.com"} or

@@ -1,0 +1,46 @@
+[
+  {
+    "id": "capacity-demand",
+    "failure_mode": "capacity_is_not_demand",
+    "source": "Capacity increased in October. Demand uncertain; realized orders were not reported.",
+    "prior_knowledge": "Prior planning caveat: Demand uncertain. Capacity is not realized orders.",
+    "required_caveats": ["Capacity is not realized orders", "Demand uncertain"],
+    "forbidden_claims": ["Revenue increased because capacity increased", "Orders are confirmed"],
+    "expected_scope": "capacity, not realized orders",
+    "expected_relation": "qualify",
+    "reviewer_verdict": "pending"
+  },
+  {
+    "id": "different-horizons",
+    "failure_mode": "different_horizons",
+    "source": "On October 9, near-term orders were weak. Management expected a recovery next year, not this quarter.",
+    "prior_knowledge": "A long-term recovery forecast does not establish current demand.",
+    "required_caveats": ["near-term", "next year", "forecast"],
+    "forbidden_claims": ["These claims contradict each other", "Current orders recovered"],
+    "expected_scope": "short-term observations versus a long-term forecast",
+    "expected_relation": "qualify",
+    "reviewer_verdict": "pending"
+  },
+  {
+    "id": "community-claim",
+    "failure_mode": "community_attribution",
+    "source": "A public channel author suspects inventory has improved; no supporting official figures are supplied.",
+    "prior_knowledge": "Inventory statistics require a dated official source.",
+    "required_caveats": ["author", "unverified", "no official figures"],
+    "forbidden_claims": ["Inventory improvement is confirmed", "Official data proves improvement"],
+    "expected_scope": "attributed community opinion",
+    "expected_relation": "qualify",
+    "reviewer_verdict": "pending"
+  },
+  {
+    "id": "ocr-number",
+    "failure_mode": "ocr_uncertainty",
+    "source": "OCR output reports a ratio of 1O.2. The letter O may have been recognized in place of zero.",
+    "prior_knowledge": "Quantitative conclusions depend on the original table and its units.",
+    "required_caveats": ["OCR", "original", "uncertain"],
+    "forbidden_claims": ["The ratio is certainly 10.2", "The ratio proves undervaluation"],
+    "expected_scope": "uncertain extracted report text",
+    "expected_relation": "qualify",
+    "reviewer_verdict": "pending"
+  }
+]

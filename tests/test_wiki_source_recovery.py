@@ -1,5 +1,6 @@
 import json
 import multiprocessing
+import threading
 
 import pytest
 
@@ -90,6 +91,26 @@ def test_old_effect_recovery_does_not_roll_back_routing_cursor(pipeline_env):
     assert after["cursor"] == 9 and "new-page" in after["selected"]
 
 
+def test_old_effect_recovery_preserves_failed_final_pass(pipeline_env, monkeypatch):
+    wiki.upsert_page({"id": "topic", "title": "Capacity planning", "body": "Prior caveat.",
+                      "kind": "concept", "surface": "market"})
+    original = wiki.rebuild_artifacts
+    monkeypatch.setattr(wiki, "rebuild_artifacts", lambda **kwargs: (_ for _ in ()).throw(OSError("disk")))
+    first = module().run(events=[{}], dry_run=False, llm_fn=pipeline_env["llm"], target_limit=1, now=NOW)
+    assert first["data_committed"] == 1 and first["effects_pending"] == 1
+    def fail_proposal(prompt):
+        if prompt.startswith("Propose"):
+            raise ValueError("temporary model failure")
+        return pipeline_env["llm"](prompt)
+    failed = module().run(events=[{}], dry_run=False, llm_fn=fail_proposal, target_limit=1, now=NOW)
+    assert failed["routing_pending"] == 1
+    monkeypatch.setattr(wiki, "rebuild_artifacts", original)
+    retried = module().run(events=[{}], dry_run=False, llm_fn=pipeline_env["llm"], target_limit=1, now=NOW)
+    assert retried["data_committed"] == 1
+    assert "Added capacity" in wiki.semantic_snapshot("topic")["body"]
+    assert not Journal().pending_operations()
+
+
 @pytest.mark.parametrize("stage", ["prepared", "applied", "committed", "log"])
 def test_receipt_stage_crashes_recover_without_duplicate_work(pipeline_env, monkeypatch, stage):
     original_prepare = Journal.prepare
@@ -118,3 +139,68 @@ def test_receipt_stage_crashes_recover_without_duplicate_work(pipeline_env, monk
     assert wiki.semantic_snapshot("entity")["body"].count("Added capacity") == 1
     log = (wiki.wiki_artifacts_dir() / "log.md").read_text()
     assert sum('"action": "source_ingest"' in line for line in log.splitlines()) == 1
+
+
+def test_overlapping_artifact_publications_keep_the_latest_store_snapshot(pipeline_env, monkeypatch):
+    captured_old = threading.Event()
+    newer_done = threading.Event()
+    original = wiki._render_index_md
+    errors = []
+    def render(pages):
+        if threading.current_thread().name == "older-rebuild":
+            captured_old.set()
+            newer_done.wait(3)
+        return original(pages)
+    monkeypatch.setattr(wiki, "_render_index_md", render)
+    def rebuild(newer=False):
+        try:
+            wiki.rebuild_artifacts()
+        except Exception as exc:
+            errors.append(type(exc).__name__)
+        finally:
+            if newer:
+                newer_done.set()
+    old = threading.Thread(target=rebuild, name="older-rebuild")
+    old.start()
+    assert captured_old.wait(3)
+    wiki.upsert_page({"id": "latest", "title": "Newest knowledge", "body": "Newly committed knowledge.",
+                      "kind": "concept", "surface": "market"})
+    new = threading.Thread(target=rebuild, args=(True,), name="newer-rebuild")
+    new.start()
+    old.join(8)
+    new.join(8)
+    assert not old.is_alive() and not new.is_alive() and errors == []
+    assert "Newest knowledge" in (wiki.wiki_artifacts_dir() / "index.md").read_text()
+
+
+def test_overlapping_search_exports_keep_the_latest_store_snapshot(pipeline_env, monkeypatch):
+    from agent_console import qmd_search
+    monkeypatch.setenv("AGENT_CONSOLE_QMD_DOCS_DIR", str(pipeline_env["root"] / "markdown"))
+    captured_old, newer_done = threading.Event(), threading.Event()
+    original = qmd_search.sync_pages
+    errors = []
+    def publish(pages, **kwargs):
+        if threading.current_thread().name == "older-search":
+            captured_old.set()
+            newer_done.wait(3)
+        return original(pages, **kwargs)
+    monkeypatch.setattr(qmd_search, "sync_pages", publish)
+    def sync(newer=False):
+        try:
+            wiki.sync_qmd()
+        except Exception as exc:
+            errors.append(type(exc).__name__)
+        finally:
+            if newer:
+                newer_done.set()
+    old = threading.Thread(target=sync, name="older-search")
+    old.start()
+    assert captured_old.wait(3)
+    wiki.upsert_page({"id": "latest", "title": "Newest knowledge", "body": "New knowledge.",
+                      "kind": "concept", "surface": "market"})
+    new = threading.Thread(target=sync, args=(True,), name="newer-search")
+    new.start()
+    old.join(8)
+    new.join(8)
+    assert not old.is_alive() and not new.is_alive() and errors == []
+    assert any("Newest knowledge" in path.read_text() for path in qmd_search.wiki_docs_dir().glob("*.md"))

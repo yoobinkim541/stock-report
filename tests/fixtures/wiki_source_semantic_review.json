@@ -1,0 +1,55 @@
+{
+  "review_model": "gpt-6-luna",
+  "scope": "synthetic_compilation_only",
+  "cases": [
+    {
+      "id": "capacity-demand",
+      "entailment": "pass: The body and claims preserve the reported capacity increase, uncertain demand, and unreported realized orders.",
+      "mechanism_causal_restraint": "pass: Explicitly says the capacity increase does not establish realized demand; does not infer revenue or orders.",
+      "date_scope": "pass: Keeps October without inventing a year, and distinguishes capacity from realized orders.",
+      "attribution": "pass: No unsupported speaker or source attribution is added.",
+      "overconfidence": "pass: Does not turn uncertain demand or unreported orders into confirmed outcomes.",
+      "routing_omissions": "not_tested: Compilation samples only; routing behavior is not evaluated.",
+      "overall": "pass",
+      "rationale": "Semantically faithful and appropriately qualified. The stated limitations also preserve the missing year, magnitude, and realized-order information."
+    },
+    {
+      "id": "different-horizons",
+      "entailment": "pass: Preserves weak near-term orders and management's expectation of recovery next year, not this quarter.",
+      "mechanism_causal_restraint": "pass: Does not treat the forecast as a realized recovery or claim the statements contradict.",
+      "date_scope": "pass: Distinguishes near-term from next year and notes that the October 9 year and calendar quarter are unspecified.",
+      "attribution": "pass: Attributes the recovery expectation to management.",
+      "overconfidence": "pass: Keeps the recovery as an expectation rather than a confirmed result.",
+      "routing_omissions": "not_tested: Compilation samples only; routing behavior is not evaluated.",
+      "overall": "pass",
+      "rationale": "The compilation retains the distinct time horizons and forecast status without overstating what happened."
+    },
+    {
+      "id": "community-claim",
+      "entailment": "pass: Preserves the author's suspicion and the absence of supporting official figures.",
+      "mechanism_causal_restraint": "pass: Does not infer why inventory may have improved or present improvement as established.",
+      "date_scope": "pass: Does not invent a date; the limitation notes that no publication date is supplied.",
+      "attribution": "pass: Clearly attributes the claim to a public-channel author.",
+      "overconfidence": "pass: Labels it an attributed suspicion, not an established finding.",
+      "routing_omissions": "not_tested: Compilation samples only; routing behavior is not evaluated.",
+      "overall": "pass",
+      "rationale": "The body and claims retain the source's attribution and evidentiary caveat. The validator may append a required community-attribution limitation based on source provenance."
+    },
+    {
+      "id": "ocr-number",
+      "entailment": "pass: Preserves the OCR string and the possibility that O was recognized in place of zero.",
+      "mechanism_causal_restraint": "pass: Does not infer a valuation conclusion from the ambiguous ratio.",
+      "date_scope": "pass: Does not invent a date and notes that the ratio's definition and context are unspecified.",
+      "attribution": "pass: Identifies OCR output as the origin of the reported string.",
+      "overconfidence": "pass: Treats 10.2 only as a possible reading and leaves the value unresolved.",
+      "routing_omissions": "not_tested: Compilation samples only; routing behavior is not evaluated.",
+      "overall": "pass",
+      "rationale": "The output preserves OCR uncertainty and does not promote a possible transcription into a confirmed figure. The validator may append a required OCR limitation based on source provenance."
+    }
+  ],
+  "limitations": [
+    "These are synthetic compilation samples, not a review of live collection, end-to-end routing, provider activation, or actual-news accuracy.",
+    "The fixture outputs show response payloads. validate_compilation additionally checks fields, citations, claims, and anchors against a SourceRevision; cleans the body and claim text; adds claim IDs, source revision IDs, and draft knowledge state; and may inject provenance-specific limitations. Those normalized results are not shown in the fixtures.",
+    "The validator's community and OCR limitation injections depend on the SourceRevision provenance class, which is not established by the compilation samples alone."
+  ]
+}

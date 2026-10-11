@@ -46,6 +46,18 @@ def test_complete_source_and_synthesis_tail_preserved():
     assert compiled["limitations"] == ["Not proof of realized orders"]
 
 
+def test_compilation_prompt_exposes_exact_claim_shape_without_model_owned_ids():
+    prompts = []
+    def llm(prompt):
+        prompts.append(prompt)
+        return json.dumps(output())
+    module().compile_source(source(), llm_fn=llm)
+    assert "OUTPUT_SCHEMA\n" in prompts[0]
+    schema = json.loads(prompts[0].split("OUTPUT_SCHEMA\n", 1)[1].split("\nEND_OUTPUT_SCHEMA", 1)[0])
+    assert set(schema["claims"][0]) == {"text", "as_of", "scope", "anchor", "competing_claim_ids"}
+    assert "Do not add id, claim_id or source_revision_id" in prompts[0]
+
+
 def test_exact_anchor_offsets():
     compiled = module().validate_compilation(output(), source())
     claim = compiled["claims"][0]

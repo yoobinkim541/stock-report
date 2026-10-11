@@ -1,6 +1,6 @@
 # Source Compilation And Persistent Wiki Integration
 
-Status: design draft awaiting written-spec review. Not implemented.
+Status: user-approved on 2026-10-09; implementation plan approved for direct TDD execution. Implementation in progress, production activation gated.
 
 ## Intent And Agreed Constraints
 
@@ -16,7 +16,7 @@ a source-ingest or stored-knowledge truncation policy. Keep existing source
 classification, authorized Hermes ingress, raw archive, wiki APIs, markdown
 mirror, index, append-only history and search. Do not create another chatbot.
 
-The selected architectural direction permits this design draft, not automatic
+The approved architectural direction permits an implementation plan, not automatic
 implementation, changes to retention, new credentials or provider calls with
 previously rejected private payloads.
 
@@ -233,9 +233,10 @@ tests alone are not the final acceptance condition.
 
 ## Next Gate
 
-Review this written spec with the user. After approval, write a TDD implementation
-plan with ownership, migrations, recovery tests and activation gates, and have
-the user select execution. No new subsystem code has been added for this design.
+The user approved this written spec and its TDD implementation plan and chose
+direct execution on 2026-10-09. Implementation is underway with durable receipts,
+guarded integration and recovery tests. Production activation, private model
+payload approval and protected-source authentication remain separate gates.
 
 ## Spec Self-Review
 
@@ -245,4 +246,5 @@ existing store lock. Query limits and new retention/provider permissions remain
 separate decisions. There are no placeholder stages presented as implementation.
 This is not an independent model review: both requested new audit workers
 terminated at their usage limits before producing findings. Written user review
-is still pending.
+approved the spec and implementation plan on 2026-10-09. Independent semantic
+review remains pending; structural test success is not factual certification.
