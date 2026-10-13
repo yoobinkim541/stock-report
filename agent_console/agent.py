@@ -1753,7 +1753,7 @@ class _ProcessTrackingRunner:
 
 
 def _race_providers(prompt: str, providers, *, runner, deadline, max_timeout,
-                     search, reasoning_effort) -> str | None:
+                     search, reasoning_effort, structured_output: bool = False) -> str | None:
     """여러 provider 함수를 동시에 띄워 가장 먼저 성공(non-None)하는 응답을 쓴다.
 
     순차 실행이면 앞선 provider 의 실패/지연이 뒤 provider 의 시작을 늦춰 공유
@@ -1771,6 +1771,7 @@ def _race_providers(prompt: str, providers, *, runner, deadline, max_timeout,
         pool.submit(
             fn, prompt, runner=trackers[name], max_timeout=max_timeout, deadline=deadline,
             search=search, reasoning_effort=reasoning_effort,
+            **({"structured_output": True} if structured_output else {}),
         ): name
         for name, fn in providers
     }
@@ -1807,7 +1808,8 @@ def _race_providers(prompt: str, providers, *, runner, deadline, max_timeout,
 
 def _try_llm_prompt(prompt: str, runner=subprocess.run, max_timeout: int | None = None,
                     search: bool | None = None,
-                    reasoning_effort: str | None = None) -> str | None:
+                    reasoning_effort: str | None = None,
+                    structured_output: bool = False) -> str | None:
     if os.getenv("AGENT_CONSOLE_LLM_ENABLED", "1").lower() in {"0", "false", "no", "off"}:
         return None
     _emit_progress_event("llm_started")
@@ -1823,6 +1825,7 @@ def _try_llm_prompt(prompt: str, runner=subprocess.run, max_timeout: int | None 
             max_timeout=remaining,
             search=search,
             reasoning_effort=reasoning_effort,
+            **({"structured_output": True} if structured_output else {}),
         )
         if result:
             return result
@@ -1836,6 +1839,7 @@ def _try_llm_prompt(prompt: str, runner=subprocess.run, max_timeout: int | None 
             deadline=deadline,
             search=search,
             reasoning_effort=reasoning_effort,
+            **({"structured_output": True} if structured_output else {}),
         )
         if result:
             return result
@@ -1843,24 +1847,29 @@ def _try_llm_prompt(prompt: str, runner=subprocess.run, max_timeout: int | None 
     # Keep the final backup inside the same request budget as the primary chain.
     remaining = _remaining_timeout(deadline, _llm_budget(max_timeout))
     if remaining >= _LLM_PROVIDER_MIN_TIMEOUT:
-        return _try_agy_backup(prompt, max_timeout=remaining)
+        return _try_agy_backup(prompt, max_timeout=remaining,
+                               **({"structured_output": True} if structured_output else {}))
     return None
 
 
-def request_structured_output(prompt: str, *, max_timeout: int = 45) -> str | None:
+def request_structured_output(prompt: str, *, max_timeout: int | None = 45) -> str | None:
     """Call the existing LLM chain for a structured, non-chat response.
 
     This keeps strategy patch requests on the same configured provider chain as
     legacy chat while leaving chat routing and fallback semantics unchanged.
     """
 
-    return _try_llm_prompt(str(prompt or ""), max_timeout=max_timeout)
+    return _try_llm_prompt(str(prompt or ""), max_timeout=max_timeout, structured_output=True)
 
 
-def _is_usable_llm_output(prompt: str, text: str) -> bool:
+def _is_usable_llm_output(prompt: str, text: str, *, structured_output: bool = False) -> bool:
     text = str(text or "").strip()
     if not text:
         return False
+    if structured_output:
+        from lib.structured_output import parse_object
+
+        return parse_object(text) is not None
     lowered = text.lower()
     bad_markers = (
         "无法给到", "無法", "不能提供", "i cannot provide", "i can't provide",
@@ -1875,7 +1884,8 @@ def _is_usable_llm_output(prompt: str, text: str) -> bool:
     return True
 
 
-def _try_agy_backup(prompt: str, max_timeout: int | None = None) -> str | None:
+def _try_agy_backup(prompt: str, max_timeout: int | None = None,
+                    structured_output: bool = False) -> str | None:
     """레포 표준 LLM 백업 체인(lib/llm_cli — agy·빈 스크래치 cwd) 최종 폴백.
 
     LLM_BACKUP_ENABLED 게이트 off(기본)면 no-op — codex/hermes 동시 장애 시에만 의미.
@@ -1884,8 +1894,9 @@ def _try_agy_backup(prompt: str, max_timeout: int | None = None) -> str | None:
         from lib import llm_cli
         timeout = max(_LLM_PROVIDER_MIN_TIMEOUT, min(int(max_timeout or 120), 120))
         text, _note = llm_cli.backup_chat(prompt, timeout=timeout)
-        out = (text or "").strip()[:6000] or None
-        if out and _is_usable_llm_output(prompt, out):
+        text = (text or "").strip()
+        if text and _is_usable_llm_output(prompt, text, structured_output=structured_output):
+            out = _bounded_llm_output(text, structured_output=structured_output)
             _mark_llm_engine("agy")
             return out
         return None
@@ -1893,9 +1904,17 @@ def _try_agy_backup(prompt: str, max_timeout: int | None = None) -> str | None:
         return None
 
 
+def _bounded_llm_output(text: str, *, structured_output: bool = False) -> str | None:
+    """Bound already-validated output without altering structured responses."""
+    if not text or len(text) > 100_000:
+        return None
+    return text if structured_output else text[:6000]
+
+
 def _try_codex_chat(prompt: str, runner=subprocess.run, max_timeout: int | None = None,
                     deadline: float | None = None, search: bool | None = None,
-                    reasoning_effort: str | None = None) -> str | None:
+                    reasoning_effort: str | None = None,
+                    structured_output: bool = False) -> str | None:
     if os.getenv("AGENT_CONSOLE_CODEX_ENABLED", "1").lower() in {"0", "false", "no", "off"}:
         return None
     out_path = None
@@ -1955,9 +1974,9 @@ def _try_codex_chat(prompt: str, runner=subprocess.run, max_timeout: int | None 
         text = Path(out_path).read_text(encoding="utf-8", errors="replace").strip() if out_path else ""
         if not text:
             text = (getattr(result, "stdout", "") or "").strip()
-        if text and _is_usable_llm_output(prompt, text):
+        if text and _is_usable_llm_output(prompt, text, structured_output=structured_output):
             _mark_llm_engine("codex")
-            return text[:6000]
+            return _bounded_llm_output(text, structured_output=structured_output)
         return None
     except Exception:
         return None
@@ -1978,7 +1997,8 @@ def _valid_reasoning_effort(value: str | None, default: str = "medium") -> str:
 
 def _try_hermes_chat(prompt: str, runner=subprocess.run, max_timeout: int | None = None,
                      deadline: float | None = None, search: bool | None = None,
-                     reasoning_effort: str | None = None) -> str | None:
+                     reasoning_effort: str | None = None,
+                     structured_output: bool = False) -> str | None:
     if os.getenv("AGENT_CONSOLE_HERMES_ENABLED", "1").lower() in {"0", "false", "no", "off"}:
         return None
     cmd = [
@@ -2019,15 +2039,16 @@ def _try_hermes_chat(prompt: str, runner=subprocess.run, max_timeout: int | None
     if getattr(result, "returncode", 1) != 0:
         return None
     text = (getattr(result, "stdout", "") or "").strip()
-    if not text or not _is_usable_llm_output(prompt, text):
+    if not text or not _is_usable_llm_output(prompt, text, structured_output=structured_output):
         return None
     _mark_llm_engine("hermes")
-    return text[:6000]
+    return _bounded_llm_output(text, structured_output=structured_output)
 
 
 def _try_gemini_chat(prompt: str, runner=subprocess.run, max_timeout: int | None = None,
                      deadline: float | None = None, search: bool | None = None,
-                     reasoning_effort: str | None = None) -> str | None:
+                     reasoning_effort: str | None = None,
+                     structured_output: bool = False) -> str | None:
     """hermes 경유 Gemini 직통 호출 — codex/hermes(openai-codex) 동시 장애 시 3차 폴백.
 
     hermes 는 openai-codex 인증 만료 시 OpenRouter 로 자동 강등되는데 그 크레딧이
@@ -2069,10 +2090,10 @@ def _try_gemini_chat(prompt: str, runner=subprocess.run, max_timeout: int | None
     if getattr(result, "returncode", 1) != 0:
         return None
     text = (getattr(result, "stdout", "") or "").strip()
-    if not text or not _is_usable_llm_output(prompt, text):
+    if not text or not _is_usable_llm_output(prompt, text, structured_output=structured_output):
         return None
     _mark_llm_engine("gemini")
-    return text[:6000]
+    return _bounded_llm_output(text, structured_output=structured_output)
 
 
 def _build_general_chat_prompt(question: str, pack: dict, history: list[dict] | None = None) -> str:

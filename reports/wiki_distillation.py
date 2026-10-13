@@ -37,6 +37,7 @@ from dotenv import load_dotenv          # crons/*.py 관례 — uv run 은 .env 
 load_dotenv()
 
 from agent_console import shared_memory, wiki
+from lib.structured_output import parse_object as _parse_structured_object
 import notify
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
@@ -146,50 +147,6 @@ def _build_distillation_prompt(page: dict) -> str:
         f"본문: {(page.get('body') or '')[:3000]}",
         "</source_digest>",
     ])
-
-
-def _parse_structured_object(text: str | None) -> dict | None:
-    """Accept one complete structured response; never salvage an inner object."""
-    raw = str(text or "").strip()
-    if not raw or len(raw) > 100_000:
-        return None
-    nesting = 0
-    quoted = escaped = False
-    for char in raw:
-        if quoted:
-            if escaped:
-                escaped = False
-            elif char == "\\":
-                escaped = True
-            elif char == '"':
-                quoted = False
-        elif char == '"':
-            quoted = True
-        elif char in "[{":
-            nesting += 1
-            if nesting > 64:
-                return None
-        elif char in "]}":
-            nesting -= 1
-            if nesting < 0:
-                return None
-    fenced = re.fullmatch(r"```(?:json)?\s*(.*?)\s*```", raw, flags=re.S | re.I)
-    if fenced:
-        raw = fenced.group(1).strip()
-    def unique_object(pairs):
-        result = {}
-        for key, value in pairs:
-            if key in result:
-                raise ValueError("duplicate JSON key")
-            result[key] = value
-        return result
-    def reject_constant(_value):
-        raise ValueError("non-finite JSON constant")
-    try:
-        plan = json.loads(raw, object_pairs_hook=unique_object, parse_constant=reject_constant)
-    except (json.JSONDecodeError, TypeError, ValueError, RecursionError):
-        return None
-    return plan if isinstance(plan, dict) else None
 
 
 def _parse_distillation_plan(text: str | None) -> dict | None:

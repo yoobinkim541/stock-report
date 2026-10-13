@@ -65,6 +65,32 @@ def test_dry_run_has_no_model_calls_or_store_changes(pipeline_env):
     assert {str(path): path.read_bytes() for path in root.rglob("*") if path.is_file()} == before
 
 
+def test_default_worker_uses_structured_provider_contract(pipeline_env, monkeypatch):
+    from agent_console import agent
+
+    budgets = []
+    def structured(prompt, *, max_timeout=45):
+        budgets.append(max_timeout)
+        return pipeline_env["llm"](prompt)
+
+    monkeypatch.setenv("WIKI_SOURCE_PIPELINE_ENABLED", "1")
+    monkeypatch.setattr(agent, "request_structured_output", structured)
+    monkeypatch.setattr(agent, "_try_llm_prompt", lambda *a, **kw: None)
+    result = module().run(events=[{}], dry_run=False, now=NOW)
+    assert result["data_committed"] == 1
+    assert pipeline_env["calls"] == ["compile", "route", "integrate"]
+    assert budgets == [None, None, None]
+
+
+def test_compiled_page_label_does_not_claim_exhaustive_summary(pipeline_env):
+    module().run(events=[{}], dry_run=False, llm_fn=pipeline_env["llm"], now=NOW)
+    page_id = hashlib.sha256(("compiled-source:" + REV).encode()).hexdigest()
+    page = wiki.get_page(page_id)
+    assert "Source-derived summary" in page["body"]
+    assert "Complete source compilation" not in page["body"]
+    assert wiki.semantic_snapshot(page_id)["claims"]
+
+
 def test_complete_source_compounds_and_unavailable_source_is_independent(pipeline_env):
     pipeline_env["discovery"]["unavailable"] = [{"discovery_id": "d" * 64, "reason": "raw_unavailable"}]
     result = module().run(events=[{}, {}], dry_run=False, llm_fn=pipeline_env["llm"], now=NOW)

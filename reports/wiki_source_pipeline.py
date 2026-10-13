@@ -151,7 +151,7 @@ def _build_batch(source: dict, compiled: dict, state: dict, llm_fn: Callable) ->
         spec = _new_spec({"title": wiki._clean(source["title"], 110) + " compiled", "surface": state["surface"],
                           "kind": "note", "purpose": "compiled_source"}, source["revision_id"], state["surface"])
         proposal["targets"].append({**spec, "before_hash": None, "additions": [{"claim_ids": [first["claim_id"]],
-            "as_of": first["as_of"], "scope": "Complete source compilation", "body": compiled["body"]}], "relations": []})
+            "as_of": first["as_of"], "scope": "Source-derived summary", "body": compiled["body"]}], "relations": []})
     batch = wiki.prepare_source_batch(proposal, compiled, source)
     # Cross-links are server-derived, never a model-selected page identity.
     for row in batch["upserts"]:
@@ -175,8 +175,8 @@ def run(*, events: list[dict] | None = None, dry_run: bool = True, llm_fn: Calla
     if not dry_run and llm_fn is None:
         if not _mode_enabled():
             raise ValueError("model_activation_required")
-        from agent_console.agent import _try_llm_prompt
-        llm_fn = _try_llm_prompt
+        from agent_console.agent import request_structured_output
+        llm_fn = lambda prompt: request_structured_output(prompt, max_timeout=None)
     now = now or datetime.now(timezone.utc)
     events = source_collector.load_recent_events() if events is None else events
     records = shared_memory._read_jsonl_checked(shared_memory._paths()["events"])

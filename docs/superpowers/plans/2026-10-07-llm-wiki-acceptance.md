@@ -567,3 +567,79 @@ The user approved direct TDD implementation on 2026-10-09.
 - A proposed same-URL refresh defect was ruled out: evidence IDs already hash
   the complete event JSON. Speculative source-fingerprint metadata was removed
   rather than keeping a fix justified only by mocked IDs.
+
+## Public-Only Source Worker Probe (2026-10-11)
+
+The user authorized a small existing-Codex-engine probe with public originals
+only. Login articles, personal conversations and production wiki contents were
+excluded. The sample was public Telegram message `insidertracking/65880`.
+
+- A Korean source prompt exposed a general provider-contract defect: valid
+  language-neutral routing JSON was rejected by the chat-language filter.
+  An explicit structured-output mode now propagates through all four provider
+  adapters and their race/fallback chain. It accepts a complete JSON object,
+  rejects duplicate keys, non-finite numbers, excess nesting/size and mixed or
+  partial output, and leaves ordinary chat language/refusal checks unchanged.
+- The source worker uses this contract without shortening its configured
+  request budget. New regressions were observed failing before implementation;
+  222 provider/chat tests and 43 source/structured-output tests passed.
+- An offline audit-hook proof blocked writes outside the temporary root.
+  The subsequent real probe used only the approved public source and one
+  temporary candidate page, with Codex read-only sandbox and no web search.
+  Three calls completed compilation, routing and integration: one source
+  compiled, one operation data-committed, zero pending effects or stale bases.
+  All 145 observed Python write attempts remained within isolation.
+- The compiled note and existing concept contain actual source-derived prose,
+  attribution, uncertainty caveats and reciprocal wiki links. Temporary
+  index/schema/log and Markdown exports were written; the chronological log
+  includes the operation's source-ingest entry. The 68-character routing JSON
+  was retained exactly, demonstrating the formerly rejected response class.
+- This is one isolated sample, not production activation, whole-corpus truth
+  verification or proof that protected collection works. Original paths outside
+  the relocated archive root are masked in this temporary display; canonical
+  public URL and original hashes remain in the compilation/receipt artifacts.
+  Production source coverage and historical-pointer repair remain open.
+- Live Hermes health remains `configured=true`, `ok=true`, `on_demand`, and its
+  service is active. This confirms the receiver, not an unattended collector.
+
+Evidence: `/tmp/wiki-guard-proof-zpwk2dwm/public-evidence.json`, isolated operation
+`710e1236f616095e9a1ab2a5c17609e4d7b5516132d1b3fefd1a5e480db8d9f8`.
+Independent code/semantic review and a fresh full suite are being completed;
+the overall goal and production activation remain open.
+
+### Review Follow-Up (2026-10-13)
+
+- Sol identified a prefix-validation bypass, ordinary-chat bounding regression,
+  single-line-fence mismatch and a shorter default worker budget. Twenty real
+  adapter-boundary regressions reproduced the first three; the budget mismatch
+  was separately reproduced. All were fixed without weakening target schemas.
+- A cold-import regression proved the structured validator initialized dotenv
+  and root logging through an operational report module. The parser now lives
+  in side-effect-free `lib/structured_output.py`; the old report helper remains
+  an import alias. Existing report behavior is not loaded by generic validation.
+- Luna's single-public-sample audit found no material unsupported causal or
+  financial strengthening, but identified omitted examples in the prose summary.
+  The stored full claim set is preserved; the page section label now says
+  `Source-derived summary`, not `Complete source compilation`. This does not
+  make the summary exhaustive or establish the community claims as facts.
+- The exact successful public model outputs were replayed after the final code
+  changes with zero model calls: one compilation and one committed integration,
+  zero pending effects, 136 isolated Python writes. No additional body was sent.
+- Final focused validation passed 121 tests; an independent staged-only checkout
+  passed 158 source/provider tests. The final additional Sol review was unavailable
+  due to usage limits; no independent sign-off for the last extraction is claimed.
+- Hermes was rechecked: service active, health configured/ok and on-demand.
+  A fresh full-project run is still in progress; no final result is inferred.
+- The sample's individual raw/text files had been cold-compacted. The existing
+  archive reader resolved both logical paths; original HTML and extracted text
+  SHA-256 hashes still matched the approved snapshot. Checking loose-file
+  existence alone would have incorrectly reported source loss.
+
+### Final Software Verification (2026-10-13)
+
+The fresh full-project run after the final parser and worker changes completed
+with **4,009 passed, two skipped and 41 warnings in 869.96 seconds**, exit zero.
+Log: `/tmp/wiki-structured-final-pytest-20261013.log`. Staged-only 158 and focused
+121 results above remain narrower checks, not substitutions for this full run.
+Both working-tree and staged diff checks passed. This completes this provider-
+contract repair, not the overall source-recovery/production-activation goal.
