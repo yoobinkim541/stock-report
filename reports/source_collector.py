@@ -433,20 +433,27 @@ def append_events(events: Iterable[dict], cache_dir: Path | str = DEFAULT_CACHE_
 
     with safe_io.file_write_lock(str(path)):
         seen: dict[str, tuple[str, str, str, str]] = {}
+        full_body_hashes: dict[str, str] = {}
         if path.exists():
-            for line in path.read_text(encoding="utf-8").splitlines():
-                try:
-                    saved = json.loads(line)
-                    saved_id = saved.get("id")
-                    if saved_id:
-                        seen[str(saved_id)] = (
-                            str(saved.get("record_kind") or ""),
-                            str(saved.get("entity_id") or ""),
-                            str(saved.get("observation_bucket") or ""),
-                            str(saved.get("content_id") or ""),
-                        )
-                except json.JSONDecodeError:
-                    continue
+            # Keep full identity dedupe while avoiding a whole-file Unicode
+            # buffer plus a second collection of all decoded lines.
+            with path.open(encoding="utf-8") as stream:
+                for line in stream:
+                    try:
+                        saved = json.loads(line)
+                        saved_id = saved.get("id")
+                        if saved_id:
+                            seen[str(saved_id)] = (
+                                str(saved.get("record_kind") or ""),
+                                str(saved.get("entity_id") or ""),
+                                str(saved.get("observation_bucket") or ""),
+                                str(saved.get("content_id") or ""),
+                            )
+                            if saved.get("fulltext_status") == "full":
+                                saved_body = str(saved.get("body_raw") or saved.get("body") or "")
+                                full_body_hashes[str(saved_id)] = hashlib.sha256(saved_body.encode()).hexdigest()
+                    except json.JSONDecodeError:
+                        continue
 
         rows = []
         run_stats: dict[str, dict] = {}
@@ -479,11 +486,33 @@ def append_events(events: Iterable[dict], cache_dir: Path | str = DEFAULT_CACHE_
                 # dedupe behavior; only two populated, different identities
                 # are a collision.
                 if previous_identity == identity or not any(previous_identity) or not any(identity):
-                    stats["deduped"] += 1
+                    # Preserve the preview in the append-only log, while allowing
+                    # an authorized full-body revision to become the latest row.
+                    body = str(row.get("body_raw") or row.get("body") or "")
+                    body_hash = hashlib.sha256(body.encode()).hexdigest()
+                    native_telegram_full = (
+                        row.get("transport") == "telegram_public_html"
+                        and str(row.get("source") or "").startswith("telegram:")
+                        and row.get("extraction_scope") == "public_message"
+                        and row.get("text_complete") is True
+                        and row.get("body_coverage") == "full"
+                    )
+                    upgrade = ((row.get("transport") == "hermes_webhook" or native_telegram_full)
+                               and row.get("fulltext_status") == "full" and bool(body)
+                               and full_body_hashes.get(row_id) != body_hash)
+                    if upgrade:
+                        full_body_hashes[row_id] = body_hash
+                        rows.append(row)
+                        stats["persisted"] += 1
+                    else:
+                        stats["deduped"] += 1
                 else:
                     stats["collisions"] += 1
                 continue
             seen[row_id] = identity
+            if row.get("fulltext_status") == "full":
+                body = str(row.get("body_raw") or row.get("body") or "")
+                full_body_hashes[row_id] = hashlib.sha256(body.encode()).hexdigest()
             rows.append(row)
             stats["persisted"] += 1
 
