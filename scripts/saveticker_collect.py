@@ -24,6 +24,7 @@ def main(argv=None, *, browser_factory=None, sender=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--outbox', type=Path, default=reports_root()/'hermes-source-outbox'/'saveticker')
     parser.add_argument('--limit', type=int, choices=range(1,21), default=10)
+    parser.add_argument('--url', action='append', help='Collect explicit article URLs without opening other articles')
     parser.add_argument('--check-connection', action='store_true', help='Check configuration without navigation, delivery or writes')
     args = parser.parse_args(argv)
     if browser_factory is None:
@@ -36,7 +37,8 @@ def main(argv=None, *, browser_factory=None, sender=None):
         if args.check_connection:
             print(json.dumps({'status':'browser_configured','authenticated':False,'delivered':0}))
             return 0
-        result = collect(browser, outbox=args.outbox, sender=sender or send_batch, limit=args.limit)
+        result = collect(browser, outbox=args.outbox, sender=sender or send_batch, limit=args.limit,
+                         article_urls=args.url)
     except Exception as exc:
         status = 'browser_connection_required' if isinstance(exc, CollectionError) and str(exc)=='browser_connection_required' else 'browser_unavailable'
         result = {'status':status, 'delivered':0, 'unchanged':0, 'wiki_status':'pending'}

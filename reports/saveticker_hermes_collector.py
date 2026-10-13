@@ -53,9 +53,24 @@ def extract_article(snapshot: dict) -> dict:
     soup = BeautifulSoup(raw, 'html.parser')
     article = soup.find('article')
     heading = article.find('h1') if article else None
-    if not article or not heading or not heading.get_text(strip=True):
-        raise CollectionError('parse_failed')
-    title = heading.get_text(' ', strip=True)
+    modal = snapshot.get('layout') == 'saveticker_modal_v1'
+    direct = bool(article and {'gap-6','p-6'}.issubset(article.get('class', []))
+                  and article.find('h2') and not heading)
+    if modal or direct:
+        section = article if direct else soup.select_one('div.gap-6.p-6')
+        paragraphs = soup.select('p.whitespace-pre-wrap')
+        supplied_title = article.find('h2').get_text(' ',strip=True) if direct else snapshot.get('title')
+        if (section is None or not paragraphs or not isinstance(supplied_title, str)
+                or not supplied_title.strip()
+                or any(p.parent is not paragraphs[0].parent for p in paragraphs)
+                or paragraphs[0].parent.parent is not section):
+            raise CollectionError('parse_failed')
+        article = section
+        title = supplied_title.strip()
+    else:
+        if not article or not heading or not heading.get_text(strip=True):
+            raise CollectionError('parse_failed')
+        title = heading.get_text(' ', strip=True)
     published = ''
     time_node = article.find('time', datetime=True)
     if time_node:
@@ -66,7 +81,7 @@ def extract_article(snapshot: dict) -> dict:
                 published = candidate
         except ValueError:
             pass
-    content = article.select_one('[data-article-body], [data-testid="article-body"], .article-content, .prose')
+    content = paragraphs[0].parent if modal or direct else article.select_one('[data-article-body], [data-testid="article-body"], .article-content, .prose')
     if content is None:
         text = article.get_text('\n',strip=True)
         if len(text)>MAX_BODY_CHARS:
@@ -115,9 +130,15 @@ def discover_urls(snapshot: dict, *, limit: int = 20) -> list[str]:
     return urls
 
 
-def collect(browser, *, outbox: Path, sender, now: datetime | None = None, limit: int = 10) -> dict:
+def collect(browser, *, outbox: Path, sender, now: datetime | None = None, limit: int = 10,
+            article_urls: list[str] | None = None) -> dict:
     if not 1 <= limit <= 20:
         raise ValueError('invalid collection limit')
+    explicit = None
+    if article_urls is not None:
+        if not isinstance(article_urls, list) or not 1 <= len(article_urls) <= limit:
+            raise ValueError('invalid explicit article count')
+        explicit = list(dict.fromkeys(_article_url(url) for url in article_urls))
     now = now or datetime.now(timezone.utc)
     if now.tzinfo is None:
         raise ValueError('collection timestamp requires timezone')
@@ -169,7 +190,9 @@ def collect(browser, *, outbox: Path, sender, now: datetime | None = None, limit
             deliver(path)
             state['retry_cursor']=path.name
         try:
-            urls = discover_urls(browser.read(ORIGIN), limit=limit)
+            listing = (browser.discover(limit=limit) if hasattr(browser, 'discover')
+                       else browser.read(ORIGIN)) if explicit is None else None
+            urls = explicit if explicit is not None else discover_urls(listing, limit=limit)
         except CollectionError as exc:
             urls = []
             result['errors'].append({'url': ORIGIN, 'reason': str(exc)})
@@ -213,12 +236,20 @@ def _delivery_id(record):
 
 DOM_CAPTURE = '''(async () => {
   const article = document.querySelector('article');
-  const html = article ? article.outerHTML : '';
+  const modals = Array.from(document.querySelectorAll('div[class*="modal-fullscreen:"]'))
+    .filter(e => e.matches('.overflow-hidden') && e.querySelector('button[aria-label="공유하기"]'));
+  const modal = modals.length === 1 ? modals[0] : null;
+  const sections = modal ? Array.from(modal.querySelectorAll('.overflow-y-auto > div.gap-6.p-6')) : [];
+  const section = sections.length === 1 ? sections[0] : null;
+  const headings = modal ? Array.from(modal.querySelectorAll('h2')) : [];
+  const titles = Array.from(new Set(headings.map(h => h.textContent.trim()).filter(Boolean)));
+  const layout = !article && section && titles.length === 1 ? 'saveticker_modal_v1' : '';
+  const html = article ? article.outerHTML : layout ? section.outerHTML : '';
   const bytes = new TextEncoder().encode(html);
   const digest = await crypto.subtle.digest('SHA-256', bytes);
   const html_sha256 = Array.from(new Uint8Array(digest)).map(x => x.toString(16).padStart(2,'0')).join('');
   return {
-    url: location.href, html, html_sha256,
+    url: location.href, html, html_sha256, layout, title: layout ? titles[0] : '',
     links: Array.from(document.querySelectorAll('a[href]')).map(a => a.getAttribute('href')),
     blocked: !!document.querySelector('#challenge-running, #cf-challenge-running, [id^="cf-chl-"]') || /just a moment/i.test(document.title),
     reauth_required: !!document.querySelector('input[type="password"]') ||
@@ -228,11 +259,90 @@ DOM_CAPTURE = '''(async () => {
 })()'''
 
 
+LISTING_DISCOVERY = r'''(async () => {
+  const pause = ms => new Promise(resolve => setTimeout(resolve, ms));
+  const blocked = () => /just a moment/i.test(document.title) ||
+    !!document.querySelector('#challenge-running, #cf-challenge-running, [id^="cf-chl-"]');
+  if (blocked()) return {blocked:true};
+  if (document.querySelector('input[type="password"]') ||
+      Array.from(document.querySelectorAll('button')).some(b => b.textContent.trim()==='로그인'))
+    return {reauth_required:true};
+  const links = [];
+  let rows = [];
+  for (let wait=0;wait<40;wait++) {
+    if (blocked()) return {blocked:true};
+    rows = Array.from(document.querySelectorAll('[role="button"][data-breaking]')).slice(0,limit);
+    if (rows.length) break;
+    await pause(100);
+  }
+  if (!rows.length) return {error:'parse_failed'};
+  for (const row of rows) {
+    row.click();
+    let modal = null;
+    for (let wait=0;wait<40;wait++) {
+      if (blocked()) return {blocked:true};
+      const candidates = Array.from(document.querySelectorAll('div[class*="modal-fullscreen:"]'))
+        .filter(e => e.matches('.overflow-hidden') && e.querySelector('button[aria-label="공유하기"]'));
+      if (candidates.length===1 && candidates[0].querySelector('h2')) {
+        modal=candidates[0]; break;
+      }
+      await pause(100);
+    }
+    if (!modal) return {error:'parse_failed'};
+    try {
+      const share = modal.querySelector('button[aria-label="공유하기"]');
+      if (!share) return {error:'parse_failed'};
+      const sentinel = 'stock-report-share:' + crypto.randomUUID();
+      await navigator.clipboard.writeText(sentinel);
+      share.click();
+      let value = sentinel;
+      for (let wait=0;wait<40;wait++) {
+        await pause(100);
+        value = await navigator.clipboard.readText();
+        if (value !== sentinel) break;
+      }
+      if (value === sentinel) return {error:'browser_unavailable'};
+      const url = new URL(value);
+      if (url.origin!=='https://saveticker.com' || !/^\/news\/[A-Za-z0-9_-]+\/?$/.test(url.pathname) ||
+          url.search || url.hash) return {error:'unsupported_url'};
+      if (!links.includes(url.href)) links.push(url.href);
+    } catch (_) {
+      return {error:'browser_unavailable'};
+    } finally {
+      const close = modal.querySelector('button[aria-label="뒤로가기"]');
+      if (close) close.click();
+      await pause(100);
+    }
+  }
+  return {url:'https://saveticker.com/',links};
+})()'''
+
+
+def _focus_attached_page(task_id, url, *, clipboard=False):
+    from tools.browser_supervisor import SUPERVISOR_REGISTRY
+    supervisor = SUPERVISOR_REGISTRY.get(task_id)
+    if supervisor is None or not supervisor.focus_page('https://saveticker.com',
+            accept='location.href === ' + json.dumps(url)).get('ok'):
+        raise CollectionError('browser_unavailable')
+    captured = SUPERVISOR_REGISTRY.capture(task_id)
+    if clipboard:
+        info = captured.call('Target.getTargetInfo', session_id=captured.page_session_id)
+        context = info.get('result', {}).get('targetInfo', {}).get('browserContextId')
+        contexts = captured.call('Target.getBrowserContexts').get('result', {}).get('browserContextIds', [])
+        params = {'origin':'https://saveticker.com',
+                  'permissions':['clipboardReadWrite','clipboardSanitizedWrite']}
+        if context and context in contexts:
+            params['browserContextId'] = context
+        captured.call('Browser.grantPermissions', params)
+    captured.call('Page.bringToFront', session_id=captured.page_session_id)
+
+
 class HermesBrowser:
     """Attach only to an explicitly configured private browser; never clone login state."""
-    def __init__(self, *, api=None):
+    def __init__(self, *, api=None, page_focus=None):
         if api is None:
             from tools import browser_tool as api
+            page_focus = page_focus or _focus_attached_page
         cdp = urlsplit(api._cdp._get_cdp_override_raw())
         host = cdp.hostname
         try:
@@ -246,7 +356,33 @@ class HermesBrowser:
                 or api._is_camofox_mode()):
             raise CollectionError('browser_connection_required')
         self.api = api
+        self.page_focus = page_focus
         self.task_id = 'stock-report-saveticker'
+
+    def discover(self, *, limit):
+        if not 1 <= limit <= 20:
+            raise ValueError('invalid collection limit')
+        navigation = json.loads(self.api.browser_navigate(ORIGIN, task_id=self.task_id))
+        if not navigation.get('success'):
+            raise CollectionError('browser_unavailable')
+        final = navigation.get('url')
+        if final not in {ORIGIN, ORIGIN.rstrip('/'), 'https://saveticker.com/news'}:
+            if final and re.search(r'/(?:login|signin|auth)(?:/|$)', urlsplit(final).path, re.I):
+                raise CollectionError('reauth_required')
+            raise CollectionError('article_redirect_mismatch')
+        if self.page_focus:
+            self.page_focus(self.task_id, final, clipboard=True)
+        expression = f'const limit = {limit};\n' + LISTING_DISCOVERY
+        response = json.loads(self.api.browser_console(expression=expression, task_id=self.task_id))
+        value = response.get('result')
+        if not response.get('success') or not isinstance(value, dict):
+            raise CollectionError('browser_unavailable')
+        _check_access(value)
+        if value.get('error'):
+            raise CollectionError(value['error'] if value['error'] in {
+                'parse_failed','unsupported_url','browser_unavailable'} else 'browser_unavailable')
+        discover_urls(value, limit=limit)
+        return value
 
     def read(self, url):
         if url != ORIGIN:
@@ -259,6 +395,8 @@ class HermesBrowser:
             if final and re.search(r'/(?:login|signin|auth)(?:/|$)', urlsplit(final).path, re.I):
                 raise CollectionError('reauth_required')
             raise CollectionError('article_redirect_mismatch')
+        if self.page_focus:
+            self.page_focus(self.task_id, final)
         response = json.loads(self.api.browser_console(expression=DOM_CAPTURE, task_id=self.task_id))
         value = response.get('result')
         if not response.get('success') or not isinstance(value, dict):

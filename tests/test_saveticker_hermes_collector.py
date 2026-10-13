@@ -1,6 +1,8 @@
 import importlib
 import hashlib
 import json
+import subprocess
+import sys
 from datetime import datetime, timezone
 from types import SimpleNamespace
 
@@ -26,6 +28,126 @@ def test_article_body_and_original_dom_survive_without_summary_or_truncation():
     assert record['published_at'] == ''
     assert record['body_coverage'] == 'full'
     assert record['extraction_scope'] == 'authorized_article'
+
+
+MODAL_HTML = ('<div class="flex flex-col gap-6 p-6 max-mobile:p-4">'
+              '<div>로이터</div><div class="bg-primary-blue/12">AI 요약 제외</div>'
+              '<div class="flex flex-col"><p class="whitespace-pre-wrap">첫 원문.</p>'
+              '<div class="h-6"></div><p class="whitespace-pre-wrap">마지막 원문.</p></div>'
+              '<p>저작권 안내 제외</p></div>')
+
+
+def modal_snapshot(html=MODAL_HTML):
+    return {**snapshot(html=html), 'layout':'saveticker_modal_v1', 'title':'기사 제목'}
+
+
+def test_live_modal_preserves_exact_section_and_excludes_ai_summary_footer():
+    record = module().extract_article(modal_snapshot())
+    assert record['title'] == '기사 제목'
+    assert record['body'] == '첫 원문.\n마지막 원문.'
+    assert record['raw_content'] == MODAL_HTML
+    assert record['published_at'] == ''
+
+
+def test_live_direct_article_h2_keeps_body_and_excludes_summary():
+    html = MODAL_HTML.replace('<div class="flex flex-col gap-6 p-6 max-mobile:p-4">',
+        '<article class="gap-6 p-6"><header><h2>원문 제목</h2></header>',1)
+    html = html[:-6] + '</article>'
+    record = module().extract_article(snapshot(html=html))
+    assert record['title'] == '원문 제목'
+    assert record['body'] == '첫 원문.\n마지막 원문.'
+    assert record['raw_content'] == html
+
+
+@pytest.mark.parametrize('html', [
+    '<div><p>미리보기만 존재</p></div>',
+    MODAL_HTML.replace('마지막 원문.', '미리보기...'),
+    MODAL_HTML + '<div><p class="whitespace-pre-wrap">댓글</p></div>',
+])
+def test_live_modal_fails_closed_when_body_is_missing_partial_or_ambiguous(html):
+    with pytest.raises(module().CollectionError):
+        module().extract_article(modal_snapshot(html))
+
+
+def test_explicit_article_collection_does_not_read_or_discover_other_articles(tmp_path):
+    reads=[]
+    class ExplicitBrowser:
+        def read(self,url):
+            reads.append(url)
+            return modal_snapshot()
+    result=module().collect(ExplicitBrowser(),outbox=tmp_path,
+        sender=lambda p:{'ok':True},now=NOW,limit=1,article_urls=[URL])
+    assert result['delivered']==1 and reads==[URL]
+
+
+def test_explicit_article_urls_are_validated_before_any_io(tmp_path):
+    with pytest.raises(module().CollectionError):
+        module().collect(browser(),outbox=tmp_path,sender=lambda p:pytest.fail('no send'),
+                         article_urls=['https://evil.example/news/1'])
+    assert not list(tmp_path.iterdir())
+
+
+def test_collection_uses_bounded_browser_discovery_for_click_based_listing(tmp_path):
+    class ClickBrowser:
+        def discover(self,limit):
+            assert limit==1
+            return {'url':'https://saveticker.com/','links':[URL]}
+        def read(self,url):
+            assert url==URL
+            return modal_snapshot()
+    result=module().collect(ClickBrowser(),outbox=tmp_path,sender=lambda p:{'ok':True},limit=1)
+    assert result['delivered']==1
+
+
+def test_hermes_click_discovery_handles_news_redirect_and_honors_limit():
+    api=hermes_api()
+    api.browser_navigate=lambda url,task_id:json.dumps({'success':True,'url':'https://saveticker.com/news'})
+    calls=[]
+    def console(**kw):
+        calls.append(kw['expression'])
+        return json.dumps({'success':True,'result':{'url':'https://saveticker.com/','links':[URL]}})
+    api.browser_console=console
+    value=module().HermesBrowser(api=api).discover(limit=1)
+    assert value['links']==[URL]
+    assert 'const limit = 1;' in calls[0]
+    assert 'document.cookie' not in calls[0]
+
+
+@pytest.mark.parametrize('write_delay,write_enabled,expected', [
+    (500, True, '/news/clicked'),
+    (0, False, None),
+])
+def test_discovery_javascript_never_uses_stale_clipboard(write_delay,write_enabled,expected):
+    script = '''
+    let clip='https://saveticker.com/news/old';
+    let open=false;
+    let copied=false;
+    const share={click(){if(WRITE_ENABLED)setTimeout(()=>{clip='https://saveticker.com/news/clicked';copied=true},WRITE_DELAY)}};
+    const close={click(){open=false}};
+    const modal={matches:()=>true,querySelector:s=>s==='h2'?{}:s.includes('공유하기')?share:s.includes('뒤로가기')?close:null};
+    const irrelevant={matches:()=>false,querySelector:()=>null};
+    globalThis.document={title:'News',querySelector:()=>null,querySelectorAll:s=>
+        s==='button'?[]:s.includes('data-breaking')?[{click(){open=true}}]:s.includes('modal-fullscreen')?(open?[modal]:[]):[]};
+    Object.defineProperty(globalThis,'navigator',{value:{clipboard:{readText:async()=>clip,writeText:async value=>{clip=value}}},configurable:true});
+    const limit=1;
+    const result=await EXPRESSION;
+    console.log(JSON.stringify({result,copied}));
+    '''.replace('WRITE_ENABLED','true' if write_enabled else 'false').replace('WRITE_DELAY',str(write_delay)).replace('EXPRESSION',module().LISTING_DISCOVERY)
+    run=subprocess.run(['node','--input-type=module'],input=script,text=True,capture_output=True,timeout=12)
+    assert run.returncode==0,run.stderr
+    result=json.loads(run.stdout)['result']
+    if expected:
+        assert result['links']==['https://saveticker.com'+expected]
+    else:
+        assert result.get('error')=='browser_unavailable'
+        assert not result.get('links')
+
+
+def test_cli_accepts_explicit_article_url_without_listing(tmp_path,capsys):
+    cli=importlib.import_module('scripts.saveticker_collect')
+    assert cli.main(['--url',URL,'--limit','1','--outbox',str(tmp_path)],
+        browser_factory=lambda:Browser({URL:modal_snapshot()}),sender=lambda p:{'ok':True})==0
+    assert json.loads(capsys.readouterr().out)['delivered']==1
 
 
 @pytest.mark.parametrize('value,reason', [
@@ -154,6 +276,49 @@ def test_hermes_adapter_reads_dom_without_model_or_browser_storage():
 def test_redacted_or_shortened_browser_result_is_not_original():
     with pytest.raises(module().CollectionError, match='original_mismatch'):
         module().HermesBrowser(api=hermes_api(altered=True)).read(URL)
+
+
+def test_adapter_focuses_exact_navigated_page_before_capture():
+    calls=[]
+    def focus(task_id,url):
+        calls.append((task_id,url))
+    adapter=module().HermesBrowser(api=hermes_api(),page_focus=focus)
+    assert adapter.read(URL)['url']==URL
+    assert calls==[('stock-report-saveticker',URL)]
+
+
+def test_default_browser_context_permission_does_not_use_ungrantable_context_id(monkeypatch):
+    calls=[]
+    class Capture:
+        page_session_id='page'
+        def call(self,method,params=None,**kw):
+            calls.append((method,params))
+            if method=='Target.getTargetInfo':
+                return {'result':{'targetInfo':{'browserContextId':'default-internal-id'}}}
+            if method=='Target.getBrowserContexts':
+                return {'result':{'browserContextIds':[]}}
+            return {'result':{}}
+    registry=SimpleNamespace(get=lambda task:SimpleNamespace(focus_page=lambda *a,**kw:{'ok':True}),
+                             capture=lambda task:Capture())
+    monkeypatch.setitem(sys.modules,'tools.browser_supervisor',SimpleNamespace(SUPERVISOR_REGISTRY=registry))
+    module()._focus_attached_page('task',URL,clipboard=True)
+    params=next(p for m,p in calls if m=='Browser.grantPermissions')
+    assert 'browserContextId' not in params
+    assert params['origin']=='https://saveticker.com'
+
+
+def test_read_only_page_focus_does_not_grant_clipboard_permissions(monkeypatch):
+    calls=[]
+    class Capture:
+        page_session_id='page'
+        def call(self,method,params=None,**kw):
+            calls.append(method)
+            return {'result':{}}
+    registry=SimpleNamespace(get=lambda task:SimpleNamespace(focus_page=lambda *a,**kw:{'ok':True}),
+                             capture=lambda task:Capture())
+    monkeypatch.setitem(sys.modules,'tools.browser_supervisor',SimpleNamespace(SUPERVISOR_REGISTRY=registry))
+    module()._focus_attached_page('task',URL)
+    assert calls==['Page.bringToFront']
 
 
 def test_empty_or_unrecognized_listing_is_not_a_healthy_run(tmp_path):

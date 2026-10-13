@@ -12,6 +12,7 @@ Use the project's Python environment with the existing Hermes source checkout:
 uv pip install --python .venv/bin/python -r deploy/requirements-saveticker-collector.txt
 .venv/bin/python scripts/saveticker_collect.py --check-connection
 .venv/bin/python scripts/saveticker_collect.py --limit 10
+.venv/bin/python scripts/saveticker_collect.py --url https://saveticker.com/news/ARTICLE_ID --limit 1
 ```
 
 The optional `HERMES_SOURCE_AGENT_ROOT` selects the Hermes checkout. The default
@@ -34,6 +35,14 @@ Never add passwords or browser storage to article batches or Git files.
 
 - Article URLs are same-origin `/news/...` paths; redirects to another article
   or an authentication page fail explicitly. The default list is the homepage.
+- Live click-based listings use a bounded article-card/share-button flow; the
+  homepage's same-origin `/news` redirect is accepted only for discovery. Article
+  navigation still requires the exact requested URL. `--url` skips discovery.
+- The attached page is selected by exact URL and brought to the foreground.
+  Clipboard permission is scoped to SaveTicker in that browser context. Discovery
+  writes a fresh sentinel before sharing and waits for a new URL; a failed share
+  never reuses an old clipboard link. The operation replaces the debug browser's
+  clipboard. Ordinary login/security confirmation remains user-managed.
 - A dedicated article-body element and an H1 are required. Unknown layouts,
   previews, subscription/login gates and challenges are not complete sources.
   Actual SaveTicker DOM must be checked through an authorized browser before
@@ -112,3 +121,38 @@ Implementation and software verification are finished. Actual protected-source
 recovery, confirmed live DOM selectors and a recurring authenticated Hermes job
 are not finished. Supply the exact saved environment-file location or attach a
 logged-in private browser before the authorized one-article live gate can run.
+
+## Authenticated Live Continuation (2026-10-13)
+
+The preceding missing-browser notes are historical. Chromium 149 now runs with a
+dedicated owner-only profile; CDP listens on loopback port 9225. After the user
+completed Cloudflare confirmation, the stored SaveTicker email login succeeded.
+No challenge was solved automatically and no credential value was logged.
+
+The actual site supports a direct `article.gap-6.p-6` page with an H2 and a body
+of `p.whitespace-pre-wrap` siblings, plus the click-list modal variant. Extraction
+requires one unambiguous body parent, excludes the separate AI-summary/footer
+from body text, and retains the exact source DOM fragment as raw. No generic H2
+or whole-modal fallback is accepted. Comments are outside the archived fragment.
+Publication time stays unknown if the scoped DOM lacks a timezone-bearing time.
+
+The authorized article `/news/news_235492` yielded 401 body characters through
+the real collector CLI and Hermes browser adapter. A dedicated loopback receiver
+confirmed signed delivery, duplicate delivery and a subsequent collector run
+returning `no_change`. Raw HTML and text matched exactly. Artifacts are under
+`~/reports/private-source-probes/`, not the production wiki queue. No external
+model calls were made. Live Hermes discovery subsequently resolved one article
+URL; that is not a receipt for bulk body ingestion or recurring execution.
+
+New TDD covers live-layout extraction, summary/footer separation, ambiguous and
+partial body rejection, explicit URL validation, bounded click discovery,
+clipboard write delays/failure, exact-page selection and Chromium's default
+context permission handling. The scoped collector/webhook/source/revision/health
+suite passed 185 tests. The full-project 4,043-test receipt above predates these
+changes and is not a fresh full-suite claim for this continuation.
+
+No recurring private-source job or production LLM/wiki delivery is enabled by
+these one-article probes. Expanding ingestion and sending login-protected bodies
+to an external model are separate activation decisions. Hermes currently emits
+an upstream shutdown cleanup warning after short-lived browser tool processes;
+the collector/receipt assertions passed independently of that warning.

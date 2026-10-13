@@ -57,7 +57,8 @@ Reuse Hermes job/browser APIs; do not subscribe to general lifecycle payloads.
 - [x] Implement deterministic SaveTicker browser capture, fair outbox retries,
   version idempotency and a no-side-effect connection readiness CLI.
 - [ ] Wire Hermes job only after its browser access is confirmed.
-- [ ] Read an actual login-protected article, deliver its body and immutable raw.
+- [x] Read an actual login-protected article, deliver its body and immutable raw
+  through an isolated local receiver (one-article approval; no external model).
 - [ ] Verify source event, classification, wiki synthesis input and cited draft.
 - [ ] Preserve blocked/reauth-required states until those live gates pass.
 - [x] Run wiki/source/webhook regression tests and deployed dashboard health.
@@ -101,6 +102,18 @@ or completed wiki refresh is claimed for the FRED notes. No login credential was
 registered, no authenticated browser was established, and Task 3 remains partial.
 
 ## SaveTicker Collector Continuation (2026-10-13)
+
+Authenticated continuation: after user-managed security confirmation, the saved
+email login succeeded. The live direct H2/paragraph article and click-list modal
+variants are supported. Explicit `--url` skips unrelated discovery. The actual
+collector CLI preserved 401 source-body characters and exact raw HTML through a
+dedicated signed loopback receiver; delivery retries and collector `no_change`
+were verified. Live Hermes bounded discovery also returned one URL. Private
+artifacts remain outside production wiki/model queues. These are source-ingest
+receipts, not permission to enable bulk private-source collection or model egress.
+Current scoped regression receipt: 185 passed; full-project verification above
+predates these changes. Recurring job and private-source wiki synthesis remain
+open activation gates.
 
 The collector and CLI are in `reports/saveticker_hermes_collector.py` and
 `scripts/saveticker_collect.py`; operations and privacy gates are documented in
