@@ -1,0 +1,10 @@
+[Unit]
+Description=SaveTicker private source collection and human-confirmed recovery
+
+[Service]
+Type=oneshot
+WorkingDirectory=%h/projects/stock-report
+Environment=PYTHONDONTWRITEBYTECODE=1
+ExecStart=%h/projects/stock-report/.venv/bin/python scripts/saveticker_recovery_tick.py --limit 1 --url https://saveticker.com/news/news_235492
+TimeoutStartSec=240
+UMask=0077

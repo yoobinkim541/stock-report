@@ -253,6 +253,7 @@ DOM_CAPTURE = '''(async () => {
     links: Array.from(document.querySelectorAll('a[href]')).map(a => a.getAttribute('href')),
     blocked: !!document.querySelector('#challenge-running, #cf-challenge-running, [id^="cf-chl-"]') || /just a moment/i.test(document.title),
     reauth_required: !!document.querySelector('input[type="password"]') ||
+      Array.from(document.querySelectorAll('button')).some(b => b.textContent.trim() === '로그인') ||
       /로그인\\s*후\\s*(열람|이용)|sign in to (continue|read)/i.test(document.body ? document.body.innerText : ''),
     access_required: /subscribe\\s+to\\s+(unlock|read)|구독\\s*후\\s*(열람|이용)/i.test(document.body ? document.body.innerText : '')
   };

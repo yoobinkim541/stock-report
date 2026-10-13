@@ -273,6 +273,19 @@ def test_hermes_adapter_reads_dom_without_model_or_browser_storage():
     assert 'subtle.digest' in expression
 
 
+def test_direct_article_login_button_is_detected_as_expired_session():
+    script='''
+    globalThis.document={title:'News',body:{innerText:''},querySelector:s=>s==='article'?{outerHTML:__ARTICLE_HTML__}:null,
+        querySelectorAll:s=>s==='button'?[{textContent:'로그인'}]:[]};
+    globalThis.location={href:'https://saveticker.com/news/123'};
+    const result=await EXPRESSION;
+    console.log(JSON.stringify({reauth:result.reauth_required}));
+    '''.replace('__ARTICLE_HTML__',json.dumps(HTML)).replace('EXPRESSION',module().DOM_CAPTURE)
+    run=subprocess.run(['node','--input-type=module'],input=script,text=True,capture_output=True,timeout=5)
+    assert run.returncode==0,run.stderr
+    assert json.loads(run.stdout)['reauth'] is True
+
+
 def test_redacted_or_shortened_browser_result_is_not_original():
     with pytest.raises(module().CollectionError, match='original_mismatch'):
         module().HermesBrowser(api=hermes_api(altered=True)).read(URL)

@@ -1,0 +1,10 @@
+[Unit]
+Description=Check SaveTicker recovery requests every minute
+
+[Timer]
+OnBootSec=2min
+OnUnitInactiveSec=60s
+Unit=stock-report-saveticker-recovery.service
+
+[Install]
+WantedBy=timers.target

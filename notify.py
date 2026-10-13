@@ -5,7 +5,7 @@
 인자로 override 가능. 동작은 기존 구현들의 합집합(줄바꿈 경계 분할 + 로그 토큰 마스킹).
 
 공개 API:
-    send_telegram(text, *, token=None, chat_id=None, timeout=10, split=True, parse_mode=None) -> bool
+    send_telegram(text, *, token=None, chat_id=None, timeout=10, split=True, parse_mode=None, reply_markup=None) -> bool
     send_photo(path, *, caption=None, ...) -> bool
     split_message(text, limit=4000) -> list[str]
 """
@@ -56,7 +56,8 @@ def split_message(message: str, limit: int = TG_MAX_CHARS) -> list[str]:
 
 
 def send_telegram(text, *, token: str | None = None, chat_id=None,
-                  timeout: int = 10, split: bool = True, parse_mode: str | None = None) -> bool:
+                  timeout: int = 10, split: bool = True, parse_mode: str | None = None,
+                  reply_markup: dict | None = None) -> bool:
     """텔레그램 sendMessage. 성공 True. 토큰 없으면 skip(False)."""
     token = token or _env_token()
     if not token:
@@ -70,6 +71,8 @@ def send_telegram(text, *, token: str | None = None, chat_id=None,
         payload = {"chat_id": chat_id, "text": part}
         if parse_mode:
             payload["parse_mode"] = parse_mode
+        if reply_markup:
+            payload['reply_markup'] = reply_markup
         try:
             resp = requests.post(url, json=payload, timeout=timeout)
             resp.raise_for_status()
