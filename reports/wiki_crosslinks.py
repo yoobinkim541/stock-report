@@ -75,7 +75,8 @@ def plan(pages: list[dict]) -> dict:
         ranked = sorted(((s, q) for q in pool if (s := _score(p, by_id[q], tags, terms)) > 0), key=lambda r: (-r[0], r[1]))
         existing = [link for link in p.get("links") or [] if link in ids]
         related = [q for _, q in ranked if q not in existing][:RELATED_PER_PAGE]
-        links[p["id"]] = existing + related
+        # Cap here (the store caps at MAX_LINKS) so a re-run sees exactly what it wrote.
+        links[p["id"]] = (existing + related)[:wiki.MAX_LINKS]
 
     hubs, members = [], defaultdict(list)
     for p in active:
@@ -145,8 +146,10 @@ def apply(dry_run: bool = True) -> dict:
                       and p.get("status") != "archived"]
         for hub in [*result["hubs"], *({**p, "status": "archived"} for p in stale_hubs)]:
             current = pages.get(hub["id"])
-            if not current or any(current.get(k) != hub.get(k) for k in ("body", "links", "title", "status", "parent_page_id")):
-                upserts[hub["id"]] = wiki._build_wiki_record(hub, existing=current or {})
+            record = wiki._build_wiki_record(hub, existing=current or {})
+            stored = wiki._record_to_page(shared_memory.normalize_record(record))
+            if not current or any(current.get(k) != stored.get(k) for k in ("body", "links", "title", "status", "parent_page_id")):
+                upserts[hub["id"]] = record
         summary = {"dry_run": dry_run, "pages_relinked": sum(1 for k in upserts if not k.startswith(HUB_PREFIX)),
                    "hubs_written": sum(1 for k in upserts if k.startswith(HUB_PREFIX)), "hubs": len(result["hubs"])}
         if dry_run or not upserts:

@@ -69,3 +69,14 @@ def test_reapply_is_idempotent_and_archives_obsolete_hubs(monkeypatch):
     assert not any(hub.endswith(("-01", "-02")) for hub in active_hubs)
     out, inbound, broken = audit.link_graph(wiki._all_wiki_pages())
     assert not any(broken.values()) and all(inbound.values())
+
+
+def test_filed_back_answer_drops_links_to_archived_or_missing_pages():
+    seed()
+    plan = {"action": "create", "title": "NVDA 수주와 공급 교차검증", "summary": "요약",
+            "body": "NVDA 수주와 공급을 함께 확인하는 절차를 정리한 본문이다." * 3, "kind": "risk",
+            "links": ["nvda-supply", "archived", "never-existed"]}
+    payload = wiki._plan_to_page_payload(plan, question="NVDA 수주는?", answer="답변 " * 50,
+                                         surface="market", chat_autocuration=True)
+    assert payload["links"] == ["nvda-supply"]
+    assert "query_fileback" in payload["tags"]

@@ -3110,6 +3110,9 @@ def _plan_to_page_payload(
     links = _clean_links(_string_list(plan.get("links"), limit=MAX_LINKS, item_limit=80), self_id=final_id)
     if target:
         links = _clean_links([*(target.get("links") or []), *links], self_id=final_id)
+    # A filed-back answer must not introduce links to missing or archived pages.
+    live_ids = {page["id"] for page in _all_wiki_pages() if page.get("status") != "archived"}
+    links = [link for link in links if link in live_ids]
     plan_tags = _string_list(plan.get("tags"), limit=12, item_limit=60)
     if chat_autocuration:
         plan_tags = [
