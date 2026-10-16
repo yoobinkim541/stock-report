@@ -10,7 +10,6 @@ from pathlib import Path
 RELEVANT_MARKERS = (
     "reports.source_pipeline",
     "reports/source_collector.py",
-    "reports.source_wiki_curator",
     "wiki_archive.log",
     "reports.wiki_health_check",
     "reports.wiki_distillation",

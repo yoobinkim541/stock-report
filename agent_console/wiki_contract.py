@@ -11,7 +11,7 @@ SCHEMA_PATH = Path(__file__).resolve().parent.parent / "config" / "wiki-maintain
 
 def maintenance_schema() -> str:
     text = SCHEMA_PATH.read_text(encoding="utf-8")
-    if not text.strip() or len(text) > 6000:
+    if not text.strip() or len(text) > 8000:
         raise ValueError("invalid wiki maintenance schema")
     return text
 

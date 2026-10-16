@@ -8,11 +8,11 @@ def test_relevant_cron_lines_normalizes_whitespace_and_comments():
 
     left = """
 5,35 * * * * cd /repo && uv run python -m reports.source_pipeline --group news >> /tmp/source_news.log 2>&1 # comment
-8,38 * * * * cd /repo && uv run python -m reports.source_wiki_curator --hours 48 --limit 0 >> /tmp/wiki.log 2>&1
+8,38 * * * * cd /repo && uv run python -m reports.wiki_distillation --limit 0 >> /tmp/wiki.log 2>&1
 """
     right = """
 5,35  *  * * *   cd /repo && uv run python -m reports.source_pipeline --group news >> /tmp/source_news.log 2>&1
-8,38 * * * * cd /repo && uv run python -m reports.source_wiki_curator --hours 48 --limit 0 >> /tmp/wiki.log 2>&1 # another comment
+8,38 * * * * cd /repo && uv run python -m reports.wiki_distillation --limit 0 >> /tmp/wiki.log 2>&1 # another comment
 """
 
     assert relevant_cron_lines(left) == relevant_cron_lines(right)
@@ -24,11 +24,11 @@ def test_drift_report_detects_wiki_limit_and_missing_source_group():
     expected = """
 5,35 * * * * uv run python -m reports.source_pipeline --group news
 9,39 * * * * uv run python -m reports.source_pipeline --group prediction
-8,38 * * * * uv run python -m reports.source_wiki_curator --hours 48 --limit 0
+8,38 * * * * uv run python -m reports.wiki_distillation --limit 0
 """
     installed = """
 5,35 * * * * uv run python -m reports.source_pipeline --group news
-8,38 * * * * uv run python -m reports.source_wiki_curator --hours 48 --limit 8
+8,38 * * * * uv run python -m reports.wiki_distillation --limit 8
 0 0 * * * uv run python tests/bot_smoke_test.py
 """
 

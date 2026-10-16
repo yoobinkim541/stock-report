@@ -24,7 +24,7 @@ from . import wiki_contract
 WIKI_TAG = "wiki"
 WIKI_SURFACE = "wiki"
 VALID_STATUSES = ("draft", "reviewed", "stable", "archived")
-VALID_KINDS = ("note", "playbook", "decision", "risk", "concept", "source_digest")
+VALID_KINDS = ("note", "playbook", "decision", "risk", "concept", "overview", "source_digest", "source_index")
 MAX_LINKS = 12
 MAX_SOURCE_REFS = 100
 WIKI_SUMMARY_LIMIT = 2400
@@ -956,8 +956,8 @@ def _record_retrieval_usage(query: str, surface: str, status: str, pages: list[d
     except Exception:
         pass
     _append_wiki_log(
-        "retrieval", query_id=query_id, page_ids=[str(page.get("id") or "") for page in pages],
-        provider=provider, surface=surface,
+        "retrieval", title=f"{surface} wiki retrieval", query_id=query_id,
+        page_ids=[str(page.get("id") or "") for page in pages], provider=provider, surface=surface,
     )
 
 
@@ -1478,7 +1478,7 @@ def lint_pages(pages: list[dict] | None = None) -> dict:
     result = collect_lint(pages, captured_at=_now())
     issues = result["issues"]
     _append_wiki_log(
-        "lint",
+        "lint", title=f"{len(issues)} issues",
         page_ids=sorted({issue.get("page_id", "") for issue in issues if issue.get("page_id")}),
         issue_count=len(issues),
         issue_codes=sorted({issue.get("code", "") for issue in issues if issue.get("code")}),
@@ -1577,7 +1577,26 @@ def _publish_artifacts(*, operation_id: str | None = None) -> dict:
     }
 
 
-def _append_wiki_log(action: str, *, operation_id: str | None = None, **metadata: object) -> None:
+_LOG_OPS = {
+    "source_ingest": "ingest", "topic_ingest": "ingest", "ingest": "ingest",
+    "retrieval": "query", "query": "query", "lint": "lint", "split": "split",
+    "merge": "merge", "archive": "archive",
+}
+
+
+def _log_header(event: dict, title: object) -> str:
+    """`## [YYYY-MM-DD] op | title` keeps the log greppable (Karpathy log.md)."""
+    op = _LOG_OPS.get(event["action"], "maintenance")
+    label = _clean(title, 120) if title else ""
+    if not label:
+        target = event.get("page_id") or event.get("revision_id") or event.get("operation_id") or ""
+        label = " ".join(part for part in (event["action"], _clean(target, 64)) if part)
+    label = re.sub(r"\s+", " ", label).strip()
+    return f"## [{event['at'][:10]}] {op} | {label}"
+
+
+def _append_wiki_log(action: str, *, operation_id: str | None = None, title: object = None,
+                     **metadata: object) -> None:
     """Append action metadata only; never serialize page bodies or user queries."""
     path = wiki_artifacts_dir() / "log.md"
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -1593,7 +1612,7 @@ def _append_wiki_log(action: str, *, operation_id: str | None = None, **metadata
             event[key] = value
         else:
             event[key] = _clean(value, 120)
-    line = ("## [" + event["at"] + "] " + event["action"] + "\n"
+    line = (_log_header(event, title) + "\n"
             + "- metadata: " + json.dumps(event, ensure_ascii=False, sort_keys=True) + "\n\n")
     with _WIKI_LOG_LOCK:
         fd = os.open(path, os.O_CREAT | os.O_RDWR | os.O_APPEND, 0o600)
@@ -1636,16 +1655,45 @@ def sync_qmd() -> dict:
         return qmd_search.sync_pages(_all_wiki_pages(), complete=True)
 
 
+RAW_LAYER_KINDS = ("source_index",)
+RAW_LAYER_TAG = "raw_index"
+_INDEX_CATEGORIES = (
+    ("overview", "Overviews"), ("compiled_source", "Source summaries"), ("concept", "Concepts"),
+    ("risk", "Risks"), ("playbook", "Playbooks"), ("decision", "Decisions"), ("note", "Notes"),
+)
+
+
+def is_raw_layer_page(page: dict) -> bool:
+    """Raw-layer catalogs support evidence lookup but are not wiki articles."""
+    return page.get("kind") in RAW_LAYER_KINDS or RAW_LAYER_TAG in (page.get("tags") or [])
+
+
+def _index_category(page: dict) -> str:
+    if "compiled_source" in (page.get("tags") or []):
+        return "Source summaries"
+    return dict(_INDEX_CATEGORIES).get(page.get("kind") or "note", "Other")
+
+
+def page_source_count(page: dict) -> int:
+    knowledge = page.get("source_knowledge") if isinstance(page.get("source_knowledge"), dict) else {}
+    revisions = {claim.get("source_revision_id") for claim in knowledge.get("claims") or []
+                 if isinstance(claim, dict) and claim.get("source_revision_id")}
+    if revisions:
+        return len(revisions)
+    return sum(1 for ref in page.get("source_refs") or [] if _is_verifiable_source_ref(ref))
+
+
 def _render_index_md(pages: list[dict], *, captured_at: str | None = None) -> str:
     lines = ["# LLM Wiki Index", "", f"Generated: {captured_at if captured_at is not None else _now()}", ""]
-    active_pages = [page for page in pages if page.get("status") != "archived"]
+    active_pages = [page for page in pages if page.get("status") != "archived" and not is_raw_layer_page(page)]
     archived_pages = [page for page in pages if page.get("status") == "archived"]
-    by_surface: dict[str, list[dict]] = {}
+    by_category: dict[str, list[dict]] = {}
     for page in active_pages:
-        by_surface.setdefault(page.get("surface") or WIKI_SURFACE, []).append(page)
-    for surface in sorted(by_surface):
-        lines += [f"## {surface}", ""]
-        for page in sorted(by_surface[surface], key=lambda item: str(item.get("title") or "")):
+        by_category.setdefault(_index_category(page), []).append(page)
+    order = [name for _, name in _INDEX_CATEGORIES] + ["Other"]
+    for category in sorted(by_category, key=order.index):
+        lines += [f"## {category}", ""]
+        for page in sorted(by_category[category], key=lambda item: str(item.get("title") or "")):
             lines.append(_render_index_entry(page))
         lines.append("")
     if archived_pages:
@@ -1664,13 +1712,16 @@ def _document_wikilink(page: dict, title: str) -> str:
 
 def _render_index_entry(page: dict) -> str:
     title = _clean(page.get("title") or "위키 페이지", 160)
+    updated = str(page.get("updated_at") or page.get("created_at") or "")[:10] or "unknown-date"
     meta = " · ".join([
         _clean(page.get("kind") or "note", 40),
         _clean(page.get("status") or "draft", 40),
         _clean(page.get("verification_status") or "unverified", 40),
+        updated,
+        f"sources: {page_source_count(page)}",
     ])
     summary = _clean(page.get("summary") or page.get("body") or "", 180)
-    summary = re.sub(r'\s+', ' ', summary).strip()
+    summary = re.sub(r'\s+', ' ', summary).strip() or title
     link_count = len({*(page.get("links") or []), *(page.get("backlinks") or [])})
     marker = f" [\U0001f517{link_count}]" if link_count else ""
     link = _document_wikilink(page, title)
@@ -1848,8 +1899,8 @@ def upsert_page(page: dict) -> dict:
     saved = _save_wiki_page(page)
     _CACHE.clear()
     _append_wiki_log(
-        "page_upsert", page_id=saved.get("id"), surface=saved.get("surface"),
-        kind=saved.get("kind"), status=saved.get("status"),
+        "page_upsert", page_id=saved.get("id"),
+        surface=saved.get("surface"), kind=saved.get("kind"), status=saved.get("status"),
     )
     _debounced_rebuild()
     return saved
@@ -2254,7 +2305,7 @@ def _merge_pages(
 
     _CACHE.clear()
     _append_wiki_log(
-        "merge", page_id=target_id, event_id=event_id,
+        "merge", title=f"merge into {target_id}", page_id=target_id, event_id=event_id,
         source_ids=[source.get("id") for source in sources],
     )
     _debounced_rebuild()
@@ -2363,7 +2414,7 @@ def capture_from_chat(question: str, answer: str, *, surface: str = WIKI_SURFACE
             "surface": surface,
             "kind": final_kind,
             "status": status if status in VALID_STATUSES else "draft",
-            "tags": tags or ["conversation"],
+            "tags": _dedupe_texts([*(tags or ["conversation"]), "query_fileback"], limit=20, item_limit=60),
             "summary": summary,
             "body": body,
             "report_citation": report_citation,
@@ -3068,6 +3119,7 @@ def _plan_to_page_payload(
                          and _clean(tag, 60).lower().split(":", 1)[1].strip() in VALID_STATUSES))
         ]
     tags = _dedupe_texts([
+        *(["query_fileback"] if chat_autocuration else []),
         WIKI_TAG,
         surface,
         kind,

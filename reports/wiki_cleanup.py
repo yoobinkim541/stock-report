@@ -218,3 +218,74 @@ def apply_cleanup(actions: Iterable[dict], dry_run: bool = True) -> dict:
         result["archived"].append(page_id)
 
     return result
+
+
+def plan_mechanical_archive(pages: Iterable[dict]) -> list[dict]:
+    """Propose archiving catalog/template pages that carry no compiled knowledge.
+
+    Pages with structured source knowledge, raw-layer catalogs and pages already
+    archived are never proposed. The detector is the acceptance audit's own.
+    """
+    from reports.wiki_karpathy_audit import mechanical_reasons
+
+    actions = []
+    for page in pages:
+        if not isinstance(page, dict) or not _page_id(page) or page.get("status") == "archived":
+            continue
+        if wiki.is_raw_layer_page(page) or (page.get("source_knowledge") or {}).get("claims"):
+            continue
+        reasons = mechanical_reasons(page)
+        if reasons:
+            # backlinks are derived from other pages and their order varies with read order
+            stable = {key: value for key, value in page.items() if key != "backlinks"}
+            actions.append({**_make_action(page, "mechanical:" + "+".join(reasons)), "fingerprint": _fingerprint(stable)})
+    return sorted(actions, key=lambda action: action["page_id"])
+
+
+def apply_mechanical_archive(actions: Iterable[dict], dry_run: bool = True) -> dict:
+    """Archive every still-matching proposal in one guarded store rewrite.
+
+    A page that changed since planning is skipped (fingerprint), the full store is
+    backed up first, and links from surviving pages to archived ones are removed so
+    the wiki has no dead links. Archived records keep their bodies and provenance.
+    """
+    planned = {a["page_id"]: a for a in actions if isinstance(a, dict) and a.get("action") == "archive"}
+    result = {"dry_run": bool(dry_run), "archived": [], "skipped_stale": [], "unlinked_pages": [], "backup_path": ""}
+    with shared_memory._events_lock():
+        rows = shared_memory._read_jsonl_checked(shared_memory._paths()["events"])
+        wiki_rows = [row for row in rows if wiki._is_wiki_record(row)]
+        pages = {page["id"]: page for page in wiki._apply_backlinks([wiki._record_to_page(row) for row in wiki_rows], wiki_rows)}
+        current = {a["page_id"]: a for a in plan_mechanical_archive(pages.values())}
+        archive_ids = set()
+        for page_id, action in planned.items():
+            match = current.get(page_id)
+            if match and match["fingerprint"] == action.get("fingerprint"):
+                archive_ids.add(page_id)
+            else:
+                result["skipped_stale"].append(page_id)
+        upserts = []
+        for page_id in sorted(archive_ids):
+            upserts.append(wiki._build_wiki_record({**pages[page_id], "status": "archived"}, existing=pages[page_id]))
+        for page_id, page in pages.items():
+            if page_id in archive_ids or page.get("status") == "archived":
+                continue
+            kept = [link for link in page.get("links") or [] if link not in archive_ids]
+            if kept != list(page.get("links") or []):
+                upserts.append(wiki._build_wiki_record({**page, "links": kept}, existing=page))
+                result["unlinked_pages"].append(page_id)
+        result["archived"] = sorted(archive_ids)
+        if dry_run or not upserts:
+            return result
+        backup_dir = Path(shared_memory.shared_memory_dir()) / "wiki-cleanup-backups"
+        stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S.%fZ")
+        result["backup_path"] = str(backup_dir / f"events-{stamp}.jsonl")
+        safe_io.atomic_write_text(result["backup_path"], "".join(
+            json.dumps(row, ensure_ascii=False, sort_keys=True) + "\n" for row in rows))
+        by_id = {row["id"]: shared_memory.normalize_record(row) for row in upserts}
+        shared_memory._write_jsonl_locked([by_id.pop(row["id"], row) for row in rows] + list(by_id.values()))
+        shared_memory._write_index_locked()
+    wiki._CACHE.clear()
+    wiki._append_wiki_log("archive", title=f"{len(result['archived'])} mechanical catalog pages",
+                          page_ids=result["archived"][:100], archived_count=len(result["archived"]),
+                          backup=Path(result["backup_path"]).name)
+    return result

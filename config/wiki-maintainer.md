@@ -33,17 +33,23 @@ unread tails or linked documents as reviewed evidence.
 
 Check orphan/broken links, stale claims, contradictions, missing concepts and
 source gaps. Preserve distinct conclusions and counterevidence when merging.
-Archive truly empty or exact duplicate drafts after preview and backup; do not
-delete useful evidence just because it was unused. Long pages become an overview
-and lossless, source-linked child pages. Preserve parent/child links and metadata.
+Archive empty, duplicate or mechanical catalog pages (event counts, repeated
+snippets, template cards, link lists) after preview and backup; raw-layer
+catalogs use kind `source_index` and are not wiki articles. Every page links to
+related pages and to its `overview-*` category hub; hubs list members only.
+Bodies stay at most 6,000 characters: long pages become an overview and
+lossless, source-linked child pages. Preserve parent/child links and metadata.
 
 ## Artifacts And History
 
-Maintain persistent markdown pages, index.md and an append-only chronological
-log.md for ingest, query, lint and management operations. Rebuilds cannot erase
-past history. Log metadata and page IDs, not private conversations or raw bodies.
-Keep backups/version history local. Source access failures and unreviewed drafts
-remain visible; passing structural tests is not a claim that all facts are true.
+Maintain persistent markdown pages with YAML frontmatter (id, kind, status,
+tags, updated, source_count), index.md grouped by category (link, summary,
+date, `sources: N`) and an append-only log.md whose entries start with
+`## [YYYY-MM-DD] ingest|query|lint|split|archive|merge|maintenance | title`.
+Rebuilds cannot erase past history. Log metadata and page IDs, not private
+conversations or raw bodies. Keep backups/version history local. Source access
+failures and unreviewed drafts remain visible; `reports.wiki_karpathy_audit`
+checks structure, which is not a claim that all facts are true.
 Source compilation receipts distinguish discovery, durable compilation,
 guarded data commit and retryable index/markdown/search/log effects. Repeated
 deliveries reuse compilation and retain actual evidence IDs by role. Preserve

@@ -251,7 +251,10 @@ def test_main_archive_action_targets_only_recommended_page(monkeypatch, tmp_path
         "surface": "market", "kind": "note", "status": "reviewed", "source_refs": [],
     })
     untouched = wiki.upsert_page({
-        "title": "방금 갱신된 무관한 신선 페이지", "summary": "요약", "body": "본문",
+        "title": "방금 갱신된 무관한 신선 페이지", "summary": "요약",
+        # Substantive body: stub pages are archived by the mechanical-catalog cleanup.
+        "body": ("무관한 신선 페이지 본문 — 원문에서 추출한 주장과 날짜, 범위, 한계를 설명하는 충분한 길이의 문단이다. "
+                 "반론 근거와 불확실성도 함께 기록하며, 이 문단은 정리 대상이 아니다."),
         "surface": "market", "kind": "note", "status": "reviewed", "source_refs": [],
     })
 

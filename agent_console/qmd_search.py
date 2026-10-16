@@ -400,6 +400,14 @@ def _normalize_result(item: dict, *, surface: str, status: str) -> dict:
     }
 
 
+def _source_count(page: dict, source_refs: list[str]) -> int:
+    """Distinct compiled source revisions, else non-conversation source references."""
+    knowledge = page.get("source_knowledge") if isinstance(page.get("source_knowledge"), dict) else {}
+    revisions = {claim.get("source_revision_id") for claim in knowledge.get("claims") or []
+                 if isinstance(claim, dict) and claim.get("source_revision_id")}
+    return len(revisions) or sum(1 for ref in source_refs if not ref.startswith("conversation:"))
+
+
 def _page_markdown(page: dict, page_id: str) -> str:
     tags = [str(tag).strip() for tag in (page.get("tags") or []) if str(tag).strip()]
     source_refs = [str(ref).strip() for ref in (page.get("source_refs") or []) if str(ref).strip()]
@@ -412,6 +420,8 @@ def _page_markdown(page: dict, page_id: str) -> str:
         f"kind: {_clean(page.get('kind') or 'note', 80)}",
         f"status: {_clean(page.get('status') or 'draft', 80)}",
         f"updated_at: {_clean(page.get('updated_at') or page.get('created_at') or '', 120)}",
+        f"updated: {_clean(page.get('updated_at') or page.get('created_at') or '', 120)[:10]}",
+        f"source_count: {_source_count(page, source_refs)}",
         f"tags: [{', '.join(_yaml_scalar(tag) for tag in tags)}]",
         "---",
         "",

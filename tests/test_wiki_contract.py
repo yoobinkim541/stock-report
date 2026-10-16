@@ -9,7 +9,7 @@ def test_schema_defines_the_source_and_maintenance_contract():
     text = wiki_contract.maintenance_schema()
     for rule in ("raw", "source_refs", "contradiction", "append-only", "draft", "index.md"):
         assert rule in text
-    assert len(text) < 6000
+    assert len(text) <= 8000
 
 
 def test_raw_document_reader_preserves_original_and_returns_complete_text(tmp_path):

@@ -2,7 +2,7 @@ import json
 from datetime import datetime, timezone
 
 from agent_console import shared_memory, wiki
-from reports import raw_archive, source_wiki_curator, wiki_distillation as wd
+from reports import raw_archive, wiki_distillation as wd
 from reports.evidence_cards import cards_to_source_refs, event_to_evidence_card
 
 
@@ -66,7 +66,7 @@ def test_complete_archive_can_be_reopened_from_long_stored_wiki_reference(monkey
     assert stored["_source_articles"][0]["text"] == "Original full body"
 
 
-def test_event_evidence_and_curator_preserve_full_source_identifiers():
+def test_event_evidence_preserves_full_source_identifiers():
     event = {"source": "saveticker", "title": "Full article", "url": URL,
              "body": "A substantive full article. " * 40,
              "text_path": PATH, "raw_path": PATH.removesuffix(".txt") + ".html",
@@ -75,27 +75,6 @@ def test_event_evidence_and_curator_preserve_full_source_identifiers():
     assert card.source_url == URL
     refs = cards_to_source_refs([card])
     assert URL in refs and PATH in refs
-    pages = source_wiki_curator.build_wiki_pages_from_events([event])
-    assert pages and all(URL in page["source_refs"] and PATH in page["source_refs"] for page in pages)
-
-
-def test_curator_body_keeps_a_working_full_source_url():
-    event = {"source": "saveticker", "title": "Long source URL", "url": URL,
-             "body": "The complete source body.",
-             "classification": {"wiki_eligible": True, "kind": "article", "topic": "policy"}}
-    pages = source_wiki_curator.build_wiki_pages_from_events([event])
-    assert pages and all(URL in page["body"] for page in pages)
-
-
-def test_different_long_urls_do_not_create_false_event_links(monkeypatch, tmp_path):
-    monkeypatch.setenv("AGENT_CONSOLE_SHARED_MEMORY_DIR", str(tmp_path / "memory"))
-    events = [{"source": "saveticker", "title": title, "url": URL + suffix,
-               "body": "The complete source body.",
-               "classification": {"wiki_eligible": True, "kind": "article", "topic": topic}}
-              for title, suffix, topic in [("Article A", "A", "alpha"), ("Article B", "B", "beta")]]
-    pages = {p["id"]: p for p in source_wiki_curator.build_wiki_pages_from_events(events)}
-    assert "source-topic-beta" not in pages["source-topic-alpha"]["links"]
-    assert "source-topic-alpha" not in pages["source-topic-beta"]["links"]
 
 
 def test_different_long_urls_do_not_create_false_shared_source_lint():
@@ -103,17 +82,6 @@ def test_different_long_urls_do_not_create_false_shared_source_lint():
              for identity, suffix in [("page-a", "A"), ("page-b", "B")]]
     issues = wiki._lint_relational_issues(pages)
     assert not any(i["code"] == "missing_cross_ref" for i in issues)
-
-
-def test_different_long_urls_do_not_link_an_unrelated_judgment(monkeypatch, tmp_path):
-    monkeypatch.setenv("AGENT_CONSOLE_SHARED_MEMORY_DIR", str(tmp_path / "memory"))
-    wiki.upsert_page({"id": "unrelated-judgment", "title": "Alpha definition", "kind": "concept",
-                      "body": "An unrelated source defines alpha.", "source_refs": [URL + "A"]})
-    event = {"source": "saveticker", "title": "Beta observation", "url": URL + "B",
-             "body": "The source describes beta.",
-             "classification": {"wiki_eligible": True, "kind": "article", "topic": "beta"}}
-    pages = source_wiki_curator.build_wiki_pages_from_events([event])
-    assert pages and all("unrelated-judgment" not in p["links"] for p in pages)
 
 
 def test_distilled_citation_and_reference_point_to_the_same_full_url():

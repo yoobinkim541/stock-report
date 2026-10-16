@@ -64,6 +64,15 @@ def build_health_report(dry_run: bool = False) -> dict:
                 f"stale 페이지 {archive_result.get('archived', 0)}개 archive, "
                 f"만료 archive {archive_result.get('deleted', 0)}개 삭제"
             )
+        from reports import wiki_cleanup, wiki_crosslinks
+
+        wiki._CACHE.clear()
+        mechanical = wiki_cleanup.plan_mechanical_archive(wiki._all_wiki_pages())
+        if mechanical:
+            report["mechanical_archive"] = {
+                key: (len(value) if isinstance(value, list) else value)
+                for key, value in wiki_cleanup.apply_mechanical_archive(mechanical, dry_run=False).items()}
+        report["crosslinks"] = wiki_crosslinks.apply(dry_run=False)
 
     if very_unused_pages:
         report["recommendations"].append(

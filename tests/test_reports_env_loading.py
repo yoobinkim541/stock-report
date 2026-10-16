@@ -28,7 +28,6 @@ MODULES = [
     "reports.institution_watch",     # STOCK_BOT_TOKEN — 신규편입 알림
     "reports.wiki_distillation",     # STOCK_BOT_TOKEN — 증류 카드 알림
     "reports.source_pipeline",       # STOCK_COLLECTOR_ARCA_PAGES 등 오버라이드
-    "reports.source_wiki_curator",   # SOURCE_WIKI_LLM_ENABLED 등 오버라이드
 ]
 
 

@@ -104,7 +104,10 @@ def _repair_effects(receipt: dict, journal: Journal) -> dict:
                 if not result.get("ok"):
                     raise ValueError("search_refresh_failed")
             else:
+                source_receipt = journal.load_source(receipt["revision_id"]) or {}
+                source_title = str((source_receipt.get("source") or {}).get("title") or "")[:80]
                 wiki._append_wiki_log("source_ingest", operation_id=op_id,
+                                     title=source_title or f"source {receipt['revision_id'][:12]}",
                                      page_ids=receipt["batch"]["target_ids"], revision_id=receipt["revision_id"])
         except Exception:
             receipt = journal.transition(op_id, effects={effect: "failed"}, error_code=effect + "_refresh_failed")
