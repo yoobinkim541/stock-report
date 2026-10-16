@@ -26,6 +26,20 @@ class OperationReceipt(TypedDict):
     error_code: str
 
 
+class TopicOperationReceipt(TypedDict):
+    """V2 has multiple revision IDs in batch, never a synthetic revision_id."""
+    schema_version: int
+    operation_id: str
+    batch: dict
+    batch_sha256: str
+    stage: str
+    artifacts: str
+    search: str
+    log: str
+    stage_times: dict[str, str]
+    error_code: str
+
+
 def _identity(value: str) -> str:
     if not isinstance(value, str) or not re.fullmatch(r"[a-f0-9]{64}", value):
         raise ValueError("identity_invalid")
@@ -184,12 +198,16 @@ class Journal:
 
     def transition(self, operation_id: str, *, stage: str | None = None,
                    effects: dict | None = None, error_code: str = "") -> dict:
+        return self._transition(operation_id, stage=stage, effects=effects, error_code=error_code)
+
+    def _transition(self, operation_id: str, *, stage: str | None = None,
+                    effects: dict | None = None, error_code: str = "", topic: bool = False) -> dict:
         transitions = {"prepared": {"prepared", "applied", "committed", "stale-base", "failed"},
                        "applied": {"applied", "committed", "stale-base", "failed"},
                        "committed": {"committed"}, "stale-base": {"stale-base"}, "failed": {"failed"}}
-        path = self._path("operations", operation_id)
+        path = self._path("topic-operations" if topic else "operations", operation_id)
         with safe_io.file_write_lock(str(path)):
-            receipt = self._read(path)
+            receipt = self.load_topic_operation(operation_id) if topic else self._read(path)
             if receipt is None or stage is not None and stage not in transitions.get(receipt.get("stage"), set()):
                 raise ValueError("transition_invalid")
             for name, value in (effects or {}).items():
@@ -204,6 +222,61 @@ class Journal:
             receipt["error_code"] = error_code
             safe_io.atomic_write_json(str(path), receipt)
             return receipt
+
+    def load_topic_operation(self, operation_id: str) -> dict | None:
+        """V2 is deliberately invisible to all legacy operation enumerators."""
+        path = self._path("topic-operations", operation_id)
+        if not path.exists():
+            return None
+        try:
+            receipt = json.loads(path.read_text(encoding="utf-8"))
+            batch = receipt["batch"]
+            if (receipt["schema_version"] != 2 or batch["protocol_version"] != 2
+                    or set(receipt) != set(TopicOperationReceipt.__required_keys__)
+                    or receipt["operation_id"] != operation_id or batch["operation_id"] != operation_id
+                    or receipt["batch_sha256"] != hashlib.sha256(_encoded(batch).encode()).hexdigest()
+                    or operation_id != hashlib.sha256(_encoded(batch["proposal"]).encode()).hexdigest()
+                    or receipt["stage"] not in {"prepared", "applied", "committed", "stale-base", "failed"}
+                    or any(receipt[k] not in {"pending", "done", "failed"} for k in ("artifacts", "search", "log"))
+                    or not isinstance(receipt["error_code"], str)
+                    or not isinstance(receipt["stage_times"], dict)
+                    or not isinstance(batch["expected_before"], dict)
+                    or not isinstance(batch["expected_after"], dict)
+                    or not batch["target_ids"] or not batch["upserts"]
+                    or set(batch["expected_after"]) != {r["id"] for r in batch["upserts"]}
+                    or not set(batch["expected_after"]) <= set(batch["expected_before"])):
+                raise ValueError()
+            return receipt
+        except (OSError, ValueError, KeyError, TypeError, UnicodeError) as exc:
+            raise ValueError("topic_journal_corrupt") from exc
+
+    def prepare_topic(self, batch: dict) -> dict:
+        if batch.get("protocol_version") != 2:
+            raise ValueError("topic_protocol_invalid")
+        path = self._path("topic-operations", batch["operation_id"])
+        with safe_io.file_write_lock(str(path)):
+            existing = self.load_topic_operation(batch["operation_id"])
+            if existing:
+                if existing["batch"] != batch:
+                    raise ValueError("operation_conflict")
+                return existing
+            receipt = {"schema_version": 2, "operation_id": batch["operation_id"], "batch": batch,
+                       "batch_sha256": hashlib.sha256(_encoded(batch).encode()).hexdigest(),
+                       "stage": "prepared", "artifacts": "pending", "search": "pending", "log": "pending",
+                       "stage_times": {"prepared": _now()}, "error_code": ""}
+            safe_io.atomic_write_json(str(path), receipt)
+            return receipt
+
+    def transition_topic(self, operation_id: str, **kwargs) -> dict:
+        return self._transition(operation_id, topic=True, **kwargs)
+
+    def pending_topic_operations(self) -> list[dict]:
+        result = []
+        for path in sorted((self.root / "topic-operations").glob("*.json")):
+            receipt = self.load_topic_operation(path.stem)
+            if receipt["stage"] != "committed" or any(receipt[k] != "done" for k in ("artifacts", "search", "log")):
+                result.append(receipt)
+        return result
 
     def pending_operations(self) -> list[dict]:
         pending = []

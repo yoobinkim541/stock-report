@@ -28,6 +28,22 @@ def module():
     return importlib.import_module("reports.wiki_source_compiler")
 
 
+def test_model_title_is_retained_in_compiled_knowledge():
+    item = source()
+    item['title'] = 'Long original article headline that must remain source metadata'
+    compiled = module().validate_compilation(output(), item)
+    assert compiled['title'] == 'Capacity uncertainty'
+    assert item['title'].startswith('Long original article')
+
+
+def test_legacy_output_without_title_remains_loadable():
+    payload = output()
+    payload.pop('title')
+    compiled = module().validate_compilation(payload, source())
+    assert 'title' not in compiled
+    assert compiled['claims']
+
+
 def test_complete_source_and_synthesis_tail_preserved():
     item = source()
     item["body"] = "source details " * 1000 + "final exception"

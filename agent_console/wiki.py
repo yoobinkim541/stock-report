@@ -115,7 +115,7 @@ def _now() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="seconds")
 
 
-def _clean(value: object, limit: int = 2200) -> str:
+def _clean(value: object, limit: int | None = 2200) -> str:
     text = re.sub(r"[\x00-\x08\x0B\x0C\x0E-\x1F\x7F]", " ", str(value or "")).strip()
     text = re.sub(
         r"(?i)\b(api[_-]?key|token|password|passwd|secret|authorization)\s*[:=]\s*\S+",
@@ -128,7 +128,7 @@ def _clean(value: object, limit: int = 2200) -> str:
         text,
     )
     text = re.sub(r"(?i)\bBearer\s+[A-Za-z0-9._~+/=-]+", "Bearer <redacted>", text)
-    if len(text) <= limit:
+    if limit is None or len(text) <= limit:
         return text
     return text[: max(0, limit - 1)].rstrip() + "…"
 
@@ -161,6 +161,19 @@ def _string_list(value: object, *, limit: int = 12, item_limit: int = 120) -> li
     if not isinstance(value, (list, tuple, set)):
         return []
     return _dedupe_texts(value, limit=limit, item_limit=item_limit)
+
+
+def _dedupe_tags(values: Iterable[object] | object) -> list[str]:
+    if isinstance(values, (str, bytes)):
+        values = [values]
+    elif not isinstance(values, (list, tuple, set)):
+        return []
+    # Split identities use the page-ID bound, not the descriptive tag bound.
+    tags = [
+        shared_memory.split_identity_tag(raw) or _clean(raw, 60)
+        for raw in values
+    ]
+    return _dedupe_texts(tags, limit=20, item_limit=91)
 
 
 def _safe_confidence(value: object, default: float = 0.5) -> float:
@@ -231,7 +244,7 @@ def _normalize_merge_history(values: object) -> list[dict]:
 
 def _normalize_distillation_state(value: object) -> dict:
     if not isinstance(value, dict):
-        return {}
+        value = {}
     try:
         attempts = max(0, min(int(value.get("attempts") or 0), 20))
     except (TypeError, ValueError):
@@ -239,8 +252,10 @@ def _normalize_distillation_state(value: object) -> dict:
     return {
         "status": _clean(value.get("status") or "", 24).lower(),
         "attempts": attempts,
+        "protocol_version": _safe_count(value.get("protocol_version"), 0, 100),
         "last_attempt_at": _clean(value.get("last_attempt_at") or "", 80),
         "last_result_id": _clean(value.get("last_result_id") or "", 80),
+        "evidence_fingerprint": _clean(value.get("evidence_fingerprint") or "", 80),
         "reason": _clean(value.get("reason") or "", 600),
     }
 
@@ -359,7 +374,7 @@ def _split_body_overview(parent_title: str, child_pages: list[dict[str, Any]], *
     for idx, page in enumerate(child_pages, start=1):
         title = _clean(page.get("title") or f"{parent_title} ({idx})", 160)
         excerpt = _clean(page.get("summary") or page.get("body") or "", 180)
-        lines.append(f"{idx}. [[{title}]]")
+        lines.append(f"{idx}. {_document_wikilink(page, title)}")
         if excerpt:
             lines.append(f"   - {excerpt}")
     return "\n".join(lines).strip()
@@ -456,7 +471,7 @@ def _prepare_split_records(page: dict, *, records: list[dict], body_limit: int =
             "surface": surface,
             "kind": kind,
             "status": status,
-            "tags": _dedupe_texts([f"split_from:{parent_id}", *tags], limit=20, item_limit=60),
+            "tags": _dedupe_tags([f"split_from:{parent_id}", *tags]),
             "source_refs": source_refs,
             "links": [parent_id, *links],
             "confidence": confidence,
@@ -490,7 +505,7 @@ def _prepare_split_records(page: dict, *, records: list[dict], body_limit: int =
         "surface": surface,
         "kind": kind,
         "status": status,
-        "tags": _dedupe_texts([*tags, *[f"split_into:{cid}" for cid in child_ids]], limit=20, item_limit=60),
+        "tags": _dedupe_tags([*tags, *[f"split_into:{cid}" for cid in child_ids]]),
         "source_refs": source_refs,
         "links": _clean_links([*links, *child_ids], self_id=parent_id),
         "confidence": confidence,
@@ -557,12 +572,20 @@ def split_for_readability(page_id: str, max_chars: int = 2600) -> dict | None:
     if not page or page.get("parent_page_id") or page.get("status") == "archived":
         return None
     body_limit = max(1, min(int(max_chars), WIKI_BODY_LIMIT))
-    stored_body = page.get("raw", {}).get("body") if isinstance(page.get("raw"), dict) else page.get("body")
+    snapshot = semantic_snapshot(page_id)
+    parent_body = snapshot["page"]["body"]
+    is_split_overview = (parent_body.startswith("이 문서는 길이가 길어 ")
+                         and any(str(tag).startswith("split_into:") for tag in page.get("tags", [])))
+    stored_body = snapshot["body"] if is_split_overview else parent_body
+    page.update(body=stored_body, _preserve_body_exact=True,
+                source_knowledge={**snapshot["source_knowledge"], "claims": snapshot["claims"]})
+    page["raw"] = {**page.get("raw", {}), "body": stored_body}
     if len(_raw_text(stored_body or "")) <= body_limit:
         stale_children = [
             child for child in _all_wiki_pages()
-            if child.get("parent_page_id") == page_id
-            or f"split_from:{page_id}" in (child.get("tags") or [])
+            if (child.get("parent_page_id") == page_id
+                or f"split_from:{page_id}" in (child.get("tags") or []))
+            and child.get("status") != "archived" and not child.get("raw", {}).get("provenance_only")
         ]
         if not stale_children:
             return None
@@ -715,7 +738,7 @@ def _apply_backlinks(pages: list[dict], records: list[dict]) -> list[dict]:
 
 
 def _record_to_page(record: dict) -> dict:
-    tags = _dedupe_texts(record.get("tags") or [], limit=20, item_limit=60)
+    tags = _dedupe_tags(record.get("tags") or [])
     summary = _clean(record.get("summary") or "", WIKI_SUMMARY_LIMIT)
     decisions = _dedupe_texts(record.get("decisions") or [], limit=8, item_limit=280)
     open_questions = _dedupe_texts(record.get("openQuestions") or [], limit=8, item_limit=280)
@@ -730,7 +753,9 @@ def _record_to_page(record: dict) -> dict:
     source = record.get("source") if isinstance(record.get("source"), dict) else {}
     body_parts = []
     is_split_child = any(str(tag).startswith("split_from:") for tag in tags)
-    body_text = _clean_body_exact(record.get("body") or "") if is_split_child else _clean(record.get("body") or "", WIKI_BODY_LIMIT)
+    stored_body = record.get("body") or ""
+    body_text = (_clean_body_exact(stored_body) if is_split_child
+                 else _clean(stored_body, None))
     report_citation = _clean(record.get("report_citation") or _extract_report_citation(body_text), 600)
     if body_text:
         body_parts.append(body_text)
@@ -802,12 +827,32 @@ def _record_to_page(record: dict) -> dict:
     }
 
 
-def _candidate_score(record: dict, query: str, surface: str, status: str) -> int:
+def _knowledge_search_text(knowledge: object) -> str:
+    if not isinstance(knowledge, dict):
+        return ""
+    values = []
+    for field, keys in (("claims", ("text", "scope", "as_of")),
+                        ("relations", ("scope_explanation",)), ("limitations", None)):
+        entries = knowledge.get(field)
+        if not isinstance(entries, list):
+            continue
+        for entry in entries:
+            if keys is None and isinstance(entry, str):
+                values.append(_clean(entry, None))
+            elif keys is not None and isinstance(entry, dict):
+                values.extend(_clean(entry[key], None) for key in keys if isinstance(entry.get(key), str))
+    return " ".join(values)
+
+
+def _candidate_score(record: dict, query: str, surface: str, status: str,
+                     *, include_document_content: bool = False) -> int:
     page = _record_to_page(record)
     haystack = " ".join(
         [
             page["title"],
             page["summary"],
+            *([page["body"], _knowledge_search_text(page.get("source_knowledge"))]
+              if include_document_content else []),
             " ".join(page["tags"]),
             " ".join(page["decisions"]),
             " ".join(page["openQuestions"]),
@@ -910,6 +955,10 @@ def _record_retrieval_usage(query: str, surface: str, status: str, pages: list[d
         )
     except Exception:
         pass
+    _append_wiki_log(
+        "retrieval", query_id=query_id, page_ids=[str(page.get("id") or "") for page in pages],
+        provider=provider, surface=surface,
+    )
 
 
 def _fallback_ranked_pages(records: list[dict], *, query: str, surface: str, status: str, limit: int) -> list[dict]:
@@ -918,10 +967,10 @@ def _fallback_ranked_pages(records: list[dict], *, query: str, surface: str, sta
         page = _record_to_page(row)
         if status and status != "all" and page["status"] != status.lower():
             continue
-        score = _candidate_score(row, query, surface, status)
+        if surface and surface != "all" and page["surface"] != surface.lower():
+            continue
+        score = _candidate_score(row, query, surface, status, include_document_content=True)
         scored.append((score, -idx, page))
-    if not scored:
-        scored = [(0, -idx, _record_to_page(row)) for idx, row in enumerate(records)]
     scored.sort(key=lambda item: (item[0], item[1], item[2].get("updated_at", "")), reverse=True)
     return [page for _score, _idx, page in scored[:limit]]
 
@@ -948,6 +997,14 @@ def _qmd_ranked_pages(records: list[dict], *, query: str, surface: str, status: 
     out: list[dict] = []
     seen: set[str] = set()
     for hit in hits:
+        if hit.get("generation_id"):
+            try:
+                revision = semantic_snapshot(str(hit.get("page_id") or hit.get("id") or ""),
+                                             records=records)["revision_hash"]
+            except (ValueError, KeyError):
+                continue
+            if hit.get("source_semantic_revision") != revision:
+                continue
         page = _page_from_qmd_hit(hit, by_id=by_id, surface=surface, status=status)
         if not page:
             continue
@@ -1033,7 +1090,16 @@ def semantic_snapshot(page_id: str, *, records: list[dict] | None = None) -> dic
         child["body"] = str(row.get("body") or "")
         child_pages.append(child)
     knowledge = [row.get("source_knowledge") or {} for row in [parent, *children]]
+    combined_knowledge = deepcopy(parent.get("source_knowledge") or {})
+    for key in ("limitations", "relations", "integrations"):
+        values = []
+        for item in knowledge:
+            for value in item.get(key, []):
+                if value not in values:
+                    values.append(deepcopy(value))
+        combined_knowledge[key] = values
     return {"page_id": page_id, "revision_hash": revision_hash, "page": page, "children": child_pages,
+            "source_knowledge": combined_knowledge,
             "body": "".join(child["body"] for child in child_pages if not child["raw"].get("provenance_only"))
                     if any(not child["raw"].get("provenance_only") for child in child_pages) else page["body"],
             "claims": list({claim["claim_id"]: deepcopy(claim) for item in knowledge
@@ -1108,7 +1174,7 @@ def prepare_source_batch(proposal: dict, compiled: dict, source: dict) -> dict:
         claims.update({claim["claim_id"]: {**deepcopy(claim), "knowledge_state": "draft"}
                        for claim in compiled["claims"] if claim["claim_id"] in selected_claims})
         claim_list = list(claims.values())
-        knowledge = deepcopy(raw.get("source_knowledge") or {})
+        knowledge = deepcopy(snap["source_knowledge"] if snap else {})
         knowledge.update(claims=claim_list[:100], relations=[*knowledge.get("relations", []), *target["relations"]],
                          limitations=list(dict.fromkeys([*knowledge.get("limitations", []), *compiled["limitations"]])))
         integrations = list(knowledge.get("integrations", []))
@@ -1118,6 +1184,25 @@ def prepare_source_batch(proposal: dict, compiled: dict, source: dict) -> dict:
             matching = {"revision_id": source["revision_id"], "role": source["role"], "evidence_ids": []}
             integrations.append(matching)
         matching["evidence_ids"] = list(dict.fromkeys([*matching["evidence_ids"], *source["observed_evidence_ids"]]))
+        if source["role"] == "conflict":
+            mapped = any(
+                isinstance(relation, dict)
+                and all(isinstance(relation.get(key), str) for key in ("type", "from_claim_id", "to_claim_id",
+                    "from_revision_id", "to_revision_id", "from_as_of", "to_as_of", "scope_explanation"))
+                and relation.get("type") in {"support", "qualify", "supersede", "compete"}
+                and relation.get("from_revision_id") == source["revision_id"]
+                and relation.get("from_claim_id") in claims and relation.get("to_claim_id") in claims
+                and claims[relation["from_claim_id"]].get("source_revision_id") == relation["from_revision_id"]
+                and claims[relation["to_claim_id"]].get("source_revision_id") == relation.get("to_revision_id")
+                and claims[relation["from_claim_id"]].get("as_of") == relation.get("from_as_of")
+                and claims[relation["to_claim_id"]].get("as_of") == relation.get("to_as_of")
+                for relation in knowledge.get("relations", [])
+            )
+            matching["relation_state"] = "mapped" if mapped else "unresolved"
+            matching["relation_note"] = (
+                "Claim relationships are recorded; this is not factual adjudication."
+                if mapped else "No claim-to-claim relationship is recorded; conflict is not adjudicated."
+            )
         knowledge["integrations"] = integrations
         page.update(source_refs=refs[:20], evidence_ids=support[:100], conflicting_evidence_ids=conflict[:100],
                     source_knowledge=knowledge)
@@ -1322,14 +1407,22 @@ MAX_CROSS_REF_GROUP = 30   # 이보다 큰 그룹은 pairwise 제안이 실질 �
 
 def _lint_relational_issues(pages: list[dict]) -> list[dict]:
     issues: list[dict] = []
-    valid_pages = [page for page in pages or [] if isinstance(page, dict) and _clean(page.get("id") or "", 80)]
+    valid_pages = [page for page in pages or [] if isinstance(page, dict)
+                   and page.get("status") != "archived" and _clean(page.get("id") or "", 80)]
+    active_ids = {_clean(page["id"], 80) for page in valid_pages}
+    neighbors: dict[str, set[str]] = {page_id: set() for page_id in active_ids}
+    for page in valid_pages:
+        page_id = _clean(page["id"], 80)
+        targets = set(_clean_links([*(page.get("links") or []), *(page.get("backlinks") or [])],
+                                  self_id=page_id)) & active_ids
+        for target in targets:
+            neighbors[page_id].add(target)
+            neighbors[target].add(page_id)
 
     for page in valid_pages:
         page_id = _clean(page.get("id"), 80)
         title = _clean(page.get("title") or "위키 페이지", 160)
-        links = set(_clean_links(page.get("links") or [], self_id=page_id))
-        backlinks = set(_clean_links(page.get("backlinks") or [], self_id=page_id))
-        if not links and not backlinks:
+        if not neighbors[page_id]:
             issues.append({
                 "code": "orphan_page",
                 "severity": "info",
@@ -1341,12 +1434,10 @@ def _lint_relational_issues(pages: list[dict]) -> list[dict]:
     ticker_index: dict[str, list[dict]] = defaultdict(list)
     ref_index: dict[str, list[dict]] = defaultdict(list)
     for page in valid_pages:
-        for tag in page.get("tags") or []:
-            clean_tag = _clean(tag, 60).lower()
+        for clean_tag in sorted({_clean(tag, 60).lower() for tag in page.get("tags") or []}):
             if clean_tag.startswith("ticker:"):
                 ticker_index[clean_tag].append(page)
-        for ref in page.get("source_refs") or page.get("artifacts") or []:
-            clean_ref = _clean(ref, 200)
+        for clean_ref in sorted(shared_memory.normalize_artifact_refs(page.get("source_refs") or page.get("artifacts") or [])):
             if _is_verifiable_source_ref(clean_ref):
                 ref_index[clean_ref].append(page)
 
@@ -1364,9 +1455,7 @@ def _lint_relational_issues(pages: list[dict]) -> list[dict]:
                 pair = tuple(sorted((left_id, right_id)))
                 if pair in seen_pairs:
                     continue
-                left_links = set(_clean_links(left.get("links") or [], self_id=left_id))
-                right_links = set(_clean_links(right.get("links") or [], self_id=right_id))
-                if right_id in left_links or left_id in right_links:
+                if right_id in neighbors[left_id]:
                     continue
                 seen_pairs.add(pair)
                 left_title = _clean(left.get("title") or "위키 페이지", 160)
@@ -1375,17 +1464,31 @@ def _lint_relational_issues(pages: list[dict]) -> list[dict]:
                     "code": "missing_cross_ref",
                     "severity": "warning",
                     "page_id": left_id,
+                    "related_page_id": right_id,
                     "title": f"{left_title} / {right_title}",
                     "message": f"'{left_title}'와(과) '{right_title}'가 태그·출처를 공유하지만 서로 연결되어 있지 않습니다.",
-                    "suggested": "merge",
+                    "suggested": "review_link",
                 })
     return issues
 
 
-@_cached("lint_pages")
 def lint_pages(pages: list[dict] | None = None) -> dict:
     if pages is None:
         pages = _all_wiki_pages()
+    result = collect_lint(pages, captured_at=_now())
+    issues = result["issues"]
+    _append_wiki_log(
+        "lint",
+        page_ids=sorted({issue.get("page_id", "") for issue in issues if issue.get("page_id")}),
+        issue_count=len(issues),
+        issue_codes=sorted({issue.get("code", "") for issue in issues if issue.get("code")}),
+    )
+    return result
+
+
+def collect_lint(pages: list[dict], *, captured_at: str) -> dict:
+    """Collect lint without live reads, clock access, cache changes or logging."""
+    cutoff = (datetime.fromisoformat(captured_at) - timedelta(days=30)).isoformat()
     issues: list[dict] = []
     for page in pages or []:
         if not isinstance(page, dict):
@@ -1421,7 +1524,6 @@ def lint_pages(pages: list[dict] | None = None) -> dict:
             })
         if status != "archived":
             last_used = _last_used_or_created(page)
-            cutoff = (datetime.now(timezone.utc) - timedelta(days=30)).isoformat()
             if not last_used or last_used < cutoff:
                 issues.append({
                     "code": "zero_usage",
@@ -1443,14 +1545,7 @@ def lint_pages(pages: list[dict] | None = None) -> dict:
                     "message": f"not_helpful({not_helpful})이 helpful({helpful})의 2배를 초과합니다. 페이지 개선 또는 삭제를 고려하세요.",
                 })
     issues.extend(_lint_relational_issues(pages or []))
-    result = {"ok": not issues, "issue_count": len(issues), "issues": issues}
-    _append_wiki_log(
-        "lint",
-        page_ids=sorted({issue.get("page_id", "") for issue in issues if issue.get("page_id")}),
-        issue_count=len(issues),
-        issue_codes=sorted({issue.get("code", "") for issue in issues if issue.get("code")}),
-    )
-    return result
+    return {"ok": not issues, "issue_count": len(issues), "issues": issues}
 
 
 def rebuild_artifacts(*, operation_id: str | None = None) -> dict:
@@ -1541,8 +1636,8 @@ def sync_qmd() -> dict:
         return qmd_search.sync_pages(_all_wiki_pages(), complete=True)
 
 
-def _render_index_md(pages: list[dict]) -> str:
-    lines = ["# LLM Wiki Index", "", f"Generated: {_now()}", ""]
+def _render_index_md(pages: list[dict], *, captured_at: str | None = None) -> str:
+    lines = ["# LLM Wiki Index", "", f"Generated: {captured_at if captured_at is not None else _now()}", ""]
     active_pages = [page for page in pages if page.get("status") != "archived"]
     archived_pages = [page for page in pages if page.get("status") == "archived"]
     by_surface: dict[str, list[dict]] = {}
@@ -1561,6 +1656,12 @@ def _render_index_md(pages: list[dict]) -> str:
     return "\n".join(lines).strip() + "\n"
 
 
+def _document_wikilink(page: dict, title: str) -> str:
+    title = re.sub(r'[\[\]|\s]+', ' ', title).strip()
+    target = qmd_search._safe_file_stem(qmd_search._clean(page['id'], 100)) if page.get('id') else None
+    return f"[[{target}|{title}]]" if target else title
+
+
 def _render_index_entry(page: dict) -> str:
     title = _clean(page.get("title") or "위키 페이지", 160)
     meta = " · ".join([
@@ -1569,38 +1670,11 @@ def _render_index_entry(page: dict) -> str:
         _clean(page.get("verification_status") or "unverified", 40),
     ])
     summary = _clean(page.get("summary") or page.get("body") or "", 180)
+    summary = re.sub(r'\s+', ' ', summary).strip()
     link_count = len({*(page.get("links") or []), *(page.get("backlinks") or [])})
     marker = f" [\U0001f517{link_count}]" if link_count else ""
-    return f"- [[{title}]] ({meta}) — {summary}{marker}"
-
-
-def _render_log_md(pages: list[dict]) -> str:
-    lines = ["# LLM Wiki Log", ""]
-    ordered = sorted(pages, key=lambda item: str(item.get("updated_at") or item.get("created_at") or ""), reverse=True)
-    for page in ordered:
-        stamp = _clean(page.get("updated_at") or page.get("created_at") or "unknown", 80)
-        title = _clean(page.get("title") or "위키 페이지", 160)
-        lines += [
-            f"## [{stamp}] {page.get('surface', WIKI_SURFACE)} | {title}",
-            f"- status: {page.get('status', 'draft')} · verification: {page.get('verification_status', 'unverified')}",
-        ]
-        refs = [_display_ref(ref) for ref in (page.get("source_refs") or [])[:4]]
-        if refs:
-            lines.append("- sources: " + ", ".join(refs))
-        for event in page.get("merge_history") or []:
-            event_id = _clean(event.get("event_id") or "unknown", 100)
-            source_titles = ", ".join(
-                _clean(title, 160) for title in (event.get("source_titles") or event.get("source_ids") or [])
-            )
-            lines.append(f"- merge event: {event_id} · {event.get('occurred_at', 'unknown')} · sources: {source_titles or 'unknown'}")
-            if event.get("reason"):
-                lines.append(f"  - reason: {_clean(event['reason'], 600)}")
-        if page.get("merged_into"):
-            lines.append(f"- archived by merge into: {_clean(page['merged_into'], 80)}")
-        lines.append("")
-    if len(lines) == 2:
-        lines.append("- No wiki pages yet.")
-    return "\n".join(lines).strip() + "\n"
+    link = _document_wikilink(page, title)
+    return f"- {link} ({meta}) — {summary}{marker}"
 
 
 def _render_open_questions_md(pages: list[dict]) -> str:
@@ -1627,13 +1701,6 @@ def _render_lint_md(lint: dict) -> str:
             f"{issue.get('title')}: {issue.get('message')}"
         )
     return "\n".join(lines).strip() + "\n"
-
-
-def _display_ref(ref: object) -> str:
-    text = _clean(ref, 200)
-    if text.startswith(str(Path.home())) or text.startswith("/"):
-        return Path(text).name or "local-file"
-    return text
 
 
 def _build_wiki_record(page: dict, *, existing: dict | None = None) -> dict:
@@ -1684,10 +1751,8 @@ def _build_wiki_record(page: dict, *, existing: dict | None = None) -> dict:
         schema_version = WIKI_SCHEMA_VERSION if report_citation else 1
     created_at = _clean(existing.get("created_at") or page.get("created_at") or _now(), 80)
     updated_at = _clean(page.get("updated_at") or _now(), 80)
-    tags = _dedupe_texts(
-        [WIKI_TAG, surface, kind, status, *_dedupe_texts(page.get("tags"), limit=20, item_limit=60)],
-        limit=20,
-        item_limit=60,
+    tags = _dedupe_tags(
+        [WIKI_TAG, surface, kind, status, *_dedupe_tags(page.get("tags"))],
     )
     return {
         "id": page_id,
@@ -1930,10 +1995,37 @@ def list_stale_pages(max_age_days: int = 30) -> list[dict]:
 
 def archive_stale_pages(max_age_days: int = 30, dry_run: bool = False, max_archive_days: int = 90) -> dict:
     pages = _all_wiki_pages()
+    referenced_ids = set()
+    for page in pages:
+        related = [*(page.get("links") or []), *(page.get("backlinks") or [])]
+        if page.get("parent_page_id"):
+            related.extend((page["id"], page["parent_page_id"]))
+        related.extend(
+            str(tag).split(":", 1)[1] for tag in page.get("tags") or []
+            if str(tag).startswith(("split_from:", "split_into:"))
+        )
+        if related:
+            referenced_ids.add(page["id"])
+            referenced_ids.update(str(value) for value in related)
+
+    # Age alone is not permission to discard accumulated knowledge or evidence.
+    protected_ids = {
+        page["id"] for page in pages
+        if page["id"] in referenced_ids
+        or page.get("kind") in {"source_digest", "concept", "risk", "playbook"}
+        or bool(page.get("source_knowledge"))
+        or any(page.get(field) for field in (
+            "source_refs", "evidence_ids", "conflicting_evidence_ids", "artifacts",
+            "merge_history", "merged_into", "merge_event_id",
+        ))
+        or any((page.get("distillation_state") or {}).values())
+        or any(str(tag).startswith(("split_from:", "split_into:", "merged_into:", "merge_event:"))
+               for tag in page.get("tags") or [])
+    }
     to_archive = [
         page for page in pages
         if page.get("status") != "archived"
-        and page.get("kind") != "source_digest"
+        and page["id"] not in protected_ids
         and _is_page_stale(page, max_age_days)
     ]
     archived_pages = [page for page in pages if page.get("status") == "archived"]
@@ -1947,7 +2039,7 @@ def archive_stale_pages(max_age_days: int = 30, dry_run: bool = False, max_archi
     to_delete = [
         page for page in archived_pages
         if page not in merge_archives
-        and page.get("kind") != "source_digest"
+        and page["id"] not in protected_ids
         and _is_page_stale(page, max_archive_days)
     ]
     stale_skipped = len([page for page in archived_pages if _is_page_stale(page, max_age_days)]) - len(to_delete)
@@ -2033,10 +2125,10 @@ def _merge_pages(
         *[tag for page in sources for tag in (page.get("tags") or [])],
         *[f"merged_from:{page['id']}" for page in sources],
     ], limit=20, item_limit=60)
-    source_refs = _dedupe_texts([
+    source_refs = shared_memory.normalize_artifact_refs([
         *(target.get("source_refs") or []),
         *[ref for page in sources for ref in (page.get("source_refs") or [])],
-    ], limit=12, item_limit=180)
+    ], limit=12)
     links = _clean_links([
         *(target.get("links") or []),
         *[link for page in sources for link in (page.get("links") or [])],
@@ -2085,6 +2177,10 @@ def _merge_pages(
         _extract_report_citation(merged_body),
     )
     merged_body, report_citation = _with_report_citation(merged_body, report_citation)
+    # Reject before any write: normalization would otherwise truncate knowledge
+    # while the original source pages are archived in the same transaction.
+    if len(merged_body) > WIKI_BODY_LIMIT:
+        return None
 
     record = _build_wiki_record({
         "id": target_id,
@@ -2157,6 +2253,10 @@ def _merge_pages(
     shared_memory.batch_upsert_delete(upserts=[record, *archived_records], deletes=[])
 
     _CACHE.clear()
+    _append_wiki_log(
+        "merge", page_id=target_id, event_id=event_id,
+        source_ids=[source.get("id") for source in sources],
+    )
     _debounced_rebuild()
     return {
         "action": "merge",
@@ -2188,7 +2288,7 @@ def _split_page(source_id: str, new_titles: list[str], llm_bodies: list[str]) ->
             "surface": source.get("surface"),
             "kind": source.get("kind"),
             "status": "draft",
-            "tags": _dedupe_texts([*(source.get("tags") or []), f"split_from:{source_id}"], limit=20, item_limit=60),
+            "tags": _dedupe_tags([*(source.get("tags") or []), f"split_from:{source_id}"]),
             "source_refs": source.get("source_refs") or [],
             "evidence_ids": source.get("evidence_ids") or [],
             "conflicting_evidence_ids": source.get("conflicting_evidence_ids") or [],
@@ -2217,10 +2317,10 @@ def _split_page(source_id: str, new_titles: list[str], llm_bodies: list[str]) ->
         "surface": source.get("surface"),
         "kind": source.get("kind"),
         "status": "archived",
-        "tags": _dedupe_texts([
+        "tags": _dedupe_tags([
             *(source.get("tags") or []),
             *[f"split_into:{sid}" for sid in new_ids],
-        ], limit=20, item_limit=60),
+        ]),
         "source_refs": source.get("source_refs") or [],
         "links": source.get("links") or [],
         "evidence_ids": source.get("evidence_ids") or [],
@@ -2284,6 +2384,70 @@ def _title_lookup_for(page_ids: set[str]) -> dict[str, str]:
     return lookup
 
 
+def _context_body_excerpt(page: dict) -> str:
+    body = str(page.get("body") or "")
+    knowledge = page.get("source_knowledge")
+    if not isinstance(knowledge, dict):
+        return body[:WIKI_CONTEXT_BODY_SNIPPET]
+    lines = []
+    fields = {
+        "limitations": None,
+        "relations": ("type", "scope_explanation", "from_as_of", "to_as_of", "from_claim_id", "to_claim_id"),
+        "claims": ("claim_id", "text", "as_of", "scope", "knowledge_state", "source_revision_id"),
+        "integrations": ("revision_id", "role", "relation_state"),
+    }
+    total = 0
+    budgets = {"limitations": 200, "relations": 420, "claims": 580, "integrations": 200}
+    for field, keys in fields.items():
+        field_size = 0
+        values = knowledge.get(field)
+        if not isinstance(values, list):
+            continue
+        total += len(values)
+        if field == "integrations":
+            values = sorted(reversed(values), key=lambda item: (
+                0 if isinstance(item, dict) and item.get("relation_state") == "unresolved"
+                else 1 if isinstance(item, dict) and item.get("role") == "conflict" else 2
+            ))
+        for value in values[:3]:
+            if keys is None:
+                if not isinstance(value, str):
+                    continue
+                fragment = _clean(value, 180)
+            elif isinstance(value, dict):
+                if field == "claims" and not isinstance(value.get("text"), str):
+                    continue
+                limits = {"text": 140, "scope_explanation": 120, "scope": 80,
+                          "as_of": 32, "from_as_of": 32, "to_as_of": 32,
+                          "knowledge_state": 24, "type": 24, "role": 24}
+                projection = {key: _clean(value[key], limits.get(key, 64))
+                              for key in keys if isinstance(value.get(key), str) and value[key].strip()}
+                if not projection:
+                    continue
+                if field == "claims":
+                    for key in ("as_of", "scope", "knowledge_state"):
+                        projection.setdefault(key, "unknown")
+                fragment = json.dumps(projection, ensure_ascii=False)
+            else:
+                continue
+            line = f"{field}: {fragment}"
+            if field_size + len(line) + 1 <= budgets[field] and len("\n".join([*lines, line])) <= 1400:
+                lines.append(line)
+                field_size += len(line) + 1
+    if not lines:
+        return body[:WIKI_CONTEXT_BODY_SNIPPET]
+    structured = f"[구조화 지식 발췌: {len(lines)}/{total}항목, 전체 검토 아님]\n" + "\n".join(lines)
+    remaining = max(0, WIKI_CONTEXT_BODY_SNIPPET - len(structured) - 1)
+    return (structured + "\n" + body[:remaining]).rstrip()
+
+
+def _context_source_refs(page: dict) -> list[str]:
+    values = page.get("source_refs")
+    if not isinstance(values, (list, tuple)):
+        return []
+    return shared_memory.normalize_artifact_refs(values)[:4]
+
+
 def build_context_section(*, query: str = "", surface: str = WIKI_SURFACE, limit: int = 4,
                           status: str = "all", pages: list[dict] | None = None) -> str:
     pages = pages if isinstance(pages, list) else list_pages(
@@ -2311,8 +2475,9 @@ def build_context_section(*, query: str = "", surface: str = WIKI_SURFACE, limit
         lines.append(f"{header} ({meta})")
         if page.get("summary"):
             lines.append(f"- 요약: {page['summary']}")
-        if page.get("body"):
-            lines.append(f"- 본문: {page['body'][:WIKI_CONTEXT_BODY_SNIPPET]}")
+        excerpt = _context_body_excerpt(page)
+        if excerpt:
+            lines.append(f"- 본문: {excerpt}")
         if page.get("search_provider"):
             search_line = f"- 검색: {page.get('search_provider')}"
             if page.get("search_score") is not None:
@@ -2320,8 +2485,9 @@ def build_context_section(*, query: str = "", surface: str = WIKI_SURFACE, limit
             lines.append(search_line)
         if page.get("updated_at"):
             lines.append(f"- 갱신: {page.get('updated_at')}")
-        if page.get("source_refs"):
-            lines.append(f"- 출처: {', '.join(page['source_refs'][:4])}")
+        context_refs = _context_source_refs(page)
+        if context_refs:
+            lines.append(f"- 출처: {', '.join(context_refs)}")
         evidence_count = len(page.get("evidence_ids") or [])
         conflict_count = len(page.get("conflicting_evidence_ids") or [])
         if evidence_count or conflict_count:
@@ -2368,6 +2534,7 @@ def build_context_section(*, query: str = "", surface: str = WIKI_SURFACE, limit
 
 AUTO_CURATE_MIN_LENGTH = 40
 AUTO_CURATE_MAX_LENGTH = WIKI_BODY_LIMIT
+AUTO_CURATE_RESPONSE_MAX_LENGTH = 100_000
 AUTO_CURATE_MIN_SCORE = 5
 _TRANSIENT_ACK_PATTERNS = (
     "진행해줘", "진행해봐", "진행해", "ㄱㄱ", "ok", "okay", "오케이", "좋아",
@@ -2475,6 +2642,41 @@ def auto_curate_from_chat(
     if action == "skip":
         return None
     plan_source = "llm" if llm is not None and plan.get("source") == "llm" else "heuristic"
+    if action == "update":
+        requested_target_id = _clean(plan.get("target_id") or "", 80)
+        if requested_target_id:
+            candidate = next(
+                (page for page in candidates
+                 if page.get("id") == requested_target_id and page.get("status") != "archived"),
+                None,
+            )
+        else:
+            active_candidates = [page for page in candidates if page.get("status") != "archived"]
+            candidate = target if target in active_candidates else _best_candidate_page(
+                question, surface, active_candidates
+            )
+            requested_target_id = _clean((candidate or {}).get("id") or "", 80)
+        hydrated_target = get_page(requested_target_id) if candidate and requested_target_id else None
+        if (
+            not candidate
+            or not hydrated_target
+            or hydrated_target.get("id") != requested_target_id
+            or hydrated_target.get("status") == "archived"
+            or hydrated_target.get("surface") != surface
+        ):
+            return {"ok": False, "action": "skipped_invalid_target", "reason": "update target must be an active retrieved candidate"}
+        target = hydrated_target
+        plan["target_id"] = requested_target_id
+    elif action == "create":
+        if _clean(plan.get("target_id") or "", 80):
+            return {"ok": False, "action": "skipped_invalid_target", "reason": "create action cannot name an update target"}
+        planned_title = _clean(plan.get("title") or _derive_title(question, answer), 160)
+        planned_kind = _clean(plan.get("kind") or "note", 40).lower() or "note"
+        if planned_kind not in VALID_KINDS:
+            planned_kind = "note"
+        if get_page(_page_id(planned_title, surface, planned_kind)):
+            return {"ok": False, "action": "skipped_target_collision", "reason": "create page id already exists"}
+        target = None
     if action in ("delete", "merge", "split"):
         # 인젝션 가드: LLM이 사용자 질문에 실린 지시를 따라 다른 surface나
         # source-backed(원문 근거 있는) 페이지를 삭제/병합하지 못하도록 막는다.
@@ -2499,7 +2701,7 @@ def auto_curate_from_chat(
                 ids_to_check.extend(_clean(sid, 80) for sid in raw_source_ids)
             for pid in ids_to_check:
                 page = get_page(pid)
-                if page and has_non_conversation_source_refs(page):
+                if page and (has_non_conversation_source_refs(page) or page.get("source_knowledge")):
                     return {"ok": False, "action": "skipped_injection_guard", "reason": "source-backed page protected"}
         if action == "merge":
             target_id = _clean(plan.get("target_page_id") or "", 80)
@@ -2571,6 +2773,8 @@ def auto_curate_from_chat(
         answer=answer,
         surface=surface,
         target=target,
+        allowed_source_refs=_cited_source_refs(pack or {}),
+        chat_autocuration=True,
     )
     if not payload:
         return None
@@ -2660,12 +2864,14 @@ def _build_auto_curation_prompt(
         "짧은 진행 확인, 단발성 수다, 상태 보고, 확인 대답은 생성 금지다.",
         "반드시 JSON object만 출력한다. 마크다운, 설명문, 코드펜스는 금지한다.",
         "body는 요약문이 아니라 재사용 가능한 위키 문서여야 한다.",
+        "아래 유지보수 스키마의 저장·분할·출처 보존 규칙을 따른다:",
+        wiki_contract.maintenance_schema(),
         "본문은 백과사전형 문장으로 작성하고, 필요할 때만 자연스러운 소제목을 사용한다. 배경·적용·예외·관찰 사례·같이 보기를 내용에 맞게 포함한다.",
         "질문이나 답변이 길면 body도 충분히 길게 유지하고, 핵심 내용을 억지로 한 문단으로 압축하지 않는다.",
         f"playbook/risk/concept 판단 문서는 본문 마지막에 '> **{REPORT_CITATION_MARKER}**: 한 줄 요약'을 정확히 한 번 포함한다.",
         "가능한 action 값은 create, update, skip, delete, merge, split 이다.",
         "update 를 고를 때는 target_id 를 기존 후보 페이지 id 로 지정한다.",
-        "확신이 낮으면 status 는 draft, 중간이면 reviewed, 이미 안정적인 운영 규칙이면 stable 이다.",
+        "대화 답변을 기반으로 자동 생성·수정하는 페이지는 항상 draft 다. reviewed/stable 승격은 별도 근거 검토 후 수동으로 한다.",
         "kind 는 아래 5개 중 내용에 가장 맞는 것 하나를 고른다 (기본값에 기대지 말고 매번 명시할 것):",
         "- playbook: 재사용 가능한 전략/절차/체크리스트 (예: 손실한도 대응 순서)",
         "- risk: 손실·MDD·레버리지 등 위험 요인 판단이나 경고",
@@ -2730,8 +2936,8 @@ def _build_auto_curation_prompt(
 
 
 def _parse_curation_plan(text: str | None) -> dict | None:
-    text = _clean(text or "", WIKI_BODY_LIMIT)
-    if not text:
+    text = str(text or "").strip()
+    if not text or len(text) > AUTO_CURATE_RESPONSE_MAX_LENGTH:
         return None
     candidates: list[tuple[str, bool]] = []
     code_blocks = re.findall(r"```(?:json)?\s*(.*?)```", text, flags=re.S | re.I)
@@ -2758,7 +2964,8 @@ def _parse_curation_plan(text: str | None) -> dict | None:
                     normalized[field] = _string_list(
                         normalized[field],
                         limit=MAX_MERGE_SOURCES if field == "source_page_ids" else 20,
-                        item_limit=240,
+                        item_limit=(shared_memory.ARTIFACT_REF_MAX_CHARS + 1
+                                    if field == "source_refs" else 240),
                     )
             if "new_bodies" in normalized:
                 normalized["new_bodies"] = _string_list(normalized["new_bodies"], limit=20, item_limit=WIKI_BODY_LIMIT)
@@ -2819,18 +3026,24 @@ def _plan_to_page_payload(
     answer: str,
     surface: str,
     target: dict | None = None,
+    allowed_source_refs: list[str] | None = None,
+    chat_autocuration: bool = False,
 ) -> dict | None:
     if not isinstance(plan, dict):
         return None
     target_id = _clean(plan.get("target_id") or (target.get("id") if target else ""), 80)
     title = _clean(plan.get("title") or _derive_title(question, answer), 160)
     summary = _clean(plan.get("summary") or answer[:WIKI_SUMMARY_LIMIT] or question[:WIKI_SUMMARY_LIMIT], WIKI_SUMMARY_LIMIT)
-    body = _clean(plan.get("body") or answer or summary, WIKI_BODY_LIMIT)
+    body_text = str(plan.get("body") or answer or summary)
+    # Storage splits long bodies; do not discard prose before it gets there.
+    body = _clean(body_text, max(WIKI_BODY_LIMIT, len(body_text)))
     kind = _clean(plan.get("kind") or "note", 40).lower() or "note"
     if kind not in VALID_KINDS:
         kind = "note"
     status = _clean(plan.get("status") or "draft", 40).lower() or "draft"
     if status not in VALID_STATUSES:
+        status = "draft"
+    if chat_autocuration:
         status = "draft"
     confidence = _num_or_default(plan.get("confidence"), 0.5)
     citation_fallback = summary if kind in {"playbook", "risk", "concept"} else ""
@@ -2846,25 +3059,51 @@ def _plan_to_page_payload(
     links = _clean_links(_string_list(plan.get("links"), limit=MAX_LINKS, item_limit=80), self_id=final_id)
     if target:
         links = _clean_links([*(target.get("links") or []), *links], self_id=final_id)
+    plan_tags = _string_list(plan.get("tags"), limit=12, item_limit=60)
+    if chat_autocuration:
+        plan_tags = [
+            tag for tag in plan_tags
+            if (_clean(tag, 60).lower() not in VALID_STATUSES
+                and not (_clean(tag, 60).lower().startswith("status:")
+                         and _clean(tag, 60).lower().split(":", 1)[1].strip() in VALID_STATUSES))
+        ]
     tags = _dedupe_texts([
         WIKI_TAG,
         surface,
         kind,
         status,
-        *_string_list(plan.get("tags"), limit=12, item_limit=60),
+        *plan_tags,
     ], limit=20, item_limit=60)
-    source_refs = _dedupe_texts([
-        *_string_list(plan.get("source_refs"), limit=12, item_limit=180),
+    proposed_refs = _string_list(
+        plan.get("source_refs"), limit=12,
+        item_limit=shared_memory.ARTIFACT_REF_MAX_CHARS + 1,
+    )
+    if chat_autocuration:
+        allowed_refs = set(shared_memory.normalize_artifact_refs(allowed_source_refs or []))
+        proposed_refs = [
+            ref for ref in shared_memory.normalize_artifact_refs(proposed_refs, limit=12)
+            if ref in allowed_refs
+        ]
+    source_refs = shared_memory.normalize_artifact_refs([
+        *proposed_refs,
         f"conversation:{_page_id(question, surface, kind)}",
-    ], limit=12, item_limit=180)
+    ], limit=12)
     messages = [
         {"role": "user", "text": question},
         {"role": "assistant", "text": answer},
     ]
     if target:
         messages = _merge_messages(target.get("messages") or [], messages)
-        source_refs = _dedupe_texts([*(target.get("source_refs") or []), *source_refs], limit=12, item_limit=180)
-        tags = _dedupe_texts([*(target.get("tags") or []), *tags], limit=20, item_limit=60)
+        source_refs = shared_memory.normalize_artifact_refs([*(target.get("source_refs") or []), *source_refs], limit=12)
+        target_tags = list(target.get("tags") or [])
+        if chat_autocuration:
+            target_tags = [
+                tag for tag in target_tags
+                if (_clean(tag, 60).lower() not in VALID_STATUSES
+                    and not (_clean(tag, 60).lower().startswith("status:")
+                             and _clean(tag, 60).lower().split(":", 1)[1].strip() in VALID_STATUSES))
+            ]
+        tags = _dedupe_texts([*target_tags, *tags], limit=20, item_limit=60)
         summary = summary or target.get("summary") or ""
         body = body or target.get("body") or summary
     if not title or not body:
@@ -2885,6 +3124,43 @@ def _plan_to_page_payload(
         "messages": messages,
         "confidence": confidence,
     }
+
+
+def _cited_source_refs(pack: dict) -> list[str]:
+    """Return source references exposed with the cited context, not unread tails."""
+    cited = {
+        str(value).strip()
+        for value in (pack or {}).get("_validated_cited_evidence_ids") or []
+        if str(value).strip()
+    }
+    if not cited:
+        return []
+
+    refs: list[str] = []
+    source_events = ((pack or {}).get("sources") or {}).get("events") or []
+    for event in source_events[:12]:
+        if not isinstance(event, dict):
+            continue
+        if not (event.get("title") or event.get("summary")):
+            continue
+        event_ids = {
+            str(event.get(key) or "").strip()
+            for key in ("event_id", "id", "content_id")
+            if str(event.get(key) or "").strip()
+        }
+        if not cited.intersection(event_ids):
+            continue
+        refs.append(event.get("url") or event.get("source_url"))
+
+    for page in (pack or {}).get("_wiki_context_pages") or []:
+        if not isinstance(page, dict):
+            continue
+        page_ids = {str(page.get("id") or "").strip()}
+        page_ids.update(str(value).strip() for value in page.get("evidence_ids") or [] if str(value).strip())
+        if cited.intersection(page_ids):
+            refs.extend(_context_source_refs(page))
+
+    return shared_memory.normalize_artifact_refs(refs)
 
 
 def _best_candidate_page(question: str, surface: str, candidates: list[dict]) -> dict | None:

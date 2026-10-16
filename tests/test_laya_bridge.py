@@ -507,6 +507,7 @@ def test_original_worker_requires_trained_head_before_start(bridge, pages, monke
 
 
 def test_public_reference_ids_are_ordered_deduplicated_and_bounded(bridge):
+    assert bridge.referenced_page_ids('[[first-child|Child heading]] [[second-child|Heading]]') == ['first-child', 'second-child']
     assert bridge.referenced_page_ids('[[p3]] wiki:p1 [[p3]] (wiki:p2). notwiki:p0') == ['p3', 'p1', 'p2']
     assert bridge.referenced_page_ids('x' * 3000 + ' [[p9]]') == ['p9']
     assert bridge.referenced_page_ids(' '.join('[[p' + str(i) + ']]' for i in range(12))) == [

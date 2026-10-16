@@ -196,8 +196,18 @@ class EntryScore:
 
 # ── 피처 계산 ─────────────────────────────────────────────────────────────────
 
+def _calculation_data(data):
+    """Detach metadata only on private calculation copies; preserve source provenance."""
+    if not data.attrs:
+        return data
+    # Constructors copy values without NDFrame.__finalize__/attrs deepcopy.
+    return type(data)(data, copy=True)
+
+
 def _compute_ticker_features(price: pd.Series, vix: pd.Series) -> pd.DataFrame:
     """단일 종목 특징 벡터 시계열 계산."""
+    price = _calculation_data(price)
+    vix = _calculation_data(vix)
     feat = pd.DataFrame(index=price.index)
 
     # 낙폭 (52주 고점 대비)
@@ -379,6 +389,10 @@ def analyze_entry(
     if price_df is None or len(price_df) < 120:
         return None
 
+    price_df = _calculation_data(price_df)
+    vix = _calculation_data(vix)
+    if underlying_price is not None:
+        underlying_price = _calculation_data(underlying_price)
     price = price_df["Close"].dropna()
     if len(price) < 120:
         return None

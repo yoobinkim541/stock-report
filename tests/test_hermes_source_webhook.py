@@ -89,6 +89,18 @@ def test_entire_batch_validated_before_first_write(receiver):
     assert not list((root / 'reports').glob('raw/**/*'))
 
 
+def test_full_body_tail_reaches_existing_wiki_prompt(receiver):
+    from reports import source_collector, wiki_distillation
+    from reports.evidence_cards import event_to_evidence_card
+    wh, client, root = receiver
+    payload = batch('long-body')
+    payload['records'][0]['body'] = 'Evidence paragraph. ' * 400 + 'IMPORTANT TAIL FACT'
+    assert send(wh, client, payload).status_code == 200
+    event = source_collector.load_recent_events(cache_dir=root / 'cache')[0]
+    page = {'id': 'source-long', 'title': 'Long article', 'evidence_ids': [event_to_evidence_card(event).id]}
+    wiki_distillation._attach_article_context([page], cache_dir=root / 'cache')
+    assert 'IMPORTANT TAIL FACT' in wiki_distillation._build_distillation_prompt(page)
+    assert page['_source_articles'][0]['text_complete'] is True
 
 
 def test_crash_after_event_append_can_resume_same_delivery(receiver, monkeypatch):
@@ -254,3 +266,20 @@ def test_delayed_first_event_append_is_current_and_keeps_original_collection_tim
     assert send(wh, client, payload).status_code == 200
     events = source_collector.load_recent_events(cache_dir=root / 'cache', hours=48)
     assert len(events) == 1 and events[0]['source_collected_at'] == old.isoformat()
+
+
+def test_full_body_provenance_survives_recent_cache_window(receiver):
+    from reports import raw_archive, source_collector, wiki_distillation
+    from datetime import timedelta
+    wh, client, root = receiver
+    payload = batch('archived-full-body')
+    assert send(wh, client, payload).status_code == 200
+    event = source_collector.load_recent_events(cache_dir=root / 'cache')[0]
+    manifest = json.loads(raw_archive.read_raw_text(event['manifest_path']))
+    assert manifest['body_coverage'] == 'full' and manifest['text_complete'] is True
+    page = {'id': 'old-body', 'title': 'Archived source',
+            'source_refs': [event['url'], event['text_path']]}
+    wiki_distillation._attach_article_context([page], cache_dir=root / 'cache',
+                                              now=datetime.now(timezone.utc) + timedelta(days=4))
+    assert page['_source_articles'][0]['text_complete'] is True
+    assert 'Important last paragraph.' in wiki_distillation._build_distillation_prompt(page)

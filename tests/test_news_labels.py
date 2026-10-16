@@ -5,6 +5,7 @@
 방향/감쇠 부호·크론 선별(pick_events 비용 캡).
 """
 import json
+import importlib
 import os
 import subprocess
 import sys
@@ -96,6 +97,18 @@ def test_append_load_roundtrip(tmp_path):
     rows = NL.load_labels(path=p)
     assert len(rows) == 1 and rows[0]["labeled_at"]          # labeled_at 스탬프
     assert NL.labeled_ids(path=p) == {"e2"}
+
+
+def test_llm_labeled_ids_leave_heuristic_fallbacks_retryable(tmp_path):
+    p = tmp_path / "labels.jsonl"
+    p.write_text(
+        json.dumps({"id": "fallback", "label_method": "heuristic"}) + "\n"
+        + json.dumps({"id": "done", "label_method": "llm"}) + "\n",
+        encoding="utf-8",
+    )
+
+    assert NL.labeled_ids(path=p) == {"fallback", "done"}
+    assert NL.llm_labeled_ids(path=p) == {"done"}
 
 
 # ── news_axis: 방향·감쇠·point-in-time ───────────────────────────────────────
@@ -205,6 +218,20 @@ def test_label_events_uses_read_only_ephemeral_codex_with_provenance():
     assert all(label["label_provider"] == "codex-exec" for label in labels)
     assert all(label["label_provenance"] == "codex-exec" for label in labels)
     assert all(label["label_error_category"] == "" for label in labels)
+
+
+def test_codex_news_labels_do_not_inherit_general_agent_model(monkeypatch):
+    """뉴스 라벨은 ChatGPT 계정에서 지원되지 않는 공용 agent 모델을 상속하면 안 된다."""
+    previous = NL.NEWS_LLM_CODEX_MODEL
+    monkeypatch.delenv("NEWS_LLM_LABELS_CODEX_MODEL", raising=False)
+    monkeypatch.setenv("AGENT_CONSOLE_CODEX_MODEL", "gpt-5.6-luna-900k")
+    importlib.reload(NL)
+    try:
+        command, _output_path = NL._codex_command("test")
+        assert "--model" not in command
+        assert "gpt-5.6-luna-900k" not in command
+    finally:
+        NL.NEWS_LLM_CODEX_MODEL = previous
 
 
 def test_label_events_chunks_and_preserves_partial_success():

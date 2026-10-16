@@ -35,7 +35,7 @@ MAX_CANDIDATES = 8
 MAX_LINE_BYTES = 65536
 MAX_EXACT_REFERENCE_CHARS = 65536
 _POSIX_SUPPORTED = os.name == "posix"
-_REFERENCES = re.compile(r"\[\[([^\]\[\s]+)\]\]|(?<![\w:])wiki:([^\s\[\]<>\"'(),;!?]+)")
+_REFERENCES = re.compile(r"\[\[([^\]\[\s|]+)(?:\|[^\]\[\r\n]*)?\]\]|(?<![\w:])wiki:([^\s\[\]<>\"'(),;!?]+)")
 _INSTRUCTIONS = (
     "Select the supplied existing wiki candidate with the best relevance to the "
     "user question and recent conversation. Match meaning, market, time scope, "

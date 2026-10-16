@@ -53,6 +53,13 @@ restart_bot() {
 
 if is_running; then
     PID="$(cat "$PID_FILE")"
+    # 메모리 상한: 봇이 누수로 커지면(기준 ~0.75GB, 시간당 ~0.1GB 증가) 재시작
+    BOT_MAX_RSS_KB="${BOT_MAX_RSS_KB:-3145728}"   # 3GB
+    RSS_KB="$(ps -o rss= -p "$PID" 2>/dev/null | tr -d " ")"
+    if [ -n "$RSS_KB" ] && [ "$RSS_KB" -gt "$BOT_MAX_RSS_KB" ]; then
+        restart_bot "메모리 상한 초과(${RSS_KB}KB > ${BOT_MAX_RSS_KB}KB)" "$PID"
+        exit 0
+    fi
     START_EPOCH="$(date -d "$(ps -o lstart= -p "$PID" 2>/dev/null)" +%s 2>/dev/null)"
     if [ -n "$START_EPOCH" ]; then
         # 재기동 직후 파일시각 반올림으로 인한 한 번 더 재시작을 흡수한다.

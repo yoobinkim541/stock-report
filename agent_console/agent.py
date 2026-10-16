@@ -222,6 +222,7 @@ def _answer_impl(question: str, surface: str, async_postprocess: bool,
     answer_payload = _normalize_answer_payload(response, provided_evidence_ids)
     response = _humanize_generic_fallback(question, surface, history, answer_payload["answer"])
     cited_evidence_ids = answer_payload["cited_evidence_ids"]
+    pack["_validated_cited_evidence_ids"] = list(cited_evidence_ids)
     try:
         answer_validation = evidence_usage.record_answer_use(
             evidence_usage.query_id_for(question, surface),
@@ -392,8 +393,10 @@ def _provided_context_evidence_ids(pack: dict, wiki_pages: list[dict] | None = N
     """Collect only identifiers actually exposed to the answer prompt."""
     identifiers: set[str] = set()
     events = ((pack or {}).get("sources") or {}).get("events") or []
-    for event in events:
+    for event in events[:12]:
         if not isinstance(event, dict):
+            continue
+        if not (event.get("title") or event.get("summary")):
             continue
         for key in ("event_id", "id", "content_id"):
             value = str(event.get(key) or "").strip()
@@ -1924,7 +1927,9 @@ def _try_codex_chat(prompt: str, runner=subprocess.run, max_timeout: int | None 
         with tempfile.NamedTemporaryFile(prefix="agent-codex-", suffix=".txt", delete=False) as tmp:
             out_path = tmp.name
 
-        def build_cmd(search: bool) -> list[str]:
+        configured_model = _configured_llm_model("AGENT_CONSOLE_CODEX_MODEL", "")
+
+        def build_cmd(search: bool, *, include_model: bool = True) -> list[str]:
             # master 가 --ask-for-approval 을 제거(서버 codex 버전 대응) — 그 플래그 셋 유지
             cmd = [
                 "codex",
@@ -1943,9 +1948,8 @@ def _try_codex_chat(prompt: str, runner=subprocess.run, max_timeout: int | None 
             if search:
                 # 웹 검색 도구 활성화 — 최신 시장 정보를 로컬 수집분 밖에서도 보강
                 cmd.append("--search")
-            model = _configured_llm_model("AGENT_CONSOLE_CODEX_MODEL", "")
-            if model:
-                cmd.extend(["--model", model])
+            if include_model and configured_model:
+                cmd.extend(["--model", configured_model])
             effort = str(reasoning_effort or os.getenv("AGENT_CONSOLE_CODEX_REASONING_EFFORT", "high")).strip().lower()
             if effort not in {"none", "minimal", "low", "medium", "high", "xhigh"}:
                 effort = "high"
@@ -1962,13 +1966,29 @@ def _try_codex_chat(prompt: str, runner=subprocess.run, max_timeout: int | None 
         first_timeout = _remaining_timeout(deadline, timeout)
         if first_timeout < _LLM_PROVIDER_MIN_TIMEOUT:
             return None
+        include_model = True
         result = runner(build_cmd(want_search), capture_output=True, text=True, timeout=first_timeout)
+        failure_text = " ".join(
+            str(getattr(result, field, "") or "") for field in ("stdout", "stderr")
+        ).lower()
+        model_is_unsupported = any(
+            marker in failure_text for marker in ("not supported", "unsupported model", "unknown model")
+        )
+        if getattr(result, "returncode", 1) != 0 and configured_model and model_is_unsupported:
+            # A deployment may carry a model name from another Codex account.
+            # Retry once without the override so the current account can choose
+            # its supported default instead of falling through after a timeout.
+            retry_timeout = _remaining_timeout(deadline, timeout)
+            if retry_timeout < _LLM_PROVIDER_MIN_TIMEOUT:
+                return None
+            include_model = False
+            result = runner(build_cmd(want_search, include_model=False), capture_output=True, text=True, timeout=retry_timeout)
         if getattr(result, "returncode", 1) != 0 and want_search:
             # 구버전 codex 가 --search 미지원이면 즉시 실패 → 검색 없이 1회 재시도
             retry_timeout = _remaining_timeout(deadline, timeout)
             if retry_timeout < _LLM_PROVIDER_MIN_TIMEOUT:
                 return None
-            result = runner(build_cmd(False), capture_output=True, text=True, timeout=retry_timeout)
+            result = runner(build_cmd(False, include_model=include_model), capture_output=True, text=True, timeout=retry_timeout)
         if getattr(result, "returncode", 1) != 0:
             return None
         text = Path(out_path).read_text(encoding="utf-8", errors="replace").strip() if out_path else ""

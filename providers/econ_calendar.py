@@ -36,6 +36,7 @@ def upcoming_events(days: int = 14, *, start: date | None = None,
     반환 항목: {title, when(datetime|None), date_str, importance, marker, color}
     """
     import requests
+    from reports.source_exceptions import SourceProviderUnavailable
     s = start or date.today()
     e = s + timedelta(days=max(1, days))
     url = f"{_api_base()}/calendar/events"
@@ -43,8 +44,25 @@ def upcoming_events(days: int = 14, *, start: date | None = None,
         r = requests.get(url, params={"start_date": s.isoformat(), "end_date": e.isoformat()},
                          timeout=timeout)
         if not r.ok:
+            if r.status_code in {403, 451}:
+                raise SourceProviderUnavailable(
+                    f"SaveTicker calendar HTTP {r.status_code} (provider access blocked)",
+                    availability="blocked",
+                    status_code=r.status_code,
+                )
             return []
         events = r.json().get("events", []) or []
+    except SourceProviderUnavailable:
+        raise
+    except requests.HTTPError as exc:
+        status_code = getattr(getattr(exc, "response", None), "status_code", None)
+        if status_code in {403, 451}:
+            raise SourceProviderUnavailable(
+                f"SaveTicker calendar HTTP {status_code} (provider access blocked)",
+                availability="blocked",
+                status_code=status_code,
+            ) from exc
+        return []
     except Exception:
         return []
     return _parse(events)

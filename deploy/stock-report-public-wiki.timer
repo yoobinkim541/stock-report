@@ -1,0 +1,10 @@
+[Unit]
+Description=Process bounded public-source wiki work after the previous run
+
+[Timer]
+OnBootSec=5min
+OnUnitInactiveSec=30min
+Unit=stock-report-public-wiki.service
+
+[Install]
+WantedBy=timers.target

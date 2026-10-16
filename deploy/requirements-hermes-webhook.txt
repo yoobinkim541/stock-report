@@ -1,0 +1,2 @@
+# Install into the existing stock-report environment.
+gunicorn==23.0.0

@@ -42,8 +42,10 @@ NEWS_LLM_MODEL = os.getenv("NEWS_LLM_LABELS_MODEL", "gpt-5-mini")
 NEWS_LLM_PROVIDER = os.getenv("NEWS_LLM_LABELS_PROVIDER", "openai-codex")
 NEWS_LLM_TIMEOUT = int(os.getenv("NEWS_LLM_LABELS_TIMEOUT", "90"))
 NEWS_LLM_PRIMARY = os.getenv("NEWS_LLM_LABELS_PRIMARY", "codex").strip().lower()
-NEWS_LLM_CODEX_MODEL = (os.getenv("NEWS_LLM_LABELS_CODEX_MODEL") or
-                        os.getenv("AGENT_CONSOLE_CODEX_MODEL", "")).strip()
+# The general agent may use an internal/ChatGPT-only model that the cron's
+# Codex account cannot request. News labels therefore opt into a model only
+# through their dedicated setting; otherwise Codex chooses its supported default.
+NEWS_LLM_CODEX_MODEL = os.getenv("NEWS_LLM_LABELS_CODEX_MODEL", "").strip()
 NEWS_LLM_CHUNK_SIZE = max(1, int(os.getenv("NEWS_LLM_LABELS_CHUNK_SIZE", "5")))
 NEWS_LLM_MAX_CHUNKS = max(1, int(os.getenv("NEWS_LLM_LABELS_MAX_CHUNKS", "6")))
 
@@ -397,6 +399,17 @@ def labeled_ids(path: Path | None = None) -> set[str]:
     return {str(r.get("id")) for r in load_labels(path) if r.get("id")}
 
 
+def llm_labeled_ids(path: Path | None = None) -> set[str]:
+    """Return only IDs with a successful LLM label.
+
+    Heuristic fallbacks remain append-only evidence, but they must not prevent
+    a later provider-recovery retry from replacing the weak label.
+    """
+    return {
+        str(row.get("id"))
+        for row in load_labels(path)
+        if row.get("id") and str(row.get("label_method") or "") == "llm"
+    }
 def label_health(labels: list[dict], *, hours: int = 24, now: datetime | None = None) -> dict:
     current = now or datetime.now(KST)
     if current.tzinfo is None:

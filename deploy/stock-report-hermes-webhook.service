@@ -1,0 +1,16 @@
+[Unit]
+Description=Stock report authenticated Hermes source ingress
+After=network.target
+
+[Service]
+Type=simple
+WorkingDirectory=%h/projects/stock-report
+ExecStart=%h/projects/stock-report/.venv/bin/gunicorn --bind 127.0.0.1:8777 --workers 1 --threads 2 --timeout 60 --max-requests 500 --max-requests-jitter 50 reports.hermes_source_webhook:runtime_app()
+Restart=on-failure
+RestartSec=5
+UMask=0077
+NoNewPrivileges=true
+PrivateTmp=true
+
+[Install]
+WantedBy=default.target

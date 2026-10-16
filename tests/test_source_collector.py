@@ -1,6 +1,8 @@
 import json
 import os
 import sys
+import pytest
+import requests
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -802,6 +804,63 @@ def test_fetch_saveticker_events_normalizes_dict_tickers(monkeypatch, tmp_path):
     assert Path(event["text_path"]).read_text(encoding="utf-8") == event["body_raw"]
 
 
+def test_fetch_saveticker_raises_blocked_status_for_cloudflare_response(monkeypatch):
+    response = requests.Response()
+    response.status_code = 403
+    response.url = "https://saveticker.com/api/news/top-stories"
+
+    def blocked_get(*args, **kwargs):
+        raise requests.HTTPError("403 blocked", response=response)
+
+    monkeypatch.setattr(sc.requests, "get", blocked_get)
+
+    with pytest.raises(sc.SourceProviderUnavailable) as exc_info:
+        sc.fetch_saveticker_events()
+
+    assert exc_info.value.availability == "blocked"
+    assert exc_info.value.status_code == 403
+
+
+def test_provider_runner_persists_saveticker_blocked_health(tmp_path, monkeypatch):
+    from reports.source_pipeline import ProviderSpec, run_providers
+
+    monkeypatch.setattr(sc, "_SOURCE_AVAILABILITY", {})
+    monkeypatch.setattr(sc, "_LAST_ERRORS", {})
+
+    def blocked_fetch():
+        raise sc.SourceProviderUnavailable(
+            "SaveTicker HTTP 403 (provider access blocked)", availability="blocked", status_code=403
+        )
+
+    result = run_providers(
+        registry=[ProviderSpec("saveticker", ("saveticker",), "news", blocked_fetch, retries=1)],
+        cache_dir=tmp_path / "cache",
+    )
+
+    health = result["health"]["saveticker"]
+    assert result["providers"]["saveticker"]["attempts"] == 1
+    assert health["availability"] == "blocked"
+    assert health["fetch_success"] is False
+    assert "HTTP 403" in health["availability_reason"]
+
+
+def test_saveticker_article_page_block_is_not_silently_downgraded(monkeypatch):
+    response = requests.Response()
+    response.status_code = 403
+    response.url = "https://saveticker.com/news/123"
+
+    def blocked_get(*args, **kwargs):
+        raise requests.HTTPError("403 blocked", response=response)
+
+    monkeypatch.setattr(sc, "_bounded_get", blocked_get)
+
+    with pytest.raises(sc.SourceProviderUnavailable) as exc_info:
+        sc._fetch_saveticker_article_body("https://saveticker.com/news/123", "기사")
+
+    assert exc_info.value.availability == "blocked"
+    assert exc_info.value.status_code == 403
+
+
 def test_fetch_saveticker_events_skips_rearchive_for_recently_seen_article(monkeypatch, tmp_path):
     """같은 기사가 API 응답에 계속 남아있어도 재폴링마다 원본을 재저장하면 안 된다(디스크 낭비 버그 회귀 방지)."""
     class FakeResponse:
@@ -869,6 +928,34 @@ def test_fetch_saveticker_events_enriches_thin_articles(monkeypatch, tmp_path):
     assert events
     assert "상세 기사 본문" in events[0]["body_raw"]
     assert Path(events[0]["raw_path"]).exists()
+    assert events[0]["fulltext_status"] == "full"
+    assert events[0]["body_raw_source"] == "article_page"
+    assert events[0]["fulltext_url"] == "https://e/orcl"
+
+
+def test_fetch_saveticker_events_marks_api_preview_when_article_fetch_fails(monkeypatch, tmp_path):
+    class FakeResponse:
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return {"news_list": [{
+                "id": 124,
+                "title": "반도체 뉴스",
+                "content": "API가 제공한 짧은 미리보기",
+                "url": "https://saveticker.com/news/124",
+            }]}
+
+    monkeypatch.setenv("STOCK_REPORT_REPORTS_DIR", str(tmp_path / "reports"))
+    monkeypatch.setattr(sc.requests, "get", lambda *args, **kwargs: FakeResponse())
+    monkeypatch.setattr(sc, "_fetch_saveticker_article_body", lambda url, title="": "")
+
+    event = sc.fetch_saveticker_events()[0]
+
+    assert event["body_raw"] == "API가 제공한 짧은 미리보기"
+    assert event["fulltext_status"] == "preview_only"
+    assert event["body_raw_source"] == "api_preview"
+    assert event["fulltext_url"] == "https://saveticker.com/news/124"
 
 
 def test_saveticker_article_url_falls_back_to_id():

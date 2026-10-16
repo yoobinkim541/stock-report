@@ -10,13 +10,25 @@ import subprocess
 from datetime import datetime, timezone
 from typing import Any, Callable
 
+import yaml
+
 from . import shared_memory
+from . import wiki_publication_config
 
 _FALSE_VALUES = {"0", "false", "no", "off"}
 
 
 def enabled() -> bool:
     return os.getenv("AGENT_CONSOLE_QMD_ENABLED", "1").strip().lower() not in _FALSE_VALUES
+
+
+def generation_enabled() -> bool:
+    return wiki_publication_config.enabled()
+
+
+def generation_root() -> Path:
+    from .wiki import wiki_artifacts_dir
+    return wiki_publication_config.publication_root(wiki_artifacts_dir())
 
 
 def qmd_bin() -> str:
@@ -89,6 +101,9 @@ def _parse_time(value: object) -> datetime | None:
 
 
 def health(*, probe_query: str = "시장", runner: Callable[..., Any] = subprocess.run) -> dict:
+    if generation_enabled():
+        from .qmd_generation import generation_health
+        return {"provider": "qmd", **status(), **generation_health(root=generation_root())}
     base = status()
     docs_dir = wiki_docs_dir()
     markdown_files: list[Path] = []
@@ -170,13 +185,31 @@ def health(*, probe_query: str = "시장", runner: Callable[..., Any] = subproce
 
 def export_pages(pages: list[dict]) -> dict:
     out_dir = wiki_docs_dir()
-    out_dir.mkdir(parents=True, exist_ok=True)
-    files: list[str] = []
+    prepared = []
+    stems = set()
     for page in pages or []:
         if not isinstance(page, dict):
             continue
         page_id = _clean(page.get("id"), 100) or _hash_id(page)
-        path = out_dir / f"{_safe_file_stem(page_id)}.md"
+        stem = _safe_file_stem(page_id)
+        if stem in stems:
+            raise ValueError('wiki_export_filename_collision')
+        existing = out_dir / f"{stem}.md"
+        if existing.exists():
+            content = existing.read_text(encoding="utf-8")
+            parts = content.split("---", 2)
+            try:
+                metadata = yaml.safe_load(parts[1]) if content.startswith("---\n") and len(parts) == 3 else None
+            except yaml.YAMLError:
+                metadata = None
+            if not isinstance(metadata, dict) or str(metadata.get("id")) != page_id:
+                raise ValueError('wiki_export_filename_collision')
+        stems.add(stem)
+        prepared.append((page, page_id, stem))
+    out_dir.mkdir(parents=True, exist_ok=True)
+    files: list[str] = []
+    for page, page_id, stem in prepared:
+        path = out_dir / f"{stem}.md"
         temporary = path.with_name(f".{path.name}.tmp")
         temporary.write_text(_page_markdown(page, page_id), encoding="utf-8")
         temporary.replace(path)
@@ -279,6 +312,13 @@ def search(
     query = _clean(query, 600)
     if not enabled() or not query:
         return []
+    if generation_enabled():
+        from .qmd_generation import _load_descriptor, search_generation
+        try:
+            descriptor = _load_descriptor(root=generation_root())
+        except (OSError, ValueError, TypeError):
+            return []
+        return search_generation(query, descriptor=descriptor, limit=limit, runner=runner)
     limit = max(1, min(int(limit or 10), 50))
     cmd = [qmd_bin(), search_command(), query, "--format", "json", "-n", str(limit)]
     for collection in collections():
@@ -367,6 +407,7 @@ def _page_markdown(page: dict, page_id: str) -> str:
         "---",
         f"id: {page_id}",
         f"title: {_yaml_scalar(page.get('title') or '위키 페이지')}",
+        f"aliases: [{_yaml_scalar(page.get('title') or '위키 페이지')}]",
         f"surface: {_clean(page.get('surface') or 'wiki', 80)}",
         f"kind: {_clean(page.get('kind') or 'note', 80)}",
         f"status: {_clean(page.get('status') or 'draft', 80)}",
@@ -378,16 +419,30 @@ def _page_markdown(page: dict, page_id: str) -> str:
         "",
     ]
     summary = _clean(page.get("summary") or "", 2400)
-    body = _clean(page.get("body") or "", 8000)
+    raw_body = str(page.get("body") or "")
+    body = _clean(raw_body, max(8000, len(raw_body)))
     if summary:
         lines += ["## Summary", "", summary, ""]
     if body:
         lines += ["## Body", "", body, ""]
+    related_ids = [*(page.get("links") or []), *(page.get("backlinks") or [])]
+    if page.get("parent_page_id"):
+        related_ids.append(page["parent_page_id"])
+    linked_stems = sorted({_safe_file_stem(str(value)) for value in related_ids if str(value).strip()
+                           and _safe_file_stem(str(value)) != _safe_file_stem(page_id)})
+    if linked_stems:
+        lines += ["## Linked Pages", "", *[f"- [[{stem}]]" for stem in linked_stems], ""]
     if source_refs:
         lines += ["## Source Refs", "", *[f"- {ref}" for ref in source_refs], ""]
     evidence_ids = [str(item).strip() for item in (page.get("evidence_ids") or []) if str(item).strip()]
     if evidence_ids:
         lines += ["## Evidence IDs", "", *[f"- {item}" for item in evidence_ids[:100]], ""]
+    knowledge = page.get("source_knowledge") or {}
+    exported_knowledge = {key: knowledge[key] for key in ("claims", "limitations", "relations", "integrations")
+                          if knowledge.get(key)}
+    if exported_knowledge:
+        lines += ["## Source Knowledge", "", "```json",
+                  json.dumps(exported_knowledge, ensure_ascii=False, indent=2), "```", ""]
     if page.get("merge_history") or page.get("merged_into"):
         lines += ["## Merge Archive", ""]
         if page.get("merged_into"):

@@ -1,0 +1,13 @@
+[Unit]
+Description=Limited public Telegram wiki compilation (5/run, 20/KST day)
+
+[Service]
+Type=oneshot
+WorkingDirectory=%h/projects/stock-report
+Environment=PYTHONDONTWRITEBYTECODE=1
+Environment=WIKI_SOURCE_PIPELINE_ENABLED=0
+Environment=PATH=%h/.local/bin:/usr/local/bin:/usr/bin:/bin
+ExecStart=%h/projects/stock-report/.venv/bin/python -m scripts.run_public_wiki_rollout --apply
+TimeoutStartSec=30min
+UMask=0077
+

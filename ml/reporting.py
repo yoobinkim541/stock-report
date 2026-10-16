@@ -182,6 +182,8 @@ def build_ml_strategy_report(
     ml_excess = (ml_result.cagr - qqq_cagr) if (ml_result.cagr is not None and qqq_cagr is not None) else None
     lines.append(f"▶ ML 전략 ({ml_result.name})")
     lines += _fmt_result_block(ml_result, excess_vs=ml_excess)
+    if qqq_result is not None and qqq_result.n_days == ml_result.n_days:
+        lines.append("  ML vs QQQ: 동일한 OOS 평가 구간으로 비교")
     lines.append("")
 
     # QQQ benchmark
@@ -336,10 +338,15 @@ def build_sample_ml_strategy_report() -> str:
     result = optimize_sweet_spot(data)
     bench = build_benchmark_comparison(data, ml_result=result.ml_result)
 
+    # The headline ML-vs-QQQ comparison must use the same nested-OOS window.
+    # The broad benchmark section below intentionally retains full-period
+    # curves so it can compare each strategy on a common synthetic history.
+    qqq_display = result.qqq_oos_result or result.qqq_result
+    spy_display = result.spy_oos_result or result.spy_result
     main_text = build_ml_strategy_report(
         ml_result=result.ml_result,
-        qqq_result=result.qqq_result,
-        spy_result=result.spy_result,
+        qqq_result=qqq_display,
+        spy_result=spy_display,
         overlay_result=result.overlay_result,
         weights=result.weights,
         wf_summary=result.wf_summary,

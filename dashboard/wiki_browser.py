@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from collections import Counter
 from collections.abc import Iterable
+from copy import deepcopy
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 import hashlib
@@ -11,6 +12,7 @@ from typing import Any
 import streamlit as st
 
 from agent_console import wiki as core_wiki
+from agent_console.shared_memory import normalize_artifact_refs
 from dashboard.wiki_mesh import _corpus_fingerprint
 
 WIKI_SURFACE = "wiki"
@@ -51,8 +53,10 @@ class WikiPage:
     merge_history: tuple[dict[str, Any], ...] = field(default_factory=tuple)
     merged_into: str = ""
     merge_event_id: str = ""
+    source_knowledge: dict[str, Any] = field(default_factory=dict)
 
     def as_dict(self) -> dict[str, Any]:
+        source_refs = normalize_artifact_refs(self.source_refs)
         return {
             "id": self.id,
             "title": self.title,
@@ -65,14 +69,15 @@ class WikiPage:
             "confidence": self.confidence,
             "created_at": self.created_at,
             "updated_at": self.updated_at,
-            "source_refs": list(self.source_refs),
+            "source_refs": source_refs,
             "source": dict(self.source),
-            "verification_status": "source-backed" if _has_non_conversation_source_refs(self.source_refs) else "unverified",
+            "verification_status": "source-backed" if _has_non_conversation_source_refs(source_refs) else "unverified",
             "evidence_ids": list(self.evidence_ids),
             "conflicting_evidence_ids": list(self.conflicting_evidence_ids),
             "merge_history": [dict(item) for item in self.merge_history],
             "merged_into": self.merged_into,
             "merge_event_id": self.merge_event_id,
+            "source_knowledge": _public_source_knowledge(self.source_knowledge),
         }
 
 
@@ -217,8 +222,76 @@ def _render_tree_item(page: dict[str, Any], *, selected_page_id: str = "") -> st
     return ""
 
 
+_WIKI_BODY_REFERENCE_RE = re.compile(r"\[\[([^\]\n]+)\]\]")
+_MARKDOWN_CODE_RE = re.compile(r"(`{3,}.*?`{3,}|~{3,}.*?~{3,}|(?<!`)`+[^`\n]*`+(?!`))", re.DOTALL)
+
+
+def transform_wiki_body(body: str, pages: Iterable[dict[str, Any]]) -> tuple[str, list[tuple[dict[str, Any], str]]]:
+    """Render known wiki references as labels without changing the stored body."""
+    by_id = {str(page.get("id") or ""): page for page in pages if page.get("id")}
+    by_title: dict[str, list[dict[str, Any]]] = {}
+    for page in by_id.values():
+        title = str(page.get("title") or "").strip()
+        if title:
+            by_title.setdefault(title, []).append(page)
+
+    references: list[tuple[dict[str, Any], str]] = []
+    referenced_ids: set[str] = set()
+    rendered_parts: list[str] = []
+    chunks = _MARKDOWN_CODE_RE.split(str(body or ""))
+    for index, chunk in enumerate(chunks):
+        if index % 2:
+            rendered_parts.append(chunk)
+            continue
+
+        def replace(match: re.Match[str]) -> str:
+            token = match.group(1).strip()
+            if "|" in token:
+                page_id, label = (part.strip() for part in token.split("|", 1))
+                page = by_id.get(page_id)
+            else:
+                page = by_id.get(token)
+                if page is not None:
+                    label = str(page.get("title") or token)
+                else:
+                    label = token
+                    matches = by_title.get(token, [])
+                    page = matches[0] if len(matches) == 1 else None
+            if page is None:
+                return match.group(0)
+            page_id = str(page.get("id") or "")
+            if page_id not in referenced_ids:
+                references.append((page, label))
+                referenced_ids.add(page_id)
+            escaped_label = re.sub(r"([\\`*_{}\[\]()#+.!|>~-])", r"\\\1", label)
+            return f"**{escaped_label}**"
+
+        rendered_parts.append(_WIKI_BODY_REFERENCE_RE.sub(replace, chunk))
+    return "".join(rendered_parts), references
+
+
+def render_wiki_body(body: str, pages: Iterable[dict[str, Any]], *, st_module: Any = st) -> None:
+    markdown, references = transform_wiki_body(body, pages)
+    st_module.markdown(markdown)
+    for index, (page, label) in enumerate(references):
+        page_id = str(page.get("id") or "")
+        if st_module.button(label, key=f"wiki_body_ref_{page_id}_{index}"):
+            st_module.session_state["agent_wiki_selected_page_id"] = page_id
+            st_module.session_state["wiki_editor_mode"] = "read"
+            st_module.rerun()
+
+
 def _verification_status(page: dict[str, Any]) -> str:
     return "source-backed" if _has_non_conversation_source_refs(page.get("source_refs") or []) else "unverified"
+
+
+_SOURCE_KNOWLEDGE_FIELDS = ("claims", "limitations", "relations", "integrations")
+
+
+def _public_source_knowledge(value: object) -> dict[str, Any]:
+    if not isinstance(value, dict):
+        return {}
+    return {key: deepcopy(value[key]) for key in _SOURCE_KNOWLEDGE_FIELDS if key in value}
 
 
 def _trust_warnings(page: dict[str, Any]) -> list[str]:
@@ -335,11 +408,63 @@ def build_selected_evidence_model(page: dict[str, Any] | WikiPage | None, *, con
         "wiki_schema_version": core_wiki._safe_count(normalized.get("wiki_schema_version"), 1, 10),
         "parent_page_id": normalized.get("parent_page_id") or "",
         "merge_history": [dict(item) for item in normalized.get("merge_history") or []],
+        "source_knowledge": _public_source_knowledge(normalized.get("source_knowledge")),
         "merged_into": normalized.get("merged_into") or "",
         "merge_event_id": normalized.get("merge_event_id") or "",
         "prompt_preview": context_section,
         "tags": list(normalized.get("tags") or []),
     }
+
+
+def _render_selected_evidence(evidence: dict[str, Any], pages: Iterable[dict[str, Any]], *, st_module: Any = st) -> None:
+    knowledge = evidence.get("source_knowledge") or {}
+    claims = knowledge.get("claims") or []
+    limitations = knowledge.get("limitations") or []
+    relations = knowledge.get("relations") or []
+    integrations = knowledge.get("integrations") or []
+    has_structured_evidence = any((claims, limitations, relations, integrations))
+
+    if has_structured_evidence:
+        with st_module.expander("구조화된 출처 지식", expanded=True):
+            for claim in claims:
+                if not isinstance(claim, dict):
+                    continue
+                st_module.markdown(str(claim.get("text") or ""))
+                metadata = [
+                    f"as of: {claim.get('as_of') or 'unknown'}",
+                    f"scope: {claim.get('scope') or 'unknown'}",
+                    f"knowledge state: {claim.get('knowledge_state') or 'unknown'}",
+                    f"source revision: {claim.get('source_revision_id') or 'unknown'}",
+                ]
+                st_module.caption(" · ".join(metadata))
+            for limitation in limitations:
+                st_module.markdown(f"- {limitation}")
+            for relation in relations:
+                if not isinstance(relation, dict):
+                    st_module.markdown(f"- {relation}")
+                    continue
+                dates = " → ".join(str(relation.get(key) or "unknown") for key in ("from_as_of", "to_as_of"))
+                st_module.markdown(
+                    f"- {relation.get('type') or 'unknown'} · {dates} · "
+                    f"{relation.get('scope_explanation') or 'unknown'}"
+                )
+            for integration in integrations:
+                if not isinstance(integration, dict):
+                    st_module.markdown(f"- {integration}")
+                    continue
+                role = str(integration.get("role") or "unknown")
+                revision = str(integration.get("revision_id") or "unknown")
+                detail = str(integration.get("text") or integration.get("description") or "")
+                st_module.markdown(f"- {role} · source revision: {revision}" + (f" · {detail}" if detail else ""))
+                if integration.get("relation_state"):
+                    st_module.caption(f"relation state: {integration['relation_state']}")
+                if integration.get("relation_note"):
+                    st_module.caption(str(integration["relation_note"]))
+
+    if evidence.get("body"):
+        render_wiki_body(evidence["body"], pages, st_module=st_module)
+    elif not has_structured_evidence:
+        st_module.info("본문이 아직 없습니다.")
 
 
 def _now() -> str:
@@ -435,12 +560,13 @@ def _record_to_page(record: dict[str, Any]) -> dict[str, Any]:
         "created_at": record.get("createdAt") or "",
         "updated_at": record.get("updatedAt") or record.get("createdAt") or "",
         "source": source,
-        "source_refs": _dedupe_texts(record.get("artifacts") or [], limit=12, item_limit=120),
+        "source_refs": normalize_artifact_refs(record.get("artifacts") or []),
         "evidence_ids": _dedupe_texts(record.get("evidence_ids") or [], limit=100, item_limit=120),
         "conflicting_evidence_ids": _dedupe_texts(record.get("conflicting_evidence_ids") or [], limit=100, item_limit=120),
         "merge_history": core_wiki._normalize_merge_history(record.get("merge_history")),
         "merged_into": _clean(record.get("merged_into") or "", 80),
         "merge_event_id": _clean(record.get("merge_event_id") or "", 100),
+        "source_knowledge": _public_source_knowledge(record.get("source_knowledge")),
         "decisions": decisions,
         "openQuestions": open_questions,
         "messages": messages,
@@ -456,7 +582,7 @@ def _normalize_page(page: dict[str, Any] | WikiPage) -> dict[str, Any]:
         return _record_to_page({"title": page})
     if {"title", "summary", "body", "verification_status", "source_refs", "openQuestions"}.intersection(page):
         tags = _dedupe_texts(page.get("tags") or [], limit=20, item_limit=60)
-        source_refs = _dedupe_texts(page.get("source_refs") or [], limit=12, item_limit=120)
+        source_refs = normalize_artifact_refs(page.get("source_refs") or [])
         normalized = {
             "id": page.get("id") or _page_id(page.get("title") or "위키 페이지", page.get("surface") or WIKI_SURFACE, page.get("kind") or "note"),
             "title": _clean(page.get("title") or "위키 페이지", 160),
@@ -479,6 +605,7 @@ def _normalize_page(page: dict[str, Any] | WikiPage) -> dict[str, Any]:
             "merge_history": core_wiki._normalize_merge_history(page.get("merge_history")),
             "merged_into": _clean(page.get("merged_into") or "", 80),
             "merge_event_id": _clean(page.get("merge_event_id") or "", 100),
+            "source_knowledge": _public_source_knowledge(page.get("source_knowledge")),
             "decisions": _dedupe_texts(page.get("decisions") or [], limit=8, item_limit=280),
             "openQuestions": _dedupe_texts(page.get("openQuestions") or [], limit=8, item_limit=280),
             "messages": list(page.get("messages") or []),
@@ -959,10 +1086,7 @@ def render_wiki_tab(surface: str, pack: dict[str, Any] | None = None) -> None:
                     if summary_text:
                         st.caption(summary_text)
 
-                    if evidence.get("body"):
-                        st.markdown(evidence["body"])
-                    else:
-                        st.info("본문이 아직 없습니다.")
+                    _render_selected_evidence(evidence, pages_all)
 
                     for warning in evidence.get("warnings") or []:
                         st.warning(warning)

@@ -34,6 +34,7 @@ class SourceRevision(TypedDict):
     manifest_ref: str
     observed_evidence_ids: list[str]
     role: str
+    content_kind: str
 
 
 class DiscoveryResult(TypedDict):
@@ -79,7 +80,7 @@ def _archive_path(value: object, directory: str) -> Path:
         raise SourceGateError("archive_path_invalid") from exc
 
 
-def build_revision(event: dict, *, now: datetime) -> SourceRevision:
+def build_revision(event: dict, *, now: datetime, allow_chunking: bool = False) -> SourceRevision:
     raw_path = _archive_path(event.get("raw_path"), "raw")
     text_path = _archive_path(event.get("text_path"), "text")
     manifest_path = _archive_path(event.get("manifest_path"), "raw")
@@ -178,20 +179,22 @@ def build_revision(event: dict, *, now: datetime) -> SourceRevision:
         "ingested_at": str(event.get("collected_at") or manifest.get("fetched_at") or ""),
         "raw_ref": str(raw_path), "text_ref": str(text_path), "manifest_ref": str(manifest_path),
         "observed_evidence_ids": [event_to_evidence_card(event, now=now).id], "role": "support",
+        "content_kind": content_kind,
     }
-    if len(body) > wiki_distillation.MAX_SOURCE_ARTICLE_CHARS:
+    if len(body) > wiki_distillation.MAX_SOURCE_ARTICLE_CHARS and not allow_chunking:
         raise SourceGateError("source_budget_exceeded", details={k: v for k, v in revision.items() if k != "body"})
     return revision
 
 
 def discover_revisions(events: list[dict], *, now: datetime,
-                       evidence_roles: dict[str, str] | None = None) -> DiscoveryResult:
+                       evidence_roles: dict[str, str] | None = None,
+                       allow_chunking: bool = False) -> DiscoveryResult:
     result: DiscoveryResult = {"eligible": [], "unavailable": [], "pending_chunking": []}
     groups: dict[tuple[str, str], SourceRevision] = {}
     for event in events:
         evidence_id = event_to_evidence_card(event, now=now).id
         try:
-            revision = build_revision(event, now=now)
+            revision = build_revision(event, now=now, allow_chunking=allow_chunking)
         except SourceGateError as exc:
             item = {"discovery_id": evidence_id, "reason": exc.reason,
                     "observed_evidence_ids": [evidence_id], **exc.details}

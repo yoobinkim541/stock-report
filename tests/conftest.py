@@ -21,6 +21,9 @@ import pytest
 # ── import 시점에 즉시 격리 (테스트 모듈 수집 전) ────────────────────────
 _TMPDIR = tempfile.mkdtemp(prefix="stock_report_test_db_")
 os.environ["STOCK_REPORT_DB"] = os.path.join(_TMPDIR, "test.db")
+# Synthetic/unit tests must not fall through to the optional FRED lookup in
+# ml.backtest.  The fallback rate remains deterministic for all test metrics.
+os.environ.setdefault("STOCK_REPORT_OFFLINE_TESTS", "1")
 
 # 공유 에이전트 메모리도 tmp 격리 — 테스트가 라이브 노트북/이벤트를 오염하지 않게
 os.environ.setdefault("AGENT_MEMORY_DIR", os.path.join(_TMPDIR, "shared-memory"))
@@ -41,6 +44,15 @@ os.environ.setdefault("STOCK_REPORT_OHLC_CACHE_DIR", os.path.join(_TMPDIR, "ohlc
 # 격리돼도 첫 조회 시 legacy 파일에서 실제 배당 기록이 자동 마이그레이션돼
 # 스모크 테스트의 "레코드 1건" 가정이 실제 데이터 유무에 따라 깨졌음.
 os.environ.setdefault("STOCK_REPORT_DATA_DIR", os.path.join(_TMPDIR, "legacy-data"))
+
+
+@pytest.fixture(autouse=True)
+def _isolate_agent_background_jobs(monkeypatch):
+    """Keep deferred writes out of the next test's mocks and temporary store."""
+    from agent_console import shared_memory, wiki
+
+    monkeypatch.setattr(shared_memory, "_schedule_context_memory_summary", lambda: None)
+    monkeypatch.setattr(wiki, "_debounced_rebuild", lambda: None)
 
 
 @pytest.fixture(autouse=True)

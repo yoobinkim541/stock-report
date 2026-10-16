@@ -51,6 +51,29 @@ def test_proposal_prompt_excludes_private_metadata_but_retains_complete_knowledg
     module().propose_integration(compiled(), source(), [snap], new_page_specs=[], llm_fn=llm)
 
 
+def test_proposal_retains_prior_limitations_and_relations_from_parent_and_children(monkeypatch):
+    rows = [record("entity", source_knowledge={
+        "limitations": ["Prior uncertainty: unaudited capacity"],
+        "relations": [{"type": "compete", "scope_explanation": "Historical conflict"}],
+        "private_notes": "PRIVATE_EXTRA_FIELD"}),
+        record("child", parent_page_id="entity", source_knowledge={
+            "limitations": ["Child caveat: seasonality"],
+            "relations": [{"type": "qualify", "scope_explanation": "Limited seasonal scope"}]})]
+    install(monkeypatch, rows)
+    snap = module().hydrate_target("entity")
+    def llm(prompt):
+        data = json.loads(prompt.rsplit("\n", 1)[1])
+        target = data['targets'][0]
+        assert target['page']['source_knowledge']['limitations'] == ["Prior uncertainty: unaudited capacity"]
+        assert target['page']['source_knowledge']['relations'][0]['scope_explanation'] == "Historical conflict"
+        assert target['children'][0]['source_knowledge']['limitations'] == ["Child caveat: seasonality"]
+        assert "PRIVATE_EXTRA_FIELD" not in prompt
+        return json.dumps({"targets": [{"page_id": "entity", "before_hash": snap["revision_hash"],
+            "additions": [{"claim_ids": ["new-claim"], "as_of": "2026-10-09", "scope": "capacity",
+                           "body": "Capacity rose [S1]."}], "relations": []}]})
+    module().propose_integration(compiled(), source(), [snap], new_page_specs=[], llm_fn=llm)
+
+
 def test_generated_child_ordinal_uses_terminal_brackets_not_parent_date():
     rows = [record("parent", title="Capacity [2026]"),
         record("z-first", title="Capacity [2026] [0001]", body="FIRST", parent_page_id="parent"),
@@ -78,6 +101,17 @@ def test_source_routes_to_two_pages_and_justified_new_page(monkeypatch):
     assert result["new_page_specs"][0]["purpose"] == new["purpose"]
     assert result["unexamined"] == []
     assert state["cursor"] == 0
+
+
+def test_router_prompt_explicitly_supplies_allowed_new_page_kinds(monkeypatch):
+    install(monkeypatch, [])
+    state = module().discover_targets(compiled(), surface='market')
+    def llm(prompt):
+        data = json.loads(prompt.rsplit('\n', 1)[1])
+        assert set(data['allowed_new_page_kinds']) == module().ELIGIBLE_KINDS
+        assert 'must use one of allowed_new_page_kinds' in prompt
+        return json.dumps({'selected': [], 'rejected': {}, 'new_page_specs': []})
+    module().route_pass(compiled(), state, llm_fn=llm)
 
 
 def test_hydration_includes_ordered_children_and_exceptions(monkeypatch):

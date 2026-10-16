@@ -529,9 +529,10 @@ def test_wiki_rebuild_artifacts_writes_index_log_open_questions_and_lint(monkeyp
 
     assert result["ok"] is True
     assert result["page_count"] == 1
-    assert set(files) == {"index.md", "log.md", "open-questions.md", "lint.md"}
+    assert set(files) == {"index.md", "log.md", "open-questions.md", "lint.md", "schema.md"}
     assert "AI CAPEX 검증 규칙" in (wiki.wiki_artifacts_dir() / "index.md").read_text(encoding="utf-8")
     assert "## [" in (wiki.wiki_artifacts_dir() / "log.md").read_text(encoding="utf-8")
+    assert (wiki.wiki_artifacts_dir() / "schema.md").read_text(encoding="utf-8")
     assert "전력비 상승" in (wiki.wiki_artifacts_dir() / "open-questions.md").read_text(encoding="utf-8")
     assert "source_missing_for_promoted" not in (wiki.wiki_artifacts_dir() / "lint.md").read_text(encoding="utf-8")
 
@@ -880,7 +881,7 @@ def test_merge_pages_archives_sources_and_preserves_metadata(monkeypatch, tmp_pa
     wiki.rebuild_artifacts()
     log_text = (wiki.wiki_artifacts_dir() / "log.md").read_text(encoding="utf-8")
     assert result["merge_event_id"] in log_text
-    assert source["title"] in log_text
+    assert source["id"] in log_text
 
 
 def test_merge_pages_rejects_surface_mismatch(monkeypatch, tmp_path):
@@ -970,7 +971,7 @@ def test_wiki_index_md_shows_link_marker(monkeypatch, tmp_path):
         "tags": ["wiki"],
         "source_refs": [],
     })
-    wiki.upsert_page({
+    target = wiki.upsert_page({
         "title": "링크 대상 페이지",
         "summary": "대상 요약",
         "body": "대상 본문",
@@ -985,7 +986,7 @@ def test_wiki_index_md_shows_link_marker(monkeypatch, tmp_path):
     wiki.rebuild_artifacts()
     index_text = (wiki.wiki_artifacts_dir() / "index.md").read_text(encoding="utf-8")
 
-    assert "[[링크 대상 페이지]]" in index_text
+    assert f"[[{target['id']}|링크 대상 페이지]]" in index_text
     assert "🔗1" in index_text
 
 
@@ -1250,6 +1251,26 @@ def test_llm_model_alias_is_normalized_before_provider_call(monkeypatch, tmp_pat
     model_index = seen["cmd"].index("--model") + 1
     assert seen["cmd"][model_index] == "gpt-5.6-luna"
     assert "model_reasoning_effort=high" in seen["cmd"]
+
+
+def test_codex_retries_without_unsupported_model_override(monkeypatch, tmp_path):
+    from agent_console import agent
+
+    monkeypatch.setenv("AGENT_CONSOLE_CODEX_MODEL", "gpt-5.6-luna-900k")
+    monkeypatch.setenv("AGENT_CONSOLE_CODEX_CWD", str(tmp_path))
+    calls = []
+
+    def fake_runner(cmd, **kwargs):
+        calls.append(cmd)
+        if len(calls) == 1:
+            return type("Result", (), {"returncode": 1, "stdout": "", "stderr": "model is not supported"})()
+        out_path = cmd[cmd.index("--output-last-message") + 1]
+        Path(out_path).write_text("기본 모델 답변", encoding="utf-8")
+        return type("Result", (), {"returncode": 0, "stdout": ""})()
+
+    assert agent._try_codex_chat("테스트", runner=fake_runner) == "기본 모델 답변"
+    assert "--model" in calls[0]
+    assert "--model" not in calls[1]
 
 
 def test_chat_search_is_reserved_for_freshness_sensitive_questions(monkeypatch):
@@ -4169,7 +4190,7 @@ def test_wiki_auto_curate_llm_split_action_splits_page(monkeypatch, tmp_path):
     assert wiki.get_page(source["id"])["status"] == "archived"
 
 
-def test_wiki_lint_missing_cross_ref_suggests_merge(monkeypatch, tmp_path):
+def test_wiki_lint_missing_cross_ref_suggests_link_review(monkeypatch, tmp_path):
     _isolate(monkeypatch, tmp_path)
 
     from agent_console import wiki
@@ -4203,7 +4224,8 @@ def test_wiki_lint_missing_cross_ref_suggests_merge(monkeypatch, tmp_path):
 
     cross_ref_issues = [issue for issue in result["issues"] if issue["code"] == "missing_cross_ref"]
     assert len(cross_ref_issues) == 1
-    assert cross_ref_issues[0]["suggested"] == "merge"
+    assert cross_ref_issues[0]["suggested"] == "review_link"
+    assert {cross_ref_issues[0]["page_id"], cross_ref_issues[0]["related_page_id"]} == {"tickerA", "tickerB"}
 
 
 def test_evidence_context_usage_summary_counts_real_sources(monkeypatch, tmp_path):

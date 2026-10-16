@@ -138,14 +138,30 @@ def _prune_state(state: dict, now: datetime) -> None:
 
 def fetch_breaking_news(now: datetime) -> list[dict]:
     """saveticker에서 속보 태그 이벤트만 반환 (최근 MAX_AGE_HOURS 이내)."""
-    from reports.source_collector import fetch_saveticker_events, append_events, event_id
+    from reports.source_collector import fetch_saveticker_events, append_events, event_id, load_recent_events
 
-    events = fetch_saveticker_events()
-    append_events(events, cache_dir=CACHE_DIR)
+    failure = None
+    try:
+        events = fetch_saveticker_events()
+        append_events(events, cache_dir=CACHE_DIR)
+    except Exception as exc:
+        failure = exc
+        events = []
+    private_cache = Path(os.getenv("SAVETICKER_AUTH_CACHE_DIR", "~/reports/private-sources/cache")).expanduser()
+    for cache in {Path(CACHE_DIR), private_cache}:
+        events.extend(load_recent_events(cache_dir=cache, now=now, hours=MAX_AGE_HOURS))
+    preferred = {}
+    for event in events:
+        if event.get("source") != "saveticker":
+            continue
+        identity = event.get("id") or event_id(event)
+        existing = preferred.get(identity)
+        if existing is None or event.get("body_coverage") == "full":
+            preferred[identity] = event
 
     cutoff = now - timedelta(hours=MAX_AGE_HOURS)
     breaking = []
-    for e in events:
+    for e in preferred.values():
         if "속보" not in (e.get("tags") or []):
             continue
         pub = e.get("published_at") or ""
@@ -160,6 +176,10 @@ def fetch_breaking_news(now: datetime) -> list[dict]:
         e["id"] = e.get("id") or event_id(e)
         breaking.append(e)
 
+    if failure:
+        if not breaking:
+            raise failure
+        _log_collection_failure(failure, now)
     return sorted(breaking, key=lambda e: e.get("published_at", ""))
 
 
@@ -300,6 +320,11 @@ def _send_telegram(text: str) -> bool:
     return notify.send_telegram(text, token=BOT_TOKEN)
 
 
+def _alert_parts(text: str) -> list[str]:
+    # 2,000 Unicode code points fit Telegram's limit even for surrogate pairs.
+    return [text[i:i + 2000] for i in range(0, len(text), 2000)] or [""]
+
+
 def _realtime_tag(tickers: list) -> str:
     """태그된 종목의 실시간 시세 동반표시(REALTIME_ENABLED·신선시). 없으면 빈 문자열(부가·차단無)."""
     try:
@@ -319,7 +344,13 @@ def _realtime_tag(tickers: list) -> str:
 def _format_alert(event: dict, score: int, reason: str) -> str:
     title   = event.get("title") or "[제목 없음]"
     tickers = [t.lstrip("$") for t in (event.get("tags") or []) if t.startswith("$")]
-    pub     = event.get("published_at", "")[:16].replace("T", " ")
+    try:
+        published = datetime.fromisoformat(event.get("published_at") or "")
+        if published.tzinfo is None:
+            published = published.replace(tzinfo=KST)
+        pub = published.astimezone(KST).strftime("%Y-%m-%d %H:%M KST")
+    except (ValueError, TypeError):
+        pub = "발행 시각 미확인"
 
     importance = "🔴" if score >= 9 else "🟠" if score >= 7 else "🟡"
     ticker_str = f"  종목: {' · '.join(tickers)}" if tickers else ""
@@ -334,7 +365,12 @@ def _format_alert(event: dict, score: int, reason: str) -> str:
         rt = _realtime_tag(tickers)
         if rt:
             lines.append(rt)
-    lines.append(f"  {pub} KST · saveticker")
+    lines.append(f"  {pub} · saveticker")
+    body = event.get("body_raw") or event.get("body")
+    if body:
+        lines.extend(["", str(body)])
+    if event.get("url"):
+        lines.extend(["", str(event["url"])])
     return "\n".join(lines)
 
 
@@ -359,6 +395,7 @@ def main() -> None:
     state = _load_state()
     _prune_state(state, now)
     sent_ids = state.setdefault("sent_ids", {})
+    deliveries = state.setdefault("deliveries", {})
 
     new_items = [e for e in breaking if e["id"] not in sent_ids]
     logger.info("미발송 속보: %d건", len(new_items))
@@ -376,22 +413,32 @@ def main() -> None:
             break
 
         score, reason, used_llm = judge_importance(
-            event, allow_llm=llm_used < NEWS_LLM_MAX_PER_RUN)
+            event, allow_llm=(event.get("transport") != "hermes_webhook"
+                              and llm_used < NEWS_LLM_MAX_PER_RUN))
         if used_llm:
             llm_used += 1
         logger.info("[%s] 중요도 %d — %s%s", event["id"][:8], score, reason,
                     " (LLM)" if used_llm else "")
 
-        # 중요도 미달이어도 발송 안 한 ID는 기록해서 재처리 방지
-        sent_ids[event["id"]] = now.isoformat()
-        state_dirty = True
-
         if score < IMPORTANCE_THRESHOLD:
             logger.info("중요도 미달 (%d) — 알림 건너뜀", score)
             continue
 
-        msg = _format_alert(event, score, reason)
-        if _send_telegram(msg):
+        # Freeze the exact message so retries cannot shift chunk boundaries or quotes.
+        delivery = deliveries.setdefault(event["id"], {
+            "parts": _alert_parts(_format_alert(event, score, reason)), "next": 0,
+        })
+        _save_state(state)
+        while delivery["next"] < len(delivery["parts"]):
+            if not _send_telegram(delivery["parts"][delivery["next"]]):
+                break
+            delivery["next"] += 1
+            _save_state(state)
+        if delivery["next"] == len(delivery["parts"]):
+            sent_ids[event["id"]] = now.isoformat()
+            del deliveries[event["id"]]
+            state_dirty = True
+            _save_state(state)
             sent_count += 1
             logger.info("발송 완료: %s", (event.get("title") or "")[:40])
             try:                                 # 중요 속보 → 월드 메모리 영구 축적 (dedupe·실패 무시)

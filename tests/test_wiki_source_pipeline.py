@@ -65,6 +65,83 @@ def test_dry_run_has_no_model_calls_or_store_changes(pipeline_env):
     assert {str(path): path.read_bytes() for path in root.rglob("*") if path.is_file()} == before
 
 
+@pytest.mark.parametrize('response,code', [(None, 'compilation_response_invalid'),
+                                         ('not JSON', 'compilation_response_invalid')])
+def test_compile_failure_retains_safe_reason_code(pipeline_env, response, code):
+    result = module().run(events=[{}], dry_run=False, llm_fn=lambda _: response, now=NOW)
+    assert result['compile_failed'] == 1
+    assert result['reason_counts'][code] == 1
+    receipt = module().Journal().load_source(REV)
+    assert receipt['error_code'] == code
+
+
+def test_compile_exception_never_persists_arbitrary_error_text(pipeline_env):
+    secret = 'synthetic-private-marker'
+    def failed(_):
+        raise RuntimeError(secret)
+    result = module().run(events=[{}], dry_run=False, llm_fn=failed, now=NOW)
+    assert result['reason_counts']['compile_failed'] == 1
+    assert secret not in json.dumps(result)
+    for path in (pipeline_env['root'] / 'reports').rglob('*.json'):
+        assert secret not in path.read_text()
+
+
+def test_nonstring_exception_payload_does_not_break_failure_recording(pipeline_env):
+    def failed(_):
+        raise ValueError({'synthetic': 'private-marker'})
+    result = module().run(events=[{}], dry_run=False, llm_fn=failed, now=NOW)
+    assert result['reason_counts']['compile_failed'] == 1
+
+
+def test_failed_compile_can_recover_and_clear_previous_diagnostic(pipeline_env):
+    failed = module().run(events=[{}], dry_run=False, llm_fn=lambda _: None, now=NOW)
+    assert failed['compile_failed'] == 1
+    recovered = module().run(events=[{}], dry_run=False, llm_fn=pipeline_env['llm'], now=NOW)
+    assert recovered['data_committed'] == 1
+    assert recovered['compile_failed'] == 0
+    assert 'compilation_response_invalid' not in recovered['reason_counts']
+    assert module().Journal().load_source(REV)['error_code'] == ''
+
+
+def test_compiled_note_uses_model_title_not_original_headline(pipeline_env):
+    pipeline_env['source']['title'] = 'Long original headline ' * 12
+    result = module().run(events=[{}], dry_run=False, llm_fn=pipeline_env['llm'], now=NOW)
+    assert result['data_committed'] == 1
+    identity = hashlib.sha256(('compiled-source:' + REV).encode()).hexdigest()
+    assert wiki.get_page(identity)['title'] == 'Capacity'
+
+
+def test_long_source_only_integrates_after_every_chunk_is_compiled(pipeline_env):
+    pipeline_env['source']['body'] = 'Capacity with caveat.\n' * 4300
+    first = module().run(events=[{}], dry_run=False, llm_fn=pipeline_env['llm'], now=NOW)
+    assert first['pending_chunking'] == 1
+    assert first['compiled'] == first['data_committed'] == first['compile_failed'] == 0
+    assert pipeline_env['calls'] == ['compile'] * 4
+    second = module().run(events=[{}], dry_run=False, llm_fn=pipeline_env['llm'], now=NOW)
+    assert second['compiled'] == second['data_committed'] == 1
+    assert pipeline_env['calls'].count('compile') == 5
+    page_id = hashlib.sha256(('compiled-source:' + REV).encode()).hexdigest()
+    assert len(wiki.semantic_snapshot(page_id)['claims']) == 5
+
+
+def test_scoped_worker_never_compiles_a_nonselected_source(pipeline_env):
+    other = copy.deepcopy(pipeline_env['source'])
+    other['revision_id'] = 'b' * 64
+    other['title'] = 'Excluded private context'
+    pipeline_env['discovery']['eligible'].insert(0, other)
+    result = module().run(events=[{}, {}], dry_run=False, llm_fn=pipeline_env['llm'], now=NOW,
+                          allowed_revision_ids={REV})
+    assert result['eligible'] == result['data_committed'] == 1
+    assert pipeline_env['calls'].count('compile') == 1
+
+
+def test_empty_source_allowlist_does_not_call_model(pipeline_env):
+    result = module().run(events=[{}], dry_run=False,
+                          llm_fn=lambda _: pytest.fail('unselected source reached model'),
+                          now=NOW, allowed_revision_ids=set())
+    assert result['eligible'] == result['data_committed'] == 0
+
+
 def test_default_worker_uses_structured_provider_contract(pipeline_env, monkeypatch):
     from agent_console import agent
 
@@ -240,3 +317,37 @@ def test_legacy_cli_dispatches_exactly_one_owner(monkeypatch, enabled):
     monkeypatch.setattr(module(), "run", lambda **kwargs: calls.append("new") or {"data_committed": 0})
     assert wiki_distillation.main() == 0
     assert calls == ["new" if enabled else "legacy"]
+
+
+def test_public_rollout_does_not_reauthorize_privately_changed_compiled_note(pipeline_env, monkeypatch):
+    from agent_console import agent
+    from reports.wiki_source_journal import Journal
+    from scripts import run_public_wiki_rollout as rollout
+
+    source = pipeline_env["source"]
+    source.update(provider="telegram:public_channel", scope="public_message",
+                  canonical_url="https://t.me/public_channel/1")
+    journal = Journal(pipeline_env["root"] / "public-journal")
+    attempt = {"id": "synthetic-attempt", "revision_id": source["revision_id"]}
+    model_prompts = []
+
+    def mocked_chat(prompt, **kwargs):
+        model_prompts.append(prompt)
+        return pipeline_env["llm"](prompt.split("\n", 1)[1])
+
+    monkeypatch.setattr(agent, "_try_codex_chat", mocked_chat)
+
+    first = rollout.process(source, [], journal, attempt)
+    assert first["data_committed"] == 1
+
+    page_id = hashlib.sha256(("compiled-source:" + REV).encode()).hexdigest()
+    page = wiki.get_page(page_id)
+    page["body"] += "\nPrivate marker: synthetic-secret"
+    wiki.upsert_page(page)
+    source["observed_evidence_ids"].append("synthetic-redelivery-id")
+
+    second = rollout.process(source, [], journal, attempt)
+
+    assert second["data_committed"] == 0
+    assert page_id not in rollout.public_target_ids(journal, {REV})
+    assert all("synthetic-secret" not in prompt for prompt in model_prompts)

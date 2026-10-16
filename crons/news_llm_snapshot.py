@@ -67,7 +67,9 @@ def main() -> int:
         logger.warning("이벤트 로드 실패: %s", e)
         return 0
 
-    targets = pick_events(events, news_labels.labeled_ids(), MAX_PER_RUN)
+    # A heuristic fallback is not a completed LLM label. Once the provider is
+    # healthy, retry those events while preserving the old JSONL rows.
+    targets = pick_events(events, news_labels.llm_labeled_ids(), MAX_PER_RUN)
     logger.info("라벨 대상: %d건 (수집 %d건 중 티커태그·미라벨)", len(targets), len(events))
     if not targets:
         return 0

@@ -454,38 +454,42 @@ def market_treemap(rows: list[dict], height: int = 560):
         sec_sum[r["sector_kr"]] += mc
         if r.get("sub"):
             sub_sum[(r["sector_kr"], r["sub"])] += mc
-    ids, labels, parents, values, colors, texts, custom = [], [], [], [], [], [], []
+    total_cap = sum(sec_sum.values())
+    ids, labels, parents, values, colors, texts, custom, changes = [], [], [], [], [], [], [], []
     for s in sorted(sec_sum):                       # 섹터 루트노드 (값=자식 시총합)
         ids.append(f"sec:{s}"); labels.append(s); parents.append("")
         values.append(sec_sum[s]); colors.append(0.0)
-        texts.append(f"<b>{s}</b>"); custom.append("")
+        texts.append(f"<b>{s}</b>"); custom.append(""); changes.append("")
     for (s, sub), v in sorted(sub_sum.items()):     # 세부 카테고리 (기술→반도체 등)
         ids.append(f"sub:{s}/{sub}"); labels.append(sub); parents.append(f"sec:{s}")
         values.append(v); colors.append(0.0)
-        texts.append(f"<b>{sub}</b>"); custom.append("")
+        texts.append(f"<b>{sub}</b>"); custom.append(""); changes.append("")
     for r in rows:
         parent = f"sub:{r['sector_kr']}/{r['sub']}" if r.get("sub") else f"sec:{r['sector_kr']}"
         ids.append(f"t:{r['ticker']}"); labels.append(r["ticker"]); parents.append(parent)
         values.append(float(r["market_cap"]))
         colors.append(max(-3.0, min(3.0, float(r["pct"]))))   # ±3 클램프(대비)
-        texts.append(f'{r.get("tile") or r["ticker"]}<br>{r["pct"]:+.2f}%')
+        # Reserve the available line for the ticker in small-cap tiles.
+        # Plotly scales that single line to the actual tile dimensions.
+        small_tile = float(r["market_cap"]) / total_cap < 0.002
+        texts.append(r["ticker"] if small_tile else f'{r["ticker"]}<br>{r["pct"]:+.2f}%')
         custom.append(r.get("name") or r["ticker"])
+        changes.append(f'{r["pct"]:+.2f}%')
     fig = go.Figure(go.Treemap(
         ids=ids, labels=labels, parents=parents, values=values, branchvalues="total",
         text=texts, textinfo="text", textposition="middle center",
         textfont=dict(size=11, color="white", family=theme._MONO),
-        customdata=custom,
+        customdata=custom, hovertext=changes,
         marker=dict(colors=colors,
                     colorscale=[[0.0, _RED], [0.5, "#1a1d26"], [1.0, _GREEN]],
                     cmid=0, cmin=-3, cmax=3, showscale=False,
                     line=dict(width=1, color="#0e1117")),
         tiling=dict(pad=1),
-        hovertemplate="%{customdata} (%{label})<br>시총 %{value:,.0f}<extra></extra>"))
-    # 모바일처럼 타일이 잘게 쪼개지는 폭에서도 라벨을 억지로 찌그러뜨리지 않는다 —
-    # 최소 크기(9px) 밑으로 내려가는 라벨은 아예 숨기고, 보이는 라벨은 항상 읽을 수
-    # 있는 크기를 유지한다(실측 2026-09-05: 390px 폭에서 라벨이 깨알같이 작아짐).
+        hovertemplate="%{customdata} (%{label})<br>%{hovertext}<br>시총 %{value:,.0f}<extra></extra>"))
+    # Let each tile shrink its own label rather than hiding all labels below
+    # a shared font threshold. Small tiles retain the ticker in one line.
     fig.update_layout(margin=dict(t=6, b=6, l=6, r=6), height=height,
-                      uniformtext=dict(minsize=9, mode="hide"))
+                      uniformtext=dict(mode=False))
     return _t(fig)
 
 

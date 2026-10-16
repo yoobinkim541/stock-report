@@ -42,6 +42,7 @@ _PROJECT_DIR = os.getenv("STOCK_REPORT_PROJECT_DIR",
 if _PROJECT_DIR not in sys.path:
     sys.path.insert(0, _PROJECT_DIR)
 from portfolio_universe import load_portfolio_tickers
+from reports.source_exceptions import SourceProviderUnavailable
 
 PORTFOLIO_TICKERS = load_portfolio_tickers()
 MARKET_TICKERS = {
@@ -209,7 +210,11 @@ def _classify_event(event: dict) -> dict:
     elif root == "polymarket":
         kind = "prediction_market"
     elif root in {"yahoo_finance", "fred", "worldgovernmentbonds"}:
-        kind = str(row.get("type") or kind or profile["kind"]).strip() or profile["kind"]
+        if (root == "fred" and row.get("extraction_scope") == "series_notes"
+                and row.get("fulltext_status") == "full" and row.get("body_coverage") == "full"):
+            kind = "series_notes"
+        else:
+            kind = str(row.get("type") or kind or profile["kind"]).strip() or profile["kind"]
     elif root == "saveticker":
         if any(label.lower() in {"analysis", "report"} for label in labels):
             kind = "analysis"
@@ -245,6 +250,8 @@ def _classify_event(event: dict) -> dict:
         wiki_eligible = kind == "analysis" or text_len >= 900
     elif root == "polymarket":
         wiki_eligible = True
+    elif root == "fred":
+        wiki_eligible = kind == "series_notes"
 
     trust = profile["trust"]
     confidence_map = {"A": 0.92, "B": 0.8, "C": 0.62, "D": 0.45}
@@ -748,6 +755,15 @@ def _fetch_saveticker_article_body(url: str, title: str = "") -> str:
             return ""
         text = _saveticker_html_to_text(html_text)
         return _strip_saveticker_boilerplate(text, title)
+    except requests.HTTPError as exc:
+        status_code = getattr(getattr(exc, "response", None), "status_code", None)
+        if status_code in {403, 451}:
+            raise SourceProviderUnavailable(
+                f"SaveTicker article HTTP {status_code} (provider access blocked)",
+                availability="blocked",
+                status_code=status_code,
+            ) from exc
+        return ""
     except Exception:
         return ""
 
@@ -761,6 +777,8 @@ def _saveticker_article_record(item: dict, base: str) -> dict:
     content = str(item.get("content") or "").strip()
     summary = str(item.get("group_summary") or "").strip()
     body_raw = _combine_body_raw(content, summary)
+    body_raw_source = "api_preview" if body_raw else ""
+    fulltext_status = "preview_only" if body_raw else "unavailable"
     # saveticker 자체 미리보기가 80~90자 근처서 "..."로 잘려 오는 경우가 흔해 길이만으로는
     # 거의 안 걸림 — 말줄임표로 끝나면 길이 무관하게 전체 기사를 마저 가져온다(2026-07-25).
     looks_truncated = body_raw.endswith("...") or body_raw.endswith("…")
@@ -768,10 +786,15 @@ def _saveticker_article_record(item: dict, base: str) -> dict:
         fetched = _fetch_saveticker_article_body(url, title=title)
         if fetched and len(fetched) > len(body_raw):
             body_raw = fetched   # 전체 기사가 미리보기의 상위집합 — 미리보기 중복 없이 이걸로 대체
+            body_raw_source = "article_page"
+            fulltext_status = "full"
         elif fetched:
             body_raw = _combine_body_raw(content, summary, fetched)
+            body_raw_source = "api_and_article_page"
+            fulltext_status = "partial"
     if not body_raw:
         body_raw = _combine_body_raw(title, content, summary) or title
+        body_raw_source = "title_fallback"
 
     raw_payload = json.dumps(item, ensure_ascii=False, sort_keys=True)
     raw_record = save_raw_artifact(
@@ -788,6 +811,9 @@ def _saveticker_article_record(item: dict, base: str) -> dict:
         "body_raw": body_raw,
         "body": body_raw,
         "body_excerpt": body_raw[:500],
+        "fulltext_status": fulltext_status,
+        "body_raw_source": body_raw_source,
+        "fulltext_url": url,
         "raw_path": raw_record["raw_path"],
         "text_path": raw_record["text_path"],
         "manifest_path": raw_record["manifest_path"],
@@ -808,6 +834,17 @@ def _fetch_arca_post_body(post_id: str, *, proxy: str | None = None) -> str:
             )
             body = resp.text.strip()
             if body:
+                if re.search(r"<(?:!doctype\s+html|html\b|body\b|article\b|div\b)", body, re.I):
+                    soup = BeautifulSoup(body, "html.parser")
+                    article = (
+                        soup.select_one(".article-content")
+                        or soup.select_one(".board-article .fr-view")
+                        or soup.select_one(".fr-view")
+                        or soup.find("article")
+                    )
+                    if article:
+                        return article.get_text("\n", strip=True)
+                    return ""
                 return body
         except Exception:
             pass
@@ -847,6 +884,15 @@ def fetch_saveticker_events() -> list[dict]:
             resp = requests.get(f"{base}/{path}", headers=HEADERS, params=params, timeout=12)
             resp.raise_for_status()
             data = resp.json()
+        except requests.HTTPError as exc:
+            status_code = getattr(getattr(exc, "response", None), "status_code", None)
+            if status_code in {403, 451}:
+                raise SourceProviderUnavailable(
+                    f"SaveTicker HTTP {status_code} (provider access blocked)",
+                    availability="blocked",
+                    status_code=status_code,
+                ) from exc
+            continue
         except Exception:
             continue
         items = data.get("news_list") or data.get("data") or []
@@ -868,9 +914,13 @@ def fetch_saveticker_events() -> list[dict]:
                 # 버그 수정 — 최근에 이미 아카이브했으면 재수집/재저장 생략(디스크·네트워크 낭비 방지).
                 body_raw = _combine_body_raw(item.get("content"), item.get("group_summary")) or text
                 raw_path = text_path = manifest_path = raw_sha256 = raw_source = ""
+                fulltext_status = "preview_only" if body_raw else "unavailable"
+                body_raw_source = "api_preview" if body_raw else "title_fallback"
             else:
                 record = _saveticker_article_record(item, base)
                 body_raw = record["body_raw"] or _combine_body_raw(item.get("content"), item.get("group_summary")) or text
+                fulltext_status = record["fulltext_status"]
+                body_raw_source = record["body_raw_source"]
                 raw_path, text_path = record["raw_path"], record["text_path"]
                 manifest_path, raw_sha256, raw_source = (
                     record["manifest_path"], record["raw_sha256"], record["raw_source"])
@@ -886,6 +936,9 @@ def fetch_saveticker_events() -> list[dict]:
                 "body_raw": body_raw,
                 "body": body_raw,
                 "body_excerpt": body_raw[:500],
+                "fulltext_status": fulltext_status,
+                "body_raw_source": body_raw_source,
+                "fulltext_url": url,
                 "tickers": _normalize_tickers(item.get("tickers")) or _extract_tickers(text),
                 "tags": item.get("tag_names") or [],
                 "raw_path": raw_path,
@@ -1039,11 +1092,14 @@ def _telegram_messages_from_html(html_text: str, channel: str) -> list[dict]:
             body_raw = _telegram_text_from_fragment(str(text_node))
             if not body_raw:
                 continue
+            url = _url_from(card)
             messages.append({
                 "title": body_raw[:180],
-                "url": _url_from(card),
-                "body_raw": body_raw[:TELEGRAM_BODY_MAX],
+                "url": url,
+                "body_raw": body_raw,
                 "raw_html": str(card),
+                "text_complete": bool(re.fullmatch(
+                    rf"https://t\.me/{re.escape(channel)}/\d+/?", url, re.I)),
             })
         return messages
 
@@ -1061,8 +1117,9 @@ def _telegram_messages_from_html(html_text: str, channel: str) -> list[dict]:
         out.append({
             "title": title[:180],
             "url": urls[idx] if idx < len(urls) else "",
-            "body_raw": title[:TELEGRAM_BODY_MAX],
+            "body_raw": title,
             "raw_html": raw_fragments[idx] if idx < len(raw_fragments) else title,
+            "text_complete": False,
         })
     return out
 
@@ -1073,7 +1130,7 @@ def _telegram_titles_from_html(html_text: str, channel: str) -> tuple[list[str],
     return [m.get("title", "") for m in messages], [m.get("url", "") for m in messages]
 
 
-TELEGRAM_BODY_MAX = 3000    # 이벤트 body 상한 (레딧 분석 등 장문 구조화 파싱용)
+TELEGRAM_BODY_MAX = 3000    # 표시·분류 상한; body_raw와 보관 본문에는 적용하지 않는다.
 
 
 def _telegram_direct_messages(channel: str) -> list[dict]:
@@ -1108,8 +1165,19 @@ def _archive_telegram_message(channel: str, message: dict) -> dict:
         payload=raw_payload,
         suffix=".html",
     )
+    complete = message.get("text_complete") is True
+    coverage = {
+        "text_complete": complete,
+        "fulltext_status": "full" if complete else "preview_only",
+        "body_coverage": "full" if complete else "partial",
+        "extraction_scope": "public_message" if complete else "public_message_preview",
+        "source_text_scope": "public_message" if complete else "public_message_preview",
+        "transport": "telegram_public_html" if complete else "telegram_preview",
+    }
+    raw_record.update(coverage)
     save_extracted_text(raw_record, body_raw)
     return {
+        **coverage,
         "raw_path": raw_record["raw_path"],
         "text_path": raw_record["text_path"],
         "manifest_path": raw_record["manifest_path"],
@@ -1136,6 +1204,7 @@ def fetch_telegram_channel_events(channels: list[str] = TELEGRAM_NEWS_CHANNELS) 
                     "url": urls[idx] if idx < len(urls) else "",
                     "body_raw": title[:TELEGRAM_BODY_MAX],
                     "raw_html": title,
+                    "text_complete": False,
                 })
         except Exception as e:
             logger.warning("telegram:%s jina 수집 실패 — 직접 HTML 폴백 시도: %s", channel, e)
@@ -1154,9 +1223,9 @@ def fetch_telegram_channel_events(channels: list[str] = TELEGRAM_NEWS_CHANNELS) 
                 continue
             if len(re.sub(r"[^\w가-힣]", "", title)) < 4:
                 continue
-            body = str(message.get("body_raw") or title).strip()[:TELEGRAM_BODY_MAX]
+            body = str(message.get("body_raw") or title).strip()
             url = str(message.get("url") or "").strip()
-            scan_text = body or title
+            scan_text = (body or title)[:TELEGRAM_BODY_MAX]
             tags = _extract_news_tags(scan_text)
             try:
                 from reports.social_sentiment import classify_post
@@ -1173,7 +1242,7 @@ def fetch_telegram_channel_events(channels: list[str] = TELEGRAM_NEWS_CHANNELS) 
                 "title": title[:180],
                 "url": url,
                 "body_raw": body,
-                "body": body,
+                "body": body[:TELEGRAM_BODY_MAX],
                 "body_excerpt": body[:500],
                 "tickers": _extract_tickers(scan_text),
                 "tags": tags,
@@ -1182,6 +1251,9 @@ def fetch_telegram_channel_events(channels: list[str] = TELEGRAM_NEWS_CHANNELS) 
                 "manifest_path": archive["manifest_path"],
                 "raw_sha256": archive["raw_sha256"],
                 "raw_source": archive["raw_source"],
+                **{key: archive[key] for key in (
+                    "text_complete", "fulltext_status", "body_coverage",
+                    "extraction_scope", "source_text_scope", "transport")},
             })
     return [_classify_event(event) for event in events]
 

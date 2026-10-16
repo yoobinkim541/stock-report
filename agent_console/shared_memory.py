@@ -111,6 +111,15 @@ def _clean_text(value, limit: int = 1800) -> str:
     return text[: max(0, limit - 1)].rstrip() + "…"
 
 
+def split_identity_tag(value: object) -> str:
+    """Return only complete reserved tags whose IDs fit the page-ID bound."""
+    if isinstance(value, str) and re.fullmatch(
+        r"split_(?:from|into):[A-Za-z0-9_-]{1,80}", value
+    ):
+        return value
+    return ""
+
+
 def normalize_artifact_refs(values: Iterable[object] | object, *, limit: int = 20) -> list[str]:
     """Keep bounded source identifiers intact rather than truncating pointers."""
     if isinstance(values, (str, bytes)):
@@ -193,7 +202,10 @@ def normalize_record(payload: dict) -> dict:
     record["summary"] = _clean_text(payload.get("summary") or "", 1800)
     record["decisions"] = [_clean_text(x, 300) for x in payload.get("decisions") or []][:12]
     record["openQuestions"] = [_clean_text(x, 300) for x in payload.get("openQuestions") or []][:12]
-    record["tags"] = [_clean_text(x, 60).lower() for x in payload.get("tags") or []][:20]
+    record["tags"] = [
+        split_identity_tag(x) or _clean_text(x, 60).lower()
+        for x in payload.get("tags") or []
+    ][:20]
     record["artifacts"] = normalize_artifact_refs(payload.get("artifacts") or [])
     record["messages"] = [
         {

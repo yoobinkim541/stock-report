@@ -30,7 +30,10 @@ class BenchmarkComparison:
 
 
 def _returns_to_price(returns: pd.Series, name: str) -> pd.Series:
-    return (100.0 * (1.0 + returns.fillna(0.0)).cumprod()).rename(name)
+    # Proxy returns are deliberately noisy, but a price path must remain
+    # positive even when a caller supplies an unusually large input return.
+    safe_returns = returns.fillna(0.0).astype(float).clip(lower=-0.95)
+    return (100.0 * (1.0 + safe_returns).cumprod()).rename(name)
 
 
 def _seed_for_ticker(ticker: str) -> int:
@@ -47,14 +50,14 @@ def _proxy_ticker_returns(ticker: str, qqq_ret: pd.Series, spy_ret: pd.Series) -
 
 def build_benchmark_price_panel(data: dict, extra_tickers: Optional[list[str]] = None) -> pd.DataFrame:
     """Build deterministic proxy prices for benchmark strategies."""
-    qqq = data["qqq_close"].rename("QQQ")
-    spy = data["spy_close"].rename("SPY")
+    qqq = pd.Series(data["qqq_close"], dtype=float).rename("QQQ")
+    spy = pd.Series(data["spy_close"], index=qqq.index, dtype=float).rename("SPY")
     qqq_ret = qqq.pct_change().fillna(0)
     spy_ret = spy.pct_change().fillna(0)
     idx = qqq.index
     rng = np.random.default_rng(123)
 
-    panel = pd.DataFrame({"QQQ": qqq, "SPY": spy}, index=idx)
+    panel = pd.DataFrame({"QQQ": qqq, "SPY": spy}, index=idx).ffill()
     panel["QLD"] = _returns_to_price(2.0 * qqq_ret - 0.00018, "QLD")
     panel["TQQQ"] = _returns_to_price(3.0 * qqq_ret - 0.00045, "TQQQ")
     panel["SGOV"] = _returns_to_price(pd.Series(0.00018 + rng.normal(0, 0.00005, len(idx)), index=idx), "SGOV")
@@ -79,12 +82,10 @@ def _constant_weight_result(panel: pd.DataFrame, weights: dict[str, float], name
     raw = pd.Series({t: weights[t] for t in cols}, dtype=float)
     raw = raw / raw.sum()
     weight_df = pd.DataFrame([raw] * len(panel), index=panel.index).fillna(0.0)
-    result = portfolio_metrics(weight_df, panel[cols], name=name)
-    equity = result.extra.get("equity")
-    if equity is None:
-        rets = panel[cols].pct_change()
-        port_ret = (weight_df.shift(1).fillna(0.0) * rets).sum(axis=1)
-        result.extra["equity"] = 100.0 * (1.0 + port_ret.fillna(0.0)).cumprod()
+    result = portfolio_metrics(weight_df, panel[cols], name=name, risk_free=0.0)
+    rets = panel[cols].pct_change()
+    port_ret = (weight_df.shift(1).fillna(0.0) * rets).sum(axis=1)
+    result.extra["equity"] = 100.0 * (1.0 + port_ret.fillna(0.0)).cumprod()
     return result
 
 
@@ -95,13 +96,17 @@ def _ma_trend_following(panel: pd.DataFrame, ma_days: int = 200) -> BacktestResu
     """
     qqq  = panel["QQQ"]
     ma   = qqq.rolling(ma_days, min_periods=min(ma_days, 60)).mean()
-    long = (qqq > ma).shift(1).fillna(False).astype(bool).values  # numpy bool array
+    long = (qqq > ma).fillna(False).astype(bool).values
 
     wts = pd.DataFrame(0.0, index=panel.index, columns=["QQQ", "SGOV"])
     wts["QQQ"]  = np.where(long, 1.0, 0.0)
     wts["SGOV"] = np.where(long, 0.0, 1.0)
 
-    result = portfolio_metrics(wts, panel[["QQQ", "SGOV"]], name=f"QQQ {ma_days}MA 트렌드추종")
+    result = portfolio_metrics(
+        wts, panel[["QQQ", "SGOV"]],
+        name=f"QQQ {ma_days}MA 트렌드추종",
+        risk_free=0.0,
+    )
     rets     = panel[["QQQ", "SGOV"]].pct_change()
     port_ret = (wts.shift(1).fillna(0.0) * rets).sum(axis=1)
     result.extra["equity"] = 100.0 * (1.0 + port_ret.fillna(0.0)).cumprod()
@@ -116,7 +121,11 @@ def _mechanical_bull_bear(panel: pd.DataFrame) -> BacktestResult:
     weights.loc[bull, ["SGOV", "TLT"]] = [0.15, 0.05]
     weights.loc[~bull, ["QQQ", "QLD"]] = [0.15, 0.00]
     weights.loc[~bull, ["SGOV", "TLT"]] = [0.65, 0.20]
-    result = portfolio_metrics(weights, panel[weights.columns], name="기계적 Bull/Bear 리밸런싱")
+    result = portfolio_metrics(
+        weights, panel[weights.columns],
+        name="기계적 Bull/Bear 리밸런싱",
+        risk_free=0.0,
+    )
     rets = panel[weights.columns].pct_change()
     port_ret = (weights.shift(1).fillna(0.0) * rets).sum(axis=1)
     result.extra["equity"] = 100.0 * (1.0 + port_ret.fillna(0.0)).cumprod()
@@ -126,6 +135,10 @@ def _mechanical_bull_bear(panel: pd.DataFrame) -> BacktestResult:
 def load_current_portfolio_weights(path: str | Path = "portfolio_snapshot.json") -> tuple[Optional[pd.Series], str]:
     """Load current portfolio weights from a local snapshot, if available."""
     p = Path(path)
+    if not p.is_absolute() and not p.exists():
+        repo_snapshot = Path(__file__).resolve().parents[1] / p
+        if repo_snapshot.exists():
+            p = repo_snapshot
     if not p.exists():
         return None, f"현재 포트폴리오: {p} 없음 - 비교 제외"
     try:
@@ -140,10 +153,15 @@ def load_current_portfolio_weights(path: str | Path = "portfolio_snapshot.json")
             ticker = str(holding.get("ticker") or "").strip().upper()
             if not ticker:
                 continue
-            value = holding.get("value_usd")
+            value = holding.get("value_usd") or holding.get("value_krw")
             if value is None:
                 shares = holding.get("shares", 0) or 0
-                price = holding.get("current_price_usd") or holding.get("current_price") or 0
+                price = (
+                    holding.get("current_price_usd")
+                    or holding.get("current_price_krw")
+                    or holding.get("current_price")
+                    or 0
+                )
                 value = shares * price
             try:
                 value_f = float(value)
@@ -161,7 +179,7 @@ def load_current_portfolio_weights(path: str | Path = "portfolio_snapshot.json")
 
 def _bah_with_equity(price: pd.Series, name: str) -> BacktestResult:
     """buy_and_hold() with normalized equity curve stored in extra["equity"]."""
-    result = buy_and_hold(price, name=name)
+    result = buy_and_hold(price, name=name, risk_free=0.0)
     valid = price.dropna()
     if len(valid) > 0 and valid.iloc[0] != 0:
         result.extra["equity"] = valid / valid.iloc[0] * 100.0
@@ -187,7 +205,7 @@ def build_benchmark_comparison(
         _constant_weight_result(panel, {"QQQ": 0.60, "SGOV": 0.40}, "QQQ/SGOV 60/40"),
         _ma_trend_following(panel, ma_days=200),
         _constant_weight_result(panel, {"QLD": 0.70, "TQQQ": 0.30}, "QLD/TQQQ 바벨"),
-        _constant_weight_result(panel, {"QQQ": 0.30, "TLT": 0.40, "IEF": 0.15, "GLD": 0.075, "DBC": 0.075}, "올웨더 포트폴리오"),
+        _constant_weight_result(panel, {"SPY": 0.30, "TLT": 0.40, "IEF": 0.15, "GLD": 0.075, "DBC": 0.075}, "올웨더 포트폴리오"),
         _mechanical_bull_bear(panel),
         _constant_weight_result(panel, {"QQQ": 0.60, "IEF": 0.30, "SGOV": 0.10}, "채권혼합 60/30/10"),
         _constant_weight_result(panel, {"SCHD": 1.00}, "SCHD 배당 스타일"),

@@ -15,6 +15,7 @@ from typing import Iterable
 from dotenv import load_dotenv          # crons/*.py 관례 — uv run 은 .env 를 자동 주입 안 함
 load_dotenv()
 
+from agent_console.shared_memory import normalize_artifact_refs
 from reports.evidence_cards import cards_to_source_refs, event_to_evidence_card
 
 KST = timezone(timedelta(hours=9))
@@ -97,8 +98,7 @@ def _usable_source_refs(page: dict) -> set[str]:
     잘못 연결한다. ``wiki:`` 역참조는 별도 규칙에서 처리한다.
     """
     refs = set()
-    for raw in page.get("source_refs") or []:
-        ref = _clean(raw, 260)
+    for ref in normalize_artifact_refs(page.get("source_refs") or []):
         if not ref or ref.startswith("wiki:") or ref.startswith("/") or ref.startswith("<"):
             continue
         refs.add(ref)
@@ -150,11 +150,11 @@ def _source_refs(events: list[dict]) -> list[str]:
     refs = []
     for event in events:
         refs.extend([event.get("url"), event.get("text_path"), event.get("raw_path")])
-    return _dedupe(refs)
+    return normalize_artifact_refs(refs, limit=MAX_SOURCE_REFS)
 
 
 def _event_key(event: dict) -> str:
-    return _clean(event.get("url"), 300) or _clean(event.get("title"), 220)
+    return next(iter(normalize_artifact_refs([event.get("url")], limit=1)), "") or _clean(event.get("title"), 220)
 
 
 def _is_strong_group(events: list[dict]) -> bool:
@@ -263,7 +263,7 @@ def _body_for(topic: str, events: list[dict], now: datetime) -> str:
         source = event.get("source") or "unknown"
         title = _clean(event.get("title"), 180)
         body = _clean(event.get("body_raw") or event.get("body") or event.get("body_excerpt"), 260)
-        url = _clean(event.get("url"), 220)
+        url = next(iter(normalize_artifact_refs([event.get("url")], limit=1)), "")
         line = f"- [{source}] {title}"
         if body and body != title:
             line += f" — {body}"

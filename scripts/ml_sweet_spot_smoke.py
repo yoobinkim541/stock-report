@@ -60,9 +60,18 @@ def main() -> None:
     print("\n[2/4] Running sweet-spot optimizer...")
     result = optimize_sweet_spot(data)
     print(f"      best_params = {result.best_params}")
-    print(f"      best CAGR   = {result.best_result.cagr:.1%}" if result.best_result.cagr else "      best CAGR = n/a")
-    print(f"      ML CAGR     = {result.ml_result.cagr:.1%}" if result.ml_result.cagr else "      ML CAGR = n/a")
-    print(f"      QQQ CAGR    = {result.qqq_result.cagr:.1%}" if result.qqq_result.cagr else "      QQQ CAGR = n/a")
+    print(
+        f"      best CAGR   = {result.best_result.cagr:.1%}"
+        if result.best_result.cagr is not None else "      best CAGR = n/a"
+    )
+    print(
+        f"      ML CAGR     = {result.ml_result.cagr:.1%}"
+        if result.ml_result.cagr is not None else "      ML CAGR = n/a"
+    )
+    print(
+        f"      QQQ CAGR    = {result.qqq_result.cagr:.1%}"
+        if result.qqq_result.cagr is not None else "      QQQ CAGR = n/a"
+    )
 
     print("\n[3/4] Building benchmark comparison...")
     bench = build_benchmark_comparison(data, ml_result=result.ml_result)
@@ -104,8 +113,9 @@ def main() -> None:
 
     main_report = build_ml_strategy_report(
         ml_result=result.ml_result,
-        qqq_result=result.qqq_result,
-        spy_result=result.spy_result,
+        qqq_result=result.qqq_oos_result or result.qqq_result,
+        spy_result=result.spy_oos_result or result.spy_result,
+        overlay_result=result.overlay_result,
         weights=result.weights,
         wf_summary=result.wf_summary,
         as_of="샘플 (최적화 샘플 / synthetic smoke)",

@@ -73,12 +73,15 @@ def extract_article(snapshot: dict) -> dict:
         title = heading.get_text(' ', strip=True)
     published = ''
     time_node = article.find('time', datetime=True)
-    if time_node:
-        candidate = str(time_node.get('datetime') or '')
+    candidates = [time_node.get('datetime') if time_node else None, snapshot.get('published_at')]
+    for candidate in candidates:
+        if not isinstance(candidate, str):
+            continue
         try:
             timestamp = datetime.fromisoformat(candidate.replace('Z', '+00:00'))
             if timestamp.tzinfo is not None:
                 published = candidate
+                break
         except ValueError:
             pass
     content = paragraphs[0].parent if modal or direct else article.select_one('[data-article-body], [data-testid="article-body"], .article-content, .prose')
@@ -97,6 +100,12 @@ def extract_article(snapshot: dict) -> dict:
     record = {'url': url, 'title': title, 'published_at': published, 'body': body,
               'body_coverage': 'full', 'extraction_scope': 'authorized_article',
               'raw_content': raw, 'raw_format': 'html'}
+    category = str(snapshot.get('category') or '').strip()
+    header = article.find('header')
+    if header and any(node.get_text(strip=True) == '속보' for node in header.find_all('span')):
+        category = '속보'
+    if category:
+        record['category'] = category
     # The webhook's complete credential/challenge checks are also enforced before outbox writes.
     try:
         validate_batch({'schema': SCHEMA, 'delivery_id': 'validation',
@@ -193,6 +202,13 @@ def collect(browser, *, outbox: Path, sender, now: datetime | None = None, limit
             listing = (browser.discover(limit=limit) if hasattr(browser, 'discover')
                        else browser.read(ORIGIN)) if explicit is None else None
             urls = explicit if explicit is not None else discover_urls(listing, limit=limit)
+            metadata_by_url = {}
+            for address, metadata in (listing or {}).get('article_metadata', {}).items():
+                canonical = _article_url(address)
+                if not isinstance(metadata, dict) or (canonical in metadata_by_url
+                        and metadata_by_url[canonical] != metadata):
+                    raise CollectionError('parse_failed')
+                metadata_by_url[canonical] = metadata
         except CollectionError as exc:
             urls = []
             result['errors'].append({'url': ORIGIN, 'reason': str(exc)})
@@ -201,7 +217,13 @@ def collect(browser, *, outbox: Path, sender, now: datetime | None = None, limit
             result['errors'].append({'url': ORIGIN, 'reason': 'browser_unavailable'})
         for url in urls:
             try:
-                record = extract_article(browser.read(url))
+                captured = browser.read(url)
+                metadata = metadata_by_url.get(url, {})
+                if not isinstance(metadata, dict):
+                    raise CollectionError('parse_failed')
+                captured = {**captured, **{key: metadata[key] for key in ('category', 'published_at')
+                    if key in metadata and not captured.get(key)}}
+                record = extract_article(captured)
                 if record['url'] != url:
                     raise CollectionError('article_redirect_mismatch')
                 identity = _delivery_id(record)
@@ -269,6 +291,7 @@ LISTING_DISCOVERY = r'''(async () => {
       Array.from(document.querySelectorAll('button')).some(b => b.textContent.trim()==='로그인'))
     return {reauth_required:true};
   const links = [];
+  const article_metadata = {};
   let rows = [];
   for (let wait=0;wait<40;wait++) {
     if (blocked()) return {blocked:true};
@@ -306,7 +329,16 @@ LISTING_DISCOVERY = r'''(async () => {
       const url = new URL(value);
       if (url.origin!=='https://saveticker.com' || !/^\/news\/[A-Za-z0-9_-]+\/?$/.test(url.pathname) ||
           url.search || url.hash) return {error:'unsupported_url'};
+      url.pathname = url.pathname.replace(/\/$/, '');
       if (!links.includes(url.href)) links.push(url.href);
+      const time = row.querySelector?.('time[datetime]');
+      const category = row.getAttribute?.('data-breaking') === 'true' ? '속보' :
+        row.getAttribute?.('data-category') ||
+        row.querySelector?.('[data-category]')?.getAttribute?.('data-category') || '';
+      article_metadata[url.href] = {
+        category,
+        published_at: time?.getAttribute?.('datetime') || row.getAttribute?.('data-published-at') || ''
+      };
     } catch (_) {
       return {error:'browser_unavailable'};
     } finally {
@@ -315,7 +347,7 @@ LISTING_DISCOVERY = r'''(async () => {
       await pause(100);
     }
   }
-  return {url:'https://saveticker.com/',links};
+  return {url:'https://saveticker.com/',links,article_metadata};
 })()'''
 
 

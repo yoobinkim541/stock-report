@@ -187,7 +187,9 @@ def main() -> int:
                     page["status"] = "archived"
                     wiki.upsert_page(page)
             elif act == "delete":
-                wiki.delete_page(page_id)
+                page = wiki.get_page(page_id)
+                if page and not (page.get("source_knowledge") or wiki.has_non_conversation_source_refs(page)):
+                    wiki.delete_page(page_id)
             elif act == "reactivate":
                 page = wiki.get_page(page_id)
                 if page:

@@ -86,8 +86,10 @@ def test_build_advisor_prompt_includes_individual_stock_holdings():
     assert "14.66%" in prompt
 
 
-def test_ask_portfolio_advisor_uses_configured_codex_model_runner():
-    from stock_advisor import PROJECT_DIR, ask_portfolio_advisor
+def test_ask_portfolio_advisor_uses_configured_codex_model_runner(monkeypatch):
+    import stock_advisor as advisor
+
+    monkeypatch.setattr(advisor, "ADVISOR_MODEL", "test-configured-model")
 
     calls = []
 
@@ -95,16 +97,16 @@ def test_ask_portfolio_advisor_uses_configured_codex_model_runner():
         calls.append((cmd, kwargs))
         return FakeCompleted(stdout="결론: DCA 유지\n근거: RSI 68")
 
-    answer = ask_portfolio_advisor("지금 추가매수해도 돼?", sample_market(), runner=fake_run)
+    answer = advisor.ask_portfolio_advisor("지금 추가매수해도 돼?", sample_market(), runner=fake_run)
 
     assert "결론: DCA 유지" in answer
     cmd = calls[0][0]
     kwargs = calls[0][1]
     assert cmd[:4] == ["hermes", "chat", "-q", calls[0][0][3]]
     assert "--provider" in cmd and "openai-codex" in cmd
-    assert "--model" in cmd and "gpt-5.6-sol" in cmd
+    assert cmd[cmd.index("--model") + 1] == "test-configured-model"
     assert "--toolsets" in cmd and "file" in cmd
-    assert kwargs["cwd"] == PROJECT_DIR
+    assert kwargs["cwd"] == advisor.PROJECT_DIR
 
 
 def test_ask_portfolio_advisor_uses_configured_provider_env(monkeypatch):

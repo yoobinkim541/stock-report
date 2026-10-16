@@ -3,6 +3,20 @@ from __future__ import annotations
 from pathlib import Path
 
 
+def test_sitecustomize_preserves_native_answer_contract():
+    import importlib
+    import inspect
+
+    from agent_console import agent
+    import sitecustomize
+
+    current_answer = agent.answer
+    importlib.reload(sitecustomize)
+
+    assert agent.answer is current_answer
+    assert {"async_postprocess", "context_pack_data"}.issubset(inspect.signature(agent.answer).parameters)
+
+
 def _isolate(monkeypatch, tmp_path: Path) -> None:
     monkeypatch.setenv("AGENT_CONSOLE_DB", str(tmp_path / "agent_console.sqlite3"))
     monkeypatch.setenv("AGENT_CONSOLE_REPORTS_DIR", str(tmp_path / "reports"))

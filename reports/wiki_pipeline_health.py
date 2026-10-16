@@ -79,6 +79,12 @@ def _page_source_refs(page: dict[str, Any]) -> list[str]:
     return [_clean(ref, 120) for ref in (page.get("source_refs") or []) if _clean(ref, 120)]
 
 
+def _evidence_fingerprint(page: dict[str, Any]) -> str:
+    from reports import wiki_distillation
+
+    return wiki_distillation._evidence_fingerprint(page)
+
+
 def _has_non_conversation_source_refs(page: dict[str, Any]) -> bool:
     return wiki.has_non_conversation_source_refs(page)
 
@@ -321,6 +327,11 @@ def _source_digest_backlinks(
                 state.get("status") or "pending", 40
             ).lower() or "pending",
             "distillation_attempts": distillation_attempts,
+            "distillation_result_id": _clean(state.get("last_result_id") or "", 100),
+            "distillation_reason": _clean(state.get("reason") or "", 240),
+            "has_evidence": bool(page.get("evidence_ids") or page.get("conflicting_evidence_ids")),
+            "distillation_evidence_fingerprint": _clean(state.get("evidence_fingerprint") or "", 100),
+            "current_evidence_fingerprint": _evidence_fingerprint(page),
         })
     return rows
 
@@ -335,12 +346,42 @@ def _summarize_curation_health(pages: list[dict[str, Any]]) -> dict[str, Any]:
         if page["has_source_refs"] and page["open_questions"] == 0 and not page["linked_to_judgment"]
     ]
     distillation_states = Counter(page.get("distillation_status") or "pending" for page in source_digests)
+    by_id = {_page_id(page): page for page in pages if _page_id(page)}
+    orphaned_judgments = [
+        page for page in unlinked
+        if page.get("distillation_result_id")
+        and _page_status(by_id.get(page["distillation_result_id"], {})) == "archived"
+    ]
+    orphaned_ids = {page["id"] for page in orphaned_judgments}
+    refresh_due = [
+        page for page in unlinked
+        if page.get("has_evidence")
+        and (
+            page.get("distillation_evidence_fingerprint")
+            or page["distillation_status"] == "created"
+        )
+        and page.get("distillation_evidence_fingerprint") != page.get("current_evidence_fingerprint")
+    ]
+    refresh_due_ids = {page["id"] for page in refresh_due}
+    intentional_skips = [
+        page for page in unlinked
+        if page["distillation_status"] == "skipped"
+        and page["id"] not in refresh_due_ids
+    ]
+    actionable_unlinked = [
+        page for page in unlinked
+        if page["id"] in refresh_due_ids
+        or page["distillation_status"] in {"pending", "created"}
+        or (page["distillation_status"] == "failed" and int(page.get("distillation_attempts") or 0) < 3)
+    ]
     distillation_pending_count = sum(
         1
         for page in source_digests
         if not page["linked_to_judgment"]
         and (
             page["distillation_status"] == "pending"
+            or page["distillation_status"] == "created"
+            or page["id"] in refresh_due_ids
             or (
                 page["distillation_status"] == "failed"
                 and int(page.get("distillation_attempts") or 0) < 3
@@ -352,6 +393,10 @@ def _summarize_curation_health(pages: list[dict[str, Any]]) -> dict[str, Any]:
         "source_digest_linked_count": len(linked),
         "source_digest_unlinked_count": len(unlinked),
         "source_digest_unlinked_pages": unlinked,
+        "actionable_unlinked_count": len(actionable_unlinked),
+        "intentional_skip_count": len(intentional_skips),
+        "orphaned_judgment_count": len(orphaned_judgments),
+        "refresh_due_count": len(refresh_due),
         "ready_for_promotion_count": len(ready_for_promotion),
         "ready_for_promotion_pages": ready_for_promotion,
         "linked_source_digest_pages": linked,
@@ -422,12 +467,18 @@ def _recommendations(
         })
     stale_rows = list(source_section.get("stale_sources") or [])
     missing_success = [row for row in source_section.get("sources") or [] if row.get("observed") and not row.get("has_success")]
-    if stale_rows or missing_success:
-        top_sources = stale_rows or missing_success
+    blocked_sources = [
+        row for row in source_section.get("sources") or []
+        if row.get("availability") in {"blocked", "disabled", "error"}
+    ]
+    if stale_rows or missing_success or blocked_sources:
+        top_sources = stale_rows or blocked_sources or missing_success
         detail_bits = []
         for row in top_sources[:3]:
             source = row.get("source", "unknown")
-            if row.get("stale_hours") is not None:
+            if row.get("availability") in {"blocked", "disabled", "error"} and row.get("availability_reason"):
+                detail_bits.append(f"{source}: {row['availability_reason']}")
+            elif row.get("stale_hours") is not None:
                 detail_bits.append(f"{source} {row['stale_hours']}h/{row.get('stale_threshold')}h")
             elif row.get("last_error"):
                 detail_bits.append(f"{source}: {row['last_error']}")
@@ -441,12 +492,16 @@ def _recommendations(
             "action": "크론·인증·채널 상태를 먼저 복구해서 원문 유입을 다시 살리세요.",
         })
 
-    unlinked = int(curation_section.get("source_digest_unlinked_count") or 0)
+    unlinked = int(curation_section.get("actionable_unlinked_count") or 0)
+    unlinked_total = int(curation_section.get("source_digest_unlinked_count") or 0)
     promoted_missing = int(wiki_section.get("source_missing_for_promoted_count") or 0)
     if unlinked or promoted_missing:
         detail_bits = []
         if unlinked:
-            detail_bits.append(f"source_digest {unlinked}개가 judgment page로 연결되지 않음")
+            detail_bits.append(f"처리 대상 source_digest {unlinked}개가 judgment page로 연결되지 않음")
+            skipped = int(curation_section.get("intentional_skip_count") or 0)
+            if skipped:
+                detail_bits.append(f"의도적 스킵 {skipped}개 제외 (전체 미연결 {unlinked_total}개)")
             pending = int(curation_section.get("distillation_pending_count") or 0)
             if pending:
                 detail_bits.append(f"증류 대기 {pending}개")
@@ -571,7 +626,10 @@ def format_pipeline_health_report(report: dict[str, Any]) -> str:
     lines.append(
         f"큐레이션: source_digest {curation_section.get('source_digest_count', 0)} · "
         f"linked {curation_section.get('source_digest_linked_count', 0)} · "
-        f"unlinked {curation_section.get('source_digest_unlinked_count', 0)}"
+        f"unlinked {curation_section.get('source_digest_unlinked_count', 0)} · "
+        f"actionable {curation_section.get('actionable_unlinked_count', 0)} · "
+        f"pending {curation_section.get('distillation_pending_count', 0)} · "
+        f"intentional-skip {curation_section.get('intentional_skip_count', 0)}"
     )
     lines.append(
         f"상태: reviewed {status_counts.get('reviewed', 0)} · stable {status_counts.get('stable', 0)} · "

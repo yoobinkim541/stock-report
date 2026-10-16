@@ -37,6 +37,13 @@ def get_risk_free_rate() -> float:
     if _RF_PROCESS_CACHE is not None:
         return _RF_PROCESS_CACHE
 
+    # Tests and local synthetic smoke runs must not depend on FRED being
+    # reachable.  Production callers retain the existing cached/network
+    # behaviour unless the test harness explicitly opts into offline mode.
+    if os.environ.get("STOCK_REPORT_OFFLINE_TESTS") == "1":
+        _RF_PROCESS_CACHE = _RF_FALLBACK
+        return _RF_PROCESS_CACHE
+
     # 파일 캐시 확인
     if _RF_CACHE.exists():
         try:
@@ -164,12 +171,21 @@ def portfolio_turnover(weights: pd.DataFrame) -> float:
 # Buy-and-hold benchmark
 # ---------------------------------------------------------------------------
 
-def buy_and_hold(close: pd.Series, name: str | None = None) -> BacktestResult:
-    """Compute buy-and-hold metrics for a single price series."""
+def buy_and_hold(
+    close: pd.Series,
+    name: str | None = None,
+    *,
+    risk_free: float | None = None,
+) -> BacktestResult:
+    """Compute buy-and-hold metrics for a single price series.
+
+    ``risk_free`` is optional so deterministic synthetic callers can avoid
+    the live FRED lookup while legacy callers keep the existing default.
+    """
     label = name or str(close.name or "bah")
     valid = close.dropna()
     rets = valid.pct_change().dropna()
-    rf = get_risk_free_rate()
+    rf = get_risk_free_rate() if risk_free is None else float(risk_free)
     return BacktestResult(
         name=label,
         cumulative_return=cumulative_return(valid),
@@ -250,6 +266,8 @@ def portfolio_metrics(
     weights: pd.DataFrame,
     close_panel: pd.DataFrame,
     name: str = "portfolio",
+    *,
+    risk_free: float | None = None,
 ) -> BacktestResult:
     """Compute performance for a time-varying weighted portfolio.
 
@@ -279,7 +297,10 @@ def portfolio_metrics(
         cumulative_return=float(equity.iloc[-1] - 1) if len(equity) else 0.0,
         cagr=cagr(equity),
         max_drawdown=max_drawdown(equity),
-        sharpe=sharpe_ratio(portfolio_ret.dropna(), risk_free=get_risk_free_rate()),
+        sharpe=sharpe_ratio(
+            portfolio_ret.dropna(),
+            risk_free=get_risk_free_rate() if risk_free is None else float(risk_free),
+        ),
         turnover=portfolio_turnover(w),
         n_days=len(equity),
     )

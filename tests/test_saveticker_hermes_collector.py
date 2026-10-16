@@ -99,6 +99,45 @@ def test_collection_uses_bounded_browser_discovery_for_click_based_listing(tmp_p
     assert result['delivered']==1
 
 
+@pytest.mark.parametrize('suffix', ['', '/'])
+def test_listing_metadata_survives_article_extraction_without_changing_raw(tmp_path, suffix):
+    class ClickBrowser:
+        def discover(self, limit):
+            return {'url': 'https://saveticker.com/', 'links': [URL + suffix],
+                    'article_metadata': {URL + suffix: {'category': '속보',
+                        'published_at': '2026-10-13T18:00:00+09:00'}}}
+        def read(self, url):
+            return snapshot()
+    delivered = []
+    def sender(path):
+        delivered.extend(json.loads(path.read_text())['records'])
+        return {'ok': True}
+    result = module().collect(ClickBrowser(), outbox=tmp_path, sender=sender, limit=1, now=NOW)
+    assert result['delivered'] == 1
+    assert delivered[0]['category'] == '속보'
+    assert delivered[0]['published_at'] == '2026-10-13T18:00:00+09:00'
+    assert delivered[0]['raw_content'] == HTML
+
+
+def test_article_timestamp_wins_and_invalid_listing_time_is_not_invented():
+    record = module().extract_article({**snapshot(html=HTML.replace('<h1>',
+        '<time datetime="2026-10-12T12:00:00Z"></time><h1>', 1)),
+        'published_at': '2026-10-13T18:00:00+09:00'})
+    assert record['published_at'] == '2026-10-12T12:00:00Z'
+    for value in ['18:00', '2026-10-13T18:00:00', 'invalid']:
+        assert module().extract_article({**snapshot(), 'published_at': value})['published_at'] == ''
+
+
+def test_listing_timestamp_is_used_when_article_has_no_timestamp():
+    assert module().extract_article({**snapshot(),
+        'published_at': '2026-10-13T18:00:00+09:00'})['published_at'] == '2026-10-13T18:00:00+09:00'
+
+
+def test_article_breaking_badge_wins_over_listing_fallback():
+    html = HTML.replace('<h1>', '<header><span>속보</span></header><h1>', 1)
+    assert module().extract_article({**snapshot(html=html), 'category': '뉴스'})['category'] == '속보'
+
+
 def test_hermes_click_discovery_handles_news_redirect_and_honors_limit():
     api=hermes_api()
     api.browser_navigate=lambda url,task_id:json.dumps({'success':True,'url':'https://saveticker.com/news'})
@@ -127,7 +166,9 @@ def test_discovery_javascript_never_uses_stale_clipboard(write_delay,write_enabl
     const modal={matches:()=>true,querySelector:s=>s==='h2'?{}:s.includes('공유하기')?share:s.includes('뒤로가기')?close:null};
     const irrelevant={matches:()=>false,querySelector:()=>null};
     globalThis.document={title:'News',querySelector:()=>null,querySelectorAll:s=>
-        s==='button'?[]:s.includes('data-breaking')?[{click(){open=true}}]:s.includes('modal-fullscreen')?(open?[modal]:[]):[]};
+        s==='button'?[]:s.includes('data-breaking')?[{click(){open=true},
+        getAttribute:s=>s==='data-breaking'?'true':s==='data-category'?'뉴스':null,
+        querySelector:s=>s==='time[datetime]'?{getAttribute:()=> '2026-10-13T18:00:00+09:00'}:null}]:s.includes('modal-fullscreen')?(open?[modal]:[]):[]};
     Object.defineProperty(globalThis,'navigator',{value:{clipboard:{readText:async()=>clip,writeText:async value=>{clip=value}}},configurable:true});
     const limit=1;
     const result=await EXPRESSION;
@@ -138,6 +179,8 @@ def test_discovery_javascript_never_uses_stale_clipboard(write_delay,write_enabl
     result=json.loads(run.stdout)['result']
     if expected:
         assert result['links']==['https://saveticker.com'+expected]
+        assert result['article_metadata']['https://saveticker.com'+expected] == {
+            'category': '속보', 'published_at': '2026-10-13T18:00:00+09:00'}
     else:
         assert result.get('error')=='browser_unavailable'
         assert not result.get('links')

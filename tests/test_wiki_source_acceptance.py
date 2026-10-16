@@ -9,10 +9,62 @@ from agent_console import shared_memory, wiki
 from reports import wiki_source_pipeline, wiki_source_revision
 from test_wiki_source_pipeline import pipeline_env, NOW
 from test_wiki_source_revision import archived_event
+from test_wiki_source_chunks import response as chunk_response
 
 REAL_DISCOVERY = wiki_source_revision.discover_revisions
 FIXTURES = Path(__file__).parent / "fixtures" / "wiki_source_semantics.json"
 SAMPLES = Path(__file__).parent / "fixtures" / "wiki_source_semantic_outputs.json"
+
+
+def test_verified_long_archive_compiles_into_lossless_children_and_reuses_chunks(pipeline_env, archived_event, monkeypatch):
+    original = 'Capacity reported; realized orders uncertain.\n' * 1100 + 'TAIL'
+    event = archived_event(body=original)
+    raw_before = Path(event['raw_path']).read_bytes()
+    text_before = Path(event['text_path']).read_bytes()
+    monkeypatch.setattr(wiki_source_revision, 'discover_revisions', REAL_DISCOVERY)
+    def llm(prompt):
+        if prompt.startswith('Compile'):
+            pipeline_env['calls'].append('compile')
+            payload = json.loads(chunk_response(prompt))
+            payload['body'] += '\nDetailed attributed discussion. ' * 400
+            return json.dumps(payload)
+        return pipeline_env['llm'](prompt)
+    result = wiki_source_pipeline.run(events=[event], dry_run=False, llm_fn=llm, now=NOW)
+    assert result['compiled'] == result['data_committed'] == 1
+    revision = REAL_DISCOVERY([event], now=NOW, allow_chunking=True)['eligible'][0]
+    page_id = hashlib.sha256(('compiled-source:' + revision['revision_id']).encode()).hexdigest()
+    snapshot = wiki.semantic_snapshot(page_id)
+    assert snapshot['children'] and 'TAIL' in snapshot['body']
+    for claim in snapshot['claims']:
+        anchor = claim['anchor']
+        assert original[anchor['start']:anchor['end']] == anchor['quote']
+        assert claim['source_revision_id'] == revision['revision_id']
+    before_calls = list(pipeline_env['calls'])
+    repeated = wiki_source_pipeline.run(events=[event], dry_run=False, llm_fn=llm, now=NOW)
+    assert repeated['data_committed'] == 0 and pipeline_env['calls'] == before_calls
+    assert Path(event['raw_path']).read_bytes() == raw_before
+    assert Path(event['text_path']).read_bytes() == text_before
+
+
+def test_pending_long_archive_resumes_after_leaving_recent_events(pipeline_env, archived_event, monkeypatch):
+    event = archived_event(body='Reported capacity with uncertainty.\n' * 2400)
+    monkeypatch.setattr(wiki_source_revision, 'discover_revisions', REAL_DISCOVERY)
+    first = wiki_source_pipeline.run(events=[event], dry_run=False, llm_fn=pipeline_env['llm'], now=NOW)
+    assert first['pending_chunking'] == 1 and first['data_committed'] == 0
+    second = wiki_source_pipeline.run(events=[], dry_run=False, llm_fn=pipeline_env['llm'], now=NOW)
+    assert second['compiled'] == second['data_committed'] == 1
+    assert pipeline_env['calls'].count('compile') == 5
+
+
+def test_pending_archive_resume_rechecks_raw_provenance_before_model_call(pipeline_env, archived_event, monkeypatch):
+    event = archived_event(body='Reported capacity with uncertainty.\n' * 2400)
+    monkeypatch.setattr(wiki_source_revision, 'discover_revisions', REAL_DISCOVERY)
+    wiki_source_pipeline.run(events=[event], dry_run=False, llm_fn=pipeline_env['llm'], now=NOW)
+    Path(event['raw_path']).unlink()
+    result = wiki_source_pipeline.run(events=[], dry_run=False, llm_fn=pipeline_env['llm'], now=NOW)
+    assert result['unavailable'] == 1 and result['reason_counts']['raw_unavailable'] == 1
+    assert result['data_committed'] == result['compiled'] == 0
+    assert pipeline_env['calls'] == ['compile'] * 4
 
 
 def test_source_knowledge_compounds_across_pages(pipeline_env, archived_event, monkeypatch):
@@ -65,7 +117,12 @@ def test_query_fileback_and_excerpt_contract_remain_compatible(pipeline_env):
     page["body"] = "x" * 1600 + "NOT_READ_TAIL"
     section = wiki.build_context_section(query="capacity", surface="market", pages=[page])
     assert "NOT_READ_TAIL" not in section and wiki.WIKI_CONTEXT_BODY_SNIPPET == 1600
-    assert "x" * 1600 in section
+    excerpt = wiki._context_body_excerpt(page)
+    assert len(excerpt) <= 1600
+    assert "x" * 100 in excerpt and excerpt in section
+    assert "Demand uncertain" in excerpt and "draft" in excerpt
+    assert "전체 검토 아님" in excerpt
+    assert page["body"].endswith("NOT_READ_TAIL")
     wiki_source_pipeline.run(events=[{}], dry_run=False, llm_fn=pipeline_env["llm"], now=NOW)
     assert wiki.semantic_snapshot(saved["id"])["revision_hash"] == before
     assert any(item["id"] == saved["id"] for item in wiki.list_pages(query="validate capacity", surface="market"))

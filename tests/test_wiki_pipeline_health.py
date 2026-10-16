@@ -199,6 +199,25 @@ def test_recommendations_do_not_flag_provenance_only_unused_pages():
     assert not any(rec["category"] == "hygiene" for rec in recommendations)
 
 
+def test_recommendations_flag_blocked_sources_even_when_not_stale():
+    from reports.wiki_pipeline_health import _recommendations
+
+    recommendations = _recommendations(
+        {
+            "stale_sources": [],
+            "sources": [
+                {"source": "saveticker", "availability": "blocked", "availability_reason": "HTTP 403"},
+            ],
+        },
+        {"stale_count": 0, "unused_count": 0, "source_missing_for_promoted_count": 0},
+        {"source_digest_unlinked_count": 0},
+    )
+
+    rec = next(rec for rec in recommendations if rec["category"] == "collection")
+    assert "saveticker" in rec["detail"]
+    assert "HTTP 403" in rec["detail"]
+
+
 def test_curation_health_exposes_distillation_queue_states():
     from reports.wiki_pipeline_health import _summarize_curation_health
 
@@ -217,6 +236,48 @@ def test_curation_health_exposes_distillation_queue_states():
     assert result["distillation_queue_ids"] == ["pending"]
     assert result["distillation_created_count"] == 1
     assert result["distillation_skipped_count"] == 1
+
+
+def test_curation_health_separates_intentional_skips_and_orphaned_results():
+    from reports.wiki_pipeline_health import _summarize_curation_health
+
+    result = _summarize_curation_health(
+        [
+            {"id": "skipped", "kind": "source_digest", "status": "draft", "links": [], "backlinks": [],
+             "distillation_state": {"status": "skipped", "reason": "단순 사실 나열"}},
+            {"id": "orphaned", "kind": "source_digest", "status": "draft", "links": [], "backlinks": [],
+             "distillation_state": {"status": "created", "last_result_id": "archived-judgment"}},
+            {"id": "failed", "kind": "source_digest", "status": "draft", "links": [], "backlinks": [],
+             "distillation_state": {"status": "failed", "attempts": 1}},
+            {"id": "archived-judgment", "kind": "risk", "status": "archived", "links": [], "backlinks": []},
+        ]
+    )
+
+    assert result["source_digest_unlinked_count"] == 3
+    assert result["intentional_skip_count"] == 1
+    assert result["orphaned_judgment_count"] == 1
+    assert result["actionable_unlinked_count"] == 2
+    assert result["distillation_pending_count"] == 2
+
+
+def test_curation_health_counts_evidence_changes_as_refresh_due():
+    from reports.wiki_pipeline_health import _summarize_curation_health
+
+    result = _summarize_curation_health([
+        {
+            "id": "changed",
+            "kind": "source_digest",
+            "status": "draft",
+            "links": [],
+            "backlinks": [],
+            "evidence_ids": ["new-evidence"],
+            "distillation_state": {"status": "skipped", "evidence_fingerprint": "old"},
+        },
+    ])
+
+    assert result["refresh_due_count"] == 1
+    assert result["intentional_skip_count"] == 0
+    assert result["actionable_unlinked_count"] == 1
 
 
 def test_pipeline_health_flags_recent_news_labels_without_llm(monkeypatch):

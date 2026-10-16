@@ -118,6 +118,16 @@ def test_oversized_source_keeps_full_pending_identity(archived_event):
     assert result["pending_chunking"][0]["text_sha256"] == hashlib.sha256(b"x" * 20001).hexdigest()
 
 
+def test_chunking_opt_in_keeps_verified_complete_body_and_identity(archived_event):
+    body = 'x' * 20000 + 'ORIGINAL TAIL'
+    event = archived_event(body=body)
+    pending = module().discover_revisions([event], now=NOW)['pending_chunking'][0]
+    result = module().discover_revisions([event], now=NOW, allow_chunking=True)
+    assert result['eligible'][0]['body'] == body
+    assert result['eligible'][0]['revision_id'] == pending['revision_id']
+    assert result['pending_chunking'] == []
+
+
 @pytest.mark.parametrize("body", ["Just a moment... Cloudflare challenge", "Sign in to read this article"])
 def test_challenge_or_login_is_not_article(archived_event, body):
     with pytest.raises(ValueError, match="reauth_required"):

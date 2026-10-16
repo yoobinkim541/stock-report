@@ -57,6 +57,96 @@ def test_atomic_additions_preserve_old_prose_trust_history_and_unrelated(store):
                for page_id, expected in batch["expected_after"].items())
 
 
+def test_conflict_without_claim_mapping_is_explicitly_unresolved(store):
+    proposal, compiled, source = inputs(('entity',))
+    proposal['role'] = source['role'] = 'conflict'
+    batch = wiki.prepare_source_batch(proposal, compiled, source)
+    assert wiki.apply_source_batch(batch)['status'] == 'applied'
+    snapshot = wiki.semantic_snapshot('entity')
+    integration = snapshot['source_knowledge']['integrations'][0]
+    assert integration['relation_state'] == 'unresolved'
+    assert 'not adjudicated' in integration['relation_note']
+    assert snapshot['claims'][0]['knowledge_state'] == 'draft'
+    assert 'Old exception.' in snapshot['body']
+    assert snapshot['conflicting_evidence_ids'] == ['actual-id']
+
+
+def test_dangling_historical_relation_does_not_mark_conflict_mapped(store):
+    wiki.upsert_page({'id': 'entity', 'title': 'entity', 'kind': 'concept', 'surface': 'market',
+                     'source_knowledge': {'relations': [{'from_revision_id': REV}]}})
+    proposal, compiled, source = inputs(('entity',))
+    proposal['role'] = source['role'] = 'conflict'
+    wiki.apply_source_batch(wiki.prepare_source_batch(proposal, compiled, source))
+    assert wiki.semantic_snapshot('entity')['source_knowledge']['integrations'][0]['relation_state'] == 'unresolved'
+
+
+def test_conflict_can_be_mapped_and_mapping_survives_empty_relation_retry(store):
+    old = {**inputs(('entity',))[1]['claims'][0], 'claim_id': 'old-claim', 'source_revision_id': 'b' * 64,
+           'as_of': '2026-10-08'}
+    wiki.upsert_page({'id': 'entity', 'title': 'entity', 'kind': 'concept', 'surface': 'market',
+                     'source_knowledge': {'claims': [old]}})
+    proposal, compiled, source = inputs(('entity',))
+    proposal['role'] = source['role'] = 'conflict'
+    wiki.apply_source_batch(wiki.prepare_source_batch(proposal, compiled, source))
+    assert wiki.semantic_snapshot('entity')['source_knowledge']['integrations'][0]['relation_state'] == 'unresolved'
+    proposal, compiled, source = inputs(('entity',))
+    proposal['role'] = source['role'] = 'conflict'
+    proposal['targets'][0]['relations'] = [{
+        'type': 'compete', 'from_claim_id': 'new-claim', 'to_claim_id': 'old-claim',
+        'from_revision_id': REV, 'to_revision_id': 'b' * 64,
+        'from_as_of': '2026-10-09', 'to_as_of': '2026-10-08',
+        'scope_explanation': 'Different observation windows; not adjudicated.'}]
+    wiki.apply_source_batch(wiki.prepare_source_batch(proposal, compiled, source))
+    for _ in range(2):
+        integration = wiki.semantic_snapshot('entity')['source_knowledge']['integrations'][0]
+        assert integration['relation_state'] == 'mapped'
+        assert 'not factual adjudication' in integration['relation_note']
+        proposal, compiled, source = inputs(('entity',))
+        proposal['role'] = source['role'] = 'conflict'
+        wiki.apply_source_batch(wiki.prepare_source_batch(proposal, compiled, source))
+
+
+def test_malformed_historical_relation_does_not_crash_conflict_state(store):
+    wiki.upsert_page({'id': 'entity', 'title': 'entity', 'kind': 'concept', 'surface': 'market',
+                     'source_knowledge': {'relations': [{'type': 'compete', 'from_revision_id': REV,
+                                                        'from_claim_id': [], 'to_claim_id': []}]}})
+    proposal, compiled, source = inputs(('entity',))
+    proposal['role'] = source['role'] = 'conflict'
+    wiki.apply_source_batch(wiki.prepare_source_batch(proposal, compiled, source))
+    assert wiki.semantic_snapshot('entity')['source_knowledge']['integrations'][0]['relation_state'] == 'unresolved'
+
+
+def test_repeated_readability_split_preserves_complete_child_body(store):
+    original = "Complete evidence and caveat.\n" * 900
+    wiki.upsert_page({"id": "entity", "title": "entity", "body": original,
+                      "kind": "concept", "surface": "market"})
+    wiki.split_for_readability("entity", 2600)
+    wiki.split_for_readability("entity", 2600)
+    assert wiki.semantic_snapshot("entity")["body"] == original
+    assert wiki.semantic_snapshot("entity")["children"]
+
+
+def test_resplitting_source_update_preserves_child_only_caveats_and_relations(store):
+    original = ''.join(f"Evidence {i:04d} with uncertainty.\n" for i in range(600))
+    wiki.upsert_page({"id": "entity", "title": "entity", "body": original,
+                      "kind": "concept", "surface": "market"})
+    wiki.split_for_readability("entity", 500)
+    child = wiki.semantic_snapshot("entity")["children"][1]["raw"]
+    relation = {"type": "compete", "from_claim_id": "historical-a", "to_claim_id": "historical-b",
+                "scope_explanation": "Unresolved historical contradiction"}
+    child['source_knowledge'] = {"limitations": ["Child-only caveat"], "relations": [relation]}
+    shared_memory.upsert_record(child)
+    proposal, compiled, source = inputs(("entity",))
+    batch = wiki.prepare_source_batch(proposal, compiled, source)
+    assert wiki.apply_source_batch(batch)['status'] == 'applied'
+    snapshot = wiki.semantic_snapshot('entity')
+    active_knowledge = [snapshot['page']['source_knowledge'],
+                        *[page['source_knowledge'] for page in snapshot['children']]]
+    assert any("Child-only caveat" in item.get('limitations', []) for item in active_knowledge)
+    assert any(relation in item.get('relations', []) for item in active_knowledge)
+    assert snapshot['body'].startswith(original)
+
+
 def test_stale_child_aborts_whole_batch(store):
     wiki.upsert_page({"id": "entity", "title": "entity", "body": "Old exception. " * 1500,
                       "surface": "market", "kind": "concept", "source_refs": ["https://example.org/old"]})

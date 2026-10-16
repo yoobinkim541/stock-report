@@ -10,7 +10,7 @@ plot_results(result, outdir)              — matplotlib equity/trial charts (op
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Optional
 
 import numpy as np
@@ -22,9 +22,16 @@ from ml.backtest import (
     cagr as _calc_cagr,
     max_drawdown as _calc_mdd,
     sharpe_ratio as _calc_sharpe,
-    get_risk_free_rate as _get_rf,
 )
 from ml.optimization import composite_score, grid_search_parameters
+
+
+_SYNTHETIC_RISK_FREE = 0.0
+
+
+def _offline_buy_and_hold(close: pd.Series, name: str) -> BacktestResult:
+    """Buy-and-hold metrics for synthetic data without a live rate lookup."""
+    return buy_and_hold(close, name=name, risk_free=_SYNTHETIC_RISK_FREE)
 
 
 # ---------------------------------------------------------------------------
@@ -153,7 +160,7 @@ def evaluate_threshold_strategy(data: dict, params: dict) -> BacktestResult:
         cumulative_return=float((1 + strat_ret.fillna(0)).prod() - 1),
         cagr=_calc_cagr(equity),
         max_drawdown=_calc_mdd(equity),
-        sharpe=_calc_sharpe(strat_ret.dropna(), risk_free=_get_rf()),
+        sharpe=_calc_sharpe(strat_ret.dropna(), risk_free=_SYNTHETIC_RISK_FREE),
         turnover=turnover,
         n_days=len(df),
         extra={"equity": equity},
@@ -179,8 +186,6 @@ def evaluate_risk_overlay_strategy(data: dict, train_fraction: float = 2 / 3) ->
     Rationale: never fully exits in uptrend (participates in bull runs);
     ML modulates size instead of making binary in/out decisions.
     """
-    from ml.models import ExcessReturnModel
-
     close     = data["close"]
     qqq_close = data.get("qqq_close", close)
     features  = data["features"]
@@ -191,15 +196,10 @@ def evaluate_risk_overlay_strategy(data: dict, train_fraction: float = 2 / 3) ->
     ma200     = qqq_close.rolling(200, min_periods=60).mean()
     trend_up  = (qqq_close > ma200).astype(float)
 
-    # ML OOS predictions
-    fwd_ret = close.pct_change().shift(-1).fillna(0)
-    X = features.values.astype(float)
-    y = fwd_ret.values
-    model = ExcessReturnModel()
-    model.fit(X[:split], y[:split])
-    raw_preds = np.full(n, np.nan)
-    raw_preds[split:] = model.predict(X[split:])
-    ml_signal = pd.Series(raw_preds, index=features.index)
+    # ML OOS predictions.  This shares the same strictly point-in-time model
+    # path as the main strategy, rather than fitting a second adapter with a
+    # different fallback behaviour.
+    ml_signal = _generate_ml_signal(data, train_fraction=train_fraction)
 
     # Expanding percentile rank — 각 시점 t 를 t 까지의 분포로만 순위화.
     # 전역 rank(pct=True) 는 t 의 순위가 t 이후 미래 예측분포에 의존하는 look-ahead 였다(감사 확정).
@@ -207,17 +207,18 @@ def evaluate_risk_overlay_strategy(data: dict, train_fraction: float = 2 / 3) ->
         lambda s: s.rank(pct=True).iloc[-1], raw=False).fillna(0.5)
 
     # Position: combine trend + ML size
-    trend_s = trend_up.shift(1).fillna(0.5)   # shift(1): no lookahead
+    trend_s = trend_up.shift(1).fillna(False)   # shift(1): no lookahead
     ml_s    = ml_pos.shift(1).fillna(0.5)
     position = np.where(
-        trend_s >= 0.5,
+        trend_s,
         0.6 + 0.4 * ml_s,   # trend up: 0.6~1.0
         0.0 + 0.4 * ml_s,   # trend down: 0.0~0.4
     )
     position_s = pd.Series(position, index=close.index)
 
-    # Only trade OOS period (in-sample: hold 0.8 as neutral)
-    position_s.iloc[:split] = 0.8
+    # Do not report an in-sample return as if it were an ML result.  The
+    # pre-split period is cash; only predictions made after training are used.
+    position_s.iloc[:split] = 0.0
 
     df = pd.concat([close.rename("close"), position_s.rename("pos")], axis=1).dropna()
     asset_ret = df["close"].pct_change()
@@ -229,7 +230,7 @@ def evaluate_risk_overlay_strategy(data: dict, train_fraction: float = 2 / 3) ->
         cumulative_return=float((1 + strat_ret.fillna(0)).prod() - 1),
         cagr=_calc_cagr(equity),
         max_drawdown=_calc_mdd(equity),
-        sharpe=_calc_sharpe(strat_ret.dropna(), risk_free=_get_rf()),
+        sharpe=_calc_sharpe(strat_ret.dropna(), risk_free=_SYNTHETIC_RISK_FREE),
         turnover=float(df["pos"].diff().abs().mean()),
         n_days=len(df),
         extra={"equity": equity},
@@ -237,53 +238,78 @@ def evaluate_risk_overlay_strategy(data: dict, train_fraction: float = 2 / 3) ->
 
 
 # ---------------------------------------------------------------------------
-# ML model signal: OOS predictions from ExcessReturnModel
+# ML model signal: OOS predictions from an optional sklearn model
 # ---------------------------------------------------------------------------
 
 def _generate_ml_signal(data: dict, train_fraction: float = 2 / 3) -> pd.Series:
-    """Train ExcessReturnModel on first `train_fraction` of data; predict OOS.
+    """Train a regularized forward-return model on the first data segment.
 
     Returns a Series of model predictions named "ml_signal".  Values are NaN
     for the in-sample period so the strategy defaults to safe_weight during
     those rows — making the backtest strictly OOS from the split point.
 
-    Why this is better than a simple threshold on raw sentiment:
-      - The model learns a weighted combination of momentum, volatility and
-        sentiment features rather than thresholding one feature.
-      - Predictions are only used on data the model has never seen.
+    A standardized sklearn Ridge model is used when available.  The fallback
+    is the same ridge equation solved with NumPy, so importing/running the
+    smoke path does not require sklearn.  Predictions are only emitted for
+    rows after the training split.
     """
-    from ml.models import ExcessReturnModel
-
     features_df = data["features"]
     close = data["close"]
     n = len(features_df)
-    split = int(n * train_fraction)
+    split = int(n * float(train_fraction))
+    if n < 8 or split < 4 or split >= n:
+        return pd.Series(np.full(n, np.nan), index=features_df.index, name="ml_signal")
 
-    # Target: next-day forward return (shift(-1) so training is lookahead-free)
-    fwd_return = close.pct_change().shift(-1).fillna(0)
+    # Target at t is return from t to t+1.  The final row has no observable
+    # target and is excluded from fitting instead of being filled with zero.
+    fwd_return = close.pct_change().shift(-1)
     X = features_df.values.astype(float)
-    y = fwd_return.values
+    y = fwd_return.values.astype(float)
+    train_mask = np.isfinite(y[:split]) & np.isfinite(X[:split]).all(axis=1)
+    if train_mask.sum() < 4:
+        return pd.Series(np.full(n, np.nan), index=features_df.index, name="ml_signal")
 
-    model = ExcessReturnModel()
-    model.fit(X[:split], y[:split])
+    x_train = X[:split][train_mask]
+    y_train = y[:split][train_mask]
+    x_test = np.nan_to_num(X[split:], nan=0.0, posinf=0.0, neginf=0.0)
 
-    # OOS predictions only — in-sample period is NaN → strategy stays safe there
-    preds = np.full(n, np.nan)
-    preds[split:] = model.predict(X[split:])
+    try:
+        from sklearn.linear_model import Ridge
+        from sklearn.pipeline import make_pipeline
+        from sklearn.preprocessing import StandardScaler
 
-    # Base-Python fallback: ExcessReturnModel intentionally falls back to a
-    # constant mean when sklearn/lightgbm is unavailable.  A constant signal
-    # cannot create a threshold sweet spot, so use deterministic ridge via
-    # numpy least squares for the smoke optimizer while keeping imports safe.
-    if np.nanstd(preds[split:]) < 1e-12 and split > 5:
-        x_train = np.column_stack([np.ones(split), X[:split]])
-        x_test = np.column_stack([np.ones(n - split), X[split:]])
-        reg = 1e-4 * np.eye(x_train.shape[1])
-        reg[0, 0] = 0.0
-        coef = np.linalg.pinv(x_train.T @ x_train + reg) @ x_train.T @ y[:split]
-        preds[split:] = x_test @ coef
+        model = make_pipeline(StandardScaler(), Ridge(alpha=1.0))
+        # DataFrame input keeps sklearn feature-name validation quiet while
+        # retaining a dependency-free NumPy fallback below.
+        model.fit(pd.DataFrame(x_train, columns=features_df.columns), y_train)
+        predictions = np.asarray(
+            model.predict(pd.DataFrame(x_test, columns=features_df.columns)),
+            dtype=float,
+        )
+        backend = "sklearn_ridge"
+    except ImportError:
+        # Standardize with training statistics and solve ridge with an
+        # unpenalized intercept.  This is intentionally equivalent in shape
+        # to the sklearn branch, not a constant-return fallback.
+        mean = np.nanmean(x_train, axis=0)
+        scale = np.nanstd(x_train, axis=0)
+        scale[~np.isfinite(scale) | (scale < 1e-12)] = 1.0
+        train_z = (x_train - mean) / scale
+        test_z = (x_test - mean) / scale
+        train_design = np.column_stack([np.ones(len(train_z)), train_z])
+        test_design = np.column_stack([np.ones(len(test_z)), test_z])
+        penalty = np.eye(train_design.shape[1])
+        penalty[0, 0] = 0.0
+        coef = np.linalg.pinv(train_design.T @ train_design + penalty) @ train_design.T @ y_train
+        predictions = test_design @ coef
+        backend = "numpy_ridge"
 
-    return pd.Series(preds, index=features_df.index, name="ml_signal")
+    predictions = np.nan_to_num(predictions, nan=0.0, posinf=0.0, neginf=0.0)
+    output = np.full(n, np.nan)
+    output[split:] = predictions
+    signal = pd.Series(output, index=features_df.index, name="ml_signal")
+    signal.attrs["model_backend"] = backend
+    return signal
 
 
 # ---------------------------------------------------------------------------
@@ -385,7 +411,7 @@ def _run_proper_walk_forward(
         }
 
         # Optimize on train fold only — default arg binding captures current loop values
-        _qqq_cagr_fold = buy_and_hold(train_data["qqq_close"], name="QQQ").cagr or 0.0
+        _qqq_cagr_fold = _offline_buy_and_hold(train_data["qqq_close"], "QQQ").cagr or 0.0
 
         def _fold_objective(params: dict, _td=train_data, _qc=_qqq_cagr_fold) -> float:
             r = evaluate_threshold_strategy(_td, params)
@@ -428,8 +454,6 @@ def oos_aligned_benchmarks(equity) -> dict:
     756일 26.46%, 그러나 같은 126일 QQQ 는 42.86% — 표시값이 ML 을 실제보다 좋아
     보이게 했다). equity 의 ML_model 유효 구간으로 잘라 재계산한다.
     """
-    from ml.backtest import buy_and_hold
-
     if equity is None or getattr(equity, "empty", True):
         return {}
     cols = set(getattr(equity, "columns", []))
@@ -446,8 +470,26 @@ def oos_aligned_benchmarks(equity) -> dict:
         series = window[name].dropna()
         if len(series) < 2:
             continue
-        out[name] = buy_and_hold(series, name=f"{name}(OOS 정합)")
+        out[name] = _offline_buy_and_hold(series, name=f"{name}(OOS 정합)")
     return out
+
+
+def _sweet_spot_score(
+    result: BacktestResult,
+    qqq_cagr: float,
+    spy_cagr: float,
+) -> float:
+    """CAGR − drawdown/turnover penalties + excess vs both benchmarks."""
+    excess_vs_benchmarks = 0.5 * (
+        (result.cagr or 0.0) - qqq_cagr
+        + (result.cagr or 0.0) - spy_cagr
+    )
+    return composite_score(
+        cagr=result.cagr,
+        max_drawdown=result.max_drawdown,
+        turnover=result.turnover or 0.0,
+        excess_return=excess_vs_benchmarks,
+    )
 
 
 def optimize_sweet_spot(
@@ -456,7 +498,8 @@ def optimize_sweet_spot(
 ) -> SweetSpotResult:
     """Grid-search for the best threshold strategy parameters.
 
-    Objective: composite_score(CAGR, MDD, turnover, QQQ-excess).
+    Objective: CAGR − drawdown penalty − turnover penalty plus excess return
+    against both QQQ and SPY.
 
     Returns SweetSpotResult with best params, baselines, trials DataFrame,
     equity curves, and a 2-fold walk-forward summary.
@@ -471,24 +514,19 @@ def optimize_sweet_spot(
             "safe_weight": [0.0, 0.1],
         }
 
-    qqq_result = buy_and_hold(data["qqq_close"], name="QQQ")
-    spy_result = buy_and_hold(data["spy_close"], name="SPY")
+    qqq_result = _offline_buy_and_hold(data["qqq_close"], "QQQ")
+    spy_result = _offline_buy_and_hold(data["spy_close"], "SPY")
     baseline_result = evaluate_threshold_strategy(
         data, {"threshold": 0.0, "max_weight": 1.0, "safe_weight": 0.0}
     )
 
     qqq_cagr = qqq_result.cagr or 0.0
+    spy_cagr = spy_result.cagr or 0.0
     trial_rows: list[dict] = []
 
     def _objective(params: dict) -> float:
         r = evaluate_threshold_strategy(data, params)
-        excess = (r.cagr or 0.0) - qqq_cagr
-        score = composite_score(
-            cagr=r.cagr,
-            max_drawdown=r.max_drawdown,
-            turnover=r.turnover or 0.0,
-            excess_return=excess,
-        )
+        score = _sweet_spot_score(r, qqq_cagr, spy_cagr)
         trial_rows.append({
             **params,
             "score": score,
@@ -501,6 +539,12 @@ def optimize_sweet_spot(
 
     gs = grid_search_parameters(_objective, param_grid)
     best_params = gs["best_params"]
+
+    # The neutral baseline is always a valid candidate, even when a caller
+    # supplies a custom grid that omits it.  Never return a worse “optimum”.
+    baseline_params = {"threshold": 0.0, "max_weight": 1.0, "safe_weight": 0.0}
+    if not best_params or _sweet_spot_score(baseline_result, qqq_cagr, spy_cagr) > gs["best_value"]:
+        best_params = baseline_params
 
     # Best threshold strategy (grid-searched on full data — in-sample benchmark)
     _best = evaluate_threshold_strategy(data, best_params)
@@ -533,39 +577,61 @@ def optimize_sweet_spot(
     else:
         ml_thresholds = [0.0]
 
-    _qqq_cagr = qqq_result.cagr or 0.0
     best_ml_score  = float("-inf")
     best_ml_params = {"threshold": ml_thresholds[0],
                       "max_weight": best_params.get("max_weight", 1.0),
                       "safe_weight": best_params.get("safe_weight", 0.0),
                       "signal_col": "ml_signal"}
 
+    # Threshold and sizing are selected on validation only.  Percentiles make
+    # the search scale-free because model predictions are returns, not prices.
+    val_slice = {
+        k: (v.iloc[train_end:val_end] if isinstance(v, (pd.Series, pd.DataFrame)) else v)
+        for k, v in ml_data.items()
+    }
+    # The validation objective must use validation-window benchmarks.  Using
+    # full-period QQQ/SPY CAGR here would leak the held-out test window into
+    # model/threshold selection.
+    val_qqq_cagr = _offline_buy_and_hold(val_slice["qqq_close"], "QQQ").cagr or 0.0
+    val_spy_cagr = _offline_buy_and_hold(val_slice["spy_close"], "SPY").cagr or 0.0
+    ml_sizing = sorted({
+        (float(best_params.get("max_weight", 1.0)), float(best_params.get("safe_weight", 0.0))),
+        (0.8, 0.0),
+        (1.0, 0.0),
+        (1.0, 0.1),
+    })
     for thr in ml_thresholds:
-        _p = {**best_params, "threshold": thr, "signal_col": "ml_signal"}
-        # val 구간만 슬라이싱해서 평가
-        val_slice = {k: (v.iloc[train_end:val_end] if isinstance(v, (pd.Series, pd.DataFrame)) else v)
-                     for k, v in ml_data.items()}
-        _r = evaluate_threshold_strategy(val_slice, _p)
-        _s = composite_score(cagr=_r.cagr, max_drawdown=_r.max_drawdown,
-                             turnover=_r.turnover or 0.0,
-                             excess_return=(_r.cagr or 0.0) - _qqq_cagr)
-        if _s > best_ml_score:
-            best_ml_score  = _s
-            best_ml_params = _p
+        for max_weight, safe_weight in ml_sizing:
+            _p = {
+                "threshold": thr,
+                "max_weight": max_weight,
+                "safe_weight": safe_weight,
+                "signal_col": "ml_signal",
+            }
+            _r = evaluate_threshold_strategy(val_slice, _p)
+            _s = _sweet_spot_score(_r, val_qqq_cagr, val_spy_cagr)
+            if _s > best_ml_score:
+                best_ml_score  = _s
+                best_ml_params = _p
 
     # 최종 test 구간에서 1회만 평가
     test_slice = {k: (v.iloc[val_end:] if isinstance(v, (pd.Series, pd.DataFrame)) else v)
                   for k, v in ml_data.items()}
     _ml = evaluate_threshold_strategy(test_slice, best_ml_params)
     ml_result = BacktestResult(
-        name="ML 전략 (ExcessReturnModel, nested OOS)",
+        name="ML 전략 (Ridge 모델, nested OOS)",
         cumulative_return=_ml.cumulative_return,
         cagr=_ml.cagr,
         max_drawdown=_ml.max_drawdown,
         sharpe=_ml.sharpe,
         turnover=_ml.turnover,
         n_days=_ml.n_days,
-        extra=_ml.extra,
+        extra={
+            **_ml.extra,
+            "model_backend": ml_signal.attrs.get("model_backend", "unknown"),
+            "selected_params": dict(best_ml_params),
+            "oos_start": str(data["close"].index[val_end]),
+        },
     )
 
     trials = pd.DataFrame(trial_rows)
@@ -618,52 +684,14 @@ def optimize_sweet_spot(
 # ---------------------------------------------------------------------------
 
 def plot_results(result: SweetSpotResult, outdir: str = "/tmp") -> list[str]:
-    """Save equity_curves.png and sweet_spot_trials.png to *outdir*.
+    """Compatibility wrapper for the two focused plotting functions."""
+    from ml.visualization import plot_equity_curves, plot_sweet_spot_trials
 
-    Silently skips and returns [] if matplotlib is not installed.
-    """
-    try:
-        import matplotlib
-        matplotlib.use("Agg")
-        import matplotlib.pyplot as plt
-    except ImportError:
-        return []
-
-    import os
     written: list[str] = []
-
-    # ── Equity curves ────────────────────────────────────────────────────────
-    fig, ax = plt.subplots(figsize=(10, 5))
-    for col in result.equity.columns:
-        norm = result.equity[col] / result.equity[col].iloc[0] * 100
-        ax.plot(result.equity.index, norm, label=col)
-    ax.set_title("Equity Curves — Sweet Spot vs Benchmarks")
-    ax.set_xlabel("Date")
-    ax.set_ylabel("Normalized Value (base=100)")
-    ax.legend()
-    ax.grid(True, alpha=0.3)
-    path1 = os.path.join(outdir, "equity_curves.png")
-    fig.savefig(path1, dpi=100, bbox_inches="tight")
-    plt.close(fig)
-    written.append(path1)
-
-    # ── Sweet-spot trials scatter ─────────────────────────────────────────────
-    t = result.trials
-    if not t.empty and "threshold" in t.columns and "score" in t.columns:
-        fig, ax = plt.subplots(figsize=(10, 5))
-        color_col = t["cagr"] if "cagr" in t.columns else t["score"]
-        sc = ax.scatter(t["threshold"], t["score"], c=color_col, cmap="RdYlGn", alpha=0.7, s=60)
-        plt.colorbar(sc, ax=ax, label="CAGR")
-        best_thr = result.best_params.get("threshold", 0)
-        ax.axvline(best_thr, color="blue", linestyle="--", label=f"best thr={best_thr:.2g}")
-        ax.set_title("Sweet Spot Trials — Threshold vs Composite Score")
-        ax.set_xlabel("Threshold")
-        ax.set_ylabel("Composite Score")
-        ax.legend()
-        ax.grid(True, alpha=0.3)
-        path2 = os.path.join(outdir, "sweet_spot_trials.png")
-        fig.savefig(path2, dpi=100, bbox_inches="tight")
-        plt.close(fig)
-        written.append(path2)
-
+    equity_path = plot_equity_curves(result.equity, outdir=outdir)
+    if equity_path:
+        written.append(equity_path)
+    trials_path = plot_sweet_spot_trials(result.trials, result.best_params, outdir=outdir)
+    if trials_path:
+        written.append(trials_path)
     return written
