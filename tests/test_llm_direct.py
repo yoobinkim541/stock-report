@@ -89,3 +89,43 @@ def test_empty_content_falls_back(monkeypatch):
     monkeypatch.setenv("OPENROUTER_API_KEY", "k")
     empty = lambda *a, **k: FakeResp({"choices": [{"message": {"content": "  "}}]})  # noqa: E731
     assert D.run(CMD, post=empty, fallback=lambda *a, **k: "hermes") == "hermes"
+
+
+AGY_CMD = ["hermes", "chat", "-q", "프롬프트", "--provider", "agy",
+           "--model", "gemini-3.8-flash-medium", "-Q"]
+
+
+def fake_agy(calls, rc=0, out=" 답 \n", err=""):
+    def runner(cmd, **kw):
+        calls.append((cmd, kw))
+        return D.subprocess.CompletedProcess(cmd, rc, out, err)
+    return runner
+
+
+def test_parse_agy_chat():
+    assert D.parse_agy_chat(AGY_CMD) == ("프롬프트", "gemini-3.8-flash-medium")
+    assert D.parse_agy_chat(CMD) is None
+    assert D.parse_openrouter_chat(AGY_CMD) is None
+
+
+def test_agy_direct_call(monkeypatch):
+    monkeypatch.delenv("LLM_DIRECT_AGY", raising=False)
+    calls = []
+    r = D.run(AGY_CMD, timeout=40, agy_runner=fake_agy(calls), fallback=must_not_fallback)
+    assert r.returncode == 0 and r.stdout == "답\n"
+    cmd, kw = calls[0]
+    assert cmd[:2] == ["agy", "--print"] and cmd[2] == "프롬프트"
+    assert cmd[cmd.index("--model") + 1] == "gemini-3.8-flash-medium"
+    assert cmd[cmd.index("--print-timeout") + 1] == "40s"
+    assert kw["cwd"].endswith("llm-backup-scratch")
+
+
+def test_agy_failure_falls_back_to_hermes(monkeypatch):
+    monkeypatch.delenv("LLM_DIRECT_AGY", raising=False)
+    seen = []
+    fb = lambda cmd, *a, **k: seen.append(cmd) or "hermes"  # noqa: E731
+    assert D.run(AGY_CMD, agy_runner=fake_agy([], rc=1, err="x"), fallback=fb) == "hermes"
+    assert D.run(AGY_CMD, agy_runner=fake_agy([], out="  "), fallback=fb) == "hermes"
+    monkeypatch.setenv("LLM_DIRECT_AGY", "false")
+    assert D.run(AGY_CMD, agy_runner=fake_agy([]), fallback=fb) == "hermes"
+    assert seen == [AGY_CMD] * 3
