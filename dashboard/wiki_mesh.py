@@ -1081,6 +1081,113 @@ def _cached_graph_model(
     )
 
 
+def build_obsidian_network_html(model: dict[str, Any], selected_id: str = "") -> str:
+    import json
+    nodes = model.get("nodes") or []
+    edges = model.get("edges") or []
+    
+    vis_nodes = []
+    for n in nodes:
+        is_sel = (n["id"] == selected_id)
+        # Degree-based sizing like Obsidian
+        deg = int(n.get("degree", 0))
+        size = 14 + min(22, deg * 1.6)
+        if is_sel:
+            size += 10
+        color = n.get("surface_color") or "#38bdf8"
+        
+        vis_nodes.append({
+            "id": n["id"],
+            "label": n.get("title", n["id"])[:24],
+            "title": f"<div style='font-family:sans-serif;padding:6px;line-height:1.4;'><b>{n.get('title')}</b><br><span style='color:#38bdf8;'>테마: {n.get('surface', '기타')}</span><br>상태: {n.get('status')}<br>연결: {deg}개</div>",
+            "color": {
+                "background": color,
+                "border": "#ffffff" if is_sel else "rgba(255,255,255,0.45)",
+                "highlight": {"background": "#f59e0b", "border": "#ffffff"}
+            },
+            "size": size,
+            "font": {
+                "color": "#f8fafc",
+                "size": 12,
+                "face": "Pretendard, -apple-system, sans-serif",
+                "strokeWidth": 2,
+                "strokeColor": "#0b0f19"
+            },
+            "borderWidth": 3.0 if is_sel else 1.4
+        })
+
+    vis_edges = []
+    for e in edges:
+        vis_edges.append({
+            "from": e.source,
+            "to": e.target,
+            "color": {
+                "color": "rgba(56, 189, 248, 0.42)" if e.explicit else "rgba(148, 163, 184, 0.16)",
+                "highlight": "#f59e0b"
+            },
+            "width": 1.8 if e.explicit else 0.8
+        })
+
+    return f'''<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <script type="text/javascript" src="https://unpkg.com/vis-network/standalone/umd/vis-network.min.js"></script>
+  <style type="text/css">
+    html, body {{
+      margin: 0; padding: 0; width: 100%; height: 100%; overflow: hidden; background-color: #0b0f19;
+    }}
+    #network {{
+      width: 100%; height: 100%;
+    }}
+    .hint {{
+      position: absolute; bottom: 12px; left: 16px; color: rgba(226, 232, 240, 0.6);
+      font-family: Pretendard, sans-serif; font-size: 11px; pointer-events: none; z-index: 10;
+    }}
+  </style>
+</head>
+<body>
+<div class="hint">🖱️ 노드를 마우스로 자유롭게 드래그하여 배치하거나 휠로 줌인/줌아웃할 수 있습니다.</div>
+<div id="network"></div>
+<script type="text/javascript">
+  const nodes = new vis.DataSet({json.dumps(vis_nodes, ensure_ascii=False)});
+  const edges = new vis.DataSet({json.dumps(vis_edges, ensure_ascii=False)});
+  const container = document.getElementById('network');
+  const data = {{ nodes: nodes, edges: edges }};
+  const options = {{
+    nodes: {{
+      shape: 'dot',
+      scaling: {{ min: 10, max: 38 }}
+    }},
+    edges: {{
+      smooth: {{ type: 'continuous', roundness: 0.18 }}
+    }},
+    physics: {{
+      solver: 'forceAtlas2Based',
+      forceAtlas2Based: {{
+        gravitationalConstant: -40,
+        centralGravity: 0.007,
+        springLength: 85,
+        springConstant: 0.05,
+        damping: 0.88,
+        avoidOverlap: 0.25
+      }},
+      stabilization: {{ iterations: 140 }}
+    }},
+    interaction: {{
+      hover: true,
+      dragNodes: true,
+      zoomView: true,
+      dragView: true,
+      tooltipDelay: 100
+    }}
+  }};
+  const network = new vis.Network(container, data, options);
+</script>
+</body>
+</html>'''
+
+
 def render_wiki_mesh(
     pages: Iterable[dict[str, Any]],
     *,
@@ -1144,6 +1251,20 @@ def render_wiki_mesh(
         )
     stat_col.caption(f"{len(nodes)} nodes · {len(model.get('edges') or [])} links · {len(groups)} groups · surface {surface} · status {status}")
     st.caption("✨ 옵시디언(Obsidian) 스타일의 연결형 지식 그래프입니다. 중앙 포털 및 테마별 성단(Cluster)으로 유기적으로 연결되어 있으며, 노드를 클릭하면 해당 위키 문서가 바로 열립니다.")
+
+    import streamlit.components.v1 as components
+    # Drag & drop interactive mode toggle
+    mode_col1, mode_col2 = st.columns([0.65, 0.35])
+    interactive_mode = mode_col2.toggle(
+        "🧲 드래그&드롭 물리 그래프 (Obsidian)",
+        value=True,
+        key=f"{key}_drag_drop_toggle"
+    )
+
+    if interactive_mode:
+        html_content = build_obsidian_network_html(model, selected_id=selected_page_id)
+        components.html(html_content, height=720, scrolling=False)
+        return selected_page_id or (model.get("selected_id") or "")
 
     fig = _build_figure({**model, "selected_id": selected_page_id})
     event = st.plotly_chart(
