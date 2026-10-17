@@ -2,8 +2,11 @@
 from __future__ import annotations
 
 from copy import deepcopy
+from functools import lru_cache
 import hashlib
 import json
+import re
+import unicodedata
 from typing import Callable, TypedDict
 
 from agent_console import wiki
@@ -25,6 +28,47 @@ class RoutingState(TypedDict):
 
 ELIGIBLE_KINDS = {"concept", "note", "playbook", "decision", "risk"}
 GENERIC_TERMS = {"속보", "뉴스", "종합", "정보", "시황", "분석", "news", "market"}
+
+# Candidate discovery only: these equivalences never establish claim entailment.
+# Equity names come from the repository's existing display/search source of truth.
+@lru_cache(maxsize=1)
+def _financial_aliases() -> tuple[tuple[str, re.Pattern], ...]:
+    import ticker_names
+
+    groups = {
+        "fed": ("fed", "federal reserve", "연준", "연방준비제도", "미연준"),
+        "cpi": ("cpi", "consumer price index", "소비자물가지수", "소비자물가"),
+        "ppi": ("ppi", "producer price index", "생산자물가지수", "생산자물가"),
+        "treasury": ("treasury", "treasuries", "미국채", "미국 국채", "미 국채"),
+        "inflation": ("inflation", "인플레이션", "인플레"),
+        "semiconductor": ("semiconductor", "semiconductors", "반도체"),
+        "interest-rate": ("interest rate", "interest rates", "기준금리", "금리"),
+        "hormuz": ("hormuz", "호르무즈"),
+    }
+    for ticker, name in ticker_names.EN.items():
+        aliases = (ticker, name, *ticker_names.KO.get(ticker, ()))
+        groups[f"ticker:{ticker}"] = tuple(alias for alias in aliases if len(alias) > 1)
+    for ticker, name in ticker_names.KR.items():
+        groups[f"ticker:{ticker}"] = (ticker, name, *ticker_names.KO.get(ticker, ()))
+    return tuple((key, re.compile(
+        r"(?<![\w])(?:" + "|".join(re.escape(_normalized_term(alias))
+                                   for alias in sorted(set(aliases), key=len, reverse=True)) + r")(?![\w])"))
+        for key, aliases in groups.items())
+
+
+def _normalized_term(value: str) -> str:
+    return " ".join(unicodedata.normalize("NFKC", value).casefold().split())
+
+
+def financial_terms(terms: list[str]) -> set[str]:
+    """Share bounded-language alias matching between routing and source context."""
+    result = set()
+    aliases = _financial_aliases()
+    for term in terms:
+        text = _normalized_term(term)
+        result.update(wiki._tokens(text) - GENERIC_TERMS)
+        result.update("alias:" + key for key, pattern in aliases if pattern.search(text))
+    return result
 
 
 def _json_response(prompt: str, llm_fn: Callable[[str], str | None]) -> dict:
@@ -60,6 +104,9 @@ def _new_spec(spec: dict, revision_id: str, surface: str) -> dict:
     if len(spec["title"]) > 120:
         raise ValueError("new_page_title_invalid")
     identity = json.dumps([revision_id, spec], ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    if spec["purpose"] == "topic_synthesis":
+        identity = json.dumps([surface, spec["kind"], _normalized_term(spec["title"]), spec["purpose"]],
+                              ensure_ascii=False, separators=(",", ":"))
     page_id = "source-topic-" + hashlib.sha256(identity.encode()).hexdigest()
     if spec["purpose"] == "compiled_source" and spec["kind"] == "note":
         page_id = hashlib.sha256(("compiled-source:" + revision_id).encode()).hexdigest()
@@ -69,7 +116,8 @@ def _new_spec(spec: dict, revision_id: str, surface: str) -> dict:
 def discover_targets(compiled: CompiledSource, *, surface: str) -> RoutingState:
     if surface in {"all", ""}:
         raise ValueError("routing_surface_required")
-    terms = {token for term in compiled["terms"] for token in wiki._tokens(term)} - GENERIC_TERMS
+    terms = financial_terms([*compiled["terms"], *[
+        alias for alias in compiled.get("verified_aliases", []) if isinstance(alias, str)]])
     candidates = []
     for page in wiki.list_pages(surface=surface, limit=10000):
         if (page["surface"] != surface or page["status"] == "archived" or page["kind"] not in ELIGIBLE_KINDS
@@ -79,7 +127,7 @@ def discover_targets(compiled: CompiledSource, *, surface: str) -> RoutingState:
         aliases = raw.get("verified_aliases") or []
         searchable = " ".join([page["title"], page.get("summary", ""), " ".join(page.get("tags", [])),
                                *[alias for alias in aliases if isinstance(alias, str)]])
-        if terms.intersection(wiki._tokens(searchable)):
+        if terms.intersection(financial_terms([searchable])):
             candidates.append(page["id"])
     candidates = sorted(set(candidates))
     return {"surface": surface, "candidate_ids": candidates, "cursor": 0, "examined": [],

@@ -45,11 +45,8 @@ def upcoming_events(days: int = 14, *, start: date | None = None,
                          timeout=timeout)
         if not r.ok:
             if r.status_code in {403, 451}:
-                raise SourceProviderUnavailable(
-                    f"SaveTicker calendar HTTP {r.status_code} (provider access blocked)",
-                    availability="blocked",
-                    status_code=r.status_code,
-                )
+                events = _browser_events(s, e, r.status_code)
+                return _parse(events)
             return []
         events = r.json().get("events", []) or []
     except SourceProviderUnavailable:
@@ -57,15 +54,28 @@ def upcoming_events(days: int = 14, *, start: date | None = None,
     except requests.HTTPError as exc:
         status_code = getattr(getattr(exc, "response", None), "status_code", None)
         if status_code in {403, 451}:
-            raise SourceProviderUnavailable(
-                f"SaveTicker calendar HTTP {status_code} (provider access blocked)",
-                availability="blocked",
-                status_code=status_code,
-            ) from exc
+            return _parse(_browser_events(s, e, status_code))
         return []
     except Exception:
         return []
     return _parse(events)
+
+
+def _browser_events(start, end, status_code):
+    from reports.saveticker_browser import CDPBrowser
+    from reports.source_exceptions import SourceProviderUnavailable
+    try:
+        data = CDPBrowser().fetch_json('/api/calendar/events',
+            {'start_date': start.isoformat(), 'end_date': end.isoformat()})
+        events = data.get('events')
+        if not isinstance(events, list):
+            raise ValueError('calendar response missing events')
+        return events
+    except Exception as exc:
+        raise SourceProviderUnavailable(
+            f"SaveTicker calendar HTTP {status_code} (provider access blocked); browser {type(exc).__name__}",
+            availability="blocked", status_code=status_code,
+        ) from exc
 
 
 def _parse(events: list[dict]) -> list[dict]:

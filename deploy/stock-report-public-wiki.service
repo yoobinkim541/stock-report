@@ -1,13 +1,16 @@
 [Unit]
-Description=Limited public Telegram wiki compilation (5/run, 20/KST day)
+Description=Verified full-body wiki compilation and multi-source topic accumulation (8/run, 240/KST day)
 
 [Service]
 Type=oneshot
 WorkingDirectory=%h/projects/stock-report
 Environment=PYTHONDONTWRITEBYTECODE=1
-Environment=WIKI_SOURCE_PIPELINE_ENABLED=0
+Environment=WIKI_SOURCE_PIPELINE_ENABLED=1
+Environment=WIKI_SOURCE_ALLOW_PRIVATE=1
+Environment=AGENT_CONSOLE_PUBLIC_TOPIC_BOOTSTRAP_ENABLED=1
+Environment=WIKI_SOURCE_DAILY_LIMIT=240
 Environment=PATH=%h/.local/bin:/usr/local/bin:/usr/bin:/bin
-ExecStart=%h/projects/stock-report/.venv/bin/python -m scripts.run_public_wiki_rollout --apply
-TimeoutStartSec=30min
+ExecStart=%h/projects/stock-report/.venv/bin/python -m scripts.run_public_wiki_rollout --apply --source-limit 8
+TimeoutStartSec=90min
 UMask=0077
 

@@ -1,4 +1,4 @@
-"""Private raw-only collection runtime; never feeds the external wiki/model queue."""
+"""Collect immutable authorized private archives for the personal wiki."""
 from __future__ import annotations
 
 import os
@@ -8,7 +8,8 @@ from pathlib import Path
 from werkzeug.serving import make_server
 
 from reports.hermes_source_webhook import create_app
-from reports.saveticker_hermes_collector import HermesBrowser, collect
+from reports.saveticker_hermes_collector import collect
+from reports.saveticker_browser import CDPBrowser
 from scripts.hermes_source_send import send_batch
 
 DEFAULT_ROOT = Path.home()/'reports/private-sources'
@@ -34,7 +35,7 @@ def collect_private(*,root=DEFAULT_ROOT,limit=3,article_urls=None,browser=None):
         thread = threading.Thread(target=server.serve_forever,daemon=True)
         thread.start()
         endpoint=f'http://127.0.0.1:{server.server_port}/webhooks/hermes-sources'
-        return collect(browser or HermesBrowser(),outbox=root/'outbox',limit=limit,
+        return collect(browser or CDPBrowser(),outbox=root/'outbox',limit=limit,
             article_urls=article_urls,sender=lambda path:send_batch(path,endpoint=endpoint))
     finally:
         if server:

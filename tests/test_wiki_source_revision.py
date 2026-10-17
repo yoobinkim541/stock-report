@@ -202,3 +202,18 @@ def test_io_failure_does_not_block_an_independent_source(archived_event, monkeyp
     assert len(result["eligible"]) == 1
     assert result["eligible"][0]["canonical_url"] == "https://saveticker.com/news/second"
     assert result["unavailable"][0]["reason"] == "archive_read_failed"
+
+
+def test_private_archive_requires_explicit_authorization_and_keeps_hash_gate(archived_event, monkeypatch):
+    root = raw_archive.reports_root()
+    monkeypatch.setenv("STOCK_REPORT_REPORTS_DIR", str(root / "private-sources"))
+    event = archived_event()
+    monkeypatch.setenv("STOCK_REPORT_REPORTS_DIR", str(root))
+    monkeypatch.delenv("WIKI_SOURCE_ALLOW_PRIVATE", raising=False)
+    with pytest.raises(module().SourceGateError, match="archive_path_invalid"):
+        module().build_revision(event, now=NOW)
+    monkeypatch.setenv("WIKI_SOURCE_ALLOW_PRIVATE", "1")
+    assert module().build_revision(event, now=NOW)["body"] == "Demand improved, but orders remain uncertain.\n"
+    Path(event["raw_path"]).write_text("tampered private raw")
+    with pytest.raises(module().SourceGateError, match="raw_hash_mismatch"):
+        module().build_revision(event, now=NOW)

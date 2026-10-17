@@ -146,9 +146,9 @@ def tick(*,state_path=DEFAULT_STATE,collect_fn,login_fn,remote_fn,send_fn,
             state['reason'] = next(iter(sorted(reasons & AUTH_FAILURES)))
             if confirmed or not state.get('auth_notice_sent_at'):
                 _auth_notice(state,remote_fn,send_fn,now,persist)
-        elif result.get('status') in {'delivered','no_change'} and (
+        elif result.get('status') in {'delivered','no_change','partial'} and (
                 result.get('delivered',0)+result.get('unchanged',0)>0):
-            state.update(phase='healthy',last_success=now)
+            state.update(phase='degraded' if result.get('errors') else 'healthy',last_success=now)
             had_incident = bool(state.pop('incident_id',None))
             for key in ('reason','remote_url','auth_notice_sent_at'):
                 state.pop(key,None)

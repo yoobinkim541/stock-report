@@ -156,3 +156,46 @@ def test_compiler_never_writes_wiki(monkeypatch):
 
     monkeypatch.setattr(wiki, "upsert_page", forbidden)
     assert module().compile_source(source(), llm_fn=lambda _: json.dumps(output()))["body"]
+
+
+def test_compiler_teaches_null_anchors_and_explicit_string_lists():
+    prompts = []
+    plan = output()
+    plan["claims"][0]["anchor"] = None
+    compiled = module().compile_source(
+        source(), llm_fn=lambda prompt: prompts.append(prompt) or json.dumps(plan))
+    assert compiled["claims"][0]["anchor"] is None
+    assert "Prefer anchor=null: never estimate or guess offsets" in prompts[0]
+    assert "zero-based Unicode character indices with an exclusive end" in prompts[0]
+    assert "terms and limitations must each be JSON arrays of nonempty strings" in prompts[0]
+    assert "Keep competing_claim_ids=[]" in prompts[0]
+
+
+@pytest.mark.parametrize("field", ["terms", "limitations", "competing_claim_ids"])
+@pytest.mark.parametrize("value", [None, "capacity", {"text": "capacity"}, [{"text": "capacity"}], [""]])
+def test_string_list_schema_is_never_coerced(field, value):
+    plan = output()
+    if field == "competing_claim_ids":
+        plan["claims"][0][field] = value
+    else:
+        plan[field] = value
+    with pytest.raises(ValueError, match="compilation_list_invalid"):
+        module().compile_source(source(), llm_fn=lambda _: json.dumps(plan))
+
+
+def test_unicode_anchor_counts_characters_not_bytes():
+    item = {**source(), "body": "가🙂Capacity rose."}
+    plan = output()
+    plan["claims"][0]["anchor"] = {"start": 2, "end": 16, "quote": "Capacity rose."}
+    assert module().validate_compilation(plan, item)["claims"][0]["anchor"]["start"] == 2
+    plan["claims"][0]["anchor"]["start"] = 7
+    with pytest.raises(ValueError, match="anchor_invalid"):
+        module().validate_compilation(plan, item)
+
+
+@pytest.mark.parametrize("quote", ["Capacity  rose.", "Demand rose.", ""])
+def test_unsupported_anchor_quote_is_not_repaired_or_dropped(quote):
+    plan = output()
+    plan["claims"][0]["anchor"]["quote"] = quote
+    with pytest.raises(ValueError, match="anchor_invalid"):
+        module().compile_source(source(), llm_fn=lambda _: json.dumps(plan))

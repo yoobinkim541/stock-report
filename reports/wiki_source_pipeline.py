@@ -28,7 +28,7 @@ def run_public_topic(source: dict, *, journal: Journal, llm_fn,
     """Reserved public stage; call only after the legacy source lock is released."""
     if os.getenv("AGENT_CONSOLE_PUBLIC_TOPIC_BOOTSTRAP_ENABLED", "0") != "1":
         return {"enabled": False}
-    from scripts.run_public_wiki_pilot import is_public, validate_public_targets
+    from scripts.run_public_wiki_pilot import source_allowed as is_public, validate_public_targets
     from scripts.run_public_wiki_rollout import public_revisions
     from reports.wiki_topic_context import select_topic_context, _verified_source
     from reports.wiki_topic_integration import propose_topic_integration
@@ -262,8 +262,8 @@ def run(*, events: list[dict] | None = None, dry_run: bool = True, llm_fn: Calla
     if not dry_run and llm_fn is None:
         if not _mode_enabled():
             raise ValueError("model_activation_required")
-        from agent_console.agent import request_structured_output
-        llm_fn = lambda prompt: request_structured_output(prompt, max_timeout=None)
+        from reports.wiki_source_compiler import structured_llm_call
+        llm_fn = structured_llm_call
     now = now or datetime.now(timezone.utc)
     events = source_collector.load_recent_events() if events is None else events
     records = shared_memory._read_jsonl_checked(shared_memory._paths()["events"])

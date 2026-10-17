@@ -259,7 +259,10 @@ def test_title_alias_links_with_bracketed_ordinals_resolve():
 
 
 @pytest.mark.skipif(os.getenv("WIKI_LIVE_ACCEPTANCE") != "1", reason="live store gate is opt-in")
-def test_live_wiki_meets_every_karpathy_condition():
+def test_live_wiki_meets_every_karpathy_condition(monkeypatch):
+    from pathlib import Path
+    monkeypatch.setenv("AGENT_CONSOLE_SHARED_MEMORY_DIR", str(Path.home() / ".local/share/stock-report/shared-memory"))
+    monkeypatch.setenv("AGENT_CONSOLE_QMD_DOCS_DIR", str(Path.home() / ".local/share/stock-report/shared-memory/qmd-wiki"))
     report = audit.run_audit(audit.live_inputs())
     failing = {k: (v["metric"], v["threshold"]) for k, v in report["results"].items() if not v["pass"]}
     assert failing == {}

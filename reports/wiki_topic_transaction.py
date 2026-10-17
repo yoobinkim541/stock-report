@@ -130,14 +130,29 @@ def _build(proposal, snapshots, *, records, journal, now, operation_id):
                     "evidence_ids": ids, "relation_state": "unresolved",
                     "relation_note": "Relationships are not factual adjudication."}])
         refs, support, conflict = map(_unique, (refs, support, conflict))
-        claims_by_id = {c["claim_id"]: deepcopy(c) for c in target["original_claims"]}
-        # Retain historical extensions, not only Task 2's allowlisted fields.
-        claims_by_id.update({c["claim_id"]: deepcopy(c) for c in (snap["claims"] if snap else [])})
+        claims_by_id = {c["claim_id"]: deepcopy(c) for c in (snap["claims"] if snap else [])}
+        # Preserve historical extensions while adding server-derived competitors.
+        for claim in target["original_claims"]:
+            prior = claims_by_id.get(claim["claim_id"], {})
+            claims_by_id[claim["claim_id"]] = {**prior, **deepcopy(claim),
+                "competing_claim_ids": _unique([
+                    *prior.get("competing_claim_ids", []), *claim["competing_claim_ids"]])}
         claims = list(claims_by_id.values())
         knowledge.update(claims=claims[:100], limitations=_unique([
             *knowledge.get("limitations", []), *target["limitations"]]),
             relations=_unique([*knowledge.get("relations", []), *target["relations"]]), integrations=integrations)
         knowledge["topic_operations"] = _unique([*knowledge.get("topic_operations", []), operation_id])
+        revisions = {claim["source_revision_id"] for claim in claims}
+        summaries = {dependency["page_id"] for dependency in proposal["dependencies"]
+                     if dependency["revision_id"] in revisions}
+        summaries.update(hashlib.sha256(("compiled-source:" + revision).encode()).hexdigest()
+                         for revision in revisions)
+        summaries = {identity for identity in summaries if identity in by_id
+                     and "compiled_source" in by_id[identity].get("tags", [])
+                     and not by_id[identity].get("parent_page_id")}
+        # Reverse navigation is derived by wiki._apply_backlinks. Do not mutate
+        # read-only summaries: their immutable fingerprints bind public receipts.
+        page["links"] = wiki._clean_links([*page.get("links", []), *sorted(summaries)], self_id=page_id)
         page.update(source_refs=refs[:20], evidence_ids=support[:100], conflicting_evidence_ids=conflict[:100],
                     source_knowledge=knowledge)
         pure = wiki._prepare_split_records(page, records=records)
@@ -260,7 +275,10 @@ def _effects(receipt, journal):
                 if not wiki.sync_qmd().get("ok"):
                     raise ValueError("search_refresh_failed")
             else:
+                titles = [row["title"] for row in receipt["batch"]["upserts"]
+                          if row["id"] in receipt["batch"]["target_ids"]]
                 wiki._append_wiki_log("topic_ingest", operation_id=op_id,
+                    title="; ".join(titles)[:160],
                     page_ids=receipt["batch"]["target_ids"], revision_ids=receipt["batch"]["revision_ids"])
         except Exception:
             receipt = journal.transition_topic(op_id, effects={effect: "failed"}, error_code=effect + "_refresh_failed")

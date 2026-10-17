@@ -210,3 +210,31 @@ def test_forged_integration_operations_fail_closed(mutation):
     if mutation == "claim": target["additions"][0]["claim_ids"] = ["unknown"]
     with pytest.raises(ValueError):
         module().propose_integration(compiled(), source(), [snap], new_page_specs=[], llm_fn=lambda _: json.dumps(plan))
+
+
+@pytest.mark.parametrize("term,title", [
+    ("엔비디아", "NVIDIA earnings"), ("NVDA", "엔비디아 실적"),
+    ("연준", "Federal Reserve policy"), ("소비자물가지수", "CPI inflation"),
+    ("미국채", "US Treasury yields"), ("반도체", "Semiconductor cycle"),
+])
+def test_financial_aliases_route_across_languages(monkeypatch, term, title):
+    install(monkeypatch, [record("topic", title=title)])
+    item = {**compiled(), "terms": [term]}
+    assert module().discover_targets(item, surface="market")["candidate_ids"] == ["topic"]
+
+
+def test_alias_matching_does_not_match_substrings_or_conflate_leverage(monkeypatch):
+    install(monkeypatch, [record("noise", title="Confederation"),
+                          record("leveraged", title="NVDL")])
+    assert module().discover_targets({**compiled(), "terms": ["fed", "NVDA"]},
+                                     surface="market")["candidate_ids"] == []
+
+
+def test_topic_identity_survives_revision_and_title_case_changes():
+    spec = {"title": "NVIDIA capacity", "kind": "concept",
+            "surface": "market", "purpose": "topic_synthesis"}
+    first = module()._new_spec(spec, REV, "market")
+    later = module()._new_spec({**spec, "title": "  nvidia   capacity "}, OLD, "market")
+    assert first["page_id"] == later["page_id"]
+    other = module()._new_spec({**spec, "title": "NVIDIA demand"}, REV, "market")
+    assert other["page_id"] != first["page_id"]

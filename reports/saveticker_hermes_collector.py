@@ -199,6 +199,8 @@ def collect(browser, *, outbox: Path, sender, now: datetime | None = None, limit
             deliver(path)
             state['retry_cursor']=path.name
         try:
+            if hasattr(browser, 'set_seen_urls'):
+                browser.set_seen_urls(state['seen'])
             listing = (browser.discover(limit=limit) if hasattr(browser, 'discover')
                        else browser.read(ORIGIN)) if explicit is None else None
             urls = explicit if explicit is not None else discover_urls(listing, limit=limit)

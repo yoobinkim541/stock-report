@@ -3,10 +3,11 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 from typing import Callable, TypedDict
 
 from agent_console import wiki
-from reports import wiki_distillation
+from reports import wiki_distillation, raw_archive
 from reports.wiki_source_revision import SourceRevision
 
 
@@ -23,6 +24,13 @@ def compilation_failure_code(error: Exception) -> str:
             and type(error.args[0]) is str and error.args[0] in _SAFE_FAILURE_CODES):
         return error.args[0]
     return "compile_failed"
+
+
+def structured_llm_call(prompt: str, *, max_timeout: int = 180) -> str | None:
+    """Shared JSON-only compile/route/integrate provider callback for runners."""
+    from lib.llm_cli import structured_chat
+
+    return structured_chat(prompt, max_timeout=int(os.getenv("WIKI_STRUCTURED_DEADLINE", str(max_timeout))))
 
 
 class _CompiledTitle(TypedDict, total=False):
@@ -51,6 +59,9 @@ def _text(value: object) -> str:
 
 
 def validate_compilation(payload: dict, source: SourceRevision) -> CompiledSource:
+    source = dict(source)
+    if not source.get("body") and source.get("text_ref"):
+        source["body"] = raw_archive.read_raw_text(source["text_ref"]) or ""
     allowed = {"action", "kind", "title", "body", "claims", "terms", "limitations", "skip_reason"}
     if not isinstance(payload, dict) or set(payload) - allowed:
         raise ValueError("compilation_fields_invalid")
@@ -110,6 +121,9 @@ def validate_compilation(payload: dict, source: SourceRevision) -> CompiledSourc
 
 
 def compile_source(source: SourceRevision, *, llm_fn: Callable[[str], str | None]) -> CompiledSource:
+    source = dict(source)
+    if not source.get("body") and source.get("text_ref"):
+        source["body"] = raw_archive.read_raw_text(source["text_ref"]) or ""
     metadata = {key: source.get(key) for key in ("revision_id", "provider", "canonical_url", "scope",
                                                "provenance_class", "published_at", "title",
                                                "chunk_parent_revision_id", "source_span")}
@@ -123,8 +137,14 @@ def compile_source(source: SourceRevision, *, llm_fn: Callable[[str], str | None
         "If source_span is present, this is one exact fragment of a larger source: offsets in anchors are "
         "relative to this fragment, not the whole source. Do not invent missing cross-fragment context. "
         "body with [S1] citations, claims, terms, limitations, skip_reason=null. Each claim has text, as_of "
-        "(use unknown when absent), scope, anchor=null or {start,end,quote} in exact source character offsets, "
-        "and competing_claim_ids=[] unless an actual intra-source relationship is established. "
+        "(use unknown when absent), scope, anchor=null or {start,end,quote} in exact source character offsets. "
+        "Prefer anchor=null: never estimate or guess offsets. Only provide an anchor when start/end are "
+        "zero-based Unicode character indices with an exclusive end and source[start:end] equals quote "
+        "exactly; byte offsets, line numbers, translated or whitespace-normalized quotes are invalid. "
+        "Keep competing_claim_ids=[]; claim IDs do not exist until the server assigns them. "
+        "terms and limitations must each be JSON arrays of nonempty strings, not objects, "
+        "comma-separated strings, arrays of objects, or null; use [] when none. "
+        "claims must be a nonempty array of claim objects for action=create. "
         "Use exactly the illustrated keys. Do not add id, claim_id or source_revision_id to claims; "
         "claim identities are assigned by the server.\nOUTPUT_SCHEMA\n"
         + json.dumps({"action": "create", "kind": "concept", "title": "Source synthesis",

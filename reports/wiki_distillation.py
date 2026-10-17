@@ -1046,24 +1046,13 @@ def main() -> int:
     parser.add_argument("--limit", type=int, default=None, help="이번 실행에서 증류할 최대 페이지 수")
     args = parser.parse_args()
 
-    if os.getenv("WIKI_SOURCE_PIPELINE_ENABLED", "0") == "1":
-        from reports import wiki_source_pipeline
-        result = wiki_source_pipeline.run(dry_run=args.dry_run, source_limit=args.limit or 5)
-        logger.info("원문 지식화 단계 상태: %s", json.dumps(result, ensure_ascii=False))
-        return 0
-
-    result = run(dry_run=args.dry_run, limit=args.limit)
-    logger.info(
-        "위키 증류 완료: 후보 %d건 검토, %d건 생성 (dry_run=%s)",
-        result["candidates_considered"], len(result["created"]), result["dry_run"],
-    )
-    for page in result["created"]:
-        logger.info("  + [%s] %s", page.get("kind"), page.get("title"))
-
-    if result["created"] and not args.dry_run:
-        _notify_created_pages(result["created"])
-
-    return 0
+    # The old catalog/template generator is no longer an unattended entrypoint.
+    # Both cron and the timer share the bounded worker's lock and daily budget.
+    from scripts.run_public_wiki_rollout import main as compile_main
+    argv = ["--source-limit", str(args.limit or 5)]
+    if not args.dry_run and os.getenv("WIKI_SOURCE_PIPELINE_ENABLED", "0") == "1":
+        argv.append("--apply")
+    return compile_main(argv)
 
 
 if __name__ == "__main__":

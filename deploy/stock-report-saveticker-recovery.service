@@ -5,6 +5,8 @@ Description=SaveTicker private source collection and human-confirmed recovery
 Type=oneshot
 WorkingDirectory=%h/projects/stock-report
 Environment=PYTHONDONTWRITEBYTECODE=1
-ExecStart=%h/projects/stock-report/.venv/bin/python scripts/saveticker_recovery_tick.py --limit 1
+ExecStart=%h/projects/stock-report/.venv/bin/python scripts/saveticker_recovery_tick.py --limit 10
 TimeoutStartSec=240
+MemoryMax=2G
+MemorySwapMax=0
 UMask=0077

@@ -18,6 +18,13 @@ def module():
     return importlib.import_module("reports.wiki_source_pipeline")
 
 
+@pytest.fixture(autouse=True)
+def no_live_structured_provider(monkeypatch):
+    from lib import llm_cli
+    monkeypatch.setattr(llm_cli, "structured_chat",
+                        lambda *a, **kw: pytest.fail("unit test reached live structured provider"))
+
+
 @pytest.fixture
 def pipeline_env(tmp_path, monkeypatch):
     monkeypatch.setenv("AGENT_CONSOLE_SHARED_MEMORY_DIR", str(tmp_path / "memory"))
@@ -143,7 +150,7 @@ def test_empty_source_allowlist_does_not_call_model(pipeline_env):
 
 
 def test_default_worker_uses_structured_provider_contract(pipeline_env, monkeypatch):
-    from agent_console import agent
+    from lib import llm_cli
 
     budgets = []
     def structured(prompt, *, max_timeout=45):
@@ -151,12 +158,11 @@ def test_default_worker_uses_structured_provider_contract(pipeline_env, monkeypa
         return pipeline_env["llm"](prompt)
 
     monkeypatch.setenv("WIKI_SOURCE_PIPELINE_ENABLED", "1")
-    monkeypatch.setattr(agent, "request_structured_output", structured)
-    monkeypatch.setattr(agent, "_try_llm_prompt", lambda *a, **kw: None)
+    monkeypatch.setattr(llm_cli, "structured_chat", structured)
     result = module().run(events=[{}], dry_run=False, now=NOW)
     assert result["data_committed"] == 1
     assert pipeline_env["calls"] == ["compile", "route", "integrate"]
-    assert budgets == [None, None, None]
+    assert budgets == [180, 180, 180]
 
 
 def test_compiled_page_label_does_not_claim_exhaustive_summary(pipeline_env):

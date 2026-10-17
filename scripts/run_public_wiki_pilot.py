@@ -30,6 +30,21 @@ def is_public(source):
                              str(source.get('canonical_url', ''))) is not None)
 
 
+def source_allowed(source):
+    """Authorization policy after build_revision has verified the complete archive."""
+    if is_public(source):
+        return True
+    if os.getenv('WIKI_SOURCE_PIPELINE_ENABLED', '0') != '1':
+        return False
+    provider, scope = str(source.get('provider', '')), source.get('scope')
+    if provider in {'saveticker', 'saveticker_report_pdf'}:
+        return (os.getenv('WIKI_SOURCE_ALLOW_PRIVATE', '0') == '1'
+                and scope in {'authorized_article', 'rendered_article', 'article_fulltext',
+                              'ocr_extracted_text'})
+    return scope in {'article_fulltext', 'rendered_article', 'extracted_text', 'public_message',
+                     'ocr_extracted_text', 'series_notes'}
+
+
 def select_sources(revisions):
     by_id = {source['revision_id']: source for source in revisions if is_public(source)}
     if any(identity not in by_id for identity in APPROVED_REVISIONS):
@@ -44,6 +59,17 @@ def filter_targets(state, allowed):
     return result
 
 
+def _matches_receipt_page(identity, batch, rows):
+    """Navigation maintenance does not authorize edits to any knowledge field."""
+    expected = batch['expected_after'][identity]
+    if wiki._source_fingerprint(identity, rows) == expected:
+        return True
+    originals = {row['id']: row for row in batch['upserts']}
+    projected = [{**row, 'links': originals[row['id']].get('links', [])}
+                 if row['id'] in originals else row for row in rows]
+    return wiki._source_fingerprint(identity, projected) == expected
+
+
 def public_target_ids(journal, allowed_revisions=None, *, records=None):
     allowed_revisions = set(APPROVED_REVISIONS) if allowed_revisions is None else set(allowed_revisions)
     allowed = set()
@@ -54,7 +80,7 @@ def public_target_ids(journal, allowed_revisions=None, *, records=None):
             continue
         batch = receipt['batch']
         for identity in batch['target_ids']:
-            if wiki._source_fingerprint(identity, rows) == batch['expected_after'][identity]:
+            if _matches_receipt_page(identity, batch, rows):
                 allowed.add(identity)
     # Topic receipts are separate from legacy single-source operations. Their
     # source set and atomic store witness must both remain verifiable.
@@ -83,7 +109,7 @@ def public_target_ids(journal, allowed_revisions=None, *, records=None):
             if wiki._source_fingerprint(witness['id'], rows) != wiki._source_fingerprint(witness['id'], [witness]):
                 continue
             for identity in batch['target_ids']:
-                if wiki._source_fingerprint(identity, rows) == batch['expected_after'][identity]:
+                if _matches_receipt_page(identity, batch, rows):
                     allowed.add(identity)
         except (ValueError, KeyError, TypeError, OSError, UnicodeError):
             continue

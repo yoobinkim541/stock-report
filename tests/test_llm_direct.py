@@ -129,3 +129,41 @@ def test_agy_failure_falls_back_to_hermes(monkeypatch):
     monkeypatch.setenv("LLM_DIRECT_AGY", "false")
     assert D.run(AGY_CMD, agy_runner=fake_agy([]), fallback=fb) == "hermes"
     assert seen == [AGY_CMD] * 3
+
+
+def test_structured_direct_requests_json_capability_with_explicit_budget(monkeypatch):
+    monkeypatch.setenv("OPENROUTER_API_KEY", "k")
+    monkeypatch.setenv("LLM_DIRECT_MAX_TOKENS", "999999")
+    calls = []
+    assert D.direct_chat("source", "capable/model", timeout=17, post=ok_post(calls),
+                         structured_output=True, max_tokens=8192) == '{"score": 7}'
+    _, body, timeout, _ = calls[0]
+    assert body["response_format"] == {"type": "json_object"}
+    assert body["provider"] == {"require_parameters": True}
+    assert body["max_tokens"] == 8192 and timeout == 17
+
+
+def test_structured_direct_rejects_invalid_and_truncated_outputs(monkeypatch):
+    import pytest
+
+    monkeypatch.setenv("OPENROUTER_API_KEY", "k")
+    for content, reason in [
+        ('{"x":1,"x":2}', "stop"), ('{"x":NaN}', "stop"),
+        ('{"x":1e999}', "stop"), ('prose {"x":1}', "stop"),
+        ("[]", "stop"), ('{"x":1}', "length"),
+        ('{"x":"' + "a" * 100001 + '"}', "stop"),
+    ]:
+        def post(*args, **kwargs):
+            return FakeResp({"choices": [{"message": {"content": content}, "finish_reason": reason}]})
+        with pytest.raises(ValueError, match="structured_response_invalid"):
+            D.direct_chat("source", "capable/model", post=post, structured_output=True)
+
+
+def test_plain_direct_keeps_existing_request_contract(monkeypatch):
+    monkeypatch.setenv("OPENROUTER_API_KEY", "k")
+    monkeypatch.setenv("LLM_DIRECT_MAX_TOKENS", "4096")
+    calls = []
+    D.direct_chat("source", "existing/model", post=ok_post(calls))
+    body = calls[0][1]
+    assert "response_format" not in body and "provider" not in body
+    assert body["max_tokens"] == 4096

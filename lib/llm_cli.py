@@ -20,6 +20,7 @@ import logging
 import os
 import subprocess
 import tempfile
+import time
 
 logger = logging.getLogger(__name__)
 
@@ -80,6 +81,49 @@ def chat_once(prompt: str, *, model: str = "gpt-5-mini", provider: str = "openai
     except Exception as e:
         logger.info("hermes 호출 실패: %s", str(e)[:120])
     return backup_chat(prompt, timeout=timeout, runner=runner)
+
+
+def structured_chat(prompt: str, *, max_timeout: int = 180) -> str | None:
+    """Bounded Codex → direct OpenRouter → Hermes JSON-object fallback.
+
+    No parallel calls, web search or agy backup. Each provider gets at most 60
+    seconds within a shared, hard-capped 180-second budget. Codex's existing
+    unsupported-model retry shares that same provider deadline. Domain schemas
+    and source attribution remain the caller's responsibility; invalid JSON is
+    never salvaged. Provider errors and source bodies are deliberately not logged.
+    """
+    from agent_console import agent
+    from lib import llm_direct
+    from lib.structured_output import parse_object
+
+    if os.getenv("AGENT_CONSOLE_LLM_ENABLED", "1").lower() in {"0", "false", "no", "off"}:
+        return None
+    deadline = time.monotonic() + max(0, min(max_timeout, int(os.getenv("WIKI_STRUCTURED_DEADLINE", "600"))))
+    providers = os.getenv("WIKI_STRUCTURED_PROVIDERS", "openrouter,codex,hermes").split(",")
+    for provider in [p.strip() for p in providers if p.strip()]:
+        remaining = min(int(os.getenv("WIKI_PROVIDER_TIMEOUT", "240")), deadline - time.monotonic())
+        if remaining < 1:
+            return None
+        stage_deadline = time.monotonic() + remaining
+        try:
+            if provider == "openrouter":
+                if not llm_direct.enabled():
+                    continue
+                text = llm_direct.direct_chat(
+                    prompt,
+                    os.getenv("WIKI_STRUCTURED_OPENROUTER_MODEL", "anthropic/claude-sonnet-4.5"),
+                    timeout=remaining, structured_output=True, max_tokens=8192,
+                )
+            else:
+                call = agent._try_codex_chat if provider == "codex" else agent._try_hermes_chat
+                text = call(prompt, max_timeout=remaining, deadline=stage_deadline,
+                            search=False, reasoning_effort="medium", structured_output=True)
+            if time.monotonic() <= deadline and isinstance(text, str) and parse_object(text) is not None:
+                return text
+        except Exception:
+            # Continue once to the next provider; never print private payloads.
+            continue
+    return None
 
 
 def status() -> dict:

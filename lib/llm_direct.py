@@ -31,7 +31,9 @@ import requests
 
 logger = logging.getLogger(__name__)
 
-OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions"
+def _openrouter_url():
+    return os.getenv("OPENROUTER_URL", "https://openrouter.ai/api/v1/chat/completions")
+
 AGY_PROVIDER = "agy"
 
 
@@ -76,7 +78,8 @@ def parse_agy_chat(cmd) -> tuple[str, str] | None:
     return _parse_chat(cmd, AGY_PROVIDER)
 
 
-def direct_chat(prompt: str, model: str, *, timeout: float | None = None, post=None) -> str:
+def direct_chat(prompt: str, model: str, *, timeout: float | None = None, post=None,
+                structured_output: bool = False, max_tokens: int | None = None) -> str:
     """OpenRouter chat completions 1회. 성공 시 응답 텍스트, 실패 시 예외."""
     key = os.getenv("OPENROUTER_API_KEY", "").strip()
     if not key:
@@ -84,20 +87,30 @@ def direct_chat(prompt: str, model: str, *, timeout: float | None = None, post=N
     body = {
         "model": model,
         "messages": [{"role": "user", "content": prompt}],
-        "max_tokens": int(os.getenv("LLM_DIRECT_MAX_TOKENS", "4096")),
+        "max_tokens": max_tokens if max_tokens is not None else int(os.getenv("LLM_DIRECT_MAX_TOKENS", "4096")),
         # 배치 작업은 한 번짜리 형식 출력이라 추론을 끈다(출력 토큰 비용의 대부분이 추론이었음)
         "reasoning": {"enabled": False},
     }
+    if structured_output:
+        # Require a JSON-capable endpoint; never silently ignore the format request.
+        body["response_format"] = {"type": "json_object"}
+        body["provider"] = {"require_parameters": True}
     resp = (post or requests.post)(
-        OPENROUTER_URL, json=body, timeout=timeout or 120,
+        _openrouter_url(), json=body, timeout=timeout or 120,
         headers={"Authorization": f"Bearer {key}", "X-Title": "stock-report"})
     resp.raise_for_status()
     data = resp.json()
     if data.get("error"):
         raise RuntimeError(str(data["error"])[:200])
     text = ((data.get("choices") or [{}])[0].get("message") or {}).get("content") or ""
-    if not text.strip():
+    if not isinstance(text, str) or not text.strip():
         raise RuntimeError("빈 응답")
+    if structured_output:
+        from lib.structured_output import parse_object
+
+        if ((data.get("choices") or [{}])[0].get("finish_reason") == "length"
+                or parse_object(text) is None):
+            raise ValueError("structured_response_invalid")
     return text.strip()
 
 

@@ -71,7 +71,7 @@ def test_invalid_revision_is_rejected_without_writing(tmp_path, revision):
     assert not path.exists()
 
 
-@pytest.mark.parametrize("limit", [0, 21, True, 1.5])
+@pytest.mark.parametrize("limit", [0, 1001, True, 1.5])
 def test_invalid_limit_is_rejected(tmp_path, limit):
     with pytest.raises(ValueError):
         wiki_public_budget.reserve(tmp_path / "budget.json", "a" * 64, limit=limit)
@@ -104,3 +104,13 @@ def test_reservations_are_atomic_across_processes_at_limit(tmp_path):
 
     assert sum(result is not None for result in results) == 20
     assert wiki_public_budget.status(path)["count"] == 20
+
+
+def test_authorized_budget_raise_preserves_existing_reservations(tmp_path, monkeypatch):
+    path = tmp_path / "budget.json"
+    for i in range(20):
+        assert wiki_public_budget.reserve(path, f"{i:064x}") is not None
+    monkeypatch.setenv("WIKI_SOURCE_DAILY_LIMIT", "240")
+    assert wiki_public_budget.reserve(path, "f" * 64) is not None
+    assert wiki_public_budget.status(path)["count"] == 21
+    assert wiki_public_budget.status(path)["limit"] == 240

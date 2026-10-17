@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import os
 import re
 import uuid
 from datetime import datetime, timedelta, timezone
@@ -11,6 +12,7 @@ from safe_io import atomic_write_json, file_write_lock
 
 SCHEMA = 1
 DEFAULT_LIMIT = 20
+MAX_LIMIT = 1000
 KST = timezone(timedelta(hours=9))
 _REVISION_RE = re.compile(r"^[0-9a-f]{64}$")
 _DAY_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
@@ -25,9 +27,13 @@ def _now(value: datetime | None) -> datetime:
 
 
 def _limit(value: int) -> int:
-    if isinstance(value, bool) or not isinstance(value, int) or not 1 <= value <= DEFAULT_LIMIT:
-        raise ValueError("limit must be an integer from 1 through 20")
+    if isinstance(value, bool) or not isinstance(value, int) or not 1 <= value <= MAX_LIMIT:
+        raise ValueError("limit must be an integer from 1 through 1000")
     return value
+
+
+def configured_limit() -> int:
+    return _limit(int(os.getenv("WIKI_SOURCE_DAILY_LIMIT", str(DEFAULT_LIMIT))))
 
 
 def _read(path: str | Path) -> dict:
@@ -50,7 +56,7 @@ def _read(path: str | Path) -> dict:
             datetime.strptime(day, "%Y-%m-%d")
         except ValueError as exc:
             raise ValueError("wiki public budget day key is invalid") from exc
-        if not isinstance(records, list) or len(records) > DEFAULT_LIMIT:
+        if not isinstance(records, list) or len(records) > MAX_LIMIT:
             raise ValueError("wiki public budget reservations are invalid")
         for record in records:
             if not isinstance(record, dict) or set(record) != {"id", "revision_id", "at"}:
@@ -83,10 +89,10 @@ def _valid_uuid(value: str) -> uuid.UUID | None:
 
 
 def reserve(path: str | Path, revision_id: str, now: datetime | None = None,
-            limit: int = DEFAULT_LIMIT) -> dict | None:
+            limit: int | None = None) -> dict | None:
     """Persist one attempt before external side effects, or return None at capacity."""
     instant = _now(now) if now is not None else None
-    limit = _limit(limit)
+    limit = configured_limit() if limit is None else _limit(limit)
     if not isinstance(revision_id, str) or not _REVISION_RE.fullmatch(revision_id):
         raise ValueError("revision_id must be 64 lowercase hexadecimal characters")
     with file_write_lock(str(path)):
@@ -107,4 +113,4 @@ def status(path: str | Path, now: datetime | None = None) -> dict:
     """Read the current KST-day count without creating or modifying the state file."""
     day = _now(now).astimezone(KST).date().isoformat()
     data = _read(path)
-    return {"day": day, "count": len(data["days"].get(day, [])), "limit": DEFAULT_LIMIT}
+    return {"day": day, "count": len(data["days"].get(day, [])), "limit": configured_limit()}

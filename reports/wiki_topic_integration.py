@@ -252,11 +252,14 @@ def validate_topic_integration(payload: dict, *, compiled: dict, source: dict,
         contributing_claims = [c for c in claims.values() if c["source_revision_id"] in used]
         for claim in [*prior_claims, *contributing_claims]:
             cid = claim["claim_id"]
-            if cid in claims and claims[cid] != claim:
-                raise ValueError("topic_claim_identity_invalid")
-            if cid in retained and retained[cid] != claim:
-                raise ValueError("topic_claim_identity_invalid")
-            retained[cid] = claim
+            identity = {key: value for key, value in claim.items() if key != "competing_claim_ids"}
+            for existing in (claims.get(cid), retained.get(cid)):
+                if existing is not None and identity != {
+                        key: value for key, value in existing.items() if key != "competing_claim_ids"}:
+                    raise ValueError("topic_claim_identity_invalid")
+            prior_competitors = retained.get(cid, {}).get("competing_claim_ids", [])
+            retained[cid] = {**claim, "competing_claim_ids": list(dict.fromkeys([
+                *prior_competitors, *claim["competing_claim_ids"]]))}
         if type(target["relations"]) is not list:
             raise ValueError("topic_relation_invalid")
         relations = []
@@ -264,6 +267,13 @@ def validate_topic_integration(payload: dict, *, compiled: dict, source: dict,
             checked = _relation(relation, retained)
             if checked not in relations:
                 relations.append(checked)
+        for relation in relations:
+            if (relation["type"] == "compete"
+                    and relation["from_revision_id"] != relation["to_revision_id"]):
+                first, second = relation["from_claim_id"], relation["to_claim_id"]
+                for cid, other in ((first, second), (second, first)):
+                    retained[cid]["competing_claim_ids"] = list(dict.fromkeys([
+                        *retained[cid]["competing_claim_ids"], other]))
         result = {**target, "page_id": page_id, "knowledge_state": "draft", "additions": additions,
                   "scope_explanation": _text(target["scope_explanation"]),
                   "original_claims": list(retained.values()), "relations": relations,
@@ -308,6 +318,9 @@ def propose_topic_integration(compiled: dict, source: dict, context: TopicContex
         "Existing targets echo supplied page_id/revision_hash. New targets use page_id=null,before_hash=null "
         "and additionally title,kind=concept,surface (supplied surface),purpose=topic_synthesis. IDs are "
         "allocated server-side. New topics require current plus at least one context revision. "
+        "Create or update multiple distinct reusable entity/concept topics when the evidence supports them; "
+        "do not collapse unrelated entities or mechanisms into one source-shaped catchall. "
+        "Prefer an existing topic with matching entity and scope over creating a differently named duplicate. "
         "Each addition has claim_ids,revision_ids,as_of,scope,body. Group only claims with identical dates "
         "and scope, preserving differing reports separately. Cite exactly its contributing sources with "
         "[S1], [S2], etc. using source_map; do not invent links. All declared contributors must contribute. "

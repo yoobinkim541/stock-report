@@ -272,3 +272,12 @@ def test_model_projection_empty_notes_does_not_expose_private_omissions():
     context = {"notes": [], "dependencies": [{"raw_sha256": "PRIVATE_HASH"}],
                "omitted": [{"page_id": "PRIVATE_ID", "reason": "unverified"}]}
     assert api().topic_context_model_input(context) == {"notes": []}
+
+
+@pytest.mark.parametrize("current,previous", [
+    ("엔비디아", "NVIDIA"), ("연준", "Federal Reserve"), ("미국채", "Treasury"),
+])
+def test_cross_language_related_sources_seed_context(store, current, previous):
+    store[2]("prior", terms=[previous])
+    result = select(store, {**CURRENT, "terms": [current]})
+    assert [note["page_id"] for note in result["notes"]] == ["prior"]

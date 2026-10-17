@@ -351,7 +351,8 @@ def test_ingest_log_lists_contributors_not_unused_context(transaction, monkeypat
     action, metadata = events[0]
     assert action == "topic_ingest"
     assert unused not in metadata["revision_ids"]
-    assert set(metadata) == {"operation_id", "page_ids", "revision_ids"}
+    assert metadata["title"] == target["title"]
+    assert set(metadata) == {"operation_id", "page_ids", "revision_ids", "title"}
 
 
 def rewrite_batch(journal, batch, mutate):
@@ -432,3 +433,54 @@ def test_frozen_split_writes_do_not_depend_on_recovery_wall_clock(transaction, m
     monkeypatch.setattr(wiki, "_now", lambda: "2099-01-01T00:00:00+00:00")
     monkeypatch.setattr(shared_memory, "_now", lambda: "2099-01-01T00:00:00+00:00")
     assert recover(batch, journal)["stage"] == "committed"
+
+
+def test_topic_links_summary_with_derived_reverse_link_and_preserves_receipt(transaction):
+    data, journal, rows = transaction
+    current_id = hashlib.sha256(("compiled-source:" + data["source"]["revision_id"]).encode()).hexdigest()
+    rows.append({**copy.deepcopy(rows[0]), "id": current_id, "title": "Current source",
+                 "source_knowledge": {"claims": data["compiled"]["claims"]}})
+    with shared_memory._events_lock():
+        shared_memory._write_jsonl_locked(rows)
+    batch = prepare(transaction)
+    assert recover(batch, journal)["stage"] == "committed"
+    topic = wiki.get_page(batch["target_ids"][0])
+    summary_id = data["context"]["notes"][0]["page_id"]
+    assert summary_id in topic["links"]
+    assert topic["id"] in wiki.get_page(summary_id)["backlinks"]
+    assert current_id in topic["links"]
+    assert topic["id"] in wiki.get_page(current_id)["backlinks"]
+    from reports.wiki_topic_context import revalidate_topic_context
+    revalidate_topic_context(data["context"], journal=journal,
+                             records=shared_memory.inspect_records(), now=NOW)
+    assert next(row for row in shared_memory.inspect_records() if row["id"] == summary_id) == next(
+        row for row in rows if row["id"] == summary_id)
+
+
+def test_competing_claims_survive_reusing_same_sources(transaction):
+    data, journal, rows = transaction
+    payload = proposal(data)
+    target = payload["targets"][0]
+    first, second = target["additions"]
+    relation = {"type": "compete", "from_claim_id": first["claim_ids"][0],
+        "to_claim_id": second["claim_ids"][0], "from_revision_id": first["revision_ids"][0],
+        "to_revision_id": second["revision_ids"][0], "from_as_of": first["as_of"],
+        "to_as_of": second["as_of"], "scope_explanation": "Unresolved dated accounts"}
+    target["relations"] = [relation]
+    batch = api().prepare_topic_batch(validate(data, payload), journal=journal, records=rows, now=NOW)
+    assert recover(batch, journal)["stage"] == "committed"
+    before = wiki.semantic_snapshot(batch["target_ids"][0])
+    by_id = {claim["claim_id"]: claim for claim in before["claims"]}
+    assert second["claim_ids"][0] in by_id[first["claim_ids"][0]]["competing_claim_ids"]
+    assert first["claim_ids"][0] in by_id[second["claim_ids"][0]]["competing_claim_ids"]
+    data["targets"] = [before]
+    for key in ("title", "kind", "surface", "purpose"):
+        target.pop(key)
+    target.update(page_id=before["page_id"], before_hash=before["revision_hash"])
+    target["relations"] = []
+    fresh = shared_memory.inspect_records()
+    appended = api().prepare_topic_batch(validate(data, payload), journal=journal, records=fresh, now=NOW)
+    assert recover(appended, journal)["stage"] == "committed"
+    after = wiki.semantic_snapshot(before["page_id"])
+    assert after["body"].startswith(before["body"])
+    assert before["claims"] == after["claims"]

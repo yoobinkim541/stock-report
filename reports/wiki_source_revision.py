@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import re
 from datetime import datetime
 from pathlib import Path
@@ -74,7 +75,11 @@ def _canonical_url(value: object) -> str:
 def _archive_path(value: object, directory: str) -> Path:
     try:
         path = Path(str(value or "")).expanduser().resolve()
-        path.relative_to((raw_archive.reports_root() / directory).resolve())
+        roots = [raw_archive.reports_root() / directory]
+        if os.getenv("WIKI_SOURCE_ALLOW_PRIVATE", "0") == "1":
+            roots.append(raw_archive.reports_root() / "private-sources" / directory)
+        if not any(path.is_relative_to(root.resolve()) for root in roots):
+            raise ValueError()
         return path
     except (ValueError, OSError, RuntimeError) as exc:
         raise SourceGateError("archive_path_invalid") from exc

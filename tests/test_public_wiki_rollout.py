@@ -1,26 +1,168 @@
 from scripts.run_public_wiki_pilot import is_public
 import pytest
+import json
+from datetime import datetime, timedelta, timezone
 
 
-def test_missing_model_executable_does_not_consume_quota(monkeypatch):
-    runner = module()
-    monkeypatch.setattr('sys.argv', ['rollout', '--apply'])
-    monkeypatch.setenv('WIKI_SOURCE_PIPELINE_ENABLED', '0')
-    monkeypatch.setattr('shutil.which', lambda command: None)
-    monkeypatch.setattr(runner.source_collector, 'load_recent_events',
-                        lambda **kw: pytest.fail('read sources before model preflight'))
-    with pytest.raises(ValueError, match='codex_executable_unavailable'):
-        runner.main()
+NOW = datetime(2026, 10, 16, 12, tzinfo=timezone.utc)
 
 
-def test_apply_rejects_unrestricted_flag_before_reading_sources(monkeypatch):
+def cached_event(identity, **changes):
+    return {'id': identity, 'source': 'arca', 'collected_at': NOW.isoformat(),
+            'url': f'https://arca.live/b/stock/{identity}',
+            'raw_path': '/raw/source', 'text_path': '/text/source',
+            'manifest_path': '/raw/source.manifest.json', **changes}
+
+
+def write_cache(runner, cache, rows, now=NOW):
+    cache.mkdir(parents=True, exist_ok=True)
+    path = runner.source_collector._event_file(cache, now)
+    with path.open('w') as stream:
+        for row in rows:
+            stream.write(json.dumps(row) + '\n')
+    return path
+
+
+def test_missing_provider_does_not_consume_quota(monkeypatch):
     runner = module()
     monkeypatch.setattr('sys.argv', ['rollout', '--apply'])
     monkeypatch.setenv('WIKI_SOURCE_PIPELINE_ENABLED', '1')
-    monkeypatch.setattr(runner.source_collector, 'load_recent_events',
-                        lambda **kw: pytest.fail('read sources before policy check'))
-    with pytest.raises(ValueError, match='unrestricted_pipeline_enabled'):
+    monkeypatch.delenv('OPENROUTER_API_KEY', raising=False)
+    monkeypatch.setattr('shutil.which', lambda command: None)
+    monkeypatch.setattr(runner, 'load_source_events',
+                        lambda **kw: pytest.fail('read sources before model preflight'))
+    with pytest.raises(ValueError, match='structured_provider_unavailable'):
         runner.main()
+
+
+def test_enabled_pipeline_accepts_verified_public_body_and_authorized_private(monkeypatch):
+    from scripts.run_public_wiki_pilot import source_allowed
+    private = {'provider': 'saveticker', 'scope': 'authorized_article',
+               'canonical_url': 'https://saveticker.com/news/1'}
+    public = {'provider': 'arca', 'scope': 'article_fulltext',
+              'canonical_url': 'https://arca.live/b/stock/123'}
+    monkeypatch.setenv('WIKI_SOURCE_PIPELINE_ENABLED', '1')
+    monkeypatch.delenv('WIKI_SOURCE_ALLOW_PRIVATE', raising=False)
+    assert source_allowed(public)
+    assert not source_allowed(private)
+    monkeypatch.setenv('WIKI_SOURCE_ALLOW_PRIVATE', '1')
+    assert source_allowed(private)
+    assert not source_allowed({**private, 'scope': 'preview'})
+
+
+@pytest.mark.parametrize('private', [False, True])
+def test_discovery_loads_private_cache_only_with_explicit_opt_in(tmp_path, monkeypatch, private):
+    runner = module()
+    monkeypatch.setenv('WIKI_SOURCE_ALLOW_PRIVATE', '1' if private else '0')
+    monkeypatch.setattr(runner.raw_archive, 'reports_root', lambda: tmp_path)
+    public_cache = tmp_path / 'cache'
+    monkeypatch.setattr(runner.source_collector, 'DEFAULT_CACHE_DIR', public_cache)
+    write_cache(runner, public_cache, [cached_event('public')])
+    write_cache(runner, tmp_path / 'private-sources' / 'cache',
+                [cached_event('private', source='saveticker')])
+    assert {row['id'] for row in runner.load_source_events(now=NOW)} == (
+        {'public', 'private'} if private else {'public'})
+
+
+def test_stream_preserves_recent_loader_cutoff_and_latest_delivery_dedupe(tmp_path, monkeypatch):
+    runner = module()
+    monkeypatch.delenv('WIKI_SOURCE_ALLOW_PRIVATE', raising=False)
+    monkeypatch.setattr(runner.source_collector, 'DEFAULT_CACHE_DIR', tmp_path)
+    old = NOW - timedelta(days=60, seconds=1)
+    write_cache(runner, tmp_path, [cached_event('old', collected_at=old.isoformat())], now=old)
+    write_cache(runner, tmp_path, [cached_event('same', title='older'),
+        cached_event('shadowed'), cached_event('same', title='newer'),
+        cached_event('shadowed', content_kind='macro_snapshot')])
+    reference = runner.source_collector.load_recent_events(tmp_path, now=NOW, hours=24 * 60)
+    expected = [row for row in reference if runner._full_body_candidate(row)]
+    assert list(runner.load_source_events(now=NOW)) == list(reversed(expected))
+
+
+def test_large_irrelevant_records_are_not_accumulated_and_tail_is_discovered(tmp_path, monkeypatch):
+    import tracemalloc
+    runner = module()
+    monkeypatch.delenv('WIKI_SOURCE_ALLOW_PRIVATE', raising=False)
+    monkeypatch.setattr(runner.source_collector, 'DEFAULT_CACHE_DIR', tmp_path)
+    large = 'x' * (512 * 1024)
+    def rows():
+        yield cached_event('head')
+        for index in range(80):
+            yield cached_event(f'snapshot-{index}', content_kind='prediction_market_snapshot', body_raw=large)
+        yield cached_event('tail')
+    write_cache(runner, tmp_path, rows())
+    monkeypatch.setattr(runner.source_collector, 'load_recent_events',
+                        lambda *a, **kw: pytest.fail('unbounded loader invoked'))
+    stats = {}
+    tracemalloc.start()
+    try:
+        retained = list(runner.load_source_events(now=NOW, stats=stats))
+        _, peak = tracemalloc.get_traced_memory()
+    finally:
+        tracemalloc.stop()
+    assert [row['id'] for row in retained] == ['tail', 'head']
+    assert stats == {'scanned_events': 82, 'duplicate_events': 0, 'full_body_events': 2}
+    assert peak < 12 * 1024 * 1024
+
+
+def test_streamed_discovery_bounds_candidates_counts_backlog_and_replays_evidence(tmp_path, monkeypatch):
+    from reports.wiki_source_journal import Journal
+    runner = module()
+    monkeypatch.setattr(runner.source_collector, 'DEFAULT_CACHE_DIR', tmp_path / 'cache')
+    monkeypatch.setenv('WIKI_SOURCE_PIPELINE_ENABLED', '1')
+    monkeypatch.delenv('WIKI_SOURCE_ALLOW_PRIVATE', raising=False)
+    write_cache(runner, tmp_path / 'cache', [cached_event(str(i)) for i in range(9)])
+    seen = []
+    def discover(events, **kwargs):
+        assert len(events) == 1
+        event = events[0]
+        seen.append(event['id'])
+        return {'eligible': [{'revision_id': event['id'], 'role': 'support', 'provider': 'arca',
+                             'scope': 'article_fulltext', 'body': 'full body',
+                             'canonical_url': event['url'], 'published_at': event['id']}],
+                'unavailable': [], 'pending_chunking': []}
+    monkeypatch.setattr(runner.wiki_source_revision, 'discover_revisions', discover)
+    completed = set()
+    monkeypatch.setattr(runner, 'pending_public_source', lambda source, _: source['revision_id'] not in completed)
+    journal = Journal(tmp_path / 'journal')
+    with runner.discover_source_batch(journal, NOW, limit=2) as (sources, relevant, pending, stats):
+        assert [source['revision_id'] for source in sources] == ['0', '1']
+        assert all('body' not in source for source in sources)
+        assert [row['id'] for row in relevant(sources[0])] == ['0']
+        assert pending(sources[0])
+        assert stats['pending_sources'] == 9
+        assert stats['retained_candidates'] == 2
+        assert stats['deferred_pending_sources'] == 7
+        completed.update(source['revision_id'] for source in sources)
+    assert set(seen) == {str(i) for i in range(9)}
+    with runner.discover_source_batch(journal, NOW, limit=2) as (sources, _, _, stats):
+        assert [source['revision_id'] for source in sources] == ['2', '3']
+        assert stats['pending_sources'] == 7
+
+def test_tail_full_body_passes_real_archive_discovery(tmp_path, monkeypatch):
+    from reports.wiki_source_journal import Journal
+    runner = module()
+    monkeypatch.setenv('STOCK_REPORT_REPORTS_DIR', str(tmp_path))
+    monkeypatch.delenv('WIKI_SOURCE_ALLOW_PRIVATE', raising=False)
+    monkeypatch.setattr(runner.source_collector, 'DEFAULT_CACHE_DIR', tmp_path / 'cache')
+    body = 'Reported capacity improved, but realized orders remain uncertain.'
+    url = 'https://t.me/public_channel/7'
+    record = runner.raw_archive.save_raw_artifact('telegram', 'text', NOW, 'Capacity', url, body, '.txt')
+    record.update(body_coverage='full', text_complete=True, extraction_scope='public_message')
+    runner.raw_archive.save_extracted_text(record, body)
+    event = cached_event('tail', source='telegram:public_channel', url=url, title='Capacity',
+                         content_kind='community_signal', extraction_scope='public_message',
+                         **{key: record[key] for key in ('raw_path', 'text_path', 'manifest_path')})
+    write_cache(runner, tmp_path / 'cache', [
+        *[cached_event(f'noise-{i}', content_kind='macro_snapshot') for i in range(100)], event])
+    monkeypatch.setattr(runner, 'pending_public_source', lambda *a: True)
+    with runner.discover_source_batch(Journal(tmp_path / 'journal'), NOW, limit=1) as batch:
+        sources, relevant, _, stats = batch
+        assert len(sources) == stats['eligible_sources'] == stats['pending_sources'] == 1
+        assert sources[0]['canonical_url'] == url
+        assert list(relevant(sources[0])) == [event]
+        assert stats['scanned_events'] == 101
+        assert stats['full_body_events'] == 1
+
 
 
 def test_supplied_private_snapshot_rejected_even_when_live_page_is_public(monkeypatch):
@@ -127,8 +269,8 @@ def test_topic_failure_remains_selectable_after_legacy_completion(tmp_path, monk
                         {'enabled': True, 'stage': 'committed', 'effects': {'log': 'done'}})
     runner.process(selected[0], [], journal, {'id': 'two', 'revision_id': source['revision_id']})
     assert not runner.pending_public_source(source, journal)
-    # Old completed originals without explicit topic-stage enrollment stay done.
-    assert not runner.pending_public_source({**source, 'revision_id': 'b' * 64}, journal)
+    # Previously compiled originals are enrolled for topic backfill, not lost.
+    assert runner.pending_public_source({**source, 'revision_id': 'b' * 64}, journal)
 
 
 def test_crash_after_legacy_commit_keeps_topic_enrollment(tmp_path, monkeypatch):
@@ -158,8 +300,9 @@ def test_dry_and_apply_keep_pending_role_when_recent_role_completed(tmp_path, mo
     monkeypatch.setenv('WIKI_SOURCE_PIPELINE_ENABLED', '0')
     monkeypatch.setattr(runner.shutil, 'which', lambda _: '/synthetic/codex')
     monkeypatch.setattr(runner.raw_archive, 'reports_root', lambda: tmp_path)
-    monkeypatch.setattr(runner.source_collector, 'load_recent_events', lambda **kw: [])
-    monkeypatch.setattr(runner.wiki_source_revision, 'discover_revisions', lambda *a, **kw: {'eligible': [support]})
+    monkeypatch.setattr(runner, 'load_source_events', lambda **kw: iter([{}]))
+    monkeypatch.setattr(runner.wiki_source_revision, 'discover_revisions',
+                        lambda *a, **kw: {'eligible': [support], 'unavailable': []})
     monkeypatch.setattr(runner, 'resume_topic_sources', lambda *a: ([conflict], []))
     monkeypatch.setattr(runner.pipeline, '_resume_compilations', lambda *a: ([], []))
     monkeypatch.setattr(runner, 'public_revisions', lambda *a: {support['revision_id']})
@@ -206,11 +349,11 @@ def test_failed_source_batch_reports_nonzero_service_exit(tmp_path, monkeypatch)
     monkeypatch.setenv('WIKI_SOURCE_PIPELINE_ENABLED', '0')
     monkeypatch.setattr(runner.shutil, 'which', lambda command: '/synthetic/codex')
     monkeypatch.setattr(runner.raw_archive, 'reports_root', lambda: tmp_path)
-    monkeypatch.setattr(runner.source_collector, 'load_recent_events', lambda **kw: [])
+    monkeypatch.setattr(runner, 'load_source_events', lambda **kw: iter([{}]))
     source = {'revision_id': 'a' * 64, 'role': 'evidence', 'provider': 'telegram:public_channel',
               'scope': 'public_message', 'canonical_url': 'https://t.me/public_channel/1'}
     monkeypatch.setattr(runner.wiki_source_revision, 'discover_revisions',
-                        lambda *args, **kw: {'eligible': [source]})
+                        lambda *args, **kw: {'eligible': [source], 'unavailable': []})
     monkeypatch.setattr(runner.pipeline, '_resume_compilations', lambda *args: ([], []))
     monkeypatch.setattr(runner.pipeline, '_pending_source', lambda *args: True)
     monkeypatch.setattr(runner, 'process', lambda *args: {'compile_failed': 1})

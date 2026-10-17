@@ -6,10 +6,10 @@ from datetime import datetime
 from typing import TypedDict
 
 from agent_console import wiki
-from reports.wiki_source_integration import GENERIC_TERMS
+from reports.wiki_source_integration import financial_terms
 from reports.wiki_source_journal import Journal
 from reports.wiki_source_revision import build_revision
-from scripts.run_public_wiki_pilot import is_public, public_target_ids
+from scripts.run_public_wiki_pilot import source_allowed as is_public, public_target_ids
 
 
 class TopicNote(TypedDict):
@@ -57,7 +57,7 @@ def _text(value: object) -> str:
 
 
 def _terms(terms: list[str]) -> set[str]:
-    return {token for term in terms for token in wiki._tokens(term)} - GENERIC_TERMS
+    return financial_terms(terms)
 
 
 def topic_context_model_input(context: TopicContext) -> dict:
@@ -176,7 +176,8 @@ def select_topic_context(compiled: dict, *, journal: Journal, records: list[dict
         if "compiled_source" in row.get("tags", []) and row.get("id") not in represented:
             context["omitted"].append({"page_id": row["id"], "reason": "unverified"})
     ranked = []
-    wanted = _terms(_strings(compiled["terms"]))
+    wanted = _terms([*_strings(compiled["terms"]), *[
+        alias for alias in compiled.get("verified_aliases", []) if type(alias) is str and alias.strip()]])
     for page_id, revision_id in sorted(candidates):
         reason = "current_revision" if revision_id == compiled["revision_id"] else ""
         if not reason:

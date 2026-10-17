@@ -768,7 +768,7 @@ def _fetch_saveticker_article_body(url: str, title: str = "") -> str:
         return ""
 
 
-def _saveticker_article_record(item: dict, base: str) -> dict:
+def _saveticker_article_record(item: dict, base: str, *, fetch_body: bool = True) -> dict:
     from reports.raw_archive import save_extracted_text, save_raw_artifact
 
     fetched_at = datetime.now(KST)
@@ -782,7 +782,7 @@ def _saveticker_article_record(item: dict, base: str) -> dict:
     # saveticker 자체 미리보기가 80~90자 근처서 "..."로 잘려 오는 경우가 흔해 길이만으로는
     # 거의 안 걸림 — 말줄임표로 끝나면 길이 무관하게 전체 기사를 마저 가져온다(2026-07-25).
     looks_truncated = body_raw.endswith("...") or body_raw.endswith("…")
-    if (len(body_raw) < 80 or looks_truncated) and url:
+    if fetch_body and (len(body_raw) < 80 or looks_truncated) and url:
         fetched = _fetch_saveticker_article_body(url, title=title)
         if fetched and len(fetched) > len(body_raw):
             body_raw = fetched   # 전체 기사가 미리보기의 상위집합 — 미리보기 중복 없이 이걸로 대체
@@ -880,6 +880,7 @@ def fetch_saveticker_events() -> list[dict]:
     dedupe_dirty = False
     now_iso = datetime.now(KST).isoformat(timespec="seconds")
     for path, params in paths:
+        browser_transport = False
         try:
             resp = requests.get(f"{base}/{path}", headers=HEADERS, params=params, timeout=12)
             resp.raise_for_status()
@@ -887,12 +888,17 @@ def fetch_saveticker_events() -> list[dict]:
         except requests.HTTPError as exc:
             status_code = getattr(getattr(exc, "response", None), "status_code", None)
             if status_code in {403, 451}:
-                raise SourceProviderUnavailable(
-                    f"SaveTicker HTTP {status_code} (provider access blocked)",
-                    availability="blocked",
-                    status_code=status_code,
-                ) from exc
-            continue
+                try:
+                    from reports.saveticker_browser import CDPBrowser
+                    data = CDPBrowser().fetch_json('/api/' + path, params)
+                    browser_transport = True
+                except Exception as browser_error:
+                    raise SourceProviderUnavailable(
+                        f"SaveTicker HTTP {status_code} (provider access blocked); browser {type(browser_error).__name__}",
+                        availability="blocked", status_code=status_code,
+                    ) from browser_error
+            else:
+                continue
         except Exception:
             continue
         items = data.get("news_list") or data.get("data") or []
@@ -917,7 +923,10 @@ def fetch_saveticker_events() -> list[dict]:
                 fulltext_status = "preview_only" if body_raw else "unavailable"
                 body_raw_source = "api_preview" if body_raw else "title_fallback"
             else:
-                record = _saveticker_article_record(item, base)
+                # API previews remain previews; the bounded private collector
+                # independently archives complete authenticated article DOM.
+                record = (_saveticker_article_record(item, base, fetch_body=False)
+                          if browser_transport else _saveticker_article_record(item, base))
                 body_raw = record["body_raw"] or _combine_body_raw(item.get("content"), item.get("group_summary")) or text
                 fulltext_status = record["fulltext_status"]
                 body_raw_source = record["body_raw_source"]
