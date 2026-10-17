@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import logging
 import os
+import shutil
 import subprocess
 import tempfile
 import time
@@ -83,10 +84,55 @@ def chat_once(prompt: str, *, model: str = "gpt-5-mini", provider: str = "openai
     return backup_chat(prompt, timeout=timeout, runner=runner)
 
 
+DEFAULT_STRUCTURED_PROVIDERS = ("codex", "openrouter", "hermes")
+_AGY_DEFAULT_MODELS = "gemini-3.8-flash-high,gemini-3.8-flash-medium,gemini-4-argon-low"
+_AGY_COOLDOWN: dict[str, float] = {}
+_AGY_QUOTA_COOLDOWN_SECONDS = 600
+
+
+def _agy_quota_error(text: str) -> bool:
+    return "RESOURCE_EXHAUSTED" in text or "quota reached" in text.lower()
+
+
+def agy_structured_call(prompt: str, *, timeout: float, runner=None) -> str | None:
+    """Server-local Antigravity CLI, trying each model in turn.
+
+    Quota is per model, so an exhausted model is skipped (and remembered for a
+    while) instead of failing the whole stage. Source text is untrusted, so tool
+    permissions are never auto-approved: the CLI runs sandboxed in an empty
+    scratch directory and a tool request simply yields empty output.
+    """
+    run = runner or subprocess.run
+    binary = os.getenv("WIKI_AGY_BIN") or shutil.which("agy") or os.path.expanduser("~/.local/bin/agy")
+    scratch = os.getenv("WIKI_AGY_SCRATCH") or os.path.join(tempfile.gettempdir(), "llm-agy-scratch")
+    os.makedirs(scratch, exist_ok=True)
+    deadline = time.monotonic() + timeout
+    for model in [m.strip() for m in os.getenv("WIKI_AGY_MODELS", _AGY_DEFAULT_MODELS).split(",") if m.strip()]:
+        remaining = deadline - time.monotonic()
+        if remaining < 1:
+            return None
+        if _AGY_COOLDOWN.get(model, 0.0) > time.monotonic():
+            continue
+        cmd = [binary, "--model", model, "--sandbox", "--disable-slash-commands",
+               "--print-timeout", f"{max(5, int(remaining))}s", "-p", prompt]
+        try:
+            result = run(cmd, capture_output=True, text=True, timeout=remaining + 10, cwd=scratch)
+        except (OSError, subprocess.SubprocessError):
+            continue
+        output = (getattr(result, "stdout", "") or "").strip()
+        failure = f"{getattr(result, 'stdout', '')}\n{getattr(result, 'stderr', '')}"
+        if getattr(result, "returncode", 1) != 0 and _agy_quota_error(failure):
+            _AGY_COOLDOWN[model] = time.monotonic() + _AGY_QUOTA_COOLDOWN_SECONDS
+            continue
+        if getattr(result, "returncode", 1) == 0 and output:
+            return output
+    return None
+
+
 def structured_chat(prompt: str, *, max_timeout: int = 180) -> str | None:
     """Bounded Codex → direct OpenRouter → Hermes JSON-object fallback.
 
-    No parallel calls, web search or agy backup. Each provider gets at most 60
+    No parallel calls or web search; agy is an opt-in stage via WIKI_STRUCTURED_PROVIDERS. Each provider gets at most 60
     seconds within a shared, hard-capped 180-second budget. Codex's existing
     unsupported-model retry shares that same provider deadline. Domain schemas
     and source attribution remain the caller's responsibility; invalid JSON is
@@ -99,14 +145,16 @@ def structured_chat(prompt: str, *, max_timeout: int = 180) -> str | None:
     if os.getenv("AGENT_CONSOLE_LLM_ENABLED", "1").lower() in {"0", "false", "no", "off"}:
         return None
     deadline = time.monotonic() + max(0, min(max_timeout, int(os.getenv("WIKI_STRUCTURED_DEADLINE", "180"))))
-    providers = os.getenv("WIKI_STRUCTURED_PROVIDERS", "codex,openrouter,hermes").split(",")
+    providers = os.getenv("WIKI_STRUCTURED_PROVIDERS", ",".join(DEFAULT_STRUCTURED_PROVIDERS)).split(",")
     for provider in [p.strip() for p in providers if p.strip()]:
         remaining = min(int(os.getenv("WIKI_PROVIDER_TIMEOUT", "60")), deadline - time.monotonic())
         if remaining < 1:
             return None
         stage_deadline = time.monotonic() + remaining
         try:
-            if provider == "openrouter":
+            if provider == "agy":
+                text = agy_structured_call(prompt, timeout=remaining)
+            elif provider == "openrouter":
                 if not llm_direct.enabled():
                     continue
                 text = llm_direct.direct_chat(
