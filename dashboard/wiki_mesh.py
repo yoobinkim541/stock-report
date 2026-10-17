@@ -534,7 +534,7 @@ def _theme_cluster_centers(themes: list[str]) -> dict[str, np.ndarray]:
     if center_hub in uniq:
         centers[center_hub] = np.array([0.0, 0.0], dtype=float)
     
-    ring = max(2.8, 2.2 + 0.35 * len(outer_themes))
+    ring = max(6.5, 4.5 + 0.8 * len(outer_themes))
     for idx, theme in enumerate(outer_themes):
         angle = (2.0 * math.pi * idx) / max(1, len(outer_themes))
         centers[theme] = np.array([math.cos(angle) * ring, math.sin(angle) * ring], dtype=float)
@@ -614,9 +614,10 @@ def _layout_nodes(nodes: list[dict[str, Any]], edges: list[WikiGraphEdge], *, fo
             disp[j] += step
 
         for idx, node in enumerate(nodes):
-            surface = str(node.get("surface") or WIKI_SURFACE).lower()
-            center = centers.get(surface, np.array([0.0, 0.0], dtype=float))
-            disp[idx] += (center - positions[idx]) * 0.02
+            theme = core_wiki._index_category(node)
+            center = centers.get(theme, np.array([0.0, 0.0], dtype=float))
+            # Stronger cluster coherence: pull firmly toward own theme center
+            disp[idx] += (center - positions[idx]) * 0.08
             if str(node.get("id") or "") == selected_id:
                 disp[idx] += -positions[idx] * 0.08
 
@@ -1165,14 +1166,14 @@ def build_obsidian_network_html(model: dict[str, Any], selected_id: str = "") ->
     physics: {{
       solver: 'forceAtlas2Based',
       forceAtlas2Based: {{
-        gravitationalConstant: -40,
-        centralGravity: 0.007,
-        springLength: 85,
-        springConstant: 0.05,
-        damping: 0.88,
-        avoidOverlap: 0.25
+        gravitationalConstant: -75,
+        centralGravity: 0.0025,
+        springLength: 120,
+        springConstant: 0.038,
+        damping: 0.90,
+        avoidOverlap: 0.65
       }},
-      stabilization: {{ iterations: 140 }}
+      stabilization: {{ iterations: 160 }}
     }},
     interaction: {{
       hover: true,
