@@ -1657,9 +1657,28 @@ def sync_qmd() -> dict:
 
 RAW_LAYER_KINDS = ("source_index",)
 RAW_LAYER_TAG = "raw_index"
+_TAXONOMY_RULES = [
+    ("정치·지정학", "정치·지정학 (Politics & Geopolitics)",
+     ("정치", "대선", "트럼프", "바이든", "선거", "정부", "의회", "백악관", "외교", "우크라이나", "러시아", "후티", "사우디", "이란", "이스라엘", "가자", "국방", "미사일", "군사", "키이우", "젤렌스키", "소하르", "호르무즈")),
+    ("금리·통화정책", "금리·통화정책 (Monetary Policy & Rates)",
+     ("금리", "연준", "fed", "fomc", "인플레이션", "물가", "cpi", "통화정책", "채권", "국채", "긴축", "완화", "sofr", "기준금리")),
+    ("거시경제·에너지", "거시경제·에너지 (Macro & Commodities)",
+     ("거시", "경제", "gdp", "고용", "실업", "유가", "에너지", "원자재", "수출", "무역", "관세", "recession", "경기", "bess", "가스", "전력")),
+    ("기술·반도체·AI", "기술·반도체·AI (Tech & AI)",
+     ("반도체", "ai", "양자", "빅테크", "기술", "소프트웨어", "hbm", "하드웨어", "엔비디아", "애플", "마이크로소프트", "구글", "스미토모", "ibm", "heron")),
+    ("기업실적·산업동향", "기업실적·산업동향 (Earnings & Industry)",
+     ("실적", "매출", "영업이익", "가이던스", "자산운용", "aum", "etf", "배당", "밸류에이션", "주주환원", "합병", "인수", "공시", "블랙록", "bank of america")),
+]
+
 _INDEX_CATEGORIES = (
-    ("overview", "Overviews"), ("compiled_source", "Source summaries"), ("concept", "Concepts"),
-    ("risk", "Risks"), ("playbook", "Playbooks"), ("decision", "Decisions"), ("note", "Notes"),
+    ("overview", "종합 위키 포털 (Overview Portals)"),
+    ("compiled_source", "원문 지식 요약 (Compiled Source Summaries)"),
+    ("politics", "정치·지정학 (Politics & Geopolitics)"),
+    ("rates", "금리·통화정책 (Monetary Policy & Rates)"),
+    ("macro", "거시경제·에너지 (Macro & Commodities)"),
+    ("tech", "기술·반도체·AI (Tech & AI)"),
+    ("earnings", "기업실적·산업동향 (Earnings & Industry)"),
+    ("strategy", "종목전략·플레이북 (Single Stock Strategies)"),
 )
 
 
@@ -1669,9 +1688,16 @@ def is_raw_layer_page(page: dict) -> bool:
 
 
 def _index_category(page: dict) -> str:
+    if page.get("kind") == "overview" or str(page.get("id", "")).startswith("overview-"):
+        return "종합 위키 포털 (Overview Portals)"
     if "compiled_source" in (page.get("tags") or []):
-        return "Source summaries"
-    return dict(_INDEX_CATEGORIES).get(page.get("kind") or "note", "Other")
+        return "원문 지식 요약 (Compiled Source Summaries)"
+    
+    text = (str(page.get("title", "")) + " " + str(page.get("summary", "")) + " " + str(page.get("body", "")) + " " + " ".join(page.get("tags", []))).lower()
+    for code, label, kws in _TAXONOMY_RULES:
+        if kws and any(k.lower() in text for k in kws):
+            return label
+    return "종목전략·플레이북 (Single Stock Strategies)"
 
 
 def page_source_count(page: dict) -> int:

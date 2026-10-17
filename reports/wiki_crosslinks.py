@@ -21,8 +21,17 @@ HUB_CHILD_SIZE = 25
 HUB_PREFIX = "overview-"
 _GENERIC_TAGS = {"wiki", "market", "ticker", "draft", "reviewed", "stable", "archived", "source_digest",
                  "compiled_source", "conversation", "query_fileback", "overview", *wiki.VALID_KINDS}
-_HUB_TITLES = {"Overviews": "개요 문서", "Source summaries": "원문 요약", "Concepts": "개념", "Risks": "위험",
-               "Playbooks": "판단 플레이북", "Decisions": "결정", "Notes": "노트", "Other": "기타"}
+_HUB_TITLES = {
+    "종합 위키 포털 (Overview Portals)": "포털 및 개요 문서",
+    "원문 지식 요약 (Compiled Source Summaries)": "원문 지식 요약",
+    "정치·지정학 (Politics & Geopolitics)": "정치·지정학 테마 위키",
+    "금리·통화정책 (Monetary Policy & Rates)": "금리·통화정책 테마 위키",
+    "거시경제·에너지 (Macro & Commodities)": "거시경제·에너지 테마 위키",
+    "기술·반도체·AI (Tech & AI)": "기술·반도체·AI 테마 위키",
+    "기업실적·산업동향 (Earnings & Industry)": "기업실적·산업동향 테마 위키",
+    "종목전략·플레이북 (Single Stock Strategies)": "종목전략·플레이북 테마 위키",
+    "Other": "기타 지식"
+}
 _TOKEN = re.compile(r"[0-9A-Za-z가-힣]{2,}")
 _STOP = {"수집", "소스", "위키", "근거", "정리", "the", "and", "of", "for", "관련", "신호", "검증", "위험", "리스크"}
 
