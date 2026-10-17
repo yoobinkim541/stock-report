@@ -1,0 +1,26 @@
+{
+  "actions": [
+    {
+      "page_id": "source-ticker-crm",
+      "action": "archive",
+      "reason": "zero_usage(30일 미사용) + open_questions 2건이 리포트 참조를 차단. 포트폴리오 종목이므로 delete보다 archive로 데이터 보존. openQ 해소 시 unarchive 가능."
+    },
+    {
+      "page_id": "source-ticker-now",
+      "action": "archive",
+      "reason": "zero_usage + open_questions 2건. CRM과 동일 패턴. archive 후 openQ 해소 시 복원."
+    },
+    {
+      "page_id": "source-ticker-googl",
+      "action": "archive",
+      "reason": "zero_usage + open_questions 2건. 기존 memory 기록('zero_usage 3')과 일치. archive 권장."
+    },
+    {
+      "page_id": "source-ticker-orcl",
+      "action": "archive",
+      "reason": "zero_usage + open_questions 2건. 기존 memory 기록과 일치. archive 권장."
+    }
+  ],
+  "health_score": 7,
+  "summary": "전반적 위키 건강도는 양호(소스 10/10 tracked, stale 0, unverified 4.7%). CRM/NOW/GOOGL/ORCL 4개 페이지는 open_questions가 리포트 참조를 차단해 30일간 미사용 상태 → archive 권장. Iran(2건)/인플레-고용(2건)은 open_questions만 있고 active(no zero_usage) → 보존, openQ 해소만 필요. source_digest unlinked 623건과 증류 대기 89건은 큐레이션 파이프라인 이슈로 별도 처리. 37건 원문 보존 파일은 현행 유지."
+}

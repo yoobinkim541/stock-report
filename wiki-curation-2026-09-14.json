@@ -1,0 +1,5 @@
+{
+  "actions": [],
+  "health_score": 7,
+  "summary": "소스 10/10 tracked, stale 0, no-success 0 — 수집층 이상 무. Unverified 4.6%(102/2230), archived 208 — 큐레이션 위생 양호. 4개 보유종목 페이지(CRM/GOOGL/NOW/ORCL) zero_usage지만 memory(보유 종목 유지)에 따라 archive 안 함, open_questions 해소만 필요. MSFT/NVDA는 open_questions만 있음 → 보존, openQ 해소 선택 사항. source_digest unlinked 618건(전주 623→소폭 감소), 증류 대기 68건(전주 89→감소) — 큐레이션 크론 정상 진행 중. 원문 보존 미사용 37건은 설계상 보존 레이어로 현행 유지. 전반적 건강도는 7/10로 2주 전과 동일 — 수집/보존은 양호하나, 증류→judgment 연결과 open_questions 해소라는 구조적 과제는 여전."
+}

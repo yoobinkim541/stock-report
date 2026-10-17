@@ -1,0 +1,31 @@
+{
+  "actions": [
+    {
+      "page_id": "source-ticker-crm",
+      "action": "archive",
+      "reason": "zero_usage (30일간 미사용) + 열린 질문 2건. 포트폴리오 보유 중이지만 수집 소스로 실사용 없음."
+    },
+    {
+      "page_id": "source-ticker-now",
+      "action": "archive",
+      "reason": "zero_usage (30일간 미사용) + 열린 질문 2건. 포트폴리오 보유 중이지만 수집 소스로 실사용 없음."
+    },
+    {
+      "page_id": "source-ticker-orcl",
+      "action": "archive",
+      "reason": "zero_usage (30일간 미사용) + 열린 질문 2건. 포트폴리오 보유 중이지만 수집 소스로 실사용 없음."
+    },
+    {
+      "page_id": "source-ticker-googl",
+      "action": "archive",
+      "reason": "zero_usage (30일간 미사용) + 열린 질문 2건. 포트폴리오 보유 중이지만 수집 소스로 실사용 없음."
+    }
+  ],
+  "note": [
+    "source-ticker-msft, source-ticker-nvda: open_questions만 있음, zero_usage 아님 → 유지, 질문 해소는 선택 사항.",
+    "원문보존 미사용 36개: 구체적 page_id 파악 후 개별 archive 결정 필요.",
+    "source_digest unlinked 466: 증류 크론에 맡기고, judgment 링크 보존/복구 우선."
+  ],
+  "health_score": 7,
+  "summary": "건강도 7/10 (어제 9/04와 동일). CRM/NOW/ORCL/GOOGL source-ticker 4건 archive이 주요 액션. unlinked source_digest 466이 가장 큰 갭으로 소폭 증가 추세(456→466)이나 증류 크론으로 처리 중. unverified 101(5.6%)은 점진적 개선 범위. MSFT/NVDA는 open_questions만 있어 archive 불필요."
+}

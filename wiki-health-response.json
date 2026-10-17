@@ -1,0 +1,5 @@
+{
+  "actions": [],
+  "health_score": 6,
+  "summary": "전회와 동일한 6/10. 총 2페이지 증가(2228) 외에 모든 지표 변화 없음 — stale 0, 미사용 0, unlinked 618 동일, unverified 102 동일. 4개 zero_usage(C RM, GOOGL, ORCL, NVDA)는 포트폴리오 보유 종목으로 의도적 유지 중. open_questions 6개 페이지(CRM, GOOGL, MSFT, ORCL, NVDA, Iran)는 해결 대기. archive/delete/merge/reactivate 액션 불필요 — 현재 상태는 안정적이며 개선 포인트는 증류 크론으로 unlinked 감소 + open questions 해결에 집중해야 함."
+}
