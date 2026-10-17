@@ -301,8 +301,8 @@ def process(source, events, journal, attempt):
         result = pipeline.run(events=events, dry_run=False, llm_fn=llm, source_limit=1,
                               allowed_revision_ids={identity})
         receipt = journal.load_source(identity)
-        is_compiled = receipt and receipt.get('compile_state') == 'compiled'
-        if (topic_enabled and is_compiled
+        is_skipped = bool(receipt) and receipt.get('compile_state') == 'skipped'
+        if (topic_enabled and not is_skipped
                 and not any(result.get(field, 0) for field in
                             ('compile_failed', 'routing_pending', 'effects_pending', 'stale_base'))):
             try:

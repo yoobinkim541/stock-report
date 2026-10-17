@@ -30,7 +30,7 @@ def structured_llm_call(prompt: str, *, max_timeout: int = 180) -> str | None:
     """Shared JSON-only compile/route/integrate provider callback for runners."""
     from lib.llm_cli import structured_chat
 
-    return structured_chat(prompt, max_timeout=int(os.getenv("WIKI_STRUCTURED_DEADLINE", str(max_timeout))))
+    return structured_chat(prompt, max_timeout=max_timeout)
 
 
 class _CompiledTitle(TypedDict, total=False):

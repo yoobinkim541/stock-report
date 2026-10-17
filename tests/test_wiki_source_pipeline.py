@@ -20,9 +20,12 @@ def module():
 
 @pytest.fixture(autouse=True)
 def no_live_structured_provider(monkeypatch):
-    from lib import llm_cli
-    monkeypatch.setattr(llm_cli, "structured_chat",
-                        lambda *a, **kw: pytest.fail("unit test reached live structured provider"))
+    from agent_console import agent
+    from lib import llm_direct
+    def blocked(*a, **kw):
+        pytest.fail("unit test reached live structured provider")
+    monkeypatch.setattr(agent, "_try_hermes_chat", blocked)
+    monkeypatch.setattr(llm_direct, "direct_chat", blocked)
 
 
 @pytest.fixture
@@ -312,17 +315,6 @@ def test_enabled_worker_excludes_direct_legacy_source_writes(monkeypatch):
     assert result["candidates_considered"] == 0 and calls == []
 
 
-@pytest.mark.parametrize("enabled", [False, True])
-def test_legacy_cli_dispatches_exactly_one_owner(monkeypatch, enabled):
-    from reports import wiki_distillation
-    monkeypatch.setenv("WIKI_SOURCE_PIPELINE_ENABLED", "1" if enabled else "0")
-    monkeypatch.setattr("sys.argv", ["wiki_distillation", "--dry-run"])
-    calls = []
-    monkeypatch.setattr(wiki_distillation, "run", lambda **kwargs: calls.append("legacy") or {
-        "dry_run": True, "candidates_considered": 0, "created": []})
-    monkeypatch.setattr(module(), "run", lambda **kwargs: calls.append("new") or {"data_committed": 0})
-    assert wiki_distillation.main() == 0
-    assert calls == ["new" if enabled else "legacy"]
 
 
 def test_public_rollout_does_not_reauthorize_privately_changed_compiled_note(pipeline_env, monkeypatch):

@@ -44,24 +44,27 @@ def test_build_wiki_graph_model_links_related_pages():
     assert model["positions"]["page-a"]
 
 
-def test_build_wiki_graph_model_groups_nodes_by_surface():
+def test_build_wiki_graph_model_groups_nodes_by_theme_with_separated_clusters():
+    def page(pid, title, summary):
+        return {"id": pid, "title": title, "summary": summary, "surface": "market", "kind": "note",
+                "tags": [], "source_refs": ["https://example.com/" + pid]}
     pages = [
-        {"id": "m1", "title": "시장 1", "summary": "시장", "surface": "market", "kind": "note", "tags": ["market"], "source_refs": []},
-        {"id": "m2", "title": "시장 2", "summary": "시장", "surface": "market", "kind": "note", "tags": ["market"], "source_refs": []},
-        {"id": "p1", "title": "포트폴리오 1", "summary": "포트폴리오", "surface": "portfolio", "kind": "note", "tags": ["portfolio"], "source_refs": []},
-        {"id": "t1", "title": "티커 1", "summary": "티커", "surface": "ticker", "kind": "note", "tags": ["ticker"], "source_refs": []},
+        page("r1", "금리 인하 기대", "연준 FOMC 기준금리 경로"),
+        page("r2", "채권 금리 변동", "국채 금리와 인플레이션"),
+        page("g1", "우크라이나 휴전 협상", "트럼프 젤렌스키 외교"),
+        page("g2", "후티 미사일 공격", "사우디 군사 충돌"),
     ]
-
     model = wiki_mesh.build_wiki_graph_model(pages, selected_page_id="", depth=1, max_nodes=10)
-    by_id = {node["id"]: node for node in model["nodes"]}
     groups = {group["surface"]: group for group in model["groups"]}
+    rates = "금리·통화정책 (Monetary Policy & Rates)"
+    politics = "정치·지정학 (Politics & Geopolitics)"
+    assert groups[rates]["count"] == 2 and groups[politics]["count"] == 2
+    assert groups[rates]["color"] != groups[politics]["color"]
+    pos = model["positions"]
+    def gap(a, b):
+        return ((pos[a][0] - pos[b][0]) ** 2 + (pos[a][1] - pos[b][1]) ** 2) ** 0.5
+    assert min(gap(r, g) for r in ("r1", "r2") for g in ("g1", "g2")) > gap("r1", "r2")
 
-    assert [group["surface"] for group in model["groups"]] == ["market", "portfolio", "ticker"]
-    assert groups["market"]["count"] == 2
-    assert groups["portfolio"]["count"] == 1
-    assert by_id["m1"]["surface_color"] == wiki_mesh.SURFACE_COLORS["market"]
-    assert by_id["p1"]["group"] == "portfolio"
-    assert model["positions"]["m1"] != model["positions"]["p1"]
 
 
 def test_build_wiki_graph_model_respects_max_nodes():

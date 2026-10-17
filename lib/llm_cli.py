@@ -98,10 +98,10 @@ def structured_chat(prompt: str, *, max_timeout: int = 180) -> str | None:
 
     if os.getenv("AGENT_CONSOLE_LLM_ENABLED", "1").lower() in {"0", "false", "no", "off"}:
         return None
-    deadline = time.monotonic() + max(0, min(max_timeout, int(os.getenv("WIKI_STRUCTURED_DEADLINE", "600"))))
-    providers = os.getenv("WIKI_STRUCTURED_PROVIDERS", "openrouter,codex,hermes").split(",")
+    deadline = time.monotonic() + max(0, min(max_timeout, int(os.getenv("WIKI_STRUCTURED_DEADLINE", "180"))))
+    providers = os.getenv("WIKI_STRUCTURED_PROVIDERS", "codex,openrouter,hermes").split(",")
     for provider in [p.strip() for p in providers if p.strip()]:
-        remaining = min(int(os.getenv("WIKI_PROVIDER_TIMEOUT", "240")), deadline - time.monotonic())
+        remaining = min(int(os.getenv("WIKI_PROVIDER_TIMEOUT", "60")), deadline - time.monotonic())
         if remaining < 1:
             return None
         stage_deadline = time.monotonic() + remaining

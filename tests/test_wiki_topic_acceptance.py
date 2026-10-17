@@ -2,7 +2,7 @@
 import copy
 import json
 
-from agent_console import shared_memory, wiki
+from agent_console import agent as agent_module, shared_memory, wiki
 from scripts import run_public_wiki_rollout as runner
 from test_wiki_topic_transaction import transaction, evidence
 
@@ -56,7 +56,7 @@ def test_runner_seeds_then_updates_same_topic_and_repeat_is_noop(transaction, mo
             result.update(title='Hormuz shipping', kind='concept', surface='market', purpose='topic_synthesis')
         return json.dumps({'targets': [result], 'refusal': None})
 
-    monkeypatch.setattr(runner.agent, '_try_codex_chat', provider)
+    monkeypatch.setattr(agent_module, '_try_codex_chat', provider)
     source = data['source']
     first = runner.process(source, [], journal, {'id': 'first', 'revision_id': source['revision_id']})
     assert first['topic']['stage'] == 'committed', first

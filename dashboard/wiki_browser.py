@@ -633,6 +633,8 @@ def _matches_surface(page: dict[str, Any], surface: str) -> bool:
 
 
 def _matches_status(page: dict[str, Any], status: str) -> bool:
+    if status == "active":
+        return str(page.get("status") or "").lower() != "archived"
     return status == "all" or page.get("status") == status.lower()
 
 
