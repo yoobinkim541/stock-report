@@ -31,13 +31,25 @@ TRUST_COLORS = {
     "archived": "#94a3b8",
 }
 
+THEME_COLORS = {
+    "종합 위키 포털 (Overview Portals)": "#f59e0b",          # Amber/Gold (Portals/Hubs)
+    "원문 지식 요약 (Compiled Source Summaries)": "#38bdf8",     # Sky Blue (Sources)
+    "정치·지정학 (Politics & Geopolitics)": "#ef4444",          # Rose/Red
+    "금리·통화정책 (Monetary Policy & Rates)": "#8b5cf6",        # Purple
+    "거시경제·에너지 (Macro & Commodities)": "#10b981",         # Emerald Green
+    "기술·반도체·AI (Tech & AI)": "#06b6d4",                   # Cyan
+    "기업실적·산업동향 (Earnings & Industry)": "#ec4899",        # Pink
+    "종목전략·플레이북 (Single Stock Strategies)": "#a855f7",    # Violet
+    "기타 지식": "#64748b"                                      # Slate
+}
+
 SURFACE_COLORS = {
-    "market": "#22d3ee",
+    "market": "#38bdf8",
     "portfolio": "#a78bfa",
-    "ticker": "#f472b6",
+    "ticker": "#ec4899",
     "paper": "#34d399",
     "lab": "#f59e0b",
-    "wiki": "#67e8f9",
+    "wiki": "#06b6d4",
 }
 
 VALID_STATUSES = ("draft", "reviewed", "stable", "archived")
@@ -305,7 +317,9 @@ def _matches_surface(page: dict[str, Any], surface: str) -> bool:
 
 
 def _matches_status(page: dict[str, Any], status: str) -> bool:
-    return status == "all" or page.get("status") == status.lower()
+    if status == "active":
+        return str(page.get("status", "")).lower() != "archived"
+    return status == "all" or str(page.get("status", "")).lower() == status.lower()
 
 
 def _matches_query(page: dict[str, Any], query: str) -> bool:
@@ -505,15 +519,25 @@ def _fill_by_degree(pages: list[dict[str, Any]], adjacency: dict[str, dict[str, 
     return list(visited)
 
 
-def _cluster_centers(surfaces: list[str], focus_surface: str) -> dict[str, np.ndarray]:
-    uniq = _ordered_surfaces(surfaces, focus_surface)
+def _theme_cluster_centers(themes: list[str]) -> dict[str, np.ndarray]:
+    from agent_console import wiki as core_wiki
+    uniq = list(dict.fromkeys(themes))
+    if not uniq:
+        return {}
     if len(uniq) == 1:
         return {uniq[0]: np.array([0.0, 0.0], dtype=float)}
-    centers: dict[str, np.ndarray] = {uniq[0]: np.array([0.0, 0.0], dtype=float)}
-    ring = max(1.8, 2.4 + 0.12 * len(uniq))
-    for idx, surface in enumerate(uniq[1:], start=1):
-        angle = (2.0 * math.pi * idx) / max(2, len(uniq) - 1)
-        centers[surface] = np.array([math.cos(angle) * ring, math.sin(angle) * ring], dtype=float)
+    
+    # Overview Portals in center (0, 0) like Obsidian constellation
+    centers: dict[str, np.ndarray] = {}
+    center_hub = "종합 위키 포털 (Overview Portals)"
+    outer_themes = [t for t in uniq if t != center_hub]
+    if center_hub in uniq:
+        centers[center_hub] = np.array([0.0, 0.0], dtype=float)
+    
+    ring = max(2.8, 2.2 + 0.35 * len(outer_themes))
+    for idx, theme in enumerate(outer_themes):
+        angle = (2.0 * math.pi * idx) / max(1, len(outer_themes))
+        centers[theme] = np.array([math.cos(angle) * ring, math.sin(angle) * ring], dtype=float)
     return centers
 
 
@@ -550,17 +574,16 @@ def _layout_large_nodes(nodes: list[dict[str, Any]], *, focus_surface: str, sele
 def _layout_nodes(nodes: list[dict[str, Any]], edges: list[WikiGraphEdge], *, focus_surface: str, selected_id: str) -> dict[str, tuple[float, float]]:
     if not nodes:
         return {}
-    if len(nodes) > LARGE_GRAPH_LAYOUT_THRESHOLD:
-        return _layout_large_nodes(nodes, focus_surface=focus_surface, selected_id=selected_id)
-    surfaces = [str(node.get("surface") or WIKI_SURFACE).lower() for node in nodes]
-    centers = _cluster_centers(surfaces, focus_surface)
+    from agent_console import wiki as core_wiki
+    themes = [core_wiki._index_category(node) for node in nodes]
+    centers = _theme_cluster_centers(themes)
     seed = sum(ord(ch) for ch in f"{focus_surface}|{selected_id}|{len(nodes)}")
     rng = np.random.default_rng(seed)
     positions = np.zeros((len(nodes), 2), dtype=float)
     node_index = {str(node["id"]): idx for idx, node in enumerate(nodes)}
     for idx, node in enumerate(nodes):
-        surface = str(node.get("surface") or WIKI_SURFACE).lower()
-        center = centers.get(surface, np.array([0.0, 0.0], dtype=float))
+        theme = core_wiki._index_category(node)
+        center = centers.get(theme, np.array([0.0, 0.0], dtype=float))
         positions[idx] = center + rng.normal(scale=0.45, size=2)
         if str(node.get("id") or "") == selected_id:
             positions[idx] = np.array([0.0, 0.0], dtype=float)
@@ -688,22 +711,25 @@ def build_wiki_graph_model(
     ordered_edges = list(edges.values())
     focus_surface = surface if surface != "all" else ""
     positions = _layout_nodes(nodes, ordered_edges, focus_surface=focus_surface, selected_id=selected_id)
+    from agent_console import wiki as core_wiki
     groups: list[dict[str, Any]] = []
-    by_surface: dict[str, list[dict[str, Any]]] = defaultdict(list)
+    by_theme: dict[str, list[dict[str, Any]]] = defaultdict(list)
     for node in nodes:
-        by_surface[str(node.get("surface") or WIKI_SURFACE).lower()].append(node)
-    for group_surface in _ordered_surfaces(list(by_surface), focus_surface):
-        group_nodes = by_surface.get(group_surface) or []
-        coords = [positions.get(node["id"]) for node in group_nodes if positions.get(node["id"]) is not None]
+        by_theme[core_wiki._index_category(node)].append(node)
+    for theme_name, theme_nodes in sorted(by_theme.items(), key=lambda x: -len(x[1])):
+        coords = [positions.get(node["id"]) for node in theme_nodes if positions.get(node["id"]) is not None]
         centroid = (
             float(sum(pt[0] for pt in coords) / len(coords)) if coords else 0.0,
             float(sum(pt[1] for pt in coords) / len(coords)) if coords else 0.0,
         )
+        color = THEME_COLORS.get(theme_name, "#94a3b8")
+        # Short clean label for annotation
+        short_label = theme_name.split(" (")[0]
         groups.append({
-            "surface": group_surface,
-            "label": _surface_label(group_surface),
-            "count": len(group_nodes),
-            "color": _surface_color(group_surface),
+            "surface": theme_name,
+            "label": short_label,
+            "count": len(theme_nodes),
+            "color": color,
             "centroid": centroid,
         })
     return {
@@ -887,7 +913,9 @@ def _build_figure(model: dict[str, Any]) -> go.Figure:
         size = 11 + min(12, node.get("degree", 0) * 1.8)
         if node.get("selected"):
             size += 8
-        fill_color = node.get("surface_color") or _surface_color(node.get("surface") or WIKI_SURFACE)
+        from agent_console import wiki as core_wiki
+        theme_cat = core_wiki._index_category(node)
+        fill_color = THEME_COLORS.get(theme_cat, "#38bdf8")
         hover = _node_hover(node)
         label = _clean(node.get("title") or "", 18)
         if node["id"] in label_ids:
@@ -1109,13 +1137,13 @@ def render_wiki_mesh(
     if legend_bits:
         st.markdown(
             "<div style='margin:0 0 6px 0;color:rgba(226,232,240,.88);font-size:.82rem;'>"
-            + "surface 그룹: "
+            + "지식 테마별 군집: "
             + "".join(legend_bits)
             + "</div>",
             unsafe_allow_html=True,
         )
     stat_col.caption(f"{len(nodes)} nodes · {len(model.get('edges') or [])} links · {len(groups)} groups · surface {surface} · status {status}")
-    st.caption("모든 위키 페이지를 노드로 표시합니다. 점을 클릭하면 해당 문서가 읽기 패널로 열립니다.")
+    st.caption("✨ 옵시디언(Obsidian) 스타일의 연결형 지식 그래프입니다. 중앙 포털 및 테마별 성단(Cluster)으로 유기적으로 연결되어 있으며, 노드를 클릭하면 해당 위키 문서가 바로 열립니다.")
 
     fig = _build_figure({**model, "selected_id": selected_page_id})
     event = st.plotly_chart(

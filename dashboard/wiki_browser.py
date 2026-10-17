@@ -964,12 +964,22 @@ def render_wiki_tab(surface: str, pack: dict[str, Any] | None = None) -> None:
         index=surface_index,
         key="agent_wiki_surface_filter",
     )
-    status_filter = f3.selectbox(
+    # Obsidian 스타일의 활성 지식망 우선: 보관(archived)된 과거 문서는 분리하고 활성 지식을 기본 노출
+    status_options = ["활성 위키 (전체)", "초안 (draft)", "검토완료 (reviewed)", "안정 (stable)", "보관 (archived)"]
+    status_map = {
+        "활성 위키 (전체)": "active",
+        "초안 (draft)": "draft",
+        "검토완료 (reviewed)": "reviewed",
+        "안정 (stable)": "stable",
+        "보관 (archived)": "archived",
+    }
+    status_sel = f3.selectbox(
         "상태",
-        statuses,
+        status_options,
         index=0,
-        key="agent_wiki_status_filter",
+        key="agent_wiki_status_filter_ui",
     )
+    status_filter = status_map.get(status_sel, "active")
 
     selected_page_id = st.session_state.get("agent_wiki_selected_page_id", "")
     graph_selected = wiki_mesh.render_wiki_mesh(
