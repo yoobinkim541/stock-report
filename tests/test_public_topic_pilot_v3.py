@@ -177,7 +177,9 @@ def test_uncertain_history_never_becomes_zero_allowance(authorized, damage, tmp_
         other.write_bytes(path.read_bytes())
         path.unlink()
         path.symlink_to(other)
-    if guard != env["guard"]:
+    # Compare serialized bytes: True == 1 and 1.0 == 1 in Python, so a dict
+    # comparison would silently skip writing type-only damage.
+    if encoded(guard) != encoded(env["guard"]):
         put(env["guard_path"], guard)
     before = inventory(tmp_path)
     assert inspect(env)["status"] == "needs_review"
