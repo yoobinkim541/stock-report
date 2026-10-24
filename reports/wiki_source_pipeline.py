@@ -23,10 +23,60 @@ def _mode_enabled() -> bool:
     return os.getenv("WIKI_SOURCE_PIPELINE_ENABLED", "0") == "1"
 
 
+def _public_v3_enabled() -> bool:
+    return (os.getenv("AGENT_CONSOLE_PUBLIC_TOPIC_BOOTSTRAP_ENABLED", "0") == "1"
+            and os.getenv("AGENT_CONSOLE_PUBLIC_SOURCE_NOTES_V3_ENABLED", "0") == "1")
+
+
+def _public_topic_operations(journal: Journal) -> list[dict]:
+    """Validate each directory's version before any proposal/dependency access."""
+    receipts = []
+    for directory, version, loader in (
+            ("topic-operations", 2, journal.load_topic_operation),
+            ("topic-operations-v3", 3, journal.load_topic_operation_v3)):
+        for path in sorted((journal.root / directory).glob("*.json")):
+            receipt = loader(path.stem)
+            if (receipt is None or type(receipt.get("schema_version")) is not int
+                    or receipt["schema_version"] != version
+                    or type(receipt["batch"].get("protocol_version")) is not int
+                    or receipt["batch"]["protocol_version"] != version):
+                raise ValueError("topic_protocol_invalid")
+            receipts.append(receipt)
+    return receipts
+
+
+def _recover_public_topic(receipt: dict, *, journal: Journal, now: datetime) -> dict:
+    version = receipt.get("schema_version")
+    if type(version) is int and version == 3:
+        if not _public_v3_enabled():
+            return {"enabled": False}
+        from reports.wiki_topic_transaction_v3 import recover_topic_operation_v3
+        return recover_topic_operation_v3(receipt["operation_id"], journal=journal, now=now)
+    if type(version) is int and version == 2:
+        from reports.wiki_topic_transaction import recover_topic_operation
+        return recover_topic_operation(receipt["operation_id"], journal=journal, now=now)
+    raise ValueError("topic_protocol_invalid")
+
+
+def _public_topic_for_source(source: dict, journal: Journal) -> dict | None:
+    matches = [receipt for receipt in _public_topic_operations(journal)
+               if receipt["stage"] in {"prepared", "applied", "committed"}
+               and receipt["batch"]["proposal"]["revision_id"] == source["revision_id"]
+               and receipt["batch"]["proposal"]["role"] == source.get("role", "support")]
+    return next((receipt for receipt in matches if receipt["stage"] == "committed"),
+                next(iter(matches), None))
+
+
 def run_public_topic(source: dict, *, journal: Journal, llm_fn,
-                     reserved_revision_id: str, now: datetime) -> dict:
+                     reserved_revision_id: str, now: datetime,
+                     context_mode="legacy_pages", note_ids=None) -> dict:
     """Reserved public stage; call only after the legacy source lock is released."""
     if os.getenv("AGENT_CONSOLE_PUBLIC_TOPIC_BOOTSTRAP_ENABLED", "0") != "1":
+        return {"enabled": False}
+    if context_mode not in {"legacy_pages", "source_note_snapshot"}:
+        raise ValueError("topic_context_mode_invalid")
+    snapshot = context_mode == "source_note_snapshot"
+    if snapshot and not _public_v3_enabled():
         return {"enabled": False}
     from scripts.run_public_wiki_pilot import source_allowed as is_public, validate_public_targets
     from scripts.run_public_wiki_rollout import public_revisions
@@ -36,26 +86,46 @@ def run_public_topic(source: dict, *, journal: Journal, llm_fn,
 
     if source.get("revision_id") != reserved_revision_id:
         raise ValueError("unreserved_source")
+    receipt = _public_topic_for_source(source, journal)
+    if receipt and receipt["schema_version"] == 3:
+        return {"enabled": True, **_recover_public_topic(receipt, journal=journal, now=now)}
     if not is_public(source):
         raise ValueError("private_source_disallowed")
-    for path in sorted((journal.root / "topic-operations").glob("*.json")):
-        receipt = journal.load_topic_operation(path.stem)
-        if (receipt["batch"]["proposal"]["revision_id"] == reserved_revision_id
-                and receipt["batch"]["proposal"]["role"] == source["role"]):
-            if receipt["stage"] in {"prepared", "applied", "committed"}:
-                return {"enabled": True, **recover_topic_operation(path.stem, journal=journal, now=now)}
+    if receipt:
+        return {"enabled": True, **_recover_public_topic(receipt, journal=journal, now=now)}
+    if snapshot and (type(note_ids) is not list or any(type(item) is not str for item in note_ids)):
+        raise ValueError("snapshot_note_ids_invalid")
     verified, compiled, _ = _verified_source(journal, reserved_revision_id, now)
     verified["role"] = source["role"]
     rows = shared_memory.inspect_records()
-    context = select_topic_context(compiled, journal=journal, records=rows, now=now, surface="market")
+    if snapshot:
+        from reports.wiki_topic_snapshot_context import select_snapshot_context
+        context = select_snapshot_context(compiled, note_ids=note_ids, journal=journal, now=now, surface="market")
+        verified["observed_evidence_ids"] = source["observed_evidence_ids"]
+    else:
+        context = select_topic_context(compiled, journal=journal, records=rows, now=now, surface="market")
     if not context["notes"]:
         return {"enabled": True, "stage": "insufficient_context"}
     state = discover_targets(compiled, surface="market")
     targets = [hydrate_target(identity) for identity in state["candidate_ids"]]
     targets = [snap for snap in targets if snap["page"]["kind"] == "concept"]
     validate_public_targets(targets, journal, public_revisions(journal))
-    proposal = propose_topic_integration(compiled, verified, context, targets,
-        llm_fn=llm_fn, journal=journal, records=rows, now=now)
+    if snapshot:
+        from reports.wiki_topic_v3 import propose_topic_integration_v3
+        from reports.wiki_topic_transaction_v3 import prepare_topic_batch_v3, recover_topic_operation_v3
+        from scripts.run_public_wiki_rollout import checked_topic_provider
+        # Pins remain local through the real process callback; its engine accepts
+        # only the exact checked prompt, not these callback keywords.
+        checked = checked_topic_provider(
+            lambda prompt: llm_fn(prompt, context_mode=context_mode, pinned_context=deepcopy(context)),
+            journal=journal, reserved_revision_id=reserved_revision_id, now=now,
+            context_mode=context_mode, pinned_context=context)
+        proposal = propose_topic_integration_v3(compiled, verified, context, targets,
+            llm_fn=checked, journal=journal, records=rows, now=now)
+        prepare_topic_batch, recover_topic_operation = prepare_topic_batch_v3, recover_topic_operation_v3
+    else:
+        proposal = propose_topic_integration(compiled, verified, context, targets,
+            llm_fn=llm_fn, journal=journal, records=rows, now=now)
     if proposal["refusal"]:
         return {"enabled": True, "stage": "refused"}
     batch = prepare_topic_batch(proposal, journal=journal, records=rows, now=now)

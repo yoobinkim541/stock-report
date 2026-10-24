@@ -161,9 +161,9 @@ def plan_status(path, *, candidates, limit=5):
             'quota': budget}
 
 
-def public_revisions(journal):
+def public_revisions(journal, *, excluded=()):
     return {path.stem for path in (journal.root / 'sources').glob('*.json')
-            if is_public(journal.load_source(path.stem)['source'])}
+            if path.stem not in excluded and is_public(journal.load_source(path.stem)['source'])}
 
 
 def _topic_stage_path(source, journal):
@@ -175,7 +175,19 @@ def _topic_stage_path(source, journal):
 
 def _read_topic_stage(path):
     data = json.loads(path.read_text())
-    if (type(data) is not dict or set(data) != {'revision_id', 'role', 'state'}
+    if type(data) is not dict:
+        raise ValueError('topic_stage_corrupt')
+    if 'schema_version' in data:
+        if (type(data['schema_version']) is not int or data['schema_version'] != 3
+                or set(data) != {'schema_version', 'revision_id', 'role', 'state', 'context_mode', 'note_ids'}
+                or data['context_mode'] != 'source_note_snapshot'
+                or type(data['note_ids']) is not list
+                or any(type(identity) is not str or not re.fullmatch(r'[a-f0-9]{64}', identity)
+                       for identity in data['note_ids'])):
+            raise ValueError('topic_stage_corrupt')
+    elif set(data) != {'revision_id', 'role', 'state'}:
+        raise ValueError('topic_stage_corrupt')
+    if (type(data['revision_id']) is not str or not re.fullmatch(r'[a-f0-9]{64}', data['revision_id'])
             or data['state'] not in {'pending', 'failed', 'done'}
             or data['role'] not in {'support', 'conflict'}
             or path.name != f"{data['revision_id']}-{data['role']}.json"):
@@ -184,6 +196,17 @@ def _read_topic_stage(path):
 
 
 def pending_public_source(source, journal):
+    topic_enabled = os.getenv('AGENT_CONSOLE_PUBLIC_TOPIC_BOOTSTRAP_ENABLED', '0') == '1'
+    receipt = pipeline._public_topic_for_source(source, journal)
+    if receipt and (receipt['schema_version'] == 3 or topic_enabled):
+        return False
+    if source.get('context_mode') == 'source_note_snapshot' and not pipeline._public_v3_enabled():
+        return False
+    path = (_topic_stage_path(source, journal)
+            if topic_enabled or source.get('role', 'support') in {'support', 'conflict'} else None)
+    stage = _read_topic_stage(path) if path is not None and path.exists() else None
+    if stage and stage.get('schema_version') == 3 and not pipeline._public_v3_enabled():
+        return False
     receipt = journal.load_source(source['revision_id'])
     if receipt and receipt['compile_state'] == 'skipped':
         return False
@@ -191,8 +214,7 @@ def pending_public_source(source, journal):
         return True
     if os.getenv('AGENT_CONSOLE_PUBLIC_TOPIC_BOOTSTRAP_ENABLED', '0') != '1':
         return False
-    path = _topic_stage_path(source, journal)
-    return not path.exists() or _read_topic_stage(path)['state'] in {'pending', 'failed'}
+    return stage is None or stage['state'] in {'pending', 'failed'}
 
 
 def resume_topic_sources(journal, now):
@@ -204,17 +226,30 @@ def resume_topic_sources(journal, now):
         stage = _read_topic_stage(path)
         if stage['state'] == 'done':
             continue
+        if pipeline._public_topic_for_source(stage, journal):
+            continue
+        if (stage.get('schema_version') == 3
+                and os.getenv('AGENT_CONSOLE_PUBLIC_SOURCE_NOTES_V3_ENABLED', '0') != '1'):
+            continue
         try:
             source, _, receipt = _verified_source(journal, stage['revision_id'], now)
             evidence = receipt['evidence_by_role'][stage['role']]
-            sources.append({**source, 'role': stage['role'], 'observed_evidence_ids': evidence})
+            local = ({'context_mode': stage['context_mode'], 'note_ids': stage['note_ids']}
+                     if stage.get('schema_version') == 3 else {})
+            sources.append({**source, 'role': stage['role'], 'observed_evidence_ids': evidence, **local})
         except (ValueError, KeyError, TypeError, OSError, UnicodeError):
             reasons.append('topic_resume_unavailable')
     return sources, reasons
 
 
-def validate_topic_prompt(data, *, journal, reserved_revision_id, now):
+def validate_topic_prompt(data, *, journal, reserved_revision_id, now,
+                          context_mode="legacy_pages", pinned_context=None):
     """Bind the final provider envelope to current public archive/store evidence."""
+    if context_mode == "source_note_snapshot":
+        return _validate_snapshot_topic_prompt(data, journal=journal,
+            reserved_revision_id=reserved_revision_id, now=now, pinned_context=pinned_context)
+    if context_mode != "legacy_pages":
+        raise ValueError('topic_context_mode_invalid')
     from agent_console import shared_memory, wiki
     from reports.wiki_topic_context import _note, _verified_source, revalidate_topic_context, topic_context_model_input
     from reports.wiki_topic_integration import _evidence, _prompt_target
@@ -253,16 +288,108 @@ def validate_topic_prompt(data, *, journal, reserved_revision_id, now):
         raise ValueError('topic_prompt_invalid') from exc
 
 
-def process(source, events, journal, attempt):
-    if not is_public(source):
-        raise ValueError('private_source_disallowed')
+def _validate_snapshot_topic_prompt(data, *, journal, reserved_revision_id, now, pinned_context):
+    from agent_console import wiki
+    from reports.wiki_topic_snapshot_context import _same, revalidate_snapshot_context
+    from reports.wiki_topic_v3 import (
+        snapshot_topic_envelope, verified_current_v3, verified_targets_v3,
+    )
+    try:
+        if (type(data) is not dict or set(data) != {'compiled', 'source_map', 'editable_topics',
+                                                  'read_only_source_context', 'surface'}
+                or data['compiled']['revision_id'] != reserved_revision_id
+                or data['surface'] != 'market' or pinned_context is None):
+            raise ValueError('topic_prompt_invalid')
+        revalidate_snapshot_context(pinned_context, journal=journal, now=now)
+        receipt = journal.load_source(reserved_revision_id)
+        source = {**receipt['source'], 'role': 'support',
+                  'observed_evidence_ids': receipt['observed_evidence_ids']}
+        # The final envelope is role-independent, but new use still requires a
+        # retained role and observed IDs. No model field supplies this authority.
+        roles = receipt['evidence_by_role']
+        source['role'] = next(role for role in ('support', 'conflict') if roles.get(role))
+        source['observed_evidence_ids'] = roles[source['role']]
+        compiled = journal.load_compilation(receipt)
+        from reports.wiki_topic_context import _verified_source
+        source_with_body, _, _ = _verified_source(journal, reserved_revision_id, now)
+        source['body'] = source_with_body['body']
+        compiled, source = verified_current_v3(compiled, source, journal=journal, now=now)
+        rows = shared_memory.inspect_records()
+        targets = [wiki.semantic_snapshot(target['page_id'], records=rows)
+                   for target in data['editable_topics']]
+        targets = verified_targets_v3(targets, journal=journal, records=rows, now=now)
+        expected = snapshot_topic_envelope(compiled, source, pinned_context, targets)
+        if not _same(data, expected):
+            raise ValueError('topic_prompt_changed')
+        return reserved_revision_id
+    except (KeyError, TypeError, OSError, UnicodeError, StopIteration) as exc:
+        raise ValueError('topic_prompt_invalid') from exc
+
+
+def checked_topic_provider(llm_fn, *, journal, reserved_revision_id, now,
+                           context_mode="legacy_pages", pinned_context=None):
+    """Local-only pin closure; accepts matching v3 callback keywords.
+
+    ``now`` may be a clock callable for fresh use. The underlying provider gets
+    only the canonical prompt string, never the local mode or pins.
+    """
+    from copy import deepcopy
+    from reports.wiki_topic_snapshot_context import _same
+    from reports.wiki_topic_v3 import snapshot_topic_prompt, strict_topic_json
+    bound_mode = context_mode
+    pins = deepcopy(pinned_context)
+
+    def checked(prompt, *, context_mode=bound_mode, pinned_context=pins):
+        if context_mode != bound_mode or not _same(pinned_context, pins):
+            raise ValueError('topic_prompt_changed')
+        if type(prompt) is not str or not prompt.startswith('Propose append-only draft topic synthesis.'):
+            raise ValueError('topic_prompt_invalid')
+        data = strict_topic_json(prompt.rsplit('\n', 1)[-1])
+        if context_mode == 'source_note_snapshot' and prompt != snapshot_topic_prompt(data):
+            raise ValueError('topic_prompt_changed')
+        validate_topic_prompt(data, journal=journal, reserved_revision_id=reserved_revision_id,
+            now=now() if callable(now) else now, context_mode=context_mode, pinned_context=pins)
+        return llm_fn(prompt)
+    return checked
+
+
+def process(source, events, journal, attempt, *, context_mode="legacy_pages", note_ids=None):
     identity = source['revision_id']
+    receipt = pipeline._public_topic_for_source(source, journal)
+    if not (receipt and receipt['schema_version'] == 3) and not is_public(source):
+        raise ValueError('private_source_disallowed')
     if attempt.get('revision_id') != identity:
         raise ValueError('unreserved_source')
+    if context_mode not in {'legacy_pages', 'source_note_snapshot'}:
+        raise ValueError('topic_context_mode_invalid')
+    if (context_mode == 'source_note_snapshot'
+            and (os.getenv('AGENT_CONSOLE_PUBLIC_SOURCE_NOTES_V3_ENABLED', '0') != '1'
+                 or os.getenv('AGENT_CONSOLE_PUBLIC_TOPIC_BOOTSTRAP_ENABLED', '0') != '1')):
+        return {'topic': {'enabled': False}}
     topic_enabled = os.getenv('AGENT_CONSOLE_PUBLIC_TOPIC_BOOTSTRAP_ENABLED', '0') == '1'
+    if receipt and receipt['schema_version'] == 3 and not pipeline._public_v3_enabled():
+        return {'topic': {'enabled': False}}
+    if topic_enabled and receipt:
+        topic = pipeline._recover_public_topic(receipt, journal=journal, now=datetime.now(timezone.utc))
+        return {'topic': {'enabled': True, **topic},
+                'effects_pending': int(any(value != 'done' for value in topic.get('effects', {}).values()))}
+    stage_path = (_topic_stage_path(source, journal)
+                  if source.get('role', 'support') in {'support', 'conflict'} else None)
+    existing_stage = _read_topic_stage(stage_path) if stage_path is not None and stage_path.exists() else None
+    if existing_stage and existing_stage.get('schema_version') == 3:
+        if not pipeline._public_v3_enabled():
+            return {'topic': {'enabled': False}}
+        if context_mode != 'source_note_snapshot':
+            raise ValueError('topic_context_mode_changed')
     if topic_enabled:
+        if context_mode == 'source_note_snapshot' and (
+                type(note_ids) is not list or any(type(note) is not str or not re.fullmatch(r'[a-f0-9]{64}', note)
+                                                for note in note_ids)):
+            raise ValueError('snapshot_note_ids_invalid')
         stage_path = _topic_stage_path(source, journal)
         stage = {'revision_id': identity, 'role': source.get('role', 'support'), 'state': 'pending'}
+        if context_mode == 'source_note_snapshot':
+            stage.update(schema_version=3, context_mode=context_mode, note_ids=list(note_ids))
         safe_io.atomic_write_json(str(stage_path), stage)
     calls = []
     original_targets, original_journal = pipeline.discover_targets, pipeline.Journal
@@ -270,14 +397,21 @@ def process(source, events, journal, attempt):
     original_qmd = os.environ.get('AGENT_CONSOLE_QMD_ENABLED')
     def allowed_targets():
         return public_target_ids(journal, public_revisions(journal))
-    def llm(prompt):
+    def llm(prompt, *, context_mode="legacy_pages", pinned_context=None):
         if prompt.startswith('Compile'):
             data = json.loads(prompt.split('\nBEGIN UNTRUSTED SOURCE TEXT\n', 1)[0].splitlines()[-1])
             parent = data.get('chunk_parent_revision_id') or data['revision_id']
         elif prompt.startswith('Propose append-only draft topic synthesis.'):
-            data = json.loads(prompt.rsplit('\n', 1)[1])
+            if context_mode == 'source_note_snapshot':
+                from reports.wiki_topic_v3 import snapshot_topic_prompt, strict_topic_json
+                data = strict_topic_json(prompt.rsplit('\n', 1)[1])
+                if prompt != snapshot_topic_prompt(data):
+                    raise ValueError('topic_prompt_changed')
+            else:
+                data = json.loads(prompt.rsplit('\n', 1)[1])
             parent = validate_topic_prompt(data, journal=journal,
-                                           reserved_revision_id=identity, now=datetime.now(timezone.utc))
+                reserved_revision_id=identity, now=datetime.now(timezone.utc),
+                context_mode=context_mode, pinned_context=pinned_context)
         else:
             data = json.loads(prompt.rsplit('\n', 1)[1])
             parent = data['compiled']['revision_id']
@@ -289,6 +423,8 @@ def process(source, events, journal, attempt):
         safe_io.atomic_write_json(str(journal.root / 'automatic-attempts' / (attempt['id'] + '.json')),
                                   {'reservation': attempt, 'model_calls': calls, 'stage': 'running'})
         print(json.dumps({'phase': calls[-1]['phase'], 'revision_id': identity}), flush=True)
+        if context_mode == 'source_note_snapshot' and prompt.startswith('Propose append-only draft topic synthesis.'):
+            return structured_llm_call(prompt)
         return structured_llm_call(
             'Use only supplied evidence. Preserve attribution and uncertainty. '
             'Do not use tools, read files, browse or load memories. Return only requested JSON.\n' + prompt)
@@ -307,7 +443,8 @@ def process(source, events, journal, attempt):
                             ('compile_failed', 'routing_pending', 'effects_pending', 'stale_base'))):
             try:
                 topic = pipeline.run_public_topic(source, journal=journal, llm_fn=llm,
-                    reserved_revision_id=identity, now=datetime.now(timezone.utc))
+                    reserved_revision_id=identity, now=datetime.now(timezone.utc),
+                    context_mode=context_mode, note_ids=note_ids)
                 result['topic'] = topic
                 if (topic.get('stage') in {'stale-base', 'failed'}
                         or any(value != 'done' for value in topic.get('effects', {}).values())):
@@ -317,7 +454,9 @@ def process(source, events, journal, attempt):
                 result['topic'] = {'enabled': True, 'stage': 'failed', 'reason': code}
                 result['topic_failed'] = 1
             deferred = result['topic'].get('stage') == 'insufficient_context'
-            stage['state'] = 'failed' if result.get('topic_failed') else ('pending' if deferred else 'done')
+            effects_pending = result['topic'].get('stage') == 'effects-pending'
+            stage['state'] = ('pending' if effects_pending else
+                              'failed' if result.get('topic_failed') else 'pending' if deferred else 'done')
             safe_io.atomic_write_json(str(stage_path), stage)
     finally:
         pipeline.discover_targets, pipeline.Journal = original_targets, original_journal
@@ -359,6 +498,24 @@ def _run_batch(args, journal, budget_path, now, batch):
                           'discovery': discovery_stats}))
         return 0
     with safe_io.file_write_lock(str(journal.root / 'automatic-run')):
+        topic_recovery = []
+        topic_receipts = pipeline._public_topic_operations(journal)
+        # Existing operations already own their attempt. Recovery, including a
+        # stale retry, must not fall through to fresh selection in this batch.
+        reserved_v3_revisions = {receipt['batch']['proposal']['revision_id'] for receipt in topic_receipts
+                                if receipt['schema_version'] == 3 and receipt['stage'] in {'prepared', 'applied', 'committed'}}
+        reserved_topic_keys = {(receipt['batch']['proposal']['revision_id'], receipt['batch']['proposal']['role'])
+                               for receipt in topic_receipts if receipt['stage'] in {'prepared', 'applied', 'committed'}
+                               and (receipt['schema_version'] == 3 or os.getenv(
+                                   'AGENT_CONSOLE_PUBLIC_TOPIC_BOOTSTRAP_ENABLED', '0') == '1')}
+        if os.getenv('AGENT_CONSOLE_PUBLIC_TOPIC_BOOTSTRAP_ENABLED', '0') == '1':
+            for receipt in topic_receipts:
+                if receipt['schema_version'] == 3 and not pipeline._public_v3_enabled():
+                    continue
+                if (receipt['stage'] in {'prepared', 'applied', 'committed'}
+                        and (receipt['stage'] != 'committed' or any(
+                            receipt[key] != 'done' for key in ('artifacts', 'search', 'log')))):
+                    topic_recovery.append(pipeline._recover_public_topic(receipt, journal=journal, now=now))
         backup = journal.root / 'backups' / (now.strftime('%Y%m%dT%H%M%S%fZ') + '-events.jsonl')
         backup.parent.mkdir(parents=True, exist_ok=True)
         with shared_memory._events_lock():
@@ -366,9 +523,13 @@ def _run_batch(args, journal, budget_path, now, batch):
             if Path(events_path).exists():
                 shutil.copyfile(events_path, backup)
         known = {(source['revision_id'], source.get('role', 'support')) for source in candidates}
-        resumed, reasons = pipeline._resume_compilations(journal, now, known, public_revisions(journal))
+        available_revisions = (public_revisions(journal, excluded=reserved_v3_revisions)
+                               if reserved_v3_revisions else public_revisions(journal))
+        resumed, reasons = pipeline._resume_compilations(journal, now, known,
+            available_revisions)
         by_id = {(source['revision_id'], source.get('role', 'support')): source
-                 for source in [*resumed, *candidates, *topic_sources] if is_public(source)}
+                 for source in [*resumed, *candidates, *topic_sources] if is_public(source)
+                 and (source['revision_id'], source.get('role', 'support')) not in reserved_topic_keys}
         # Rotate failed/deferred attempts behind untouched sources; a poison source
         # cannot monopolize every unattended batch.
         attempted = {}
@@ -386,16 +547,23 @@ def _run_batch(args, journal, budget_path, now, batch):
             attempt = quota.reserve(budget_path, source['revision_id'])
             if attempt is None:
                 break
-            result = process(source, list(relevant_events(source)), journal, attempt)
+            local = ({'context_mode': source['context_mode'], 'note_ids': source['note_ids']}
+                     if source.get('context_mode') == 'source_note_snapshot' else {})
+            result = process(source, list(relevant_events(source)), journal, attempt, **local)
             results.append({'revision_id': source['revision_id'], 'result': result})
             print(json.dumps(results[-1]), flush=True)
         summary = {'attempted': len(results), 'results': results, 'quota': quota.status(budget_path),
                    'discovery': discovery_stats,
                    'resume_unavailable': len(reasons) + len(topic_reasons), 'unrestricted_pipeline_enabled': pipeline._mode_enabled()}
+        if topic_recovery:
+            summary['topic_recovery'] = topic_recovery
         safe_io.atomic_write_json(str(journal.root / 'automatic-latest.json'), summary)
         print(json.dumps(summary), flush=True)
-    return 2 if any(item['result'].get(field, 0) for item in results for field in
-                    ('compile_failed', 'routing_pending', 'effects_pending', 'stale_base', 'topic_failed')) else 0
+    recovery_pending = any(item.get('stage') != 'committed' or any(
+        value != 'done' for value in item.get('effects', {}).values()) for item in topic_recovery)
+    failed = any(item['result'].get(field, 0) for item in results for field in
+                 ('compile_failed', 'routing_pending', 'effects_pending', 'stale_base', 'topic_failed'))
+    return 2 if recovery_pending or failed else 0
 
 
 if __name__ == '__main__':

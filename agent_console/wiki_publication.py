@@ -2,12 +2,14 @@
 from __future__ import annotations
 
 from copy import deepcopy
+import base64
+import binascii
 import hashlib
 import json
 from pathlib import PurePosixPath
 import posixpath
 import re
-from urllib.parse import unquote, urlsplit
+from urllib.parse import parse_qs, unquote, urlsplit
 
 from contextlib import contextmanager
 from pathlib import Path
@@ -35,7 +37,7 @@ def _snapshot_hash(snapshot: dict) -> str:
                              if key != "snapshot_sha256"}))
 
 
-def capture_snapshot() -> dict:
+def capture_snapshot(*, source_note_assets: dict[str, dict] | None = None) -> dict:
     """Read checked canonical wiki rows under the existing store lock, once."""
     with shared_memory._events_lock():
         records = deepcopy([row for row in shared_memory._read_jsonl_checked(
@@ -44,8 +46,116 @@ def capture_snapshot() -> dict:
         snapshot = {"records": records, "captured_at": wiki._now(),
                     "schema_text": schema_text,
                     "schema_sha256": _sha(schema_text.encode("utf-8"))}
+    if source_note_assets is not None:
+        snapshot["source_note_assets"] = deepcopy(source_note_assets)
+        _source_note_files(snapshot["source_note_assets"])
     snapshot["snapshot_sha256"] = _snapshot_hash(snapshot)
     return snapshot
+
+
+def _source_note_files(assets: dict) -> dict[str, bytes]:
+    """Verify detached Task 1 identities, without opening an archive or note."""
+    files = {}
+    identity_keys = {"identity_version", "source_protocol_version", "revision_id", "projection_version",
+                     "canonical_url", "raw_sha256", "text_sha256", "compile_sha256",
+                     "note_json_sha256", "note_md_sha256"}
+    hash_keys = {"manifest_sha256", "raw_sha256", "text_sha256", "compile_sha256",
+                 "note_json_sha256", "note_md_sha256"}
+    try:
+        if type(assets) is not dict:
+            raise ValueError()
+        for note_id, asset in assets.items():
+            _generation_id(note_id)
+            if (type(asset) is not dict or set(asset) != {"note_id", "note_hashes", "note_assets"}
+                    or asset["note_id"] != note_id or type(asset["note_hashes"]) is not dict
+                    or set(asset["note_hashes"]) != hash_keys or type(asset["note_assets"]) is not dict
+                    or set(asset["note_assets"]) != {"note_json_bytes", "note_md_bytes", "manifest_bytes"}
+                    or any(type(value) is not str for value in asset["note_assets"].values())):
+                raise ValueError()
+            decoded = {key: base64.b64decode(value, validate=True) for key, value in asset["note_assets"].items()}
+            manifest = json.loads(decoded["manifest_bytes"])
+            note = json.loads(decoded["note_json_bytes"])
+            _check_source_note(note)
+            identity = {key: manifest[key] for key in identity_keys}
+            hashes = asset["note_hashes"]
+            if (set(manifest) != identity_keys | {"schema_version", "note_id"}
+                    or manifest["note_id"] != note_id or _sha(_json_bytes(identity)) != note_id
+                    or any(type(manifest[key]) is not int for key in
+                           ("schema_version", "identity_version", "source_protocol_version", "projection_version"))
+                    or manifest["schema_version"] != 1 or manifest["identity_version"] != 1
+                    or manifest["source_protocol_version"] != 1
+                    or manifest["projection_version"] != 1
+                    or _json_bytes(manifest) != decoded["manifest_bytes"]
+                    or _json_bytes(note) != decoded["note_json_bytes"]
+                    or any(type(note[key]) is not type(manifest[key]) or note[key] != manifest[key]
+                           for key in ("revision_id", "canonical_url", "projection_version", "source_protocol_version"))
+                    or any(manifest[key] != hashes[key] for key in hash_keys - {"manifest_sha256"})
+                    or any(_sha(decoded[key]) != hashes[digest] for key, digest in (
+                        ("manifest_bytes", "manifest_sha256"), ("note_json_bytes", "note_json_sha256"),
+                        ("note_md_bytes", "note_md_sha256")))):
+                raise ValueError()
+            for digest in hashes.values():
+                _generation_id(digest)
+            heading = f"# {note['title']}\n\n" if note["title"] else ""
+            expected_md = (heading + note["body"] + "\n\n## Retained Source Knowledge\n\n```json\n"
+                           + decoded["note_json_bytes"].decode("utf-8") + "\n```\n").encode("utf-8")
+            if decoded["note_md_bytes"] != expected_md:
+                raise ValueError()
+            files[f"source-notes/{note_id}.json"] = decoded["note_json_bytes"]
+            files[f"source-notes/{note_id}.md"] = decoded["note_md_bytes"]
+    except (KeyError, TypeError, ValueError, UnicodeError, binascii.Error) as exc:
+        raise ValueError("source_note_asset_invalid") from exc
+    return files
+
+
+def _check_source_note(note: dict) -> None:
+    """Check the exact public projection, not fresh source eligibility."""
+    fields = {"revision_id", "canonical_url", "provider", "scope", "provenance_class", "published_at",
+              "collected_at", "projection_version", "source_protocol_version", "title", "body", "claims",
+              "terms", "verified_aliases", "limitations"}
+    claim_fields = {"claim_id", "source_revision_id", "text", "as_of", "scope", "anchor",
+                    "competing_claim_ids", "knowledge_state"}
+
+    def strings(value):
+        if (type(value) is not list or any(type(item) is not str or not item.strip() for item in value)
+                or len(value) != len(set(value))):
+            raise ValueError()
+
+    if (type(note) is not dict or set(note) != fields
+            or any(type(note[key]) is not str for key in fields - {
+                "projection_version", "source_protocol_version", "claims", "terms", "verified_aliases", "limitations"})
+            or any(not note[key].strip() for key in ("body", "provider", "scope", "provenance_class"))
+            or type(note["projection_version"]) is not int or note["projection_version"] != 1
+            or type(note["source_protocol_version"]) is not int or note["source_protocol_version"] != 1
+            or type(note["claims"]) is not list or not note["claims"]):
+        raise ValueError()
+    _generation_id(note["revision_id"])
+    url = urlsplit(note["canonical_url"])
+    if url.scheme not in {"http", "https"} or not url.hostname or url.username or url.password:
+        raise ValueError()
+    for key in ("terms", "verified_aliases", "limitations"):
+        strings(note[key])
+    ids = set()
+    for claim in note["claims"]:
+        if (type(claim) is not dict or set(claim) != claim_fields
+                or claim["source_revision_id"] != note["revision_id"]
+                or claim["knowledge_state"] != "draft"
+                or any(type(claim[key]) is not str or not claim[key].strip() for key in ("text", "as_of", "scope"))):
+            raise ValueError()
+        _generation_id(claim["claim_id"])
+        if claim["claim_id"] in ids:
+            raise ValueError()
+        ids.add(claim["claim_id"])
+        strings(claim["competing_claim_ids"])
+        anchor = claim["anchor"]
+        if anchor is not None and (type(anchor) is not dict or set(anchor) != {"start", "end", "quote"}
+                or type(anchor["start"]) is not int or type(anchor["end"]) is not int
+                or not 0 <= anchor["start"] < anchor["end"] or type(anchor["quote"]) is not str
+                or len(anchor["quote"]) != anchor["end"] - anchor["start"]):
+            raise ValueError()
+    for claim in note["claims"]:
+        if not set(claim["competing_claim_ids"]) <= ids - {claim["claim_id"]}:
+            raise ValueError()
 
 
 def _identities(records: list[dict]) -> dict[str, str]:
@@ -81,7 +191,8 @@ def _check_snapshot(snapshot: dict) -> None:
         raise ValueError("snapshot_hash_mismatch")
 
 
-_WIKI_REFERENCE_RE = re.compile(r"\[\[([^\]\n]+)\]\]")
+_WIKI_REFERENCE_RE = re.compile(
+    r"\[\[((?:[^\[\]\n]|\[[^\[\]\n]*\])+|[^\]\n]+)\]\]")
 _MARKDOWN_CODE_START_RE = re.compile(
     r"^ {0,3}(?P<fence>`{3,}|~{3,})[^\n]*(?:\n|$)|(?<!`)(?P<inline>`+)(?!`)",
     re.MULTILINE)
@@ -121,6 +232,18 @@ def _markdown_chunks(text: str, *, flattened_preview: bool = False) -> list[tupl
 def _markdown_prose(text: str, *, flattened_preview: bool = False) -> str:
     return "".join(" " if is_code else chunk for is_code, chunk in
                    _markdown_chunks(text, flattened_preview=flattened_preview))
+
+
+def _markdown_targets(text: str):
+    from markdown_it import MarkdownIt
+
+    for token in MarkdownIt().parse(text):
+        for child in token.children or []:
+            attribute = 'href' if child.type == 'link_open' else 'src' if child.type == 'image' else None
+            if attribute is not None:
+                target = child.attrGet(attribute)
+                if target is not None:
+                    yield target
 
 
 def _reference_lookup(records: list[dict]) -> tuple[dict, dict]:
@@ -168,9 +291,62 @@ def _export_markdown(text: str, by_id: dict, by_title: dict, stems_by_id: dict,
                        text, flattened_preview=flattened_preview))
 
 
+def _export_source_note_queries(text: str, *, path: str, source_files: dict[str, bytes]) -> str:
+    """Bind viewer queries to paired assets in this export, not a current alias."""
+    if not source_files:
+        return text
+    from markdown_it import MarkdownIt
+
+    parser = MarkdownIt()
+    targets = set(_markdown_targets(text))
+    line_offsets = [0, *(match.end() for match in re.finditer(r"\r\n?|\n", text)), len(text)]
+    code_ranges = [(line_offsets[token.map[0]], line_offsets[token.map[1]])
+                   for token in parser.parse(text) if token.type in {"code_block", "fence"} and token.map]
+    parts = []
+    offset = 0
+    for is_code, chunk in _markdown_chunks(text, flattened_preview=path == "index.md"):
+        chunk_start = offset
+        offset += len(chunk)
+        if is_code:
+            parts.append(chunk)
+            continue
+        replacements = []
+        # Locate destination starts only; MarkdownIt's destination parser handles
+        # escaping/entities/angle brackets, and its parsed targets confirm links.
+        for match in re.finditer(r"\](?:\(|:)[ \t\r\n]*", chunk):
+            destination = parser.helpers.parseLinkDestination(chunk, match.end(), len(chunk))
+            if not destination.ok:
+                continue
+            # A matching prose target does not authorize rewriting a code literal.
+            if any(chunk_start + match.start() < end and chunk_start + destination.pos > start
+                   for start, end in code_ranges):
+                continue
+            target = parser.normalizeLink(destination.str)
+            if target not in targets:
+                continue
+            parsed = urlsplit(target)
+            query = parse_qs(parsed.query, keep_blank_values=True)
+            note_ids, generations = query.get("source_note", []), query.get("generation")
+            if (parsed.scheme or parsed.netloc or parsed.path or len(note_ids) != 1
+                    or not re.fullmatch(r"[0-9a-f]{64}", note_ids[0])
+                    or (generations is not None and (len(generations) != 1
+                        or not re.fullmatch(r"[0-9a-f]{64}", generations[0])))
+                    or any(f"source-notes/{note_ids[0]}.{suffix}" not in source_files for suffix in ("md", "json"))):
+                continue
+            relative = posixpath.relpath(f"source-notes/{note_ids[0]}.md", str(PurePosixPath(path).parent))
+            if chunk[match.end()] == "<":
+                relative = f"<{relative}>"
+            replacements.append((match.end(), destination.pos, relative))
+        for start, end, relative in reversed(replacements):
+            chunk = chunk[:start] + relative + chunk[end:]
+        parts.append(chunk)
+    return "".join(parts)
+
+
 def render_candidate(snapshot: dict) -> dict[str, bytes]:
     """Return all candidate bytes using only supplied, hash-checked inputs."""
     _check_snapshot(snapshot)
+    source_files = _source_note_files(snapshot.get("source_note_assets", {}))
     records = deepcopy(snapshot["records"])
     stems = _identities(records)
     by_id, by_title = _reference_lookup(records)
@@ -197,9 +373,20 @@ def render_candidate(snapshot: dict) -> dict[str, bytes]:
         if body:
             note += "\n## Body\n\n" + body + "\n"
         note = _export_markdown(note, by_id, by_title, stems_by_id)
+        revisions = {claim.get("source_revision_id") for claim in
+                     (record.get("source_knowledge") or {}).get("claims", [])}
+        citations = []
+        for note_id in sorted(snapshot.get("source_note_assets", {})):
+            metadata = json.loads(source_files[f"source-notes/{note_id}.json"])
+            if metadata["revision_id"] in revisions:
+                citations.append(f"- [Source {metadata['revision_id']}](../source-notes/{note_id}.md)")
+        if citations:
+            note += "\n## Source Notes\n\n" + "\n".join(citations) + "\n"
         note += "\n## Canonical Record\n\n```json\n" + _json_bytes(record).decode("utf-8") + "\n```\n"
         files[f"notes/{stem}.md"] = note
-    result = {name: body.encode("utf-8") for name, body in files.items()}
+    result = {name: (body if name == "schema.md" else _export_source_note_queries(
+        body, path=name, source_files=source_files)).encode("utf-8") for name, body in files.items()}
+    result.update(source_files)
     result["snapshot.json"] = _json_bytes(snapshot)
     return result
 
@@ -280,9 +467,17 @@ def validate_candidate(files: dict[str, bytes]) -> dict:
                     errors.append({"code": "missing_markdown_link", "path": name,
                                    "page_id": stems.get(PurePosixPath(name).stem),
                                    "target_id": stem or target})
-            for target in re.findall(r"\[[^\]\n]*\]\(<?([^\s)>]+)>?(?:\s+[^)]*)?\)", text):
+            for target in _markdown_targets(text):
                 parsed = urlsplit(target)
-                if parsed.scheme or parsed.netloc or not parsed.path:
+                if parsed.scheme or parsed.netloc:
+                    continue
+                query = parse_qs(parsed.query, keep_blank_values=True)
+                if "source_note" in query:
+                    # Valid queries were normalized to relative paired assets.
+                    # Anything left could resolve outside this frozen generation.
+                    errors.append({"code": "unbound_source_note_query", "path": name})
+                    continue
+                if not parsed.path:
                     continue
                 resolved = posixpath.normpath(posixpath.join(
                     str(PurePosixPath(name).parent), unquote(parsed.path)))

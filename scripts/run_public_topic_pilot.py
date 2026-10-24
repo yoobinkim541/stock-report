@@ -1,17 +1,22 @@
-"""One approved two-attempt pilot; default is archive-aware read-only preflight."""
+"""One retained, two-attempt pilot. Missing authorization never initializes it."""
 from __future__ import annotations
 
 import argparse
 from datetime import datetime, timezone
 import json
+import uuid
 
-import safe_io
 from agent_console import agent, shared_memory, wiki
 from reports import raw_archive, wiki_public_budget as quota
+from reports import wiki_topic_pilot_state as pilot
 from reports.wiki_source_journal import Journal
+from reports.wiki_source_notes import pin_source_note
 from reports.wiki_topic_context import _note, _verified_source
 from reports.wiki_topic_integration import propose_topic_integration
-from reports.wiki_topic_transaction import prepare_topic_batch, recover_topic_operation, _commit_record
+from reports.wiki_topic_transaction import prepare_topic_batch, recover_topic_operation
+from reports.wiki_topic_snapshot_context import select_snapshot_context
+from reports.wiki_topic_v3 import propose_topic_integration_v3, strict_topic_json, snapshot_topic_prompt
+from reports.wiki_topic_transaction_v3 import prepare_topic_batch_v3, recover_topic_operation_v3
 from scripts.run_public_wiki_rollout import validate_topic_prompt
 
 APPROVED_REVISIONS = (
@@ -22,14 +27,14 @@ APPROVED_REVISIONS = (
 
 
 def _inspect(journal, revisions, now):
-    if len(revisions) != 3 or len(set(revisions)) != 3:
-        raise ValueError('pilot_revisions_invalid')
     rows = shared_memory.inspect_records()
     notes, dependencies, sources, compiled = [], [], [], []
     for revision in revisions:
         candidates = set()
-        for path in (journal.root / 'operations').glob('*.json'):
-            receipt = journal._read(path)
+        for name in pilot._list(journal, 'operations'):
+            if not name.endswith('.json'):
+                continue
+            receipt = pilot._object(pilot._read(journal, 'operations/' + name))
             if receipt['stage'] == 'committed' and receipt['revision_id'] == revision:
                 candidates.update(receipt['batch']['target_ids'])
         selected = None
@@ -51,156 +56,149 @@ def _inspect(journal, revisions, now):
     return rows, notes, dependencies, sources, compiled
 
 
-def _load(path, revisions):
-    if not path.exists():
-        return {'schema_version': 1, 'revisions': list(revisions), 'attempts': [],
-                'topic_ids': [], 'baseline': None}
-    state = json.loads(path.read_text())
-    if (not isinstance(state, dict) or set(state) != {
-            'schema_version', 'revisions', 'attempts', 'topic_ids', 'baseline'}
-            or state.get('schema_version') != 1 or state.get('revisions') != list(revisions)
-            or type(state.get('attempts')) is not list or len(state['attempts']) > 2):
-        raise ValueError('pilot_state_invalid')
-    if (not isinstance(state['topic_ids'], list)
-            or len(state['topic_ids']) > 1
-            or any(not isinstance(p, str) or not p for p in state['topic_ids'])
-            or (state['baseline'] is not None and not isinstance(state['baseline'], list))):
-        raise ValueError('pilot_state_invalid')
-    for index, attempt in enumerate(state['attempts']):
-        if (not isinstance(attempt, dict)
-                or not {'stage', 'status', 'revision_id', 'reservation'} <= set(attempt)
-                or set(attempt) - {'stage', 'status', 'revision_id', 'reservation', 'operation_id'}
-                or attempt['stage'] != ('seed' if index == 0 else 'followup')
-                or attempt['revision_id'] != revisions[index + 1]
-                or attempt['status'] not in {'interrupted', 'failed', 'refused', 'committed'}
-                or (index and state['attempts'][index - 1]['status'] != 'committed')):
-            raise ValueError('pilot_state_invalid')
-        if attempt['status'] == 'committed' and (
-                not attempt.get('operation_id') or not attempt['reservation']
-                or not state['baseline'] or not state['topic_ids']):
-            raise ValueError('pilot_state_invalid')
-    return state
+def _snapshot_inputs(journal, state, now):
+    sources, compiled, dependencies = [], [], []
+    from reports.wiki_topic_snapshot_context import _candidate
+    for revision in APPROVED_REVISIONS:
+        pin = pin_source_note(state['note_ids'][revision], journal=journal, now=now)
+        if pin['revision_id'] != revision:
+            raise ValueError('pilot_note_revision_changed')
+        dependencies.append(_candidate(pin, 'market')[1])
+        source, compilation, receipt = _verified_source(journal, revision, now)
+        source.update(role='support', observed_evidence_ids=receipt['evidence_by_role']['support'])
+        sources.append(source)
+        compiled.append(compilation)
+    return shared_memory.inspect_records(), dependencies, sources, compiled
 
 
-def _verify_commits(state, journal, rows, budget_path):
-    reservations = [r for day in quota._read(budget_path)['days'].values() for r in day]
-    for attempt in state['attempts']:
-        reservation = attempt['reservation']
-        if reservation is not None and (reservation not in reservations
-                or reservation['revision_id'] != attempt['revision_id']):
-            raise ValueError('pilot_reservation_unverified')
-        if attempt['status'] != 'committed':
-            continue
-        receipt = journal.load_topic_operation(attempt['operation_id'])
-        if (not receipt or receipt['stage'] != 'committed'
-                or receipt['batch']['proposal']['revision_id'] != attempt['revision_id']
-                or receipt['batch']['proposal']['role'] != 'support'
-                or any(receipt[k] != 'done' for k in ('artifacts', 'search', 'log'))
-                or receipt['batch']['target_ids'] != state['topic_ids']
-                or _commit_record(receipt['batch']) not in rows):
-            raise ValueError('pilot_commit_unverified')
-    if state['attempts'] and state['attempts'][-1]['status'] == 'committed':
-        batch = journal.load_topic_operation(state['attempts'][-1]['operation_id'])['batch']
-        if any(wiki._source_fingerprint(pid, rows) != digest
-               for pid, digest in batch['expected_after'].items()):
-            raise ValueError('pilot_topic_changed')
+def _budget(path, now):
+    status = quota.status(path, now)
+    status['limit'] = min(20, status['limit'])
+    return status
 
 
-def run(journal, *, revisions=APPROVED_REVISIONS, now=None, apply=False, llm_fn=None):
-    clock = lambda: now or datetime.now(timezone.utc)
-    state_path = journal.root / 'topic-pilot.json'
+def run(journal, *, revisions=None, now=None, apply=False, llm_fn=None):
+    """Injected provider/time are for synthetic callers; CLI has no overrides.
+
+    Both modes share the exact same state, authorization, intents and budget.
+    Model refusal, failure and process interruption are terminal for this pilot.
+    """
+    clock = lambda: now if now is not None else datetime.now(timezone.utc)
     budget_path = journal.root / 'automatic-budget.json'
+    try:
+        if revisions is not None and tuple(revisions) != APPROVED_REVISIONS:
+            raise ValueError('pilot_revisions_invalid')
+        with pilot.pilot_locks(journal):
+            state, guard, _ = pilot._load_locked(journal)
+            budget = _budget(budget_path, clock())
+            report = pilot._report(state, guard)
+            report.update(quota=budget, topic_ids=state['topic_ids'])
+            if report['status'] != 'ready':
+                return report
+            snapshot = state['schema_version'] == 2
 
-    def execute():
-        state = _load(state_path, revisions)
-        rows, notes, dependencies, sources, compiled = _inspect(journal, revisions, clock())
-        _verify_commits(state, journal, rows, budget_path)
-        budget = quota.status(budget_path, now)
-        result = {'status': 'ready', 'attempts_used': len(state['attempts']), 'quota': budget}
-        if state['baseline'] is not None and state['baseline'] != dependencies:
-            raise ValueError('pilot_originals_changed')
-        if state['attempts'] and state['attempts'][-1]['status'] != 'committed':
-            result['status'] = state['attempts'][-1]['status']
-            return result
-        if len(state['attempts']) == 2:
-            result.update(status='awaiting_semantic_review', topic_ids=state['topic_ids'])
-            return result
-        if budget['count'] >= budget['limit']:
-            result['status'] = 'quota_exhausted'
-            return result
-        if not apply:
-            return result
-        if llm_fn is None:
-            raise ValueError('pilot_backend_required')
-        while len(state['attempts']) < 2:
-            index = len(state['attempts'])
-            rows, notes, dependencies, sources, compiled = _inspect(journal, revisions, clock())
-            if state['baseline'] is not None and state['baseline'] != dependencies:
-                raise ValueError('pilot_originals_changed')
-            source = sources[index + 1]
-            # A durable intent counts against the local two-attempt cap even if
-            # interrupted between the shared reservation and its receipt write.
-            attempt = {'stage': 'seed' if index == 0 else 'followup', 'status': 'interrupted',
-                       'revision_id': source['revision_id'], 'reservation': None}
-            if quota.status(budget_path, now)['count'] >= 20:
-                break
-            state['baseline'] = dependencies
-            state['attempts'].append(attempt)
-            safe_io.atomic_write_json(str(state_path), state)
-            reservation = quota.reserve(budget_path, source['revision_id'], now)
-            if reservation is None:
-                state['attempts'].pop()
-                safe_io.atomic_write_json(str(state_path), state)
-                break
-            attempt['reservation'] = reservation
-            safe_io.atomic_write_json(str(state_path), state)
-            try:
-                context = {'notes': notes[:index + 1], 'dependencies': dependencies[:index + 1], 'omitted': []}
-                targets = [wiki.semantic_snapshot(identity, records=rows) for identity in state['topic_ids']]
-                def checked_model(prompt):
-                    envelope = json.loads(prompt.rsplit('\n', 1)[1])
-                    validate_topic_prompt(envelope, journal=journal,
-                        reserved_revision_id=source['revision_id'], now=clock())
-                    return llm_fn(prompt)
-                proposal = propose_topic_integration(compiled[index + 1], source, context, targets,
-                    llm_fn=checked_model, journal=journal, records=rows, now=clock())
-                if proposal['refusal']:
-                    attempt['status'] = 'refused'
+            def inputs():
+                if snapshot:
+                    rows, dependencies, sources, compiled = _snapshot_inputs(journal, state, clock())
+                    notes = None
                 else:
-                    proposed = proposal['targets']
-                    if (len(proposed) != 1 or (index == 1 and [p['page_id'] for p in proposed] != state['topic_ids'])
-                            or set(proposed[0]['contributing_revision_ids']) - set(revisions[:index + 2])):
-                        raise ValueError('pilot_scope_changed')
-                    batch = prepare_topic_batch(proposal, journal=journal, records=rows, now=clock())
-                    attempt['operation_id'] = batch['operation_id']
-                    safe_io.atomic_write_json(str(state_path), state)
-                    outcome = recover_topic_operation(batch['operation_id'], journal=journal, now=clock())
-                    if outcome['stage'] != 'committed' or any(v != 'done' for v in outcome['effects'].values()):
-                        raise ValueError('pilot_commit_incomplete')
-                    state['topic_ids'] = batch['target_ids']
-                    for identity in state['topic_ids']:
-                        snapshot = wiki.semantic_snapshot(identity)
-                        if ({c['source_revision_id'] for c in snapshot['claims']} != set(revisions[:index + 2])
-                                or snapshot['page']['status'] != 'draft'):
-                            raise ValueError('pilot_acceptance_failed')
-                    if _inspect(journal, revisions, clock())[2] != state['baseline']:
-                        raise ValueError('pilot_originals_changed')
-                    attempt['status'] = 'committed'
-            except Exception:
-                attempt['status'] = 'failed'
-            safe_io.atomic_write_json(str(state_path), state)
-            if attempt['status'] != 'committed':
-                return {'status': attempt['status'], 'attempts_used': len(state['attempts']),
-                        'quota': quota.status(budget_path, now)}
-        _verify_commits(state, journal, shared_memory.inspect_records(), budget_path)
-        return {'status': 'awaiting_semantic_review' if len(state['attempts']) == 2 else 'quota_exhausted',
-                'attempts_used': len(state['attempts']), 'topic_ids': state['topic_ids'],
-                'quota': quota.status(budget_path, now)}
+                    rows, notes, dependencies, sources, compiled = _inspect(journal, APPROVED_REVISIONS, clock())
+                if state['baseline'] is not None and not pilot._same(state['baseline'], dependencies):
+                    raise ValueError('pilot_originals_changed')
+                return rows, notes, dependencies, sources, compiled
 
-    if apply:
-        with safe_io.file_write_lock(str(journal.root / 'automatic-run')):
-            return execute()
-    return execute()
+            inputs()
+            if budget['count'] >= budget['limit']:
+                report['status'] = 'quota_exhausted'
+                return report
+            if not apply:
+                return report
+            if llm_fn is None:
+                raise ValueError('pilot_backend_required')
+            while len(state['attempts']) < 2:
+                index = len(state['attempts'])
+                budget = _budget(budget_path, clock())
+                if budget['count'] >= budget['limit']:
+                    break
+                rows, notes, dependencies, sources, compiled = inputs()
+                source = sources[index + 1]
+                if snapshot:
+                    context = select_snapshot_context(compiled[index + 1], journal=journal, now=clock(),
+                        note_ids=[state['note_ids'][r] for r in APPROVED_REVISIONS[:index + 1]], surface='market')
+                    if (context['omitted'] or {n['revision_id'] for n in context['notes']}
+                            != set(APPROVED_REVISIONS[:index + 1])):
+                        raise ValueError('pilot_context_incomplete')
+                else:
+                    context = {'notes': notes[:index + 1], 'dependencies': dependencies[:index + 1], 'omitted': []}
+                targets = [wiki.semantic_snapshot(identity, records=rows) for identity in state['topic_ids']]
+                attempt = {'stage': 'seed' if index == 0 else 'followup', 'status': 'interrupted',
+                    'revision_id': source['revision_id'], 'reservation': None,
+                    'intent_id': pilot._sha(uuid.uuid4().bytes)}
+                state['baseline'] = dependencies
+                state['attempts'].append(attempt)
+                pilot.persist_pilot_state(journal, state, guard)
+                # An intent survives a crash inside reserve or before its ID
+                # reaches the state. Reconciliation then stops for review.
+                reservation = quota.reserve(budget_path, source['revision_id'], clock(), limit=budget['limit'])
+                if reservation is None:
+                    return {'status': 'interrupted', 'attempts_used': len(state['attempts']),
+                            'quota': _budget(budget_path, clock())}
+                attempt['reservation'] = reservation
+                pilot.persist_pilot_state(journal, state, guard)
+                try:
+                    def checked_model(prompt, *, context_mode='legacy_pages', pinned_context=None):
+                        envelope = strict_topic_json(prompt.rsplit('\n', 1)[1])
+                        if snapshot and prompt != snapshot_topic_prompt(envelope):
+                            raise ValueError('pilot_prompt_changed')
+                        validate_topic_prompt(envelope, journal=journal, reserved_revision_id=source['revision_id'],
+                            now=clock(), context_mode=context_mode, pinned_context=pinned_context)
+                        inputs()
+                        return llm_fn(prompt)
+                    propose = propose_topic_integration_v3 if snapshot else propose_topic_integration
+                    prepare = prepare_topic_batch_v3 if snapshot else prepare_topic_batch
+                    recover = recover_topic_operation_v3 if snapshot else recover_topic_operation
+                    proposal = propose(compiled[index + 1], source, context, targets, llm_fn=checked_model,
+                        journal=journal, records=rows, now=clock())
+                    if proposal['refusal']:
+                        attempt['status'] = 'refused'
+                    else:
+                        proposed = proposal['targets']
+                        contributors = set(APPROVED_REVISIONS[:index + 2])
+                        if (len(proposed) != 1
+                                or (index == 0 and proposed[0]['before_hash'] is not None)
+                                or (index == 1 and [p['page_id'] for p in proposed] != state['topic_ids'])
+                                or set(proposed[0]['contributing_revision_ids']) - contributors
+                                or (index == 0 and set(proposed[0]['contributing_revision_ids']) != contributors)):
+                            raise ValueError('pilot_scope_changed')
+                        inputs()
+                        batch = prepare(proposal, journal=journal, records=rows, now=clock())
+                        attempt.update(operation_id=batch['operation_id'], protocol_version=3 if snapshot else 2)
+                        pilot.persist_pilot_state(journal, state, guard)
+                        outcome = recover(batch['operation_id'], journal=journal, now=clock())
+                        if outcome['stage'] != 'committed' or any(v != 'done' for v in outcome['effects'].values()):
+                            raise ValueError('pilot_commit_incomplete')
+                        state['topic_ids'] = batch['target_ids']
+                        for identity in state['topic_ids']:
+                            topic = wiki.semantic_snapshot(identity)
+                            if ({c['source_revision_id'] for c in topic['claims']} != contributors
+                                    or topic['page']['status'] != 'draft'):
+                                raise ValueError('pilot_acceptance_failed')
+                        inputs()
+                        attempt['status'] = 'committed'
+                except Exception:
+                    attempt['status'] = 'failed'
+                pilot.persist_pilot_state(journal, state, guard)
+                if attempt['status'] != 'committed':
+                    return {'status': attempt['status'], 'attempts_used': len(state['attempts']),
+                            'quota': _budget(budget_path, clock())}
+            state, guard, _ = pilot._load_locked(journal)
+            report = pilot._report(state, guard)
+            if report['status'] == 'ready':
+                report['status'] = 'quota_exhausted'
+            report.update(topic_ids=state['topic_ids'], quota=_budget(budget_path, clock()))
+            return report
+    except pilot._HISTORY_ERRORS as exc:
+        return pilot._review(exc)
 
 
 def main():
@@ -209,8 +207,7 @@ def main():
     args = parser.parse_args()
     journal = Journal(raw_archive.reports_root() / 'public-wiki-pilot-20261013')
     def model(prompt):
-        return agent._try_codex_chat('Use only supplied public evidence; no tools, browsing or memories. '
-            'Return requested JSON only.\n' + prompt, search=False, max_timeout=90,
+        return agent._try_codex_chat(prompt, search=False, max_timeout=90,
             reasoning_effort='medium', structured_output=True)
     result = run(journal, apply=args.apply, llm_fn=model if args.apply else None)
     print(json.dumps(result, ensure_ascii=False))

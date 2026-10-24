@@ -2197,11 +2197,12 @@ def _merge_pages(
         body_parts.append(synthesis)
     merged_body = "\n\n".join(part for part in body_parts if part).strip()
 
-    tags = _dedupe_texts([
+    tags = _dedupe_tags([
         *(target.get("tags") or []),
-        *[tag for page in sources for tag in (page.get("tags") or [])],
+        *[tag for page in sources for tag in (page.get("tags") or [])
+          if not str(tag).startswith(("split_into:", "split_from:", "split_superseded"))],
         *[f"merged_from:{page['id']}" for page in sources],
-    ], limit=20, item_limit=60)
+    ])
     source_refs = shared_memory.normalize_artifact_refs([
         *(target.get("source_refs") or []),
         *[ref for page in sources for ref in (page.get("source_refs") or [])],
@@ -2304,12 +2305,12 @@ def _merge_pages(
             "surface": source.get("surface"),
             "kind": source.get("kind"),
             "status": "archived",
-            "tags": _dedupe_texts([
+            "tags": _dedupe_tags([
                 *(source.get("tags") or []),
                 "archived_reason:merged",
                 f"merged_into:{target_id}",
                 f"merge_event:{event_id}",
-            ], limit=20, item_limit=80),
+            ]),
             "source_refs": source.get("source_refs") or [],
             "links": _clean_links([*(source.get("links") or []), target_id], self_id=source["id"]),
             "messages": source.get("messages") or [],
@@ -2365,7 +2366,11 @@ def _split_page(source_id: str, new_titles: list[str], llm_bodies: list[str]) ->
             "surface": source.get("surface"),
             "kind": source.get("kind"),
             "status": "draft",
-            "tags": _dedupe_tags([*(source.get("tags") or []), f"split_from:{source_id}"]),
+            "tags": _dedupe_tags([
+                *[tag for tag in (source.get("tags") or [])
+                  if not str(tag).startswith(("split_into:", "split_from:", "split_superseded"))],
+                f"split_from:{source_id}",
+            ]),
             "source_refs": source.get("source_refs") or [],
             "evidence_ids": source.get("evidence_ids") or [],
             "conflicting_evidence_ids": source.get("conflicting_evidence_ids") or [],

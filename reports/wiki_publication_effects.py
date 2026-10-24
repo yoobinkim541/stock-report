@@ -33,16 +33,62 @@ def _digest(value) -> str:
 def _receipt(operation_id, journal):
     source = journal._read(journal._path('operations', operation_id))
     topic = journal.load_topic_operation(operation_id)
-    if (source is None) == (topic is None):
+    topic_v3 = journal.load_topic_operation_v3(operation_id)
+    receipts = [value for value in (source, topic, topic_v3) if value is not None]
+    if len(receipts) != 1:
         raise ValueError('publication_operation_ambiguous')
-    receipt = source or topic
+    receipt = receipts[0]
+    _version(receipt)
     if receipt['operation_id'] != operation_id or receipt['stage'] != 'committed':
         raise ValueError('publication_not_committed')
     return receipt
 
 
-def _binding(receipt, journal):
+def _version(receipt):
+    version = receipt.get('schema_version')
+    if type(version) is not int or version not in {1, 2, 3}:
+        raise ValueError('publication_protocol_invalid')
+    return version
+
+
+def _error_code(exc, default='publication_effects_unavailable'):
+    # Exceptions can contain filesystem paths or untrusted source text.
+    allowed = {'publication_target_mismatch', 'topic_commit_witness_mismatch',
+        'publication_receipt_mismatch', 'publication_frozen_proof_unavailable',
+        'source_note_asset_invalid', 'publication_sidecar_mismatch',
+        'publication_snapshot_assets_mismatch', 'publication_snapshot_target_mismatch',
+        'publication_generation_policy_disabled', 'publication_predecessor_changed',
+        'publication_legacy_intent_mismatch', 'invalid_publication_candidate',
+        'topic_journal_corrupt', 'publication_protocol_invalid'}
+    code = str(exc)
+    return code if code in allowed else default
+
+
+def _assets_v3(receipt):
     batch = receipt['batch']
+    proof = batch['public_proof']
+    if not batch['source_inputs'] or not proof['source_assets']:
+        raise ValueError('publication_frozen_proof_unavailable')
+    assets = {asset['note_id']: asset for asset in proof['source_assets'].values()}
+    if (len(assets) != len(proof['source_assets'])
+            or sorted(assets) != proof['export_metadata']['source_note_ids']):
+        raise ValueError('publication_frozen_proof_unavailable')
+    publication._source_note_files(assets)
+    return assets
+
+
+def _binding(receipt, journal):
+    version = _version(receipt)
+    batch = receipt['batch']
+    if version == 3:
+        from reports.wiki_topic_transaction_v3 import _strict_equal
+        checked = journal.load_topic_operation_v3(receipt['operation_id'])
+        if not _strict_equal(checked, receipt):
+            raise ValueError('publication_receipt_mismatch')
+        with shared_memory._events_lock():
+            _check_commit(receipt, shared_memory._read_jsonl_checked(shared_memory._paths()['events']), historical=True)
+        _assets_v3(receipt)
+        return _digest({'schema_version': 3, 'batch': batch})
     revisions = batch['revision_ids'] if receipt['schema_version'] == 2 else [receipt['revision_id']]
     sources = {}
     for revision in revisions:
@@ -55,7 +101,13 @@ def _binding(receipt, journal):
 
 
 def _check_commit(receipt, rows, *, historical=False):
-    if receipt['schema_version'] == 2:
+    version = _version(receipt)
+    if version == 3:
+        from reports.wiki_topic_transaction_v3 import topic_commit_record_v3, _strict_equal
+        witness = topic_commit_record_v3(receipt['batch'])
+        if not _strict_equal([r for r in rows if r['id'] == witness['id']], [witness]):
+            raise ValueError('topic_commit_witness_mismatch')
+    elif version == 2:
         from reports.wiki_topic_transaction import _commit_record
         witness = _commit_record(receipt['batch'])
         if [r for r in rows if r['id'] == witness['id']] != [witness]:
@@ -165,6 +217,10 @@ def repair_publication(operation_id: str, *, journal, now=None) -> dict:
                         or sidecar.get('root') != str(root)):
                     raise ValueError('publication_sidecar_mismatch')
                 snapshot = sidecar['snapshot']
+                if receipt['schema_version'] == 3:
+                    from reports.wiki_topic_transaction_v3 import _strict_equal
+                    if not _strict_equal(snapshot.get('source_note_assets'), _assets_v3(receipt)):
+                        raise ValueError('publication_snapshot_assets_mismatch')
                 # Old canonical targets may have advanced, but frozen targets must
                 # still prove this operation's exact committed after-images.
                 if any(wiki._source_fingerprint(pid, snapshot['records']) != digest
@@ -188,7 +244,8 @@ def repair_publication(operation_id: str, *, journal, now=None) -> dict:
                 # activation during capture must not become this intent's base.
                 with publication._publication_lock(root) as locked_root:
                     predecessor = _pointer(locked_root)
-                snapshot = publication.capture_snapshot()
+                snapshot = (publication.capture_snapshot(source_note_assets=_assets_v3(receipt))
+                            if receipt['schema_version'] == 3 else publication.capture_snapshot())
                 if any(wiki._source_fingerprint(pid, snapshot['records']) != digest
                        for pid, digest in receipt['batch']['expected_after'].items()):
                     raise ValueError('publication_snapshot_target_mismatch')
@@ -276,6 +333,25 @@ def repair_publication(operation_id: str, *, journal, now=None) -> dict:
 
 def dispatch_effects(receipt, journal):
     """Project verified sidecar state onto the unchanged legacy effect fields."""
+    version = _version(receipt)
+    if version == 3:
+        # A policy rollback stops new generations, but does not deny history or
+        # reinterpret a retained generation intent as a legacy publication.
+        try:
+            receipt = _receipt(receipt['operation_id'], journal)
+            legacy_intent = journal._path('publication-effects-v3-legacy', receipt['operation_id'])
+            publication._no_symlinks(legacy_intent)
+            if legacy_intent.exists() or not wiki_publication_config.enabled():
+                return _legacy_effects_v3(receipt, journal)
+            result = repair_publication(receipt['operation_id'], journal=journal)
+        except (OSError, ValueError, KeyError, TypeError) as exc:
+            return journal.transition_topic_v3(receipt['operation_id'],
+                effects={key: 'failed' for key in ('artifacts', 'search', 'log')}, error_code=_error_code(exc))
+        if result['generation_id'] is None and any(receipt[key] == 'done' for key in ('artifacts', 'search', 'log')):
+            return receipt
+        effects = {key: result[key] for key in ('artifacts', 'search', 'log')}
+        return journal.transition_topic_v3(receipt['operation_id'], effects=effects,
+            error_code='' if all(v == 'done' for v in effects.values()) else 'publication_effects_pending')
     result = repair_publication(receipt['operation_id'], journal=journal)
     # A legacy done receipt without a sidecar remains legacy, not generation proof.
     if result['generation_id'] is None:
@@ -284,3 +360,112 @@ def dispatch_effects(receipt, journal):
     transition = journal.transition_topic if receipt['schema_version'] == 2 else journal.transition
     return transition(receipt['operation_id'], effects=effects,
                       error_code='' if all(v == 'done' for v in effects.values()) else 'publication_effects_pending')
+
+
+def _legacy_effects_v3(receipt, journal):
+    """Serialize one frozen default-off intent, separate from generation proof."""
+    path = journal._path('publication-effects-v3-legacy', receipt['operation_id'])
+    publication._no_symlinks(path)
+    with safe_io.file_write_lock(str(journal.root / 'publication-effects-order')):
+        with safe_io.file_write_lock(str(path)):
+            return _repair_legacy_v3(receipt, journal, path)
+
+
+def _legacy_pointer(root):
+    path = publication._no_symlinks(root / 'publication-v3-current.json')
+    return json.loads(publication._read_regular(path)) if path.exists() else None
+
+
+def _legacy_file_hashes(root, files):
+    result = {}
+    for name in files:
+        path = publication._no_symlinks(root / name)
+        result[name] = hashlib.sha256(publication._read_regular(path)).hexdigest() if path.exists() else None
+    return result
+
+
+def _repair_legacy_v3(receipt, journal, path):
+    binding = _binding(receipt, journal)
+    op_id = receipt['operation_id']
+    if journal._path('publication-effects', op_id).exists():
+        raise ValueError('publication_generation_policy_disabled')
+    root = publication._no_symlinks(wiki.wiki_artifacts_dir())
+    generation_root = publication._no_symlinks(publication_root())
+    if path.exists():
+        intent = json.loads(publication._read_regular(path))
+        if (intent.get('version') != 3 or intent.get('operation_id') != op_id
+                or intent.get('receipt_sha256') != binding or intent.get('root') != str(root)):
+            raise ValueError('publication_legacy_intent_mismatch')
+    else:
+        with shared_memory._events_lock():
+            rows = shared_memory._read_jsonl_checked(shared_memory._paths()['events'])
+            _check_commit(receipt, rows)
+        with safe_io.file_write_lock(str(root / 'publication')):
+            predecessor = _legacy_pointer(root)
+            generation_predecessor = _pointer(generation_root)
+        snapshot = publication.capture_snapshot(source_note_assets=_assets_v3(receipt))
+        if any(wiki._source_fingerprint(pid, snapshot['records']) != digest
+               for pid, digest in receipt['batch']['expected_after'].items()):
+            raise ValueError('publication_snapshot_target_mismatch')
+        files = publication.render_candidate(snapshot)
+        if not publication.validate_candidate(files)['ok']:
+            raise ValueError('invalid_publication_candidate')
+        with safe_io.file_write_lock(str(root / 'publication')):
+            if _legacy_pointer(root) != predecessor or _pointer(generation_root) != generation_predecessor:
+                raise ValueError('publication_predecessor_changed')
+            intent = {'version': 3, 'operation_id': op_id, 'receipt_sha256': binding, 'root': str(root),
+                'snapshot': snapshot, 'predecessor': predecessor, 'generation_predecessor': generation_predecessor,
+                'before_files': _legacy_file_hashes(root, files)}
+            _save(path, intent)
+    snapshot = intent['snapshot']
+    from reports.wiki_topic_transaction_v3 import _strict_equal
+    if not _strict_equal(snapshot.get('source_note_assets'), _assets_v3(receipt)):
+        raise ValueError('publication_snapshot_assets_mismatch')
+    if any(wiki._source_fingerprint(pid, snapshot['records']) != digest
+           for pid, digest in receipt['batch']['expected_after'].items()):
+        raise ValueError('publication_snapshot_target_mismatch')
+    files = publication.render_candidate(snapshot)
+    if not publication.validate_candidate(files)['ok']:
+        raise ValueError('invalid_publication_candidate')
+    pointer = {'operation_id': op_id, 'receipt_sha256': binding, 'snapshot_sha256': snapshot['snapshot_sha256']}
+    errors = {}
+    for effect in ('artifacts', 'search', 'log'):
+        if receipt[effect] == 'done':
+            continue
+        try:
+            with shared_memory._events_lock():
+                rows = shared_memory._read_jsonl_checked(shared_memory._paths()['events'])
+                _check_commit(receipt, rows, historical=effect == 'log')
+                if effect == 'artifacts':
+                    shared_memory._write_index_locked()
+            if effect in {'artifacts', 'search'}:
+                with safe_io.file_write_lock(str(wiki.wiki_artifacts_dir() / 'publication')):
+                    if (_legacy_pointer(root) not in (intent['predecessor'], pointer)
+                            or _pointer(generation_root) != intent['generation_predecessor']
+                            or any(value not in (intent['before_files'][name], hashlib.sha256(files[name]).hexdigest())
+                                   for name, value in _legacy_file_hashes(root, files).items())):
+                        raise ValueError('publication_predecessor_changed')
+                    if effect == 'artifacts':
+                        for name, content in files.items():
+                            target = publication._no_symlinks(root / name)
+                            safe_io.atomic_write_text(str(target), content.decode('utf-8'))
+                            publication._fsync_directory(target.parent)
+                        _save(root / 'publication-v3-current.json', pointer)
+                    else:
+                        pages = [wiki._record_to_page(row) for row in snapshot['records']]
+                        if not wiki.qmd_search.sync_pages(pages, complete=True).get('ok'):
+                            raise ValueError('search_refresh_failed')
+            else:
+                titles = [row['title'] for row in receipt['batch']['upserts']
+                          if row['id'] in receipt['batch']['target_ids']]
+                wiki._append_wiki_log('topic_ingest', operation_id=op_id,
+                    title='; '.join(titles)[:160], page_ids=receipt['batch']['target_ids'],
+                    revision_ids=receipt['batch']['revision_ids'])
+        except (OSError, ValueError, KeyError, TypeError) as exc:
+            errors[effect] = _error_code(exc, effect + '_refresh_failed')
+            receipt = journal.transition_topic_v3(op_id, effects={effect: 'failed'}, error_code=errors[effect])
+        else:
+            receipt = journal.transition_topic_v3(op_id, effects={effect: 'done'})
+    pending = any(receipt[key] != 'done' for key in ('artifacts', 'search', 'log'))
+    return journal.transition_topic_v3(op_id, error_code=(next(iter(errors.values()), 'publication_effects_pending')
+                                                        if pending else ''))

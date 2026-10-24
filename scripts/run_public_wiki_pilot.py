@@ -70,18 +70,82 @@ def _matches_receipt_page(identity, batch, rows):
     return wiki._source_fingerprint(identity, projected) == expected
 
 
+def _public_v3_target_ids(journal, allowed_revisions, rows):
+    from reports.wiki_source_notes import pin_source_note
+    from reports.wiki_topic_snapshot_context import _same
+    from reports.wiki_topic_transaction_v3 import topic_commit_record_v3
+
+    allowed = set()
+    for path in sorted((journal.root / 'topic-operations-v3').glob('*.json')):
+        try:
+            receipt = journal.load_topic_operation_v3(path.stem)
+            if not receipt or receipt['stage'] != 'committed':
+                continue
+            batch = receipt['batch']
+            entries = list(batch['source_map'].values())
+            revisions = {entry['revision_id'] for entry in entries}
+            if (not revisions or not revisions <= allowed_revisions
+                    or revisions != set(batch['source_inputs'])):
+                continue
+            witness = topic_commit_record_v3(batch)
+            if not _same([row for row in rows if row['id'] == witness['id']], [witness]):
+                continue
+            now = datetime.now(timezone.utc)
+            for entry in entries:
+                frozen = batch['source_inputs'][entry['revision_id']]
+                pin = pin_source_note(frozen['note_id'], journal=journal, now=now)
+                if (pin['revision_id'] != entry['revision_id']
+                        or pin['canonical_url'] != entry['canonical_url']
+                        or any(pin[key] != digest for key, digest in frozen['note_hashes'].items())):
+                    raise ValueError('public_topic_source_changed')
+            roots = set(batch['target_ids'])
+            originals = {row['id']: row for row in batch['upserts']}
+            children = {identity for identity, row in originals.items()
+                        if row.get('parent_page_id') in roots
+                        or any(f'split_from:{root}' in row.get('tags', []) for root in roots)}
+            batch_allowed = set()
+            for identity in [*sorted(roots), *sorted(children - roots)]:
+                matches = [row for row in rows if row['id'] == identity]
+                if len(matches) != 1:
+                    continue
+                row = matches[0]
+                # Canonical visibility is always local-only, including public
+                # source derivatives; it is not source access classification.
+                if (row.get('private', False) is not False or row.get('requires_login', False) is not False):
+                    continue
+                if identity not in roots and not any(root in batch_allowed and (
+                        originals[identity].get('parent_page_id') == root
+                        or f'split_from:{root}' in originals[identity].get('tags', [])) for root in roots):
+                    continue
+                if _matches_receipt_page(identity, batch, rows):
+                    batch_allowed.add(identity)
+            allowed.update(batch_allowed)
+        except (ValueError, KeyError, TypeError, OSError, UnicodeError):
+            continue
+    return allowed
+
+
 def public_target_ids(journal, allowed_revisions=None, *, records=None):
     allowed_revisions = set(APPROVED_REVISIONS) if allowed_revisions is None else set(allowed_revisions)
     allowed = set()
     rows = shared_memory.inspect_records() if records is None else records
     for path in (journal.root / 'operations').glob('*.json'):
-        receipt = journal._read(path)
-        if receipt['stage'] != 'committed' or receipt['revision_id'] not in allowed_revisions:
+        try:
+            receipt = journal._read(path)
+            if (not receipt or type(receipt.get('schema_version')) is not int
+                    or receipt['schema_version'] != 1):
+                continue
+            batch = receipt['batch']
+            if ('protocol_version' in batch and
+                    (type(batch['protocol_version']) is not int or batch['protocol_version'] != 1)):
+                continue
+            if receipt['stage'] != 'committed' or receipt['revision_id'] not in allowed_revisions:
+                continue
+            for identity in batch['target_ids']:
+                if _matches_receipt_page(identity, batch, rows):
+                    allowed.add(identity)
+        except (ValueError, KeyError, TypeError, OSError, UnicodeError):
             continue
-        batch = receipt['batch']
-        for identity in batch['target_ids']:
-            if _matches_receipt_page(identity, batch, rows):
-                allowed.add(identity)
     # Topic receipts are separate from legacy single-source operations. Their
     # source set and atomic store witness must both remain verifiable.
     for path in (journal.root / 'topic-operations').glob('*.json'):
@@ -89,9 +153,12 @@ def public_target_ids(journal, allowed_revisions=None, *, records=None):
             from reports.wiki_topic_context import _verified_source
             from reports.wiki_topic_transaction import _commit_record
             receipt = journal.load_topic_operation(path.stem)
-            if not receipt or receipt['stage'] != 'committed':
+            if (not receipt or type(receipt.get('schema_version')) is not int
+                    or receipt['schema_version'] != 2 or receipt['stage'] != 'committed'):
                 continue
             batch = receipt['batch']
+            if type(batch.get('protocol_version')) is not int or batch['protocol_version'] != 2:
+                continue
             entries = list(batch['source_map'].values())
             revisions = {entry['revision_id'] for entry in entries}
             if not revisions or not revisions <= allowed_revisions:
@@ -113,6 +180,7 @@ def public_target_ids(journal, allowed_revisions=None, *, records=None):
                     allowed.add(identity)
         except (ValueError, KeyError, TypeError, OSError, UnicodeError):
             continue
+    allowed.update(_public_v3_target_ids(journal, allowed_revisions, rows))
     return allowed
 
 

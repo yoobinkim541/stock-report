@@ -423,6 +423,7 @@ def _render_selected_evidence(evidence: dict[str, Any], pages: Iterable[dict[str
     relations = knowledge.get("relations") or []
     integrations = knowledge.get("integrations") or []
     has_structured_evidence = any((claims, limitations, relations, integrations))
+    render_source_note_links(evidence, st_module=st_module)
 
     if has_structured_evidence:
         with st_module.expander("구조화된 출처 지식", expanded=True):
@@ -465,6 +466,81 @@ def _render_selected_evidence(evidence: dict[str, Any], pages: Iterable[dict[str
         render_wiki_body(evidence["body"], pages, st_module=st_module)
     elif not has_structured_evidence:
         st_module.info("본문이 아직 없습니다.")
+
+
+def _source_note_reader(generation_id: str | None = None):
+    from agent_console.wiki_publication import pin_generation
+    from agent_console.wiki_publication_config import publication_root
+
+    return pin_generation(root=publication_root(core_wiki.wiki_artifacts_dir()), generation_id=generation_id)
+
+
+def render_source_note_links(evidence: dict, *, reader=None, st_module: Any = st) -> None:
+    """Emit only citations whose paired assets are present in one pinned reader."""
+    import json
+    from agent_console.wiki_publication_config import enabled
+    from reports.wiki_source_note_viewer import frozen_source_note_citation, valid_note_id
+
+    knowledge = evidence.get("source_knowledge") or {}
+    if not isinstance(knowledge, dict) or not isinstance(knowledge.get("claims", []), list):
+        return
+    revisions = {claim["source_revision_id"] for claim in knowledge.get("claims", [])
+                 if isinstance(claim, dict) and valid_note_id(claim.get("source_revision_id"))}
+    if not revisions or (reader is None and not enabled()):
+        return
+    try:
+        reader = reader if reader is not None else _source_note_reader()
+        snapshot = json.loads(reader.read("snapshot.json"))
+        for note_id in sorted(snapshot.get("source_note_assets", {})):
+            citation = frozen_source_note_citation(note_id, reader=reader)
+            if citation.get("revision_id") in revisions and citation["availability"] == "historical":
+                st_module.markdown(f"[Source {citation['revision_id']}]({citation['viewer_url']})")
+    except (OSError, ValueError, KeyError, TypeError, UnicodeError):
+        st_module.warning("Source note unavailable")
+
+
+def render_source_note_query(query_params, *, reader=None, journal=None, now=None, st_module: Any = st) -> bool:
+    """Handle citation navigation before reading editorial pages or chat context."""
+    from agent_console.wiki_publication_config import enabled
+    from reports.wiki_source_journal import Journal
+    from reports.wiki_source_note_viewer import (
+        frozen_source_note_citation, source_note_citation, valid_note_id,
+    )
+
+    if "source_note" not in query_params:
+        return False
+
+    def single(key):
+        values = query_params.get_all(key) if hasattr(query_params, "get_all") else [query_params.get(key)]
+        return values[0] if len(values) == 1 else None
+
+    note_id, generation_id = single("source_note"), single("generation")
+    citation = {"availability": "unavailable"}
+    if valid_note_id(note_id) and ("generation" not in query_params or valid_note_id(generation_id)):
+        try:
+            if reader is not None or "generation" in query_params or enabled():
+                reader = reader if reader is not None else _source_note_reader(generation_id)
+                if generation_id is None or generation_id == reader.generation_id:
+                    citation = frozen_source_note_citation(note_id, reader=reader)
+            else:
+                citation = source_note_citation(note_id, journal=journal if journal is not None else Journal(),
+                                                now=now if now is not None else datetime.now(timezone.utc))
+        except (OSError, ValueError, KeyError, TypeError, UnicodeError):
+            pass
+    status = citation["availability"]
+    if status not in {"available", "historical"}:
+        st_module.warning(f"Source note {status}")
+        return True
+    st_module.text(citation["title"] or "Source note")
+    st_module.caption(f"Source note {status}" + ("; current eligibility not checked" if status == "historical" else ""))
+    st_module.text(f"Source revision: {citation['revision_id']}")
+    st_module.text(f"Published: {citation['published_at'] or 'unknown'}; collected: {citation['collected_at'] or 'unknown'}")
+    st_module.link_button("Original source", citation["canonical_url"])
+    # Pass exact pinned text to a non-executing code widget, including any HTML,
+    # Markdown links, images or code-fence breakouts inside the source.
+    markdown = citation["markdown_bytes"].decode("utf-8") if status == "historical" else citation["markdown"]
+    st_module.code(markdown, language="markdown", wrap_lines=True)
+    return True
 
 
 def _now() -> str:
@@ -907,6 +983,9 @@ def render_wiki_tab(surface: str, pack: dict[str, Any] | None = None) -> None:
 
     from agent_console import wiki
     from dashboard import wiki_mesh
+
+    if render_source_note_query(st.query_params):
+        return
 
     st.markdown("##### AI 위키")
     st.caption("대화와 메모를 카드로 승격해 챗봇이 다시 읽는 지식층입니다.")
