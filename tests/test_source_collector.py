@@ -1069,6 +1069,64 @@ def test_fetch_saveticker_events_paginates_news_list(monkeypatch, tmp_path):
     assert [event["title"] for event in events] == ["페이지 1 반도체 뉴스", "페이지 2 반도체 뉴스"]
 
 
+def test_fetch_saveticker_uses_public_api_host_and_drops_sunset_notice(monkeypatch, tmp_path):
+    """saveticker.com/api 는 Cloudflare 403. 공개 호스트 news/list 는 종료 공지만 반환한다."""
+    class FakeResponse:
+        def __init__(self, payload):
+            self._payload = payload
+
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return self._payload
+
+    notice = {"id": "legacy-news-sunset-notice", "title": "새로운 세이브 뉴스로 업데이트해 주세요",
+              "content": "", "is_headline_only": True, "created_at": "2026-07-07T09:00:00+09:00"}
+    calls = []
+
+    def fake_get(url, **kwargs):
+        calls.append(url)
+        if url.endswith("/news/top-stories"):
+            return FakeResponse({"news_list": [notice, {
+                "id": "news_245995", "title": "스페이스X 이동통신망 구축", "content": "본문",
+                "created_at": "2026-10-23T09:00:00+09:00", "tag_names": ["정보", "$SPCX"]}]})
+        return FakeResponse({"news_list": [notice], "has_older": False})
+
+    monkeypatch.delenv("SAVE_TICKER_API_BASE", raising=False)
+    monkeypatch.setenv("STOCK_REPORT_REPORTS_DIR", str(tmp_path / "reports"))
+    monkeypatch.setenv("STOCK_COLLECTOR_SAVETICKER_MAX_PAGES", "3")
+    monkeypatch.setattr(sc, "_fetch_saveticker_article_body", lambda url, title="": "")
+    monkeypatch.setattr(sc.requests, "get", fake_get)
+
+    events = sc.fetch_saveticker_events()
+
+    assert calls[0] == "https://api.saveticker.com/api/news/top-stories"
+    assert [event["title"] for event in events] == ["스페이스X 이동통신망 구축"]
+    assert events[0]["tickers"] == ["SPCX"]          # top-stories 는 $태그로만 심볼을 준다
+    # 공지만 있는 목록 페이지에서 페이지 순회를 멈춘다 (page 1 한 번).
+    assert sum(url.endswith("/news/list") for url in calls) == 1
+
+
+def test_fetch_saveticker_reports_failure_instead_of_silent_zero(monkeypatch):
+    """비JSON(챌린지 HTML)·5xx 로 모든 경로가 실패하면 정상 0건이 아니라 실패로 남겨야 한다."""
+    class HtmlResponse:
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            raise ValueError("Expecting value: line 1 column 1 (char 0)")
+
+    monkeypatch.setattr(sc.requests, "get", lambda url, **kwargs: HtmlResponse())
+
+    with pytest.raises(sc.SourceProviderUnavailable) as exc_info:
+        sc.fetch_saveticker_events()
+
+    assert exc_info.value.availability == "error"
+    assert "news/top-stories" in str(exc_info.value)
+
+
+
 # ── 소스별 수집 헬스 (수집 공백 가시화) ──────────────────────────────────────
 
 def test_update_and_load_source_health_roundtrip(tmp_path):

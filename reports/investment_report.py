@@ -2319,19 +2319,18 @@ def _build_ticker_findings(sig, price_info, vol_info, vol_str, fund, ticker):
             max_val = data_cat.get("max", 10)
             findings.append(f"⚠️ {cn} 점수 낮음 ({score_val}/{max_val}) — 재무제표 확인 필요")
 
-    # 5. SaveTicker news check
+    # 5. SaveTicker news check — news/list?tickers 는 서비스 종료 공지만 반환하므로
+    # 공개 호스트 top-stories 에서 해당 티커 기사만 고른다.
     try:
         import requests
-        st_url = f"https://saveticker.com/api/news/list?tickers={ticker}&page=1&page_size=2&sort=created_at_desc"
-        st_resp = requests.get(st_url, timeout=5)
+        from providers.saveticker_api import api_base, rows_for_tickers
+        st_resp = requests.get(f"{api_base()}/news/top-stories", timeout=5)
         if st_resp.status_code == 200:
-            st_data = st_resp.json()
-            st_news = st_data.get("news_list", [])
-            if st_news:
-                for item in st_news[:2]:
-                    st_title = item.get("title", "")
-                    if st_title and _news_title_relevant(ticker, st_title) and not any(st_title in f for f in findings):
-                        findings.append(f"📰 SaveTicker: {st_title}")
+            st_news = rows_for_tickers(st_resp.json().get("news_list") or [], [ticker])
+            for item in st_news[:2]:
+                st_title = item.get("title", "")
+                if st_title and _news_title_relevant(ticker, st_title) and not any(st_title in f for f in findings):
+                    findings.append(f"📰 SaveTicker: {st_title}")
     except Exception:
         pass
 

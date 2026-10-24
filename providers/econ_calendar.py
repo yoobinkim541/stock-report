@@ -6,10 +6,8 @@ saveticker 공개 API(키 불요·한국어·기존 통합)에서 연준·경제
 """
 from __future__ import annotations
 
-import os
 from datetime import date, datetime, timedelta, timezone
 
-_BASE = "https://saveticker.com/api"
 KST = timezone(timedelta(hours=9))
 
 # saveticker color → 중요도 (관찰: #EF4444=고위험/중요)
@@ -26,7 +24,9 @@ def _importance(color: str) -> tuple[str, str]:
 
 
 def _api_base() -> str:
-    return os.getenv("SAVE_TICKER_API_BASE", _BASE).rstrip("/")
+    from providers.saveticker_api import api_base
+
+    return api_base()
 
 
 def upcoming_events(days: int = 14, *, start: date | None = None,

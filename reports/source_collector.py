@@ -868,7 +868,9 @@ def _saveticker_max_pages() -> int:
 def fetch_saveticker_events() -> list[dict]:
     from reports.raw_archive import load_dedupe_index, save_dedupe_index
 
-    base = os.getenv("SAVE_TICKER_API_BASE", "https://saveticker.com/api").rstrip("/")
+    from providers.saveticker_api import api_base, is_article_row, row_symbols
+
+    base = api_base()
     paths = [("news/top-stories", None)]
     paths.extend(
         ("news/list", {"page": page, "page_size": 30, "sort": "created_at_desc"})
@@ -879,6 +881,7 @@ def fetch_saveticker_events() -> list[dict]:
     dedupe_index = load_dedupe_index()
     dedupe_dirty = False
     now_iso = datetime.now(KST).isoformat(timespec="seconds")
+    errors: list[str] = []
     for path, params in paths:
         browser_transport = False
         try:
@@ -898,10 +901,16 @@ def fetch_saveticker_events() -> list[dict]:
                         availability="blocked", status_code=status_code,
                     ) from browser_error
             else:
+                errors.append(f"{path} HTTP {status_code}")
                 continue
-        except Exception:
+        except Exception as exc:
+            # 비JSON(챌린지 HTML)·타임아웃을 정상 0건과 구분해 헬스에 남긴다.
+            errors.append(f"{path} {type(exc).__name__}")
             continue
-        items = data.get("news_list") or data.get("data") or []
+        rows = (data.get("news_list") or data.get("data") or []) if isinstance(data, dict) else []
+        # news/list 는 서비스 종료 공지 1건만 반환한다 — 공지는 기사가 아니므로 버리고,
+        # 기사 행이 하나도 없는 페이지에서 페이지 순회를 멈춘다.
+        items = [row for row in rows if is_article_row(row)]
         if params and not items:
             break
         for item in items:
@@ -948,7 +957,8 @@ def fetch_saveticker_events() -> list[dict]:
                 "fulltext_status": fulltext_status,
                 "body_raw_source": body_raw_source,
                 "fulltext_url": url,
-                "tickers": _normalize_tickers(item.get("tickers")) or _extract_tickers(text),
+                "tickers": (_normalize_tickers(item.get("tickers")) or row_symbols(item)
+                            or _extract_tickers(text)),
                 "tags": item.get("tag_names") or [],
                 "raw_path": raw_path,
                 "text_path": text_path,
@@ -958,6 +968,10 @@ def fetch_saveticker_events() -> list[dict]:
             })
     if dedupe_dirty:
         save_dedupe_index(dedupe_index, now=datetime.now(KST))
+    if errors and not events:
+        # 모든 경로가 실패했는데 빈 목록을 반환하면 헬스가 "정상 0건"으로 기록된다.
+        raise SourceProviderUnavailable(
+            "SaveTicker fetch failed: " + "; ".join(errors[:3]), availability="error")
     return [_classify_event(event) for event in events]
 
 def _parse_arca_html(html_text: str) -> list[tuple[str, str]]:

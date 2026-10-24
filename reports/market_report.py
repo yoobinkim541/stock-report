@@ -333,7 +333,9 @@ def format_kst_time(iso_text: Optional[str]) -> str:
 
 def fetch_saveticker_json(path: str, params: Optional[dict] = None) -> Optional[dict]:
     """Fetch JSON from SaveTicker's public API."""
-    base = os.getenv("SAVE_TICKER_API_BASE", "https://saveticker.com/api")
+    from providers.saveticker_api import api_base
+
+    base = api_base()
     url = f"{base.rstrip('/')}/{path.lstrip('/')}"
     try:
         resp = requests.get(url, headers=HEADERS, params=params, timeout=12)
@@ -582,20 +584,18 @@ def section_2_top_news() -> str:
     lines.append("")
 
     # 1) SaveTicker top stories: market-wide headlines
-    top_stories = []
-    data = fetch_saveticker_json("news/top-stories")
-    if data and data.get("news_list"):
-        top_stories = data["news_list"][:5]
+    from providers.saveticker_api import is_article_row, rows_for_tickers
 
-    # 2) SaveTicker portfolio-related news via ticker filter
-    portfolio_news = []
-    portfolio_filter = ",".join(PORTFOLIO_TICKERS)
-    data = fetch_saveticker_json(
-        "news/list",
-        params={"page": 1, "page_size": 6, "sort": "created_at_desc", "tickers": portfolio_filter},
-    )
-    if data and data.get("news_list"):
-        portfolio_news = data["news_list"][:6]
+    top_stories = []
+    top_rows = []
+    data = fetch_saveticker_json("news/top-stories")
+    if data and isinstance(data.get("news_list"), list):
+        top_rows = [row for row in data["news_list"] if is_article_row(row)]
+        top_stories = top_rows[:5]
+
+    # 2) SaveTicker portfolio-related news — news/list(티커 필터)는 서비스 종료 공지만
+    # 반환하므로 top-stories 를 보유 티커로 거른다.
+    portfolio_news = rows_for_tickers(top_rows, PORTFOLIO_TICKERS)[:6]
 
     # 3) Keep a small fallback path for resilience
     headlines = []
