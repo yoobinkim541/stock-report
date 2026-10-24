@@ -13,7 +13,7 @@ from typing import Any
 
 from agent_console import storage
 from dashboard import chart_workspace
-from ohlc_utils import normalize_ohlc_frame
+from ohlc_utils import normalize_ohlc_frame, repair_display_ohlc
 
 
 logger = logging.getLogger(__name__)
@@ -680,7 +680,7 @@ def paper_glance() -> list[dict]:
 
     전 페이지 사이드바에서 매 rerun 호출되므로 네트워크 0·로컬 DB 만. 스냅샷 없는
     surface 는 제외(크론 미실행 환경 → 빈 리스트 = 레일 숨김). graceful.
-    [{surface, label, currency, nav, cum_ret, day_ret, n_days}]
+    [{surface, label, currency, nav, cum_ret(전체 세대), current_cum_ret(현 세대), day_ret, n_days, ...}]
     """
     specs = (("kr_mock", "🇰🇷 국내", "₩", "kr_mock_history"),
              ("us_mock", "🇺🇸 미국", "$", "us_mock_history"))
@@ -1393,13 +1393,40 @@ def _institution_analysis(snapshots: list[dict], comparison: dict, *, with_llm_s
     }
 
 
+def _watch_quote_symbol(ticker: str) -> str:
+    """관심종목 티커 → yfinance 심볼. 정규화 이전 저장분(국내 6자리 원형)도 .KS 로."""
+    t = str(ticker or "").strip().upper()
+    return f"{t}.KS" if t.isdigit() and len(t) == 6 else t
+
+
 def watchlist_quotes(tickers) -> dict:
-    """관심종목 시세 오버레이(가격·등락률) — market_data 배치 조회. graceful {}."""
+    """관심종목 시세 — {원래 티커: {price, chg_pct, as_of, currency, source} | {error}}.
+
+    국내(.KS) 시세가 없으면 코스닥(.KQ)으로 한 번 더 조회한다(6자리 코드만으론 시장을
+    알 수 없다). 조회 실패와 '시세 없음'을 티커별로 구분해 표에 그대로 보여준다.
+    """
+    from providers import market_data
+
+    tks = [str(t).strip() for t in tickers or [] if str(t).strip()]
+    symbols = {t: _watch_quote_symbol(t) for t in tks}
     try:
-        from providers import market_data
-        return market_data.batch_quote_change(list(tickers))
-    except Exception:
-        return {}
+        quotes = market_data.batch_quote_change(sorted(set(symbols.values())))
+        retry = {t: s[:-3] + ".KQ" for t, s in symbols.items() if s.endswith(".KS") and s not in quotes}
+        if retry:
+            quotes.update(market_data.batch_quote_change(sorted(set(retry.values()))))
+            symbols.update({t: s for t, s in retry.items() if s in quotes})
+    except Exception as exc:
+        return {t: {"error": f"시세 조회 실패({type(exc).__name__})"} for t in tks}
+    out = {}
+    for t, symbol in symbols.items():
+        quote = quotes.get(symbol)
+        if not quote:
+            out[t] = {"error": "시세 없음"}
+            continue
+        kr = symbol.endswith((".KS", ".KQ"))
+        out[t] = {**quote, "symbol": symbol, "currency": "KRW" if kr else "USD",
+                  "source": "yfinance"}
+    return out
 
 
 def congress_trading(name: str) -> list[dict] | None:
@@ -1849,7 +1876,7 @@ def chart_data_bundle(ticker: str, timeframe: str, session_policy: str = "regula
     prepared = None
     actual = requested
     if hist is not None and not getattr(hist, "empty", True):
-        prepared = hist.copy(deep=True)
+        prepared = repair_display_ohlc(hist.copy(deep=True))
         prepared.attrs.update(getattr(hist, "attrs", {}) or {})
         provider_timezone = (prepared.attrs.get("provider_timezone")
                              or prepared.attrs.get("source_timezone")

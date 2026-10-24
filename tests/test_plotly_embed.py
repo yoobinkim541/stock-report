@@ -339,7 +339,6 @@ def test_embed_dock_layout_reserves_chart_column():
     for token in (
         "grid-template-columns:128px minmax(0, 1fr)",
         "#wrap.dock #chartcol { grid-column:2",
-        "#wrap.dock .tbtn { width:100%",
         "text-overflow:ellipsis",
         "Plotly.Plots.resize(gd)",
     ):

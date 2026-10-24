@@ -711,7 +711,12 @@ def _wiki_pipeline_health_panel():
 
     cols = st.columns(5)
     cols[0].metric("소스", f"{overall.get('healthy_sources', 0)}/{overall.get('expected_sources', 0)}")
-    cols[1].metric("소스 공백", f"{overall.get('stale_sources', 0)}")
+    gap_names = overall.get("gap_source_names") or []
+    cols[1].metric(
+        "소스 공백·차단",
+        f"{overall.get('gap_sources', overall.get('stale_sources', 0))}",
+        help=("수집이 멈춘 소스: " + ", ".join(gap_names)) if gap_names else "수집이 멈춘 소스 없음",
+    )
     cols[2].metric("source-backed", f"{wiki_section.get('source_backed_count', 0)}")
     cols[3].metric("미검증", f"{wiki_section.get('unverified_count', 0)}")
     cols[4].metric("미연결 digest", f"{curation_section.get('source_digest_unlinked_count', 0)}")

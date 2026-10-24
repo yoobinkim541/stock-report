@@ -1050,6 +1050,26 @@ def move_watchlist_folder(ticker: str, folder: str) -> bool:
         return False
 
 
+def add_watchlist_ticker(ticker: str, note: str | None = None,
+                         folder: str | None = None) -> tuple[bool, str]:
+    """대시보드 관심종목 추가 — 봇 /watch add 와 같은 저장소·검증(lib.watchlist).
+
+    반환 (성공 여부, 저장된 티커 또는 오류 메시지)."""
+    from lib import watchlist as _wl
+    try:
+        entry = _wl.add_ticker(ticker, reason="대시보드에서 추가", source="dashboard",
+                               note=(note or "").strip() or None, folder=folder)
+    except ValueError as exc:
+        return False, str(exc)
+    return True, entry["ticker"]
+
+
+def remove_watchlist_ticker(ticker: str) -> bool:
+    """대시보드 관심종목 삭제 — 봇 /watch remove 와 같은 경로. 없으면 False."""
+    from lib import watchlist as _wl
+    return _wl.remove_ticker(ticker)
+
+
 # ── 가격 알림 (bot/price_alerts store 재사용 — 차트→알림 연동) ─────────────────
 
 def ticker_alerts(ticker: str) -> list[dict]:

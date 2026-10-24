@@ -302,6 +302,16 @@ def _trade_price(hist, trade: dict):
     return None
 
 
+def trade_marker_style(symbol: str, color: str) -> dict:
+    """매수·매도·알림 마커 공통 스타일 (차트 2개 경로 공용).
+
+    적립식 매수처럼 연속 체결이 많으면 13px+흰 테두리 삼각형이 최근 봉을 덮었다
+    (2026-10-23 실측). y=체결가·이벤트별 customdata(클릭 편집)는 유지하고 크기만 줄인다.
+    """
+    return dict(symbol=symbol, size=9, color=color, opacity=0.85,
+                line=dict(color="rgba(255,255,255,0.6)", width=0.5))
+
+
 def _add_trade_markers(fig, hist, trades):
     hist = normalize_ohlc_frame(hist)
     if not trades:
@@ -356,8 +366,7 @@ def _add_trade_markers(fig, hist, trades):
             name=name,
             showlegend=False,
             customdata=custom,
-            marker=dict(symbol=symbol, size=13, color=color,
-                        line=dict(color="#ffffff", width=0.8)),
+            marker=trade_marker_style(symbol, color),
             hovertemplate=hovertemplate,
         ))
 

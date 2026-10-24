@@ -55,6 +55,17 @@ def test_watch_add_missing_ticker_shows_error(monkeypatch, tmp_path):
     assert watchlist.list_watchlist() == []
 
 
+def test_watch_add_rejects_malformed_ticker_without_saving(monkeypatch, tmp_path):
+    _isolate(monkeypatch, tmp_path)
+    sent = []
+    wc.cmd_watch("chat1", ["add", "$PLTR"], lambda chat_id, text: sent.append(text))
+
+    assert "❌" in sent[0] and "$PLTR" in sent[0]
+    from lib import watchlist
+    assert watchlist.list_watchlist() == []
+
+
+
 def test_watch_list_shows_entries(monkeypatch, tmp_path):
     _isolate(monkeypatch, tmp_path)
     from lib import watchlist

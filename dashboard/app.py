@@ -146,7 +146,7 @@ with st.sidebar:
         st.markdown("<div style='height:8px'></div>", unsafe_allow_html=True)
         theme.render(theme.watchlist_html(
             [{"symbol": h["ticker"], "name": h.get("name"), "last": h.get("value"), "chg_pct": h.get("ret")}
-             for h in _wl if h.get("ticker")], title="보유 종목"))
+             for h in _wl if h.get("ticker")], title="보유 종목 · 평가액($) · 수익률"))
 
     # 🧪 모의투자 레일 (KR·US 자동 페이퍼트레이딩 — EOD 스냅샷 초경량·무네트워크)
     _pg = cached.paper_glance()
@@ -188,10 +188,11 @@ _watchlist_pg = st.Page(watchlist.render, title="관심종목", icon="⭐", url_
 st.session_state["_ticker_page"] = _ticker_pg
 st.session_state["_kr_etf_page"] = _kr_etf_pg
 st.session_state["_chart_page"] = _chart_pg          # ⛶ 전체화면 풀차트 왕복용
-st.session_state["_wiki_page"] = st.Page(ai_wiki.render, title="AI 위키", icon="🗂️", url_path="wiki")
+_wiki_pg = st.Page(ai_wiki.render, title="AI 위키", icon="🗂️", url_path="wiki")
+st.session_state["_wiki_page"] = _wiki_pg        # AI 콘솔 위키 카드 → 위키 페이지 이동용
 
 nav = st.navigation([_home_pg, _portfolio_pg, _watchlist_pg, _ticker_pg, _kr_etf_pg, _chart_pg,
-                     _market_pg, _paper_pg, _research_pg, _agent_pg])
+                     _market_pg, _paper_pg, _research_pg, _agent_pg, _wiki_pg])
 # 사이드바에서 종목을 새로 고르면 종목 분석 페이지로 이동 (홈 행클릭과 동일 UX)
 if st.session_state.pop("_nav_to_ticker", False):
     st.switch_page(_ticker_pg)

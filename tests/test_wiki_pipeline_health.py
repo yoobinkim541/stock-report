@@ -340,6 +340,28 @@ def test_source_health_summary_exposes_blocked_and_zero_persistence():
     assert section["overall"]["zero_persist_sources"] == 1
 
 
+def test_gap_count_includes_blocked_sources_that_stale_check_skips():
+    """차단(403) 소스는 stale 계산에서 빠지므로 '소스 공백 0'으로 숨겨지면 안 된다."""
+    from reports.wiki_pipeline_health import _summarize_source_health
+
+    section = _summarize_source_health({
+        "saveticker": {"last_run": "2026-10-23T00:00:00+00:00", "last_count": 0,
+                       "availability": "blocked", "availability_reason": "HTTP 403"},
+        "economic_calendar": {"last_run": "2026-10-23T00:00:00+00:00", "last_count": 0,
+                              "availability": "error", "last_error": "timeout"},
+        "fred": {"last_run": "2026-10-23T00:00:00+00:00", "last_count": 0,
+                 "availability": "disabled"},
+        "kalshi": {"last_run": "2026-10-23T00:00:00+00:00", "last_count": 60,
+                   "last_success": "2026-10-23T00:00:00+00:00"},
+    }, [], [])
+
+    overall = section["overall"]
+    assert overall["stale_sources"] == 0
+    assert overall["gap_sources"] == 2
+    assert sorted(overall["gap_source_names"]) == ["economic_calendar", "saveticker"]
+
+
+
 def test_source_health_summary_exposes_explicit_integrity_metrics():
     from reports.wiki_pipeline_health import _summarize_source_health
 

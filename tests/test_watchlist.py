@@ -67,6 +67,34 @@ def test_remove_ticker_missing_returns_false(monkeypatch, tmp_path):
     assert watchlist.remove_ticker("ZZZZ") is False
 
 
+def test_add_ticker_normalizes_kr_code_and_rejects_malformed(monkeypatch, tmp_path):
+    """봇·대시보드 공통 검증 — 국내 6자리는 .KS, 공백·특수문자 오타는 저장 거부."""
+    import pytest
+
+    _isolate(monkeypatch, tmp_path)
+
+    assert watchlist.add_ticker(" 005930 ", reason="r", source="manual")["ticker"] == "005930.KS"
+    assert watchlist.add_ticker("brk.b", reason="r", source="manual")["ticker"] == "BRK.B"
+    for bad in ("", "NV DA", "$PLTR", "A" * 20):
+        with pytest.raises(ValueError):
+            watchlist.add_ticker(bad, reason="r", source="manual")
+    assert [e["ticker"] for e in watchlist.list_watchlist()] == ["BRK.B", "005930.KS"]
+
+
+def test_remove_ticker_finds_legacy_and_normalized_kr_entries(monkeypatch, tmp_path):
+    """정규화 이전에 원형('005930')으로 저장된 항목도, 새 '.KS' 항목도 6자리 입력으로 지운다."""
+    import store
+
+    _isolate(monkeypatch, tmp_path)
+    store.replace_all("watchlist", [{"ticker": "005930", "reason": "r", "source": "manual",
+                                     "added_at": "2026-07-01T00:00:00+00:00"}])
+
+    assert watchlist.remove_ticker("005930") is True
+    watchlist.add_ticker("000660", reason="r", source="manual")
+    assert watchlist.remove_ticker("000660") is True
+    assert watchlist.list_watchlist() == []
+
+
 def test_list_watchlist_empty_by_default(monkeypatch, tmp_path):
     _isolate(monkeypatch, tmp_path)
 

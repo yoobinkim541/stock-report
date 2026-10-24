@@ -71,6 +71,67 @@ def test_watchlist_table_shows_price_and_change_columns(monkeypatch):
     assert list(df["등락률"]) == ["+1.50%", "-2.20%"]
 
 
+def test_watchlist_table_shows_krw_price_basis_and_per_ticker_failure(monkeypatch):
+    rows = [
+        {"ticker": "005930.KS", "name": "삼성전자", "reason": "메모리", "source": "manual",
+         "note": None, "added_at": "2026-08-01T00:00:00"},
+        *_ROWS,
+    ]
+    monkeypatch.setattr(data, "load_watchlist", lambda: rows)
+    monkeypatch.setattr(cached, "watchlist_quotes", lambda tickers: {
+        "005930.KS": {"price": 61200.0, "chg_pct": 0.5, "as_of": "2026-10-23",
+                      "currency": "KRW", "source": "yfinance"},
+        "PLTR": {"error": "시세 없음"},
+        "NVDA": {"price": 176.0, "chg_pct": -2.2, "as_of": "2026-10-22",
+                 "currency": "USD", "source": "yfinance"},
+    })
+
+    at = AppTest.from_string(_RUN_SCRIPT, default_timeout=30)
+    at.run()
+    assert not at.exception, str(at.exception)
+    df = at.dataframe[0].value
+    assert list(df["현재가"]) == ["₩61,200", "—", "$176.00"]
+    assert list(df["시세 기준"]) == ["2026-10-23 일봉 · yfinance", "⚠️ 시세 없음", "2026-10-22 일봉 · yfinance"]
+    assert any("시세 미확인 1개" in str(c.value) for c in at.caption)
+
+
+def test_add_and_remove_buttons_use_shared_watchlist_store(monkeypatch):
+    monkeypatch.setattr(data, "load_watchlist", lambda: _ROWS)
+    monkeypatch.setattr(cached, "watchlist_quotes", lambda tickers: {})
+    added, removed = [], []
+    monkeypatch.setattr(data, "add_watchlist_ticker",
+                        lambda ticker, note=None, folder=None: added.append((ticker, note)) or (True, ticker.upper()))
+    monkeypatch.setattr(data, "remove_watchlist_ticker", lambda ticker: removed.append(ticker) or True)
+
+    at = AppTest.from_string(_RUN_SCRIPT, default_timeout=30)
+    at.run()
+    at.text_input(key="_watchlist_add_ticker").set_value("amd")
+    at.text_input(key="_watchlist_add_note").set_value("MI450")
+    at.button(key="_watchlist_add_btn").click().run()
+    at.selectbox(key="_watchlist_remove_ticker").set_value("NVDA").run()
+    at.button(key="_watchlist_remove_btn").click().run()
+
+    assert not at.exception, str(at.exception)
+    assert added == [("amd", "MI450")]
+    assert removed == ["NVDA"]
+
+
+def test_add_shows_validation_error_instead_of_saving(monkeypatch):
+    monkeypatch.setattr(data, "load_watchlist", lambda: _ROWS)
+    monkeypatch.setattr(cached, "watchlist_quotes", lambda tickers: {})
+    monkeypatch.setattr(data, "add_watchlist_ticker",
+                        lambda ticker, note=None, folder=None: (False, "티커 형식이 아닙니다: '$X'"))
+
+    at = AppTest.from_string(_RUN_SCRIPT, default_timeout=30)
+    at.run()
+    at.text_input(key="_watchlist_add_ticker").set_value("$X")
+    at.button(key="_watchlist_add_btn").click().run()
+
+    assert not at.exception, str(at.exception)
+    assert any("티커 형식" in str(e.value) for e in at.error)
+
+
+
 def test_watchlist_search_filters_rows(monkeypatch):
     monkeypatch.setattr(data, "load_watchlist", lambda: _ROWS)
     monkeypatch.setattr(cached, "watchlist_quotes", lambda tickers: {})

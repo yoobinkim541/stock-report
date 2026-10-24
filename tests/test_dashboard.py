@@ -478,7 +478,8 @@ def test_views_watchlist_quotes_delegates_to_market_data(monkeypatch):
     assert out["PLTR"]["price"] == 30.0
 
 
-def test_views_watchlist_quotes_graceful_on_exception(monkeypatch):
+def test_views_watchlist_quotes_marks_each_ticker_failed_on_exception(monkeypatch):
+    """조회 예외는 빈 결과가 아니라 티커별 실패 사유로 남아 표에 보여야 한다."""
     from dashboard import views
     from providers import market_data
 
@@ -486,7 +487,33 @@ def test_views_watchlist_quotes_graceful_on_exception(monkeypatch):
         raise RuntimeError("network down")
     monkeypatch.setattr(market_data, "batch_quote_change", _boom)
 
-    assert views.watchlist_quotes(("PLTR",)) == {}
+    out = views.watchlist_quotes(("PLTR", "005930.KS"))
+
+    assert set(out) == {"PLTR", "005930.KS"}
+    assert all("RuntimeError" in q["error"] for q in out.values())
+
+
+def test_views_watchlist_quotes_resolves_kr_codes_and_retries_kosdaq(monkeypatch):
+    """국내 6자리(정규화 전 원형)는 .KS, .KS 시세가 없으면 코스닥 .KQ 로 재조회."""
+    from dashboard import views
+    from providers import market_data
+
+    requested = []
+
+    def fake_batch(tickers):
+        requested.append(list(tickers))
+        known = {"005930.KS": 61200.0, "247540.KQ": 151000.0, "PLTR": 30.0}
+        return {t: {"price": known[t], "chg_pct": 1.0, "as_of": "2026-10-23"}
+                for t in tickers if t in known}
+    monkeypatch.setattr(market_data, "batch_quote_change", fake_batch)
+
+    out = views.watchlist_quotes(("005930", "247540.KS", "PLTR", "ZZZZ"))
+
+    assert requested[1] == ["247540.KQ"]
+    assert out["005930"]["currency"] == "KRW" and out["005930"]["price"] == 61200.0
+    assert out["247540.KS"]["symbol"] == "247540.KQ"
+    assert out["PLTR"]["currency"] == "USD" and out["PLTR"]["as_of"] == "2026-10-23"
+    assert out["ZZZZ"] == {"error": "시세 없음"}
 
 
 def test_views_congress_trading_delegates_to_provider(monkeypatch):

@@ -406,30 +406,33 @@ def _money_compact(v, cur: str) -> str:
     return f"${v:,.0f}"
 
 
-def paper_rail_html(rows: list[dict], title="🧪 모의투자") -> str:
+def paper_rail_html(rows: list[dict], title="🧪 모의투자 · 평가액 · 현 세대 수익률") -> str:
     """사이드바 모의 계좌 레일 (워치리스트와 동일 tn-wl 스타일 — 순수 빌더).
 
-    rows: views.paper_glance 출력 [{label, currency, nav, cum_ret, day_ret, n_days}].
-    3열: 계좌 · NAV(압축) · 누적%(색). 전일·세대/전체 누적·기록일수는 title 툴팁.
+    rows: views.paper_glance 출력 [{label, currency, nav, cum_ret, current_cum_ret, day_ret, n_days}].
+    3열: 계좌 · NAV(압축) · 수익률(색). NAV 는 현 세대 계좌라 수익률도 같은 세대 값을 보여준다
+    (세대 리셋 후 $100,000 옆에 전체 세대 누적 -60% 가 붙어 모순돼 보이던 문제).
+    전체 세대 누적·전일·기록일수는 title 툴팁.
     """
     body = []
     for r in rows or []:
-        cum = r.get("cum_ret")
-        up = (cum or 0) >= 0
-        col = GREEN if up else RED
-        chg = f"{'+' if up else ''}{_num(cum)}%" if cum is not None else "—"
+        life = r.get("cum_ret")
         cur_cum = r.get("current_cum_ret")
+        shown = cur_cum if cur_cum is not None else life
+        up = (shown or 0) >= 0
+        col = GREEN if up else RED
+        chg = f"{'+' if up else ''}{_num(shown)}%" if shown is not None else "—"
         day = r.get("day_ret")
         tip_bits = []
         if day is not None:
             tip_bits.append(f"전일 {day:+.2f}%")
-        if cur_cum is not None and cum is not None and cur_cum != cum:
-            tip_bits.append(f"세대 {cur_cum:+.2f}%")
-            tip_bits.append(f"전체 {cum:+.2f}%")
-        elif cum is not None:
-            tip_bits.append(f"누적 {cum:+.2f}%")
+        if shown is not None:
+            tip_bits.append(f"현 세대 {shown:+.2f}%")
+        if life is not None and life != shown:
+            gen = r.get("generation")
+            tip_bits.append(f"{f'전체 {gen}세대' if gen else '전체'} 누적 {life:+.2f}%")
         tip_bits.append(f"기록 {r.get('n_days', 0)}일")
-        tip = f' title="{" · ".join(tip_bits)}"' if tip_bits else ""
+        tip = f' title="{" · ".join(tip_bits)}"'
         body.append(f'''<div class="tn-wl-row">
   <span class="tn-wl-sym"{tip}>{r.get("label", "?")}</span>
   <span class="tn-wl-last">{_money_compact(r.get("nav"), r.get("currency", ""))}</span>

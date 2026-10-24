@@ -41,9 +41,12 @@ def cmd_watch(chat_id: str, args: list, send_fn) -> None:
         if len(args) < 2:
             send_fn(chat_id, "❌ 티커를 입력하세요.\n예: /watch add PLTR 실적 기대")
             return
-        ticker = args[1].upper()
         note = " ".join(args[2:]) if len(args) > 2 else None
-        entry = watchlist.add_ticker(ticker, reason="수동 추가", source="manual", note=note)
+        try:
+            entry = watchlist.add_ticker(args[1], reason="수동 추가", source="manual", note=note)
+        except ValueError:
+            send_fn(chat_id, f"❌ 티커 형식이 아닙니다: {args[1]}\n예: /watch add PLTR · /watch add 005930")
+            return
         note_line = f" — {entry['note']}" if entry.get("note") else ""
         send_fn(chat_id, f"⭐ 관심종목 추가: {entry['ticker']}{note_line}")
         return

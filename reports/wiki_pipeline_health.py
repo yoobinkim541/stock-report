@@ -212,6 +212,13 @@ def _summarize_source_health(
     zero_event = [row for row in rows if row["observed"] and row["last_count"] == 0]
     blocked = [row for row in rows if row["availability"] in {"blocked", "disabled"}]
     failed = [row for row in rows if row["availability"] == "error"]
+    # 공백 = 오래 성공 못 함(stale) + 접근 차단(blocked) + 실패(error). stale 계산은 차단
+    # 소스를 의도적으로 제외하므로(stale_sources), 차단만으로 수집이 멈춘 소스가 "공백 0"으로
+    # 보이지 않게 따로 합산한다. 운영자가 끈(disabled) 소스는 공백이 아니다.
+    gap_rows = [
+        row for row in rows
+        if row["is_stale"] or row["availability"] in {"blocked", "error"}
+    ]
     zero_persist = [
         row for row in rows
         if row["observed"] and row["zero_persist_alert"]
@@ -238,6 +245,8 @@ def _summarize_source_health(
             "zero_event_sources": len(zero_event),
             "blocked_sources": len(blocked),
             "failed_sources": len(failed),
+            "gap_sources": len(gap_rows),
+            "gap_source_names": [row["source"] for row in gap_rows],
             "zero_persist_sources": len(zero_persist),
             "cardinality_drop_sources": len(cardinality_drops),
             "collision_sources": len(collisions),

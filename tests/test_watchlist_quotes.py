@@ -65,3 +65,17 @@ def test_batch_quote_change_skips_missing_ticker_column(monkeypatch):
     monkeypatch.setattr(md.yf, "download", lambda *a, **k: df)
     out = md.batch_quote_change(["PLTR", "DEADCO"])
     assert set(out.keys()) == {"PLTR"}
+
+
+def test_batch_quote_change_uses_each_tickers_last_trading_day(monkeypatch):
+    """국내·미국 혼합 조회 — 한쪽 휴장일 NaN 은 건너뛰고 종목별 마지막 두 종가·날짜를 쓴다."""
+    idx = pd.to_datetime(["2026-10-21", "2026-10-22", "2026-10-23"])
+    cols = pd.MultiIndex.from_product([["Close"], ["005930.KS", "PLTR"]])
+    df = pd.DataFrame([[60000.0, 28.0], [61000.0, 30.0], [None, 33.0]], index=idx, columns=cols)
+    monkeypatch.setattr(md.yf, "download", lambda *a, **k: df)
+
+    out = md.batch_quote_change(["005930.KS", "PLTR"])
+
+    assert out["005930.KS"]["as_of"] == "2026-10-22"
+    assert out["005930.KS"]["chg_pct"] == pytest.approx((61000.0 / 60000.0 - 1) * 100)
+    assert out["PLTR"]["as_of"] == "2026-10-23"

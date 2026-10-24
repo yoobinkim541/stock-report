@@ -115,7 +115,9 @@ _TEMPLATE = r"""
                       width:128px; min-width:0; max-width:128px; max-height:calc(100vh - 112px);
                       overflow-y:auto; overflow-x:hidden; margin:0; align-self:flex-start;
                       position:sticky; top:0; z-index:3; padding-right:2px; }
-  #wrap.dock .tbtn { width:100%; min-width:0; padding:4px 7px; overflow:hidden; text-overflow:ellipsis; }
+  /* 세로 flex + max-height 에서 기본 flex-shrink:1 이면 버튼 25개+가 몇 px 로 눌려
+     라벨이 잘린 빈 막대 열이 된다(2026-10-23 실측). 높이를 지키고 독을 스크롤시킨다. */
+  #wrap.dock .tbtn { flex:0 0 auto; width:100%; min-width:0; padding:4px 7px; overflow:hidden; text-overflow:ellipsis; }
   #wrap.dock .tsep { width:auto; height:1px; margin:2px 0; }
   #wrap.dock #tool-hint { margin:2px 0 0; white-space:normal; overflow-wrap:anywhere; }
   #wrap.dock #ohlcbar { order:-1; margin:0 0 4px; white-space:normal; overflow:hidden; text-overflow:ellipsis; }

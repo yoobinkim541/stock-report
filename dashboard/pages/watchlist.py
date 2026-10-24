@@ -1,4 +1,4 @@
-"""dashboard/pages/watchlist.py — 관심종목 (읽기 전용). 삭제는 봇 /watch remove 에서만."""
+"""dashboard/pages/watchlist.py — 관심종목. 추가·삭제는 봇 /watch 와 같은 lib.watchlist 저장소."""
 from __future__ import annotations
 
 import os
@@ -138,6 +138,8 @@ def _render_common_moves(analysis: dict):
 def _fmt_price(q: dict | None) -> str:
     if not q or q.get("price") is None:
         return "—"
+    if q.get("currency") == "KRW":
+        return f"₩{q['price']:,.0f}"
     return f"${q['price']:,.2f}"
 
 
@@ -145,6 +147,51 @@ def _fmt_chg(q: dict | None) -> str:
     if not q or q.get("chg_pct") is None:
         return "—"
     return f"{q['chg_pct']:+.2f}%"
+
+
+def _fmt_basis(q: dict | None) -> str:
+    """시세 기준 — 일봉 날짜·출처, 실패면 사유."""
+    if not q:
+        return "⚠️ 시세 없음"
+    if q.get("error"):
+        return f"⚠️ {q['error']}"
+    parts = [f"{q['as_of']} 일봉" if q.get("as_of") else "", str(q.get("source") or "")]
+    return " · ".join(p for p in parts if p) or "—"
+
+
+def _edit_section(rows: list[dict]) -> None:
+    """관심종목 추가·삭제 (텔레그램 /watch add|remove 와 같은 저장소·티커 검증)."""
+    with st.expander("➕ 추가 · 🗑️ 삭제", expanded=not rows):
+        c1, c2, c3 = st.columns([1, 2, 1])
+        ticker = c1.text_input("티커", key="_watchlist_add_ticker", placeholder="PLTR · 005930")
+        note = c2.text_input("메모 (선택)", key="_watchlist_add_note", placeholder="실적 기대")
+        with c3:
+            st.write("")
+            st.write("")
+            if st.button("추가", key="_watchlist_add_btn", width="stretch"):
+                if not ticker.strip():
+                    st.warning("티커를 입력하세요.")
+                else:
+                    ok, msg = data.add_watchlist_ticker(ticker, note=note)
+                    if ok:
+                        st.toast(f"⭐ 관심종목 추가: {msg}")
+                        st.rerun()
+                    else:
+                        st.error(msg)
+        if not rows:
+            return
+        r1, r2 = st.columns([3, 1])
+        target = r1.selectbox("삭제할 종목", options=[r["ticker"] for r in rows],
+                              key="_watchlist_remove_ticker")
+        with r2:
+            st.write("")
+            st.write("")
+            if st.button("삭제", key="_watchlist_remove_btn", width="stretch") and target:
+                if data.remove_watchlist_ticker(target):
+                    st.toast(f"🗑️ 관심종목 삭제: {target}")
+                    st.rerun()
+                else:
+                    st.error(f"관심종목에 없습니다: {target}")
 
 
 def _folder_move_section(rows: list[dict], folders: list[str]) -> None:
@@ -169,8 +216,9 @@ def _folder_move_section(rows: list[dict], folders: list[str]) -> None:
 def _watchlist_section(rows: list[dict]) -> None:
     st.markdown("### ⭐ 내 관심종목")
     if not rows:
-        st.info("관심종목이 비어 있습니다 — 종목 분석페이지에서 ⭐ 를 누르거나 "
-                "봇에서 `/watch add TICKER 메모` 로 추가하세요.")
+        st.info("관심종목이 비어 있습니다 — 아래에서 추가하거나, 종목 분석페이지 ⭐ · "
+                "봇 `/watch add TICKER 메모` 로 추가하세요.")
+        _edit_section(rows)
         return
 
     folders = data.watchlist_folders()
@@ -187,6 +235,7 @@ def _watchlist_section(rows: list[dict]) -> None:
         st.caption(f"'{query}' 검색 결과 없음 ({len(folder_rows)}개 중)" if query
                   else f"'{folder_pick}' 폴더에 종목이 없습니다.")
         _folder_move_section(rows, folders)
+        _edit_section(rows)
         return
 
     tickers = tuple(sorted({r["ticker"] for r in filtered}))
@@ -199,11 +248,14 @@ def _watchlist_section(rows: list[dict]) -> None:
         "티커": r["ticker"], "종목": r["name"], "폴더": r.get("folder") or "미분류",
         "현재가": _fmt_price(quotes.get(r["ticker"])),
         "등락률": _fmt_chg(quotes.get(r["ticker"])),
+        "시세 기준": _fmt_basis(quotes.get(r["ticker"])),
         "추가 사유": r["reason"], "추가일": r["added_at"][:10] if r["added_at"] else "",
     } for r in filtered])
 
+    failed = sum(1 for r in filtered if (quotes.get(r["ticker"]) or {}).get("price") is None)
     st.caption(f"{len(filtered)}개 · 🔍 **행을 클릭**하면 해당 종목 상세 분석으로 이동 "
-              "· 가격은 최근 종가 기준(최대 5분 지연, 국내 티커는 미지원)")
+              "· 가격은 yfinance 일봉 마지막 값(장중엔 지연 체결가, 5분 캐시 · 국내 ₩·미국 $)"
+              + (f" · ⚠️ 시세 미확인 {failed}개" if failed else ""))
     event = st.dataframe(
         df, hide_index=True, width="stretch", on_select="rerun", selection_mode="single-row",
     )
@@ -223,6 +275,7 @@ def _watchlist_section(rows: list[dict]) -> None:
                 st.rerun()
 
     _folder_move_section(rows, folders)
+    _edit_section(rows)
 
 
 _TX_TYPE_LABELS = {"Purchase": "매수", "Sale": "매도", "Exchange": "교환"}
@@ -358,8 +411,8 @@ def _institution_hub_section() -> None:
 
 def render():
     st.title("⭐ 관심종목")
-    st.caption("직접 추가한 종목을 보여주는 페이지 · 표시 전용 · "
-              "추가/삭제는 텔레그램 봇 `/watch add|remove`")
+    st.caption("직접 추가한 종목 · 추가/삭제는 이 페이지나 텔레그램 봇 `/watch add|remove` "
+              "(같은 저장소)")
 
     rows = data.load_watchlist()
     _watchlist_section(rows)

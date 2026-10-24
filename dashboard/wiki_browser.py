@@ -977,6 +977,25 @@ def _wiki_stats() -> dict[str, Any]:
     }
 
 
+WIKI_STATUS_LABELS = (("draft", "초안"), ("reviewed", "검토"), ("stable", "안정"), ("archived", "보관"))
+
+
+def wiki_status_metrics(stats: dict[str, Any]) -> list[tuple[str, str]]:
+    """페이지·상태별(없는 상태는 0)·최근 지표. 엔진 stats 는 문서가 없는 상태를 생략한다."""
+    counts = stats.get("status_counts") or {}
+    latest = stats.get("latest") or {}
+    metrics = [("페이지", f"{int(stats.get('total') or 0):,}")]
+    metrics += [(label, f"{int(counts.get(key) or 0):,}") for key, label in WIKI_STATUS_LABELS]
+    metrics.append(("최근", (str(latest.get("title") or "—"))[:20]))
+    return metrics
+
+
+def render_wiki_status_metrics(stats: dict[str, Any], *, st_module: Any = st) -> None:
+    metrics = wiki_status_metrics(stats)
+    for col, (label, value) in zip(st_module.columns(len(metrics)), metrics):
+        col.metric(label, value)
+
+
 def render_wiki_tab(surface: str, pack: dict[str, Any] | None = None) -> None:
     import pandas as pd
     import streamlit as st
@@ -991,12 +1010,7 @@ def render_wiki_tab(surface: str, pack: dict[str, Any] | None = None) -> None:
     st.caption("대화와 메모를 카드로 승격해 챗봇이 다시 읽는 지식층입니다.")
 
     stats = _wiki_stats()
-    cols = st.columns(4)
-    cols[0].metric("페이지", f"{stats.get('total', 0)}")
-    cols[1].metric("초안", f"{stats.get('status_counts', {}).get('draft', 0)}")
-    cols[2].metric("검토", f"{stats.get('status_counts', {}).get('reviewed', 0)}")
-    latest = stats.get("latest") or {}
-    cols[3].metric("최근", latest.get("title", "—")[:20] if latest else "—")
+    render_wiki_status_metrics(stats)
 
     pages_all, search_health, lint = _cached_wiki_snapshot()
     health = build_wiki_health_model(pages_all, search_health=search_health, lint=lint)

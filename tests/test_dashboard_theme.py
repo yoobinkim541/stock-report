@@ -181,6 +181,17 @@ def test_paper_rail_html_eok_and_empty():
     assert empty.startswith('<div class="tn-wl">')                 # 무행도 유효 마크업
 
 
+def test_paper_rail_pairs_nav_with_same_generation_return():
+    """세대 리셋 후 NAV($100,000)와 전체 세대 누적(-60%)을 나란히 보여 모순되던 문제."""
+    html = theme.paper_rail_html([{"label": "🇺🇸 미국", "currency": "$", "nav": 100_000.0,
+                                   "cum_ret": -60.24, "current_cum_ret": 0.0,
+                                   "generation": 3, "n_days": 1}])
+    row = html.split('class="tn-wl-chg"', 1)[1]
+    assert "+0.00%" in row and "-60.24%" not in row
+    assert "전체 3세대 누적 -60.24%" in html                        # 툴팁에 전체 누적
+    assert "현 세대 수익률" in html
+
+
 def test_orderbook_ladder_html():
     """호가 사다리 — 잔량 바·전일比 등락%·현재가 강조·총잔량·당일/52주 패널."""
     bids = [[23125, 518], [23110, 827]]

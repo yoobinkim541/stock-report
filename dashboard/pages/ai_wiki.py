@@ -9,7 +9,7 @@ from agent_console import wiki
 
 
 from dashboard import cached
-from dashboard.wiki_browser import KIND_OPTIONS, SURFACE_OPTIONS, build_wiki_health_model
+from dashboard.wiki_browser import KIND_OPTIONS, SURFACE_OPTIONS, build_wiki_health_model, render_wiki_status_metrics
 
 STATUS_OPTIONS = ["all", "draft", "reviewed", "stable", "archived"]
 
@@ -63,12 +63,7 @@ def render():
     )
 
     stats = _safe_wiki_stats()
-    cols = st.columns(4)
-    cols[0].metric("페이지", f"{stats.get('total', 0)}")
-    cols[1].metric("초안", f"{stats.get('status_counts', {}).get('draft', 0)}")
-    cols[2].metric("검토", f"{stats.get('status_counts', {}).get('reviewed', 0)}")
-    latest = stats.get("latest") or {}
-    cols[3].metric("최근", (latest.get("title", "—") or "—")[:20])
+    render_wiki_status_metrics(stats)
 
     try:
         pages_all = cached.wiki_pages(query="", surface="all", status="all", limit=10000)

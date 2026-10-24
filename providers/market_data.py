@@ -701,8 +701,24 @@ def freshness_note(fetched_ts, *, now: float | None = None) -> str:
     return f"🕒 {when} KST ({age_str}) · 시세 {src}"
 
 
+def _close_quote(s) -> dict | None:
+    """종가 시리즈 → {price, chg_pct, as_of}. as_of = 마지막 종가 봉의 날짜."""
+    s = s.dropna()
+    if s.empty:
+        return None
+    price = _safe_float(s.iloc[-1])
+    if price <= 0:
+        return None
+    chg_pct = None
+    if len(s) >= 2 and _safe_float(s.iloc[-2]) > 0:
+        chg_pct = (price / _safe_float(s.iloc[-2]) - 1) * 100
+    last = s.index[-1]
+    as_of = last.date().isoformat() if hasattr(last, "date") else str(last)[:10]
+    return {"price": price, "chg_pct": chg_pct, "as_of": as_of}
+
+
 def batch_quote_change(tickers: list[str]) -> dict:
-    """티커 목록 → {ticker: {"price", "chg_pct"}} 배치 조회 (직전 2 거래일 종가 비교).
+    """티커 목록 → {ticker: {"price", "chg_pct", "as_of"}} 배치 조회 (직전 2 거래일 종가 비교).
 
     관심종목처럼 실시간 스트림 구독 밖의 티커에 쓰는 가벼운 폴백(fetch_portfolio_value
     와 동일한 yf.download 배치 패턴). 네트워크/개별종목 실패는 조용히 생략.
@@ -712,33 +728,20 @@ def batch_quote_change(tickers: list[str]) -> dict:
     if not tks:
         return out
     try:
-        data = yf.download(tks, period="2d", auto_adjust=True, progress=False)
+        # 국내·미국 티커를 한 번에 받으면 휴장일이 달라 2일 창에선 한쪽 직전 종가가 비어
+        # 등락률이 사라진다. 5일 창에서 종목별 dropna 후 마지막 두 종가를 쓴다.
+        data = yf.download(tks, period="5d", auto_adjust=True, progress=False)
         if data.empty or "Close" not in data.columns:
             return out
         close = data["Close"]
         if hasattr(close, "columns"):               # DataFrame (복수 종목)
-            for t in tks:
-                if t not in close.columns:
-                    continue
-                s = close[t].dropna()
-                if s.empty:
-                    continue
-                price = _safe_float(s.iloc[-1])
-                if price <= 0:
-                    continue
-                chg_pct = None
-                if len(s) >= 2 and _safe_float(s.iloc[-2]) > 0:
-                    chg_pct = (price / _safe_float(s.iloc[-2]) - 1) * 100
-                out[t] = {"price": price, "chg_pct": chg_pct}
+            series = {t: close[t] for t in tks if t in close.columns}
         else:                                        # Series (단일 종목)
-            s = close.dropna()
-            if not s.empty:
-                price = _safe_float(s.iloc[-1])
-                if price > 0:
-                    chg_pct = None
-                    if len(s) >= 2 and _safe_float(s.iloc[-2]) > 0:
-                        chg_pct = (price / _safe_float(s.iloc[-2]) - 1) * 100
-                    out[tks[0]] = {"price": price, "chg_pct": chg_pct}
+            series = {tks[0]: close}
+        for t, s in series.items():
+            quote = _close_quote(s)
+            if quote:
+                out[t] = quote
     except Exception as e:
         logger.warning(f"batch_quote_change 실패: {e}")
     return out

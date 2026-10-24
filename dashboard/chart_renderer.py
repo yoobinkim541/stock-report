@@ -173,7 +173,7 @@ def _add_sequence_trade_markers(figure, frame: pd.DataFrame, records: Sequence[M
                 name=name,
                 showlegend=False,
                 customdata=custom,
-                marker=dict(symbol=symbol, size=13, color=color, line=dict(color="#ffffff", width=0.8)),
+                marker=charts.trade_marker_style(symbol, color),
                 hovertemplate="%{customdata.source_timestamp}<extra>" + name + "</extra>",
             ))
 
