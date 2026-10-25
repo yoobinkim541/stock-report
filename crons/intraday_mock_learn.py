@@ -196,12 +196,11 @@ def run_market(market: str) -> str:
                 + (f" · ⚠️orphan {len(orphans)}" if orphans else ""))
 
     idx_mdd = _index_mdd(market, [r.get("date", "") for r in rows])
-    prior_trials, trial_sharpes = learner.trial_history(f"{market}_intraday")
     out = learner.refit_and_adopt(
         rows, ip.get_policy(market), make_fit(market),
         lambda oos, params: eval_policy(oos, params, market),
         index_mdd=idx_mdd, min_samples=MIN_SAMPLES, embargo=1,   # 당일 청산 — 라벨 수평선 1일
-        n_trials=prior_trials + 1, trial_sharpes=trial_sharpes)
+        trial_log=learner.trial_history(f"{market}_intraday"))
     logger.info("[%s] 재학습: %s", market, out["reason"])
     evolution.record_learning(f"{market}_intraday", {
         **base_rec, "adopted": bool(out.get("adopted")), "reason": out.get("reason"),
@@ -213,6 +212,8 @@ def run_market(market: str) -> str:
         "sharpe_challenger": (out.get("evidence") or {}).get("sharpe_pp"),
         "psr_challenger": (out.get("evidence") or {}).get("psr"),
         "n_trials": (out.get("evidence") or {}).get("n_trials"),
+        "trial_key": (out.get("evidence") or {}).get("trial_key"),
+        "trial_sharpe": (out.get("evidence") or {}).get("trial_sharpe"),
         "candidate_params": out.get("candidate_params")})
     g = gate
     gate_line = (f"게이트 {g['verdict']} — n {g['n']}·순R {g.get('mean_net_r')}"

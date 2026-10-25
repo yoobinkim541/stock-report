@@ -83,43 +83,78 @@ def test_eval_policy_uses_top_max_positions_per_date():
     assert r["n_candidates"] == 4 and r["n_selected"] == 2
 
 
-def _dated(day, score, excess, index_ret):
-    return {"date": day, "ticker": f"T{score}", "features": {"ranker": score},
-            "fwd_excess": excess, "index_ret": index_ret}
+_TD = [d.strftime("%Y-%m-%d") for d in pd.bdate_range("2026-03-02", periods=700)]
 
 
-def test_eval_policy_builds_one_dated_series_with_portfolio_mdd():
-    """A-fix-learn: 날짜별 top-K 를 모두 평가 · 포트폴리오 곡선 MDD 를 수작업 기대값과 비교."""
-    d1 = [_dated("2026-05-04", s, e, 0.02) for s, e in
-          [(0.9, 0.10), (0.8, 0.06), (0.5, -0.5), (0.4, -0.5), (0.3, -0.5), (0.2, -0.5)]]
-    d2 = [_dated("2026-05-05", s, e, -0.05) for s, e in
-          [(0.9, -0.20), (0.8, 0.00), (0.5, 0.5), (0.4, 0.5), (0.3, 0.5), (0.2, 0.5)]]
-    r = L.eval_policy(d1 + d2, {"w_ranker": 1.0}, max_positions=2)
-    # 일별 바스켓 초과수익: d1 (0.10+0.06)/2=0.08, d2 (-0.20+0.00)/2=-0.10 → 평균 -0.01
-    assert r["series"] == pytest.approx([0.08, -0.10])
-    assert r["excess"] == pytest.approx(-0.01)
-    # 절대 net 수익 = 초과 + 지수: d1 0.10, d2 -0.15 → NAV 1→1.10→0.935 → MDD 0.15
-    assert r["mdd"] == pytest.approx(0.15)
-    assert r["mdd_basis"] == "absolute"
-    assert (r["n"], r["n_candidates"], r["n_selected"]) == (2, 12, 4)
-    assert r["n_independent"] == 1                       # 20거래일 보유가 겹치는 이틀 = 독립 1
-    from ml.adaptive import oos_eval
-    # 같은 평가일 지수 곡선 1→1.02→0.969 → MDD 0.05 (전략 MDD 와 같은 단위)
-    assert oos_eval.index_curve_mdd(d1 + d2) == pytest.approx(0.05)
+def _held(day_i, score, excess, stock_path, idx_path=None, ticker=None):
+    """day_i 거래일 결정 · 보유 경로(진입=1) 를 가진 학습행 (backfill 이 남기는 outcome 형식)."""
+    days = _TD[day_i:day_i + len(stock_path)]
+    idx_path = idx_path or [1.0] * len(stock_path)
+    name = ticker or f"T{score}"
+    return {"id": f"{_TD[day_i]}:{name}", "date": _TD[day_i], "ticker": name,
+            "features": {"ranker": score}, "fwd_excess": excess, "gross_excess": excess,
+            "entry_date": days[0], "exit_date": days[-1],
+            "path": [[d, s, i] for d, s, i in zip(days, stock_path, idx_path)]}
 
 
-def test_eval_policy_does_not_count_candidates_as_samples():
-    """A-fix-learn: 20일×2후보 = 40행, 상위 5행만 +10% — 전체를 한 바스켓으로 뭉쳐 n=40 이 되면 안 된다."""
+def test_eval_policy_mdd_follows_holding_path_not_exit_returns():
+    """A-fix2 RA-01: 종료 수익은 +10% 여도 보유 중 50% 낙폭은 MDD 에 남는다(종료수익 합성곡선 금지)."""
+    d0 = [_held(0, 0.9, 0.10, [1.0, 0.5, 0.9, 1.1]), _held(0, 0.8, 0.10, [1.0, 1.0, 1.0, 1.1]),
+          _held(0, 0.1, -0.5, [1.0, 1.0, 1.0, 0.5])]
+    d1 = [_held(1, 0.9, 0.06, [1.0, 1.0, 1.0, 1.06]), _held(1, 0.8, 0.06, [1.0, 1.0, 1.0, 1.06])]
+    r = L.eval_policy(d0 + d1, {"w_ranker": 1.0}, max_positions=2)
+    assert r["excess"] == pytest.approx(0.08)                 # 점추정은 모든 평가일(0.10, 0.06)
+    assert (r["n"], r["n_candidates"], r["n_selected"]) == (2, 5, 4)
+    # 비중첩: d0 코호트(종료 _TD[3]) 보유 중 시작한 d1 은 독립 관측이 아니다
+    assert r["series"] == pytest.approx([0.10]) and r["n_independent"] == 1
+    assert r["series_days"] == [_TD[0]]
+    assert sorted(r["series_ids"][0]) == sorted([d0[0]["id"], d0[1]["id"]])
+    # 바스켓 일별 가치 1 → (0.5+1)/2=0.75 → 0.95 → 1.10 → MDD 0.25, 지수 평탄 → 0
+    assert r["mdd"] == pytest.approx(0.25) and r["index_mdd"] == pytest.approx(0.0)
+    assert r["mdd_basis"] == "holding_path"
+
+
+def test_eval_policy_without_paths_has_no_risk_or_independent_evidence():
+    """legacy 행(경로·종료일 없음): 후보 수를 표본으로 세지 않고, 독립 증거·위험 곡선도 만들지 않는다."""
     rows = []
     for i in range(20):
         day = f"2026-03-{i + 1:02d}"
         good = i < 5
-        rows.append(_dated(day, 0.9 if good else 0.6, 0.10 if good else -0.90, 0.0))
-        rows.append(_dated(day, 0.1, -0.90, 0.0))
+        rows.append({"date": day, "ticker": "G", "features": {"ranker": 0.9 if good else 0.6},
+                     "fwd_excess": 0.10 if good else -0.90})
+        rows.append({"date": day, "ticker": "B", "features": {"ranker": 0.1}, "fwd_excess": -0.90})
     r = L.eval_policy(rows, {"w_ranker": 1.0}, max_positions=5)
     assert r["n"] == 20 and r["n_candidates"] == 40 and r["n_selected"] == 40
     assert r["excess"] < 0                               # 매일 바스켓이 -90% 행을 포함
-    assert r["n_independent"] == 1                       # 3주 안의 20일 → 겹침
+    assert r["n_independent"] == 0 and r["series"] == [] and r["n_unresolved_days"] == 20
+    assert r["mdd"] is None and r["index_mdd"] is None and r["mdd_basis"] == "unavailable"
+
+
+def test_eval_policy_independent_series_is_first_day_of_each_label_block():
+    """A-fix2 RA-02 재현 2: 블록 첫날 -2%·나머지 +2%. 검정 입력은 실제 비중첩 관측(블록 첫날)이어야 한다.
+
+    예전엔 전체 400 평가일 열로 PSR .957·ok=True 를 냈다(보고 표본과 검정 관측열 불일치)."""
+    from ml.adaptive import learner
+    rows = []
+    for b in range(20):
+        for j in range(20):
+            day_i = b * 20 + j
+            ex = (-0.02 + 0.001 * (b % 3)) if j == 0 else (0.02 + 0.001 * (day_i % 3))
+            rows.append(_held(day_i, 0.9, ex, [1.0] * 20 + [1.0 + ex], ticker="X"))
+    r = L.eval_policy(rows, {"w_ranker": 1.0}, max_positions=1)
+    assert r["series_days"] == [_TD[b * 20] for b in range(20)]
+    by_id = {row["id"]: row["fwd_excess"] for row in rows}
+    assert r["series"] == pytest.approx([by_id[ids[0]] for ids in r["series_ids"]])
+    assert r["n_independent"] == len(r["series"]) == 20
+    ev = learner.adoption_evidence(r)
+    assert ev["ok"] is False and ev["n_independent"] == 20
+
+
+def _win(stock_ret, idx_ret, stock_mdd, idx_mdd, entry="2026-05-01", exit_="2026-05-29"):
+    """_holding_window 형식(보유 경로 포함) 가짜 결과."""
+    return {"stock_ret": stock_ret, "idx_ret": idx_ret, "stock_mdd": stock_mdd, "idx_mdd": idx_mdd,
+            "entry_date": entry, "exit_date": exit_,
+            "path": [[entry, 1.0, 1.0], [exit_, 1.0 + stock_ret, 1.0 + idx_ret]]}
 
 
 def test_backfill_matures_entries_only_and_idempotent(tmp_path):
@@ -130,12 +165,12 @@ def test_backfill_matures_entries_only_and_idempotent(tmp_path):
     lg.log_decision({"date": "2026-05-02", "ticker": "035720.KS", "code": "035720", "side": "편입",
                      "features": {"ranker": 0.3}})
 
-    def fake_price(ticker, date, horizon):
+    def fake_window(ticker, date, horizon):
         if ticker == "005930.KS":
-            return (0.12, 0.04, 0.06, 0.03)   # (종목수익, 지수수익, 종목MDD, 지수MDD)
-        return None                            # 035720 미성숙
+            return _win(0.12, 0.04, 0.06, 0.03)   # (종목수익, 지수수익, 종목MDD, 지수MDD)
+        return None                                # 035720 미성숙
 
-    added = L.backfill_outcomes(lg, price_fn=fake_price)
+    added = L.backfill_outcomes(lg, window_fn=fake_window)
     assert added == 1                                   # 편입·성숙분만 (퇴출 제외, 미성숙 제외)
     from ml.adaptive import costs
     rt = costs.round_trip_frac("KR")
@@ -144,9 +179,13 @@ def test_backfill_matures_entries_only_and_idempotent(tmp_path):
     assert outs[0]["gross_excess"] == pytest.approx(0.08)                          # 원 초과
     assert outs[0]["fwd_excess"] == pytest.approx(0.08 - rt) and outs[0]["success"] is True  # net(왕복비용 차감)
     assert outs[0]["fwd_mdd"] == pytest.approx(0.06) and outs[0]["idx_fwd_mdd"] == pytest.approx(0.03)
+    # 위험곡선·비중첩 판정의 근거(실제 진입/종료 거래일·보유 경로)를 outcome 에 보존
+    assert (outs[0]["entry_date"], outs[0]["exit_date"]) == ("2026-05-01", "2026-05-29")
+    assert [p[0] for p in outs[0]["path"]] == ["2026-05-01", "2026-05-29"]
+    assert [p[1:] for p in outs[0]["path"]] == [pytest.approx([1.0, 1.0]), pytest.approx([1.12, 1.04])]
 
     # 멱등: 재실행해도 중복 outcome 없음
-    assert L.backfill_outcomes(lg, price_fn=fake_price) == 0
+    assert L.backfill_outcomes(lg, window_fn=fake_window) == 0
     assert len(lg.read_outcomes()) == 1
 
     # 학습셋 조인(성숙분만)
@@ -162,10 +201,7 @@ def test_backfill_excludes_unfilled_decisions(tmp_path):
     lg.log_decision({"date": "2026-05-01", "ticker": "000660.KS", "code": "000660", "side": "편입",
                      "features": {"ranker": 0.7}, "ok": False})   # 주문 거부 → 학습 제외돼야
 
-    def fake_price(ticker, date, horizon):
-        return (0.12, 0.04, 0.06, 0.03)
-
-    added = L.backfill_outcomes(lg, price_fn=fake_price)
+    added = L.backfill_outcomes(lg, window_fn=lambda t, d, h: _win(0.12, 0.04, 0.06, 0.03))
     assert added == 1                                            # ok=True 편입만 성숙(ok=False 제외)
     outs = lg.read_outcomes()
     assert len(outs) == 1 and outs[0]["decision_id"] == "2026-05-01:005930.KS"
@@ -247,13 +283,77 @@ def test_backfill_supports_shadow_observation_side(tmp_path):
     lg.log_decision({"date": "2026-05-01", "ticker": "005930.KS", "code": "005930",
                      "side": "관측", "shadow": True, "ok": True, "policy_score": 0.8})
 
-    def fake_price(ticker, date, horizon):
-        return (0.12, 0.04, 0.06, 0.03)
+    fake_window = lambda ticker, date, horizon: _win(0.12, 0.04, 0.06, 0.03)
 
     # 기본 호출은 '관측'을 무시(라이브 규칙 그대로)
-    assert L.backfill_outcomes(lg, price_fn=fake_price) == 0
+    assert L.backfill_outcomes(lg, window_fn=fake_window) == 0
     # 섀도 전용 호출만 성숙
-    added = L.backfill_outcomes(lg, price_fn=fake_price, sides=("관측",))
+    added = L.backfill_outcomes(lg, window_fn=fake_window, sides=("관측",))
     assert added == 1
     outs = lg.read_outcomes()
     assert len(outs) == 1 and outs[0]["decision_id"] == "2026-05-01:005930.KS"
+
+
+def test_default_holding_window_records_trading_day_path(tmp_path, monkeypatch):
+    """기본 백필 경로: 공통 거래일 정렬 후 실제 진입/종료 거래일과 일별 경로(진입=1)를 낸다."""
+    from providers import market_data
+    idx = pd.bdate_range("2026-05-01", periods=6)
+    stock = pd.Series([100.0, 80.0, 90.0, 105.0, 110.0, 120.0], index=idx)
+    bench = pd.Series([200.0, 200.0, 190.0, 200.0, 210.0, 220.0], index=idx)
+    from ml.data_pipeline import KR_BENCHMARK
+    series = {"005930.KS": stock, KR_BENCHMARK: bench}
+    monkeypatch.setattr(market_data, "load_close_series_upto",
+                        lambda t, need_last=None, fetch_fn=None: series.get(t))
+    w = L._holding_window("005930.KS", "2026-05-01", 4)
+    assert (w["entry_date"], w["exit_date"]) == ("2026-05-01", "2026-05-07")
+    assert [p[0] for p in w["path"]] == [d.strftime("%Y-%m-%d") for d in idx[:5]]
+    assert [p[1] for p in w["path"]] == pytest.approx([1.0, 0.8, 0.9, 1.05, 1.1])
+    assert w["stock_ret"] == pytest.approx(0.10) and w["stock_mdd"] == pytest.approx(0.20)
+    assert L._default_price_fn("005930.KS", "2026-05-01", 4) == pytest.approx(
+        (w["stock_ret"], w["idx_ret"], w["stock_mdd"], w["idx_mdd"]))
+
+
+def _risk_rows(risk_path_fn, n_days=500):
+    """매 결정일 SAFE(무수익·무낙폭)·RISK(20일 종료 +1~2%) 두 후보. 지수 평탄."""
+    rows = []
+    for j in range(n_days):
+        ex = 0.01 + 0.005 * (j % 3)
+        safe = _held(j, 0.4, 0.0, [1.0] * 21, ticker="SAFE")
+        safe["features"] = {"ranker": 0.4, "fund": 1.0, "signal": 1.0}
+        risk = _held(j, 0.6, ex, risk_path_fn(ex), ticker="RISK")
+        risk["features"] = {"ranker": 0.6, "fund": 0.0, "signal": 0.0}
+        safe["index_ret"] = risk["index_ret"] = 0.0
+        rows += [safe, risk]
+    return rows
+
+
+def _refit_risk(tmp_path, monkeypatch, rows):
+    from ml import kr_policy
+    from ml.adaptive import learner, policy as pol
+    monkeypatch.setattr(pol, "_CACHE_DIR", tmp_path)
+    policy = kr_policy.get_policy()                        # 챔피언 = 기본 가중 → SAFE 선택
+    saved = []
+    monkeypatch.setattr(policy, "save", lambda params, meta=None: saved.append((params, meta)))
+    candidate = {k: 0.0 for k in kr_policy.DEFAULT_POLICY} | {"w_ranker": 1.0}   # → RISK 선택
+    out = learner.refit_and_adopt(rows, policy, lambda tr: dict(candidate),
+                                  lambda oos, params: L.eval_policy(oos, params, 1),
+                                  index_mdd=0.0, min_samples=40, embargo=L.HORIZON)
+    return out, saved
+
+
+def test_refit_blocks_candidate_with_80pct_holding_drawdown(tmp_path, monkeypatch):
+    """A-fix2 RA-01 회귀: 종료 수익은 +1~2% 지만 보유 중 80% 낙폭 → 예전엔 MDD 0·저장 1회."""
+    rows = _risk_rows(lambda ex: [1.0, 0.2] + [0.2] * 18 + [1.0 + ex])
+    out, saved = _refit_risk(tmp_path, monkeypatch, rows)
+    chal = out["challenger"]
+    assert chal["mdd"] >= 0.79 and chal["index_mdd"] == pytest.approx(0.0)
+    assert out["adopted"] is False and saved == []
+
+
+def test_refit_adopts_same_candidate_without_holding_drawdown(tmp_path, monkeypatch):
+    """대조군: 같은 종료 수익·보유 낙폭 0 → 위험·통계 게이트 모두 통과해 저장 1회(게이트 상시 폐쇄 아님)."""
+    rows = _risk_rows(lambda ex: [1.0] * 20 + [1.0 + ex])
+    out, saved = _refit_risk(tmp_path, monkeypatch, rows)
+    assert out["challenger"]["mdd"] == pytest.approx(0.0)
+    assert out["challenger"]["n_independent"] >= 8
+    assert out["adopted"] is True and len(saved) == 1

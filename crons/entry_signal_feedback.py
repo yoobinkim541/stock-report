@@ -32,6 +32,24 @@ def main() -> int:
     summaries = {h: entry_feedback.summarize_feedback(horizon=h) for h in summary_horizons}
     s20, s60 = summaries[20], summaries[60]
     adjust = entry_feedback.learn_feedback_adjustments(horizon=20)
+    if adjust.get("challenger") is not None:
+        # OOS 평가까지 간 시도만 이력에 남긴다 — 다음 학습의 다중시도 보정(시도 지문·미반올림 Sharpe) 근거.
+        from ml.adaptive import evolution
+        evidence = adjust.get("evidence") or {}
+        evolution.record_learning(entry_feedback.TRIAL_SURFACE, {
+            "date": datetime.now(KST).strftime("%Y-%m-%d"), "adopted": bool(adjust.get("adopted")),
+            "reason": adjust.get("reason"),
+            "excess_challenger": adjust["challenger"].get("excess"),
+            "excess_champion": (adjust.get("champion") or {}).get("excess"),
+            "n_oos": adjust.get("oos_n"),
+            "n_oos_independent": adjust["challenger"].get("n_independent"),
+            "sharpe_challenger": evidence.get("sharpe_pp"),
+            "psr_challenger": evidence.get("psr"),
+            "n_trials": evidence.get("n_trials"),
+            "trial_key": evidence.get("trial_key"),
+            "trial_sharpe": evidence.get("trial_sharpe"),
+            "candidate_params": adjust.get("adjustments"),
+        })
     compact = " · ".join(f"{h} n={summaries[h].get('n', 0)}" for h in summary_horizons)
     logger.info(
         "백필 %d건 · %s · 보정학습 adopted=%s (%s)",

@@ -78,23 +78,23 @@ def fit_policy(train_rows: list[dict]) -> dict:
 
 
 def eval_policy(oos_rows: list[dict], params: dict, max_positions: int = 5) -> dict:
-    """OOS = 결정일별 정책점수 상위 max_positions 바스켓(편입측)을 평가일 단위로 이은 OOS 시계열.
+    """OOS = 결정일별 정책점수 상위 max_positions 바스켓(편입측).
 
-    n = 평가일 수, n_candidates/n_selected/n_independent 분리, mdd = 포트폴리오 곡선 MDD
-    (ml.adaptive.oos_eval.dated_topk_eval).
+    n = 평가일 수, n_candidates/n_selected 분리, series = 실제 라벨 종료일 기준 비중첩 코호트
+    초과수익(n_independent = len(series)), mdd/index_mdd = 그 코호트 보유 일별 mark-to-market 곡선
+    MDD (ml.adaptive.oos_eval.dated_topk_eval).
     """
     from ml import us_policy
     from ml.adaptive import oos_eval
     return oos_eval.dated_topk_eval(
-        _buy_rows(oos_rows), lambda r: us_policy.score(r.get("features", {}), params), max_positions,
-        horizon_days=HORIZON)
+        _buy_rows(oos_rows), lambda r: us_policy.score(r.get("features", {}), params), max_positions)
 
 
-def _default_price_fn(ticker: str, start_date: str, horizon: int):
-    """보유기간 (종목수익, QQQ수익, 종목MDD, QQQ MDD). 미성숙/실패 → None. 공통 거래일 정렬."""
+def _holding_window(ticker: str, start_date: str, horizon: int) -> dict | None:
+    """보유기간 outcome 필드(수익·MDD·실제 진입/종료 거래일·일별 경로). 미성숙/실패 → None. 공통 거래일 정렬."""
     try:
         from providers import market_data
-        from ml.adaptive import reward as _reward
+        from ml.adaptive import oos_eval
         from ohlc_utils import align_common_index
         # 성숙 판정에 필요한 마지막 거래일(≈ 결정일 + horizon 거래일, 주말 여유 포함)
         import pandas as _pd
@@ -108,26 +108,27 @@ def _default_price_fn(ticker: str, start_date: str, horizon: int):
         s, b = align_common_index(s, b, start=start_date)
         if s is None or b is None:
             return None
-        if len(s) <= horizon:
-            return None
-        sw, bw = s.iloc[:horizon + 1], b.iloc[:horizon + 1]
-        return (float(sw.iloc[-1]) / float(sw.iloc[0]) - 1.0,
-                float(bw.iloc[-1]) / float(bw.iloc[0]) - 1.0,
-                _reward.max_drawdown([float(x) for x in sw.values]),
-                _reward.max_drawdown([float(x) for x in bw.values]))
+        return oos_eval.holding_window(s, b, horizon)
     except Exception as e:
         logger.warning("가격 조회 실패 %s: %s", ticker, e)
         return None
 
 
-def backfill_outcomes(ledger, *, horizon: int = HORIZON, price_fn=None,
-                      sides: tuple[str, ...] = ("편입", "증액", "퇴출", "감액")) -> int:
-    """미성숙 결정의 실현 초과수익 + side-aware 정답 플래그를 outcomes 에 추가. 추가 건수 반환.
+def _default_price_fn(ticker: str, start_date: str, horizon: int):
+    """보유기간 (종목수익, QQQ수익, 종목MDD, QQQ MDD). 미성숙/실패 → None (LLM shadow 백필용)."""
+    w = _holding_window(ticker, start_date, horizon)
+    return None if w is None else (w["stock_ret"], w["idx_ret"], w["stock_mdd"], w["idx_mdd"])
 
+
+def backfill_outcomes(ledger, *, horizon: int = HORIZON, window_fn=None,
+                      sides: tuple[str, ...] = ("편입", "증액", "퇴출", "감액")) -> int:
+    """미성숙 결정의 실현 초과수익 + side-aware 정답 플래그 + 보유 경로를 outcomes 에 추가. 추가 건수 반환.
+
+    window_fn(ticker, date, horizon) -> _holding_window 형식 dict | None.
     sides: 평가 대상 side. 기본은 라이브 매매. 랭킹 섀도 표면은 ("관측",) 로 호출
     (선택편향 없는 IC 측정용 — lib/rank_shadow.py).
     """
-    price_fn = price_fn or _default_price_fn
+    window_fn = window_fn or _holding_window
     added = 0
     for d in ledger.pending():
         side = d.get("side")
@@ -135,10 +136,10 @@ def backfill_outcomes(ledger, *, horizon: int = HORIZON, price_fn=None,
             continue
         if d.get("ok") is False:   # ★미집행(주문실패) 결정은 학습 제외 — 팬텀 트레이드 오염 방지(S6)
             continue
-        res = price_fn(d.get("ticker", ""), d.get("date", ""), horizon)
-        if res is None:
+        w = window_fn(d.get("ticker", ""), d.get("date", ""), horizon)
+        if w is None:
             continue
-        stock_ret, idx_ret, stock_mdd, idx_mdd = res
+        stock_ret, idx_ret = w["stock_ret"], w["idx_ret"]
         from ml.adaptive import costs
         gross = stock_ret - idx_ret
         is_buy = side in _BUY
@@ -148,10 +149,11 @@ def backfill_outcomes(ledger, *, horizon: int = HORIZON, price_fn=None,
         ledger.log_outcome({
             "decision_id": d["id"], "side": side, "horizon": horizon,
             "matured_at": datetime.now(KST).strftime("%Y-%m-%d"),
+            "entry_date": w["entry_date"], "exit_date": w["exit_date"], "path": w["path"],
             "stock_ret": round(stock_ret, 5), "index_ret": round(idx_ret, 5),
             "fwd_excess": round(net, 5), "gross_excess": round(gross, 5),
-            "fwd_mdd": round(stock_mdd, 5),
-            "idx_fwd_mdd": round(idx_mdd, 5), "correct": bool(correct), "success": bool(correct),
+            "fwd_mdd": round(w["stock_mdd"], 5),
+            "idx_fwd_mdd": round(w["idx_mdd"], 5), "correct": bool(correct), "success": bool(correct),
         })
         added += 1
     return added
@@ -215,21 +217,13 @@ def main() -> int:
         send_cron_telegram(msg)
         return 0
 
-    # 지수 MDD 는 챌린저 MDD 와 동일 OOS 창·동일 평가일 곡선에서 계산(전체 population 평균은 baseline 부풀림 — 감사 확정)
-    from ml.adaptive import oos_eval
-    from ml.adaptive.learner import walk_forward_split
-    _, _oos_mask = walk_forward_split([r.get("date", "") for r in rows], embargo=HORIZON)
-    _oos_buy = _buy_rows([r for r, m in zip(rows, _oos_mask) if m])
-    index_mdd = oos_eval.index_curve_mdd(_oos_buy)
-    if index_mdd is None:
-        index_mdd = 0.20
-        logger.warning("OOS 평가일 지수 수익 없음 — 지수 MDD 기본 0.20")
-    prior_trials, trial_sharpes = learner.trial_history("us_mock")
+    # 지수 MDD 기준은 eval_policy 가 챌린저와 같은 보유 날짜·같은 비중의 지수 곡선으로 낸다(index_mdd).
+    # 보유 경로가 없어 산출 불가면 위험 증거 없음 → 보류(기본값으로 대체하지 않음).
     out = learner.refit_and_adopt(
         rows, us_policy.get_policy(), fit_policy,
         lambda oos, params: eval_policy(oos, params, MAX_POS),
-        index_mdd=index_mdd, min_samples=MIN_SAMPLES, embargo=HORIZON,
-        n_trials=prior_trials + 1, trial_sharpes=trial_sharpes)
+        min_samples=MIN_SAMPLES, embargo=HORIZON,
+        trial_log=learner.trial_history("us_mock"))
     logger.info("재학습 결과: %s", out["reason"])
     evolution.record_learning("us_mock", {
         "date": datetime.now(KST).strftime("%Y-%m-%d"), "adopted": bool(out.get("adopted")),
@@ -237,13 +231,18 @@ def main() -> int:
         "excess_challenger": (out.get("challenger") or {}).get("excess"),
         "excess_champion": (out.get("champion") or {}).get("excess"),
         "mdd_challenger": (out.get("challenger") or {}).get("mdd"),
+        "index_mdd_oos": out.get("risk_index_mdd"),
+        "mdd_basis": (out.get("challenger") or {}).get("mdd_basis"),
         "n_oos": (out.get("challenger") or {}).get("n"),
         "n_oos_candidates": (out.get("challenger") or {}).get("n_candidates"),
         "n_oos_selected": (out.get("challenger") or {}).get("n_selected"),
         "n_oos_independent": (out.get("challenger") or {}).get("n_independent"),
+        "n_oos_unresolved": (out.get("challenger") or {}).get("n_unresolved_days"),
         "sharpe_challenger": (out.get("evidence") or {}).get("sharpe_pp"),
         "psr_challenger": (out.get("evidence") or {}).get("psr"),
         "n_trials": (out.get("evidence") or {}).get("n_trials"),
+        "trial_key": (out.get("evidence") or {}).get("trial_key"),
+        "trial_sharpe": (out.get("evidence") or {}).get("trial_sharpe"),
         "candidate_params": out.get("candidate_params"),
         "llm_shadow_added": llm_added,
         "llm_shadow_n": llm_summary.get("n"),

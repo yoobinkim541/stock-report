@@ -101,8 +101,15 @@ tranche 분할은 **미적용**(단타는 일괄 진입/청산 — lib/tranche �
 `crons/intraday_mock_learn.py` (토 03:30 UTC) — `kr_mock_learn.py` 템플릿 그대로:
 - `learner.robust_axis_weight(축점수, realized net R, stability=True)` → 축별 상관
 - `learner.refit_and_adopt(...)` walk-forward OOS 게이트 (min_samples=100 — 트레이드가 많아 통계 파워 빨리 참)
-  + 통계 게이트 `learner.adoption_evidence` — 거래일별 슬리브 수익 시계열의 PSR≥0.95(T=독립 거래일 수,
-  누적 시도 수>1 이면 시도별 Sharpe 분산으로 deflate한 DSR)·독립 거래일 ≥8. 증거 누락·계산 실패는 보류.
+  + 통계 게이트 `learner.adoption_evidence` — 거래일별 슬리브 수익 시계열(당일 청산이라 거래일끼리 비중첩,
+  T 와 모든 모멘트를 같은 열에서 계산)의 PSR≥0.95·독립 거래일 ≥8. 증거 누락·계산 실패는 보류.
+  - 다중시도 보정: 시도 수>1 이면 시도별 Sharpe 분산으로 deflate한 DSR. 시도 = (후보 파라미터, OOS 행 id
+    집합) 지문(`learner.trial_fingerprint`)이 서로 다른 평가이고, 학습 이력에 `trial_key`·미반올림
+    `trial_sharpe` 를 남긴다. 같은 지문 재평가는 새 시도가 아니다.
+  - 지문 없는 기존(legacy) 기록은 시도 수에는 세지만(보수적) 그 Sharpe(표시용 반올림값)는 분산 증거로
+    쓰지 않는다. 지문 있는 Sharpe 가 5개 이상이면서 전체 시도의 50% 이상이어야 분산을 추정하고
+    (`trial_evidence_insufficient`), 시도 Sharpe 표준편차 <1e-6 이면 무정보로 보류한다
+    (`trial_variance_degenerate`). 기존 이력은 모두 legacy 이므로 지문 있는 새 평가가 쌓일 때까지 보류된다.
 - `reward.objective_score` 재사용 — 단기 슬리브 MDD 가 지수 MDD 초과 시 하드 디스퀄
 - `evolution.record_learning()` → `/evolve`·대시보드 학습곡선에 `kr_intraday`/`us_intraday` 표면 추가
 

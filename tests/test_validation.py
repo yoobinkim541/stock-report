@@ -153,14 +153,6 @@ def test_pbo_invariant_to_column_order_with_ties():
     assert a["pbo"] == pytest.approx(b["pbo"])
 
 
-def test_dsr_effective_n_cannot_exceed_observations():
-    r = np.random.default_rng(44).normal(0.002, 0.01, 50)
-    assert v.deflated_sharpe_ratio(r, n_trials=1, effective_n=51) is None
-    full = v.deflated_sharpe_ratio(r, n_trials=1)
-    fewer = v.deflated_sharpe_ratio(r, n_trials=1, effective_n=10)
-    assert full > fewer > 0.5                             # 독립 표본이 적을수록 증거 약함
-
-
 # ── Purged K-Fold ─────────────────────────────────────────────────────
 def test_purged_kfold_no_label_overlap():
     splits = v.purged_kfold_indices(100, n_splits=5, label_horizon=5, embargo=3)

@@ -47,6 +47,8 @@ MIN_OOS_SAMPLES = int(os.getenv("ENTRY_FEEDBACK_OOS_MIN_SAMPLES", "10"))
 FACTOR_ADJUST_CAP = 0.04
 TOTAL_ADJUST_CAP = 0.08
 FACTOR_SCORE_PER_R = 0.035
+# 보정 학습의 시도 이력 표면(ml.adaptive.evolution learning jsonl) — 다중시도 보정(DSR)·시도 지문 근거.
+TRIAL_SURFACE = "entry_feedback"
 
 
 def _today_kst() -> str:
@@ -987,6 +989,38 @@ def _realized_excess(row: dict) -> float:
     return 0.0
 
 
+def _label_window(row: dict) -> tuple[str, str | None]:
+    """라벨 구간(진입 거래일, 종료 거래일|None). 종료일이 없으면 기간 미상(독립 증거로 못 씀)."""
+    start = str(row.get("entry_date") or row.get("date") or "")[:10]
+    end = str(row.get("exit_date") or "")[:10] or None
+    return start, end
+
+
+def _nonoverlapping_series(selected: list[dict]) -> dict:
+    """선택 행 → 결정일 바스켓 → 실제 라벨 종료일 기준 비중첩 관측열(통계 게이트 입력)."""
+    from ml.adaptive.oos_eval import nonoverlapping_units
+
+    by_day: dict[str, list[dict]] = {}
+    for row in selected:
+        by_day.setdefault(str(row.get("date") or "")[:10], []).append(row)
+    units = []
+    for day, members in by_day.items():
+        windows = [_label_window(r) for r in members]
+        start = min(w[0] for w in windows) if all(w[0] for w in windows) else day
+        end = None if any(w[1] is None for w in windows) else max(w[1] for w in windows)
+        if start < day:                       # 결정일 이전 진입 기록 = 손상 → 기간 미상
+            start, end = day, None
+        value = sum(_realized_excess(r) for r in members) / len(members)
+        units.append((start, end, (day, value)))
+    picked, unresolved = nonoverlapping_units(units)
+    return {
+        "series": [round(value, 8) for _, _, (_, value) in picked],
+        "series_days": [day for _, _, (day, _) in picked],
+        "n_independent": len(picked),
+        "n_unresolved_days": unresolved,
+    }
+
+
 def _eval_adjustments(rows: list[dict], adjustments: dict[str, float], threshold: float) -> dict:
     selected = []
     for row in rows:
@@ -994,7 +1028,8 @@ def _eval_adjustments(rows: list[dict], adjustments: dict[str, float], threshold
         if adj_score >= threshold:
             selected.append(row)
     if not selected:
-        return {"excess": 0.0, "mdd": 0.0, "avg_loss": 0.0, "n": 0, "win_rate": 0.0}
+        return {"excess": 0.0, "mdd": 0.0, "avg_loss": 0.0, "n": 0, "win_rate": 0.0,
+                "series": [], "series_days": [], "n_independent": 0, "n_unresolved_days": 0}
     excess_values = [_realized_excess(r) for r in selected]
     wins = sum(1 for r in selected if r.get("success"))
     losses = [value for value in excess_values if value < 0]
@@ -1008,6 +1043,7 @@ def _eval_adjustments(rows: list[dict], adjustments: dict[str, float], threshold
         "avg_loss": round(abs(sum(losses) / len(losses)), 4) if losses else 0.0,
         "n": len(selected),
         "win_rate": round(wins / len(selected), 4),
+        **_nonoverlapping_series(selected),
     }
 
 
@@ -1100,12 +1136,21 @@ def _outcome_available_time(row: dict):
 def learn_feedback_adjustments(rows: list[dict] | None = None, *,
                                horizon: int = 20,
                                save: bool = True,
-                               path: Path | str | None = None) -> dict:
+                               path: Path | str | None = None,
+                               trial_log: dict | None = None) -> dict:
     """사후 성과를 이용해 조건별 점수 보정치를 학습하고, 검증 통과 시 저장.
 
     train/OOS 경계는 결정일 단위(같은 날 다종목이 양쪽에 걸치지 않음)이며, train 라벨의
     이용가능 시각(exit/성숙)이 첫 OOS 결정 시각 이전인 행만 학습한다(ml.purged_split).
+
+    채택 계약(모두 충족):
+    - 챔피언 = 지금 실제 점수에 적용 중인 저장 모델의 보정치(없으면 무보정). 같은 OOS 행·같은 문턱으로
+      평가해 challenger 가 절대 양의 초과수익 + 챔피언 초과 + MDD/평균손실 ≤ 챔피언.
+    - 통계 게이트(ml.adaptive.learner.adoption_evidence): challenger 선택 행의 결정일 바스켓을 실제
+      라벨 종료일 기준으로 겹치지 않게 고른 관측열의 PSR/DSR. 시도 지문 = (보정치, 문턱, horizon,
+      OOS 행 집합), trial_log 는 TRIAL_SURFACE 학습 이력(None 이면 파일에서 읽음).
     """
+    from ml.adaptive import learner
     from ml.purged_split import purged_day_holdout_split
 
     rows = list(rows if rows is not None else training_rows(horizon=horizon))
@@ -1183,7 +1228,9 @@ def learn_feedback_adjustments(rows: list[dict] | None = None, *,
     except Exception:
         threshold = 0.62
 
-    champion = _eval_adjustments(oos, {}, threshold)
+    champion_model = load_feedback_adjustments(path)
+    champion_adjustments = dict(champion_model.get("adjustments") or {})
+    champion = _eval_adjustments(oos, champion_adjustments, threshold)
     challenger = _eval_adjustments(oos, adjustments, threshold)
 
     try:
@@ -1193,9 +1240,9 @@ def learn_feedback_adjustments(rows: list[dict] | None = None, *,
         # MIN_OOS_SAMPLES applies to the held-out time window. A stricter
         # per-threshold selected-count gate would reject a valid OOS window
         # simply because the challenger is intentionally selective.
-        adopted = should_adopt(challenger, champion, index_mdd=index_mdd, min_samples=min_samples)
+        objective_ok = should_adopt(challenger, champion, index_mdd=index_mdd, min_samples=min_samples)
     except Exception:
-        adopted = (
+        objective_ok = (
             challenger.get("n", 0) >= MIN_OOS_SAMPLES
             and challenger.get("excess", 0.0) > 0
             and challenger.get("excess", 0.0) > champion.get("excess", 0.0)
@@ -1203,17 +1250,32 @@ def learn_feedback_adjustments(rows: list[dict] | None = None, *,
         )
     # Keep drawdown and average-loss constraints explicit even if the shared
     # reward gate changes implementation details later.
-    if adopted and not _oos_constraints_ok(challenger, champion):
-        adopted = False
+    if objective_ok and not _oos_constraints_ok(challenger, champion):
+        objective_ok = False
+    trial_key = learner.trial_fingerprint(
+        {"adjustments": adjustments, "threshold": round(threshold, 6), "horizon": str(horizon)}, oos)
+    evidence = learner.adoption_evidence(
+        challenger, trial_key=trial_key,
+        trial_log=trial_log if trial_log is not None else learner.trial_history(TRIAL_SURFACE))
+    adopted = bool(objective_ok and evidence["ok"])
+    if adopted:
+        reason = "검증 통과"
+    elif not objective_ok:
+        reason = "검증 구간에서 기존 점수 대비 개선 부족"
+    else:
+        reason = (f"통계 게이트 미통과 ({evidence['reason']} · 비중첩 {evidence['n_independent']}"
+                  f" · 시도 {evidence['n_trials']} · PSR {evidence['psr']})")
 
     result = {
-        "adopted": bool(adopted),
-        "reason": "검증 통과" if adopted else "검증 구간에서 기존 점수 대비 개선 부족",
+        "adopted": adopted,
+        "reason": reason,
         **split_meta,
         "threshold": round(threshold, 4),
         "adjustments": adjustments,
+        "champion_adjustments": champion_adjustments,
         "champion": champion,
         "challenger": challenger,
+        "evidence": evidence,
     }
     if adopted and save:
         model_path = Path(path or ADJUST_PATH)
@@ -1232,8 +1294,13 @@ def learn_feedback_adjustments(rows: list[dict] | None = None, *,
                 "train_last_date": split_meta["train_last_date"],
                 "oos_first_date": split_meta["oos_first_date"],
                 "threshold": round(threshold, 4),
+                "champion_adjustments": champion_adjustments,
                 "champion": champion,
                 "challenger": challenger,
+                "psr": evidence["psr"],
+                "n_independent": evidence["n_independent"],
+                "n_trials": evidence["n_trials"],
+                "trial_key": evidence["trial_key"],
                 "total_adjust_cap": TOTAL_ADJUST_CAP,
                 "factor_adjust_cap": FACTOR_ADJUST_CAP,
             },

@@ -385,26 +385,74 @@ def enter_threshold(monkeypatch):
     return 0.62
 
 
+def _validated_rows(days: int = 50, label_days: int = 1) -> list[dict]:
+    """실패 그룹 점수 .68(보정 -0.08 이면 문턱 .62 아래). 성공 그룹 R 은 날마다 조금씩 달라 Sharpe 가 정의된다."""
+    rows = []
+    for i in range(days):
+        rows.append(_training_row(i, confirmed=False, bad_score=0.68, label_days=label_days))
+        good = _training_row(i, confirmed=True, label_days=label_days)
+        good["r_multiple"] = 1.5 + 0.1 * (i % 3)
+        rows.append(good)
+    return rows
+
+
 def test_learn_feedback_adjustments_adopts_validated_model(tmp_path, enter_threshold):
     """실패 그룹 점수 .68 → 학습 보정(-0.08 cap)이 진입 문턱 .62 를 넘겨 실패 그룹을 걸러낸다."""
-    rows = []
-    for i in range(20):
-        rows.append(_training_row(i, confirmed=False, bad_score=0.68))
-        rows.append(_training_row(i, confirmed=True))
-
     model_path = tmp_path / "entry_feedback_adjustments.json"
-    result = F.learn_feedback_adjustments(rows=rows, save=True, path=model_path)
+    result = F.learn_feedback_adjustments(rows=_validated_rows(), save=True, path=model_path,
+                                          trial_log={})
 
     assert result["adopted"] is True
     assert result["adjustments"]["technical_conflict"] < 0
     assert result["adjustments"]["technical_confirmed"] > 0
     assert result["challenger"]["excess"] > result["champion"]["excess"]
     assert result["train_last_date"] < result["oos_first_date"]
+    ev = result["evidence"]
+    assert ev["ok"] is True and ev["n_independent"] >= 8 and ev["psr"] >= 0.95
 
     saved = json.loads(model_path.read_text())
     assert saved["adjustments"]["technical_conflict"] < 0
     assert saved["meta"]["oos_n"] == result["oos_n"]
     assert saved["meta"]["purged_n"] == result["purged_n"]
+    assert saved["meta"]["trial_key"] == ev["trial_key"]
+
+
+def test_learn_feedback_adjustments_requires_nonoverlapping_evidence(tmp_path, enter_threshold):
+    """A-fix2 (재리뷰 §4b): 라벨(8일)이 서로 겹치는 OOS 20일은 비중첩 관측이 3개뿐 — 개선이 커 보여도
+    저장 0회. 예전엔 행 단위 평균 비교만으로 채택·저장했다."""
+    model_path = tmp_path / "entry_feedback_adjustments.json"
+    result = F.learn_feedback_adjustments(rows=_validated_rows(label_days=8), save=True,
+                                          path=model_path, trial_log={})
+    assert result["challenger"]["excess"] > result["champion"]["excess"]
+    assert result["challenger"]["n_independent"] == 3
+    assert result["challenger"]["series_days"] == ["2026-01-31", "2026-02-08", "2026-02-16"]
+    assert result["evidence"]["reason"] == "insufficient_independent"
+    assert result["adopted"] is False and "통계 게이트" in result["reason"]
+    assert not model_path.exists()
+
+
+def test_learn_feedback_adjustments_compares_against_applied_champion(tmp_path, enter_threshold):
+    """A-fix2 (재리뷰 §4b): 챔피언 = 지금 점수에 적용 중인 저장 모델. 이미 실패 그룹을 거르는 모델이
+    있으면 같은 선택의 새 보정은 개선이 아니다(예전엔 무보정과 비교해 덮어썼다)."""
+    model_path = tmp_path / "entry_feedback_adjustments.json"
+    applied = {"version": 1, "adjustments": {"technical_conflict": -0.04, "pivot_not_recovered": -0.04}}
+    model_path.write_text(json.dumps(applied))
+    result = F.learn_feedback_adjustments(rows=_validated_rows(), save=True, path=model_path,
+                                          trial_log={})
+    assert result["champion_adjustments"] == applied["adjustments"]
+    assert result["challenger"]["excess"] == result["champion"]["excess"]
+    assert result["adopted"] is False and "개선 부족" in result["reason"]
+    assert json.loads(model_path.read_text()) == applied
+
+
+def test_learn_feedback_adjustments_deflates_for_prior_trials(tmp_path, enter_threshold):
+    """A-fix2 (재리뷰 §4b): 이전 시도 이력(지문 없는 legacy 30회)이 있으면 분산 증거 부족 → 보류."""
+    model_path = tmp_path / "entry_feedback_adjustments.json"
+    result = F.learn_feedback_adjustments(rows=_validated_rows(), save=True, path=model_path,
+                                          trial_log={"legacy": 30, "trials": {}})
+    assert result["evidence"]["n_trials"] == 31
+    assert result["evidence"]["reason"] == "trial_evidence_insufficient"
+    assert result["adopted"] is False and not model_path.exists()
 
 
 def test_learn_feedback_adjustments_holds_when_capped_adjustment_cannot_change_selection(

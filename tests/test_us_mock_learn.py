@@ -52,17 +52,24 @@ class _FakeLedger:
         self.outcomes.append(o)
 
 
+def _win(stock_ret, idx_ret, stock_mdd, idx_mdd, entry="2026-01-02", exit_="2026-02-02"):
+    """_holding_window 형식(보유 경로 포함) 가짜 결과."""
+    return {"stock_ret": stock_ret, "idx_ret": idx_ret, "stock_mdd": stock_mdd, "idx_mdd": idx_mdd,
+            "entry_date": entry, "exit_date": exit_,
+            "path": [[entry, 1.0, 1.0], [exit_, 1.0 + stock_ret, 1.0 + idx_ret]]}
+
+
 def test_backfill_side_aware_correct():
     pending = [
         {"id": 1, "ticker": "A", "date": "2026-01-01", "side": "편입"},
         {"id": 2, "ticker": "B", "date": "2026-01-01", "side": "퇴출"},
         {"id": 3, "ticker": "C", "date": "2026-01-01", "side": "편입"},
     ]
-    px = {"A": (0.10, 0.04, 0.05, 0.03),   # 편입 초과 +0.06 → 적중
-          "B": (0.01, 0.05, 0.04, 0.03),   # 퇴출, 종목 -0.04 미달 → 잘 뺌(적중)
-          "C": (0.02, 0.06, 0.05, 0.03)}   # 편입 초과 -0.04 → 오답
+    px = {"A": _win(0.10, 0.04, 0.05, 0.03),   # 편입 초과 +0.06 → 적중
+          "B": _win(0.01, 0.05, 0.04, 0.03),   # 퇴출, 종목 -0.04 미달 → 잘 뺌(적중)
+          "C": _win(0.02, 0.06, 0.05, 0.03)}   # 편입 초과 -0.04 → 오답
     led = _FakeLedger(pending)
-    added = L.backfill_outcomes(led, price_fn=lambda t, d, h: px[t])
+    added = L.backfill_outcomes(led, window_fn=lambda t, d, h: px[t])
     assert added == 3
     by = {o["decision_id"]: o for o in led.outcomes}
     from ml.adaptive import costs
@@ -70,6 +77,8 @@ def test_backfill_side_aware_correct():
     assert by[1]["correct"] is True
     assert by[1]["gross_excess"] == pytest.approx(0.06)          # 원(gross) 초과
     assert by[1]["fwd_excess"] == pytest.approx(0.06 - rt)       # 매수 net = gross − 왕복비용
+    assert (by[1]["entry_date"], by[1]["exit_date"]) == ("2026-01-02", "2026-02-02")
+    assert by[1]["path"] == px["A"]["path"]                      # 위험곡선 근거 보존
     assert by[2]["correct"] is True                              # 퇴출 회피 적중
     assert by[2]["fwd_excess"] == pytest.approx(-0.04)           # 매도는 gross(비용 미차감)
     assert by[3]["correct"] is False                            # 편입 오답
@@ -81,7 +90,7 @@ def test_backfill_cost_flips_marginal_buy():
     rt = costs.round_trip_frac("US")
     led = _FakeLedger([{"id": 1, "ticker": "A", "date": "2026-01-01", "side": "편입"}])
     # 종목이 지수를 rt/2 만큼만 이김 → gross>0 이지만 net<0
-    L.backfill_outcomes(led, price_fn=lambda t, d, h: (0.04 + rt / 2, 0.04, 0.02, 0.02))
+    L.backfill_outcomes(led, window_fn=lambda t, d, h: _win(0.04 + rt / 2, 0.04, 0.02, 0.02))
     o = led.outcomes[0]
     assert o["gross_excess"] == pytest.approx(rt / 2) and o["gross_excess"] > 0
     assert o["fwd_excess"] < 0 and o["correct"] is False        # 비용 넘지 못함 → 오답
@@ -89,7 +98,7 @@ def test_backfill_cost_flips_marginal_buy():
 
 def test_backfill_skips_immature():
     led = _FakeLedger([{"id": 1, "ticker": "A", "date": "2026-06-01", "side": "편입"}])
-    assert L.backfill_outcomes(led, price_fn=lambda t, d, h: None) == 0   # 미성숙
+    assert L.backfill_outcomes(led, window_fn=lambda t, d, h: None) == 0   # 미성숙
 
 
 def test_backfill_skips_failed_orders():
@@ -98,7 +107,7 @@ def test_backfill_skips_failed_orders():
         {"id": 1, "ticker": "A", "date": "2026-01-01", "side": "편입", "ok": False},
         {"id": 2, "ticker": "B", "date": "2026-01-01", "side": "편입", "ok": True},
     ])
-    added = L.backfill_outcomes(led, price_fn=lambda t, d, h: (0.10, 0.04, 0.05, 0.03))
+    added = L.backfill_outcomes(led, window_fn=lambda t, d, h: _win(0.10, 0.04, 0.05, 0.03))
     assert added == 1                                    # 집행건만
     assert [o["decision_id"] for o in led.outcomes] == [2]
 
@@ -187,22 +196,94 @@ def test_eval_policy_basket_excess():
     assert out["n_candidates"] == 3 and out["n_selected"] == 2
 
 
+def _bday_path_row(day_i, rank, ex, ticker, side="편입"):
+    days = [d.strftime("%Y-%m-%d") for d in pd.bdate_range("2026-06-01", periods=80)][day_i:day_i + 21]
+    return {"side": side, "id": f"{days[0]}:{ticker}", "date": days[0], "ticker": ticker,
+            "features": {"ranker": rank}, "fwd_excess": ex, "gross_excess": ex,
+            "entry_date": days[0], "exit_date": days[-1],
+            "path": [[d, 1.0 + ex * k / 20, 1.0] for k, d in enumerate(days)]}
+
+
 def test_eval_policy_evaluates_every_date_and_excludes_sell_rows():
-    """A-fix-learn: 날짜별 top-K 가 모두 평가되고 매도측 행은 후보가 아니다."""
-    from ml import us_policy
+    """날짜별 top-K 가 모두 평가되고 매도측 행은 후보가 아니다. 독립 관측은 실제 라벨 종료일로 정한다."""
     rows = []
-    for day, top in (("2026-06-01", 0.04), ("2026-07-06", -0.02)):
+    for day_i, top in ((0, 0.04), (25, -0.02)):
         for i, rank in enumerate((0.9, 0.8, 0.7, 0.6, 0.5, 0.4)):
-            rows.append({"side": "편입", "date": day, "ticker": f"A{i}", "features": {"ranker": rank},
-                         "fwd_excess": top if i < 2 else -0.5, "index_ret": 0.0})
-        rows.append({"side": "퇴출", "date": day, "ticker": "S", "features": {"ranker": 1.0},
-                     "fwd_excess": 9.9, "index_ret": 0.0})
+            rows.append(_bday_path_row(day_i, rank, top if i < 2 else -0.5, f"A{i}"))
+        rows.append(_bday_path_row(day_i, 1.0, 9.9, "S", side="퇴출"))
     out = L.eval_policy(rows, {"w_ranker": 1.0}, max_positions=2)
     assert out["series"] == pytest.approx([0.04, -0.02])
     assert out["excess"] == pytest.approx(0.01)
     assert (out["n"], out["n_candidates"], out["n_selected"]) == (2, 12, 4)
-    assert out["n_independent"] == 2                          # 35일 간격 > 20거래일 근사(28일)
-    assert out["mdd"] == pytest.approx(0.02)                  # 1→1.04→1.0192
+    assert out["n_independent"] == 2                          # 25거래일 뒤 = 첫 라벨(20거래일) 종료 후
+    assert out["mdd"] == pytest.approx(0.02)                  # 1→1.04 보유 후 1.04→1.0192 (−2%)
+    assert out["index_mdd"] == pytest.approx(0.0)
+
+
+# ── RA-02: 독립 표본 = 실제 라벨 종료(휴장·거래정지 반영) ─────────────────────────
+
+_US_HOLIDAYS = {"2026-01-19", "2026-02-16"}          # MLK·Presidents Day (NYSE 휴장)
+_CAL = pd.DatetimeIndex([d for d in pd.bdate_range("2026-01-02", "2026-05-29")
+                         if d.strftime("%Y-%m-%d") not in _US_HOLIDAYS])
+
+
+def _px(seed, missing=()):
+    import numpy as np
+    vals = 100.0 * np.cumprod(1.0 + np.random.default_rng(seed).normal(0.001, 0.01, len(_CAL)))
+    s = pd.Series(vals, index=_CAL)
+    return s.drop(pd.DatetimeIndex(list(missing))) if missing else s
+
+
+def _calendar_row(ticker, day, stock, bench, rank):
+    from ml.adaptive import oos_eval
+    from ohlc_utils import align_common_index
+    s, b = align_common_index(stock, bench, start=day)
+    w = oos_eval.holding_window(s, b, L.HORIZON)
+    ex = w["stock_ret"] - w["idx_ret"]
+    return {"side": "편입", "id": f"{day}:{ticker}", "date": day, "ticker": ticker,
+            "features": {"ranker": rank}, "fwd_excess": ex, "gross_excess": ex,
+            "entry_date": w["entry_date"], "exit_date": w["exit_date"], "path": w["path"]}
+
+
+def test_independent_cohorts_respect_us_holiday_label_end():
+    """리뷰 재현: 1/5 시작 20거래일 라벨은 MLK 휴장 때문에 2/3 종료 → 2/2 결정은 독립이 아니다."""
+    qqq, a = _px(1), _px(2)
+    rows = [_calendar_row("A", d, a, qqq, 0.9) for d in ("2026-01-05", "2026-02-02", "2026-02-03")]
+    assert rows[0]["exit_date"] == "2026-02-03"
+    out = L.eval_policy(rows, {"w_ranker": 1.0}, max_positions=1)
+    assert out["series_days"] == ["2026-01-05", "2026-02-03"]
+    assert out["n_independent"] == 2
+
+
+def test_independent_cohorts_wait_for_suspended_member_exit():
+    """거래정지(1/7~1/9 시세 없음) 종목의 라벨은 3거래일 늦게 끝난다 — 코호트 종료 = 구성원 최댓값."""
+    qqq, a = _px(1), _px(2)
+    b = _px(3, missing=("2026-01-07", "2026-01-08", "2026-01-09"))
+    rows = []
+    for d in ("2026-01-05", "2026-02-03", "2026-02-06"):
+        rows += [_calendar_row("A", d, a, qqq, 0.9), _calendar_row("B", d, b, qqq, 0.8)]
+    assert rows[1]["exit_date"] == "2026-02-06"                 # B(1/5) 의 실제 종료
+    out = L.eval_policy(rows, {"w_ranker": 1.0}, max_positions=2)
+    assert out["series_days"] == ["2026-01-05", "2026-02-06"]
+
+
+@pytest.mark.parametrize("step", [1, 5])
+def test_independent_cohorts_never_overlap_and_match_reported_rows(step):
+    """평가일 밀도(매일/주1회)와 무관하게: 채택 코호트의 라벨 구간이 겹치지 않고, 검정 입력 = 보고 행."""
+    qqq, a, b = _px(1), _px(2), _px(3, missing=("2026-03-10", "2026-03-11"))
+    days = [d.strftime("%Y-%m-%d") for d in _CAL[1:-25:step]]
+    rows = []
+    for d in days:
+        rows += [_calendar_row("A", d, a, qqq, 0.9), _calendar_row("B", d, b, qqq, 0.8)]
+    out = L.eval_policy(rows, {"w_ranker": 1.0}, max_positions=2)
+    by_id = {r["id"]: r for r in rows}
+    assert out["n_independent"] == len(out["series"]) == len(out["series_ids"]) >= 3
+    prev_exit = ""
+    for ids, value in zip(out["series_ids"], out["series"]):
+        members = [by_id[i] for i in ids]
+        assert min(m["entry_date"] for m in members) >= prev_exit
+        prev_exit = max(m["exit_date"] for m in members)
+        assert value == pytest.approx(sum(m["fwd_excess"] for m in members) / len(members), abs=1e-8)
 
 
 def test_backfill_shadow_observation_is_treated_as_entry_side():
@@ -212,10 +293,10 @@ def test_backfill_shadow_observation_is_treated_as_entry_side():
 
     # 기본 sides 엔 '관측' 미포함 — 라이브 규칙 불변
     assert L.backfill_outcomes(_FakeLedger(list(pending)),
-                               price_fn=lambda t, d, h: (0.10, 0.02, 0.03, 0.02)) == 0
+                               window_fn=lambda t, d, h: _win(0.10, 0.02, 0.03, 0.02)) == 0
 
     led = _FakeLedger(list(pending))
-    added = L.backfill_outcomes(led, price_fn=lambda t, d, h: (0.10, 0.02, 0.03, 0.02),
+    added = L.backfill_outcomes(led, window_fn=lambda t, d, h: _win(0.10, 0.02, 0.03, 0.02),
                                 sides=("관측",))
     assert added == 1
     from ml.adaptive import costs

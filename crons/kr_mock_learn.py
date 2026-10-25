@@ -82,24 +82,23 @@ def fit_policy(train_rows: list[dict]) -> dict:
 
 
 def eval_policy(oos_rows: list[dict], params: dict, max_positions: int = 5) -> dict:
-    """OOS 평가 = **배치와 동일한 결정일별 바스켓**(그날 정책점수 상위 max_positions 균등) 을
-    평가일마다 하나의 관측으로 이은 OOS 시계열.
+    """OOS 평가 = **배치와 동일한 결정일별 바스켓**(그날 정책점수 상위 max_positions 균등).
 
-    excess = 평가일 바스켓 평균 초과수익의 평균, mdd = 그 포트폴리오 곡선 MDD,
-    n = 평가일 수(최소 표본 게이트 단위). n_candidates/n_selected/n_independent 는 분리 보고
+    excess = 평가일 바스켓 평균 초과수익의 평균, n = 평가일 수(최소 표본 게이트 단위).
+    series = 실제 라벨 종료일 기준 비중첩 코호트 초과수익(n_independent = len(series)),
+    mdd/index_mdd = 그 코호트를 차례로 보유한 일별 mark-to-market 곡선의 MDD(보유 경로 반영)
     (ml.adaptive.oos_eval.dated_topk_eval).
     """
     from ml import kr_policy
     from ml.adaptive import oos_eval
     return oos_eval.dated_topk_eval(
-        oos_rows, lambda r: kr_policy.score(r.get("features", {}), params), max_positions,
-        horizon_days=HORIZON)
+        oos_rows, lambda r: kr_policy.score(r.get("features", {}), params), max_positions)
 
 
 # ── 보상 백필 ─────────────────────────────────────────────────────────────────
 
-def _default_price_fn(ticker: str, start_date: str, horizon: int):
-    """보유기간 성과 — (종목수익, 지수수익, 종목MDD, 지수MDD). 미성숙/실패 시 None.
+def _holding_window(ticker: str, start_date: str, horizon: int) -> dict | None:
+    """보유기간 outcome 필드(수익·MDD·실제 진입/종료 거래일·일별 경로). 미성숙/실패 시 None.
 
     종목·지수를 **공통 날짜로 정렬**해 동일 구간으로 평가(거래정지·결측에 의한 종료일 어긋남 방지).
     MDD = 보유 horizon 구간의 peak-to-trough 낙폭(양수) → 지수 MDD 와 동일 단위로 비교 가능.
@@ -107,7 +106,7 @@ def _default_price_fn(ticker: str, start_date: str, horizon: int):
     try:
         from providers import market_data
         from ml.data_pipeline import KR_BENCHMARK
-        from ml.adaptive import reward as _reward
+        from ml.adaptive import oos_eval
         from ohlc_utils import align_common_index
         # 성숙 판정에 필요한 마지막 거래일(≈ 결정일 + horizon 거래일, 주말 여유 포함)
         import pandas as _pd
@@ -121,27 +120,27 @@ def _default_price_fn(ticker: str, start_date: str, horizon: int):
         s, k = align_common_index(s, k, start=start_date)
         if s is None or k is None:
             return None
-        if len(s) <= horizon:
-            return None                                   # 미성숙
-        s_win, k_win = s.iloc[:horizon + 1], k.iloc[:horizon + 1]
-        stock_ret = float(s_win.iloc[-1]) / float(s_win.iloc[0]) - 1.0
-        idx_ret = float(k_win.iloc[-1]) / float(k_win.iloc[0]) - 1.0
-        stock_mdd = _reward.max_drawdown([float(x) for x in s_win.values])
-        idx_mdd = _reward.max_drawdown([float(x) for x in k_win.values])
-        return stock_ret, idx_ret, stock_mdd, idx_mdd
+        return oos_eval.holding_window(s, k, horizon)               # 미성숙이면 None
     except Exception as e:
         logger.warning("가격 조회 실패 %s: %s", ticker, e)
         return None
 
 
-def backfill_outcomes(ledger, *, horizon: int = HORIZON, price_fn=None,
-                      sides: tuple[str, ...] = ("편입", "증액")) -> int:
-    """미성숙 결정의 실현 초과수익 + 보유기간 MDD 를 outcomes 에 추가. 추가 건수 반환.
+def _default_price_fn(ticker: str, start_date: str, horizon: int):
+    """보유기간 성과 — (종목수익, 지수수익, 종목MDD, 지수MDD). 미성숙/실패 시 None (LLM shadow 백필용)."""
+    w = _holding_window(ticker, start_date, horizon)
+    return None if w is None else (w["stock_ret"], w["idx_ret"], w["stock_mdd"], w["idx_mdd"])
 
+
+def backfill_outcomes(ledger, *, horizon: int = HORIZON, window_fn=None,
+                      sides: tuple[str, ...] = ("편입", "증액")) -> int:
+    """미성숙 결정의 실현 초과수익 + 보유기간 MDD·경로를 outcomes 에 추가. 추가 건수 반환.
+
+    window_fn(ticker, date, horizon) -> _holding_window 형식 dict | None.
     sides: 평가 대상 side. 기본은 라이브 매수(편입/증액). 랭킹 섀도 표면은 ("관측",) 로
     호출한다(선택편향 없는 IC 측정용 — lib/rank_shadow.py).
     """
-    price_fn = price_fn or _default_price_fn
+    window_fn = window_fn or _holding_window
     added = 0
     for d in ledger.pending():
         # 매수(또는 섀도 관측) 결정만 보상 평가 대상(선택 정책 학습 신호)
@@ -149,10 +148,10 @@ def backfill_outcomes(ledger, *, horizon: int = HORIZON, price_fn=None,
             continue
         if d.get("ok") is False:   # ★미집행(주문실패) 결정 제외 — 팬텀 트레이드 오염 방지(US S6 미러·감사 확정)
             continue
-        res = price_fn(d.get("ticker", ""), d.get("date", ""), horizon)
-        if res is None:
+        w = window_fn(d.get("ticker", ""), d.get("date", ""), horizon)
+        if w is None:
             continue   # 아직 미성숙 → 다음 회차
-        stock_ret, idx_ret, stock_mdd, idx_mdd = res
+        stock_ret, idx_ret = w["stock_ret"], w["idx_ret"]
         from ml.adaptive import costs
         gross = stock_ret - idx_ret
         # 매수(편입/증액) 결정만 평가 → 왕복 거래비용(수수료+증권거래세) 차감한 net 보상
@@ -160,9 +159,10 @@ def backfill_outcomes(ledger, *, horizon: int = HORIZON, price_fn=None,
         ledger.log_outcome({
             "decision_id": d["id"], "horizon": horizon,
             "matured_at": datetime.now(KST).strftime("%Y-%m-%d"),
+            "entry_date": w["entry_date"], "exit_date": w["exit_date"], "path": w["path"],
             "stock_ret": round(stock_ret, 5), "index_ret": round(idx_ret, 5),
             "fwd_excess": round(fwd_excess, 5), "gross_excess": round(gross, 5),
-            "fwd_mdd": round(stock_mdd, 5), "idx_fwd_mdd": round(idx_mdd, 5),
+            "fwd_mdd": round(w["stock_mdd"], 5), "idx_fwd_mdd": round(w["idx_mdd"], 5),
             "success": bool(fwd_excess > 0),
         })
         added += 1
@@ -230,24 +230,14 @@ def main() -> int:
         send_cron_telegram(msg)
         return 0
 
-    # 지수 MDD 기준 — 챌린저 MDD 와 **동일 OOS 창·동일 평가일 곡선**(refit_and_adopt 와 같은 분할·embargo).
-    # 전체 population 평균을 쓰면 train 급락장이 baseline 을 부풀려 OOS MDD 제약이 느슨해진다(감사 확정).
-    from ml.adaptive import oos_eval
-    from ml.adaptive.learner import walk_forward_split
-    _, _oos_mask = walk_forward_split([r.get("date", "") for r in rows], embargo=HORIZON)
-    _oos_rows = [r for r, m in zip(rows, _oos_mask) if m]
-    index_mdd = oos_eval.index_curve_mdd(_oos_rows)
-    if index_mdd is None:
-        index_mdd = 0.20
-        logger.warning("OOS 평가일 지수 수익 없음 — 지수 MDD 기본 0.20")
-
+    # 지수 MDD 기준은 eval_policy 가 챌린저와 **같은 보유 날짜·같은 비중**의 지수 곡선으로 낸다
+    # (index_mdd). 보유 경로가 없어 산출 불가면 위험 증거 없음 → 보류(기본값으로 대체하지 않음).
     from ml.adaptive import learner
-    prior_trials, trial_sharpes = learner.trial_history("kr_mock")
     out = learner.refit_and_adopt(
         rows, kr_policy.get_policy(), fit_policy,
         lambda oos, params: eval_policy(oos, params, MAX_POS),    # 배치 바스켓과 동일
-        index_mdd=index_mdd, min_samples=MIN_SAMPLES, embargo=HORIZON,
-        n_trials=prior_trials + 1, trial_sharpes=trial_sharpes)
+        min_samples=MIN_SAMPLES, embargo=HORIZON,
+        trial_log=learner.trial_history("kr_mock"))
     logger.info("재학습 결과: %s", out["reason"])
     evolution.record_learning("kr_mock", {
         "date": datetime.now(KST).strftime("%Y-%m-%d"), "adopted": bool(out.get("adopted")),
@@ -255,13 +245,18 @@ def main() -> int:
         "excess_challenger": (out.get("challenger") or {}).get("excess"),
         "excess_champion": (out.get("champion") or {}).get("excess"),
         "mdd_challenger": (out.get("challenger") or {}).get("mdd"),
+        "index_mdd_oos": out.get("risk_index_mdd"),
+        "mdd_basis": (out.get("challenger") or {}).get("mdd_basis"),
         "n_oos": (out.get("challenger") or {}).get("n"),
         "n_oos_candidates": (out.get("challenger") or {}).get("n_candidates"),
         "n_oos_selected": (out.get("challenger") or {}).get("n_selected"),
         "n_oos_independent": (out.get("challenger") or {}).get("n_independent"),
+        "n_oos_unresolved": (out.get("challenger") or {}).get("n_unresolved_days"),
         "sharpe_challenger": (out.get("evidence") or {}).get("sharpe_pp"),
         "psr_challenger": (out.get("evidence") or {}).get("psr"),
         "n_trials": (out.get("evidence") or {}).get("n_trials"),
+        "trial_key": (out.get("evidence") or {}).get("trial_key"),
+        "trial_sharpe": (out.get("evidence") or {}).get("trial_sharpe"),
         "candidate_params": out.get("candidate_params"),
         "llm_shadow_added": llm_added,
         "llm_shadow_n": llm_summary.get("n"),

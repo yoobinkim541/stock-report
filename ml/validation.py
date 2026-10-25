@@ -81,18 +81,15 @@ def expected_max_sharpe(n_trials: int, sr_variance: float) -> float:
 
 
 def deflated_sharpe_ratio(returns, n_trials: int, sr_variance: float | None = None,
-                          trial_sharpes=None, effective_n: int | None = None) -> float | None:
-    """DSR = PSR(SR0). returns 에서 sr_pp·skew·kurt 도출(오용 방지).
+                          trial_sharpes=None) -> float | None:
+    """DSR = PSR(SR0). returns 에서 sr_pp·skew·kurt·T 를 모두 도출(오용 방지).
 
     V: sr_variance(per-period Sharpe 분산) 직접 or trial_sharpes 배열로 산출. 둘 다 없으면 None.
-    effective_n: 겹치는(자기상관) 관측이면 독립 관측수 T 를 명시 — PSR 표준오차에 사용.
-    None 이면 len(returns). len(returns) 초과·2 미만은 None(과대 T 금지)."""
+    returns 는 서로 겹치지 않는 관측이어야 한다 — 중첩열의 모멘트에 T 만 줄여 넣지 않는다."""
     r = _arr(returns)
     if len(r) < 2:
         return None
-    T = len(r) if effective_n is None else int(effective_n)
-    if T < 2 or T > len(r):
-        return None
+    T = len(r)
     if sr_variance is None and trial_sharpes is not None:
         ts = _arr(trial_sharpes)
         ts = ts[np.isfinite(ts)]
