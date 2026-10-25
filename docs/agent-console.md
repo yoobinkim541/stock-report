@@ -81,6 +81,26 @@ AGENT_CONSOLE_PORT=8798 bash scripts/run_agent_console.sh
 - `POST /api/portfolio-lab/scenarios`
 - `GET /api/local-install-prompt`
 
+## 답변 파이프라인 (실제 구조)
+
+`agent.answer()` 는 도구 호출 루프(tool-calling agent)가 **아니다**. 한 요청은 다음 고정 경로를 지난다.
+
+1. `context.build_context_pack()` — 리포트·원장·공유 메모리·실시간 시세를 모아 팩 구성 (대시보드가 만든 팩을 재사용 가능).
+2. `wiki.list_pages(query=질문)` — 위키 검색(QMD·로컬 랭킹)으로 근거 페이지 선별, 사용 기록(`track_page_usage`).
+3. 의도 분류(`_classify_question_intent`) → 규칙 기반 답변 또는 `_try_llm_prompt` 단일 프롬프트 호출.
+4. LLM 호출은 codex·hermes 를 **동시에 경합**시켜 먼저 성공한 응답을 쓰고, 실패 시 gemini → agy 순 폴백. 전체는 하나의 요청 예산(deadline) 안에서 돈다. 어느 엔진이 답했는지는 요청(스레드) 범위로 기록돼 `context.engine` 으로 노출된다.
+5. 후처리 — 증거 사용 기록, 대화 저장, 자동 큐레이션(`wiki.auto_curate_from_chat`).
+
+즉 retrieval + generation 구조이며, LLM 이 임의 도구를 호출하지 않는다.
+
+### 자동 큐레이션 승인 대기열
+
+`auto_curate_from_chat` 의 LLM 계획 중 **삭제·병합·분할**은 기본적으로 실행되지 않고 `data/shared-memory/pending_curation.jsonl` 에 제안으로 쌓인다. 사용자가 AI 위키 페이지의 "승인 대기 큐레이션 제안" 패널(또는 아래 API)에서 적용/거부한다. 생성·갱신은 종전처럼 즉시 반영. `WIKI_CURATION_AUTO_APPLY=1` 이면 승인 없이 즉시 적용(종전 동작).
+
+- `GET /api/wiki/curation/pending`
+- `POST /api/wiki/curation/<id>/apply`
+- `POST /api/wiki/curation/<id>/reject`
+
 ## 운영 메모
 
 이 콘솔은 기존 대시보드를 대체하지 않는다. 대시보드는 차트와 운영 화면, 에이전트 콘솔은 맥락 축적과 질문 응답, 전략 실험의 가벼운 작업대 역할로 나눈다. `기억·위키`는 그 사이에서 반복되는 판단을 정리해 다음 답변에 재사용하는 지식 카드 레이어다.
