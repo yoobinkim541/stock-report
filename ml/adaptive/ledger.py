@@ -21,6 +21,8 @@ import logging
 import os
 from pathlib import Path
 
+import safe_io
+
 logger = logging.getLogger(__name__)
 
 _DATA_DIR = Path(os.path.expanduser("~/reports/ml-data"))
@@ -68,10 +70,13 @@ class Ledger:
         ticker = rec.get("ticker", "")
         did = rec.get("id") or self.make_id(date, ticker)
         rec = {**rec, "id": did}
-        existing = {d.get("id") for d in self._read_lines(self.decisions_path)}
-        if did in existing:
-            return did   # 멱등 — 같은 날 같은 종목 재실행 시 중복 줄 방지
-        self._append_line(self.decisions_path, rec)
+        # 중복 확인→append 를 교차 프로세스 락 안에서 — 크론이 겹치면(추적+학습) 둘 다 '없음'을
+        # 보고 같은 id 를 두 번 쓰던 경쟁. 락은 원장 파일 sidecar(.lock).
+        with safe_io.file_write_lock(str(self.decisions_path)):
+            existing = {d.get("id") for d in self._read_lines(self.decisions_path)}
+            if did in existing:
+                return did   # 멱등 — 같은 날 같은 종목 재실행 시 중복 줄 방지
+            self._append_line(self.decisions_path, rec)
         return did
 
     # ── 결과 로그 ─────────────────────────────────────────────────────────────
@@ -79,11 +84,12 @@ class Ledger:
         """결과 1건 append(decision_id 필수). 결정 줄은 절대 고치지 않음."""
         if not rec.get("decision_id"):
             raise ValueError("outcome 에 decision_id 필수")
-        # 이미 결과가 있는 decision_id 는 중복 적재 안 함(멱등)
-        done = {o.get("decision_id") for o in self._read_lines(self.outcomes_path)}
-        if rec["decision_id"] in done:
-            return
-        self._append_line(self.outcomes_path, rec)
+        # 이미 결과가 있는 decision_id 는 중복 적재 안 함(멱등) — 확인·append 는 락 안에서
+        with safe_io.file_write_lock(str(self.outcomes_path)):
+            done = {o.get("decision_id") for o in self._read_lines(self.outcomes_path)}
+            if rec["decision_id"] in done:
+                return
+            self._append_line(self.outcomes_path, rec)
 
     # ── 조회 ──────────────────────────────────────────────────────────────────
     def read_decisions(self) -> list[dict]:
