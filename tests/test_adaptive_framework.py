@@ -198,3 +198,14 @@ def test_champion_challenger_promotes_on_outperform_within_mdd():
 
 if __name__ == "__main__":
     sys.exit(pytest.main([__file__, "-v"]))
+
+
+def test_champion_challenger_requires_independent_blocks():
+    """원표본 n 이 min_samples 를 넘어도 겹치는 horizon 을 보정한 독립 블록이 부족하면 승격 거부."""
+    from ml.adaptive import champion_challenger as cc
+
+    good = {"excess": 0.05, "mdd": 0.05, "n": 40}
+    res = cc.evaluate(None, good, index_mdd=0.10, min_samples=40, horizon=20, min_independent_blocks=3)
+    assert res["promote"] is False and "독립 블록 부족" in res["reason"] and res["indep_blocks"] == 2
+    res = cc.evaluate(None, {**good, "n": 60}, index_mdd=0.10, min_samples=40, horizon=20, min_independent_blocks=3)
+    assert res["promote"] is True
