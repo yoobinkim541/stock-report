@@ -93,7 +93,8 @@ def find_candidate_pairs(
             for other_index in range(index + 1, len(group)):
                 other = group[other_index]
                 score = _jaccard(token_sets[index], token_sets[other_index])
-                if score >= min_similarity:
+                # 서버 병합 가드(wiki.merge_trust_blocker)가 거부할 쌍에 판정 호출을 쓰지 않는다.
+                if score >= min_similarity and not wiki.merge_trust_blocker([page, other]):
                     pairs.append((page, other, score))
     pairs.sort(key=lambda item: item[2], reverse=True)
     return pairs

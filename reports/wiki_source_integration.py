@@ -11,7 +11,7 @@ from typing import Callable, TypedDict
 
 from agent_console import wiki
 from reports import wiki_distillation
-from reports.wiki_source_compiler import CompiledSource
+from reports.wiki_source_compiler import CompiledSource, addition_grounding_violation
 from reports.wiki_source_revision import SourceRevision
 
 
@@ -220,12 +220,24 @@ def propose_integration(compiled: CompiledSource, source: SourceRevision, target
               "Return JSON {targets:[{page_id,before_hash,additions:[{claim_ids,as_of,scope,body}],relations:[]}]} only. "
               "Body cites [S1]. Relations require type support|qualify|supersede|compete, from_claim_id, to_claim_id, "
               "from_revision_id, to_revision_id, from_as_of, to_as_of, scope_explanation. Use provided IDs only. "
+              "Addition body and scope may only use numbers, percentages and certainty or multiplier words "
+              "(guaranteed, certainly, double, 보장, 확정) present in the text, quote, as_of or scope of the "
+              "claims they cite; other additions are rejected. "
               "New targets additionally echo title, kind, surface, purpose and before_hash=null.\n" +
               json.dumps({"compiled": compiled, "source": {"revision_id": source["revision_id"],
                          "canonical_url": source["canonical_url"], "role": source["role"]},
                          "targets": prompt_targets, "new_page_specs": new_page_specs}, ensure_ascii=False))
     payload = _json_response(prompt, llm_fn)
-    return validate_integration(payload, compiled, source, targets, new_page_specs=new_page_specs)
+    proposal = validate_integration(payload, compiled, source, targets, new_page_specs=new_page_specs)
+    # Model-proposed prose only: the server-built compiled-source addition is
+    # already grounded against the whole source by the compiler.
+    claims = {claim["claim_id"]: claim for claim in compiled["claims"]}
+    for target in proposal["targets"]:
+        for addition in target["additions"]:
+            units = [claims[cid] for cid in addition["claim_ids"]]
+            if addition_grounding_violation(addition["body"] + "\n" + addition["scope"], units):
+                raise ValueError("proposal_addition_unsupported")
+    return proposal
 
 
 def validate_integration(payload: dict, compiled: CompiledSource, source: SourceRevision,

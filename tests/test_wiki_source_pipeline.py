@@ -18,6 +18,12 @@ def module():
     return importlib.import_module("reports.wiki_source_pipeline")
 
 
+def source_text(prompt):
+    """Decode the compile prompt's JSON source literal (the only text between the markers)."""
+    literal = prompt[:-len("\nEND UNTRUSTED SOURCE TEXT")].split("\nBEGIN UNTRUSTED SOURCE TEXT\n", 1)[1]
+    return json.loads(literal)
+
+
 @pytest.fixture(autouse=True)
 def no_live_structured_provider(monkeypatch):
     from agent_console import agent
@@ -51,9 +57,11 @@ def pipeline_env(tmp_path, monkeypatch):
     def llm(prompt):
         if prompt.startswith("Compile"):
             calls.append("compile")
+            text = source_text(prompt)
+            quote = "Capacity increased" if "Capacity increased" in text else text[:60]
             return json.dumps({"action": "create", "kind": "concept", "title": "Capacity", "body": "Compiled capacity; demand uncertain [S1].",
                 "claims": [{"text": "Capacity increased", "as_of": "2026-10-09", "scope": "capacity, not realized orders",
-                            "anchor": None, "competing_claim_ids": []}],
+                            "anchor": {"quote": quote}, "competing_claim_ids": []}],
                 "terms": ["capacity"], "limitations": ["Demand uncertain"], "skip_reason": None})
         data = json.loads(prompt.rsplit("\n", 1)[1])
         if prompt.startswith("Route"):
@@ -227,7 +235,8 @@ def test_compiled_page_preserves_every_claim_and_long_source_title(pipeline_env)
         if prompt.startswith("Compile"):
             payload = json.loads(answer)
             payload["claims"].append({"text": "Demand uncertain", "as_of": "2026-10-08",
-                "scope": "demand, not capacity", "anchor": None, "competing_claim_ids": []})
+                "scope": "demand, not capacity", "anchor": {"quote": "Demand uncertain."},
+                "competing_claim_ids": []})
             return json.dumps(payload)
         return answer
     pipeline_env["source"]["title"] = "Capacity " * 30
@@ -236,6 +245,33 @@ def test_compiled_page_preserves_every_claim_and_long_source_title(pipeline_env)
     page_id = hashlib.sha256(("compiled-source:" + REV).encode()).hexdigest()
     claims = wiki.semantic_snapshot(page_id)["claims"]
     assert {claim["as_of"] for claim in claims} == {"2026-10-09", "2026-10-08"}
+
+
+# B-fix-ground-01: an invented, validly cited claim never reaches stored or searchable knowledge.
+@pytest.mark.parametrize("claim,anchor,code", [
+    ("Revenue is guaranteed to triple in 2027.", None, "anchor_missing"),
+    ("Revenue is guaranteed to triple in 2027.", {"quote": "Capacity increased."}, "claim_number_unsupported"),
+    ("Capacity is guaranteed.", {"quote": "Capacity increased."}, "claim_certainty_unsupported"),
+])
+def test_invented_claim_is_rejected_before_store_and_search(pipeline_env, claim, anchor, code):
+    original = pipeline_env["llm"]
+    def llm(prompt):
+        answer = original(prompt)
+        if prompt.startswith("Compile"):
+            payload = json.loads(answer)
+            payload["claims"][0].update(text=claim, anchor=anchor)
+            return json.dumps(payload)
+        return answer
+    result = module().run(events=[{}], dry_run=False, llm_fn=llm, now=NOW)
+    assert result["compile_failed"] == 1 and result["data_committed"] == 0
+    assert result["reason_counts"][code] == 1
+    assert module().Journal().load_source(REV)["error_code"] == code
+    page_id = hashlib.sha256(("compiled-source:" + REV).encode()).hexdigest()
+    assert wiki.get_page(page_id) is None
+    assert not any("guaranteed" in (page.get("body") or "")
+                   for page in wiki.list_pages(query="guaranteed triple", status="all", surface="all"))
+    assert "guaranteed" not in wiki.build_context_section(query="revenue guaranteed triple", surface="market")
+    assert pipeline_env["calls"] == ["compile"]
 
 
 def test_skipped_redelivery_retains_new_actual_id_without_recompile(pipeline_env):

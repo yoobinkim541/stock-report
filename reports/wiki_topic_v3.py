@@ -1,6 +1,8 @@
 """Draft-only snapshot proposals. Trusted context is never model authority.
 
-Validation is syntactic attribution, not factual entailment. Transactions must
+Validation is syntactic attribution plus deterministic lexical grounding (an
+addition may only use numbers and certainty/multiplier words found in the
+claims it cites), not factual entailment. Transactions must
 revalidate current evidence, receipt inputs and target CAS before committing.
 """
 from __future__ import annotations
@@ -10,8 +12,8 @@ from datetime import datetime
 import json
 
 from agent_console import wiki
+from reports.wiki_source_compiler import addition_grounding_violation
 from reports.wiki_source_integration import _new_spec
-from reports.wiki_source_journal import Journal
 from reports.wiki_source_notes import materialize_source_note
 from reports.wiki_topic_integration import (
     _body, _claim, _current, _fields, _ids, _prior, _prompt_target, _relation,
@@ -215,7 +217,10 @@ def _validate(payload, *, compiled, source, context, targets):
             if (set(revisions) != {c["source_revision_id"] for c in units}
                     or any(c["as_of"] != addition["as_of"] or c["scope"] != addition["scope"] for c in units)):
                 raise ValueError("topic_claim_scope_invalid")
-            additions.append({**addition, "body": _body(addition["body"], revisions, mapping)})
+            body = _body(addition["body"], revisions, mapping)
+            if addition_grounding_violation(body, units):
+                raise ValueError("topic_addition_unsupported")
+            additions.append({**addition, "body": body})
             used.update(revisions)
         if used != set(contributors):
             raise ValueError("topic_contributors_incomplete")
@@ -279,7 +284,10 @@ def snapshot_topic_prompt(envelope: dict) -> str:
         "surface=market,purpose=topic_synthesis. IDs are allocated server-side. New topics require "
         "current plus at least one support revision. Each addition has claim_ids,revision_ids,as_of,"
         "scope,body; group only identical dates/scopes. Cite exactly its sources using [S1], [S2], etc. "
-        "from source_map; never invent links. All declared contributors must contribute. Relations have "
+        "from source_map; never invent links. An addition body may only use numbers, percentages and "
+        "certainty or multiplier words (guaranteed, certainly, double, 보장, 확정) that appear in the text, "
+        "quote, as_of or scope of the claims it cites; additions that do not are rejected. "
+        "All declared contributors must contribute. Relations have "
         "type=support|qualify|supersede|compete,from_claim_id,to_claim_id,from_revision_id,to_revision_id,"
         "from_as_of,to_as_of,scope_explanation. Use supplied identities/dates only. No other fields.\n"
         + json.dumps(envelope, ensure_ascii=False, sort_keys=True, allow_nan=False))

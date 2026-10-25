@@ -1,18 +1,37 @@
 import json
 from datetime import datetime, timezone
 
+import pytest
+
 from agent_console import shared_memory, wiki
 from reports import raw_archive, wiki_distillation as wd
 from reports.evidence_cards import cards_to_source_refs, event_to_evidence_card
 
 
 URL = "https://example.com/article/" + "a" * 700
-PATH = "/home/ubuntu/reports/text/saveticker_report_pdf/2026/10/08/" + "p" * 200 + ".txt"
+ARCHIVE_TEXT = "text/saveticker_report_pdf/2026/10/08/" + "p" * 200 + ".txt"
 
 
-def test_shared_record_retains_source_identifiers_instead_of_clipping_them():
-    record = shared_memory.normalize_record({"artifacts": [URL, PATH]})
-    assert record["artifacts"] == [URL, PATH]
+@pytest.fixture
+def archive_path(tmp_path, monkeypatch):
+    """A long archive pointer under the configured reports root (the only redaction exception)."""
+    root = tmp_path / "reports"
+    monkeypatch.setenv("STOCK_REPORT_REPORTS_DIR", str(root))
+    return str(root / ARCHIVE_TEXT)
+
+
+def test_shared_record_retains_source_identifiers_instead_of_clipping_them(archive_path):
+    record = shared_memory.normalize_record({"artifacts": [URL, archive_path]})
+    assert record["artifacts"] == [URL, archive_path]
+
+
+@pytest.mark.parametrize("configured", ["/home/ubuntu/reports", "/home/ubuntu/other-reports"])
+def test_home_archive_pointer_is_kept_only_under_configured_root(monkeypatch, configured):
+    pointer = "/home/ubuntu/reports/" + ARCHIVE_TEXT
+    monkeypatch.setenv("STOCK_REPORT_REPORTS_DIR", configured)
+    record = shared_memory.normalize_record({"artifacts": [pointer]})
+    expected = pointer if configured == "/home/ubuntu/reports" else "<local-path>"
+    assert record["artifacts"] == [expected]
 
 
 def test_oversized_reference_is_rejected_instead_of_stored_as_a_different_identifier():
@@ -33,19 +52,19 @@ def test_reference_normalization_does_not_expose_unrelated_home_paths():
     assert record["artifacts"] == ["<local-path>"]
 
 
-def test_wiki_storage_reload_and_split_preserve_full_source_references(monkeypatch, tmp_path):
+def test_wiki_storage_reload_and_split_preserve_full_source_references(monkeypatch, tmp_path, archive_path):
     monkeypatch.setenv("AGENT_CONSOLE_SHARED_MEMORY_DIR", str(tmp_path / "memory"))
     monkeypatch.setenv("AGENT_CONSOLE_WIKI_ARTIFACTS_DIR", str(tmp_path / "wiki"))
     page = wiki.upsert_page({"id": "long-reference", "title": "Source reference identity",
-                             "body": "A source-backed paragraph. " * 50, "source_refs": [URL, PATH]})
+                             "body": "A source-backed paragraph. " * 50, "source_refs": [URL, archive_path]})
     wiki._CACHE.clear()
     loaded = wiki.get_page(page["id"])
-    assert loaded["source_refs"] == [URL, PATH]
-    assert loaded["raw"]["artifacts"] == [URL, PATH]
+    assert loaded["source_refs"] == [URL, archive_path]
+    assert loaded["raw"]["artifacts"] == [URL, archive_path]
     split = wiki.split_for_readability(page["id"], max_chars=400)
     children = wiki.split_children_for_page(split)
     assert children
-    assert all(child["source_refs"] == [URL, PATH] for child in children)
+    assert all(child["source_refs"] == [URL, archive_path] for child in children)
 
 
 def test_complete_archive_can_be_reopened_from_long_stored_wiki_reference(monkeypatch, tmp_path):
@@ -66,15 +85,15 @@ def test_complete_archive_can_be_reopened_from_long_stored_wiki_reference(monkey
     assert stored["_source_articles"][0]["text"] == "Original full body"
 
 
-def test_event_evidence_preserves_full_source_identifiers():
+def test_event_evidence_preserves_full_source_identifiers(archive_path):
     event = {"source": "saveticker", "title": "Full article", "url": URL,
              "body": "A substantive full article. " * 40,
-             "text_path": PATH, "raw_path": PATH.removesuffix(".txt") + ".html",
+             "text_path": archive_path, "raw_path": archive_path.removesuffix(".txt") + ".html",
              "classification": {"wiki_eligible": True, "kind": "article", "topic": "policy"}}
     card = event_to_evidence_card(event)
     assert card.source_url == URL
     refs = cards_to_source_refs([card])
-    assert URL in refs and PATH in refs
+    assert URL in refs and archive_path in refs
 
 
 def test_different_long_urls_do_not_create_false_shared_source_lint():

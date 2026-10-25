@@ -149,8 +149,9 @@ def test_semantic_review_cases_are_unreviewed_and_cover_known_failure_modes():
 
 
 @pytest.mark.parametrize("case_id", ["capacity-demand", "different-horizons", "community-claim", "ocr-number"])
-def test_recorded_model_samples_pass_runtime_compilation_schema(case_id):
-    from reports.wiki_source_compiler import compile_source
+def test_recorded_model_samples_remain_replayable_but_need_quote_anchors_now(case_id):
+    """Recorded under the former anchor=null prompt; replay stays valid, fresh output must quote."""
+    from reports.wiki_source_compiler import compile_source, validate_compilation
     case = next(case for case in json.loads(FIXTURES.read_text()) if case["id"] == case_id)
     samples = json.loads(SAMPLES.read_text())
     response = next(case["response"] for case in samples["cases"] if case["id"] == case_id)
@@ -158,7 +159,9 @@ def test_recorded_model_samples_pass_runtime_compilation_schema(case_id):
     source = {"revision_id": hashlib.sha256(case_id.encode()).hexdigest(), "provider": "synthetic",
               "canonical_url": url, "scope": "synthetic_text", "title": case_id, "body": case["source"],
               "provenance_class": {"community-claim": "community", "ocr-number": "ocr_report"}.get(case_id, "editorial")}
-    compiled = compile_source(source, llm_fn=lambda _: json.dumps(response))
-    assert samples["model"] == "gpt-6.1-sol" and url in compiled["body"]
-    assert compiled["claims"] and all(claim["knowledge_state"] == "draft" for claim in compiled["claims"])
-    assert all(not claim["competing_claim_ids"] for claim in compiled["claims"])
+    replayed = validate_compilation(response, source)
+    assert samples["model"] == "gpt-6.1-sol" and url in replayed["body"]
+    assert replayed["claims"] and all(claim["knowledge_state"] == "draft" for claim in replayed["claims"])
+    assert all(not claim["competing_claim_ids"] for claim in replayed["claims"])
+    with pytest.raises(ValueError, match="anchor_missing"):
+        compile_source(source, llm_fn=lambda _: json.dumps(response))

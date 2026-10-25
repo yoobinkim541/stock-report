@@ -160,6 +160,35 @@ def test_forged_proposals_fail_closed(evidence, damage):
     with pytest.raises(ValueError): validate(data, payload)
 
 
+# B-fix-ground-01: v2 legacy addition prose stays within its cited claims.
+@pytest.mark.parametrize("body", [
+    "Shipping volume will reach 900 vessels [S{i}].",
+    "Hormuz shipping is guaranteed to resume [S{i}].",
+    "Shipping traffic will triple [S{i}].",
+])
+def test_v2_addition_cannot_assert_numbers_or_certainty_absent_from_claims(evidence, body):
+    data, _, _ = evidence
+    payload = proposal(data)
+    for index, addition in enumerate(payload["targets"][0]["additions"], 1):
+        addition["body"] = body.format(i=index)
+    with pytest.raises(ValueError, match="topic_addition_unsupported"):
+        validate(data, payload)
+
+
+def test_v2_addition_may_restate_cited_claim_numbers_and_negated_certainty(evidence):
+    data, journal, rows = evidence
+    payload = proposal(data)
+    claims = {c["claim_id"]: c for c in [*data["compiled"]["claims"],
+              *[c for n in data["context"]["notes"] for c in n["claims"]]]}
+    for index, addition in enumerate(payload["targets"][0]["additions"], 1):
+        claim = claims[addition["claim_ids"][0]]
+        addition["body"] = f"{claim['text']} as of {claim['as_of']}; resumption is not guaranteed [S{index}]."
+    result = api().propose_topic_integration(**data, journal=journal, records=rows, now=NOW,
+                                             llm_fn=lambda _: json.dumps(payload))
+    assert all("not guaranteed" in a["body"] for a in result["targets"][0]["additions"])
+
+
+
 def test_duplicate_claim_id_with_differing_content_is_rejected(evidence):
     data, _, _ = evidence
     claim = copy.deepcopy(data["compiled"]["claims"][0])

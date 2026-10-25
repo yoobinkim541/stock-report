@@ -14,7 +14,7 @@ import json
 import re
 
 from reports import wiki_distillation
-from reports.wiki_source_compiler import validate_compilation
+from reports.wiki_source_compiler import addition_grounding_violation, validate_compilation
 from reports.wiki_source_integration import _new_spec
 from reports.wiki_source_journal import Journal
 from reports.wiki_topic_context import (
@@ -243,6 +243,8 @@ def validate_topic_integration(payload: dict, *, compiled: dict, source: dict,
                     or any(c["as_of"] != addition["as_of"] or c["scope"] != addition["scope"] for c in units)):
                 raise ValueError("topic_claim_scope_invalid")
             body = _body(addition["body"], revisions, source_map)
+            if addition_grounding_violation(body, units):
+                raise ValueError("topic_addition_unsupported")
             additions.append({**addition, "body": body})
             used.update(revisions)
         if used != set(contributors):
@@ -324,6 +326,9 @@ def propose_topic_integration(compiled: dict, source: dict, context: TopicContex
         "Each addition has claim_ids,revision_ids,as_of,scope,body. Group only claims with identical dates "
         "and scope, preserving differing reports separately. Cite exactly its contributing sources with "
         "[S1], [S2], etc. using source_map; do not invent links. All declared contributors must contribute. "
+        "An addition body may only use numbers, percentages and certainty or multiplier words (guaranteed, "
+        "certainly, double, 보장, 확정) present in the text, quote, as_of or scope of the claims it cites; "
+        "other additions are rejected. "
         "Relations have type=support|qualify|supersede|compete,from_claim_id,to_claim_id,from_revision_id,"
         "to_revision_id,from_as_of,to_as_of,scope_explanation. Use supplied identities/dates only; do not "
         "invent resolution. No other fields. Preserve old exceptions, claims, limitations and relations.\n"

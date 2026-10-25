@@ -7,17 +7,28 @@ from __future__ import annotations
 
 from collections import Counter, defaultdict
 from datetime import datetime, timezone
+import json
+from pathlib import Path
 from typing import Any
 
 from agent_console import evidence_usage, wiki
 from providers import news_labels
-from reports import source_collector
+from reports import raw_archive, source_collector
 
 STALE_WIKI_AGE_DAYS = 14
 UNUSED_WIKI_DAYS = 30
 RECENT_EVENT_HOURS = 24
 RECENT_EVENT_SAMPLE_LIMIT = 120
 NEWS_LABEL_FALLBACK_ALERT_RATIO = 0.5
+# Source/topic compilation journals (reports/wiki_source_journal.py) and the
+# unattended public runner summary (scripts/run_public_wiki_rollout.py).
+SOURCE_PIPELINE_JOURNALS = (("unrestricted", "wiki-source-v1"), ("public", "public-wiki-pilot-20261013"))
+AUTOMATIC_LATEST_NAME = "automatic-latest.json"
+# The systemd timer reruns 30 minutes after each run (<=90 minutes each).
+AUTOMATIC_RUN_STALE_HOURS = 6
+_AUTOMATIC_FAILURE_FIELDS = ("compile_failed", "routing_pending", "effects_pending", "stale_base", "topic_failed")
+_COMPILE_STATES = {"pending", "compiled", "skipped", "failed"}
+_EFFECT_KEYS = ("artifacts", "search", "log")
 
 
 def _now_iso() -> str:
@@ -38,6 +49,139 @@ def _health_bool(record: dict[str, Any], key: str, fallback: bool = False) -> bo
     if isinstance(value, str):
         return value.strip().lower() not in {"", "0", "false", "no", "none", "null"}
     return bool(value)
+
+
+def _read_json_object(path: Path) -> tuple[str, dict | None]:
+    """Distinguish an absent record from an unreadable or malformed one."""
+    try:
+        text = path.read_text(encoding="utf-8")
+    except FileNotFoundError:
+        return "missing", None
+    except (OSError, UnicodeError):
+        return "corrupt", None
+    try:
+        value = json.loads(text)
+    except ValueError:
+        return "corrupt", None
+    return ("ok", value) if isinstance(value, dict) else ("corrupt", None)
+
+
+def _top_codes(counter: Counter, limit: int = 3) -> str:
+    return ", ".join(f"{code} {count}" for code, count in counter.most_common(limit))
+
+
+def _summarize_source_journal(root: Path) -> dict[str, Any]:
+    summary: dict[str, Any] = {
+        "present": root.is_dir(), "sources": 0, "compile_failed": 0, "compile_pending": 0,
+        "error_codes": {}, "operations_pending": 0, "operation_stages": {}, "corrupt_records": 0,
+    }
+    if not summary["present"]:
+        return summary
+    errors: Counter = Counter()
+    for path in sorted((root / "sources").glob("*.json")):
+        state, receipt = _read_json_object(path)
+        if state != "ok" or receipt.get("compile_state") not in _COMPILE_STATES:
+            summary["corrupt_records"] += 1
+            continue
+        summary["sources"] += 1
+        if receipt["compile_state"] == "failed":
+            summary["compile_failed"] += 1
+            errors[_clean(receipt.get("error_code") or "compile_failed", 80)] += 1
+        elif receipt["compile_state"] == "pending":
+            summary["compile_pending"] += 1
+    stages: Counter = Counter()
+    for directory in ("operations", "topic-operations", "topic-operations-v3"):
+        for path in sorted((root / directory).glob("*.json")):
+            state, receipt = _read_json_object(path)
+            if state != "ok" or not isinstance(receipt.get("stage"), str):
+                summary["corrupt_records"] += 1
+                continue
+            effects_done = all(receipt.get(key) == "done" for key in _EFFECT_KEYS)
+            if receipt["stage"] == "committed" and effects_done:
+                continue
+            summary["operations_pending"] += 1
+            stages["effects_pending" if receipt["stage"] == "committed" else _clean(receipt["stage"], 40)] += 1
+    summary["error_codes"] = dict(errors.most_common())
+    summary["operation_stages"] = dict(stages.most_common())
+    return summary
+
+
+def _summarize_automatic_latest(path: Path, now: datetime) -> dict[str, Any]:
+    state, summary = _read_json_object(path)
+    result: dict[str, Any] = {"state": state}
+    if state != "ok":
+        return result
+    try:
+        modified = datetime.fromtimestamp(path.stat().st_mtime, timezone.utc)
+        results = summary.get("results") or []
+        recovery = summary.get("topic_recovery") or []
+        if not isinstance(results, list) or not isinstance(recovery, list):
+            raise TypeError("automatic summary lists invalid")
+        counts = {field: 0 for field in _AUTOMATIC_FAILURE_FIELDS}
+        reasons: Counter = Counter()
+        for item in results:
+            outcome = item["result"]
+            for field in _AUTOMATIC_FAILURE_FIELDS:
+                counts[field] += int(outcome.get(field) or 0)
+            for code, count in (outcome.get("reason_counts") or {}).items():
+                reasons[_clean(code, 80)] += int(count or 0)
+            topic = outcome.get("topic") or {}
+            if topic.get("stage") == "failed" and topic.get("reason"):
+                reasons[_clean(topic["reason"], 80)] += 1
+        recovery_pending = sum(
+            1 for item in recovery
+            if item.get("stage") != "committed"
+            or any(value != "done" for value in (item.get("effects") or {}).values()))
+    except (OSError, TypeError, ValueError, KeyError, AttributeError):
+        return {"state": "corrupt"}
+    age_hours = round(max(0.0, (now - modified).total_seconds()) / 3600, 1)
+    result.update(
+        last_run_at=modified.isoformat(timespec="seconds"), age_hours=age_hours,
+        stale=age_hours > AUTOMATIC_RUN_STALE_HOURS, attempted=int(summary.get("attempted") or 0),
+        recovery_pending=recovery_pending, reason_counts=dict(reasons.most_common()), **counts)
+    return result
+
+
+def _summarize_source_pipeline_health(now: datetime | None = None) -> dict[str, Any]:
+    """New source/topic compilation pipeline state; failures are never an empty queue."""
+    now = now or datetime.now(timezone.utc)
+    root = raw_archive.reports_root()
+    journals: dict[str, Any] = {}
+    reasons: list[str] = []
+    for name, directory in SOURCE_PIPELINE_JOURNALS:
+        journal = _summarize_source_journal(root / directory)
+        if name == "public" and journal["present"]:
+            journal["automatic_latest"] = _summarize_automatic_latest(root / directory / AUTOMATIC_LATEST_NAME, now)
+        journals[name] = journal
+        if journal["compile_failed"]:
+            detail = _top_codes(Counter(journal["error_codes"]))
+            reasons.append(f"{name}: compile 실패 {journal['compile_failed']}건" + (f" ({detail})" if detail else ""))
+        if journal["operations_pending"]:
+            reasons.append(f"{name}: 복구·효과 대기 {journal['operations_pending']}건 "
+                           f"({_top_codes(Counter(journal['operation_stages']), 5)})")
+        if journal["corrupt_records"]:
+            reasons.append(f"{name}: journal 기록 손상 {journal['corrupt_records']}건")
+        latest = journal.get("automatic_latest")
+        if not latest or latest["state"] == "missing":
+            continue
+        if latest["state"] == "corrupt":
+            reasons.append(f"{name}: {AUTOMATIC_LATEST_NAME} 손상")
+            continue
+        if latest["stale"]:
+            reasons.append(f"{name}: 자동 실행 정체 — 마지막 {latest['last_run_at']} ({latest['age_hours']}h 전)")
+        failures = [f"{field} {latest[field]}" for field in _AUTOMATIC_FAILURE_FIELDS if latest[field]]
+        if failures:
+            detail = _top_codes(Counter(latest["reason_counts"]))
+            reasons.append(f"{name}: 마지막 자동 실행 {' · '.join(failures)}" + (f" ({detail})" if detail else ""))
+        if latest["recovery_pending"]:
+            reasons.append(f"{name}: 토픽 복구 대기 {latest['recovery_pending']}건")
+    present = any(journal["present"] for journal in journals.values())
+    return {
+        "status": "attention" if reasons else ("ok" if present else "no_data"),
+        "attention": bool(reasons),
+        "reasons": reasons,
+        "journals": journals,
+    }
 
 
 def _source_root(source: str) -> str:
@@ -458,6 +602,7 @@ def _recommendations(
     wiki_section: dict[str, Any],
     curation_section: dict[str, Any],
     news_label_section: dict[str, Any] | None = None,
+    source_pipeline_section: dict[str, Any] | None = None,
 ) -> list[dict[str, Any]]:
     recs: list[dict[str, Any]] = []
     if (news_label_section or {}).get("attention"):
@@ -499,6 +644,14 @@ def _recommendations(
             "title": "소스 수집 공백 점검",
             "detail": " · ".join(detail_bits),
             "action": "크론·인증·채널 상태를 먼저 복구해서 원문 유입을 다시 살리세요.",
+        })
+    if (source_pipeline_section or {}).get("attention"):
+        recs.append({
+            "priority": 1,
+            "category": "source_pipeline",
+            "title": "원문 컴파일·토픽 파이프라인 점검",
+            "detail": " · ".join(source_pipeline_section.get("reasons") or [])[:600],
+            "action": "journal의 실패 사유 코드와 복구 대기 operation을 확인하고, 자동 실행 로그·타이머를 복구하세요.",
         })
 
     unlinked = int(curation_section.get("actionable_unlinked_count") or 0)
@@ -583,8 +736,9 @@ def build_pipeline_health_report(*, dry_run: bool = False) -> dict[str, Any]:
     wiki_section = _summarize_wiki_health(pages, stats_data, lint_data, stale_pages, unused_pages)
     curation_section = _summarize_curation_health(pages)
     news_label_section = _summarize_news_label_health()
+    source_pipeline_section = _summarize_source_pipeline_health()
     recommendations = _recommendations(
-        source_section, wiki_section, curation_section, news_label_section
+        source_section, wiki_section, curation_section, news_label_section, source_pipeline_section
     )
     overall_status = "attention" if any(
         int(rec.get("priority") or 0) > 0 for rec in recommendations
@@ -600,9 +754,11 @@ def build_pipeline_health_report(*, dry_run: bool = False) -> dict[str, Any]:
         "wiki_health": wiki_section,
         "curation_health": curation_section,
         "news_label_health": news_label_section,
+        "source_pipeline_health": source_pipeline_section,
         "overall": {
             "status": overall_status,
             "news_labels": news_label_section,
+            "source_pipeline": source_pipeline_section["status"],
         },
         "evidence_usage": usage,
         "recommendations": recommendations,
@@ -653,6 +809,12 @@ def format_pipeline_health_report(report: dict[str, Any]) -> str:
         )
     else:
         lines.append("뉴스 LLM 라벨: no_data · 라벨 파일이 비어 있음")
+    pipeline_section = report.get("source_pipeline_health") or {}
+    if pipeline_section:
+        lines.append(
+            f"원문 파이프라인: {pipeline_section.get('status', 'unknown')}"
+            + "".join(f"\n- {reason}" for reason in (pipeline_section.get("reasons") or [])[:5])
+        )
     lines.append("")
     lines.append("권장 액션:")
     for rec in (report.get("recommendations") or [])[:5]:

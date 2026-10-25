@@ -3,6 +3,7 @@ import copy
 import hashlib
 import json
 from pathlib import Path
+import sys
 import pytest
 
 from agent_console import shared_memory, wiki, wiki_publication, qmd_generation
@@ -147,6 +148,9 @@ def test_synthetic_topic_publication_pinning_search_rollback_and_recovery(
     assert pinned.generation_id == first["generation_id"]
     assert pinned.read("index.md")
 
+    # The synthetic runner never starts a process; production still pins a real
+    # executable path/hash first, so bind it to this interpreter (no installed qmd).
+    monkeypatch.setenv("AGENT_CONSOLE_QMD_BIN", sys.executable)
     runner = SyntheticQmdRunner()
     capability = {"supported": True, "recipe": {
         "build_argv": ["{executable}", "--index", "{index_name}", "collection", "add",

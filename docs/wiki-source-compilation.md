@@ -42,6 +42,29 @@ contract and existing raw retention remain unchanged.
   before reading a fresh snapshot. This prevents an older concurrent rebuild
   from overwriting newer output; it serializes publications rather than commits.
 
+## Merge, Cleanup And Context
+
+- `_merge_pages` (chat curation, autonomous curator, dedup) refuses to mix
+  source-backed and unverified pages. The result keeps the least reviewed input
+  status; any LLM synthesis makes it `draft`.
+- A merge reads each page's full semantic snapshot, split children included,
+  unions claims (one `claim_id` with different facts refuses the merge),
+  limitations, relations and integrations, and keeps references/evidence beyond
+  parent caps in provenance children. Bodies over the limit use the lossless
+  split rule. Every affected parent and child is written in one fingerprint-
+  guarded batch; source children are archived with the source, never left
+  active under an archived parent.
+- `wiki_cleanup.apply_cleanup` rechecks, backs up and writes under the store
+  lock; a page changed after planning is `skipped_stale`.
+- `build_context_section` drops archived pages from retrieved and injected
+  pages unless `include_archived=True`; `list_pages` keeps the full history view
+  by default for the browser and batch jobs.
+- The autonomous curator spends `WIKI_AUTONOMOUS_MAX_JUDGMENTS` (default 12)
+  per run before each LLM call, including failures and skips, and remembers
+  unapplied outcomes per input hash in
+  `<wiki artifacts>/autonomous-curator-state.json` (failures 1 day, others
+  30 days) so unchanged candidates are not re-judged.
+
 ## Safe Inspection
 
 Run from `/home/ubuntu/projects/stock-report`:

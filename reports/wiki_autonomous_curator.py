@@ -9,11 +9,14 @@ LLM은 merge/split 판정만 하고, 실제 범위·kind·출처 보호는 이 �
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import logging
 import os
 import re
 import sys
+import time
+from pathlib import Path
 from typing import Callable
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -22,6 +25,7 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
+import safe_io
 from agent_console import wiki
 
 
@@ -31,7 +35,13 @@ logger = logging.getLogger(__name__)
 _JUDGMENT_KINDS = ("playbook", "risk", "concept")
 _DEFAULT_READABILITY_LIMIT = 2600
 _DEFAULT_MAX_OPERATIONS = 6
+# 판정(LLM 호출) 상한. 성공 건수만 세면 skip·실패만 나는 날 후보 전체를 호출했다
+# (리뷰 B-07: limit=1, skip-only 25건 → 실행마다 25회). 호출 직전에 소비한다.
+_DEFAULT_MAX_JUDGMENTS = 12
 _MAX_SPLIT_PARTS = 8
+_STATE_SCHEMA = 1
+# 같은 입력에 대해 적용되지 않은 판정은 이 기간 동안 다시 묻지 않는다. 일시 실패만 짧게.
+_SUPPRESS_SECONDS = {"skip": 30 * 86400, "invalid": 30 * 86400, "rejected": 30 * 86400, "failed": 86400}
 
 _BOUNDARIES = """\
 다음 중 하나라도 해당하면 merge=false다.
@@ -80,7 +90,7 @@ def find_management_pairs(
             for other_index in range(index + 1, len(group)):
                 other = group[other_index]
                 score = _jaccard(token_sets[index], token_sets[other_index])
-                if score >= min_similarity:
+                if score >= min_similarity and not wiki.merge_trust_blocker([page, other]):
                     pairs.append((page, other, score))
     pairs.sort(key=lambda item: item[2], reverse=True)
     return pairs[: max(1, int(limit))]
@@ -175,6 +185,84 @@ def _max_operations() -> int:
         return _DEFAULT_MAX_OPERATIONS
 
 
+def _max_judgments() -> int:
+    raw = os.getenv("WIKI_AUTONOMOUS_MAX_JUDGMENTS", str(_DEFAULT_MAX_JUDGMENTS))
+    try:
+        return max(1, min(100, int(raw)))
+    except (TypeError, ValueError):
+        return _DEFAULT_MAX_JUDGMENTS
+
+
+def _state_path() -> Path:
+    return wiki.wiki_artifacts_dir() / "autonomous-curator-state.json"
+
+
+def _load_judgments(path: Path) -> dict:
+    """Unapplied judgments by candidate key; an unreadable file only costs extra calls."""
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+    judgments = data.get("judgments") if isinstance(data, dict) and data.get("schema") == _STATE_SCHEMA else None
+    return {key: value for key, value in (judgments or {}).items()
+            if isinstance(value, dict) and isinstance(value.get("input_sha256"), str)
+            and value.get("outcome") in _SUPPRESS_SECONDS and isinstance(value.get("at"), (int, float))}
+
+
+def _store_judgment(path: Path, key: str, entry: dict | None, now: float) -> None:
+    """Record (or clear) one outcome by read-modify-write under a lock, dropping expired rows."""
+    with safe_io.file_write_lock(str(path)):
+        judgments = _load_judgments(path)
+        if entry is None:
+            judgments.pop(key, None)
+        else:
+            judgments[key] = entry
+        judgments = {k: v for k, v in judgments.items() if now - v["at"] < _SUPPRESS_SECONDS[v["outcome"]]}
+        safe_io.atomic_write_json(str(path), {"schema": _STATE_SCHEMA, "judgments": judgments})
+
+
+class _JudgmentGate:
+    """Counts LLM judgments before each call and skips unchanged inputs that were not applied."""
+
+    def __init__(self, llm_fn: Callable[[str], str | None], limit: int):
+        self.llm_fn = llm_fn
+        self.limit = limit
+        self.used = 0
+        self.suppressed = 0
+        self.path = _state_path()
+        self.now = time.time()
+        self.memory = _load_judgments(self.path)
+
+    def ask(self, key: str, prompt: str) -> tuple[dict | None, str]:
+        """Return (decision, input hash) for a judgment the caller must classify.
+
+        An empty hash means no decision to classify: the input was suppressed, or the
+        call failed and that failure is already remembered.
+        """
+        digest = hashlib.sha256(prompt.encode("utf-8")).hexdigest()
+        known = self.memory.get(key)
+        if (known and known["input_sha256"] == digest
+                and self.now - known["at"] < _SUPPRESS_SECONDS[known["outcome"]]):
+            self.suppressed += 1
+            return None, ""
+        self.used += 1
+        try:
+            decision = _parse_management_decision(self.llm_fn(prompt))
+        except Exception as exc:
+            logger.warning("자율 위키 판정 실패 (%s): %s", key, exc)
+            self.remember(key, digest, "failed")
+            return None, ""
+        return decision, digest
+
+    def remember(self, key: str, digest: str, outcome: str | None) -> None:
+        entry = None if outcome is None else {"input_sha256": digest, "outcome": outcome, "at": self.now}
+        if entry is None:
+            self.memory.pop(key, None)
+        else:
+            self.memory[key] = entry
+        _store_judgment(self.path, key, entry, self.now)
+
+
 def _valid_merge_decision(decision: dict, first: dict, second: dict) -> tuple[str, list[str]] | None:
     ids = {str(first.get("id")), str(second.get("id"))}
     target_id = str(decision.get("target_page_id") or "")
@@ -212,6 +300,12 @@ def run(
     limit: int | None = None,
     readability_limit: int | None = None,
 ) -> dict:
+    """Judge merge/split candidates within one judgment budget per run.
+
+    Every LLM call, including failures and skips, consumes the budget before it is made.
+    Unapplied outcomes are remembered per input hash (also in dry runs, since the calls
+    were real) so the next run does not pay again for an unchanged candidate.
+    """
     if llm_fn is None:
         from agent_console.agent import _try_llm_prompt
 
@@ -226,70 +320,86 @@ def run(
     # 후보가 있으면 merge 가 예산 전부를 못 가져가도록 최소 몫을 미리 떼어둔다.
     split_reserve = min(len(split_candidates), max(1, max_operations // 3)) if split_candidates else 0
     merge_budget = max_operations - split_reserve
+    gate = _JudgmentGate(llm_fn, _max_judgments())
+    # 판정 예산도 같은 이유로 분할 몫을 남긴다.
+    split_judgment_reserve = min(len(split_candidates), max(1, gate.limit // 3)) if split_candidates else 0
+    merge_judgment_budget = gate.limit - split_judgment_reserve
     merged: list[dict] = []
     split: list[dict] = []
     consumed: set[str] = set()
 
     for first, second, similarity in find_management_pairs(pages):
-        if len(merged) >= merge_budget:
+        if len(merged) >= merge_budget or gate.used >= merge_judgment_budget:
             break
         if str(first.get("id")) in consumed or str(second.get("id")) in consumed:
             continue
-        try:
-            decision = _parse_management_decision(llm_fn(_build_management_prompt("merge", first, second)))
-        except Exception as exc:
-            logger.warning("자율 위키 병합 판정 실패: %s", exc)
+        key = "merge:" + "|".join(sorted([str(first.get("id")), str(second.get("id"))]))
+        decision, digest = gate.ask(key, _build_management_prompt("merge", first, second))
+        if not digest:
             continue
         if not decision or decision.get("action") != "merge":
+            gate.remember(key, digest, "skip")
             continue
         valid = _valid_merge_decision(decision, first, second)
         if not valid:
+            gate.remember(key, digest, "invalid")
             continue
         target_id, source_ids = valid
         entry = {"target": target_id, "sources": source_ids, "similarity": similarity, "reason": decision.get("reason", "")}
         if not dry_run:
             result = wiki._merge_pages(source_ids, target_id, decision.get("body") or "", reason=decision.get("reason") or "")
             if not result:
+                gate.remember(key, digest, "rejected")
                 continue
+            gate.remember(key, digest, None)
         merged.append(entry)
         consumed.update([target_id, *source_ids])
 
     for source in split_candidates:
-        if len(merged) + len(split) >= max_operations or str(source.get("id")) in consumed:
+        if len(merged) + len(split) >= max_operations or gate.used >= gate.limit:
             break
-        try:
-            decision = _parse_management_decision(llm_fn(_build_management_prompt("split", source)))
-        except Exception as exc:
-            logger.warning("자율 위키 분할 판정 실패: %s", exc)
+        if str(source.get("id")) in consumed:
+            continue
+        key = "split:" + str(source.get("id"))
+        decision, digest = gate.ask(key, _build_management_prompt("split", source))
+        if not digest:
             continue
         if not decision or decision.get("action") != "split":
+            gate.remember(key, digest, "skip")
             continue
         valid = _valid_split_decision(decision, source)
         if not valid:
+            gate.remember(key, digest, "invalid")
             continue
         titles, bodies = valid
         entry = {"source": source["id"], "titles": titles, "reason": decision.get("reason", "")}
         if not dry_run:
             result = wiki._split_page(source["id"], titles, bodies)
             if not result:
+                gate.remember(key, digest, "rejected")
                 continue
+            gate.remember(key, digest, None)
             entry["created"] = result.get("created", [])
         split.append(entry)
         consumed.add(str(source.get("id")))
 
     if (merged or split) and not dry_run:
         wiki.rebuild_artifacts()
-    return {"dry_run": bool(dry_run), "merged": merged, "split": split}
+    return {"dry_run": bool(dry_run), "merged": merged, "split": split,
+            "judgments": gate.used, "suppressed": gate.suppressed}
 
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--dry-run", action="store_true", help="판정만 계산하고 저장하지 않음")
+    parser.add_argument("--dry-run", action="store_true",
+                        help="위키에 저장하지 않음(실제 LLM 판정 결과의 재호출 억제 기록은 남김)")
     parser.add_argument("--limit", type=int, default=None, help="이번 실행의 최대 작업 수")
     parser.add_argument("--readability-limit", type=int, default=None, help="분할 후보 본문 글자 수")
     args = parser.parse_args()
     result = run(dry_run=args.dry_run, limit=args.limit, readability_limit=args.readability_limit)
-    logger.info("자율 위키 관리 완료: 병합 %d건, 분할 %d건 (dry_run=%s)", len(result["merged"]), len(result["split"]), result["dry_run"])
+    logger.info("자율 위키 관리 완료: 병합 %d건, 분할 %d건, 판정 %d회, 억제 %d건 (dry_run=%s)",
+                len(result["merged"]), len(result["split"]), result["judgments"], result["suppressed"],
+                result["dry_run"])
     return 0
 
 

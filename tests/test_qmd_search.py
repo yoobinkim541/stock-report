@@ -201,18 +201,42 @@ def test_qmd_partial_sync_does_not_remove_existing_docs(monkeypatch, tmp_path):
     existing = wiki_dir / "existing.md"
     existing.write_text("keep", encoding="utf-8")
     monkeypatch.setenv("AGENT_CONSOLE_QMD_WIKI_DIR", str(wiki_dir))
+    monkeypatch.setenv("AGENT_CONSOLE_QMD_ENABLED", "1")
+    monkeypatch.setenv("AGENT_CONSOLE_QMD_BIN", "qmd")
     from agent_console import qmd_search
+    calls = []
 
-    result = qmd_search.sync_pages(
-        [{"id": "new", "title": "New", "body": "new"}],
-        complete=False,
-        runner=lambda *args, **kwargs: _Result("updated"),
-    )
+    def runner(cmd, **kwargs):
+        calls.append(cmd)
+        return _Result("updated")
+
+    result = qmd_search.sync_pages([{"id": "new", "title": "New", "body": "new"}], complete=False, runner=runner)
 
     assert result["ok"] is True
     assert result["skipped"] == "partial_snapshot"
     assert result["removed_count"] == 0
     assert existing.exists()
+    assert calls == [["qmd", "update"]]
+
+
+def test_qmd_partial_sync_when_disabled_exports_without_index_update(monkeypatch, tmp_path):
+    wiki_dir = tmp_path / "wiki-md"
+    wiki_dir.mkdir()
+    existing = wiki_dir / "existing.md"
+    existing.write_text("keep", encoding="utf-8")
+    monkeypatch.setenv("AGENT_CONSOLE_QMD_WIKI_DIR", str(wiki_dir))
+    monkeypatch.setenv("AGENT_CONSOLE_QMD_ENABLED", "0")
+    from agent_console import qmd_search
+
+    def forbidden(*args, **kwargs):
+        raise AssertionError("disabled QMD must not run update")
+
+    result = qmd_search.sync_pages([{"id": "new", "title": "New", "body": "new"}], complete=False, runner=forbidden)
+
+    assert result["ok"] is True
+    assert result["skipped"] == "disabled"
+    assert result["removed_count"] == 0
+    assert existing.exists() and len(result["files"]) == 1
 
 
 def test_qmd_complete_sync_restores_removed_docs_when_update_fails(monkeypatch, tmp_path):

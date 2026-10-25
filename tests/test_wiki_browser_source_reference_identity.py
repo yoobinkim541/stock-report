@@ -1,22 +1,39 @@
 from collections import Counter
 
+import pytest
+
 from dashboard import wiki_browser
 
 
 URL = "https://example.com/article/" + "a" * 700
-PATH = "/home/ubuntu/reports/text/telegram/2026/10/08/" + "p" * 160 + ".txt"
+ARCHIVE_TEXT = "text/telegram/2026/10/08/" + "p" * 160 + ".txt"
 
 
-def test_selected_evidence_retains_full_clickable_identifiers():
+@pytest.fixture
+def archive_path(tmp_path, monkeypatch):
+    """A long archive pointer under the configured reports root (the only redaction exception)."""
+    root = tmp_path / "reports"
+    monkeypatch.setenv("STOCK_REPORT_REPORTS_DIR", str(root))
+    return str(root / ARCHIVE_TEXT)
+
+
+def test_selected_evidence_retains_full_clickable_identifiers(archive_path):
     model = wiki_browser.build_selected_evidence_model({"id": "source", "title": "Source",
-                                                       "source_refs": [URL, PATH]})
-    assert model["evidence"] == [URL, PATH]
+                                                       "source_refs": [URL, archive_path]})
+    assert model["evidence"] == [URL, archive_path]
 
 
-def test_legacy_record_adapter_preserves_full_archive_pointer():
+def test_legacy_record_adapter_preserves_full_archive_pointer(archive_path):
     page = wiki_browser._record_to_page({"id": "legacy", "title": "Legacy source",
-                                          "artifacts": [URL, PATH]})
-    assert page["source_refs"] == [URL, PATH]
+                                          "artifacts": [URL, archive_path]})
+    assert page["source_refs"] == [URL, archive_path]
+
+
+def test_browser_redacts_home_archive_pointer_outside_configured_root(monkeypatch, tmp_path):
+    monkeypatch.setenv("STOCK_REPORT_REPORTS_DIR", str(tmp_path / "reports"))
+    model = wiki_browser.build_selected_evidence_model({"id": "outside", "title": "Outside root",
+        "source_refs": ["/home/ubuntu/reports/" + ARCHIVE_TEXT]})
+    assert not any("/home/ubuntu" in ref for ref in model["evidence"])
 
 
 def test_browser_keeps_every_reference_from_a_valid_core_page():

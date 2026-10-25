@@ -151,6 +151,34 @@ def test_forged_payloads_are_rejected(evidence, damage):
     with pytest.raises(ValueError): validate(data, value)
 
 
+# B-fix-ground-01: real claim IDs/dates/scopes cannot carry ungrounded prose.
+@pytest.mark.parametrize("body", [
+    "Realized demand is guaranteed and all forecast uncertainty is resolved [S{i}].",
+    "The author reports capacity will reach 500 units [S{i}].",
+    "The author reports demand will triple [S{i}].",
+])
+def test_v3_addition_prose_cannot_exceed_cited_claims(evidence, body):
+    data, _, _ = evidence
+    value = payload(data)
+    for index, addition in enumerate(value["targets"][0]["additions"], 1):
+        addition["body"] = body.format(i=index)
+    with pytest.raises(ValueError, match="topic_addition_unsupported"):
+        validate(data, value)
+
+
+def test_v3_addition_may_restate_cited_numbers_and_negated_certainty(evidence):
+    data, _, _ = evidence
+    value = payload(data)
+    claims = {c["claim_id"]: c for c in [*data["compiled"]["claims"],
+              *[c for n in data["context"]["notes"] for c in n["claims"]]]}
+    for index, addition in enumerate(value["targets"][0]["additions"], 1):
+        text = claims[addition["claim_ids"][0]]["text"]
+        assert any(char.isdigit() for char in text)
+        addition["body"] = f"{text}; demand is not guaranteed [S{index}]."
+    result = validate(data, value)
+    assert all("not guaranteed" in a["body"] for a in result["targets"][0]["additions"])
+
+
 @pytest.mark.parametrize("response", ['{"targets":[],"targets":[],"refusal":"x"}',
     '{"targets":[],"refusal":NaN}', '{"targets":[],"refusal":Infinity}',
     '{"targets":[],"refusal":1e999}', '[1]', 'not json'])

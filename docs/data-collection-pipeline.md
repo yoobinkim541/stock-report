@@ -89,6 +89,8 @@ World Memory UI(대시보드 "시장 기억" 탭)는 검색(제목·본문·티�
 
 위키 쓰기 규약(신뢰 등급, `verification_status`, source-backed 승격 조건 등)은 [`shared-agent-memory.md`의 "LLM Wiki 운영 규약"](shared-agent-memory.md) 참조.
 
+`wiki_pipeline_health`의 `source_pipeline_health`는 원문 컴파일·토픽 journal(`~/reports/wiki-source-v1`, `~/reports/public-wiki-pilot-20261013`)과 무인 실행 요약 `automatic-latest.json`을 읽는다. 다음은 `attention`과 구체 원인으로 표시된다: compile 실패 receipt(사유 코드별), prepared/applied/stale-base/failed operation과 effects 미완료(복구 대기), 손상된 journal 기록, `automatic-latest.json` 손상(파일 없음은 `missing`으로 따로 표시하고 경보하지 않음), 마지막 실행 6시간 초과(파일 mtime 기준), 마지막 자동 실행의 `compile_failed/routing_pending/effects_pending/stale_base/topic_failed`, 미완료 토픽 복구. 모두 해소되면 `ok`, journal이 없으면 `no_data`.
+
 > **2026-07-25 / 2026-07-31**: `source_wiki_curator`가 매 실행마다 이벤트 개수 상위 N개 그룹만 저장하던
 > `--limit 8` 캡을 제거함(`--limit 0`=무제한). 소수 거시 주제(중동/전쟁·기술/AI 등)가
 > 이벤트 수에서 항상 상위권을 독점해, 종목별/유형별 신규 페이지가 하루 넘게 하나도

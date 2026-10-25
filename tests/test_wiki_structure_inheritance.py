@@ -30,33 +30,35 @@ def assert_publishable():
 
 
 @pytest.mark.parametrize('long_ids', [False, True])
-def test_merge_keeps_own_children_without_adopting_source_children(long_ids):
+def test_merge_absorbs_both_documents_and_retires_their_children(long_ids):
     target_id = 'source-topic-' + 'a' * 64 if long_ids else 'target'
     source_id = 'source-topic-' + 'b' * 64 if long_ids else 'source'
     target_child = 'source-topic-' + 'c' * 64 if long_ids else 'target-child'
     source_child = 'source-topic-' + 'd' * 64 if long_ids else 'source-child'
     target = save(target_id, tags=['target-theme', 'split_into:' + target_child])
     source = save(source_id, tags=['source-theme', 'split_into:' + source_child])
-    save(target_child, parent_page_id=target_id, tags=['split_from:' + target_id])
-    save(source_child, parent_page_id=source_id, tags=['split_from:' + source_id])
-    child_before = wiki.semantic_snapshot(source_child)
+    target_child_body = save(target_child, parent_page_id=target_id, tags=['split_from:' + target_id])['body']
+    source_child_body = save(source_child, parent_page_id=source_id, tags=['split_from:' + source_id])['body']
     assert_publishable()
 
     assert wiki._merge_pages([source_id], target_id, 'Combined attributed evidence')
 
     merged = wiki.get_page(target_id)
+    snapshot = wiki.semantic_snapshot(target_id)
     archived = wiki.get_page(source_id)
-    assert 'split_into:' + target_child in merged['tags']
-    assert 'split_into:' + source_child not in merged['tags']
+    for text in (target['body'], source['body'], target_child_body, source_child_body):
+        assert text in snapshot['body']
+    assert not snapshot['children']
+    assert not any(tag.startswith('split_into:') for tag in merged['tags'])
     assert 'source-theme' in merged['tags']
-    assert source['body'] in merged['body']
-    assert target['body'] in merged['body']
     assert set(source['source_refs']) <= set(merged['source_refs'])
     assert archived['status'] == 'archived'
     assert archived['body'] == source['body']
     assert 'split_into:' + source_child in archived['tags']
-    assert wiki.semantic_snapshot(source_child)['body'] == child_before['body']
-    assert wiki.get_page(source_child)['parent_page_id'] == source_id
+    for child_id, parent_id in ((target_child, target_id), (source_child, source_id)):
+        child = wiki.get_page(child_id)
+        assert child['status'] == 'archived' and child['parent_page_id'] == parent_id
+    assert wiki.get_page(source_child)['merged_into'] == target_id
     assert_publishable()
 
 

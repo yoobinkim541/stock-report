@@ -163,60 +163,59 @@ def plan_cleanup(pages: Iterable[dict]) -> list[dict]:
     return sorted(actions, key=lambda action: (action["page_id"], action["reason"]))
 
 
-def _current_pages() -> list[dict]:
-    wiki._CACHE.clear()
-    return wiki._all_wiki_pages()
-
-
-def _snapshot_backup() -> str:
-    events_path = Path(shared_memory.shared_memory_dir()) / "events.jsonl"
-    contents = events_path.read_text(encoding="utf-8", errors="replace") if events_path.exists() else ""
-    backup_dir = events_path.parent / "wiki-cleanup-backups"
-    timestamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S.%fZ")
-    backup_path = backup_dir / f"events-{timestamp}.jsonl"
-    safe_io.atomic_write_text(str(backup_path), contents)
-    return str(backup_path)
+def _pages_from_rows(rows: list[dict]) -> list[dict]:
+    """Project stored rows exactly as ``wiki._all_wiki_pages`` does, for fingerprint parity."""
+    ordered = sorted(rows, key=lambda row: row.get("createdAt") or "", reverse=True)
+    wiki_rows = [row for row in ordered if wiki._is_wiki_record(row)]
+    return wiki._apply_backlinks([wiki._record_to_page(row) for row in wiki_rows], wiki_rows)
 
 
 def apply_cleanup(actions: Iterable[dict], dry_run: bool = True) -> dict:
-    """Recheck a plan against current state, then archive at most 50 pages."""
+    """Recheck a plan against current state, then archive at most 50 pages.
+
+    The recheck, the backup and the write happen under one store lock, so a page
+    changed after planning is skipped as stale instead of being overwritten.
+    """
     supplied = [action for action in actions if isinstance(action, dict)]
     requested = supplied[:MAX_CLEANUP_ACTIONS]
     result = {
         "dry_run": bool(dry_run), "planned": [], "archived": [], "skipped_stale": [],
         "backup_path": "", "truncated_actions": max(0, len(supplied) - MAX_CLEANUP_ACTIONS),
     }
-    backup_created = False
-
-    for action in requested:
-        page_id = str(action.get("page_id") or "").strip()
-        if action.get("action") != "archive" or not page_id:
-            continue
-        pages = _current_pages()
-        current_plan = plan_cleanup(pages)
-        eligible = next((candidate for candidate in current_plan
-                         if candidate["page_id"] == page_id
-                         and candidate["reason"] == action.get("reason")
-                         and candidate["fingerprint"] == action.get("fingerprint")), None)
-        if not eligible:
-            result["skipped_stale"].append(page_id)
-            continue
-        result["planned"].append(page_id)
-        if dry_run:
-            continue
-        if not backup_created:
-            result["backup_path"] = _snapshot_backup()
-            backup_created = True
-        page = next((row for row in pages if _page_id(row) == page_id), None)
-        if not page:
-            result["planned"].pop()
-            result["skipped_stale"].append(page_id)
-            continue
-        payload = deepcopy(page)
-        payload["status"] = "archived"
-        wiki.upsert_page(payload)
-        result["archived"].append(page_id)
-
+    events_path = shared_memory._paths()["events"]
+    with shared_memory._events_lock():
+        rows = shared_memory._read_jsonl_checked(events_path)
+        pages = {_page_id(page): page for page in _pages_from_rows(rows)}
+        current = {(action["page_id"], action["reason"]): action for action in plan_cleanup(pages.values())}
+        for action in requested:
+            page_id = str(action.get("page_id") or "").strip()
+            if action.get("action") != "archive" or not page_id:
+                continue
+            match = current.get((page_id, action.get("reason")))
+            if match and match["fingerprint"] == action.get("fingerprint") and page_id not in result["planned"]:
+                result["planned"].append(page_id)
+            else:
+                result["skipped_stale"].append(page_id)
+        if dry_run or not result["planned"]:
+            return result
+        backup_dir = Path(shared_memory.shared_memory_dir()) / "wiki-cleanup-backups"
+        stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S.%fZ")
+        result["backup_path"] = str(backup_dir / f"events-{stamp}.jsonl")
+        safe_io.atomic_write_text(result["backup_path"], "".join(
+            json.dumps(row, ensure_ascii=False, sort_keys=True) + "\n" for row in rows))
+        by_id = {
+            page_id: shared_memory.normalize_record(
+                wiki._build_wiki_record({**pages[page_id], "status": "archived"}, existing=pages[page_id]))
+            for page_id in result["planned"]
+        }
+        shared_memory._write_jsonl_locked([by_id.pop(row["id"], row) for row in rows] + list(by_id.values()))
+        shared_memory._write_index_locked()
+        result["archived"] = list(result["planned"])
+    wiki._CACHE.clear()
+    wiki._append_wiki_log("archive", title=f"{len(result['archived'])} empty or duplicate draft pages",
+                          page_ids=result["archived"][:100], archived_count=len(result["archived"]),
+                          backup=Path(result["backup_path"]).name)
+    wiki._debounced_rebuild()
     return result
 
 

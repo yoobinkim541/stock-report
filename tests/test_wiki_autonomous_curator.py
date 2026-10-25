@@ -140,3 +140,53 @@ def test_run_split_persists_parent_page_id(monkeypatch, tmp_path):
     assert len(result["split"]) == 1
     for child_id in result["split"][0]["created"]:
         assert wiki.get_page(child_id)["parent_page_id"] == source["id"]
+
+
+def test_run_caps_llm_judgments_even_when_every_answer_is_skip_or_failure(monkeypatch, tmp_path):
+    """B-07: the limit counts calls made, not successful operations."""
+    _isolate(monkeypatch, tmp_path)
+    monkeypatch.setenv("WIKI_AUTONOMOUS_MAX_JUDGMENTS", "5")
+    from agent_console import wiki
+    from reports import wiki_autonomous_curator as curator
+
+    for index in range(25):
+        _page(wiki, title=f"긴 판단 {index}", body=f"고유 판단 {index} " + "긴 본문 " * 400, kind="concept")
+    calls: list[str] = []
+
+    def skip(prompt):
+        calls.append(prompt)
+        return '{"action":"skip","reason":"insufficient"}'
+
+    def fail(prompt):
+        calls.append(prompt)
+        raise RuntimeError("provider down")
+
+    for answer in (skip, lambda prompt: (calls.append(prompt), "not json")[1], fail):
+        calls.clear()
+        result = curator.run(dry_run=True, llm_fn=answer, limit=1, readability_limit=1000)
+        assert len(calls) == 5
+        assert result["judgments"] == 5
+
+
+def test_run_does_not_reask_unchanged_input_but_reasks_after_change(monkeypatch, tmp_path):
+    _isolate(monkeypatch, tmp_path)
+    from agent_console import wiki
+    from reports import wiki_autonomous_curator as curator
+
+    page = _page(wiki, title="분할 대상", body="배경 문장 " * 400)
+    calls: list[str] = []
+
+    def skip(prompt):
+        calls.append(prompt)
+        return '{"action":"skip","reason":"insufficient"}'
+
+    curator.run(dry_run=True, llm_fn=skip, limit=1, readability_limit=1000)
+    second = curator.run(dry_run=True, llm_fn=skip, limit=1, readability_limit=1000)
+    assert len(calls) == 1
+    assert (second["judgments"], second["suppressed"]) == (0, 1)
+
+    wiki.upsert_page({**{key: page[key] for key in ("id", "title", "summary", "surface", "kind", "status")},
+                      "source_refs": [], "body": "적용 문장 " * 400})
+    wiki._CACHE.clear()
+    curator.run(dry_run=True, llm_fn=skip, limit=1, readability_limit=1000)
+    assert len(calls) == 2

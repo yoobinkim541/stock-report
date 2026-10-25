@@ -388,3 +388,112 @@ def test_source_health_summary_exposes_explicit_integrity_metrics():
     assert row["collision_count"] == 0
     assert row["duplicate_only"] is True
     assert section["overall"]["collision_sources"] == 0
+
+
+# B-fix-ground-08: new source/topic pipeline state reaches health with concrete causes.
+def _write_json(path, value):
+    import json
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(value if isinstance(value, str) else json.dumps(value), encoding="utf-8")
+
+
+def _health_with_reports_root(monkeypatch, root):
+    from reports import wiki_pipeline_health
+
+    _patch_empty_pipeline(monkeypatch, wiki_pipeline_health)
+    monkeypatch.setattr(wiki_pipeline_health.news_labels, "load_labels", lambda: [])
+    monkeypatch.setenv("STOCK_REPORT_REPORTS_DIR", str(root))
+    return wiki_pipeline_health.build_pipeline_health_report(dry_run=True)
+
+
+def _public(root):
+    return root / "public-wiki-pilot-20261013"
+
+
+def _attempt(**counts):
+    result = {"compile_failed": 0, "routing_pending": 0, "effects_pending": 0, "stale_base": 0,
+              "reason_counts": {}, **counts}
+    return {"revision_id": "a" * 64, "result": result}
+
+
+def test_source_pipeline_without_journals_is_no_data_not_attention(monkeypatch, tmp_path):
+    report = _health_with_reports_root(monkeypatch, tmp_path)
+    assert report["source_pipeline_health"]["status"] == "no_data"
+    assert report["overall"]["status"] == "ok"
+    assert report["overall"]["source_pipeline"] == "no_data"
+
+
+def test_failed_automatic_run_without_source_digest_is_attention(monkeypatch, tmp_path):
+    from reports.wiki_pipeline_health import format_pipeline_health_report
+
+    _write_json(_public(tmp_path) / "automatic-latest.json", {
+        "attempted": 5, "results": [_attempt(compile_failed=1, effects_pending=1,
+                                             reason_counts={"anchor_missing": 1}) for _ in range(5)]})
+    report = _health_with_reports_root(monkeypatch, tmp_path)
+    section = report["source_pipeline_health"]
+    latest = section["journals"]["public"]["automatic_latest"]
+    assert latest["state"] == "ok" and latest["compile_failed"] == 5 and latest["effects_pending"] == 5
+    assert report["overall"]["status"] == "attention"
+    assert any("compile_failed 5" in reason and "effects_pending 5" in reason and "anchor_missing 5" in reason
+               for reason in section["reasons"])
+    rec = next(rec for rec in report["recommendations"] if rec["category"] == "source_pipeline")
+    assert rec["priority"] == 1 and "compile_failed 5" in rec["detail"]
+    assert "healthy" not in {rec["category"] for rec in report["recommendations"]}
+    assert "원문 파이프라인: attention" in format_pipeline_health_report(report)
+
+
+def test_journal_compile_failure_and_recovery_wait_are_reported(monkeypatch, tmp_path):
+    root = tmp_path / "wiki-source-v1"
+    _write_json(root / "sources" / ("a" * 64 + ".json"), {"compile_state": "failed", "error_code": "claim_number_unsupported"})
+    _write_json(root / "sources" / ("b" * 64 + ".json"), {"compile_state": "compiled", "error_code": ""})
+    _write_json(root / "operations" / ("c" * 64 + ".json"),
+                {"stage": "prepared", "artifacts": "pending", "search": "pending", "log": "pending"})
+    _write_json(root / "topic-operations-v3" / ("d" * 64 + ".json"),
+                {"stage": "committed", "artifacts": "done", "search": "failed", "log": "done"})
+    report = _health_with_reports_root(monkeypatch, tmp_path)
+    section = report["source_pipeline_health"]
+    journal = section["journals"]["unrestricted"]
+    assert journal["compile_failed"] == 1 and journal["error_codes"] == {"claim_number_unsupported": 1}
+    assert journal["operation_stages"] == {"prepared": 1, "effects_pending": 1}
+    assert "unrestricted: compile 실패 1건 (claim_number_unsupported 1)" in section["reasons"]
+    assert any("복구·효과 대기 2건" in reason for reason in section["reasons"])
+    assert report["overall"]["status"] == "attention"
+
+
+def test_missing_and_corrupt_automatic_summary_are_distinguished(monkeypatch, tmp_path):
+    (_public(tmp_path) / "sources").mkdir(parents=True)
+    missing = _health_with_reports_root(monkeypatch, tmp_path)["source_pipeline_health"]
+    assert missing["journals"]["public"]["automatic_latest"] == {"state": "missing"}
+    assert missing["status"] == "ok" and not missing["attention"]
+    _write_json(_public(tmp_path) / "automatic-latest.json", "{not json")
+    _write_json(_public(tmp_path) / "sources" / ("e" * 64 + ".json"), "[]")
+    corrupt = _health_with_reports_root(monkeypatch, tmp_path)["source_pipeline_health"]
+    assert corrupt["journals"]["public"]["automatic_latest"] == {"state": "corrupt"}
+    assert "public: automatic-latest.json 손상" in corrupt["reasons"]
+    assert "public: journal 기록 손상 1건" in corrupt["reasons"]
+    assert corrupt["status"] == "attention"
+
+
+def test_stale_unattended_run_is_attention_and_clean_recovery_clears_it(monkeypatch, tmp_path):
+    import os
+    import time
+
+    latest = _public(tmp_path) / "automatic-latest.json"
+    _write_json(latest, {"attempted": 1, "results": [_attempt()], "topic_recovery": [
+        {"stage": "applied", "effects": {"artifacts": "pending"}}]})
+    old = time.time() - 10 * 3600
+    os.utime(latest, (old, old))
+    stale = _health_with_reports_root(monkeypatch, tmp_path)["source_pipeline_health"]
+    assert stale["journals"]["public"]["automatic_latest"]["stale"] is True
+    assert any("자동 실행 정체" in reason for reason in stale["reasons"])
+    assert "public: 토픽 복구 대기 1건" in stale["reasons"]
+    _write_json(_public(tmp_path) / "sources" / ("f" * 64 + ".json"), {"compile_state": "compiled"})
+    _write_json(_public(tmp_path) / "topic-operations-v3" / ("1" * 64 + ".json"),
+                {"stage": "committed", "artifacts": "done", "search": "done", "log": "done"})
+    _write_json(latest, {"attempted": 1, "results": [_attempt()], "topic_recovery": [
+        {"stage": "committed", "effects": {"artifacts": "done", "search": "done", "log": "done"}}]})
+    report = _health_with_reports_root(monkeypatch, tmp_path)
+    assert report["source_pipeline_health"]["status"] == "ok"
+    assert report["source_pipeline_health"]["reasons"] == []
+    assert report["overall"]["status"] == "ok"

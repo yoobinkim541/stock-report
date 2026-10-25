@@ -6,12 +6,23 @@ from pathlib import Path
 import stat
 import sqlite3
 import subprocess
+import sys
 from types import SimpleNamespace
 
 import pytest
 import yaml
 
 from agent_console import qmd_generation as qg, wiki, wiki_publication
+
+
+@pytest.fixture(autouse=True)
+def trusted_synthetic_executable(monkeypatch):
+    """Synthetic Runners never start a process, but production still verifies a real
+    executable path and byte hash first. Bind that check to this interpreter so the
+    tests do not depend on an installed qmd; the opt-in real-QMD test keeps its binary."""
+    if os.getenv("AGENT_CONSOLE_TEST_REAL_QMD") != "1":
+        monkeypatch.setenv("AGENT_CONSOLE_QMD_BIN", sys.executable)
+
 
 
 @pytest.fixture

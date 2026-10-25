@@ -212,6 +212,35 @@ def test_forged_integration_operations_fail_closed(mutation):
         module().propose_integration(compiled(), source(), [snap], new_page_specs=[], llm_fn=lambda _: json.dumps(plan))
 
 
+# B-fix-ground-01: v1 model-proposed addition prose stays within its cited claims.
+def _grounding_snapshot():
+    return wiki.semantic_snapshot("a", records=[record("a", source_knowledge={"claims": [{
+        "claim_id": "old-claim", "source_revision_id": OLD, "as_of": "2026-09-01"}]})])
+
+
+@pytest.mark.parametrize("field,value", [
+    ("body", "Capacity rose 40% this quarter [S1]."),
+    ("body", "Capacity rose, so demand is guaranteed [S1]."),
+    ("body", "Capacity will double [S1]."),
+    ("scope", "capacity through 2030"),
+])
+def test_v1_addition_cannot_assert_numbers_or_certainty_absent_from_claims(field, value):
+    snap = _grounding_snapshot()
+    plan = proposal(snap)
+    plan["targets"][0]["additions"][0][field] = value
+    with pytest.raises(ValueError, match="proposal_addition_unsupported"):
+        module().propose_integration(compiled(), source(), [snap], new_page_specs=[], llm_fn=lambda _: json.dumps(plan))
+
+
+def test_v1_addition_may_restate_claim_date_and_negated_certainty():
+    snap = _grounding_snapshot()
+    plan = proposal(snap)
+    plan["targets"][0]["additions"][0]["body"] = "As of 2026-10-09 capacity rose; demand is not guaranteed [S1]."
+    result = module().propose_integration(compiled(), source(), [snap], new_page_specs=[],
+                                          llm_fn=lambda _: json.dumps(plan))
+    assert "not guaranteed" in result["targets"][0]["additions"][0]["body"]
+
+
 @pytest.mark.parametrize("term,title", [
     ("엔비디아", "NVIDIA earnings"), ("NVDA", "엔비디아 실적"),
     ("연준", "Federal Reserve policy"), ("소비자물가지수", "CPI inflation"),

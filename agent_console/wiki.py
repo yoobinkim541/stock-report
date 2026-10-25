@@ -566,6 +566,12 @@ def _prepare_split_records(page: dict, *, records: list[dict], body_limit: int =
     return [*child_records, parent_record]
 
 
+def _is_split_overview(page: dict, parent_body: str) -> bool:
+    """A readability-split parent stores only a generated overview; children hold the text."""
+    return (parent_body.startswith("이 문서는 길이가 길어 ")
+            and any(str(tag).startswith("split_into:") for tag in page.get("tags") or []))
+
+
 def split_for_readability(page_id: str, max_chars: int = 2600) -> dict | None:
     """Losslessly split an existing top-level page without semantic rewriting."""
     page = get_page(page_id)
@@ -574,9 +580,7 @@ def split_for_readability(page_id: str, max_chars: int = 2600) -> dict | None:
     body_limit = max(1, min(int(max_chars), WIKI_BODY_LIMIT))
     snapshot = semantic_snapshot(page_id)
     parent_body = snapshot["page"]["body"]
-    is_split_overview = (parent_body.startswith("이 문서는 길이가 길어 ")
-                         and any(str(tag).startswith("split_into:") for tag in page.get("tags", [])))
-    stored_body = snapshot["body"] if is_split_overview else parent_body
+    stored_body = snapshot["body"] if _is_split_overview(page, parent_body) else parent_body
     page.update(body=stored_body, _preserve_body_exact=True,
                 source_knowledge={**snapshot["source_knowledge"], "claims": snapshot["claims"]})
     page["raw"] = {**page.get("raw", {}), "body": stored_body}
@@ -888,7 +892,14 @@ def _tokens(text: str) -> set[str]:
     }
 
 
-def list_pages(*, query: str = "", surface: str = "all", status: str = "all", limit: int = 20) -> list[dict]:
+def _record_is_archived(record: dict) -> bool:
+    return _status_from_tags(_dedupe_tags(record.get("tags") or [])) == "archived"
+
+
+def list_pages(*, query: str = "", surface: str = "all", status: str = "all", limit: int = 20,
+               include_archived: bool = True) -> list[dict]:
+    """Rank or list pages. ``include_archived=False`` is the knowledge view for LLM context;
+    the browser and batch jobs keep the full history view by default."""
     limit = max(1, min(int(limit or 20), 10000))
     query = _clean(query, 600)
     surface = _clean(surface or "all", 60).lower() or "all"
@@ -901,6 +912,7 @@ def list_pages(*, query: str = "", surface: str = "all", status: str = "all", li
             page
             for page in _all_wiki_pages()
             if (status == "all" or str(page.get("status") or "draft").lower() == status)
+            and (include_archived or page.get("status") != "archived")
             and (surface == "all" or str(page.get("surface") or WIKI_SURFACE).lower() == surface)
         ]
         pages.sort(
@@ -913,6 +925,8 @@ def list_pages(*, query: str = "", surface: str = "all", status: str = "all", li
         return pages[:limit]
 
     records = _wiki_records()
+    if not include_archived:
+        records = [row for row in records if not _record_is_archived(row)]
     if not records:
         return []
     fallback = _fallback_ranked_pages(records, query=query, surface=surface, status=status, limit=limit)
@@ -2161,56 +2175,167 @@ def archive_stale_pages(max_age_days: int = 30, dry_run: bool = False, max_archi
     }
 
 
-def _merge_pages(
-    source_ids: list[str],
-    target_id: str,
-    llm_synthesis: str,
-    *,
-    reason: str = "",
-) -> dict | None:
-    target_id = _clean(target_id, 80)
-    target = get_page(target_id)
-    if not target or target.get("status") == "archived":
-        return None
-    source_ids = list(dict.fromkeys(
-        _clean(sid, 80) for sid in (source_ids or [])
-        if _clean(sid, 80) and _clean(sid, 80) != target_id
-    ))
-    if not source_ids or len(source_ids) > MAX_MERGE_SOURCES:
-        return None
-    sources = [get_page(sid) for sid in source_ids]
-    if any(page is None for page in sources):
-        return None
-    sources = [page for page in sources if page]
-    if any(page.get("status") == "archived" for page in sources):
-        return None
-    if any(
-        page.get("surface") != target.get("surface") or page.get("kind") != target.get("kind")
-        for page in sources
-    ):
-        return None
+_TRUST_RANK = {"draft": 0, "reviewed": 1, "stable": 2}
+_PROVENANCE_REF_CHUNK = 20
+_PROVENANCE_ID_CHUNK = 100
 
-    all_pages = [target, *sources]
-    body_parts = [page.get("body") or "" for page in all_pages]
+
+def merge_trust_blocker(pages: Iterable[dict]) -> str:
+    """Return why pages must not share one trust state, or "" when they may.
+
+    A merge unions source refs, so an unverified page merged into a source-backed
+    one would be presented as source-backed. Every merge writer goes through
+    ``_merge_pages``; candidate finders call this to avoid judging refused pairs.
+    """
+    verifications = {verification_status_for(page.get("source_refs") or [])
+                     for page in pages if isinstance(page, dict)}
+    return "mixed_verification" if len(verifications) > 1 else ""
+
+
+def _merged_trust_status(pages: list[dict], *, adds_content: bool) -> str:
+    """New unreviewed text resets review; otherwise the least reviewed input wins."""
+    if adds_content:
+        return "draft"
+    return min((str(page.get("status") or "draft") for page in pages),
+               key=lambda status: _TRUST_RANK.get(status, 0))
+
+
+def _union_values(current: list, values: list) -> list:
+    merged = deepcopy(current)
+    for value in values:
+        if value not in merged:
+            merged.append(deepcopy(value))
+    return merged
+
+
+def _merge_claim_ledgers(ledgers: Iterable[list]) -> list[dict]:
+    """Union claims by identity; one claim_id must never carry different facts."""
+    merged: dict[str, dict] = {}
+    for ledger in ledgers:
+        for claim in ledger or []:
+            claim_id = claim.get("claim_id") if isinstance(claim, dict) else None
+            if not isinstance(claim_id, str) or not claim_id:
+                raise ValueError("claim_identity_invalid")
+            current = merged.setdefault(claim_id, {})
+            for key, value in claim.items():
+                if key not in current:
+                    current[key] = deepcopy(value)
+                elif isinstance(current[key], list) and isinstance(value, list):
+                    current[key] = _union_values(current[key], value)
+                elif current[key] != value:
+                    raise ValueError("claim_identity_conflict")
+    return list(merged.values())
+
+
+def _merge_knowledge(snapshots: list[dict]) -> dict:
+    """Union non-claim knowledge lists; differing scalar metadata cannot be merged."""
+    knowledge: dict = {}
+    for snapshot in snapshots:
+        for key, value in snapshot["source_knowledge"].items():
+            if key == "claims":
+                continue
+            if key not in knowledge:
+                knowledge[key] = deepcopy(value)
+            elif isinstance(knowledge[key], list) and isinstance(value, list):
+                knowledge[key] = _union_values(knowledge[key], value)
+            elif knowledge[key] != value:
+                raise ValueError("knowledge_conflict")
+    return {key: value for key, value in knowledge.items() if value not in ([], {}, None, "")}
+
+
+def _merge_document_body(snapshot: dict) -> str:
+    """Complete readable text of a page, including its active split children."""
+    view = _record_to_page(snapshot["page"]["raw"])
+    content = [child["body"] for child in snapshot["children"] if not child["raw"].get("provenance_only")]
+    if not content:
+        return view["body"]
+    children_body = "".join(content)
+    if _is_split_overview(view, snapshot["page"]["body"]):
+        return children_body
+    return "\n\n".join(part for part in (view["body"], children_body) if part)
+
+
+def _archived_child_record(child: dict, *, tags: list[str], **fields: object) -> dict:
+    """Archive a split or provenance child without rewriting its stored text."""
+    raw = child.get("raw") or {}
+    record = _build_wiki_record({
+        **child, **fields, "status": "archived", "body": raw.get("body") or "",
+        "_preserve_body_exact": True, "tags": _dedupe_tags([*(child.get("tags") or []), *tags]),
+    }, existing=child)
+    if raw.get("provenance_only"):
+        record["provenance_only"] = True
+    return record
+
+
+def _merge_provenance_children(target: dict, event_id: str, *, refs: list[str], evidence: list[str],
+                               conflicts: list[str], claims: list[dict]) -> list[dict]:
+    """Store references and ledgers beyond parent caps the way source batches do."""
+    chunks = max(-(-len(refs) // _PROVENANCE_REF_CHUNK), -(-len(evidence) // _PROVENANCE_ID_CHUNK),
+                 -(-len(conflicts) // _PROVENANCE_ID_CHUNK), -(-len(claims) // _PROVENANCE_ID_CHUNK))
+    rows = []
+    for index in range(chunks):
+        refs_part = refs[index * _PROVENANCE_REF_CHUNK:(index + 1) * _PROVENANCE_REF_CHUNK]
+        ids_part = slice(index * _PROVENANCE_ID_CHUNK, (index + 1) * _PROVENANCE_ID_CHUNK)
+        child = _build_wiki_record({
+            "id": "prov-" + hashlib.sha256(f"{target['id']}:{event_id}:{index}".encode()).hexdigest(),
+            "title": f"{target['title']} provenance [{index + 1:04d}]",
+            "body": "\n".join(refs_part) or "Claim and evidence provenance", "kind": "note",
+            "surface": target["surface"], "status": "draft", "parent_page_id": target["id"],
+            "source_refs": refs_part, "links": [target["id"]],
+            "evidence_ids": evidence[ids_part], "conflicting_evidence_ids": conflicts[ids_part],
+            "source_knowledge": {"claims": claims[ids_part]},
+        }, existing={})
+        child["provenance_only"] = True
+        rows.append(child)
+    return rows
+
+
+def _plan_merge(records: list[dict], source_ids: list[str], target_id: str, llm_synthesis: str,
+                *, reason: str) -> dict | None:
+    """Build every record a merge changes, or None when it cannot be lossless."""
+    by_id = {row["id"]: row for row in records}
+    page_ids = [target_id, *source_ids]
+    if any(page_id not in by_id or not _is_wiki_record(by_id[page_id]) for page_id in page_ids):
+        return None
+    all_pages = [_record_to_page(by_id[page_id]) for page_id in page_ids]
+    target, sources = all_pages[0], all_pages[1:]
+    if any(page["status"] == "archived" for page in all_pages):
+        return None
+    if any(page["surface"] != target["surface"] or page["kind"] != target["kind"] for page in sources):
+        return None
+    if merge_trust_blocker(all_pages):
+        return None
+    snapshots = [semantic_snapshot(page_id, records=records) for page_id in page_ids]
+    families = [{snap["page_id"], *(child["id"] for child in snap["children"])} for snap in snapshots]
+    if len(set().union(*families)) != sum(len(family) for family in families):
+        return None  # one document already contains another
+    target_children = snapshots[0]["children"]
+    target_content = [child for child in target_children if not child["raw"].get("provenance_only")]
+    target_provenance = [child for child in target_children if child["raw"].get("provenance_only")]
+
     synthesis = _clean(llm_synthesis, WIKI_SUMMARY_LIMIT)
-    if synthesis:
-        body_parts.append(synthesis)
-    merged_body = "\n\n".join(part for part in body_parts if part).strip()
+    merged_body = "\n\n".join(
+        part for part in [*(_merge_document_body(snap) for snap in snapshots), synthesis] if part
+    ).strip()
+    report_citation = next(
+        (page.get("report_citation") for page in all_pages if page.get("report_citation")),
+        _extract_report_citation(merged_body),
+    )
+    merged_body, report_citation = _with_report_citation(merged_body, report_citation)
+    oversized = len(merged_body) > WIKI_BODY_LIMIT
+    if oversized and (target["parent_page_id"]
+                      or any(str(tag).startswith("split_from:") for tag in target["tags"])):
+        return None  # re-splitting a child would rewrite its ancestry
 
-    tags = _dedupe_tags([
-        *(target.get("tags") or []),
-        *[tag for page in sources for tag in (page.get("tags") or [])
-          if not str(tag).startswith(("split_into:", "split_from:", "split_superseded"))],
-        *[f"merged_from:{page['id']}" for page in sources],
-    ])
-    source_refs = shared_memory.normalize_artifact_refs([
-        *(target.get("source_refs") or []),
-        *[ref for page in sources for ref in (page.get("source_refs") or [])],
-    ], limit=12)
-    links = _clean_links([
-        *(target.get("links") or []),
-        *[link for page in sources for link in (page.get("links") or [])],
-    ], self_id=target_id)
+    claims = _merge_claim_ledgers(
+        (page.get("source_knowledge") or {}).get("claims") or []
+        for snap in snapshots for page in [snap["page"], *snap["children"]]
+    )
+    knowledge = _merge_knowledge(snapshots)
+    all_refs = [ref for snap in snapshots for ref in snap["source_refs"]]
+    refs = shared_memory.normalize_artifact_refs(all_refs, limit=len(all_refs) + 1)
+    evidence = list(dict.fromkeys(item for snap in snapshots for item in snap["evidence_ids"]))
+    conflicts = list(dict.fromkeys(item for snap in snapshots for item in snap["conflicting_evidence_ids"]))
 
     merged_source_ids = [page["id"] for page in sources]
     event_id = "merge-" + hashlib.sha256(
@@ -2227,121 +2352,153 @@ def _merge_pages(
         "synthesis": synthesis,
         "status": "completed",
     }
-    merge_history = _normalize_merge_history(
-        [event for page in all_pages for event in (page.get("merge_history") or [])] + [merge_event]
-    )
-    evidence_ids = _dedupe_texts(
-        [evidence_id for page in all_pages for evidence_id in (page.get("evidence_ids") or [])],
-        limit=100,
-        item_limit=120,
-    )
-    conflicting_evidence_ids = _dedupe_texts(
-        [evidence_id for page in all_pages for evidence_id in (page.get("conflicting_evidence_ids") or [])],
-        limit=100,
-        item_limit=120,
-    )
-    answer_hints = _dedupe_texts(
-        [hint for page in all_pages for hint in (page.get("answer_hints") or [])],
-        limit=12,
-        item_limit=280,
-    )
+    retired_ids = {child["id"] for child in target_children}.union(*families[1:])
     staleness_policies = [page.get("staleness_policy") or "" for page in all_pages]
-    staleness_policy = next(
-        (policy for policy in staleness_policies if "12h" in policy),
-        next((policy for policy in staleness_policies if policy), ""),
-    )
-    report_citation = next(
-        (page.get("report_citation") for page in all_pages if page.get("report_citation")),
-        _extract_report_citation(merged_body),
-    )
-    merged_body, report_citation = _with_report_citation(merged_body, report_citation)
-    # Reject before any write: normalization would otherwise truncate knowledge
-    # while the original source pages are archived in the same transaction.
-    if len(merged_body) > WIKI_BODY_LIMIT:
-        return None
-
-    record = _build_wiki_record({
+    payload = {
         "id": target_id,
-        "title": target.get("title"),
-        "summary": target.get("summary") or synthesis,
+        "title": target["title"],
+        "summary": target["summary"] or synthesis,
         "body": merged_body,
-        "surface": target.get("surface"),
-        "kind": target.get("kind"),
-        "status": target.get("status"),
-        "tags": tags,
-        "source_refs": source_refs,
-        "links": links,
-        "messages": _merge_messages(
-            [message for page in all_pages for message in (page.get("messages") or [])], []
+        "surface": target["surface"],
+        "kind": target["kind"],
+        "status": _merged_trust_status(all_pages, adds_content=bool(synthesis)),
+        # Status is recomputed above; an inherited "stable" tag must not linger beside it.
+        "tags": _dedupe_tags([tag for tag in [
+            *[tag for tag in target["tags"]
+              if not (str(tag).startswith("split_into:") and str(tag).split(":", 1)[1] in retired_ids)],
+            *[tag for page in sources for tag in page["tags"]
+              if not str(tag).startswith(("split_into:", "split_from:", "split_superseded"))],
+            *[f"merged_from:{page['id']}" for page in sources],
+        ] if str(tag).lower() not in VALID_STATUSES and not str(tag).lower().startswith("status:")]),
+        "source_refs": refs[:_PROVENANCE_REF_CHUNK],
+        "links": _clean_links([link for page in all_pages for link in page["links"] if link not in retired_ids],
+                              self_id=target_id),
+        "messages": _merge_messages([message for page in all_pages for message in page["messages"]], []),
+        "decisions": _dedupe_texts([item for page in all_pages for item in page["decisions"]],
+                                   limit=8, item_limit=280),
+        "openQuestions": _dedupe_texts([item for page in all_pages for item in page["openQuestions"]],
+                                       limit=8, item_limit=280),
+        "evidence_ids": evidence[:_PROVENANCE_ID_CHUNK],
+        "conflicting_evidence_ids": conflicts[:_PROVENANCE_ID_CHUNK],
+        "staleness_policy": next((policy for policy in staleness_policies if "12h" in policy),
+                                 next((policy for policy in staleness_policies if policy), "")),
+        "answer_hints": _dedupe_texts([hint for page in all_pages for hint in page["answer_hints"]],
+                                      limit=12, item_limit=280),
+        "merge_history": _normalize_merge_history(
+            [event for page in all_pages for event in page["merge_history"]] + [merge_event]
         ),
-        "decisions": _dedupe_texts(
-            [decision for page in all_pages for decision in (page.get("decisions") or [])],
-            limit=8,
-            item_limit=280,
-        ),
-        "openQuestions": _dedupe_texts(
-            [question for page in all_pages for question in (page.get("openQuestions") or [])],
-            limit=8,
-            item_limit=280,
-        ),
-        "evidence_ids": evidence_ids,
-        "conflicting_evidence_ids": conflicting_evidence_ids,
-        "staleness_policy": staleness_policy,
-        "answer_hints": answer_hints,
-        "merge_history": merge_history,
         "merge_event_id": event_id,
         "confidence": min(_safe_confidence(page.get("confidence")) for page in all_pages),
         "report_citation": report_citation,
-        "parent_page_id": target.get("parent_page_id") or "",
-    }, existing=target)
-
-    archived_records = []
-    for source in sources:
-        archived_records.append(_build_wiki_record({
+        "parent_page_id": target["parent_page_id"],
+        "source_knowledge": {**knowledge, **({"claims": claims[:_PROVENANCE_ID_CHUNK]} if claims else {})},
+    }
+    if oversized:
+        upserts = _prepare_split_records(payload, records=records)
+        if not upserts:
+            return None
+        next(row for row in upserts if row["id"] == target_id)["merge_event_id"] = event_id
+    else:
+        upserts = [_build_wiki_record(payload, existing=target),
+                   *[_archived_child_record(child, tags=["split_superseded"]) for child in target_content]]
+    upserts += [_archived_child_record(child, tags=["split_superseded", f"merge_event:{event_id}"],
+                                       merge_event_id=event_id) for child in target_provenance]
+    upserts += _merge_provenance_children(
+        target, event_id, refs=refs[_PROVENANCE_REF_CHUNK:], evidence=evidence[_PROVENANCE_ID_CHUNK:],
+        conflicts=conflicts[_PROVENANCE_ID_CHUNK:], claims=claims[_PROVENANCE_ID_CHUNK:],
+    )
+    merged_tags = ["archived_reason:merged", f"merged_into:{target_id}", f"merge_event:{event_id}"]
+    for source, snapshot in zip(sources, snapshots[1:]):
+        upserts.append(_build_wiki_record({
+            **{key: source.get(key) for key in (
+                "title", "summary", "surface", "kind", "messages", "decisions", "openQuestions",
+                "evidence_ids", "conflicting_evidence_ids", "staleness_policy", "answer_hints",
+                "confidence", "source_knowledge")},
             "id": source["id"],
-            "title": source.get("title"),
-            "summary": source.get("summary"),
-            "body": source.get("body"),
-            "surface": source.get("surface"),
-            "kind": source.get("kind"),
+            "body": source["raw"].get("body") or "",
+            "_preserve_body_exact": True,
             "status": "archived",
-            "tags": _dedupe_tags([
-                *(source.get("tags") or []),
-                "archived_reason:merged",
-                f"merged_into:{target_id}",
-                f"merge_event:{event_id}",
-            ]),
-            "source_refs": source.get("source_refs") or [],
-            "links": _clean_links([*(source.get("links") or []), target_id], self_id=source["id"]),
-            "messages": source.get("messages") or [],
-            "decisions": source.get("decisions") or [],
-            "openQuestions": source.get("openQuestions") or [],
-            "evidence_ids": source.get("evidence_ids") or [],
-            "conflicting_evidence_ids": source.get("conflicting_evidence_ids") or [],
-            "staleness_policy": source.get("staleness_policy") or "",
-            "answer_hints": source.get("answer_hints") or [],
-            "merge_history": _normalize_merge_history([*(source.get("merge_history") or []), merge_event]),
+            "tags": _dedupe_tags([*source["tags"], *merged_tags]),
+            "source_refs": source["source_refs"],
+            "links": _clean_links([*source["links"], target_id], self_id=source["id"]),
+            "merge_history": _normalize_merge_history([*source["merge_history"], merge_event]),
             "merged_into": target_id,
             "merge_event_id": event_id,
-            "confidence": source.get("confidence"),
-            "report_citation": source.get("report_citation") or _extract_report_citation(source.get("body")),
-            "parent_page_id": source.get("parent_page_id") or "",
+            "report_citation": source.get("report_citation") or _extract_report_citation(source["raw"].get("body")),
+            "parent_page_id": source["parent_page_id"],
         }, existing=source))
+        upserts += [_archived_child_record(child, tags=merged_tags, merged_into=target_id, merge_event_id=event_id)
+                    for child in snapshot["children"]]
 
-    shared_memory.batch_upsert_delete(upserts=[record, *archived_records], deletes=[])
+    ids = [row["id"] for row in upserts]
+    family_ids = set().union(*families)
+    if len(set(ids)) != len(ids):
+        return None
+    for row_id in ids:
+        old = by_id.get(row_id)
+        if (old is not None and row_id not in family_ids and old.get("parent_page_id") != target_id
+                and f"split_from:{target_id}" not in (old.get("tags") or [])):
+            return None  # a generated child identity belongs to an unrelated page
+    expected_ids = list(dict.fromkeys([*page_ids, *ids]))
+    return {
+        "upserts": upserts,
+        "expected": {row_id: _source_fingerprint(row_id, records) for row_id in expected_ids},
+        "snapshots": [deepcopy(by_id[row_id]) for row_id in expected_ids if row_id in by_id],
+        "event_id": event_id,
+        "source_ids": merged_source_ids,
+        "status": payload["status"],
+    }
 
+
+def _merge_pages(
+    source_ids: list[str],
+    target_id: str,
+    llm_synthesis: str,
+    *,
+    reason: str = "",
+) -> dict | None:
+    """Merge whole documents into ``target_id`` in one guarded batch, or refuse without writing.
+
+    Inputs are full semantic snapshots (split children included); claims and knowledge are
+    unioned by identity, references beyond parent caps go to provenance children, and the
+    result is stored with the lossless split rule. Mixed source-backed/unverified inputs are
+    refused, and unreviewed synthesis or a less reviewed input lowers the target status.
+    """
+    target_id = _clean(target_id, 80)
+    source_ids = list(dict.fromkeys(
+        _clean(sid, 80) for sid in (source_ids or [])
+        if _clean(sid, 80) and _clean(sid, 80) != target_id
+    ))
+    if not target_id or not source_ids or len(source_ids) > MAX_MERGE_SOURCES:
+        return None
+    try:
+        records = shared_memory._read_jsonl_checked(shared_memory._paths()["events"])
+        plan = _plan_merge(records, source_ids, target_id, llm_synthesis, reason=reason)
+        if plan is None:
+            return None
+        for row in plan["snapshots"]:
+            _snapshot_page_revision(row)
+    except (AttributeError, KeyError, TypeError, ValueError):
+        return None
+    applied = shared_memory.guarded_batch_upsert(
+        upserts=plan["upserts"], expected=plan["expected"], fingerprint=_source_fingerprint,
+        preserve_fields=("useCount", "lastUsedAt", "lastQuery"),
+    )
     _CACHE.clear()
+    if applied.get("status") != "applied":
+        return None
     _append_wiki_log(
-        "merge", title=f"merge into {target_id}", page_id=target_id, event_id=event_id,
-        source_ids=[source.get("id") for source in sources],
+        "merge", title=f"merge into {target_id}", page_id=target_id, event_id=plan["event_id"],
+        source_ids=plan["source_ids"],
     )
     _debounced_rebuild()
     return {
         "action": "merge",
         "target": target_id,
-        "archived": merged_source_ids,
+        "archived": plan["source_ids"],
         "deleted": [],
-        "merge_event_id": event_id,
+        "merge_event_id": plan["event_id"],
+        "status": plan["status"],
     }
 
 
@@ -2531,10 +2688,19 @@ def _context_source_refs(page: dict) -> list[str]:
 
 
 def build_context_section(*, query: str = "", surface: str = WIKI_SURFACE, limit: int = 4,
-                          status: str = "all", pages: list[dict] | None = None) -> str:
-    pages = pages if isinstance(pages, list) else list_pages(
-        query=query, surface=surface, status=status, limit=limit
-    )
+                          status: str = "all", pages: list[dict] | None = None,
+                          include_archived: bool = False) -> str:
+    """Render wiki knowledge for an LLM prompt.
+
+    Archived pages are history, not current knowledge: they are dropped from both
+    retrieved and injected ``pages`` unless a history caller passes ``include_archived``.
+    """
+    if isinstance(pages, list):
+        pages = [page for page in pages if isinstance(page, dict)
+                 and (include_archived or page.get("status") != "archived")]
+    else:
+        pages = list_pages(query=query, surface=surface, status=status, limit=limit,
+                           include_archived=include_archived)
     if not pages:
         return ""
     related_ids = {

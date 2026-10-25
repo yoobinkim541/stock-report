@@ -188,3 +188,40 @@ def test_apply_cleanup_caps_writes_at_fifty(monkeypatch, tmp_path):
     assert sum(wiki.get_page(page["id"])["status"] == "draft" for page in pages) == 2
     backup_rows = [json.loads(line) for line in Path(result["backup_path"]).read_text(encoding="utf-8").splitlines()]
     assert sum(row.get("id", "").startswith("empty-") for row in backup_rows) == 52
+
+
+def test_apply_cleanup_never_overwrites_knowledge_written_during_its_recheck(monkeypatch, tmp_path):
+    """B-05: a writer racing the recheck must not lose its reviewed body and claims."""
+    import threading
+
+    _isolate(monkeypatch, tmp_path)
+    from agent_console import wiki
+    from reports import wiki_cleanup
+
+    page = _save(wiki, "empty")
+    actions = wiki_cleanup.plan_cleanup(wiki._all_wiki_pages())
+    planned_pages = []
+    real_plan = wiki_cleanup.plan_cleanup
+    writer = threading.Thread(target=lambda: wiki.upsert_page({
+        "id": page["id"], "title": page["title"], "surface": "market", "kind": "note",
+        "status": "reviewed", "source_refs": ["https://example.org/review"],
+        "body": "CONCURRENT_PROTECTED_BODY", "source_knowledge": {"claims": [{"claim_id": "new"}]},
+    }))
+
+    def recheck_while_another_writer_runs(pages):
+        planned_pages.append(True)
+        writer.start()
+        # An unguarded check/write window lets the writer finish here, before cleanup writes.
+        writer.join(timeout=1.0)
+        return real_plan(pages)
+
+    monkeypatch.setattr(wiki_cleanup, "plan_cleanup", recheck_while_another_writer_runs)
+    wiki_cleanup.apply_cleanup(actions, dry_run=False)
+    writer.join(timeout=60)
+
+    assert planned_pages and not writer.is_alive()
+    wiki._CACHE.clear()
+    stored = wiki.get_page(page["id"])
+    assert stored["status"] == "reviewed"
+    assert "CONCURRENT_PROTECTED_BODY" in stored["body"]
+    assert stored["source_knowledge"] == {"claims": [{"claim_id": "new"}]}

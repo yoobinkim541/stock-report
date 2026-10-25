@@ -19,12 +19,18 @@ def source():
             'observed_evidence_ids': ['e1'], 'role': 'support'}
 
 
+def source_text(prompt):
+    literal = prompt[:-len('\nEND UNTRUSTED SOURCE TEXT')].split('\nBEGIN UNTRUSTED SOURCE TEXT\n', 1)[1]
+    return json.loads(literal)
+
+
 def response(prompt):
-    body = prompt.split('BEGIN UNTRUSTED SOURCE TEXT\n', 1)[1].split('\nEND UNTRUSTED SOURCE TEXT', 1)[0]
+    body = source_text(prompt)
+    quote = body[:40]
     return json.dumps({'action': 'create', 'kind': 'concept', 'title': 'Chunk knowledge',
         'body': 'Attributed chunk [S1]. ' + body[-4:], 'claims': [{
-            'text': 'Attributed content ' + body[0], 'as_of': 'unknown', 'scope': 'reported source fragment',
-            'anchor': {'start': 0, 'end': 1, 'quote': body[0]}, 'competing_claim_ids': []}],
+            'text': 'Attributed content ' + quote, 'as_of': 'unknown', 'scope': 'reported source fragment',
+            'anchor': {'start': 0, 'end': len(quote), 'quote': quote}, 'competing_claim_ids': []}],
         'terms': ['source'], 'limitations': ['Source uncertainty ' + body[0]], 'skip_reason': None})
 
 
@@ -114,7 +120,7 @@ def test_corrupt_saved_chunk_is_not_silently_reused_or_sent_to_model(tmp_path):
 
 def test_all_skipped_spans_retain_every_reason_and_are_not_knowledge(tmp_path):
     def skip(prompt):
-        body = prompt.split('BEGIN UNTRUSTED SOURCE TEXT\n', 1)[1]
+        body = source_text(prompt)
         return json.dumps({'action': 'skip', 'skip_reason': 'No reusable knowledge: ' + body[0]})
     result = module().compile_chunks(source(), journal=Journal(tmp_path), llm_fn=skip)
     assert result['claims'] == [] and result['body'] == ''
@@ -148,7 +154,7 @@ def test_chunk_parent_identity_cannot_escape_journal_directory(tmp_path):
 
 def test_partial_skip_remains_explicit_without_marking_whole_source_skipped(tmp_path):
     def llm(prompt):
-        body = prompt.split('BEGIN UNTRUSTED SOURCE TEXT\n', 1)[1]
+        body = source_text(prompt)
         if body.startswith('B'):
             return json.dumps({'action': 'skip', 'skip_reason': 'No reusable facts in middle span'})
         return response(prompt)
