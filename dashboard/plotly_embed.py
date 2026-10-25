@@ -30,7 +30,7 @@ def _plotlyjs_cdn() -> str:
         return "https://cdn.plot.ly/plotly-3.6.0.min.js"
 
 
-def _epoch_ms(index) -> "np.ndarray":
+def _epoch_ms(index):
     """DatetimeIndex → epoch ms int64 (asi8 는 naive·tz-aware 모두 UTC 기준 ns — ts.timestamp() 와 동일)."""
     import numpy as np
     import pandas as pd

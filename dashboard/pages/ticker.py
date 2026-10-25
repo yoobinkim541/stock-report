@@ -1132,7 +1132,8 @@ def _price_chart(ticker, hist, avg_cost, trades, fullscreen: bool = False,
             st.plotly_chart(fig, width="stretch", config=charts.PAN_DRAW_CFG)
     else:
         # 커스텀 임베드 — 팬 시 보이는 구간에 y축(가격·거래량) 부드러운 자동 맞춤
-        from dashboard import plotly_embed
+        # (plotly_embed 는 모듈 임포트 — 여기서 다시 import 하면 함수 지역변수가 돼 위 Canvas
+        #  분기의 realtime_feed_html 호출이 UnboundLocalError 로 죽었다: ruff F823)
         _bj = (plotly_embed.compare_bounds_json(df, compare, view_days)
                if compare else None)                   # 비교 모드 — % 프레임으로 y 맞춤
         # 드로잉 영속화 키 — 좌표계가 다른 조합(스케일·HA)은 분리 버킷
