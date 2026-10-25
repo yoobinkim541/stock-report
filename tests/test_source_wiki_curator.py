@@ -431,3 +431,24 @@ def test_curate_recent_source_wiki_limit_zero_saves_all_groups(monkeypatch):
     assert result["saved"] == 2
     assert len(saved_ids) == 2
     assert len(sync_calls) == 2
+
+
+def test_llm_enrich_is_capped_by_max_llm_groups():
+    """LLM enrich 는 큰 그룹부터 max_llm_groups 개까지만 호출된다 — 그룹 수에 비례한 무제한 호출 방지."""
+    def _ev(i, topic):
+        return {
+            "source": "saveticker", "title": f"{topic} 뉴스 {i}", "url": f"https://x/{topic}/{i}",
+            "body_raw": "본문 " * 10, "topic": topic, "tags": [topic], "tickers": [],
+            "text_path": "/tmp/a.txt", "raw_path": "/tmp/a.json",
+            "classification": {"kind": "article", "topic": topic, "trust": "B", "wiki_eligible": True},
+        }
+    events = [_ev(i, t) for t in ("반도체", "에너지", "금융", "헬스케어") for i in range(3)]
+    calls = []
+
+    def _llm(prompt):
+        calls.append(prompt)
+        return '{"title": "요약제목", "summary": "s", "tags": ["t"]}'
+    pages = swc.build_wiki_pages_from_events(events, llm_fn=_llm, max_llm_groups=2)
+    assert len(calls) == 2
+    assert sum(1 for p in pages if "요약제목" in p["title"]) == 2
+    assert len(pages) >= 4                               # 나머지 그룹은 규칙 기반 제목으로 저장

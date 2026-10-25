@@ -366,8 +366,19 @@ def _llm_enrich_event_group(group_title: str, events: list[dict], llm_fn: Callab
         return None
 
 
-def build_wiki_pages_from_events(events: list[dict], now: datetime | None = None, llm_fn: Callable[[str], str | None] | None = None) -> list[dict]:
+def build_wiki_pages_from_events(events: list[dict], now: datetime | None = None,
+                                 llm_fn: Callable[[str], str | None] | None = None,
+                                 max_llm_groups: int | None = None) -> list[dict]:
+    """events → source_digest 페이지. llm_fn 이 있으면 3+ 이벤트 그룹에 LLM enrich 를 쓰되
+    큰 그룹부터 max_llm_groups 개(기본 env SOURCE_WIKI_LLM_MAX_GROUPS=20)까지만 — 그룹 수가
+    수백이면 호출 비용이 무제한으로 늘어난다. 나머지 그룹은 규칙 기반 제목/요약."""
     now = now or datetime.now(KST)
+    if max_llm_groups is None:
+        try:
+            max_llm_groups = int(os.getenv("SOURCE_WIKI_LLM_MAX_GROUPS", "20"))
+        except ValueError:
+            max_llm_groups = 20
+    llm_calls = 0
     groups: dict[str, list[dict]] = defaultdict(list)
     for event in events or []:
         if not isinstance(event, dict):
@@ -430,7 +441,8 @@ def build_wiki_pages_from_events(events: list[dict], now: datetime | None = None
             "confidence": _confidence_for_group(rows, evidence_cards),
         }
         # LLM enrich: 3+ 이벤트 그룹만 LLM으로 제목/요약/태그 생성
-        if len(rows) >= 3:
+        if len(rows) >= 3 and llm_fn and llm_calls < max_llm_groups:
+            llm_calls += 1
             enriched = _llm_enrich_event_group(display, rows, llm_fn)
             if enriched:
                 if enriched.get("title"):
