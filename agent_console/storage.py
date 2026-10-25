@@ -515,10 +515,18 @@ def save_strategy_version(
     spec_obj = StrategySpec.from_dict({**_strategy_spec_payload(spec), "id": spec_id})
     payload = spec_obj.to_dict()
     payload["id"] = spec_id
-    version, now = _next_strategy_version(spec_id)
     patch_json = _json(patch or {})
     with connect() as conn:
-        with conn:
+        # MAX(version)+1 조회와 INSERT 를 한 쓰기 트랜잭션(BEGIN IMMEDIATE)으로 — 종전엔 별도
+        # 연결에서 읽어 동시 저장이 같은 version 을 골라 UNIQUE(spec_id, version) 충돌을 냈다.
+        conn.isolation_level = None
+        conn.execute("BEGIN IMMEDIATE")
+        try:
+            row = conn.execute(
+                "SELECT COALESCE(MAX(version), 0) AS version FROM strategy_spec_versions WHERE spec_id = ?",
+                (spec_id,),
+            ).fetchone()
+            version, now = int(row["version"] or 0) + 1, _now()
             conn.execute(
                 """
                 INSERT INTO strategy_spec_versions
@@ -566,16 +574,11 @@ def save_strategy_version(
                     now,
                 ),
             )
+            conn.execute("COMMIT")
+        except BaseException:
+            conn.execute("ROLLBACK")
+            raise
     return get_strategy_spec(spec_id) or {"id": spec_id, "version": version, "spec": payload}
-
-
-def _next_strategy_version(spec_id: str) -> tuple[int, str]:
-    with connect() as conn:
-        row = conn.execute(
-            "SELECT COALESCE(MAX(version), 0) AS version FROM strategy_spec_versions WHERE spec_id = ?",
-            (spec_id,),
-        ).fetchone()
-    return int(row["version"] or 0) + 1, _now()
 
 
 def list_strategy_specs(limit: int = 50) -> list[dict[str, Any]]:

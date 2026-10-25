@@ -3089,6 +3089,38 @@ def test_strategy_studio_version_store_round_trips(monkeypatch, tmp_path):
     assert reverted["version"] == 3
     assert storage.list_strategy_versions(created["id"])[0]["version"] == 3
 
+def test_strategy_version_save_is_serialized_under_concurrency(monkeypatch, tmp_path):
+    """동시 저장이 같은 version 을 골라 UNIQUE 충돌하던 경쟁 — 조회+INSERT 단일 쓰기 트랜잭션."""
+    import threading
+    _isolate(monkeypatch, tmp_path)
+    from agent_console import storage
+    spec = {
+        "name": "race", "market": "us", "timeframe": "1d", "base_symbol": "QQQ",
+        "universe": {"type": "list", "symbols": ["QQQ"]},
+        "indicators": [{"name": "ema_fast", "kind": "ema", "period": 20, "source": "close"}],
+        "rules": {"entry": [{"field": "close", "op": ">", "ref": "ema_fast"}], "exit": []},
+        "sizing": {"type": "fixed_pct", "position_pct": 1.0},
+        "costs": {"fees_bps": 5}, "optimization": {"params": {}, "objective": "sharpe"},
+        "validation": {"mode": "single_pass", "min_trades": 1},
+    }
+    created = storage.save_strategy_spec(spec)
+    errors, barrier = [], threading.Barrier(6)
+
+    def w(i):
+        barrier.wait()
+        try:
+            storage.save_strategy_version(created["id"], {**spec, "sizing": {"type": "fixed_pct", "position_pct": 0.1 * (i + 1)}})
+        except Exception as e:
+            errors.append(e)
+    ts = [threading.Thread(target=w, args=(i,)) for i in range(6)]
+    for t in ts:
+        t.start()
+    for t in ts:
+        t.join()
+    assert not errors
+    assert [v["version"] for v in storage.list_strategy_versions(created["id"])] == [7, 6, 5, 4, 3, 2, 1]
+
+
 
 def test_chart_drawing_snapshots_round_trip_latest_version(monkeypatch, tmp_path):
     _isolate(monkeypatch, tmp_path)
