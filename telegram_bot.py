@@ -23,6 +23,7 @@ import os
 import re
 import sys
 import time
+import uuid
 import fcntl
 import logging
 import queue
@@ -970,6 +971,19 @@ def cmd_sim(chat_id: str, args: list):
     send(chat_id, build_simulation_report(mode))
 
 
+def _prune_attachments(directory, *, max_age_s: float) -> None:
+    try:
+        cutoff = time.time() - max_age_s
+        for p in Path(directory).iterdir():
+            try:
+                if p.is_file() and p.stat().st_mtime < cutoff:
+                    p.unlink()
+            except OSError:
+                continue
+    except OSError:
+        pass
+
+
 def download_telegram_file(file_id: str, filename: str) -> str | None:
     """텔레그램 파일을 로컬(ATTACH_DIR)에 저장하고 경로 반환."""
     _ensure_attach_dir()
@@ -995,7 +1009,10 @@ def download_telegram_file(file_id: str, filename: str) -> str | None:
                         return None
                 except ValueError:
                     pass  # 헤더가 비정상이면 무시하고 본문 누적 검사로 방어
-            local_path = str(ATTACH_DIR / filename)
+            # 고유 저장명 — 같은 이름(photo_<id>.jpg·'잔고.pdf')이 재전송되면 덮어쓰던 문제.
+            # 보관 7일 — 디렉터리가 무한히 자라지 않게 다운로드 시점에 오래된 첨부 정리.
+            _prune_attachments(ATTACH_DIR, max_age_s=7 * 86400)
+            local_path = str(ATTACH_DIR / f"{int(time.time())}_{uuid.uuid4().hex[:8]}_{filename}")
             written = 0
             with open(local_path, "wb") as f:
                 # 청크로 읽으며 누적 크기가 임계를 넘으면 중단 (헤더 누락/위조 방어)

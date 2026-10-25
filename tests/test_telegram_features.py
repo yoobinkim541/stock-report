@@ -843,3 +843,37 @@ def test_attachment_worker_offloads_and_survives_errors(monkeypatch):
     assert ({"document": {"file_id": "d1"}}, "c1") in seen
     assert ({"document": {"file_id": "d2"}}, "c3") in seen   # 예외 후에도 계속 처리(워커 생존)
     assert any("오류" in m for _, m in errs)
+
+
+def test_download_uses_unique_name_and_prunes_old_attachments(monkeypatch, tmp_path):
+    """같은 파일명 재전송이 이전 첨부를 덮어쓰지 않고, 7일 지난 첨부는 정리된다."""
+    import os
+    import time as _time
+    import telegram_bot as tb
+
+    monkeypatch.setattr(tb, "ATTACH_DIR", tmp_path)
+    old = tmp_path / "old.jpg"
+    old.write_bytes(b"x")
+    os.utime(old, (0, _time.time() - 8 * 86400))
+
+    class _R:
+        ok = True
+        headers = {"Content-Length": "3"}
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+        def iter_content(self, chunk_size):
+            yield b"abc"
+    monkeypatch.setattr(tb, "_file_url", lambda fid: "http://x", raising=False)
+    monkeypatch.setattr(tb, "_api", lambda method, **kw: {"result": {"file_path": "p"}})
+    monkeypatch.setattr(tb.requests, "get", lambda *a, **k: _R())
+
+    p1 = tb.download_telegram_file("fid", "snap.jpg")
+    p2 = tb.download_telegram_file("fid", "snap.jpg")
+    assert p1 and p2 and p1 != p2 and p1.endswith("_snap.jpg")
+    assert not old.exists()
+    assert open(p1, "rb").read() == b"abc"

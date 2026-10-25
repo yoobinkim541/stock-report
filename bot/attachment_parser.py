@@ -12,6 +12,7 @@ import os
 import re
 import subprocess
 import tempfile
+import time
 from datetime import datetime, timedelta
 from pathlib import Path
 
@@ -65,13 +66,22 @@ def _ensure_dir():
 #  텍스트 추출
 # ──────────────────────────────────────────────────────────
 
+# 리소스 상한 — 첨부는 소유자 전용이지만 수백 페이지 PDF·초고해상도 이미지 1장이 OCR 워커를
+# 분 단위로 묶어 뒤 첨부를 막는다(워커 단일). 잔고 캡처·매도내역은 수 페이지면 충분.
+MAX_PDF_PAGES = 20
+MAX_OCR_PIXELS = 4000 * 4000
+OCR_TIME_BUDGET_S = 45.0
+
+
 def extract_text_from_pdf(path: str) -> str | None:
-    """PDF에서 텍스트 추출 (pypdf)."""
+    """PDF에서 텍스트 추출 (pypdf). 앞 MAX_PDF_PAGES 페이지만."""
     try:
         import pypdf
         reader = pypdf.PdfReader(path)
         parts = []
-        for page in reader.pages:
+        if len(reader.pages) > MAX_PDF_PAGES:
+            logger.warning("PDF %d페이지 — 앞 %d페이지만 추출", len(reader.pages), MAX_PDF_PAGES)
+        for page in list(reader.pages)[:MAX_PDF_PAGES]:
             t = page.extract_text()
             if t:
                 parts.append(t)
@@ -82,19 +92,48 @@ def extract_text_from_pdf(path: str) -> str | None:
         return None
 
 
+def _downscale_if_huge(path: str) -> str:
+    """MAX_OCR_PIXELS 초과 이미지는 축소본(임시파일)으로 OCR — tesseract 가 수십초를 쓰는 걸 막는다.
+    축소 실패(PIL 없음 등)면 원본 경로 그대로."""
+    try:
+        from PIL import Image
+        with Image.open(path) as im:
+            w, h = im.size
+            if w * h <= MAX_OCR_PIXELS:
+                return path
+            scale = (MAX_OCR_PIXELS / float(w * h)) ** 0.5
+            small = im.convert("RGB").resize((max(1, int(w * scale)), max(1, int(h * scale))))
+            with tempfile.NamedTemporaryFile(suffix="-small.png", delete=False) as tf:
+                out = tf.name
+            small.save(out)
+            logger.info("OCR 입력 축소 %dx%d → %dx%d", w, h, *small.size)
+            return out
+    except Exception as e:
+        logger.warning(f"이미지 축소 실패(원본 사용): {e}")
+        return path
+
+
 def extract_text_from_image(path: str) -> str | None:
-    """이미지에서 OCR (tesseract kor+eng, subprocess 직접 호출)."""
+    """이미지에서 OCR (tesseract kor+eng, subprocess 직접 호출).
+
+    psm 6(블록) 후 11(희소) 순으로 돌리되, 전체 예산 OCR_TIME_BUDGET_S 를 넘기면 다음 psm 은 생략."""
     out_files = []
+    src = _downscale_if_huge(path)
+    started = time.monotonic()
     try:
         parts = []
         for psm in ("6", "11"):
+            remaining = OCR_TIME_BUDGET_S - (time.monotonic() - started)
+            if remaining <= 1.0:
+                logger.warning("OCR 시간 예산 소진 — psm %s 생략", psm)
+                break
             with tempfile.NamedTemporaryFile(suffix=".txt", delete=False) as tf:
                 out_base = tf.name[:-4]
             out_file = out_base + ".txt"
             out_files.append(out_file)
             subprocess.run(
-                ["tesseract", path, out_base, "-l", "kor+eng", "--psm", psm],
-                capture_output=True, text=True, timeout=30,
+                ["tesseract", src, out_base, "-l", "kor+eng", "--psm", psm],
+                capture_output=True, text=True, timeout=min(30, remaining),
             )
             if os.path.exists(out_file):
                 with open(out_file, encoding="utf-8", errors="ignore") as f:
@@ -111,6 +150,9 @@ def extract_text_from_image(path: str) -> str | None:
         for out_file in out_files:
             if os.path.exists(out_file):
                 os.unlink(out_file)
+        if src != path:
+            with contextlib.suppress(FileNotFoundError):
+                os.unlink(src)
     return None
 
 
@@ -127,6 +169,9 @@ def _render_pdf_pages_to_images(path: str) -> list[str]:
         doc = fitz.open(path)
         try:
             for idx, page in enumerate(doc):
+                if idx >= MAX_PDF_PAGES:
+                    logger.warning("PDF 렌더 %d페이지 상한 — 이후 생략", MAX_PDF_PAGES)
+                    break
                 pix = page.get_pixmap(matrix=fitz.Matrix(2.0, 2.0), alpha=False)
                 with tempfile.NamedTemporaryFile(suffix=f"-page{idx + 1}.png", delete=False) as tf:
                     image_path = tf.name
