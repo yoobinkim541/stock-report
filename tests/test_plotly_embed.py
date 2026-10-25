@@ -45,6 +45,39 @@ def test_price_bounds_json():
     h.iloc[2, h.columns.get_loc("Low")] = float("nan")
     assert len(json.loads(plotly_embed.price_bounds_json(h))) == 4   # NaN 스킵
 
+def test_fig_json_compacts_dates_consistently():
+    """fig_json — 트레이스 x·categoryarray·도형 x 가 **같은** 짧은 문자열(일봉 'YYYY-MM-DD')로
+    직렬화돼 category 축 매칭이 정확해지고 JSON 이 작아진다. 의미(시각)는 fig.to_json 과 동일."""
+    hist = _hist(200)
+    fig = charts.price_chart(hist, "T", kind="candle", show_volume=True, avg_cost=100.0)
+    raw, compact = fig.to_json(), plotly_embed.fig_json(fig)
+    assert len(compact) < len(raw) * 0.75
+    d = json.loads(compact)
+    xs = d["data"][0]["x"]
+    assert xs[0] == "2024-01-01" and len(xs) == 200
+    cats = d["layout"]["xaxis"]["categoryarray"]
+    assert set(xs) <= set(cats)                                   # 카테고리 문자열 정확 일치
+    assert all(len(c) == 10 for c in cats)                        # 투영 미래 카테고리도 같은 포맷
+    for sh in d["layout"].get("shapes", []):
+        for k in ("x0", "x1"):
+            v = sh.get(k)
+            if isinstance(v, str) and v[:4].isdigit():
+                assert len(v) == 10, v
+    # 시각 동일성 — 원본 ns 문자열과 압축 문자열이 같은 시각
+    raw_xs = json.loads(raw)["data"][0]["x"]
+    assert list(pd.to_datetime(raw_xs)) == list(pd.to_datetime(xs))
+
+
+def test_fig_json_keeps_tz_offset_and_intraday_minutes():
+    """tz-aware 분봉 — 오프셋(+09:00) 보존, 분까지 표기 (JS Date.parse 해석 불변)."""
+    idx = pd.date_range("2024-01-02 09:00", periods=30, freq="5min", tz="Asia/Seoul")
+    hist = pd.DataFrame({"Open": 100.0, "High": 101.0, "Low": 99.0, "Close": 100.0, "Volume": 1.0}, index=idx)
+    fig = charts.price_chart(hist, "005930.KS", kind="candle")
+    xs = json.loads(plotly_embed.fig_json(fig))["data"][0]["x"]
+    assert xs[0] == "2024-01-02T09:00+09:00" and xs[1] == "2024-01-02T09:05+09:00"
+    assert pd.Timestamp(xs[0]) == idx[0]
+
+
 
 def test_embed_drawing_tools_contract():
     """드로잉 도구 — 자석·수평선·피보나치·측정·지우기 툴바 + 스냅/도형 로직 계약."""

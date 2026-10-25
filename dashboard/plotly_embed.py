@@ -2036,6 +2036,114 @@ _TEMPLATE = r"""
 """
 
 
+def _as_datetime_index(values):
+    """datetime 배열(numpy M8·Timestamp 객체 배열/리스트·DatetimeIndex) → DatetimeIndex, 아니면 None."""
+    import numpy as np
+    import pandas as pd
+    if values is None:
+        return None
+    if isinstance(values, pd.DatetimeIndex):
+        idx = values
+    elif isinstance(values, np.ndarray):
+        if values.dtype.kind == "M":
+            idx = pd.DatetimeIndex(values)
+        elif values.dtype == object and len(values) and all(isinstance(v, pd.Timestamp) for v in values):
+            idx = pd.DatetimeIndex(values)
+        else:
+            return None
+    elif isinstance(values, (list, tuple)) and values and all(isinstance(v, pd.Timestamp) for v in values):
+        idx = pd.DatetimeIndex(values)
+    else:
+        return None
+    return None if idx.hasnans else idx
+
+
+def _date_fmt(indexes) -> str:
+    """figure 전체에서 하나의 포맷 — 트레이스 x·categoryarray·도형 x 가 같은 문자열이어야
+    category 축에서 같은 봉으로 매칭된다. 자정만이면 'YYYY-MM-DD', 분, 초 순으로 확장."""
+    has_sec = has_time = False
+    for idx in indexes:
+        if (idx.second != 0).any() or (idx.microsecond != 0).any():
+            has_sec = True
+        if (idx.hour != 0).any() or (idx.minute != 0).any():
+            has_time = True
+    return "%Y-%m-%dT%H:%M:%S" if has_sec else ("%Y-%m-%dT%H:%M" if has_time else "%Y-%m-%d")
+
+
+def _format_dates(idx, fmt: str) -> list[str]:
+    if idx.tz is None:
+        return idx.strftime(fmt).tolist()
+    # tz-aware: 오프셋 보존 (+0900 → +09:00) — JS Date.parse 가 naive 를 로컬로 해석하는
+    # 기존 동작을 바꾸지 않기 위해 naive 는 naive 그대로, aware 는 aware 그대로.
+    # 날짜만+오프셋('1990-01-01-05:00')은 ISO 가 아니므로 aware 는 최소 분까지 쓴다.
+    if fmt == "%Y-%m-%d":
+        fmt = "%Y-%m-%dT%H:%M"
+    return [s[:-2] + ":" + s[-2:] for s in idx.strftime(fmt + "%z")]
+
+
+def fig_json(fig) -> str:
+    """fig → JSON (plotly 인코더 + 날짜 압축). fig.to_json() 과 plotly 해석 동일, 크기 ~1/3.
+
+    plotly 기본 인코더는 naive 인덱스를 '1990-01-01T00:00:00.000000000'(29자), Timestamp 를
+    '1990-01-01T00:00:00' 로 쓴다 — 트레이스마다 x 전체가 반복되고 category 축의
+    categoryarray(xaxis·xaxis2·…)에도 또 들어가 8k봉 차트 JSON 의 ~70% 가 날짜 문자열이었다.
+    트레이스 x·layout 안의 모든 datetime(categoryarray·shapes·annotations·range)을 한 포맷으로
+    바꿔 서로 정확히 같은 문자열이 되게 한다(기존엔 ns 접미사 유무가 섞여 있었다).
+    """
+    import datetime
+    import numpy as np
+    import pandas as pd
+    from plotly.io.json import to_json_plotly
+    d = fig.to_plotly_json()
+    found: list[tuple] = []          # (container, key, DatetimeIndex|Timestamp)
+
+    def _scalar(v):
+        if isinstance(v, pd.Timestamp):
+            return None if v is pd.NaT else v
+        if isinstance(v, (np.datetime64, datetime.datetime)):
+            ts = pd.Timestamp(v)
+            return None if ts is pd.NaT else ts
+        return None
+
+    def _walk(obj):
+        if isinstance(obj, dict):
+            for k, v in obj.items():
+                idx = _as_datetime_index(v)
+                if idx is not None:
+                    found.append((obj, k, idx))
+                elif _scalar(v) is not None:
+                    found.append((obj, k, v))
+                elif isinstance(v, (dict, list)):
+                    _walk(v)
+        elif isinstance(obj, list):
+            for i, v in enumerate(obj):
+                idx = _as_datetime_index(v)
+                if idx is not None:
+                    found.append((obj, i, idx))
+                elif _scalar(v) is not None:
+                    found.append((obj, i, v))
+                elif isinstance(v, (dict, list)):
+                    _walk(v)
+
+    for tr in d.get("data") or []:
+        if not isinstance(tr, dict):
+            continue
+        if "x" in tr:
+            idx = _as_datetime_index(tr["x"])
+            if idx is not None:
+                found.append((tr, "x", idx))
+    _walk(d.get("layout") or {})
+    if found:
+        fmt = _date_fmt([v if isinstance(v, pd.DatetimeIndex) else pd.DatetimeIndex([v])
+                         for _, _, v in found])
+        for container, key, v in found:
+            if isinstance(v, pd.DatetimeIndex):
+                container[key] = _format_dates(v, fmt)
+            else:
+                container[key] = _format_dates(pd.DatetimeIndex([v]), fmt)[0]
+    return to_json_plotly(d)
+
+
 def pannable_chart_html(fig, hist, *, height: int = 460, view_days=None,
                         vol_axis: str | None = None,
                         bounds_json: str | None = None,
@@ -2114,7 +2222,7 @@ def pannable_chart_html(fig, hist, *, height: int = 460, view_days=None,
             .replace("@@LIGHTMODE@@", json.dumps(bool(light)))
             .replace("@@CONFIG@@", config)
             .replace("@@BOUNDS@@", bounds)
-            .replace("@@FIG@@", fig.to_json()))       # fig JSON 은 마지막 (토큰 오염 차단)
+            .replace("@@FIG@@", fig_json(fig)))      # fig JSON 은 마지막 (토큰 오염 차단)
     return html
 
 
