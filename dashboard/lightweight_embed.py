@@ -10,6 +10,8 @@ from typing import Any
 import numpy as np
 import pandas as pd
 
+from dashboard import theme as _theme
+
 
 PAYLOAD_VERSION = 2
 MAX_INITIAL_BARS = 20_000
@@ -28,8 +30,19 @@ _SERIES_TYPES = {
     "bars": "bar",
     "high_low": "bar",
 }
-_UP = "#26a69a"
-_DOWN = "#ef5350"
+_UP = _theme.GREEN          # Plotly 캔들(charts._GREEN/_RED)과 같은 팔레트 — 두 엔진 색 일치
+_DOWN = _theme.RED
+_ACCENT = _theme.BLUE
+
+
+def _rgba(hex_color: str, alpha: float) -> str:
+    h = hex_color.lstrip("#")
+    r, g, b = (int(h[i:i + 2], 16) for i in (0, 2, 4))
+    return f"rgba({r},{g},{b},{alpha:g})"
+
+
+_VOL_UP = _rgba(_UP, 0.38)
+_VOL_DOWN = _rgba(_DOWN, 0.38)
 
 
 def _finite(value: Any) -> float | None:
@@ -238,14 +251,13 @@ def build_payload(rendered: Any, *, compact: bool = False, max_bars: int = MAX_I
             if value is not None and value >= 0:
                 volume["time"].append(int(timestamp))
                 volume["value"].append(value)
-                volume["color"].append(
-                    "rgba(38,166,154,.38)" if values[3] >= values[0] else "rgba(239,83,80,.38)"
-                )
+                volume["color"].append(_VOL_UP if values[3] >= values[0] else _VOL_DOWN)
     figure = getattr(rendered, "figure", None)
     payload = {
         "version": PAYLOAD_VERSION,
         "symbol": str(document.get("symbol") or ""),
         "timezone": str(document.get("timezone") or "UTC"),
+        "colors": {"up": _UP, "down": _DOWN, "accent": _ACCENT, "accent_fill": _rgba(_ACCENT, 0.30), "accent_fill_faint": _rgba(_ACCENT, 0.02)},
         "series_type": _SERIES_TYPES[chart_type],
         "chart_type": chart_type,
         "log_scale": (document.get("scale") or {}).get("type") == "log",
@@ -325,6 +337,7 @@ button{border:1px solid @@GRID@@;background:@@PANEL@@;color:@@TEXT@@;padding:7px
   clearTimeout(loadTimer);
   try {
     const LC = window.LightweightCharts;
+    const C = payload.colors || {up:"#26a69a",down:"#ef5350",accent:"#2962ff",accent_fill:"rgba(41,98,255,.3)",accent_fill_faint:"rgba(41,98,255,.02)"};
     const bars = payload.bars.time.map((time, index) => ({
       time,
       open:payload.bars.open[index], high:payload.bars.high[index],
@@ -374,19 +387,19 @@ button{border:1px solid @@GRID@@;background:@@PANEL@@;color:@@TEXT@@;padding:7px
     const options = {priceLineVisible:false,lastValueVisible:true};
     let series;
     if (payload.series_type === "line") {
-      series = chart.addSeries(LightweightCharts.LineSeries, {...options,color:"#2f81f7",lineWidth:2});
+      series = chart.addSeries(LightweightCharts.LineSeries, {...options,color:C.accent,lineWidth:2});
       series.setData(bars.map(b => ({time:b.time,value:b.close})));
     } else if (payload.series_type === "area") {
-      series = chart.addSeries(LightweightCharts.AreaSeries, {...options,lineColor:"#2f81f7",topColor:"rgba(47,129,247,.30)",bottomColor:"rgba(47,129,247,.02)"});
+      series = chart.addSeries(LightweightCharts.AreaSeries, {...options,lineColor:C.accent,topColor:C.accent_fill,bottomColor:C.accent_fill_faint});
       series.setData(bars.map(b => ({time:b.time,value:b.close})));
     } else if (payload.series_type === "baseline") {
       series = chart.addSeries(LightweightCharts.BaselineSeries, {...options,baseValue:{type:"price",price:bars[0].close}});
       series.setData(bars.map(b => ({time:b.time,value:b.close})));
     } else if (payload.series_type === "bar") {
-      series = chart.addSeries(LightweightCharts.BarSeries, {...options,upColor:"#26a69a",downColor:"#ef5350"});
+      series = chart.addSeries(LightweightCharts.BarSeries, {...options,upColor:C.up,downColor:C.down});
       series.setData(bars);
     } else {
-      series = chart.addSeries(LightweightCharts.CandlestickSeries, {...options,upColor:"#26a69a",downColor:"#ef5350",borderVisible:false,wickUpColor:"#26a69a",wickDownColor:"#ef5350"});
+      series = chart.addSeries(LightweightCharts.CandlestickSeries, {...options,upColor:C.up,downColor:C.down,borderVisible:false,wickUpColor:C.up,wickDownColor:C.down});
       series.setData(bars);
     }
     if (volumeBars.length) {
