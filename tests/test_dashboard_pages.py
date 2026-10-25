@@ -24,6 +24,13 @@ _AGENT_MODULE_SNAPSHOTS = [
     (_agent_storage, dict(vars(_agent_storage))),
 ]
 
+def _iframe_has_trace(src: str, name: str) -> bool:
+    """iframe srcdoc 안의 fig JSON 에 name 트레이스가 있는지 — plotly 6 인코더는 비ASCII 를
+    \\uXXXX 로 이스케이프하므로 원문 substring 검사는 항상 False 였다."""
+    import json as _json
+    escaped = _json.dumps(name, ensure_ascii=True)        # '"\\ub9e4\\ucd9c"'
+    return f'"name":{escaped}' in src or f'"name": {escaped}' in src or f'"{name}"' in src
+
 
 @pytest.fixture(scope="module", autouse=True)
 def _restore_dashboard_modules():
@@ -1115,7 +1122,7 @@ def test_ticker_page_per_band_and_peer_sections_are_visible():
     comparison = next(item.value for item in at.dataframe if "ROE(%)" in item.value.columns)
     assert comparison.shape[0] >= 2
     frames = [item.proto.srcdoc for item in at.get("iframe")]
-    assert frames and any('"매출"' in src for src in frames)
+    assert frames and any(_iframe_has_trace(src, "매출") for src in frames)
 
 
 def test_paper_kpis_and_decisions():
@@ -1681,7 +1688,7 @@ ticker.render()
     caps = " ".join(str(c.value) for c in at.caption)
     assert "펀더멘털 패널" in caps and "분기" in caps
     frames = [i.proto.srcdoc for i in at.get("iframe")]
-    assert any('"매출"' in s for s in frames), "차트 iframe 에 매출 트레이스 없음"
+    assert any(_iframe_has_trace(s, "매출") for s in frames), "차트 iframe 에 매출 트레이스 없음"
     # ETF 등 데이터 없음 → 정직 안내
     script2 = script.replace('"quarterly": [', '"quarterly_x": [')
     at2 = AppTest.from_string(script2, default_timeout=30)
