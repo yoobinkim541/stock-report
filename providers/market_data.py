@@ -324,16 +324,11 @@ def load_ohlc_close_series(symbol: str, periods: tuple[str, ...] = ("1y", "2y", 
     if yf is None:
         return cached
     live = None
-    for period in per:
-        try:
-            hist = yf.Ticker(symbol).history(period=period)
-        except Exception:
-            hist = pd.DataFrame()
-        if hist is not None and not getattr(hist, "empty", True) and "Close" in getattr(hist, "columns", []):
-            close = normalize_ohlc_frame(hist)["Close"].dropna()
-            if len(close):
-                live = close
-                break
+    for period in per:                      # 라이브 조회는 _fetch_close_series_live 단일 경로
+        live = _fetch_close_series_live(symbol, period=period)
+        if live is not None and len(live):
+            break
+        live = None
     if live is None:
         if cached is not None:
             logger.warning("낡은 Close 캐시 사용(라이브 실패) %s: 마지막 %s", symbol, cached.index[-1])
