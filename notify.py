@@ -14,6 +14,7 @@ from __future__ import annotations
 import logging
 import os
 import re
+import time
 
 import requests
 
@@ -55,9 +56,37 @@ def split_message(message: str, limit: int = TG_MAX_CHARS) -> list[str]:
     return parts or [""]
 
 
+def _post_with_retry(url: str, payload: dict, *, timeout: int, token: str | None,
+                     attempts: int = 3) -> bool:
+    """429(retry_after 존중)·5xx·네트워크 예외만 재시도. 4xx 는 즉시 실패(재시도 무의미)."""
+    delay = 1.0
+    for attempt in range(1, attempts + 1):
+        try:
+            resp = requests.post(url, json=payload, timeout=timeout)
+            if resp.ok:
+                return True
+            if resp.status_code == 429:
+                try:
+                    delay = float((resp.json().get("parameters") or {}).get("retry_after") or delay)
+                except Exception:
+                    pass
+                logger.warning("텔레그램 429 — %.0fs 후 재시도 (%d/%d)", delay, attempt, attempts)
+            elif resp.status_code >= 500:
+                logger.warning("텔레그램 HTTP %s (%d/%d)", resp.status_code, attempt, attempts)
+            else:
+                logger.error("텔레그램 전송 실패 HTTP %s: %s", resp.status_code, _mask(resp.text[:200], token))
+                return False
+        except Exception as e:
+            logger.error("텔레그램 전송 실패 (%d/%d): %s", attempt, attempts, _mask(e, token))
+        if attempt < attempts:
+            time.sleep(min(delay, 30.0))
+            delay = min(delay * 2, 30.0)
+    return False
+
+
 def send_telegram(text, *, token: str | None = None, chat_id=None,
                   timeout: int = 10, split: bool = True, parse_mode: str | None = None) -> bool:
-    """텔레그램 sendMessage. 성공 True. 토큰 없으면 skip(False)."""
+    """텔레그램 sendMessage. 성공 True. 토큰 없으면 skip(False). 429/5xx/네트워크 오류는 최대 3회 재시도."""
     token = token or _env_token()
     if not token:
         logger.warning("STOCK_BOT_TOKEN 없음 — 텔레그램 발송 skip")
@@ -70,11 +99,7 @@ def send_telegram(text, *, token: str | None = None, chat_id=None,
         payload = {"chat_id": chat_id, "text": part}
         if parse_mode:
             payload["parse_mode"] = parse_mode
-        try:
-            resp = requests.post(url, json=payload, timeout=timeout)
-            resp.raise_for_status()
-        except Exception as e:
-            logger.error("텔레그램 전송 실패: %s", _mask(e, token))
+        if not _post_with_retry(url, payload, timeout=timeout, token=token):
             ok = False
     return ok
 
