@@ -105,11 +105,14 @@ def render():
                 st.caption(rec.get("category", "general"))
                 st.write(rec.get("detail", ""))
 
-    query = st.text_input("검색", key="wiki_query", placeholder="손실한도, 레버리지, SOL, 중동, 크레딧...")
-    f1, f2, f3 = st.columns([1, 1, 1])
-    surface = f1.selectbox("surface", SURFACE_OPTIONS, index=0, key="wiki_surface_filter")
-    status = f2.selectbox("status", STATUS_OPTIONS, index=0, key="wiki_status_filter")
-    kind_filter = f3.selectbox("kind", KIND_OPTIONS, index=0, key="wiki_kind_filter")
+    # 폼 제출형 검색 — 종전엔 text_input 이 폼 밖이라 글자 하나 칠 때마다 전체 rerun + 위키 조회
+    with st.form("wiki_search_form", border=False):
+        query = st.text_input("검색", key="wiki_query", placeholder="손실한도, 레버리지, SOL, 중동, 크레딧...")
+        f1, f2, f3, f4 = st.columns([1, 1, 1, 0.6])
+        surface = f1.selectbox("화면(surface)", SURFACE_OPTIONS, index=0, key="wiki_surface_filter")
+        status = f2.selectbox("상태", STATUS_OPTIONS, index=0, key="wiki_status_filter")
+        kind_filter = f3.selectbox("종류", KIND_OPTIONS, index=0, key="wiki_kind_filter")
+        f4.form_submit_button("검색", width="stretch")
 
     pages = cached.wiki_pages(query=query, surface=surface, status=status, limit=60)
     if kind_filter != "all":

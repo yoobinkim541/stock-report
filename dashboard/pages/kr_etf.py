@@ -60,10 +60,18 @@ def render():
 
     etf = cached.etf(ticker) or {}
     if not etf.get("is_etf"):
-        st.info("국내 ETF 데이터를 아직 준비하지 못했습니다.")
+        # 데이터 공백(미지원 종목)과 일시 장애(공급자 타임아웃)를 구분할 수 없으므로
+        # 캐시를 비우고 재조회할 수 있는 경로를 준다 — 종전엔 TTL 만료까지 막혀 있었다.
+        st.info("국내 ETF 데이터를 아직 준비하지 못했습니다 — 데이터 공급자 지연이면 잠시 후 다시 시도하세요.")
+        if st.button("🔄 다시 불러오기", key="_kr_etf_retry"):
+            try:
+                cached.etf.clear()
+            except Exception:
+                pass
+            st.rerun()
         return
     if (etf.get("market_type") or "").lower() != "kr":
-        st.info("해당 종목은 국내 ETF가 아닙니다.")
+        st.info("해당 종목은 국내 ETF가 아닙니다 — 해외 ETF·개별주는 ‘종목 분석’ 페이지에서 보세요.")
         return
 
     cols = st.columns(5)

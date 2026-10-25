@@ -253,14 +253,8 @@ def _chat_tab(surface: str, pack: dict):
 
         pending = _quick_prompts()
         if pending:
-            try:
-                _run_agent_question_auto(pending, pack)
-            except BaseException as exc:
-                import traceback
-                print(f"[DEBUG_CHAT] BASEEXCEPTION in _run_agent_question_auto: type={type(exc)} {exc}\n{traceback.format_exc()}", flush=True)
-                raise
+            _run_agent_question_auto(pending, pack)
 
-        print(f"[DEBUG_CHAT] rendering loop. chat_key={chat_key} id(session_state)={id(st.session_state)} len={len(st.session_state[chat_key])}", flush=True)
         for idx, msg in enumerate(st.session_state[chat_key][-16:]):
             role_raw = str(msg.get("role", "assistant")).strip().lower()
             role = "user" if role_raw in {"user", "human"} else "assistant"
