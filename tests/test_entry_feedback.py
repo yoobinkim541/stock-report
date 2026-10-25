@@ -273,7 +273,7 @@ def _training_row(i: int, *, confirmed: bool) -> dict:
         "date": f"2026-01-{(i % 28) + 1:02d}",
         "ticker": f"{'GOOD' if confirmed else 'BAD'}{i}",
         "signal": "enter",
-        "score": 0.70 if confirmed else 0.75,
+        "score": 0.70 if confirmed else 0.68,   # 실패 행은 보정 상한(TOTAL_ADJUST_CAP 0.08) 안에서 임계(0.62) 아래로 내려가야 챌린저가 거를 수 있다
         "success": confirmed,
         "r_multiple": 1.5 if confirmed else -1.0,
         "features": {
