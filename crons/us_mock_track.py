@@ -725,12 +725,23 @@ def main(argv: list[str] | None = None) -> int:
     logged = llm_exec.log_shadow_reviews(
         llm_shadow_ledger, market="US", date=today, plan=plan, reviews=llm_reviews,
         signals_by=sig_by, applied_mode=llm_exec.mode())
-    plan, llm_applied = llm_exec.apply_reviews(plan, llm_reviews)
+    llm_mode = llm_exec.mode()
+    plan, llm_applied = llm_exec.apply_reviews(plan, llm_reviews, apply_mode=llm_mode,
+                                               review_status=llm_status)
     logger.info("LLM order review: %s · shadow %d건 · applied %d건",
                 llm_status, logged, len(llm_applied))
     for item in llm_applied:
         logger.warning("LLM guarded_apply %s %s %s주 → %s",
                        item.get("side"), item.get("symbol"), item.get("qty"), item.get("llm_applied"))
+    llm_record = llm_exec.review_execution_record(apply_mode=llm_mode, review_status=llm_status,
+                                                  applied=llm_applied)
+    if llm_record:
+        try:
+            import store
+            store.append("us_mock_history", {"date": datetime.now(KST).strftime("%Y-%m-%d %H:%M"),
+                                             **llm_record})
+        except Exception as e:
+            logger.warning("LLM 주문검토 기록 실패: %s", e)
 
     from ml.adaptive import costs
     results = []
@@ -771,7 +782,7 @@ def main(argv: list[str] | None = None) -> int:
                                          "kind": "cost", "cost": round(day_cost, 2),
                                          "notional": round(day_notional, 2)})
     _record_snapshot(nav, cash, positions)
-    _notify(nav, results)
+    _notify(nav, results, llm_note=llm_exec.fallback_note(llm_record))
     logger.info("=== 완료: 집행 %d건 ===", sum(1 for r in results if r.get("ok")))
     return 0
 
@@ -834,7 +845,7 @@ def _order_blocker(msg) -> str | None:
     return None
 
 
-def _notify(nav, results):
+def _notify(nav, results, llm_note: str | None = None):
     _ICON = {"편입": "📥", "증액": "➕", "퇴출": "📤", "감액": "➖", "레버슬리브": "🏗️"}
     lines = ["🧪 [모의] 미국 페이퍼트레이딩 (KIS 해외)", "━━━━━━━━━━━━━━"]
     if nav is not None:
@@ -858,6 +869,8 @@ def _notify(nav, results):
             if not r.get("ok") and r.get("msg"):
                 lines.append(f"     ↳ {r['msg']}")
         lines.append(f"  집행 {sum(1 for r in results if r.get('ok'))} · 실패 {sum(1 for r in results if not r.get('ok'))}")
+    if llm_note:
+        lines.append(f"  {llm_note}")
     lines.append("  ⚠️ 모의투자 — 실거래 아님")
     try:
         import notify

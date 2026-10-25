@@ -4,14 +4,44 @@
 
 The trading loops stay deterministic.  This helper only adds a short,
 schema-checked explanation section to read-only mock reports.
+
+The LLM text is published only when it is grounded in the payload it was
+given (``validate_output(raw, payload)``):
+
+- schema: every key in ``ALLOWED_KEYS`` present; ``summary`` a non-empty string;
+  note fields lists of non-empty strings; ``confidence`` a number 0..100.
+- tickers: Latin upper-case tokens and 6-digit KR codes must appear in the
+  payload strings (or be a generic metric/benchmark acronym).
+- numbers: every number with a unit (%, %p, 원, 만/억/조, 배) and every bare number
+  above 10 must match a payload number (ratios ≤1 also as ×100) within display
+  rounding / 0.5%.
+- no assertive forecast words (확정·보장·반드시·무조건·틀림없…).
+
+Anything else is ``guard rejected`` and the report shows ``fallback_section``,
+stating that only the quantitative sections above are the basis.
 """
 from __future__ import annotations
 
 import json
+import math
 import os
-import subprocess
+import re
+
+from lib import llm_cli
 
 ALLOWED_KEYS = ("summary", "position_notes", "decision_notes", "risk_checks", "confidence")
+NOTE_KEYS = ("position_notes", "decision_notes", "risk_checks")
+# 티커처럼 보이지만 종목이 아닌 일반 지표/벤치마크 약어.
+GENERIC_TOKENS = frozenset({
+    "MDD", "NAV", "IC", "ETF", "LLM", "USD", "KRW", "QQQ", "KOSPI", "KOSDAQ", "PCT", "OOS", "AI",
+    "KS", "KQ",
+})
+_TICKER_RE = re.compile(r"(?<![A-Za-z0-9])[A-Z][A-Z0-9]{1,9}(?:\.[A-Z]{1,2})?(?![A-Za-z0-9])")
+_KR_CODE_RE = re.compile(r"(?<![0-9])\d{6}(?![0-9])")
+_NUMBER_RE = re.compile(
+    r"(?<![0-9A-Za-z.])([-+]?\d[\d,]*(?:\.\d+)?)\s*(%p|%|조|억|만|원|배)?")
+_UNIT_SCALE = {"만": 1e4, "억": 1e8, "조": 1e12}
+_ASSERTIVE_RE = re.compile(r"(?<!미)확정|보장|반드시|무조건|틀림없|확실히")
 
 
 def _env_bool(name: str, default: str = "1") -> bool:
@@ -74,8 +104,10 @@ def build_prompt(payload: dict) -> str:
         "한국어 모의투자 리포트 판단근거 작성자. 입력 JSON 안의 숫자·티커·종목명만 사용한다.\n"
         "주문 지시를 만들지 말고, 현황 보고서에 붙일 사후 설명만 작성한다.\n"
         "입력에 없는 원인/뉴스/전망/숫자/티커를 만들지 않는다. 모르면 확인 필요라고 쓴다.\n"
-        "출력은 JSON object 하나만 반환한다. 키는 summary, position_notes, decision_notes, risk_checks, confidence만 허용한다.\n"
-        "각 배열은 최대 2개, 각 문장은 짧게 쓴다.\n"
+        "출력은 JSON object 하나만 반환한다. 키 summary, position_notes, decision_notes, risk_checks, confidence를 모두 넣고 다른 키는 쓰지 않는다.\n"
+        "summary는 문자열, 세 notes는 문자열 배열(최대 2개), confidence는 0~100 숫자다.\n"
+        "숫자는 입력 값을 반올림 그대로만 인용하고, 확정·보장·반드시 같은 단정 표현을 쓰지 않는다. "
+        "검증에 어긋나면 전체가 폐기된다. 각 문장은 짧게 쓴다.\n"
         "예시: {\"summary\":\"전략은 QQQ 대비 열위지만 MDD는 안정적입니다.\","
         "\"position_notes\":[\"NVDA 비중은 수익 기여 확인 필요\"],"
         "\"decision_notes\":[\"최근 편입은 정책점수 상위 근거\"],"
@@ -95,19 +127,123 @@ def _extract_json_object(text: str) -> dict:
     return json.loads(text[start:end + 1])
 
 
-def validate_output(raw: dict) -> dict:
+def _payload_strings(value) -> list[str]:
+    if isinstance(value, str):
+        return [value]
+    if isinstance(value, dict):
+        return [s for k, v in value.items() for s in _payload_strings(k) + _payload_strings(v)]
+    if isinstance(value, (list, tuple)):
+        return [s for v in value for s in _payload_strings(v)]
+    return []
+
+
+def _payload_numbers(value) -> list[float]:
+    if isinstance(value, bool):
+        return []
+    if isinstance(value, (int, float)):
+        number = _safe_float(value)
+        return [number] if number is not None else []
+    if isinstance(value, dict):
+        return [n for v in value.values() for n in _payload_numbers(v)]
+    if isinstance(value, (list, tuple)):
+        return [n for v in value for n in _payload_numbers(v)]
+    if isinstance(value, str):
+        return [n for n, _, _ in _text_numbers(value)]
+    return []
+
+
+def _text_numbers(text: str) -> list[tuple[float, int, str]]:
+    """(값, 소수 자릿수, 단위) — 만/억/조는 값에 곱해 둔다."""
+    out = []
+    for m in _NUMBER_RE.finditer(text):
+        raw, unit = m.group(1).replace(",", ""), m.group(2) or ""
+        try:
+            number = float(raw)
+        except ValueError:
+            continue
+        decimals = len(raw.split(".", 1)[1]) if "." in raw else 0
+        scale = _UNIT_SCALE.get(unit, 1.0)
+        out.append((number * scale, decimals if scale == 1.0 else 0, unit))
+    return out
+
+
+def _grounding(payload: dict) -> tuple[set[str], set[str], list[float]]:
+    strings = _payload_strings(payload)
+    tickers = {t for s in strings for t in _TICKER_RE.findall(s.upper())}
+    tickers |= {t.split(".", 1)[0] for t in tickers}
+    codes = {c for s in strings for c in _KR_CODE_RE.findall(s)}
+    numbers = _payload_numbers(payload)
+    numbers += [float(len(payload.get(k) or [])) for k in ("positions", "recent_decisions")]
+    return tickers, codes, numbers
+
+
+def _number_matches(value: float, decimals: int, numbers: list[float]) -> bool:
+    """표시 반올림(소수 자릿수) 또는 0.5% 상대오차 안에서 payload 값과 일치하는지.
+
+    |값| ≤ 1 인 payload 비율(예 IC 0.05, 점수 0.82)은 ×100 퍼센트 표기도 허용한다.
+    """
+    target = abs(value)
+    tol_abs = 0.5 * 10 ** (-decimals) + 1e-9
+    for n in numbers:
+        cands = (abs(n), abs(n) * 100.0) if abs(n) <= 1.0 else (abs(n),)
+        for cand in cands:
+            if math.isclose(target, cand, abs_tol=max(tol_abs, 0.005 * cand)):
+                return True
+    return False
+
+
+def _check_grounded(text: str, field: str, grounding) -> None:
+    tickers, codes, numbers = grounding
+    if _ASSERTIVE_RE.search(text):
+        raise ValueError(f"{field}: assertive forecast wording")
+    for token in _TICKER_RE.findall(text):
+        base = token.split(".", 1)[0]
+        if token not in tickers and base not in tickers and base not in GENERIC_TOKENS:
+            raise ValueError(f"{field}: unknown ticker {token}")
+    for code in _KR_CODE_RE.findall(text):
+        if code not in codes:
+            raise ValueError(f"{field}: unknown code {code}")
+    stripped = _KR_CODE_RE.sub(" ", _TICKER_RE.sub(" ", text))
+    for value, decimals, unit in _text_numbers(stripped):
+        if not unit and decimals == 0 and abs(value) <= 10:
+            continue  # 작은 정수(건수·순번)는 수치 주장으로 보지 않는다
+        if not _number_matches(value, decimals, numbers):
+            raise ValueError(f"{field}: number not in input {value:g}{unit}")
+
+
+def validate_output(raw: dict, payload: dict) -> dict:
+    """LLM 출력을 스키마 + payload 근거 대조로 검증한다. 하나라도 어긋나면 ValueError."""
     if not isinstance(raw, dict):
         raise ValueError("output must be object")
     unknown = set(raw) - set(ALLOWED_KEYS)
     if unknown:
         raise ValueError("unknown keys: " + ", ".join(sorted(unknown)))
-    confidence = int(max(0, min(100, _safe_float(raw.get("confidence")) or 50)))
+    missing = [k for k in ALLOWED_KEYS if k not in raw]
+    if missing:
+        raise ValueError("missing keys: " + ", ".join(missing))
+    summary = raw.get("summary")
+    if not isinstance(summary, str) or not summary.strip():
+        raise ValueError("summary must be non-empty string")
+    for key in NOTE_KEYS:
+        items = raw.get(key)
+        if not isinstance(items, list) or not all(isinstance(x, str) and x.strip() for x in items):
+            raise ValueError(f"{key} must be list of non-empty strings")
+    confidence = raw.get("confidence")
+    if isinstance(confidence, bool) or not isinstance(confidence, (int, float)) \
+            or _safe_float(confidence) is None or not 0 <= confidence <= 100:
+        raise ValueError(f"confidence must be number 0..100: {confidence!r}")
+
+    grounding = _grounding(payload or {})
+    _check_grounded(summary, "summary", grounding)
+    for key in NOTE_KEYS:
+        for item in raw[key]:
+            _check_grounded(item, key, grounding)
     return {
-        "summary": _compact(raw.get("summary"), 100),
-        "position_notes": [_compact(x, 90) for x in (raw.get("position_notes") or [])[:2]],
-        "decision_notes": [_compact(x, 90) for x in (raw.get("decision_notes") or [])[:2]],
-        "risk_checks": [_compact(x, 90) for x in (raw.get("risk_checks") or [])[:2]],
-        "confidence": confidence,
+        "summary": _compact(summary, 100),
+        "position_notes": [_compact(x, 90) for x in raw["position_notes"][:2]],
+        "decision_notes": [_compact(x, 90) for x in raw["decision_notes"][:2]],
+        "risk_checks": [_compact(x, 90) for x in raw["risk_checks"][:2]],
+        "confidence": int(confidence),
     }
 
 
@@ -123,7 +259,18 @@ def format_section(result: dict, *, html: bool = False) -> list[str]:
     return lines
 
 
-def run(payload: dict, *, runner=subprocess.run) -> tuple[dict | None, str]:
+def fallback_section(status: str) -> list[str]:
+    """LLM 근거를 게시하지 못했을 때의 표시. 비활성(disabled)이면 빈 리스트(섹션 숨김)."""
+    if not status or status == "disabled":
+        return []
+    return [
+        "🧠 LLM 판단근거",
+        f"- 미게시: LLM 근거 검증 실패/미응답 ({_compact(status, 70)})",
+        "- 정량 근거 fallback — 위 성과·보유·결정 근거 수치만 판단 근거로 사용",
+    ]
+
+
+def run(payload: dict, *, runner=llm_cli.run_cli) -> tuple[dict | None, str]:
     if not _env_bool("MOCK_REPORT_LLM_ENABLED", "1"):
         return None, "disabled"
     prompt = build_prompt(payload)
@@ -146,6 +293,6 @@ def run(payload: dict, *, runner=subprocess.run) -> tuple[dict | None, str]:
     if getattr(result, "returncode", 1) != 0:
         return None, f"call failed: {_compact(getattr(result, 'stderr', 'non-zero exit'), 80)}"
     try:
-        return validate_output(_extract_json_object(getattr(result, "stdout", "") or "")), "ok"
+        return validate_output(_extract_json_object(getattr(result, "stdout", "") or ""), payload), "ok"
     except Exception as exc:
         return None, f"guard rejected: {_compact(exc, 80)}"

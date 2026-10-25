@@ -28,7 +28,8 @@
 
 1. **shadow-first**: 기본 `INTRADAY_SHADOW_ONLY=true` — 신호·가상체결만 원장에 기록, 모의 주문 0.
 2. **게이트 통과 후 집행**: shadow 트레이드 ≥ 100건/축, 순비용 기대치 > 0, PSR ≥ 0.95(`ml/validation`),
-   파라미터 그리드 PBO < 0.5 를 통과한 축만 모의 집행 허용.
+   파라미터 그리드 PBO < 0.5 를 통과한 축만 모의 집행 허용. PBO 가 계산되지 않으면(θ 변형이 모두 같은
+   트레이드를 고르는 중복/무분산 후보군 = 선택 능력 검증 정보 없음) GO 근거가 아니다 → OBSERVE.
 3. **슬리브 캡**: 통과해도 모의 NAV 의 10%(기본)만 배정 — 기존 일간 전략 NAV 와 귀속 분리.
 4. **무엣지면 정직 공개**: 기존 Tier4~6 NO-GO 처럼 `/evolve`·대시보드에 그대로 노출하고 표시 전용으로 남긴다.
 
@@ -100,6 +101,8 @@ tranche 분할은 **미적용**(단타는 일괄 진입/청산 — lib/tranche �
 `crons/intraday_mock_learn.py` (토 03:30 UTC) — `kr_mock_learn.py` 템플릿 그대로:
 - `learner.robust_axis_weight(축점수, realized net R, stability=True)` → 축별 상관
 - `learner.refit_and_adopt(...)` walk-forward OOS 게이트 (min_samples=100 — 트레이드가 많아 통계 파워 빨리 참)
+  + 통계 게이트 `learner.adoption_evidence` — 거래일별 슬리브 수익 시계열의 PSR≥0.95(T=독립 거래일 수,
+  누적 시도 수>1 이면 시도별 Sharpe 분산으로 deflate한 DSR)·독립 거래일 ≥8. 증거 누락·계산 실패는 보류.
 - `reward.objective_score` 재사용 — 단기 슬리브 MDD 가 지수 MDD 초과 시 하드 디스퀄
 - `evolution.record_learning()` → `/evolve`·대시보드 학습곡선에 `kr_intraday`/`us_intraday` 표면 추가
 

@@ -670,7 +670,8 @@ def _notify_llm_lines(nav: float | None, results: list[dict], signals_by_code: d
         return []
 
 
-def _notify(nav: float | None, results: list[dict], signals: list[dict]) -> None:
+def _notify(nav: float | None, results: list[dict], signals: list[dict],
+            llm_note: str | None = None) -> None:
     signals_by_code = {s.get("code"): s for s in signals if s.get("code")}
     name_by_code = {}
     for s in signals:
@@ -726,6 +727,8 @@ def _notify(nav: float | None, results: list[dict], signals: list[dict]) -> None
             lines.extend(llm_lines)
         lines.append("━━━━━━━━━━━━━━━━━━━━━━━")
         lines.append(f"  집행 {len(placed)} · 실패 {len(failed)}")
+    if llm_note:
+        lines.append(f"  {llm_note}")
     lines.append("  ⚠️ 모의투자 — 실거래 아님")
 
     try:
@@ -820,12 +823,18 @@ def main(argv: list[str] | None = None) -> int:
     logged = llm_exec.log_shadow_reviews(
         llm_shadow_ledger, market="KR", date=today, plan=plan, reviews=llm_reviews,
         signals_by=sig_by_code, applied_mode=llm_exec.mode())
-    plan, llm_applied = llm_exec.apply_reviews(plan, llm_reviews)
+    llm_mode = llm_exec.mode()
+    plan, llm_applied = llm_exec.apply_reviews(plan, llm_reviews, apply_mode=llm_mode,
+                                               review_status=llm_status)
     logger.info("LLM order review: %s · shadow %d건 · applied %d건",
                 llm_status, logged, len(llm_applied))
     for item in llm_applied:
         logger.warning("LLM guarded_apply %s %s %s주 → %s",
                        item.get("side"), item.get("symbol"), item.get("qty"), item.get("llm_applied"))
+    llm_record = llm_exec.review_execution_record(apply_mode=llm_mode, review_status=llm_status,
+                                                  applied=llm_applied)
+    if llm_record:
+        _append_history(llm_record)
 
     from ml.adaptive import costs
     results = []
@@ -872,7 +881,7 @@ def main(argv: list[str] | None = None) -> int:
 
     if day_notional > 0:                       # 당일 거래비용 1건 적재 (리포트 누적·회전율용)
         _append_history({"kind": "cost", "cost": round(day_cost, 2), "notional": round(day_notional, 2)})
-    _notify(nav, results, signals)
+    _notify(nav, results, signals, llm_note=llm_exec.fallback_note(llm_record))
     logger.info("=== 완료: 집행 %d건 ===", sum(1 for r in results if r.get("ok")))
     return 0
 

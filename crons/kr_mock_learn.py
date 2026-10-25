@@ -82,31 +82,18 @@ def fit_policy(train_rows: list[dict]) -> dict:
 
 
 def eval_policy(oos_rows: list[dict], params: dict, max_positions: int = 5) -> dict:
-    """OOS 평가 = **배치와 동일한 바스켓**(정책점수 상위 max_positions) 의 평균 초과수익 +
-    보유기간 MDD(선택 종목 평균 peak-to-trough 낙폭 — 지수 MDD 와 동일 단위로 비교 가능).
+    """OOS 평가 = **배치와 동일한 결정일별 바스켓**(그날 정책점수 상위 max_positions 균등) 을
+    평가일마다 하나의 관측으로 이은 OOS 시계열.
 
-    plan_rebalance 의 선택(top max_positions 균등)과 일치시켜 '학습 목적 = 실제 운용 목적'.
+    excess = 평가일 바스켓 평균 초과수익의 평균, mdd = 그 포트폴리오 곡선 MDD,
+    n = 평가일 수(최소 표본 게이트 단위). n_candidates/n_selected/n_independent 는 분리 보고
+    (ml.adaptive.oos_eval.dated_topk_eval).
     """
-    scored = []
-    for r in oos_rows:
-        if r.get("fwd_excess") is None:
-            continue
-        from ml import kr_policy
-        sc = kr_policy.score(r.get("features", {}), params)
-        scored.append((sc, r))
-    if not scored:
-        return {"excess": 0.0, "mdd": 1.0, "n": 0}
-    scored.sort(key=lambda x: -x[0])
-    sel = [r for _, r in scored[:max(1, max_positions)]]
-    excess = sum(r["fwd_excess"] for r in sel) / len(sel)
-    # 실제 낙폭: 선택 종목 보유기간 MDD 평균(없으면 음의 초과수익 크기로 보수적 대체)
-    mdds = [r["fwd_mdd"] for r in sel if r.get("fwd_mdd") is not None]
-    if mdds:
-        mdd = sum(mdds) / len(mdds)
-    else:
-        negs = [r["fwd_excess"] for r in sel if r["fwd_excess"] < 0]
-        mdd = abs(sum(negs) / len(negs)) if negs else 0.0
-    return {"excess": round(excess, 4), "mdd": round(mdd, 4), "n": len(scored)}
+    from ml import kr_policy
+    from ml.adaptive import oos_eval
+    return oos_eval.dated_topk_eval(
+        oos_rows, lambda r: kr_policy.score(r.get("features", {}), params), max_positions,
+        horizon_days=HORIZON)
 
 
 # ── 보상 백필 ─────────────────────────────────────────────────────────────────
@@ -243,23 +230,24 @@ def main() -> int:
         send_cron_telegram(msg)
         return 0
 
-    # 지수 MDD 기준 — 챌린저 MDD 와 **동일 OOS 창**에서 계산(refit_and_adopt 와 같은 분할·embargo).
+    # 지수 MDD 기준 — 챌린저 MDD 와 **동일 OOS 창·동일 평가일 곡선**(refit_and_adopt 와 같은 분할·embargo).
     # 전체 population 평균을 쓰면 train 급락장이 baseline 을 부풀려 OOS MDD 제약이 느슨해진다(감사 확정).
+    from ml.adaptive import oos_eval
     from ml.adaptive.learner import walk_forward_split
     _, _oos_mask = walk_forward_split([r.get("date", "") for r in rows], embargo=HORIZON)
     _oos_rows = [r for r, m in zip(rows, _oos_mask) if m]
-    idx_mdds = [r["idx_fwd_mdd"] for r in _oos_rows if r.get("idx_fwd_mdd") is not None]
-    if idx_mdds:
-        index_mdd = sum(idx_mdds) / len(idx_mdds)
-    else:
+    index_mdd = oos_eval.index_curve_mdd(_oos_rows)
+    if index_mdd is None:
         index_mdd = 0.20
-        logger.warning("OOS 보유기간 지수 MDD 없음 — 기본 0.20")
+        logger.warning("OOS 평가일 지수 수익 없음 — 지수 MDD 기본 0.20")
 
     from ml.adaptive import learner
+    prior_trials, trial_sharpes = learner.trial_history("kr_mock")
     out = learner.refit_and_adopt(
         rows, kr_policy.get_policy(), fit_policy,
         lambda oos, params: eval_policy(oos, params, MAX_POS),    # 배치 바스켓과 동일
-        index_mdd=index_mdd, min_samples=MIN_SAMPLES, embargo=HORIZON)
+        index_mdd=index_mdd, min_samples=MIN_SAMPLES, embargo=HORIZON,
+        n_trials=prior_trials + 1, trial_sharpes=trial_sharpes)
     logger.info("재학습 결과: %s", out["reason"])
     evolution.record_learning("kr_mock", {
         "date": datetime.now(KST).strftime("%Y-%m-%d"), "adopted": bool(out.get("adopted")),
@@ -268,6 +256,12 @@ def main() -> int:
         "excess_champion": (out.get("champion") or {}).get("excess"),
         "mdd_challenger": (out.get("challenger") or {}).get("mdd"),
         "n_oos": (out.get("challenger") or {}).get("n"),
+        "n_oos_candidates": (out.get("challenger") or {}).get("n_candidates"),
+        "n_oos_selected": (out.get("challenger") or {}).get("n_selected"),
+        "n_oos_independent": (out.get("challenger") or {}).get("n_independent"),
+        "sharpe_challenger": (out.get("evidence") or {}).get("sharpe_pp"),
+        "psr_challenger": (out.get("evidence") or {}).get("psr"),
+        "n_trials": (out.get("evidence") or {}).get("n_trials"),
         "candidate_params": out.get("candidate_params"),
         "llm_shadow_added": llm_added,
         "llm_shadow_n": llm_summary.get("n"),

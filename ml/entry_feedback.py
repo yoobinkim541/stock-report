@@ -445,49 +445,57 @@ def _parse_snapshot_timestamp(value: object):
         return None
 
 
-def _default_intraday_result(decision: dict, horizon: int | str) -> dict | None:
-    steps = _intraday_steps(horizon)
-    if steps is None:
-        return None
-    ticker = str(decision.get("ticker") or "")
-    benchmark = str(decision.get("benchmark") or _benchmark(decision))
-    market = str(decision.get("market") or _market(ticker)).upper()
-    date = str(decision.get("date") or _today_kst())[:10]
-    df = _intraday_frame(ticker, date, market=market)
-    bm = _intraday_frame(benchmark, date, market="US" if market != "KR" else "KR")
-    if df.empty or bm.empty:
-        return None
-    df = df.sort_index()
-    bm = bm.sort_index()
-    snapshot = _parse_snapshot_timestamp(decision.get("snapshot_ts"))
-    def after_snapshot(frame: pd.DataFrame) -> pd.DataFrame:
-        if snapshot is None:
-            return frame
-        start = snapshot
-        try:
-            if getattr(start, "tzinfo", None) is None and getattr(frame.index, "tz", None) is not None:
-                start = start.tz_localize(frame.index.tz)
-            elif getattr(start, "tzinfo", None) is not None and getattr(frame.index, "tz", None) is None:
-                start = start.tz_localize(None)
-            return frame[frame.index >= start]
-        except (TypeError, ValueError):
-            return frame.iloc[0:0]
-    df = after_snapshot(df)
-    bm = after_snapshot(bm)
-    if len(df) <= steps or len(bm) <= steps:
-        return None
-    window, bwindow = df.iloc[:steps + 1], bm.iloc[:steps + 1]
+# ── outcome 시간창: 종목·벤치마크를 같은 시작/종료 시각으로 평가 ─────────────────
+# 창 안 기대 봉수(1분봉=경과분+1, 일봉=거래일+1) 대비 실제 봉 비율 하한(종목·벤치마크 각각).
+MIN_BAR_COVERAGE = 0.5
+# 단기 창의 종료 시각+유예가 지나도 창이 채워지지 않으면(장 경계·결측) invalid. 그 전엔 pending.
+INTRADAY_GRACE = pd.Timedelta(days=1)
+_MARKET_TZ = {"KR": "Asia/Seoul", "US": "America/New_York"}
+
+
+def _now_utc() -> pd.Timestamp:
+    return pd.Timestamp.now(tz="UTC")
+
+
+def _invalid_window(reason: str) -> dict:
+    """평가 불가가 확정된 창 — build_outcome 이 invalid outcome 으로 남기고 학습에서 제외한다."""
+    return {"status": "invalid", "quality_reason": reason, "path_result": "none"}
+
+
+def _clean_bars(frame: pd.DataFrame | None) -> pd.DataFrame:
+    if not isinstance(frame, pd.DataFrame) or frame.empty or "Close" not in frame.columns:
+        return pd.DataFrame()
+    out = frame.copy()
+    out.index = pd.DatetimeIndex(out.index)
+    out = out[~out.index.duplicated(keep="last")].sort_index()
+    return out[pd.to_numeric(out["Close"], errors="coerce").notna()]
+
+
+def _window_payload(window: pd.DataFrame, bwindow: pd.DataFrame, decision: dict, *,
+                    stamp_format: str | None) -> dict:
     entry, exit_ = float(window["Close"].iloc[0]), float(window["Close"].iloc[-1])
     bentry, bexit = float(bwindow["Close"].iloc[0]), float(bwindow["Close"].iloc[-1])
-    target = _as_float(decision.get("target_price"), 0.0) or None
-    stop = _as_float(decision.get("stop_price"), 0.0) or None
+    target = decision.get("target_price")
+    stop = decision.get("stop_price")
+    try:
+        target = float(target) if target is not None else None
+        stop = float(stop) if stop is not None else None
+    except (TypeError, ValueError):
+        target, stop = None, None
     path_result, path_date, path_price, time_to_target, time_to_stop = _first_touch_details(
-        window, target, stop
+        window, target or None, stop or None
     )
     stock_prices = [float(x) for x in window["Close"].tolist()]
+
+    def fmt(value) -> str:
+        stamp = pd.Timestamp(value)
+        return stamp.strftime(stamp_format) if stamp_format else stamp.isoformat()
+
     return {
-        "entry_date": pd.Timestamp(window.index[0]).isoformat(),
-        "exit_date": pd.Timestamp(window.index[-1]).isoformat(),
+        "entry_date": fmt(window.index[0]),
+        "exit_date": fmt(window.index[-1]),
+        "benchmark_entry_date": fmt(bwindow.index[0]),
+        "benchmark_exit_date": fmt(bwindow.index[-1]),
         "entry_price_actual": entry, "exit_price": exit_,
         "benchmark_entry": bentry, "benchmark_exit": bexit,
         "stock_ret": exit_ / entry - 1.0 if entry > 0 else 0.0,
@@ -502,8 +510,92 @@ def _default_intraday_result(decision: dict, horizon: int | str) -> dict | None:
     }
 
 
+def _default_intraday_result(decision: dict, horizon: int | str) -> dict | None:
+    """단기 horizon = **경과 시간**(분). 종목·벤치마크는 같은 시작/종료 timestamp 로만 비교한다.
+
+    - 시작: snapshot 이후 두 시계열이 모두 가진 첫 봉(종목 첫 봉과 허용오차 이내여야 함).
+    - 종료: 시작+horizon 분에서 허용오차(horizon 10%, 최소 1분) 안의 마지막 공통 봉.
+    - 창이 아직 안 채워짐 → pending(None). 종료+INTRADAY_GRACE 후에도 미충족·종료봉 결측·
+      봉 coverage 부족·시작봉 불일치 → invalid. 봉 개수로 horizon 을 세지 않는다.
+    """
+    steps = _intraday_steps(horizon)
+    if steps is None:
+        return None
+    ticker = str(decision.get("ticker") or "")
+    benchmark = str(decision.get("benchmark") or _benchmark(decision))
+    market = str(decision.get("market") or _market(ticker)).upper()
+    date = str(decision.get("date") or _today_kst())[:10]
+    df = _clean_bars(_intraday_frame(ticker, date, market=market))
+    bm = _clean_bars(_intraday_frame(benchmark, date, market="US" if market != "KR" else "KR"))
+    if df.empty or bm.empty:
+        return None
+    tz = df.index.tz or _MARKET_TZ.get(market, "UTC")
+    snapshot = _parse_snapshot_timestamp(decision.get("snapshot_ts"))
+    try:
+        df.index = df.index.tz_localize(tz) if df.index.tz is None else df.index.tz_convert(tz)
+        bm.index = bm.index.tz_localize(tz) if bm.index.tz is None else bm.index.tz_convert(tz)
+        if snapshot is not None:
+            snapshot = snapshot.tz_localize(tz) if snapshot.tzinfo is None else snapshot.tz_convert(tz)
+    except (TypeError, ValueError):
+        return _invalid_window("timezone_unresolved")
+    if snapshot is not None:
+        df = df[df.index >= snapshot]
+        bm = bm[bm.index >= snapshot]
+    span = pd.Timedelta(minutes=steps)
+    tolerance = pd.Timedelta(minutes=max(1, round(steps * 0.1)))
+
+    def not_ready(reason: str, expected_end) -> dict | None:
+        if expected_end is not None and _now_utc() >= pd.Timestamp(expected_end).tz_convert("UTC") + INTRADAY_GRACE:
+            return _invalid_window(reason)
+        return None
+
+    origin = snapshot if snapshot is not None else (df.index[0] if not df.empty else None)
+    if df.empty or bm.empty:
+        return not_ready("no_bars_after_snapshot", None if origin is None else origin + span)
+    common = df.index.intersection(bm.index)
+    if common.empty:
+        return not_ready("no_common_bars", df.index[0] + span)
+    anchor = common[0]
+    if anchor - df.index[0] > tolerance:
+        return _invalid_window("entry_bar_not_aligned")
+    end_target = anchor + span
+    exits = common[(common >= end_target - tolerance) & (common <= end_target)]
+    if exits.empty:
+        if df.index[-1] < end_target or bm.index[-1] < end_target:
+            return not_ready("window_not_covered", end_target)
+        return _invalid_window("exit_bar_missing")
+    exit_at = exits[-1]
+    window = df.loc[anchor:exit_at]
+    bwindow = bm.loc[anchor:exit_at]
+    expected = int(round((exit_at - anchor).total_seconds() / 60)) + 1
+    coverage = min(len(window), len(bwindow)) / max(expected, 1)
+    if coverage < MIN_BAR_COVERAGE:
+        return _invalid_window("insufficient_bar_coverage")
+    out = _window_payload(window, bwindow, decision, stamp_format=None)
+    out["bar_coverage"] = round(coverage, 4)
+    return out
+
+
+def _daily_bars(frame: pd.DataFrame | None, start: pd.Timestamp) -> pd.DataFrame:
+    """일봉을 tz 제거·날짜 정규화(벽시계 날짜 보존)한 뒤 start 이후만."""
+    out = _clean_bars(frame)
+    if out.empty:
+        return out
+    idx = out.index
+    if idx.tz is not None:
+        idx = idx.tz_localize(None)
+    out.index = idx.normalize()
+    out = out[~out.index.duplicated(keep="last")]
+    return out[out.index >= start]
+
+
 def _default_price_result(decision: dict, horizon: int | str) -> dict | None:
-    """결정일 이후 market-aware horizon 수익률/경로 결과 계산."""
+    """결정일 이후 market-aware horizon 수익률/경로 결과 계산.
+
+    종목·벤치마크 관측일의 합집합을 거래일 시계로 쓰고 같은 시작일/종료일(시계상 horizon
+    거래일 뒤)로만 비교한다. 데이터가 아직 그 날까지 없으면 pending, 한쪽이 그 날 이후
+    관측은 있는데 시작/종료일 봉이 없으면(거래정지·결측) invalid, coverage 부족도 invalid.
+    """
     if _intraday_steps(horizon) is not None:
         return _default_intraday_result(decision, horizon)
     from ml.data_pipeline import fetch_prices
@@ -514,56 +606,31 @@ def _default_price_result(decision: dict, horizon: int | str) -> dict | None:
         return None
     steps = _swing_steps(horizon)
     prices = fetch_prices([ticker, benchmark], days=max(756, steps * 4 + 80))
-    df = prices.get(ticker)
-    bm = prices.get(benchmark)
-    if df is None or bm is None or len(df) <= steps or len(bm) <= steps:
-        return None
-
-    start = pd.Timestamp(decision.get("date"))
-    df = df.sort_index()
-    bm = bm.sort_index()
-    fut = df[df.index >= start]
-    bfut = bm[bm.index >= start]
-    if len(fut) <= steps or len(bfut) <= steps:
-        return None
-
-    window = fut.iloc[:steps + 1]
-    bwindow = bfut.iloc[:steps + 1]
-    entry = float(window["Close"].iloc[0])
-    exit_ = float(window["Close"].iloc[-1])
-    bentry = float(bwindow["Close"].iloc[0])
-    bexit = float(bwindow["Close"].iloc[-1])
-    target = decision.get("target_price")
-    stop = decision.get("stop_price")
     try:
-        target = float(target) if target is not None else None
-        stop = float(stop) if stop is not None else None
-    except Exception:
-        target, stop = None, None
-    path_result, path_date, path_price, time_to_target, time_to_stop = _first_touch_details(
-        window, target, stop
-    )
-    return {
-        "entry_date": pd.Timestamp(window.index[0]).strftime("%Y-%m-%d"),
-        "exit_date": pd.Timestamp(window.index[-1]).strftime("%Y-%m-%d"),
-        "entry_price_actual": entry,
-        "exit_price": exit_,
-        "benchmark_entry": bentry,
-        "benchmark_exit": bexit,
-        "stock_ret": exit_ / entry - 1.0 if entry > 0 else 0.0,
-        "benchmark_ret": bexit / bentry - 1.0 if bentry > 0 else 0.0,
-        "fwd_mdd": _max_drawdown([float(x) for x in window["Close"].tolist()]),
-        "idx_fwd_mdd": _max_drawdown([float(x) for x in bwindow["Close"].tolist()]),
-        "mfe": max(float(x) for x in window["Close"].tolist()) / entry - 1.0 if entry > 0 else 0.0,
-        "mae": min(float(x) for x in window["Close"].tolist()) / entry - 1.0 if entry > 0 else 0.0,
-        "path_result": path_result,
-        "path_date": path_date,
-        "path_price": path_price,
-        "time_to_target": time_to_target,
-        "time_to_stop": time_to_stop,
-        "time_to_target_minutes": time_to_target,
-        "time_to_stop_minutes": time_to_stop,
-    }
+        start = pd.Timestamp(str(decision.get("date") or "")[:10])
+    except (TypeError, ValueError):
+        return None
+    df = _daily_bars(prices.get(ticker), start)
+    bm = _daily_bars(prices.get(benchmark), start)
+    if df.empty or bm.empty:
+        return None
+    calendar = df.index.union(bm.index)
+    if len(calendar) <= steps:
+        return None
+    anchor, end = calendar[0], calendar[steps]
+    for frame in (df, bm):
+        if anchor not in frame.index:
+            return _invalid_window("start_bar_missing")
+        if end not in frame.index:
+            return None if frame.index[-1] < end else _invalid_window("end_bar_missing")
+    window = df.loc[anchor:end]
+    bwindow = bm.loc[anchor:end]
+    coverage = min(len(window), len(bwindow)) / (steps + 1)
+    if coverage < MIN_BAR_COVERAGE:
+        return _invalid_window("insufficient_bar_coverage")
+    out = _window_payload(window, bwindow, decision, stamp_format="%Y-%m-%d")
+    out["bar_coverage"] = round(coverage, 4)
+    return out
 
 
 def _diagnose(decision: dict, outcome: dict) -> tuple[str, list[str], str]:
@@ -631,17 +698,18 @@ def build_outcome(decision: dict, horizon: int | str, result: dict) -> dict:
             "horizon": _horizon_value(horizon), "status": "pending",
             "quality_reason": (result or {}).get("status") if isinstance(result, dict) else "missing_price_data",
         }
-    invalid = _invalid_outcome_fields(result, returns=("stock_ret", "benchmark_ret"))
-    if result.get("status") == "invalid":
+    window_reason = result.get("quality_reason") if result.get("status") == "invalid" else None
+    invalid = [] if window_reason else _invalid_outcome_fields(result, returns=("stock_ret", "benchmark_ret"))
+    if result.get("status") == "invalid" and not window_reason:
         invalid.append("status")
-    if invalid:
+    if invalid or window_reason:
         return finite_json_value({
             **result, "decision_id": _outcome_id(decision.get("id", "unknown"), horizon),
             "base_decision_id": decision.get("id"), "ticker": decision.get("ticker"),
             "horizon": _horizon_value(horizon), "status": "invalid", "success": None,
             "fwd_ret": result.get("stock_ret"), "fwd_excess": None,
-            "quality_reason": "invalid_fields:" + ",".join(invalid),
-            "diagnosis": "invalid_price_or_path_data",
+            "quality_reason": window_reason or "invalid_fields:" + ",".join(invalid),
+            "diagnosis": "invalid_outcome_window" if window_reason else "invalid_price_or_path_data",
         })
     stock_ret = float(result["stock_ret"])
     bench_ret = float(result["benchmark_ret"])
@@ -996,36 +1064,108 @@ def apply_score_adjustment(base_score: float, context: dict, *,
     return round(_clamp(_as_float(base_score) + adj, 0.0, 1.0), 4), round(adj, 4), tags
 
 
+_DECISION_TIME_KEYS = ("decision_ts", "snapshot_ts", "date", "asof_date")
+_OUTCOME_AVAILABLE_KEYS = ("available_at", "outcome_available_at", "matured_at", "exit_date")
+
+
+def _utc_value(value, *, end_of_day: bool = False):
+    from ml.purged_split import utc_timestamp
+
+    text = str(value or "").strip()
+    if text.endswith(" KST"):
+        stamp = _parse_snapshot_timestamp(text)
+        return None if stamp is None else utc_timestamp(stamp.to_pydatetime())
+    return utc_timestamp(text, end_of_day=end_of_day)
+
+
+def _decision_time(row: dict):
+    """결정 시각(UTC). 첫 번째로 존재하는 키가 결정 — 해석 불가면 None(추정 금지)."""
+    for key in _DECISION_TIME_KEYS:
+        if row.get(key) is not None:
+            return _utc_value(row.get(key))
+    return None
+
+
+def _outcome_available_time(row: dict):
+    """라벨이 실제로 알려진 시각(UTC) = exit/성숙/가용 시각 중 가장 늦은 값. 없거나 해석 불가면 None."""
+    values = [row.get(key) for key in _OUTCOME_AVAILABLE_KEYS if row.get(key) is not None]
+    if not values:
+        return None
+    parsed = [_utc_value(value, end_of_day=True) for value in values]
+    if any(stamp is None for stamp in parsed):
+        return None
+    return max(parsed)
+
+
 def learn_feedback_adjustments(rows: list[dict] | None = None, *,
                                horizon: int = 20,
                                save: bool = True,
                                path: Path | str | None = None) -> dict:
-    """사후 성과를 이용해 조건별 점수 보정치를 학습하고, 검증 통과 시 저장."""
+    """사후 성과를 이용해 조건별 점수 보정치를 학습하고, 검증 통과 시 저장.
+
+    train/OOS 경계는 결정일 단위(같은 날 다종목이 양쪽에 걸치지 않음)이며, train 라벨의
+    이용가능 시각(exit/성숙)이 첫 OOS 결정 시각 이전인 행만 학습한다(ml.purged_split).
+    """
+    from ml.purged_split import purged_day_holdout_split
+
     rows = list(rows if rows is not None else training_rows(horizon=horizon))
     rows = [r for r in rows if r.get("r_multiple") is not None]
-    rows.sort(key=lambda r: (str(r.get("date") or ""), str(r.get("ticker") or "")))
+    # (결정일, 결정시각 UTC, 행) — 결정일은 원장의 거래일(date), 없으면 UTC 날짜.
+    timed = []
+    for row in rows:
+        decided = _decision_time(row)
+        if decided is not None:
+            day = str(row.get("date") or "")[:10] or decided.date().isoformat()
+            timed.append((day, decided, row))
+    excluded_n = len(rows) - len(timed)
+    timed.sort(key=lambda item: (item[1], str(item[2].get("ticker") or "")))
+    rows = [row for _, _, row in timed]
     if len(rows) < MIN_ADJUST_SAMPLES:
         return {
             "adopted": False,
             "reason": f"표본 부족({len(rows)}/{MIN_ADJUST_SAMPLES})",
             "horizon": horizon,
             "n": len(rows),
+            "excluded_n": excluded_n,
             "adjustments": {},
         }
 
     split = max(MIN_FACTOR_SAMPLES, int(len(rows) * 0.6))
     if len(rows) - split < max(5, MIN_FACTOR_SAMPLES // 2):
         split = max(1, len(rows) // 2)
-    train = rows[:split]
-    oos = rows[split:]
+    train_t, oos_t, purged_t = purged_day_holdout_split(
+        timed, holdout_size=len(rows) - split,
+        day_of=lambda item: item[0],
+        decision_at=lambda item: item[1],
+        available_at=lambda item: _outcome_available_time(item[2]),
+    )
+    train = [row for _, _, row in train_t]
+    oos = [row for _, _, row in oos_t]
+    split_meta = {
+        "horizon": horizon,
+        "n": len(rows),
+        "train_n": len(train),
+        "oos_n": len(oos),
+        "purged_n": len(purged_t),
+        "excluded_n": excluded_n,
+        "train_last_date": max((day for day, _, _ in train_t), default=None),
+        "oos_first_date": min((day for day, _, _ in oos_t), default=None),
+        "oos_start_at": min((decided for _, decided, _ in oos_t), default=None),
+    }
+    if split_meta["oos_start_at"] is not None:
+        split_meta["oos_start_at"] = split_meta["oos_start_at"].isoformat()
     if len(oos) < MIN_OOS_SAMPLES:
         return {
             "adopted": False,
             "reason": f"OOS 표본 부족({len(oos)}/{MIN_OOS_SAMPLES})",
-            "horizon": horizon,
-            "n": len(rows),
-            "train_n": len(train),
-            "oos_n": len(oos),
+            **split_meta,
+            "adjustments": {},
+        }
+    if len(train) < MIN_FACTOR_SAMPLES:
+        return {
+            "adopted": False,
+            "reason": f"purge 후 학습 표본 부족({len(train)}/{MIN_FACTOR_SAMPLES})",
+            **split_meta,
             "adjustments": {},
         }
     adjustments = _fit_factor_adjustments(train)
@@ -1033,10 +1173,7 @@ def learn_feedback_adjustments(rows: list[dict] | None = None, *,
         return {
             "adopted": False,
             "reason": "유효한 조건별 보정치 없음",
-            "horizon": horizon,
-            "n": len(rows),
-            "train_n": len(train),
-            "oos_n": len(oos),
+            **split_meta,
             "adjustments": {},
         }
 
@@ -1072,10 +1209,7 @@ def learn_feedback_adjustments(rows: list[dict] | None = None, *,
     result = {
         "adopted": bool(adopted),
         "reason": "검증 통과" if adopted else "검증 구간에서 기존 점수 대비 개선 부족",
-        "horizon": horizon,
-        "n": len(rows),
-        "train_n": len(train),
-        "oos_n": len(oos),
+        **split_meta,
         "threshold": round(threshold, 4),
         "adjustments": adjustments,
         "champion": champion,
@@ -1094,6 +1228,9 @@ def learn_feedback_adjustments(rows: list[dict] | None = None, *,
                 "n": len(rows),
                 "train_n": len(train),
                 "oos_n": len(oos),
+                "purged_n": split_meta["purged_n"],
+                "train_last_date": split_meta["train_last_date"],
+                "oos_first_date": split_meta["oos_first_date"],
                 "threshold": round(threshold, 4),
                 "champion": champion,
                 "challenger": challenger,

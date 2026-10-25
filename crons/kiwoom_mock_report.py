@@ -496,6 +496,9 @@ def build_report(html: bool = False, detail: bool | None = None) -> str:
         lines.extend(_detail_block("🧠 LLM 판단근거", llm_rationale.format_section(llm_result)[1:], html=html))
     else:
         logger.info("KR mock LLM rationale skipped: %s", llm_status)
+        fallback = llm_rationale.fallback_section(llm_status)
+        if fallback:
+            lines.extend(_detail_block("🧠 LLM 판단근거", fallback[1:], html=html))
 
     lines.append(fmt.sep())
     lines.append("⚠️ 모의투자 — 실거래 아님")

@@ -348,15 +348,21 @@ def test_build_outcome_marks_target_success():
     assert "pivot_confirmed" in out["factor_tags"]
 
 
-def _training_row(i: int, *, confirmed: bool) -> dict:
+def _training_row(i: int, *, confirmed: bool, bad_score: float = 0.75, label_days: int = 1) -> dict:
+    """i일차(2026-01-01+i) 결정. 라벨은 label_days 뒤 exit·성숙(이용가능)."""
+    day = pd.Timestamp("2026-01-01") + pd.Timedelta(days=i)
+    available = (day + pd.Timedelta(days=label_days)).strftime("%Y-%m-%d")
+    name = f"{'GOOD' if confirmed else 'BAD'}{i}"
     return {
-        "id": f"2026-01-{(i % 28) + 1:02d}:test:watch:{'GOOD' if confirmed else 'BAD'}{i}",
-        "date": f"2026-01-{(i % 28) + 1:02d}",
-        "ticker": f"{'GOOD' if confirmed else 'BAD'}{i}",
+        "id": f"{day:%Y-%m-%d}:test:watch:{name}",
+        "date": f"{day:%Y-%m-%d}",
+        "ticker": name,
         "signal": "enter",
-        "score": 0.70 if confirmed else 0.75,
+        "score": 0.70 if confirmed else bad_score,
         "success": confirmed,
         "r_multiple": 1.5 if confirmed else -1.0,
+        "exit_date": available,
+        "matured_at": available,
         "features": {
             "technical_rating": "🟢 매수" if confirmed else "🔴 매도",
             "pivot_position": "above_p" if confirmed else "below_p",
@@ -372,10 +378,18 @@ def _training_row(i: int, *, confirmed: bool) -> dict:
     }
 
 
-def test_learn_feedback_adjustments_adopts_validated_model(tmp_path):
+@pytest.fixture
+def enter_threshold(monkeypatch):
+    import ml.entry_analyzer as analyzer
+    monkeypatch.setattr(analyzer, "get_score_params", lambda: {"enter_threshold": 0.62})
+    return 0.62
+
+
+def test_learn_feedback_adjustments_adopts_validated_model(tmp_path, enter_threshold):
+    """실패 그룹 점수 .68 → 학습 보정(-0.08 cap)이 진입 문턱 .62 를 넘겨 실패 그룹을 걸러낸다."""
     rows = []
     for i in range(20):
-        rows.append(_training_row(i, confirmed=False))
+        rows.append(_training_row(i, confirmed=False, bad_score=0.68))
         rows.append(_training_row(i, confirmed=True))
 
     model_path = tmp_path / "entry_feedback_adjustments.json"
@@ -385,10 +399,180 @@ def test_learn_feedback_adjustments_adopts_validated_model(tmp_path):
     assert result["adjustments"]["technical_conflict"] < 0
     assert result["adjustments"]["technical_confirmed"] > 0
     assert result["challenger"]["excess"] > result["champion"]["excess"]
+    assert result["train_last_date"] < result["oos_first_date"]
 
     saved = json.loads(model_path.read_text())
     assert saved["adjustments"]["technical_conflict"] < 0
     assert saved["meta"]["oos_n"] == result["oos_n"]
+    assert saved["meta"]["purged_n"] == result["purged_n"]
+
+
+def test_learn_feedback_adjustments_holds_when_capped_adjustment_cannot_change_selection(
+        tmp_path, enter_threshold):
+    """실패 그룹 .75 − 총보정 cap .08 = .67 ≥ .62 → 선택 불변 → 동률은 채택 거부(생산 규칙 유지)."""
+    rows = []
+    for i in range(20):
+        rows.append(_training_row(i, confirmed=False))
+        rows.append(_training_row(i, confirmed=True))
+
+    model_path = tmp_path / "entry_feedback_adjustments.json"
+    result = F.learn_feedback_adjustments(rows=rows, save=True, path=model_path)
+
+    assert result["adjustments"]["technical_conflict"] < 0
+    assert result["challenger"] == result["champion"]
+    assert result["adopted"] is False
+    assert "개선 부족" in result["reason"]
+    assert not model_path.exists()
+
+
+def test_learn_feedback_split_uses_whole_days_and_purges_unavailable_labels(monkeypatch, enter_threshold):
+    """A-fix-learn: 같은 날 다종목·20일 중첩 라벨·뒤늦게 성숙한 라벨·가용시각 없는 라벨."""
+    rows = []
+    for i in range(40):
+        rows.append(_training_row(i, confirmed=True, label_days=3))
+        rows.append(_training_row(i, confirmed=False, label_days=20))
+    late = _training_row(0, confirmed=True, label_days=3)
+    late.update(ticker="LATE", id="2026-01-01:test:watch:LATE", matured_at="2026-03-31")
+    unknown = _training_row(1, confirmed=True)
+    unknown.update(ticker="UNKNOWN", id="2026-01-02:test:watch:UNKNOWN")
+    del unknown["exit_date"], unknown["matured_at"]
+    rows += [late, unknown]
+    seen = {}
+
+    def capture(train):
+        seen["train"] = list(train)
+        return {}
+    monkeypatch.setattr(F, "_fit_factor_adjustments", capture)
+
+    result = F.learn_feedback_adjustments(rows=rows, save=False)
+
+    train = seen["train"]
+    # 경계는 결정일 단위: 학습 행의 날짜는 모두 첫 OOS 결정일 이전(같은 날이 양쪽에 걸치지 않음)
+    assert result["train_last_date"] < result["oos_first_date"]
+    assert all(r["date"] < result["oos_first_date"] for r in train)
+    oos_start = pd.Timestamp(result["oos_start_at"])
+    for row in train:
+        available = pd.Timestamp(max(row["exit_date"], row["matured_at"])) + pd.Timedelta(days=1)
+        assert available.tz_localize("UTC") <= oos_start          # 가용(그날 끝) ≤ 첫 OOS 결정
+    tickers = {r["ticker"] for r in train}
+    assert "LATE" not in tickers and "UNKNOWN" not in tickers
+    assert result["purged_n"] >= 2
+    assert result["train_n"] + result["oos_n"] + result["purged_n"] == len(rows)
+
+
+def _minute_frame(start: str, periods: int, step_min: int, close_fn, tz="Asia/Seoul") -> pd.DataFrame:
+    index = pd.date_range(start, periods=periods, freq=f"{step_min}min", tz=tz)
+    closes = [close_fn(i * step_min) for i in range(periods)]
+    return pd.DataFrame({"Open": closes, "High": closes, "Low": closes, "Close": closes,
+                         "Volume": [1000] * periods}, index=index)
+
+
+_SHORT_DECISION = {"ticker": "PLTR", "benchmark": "QQQ", "market": "US", "date": "2026-08-31",
+                   "snapshot_ts": "2026-08-31T09:30:00+09:00", "target_price": 1e9, "stop_price": 1.0}
+
+
+def test_intraday_outcome_uses_same_exit_time_for_stock_and_benchmark(monkeypatch):
+    """A-fix-learn: 벤치마크가 2분 간격이어도 30분 창은 양쪽 모두 09:30→10:00."""
+    stock = _minute_frame("2026-08-31 09:30", 71, 1, lambda m: 100.0 + 0.01 * m)
+    bench = _minute_frame("2026-08-31 09:30", 36, 2, lambda m: 100.0 + 0.02 * m)
+    monkeypatch.setattr(F, "_intraday_frame",
+                        lambda symbol, date, *, market: stock if symbol == "PLTR" else bench)
+
+    result = F._default_intraday_result(dict(_SHORT_DECISION), "30m")
+
+    assert result["exit_date"].startswith("2026-08-31T10:00")
+    assert result["benchmark_exit_date"].startswith("2026-08-31T10:00")
+    assert result["stock_ret"] == pytest.approx(0.3 / 100.0)
+    assert result["benchmark_ret"] == pytest.approx(0.6 / 100.0)     # 60분 벤치(1.2%) 아님
+
+
+def test_intraday_outcome_with_stock_gap_is_not_stretched_to_longer_horizon(monkeypatch):
+    """종목 봉이 09:40 이후 10:30 까지 비면 30분 창을 봉 31개로 세어 60분+로 늘리지 않는다."""
+    full = _minute_frame("2026-08-31 09:30", 91, 1, lambda m: 100.0 + 0.01 * m)
+    gap = (full.index <= pd.Timestamp("2026-08-31 09:40+09:00")) | (
+        full.index >= pd.Timestamp("2026-08-31 10:30+09:00"))
+    stock = full[gap]
+    monkeypatch.setattr(F, "_intraday_frame",
+                        lambda symbol, date, *, market: stock if symbol == "PLTR" else full)
+
+    result = F._default_intraday_result(dict(_SHORT_DECISION), "30m")
+
+    assert result["status"] == "invalid" and result["quality_reason"] == "exit_bar_missing"
+    decision = {**_SHORT_DECISION, "id": "d-gap"}
+    outcome = F.build_outcome(decision, "30m", result)
+    assert outcome["status"] == "invalid" and outcome["quality_reason"] == "exit_bar_missing"
+
+
+def test_intraday_outcome_pending_until_window_covered_then_invalid(monkeypatch):
+    stock = _minute_frame("2026-08-31 09:30", 21, 1, lambda m: 100.0)     # 09:50 까지만
+    monkeypatch.setattr(F, "_intraday_frame", lambda symbol, date, *, market: stock)
+
+    monkeypatch.setattr(F, "_now_utc", lambda: pd.Timestamp("2026-08-31T01:00:00Z"))
+    assert F._default_intraday_result(dict(_SHORT_DECISION), "30m") is None
+
+    monkeypatch.setattr(F, "_now_utc", lambda: pd.Timestamp("2026-09-02T01:00:00Z"))
+    late = F._default_intraday_result(dict(_SHORT_DECISION), "30m")
+    assert late["status"] == "invalid" and late["quality_reason"] == "window_not_covered"
+
+
+def _daily_frame(dates, close_fn) -> pd.DataFrame:
+    index = pd.DatetimeIndex(pd.to_datetime(dates))
+    closes = [close_fn(i) for i in range(len(index))]
+    return pd.DataFrame({"Open": closes, "High": closes, "Low": closes, "Close": closes,
+                         "Volume": [1000] * len(index)}, index=index)
+
+
+def _patch_daily(monkeypatch, stock, bench):
+    monkeypatch.setattr("ml.data_pipeline.fetch_prices",
+                        lambda tickers, days: {"PLTR": stock, "QQQ": bench})
+
+
+_DAILY_DECISION = {"ticker": "PLTR", "benchmark": "QQQ", "market": "US", "date": "2026-08-03"}
+
+
+def test_daily_outcome_compares_same_trading_days_when_stock_has_mid_window_gap(monkeypatch):
+    days = pd.bdate_range("2026-08-03", periods=30)
+    bench = _daily_frame(days, lambda i: 100.0 + i)
+    stock_days = [d for k, d in enumerate(days) if k not in (3, 4)]      # 2일 거래정지(창 중간)
+    stock = _daily_frame(stock_days, lambda i: 50.0 + i)
+    _patch_daily(monkeypatch, stock, bench)
+
+    result = F._default_price_result(dict(_DAILY_DECISION), "5d")
+
+    assert result["entry_date"] == result["benchmark_entry_date"] == "2026-08-03"
+    assert result["exit_date"] == result["benchmark_exit_date"] == days[5].strftime("%Y-%m-%d")
+    assert result["benchmark_ret"] == pytest.approx(105.0 / 100.0 - 1.0)
+
+
+def test_daily_outcome_halted_on_exit_day_is_invalid(monkeypatch):
+    days = pd.bdate_range("2026-08-03", periods=30)
+    bench = _daily_frame(days, lambda i: 100.0 + i)
+    stock = _daily_frame([d for k, d in enumerate(days) if k != 5], lambda i: 50.0 + i)
+    _patch_daily(monkeypatch, stock, bench)
+
+    result = F._default_price_result(dict(_DAILY_DECISION), "5d")
+
+    assert result["status"] == "invalid" and result["quality_reason"] == "end_bar_missing"
+
+
+def test_daily_outcome_with_different_start_day_is_invalid(monkeypatch):
+    days = pd.bdate_range("2026-08-03", periods=30)
+    bench = _daily_frame(days, lambda i: 100.0 + i)
+    stock = _daily_frame(days[2:], lambda i: 50.0 + i)                  # 결정일 이후 이틀 늦게 시작
+    _patch_daily(monkeypatch, stock, bench)
+
+    result = F._default_price_result(dict(_DAILY_DECISION), "5d")
+
+    assert result["status"] == "invalid" and result["quality_reason"] == "start_bar_missing"
+
+
+def test_daily_outcome_pending_while_stock_data_lags(monkeypatch):
+    days = pd.bdate_range("2026-08-03", periods=30)
+    bench = _daily_frame(days, lambda i: 100.0 + i)
+    stock = _daily_frame(days[:4], lambda i: 50.0 + i)                  # 아직 종료일 데이터 없음
+    _patch_daily(monkeypatch, stock, bench)
+
+    assert F._default_price_result(dict(_DAILY_DECISION), "5d") is None
 
 
 def test_apply_score_adjustment_uses_saved_model(tmp_path):

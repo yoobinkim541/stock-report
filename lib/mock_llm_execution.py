@@ -6,13 +6,20 @@ The default is shadow measurement: ask for an order-level review, keep the
 deterministic rebalance plan unchanged, and later score whether the suggested
 intervention would have helped.  Actual order modification is only available
 behind an explicit guarded_apply mode and only for risk-reducing buy changes.
+
+Reviews are keyed by ``(symbol, side)`` so a review can only touch the order it
+names.  Failure policy differs by mode: shadow keeps the plan as-is, while
+guarded_apply holds every buy without a validated review (call failure, guard
+rejection, missing review) and lets sells proceed; that fallback is reported by
+``review_execution_record``/``fallback_note``.
 """
 from __future__ import annotations
 
 import json
 import os
-import subprocess
 from datetime import datetime, timedelta, timezone
+
+from lib import llm_cli
 
 KST = timezone(timedelta(hours=9))
 ALLOWED_ACTIONS = {"allow", "block", "reduce_half"}
@@ -139,6 +146,8 @@ def build_order_review_prompt(payload: dict) -> str:
     return (
         "한국어 모의투자 주문 리밸런싱 검토자. 입력 JSON 안의 숫자·종목·주문만 사용한다.\n"
         "새 주문을 만들지 않는다. orders에 있는 주문별로만 allow/block/reduce_half 중 하나를 판단한다.\n"
+        "orders의 주문마다 review를 정확히 하나씩 반환한다. order_side는 원주문 side 그대로 쓰고, "
+        "reason(문자열)과 confidence(0~100 숫자)를 반드시 채운다. 누락·불일치 응답은 전부 폐기된다.\n"
         "목표는 성과 개선 가능성을 사후 측정하기 위한 shadow 리뷰다. 기본은 주문 변경이 아니라 기록이다.\n"
         "block/reduce_half는 과대회전, 급등추격, 현금부족, 낮은 확신, 실적/이벤트 전 추가매수 같은 경우에만 쓴다.\n"
         "매도 주문을 막는 판단은 매우 보수적으로만 제안한다. 입력에 없는 뉴스/전망/숫자를 만들지 않는다.\n"
@@ -160,40 +169,64 @@ def _extract_json_object(text: str) -> dict:
     return json.loads(text[start:end + 1])
 
 
-def validate_reviews(raw: dict, allowed_symbols: set[str]) -> dict[str, dict]:
+def review_key(symbol, side) -> tuple[str, str]:
+    return str(symbol or "").upper(), str(side or "").lower()
+
+
+def _order_key(order: dict) -> tuple[str, str]:
+    return review_key(_symbol(order), order.get("side"))
+
+
+def validate_reviews(raw: dict, allowed_keys: set[tuple[str, str]]) -> dict[tuple[str, str], dict]:
+    """LLM 응답을 주문 허용키 `(symbol, side)` 기준으로 검증한다.
+
+    하나라도 어긋나면(미지 종목·side 불일치·중복·필수 필드 누락/타입 오류) 전체를 거부한다.
+    부분 승인은 하지 않는다 — 거부된 응답은 적용 전 단계에서 빈 review 로 취급된다.
+    """
     if not isinstance(raw, dict):
         raise ValueError("output must be object")
     reviews = raw.get("reviews")
     if not isinstance(reviews, list):
         raise ValueError("reviews must be list")
-    out = {}
+    allowed_symbols = {sym for sym, _ in allowed_keys}
+    out: dict[tuple[str, str], dict] = {}
     for item in reviews:
         if not isinstance(item, dict):
-            continue
+            raise ValueError("review item must be object")
         symbol = str(item.get("symbol") or "").upper()
         if symbol not in allowed_symbols:
             raise ValueError(f"unknown symbol: {symbol}")
-        action = item.get("order_action")
-        if action not in ALLOWED_ACTIONS:
-            raise ValueError(f"invalid order_action for {symbol}: {action}")
         side = item.get("order_side")
         if side not in ("buy", "sell"):
             raise ValueError(f"invalid order_side for {symbol}: {side}")
-        try:
-            confidence = int(max(0, min(100, float(item.get("confidence", 50)))))
-        except (TypeError, ValueError):
-            confidence = 50
-        out[symbol] = {
+        key = review_key(symbol, side)
+        if key not in allowed_keys:
+            raise ValueError(f"order_side mismatch for {symbol}: {side}")
+        if key in out:
+            raise ValueError(f"duplicate review for {symbol} {side}")
+        action = item.get("order_action")
+        if action not in ALLOWED_ACTIONS:
+            raise ValueError(f"invalid order_action for {symbol}: {action}")
+        reason = item.get("reason")
+        if not isinstance(reason, str) or not reason.strip():
+            raise ValueError(f"missing reason for {symbol} {side}")
+        confidence = item.get("confidence")
+        if (isinstance(confidence, bool) or not isinstance(confidence, (int, float))
+                or not 0 <= confidence <= 100):
+            raise ValueError(f"invalid confidence for {symbol} {side}: {confidence}")
+        out[key] = {
             "symbol": symbol,
             "order_side": side,
             "order_action": action,
-            "reason": _compact(item.get("reason"), 100),
-            "confidence": confidence,
+            "reason": _compact(reason, 100),
+            "confidence": int(confidence),
         }
     return out
 
 
-def run_order_review(payload: dict, *, runner=subprocess.run) -> tuple[dict[str, dict], str]:
+def run_order_review(payload: dict, *, runner=llm_cli.run_cli) -> tuple[dict[tuple[str, str], dict], str]:
+    """주문 검토 실행. status 는 "ok"(전 주문 검토)·"partial: k/n reviewed"·"disabled"·
+    "no orders"·"call failed: …"·"guard rejected: …" 중 하나."""
     if not _env_bool("MOCK_ORDER_LLM_ENABLED", "1"):
         return {}, "disabled"
     if not payload.get("orders"):
@@ -221,30 +254,53 @@ def run_order_review(payload: dict, *, runner=subprocess.run) -> tuple[dict[str,
         return {}, f"call failed: {_compact(exc, 80)}"
     if getattr(result, "returncode", 1) != 0:
         return {}, f"call failed: {_compact(getattr(result, 'stderr', 'non-zero exit'), 80)}"
+    allowed = {_order_key(o) for o in payload.get("orders", []) if _symbol(o)}
     try:
-        allowed = {_symbol(o) for o in payload.get("orders", []) if _symbol(o)}
-        return validate_reviews(_extract_json_object(getattr(result, "stdout", "") or ""), allowed), "ok"
+        reviews = validate_reviews(_extract_json_object(getattr(result, "stdout", "") or ""), allowed)
     except Exception as exc:
         return {}, f"guard rejected: {_compact(exc, 80)}"
+    if len(reviews) < len(allowed):
+        return reviews, f"partial: {len(reviews)}/{len(allowed)} reviewed"
+    return reviews, "ok"
 
 
-def apply_reviews(plan: list[dict], reviews: dict[str, dict],
-                  *, apply_mode: str | None = None) -> tuple[list[dict], list[dict]]:
+def apply_reviews(plan: list[dict], reviews: dict[tuple[str, str], dict],
+                  *, apply_mode: str | None = None,
+                  review_status: str = "ok") -> tuple[list[dict], list[dict]]:
+    """review 를 계획에 적용한다.
+
+    shadow: 원계획 그대로(적용 없음).
+    guarded_apply: `(symbol, side)` 가 일치하는 검증된 review 로만 매수를 block/reduce_half.
+    검증된 review 가 없는 주문(호출 실패·guard 거부·응답 누락·부분 응답)은 fail-closed —
+    매수는 보류(`hold_unreviewed`), 매도는 진행(`unreviewed_sell`)하고 둘 다 applied 에
+    기록한다. 운영자가 LLM 검토를 끈 경우(review_status="disabled")만 원계획을 유지한다.
+    """
     apply_mode = apply_mode or mode()
-    if apply_mode != "guarded_apply":
+    if apply_mode != "guarded_apply" or review_status == "disabled":
         return list(plan), []
     new_plan = []
     applied = []
     for order in plan:
         symbol = _symbol(order)
-        review = reviews.get(symbol)
-        action = (review or {}).get("order_action")
+        side = order.get("side")
+        review = reviews.get(_order_key(order))
+        if review is None:
+            fallback = {**order, "symbol": symbol, "llm_status": review_status}
+            if side == "buy":
+                applied.append({**fallback, "llm_applied": "hold_unreviewed",
+                                "llm_reason": f"LLM 검토 없음({_compact(review_status, 60)}) — 미검증 매수 보류"})
+                continue
+            applied.append({**fallback, "llm_applied": "unreviewed_sell",
+                            "llm_reason": f"LLM 검토 없음({_compact(review_status, 60)}) — 매도는 진행"})
+            new_plan.append(order)
+            continue
+        action = review.get("order_action")
         # Guarded apply is intentionally narrow: only reduce/block buy orders.
-        if order.get("side") == "buy" and action == "block":
+        if side == "buy" and action == "block":
             applied.append({**order, "symbol": symbol, "llm_applied": "block",
                             "llm_reason": review.get("reason")})
             continue
-        if order.get("side") == "buy" and action == "reduce_half":
+        if side == "buy" and action == "reduce_half":
             qty = int(order.get("qty", 0) or 0) // 2
             applied.append({**order, "symbol": symbol, "llm_applied": "reduce_half",
                             "llm_reason": review.get("reason"), "new_qty": qty})
@@ -255,13 +311,50 @@ def apply_reviews(plan: list[dict], reviews: dict[str, dict],
     return new_plan, applied
 
 
+def review_execution_record(*, apply_mode: str, review_status: str,
+                            applied: list[dict]) -> dict | None:
+    """실행 원장(`<market>_mock_history`)에 남길 주문검토 결과 1건. 주문이 없으면 None.
+
+    최상위에 side/code/ticker 를 두지 않는다(원장 리더가 주문 행으로 오인하지 않게).
+    """
+    if review_status == "no orders":
+        return None
+
+    def _rows(action):
+        return [{"symbol": a.get("symbol"), "side": a.get("side"), "qty": a.get("qty"),
+                 **({"new_qty": a.get("new_qty")} if "new_qty" in a else {})}
+                for a in applied if a.get("llm_applied") == action]
+
+    held = _rows("hold_unreviewed")
+    unreviewed_sells = _rows("unreviewed_sell")
+    return {
+        "kind": "llm_order_review",
+        "mode": apply_mode,
+        "status": review_status,
+        "fallback": bool(held or unreviewed_sells),
+        "held_buys": held,
+        "unreviewed_sells": unreviewed_sells,
+        "llm_blocked": _rows("block"),
+        "llm_reduced": _rows("reduce_half"),
+    }
+
+
+def fallback_note(record: dict | None) -> str | None:
+    """알림/리포트용 fallback 한 줄. fallback 이 없으면 None."""
+    if not record or not record.get("fallback"):
+        return None
+    return (f"⚠️ LLM 주문검토 fallback({_compact(record.get('status'), 60)}) — "
+            f"미검증 매수 {len(record.get('held_buys') or [])}건 보류 · "
+            f"매도 {len(record.get('unreviewed_sells') or [])}건 검토 없이 진행")
+
+
 def log_shadow_reviews(ledger, *, market: str, date: str, plan: list[dict],
-                       reviews: dict[str, dict], signals_by: dict[str, dict],
+                       reviews: dict[tuple[str, str], dict], signals_by: dict[str, dict],
                        applied_mode: str = "shadow") -> int:
     added = 0
     for order in plan:
         symbol = _symbol(order)
-        review = reviews.get(symbol)
+        review = reviews.get(_order_key(order))
         if not review or review.get("order_action") == "allow":
             continue
         sig = signals_by.get(symbol, {})

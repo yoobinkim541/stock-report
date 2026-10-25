@@ -183,7 +183,26 @@ def test_eval_policy_basket_excess():
             {"side": "편입", "features": {"ranker": 0.1}, "fwd_excess": -0.03}]
     out = L.eval_policy(rows, us_policy.DEFAULT_POLICY, max_positions=2)
     assert out["excess"] == pytest.approx(0.035, abs=1e-3)   # 상위 2 평균
-    assert out["n"] == 3
+    assert out["n"] == 1                                      # 평가일 1개(후보 3행 ≠ 표본 3)
+    assert out["n_candidates"] == 3 and out["n_selected"] == 2
+
+
+def test_eval_policy_evaluates_every_date_and_excludes_sell_rows():
+    """A-fix-learn: 날짜별 top-K 가 모두 평가되고 매도측 행은 후보가 아니다."""
+    from ml import us_policy
+    rows = []
+    for day, top in (("2026-06-01", 0.04), ("2026-07-06", -0.02)):
+        for i, rank in enumerate((0.9, 0.8, 0.7, 0.6, 0.5, 0.4)):
+            rows.append({"side": "편입", "date": day, "ticker": f"A{i}", "features": {"ranker": rank},
+                         "fwd_excess": top if i < 2 else -0.5, "index_ret": 0.0})
+        rows.append({"side": "퇴출", "date": day, "ticker": "S", "features": {"ranker": 1.0},
+                     "fwd_excess": 9.9, "index_ret": 0.0})
+    out = L.eval_policy(rows, {"w_ranker": 1.0}, max_positions=2)
+    assert out["series"] == pytest.approx([0.04, -0.02])
+    assert out["excess"] == pytest.approx(0.01)
+    assert (out["n"], out["n_candidates"], out["n_selected"]) == (2, 12, 4)
+    assert out["n_independent"] == 2                          # 35일 간격 > 20거래일 근사(28일)
+    assert out["mdd"] == pytest.approx(0.02)                  # 1→1.04→1.0192
 
 
 def test_backfill_shadow_observation_is_treated_as_entry_side():

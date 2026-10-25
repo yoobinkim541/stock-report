@@ -87,6 +87,25 @@ def test_build_report_includes_llm_rationale_when_available(patched, monkeypatch
     assert "신뢰도 73/100" in txt
 
 
+def test_a_fix_exec_report_marks_quantitative_fallback_when_llm_rationale_rejected(patched, monkeypatch):
+    """A-09: 입력에 없는 종목코드/수치를 낸 LLM 근거는 게시되지 않고 정량 근거 fallback 이 표시된다."""
+    from types import SimpleNamespace
+
+    real_run = rpt.llm_rationale.run
+    fake_stdout = ('{"summary":"000660 상승 9999% 확정","position_notes":["000660 비중 확대"],'
+                   '"decision_notes":[],"risk_checks":[],"confidence":90}')
+    monkeypatch.setenv("MOCK_REPORT_LLM_ENABLED", "1")
+    monkeypatch.setattr(rpt.llm_rationale, "run", lambda payload: real_run(
+        payload, runner=lambda cmd, **kw: SimpleNamespace(returncode=0, stdout=fake_stdout, stderr="")))
+
+    txt = rpt.build_report(detail=True)
+
+    assert "🧠 LLM 판단근거" in txt
+    assert "정량 근거 fallback" in txt
+    assert "000660 상승" not in txt and "000660 비중 확대" not in txt
+    assert "신뢰도 90/100" not in txt
+
+
 def test_build_report_balance_failure(monkeypatch):
     monkeypatch.setattr(kiwoom_mock, "get_balance", lambda: {"ok": False, "positions": {},
                         "pos_value": 0, "cash_krw": None, "nav": None})

@@ -81,22 +81,28 @@ def expected_max_sharpe(n_trials: int, sr_variance: float) -> float:
 
 
 def deflated_sharpe_ratio(returns, n_trials: int, sr_variance: float | None = None,
-                          trial_sharpes=None) -> float | None:
+                          trial_sharpes=None, effective_n: int | None = None) -> float | None:
     """DSR = PSR(SR0). returns 에서 sr_pp·skew·kurt 도출(오용 방지).
 
-    V: sr_variance(per-period Sharpe 분산) 직접 or trial_sharpes 배열로 산출. 둘 다 없으면 None."""
+    V: sr_variance(per-period Sharpe 분산) 직접 or trial_sharpes 배열로 산출. 둘 다 없으면 None.
+    effective_n: 겹치는(자기상관) 관측이면 독립 관측수 T 를 명시 — PSR 표준오차에 사용.
+    None 이면 len(returns). len(returns) 초과·2 미만은 None(과대 T 금지)."""
     r = _arr(returns)
     if len(r) < 2:
         return None
+    T = len(r) if effective_n is None else int(effective_n)
+    if T < 2 or T > len(r):
+        return None
     if sr_variance is None and trial_sharpes is not None:
         ts = _arr(trial_sharpes)
+        ts = ts[np.isfinite(ts)]
         sr_variance = float(ts.var(ddof=1)) if len(ts) > 1 else None
     if n_trials and n_trials > 1 and (sr_variance is None or sr_variance <= 0):
         return None
     sr_pp = sharpe_ratio(r)["pp"]
     skew, kurt = _skew_kurt(r)
     sr0 = expected_max_sharpe(n_trials, sr_variance if sr_variance else 0.0)
-    return probabilistic_sharpe_ratio(sr_pp, sr0, len(r), skew, kurt)
+    return probabilistic_sharpe_ratio(sr_pp, sr0, T, skew, kurt)
 
 
 def min_track_record_length(sr_pp: float, sr_star_pp: float, skew: float, kurt: float,
@@ -115,23 +121,48 @@ def min_track_record_length(sr_pp: float, sr_star_pp: float, skew: float, kurt: 
 # ══════════════════════════════════════════════════════════════════════
 
 def _col_sharpe(M: np.ndarray) -> np.ndarray:
-    """열(config)별 per-period Sharpe (mean/std, std=0 보호)."""
+    """열(config)별 per-period Sharpe (mean/std). std=0 → 0 (sharpe_ratio 와 동일 규약 —
+    epsilon 을 더하지 않아 같은 Sharpe 의 열이 정확히 동률로 비교된다)."""
     mu = M.mean(axis=0)
     sd = M.std(axis=0, ddof=1)
-    return mu / (sd + 1e-12)
+    return np.divide(mu, sd, out=np.zeros_like(mu), where=sd > 0)
+
+
+def _unique_columns(M: np.ndarray) -> np.ndarray:
+    """완전히 같은 열(config) 중복 제거 — 원 순서 유지(첫 등장 열 보존)."""
+    _, first = np.unique(M.T, axis=0, return_index=True)
+    return M[:, np.sort(first)]
+
+
+def _average_rank(values: np.ndarray, target: float) -> float:
+    """target 의 1..N 상대순위(1=최저). 동률은 평균 순위 — 동률을 전부 최상위로 세지 않는다."""
+    below = float(np.sum(values < target))
+    ties = float(np.sum(values == target))          # 자기 자신 포함 ≥1
+    return below + (ties + 1.0) / 2.0
 
 
 def pbo_cscv(perf_matrix, n_splits: int = 10):
-    """과적합확률. perf_matrix: T×N per-period 수익률(열=config). N<2 → None.
+    """과적합확률. perf_matrix: T×N per-period 수익률(열=config).
 
     S(짝수≤14) 블록 → C(S,S/2) IS/OOS 조합. 각 조합: IS-best config 의 OOS 상대순위
     ω=rank/(N+1)(1=최저), logit λ=ln(ω/(1−ω)). PBO = P(λ≤0) = IS-best 가 OOS 중앙값 이하 비율.
+
+    정보 없음 → None (과적합 0% 로 보고하지 않는다):
+    - 서로 다른 config 가 2개 미만(완전 중복 열은 하나로 합친다 — 복제로 PBO 가 유리해지지 않음),
+    - 모든 config 가 무분산(상수 열 — 선택 능력을 검증할 변동이 없음).
+    동률 규칙: OOS 순위는 평균 순위, IS 최상위가 여럿이면 그들의 ω 평균(열 순서 무관).
     """
     import itertools
     M = np.asarray(perf_matrix, dtype=float)
     if M.ndim != 2 or M.shape[1] < 2:
         return None
+    n_input = int(M.shape[1])
+    M = _unique_columns(M)
     T, N = M.shape
+    if N < 2:
+        return None
+    if not np.any(M.std(axis=0) > 0):
+        return None
     S = int(n_splits)
     if S % 2 != 0:
         S -= 1
@@ -144,13 +175,13 @@ def pbo_cscv(perf_matrix, n_splits: int = 10):
         oos_rows = np.concatenate([blocks[b] for b in range(S) if b not in combo])
         sr_is = _col_sharpe(M[is_rows])
         sr_oos = _col_sharpe(M[oos_rows])
-        n_star = int(np.argmax(sr_is))
-        rank = int(np.sum(sr_oos <= sr_oos[n_star]))      # 1..N (1=최저)
-        omega = rank / (N + 1.0)
+        best = np.flatnonzero(sr_is == sr_is.max())
+        omega = float(np.mean([_average_rank(sr_oos, sr_oos[i]) for i in best])) / (N + 1.0)
         logits.append(math.log(omega / (1.0 - omega)))
     logits = np.array(logits)
     return {"pbo": float(np.mean(logits <= 0.0)), "logits": logits,
-            "n_splits": S, "n_configs": N, "n_combos": len(logits)}
+            "n_splits": S, "n_configs": N, "n_input_configs": n_input,
+            "n_combos": len(logits)}
 
 
 # ══════════════════════════════════════════════════════════════════════

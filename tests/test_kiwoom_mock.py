@@ -442,6 +442,33 @@ def test_notify_includes_company_name_and_expanded_reason(monkeypatch):
     assert "세부: 재무 B · 타이밍 긍정 · 뉴스 중립 · 리스크 보통" in text
 
 
+def test_a_fix_exec_notify_reports_llm_review_fallback(monkeypatch):
+    """A-11: guarded_apply 검토 실패 시 KR 알림에도 매수 보류·매도 진행 fallback 이 표시된다."""
+    import kiwoom_mock_track as kt
+    import notify
+    from lib import mock_llm_execution as llm_exec
+
+    sent = {}
+    monkeypatch.setenv("KR_MOCK_NOTIFY_LLM_ENABLED", "0")
+    monkeypatch.setitem(sys.modules, "kr200_meta", SimpleNamespace(NAME={"009540": "HD한국조선해양"}))
+    monkeypatch.setattr(notify, "send_telegram",
+                        lambda text, **_kw: sent.__setitem__("text", text))
+    plan = [{"code": "009540", "side": "buy", "qty": 2, "reason": "신규/추가"}]
+    new_plan, applied = llm_exec.apply_reviews(plan, {}, apply_mode="guarded_apply",
+                                               review_status="guard rejected: unknown symbol: ZZZZ")
+    record = llm_exec.review_execution_record(apply_mode="guarded_apply",
+                                              review_status="guard rejected: unknown symbol: ZZZZ",
+                                              applied=applied)
+
+    assert new_plan == []
+    assert record["held_buys"] == [{"symbol": "009540", "side": "buy", "qty": 2}]
+    kt._notify(9_664_093, [], [], llm_note=llm_exec.fallback_note(record))
+
+    text = sent["text"]
+    assert "LLM 주문검토 fallback(guard rejected: unknown symbol: ZZZZ)" in text
+    assert "미검증 매수 1건 보류" in text
+
+
 def test_notify_uses_llm_decision_notes(monkeypatch):
     import kiwoom_mock_track as kt
     import notify

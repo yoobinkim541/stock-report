@@ -128,6 +128,39 @@ def test_build_report_interprets_recent_factor_decisions(monkeypatch):
     assert "LLM Shadow: 성숙 표본 없음" in txt
 
 
+def test_a_fix_exec_report_marks_quantitative_fallback_when_llm_rationale_rejected(monkeypatch):
+    """A-09: 입력에 없는 티커/수치를 낸 LLM 근거는 게시되지 않고 정량 근거 fallback 이 표시된다."""
+    from types import SimpleNamespace
+
+    monkeypatch.setattr(kis_mock, "get_balance", lambda: {
+        "ok": True,
+        "positions": {"MSFT": {"shares": 10, "avg_price": 400.0, "cur_price": 420.0, "value": 4200.0}},
+        "pos_value": 4200.0, "cash_usd": 800.0, "nav": 5000.0,
+    })
+    monkeypatch.setattr(R, "_snapshots", lambda: [])
+    monkeypatch.setattr(R, "_scorecard_rows", lambda: [])
+    monkeypatch.setattr(R, "_recent_decisions", lambda: ([], None))
+    monkeypatch.setattr(R, "_llm_shadow_summary", lambda: (
+        {"n": 0, "hit_rate": None, "avg_delta": None, "by_action": {}}, 0))
+    from providers import market_data
+    monkeypatch.setattr(market_data, "fetch_kospi_stats",
+                        lambda since_date=None, symbol=None: {"return_pct": -3.0, "mdd": 0.04})
+
+    real_run = R.llm_rationale.run
+    fake_stdout = ('{"summary":"ZZZZ 상승 9999% 확정","position_notes":["ZZZZ 비중 확대"],'
+                   '"decision_notes":[],"risk_checks":[],"confidence":90}')
+    monkeypatch.setenv("MOCK_REPORT_LLM_ENABLED", "1")
+    monkeypatch.setattr(R.llm_rationale, "run", lambda payload: real_run(
+        payload, runner=lambda cmd, **kw: SimpleNamespace(returncode=0, stdout=fake_stdout, stderr="")))
+
+    txt = R.build_report(detail=True)
+
+    assert "🧠 LLM 판단근거" in txt
+    assert "정량 근거 fallback" in txt
+    assert "ZZZZ 상승" not in txt and "ZZZZ 비중 확대" not in txt
+    assert "신뢰도 90/100" not in txt
+
+
 if __name__ == "__main__":
     sys.exit(pytest.main([__file__, "-v"]))
 

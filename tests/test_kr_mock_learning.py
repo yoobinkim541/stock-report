@@ -73,14 +73,53 @@ def test_fit_policy_falls_back_when_no_signal():
     assert p["w_ranker"] == kr_policy.DEFAULT_POLICY["w_ranker"]
 
 
-def test_eval_policy_uses_top_max_positions_and_real_mdd():
+def test_eval_policy_uses_top_max_positions_per_date():
     rows = [{"features": {"ranker": s}, "fwd_excess": e, "fwd_mdd": m}
             for s, e, m in [(0.9, 0.20, 0.05), (0.8, 0.10, 0.10), (0.2, -0.10, 0.30), (0.1, -0.20, 0.40)]]
     r = L.eval_policy(rows, {"w_ranker": 1.0}, max_positions=2)
-    # 배치와 동일 상위 2(0.9,0.8) 선택 → 평균 초과수익 0.15, 보유기간 MDD 평균 0.075
+    # 같은 결정일(날짜 없음 = 하루) 상위 2(0.9,0.8) 바스켓 → 평균 초과수익 0.15 · 평가일 1개
     assert r["excess"] == pytest.approx(0.15)
-    assert r["mdd"] == pytest.approx(0.075)       # (0.05+0.10)/2 — 실제 낙폭 단위
-    assert r["n"] == 4
+    assert r["n"] == 1 and r["n_days"] == 1
+    assert r["n_candidates"] == 4 and r["n_selected"] == 2
+
+
+def _dated(day, score, excess, index_ret):
+    return {"date": day, "ticker": f"T{score}", "features": {"ranker": score},
+            "fwd_excess": excess, "index_ret": index_ret}
+
+
+def test_eval_policy_builds_one_dated_series_with_portfolio_mdd():
+    """A-fix-learn: 날짜별 top-K 를 모두 평가 · 포트폴리오 곡선 MDD 를 수작업 기대값과 비교."""
+    d1 = [_dated("2026-05-04", s, e, 0.02) for s, e in
+          [(0.9, 0.10), (0.8, 0.06), (0.5, -0.5), (0.4, -0.5), (0.3, -0.5), (0.2, -0.5)]]
+    d2 = [_dated("2026-05-05", s, e, -0.05) for s, e in
+          [(0.9, -0.20), (0.8, 0.00), (0.5, 0.5), (0.4, 0.5), (0.3, 0.5), (0.2, 0.5)]]
+    r = L.eval_policy(d1 + d2, {"w_ranker": 1.0}, max_positions=2)
+    # 일별 바스켓 초과수익: d1 (0.10+0.06)/2=0.08, d2 (-0.20+0.00)/2=-0.10 → 평균 -0.01
+    assert r["series"] == pytest.approx([0.08, -0.10])
+    assert r["excess"] == pytest.approx(-0.01)
+    # 절대 net 수익 = 초과 + 지수: d1 0.10, d2 -0.15 → NAV 1→1.10→0.935 → MDD 0.15
+    assert r["mdd"] == pytest.approx(0.15)
+    assert r["mdd_basis"] == "absolute"
+    assert (r["n"], r["n_candidates"], r["n_selected"]) == (2, 12, 4)
+    assert r["n_independent"] == 1                       # 20거래일 보유가 겹치는 이틀 = 독립 1
+    from ml.adaptive import oos_eval
+    # 같은 평가일 지수 곡선 1→1.02→0.969 → MDD 0.05 (전략 MDD 와 같은 단위)
+    assert oos_eval.index_curve_mdd(d1 + d2) == pytest.approx(0.05)
+
+
+def test_eval_policy_does_not_count_candidates_as_samples():
+    """A-fix-learn: 20일×2후보 = 40행, 상위 5행만 +10% — 전체를 한 바스켓으로 뭉쳐 n=40 이 되면 안 된다."""
+    rows = []
+    for i in range(20):
+        day = f"2026-03-{i + 1:02d}"
+        good = i < 5
+        rows.append(_dated(day, 0.9 if good else 0.6, 0.10 if good else -0.90, 0.0))
+        rows.append(_dated(day, 0.1, -0.90, 0.0))
+    r = L.eval_policy(rows, {"w_ranker": 1.0}, max_positions=5)
+    assert r["n"] == 20 and r["n_candidates"] == 40 and r["n_selected"] == 40
+    assert r["excess"] < 0                               # 매일 바스켓이 -90% 행을 포함
+    assert r["n_independent"] == 1                       # 3주 안의 20일 → 겹침
 
 
 def test_backfill_matures_entries_only_and_idempotent(tmp_path):

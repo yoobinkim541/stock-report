@@ -75,27 +75,38 @@ def make_fit(market: str):
 def eval_policy(oos_rows: list[dict], params: dict, market: str) -> dict:
     """OOS 평가 = 후보 가중으로 θ_entry 통과했을 트레이드의 슬리브 분수 성과.
 
-    excess = 평균 트레이드 분수수익, mdd = 그 트레이드열 복리 곡선의 MDD (지수 MDD 와 동일 단위).
+    excess = 평균 트레이드 분수수익, mdd = 그 트레이드열 복리 곡선의 MDD (지수 MDD 와 동일 단위),
+    n = 선택 트레이드 수. 통계 게이트용 series = 거래일별 슬리브 수익(당일 청산 → 거래일끼리
+    보유기간이 겹치지 않으므로 n_independent = 거래일 수).
     """
     from ml import intraday_policy as ip
     from ml.adaptive import reward
     full = {**ip.DEFAULTS[market], **(params or {})}
     theta = float(full.get("theta_entry", 0.55))
     sel = []
+    by_day: dict[str, float] = {}
+    n_candidates = 0
     for r in sorted(oos_rows, key=lambda x: (x.get("date", ""), x.get("id", ""))):
         f = _trade_frac(r)
         if f is None or not r.get("features"):
             continue
+        n_candidates += 1
         if ip.score(r["features"], full, market) >= theta:
             sel.append(f)
+            day = str(r.get("date") or "")[:10]
+            by_day[day] = (1.0 + by_day.get(day, 0.0)) * (1.0 + f) - 1.0
     if not sel:
-        return {"excess": 0.0, "mdd": 1.0, "n": 0}    # 아무것도 안 뽑는 정책 — 채택 불가 방향
+        return {"excess": 0.0, "mdd": 1.0, "n": 0, "n_candidates": n_candidates,
+                "n_selected": 0, "n_days": 0, "n_independent": 0, "series": []}
     nav, navs = 1.0, [1.0]
     for f in sel:
         nav *= (1.0 + f)
         navs.append(nav)
+    series = [round(by_day[d], 8) for d in sorted(by_day)]
     return {"excess": round(sum(sel) / len(sel), 6),
-            "mdd": round(reward.max_drawdown(navs), 5), "n": len(sel)}
+            "mdd": round(reward.max_drawdown(navs), 5), "n": len(sel),
+            "n_candidates": n_candidates, "n_selected": len(sel),
+            "n_days": len(series), "n_independent": len(series), "series": series}
 
 
 # ── ★게이트 (표시·판정 전용 — 집행 전환은 수동) ──────────────────────────────
@@ -133,11 +144,13 @@ def gate_eval(rows: list[dict], market: str) -> dict:
                 out["pbo"] = round(pb["pbo"], 3)
     except Exception as e:
         logger.warning("[%s] 게이트 통계 실패: %s", market, e)
+    # GO 는 PBO 가 실제로 계산돼(서로 다른 θ 변형 ≥2) 0.5 미만일 때만. PBO 없음 = 선택 능력
+    # 검증 정보 없음(모든 θ 가 같은 트레이드를 고르는 등) → GO 근거로 쓰지 않는다.
     if n < MIN_SAMPLES:
         out["verdict"] = "콜드스타트"
     elif mean_r <= 0:
         out["verdict"] = "NO-GO"
-    elif (out["psr"] or 0) >= 0.95 and (out["pbo"] is None or out["pbo"] < 0.5):
+    elif (out["psr"] or 0) >= 0.95 and out["pbo"] is not None and out["pbo"] < 0.5:
         out["verdict"] = "GO"
     else:
         out["verdict"] = "OBSERVE"
@@ -183,10 +196,12 @@ def run_market(market: str) -> str:
                 + (f" · ⚠️orphan {len(orphans)}" if orphans else ""))
 
     idx_mdd = _index_mdd(market, [r.get("date", "") for r in rows])
+    prior_trials, trial_sharpes = learner.trial_history(f"{market}_intraday")
     out = learner.refit_and_adopt(
         rows, ip.get_policy(market), make_fit(market),
         lambda oos, params: eval_policy(oos, params, market),
-        index_mdd=idx_mdd, min_samples=MIN_SAMPLES, embargo=1)   # 당일 청산 — 라벨 수평선 1일
+        index_mdd=idx_mdd, min_samples=MIN_SAMPLES, embargo=1,   # 당일 청산 — 라벨 수평선 1일
+        n_trials=prior_trials + 1, trial_sharpes=trial_sharpes)
     logger.info("[%s] 재학습: %s", market, out["reason"])
     evolution.record_learning(f"{market}_intraday", {
         **base_rec, "adopted": bool(out.get("adopted")), "reason": out.get("reason"),
@@ -194,6 +209,10 @@ def run_market(market: str) -> str:
         "excess_champion": (out.get("champion") or {}).get("excess"),
         "mdd_challenger": (out.get("challenger") or {}).get("mdd"),
         "n_oos": (out.get("challenger") or {}).get("n"),
+        "n_oos_independent": (out.get("challenger") or {}).get("n_independent"),
+        "sharpe_challenger": (out.get("evidence") or {}).get("sharpe_pp"),
+        "psr_challenger": (out.get("evidence") or {}).get("psr"),
+        "n_trials": (out.get("evidence") or {}).get("n_trials"),
         "candidate_params": out.get("candidate_params")})
     g = gate
     gate_line = (f"게이트 {g['verdict']} — n {g['n']}·순R {g.get('mean_net_r')}"

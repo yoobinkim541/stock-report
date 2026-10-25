@@ -192,6 +192,18 @@ def test_paper_rail_pairs_nav_with_same_generation_return():
     assert "현 세대 수익률" in html
 
 
+def test_a_fix_exec_paper_rail_shows_awaiting_new_generation():
+    """세대 마감 직후 새 세대 첫 기록 전: 행 유지, 직전 마감 NAV + '새 세대 대기', 전체 누적을 현 세대처럼 표시 안 함."""
+    html = theme.paper_rail_html([{"label": "🇰🇷 국내", "currency": "₩", "nav": 6_000_000.0,
+                                   "cum_ret": -40.0, "current_cum_ret": None, "day_ret": None,
+                                   "generation": 2, "n_days": 0, "awaiting_generation": True,
+                                   "closed_generation": 1, "closed_nav_date": "2026-04-05"}])
+    row = html.split('class="tn-wl-chg"', 1)[1]
+    assert "새 세대 대기" in row and "-40.00%" not in row
+    assert "₩600만" in html
+    assert "세대 1 마감 NAV (2026-04-05)" in html and "전체 2세대 누적 -40.00%" in html
+
+
 def test_orderbook_ladder_html():
     """호가 사다리 — 잔량 바·전일比 등락%·현재가 강조·총잔량·당일/52주 패널."""
     bids = [[23125, 518], [23110, 827]]

@@ -159,3 +159,171 @@ def test_generation_rollup_stitches_lifetime_curve_across_boundaries():
     assert [round(r["nav"], 0) for r in roll["lifetime"]["nav_series"]] == [
         10_000_000, 8_000_000, 8_000_000, 8_800_000
     ]
+
+
+# ── A-01 회귀: 마감 NAV 가 롤업 수익률·MDD 에 정확히 한 번 반영 ─────────────────
+
+def _peak_mdd(series):
+    peak, worst = series[0], 0.0
+    for v in series:
+        peak = max(peak, v)
+        worst = max(worst, 1.0 - v / peak)
+    return worst
+
+
+def _close(store, nav, now="2026-04-05 09:00"):
+    return mock_generations.close_generation(
+        "kr_mock_history",
+        get_balance_fn=lambda: {"ok": True, "nav": nav, "positions": {}},
+        max_drawdown_fn=_peak_mdd,
+        store_module=store,
+        now=now,
+    )
+
+
+def _roll(store):
+    return mock_generations.generation_rollup(
+        "kr_mock_history", store_module=store, max_drawdown_fn=_peak_mdd)
+
+
+def test_a_fix_exec_close_nav_below_last_snapshot_counts_in_lifetime():
+    store = _FakeStore()
+    store.append("kr_mock_history", _snap("2026-01-05 06:40", 100))
+    store.append("kr_mock_history", _snap("2026-01-06 06:40", 120))
+    summary = _close(store, 60)
+    store.append("kr_mock_history", _snap("2026-04-06 06:40", 100))
+
+    roll = _roll(store)
+
+    assert round(summary["cum_return_pct"], 6) == -40.0
+    assert round(summary["mdd_pct"], 6) == 50.0
+    assert round(roll["lifetime"]["cum_return_pct"], 6) == -40.0
+    assert round(roll["lifetime"]["mdd_pct"], 6) == 50.0
+    assert [round(r["nav"], 6) for r in roll["lifetime"]["nav_series"]] == [100, 120, 60, 60]
+    # 세대 요약과 롤업 세그먼트가 같은 시계열을 소비
+    closed = mock_generations._segment_summary(
+        roll["segments"][0]["snapshots"], max_drawdown_fn=_peak_mdd)
+    assert closed["final_nav"] == summary["final_nav"] == 60
+    assert closed["cum_return_pct"] == summary["cum_return_pct"]
+    assert closed["mdd_pct"] == summary["mdd_pct"]
+    # 현재 세대는 새 snapshot 만
+    assert roll["current"]["nav"] == 100
+    assert mock_generations.active_snapshots("kr_mock_history", store_module=store)[0]["nav"] == 100
+
+
+def test_a_fix_exec_close_nav_above_last_snapshot_counts_gain():
+    store = _FakeStore()
+    store.append("kr_mock_history", _snap("2026-01-05 06:40", 100))
+    store.append("kr_mock_history", _snap("2026-01-06 06:40", 110))
+    _close(store, 130)
+    store.append("kr_mock_history", _snap("2026-04-06 06:40", 100))
+    store.append("kr_mock_history", _snap("2026-04-07 06:40", 110))
+
+    roll = _roll(store)
+
+    assert round(roll["lifetime"]["cum_return_pct"], 6) == 43.0  # 1.3 × 1.1
+
+
+def test_a_fix_exec_close_nav_equal_to_last_snapshot_not_duplicated():
+    store = _FakeStore()
+    store.append("kr_mock_history", _snap("2026-01-05 06:40", 100))
+    store.append("kr_mock_history", _snap("2026-01-06 06:40", 120))
+    summary = _close(store, 120)
+    store.append("kr_mock_history", _snap("2026-04-06 06:40", 100))
+
+    roll = _roll(store)
+
+    assert round(summary["cum_return_pct"], 6) == 20.0
+    assert [r["nav"] for r in roll["segments"][0]["snapshots"]] == [100, 120]
+    assert [round(r["nav"], 6) for r in roll["lifetime"]["nav_series"]] == [100, 120, 120]
+    assert round(roll["lifetime"]["cum_return_pct"], 6) == 20.0
+
+
+def test_a_fix_exec_close_without_new_snapshot_reflects_final_nav():
+    store = _FakeStore()
+    store.append("kr_mock_history", _snap("2026-01-05 06:40", 100))
+    store.append("kr_mock_history", _snap("2026-01-06 06:40", 120))
+    _close(store, 60)
+
+    roll = _roll(store)
+
+    assert roll["generation_count"] == 2
+    assert roll["current"]["nav"] is None
+    assert roll["lifetime"]["final_nav"] == 60
+    assert round(roll["lifetime"]["cum_return_pct"], 6) == -40.0
+    assert round(roll["lifetime"]["mdd_pct"], 6) == 50.0
+    assert roll["lifetime"]["end_date"] == "2026-04-05"
+
+
+def test_a_fix_exec_duplicate_close_is_rejected_without_writes():
+    store = _FakeStore()
+    store.append("kr_mock_history", _snap("2026-01-05 06:40", 100))
+    store.append("kr_mock_history", _snap("2026-01-06 06:40", 120))
+    _close(store, 60)
+    history_before = store.all("kr_mock_history")
+    archive_before = store.all("kr_mock_history_generations")
+
+    def _no_balance():
+        raise AssertionError("중복 마감은 잔고를 조회하지 않아야 한다")
+
+    try:
+        mock_generations.close_generation(
+            "kr_mock_history", get_balance_fn=_no_balance, max_drawdown_fn=_peak_mdd,
+            store_module=store, now="2026-04-05 09:05")
+        assert False, "중복 마감은 거부돼야 한다"
+    except RuntimeError as e:
+        assert "이미 마감" in str(e)
+
+    assert store.all("kr_mock_history") == history_before
+    assert store.all("kr_mock_history_generations") == archive_before
+    assert round(_roll(store)["lifetime"]["cum_return_pct"], 6) == -40.0
+
+
+def test_a_fix_exec_close_resumes_archive_after_partial_write():
+    store = _FakeStore()
+    store.append("kr_mock_history", _snap("2026-01-05 06:40", 100))
+    store.append("kr_mock_history", _snap("2026-01-06 06:40", 120))
+    real_append = store.append
+
+    def failing_append(name, item):
+        if name.endswith("_generations"):
+            raise OSError("disk full")
+        return real_append(name, item)
+
+    store.append = failing_append
+    try:
+        _close(store, 60)
+        assert False, "아카이브 쓰기 실패가 전파돼야 한다"
+    except OSError:
+        pass
+    store.append = real_append
+    # 경계 마커(진실원)만 남은 상태에서도 롤업은 마감 NAV 를 반영
+    assert round(_roll(store)["lifetime"]["cum_return_pct"], 6) == -40.0
+
+    resumed = _close(store, 999, now="2026-04-05 09:10")  # 재실행: 잔고값이 아니라 마커 요약으로 복구
+
+    assert resumed["final_nav"] == 60 and resumed["generation"] == 1
+    assert len(store.all("kr_mock_history_generations")) == 1
+    assert len([r for r in store.all("kr_mock_history") if r.get("kind") == "generation_boundary"]) == 1
+    try:
+        _close(store, 60, now="2026-04-05 09:20")
+        assert False, "복구 이후 재마감은 중복으로 거부돼야 한다"
+    except RuntimeError:
+        pass
+
+
+def test_a_fix_exec_legacy_boundary_reads_close_nav_from_archive():
+    """구 형식 경계 마커(final_nav 없음)는 같은 세대 아카이브의 마감 NAV 를 쓴다."""
+    store = _FakeStore()
+    store.append("kr_mock_history", _snap("2026-01-05 06:40", 100))
+    store.append("kr_mock_history", _snap("2026-01-06 06:40", 120))
+    store.append("kr_mock_history_generations", {
+        "date": "2026-04-05 09:00", "generation": 1, "final_nav": 60, "inception_nav": 100})
+    store.append("kr_mock_history", {"date": "2026-04-05 09:00", "kind": "generation_boundary",
+                                     "generation": 1, "reason": "계좌 리셋"})
+    store.append("kr_mock_history", _snap("2026-04-06 06:40", 100))
+
+    roll = _roll(store)
+
+    assert round(roll["lifetime"]["cum_return_pct"], 6) == -40.0
+    assert round(roll["lifetime"]["mdd_pct"], 6) == 50.0

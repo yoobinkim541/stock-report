@@ -291,6 +291,39 @@ def test_context_paper_state_defaults_to_offline(monkeypatch, tmp_path):
     assert context.paper_state()["kr"]["surface"] == "offline"
 
 
+def test_a_fix_exec_context_offline_paper_follows_generation_rules(monkeypatch, tmp_path):
+    """오프라인 모의 요약은 세대 경계를 지켜 현재 세대 + 전체 누적(마감 NAV 포함)을 분리한다."""
+    _isolate(monkeypatch, tmp_path)
+    import store
+    from agent_console import context
+    hists = {"kr_mock_history": [
+                 {"kind": "snapshot", "date": "2026-01-05 06:40", "nav": 10_000_000.0},
+                 {"kind": "snapshot", "date": "2026-01-06 06:40", "nav": 12_000_000.0},
+                 {"kind": "generation_boundary", "date": "2026-04-05 09:00", "generation": 1,
+                  "final_nav": 6_000_000.0},
+                 {"kind": "snapshot", "date": "2026-04-06 06:40", "nav": 10_000_000.0, "cash": 1.0},
+                 {"kind": "snapshot", "date": "2026-04-07 06:40", "nav": 11_000_000.0, "cash": 2.0},
+                 {"kind": "order", "date": "2026-04-07 09:10", "code": "005930", "side": "buy"}],
+             "us_mock_history": []}
+    monkeypatch.setattr(store, "all", lambda name, **k: list(hists.get(name, [])))
+
+    kr = context._offline_paper_summary("kr_mock")
+
+    assert kr["nav"] == 11_000_000.0 and kr["cash"] == 2.0
+    assert kr["inception_date"] == "2026-04-06"
+    assert round(kr["cum_ret"], 6) == 10.0                # 현재 세대 — 리셋이 손실로 잡히지 않음
+    assert round(kr["day_ret"], 6) == 10.0
+    assert kr["strat_mdd"] == 0.0
+    assert [r["nav"] for r in kr["nav_series"]] == [10_000_000.0, 11_000_000.0]
+    assert kr["generation_count"] == 2
+    assert round(kr["lifetime_cum_ret"], 6) == -34.0      # 0.6 × 1.1
+    assert round(kr["lifetime_strat_mdd"], 6) == 50.0     # 12M → 6M
+    assert [r["date"] for r in kr["decisions"]] == ["2026-04-07 09:10"]
+
+    us = context._offline_paper_summary("us_mock")
+    assert us["nav"] is None and us["cum_ret"] is None and us["lifetime_cum_ret"] is None
+
+
 def test_shared_memory_context_contract(monkeypatch, tmp_path):
     _isolate(monkeypatch, tmp_path)
 

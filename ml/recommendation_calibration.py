@@ -8,13 +8,14 @@ from __future__ import annotations
 
 from collections import Counter, defaultdict
 from collections.abc import Iterable, Mapping
-from datetime import date, datetime, time, timedelta, timezone
+from datetime import datetime, timedelta, timezone
 import hashlib
 import json
 import math
 from numbers import Real
 from pathlib import Path
 
+from ml.purged_split import purged_day_holdout_split, utc_timestamp as _timestamp
 from ml.recommendation_contracts import canonical_horizon, dedupe_canonical_outcomes, finite_json_value
 from ml.recommendation_engine import fit_score_calibrator
 from safe_io import atomic_write_json
@@ -30,25 +31,6 @@ _METRICS = ("fwd_excess", "excess_ret", "fwd_ret", "stock_ret", "benchmark_ret",
 
 def _finite(value):
     return isinstance(value, Real) and not isinstance(value, bool) and math.isfinite(value)
-
-
-def _timestamp(value, *, end_of_day=False):
-    if isinstance(value, datetime):
-        stamp = value
-    elif isinstance(value, date):
-        stamp = datetime.combine(value, time.max if end_of_day else time.min, timezone.utc)
-    elif isinstance(value, str):
-        try:
-            if len(value) == 10:
-                return _timestamp(date.fromisoformat(value), end_of_day=end_of_day)
-            stamp = datetime.fromisoformat(value.replace("Z", "+00:00"))
-        except ValueError:
-            return None
-    else:
-        return None
-    if stamp.tzinfo is None or stamp.utcoffset() is None:
-        return None
-    return stamp.astimezone(timezone.utc)
 
 
 def _asof(value):
@@ -329,16 +311,13 @@ def train_artifacts(
         deduped = dedupe_canonical_outcomes(eligible)
         rows = sorted((o["_calibration_row"] for o in deduped),
                       key=lambda r: (r["decision_ts"], r["decision_id"]))
-        days = sorted({r["decision_ts"][:10] for r in rows})
         # The boundary is a whole decision day, never an arbitrary row index.
         desired_holdout = max(min_holdout_samples, math.ceil(len(rows) * holdout_fraction))
-        boundary = rows[max(0, len(rows) - desired_holdout)]["decision_ts"][:10] if len(days) >= 2 else None
-        held_out = [r for r in rows if boundary is not None and r["decision_ts"][:10] >= boundary]
-        training = [r for r in rows if boundary is None or r["decision_ts"][:10] < boundary]
-        first_holdout = min((r["decision_ts"] for r in held_out), default=None)
-        purged = [r for r in training if first_holdout is not None
-                  and r["outcome_available_at"] >= first_holdout]
-        training = [r for r in training if first_holdout is None or r["outcome_available_at"] < first_holdout]
+        training, held_out, purged = purged_day_holdout_split(
+            rows, holdout_size=desired_holdout,
+            day_of=lambda r: r["decision_ts"][:10],
+            decision_at=lambda r: r["decision_ts"],
+            available_at=lambda r: r["outcome_available_at"])
         fit_rows = [{**r, "split": "train"} for r in training] + [{**r, "split": "holdout"} for r in held_out]
         scope = group["scope"]
         versions = sorted({v for r in training + held_out for v in

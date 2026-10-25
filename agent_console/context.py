@@ -411,27 +411,44 @@ def _offline_paper_summary(surface: str) -> dict:
         "cost": None,
         "scorecard": {},
         "decisions": [],
+        "generation_count": 1,
+        "generation": 1,
+        "lifetime_inception_date": None,
+        "lifetime_cum_ret": None,
+        "lifetime_strat_mdd": None,
+        "lifetime_nav_series": [],
     }
     try:
         import store
 
         hist = store.all(hist_name)
     except Exception:
-        hist = []
-    snaps = [r for r in hist if r.get("kind") == "snapshot" and r.get("nav") is not None]
+        return out
+
+    # 대시보드 paper_summary 와 같은 세대 규칙: 현재 세대 지표 + 리셋 구간을 이은 전체 지표.
+    # 세대 경계를 무시하고 전 세대 snapshot 을 이으면 계좌 리셋이 손실·MDD 로 잡힌다.
+    from lib import mock_generations
+
+    roll = mock_generations.generation_rollup(hist_name, store_module=store)
+    current = roll["current"]
+    lifetime = roll["lifetime"]
+    snaps = roll["segments"][-1]["snapshots"]
+    out["generation_count"] = out["generation"] = roll["generation_count"]
     if snaps:
         out["nav_series"] = [{"date": str(r.get("date", ""))[:10], "nav": float(r["nav"])} for r in snaps]
-        out["nav"] = float(snaps[-1]["nav"])
+        out["nav"] = current["nav"]
         out["cash"] = snaps[-1].get("cash")
-        out["inception_date"] = str(snaps[0].get("date", ""))[:10]
-        first_nav = float(snaps[0]["nav"])
-        if first_nav:
-            out["cum_ret"] = (float(snaps[-1]["nav"]) / first_nav - 1.0) * 100.0
-        if len(snaps) >= 2:
-            prev_nav = float(snaps[-2]["nav"])
-            out["day_ret"] = (float(snaps[-1]["nav"]) / prev_nav - 1.0) * 100.0 if prev_nav else None
-        mdd = _max_drawdown([float(row["nav"]) for row in snaps])
-        out["strat_mdd"] = mdd * 100.0 if mdd is not None else None
+        out["inception_date"] = current["start_date"]
+        out["cum_ret"] = current["cum_return_pct"]
+        out["day_ret"] = current["day_return_pct"] if len(snaps) >= 2 else None
+        out["strat_mdd"] = current["mdd_pct"]
+    out["lifetime_inception_date"] = lifetime["start_date"]
+    out["lifetime_cum_ret"] = lifetime["cum_return_pct"]
+    out["lifetime_strat_mdd"] = lifetime["mdd_pct"]
+    out["lifetime_nav_series"] = [
+        {"date": str(r.get("date", ""))[:10], "nav": float(r["nav"])}
+        for r in lifetime["nav_series"]
+    ]
 
     decisions = [
         r for r in hist
@@ -443,20 +460,6 @@ def _offline_paper_summary(surface: str) -> dict:
     decisions.sort(key=lambda r: str(r.get("date") or r.get("ts") or r.get("created_at") or ""), reverse=True)
     out["decisions"] = decisions[:20]
     return out
-
-
-def _max_drawdown(values: list[float]) -> float | None:
-    peak = None
-    worst = 0.0
-    for raw in values:
-        value = float(raw)
-        if value <= 0:
-            continue
-        if peak is None or value > peak:
-            peak = value
-        if peak:
-            worst = min(worst, value / peak - 1.0)
-    return abs(worst) if peak else None
 
 
 def portfolio_state() -> dict:

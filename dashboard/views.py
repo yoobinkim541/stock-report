@@ -678,8 +678,10 @@ def paper_summary(surface: str = "kr_mock") -> dict:
 def paper_glance() -> list[dict]:
     """사이드바용 모의 계좌 초경량 요약 — store EOD 스냅샷만 읽음 (잔고 API·벤치·원장 X).
 
-    전 페이지 사이드바에서 매 rerun 호출되므로 네트워크 0·로컬 DB 만. 스냅샷 없는
+    전 페이지 사이드바에서 매 rerun 호출되므로 네트워크 0·로컬 DB 만. 기록이 전혀 없는
     surface 는 제외(크론 미실행 환경 → 빈 리스트 = 레일 숨김). graceful.
+    세대 마감 직후 새 세대 첫 스냅샷 전에는 행을 숨기지 않고 `awaiting_generation=True`,
+    nav=직전 세대 마감 NAV(원 계좌 금액), current_cum_ret/day_ret=None 으로 반환한다.
     [{surface, label, currency, nav, cum_ret(전체 세대), current_cum_ret(현 세대), day_ret, n_days, ...}]
     """
     specs = (("kr_mock", "🇰🇷 국내", "₩", "kr_mock_history"),
@@ -692,7 +694,28 @@ def paper_glance() -> list[dict]:
             current = roll.get("current") or {}
             lifetime = roll.get("lifetime") or {}
             snaps = current.get("nav_series") or []
+            generation = roll.get("generation_count") or 1
             if not snaps:
+                life_series = lifetime.get("nav_series") or []
+                if not life_series:
+                    continue
+                closing = life_series[-1]
+                out.append({
+                    "surface": surface,
+                    "label": label,
+                    "currency": cur,
+                    "nav": float(closing.get("raw_nav", closing["nav"])),
+                    "cum_ret": lifetime.get("cum_return_pct"),
+                    "current_cum_ret": None,
+                    "day_ret": None,
+                    "n_days": 0,
+                    "generation": generation,
+                    "awaiting_generation": True,
+                    "closed_generation": closing.get("generation"),
+                    "closed_nav_date": str(closing.get("date") or "")[:10] or None,
+                    "lifetime_n_days": lifetime.get("n_snapshots") or len(life_series),
+                    "lifetime_inception_date": lifetime.get("start_date"),
+                })
                 continue
             nav = float(current.get("nav")) if current.get("nav") is not None else float(snaps[-1])
             out.append({
@@ -705,7 +728,8 @@ def paper_glance() -> list[dict]:
                 "current_cum_ret": current.get("cum_return_pct"),
                 "day_ret": current.get("day_return_pct"),
                 "n_days": current.get("n_snapshots") or len(snaps),
-                "generation": roll.get("generation_count") or 1,
+                "generation": generation,
+                "awaiting_generation": False,
                 "lifetime_n_days": lifetime.get("n_snapshots") or len(snaps),
                 "lifetime_inception_date": lifetime.get("start_date"),
             })

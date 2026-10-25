@@ -1448,6 +1448,30 @@ def test_views_paper_glance_stitches_lifetime_after_boundary(monkeypatch):
     assert kr["n_days"] == 2 and kr["generation"] == 2
 
 
+def test_a_fix_exec_paper_glance_keeps_row_after_close_before_new_snapshot(monkeypatch):
+    """세대 마감 직후(새 세대 첫 스냅샷 전) 레일 행이 사라지지 않고 마감 NAV·대기 상태를 보인다."""
+    import store
+    from dashboard import views
+    hists = {"kr_mock_history": [
+                 {"kind": "snapshot", "date": "2026-01-05 06:40", "nav": 10_000_000.0},
+                 {"kind": "snapshot", "date": "2026-01-06 06:40", "nav": 12_000_000.0},
+                 {"kind": "generation_boundary", "date": "2026-04-05 09:00", "generation": 1,
+                  "final_nav": 6_000_000.0}],
+             "us_mock_history": []}
+    monkeypatch.setattr(store, "all", lambda name, **k: list(hists.get(name, [])))
+
+    g = views.paper_glance()
+
+    assert [r["surface"] for r in g] == ["kr_mock"]
+    kr = g[0]
+    assert kr["awaiting_generation"] is True
+    assert kr["nav"] == 6_000_000.0                       # 직전 세대 마감 NAV(원 계좌 금액)
+    assert kr["closed_generation"] == 1 and kr["closed_nav_date"] == "2026-04-05"
+    assert round(kr["cum_ret"], 6) == -40.0               # 마감 NAV 반영 전체 누적
+    assert kr["current_cum_ret"] is None and kr["day_ret"] is None and kr["n_days"] == 0
+    assert kr["generation"] == 2
+
+
 def test_views_paper_glance_empty_and_error(monkeypatch):
     import store
     from dashboard import views

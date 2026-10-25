@@ -115,6 +115,52 @@ def test_pbo_pure_noise_near_half():
     assert res is not None and 0.2 <= res["pbo"] <= 0.8   # 노이즈 ≈0.5 (1 아님)
 
 
+# ── A-fix-learn: PBO 동률·중복·무정보 (A-07) ─────────────────────────────
+def test_pbo_identical_configs_are_no_information_not_zero():
+    col = np.random.default_rng(40).normal(0.001, 0.01, 40)
+    M = np.column_stack([col] * 4)                        # 40×4 동일 열
+    assert v.pbo_cscv(M, n_splits=10) is None             # 과적합 0% 로 보고하지 않음
+
+
+def test_pbo_constant_configs_are_no_information():
+    M = np.column_stack([np.full(40, 0.01), np.zeros(40), np.full(40, -0.01)])
+    assert v.pbo_cscv(M, n_splits=10) is None
+
+
+def test_pbo_duplicate_columns_do_not_change_result():
+    rng = np.random.default_rng(41)
+    M = rng.normal(0, 0.01, (400, 6))
+    base = v.pbo_cscv(M, n_splits=10)
+    padded = v.pbo_cscv(np.column_stack([M, M[:, 0], M[:, 0], M[:, 3]]), n_splits=10)
+    assert padded["pbo"] == pytest.approx(base["pbo"])
+    assert padded["n_configs"] == 6 and padded["n_input_configs"] == 9
+
+
+def test_pbo_equal_sharpe_configs_use_average_rank():
+    col = np.random.default_rng(42).normal(0.001, 0.01, 200)
+    res = v.pbo_cscv(np.column_stack([col, 2.0 * col]), n_splits=10)   # 모든 구간 Sharpe 동률
+    # 동률을 최상위로 세면 PBO=0(완벽 통과). 평균 순위면 ω=0.5 → 과적합 쪽(λ≤0)으로 집계.
+    assert res["pbo"] == pytest.approx(1.0)
+
+
+def test_pbo_invariant_to_column_order_with_ties():
+    rng = np.random.default_rng(43)
+    M = rng.normal(0, 0.01, (300, 5))
+    M = np.column_stack([M, 4.0 * M[:, 2]])               # 2번 열과 Sharpe 정확히 동률인 열
+    perm = [5, 3, 0, 2, 4, 1]
+    a = v.pbo_cscv(M, n_splits=10)
+    b = v.pbo_cscv(M[:, perm], n_splits=10)
+    assert a["pbo"] == pytest.approx(b["pbo"])
+
+
+def test_dsr_effective_n_cannot_exceed_observations():
+    r = np.random.default_rng(44).normal(0.002, 0.01, 50)
+    assert v.deflated_sharpe_ratio(r, n_trials=1, effective_n=51) is None
+    full = v.deflated_sharpe_ratio(r, n_trials=1)
+    fewer = v.deflated_sharpe_ratio(r, n_trials=1, effective_n=10)
+    assert full > fewer > 0.5                             # 독립 표본이 적을수록 증거 약함
+
+
 # ── Purged K-Fold ─────────────────────────────────────────────────────
 def test_purged_kfold_no_label_overlap():
     splits = v.purged_kfold_indices(100, n_splits=5, label_horizon=5, embargo=3)

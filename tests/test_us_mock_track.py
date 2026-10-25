@@ -356,3 +356,31 @@ def test_notify_shows_single_account_blocker_message_instead_of_spamming(monkeyp
     text = sent["text"]
     assert "계좌 문제" in text or "계좌#" in text
     assert "MSFT" not in text and "NVDA" not in text
+
+
+def test_a_fix_exec_notify_reports_llm_review_fallback(monkeypatch):
+    """A-11: guarded_apply 검토 실패로 매수를 보류했다면 알림에 fallback 사실이 남아야 한다."""
+    from lib import mock_llm_execution as llm_exec
+
+    sent = {}
+
+    class _FakeNotify:
+        @staticmethod
+        def send_telegram(text, **kwargs):
+            sent["text"] = text
+
+    monkeypatch.setitem(sys.modules, "notify", _FakeNotify)
+    plan = [{"symbol": "TSLA", "side": "sell", "qty": 4}, {"symbol": "AAPL", "side": "buy", "qty": 10}]
+    new_plan, applied = llm_exec.apply_reviews(plan, {}, apply_mode="guarded_apply",
+                                               review_status="call failed: fake unavailable")
+    record = llm_exec.review_execution_record(apply_mode="guarded_apply",
+                                              review_status="call failed: fake unavailable",
+                                              applied=applied)
+    results = [{**o, "kind": "퇴출", "ok": True} for o in new_plan]
+
+    T._notify(1000.0, results, llm_note=llm_exec.fallback_note(record))
+
+    text = sent["text"]
+    assert "TSLA" in text and "AAPL" not in text
+    assert "LLM 주문검토 fallback(call failed: fake unavailable)" in text
+    assert "미검증 매수 1건 보류" in text and "매도 1건 검토 없이 진행" in text
