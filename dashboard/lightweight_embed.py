@@ -333,14 +333,41 @@ button{border:1px solid @@GRID@@;background:@@PANEL@@;color:@@TEXT@@;padding:7px
     const volumeBars = payload.volume.time.map((time, index) => ({
       time, value:payload.volume.value[index], color:payload.volume.color[index],
     }));
+    // 시간대 — Lightweight Charts 는 UTC 타임스탬프를 UTC 로만 표기한다(시간대 미지원).
+    // payload.timezone(시장 TZ: Asia/Seoul·America/New_York)으로 축 눈금·크로스헤어·readout 을
+    // 포맷해 09:00 KST 봉이 00:00 으로 보이던 문제를 막는다. 봉 간격이 하루 미만이면 시각 표기.
+    const tz = payload.timezone || "UTC";
+    const intraday = bars.length > 1 && (bars[1].time - bars[0].time) < 86400;
+    function tzParts(sec, opts) {
+      try {
+        const p = {};
+        new Intl.DateTimeFormat("en-US", {timeZone:tz, hour12:false, ...opts}).formatToParts(new Date(sec * 1000))
+          .forEach(x => { p[x.type] = x.value; });
+        if (p.hour === "24") p.hour = "00";
+        return p;
+      } catch (_) { return null; }
+    }
+    const DT = {year:"numeric", month:"2-digit", day:"2-digit", hour:"2-digit", minute:"2-digit", second:"2-digit"};
+    function fmtDate(sec) { const p = tzParts(sec, DT); return p ? `${p.year}-${p.month}-${p.day}` : ""; }
+    function fmtTime(sec) { const p = tzParts(sec, DT); return p ? `${p.hour}:${p.minute}` : ""; }
+    function fmtFull(sec) { return intraday ? `${fmtDate(sec)} ${fmtTime(sec)}` : fmtDate(sec); }
+    function tickMark(sec, type) {              // 0=Year 1=Month 2=Day 3=Time 4=TimeWithSeconds
+      const p = tzParts(sec, DT); if (!p) return "";
+      if (type === 0) return p.year;
+      if (type === 1) return `${p.year}-${p.month}`;
+      if (type === 2) return `${p.month}-${p.day}`;
+      if (type === 4) return `${p.hour}:${p.minute}:${p.second}`;
+      return `${p.hour}:${p.minute}`;
+    }
     const chart = LightweightCharts.createChart(chartEl, {
       width: Math.max(1, chartEl.clientWidth), height: Math.max(1, chartEl.clientHeight),
       attributionLogo: true,
-      localization: {locale:"en-US"},
+      localization: {locale:"en-US", timeFormatter: fmtFull},
       layout: {background:{type:"solid",color:"transparent"},textColor:@@TEXT_JSON@@},
       grid: {vertLines:{color:@@GRID_JSON@@},horzLines:{color:@@GRID_JSON@@}},
       rightPriceScale: {borderColor:@@GRID_JSON@@,mode:payload.log_scale ? 1 : 0},
-      timeScale: {borderColor:@@GRID_JSON@@,timeVisible:true,secondsVisible:false,rightOffset:3},
+      timeScale: {borderColor:@@GRID_JSON@@,timeVisible:intraday,secondsVisible:false,rightOffset:3,
+                  tickMarkFormatter: tickMark},
       crosshair: {mode:1},
       handleScroll: true, handleScale: true,
     });
@@ -381,7 +408,7 @@ button{border:1px solid @@GRID@@;background:@@PANEL@@;color:@@TEXT@@;padding:7px
     const byTime = new Map(bars.map(b => [b.time,b]));
     function showBar(bar) {
       if (!bar) return;
-      readout.textContent = `${payload.symbol}  O ${bar.open.toLocaleString()}  H ${bar.high.toLocaleString()}  L ${bar.low.toLocaleString()}  C ${bar.close.toLocaleString()}`;
+      readout.textContent = `${payload.symbol}  ${fmtFull(bar.time)}  O ${bar.open.toLocaleString()}  H ${bar.high.toLocaleString()}  L ${bar.low.toLocaleString()}  C ${bar.close.toLocaleString()}`;
     }
     showBar(bars[bars.length - 1]);
     chart.subscribeCrosshairMove(param => showBar(byTime.get(Number(param.time))));
