@@ -162,53 +162,78 @@ def heuristic_labels(events: list[dict]) -> list[dict]:
     return out
 
 
+def _strict_int(value) -> int | None:
+    """JSON 정수만 허용 — bool·소수(0.9)·문자열 숫자("1")·NaN/Infinity 는 None (강제변환 금지)."""
+    return value if type(value) is int else None
+
+
+def _parse_label_row(raw: str, by_id: dict, seen: set) -> dict | None:
+    """LLM 출력 한 줄 → 검증된 라벨 또는 None. 타입이 틀린 행은 그 행만 탈락."""
+    from lib.structured_output import parse_object
+
+    raw = raw.strip().strip("`")
+    if not raw.startswith("{"):
+        return None
+    d = parse_object(raw)                          # 중복 키·NaN·Infinity 거부
+    if d is None:
+        return None
+    raw_id = d.get("id")
+    if isinstance(raw_id, bool) or not isinstance(raw_id, (str, int)):
+        return None
+    eid = str(raw_id)
+    ev = by_id.get(eid)
+    if ev is None or eid in seen:
+        return None
+    raw_tickers = d.get("tickers", [])
+    if raw_tickers is None:
+        raw_tickers = []
+    if not isinstance(raw_tickers, list) or not all(isinstance(t, str) for t in raw_tickers):
+        return None
+    allowed = _event_tickers(ev)
+    tickers = [t.split(".")[0].upper() for t in raw_tickers]
+    if any(t not in allowed for t in tickers):
+        return None                                # 입력에 없는 티커 = 환각 → 폐기
+    etype = d.get("event_type")
+    if not isinstance(etype, str) or etype not in EVENT_TYPES:
+        return None
+    direction = _strict_int(d.get("direction"))
+    strength = _strict_int(d.get("strength"))
+    if direction not in (-1, 0, 1) or strength is None or not 1 <= strength <= 5:
+        return None
+    return {
+        "id": eid,
+        "published_at": str(ev.get("published_at") or ""),
+        "tickers": tickers,
+        "event_type": etype,
+        "direction": direction,
+        "strength": strength,
+        "title_head": str(ev.get("title") or "")[:80],
+        "body": str(ev.get("body") or ""),
+        "url": str(ev.get("url") or ""),
+    }
+
+
 def parse_labels(text: str, events: list[dict]) -> list[dict]:
     """LLM 출력 → 검증된 라벨 목록. 환각/형식 위반 행은 폐기 (fact guard 철학).
 
-    검증: id 는 입력 이벤트에 존재, tickers ⊆ 해당 이벤트 태그 티커, event_type enum,
-    direction ∈ {-1,0,1}, strength ∈ 1~5. published_at 은 **입력 이벤트에서** 가져온다
-    (LLM 이 시각을 만들 수 없게 — point-in-time 무결성).
+    검증: id 는 입력 이벤트에 존재, tickers 는 문자열 배열이며 ⊆ 해당 이벤트 태그 티커,
+    event_type enum, direction ∈ {-1,0,1}·strength ∈ 1~5 는 JSON 정수만(소수·bool·문자열 숫자
+    강제변환 금지). published_at 은 **입력 이벤트에서** 가져온다(LLM 이 시각을 만들 수 없게 —
+    point-in-time 무결성). 잘못된 행은 그 행만 탈락하고 같은 출력의 정상 행은 보존한다.
     """
+    if not isinstance(text, str):
+        return []
     by_id = {str(e.get("id")): e for e in events if e.get("id")}
     out, seen = [], set()
-    for raw in (text or "").splitlines():
-        raw = raw.strip().strip("`")
-        if not raw.startswith("{"):
-            continue
+    for raw in text.splitlines():
         try:
-            d = json.loads(raw)
-        except Exception:
+            label = _parse_label_row(raw, by_id, seen)
+        except Exception:                           # 예상 밖 형태도 행 단위로만 격리
+            label = None
+        if label is None:
             continue
-        eid = str(d.get("id", ""))
-        ev = by_id.get(eid)
-        if ev is None or eid in seen:
-            continue
-        allowed = _event_tickers(ev)
-        tickers = [str(t).split(".")[0].upper() for t in (d.get("tickers") or [])]
-        if any(t not in allowed for t in tickers):
-            continue                                  # 입력에 없는 티커 = 환각 → 폐기
-        etype = str(d.get("event_type", ""))
-        if etype not in EVENT_TYPES:
-            continue
-        try:
-            direction = int(d.get("direction"))
-            strength = int(d.get("strength"))
-        except (TypeError, ValueError):
-            continue
-        if direction not in (-1, 0, 1) or not 1 <= strength <= 5:
-            continue
-        seen.add(eid)
-        out.append({
-            "id": eid,
-            "published_at": str(ev.get("published_at") or ""),
-            "tickers": tickers,
-            "event_type": etype,
-            "direction": direction,
-            "strength": strength,
-            "title_head": str(ev.get("title") or "")[:80],
-            "body": str(ev.get("body") or ""),
-            "url": str(ev.get("url") or ""),
-        })
+        seen.add(label["id"])
+        out.append(label)
     return out
 
 
@@ -247,21 +272,29 @@ def _output_category(text: str) -> str:
     return "refusal" if _is_refusal(text) else "invalid_output"
 
 
-def _run_llm(cmd: list[str], *, provider: str, model: str, runner,
-             output_path: str | None = None) -> dict:
+def _run_llm(build, *, provider: str, model: str, runner) -> dict:
+    """route 1회 실행. build() 는 실행 직전에 (cmd, output_path) 를 만든다.
+
+    Codex 의 output-last-message 임시 파일은 실제로 실행하는 route 만 만들고, 이 함수가
+    성공·실패·예외 모두에서 지운다(실행하지 않은 route 의 빈 파일이 남지 않게).
+    오류 detail 에는 종류·종료코드만 남긴다 — 원시 stderr/예외 문자열(프롬프트 포함 가능)은
+    라벨 파일·로그로 가지 않는다.
+    """
     kwargs = {"capture_output": True, "text": True, "timeout": NEWS_LLM_TIMEOUT}
     output = ""
+    output_path = None
     try:
+        cmd, output_path = build()
         result = runner(cmd, **kwargs)
     except subprocess.TimeoutExpired:
         return {"text": None, "provider": provider, "model": model,
                 "category": "timeout", "detail": "LLM timeout"}
     except FileNotFoundError:
         return {"text": None, "provider": provider, "model": model,
-                "category": "unavailable", "detail": f"{cmd[0]} not installed"}
+                "category": "unavailable", "detail": f"{provider} not installed"}
     except Exception as exc:
         return {"text": None, "provider": provider, "model": model,
-                "category": "unavailable", "detail": f"LLM call failed: {str(exc)[:160]}"}
+                "category": "unavailable", "detail": f"LLM call failed: {type(exc).__name__}"}
 
     finally:
         if output_path:
@@ -276,20 +309,20 @@ def _run_llm(cmd: list[str], *, provider: str, model: str, runner,
 
     returncode = getattr(result, "returncode", 1)
     if returncode != 0:
-        detail = str(getattr(result, "stderr", "") or "").strip()[:200]
         return {"text": None, "provider": provider, "model": model,
-                "category": "exit", "detail": f"exit {returncode}: {detail}".strip()}
+                "category": "exit", "detail": f"exit {returncode}"}
     text = output or (getattr(result, "stdout", "") or "").strip()
     return {"text": text, "provider": provider, "model": model,
             "category": "", "detail": ""}
 
 
-def _llm_routes(prompt: str) -> list[tuple[list[str], str, str, str | None]]:
-    codex_cmd, output_path = _codex_command(prompt)
-    codex = (codex_cmd, "codex-exec", NEWS_LLM_CODEX_MODEL or "codex-config-default", output_path)
-    hermes = (["hermes", "chat", "-q", prompt,
-               "--provider", NEWS_LLM_PROVIDER, "--model", NEWS_LLM_MODEL, "-Q"],
-              "hermes", NEWS_LLM_MODEL, None)
+def _llm_routes(prompt: str) -> list[tuple[str, str, object]]:
+    """(provider, model, build) 순서 목록. build 는 실행 직전에만 호출된다(임시 파일 지연 생성)."""
+    codex = ("codex-exec", NEWS_LLM_CODEX_MODEL or "codex-config-default",
+             lambda: _codex_command(prompt))
+    hermes = ("hermes", NEWS_LLM_MODEL,
+              lambda: (["hermes", "chat", "-q", prompt,
+                        "--provider", NEWS_LLM_PROVIDER, "--model", NEWS_LLM_MODEL, "-Q"], None))
     return [hermes, codex] if NEWS_LLM_PRIMARY == "hermes" else [codex, hermes]
 
 
@@ -326,9 +359,8 @@ def label_events(events: list[dict], runner=None, *, chunk_size: int | None = No
         accepted = []
         first_category = ""
         last_detail = ""
-        for cmd, provider, model, output_path in _llm_routes(build_label_prompt(chunk)):
-            attempt = _run_llm(cmd, provider=provider, model=model, runner=run,
-                               output_path=output_path)
+        for provider, model, build in _llm_routes(build_label_prompt(chunk)):
+            attempt = _run_llm(build, provider=provider, model=model, runner=run)
             text = attempt["text"]
             parsed = parse_labels(text, chunk) if text is not None else []
             parsed = [label for label in parsed if label["id"] in pending]

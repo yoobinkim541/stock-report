@@ -5,7 +5,6 @@
 import json
 import logging
 import os
-import subprocess
 import sys
 from pathlib import Path
 
@@ -16,6 +15,7 @@ if str(PROJECT_DIR) not in sys.path:
     sys.path.insert(0, str(PROJECT_DIR))
 
 import fmt  # 루트 모듈 — sys.path 세팅 이후 import
+from lib import llm_cli  # 공용 CLI 러너 — timeout 시 hermes 가 띄운 도구 프로세스 그룹까지 정리
 
 ADVISOR_MODEL = os.environ.get("STOCK_ADVISOR_MODEL", "gpt-5.6-sol")
 EDITABLE_FILES = [
@@ -455,7 +455,7 @@ def _backup_or_local(prompt: str, question: str, market: dict, runner) -> str:
     return _local_fallback(question, market)
 
 
-def ask_portfolio_advisor(question: str, market: dict, runner=subprocess.run) -> str:
+def ask_portfolio_advisor(question: str, market: dict, runner=llm_cli.run_cli) -> str:
     prompt = build_advisor_prompt(question, market)
     cmd = [
         "hermes",

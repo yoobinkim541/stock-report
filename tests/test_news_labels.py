@@ -227,11 +227,12 @@ def test_codex_news_labels_do_not_inherit_general_agent_model(monkeypatch):
     monkeypatch.setenv("AGENT_CONSOLE_CODEX_MODEL", "gpt-5.6-luna-900k")
     importlib.reload(NL)
     try:
-        command, _output_path = NL._codex_command("test")
+        command, output_path = NL._codex_command("test")
         assert "--model" not in command
         assert "gpt-5.6-luna-900k" not in command
     finally:
         NL.NEWS_LLM_CODEX_MODEL = previous
+        os.unlink(output_path)
 
 
 def test_label_events_chunks_and_preserves_partial_success():
@@ -348,3 +349,103 @@ def test_news_axis_registered_in_learners_and_policies():
     assert "w_news" in kr_policy.BOUNDS and "w_news" in us_policy.BOUNDS
     import kr_mock_learn, us_mock_learn
     assert "news" in kr_mock_learn._FEATS and "news" in us_mock_learn._FEATS
+
+
+# ── 리뷰 D-03/D-04/D-13 회귀 ───────────────────────────────────────────────────
+
+import tempfile  # noqa: E402
+
+import pytest  # noqa: E402
+
+_VALID_E2 = '{"id": "e2", "tickers": ["MSFT"], "event_type": "규제", "direction": -1, "strength": 3}'
+SECRET = "D_FIX_FAKE_TOKEN_7a93"
+
+
+@pytest.mark.parametrize("numbers", [
+    '"direction": 0.9, "strength": 4', '"direction": 1, "strength": 4.9',
+    '"direction": 1.0, "strength": 4', '"direction": "1", "strength": 4',
+    '"direction": 1, "strength": "4"', '"direction": true, "strength": 4',
+    '"direction": 1, "strength": true', '"direction": 1, "strength": Infinity',
+    '"direction": NaN, "strength": 4', '"direction": 1, "strength": 1e999',
+], ids=["dir-float", "str-float", "dir-1.0", "dir-str", "str-str", "dir-bool", "str-bool",
+        "str-inf", "dir-nan", "str-overflow"])
+def test_parse_rejects_coerced_numbers_and_keeps_valid_rows(numbers):
+    """D-03: direction=0.9 → 0, strength=4.9 → 4 같은 강제변환 라벨을 llm 라벨로 채택하지 않는다."""
+    bad = '{"id": "e1", "tickers": ["NVDA"], "event_type": "실적", ' + numbers + '}'
+    out = NL.parse_labels(bad + "\n" + _VALID_E2, _events())
+    assert [label["id"] for label in out] == ["e2"]
+
+
+@pytest.mark.parametrize("tickers", ['7', 'true', '"NVDA"', '[7]', '[true]', '[{"t": "NVDA"}]',
+                                     '{"NVDA": 1}'])
+def test_parse_rejects_non_string_ticker_arrays_without_raising(tickers):
+    bad = ('{"id": "e1", "tickers": ' + tickers
+           + ', "event_type": "실적", "direction": 1, "strength": 4}')
+    out = NL.parse_labels(bad + "\n" + _VALID_E2, _events())
+    assert [label["id"] for label in out] == ["e2"]
+
+
+@pytest.mark.parametrize("line", ['{"id": true, "tickers": [], "event_type": "실적", "direction": 0, "strength": 1}',
+                                  '{"id": "e1", "tickers": ["NVDA"], "event_type": 7, "direction": 0, "strength": 1}',
+                                  '{"id": "e1", "id": "e1", "tickers": ["NVDA"], "event_type": "실적", "direction": 0, "strength": 1}'])
+def test_parse_rejects_bad_id_type_enum_type_and_duplicate_keys(line):
+    assert [label["id"] for label in NL.parse_labels(line + "\n" + _VALID_E2, _events())] == ["e2"]
+
+
+def test_label_events_isolates_a_bad_row_instead_of_aborting_the_batch():
+    output = ('{"id": "e1", "tickers": 7, "event_type": "실적", "direction": 1, "strength": 4}\n'
+              + _VALID_E2)
+    labels = NL.label_events(_events(), runner=lambda *a, **k: FakeCompleted(stdout=output))
+    by_id = {label["id"]: label for label in labels}
+    assert by_id["e2"]["label_method"] == "llm"
+    assert by_id["e1"]["label_method"] == "heuristic"
+
+
+def test_label_errors_do_not_persist_stderr_or_exception_text():
+    """D-04: 라벨 파일에 남는 label_error 에 원시 stderr/예외 문자열(프롬프트 포함 가능)을 넣지 않는다."""
+    exited = NL.label_events(_events()[:1], runner=lambda *a, **k: FakeCompleted(
+        returncode=23, stderr=f"echo prompt {SECRET}"))
+    assert exited[0]["label_error"] == "exit 23"
+
+    def boom(cmd, **kwargs):
+        raise RuntimeError(f"failed while sending {SECRET}")
+
+    failed = NL.label_events(_events()[:1], runner=boom)
+    assert failed[0]["label_error_category"] == "unavailable"
+    assert SECRET not in failed[0]["label_error"]
+
+
+def _codex_temp_files(tmp_path):
+    return sorted(p.name for p in tmp_path.glob("news-label-codex-*"))
+
+
+@pytest.mark.parametrize("primary,codex_mode,hermes_mode", [
+    ("hermes", "ok", "ok"),          # Hermes 완전 성공 — Codex route 미실행
+    ("hermes", "ok", "partial"),     # Hermes 부분 성공 — Codex route 미실행
+    ("hermes", "ok", "raise"),       # Hermes 예외 → Codex 실행
+    ("codex", "ok", "ok"),
+    ("codex", "raise", "ok"),
+    ("codex", "exit", "exit"),
+])
+def test_codex_output_files_never_outlive_label_events(monkeypatch, tmp_path, primary, codex_mode,
+                                                     hermes_mode):
+    """D-13: 실행하지 않은 Codex route 의 output-last-message 임시 파일이 chunk 마다 쌓이면 안 된다."""
+    monkeypatch.setattr(tempfile, "tempdir", str(tmp_path))
+    monkeypatch.setattr(NL, "NEWS_LLM_PRIMARY", primary)
+    full = ('{"id": "e1", "tickers": ["NVDA"], "event_type": "실적", "direction": 1, "strength": 4}\n'
+            + _VALID_E2)
+    partial = '{"id": "e1", "tickers": ["NVDA"], "event_type": "실적", "direction": 1, "strength": 4}'
+
+    def act(mode):
+        if mode == "raise":
+            raise RuntimeError("provider crashed")
+        if mode == "exit":
+            return FakeCompleted(returncode=1)
+        return FakeCompleted(stdout=partial if mode == "partial" else full)
+
+    def runner(cmd, **kwargs):
+        return act(codex_mode if cmd[0] == "codex" else hermes_mode)
+
+    labels = NL.label_events(_events(), runner=runner)
+    assert {label["id"] for label in labels} == {"e1", "e2"}
+    assert _codex_temp_files(tmp_path) == []

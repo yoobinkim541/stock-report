@@ -92,9 +92,52 @@ def test_provider_validates_whole_response_before_display_bounding(monkeypatch, 
         monkeypatch.setenv('AGENT_CONSOLE_' + provider.upper() + '_ENABLED', '1')
         result = getattr(agent, '_try_' + provider + '_chat')(
             '한국어 입력', runner=runner, structured_output=structured)
+    # 완결된 JSON 객체 채팅 응답(chat_json)은 원문 전체를 보존한다 — 표시 상한은 answer 필드에만
+    # 적용된다(_normalize_answer_payload). 일반 문자열 채팅만 6000자로 자른다.
     expected = None if case in {'trailing_invalid', 'chat_late_refusal'} else (
-        response if structured else response[:6000])
+        response if structured or case == 'chat_json' else response[:6000])
     assert result == expected
+
+
+def _chat_provider_result(monkeypatch, provider, response, prompt='한국어 질문'):
+    def runner(command, **kwargs):
+        if '--output-last-message' in command:
+            Path(command[command.index('--output-last-message') + 1]).write_text(
+                response, encoding='utf-8')
+        return SimpleNamespace(returncode=0, stdout=response)
+
+    if provider == 'agy':
+        from lib import llm_cli
+        monkeypatch.setattr(llm_cli, 'backup_chat', lambda *a, **kw: (response, 'test'))
+        return agent._try_agy_backup(prompt)
+    monkeypatch.setenv('AGENT_CONSOLE_' + provider.upper() + '_ENABLED', '1')
+    return getattr(agent, '_try_' + provider + '_chat')(prompt, runner=runner)
+
+
+@pytest.mark.parametrize('provider', ['codex', 'hermes', 'gemini', 'agy'])
+def test_long_chat_answer_contract_keeps_json_and_trailing_citation(monkeypatch, provider):
+    """D-01: 6,000자를 넘는 정상 {answer, cited_evidence_ids} 가 잘려 원시 JSON 조각이 답변이 되면 안 된다."""
+    response = json.dumps({'answer': '한국어 답변입니다. ' * 800,
+                           'cited_evidence_ids': ['event-one']}, ensure_ascii=False)
+    assert len(response) > 6000
+
+    raw = _chat_provider_result(monkeypatch, provider, response)
+    payload = agent._normalize_answer_payload(raw, {'event-one'})
+
+    assert payload['structured'] is True
+    assert payload['cited_evidence_ids'] == ['event-one']
+    assert payload['answer'].startswith('한국어 답변입니다.')
+    assert '{"answer"' not in payload['answer']
+    assert len(payload['answer']) == 6000                 # 표시 상한은 answer 필드에만
+
+
+@pytest.mark.parametrize('provider', ['codex', 'hermes', 'gemini', 'agy'])
+@pytest.mark.parametrize('response', [
+    '{"answer": "한국어 답변이 중간에서 잘렸', '```json\n{"answer": "한국어 답변", "cited_evidence_ids": [',
+], ids=['cut_object', 'cut_fence'])
+def test_partial_chat_json_is_not_promoted_to_legacy_answer(monkeypatch, provider, response):
+    """D-01: 깨진 JSON 은 문자열 답변으로 채택하지 않고 다음 provider/정직한 폴백으로 넘긴다."""
+    assert _chat_provider_result(monkeypatch, provider, response) is None
 
 
 def test_structured_validation_does_not_initialize_distillation_runtime(tmp_path):

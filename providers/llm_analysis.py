@@ -7,17 +7,20 @@
 출력엔 정직 라벨 필수(검증 안 된 참고용·매매신호 아님 — 판단 반영 금지).
 
 호출 경로는 프로젝트 표준(hermes chat · openai-codex — llm_related 와 동일)이며
-24h 디스크 캐시 + 대시보드 버튼 게이트로 비용을 이중 통제. graceful: 실패 시 (None, 사유).
+24h 디스크 캐시(키별 프로세스 간 single-flight) + 대시보드 버튼 게이트로 비용을 이중 통제.
+토큰 상한은 hermes 오버레이와 직접 API 요청 양쪽에 같은 값이 간다. graceful: 실패 시 (None, 사유).
 """
 from __future__ import annotations
 
 import json
 import os
 import re
+import tempfile
 import time
 from pathlib import Path
 
 from lib import file_cache
+from lib import llm_cli
 from lib import llm_direct
 
 CACHE_DIR = Path(os.path.expanduser("~/reports/ml-cache/llm_analysis"))
@@ -77,22 +80,29 @@ def _prepare_analysis_hermes_home(max_tokens: int):
         model_cfg["max_tokens"] = int(max_tokens)
         cfg["model"] = model_cfg
 
-        tmp_path = os.path.join(overlay, ".config.yaml.tmp")
-        with open(tmp_path, "w", encoding="utf-8") as fh:
-            yaml.safe_dump(cfg, fh, allow_unicode=True, sort_keys=False)
-        os.replace(tmp_path, os.path.join(overlay, "config.yaml"))
+        # 종목이 달라도 같은 오버레이를 공유하므로 고유 임시 파일로 써야 동시 갱신이 서로를 깨지 않는다.
+        fd, tmp_path = tempfile.mkstemp(prefix=".config.yaml.", suffix=".tmp", dir=overlay)
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as fh:
+                yaml.safe_dump(cfg, fh, allow_unicode=True, sort_keys=False)
+            os.replace(tmp_path, os.path.join(overlay, "config.yaml"))
+        except BaseException:
+            Path(tmp_path).unlink(missing_ok=True)
+            raise
         return overlay
     except Exception:
         return None
 
 
 def _run_analysis_llm(cmd, runner, timeout, max_tokens):
+    """max_tokens 는 hermes(HERMES_HOME 오버레이)와 직접 API(runner 키워드) 양쪽에 같은 값으로 전달."""
     env = None
     overlay_home = _prepare_analysis_hermes_home(max_tokens)
     if overlay_home:
         env = dict(os.environ)
         env["HERMES_HOME"] = overlay_home
-    return runner(cmd, capture_output=True, text=True, timeout=timeout, env=env)
+    return runner(cmd, capture_output=True, text=True, timeout=timeout, env=env,
+                  max_tokens=int(max_tokens))
 
 
 def build_prompt(ticker: str, name: str, facts: dict) -> str:
@@ -119,9 +129,9 @@ def build_prompt(ticker: str, name: str, facts: dict) -> str:
     )
 
 
-def _clean_item(s, maxlen: int) -> str | None:
-    """항목 정리 — 문자열화·절단·금지어 폐기 (순수)."""
-    t = str(s or "").strip()
+def _clean_item(s: str, maxlen: int) -> str | None:
+    """문자열 항목 정리 — 공백 제거·절단·금지어 폐기 (순수). 문자열만 받는다."""
+    t = s.strip()
     if not t:
         return None
     if any(w in t for w in FORBIDDEN):
@@ -129,33 +139,51 @@ def _clean_item(s, maxlen: int) -> str | None:
     return t[:maxlen]
 
 
-def parse_analysis(text: str) -> dict | None:
-    """LLM 출력 → 검증된 분석 dict (순수·방어).
+def _parse_schema(text, schema) -> dict | None:
+    """JSON 객체 추출(코드펜스/잡설 허용) → 엄격 JSON(lib.structured_output) → 스키마 강제.
 
-    JSON 객체 추출(코드펜스/잡설 허용) → 스키마 키·타입·개수·길이 강제.
-    금지어: 항목 단위 폐기, summary 에 있으면 전체 폐기(None). bulls/bears 중
-    한쪽이 비면 균형 실패로 전체 폐기(편향 해설 방지).
+    문자열 필드에 문자열이 아닌 값, 리스트 필드에 리스트가 아닌 값이 오면 전체 거부(None).
+    리스트 안의 문자열이 아닌 항목은 그 항목만 폐기. 어떤 입력에도 예외를 던지지 않는다.
     """
-    m = re.search(r"\{[\s\S]*\}", text or "")
+    from lib.structured_output import parse_object
+
+    if not isinstance(text, str):
+        return None
+    m = re.search(r"\{[\s\S]*\}", text)
     if not m:
         return None
-    try:
-        raw = json.loads(m.group(0))
-    except Exception:
-        return None
-    if not isinstance(raw, dict):
+    raw = parse_object(m.group(0))
+    if raw is None:
         return None
     out: dict = {}
-    for key, typ, n_max, len_max in _SCHEMA:
+    for key, typ, n_max, len_max in schema:
         v = raw.get(key)
         if typ is str:
-            c = _clean_item(v, len_max)
+            if v is not None and not isinstance(v, str):
+                return None                       # 타입 위반 = 정상 해설로 채택 금지
+            c = _clean_item(v, len_max) if v is not None else None
             if key == "summary" and c is None:
                 return None                       # 요약 결측/금지어 = 전체 폐기
             out[key] = c or ""
         else:
-            items = [c for c in (_clean_item(x, len_max) for x in (v or [])[:n_max]) if c]
-            out[key] = items
+            if v is None:
+                v = []
+            if not isinstance(v, list):
+                return None
+            items = [c for c in (_clean_item(x, len_max) for x in v if isinstance(x, str)) if c]
+            out[key] = items[:n_max]
+    return out
+
+
+def parse_analysis(text: str) -> dict | None:
+    """LLM 출력 → 검증된 분석 dict (순수·방어).
+
+    스키마 키·타입·개수·길이 강제(_parse_schema). 금지어: 항목 단위 폐기, summary 에 있으면
+    전체 폐기(None). bulls/bears 중 한쪽이 비면 균형 실패로 전체 폐기(편향 해설 방지).
+    """
+    out = _parse_schema(text, _SCHEMA)
+    if out is None:
+        return None
     if not out["bulls"] or not out["bears"]:
         return None                               # 한쪽 편향 해설 방지
     return out
@@ -380,91 +408,117 @@ def _cache_path(ticker: str) -> Path:
     return CACHE_DIR / f"{safe}.json"
 
 
+def _reuse_cache(path: Path, ttl_h: float, valid, *, newer_than: float | None = None):
+    """신선한 캐시면 반환. newer_than 이 있으면 그 시각 이후에 쓰인 캐시만(잠금 대기 중 동료가 채운 것)."""
+    if not file_cache.is_fresh(path, ttl_h):
+        return None
+    if newer_than is not None:
+        try:
+            if path.stat().st_mtime < newer_than:
+                return None
+        except OSError:
+            return None
+    cached = file_cache.read_json(path)
+    return cached if valid(cached) else None
+
+
+def _valid_analysis_cache(cached) -> bool:
+    return isinstance(cached, dict) and bool(cached.get("summary"))
+
+
+def _stamp(parsed: dict, *, requested_provider: str, requested_model: str,
+           provider: str, model: str) -> dict:
+    """요청 설정과 실제 실행 제공자/모델을 분리해 기록(캐시에도 그대로 보존)."""
+    parsed["generated_at"] = time.strftime("%Y-%m-%d %H:%M")
+    parsed["requested_provider"] = requested_provider
+    parsed["requested_model"] = requested_model
+    parsed["provider"] = provider
+    parsed["model"] = model
+    return parsed
+
+
 def analyze(ticker: str, name: str, facts: dict,
             runner=llm_direct.run, force: bool = False) -> tuple[dict | None, str]:
     """종목 분석 해설 — (dict|None, 상태). 24h 디스크 캐시·graceful.
 
-    상태: "ok" | "cached" | "fallback" | "disabled" | "call failed: …" | "empty".
-    반환 dict 엔 generated_at(ISO)·model 이 포함된다 (표시용).
+    상태: "ok" | "ok (backup:…)" | "cached" | "fallback" | "disabled".
+    반환 dict 엔 generated_at·requested_provider/model(설정)·provider/model(실제 실행) 이 포함된다.
+    같은 종목의 동시 캐시 미스는 프로세스 간 잠금으로 한 번만 생성하고 나머지는 그 결과를 쓴다.
     """
     if os.getenv("DASH_LLM_ANALYSIS_ENABLED", "1").lower() in ("0", "false", "no"):
         return None, "disabled"
     cp = _cache_path(ticker)
-    if not force and file_cache.is_fresh(cp, CACHE_TTL_H):
-        cached = file_cache.read_json(cp)
-        if isinstance(cached, dict) and cached.get("summary"):
+    if not force:
+        cached = _reuse_cache(cp, CACHE_TTL_H, _valid_analysis_cache)
+        if cached is not None:
             return cached, "cached"
-    model = _env("DASH_LLM_ANALYSIS_MODEL",
-                 _env("INVESTMENT_REPORT_LLM_MODEL", "gpt-5-mini"))
-    provider = _env("DASH_LLM_ANALYSIS_PROVIDER",
-                    _env("INVESTMENT_REPORT_LLM_PROVIDER", "openai-codex"))
-    cmd = ["hermes", "chat", "-q", build_prompt(ticker, name or ticker, facts),
-           "--provider", provider,
-           "--model", model, "-Q"]
     try:
         timeout = max(20, int(os.getenv("DASH_LLM_ANALYSIS_TIMEOUT", "90")))
     except ValueError:
         timeout = 90
+    requested_at = time.time()
+    with llm_cli.cache_fill_lock(cp, wait=timeout + 15):
+        cached = _reuse_cache(cp, CACHE_TTL_H, _valid_analysis_cache,
+                              newer_than=requested_at if force else None)
+        if cached is not None:
+            return cached, "cached"
+        return _generate_analysis(ticker, name, facts, runner, cp, timeout)
+
+
+def _generate_analysis(ticker: str, name: str, facts: dict, runner, cp: Path,
+                       timeout: int) -> tuple[dict, str]:
+    """1차 → (402 시 축소 재시도) → agy 백업 → 로컬 폴백. 모두 timeout 하나를 나눠 쓴다."""
+    deadline = time.monotonic() + timeout
+    model = _env("DASH_LLM_ANALYSIS_MODEL",
+                 _env("INVESTMENT_REPORT_LLM_MODEL", "gpt-5-mini"))
+    provider = _env("DASH_LLM_ANALYSIS_PROVIDER",
+                    _env("INVESTMENT_REPORT_LLM_PROVIDER", "openai-codex"))
+    prompt = build_prompt(ticker, name or ticker, facts)
+    cmd = ["hermes", "chat", "-q", prompt,
+           "--provider", provider,
+           "--model", model, "-Q"]
     max_tokens = _analysis_max_tokens()
     try:
         res = _run_analysis_llm(cmd, runner, timeout, max_tokens)
     except Exception as exc:
         res = None
-        first_error = f"call failed: {str(exc)[:80]}"
+        first_error = f"call failed: {type(exc).__name__}"
     else:
         first_error = ""
     if res is not None and getattr(res, "returncode", 1) != 0:
         stderr_text = str(getattr(res, "stderr", "") or "")
         retry_tokens = _analysis_retry_max_tokens()
-        if "402" in stderr_text and retry_tokens < max_tokens:
+        remaining = deadline - time.monotonic()
+        if "402" in stderr_text and retry_tokens < max_tokens and remaining >= 1:
             try:
-                res = _run_analysis_llm(cmd, runner, timeout, retry_tokens)
+                res = _run_analysis_llm(cmd, runner, remaining, retry_tokens)
             except Exception as exc:
-                first_error = f"call failed: {str(exc)[:80]}"
+                first_error = f"call failed: {type(exc).__name__}"
             else:
                 first_error = ""
     if res is not None and getattr(res, "returncode", 1) == 0:
         parsed = parse_analysis(getattr(res, "stdout", "") or "")
         if parsed:
-            parsed["generated_at"] = time.strftime("%Y-%m-%d %H:%M")
-            parsed["model"] = model
-            parsed["provider"] = provider
-            try:
-                file_cache.harden_dir(CACHE_DIR)
-                _tmp = cp.with_suffix(".tmp")
-                _tmp.write_text(json.dumps(parsed, ensure_ascii=False), encoding="utf-8")
-                os.replace(_tmp, cp)
-            except Exception:
-                pass
+            _stamp(parsed, requested_provider=provider, requested_model=model,
+                   provider=provider, model=model)
+            llm_cli.write_cache_json(cp, parsed)
             return parsed, "ok"
     try:
-        from lib.llm_cli import backup_chat
-        btext, bnote = backup_chat(build_prompt(ticker, name or ticker, facts),
-                                   timeout=timeout, runner=runner)
+        btext, bnote = llm_cli.backup_chat(prompt, timeout=deadline - time.monotonic(),
+                                           runner=runner)
     except Exception:
         btext, bnote = None, ""
     if btext:
         parsed = parse_analysis(btext)
         if parsed:
-            parsed["generated_at"] = time.strftime("%Y-%m-%d %H:%M")
-            parsed["model"] = model
-            parsed["provider"] = provider
-            try:
-                file_cache.harden_dir(CACHE_DIR)
-                _tmp = cp.with_suffix(".tmp")
-                _tmp.write_text(json.dumps(parsed, ensure_ascii=False), encoding="utf-8")
-                os.replace(_tmp, cp)
-            except Exception:
-                pass
+            # agy 는 실제 모델을 알려주지 않는다 — 요청 모델로 위장하지 않고 unknown 으로 기록.
+            backup_provider = bnote.split(":", 1)[1] if bnote.startswith("backup:") else "backup"
+            _stamp(parsed, requested_provider=provider, requested_model=model,
+                   provider=backup_provider, model="unknown")
+            llm_cli.write_cache_json(cp, parsed)
             return parsed, f"ok ({bnote})"
     fallback = _analysis_fallback(ticker, name or ticker, facts or {})
-    try:
-        file_cache.harden_dir(CACHE_DIR)
-        _tmp = cp.with_suffix(".tmp")
-        _tmp.write_text(json.dumps(fallback, ensure_ascii=False), encoding="utf-8")
-        os.replace(_tmp, cp)
-    except Exception:
-        pass
+    llm_cli.write_cache_json(cp, fallback)
     if first_error:
         return fallback, f"fallback ({first_error})"
     return fallback, "fallback"
@@ -505,26 +559,10 @@ def build_portfolio_prompt(facts: dict) -> str:
 
 
 def parse_portfolio_brief(text: str) -> dict | None:
-    """브리핑 출력 → 검증 dict (순수) — 스키마·금지어·highlights/risks 균형 강제."""
-    m = re.search(r"\{[\s\S]*\}", text or "")
-    if not m:
+    """브리핑 출력 → 검증 dict (순수) — 스키마 타입·금지어·highlights/risks 균형 강제."""
+    out = _parse_schema(text, _PF_SCHEMA)
+    if out is None:
         return None
-    try:
-        raw = json.loads(m.group(0))
-    except Exception:
-        return None
-    if not isinstance(raw, dict):
-        return None
-    out: dict = {}
-    for key, typ, n_max, len_max in _PF_SCHEMA:
-        v = raw.get(key)
-        if typ is str:
-            c = _clean_item(v, len_max)
-            if key == "summary" and c is None:
-                return None
-            out[key] = c or ""
-        else:
-            out[key] = [c for c in (_clean_item(x, len_max) for x in (v or [])[:n_max]) if c]
     if not out["highlights"] or not out["risks"]:
         return None                               # 한쪽 비면 균형 실패 — 전체 폐기
     return out
@@ -535,39 +573,40 @@ def portfolio_brief(facts: dict, runner=llm_direct.run,
     """🌅 포트폴리오 브리핑 — (dict|None, 상태). 20h 디스크 캐시·graceful.
 
     상태: "ok" | "cached" | "disabled" | "call failed: …" | "empty".
+    크론·홈 카드가 동시에 미스해도 프로세스 간 잠금으로 한 번만 호출한다.
     """
     if os.getenv("DASH_AI_BRIEFING_ENABLED", "0").lower() not in ("1", "true", "yes"):
         return None, "disabled"
-    if not force and file_cache.is_fresh(BRIEF_PATH, BRIEF_TTL_H):
-        cached = file_cache.read_json(BRIEF_PATH)
-        if isinstance(cached, dict) and cached.get("summary"):
+    if not force:
+        cached = _reuse_cache(BRIEF_PATH, BRIEF_TTL_H, _valid_analysis_cache)
+        if cached is not None:
             return cached, "cached"
-    model = _env("DASH_AI_BRIEFING_MODEL",
-                 _env("INVESTMENT_REPORT_LLM_MODEL", "gpt-5-mini"))
-    cmd = ["hermes", "chat", "-q", build_portfolio_prompt(facts),
-           "--provider", _env("DASH_AI_BRIEFING_PROVIDER",
-                              _env("INVESTMENT_REPORT_LLM_PROVIDER", "openai-codex")),
-           "--model", model, "-Q"]
     try:
         timeout = max(20, int(os.getenv("DASH_AI_BRIEFING_TIMEOUT", "180")))
     except ValueError:
         timeout = 180
-    try:
-        res = runner(cmd, capture_output=True, text=True, timeout=timeout)
-    except Exception as exc:
-        return None, f"call failed: {str(exc)[:80]}"
-    if getattr(res, "returncode", 1) != 0:
-        return None, f"call failed: {str(getattr(res, 'stderr', ''))[:80] or 'non-zero exit'}"
-    parsed = parse_portfolio_brief(getattr(res, "stdout", "") or "")
-    if not parsed:
-        return None, "empty"
-    parsed["generated_at"] = time.strftime("%Y-%m-%d %H:%M")
-    parsed["model"] = model
-    try:
-        file_cache.harden_dir(BRIEF_PATH.parent)
-        _tmp = BRIEF_PATH.with_suffix(".tmp")
-        _tmp.write_text(json.dumps(parsed, ensure_ascii=False), encoding="utf-8")
-        os.replace(_tmp, BRIEF_PATH)
-    except Exception:
-        pass
-    return parsed, "ok"
+    requested_at = time.time()
+    with llm_cli.cache_fill_lock(BRIEF_PATH, wait=timeout + 15):
+        cached = _reuse_cache(BRIEF_PATH, BRIEF_TTL_H, _valid_analysis_cache,
+                              newer_than=requested_at if force else None)
+        if cached is not None:
+            return cached, "cached"
+        model = _env("DASH_AI_BRIEFING_MODEL",
+                     _env("INVESTMENT_REPORT_LLM_MODEL", "gpt-5-mini"))
+        cmd = ["hermes", "chat", "-q", build_portfolio_prompt(facts),
+               "--provider", _env("DASH_AI_BRIEFING_PROVIDER",
+                                  _env("INVESTMENT_REPORT_LLM_PROVIDER", "openai-codex")),
+               "--model", model, "-Q"]
+        try:
+            res = runner(cmd, capture_output=True, text=True, timeout=timeout)
+        except Exception as exc:
+            return None, f"call failed: {type(exc).__name__}"
+        if getattr(res, "returncode", 1) != 0:
+            return None, f"call failed: exit {getattr(res, 'returncode', 1)}"
+        parsed = parse_portfolio_brief(getattr(res, "stdout", "") or "")
+        if not parsed:
+            return None, "empty"
+        parsed["generated_at"] = time.strftime("%Y-%m-%d %H:%M")
+        parsed["model"] = model
+        llm_cli.write_cache_json(BRIEF_PATH, parsed)
+        return parsed, "ok"

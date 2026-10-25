@@ -114,3 +114,124 @@ def test_status_reports_missing_binaries():
     st = L.status()
     assert "backup_enabled" in st and st["backup_cli"] == "agy"
     assert "hermes" in st                                  # 샌드박스: 미설치/오류 문자열
+
+
+# ── 공용 호출 계약: 예산·비밀·프로세스 그룹 (리뷰 D-04/D-07/D-08) ─────────────────
+
+import subprocess  # noqa: E402
+import time  # noqa: E402
+from pathlib import Path  # noqa: E402
+
+import pytest  # noqa: E402
+
+SECRET = "D_FIX_FAKE_TOKEN_7a93"
+
+
+def test_backup_does_not_stretch_a_small_remaining_budget(monkeypatch):
+    """남은 예산 1초를 30초 최소값·+30초 여유로 늘리면 상위 deadline 을 넘긴다."""
+    monkeypatch.setenv("LLM_BACKUP_ENABLED", "true")
+    calls = []
+
+    def runner(cmd, **kw):
+        calls.append((cmd, kw))
+        return FakeCompleted(stdout="답")
+
+    assert L.backup_chat("질문", timeout=1, runner=runner)[0] == "답"
+    cmd, kw = calls[0]
+    assert kw["timeout"] == 1
+    assert cmd[cmd.index("--print-timeout") + 1] == "1s"
+    calls.clear()
+    assert L.backup_chat("질문", timeout=0.4, runner=runner) == (None, "backup 예산 없음")
+    assert calls == []                                     # 예산이 없으면 시작하지 않음
+
+
+def test_backup_failure_notes_do_not_echo_prompt_or_stderr(monkeypatch):
+    monkeypatch.setenv("LLM_BACKUP_ENABLED", "true")
+
+    def timeout_runner(cmd, **kw):
+        raise subprocess.TimeoutExpired(cmd, 1)            # str 에 명령 인자(=프롬프트) 포함
+
+    text, note = L.backup_chat(f"프롬프트 {SECRET}", runner=timeout_runner)
+    assert text is None and SECRET not in note and "TimeoutExpired" in note
+    text, note = L.backup_chat("q", runner=lambda *a, **k: FakeCompleted(
+        returncode=2, stderr=f"echo: {SECRET}"))
+    assert text is None and SECRET not in note and "rc=2" in note
+
+
+def test_chat_once_backup_uses_the_remaining_budget(monkeypatch):
+    monkeypatch.setenv("LLM_BACKUP_ENABLED", "true")
+    clock = {"t": 100.0}
+    monkeypatch.setattr(L.time, "monotonic", lambda: clock["t"])
+    seen = []
+
+    def runner(cmd, **kw):
+        if cmd[0] == "hermes":
+            clock["t"] += 25                                # 1차가 예산 대부분을 씀
+            return FakeCompleted(returncode=1)
+        seen.append(kw["timeout"])
+        return FakeCompleted(stdout="백업")
+
+    assert L.chat_once("질문", timeout=30, runner=runner) == ("백업", "backup:agy")
+    assert seen == [5]
+
+
+_TREE_SCRIPT = """#!{python}
+import os, signal, subprocess, sys, time
+ignore = os.environ.get("D_TREE_MODE") == "ignore"
+if ignore:
+    signal.signal(signal.SIGTERM, signal.SIG_IGN)
+child_code = ("import signal, time\\n"
+              + ("signal.signal(signal.SIGTERM, signal.SIG_IGN)\\n" if ignore else "")
+              + "time.sleep(60)\\n")
+# 후손은 부모의 stdout/stderr 파이프를 상속한다(파이프를 쥔 채 남는 손자 재현).
+child = subprocess.Popen([sys.executable, "-c", child_code])
+with open(os.environ["D_TREE_PID_FILE"], "w") as fh:
+    fh.write(str(child.pid))
+time.sleep(60)
+"""
+
+
+def _alive(pid: int) -> bool:
+    try:
+        state = Path(f"/proc/{pid}/stat").read_text().rsplit(")", 1)[1].split()[0]
+    except OSError:
+        return False
+    return state != "Z"
+
+
+@pytest.mark.skipif(not sys.platform.startswith("linux"), reason="프로세스 그룹/proc 은 리눅스 전용")
+@pytest.mark.parametrize("mode", ["normal", "ignore"])
+def test_backup_timeout_terminates_the_whole_cli_process_group(monkeypatch, tmp_path, mode):
+    """D-08: 백업 CLI timeout 시 CLI 가 띄운 손자(파이프 상속·TERM 무시 포함)까지 정리된다."""
+    script = tmp_path / "fake-agy"
+    script.write_text(_TREE_SCRIPT.format(python=sys.executable), encoding="utf-8")
+    script.chmod(0o755)
+    pid_file = tmp_path / "child.pid"
+    monkeypatch.setenv("LLM_BACKUP_ENABLED", "true")
+    monkeypatch.setenv("D_TREE_PID_FILE", str(pid_file))
+    monkeypatch.setenv("D_TREE_MODE", mode)
+    monkeypatch.setattr(L, "BACKUP_CLI", str(script))
+    monkeypatch.setattr(L, "PROCESS_GROUP_GRACE", 0.5, raising=False)
+
+    started = time.monotonic()
+    text, note = L.backup_chat(f"프롬프트 {SECRET}", timeout=1.5)
+    elapsed = time.monotonic() - started
+
+    child_pid = int(pid_file.read_text())
+    deadline = time.monotonic() + 5
+    while _alive(child_pid) and time.monotonic() < deadline:
+        time.sleep(0.05)
+    alive = _alive(child_pid)
+    if alive:
+        os.kill(child_pid, 9)
+    assert not alive, "CLI 의 후손 프로세스가 timeout 뒤에도 살아 있음"
+    assert elapsed < 10                                    # 예산(1.5s)+정리 유예 안에서 반환
+    assert text is None and "TimeoutExpired" in note and SECRET not in note
+
+
+@pytest.mark.skipif(not sys.platform.startswith("linux"), reason="프로세스 그룹은 리눅스 전용")
+def test_run_cli_timeout_exception_does_not_carry_prompt():
+    with pytest.raises(subprocess.TimeoutExpired) as info:
+        L.run_cli([sys.executable, "-c", "import time; time.sleep(30)", SECRET],
+                  capture_output=True, text=True, timeout=0.3)
+    assert SECRET not in str(info.value)

@@ -167,3 +167,90 @@ def test_plain_direct_keeps_existing_request_contract(monkeypatch):
     body = calls[0][1]
     assert "response_format" not in body and "provider" not in body
     assert body["max_tokens"] == 4096
+
+
+# ── 단일 예산·호출별 토큰 상한·비밀 없는 로그 (리뷰 D-04/D-06/D-07) ────────────────
+
+import logging  # noqa: E402
+import subprocess  # noqa: E402
+
+import pytest  # noqa: E402
+
+SECRET = "D_FIX_FAKE_TOKEN_7a93"
+
+
+def _clocked(monkeypatch, start=1000.0):
+    clock = {"t": start}
+    monkeypatch.setattr(D.time, "monotonic", lambda: clock["t"])
+    return clock
+
+
+def test_hermes_fallback_gets_only_the_remaining_budget(monkeypatch):
+    """D-07: 직접 호출이 timeout 대부분을 쓴 뒤 hermes 폴백이 timeout 전체를 다시 받으면 안 된다."""
+    monkeypatch.setenv("OPENROUTER_API_KEY", "k")
+    clock = _clocked(monkeypatch)
+    seen = []
+
+    def slow_failure(*args, timeout=None, **kwargs):
+        seen.append(("http", timeout))
+        clock["t"] += 4
+        raise TimeoutError("read timed out")
+
+    D.run(CMD, timeout=5, post=slow_failure,
+          fallback=lambda cmd, *a, **k: seen.append(("fallback", k["timeout"])) or "hermes")
+    assert seen == [("http", 5), ("fallback", 1)]
+
+
+def test_exhausted_budget_does_not_start_the_fallback(monkeypatch):
+    monkeypatch.setenv("OPENROUTER_API_KEY", "k")
+    clock = _clocked(monkeypatch)
+
+    def slow_failure(*args, **kwargs):
+        clock["t"] += 4.5
+        raise TimeoutError("read timed out")
+
+    with pytest.raises(subprocess.TimeoutExpired) as info:
+        D.run(CMD, timeout=5, post=slow_failure, fallback=must_not_fallback)
+    assert "프롬프트" not in str(info.value)
+
+
+def test_agy_keeps_a_small_budget_small():
+    """D-07: agy 에 1초를 주면 프로세스 상한도 1초 — 60초(30 최소값+30 여유)로 늘지 않는다."""
+    calls = []
+    D.agy_chat("프롬프트", "gemini-3.8-flash-medium", timeout=1, runner=fake_agy(calls))
+    cmd, kw = calls[0]
+    assert kw["timeout"] == 1
+    assert cmd[cmd.index("--print-timeout") + 1] == "1s"
+
+
+def test_runner_forwards_call_specific_max_tokens_to_the_api(monkeypatch):
+    """D-06: 호출부 상한이 API body 까지 가고, hermes 폴백 명령에는 새지 않는다."""
+    monkeypatch.setenv("OPENROUTER_API_KEY", "k")
+    monkeypatch.setenv("LLM_DIRECT_MAX_TOKENS", "4096")
+    calls = []
+    D.run(CMD, timeout=9, post=ok_post(calls), fallback=must_not_fallback, max_tokens=1536)
+    assert calls[0][1]["max_tokens"] == 1536
+    seen = []
+    D.run(CMD, timeout=9, post=lambda *a, **k: FakeResp({}, status=402), max_tokens=512,
+          fallback=lambda cmd, *a, **k: seen.append(k) or "hermes")
+    assert "max_tokens" not in seen[0]
+
+
+def test_direct_failure_logs_carry_no_prompt_or_error_body(monkeypatch, caplog):
+    """D-04: 실패 로그에는 경로·예외 종류·소요시간만 — 프롬프트/응답 오류 본문 금지."""
+    caplog.set_level(logging.INFO, logger=D.logger.name)
+    monkeypatch.setenv("OPENROUTER_API_KEY", "k")
+    secret_cmd = [c if c != "프롬프트" else f"프롬프트 {SECRET}" for c in CMD]
+
+    def leaky_post(*args, **kwargs):
+        raise RuntimeError(f"upstream echoed {SECRET}")
+
+    D.run(secret_cmd, timeout=5, post=leaky_post, fallback=lambda *a, **k: "hermes")
+
+    def agy_timeout(cmd, **kw):
+        raise subprocess.TimeoutExpired(cmd, 1)             # str 에 프롬프트 포함
+
+    secret_agy = [c if c != "프롬프트" else f"프롬프트 {SECRET}" for c in AGY_CMD]
+    D.run(secret_agy, timeout=5, agy_runner=agy_timeout, fallback=lambda *a, **k: "hermes")
+    assert "직접 호출 실패" in caplog.text
+    assert SECRET not in caplog.text

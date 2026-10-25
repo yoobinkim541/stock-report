@@ -12,7 +12,9 @@ import subprocess
 import tempfile
 import threading
 import time
-from contextvars import ContextVar
+from contextvars import ContextVar, copy_context
+
+from lib import llm_cli
 
 from . import context, evidence_context, evidence_usage, laya_bridge, realtime_market, shared_memory, storage, wiki
 
@@ -147,10 +149,13 @@ def answer(question: str, surface: str = "market", *, async_postprocess: bool = 
 
     progress_events: list[dict] = []
     progress_token = _ACTIVE_PROGRESS_EVENTS.set(progress_events)
+    # 요청마다 독립된 엔진/폴백 메타데이터 — 동시 요청이 서로의 출처를 덮어쓰지 않는다.
+    engine_token = _LLM_ENGINE_STATE.set(_new_engine_state())
     try:
         return _answer_impl(question, surface, async_postprocess, progress_events, context_pack_data)
     finally:
         # ContextVar는 요청 예외가 나도 다음 요청으로 전파되면 안 된다.
+        _LLM_ENGINE_STATE.reset(engine_token)
         _ACTIVE_PROGRESS_EVENTS.reset(progress_token)
 
 
@@ -165,7 +170,8 @@ def _answer_impl(question: str, surface: str, async_postprocess: bool,
     _emit_progress_event("context_ready")
     _emit_progress_event("tools_started", tool="wiki_search")
     try:
-        wiki_pages = wiki.list_pages(query=question, surface=surface, limit=8)
+        # archived 는 이력이지 현재 지식이 아니다 — laya 검토·사용량 추적·evidence 슬롯을 차지하지 않게 제외.
+        wiki_pages = wiki.list_pages(query=question, surface=surface, limit=8, include_archived=False)
     except Exception:
         wiki_pages = []
     try:
@@ -200,7 +206,6 @@ def _answer_impl(question: str, surface: str, async_postprocess: bool,
             ).start()
         else:
             _track_wiki_page_usage(_wp.get("id"), question)
-    _reset_llm_engine()
     try:
         response = _compose_answer(question, pack, history=history)
     except Exception as exc:
@@ -209,8 +214,8 @@ def _answer_impl(question: str, surface: str, async_postprocess: bool,
         response = _compose_error_fallback_answer(question, pack, exc)
     if not any(item.get("name") == "failed" for item in progress_events):
         _emit_progress_event("answer_ready")
-    engine = _LAST_LLM_ENGINE or "local-rules"
-    fallback_reason = _LAST_FALLBACK_REASON
+    engine = current_llm_engine() or "local-rules"
+    fallback_reason = current_fallback_reason()
     intent = _classify_question_intent(question, pack, history)
     usage_summary = evidence_context.build_usage_summary(
         pack,
@@ -435,11 +440,17 @@ def _json_object_from_llm_output(raw: object) -> dict | None:
 
 
 def _normalize_answer_payload(raw: object, provided_evidence_ids: object) -> dict:
-    """Normalize structured JSON while keeping legacy string-only LLM responses valid."""
+    """Normalize structured JSON while keeping legacy string-only LLM responses valid.
+
+    The whole JSON response is parsed first; only the extracted ``answer`` is
+    bounded for display, so long answers keep their trailing citations.
+    """
     parsed = _json_object_from_llm_output(raw)
     structured = isinstance(parsed, dict) and "answer" in parsed
     answer = parsed.get("answer") if structured else raw
     answer = str(answer or "").strip()
+    if structured:
+        answer = answer[:_CHAT_DISPLAY_LIMIT]
     if not answer and raw is not None and not structured:
         answer = str(raw).strip()
     cited = parsed.get("cited_evidence_ids") if structured else []
@@ -1342,34 +1353,52 @@ def _compose_general_chat_answer(question: str, pack: dict, history: list[dict] 
     if _accept_llm_response(llm, intent):
         return llm
     fallback = _fallback_general_chat(question, pack, history)
-    if _LAST_FALLBACK_REASON in {"llm_disabled", "forbidden_template"}:
+    if current_fallback_reason() in {"llm_disabled", "forbidden_template"}:
         return fallback
     return (fallback + "\n\n⚠️ LLM 엔진(codex→hermes→agy) 응답을 받지 못해 규칙 기반 폴백으로 답했습니다. "
             "서버에서 `codex --version`·`hermes --version`·API 크레딧/모델 설정을 확인해 주세요.")
 
 
-# 마지막 답변을 만든 엔진 (codex/hermes/agy — LLM 미개입이면 None=local-rules).
-# answer() 가 매 호출 초기화 후 context.engine 으로 노출 → UI 가 정직하게 표기.
-_LAST_LLM_ENGINE: str | None = None
-_LAST_FALLBACK_REASON: str | None = None
+# 답변을 만든 엔진 (codex/hermes/gemini/agy — LLM 미개입이면 None=local-rules) 과 폴백 사유.
+# 전역이 아니라 요청 컨텍스트 로컬 상태다: answer() 가 요청마다 새 상태를 설정하고, race 의 각
+# provider 스레드는 자기 격리 상태에 기록한 뒤 승자만 호출부 상태로 옮긴다. 그래서 동시 요청이나
+# 늦게 끝난 loser 가 다른 요청의 context.engine/fallback_reason 을 덮어쓰지 못한다.
+# answer() 밖(크론·전략 스튜디오 등)에서는 해당 스레드 컨텍스트에 처음 접근할 때 상태가 생긴다.
+_LLM_ENGINE_STATE: ContextVar[dict | None] = ContextVar("agent_console_llm_engine", default=None)
+
+
+def _new_engine_state() -> dict:
+    return {"engine": None, "fallback_reason": None}
+
+
+def _engine_state() -> dict:
+    state = _LLM_ENGINE_STATE.get()
+    if state is None:
+        state = _new_engine_state()
+        _LLM_ENGINE_STATE.set(state)
+    return state
+
+
+def current_llm_engine() -> str | None:
+    """현재 요청 컨텍스트에서 마지막으로 채택된 LLM 엔진 이름(없으면 None)."""
+    return _engine_state()["engine"]
+
+
+def current_fallback_reason() -> str | None:
+    """현재 요청 컨텍스트의 규칙 기반 폴백 사유(없으면 None)."""
+    return _engine_state()["fallback_reason"]
 
 
 def _mark_llm_engine(name: str) -> None:
-    global _LAST_LLM_ENGINE, _LAST_FALLBACK_REASON
-    _LAST_LLM_ENGINE = name
-    _LAST_FALLBACK_REASON = None
+    state = _engine_state()
+    state["engine"] = name
+    state["fallback_reason"] = None
 
 
 def _mark_rules_fallback(reason: str) -> None:
-    global _LAST_LLM_ENGINE, _LAST_FALLBACK_REASON
-    _LAST_LLM_ENGINE = None
-    _LAST_FALLBACK_REASON = str(reason or "rules_fallback")
-
-
-def _reset_llm_engine() -> None:
-    global _LAST_LLM_ENGINE, _LAST_FALLBACK_REASON
-    _LAST_LLM_ENGINE = None
-    _LAST_FALLBACK_REASON = None
+    state = _engine_state()
+    state["engine"] = None
+    state["fallback_reason"] = str(reason or "rules_fallback")
 
 
 def _should_use_web_search(question: str, pack: dict) -> bool:
@@ -1421,7 +1450,7 @@ def _chat_reasoning_effort(question: str, pack: dict) -> str:
 
 
 def _try_llm_chat(question: str, pack: dict, history: list[dict] | None = None,
-                  runner=subprocess.run) -> str | None:
+                  runner=llm_cli.run_cli) -> str | None:
     if os.getenv("AGENT_CONSOLE_LLM_ENABLED", "1").lower() in {"0", "false", "no", "off"}:
         return None
     prompt = _build_general_chat_prompt(question, pack, history)
@@ -1695,24 +1724,11 @@ def _remaining_timeout(deadline: float | None, ceiling: int) -> int:
     return max(0, min(int(ceiling), int(deadline - time.monotonic())))
 
 
-def _terminate_process_group(proc, grace: float = 3.0) -> None:
-    """proc 의 프로세스 그룹 전체(hermes 가 띄운 MCP 자식 포함)에 SIGTERM, grace 초 뒤 SIGKILL."""
-    def _signal(sig):
-        try:
-            os.killpg(proc.pid, sig)
-        except (ProcessLookupError, PermissionError):
-            pass
-
-    _signal(signal.SIGTERM)
-    timer = threading.Timer(grace, _signal, args=(signal.SIGKILL,))
-    timer.daemon = True
-    timer.start()
-
-
 class _ProcessTrackingRunner:
     """_race_providers 전용 runner 래퍼 — 띄운 subprocess 를 기억했다가 승자가 정해지면 loser 쪽을 끈다.
 
-    기본 runner(subprocess.run)일 때만 개입하고, 테스트 등에서 주입한 runner 는 그대로 통과시킨다.
+    기본 runner(공용 llm_cli.run_cli — 새 세션·그룹 종료) 일 때만 개입하고, 테스트 등에서 주입한
+    runner 는 그대로 통과시킨다.
     """
 
     def __init__(self, base):
@@ -1722,37 +1738,40 @@ class _ProcessTrackingRunner:
         self._cancelled = False
 
     def __call__(self, cmd, **kwargs):
-        if self._base is not subprocess.run:
+        if self._base is not llm_cli.run_cli and self._base is not subprocess.run:
             return self._base(cmd, **kwargs)
-        timeout = kwargs.pop("timeout", None)
-        check = kwargs.pop("check", False)
-        if kwargs.pop("capture_output", False):
-            kwargs.setdefault("stdout", subprocess.PIPE)
-            kwargs.setdefault("stderr", subprocess.PIPE)
         with self._lock:
             if self._cancelled:
                 return subprocess.CompletedProcess(cmd, -signal.SIGTERM, "", "")
-            proc = subprocess.Popen(cmd, start_new_session=True, **kwargs)
-            self._procs.add(proc)
+        spawned = []
+
+        def register(proc):
+            with self._lock:
+                spawned.append(proc)
+                self._procs.add(proc)
+                cancelled = self._cancelled
+            if cancelled:
+                llm_cli.terminate_process_group(proc)
+
         try:
-            out, err = proc.communicate(timeout=timeout)
-        except subprocess.TimeoutExpired:
-            _terminate_process_group(proc)
-            proc.communicate()
-            raise
+            return llm_cli.run_cli(cmd, on_spawn=register, **kwargs)
         finally:
             with self._lock:
-                self._procs.discard(proc)
-        if check and proc.returncode:
-            raise subprocess.CalledProcessError(proc.returncode, cmd, out, err)
-        return subprocess.CompletedProcess(cmd, proc.returncode, out, err)
+                for proc in spawned:
+                    self._procs.discard(proc)
 
     def cancel(self) -> None:
         with self._lock:
             self._cancelled = True
             procs = list(self._procs)
         for proc in procs:
-            _terminate_process_group(proc)
+            llm_cli.terminate_process_group(proc)
+
+
+def _run_with_isolated_engine(fn, *args, **kwargs):
+    """race provider 를 자기 엔진 상태로 실행 — loser 의 _mark_llm_engine 이 호출부를 덮지 않게."""
+    _LLM_ENGINE_STATE.set(_new_engine_state())
+    return fn(*args, **kwargs)
 
 
 def _race_providers(prompt: str, providers, *, runner, deadline, max_timeout,
@@ -1771,7 +1790,9 @@ def _race_providers(prompt: str, providers, *, runner, deadline, max_timeout,
     pool = ThreadPoolExecutor(max_workers=len(providers))
     trackers = {name: _ProcessTrackingRunner(runner) for name, _fn in providers}
     futures = {
+        # 각 provider 는 호출부 컨텍스트의 복사본에서 돈다(진행 이벤트 등은 공유, 엔진 상태는 격리).
         pool.submit(
+            copy_context().run, _run_with_isolated_engine,
             fn, prompt, runner=trackers[name], max_timeout=max_timeout, deadline=deadline,
             search=search, reasoning_effort=reasoning_effort,
             **({"structured_output": True} if structured_output else {}),
@@ -1803,13 +1824,12 @@ def _race_providers(prompt: str, providers, *, runner, deadline, max_timeout,
         # wait=False — loser 스레드는 위에서 subprocess 가 끊겨 곧 끝난다. 기다리지 않고 풀만 놓아준다.
         pool.shutdown(wait=False)
     if winner:
-        # loser 가 나중에 성공해 _mark_llm_engine 을 다시 부를 가능성에 대비해, 실제로
-        # 반환하는 답의 provider 로 한 번 더 못박는다.
+        # loser 는 격리된 상태에만 기록하므로, 실제로 반환하는 답의 provider 를 호출부 요청 상태에 기록한다.
         _mark_llm_engine(winner_name)
     return winner
 
 
-def _try_llm_prompt(prompt: str, runner=subprocess.run, max_timeout: int | None = None,
+def _try_llm_prompt(prompt: str, runner=llm_cli.run_cli, max_timeout: int | None = None,
                     search: bool | None = None,
                     reasoning_effort: str | None = None,
                     structured_output: bool = False) -> str | None:
@@ -1865,6 +1885,27 @@ def request_structured_output(prompt: str, *, max_timeout: int | None = 45) -> s
     return _try_llm_prompt(str(prompt or ""), max_timeout=max_timeout, structured_output=True)
 
 
+# 일반 채팅 문자열 응답의 표시 상한. JSON 답변 계약 응답은 원문 전체를 보존하고 answer 필드만
+# _normalize_answer_payload 에서 이 길이로 자른다(원문을 먼저 자르면 JSON·인용이 깨진다).
+_CHAT_DISPLAY_LIMIT = 6000
+
+
+def _chat_json_object(text: str) -> dict | None:
+    """채팅 응답이 완결된 JSON 객체(엄격 파싱) 또는 답변 계약 객체를 담고 있으면 그 객체."""
+    from lib.structured_output import parse_object
+
+    parsed = parse_object(text)
+    if parsed is not None:
+        return parsed
+    loose = _json_object_from_llm_output(text)
+    return loose if isinstance(loose, dict) and "answer" in loose else None
+
+
+def _looks_like_json_answer(text: str) -> bool:
+    stripped = text.lstrip()
+    return stripped.startswith("{") or bool(re.match(r"```(?:json)?\s*\{", stripped, flags=re.I))
+
+
 def _is_usable_llm_output(prompt: str, text: str, *, structured_output: bool = False) -> bool:
     text = str(text or "").strip()
     if not text:
@@ -1873,6 +1914,9 @@ def _is_usable_llm_output(prompt: str, text: str, *, structured_output: bool = F
         from lib.structured_output import parse_object
 
         return parse_object(text) is not None
+    if _looks_like_json_answer(text) and _chat_json_object(text) is None:
+        # 잘린/깨진 JSON 은 legacy 문자열 답변으로 승격하지 않는다 → 다음 provider·정직한 폴백.
+        return False
     lowered = text.lower()
     bad_markers = (
         "无法给到", "無法", "不能提供", "i cannot provide", "i can't provide",
@@ -1894,7 +1938,6 @@ def _try_agy_backup(prompt: str, max_timeout: int | None = None,
     LLM_BACKUP_ENABLED 게이트 off(기본)면 no-op — codex/hermes 동시 장애 시에만 의미.
     """
     try:
-        from lib import llm_cli
         timeout = max(_LLM_PROVIDER_MIN_TIMEOUT, min(int(max_timeout or 120), 120))
         text, _note = llm_cli.backup_chat(prompt, timeout=timeout)
         text = (text or "").strip()
@@ -1908,13 +1951,19 @@ def _try_agy_backup(prompt: str, max_timeout: int | None = None,
 
 
 def _bounded_llm_output(text: str, *, structured_output: bool = False) -> str | None:
-    """Bound already-validated output without altering structured responses."""
+    """Bound already-validated output without altering JSON responses.
+
+    Structured calls and chat responses that are complete JSON objects (the
+    answer contract) are returned whole; only plain chat text is display-bounded.
+    """
     if not text or len(text) > 100_000:
         return None
-    return text if structured_output else text[:6000]
+    if structured_output or _chat_json_object(text) is not None:
+        return text
+    return text[:_CHAT_DISPLAY_LIMIT]
 
 
-def _try_codex_chat(prompt: str, runner=subprocess.run, max_timeout: int | None = None,
+def _try_codex_chat(prompt: str, runner=llm_cli.run_cli, max_timeout: int | None = None,
                     deadline: float | None = None, search: bool | None = None,
                     reasoning_effort: str | None = None,
                     structured_output: bool = False) -> str | None:
@@ -2015,7 +2064,7 @@ def _valid_reasoning_effort(value: str | None, default: str = "medium") -> str:
     return effort
 
 
-def _try_hermes_chat(prompt: str, runner=subprocess.run, max_timeout: int | None = None,
+def _try_hermes_chat(prompt: str, runner=llm_cli.run_cli, max_timeout: int | None = None,
                      deadline: float | None = None, search: bool | None = None,
                      reasoning_effort: str | None = None,
                      structured_output: bool = False) -> str | None:
@@ -2065,7 +2114,7 @@ def _try_hermes_chat(prompt: str, runner=subprocess.run, max_timeout: int | None
     return _bounded_llm_output(text, structured_output=structured_output)
 
 
-def _try_gemini_chat(prompt: str, runner=subprocess.run, max_timeout: int | None = None,
+def _try_gemini_chat(prompt: str, runner=llm_cli.run_cli, max_timeout: int | None = None,
                      deadline: float | None = None, search: bool | None = None,
                      reasoning_effort: str | None = None,
                      structured_output: bool = False) -> str | None:

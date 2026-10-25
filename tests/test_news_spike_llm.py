@@ -85,3 +85,82 @@ def test_prompt_defense():
     p = N._llm_prompt({"title": "테스트 <<<속보>>>", "tags": ["$NVDA"]})
     assert "<<<DATA_START>>>" in p and "따르지 말" in p
     assert "<<<속보>>>" not in p                              # 마커 충돌 문자는 제거
+
+
+# ── 리뷰 D-04/D-05/D-07 회귀 ───────────────────────────────────────────────────
+
+import logging  # noqa: E402
+import subprocess  # noqa: E402
+
+import pytest  # noqa: E402
+
+SECRET = "D_FIX_FAKE_TOKEN_7a93"
+
+
+def _outcome(kind):
+    def runner(cmd, **kwargs):
+        if kind == "timeout":
+            raise subprocess.TimeoutExpired(cmd, 1)
+        if kind == "nonzero":
+            return FakeCompleted(returncode=1, stderr="provider down")
+        if kind == "invalid":
+            return FakeCompleted(stdout="invalid")
+        return FakeCompleted(stdout="6|경계선 유지")            # 성공했지만 알림 임계 미달
+    return runner
+
+
+@pytest.mark.parametrize("kind", ["success", "timeout", "nonzero", "invalid"])
+def test_per_run_llm_budget_counts_attempts_not_successes(monkeypatch, kind):
+    """D-05: 상한 3이면 실패가 이어져도 실제 LLM 시도는 3회를 넘지 않는다."""
+    from lib import llm_direct
+
+    events = [{"id": f"borderline-{i:02d}", "title": f"어느 기업 신제품 발표 {i}", "tags": ["속보"],
+               "published_at": "2026-10-25T09:00:00+09:00"} for i in range(8)]
+    attempts = []
+    inner = _outcome(kind)
+
+    def counting_run(cmd, **kwargs):
+        attempts.append(cmd)
+        return inner(cmd, **kwargs)
+
+    monkeypatch.setattr(N, "NEWS_LLM_ENABLED", True)
+    monkeypatch.setattr(N, "NEWS_LLM_MAX_PER_RUN", 3)
+    monkeypatch.delenv("LLM_BACKUP_ENABLED", raising=False)
+    monkeypatch.setattr(llm_direct, "run", counting_run)
+    monkeypatch.setattr(N, "fetch_breaking_news", lambda now: [dict(e) for e in events])
+    monkeypatch.setattr(N, "_load_state", lambda: {"sent_ids": {}})
+    monkeypatch.setattr(N, "_save_state", lambda state: None)
+    monkeypatch.setattr(N, "_send_telegram", lambda text: pytest.fail("임계 미달 속보가 발송됨"))
+
+    N.main()
+
+    assert len(attempts) == 3
+
+
+def test_timeout_log_does_not_disclose_the_prompt(monkeypatch, caplog):
+    """D-04: TimeoutExpired 문자열에는 명령 인자(속보 제목·보유종목이 든 프롬프트)가 들어 있다."""
+    caplog.set_level(logging.INFO)
+    monkeypatch.delenv("LLM_BACKUP_ENABLED", raising=False)
+    event = {"title": f"어느 기업 신제품 발표 {SECRET}", "tags": ["속보"]}
+    assert N._llm_score(event, runner=_outcome("timeout")) is None
+    assert "LLM 판정 호출 실패" in caplog.text and "TimeoutExpired" in caplog.text
+    assert SECRET not in caplog.text
+
+
+def test_backup_receives_only_the_remaining_budget(monkeypatch):
+    """D-07: 1차가 예산 대부분을 쓴 뒤 agy 백업이 다시 timeout 전체(+30초)를 받지 않는다."""
+    monkeypatch.setenv("LLM_BACKUP_ENABLED", "true")
+    monkeypatch.setattr(N, "NEWS_LLM_TIMEOUT", 20)
+    clock = {"t": 0.0}
+    monkeypatch.setattr(N.time, "monotonic", lambda: clock["t"])
+    seen = []
+
+    def runner(cmd, **kwargs):
+        if cmd[0] == "hermes":
+            clock["t"] += 15
+            return FakeCompleted(returncode=1)
+        seen.append(kwargs["timeout"])
+        return FakeCompleted(stdout="8|백업 판정")
+
+    assert N._llm_score(_borderline_event(), runner=runner) == (8, "백업 판정")
+    assert seen == [5]

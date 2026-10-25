@@ -1218,7 +1218,7 @@ def test_llm_race_does_not_let_the_slower_loser_overwrite_the_winner_engine(monk
 
     result = agent._try_llm_prompt("테스트")
     assert result == "빠른 답변"
-    assert agent._LAST_LLM_ENGINE == "hermes"
+    assert agent.current_llm_engine() == "hermes"
 
 
 def test_llm_default_budget_is_generous_enough_for_real_prompts(monkeypatch):
@@ -2920,11 +2920,11 @@ def test_agent_llm_chat_rejects_unusable_non_korean_codex_output(monkeypatch):
             return type("R", (), {"returncode": 0, "stdout": "한국어 Gemini 답변", "stderr": ""})()
         return Result()
 
-    agent._reset_llm_engine()
+    agent._mark_rules_fallback("test_start")      # 이전 테스트가 남긴 엔진 표시를 지운다
     answer = agent._try_llm_prompt("한국증시는 어땠어", runner=fake_runner)
 
     assert answer == "한국어 Gemini 답변"
-    assert agent._LAST_LLM_ENGINE == "gemini"
+    assert agent.current_llm_engine() == "gemini"
 
 
 def test_agent_llm_chat_falls_through_codex_hermes_to_gemini(monkeypatch):

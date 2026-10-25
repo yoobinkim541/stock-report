@@ -7,16 +7,20 @@ ticker_names.normalize_input 화이트리스트/형식 검증을 통과한 것�
 (검증 안 된 참고용·매매신호 아님 — 판단 반영 금지, CLAUDE.md LLM 원칙).
 
 호출 경로는 프로젝트 표준(hermes chat · openai-codex)과 동일. 24h 디스크 캐시
-(회당 비용·지연 통제 — 대시보드 버튼 게이트와 이중 방어). graceful: 실패 시 (None, 사유).
+(키별 프로세스 간 single-flight — 회당 비용·지연 통제, 대시보드 버튼 게이트와 이중 방어).
+토큰 상한은 hermes 오버레이와 직접 API 요청 양쪽에 같은 값이 간다. graceful: 실패 시 (None, 사유).
 """
 from __future__ import annotations
 
 import json
 import os
 import re
+import tempfile
+import time
 from pathlib import Path
 
 from lib import file_cache
+from lib import llm_cli
 from lib import llm_direct
 
 CACHE_DIR = Path(os.path.expanduser("~/reports/ml-cache/llm_related"))
@@ -208,10 +212,15 @@ def _prepare_related_hermes_home(max_tokens: int):
         overlay = os.path.join(os.path.expanduser("~/.cache"), "stock-report",
                                f"hermes-overlay-{int(max_tokens)}-related")
         os.makedirs(overlay, exist_ok=True)
-        tmp_path = os.path.join(overlay, ".config.yaml.tmp")
-        with open(tmp_path, "w", encoding="utf-8") as fh:
-            yaml.safe_dump(cfg, fh, allow_unicode=True, sort_keys=False)
-        os.replace(tmp_path, os.path.join(overlay, "config.yaml"))
+        # 종목이 달라도 같은 오버레이를 공유하므로 고유 임시 파일로 써야 동시 갱신이 서로를 깨지 않는다.
+        fd, tmp_path = tempfile.mkstemp(prefix=".config.yaml.", suffix=".tmp", dir=overlay)
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as fh:
+                yaml.safe_dump(cfg, fh, allow_unicode=True, sort_keys=False)
+            os.replace(tmp_path, os.path.join(overlay, "config.yaml"))
+        except BaseException:
+            Path(tmp_path).unlink(missing_ok=True)
+            raise
         for name in (".env", "auth.json"):
             src = os.path.join(base_home, name)
             dst = os.path.join(overlay, name)
@@ -223,12 +232,14 @@ def _prepare_related_hermes_home(max_tokens: int):
 
 
 def _run_related_llm(cmd, runner, timeout, max_tokens):
+    """max_tokens 는 hermes(HERMES_HOME 오버레이)와 직접 API(runner 키워드) 양쪽에 같은 값으로 전달."""
     env = None
     overlay_home = _prepare_related_hermes_home(max_tokens)
     if overlay_home:
         env = dict(os.environ)
         env["HERMES_HOME"] = overlay_home
-    return runner(cmd, capture_output=True, text=True, timeout=timeout, env=env)
+    return runner(cmd, capture_output=True, text=True, timeout=timeout, env=env,
+                  max_tokens=int(max_tokens))
 
 
 def _env(name: str, default: str) -> str:
@@ -295,19 +306,50 @@ def _cache_path(ticker: str) -> Path:
     return CACHE_DIR / f"{safe}.json"
 
 
+def _reuse_cache(cp: Path, *, newer_than: float | None = None):
+    """신선한 비어있지 않은 캐시 목록. newer_than 이 있으면 그 시각 이후에 쓰인 것만."""
+    if not file_cache.is_fresh(cp, CACHE_TTL_H):
+        return None
+    if newer_than is not None:
+        try:
+            if cp.stat().st_mtime < newer_than:
+                return None
+        except OSError:
+            return None
+    cached = file_cache.read_json(cp)
+    return cached if isinstance(cached, list) and cached else None
+
+
 def related_tickers(ticker: str, name: str = "", context: str = "",
                     runner=llm_direct.run, force: bool = False) -> tuple[list[dict] | None, str]:
     """연관 종목 추천 — (목록|None, 상태). 24h 디스크 캐시·graceful.
 
     상태: "ok" | "cached" | "fallback" | "disabled" | "call failed: …" | "empty".
+    같은 종목의 동시 캐시 미스는 프로세스 간 잠금으로 한 번만 생성하고 나머지는 그 결과를 쓴다.
     """
     if os.getenv("DASH_LLM_RELATED_ENABLED", "1").lower() in ("0", "false", "no"):
         return None, "disabled"
     cp = _cache_path(ticker)
-    if not force and file_cache.is_fresh(cp, CACHE_TTL_H):
-        cached = file_cache.read_json(cp)
-        if isinstance(cached, list) and cached:
+    if not force:
+        cached = _reuse_cache(cp)
+        if cached is not None:
             return cached, "cached"
+    try:
+        timeout = max(20, int(os.getenv("DASH_LLM_RELATED_TIMEOUT", "60")))
+    except ValueError:
+        timeout = 60
+    requested_at = time.time()
+    with llm_cli.cache_fill_lock(cp, wait=timeout + 15):
+        cached = _reuse_cache(cp, newer_than=requested_at if force else None)
+        if cached is not None:
+            return cached, "cached"
+        return _generate_related(ticker, name, context, runner, cp, timeout)
+
+
+def _generate_related(ticker: str, name: str, context: str, runner, cp: Path,
+                      timeout: int) -> tuple[list[dict] | None, str]:
+    """1차 → (402 시 축소 재시도) → 테마 폴백. 1차와 재시도는 timeout 하나를 나눠 쓴다."""
+    deadline = time.monotonic() + timeout
     prompt = build_prompt(ticker, name or ticker, context)
     provider = _env("DASH_LLM_RELATED_PROVIDER",
                     _env("INVESTMENT_REPORT_LLM_PROVIDER", "openai-codex"))
@@ -317,50 +359,34 @@ def related_tickers(ticker: str, name: str = "", context: str = "",
            "--provider", provider,
            "--model", model,
            "-Q"]
-    try:
-        timeout = max(20, int(os.getenv("DASH_LLM_RELATED_TIMEOUT", "60")))
-    except ValueError:
-        timeout = 60
     max_tokens = _analysis_max_tokens()
-    first_error = ""
     try:
         res = _run_related_llm(cmd, runner, timeout, max_tokens)
     except Exception as exc:
         res = None
-        first_error = f"call failed: {str(exc)[:80]}"
+        first_error = f"call failed: {type(exc).__name__}"
     else:
         first_error = ""
     if res is not None and getattr(res, "returncode", 1) != 0:
         stderr_text = str(getattr(res, "stderr", "") or "")
         retry_tokens = _analysis_retry_max_tokens()
-        if "402" in stderr_text and retry_tokens < max_tokens:
+        remaining = deadline - time.monotonic()
+        if "402" in stderr_text and retry_tokens < max_tokens and remaining >= 1:
             try:
-                res = _run_related_llm(cmd, runner, timeout, retry_tokens)
+                res = _run_related_llm(cmd, runner, remaining, retry_tokens)
             except Exception as exc:
-                first_error = f"call failed: {str(exc)[:80]}"
+                first_error = f"call failed: {type(exc).__name__}"
             else:
                 first_error = ""
     if res is not None and getattr(res, "returncode", 1) == 0:
         items = parse_related(getattr(res, "stdout", "") or "", ticker)
         if items:
-            try:
-                file_cache.harden_dir(CACHE_DIR)
-                _tmp = cp.with_suffix(".tmp")
-                _tmp.write_text(json.dumps(items, ensure_ascii=False), encoding="utf-8")
-                os.replace(_tmp, cp)
-            except Exception:
-                pass
+            llm_cli.write_cache_json(cp, items)
             return items, "ok"
 
     fallback = _fallback_related(ticker, name, context)
     if fallback:
-        try:
-            file_cache.harden_dir(CACHE_DIR)
-            _tmp = cp.with_suffix(".tmp")
-            _tmp.write_text(json.dumps(fallback, ensure_ascii=False), encoding="utf-8")
-            os.replace(_tmp, cp)
-        except Exception:
-            pass
+        llm_cli.write_cache_json(cp, fallback)
         if first_error:
             return fallback, f"fallback ({first_error})"
         return fallback, "fallback"
@@ -368,5 +394,5 @@ def related_tickers(ticker: str, name: str = "", context: str = "",
     if first_error:
         return None, first_error
     if res is not None and getattr(res, "returncode", 1) != 0:
-        return None, f"call failed: {str(getattr(res, 'stderr', ''))[:80] or 'non-zero exit'}"
+        return None, f"call failed: exit {getattr(res, 'returncode', 1)}"
     return None, "empty"

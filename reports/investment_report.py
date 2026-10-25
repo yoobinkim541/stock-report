@@ -11,7 +11,6 @@ import json
 import re
 import sys
 import logging
-import subprocess
 import time
 from datetime import datetime, timedelta, timezone
 
@@ -79,6 +78,7 @@ _PROJECT_DIR = os.getenv("STOCK_REPORT_PROJECT_DIR",
 if _PROJECT_DIR not in sys.path:
     sys.path.insert(0, _PROJECT_DIR)
 import fmt   # 출력 포맷 공통 레이어 (루트 모듈 — _PROJECT_DIR 경로 설정 후 import)
+from lib import llm_cli   # 공용 CLI 러너 — timeout 시 hermes 프로세스 그룹까지 정리
 from providers.fx_timing import fetch_fx_timing, render_fx_timing
 from portfolio_universe import (DEFAULT_PORTFOLIO_TICKERS, PORTFOLIO_SNAPSHOT_PATH,
                                 load_portfolio_tickers)
@@ -601,7 +601,7 @@ def _run_overlay_llm(cmd, runner, timeout, max_tokens):
     )
 
 
-def _generate_llm_overlay(clean_data, source_digest="", runner=subprocess.run):
+def _generate_llm_overlay(clean_data, source_digest="", runner=llm_cli.run_cli):
     if not _llm_overlay_enabled():
         return None, "disabled"
 
@@ -642,8 +642,7 @@ def _generate_llm_overlay(clean_data, source_digest="", runner=subprocess.run):
     if getattr(result, "returncode", 1) != 0:
         # 백업 LLM (agy — LLM_BACKUP_ENABLED 시): 출력도 동일 fact guard 통과해야 채택
         try:
-            from lib.llm_cli import backup_chat
-            btext, bnote = backup_chat(prompt, timeout=timeout, runner=runner)
+            btext, bnote = llm_cli.backup_chat(prompt, timeout=timeout, runner=runner)
         except Exception:
             btext, bnote = None, ""
         if btext:
@@ -1876,7 +1875,7 @@ def _earnings_context_for_ticker(ticker):
         return {}
 
 
-def _attach_context_decisions(portfolio_results, market, runner=subprocess.run):
+def _attach_context_decisions(portfolio_results, market, runner=llm_cli.run_cli):
     """Attach deterministic v3 context decisions and optional LLM shadow review."""
     try:
         holding_book = load_holding_context(PORTFOLIO_SNAPSHOT_PATH)

@@ -8,15 +8,24 @@
 동작:
   - 호출부는 기존 hermes 명령(list)을 그대로 만든다. 이 모듈의 `run`을 기본 runner로 쓰면
     `hermes chat -q PROMPT --provider openrouter --model M` 형태만 직접 호출로 바꾸고, 나머지 명령은
-    `subprocess.run`에 그대로 넘긴다(openai-codex 등 기존 경로 불변).
+    공용 CLI 러너(`lib.llm_cli.run_cli`)에 그대로 넘긴다(openai-codex 등 기존 경로 불변).
   - `--provider agy` 는 Antigravity CLI(`agy --print --model M`)를 빈 스크래치 cwd 에서 직접 실행한다
     (구독 기반 — API 키 불필요, 에이전트 파일 도구가 레포를 못 보게 격리).
   - 직접 호출이 실패하면(키 없음·HTTP 오류·빈 응답) 원래 hermes 명령을 실행해 Hermes의 대체 체인에 맡긴다.
   - 반환값은 subprocess.CompletedProcess 이므로 호출부의 returncode/stdout 처리 코드를 바꿀 필요가 없다.
 
+호출 계약:
+  - `timeout` 은 직접 호출 + hermes 폴백 전체의 단일 예산이다. 폴백은 남은 시간만 받고, 남은 시간이
+    1초 미만이면 시작하지 않고 TimeoutExpired 를 낸다. agy 는 예산을 최소값으로 늘리지 않는다.
+  - `max_tokens` (runner 전용 키워드): 직접 API 요청 body 의 출력 상한. 호출부의 상한(402 재시도의
+    축소값 포함)이 API 까지 그대로 전달된다. hermes 폴백에는 넘기지 않는다(그 경로는 HERMES_HOME
+    오버레이로 같은 상한을 받는다).
+  - 실패 로그에는 경로·예외 종류·소요시간만 남긴다(프롬프트·원시 오류 본문 금지).
+  - hermes/agy CLI 는 `lib.llm_cli.run_cli` 로 실행해 timeout 시 프로세스 그룹 전체를 정리한다.
+
 설정:
   LLM_DIRECT_OPENROUTER   기본 true. false 면 항상 hermes 명령 실행(이전 동작).
-  LLM_DIRECT_MAX_TOKENS   기본 4096. 출력 상한.
+  LLM_DIRECT_MAX_TOKENS   기본 4096. 호출부가 max_tokens 를 주지 않을 때의 출력 상한.
   OPENROUTER_API_KEY      필수(없으면 hermes 명령으로 실행).
   LLM_DIRECT_AGY          기본 true. false 면 agy provider 도 hermes 명령으로 실행.
   LLM_BACKUP_CLI          agy 실행 파일(기본 agy).
@@ -26,8 +35,11 @@ from __future__ import annotations
 import logging
 import os
 import subprocess
+import time
 
 import requests
+
+from lib import llm_cli
 
 logger = logging.getLogger(__name__)
 
@@ -115,39 +127,57 @@ def direct_chat(prompt: str, model: str, *, timeout: float | None = None, post=N
 
 
 def agy_chat(prompt: str, model: str, *, timeout: float | None = None, runner=None) -> str:
-    """agy --print 1회. 성공 시 응답 텍스트, 실패 시 예외. 빈 스크래치 cwd 에서 실행(레포 접근 차단)."""
-    from lib.llm_cli import _scratch_dir
-    secs = max(30, int(timeout or 120))
+    """agy --print 1회. 성공 시 응답 텍스트, 실패 시 예외. 빈 스크래치 cwd 에서 실행(레포 접근 차단).
+
+    timeout 은 호출부 예산 그대로 — CLI 의 --print-timeout 과 프로세스 상한이 같은 값을 쓴다.
+    """
+    budget = float(timeout) if timeout else 120.0
     cmd = [os.getenv("LLM_BACKUP_CLI", "agy"), "--print", prompt, "--model", model,
-           "--print-timeout", f"{secs}s"]
-    result = (runner or subprocess.run)(cmd, capture_output=True, text=True,
-                                        timeout=secs + 30, cwd=_scratch_dir())
+           "--print-timeout", f"{max(1, int(budget))}s"]
+    result = (runner or llm_cli.run_cli)(cmd, capture_output=True, text=True,
+                                         timeout=budget, cwd=llm_cli._scratch_dir())
     if result.returncode != 0:
-        raise RuntimeError(f"agy rc={result.returncode}: {(result.stderr or '')[:120]}")
+        raise RuntimeError(f"agy rc={result.returncode}")
     text = (result.stdout or "").strip()
     if not text:
         raise RuntimeError("빈 응답")
     return text
 
 
-def run(cmd, *args, post=None, fallback=None, agy_runner=None, **kwargs):
+def _fallback_within(deadline, fallback, cmd, args, kwargs):
+    """직접 호출 실패 뒤 hermes 명령을 같은 예산의 남은 시간으로만 실행."""
+    if deadline is None:
+        return fallback(cmd, *args, **kwargs)
+    remaining = deadline - time.monotonic()
+    if remaining < 1:
+        raise subprocess.TimeoutExpired([str(cmd[0])], kwargs.get("timeout"))
+    return fallback(cmd, *args, **{**kwargs, "timeout": remaining})
+
+
+def run(cmd, *args, post=None, fallback=None, agy_runner=None, max_tokens: int | None = None,
+        **kwargs):
     """subprocess.run 호환 runner. openrouter·agy hermes 명령만 직접 호출로 바꾼다."""
-    fallback = fallback or subprocess.run
+    fallback = fallback or llm_cli.run_cli
+    timeout = kwargs.get("timeout")
+    started = time.monotonic()
+    deadline = started + timeout if timeout else None
     agy = parse_agy_chat(cmd) if agy_enabled() else None
     if agy is not None:
         try:
-            text = agy_chat(*agy, timeout=kwargs.get("timeout"), runner=agy_runner)
+            text = agy_chat(*agy, timeout=timeout, runner=agy_runner)
         except Exception as exc:  # noqa: BLE001 — 실패 시 기존 hermes 경로로
-            logger.info("agy 직접 호출 실패 → hermes로 실행: %s", str(exc)[:160])
-            return fallback(cmd, *args, **kwargs)
+            logger.info("agy 직접 호출 실패 → hermes로 실행: error=%s elapsed=%.1fs",
+                        type(exc).__name__, time.monotonic() - started)
+            return _fallback_within(deadline, fallback, cmd, args, kwargs)
         return subprocess.CompletedProcess(cmd, 0, text + "\n", "")
     parsed = parse_openrouter_chat(cmd) if enabled() else None
     if parsed is None:
         return fallback(cmd, *args, **kwargs)
     prompt, model = parsed
     try:
-        text = direct_chat(prompt, model, timeout=kwargs.get("timeout"), post=post)
+        text = direct_chat(prompt, model, timeout=timeout, post=post, max_tokens=max_tokens)
     except Exception as exc:  # noqa: BLE001 — 실패 시 기존 hermes 경로(대체 체인 포함)로
-        logger.info("OpenRouter 직접 호출 실패 → hermes로 실행: %s", str(exc)[:160])
-        return fallback(cmd, *args, **kwargs)
+        logger.info("OpenRouter 직접 호출 실패 → hermes로 실행: error=%s elapsed=%.1fs",
+                    type(exc).__name__, time.monotonic() - started)
+        return _fallback_within(deadline, fallback, cmd, args, kwargs)
     return subprocess.CompletedProcess(cmd, 0, text + "\n", "")

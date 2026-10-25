@@ -12,7 +12,6 @@ from __future__ import annotations
 import json
 import os
 import re
-import subprocess
 from datetime import datetime, timedelta, timezone
 
 KST = timezone(timedelta(hours=9))
@@ -368,7 +367,7 @@ def validate_llm_decisions(raw, allowed_tickers: set[str]) -> dict:
 
 
 def run_llm_portfolio_decisions(items: list[dict], market: dict | None = None,
-                                runner=subprocess.run) -> tuple[dict, str]:
+                                runner=None) -> tuple[dict, str]:
     if not _llm_enabled():
         return {}, "disabled"
     if not items:
@@ -388,6 +387,11 @@ def run_llm_portfolio_decisions(items: list[dict], market: dict | None = None,
         "-Q",
     ]
     timeout = _env_int("INVESTMENT_REPORT_LLM_DECISION_TIMEOUT", 90, 20)
+    if runner is None:
+        # 이 모듈은 investment_report 가 프로젝트 루트를 sys.path 에 넣기 전에 import 되므로
+        # 공용 CLI 러너(프로세스 그룹 정리)는 호출 시점에 가져온다.
+        from lib import llm_cli
+        runner = llm_cli.run_cli
     try:
         result = runner(cmd, capture_output=True, text=True, timeout=timeout, cwd=os.path.dirname(os.path.abspath(__file__)))
     except Exception as exc:

@@ -119,3 +119,29 @@ def test_callback_forwards_budget(monkeypatch):
     monkeypatch.setattr(llm_cli, "structured_chat", lambda prompt, **kwargs: seen.append((prompt, kwargs)) or '{"ok":true}')
     assert wiki_source_compiler.structured_llm_call("source", max_timeout=27) == '{"ok":true}'
     assert seen == [("source", {"max_timeout": 27})]
+
+
+@pytest.mark.parametrize("configured", ["codxe", "codex,codxe", "hermes, openai", "codex;hermes"])
+def test_unknown_provider_fails_closed_without_sending_the_prompt(monkeypatch, providers, configured):
+    """D-12: 오타 제공자를 Hermes 로 조용히 보내지 않는다 — 어떤 제공자에도 프롬프트 미전달."""
+    calls, results = providers
+    results.update({"codex": '{"ok":true}', "openrouter": '{"ok":true}', "hermes": '{"ok":true}'})
+    monkeypatch.setenv("WIKI_STRUCTURED_PROVIDERS", configured)
+    assert llm_cli.structured_chat("source") is None
+    assert calls == []
+
+
+def test_provider_names_are_normalized_and_deduplicated(monkeypatch, providers):
+    calls, results = providers
+    results["hermes"] = '{"ok":true}'
+    monkeypatch.setenv("WIKI_STRUCTURED_PROVIDERS", " Codex ,HERMES,codex, ")
+    assert llm_cli.structured_chat("source") == '{"ok":true}'
+    assert [call[0] for call in calls] == ["codex", "hermes"]
+
+
+@pytest.mark.parametrize("configured", ["", " , "])
+def test_empty_provider_list_calls_nothing(monkeypatch, providers, configured):
+    calls, _ = providers
+    monkeypatch.setenv("WIKI_STRUCTURED_PROVIDERS", configured)
+    assert llm_cli.structured_chat("source") is None
+    assert calls == []

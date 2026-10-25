@@ -23,6 +23,7 @@ import logging
 import os
 from datetime import datetime, timedelta, timezone
 import sys
+import time
 from pathlib import Path
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -270,23 +271,30 @@ def _parse_llm_verdict(text: str) -> tuple[int, str] | None:
 
 
 def _llm_score(event: dict, runner=None) -> tuple[int, str] | None:
-    """LLM 2차 판정 — 성공 시 (점수, 이유), 실패 시 None. hermes 실패 시 백업(agy) 시도."""
-    from lib import llm_direct
-    run = runner or llm_direct.run   # openrouter면 API 직접 호출, 아니면 subprocess.run
+    """LLM 2차 판정 — 성공 시 (점수, 이유), 실패 시 None. hermes 실패 시 백업(agy) 시도.
+
+    1차와 백업은 NEWS_LLM_TIMEOUT 하나를 나눠 쓴다. 실패 로그에는 제공자·예외 종류·소요시간만
+    남긴다 — TimeoutExpired 문자열에는 명령 인자(=속보 제목·보유종목이 든 프롬프트)가 들어간다.
+    """
+    from lib import llm_cli, llm_direct
+    run = runner or llm_direct.run   # openrouter면 API 직접 호출, 아니면 공용 CLI 러너
     prompt = _llm_prompt(event)
     cmd = ["hermes", "chat", "-q", prompt,
            "--provider", NEWS_LLM_PROVIDER, "--model", NEWS_LLM_MODEL, "-Q"]
     text = None
+    started = time.monotonic()
+    deadline = started + NEWS_LLM_TIMEOUT
     try:
         result = run(cmd, capture_output=True, text=True, timeout=NEWS_LLM_TIMEOUT)
         if getattr(result, "returncode", 1) == 0:
             text = getattr(result, "stdout", "") or ""
     except Exception as e:
-        logger.info("LLM 판정 호출 실패: %s", e)
+        logger.info("LLM 판정 호출 실패: provider=%s error=%s elapsed=%.1fs",
+                    NEWS_LLM_PROVIDER, type(e).__name__, time.monotonic() - started)
     if text is None:
         try:
-            from lib.llm_cli import backup_chat
-            text, _note = backup_chat(prompt, timeout=NEWS_LLM_TIMEOUT, runner=runner)
+            text, _note = llm_cli.backup_chat(prompt, timeout=deadline - time.monotonic(),
+                                              runner=runner)
         except Exception:
             text = None
     if text is None:
@@ -294,14 +302,21 @@ def _llm_score(event: dict, runner=None) -> tuple[int, str] | None:
     return _parse_llm_verdict(text)
 
 
+def llm_eligible(event: dict) -> bool:
+    """이 속보가 LLM 2차 판정 대상인가 (게이트 on + 규칙 점수 경계선)."""
+    score, _reason = _rule_score(event)
+    return NEWS_LLM_ENABLED and _LLM_BAND[0] <= score <= _LLM_BAND[1]
+
+
 def judge_importance(event: dict, *, allow_llm: bool = False, runner=None) -> tuple[int, str, bool]:
-    """중요도 판정 — (점수, 이유, LLM사용여부).
+    """중요도 판정 — (점수, 이유, LLM판정채택여부).
 
     규칙 1차 판정이 경계선(_LLM_BAND)이고 allow_llm(게이트+회당 예산)일 때만 LLM 2차 판정.
     LLM 실패·형식 위반 → 규칙 점수 그대로 (알림 누락 없음·오발송 없음 방향으로 보수적).
+    예산 차감은 호출부가 호출 시도 직전에 한다(성공 여부와 무관).
     """
     score, reason = _rule_score(event)
-    if not (allow_llm and NEWS_LLM_ENABLED and _LLM_BAND[0] <= score <= _LLM_BAND[1]):
+    if not (allow_llm and llm_eligible(event)):
         return score, reason, False
     verdict = _llm_score(event, runner=runner)
     if verdict is None:
@@ -406,17 +421,20 @@ def main() -> None:
     # 중요도 판단 + 발송
     sent_count  = 0
     state_dirty = False
-    llm_used    = 0   # 회당 LLM 판정 예산 (경계선만·NEWS_LLM_MAX_PER_RUN 상한)
+    # 회당 LLM 판정 예산 — 경계선 속보 1건의 판정 시도(1차 + 내부 폴백/백업, 모두
+    # NEWS_LLM_TIMEOUT 단일 예산 안)를 1로 센다. 성공 여부와 무관하게 호출 직전에 예약해야
+    # 타임아웃·형식 실패가 이어져도 NEWS_LLM_MAX_PER_RUN 을 넘겨 호출하지 않는다.
+    llm_used    = 0
 
     for event in new_items:
         if sent_count >= MAX_SEND_PER_RUN:
             break
 
-        score, reason, used_llm = judge_importance(
-            event, allow_llm=(event.get("transport") != "hermes_webhook"
-                              and llm_used < NEWS_LLM_MAX_PER_RUN))
-        if used_llm:
+        allow_llm = (event.get("transport") != "hermes_webhook"
+                     and llm_used < NEWS_LLM_MAX_PER_RUN and llm_eligible(event))
+        if allow_llm:
             llm_used += 1
+        score, reason, used_llm = judge_importance(event, allow_llm=allow_llm)
         logger.info("[%s] 중요도 %d — %s%s", event["id"][:8], score, reason,
                     " (LLM)" if used_llm else "")
 
