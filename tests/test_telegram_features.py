@@ -784,6 +784,40 @@ def test_offset_persists_to_disk_and_survives_restart(monkeypatch, tmp_path):
     tb._persist_offset(12399)                        # 다음 업데이트 처리 후 갱신
     assert tb._load_persisted_offset() == 12399
 
+def test_load_persisted_offset_logs_corrupt_file(monkeypatch, tmp_path, caplog):
+    """손상된 offset 파일은 최초 실행(None)과 구분해 경고 로그를 남겨야 운영자가 알 수 있다."""
+    import logging
+    import telegram_bot as tb
+
+    offset_file = tmp_path / "telegram_offset.txt"
+    offset_file.write_text("garbage")
+    monkeypatch.setattr(tb, "_offset_file_path", lambda: str(offset_file))
+
+    with caplog.at_level(logging.WARNING):
+        assert tb._load_persisted_offset() is None
+    assert any("offset 파일 복원 실패" in r.message for r in caplog.records)
+
+
+def test_ingest_update_enqueues_command_and_blocks_unknown_chat(monkeypatch):
+    """_ingest_update: 허용 chat 의 명령은 dispatch 큐로, 미허용 chat 은 차단 응답만.
+    (offset 영속화는 호출자가 큐잉 뒤에 수행 — 큐잉 전 크래시로 명령이 유실되지 않게)"""
+    import queue
+    import telegram_bot as tb
+
+    q = queue.Queue()
+    monkeypatch.setattr(tb, "_DISPATCH_Q", q)
+    monkeypatch.setattr(tb, "_role_for", lambda cid: "owner" if cid == "1" else None)
+    api_calls = []
+    monkeypatch.setattr(tb, "_api", lambda method, **kw: api_calls.append((method, kw)))
+
+    tb._ingest_update({"update_id": 7, "message": {"chat": {"id": 1}, "text": "/status"}})
+    assert q.get_nowait() == ("/status", "1", "owner")
+
+    tb._ingest_update({"update_id": 8, "message": {"chat": {"id": 99}, "text": "/status"}})
+    assert q.empty()
+    assert api_calls and api_calls[-1][1]["chat_id"] == "99"
+
+
 
 def test_attachment_worker_offloads_and_survives_errors(monkeypatch):
     """OCR/PDF 첨부 처리도 dispatch 워커와 동일하게 전용 큐로 오프로드돼야 메인

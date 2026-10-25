@@ -168,10 +168,15 @@ def _load_persisted_offset() -> int | None:
     """직전 실행이 마지막으로 처리한 update_id+1 을 디스크에서 복원.
 
     없으면(최초 실행) None — Telegram 기본 동작(대기 중인 가장 오래된 업데이트부터).
+    손상·권한 오류는 경고 로그 후 None (최초 실행과 구분해 운영자가 알 수 있게).
     """
+    path = Path(_offset_file_path())
     try:
-        return int(Path(_offset_file_path()).read_text().strip())
-    except Exception:
+        return int(path.read_text().strip())
+    except FileNotFoundError:
+        return None
+    except Exception as e:
+        logger.warning("offset 파일 복원 실패 (%s): %s — 미확인 업데이트부터 재개", path, e)
         return None
 
 
@@ -2217,6 +2222,41 @@ def _attachment_worker():
             _ATTACHMENT_Q.task_done()
 
 
+def _ingest_update(upd: dict) -> None:
+    """업데이트 1건 분류 — 권한 확인 후 첨부/일반 텍스트/명령을 워커 큐로 넘긴다 (폴링 비차단)."""
+    msg     = upd.get("message", {})
+    chat_id = str(msg.get("chat", {}).get("id", ""))
+    text    = msg.get("text", "")
+
+    has_attachment = "photo" in msg or "document" in msg
+    if not has_attachment and not text.strip():
+        return
+    role = _role_for(chat_id)
+    if role is None:
+        logger.warning(f"차단: chat_id {chat_id}")
+        _api("sendMessage", chat_id=chat_id, text="🔒 권한 없음")
+        return
+
+    if has_attachment:
+        # 첨부(스냅샷/매도내역 파싱)는 포트폴리오 수정 → 소유자 전용
+        if role != "owner":
+            _api("sendMessage", chat_id=chat_id, text="🔒 첨부 파일은 소유자 전용입니다.")
+            return
+        kind = "photo" if "photo" in msg else "document"
+        logger.info(f"첨부 수신: {kind}")
+        _ATTACHMENT_Q.put((msg, chat_id))   # 워커 스레드로 오프로드(OCR 최대 60초·폴링 비차단)
+        return
+
+    # 일반 텍스트(스냅샷/매도내역) 처리는 포트폴리오 수정 → 소유자 전용
+    if role == "owner" and not text.startswith("/") and handle_plain_text(text, chat_id):
+        logger.info("일반 텍스트를 스냅샷/매도내역으로 처리")
+        return
+
+    text = _normalize_message_text(text)
+    logger.info(f"수신: {text!r}")
+    _DISPATCH_Q.put((text, chat_id, role))   # 워커 스레드로 오프로드(폴링·주기작업 비차단)
+
+
 def run():
     if not TELEGRAM_TOKEN:
         logger.error("STOCK_BOT_TOKEN 없음 — .env 파일 확인")
@@ -2265,39 +2305,9 @@ def run():
 
             consecutive_409 = 0
             for upd in updates:
-                offset  = upd["update_id"] + 1
-                _persist_offset(offset)
-                msg     = upd.get("message", {})
-                chat_id = str(msg.get("chat", {}).get("id", ""))
-                text    = msg.get("text", "")
-
-                has_attachment = "photo" in msg or "document" in msg
-                if not has_attachment and not text.strip():
-                    continue
-                role = _role_for(chat_id)
-                if role is None:
-                    logger.warning(f"차단: chat_id {chat_id}")
-                    _api("sendMessage", chat_id=chat_id, text="🔒 권한 없음")
-                    continue
-
-                if has_attachment:
-                    # 첨부(스냅샷/매도내역 파싱)는 포트폴리오 수정 → 소유자 전용
-                    if role != "owner":
-                        _api("sendMessage", chat_id=chat_id, text="🔒 첨부 파일은 소유자 전용입니다.")
-                        continue
-                    kind = "photo" if "photo" in msg else "document"
-                    logger.info(f"첨부 수신: {kind}")
-                    _ATTACHMENT_Q.put((msg, chat_id))   # 워커 스레드로 오프로드(OCR 최대 60초·폴링 비차단)
-                    continue
-
-                # 일반 텍스트(스냅샷/매도내역) 처리는 포트폴리오 수정 → 소유자 전용
-                if role == "owner" and not text.startswith("/") and handle_plain_text(text, chat_id):
-                    logger.info("일반 텍스트를 스냅샷/매도내역으로 처리")
-                    continue
-
-                text = _normalize_message_text(text)
-                logger.info(f"수신: {text!r}")
-                _DISPATCH_Q.put((text, chat_id, role))   # 워커 스레드로 오프로드(폴링·주기작업 비차단)
+                offset = upd["update_id"] + 1
+                _ingest_update(upd)
+                _persist_offset(offset)   # 큐잉/처리 뒤 영속화 — 큐잉 전 크래시로 명령이 유실되지 않게
 
             # 주기 작업 — 백그라운드 스레드로 실행해 명령어 응답 차단 방지
             now = time.time()
