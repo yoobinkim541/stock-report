@@ -2200,16 +2200,38 @@ def _run_periodic(name: str, fn) -> None:
 # 명령 dispatch 단일 워커 — 무거운 명령(/signals 200s·/ask·/portfolio 등)이 메인 폴링 루프
 # (getUpdates 재폴링·주기작업 스케줄 체크)를 막지 않도록 큐로 오프로드. **단일 워커**라 명령은
 # 여전히 1건씩 순차 처리(새 동시성 없음·현행 의미 보존). 주기 데몬과의 동시성은 기존 수준 그대로.
-_DISPATCH_Q: "queue.Queue" = queue.Queue()
+_DISPATCH_Q: "queue.Queue" = queue.Queue(maxsize=200)
+
+# 느린 명령 전용 레인 — /signals(최대 ~200s)·/ask(LLM)·/evolve 가 단일 워커를 잡으면 뒤의
+# /status 같은 즉답 명령까지 분 단위로 밀렸다. 느린 명령은 별도 워커로 보내 서로 간섭 안 하게.
+_SLOW_COMMANDS = {"/signals", "/ask", "/evolve", "/portfolio", "/risk"}
+_SLOW_Q: "queue.Queue" = queue.Queue(maxsize=50)
+
+
+def _is_slow_command(text: str) -> bool:
+    head = (text or "").strip().split(maxsplit=1)[0].lower() if (text or "").strip() else ""
+    head = BOT_COMMAND_ALIASES.get(head, head)
+    return head.split(maxsplit=1)[0] in _SLOW_COMMANDS
+
+
+def _enqueue_command(text: str, chat_id: str, role: str) -> None:
+    """큐 포화(maxsize) 시 블로킹 대신 즉시 안내 — 폴링 루프가 멈추면 전체 봇이 멈춘다."""
+    q = _SLOW_Q if _is_slow_command(text) else _DISPATCH_Q
+    try:
+        q.put_nowait((text, chat_id, role))
+    except queue.Full:
+        logger.warning("명령 큐 포화(%s) — 드롭: %r", "slow" if q is _SLOW_Q else "fast", text)
+        _api("sendMessage", chat_id=chat_id, text="⏳ 처리 대기 중인 명령이 많습니다. 잠시 후 다시 시도해 주세요.")
 
 # 첨부(OCR/PDF) 처리 전용 워커 — tesseract OCR 은 페이지당 최대 60초까지 걸릴 수 있어
 # dispatch 큐와 별도로 분리(느린 첨부 처리 중에도 일반 명령이 밀리지 않게).
 _ATTACHMENT_Q: "queue.Queue" = queue.Queue()
 
 
-def _dispatch_worker():
+def _dispatch_worker(q: "queue.Queue | None" = None):
+    q = q if q is not None else _DISPATCH_Q
     while True:
-        item = _DISPATCH_Q.get()
+        item = q.get()
         try:
             text, chat_id, role = item
             dispatch(text, chat_id, role)
@@ -2220,7 +2242,7 @@ def _dispatch_worker():
             except Exception:
                 pass
         finally:
-            _DISPATCH_Q.task_done()
+            q.task_done()
 
 
 def _attachment_worker():
@@ -2271,7 +2293,7 @@ def _ingest_update(upd: dict) -> None:
 
     text = _normalize_message_text(text)
     logger.info(f"수신: {text!r}")
-    _DISPATCH_Q.put((text, chat_id, role))   # 워커 스레드로 오프로드(폴링·주기작업 비차단)
+    _enqueue_command(text, chat_id, role)    # 워커 스레드로 오프로드(폴링·주기작업 비차단)
 
 
 def run():
@@ -2299,6 +2321,7 @@ def run():
 
     # dispatch 오프로드 워커 기동 (무거운 명령이 폴링·주기알림을 막지 않게)
     threading.Thread(target=_dispatch_worker, daemon=True, name="dispatch-worker").start()
+    threading.Thread(target=_dispatch_worker, args=(_SLOW_Q,), daemon=True, name="dispatch-slow-worker").start()
     threading.Thread(target=_attachment_worker, daemon=True, name="attachment-worker").start()
 
     while True:

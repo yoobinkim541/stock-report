@@ -804,8 +804,9 @@ def test_ingest_update_enqueues_command_and_blocks_unknown_chat(monkeypatch):
     import queue
     import telegram_bot as tb
 
-    q = queue.Queue()
+    q, slow = queue.Queue(), queue.Queue()
     monkeypatch.setattr(tb, "_DISPATCH_Q", q)
+    monkeypatch.setattr(tb, "_SLOW_Q", slow)
     monkeypatch.setattr(tb, "_role_for", lambda cid: "owner" if cid == "1" else None)
     api_calls = []
     monkeypatch.setattr(tb, "_api", lambda method, **kw: api_calls.append((method, kw)))
@@ -816,6 +817,23 @@ def test_ingest_update_enqueues_command_and_blocks_unknown_chat(monkeypatch):
     tb._ingest_update({"update_id": 8, "message": {"chat": {"id": 99}, "text": "/status"}})
     assert q.empty()
     assert api_calls and api_calls[-1][1]["chat_id"] == "99"
+
+    # 느린 명령(/signals·/ask·오타 alias 포함)은 slow 레인으로 — /status 가 뒤에서 안 막히게
+    tb._ingest_update({"update_id": 9, "message": {"chat": {"id": 1}, "text": "/signals entry"}})
+    tb._ingest_update({"update_id": 10, "message": {"chat": {"id": 1}, "text": "/portpolio"}})
+    assert q.empty() and slow.qsize() == 2
+
+
+def test_enqueue_command_full_queue_replies_instead_of_blocking(monkeypatch):
+    import queue
+    import telegram_bot as tb
+    q = queue.Queue(maxsize=1)
+    q.put(("/status", "1", "owner"))
+    monkeypatch.setattr(tb, "_DISPATCH_Q", q)
+    replies = []
+    monkeypatch.setattr(tb, "_api", lambda method, **kw: replies.append(kw))
+    tb._enqueue_command("/status", "1", "owner")          # 포화 → 블로킹 없이 안내
+    assert q.qsize() == 1 and "잠시 후" in replies[-1]["text"]
 
 
 
