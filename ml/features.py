@@ -248,7 +248,15 @@ def cci(
     else:
         typical = close
     ma  = typical.rolling(period).mean()
-    mad = typical.rolling(period).apply(lambda x: np.abs(x - x.mean()).mean(), raw=True)
+    # 평균절대편차(MAD) 벡터화 — rolling.apply(lambda) 는 윈도마다 Python 호출이라 수천 봉 ×
+    # 수백 종목 피처 생성에서 가장 느린 지표였다. sliding_window_view 로 (n, period) 행렬을
+    # 만들어 한 번에 계산 (결과 동일, 테스트로 고정).
+    values = typical.to_numpy(dtype="float64")
+    mad = np.full(len(values), np.nan)
+    if len(values) >= period:
+        windows = np.lib.stride_tricks.sliding_window_view(values, period)
+        mad[period - 1:] = np.abs(windows - windows.mean(axis=1, keepdims=True)).mean(axis=1)
+    mad = pd.Series(mad, index=typical.index)
     return ((typical - ma) / (0.015 * mad.replace(0, np.nan))).rename(f"cci_{period}")
 
 
