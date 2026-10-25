@@ -366,6 +366,28 @@ def upsert_record(record: dict) -> dict:
     return normalized
 
 
+def patch_record(record_id: str, mutate) -> dict | None:
+    """id 레코드를 **락 안에서** 읽고 mutate(dict)->dict 로 바꿔 원자 재작성 (lost update 방지).
+
+    useCount 증분·피드백 카운터처럼 '현재 값 + 1' 형태의 갱신은 get→upsert 두 호출로 하면
+    동시 요청이 같은 값을 읽어 증분 하나가 사라진다. 레코드가 없으면 None."""
+    ensure_store()
+    record_id = str(record_id or "").strip()
+    if not record_id:
+        return None
+    with _events_lock():
+        rows = _read_jsonl(_paths()["events"])
+        target = next((row for row in rows if row.get("id") == record_id), None)
+        if target is None:
+            return None
+        updated = normalize_record(mutate(dict(target)))
+        kept = [row for row in rows if row.get("id") != record_id]
+        kept.append(updated)
+        _write_jsonl_locked(kept)
+        _write_index_locked()
+    return updated
+
+
 def batch_upsert_delete(*, upserts: list[dict], deletes: list[str]) -> dict:
     """원자적 배치: 모든 upsert + delete를 한 번의 파일 재작성으로 처리한다.
 

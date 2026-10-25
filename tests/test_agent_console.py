@@ -1678,6 +1678,35 @@ def test_wiki_track_page_usage_increments_use_count_and_last_used(monkeypatch, t
     assert fetched["lastQuery"] == "레버리지 질문"
     assert fetched["lastUsedAt"]
 
+def test_wiki_track_page_usage_is_atomic_under_concurrency_and_keeps_metadata(monkeypatch, tmp_path):
+    """동시 track_page_usage — 증분이 소실되지 않고(종전 get→upsert lost update), evidence_ids
+    등 페이지 메타는 그대로 유지된다."""
+    import threading
+    _isolate(monkeypatch, tmp_path)
+    from agent_console import wiki
+
+    page = wiki.upsert_page({
+        "title": "동시 사용량", "summary": "요약", "body": "본문", "surface": "portfolio",
+        "kind": "note", "status": "draft", "source_refs": [],
+        "evidence_ids": ["ev-1", "ev-2"], "answer_hints": ["힌트"],
+    })
+    barrier = threading.Barrier(8)
+
+    def w(i):
+        barrier.wait()
+        for _ in range(5):
+            wiki.track_page_usage(page["id"], f"q{i}")
+    ts = [threading.Thread(target=w, args=(i,)) for i in range(8)]
+    for t in ts:
+        t.start()
+    for t in ts:
+        t.join()
+    fetched = wiki.get_page(page["id"])
+    assert fetched["useCount"] == 40
+    assert fetched["evidence_ids"] == ["ev-1", "ev-2"] and fetched["answer_hints"] == ["힌트"]
+    assert wiki.track_page_usage("no-such-page", "q") is None     # 없는 페이지는 무시
+
+
 
 def test_wiki_list_unused_pages_flags_old_and_never_used_pages(monkeypatch, tmp_path):
     _isolate(monkeypatch, tmp_path)

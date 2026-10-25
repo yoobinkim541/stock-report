@@ -1463,30 +1463,24 @@ def split_children_for_page(page: dict | None) -> list[dict]:
 
 
 def track_page_usage(page_id: str, query: str) -> None:
-    """페이지가 LLM 컨텍스트로 제공될 때 호출한다. useCount 증가, lastUsedAt/lastQuery 갱신."""
-    page = get_page(page_id)
-    if not page:
+    """페이지가 LLM 컨텍스트로 제공될 때 호출한다. useCount 증가, lastUsedAt/lastQuery 갱신.
+
+    저장 계층 락 안에서 현재 값을 읽어 증분(shared_memory.patch_record) — 종전 get→upsert 는
+    동시 요청이 같은 useCount 를 읽어 증분 하나가 사라졌다. 다른 필드는 손대지 않는다."""
+    page_id = _clean(page_id, 80)
+    if not page_id:
         return
-    upsert_page({
-        "id": page["id"],
-        "title": page.get("title"),
-        "summary": page.get("summary"),
-        "body": page.get("body"),
-        "surface": page.get("surface"),
-        "kind": page.get("kind"),
-        "status": page.get("status"),
-        "tags": page.get("tags") or [],
-        "source_refs": page.get("source_refs") or [],
-        "links": page.get("links") or [],
-        "messages": page.get("messages") or [],
-        "decisions": page.get("decisions") or [],
-        "openQuestions": page.get("openQuestions") or [],
-        "confidence": page.get("confidence"),
-        "created_at": page.get("created_at"),
-        "useCount": _safe_count(page.get("useCount")) + 1,
-        "lastUsedAt": _now(),
-        "lastQuery": _clean(query, 200),
-    })
+    query_text = _clean(query, 200)
+
+    def _bump(record: dict) -> dict:
+        record["useCount"] = _safe_count(record.get("useCount")) + 1
+        record["lastUsedAt"] = _now()
+        record["lastQuery"] = query_text
+        return record
+
+    if shared_memory.patch_record(page_id, _bump) is None:
+        return
+    _CACHE.clear()
     _debounced_rebuild()
 
 
@@ -1494,28 +1488,19 @@ def _store_page_feedback(page_id: str, rating: str) -> None:
     """페이지의 유용성 피드백을 저장/증분한다. rating: 'helpful' | 'not_helpful' | 'neutral'."""
     if rating not in ("helpful", "not_helpful", "neutral"):
         return
-    page = get_page(page_id)
-    if not page:
+    page_id = _clean(page_id, 80)
+    if not page_id:
         return
-    existing_feedback = dict(page.get("feedback") or {})
-    existing_feedback[rating] = existing_feedback.get(rating, 0) + 1
-    upsert_page({
-        "id": page["id"],
-        "title": page.get("title"),
-        "summary": page.get("summary"),
-        "body": page.get("body"),
-        "surface": page.get("surface"),
-        "kind": page.get("kind"),
-        "status": page.get("status"),
-        "tags": page.get("tags") or [],
-        "source_refs": page.get("source_refs") or [],
-        "links": page.get("links") or [],
-        "messages": page.get("messages") or [],
-        "decisions": page.get("decisions") or [],
-        "openQuestions": page.get("openQuestions") or [],
-        "confidence": page.get("confidence"),
-        "feedback": existing_feedback,
-    })
+
+    def _bump(record: dict) -> dict:
+        feedback = dict(record.get("feedback") or {})
+        feedback[rating] = _safe_count(feedback.get(rating)) + 1
+        record["feedback"] = feedback
+        return record
+
+    if shared_memory.patch_record(page_id, _bump) is None:
+        return
+    _CACHE.clear()
     _debounced_rebuild()
 
 
