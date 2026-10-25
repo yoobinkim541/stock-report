@@ -189,8 +189,8 @@ def _answer_impl(question: str, surface: str, async_postprocess: bool,
         response = _compose_error_fallback_answer(question, pack, exc)
     if not any(item.get("name") == "failed" for item in progress_events):
         _emit_progress_event("answer_ready")
-    engine = _LAST_LLM_ENGINE or "local-rules"
-    fallback_reason = _LAST_FALLBACK_REASON
+    engine = _llm_engine() or "local-rules"
+    fallback_reason = _llm_fallback_reason()
     intent = _classify_question_intent(question, pack, history)
     usage_summary = evidence_context.build_usage_summary(
         pack,
@@ -1318,7 +1318,7 @@ def _compose_general_chat_answer(question: str, pack: dict, history: list[dict] 
     if _accept_llm_response(llm, intent):
         return llm
     fallback = _fallback_general_chat(question, pack, history)
-    if _LAST_FALLBACK_REASON in {"llm_disabled", "forbidden_template"}:
+    if _llm_fallback_reason() in {"llm_disabled", "forbidden_template"}:
         return fallback
     return (fallback + "\n\n⚠️ LLM 엔진(codex→hermes→agy) 응답을 받지 못해 규칙 기반 폴백으로 답했습니다. "
             "서버에서 `codex --version`·`hermes --version`·API 크레딧/모델 설정을 확인해 주세요.")
@@ -1326,26 +1326,33 @@ def _compose_general_chat_answer(question: str, pack: dict, history: list[dict] 
 
 # 마지막 답변을 만든 엔진 (codex/hermes/agy — LLM 미개입이면 None=local-rules).
 # answer() 가 매 호출 초기화 후 context.engine 으로 노출 → UI 가 정직하게 표기.
-_LAST_LLM_ENGINE: str | None = None
-_LAST_FALLBACK_REASON: str | None = None
+# **요청(스레드) 범위** — 모듈 전역이면 동시 요청·provider 경합 loser 스레드가 서로의 표시를
+# 덮어썼다. provider 함수는 워커 스레드에서 마킹하므로 _race_providers 가 승자를 요청 스레드에
+# 다시 못박는다.
+_LLM_STATE = threading.local()
+
+
+def _llm_engine() -> str | None:
+    return getattr(_LLM_STATE, "engine", None)
+
+
+def _llm_fallback_reason() -> str | None:
+    return getattr(_LLM_STATE, "fallback_reason", None)
 
 
 def _mark_llm_engine(name: str) -> None:
-    global _LAST_LLM_ENGINE, _LAST_FALLBACK_REASON
-    _LAST_LLM_ENGINE = name
-    _LAST_FALLBACK_REASON = None
+    _LLM_STATE.engine = name
+    _LLM_STATE.fallback_reason = None
 
 
 def _mark_rules_fallback(reason: str) -> None:
-    global _LAST_LLM_ENGINE, _LAST_FALLBACK_REASON
-    _LAST_LLM_ENGINE = None
-    _LAST_FALLBACK_REASON = str(reason or "rules_fallback")
+    _LLM_STATE.engine = None
+    _LLM_STATE.fallback_reason = str(reason or "rules_fallback")
 
 
 def _reset_llm_engine() -> None:
-    global _LAST_LLM_ENGINE, _LAST_FALLBACK_REASON
-    _LAST_LLM_ENGINE = None
-    _LAST_FALLBACK_REASON = None
+    _LLM_STATE.engine = None
+    _LLM_STATE.fallback_reason = None
 
 
 def _should_use_web_search(question: str, pack: dict) -> bool:

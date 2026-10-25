@@ -1273,7 +1273,7 @@ def test_llm_race_does_not_let_the_slower_loser_overwrite_the_winner_engine(monk
 
     result = agent._try_llm_prompt("테스트")
     assert result == "빠른 답변"
-    assert agent._LAST_LLM_ENGINE == "hermes"
+    assert agent._llm_engine() == "hermes"
 
 
 def test_llm_default_budget_is_generous_enough_for_real_prompts(monkeypatch):
@@ -2988,7 +2988,7 @@ def test_agent_llm_chat_rejects_unusable_non_korean_codex_output(monkeypatch):
     answer = agent._try_llm_prompt("한국증시는 어땠어", runner=fake_runner)
 
     assert answer == "한국어 Gemini 답변"
-    assert agent._LAST_LLM_ENGINE == "gemini"
+    assert agent._llm_engine() == "gemini"
 
 
 def test_agent_llm_chat_falls_through_codex_hermes_to_gemini(monkeypatch):
@@ -5439,3 +5439,27 @@ def test_legacy_chat_and_default_preview_routes_remain_compatible(monkeypatch, t
     assert preview.get_json()["ok"] is True
     assert chat.status_code == 200
     assert chat.get_json()["answer"] == "legacy"
+
+
+def test_llm_engine_marker_is_request_scoped_across_threads():
+    """엔진 표시는 요청(스레드) 범위 — 동시 요청이 서로의 표시를 덮어쓰지 않는다."""
+    import threading
+    from agent_console import agent
+
+    seen = {}
+    start = threading.Barrier(2)
+
+    def w(name):
+        agent._reset_llm_engine()
+        start.wait()
+        agent._mark_llm_engine(name)
+        import time as _t
+        _t.sleep(0.05)
+        seen[name] = agent._llm_engine()
+    ts = [threading.Thread(target=w, args=(n,)) for n in ("codex", "hermes")]
+    for t in ts:
+        t.start()
+    for t in ts:
+        t.join()
+    assert seen == {"codex": "codex", "hermes": "hermes"}
+    assert agent._llm_engine() is None                       # 메인 스레드는 영향 없음

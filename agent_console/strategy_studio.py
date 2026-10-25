@@ -1013,7 +1013,7 @@ def propose_strategy_patch_with_llm(
         "preview": preview,
         "diagnostics": _dedupe_diagnostics(diagnostics),
         "rationale": rationale,
-        "llm_engine": getattr(agent, "_LAST_LLM_ENGINE", None),
+        "llm_engine": agent._llm_engine(),
     })
 
 
