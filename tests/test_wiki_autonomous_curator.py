@@ -230,7 +230,10 @@ def test_review_status_and_repaired_claims_are_rejudged_although_the_prompt_is_u
     assert judge()["suppressed"] == 1 and len(calls) == 1
 
     _page(wiki, **{**target_fields, "status": "reviewed"})
+    # Re-save the unchanged source so the pair (and prompt) keeps its original order.
+    _page(wiki, **source_fields, source_knowledge={"claims": [_same_claim("Revenue is guaranteed")]})
     assert judge()["merged"] == [] and len(calls) == 2  # status is not in the prompt
+    assert calls[1] == calls[0]
 
     _page(wiki, **source_fields, source_knowledge={"claims": [_same_claim("Capacity is a forecast")]})
     result = judge()
