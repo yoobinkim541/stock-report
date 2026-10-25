@@ -791,28 +791,47 @@ def _benchmark_run(benchmarks: Mapping[str, object]) -> object | None:
 
 
 def _configuration_matrix(folds: Sequence[object]) -> np.ndarray | None:
-    matrices: list[np.ndarray] = []
+    """fold 별 설정 수익 행렬을 행 방향으로 이어 붙인다 (PBO/DSR 입력).
+
+    열 = 설정(configuration). fold 마다 열 순서·구성이 다르면 서로 다른 설정의 수익이 같은
+    열로 합쳐져 PBO·시행 샤프가 오염되므로, DataFrame 은 열 라벨의 공통 집합을 같은 순서로
+    정렬해 맞추고(공통 열 < 2 면 None), 라벨 없는 배열은 폭이 전부 같을 때만 허용한다.
+    종전엔 최소 폭으로 자르고 그냥 이어 붙였다.
+    """
+    frames: list[pd.DataFrame] = []
+    arrays: list[np.ndarray] = []
     for run in folds:
         candidate = _run_metrics(run).get("configuration_returns")
         if candidate is None:
             candidate = _run_value(run, "configuration_returns", None)
         if isinstance(candidate, pd.DataFrame):
-            array = candidate.to_numpy(dtype="float64")
+            if candidate.shape[1] >= 2:
+                frames.append(candidate)
         elif candidate is not None:
             try:
                 array = np.asarray(candidate, dtype="float64")
             except (TypeError, ValueError):
                 continue
-        else:
-            continue
-        if array.ndim == 1:
-            array = array[:, None]
-        if array.ndim == 2 and array.shape[1] >= 2:
-            matrices.append(array)
-    if not matrices:
+            if array.ndim == 1:
+                array = array[:, None]
+            if array.ndim == 2 and array.shape[1] >= 2:
+                arrays.append(array)
+    if frames and arrays:
+        return None                                   # 라벨 유무가 섞이면 정렬 불가
+    if frames:
+        common = list(frames[0].columns)
+        for frame in frames[1:]:
+            present = set(frame.columns)
+            common = [c for c in common if c in present]
+        if len(common) < 2:
+            return None
+        return np.concatenate([f.loc[:, common].to_numpy(dtype="float64") for f in frames], axis=0)
+    if not arrays:
         return None
-    width = min(matrix.shape[1] for matrix in matrices)
-    return np.concatenate([matrix[:, :width] for matrix in matrices], axis=0)
+    width = arrays[0].shape[1]
+    if any(a.shape[1] != width for a in arrays):
+        return None
+    return np.concatenate(arrays, axis=0)
 
 
 def _tested_configurations(folds: Sequence[object]) -> int:
