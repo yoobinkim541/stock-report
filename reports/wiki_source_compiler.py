@@ -1,16 +1,23 @@
 """Compile full permitted source text into reusable, attributed draft knowledge.
 
 Freshly compiled model output must pass deterministic grounding rules (see
-``grounding_violation`` and ``claim_grounding_violation``). They are lexical
-checks, not factual entailment: they reject numbers, names and certainty words
-that the cited source text does not contain, but cannot prove a paraphrase true.
+``claim_grounding_violation`` and ``prose_grounding_violation``). They compare
+surface signals, not factual entailment: numbers (with unit scales), names,
+certainty/multiplier words, negation, rise/fall direction and forecast wording
+must correspond to the cited source text. Lexical overlap is required only when
+the claim and its quote are in the same language; a translation is checked by
+the language-independent signals alone. Anything that passes is still unverified
+model synthesis and is labelled as such in LLM context (``wiki.build_context_section``).
 """
 from __future__ import annotations
 
+from decimal import Decimal
+from functools import lru_cache
 import hashlib
 import json
 import os
 import re
+import unicodedata
 from typing import Callable, TypedDict
 
 from agent_console import wiki
@@ -26,40 +33,73 @@ _SAFE_FAILURE_CODES = frozenset({
     "anchor_missing", "anchor_quote_too_short", "claim_number_unsupported",
     "claim_certainty_unsupported", "claim_name_unsupported", "claim_quote_unrelated",
     "body_number_unsupported", "body_certainty_unsupported",
+    "claim_negation_unsupported", "claim_direction_unsupported", "claim_modality_unsupported",
+    "body_direction_unsupported", "body_sentence_unrelated",
 })
 
 # Grounding rules for freshly compiled output (documented in docs/shared-agent-memory.md).
 MIN_ANCHOR_QUOTE_CHARS = 12
 _CITATION_OR_URL = re.compile(r"\[S[0-9]+\](?:\([^)\s]*\))?|https?://\S+|www\.\S+", re.I)
-_NUMBER = re.compile(r"[0-9]+(?:[.,][0-9]+)*")
 _THOUSANDS = re.compile(r"[0-9]{1,3}(?:,[0-9]{3})+(?:\.[0-9]+)?")
-# Certainty and multiplier expressions. A claim/prose may use one only when
-# its evidence asserts the same expression (negated uses are not assertions).
+# A number with an optional scale: English words/abbreviations or Korean units (applied to casefolded text).
+_NUMBER_MENTION = re.compile(
+    r"([0-9]+(?:[.,][0-9]+)*)(?:\s*(thousand|million|billion|trillion)\b|(bn|mn|tn|[kmbt])(?![a-z])"
+    r"|\s?([십백천]?[만억조]|[십백천]))?")
+_EN_SCALE = {"thousand": 3, "k": 3, "million": 6, "mn": 6, "m": 6, "billion": 9, "bn": 9, "b": 9,
+             "trillion": 12, "tn": 12, "t": 12}
+_KO_SMALL_UNIT = {"십": 1, "백": 2, "천": 3}
+_KO_LARGE_UNIT = {"만": 4, "억": 8, "조": 12}
+# Evidence-side only: spelled numbers and multipliers may support a digit in a translation.
+_NUMBER_WORDS = {"one": "1", "two": "2", "three": "3", "four": "4", "five": "5", "six": "6", "seven": "7",
+                 "eight": "8", "nine": "9", "ten": "10", "eleven": "11", "twelve": "12", "dozen": "12"}
+_MULTIPLIER_NUMBERS = {"x2": "2", "x3": "3", "x4": "4"}
+# Certainty and multiplier expressions, keyed by meaning so English and Korean
+# forms of the same unit correspond. A claim/prose may use one only when its
+# evidence asserts the same unit (negated uses are not assertions).
 _ASSERTIVE_PATTERNS = {
-    "guarantee": r"\bguarantee(?:s|d)?\b|\bguaranteeing\b",
-    "certainly": r"\bcertainly\b|\bwith certainty\b|\b(?:is|are|was|were|be|been|remains?|seems?) certain\b",
-    "definitely": r"\bdefinite(?:ly)?\b",
-    "undoubtedly": r"\bundoubtedly\b|\bno doubt\b|\bwithout (?:a )?doubt\b",
-    "assured": r"\bassured(?:ly)?\b",
-    "inevitable": r"\binevitabl[ey]\b",
-    "surely": r"\bsurely\b",
-    "double": r"\bdoubl(?:e|ed|es|ing)\b(?!-)",
-    "triple": r"\btripl(?:e|ed|es|ing)\b",
-    "quadruple": r"\bquadrupl(?:e|ed|es|ing)\b",
-    "fold": r"\b(?:two|three|four|five|ten|hundred)fold\b",
-    "보장": r"보장",
-    "확정": r"확정",
-    "확실": r"(?<!불)확실",
-    "반드시": r"반드시",
-    "틀림없": r"틀림없",
-    "무조건": r"무조건",
-    "두 배": r"두\s?배",
-    "세 배": r"세\s?배",
-    "네 배": r"네\s?배",
+    "guarantee": r"\bguarantee(?:s|d)?\b|\bguaranteeing\b|보장",
+    "certain": (r"\bcertainly\b|\bwith certainty\b|\b(?:is|are|was|were|be|been|remains?|seems?) certain\b"
+                r"|\bdefinite(?:ly)?\b|\bundoubtedly\b|\bno doubt\b|\bwithout (?:a )?doubt\b"
+                r"|\bassured(?:ly)?\b|\binevitabl[ey]\b|\bsurely\b|(?<!불)확실|반드시|틀림없|무조건"),
+    "finalized": r"\bfinali[sz]ed\b|확정",
+    "x2": r"\bdoubl(?:e|ed|es|ing)\b(?!-)|\btwo-?fold\b|두\s?배|(?<![0-9.])2\s?배",
+    "x3": r"\btripl(?:e|ed|es|ing)\b|\bthree-?fold\b|세\s?배|(?<![0-9.])3\s?배",
+    "x4": r"\bquadrupl(?:e|ed|es|ing)\b|\bfour-?fold\b|네\s?배|(?<![0-9.])4\s?배",
+    "fold": r"\b(?:five|ten|hundred)-?fold\b",
 }
 _ASSERTIVE = {key: re.compile(pattern) for key, pattern in _ASSERTIVE_PATTERNS.items()}
 _NEGATORS = {"not", "no", "never", "without", "nor", "cannot", "neither", "hardly", "nothing"}
 _KOREAN_NEGATION = ("않", "없", "아니", "못")
+# Polarity of a claim must match its quote (in any language).
+_NEGATION = re.compile(
+    r"\b(?:not|no|never|without|cannot|neither|nor|none|nothing|unrealized|unconfirmed|unproven"
+    r"|unverified|uncertain|unclear)\b|n't\b|않|없|아니|(?<!잘)못|미실현|미확정|미확인|미입증|미검증"
+    r"|불확실|불분명|불투명")
+_NOT_NEGATION = re.compile(r"\bnot only\b|\bno doubt\b|\bwithout (?:a )?doubt\b"
+                           r"|틀림없|끊임없|어김없|변함없|관계없|상관없|빠짐없|거침없")
+# Forecast/uncertainty wording: a quote that only expects something cannot support a realized claim.
+_HEDGE = re.compile(
+    r"\b(?:forecast\w*|expect\w*|estimat\w*|project(?:ed|ion|ions|ing)|plan(?:s|ned|ning)?|might|could"
+    r"|would|likely|unlikely|possibl\w*|potential\w*|anticipat\w*|predict\w*|outlook|guidance"
+    r"|target(?:s|ed|ing)?|uncertain\w*|unclear|intend\w*|scheduled|proposed)\b"
+    r"|전망|예상|예측|추정|계획|가능|불확실|불분명|불투명|목표|예정|우려|수\s?있|것으로\s?보|관측|추진")
+_MODAL_MAY = re.compile(r"\bmay\b")  # case-sensitive: "May" the month is not a hedge
+# Rise/fall vocabulary per content token (English whole word, Korean anywhere in the token).
+_DIRECTION_EN = {
+    "up": re.compile(r"ris(?:e|es|en|ing)|rose|increas\w*|grow(?:s|n|ing|th)?|grew|gain(?:s|ed|ing)?"
+                     r"|climb\w*|jump\w*|surg(?:e|es|ed|ing)|soar\w*|rall(?:y|ies|ied|ying)|expan\w*"
+                     r"|boost\w*|accelerat\w*|higher"),
+    "down": re.compile(r"fall(?:s|en|ing)?|fell|declin\w*|decreas\w*|drop(?:s|ped|ping)?|shr(?:ink\w*|ank|unk)"
+                       r"|slump\w*|plung\w*|tumbl\w*|slid(?:e|es|ing)?|contract(?:ed|ing|ion)|lower(?:s|ed|ing)?"
+                       r"|reduc\w*|weaken\w*|decelerat\w*"),
+}
+_DIRECTION_KO = {
+    "up": re.compile(r"증가|상승|늘어|늘었|늘린|늘려|늘고|늘며|급등|급증|확대|성장|오르|올랐|오른|올라|상향|증대|인상"),
+    "down": re.compile(r"감소|하락|줄어|줄었|줄인|줄여|줄고|줄며|급락|급감|축소|떨어|하향|위축|감축|인하"),
+}
+_HANGUL = re.compile(r"[\u1100-\u11ff\u3130-\u318f\uac00-\ud7a3]")
+_WORD = re.compile(r"[^\W\d_][^\W_]*")
+_SENTENCE_BREAK = re.compile(r"(?<=[.!?。])\s+|\n+")
 _STOPWORDS = frozenset("""
 the and for but not are was were has have had its his her their this that these those with from
 into onto over under than then also such which who whom whose what when where while there here
@@ -75,22 +115,68 @@ def _plain(text: str) -> str:
     return _CITATION_OR_URL.sub(" ", text)
 
 
+def _canonical_numbers(raw: str) -> list[str]:
+    """Thousands separators and leading/trailing zeros ignored; comma lists are separate numbers."""
+    parts = [raw.replace(",", "")] if _THOUSANDS.fullmatch(raw) else raw.split(",")
+    numbers = []
+    for part in parts:
+        for piece in (part.split(".") if part.count(".") > 1 else [part]):
+            whole, _, fraction = piece.partition(".")
+            whole, fraction = whole.lstrip("0") or "0", fraction.rstrip("0")
+            numbers.append(whole + ("." + fraction if fraction else ""))
+    return numbers
+
+
+def _decimal_text(value: Decimal) -> str:
+    return format(value.normalize(), "f")
+
+
+def _number_mentions(text: str) -> list[set[str]]:
+    """Each number mention with every canonical form it may be matched by.
+
+    A scaled mention also accepts its absolute value (``1.2 billion`` = ``12억``),
+    and adjacent Korean units form one compound value (``1조 2천억``).
+    """
+    plain = _plain(text).casefold()
+    mentions: list[set[str]] = []
+    compound = None  # (end offset, large-unit exponent, running total, first mention index)
+    for match in _NUMBER_MENTION.finditer(plain):
+        parts = _canonical_numbers(match.group(1))
+        word, suffix, korean = match.group(2, 3, 4)
+        if len(parts) != 1 or not (word or suffix or korean):
+            mentions.extend({part} for part in parts)
+            compound = None
+            continue
+        if korean:
+            large = _KO_LARGE_UNIT.get(korean[-1], 0)
+            exponent = _KO_SMALL_UNIT.get(korean[0], 0) + large
+        else:
+            large, exponent = None, _EN_SCALE[word or suffix]
+        value = Decimal(parts[0]).scaleb(exponent)
+        forms = {parts[0], _decimal_text(value)}
+        if korean and compound and compound[1] > large and not plain[compound[0]:match.start()].strip():
+            total = compound[2] + value
+            for index in range(compound[3], len(mentions)):
+                mentions[index].add(_decimal_text(total))
+            forms.add(_decimal_text(total))
+            compound = (match.end(), large, total, compound[3])
+        else:
+            compound = (match.end(), large, value, len(mentions)) if korean else None
+        mentions.append(forms)
+    return mentions
+
+
 def grounding_numbers(text: str) -> set[str]:
-    """Canonical numeric tokens: thousands separators and leading/trailing zeros ignored."""
-    numbers = set()
-    for raw in _NUMBER.findall(_plain(text)):
-        parts = [raw.replace(",", "")] if _THOUSANDS.fullmatch(raw) else raw.split(",")
-        for part in parts:
-            pieces = part.split(".") if part.count(".") > 1 else [part]
-            for piece in pieces:
-                whole, _, fraction = piece.partition(".")
-                whole, fraction = whole.lstrip("0") or "0", fraction.rstrip("0")
-                numbers.add(whole + ("." + fraction if fraction else ""))
+    """Every canonical number form evidence supports (raw, scaled, spelled out, multiplier)."""
+    numbers = set().union(*_number_mentions(text))
+    words = set(re.findall(r"[a-z]+", _plain(text).casefold()))
+    numbers.update(digit for word, digit in _NUMBER_WORDS.items() if word in words)
+    numbers.update(_MULTIPLIER_NUMBERS[key] for key in assertive_terms(text) if key in _MULTIPLIER_NUMBERS)
     return numbers
 
 
 def assertive_terms(text: str) -> set[str]:
-    """Certainty/multiplier expressions used affirmatively (simple local negation excluded)."""
+    """Certainty/multiplier meaning units used affirmatively (simple local negation excluded)."""
     lowered = _plain(text).casefold()
     found = set()
     for key, pattern in _ASSERTIVE.items():
@@ -107,18 +193,12 @@ def assertive_terms(text: str) -> set[str]:
 
 def grounding_violation(text: str, evidence: str) -> str | None:
     """Return "number" or "certainty" when text asserts what evidence does not."""
-    if not grounding_numbers(text) <= grounding_numbers(evidence):
+    supported = grounding_numbers(evidence)
+    if any(not forms & supported for forms in _number_mentions(text)):
         return "number"
     if not assertive_terms(text) <= assertive_terms(evidence):
         return "certainty"
     return None
-
-
-def addition_grounding_violation(text: str, claims: list[dict]) -> str | None:
-    """Integration prose may only assert what its cited claims (text/quote/date/scope) contain."""
-    evidence = "\n".join(value for claim in claims for value in (
-        claim["text"], claim["as_of"], claim["scope"], (claim.get("anchor") or {}).get("quote", "")))
-    return grounding_violation(text, evidence)
 
 
 def _stem(token: str) -> str:
@@ -127,6 +207,126 @@ def _stem(token: str) -> str:
 
 def _mentions(stem: str, text: str) -> bool:
     return re.search(r"(?<!\w)" + re.escape(stem), text) is not None
+
+
+def _script(token: str) -> str:
+    return "hangul" if _HANGUL.search(token) else "latin" if token.isascii() else "other"
+
+
+def _content_tokens(text: str) -> list[str]:
+    return [token for token in _WORD.findall(_plain(text).casefold())
+            if token not in _STOPWORDS and len(token) >= (3 if token.isascii() else 2)]
+
+
+def _same_language(tokens: list[str], evidence_tokens: list[str]) -> str | None:
+    """The tokens' majority script when the evidence is written in it, else None (translation)."""
+    if not tokens:
+        return None
+    scripts = [_script(token) for token in tokens]
+    language = max(("hangul", "latin", "other"), key=scripts.count)
+    shared = sum(_script(token) == language for token in evidence_tokens)
+    return language if shared and shared >= min(3, len(evidence_tokens)) else None
+
+
+def _overlap_too_small(tokens: list[str], language: str, evidence: str, divisor: int, minimum: int) -> bool:
+    """Fewer than 1/divisor of the distinct content stems occur in same-language evidence."""
+    stems = {_stem(token) for token in tokens if _script(token) == language}
+    if len(stems) < minimum:
+        return False
+    return sum(_mentions(stem, evidence) for stem in stems) * divisor < len(stems)
+
+
+def _direction(token: str) -> str | None:
+    for key in ("up", "down"):
+        if (_DIRECTION_EN[key].fullmatch(token) if token.isascii() else _DIRECTION_KO[key].search(token)):
+            return key
+    return None
+
+
+def _directions(tokens: list[str]) -> tuple[set[str], set[tuple[str, str]]]:
+    """Rise/fall words, and (preceding subject stem, direction) pairs."""
+    found, pairs, subject = set(), set(), None
+    for token in tokens:
+        direction = _direction(token)
+        if direction is None:
+            subject = _stem(token)
+            continue
+        found.add(direction)
+        if subject:
+            pairs.add((subject, direction))
+    return found, pairs
+
+
+def _direction_contradicted(pairs: set[tuple[str, str]], evidence_pairs: set[tuple[str, str]]) -> bool:
+    """A subject moves only opposite to how the evidence says it moved."""
+    for subject, direction in pairs:
+        seen = {other for stem, other in evidence_pairs if stem == subject}
+        if seen and direction not in seen:
+            return True
+    return False
+
+
+def _negated(text: str) -> bool:
+    return _NEGATION.search(_NOT_NEGATION.sub(" ", _plain(text).casefold())) is not None
+
+
+def _hedged(text: str) -> bool:
+    plain = _plain(text)
+    return _HEDGE.search(plain.casefold()) is not None or _MODAL_MAY.search(plain) is not None
+
+
+def normalized_term(value: str) -> str:
+    return " ".join(unicodedata.normalize("NFKC", value).casefold().split())
+
+
+@lru_cache(maxsize=1)
+def financial_alias_groups() -> tuple[tuple[str, tuple[str, ...]], ...]:
+    """Bounded bilingual names for the same entity (macro terms + repository ticker names).
+
+    They identify one named entity across languages for routing and for name
+    grounding; they never establish that a claim is entailed by its source.
+    """
+    import ticker_names
+
+    groups = {
+        "fed": ("fed", "federal reserve", "연준", "연방준비제도", "미연준"),
+        "cpi": ("cpi", "consumer price index", "소비자물가지수", "소비자물가"),
+        "ppi": ("ppi", "producer price index", "생산자물가지수", "생산자물가"),
+        "treasury": ("treasury", "treasuries", "미국채", "미국 국채", "미 국채"),
+        "inflation": ("inflation", "인플레이션", "인플레"),
+        "semiconductor": ("semiconductor", "semiconductors", "반도체"),
+        "interest-rate": ("interest rate", "interest rates", "기준금리", "금리"),
+        "hormuz": ("hormuz", "호르무즈"),
+    }
+    for ticker, name in ticker_names.EN.items():
+        aliases = (ticker, name, *ticker_names.KO.get(ticker, ()))
+        groups[f"ticker:{ticker}"] = tuple(alias for alias in aliases if len(alias) > 1)
+    for ticker, name in ticker_names.KR.items():
+        groups[f"ticker:{ticker}"] = (ticker, name, *ticker_names.KO.get(ticker, ()))
+    return tuple((key, tuple(sorted({normalized_term(alias) for alias in aliases}, key=len, reverse=True)))
+                 for key, aliases in groups.items())
+
+
+@lru_cache(maxsize=1)
+def _alias_matchers() -> tuple[tuple[str, re.Pattern | None, tuple[str, ...]], ...]:
+    matchers = []
+    for key, aliases in financial_alias_groups():
+        latin = [alias for alias in aliases if not _HANGUL.search(alias)]
+        pattern = re.compile(r"(?<![0-9a-z])(?:" + "|".join(map(re.escape, latin)) + r")(?![0-9a-z])") if latin else None
+        matchers.append((key, pattern, tuple(alias for alias in aliases if _HANGUL.search(alias))))
+    return tuple(matchers)
+
+
+def _alias_hits(text: str) -> dict[str, set[str]]:
+    """Alias groups named in text; Korean names match with attached particles (엔비디아의)."""
+    normalized = normalized_term(_plain(text))
+    hits = {}
+    for key, pattern, hangul in _alias_matchers():
+        found = set(pattern.findall(normalized)) if pattern else set()
+        found.update(alias for alias in hangul if alias in normalized)
+        if found:
+            hits[key] = found
+    return hits
 
 
 def _names(text: str) -> set[str]:
@@ -142,21 +342,79 @@ def _names(text: str) -> set[str]:
     return names
 
 
+def _names_supported(text: str, quote: str) -> bool:
+    """Every name in text occurs in quote, directly or as a known alias of the same entity."""
+    quoted = _plain(quote).casefold()
+    missing = [name for name in _names(text) if not _mentions(_stem(name), quoted)]
+    if not missing:
+        return True
+    quote_groups = set(_alias_hits(quote))
+    covered = {word for key, found in _alias_hits(text).items() if key in quote_groups
+               for alias in found for word in re.findall(r"\w+", alias)}
+    return all(name in covered for name in missing)
+
+
 def claim_grounding_violation(text: str, quote: str, source_body: str) -> str | None:
-    """Deterministic correspondence between one claim and its exact source quote."""
+    """Deterministic correspondence between one claim and its exact source quote.
+
+    Numbers, names, certainty, negation, direction and forecast wording are
+    compared in any language; key-word reuse only when claim and quote share one.
+    """
     if len(quote.strip()) < min(MIN_ANCHOR_QUOTE_CHARS, len(source_body.strip())):
         return "anchor_quote_too_short"
     violation = grounding_violation(text, quote)
     if violation:
         return f"claim_{violation}_unsupported"
-    quoted = _plain(quote).casefold()
-    if any(not _mentions(_stem(name), quoted) for name in _names(text)):
+    if not _names_supported(text, quote):
         return "claim_name_unsupported"
-    tokens = {token for token in re.findall(r"[^\W\d_][^\W_]*", _plain(text).casefold())
-              if token not in _STOPWORDS and len(token) >= (3 if token.isascii() else 2)}
-    if not any(_mentions(_stem(token), quoted) for token in tokens):
+    tokens, quote_tokens = _content_tokens(text), _content_tokens(quote)
+    language = _same_language(tokens, quote_tokens)
+    quoted = _plain(quote).casefold()
+    if not tokens or (language and _overlap_too_small(tokens, language, quoted, divisor=3, minimum=1)):
         return "claim_quote_unrelated"
+    if _negated(text) != _negated(quote):
+        return "claim_negation_unsupported"
+    directions, pairs = _directions(tokens)
+    quote_directions, quote_pairs = _directions(quote_tokens)
+    if not directions <= quote_directions or (language and _direction_contradicted(pairs, quote_pairs)):
+        return "claim_direction_unsupported"
+    if _hedged(quote) and not _hedged(text):
+        return "claim_modality_unsupported"
     return None
+
+
+def prose_grounding_violation(text: str, evidence: str) -> str | None:
+    """Synthesis prose: "number"/"certainty" for the whole text; per same-language
+    sentence of at least four content words, "unrelated" when under a quarter of them
+    occur in the evidence, and "direction" when it reverses how the evidence says a
+    subject moved. Shorter or translated sentences are not lexically judged."""
+    violation = grounding_violation(text, evidence)
+    if violation:
+        return violation
+    evidence_tokens = _content_tokens(evidence)
+    evidence_plain = _plain(evidence).casefold()
+    evidence_pairs = _directions(evidence_tokens)[1]
+    for sentence in _SENTENCE_BREAK.split(_plain(text)):
+        tokens = _content_tokens(sentence)
+        language = _same_language(tokens, evidence_tokens)
+        if not language:
+            continue
+        if _overlap_too_small(tokens, language, evidence_plain, divisor=4, minimum=4):
+            return "unrelated"
+        if _direction_contradicted(_directions(tokens)[1], evidence_pairs):
+            return "direction"
+    return None
+
+
+def addition_grounding_violation(text: str, claims: list[dict]) -> str | None:
+    """Integration prose may only assert what its cited claims (text/quote/date/scope) contain."""
+    evidence = "\n".join(value for claim in claims for value in (
+        claim["text"], claim["as_of"], claim["scope"], (claim.get("anchor") or {}).get("quote", "")))
+    return prose_grounding_violation(text, evidence)
+
+
+_BODY_FAILURES = {"number": "body_number_unsupported", "certainty": "body_certainty_unsupported",
+                  "direction": "body_direction_unsupported", "unrelated": "body_sentence_unrelated"}
 
 
 def _require_grounding(payload: dict, compiled: dict, source: dict) -> None:
@@ -170,10 +428,12 @@ def _require_grounding(payload: dict, compiled: dict, source: dict) -> None:
         if violation:
             raise ValueError(violation)
     evidence = "\n".join(str(source.get(key) or "") for key in ("body", "title", "published_at"))
-    for value in (payload.get("body"), payload.get("title")):
-        violation = grounding_violation(value, evidence) if isinstance(value, str) else None
-        if violation:
-            raise ValueError(f"body_{violation}_unsupported")
+    body, title = payload.get("body"), payload.get("title")
+    violation = prose_grounding_violation(body, evidence) if isinstance(body, str) else None
+    if not violation and isinstance(title, str):
+        violation = grounding_violation(title, evidence)
+    if violation:
+        raise ValueError(_BODY_FAILURES[violation])
 
 
 def _source_text_literal(body: str) -> str:
@@ -316,11 +576,16 @@ def compile_source(source: SourceRevision, *, llm_fn: Callable[[str], str | None
         "locates it. Never estimate or guess offsets; add start/end only when they are "
         "zero-based Unicode character indices with an exclusive end and source[start:end] equals quote "
         "exactly; byte offsets, line numbers, translated or whitespace-normalized quotes are invalid. "
-        "A claim restates its own quote: every number, percentage, name, ticker and certainty or multiplier "
-        "word (guaranteed, certainly, definitely, double, triple, 보장, 확정, 반드시) in the claim text must "
-        "appear in its quote, and the claim must reuse key words of the quote. The body and title may use "
-        "only numbers and certainty or multiplier words that the source text or its metadata contains; "
-        "keep the source's uncertainty instead of turning it into a guarantee. Violations are rejected. "
+        "A claim restates its own quote; quote only the sentence or clause the claim restates. Every number, "
+        "percentage, name, ticker and certainty or multiplier word (guaranteed, certainly, definitely, double, "
+        "triple, 보장, 확정, 반드시) in the claim text must appear in its quote (a translation may convert units "
+        "and names). The claim keeps the quote's negation (not, 않다), rise/fall direction (increase/decrease, "
+        "증가/감소) and forecast or uncertainty wording (expected, may, 전망, 불확실); never turn a forecast "
+        "into a realized fact. A claim in the quote's language must reuse key words of the quote. The body "
+        "and title may use only numbers and certainty or multiplier words that the source text or its "
+        "metadata contains; every body sentence stays on the source's subject matter and never reverses "
+        "a direction it reports; keep the source's uncertainty instead of turning it into a guarantee. "
+        "Violations are rejected. "
         "Keep competing_claim_ids=[]; claim IDs do not exist until the server assigns them. "
         "terms and limitations must each be JSON arrays of nonempty strings, not objects, "
         "comma-separated strings, arrays of objects, or null; use [] when none. "

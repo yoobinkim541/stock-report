@@ -292,3 +292,66 @@ def test_unicode_line_separators_cannot_break_the_source_literal():
     module().compile_source(item, llm_fn=lambda prompt: prompts.append(prompt) or json.dumps(plan))
     literal = prompts[0].rsplit("\nBEGIN UNTRUSTED SOURCE TEXT\n", 1)[1][:-len("\nEND UNTRUSTED SOURCE TEXT")]
     assert "\u2028" not in literal and "\u2029" not in literal and json.loads(literal) == item["body"]
+
+
+# B-fix2-01/02: translations are checked by language-independent signals; reversals are rejected.
+def compile_claim(quote, claim, *, body=None, source_body=None):
+    item = {**source(), "body": source_body or quote}
+    plan = output()
+    plan["body"] = body or claim + " [S1]"
+    plan["claims"][0].update(text=claim, anchor={"quote": quote})
+    return module().compile_source(item, llm_fn=lambda _: json.dumps(plan))
+
+
+@pytest.mark.parametrize("quote,claim", [
+    ("Capacity rose while demand remains uncertain.", "생산능력은 증가했지만 수요는 여전히 불확실하다."),
+    ("The company reported revenue growth of 12%.", "회사는 매출이 12% 증가했다고 보고했다."),
+    ("Revenue is guaranteed under the signed contract.", "계약에 따라 매출이 보장된다."),
+    ("Capacity at NVIDIA grew in the latest quarter.", "엔비디아의 생산능력이 최근 분기에 증가했다."),
+    ("엔비디아의 매출은 12억 달러로 증가했다.", "NVIDIA revenue rose to $1.2 billion."),
+    ("Revenue reached $1.2 trillion.", "매출은 1조 2천억 달러에 달했다."),
+    ("The trial did not establish a causal effect.", "이 시험은 인과 효과를 입증하지 못했다."),
+    ("Analysts expect orders to double next year.", "애널리스트들은 내년 주문이 두 배가 될 것으로 예상한다."),
+    ("The company reported revenue growth of 12%.", "Revenue grew 12%, the company reported."),
+])
+def test_faithful_translations_and_paraphrases_are_accepted(quote, claim):
+    compiled = compile_claim(quote, claim)
+    assert compiled["claims"][0]["text"] == claim
+    assert compiled["claims"][0]["anchor"] == {"start": 0, "end": len(quote), "quote": quote}
+
+
+@pytest.mark.parametrize("quote,claim,code", [
+    ("Capacity is a forecast, not realized revenue.", "Capacity is realized revenue.", "claim_negation_unsupported"),
+    ("Revenue fell while costs rose.", "Revenue rose while costs fell.", "claim_direction_unsupported"),
+    ("The trial did not establish a causal effect.", "The trial established a causal effect.",
+     "claim_negation_unsupported"),
+    ("Analysts expect revenue to rise next year.", "Revenue rises next year.", "claim_modality_unsupported"),
+    ("Revenue fell 5% last quarter.", "지난 분기 매출이 5% 증가했다.", "claim_direction_unsupported"),
+    ("The trial did not establish a causal effect.", "이 시험은 인과 효과를 입증했다.", "claim_negation_unsupported"),
+    ("Revenue rose to $1.2 billion.", "매출은 15억 달러로 증가했다.", "claim_number_unsupported"),
+    ("Revenue may rise under the contract.", "계약에 따라 매출 증가가 보장된다.", "claim_certainty_unsupported"),
+    ("Analysts expect revenue to double next year.", "내년 매출은 두 배가 된다.", "claim_modality_unsupported"),
+    ("엔비디아의 매출이 증가했다.", "AMD revenue rose.", "claim_name_unsupported"),
+])
+def test_reversed_or_invented_claims_are_rejected_in_any_language(quote, claim, code):
+    with pytest.raises(ValueError, match=code):
+        compile_claim(quote, claim)
+    assert module().compilation_failure_code(ValueError(code)) == code
+
+
+@pytest.mark.parametrize("body,code", [
+    ("The regulator approved the acquisition and all factories closed [S1].", "body_sentence_unrelated"),
+    ("Capacity rose [S1]. The regulator approved the acquisition and all factories closed.",
+     "body_sentence_unrelated"),
+    ("Capacity fell, and demand is uncertain [S1].", "body_direction_unsupported"),
+])
+def test_unrelated_or_reversed_body_is_rejected(body, code):
+    with pytest.raises(ValueError, match=code):
+        compile_claim("Capacity rose.", "Capacity rose.", body=body, source_body=source()["body"])
+    assert module().compilation_failure_code(ValueError(code)) == code
+
+
+def test_translated_body_is_not_rejected_for_lacking_english_words():
+    body = "생산능력은 증가했고 수요는 여전히 불확실하다 [S1]."
+    compiled = compile_claim("Capacity rose.", "Capacity rose.", body=body, source_body=source()["body"])
+    assert compiled["body"].startswith("생산능력은 증가했고")

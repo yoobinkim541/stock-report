@@ -2185,7 +2185,8 @@ def merge_trust_blocker(pages: Iterable[dict]) -> str:
 
     A merge unions source refs, so an unverified page merged into a source-backed
     one would be presented as source-backed. Every merge writer goes through
-    ``_merge_pages``; candidate finders call this to avoid judging refused pairs.
+    ``_merge_pages``, which applies this to the parents and their content children;
+    candidate finders call it on parents to avoid judging pairs that are refused anyway.
     """
     verifications = {verification_status_for(page.get("source_refs") or [])
                      for page in pages if isinstance(page, dict)}
@@ -2309,6 +2310,13 @@ def _plan_merge(records: list[dict], source_ids: list[str], target_id: str, llm_
     families = [{snap["page_id"], *(child["id"] for child in snap["children"])} for snap in snapshots]
     if len(set().union(*families)) != sum(len(family) for family in families):
         return None  # one document already contains another
+    # Trust is judged over every record whose text the merged document absorbs: the
+    # parents and their content children. Provenance-only children hold reference and
+    # claim ledgers, not prose, and keep their storage status (draft) regardless.
+    trust_pages = [*all_pages, *(child for snap in snapshots for child in snap["children"]
+                                 if not child["raw"].get("provenance_only"))]
+    if merge_trust_blocker(trust_pages):
+        return None
     target_children = snapshots[0]["children"]
     target_content = [child for child in target_children if not child["raw"].get("provenance_only")]
     target_provenance = [child for child in target_children if child["raw"].get("provenance_only")]
@@ -2361,7 +2369,7 @@ def _plan_merge(records: list[dict], source_ids: list[str], target_id: str, llm_
         "body": merged_body,
         "surface": target["surface"],
         "kind": target["kind"],
-        "status": _merged_trust_status(all_pages, adds_content=bool(synthesis)),
+        "status": _merged_trust_status(trust_pages, adds_content=bool(synthesis)),
         # Status is recomputed above; an inherited "stable" tag must not linger beside it.
         "tags": _dedupe_tags([tag for tag in [
             *[tag for tag in target["tags"]
@@ -2687,6 +2695,21 @@ def _context_source_refs(page: dict) -> list[str]:
     return shared_memory.normalize_artifact_refs(values)[:4]
 
 
+MODEL_SYNTHESIS_WARNING = (
+    "미검증 모델 합성: 본문과 claim은 모델이 원문에서 합성·번역한 초안입니다. 원문과는 숫자·이름·확정/부정·증감 방향·"
+    "전망 표현만 결정적으로 대조했고 의미(함의)는 검증하지 않았으니 사실 근거로 단정하지 마세요."
+)
+
+
+def has_unverified_synthesis(page: dict) -> bool:
+    """Compiled/topic knowledge whose claims are still draft model synthesis."""
+    knowledge = page.get("source_knowledge")
+    claims = knowledge.get("claims") if isinstance(knowledge, dict) else None
+    return isinstance(claims, list) and any(
+        isinstance(claim, dict) and claim.get("knowledge_state", "draft") == "draft" for claim in claims)
+
+
+
 def build_context_section(*, query: str = "", surface: str = WIKI_SURFACE, limit: int = 4,
                           status: str = "all", pages: list[dict] | None = None,
                           include_archived: bool = False) -> str:
@@ -2724,8 +2747,9 @@ def build_context_section(*, query: str = "", surface: str = WIKI_SURFACE, limit
         if page.get("summary"):
             lines.append(f"- 요약: {page['summary']}")
         excerpt = _context_body_excerpt(page)
+        unverified_synthesis = has_unverified_synthesis(page)
         if excerpt:
-            lines.append(f"- 본문: {excerpt}")
+            lines.append(f"- 본문{'(미검증 모델 합성)' if unverified_synthesis else ''}: {excerpt}")
         if page.get("search_provider"):
             search_line = f"- 검색: {page.get('search_provider')}"
             if page.get("search_score") is not None:
@@ -2757,6 +2781,8 @@ def build_context_section(*, query: str = "", surface: str = WIKI_SURFACE, limit
                 f" · 원본 {source_ids or 'unknown'}"
             )
         lines.append(f"- 검증: {page.get('verification_status', 'unverified')}")
+        if unverified_synthesis:
+            lines.append(f"- 주의: {MODEL_SYNTHESIS_WARNING}")
         for warning in page.get("trust_warnings") or []:
             lines.append(f"- 주의: {warning}")
         related_ids_for_page = _dedupe_texts(

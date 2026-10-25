@@ -59,8 +59,10 @@ def pipeline_env(tmp_path, monkeypatch):
             calls.append("compile")
             text = source_text(prompt)
             quote = "Capacity increased" if "Capacity increased" in text else text[:60]
+            # The claim restates its own quote (a chunk without the sentence is restated verbatim).
+            claim = "Capacity increased" if quote == "Capacity increased" else quote
             return json.dumps({"action": "create", "kind": "concept", "title": "Capacity", "body": "Compiled capacity; demand uncertain [S1].",
-                "claims": [{"text": "Capacity increased", "as_of": "2026-10-09", "scope": "capacity, not realized orders",
+                "claims": [{"text": claim, "as_of": "2026-10-09", "scope": "capacity, not realized orders",
                             "anchor": {"quote": quote}, "competing_claim_ids": []}],
                 "terms": ["capacity"], "limitations": ["Demand uncertain"], "skip_reason": None})
         data = json.loads(prompt.rsplit("\n", 1)[1])
@@ -272,6 +274,54 @@ def test_invented_claim_is_rejected_before_store_and_search(pipeline_env, claim,
                    for page in wiki.list_pages(query="guaranteed triple", status="all", surface="all"))
     assert "guaranteed" not in wiki.build_context_section(query="revenue guaranteed triple", surface="market")
     assert pipeline_env["calls"] == ["compile"]
+
+
+# B-fix2-02: a reversed claim or an unrelated body never reaches stored, searchable or context knowledge.
+@pytest.mark.parametrize("change,code", [
+    ({"claim": "Capacity fell."}, "claim_direction_unsupported"),
+    ({"body": "The regulator approved the acquisition and all factories closed [S1]."}, "body_sentence_unrelated"),
+])
+def test_reversed_claim_or_unrelated_body_never_reaches_search_or_context(pipeline_env, change, code):
+    original = pipeline_env["llm"]
+    def llm(prompt):
+        answer = original(prompt)
+        if prompt.startswith("Compile"):
+            payload = json.loads(answer)
+            if "claim" in change:
+                payload["claims"][0].update(text=change["claim"], anchor={"quote": "Capacity increased."})
+            if "body" in change:
+                payload["body"] = change["body"]
+            return json.dumps(payload)
+        return answer
+    result = module().run(events=[{}], dry_run=False, llm_fn=llm, now=NOW)
+    assert result["compile_failed"] == 1 and result["data_committed"] == 0
+    assert result["reason_counts"][code] == 1
+    assert wiki.get_page(hashlib.sha256(("compiled-source:" + REV).encode()).hexdigest()) is None
+    pages = wiki.list_pages(query="capacity regulator acquisition", status="all", surface="all")
+    assert not any("regulator" in (page.get("body") or "") or "Capacity fell" in (page.get("body") or "")
+                   for page in pages)
+    context = wiki.build_context_section(query="capacity regulator acquisition", surface="market")
+    assert "regulator" not in context and "Capacity fell" not in context
+    assert pipeline_env["calls"] == ["compile"]
+
+
+# B-fix2-01: a faithful Korean claim for an English source is stored, and context labels it unverified.
+def test_translated_claim_is_stored_and_labelled_unverified_in_context(pipeline_env):
+    original = pipeline_env["llm"]
+    def llm(prompt):
+        answer = original(prompt)
+        if prompt.startswith("Compile"):
+            payload = json.loads(answer)
+            payload["body"] = "생산능력은 증가했고 수요는 불확실하다 [S1]."
+            payload["claims"][0].update(text="생산능력이 증가했다.", anchor={"quote": "Capacity increased."})
+            return json.dumps(payload)
+        return answer
+    result = module().run(events=[{}], dry_run=False, llm_fn=llm, now=NOW)
+    assert result["compile_failed"] == 0 and result["data_committed"] == 1
+    page = wiki.get_page(hashlib.sha256(("compiled-source:" + REV).encode()).hexdigest())
+    assert page["source_knowledge"]["claims"][0]["text"] == "생산능력이 증가했다."
+    context = wiki.build_context_section(pages=[page])
+    assert "- 본문(미검증 모델 합성): " in context and wiki.MODEL_SYNTHESIS_WARNING in context
 
 
 def test_skipped_redelivery_retains_new_actual_id_without_recompile(pipeline_env):

@@ -179,6 +179,16 @@ def test_v3_addition_may_restate_cited_numbers_and_negated_certainty(evidence):
     assert all("not guaranteed" in a["body"] for a in result["targets"][0]["additions"])
 
 
+# B-fix2-02: prose without numbers or certainty words still cannot leave its cited claims.
+def test_v3_addition_cannot_carry_unrelated_prose(evidence):
+    data, _, _ = evidence
+    value = payload(data)
+    for index, addition in enumerate(value["targets"][0]["additions"], 1):
+        addition["body"] = f"The regulator approved the acquisition and all factories closed [S{index}]."
+    with pytest.raises(ValueError, match="topic_addition_unsupported"):
+        validate(data, value)
+
+
 @pytest.mark.parametrize("response", ['{"targets":[],"targets":[],"refusal":"x"}',
     '{"targets":[],"refusal":NaN}', '{"targets":[],"refusal":Infinity}',
     '{"targets":[],"refusal":1e999}', '[1]', 'not json'])

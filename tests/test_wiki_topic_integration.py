@@ -188,6 +188,15 @@ def test_v2_addition_may_restate_cited_claim_numbers_and_negated_certainty(evide
     assert all("not guaranteed" in a["body"] for a in result["targets"][0]["additions"])
 
 
+# B-fix2-02: prose without numbers or certainty words still cannot leave its cited claims.
+def test_v2_addition_cannot_carry_unrelated_prose(evidence):
+    data, _, _ = evidence
+    payload = proposal(data)
+    for index, addition in enumerate(payload["targets"][0]["additions"], 1):
+        addition["body"] = f"The regulator approved the acquisition and all factories closed [S{index}]."
+    with pytest.raises(ValueError, match="topic_addition_unsupported"):
+        validate(data, payload)
+
 
 def test_duplicate_claim_id_with_differing_content_is_rejected(evidence):
     data, _, _ = evidence

@@ -241,6 +241,19 @@ def test_v1_addition_may_restate_claim_date_and_negated_certainty():
     assert "not guaranteed" in result["targets"][0]["additions"][0]["body"]
 
 
+# B-fix2-02: prose without numbers or certainty words still cannot leave or reverse its claims.
+@pytest.mark.parametrize("body", [
+    "The regulator approved the acquisition and all factories closed [S1].",
+    "Capacity fell sharply this quarter [S1].",
+])
+def test_v1_addition_cannot_carry_unrelated_or_reversed_prose(body):
+    snap = _grounding_snapshot()
+    plan = proposal(snap)
+    plan["targets"][0]["additions"][0]["body"] = body
+    with pytest.raises(ValueError, match="proposal_addition_unsupported"):
+        module().propose_integration(compiled(), source(), [snap], new_page_specs=[], llm_fn=lambda _: json.dumps(plan))
+
+
 @pytest.mark.parametrize("term,title", [
     ("엔비디아", "NVIDIA earnings"), ("NVDA", "엔비디아 실적"),
     ("연준", "Federal Reserve policy"), ("소비자물가지수", "CPI inflation"),
