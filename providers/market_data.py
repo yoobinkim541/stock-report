@@ -282,39 +282,70 @@ def load_close_series_upto(symbol: str, need_last, fetch_fn=None):
         return fresh
 
 
-def load_ohlc_close_series(symbol: str, periods: tuple[str, ...] = ("1y", "2y", "5y", "max")):
-    """로컬 OHLC 캐시 우선, 그 다음 price_*.pkl 캐시, 마지막으로 yfinance.
+CLOSE_CACHE_MAX_STALE_DAYS = 5     # 캐시 마지막 일자가 이보다 오래되면 라이브로 보강 (주말+휴장 여유)
 
-    Close 시계열만 반환한다.
+
+def _is_stale(close, max_stale_days: int) -> bool:
+    try:
+        import pandas as pd
+        from ohlc_utils import to_naive_days
+        last = to_naive_days(close).index[-1]
+        return (pd.Timestamp.now().normalize() - last).days > int(max_stale_days)
+    except Exception:
+        return False
+
+
+def load_ohlc_close_series(symbol: str, periods: tuple[str, ...] = ("1y", "2y", "5y", "max"),
+                           max_stale_days: int | None = CLOSE_CACHE_MAX_STALE_DAYS):
+    """로컬 OHLC 캐시 우선, 그 다음 price_*.pkl 캐시, 마지막으로 yfinance. Close 시계열만 반환.
+
+    캐시가 max_stale_days 보다 낡았으면(캐시 크론 고장 등) 라이브로 보강해 병합한다 — 종전엔
+    나이 검사 없이 무기한 서빙해 모의투자 모멘텀/보상 계산이 낡은 종가로 돌았다. 라이브 실패
+    시엔 낡은 캐시라도 반환. max_stale_days=None 이면 검사 안 함.
     """
     import pandas as pd
     per = (periods,) if isinstance(periods, str) else periods
+    cached = None
     for period in per:
         hist = load_cached_ohlc(symbol, period)
         if hist is not None and not getattr(hist, "empty", True) and "Close" in getattr(hist, "columns", []):
-            hist = normalize_ohlc_frame(hist)
-            close = hist["Close"].dropna()
+            close = normalize_ohlc_frame(hist)["Close"].dropna()
             if len(close):
-                return close
-    hist = load_cached_price_ohlc(symbol)
-    if hist is not None and not getattr(hist, "empty", True) and "Close" in getattr(hist, "columns", []):
-        hist = normalize_ohlc_frame(hist)
-        close = hist["Close"].dropna()
-        if len(close):
-            return close
+                cached = close
+                break
+    if cached is None:
+        hist = load_cached_price_ohlc(symbol)
+        if hist is not None and not getattr(hist, "empty", True) and "Close" in getattr(hist, "columns", []):
+            close = normalize_ohlc_frame(hist)["Close"].dropna()
+            if len(close):
+                cached = close
+    if cached is not None and (max_stale_days is None or not _is_stale(cached, max_stale_days)):
+        return cached
     if yf is None:
-        return None
+        return cached
+    live = None
     for period in per:
         try:
             hist = yf.Ticker(symbol).history(period=period)
         except Exception:
             hist = pd.DataFrame()
         if hist is not None and not getattr(hist, "empty", True) and "Close" in getattr(hist, "columns", []):
-            hist = normalize_ohlc_frame(hist)
-            close = hist["Close"].dropna()
+            close = normalize_ohlc_frame(hist)["Close"].dropna()
             if len(close):
-                return close
-    return None
+                live = close
+                break
+    if live is None:
+        if cached is not None:
+            logger.warning("낡은 Close 캐시 사용(라이브 실패) %s: 마지막 %s", symbol, cached.index[-1])
+        return cached
+    if cached is None:
+        return live
+    try:
+        from ohlc_utils import to_naive_days
+        merged = pd.concat([to_naive_days(cached), to_naive_days(live)])
+        return merged[~merged.index.duplicated(keep="last")].sort_index()
+    except Exception:
+        return live
 
 
 def _history_cached(symbol: str, period: str = "1y"):
