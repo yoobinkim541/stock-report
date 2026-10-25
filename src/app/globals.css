@@ -437,3 +437,7 @@ h2 { font-size: clamp(30px, 3.25vw, 46px); line-height: 1.35; letter-spacing: -1
   *, *:before, *:after { animation: none !important; transition: none !important; }
   [data-reveal].reveal-ready { opacity: 1; transform: none; }
 }
+
+.chart-expand { display: inline-flex; color: inherit; opacity: .7; }
+.chart-expand:hover { opacity: 1; }
+a.research-input { text-decoration: none; color: inherit; cursor: pointer; }

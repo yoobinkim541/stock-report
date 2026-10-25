@@ -82,7 +82,7 @@ export default function HomePage() {
           <div className="research-top"><div className="research-icon"><Sparkles size={19} /></div><div><strong>Research, connected.</strong><span>AI CONSOLE + KNOWLEDGE WIKI</span></div><span className="tiny-pill">예시</span></div>
           <div className="research-question">반도체 업황을 보려면 무엇을 연결해야 할까?<span>YOU</span></div>
           <div className="research-answer"><span className="answer-label"><Sparkles size={13} />STOCK REPORT AI</span><p>수요, 공급, 기업 실적을 함께 살펴보세요.<br />서로 연결된 자료에서 맥락을 찾을 수 있습니다.</p><div className="research-map"><div><span>01</span><strong>AI 인프라 수요</strong><small>투자 계획 · 데이터센터</small></div><div><span>02</span><strong>반도체 공급망</strong><small>메모리 · 파운드리 · 장비</small></div><div><span>03</span><strong>기업 펀더멘털</strong><small>실적 · 가이던스 · 밸류에이션</small></div></div><div className="research-sources"><BookOpen size={13} /><span>뉴스 원문</span><span>기업 리포트</span><span>관련 위키</span><ArrowUpRight size={13} /></div></div>
-          <div className="research-input"><span>더 깊이 이해하고 싶은 시장을 질문하세요</span><span className="research-send"><ArrowUpRight size={16} /></span></div>
+          <a className="research-input" href="/research" data-app-link target="_blank" rel="noopener noreferrer" aria-label="AI 콘솔에서 질문하기 (새 탭)"><span>더 깊이 이해하고 싶은 시장을 질문하세요</span><span className="research-send"><ArrowUpRight size={16} /></span></a>
         </div>
       </div></section>
 
