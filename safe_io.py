@@ -21,6 +21,21 @@ import tempfile
 import time
 
 
+def _fsync_dir(d: str) -> None:
+    """rename 자체를 내구성 있게 — 전원 장애 시 디렉터리 엔트리(새 이름)가 유실되지 않도록
+    부모 디렉터리도 fsync. 파일 내용 fsync 만으로는 rename 이 디스크에 안 닿을 수 있다."""
+    try:
+        dfd = os.open(d, os.O_RDONLY)
+    except OSError:
+        return
+    try:
+        os.fsync(dfd)
+    except OSError:
+        pass
+    finally:
+        os.close(dfd)
+
+
 def atomic_write_json(path: str, obj, *, indent: int = 2) -> None:
     """obj 를 path 에 원자적으로 기록 (temp→fsync→rename). 실패 시 원본 보존."""
     path = os.path.abspath(path)
@@ -33,6 +48,7 @@ def atomic_write_json(path: str, obj, *, indent: int = 2) -> None:
             f.flush()
             os.fsync(f.fileno())
         os.replace(tmp, path)   # 원자적 교체
+        _fsync_dir(d)
     except BaseException:
         with contextlib.suppress(OSError):
             os.unlink(tmp)
@@ -55,6 +71,7 @@ def atomic_write_text(path: str, text: str) -> None:
             f.flush()
             os.fsync(f.fileno())
         os.replace(tmp, path)
+        _fsync_dir(d)
     except BaseException:
         with contextlib.suppress(OSError):
             os.unlink(tmp)
