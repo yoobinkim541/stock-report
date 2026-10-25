@@ -2365,9 +2365,10 @@ def generate_report():
             print(f"❌ 오류: {e}")
             portfolio_results.append({
                 "ticker": ticker,
-                "fundamental": {"total_score": 0, "grade": "D", "notes": [str(e)]},
+                "fundamental": {"total_score": 0, "grade": "N/A", "notes": [str(e)]},
                 "signal": {"overall_signal": "Warning", "warnings": [str(e)]},
-                "judgment": "제외 검토",
+                "judgment": "데이터 오류",        # 수집 실패 — 펀더멘털 판단('제외 검토')과 구분
+                "status": "error",
                 "decision_v2": _decision_v2(
                     {"total_score": 0, "grade": "N/A", "notes": [str(e)]},
                     {"overall_signal": "Warning", "warnings": [str(e)]},
@@ -2777,12 +2778,18 @@ def generate_report():
     lines.append(f"")
 
     # Generate conclusion
-    avg_score = sum(r["fundamental"]["total_score"] for r in portfolio_results) / len(portfolio_results) if portfolio_results else 0
+    scored_results = [r for r in portfolio_results if r.get("status") != "error"]
+    error_tickers = [r["ticker"] for r in portfolio_results if r.get("status") == "error"]
+    avg_score = (sum(r["fundamental"]["total_score"] for r in scored_results) / len(scored_results)
+                 if scored_results else 0)                      # 수집 실패(0점)가 평균을 끌어내리지 않게
     buy_candidates = [f"{r['ticker']} — {_company_name(r['ticker'])}" for r in portfolio_results if r["judgment"] == "분할매수 후보"]
     watch_risks = [f"{r['ticker']} — {_company_name(r['ticker'])}" for r in portfolio_results if r["judgment"] in ("위험 증가", "제외 검토")]
     hold = [f"{r['ticker']} — {_company_name(r['ticker'])}" for r in portfolio_results if r["judgment"] in ("관심 유지", "관망", "가격 조정 대기")]
 
-    lines.append(f"**포트폴리오 평균 점수:** {avg_score:.1f}/100점")
+    lines.append(f"**포트폴리오 평균 점수:** {avg_score:.1f}/100점"
+                 + (f" (데이터 오류 {len(error_tickers)}종목 제외)" if error_tickers else ""))
+    if error_tickers:
+        lines.append(f"**데이터 수집 실패:** {', '.join(error_tickers)} — 판단 보류(재실행 필요)")
     lines.append(f"")
 
     lines.append(f"### 위험 대시보드")
