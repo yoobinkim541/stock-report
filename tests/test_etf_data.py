@@ -312,3 +312,28 @@ def test_kr_naver_overlay_noop_without_stock_code():
     out = {}
     E._kr_naver_overlay(out)
     assert out == {}
+
+
+def test_pykrx_negative_result_is_rechecked_after_interval(monkeypatch):
+    """불가 판정은 영구가 아니라 _PYKRX_NEGATIVE_RECHECK_S 뒤 재확인한다 — 상시 프로세스가
+    네트워크 복구를 영원히 못 보던 문제."""
+    import pykrx.stock as pykrx_stock
+    monkeypatch.setattr(E, "_PYKRX_REACHABLE", None)
+    monkeypatch.setattr(E, "_PYKRX_CHECKED_AT", 0.0)
+    clock = {"t": 1000.0}
+    import time as _time
+    monkeypatch.setattr(_time, "monotonic", lambda: clock["t"])
+    calls = []
+
+    def _probe(*a, **k):
+        calls.append(1)
+        if len(calls) == 1:
+            raise RuntimeError("down")
+        return "KODEX 200"
+    monkeypatch.setattr(pykrx_stock, "get_etf_ticker_name", _probe)
+
+    assert E._pykrx_reachable() is False
+    assert E._pykrx_reachable() is False and len(calls) == 1      # 간격 내 재확인 없음
+    clock["t"] += E._PYKRX_NEGATIVE_RECHECK_S + 1
+    assert E._pykrx_reachable() is True and len(calls) == 2       # 복구 반영
+    assert E._pykrx_reachable() is True and len(calls) == 2       # 양성은 고정

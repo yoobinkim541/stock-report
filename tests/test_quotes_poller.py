@@ -252,3 +252,18 @@ def test_poll_once_mirrors_rest_cache_to_redis(tmp_path, monkeypatch):
     assert n == 1
     assert seen["payload"]["NVDA"]["price"] == 181.0
     assert seen["payload"]["NVDA"]["session"] == "overnight"
+
+
+def test_poll_once_prunes_entries_older_than_a_day_but_keeps_recent_unrefreshed(tmp_path):
+    """갱신 안 된 심볼: 최근 것은 ts 그대로 유지(소비자가 신선도 판정), 하루 넘은 것은 제거."""
+    cache = str(tmp_path / "rest_quotes.json")
+    now = time.time()
+    with open(cache, "w", encoding="utf-8") as f:
+        json.dump({"OLD": {"price": 1.0, "ts": now - 2 * 86400, "src": "toss"},
+                   "RECENT": {"price": 2.0, "ts": now - 60, "src": "toss"}}, f)
+    Q.poll_once(now=_both_open(), universe=["MSFT"],
+                toss_fn=lambda s: {"MSFT": 100.0}, kiwoom_fn=lambda c: {}, cache_path=cache)
+    data = json.loads(open(cache, encoding="utf-8").read())
+    assert "OLD" not in data
+    assert data["RECENT"]["price"] == 2.0 and data["RECENT"]["ts"] == pytest.approx(now - 60, abs=1)
+    assert data["MSFT"]["price"] == 100.0

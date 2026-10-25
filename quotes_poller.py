@@ -214,6 +214,9 @@ def parse_kiwoom_quotes(result: dict) -> dict[str, float]:
 
 # ── 폴링 사이클 ───────────────────────────────────────────────────────────────
 
+STALE_PRUNE_SECS = 24 * 3600   # 하루 이상 갱신 안 된 캐시 엔트리 제거
+
+
 def poll_once(now: datetime | None = None, *, universe: list[str] | None = None,
               toss_fn=fetch_toss, kiwoom_fn=fetch_kiwoom_kr,
               cache_path: str = CACHE_PATH) -> int:
@@ -248,6 +251,11 @@ def poll_once(now: datetime | None = None, *, universe: list[str] | None = None,
             cache = old
     except Exception:
         pass
+    # 갱신 안 된 심볼의 옛 엔트리는 ts 로 신선도를 판정받지만, 유니버스에서 빠진 심볼이
+    # 무기한 남아 파일이 커지는 걸 막기 위해 STALE_PRUNE_SECS 지난 엔트리는 제거.
+    cache = {k: v for k, v in cache.items()
+             if k.startswith("__") or not isinstance(v, dict)
+             or ts - float(v.get("ts") or 0) <= STALE_PRUNE_SECS}
     for sym, (px, src) in prices.items():
         entry = {"price": px, "ts": ts, "src": src}
         if not is_kr_symbol(sym):
