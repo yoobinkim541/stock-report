@@ -799,22 +799,31 @@ def normalize_pct(series, view_days=None, anchor_ts=None):
     return (s / anchor_val - 1.0) * 100.0
 
 
+# Plotly(SVG 캔들) 직렬화 상한 — "전체" 기간도 이 이상은 보내지 않는다. 일봉 ~32년치.
+# Canvas(lightweight_embed.MAX_INITIAL_BARS=20k)는 더 싸서 별도 상한. 과거 구간은 기간 라디오로.
+MAX_SERIALIZED_BARS = 8000
+
+
 def view_window(hist, view_days, pan_mult: int = 5, warmup_bars: int = 250,
-                floor_bars: int = 800):
+                floor_bars: int = 800, max_bars: int | None = MAX_SERIALIZED_BARS):
     """차트 직렬화용 데이터 윈도잉 — 뷰(기간)의 pan_mult배 팬버퍼 + 지표 워밍업 tail (순수).
 
     기간 라디오는 초기 표시창만 좁히고 데이터는 항상 전체(max·장기주 ~11k봉)를
     fig+bounds 로 직렬화하던 것이 지표/기간 토글마다 수 MB websocket push + 수초
     ScriptRunner 점유의 주원인("채널 쓰면 다운" 체감). 뷰의 pan_mult배 팬버퍼면
     과거 드래그 체감은 유지되고, warmup_bars 는 MA200·일목(52+26) 등 롤링 지표가
-    팬버퍼 구간에서 깨지지 않을 여유분. view_days=None(전체)·짧은 데이터는 그대로
-    반환. DataFrame/Series 모두 지원(tail 뷰 반환).
+    팬버퍼 구간에서 깨지지 않을 여유분. view_days=None(전체)은 max_bars 로만 자른다
+    (max_bars=None 이면 무윈도잉). DataFrame/Series 모두 지원(tail 뷰 반환).
     """
     if hasattr(hist, "columns"):
         hist = normalize_ohlc_frame(hist)
     else:
         hist = normalize_time_series(hist)
-    if view_days is None or hist is None or getattr(hist, "empty", True):
+    if hist is None or getattr(hist, "empty", True):
+        return hist
+    if view_days is None:
+        if max_bars is not None and len(hist) > int(max_bars):
+            return hist.iloc[-int(max_bars):]
         return hist
     import pandas as pd
     try:
@@ -823,6 +832,8 @@ def view_window(hist, view_days, pan_mult: int = 5, warmup_bars: int = 250,
     except Exception:
         return hist                                 # 비시계열 인덱스 등 — 무윈도잉
     keep = max(view_bars * int(pan_mult) + int(warmup_bars), int(floor_bars))
+    if max_bars is not None:
+        keep = min(keep, int(max_bars))
     if keep >= len(hist):
         return hist
     return hist.iloc[-keep:]

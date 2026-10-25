@@ -974,8 +974,11 @@ def _price_chart(ticker, hist, avg_cost, trades, fullscreen: bool = False,
         df, compare = _align_compare_window(df, compare, view_days)
     # 직렬화 윈도잉 — max 전량(장기주 ~11k봉) fig+bounds 직렬화가 지표/기간 토글마다
     # 수 MB push + 수초 ScriptRunner 점유의 주원인. 뷰의 5배 팬버퍼+지표 워밍업만
-    # 남긴다("전체"=무윈도잉). 이하 실시간 패치·이벤트마커·HA·bounds 전부 같은 윈도우.
+    # 남긴다("전체"=charts.MAX_SERIALIZED_BARS 상한). 이하 실시간 패치·이벤트마커·HA·bounds 전부 같은 윈도우.
+    _src_bars = len(df) if df is not None else 0
     df = charts.view_window(df, view_days)
+    if view_days is None and df is not None and len(df) < _src_bars:
+        st.caption(f"전체 {_src_bars:,}봉 중 최근 {len(df):,}봉만 렌더(Plotly 직렬화 상한 {charts.MAX_SERIALIZED_BARS:,}봉)")
     if compare:
         compare = {k: charts.view_window(s, view_days) for k, s in compare.items()}
     # ⚡ live(자동갱신) — 실시간가는 **클라이언트 패치**(피더 iframe → localStorage →

@@ -1360,6 +1360,19 @@ def test_view_window_full_and_short_passthrough():
     empty = pd.DataFrame({"Close": []})
     assert charts.view_window(empty, 90) is empty
 
+def test_view_window_full_mode_caps_at_max_serialized_bars():
+    """'전체'도 MAX_SERIALIZED_BARS 를 넘기지 않는다 — 11k봉 장기주 전량 SVG 캔들이
+    수 MB push + 브라우저 프리즈의 원인. 최근 봉이 보존되고 max_bars=None 이면 전량."""
+    idx = pd.date_range("1980-01-01", periods=11000, freq="D")
+    hist = pd.DataFrame({"Close": range(11000)}, index=idx)
+    w = charts.view_window(hist, None)
+    assert len(w) == charts.MAX_SERIALIZED_BARS
+    assert int(w["Close"].iloc[-1]) == 10999
+    assert charts.view_window(hist, None, max_bars=None) is hist
+    # 기간 모드의 팬버퍼도 상한을 넘지 않는다 (5y: 1826×5+250 > 8000)
+    assert len(charts.view_window(hist, 1825)) == charts.MAX_SERIALIZED_BARS
+
+
 
 def test_view_window_floor_and_series():
     """짧은 뷰는 floor(기본 800봉) 보장 — Series 도 지원 (비교 오버레이용)."""
