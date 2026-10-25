@@ -111,9 +111,14 @@ def _now() -> str:
 # ══════════════════════════════════════════════════════════════════════
 
 def append(name: str, item: dict, *, user: str = DEFAULT_USER) -> int:
-    """컬렉션 끝에 항목 추가. 부여된 seq 반환."""
+    """컬렉션 끝에 항목 추가. 부여된 seq 반환.
+
+    BEGIN IMMEDIATE — MAX(seq) 조회와 INSERT 사이에 다른 프로세스가 끼어들어 같은 seq 로
+    PK 충돌(IntegrityError)을 내던 경쟁을 쓰기 락으로 직렬화한다."""
     with _connect() as conn:
-        with conn:
+        conn.isolation_level = None
+        conn.execute("BEGIN IMMEDIATE")
+        try:
             row = conn.execute(
                 "SELECT COALESCE(MAX(seq), -1) FROM collections WHERE user_id=? AND name=?",
                 (user, name),
@@ -124,7 +129,43 @@ def append(name: str, item: dict, *, user: str = DEFAULT_USER) -> int:
                 "VALUES (?, ?, ?, ?, ?)",
                 (user, name, seq, json.dumps(item, ensure_ascii=False), _now()),
             )
+            conn.execute("COMMIT")
+        except BaseException:
+            conn.execute("ROLLBACK")
+            raise
     return seq
+
+
+def update_all(name: str, mutate, *, user: str = DEFAULT_USER) -> list[dict]:
+    """컬렉션 read-modify-write 를 **하나의 쓰기 트랜잭션** 안에서 수행 (lost update 방지).
+
+    mutate(items) -> new_items. 호출자가 all() 뒤 replace_all() 을 따로 부르면 그 사이
+    다른 writer(봇 vs 크론)의 변경이 덮여 사라진다 — 이 함수는 BEGIN IMMEDIATE 로 쓰기
+    락을 먼저 잡고 읽으므로 두 writer 의 결과가 모두 보존된다. 반환 = 저장된 new_items.
+    """
+    with _connect() as conn:
+        conn.isolation_level = None
+        conn.execute("BEGIN IMMEDIATE")
+        try:
+            rows = conn.execute(
+                "SELECT item FROM collections WHERE user_id=? AND name=? ORDER BY seq",
+                (user, name),
+            ).fetchall()
+            items = [json.loads(r[0]) for r in rows]
+            new_items = list(mutate(items))
+            conn.execute("DELETE FROM collections WHERE user_id=? AND name=?", (user, name))
+            now = _now()
+            conn.executemany(
+                "INSERT INTO collections (user_id, name, seq, item, created_at) "
+                "VALUES (?, ?, ?, ?, ?)",
+                [(user, name, i, json.dumps(it, ensure_ascii=False), now)
+                 for i, it in enumerate(new_items)],
+            )
+            conn.execute("COMMIT")
+        except BaseException:
+            conn.execute("ROLLBACK")
+            raise
+    return new_items
 
 
 def all(name: str, *, user: str = DEFAULT_USER) -> list[dict]:

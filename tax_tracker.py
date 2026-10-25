@@ -21,10 +21,6 @@ def _load() -> list[dict]:
     return store.load_collection(_COLLECTION, TAX_FILE)
 
 
-def _save(records: list[dict]):
-    store.replace_all(_COLLECTION, records)
-
-
 def add_sell(ticker: str, qty: float, buy_price_usd: float,
              sell_price_usd: float, fx: float) -> dict:
     """매도 기록 추가. fx: USD/KRW 환율 (매도 시점 적용)."""
@@ -41,9 +37,7 @@ def add_sell(ticker: str, qty: float, buy_price_usd: float,
         "gain_krw":       round(gain_krw, 0),
         "fx":             round(fx, 2),
     }
-    records = _load()
-    records.append(record)
-    _save(records)
+    store.update_all(_COLLECTION, lambda items: items + [record])   # 읽기→쓰기 단일 트랜잭션
     return record
 
 
@@ -75,11 +69,17 @@ def get_all_records() -> list[dict]:
 
 def delete_record(index: int) -> dict | None:
     """1-based index로 매도 기록 삭제. 삭제된 레코드 반환, 없으면 None."""
-    records = _load()
-    if index < 1 or index > len(records):
-        return None
-    removed = records.pop(index - 1)
-    _save(records)
+    removed: dict | None = None
+
+    def _drop(items: list[dict]) -> list[dict]:
+        nonlocal removed
+        if index < 1 or index > len(items):
+            return items
+        items = list(items)
+        removed = items.pop(index - 1)
+        return items
+
+    store.update_all(_COLLECTION, _drop)
     return removed
 
 
