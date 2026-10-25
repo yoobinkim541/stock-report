@@ -107,10 +107,22 @@ def _evaluate_rule(rule, bars_by_key, *, as_of, fundamentals_by_symbol, events_b
     checked_at = as_of or _latest_timestamp(timestamps.values()) or datetime.now(timezone.utc).isoformat(timespec="seconds")
     previous_state = (rule or {}).get("last_state") if isinstance((rule or {}).get("last_state"), dict) else {}
     if str((rule or {}).get("frequency") or "").lower().strip() == "once" and bool(previous_state.get("triggered")):
+        # 한 번 체결된 once 룰은 재평가하지 않는다. 단, 직전 알림 전송이 실패(delivered=False)
+        # 했으면 저장된 이벤트를 다시 내보내 재전송 — 종전엔 trigger 상태만 저장돼 전송 실패
+        # 알림이 영구 미전달이었다.
+        pending_event = previous_state.get("event") if previous_state.get("delivered") is False else None
+        if isinstance(pending_event, dict) and pending_event:
+            return {
+                "rule_id": rule_id, "last_checked_at": checked_at, "matched": True,
+                "reason": "retry_delivery", "trace": [], "missing_contexts": missing,
+                "source_timestamps": timestamps, "triggered": True, "delivered": False,
+                "event": pending_event,
+            }, dict(pending_event)
         return {
             "rule_id": rule_id, "last_checked_at": checked_at, "matched": False,
             "reason": "already_triggered", "trace": [], "missing_contexts": missing,
             "source_timestamps": timestamps, "triggered": True,
+            **({"delivered": previous_state["delivered"]} if "delivered" in previous_state else {}),
         }, None
 
     evaluation = chart_conditions.evaluate_condition(condition, contexts, now=as_of)

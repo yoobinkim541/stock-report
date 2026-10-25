@@ -85,3 +85,28 @@ def test_worker_supports_legacy_one_argument_loader_and_records_missing(monkeypa
     assert calls == ["AAPL", "QQQ"]
     assert result["missing_bars"] == [{"symbol": "QQQ", "timeframe": "1h"}]
     assert states[0][1]["missing_contexts"] == [{"symbol": "QQQ", "timeframe": "1h"}]
+
+
+def test_once_rule_retries_delivery_after_send_failure_then_stops(monkeypatch, tmp_path):
+    """once 룰: 알림 전송 실패 → 상태에 delivered=False+event 저장 → 다음 사이클이 재전송 →
+    성공 후엔 더 이상 이벤트를 내지 않는다 (종전엔 trigger 만 저장돼 영구 미전달)."""
+    monkeypatch.setattr(chart_alert_worker, "_LOCK_TARGET", str(tmp_path / "chart_alert_worker"))
+    rule = {**_rule("once1"), "frequency": "once"}
+    monkeypatch.setattr(chart_alert_worker.storage, "list_chart_alert_rules", lambda **kwargs: [rule])
+    monkeypatch.setattr(chart_alert_worker.storage, "update_chart_alert_state",
+                        lambda rule_id, state: rule.__setitem__("last_state", state) or {})
+    monkeypatch.setattr(chart_alert_worker.storage, "save_chart_alert_run", lambda payload: {"id": 1, "created_at": "now"})
+    loader = lambda symbol, timeframe: _bars([99, 101], "1D") if timeframe == "1d" else _bars([501, 502], "1h")
+    sent: list[str] = []
+
+    r1 = chart_alert_worker.run_chart_alert_cycle(load_bars_fn=loader, notify=True, send_fn=lambda t: False)
+    assert r1["event_count"] == 1 and r1["notification"]["failed"] == 1
+    assert rule["last_state"]["triggered"] is True and rule["last_state"]["delivered"] is False
+
+    r2 = chart_alert_worker.run_chart_alert_cycle(load_bars_fn=loader, notify=True, send_fn=lambda t: sent.append(t) or True)
+    assert r2["event_count"] == 1 and r2["evaluations"][0]["reason"] == "retry_delivery"
+    assert len(sent) == 1 and rule["last_state"]["delivered"] is True
+
+    r3 = chart_alert_worker.run_chart_alert_cycle(load_bars_fn=loader, notify=True, send_fn=lambda t: sent.append(t) or True)
+    assert r3["event_count"] == 0 and r3["evaluations"][0]["reason"] == "already_triggered"
+    assert len(sent) == 1

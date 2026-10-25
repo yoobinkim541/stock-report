@@ -556,23 +556,38 @@ def create_app() -> Flask:
         workspace_id = str(payload.get("workspace_id") or "").strip() or None
         symbol = str(payload.get("symbol") or "").strip().upper() or None
         bars = payload.get("bars") if isinstance(payload.get("bars"), dict) else {}
-        rules = storage.list_chart_alert_rules(
-            workspace_id=workspace_id,
-            symbol=symbol,
-            enabled=True,
-            limit=int(payload.get("limit") or 200),
-        )
-        evaluations: list[dict] = []
-        events = chart_alert_runner.evaluate_alert_rules(
-            rules, bars, as_of=payload.get("as_of"), state_sink=evaluations,
-        )
-        for state in evaluations:
-            alert_id = str(state.get("rule_id") or "").strip()
-            if alert_id:
-                storage.update_chart_alert_state(alert_id, state)
-        notification = {"attempted": 0, "delivered": 0, "failed": 0, "failures": []}
-        if bool(payload.get("notify")) and events:
-            notification = chart_alert_dispatcher.dispatch_alert_events(events)
+        # 워커(run_chart_alert_cycle)와 같은 락 — 종전엔 이 경로가 락을 우회해 워커와 동시에
+        # 같은 once 룰을 평가·알림하는 중복 전송이 가능했다. 짧게 기다렸다 못 잡으면 409.
+        import safe_io
+        try:
+            lock = chart_alert_worker.cycle_lock(timeout=5.0)
+            lock.__enter__()
+        except safe_io.LockTimeout:
+            return jsonify({"ok": False, "reason": "already_running"}), 409
+        try:
+            rules = storage.list_chart_alert_rules(
+                workspace_id=workspace_id,
+                symbol=symbol,
+                enabled=True,
+                limit=int(payload.get("limit") or 200),
+            )
+            evaluations: list[dict] = []
+            events = chart_alert_runner.evaluate_alert_rules(
+                rules, bars, as_of=payload.get("as_of"), state_sink=evaluations,
+            )
+            notification = {"attempted": 0, "delivered": 0, "failed": 0, "failures": []}
+            if bool(payload.get("notify")) and events:
+                notification = chart_alert_dispatcher.dispatch_alert_events(events)
+                failed_ids = {str(f.get("alert_id") or "") for f in notification.get("failures") or []}
+                for state in evaluations:
+                    if state.get("event"):
+                        state["delivered"] = str(state.get("rule_id") or "") not in failed_ids
+            for state in evaluations:
+                alert_id = str(state.get("rule_id") or "").strip()
+                if alert_id:
+                    storage.update_chart_alert_state(alert_id, state)
+        finally:
+            lock.__exit__(None, None, None)
         return jsonify({
             "ok": True,
             "event_count": len(events),

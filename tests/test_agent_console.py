@@ -3289,6 +3289,20 @@ def test_chart_alert_batch_api_evaluates_saved_rules_from_bars(monkeypatch, tmp_
     assert saved["last_state"]["triggered"] is True
     assert saved["last_state"]["event"]["alert_id"] == rule["id"]
 
+def test_chart_alert_batch_api_returns_409_while_worker_cycle_holds_lock(monkeypatch, tmp_path):
+    """배치 API 도 워커 사이클 락을 통과한다 — 종전엔 우회해 같은 once 룰을 이중 알림할 수 있었다."""
+    _isolate(monkeypatch, tmp_path)
+    from agent_console import chart_alert_worker
+    from agent_console.server import create_app
+
+    monkeypatch.setattr(chart_alert_worker, "_LOCK_TARGET", str(tmp_path / "chart_alert_worker"))
+    client = create_app().test_client()
+    with chart_alert_worker.cycle_lock(timeout=0):
+        result = client.post("/api/chart-alerts/evaluate-batch", json={"workspace_id": "w", "bars": {}})
+    assert result.status_code == 409 and result.json["reason"] == "already_running"
+    assert client.post("/api/chart-alerts/evaluate-batch", json={"workspace_id": "w", "bars": {}}).status_code == 200
+
+
 
 def test_chart_alert_runner_computes_extended_indicator_values():
     import pandas as pd

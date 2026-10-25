@@ -36,6 +36,11 @@ def _lock_target() -> str:
     return _LOCK_TARGET
 
 
+def cycle_lock(timeout: float = 0.0):
+    """워커·배치 API 가 공유하는 사이클 락 — once 룰 중복 알림 방지의 단일 직렬화 지점."""
+    return safe_io.file_write_lock(_lock_target(), timeout=timeout)
+
+
 def run_chart_alert_cycle(
     *,
     workspace_id: str | None = None,
@@ -52,7 +57,7 @@ def run_chart_alert_cycle(
     이번 호출은 통째로 스킵(룰 조회도 시작 안 함).
     """
     try:
-        with safe_io.file_write_lock(_lock_target(), timeout=0):
+        with cycle_lock(timeout=0):
             return _run_chart_alert_cycle_locked(
                 workspace_id=workspace_id, symbols=symbols, notify=notify,
                 load_bars_fn=load_bars_fn, send_fn=send_fn, limit=limit,
@@ -119,14 +124,19 @@ def _run_chart_alert_cycle_locked(
     events = chart_alert_runner.evaluate_alert_rules(
         rules, bars_by_key, state_sink=evaluations,
     )
+    notification = {"attempted": 0, "delivered": 0, "failed": 0, "failures": []}
+    if notify and events:
+        notification = chart_alert_dispatcher.dispatch_alert_events(events, send_fn=send_fn)
+        # 전송 결과를 상태에 기록 — once 룰이 전송 실패 시 다음 사이클에서 재전송할 수 있게
+        # (runner 가 delivered=False + event 를 보고 retry_delivery 이벤트를 다시 낸다).
+        failed_ids = {str(f.get("alert_id") or "") for f in notification.get("failures") or []}
+        for state in evaluations:
+            if state.get("event"):
+                state["delivered"] = str(state.get("rule_id") or "") not in failed_ids
     for state in evaluations:
         rule_id = str(state.get("rule_id") or "").strip()
         if rule_id:
             storage.update_chart_alert_state(rule_id, state)
-
-    notification = {"attempted": 0, "delivered": 0, "failed": 0, "failures": []}
-    if notify and events:
-        notification = chart_alert_dispatcher.dispatch_alert_events(events, send_fn=send_fn)
 
     result = {
         "ok": True,
