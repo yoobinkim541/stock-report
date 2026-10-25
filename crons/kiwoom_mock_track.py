@@ -47,6 +47,7 @@ load_dotenv()
 
 import pandas as pd
 import kiwoom_mock
+from lib import mock_generations
 from lib import mock_llm_execution as llm_exec
 from lib import trade_events
 from ml.mock_momentum_overlay import (build_momentum_features,
@@ -466,6 +467,25 @@ def _append_history(rec: dict) -> None:
         logger.warning("모의 기록 실패: %s", e)
 
 
+def _record_snapshot(bal: dict) -> dict | None:
+    """잔고 응답(관측값 그대로) → NAV snapshot. 근사 NAV(보유액/시드)는 시계열에 넣지 않고
+    잔고 이상은 snapshot 대신 실패 이벤트로 남긴다(mock_generations.record_snapshot)."""
+    try:
+        res = mock_generations.record_snapshot(
+            "kr_mock_history", nav=bal.get("nav"), cash=bal.get("cash_krw"),
+            positions=bal.get("positions") or {}, seed=SEED_KRW,
+            problem=mock_generations.balance_problem(bal))
+        if not res["recorded"]:
+            logger.warning("KR 모의 스냅샷 미기록 — 잔고 이상(%s)", res["reason"])
+        elif res["reset"]:
+            logger.warning("KR 모의계좌 리셋 감지 — 세대 %s 마감(마감 NAV ₩%s)",
+                           res["reset"]["generation"], f"{res['reset']['final_nav']:,.0f}")
+        return res
+    except Exception as e:
+        logger.warning("모의 스냅샷 기록 실패: %s", e)
+        return None
+
+
 def _classify_kind(side: str, qty: int, cur_shares: int) -> str:
     """편입(신규 매수)/증액/퇴출(전량 매도)/감액 분류."""
     if side == "buy":
@@ -754,16 +774,17 @@ def main(argv: list[str] | None = None) -> int:
         return 0
 
     bal = kiwoom_mock.get_balance()
-    if not bal["ok"]:
-        # 잔고를 모르면 매수하면 안 됨(빈 보유로 오인 → 블라인드 풀바스켓 매수 방지)
-        logger.error("모의 잔고 조회 실패 — 주문 보류")
+    balance_issue = mock_generations.balance_problem(bal)
+    if balance_issue:
+        # 잔고/NAV 를 모르면 매수하면 안 됨(빈 보유로 오인 → 블라인드 풀바스켓 매수, 보유액/시드
+        # 근사 예산 사이징 방지) — snapshot 대신 실패 이벤트만 남기고 주문 보류.
+        logger.error("모의 잔고 조회 실패(%s) — 주문 보류", balance_issue)
+        if not dry:
+            _record_snapshot(bal)
         return 1
     positions = bal["positions"]
     cash = bal["cash_krw"]
-    nav  = bal["nav"]
-    if nav is None:
-        nav = bal["pos_value"] or SEED_KRW   # 요약필드 전부 미확인 → 보유액/시드 근사
-        logger.info("NAV 근사치 사용: ₩%s", f"{nav:,.0f}")
+    nav = float(bal["nav"])
 
     signals = compute_kr_signals(UNIVERSE)
     if not signals:
@@ -797,9 +818,8 @@ def main(argv: list[str] | None = None) -> int:
             logger.info("  [DRY] 주문 없음 (목표 = 현 보유)")
         return 0
 
-    # 시작 스냅샷 먼저 기록(크래시에도 당일 NAV 시계열 보존)
-    _append_history({"kind": "snapshot", "nav": nav, "cash": cash,
-                     "positions": len([p for p in positions.values() if int(p.get("shares", 0) or 0) > 0])})
+    # 시작 스냅샷 먼저 기록(크래시에도 당일 NAV 시계열 보존) — 근사 NAV 가 아니라 관측 잔고로
+    _record_snapshot(bal)
 
     from ml.adaptive import Ledger
     ledger = Ledger("kr_mock")

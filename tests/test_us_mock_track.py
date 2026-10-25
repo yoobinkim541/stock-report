@@ -384,3 +384,61 @@ def test_a_fix_exec_notify_reports_llm_review_fallback(monkeypatch):
     assert "TSLA" in text and "AAPL" not in text
     assert "LLM 주문검토 fallback(call failed: fake unavailable)" in text
     assert "미검증 매수 1건 보류" in text and "매도 1건 검토 없이 진행" in text
+
+
+def _fake_history(monkeypatch):
+    import store
+    rows: dict[str, list] = {}
+
+    def append(name, item, **kwargs):
+        rows.setdefault(name, []).append(dict(item))
+        return len(rows[name])
+
+    monkeypatch.setattr(store, "append", append)
+    monkeypatch.setattr(store, "all", lambda name, **kwargs: list(rows.get(name, [])))
+    return rows
+
+
+def test_a_exec_fix2_broker_rejected_balance_holds_orders_and_records_failure(monkeypatch):
+    """KIS 가 '모의투자 신청내역' 으로 거부(rt_cd≠0)하면 시드 $100,000 으로 NAV 를 메워
+    snapshot·주문을 내지 않고, 실패 이벤트만 남긴 뒤 주문 보류한다."""
+    rows = _fake_history(monkeypatch)
+    monkeypatch.setattr(T.kis_mock, "is_enabled", lambda: True)
+    monkeypatch.setattr(T.kis_mock, "get_balance", lambda: {
+        "ok": True, "positions": {}, "pos_value": 0.0, "cash_usd": None, "cash_derived": False,
+        "nav": None, "raw": {"rt_cd": "1", "msg1": "모의투자 신청내역을 확인하세요"}})
+
+    def _no_signals():
+        raise AssertionError("잔고 실패 시 신호·주문 단계로 진행하면 안 된다")
+
+    monkeypatch.setattr(T, "compute_us_signals", _no_signals)
+    monkeypatch.setattr(T.kis_mock, "place_order", lambda *a, **k: _no_signals())
+
+    assert T.main([]) == 1
+
+    hist = rows["us_mock_history"]
+    assert [r["kind"] for r in hist] == ["snapshot_failed"]
+    assert hist[0]["reason"] == "broker_rejected: 모의투자 신청내역을 확인하세요"
+    assert hist[0]["nav"] is None
+
+
+def test_a_exec_fix2_unknown_nav_with_holdings_holds_orders(monkeypatch):
+    """00시대 환율 미고시로 NAV 미확인(보유는 있음) → 보유평가액/시드로 예산을 잡아 주문하지 않고,
+    반쪽 NAV 를 시계열에 넣지 않는다."""
+    rows = _fake_history(monkeypatch)
+    rows["us_mock_history"] = [{"date": "2026-08-24 06:40", "kind": "snapshot", "nav": 255_000.0,
+                                "cash": 120_000.0, "positions": 5}]
+    monkeypatch.setattr(T.kis_mock, "is_enabled", lambda: True)
+    monkeypatch.setattr(T.kis_mock, "get_balance", lambda: {
+        "ok": True, "positions": {"AAPL": {"shares": 10, "value": 128_000.0}}, "pos_value": 128_000.0,
+        "cash_usd": None, "cash_derived": False, "nav": None, "krw_asset": 360_000_000.0, "fx": None,
+        "raw": {"rt_cd": "0"}})
+
+    def _no_signals():
+        raise AssertionError("NAV 미확인 시 신호·주문 단계로 진행하면 안 된다")
+
+    monkeypatch.setattr(T, "compute_us_signals", _no_signals)
+
+    assert T.main([]) == 1
+    assert [r["kind"] for r in rows["us_mock_history"]] == ["snapshot", "snapshot_failed"]
+    assert rows["us_mock_history"][-1]["reason"] == "nav_missing"

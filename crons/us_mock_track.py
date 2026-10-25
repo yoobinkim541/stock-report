@@ -39,6 +39,7 @@ load_dotenv()
 
 import pandas as pd
 import kis_mock
+from lib import mock_generations
 from lib import mock_llm_execution as llm_exec
 from lib import trade_events
 from ml.mock_momentum_overlay import (build_momentum_features,
@@ -631,18 +632,20 @@ def main(argv: list[str] | None = None) -> int:
     cash_derived = False
     if not dry:
         bal = kis_mock.get_balance()
-        if not bal["ok"]:
-            logger.error("KIS 모의 잔고 조회 실패 — 주문 보류")
+        balance_issue = mock_generations.balance_problem(bal)
+        # 잔고를 모르면(조회 실패·브로커 거부·NAV 미확인) 빈 보유로 오인하거나 시드/보유평가액
+        # 예산으로 매수하면 안 된다 — snapshot 대신 실패 이벤트만 남기고 주문 보류.
+        if balance_issue:
+            logger.error("KIS 모의 잔고 조회 실패(%s) — 주문 보류", balance_issue)
+            _record_snapshot(bal, balance_issue)
             return 1
-        positions, cash, nav = bal["positions"], bal["cash_usd"], bal["nav"]
+        positions, cash, nav = bal["positions"], bal["cash_usd"], float(bal["nav"])
         cash_derived = bool(bal.get("cash_derived"))
         logger.info("잔고: cash=$%s(%s) nav=$%s pos_value=$%s", f"{cash or 0:,.0f}",
-                    "역산추정" if cash_derived else "실측", f"{nav or 0:,.0f}",
+                    "역산추정" if cash_derived else "실측", f"{nav:,.0f}",
                     f"{bal.get('pos_value') or 0:,.0f}")
     else:
         positions, cash, nav = {}, SEED_USD, SEED_USD    # dry-run: 시드 가정 미리보기
-    if nav is None:
-        nav = (bal["pos_value"] if not dry else 0) or SEED_USD
 
     signals = compute_us_signals()
     if not signals:
@@ -781,7 +784,7 @@ def main(argv: list[str] | None = None) -> int:
         store.append("us_mock_history", {"date": datetime.now(KST).strftime("%Y-%m-%d %H:%M"),
                                          "kind": "cost", "cost": round(day_cost, 2),
                                          "notional": round(day_notional, 2)})
-    _record_snapshot(nav, cash, positions)
+    _record_snapshot(bal, None)
     _notify(nav, results, llm_note=llm_exec.fallback_note(llm_record))
     logger.info("=== 완료: 집행 %d건 ===", sum(1 for r in results if r.get("ok")))
     return 0
@@ -814,15 +817,21 @@ def _log_decision(ledger, sig, sym, kind, order_side, qty, ok, today):
         logger.warning("결정 원장 기록 실패 %s: %s", sym, e)
 
 
-def _record_snapshot(nav, cash, positions):
+def _record_snapshot(bal: dict, problem: str | None, *, at: str | None = None) -> dict | None:
+    """잔고 응답 → NAV snapshot. 쓸 수 없는 잔고는 snapshot 대신 실패 이벤트(mock_generations)."""
     try:
-        import store
-        store.append("us_mock_history", {
-            "date": datetime.now(KST).strftime("%Y-%m-%d %H:%M"), "kind": "snapshot",
-            "nav": nav, "cash": cash,
-            "positions": len([p for p in positions.values() if int(p.get("shares", 0) or 0) > 0])})
+        res = mock_generations.record_snapshot(
+            "us_mock_history", nav=(bal or {}).get("nav"), cash=(bal or {}).get("cash_usd"),
+            positions=(bal or {}).get("positions") or {}, at=at, seed=SEED_USD, problem=problem)
+        if not res["recorded"]:
+            logger.warning("US 모의 스냅샷 미기록 — 잔고 이상(%s)", res["reason"])
+        elif res["reset"]:
+            logger.warning("US 모의계좌 리셋 감지 — 세대 %s 마감(마감 NAV $%s)",
+                           res["reset"]["generation"], f"{res['reset']['final_nav']:,.2f}")
+        return res
     except Exception as e:
         logger.warning("US 모의 스냅샷 기록 실패: %s", e)
+        return None
 
 
 # 개별 주문이 아니라 '전 주문이 동일하게 막히는' 계좌/시장 레벨 상황 신호 — KR

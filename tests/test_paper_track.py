@@ -107,3 +107,45 @@ def test_a_fix_exec_fill_realized_keeps_pending_and_never_rewrites_confirmed(mon
 
     assert abs(entry["ret_meta_5d"] - (-0.34)) < 1e-9
     assert entry["ret_rule_5d"] == 0.123
+
+
+# ── RA-05 회귀: 부분 결측 시 종목마다 다른 종료일을 섞지 않음 (공통 거래일 시계) ──────
+
+def _series(prices: dict):
+    import pandas as pd
+    return pd.Series(list(prices.values()), index=pd.to_datetime(list(prices.keys())))
+
+
+_DAYS = ["2026-01-05", "2026-01-06", "2026-01-07", "2026-01-08", "2026-01-09", "2026-01-12"]
+
+
+def test_a_exec_fix2_mid_gap_does_not_push_one_asset_end_date_later():
+    """A 는 1/12 까지 정상, B 는 1/8 봉만 없고 1/13 에 급등. 공통 종료일(1/12) 기준 0%."""
+    from crons import paper_track as cron
+
+    a = _series({d: 100.0 for d in _DAYS})
+    b = _series({**{d: 100.0 for d in _DAYS if d != "2026-01-08"}, "2026-01-13": 200.0})
+
+    r = cron._weighted_forward_return({"A": 0.6, "B": 0.4}, {"A": a, "B": b}, "2026-01-05", 5)
+
+    assert r == 0.0
+
+
+def test_a_exec_fix2_missing_common_end_bar_is_pending():
+    """공통 종료일 봉이 한 종목에 없으면 다음 봉으로 미루지 않고 미확정."""
+    from crons import paper_track as cron
+
+    a = _series({d: 100.0 for d in _DAYS})
+    b = _series({**{d: 100.0 for d in _DAYS if d != "2026-01-12"}, "2026-01-13": 200.0})
+
+    assert cron._weighted_forward_return({"A": 0.6, "B": 0.4}, {"A": a, "B": b}, "2026-01-05", 5) is None
+
+
+def test_a_exec_fix2_missing_common_start_bar_is_pending():
+    """서로 다른 첫 관측일 — B 가 공통 시작일 봉이 없으면 늦은 첫 봉을 시작가로 쓰지 않는다."""
+    from crons import paper_track as cron
+
+    a = _series({d: 100.0 for d in _DAYS})
+    b = _series({**{d: 50.0 for d in _DAYS[1:]}, "2026-01-13": 50.0})
+
+    assert cron._weighted_forward_return({"A": 0.6, "B": 0.4}, {"A": a, "B": b}, "2026-01-05", 5) is None

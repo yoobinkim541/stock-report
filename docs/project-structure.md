@@ -142,7 +142,8 @@
 
 ### 🛠 운영 / 배포
 `deploy/crontab.stock-report`(크론 단일 진실원) · `scripts/*_watchdog.sh`(생존+코드신선도 감시) ·
-`scripts/check_crontab_drift.py`(라이브 crontab ↔ 저장소 대조) · `tests/bot_healthcheck.py`
+`scripts/check_crontab_drift.py`(라이브 crontab ↔ 저장소 대조) · `tests/bot_healthcheck.py` ·
+`scripts/repair_mock_generation_boundary.py`(모의 원장 세대 경계·무효 snapshot 복구 — 기본 dry-run, `--apply --confirm` 시 store DB 백업 후 쓰기)
 
 ---
 

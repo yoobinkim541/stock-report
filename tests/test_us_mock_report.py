@@ -255,3 +255,50 @@ def test_build_report_defaults_to_compact(monkeypatch):
     assert "🧠 LLM 판단근거" not in txt
     assert "검증 상태" not in txt
     assert "123.58→110.24" not in txt
+
+
+_REJECTED = {"ok": True, "positions": {}, "pos_value": 0.0, "cash_usd": None, "cash_derived": False,
+             "nav": None, "raw": {"rt_cd": "1", "msg1": "모의투자 신청내역을 확인하세요"}}
+
+
+def test_a_exec_fix2_report_does_not_fill_seed_nav_when_broker_rejects(monkeypatch):
+    """브로커 거부(rt_cd≠0) 잔고를 시드 $100,000 로 메워 수익률을 지어내지 않는다."""
+    monkeypatch.setenv("MOCK_REPORT_LLM_ENABLED", "0")
+    monkeypatch.setattr(kis_mock, "get_balance", lambda: dict(_REJECTED))
+    monkeypatch.setattr(R, "_snapshots", lambda: [
+        {"date": "2026-10-10 06:40", "kind": "snapshot", "nav": 262_224.57}])
+    monkeypatch.setattr(R, "_scorecard_rows", lambda: [])
+    monkeypatch.setattr(R, "_recent_decisions", lambda: ([], None))
+    monkeypatch.setattr(R, "_llm_shadow_summary", lambda: (
+        {"n": 0, "hit_rate": None, "avg_delta": None, "by_action": {}}, 0))
+    from providers import market_data
+    monkeypatch.setattr(market_data, "fetch_kospi_stats",
+                        lambda since_date=None, symbol=None: {"return_pct": 1.0, "mdd": 0.04})
+
+    txt = R.build_report()
+
+    assert "잔고 조회 실패" in txt and "broker_rejected" in txt
+    assert "누적" not in txt and "-61" not in txt
+
+
+def test_a_exec_fix2_eod_records_failure_event_instead_of_none_snapshot(monkeypatch):
+    import store
+
+    rows: dict[str, list] = {}
+    monkeypatch.setattr(store, "append", lambda name, item, **k: rows.setdefault(name, []).append(dict(item)))
+    monkeypatch.setattr(store, "all", lambda name, **k: list(rows.get(name, [])))
+    monkeypatch.setattr(kis_mock, "is_enabled", lambda: True)
+    monkeypatch.setattr(kis_mock, "get_balance", lambda: dict(_REJECTED))
+    monkeypatch.setattr(R, "build_report", lambda *a, **k: "report")
+
+    class _FakeNotify:
+        @staticmethod
+        def send_telegram(text, **kwargs):
+            return None
+
+    monkeypatch.setitem(sys.modules, "notify", _FakeNotify)
+
+    assert R.main() == 0
+
+    hist = rows["us_mock_history"]
+    assert [(r["kind"], r.get("at")) for r in hist] == [("snapshot_failed", "eod")]

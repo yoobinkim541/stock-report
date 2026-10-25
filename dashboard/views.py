@@ -498,13 +498,15 @@ def _reconstruct_positions_from_history(hist: list[dict], decisions: list[dict],
 def paper_summary(surface: str = "kr_mock") -> dict:
     """자동 모의투자 계좌 요약 — NAV 시계열·벤치마크·MDD·보유·비용·결정 원장. read-only·graceful.
 
-    잔고 API(모의 도메인) 실패/비활성 시 마지막 EOD 스냅샷 NAV 로 폴백(balance_ok=False).
+    잔고 API(모의 도메인) 실패/비활성 또는 NAV 로 쓸 수 없는 잔고(브로커 거부·NAV 미확인 —
+    `mock_generations.balance_problem`)면 시드·보유액·0 으로 NAV 를 메우지 않고 마지막 유효
+    EOD 스냅샷 NAV 로 폴백한다(balance_ok=False, balance_problem=사유).
     표시 전용 — 주문 경로 0. 크론 리포트(kiwoom_mock_report·us_mock_report)와 동일 데이터원.
     """
     hist_name, bench_sym, bench_name, cur, seed_env, seed_def = _PAPER.get(surface, _PAPER["kr_mock"])
     seed = float(os.getenv(seed_env, str(seed_def)))
     out: dict = {"surface": surface, "currency": cur, "bench_name": bench_name,
-                 "balance_ok": False, "nav": None, "cash": None, "positions": [],
+                 "balance_ok": False, "balance_problem": None, "nav": None, "cash": None, "positions": [],
                  "nav_series": [], "inception_date": None, "cum_ret": None, "day_ret": None,
                  "strat_mdd": None, "bench_ret": None, "bench_mdd": None,
                  "generation_count": 1, "generation": 1,
@@ -535,15 +537,16 @@ def paper_summary(surface: str = "kr_mock") -> dict:
         snaps = [r for r in hist if r.get("kind") == "snapshot" and r.get("nav") is not None]
     out["nav_series"] = [{"date": str(r.get("date", ""))[:10], "nav": float(r["nav"])} for r in snaps]
 
-    # 2) 라이브 잔고 (모의 API — 비활성/장애 시 마지막 스냅샷 폴백)
+    # 2) 라이브 잔고 (모의 API — 비활성/장애/거부/NAV 미확인 시 마지막 유효 스냅샷 폴백)
     nav = None
     try:
+        from lib import mock_generations
         mock = __import__("kiwoom_mock" if surface == "kr_mock" else "kis_mock")
         bal = mock.get_balance()
-        if bal.get("ok"):
+        out["balance_problem"] = mock_generations.balance_problem(bal)
+        if out["balance_problem"] is None:
             out["balance_ok"] = True
-            nav = bal.get("nav") or ((bal.get("pos_value") or 0.0)
-                                     + (bal.get("cash_krw" if surface == "kr_mock" else "cash_usd") or 0.0))
+            nav = float(bal["nav"])
             out["cash"] = bal.get("cash_krw" if surface == "kr_mock" else "cash_usd")
             if surface == "us_mock":
                 # 통화 구성 분해 — KIS 모의는 통합증거금(USD 예수금 0·원화가 증거금)이라
@@ -566,7 +569,8 @@ def paper_summary(surface: str = "kr_mock") -> dict:
                                          "value": p.get("value", 0) or 0, "ret": ret})
             out["positions"].sort(key=lambda r: -(r["value"] or 0))
     except Exception:
-        pass
+        if not out["balance_ok"]:
+            out["balance_problem"] = out["balance_problem"] or "balance_failed"
     if nav is None and snaps:                    # 폴백: 마지막 EOD 스냅샷
         nav = float(snaps[-1]["nav"])
         out["cash"] = snaps[-1].get("cash")
@@ -680,6 +684,9 @@ def paper_glance() -> list[dict]:
 
     전 페이지 사이드바에서 매 rerun 호출되므로 네트워크 0·로컬 DB 만. 기록이 전혀 없는
     surface 는 제외(크론 미실행 환경 → 빈 리스트 = 레일 숨김). graceful.
+    무효 snapshot(잔고 실패 nav=None·0 이하·무효 표시)과 실패 이벤트는 시계열에서 빠진다
+    (mock_generations 롤업 규칙). 마지막 유효 기록 이후 잔고 실패가 있으면
+    `balance_failure={date, reason}` 로 알린다.
     세대 마감 직후 새 세대 첫 스냅샷 전에는 행을 숨기지 않고 `awaiting_generation=True`,
     nav=직전 세대 마감 NAV(원 계좌 금액), current_cum_ret/day_ret=None 으로 반환한다.
     [{surface, label, currency, nav, cum_ret(전체 세대), current_cum_ret(현 세대), day_ret, n_days, ...}]
@@ -695,6 +702,7 @@ def paper_glance() -> list[dict]:
             lifetime = roll.get("lifetime") or {}
             snaps = current.get("nav_series") or []
             generation = roll.get("generation_count") or 1
+            failure = roll.get("latest_failure")
             if not snaps:
                 life_series = lifetime.get("nav_series") or []
                 if not life_series:
@@ -715,6 +723,7 @@ def paper_glance() -> list[dict]:
                     "closed_nav_date": str(closing.get("date") or "")[:10] or None,
                     "lifetime_n_days": lifetime.get("n_snapshots") or len(life_series),
                     "lifetime_inception_date": lifetime.get("start_date"),
+                    "balance_failure": failure,
                 })
                 continue
             nav = float(current.get("nav")) if current.get("nav") is not None else float(snaps[-1])
@@ -732,6 +741,7 @@ def paper_glance() -> list[dict]:
                 "awaiting_generation": False,
                 "lifetime_n_days": lifetime.get("n_snapshots") or len(snaps),
                 "lifetime_inception_date": lifetime.get("start_date"),
+                "balance_failure": failure,
             })
         except Exception:
             continue

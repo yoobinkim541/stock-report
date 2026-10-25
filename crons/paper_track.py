@@ -167,14 +167,16 @@ _MAX_START_GAP_DAYS = 5
 def _weighted_forward_return(weights: dict, closes: dict, start: str, horizon: int) -> float | None:
     """기록일 종가 → horizon 거래일 후 종가의 가중 수익률. 미확정이면 None.
 
-    가중치가 있는 비현금 자산은 **모두** 같은 평가구간 시세가 있어야 한다. 하나라도
-    없으면(시세 결측·미래 데이터 미도래·가격 창이 기록일을 덮지 못함) None — 남은 자산을
-    재정규화해 100% 로 키우지 않는다. 현금은 명시 키(CASH_KEYS)와 미배분 잔여(1-Σw)를
-    수익률 0 으로 계산한다.
+    평가구간은 포트폴리오 **공통 거래일 시계**(가중 비현금 자산들의 관측일 합집합)에서 먼저
+    정한다: 시작 = 기록일 이후 첫 공통 거래일, 종료 = 그로부터 horizon 번째 공통 거래일.
+    모든 비현금 자산이 시작일과 종료일 **바로 그날** 종가를 가져야 한다. 하나라도 없으면
+    (시세 결측·종료봉 미도래·중간 결측으로 종료일 봉이 없음·가격 창이 기록일을 덮지 못함) None
+    — 종목별로 자기 관측 수를 세어 종료일을 뒤로 미루거나, 남은 자산을 재정규화하지 않는다.
+    현금은 명시 키(CASH_KEYS)와 미배분 잔여(1-Σw)를 수익률 0 으로 계산한다.
     """
     import pandas as pd
     start_ts = pd.Timestamp(start)
-    acc = 0.0
+    series = {}
     for t, w in weights.items():
         if t in CASH_KEYS or not w:
             continue
@@ -184,12 +186,21 @@ def _weighted_forward_return(weights: dict, closes: dict, start: str, horizon: i
         s = s.dropna()
         if s.empty:
             return None
-        pos = s.index.searchsorted(start_ts)
-        if pos >= len(s) or pos + horizon >= len(s):
-            return None   # 아직 미래 데이터 없음
-        if (s.index[pos] - start_ts).days > _MAX_START_GAP_DAYS:
-            return None   # 기록일 시작가가 가격 창 밖
-        acc += w * float(s.iloc[pos + horizon] / s.iloc[pos] - 1)
+        series[t] = s
+    if not series:
+        return 0.0
+    clock = sorted(set().union(*(s.index for s in series.values())))
+    pos = next((i for i, ts in enumerate(clock) if ts >= start_ts), None)
+    if pos is None or pos + horizon >= len(clock):
+        return None   # 아직 미래 데이터 없음
+    begin, end = clock[pos], clock[pos + horizon]
+    if (begin - start_ts).days > _MAX_START_GAP_DAYS:
+        return None   # 기록일 시작가가 가격 창 밖
+    acc = 0.0
+    for t, s in series.items():
+        if begin not in s.index or end not in s.index:
+            return None   # 공통 시작/종료일 봉 결측 → 미확정
+        acc += weights[t] * float(s.loc[end] / s.loc[begin] - 1)
     return acc
 
 

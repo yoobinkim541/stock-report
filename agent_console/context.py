@@ -417,6 +417,7 @@ def _offline_paper_summary(surface: str) -> dict:
         "lifetime_cum_ret": None,
         "lifetime_strat_mdd": None,
         "lifetime_nav_series": [],
+        "balance_failure": None,
     }
     try:
         import store
@@ -434,6 +435,8 @@ def _offline_paper_summary(surface: str) -> dict:
     lifetime = roll["lifetime"]
     snaps = roll["segments"][-1]["snapshots"]
     out["generation_count"] = out["generation"] = roll["generation_count"]
+    # 마지막 유효 snapshot 이후 잔고 조회 실패(실패 이벤트·nav=None 행) — 수치는 마지막 유효값 기준
+    out["balance_failure"] = roll.get("latest_failure")
     if snaps:
         out["nav_series"] = [{"date": str(r.get("date", ""))[:10], "nav": float(r["nav"])} for r in snaps]
         out["nav"] = current["nav"]

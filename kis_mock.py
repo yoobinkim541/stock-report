@@ -286,6 +286,11 @@ def get_balance() -> dict:
     """해외 모의계좌 잔고. 필드명은 라이브 스모크 전 미확정 → graceful(None+키 로깅).
 
     반환: {ok, positions{sym:{shares,avg_price,cur_price,value,pnl}}, pos_value, cash_usd, nav, raw}
+    - KIS 는 업무 오류(예: '모의투자 신청내역을 확인하세요')를 HTTP 200 + rt_cd≠0 으로 돌려준다
+      → ok=False(msg 포함). 빈 output1 을 '보유 없음'으로 오인하지 않는다.
+    - NAV 는 present-balance 총자산(원화)/환율, 또는 보유평가액 + 실측 현금일 때만 채운다. 둘 다
+      없으면(예: 00시대 최초고시 환율 미고시) nav=None — 보유평가액만으로 NAV 를 채우면 현금이
+      빠진 반쪽 NAV 가 된다.
     """
     cano, prdt = account()
     if not cano:
@@ -299,6 +304,11 @@ def get_balance() -> dict:
     res = _http_get(_MOCK_BASE + _BALANCE_URL, h, params)
     if res is None:
         return {"ok": False, "positions": {}, "pos_value": 0.0, "cash_usd": None, "nav": None, "raw": None}
+    if str(res.get("rt_cd", "0")) != "0":
+        msg = str(res.get("msg1") or "").strip()
+        logger.warning("KIS 모의 잔고 거부 rt_cd=%s: %s", res.get("rt_cd"), msg)
+        return {"ok": False, "positions": {}, "pos_value": 0.0, "cash_usd": None, "nav": None,
+                "msg": msg, "raw": res}
     positions = {}
     for it in res.get("output1", []) or []:
         sym = (it.get("ovrs_pdno") or "").strip().upper()
@@ -314,12 +324,15 @@ def get_balance() -> dict:
     pb = present_balance()
     cash = pb.get("cash_usd")
     nav = pb.get("nav_usd")
-    if nav is None:
-        nav = (pos_value + cash) if cash is not None else (pos_value or None)
+    if nav is None and cash is not None:
+        nav = pos_value + cash
     cash_derived = False
     if cash is None and nav is not None:
         cash = max(0.0, nav - pos_value)
         cash_derived = True     # 파생값 — USD 실예수금 아님(원화 여유증거금의 달러 환산)
+    if nav is None:
+        logger.warning("KIS 모의 NAV 미확인 — 총자산/환율·현금 없음(보유평가액 $%s 만으로 채우지 않음)",
+                       f"{pos_value:,.0f}")
     return {"ok": True, "positions": positions, "pos_value": pos_value,
             "cash_usd": cash, "cash_derived": cash_derived, "nav": nav,
             "krw_asset": pb.get("krw_asset"), "fx": pb.get("fx"),

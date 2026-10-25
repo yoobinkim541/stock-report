@@ -204,6 +204,18 @@ def test_a_fix_exec_paper_rail_shows_awaiting_new_generation():
     assert "세대 1 마감 NAV (2026-04-05)" in html and "전체 2세대 누적 -40.00%" in html
 
 
+def test_a_exec_fix2_paper_rail_flags_balance_failure_after_last_valid_record():
+    """잔고 조회 실패가 이어지면 NAV 는 마지막 유효값 그대로, 툴팁에 실패 날짜를 밝힌다."""
+    html = theme.paper_rail_html([{"label": "🇺🇸 미국", "currency": "$", "nav": 262_224.57,
+                                   "cum_ret": 4.89, "current_cum_ret": None, "day_ret": None,
+                                   "generation": 2, "n_days": 0, "awaiting_generation": True,
+                                   "closed_generation": 1, "closed_nav_date": "2026-10-13",
+                                   "balance_failure": {"date": "2026-10-15 06:40",
+                                                       "reason": "nav_missing"}}])
+    assert "$262,225" in html and "$100,000" not in html
+    assert "잔고 조회 실패 2026-10-15" in html
+
+
 def test_orderbook_ladder_html():
     """호가 사다리 — 잔량 바·전일比 등락%·현재가 강조·총잔량·당일/52주 패널."""
     bids = [[23125, 518], [23110, 827]]

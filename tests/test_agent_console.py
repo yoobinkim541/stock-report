@@ -324,6 +324,30 @@ def test_a_fix_exec_context_offline_paper_follows_generation_rules(monkeypatch, 
     assert us["nav"] is None and us["cum_ret"] is None and us["lifetime_cum_ret"] is None
 
 
+def test_a_exec_fix2_context_offline_paper_ignores_failed_balance_snapshots(monkeypatch, tmp_path):
+    """잔고 실패(nav None·0·반쪽 잔고 무효 표시) snapshot 은 에이전트 모의 요약의 NAV·MDD 에서 빠진다."""
+    _isolate(monkeypatch, tmp_path)
+    import store
+    from agent_console import context
+    hists = {"kr_mock_history": [],
+             "us_mock_history": [
+                 {"kind": "snapshot", "date": "2026-08-24 06:40", "nav": 250_000.0, "cash": 1.0},
+                 {"kind": "snapshot", "date": "2026-08-25 00:03", "nav": 125_000.0, "cash": 0.0,
+                  "invalid": "incomplete_balance"},
+                 {"kind": "snapshot", "date": "2026-08-25 06:40", "nav": 260_000.0, "cash": 2.0},
+                 {"kind": "snapshot", "date": "2026-10-13 00:03", "nav": 0.0, "cash": None},
+                 {"kind": "snapshot", "date": "2026-10-13 06:40", "nav": None, "cash": None}]}
+    monkeypatch.setattr(store, "all", lambda name, **k: list(hists.get(name, [])))
+
+    us = context._offline_paper_summary("us_mock")
+
+    assert us["nav"] == 260_000.0 and us["cash"] == 2.0
+    assert [r["nav"] for r in us["nav_series"]] == [250_000.0, 260_000.0]
+    assert us["strat_mdd"] == 0.0
+    assert us["balance_failure"] == {"date": "2026-10-13 06:40", "reason": "nav_missing"}
+    assert us["decisions"] == []
+
+
 def test_shared_memory_context_contract(monkeypatch, tmp_path):
     _isolate(monkeypatch, tmp_path)
 

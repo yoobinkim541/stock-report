@@ -165,5 +165,58 @@ def test_is_enabled(monkeypatch):
     assert kis_mock.is_enabled() is False
 
 
+# ── 잔고: 브로커 거부·NAV 미확인은 실패/결측으로 (반쪽 NAV·빈 보유 오인 금지) ─────────
+
+class _BalanceHTTP:
+    """URL 별 고정 응답. 모든 GET 이 모의 도메인·리다이렉트 금지로 나가는지 기록."""
+
+    def __init__(self, balance: dict, present: dict):
+        self.routes = {kis_mock._BALANCE_URL: balance, kis_mock._PRESENT_BALANCE_URL: present}
+        self.calls = []
+
+    def get(self, url, headers=None, params=None, timeout=None, allow_redirects=True):
+        self.calls.append((url, allow_redirects))
+        body = next(v for k, v in self.routes.items() if url.endswith(k))
+        return _FakeResponse(body)
+
+
+def _prep_balance(monkeypatch, fake):
+    monkeypatch.setenv("KOREA_MOCK_ACCOUNT_NO", "50012345-01")
+    monkeypatch.setattr(kis_mock, "_headers", lambda tr_id, extra=None: {"tr_id": tr_id})
+    monkeypatch.setattr(kis_mock.requests, "get", fake.get)
+
+
+_HOLDING = {"ovrs_pdno": "MSFT", "ovrs_cblc_qty": "10", "pchs_avg_pric": "400",
+            "now_pric2": "420", "ovrs_stck_evlu_amt": "4200", "frcr_evlu_pfls_amt": "200"}
+
+
+def test_a_exec_fix2_balance_rejected_by_broker_is_failure(monkeypatch):
+    fake = _BalanceHTTP({"rt_cd": "1", "msg1": "모의투자 신청내역을 확인하세요", "output1": []},
+                        {"rt_cd": "1", "msg1": "모의투자 신청내역을 확인하세요"})
+    _prep_balance(monkeypatch, fake)
+
+    bal = kis_mock.get_balance()
+
+    assert bal["ok"] is False and bal["nav"] is None and bal["positions"] == {}
+    assert bal["msg"] == "모의투자 신청내역을 확인하세요"
+    assert all(url.startswith(kis_mock._MOCK_BASE) and redirects is False for url, redirects in fake.calls)
+
+
+def test_a_exec_fix2_balance_without_fx_does_not_fill_nav_with_holdings(monkeypatch):
+    """00시대 최초고시 환율 미고시(0) → 총자산 환산 불가. 보유평가액만으로 NAV 를 채우지 않는다."""
+    present = {"rt_cd": "0", "output3": {"frcr_use_psbl_amt": "0", "tot_asst_amt": "360000000"},
+               "output2": [{"crcy_cd": "USD", "frst_bltn_exrt": "0", "frcr_dncl_amt_2": "0"}]}
+    _prep_balance(monkeypatch, _BalanceHTTP({"rt_cd": "0", "output1": [_HOLDING]}, present))
+
+    bal = kis_mock.get_balance()
+
+    assert bal["ok"] is True and bal["positions"]["MSFT"]["shares"] == 10
+    assert bal["nav"] is None and bal["cash_usd"] is None
+
+    present["output2"][0]["frst_bltn_exrt"] = "1440"        # 환율 고시 후: 총자산/환율 = NAV
+    bal = kis_mock.get_balance()
+    assert bal["nav"] == 250_000.0 and bal["cash_usd"] == 250_000.0 - 4200.0 and bal["cash_derived"] is True
+
+
 if __name__ == "__main__":
     sys.exit(pytest.main([__file__, "-v"]))

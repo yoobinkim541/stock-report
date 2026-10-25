@@ -47,12 +47,17 @@ def _account_section(surface: str):
     cur = d.get("currency", "₩")
     bench = d.get("bench_name", "지수")
 
+    problem = d.get("balance_problem")
     if d.get("nav") is None:
-        st.info("계좌 데이터 없음 — 모의투자 크론(kiwoom_mock_track·us_mock_track)이 아직 "
-                "실행되지 않았거나 `*_MOCK_ENABLED` 미설정입니다.")
+        if problem:
+            st.warning(f"⚠️ 잔고 조회 실패({problem}) — 표시할 유효 NAV 기록이 없습니다 "
+                       "(세대 마감 직후이거나 모의투자 신청·연결 확인 필요).")
+        else:
+            st.info("계좌 데이터 없음 — 모의투자 크론(kiwoom_mock_track·us_mock_track)이 아직 "
+                    "실행되지 않았거나 `*_MOCK_ENABLED` 미설정입니다.")
         return
     if not d.get("balance_ok"):
-        st.caption("⚠️ 잔고 API 조회 불가 — 마지막 EOD 스냅샷 기준 표시")
+        st.caption(f"⚠️ 잔고 API 조회 불가{f'({problem})' if problem else ''} — 마지막 유효 EOD 스냅샷 기준 표시")
 
     # ── 계좌 KPI ──────────────────────────────────────────────────────────────
     excess = None

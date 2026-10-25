@@ -1337,6 +1337,34 @@ def test_views_paper_summary_graceful_empty(monkeypatch):
     assert d["nav"] is None and d["positions"] == [] and d["nav_series"] == []
 
 
+def test_a_exec_fix2_paper_summary_rejected_balance_falls_back_to_last_valid_snapshot(monkeypatch):
+    """브로커 거부(rt_cd≠0)·NAV 미확인 잔고를 0/시드로 메워 NAV 0·누적 -100% 를 보이지 않는다."""
+    import kis_mock
+    import store
+    from dashboard import views
+    from providers import market_data
+
+    hist = [{"kind": "snapshot", "date": "2026-10-09 06:40", "nav": 250_000.0, "cash": 1.0},
+            {"kind": "snapshot", "date": "2026-10-10 06:40", "nav": 262_224.57, "cash": 2.0},
+            {"kind": "snapshot", "date": "2026-10-13 06:40", "nav": None, "cash": None}]
+    monkeypatch.setattr(store, "all", lambda name, **k: list(hist) if name == "us_mock_history" else [])
+    monkeypatch.setattr(market_data, "fetch_kospi_stats", lambda *a, **k: {})
+
+    for bal, reason in (
+        ({"ok": True, "positions": {}, "pos_value": 0.0, "cash_usd": None, "nav": None,
+          "raw": {"rt_cd": "1", "msg1": "모의투자 신청내역을 확인하세요"}},
+         "broker_rejected: 모의투자 신청내역을 확인하세요"),
+        ({"ok": True, "positions": {"MSFT": {"shares": 10, "value": 4200.0}}, "pos_value": 4200.0,
+          "cash_usd": None, "nav": None, "raw": {"rt_cd": "0"}}, "nav_missing"),
+    ):
+        monkeypatch.setattr(kis_mock, "get_balance", lambda bal=bal: bal)
+        d = views.paper_summary("us_mock")
+        assert d["balance_ok"] is False and d["balance_problem"] == reason
+        assert d["nav"] == 262_224.57 and d["cash"] == 2.0
+        assert round(d["cum_ret"], 4) == round((262_224.57 / 250_000 - 1) * 100, 4)
+        assert d["positions"] == []
+
+
 # ── P2 ML 게이트 요약 (파일 read-only·graceful) ───────────────────────────────
 def _write_json(p, obj):
     import json
@@ -1470,6 +1498,30 @@ def test_a_fix_exec_paper_glance_keeps_row_after_close_before_new_snapshot(monke
     assert round(kr["cum_ret"], 6) == -40.0               # 마감 NAV 반영 전체 누적
     assert kr["current_cum_ret"] is None and kr["day_ret"] is None and kr["n_days"] == 0
     assert kr["generation"] == 2
+
+
+def test_a_exec_fix2_paper_glance_ignores_invalid_snapshots_and_flags_failure(monkeypatch):
+    """잔고 실패로 기록된 nav=0/None/무효 표시 snapshot 은 NAV·수익률에서 빠지고, 마지막 유효
+    기록 이후 실패가 있으면 balance_failure 로 알린다."""
+    import store
+    from dashboard import views
+    hists = {"kr_mock_history": [],
+             "us_mock_history": [
+                 {"kind": "snapshot", "date": "2026-10-09 06:40", "nav": 250_000.0, "cash": 1.0},
+                 {"kind": "snapshot", "date": "2026-10-10 06:40", "nav": 262_224.57, "cash": 1.0},
+                 {"kind": "snapshot", "date": "2026-10-11 00:03", "nav": 131_000.0, "cash": 0.0,
+                  "invalid": "incomplete_balance"},
+                 {"kind": "snapshot", "date": "2026-10-13 00:03", "nav": 0.0, "cash": 0.0},
+                 {"kind": "snapshot", "date": "2026-10-13 06:40", "nav": None, "cash": None},
+                 {"kind": "snapshot_failed", "date": "2026-10-14 06:40", "reason": "broker_rejected"}]}
+    monkeypatch.setattr(store, "all", lambda name, **k: list(hists.get(name, [])))
+
+    (us,) = views.paper_glance()
+
+    assert us["nav"] == 262_224.57
+    assert round(us["current_cum_ret"], 4) == round((262_224.57 / 250_000 - 1) * 100, 4)
+    assert us["n_days"] == 2
+    assert us["balance_failure"] == {"date": "2026-10-14 06:40", "reason": "broker_rejected"}
 
 
 def test_views_paper_glance_empty_and_error(monkeypatch):

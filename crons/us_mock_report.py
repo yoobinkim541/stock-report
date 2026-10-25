@@ -24,6 +24,7 @@ load_dotenv()
 
 import kis_mock
 import fmt
+from lib import mock_generations
 from lib import mock_llm_execution as llm_exec
 from lib import mock_llm_rationale as llm_rationale
 
@@ -305,10 +306,9 @@ def _scorecard_rows() -> list[dict]:
 
 
 def _snapshots() -> list[dict]:
+    """현재 세대의 유효 NAV snapshot (세대 경계 이후·잔고 실패 행 제외 — KR 리포트와 동일 규칙)."""
     try:
-        import store
-        return [r for r in store.all("us_mock_history")
-                if r.get("kind") == "snapshot" and r.get("nav") is not None]
+        return mock_generations.active_snapshots("us_mock_history")
     except Exception as e:
         logger.warning("히스토리 조회 실패: %s", e)
         return []
@@ -342,12 +342,15 @@ def build_report(html: bool = False, detail: bool | None = None) -> str:
                f"📅 {today.strftime('%Y-%m-%d')} ({_WD[today.weekday()]}) {today.strftime('%H:%M')} KST")
     else:
         hdr = f"🧪 US 모의 · {today.strftime('%Y-%m-%d')} ({_WD[today.weekday()]}) {today.strftime('%H:%M')} KST"
-    if not bal.get("ok"):
-        return hdr + "\n━━━━━━━━━━━━━━━\n  ⚠️ 잔고 조회 실패 — KOREA_MOCK_ENABLED·계좌#·모의 연결 확인"
+    problem = mock_generations.balance_problem(bal)
+    if problem:
+        # 잔고를 모르면 시드/보유평가액으로 NAV 를 메워 손익을 지어내지 않는다.
+        return (hdr + "\n━━━━━━━━━━━━━━━\n  ⚠️ 잔고 조회 실패 — KOREA_MOCK_ENABLED·계좌#·모의 연결 확인"
+                f"\n  사유: {problem}")
 
     positions, cash = bal["positions"], bal["cash_usd"]
     pos_value = bal["pos_value"] or 0.0
-    nav = bal["nav"] or (pos_value + (cash or 0.0)) or SEED_USD
+    nav = float(bal["nav"])
 
     snaps = _snapshots()
     inception_nav = float(snaps[0]["nav"]) if snaps else SEED_USD
@@ -362,7 +365,6 @@ def build_report(html: bool = False, detail: bool | None = None) -> str:
     day_ret = (nav / prev_nav - 1.0) * 100.0 if prev_nav else 0.0
 
     try:
-        from lib import mock_generations
         roll = mock_generations.generation_rollup("us_mock_history")
     except Exception as e:
         logger.warning("세대 롤업 실패: %s", e)
@@ -649,12 +651,12 @@ def main() -> int:
     text = build_report()
     try:
         bal = kis_mock.get_balance()
-        if bal.get("ok"):
-            import store
-            store.append("us_mock_history", {
-                "date": datetime.now(KST).strftime("%Y-%m-%d %H:%M"), "kind": "snapshot", "at": "eod",
-                "nav": bal.get("nav"), "cash": bal.get("cash_usd"),
-                "positions": len([p for p in bal["positions"].values() if int(p.get("shares", 0) or 0) > 0])})
+        res = mock_generations.record_snapshot(
+            "us_mock_history", nav=bal.get("nav"), cash=bal.get("cash_usd"),
+            positions=bal.get("positions") or {}, at="eod", seed=SEED_USD,
+            problem=mock_generations.balance_problem(bal))
+        if not res["recorded"]:
+            logger.warning("EOD 스냅샷 미기록 — 잔고 이상(%s)", res["reason"])
     except Exception as e:
         logger.warning("EOD 스냅샷 실패: %s", e)
     try:

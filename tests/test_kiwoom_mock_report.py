@@ -137,5 +137,40 @@ def test_main_skips_when_disabled(monkeypatch):
     assert sent["n"] == 0
 
 
+def test_a_exec_fix2_kr_eod_records_failure_event_when_nav_unconfirmed(monkeypatch):
+    """키움 요약필드 미확인(nav=None) 잔고는 nav=None snapshot 이 아니라 실패 이벤트로 남는다."""
+    import notify
+    import store
+
+    rows: dict[str, list] = {}
+    monkeypatch.setattr(store, "append", lambda name, item, **k: rows.setdefault(name, []).append(dict(item)))
+    monkeypatch.setattr(store, "all", lambda name, **k: list(rows.get(name, [])))
+    monkeypatch.setattr(kiwoom_mock, "is_enabled", lambda: True)
+    monkeypatch.setattr(kiwoom_mock, "get_balance", lambda: _bal(nav=None, cash=None))
+    monkeypatch.setattr(rpt, "build_report", lambda *a, **k: "report")
+    monkeypatch.setattr(notify, "send_telegram", lambda *a, **k: None)
+
+    assert rpt.main() == 0
+
+    assert [(r["kind"], r.get("at"), r.get("reason")) for r in rows["kr_mock_history"]] == [
+        ("snapshot_failed", "eod", "nav_missing")]
+
+
+def test_a_exec_fix2_kr_track_snapshot_uses_observed_nav_not_seed_approximation(monkeypatch):
+    """KR 루프 시작 snapshot: 요약필드 미확인 NAV 를 보유액/시드 근사로 기록하지 않는다."""
+    import kiwoom_mock_track as track
+    import store
+
+    rows: dict[str, list] = {}
+    monkeypatch.setattr(store, "append", lambda name, item, **k: rows.setdefault(name, []).append(dict(item)))
+    monkeypatch.setattr(store, "all", lambda name, **k: list(rows.get(name, [])))
+
+    track._record_snapshot(_bal(nav=None, cash=None))
+    track._record_snapshot(_bal())
+
+    assert [r["kind"] for r in rows["kr_mock_history"]] == ["snapshot_failed", "snapshot"]
+    assert rows["kr_mock_history"][1]["nav"] == 11_000_000
+
+
 if __name__ == "__main__":
     sys.exit(pytest.main([__file__, "-v"]))

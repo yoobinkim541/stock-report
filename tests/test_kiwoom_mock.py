@@ -589,6 +589,30 @@ def test_main_aborts_on_balance_failure(monkeypatch):
     assert ordered["n"] == 0, "잔고 실패 시 주문 0"
 
 
+def test_a_exec_fix2_main_holds_orders_when_nav_unknown(monkeypatch):
+    """잔고는 ok 지만 NAV/현금 요약필드 미확인(nav=None) → 보유액/시드 근사 예산으로 주문하지 않고
+    실패 이벤트만 남긴 뒤 종료."""
+    import kiwoom_mock_track as kt
+    import store
+
+    rows: dict[str, list] = {}
+    monkeypatch.setattr(store, "append", lambda name, item, **k: rows.setdefault(name, []).append(dict(item)))
+    monkeypatch.setattr(store, "all", lambda name, **k: list(rows.get(name, [])))
+    monkeypatch.setattr(kiwoom_mock, "is_enabled", lambda: True)
+    monkeypatch.setattr(kiwoom_mock, "get_balance", lambda: {
+        "ok": True, "positions": {"005930": {"shares": 10, "value": 700_000}}, "pos_value": 700_000.0,
+        "cash_krw": None, "nav": None, "raw": {"return_code": 0}})
+
+    def _no_signals(*a, **k):
+        raise AssertionError("NAV 미확인 시 신호·주문 단계로 진행하면 안 된다")
+
+    monkeypatch.setattr(kt, "compute_kr_signals", _no_signals)
+    monkeypatch.setattr(kiwoom_mock, "place_order", _no_signals)
+
+    assert kt.main() == 1
+    assert [(r["kind"], r["reason"]) for r in rows["kr_mock_history"]] == [("snapshot_failed", "nav_missing")]
+
+
 def test_compute_kr_signals_attaches_momentum_overlay_fields(monkeypatch):
     import pandas as pd
     import kiwoom_mock_track as kt

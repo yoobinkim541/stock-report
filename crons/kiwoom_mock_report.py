@@ -22,6 +22,7 @@ load_dotenv()
 
 import kiwoom_mock
 import fmt
+from lib import mock_generations
 from lib import mock_llm_execution as llm_exec
 from lib import mock_llm_rationale as llm_rationale
 
@@ -210,7 +211,6 @@ def _llm_shadow_summary():
 
 def _snapshots() -> list[dict]:
     try:
-        from lib import mock_generations
         return mock_generations.active_snapshots("kr_mock_history")
     except Exception as e:
         logger.warning("히스토리 조회 실패: %s", e)
@@ -244,13 +244,15 @@ def build_report(html: bool = False, detail: bool | None = None) -> str:
     today = datetime.now(KST)
     hdr = (f"🧪 [모의] 국내 모의투자 · "
            f"{today.strftime('%Y-%m-%d')} ({_WEEKDAY_KR[today.weekday()]}) {today.strftime('%H:%M')} KST")
-    if not bal.get("ok"):
-        return hdr + "\n━━━━━━━━━━━━━━━━━━━\n  ⚠️ 잔고 조회 실패 — 모의 연결/모의투자 신청 확인 필요"
+    problem = mock_generations.balance_problem(bal)
+    if problem:
+        # 잔고를 모르면 시드/보유평가액으로 NAV 를 메워 손익을 지어내지 않는다.
+        return (hdr + "\n━━━━━━━━━━━━━━━━━━━\n  ⚠️ 잔고 조회 실패 — 모의 연결/모의투자 신청 확인 필요"
+                f"\n  사유: {problem}")
 
     # 계좌 만기 리셋으로 세대가 넘어간 이력이 있으면 헤더에 표시 (누적수익률·MDD가
     # 리셋 이전 세대와 섞이지 않는다는 걸 알 수 있도록)
     try:
-        from lib import mock_generations
         gen_no = mock_generations.generation_count("kr_mock_history")
         if gen_no > 1:
             hdr += f" · 세대{gen_no}"
@@ -260,9 +262,7 @@ def build_report(html: bool = False, detail: bool | None = None) -> str:
     positions = bal["positions"]
     cash = bal["cash_krw"]
     pos_value = bal["pos_value"] or 0.0
-    nav = bal["nav"]
-    if nav is None:
-        nav = pos_value + (cash or 0.0) or SEED_KRW
+    nav = float(bal["nav"])
 
     # NAV 시계열 → 인셉션·전일·전략 MDD
     snaps = _snapshots()
@@ -279,7 +279,6 @@ def build_report(html: bool = False, detail: bool | None = None) -> str:
     day_ret = (nav / prev_nav - 1.0) * 100.0 if prev_nav else 0.0
 
     try:
-        from lib import mock_generations
         roll = mock_generations.generation_rollup("kr_mock_history")
     except Exception as e:
         logger.warning("세대 롤업 실패: %s", e)
@@ -516,13 +515,12 @@ def main() -> int:
     # EOD NAV 스냅샷 적재(종가 NAV 시계열 — 전일대비는 이전 날짜 기준이라 동일자 중복 무해)
     try:
         bal = kiwoom_mock.get_balance()
-        if bal.get("ok"):
-            import store
-            store.append("kr_mock_history", {
-                "date": datetime.now(KST).strftime("%Y-%m-%d %H:%M"), "kind": "snapshot", "at": "eod",
-                "nav": bal.get("nav"), "cash": bal.get("cash_krw"),
-                "positions": len([p for p in bal["positions"].values() if int(p.get("shares", 0) or 0) > 0]),
-            })
+        res = mock_generations.record_snapshot(
+            "kr_mock_history", nav=bal.get("nav"), cash=bal.get("cash_krw"),
+            positions=bal.get("positions") or {}, at="eod", seed=SEED_KRW,
+            problem=mock_generations.balance_problem(bal))
+        if not res["recorded"]:
+            logger.warning("EOD 스냅샷 미기록 — 잔고 이상(%s)", res["reason"])
     except Exception as e:
         logger.warning("EOD 스냅샷 실패: %s", e)
 

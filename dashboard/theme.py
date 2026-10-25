@@ -410,12 +410,13 @@ def paper_rail_html(rows: list[dict], title="🧪 모의투자 · 평가액 · �
     """사이드바 모의 계좌 레일 (워치리스트와 동일 tn-wl 스타일 — 순수 빌더).
 
     rows: views.paper_glance 출력 [{label, currency, nav, cum_ret, current_cum_ret, day_ret, n_days,
-    awaiting_generation}].
+    awaiting_generation, balance_failure}].
     3열: 계좌 · NAV(압축) · 수익률(색). NAV 는 현 세대 계좌라 수익률도 같은 세대 값을 보여준다
     (세대 리셋 후 $100,000 옆에 전체 세대 누적 -60% 가 붙어 모순돼 보이던 문제).
     세대 마감 직후 새 세대 첫 기록 전(awaiting_generation)에는 직전 세대 마감 NAV 와
     "새 세대 대기" 를 보여준다 — 현 세대 수익률이 없으므로 전체 누적으로 대체하지 않는다.
-    전체 세대 누적·전일·기록일수는 title 툴팁.
+    마지막 유효 기록 이후 잔고 조회가 실패하고 있으면(balance_failure) NAV 는 마지막 유효값
+    그대로 두고 툴팁에 실패 시각을 붙인다. 전체 세대 누적·전일·기록일수는 title 툴팁.
     """
     body = []
     for r in rows or []:
@@ -444,6 +445,10 @@ def paper_rail_html(rows: list[dict], title="🧪 모의투자 · 평가액 · �
             if life is not None and life != shown:
                 tip_bits.append(f"{f'전체 {gen}세대' if gen else '전체'} 누적 {life:+.2f}%")
             tip_bits.append(f"기록 {r.get('n_days', 0)}일")
+        failure = r.get("balance_failure") or {}
+        if failure:
+            when = str(failure.get("date") or "")[:10]
+            tip_bits.append(f"잔고 조회 실패{f' {when}' if when else ''} — 마지막 유효 기록 기준")
         tip = f' title="{" · ".join(tip_bits)}"'
         body.append(f'''<div class="tn-wl-row">
   <span class="tn-wl-sym"{tip}>{r.get("label", "?")}</span>

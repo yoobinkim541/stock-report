@@ -327,3 +327,159 @@ def test_a_fix_exec_legacy_boundary_reads_close_nav_from_archive():
 
     assert round(roll["lifetime"]["cum_return_pct"], 6) == -40.0
     assert round(roll["lifetime"]["mdd_pct"], 6) == 50.0
+
+
+# ── RA-06: snapshot 없는 첫 정상 마감의 NAV 가 롤업에서 사라지지 않음 ─────────────────
+
+def test_a_exec_fix2_first_close_without_snapshots_keeps_close_nav():
+    store = _FakeStore()
+    summary = _close(store, 100)
+
+    roll = _roll(store)
+    assert summary["final_nav"] == 100
+    assert roll["generation_count"] == 2
+    assert roll["current"]["nav"] is None
+    assert roll["lifetime"]["final_nav"] == 100
+    assert [r["raw_nav"] for r in roll["lifetime"]["nav_series"]] == [100]
+
+    store.append("kr_mock_history", _snap("2026-04-06 06:40", 50))
+    store.append("kr_mock_history", _snap("2026-04-07 06:40", 55))
+    roll = _roll(store)
+    assert [r["raw_nav"] for r in roll["lifetime"]["nav_series"]] == [100, 50, 55]
+    assert [round(r["nav"], 6) for r in roll["lifetime"]["nav_series"]] == [100, 100, 110]
+    assert round(roll["lifetime"]["cum_return_pct"], 6) == 10.0   # 리셋(100→50)은 손실 아님
+
+
+def test_a_exec_fix2_legacy_duplicate_empty_boundary_adds_no_fake_point():
+    store = _FakeStore()
+    store.append("kr_mock_history", _snap("2026-01-05 06:40", 100))
+    store.append("kr_mock_history", _snap("2026-01-06 06:40", 120))
+    store.append("kr_mock_history", {"date": "2026-04-05 09:00", "kind": "generation_boundary",
+                                     "generation": 1, "final_nav": 60})
+    store.append("kr_mock_history", {"date": "2026-04-05 09:05", "kind": "generation_boundary",
+                                     "generation": 2, "final_nav": 999})   # 구 중복 마감
+    store.append("kr_mock_history", _snap("2026-04-06 06:40", 100))
+
+    roll = _roll(store)
+
+    assert [r["raw_nav"] for r in roll["lifetime"]["nav_series"]] == [100, 120, 60, 100]
+    assert round(roll["lifetime"]["cum_return_pct"], 6) == -40.0
+
+
+# ── 운영 원장 결함: 무효 snapshot 무시 · 실패 이벤트 · 불완전 잔고 · 리셋 자동 세대 ─────
+
+def test_a_exec_fix2_rollup_ignores_invalid_snapshots():
+    store = _FakeStore()
+    store.append("us_mock_history", {"date": "2026-08-24 06:40", "kind": "snapshot", "nav": 100.0, "cash": 50.0})
+    store.append("us_mock_history", {"date": "2026-08-25 00:03", "kind": "snapshot", "nav": None, "cash": None})
+    store.append("us_mock_history", {"date": "2026-08-25 00:04", "kind": "snapshot", "nav": 0.0, "cash": 0.0})
+    store.append("us_mock_history", {"date": "2026-08-25 00:05", "kind": "snapshot", "nav": float("nan")})
+    store.append("us_mock_history", {"date": "2026-08-25 00:06", "kind": "snapshot", "nav": 50.0,
+                                     "cash": 0.0, "invalid": "incomplete_balance"})
+    store.append("us_mock_history", {"date": "2026-08-25 06:40", "kind": "snapshot", "nav": 110.0, "cash": 55.0})
+
+    roll = mock_generations.generation_rollup("us_mock_history", store_module=store,
+                                              max_drawdown_fn=_peak_mdd)
+
+    assert roll["current"]["nav_series"] == [100.0, 110.0]
+    assert roll["current"]["mdd_pct"] == 0.0
+    assert round(roll["current"]["cum_return_pct"], 6) == 10.0
+    assert roll["latest_failure"] is None
+
+
+def test_a_exec_fix2_failed_balance_is_recorded_as_event_not_snapshot():
+    store = _FakeStore()
+    store.append("us_mock_history", {"date": "2026-10-10 06:40", "kind": "snapshot", "nav": 262224.57})
+
+    res = mock_generations.record_snapshot(
+        "us_mock_history", nav=None, cash=None, positions={}, at="eod", seed=100_000,
+        problem=mock_generations.balance_problem(
+            {"ok": True, "nav": None, "positions": {}, "raw": {"rt_cd": "1", "msg1": "모의투자 신청내역을 확인하세요"}}),
+        store_module=store, now="2026-10-13 06:40")
+
+    assert res == {"recorded": False, "reason": "broker_rejected: 모의투자 신청내역을 확인하세요", "reset": None}
+    rows = store.all("us_mock_history")
+    assert rows[-1]["kind"] == "snapshot_failed" and rows[-1]["at"] == "eod"
+    assert [s["nav"] for s in mock_generations.active_snapshots("us_mock_history", store_module=store)] == [262224.57]
+    assert mock_generations.latest_failure("us_mock_history", store_module=store)["date"] == "2026-10-13 06:40"
+
+
+def test_a_exec_fix2_half_balance_without_cash_is_rejected():
+    store = _FakeStore()
+    store.append("us_mock_history", {"date": "2026-08-24 06:40", "kind": "snapshot", "nav": 200_000.0,
+                                     "cash": 100_000.0, "positions": 4})
+
+    res = mock_generations.record_snapshot(
+        "us_mock_history", nav=100_000.0, cash=0.0, positions=4, seed=100_000,
+        store_module=store, now="2026-08-25 00:03")
+
+    assert res["recorded"] is False and res["reason"] == "incomplete_balance"
+    assert len(mock_generations.active_snapshots("us_mock_history", store_module=store)) == 1
+
+
+def test_a_exec_fix2_kis_balance_problems_are_classified():
+    bp = mock_generations.balance_problem
+    assert bp({"ok": False}) == "balance_failed"
+    assert bp(None) == "balance_failed"
+    assert bp({"ok": True, "nav": None, "raw": {"rt_cd": "1", "msg1": "모의투자 신청내역을 확인하세요"}}) \
+        == "broker_rejected: 모의투자 신청내역을 확인하세요"
+    # 어댑터가 거부를 ok=False 로 돌려줘도 사유(메시지)는 보존
+    assert bp({"ok": False, "nav": None, "msg": "모의투자 신청내역을 확인하세요",
+               "raw": {"rt_cd": "1"}}) == "broker_rejected: 모의투자 신청내역을 확인하세요"
+    assert bp({"ok": False, "raw": {"return_code": 1, "return_msg": "모의투자 미신청"}}) \
+        == "broker_rejected: 모의투자 미신청"
+    assert bp({"ok": True, "nav": None, "raw": {"rt_cd": "0"}}) == "nav_missing"
+    assert bp({"ok": True, "nav": float("nan"), "raw": {"rt_cd": "0"}}) == "nav_missing"
+    assert bp({"ok": True, "nav": 262_224.57, "cash_usd": 130_000.0, "cash_derived": True,
+               "krw_asset": 360_000_000.0, "fx": 1372.9, "raw": {"rt_cd": "0"}}) is None
+    assert bp({"ok": True, "nav": 11_000_000, "cash_krw": 1_000_000, "raw": {"return_code": 0}}) is None
+
+
+def test_a_exec_fix2_detected_reset_closes_generation_at_last_valid_nav():
+    store = _FakeStore()
+    store.append("us_mock_history", {"date": "2026-10-09 06:40", "kind": "snapshot", "nav": 250_000.0, "positions": 3})
+    store.append("us_mock_history", {"date": "2026-10-10 06:40", "kind": "snapshot", "nav": 262_224.57, "positions": 3})
+
+    res = mock_generations.record_snapshot(
+        "us_mock_history", nav=100_000.0, cash=100_000.0, positions={}, seed=100_000,
+        max_drawdown_fn=_peak_mdd, store_module=store, now="2026-10-13 00:03")
+
+    assert res["recorded"] is True
+    assert res["reset"]["final_nav"] == 262_224.57 and res["reset"]["generation"] == 1
+    assert res["reset"]["close_nav_date"] == "2026-10-10 06:40"
+    assert len(store.all("us_mock_history_generations")) == 1
+    roll = mock_generations.generation_rollup("us_mock_history", store_module=store,
+                                              max_drawdown_fn=_peak_mdd)
+    assert roll["generation_count"] == 2
+    assert roll["current"]["nav"] == 100_000.0 and roll["current"]["cum_return_pct"] == 0.0
+    assert round(roll["lifetime"]["cum_return_pct"], 4) == round((262_224.57 / 250_000 - 1) * 100, 4)
+    assert roll["lifetime"]["mdd_pct"] == 0.0   # 리셋이 -60% 손실·MDD 로 잡히지 않음
+
+
+def test_a_exec_fix2_reset_requires_flat_seed_nav_and_large_gap():
+    for nav, positions, prev in ((100_000.0, 2, 262_224.57),     # 보유 있음
+                                 (95_000.0, 0, 262_224.57),      # 시드와 불일치
+                                 (100_000.0, 0, 104_000.0)):     # 직전이 시드 근처(정상 운용)
+        store = _FakeStore()
+        store.append("us_mock_history", {"date": "2026-10-10 06:40", "kind": "snapshot", "nav": prev,
+                                         "cash": prev / 2, "positions": 2})
+        res = mock_generations.record_snapshot(
+            "us_mock_history", nav=nav, cash=nav / 2, positions=positions, seed=100_000,
+            store_module=store, now="2026-10-13 00:03")
+        assert res["reset"] is None
+        assert mock_generations.generation_count("us_mock_history", store_module=store) == 1
+
+
+def test_a_exec_fix2_close_generation_refuses_rejected_balance_without_writes():
+    store = _FakeStore()
+    store.append("us_mock_history", {"date": "2026-10-10 06:40", "kind": "snapshot", "nav": 262_224.57})
+    try:
+        mock_generations.close_generation(
+            "us_mock_history", store_module=store, max_drawdown_fn=_peak_mdd,
+            get_balance_fn=lambda: {"ok": True, "nav": None, "pos_value": 0.0, "positions": {},
+                                    "raw": {"rt_cd": "1", "msg1": "모의투자 신청내역을 확인하세요"}})
+        assert False, "브로커가 거부한 잔고로 마감하면 안 된다"
+    except RuntimeError as e:
+        assert "broker_rejected" in str(e)
+    assert [r["kind"] for r in store.all("us_mock_history")] == ["snapshot"]
+    assert store.all("us_mock_history_generations") == []
