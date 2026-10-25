@@ -895,3 +895,18 @@ def test_download_uses_unique_name_and_prunes_old_attachments(monkeypatch, tmp_p
     assert p1 and p2 and p1 != p2 and p1.endswith("_snap.jpg")
     assert not old.exists()
     assert open(p1, "rb").read() == b"abc"
+
+
+def test_command_registries_are_consistent():
+    """4개 레지스트리(_COMMAND_HANDLERS·BOT_COMMAND_ALIASES·메뉴·게스트 허용)의 정합성 —
+    alias 대상·메뉴 항목·게스트 허용 명령이 전부 실제 핸들러를 가진다."""
+    import telegram_bot as tb
+    handlers = set(tb._COMMAND_HANDLERS)
+    for alias, target in tb.BOT_COMMAND_ALIASES.items():
+        head = target.split()[0]
+        assert head in handlers, f"alias {alias} → {target}: 핸들러 없음"
+    for menu in (tb._OWNER_MENU, tb._GUEST_MENU):
+        for item in menu:
+            assert "/" + item["command"] in handlers, f"메뉴 {item['command']}: 핸들러 없음"
+    assert tb._GUEST_COMMANDS <= handlers
+    assert tb._SLOW_COMMANDS <= handlers
