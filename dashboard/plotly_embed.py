@@ -30,24 +30,40 @@ def _plotlyjs_cdn() -> str:
         return "https://cdn.plot.ly/plotly-3.6.0.min.js"
 
 
+def _epoch_ms(index) -> "np.ndarray":
+    """DatetimeIndex → epoch ms int64 (asi8 는 naive·tz-aware 모두 UTC 기준 ns — ts.timestamp() 와 동일)."""
+    import numpy as np
+    import pandas as pd
+    return (pd.DatetimeIndex(index).asi8 // 1_000_000).astype(np.int64)
+
+
 def price_bounds_json(hist) -> str:
-    """[[epoch_ms, low, high, volume, open, close], ...] — y 자동맞춤 + 🧲 스냅용 (JS 소비)."""
+    """[[epoch_ms, low, high, volume, open, close], ...] — y 자동맞춤 + 🧲 스냅용 (JS 소비).
+
+    벡터화 — 행별 Python 루프·iloc 호출은 11k 봉(장기 일봉) 기준 수십만 호출이라 rerun 마다
+    수백 ms 를 먹었다. NaN low/high 행은 스킵, NaN open/close 는 low/high 로 대체(기존 계약).
+    """
+    import numpy as np
     if hist is None or getattr(hist, "empty", True):
         return "[]"
     cols = set(hist.columns)
-    close = hist["Close"]
-    lo = hist["Low"] if "Low" in cols else close
-    hi = hist["High"] if "High" in cols else close
-    op = hist["Open"] if "Open" in cols else close
-    vol = hist["Volume"] if "Volume" in cols else None
-    out = []
-    for i, (ts, l, h, o, c) in enumerate(zip(hist.index, lo.values, hi.values,
-                                             op.values, close.values)):
-        if l == l and h == h:                                   # NaN 스킵
-            v = float(vol.iloc[i]) if vol is not None and vol.iloc[i] == vol.iloc[i] else 0.0
-            out.append([int(ts.timestamp() * 1000), float(l), float(h), v,
-                        float(o) if o == o else float(l), float(c) if c == c else float(h)])
-    return json.dumps(out)
+    close = hist["Close"].to_numpy(dtype="float64")
+    lo = hist["Low"].to_numpy(dtype="float64") if "Low" in cols else close
+    hi = hist["High"].to_numpy(dtype="float64") if "High" in cols else close
+    op = hist["Open"].to_numpy(dtype="float64") if "Open" in cols else close
+    vol = hist["Volume"].to_numpy(dtype="float64") if "Volume" in cols else np.zeros(len(close))
+    keep = ~(np.isnan(lo) | np.isnan(hi))
+    if not keep.any():
+        return "[]"
+    ms = _epoch_ms(hist.index)[keep]
+    lo, hi, op, close, vol = lo[keep], hi[keep], op[keep], close[keep], vol[keep]
+    op = np.where(np.isnan(op), lo, op)
+    close = np.where(np.isnan(close), hi, close)
+    vol = np.where(np.isnan(vol), 0.0, vol)
+    rows = np.column_stack([ms.astype("float64"), lo, hi, vol, op, close]).tolist()
+    for r in rows:
+        r[0] = int(r[0])
+    return json.dumps(rows)
 
 
 def compare_bounds_json(main_hist, compare: dict, view_days=None) -> str:
@@ -67,19 +83,24 @@ def compare_bounds_json(main_hist, compare: dict, view_days=None) -> str:
             anchor_ts = None
 
     def _rows(series, vol=None):
+        import numpy as np
         ns = normalize_pct(series, anchor_ts=anchor_ts)
         if ns is None:
             return
-        for i, (ts, p) in enumerate(zip(ns.index, ns.values)):
-            if p == p:                                       # NaN 스킵
-                v = 0.0
-                if vol is not None:
-                    try:
-                        vv = float(vol.loc[ts])
-                        v = vv if vv == vv else 0.0
-                    except Exception:
-                        v = 0.0
-                rows.append([int(ts.timestamp() * 1000), float(p), float(p), v])
+        p = ns.to_numpy(dtype="float64")
+        keep = ~np.isnan(p)
+        if not keep.any():
+            return
+        ms = _epoch_ms(ns.index)[keep]
+        p = p[keep]
+        if vol is not None:
+            if not vol.index.is_unique:
+                vol = vol[~vol.index.duplicated(keep="last")]
+            v = vol.reindex(ns.index).to_numpy(dtype="float64")[keep]
+            v = np.where(np.isnan(v), 0.0, v)
+        else:
+            v = np.zeros(len(p))
+        rows.extend([int(m), float(x), float(x), float(vv)] for m, x, vv in zip(ms, p, v))
 
     if main_hist is not None and not getattr(main_hist, "empty", True):
         cols = set(main_hist.columns)
