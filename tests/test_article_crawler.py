@@ -574,6 +574,7 @@ def test_default_transport_enforces_total_deadline_during_slow_trickle(monkeypat
     assert released == [True]
 
 
+@pytest.mark.network
 @pytest.mark.parametrize("phase", ["headers", "body"])
 def test_default_transport_interrupts_real_slow_stream_at_wallclock_deadline(phase):
     listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
@@ -623,6 +624,7 @@ def test_default_transport_interrupts_real_slow_stream_at_wallclock_deadline(pha
     assert _active_fetch_children() == []
 
 
+@pytest.mark.network
 def test_default_transport_returns_large_body_without_pipe_deadlock_and_cleans_child():
     body = b"x" * (512 * 1024)
     listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
