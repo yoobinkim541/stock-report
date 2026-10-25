@@ -155,6 +155,23 @@ def create_app() -> Flask:
             return jsonify({"ok": False, "error": "page object required"}), 400
         return jsonify({"ok": True, "page": wiki.upsert_page(payload)})
 
+    @app.get("/api/wiki/curation/pending")
+    def wiki_curation_pending():
+        return jsonify({"ok": True, "proposals": wiki.list_pending_curation()})
+
+    @app.post("/api/wiki/curation/<proposal_id>/apply")
+    def wiki_curation_apply(proposal_id: str):
+        result = wiki.apply_pending_curation(proposal_id)
+        if result is None:
+            return jsonify({"ok": False, "error": "proposal not found or not applicable"}), 404
+        return jsonify({"ok": True, "result": result})
+
+    @app.post("/api/wiki/curation/<proposal_id>/reject")
+    def wiki_curation_reject(proposal_id: str):
+        if not wiki.reject_pending_curation(proposal_id):
+            return jsonify({"ok": False, "error": "proposal not found"}), 404
+        return jsonify({"ok": True})
+
     @app.post("/api/wiki/capture")
     def wiki_capture():
         payload = request.get_json(force=True)

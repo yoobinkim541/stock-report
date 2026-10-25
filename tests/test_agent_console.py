@@ -4000,6 +4000,7 @@ def test_wiki_parse_curation_plan_handles_delete_action():
 
 def test_wiki_auto_curate_llm_delete_action_removes_page(monkeypatch, tmp_path):
     _isolate(monkeypatch, tmp_path)
+    monkeypatch.setenv("WIKI_CURATION_AUTO_APPLY", "1")   # 즉시 적용 모드(기본은 승인 대기)
 
     from agent_console import wiki
 
@@ -4036,6 +4037,7 @@ def test_wiki_auto_curate_llm_delete_action_removes_page(monkeypatch, tmp_path):
 
 def test_wiki_auto_curate_llm_delete_without_target_id_is_noop(monkeypatch, tmp_path):
     _isolate(monkeypatch, tmp_path)
+    monkeypatch.setenv("WIKI_CURATION_AUTO_APPLY", "1")   # 즉시 적용 모드(기본은 승인 대기)
 
     from agent_console import wiki
 
@@ -4209,6 +4211,7 @@ def test_wiki_upsert_page_auto_splits_overlong_body(monkeypatch, tmp_path):
 
 def test_wiki_auto_curate_llm_merge_action_merges_pages(monkeypatch, tmp_path):
     _isolate(monkeypatch, tmp_path)
+    monkeypatch.setenv("WIKI_CURATION_AUTO_APPLY", "1")   # 즉시 적용 모드(기본은 승인 대기)
 
     from agent_console import wiki
 
@@ -4261,6 +4264,7 @@ def test_wiki_auto_curate_llm_merge_action_merges_pages(monkeypatch, tmp_path):
 
 def test_wiki_auto_curate_llm_split_action_splits_page(monkeypatch, tmp_path):
     _isolate(monkeypatch, tmp_path)
+    monkeypatch.setenv("WIKI_CURATION_AUTO_APPLY", "1")   # 즉시 적용 모드(기본은 승인 대기)
 
     from agent_console import wiki
 
@@ -5463,3 +5467,57 @@ def test_llm_engine_marker_is_request_scoped_across_threads():
         t.join()
     assert seen == {"codex": "codex", "hermes": "hermes"}
     assert agent._llm_engine() is None                       # 메인 스레드는 영향 없음
+
+
+def test_wiki_destructive_curation_is_proposed_by_default_and_applied_on_approval(monkeypatch, tmp_path):
+    """기본 모드 — LLM 의 delete/merge/split 계획은 실행되지 않고 승인 대기열에 쌓인다.
+    apply_pending_curation 이 실제 실행, reject 는 폐기."""
+    _isolate(monkeypatch, tmp_path)
+    monkeypatch.delenv("WIKI_CURATION_AUTO_APPLY", raising=False)
+    from agent_console import wiki
+
+    existing = wiki.upsert_page({
+        "title": "오래된 임시 메모", "summary": "더 이상 유효하지 않음", "body": "삭제 후보",
+        "surface": "portfolio", "kind": "note", "status": "draft", "tags": ["misc"], "source_refs": [],
+    })
+    result = wiki.auto_curate_from_chat(
+        "위키 페이지 삭제 기준을 정리해줘. 오래된 메모는 지워도 될까?",
+        "네, 아래 기준에 맞으면 삭제합니다.\n- 30일 이상 갱신 안 됨\n- 최신 리포트와 모순\n- 중복 내용\n검증 결과 이 페이지는 삭제 대상입니다.",
+        surface="portfolio",
+        llm=lambda _p: '{"action":"delete","target_id":"' + existing["id"] + '","reason":"stale"}',
+        pack={"focus": []}, history=[],
+    )
+    assert result["action"] == "proposed" and result["proposed_action"] == "delete"
+    assert wiki.get_page(existing["id"]) is not None                  # 아직 삭제 안 됨
+    pending = wiki.list_pending_curation()
+    assert [p["id"] for p in pending] == [result["proposal_id"]]
+    assert pending[0]["plan"]["target_id"] == existing["id"]
+
+    assert wiki.reject_pending_curation("no-such") is False
+    applied = wiki.apply_pending_curation(result["proposal_id"])
+    assert applied["ok"] is True and applied["action"] == "delete"
+    assert wiki.get_page(existing["id"]) is None
+    assert wiki.list_pending_curation() == []
+    assert wiki.apply_pending_curation(result["proposal_id"]) is None   # 이미 소진
+
+
+def test_wiki_curation_api_lists_applies_and_rejects_proposals(monkeypatch, tmp_path):
+    _isolate(monkeypatch, tmp_path)
+    monkeypatch.delenv("WIKI_CURATION_AUTO_APPLY", raising=False)
+    from agent_console import wiki
+    from agent_console.server import create_app
+
+    page = wiki.upsert_page({"title": "제안 대상", "summary": "s", "body": "b", "surface": "portfolio",
+                             "kind": "note", "status": "draft", "source_refs": []})
+    prop = wiki._store_pending_curation("delete", {"target_id": page["id"], "reason": "stale"},
+                                        surface="portfolio", question="q", target_id=page["id"], source="llm")
+    client = create_app().test_client()
+    assert [p["id"] for p in client.get("/api/wiki/curation/pending").json["proposals"]] == [prop["id"]]
+    assert client.post(f"/api/wiki/curation/{prop['id']}/reject").json["ok"] is True
+    assert client.get("/api/wiki/curation/pending").json["proposals"] == []
+    assert client.post(f"/api/wiki/curation/{prop['id']}/apply").status_code == 404
+
+    prop2 = wiki._store_pending_curation("delete", {"target_id": page["id"], "reason": "stale"},
+                                         surface="portfolio", question="q", target_id=page["id"], source="llm")
+    assert client.post(f"/api/wiki/curation/{prop2['id']}/apply").json["result"]["action"] == "delete"
+    assert wiki.get_page(page["id"]) is None
