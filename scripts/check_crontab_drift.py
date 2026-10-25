@@ -7,6 +7,8 @@ import re
 import subprocess
 from pathlib import Path
 
+# 소스 수집·위키 저장소(JSONL)를 읽고 쓰는 크론 전부 — 하나라도 빠지면 서버와 저장소가
+# 어긋나도 drift 로 잡히지 않는다. crontab 에 위키 작업을 추가하면 여기도 추가한다.
 RELEVANT_MARKERS = (
     "reports.source_pipeline",
     "reports.article_crawler",
@@ -15,6 +17,10 @@ RELEVANT_MARKERS = (
     "wiki_archive.log",
     "reports.wiki_health_check",
     "reports.wiki_distillation",
+    "reports.wiki_dedup_batch",
+    "reports.wiki_autonomous_curator",
+    "reports.wiki_backfill",
+    "reports.institution_watch",
     "news_llm_snapshot.py",
 )
 
