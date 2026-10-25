@@ -80,7 +80,8 @@ def _summarize_source_journal(root: Path) -> dict[str, Any]:
     errors: Counter = Counter()
     for path in sorted((root / "sources").glob("*.json")):
         state, receipt = _read_json_object(path)
-        if state != "ok" or receipt.get("compile_state") not in _COMPILE_STATES:
+        if (state != "ok" or not isinstance(receipt.get("compile_state"), str)
+                or receipt["compile_state"] not in _COMPILE_STATES):
             summary["corrupt_records"] += 1
             continue
         summary["sources"] += 1
@@ -132,12 +133,14 @@ def _summarize_automatic_latest(path: Path, now: datetime) -> dict[str, Any]:
             1 for item in recovery
             if item.get("stage") != "committed"
             or any(value != "done" for value in (item.get("effects") or {}).values()))
-    except (OSError, TypeError, ValueError, KeyError, AttributeError):
+        attempted = int(summary.get("attempted") or 0)
+    except (OSError, TypeError, ValueError, KeyError, AttributeError, OverflowError):
+        # Every field is parsed inside this guard: a damaged summary is reported, never raised.
         return {"state": "corrupt"}
     age_hours = round(max(0.0, (now - modified).total_seconds()) / 3600, 1)
     result.update(
         last_run_at=modified.isoformat(timespec="seconds"), age_hours=age_hours,
-        stale=age_hours > AUTOMATIC_RUN_STALE_HOURS, attempted=int(summary.get("attempted") or 0),
+        stale=age_hours > AUTOMATIC_RUN_STALE_HOURS, attempted=attempted,
         recovery_pending=recovery_pending, reason_counts=dict(reasons.most_common()), **counts)
     return result
 

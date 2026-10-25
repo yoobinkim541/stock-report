@@ -45,8 +45,11 @@ contract and existing raw retention remain unchanged.
 ## Merge, Cleanup And Context
 
 - `_merge_pages` (chat curation, autonomous curator, dedup) refuses to mix
-  source-backed and unverified pages. The result keeps the least reviewed input
-  status; any LLM synthesis makes it `draft`.
+  source-backed and unverified pages. Trust is judged over every record whose
+  text the merge absorbs — both parents and their content (split) children;
+  provenance-only children hold reference/claim ledgers and are excluded. The
+  result keeps the least reviewed of those statuses; any LLM synthesis makes it
+  `draft`.
 - A merge reads each page's full semantic snapshot, split children included,
   unions claims (one `claim_id` with different facts refuses the merge),
   limitations, relations and integrations, and keeps references/evidence beyond
@@ -58,12 +61,20 @@ contract and existing raw retention remain unchanged.
   lock; a page changed after planning is `skipped_stale`.
 - `build_context_section` drops archived pages from retrieved and injected
   pages unless `include_archived=True`; `list_pages` keeps the full history view
-  by default for the browser and batch jobs.
+  by default for the browser and batch jobs. A page carrying draft
+  `source_knowledge` claims (compiled or topic synthesis) is rendered as
+  `- 본문(미검증 모델 합성): …` plus a `주의` line (`wiki.MODEL_SYNTHESIS_WARNING`):
+  the deterministic grounding rules cannot verify meaning, so this text must not
+  be cited as established fact.
 - The autonomous curator spends `WIKI_AUTONOMOUS_MAX_JUDGMENTS` (default 12)
   per run before each LLM call, including failures and skips, and remembers
-  unapplied outcomes per input hash in
-  `<wiki artifacts>/autonomous-curator-state.json` (failures 1 day, others
-  30 days) so unchanged candidates are not re-judged.
+  unapplied outcomes in `<wiki artifacts>/autonomous-curator-state.json`
+  (failures 1 day, others 30 days). The remembered fingerprint covers the prompt,
+  the full semantic revision of each page the server guard reads (body beyond the
+  prompt excerpt, children, `source_knowledge`, status tags; not usage counters)
+  and the guard policy (`_GUARD_POLICY`, split limits), so a refusal is re-judged
+  once its cause can have changed. A malformed state file or entry is dropped and
+  rewritten; it never stops the run.
 
 ## Safe Inspection
 

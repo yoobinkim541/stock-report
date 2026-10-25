@@ -80,6 +80,46 @@ def test_merge_status_is_least_reviewed_input_and_synthesis_resets_review():
     assert wiki.get_page("stable-e")["status"] == "draft"
 
 
+# B-fix2-03: trust is judged over the whole absorbed document, children included.
+@pytest.mark.parametrize("owner", ["source", "target"])
+def test_unverified_child_text_never_enters_a_source_backed_merge(owner):
+    save("target", status="stable")
+    save("source", status="stable")
+    save("child", source_refs=[], parent_page_id=owner, body="UNVERIFIED_CHILD_ASSERTION")
+    before = events()
+
+    assert wiki._merge_pages(["source"], "target", "") is None
+
+    assert events() == before
+    assert wiki.get_page("target")["status"] == "stable"
+    assert "UNVERIFIED_CHILD_ASSERTION" not in wiki.get_page("target")["body"]
+
+
+@pytest.mark.parametrize("owner", ["source", "target"])
+def test_draft_child_lowers_merged_status_even_when_parents_are_stable(owner):
+    save("target", status="stable")
+    save("source", status="stable")
+    save("child", status="draft", parent_page_id=owner, body="DRAFT_CHILD_TEXT")
+
+    assert wiki._merge_pages(["source"], "target", "")
+
+    merged = wiki.get_page("target")
+    assert "DRAFT_CHILD_TEXT" in merged["body"]
+    assert merged["status"] == "draft" and "stable" not in merged["tags"]
+
+
+def test_provenance_children_do_not_lower_a_stable_merge():
+    save("target", status="stable", source_refs=[f"https://example.org/target/{i}" for i in range(15)])
+    save("source", status="stable", source_refs=[f"https://example.org/source/{i}" for i in range(15)])
+    assert wiki._merge_pages(["source"], "target", "")
+    assert any(child["raw"].get("provenance_only") for child in wiki.semantic_snapshot("target")["children"])
+    save("third", status="stable")
+
+    assert wiki._merge_pages(["third"], "target", "")
+
+    assert wiki.get_page("target")["status"] == "stable"
+
+
 def _mixed_trust_pair(kind):
     shared = "금리 상승 할인율 성장주 밸류에이션 위험 판단 기준"
     save("backed", kind=kind, status="stable", title="금리 성장주 위험 판단", summary="금리 성장주 위험 판단",

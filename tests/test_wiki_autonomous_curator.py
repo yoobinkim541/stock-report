@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import pytest
+
 
 def _isolate(monkeypatch, tmp_path: Path) -> None:
     monkeypatch.setenv("AGENT_CONSOLE_SHARED_MEMORY_DIR", str(tmp_path / "data" / "shared-memory"))
@@ -190,3 +192,114 @@ def test_run_does_not_reask_unchanged_input_but_reasks_after_change(monkeypatch,
     wiki._CACHE.clear()
     curator.run(dry_run=True, llm_fn=skip, limit=1, readability_limit=1000)
     assert len(calls) == 2
+
+
+# B-fix2-04: a remembered refusal is re-judged once anything the server guard reads changes.
+def _same_claim(text):
+    return {"claim_id": "same", "source_revision_id": "rev-same", "text": text, "as_of": "2026-10-01",
+            "scope": "synthetic", "anchor": None, "competing_claim_ids": [], "knowledge_state": "draft"}
+
+
+def test_review_status_and_repaired_claims_are_rejudged_although_the_prompt_is_unchanged(monkeypatch, tmp_path):
+    import json
+
+    _isolate(monkeypatch, tmp_path)
+    from agent_console import wiki
+    from reports import wiki_autonomous_curator as curator
+
+    shared = "금리 상승 할인율 성장주 밸류에이션 위험 판단 기준"
+    target_fields = dict(title="금리 성장주 위험 판단", body=shared + " 첫 문서", kind="concept",
+                         source_refs=["https://example.org/target"],
+                         source_knowledge={"claims": [_same_claim("Capacity is a forecast")]})
+    source_fields = dict(title="금리 성장주 위험 판단 메모", body=shared + " 둘째 문서", kind="concept",
+                         source_refs=["https://example.org/source"])
+    target = _page(wiki, **target_fields)
+    source = _page(wiki, **source_fields, source_knowledge={"claims": [_same_claim("Revenue is guaranteed")]})
+    calls: list[str] = []
+
+    def approve(prompt):
+        calls.append(prompt)
+        return json.dumps({"action": "merge", "target_page_id": target["id"],
+                           "source_page_ids": [source["id"]], "body": "", "reason": "same subject"})
+
+    def judge():
+        wiki._CACHE.clear()
+        return curator.run(dry_run=False, llm_fn=approve, limit=1)
+
+    assert judge()["merged"] == []  # claim identity conflict: refused and remembered
+    assert judge()["suppressed"] == 1 and len(calls) == 1
+
+    _page(wiki, **{**target_fields, "status": "reviewed"})
+    assert judge()["merged"] == [] and len(calls) == 2  # status is not in the prompt
+
+    _page(wiki, **source_fields, source_knowledge={"claims": [_same_claim("Capacity is a forecast")]})
+    result = judge()
+
+    assert len(calls) == 3
+    # Same page text in every prompt (pair order may follow update time).
+    assert sorted(calls[2].splitlines()) == sorted(calls[1].splitlines()) == sorted(calls[0].splitlines())
+    assert [entry["target"] for entry in result["merged"]] == [target["id"]]
+    assert wiki.get_page(source["id"])["status"] == "archived"
+
+
+def test_unseen_body_tail_change_reasks_but_usage_tracking_does_not(monkeypatch, tmp_path):
+    _isolate(monkeypatch, tmp_path)
+    from agent_console import wiki
+    from reports import wiki_autonomous_curator as curator
+
+    fields = dict(title="분할 대상", body="배경 문장 " * 900)
+    page = _page(wiki, **fields)
+    calls: list[str] = []
+
+    def skip(prompt):
+        calls.append(prompt)
+        return '{"action":"skip","reason":"insufficient"}'
+
+    def judge():
+        wiki._CACHE.clear()
+        return curator.run(dry_run=True, llm_fn=skip, limit=1, readability_limit=1000)
+
+    assert judge()["judgments"] == 1
+    wiki.track_page_usage(page["id"], "분할 대상 질의")
+    assert judge()["suppressed"] == 1 and len(calls) == 1
+
+    _page(wiki, **{**fields, "body": fields["body"] + "꼬리 예외 문장"})
+    judge()
+    assert len(calls) == 2 and calls[1] == calls[0]  # the prompt shows only the first 4000 chars
+
+
+# B-fix2-05: a damaged state file never stops the run; it is replaced within the judgment cap.
+@pytest.mark.parametrize("state", [
+    '{"schema": 1, "judgments": [{"bad": true}]}',
+    '{"schema": 1, "judgments": "damaged"}',
+    '{"schema": 1, "judgments": 7}',
+    '{"schema": 1, "judgments": {"split:x": {"input_sha256": "a", "outcome": ["skip"], "at": 1}}}',
+    '{"schema": 1, "judgments": {"split:x": {"input_sha256": "a", "outcome": "skip", "at": NaN}}}',
+    '{"schema": 1, "judgments": {"split:x": [1], "7": {"input_sha256": "a", "outcome": "skip", "at": true}}}',
+])
+def test_damaged_state_file_is_replaced_and_run_stays_capped(monkeypatch, tmp_path, state):
+    import json
+
+    _isolate(monkeypatch, tmp_path)
+    monkeypatch.setenv("WIKI_AUTONOMOUS_MAX_JUDGMENTS", "2")
+    from agent_console import wiki
+    from reports import wiki_autonomous_curator as curator
+
+    for index in range(4):
+        _page(wiki, title=f"긴 판단 {index}", body=f"고유 판단 {index} " + "긴 본문 " * 400, kind="concept")
+    path = curator._state_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(state, encoding="utf-8")
+    calls: list[str] = []
+
+    def skip(prompt):
+        calls.append(prompt)
+        return '{"action":"skip","reason":"insufficient"}'
+
+    result = curator.run(dry_run=True, llm_fn=skip, limit=1, readability_limit=1000)
+
+    assert result["judgments"] == len(calls) == 2
+    stored = json.loads(path.read_text(encoding="utf-8"))
+    assert stored["schema"] == 1 and isinstance(stored["judgments"], dict)
+    assert len(stored["judgments"]) == 2
+    assert all(entry["outcome"] == "skip" for entry in stored["judgments"].values())

@@ -355,3 +355,15 @@ def test_translated_body_is_not_rejected_for_lacking_english_words():
     body = "생산능력은 증가했고 수요는 여전히 불확실하다 [S1]."
     compiled = compile_claim("Capacity rose.", "Capacity rose.", body=body, source_body=source()["body"])
     assert compiled["body"].startswith("생산능력은 증가했고")
+
+
+# B-fix2-02: statements about attribution status are expected synthesis, not unrelated facts.
+@pytest.mark.parametrize("text", [
+    "Attributed synthetic account; limitations remain explicit.",
+    "Synthetic dated account, not adjudicated.",
+])
+def test_attribution_status_prose_is_not_rejected_as_unrelated(text):
+    claims = [{"text": "Shipping report 1", "as_of": "2026-10-15", "scope": "Hormuz shipping"}]
+    assert module().addition_grounding_violation(text, claims) is None
+    unrelated = "The regulator approved the acquisition and all factories closed."
+    assert module().addition_grounding_violation(unrelated, claims) == "unrelated"

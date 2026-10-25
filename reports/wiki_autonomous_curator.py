@@ -12,6 +12,7 @@ import argparse
 import hashlib
 import json
 import logging
+import math
 import os
 import re
 import sys
@@ -26,7 +27,7 @@ from dotenv import load_dotenv
 load_dotenv()
 
 import safe_io
-from agent_console import wiki
+from agent_console import shared_memory, wiki
 
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
@@ -42,6 +43,8 @@ _MAX_SPLIT_PARTS = 8
 _STATE_SCHEMA = 1
 # 같은 입력에 대해 적용되지 않은 판정은 이 기간 동안 다시 묻지 않는다. 일시 실패만 짧게.
 _SUPPRESS_SECONDS = {"skip": 30 * 86400, "invalid": 30 * 86400, "rejected": 30 * 86400, "failed": 86400}
+# 서버 병합·분할 가드가 바뀌면 올린다. 예전 가드가 거부해 기억된 판정을 새 가드로 다시 묻게 한다.
+_GUARD_POLICY = "2026-10-25:merge-trust-closure"
 
 _BOUNDARIES = """\
 다음 중 하나라도 해당하면 merge=false다.
@@ -197,16 +200,25 @@ def _state_path() -> Path:
     return wiki.wiki_artifacts_dir() / "autonomous-curator-state.json"
 
 
+def _valid_judgment(value: object) -> bool:
+    if not isinstance(value, dict):
+        return False
+    outcome, at = value.get("outcome"), value.get("at")
+    return (isinstance(value.get("input_sha256"), str) and isinstance(outcome, str)
+            and outcome in _SUPPRESS_SECONDS and type(at) in (int, float) and math.isfinite(at))
+
+
 def _load_judgments(path: Path) -> dict:
-    """Unapplied judgments by candidate key; an unreadable file only costs extra calls."""
+    """Unapplied judgments by candidate key; an unreadable or malformed file (or entry)
+    is dropped, which only costs extra calls within the per-run judgment cap."""
     try:
         data = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, ValueError):
         return {}
     judgments = data.get("judgments") if isinstance(data, dict) and data.get("schema") == _STATE_SCHEMA else None
-    return {key: value for key, value in (judgments or {}).items()
-            if isinstance(value, dict) and isinstance(value.get("input_sha256"), str)
-            and value.get("outcome") in _SUPPRESS_SECONDS and isinstance(value.get("at"), (int, float))}
+    if not isinstance(judgments, dict):
+        return {}
+    return {key: value for key, value in judgments.items() if isinstance(key, str) and _valid_judgment(value)}
 
 
 def _store_judgment(path: Path, key: str, entry: dict | None, now: float) -> None:
@@ -232,14 +244,36 @@ class _JudgmentGate:
         self.path = _state_path()
         self.now = time.time()
         self.memory = _load_judgments(self.path)
+        self.records: list[dict] | None = None
 
-    def ask(self, key: str, prompt: str) -> tuple[dict | None, str]:
-        """Return (decision, input hash) for a judgment the caller must classify.
+    def refresh(self) -> None:
+        """The store changed (an operation was applied); re-read revisions on next use."""
+        self.records = None
 
-        An empty hash means no decision to classify: the input was suppressed, or the
-        call failed and that failure is already remembered.
+    def _revisions(self, page_ids: list[str]) -> list[str]:
+        """Semantic revision of each whole document (children, knowledge, status tags);
+        usage counters and lookup traces are not part of it."""
+        if self.records is None:
+            self.records = shared_memory.inspect_records()
+        revisions = []
+        for page_id in page_ids:
+            try:
+                revisions.append(wiki.semantic_snapshot(page_id, records=self.records)["revision_hash"])
+            except ValueError:
+                revisions.append("unavailable")
+        return revisions
+
+    def ask(self, key: str, prompt: str, *, page_ids: list[str], policy: tuple = ()) -> tuple[dict | None, str]:
+        """Return (decision, input fingerprint) for a judgment the caller must classify.
+
+        The fingerprint covers the prompt, the full semantic revision of every page the
+        server guard will read, and the guard policy, so a remembered refusal is re-judged
+        once anything the guard checks changes. An empty fingerprint means no decision to
+        classify: the input was suppressed, or the call failed and that is remembered.
         """
-        digest = hashlib.sha256(prompt.encode("utf-8")).hexdigest()
+        digest = hashlib.sha256(json.dumps(
+            {"prompt": prompt, "revisions": self._revisions(page_ids), "policy": [_GUARD_POLICY, *policy]},
+            ensure_ascii=False, sort_keys=True).encode("utf-8")).hexdigest()
         known = self.memory.get(key)
         if (known and known["input_sha256"] == digest
                 and self.now - known["at"] < _SUPPRESS_SECONDS[known["outcome"]]):
@@ -303,8 +337,9 @@ def run(
     """Judge merge/split candidates within one judgment budget per run.
 
     Every LLM call, including failures and skips, consumes the budget before it is made.
-    Unapplied outcomes are remembered per input hash (also in dry runs, since the calls
-    were real) so the next run does not pay again for an unchanged candidate.
+    Unapplied outcomes are remembered per input fingerprint (prompt + semantic revisions
+    of the pages + guard policy; also in dry runs, since the calls were real) so the next
+    run does not pay again for an unchanged candidate.
     """
     if llm_fn is None:
         from agent_console.agent import _try_llm_prompt
@@ -334,7 +369,8 @@ def run(
         if str(first.get("id")) in consumed or str(second.get("id")) in consumed:
             continue
         key = "merge:" + "|".join(sorted([str(first.get("id")), str(second.get("id"))]))
-        decision, digest = gate.ask(key, _build_management_prompt("merge", first, second))
+        decision, digest = gate.ask(key, _build_management_prompt("merge", first, second),
+                                    page_ids=[str(first.get("id")), str(second.get("id"))])
         if not digest:
             continue
         if not decision or decision.get("action") != "merge":
@@ -352,6 +388,7 @@ def run(
                 gate.remember(key, digest, "rejected")
                 continue
             gate.remember(key, digest, None)
+            gate.refresh()
         merged.append(entry)
         consumed.update([target_id, *source_ids])
 
@@ -361,7 +398,8 @@ def run(
         if str(source.get("id")) in consumed:
             continue
         key = "split:" + str(source.get("id"))
-        decision, digest = gate.ask(key, _build_management_prompt("split", source))
+        decision, digest = gate.ask(key, _build_management_prompt("split", source), page_ids=[str(source.get("id"))],
+                                    policy=(readability_limit or _readability_limit(), _MAX_SPLIT_PARTS))
         if not digest:
             continue
         if not decision or decision.get("action") != "split":
@@ -379,6 +417,7 @@ def run(
                 gate.remember(key, digest, "rejected")
                 continue
             gate.remember(key, digest, None)
+            gate.refresh()
             entry["created"] = result.get("created", [])
         split.append(entry)
         consumed.add(str(source.get("id")))

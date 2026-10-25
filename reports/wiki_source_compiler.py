@@ -100,6 +100,9 @@ _DIRECTION_KO = {
 _HANGUL = re.compile(r"[\u1100-\u11ff\u3130-\u318f\uac00-\ud7a3]")
 _WORD = re.compile(r"[^\W\d_][^\W_]*")
 _SENTENCE_BREAK = re.compile(r"(?<=[.!?。])\s+|\n+")
+# Function words plus attribution/provenance vocabulary. The prompts ask synthesis to keep
+# attribution, dates, scope and limitations, so prose about a report's status ("dated
+# account, not adjudicated"; "limitations remain explicit") is not a world fact to match.
 _STOPWORDS = frozenset("""
 the and for but not are was were has have had its his her their this that these those with from
 into onto over under than then also such which who whom whose what when where while there here
@@ -107,7 +110,10 @@ been being will would could should may might can does did about after before bet
 say says said report reports reported according author authors source sources article claim
 claims state states stated note notes noted write writes wrote suggest suggests suggested mention
 mentions mentioned attributed reportedly
-저자 출처 기사 원문 보도 따르면 주장 밝혔다 전했다 있다 했다 이라고 라고
+account accounts attribution attributions dated adjudicated unadjudicated adjudication limitation
+limitations caveat caveats qualification qualifications explicit explicitly remain remains remained
+retained preserved unresolved evidence scope scoped
+저자 출처 기사 원문 보도 따르면 주장 밝혔다 전했다 있다 했다 이라고 라고 한계 단서 범위 귀속
 """.split())
 
 

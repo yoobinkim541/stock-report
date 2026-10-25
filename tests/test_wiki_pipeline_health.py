@@ -3,6 +3,8 @@ from __future__ import annotations
 import os
 import sys
 
+import pytest
+
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, ROOT)
 
@@ -497,3 +499,27 @@ def test_stale_unattended_run_is_attention_and_clean_recovery_clears_it(monkeypa
     assert report["source_pipeline_health"]["status"] == "ok"
     assert report["source_pipeline_health"]["reasons"] == []
     assert report["overall"]["status"] == "ok"
+
+
+# B-fix2-06: a damaged automatic summary or receipt field is reported as corruption, never raised.
+@pytest.mark.parametrize("attempted", ["damaged", [1], {"n": 1}, 1e999])
+def test_damaged_attempted_count_is_corruption_attention_not_a_crash(monkeypatch, tmp_path, attempted):
+    import json
+    from datetime import datetime, timezone
+
+    from reports.wiki_pipeline_health import _summarize_automatic_latest
+
+    latest = _public(tmp_path) / "automatic-latest.json"
+    _write_json(latest, json.dumps({"results": [], "attempted": attempted}))
+    assert _summarize_automatic_latest(latest, datetime.now(timezone.utc)) == {"state": "corrupt"}
+    report = _health_with_reports_root(monkeypatch, tmp_path)
+    section = report["source_pipeline_health"]
+    assert "public: automatic-latest.json 손상" in section["reasons"]
+    assert section["status"] == "attention" and report["overall"]["status"] == "attention"
+
+
+def test_unhashable_compile_state_is_counted_as_corrupt_record(monkeypatch, tmp_path):
+    _write_json(_public(tmp_path) / "sources" / ("a" * 64 + ".json"), {"compile_state": ["failed"]})
+    section = _health_with_reports_root(monkeypatch, tmp_path)["source_pipeline_health"]
+    assert "public: journal 기록 손상 1건" in section["reasons"]
+    assert section["status"] == "attention"
