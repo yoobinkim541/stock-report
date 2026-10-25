@@ -24,11 +24,16 @@ def _rule(rule_id, dependency="QQQ"):
     }
 
 
+# 일봉(8/3·8/4 라벨)과 1h 봉(8/4 18:00Z~)이 모두 8/4 20:30Z(16:30 ET) 기준 확정·최신이다.
+FIRST_AS_OF = "2026-08-04T20:30:00Z"
+
+
 def _bars(values, freq):
-    # 2026-08-03(월) 14:00Z = 미국 정규장 10:00 ET.
+    # 일봉: 2026-08-03(월) 14:00Z = 미국 정규장 10:00 ET 라벨. 1h: 8/4 정규장 마지막 두 시간.
+    start = "2026-08-04T18:00:00Z" if freq == "1h" else "2026-08-03T14:00:00Z"
     return pd.DataFrame(
         {"close": values},
-        index=pd.date_range("2026-08-03T14:00:00Z", periods=len(values), freq=freq),
+        index=pd.date_range(start, periods=len(values), freq=freq),
     )
 
 
@@ -44,7 +49,7 @@ def test_worker_deduplicates_requirement_loads_and_persists_every_evaluation(mon
         calls.append((symbol, timeframe))
         return _bars([99, 101], "1D") if timeframe == "1d" else _bars([501, 502], "1h")
 
-    result = chart_alert_worker.run_chart_alert_cycle(load_bars_fn=loader)
+    result = chart_alert_worker.run_chart_alert_cycle(load_bars_fn=loader, as_of=FIRST_AS_OF)
 
     assert calls == [("AAPL", "1d"), ("QQQ", "1h")]
     assert result["event_count"] == 2
@@ -82,7 +87,7 @@ def test_worker_supports_legacy_one_argument_loader_and_records_missing(monkeypa
         calls.append(symbol)
         return _bars([99, 101], "1D") if symbol == "AAPL" else None
 
-    result = chart_alert_worker.run_chart_alert_cycle(load_bars_fn=legacy_loader)
+    result = chart_alert_worker.run_chart_alert_cycle(load_bars_fn=legacy_loader, as_of=FIRST_AS_OF)
 
     assert calls == ["AAPL", "QQQ"]
     assert result["missing_bars"] == [{"symbol": "QQQ", "timeframe": "1h"}]
@@ -91,7 +96,7 @@ def test_worker_supports_legacy_one_argument_loader_and_records_missing(monkeypa
 
 # ── C-fix-alerts: 평가/발송 분리·재시도·중복 방지 (실제 sqlite storage, 가짜 sender) ──
 
-AS_OF = "2026-08-03T15:00:00Z"
+AS_OF = "2026-08-03T14:00:00Z"  # 13:30Z~ 5분봉이 모두 마감됐고 최신(정규장 경과 30분 이내)
 
 
 @pytest.fixture
@@ -282,7 +287,7 @@ def test_C_fix_alerts_worker_loads_fundamentals_relative_and_atr_fields(isolated
     intraday = pd.DataFrame({
         "high": [101 + i for i in range(20)], "low": [99 + i for i in range(20)],
         "close": [100 + i for i in range(20)],
-    }, index=pd.date_range("2026-08-03T13:30:00Z", periods=20, freq="5min"))
+    }, index=pd.date_range("2026-09-04T13:30:00Z", periods=20, freq="5min"))
     bars = {("AAPL", "1d"): daily_aapl, ("QQQ", "1d"): daily_qqq, ("AAPL", "5m"): intraday}
     _save_rule("fund", frequency="repeating", timeframe="1d",
                condition={"type": "fundamental", "field": "per", "operator": "less_than", "value": 30})
@@ -294,7 +299,7 @@ def test_C_fix_alerts_worker_loads_fundamentals_relative_and_atr_fields(isolated
     loaded: list[str] = []
 
     result = chart_alert_worker.run_chart_alert_cycle(
-        workspace_id="w1", notify=False, as_of="2026-09-30T00:00:00Z",
+        workspace_id="w1", notify=False, as_of="2026-09-04T15:15:00Z",
         load_bars_fn=lambda symbol, timeframe: bars.get((symbol, timeframe)),
         load_fundamentals_fn=lambda symbol: loaded.append(symbol) or {"per": 25.0},
     )
@@ -314,7 +319,7 @@ def test_C_fix_alerts_run_separates_unavailable_data_from_not_matched(isolated):
     daily = pd.DataFrame({"close": [99.0, 101.0]}, index=pd.bdate_range("2026-08-03", periods=2))
 
     result = chart_alert_worker.run_chart_alert_cycle(
-        workspace_id="w1", notify=False, as_of="2026-09-30T00:00:00Z",
+        workspace_id="w1", notify=False, as_of="2026-08-05T00:00:00Z",
         load_bars_fn=lambda symbol, timeframe: daily,
         load_fundamentals_fn=lambda symbol: {"per": None},
     )
@@ -352,3 +357,103 @@ def test_C_fix_alerts_default_fundamentals_loader_covers_every_supported_field(m
 def test_C_fix_alerts_storage_rejects_fields_worker_cannot_compute(isolated, condition, message):
     with pytest.raises(ValueError, match=message):
         _save_rule(condition=condition)
+
+
+# ── C-fix2: 조건 revision·오래된 시세 ──
+
+def _event_statuses(rule_id="r1"):
+    return [row["status"] for row in storage.list_chart_alert_events(rule_ids=[rule_id])]
+
+
+def test_C_fix2_condition_edit_supersedes_old_pending_and_new_once_stays_open(isolated):
+    _save_rule()  # once crossing_up 100
+    sent: list[str] = []
+    _cycle(_five_minute([99.0, 101.0]), sent, ok=False)
+    assert _event_statuses() == ["failed"]
+
+    _save_rule(condition={"type": "price", "operator": "crossing_up", "value": 200})
+    assert _event_statuses() == ["superseded"]
+    assert storage.get_chart_alert_rule("r1")["last_state"] == {}
+
+    again = _cycle(_five_minute([99.0, 101.0]), sent, ok=True)
+    assert again["notification"]["attempted"] == 0 and len(sent) == 1
+    assert again["evaluations"][0]["status"] == "false"
+    assert storage.get_chart_alert_rule("r1")["last_state"]["triggered"] is False
+
+    crossed = _cycle(_five_minute([199.0, 201.0]), sent, ok=True)
+    assert crossed["notification"]["delivered"] == 1
+    assert "평가 봉 종가 201.00" in sent[-1]
+    assert storage.get_chart_alert_rule("r1")["last_state"]["triggered"] is True
+
+
+def test_C_fix2_worker_drops_other_revision_events_and_completion_even_without_storage_reset(isolated):
+    # 저장 경로를 거치지 않은(또는 저장과 평가가 겹친) 상태: 옛 조건 해시의 미발송 이벤트·once 완료.
+    from agent_console import chart_alert_runner
+
+    rule = _save_rule(condition={"type": "price", "operator": "crossing_up", "value": 200})
+    storage.record_chart_alert_event({
+        "event_id": "old-event", "alert_id": "r1", "condition_hash": "0ldc0nd1t10n",
+        "symbol": "AAPL", "timeframe": "5m", "bar_time": "2026-08-03T13:35:00+00:00",
+    })
+    storage.mark_chart_alert_event("old-event", delivered=False, error="telegram down")
+    storage.update_chart_alert_state("r1", {
+        "triggered": True, "triggered_condition_hash": "0ldc0nd1t10n",
+        "condition_hash": "0ldc0nd1t10n", "armed": False,
+    })
+    sent: list[str] = []
+
+    result = _cycle(_five_minute([199.0, 201.0]), sent, ok=True)
+
+    assert result["notification"]["delivered"] == 1 and len(sent) == 1 and "201.00" in sent[0]
+    assert storage.get_chart_alert_event("old-event")["status"] == "superseded"
+    state = storage.get_chart_alert_rule("r1")["last_state"]
+    assert state["triggered"] is True
+    assert state["triggered_condition_hash"] == chart_alert_runner.rule_condition_hash(rule)
+
+
+def test_C_fix2_rename_disable_and_frequency_change_keep_the_same_condition_event(isolated):
+    _save_rule()
+    sent: list[str] = []
+    first = _cycle(_five_minute([99.0, 101.0]), sent, ok=False)
+    event_id = first["events"][0]["event_id"]
+
+    renamed = {**storage.get_chart_alert_rule("r1"), "name": "renamed", "message": "새 메시지", "enabled": False}
+    storage.save_chart_alert_rule(renamed)
+    storage.save_chart_alert_rule({**renamed, "enabled": True})
+    assert _event_statuses() == ["failed"]
+    assert storage.get_chart_alert_rule("r1")["last_state"]["pending_event_id"] == event_id
+
+    storage.save_chart_alert_rule({**storage.get_chart_alert_rule("r1"), "frequency": "repeating"})
+    assert _event_statuses() == ["failed"]  # 같은 조건의 이벤트는 유효
+    assert storage.get_chart_alert_rule("r1")["last_state"] == {}
+
+    retried = _cycle(_five_minute([99.0, 101.0]), sent, ok=True)
+    assert retried["notification"]["delivered"] == 1
+    assert [(row["event_id"], row["status"]) for row in storage.list_chart_alert_events(rule_ids=["r1"])] == [
+        (event_id, "delivered"),
+    ]
+
+
+def test_C_fix2_worker_stale_loader_snapshot_is_partial_and_not_sent(isolated):
+    # 로더가 실패 뒤 디스크의 오래된 봉을 돌려준 상황(cached.ohlc 폴백) — 81일 전 교차.
+    _save_rule()
+    sent: list[str] = []
+
+    result = _cycle(_five_minute([99.0, 101.0]), sent, as_of="2026-10-23T15:00:00Z")
+
+    assert sent == [] and result["notification"]["attempted"] == 0
+    assert result["evaluation_summary"]["unknown"] == 1 and result["status"] == "partial"
+    assert result["evaluations"][0]["stale_contexts"][0]["timeframe"] == "5m"
+    assert _event_statuses() == []
+
+
+def test_C_fix2_failed_event_expires_instead_of_sending_once_its_bar_is_stale(isolated):
+    _save_rule()
+    sent: list[str] = []
+    _cycle(_five_minute([99.0, 101.0]), sent, ok=False)
+
+    later = _cycle(_five_minute([99.0, 101.0]), sent, ok=True, as_of="2026-08-03T19:00:00Z")
+
+    assert later["notification"]["attempted"] == 0 and len(sent) == 1
+    assert _event_statuses() == ["expired"]
+    assert storage.get_chart_alert_rule("r1")["last_state"]["triggered"] is False

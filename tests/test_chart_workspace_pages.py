@@ -136,14 +136,13 @@ def test_panel_chart_render_is_isolated_in_its_own_fragment():
     assert "_render_panel_chart(" not in render_loop_source.replace("_render_panel_chart_fragment(", "")
 
 
-def test_replay_analysis_disables_live_orderflow_loader():
-    from dashboard import chart_orderflow, chart_workspace_ui
+def test_replay_analysis_isolates_live_orderflow():
+    """리플레이 중 분석 레일은 실시간 오더플로 캡처를 읽지 않는다(종목 페이지와 같은 snapshot 정책)."""
+    replay, _ = _replay_rail_capture("2026-08-01T15:35:00+00:00")
+    live, _ = _replay_rail_capture(None)
 
-    live_loader = chart_workspace_ui._analysis_orderflow_loader(None)
-    replay_loader = chart_workspace_ui._analysis_orderflow_loader("2026-01-02T15:00:00Z")
-
-    assert live_loader is chart_orderflow.load_snapshot
-    assert replay_loader("AAPL") == {"ok": False, "reason": "replay_isolated"}
+    assert replay["snapshot"]["orderflow"] == {"ok": False, "reason": "replay_isolated"}
+    assert live["snapshot"]["orderflow"].get("reason") != "replay_isolated"
 
 
 _REPLAY_RAIL_SCRIPT = """

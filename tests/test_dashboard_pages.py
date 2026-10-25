@@ -1653,6 +1653,79 @@ ticker.render()
     assert "다른 봉으로 대체하지 않았습니다" in warnings
 
 
+_TICKER_REPLAY_RS = '''
+import os
+_old_db = os.environ.get("AGENT_CONSOLE_DB")
+os.environ["AGENT_CONSOLE_DB"] = _REPLAY_DB
+cached.realtime_quote = lambda t: None
+_DAYS = pd.bdate_range("2025-11-03", "2026-05-29")
+def _daily(t, period="max"):
+    # 4/22 까지 자산=벤치마크(100), 이후 자산만 200 — 커서 뒤 일봉이 새면 상대강도가 1.0 이 된다.
+    vals = [100.0 if (t == "QQQ" or d <= pd.Timestamp("2026-04-22")) else 200.0 for d in _DAYS]
+    return pd.DataFrame({"Open": vals, "High": vals, "Low": vals, "Close": vals, "Volume": 1000}, index=_DAYS)
+_HOURS = pd.date_range("2026-04-20 14:00", periods=150, freq="h", tz="UTC")
+_hourly = pd.DataFrame({"Open": 100.0, "High": 101.0, "Low": 99.0, "Close": 100.0, "Volume": 1000},
+                       index=_HOURS)
+cached.ohlc = _daily
+cached.ohlc_tf = lambda t, tf: _daily(t) if tf == "1d" else _hourly
+cached.chart_data_bundle = lambda t, tf, session_policy="regular": {
+    "frame": cached.ohlc_tf(t, tf), "requested_timeframe": tf, "actual_timeframe": tf,
+    "session": {"policy": session_policy, "decision": "provider_bars_retained"},
+    "source": {"name": "test-bars", "source": "test-bars", "as_of": str(_HOURS[-1]),
+               "freshness": "delayed", "market": "us", "timezone": "America/New_York"},
+}
+st.session_state["ticker"] = "MSFT"
+st.session_state["_chart_tf"] = "1시간"
+st.session_state["ticker_MSFT_1h_replay_enabled"] = _REPLAY_ON
+from dashboard import chart_orderflow, chart_workbench_ui
+_original_rail = chart_workbench_ui.render_analysis_rail
+_original_orderflow = chart_orderflow.load_snapshot
+chart_orderflow.load_snapshot = lambda symbol: {"ok": True, "symbol": symbol, "source": "live-capture"}
+chart_workbench_ui.render_analysis_rail = lambda snapshot, hist=None: st.session_state.__setitem__(
+    "captured_rs", {**snapshot["relative_strength"], "replay_cursor": snapshot["context"]["replay_cursor"],
+                    "orderflow": dict(snapshot["orderflow"])})
+try:
+    from dashboard.pages import ticker
+    ticker.render()
+finally:
+    chart_workbench_ui.render_analysis_rail = _original_rail
+    chart_orderflow.load_snapshot = _original_orderflow
+    if _old_db is None:
+        os.environ.pop("AGENT_CONSOLE_DB", None)
+    else:
+        os.environ["AGENT_CONSOLE_DB"] = _old_db
+'''
+
+
+def _ticker_replay_capture(tmp_path, replay_on):
+    script = (_STUBS + "_REPLAY_DB = " + repr(str(tmp_path / "console.sqlite3")) + "\n"
+              + "_REPLAY_ON = " + repr(bool(replay_on)) + "\n" + _TICKER_REPLAY_RS)
+    at = AppTest.from_string(script, default_timeout=60)
+    at.run()
+    assert not at.exception, str(at.exception)
+    return at.session_state["captured_rs"]
+
+
+def test_C_fix2_ticker_replay_relative_strength_ignores_daily_bars_after_cursor(tmp_path):
+    """C-R04: 1h 리플레이(커서 4/22 16:00Z)의 분석 레일 상대강도는 커서 봉 마감 뒤 일봉을 읽지 않는다."""
+    captured = _ticker_replay_capture(tmp_path, True)
+
+    assert captured["replay_cursor"] == "2026-04-22T16:00:00+00:00"
+    assert captured["ok"] is True, captured
+    assert captured["as_of"] == "2026-04-21"  # 4/22 일봉은 16:00 ET 마감 전이라 제외
+    assert captured["relative_strength_60d"] == 0.0
+
+
+def test_C_fix2_ticker_replay_isolates_live_orderflow(tmp_path):
+    """리플레이 중 종목 페이지 분석 레일은 실시간 오더플로 캡처를 쓰지 않는다(워크스페이스와 같은 정책)."""
+    replay = _ticker_replay_capture(tmp_path, True)
+    live = _ticker_replay_capture(tmp_path, False)
+
+    assert replay["orderflow"] == {"ok": False, "reason": "replay_isolated"}
+    assert live["replay_cursor"] is None
+    assert live["orderflow"]["source"] == "live-capture"
+
+
 def test_compare_window_aligns_to_shared_start():
     """비교 창은 공통 시작점부터 잘라서 불필요한 선행 공백을 줄여야 한다."""
     import pandas as pd

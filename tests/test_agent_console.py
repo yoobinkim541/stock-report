@@ -3239,6 +3239,7 @@ def test_chart_alert_batch_api_evaluates_saved_rules_from_bars(monkeypatch, tmp_
     result = client.post("/api/chart-alerts/evaluate-batch", json={
         "workspace_id": "workspace-1",
         "bars": {"AAPL": bars},
+        "as_of": "2026-08-03T15:15:00Z",  # 마지막 봉(15:05Z) 마감 직후 — 오래된 시세가 아님
     })
 
     assert result.status_code == 200
@@ -3319,6 +3320,7 @@ def test_chart_alert_batch_api_evaluates_macd_hist_condition(monkeypatch, tmp_pa
     result = client.post("/api/chart-alerts/evaluate-batch", json={
         "workspace_id": "workspace-1",
         "bars": {"AAPL": bars},
+        "as_of": "2026-08-03T17:00:00Z",
     })
 
     assert result.status_code == 200
@@ -3360,6 +3362,7 @@ def test_chart_alert_batch_api_can_dispatch_notifications(monkeypatch, tmp_path)
         "workspace_id": "workspace-1",
         "bars": {"AAPL": bars},
         "notify": True,
+        "as_of": "2026-08-03T13:45:00Z",
     })
 
     assert result.status_code == 200
@@ -3403,6 +3406,7 @@ def test_chart_alert_worker_loads_bars_updates_state_and_notifies(monkeypatch, t
         notify=True,
         load_bars_fn=load_bars,
         send_fn=lambda text: sent.append(text) or True,
+        as_of="2026-08-03T13:45:00Z",
     )
 
     assert calls == [("AAPL", "5m")]
@@ -3467,6 +3471,7 @@ def test_chart_alert_worker_persists_run_history(monkeypatch, tmp_path):
         workspace_id="workspace-1",
         notify=False,
         load_bars_fn=lambda symbol, timeframe: bars,
+        as_of="2026-08-03T13:45:00Z",
     )
 
     runs = storage.list_chart_alert_runs(workspace_id="workspace-1")

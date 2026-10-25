@@ -19,15 +19,18 @@ LLM 응답 계약:
   아닌 0~1 유한수, description/implication/summary 는 길이 제한 문자열. 하나라도
   어기면 응답 전체를 ``invalid_llm_schema`` 실패로 돌려준다(조용히 버리지 않음).
   유효한 빈 patterns 는 "패턴 없음" 성공이다.
-- 수치 대조(grounding): 관측값(현재가·RSI(14)·분석 구간 고저)은 이 모듈이 봉에서
-  직접 계산한 ``facts`` 만 표시한다. LLM 자유 문장에 든 수치는 문장 단위로 대조해
-  하나라도 검증되지 않으면 그 문장을 표시 텍스트에서 빼고 ``unverified_claims`` 로
-  옮긴다. 규칙(_ground_text):
+- 수치 대조(grounding): 관측값(현재가·RSI(14)·분석 구간 고저)과 가격 레벨(스윙
+  고점/저점·MA5~200·볼린저20)은 이 모듈이 봉에서 직접 계산한 ``facts`` 만 표시하고
+  프롬프트에도 넣는다. LLM 자유 문장에 든 수치는 문장 단위로 대조해 하나라도 검증되지
+  않으면 그 문장을 표시 텍스트에서 빼고 ``unverified_claims`` 로 옮긴다. 규칙(_ground_text):
+    * 지표 파라미터(RSI(14), MACD(12,26,9), MA20, 20 이평선 등)는 수치 주장이 아니다.
     * RSI 뒤의 수치: 0~100 이고 계산 RSI(14)와 ±2 이내(70 이상/30 이하 같은 기준값
       언급은 0~100 범위만 확인). 계산 RSI 가 없으면 미검증.
     * 현재가/종가 뒤의 수치: 계산 마지막 종가와 ±0.5% 이내.
     * 그 밖의 수치(%·파·봉·개월 등 단위가 붙은 수, 날짜·시각·티커 제외)는 가격
-      레벨로 보고 0 초과이며 분석 구간 [저가×0.5, 고가×1.5] 안이어야 한다.
+      레벨로 보고 0 초과, 분석 구간 [저가×0.5, 고가×1.5] 안이며, 계산 레벨 중 하나와
+      ±1% 이내여야 한다. 범위 안이라도 계산 레벨에 연결되지 않으면 ``uncomputed_level``.
+- 호출 상한: 기본 제공자 체인 호출은 KST 하루 ``CHART_VISION_DAILY_LIMIT``(기본 20)회.
 """
 from __future__ import annotations
 
@@ -39,7 +42,7 @@ import re
 import shutil
 import subprocess
 import tempfile
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
@@ -49,7 +52,7 @@ from dashboard import chart_studies
 
 _VISION_TIMEOUT_SEC = 90
 _DEFAULT_BARS = 180
-VISION_PROMPT_VERSION = "chart-vision-2026-10-25"
+VISION_PROMPT_VERSION = "chart-vision-2026-10-25-levels"
 _VISION_PROVIDER_CHAIN = "codex-exec(reasoning=medium)>hermes-chat"
 PATTERN_KINDS = frozenset({
     "triangle_convergence", "elliott_wave", "head_and_shoulders",
@@ -157,7 +160,43 @@ def analysis_identity(hist: pd.DataFrame, ticker: str, *, timeframe: str = "", s
     return identity
 
 
-def _computed_facts(window: pd.DataFrame) -> dict[str, Any]:
+_SWING_SPAN = 3  # 좌우 3봉보다 높은/낮은 봉 = 스윙 고점/저점
+_MA_PERIODS = (5, 10, 20, 50, 60, 120, 200)
+_PROMPT_SWINGS = 5
+
+
+def _computed_levels(hist: pd.DataFrame, window: pd.DataFrame) -> list[dict[str, Any]]:
+    """Price levels computed from bars — the only levels a vision sentence may cite.
+
+    Last close, analysed-range high/low, swing highs/lows inside the window, simple
+    moving averages (full history up to the last analysed bar) and Bollinger(20, 2).
+    """
+    high = pd.to_numeric(window["High"], errors="coerce")
+    low = pd.to_numeric(window["Low"], errors="coerce")
+    close = pd.to_numeric(window["Close"], errors="coerce")
+    levels: list[dict[str, Any]] = [
+        {"label": "현재가", "value": float(close.iloc[-1])},
+        {"label": "구간 고가", "value": float(high.max())},
+        {"label": "구간 저가", "value": float(low.min())},
+    ]
+    span = 2 * _SWING_SPAN + 1
+    swing_highs = high[high == high.rolling(span, center=True).max()].dropna()
+    swing_lows = low[low == low.rolling(span, center=True).min()].dropna()
+    levels += [{"label": f"스윙 고점 {_timestamp_text(ts)}", "value": float(v)} for ts, v in swing_highs.items()]
+    levels += [{"label": f"스윙 저점 {_timestamp_text(ts)}", "value": float(v)} for ts, v in swing_lows.items()]
+    full_close = pd.to_numeric(hist["Close"], errors="coerce")
+    full_close = full_close.loc[:window.index[-1]].dropna()
+    for period in _MA_PERIODS:
+        if len(full_close) >= period:
+            levels.append({"label": f"MA{period}", "value": float(full_close.tail(period).mean())})
+    if len(full_close) >= 20:
+        middle, deviation = full_close.tail(20).mean(), full_close.tail(20).std()
+        levels.append({"label": "BB20 상단", "value": float(middle + 2 * deviation)})
+        levels.append({"label": "BB20 하단", "value": float(middle - 2 * deviation)})
+    return [level for level in levels if math.isfinite(level["value"])]
+
+
+def _computed_facts(hist: pd.DataFrame, window: pd.DataFrame) -> dict[str, Any]:
     """Observed values computed from the analysed bars — the only numbers shown as facts."""
     close = pd.to_numeric(window["Close"], errors="coerce")
     rsi_value = chart_studies.rsi(close).iloc[-1]
@@ -168,6 +207,7 @@ def _computed_facts(window: pd.DataFrame) -> dict[str, Any]:
         "range_low": float(pd.to_numeric(window["Low"], errors="coerce").min()),
         "range_high": float(pd.to_numeric(window["High"], errors="coerce").max()),
         "bars": int(len(window)),
+        "levels": _computed_levels(hist, window),
     }
 
 
@@ -234,6 +274,15 @@ def format_price(value: float) -> str:
     return f"{float(value):.4f}".rstrip("0").rstrip(".")
 
 
+def _prompt_levels(levels: list[dict[str, Any]]) -> list[str]:
+    """Moving averages/Bollinger plus the most recent swing points, for the prompt."""
+    swings_high = [level for level in levels if str(level["label"]).startswith("스윙 고점")][-_PROMPT_SWINGS:]
+    swings_low = [level for level in levels if str(level["label"]).startswith("스윙 저점")][-_PROMPT_SWINGS:]
+    others = [level for level in levels if not str(level["label"]).startswith("스윙")
+              and level["label"] not in {"현재가", "구간 고가", "구간 저가"}]
+    return [f"{level['label']} {format_price(level['value'])}" for level in (*swings_high, *swings_low, *others)]
+
+
 def _build_vision_prompt(ticker: str, facts: dict[str, Any] | None = None) -> str:
     lines = [
         f"너는 기술적 분석가다. 첨부된 {ticker} 캔들 차트 이미지를 보고 고전 차트 패턴을 식별하라.",
@@ -247,9 +296,12 @@ def _build_vision_prompt(ticker: str, facts: dict[str, Any] | None = None) -> st
             f"RSI(14) {rsi_text}, 최근 {facts['bars']}봉 저가 {format_price(facts['range_low'])} ~ "
             f"고가 {format_price(facts['range_high'])}."
         )
+        prompt_levels = _prompt_levels(facts.get("levels") or [])
+        if prompt_levels:
+            lines.append("계산된 가격 레벨(지지·저항으로 인용 가능한 값): " + ", ".join(prompt_levels) + ".")
     lines += [
-        "가격·지표 수치는 위 계산값과 일치하는 것만 쓰고, 목표가·예상 가격 같은 추정 수치는 쓰지 마라. "
-        "계산값과 대조되지 않는 수치가 든 문장은 화면에 표시되지 않는다.",
+        "가격·지표 수치는 위 계산값·계산 레벨과 일치하는 것만 쓰고, 목표가·예상 가격 같은 추정 수치는 쓰지 마라. "
+        "계산값·계산 레벨과 대조되지 않는 수치가 든 문장은 화면에 표시되지 않는다.",
         "반드시 JSON object만 출력한다. 마크다운, 설명문, 코드펜스는 금지한다.",
         '{"patterns": [{"kind": "...", "confidence": 0.0, "description": "...", "implication": "..."}], "summary": "..."}',
         "",
@@ -322,8 +374,21 @@ _NON_PRICE_UNIT_RE = re.compile(
 )
 _DATE_TIME_RE = re.compile(r"\d{4}[-/.]\d{1,2}[-/.]\d{1,2}|\d{1,2}:\d{2}(?::\d{2})?")
 _SENTENCE_SPLIT_RE = re.compile(r"(?<=[.!?。])\s+|\n+")
+# 지표 이름 뒤의 기간/파라미터(RSI(14), MACD(12,26,9), MA20, 20 이평선)는 수치 주장이 아니다.
+_INDICATOR_NAME = (
+    r"(?:RSI|MACD|EMA|SMA|WMA|MA|BB|ATR|ADX|CCI|MFI|Stoch(?:astic)?|스토캐스틱|볼린저\s*밴드|볼린저|"
+    r"Bollinger(?:\s*Bands?)?|이동\s*평균선?|이평선?)"
+)
+_INDICATOR_PARAMETER_RE = re.compile(
+    r"(?<![A-Za-z])" + _INDICATOR_NAME
+    + r"(?P<params>\s*\(\s*\d+(?:\.\d+)?(?:\s*[,/]\s*\d+(?:\.\d+)?)*\s*\))"
+    r"|(?<![A-Za-z])(?:EMA|SMA|WMA|MA)(?P<suffix>\s?\d{1,3})(?!\d)"
+    r"|(?<![\w.])(?P<prefix>\d{1,3})\s*(?=(?:이동\s*평균|이평|(?:EMA|SMA|WMA|MA)(?![A-Za-z0-9])))",
+    re.IGNORECASE,
+)
 _RSI_TOLERANCE = 2.0
 _PRICE_TOLERANCE = 0.005
+_LEVEL_TOLERANCE = 0.01
 _LEVEL_BAND = (0.5, 1.5)
 
 
@@ -332,14 +397,25 @@ def _claim_value(match: re.Match) -> float:
     return -value if match.group("sign") else value
 
 
+def _blank_indicator_parameters(text: str) -> str:
+    chars = list(text)
+    for match in _INDICATOR_PARAMETER_RE.finditer(text):
+        for group in ("params", "suffix", "prefix"):
+            if match.group(group) is not None:
+                start, end = match.span(group)
+                chars[start:end] = " " * (end - start)
+    return "".join(chars)
+
+
 def _sentence_problems(sentence: str, ticker: str, facts: dict[str, Any]) -> list[str]:
     text = _DATE_TIME_RE.sub(lambda m: " " * len(m.group(0)), sentence)
     if ticker:
         text = re.sub(re.escape(ticker), lambda m: " " * len(m.group(0)), text, flags=re.IGNORECASE)
+    text = _blank_indicator_parameters(text)
     problems: list[str] = []
     claimed: list[tuple[int, int]] = []
     for match in _RSI_CLAIM_RE.finditer(text):
-        claimed.append(match.span())  # RSI(14) 의 기간 숫자도 레벨로 오인하지 않게 전체 구간
+        claimed.append(match.span())
         value = _claim_value(match)
         if not 0 <= value <= 100:
             problems.append("rsi_out_of_bounds")
@@ -355,6 +431,7 @@ def _sentence_problems(sentence: str, ticker: str, facts: dict[str, Any]) -> lis
         if abs(value - last) > max(abs(last) * _PRICE_TOLERANCE, 1e-9):
             problems.append("current_price_mismatch")
     low, high = float(facts["range_low"]), float(facts["range_high"])
+    levels = [float(level["value"]) for level in facts.get("levels") or []]
     for match in _LEVEL_RE.finditer(text):
         start, end = match.span("num")
         if any(start < c_end and c_start < end for c_start, c_end in claimed):
@@ -366,6 +443,9 @@ def _sentence_problems(sentence: str, ticker: str, facts: dict[str, Any]) -> lis
             problems.append("non_positive_price")
         elif not low * _LEVEL_BAND[0] <= value <= high * _LEVEL_BAND[1]:
             problems.append("out_of_range_level")
+        elif not any(abs(value - level) <= abs(level) * _LEVEL_TOLERANCE for level in levels):
+            # 범위 안이라도 계산 레벨(스윙 고저·이평선·볼린저·구간 고저·현재가)에 연결되지 않으면 미검증.
+            problems.append("uncomputed_level")
     return problems
 
 
@@ -458,13 +538,88 @@ def _try_vision_prompt(prompt: str, image_path: str, *, timeout: int = _VISION_T
     return None
 
 
+# ── 호출 상한(C-14) ── 세션 캐시는 같은 identity 재호출만 막는다. 유료 제공자 체인 호출은
+# 대시보드 전체(사용자 식별 없음 — 단일 운영자 대시보드)에서 KST 하루 상한을 공유한다.
+_BUDGET_LIMIT_ENV = "CHART_VISION_DAILY_LIMIT"
+_BUDGET_PATH_ENV = "CHART_VISION_BUDGET_PATH"
+_DEFAULT_DAILY_LIMIT = 20
+_KST = timezone(timedelta(hours=9))
+
+
+def _budget_path() -> Path:
+    configured = os.getenv(_BUDGET_PATH_ENV, "").strip()
+    if configured:
+        return Path(configured).expanduser()
+    return Path.home() / ".cache" / "stock-report" / "chart_vision_budget.json"
+
+
+def _budget_limit() -> int:
+    try:
+        return max(0, int(os.getenv(_BUDGET_LIMIT_ENV, str(_DEFAULT_DAILY_LIMIT))))
+    except ValueError:
+        return _DEFAULT_DAILY_LIMIT
+
+
+def _budget_day(now: datetime | None) -> str:
+    return (now or datetime.now(timezone.utc)).astimezone(_KST).date().isoformat()
+
+
+def _read_budget(path: Path) -> dict[str, Any]:
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        return {"days": {}}
+    except (OSError, ValueError):
+        # 손상된 장부를 0회로 읽으면 상한이 풀린다 — 이 날은 소진으로 본다.
+        return {"days": {}, "corrupt": True}
+    days = data.get("days") if isinstance(data, dict) else None
+    return {"days": days if isinstance(days, dict) else {}}
+
+
+def vision_budget_status(now: datetime | None = None) -> dict[str, Any]:
+    """Today's (KST) paid vision calls versus the configured daily limit."""
+    day, limit = _budget_day(now), _budget_limit()
+    data = _read_budget(_budget_path())
+    used = limit if data.get("corrupt") else len(data["days"].get(day) or [])
+    return {"day": day, "used": used, "limit": limit, "remaining": max(0, limit - used)}
+
+
+def _reserve_vision_call(identity_key: str, now: datetime | None = None) -> str | None:
+    """Record one paid call before it happens. Returns None when reserved, otherwise why not:
+    ``daily_budget_exhausted`` or ``budget_ledger_unavailable`` (unreadable/unwritable ledger —
+    fail closed rather than calling a paid provider without a count)."""
+    import safe_io
+
+    path = _budget_path()
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with safe_io.file_write_lock(str(path), timeout=10):
+            day, limit = _budget_day(now), _budget_limit()
+            data = _read_budget(path)
+            if data.get("corrupt"):
+                return "budget_ledger_unavailable"
+            calls = list(data["days"].get(day) or [])
+            if len(calls) >= limit:
+                return "daily_budget_exhausted"
+            calls.append({"key": str(identity_key), "at": (now or datetime.now(timezone.utc)).isoformat()})
+            # 오늘 장부만 남긴다(상한은 하루 단위).
+            safe_io.atomic_write_json(str(path), {"days": {day: calls}})
+            return None
+    except (OSError, safe_io.LockTimeout):
+        return "budget_ledger_unavailable"
+
+
 def analyze_chart_patterns(hist: pd.DataFrame, ticker: str, *, llm_fn=None, bars: int = _DEFAULT_BARS,
                            identity: dict[str, Any] | None = None) -> dict:
     """캔들 이미지를 렌더링해 LLM 비전으로 고전 차트 패턴(삼각수렴·엘리엇 파동 등)을
     식별한다. 버튼 트리거 전제 — 자동 반복 호출 금지(호출당 수십 초).
 
     ``identity`` 는 호출부가 캐시 키로 쓰는 analysis_identity() 결과이며 결과에 그대로
-    저장된다(없으면 ticker·봉 내용만으로 계산)."""
+    저장된다(없으면 ticker·봉 내용만으로 계산). 기본 제공자 체인(유료 CLI)을 쓰는
+    호출은 호출 직전에 일일 상한(CHART_VISION_DAILY_LIMIT, KST 기준)을 예약하고, 소진되면
+    ``daily_budget_exhausted``, 장부를 읽거나 쓸 수 없으면 ``budget_ledger_unavailable`` 로
+    호출 없이 실패한다. 주입한 ``llm_fn`` 은 호출부 책임이다."""
+    paid = llm_fn is None
     if llm_fn is None:
         llm_fn = _try_vision_prompt
     if identity is None:
@@ -478,8 +633,11 @@ def analyze_chart_patterns(hist: pd.DataFrame, ticker: str, *, llm_fn=None, bars
         rendered = render_chart_image(hist, ticker, image_path, bars=bars)
         if not rendered:
             return _failure("image_render_failed")
-        facts = _computed_facts(_chart_window(hist, bars))
+        facts = _computed_facts(hist, _chart_window(hist, bars))
         prompt = _build_vision_prompt(ticker, facts)
+        blocked = _reserve_vision_call(identity.get("key") or "") if paid else None
+        if blocked:
+            return _failure(blocked)
         try:
             text = llm_fn(prompt, rendered)
         except Exception as exc:

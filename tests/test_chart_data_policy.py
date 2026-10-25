@@ -187,3 +187,28 @@ def test_exportable_bars_preserves_an_existing_source_timestamp_column():
 
     assert out.loc[0, "Timestamp"] == "2024-03-11T09:30:00-04:00"
     assert out.loc[0, "SourceTimestamp"] == "synthetic-source"
+
+
+@pytest.mark.parametrize("market, labels, expected_local", [
+    # W-FRI 주 마감 라벨과 월요일 시작 라벨 모두 그 주 금요일 정규장 마감.
+    ("us", ["2026-08-07", "2026-08-03"], ["2026-08-07 16:00", "2026-08-07 16:00"]),
+    ("kr", ["2026-08-07", "2026-08-03"], ["2026-08-07 15:30", "2026-08-07 15:30"]),
+])
+def test_C_fix2_weekly_bar_closes_on_its_fridays_session_close(market, labels, expected_local):
+    zone = "America/New_York" if market == "us" else "Asia/Seoul"
+
+    closes = policy.bar_close_times(pd.DatetimeIndex(labels), market=market, timeframe="1wk")
+
+    assert [ts.tz_convert(zone).strftime("%Y-%m-%d %H:%M") for ts in closes] == expected_local
+
+
+def test_C_fix2_monthly_daily_and_intraday_bar_close_times():
+    monthly = policy.bar_close_times(pd.DatetimeIndex(["2026-07-31", "2026-07-01"]), market="us", timeframe="1mo")
+    daily = policy.bar_close_time("2026-03-08", market="us", timeframe="1d")  # DST 전환일에도 벽시계 16:00
+    intraday = policy.bar_close_time(pd.Timestamp("2026-08-03T13:30:00Z"), market="us", timeframe="5m")
+
+    assert [ts.tz_convert("America/New_York").strftime("%Y-%m-%d %H:%M") for ts in monthly] == [
+        "2026-07-31 16:00", "2026-07-31 16:00",
+    ]
+    assert daily.tz_convert("America/New_York").strftime("%H:%M") == "16:00"
+    assert intraday == pd.Timestamp("2026-08-03T13:35:00Z")

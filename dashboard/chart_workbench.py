@@ -6,7 +6,9 @@ from collections import Counter
 from collections.abc import Callable, Mapping
 from typing import Any
 
-from dashboard import chart_analysis, chart_document, trendlines
+import pandas as pd
+
+from dashboard import chart_analysis, chart_data_policy, chart_document, trendlines
 
 
 def benchmark_symbol(document: Mapping[str, Any]) -> str:
@@ -50,6 +52,34 @@ def _optional(name: str, loader: Callable[[str], Any], symbol: str,
     return copy.deepcopy(fallback if value is None else value)
 
 
+def _replay_horizon(normalized: Mapping[str, Any]) -> pd.Timestamp | None:
+    """Information boundary of an active replay: the close of the cursor bar (UTC)."""
+    replay = normalized.get("replay") or {}
+    cursor = replay.get("cursor") if replay.get("active") else None
+    if cursor in (None, ""):
+        return None
+    return chart_data_policy.bar_close_time(
+        cursor, market=str(normalized["market"]), timeframe=str(normalized.get("timeframe") or "1d"),
+    )
+
+
+def _replay_bounded_loader(loader: Callable[[str, str], Any], horizon: pd.Timestamp,
+                           market: str) -> Callable[[str, str], Any]:
+    """Every auxiliary series sees only bars already closed at the replay boundary.
+
+    A daily bar of the cursor's own day is excluded until that day's exchange close,
+    so an intraday cursor never reads the day's final close.
+    """
+    def load(symbol: str, timeframe: str):
+        frame = loader(symbol, timeframe)
+        if frame is None or getattr(frame, "empty", True):
+            return frame
+        closes = chart_data_policy.bar_close_times(frame.index, market=market, timeframe=timeframe)
+        return frame[closes <= horizon]
+
+    return load
+
+
 def build_analysis_snapshot(
     document,
     hist,
@@ -63,12 +93,20 @@ def build_analysis_snapshot(
 
     Primary history is supplied by the controller so the chart and analysis use
     the same bars. Optional providers are isolated; unavailable fundamentals or
-    alerts never suppress deterministic price analysis.
+    alerts never suppress deterministic price analysis. With an active replay
+    (``document["replay"]``) every series fetched through ``ohlc_loader`` is cut at
+    the cursor bar's close (relative strength, multi-timeframe) and live orderflow
+    is isolated (``replay_isolated``), so the rail never shows data after the replay
+    position. Bars of other symbols are closed by the chart's market session (the
+    benchmark is chosen per market).
     """
     normalized = chart_document.normalize_chart_document(document)
     symbol = str(normalized["symbol"])
     benchmark = benchmark_symbol(normalized)
     errors: dict[str, str] = {}
+    horizon = _replay_horizon(normalized)
+    if horizon is not None:
+        ohlc_loader = _replay_bounded_loader(ohlc_loader, horizon, str(normalized["market"]))
 
     try:
         benchmark_hist = ohlc_loader(benchmark, "1d")
@@ -100,12 +138,14 @@ def build_analysis_snapshot(
     multi_timeframe = chart_analysis.multi_timeframe_summary(ohlc_loader, symbol)
     fundamentals = _optional("fundamentals", fundamental_loader, symbol, {}, errors)
     alerts = _optional("alerts", alert_loader, symbol, [], errors)
-    orderflow = (
-        _optional("orderflow", orderflow_loader, symbol,
-                  {"ok": False, "reason": "provider_unavailable"}, errors)
-        if orderflow_loader is not None
-        else {"ok": False, "reason": "capture_not_configured"}
-    )
+    if horizon is not None:
+        # 오더플로는 지금 이 순간의 체결 캡처라 커서 시점으로 되돌릴 수 없다 — 리플레이 중에는 격리한다.
+        orderflow = {"ok": False, "reason": "replay_isolated"}
+    elif orderflow_loader is not None:
+        orderflow = _optional("orderflow", orderflow_loader, symbol,
+                              {"ok": False, "reason": "provider_unavailable"}, errors)
+    else:
+        orderflow = {"ok": False, "reason": "capture_not_configured"}
     if not isinstance(fundamentals, Mapping):
         errors["fundamentals"] = "provider returned a non-object payload"
         fundamentals = {}

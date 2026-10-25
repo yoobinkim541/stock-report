@@ -252,10 +252,11 @@ def test_vision_hides_numeric_claims_that_contradict_computed_values():
 
 
 def test_vision_keeps_claims_consistent_with_computed_values():
+    # MA20(마지막 20봉 평균) = 189.5 — 계산 레벨과 연결된 가격만 남는다.
     payload = {
         "patterns": [{
             "kind": "elliott_wave", "confidence": 0.7,
-            "description": "현재가 199 부근, RSI(14) 100 으로 과매수. 지지선 180 확인.",
+            "description": "현재가 199 부근, RSI(14) 100 으로 과매수. MA20 189.5 지지 확인.",
             "implication": "RSI 70 이상 구간이 이어지면 5파 마무리 가능.",
         }],
         "summary": "엘리엇 5파 진행 중. RSI 55 로 중립.",
@@ -265,7 +266,7 @@ def test_vision_keeps_claims_consistent_with_computed_values():
 
     assert result["ok"] is True
     pattern = result["patterns"][0]
-    assert pattern["description"] == "현재가 199 부근, RSI(14) 100 으로 과매수. 지지선 180 확인."
+    assert pattern["description"] == "현재가 199 부근, RSI(14) 100 으로 과매수. MA20 189.5 지지 확인."
     assert pattern["implication"] == "RSI 70 이상 구간이 이어지면 5파 마무리 가능."
     assert result["summary"] == "엘리엇 5파 진행 중."
     assert [claim["reasons"] for claim in result["unverified_claims"]] == [["rsi_mismatch"]]
@@ -317,3 +318,104 @@ def test_analysis_result_stores_the_requested_identity():
 
     assert ok["identity"]["key"] == identity["key"]
     assert failed["identity"]["key"] == identity["key"]
+
+
+# --- C-fix2: 근거 없는 가격 레벨·지표 파라미터·호출 상한 ---------------------------
+
+def _grounded(text, hist=None):
+    payload = {"patterns": [{"kind": "wedge", "confidence": 0.6, "description": text, "implication": ""}],
+               "summary": ""}
+    result = cv.analyze_chart_patterns(hist if hist is not None else _review_hist(), "AAPL",
+                                       llm_fn=_llm_returning(payload))
+    assert result["ok"] is True
+    return result["patterns"][0]["description"], result["unverified_claims"]
+
+
+@pytest.mark.parametrize("sentence", [
+    "저항선은 290이다.",        # 분석 구간 안(≤300)이지만 어떤 계산 레벨과도 연결되지 않음
+    "지지선 180 확인.",         # 구간 안, 가장 가까운 계산 레벨(BB 하단 177.7)과도 1% 밖
+    "목표가 250 까지 열려 있다.",
+])
+def test_C_fix2_uncomputed_in_range_price_level_is_hidden(sentence):
+    shown, unverified = _grounded(sentence)
+
+    assert shown == ""
+    assert unverified[0]["reasons"] == ["uncomputed_level"]
+
+
+def test_C_fix2_levels_linked_to_computed_swings_and_range_are_kept():
+    # 120 까지 오른 뒤 100 까지 되돌린 구간: 스윙 고점 High=121, 구간 저가 99.
+    values = list(range(100, 121)) + list(range(119, 99, -1)) + [100] * 10
+    hist = _review_hist(values)
+    shown, unverified = _grounded("스윙 고점 121 이 저항, 구간 저가 99 가 지지.", hist)
+
+    assert shown == "스윙 고점 121 이 저항, 구간 저가 99 가 지지."
+    assert unverified == []
+    facts = cv.analyze_chart_patterns(hist, "AAPL", llm_fn=_llm_returning({"patterns": []}))["facts"]
+    swing_highs = [level["value"] for level in facts["levels"] if level["label"].startswith("스윙 고점")]
+    assert 121.0 in swing_highs
+
+
+@pytest.mark.parametrize("sentence", [
+    "RSI(14)는 과매수 구간입니다.",
+    "MACD(12,26,9)의 골든크로스가 관찰됩니다.",
+    "주가가 MA20 위에서 지지받고 있다.",
+    "20일 이동평균선과 60 이평선이 정배열.",
+    "볼린저 밴드(20, 2) 상단을 돌파했다.",
+    "엘리엇 3파가 진행 중이다.",
+])
+def test_C_fix2_indicator_parameters_are_not_price_claims(sentence):
+    shown, unverified = _grounded(sentence)
+
+    assert shown == sentence
+    assert unverified == []
+
+
+def test_C_fix2_indicator_parameter_does_not_hide_a_wrong_value_after_it():
+    shown, unverified = _grounded("RSI(14) 30 으로 과매도.")  # 계산 RSI 100
+
+    assert shown == ""
+    assert unverified[0]["reasons"] == ["rsi_mismatch"]
+
+
+def test_C_fix2_prompt_lists_the_computed_levels():
+    captured = {}
+
+    def _llm(prompt, image_path):
+        captured["prompt"] = prompt
+        return '{"patterns": [], "summary": ""}'
+
+    cv.analyze_chart_patterns(_review_hist(), "AAPL", llm_fn=_llm)
+
+    assert "계산된 가격 레벨" in captured["prompt"]
+    assert "MA20 189.5" in captured["prompt"]
+
+
+def test_C_fix2_paid_vision_calls_stop_at_the_daily_budget(monkeypatch, tmp_path):
+    from datetime import datetime, timedelta, timezone
+
+    monkeypatch.setenv("CHART_VISION_BUDGET_PATH", str(tmp_path / "budget.json"))
+    monkeypatch.setenv("CHART_VISION_DAILY_LIMIT", "2")
+    calls = []
+    monkeypatch.setattr(cv, "_try_vision_prompt",
+                        lambda prompt, image_path, **_: calls.append(1) or '{"patterns": [], "summary": ""}')
+
+    results = [cv.analyze_chart_patterns(_review_hist(), "AAPL") for _ in range(3)]
+
+    assert [result["ok"] for result in results] == [True, True, False]
+    assert results[2]["reason"] == "daily_budget_exhausted"
+    assert len(calls) == 2  # 상한 초과 호출은 제공자를 부르지 않는다
+    assert cv.vision_budget_status()["remaining"] == 0
+    assert cv.vision_budget_status(datetime.now(timezone.utc) + timedelta(days=1))["used"] == 0
+
+
+def test_C_fix2_corrupt_budget_ledger_blocks_paid_calls(monkeypatch, tmp_path):
+    ledger = tmp_path / "budget.json"
+    ledger.write_text("{not json", encoding="utf-8")
+    monkeypatch.setenv("CHART_VISION_BUDGET_PATH", str(ledger))
+    monkeypatch.setattr(cv, "_try_vision_prompt", lambda *a, **k: pytest.fail("provider called"))
+
+    result = cv.analyze_chart_patterns(_review_hist(), "AAPL")
+
+    assert result["ok"] is False and result["reason"] == "budget_ledger_unavailable"
+    assert cv.vision_budget_status()["remaining"] == 0  # 화면 버튼도 비활성

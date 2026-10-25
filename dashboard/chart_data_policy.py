@@ -161,6 +161,136 @@ def bar_seconds(timeframe: str) -> int | None:
     return amount * (60 if match.group(2) == "m" else 3600)
 
 
+def regular_session(market: str) -> tuple[str, time, time]:
+    """Exchange timezone name and regular-session open/close for ``market`` (us/kr)."""
+    return _MARKET_DEFAULTS[_normalized_market(market)]
+
+
+# 봉 마감·신선도 정책(경보 평가·리플레이·분석 레일 공용). 거래소 휴장 달력은 설정돼 있지
+# 않다(_session_metadata 의 holiday_calendar=not_configured) — 아래 허용치가 그 몫을 흡수한다.
+_WEEKLY_PERIOD_END = 4  # W-FRI: 대시보드 주봉 리샘플(views.ohlc_tf)의 주 마감 라벨(금요일)
+_PERIOD_CLOSE_GRACE = pd.Timedelta(hours=6)  # 일·주·월봉 마감 뒤 공급자가 봉을 반영할 여유
+_DAILY_MISSING_ALLOWED = 1  # 평일 휴장 하루(달력 없음)는 결측으로 보지 않는다
+_INTRADAY_GAP_BARS = 3
+_INTRADAY_MIN_GAP_SECONDS = 30 * 60
+_STALE_SCAN_DAYS = 400
+
+
+def bar_close_times(index, *, market: str, timeframe: str) -> pd.DatetimeIndex:
+    """UTC instant at which each bar labelled by ``index`` is closed.
+
+    - Intraday bars are labelled by their start: close = start + bar length.
+    - Daily bars close at the exchange regular-session close of their local date.
+    - Weekly/monthly bars close at the regular close of the last day of their period
+      (Friday for weeks, calendar month end for months). Period-end labels (the
+      dashboard's ``W-FRI``/``ME`` resample) and period-start labels (Monday / 1st)
+      both roll forward to that same day, so neither is read one period late.
+    - Holidays: without an exchange calendar a period whose last trading day is
+      earlier than its label day closes at the label day's close — later, never earlier.
+
+    Naive timestamps are read as the exchange wall clock.
+    """
+    zone, _opening, closing = _MARKET_DEFAULTS[_normalized_market(market)]
+    value = _normalized_timeframe(timeframe)
+    stamps = pd.DatetimeIndex(index)
+    if stamps.tz is None:
+        stamps = stamps.tz_localize(zone, ambiguous="NaT", nonexistent="NaT")
+    seconds = bar_seconds(value)
+    if seconds:
+        return (stamps + pd.Timedelta(seconds=seconds)).tz_convert("UTC")
+    if value not in _DAILY_TIMEFRAMES:
+        raise ValueError(f"unsupported timeframe: {timeframe}")
+    days = stamps.tz_convert(zone).tz_localize(None).normalize()
+    if value == "1wk":
+        days = days + pd.to_timedelta((_WEEKLY_PERIOD_END - days.dayofweek) % 7, unit="D")
+    elif value == "1mo":
+        days = days + pd.offsets.MonthEnd(0)
+    closes = days + pd.Timedelta(hours=closing.hour, minutes=closing.minute)
+    return closes.tz_localize(zone, ambiguous="NaT", nonexistent="NaT").tz_convert("UTC")
+
+
+def bar_close_time(start, *, market: str, timeframe: str) -> pd.Timestamp:
+    """Scalar form of :func:`bar_close_times`."""
+    return bar_close_times(pd.DatetimeIndex([pd.Timestamp(start)]), market=market, timeframe=timeframe)[0]
+
+
+def _utc_timestamp(value) -> pd.Timestamp:
+    stamp = pd.Timestamp(value)
+    return stamp.tz_localize("UTC") if stamp.tzinfo is None else stamp.tz_convert("UTC")
+
+
+def _regular_session_seconds(start: pd.Timestamp, end: pd.Timestamp, market: str, limit: float) -> float:
+    """Weekday regular-session seconds inside (start, end]; stops counting past ``limit``."""
+    zone, opening, closing = _MARKET_DEFAULTS[market]
+    day = start.tz_convert(zone).tz_localize(None).normalize()
+    last_day = end.tz_convert(zone).tz_localize(None).normalize()
+    total = 0.0
+    while day <= last_day and total <= limit:
+        if day.dayofweek < 5:
+            open_at = (day + pd.Timedelta(hours=opening.hour, minutes=opening.minute)).tz_localize(zone)
+            close_at = (day + pd.Timedelta(hours=closing.hour, minutes=closing.minute)).tz_localize(zone)
+            low, high = max(open_at, start), min(close_at, end)
+            if high > low:
+                total += (high - low).total_seconds()
+        day += pd.Timedelta(days=1)
+    return total
+
+
+def _missing_period_closes(last_close: pd.Timestamp, reference: pd.Timestamp, market: str, timeframe: str) -> int:
+    """Expected daily/weekly/monthly closes after ``last_close`` that are overdue at ``reference``."""
+    zone, _opening, closing = _MARKET_DEFAULTS[market]
+    days = pd.date_range(
+        last_close.tz_convert(zone).tz_localize(None).normalize(),
+        reference.tz_convert(zone).tz_localize(None).normalize(),
+        freq="D",
+    )
+    if timeframe == "1wk":
+        days = days[days.dayofweek == _WEEKLY_PERIOD_END]
+    elif timeframe == "1mo":
+        days = days[days.is_month_end]
+    else:
+        days = days[days.dayofweek < 5]
+    closes = (days + pd.Timedelta(hours=closing.hour, minutes=closing.minute)).tz_localize(
+        zone, ambiguous="NaT", nonexistent="NaT",
+    ).tz_convert("UTC")
+    return int(((closes > last_close) & (closes + _PERIOD_CLOSE_GRACE <= reference)).sum())
+
+
+def bar_staleness(last_bar_start, reference, *, market: str, timeframe: str) -> dict[str, Any] | None:
+    """``None`` while the newest bar is current at ``reference``; otherwise why it is stale.
+
+    A bar still forming at ``reference`` is current. After the newest bar closed:
+    - intraday: stale once more weekday regular-session time than
+      max(3 bars, 30 minutes) has passed without a newer bar (nights/weekends do not count);
+    - daily: stale once more than one weekday close (+6h provider grace) is missing;
+    - weekly/monthly: stale once the next period close (+6h grace) is missing.
+    """
+    market = _normalized_market(market)
+    value = _normalized_timeframe(timeframe)
+    reference = _utc_timestamp(reference)
+    last_close = bar_close_time(last_bar_start, market=market, timeframe=value)
+    if pd.isna(last_close):
+        return {"reason": "bar_time_unresolved", "last_bar": str(last_bar_start)}
+    if last_close > reference:
+        return None
+    detail: dict[str, Any] = {"reason": "stale_bars", "last_bar_close": last_close.isoformat(),
+                              "reference": reference.isoformat()}
+    if reference - last_close > pd.Timedelta(days=_STALE_SCAN_DAYS):
+        return detail
+    seconds = bar_seconds(value)
+    if seconds:
+        limit = float(max(_INTRADAY_GAP_BARS * seconds, _INTRADAY_MIN_GAP_SECONDS))
+        elapsed = _regular_session_seconds(last_close, reference, market, limit)
+        if elapsed > limit:
+            return {**detail, "session_seconds_without_bar": elapsed, "limit_seconds": limit}
+        return None
+    missing = _missing_period_closes(last_close, reference, market, value)
+    allowed = _DAILY_MISSING_ALLOWED if value == "1d" else 0
+    if missing > allowed:
+        return {**detail, "missing_closes": missing, "allowed_missing": allowed}
+    return None
+
+
 def _source_details(source: str | Mapping[str, Any]) -> tuple[str, str]:
     if isinstance(source, Mapping):
         name = str(source.get("name") or source.get("source") or "unknown")

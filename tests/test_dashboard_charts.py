@@ -934,10 +934,28 @@ def test_price_chart_second_wave_indicators():
     two_day = two_day[:40].append(pd.date_range("2026-07-07 09:00", periods=40,
                                                 freq="5min", tz="Asia/Seoul"))
     h2 = hist.iloc[:80].set_axis(two_day)
-    sv = charts.session_vwap(h2)
-    d2_first = sv.iloc[40]
+    fig2 = charts.price_chart(h2, "005930.KS", mas=[], vwap=True)
+    sv = next(tr for tr in fig2.data if tr.name == "VWAP(세션)").y
+    d2_first = sv[40]
     tp_first = float((h2["High"].iloc[40] + h2["Low"].iloc[40] + h2["Close"].iloc[40]) / 3)
     assert d2_first == pytest.approx(tp_first)          # 새 세션 첫 봉 = 그 봉 tp (리셋)
+
+
+def test_C_fix2_price_chart_session_vwap_resets_on_exchange_day_not_utc_date():
+    """차트의 VWAP(세션)도 경보·스터디와 같은 거래소 현지 날짜 리셋(UTC 저장 시간외 봉 포함)."""
+    from dashboard import chart_studies
+
+    idx = pd.DatetimeIndex(["2026-08-03 19:00", "2026-08-04 00:30", "2026-08-04 13:30"]).tz_localize("UTC")
+    closes = [10.0, 20.0, 50.0]
+    hist = pd.DataFrame({"Open": closes, "High": closes, "Low": closes, "Close": closes,
+                         "Volume": [100.0] * 3}, index=idx)
+
+    fig = charts.price_chart(hist, "AAPL", mas=[], vwap=True)
+
+    vwap = list(next(tr for tr in fig.data if tr.name == "VWAP(세션)").y)
+    # 15:00 ET 와 20:30 ET 는 같은 뉴욕 거래일, 다음 09:30 ET 에서 리셋.
+    assert vwap == pytest.approx([10.0, 15.0, 50.0])
+    assert vwap == pytest.approx(list(chart_studies.session_vwap(hist, "America/New_York")))
 
 
 # ── I3 종목 비교 오버레이 (% 상대수익) ────────────────────────────────

@@ -49,6 +49,7 @@ def test_batch_api_persists_nonmatching_evaluation_trace(monkeypatch, tmp_path):
 
     response = client.post("/api/chart-alerts/evaluate-batch", json={
         "workspace_id": "w1",
+        "as_of": "2026-08-07T16:10:00Z",
         "bars": {"AAPL": [
             {"time": "2026-08-07T15:55:00Z", "close": 100},
             {"time": "2026-08-07T16:00:00Z", "close": 101},
@@ -95,7 +96,7 @@ def test_C_fix_alerts_batch_api_retries_failed_send_and_never_resends_delivered(
     sent: list[str] = []
     monkeypatch.setattr(chart_alert_dispatcher, "send_alert_message", lambda text: sent.append(text) or outcomes[len(sent) - 1])
     client = create_app().test_client()
-    body = {"workspace_id": "w1", "bars": _CROSS_BARS, "notify": True, "as_of": "2026-08-07T17:00:00Z"}
+    body = {"workspace_id": "w1", "bars": _CROSS_BARS, "notify": True, "as_of": "2026-08-07T16:10:00Z"}
 
     failed = client.post("/api/chart-alerts/evaluate-batch", json=body).json
     assert failed["notification"]["failed"] == 1
@@ -124,3 +125,24 @@ def test_C_fix_alerts_single_rule_evaluate_api_does_not_consume_once(monkeypatch
     state = storage.get_chart_alert_rule(rule["id"])["last_state"]
     assert not state.get("triggered")
     assert state["manual_evaluation"]["triggered"] is True
+
+
+def test_C_fix2_batch_api_does_not_alert_on_stale_client_bars(monkeypatch, tmp_path):
+    from agent_console import chart_alert_dispatcher
+    from agent_console.server import create_app
+
+    rule = _server_rule(monkeypatch, tmp_path)
+    sent: list[str] = []
+    monkeypatch.setattr(chart_alert_dispatcher, "send_alert_message", lambda text: sent.append(text) or True)
+    client = create_app().test_client()
+
+    # 마지막 5분봉 마감(16:05Z) 뒤 정규장 3시간 가까이 새 봉이 없는 스냅샷.
+    stale = client.post("/api/chart-alerts/evaluate-batch", json={
+        "workspace_id": "w1", "bars": _CROSS_BARS, "notify": True, "as_of": "2026-08-07T19:00:00Z",
+    }).json
+
+    assert stale["notification"]["attempted"] == 0 and sent == []
+    assert stale["evaluations"][0]["status"] == "unknown"
+    assert stale["evaluations"][0]["reason"] == "stale data: AAPL 5m"
+    assert stale["evaluation_summary"]["unknown"] == 1
+    assert storage.list_chart_alert_events(rule_ids=[rule["id"]]) == []

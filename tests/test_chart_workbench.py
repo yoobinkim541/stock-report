@@ -471,10 +471,12 @@ def test_vision_cache_is_keyed_by_analysis_identity_and_reanalysis_is_explicit(m
     assert len(calls) == 2
 
 
-def test_vision_section_warns_on_schema_violation_and_hides_ungrounded_numbers(monkeypatch):
+def test_vision_section_warns_on_schema_violation_and_hides_ungrounded_numbers(monkeypatch, tmp_path):
     pytest.importorskip("streamlit")
     from streamlit.testing.v1 import AppTest
     from dashboard import chart_vision
+
+    monkeypatch.setenv("CHART_VISION_BUDGET_PATH", str(tmp_path / "vision-budget.json"))
 
     responses = {
         "bad": '{"patterns": [{"kind": "wedge", "confidence": "certain"}], "summary": ""}',
@@ -502,3 +504,81 @@ def test_vision_section_warns_on_schema_violation_and_hides_ungrounded_numbers(m
     assert "미검증 수치 주장 2건" in body
     assert "관측값(봉 데이터 계산): 현재가 199" in body
     assert "RSI(14) 100.0" in body
+
+
+# --- C-fix2: 리플레이 경계·AI 호출 상한 ---------------------------------------
+
+def _cutoff_daily(after_cutoff_asset=200.0, after_cutoff_bench=100.0):
+    """2026-04-22 까지 자산 100(벤치와 동일), 이후 값만 다른 일봉 — 커서 뒤 값이 새면 상대강도가 바뀐다."""
+    days = pd.bdate_range("2025-11-03", "2026-05-29")
+    cutoff = pd.Timestamp("2026-04-22")
+    asset = [100.0 if day <= cutoff else after_cutoff_asset for day in days]
+    bench = [100.0 if day <= cutoff else after_cutoff_bench for day in days]
+
+    def frame(values):
+        return pd.DataFrame({"Open": values, "High": values, "Low": values, "Close": values,
+                             "Volume": 1_000}, index=days)
+
+    return frame(asset), frame(bench)
+
+
+@pytest.mark.parametrize("timeframe, cursor, expected_as_of", [
+    # 1h 커서 4/22 16:00Z(12:00 ET) — 그날 일봉은 16:00 ET 마감 전이라 제외된다.
+    ("1h", "2026-04-22T16:00:00+00:00", "2026-04-21"),
+    # W-FRI 주봉 커서 4/17 — 그 주 금요일 마감까지만.
+    ("1wk", "2026-04-17T00:00:00", "2026-04-17"),
+])
+def test_C_fix2_replay_snapshot_cuts_every_loaded_series_at_cursor_close(timeframe, cursor, expected_as_of):
+    hourly = _hist(300)
+    hourly.index = pd.date_range("2026-04-01 13:30", periods=300, freq="h", tz="UTC")
+
+    def snapshot(asset_after, bench_after, *, replay=True):
+        asset_daily, bench_daily = _cutoff_daily(asset_after, bench_after)
+
+        def load(symbol, tf):
+            if tf == "1d":
+                return bench_daily if symbol == "QQQ" else asset_daily
+            return hourly
+
+        document = chart_document.default_chart_document("MSFT")
+        document["timeframe"] = timeframe
+        document["replay"] = {"active": replay, "cursor": cursor if replay else None}
+        return chart_workbench.build_analysis_snapshot(
+            document, hourly, ohlc_loader=load,
+            fundamental_loader=lambda _symbol: {}, alert_loader=lambda _symbol: [],
+        )
+
+    replay = snapshot(200.0, 100.0)["relative_strength"]
+    changed_future = snapshot(50.0, 300.0)["relative_strength"]
+    live = snapshot(200.0, 100.0, replay=False)["relative_strength"]
+
+    assert replay["ok"] is True, replay
+    assert replay["as_of"] == expected_as_of
+    assert replay["relative_strength_60d"] == 0.0
+    assert changed_future == replay  # 커서 뒤 자산·벤치 값을 크게 바꿔도 동일
+    assert live["as_of"] == "2026-05-29" and live["relative_strength_60d"] == pytest.approx(1.0)
+
+
+def test_C_fix2_vision_button_is_disabled_when_daily_budget_is_used_up(monkeypatch, tmp_path):
+    pytest.importorskip("streamlit")
+    from streamlit.testing.v1 import AppTest
+    from dashboard import chart_vision
+
+    monkeypatch.setenv("CHART_VISION_BUDGET_PATH", str(tmp_path / "vision-budget.json"))
+    monkeypatch.setenv("CHART_VISION_DAILY_LIMIT", "1")
+    calls = []
+    monkeypatch.setattr(chart_vision, "_try_vision_prompt",
+                        lambda prompt, image_path, **_: calls.append(1) or '{"patterns": [], "summary": ""}')
+
+    at = AppTest.from_string(_IDENTITY_SCRIPT.format(root=ROOT), default_timeout=60).run()
+    assert at.button[0].disabled is False
+    assert "오늘 AI 시각 분석 0/1회 사용" in _rendered_text(at)
+    at.button[0].click().run()
+    assert not at.exception, str(at.exception)
+    assert len(calls) == 1
+
+    at.session_state["variant"] = 2  # 새 봉 → 새 identity 라도 오늘 상한은 소진
+    at.run()
+    assert at.button[0].disabled is True
+    assert "오늘 AI 시각 분석 1/1회 사용" in _rendered_text(at)
+    assert len(calls) == 1

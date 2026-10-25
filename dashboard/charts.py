@@ -1075,6 +1075,7 @@ def price_chart(hist, ticker: str = "", *, kind: str = "line", avg_cost=None,
     최고/최저 콜아웃)는 자동 비활성 — RSI·거래량 서브패널은 메인 종목 기준 유지.
     """
     go = _go()
+    exchange_timezone = _exchange_timezone(hist, ticker)
     try:
         import pandas as pd
         sequence_index = isinstance(getattr(hist, "index", None), pd.RangeIndex)
@@ -1273,7 +1274,8 @@ def price_chart(hist, ticker: str = "", *, kind: str = "line", avg_cost=None,
     _add_top_indicators(fig, hist, supertrend=supertrend, envelope=envelope,
                         fractals=fractals, vol_profile=vol_profile, panes=panes)
     _add_top_indicators2(fig, hist, emas=emas, psar=psar, donchian_on=donchian_on,
-                         vwap=vwap, avwap=avwap, view_days=view_days, panes=panes)
+                         vwap=vwap, avwap=avwap, view_days=view_days, panes=panes,
+                         exchange_timezone=exchange_timezone)
     _add_trade_markers(fig, hist, trades or [])
     _add_event_markers(fig, hist, events, panes)
     _add_entry_zones(fig, zones, panes)
@@ -1800,17 +1802,16 @@ def donchian(hist, n: int = 20):
     return up, lo, (up + lo) / 2
 
 
-def session_vwap(hist):
-    """세션(일자별 리셋) VWAP — 인트라데이 전용. Volume 없으면 None."""
-    hist = normalize_ohlc_frame(hist)
-    if "Volume" not in hist.columns:
+def _exchange_timezone(hist, ticker: str) -> str | None:
+    """세션 VWAP 경계용 거래소 timezone — frame attrs 우선, 없으면 종목의 거래소 기본값."""
+    zone = (getattr(hist, "attrs", None) or {}).get("exchange_timezone")
+    if zone:
+        return str(zone)
+    if not str(ticker or "").strip():
         return None
-    tp = (hist["High"] + hist["Low"] + hist["Close"]) / 3
-    v = hist["Volume"].fillna(0)
-    day = hist.index.date
-    cum_tv = (tp * v).groupby(day).cumsum()
-    cum_v = v.groupby(day).cumsum().replace(0, float("nan"))
-    return cum_tv / cum_v
+    from dashboard import chart_document
+
+    return str(chart_document.default_chart_document(ticker)["timezone"])
 
 
 def anchored_vwap(hist, anchor=None):
@@ -1828,7 +1829,8 @@ def anchored_vwap(hist, anchor=None):
 
 
 def _add_top_indicators2(fig, hist, *, emas=(), psar=False, donchian_on=False,
-                         vwap=False, avwap=False, view_days=None, panes=1):
+                         vwap=False, avwap=False, view_days=None, panes=1,
+                         exchange_timezone: str | None = None):
     """상단 지표 2차 오버레이 — price_chart 내부 전용."""
     go = _go()
     kw = dict(row=1, col=1) if panes > 1 else {}
@@ -1860,9 +1862,14 @@ def _add_top_indicators2(fig, hist, *, emas=(), psar=False, donchian_on=False,
         fig.add_trace(go.Scatter(x=hist.index, y=mid, showlegend=False,
                                  legendgroup="프라이스 채널(20)",
                                  line=dict(color="#8b93a7", width=0.7, dash="dot")), **kw)
-    if vwap:
-        sv = session_vwap(hist)
-        if sv is not None:
+    if vwap and {"High", "Low", "Close", "Volume"} <= set(hist.columns):
+        import pandas as pd
+
+        from dashboard import chart_studies
+
+        if isinstance(hist.index, pd.DatetimeIndex):
+            # 거래소 현지 날짜마다 리셋 — 경보 runner·스터디와 같은 chart_studies 정의.
+            sv = chart_studies.session_vwap(hist, exchange_timezone)
             fig.add_trace(go.Scatter(x=hist.index, y=sv, name="VWAP(세션)",
                                      line=dict(color="#f59e0b", width=1.3)), **kw)
     if avwap:

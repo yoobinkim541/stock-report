@@ -12,6 +12,7 @@ from typing import Any, Callable, Iterator
 import pandas as pd
 
 import safe_io
+from dashboard import chart_data_policy, chart_document
 from . import chart_alert_dispatcher, chart_alert_runner, storage
 
 
@@ -169,7 +170,10 @@ def evaluate_and_deliver(
       같은 봉이면 같은 event ID 로 발송한다.
     - notify=True: 새 이벤트를 pending 으로 먼저 저장 → 평가 state 저장 → 아직 delivered 가
       아닌 이 규칙들의 모든 이벤트(이전 사이클 실패·중단분 포함)를 발송 → 성공 ack 만
-      delivered. once 는 delivered 뒤에만 triggered=True 로 완료한다.
+      delivered. once 는 delivered 뒤에만 triggered=True(+triggered_condition_hash)로 완료한다.
+    - 미발송 이벤트는 현재 조건 해시의 것만 발송한다. 수정 전 조건의 이벤트는
+      ``superseded``, 근거 봉이 이제 오래된(chart_data_policy.bar_staleness) 이벤트는
+      ``expired`` 로 닫고 보내지 않는다 — 어느 쪽도 once 를 완료시키지 않는다.
     - 같은 event ID 가 이미 delivered 면 다시 보내지 않는다(sender 성공 후 ack 저장 전에
       중단되면 다음 사이클에 한 번 더 갈 수 있다 — at-least-once).
     """
@@ -179,17 +183,19 @@ def evaluate_and_deliver(
         state_sink=evaluations,
     )
     rules_by_id = {str(rule.get("id") or ""): rule for rule in rules or []}
+    hashes = {rule_id: chart_alert_runner.rule_condition_hash(rule) for rule_id, rule in rules_by_id.items()}
     rule_ids = [str(state.get("rule_id") or "") for state in evaluations if state.get("rule_id")]
     once_ids = [rule_id for rule_id in rule_ids if _frequency(rules_by_id.get(rule_id)) == "once"]
     undelivered_by_rule: dict[str, list[dict[str, Any]]] = {}
     delivered_once: set[str] = set()
     if notify and rule_ids:
-        for row in storage.list_chart_alert_events(rule_ids=rule_ids, statuses=_UNDELIVERED):
+        for row in _sendable_events(rule_ids, rules_by_id, hashes, as_of):
             undelivered_by_rule.setdefault(row["rule_id"], []).append(row)
         if once_ids:
             delivered_once = {
                 row["rule_id"]
                 for row in storage.list_chart_alert_events(rule_ids=once_ids, statuses=("delivered",))
+                if _event_hash(row) == hashes.get(row["rule_id"])
             }
 
     events: list[dict[str, Any]] = []
@@ -209,7 +215,10 @@ def evaluate_and_deliver(
         if _frequency(rule) == "once":
             if rule_id in delivered_once:
                 # ack 저장 뒤 state 갱신 전에 중단된 once: 이미 보냈으므로 완료로 복구한다.
-                state.update({"triggered": True, "reason": "already_triggered"})
+                state.update({
+                    "triggered": True, "reason": "already_triggered",
+                    "triggered_condition_hash": hashes.get(rule_id),
+                })
                 state.pop("event", None)
                 continue
             other = [row for row in undelivered_by_rule.get(rule_id, []) if row["event_id"] != event["event_id"]]
@@ -223,6 +232,10 @@ def evaluate_and_deliver(
         if row["status"] == "delivered":
             state["delivery"] = "already_delivered"
             continue
+        if row["status"] not in _UNDELIVERED:
+            # 같은 근거 봉의 이벤트가 이미 superseded/expired 로 닫혔다 — 다시 열지 않는다.
+            state["delivery"] = row["status"]
+            continue
         state["pending_event_id"] = event["event_id"]
         state["delivery"] = "pending"
         events.append(event)
@@ -233,7 +246,7 @@ def evaluate_and_deliver(
 
     notification = dict(_EMPTY_NOTIFICATION)
     if notify and rule_ids:
-        queue = storage.list_chart_alert_events(rule_ids=rule_ids, statuses=_UNDELIVERED)
+        queue = _sendable_events(rule_ids, rules_by_id, hashes, as_of)
         if queue:
             notification = chart_alert_dispatcher.dispatch_alert_events(
                 [row["event"] for row in queue], send_fn=send_fn,
@@ -252,6 +265,7 @@ def evaluate_and_deliver(
                         state.pop("pending_event_id", None)
                     if _frequency(rules_by_id.get(saved["rule_id"])) == "once":
                         state["triggered"] = True
+                        state["triggered_condition_hash"] = _event_hash(saved)
                     state["delivery"] = "delivered"
                 else:
                     state["delivery"] = "failed"
@@ -266,11 +280,55 @@ def evaluate_and_deliver(
     }
 
 
+def _event_hash(row: dict[str, Any]) -> str | None:
+    event = row.get("event") if isinstance(row.get("event"), dict) else {}
+    return str(event.get("condition_hash") or "") or None
+
+
+def _sendable_events(rule_ids, rules_by_id, hashes, as_of) -> list[dict[str, Any]]:
+    """Undelivered events still valid for the rule's current condition and still current data.
+
+    Events of an edited-away condition are closed as ``superseded``; events whose basis
+    bar is now stale (same freshness rule as evaluation) are closed as ``expired``.
+    """
+    sendable: list[dict[str, Any]] = []
+    superseded: list[str] = []
+    expired: list[str] = []
+    for row in storage.list_chart_alert_events(rule_ids=rule_ids, statuses=_UNDELIVERED):
+        rule = rules_by_id.get(row["rule_id"]) or {}
+        current_hash = hashes.get(row["rule_id"])
+        if current_hash is None:
+            continue  # 조건을 해석할 수 없는 규칙의 이벤트는 판단 없이 보류한다.
+        if _event_hash(row) != current_hash:
+            superseded.append(row["event_id"])
+        elif _event_is_stale(row["event"], rule, as_of):
+            expired.append(row["event_id"])
+        else:
+            sendable.append(row)
+    if superseded:
+        storage.close_chart_alert_events(superseded, status="superseded", reason="rule condition changed")
+    if expired:
+        storage.close_chart_alert_events(expired, status="expired", reason="basis bar is stale")
+    return sendable
+
+
+def _event_is_stale(event: dict[str, Any], rule: dict[str, Any], as_of: str) -> bool:
+    bar_time = event.get("bar_time")
+    if not bar_time:
+        return False
+    symbol = str(event.get("symbol") or rule.get("symbol") or "").upper().strip()
+    timeframe = str(event.get("timeframe") or rule.get("timeframe") or "1d").lower().strip() or "1d"
+    market = chart_document.default_chart_document(symbol)["market"]
+    return chart_data_policy.bar_staleness(bar_time, as_of, market=market, timeframe=timeframe) is not None
+
+
 def _keep_delivery_fields(state: dict[str, Any], previous: dict[str, Any]) -> None:
+    if state.get("condition_hash"):
+        previous = chart_alert_runner.revision_state(previous, state["condition_hash"])
     state["triggered"] = bool(previous.get("triggered"))
     # 이번 평가의 matched 로 무장을 다시 유도하지 않도록 이전 무장 상태를 명시해 둔다.
     state["armed"] = chart_alert_runner.previous_armed(previous)
-    for key in ("pending_event_id", "delivered_event_id"):
+    for key in ("pending_event_id", "delivered_event_id", "triggered_condition_hash"):
         if previous.get(key):
             state[key] = previous[key]
         else:

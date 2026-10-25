@@ -190,7 +190,8 @@ def test_alert_runner_computes_rsi_and_evaluates_saved_rules_from_bars():
         "enabled": True,
     }
 
-    events = evaluate_alert_rules([rule], {"AAPL": bars})
+    # 규칙 timeframe 기본값 1d — 8/1 일봉 마감(20:00Z) 직후 평가(오래된 시세가 아님).
+    events = evaluate_alert_rules([rule], {"AAPL": bars}, as_of="2026-08-01T21:00:00Z")
 
     assert len(events) == 1
     event = events[0]
@@ -227,7 +228,7 @@ def test_alert_dispatcher_formats_and_sends_triggered_events():
     assert sent == [
         "🔔 차트 알림\n"
         "AAPL · AAPL price + RSI\n"
-        "현재가 101.00 · 이전 99.00\n"
+        "평가 봉 종가 101.00 · 이전 봉 99.00\n"
         "조건 price:crossing_up, indicator:rsi_14:less_than\n"
         "AAPL crossed 100 with RSI filter\n"
         "2026-08-01T12:00:00Z"

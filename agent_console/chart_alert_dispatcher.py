@@ -58,6 +58,12 @@ def send_alert_message(text: str) -> bool:
 
 
 def format_alert_message(event: dict[str, Any]) -> str:
+    """Message from the evaluated bar pair (bar_time / current_price / previous_price).
+
+    The runner fills these from the bars the condition was judged on — for a
+    bar_close condition that is the last closed bar, not the still-forming one —
+    so the text is labelled as that bar's close, not a live quote.
+    """
     symbol = str((event or {}).get("symbol") or "").upper().strip() or "UNKNOWN"
     name = str((event or {}).get("name") or "").strip() or "Chart alert"
     current_price = _price_text((event or {}).get("current_price"))
@@ -65,11 +71,14 @@ def format_alert_message(event: dict[str, Any]) -> str:
     matched = ", ".join(str(item) for item in (event or {}).get("matched_conditions") or [] if str(item).strip())
     message = str((event or {}).get("message") or "").strip()
     as_of = str((event or {}).get("as_of") or "").strip()
+    bar_time = str((event or {}).get("bar_time") or "").strip()
     lines = [
         "🔔 차트 알림",
         f"{symbol} · {name}",
-        f"현재가 {current_price} · 이전 {previous_price}",
+        f"평가 봉 종가 {current_price} · 이전 봉 {previous_price}",
     ]
+    if bar_time:
+        lines.append(f"평가 봉 {bar_time}")
     if matched:
         lines.append(f"조건 {matched}")
     if message:

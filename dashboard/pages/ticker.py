@@ -1167,8 +1167,17 @@ def _price_chart(ticker, hist, avg_cost, trades, fullscreen: bool = False,
             return cached.ohlc(symbol, period="max")
         return cached.ohlc_tf(symbol, timeframe)
 
+    # 리플레이 중이면 분석 레일이 불러오는 보조 시계열(상대강도 일봉·멀티봉)을 커서 봉 마감에서
+    # 자른다(chart_workbench 가 document["replay"] 로 적용). 저장·내보내기 문서에는 싣지 않는다.
+    analysis_document = {
+        **document,
+        "replay": {
+            "active": bool(replay_context["active"]),
+            "cursor": pd.Timestamp(replay_context["as_of"]).isoformat() if replay_context["active"] else None,
+        },
+    }
     snapshot = chart_workbench.build_analysis_snapshot(
-        document,
+        analysis_document,
         df,
         ohlc_loader=_analysis_loader,
         fundamental_loader=lambda symbol: cached.valuation(symbol) or {},

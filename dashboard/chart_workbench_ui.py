@@ -280,6 +280,11 @@ _UNVERIFIED_REASON_LABELS = {
     "current_price_mismatch": "현재가 불일치",
     "non_positive_price": "0 이하 가격",
     "out_of_range_level": "분석 구간 가격대에서 크게 벗어난 레벨",
+    "uncomputed_level": "계산된 가격 레벨(스윙 고저·이평선·볼린저)과 연결되지 않은 가격",
+}
+_VISION_FAILURE_LABELS = {
+    "daily_budget_exhausted": "오늘(KST) AI 시각 분석 호출 한도를 모두 사용했습니다",
+    "budget_ledger_unavailable": "AI 호출 횟수 장부를 읽거나 쓸 수 없어 호출하지 않았습니다",
 }
 
 
@@ -322,11 +327,14 @@ def _render_vision_pattern_section(snapshot: Mapping[str, Any], hist) -> None:
     identity = _vision_identity(snapshot, hist, ticker)
     key = identity["key"]
     cached_result = (st.session_state.get(_VISION_CACHE_KEY) or {}).get(key)
+    budget = chart_vision.vision_budget_status()
     label = "다시 분석" if cached_result is not None else "AI로 패턴 분석하기"
-    if st.button(label, key=f"chart_vision_btn_{ticker}_{key}"):
+    if st.button(label, key=f"chart_vision_btn_{ticker}_{key}", disabled=budget["remaining"] <= 0):
         with st.spinner("차트 이미지를 분석하는 중입니다 (최대 90초)..."):
             cached_result = chart_vision.analyze_chart_patterns(hist, ticker, identity=identity)
         _store_vision_result(key, cached_result)
+        budget = chart_vision.vision_budget_status()
+    st.caption(f"오늘 AI 시각 분석 {budget['used']}/{budget['limit']}회 사용(KST 기준 일일 상한)")
 
     if cached_result is None:
         st.caption(
@@ -340,7 +348,8 @@ def _render_vision_pattern_section(snapshot: Mapping[str, Any], hist) -> None:
         f"마지막 봉 {identity.get('last_bar') or '미상'}"
     )
     if not cached_result.get("ok"):
-        st.warning(f"분석 실패: {cached_result.get('reason', 'unknown')}")
+        reason = str(cached_result.get("reason", "unknown"))
+        st.warning(f"분석 실패: {_VISION_FAILURE_LABELS.get(reason, reason)}")
         return
 
     facts = cached_result.get("facts") or {}

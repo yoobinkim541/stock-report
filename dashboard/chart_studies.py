@@ -240,7 +240,12 @@ def _volume(frame: pd.DataFrame, params: Mapping[str, Any]) -> StudyOutput:
 
 def _vwap(frame: pd.DataFrame, params: Mapping[str, Any]) -> StudyOutput:
     _require(frame, "High", "Low", "Close", "Volume")
-    return _output("vwap", "overlay", params, VWAP=session_vwap(frame, None))
+    zone = frame.attrs.get("exchange_timezone")
+    index_tz = getattr(frame.index, "tz", None)
+    if not zone and index_tz is not None and str(index_tz) in {"UTC", "utc"}:
+        # UTC 날짜로 세션을 끊으면 미국 시간외/한국 새벽 봉이 엉뚱한 날에 묶인다 — 추측하지 않는다.
+        raise ValueError("Session VWAP needs the exchange timezone for UTC timestamps")
+    return _output("vwap", "overlay", params, VWAP=session_vwap(frame, zone or None))
 
 
 def _atr(frame: pd.DataFrame, params: Mapping[str, Any]) -> StudyOutput:
@@ -312,12 +317,33 @@ def _validated_params(definition: StudyDefinition, params: Mapping[str, Any] | N
     return out
 
 
-def run_study(study_id: str, hist, params: Mapping[str, Any] | None = None) -> StudyOutput:
+def _exchange_timezone(hist, timezone: str | None) -> str | None:
+    """Explicit zone, else the frame's ``exchange_timezone``/``market`` metadata."""
+    if timezone:
+        return str(timezone)
+    attrs = getattr(hist, "attrs", {}) or {}
+    if attrs.get("exchange_timezone"):
+        return str(attrs["exchange_timezone"])
+    market = str(attrs.get("market") or "").lower().strip()
+    if market:
+        from dashboard import chart_data_policy
+
+        return chart_data_policy.regular_session(market)[0]
+    return None
+
+
+def run_study(study_id: str, hist, params: Mapping[str, Any] | None = None, *,
+              timezone: str | None = None) -> StudyOutput:
+    """Run a registered study. ``timezone`` is the exchange zone (falls back to the
+    frame's ``exchange_timezone``/``market`` attrs); session studies (VWAP) reset on
+    that zone's calendar day exactly like the alert runner."""
     definition = _REGISTRY.get(str(study_id or "").strip().lower())
     if definition is None:
         raise ValueError(f"unknown study: {study_id}")
     validated = _validated_params(definition, params)
-    return definition.compute(_frame(hist), validated)
+    frame = _frame(hist)
+    frame.attrs["exchange_timezone"] = _exchange_timezone(hist, timezone)
+    return definition.compute(frame, validated)
 
 
 _CODE_RE = re.compile(r"(?:\b(?:import|exec|eval|lambda)\b|__|\bopen\s*\()", re.IGNORECASE)

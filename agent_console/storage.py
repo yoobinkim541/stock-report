@@ -1199,9 +1199,28 @@ def save_chart_alert_rule(rule: dict[str, Any]) -> dict[str, Any]:
     if not rule_id:
         raw = _json({**payload, "created_at": now})
         rule_id = hashlib.sha256(raw.encode("utf-8")).hexdigest()[:20]
+    frequency = str(payload.get("frequency") or "once").strip().lower() or "once"
+    from . import chart_alert_runner
+
+    new_hash = chart_alert_runner.rule_condition_hash(
+        {"symbol": symbol, "timeframe": timeframe, "condition": condition},
+    )
     with connect() as conn:
-        row = conn.execute("SELECT created_at FROM chart_alert_rules WHERE id = ?", (rule_id,)).fetchone()
+        row = conn.execute(
+            "SELECT created_at, symbol, timeframe, condition_json, frequency FROM chart_alert_rules WHERE id = ?",
+            (rule_id,),
+        ).fetchone()
         created_at = row["created_at"] if row else now
+        # 조건(canonical 해시)이나 frequency 가 바뀌면 새 revision 이다 — once 완료·무장·pending
+        # 상태를 이어받지 않고, 이전 조건으로 만든 미발송 이벤트는 superseded 로 닫는다.
+        # 이름·메시지·활성화만 바꾼 저장은 같은 revision 으로 상태를 유지한다.
+        revision_changed = bool(row) and (
+            chart_alert_runner.rule_condition_hash({
+                "symbol": row["symbol"], "timeframe": row["timeframe"],
+                "condition": json.loads(row["condition_json"] or "{}"),
+            }) != new_hash
+            or str(row["frequency"] or "") != frequency
+        )
         with conn:
             conn.execute(
                 """
@@ -1230,13 +1249,28 @@ def save_chart_alert_rule(rule: dict[str, Any]) -> dict[str, Any]:
                     name,
                     _json(condition),
                     str(payload.get("message") or ""),
-                    str(payload.get("frequency") or "once").strip().lower() or "once",
+                    frequency,
                     1 if bool(payload.get("enabled", True)) else 0,
                     _json(payload.get("last_state") if isinstance(payload.get("last_state"), dict) else {}),
                     created_at,
                     now,
                 ),
             )
+            if revision_changed:
+                conn.execute(
+                    "UPDATE chart_alert_rules SET last_state_json = ? WHERE id = ?", (_json({}), rule_id),
+                )
+                stale_ids = [
+                    event["event_id"]
+                    for event in conn.execute(
+                        "SELECT event_id, event_json FROM chart_alert_events "
+                        "WHERE rule_id = ? AND status IN ('pending', 'failed')",
+                        (rule_id,),
+                    ).fetchall()
+                    if json.loads(event["event_json"] or "{}").get("condition_hash") != new_hash
+                ]
+                _close_chart_alert_events(conn, stale_ids, status="superseded",
+                                          reason="rule condition changed", now=now)
     saved = get_chart_alert_rule(rule_id)
     if saved is None:
         raise RuntimeError("chart alert rule was not saved")
@@ -1485,6 +1519,36 @@ def mark_chart_alert_event(event_id: str, *, delivered: bool, error: str = "") -
     if saved is None:
         raise ValueError(f"chart alert event not found: {event_id}")
     return saved
+
+
+_CLOSED_CHART_ALERT_EVENT_STATUSES = frozenset({"superseded", "expired"})
+
+
+def _close_chart_alert_events(conn: sqlite3.Connection, event_ids: Iterable[str], *, status: str,
+                              reason: str, now: str) -> None:
+    ids = sorted({str(event_id).strip() for event_id in event_ids if str(event_id).strip()})
+    if not ids:
+        return
+    if status not in _CLOSED_CHART_ALERT_EVENT_STATUSES:
+        raise ValueError(f"unsupported closed event status: {status}")
+    conn.execute(
+        f"""
+        UPDATE chart_alert_events
+        SET status = ?, last_error = ?, updated_at = ?
+        WHERE event_id IN ({', '.join('?' for _ in ids)}) AND status IN ('pending', 'failed')
+        """,
+        (status, str(reason or status), now, *ids),
+    )
+
+
+def close_chart_alert_events(event_ids: Iterable[str], *, status: str, reason: str) -> None:
+    """Close undelivered events without sending: ``superseded`` (condition edited) or ``expired`` (stale bar).
+
+    Delivered events are never touched; a closed event is not resent or reopened.
+    """
+    with connect() as conn:
+        with conn:
+            _close_chart_alert_events(conn, event_ids, status=status, reason=reason, now=_now())
 
 
 def list_chart_alert_events(

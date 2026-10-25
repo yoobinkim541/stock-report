@@ -311,6 +311,8 @@ def _threshold_values(value: Any, contexts, confirmation: Any) -> tuple[Any, Any
     key, context = _context_for(value, contexts)
     if context is None:
         return None, None, f"missing context: {key[0]} {key[1]}", None
+    if context.get("stale"):
+        return None, None, f"stale data: {key[0]} {key[1]}", None
     context = _settled_context(context, confirmation)
     if confirmation == "bar_close" and context.get("confirmed") is False:
         return None, None, f"bar not confirmed: {key[0]} {key[1]}", None
@@ -441,6 +443,12 @@ def evaluate_condition(condition, contexts, *, now: str | None = None) -> dict[s
         if context is None:
             reason = f"missing context: {key[0]} {key[1]}"
             trace.append({**base, "status": "unknown", "matched": False, "reason": reason})
+            return "unknown", reason
+        if context.get("stale"):
+            # 최신 봉이 타임프레임 대비 너무 오래됨 — 데이터 불가(unknown)로 판정하고 평가하지 않는다.
+            reason = f"stale data: {key[0]} {key[1]}"
+            trace.append({**base, "status": "unknown", "matched": False, "reason": reason,
+                          "as_of": context.get("as_of")})
             return "unknown", reason
         expires = _timestamp(leaf.get("expires_at"))
         reference = _timestamp(now or context.get("as_of")) or datetime.now(timezone.utc)

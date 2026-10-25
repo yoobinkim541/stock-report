@@ -947,12 +947,6 @@ def _render_workspace_library_bar(ws: dict[str, Any]) -> dict[str, Any]:
     return chart_workspace.normalize_workspace(ws)
 
 
-def _analysis_orderflow_loader(replay_until):
-    if replay_until is None:
-        return chart_orderflow.load_snapshot
-    return lambda _symbol: {"ok": False, "reason": "replay_isolated"}
-
-
 def _render_analysis_rail(
     ws: dict[str, Any],
     *,
@@ -984,12 +978,6 @@ def _render_analysis_rail(
             st.info(f"{panel['ticker']} replay 구간에 분석 데이터가 없습니다.")
             return
 
-    def _replay_loader(ticker: str, tf: str):
-        df = _analysis_ohlc_loader(ticker, tf)
-        if replay_until is not None and df is not None and not getattr(df, "empty", True):
-            df = df[df.index <= replay_until]
-        return df
-
     document = chart_document.normalize_chart_document(
         panel.get("document") or chart_document.document_from_panel(panel),
         ticker=panel["ticker"],
@@ -1000,8 +988,9 @@ def _render_analysis_rail(
         "freshness": "provider-dependent",
         "quality": "indicative",
     })
-    # 리플레이 커서는 분석 identity(AI 시각 분석 캐시 키)에만 쓰는 사본에 싣는다 —
-    # panel["document"] 로 저장되는 문서에는 리플레이 상태를 남기지 않는다.
+    # 리플레이 커서는 분석 사본에만 싣는다 — chart_workbench 가 이 커서 봉 마감으로 보조
+    # 시계열(상대강도·멀티봉)을 자르고 AI 시각 분석 identity 에도 쓴다. panel["document"] 로
+    # 저장되는 문서에는 리플레이 상태를 남기지 않는다.
     analysis_document = {
         **document,
         "replay": {
@@ -1012,10 +1001,10 @@ def _render_analysis_rail(
     snapshot = chart_workbench.build_analysis_snapshot(
         analysis_document,
         hist,
-        ohlc_loader=_replay_loader,
+        ohlc_loader=_analysis_ohlc_loader,
         fundamental_loader=lambda symbol: cached.valuation(symbol) or {},
         alert_loader=lambda _symbol: list(document.get("alerts") or []),
-        orderflow_loader=_analysis_orderflow_loader(replay_until),
+        orderflow_loader=chart_orderflow.load_snapshot,  # 리플레이 중 격리는 snapshot 이 적용
     )
     chart_workbench_ui.render_analysis_rail(snapshot, hist=hist)
     tools_key = f"cw_{ws.get('id', 'default')}_{panel['id']}"

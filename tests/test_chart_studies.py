@@ -176,6 +176,53 @@ def test_session_vwap_zero_volume_session_is_unavailable_and_study_matches():
     assert study.iloc[1:].isna().all()
 
 
+def _utc_extended_frame(timestamps, closes, volumes, **attrs):
+    frame = pd.DataFrame(
+        {"Open": closes, "High": closes, "Low": closes, "Close": closes, "Volume": volumes},
+        index=pd.DatetimeIndex(timestamps).tz_localize("UTC"),
+    )
+    frame.attrs.update(attrs)
+    return frame
+
+
+@pytest.mark.parametrize("symbol, zone, timestamps, expected", [
+    # NY: 8/3 15:00 ET 와 8/3 20:30 ET(다음 UTC 날짜)는 같은 거래일, 8/4 09:30 ET 는 다음 거래일.
+    ("AAPL", "America/New_York",
+     ["2026-08-03 19:00", "2026-08-04 00:30", "2026-08-04 13:30"], [10.0, 15.0, 50.0]),
+    # 서울: 8/4 08:30 KST(UTC 전날 23:30)와 8/4 09:00 KST 는 같은 거래일.
+    ("005930.KS", "Asia/Seoul",
+     ["2026-08-03 05:00", "2026-08-03 23:30", "2026-08-04 00:00"], [10.0, 20.0, 35.0]),
+])
+def test_C_fix2_vwap_study_resets_on_exchange_day_like_the_alert_runner(symbol, zone, timestamps, expected):
+    from agent_console import chart_alert_runner
+
+    frame = _utc_extended_frame(timestamps, [10.0, 20.0, 50.0], [100, 100, 100], exchange_timezone=zone)
+
+    study = chart_studies.run_study("vwap", frame).series["VWAP"]
+    explicit = chart_studies.run_study("vwap", frame.copy(), timezone=zone).series["VWAP"]
+    rule = {"id": "v", "symbol": symbol, "timeframe": "5m", "condition": {
+        "type": "indicator", "field": "vwap", "operator": "greater_than", "value": 0, "session": "all"}}
+    runner = [
+        chart_alert_runner.build_condition_contexts(
+            rule, {(symbol, "5m"): frame.iloc[: position + 1]}, as_of=frame.index[position].isoformat(),
+        )[(symbol, "5m")]["current"]["vwap"]
+        for position in (1, 2)
+    ]
+
+    assert list(study) == pytest.approx(expected)
+    assert list(explicit) == pytest.approx(expected)
+    assert runner == pytest.approx(expected[1:])
+
+
+def test_C_fix2_vwap_study_refuses_to_guess_sessions_for_utc_bars_without_exchange():
+    frame = _utc_extended_frame(["2026-08-03 19:00", "2026-08-04 00:30"], [10.0, 20.0], [100, 100])
+
+    with pytest.raises(ValueError, match="exchange timezone"):
+        chart_studies.run_study("vwap", frame)
+    by_market = _utc_extended_frame(["2026-08-03 19:00", "2026-08-04 00:30"], [10.0, 20.0], [100, 100], market="us")
+    assert list(chart_studies.run_study("vwap", by_market).series["VWAP"]) == pytest.approx([10.0, 15.0])
+
+
 def test_relative_performance_aligns_by_trading_day_not_timestamp():
     days = pd.bdate_range("2026-01-01", periods=100)
     asset = pd.Series([100.0 * 1.01 ** i for i in range(100)], index=days + pd.Timedelta(hours=14))

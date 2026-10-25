@@ -8,9 +8,15 @@
   되는 전이(false→true)에서만 재무장한다. unknown(데이터 불가)은 무장 상태를 바꾸지
   않는다. 연속으로 true 인 봉(예: greater_than 이 계속 참, crossing 직후 반대 교차)은
   새 이벤트가 아니다.
+- 조건 revision: once 완료(triggered_condition_hash)·무장(condition_hash)은 그 상태를
+  만든 조건 해시에만 유효하다. 조건이 바뀌면 이전 상태를 이어받지 않는다.
 - 지표 정의는 dashboard.chart_studies 공개 함수만 사용한다(자체 계산식 없음).
 - 미래 봉(평가 시각 이후 시작)은 제외하고, 진행 중 봉은 confirmed=False 로 표시한다.
-  bar_close 조건은 그때 마지막으로 마감된 봉 쌍(context["closed"])을 사용한다.
+  bar_close 조건은 그때 마지막으로 마감된 봉 쌍(context["closed"])을 사용하고, 이벤트
+  본문(가격·지표·bar_time)도 평가에 실제로 쓴 그 봉 쌍에서 만든다.
+- 봉 마감 시각·신선도는 chart_data_policy.bar_close_times / bar_staleness 가 정한다
+  (주봉 W-FRI·월봉 ME 라벨은 그 주/월의 마지막 날 마감). 최신 봉이 타임프레임 대비
+  너무 오래됐으면 context["stale"] 로 표시되고 그 leaf 는 unknown(데이터 불가)이다.
 """
 from __future__ import annotations
 
@@ -147,15 +153,24 @@ def build_condition_contexts(
     as_of: str | None = None,
 ) -> dict[tuple[str, str], dict[str, Any]]:
     """Build one context per required symbol/timeframe, accepting legacy symbol keys."""
-    return _build_contexts(
+    contexts, _relative_stale = _build_contexts(
         canonical_condition(rule), bars_by_key, _reference_time(as_of),
         fundamentals_by_symbol=fundamentals_by_symbol, events_by_symbol=events_by_symbol,
     )
+    return contexts
+
+
+def rule_condition_hash(rule: dict[str, Any]) -> str | None:
+    """Hash of the rule's canonical condition — the revision its events and state belong to."""
+    try:
+        return _condition_hash(canonical_condition(rule))
+    except ValueError:
+        return None
 
 
 def _build_contexts(canonical, bars_by_key, reference, *, fundamentals_by_symbol, events_by_symbol):
     requirements = chart_conditions.condition_requirements(canonical, default_symbol="", default_timeframe="")
-    relative = _relative_values(canonical, bars_by_key, reference)
+    relative, relative_stale = _relative_values(canonical, bars_by_key, reference)
     contexts: dict[tuple[str, str], dict[str, Any]] = {}
     for key in sorted(requirements):
         context = _context_for_key(
@@ -168,7 +183,7 @@ def _build_contexts(canonical, bars_by_key, reference, *, fundamentals_by_symbol
         )
         if context is not None:
             contexts[key] = context
-    return contexts
+    return contexts, relative_stale
 
 
 def _context_for_key(key, raw, reference, *, fundamentals, events, relative):
@@ -204,6 +219,9 @@ def _context_for_key(key, raw, reference, *, fundamentals, events, relative):
     context["confirmed"] = confirmed
     if not confirmed and len(bars) >= 3:
         context["closed"] = {**pair(len(bars) - 2), "confirmed": True}
+    stale = chart_data_policy.bar_staleness(bars.index[-1], reference, market=market, timeframe=timeframe)
+    if stale is not None:
+        context["stale"] = stale
     context["source"] = {
         "bar_count": len(bars),
         "first": _timestamp_iso(bars.index[0]),
@@ -221,25 +239,28 @@ def _evaluate_rule(rule, bars_by_key, *, reference, fundamentals_by_symbol, even
     if not symbol or not isinstance(condition, dict) or not condition:
         return _error_state(rule, "missing_condition", reference=reference), None
     checked_at = reference.isoformat()
-    previous_state = (rule or {}).get("last_state") if isinstance((rule or {}).get("last_state"), dict) else {}
+    canonical = canonical_condition(rule)
+    condition_hash = _condition_hash(canonical)
+    stored_state = (rule or {}).get("last_state") if isinstance((rule or {}).get("last_state"), dict) else {}
+    previous_state = revision_state(stored_state, condition_hash)
     once = _frequency(rule) == "once"
     if once and bool(previous_state.get("triggered")):
         return {
             **_base_state(rule_id, checked_at, previous_state),
             "status": "suppressed", "reason": "already_triggered", "armed": False,
+            "condition_hash": condition_hash,
         }, None
 
-    canonical = canonical_condition(rule)
     unsupported = unsupported_condition_errors(canonical)
     if unsupported:
         return {
             **_base_state(rule_id, checked_at, previous_state),
             "status": "unsupported", "reason": unsupported[0],
-            "armed": previous_armed(previous_state),
+            "armed": previous_armed(previous_state), "condition_hash": condition_hash,
         }, None
 
     requirements = alert_requirements(rule)
-    contexts = _build_contexts(
+    contexts, relative_stale = _build_contexts(
         canonical, bars_by_key, reference,
         fundamentals_by_symbol=fundamentals_by_symbol, events_by_symbol=events_by_symbol,
     )
@@ -253,6 +274,10 @@ def _evaluate_rule(rule, bars_by_key, *, reference, fundamentals_by_symbol, even
         and not ((required_symbol, required_timeframe) in relative_keys
                  and _has_bars(bars_by_key, (required_symbol, required_timeframe), reference))
     ]
+    stale = [
+        {"symbol": key[0], "timeframe": key[1], **context["stale"]}
+        for key, context in sorted(contexts.items()) if context.get("stale")
+    ] + relative_stale
     timestamps = {
         f"{required_symbol}:{required_timeframe}": context.get("as_of")
         for (required_symbol, required_timeframe), context in sorted(contexts.items())
@@ -267,7 +292,6 @@ def _evaluate_rule(rule, bars_by_key, *, reference, fundamentals_by_symbol, even
         armed = True
     else:
         armed = armed_previous
-    condition_hash = _condition_hash(canonical)
     state = {
         **_base_state(rule_id, checked_at, previous_state),
         "matched": matched,
@@ -275,6 +299,7 @@ def _evaluate_rule(rule, bars_by_key, *, reference, fundamentals_by_symbol, even
         "reason": str(evaluation.get("reason") or ""),
         "trace": [dict(row) for row in evaluation.get("trace") or [] if isinstance(row, dict)],
         "missing_contexts": missing,
+        "stale_contexts": stale,
         "source_timestamps": timestamps,
         "condition_hash": condition_hash,
         "explanation": chart_conditions.explain_condition(canonical),
@@ -293,6 +318,22 @@ def _evaluate_rule(rule, bars_by_key, *, reference, fundamentals_by_symbol, even
     return state, event
 
 
+def revision_state(previous_state: dict[str, Any], condition_hash: str) -> dict[str, Any]:
+    """Delivery bookkeeping (once 완료·무장·pending) carries over only within one condition revision.
+
+    A state stamped with another condition hash belongs to an edited-away condition and
+    is ignored. A legacy state without any hash is kept as is (storage resets it when
+    the condition is edited).
+    """
+    if previous_state.get("triggered") and previous_state.get("triggered_condition_hash"):
+        recorded = previous_state["triggered_condition_hash"]
+    else:
+        recorded = previous_state.get("condition_hash")
+    if recorded and recorded != condition_hash:
+        return {}
+    return previous_state
+
+
 def _base_state(rule_id: str, checked_at: str, previous_state: dict[str, Any]) -> dict[str, Any]:
     state = {
         "rule_id": rule_id,
@@ -305,7 +346,7 @@ def _base_state(rule_id: str, checked_at: str, previous_state: dict[str, Any]) -
         # once 완료 여부. 발송 성공 ack 뒤 worker 만 True 로 바꾼다.
         "triggered": bool(previous_state.get("triggered")),
     }
-    for key in ("pending_event_id", "delivered_event_id"):
+    for key in ("pending_event_id", "delivered_event_id", "triggered_condition_hash"):
         if previous_state.get(key):
             state[key] = previous_state[key]
     return state
@@ -332,12 +373,25 @@ def _condition_hash(canonical: dict[str, Any]) -> str:
     return hashlib.sha256(raw.encode("utf-8")).hexdigest()[:16]
 
 
+def _evaluated_pair(context: dict[str, Any], leaves: list[dict[str, Any]], key: tuple[str, str]) -> dict[str, Any]:
+    """The bar pair the primary-symbol leaves were actually judged on (closed pair for bar_close)."""
+    judged = {row.get("as_of") for row in leaves if (row.get("symbol"), row.get("timeframe")) == key}
+    judged.discard(None)
+    closed = context.get("closed") if isinstance(context.get("closed"), dict) else None
+    if closed is None:
+        return context
+    if judged:
+        return closed if closed.get("as_of") in judged and context.get("as_of") not in judged else context
+    # 주 종목 leaf 가 없으면(다른 종목 조건만) 기본 확인 정책(bar_close)의 확정 봉을 보여 준다.
+    return closed if context.get("confirmed") is False else context
+
+
 def _event_payload(rule, canonical, evaluation, contexts, checked_at):
     symbol, timeframe = _rule_symbol_timeframe(rule)
-    primary = contexts.get((symbol, timeframe), {})
+    leaves = [row for row in evaluation.get("trace") or [] if row.get("node") == "leaf"]
+    primary = _evaluated_pair(contexts.get((symbol, timeframe), {}), leaves, (symbol, timeframe))
     previous = primary.get("previous") if isinstance(primary.get("previous"), dict) else {}
     current = primary.get("current") if isinstance(primary.get("current"), dict) else {}
-    leaves = [row for row in evaluation.get("trace") or [] if row.get("node") == "leaf"]
     conditions = [{
         "condition_type": row.get("condition_type"), "field": row.get("field"),
         "operator": row.get("operator"), "threshold": row.get("threshold"),
@@ -349,6 +403,7 @@ def _event_payload(rule, canonical, evaluation, contexts, checked_at):
         "alert_id": str((rule or {}).get("id") or ""),
         "name": str((rule or {}).get("name") or ""),
         "symbol": symbol,
+        "timeframe": timeframe,
         "as_of": checked_at,
         "bar_time": current.get("time"),
         "message": str((rule or {}).get("message") or ""),
@@ -392,16 +447,27 @@ def _relative_benchmarks(canonical: dict[str, Any]) -> dict[str, str]:
     return benchmarks
 
 
-def _relative_values(canonical, bars_by_key, reference) -> dict[str, pd.DataFrame]:
+def _relative_values(canonical, bars_by_key, reference) -> tuple[dict[str, pd.DataFrame], list[dict[str, Any]]]:
+    """Relative-performance tables per symbol; stale daily inputs are left out and reported."""
     out: dict[str, pd.DataFrame] = {}
+    stale: list[dict[str, Any]] = []
     for symbol, benchmark in _relative_benchmarks(canonical).items():
-        _market, zone = _market_timezone(symbol)
-        asset = _daily_close(bars_by_key, (symbol, RELATIVE_TIMEFRAME), reference, zone)
-        bench = _daily_close(bars_by_key, (benchmark, RELATIVE_TIMEFRAME), reference, zone)
-        if asset is None or bench is None:
-            continue
-        out[symbol] = chart_studies.relative_performance(asset, bench)
-    return out
+        market, zone = _market_timezone(symbol)
+        series = {}
+        for name in (symbol, benchmark):
+            close = _daily_close(bars_by_key, (name, RELATIVE_TIMEFRAME), reference, zone)
+            if close is None:
+                continue
+            detail = chart_data_policy.bar_staleness(
+                close.index[-1], reference, market=market, timeframe=RELATIVE_TIMEFRAME,
+            )
+            if detail is not None:
+                stale.append({"symbol": name, "timeframe": RELATIVE_TIMEFRAME, **detail})
+                continue
+            series[name] = close
+        if symbol in series and benchmark in series:
+            out[symbol] = chart_studies.relative_performance(series[symbol], series[benchmark])
+    return out, stale
 
 
 def _daily_close(bars_by_key, key, reference, zone) -> pd.Series | None:
@@ -482,27 +548,14 @@ def _session_labels(bars: pd.DataFrame, market: str, timeframe: str) -> list[str
 
 
 def bar_close_time(symbol: str, timeframe: str, start: Any) -> pd.Timestamp:
-    """UTC time at which the bar starting at ``start`` is closed (intraday: start + bar length,
-    daily: exchange close of that local date, weekly/monthly: start of the next period)."""
-    market, zone = _market_timezone(symbol)
-    start = pd.Timestamp(start)
-    # tz 없는 시각은 _bars_frame 과 같이 거래소 현지 벽시계로 본다.
-    start = start.tz_localize(zone) if start.tzinfo is None else start
-    seconds = chart_data_policy.bar_seconds(timeframe)
-    if seconds:
-        return (start + pd.Timedelta(seconds=seconds)).tz_convert("UTC")
-    day = start.tz_convert(zone).normalize()
-    if timeframe == "1wk":
-        end = day + pd.Timedelta(days=7)
-    elif timeframe == "1mo":
-        end = day + pd.offsets.MonthBegin(1)
-    else:
-        closing = chart_data_policy.apply_session_policy(
-            None, market=market, timeframe="1d", policy="regular",
-        ).metadata["exchange_session"]["close"]
-        hours, minutes = (int(part) for part in closing.split(":"))
-        end = day + pd.Timedelta(hours=hours, minutes=minutes)
-    return end.tz_convert("UTC")
+    """UTC close of the bar labelled ``start`` on ``symbol``'s exchange.
+
+    The rule (intraday start + length, daily exchange close, weekly W-FRI / monthly
+    month-end period close for both period-end and period-start labels) lives in
+    ``chart_data_policy.bar_close_times``.
+    """
+    market, _zone = _market_timezone(symbol)
+    return chart_data_policy.bar_close_time(start, market=market, timeframe=timeframe)
 
 
 def _market_timezone(symbol: str) -> tuple[str, str]:
