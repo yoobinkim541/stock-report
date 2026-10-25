@@ -218,13 +218,19 @@ def calc_signals(close: pd.DataFrame) -> pd.DataFrame:
 #  포트폴리오 시뮬레이션
 # ══════════════════════════════════════════════════════════════════════
 
-def run_simulation(df: pd.DataFrame, start: str) -> dict:
+COST_BPS = 5.0   # 왕복 거래비용(수수료+슬리피지) bps — leverage_structural_backtest.COST_BPS 와 동일 가정
+
+
+def run_simulation(df: pd.DataFrame, start: str, cost_bps: float = COST_BPS) -> dict:
     """
     백테스트 메인 루프.
     - 초기 자산 INITIAL_CASH를 Phase 0 배분으로 투자
     - 매 거래일 DCA 추가 (Phase별 배율·대상)
     - Phase 전환 시 전체 리밸런싱
+    - 거래비용: 리밸런싱 회전액·DCA 매수액에 cost_bps 차감 (종전 0 — 공통 엔진과 비교 불가였음)
     """
+    cost_rate = max(0.0, float(cost_bps)) / 1e4
+    total_cost = 0.0
     df = df[df.index >= pd.Timestamp(start)].copy()
     if df.empty:
         return {"error": "해당 기간 데이터 없음"}
@@ -266,6 +272,12 @@ def run_simulation(df: pd.DataFrame, start: str) -> dict:
         if phase != prev_phase:
             port_val = sum(shares[t] * prices[t] for t in ASSETS)
             target   = ALLOC.get(phase, ALLOC[0])
+            # 회전액(매도+매수 합의 절반 = 편도 거래대금)에 비용 부과 후 재배분
+            turnover = sum(abs(port_val * target[i] - shares[t] * prices[t])
+                           for i, t in enumerate(ASSETS)) / 2.0
+            cost = turnover * cost_rate
+            total_cost += cost
+            port_val -= cost
             shares   = {t: (port_val * target[i]) / prices[t] for i, t in enumerate(ASSETS)}
             transitions.append({
                 "date":      date.strftime("%Y-%m-%d"),
@@ -281,8 +293,9 @@ def run_simulation(df: pd.DataFrame, start: str) -> dict:
         mult   = DCA_MULT.get(phase, 1.0)
         dca    = DAILY_DCA_USD * mult
         target = DCA_TARGET.get(phase, "QQQ")
-        shares[target] = shares.get(target, 0) + dca / prices[target]
+        shares[target] = shares.get(target, 0) + dca * (1.0 - cost_rate) / prices[target]
         total_invested += dca
+        total_cost += dca * cost_rate
 
         # 포트폴리오 가치
         port_val = sum(shares[t] * prices[t] for t in ASSETS)
@@ -306,7 +319,7 @@ def run_simulation(df: pd.DataFrame, start: str) -> dict:
         if not np.isfinite(p) or p <= 0:
             p = bm_last_p
         bm_last_p = p
-        bm_shares   += DAILY_DCA_USD / p
+        bm_shares   += DAILY_DCA_USD * (1.0 - cost_rate) / p     # 벤치마크도 같은 매수 비용
         bm_invested += DAILY_DCA_USD
         bm_log.append({"date": date.strftime("%Y-%m-%d"), "value": round(bm_shares * p, 2)})
 
@@ -315,6 +328,8 @@ def run_simulation(df: pd.DataFrame, start: str) -> dict:
         "benchmark":     bm_log,
         "transitions":   transitions,
         "total_invested": round(total_invested, 2),
+        "total_cost":    round(total_cost, 2),
+        "cost_bps":      float(cost_bps),
         "bm_invested":   round(bm_invested, 2),
         "phase_series":  df["phase"].tolist(),
     }
