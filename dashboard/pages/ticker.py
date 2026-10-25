@@ -1153,6 +1153,9 @@ def _price_chart(ticker, hist, avg_cost, trades, fullscreen: bool = False,
             st.iframe(plotly_embed.realtime_feed_html(_sk, _rtp), height=1)
     if prepared.decision.backend == "canvas":
         st.caption("드래그=이동 · 휠/핀치=확대·축소 · 크로스헤어=OHLC · 드로잉과 주문선 편집은 렌더러 ‘분석’에서 사용")
+    elif legacy or sequence_chart:
+        st.caption("🖱️ 드래그=이동 · 휠=확대/축소 · ✏️ 모드바 직접 그리기(선·자유곡선·박스)·지우개 · "
+                   "▲/▼ 거래 마커 클릭=상세 · ⚠️ 이 경로의 드로잉은 재실행 시 사라집니다(저장 안 됨)")
     else:
         st.caption("🖱️ 드래그=이동(y축 자동 맞춤) · 휠=확대/축소 · 더블클릭=원위치 · "
                    "✏️ 모드바 직접 그리기(선·자유곡선·박스)·지우개 + 차트 위 도구바: "
